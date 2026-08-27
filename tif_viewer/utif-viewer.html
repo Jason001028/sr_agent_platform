@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>TIF 快速查看（UTIF + geotiff 自动分派）</title>
+    <!-- 本地库：pako 必须在前（UTIF 依赖它）；geotiff 用于大图分块读取 -->
+    <script src="vendor/pako.min.js"></script>
+    <script src="vendor/utif.js"></script>
+    <script src="vendor/geotiff.min.js"></script>
+    <style>
+        html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #0f1113; color: #d5d9de;
+                     font: 13px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; }
+        #toolbar {
+            height: 50px; display: flex; align-items: center; gap: 12px; padding: 0 14px;
+            background: #1b1f24; border-bottom: 1px solid #2c313a; flex: none;
+        }
+        .btn {
+            display: inline-flex; align-items: center; justify-content: center;
+            height: 34px; padding: 0 16px; background: #2b7bdd; color: #fff; font-size: 14px;
+            border-radius: 6px; cursor: pointer; user-select: none; white-space: nowrap;
+        }
+        .btn:hover { background: #357fd8; }
+        .btn input { display: none; }
+        #hint { color: #8a93a0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        #meta { color: #9fb0c0; font-size: 12px; white-space: nowrap; margin-left: auto; }
+        #layout { display: flex; height: calc(100% - 50px); }
+        #sidebar {
+            width: 260px; flex: none; background: #161a1f; border-right: 1px solid #2c313a;
+            overflow-y: auto; padding: 8px;
+        }
+        #sidebar .tip { color: #5c6670; font-size: 12px; padding: 10px 8px; }
+        .file-item {
+            padding: 8px 10px; margin-bottom: 6px; background: #1d2229; border: 1px solid #2c313a;
+            border-radius: 6px; cursor: pointer;
+        }
+        .file-item.active { border-color: #2b7bdd; background: #22304a; }
+        .file-item .name { font-weight: 600; color: #e6e9ed; word-break: break-all; }
+        .file-item .meta { color: #8a93a0; font-size: 11px; margin-top: 3px; }
+        .file-item .status { font-size: 11px; margin-top: 3px; color: #e2a541; }
+        .file-item .status.err { color: #e05c5c; }
+        .file-item .status.ok { color: #5bb974; }
+        .file-item .close {
+            float: right; color: #6b7480; cursor: pointer; font-size: 14px; padding: 0 4px;
+        }
+        .file-item .close:hover { color: #ff6b6b; }
+        #stage { position: relative; flex: 1; overflow: hidden; background: #0f1113; }
+        #viewCanvas { display: block; width: 100%; height: 100%; cursor: grab; }
+        #viewCanvas.dragging { cursor: grabbing; }
+        #decodeMask {
+            position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+            background: rgba(10, 12, 14, 0.92); z-index: 20; text-align: center;
+        }
+        #decodeMask.visible { display: flex; }
+        #decodeMask .box { max-width: 480px; padding: 0 20px; }
+        #decodeMask .title { font-size: 16px; color: #fff; margin-bottom: 10px; }
+        #decodeMask .sub { color: #9fb0c0; font-size: 13px; line-height: 1.7; }
+        #decodeMask .spinner {
+            width: 34px; height: 34px; margin: 0 auto 14px; border: 3px solid #2c313a;
+            border-top-color: #2b7bdd; border-radius: 50%; animation: spin 0.9s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        #progressWrap { display: none; margin-top: 16px; }
+        #progressBar {
+            height: 8px; border-radius: 4px; background: #2b7bdd; width: 0%;
+            transition: width 0.2s;
+        }
+        #progressPct { color: #9fb0c0; font-size: 12px; margin-top: 6px; }
+        #errBox { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: none;
+                  max-width: 420px; padding: 16px 18px; background: #2a1b1b; border: 1px solid #6b3b3b;
+                  border-radius: 8px; color: #ffb4b4; font-size: 13px; z-index: 25; text-align: center; }
+    </style>
+</head>
+<body>
+<div id="toolbar">
+    <label class="btn">选择文件<input type="file" id="fileInput" multiple accept=".tif,.tiff,image/tiff"></label>
+    <span id="hint">小图走 UTIF 全量解码；大图自动切 geotiff 分块读取（有进度条）。一次可多选。</span>
+    <span id="meta"></span>
+</div>
+<div id="layout">
+    <div id="sidebar"><div class="tip">尚未添加文件。点左上角「选择文件」。</div></div>
+    <div id="stage">
+        <canvas id="viewCanvas"></canvas>
+        <div id="decodeMask">
+            <div class="box">
+                <div class="spinner"></div>
+                <div class="title" id="maskTitle">正在处理…</div>
+                <div class="sub" id="maskSub"></div>
+                <div id="progressWrap">
+                    <div id="progressBar"></div>
+                    <div id="progressPct"></div>
+                </div>
+            </div>
+        </div>
+        <div id="errBox"></div>
+    </div>
+</div>
+
+<script>
+/* ---------------- 状态与常量 ---------------- */
+var recs = [];
+var activeRec = null;
+var view = { scale: 1, ox: 0, oy: 0 };
+var canvas, ctx, stage, mask, maskTitle, maskSub, progressWrap, progressBar, progressPct, errBox;
+
+var PREVIEW_MAX = 2048;      // 整图预览长边上限
+// 浏览器单次 ArrayBuffer 分配上限实测约 2GB；UTIF 解码/转RGBA 各需一次大分配。
+// 任一预估超过安全线即改走 geotiff 分块，避免分配失败。
+var SAFE = 1.3e9;
+
+/* ---------------- 工具函数 ---------------- */
+function fmtBytes(n) {
+    if (n >= 1073741824) return (n / 1073741824).toFixed(2) + ' GB';
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+    if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+    return n + ' B';
+}
+function fmtTime(ms) {
+    if (ms >= 60000) return (ms / 60000).toFixed(1) + ' 分钟';
+    if (ms >= 1000) return (ms / 1000).toFixed(1) + ' 秒';
+    return ms + ' 毫秒';
+}
+function tick() { return new Promise(function (r) { setTimeout(r, 30); }); }
+
+/* ---------------- geotiff 辅助（分块路径用） ---------------- */
+function safeBits(image) {
+    var b = 8;
+    try {
+        var v = image.getBitsPerSample();
+        if (typeof v === 'number') { b = v; }
+        else if (v) { b = Math.max.apply(null, Array.from(v)); }
+    } catch (e) {}
+    if (!isFinite(b) || b <= 0) b = 8;
+    return b;
+}
+function getSamplePlan(image) {
+    var spp = image.getSamplesPerPixel();
+    var samples = spp >= 3 ? [0, 1, 2] : [0];
+    return { samples: samples, comps: samples.length, bits: safeBits(image) };
+}
+function normalizeRGBA(raster, w, h, comps, bits) {
+    var rgba = new Uint8ClampedArray(w * h * 4);
+    var n = w * h, scale = 1, j = 0, k = 0, r, g, b, a, R, G, B, A;
+    if (raster instanceof Uint16Array) {
+        var maxv = (bits > 8 && bits <= 32) ? (Math.pow(2, bits) - 1) : 65535;
+        scale = 255 / maxv;
+    } else if (raster instanceof Float32Array) {
+        var mx = 0;
+        for (var m = 0; m < raster.length; m++) if (raster[m] > mx) mx = raster[m];
+        scale = mx > 1.001 ? 1 : 255;
+    }
+    for (var i = 0; i < n; i++, j += comps) {
+        r = g = b = 0; a = 255;
+        if (comps === 1) { r = g = b = raster[j]; }
+        else { r = raster[j]; g = raster[j + 1]; b = raster[j + 2]; if (comps === 4) a = raster[j + 3]; }
+        R = r * scale; if (R < 0) R = 0; else if (R > 255) R = 255;
+        G = g * scale; if (G < 0) G = 0; else if (G > 255) G = 255;
+        B = b * scale; if (B < 0) B = 0; else if (B > 255) B = 255;
+        A = a * scale; if (A < 0) A = 0; else if (A > 255) A = 255;
+        k = i * 4;
+        rgba[k] = R | 0; rgba[k + 1] = G | 0; rgba[k + 2] = B | 0; rgba[k + 3] = A | 0;
+    }
+    return rgba;
+}
+
+// 无概览金字塔：按 2048px 窗口分块读主图、现场降采样到预览画布，内存封顶
+function chunkedPreview(image, W, H, ps, c, cv, onProgress) {
+    var plan = getSamplePlan(image);
+    var chunk = 4096;
+    var cols = Math.ceil(W / chunk), rows = Math.ceil(H / chunk);
+    var total = cols * rows, done = 0;
+    c.imageSmoothingEnabled = true;
+    var rowLoop = function (ry) {
+        if (ry >= rows) return Promise.resolve();
+        var x = 0;
+        var colStep = function () {
+            if (x >= cols) return Promise.resolve().then(function () { return rowLoop(ry + 1); });
+            var x0 = x * chunk, y0 = ry * chunk;
+            var x1 = Math.min(W, x0 + chunk), y1 = Math.min(H, y0 + chunk);
+            var cw = x1 - x0, chh = y1 - y0;
+            x++;
+            return image.readRasters({ window: [x0, y0, x1, y1], samples: plan.samples, interleave: true }).then(function (raster) {
+                var rgba = normalizeRGBA(raster, cw, chh, plan.comps, plan.bits);
+                var off = document.createElement('canvas');
+                off.width = cw; off.height = chh;
+                off.getContext('2d').putImageData(new ImageData(rgba, cw, chh), 0, 0);
+                c.drawImage(off, 0, 0, cw, chh, x0 * ps, y0 * ps, cw * ps, chh * ps);
+                done++;
+                if (onProgress) onProgress(done / total);
+                return new Promise(function (r) { setTimeout(r, 0); }).then(colStep);
+            });
+        };
+        return colStep();
+    };
+    return rowLoop(0);
+}
+
+// 用 geotiff 懒读 IFD（只读文件头部几KB），估算解码内存占用
+function probeImage(file) {
+    return GeoTIFF.fromBlob(file).then(function (tiff) {
+        return tiff.getImage().then(function (image) {
+            return {
+                W: image.getWidth(), H: image.getHeight(),
+                spp: image.getSamplesPerPixel(), bits: safeBits(image),
+                image: image, tiff: tiff
+            };
+        });
+    });
+}
+
+/* ---------------- 文件打开与解码分派 ---------------- */
+function openFiles(fileList) {
+    var files = Array.from(fileList).filter(function (f) {
+        return /\.tiff?$/i.test(f.name) || (f.type && f.type.indexOf('tiff') !== -1);
+    });
+    if (!files.length) { showErr('没有识别到 tif/tiff 文件'); return; }
+    files.forEach(function (f) {
+        var dup = recs.some(function (r) { return r.file.name === f.name && r.file.size === f.size; });
+        if (!dup) openOne(f);
+    });
+}
+
+function openOne(file) {
+    var rec = { file: file, thumb: null, W: 0, H: 0, status: '等待…' };
+    recs.push(rec);
+    addListItem(rec);
+    activate(rec);
+}
+
+async function activate(rec) {
+    if (activeRec === rec && rec.thumb) { render(); return; }
+    activeRec = rec;
+    setActiveItem(rec);
+    if (rec.thumb) { fit(); render(); updateMeta(rec); return; }
+
+    // 先懒读尺寸，决定走 UTIF 全量还是 geotiff 分块
+    var probe = null;
+    try { probe = await probeImage(rec.file); } catch (e) { probe = null; }
+
+    var needGeo = false;
+    if (probe) {
+        var decodeBytes = probe.W * probe.H * probe.spp * (probe.bits / 8);
+        var rgbaBytes = probe.W * probe.H * 4;
+        needGeo = (decodeBytes > SAFE || rgbaBytes > SAFE);
+    }
+    if (needGeo) {
+        try { await decodeGeoTiff(rec, probe); }
+        catch (e) { fail(rec, e); }
+    } else {
+        await decodeUtif(rec);
+    }
+}
+
+// 大图路径：geotiff 分块读，有进度条，页面保持可响应
+function decodeGeoTiff(rec, probe) {
+    var W = probe.W, H = probe.H, image = probe.image;
+    var ps = Math.min(1, PREVIEW_MAX / Math.max(W, H));
+    var pw = Math.max(1, Math.round(W * ps)), ph = Math.max(1, Math.round(H * ps));
+    var cv = document.createElement('canvas'); cv.width = pw; cv.height = ph;
+    var c = cv.getContext('2d'); c.fillStyle = '#000'; c.fillRect(0, 0, pw, ph);
+    var t0 = Date.now();
+    showMask('正在分块读取整图预览…', '', true);
+    updateProgressUI(0);
+    return chunkedPreview(image, W, H, ps, c, cv, function (f) {
+        if (rec === activeRec) updateProgressUI(f);
+    }).then(function () {
+        rec.thumb = cv; rec.W = W; rec.H = H;
+        rec.status = '完成，读取耗时 ' + fmtTime(Date.now() - t0);
+        if (rec === activeRec) hideMask();
+        updateItem(rec);
+        if (rec === activeRec) { fit(); render(); updateMeta(rec); }
+    });
+}
+
+// 小图路径：UTIF 全量解码（页面冻结等待）。分配失败自动回退 geotiff 分块
+async function decodeUtif(rec) {
+    var buf = null;
+    try {
+        var t0 = Date.now();
+        showMask('正在读取文件…', '「' + rec.file.name + '」 ' + fmtBytes(rec.file.size), false);
+        await tick();
+        buf = await rec.file.arrayBuffer();
+        showMask('正在完整解码…', '已读入 ' + fmtBytes(buf.byteLength) + '。这一步会一次性解码全部像素，' +
+            '大图可能需要几分钟，期间页面短暂无响应属正常。', false);
+        await tick();
+        var ifds = UTIF.decode(buf);
+        if (!ifds || !ifds.length) throw new Error('无法解析 tif 结构');
+        UTIF.decodeImage(buf, ifds[0]);
+        var rgba = UTIF.toRGBA8(ifds[0]);
+        var W = ifds[0].width, H = ifds[0].height;
+        var thumb = buildThumb(rgba, W, H);
+        rec.thumb = thumb; rec.W = W; rec.H = H;
+        rec.status = '完成，解码耗时 ' + fmtTime(Date.now() - t0);
+        rgba = null; buf = null;
+        if (rec === activeRec) hideMask();
+        updateItem(rec);
+        if (activeRec === rec) { fit(); render(); updateMeta(rec); }
+    } catch (e) {
+        // 内存/分配不足（如 Array buffer allocation failed）→ 自动回退到分块读取
+        if (e && /array buffer/i.test(e.message)) {
+            rec.status = 'UTIF 全量内存不足，切换分块读取…';
+            updateItem(rec);
+            var probe = null;
+            try { probe = await probeImage(rec.file); } catch (e2) { probe = null; }
+            if (probe) { await decodeGeoTiff(rec, probe); return; }
+        }
+        fail(rec, e);
+    }
+}
+
+/* UTIF 全量解码后的 RGBA 下采样成 ≤2048 缩略图。
+   全程不创建超过 8192 边的 canvas，绕开画布面积上限；按 4096 块逐步汇入中间画布。 */
+function buildThumb(rgba, W, H) {
+    var TI = 4096, maxI = 8192, maxT = 2048;
+    var si = Math.min(1, maxI / Math.max(W, H));
+    var iw = Math.max(1, Math.round(W * si));
+    var ih = Math.max(1, Math.round(H * si));
+    var ic = document.createElement('canvas'); ic.width = iw; ic.height = ih;
+    var ictx = ic.getContext('2d');
+    ictx.imageSmoothingEnabled = true;
+    ictx.imageSmoothingQuality = 'high';
+    for (var ty = 0; ty < H; ty += TI) {
+        var chh = Math.min(TI, H - ty);
+        for (var tx = 0; tx < W; tx += TI) {
+            var cww = Math.min(TI, W - tx);
+            var chunk = new Uint8ClampedArray(rgba.buffer, rgba.byteOffset + (ty * W + tx) * 4, cww * chh * 4);
+            var cc = document.createElement('canvas'); cc.width = cww; cc.height = chh;
+            cc.getContext('2d').putImageData(new ImageData(chunk, cww, chh), 0, 0);
+            ictx.drawImage(cc, 0, 0, cww, chh,
+                Math.round(tx * si), Math.round(ty * si),
+                Math.max(1, Math.round(cww * si)), Math.max(1, Math.round(chh * si)));
+        }
+    }
+    var s = Math.min(1, maxT / Math.max(iw, ih));
+    var tw = Math.max(1, Math.round(iw * s));
+    var th = Math.max(1, Math.round(ih * s));
+    var tc = document.createElement('canvas'); tc.width = tw; tc.height = th;
+    tc.getContext('2d').drawImage(ic, 0, 0, iw, ih, 0, 0, tw, th);
+    return tc;
+}
+
+function fail(rec, e) {
+    if (rec === activeRec) hideMask();
+    rec.status = '解码失败：' + (e && e.message ? e.message : e);
+    updateItem(rec);
+    if (activeRec === rec) showErr('「' + rec.file.name + '」解码失败：' + (e && e.message ? e.message : e));
+}
+
+/* ---------------- 渲染与交互 ---------------- */
+function fit() {
+    if (!activeRec || !activeRec.thumb) return;
+    var cw = canvas.width, ch = canvas.height;
+    var s = Math.min(cw / activeRec.thumb.width, ch / activeRec.thumb.height, 1);
+    view.scale = s;
+    view.ox = (cw - activeRec.thumb.width * s) / 2;
+    view.oy = (ch - activeRec.thumb.height * s) / 2;
+}
+function render() {
+    if (!activeRec || !activeRec.thumb) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.imageSmoothingEnabled = view.scale < 4;
+    ctx.drawImage(activeRec.thumb,
+        view.ox, view.oy,
+        activeRec.thumb.width * view.scale, activeRec.thumb.height * view.scale);
+}
+function updateMeta(rec) {
+    var el = document.getElementById('meta');
+    if (!rec) { el.textContent = ''; return; }
+    el.textContent = rec.file.name + '  |  原图 ' + rec.W + '×' + rec.H +
+        '  缩略图 ' + rec.thumb.width + '×' + rec.thumb.height;
+}
+
+/* ---------------- 遮罩 / 进度 / 错误 / 列表 ---------------- */
+function showMask(title, sub, bar) {
+    maskTitle.textContent = title;
+    maskSub.textContent = sub || '';
+    progressWrap.style.display = bar ? 'block' : 'none';
+    if (bar) { progressBar.style.width = '0%'; progressPct.textContent = '0%'; }
+    mask.classList.add('visible');
+}
+function hideMask() { mask.classList.remove('visible'); }
+function updateProgressUI(f) {
+    var pct = Math.round(f * 100);
+    progressBar.style.width = pct + '%';
+    progressPct.textContent = pct + '%';
+    maskSub.textContent = '分块读取中：' + pct + '%（边读边生成缩略图，可随时切换其他文件）';
+}
+function showErr(msg) { errBox.textContent = msg; errBox.style.display = 'block'; setTimeout(function () { errBox.style.display = 'none'; }, 6000); }
+
+function addListItem(rec) {
+    var div = document.createElement('div');
+    div.className = 'file-item';
+    div.innerHTML = '<span class="close" title="移除">×</span>' +
+        '<div class="name"></div><div class="meta"></div><div class="status"></div>';
+    div.querySelector('.name').textContent = rec.file.name;
+    div.querySelector('.meta').textContent = fmtBytes(rec.file.size);
+    div.querySelector('.close').addEventListener('click', function (e) { e.stopPropagation(); removeFile(rec); });
+    div.addEventListener('click', function () { activate(rec); });
+    document.getElementById('sidebar').appendChild(div);
+    rec._el = div;
+    updateItem(rec);
+    var tip = document.querySelector('#sidebar .tip');
+    if (tip) tip.style.display = 'none';
+}
+function updateItem(rec) {
+    if (!rec._el) return;
+    rec._el.querySelector('.meta').textContent = fmtBytes(rec.file.size) +
+        (rec.W ? '  ·  ' + rec.W + '×' + rec.H : '');
+    var st = rec._el.querySelector('.status');
+    st.className = 'status';
+    if (/失败/.test(rec.status)) st.classList.add('err');
+    else if (rec.status.indexOf('完成') === 0) st.classList.add('ok');
+    st.textContent = rec.status;
+}
+function setActiveItem(rec) {
+    recs.forEach(function (r) { if (r._el) r._el.classList.toggle('active', r === rec); });
+}
+function removeFile(rec) {
+    var i = recs.indexOf(rec);
+    if (i < 0) return;
+    recs.splice(i, 1);
+    if (rec._el) rec._el.remove();
+    if (activeRec === rec) {
+        activeRec = null;
+        var next = recs[recs.length - 1];
+        if (next) activate(next);
+        else { ctx.clearRect(0, 0, canvas.width, canvas.height); updateMeta(null); }
+    }
+}
+
+/* ---------------- 初始化 ---------------- */
+window.addEventListener('DOMContentLoaded', function () {
+    canvas = document.getElementById('viewCanvas');
+    stage = document.getElementById('stage');
+    ctx = canvas.getContext('2d');
+    mask = document.getElementById('decodeMask');
+    maskTitle = document.getElementById('maskTitle');
+    maskSub = document.getElementById('maskSub');
+    progressWrap = document.getElementById('progressWrap');
+    progressBar = document.getElementById('progressBar');
+    progressPct = document.getElementById('progressPct');
+    errBox = document.getElementById('errBox');
+
+    function resize() {
+        canvas.width = stage.clientWidth;
+        canvas.height = stage.clientHeight;
+        if (activeRec && activeRec.thumb) { fit(); render(); }
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    document.getElementById('fileInput').addEventListener('change', function (e) {
+        openFiles(e.target.files);
+        e.target.value = '';
+    });
+
+    window.addEventListener('dragover', function (e) { e.preventDefault(); });
+    window.addEventListener('drop', function (e) {
+        e.preventDefault();
+        if (e.dataTransfer && e.dataTransfer.files) openFiles(e.dataTransfer.files);
+    });
+
+    canvas.addEventListener('wheel', function (e) {
+        e.preventDefault();
+        if (!activeRec || !activeRec.thumb) return;
+        var r = canvas.getBoundingClientRect();
+        var mx = e.clientX - r.left, my = e.clientY - r.top;
+        var f = e.deltaY < 0 ? 1.2 : 1 / 1.2;
+        var ns = Math.max(0.05, Math.min(64, view.scale * f));
+        var ix = (mx - view.ox) / view.scale, iy = (my - view.oy) / view.scale;
+        view.scale = ns;
+        view.ox = mx - ix * ns;
+        view.oy = my - iy * ns;
+        render();
+    }, { passive: false });
+
+    var dragging = false, lastX = 0, lastY = 0;
+    canvas.addEventListener('mousedown', function (e) {
+        if (e.button !== 0 || !activeRec || !activeRec.thumb) return;
+        dragging = true; lastX = e.clientX; lastY = e.clientY;
+        canvas.classList.add('dragging');
+    });
+    window.addEventListener('mousemove', function (e) {
+        if (!dragging) return;
+        view.ox += e.clientX - lastX;
+        view.oy += e.clientY - lastY;
+        lastX = e.clientX; lastY = e.clientY;
+        render();
+    });
+    window.addEventListener('mouseup', function () {
+        dragging = false; canvas.classList.remove('dragging');
+    });
+
+    canvas.addEventListener('dblclick', function () { fit(); render(); });
+});
+</script>
+</body>
+</html>
