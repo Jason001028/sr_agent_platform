@@ -6,7 +6,7 @@
 
 ## 当前状态（一句话）
 
-内网机（64GB，离线，Edge）本地 HTML 查看器读遥感大 TIF：**400MB 小图全黑已定位并修复**（位深限制 + alpha bug）；**大图"解码失败"的根因未最终确认**——嫌疑是用户真实文件的压缩格式（JPEG/JPEG2000/LZMA/ZSTD）不被 geotiff 支持，**等待用户回传真实报错文本**。
+**真实文件布局已确认**：GF07A03（1.11GB）与 KF02B04（1.78GB）均为**无压缩 · 条带1行**的单波段 16bit 影像。已实现**稀疏条带预览**（无压缩大图秒级出预览，只抽读少数条带做字节切片，不碰全文件）：134MB 测试图从全量 4.5s → **1.3s（读 32MB/128MB）**，预计真实 1.1GB 文件从 ~2 分钟降到秒级。**下一步**：放大看细节时按可视窗口读全分辨率（无压缩切片，无需金字塔）。
 
 ## 时间线
 
@@ -32,18 +32,41 @@
    - `test-regress.js`：8192² uint16 灰度 134MB → 分块多窗口 + 进度 100% + 渐变正确（4.5s）；UTIF 分配失败自动回退 geotiff 通过。
 8. 文档落盘：`sr_agent_gui_experience.md`（经验）、`.gitignore`（屏蔽 test-tifs/.e2e/*.zip）、内存文件更新。
 
+### 2026-08-28 · 稀疏条带预览（大图加速第一刀）
+- 用户回传探针：GF07A03、KF02B04 均为**无压缩 · 条带1行**。
+- 2 分钟之谜根因确认：旧路径把全图全量读一遍做预览，耗时 ∝ 字节；且 geotiff 窗口读在 1 行条带上每窗口触发 ~4096 次小 slice（42 窗口 × 4096 ≈ 17 万次切片读）。
+- 实现 `parseStrips`（头部解析条带偏移/长度数组，兼容 classic/BigTIFF）+ `sparseCollect`（按条带字节切片，抽 ph 行 × 抽样列，8 路并发，进度条）；`stripPxVal` 支持 8/16/32bit 的 uint/int/float。
+- 路由：`无压缩 + 条带 + 单波段 + >100MB` → 稀疏预览；否则原分块/UTIF 路径不变。
+- E2E `test-sparse.js` 全过（像素精确 + Deflate 回退）；`test-regress/stretch/stretch8/locator/types/probe-list` 全过无回归。
+- 134MB 8192² 测试图：稀疏 **1.3s**（读 32MB/128MB）；原全量 4.5s。big_u16 也自动转稀疏（1.5s）。
+
 ## 下一步（给新窗口）
 
-1. **等用户回传**：让用户用当前 `tif_viewer/utif-viewer.html` 重新打开 (a) 400MB 小图、(b) 报解码失败的大图，把状态栏**完整报错文本**发来（含 `[属性 W×H，bits/spp，类型，压缩code]`）。
+> **环境约束（已写入记忆）**：开发机是**外网机**，真实遥感图全在**内网机盘阵**，无法导出/复制/读头探测。文件结构只能靠**用户回传 ENVI 头信息**（Edit Headers：Compression/Interleave）或**尺寸推断法**。不能要求用户给文件路径。
+
+1. **等用户回传**（两种途径，用户二选一）：
+   - 用当前 `tif_viewer/utif-viewer.html` 打开 (a) 400MB 小图、(b) 报解码失败的大图，把状态栏**完整报错文本**发来（含 `[属性 W×H，bits/spp，类型，压缩code]`）。
+   - 或回传 ENVI 头信息：**Compression 字段** + 文件字节大小 + 宽×高 + 有没有 `.ovr`（用户已确认 Interleave=BSQ，单波段下不是瓶颈）。
 2. 看 compression 编码：
    - 若为 1/5/8/32946（无/LZW/Deflate/旧 deflate）→ 不该失败，需进一步查。
    - 若为 7/34712/34925/50000（JPEG/JPEG2000/LZMA/ZSTD）→ 补解码器或换库。
 3. 若 400MB 小图仍异常，对照 §3 经验核对数据流。
 
+## 新需求（2026-08-27 晚，待开工）
+
+用户要求**显示拉伸（ENVI 风格）+ 像素定位**——**已实现并全部 E2E 通过**（见 §8 时间线追加）。
+加速大图读取（进行中）：
+
+- 用户场景：单波段灰度/DEM，**要放大看细节**，期望 ≤1 分钟。
+- **真实文件布局已确认**（GF07A03/KF02B04 均无压缩·条带1行）→ **无需金字塔**：任意窗口都可直接字节切片。
+- ✅ 已完成：**稀疏条带预览**（秒级概览，见 2026-08-28 时间线）。
+- ⬜ **待做：按可视区按需读全分辨率瓦片**（放大看细节）：缩放超过预览分辨率时，把可视窗口对应的条带切片读出并叠加绘制；读量与屏幕分辨率成正比，无压缩直接切片。设计要点：渲染时先画预览底图，再叠加已加载的细节瓦片；滚动/缩放触发新窗口读取并去抖；缓存已读瓦片。
+- 逻辑验证用本地 test-tifs/sparse；真实行为需用户实机确认。
+
 ## 关键文件
 
-- 主交付物：`tif_viewer/utif-viewer.html`（双引擎：UTIF 小图 / geotiff 分块大图）
+- 主交付物：`tif_viewer/utif-viewer.html`（UTIF 小图 / geotiff 分块大图 / **稀疏条带预览** 三路分派）
 - 经验文档：`sr_agent_gui_experience.md`
-- E2E：`.e2e/test-types.js`、`.e2e/test-regress.js`（puppeteer-core + 无头 Edge）
-- 测试图：`test-tifs/`、`test-tifs/types/`
-- 内存：`~/.claude/projects/.../memory/`（browser-2gb-alloc-cap、local-vendor-libs-for-viewers）
+- E2E：`.e2e/test-sparse.js`（稀疏）、`test-regress.js`、`test-types.js`、`test-stretch.js`、`test-locator.js`（puppeteer-core + 无头 Edge）
+- 测试图：`test-tifs/`、`test-tifs/types/`、`test-tifs/sparse/`
+- 内存：`~/.claude/projects/.../memory/`（browser-2gb-alloc-cap、local-vendor-libs-for-viewers、intranet-data-inaccessible）
