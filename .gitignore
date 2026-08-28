@@ -1,0 +1,9 @@
+# 测试数据与测试脚本
+test-tifs/
+.e2e/
+
+# 压缩包
+*.zip
+
+# 实施计划（内部参考，不入库）
+sr_agent_web_plan.md

@@ -73,7 +73,7 @@
 <body>
 <div id="toolbar">
     <label class="btn">选择文件<input type="file" id="fileInput" multiple accept=".tif,.tiff,image/tiff"></label>
-    <span id="hint">小图走 UTIF 全量解码；大图自动切 geotiff 分块读取（有进度条）。一次可多选。</span>
+    <span id="hint">8bit 小图走 UTIF；大图/16bit/浮点/多波段自动走分块读取（有进度条）。可多选/拖拽。</span>
     <span id="meta"></span>
 </div>
 <div id="layout">
@@ -135,29 +135,37 @@ function safeBits(image) {
 function getSamplePlan(image) {
     var spp = image.getSamplesPerPixel();
     var samples = spp >= 3 ? [0, 1, 2] : [0];
-    return { samples: samples, comps: samples.length, bits: safeBits(image) };
+    var ph = image._ph;   // 在 probeImage 里解析好的 photometric（0=WhiteIsZero 需反相）
+    return { samples: samples, comps: samples.length, bits: safeBits(image), invert: ph === 0 };
 }
-function normalizeRGBA(raster, w, h, comps, bits) {
+function normalizeRGBA(raster, w, h, comps, invert) {
     var rgba = new Uint8ClampedArray(w * h * 4);
-    var n = w * h, scale = 1, j = 0, k = 0, r, g, b, a, R, G, B, A;
-    if (raster instanceof Uint16Array) {
-        var maxv = (bits > 8 && bits <= 32) ? (Math.pow(2, bits) - 1) : 65535;
-        scale = 255 / maxv;
-    } else if (raster instanceof Float32Array) {
-        var mx = 0;
-        for (var m = 0; m < raster.length; m++) if (raster[m] > mx) mx = raster[m];
-        scale = mx > 1.001 ? 1 : 255;
+    var n = w * h, chans = comps === 4 ? 3 : comps, j = 0;
+    var direct = raster instanceof Uint8Array;   // 8bit：原样映射，保持原始观感
+    var scale = 1, off = 0, v;
+    if (!direct) {
+        // 非 8bit（Uint16/Uint32/Int/Float…）：按颜色通道线性拉伸到 0~255，跳过 NaN
+        var lo = Infinity, hi = -Infinity;
+        for (var m = 0; m < raster.length; m += comps)
+            for (var cc = 0; cc < chans; cc++) {
+                v = raster[m + cc];
+                if (v === v && isFinite(v)) { if (v < lo) lo = v; if (v > hi) hi = v; }
+            }
+        if (hi > lo) { scale = 255 / (hi - lo); off = -lo * scale; }
+        else if (lo === 0) { scale = 0; off = 0; }   // 全零 → 黑
+        else { scale = 0; off = 128; }                // 常量非零 → 中灰
     }
+    var hasAlpha = comps === 4;
+    var fl = function (x) { if (x < 0) return 0; if (x > 255) return 255; return x; };
     for (var i = 0; i < n; i++, j += comps) {
-        r = g = b = 0; a = 255;
-        if (comps === 1) { r = g = b = raster[j]; }
-        else { r = raster[j]; g = raster[j + 1]; b = raster[j + 2]; if (comps === 4) a = raster[j + 3]; }
-        R = r * scale; if (R < 0) R = 0; else if (R > 255) R = 255;
-        G = g * scale; if (G < 0) G = 0; else if (G > 255) G = 255;
-        B = b * scale; if (B < 0) B = 0; else if (B > 255) B = 255;
-        A = a * scale; if (A < 0) A = 0; else if (A > 255) A = 255;
-        k = i * 4;
-        rgba[k] = R | 0; rgba[k + 1] = G | 0; rgba[k + 2] = B | 0; rgba[k + 3] = A | 0;
+        var r, g, b, a;
+        if (comps === 1) { r = g = b = raster[j]; a = 255; }
+        else { r = raster[j]; g = raster[j + 1]; b = raster[j + 2]; a = hasAlpha ? raster[j + 3] : 255; }
+        var R = r * scale + off, G = g * scale + off, B = b * scale + off;
+        if (invert) { R = 255 - R; G = 255 - G; B = 255 - B; }
+        var k = i * 4;
+        rgba[k] = fl(R) | 0; rgba[k + 1] = fl(G) | 0; rgba[k + 2] = fl(B) | 0;
+        rgba[k + 3] = hasAlpha ? (fl(a * scale + off) | 0) : 255;
     }
     return rgba;
 }
@@ -179,7 +187,7 @@ function chunkedPreview(image, W, H, ps, c, cv, onProgress) {
             var cw = x1 - x0, chh = y1 - y0;
             x++;
             return image.readRasters({ window: [x0, y0, x1, y1], samples: plan.samples, interleave: true }).then(function (raster) {
-                var rgba = normalizeRGBA(raster, cw, chh, plan.comps, plan.bits);
+                var rgba = normalizeRGBA(raster, cw, chh, plan.comps, plan.invert);
                 var off = document.createElement('canvas');
                 off.width = cw; off.height = chh;
                 off.getContext('2d').putImageData(new ImageData(rgba, cw, chh), 0, 0);
@@ -194,15 +202,64 @@ function chunkedPreview(image, W, H, ps, c, cv, onProgress) {
     return rowLoop(0);
 }
 
-// 用 geotiff 懒读 IFD（只读文件头部几KB），估算解码内存占用
+// 直接从文件头部解析少量关键 IFD 标签（兼容 classic TIFF 与 BigTIFF）。
+// geotiff 的 getFileDirectory() 在部分构建里是惰性桩，读不到 photometric/compression，故自行解析。
+function tiffTags(file) {
+    return file.slice(0, 1048576).arrayBuffer().then(function (buf) {
+        var u8 = new Uint8Array(buf), dv = new DataView(buf);
+        if (u8.length < 16) return {};
+        var le = u8[0] === 0x49;   // 'II' = 小端
+        var u = function (off, size) {
+            if (size === 1) return dv.getUint8(off);
+            if (size === 2) return le ? dv.getUint16(off, true) : dv.getUint16(off, false);
+            if (size === 4) return le ? dv.getUint32(off, true) : dv.getUint32(off, false);
+            if (size === 8) { try { return Number(le ? dv.getBigUint64(off, true) : dv.getBigUint64(off, false)); } catch (e) { return 0; } }
+            return 0;
+        };
+        var magic = u(2, 2);
+        if (magic !== 42 && magic !== 43) return {};   // 42=classic, 43=BigTIFF
+        var big = magic === 43;
+        var ifdOff = big ? u(8, 8) : u(4, 4);
+        var cnt = big ? u(ifdOff, 8) : u(ifdOff, 2);
+        var esz = big ? 20 : 12;
+        var ebase = ifdOff + (big ? 8 : 2);
+        var valInline = big ? 8 : 4, valAt = big ? 12 : 8;
+        var tsize = [0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8, 0, 0, 0, 8, 8, 8];   // TIFF type → 字节数
+        var tags = {};
+        var n = Math.min(cnt, 300);
+        for (var i = 0; i < n; i++) {
+            var e = ebase + i * esz;
+            var tag = u(e, 2), type = u(e + 2, 2);
+            var cntv = big ? u(e + 4, 8) : u(e + 4, 4);
+            var s1 = (type > 0 && type < tsize.length) ? tsize[type] : 0;
+            var vo = e + valAt;
+            if (s1 * cntv > valInline) vo = u(e + valAt, big ? 8 : 4);
+            if (s1) tags[tag] = u(vo, s1);
+        }
+        return tags;
+    });
+}
+
+// 用 geotiff 懒读尺寸 + 自行解析 photometric/compression（只读文件头部几KB），估算解码内存占用
 function probeImage(file) {
     return GeoTIFF.fromBlob(file).then(function (tiff) {
         return tiff.getImage().then(function (image) {
-            return {
-                W: image.getWidth(), H: image.getHeight(),
-                spp: image.getSamplesPerPixel(), bits: safeBits(image),
-                image: image, tiff: tiff
-            };
+            return tiffTags(file).then(function (tags) {
+                var sf = 1;
+                try { sf = image.getSampleFormat(); } catch (e) {}
+                if (Array.isArray(sf)) sf = sf[0];
+                if (typeof sf !== 'number' || !isFinite(sf)) sf = 1;
+                var ph = tags[262] != null ? tags[262] : null;
+                image._ph = ph;   // 供 getSamplePlan 判断反相
+                return {
+                    W: image.getWidth(), H: image.getHeight(),
+                    spp: image.getSamplesPerPixel(), bits: safeBits(image),
+                    sampleFormat: sf,             // 1=无符号整数 2=有符号 3=浮点
+                    photometric: ph,
+                    compression: tags[259] != null ? tags[259] : null,
+                    image: image, tiff: tiff
+                };
+            });
         });
     });
 }
@@ -232,19 +289,29 @@ async function activate(rec) {
     setActiveItem(rec);
     if (rec.thumb) { fit(); render(); updateMeta(rec); return; }
 
-    // 先懒读尺寸，决定走 UTIF 全量还是 geotiff 分块
+    // 先懒读 IFD，决定走 UTIF 还是 geotiff 分块
     var probe = null;
     try { probe = await probeImage(rec.file); } catch (e) { probe = null; }
+    rec.probe = probe;
 
     var needGeo = false;
     if (probe) {
         var decodeBytes = probe.W * probe.H * probe.spp * (probe.bits / 8);
         var rgbaBytes = probe.W * probe.H * 4;
-        needGeo = (decodeBytes > SAFE || rgbaBytes > SAFE);
+        // 只有「小的 8bit 无符号整数」走 UTIF 快速路径；
+        // 其余（浮点/16bit/32bit/多波段/特殊色相/大图）一律走 geotiff 分块，避免全黑与分配失败
+        var ph = probe.photometric;
+        var goodPh = ph == null || ph === 0 || ph === 1 || ph === 2 || ph === 3 || ph === 5;
+        var small8 = probe.sampleFormat === 1 && probe.bits === 8 && probe.spp <= 4 && goodPh;
+        needGeo = !small8 || decodeBytes > SAFE || rgbaBytes > SAFE;
     }
     if (needGeo) {
         try { await decodeGeoTiff(rec, probe); }
-        catch (e) { fail(rec, e); }
+        catch (e) {
+            // geotiff 读不了时，小的 8bit 再试 UTIF（个别压缩 geotiff 不支持但 UTIF 能解）
+            if (probe && probe.sampleFormat === 1 && probe.bits === 8 && probe.spp <= 4) await decodeUtif(rec);
+            else fail(rec, e);
+        }
     } else {
         await decodeUtif(rec);
     }
@@ -340,9 +407,13 @@ function buildThumb(rgba, W, H) {
 
 function fail(rec, e) {
     if (rec === activeRec) hideMask();
-    rec.status = '解码失败：' + (e && e.message ? e.message : e);
+    var msg = e && e.message ? e.message : String(e);
+    if (rec.probe) msg += '  [属性 ' + rec.probe.W + '×' + rec.probe.H + '，' + rec.probe.bits + 'bit/' +
+        rec.probe.spp + '通道，类型' + rec.probe.sampleFormat + '，压缩' +
+        (rec.probe.compression != null ? rec.probe.compression : '?') + ']';
+    rec.status = '解码失败：' + msg;
     updateItem(rec);
-    if (activeRec === rec) showErr('「' + rec.file.name + '」解码失败：' + (e && e.message ? e.message : e));
+    if (activeRec === rec) showErr('「' + rec.file.name + '」解码失败：' + msg);
 }
 
 /* ---------------- 渲染与交互 ---------------- */

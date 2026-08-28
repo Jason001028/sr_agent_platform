@@ -1,0 +1,31 @@
+# python test.py -opt options/test/test_ESRGAN_CGx2.yml 16383
+
+name: CG_SR_L1_PAN_1CH_16BITS_REALESRGAN
+suffix: ~ # add suffix to saved images
+model: sr
+distortion: sr
+scale: 2
+cropborder: ~ # crop border when evaluation. If None(~), crop the scale pixels
+
+t_ht: 1000
+t_wd: 1000
+pad: 50
+max_dn: 16383
+tiftype: .tif
+
+datasets:
+  test1: # the 1st test dataset
+    name: KF01
+    mode: LQGT
+#### network structures
+networkG:
+  whichmodelG: Espan2
+  innc: 1
+  outnc: 1
+  nf: 64
+  nb: 23
+  upscale: 2
+
+path:
+  # W:/tmp/wangrz/sr_utils/Espan3.pth  # Windows deploy
+  pretrain_model_G: /DiskArray/tmp/wangrz/sr_utils/Espan3.pth
