@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<SFSR_Config>
+  <!--<DatarootLQ>/DiskArray/tmp/wangrz/algorithm_database/0723/JL1KF02B04_PMS06_20260322114851_200493024_101_0006_001_L1_PAN</DatarootLQ>-->
+  <!-- W:/tmp/wangrz/sr_utils/sr_data/JXGF07A03_PMS_20260522152409_200508939_107_0004_001_L1_PAN  # Windows deploy -->
+  <DatarootLQ>/DiskArray/tmp/wangrz/sr_utils/sr_data/JXGF07A03_PMS_20260522152409_200508939_107_0004_001_L1_PAN</DatarootLQ>
+  <!--<DatarootLQ>/DiskArray/GSHC2IMPS\PRODUCT\2024\06\17\JL1KF01A\JL1KF01A_PMSD5_20240617174618_200274530_101_001_L1_PAN\JL1KF01A_PMSD5_20240617174618_200274530_101_0013_001_L1_PAH</DatarootLQ>-->
+  <GPUIDS>3</GPUIDS>
+  <CloudLimit>80</CloudLimit>
+  <DeleteOriTifNeeded>False</DeleteOriTifNeeded>
+  <SRScale>2</SRScale>
+  <Suffix>260318</Suffix>
+  <!-- W:/tmp/wangrz/sr_utils/espan3_2026_gf04_tile500.yml  # Windows deploy -->
+  <OPT>/DiskArray/tmp/wangrz/sr_utils/espan3_2026_gf04_tile500.yml</OPT>
+  <!-- W:/tmp/wangrz/sr_utils/sr_data/JXGF07A03_PMS_20260522152409_200508939_107_0004_001_L1_PAN/JXGF07A03_PMS_20260522152409_200508939_107_0004_001_L1_PAN_mask.tif  # Windows deploy -->
+  <MaskPath>/DiskArray/tmp/wangrz/sr_utils/sr_data/JXGF07A03_PMS_20260522152409_200508939_107_0004_001_L1_PAN/JXGF07A03_PMS_20260522152409_200508939_107_0004_001_L1_PAN_mask.tif</MaskPath><MaskDilateFactor>2</MaskDilateFactor>
+</SFSR_Config> 
