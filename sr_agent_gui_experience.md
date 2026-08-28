@@ -13,6 +13,7 @@
 | **单次分配 2GB 上限** | Edge 单次 `new Uint8Array` 上限约 2GB（2.0GB 成功，2.7GB/3.6GB 抛 `RangeError: Array buffer allocation failed`）。与总内存无关，64GB 也救不了。 | 30000×30000 RGB8 全量解码（2.7GB + 3.6GB 两段）**必然失败** |
 | **CDN 不可达** | 内网机加载 jsdelivr 等 CDN 脚本失败 | 必须本地 vendor；最稳妥是内联进 HTML 单文件 |
 | **位深/类型决定显示** | UTIF.js 与自写的 normalize 对不同位深支持差异极大 | 见 §3，全黑/全白多是这里来的 |
+| **真实数据外网读不到** | 开发机是**外网机**；真实遥感图全在**内网机盘阵**，无法导出/复制，也无法读其文件头探测 | 文件结构（压缩/金字塔/分块/位深）只能靠**用户回传 ENVI 头信息**（Edit Headers：Compression/Interleave）或**尺寸推断法**（16bit=宽×高×2、32bit=宽×高×4：文件大小≈→无压缩无金字塔；>→带金字塔；<→有压缩）；功能以对未知结构鲁棒为前提，真实行为需用户实机确认 |
 
 ---
 
@@ -61,6 +62,15 @@
 - **JPEG(7)、JPEG2000、LZMA(34925)、ZSTD(50000) 等不支持 → 会解码失败**。
 - 现在的页面失败时会显示**具体错误 + 文件属性**（W×H、bits/spp、sampleFormat、compression 编码），据此可判定是否要补解码器。
 - 另一条路：UTIF.js 的 `_decompress` 已 patch 兼容 cmpr 8 / 32946（旧 deflate）。
+- **已确认（2026-08-28）**：GF07A03 / KF02B04 两个真实大图均为无压缩(1) + 条带1行，不在上述危险区。
+
+### 3.9 稀疏条带预览 —— 无压缩大图的秒级概览
+- **场景**：无压缩 + 条带（尤其条带1行）的单波段大图，旧路径把全图全量读一遍做预览，耗时 ∝ 字节；且 geotiff 窗口读在 1 行条带上每窗口触发 ~4096 次小 slice，双重慢。
+- **原理**：无压缩下任意像素都能按字节定位（offset + row*rps + col*bpp），所以预览可以**只抽读 ph 行 × 抽样列**，每行一条 `file.slice()`，直接解析 8/16/32bit 的 uint/int/float 自然值，喂给统一的拉伸引擎（`computeStats` + `paintStretch` 原样复用）。
+- **实现**：`parseStrips(file)` 自解析头部 IFD 得 273/279 偏移/长度数组（兼容 classic/BigTIFF，offset 用 LONG 4B / LONG8 8B）；`sparseCollect` 8 路并发切片 + 进度条；`stripPxVal` 按 bpp/sampleFormat 解析。
+- **路由**：`isSparseCandidate` = 无压缩(259=1) + 非tiled + 单波段(277=1) + bits∈{8,16,32} + 解码字节 > `SPARSE_MIN=1e8`。命中则秒级；否则原分块/UTIF 路径不变。任何解析失败自动回退原路径。
+- **实测**：134MB 8192² 条带1行 → **1.3s**（读 32MB/128MB，像素精确）；原全量 4.5s。big_u16 单大条带同样命中稀疏（1.5s）。
+- **局限**：①只支持单波段（多波段 BSQ 布局复杂留给全量路径）；②稀疏抽样可能漏掉极细的线状目标（行间未采到）——大图定位可接受，精细查看靠后续「按可视区读全分辨率」。**无压缩+条带也意味着无需金字塔**：任意窗口都能直接字节切片。
 
 ---
 
@@ -71,11 +81,13 @@ probe = GeoTIFF.fromBlob → getImage → tiffTags(262,259) → {W,H,spp,bits,sa
 
 needGeo = 不是「8bit 无符号整数 & spp<=4 & photometric 正常」 || 解码缓冲>1.3e9 || RGBA>1.3e9
 
-needGeo → decodeGeoTiff（分块+进度条）   // 失败时若仍是小 8bit 再试 UTIF
+needGeo → decodeGeoTiff：
+           ├─ isSparseCandidate（无压缩+条带+单波段+>1e8）→ 稀疏条带预览（秒级）
+           └─ 否则 → chunkedFull 分块读取（+进度条）   // 失败时若仍是小 8bit 再试 UTIF
 否则   → decodeUtif（UTIF 全量 → ≤2048 缩略图）
 ```
 
-- 常量：`PREVIEW_MAX=2048`、`SAFE=1.3e9`、`chunk=4096`。
+- 常量：`PREVIEW_MAX=2048`、`SAFE=1.3e9`、`SPARSE_MIN=1e8`、`chunk=4096`。
 - 脚本引入顺序：`pako.min.js → utif.js → geotiff.min.js`（deflate 解压依赖 pako）。
 
 ---
@@ -112,8 +124,8 @@ needGeo → decodeGeoTiff（分块+进度条）   // 失败时若仍是小 8bit 
 
 ## 7. 待确认 / 未决问题
 
-- **用户大图解码失败**：若属性里的 compression 是 JPEG/JPEG2000/LZMA/ZSTD，需评估补解码器（把对应解压码打进 geotiff 或用更全的 WASM 库）。
-- 无概览金字塔的大图按 4096 窗口逐块读，速度取决于 IO；如需更快可考虑先读概览层（若文件带 pyramid）。
+- **用户大图解码失败**：若属性里的 compression 是 JPEG/JPEG2000/LZMA/ZSTD，需评估补解码器（把对应解压码打进 geotiff 或用更全的 WASM 库）。两个真实大图已确认无压缩，不在危险区，但其他真实文件未知。
+- **放大看细节**：稀疏预览给出秒级概览；缩放超过预览分辨率后需「按可视区按需读全分辨率」——无压缩+条带下直接字节切片，读量与屏幕分辨率成正比，**无需金字塔**。尚未实现。
 
 ---
 
