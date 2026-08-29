@@ -1,8 +1,8 @@
 # sr_agent_gui 经验文档
 
-> 本地 HTML 查看器（quick-look.html / tif_viewer/utif-viewer.html）读取遥感大 TIF 的踩坑与已验证方案。
+> 本地 HTML 查看器（quick-look.html / tif_viewer/tif-viewer.html）读取遥感大 TIF 的踩坑与已验证方案。
 > 适用环境：**离线内网 Windows（64GB RAM），浏览器为 Edge/Chrome，CDN 不可达**。
-> 当前主产物：`tif_viewer/utif-viewer.html`（双引擎自动分派，本地 vendor 单目录）。
+> 当前主产物：`tif_viewer/tif-viewer.html`（双引擎自动分派，本地 vendor 单目录）。
 
 ---
 
@@ -74,7 +74,7 @@
 
 ---
 
-## 4. 路由决策（utif-viewer.html 现状）
+## 4. 路由决策（tif-viewer.html 现状）
 
 ```
 probe = GeoTIFF.fromBlob → getImage → tiffTags(262,259) → {W,H,spp,bits,sampleFormat,photometric,compression}
@@ -82,12 +82,13 @@ probe = GeoTIFF.fromBlob → getImage → tiffTags(262,259) → {W,H,spp,bits,sa
 needGeo = 不是「8bit 无符号整数 & spp<=4 & photometric 正常」 || 解码缓冲>1.3e9 || RGBA>1.3e9
 
 needGeo → decodeGeoTiff：
-           ├─ isSparseCandidate（无压缩+条带+单波段+>1e8）→ 稀疏条带预览（秒级）
+           ├─ isSparseCandidate（无压缩+条带+单波段+>1e8）→ 稀疏条带预览（秒级，长边 ≤8192≈原始 1/3，与导出 JPG 同清晰度）
            └─ 否则 → chunkedFull 分块读取（+进度条）   // 失败时若仍是小 8bit 再试 UTIF
 否则   → decodeUtif（UTIF 全量 → ≤2048 缩略图）
 ```
 
-- 常量：`PREVIEW_MAX=2048`、`SAFE=1.3e9`、`SPARSE_MIN=1e8`、`chunk=4096`。
+- 常量：`PREVIEW_MAX=2048`（chunked/UTIF 路径）、`SPARSE_PREVIEW_MAX=8192`（稀疏路径，≈1/3）、`SAFE=1.3e9`、`SPARSE_MIN=1e8`、`chunk=4096`。
+- 内存提示：稀疏预览 8192² 时 src(Float32)+canvas ≈0.5GB/图，避免同时开过多大图。
 - 脚本引入顺序：`pako.min.js → utif.js → geotiff.min.js`（deflate 解压依赖 pako）。
 
 ---

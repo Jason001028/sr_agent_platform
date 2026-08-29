@@ -1,7 +1,7 @@
 # 项目文档索引（sr_agent_platform）
 
 > 项目所有 `.md` 文档统一归档于本目录，按类目分目录管理。
-> **路径约定**：文档内引用一律用**项目根目录相对路径**（如 `tif_viewer/utif-viewer.html`）；跨文档引用写 `docs/<类目>/<文件>.md`。
+> **路径约定**：文档内引用一律用**项目根目录相对路径**（如 `tif_viewer/tif-viewer.html`）；跨文档引用写 `docs/<类目>/<文件>.md`。
 > 命名与归档规则依据：[naming-conventions.md](conventions/naming-conventions.md) §2。
 
 ## 一、分类总览
