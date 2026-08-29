@@ -1,6 +1,6 @@
 # current_question — 当前问题解决时间线（显示遥感图像）
 
-> 用途：**窗口交接文档**。下一个 Claude 窗口先读本文件，再读 `sr_agent_gui_experience.md`（经验），即可无断点继续。
+> 用途：**窗口交接文档**。下一个 Claude 窗口先读本文件，再读 `docs/experience/gui-experience.md`（经验），即可无断点继续。
 
 ---
 
@@ -30,7 +30,7 @@
 7. **验证通过**：
    - `test-types.js`：8 种数据类型（8bit RGB / 16bit 灰度 / 16bit RGB / uint32 / float32×3 / WhiteIsZero 反色）全部通过。
    - `test-regress.js`：8192² uint16 灰度 134MB → 分块多窗口 + 进度 100% + 渐变正确（4.5s）；UTIF 分配失败自动回退 geotiff 通过。
-8. 文档落盘：`sr_agent_gui_experience.md`（经验）、`.gitignore`（屏蔽 test-tifs/.e2e/*.zip）、内存文件更新。
+8. 文档落盘：`docs/experience/gui-experience.md`（经验）、`.gitignore`（屏蔽 test-tifs/.e2e/*.zip）、内存文件更新。
 
 ### 2026-08-28 · 稀疏条带预览（大图加速第一刀）
 - 用户回传探针：GF07A03、KF02B04 均为**无压缩 · 条带1行**。
@@ -66,7 +66,7 @@
 ## 关键文件
 
 - 主交付物：`tif_viewer/utif-viewer.html`（UTIF 小图 / geotiff 分块大图 / **稀疏条带预览** 三路分派）
-- 经验文档：`sr_agent_gui_experience.md`
+- 经验文档：`docs/experience/gui-experience.md`
 - E2E：`.e2e/test-sparse.js`（稀疏）、`test-regress.js`、`test-types.js`、`test-stretch.js`、`test-locator.js`（puppeteer-core + 无头 Edge）
 - 测试图：`test-tifs/`、`test-tifs/types/`、`test-tifs/sparse/`
 - 内存：`~/.claude/projects/.../memory/`（browser-2gb-alloc-cap、local-vendor-libs-for-viewers、intranet-data-inaccessible）

@@ -17,20 +17,22 @@
 
 ## 2. 新增 .md 文档规范
 
-- **位置**：顶层主题文档放根目录；归档型 / 主题型文档放 `docs/`。
-- **命名**：`sr_agent_<类型>.md`。类型限定如下，超出需在本规范 §6 登记：
-
-| 类型 | 用途 | 现有实例 |
-|---|---|---|
-| `requirements` | 需求 / 规格 | `sr_agent_gui_requirements.md` |
-| `plan` | 实施计划 | `sr_agent_web_plan.md`（gitignore） |
-| `design` | 设计文档 / 算法规格 | （待定） |
-| `experience` | 踩坑经验 / 已验证方案 | `sr_agent_gui_experience.md` |
-| `api` | 接口契约 | （待定） |
-| `readme` | 使用说明 | （待定） |
-
+- **位置**：项目文档统一收进 `docs/<类目>/`（根目录不再放散落文档）。类目见下表，新增类目需在本规范 §6 登记。
+- **命名**：`<类目>-<主题>.md`，英文 snake_case（可检索、跨平台），避免中文名与裸日期。正文内容语言不限。
 - **头部元信息**：每份文档首部固定一行：`标题 / 日期 / 状态（草稿·评审·已定）`。
+- **路径约定**：文中引用一律用**项目根目录相对路径**（如 `tif_viewer/utif-viewer.html`）；跨文档引用写 `docs/<类目>/<文件>.md`。
 - **文档与代码分离**：参考代码目录内**禁止**放 .md；历史归档文档（如 `重要新增本地文档/` 内的接口/设计文档）属存量豁免，新文档不得再混入。
+
+| 类目目录 | 用途 | 现有文档 |
+|---|---|---|
+| `docs/knowledge/` | 背景知识 / 原理 / 技术实现说明 | `jpg-export-background.md` |
+| `docs/planning/` | 需求规格 / 实施计划 | `gui-requirements.md`、`web-plan.md`（gitignore） |
+| `docs/design/` | 设计文档 / 算法规格 | （待定） |
+| `docs/experience/` | 踩坑经验 / 已验证方案 | `gui-experience.md` |
+| `docs/api/` | 接口契约 | （待定） |
+| `docs/status/` | 交接 / 状态 / 当前问题 | `current-question.md` |
+| `docs/conventions/` | 规范 / 约定 | `naming-conventions.md` |
+| `docs/readme/` | 使用说明 | （待定） |
 
 ---
 
@@ -58,7 +60,7 @@
 - **Python（backend）**：模块 snake_case；分层为 `api/`（路由）、`services/`（业务）、`mta_grid/`（纯算法）、`tools/`（agent 工具）、`agent/`（编排）；测试 `tests/test_<模块>.py`。
 - **前端（frontend）**：组件文件 PascalCase（`TifCanvas.tsx`），非组件模块 camelCase（`tifDecode.ts`）；页面收 `pages/`、复用组件收 `components/`。
 - **API 路由**：REST 复数资源，`/api/<资源>[/{id}]`（如 `/api/scenes/{name}/mask`）。
-- 完整目录结构与切换点见 `sr_agent_web_plan.md` §4。
+- 完整目录结构与切换点见 `docs/planning/web-plan.md` §4。
 
 ---
 
@@ -70,7 +72,7 @@
 | `SR_code/` | 生产算法源码 | 保持原样 |
 | `langchain-master/` | 第三方 clone | 只读，不纳入本仓库版本管理 |
 | `tif_viewer/`、`test-tifs/`、`.e2e/` | 复用 / 测试资产 | 保持原样 |
-| `sr_agent_web_plan.md` | 内部实施计划 | gitignore，不入库 |
+| `docs/planning/web-plan.md` | 内部实施计划 | gitignore，不入库 |
 
 ---
 
