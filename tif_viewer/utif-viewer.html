@@ -41,6 +41,16 @@
             border: none; border-radius: 6px; cursor: pointer;
         }
         #locBtn:hover { background: #357fd8; }
+        .outbtn {
+            display: inline-flex; align-items: center; justify-content: center;
+            height: 34px; padding: 0 14px; background: #22262c; color: #9fb0c0; font-size: 12px;
+            border: 1px solid #3a4149; border-radius: 6px; cursor: pointer; user-select: none; white-space: nowrap;
+        }
+        .outbtn:hover { border-color: #2b7bdd; color: #d5d9de; }
+        .outbtn.granted { color: #5bb974; border-color: #3a6b4d; }
+        .outbtn.pending { color: #e2a541; border-color: #6b5a2d; }
+        .chk { display: inline-flex; align-items: center; gap: 5px; color: #9fb0c0; font-size: 12px; flex: none; cursor: pointer; }
+        .chk input { accent-color: #2b7bdd; }
         #layout { display: flex; height: calc(100% - 50px); }
         #sidebar {
             width: 260px; flex: none; background: #161a1f; border-right: 1px solid #2c313a;
@@ -57,6 +67,14 @@
         .file-item .status { font-size: 11px; margin-top: 3px; color: #e2a541; }
         .file-item .status.err { color: #e05c5c; }
         .file-item .status.ok { color: #5bb974; }
+        .file-item .jpg {
+            font-size: 11px; margin-top: 3px; color: #7aa7ff; cursor: pointer; display: none;
+            word-break: break-all;
+        }
+        .file-item .jpg:hover { text-decoration: underline; }
+        .file-item .jpg.err { color: #e05c5c; cursor: default; }
+        .file-item .jpg.ok { color: #7ab98a; cursor: pointer; }
+        .file-item .jpg .rex { color: #2b7bdd; margin-left: 6px; }
         .file-item .close {
             float: right; color: #6b7480; cursor: pointer; font-size: 14px; padding: 0 4px;
         }
@@ -98,6 +116,8 @@
         <option value="log">Log</option>
         <option value="equal">Equalize</option>
     </select>
+    <button id="outBtn" class="outbtn" title="选择 JPG 中间产物输出目录：首次点选一次目录（授权后自动按读取日期建子目录写入），之后每读一张 tif 自动生成 jpg + 当日读取记录">输出目录: 未授权</button>
+    <label class="chk" title="读取成功后自动生成 JPG 中间产物（当前拉伸模式烘焙，长边上限可改 JPG_MAX）"><input type="checkbox" id="autoChk" checked>自动JPG</label>
     <span class="loc" title="输入原始图像像素坐标（X=列，Y=行），跳转并红叉标记约 7 秒">
         <input id="locX" type="number" placeholder="X" min="0" step="1">
         <input id="locY" type="number" placeholder="Y" min="0" step="1">
@@ -140,6 +160,24 @@ var SAFE = 1.3e9;
 // 无压缩 + 条带 + 单波段大图走「稀疏条带预览」（只抽读少数条带做字节切片）的最小字节数。
 // 低于此值沿用原分块路径，保持小图预览行为与既有测试不变。
 var SPARSE_MIN = 1e8;
+
+/* ---------------- JPG 中间产物导出（读取 tif 成功 → 自动生成 jpg + 记录读取日期） ----------------
+   落盘用文件系统访问 API（showDirectoryPicker，Edge/Chrome）；首次点工具栏「输出目录」授权一次，
+   之后每读一张 tif 自动写入 输出目录/YYYY-MM-DD/<名字>.jpg 并在当日 读取记录.json 追加一条。
+   注意：jpg 为 8bit 有损，真正的 16bit 辐射细节保不住；这里"尽可能保留细节"= 高分辨率 + 高画质 + 当前拉伸。 */
+var JPG_MAX = 16384;          // 导出长边上限（用户需求；受画布面积与内存预算约束时自动降档）
+var JPG_QUALITY = 0.95;       // JPEG 质量（Chromium 的 toBlob 尊重该值）
+var EXPORT_BUDGET = 2.4e9;    // 导出 src(Float32)+RGBA 的 JS 可见分配预算（16384²单波段=2.147e9，留余量；可下调适配低内存机）
+var MULTI_BAND_LONG = 8192;   // 多波段导出长边硬上限（3 波段 16384 内存必然爆，保守封顶）
+var BAND_ACC_LIMIT = 4e8;     // 分块 Float64 累加器超过此字节数 → 改用带通累加（16384² 全量会达 2.1GB>2GB 上限）
+var ACC_BAND_ROWS = 256;      // 带通累加每带输出行数（单波段 16384 时累加器 ≈256×16384×8≈33MB）
+var CANVAS_AREA_MAX = 268435456; // Chromium 画布面积上限（16384² 恰等于此值）
+var FSA = window.showDirectoryPicker ? { available: true } : { available: false };
+var autoExport = true;        // 「自动JPG」开关（工具栏可关）
+var outHandle = null;         // FileSystemDirectoryHandle（IndexedDB 持久化）
+var outName = null;           // 输出目录名（仅展示）
+var exportQueue = [];         // 导出串行队列：避免多图同时高分辨率解码撑爆内存
+var exportingNow = false;
 
 /* ---------------- 工具函数 ---------------- */
 function fmtBytes(n) {
@@ -196,24 +234,27 @@ function stretchMap(v, b, st, mode) {
     return lo === 0 ? 0 : 128;                   // 常量图：全零→黑，否则中灰
 }
 
-function paintStretch(rec) {
-    if (!rec.src || !rec.thumb) return;
-    var src = rec.src, sw = rec.srcw, sh = rec.srch, nb = rec.nbands, st = rec.stats, mode = curStretch;
-    var n = sw * sh, inv = rec.invert;
+function stretchRgba(src, sw, sh, nb, st, mode, invert) {
+    var n = sw * sh;
     var rgba = new Uint8ClampedArray(n * 4);
     var k = 0;
     for (var i = 0; i < n; i++, k += 4) {
         var b0 = i * nb, r, g, b;
         if (nb === 1) { r = g = b = stretchMap(src[b0], 0, st, mode); }
         else { r = stretchMap(src[b0], 0, st, mode); g = stretchMap(src[b0 + 1], 1, st, mode); b = stretchMap(src[b0 + 2], 2, st, mode); }
-        if (inv) { r = 255 - r; g = 255 - g; b = 255 - b; }
+        if (invert) { r = 255 - r; g = 255 - g; b = 255 - b; }
         if (r < 0) r = 0; else if (r > 255) r = 255;
         if (g < 0) g = 0; else if (g > 255) g = 255;
         if (b < 0) b = 0; else if (b > 255) b = 255;
         rgba[k] = r; rgba[k + 1] = g; rgba[k + 2] = b; rgba[k + 3] = 255;
     }
-    rec.thumb.getContext('2d').putImageData(new ImageData(rgba, sw, sh), 0, 0);
-    rec.paintedMode = mode;
+    return rgba;
+}
+function paintStretch(rec) {
+    if (!rec.src || !rec.thumb) return;
+    var rgba = stretchRgba(rec.src, rec.srcw, rec.srch, rec.nbands, rec.stats, curStretch, rec.invert);
+    rec.thumb.getContext('2d').putImageData(new ImageData(rgba, rec.srcw, rec.srch), 0, 0);
+    rec.paintedMode = curStretch;
 }
 
 /* 每波段统计：min/max、1024 直方图 + CDF、2%/98% 百分位（供 2%线性 / 直方图均衡）。
@@ -256,10 +297,15 @@ function computeStats(src, sw, sh, nb, fLo, fHi) {
 
 /* geotiff 分块读取：把全图自然值按缩放系数箱式降采样到预览分辨率（Float32 累加求均值），
    内存封顶（预览 ≤2048 边）；结束后由 paintStretch 按当前拉伸模式统一渲染。 */
-function chunkedCollect(image, W, H, plan, ps, sw, sh, onProgress) {
+function chunkedCollect(image, W, H, plan, ps, sw, sh, onProgress, opts) {
     var nb = plan.comps, chunk = 4096;
-    var cols = Math.ceil(W / chunk), rows = Math.ceil(H / chunk), total = cols * rows, done = 0;
     var npx = sw * sh;
+    // 导出高分辨率时 Float64 累加器会超单次分配上限（16384² 单波段 ≈2.1GB）→ 改用带通累加。
+    // 预览（≤2048）恒 < BAND_ACC_LIMIT，走原逻辑，行为逐字节不变。
+    if (npx * nb * 8 > BAND_ACC_LIMIT) {
+        return bandPassCollect(image, W, H, plan, ps, sw, sh, onProgress, opts);
+    }
+    var cols = Math.ceil(W / chunk), rows = Math.ceil(H / chunk), total = cols * rows, done = 0;
     var acc = new Float64Array(npx * nb), cnt = new Uint32Array(npx);
     var rowLoop = function (ry) {
         if (ry >= rows) return Promise.resolve();
@@ -301,6 +347,65 @@ function chunkedCollect(image, W, H, plan, ps, sw, sh, onProgress) {
         }
         return src;
     });
+}
+
+/* 带通累加：与 chunkedCollect 同语义（逐像素求和/计数求均值），但累加器只覆盖当前输出带，
+   内存由全图 2.1GB 压到 ≈ACC_BAND_ROWS×sw×nb×8。源行区间按带反推并做带内守卫，保证每个
+   源像素恰好累加一次。仅供导出高分辨率使用（预览恒走原逻辑）。 */
+function bandPassCollect(image, W, H, plan, ps, sw, sh, onProgress, opts) {
+    opts = opts || {};
+    var nb = plan.comps, B = opts.bandRows || ACC_BAND_ROWS;
+    var src = new Float32Array(sw * sh * nb);
+    var rowBand = function (or0) {
+        if (or0 >= sh) return Promise.resolve();
+        var or1 = Math.min(sh, or0 + B), bandH = or1 - or0;
+        var acc = new Float64Array(bandH * sw * nb), cnt = new Uint32Array(bandH * sw);
+        var yIn0 = Math.max(0, Math.floor(or0 / ps));
+        var yIn1 = Math.min(H, Math.ceil(or1 / ps));
+        var chunk = 4096, cols = Math.ceil(W / chunk), rows = Math.ceil((yIn1 - yIn0) / chunk);
+        var rowLoop = function (ri) {
+            if (ri >= rows) return Promise.resolve();
+            var y0 = yIn0 + ri * chunk, y1 = Math.min(yIn1, y0 + chunk), chh = y1 - y0;
+            var dyy = new Uint32Array(chh);
+            for (var r2 = 0; r2 < chh; r2++) { var dr = Math.floor((y0 + r2) * ps); dyy[r2] = dr >= sh ? sh - 1 : dr; }
+            var x = 0;
+            var colStep = function () {
+                if (x >= cols) return Promise.resolve().then(function () { return rowLoop(ri + 1); });
+                var x0 = x * chunk, x1 = Math.min(W, x0 + chunk), cw = x1 - x0;
+                x++;
+                var dxx = new Uint32Array(cw);
+                for (var q = 0; q < cw; q++) { var dq = Math.floor((x0 + q) * ps); dxx[q] = dq >= sw ? sw - 1 : dq; }
+                return image.readRasters({ window: [x0, y0, x1, y1], samples: plan.samples, interleave: true }).then(function (raster) {
+                    for (var yy = 0; yy < chh; yy++) {
+                        var d = dyy[yy];
+                        if (d < or0 || d >= or1) continue;
+                        var local = (d - or0) * sw, rowS = yy * cw;
+                        for (var xx = 0; xx < cw; xx++) {
+                            var ai = local + dxx[xx], si = (rowS + xx) * nb;
+                            var ok = true;
+                            for (var b = 0; b < nb; b++) { var v = raster[si + b]; if (v !== v || !isFinite(v)) { ok = false; break; } }
+                            if (!ok) continue;
+                            for (var c = 0; c < nb; c++) acc[ai * nb + c] += raster[si + c];
+                            cnt[ai]++;
+                        }
+                    }
+                    return new Promise(function (r) { setTimeout(r, 0); }).then(colStep);
+                });
+            };
+            return colStep();
+        };
+        return rowLoop(0).then(function () {
+            for (var i = 0; i < bandH * sw; i++) {
+                var c = cnt[i];
+                if (!c) continue;
+                var oi = (or0 * sw + i) * nb;
+                for (var b2 = 0; b2 < nb; b2++) src[oi + b2] = acc[i * nb + b2] / c;
+            }
+            if (onProgress) onProgress(or1 / sh);
+            return rowBand(or1);
+        });
+    };
+    return rowBand(0);
 }
 
 /* ---------------- 稀疏条带预览（无压缩+条带+单波段大图快路径） ----------------
@@ -404,32 +509,31 @@ function trySparse(rec, probe) {
     }).catch(function () { return false; });
 }
 
-function sparseCollect(rec, probe, sp) {
+// 稀疏条带采样：直接按条带字节切片把抽样行写入目标数组（不再留 rows[] 整行副本，省 ~1GB）。
+// 导出复用同一机制（targetMax 可调大），返回 {src, sw, sh, bytesRead, stripsTouched}。
+function sparseSample(file, sp, targetMax, onProgress) {
     var W = sp.W, H = sp.H, bpp = sp.bpp, sf = sp.sf, le = sp.le, rps = sp.rps;
-    var ps = Math.min(1, PREVIEW_MAX / Math.max(W, H));
+    var tMax = (typeof targetMax === 'number') ? targetMax : PREVIEW_MAX;
+    var ps = Math.min(1, tMax / Math.max(W, H));
     var pw = Math.max(1, Math.round(W * ps)), ph = Math.max(1, Math.round(H * ps));
     var colStep = Math.max(1, Math.ceil(W / pw));
     var rowStep = Math.max(1, Math.ceil(H / ph));
     var src = new Float32Array(pw * ph);
-    var rows = new Array(ph);
-    var t0 = Date.now(), bytesRead = 0, stripsTouched = 0;
-    if (rec === activeRec) { showMask('稀疏条带预览：只抽样读少数条带，跳过全文件…', '', true); updateProgressUI(0); }
+    var bytesRead = 0, stripsTouched = 0;
     var readRow = function (i) {
         var r = Math.min(i * rowStep, H - 1);
         var si = Math.floor(r / rps), rowOff = (r % rps) * sp.rowBytes;
         var base = sp.offs[si], avail = sp.lens[si];
-        if (!base || !avail) return Promise.resolve(new Float32Array(pw));
+        if (!base || !avail) return Promise.resolve();
         var len = Math.min(avail - rowOff, sp.rowBytes);
-        if (len < bpp) return Promise.resolve(new Float32Array(pw));
+        if (len < bpp) return Promise.resolve();
         return sp.file.slice(base + rowOff, base + rowOff + len).arrayBuffer().then(function (buf) {
             var u8 = new Uint8Array(buf), dv = new DataView(buf);
-            var out = new Float32Array(pw);
+            var off = i * pw;
             for (var j = 0; j < pw; j++) {
-                var c = Math.min(j * colStep, W - 1);
-                out[j] = stripPxVal(u8, dv, le, bpp, sf, c * bpp);
+                src[off + j] = stripPxVal(u8, dv, le, bpp, sf, Math.min(j * colStep, W - 1) * bpp);
             }
             bytesRead += len; stripsTouched++;
-            return out;
         });
     };
     var idx = 0;
@@ -437,28 +541,46 @@ function sparseCollect(rec, probe, sp) {
         if (idx >= ph) return Promise.resolve();
         var end = Math.min(ph, idx + 8);
         var batch = [];
-        for (var k = idx; k < end; k++) (function (kk) {
-            batch.push(readRow(kk).then(function (v) { rows[kk] = v; }));
-        })(k);
+        for (var k = idx; k < end; k++) batch.push(readRow(k));
         idx = end;
         return Promise.all(batch).then(function () {
-            if (rec === activeRec) updateProgressUI(idx / ph);
+            if (onProgress) onProgress(idx / ph);
             return loop();
         });
     };
     return loop().then(function () {
-        for (var i = 0; i < ph; i++) src.set(rows[i], i * pw);
+        return { src: src, sw: pw, sh: ph, bytesRead: bytesRead, stripsTouched: stripsTouched };
+    });
+}
+
+function sparseCollect(rec, probe, sp, targetMax, opts) {
+    opts = opts || {};
+    var silent = !!opts.silent;
+    var W = sp.W, H = sp.H;
+    var t0 = Date.now();
+    if (!silent && rec === activeRec) { showMask('稀疏条带预览：只抽样读少数条带，跳过全文件…', '', true); updateProgressUI(0); }
+    return sparseSample(rec.file, sp, targetMax, function (f) {
+        if (!silent && rec === activeRec) updateProgressUI(f);
+    }).then(function (r) {
+        var src = r.src, pw = r.sw, ph = r.sh;
+        var stats = computeStats(src, pw, ph, 1);
+        if (silent) {
+            return { src: src, sw: pw, sh: ph, nbands: 1, stats: stats,
+                     invert: probe.photometric === 0, W: W, H: H,
+                     bytesRead: r.bytesRead, stripsTouched: r.stripsTouched };
+        }
         var cv = document.createElement('canvas'); cv.width = pw; cv.height = ph;
         rec.src = src; rec.srcw = pw; rec.srch = ph; rec.nbands = 1;
         rec.invert = probe.photometric === 0;
-        rec.stats = computeStats(src, pw, ph, 1);
+        rec.stats = stats;
         rec.thumb = cv; rec.W = W; rec.H = H;
         paintStretch(rec);
         rec.status = '完成，读取耗时 ' + fmtTime(Date.now() - t0) +
-            '（稀疏条带预览：抽样 ' + stripsTouched + ' 条条带，读 ' + fmtBytes(bytesRead) + ' / ' +
+            '（稀疏条带预览：抽样 ' + r.stripsTouched + ' 条条带，读 ' + fmtBytes(r.bytesRead) + ' / ' +
             fmtBytes(rec.file.size) + '）';
-        if (rec === activeRec) hideMask();
+        if (!silent && rec === activeRec) hideMask();
         updateItem(rec);
+        if (!silent) kickExport(rec);    // 解码成功 → 自动生成 JPG 中间产物
         if (rec === activeRec) { fit(); render(); updateMeta(rec); }
     });
 }
@@ -630,6 +752,7 @@ function chunkedFull(rec, probe, plan, W, H) {
         rec.status = '完成，读取耗时 ' + fmtTime(Date.now() - t0);
         if (rec === activeRec) hideMask();
         updateItem(rec);
+        kickExport(rec);                 // 解码成功 → 自动生成 JPG 中间产物
         if (rec === activeRec) { fit(); render(); updateMeta(rec); }
     });
 }
@@ -666,6 +789,7 @@ async function decodeUtif(rec) {
         rgba = null; buf = null; d = null;
         if (rec === activeRec) hideMask();
         updateItem(rec);
+        kickExport(rec);                 // 解码成功 → 自动生成 JPG 中间产物
         if (activeRec === rec) { fit(); render(); updateMeta(rec); }
     } catch (e) {
         // 内存/分配不足（如 Array buffer allocation failed）→ 自动回退到分块读取
@@ -682,8 +806,9 @@ async function decodeUtif(rec) {
 
 /* UTIF 全量解码后的 RGBA 下采样成 ≤2048 缩略图。
    全程不创建超过 8192 边的 canvas，绕开画布面积上限；按 4096 块逐步汇入中间画布。 */
-function buildThumb(rgba, W, H) {
-    var TI = 4096, maxI = 8192, maxT = 2048;
+function buildThumb(rgba, W, H, maxT, maxI) {
+    maxT = maxT || 2048; maxI = maxI || 8192;
+    var TI = 4096;
     var si = Math.min(1, maxI / Math.max(W, H));
     var iw = Math.max(1, Math.round(W * si));
     var ih = Math.max(1, Math.round(H * si));
@@ -710,6 +835,377 @@ function buildThumb(rgba, W, H) {
     tc.getContext('2d').drawImage(ic, 0, 0, iw, ih, 0, 0, tw, th);
     return tc;
 }
+
+/* ================ JPG 中间产物导出 ================
+   读取成功 → 以长边 JPG_MAX(默认 16384) 复用解码机制重建自然值 → 当前拉伸烘焙 RGBA
+   → canvas.toBlob('image/jpeg', 0.95) → 写入 输出目录/YYYY-MM-DD/<名字>.jpg
+   并在当日 读取记录.json 追加一条（{文件名,大小,尺寸,读取时间,jpg,导出长边,拉伸,质量,实际尺寸}）。
+   导出串行执行（多图同时高分辨率解码会撑爆内存）；不弹遮罩、不阻塞浏览交互。 */
+
+// 内存预算规划：返回满足画布面积上限、尺寸上限与 EXPORT_BUDGET 的导出分辨率。
+// 多波段直接封顶 MULTI_BAND_LONG（8192）。预算不足时自动降档并置 reduced=true 供状态提示。
+function planExport(W, H, nb, capLong) {
+    capLong = capLong || JPG_MAX;
+    var LONG = nb > 1 ? Math.min(capLong, MULTI_BAND_LONG) : capLong;
+    var scale = Math.min(1, LONG / Math.max(W, H));
+    var requested = scale;
+    for (;;) {
+        var pw = Math.max(1, Math.round(W * scale));
+        var ph = Math.max(1, Math.round(H * scale));
+        var px = pw * ph;
+        if (px > CANVAS_AREA_MAX) { scale = scale * Math.sqrt(CANVAS_AREA_MAX / px) * 0.99; continue; }
+        if (pw > 65535 || ph > 65535) { scale *= 0.9; continue; }
+        if (px * (nb * 4 + 4) <= EXPORT_BUDGET) {
+            return { pw: pw, ph: ph, scale: scale, px: px, longEdge: Math.max(pw, ph),
+                     reduced: scale < requested * 0.999 };
+        }
+        scale *= 0.9;
+        if (scale * Math.max(W, H) < 64) return null;
+    }
+}
+
+// 小 8bit 图：UTIF 全量重解 → 直接上画布（预算内）或 buildThumb 到目标边。
+function utifExportCollect(file, plan) {
+    return file.arrayBuffer().then(function (buf) {
+        var ifds = UTIF.decode(buf);
+        if (!ifds || !ifds.length) throw new Error('无法解析 tif 结构');
+        UTIF.decodeImage(buf, ifds[0]);
+        var rgba = UTIF.toRGBA8(ifds[0]);
+        var W = ifds[0].width, H = ifds[0].height;
+        var cv, sw, sh;
+        if (W * H * 16 <= EXPORT_BUDGET) {
+            cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+            cv.getContext('2d').putImageData(new ImageData(rgba, W, H), 0, 0);
+            sw = W; sh = H;
+        } else {
+            cv = buildThumb(rgba, W, H, plan.longEdge, plan.longEdge);
+            sw = cv.width; sh = cv.height;
+        }
+        var d = cv.getContext('2d').getImageData(0, 0, sw, sh).data, n = sw * sh;
+        var src = new Float32Array(n * 3);
+        for (var i = 0; i < n; i++) { src[i * 3] = d[i * 4]; src[i * 3 + 1] = d[i * 4 + 1]; src[i * 3 + 2] = d[i * 4 + 2]; }
+        buf = null; rgba = null; d = null;
+        return { src: src, sw: sw, sh: sh, nb: 3,
+                 stats: computeStats(src, sw, sh, 3, 0, 255), invert: false,
+                 W: W, H: H, plan: plan };
+    });
+}
+
+function chunkedExport(rec, probe, plan, onProgress) {
+    var plan2 = getSamplePlan(probe.image);
+    return chunkedCollect(probe.image, probe.W, probe.H, plan2, plan.scale,
+                          plan.pw, plan.ph, onProgress)
+        .then(function (src) {
+            return { src: src, sw: plan.pw, sh: plan.ph, nb: plan2.comps,
+                     stats: computeStats(src, plan.pw, plan.ph, plan2.comps),
+                     invert: plan2.invert, W: probe.W, H: probe.H, plan: plan };
+        });
+}
+
+// 与预览相同路由：小8bit→UTIF；无压缩条带大图→稀疏；其余→分块。产出统一 {src,sw,sh,nb,stats,invert,W,H,plan}。
+function collectForExport(rec, onProgress) {
+    var probe = rec.probe;
+    if (!probe || !probe.image) return Promise.reject(new Error('缺文件属性，无法导出'));
+    var W = probe.W, H = probe.H;
+    var ph = probe.photometric;
+    var goodPh = ph == null || ph === 0 || ph === 1 || ph === 2 || ph === 3 || ph === 5;
+    var small8 = probe.sampleFormat === 1 && probe.bits === 8 && probe.spp <= 4 && goodPh &&
+                 W * H * 4 <= SAFE;   // UTIF 全量 rgba 需一次性分配
+    if (small8) {
+        var p3 = planExport(W, H, 3, rec._exportCap);
+        if (!p3) return Promise.reject(new Error('导出尺寸计算失败'));
+        return utifExportCollect(rec.file, p3);
+    }
+    var nb = probe.spp >= 3 ? 3 : 1;
+    var plan = planExport(W, H, nb, rec._exportCap);
+    if (!plan) return Promise.reject(new Error('导出尺寸计算失败'));
+    if (isSparseCandidate(probe)) {
+        return parseStrips(rec.file).then(function (sp) {
+            if (sp && sp.ok) {
+                return sparseCollect(rec, probe, sp, plan.longEdge, { silent: true })
+                    .then(function (r) { r.plan = plan; return r; });
+            }
+            return chunkedExport(rec, probe, plan, onProgress);
+        });
+    }
+    return chunkedExport(rec, probe, plan, onProgress);
+}
+
+function canvasToJpegBlob(rgba, sw, sh) {
+    return new Promise(function (resolve, reject) {
+        try {
+            var cv = document.createElement('canvas'); cv.width = sw; cv.height = sh;
+            cv.getContext('2d').putImageData(new ImageData(rgba, sw, sh), 0, 0);
+            cv.toBlob(function (b) { b ? resolve(b) : reject(new Error('toBlob 返回空（画布过大或浏览器限制）')); },
+                      'image/jpeg', JPG_QUALITY);
+        } catch (e) { reject(e); }
+    });
+}
+
+function exportToJpg(rec, onProgress) {
+    var t0 = Date.now();
+    return collectForExport(rec, onProgress).then(function (c) {
+        var rgba = stretchRgba(c.src, c.sw, c.sh, c.nb, c.stats, curStretch, c.invert);
+        c.src = null;                       // 尽早释放 Float32
+        return canvasToJpegBlob(rgba, c.sw, c.sh).then(function (blob) {
+            rgba = null;                    // 画布持有副本，RGBA 可释放
+            var saver = getSaver();
+            if (!saver) throw new Error('输出目录未授权');
+            var dateDir = dateDirName();
+            var base = rec.file.name.replace(/\.tiff?$/i, '') + '.jpg';
+            return saver.uniqueJpgName(dateDir, base).then(function (name) {
+                return saver.writeJpg(dateDir, name, blob).then(function () {
+                    var entry = {
+                        fileName: rec.file.name,
+                        fileSize: rec.file.size,
+                        W: rec.W, H: rec.H,
+                        readAt: new Date().toISOString(),
+                        jpg: name,
+                        exportMaxDim: JPG_MAX,
+                        stretch: curStretch,
+                        quality: JPG_QUALITY,
+                        dims: [c.sw, c.sh]
+                    };
+                    return saver.appendLog(dateDir, entry).then(function () {
+                        return { name: name, dims: c.sw + '×' + c.sh, ms: Date.now() - t0, plan: c.plan };
+                    });
+                });
+            });
+        });
+    });
+}
+
+/* ---------------- 落盘层：文件系统访问 API + IndexedDB（可注入 saver 供 E2E） ---------------- */
+var saverOverride = null;
+function getSaver() {
+    if (saverOverride) return saverOverride;
+    if (fsIO.isReady()) return fsIO;
+    if (!FSA.available) return downloadSaver;   // 浏览器不支持 FS API → 降级为下载
+    return null;                                 // FS 可用但未授权 → kickExport 提示
+}
+
+function dateDirName() {
+    var d = new Date(), p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+
+function openIDB() {
+    return new Promise(function (resolve, reject) {
+        var rq = indexedDB.open('tif-viewer-export', 1);
+        rq.onupgradeneeded = function () {
+            var db = rq.result;
+            if (!db.objectStoreNames.contains('settings')) db.createObjectStore('settings', { keyPath: 'k' });
+        };
+        rq.onsuccess = function () { resolve(rq.result); };
+        rq.onerror = function () { reject(rq.error); };
+    });
+}
+
+var fsIO = {
+    permission: 'prompt',
+    _db: null,
+    _logLock: Promise.resolve(),
+    init: function () {
+        return openIDB().then(function (db) {
+            fsIO._db = db;
+            return new Promise(function (res) {
+                var tx = db.transaction('settings', 'readonly');
+                tx.objectStore('settings').get('outDirHandle').onsuccess = function (e) {
+                    var v = e.target.result;
+                    if (v && v.handle) { outHandle = v.handle; outName = outHandle.name || ''; fsIO.applyPermission(); }
+                    else updateOutDirUI();
+                    res();
+                };
+            });
+        }).catch(function () { updateOutDirUI(); });
+    },
+    applyPermission: function () {
+        if (!outHandle || !outHandle.queryPermission) { fsIO.permission = 'granted'; updateOutDirUI(); return; }
+        return outHandle.queryPermission({ mode: 'readwrite' }).then(function (st) {
+            if (st === 'granted') fsIO.permission = 'granted';
+            else if (st === 'prompt') fsIO.permission = 'prompt';
+            else fsIO.permission = 'denied';
+            updateOutDirUI();
+        }).catch(function () { fsIO.permission = 'prompt'; updateOutDirUI(); });
+    },
+    authorize: function () {
+        if (!FSA.available) return Promise.reject(new Error('当前浏览器不支持文件系统访问 API（需 Edge/Chrome）'));
+        var persist = function (h) {
+            outHandle = h; outName = h.name || '';
+            fsIO.permission = 'granted';
+            return openIDB().then(function (db) {
+                return new Promise(function (res, rej) {
+                    var tx = db.transaction('settings', 'readwrite');
+                    tx.objectStore('settings').put({ k: 'outDirHandle', handle: h });
+                    tx.oncomplete = function () { res(); };
+                    tx.onerror = function () { rej(tx.error); };
+                });
+            }).then(function () { updateOutDirUI(); scanPendingExports(); });
+        };
+        // 已存句柄且只是权限未授权 → 优先重新授权同一目录（避免再次选目录）
+        if (outHandle && outHandle.requestPermission) {
+            return outHandle.requestPermission({ mode: 'readwrite' }).then(function (st) {
+                if (st === 'granted') return persist(outHandle);
+                return window.showDirectoryPicker({ mode: 'readwrite' }).then(persist);
+            }, function () { return window.showDirectoryPicker({ mode: 'readwrite' }).then(persist); });
+        }
+        return window.showDirectoryPicker({ mode: 'readwrite' }).then(persist);
+    },
+    isReady: function () { return !!outHandle && fsIO.permission === 'granted'; },
+    getDateDir: function (name) { return outHandle.getDirectoryHandle(name, { create: true }); },
+    uniqueJpgName: function (dateDir, base) {
+        return fsIO.getDateDir(dateDir).then(function (d) {
+            var tryName = function (candidate) {
+                return d.getFileHandle(candidate, { create: false })
+                    .then(function () { return tryName(nextJpgName(candidate)); })   // 已存在 → 下一个
+                    .catch(function (e) { if (e && e.name === 'NotFoundError') return candidate; throw e; });
+            };
+            return tryName(base);
+        });
+    },
+    writeJpg: function (dateDir, name, blob) {
+        return fsIO.getDateDir(dateDir).then(function (d) {
+            return d.getFileHandle(name, { create: true }).then(function (fh) {
+                return fh.createWritable().then(function (w) {
+                    return w.write(blob).then(function () { return w.close(); });
+                });
+            });
+        });
+    },
+    appendLog: function (dateDir, entry) {
+        fsIO._logLock = fsIO._logLock.then(function () {    // 串行追加，避免并发覆盖
+            return fsIO.getDateDir(dateDir).then(function (d) {
+                var txtP = d.getFileHandle('读取记录.json', { create: false })
+                    .then(function (fh) { return fh.getFile().then(function (f) { return f.text(); }); })
+                    .catch(function () { return null; });
+                return txtP.then(function (txt) {
+                    var log = null;
+                    if (txt) { try { var obj = JSON.parse(txt); if (obj && Array.isArray(obj.entries)) log = obj; } catch (e) {} }
+                    if (!log) log = { tool: 'tif-viewer', version: 1, entries: [] };
+                    log.entries.push(entry);
+                    return d.getFileHandle('读取记录.json', { create: true }).then(function (fh) {
+                        return fh.createWritable().then(function (w) {
+                            return w.write(JSON.stringify(log, null, 2)).then(function () { return w.close(); });
+                        });
+                    });
+                });
+            });
+        });
+        return fsIO._logLock;
+    }
+};
+
+function nextJpgName(name) {
+    var m = name.match(/^(.*?)(?:_(\d+))?\.jpg$/);
+    var n = m[2] ? (+m[2] + 1) : 2;
+    return m[1] + '_' + n + '.jpg';
+}
+
+// 降级方案：FS API 不可用（旧浏览器）→ 每次下载 jpg 到下载文件夹，不写日志。
+var downloadSaver = {
+    isReady: function () { return true; },
+    uniqueJpgName: function (dateDir, base) { return Promise.resolve(dateDir + '_' + base); },
+    writeJpg: function (dateDir, name, blob) {
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a'); a.href = url; a.download = name;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+        return Promise.resolve();
+    },
+    appendLog: function () { return Promise.resolve(); }
+};
+
+/* ---------------- 导出编排：状态渲染 + 串行队列 ---------------- */
+function updateOutDirUI() {
+    var b = document.getElementById('outBtn');
+    if (!b) return;
+    if (!outHandle) {
+        b.textContent = '输出目录: 未授权'; b.className = 'outbtn';
+        b.title = '点击选择输出目录（授权后自动按日期写 JPG 中间产物）';
+    } else if (fsIO.permission === 'granted') {
+        b.textContent = '输出目录: ✓ ' + outName; b.className = 'outbtn granted';
+    } else {
+        b.textContent = '输出目录: ' + (outName || '…') + '（待授权）'; b.className = 'outbtn pending';
+        b.title = '点击重新授权该目录';
+    }
+}
+
+function setJpgStatus(rec, text, cls) {
+    rec._jpgStatus = text; rec._jpgCls = cls || '';
+    var el = rec._el && rec._el.querySelector('.jpg');
+    if (!el) return;
+    el.innerHTML = '';
+    el.className = 'jpg' + (cls ? ' ' + cls : '');
+    el.style.display = text ? 'block' : 'none';
+    if (text) {
+        var s = document.createElement('span'); s.textContent = text;
+        el.appendChild(s);
+        if (rec._jpgDone) {
+            var rx = document.createElement('span');
+            rx.textContent = '（重新导出）'; rx.className = 'rex'; rx.title = '按当前拉伸模式重新生成 JPG';
+            el.appendChild(rx);
+        }
+    }
+}
+
+function kickExport(rec, force) {
+    if (!force && !autoExport) return;
+    if (!rec || !rec.W || !rec.src || rec._jpgBusy || rec._jpgDone) return;
+    var s = getSaver();
+    if (!s) { setJpgStatus(rec, 'JPG 未授权（点工具栏「输出目录」后自动导出）', 'err'); return; }
+    rec._jpgBusy = true;
+    rec._jpgToken = (rec._jpgToken || 0) + 1;
+    exportQueue.push({ rec: rec, token: rec._jpgToken });
+    pumpExport();
+}
+function reExportJpg(rec) {
+    if (!rec || rec._jpgBusy) return;
+    rec._jpgDone = false; rec._jpgBusy = false;
+    kickExport(rec, true);
+}
+function scanPendingExports() {
+    recs.forEach(function (r) { if (r.W && r.src && !r._jpgDone) kickExport(r); });
+}
+function pumpExport() {
+    if (exportingNow || !exportQueue.length) return;
+    var job = exportQueue.shift();
+    exportingNow = true;
+    doExportJob(job).then(function () { exportingNow = false; pumpExport(); });
+}
+function doExportJob(job) {
+    var rec = job.rec, tok = job.token;
+    setJpgStatus(rec, 'JPG 生成中…');
+    return exportToJpg(rec, function (f) {
+        if (tok === rec._jpgToken) setJpgStatus(rec, 'JPG 生成中 ' + Math.round(f * 100) + '%…');
+    }).then(function (r) {
+        if (tok !== rec._jpgToken) return;
+        rec._jpgDone = true;
+        var extra = r.plan && r.plan.reduced ? '（受画布/内存限制已自动降档）' : '';
+        setJpgStatus(rec, 'JPG 已导出 ' + r.name + ' · ' + r.dims + ' · ' + curStretch + ' · q' + JPG_QUALITY + extra, 'ok');
+    }).catch(function (e) {
+        if (tok !== rec._jpgToken) return;
+        var msg = (e && e.message) || String(e);
+        // 个别 Edge 构建在 16384² 画布面积极限上会拒绝 → 降档到 8192 重试一次
+        if (!rec._exportCap && /RangeError|allocation|Invalid|空|过大|enormous/i.test(msg)) {
+            rec._exportCap = 8192;
+            rec._jpgBusy = false;
+            kickExport(rec, true);
+            return;
+        }
+        setJpgStatus(rec, 'JPG 失败: ' + msg, 'err');
+    }).then(function () {
+        if (tok === rec._jpgToken) rec._jpgBusy = false;
+    });
+}
+
+// E2E 测试钩子：可注入假 saver、直接调用各子流程
+window.__viewer = {
+    planExport: planExport, bakeJpg: canvasToJpegBlob, getSaver: getSaver, fsIO: fsIO,
+    setSaver: function (s) { saverOverride = s; },
+    collectForExport: collectForExport, kickExport: kickExport, reExportJpg: reExportJpg,
+    scanPendingExports: scanPendingExports, dateDirName: dateDirName,
+    JPG_MAX: JPG_MAX, JPG_QUALITY: JPG_QUALITY
+};
 
 function fail(rec, e) {
     if (rec === activeRec) hideMask();
@@ -810,10 +1306,14 @@ function addListItem(rec) {
     var div = document.createElement('div');
     div.className = 'file-item';
     div.innerHTML = '<span class="close" title="移除">×</span>' +
-        '<div class="name"></div><div class="meta"></div><div class="status"></div>';
+        '<div class="name"></div><div class="meta"></div><div class="status"></div><div class="jpg"></div>';
     div.querySelector('.name').textContent = rec.file.name;
     div.querySelector('.meta').textContent = fmtBytes(rec.file.size);
     div.querySelector('.close').addEventListener('click', function (e) { e.stopPropagation(); removeFile(rec); });
+    div.querySelector('.jpg').addEventListener('click', function (e) {
+        e.stopPropagation();
+        if (e.target && e.target.classList && e.target.classList.contains('rex')) reExportJpg(rec);
+    });
     div.addEventListener('click', function () { activate(rec); });
     document.getElementById('sidebar').appendChild(div);
     rec._el = div;
@@ -886,6 +1386,20 @@ window.addEventListener('DOMContentLoaded', function () {
         curStretch = stretchSel.value;
         if (activeRec && activeRec.thumb && activeRec.src) { paintStretch(activeRec); render(); }
     });
+
+    var outBtn = document.getElementById('outBtn'), autoChk = document.getElementById('autoChk');
+    autoChk.checked = autoExport;
+    autoChk.addEventListener('change', function () {
+        autoExport = autoChk.checked;
+        if (autoExport) scanPendingExports();
+    });
+    outBtn.addEventListener('click', function () {
+        fsIO.authorize().catch(function (e) {
+            if (e && e.name === 'AbortError') return;   // 用户取消选择
+            showErr('输出目录授权失败：' + ((e && e.message) || e));
+        });
+    });
+    fsIO.init();   // 恢复上次授权目录（非阻塞）
 
     var locX = document.getElementById('locX'), locY = document.getElementById('locY');
     var doLocate = function () { locatePixel(locX.value, locY.value); };

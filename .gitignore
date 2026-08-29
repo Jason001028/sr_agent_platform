@@ -6,4 +6,4 @@ test-tifs/
 *.zip
 
 # 实施计划（内部参考，不入库）
-sr_agent_web_plan.md
+docs/planning/web-plan.md
