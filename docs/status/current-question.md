@@ -6,7 +6,7 @@
 
 ## 当前状态（一句话）
 
-**真实文件布局已确认**：GF07A03（1.11GB）与 KF02B04（1.78GB）均为**无压缩 · 条带1行**的单波段 16bit 影像。已实现**稀疏条带预览**（无压缩大图秒级出预览，只抽读少数条带做字节切片，不碰全文件）：134MB 测试图从全量 4.5s → **1.3s（读 32MB/128MB）**，预计真实 1.1GB 文件从 ~2 分钟降到秒级。**下一步**：放大看细节时按可视窗口读全分辨率（无压缩切片，无需金字塔）。
+**真实文件布局已确认**：GF07A03（1.11GB）与 KF02B04（1.78GB）均为**无压缩 · 条带1行**的单波段 16bit 影像。已实现**稀疏条带预览**（无压缩大图秒级出预览，只抽读少数条带做字节切片，不碰全文件）：134MB 测试图从全量 4.5s → **1.3s（读 32MB/128MB）**，预计真实 1.1GB 文件从 ~2 分钟降到秒级。**2026-08-29 已修 JPG 导出三 bug**（p2 崩溃 / 右下滑条纹 / 分辨率 2048→8192）；随后**稀疏条带预览显示分辨率提到 8192**（`SPARSE_PREVIEW_MAX`，≈原始 1/3，与导出 JPG 同清晰度，解决"网页显示不如本地 JPG 清晰"）。**下一步**：放大看细节时按可视窗口读全分辨率（无压缩切片，无需金字塔）；真机验证导出与 8192 显示。另注意：开发机 e2e 浏览器仍无法启动（环境问题，见 08-29 条目）。
 
 ## 时间线
 
@@ -40,12 +40,28 @@
 - E2E `test-sparse.js` 全过（像素精确 + Deflate 回退）；`test-regress/stretch/stretch8/locator/types/probe-list` 全过无回归。
 - 134MB 8192² 测试图：稀疏 **1.3s**（读 32MB/128MB）；原全量 4.5s。big_u16 也自动转稀疏（1.5s）。
 
+### 2026-08-29 · JPG 导出三 bug 解耦修复（稀疏大图）
+- 用户报：导出 JPG 报 `Cannot read properties of undefined(reading 'p2')`；预览/导出分辨率停在 2048×2003（位图过低，想要 ~1/3）；右/下大片拉伸条纹。要求解耦分步排查。
+- **Bug A（导出崩溃，根因）**：`sparseCollect` 的 silent 返回 `nbands:1`，而 `exportToJpg` 读 `c.nb` → 未定义 → `stretchRgba` 误走 3 波段分支 → `stretchMap` 在 `st[1]`（不存在）上读 `p2` → 崩溃。修：silent 返回补 `nb:1`；另给 `stretchMap`/`stretchRgba` 加兜底（统计缺失时按值截断返回，绝不抛错）。
+- **Bug C（右/下条纹，根因）**：`sparseSample` 用 `ceil(W/pw)` 定步长 + clamp 到 W-1 → 右/下各 ~145 列/行重复最后像素。修：改目标→源线性最近邻映射 `round(j*(W-1)/(pw-1))`，端点精确对齐。
+- **Bug B（分辨率）**：用户看到的 2048×2003 是预览（`PREVIEW_MAX=2048` 的产物）；导出因 Bug A 从未成功。修：默认导出长边 `JPG_MAX` 16384→**8192**（24739 宽 → 8192×8013 ≈ 原始 1/3），同时规避 16384² 画布面积/toBlob 边界；失败降档重试同步 8192→4096。
+- 同步：`docs/knowledge/jpg-export-background.md` 默认值/降档说明；`.e2e/test-sparse.js` 注释（新映射下断言仍成立，`round(i*8191/2047)=4i`）。
+- ⚠️ **待验证**：开发机 e2e 浏览器启动仍失败（puppeteer-core 25.9.0 + 无头 Edge，Code: 0，环境问题，与本次改动无关）；真机（内网）验证：打开 24739×24199 图 → 预览无条纹、2% 线性导出得 8192×8013 JPG 且无报错。
+
+### 2026-08-29 · 网页显示清晰度 = 本地 JPG（稀疏预览 2048→8192）
+
+- 用户报："同样的 jpg，本地目录预览清晰度远超 html 网页显示"。根因：导出 JPG 是 8192（≈1/3），而**网页稀疏预览仍是 2048**（`PREVIEW_MAX`），所以页面图被放大看就糊。
+- 方案（用户选定「网页按 8192≈1/3 直接显示」）：新增 `SPARSE_PREVIEW_MAX=8192`，仅**稀疏条带路径**预览目标长边 2048→8192；`sparseSample` 默认目标改为该常量。chunked/UTIF 路径保持 2048（压缩/小图预览仍快）。
+- 代价与约束：稀疏预览 8192² 时 src(Float32)+canvas ≈ **0.5GB/图**，避免同时开过多大图（已写入 gui-experience §4 内存提示）。
+- 同步：`.e2e/test-sparse.js` 与 `.e2e/test-regress.js` 预览尺寸断言 2048→8192（测试图为 8192²，无压缩命中稀疏，全分辨率恒等映射）；`docs/knowledge/jpg-export-background.md` 预览降采样说明改口（稀疏 8192 / 其余 2048）。
+- ⚠️ **待真机验证**：8192² 稀疏预览在真实 24739×24199 图上的内存/耗时；e2e 本机仍无法启动（环境问题）。
+
 ## 下一步（给新窗口）
 
 > **环境约束（已写入记忆）**：开发机是**外网机**，真实遥感图全在**内网机盘阵**，无法导出/复制/读头探测。文件结构只能靠**用户回传 ENVI 头信息**（Edit Headers：Compression/Interleave）或**尺寸推断法**。不能要求用户给文件路径。
 
 1. **等用户回传**（两种途径，用户二选一）：
-   - 用当前 `tif_viewer/utif-viewer.html` 打开 (a) 400MB 小图、(b) 报解码失败的大图，把状态栏**完整报错文本**发来（含 `[属性 W×H，bits/spp，类型，压缩code]`）。
+   - 用当前 `tif_viewer/tif-viewer.html` 打开 (a) 400MB 小图、(b) 报解码失败的大图，把状态栏**完整报错文本**发来（含 `[属性 W×H，bits/spp，类型，压缩code]`）。
    - 或回传 ENVI 头信息：**Compression 字段** + 文件字节大小 + 宽×高 + 有没有 `.ovr`（用户已确认 Interleave=BSQ，单波段下不是瓶颈）。
 2. 看 compression 编码：
    - 若为 1/5/8/32946（无/LZW/Deflate/旧 deflate）→ 不该失败，需进一步查。
@@ -65,7 +81,7 @@
 
 ## 关键文件
 
-- 主交付物：`tif_viewer/utif-viewer.html`（UTIF 小图 / geotiff 分块大图 / **稀疏条带预览** 三路分派）
+- 主交付物：`tif_viewer/tif-viewer.html`（UTIF 小图 / geotiff 分块大图 / **稀疏条带预览** 三路分派）
 - 经验文档：`docs/experience/gui-experience.md`
 - E2E：`.e2e/test-sparse.js`（稀疏）、`test-regress.js`、`test-types.js`、`test-stretch.js`、`test-locator.js`（puppeteer-core + 无头 Edge）
 - 测试图：`test-tifs/`、`test-tifs/types/`、`test-tifs/sparse/`

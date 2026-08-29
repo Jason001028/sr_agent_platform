@@ -2,8 +2,10 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>大图 TIF 查看器</title>
-    <!-- geotiff.js 已内置到本地 vendor/，内网/离线环境无需联网 -->
+    <title>TIF 快速查看（UTIF + geotiff 自动分派）</title>
+    <!-- 本地库：pako 必须在前（UTIF 依赖它）；geotiff 用于大图分块读取 -->
+    <script src="vendor/pako.min.js"></script>
+    <script src="vendor/utif.js"></script>
     <script src="vendor/geotiff.min.js"></script>
     <style>
         html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #0f1113; color: #d5d9de;
@@ -15,11 +17,40 @@
         .btn {
             display: inline-flex; align-items: center; justify-content: center;
             height: 34px; padding: 0 16px; background: #2b7bdd; color: #fff; font-size: 14px;
-            border-radius: 6px; cursor: pointer; user-select: none;
+            border-radius: 6px; cursor: pointer; user-select: none; white-space: nowrap;
         }
         .btn:hover { background: #357fd8; }
         .btn input { display: none; }
-        #hint { color: #8a93a0; font-size: 12px; }
+        #hint { color: #8a93a0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        #meta { color: #9fb0c0; font-size: 12px; white-space: nowrap; margin-left: auto; }
+        #stretchSel {
+            height: 34px; padding: 0 8px; background: #22262c; color: #d5d9de; font-size: 13px;
+            border: 1px solid #3a4149; border-radius: 6px; cursor: pointer; outline: none;
+        }
+        #stretchSel:hover { border-color: #2b7bdd; }
+        .loc { display: inline-flex; align-items: center; gap: 6px; flex: none; }
+        .loc input {
+            width: 60px; height: 30px; padding: 0 8px; background: #22262c; color: #d5d9de;
+            border: 1px solid #3a4149; border-radius: 6px; font-size: 13px; outline: none;
+            appearance: textfield; -moz-appearance: textfield;
+        }
+        .loc input::-webkit-outer-spin-button, .loc input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+        .loc input:hover, .loc input:focus { border-color: #2b7bdd; }
+        #locBtn {
+            height: 30px; padding: 0 12px; background: #2b7bdd; color: #fff; font-size: 13px;
+            border: none; border-radius: 6px; cursor: pointer;
+        }
+        #locBtn:hover { background: #357fd8; }
+        .outbtn {
+            display: inline-flex; align-items: center; justify-content: center;
+            height: 34px; padding: 0 14px; background: #22262c; color: #9fb0c0; font-size: 12px;
+            border: 1px solid #3a4149; border-radius: 6px; cursor: pointer; user-select: none; white-space: nowrap;
+        }
+        .outbtn:hover { border-color: #2b7bdd; color: #d5d9de; }
+        .outbtn.granted { color: #5bb974; border-color: #3a6b4d; }
+        .outbtn.pending { color: #e2a541; border-color: #6b5a2d; }
+        .chk { display: inline-flex; align-items: center; gap: 5px; color: #9fb0c0; font-size: 12px; flex: none; cursor: pointer; }
+        .chk input { accent-color: #2b7bdd; }
         #layout { display: flex; height: calc(100% - 50px); }
         #sidebar {
             width: 260px; flex: none; background: #161a1f; border-right: 1px solid #2c313a;
@@ -36,84 +67,136 @@
         .file-item .status { font-size: 11px; margin-top: 3px; color: #e2a541; }
         .file-item .status.err { color: #e05c5c; }
         .file-item .status.ok { color: #5bb974; }
+        .file-item .jpg {
+            font-size: 11px; margin-top: 3px; color: #7aa7ff; cursor: pointer; display: none;
+            word-break: break-all;
+        }
+        .file-item .jpg:hover { text-decoration: underline; }
+        .file-item .jpg.err { color: #e05c5c; cursor: default; }
+        .file-item .jpg.ok { color: #7ab98a; cursor: pointer; }
+        .file-item .jpg .rex { color: #2b7bdd; margin-left: 6px; }
         .file-item .close {
             float: right; color: #6b7480; cursor: pointer; font-size: 14px; padding: 0 4px;
         }
-        .file-item .close:hover { color: #ff8a8a; }
-        #viewWrap { flex: 1; position: relative; overflow: hidden; background: #0f1113; }
+        .file-item .close:hover { color: #ff6b6b; }
+        #stage { position: relative; flex: 1; overflow: hidden; background: #0f1113; }
         #viewCanvas { display: block; width: 100%; height: 100%; cursor: grab; }
         #viewCanvas.dragging { cursor: grabbing; }
-        #statusBar {
-            position: absolute; left: 10px; right: 10px; bottom: 8px; padding: 6px 10px;
-            background: rgba(0,0,0,.55); border-radius: 6px; color: #c8cdd3; font-size: 12px;
-            pointer-events: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        #decodeMask {
+            position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+            background: rgba(10, 12, 14, 0.92); z-index: 20; text-align: center;
         }
-        #progressWrap {
-            position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
-            width: 320px; background: #1d2229; border: 1px solid #2c313a; border-radius: 8px;
-            padding: 16px 18px; text-align: center;
+        #decodeMask.visible { display: flex; }
+        #decodeMask .box { max-width: 480px; padding: 0 20px; }
+        #decodeMask .title { font-size: 16px; color: #fff; margin-bottom: 10px; }
+        #decodeMask .sub { color: #9fb0c0; font-size: 13px; line-height: 1.7; }
+        #decodeMask .spinner {
+            width: 34px; height: 34px; margin: 0 auto 14px; border: 3px solid #2c313a;
+            border-top-color: #2b7bdd; border-radius: 50%; animation: spin 0.9s linear infinite;
         }
-        #progressText { color: #d5d9de; font-size: 13px; margin-bottom: 10px; }
-        .progressBar { height: 8px; background: #2c313a; border-radius: 4px; overflow: hidden; }
-        #progressFill { height: 100%; width: 0%; background: #2b7bdd; transition: width .15s; }
-        #warnNote { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); color: #8a93a0; font-size: 13px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        #progressWrap { display: none; margin-top: 16px; }
+        #progressBar {
+            height: 8px; border-radius: 4px; background: #2b7bdd; width: 0%;
+            transition: width 0.2s;
+        }
+        #progressPct { color: #9fb0c0; font-size: 12px; margin-top: 6px; }
+        #errBox { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: none;
+                  max-width: 420px; padding: 16px 18px; background: #2a1b1b; border: 1px solid #6b3b3b;
+                  border-radius: 8px; color: #ffb4b4; font-size: 13px; z-index: 25; text-align: center; }
     </style>
 </head>
 <body>
 <div id="toolbar">
-    <label class="btn">选择 TIF 文件<input type="file" id="fileInput" multiple accept=".tif,.tiff,image/tiff"></label>
-    <span id="hint">支持拖拽多张 tif/tiff · 已验证单张约 1.77GB / 30000×30000</span>
+    <label class="btn">选择文件<input type="file" id="fileInput" multiple accept=".tif,.tiff,image/tiff"></label>
+    <select id="stretchSel" title="Display stretch (ENVI-style preprocessing)">
+        <option value="linear">Linear</option>
+        <option value="linear2">2% Linear</option>
+        <option value="sqrt">Sqrt</option>
+        <option value="log">Log</option>
+        <option value="equal">Equalize</option>
+    </select>
+    <button id="outBtn" class="outbtn" title="选择 JPG 中间产物输出目录：首次点选一次目录（授权后自动按读取日期建子目录写入），之后每读一张 tif 自动生成 jpg + 当日读取记录">输出目录: 未授权</button>
+    <label class="chk" title="读取成功后自动生成 JPG 中间产物（当前拉伸模式烘焙，长边上限可改 JPG_MAX）"><input type="checkbox" id="autoChk" checked>自动JPG</label>
+    <span class="loc" title="输入原始图像像素坐标（X=列，Y=行），跳转并红叉标记约 7 秒">
+        <input id="locX" type="number" placeholder="X" min="0" step="1">
+        <input id="locY" type="number" placeholder="Y" min="0" step="1">
+        <button id="locBtn">定位</button>
+    </span>
+    <span id="hint">8bit 小图走 UTIF；大图/16bit/浮点/多波段自动分块（有进度条）；无压缩大图用稀疏条带预览（秒级）。可用「拉伸」切换浏览增强。可多选/拖拽。</span>
+    <span id="meta"></span>
 </div>
 <div id="layout">
-    <div id="sidebar"><div class="tip">未打开文件<br>点击左上角选择，或把 tif 拖进本窗口</div></div>
-    <div id="viewWrap">
+    <div id="sidebar"><div class="tip">尚未添加文件。点左上角「选择文件」。</div></div>
+    <div id="stage">
         <canvas id="viewCanvas"></canvas>
-        <div id="warnNote" hidden></div>
-        <div id="progressWrap" hidden>
-            <div id="progressText">正在生成整图预览…</div>
-            <div class="progressBar"><div id="progressFill"></div></div>
+        <div id="decodeMask">
+            <div class="box">
+                <div class="spinner"></div>
+                <div class="title" id="maskTitle">正在处理…</div>
+                <div class="sub" id="maskSub"></div>
+                <div id="progressWrap">
+                    <div id="progressBar"></div>
+                    <div id="progressPct"></div>
+                </div>
+            </div>
         </div>
-        <div id="statusBar"></div>
+        <div id="errBox"></div>
     </div>
 </div>
 
 <script>
-'use strict';
-var $ = function (id) { return document.getElementById(id); };
-var canvas = $('viewCanvas');
-var ctx = canvas.getContext('2d');
-
-var MAX_READ_PIXELS = 12e6;   // 单次“实时窗口读取”允许的源像素数上限（防全图误读导致 OOM）
-var PREVIEW_MAX = 2048;       // 整图预览长边像素上限
-
-var recs = [];                // 已打开的文件记录
+/* ---------------- 状态与常量 ---------------- */
+var recs = [];
 var activeRec = null;
-var previewQueue = [];        // 预览构建队列（后台逐个构建）
-var previewRunning = false;
-var renderToken = 0;          // 用于丢弃过期的异步渲染结果
-var inFlight = false;
-var pendingRender = false;
+var view = { scale: 1, ox: 0, oy: 0 };
+var marker = null;   // {tx, ty, until}：缩略图坐标 + 过期时间（红叉定位）
+var canvas, ctx, stage, mask, maskTitle, maskSub, progressWrap, progressBar, progressPct, errBox;
+
+var PREVIEW_MAX = 2048;        // 整图预览长边上限（chunked/UTIF 路径；保快）
+var SPARSE_PREVIEW_MAX = 8192; // 稀疏条带预览长边上限（≈原始 1/3：网页显示与导出 JPG 同清晰度；无压缩文件抽样读仍秒级）。
+                               // 内存：8192² 预览 src(Float32)+canvas ≈0.5GB/图，避免同时开过多大图。
+// 浏览器单次 ArrayBuffer 分配上限实测约 2GB；UTIF 解码/转RGBA 各需一次大分配。
+// 任一预估超过安全线即改走 geotiff 分块，避免分配失败。
+var SAFE = 1.3e9;
+// 无压缩 + 条带 + 单波段大图走「稀疏条带预览」（只抽读少数条带做字节切片）的最小字节数。
+// 低于此值沿用原分块路径，保持小图预览行为与既有测试不变。
+var SPARSE_MIN = 1e8;
+
+/* ---------------- JPG 中间产物导出（读取 tif 成功 → 自动生成 jpg + 记录读取日期） ----------------
+   落盘用文件系统访问 API（showDirectoryPicker，Edge/Chrome）；首次点工具栏「输出目录」授权一次，
+   之后每读一张 tif 自动写入 输出目录/YYYY-MM-DD/<名字>.jpg 并在当日 读取记录.json 追加一条。
+   注意：jpg 为 8bit 有损，真正的 16bit 辐射细节保不住；这里"尽可能保留细节"= 高分辨率 + 高画质 + 当前拉伸。 */
+var JPG_MAX = 8192;           // 导出长边上限：默认 8192 ≈ 原始长边 1/3（用户需求；24739 宽图→8192×8013）。
+                              // 8192 也规避 16384² 画布面积/toBlob/内存的边界风险；需更高清晰度可改回 16384。
+var JPG_QUALITY = 0.95;       // JPEG 质量（Chromium 的 toBlob 尊重该值）
+var EXPORT_BUDGET = 2.4e9;    // 导出 src(Float32)+RGBA 的 JS 可见分配预算（16384²单波段=2.147e9，留余量；可下调适配低内存机）
+var MULTI_BAND_LONG = 8192;   // 多波段导出长边硬上限（3 波段 16384 内存必然爆，保守封顶）
+var BAND_ACC_LIMIT = 4e8;     // 分块 Float64 累加器超过此字节数 → 改用带通累加（16384² 全量会达 2.1GB>2GB 上限）
+var ACC_BAND_ROWS = 256;      // 带通累加每带输出行数（单波段 16384 时累加器 ≈256×16384×8≈33MB）
+var CANVAS_AREA_MAX = 268435456; // Chromium 画布面积上限（16384² 恰等于此值）
+var FSA = window.showDirectoryPicker ? { available: true } : { available: false };
+var autoExport = true;        // 「自动JPG」开关（工具栏可关）
+var outHandle = null;         // FileSystemDirectoryHandle（IndexedDB 持久化）
+var outName = null;           // 输出目录名（仅展示）
+var exportQueue = [];         // 导出串行队列：避免多图同时高分辨率解码撑爆内存
+var exportingNow = false;
 
 /* ---------------- 工具函数 ---------------- */
-function fmt(n) {
-    if (n >= 1e9) return (n / 1e9).toFixed(2) + 'G';
-    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
-    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
-    return String(Math.round(n));
+function fmtBytes(n) {
+    if (n >= 1073741824) return (n / 1073741824).toFixed(2) + ' GB';
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+    if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+    return n + ' B';
 }
-
-var PHOTO_MAP = { 0: 'WhiteIsZero', 1: 'BlackIsZero', 2: 'RGB', 3: 'Palette', 4: 'TransparencyMask', 5: 'CMYK', 6: 'YCbCr', 8: 'CIELab' };
-var COMP_MAP = { 1: '无', 2: 'CCITT RLE', 5: 'LZW', 6: 'JPEG(旧)', 7: 'JPEG', 8: 'Deflate', 32773: 'PackBits', 34892: 'LERC', 50001: 'WebP', 50002: 'ZSTD' };
-
-// 决定读取哪些波段：>=3 波段取前 3 当 RGB，否则按单波段(灰度)
-function getSamplePlan(image) {
-    var spp = image.getSamplesPerPixel();
-    var samples = spp >= 3 ? [0, 1, 2] : [0];
-    var bits = safeBits(image);
-    return { samples: samples, comps: samples.length, bits: bits };
+function fmtTime(ms) {
+    if (ms >= 60000) return (ms / 60000).toFixed(1) + ' 分钟';
+    if (ms >= 1000) return (ms / 1000).toFixed(1) + ' 秒';
+    return ms + ' 毫秒';
 }
+function tick() { return new Promise(function (r) { setTimeout(r, 30); }); }
 
-// geotiff v3 的 getBitsPerSample() 返回单个数字，个别情况下可能是数组，统一归一化
+/* ---------------- geotiff 辅助（分块路径用） ---------------- */
 function safeBits(image) {
     var b = 8;
     try {
@@ -124,428 +207,1257 @@ function safeBits(image) {
     if (!isFinite(b) || b <= 0) b = 8;
     return b;
 }
+function getSamplePlan(image) {
+    var spp = image.getSamplesPerPixel();
+    var samples = spp >= 3 ? [0, 1, 2] : [0];
+    var ph = image._ph;   // 在 probeImage 里解析好的 photometric（0=WhiteIsZero 需反相）
+    return { samples: samples, comps: samples.length, bits: safeBits(image), invert: ph === 0 };
+}
+/* ---------------- 显示拉伸（ENVI 风格预处理） ----------------
+   解码时保留预览分辨率的"自然值"数据（rec.src）与每波段统计（rec.stats），
+   之后可随时按当前模式重绘（线性 / 2%线性 / 平方根 / 对数 / 直方图均衡）。
+   alpha 恒为不透明；photometric 反相（WhiteIsZero）在映射后取反。 */
+var curStretch = 'linear';
 
-// 把 geotiff 读出的交错数组(interleaved)转成 RGBA(Uint8Clamped)，按数组类型+位深做归一化
-function normalizeRGBA(raster, w, h, comps, bits) {
-    var rgba = new Uint8ClampedArray(w * h * 4);
-    var n = w * h, scale = 1, j = 0, k = 0, r, g, b, a, R, G, B, A;
-    if (raster instanceof Uint16Array) {
-        var maxv = (bits > 8 && bits <= 32) ? (Math.pow(2, bits) - 1) : 65535;
-        scale = 255 / maxv;                               // 16bit(或 12bit 等) -> 8bit
-    } else if (raster instanceof Float32Array) {
-        var mx = 0;
-        for (var m = 0; m < raster.length; m++) if (raster[m] > mx) mx = raster[m];
-        scale = mx > 1.001 ? 1 : 255;                     // 0..1 范围则乘 255
+function stretchMap(v, b, st, mode) {
+    var s = st && st[b];
+    // 统计缺失兜底：直接按值自身截断到 0~255 返回，保证任何情况下都不抛错
+    if (!s) { var cv = (v > 255) ? 255 : (v < 0 ? 0 : v); return (cv === cv) ? cv : 0; }
+    var lo = (mode === 'linear2') ? s.p2 : s.min;
+    var hi = (mode === 'linear2') ? s.p98 : s.max;
+    if (hi > lo) {
+        var t = (v - lo) / (hi - lo);
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+        if (mode === 'sqrt') return Math.sqrt(t) * 255;
+        if (mode === 'log') return Math.log(1 + t) / Math.LN2 * 255;
+        if (mode === 'equal') {
+            var BINS = s.cdf.length, k = (t * (BINS - 1)) | 0;
+            return s.cdf[k] / s.total * 255;
+        }
+        return t * 255;                          // linear
     }
-    for (var i = 0; i < n; i++, j += comps) {
-        r = g = b = 0; a = 255;
-        if (comps === 1) { r = g = b = raster[j]; }
-        else { r = raster[j]; g = raster[j + 1]; b = raster[j + 2]; if (comps === 4) a = raster[j + 3]; }
-        R = r * scale; if (R < 0) R = 0; else if (R > 255) R = 255;
-        G = g * scale; if (G < 0) G = 0; else if (G > 255) G = 255;
-        B = b * scale; if (B < 0) B = 0; else if (B > 255) B = 255;
-        A = a * scale; if (A < 0) A = 0; else if (A > 255) A = 255;
-        k = i * 4;
-        rgba[k] = R | 0; rgba[k + 1] = G | 0; rgba[k + 2] = B | 0; rgba[k + 3] = A | 0;
+    return lo === 0 ? 0 : 128;                   // 常量图：全零→黑，否则中灰
+}
+
+function stretchRgba(src, sw, sh, nb, st, mode, invert) {
+    if (!nb) nb = (st && st.length) ? st.length : 1;   // 兜底：nb 缺失时按 stats 波段数，避免误走 3 波段分支
+    var n = sw * sh;
+    var rgba = new Uint8ClampedArray(n * 4);
+    var k = 0;
+    for (var i = 0; i < n; i++, k += 4) {
+        var b0 = i * nb, r, g, b;
+        if (nb === 1) { r = g = b = stretchMap(src[b0], 0, st, mode); }
+        else { r = stretchMap(src[b0], 0, st, mode); g = stretchMap(src[b0 + 1], 1, st, mode); b = stretchMap(src[b0 + 2], 2, st, mode); }
+        if (invert) { r = 255 - r; g = 255 - g; b = 255 - b; }
+        if (r < 0) r = 0; else if (r > 255) r = 255;
+        if (g < 0) g = 0; else if (g > 255) g = 255;
+        if (b < 0) b = 0; else if (b > 255) b = 255;
+        rgba[k] = r; rgba[k + 1] = g; rgba[k + 2] = b; rgba[k + 3] = 255;
     }
     return rgba;
 }
-
-// 读取指定窗口为 RGB 交错数组：优先 readRGB（自动处理灰度/调色板/YCbCr），失败则手动按波段读
-function readWindowRGB(image, window, outW, outH) {
-    var bits = safeBits(image);
-    var photo = null;
-    try { photo = image.fileDirectory.getValue('PhotometricInterpretation'); } catch (e) {}
-    if (photo != null) {
-        try {
-            return image.readRGB({ window: window, width: outW, height: outH, interleave: true, resampleMethod: 'nearest' })
-                .then(function (raster) { return { raster: raster, comps: 3, bits: bits }; });
-        } catch (e) { /* 回退到手动读取 */ }
-    }
-    var plan = getSamplePlan(image);
-    return image.readRasters({ window: window, width: outW, height: outH, samples: plan.samples, interleave: true })
-        .then(function (raster) { return { raster: raster, comps: plan.comps, bits: plan.bits }; });
+function paintStretch(rec) {
+    if (!rec.src || !rec.thumb) return;
+    var rgba = stretchRgba(rec.src, rec.srcw, rec.srch, rec.nbands, rec.stats, curStretch, rec.invert);
+    rec.thumb.getContext('2d').putImageData(new ImageData(rgba, rec.srcw, rec.srch), 0, 0);
+    rec.paintedMode = curStretch;
 }
 
-/* ---------------- 文件打开与元数据 ---------------- */
-function openFiles(fileList) {
-    if (typeof GeoTIFF === 'undefined') {
-        alert('geotiff.js 库未加载。请确认 vendor/geotiff.min.js 与页面在同一目录下，然后刷新重试');
-        return;
-    }
-    var files = Array.from(fileList).filter(function (f) {
-        return /\.tiff?$/i.test(f.name) || (f.type && f.type.indexOf('tiff') !== -1);
-    });
-    if (!files.length) { alert('没有识别到 tif/tiff 文件'); return; }
-    files.forEach(function (f) {
-        // 去重：同名同大小视为同一文件
-        var dup = recs.some(function (r) { return r.file.name === f.name && r.file.size === f.size; });
-        if (!dup) openOne(f);
-    });
-    if (recs.length && !activeRec) activateFile(recs[recs.length - 1]);
-}
-
-function openOne(file) {
-    var rec = {
-        file: file, status: '打开中…', view: null,
-        previewCanvas: null, previewScale: 1, previewReady: false,
-        previewError: null, previewQueued: false, previewBuilding: false, cancelled: false
-    };
-    recs.push(rec);
-    addSidebarItem(rec);
-    GeoTIFF.fromBlob(file).then(function (tiff) {
-        rec.tiff = tiff;
-        return tiff.getImage();
-    }).then(function (image) {
-        rec.image = image;
-        rec.W = image.getWidth();
-        rec.H = image.getHeight();
-        var plan = getSamplePlan(image);
-        rec.spp = image.getSamplesPerPixel();
-        rec.bits = plan.bits;
-        rec.photo = getTag(image, 'PhotometricInterpretation');
-        rec.compression = getTag(image, 'Compression');
-        rec.count = 1;
-        return rec.tiff.getImageCount().then(function (c) { rec.count = c; });
-    }).then(function () {
-        rec.status = '已打开';
-        rec.metaLine = rec.W + '×' + rec.H + ' · ' + fmt(file.size) + ' · ' + rec.spp + ' 波段 · ' +
-            rec.bits + 'bit · ' + (PHOTO_MAP[rec.photo] || rec.photo) + ' · ' +
-            (COMP_MAP[rec.compression] || rec.compression) + (rec.count > 1 ? ' · 多IFD页' : '');
-        updateSidebarItem(rec);
-        if (rec === activeRec) {
-            fitView(rec, canvas.width, canvas.height);
-            scheduleRender();
-        }
-        if (!activeRec) activateFile(rec);
-    }).catch(function (err) {
-        rec.status = '打开失败：' + err.message;
-        rec.previewError = err.message;
-        updateSidebarItem(rec);
-    });
-}
-
-function getTag(image, name) {
-    try { return image.fileDirectory.getValue(name); } catch (e) { return null; }
-}
-
-/* ---------------- 整图预览构建 ---------------- */
-function enqueuePreview(rec) {
-    if (!rec || rec.previewReady || rec.previewError || rec.previewQueued || rec.previewBuilding) return;
-    rec.previewQueued = true;
-    previewQueue.push(rec);
-    runPreviewQueue();
-}
-
-function runPreviewQueue() {
-    if (previewRunning) return;
-    previewRunning = true;
-    var step = function () {
-        if (!previewQueue.length) { previewRunning = false; return; }
-        var rec = previewQueue.shift();
-        rec.previewQueued = false;
-        rec.previewBuilding = true;
-        updateSidebarItem(rec);
-        updateProgress(0, rec);
-        buildPreview(rec).then(function () {
-            rec.previewBuilding = false;
-            updateSidebarItem(rec);
-            updateProgress(1, rec);
-            if (rec === activeRec) scheduleRender();
-        }).catch(function (err) {
-            rec.previewBuilding = false;
-            rec.previewError = err.message;
-            updateSidebarItem(rec);
-            if (rec === activeRec) {
-                setWarn('预览生成失败：' + err.message);
-                scheduleRender();
+/* 每波段统计：min/max、1024 直方图 + CDF、2%/98% 百分位（供 2%线性 / 直方图均衡）。
+   传 fLo/fHi 时（8bit 原样图）按固定范围统计，线性退化为恒等映射。 */
+function computeStats(src, sw, sh, nb, fLo, fHi) {
+    var BINS = 1024, n = sw * sh, st = [];
+    for (var b = 0; b < nb; b++) {
+        var lo = (fLo !== undefined) ? fLo : Infinity;
+        var hi = (fHi !== undefined) ? fHi : -Infinity;
+        var v;
+        if (fLo === undefined)
+            for (var i = b; i < src.length; i += nb) { v = src[i]; if (v === v && isFinite(v)) { if (v < lo) lo = v; if (v > hi) hi = v; } }
+        var hist = new Float64Array(BINS), cdf = new Float64Array(BINS), total = 0;
+        if (hi > lo) {
+            var sc = BINS / (hi - lo);
+            for (var j = b; j < src.length; j += nb) {
+                v = src[j];
+                if (v === v && isFinite(v)) {
+                    var q = ((v - lo) * sc) | 0;
+                    if (q < 0) q = 0; else if (q >= BINS) q = BINS - 1;
+                    hist[q]++;
+                }
             }
-        }).then(step);
-    };
-    step();
+        }
+        var acc = 0;
+        for (var t = 0; t < BINS; t++) { acc += hist[t]; cdf[t] = acc; total += hist[t]; }
+        var p2 = lo, p98 = hi;
+        if (hi > lo && total > 0) {
+            var c2 = total * 0.02, c98 = total * 0.98, run = 0;
+            for (var u = 0; u < BINS; u++) {
+                run += hist[u];
+                if (p2 === lo && run >= c2) p2 = lo + (u + 0.5) * (hi - lo) / BINS;
+                if (run >= c98) { p98 = lo + (u + 0.5) * (hi - lo) / BINS; break; }
+            }
+        }
+        st[b] = { min: lo, max: hi, hist: hist, cdf: cdf, total: total, p2: p2, p98: p98 };
+    }
+    return st;
 }
 
-function buildPreview(rec) {
-    var image = rec.image, W = rec.W, H = rec.H;
-    var ps = Math.min(1, PREVIEW_MAX / Math.max(W, H));
-    var pw = Math.max(1, Math.round(W * ps)), ph = Math.max(1, Math.round(H * ps));
-    var cv = document.createElement('canvas');
-    cv.width = pw; cv.height = ph;
-    var c = cv.getContext('2d');
-    c.fillStyle = '#000'; c.fillRect(0, 0, pw, ph);
-    // 说明：geotiff.js 读不了 SubIFD 金字塔概览，链式概览在真实文件里也罕见，
-    // 且 MultiGeoTIFF.readRasters 依赖地理配准并可能触发全图读取。因此统一
-    // 走分块读取主图 + 现场降采样：内存封顶、不依赖地理配准、最稳。
-    return chunkedPreview(rec, image, W, H, ps, c, cv);
-}
-
-// 无概览：按 2048px 窗口分块读完整图、现场降采样到预览画布，内存封顶
-function chunkedPreview(rec, image, W, H, ps, c, cv) {
-    var plan = getSamplePlan(image);
-    var chunk = 2048;
-    var cols = Math.ceil(W / chunk), rows = Math.ceil(H / chunk);
-    var total = cols * rows, done = 0;
-    c.imageSmoothingEnabled = true;
-
+/* geotiff 分块读取：把全图自然值按缩放系数箱式降采样到预览分辨率（Float32 累加求均值），
+   内存封顶（预览 ≤2048 边）；结束后由 paintStretch 按当前拉伸模式统一渲染。 */
+function chunkedCollect(image, W, H, plan, ps, sw, sh, onProgress, opts) {
+    var nb = plan.comps, chunk = 4096;
+    var npx = sw * sh;
+    // 导出高分辨率时 Float64 累加器会超单次分配上限（16384² 单波段 ≈2.1GB）→ 改用带通累加。
+    // 预览（≤2048）恒 < BAND_ACC_LIMIT，走原逻辑，行为逐字节不变。
+    if (npx * nb * 8 > BAND_ACC_LIMIT) {
+        return bandPassCollect(image, W, H, plan, ps, sw, sh, onProgress, opts);
+    }
+    var cols = Math.ceil(W / chunk), rows = Math.ceil(H / chunk), total = cols * rows, done = 0;
+    var acc = new Float64Array(npx * nb), cnt = new Uint32Array(npx);
     var rowLoop = function (ry) {
-        if (rec.cancelled) throw new Error('已取消');
-        if (ry >= rows) { rec.previewCanvas = cv; rec.previewScale = ps; rec.previewReady = true; return Promise.resolve(); }
+        if (ry >= rows) return Promise.resolve();
         var x = 0;
         var colStep = function () {
-            if (rec.cancelled) throw new Error('已取消');
             if (x >= cols) return Promise.resolve().then(function () { return rowLoop(ry + 1); });
             var x0 = x * chunk, y0 = ry * chunk;
             var x1 = Math.min(W, x0 + chunk), y1 = Math.min(H, y0 + chunk);
             var cw = x1 - x0, chh = y1 - y0;
             x++;
+            var dxx = new Uint32Array(cw), dyy = new Uint32Array(chh);
+            for (var q = 0; q < cw; q++) { var dq = Math.floor((x0 + q) * ps); dxx[q] = dq >= sw ? sw - 1 : dq; }
+            for (var r2 = 0; r2 < chh; r2++) { var dr = Math.floor((y0 + r2) * ps); dyy[r2] = dr >= sh ? sh - 1 : dr; }
             return image.readRasters({ window: [x0, y0, x1, y1], samples: plan.samples, interleave: true }).then(function (raster) {
-                var rgba = normalizeRGBA(raster, cw, chh, plan.comps, plan.bits);
-                var off = document.createElement('canvas');
-                off.width = cw; off.height = chh;
-                off.getContext('2d').putImageData(new ImageData(rgba, cw, chh), 0, 0);
-                c.drawImage(off, 0, 0, cw, chh, x0 * ps, y0 * ps, cw * ps, chh * ps);
+                for (var yy = 0; yy < chh; yy++) {
+                    var rowA = dyy[yy] * sw, rowS = yy * cw;
+                    for (var xx = 0; xx < cw; xx++) {
+                        var ai = rowA + dxx[xx], si = (rowS + xx) * nb;
+                        var ok = true;
+                        for (var b = 0; b < nb; b++) { var v = raster[si + b]; if (v !== v || !isFinite(v)) { ok = false; break; } }
+                        if (!ok) continue;
+                        for (var c = 0; c < nb; c++) acc[ai * nb + c] += raster[si + c];
+                        cnt[ai]++;
+                    }
+                }
                 done++;
-                if (rec === activeRec && (done % 3 === 0 || done === total)) updateProgress(done / total, rec);
+                if (onProgress) onProgress(done / total);
                 return new Promise(function (r) { setTimeout(r, 0); }).then(colStep);
             });
         };
         return colStep();
     };
-    return rowLoop(0);
-}
-
-/* ---------------- 视图渲染 ---------------- */
-function fitView(rec, cw, ch) {
-    if (!cw || !ch || !rec) return;
-    rec.view = {
-        scale: Math.min(cw / rec.W, ch / rec.H),
-        cx: rec.W / 2,
-        cy: rec.H / 2
-    };
-}
-
-function scheduleRender() {
-    if (inFlight) { pendingRender = true; return; }
-    requestAnimationFrame(renderView);
-}
-
-function renderView() {
-    var rec = activeRec;
-    if (!rec) return;
-    var token = ++renderToken;
-    var cw = canvas.width, ch = canvas.height;
-    ctx.fillStyle = '#0f1113';
-    ctx.fillRect(0, 0, cw, ch);
-    if (!rec.view) fitView(rec, cw, ch);
-
-    var v = rec.view;
-    var halfW = cw / (2 * v.scale), halfH = ch / (2 * v.scale);
-    var x0 = Math.max(0, v.cx - halfW), y0 = Math.max(0, v.cy - halfH);
-    var x1 = Math.min(rec.W, v.cx + halfW), y1 = Math.min(rec.H, v.cy + halfH);
-    var winW = x1 - x0, winH = y1 - y0;
-    if (winW <= 0 || winH <= 0) return;
-
-    var destX = (x0 - (v.cx - halfW)) * v.scale;
-    var destY = (y0 - (v.cy - halfH)) * v.scale;
-    var destW = winW * v.scale, destH = winH * v.scale;
-
-    function drawPreview() {
-        var ps = rec.previewScale;
-        ctx.imageSmoothingEnabled = true;
-        ctx.drawImage(rec.previewCanvas, x0 * ps, y0 * ps, winW * ps, winH * ps, destX, destY, destW, destH);
-    }
-
-    // 预览已就绪且缩放深度不超过预览分辨率 → 直接用整图预览画布
-    if (rec.previewReady && v.scale <= rec.previewScale) {
-        drawPreview();
-        showStatus(rec.file.name + '  ·  整图预览 · ' + fmt(winW) + '×' + fmt(winH) + ' · 缩放 ' + v.scale.toFixed(4));
-        return;
-    }
-
-    // 窗口过大（接近全图）：不允许实时读全图（防 OOM）
-    if (winW * winH > MAX_READ_PIXELS) {
-        if (rec.previewReady) {
-            drawPreview();
-            showStatus(rec.file.name + '  ·  窗口过大，显示预览 · 缩放 ' + v.scale.toFixed(4));
-        } else if (rec.previewError) {
-            setWarn('该文件无法预览：' + rec.previewError);
-            showStatus(rec.file.name + '  ·  ' + (rec.metaLine || rec.status));
-        } else {
-            setWarn('正在生成整图预览…（当前窗口过大，可先滚轮放大到局部）');
-            showStatus(rec.file.name + '  ·  ' + (rec.metaLine || rec.status));
+    return rowLoop(0).then(function () {
+        var src = new Float32Array(npx * nb);
+        for (var i = 0; i < npx; i++) {
+            var c = cnt[i];
+            if (!c) continue;
+            for (var b2 = 0; b2 < nb; b2++) src[i * nb + b2] = acc[i * nb + b2] / c;
         }
-        return;
-    }
-
-    // 窗口足够小：即使预览未完成，也直接实时读取该窗口（可立即看局部细节）
-    hideWarn();
-    inFlight = true;
-    showStatus(rec.file.name + '  ·  正在读取图像数据…');
-    var wx = [Math.round(x0), Math.round(y0), Math.round(x1), Math.round(y1)];
-    var outW = Math.max(1, Math.round(destW)), outH = Math.max(1, Math.round(destH));
-    readWindowRGB(rec.image, wx, outW, outH).then(function (res) {
-        if (token !== renderToken || rec !== activeRec) return;
-        if (!res.raster || !res.raster.length) return;
-        var rgba = normalizeRGBA(res.raster, outW, outH, res.comps, res.bits);
-        var img = new ImageData(rgba, outW, outH);
-        var off = document.createElement('canvas');
-        off.width = outW; off.height = outH;
-        off.getContext('2d').putImageData(img, 0, 0);
-        ctx.imageSmoothingEnabled = true;
-        ctx.drawImage(off, 0, 0, outW, outH, destX, destY, destW, destH);
-        showStatus(rec.file.name + '  ·  高分辨率 · ' + fmt(winW) + '×' + fmt(winH) + ' · 缩放 ' + v.scale.toFixed(4));
-    }).catch(function (err) {
-        if (token === renderToken && rec === activeRec) showStatus('读取失败：' + err.message);
-    }).then(function () {
-        inFlight = false;
-        if (token === renderToken && pendingRender) {
-            pendingRender = false;
-            requestAnimationFrame(renderView);
-        }
+        return src;
     });
 }
 
-/* ---------------- 交互 ---------------- */
-canvas.addEventListener('wheel', function (e) {
-    e.preventDefault();
-    var rec = activeRec;
-    if (!rec || !rec.view) return;
-    var rect = canvas.getBoundingClientRect();
-    var mx = e.clientX - rect.left, my = e.clientY - rect.top;
-    var factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-    var ns = Math.max(rec.view.scale * factor, 1 / 2048);
-    ns = Math.min(ns, 128);
-    var imgX = (mx - canvas.width / 2) / rec.view.scale + rec.view.cx;
-    var imgY = (my - canvas.height / 2) / rec.view.scale + rec.view.cy;
-    rec.view.scale = ns;
-    rec.view.cx = imgX - (mx - canvas.width / 2) / ns;
-    rec.view.cy = imgY - (my - canvas.height / 2) / ns;
-    scheduleRender();
-}, { passive: false });
-
-var dragging = false, lastX = 0, lastY = 0;
-canvas.addEventListener('mousedown', function (e) {
-    if (e.button === 0) { dragging = true; lastX = e.clientX; lastY = e.clientY; canvas.classList.add('dragging'); }
-});
-window.addEventListener('mousemove', function (e) {
-    if (!dragging || !activeRec || !activeRec.view) return;
-    var dx = e.clientX - lastX, dy = e.clientY - lastY;
-    lastX = e.clientX; lastY = e.clientY;
-    activeRec.view.cx -= dx / activeRec.view.scale;
-    activeRec.view.cy -= dy / activeRec.view.scale;
-    scheduleRender();
-});
-window.addEventListener('mouseup', function () { dragging = false; canvas.classList.remove('dragging'); });
-canvas.addEventListener('dblclick', function () {
-    if (activeRec) { fitView(activeRec, canvas.width, canvas.height); scheduleRender(); }
-});
-
-/* ---------------- 侧栏 / 进度 / 状态 ---------------- */
-function addSidebarItem(rec) {
-    var el = document.createElement('div');
-    el.className = 'file-item';
-    el.dataset.id = String(recs.length - 1);
-    el.innerHTML = '<span class="close" title="移除">×</span><div class="name"></div><div class="meta"></div><div class="status"></div>';
-    var nameEl = el.querySelector('.name'), metaEl = el.querySelector('.meta'), stEl = el.querySelector('.status');
-    nameEl.textContent = rec.file.name;
-    el.addEventListener('click', function () { activateFile(rec); });
-    el.querySelector('.close').addEventListener('click', function (e) { e.stopPropagation(); removeFile(rec); });
-    rec.el = el;
-    $('sidebar').appendChild(el);
-    hideSidebarTip();
-    updateSidebarItem(rec);
+/* 带通累加：与 chunkedCollect 同语义（逐像素求和/计数求均值），但累加器只覆盖当前输出带，
+   内存由全图 2.1GB 压到 ≈ACC_BAND_ROWS×sw×nb×8。源行区间按带反推并做带内守卫，保证每个
+   源像素恰好累加一次。仅供导出高分辨率使用（预览恒走原逻辑）。 */
+function bandPassCollect(image, W, H, plan, ps, sw, sh, onProgress, opts) {
+    opts = opts || {};
+    var nb = plan.comps, B = opts.bandRows || ACC_BAND_ROWS;
+    var src = new Float32Array(sw * sh * nb);
+    var rowBand = function (or0) {
+        if (or0 >= sh) return Promise.resolve();
+        var or1 = Math.min(sh, or0 + B), bandH = or1 - or0;
+        var acc = new Float64Array(bandH * sw * nb), cnt = new Uint32Array(bandH * sw);
+        var yIn0 = Math.max(0, Math.floor(or0 / ps));
+        var yIn1 = Math.min(H, Math.ceil(or1 / ps));
+        var chunk = 4096, cols = Math.ceil(W / chunk), rows = Math.ceil((yIn1 - yIn0) / chunk);
+        var rowLoop = function (ri) {
+            if (ri >= rows) return Promise.resolve();
+            var y0 = yIn0 + ri * chunk, y1 = Math.min(yIn1, y0 + chunk), chh = y1 - y0;
+            var dyy = new Uint32Array(chh);
+            for (var r2 = 0; r2 < chh; r2++) { var dr = Math.floor((y0 + r2) * ps); dyy[r2] = dr >= sh ? sh - 1 : dr; }
+            var x = 0;
+            var colStep = function () {
+                if (x >= cols) return Promise.resolve().then(function () { return rowLoop(ri + 1); });
+                var x0 = x * chunk, x1 = Math.min(W, x0 + chunk), cw = x1 - x0;
+                x++;
+                var dxx = new Uint32Array(cw);
+                for (var q = 0; q < cw; q++) { var dq = Math.floor((x0 + q) * ps); dxx[q] = dq >= sw ? sw - 1 : dq; }
+                return image.readRasters({ window: [x0, y0, x1, y1], samples: plan.samples, interleave: true }).then(function (raster) {
+                    for (var yy = 0; yy < chh; yy++) {
+                        var d = dyy[yy];
+                        if (d < or0 || d >= or1) continue;
+                        var local = (d - or0) * sw, rowS = yy * cw;
+                        for (var xx = 0; xx < cw; xx++) {
+                            var ai = local + dxx[xx], si = (rowS + xx) * nb;
+                            var ok = true;
+                            for (var b = 0; b < nb; b++) { var v = raster[si + b]; if (v !== v || !isFinite(v)) { ok = false; break; } }
+                            if (!ok) continue;
+                            for (var c = 0; c < nb; c++) acc[ai * nb + c] += raster[si + c];
+                            cnt[ai]++;
+                        }
+                    }
+                    return new Promise(function (r) { setTimeout(r, 0); }).then(colStep);
+                });
+            };
+            return colStep();
+        };
+        return rowLoop(0).then(function () {
+            for (var i = 0; i < bandH * sw; i++) {
+                var c = cnt[i];
+                if (!c) continue;
+                var oi = (or0 * sw + i) * nb;
+                for (var b2 = 0; b2 < nb; b2++) src[oi + b2] = acc[i * nb + b2] / c;
+            }
+            if (onProgress) onProgress(or1 / sh);
+            return rowBand(or1);
+        });
+    };
+    return rowBand(0);
 }
 
-function updateSidebarItem(rec) {
-    if (!rec.el) return;
-    rec.el.classList.toggle('active', rec === activeRec);
-    rec.el.querySelector('.meta').textContent = rec.metaLine || '';
-    var st = rec.el.querySelector('.status');
-    st.className = 'status';
-    if (rec.previewError) { st.textContent = '预览失败'; st.classList.add('err'); }
-    else if (rec.previewBuilding) { st.textContent = '预览生成中…'; }
-    else if (rec.previewReady) { st.textContent = '预览就绪'; st.classList.add('ok'); }
-    else if (rec.status === '已打开') { st.textContent = '等待预览'; }
-    else { st.textContent = rec.status; st.classList.add('err'); }
+/* ---------------- 稀疏条带预览（无压缩+条带+单波段大图快路径） ----------------
+   不再全读文件：按条带偏移/长度直接对 file 做字节切片，只抽读 ph 行 × 抽样列。
+   对 1.1GB 级「无压缩·条带1行」文件从 ~2 分钟降到秒级（读量约为文件的 1/几十）。 */
+function stripPxVal(u8, dv, le, bpp, sf, bo) {
+    switch (bpp) {
+        case 1:
+            if (sf === 2) return dv.getInt8(bo);
+            return u8[bo];
+        case 2: {
+            var v = le ? dv.getUint16(bo, true) : dv.getUint16(bo, false);
+            return sf === 2 ? (v << 16 >> 16) : v;
+        }
+        case 4:
+            if (sf === 3) return dv.getFloat32(bo, true);
+            var v32 = le ? dv.getUint32(bo, true) : dv.getUint32(bo, false);
+            return sf === 2 ? (v32 | 0) : v32;
+    }
+    return NaN;
 }
 
-function hideSidebarTip() {
-    var tip = $('sidebar').querySelector('.tip');
-    if (tip) tip.style.display = 'none';
+// 解析无压缩条带布局（偏移/长度数组），供稀疏预览直接做字节切片。
+// 仅接受：无压缩(259=1) + 条带(非tiled) + 单波段(277=1)；其余返回 {ok:false}。
+function parseStrips(file) {
+    var HEAD = 2 * 1024 * 1024;
+    return file.slice(0, HEAD).arrayBuffer().then(function (buf) {
+        var u8 = new Uint8Array(buf), dv = new DataView(buf);
+        var le = u8[0] === 0x49;
+        var u = function (off, size) {
+            if (size === 1) return dv.getUint8(off);
+            if (size === 2) return le ? dv.getUint16(off, true) : dv.getUint16(off, false);
+            if (size === 4) return le ? dv.getUint32(off, true) : dv.getUint32(off, false);
+            if (size === 8) { try { return Number(le ? dv.getBigUint64(off, true) : dv.getBigUint64(off, false)); } catch (e) { return 0; } }
+            return 0;
+        };
+        var magic = u(2, 2);
+        if (magic !== 42 && magic !== 43) return { ok: false };
+        var big = magic === 43;
+        var ifdOff = big ? u(8, 8) : u(4, 4);
+        var cnt = big ? u(ifdOff, 8) : u(ifdOff, 2);
+        var esz = big ? 20 : 12;
+        var ebase = ifdOff + (big ? 8 : 2);
+        var valInline = big ? 8 : 4, valAt = big ? 12 : 8;
+        var tsize = [0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8, 0, 0, 0, 8, 8, 8];
+        var WANT = { 256: 1, 257: 1, 277: 1, 258: 1, 278: 1, 259: 1, 273: 1, 279: 1, 339: 1 };
+        var tags = {};
+        for (var i = 0; i < cnt; i++) {
+            var e = ebase + i * esz;
+            var tag = u(e, 2), type = u(e + 2, 2);
+            if (!WANT[tag]) continue;
+            var c = big ? u(e + 4, 8) : u(e + 4, 4);
+            var s1 = (type > 0 && type < tsize.length) ? tsize[type] : 0;
+            var vo = e + valAt;
+            if (s1 * c > valInline) vo = u(e + valAt, big ? 8 : 4);
+            tags[tag] = { type: type, cnt: c, off: vo, s1: s1 };
+        }
+        var scalar = function (tag, dflt) {
+            var t = tags[tag];
+            if (!t || !t.s1) return dflt;
+            return u(t.off, t.s1);
+        };
+        var comp = scalar(259, -1);
+        if (comp !== 1 || tags[322] || tags[323]) return { ok: false };
+        var W = scalar(256, 0), H = scalar(257, 0), spp = scalar(277, 1);
+        var rps = scalar(278, 0), bits = scalar(258, 8), sf = scalar(339, 1);
+        if (!W || !H || !rps || spp !== 1) return { ok: false };
+        var bpp = bits / 8;
+        if (bpp !== Math.floor(bpp) || bpp < 1 || bpp > 8) return { ok: false };
+        var strips = Math.ceil(H / rps);
+        var readArr = function (tag, n) {
+            var t = tags[tag];
+            if (!t || !t.s1) return null;
+            if (t.off + t.s1 * n > buf.byteLength) return null;
+            var arr = new Array(n);
+            for (var k = 0; k < n; k++) arr[k] = u(t.off + k * t.s1, t.s1);
+            return arr;
+        };
+        var offs = readArr(273, strips), lens = readArr(279, strips);
+        if (!offs || !lens) return { ok: false };
+        return { ok: true, file: file, le: le, W: W, H: H, bits: bits, sf: sf, rps: rps,
+                 bpp: bpp, rowBytes: W * bpp, offs: offs, lens: lens, strips: strips };
+    });
 }
 
-function activateFile(rec) {
-    if (activeRec === rec) { scheduleRender(); return; }
+function isSparseCandidate(probe) {
+    if (!probe || probe.spp !== 1 || probe.compression !== 1) return false;
+    var b = probe.bits;
+    if (b !== 8 && b !== 16 && b !== 32) return false;
+    var sf = probe.sampleFormat;
+    if (sf !== 1 && sf !== 2 && sf !== 3) return false;
+    return probe.W * probe.H * (b / 8) > SPARSE_MIN;
+}
+
+// 无压缩条带文件：按条带字节切片抽样读预览，不碰全文件。
+// 解析失败 / 结构不支持 → 返回 false 交给原分块路径兜底。
+function trySparse(rec, probe) {
+    return parseStrips(rec.file).then(function (sp) {
+        if (!sp || !sp.ok) return false;
+        return sparseCollect(rec, probe, sp).then(function () { return true; });
+    }).catch(function () { return false; });
+}
+
+// 稀疏条带采样：直接按条带字节切片把抽样行写入目标数组（不再留 rows[] 整行副本，省 ~1GB）。
+// 导出复用同一机制（targetMax 可调大），返回 {src, sw, sh, bytesRead, stripsTouched}。
+function sparseSample(file, sp, targetMax, onProgress) {
+    var W = sp.W, H = sp.H, bpp = sp.bpp, sf = sp.sf, le = sp.le, rps = sp.rps;
+    var tMax = (typeof targetMax === 'number') ? targetMax : SPARSE_PREVIEW_MAX;
+    var ps = Math.min(1, tMax / Math.max(W, H));
+    var pw = Math.max(1, Math.round(W * ps)), ph = Math.max(1, Math.round(H * ps));
+    // 目标→源线性最近邻映射：0↔0、pw-1↔W-1 端点精确对齐，抽样点均匀覆盖全图。
+    // 旧实现用 ceil(W/pw) 定步长再 clamp 到 W-1：右侧 (W - pw*floor(W/pw)) 列全部重复最后像素
+    // （24739→2048 时列 1903..2047 全映射到 24738）→ 右/下大片拉伸条纹。此映射彻底消除。
+    var mapX = function (j) { return pw <= 1 ? 0 : Math.round(j * (W - 1) / (pw - 1)); };
+    var mapY = function (i) { return ph <= 1 ? 0 : Math.round(i * (H - 1) / (ph - 1)); };
+    var src = new Float32Array(pw * ph);
+    var bytesRead = 0, stripsTouched = 0;
+    var readRow = function (i) {
+        var r = mapY(i);
+        var si = Math.floor(r / rps), rowOff = (r % rps) * sp.rowBytes;
+        var base = sp.offs[si], avail = sp.lens[si];
+        if (!base || !avail) return Promise.resolve();
+        var len = Math.min(avail - rowOff, sp.rowBytes);
+        if (len < bpp) return Promise.resolve();
+        return sp.file.slice(base + rowOff, base + rowOff + len).arrayBuffer().then(function (buf) {
+            var u8 = new Uint8Array(buf), dv = new DataView(buf);
+            var off = i * pw;
+            for (var j = 0; j < pw; j++) {
+                src[off + j] = stripPxVal(u8, dv, le, bpp, sf, mapX(j) * bpp);
+            }
+            bytesRead += len; stripsTouched++;
+        });
+    };
+    var idx = 0;
+    var loop = function () {
+        if (idx >= ph) return Promise.resolve();
+        var end = Math.min(ph, idx + 8);
+        var batch = [];
+        for (var k = idx; k < end; k++) batch.push(readRow(k));
+        idx = end;
+        return Promise.all(batch).then(function () {
+            if (onProgress) onProgress(idx / ph);
+            return loop();
+        });
+    };
+    return loop().then(function () {
+        return { src: src, sw: pw, sh: ph, bytesRead: bytesRead, stripsTouched: stripsTouched };
+    });
+}
+
+function sparseCollect(rec, probe, sp, targetMax, opts) {
+    opts = opts || {};
+    var silent = !!opts.silent;
+    var W = sp.W, H = sp.H;
+    var t0 = Date.now();
+    if (!silent && rec === activeRec) { showMask('稀疏条带预览：只抽样读少数条带，跳过全文件…', '', true); updateProgressUI(0); }
+    return sparseSample(rec.file, sp, targetMax, function (f) {
+        if (!silent && rec === activeRec) updateProgressUI(f);
+    }).then(function (r) {
+        var src = r.src, pw = r.sw, ph = r.sh;
+        var stats = computeStats(src, pw, ph, 1);
+        if (silent) {
+            // 注意：必须是 nb 字段——exportToJpg 读 c.nb，缺了就回退到 3 波段分支，
+            // stretchMap 在 st[1] 上读 p2 → "Cannot read properties of undefined (reading 'p2')"
+            return { src: src, sw: pw, sh: ph, nb: 1, stats: stats,
+                     invert: probe.photometric === 0, W: W, H: H,
+                     bytesRead: r.bytesRead, stripsTouched: r.stripsTouched };
+        }
+        var cv = document.createElement('canvas'); cv.width = pw; cv.height = ph;
+        rec.src = src; rec.srcw = pw; rec.srch = ph; rec.nbands = 1;
+        rec.invert = probe.photometric === 0;
+        rec.stats = stats;
+        rec.thumb = cv; rec.W = W; rec.H = H;
+        paintStretch(rec);
+        rec.status = '完成，读取耗时 ' + fmtTime(Date.now() - t0) +
+            '（稀疏条带预览：抽样 ' + r.stripsTouched + ' 条条带，读 ' + fmtBytes(r.bytesRead) + ' / ' +
+            fmtBytes(rec.file.size) + '）';
+        if (!silent && rec === activeRec) hideMask();
+        updateItem(rec);
+        if (!silent) kickExport(rec);    // 解码成功 → 自动生成 JPG 中间产物
+        if (rec === activeRec) { fit(); render(); updateMeta(rec); }
+    });
+}
+
+// 直接从文件头部解析少量关键 IFD 标签（兼容 classic TIFF 与 BigTIFF）。
+// geotiff 的 getFileDirectory() 在部分构建里是惰性桩，读不到 photometric/compression，故自行解析。
+function tiffTags(file) {
+    return file.slice(0, 1048576).arrayBuffer().then(function (buf) {
+        var u8 = new Uint8Array(buf), dv = new DataView(buf);
+        if (u8.length < 16) return {};
+        var le = u8[0] === 0x49;   // 'II' = 小端
+        var u = function (off, size) {
+            if (size === 1) return dv.getUint8(off);
+            if (size === 2) return le ? dv.getUint16(off, true) : dv.getUint16(off, false);
+            if (size === 4) return le ? dv.getUint32(off, true) : dv.getUint32(off, false);
+            if (size === 8) { try { return Number(le ? dv.getBigUint64(off, true) : dv.getBigUint64(off, false)); } catch (e) { return 0; } }
+            return 0;
+        };
+        var magic = u(2, 2);
+        if (magic !== 42 && magic !== 43) return {};   // 42=classic, 43=BigTIFF
+        var big = magic === 43;
+        var ifdOff = big ? u(8, 8) : u(4, 4);
+        var cnt = big ? u(ifdOff, 8) : u(ifdOff, 2);
+        var esz = big ? 20 : 12;
+        var ebase = ifdOff + (big ? 8 : 2);
+        var valInline = big ? 8 : 4, valAt = big ? 12 : 8;
+        var tsize = [0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8, 0, 0, 0, 8, 8, 8];   // TIFF type → 字节数
+        var tags = {};
+        var n = Math.min(cnt, 300);
+        for (var i = 0; i < n; i++) {
+            var e = ebase + i * esz;
+            var tag = u(e, 2), type = u(e + 2, 2);
+            var cntv = big ? u(e + 4, 8) : u(e + 4, 4);
+            var s1 = (type > 0 && type < tsize.length) ? tsize[type] : 0;
+            var vo = e + valAt;
+            if (s1 * cntv > valInline) vo = u(e + valAt, big ? 8 : 4);
+            if (s1) tags[tag] = u(vo, s1);
+        }
+        return tags;
+    });
+}
+
+// 由头部标签生成压缩/布局摘要（用于文件列表即探显示）
+var COMP_NAMES = { 1: '无压缩', 5: 'LZW', 6: 'JPEG', 7: 'JPEG', 8: 'Deflate', 32946: '旧Deflate', 32773: 'PackBits', 34712: 'JPEG2000', 34925: 'LZMA', 50000: 'ZSTD' };
+function layoutInfo(tags) {
+    var parts = [];
+    var comp = tags[259];
+    if (COMP_NAMES[comp]) parts.push(COMP_NAMES[comp]);
+    else if (comp != null) parts.push('压缩' + comp);
+    else parts.push('压缩?');
+    if (tags[322] && tags[323]) parts.push('瓦片' + tags[322] + '×' + tags[323]);
+    else if (tags[278]) parts.push('条带' + tags[278] + '行');
+    else parts.push('布局未知');
+    if (tags[324] != null) parts.push('(tiled)');
+    return parts.join(' · ');
+}
+
+// 用 geotiff 懒读尺寸 + 自行解析 photometric/compression（只读文件头部几KB），估算解码内存占用
+function probeImage(file) {
+    return GeoTIFF.fromBlob(file).then(function (tiff) {
+        return tiff.getImage().then(function (image) {
+            return tiffTags(file).then(function (tags) {
+                var sf = 1;
+                try { sf = image.getSampleFormat(); } catch (e) {}
+                if (Array.isArray(sf)) sf = sf[0];
+                if (typeof sf !== 'number' || !isFinite(sf)) sf = 1;
+                var ph = tags[262] != null ? tags[262] : null;
+                image._ph = ph;   // 供 getSamplePlan 判断反相
+                return {
+                    W: image.getWidth(), H: image.getHeight(),
+                    spp: image.getSamplesPerPixel(), bits: safeBits(image),
+                    sampleFormat: sf,             // 1=无符号整数 2=有符号 3=浮点
+                    photometric: ph,
+                    compression: tags[259] != null ? tags[259] : null,
+                    layout: layoutInfo(tags),
+                    image: image, tiff: tiff
+                };
+            });
+        });
+    });
+}
+
+/* ---------------- 文件打开与解码分派 ---------------- */
+function openFiles(fileList) {
+    var files = Array.from(fileList).filter(function (f) {
+        return /\.tiff?$/i.test(f.name) || (f.type && f.type.indexOf('tiff') !== -1);
+    });
+    if (!files.length) { showErr('没有识别到 tif/tiff 文件'); return; }
+    files.forEach(function (f) {
+        var dup = recs.some(function (r) { return r.file.name === f.name && r.file.size === f.size; });
+        if (!dup) openOne(f);
+    });
+}
+
+function openOne(file) {
+    var rec = { file: file, thumb: null, W: 0, H: 0, status: '等待…' };
+    recs.push(rec);
+    addListItem(rec);
+    activate(rec);
+}
+
+async function activate(rec) {
+    if (activeRec === rec && rec.thumb) { if (rec.paintedMode !== curStretch) paintStretch(rec); render(); return; }
+    marker = null;
     activeRec = rec;
-    renderToken++;                    // 丢弃旧文件的在途渲染
-    updateSidebarItemAll();
-    enqueuePreview(rec);
-    fitView(rec, canvas.width, canvas.height);
-    scheduleRender();
-}
+    setActiveItem(rec);
+    if (rec.thumb) {
+        if (rec.paintedMode !== curStretch) paintStretch(rec);
+        fit(); render(); updateMeta(rec); return;
+    }
 
-function updateSidebarItemAll() { recs.forEach(updateSidebarItem); }
+    // 先懒读 IFD，决定走 UTIF 还是 geotiff 分块
+    var probe = null;
+    try { probe = await probeImage(rec.file); } catch (e) { probe = null; }
+    rec.probe = probe;
 
-function removeFile(rec) {
-    rec.cancelled = true;
-    var qi = previewQueue.indexOf(rec);
-    if (qi >= 0) previewQueue.splice(qi, 1);
-    var idx = recs.indexOf(rec);
-    if (idx >= 0) recs.splice(idx, 1);
-    if (rec.el) rec.el.remove();
-    if (!recs.length) {
-        activeRec = null;
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        setWarn('未打开文件');
-        $('sidebar').innerHTML = '<div class="tip">未打开文件<br>点击左上角选择，或把 tif 拖进本窗口</div>';
-    } else if (rec === activeRec) {
-        var next = recs[Math.min(idx, recs.length - 1)];
-        activateFile(next);
+    var needGeo = false;
+    if (probe) {
+        var decodeBytes = probe.W * probe.H * probe.spp * (probe.bits / 8);
+        var rgbaBytes = probe.W * probe.H * 4;
+        // 只有「小的 8bit 无符号整数」走 UTIF 快速路径；
+        // 其余（浮点/16bit/32bit/多波段/特殊色相/大图）一律走 geotiff 分块，避免全黑与分配失败
+        var ph = probe.photometric;
+        var goodPh = ph == null || ph === 0 || ph === 1 || ph === 2 || ph === 3 || ph === 5;
+        var small8 = probe.sampleFormat === 1 && probe.bits === 8 && probe.spp <= 4 && goodPh;
+        needGeo = !small8 || decodeBytes > SAFE || rgbaBytes > SAFE;
+    }
+    if (needGeo) {
+        try { await decodeGeoTiff(rec, probe); }
+        catch (e) {
+            // geotiff 读不了时，小的 8bit 再试 UTIF（个别压缩 geotiff 不支持但 UTIF 能解）
+            if (probe && probe.sampleFormat === 1 && probe.bits === 8 && probe.spp <= 4) await decodeUtif(rec);
+            else fail(rec, e);
+        }
+    } else {
+        await decodeUtif(rec);
     }
 }
 
-function updateProgress(f, rec) {
-    var wrap = $('progressWrap');
-    if (rec !== activeRec) { wrap.hidden = true; return; }
-    wrap.hidden = false;
+// 大图路径：优先「稀疏条带预览」（无压缩+条带+单波段大图，秒级）；
+// 否则 geotiff 分块读自然值 → 统一渲染（有进度条，页面保持可响应）
+function decodeGeoTiff(rec, probe) {
+    var W = probe.W, H = probe.H;
+    var plan = getSamplePlan(probe.image);
+    if (isSparseCandidate(probe)) {
+        return trySparse(rec, probe).then(function (handled) {
+            if (handled) return;
+            return chunkedFull(rec, probe, plan, W, H);
+        });
+    }
+    return chunkedFull(rec, probe, plan, W, H);
+}
+
+function chunkedFull(rec, probe, plan, W, H) {
+    var ps = Math.min(1, PREVIEW_MAX / Math.max(W, H));
+    var pw = Math.max(1, Math.round(W * ps)), ph = Math.max(1, Math.round(H * ps));
+    var cv = document.createElement('canvas'); cv.width = pw; cv.height = ph;
+    var t0 = Date.now();
+    showMask('正在分块读取整图…', '', true);
+    updateProgressUI(0);
+    rec.invert = plan.invert;
+    return chunkedCollect(probe.image, W, H, plan, ps, pw, ph, function (f) {
+        if (rec === activeRec) updateProgressUI(f);
+    }).then(function (src) {
+        rec.src = src; rec.srcw = pw; rec.srch = ph; rec.nbands = plan.comps;
+        rec.stats = computeStats(src, pw, ph, plan.comps);
+        rec.thumb = cv; rec.W = W; rec.H = H;
+        paintStretch(rec);
+        rec.status = '完成，读取耗时 ' + fmtTime(Date.now() - t0);
+        if (rec === activeRec) hideMask();
+        updateItem(rec);
+        kickExport(rec);                 // 解码成功 → 自动生成 JPG 中间产物
+        if (rec === activeRec) { fit(); render(); updateMeta(rec); }
+    });
+}
+
+// 小图路径：UTIF 全量解码（页面冻结等待）。分配失败自动回退 geotiff 分块
+async function decodeUtif(rec) {
+    var buf = null;
+    try {
+        var t0 = Date.now();
+        showMask('正在读取文件…', '「' + rec.file.name + '」 ' + fmtBytes(rec.file.size), false);
+        await tick();
+        buf = await rec.file.arrayBuffer();
+        showMask('正在完整解码…', '已读入 ' + fmtBytes(buf.byteLength) + '。这一步会一次性解码全部像素，' +
+            '大图可能需要几分钟，期间页面短暂无响应属正常。', false);
+        await tick();
+        var ifds = UTIF.decode(buf);
+        if (!ifds || !ifds.length) throw new Error('无法解析 tif 结构');
+        UTIF.decodeImage(buf, ifds[0]);
+        var rgba = UTIF.toRGBA8(ifds[0]);
+        var W = ifds[0].width, H = ifds[0].height;
+        var thumb = buildThumb(rgba, W, H);
+        // 8bit 缩略图的原像素即"自然值"（0~255），存为 src 供拉伸切换；按固定 0~255 统计，线性=原样
+        var d = thumb.getContext('2d').getImageData(0, 0, thumb.width, thumb.height).data;
+        var sw = thumb.width, sh = thumb.height, n = sw * sh;
+        var src = new Float32Array(n * 3);
+        for (var i = 0; i < n; i++) {
+            src[i * 3] = d[i * 4]; src[i * 3 + 1] = d[i * 4 + 1]; src[i * 3 + 2] = d[i * 4 + 2];
+        }
+        rec.thumb = thumb; rec.W = W; rec.H = H;
+        rec.src = src; rec.srcw = sw; rec.srch = sh; rec.nbands = 3; rec.invert = false;
+        rec.stats = computeStats(src, sw, sh, 3, 0, 255);
+        paintStretch(rec);
+        rec.status = '完成，解码耗时 ' + fmtTime(Date.now() - t0);
+        rgba = null; buf = null; d = null;
+        if (rec === activeRec) hideMask();
+        updateItem(rec);
+        kickExport(rec);                 // 解码成功 → 自动生成 JPG 中间产物
+        if (activeRec === rec) { fit(); render(); updateMeta(rec); }
+    } catch (e) {
+        // 内存/分配不足（如 Array buffer allocation failed）→ 自动回退到分块读取
+        if (e && /array buffer/i.test(e.message)) {
+            rec.status = 'UTIF 全量内存不足，切换分块读取…';
+            updateItem(rec);
+            var probe = null;
+            try { probe = await probeImage(rec.file); } catch (e2) { probe = null; }
+            if (probe) { await decodeGeoTiff(rec, probe); return; }
+        }
+        fail(rec, e);
+    }
+}
+
+/* UTIF 全量解码后的 RGBA 下采样成 ≤2048 缩略图。
+   全程不创建超过 8192 边的 canvas，绕开画布面积上限；按 4096 块逐步汇入中间画布。 */
+function buildThumb(rgba, W, H, maxT, maxI) {
+    maxT = maxT || 2048; maxI = maxI || 8192;
+    var TI = 4096;
+    var si = Math.min(1, maxI / Math.max(W, H));
+    var iw = Math.max(1, Math.round(W * si));
+    var ih = Math.max(1, Math.round(H * si));
+    var ic = document.createElement('canvas'); ic.width = iw; ic.height = ih;
+    var ictx = ic.getContext('2d');
+    ictx.imageSmoothingEnabled = true;
+    ictx.imageSmoothingQuality = 'high';
+    for (var ty = 0; ty < H; ty += TI) {
+        var chh = Math.min(TI, H - ty);
+        for (var tx = 0; tx < W; tx += TI) {
+            var cww = Math.min(TI, W - tx);
+            var chunk = new Uint8ClampedArray(rgba.buffer, rgba.byteOffset + (ty * W + tx) * 4, cww * chh * 4);
+            var cc = document.createElement('canvas'); cc.width = cww; cc.height = chh;
+            cc.getContext('2d').putImageData(new ImageData(chunk, cww, chh), 0, 0);
+            ictx.drawImage(cc, 0, 0, cww, chh,
+                Math.round(tx * si), Math.round(ty * si),
+                Math.max(1, Math.round(cww * si)), Math.max(1, Math.round(chh * si)));
+        }
+    }
+    var s = Math.min(1, maxT / Math.max(iw, ih));
+    var tw = Math.max(1, Math.round(iw * s));
+    var th = Math.max(1, Math.round(ih * s));
+    var tc = document.createElement('canvas'); tc.width = tw; tc.height = th;
+    tc.getContext('2d').drawImage(ic, 0, 0, iw, ih, 0, 0, tw, th);
+    return tc;
+}
+
+/* ================ JPG 中间产物导出 ================
+   读取成功 → 以长边 JPG_MAX(默认 8192≈1/3) 复用解码机制重建自然值 → 当前拉伸烘焙 RGBA
+   → canvas.toBlob('image/jpeg', 0.95) → 写入 输出目录/YYYY-MM-DD/<名字>.jpg
+   并在当日 读取记录.json 追加一条（{文件名,大小,尺寸,读取时间,jpg,导出长边,拉伸,质量,实际尺寸}）。
+   导出串行执行（多图同时高分辨率解码会撑爆内存）；不弹遮罩、不阻塞浏览交互。 */
+
+// 内存预算规划：返回满足画布面积上限、尺寸上限与 EXPORT_BUDGET 的导出分辨率。
+// 多波段直接封顶 MULTI_BAND_LONG（8192）。预算不足时自动降档并置 reduced=true 供状态提示。
+function planExport(W, H, nb, capLong) {
+    capLong = capLong || JPG_MAX;
+    var LONG = nb > 1 ? Math.min(capLong, MULTI_BAND_LONG) : capLong;
+    var scale = Math.min(1, LONG / Math.max(W, H));
+    var requested = scale;
+    for (;;) {
+        var pw = Math.max(1, Math.round(W * scale));
+        var ph = Math.max(1, Math.round(H * scale));
+        var px = pw * ph;
+        if (px > CANVAS_AREA_MAX) { scale = scale * Math.sqrt(CANVAS_AREA_MAX / px) * 0.99; continue; }
+        if (pw > 65535 || ph > 65535) { scale *= 0.9; continue; }
+        if (px * (nb * 4 + 4) <= EXPORT_BUDGET) {
+            return { pw: pw, ph: ph, scale: scale, px: px, longEdge: Math.max(pw, ph),
+                     reduced: scale < requested * 0.999 };
+        }
+        scale *= 0.9;
+        if (scale * Math.max(W, H) < 64) return null;
+    }
+}
+
+// 小 8bit 图：UTIF 全量重解 → 直接上画布（预算内）或 buildThumb 到目标边。
+function utifExportCollect(file, plan) {
+    return file.arrayBuffer().then(function (buf) {
+        var ifds = UTIF.decode(buf);
+        if (!ifds || !ifds.length) throw new Error('无法解析 tif 结构');
+        UTIF.decodeImage(buf, ifds[0]);
+        var rgba = UTIF.toRGBA8(ifds[0]);
+        var W = ifds[0].width, H = ifds[0].height;
+        var cv, sw, sh;
+        if (W * H * 16 <= EXPORT_BUDGET) {
+            cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+            cv.getContext('2d').putImageData(new ImageData(rgba, W, H), 0, 0);
+            sw = W; sh = H;
+        } else {
+            cv = buildThumb(rgba, W, H, plan.longEdge, plan.longEdge);
+            sw = cv.width; sh = cv.height;
+        }
+        var d = cv.getContext('2d').getImageData(0, 0, sw, sh).data, n = sw * sh;
+        var src = new Float32Array(n * 3);
+        for (var i = 0; i < n; i++) { src[i * 3] = d[i * 4]; src[i * 3 + 1] = d[i * 4 + 1]; src[i * 3 + 2] = d[i * 4 + 2]; }
+        buf = null; rgba = null; d = null;
+        return { src: src, sw: sw, sh: sh, nb: 3,
+                 stats: computeStats(src, sw, sh, 3, 0, 255), invert: false,
+                 W: W, H: H, plan: plan };
+    });
+}
+
+function chunkedExport(rec, probe, plan, onProgress) {
+    var plan2 = getSamplePlan(probe.image);
+    return chunkedCollect(probe.image, probe.W, probe.H, plan2, plan.scale,
+                          plan.pw, plan.ph, onProgress)
+        .then(function (src) {
+            return { src: src, sw: plan.pw, sh: plan.ph, nb: plan2.comps,
+                     stats: computeStats(src, plan.pw, plan.ph, plan2.comps),
+                     invert: plan2.invert, W: probe.W, H: probe.H, plan: plan };
+        });
+}
+
+// 与预览相同路由：小8bit→UTIF；无压缩条带大图→稀疏；其余→分块。产出统一 {src,sw,sh,nb,stats,invert,W,H,plan}。
+function collectForExport(rec, onProgress) {
+    var probe = rec.probe;
+    if (!probe || !probe.image) return Promise.reject(new Error('缺文件属性，无法导出'));
+    var W = probe.W, H = probe.H;
+    var ph = probe.photometric;
+    var goodPh = ph == null || ph === 0 || ph === 1 || ph === 2 || ph === 3 || ph === 5;
+    var small8 = probe.sampleFormat === 1 && probe.bits === 8 && probe.spp <= 4 && goodPh &&
+                 W * H * 4 <= SAFE;   // UTIF 全量 rgba 需一次性分配
+    if (small8) {
+        var p3 = planExport(W, H, 3, rec._exportCap);
+        if (!p3) return Promise.reject(new Error('导出尺寸计算失败'));
+        return utifExportCollect(rec.file, p3);
+    }
+    var nb = probe.spp >= 3 ? 3 : 1;
+    var plan = planExport(W, H, nb, rec._exportCap);
+    if (!plan) return Promise.reject(new Error('导出尺寸计算失败'));
+    if (isSparseCandidate(probe)) {
+        return parseStrips(rec.file).then(function (sp) {
+            if (sp && sp.ok) {
+                return sparseCollect(rec, probe, sp, plan.longEdge, { silent: true })
+                    .then(function (r) { r.plan = plan; return r; });
+            }
+            return chunkedExport(rec, probe, plan, onProgress);
+        });
+    }
+    return chunkedExport(rec, probe, plan, onProgress);
+}
+
+function canvasToJpegBlob(rgba, sw, sh) {
+    return new Promise(function (resolve, reject) {
+        try {
+            var cv = document.createElement('canvas'); cv.width = sw; cv.height = sh;
+            cv.getContext('2d').putImageData(new ImageData(rgba, sw, sh), 0, 0);
+            cv.toBlob(function (b) { b ? resolve(b) : reject(new Error('toBlob 返回空（画布过大或浏览器限制）')); },
+                      'image/jpeg', JPG_QUALITY);
+        } catch (e) { reject(e); }
+    });
+}
+
+function exportToJpg(rec, onProgress) {
+    var t0 = Date.now();
+    return collectForExport(rec, onProgress).then(function (c) {
+        var rgba = stretchRgba(c.src, c.sw, c.sh, c.nb, c.stats, curStretch, c.invert);
+        c.src = null;                       // 尽早释放 Float32
+        return canvasToJpegBlob(rgba, c.sw, c.sh).then(function (blob) {
+            rgba = null;                    // 画布持有副本，RGBA 可释放
+            var saver = getSaver();
+            if (!saver) throw new Error('输出目录未授权');
+            var dateDir = dateDirName();
+            var base = rec.file.name.replace(/\.tiff?$/i, '') + '.jpg';
+            return saver.uniqueJpgName(dateDir, base).then(function (name) {
+                return saver.writeJpg(dateDir, name, blob).then(function () {
+                    var entry = {
+                        fileName: rec.file.name,
+                        fileSize: rec.file.size,
+                        W: rec.W, H: rec.H,
+                        readAt: new Date().toISOString(),
+                        jpg: name,
+                        exportMaxDim: JPG_MAX,
+                        stretch: curStretch,
+                        quality: JPG_QUALITY,
+                        dims: [c.sw, c.sh]
+                    };
+                    return saver.appendLog(dateDir, entry).then(function () {
+                        return { name: name, dims: c.sw + '×' + c.sh, ms: Date.now() - t0, plan: c.plan };
+                    });
+                });
+            });
+        });
+    });
+}
+
+/* ---------------- 落盘层：文件系统访问 API + IndexedDB（可注入 saver 供 E2E） ---------------- */
+var saverOverride = null;
+function getSaver() {
+    if (saverOverride) return saverOverride;
+    if (fsIO.isReady()) return fsIO;
+    if (!FSA.available) return downloadSaver;   // 浏览器不支持 FS API → 降级为下载
+    return null;                                 // FS 可用但未授权 → kickExport 提示
+}
+
+function dateDirName() {
+    var d = new Date(), p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+
+function openIDB() {
+    return new Promise(function (resolve, reject) {
+        var rq = indexedDB.open('tif-viewer-export', 1);
+        rq.onupgradeneeded = function () {
+            var db = rq.result;
+            if (!db.objectStoreNames.contains('settings')) db.createObjectStore('settings', { keyPath: 'k' });
+        };
+        rq.onsuccess = function () { resolve(rq.result); };
+        rq.onerror = function () { reject(rq.error); };
+    });
+}
+
+var fsIO = {
+    permission: 'prompt',
+    _db: null,
+    _logLock: Promise.resolve(),
+    init: function () {
+        return openIDB().then(function (db) {
+            fsIO._db = db;
+            return new Promise(function (res) {
+                var tx = db.transaction('settings', 'readonly');
+                tx.objectStore('settings').get('outDirHandle').onsuccess = function (e) {
+                    var v = e.target.result;
+                    if (v && v.handle) { outHandle = v.handle; outName = outHandle.name || ''; fsIO.applyPermission(); }
+                    else updateOutDirUI();
+                    res();
+                };
+            });
+        }).catch(function () { updateOutDirUI(); });
+    },
+    applyPermission: function () {
+        if (!outHandle || !outHandle.queryPermission) { fsIO.permission = 'granted'; updateOutDirUI(); return; }
+        return outHandle.queryPermission({ mode: 'readwrite' }).then(function (st) {
+            if (st === 'granted') fsIO.permission = 'granted';
+            else if (st === 'prompt') fsIO.permission = 'prompt';
+            else fsIO.permission = 'denied';
+            updateOutDirUI();
+        }).catch(function () { fsIO.permission = 'prompt'; updateOutDirUI(); });
+    },
+    authorize: function () {
+        if (!FSA.available) return Promise.reject(new Error('当前浏览器不支持文件系统访问 API（需 Edge/Chrome）'));
+        var persist = function (h) {
+            outHandle = h; outName = h.name || '';
+            fsIO.permission = 'granted';
+            return openIDB().then(function (db) {
+                return new Promise(function (res, rej) {
+                    var tx = db.transaction('settings', 'readwrite');
+                    tx.objectStore('settings').put({ k: 'outDirHandle', handle: h });
+                    tx.oncomplete = function () { res(); };
+                    tx.onerror = function () { rej(tx.error); };
+                });
+            }).then(function () { updateOutDirUI(); scanPendingExports(); });
+        };
+        // 已存句柄且只是权限未授权 → 优先重新授权同一目录（避免再次选目录）
+        if (outHandle && outHandle.requestPermission) {
+            return outHandle.requestPermission({ mode: 'readwrite' }).then(function (st) {
+                if (st === 'granted') return persist(outHandle);
+                return window.showDirectoryPicker({ mode: 'readwrite' }).then(persist);
+            }, function () { return window.showDirectoryPicker({ mode: 'readwrite' }).then(persist); });
+        }
+        return window.showDirectoryPicker({ mode: 'readwrite' }).then(persist);
+    },
+    isReady: function () { return !!outHandle && fsIO.permission === 'granted'; },
+    getDateDir: function (name) { return outHandle.getDirectoryHandle(name, { create: true }); },
+    uniqueJpgName: function (dateDir, base) {
+        return fsIO.getDateDir(dateDir).then(function (d) {
+            var tryName = function (candidate) {
+                return d.getFileHandle(candidate, { create: false })
+                    .then(function () { return tryName(nextJpgName(candidate)); })   // 已存在 → 下一个
+                    .catch(function (e) { if (e && e.name === 'NotFoundError') return candidate; throw e; });
+            };
+            return tryName(base);
+        });
+    },
+    writeJpg: function (dateDir, name, blob) {
+        return fsIO.getDateDir(dateDir).then(function (d) {
+            return d.getFileHandle(name, { create: true }).then(function (fh) {
+                return fh.createWritable().then(function (w) {
+                    return w.write(blob).then(function () { return w.close(); });
+                });
+            });
+        });
+    },
+    appendLog: function (dateDir, entry) {
+        fsIO._logLock = fsIO._logLock.then(function () {    // 串行追加，避免并发覆盖
+            return fsIO.getDateDir(dateDir).then(function (d) {
+                var txtP = d.getFileHandle('读取记录.json', { create: false })
+                    .then(function (fh) { return fh.getFile().then(function (f) { return f.text(); }); })
+                    .catch(function () { return null; });
+                return txtP.then(function (txt) {
+                    var log = null;
+                    if (txt) { try { var obj = JSON.parse(txt); if (obj && Array.isArray(obj.entries)) log = obj; } catch (e) {} }
+                    if (!log) log = { tool: 'tif-viewer', version: 1, entries: [] };
+                    log.entries.push(entry);
+                    return d.getFileHandle('读取记录.json', { create: true }).then(function (fh) {
+                        return fh.createWritable().then(function (w) {
+                            return w.write(JSON.stringify(log, null, 2)).then(function () { return w.close(); });
+                        });
+                    });
+                });
+            });
+        });
+        return fsIO._logLock;
+    }
+};
+
+function nextJpgName(name) {
+    var m = name.match(/^(.*?)(?:_(\d+))?\.jpg$/);
+    var n = m[2] ? (+m[2] + 1) : 2;
+    return m[1] + '_' + n + '.jpg';
+}
+
+// 降级方案：FS API 不可用（旧浏览器）→ 每次下载 jpg 到下载文件夹，不写日志。
+var downloadSaver = {
+    isReady: function () { return true; },
+    uniqueJpgName: function (dateDir, base) { return Promise.resolve(dateDir + '_' + base); },
+    writeJpg: function (dateDir, name, blob) {
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a'); a.href = url; a.download = name;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+        return Promise.resolve();
+    },
+    appendLog: function () { return Promise.resolve(); }
+};
+
+/* ---------------- 导出编排：状态渲染 + 串行队列 ---------------- */
+function updateOutDirUI() {
+    var b = document.getElementById('outBtn');
+    if (!b) return;
+    if (!outHandle) {
+        b.textContent = '输出目录: 未授权'; b.className = 'outbtn';
+        b.title = '点击选择输出目录（授权后自动按日期写 JPG 中间产物）';
+    } else if (fsIO.permission === 'granted') {
+        b.textContent = '输出目录: ✓ ' + outName; b.className = 'outbtn granted';
+    } else {
+        b.textContent = '输出目录: ' + (outName || '…') + '（待授权）'; b.className = 'outbtn pending';
+        b.title = '点击重新授权该目录';
+    }
+}
+
+function setJpgStatus(rec, text, cls) {
+    rec._jpgStatus = text; rec._jpgCls = cls || '';
+    var el = rec._el && rec._el.querySelector('.jpg');
+    if (!el) return;
+    el.innerHTML = '';
+    el.className = 'jpg' + (cls ? ' ' + cls : '');
+    el.style.display = text ? 'block' : 'none';
+    if (text) {
+        var s = document.createElement('span'); s.textContent = text;
+        el.appendChild(s);
+        if (rec._jpgDone) {
+            var rx = document.createElement('span');
+            rx.textContent = '（重新导出）'; rx.className = 'rex'; rx.title = '按当前拉伸模式重新生成 JPG';
+            el.appendChild(rx);
+        }
+    }
+}
+
+function kickExport(rec, force) {
+    if (!force && !autoExport) return;
+    if (!rec || !rec.W || !rec.src || rec._jpgBusy || rec._jpgDone) return;
+    var s = getSaver();
+    if (!s) { setJpgStatus(rec, 'JPG 未授权（点工具栏「输出目录」后自动导出）', 'err'); return; }
+    rec._jpgBusy = true;
+    rec._jpgToken = (rec._jpgToken || 0) + 1;
+    exportQueue.push({ rec: rec, token: rec._jpgToken });
+    pumpExport();
+}
+function reExportJpg(rec) {
+    if (!rec || rec._jpgBusy) return;
+    rec._jpgDone = false; rec._jpgBusy = false;
+    kickExport(rec, true);
+}
+function scanPendingExports() {
+    recs.forEach(function (r) { if (r.W && r.src && !r._jpgDone) kickExport(r); });
+}
+function pumpExport() {
+    if (exportingNow || !exportQueue.length) return;
+    var job = exportQueue.shift();
+    exportingNow = true;
+    doExportJob(job).then(function () { exportingNow = false; pumpExport(); });
+}
+function doExportJob(job) {
+    var rec = job.rec, tok = job.token;
+    setJpgStatus(rec, 'JPG 生成中…');
+    return exportToJpg(rec, function (f) {
+        if (tok === rec._jpgToken) setJpgStatus(rec, 'JPG 生成中 ' + Math.round(f * 100) + '%…');
+    }).then(function (r) {
+        if (tok !== rec._jpgToken) return;
+        rec._jpgDone = true;
+        var extra = r.plan && r.plan.reduced ? '（受画布/内存限制已自动降档）' : '';
+        setJpgStatus(rec, 'JPG 已导出 ' + r.name + ' · ' + r.dims + ' · ' + curStretch + ' · q' + JPG_QUALITY + extra, 'ok');
+    }).catch(function (e) {
+        if (tok !== rec._jpgToken) return;
+        var msg = (e && e.message) || String(e);
+        // 个别 Edge 构建在画布面积极限上会拒绝 → 降到 4096 重试一次
+        if (!rec._exportCap && /RangeError|allocation|Invalid|空|过大|enormous/i.test(msg)) {
+            rec._exportCap = 4096;   // 默认 8192 导出仍遇画布/内存失败 → 降到 4096 再试一次
+            rec._jpgBusy = false;
+            kickExport(rec, true);
+            return;
+        }
+        setJpgStatus(rec, 'JPG 失败: ' + msg, 'err');
+    }).then(function () {
+        if (tok === rec._jpgToken) rec._jpgBusy = false;
+    });
+}
+
+// E2E 测试钩子：可注入假 saver、直接调用各子流程
+window.__viewer = {
+    planExport: planExport, bakeJpg: canvasToJpegBlob, getSaver: getSaver, fsIO: fsIO,
+    setSaver: function (s) { saverOverride = s; },
+    collectForExport: collectForExport, kickExport: kickExport, reExportJpg: reExportJpg,
+    scanPendingExports: scanPendingExports, dateDirName: dateDirName,
+    JPG_MAX: JPG_MAX, JPG_QUALITY: JPG_QUALITY
+};
+
+function fail(rec, e) {
+    if (rec === activeRec) hideMask();
+    var msg = e && e.message ? e.message : String(e);
+    if (rec.probe) msg += '  [属性 ' + rec.probe.W + '×' + rec.probe.H + '，' + rec.probe.bits + 'bit/' +
+        rec.probe.spp + '通道，类型' + rec.probe.sampleFormat + '，压缩' +
+        (rec.probe.compression != null ? rec.probe.compression : '?') + ']';
+    rec.status = '解码失败：' + msg;
+    updateItem(rec);
+    if (activeRec === rec) showErr('「' + rec.file.name + '」解码失败：' + msg);
+}
+
+/* ---------------- 渲染与交互 ---------------- */
+function fit() {
+    if (!activeRec || !activeRec.thumb) return;
+    var cw = canvas.width, ch = canvas.height;
+    var s = Math.min(cw / activeRec.thumb.width, ch / activeRec.thumb.height, 1);
+    view.scale = s;
+    view.ox = (cw - activeRec.thumb.width * s) / 2;
+    view.oy = (ch - activeRec.thumb.height * s) / 2;
+}
+function render() {
+    if (!activeRec || !activeRec.thumb) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.imageSmoothingEnabled = view.scale < 4;
+    ctx.drawImage(activeRec.thumb,
+        view.ox, view.oy,
+        activeRec.thumb.width * view.scale, activeRec.thumb.height * view.scale);
+    // 像素定位红叉（约 7 秒，随缩放/平移保持在目标像素上）
+    if (marker) {
+        if (Date.now() > marker.until) { marker = null; return; }
+        var sx = view.ox + marker.tx * view.scale;
+        var sy = view.oy + marker.ty * view.scale;
+        var L = 14;
+        ctx.strokeStyle = '#ff4040'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(sx - L, sy); ctx.lineTo(sx + L, sy);
+        ctx.moveTo(sx, sy - L); ctx.lineTo(sx, sy + L);
+        ctx.stroke();
+        ctx.fillStyle = '#ff4040';
+        ctx.fillRect(sx - 1.5, sy - 1.5, 3, 3);
+    }
+}
+
+/* 像素定位：输入原图像素坐标 X/Y → 视图跳转居中 + 红叉标记约 7 秒 */
+function locatePixel(x, y) {
+    if (!activeRec || !activeRec.thumb) { showErr('请先打开一张图'); return; }
+    var W = activeRec.W, H = activeRec.H;
+    if (!W || !H) { showErr('图像尺寸未知'); return; }
+    x = Math.floor(+x); y = Math.floor(+y);
+    if (!isFinite(x) || !isFinite(y) || x < 0 || y < 0 || x >= W || y >= H) {
+        showErr('坐标超出范围（0 ≤ X < ' + W + '，0 ≤ Y < ' + H + '）');
+        return;
+    }
+    var t = activeRec.thumb;
+    var tx = x * (t.width / W), ty = y * (t.height / H);
+    var cw = canvas.width, ch = canvas.height;
+    view.ox = cw / 2 - tx * view.scale;
+    view.oy = ch / 2 - ty * view.scale;
+    if (view.scale < 1) view.scale = 1;   // 缩得太远时放大到像素级，便于看清目标邻域
+    view.ox = cw / 2 - tx * view.scale;
+    view.oy = ch / 2 - ty * view.scale;
+    showMarker(tx, ty);
+    render();
+}
+function showMarker(tx, ty) {
+    marker = { tx: tx, ty: ty, until: Date.now() + 7000 };
+    if (marker._t) clearTimeout(marker._t);
+    marker._t = setTimeout(function () {
+        if (marker && Date.now() >= marker.until) { marker = null; render(); }
+    }, 7000);
+}
+function updateMeta(rec) {
+    var el = document.getElementById('meta');
+    if (!rec) { el.textContent = ''; return; }
+    el.textContent = rec.file.name + '  |  原图 ' + rec.W + '×' + rec.H +
+        '  缩略图 ' + rec.thumb.width + '×' + rec.thumb.height;
+}
+
+/* ---------------- 遮罩 / 进度 / 错误 / 列表 ---------------- */
+function showMask(title, sub, bar) {
+    maskTitle.textContent = title;
+    maskSub.textContent = sub || '';
+    progressWrap.style.display = bar ? 'block' : 'none';
+    if (bar) { progressBar.style.width = '0%'; progressPct.textContent = '0%'; }
+    mask.classList.add('visible');
+}
+function hideMask() { mask.classList.remove('visible'); }
+function updateProgressUI(f) {
     var pct = Math.round(f * 100);
-    $('progressFill').style.width = pct + '%';
-    $('progressText').textContent = '正在生成整图预览… ' + pct + '%（需读取整张文件，请耐心等待）';
-    if (f >= 1) { wrap.hidden = true; }
+    progressBar.style.width = pct + '%';
+    progressPct.textContent = pct + '%';
+    maskSub.textContent = '分块读取中：' + pct + '%（边读边生成缩略图，可随时切换其他文件）';
+}
+function showErr(msg) { errBox.textContent = msg; errBox.style.display = 'block'; setTimeout(function () { errBox.style.display = 'none'; }, 6000); }
+
+function addListItem(rec) {
+    var div = document.createElement('div');
+    div.className = 'file-item';
+    div.innerHTML = '<span class="close" title="移除">×</span>' +
+        '<div class="name"></div><div class="meta"></div><div class="status"></div><div class="jpg"></div>';
+    div.querySelector('.name').textContent = rec.file.name;
+    div.querySelector('.meta').textContent = fmtBytes(rec.file.size);
+    div.querySelector('.close').addEventListener('click', function (e) { e.stopPropagation(); removeFile(rec); });
+    div.querySelector('.jpg').addEventListener('click', function (e) {
+        e.stopPropagation();
+        if (e.target && e.target.classList && e.target.classList.contains('rex')) reExportJpg(rec);
+    });
+    div.addEventListener('click', function () { activate(rec); });
+    document.getElementById('sidebar').appendChild(div);
+    rec._el = div;
+    updateItem(rec);
+    var tip = document.querySelector('#sidebar .tip');
+    if (tip) tip.style.display = 'none';
+    // 即探：只读头部标签，秒显压缩/布局，不等待解码
+    tiffTags(rec.file).then(function (tags) {
+        rec.layout = layoutInfo(tags);
+        rec._tags = tags;
+        updateItem(rec);
+    }).catch(function () {});
+}
+function updateItem(rec) {
+    if (!rec._el) return;
+    rec._el.querySelector('.meta').textContent = fmtBytes(rec.file.size) +
+        (rec.W ? '  ·  ' + rec.W + '×' + rec.H : '') +
+        (rec.layout ? '  ·  ' + rec.layout : '');
+    var st = rec._el.querySelector('.status');
+    st.className = 'status';
+    if (/失败/.test(rec.status)) st.classList.add('err');
+    else if (rec.status.indexOf('完成') === 0) st.classList.add('ok');
+    st.textContent = rec.status;
+}
+function setActiveItem(rec) {
+    recs.forEach(function (r) { if (r._el) r._el.classList.toggle('active', r === rec); });
+}
+function removeFile(rec) {
+    var i = recs.indexOf(rec);
+    if (i < 0) return;
+    recs.splice(i, 1);
+    if (rec._el) rec._el.remove();
+    if (activeRec === rec) {
+        activeRec = null;
+        var next = recs[recs.length - 1];
+        if (next) activate(next);
+        else { ctx.clearRect(0, 0, canvas.width, canvas.height); updateMeta(null); }
+    }
 }
 
-function setWarn(msg) {
-    var w = $('warnNote');
-    w.hidden = false;
-    w.textContent = msg;
-}
-function hideWarn() { $('warnNote').hidden = true; }
-function showStatus(msg) { $('statusBar').textContent = msg; }
+/* ---------------- 初始化 ---------------- */
+window.addEventListener('DOMContentLoaded', function () {
+    canvas = document.getElementById('viewCanvas');
+    stage = document.getElementById('stage');
+    ctx = canvas.getContext('2d');
+    mask = document.getElementById('decodeMask');
+    maskTitle = document.getElementById('maskTitle');
+    maskSub = document.getElementById('maskSub');
+    progressWrap = document.getElementById('progressWrap');
+    progressBar = document.getElementById('progressBar');
+    progressPct = document.getElementById('progressPct');
+    errBox = document.getElementById('errBox');
 
-/* ---------------- 拖拽 & 尺寸 ---------------- */
-var layout = $('layout');
-['dragover', 'dragenter'].forEach(function (ev) {
-    layout.addEventListener(ev, function (e) { e.preventDefault(); });
+    function resize() {
+        canvas.width = stage.clientWidth;
+        canvas.height = stage.clientHeight;
+        if (activeRec && activeRec.thumb) { fit(); render(); }
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    document.getElementById('fileInput').addEventListener('change', function (e) {
+        openFiles(e.target.files);
+        e.target.value = '';
+    });
+
+    var stretchSel = document.getElementById('stretchSel');
+    stretchSel.value = curStretch;
+    stretchSel.addEventListener('change', function () {
+        curStretch = stretchSel.value;
+        if (activeRec && activeRec.thumb && activeRec.src) { paintStretch(activeRec); render(); }
+    });
+
+    var outBtn = document.getElementById('outBtn'), autoChk = document.getElementById('autoChk');
+    autoChk.checked = autoExport;
+    autoChk.addEventListener('change', function () {
+        autoExport = autoChk.checked;
+        if (autoExport) scanPendingExports();
+    });
+    outBtn.addEventListener('click', function () {
+        fsIO.authorize().catch(function (e) {
+            if (e && e.name === 'AbortError') return;   // 用户取消选择
+            showErr('输出目录授权失败：' + ((e && e.message) || e));
+        });
+    });
+    fsIO.init();   // 恢复上次授权目录（非阻塞）
+
+    var locX = document.getElementById('locX'), locY = document.getElementById('locY');
+    var doLocate = function () { locatePixel(locX.value, locY.value); };
+    document.getElementById('locBtn').addEventListener('click', doLocate);
+    [locX, locY].forEach(function (el) {
+        el.addEventListener('keydown', function (e) { if (e.key === 'Enter') doLocate(); });
+    });
+
+    window.addEventListener('dragover', function (e) { e.preventDefault(); });
+    window.addEventListener('drop', function (e) {
+        e.preventDefault();
+        if (e.dataTransfer && e.dataTransfer.files) openFiles(e.dataTransfer.files);
+    });
+
+    canvas.addEventListener('wheel', function (e) {
+        e.preventDefault();
+        if (!activeRec || !activeRec.thumb) return;
+        var r = canvas.getBoundingClientRect();
+        var mx = e.clientX - r.left, my = e.clientY - r.top;
+        var f = e.deltaY < 0 ? 1.2 : 1 / 1.2;
+        var ns = Math.max(0.05, Math.min(64, view.scale * f));
+        var ix = (mx - view.ox) / view.scale, iy = (my - view.oy) / view.scale;
+        view.scale = ns;
+        view.ox = mx - ix * ns;
+        view.oy = my - iy * ns;
+        render();
+    }, { passive: false });
+
+    var dragging = false, lastX = 0, lastY = 0;
+    canvas.addEventListener('mousedown', function (e) {
+        if (e.button !== 0 || !activeRec || !activeRec.thumb) return;
+        dragging = true; lastX = e.clientX; lastY = e.clientY;
+        canvas.classList.add('dragging');
+    });
+    window.addEventListener('mousemove', function (e) {
+        if (!dragging) return;
+        view.ox += e.clientX - lastX;
+        view.oy += e.clientY - lastY;
+        lastX = e.clientX; lastY = e.clientY;
+        render();
+    });
+    window.addEventListener('mouseup', function () {
+        dragging = false; canvas.classList.remove('dragging');
+    });
+
+    canvas.addEventListener('dblclick', function () { fit(); render(); });
 });
-layout.addEventListener('drop', function (e) {
-    e.preventDefault();
-    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) openFiles(e.dataTransfer.files);
-});
-
-function resizeCanvas() {
-    var wrap = $('viewWrap');
-    canvas.width = Math.max(1, wrap.clientWidth);
-    canvas.height = Math.max(1, wrap.clientHeight);
-    if (activeRec) { fitView(activeRec, canvas.width, canvas.height); scheduleRender(); }
-}
-window.addEventListener('resize', resizeCanvas);
-
-$('fileInput').addEventListener('change', function (e) {
-    openFiles(e.target.files);
-    e.target.value = '';
-});
-
-resizeCanvas();
 </script>
 </body>
 </html>
