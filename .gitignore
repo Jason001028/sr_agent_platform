@@ -7,3 +7,7 @@ test-tifs/
 
 # 实施计划（内部参考，不入库）
 docs/planning/web-plan.md
+
+# Python
+__pycache__/
+*.pyc

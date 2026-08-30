@@ -82,6 +82,26 @@
         #stage { position: relative; flex: 1; overflow: hidden; background: #0f1113; }
         #viewCanvas { display: block; width: 100%; height: 100%; cursor: grab; }
         #viewCanvas.dragging { cursor: grabbing; }
+        #drawCanvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
+        #drawPanel {
+            position: absolute; left: 10px; top: 10px; z-index: 15; display: none; align-items: center; gap: 6px;
+            padding: 6px 8px; background: rgba(27, 31, 36, 0.96); border: 1px solid #2c313a; border-radius: 8px;
+        }
+        #drawPanel.on { display: inline-flex; }
+        #drawPanel button {
+            height: 28px; padding: 0 10px; background: #22262c; color: #d5d9de; font-size: 12px;
+            border: 1px solid #3a4149; border-radius: 5px; cursor: pointer; white-space: nowrap;
+        }
+        #drawPanel button:hover { border-color: #2b7bdd; }
+        #drawPanel button.on { background: #2b7bdd; color: #fff; border-color: #2b7bdd; }
+        #drawPanel .lbl { color: #8a93a0; font-size: 11px; margin: 0 2px; }
+        #drawPanel .sep { width: 1px; height: 18px; background: #2c313a; }
+        .outbtn.on { border-color: #2b7bdd; color: #d5d9de; background: #22304a; }
+        #toast {
+            position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); display: none;
+            max-width: 70%; padding: 10px 16px; background: #1d2a1d; border: 1px solid #3a6b4d;
+            border-radius: 8px; color: #8fd6a8; font-size: 13px; z-index: 30; text-align: center;
+        }
         #decodeMask {
             position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
             background: rgba(10, 12, 14, 0.92); z-index: 20; text-align: center;
@@ -123,6 +143,7 @@
         <input id="locY" type="number" placeholder="Y" min="0" step="1">
         <button id="locBtn">定位</button>
     </span>
+    <button id="maskBtn" class="outbtn" title="在预览图上绘制掩码 ROI（矩形/多边形，多区域），导出矢量 JSON 交给后端生成掩码.tif">绘制掩码</button>
     <span id="hint">8bit 小图走 UTIF；大图/16bit/浮点/多波段自动分块（有进度条）；无压缩大图用稀疏条带预览（秒级）。可用「拉伸」切换浏览增强。可多选/拖拽。</span>
     <span id="meta"></span>
 </div>
@@ -130,6 +151,7 @@
     <div id="sidebar"><div class="tip">尚未添加文件。点左上角「选择文件」。</div></div>
     <div id="stage">
         <canvas id="viewCanvas"></canvas>
+        <canvas id="drawCanvas"></canvas>
         <div id="decodeMask">
             <div class="box">
                 <div class="spinner"></div>
@@ -142,6 +164,17 @@
             </div>
         </div>
         <div id="errBox"></div>
+        <div id="drawPanel">
+            <button id="toolRect" class="on">矩形</button>
+            <button id="toolPoly">多边形</button>
+            <span class="sep"></span>
+            <button id="undoRoi">撤销</button>
+            <button id="clearRoi">清空</button>
+            <button id="exportMask">导出掩码JSON</button>
+            <button id="exitDraw">完成</button>
+            <span class="lbl" id="drawCount"></span>
+        </div>
+        <div id="toast"></div>
     </div>
 </div>
 
@@ -152,6 +185,12 @@ var activeRec = null;
 var view = { scale: 1, ox: 0, oy: 0 };
 var marker = null;   // {tx, ty, until}：缩略图坐标 + 过期时间（红叉定位）
 var canvas, ctx, stage, mask, maskTitle, maskSub, progressWrap, progressBar, progressPct, errBox;
+var drawCanvas, drawCtx;                       // 掩码绘制叠加层（与 viewCanvas 同几何，pointer-events:none）
+var drawMode = false;                          // 是否处于「绘制掩码」模式
+var drawTool = 'rect';                         // 'rect' | 'polygon'
+var pendingRect = null;                        // 绘制中的矩形 {x0,y0,x1,y1}（缩略图坐标）
+var pendingPts = null;                         // 绘制中的多边形顶点（缩略图坐标）
+var hoverPt = null;                            // 多边形当前鼠标位置（缩略图坐标，画橡皮筋）
 
 var PREVIEW_MAX = 2048;        // 整图预览长边上限（chunked/UTIF 路径；保快）
 var SPARSE_PREVIEW_MAX = 8192; // 稀疏条带预览长边上限（≈原始 1/3：网页显示与导出 JPG 同清晰度；无压缩文件抽样读仍秒级）。
@@ -697,6 +736,7 @@ async function activate(rec) {
     if (activeRec === rec && rec.thumb) { if (rec.paintedMode !== curStretch) paintStretch(rec); render(); return; }
     marker = null;
     activeRec = rec;
+    if (drawMode) { pendingPts = null; pendingRect = null; hoverPt = null; updateDrawPanel(); }
     setActiveItem(rec);
     if (rec.thumb) {
         if (rec.paintedMode !== curStretch) paintStretch(rec);
@@ -1215,7 +1255,9 @@ window.__viewer = {
     setSaver: function (s) { saverOverride = s; },
     collectForExport: collectForExport, kickExport: kickExport, reExportJpg: reExportJpg,
     scanPendingExports: scanPendingExports, dateDirName: dateDirName,
-    JPG_MAX: JPG_MAX, JPG_QUALITY: JPG_QUALITY
+    JPG_MAX: JPG_MAX, JPG_QUALITY: JPG_QUALITY,
+    enterDraw: enterDraw, exitDraw: exitDraw, buildMaskJson: buildMaskJson,
+    exportMaskJson: exportMaskJson, thumbToOrig: thumbToOrig, getRois: getRois
 };
 
 function fail(rec, e) {
@@ -1229,6 +1271,161 @@ function fail(rec, e) {
     if (activeRec === rec) showErr('「' + rec.file.name + '」解码失败：' + msg);
 }
 
+/* ---------------- 掩码绘制（预览图上画 ROI → 导出矢量 JSON） ----------------
+   在预览缩略图上用矩形/多边形画多个 ROI，顶点存「缩略图坐标」，渲染时按当前视图
+   (ox,oy,scale) 映射回屏幕。导出时用 thumbToOrig 反算回原图像素坐标
+   （orig = thumb * (W-1)/(tw-1)，与稀疏采样的 mapX/mapY 同源），交给
+   python -m backend.services.mask 生成 掩码.tif + 掩码01点阵.txt。 */
+function getRois() {
+    if (!activeRec) return [];
+    if (!activeRec.maskRois) activeRec.maskRois = [];
+    return activeRec.maskRois;
+}
+function mouseToThumb(e) {
+    var r = canvas.getBoundingClientRect();
+    return { x: (e.clientX - r.left - view.ox) / view.scale,
+             y: (e.clientY - r.top - view.oy) / view.scale };
+}
+function thumbToScreen(tx, ty) {
+    return { x: view.ox + tx * view.scale, y: view.oy + ty * view.scale };
+}
+function thumbToOrig(tx, ty) {
+    var W = activeRec.W, H = activeRec.H;
+    var tw = activeRec.thumb.width, th = activeRec.thumb.height;
+    var ox = tw <= 1 ? 0 : tx * (W - 1) / (tw - 1);
+    var oy = th <= 1 ? 0 : ty * (H - 1) / (th - 1);
+    ox = Math.max(0, Math.min(W - 1, Math.round(ox)));
+    oy = Math.max(0, Math.min(H - 1, Math.round(oy)));
+    return [ox, oy];
+}
+function strokePoly(pts, fill, stroke, lw, open) {
+    if (!pts || pts.length < 2) return;
+    var a = thumbToScreen(pts[0][0], pts[0][1]);
+    drawCtx.beginPath();
+    drawCtx.moveTo(a.x, a.y);
+    for (var i = 1; i < pts.length; i++) {
+        var p = thumbToScreen(pts[i][0], pts[i][1]);
+        drawCtx.lineTo(p.x, p.y);
+    }
+    if (!open && pts.length >= 3) drawCtx.closePath();
+    if (!open && pts.length >= 3 && fill) { drawCtx.fillStyle = fill; drawCtx.fill(); }
+    if (stroke) { drawCtx.strokeStyle = stroke; drawCtx.lineWidth = lw || 2; drawCtx.stroke(); }
+}
+function renderDraw() {
+    if (!drawCtx) return;
+    drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+    if (!drawMode || !activeRec || !activeRec.thumb) return;
+    var rois = getRois();
+    drawCtx.lineJoin = 'round';
+    for (var i = 0; i < rois.length; i++) strokePoly(rois[i], 'rgba(43,123,221,0.28)', '#2b7bdd', 2, false);
+    if (pendingPts && pendingPts.length) {
+        strokePoly(pendingPts, 'rgba(255,176,46,0.15)', '#ffb02e', 2, true);
+        var last = pendingPts[pendingPts.length - 1];
+        if (hoverPt) {
+            var a = thumbToScreen(last[0], last[1]), b = thumbToScreen(hoverPt[0], hoverPt[1]);
+            drawCtx.setLineDash([6, 4]);
+            drawCtx.strokeStyle = '#ffb02e'; drawCtx.lineWidth = 1.5;
+            drawCtx.beginPath(); drawCtx.moveTo(a.x, a.y); drawCtx.lineTo(b.x, b.y); drawCtx.stroke();
+            drawCtx.setLineDash([]);
+        }
+        for (var j = 0; j < pendingPts.length; j++) {
+            var p = thumbToScreen(pendingPts[j][0], pendingPts[j][1]);
+            drawCtx.fillStyle = '#ffb02e';
+            drawCtx.fillRect(p.x - 3, p.y - 3, 6, 6);
+        }
+    }
+    if (pendingRect) {
+        var ra = thumbToScreen(pendingRect.x0, pendingRect.y0);
+        var rb = thumbToScreen(pendingRect.x1, pendingRect.y1);
+        var rx = Math.min(ra.x, rb.x), ry = Math.min(ra.y, rb.y);
+        var rw = Math.abs(rb.x - ra.x), rh = Math.abs(rb.y - ra.y);
+        drawCtx.fillStyle = 'rgba(43,123,221,0.25)';
+        drawCtx.strokeStyle = '#2b7bdd'; drawCtx.lineWidth = 2;
+        drawCtx.fillRect(rx, ry, rw, rh);
+        drawCtx.strokeRect(rx, ry, rw, rh);
+    }
+}
+function enterDraw() {
+    if (!activeRec || !activeRec.thumb) { showErr('请先打开一张图'); return; }
+    drawMode = true; drawTool = 'rect';
+    pendingRect = null; pendingPts = null; hoverPt = null;
+    canvas.style.cursor = 'crosshair';
+    updateDrawPanel(); renderDraw();
+}
+function exitDraw() {
+    drawMode = false;
+    pendingRect = null; pendingPts = null; hoverPt = null;
+    canvas.style.cursor = '';
+    updateDrawPanel(); renderDraw();
+}
+function updateDrawPanel() {
+    var panel = document.getElementById('drawPanel');
+    if (panel) panel.classList.toggle('on', drawMode);
+    var mb = document.getElementById('maskBtn');
+    if (mb) { mb.textContent = drawMode ? '绘制掩码 ✓' : '绘制掩码'; mb.classList.toggle('on', drawMode); }
+    var tr = document.getElementById('toolRect'), tp = document.getElementById('toolPoly');
+    if (tr) tr.classList.toggle('on', drawTool === 'rect');
+    if (tp) tp.classList.toggle('on', drawTool === 'polygon');
+    var cnt = document.getElementById('drawCount');
+    var n = getRois().length;
+    if (cnt) cnt.textContent = n ? ('ROI ' + n + ' 个') : '';
+}
+function commitRect() {
+    var r = pendingRect;
+    pendingRect = null;
+    if (!r) { renderDraw(); return; }
+    var x0 = Math.min(r.x0, r.x1), y0 = Math.min(r.y0, r.y1);
+    var x1 = Math.max(r.x0, r.x1), y1 = Math.max(r.y0, r.y1);
+    if (x1 - x0 < 1 || y1 - y0 < 1) { renderDraw(); return; }   // 忽略过小的框
+    getRois().push([[x0, y0], [x1, y0], [x1, y1], [x0, y1]]);
+    updateDrawPanel(); renderDraw();
+}
+function closePolygon() {
+    if (pendingPts && pendingPts.length >= 3) { getRois().push(pendingPts.slice()); updateDrawPanel(); }
+    pendingPts = null; hoverPt = null;
+    renderDraw();
+}
+function undoRoi() {
+    getRois().pop();
+    pendingPts = null; pendingRect = null; hoverPt = null;
+    updateDrawPanel(); renderDraw();
+}
+function clearRois() {
+    if (activeRec) activeRec.maskRois = [];
+    pendingPts = null; pendingRect = null; hoverPt = null;
+    updateDrawPanel(); renderDraw();
+}
+function buildMaskJson() {
+    var W = activeRec.W, H = activeRec.H;
+    var polys = getRois().map(function (pts, i) {
+        return { label: 'roi_' + (i + 1),
+                 points: pts.map(function (p) { return thumbToOrig(p[0], p[1]); }) };
+    });
+    return { width: W, height: H, polygons: polys };
+}
+function exportMaskJson() {
+    if (!activeRec || !activeRec.thumb) { showErr('请先打开一张图'); return; }
+    var polys = getRois();
+    if (!polys.length) { showErr('还没有绘制任何掩码区域（用矩形/多边形在图上绘制）'); return; }
+    var blob = new Blob([JSON.stringify(buildMaskJson(), null, 2)], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = activeRec.file.name.replace(/\.tiff?$/i, '') + '.mask.json';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+    showToast('已导出掩码 JSON（' + polys.length + ' 个区域）。运行：python -m backend.services.mask <json文件> 掩码.tif 掩码01点阵.txt');
+}
+var toastTimer = null;
+function showToast(msg) {
+    var t = document.getElementById('toast');
+    if (!t) return;
+    t.textContent = msg;
+    t.style.display = 'block';
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.style.display = 'none'; }, 6000);
+}
+
 /* ---------------- 渲染与交互 ---------------- */
 function fit() {
     if (!activeRec || !activeRec.thumb) return;
@@ -1239,12 +1436,13 @@ function fit() {
     view.oy = (ch - activeRec.thumb.height * s) / 2;
 }
 function render() {
-    if (!activeRec || !activeRec.thumb) return;
+    if (!activeRec || !activeRec.thumb) { renderDraw(); return; }
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.imageSmoothingEnabled = view.scale < 4;
     ctx.drawImage(activeRec.thumb,
         view.ox, view.oy,
         activeRec.thumb.width * view.scale, activeRec.thumb.height * view.scale);
+    renderDraw();
     // 像素定位红叉（约 7 秒，随缩放/平移保持在目标像素上）
     if (marker) {
         if (Date.now() > marker.until) { marker = null; return; }
@@ -1370,6 +1568,8 @@ window.addEventListener('DOMContentLoaded', function () {
     canvas = document.getElementById('viewCanvas');
     stage = document.getElementById('stage');
     ctx = canvas.getContext('2d');
+    drawCanvas = document.getElementById('drawCanvas');
+    drawCtx = drawCanvas.getContext('2d');
     mask = document.getElementById('decodeMask');
     maskTitle = document.getElementById('maskTitle');
     maskSub = document.getElementById('maskSub');
@@ -1381,6 +1581,8 @@ window.addEventListener('DOMContentLoaded', function () {
     function resize() {
         canvas.width = stage.clientWidth;
         canvas.height = stage.clientHeight;
+        drawCanvas.width = stage.clientWidth;
+        drawCanvas.height = stage.clientHeight;
         if (activeRec && activeRec.thumb) { fit(); render(); }
     }
     window.addEventListener('resize', resize);
@@ -1442,21 +1644,75 @@ window.addEventListener('DOMContentLoaded', function () {
     var dragging = false, lastX = 0, lastY = 0;
     canvas.addEventListener('mousedown', function (e) {
         if (e.button !== 0 || !activeRec || !activeRec.thumb) return;
+        if (drawMode) {
+            var p = mouseToThumb(e);
+            if (drawTool === 'rect') {
+                pendingRect = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+            } else {
+                if (!pendingPts) pendingPts = [];
+                pendingPts.push([p.x, p.y]);
+                hoverPt = p;
+            }
+            renderDraw();
+            return;
+        }
         dragging = true; lastX = e.clientX; lastY = e.clientY;
         canvas.classList.add('dragging');
     });
     window.addEventListener('mousemove', function (e) {
+        if (drawMode && (pendingRect || pendingPts)) {
+            var p = mouseToThumb(e);
+            hoverPt = p;
+            if (pendingRect) { pendingRect.x1 = p.x; pendingRect.y1 = p.y; }
+            renderDraw();
+            return;
+        }
         if (!dragging) return;
         view.ox += e.clientX - lastX;
         view.oy += e.clientY - lastY;
         lastX = e.clientX; lastY = e.clientY;
         render();
     });
-    window.addEventListener('mouseup', function () {
+    window.addEventListener('mouseup', function (e) {
+        if (drawMode && pendingRect) {
+            var p = mouseToThumb(e);
+            pendingRect.x1 = p.x; pendingRect.y1 = p.y;
+            commitRect();
+            return;
+        }
         dragging = false; canvas.classList.remove('dragging');
     });
 
-    canvas.addEventListener('dblclick', function () { fit(); render(); });
+    canvas.addEventListener('dblclick', function () {
+        if (drawMode) { closePolygon(); return; }
+        fit(); render();
+    });
+
+    // 掩码绘制：工具栏按钮 + 浮动面板
+    document.getElementById('maskBtn').addEventListener('click', function () {
+        if (drawMode) exitDraw(); else enterDraw();
+    });
+    document.getElementById('toolRect').addEventListener('click', function () {
+        drawTool = 'rect'; pendingPts = null; pendingRect = null; updateDrawPanel(); renderDraw();
+    });
+    document.getElementById('toolPoly').addEventListener('click', function () {
+        drawTool = 'polygon'; pendingRect = null; updateDrawPanel(); renderDraw();
+    });
+    document.getElementById('undoRoi').addEventListener('click', undoRoi);
+    document.getElementById('clearRoi').addEventListener('click', clearRois);
+    document.getElementById('exportMask').addEventListener('click', exportMaskJson);
+    document.getElementById('exitDraw').addEventListener('click', exitDraw);
+    window.addEventListener('keydown', function (e) {
+        if (!drawMode) return;
+        if (e.key === 'Escape') {
+            pendingPts = null; pendingRect = null; hoverPt = null; renderDraw();
+        } else if (e.key === 'Enter' && pendingPts) {
+            closePolygon();
+        }
+    });
+    canvas.addEventListener('contextmenu', function (e) {
+        if (drawMode) { e.preventDefault(); closePolygon(); }
+    });
 });
 </script>
 </body>
