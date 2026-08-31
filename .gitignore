@@ -1,5 +1,4 @@
 # 测试数据与测试脚本
-test-tifs/
 .e2e/
 
 # 压缩包
@@ -7,3 +6,7 @@ test-tifs/
 
 # 实施计划（内部参考，不入库）
 docs/planning/web-plan.md
+
+# Python
+__pycache__/
+*.pyc
