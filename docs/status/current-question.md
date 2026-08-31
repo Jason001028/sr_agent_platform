@@ -7,7 +7,7 @@
 ## 当前状态（一句话）
 
 **✅ 最小原型已达成（2026-08-29）**：`tif_viewer/tif-viewer.html` 能正常打开、预览本地遥感图像，用户实测**时间成本可接受**。真实文件布局已确认（GF07A03/KF02B04 均**无压缩 · 条带1行**单波段 16bit），走稀疏条带预览（秒级）。JPG 导出三 bug 已修（p2 崩溃 / 右下滑条纹 / 分辨率 2048→8192），稀疏预览显示也提到 8192（`SPARSE_PREVIEW_MAX`，与导出 JPG 同清晰度）。**下一步**：放大看细节时按可视窗口读全分辨率（无压缩切片，无需金字塔）。另注意：开发机 e2e 浏览器仍无法启动（环境问题）。
-**真实文件布局已确认**：GF07A03（1.11GB）与 KF02B04（1.78GB）均为**无压缩 · 条带1行**的单波段 16bit 影像。已实现**稀疏条带预览**（无压缩大图秒级出预览，只抽读少数条带做字节切片，不碰全文件）：134MB 测试图从全量 4.5s → **1.3s（读 32MB/128MB）**，预计真实 1.1GB 文件从 ~2 分钟降到秒级。**2026-08-29 已修 JPG 导出三 bug**（p2 崩溃 / 右下滑条纹 / 分辨率 2048→8192）；随后**稀疏条带预览显示分辨率提到 8192**（`SPARSE_PREVIEW_MAX`，≈原始 1/3，与导出 JPG 同清晰度，解决"网页显示不如本地 JPG 清晰"）。**下一步**：放大看细节时按可视窗口读全分辨率（无压缩切片，无需金字塔）；真机验证导出与 8192 显示。**2026-08-31 前端已落地掩码绘制**（tif_viewer「绘制掩码」模式：矩形/多边形画 ROI → 导出矢量 JSON → `python -m backend.services.mask` 出掩码.tif + 01点阵.txt，详见下文「掩码绘制」）。**2026-08-31 SR 部署定论**：目标机=现成 CentOS7 盘阵那台；生产跑 **realesrgan_trt**；计划保留 **Slurm**；SR 用**裸机+Slurm**（TRT 版本锁定，不加 Docker）；bundle/权重/so/TRT 全在 `/DiskArray`（Linux 读写更快），打包=挂载复用、路径零改动。另注意：开发机 e2e 浏览器仍无法启动（环境问题，见 08-29 条目）。
+**真实文件布局已确认**：GF07A03（1.11GB）与 KF02B04（1.78GB）均为**无压缩 · 条带1行**的单波段 16bit 影像。已实现**稀疏条带预览**（无压缩大图秒级出预览，只抽读少数条带做字节切片，不碰全文件）：134MB 测试图从全量 4.5s → **1.3s（读 32MB/128MB）**，预计真实 1.1GB 文件从 ~2 分钟降到秒级。**2026-08-29 已修 JPG 导出三 bug**（p2 崩溃 / 右下滑条纹 / 分辨率 2048→8192）；随后**稀疏条带预览显示分辨率提到 8192**（`SPARSE_PREVIEW_MAX`，≈原始 1/3，与导出 JPG 同清晰度，解决"网页显示不如本地 JPG 清晰"）。**下一步**：放大看细节时按可视窗口读全分辨率（无压缩切片，无需金字塔）；真机验证导出与 8192 显示。**2026-08-31 前端已落地掩码绘制**（tif_viewer「绘制掩码」模式：矩形/多边形/魔棒画 ROI；浏览器**直出**掩码.tif + 掩膜中心点坐标.txt，或导出矢量 JSON 走 `python -m backend.services.mask`，详见下文「掩码绘制」）。**2026-08-31 SR 部署定论**：目标机=现成 CentOS7 盘阵那台；生产跑 **realesrgan_trt**；计划保留 **Slurm**；SR 用**裸机+Slurm**（TRT 版本锁定，不加 Docker）；bundle/权重/so/TRT 全在 `/DiskArray`（Linux 读写更快），打包=挂载复用、路径零改动。另注意：开发机 e2e 浏览器仍无法启动（环境问题，见 08-29 条目）。
 
 ## 平台化技术栈方向（2026-08-30 · 定调讨论）
 
@@ -57,7 +57,7 @@
 
 1. `tools/` 包 + **工具契约**：`name` / `description` / JSON-schema params / `run(**params)->result`。
 2. 首批工具：
-   - **SR 侧（已有代码纯包装）**：`run_sr_inference`（包 `code_0817_prod.py`（Linux 生产版）为无头/Slurm 调用）、`run_all_folders`（内网，需回传/重写）、掩码生成（掩码.tif + 01点阵.txt）。
+   - **SR 侧（已有代码纯包装）**：`run_sr_inference`（包 `code_0817_prod.py`（Linux 生产版）为无头/Slurm 调用）、`run_all_folders`（内网，需回传/重写）、掩码生成（掩码.tif + 掩膜中心点坐标.txt）。
    - **cv 侧（从零，先做一个定契约）**：如 `fix_bad_lines`（坏行/条带修复，OpenCV/numpy）。
    - **盘阵检索**：`search_scenes`（先定接口 + 本地假实现，真机再接盘阵）。
 3. 注册表（在 `tools/contract.py` 内，`@tool` 装饰器自动收集）→ `manifest()` 生成 OpenAI 兼容工具清单 JSON（日后直接喂 agent function-calling + 自动生成 API 文档）。
@@ -73,16 +73,17 @@
 
 ### 掩码绘制（前端已落地 · 2026-08-31）
 
-- **需求**（gui-requirements G1/P0）：本地 HTML 交互式绘制 ROI 掩码，输出 `掩码.tif`（**分辨率与原图一致**）+ `掩码01点阵.txt`。
+- **需求**（gui-requirements G1/P0）：本地 HTML 交互式绘制 ROI 掩码，输出 `掩码.tif`（**分辨率与原图一致**）+ `掩膜中心点坐标.txt`。
 - **核心矛盾**：预览/JPG 是降采样（稀疏 8192≈1/3、其余 2048）+ 8bit 拉伸，而掩码要全分辨率。**JPG 的有损/拉伸不影响掩码几何（掩码只关心位置 0/1），只有分辨率影响精度。**
-- **设计倾向**：HTML 只出**矢量多边形**（在预览画布上画，顶点坐标按 scale 映射回原图像素）；**全分辨率栅格化放 Python**（numpy + tifffile/cv2 填充多边形 → 原尺寸 掩码.tif），因为 24739×24199 掩码 ≈ 6 亿像素，浏览器扛不起、且 `run_sr` 本来就要在 Python 拿掩码。
-- **已定**：① 栅格化 **Python 从零写**（`backend/services/mask.py`，Pillow 填充，已实现 + 12 测试全过）；② 精度**混合**——先在 8192 预览粗画，后续做「按可视区读全分辨率」后放大精画。
-- **矢量格式（临时，HTML 产出）**：`{"width":W,"height":H,"polygons":[{"label":"roi","points":[[x,y],...]}]}`，x=列、y=行（原图像素坐标）。填充约定：顶点为像素中心、**边界含入**（方形 [2,2]..[7,7] 覆盖 6×6）。
-- **已验证**：`python -m backend.services.mask p.json mask.tif mask.txt` 冒烟通过（多边形→掩码.tif + 01点阵.txt）。
-- **✅ 前端已实现（tif_viewer/tif-viewer.html）**：工具栏「绘制掩码」按钮 → 进入绘制模式（光标变十字）→ 顶部浮动面板选「矩形/多边形」工具，在叠加层 `#drawCanvas` 上画多个 ROI（矩形拖拽、多边形点击加点 + 双击/回车/右键闭合 + Esc 取消、撤销/清空）。顶点存**缩略图坐标**，渲染时按 `(ox,oy,scale)` 映射回屏幕，随平移/缩放走。
-- **坐标映射**：导出时 `orig = thumb × (W-1)/(tw-1)`（与稀疏采样 `mapX/mapY` 同源），`buildMaskJson()` 产出 `{width,height,polygons:[{label,points:[[x,y]…]}]}` → 「导出掩码JSON」下载 `<名字>.mask.json`。E2E 钩子已挂 `window.__viewer.{enterDraw,exitDraw,buildMaskJson,exportMaskJson,thumbToOrig,getRois}`。
-- **端到端已验证**：前端形状的 JSON（含 label 字段）经 `python -m backend.services.mask` 冒烟 → 掩码.tif + 01点阵.txt（20×10 双 ROI=61px 正确）；HTML 内联 JS 经 `new Function` 语法检查通过。
-- **剩余**：①「按可视区读全分辨率」的放大精画路径（当前仅预览粗画，符合已定混合精度）；② 01点阵.txt 全分辨率 ≈ W×H 字符（24k² 图 ~600MB），格式待与现有掩码工具对齐确认。
+- **设计倾向**：HTML 只出**矢量多边形**（在预览画布上画，顶点坐标按 scale 映射回原图像素）；全分辨率栅格化最初计划放 Python（6 亿像素，浏览器存疑）。**08-31 已验证浏览器扛得住**：栅格化按行流式（`rasterRows` 逐行事件扫描，非全量位图）+ pako Deflate 压缩，内存占用只与压缩缓冲相关 → **浏览器直出成为默认路径**，Python 路径保留为备选。
+- **已定**：① 栅格化前后端双实现（`tif_viewer/maskgen.js` 前端流式 + `backend/services/mask.py` 后端 Pillow，12 测试全过、产物交叉验证逐像素一致）；② 精度**混合**——先在 8192 预览粗画，后续做「按可视区读全分辨率」后放大精画。
+- **矢量格式**：`{"width":W,"height":H,"polygons":[{"label":"roi","points":[[x,y],...]}]}`，x=列、y=行（原图像素坐标）。填充约定：顶点为像素中心、**边界含入**（方形 [2,2]..[7,7] 覆盖 6×6）。
+- **✅ 前端已实现（tif_viewer/tif-viewer.html）**：工具栏「绘制掩码」按钮 → 进入绘制模式（光标变十字）→ 顶部浮动面板选「矩形/多边形/魔棒」工具，在叠加层 `#drawCanvas` 上画多个 ROI（矩形拖拽、多边形点击加点 + 双击/回车/右键闭合 + Esc 取消、撤销/清空）。顶点存**缩略图坐标**，渲染时按 `(ox,oy,scale)` 映射回屏幕，随平移/缩放走。
+- **魔棒（2026-08-31 新增）**：`WAND_WIN=4096` 取种子周围窗口 → `floodSelect`（容差 + 边缘梯度屏障，非把屏障像素置灰，见 gui-experience §掩码）→ 洞填充 + 外轮廓追踪 → `simplifyPoly(0.5)` → 转缩略图坐标 ROI。适配常见地物（同色连通区一键圈选）。
+- **浏览器直出掩码（2026-08-31，无需 Python）**：「生成掩码」按钮 → ROI 经 `thumbToOrig` 反算回原图像素 → `MaskGen.buildTiff`（`rasterRows` 逐行 + pako Deflate → classic TIFF 小端/8bit/压缩8）→ 下载 `掩码.tif`（**0/255**）+ `掩膜中心点坐标.txt`（**质心点阵，2 位小数，CRLF**）。E2E 钩子已挂 `window.__viewer.{enterDraw,exitDraw,buildMaskJson,exportMaskJson,thumbToOrig,getRois,genMask,wandSelect,maskGen}`。
+- **产物格式（2026-08-31 对齐参考文件定稿）**：txt 参考 `SR_code/JL1KF02B03_..._mask.txt`——`＃掩膜中心点坐标（X，Y）\r\n＃掩膜编号，X坐标，Y坐标\r\n` + `序号,质心X,质心Y`（2dp、CRLF、UTF-8）；掩码.tif 前后端一致用 **0/255**（`run_sr` 经 `cv2.threshold(>0)` 消费，0/1 等价）。原「01点阵.txt」（W×H 字符、24k² 图 ~600MB）方案**废弃**。
+- **端到端已验证**：maskgen Node 单测 11 项全过（含与 Pillow 逐像素比对、随机多边形仅边界 ≤1px 离散化差异）；后端 `test_mask.py` 12 项全过（txt 逐字节对齐参考、tif 0/255 往返）；jsdom 冒烟 3 项全过（页面加载 + genMask 直出两次下载 + wandSelect 加 ROI）。
+- **剩余**：①「按可视区读全分辨率」的放大精画路径（当前仅预览粗画，符合已定混合精度）；② 真机浏览器实测（开发机 e2e 浏览器无法启动，jsdom 只验证接线，pako/像素管线已在 Node 层覆盖）。
 
 ### 下一步（平台侧）
 
