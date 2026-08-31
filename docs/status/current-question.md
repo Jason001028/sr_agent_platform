@@ -7,7 +7,7 @@
 ## 当前状态（一句话）
 
 **✅ 最小原型已达成（2026-08-29）**：`tif_viewer/tif-viewer.html` 能正常打开、预览本地遥感图像，用户实测**时间成本可接受**。真实文件布局已确认（GF07A03/KF02B04 均**无压缩 · 条带1行**单波段 16bit），走稀疏条带预览（秒级）。JPG 导出三 bug 已修（p2 崩溃 / 右下滑条纹 / 分辨率 2048→8192），稀疏预览显示也提到 8192（`SPARSE_PREVIEW_MAX`，与导出 JPG 同清晰度）。**下一步**：放大看细节时按可视窗口读全分辨率（无压缩切片，无需金字塔）。另注意：开发机 e2e 浏览器仍无法启动（环境问题）。
-**真实文件布局已确认**：GF07A03（1.11GB）与 KF02B04（1.78GB）均为**无压缩 · 条带1行**的单波段 16bit 影像。已实现**稀疏条带预览**（无压缩大图秒级出预览，只抽读少数条带做字节切片，不碰全文件）：134MB 测试图从全量 4.5s → **1.3s（读 32MB/128MB）**，预计真实 1.1GB 文件从 ~2 分钟降到秒级。**2026-08-29 已修 JPG 导出三 bug**（p2 崩溃 / 右下滑条纹 / 分辨率 2048→8192）；随后**稀疏条带预览显示分辨率提到 8192**（`SPARSE_PREVIEW_MAX`，≈原始 1/3，与导出 JPG 同清晰度，解决"网页显示不如本地 JPG 清晰"）。**下一步**：放大看细节时按可视窗口读全分辨率（无压缩切片，无需金字塔）；真机验证导出与 8192 显示。**2026-08-31 前端已落地掩码绘制**（tif_viewer「绘制掩码」模式：矩形/多边形/魔棒画 ROI；浏览器**直出**掩码.tif + 掩膜中心点坐标.txt，或导出矢量 JSON 走 `python -m backend.services.mask`，详见下文「掩码绘制」）。**2026-08-31 SR 部署定论**：目标机=现成 CentOS7 盘阵那台；生产跑 **realesrgan_trt**；计划保留 **Slurm**；SR 用**裸机+Slurm**（TRT 版本锁定，不加 Docker）；bundle/权重/so/TRT 全在 `/DiskArray`（Linux 读写更快），打包=挂载复用、路径零改动。另注意：开发机 e2e 浏览器仍无法启动（环境问题，见 08-29 条目）。
+**真实文件布局已确认**：GF07A03（1.11GB）与 KF02B04（1.78GB）均为**无压缩 · 条带1行**的单波段 16bit 影像。已实现**稀疏条带预览**（无压缩大图秒级出预览，只抽读少数条带做字节切片，不碰全文件）：134MB 测试图从全量 4.5s → **1.3s（读 32MB/128MB）**，预计真实 1.1GB 文件从 ~2 分钟降到秒级。**2026-08-29 已修 JPG 导出三 bug**（p2 崩溃 / 右下滑条纹 / 分辨率 2048→8192）；随后**稀疏条带预览显示分辨率提到 8192**（`SPARSE_PREVIEW_MAX`，≈原始 1/3，与导出 JPG 同清晰度，解决"网页显示不如本地 JPG 清晰"）。**下一步**：放大看细节时按可视窗口读全分辨率（无压缩切片，无需金字塔）；真机验证导出与 8192 显示。**2026-08-31 前端已落地掩码绘制**（tif_viewer「绘制掩码」模式：矩形/多边形/魔棒画 ROI；浏览器**直出**掩码.tif + 掩膜中心点坐标.txt，或导出矢量 JSON 走 `python -m backend.services.mask`，详见下文「掩码绘制」）。**2026-08-31 SR 部署定论**：目标机=现成 CentOS7 盘阵那台；生产跑 **realesrgan_trt**；计划保留 **Slurm**；SR 用**裸机+Slurm**（TRT 版本锁定，不加 Docker）；bundle/权重/so/TRT 全在 `/DiskArray`（Linux 读写更快），打包=挂载复用、路径零改动。另注意：开发机 e2e 浏览器仍无法启动（环境问题，见 08-29 条目）。**2026-08-31 晚 agent 最小原型 M1 已落地**（`backend/agent/loop.py` 自写循环 + 首个真实工具 `fix_bad_lines`，36 测试全过；配 `SR_LLM_*` 环境变量后 `python -m backend.agent "prompt"` 即真闭环）。0817←0820 合并**不做**（0820 适配 Windows 本地推理、0817 服务器跑，核心流水线一致，run_sr 工具按环境选脚本即可）。
 
 ## 平台化技术栈方向（2026-08-30 · 定调讨论）
 
@@ -70,6 +70,36 @@
 - ✅ `backend/tools/contract.py`：工具契约 `Tool` + `@tool` 注册表 + `ok/err` + `manifest()`（契约成立，首个真实工具待流程级）。
 - ❌ 已移除 `backend/tools/grid_planner.py`（误把积木当工具的包装）。
 - **分层定论**：`services/`（流程编排，`run_sr` 在此组合 mta_grid + 推理 + util）→ `tools/`（流程级 agent 工具，薄壳调 services）→ `mta_grid/`（纯算法积木）。
+- ✅ **agent 最小原型 M1（2026-08-31 晚）**：`backend/agent/loop.py` 自写状态机（工具错误回填自愈 + 迭代上限，**不引 langchain/langgraph**）+ `backend/config.py`（env 驱动 `SR_LLM_BASE_URL/API_KEY/MODEL/...`）+ CLI `python -m backend.agent [--tools|--json|--max-turns] "prompt"`。**首个真实流程级工具 `fix_bad_lines`**（`services/fix_bad_lines.py` 纯 numpy 坏行/条带检测 + 邻线中值替换、Pillow IO；`tools/fix_bad_lines.py` 薄壳）。36 测试全过（含循环 6 场景：直达答案 / 工具→答案 / 工具错误不中断 / 未知工具 / 迭代上限 / API 错误）。**下一步**：你配好 `SR_LLM_API_KEY`（任意 OpenAI 兼容云 API）→ 真闭环；`run_sr` 工具（按环境选 0817/0820）待做。
+- ✅ **`search_scenes` 盘阵检索工具（2026-08-31 晚）**：定接口 + 双后端——`SR_SCENES_ROOT` 指向真实目录则扫盘（`scan_root` 递归 + 文件名解析 satellite/sensor/date，对齐 `JL1KF02B03_PMS05_20260722125045...` 命名），未设置/目录不存在则回退**确定性假数据**（`fake:true` 标记，防 agent 把占位路径喂给 run_sr）。过滤：query 子串 / satellite / date_from~date_to / limit。新增 18 测试（现共 **54 全过**）。真机接盘阵 = 只设 `SR_SCENES_ROOT` 指向挂载点。
+- ✅ **`run_sr` + `sr_job_status`（2026-08-31 晚）**：异步 Slurm 作业形态（**经你确认：生产路径 = Slurm 提交 0817，输入 = 高层参数组装 XML**）。`services/slurm.py` 薄客户端（sbatch/squeue/sacct/scancel，`run_cmd` 可注入做测试）；`services/run_sr.py` 高层参数（lq_path/mask_path/sr_scale/suffix/gpu/cloud_limit/delete_ori/grid_align/options_yml）→ 组装 `<SFSR_Config>` XML + batch 脚本（`--gres=gpu:1`、cd bundle、`code_0817_prod.py -f`）→ sbatch 返回 job_id。`sr_job_status` 轮询（squeue 活动态 → sacct 终态+退出码）。**本机无 sbatch → 干净 err**（不会误信 SR 已跑）；真机需设 `SR_BUNDLE_DIR/SR_PYTHON/SR_SLURM_WORK_DIR/SR_SLURM_PARTITION`。新增 18 测试（现共 **74 全过**）。
+
+### M1 待完善（2026-08-31 复盘 · 明天接续）
+
+> M1 闭环已通（74 测试全过），但对照 `agent-orchestration-research.md` §5，**两项 M1 承诺没兑现**（会话持久化、幂等层）+ 若干健壮性缺口。**建议顺序：P0①②③ → P1④⑤⑥ → ⑦**。这些全部开发机可做，不卡内网。
+
+**P0 · M1 范围真实缺口**
+
+1. **会话持久化缺失**（研究文档 §5.1 承诺"SQLite 消息持久化"，`backend/agent/loop.py` 现为纯内存）。
+   - 后果：进程重启丢全部上下文，无法多轮续接。
+   - 补法：新建 `backend/services/store.py`（SQLite：sessions + messages 两表），checkpoint 时机 = **每步前**（借 deepseek-harness 的"副作用前 checkpoint"）；`loop.py` 接入，messages 落库。
+2. **run_sr 幂等层缺**（研究文档 §5.3 "必写层，现在就该设计"）。
+   - 后果：循环崩溃重放 → **同一 Slurm 作业重复提交**。
+   - 补法：任务表存 `job_id`；`submit_run_sr` 前先查表，已有 job_id 先 `squeue/sacct` 再决定重跑或续查。落点并入 `store.py` 任务表。
+3. **run_sr 不拦截占位/假路径**：`search_scenes` fake 结果含 `<fake>/...`，`run_sr` 应拒绝（`lq_path`/`mask_path` 含 `<fake>` 或非绝对路径 → err）+ 补测试。
+
+**P1 · 健壮性/体验**
+
+4. **配置 UX**：`.env` 加载（零依赖，~20 行）+ `.env.example` 入库；`system_prompt`/`max_turns` 进 config（现硬编码在 `loop.py`）。
+5. **瞬时错误重试**：LLM 偶发 429/超时目前直接杀循环。补 N 次退避重试再放弃（langgraph RetryPolicy 借鉴项——只做了迭代上限，没做重试）。
+6. **测试缺口**：loop 畸形响应/空 choices 用例（当前已兜住但没锁住）；`fix_bad_lines` uint8/float 用例（现只测 uint16）；`run_sr` 假路径拒绝用例。
+7. **CLI `--resume <session_id>`**（依赖 1）。
+
+**P2 · 边界外 / 靠真机（暂不做）**
+
+- tiles 结构化进度回传（`{"tiles_done","tiles_total"}`）——需改 0817 脚本在作业内写进度文件，服务器侧。
+- 工具执行门控/审计（deepseek-harness allow/deny/ask）——多人共享队列时才需要，M2。
+- 真机验证：LLM key 真闭环、Slurm 实机提交、盘阵 `SR_SCENES_ROOT`。
 
 ### 掩码绘制（前端已落地 · 2026-08-31）
 
@@ -87,10 +117,14 @@
 
 ### 下一步（平台侧）
 
-1. 确认 LLM 底座可选项（内网是否有第二台 GPU 服务器 / 仅单 3060）。
-2. **0817←0820 合并**：进度条 + 五段剖析并回 0817，加结构化进度 JSON，`CUDA_VISIBLE_DEVICES` 交给 Slurm。
-3. **Slurm 接入验证**：`sbatch` 提交 0817 + `squeue/sacct` 轮询，跑通一条真实 job.xml。
-4. 继续 P1：定工具契约 → 第一个 cv 工具 `fix_bad_lines`；盘点 `run_all_folders` 能否无头跑。
+> **开发机可推进的新工作 = 上方「M1 待完善」清单**（P0①②③ → P1④⑤⑥ → ⑦），与下列配置/真机事项并行。明天接续优先 P0。
+
+1. **补 M1 待完善 P0**：SQLite 会话持久化（`services/store.py`）+ run_sr 幂等（任务表 job_id）+ 假路径拦截（见「M1 待完善」清单）。
+2. **配 LLM 端点跑真闭环**（M1 已完成，唯一卡你）：`SR_LLM_BASE_URL` / `SR_LLM_API_KEY` / `SR_LLM_MODEL` → `python -m backend.agent "把 test-tifs 下这张图修一下坏行"`。
+3. **Slurm 接入验证**（内网真机）：`sbatch` 提交 0817 + `squeue/sacct` 轮询，跑通一条真实 job.xml（0817←0820 合并**已取消**，两版按环境选脚本）。
+4. **run_sr 真机验证**（CentOS7 盘阵机）：设 `SR_BUNDLE_DIR/SR_PYTHON/SR_SLURM_WORK_DIR/SR_SLURM_PARTITION` 后，用假配置 xml 跑通 sbatch→squeue→sacct 一条真实 job.xml；确认 `code_0817_prod.py` 的 `<MaskPath>` 消费 0/255 掩码。
+5. 继续 P1：盘点 `run_all_folders` 能否无头跑（内网，需回传/重写）；`mta_grid` 已移植，`run_sr` 服务的 `tiles` 进度回传待 Slurm 作业内加结构化 JSON（现 0817 无进度条）。
+6. 确认 LLM 底座可选项（内网有无第二台 GPU）——决定 M3 生产底座，M1 不阻塞。
 
 > 注：记忆已重建（`~/.claude/.../memory/MEMORY.md` 现有 4 条：local-vendor-libs-for-viewers / browser-2gb-alloc-cap / intranet-data-inaccessible / real-files-uncompressed-1row-strips）。
 
