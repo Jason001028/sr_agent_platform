@@ -12,8 +12,8 @@ import numpy as np
 from PIL import Image
 
 from backend.services.mask import (generate_mask, load_polygons_json,
-                                   rasterize_polygons, write_mask_01txt,
-                                   write_mask_tif)
+                                   polygon_centroid, rasterize_polygons,
+                                   write_mask_centroid_txt, write_mask_tif)
 
 
 class TestRasterizePolygons(unittest.TestCase):
@@ -50,23 +50,60 @@ class TestRasterizePolygons(unittest.TestCase):
 
 
 class TestWriters(unittest.TestCase):
-    def test_01txt_roundtrip(self):
-        mask = rasterize_polygons(6, 6, [[[1, 1], [4, 1], [4, 4], [1, 4]]])
+    def test_centroid_txt_matches_reference_format(self):
+        polys = [[[2, 2], [7, 2], [7, 7], [2, 7]]]
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "mask.txt"
-            write_mask_01txt(mask, p)
-            rows = p.read_text(encoding="ascii").splitlines()
-            back = np.array([[1 if ch == "1" else 0 for ch in row]
-                             for row in rows], dtype=np.uint8)
-            np.testing.assert_array_equal(back, mask)
+            write_mask_centroid_txt(polys, p)
+            # newline="" 保留原始 \r\n（read_text 默认通用换行会翻译掉 \r）
+            with p.open(encoding="utf-8", newline="") as f:
+                text = f.read()
+            self.assertTrue(text.startswith(
+                "＃掩膜中心点坐标（X，Y）\r\n＃掩膜编号，X坐标，Y坐标\r\n"))
+            self.assertTrue(text.endswith("1,4.50,4.50\r\n"), repr(text[-30:]))
+            # 无裸 \n（换行必须是 \r\n）
+            self.assertIsNone(__import__("re").search(r"[^\r]\n", text))
+            self.assertIn("\r\n", text)
 
-    def test_tif_roundtrip(self):
+    def test_centroid_txt_numbering_multiple(self):
+        polys = [
+            [[0, 0], [4, 0], [4, 4], [0, 4]],
+            [[10, 10], [14, 10], [14, 14], [10, 14]],
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "mask.txt"
+            write_mask_centroid_txt(polys, p)
+            with p.open(encoding="utf-8", newline="") as f:
+                text = f.read()
+            self.assertIn("1,2.00,2.00\r\n", text)
+            self.assertIn("2,12.00,12.00\r\n", text)
+
+    def test_tif_roundtrip_0_255(self):
         mask = rasterize_polygons(6, 6, [[[1, 1], [4, 1], [4, 4], [1, 4]]])
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "mask.tif"
             write_mask_tif(mask, p)
             back = np.asarray(Image.open(p))
+            np.testing.assert_array_equal(back, mask * 255)   # 0/1 → 0/255
+
+    def test_tif_write_255_passthrough(self):
+        mask = (np.arange(9).reshape(3, 3) > 0).astype(np.uint8) * 255
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "mask.tif"
+            write_mask_tif(mask, p)
+            back = np.asarray(Image.open(p))
             np.testing.assert_array_equal(back, mask)
+
+
+class TestPolygonCentroid(unittest.TestCase):
+    def test_centroids(self):
+        self.assertEqual(polygon_centroid([[2, 2], [7, 2], [7, 7], [2, 7]]), (4.5, 4.5))
+        cx, cy = polygon_centroid([[0, 0], [6, 0], [0, 6]])
+        self.assertAlmostEqual(cx, 2.0)
+        self.assertAlmostEqual(cy, 2.0)
+
+    def test_degenerate_falls_back_to_bbox_center(self):
+        self.assertEqual(polygon_centroid([[1, 1], [3, 1]]), (2.0, 1.0))
 
 
 class TestGenerateMask(unittest.TestCase):
@@ -85,13 +122,16 @@ class TestGenerateMask(unittest.TestCase):
             self.assertEqual(len(polys), 1)
 
             tif_path = d / "mask.tif"
-            txt_path = d / "mask01.txt"
+            txt_path = d / "mask.txt"
             mask = generate_mask(w, h, polys, tif_path, txt_path)
 
             self.assertTrue(tif_path.exists())
             self.assertTrue(txt_path.exists())
             self.assertEqual(int(mask.sum()), 36)
-            np.testing.assert_array_equal(np.asarray(Image.open(tif_path)), mask)
+            np.testing.assert_array_equal(np.asarray(Image.open(tif_path)), mask * 255)
+            with txt_path.open(encoding="utf-8", newline="") as f:
+                txt = f.read()
+            self.assertIn("1,4.50,4.50\r\n", txt)
 
 
 if __name__ == "__main__":

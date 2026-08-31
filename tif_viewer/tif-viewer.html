@@ -7,6 +7,7 @@
     <script src="vendor/pako.min.js"></script>
     <script src="vendor/utif.js"></script>
     <script src="vendor/geotiff.min.js"></script>
+    <script src="maskgen.js"></script>
     <style>
         html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #0f1113; color: #d5d9de;
                      font: 13px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; }
@@ -96,6 +97,11 @@
         #drawPanel button.on { background: #2b7bdd; color: #fff; border-color: #2b7bdd; }
         #drawPanel .lbl { color: #8a93a0; font-size: 11px; margin: 0 2px; }
         #drawPanel .sep { width: 1px; height: 18px; background: #2c313a; }
+        #drawPanel input[type=number] {
+            width: 54px; height: 28px; padding: 0 4px; background: #22262c; color: #d5d9de;
+            font-size: 12px; border: 1px solid #3a4149; border-radius: 5px;
+        }
+        #drawPanel input[type=number]:focus { outline: none; border-color: #2b7bdd; }
         .outbtn.on { border-color: #2b7bdd; color: #d5d9de; background: #22304a; }
         #toast {
             position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); display: none;
@@ -143,7 +149,8 @@
         <input id="locY" type="number" placeholder="Y" min="0" step="1">
         <button id="locBtn">定位</button>
     </span>
-    <button id="maskBtn" class="outbtn" title="在预览图上绘制掩码 ROI（矩形/多边形，多区域），导出矢量 JSON 交给后端生成掩码.tif">绘制掩码</button>
+    <button id="maskBtn" class="outbtn" title="在预览图上绘制掩码 ROI（矩形/多边形/魔棒，多区域），导出矢量 JSON 交给后端生成掩码.tif">绘制掩码</button>
+    <button id="genMaskBtn" class="outbtn" title="直接在浏览器按原图像素分辨率栅格化掩码 → 下载 掩码.tif（0/255 Deflate）+ 掩膜中心点坐标.txt，无需 Python">生成掩码</button>
     <span id="hint">8bit 小图走 UTIF；大图/16bit/浮点/多波段自动分块（有进度条）；无压缩大图用稀疏条带预览（秒级）。可用「拉伸」切换浏览增强。可多选/拖拽。</span>
     <span id="meta"></span>
 </div>
@@ -167,6 +174,9 @@
         <div id="drawPanel">
             <button id="toolRect" class="on">矩形</button>
             <button id="toolPoly">多边形</button>
+            <button id="toolWand" title="魔棒：点击预览图上某处，按颜色容差自动选中连通区域并转成多边形 ROI">魔棒</button>
+            <span class="lbl" title="魔棒颜色容差（0-255，与种子像素的欧氏距离）">容差</span>
+            <input id="wandTol" type="number" min="0" max="255" step="1" value="20" class="num" title="魔棒颜色容差（0-255）">
             <span class="sep"></span>
             <button id="undoRoi">撤销</button>
             <button id="clearRoi">清空</button>
@@ -187,7 +197,7 @@ var marker = null;   // {tx, ty, until}：缩略图坐标 + 过期时间（红�
 var canvas, ctx, stage, mask, maskTitle, maskSub, progressWrap, progressBar, progressPct, errBox;
 var drawCanvas, drawCtx;                       // 掩码绘制叠加层（与 viewCanvas 同几何，pointer-events:none）
 var drawMode = false;                          // 是否处于「绘制掩码」模式
-var drawTool = 'rect';                         // 'rect' | 'polygon'
+var drawTool = 'rect';                         // 'rect' | 'polygon' | 'wand'
 var pendingRect = null;                        // 绘制中的矩形 {x0,y0,x1,y1}（缩略图坐标）
 var pendingPts = null;                         // 绘制中的多边形顶点（缩略图坐标）
 var hoverPt = null;                            // 多边形当前鼠标位置（缩略图坐标，画橡皮筋）
@@ -1257,7 +1267,9 @@ window.__viewer = {
     scanPendingExports: scanPendingExports, dateDirName: dateDirName,
     JPG_MAX: JPG_MAX, JPG_QUALITY: JPG_QUALITY,
     enterDraw: enterDraw, exitDraw: exitDraw, buildMaskJson: buildMaskJson,
-    exportMaskJson: exportMaskJson, thumbToOrig: thumbToOrig, getRois: getRois
+    exportMaskJson: exportMaskJson, thumbToOrig: thumbToOrig, getRois: getRois,
+    genMask: genMask, wandSelect: wandSelect,
+    maskGen: (typeof MaskGen !== 'undefined') ? MaskGen : null
 };
 
 function fail(rec, e) {
@@ -1364,8 +1376,10 @@ function updateDrawPanel() {
     var mb = document.getElementById('maskBtn');
     if (mb) { mb.textContent = drawMode ? '绘制掩码 ✓' : '绘制掩码'; mb.classList.toggle('on', drawMode); }
     var tr = document.getElementById('toolRect'), tp = document.getElementById('toolPoly');
+    var tw = document.getElementById('toolWand');
     if (tr) tr.classList.toggle('on', drawTool === 'rect');
     if (tp) tp.classList.toggle('on', drawTool === 'polygon');
+    if (tw) tw.classList.toggle('on', drawTool === 'wand');
     var cnt = document.getElementById('drawCount');
     var n = getRois().length;
     if (cnt) cnt.textContent = n ? ('ROI ' + n + ' 个') : '';
@@ -1414,7 +1428,77 @@ function exportMaskJson() {
     a.download = activeRec.file.name.replace(/\.tiff?$/i, '') + '.mask.json';
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
-    showToast('已导出掩码 JSON（' + polys.length + ' 个区域）。运行：python -m backend.services.mask <json文件> 掩码.tif 掩码01点阵.txt');
+    showToast('已导出掩码 JSON（' + polys.length + ' 个区域）。运行：python -m backend.services.mask <json文件> 掩码.tif 掩膜中心点坐标.txt；或直接点工具栏「生成掩码」在浏览器直出');
+}
+
+/* ---------------- 魔棒选区（预览图上点击 → 转多边形 ROI） ----------------
+   在预览缩略图 RGBA 上做颜色容差 + 边缘屏障的连通区域生长，洞填充后用
+   Moore 追踪提外轮廓、RDP 简化，转成与矩形/多边形一致的缩略图坐标 ROI。
+   大缩略图只取种子周围 WAND_WIN² 窗口，避免整幅 getImageData 的内存压力。 */
+var WAND_WIN = 4096;
+var WAND_EDGE = 32;
+function wandSelect(sx, sy) {
+    if (!activeRec || !activeRec.thumb || typeof MaskGen === 'undefined') { showErr('魔棒不可用'); return; }
+    var thumb = activeRec.thumb, tw = thumb.width, th = thumb.height;
+    if (sx < 0 || sy < 0 || sx >= tw || sy >= th) return;
+    var x0 = Math.max(0, Math.min(tw - WAND_WIN, sx - (WAND_WIN >> 1)));
+    var y0 = Math.max(0, Math.min(th - WAND_WIN, sy - (WAND_WIN >> 1)));
+    var w = Math.min(WAND_WIN, tw - x0), h = Math.min(WAND_WIN, th - y0);
+    var img = thumb.getContext('2d').getImageData(x0, y0, w, h);
+    var tol = parseInt(document.getElementById('wandTol').value, 10);
+    if (!isFinite(tol)) tol = 20;
+    tol = Math.max(0, Math.min(255, tol));
+    var sel = MaskGen.floodSelect(w, h, img.data, sx - x0, sy - y0, tol, WAND_EDGE);
+    // 加 1px 背景外框：洞填充与外轮廓追踪都要求区域四周有背景，避免贴边选区开口
+    var pw = w + 2, ph = h + 2;
+    var pm = new Uint8Array(pw * ph);
+    for (var yy = 0; yy < h; yy++) for (var xx = 0; xx < w; xx++) pm[(yy + 1) * pw + (xx + 1)] = sel[yy * w + xx];
+    pm = MaskGen.fillRegionHoles(pm, pw, ph);
+    var poly = MaskGen.traceContour(pm, pw, ph);
+    if (!poly.length) { showErr('未选中区域（容差过小或该处无同色连通区）'); return; }
+    poly = MaskGen.simplifyPoly(poly, 0.5);
+    if (poly.length < 3) { showErr('选中区域过小，无法构成多边形'); return; }
+    var pts = poly.map(function (p) { return [p[0] - 1 + x0, p[1] - 1 + y0]; });   // 填充空间 → 缩略图坐标
+    getRois().push(pts);
+    showToast('魔棒已添加选区（' + pts.length + ' 个顶点，容差 ' + tol + '）');
+    updateDrawPanel(); renderDraw();
+}
+
+/* ---------------- 浏览器直出掩码：全分辨率栅格化 → 掩码.tif + 掩膜中心点坐标.txt ----------------
+   无需 Python：rasterRows 逐行流式 + pako Deflate，进度条反馈，大批次间让出主线程。 */
+function genMask() {
+    if (!activeRec || !activeRec.thumb || typeof MaskGen === 'undefined') { showErr('请先打开一张图'); return; }
+    var rois = getRois();
+    if (!rois.length) { showErr('还没有任何掩码区域：先「绘制掩码」，用矩形/多边形/魔棒画 ROI'); return; }
+    var W = activeRec.W, H = activeRec.H;
+    var polys = rois.map(function (pts) { return pts.map(function (p) { return thumbToOrig(p[0], p[1]); }); });
+    var base = activeRec.file.name.replace(/\.tiff?$/i, '');
+    showMask('正在生成掩码（全分辨率 ' + W + '×' + H + '，' + polys.length + ' 区域）…', '', true);
+    MaskGen.buildTiff(W, H, polys, {
+        batch: 128,
+        onProgress: function (f) {
+            var pct = Math.round(f * 100);
+            progressBar.style.width = pct + '%';
+            progressPct.textContent = pct + '%';
+            maskSub.textContent = '栅格化 + 压缩中：' + pct + '%（' + W + '×' + H + '，请稍候）';
+        }
+    }).then(function (tif) {
+        var txt = MaskGen.buildMaskTxt(W, H, polys);
+        hideMask();
+        downloadBlob(new Blob([tif], { type: 'image/tiff' }), base + '.掩码.tif');
+        downloadBlob(new Blob([txt], { type: 'text/plain;charset=utf-8' }), base + '掩膜中心点坐标.txt');
+        showToast('已生成 掩码.tif + 掩膜中心点坐标.txt（' + polys.length + ' 区域，分辨率 ' + W + '×' + H + '）');
+    }).catch(function (e) {
+        hideMask();
+        showErr('生成掩码失败：' + ((e && e.message) || e));
+    });
+}
+function downloadBlob(blob, name) {
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
 }
 var toastTimer = null;
 function showToast(msg) {
@@ -1648,6 +1732,9 @@ window.addEventListener('DOMContentLoaded', function () {
             var p = mouseToThumb(e);
             if (drawTool === 'rect') {
                 pendingRect = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+            } else if (drawTool === 'wand') {
+                wandSelect(Math.round(p.x), Math.round(p.y));
+                return;
             } else {
                 if (!pendingPts) pendingPts = [];
                 pendingPts.push([p.x, p.y]);
@@ -1698,6 +1785,10 @@ window.addEventListener('DOMContentLoaded', function () {
     document.getElementById('toolPoly').addEventListener('click', function () {
         drawTool = 'polygon'; pendingRect = null; updateDrawPanel(); renderDraw();
     });
+    document.getElementById('toolWand').addEventListener('click', function () {
+        drawTool = 'wand'; pendingRect = null; pendingPts = null; updateDrawPanel(); renderDraw();
+    });
+    document.getElementById('genMaskBtn').addEventListener('click', genMask);
     document.getElementById('undoRoi').addEventListener('click', undoRoi);
     document.getElementById('clearRoi').addEventListener('click', clearRois);
     document.getElementById('exportMask').addEventListener('click', exportMaskJson);
