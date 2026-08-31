@@ -7,11 +7,12 @@
 ## 当前状态（一句话）
 
 **✅ 最小原型已达成（2026-08-29）**：`tif_viewer/tif-viewer.html` 能正常打开、预览本地遥感图像，用户实测**时间成本可接受**。真实文件布局已确认（GF07A03/KF02B04 均**无压缩 · 条带1行**单波段 16bit），走稀疏条带预览（秒级）。JPG 导出三 bug 已修（p2 崩溃 / 右下滑条纹 / 分辨率 2048→8192），稀疏预览显示也提到 8192（`SPARSE_PREVIEW_MAX`，与导出 JPG 同清晰度）。**下一步**：放大看细节时按可视窗口读全分辨率（无压缩切片，无需金字塔）。另注意：开发机 e2e 浏览器仍无法启动（环境问题）。
-**真实文件布局已确认**：GF07A03（1.11GB）与 KF02B04（1.78GB）均为**无压缩 · 条带1行**的单波段 16bit 影像。已实现**稀疏条带预览**（无压缩大图秒级出预览，只抽读少数条带做字节切片，不碰全文件）：134MB 测试图从全量 4.5s → **1.3s（读 32MB/128MB）**，预计真实 1.1GB 文件从 ~2 分钟降到秒级。**2026-08-29 已修 JPG 导出三 bug**（p2 崩溃 / 右下滑条纹 / 分辨率 2048→8192）；随后**稀疏条带预览显示分辨率提到 8192**（`SPARSE_PREVIEW_MAX`，≈原始 1/3，与导出 JPG 同清晰度，解决"网页显示不如本地 JPG 清晰"）。**下一步**：放大看细节时按可视窗口读全分辨率（无压缩切片，无需金字塔）；真机验证导出与 8192 显示。**2026-08-31 前端已落地掩码绘制**（tif_viewer「绘制掩码」模式：矩形/多边形画 ROI → 导出矢量 JSON → `python -m backend.services.mask` 出掩码.tif + 01点阵.txt，详见下文「掩码绘制」）。另注意：开发机 e2e 浏览器仍无法启动（环境问题，见 08-29 条目）。
+**真实文件布局已确认**：GF07A03（1.11GB）与 KF02B04（1.78GB）均为**无压缩 · 条带1行**的单波段 16bit 影像。已实现**稀疏条带预览**（无压缩大图秒级出预览，只抽读少数条带做字节切片，不碰全文件）：134MB 测试图从全量 4.5s → **1.3s（读 32MB/128MB）**，预计真实 1.1GB 文件从 ~2 分钟降到秒级。**2026-08-29 已修 JPG 导出三 bug**（p2 崩溃 / 右下滑条纹 / 分辨率 2048→8192）；随后**稀疏条带预览显示分辨率提到 8192**（`SPARSE_PREVIEW_MAX`，≈原始 1/3，与导出 JPG 同清晰度，解决"网页显示不如本地 JPG 清晰"）。**下一步**：放大看细节时按可视窗口读全分辨率（无压缩切片，无需金字塔）；真机验证导出与 8192 显示。**2026-08-31 前端已落地掩码绘制**（tif_viewer「绘制掩码」模式：矩形/多边形画 ROI → 导出矢量 JSON → `python -m backend.services.mask` 出掩码.tif + 01点阵.txt，详见下文「掩码绘制」）。**2026-08-31 SR 部署定论**：目标机=现成 CentOS7 盘阵那台；生产跑 **realesrgan_trt**；计划保留 **Slurm**；SR 用**裸机+Slurm**（TRT 版本锁定，不加 Docker）；bundle/权重/so/TRT 全在 `/DiskArray`（Linux 读写更快），打包=挂载复用、路径零改动。另注意：开发机 e2e 浏览器仍无法启动（环境问题，见 08-29 条目）。
 
 ## 平台化技术栈方向（2026-08-30 · 定调讨论）
 
-> 结论先行：前端 React+TS（**移植不重写** tif-viewer 逻辑）；后端 FastAPI + 自建作业队列 + 工具库；**LangChain 非地基，后置为可选薄层**。四问已答：LLM 底座**未定**（按 OpenAI 兼容写，可替换）、**无 SLURM**（自建队列）、cv 工具箱**从零开发**、近期**先包工具库（P1）**。
+> 结论先行：前端 React+TS（**移植不重写** tif-viewer 逻辑）；后端 FastAPI + 自建作业队列 + 工具库；**LangChain 非地基，后置为可选薄层**。四问已答：LLM 底座**未定**（按 OpenAI 兼容写，可替换）、**SLURM 计划保留**（GPU 调度用 Slurm，FastAPI 作其客户端）、cv 工具箱**从零开发**、近期**先包工具库（P1）**。
+> **2026-08-31 已确认：无公司技术标准**——老员工（谢志兵）表示此前 Vue2+SpringBoot 工程只是随手 clone 的 GitHub 源码、可用可不用；Nginx/Redis 可选。技术栈完全自由，维持上述选型；Spring Boot 门面折中方案作废。
 
 ### 技术栈决策
 
@@ -20,23 +21,43 @@
 | 前端 | React + TypeScript（Vite 构建 + Nginx 静态托管，离线 vendor） | 多视图 + 共享状态 + 实时进度是 React 主场；`naming-conventions §4` 已预留 `TifCanvas.tsx`/`tifDecode.ts` 结构 |
 | 前端迁移 | **移植不重写** tif-viewer | 116KB HTML 里已踩完坑的解码/拉伸/稀疏条带逻辑抽成**框架无关 TS 模块**，React 应用 import 它，别重写 |
 | 后端框架 | FastAPI（REST + SSE） | Agent/SR/cv 工具全在 Python，避免双语言；SSE 推任务进度 |
-| 作业队列 | 自建：FastAPI(API+SSE) + **独立 worker 进程**（跑 GPU）+ SQLite 作业表 | 无 SLURM；SR 是阻塞 GPU 进程，必须独立进程跑；单机 MVP 用 SQLite 免装 Redis，多机/高并发再升 Redis+Celery/ARQ |
+| 作业队列 | **Slurm 调度 GPU**（sbatch 提交 code_0817）+ FastAPI 作 **Slurm 客户端**（轮询 squeue/sacct）+ SQLite 作业表 | 3090×4 计划保留 Slurm，SR 脚本本就集成 Slurm（健康门 stop slurmd）；SR 是阻塞 GPU 进程，靠 Slurm 排队；CPU 小活（掩码栅格化等）可自建轻队列或也走 Slurm；SQLite 记任务元数据，Redis 后置 |
 | LLM 底座 | **未定**，统一按 OpenAI 兼容 `/v1/chat/completions` + tools 参数写 | 底座可换（Ollama→vLLM/DeepSeek 不改业务码）；有第二台 GPU→vLLM+Qwen2.5-14B，仅单 3060→Ollama+Qwen2.5-7B Q4 与 SR 错峰 |
-| Agent 层 | 先不碰 LangChain 全家桶；原生 function-calling + 自写 ~200 行状态机 | 撞到跨小时级断点续跑/人审再上 **LangGraph**（此时是替换薄层，非重写）；`langchain-master` 当参考不引为依赖 |
+| Agent 层 | 先不碰 LangChain 全家桶；原生 function-calling + 自写 ~200 行状态机 | 撞到跨小时级断点续跑/人审再上 **LangGraph**（此时是替换薄层，非重写）；`langchain-master` 当参考不引为依赖；边界见 docs/conventions/langchain-boundary.md |
+
+### 前端实现约束（2026-08-31 · 两轮问答确认）
+
+| 约束 | 结论 |
+|---|---|
+| 浏览器 | 仅 Chrome/Edge → FS Access、WebGL2 放心用，无需降级 |
+| 查看器数据源 | 本地 File + 盘阵 HTTP **两条并存** → 解码层抽 `source.read(offset,len)→Promise<ArrayBuffer>` 抽象（FileSource / HttpSource），IFD/稀疏/分块/拉伸复用 |
+| 掩码 | 键鼠 + 像素坐标（无 GIS），掩码=像素坐标数组，存后端 |
+| 任务队列 | 多人**共享同一队列** → 前端实时同步 + 乐观更新 + 并发处理；服务端为唯一事实源 |
+| 实时通道 | `pushClient` 单模块抽象，**SSE 先行**（反代兼容最好、单向推状态够用），WS 可换；动作走 REST |
+| 构建/部署 | 无公司标准；产物自包含（离线 vendor，Vite 构建，Nginx 托管） |
+| 时间预算 | 1-2 个月 → 可做完整平台（对话+队列+掩码+失败诊断） |
+
+### SR 部署定论（2026-08-31 · 两版对比 + 部署形态）
+
+- **目标机**：现成 CentOS7 盘阵那台，mmsr_bundle/权重/ImgHistMatch.so/TRT engine 全在 `/DiskArray`（Windows+Linux 都能访问，Linux 本地读写显著更快）→ **打包=挂载复用，代码路径零改动**。
+- **生产跑 realesrgan_trt** → 依赖 `torch_tensorrt` + TRT engine（**版本锁定**，engine 在 `/DiskArray/.../trt/t2trt_fp16_realESRGAN_1640.trt`）；**ImgHistMatch.so 只有 restormer 用，生产可忽略**。
+- **部署形态**：SR = **裸机 + Slurm（不加 Docker）**——TRT 版本锁定 + 固定机不换 + Slurm 本就在裸机起作业，Docker 只添耦合；平台服务（FastAPI/Nginx）可选 Docker 或裸机 venv+systemd。
+- **两版对比（SR_code/）**：`code_0817_prod.py`（Linux 生产版：4 卡校验 `gpu_count!=4`→stop slurmd、硬编码 /DiskArray、无进度条）vs `code_0820_prod_windows.py`（Windows 开发分支：lib 软容错、**进度条+五段剖析**、去掉 Slurm 联动、GPU≥1）。**核心流水线逐行一致 → 合并**：0817 作底 + 0820 进度/剖析并回 + 加结构化进度 JSON（`{"tiles_done":N,"tiles_total":M}`）供队列 tail→SSE。
+- **代码小改动**：`CUDA_VISIBLE_DEVICES` 硬编码 `"0"` 改为**交给 Slurm 分配**（`--gres=gpu:1`）；清 `__main__` 残留 `"1"`。
 
 ### 优先级 P0–P4
 
-- **P0 阻塞**：定 LLM 底座 + 定作业队列实现 + 盘点 SR/cv 工具能否无头调用。
+- **P0 阻塞**：定 LLM 底座（内网有无第二台 GPU）+ **0817←0820 合并**（进度条+剖析+结构化进度+GPU 交 Slurm）+ Slurm 接入验证（sbatch 提交 / squeue 轮询）。
 - **P1 工具库先行（当前在做）**：见下，纯价值零 LLM。
-- **P2 FastAPI 骨架**：REST + SSE + 作业队列，工具暴露成端点（无 LLM 即可联调）。
-- **P3 React+TS 前端骨架**：聊天 + 队列 + 移植 TIF 查看器 + 盘阵检索/查看 UI。
+- **P2 FastAPI 骨架**：REST + SSE + **Slurm 客户端**（提交/轮询/取消）+ SQLite 作业表，工具暴露成端点。
+- **P3 React+TS 前端骨架**：聊天 + 共享队列 + 移植 TIF 查看器（**双数据源**）+ 盘阵检索/查看 UI。
 - **P4 Agent 编排层**：最后加，native function-calling 状态机或 LangGraph。
 
 ### P1 交付物（工具库）
 
 1. `tools/` 包 + **工具契约**：`name` / `description` / JSON-schema params / `run(**params)->result`。
 2. 首批工具：
-   - **SR 侧（已有代码纯包装）**：`grid_offset_planner`（code_0820 里纯 numpy，直接抽最快见成效）、`run_sr_inference`（包 `code_0820_prod_windows.py` 的 main 为无头调用）、`run_all_folders`（内网，需回传/重写）、掩码生成（掩码.tif + 01点阵.txt）。
+   - **SR 侧（已有代码纯包装）**：`run_sr_inference`（包 `code_0817_prod.py`（Linux 生产版）为无头/Slurm 调用）、`run_all_folders`（内网，需回传/重写）、掩码生成（掩码.tif + 01点阵.txt）。
    - **cv 侧（从零，先做一个定契约）**：如 `fix_bad_lines`（坏行/条带修复，OpenCV/numpy）。
    - **盘阵检索**：`search_scenes`（先定接口 + 本地假实现，真机再接盘阵）。
 3. 注册表（在 `tools/contract.py` 内，`@tool` 装饰器自动收集）→ `manifest()` 生成 OpenAI 兼容工具清单 JSON（日后直接喂 agent function-calling + 自动生成 API 文档）。
@@ -66,11 +87,11 @@
 ### 下一步（平台侧）
 
 1. 确认 LLM 底座可选项（内网是否有第二台 GPU 服务器 / 仅单 3060）。
-2. 定作业队列最小实现（建议 SQLite + 独立 worker 进程）。
-3. 盘点内网 SR 工具清单（run_all_folders / 掩码工具在不在本仓库、能否无头跑）。
-4. 动手 P1：先抽 `grid_offset_planner` → 定工具契约 → 做第一个 cv 工具 `fix_bad_lines`。
+2. **0817←0820 合并**：进度条 + 五段剖析并回 0817，加结构化进度 JSON，`CUDA_VISIBLE_DEVICES` 交给 Slurm。
+3. **Slurm 接入验证**：`sbatch` 提交 0817 + `squeue/sacct` 轮询，跑通一条真实 job.xml。
+4. 继续 P1：定工具契约 → 第一个 cv 工具 `fix_bad_lines`；盘点 `run_all_folders` 能否无头跑。
 
-> 注：`~/.claude/.../memory/` 当前为空，而 docs 里引用过 browser-2gb-alloc-cap / local-vendor-libs-for-viewers / intranet-data-inaccessible 三条记忆，疑似换机后未重建，待补。
+> 注：记忆已重建（`~/.claude/.../memory/MEMORY.md` 现有 4 条：local-vendor-libs-for-viewers / browser-2gb-alloc-cap / intranet-data-inaccessible / real-files-uncompressed-1row-strips）。
 
 ## 时间线
 
@@ -119,6 +140,13 @@
 - 代价与约束：稀疏预览 8192² 时 src(Float32)+canvas ≈ **0.5GB/图**，避免同时开过多大图（已写入 gui-experience §4 内存提示）。
 - 同步：`.e2e/test-sparse.js` 与 `.e2e/test-regress.js` 预览尺寸断言 2048→8192（测试图为 8192²，无压缩命中稀疏，全分辨率恒等映射）；`docs/knowledge/jpg-export-background.md` 预览降采样说明改口（稀疏 8192 / 其余 2048）。
 - ⚠️ **待真机验证**：8192² 稀疏预览在真实 24739×24199 图上的内存/耗时；e2e 本机仍无法启动（环境问题）。
+
+### 2026-08-31 · 前端约束问答 + SR 部署定论（平台化收口）
+
+- **前端约束两轮问答**（见上「前端实现约束」表）：仅 Chromium、查看器双数据源（本地 File + 盘阵 HTTP，解码层加 `source` 抽象）、掩码键鼠像素坐标、多人共享队列、`pushClient`（SSE 先行）、Vite 自包含产物、1-2 个月完整平台。
+- **无公司技术标准确认**：老员工（谢志兵）称此前 Vue2+SpringBoot 工程只是随手 clone 的 GitHub 源码、可用可不用，Nginx/Redis 可选 → 技术栈完全自由，维持 React+TS+FastAPI；Spring Boot 门面折中作废。
+- **SR 两版对比**（`SR_code/code_0817_prod.py` vs `code_0820_prod_windows.py`）：核心流水线逐行一致；差异=lib 软容错、进度条+五段剖析、Slurm 联动（stop slurmd）、GPU 数校验（==4 vs ≥1）。合并策略见上「SR 部署定论」。
+- **部署形态定论**：目标机=现成 CentOS7 盘阵那台（bundle 已跑通）；生产 realesrgan_trt（TRT 版本锁定）；计划保留 Slurm；SR 裸机+Slurm（不加 Docker）；bundle/权重/so/TRT 全在 `/DiskArray`（Linux 读写显著更快）。详见上文「SR 部署定论」。
 
 ## 下一步（给新窗口）
 
