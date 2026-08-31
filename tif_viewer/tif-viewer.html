@@ -58,6 +58,13 @@
             overflow-y: auto; padding: 8px;
         }
         #sidebar .tip { color: #5c6670; font-size: 12px; padding: 10px 8px; }
+        #sidebar.collapsed { width: 0; padding: 0; border-right: none; overflow: hidden; }
+        #sideToggle {
+            flex: none; width: 22px; background: #1b1f24; border-right: 1px solid #2c313a;
+            display: flex; align-items: center; justify-content: center;
+            cursor: pointer; color: #8a93a0; font-size: 13px; user-select: none;
+        }
+        #sideToggle:hover { color: #d5d9de; background: #22304a; }
         .file-item {
             padding: 8px 10px; margin-bottom: 6px; background: #1d2229; border: 1px solid #2c313a;
             border-radius: 6px; cursor: pointer;
@@ -156,6 +163,7 @@
 </div>
 <div id="layout">
     <div id="sidebar"><div class="tip">尚未添加文件。点左上角「选择文件」。</div></div>
+    <div id="sideToggle" title="收起文件列表">«</div>
     <div id="stage">
         <canvas id="viewCanvas"></canvas>
         <canvas id="drawCanvas"></canvas>
@@ -1697,6 +1705,15 @@ window.addEventListener('DOMContentLoaded', function () {
         });
     });
     fsIO.init();   // 恢复上次授权目录（非阻塞）
+
+    // 左侧文件状态栏：收回/展开（秒出，无动画）
+    var sideToggle = document.getElementById('sideToggle');
+    var sidebar = document.getElementById('sidebar');
+    sideToggle.addEventListener('click', function () {
+        var collapsed = sidebar.classList.toggle('collapsed');
+        sideToggle.textContent = collapsed ? '»' : '«';
+        sideToggle.title = collapsed ? '展开文件列表' : '收起文件列表';
+    });
 
     var locX = document.getElementById('locX'), locY = document.getElementById('locY');
     var doLocate = function () { locatePixel(locX.value, locY.value); };
