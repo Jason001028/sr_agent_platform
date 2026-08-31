@@ -10,3 +10,11 @@ docs/planning/web-plan.md
 # Python
 __pycache__/
 *.pyc
+
+#参考书
+docs/agent-book
+
+#参考源码
+langchain-master
+langgraph-main
+deepseek-harness-master

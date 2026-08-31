@@ -8,10 +8,10 @@
 
 | 类目 | 目录 | 职责 | 现有文档 |
 |---|---|---|---|
-| 背景知识 | `docs/knowledge/` | 原理 / 学科背景 / 技术实现说明 | [jpg-export-background.md](knowledge/jpg-export-background.md) |
+| 背景知识 | `docs/knowledge/` | 原理 / 学科背景 / 技术实现说明 | [jpg-export-background.md](knowledge/jpg-export-background.md)、[agent-orchestration-research.md](knowledge/agent-orchestration-research.md) |
 | 需求与规划 | `docs/planning/` | 需求规格、实施计划 | [gui-requirements.md](planning/gui-requirements.md)、[web-plan.md](planning/web-plan.md)（gitignore） |
 | 经验与复盘 | `docs/experience/` | 踩坑记录、已验证方案 | [gui-experience.md](experience/gui-experience.md) |
-| 规范与约定 | `docs/conventions/` | 命名 / 流程等约束 | [naming-conventions.md](conventions/naming-conventions.md) |
+| 规范与约定 | `docs/conventions/` | 命名 / 流程等约束 | [naming-conventions.md](conventions/naming-conventions.md)、[langchain-boundary.md](conventions/langchain-boundary.md) |
 | 交接与状态 | `docs/status/` | 当前问题、窗口交接 | [current-question.md](status/current-question.md) |
 
 ## 二、怎么新增一个 .md（分类规则）
