@@ -3,14 +3,16 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "lib": ["ES2022", "DOM"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
-    "types": ["node"]
+    "useDefineForClassFields": true,
+    "isolatedModules": true,
+    "types": ["node", "vite/client"]
   },
-  "include": ["src/**/*.ts", "vitest.config.ts"],
+  "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.vue", "vitest.config.ts", "vite.config.ts"],
   "exclude": ["src/vendor/*.js", "src/vendor/*.min.js", "node_modules", "dist"]
 }

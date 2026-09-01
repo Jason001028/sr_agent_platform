@@ -14,7 +14,12 @@
  *   - 其余（16bit/浮点/多波段/压缩/大图）→ geotiff 分块降采样（chunkedCollect/bandPassCollect）
  * 统一产出预览自然值 src（Float32）+ 每波段统计 st，供前端按拉伸模式实时重绘。
  */
-import GeoTIFF from '../vendor/geotiff.min.js';
+// ⚠️ 必须用命名空间导入，不能用 default：geotiff@3.0.5 是 ESM 作者语义，UMD 忠实带了
+// `exports.default = GeoTIFF`（类，无静态 fromBlob）。HTML 版用的是全局 window.GeoTIFF
+// （= exports 命名空间，含 fromBlob）。esbuild(vitest) 对 CJS 给 module.exports 所以 default 碰巧可用，
+// rollup(vite build) 给 exports.default（=类）→ 会挂。命名空间导入在两种转换下都指向 exports 命名空间。
+// 这是「模块互操作适配」，不改任何算法/像素行为（51 Vitest golden 回归锁定）。
+import * as GeoTIFF from '../vendor/geotiff.min.js';
 import type { Source } from './source.js';
 
 /* ---------------- 关键常量（与 tif-viewer.html 一致，供上层复用/覆盖） ---------------- */

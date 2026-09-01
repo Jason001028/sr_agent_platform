@@ -19,7 +19,7 @@
 | 阶段 | 内容 | 验收 | 状态 |
 |---|---|---|---|
 | 1 · 纯 TS 核心抽取 | `frontend/src/lib/` 下 `tifDecode.ts` / `maskgen.ts` / `source.ts`；17 项 maskgen 测试移植为 Vitest TS 版 + tifDecode 像素 golden | Node 测试全过；原 `tif-viewer.html` 浏览器回归不破坏；tifDecode 与 HTML 版对同一测试图逐像素一致 | 完成（2026-09-01） |
-| 2 · Vue3 工程骨架 | Vite+Vue3+TS 脚手架、离线 vendor 落地、路由骨架 `/viewer /chat /queue`、Pinia/composable 状态层、Nginx 托管 + 离线交付压缩包脚本 | `vite build` 后 dist 无外部 CDN 引用，Nginx 打开查看器可用 | 待 |
+| 2 · Vue3 工程骨架 | Vite+Vue3+TS 脚手架、离线 vendor 落地、路由骨架 `/viewer /chat /queue`、Pinia/composable 状态层、Nginx 托管 + 离线交付压缩包脚本 | `vite build` 后 dist 无外部 CDN 引用，Nginx 打开查看器可用 | 完成（2026-09-01） |
 | 3 · 查看器 UI 组件化 | 视图数学抽纯函数并 Node 测；`TifCanvas.vue` 双画布分层；工具栏/文件列表/状态栏/拉伸下拉/输出目录授权；掩码绘制面板 + 事件 + 协程进度条 + owner 守卫 + genMask 直出；导出层串行 + 降档 + saver 抽象；重建 E2E 钩子等价物 | Vue3 查看器跑通等价浏览器回归；掩码 17 项 Node 测试仍全过 | 待 |
 | 4 · 双数据源 + 后端衔接 | `HttpSource`（Range 读取）+ 后端 FastAPI 骨架（REST + SSE + Slurm 客户端 + SQLite 作业表 + strip/窗口读取端点），复用 `backend/services·mta_grid·tools`；盘阵检索/查看 UI | 后端 pytest 全过（现 114）、HttpSource 单测、真机读盘阵验证 | 待 |
 | 5 · 平台新功能 | 聊天界面（Agent loop 对接 SSE）、共享任务队列（乐观更新 + 并发处理，服务端唯一事实源） | 先写 REST/SSE 契约文档再写代码 | 待 |
@@ -86,3 +86,5 @@ EXPORT_BUDGET≈2.4e9      // 导出内存预算
 - 2026-09-01：本文档固化。决策：golden 测试**自包含 fixtures** 入库；开工前先固化规划文档。Phase 1 启动。
 - 2026-09-01：Phase 1 提交。验收：`tsc --noEmit` 全绿；Vitest 51 全过（17 maskgen + 30 tifDecode + 4 source）；`.e2e` 浏览器回归全过（bootstrap 13 + types 13 + sparse + maskgen 17），原 HTML 未破坏。
   **移植偏差 1 处（已记录在 tifDecode.ts bandPassCollect 注释）**：原 HTML 的带通终端 `return Promise.resolve()` 丢弃就地填充的 `src`，会令 8192² 高分导出（走带通分支时）拿到的 Promise 解析为 `undefined`，属潜在 bug；TS 版改为 `return Promise.resolve(src)`，兑现"产出 src"的函数契约，其余算法逐字节不变。
+- 2026-09-01：Phase 2 提交。验收：`vue-tsc --noEmit` 全绿；Vitest 51 全过；`.e2e/check-frontend-build.js` 对 `frontend/dist` 静态服务 + 无头浏览器实测全过（无外部请求、SPA fallback、`u16_whitezero.tif` 解码出 256×128 渐变、拉伸切换重绘、`/viewer/` 尾斜杠 301）。交付物：`deploy/nginx.conf`（SPA fallback + assets 长缓存 + 尾斜杠规整）、`deploy/README.md`（CentOS7 部署）、`frontend/scripts/package-offline.sh`（`npm run package:offline` → `release/*.tar.gz`）。
+  **构建互操作坑 2 处（已在代码注释固化）**：(1) geotiff@3.0.5 UMD 带 `exports.default=GeoTIFF(类)`，default 导入在 esbuild(vitest) 解析成 module.exports、rollup(vite build) 解析成类 → 运行时 `fromBlob is not a function`；改用 `import * as GeoTIFF`（命名空间，两种转换都指向 exports）。(2) Vite 6 @rollup/plugin-commonjs 默认只处理 node_modules，`src/vendor` UMD 需 `commonjsOptions.include` 显式纳入；vendor 环境声明因"同名 .ts/.d.ts 兄弟"会被 TS 挤出 program，统一收在 `src/env.d.ts`（无同名 .ts 兄弟）。
