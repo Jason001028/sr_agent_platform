@@ -1,0 +1,80 @@
+[
+  {
+    "name": "gray16_grad.tif",
+    "bytes": 131474,
+    "W": 256,
+    "H": 256,
+    "spp": 1,
+    "bits": 16,
+    "photometric": 1,
+    "compression": 1,
+    "rps": 8,
+    "sample_format": 1,
+    "big": false
+  },
+  {
+    "name": "rgb8.tif",
+    "bytes": 12446,
+    "W": 64,
+    "H": 64,
+    "spp": 3,
+    "bits": 8,
+    "photometric": 2,
+    "compression": 1,
+    "rps": 64,
+    "sample_format": 1,
+    "big": false
+  },
+  {
+    "name": "u16_whitezero.tif",
+    "bytes": 65682,
+    "W": 256,
+    "H": 128,
+    "spp": 1,
+    "bits": 16,
+    "photometric": 0,
+    "compression": 1,
+    "rps": 128,
+    "sample_format": 1,
+    "big": false
+  },
+  {
+    "name": "f32_grad.tif",
+    "bytes": 65682,
+    "W": 128,
+    "H": 128,
+    "spp": 1,
+    "bits": 32,
+    "photometric": 1,
+    "compression": 1,
+    "rps": 128,
+    "sample_format": 3,
+    "big": false
+  },
+  {
+    "name": "bigtiff_strips.tif",
+    "bytes": 65920,
+    "W": 256,
+    "H": 256,
+    "spp": 1,
+    "bits": 8,
+    "photometric": 1,
+    "compression": 1,
+    "rps": 16,
+    "sample_format": 1,
+    "big": true
+  },
+  {
+    "name": "u16_rows8.tif",
+    "bytes": 16594,
+    "W": 128,
+    "H": 64,
+    "spp": 1,
+    "bits": 16,
+    "photometric": 1,
+    "compression": 1,
+    "rps": 8,
+    "sample_format": 1,
+    "big": false
+  }
+]
