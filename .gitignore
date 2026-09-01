@@ -11,6 +11,10 @@ docs/planning/web-plan.md
 __pycache__/
 *.pyc
 
+# 运行时 SQLite（agent 会话/message/任务表）
+sr_agent.db
+sr_agent.db-journal
+
 #参考书
 docs/agent-book
 
