@@ -1,0 +1,20 @@
+{
+  "name": "sr-agent-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "sr_agent_platform 前端（Vue3+TS+Vite）· Phase 1 = 框架无关 TS 核心（tifDecode/maskgen/source）+ Node 像素 golden",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "gen:fixtures": "python scripts/gen-fixtures.py"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/pako": "^2.0.3",
+    "pako": "^2.1.0",
+    "typescript": "^5.6.3",
+    "vitest": "^3.2.4"
+  }
+}
