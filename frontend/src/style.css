@@ -1,0 +1,70 @@
+/* 全局基础样式（阶段2 骨架；组件级样式留在各 SFC 的 scoped 内） */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  font-size: 14px;
+  color: #2c3e50;
+  background: #f5f6f8;
+}
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.app-nav {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 0 16px;
+  height: 48px;
+  background: #1f2d3d;
+  color: #fff;
+  flex: none;
+}
+
+.app-nav .brand {
+  font-weight: 600;
+  font-size: 15px;
+  color: #fff;
+  text-decoration: none;
+}
+
+.nav-links {
+  display: flex;
+  gap: 8px;
+}
+
+.nav-links a {
+  color: #c0ccda;
+  text-decoration: none;
+  padding: 6px 12px;
+  border-radius: 4px;
+}
+
+.nav-links a:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.nav-links a.router-link-exact-active {
+  color: #fff;
+  background: #409eff;
+}
+
+.app-main {
+  flex: 1;
+  overflow: auto;
+  padding: 12px;
+}

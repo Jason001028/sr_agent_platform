@@ -3,6 +3,10 @@
 
 # 压缩包
 *.zip
+*.tar.gz
+
+# 离线交付打包产物
+release/
 
 # 实施计划（内部参考，不入库）
 docs/planning/web-plan.md
