@@ -13,8 +13,9 @@
 - **魔棒/合并/删除打磨（09-01）**：魔棒改**自适应区域生长**（修复"总出默认大小椭圆"）；新增「合并重叠」按钮（重叠/相接区域并成连通区）与「删除」工具（命中区域柔和红闪后移除）。详见 §3.3。
 - **SR 部署定论（08-31）**：目标机 = 现成 CentOS7 盘阵那台；生产跑 `realesrgan_trt`；保留 Slurm；SR 用**裸机+Slurm**（TRT 版本锁定，不加 Docker）；bundle/权重/so/TRT 全在 `/DiskArray`（Linux 读写更快），打包 = 挂载复用、路径零改动（详见 §3.2）。
 - **Agent 最小原型 M1（08-31 晚）**：`backend/agent/loop.py` 自写循环 + 首个真实工具 `fix_bad_lines`；**M1 待完善 P0①②③ 已补齐（09-01）**——SQLite 会话持久化 + run_sr 幂等层 + 假路径拦截，**114 测试全过**（详见 §2.5）。
-- **下一步**：P1 ④⑤⑥⑦（见 §2.5）；配 LLM key 真闭环、Slurm/run_sr 真机验证（见 §2.6）。
-- **约束提醒**：开发机 e2e 浏览器仍无法启动（环境问题，见 08-29 条目）；真实图在内网盘阵，外网机读不到（见 §5.1）。
+- **阶段3 查看器 UI 组件化完成（09-01）**：HTML 交互层**移植不重写**到 Vue3——TifCanvas/Toolbar/FileList/DrawPanel/DecodeOverlay/StatusBar 六组件 + `stores/viewer.ts` 全量编排 + `lib/{viewMath,browserKit,decode,exportJpg,saver}` + `window.__viewer` 钩子；算法逐字节保留，交互 Vue3 惯用重写；**BigTIFF 路由修复**（vendored UTIF 不解 BigTIFF，强制走 geotiff 分块，本阶段唯一行为偏差）。75 Vitest + vue-tsc 零错误 + 浏览器回归 38 断言全过（详见 §4 时间线）。
+- **下一步**：P1 ④⑤⑥⑦（见 §2.5）；配 LLM key 真闭环、Slurm/run_sr 真机验证（见 §2.6）；Vue3 查看器真机（内网盘阵）验收——真实 24739×24199 稀疏预览/掩码直出/导出。
+- **约束提醒**：开发机浏览器 e2e **已恢复可用**（`.e2e/launchBrowser.js` 独立临时 profile，根治 Code:0）；真实图在内网盘阵，外网机读不到（见 §5.1）。
 
 ## 2. 里程碑计划与待办
 
@@ -122,14 +123,12 @@
 | 构建/部署 | 无公司标准；产物自包含（离线 vendor，Vite 构建，Nginx 托管） |
 | 时间预算 | 1-2 个月 → 可做完整平台（对话+队列+掩码+失败诊断） |
 
-**前端迁移策略（2026-09-01）**
+**前端迁移策略（2026-09-01 更新）**
 
-- **HTML 侧收口条件**（满足后 tif-viewer.html 冻结，不再新增功能）：
-  1. 掩码「删除」+「合并重叠」完成并提交（现未提交）——掩码编辑功能集定稿；
-  2. 真机实测掩码直出：真实大图（24739×24199）浏览器直出 `掩码.tif` + `掩膜中心点坐标.txt`、稀疏预览 8192 不崩（开发机仅 jsdom 接线，交互层未实测）。
+- **HTML 侧收口状态**：功能集已定稿（掩码「删除」+「合并重叠」09-01 已提交 `d9a6055`），tif-viewer.html **冻结**，不再新增功能；仅剩真机实测（内网盘阵）。
 - **冻结后新增功能直接进 Vue3（P3）**：盘阵 HTTP 读图（HttpSource）、多视图、任务队列，不再加进 HTML。
-- **Vue3 迁移时机 = 冻结后 + P2 就绪**（FastAPI REST/SSE，HttpSource 有端点可绑）：逻辑层忠实移植（沿用「移植不重写」决策），交互层用 Vue3 惯用法重写。
-- **可提前项**：`tifDecode.ts` 抽取 + Node 像素级 golden 单测，不依赖 Vue3 时机，为移植备回归基准。
+- **阶段3 组件化已提前完成（09-01，不等 P2）**：交互层已移植不重写到 Vue3（六组件 + store + lib + `window.__viewer`）；HttpSource 接线 + 多视图 + 任务队列 = P3 在现有 Vue3 查看器上继续，不重做。
+- **可提前项**：`tifDecode.ts` 抽取 + Node 像素级 golden 单测（阶段1 完成，为移植备回归基准）；阶段3 浏览器回归已全绿。
 
 ### 3.2 SR 部署定论（2026-08-31 · 两版对比 + 部署形态）
 
@@ -155,7 +154,7 @@
 - **浏览器直出掩码（2026-08-31，无需 Python）**：「生成掩码」按钮 → ROI 经 `thumbToOrig` 反算回原图像素 → `MaskGen.buildTiff`（`rasterRows` 逐行 + pako Deflate → classic TIFF 小端/8bit/压缩8）→ 下载 `掩码.tif`（**0/255**）+ `掩膜中心点坐标.txt`（**质心点阵，2 位小数，CRLF**）。E2E 钩子已挂 `window.__viewer.{enterDraw,exitDraw,buildMaskJson,exportMaskJson,thumbToOrig,getRois,genMask,wandSelect,maskGen}`。
 - **产物格式（2026-08-31 对齐参考文件定稿）**：txt 参考 `SR_code/JL1KF02B03_..._mask.txt`——`＃掩膜中心点坐标（X，Y）\r\n＃掩膜编号，X坐标，Y坐标\r\n` + `序号,质心X,质心Y`（2dp、CRLF、UTF-8）；掩码.tif 前后端一致用 **0/255**（`run_sr` 经 `cv2.threshold(>0)` 消费，0/1 等价）。原「01点阵.txt」（W×H 字符、24k² 图 ~600MB）方案**废弃**。
 - **端到端已验证**：maskgen Node 单测 **12 项全过**（含与 Pillow 逐像素比对、随机多边形仅边界 ≤1px 离散化差异、纹理整块点选、重叠→1 区 / 相接→合并 / 包含→吞噬三组 merge）；后端 `test_mask.py` 12 项全过（txt 逐字节对齐参考、tif 0/255 往返）；jsdom 冒烟 **5 项全过**（页面加载 + genMask 直出两次下载 + wandSelect 加 ROI + 合并按钮接线 + 删除命中/闪烁/移除）。
-- **剩余**：① 放大精画路径 **已砍**（09-01 预览路径定案=JPG 中间产物，不做浏览器内全分辨率读取；保持 8192 预览粗画 → `thumbToOrig` 反算全分辨率，符合已定混合精度）；② 真机浏览器实测（开发机 e2e 浏览器无法启动，jsdom 只验证接线，pako/像素管线已在 Node 层覆盖）。
+- **剩余**：① 放大精画路径 **已砍**（09-01 预览路径定案=JPG 中间产物，不做浏览器内全分辨率读取；保持 8192 预览粗画 → `thumbToOrig` 反算全分辨率，符合已定混合精度）；② 真机浏览器实测（内网盘阵：真实 2.4 万像素大图）。开发机浏览器 e2e 已恢复（`launchBrowser.js` 临时 profile），Vue3 查看器浏览器回归 38 断言已覆盖接线与行为，但真实大图内存/耗时仍待真机确认。
 
 ### 3.4 新需求（2026-08-27 晚）——已收口（09-01 预览路径定案）
 
@@ -237,15 +236,29 @@
 - ✅ **测试**：`.e2e/test-maskgen.js` **12 项**全过（纹理整块点选 + 三组 merge：重叠→1 区、相接→合并/分离→2 区、包含→吞噬）；`.e2e/test-html-mask-smoke.js` **5 项**全过（合并接线 + 删除命中/闪烁/移除；4 个 okA 全部 `await` 消除并发共享态竞争）；后端 `python -m pytest backend/tests -q` **114 全过**（无回归）。
 - ⚠️ **提交状态**：本轮改动 `tif_viewer/maskgen.js`（+142）、`tif_viewer/tif-viewer.html`（+83），连同先前未提交的 `CLAUDE.md` / `docs/README.md` / `current-question.md` 三文档，共 5 文件**未提交**；`.e2e/` 测试 gitignore 不入库。真机浏览器实测待内网（开发机 e2e 浏览器仍无法启动）。
 
+### 2026-09-01 · 阶段3 查看器 UI 组件化（HTML 交互层 → Vue3，移植不重写）
+
+- **范围**：tif-viewer.html 交互层完整迁到 Vue3——阶段1 已抽的 `tifDecode.ts`/`maskgen.ts`/`source.ts` **不动**，交互与编排用 Vue3 惯用法重写。
+- ✅ **六组件**：`TifCanvas.vue`（viewCanvas+drawCanvas 双画布 + pan/zoom/locate/resize + 掩码画布事件 + 竞态守卫）、`Toolbar.vue`（选文件/拉伸下拉/输出目录三态/自动JPG/定位 X·Y/绘制掩码/生成掩码）、`FileList.vue`（侧栏列表 + 即探 layout + jpg 状态/重新导出 + ×移除 + 收起）、`DrawPanel.vue`（矩形/多边形/魔棒/删除/容差/合并重叠/撤销/清空/导出掩码JSON/完成 + 合并四阶段进度）、`DecodeOverlay.vue`（遮罩 + 进度条 + 百分比）、`StatusBar.vue`（rec-bar，Phase2 格式兼容）。
+- ✅ **store 全量编排**：`stores/viewer.ts`（addFiles/activate/decodeRec/paintStretch/fit/pan/zoom/locatePixel/掩码全套/导出队列/fsIO），`renderTick` 计数器驱动 TifCanvas 重绘（等价 HTML 直接 render()）；重字段 `markRaw`/`shallowRef`。
+- ✅ **浏览器层 lib**：`browserKit.ts`（真实 canvas DI）、`decode.ts`（needGeo→稀疏/分块/UTIF 分派 + 分配失败回退）、`exportJpg.ts`（collect→stretch→toBlob→saver 串行导出）、`saver.ts`（FS Access/IndexedDB/downloadSaver 降级 + `_logLock` 串行日志）。
+- ✅ **E2E 钩子**：`src/viewer/e2eHooks.ts` 挂 `window.__viewer`（**始终暴露**，真机验收也靠它），行为对齐 HTML 钩子 + 新增 `setSparseMin`（改写 `SPARSE_MIN`，默认 1e8 不变）+ `recs()/activeRec()` 摘要快照。
+- ✅ **竞态守卫逐条照抄**：delClick owner + 200ms 柔和红闪（闪烁期间切图/清空不误删）、merge 期间切图丢弃结果 + 按钮禁用、export `_jpgToken` 守卫 + RangeError→`_exportCap=4096` 降档重试一次、rasterRows 每批让出主线程、decode 进度 `rec===activeRec` 才刷 UI。
+- ✅ **BigTIFF 路由修复（本阶段唯一行为偏差）**：`needGeo` 对 `probe.big` 强制走 geotiff 分块——vendored UTIF 不能解 BigTIFF（decode 后 width/height 缺失，HTML 原版同条件产出 0×0 缩略图）；`bigtiff_strips` fixture 解码正确（256×256 渐变，route='chunked'）。新增 needGeo 路由 4 项 Node 测试。
+- ✅ **验证**：`vue-tsc --noEmit` 零错误；**75 Vitest** 全绿（tifDecode 30→35 + viewMath 17 + maskgen 17 + source 4 + exportJpg 2，掩码 17 项 golden 不回归）；`npm run build` 成功；`.e2e/check-frontend-build.js`（Phase2 选择器）**全过**（`tif-canvas` 类 + `.rec-bar` 格式保持兼容）；新 `.e2e/test-vue-viewer.js` **38 断言全过**——bootstrap 30 钩子齐全 / 解码路由+像素（utif、chunked×2、bigtiff、sparse）/ 稀疏 setSparseMin / 拉伸重绘 / 定位+7s 过期 / 掩码冒烟（enterDraw→commitRect→2 ROI→buildMaskJson 反算→genMask 两次下载 mask.tif 280B + mask.txt 104B→merge→del 红闪 3670px→200ms 移除→undo/clear）/ 导出降档（假 saver 首抛 allocation → writeJpg×2 重试成功）。
+- ⚠️ **开发机浏览器 e2e 已恢复可用**：`launchBrowser.js` 每次独立临时 profile 根治 Edge「profile 单实例」Code:0；旧「e2e 浏览器无法启动」笔记（08-29/08-31 条目）作废。
+- ⚠️ **仍待真机（内网盘阵）验证**：真实 24739×24199 稀疏预览 8192 不崩、掩码直出 `掩码.tif`+`掩膜中心点坐标.txt`、2% 线性导出 JPG 8192×8013 无条纹；代码只保证按常量分块与等价行为（跨阶段红线）。
+
 ## 5. 交接（给新窗口）
 
 ### 5.1 环境约束
 
 - 开发机是**外网机**，真实遥感图全在**内网机盘阵**，无法导出/复制/读头探测。文件结构只能靠**用户回传 ENVI 头信息**（Edit Headers：Compression/Interleave）或**尺寸推断法**。不能要求用户给文件路径。
-- 开发机 e2e 浏览器无法启动（puppeteer-core + 无头 Edge，Code: 0，环境问题，与代码改动无关）；浏览器单次分配 ~2GB、Canvas 面积上限 16384²、CDN 不可达（必须本地 vendor）。
+- 开发机浏览器 e2e **可用**（`.e2e/launchBrowser.js`：puppeteer-core + 无头 Edge/Chrome + 每次独立临时 profile，根治 Code:0）；浏览器单次分配 ~2GB、Canvas 面积上限 16384²、CDN 不可达（必须本地 vendor）。
 
 ### 5.2 下一步（给新窗口）
 
+0. **Vue3 查看器真机验收（阶段3 收尾）**：内网盘阵机打开 `frontend/dist`（或 Nginx 托管），验证 24739×24199 真实大图：稀疏预览 8192 不崩、掩码直出 `掩码.tif`+`掩膜中心点坐标.txt`、2% 线性导出 JPG 8192×8013 无条纹、与 HTML 原版行为等价。
 1. **等用户回传**（两种途径，用户二选一）：
    - 用当前 `tif_viewer/tif-viewer.html` 打开 (a) 400MB 小图、(b) 报解码失败的大图，把状态栏**完整报错文本**发来（含 `[属性 W×H，bits/spp，类型，压缩code]`）。
    - 或回传 ENVI 头信息：**Compression 字段** + 文件字节大小 + 宽×高 + 有没有 `.ovr`（用户已确认 Interleave=BSQ，单波段下不是瓶颈）。

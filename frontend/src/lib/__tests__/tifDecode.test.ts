@@ -17,6 +17,7 @@ import {
   computeStats, stretchMap, stretchRgba, planExport,
   SPARSE_PREVIEW_MAX, type SparseLayoutOk, type ProbeInfo,
 } from '../tifDecode.js';
+import { needGeo } from '../decode.js';
 import { FileSource } from '../source.js';
 
 interface FixtureMeta {
@@ -198,12 +199,38 @@ describe('probeImage', () => {
     expect(probe.bits).toBe(32);
   });
 
-  it('bigtiff_strips → BigTIFF 尺寸正确', async () => {
+  it('bigtiff_strips → BigTIFF 尺寸正确 + probe.big=true', async () => {
     const probe = await probeImage(new Blob([fixtureBuf('bigtiff_strips.tif')]));
     expect(probe.W).toBe(256);
     expect(probe.H).toBe(256);
     expect(probe.spp).toBe(1);
     expect(probe.compression).toBe(1);
+    expect(probe.big).toBe(true);
+  });
+
+  it('classic TIFF → probe.big=false', async () => {
+    const probe = await probeImage(new Blob([fixtureBuf('rgb8.tif')]));
+    expect(probe.big).toBe(false);
+  });
+});
+
+/* ---------------- 解码路由决策（needGeo） ---------------- */
+describe('needGeo（解码路由：小 8bit → UTIF，其余 → geotiff）', () => {
+  const base: ProbeInfo = {
+    W: 64, H: 64, spp: 3, bits: 8, sampleFormat: 1, photometric: 2,
+    compression: 1, layout: '', image: undefined as never, tiff: undefined,
+  };
+  it('小 8bit classic → false（走 UTIF）', () => {
+    expect(needGeo({ ...base, big: false })).toBe(false);
+  });
+  it('小 8bit BigTIFF → true（UTIF 不能解，走 geotiff 分块）', () => {
+    expect(needGeo({ ...base, big: true })).toBe(true);
+  });
+  it('16bit → true', () => {
+    expect(needGeo({ ...base, bits: 16, big: false })).toBe(true);
+  });
+  it('浮点 → true', () => {
+    expect(needGeo({ ...base, sampleFormat: 3, big: false })).toBe(true);
   });
 });
 
