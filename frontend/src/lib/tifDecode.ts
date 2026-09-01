@@ -26,7 +26,7 @@ import type { Source } from './source.js';
 export const PREVIEW_MAX = 2048;          // 整图预览长边上限（chunked/UTIF 路径；保快）
 export const SPARSE_PREVIEW_MAX = 8192;   // 稀疏条带预览长边上限（≈原始 1/3）
 export const SAFE = 1.3e9;                // 浏览器单次 ArrayBuffer 分配安全线
-export const SPARSE_MIN = 1e8;            // 无压缩+条带+单波段大图走稀疏预览的最小字节数
+export let SPARSE_MIN = 1e8;              // 无压缩+条带+单波段大图走稀疏预览的最小字节数
 export const JPG_MAX = 8192;              // JPG 导出长边上限
 export const JPG_QUALITY = 0.95;
 export const EXPORT_BUDGET = 2.4e9;       // 导出 src+RGBA 的 JS 可见分配预算
@@ -34,6 +34,12 @@ export const MULTI_BAND_LONG = 8192;      // 多波段导出长边硬上限
 export const BAND_ACC_LIMIT = 4e8;        // 分块 Float64 累加器超此字节 → 带通累加
 export const ACC_BAND_ROWS = 256;         // 带通累加每带输出行数
 export const CANVAS_AREA_MAX = 268435456; // Chromium 画布面积上限（16384²）
+
+/** 测试钩子：改写稀疏路径判定阈值（默认 1e8 不动）。浏览器回归用小 fixture 走稀疏路由时调用。 */
+export function setSparseMin(n: number): void {
+  SPARSE_MIN = n;
+}
+
 export const COMP_NAMES: Record<number, string> = {
   1: '无压缩', 5: 'LZW', 6: 'JPEG', 7: 'JPEG', 8: 'Deflate', 32946: '旧Deflate',
   32773: 'PackBits', 34712: 'JPEG2000', 34925: 'LZMA', 50000: 'ZSTD',
@@ -62,6 +68,8 @@ export interface ProbeInfo {
   layout: string;
   image: GeoTiffImageLike;
   tiff: unknown;
+  /** BigTIFF（magic 43）。vendored UTIF 不能解 BigTIFF → 强制走 geotiff 分块（解码路由用） */
+  big?: boolean;
 }
 
 export interface SamplePlan {
@@ -508,6 +516,18 @@ export function sparseCollect(
 // 直接从文件头部解析少量关键 IFD 标签（兼容 classic TIFF 与 BigTIFF）。
 // geotiff 的 getFileDirectory() 在部分构建里是惰性桩，读不到 photometric/compression，故自行解析。
 const TIFF_HEAD = 1048576;   // 1MB（比 parseStrips 的 2MB 小：仅需读常用标量标签）
+/** 读头部 magic 判断是否 BigTIFF（magic 43 vs classic 42）。vendored UTIF 不能解 BigTIFF，
+ *  decode 路由（needGeo）据此把小的 8bit BigTIFF 也走 geotiff 分块。 */
+export function isBigTiff(source: Source): Promise<boolean> {
+  return source.read(0, 4).then((buf) => {
+    const u8 = new Uint8Array(buf);
+    if (u8.length < 4) return false;
+    const le = u8[0] === 0x49;   // 'II' = 小端
+    const dv = new DataView(buf);
+    return le ? dv.getUint16(2, true) === 43 : dv.getUint16(2, false) === 43;
+  }).catch(() => false);
+}
+
 export function tiffTags(source: Source): Promise<Record<number, number>> {
   return source.read(0, TIFF_HEAD).then((buf) => {
     const u8 = new Uint8Array(buf), dv = new DataView(buf);
@@ -572,7 +592,7 @@ export function probeImage(file: Blob): Promise<ProbeInfo> {
         if (typeof sf !== 'number' || !isFinite(sf)) sf = 1;
         const ph = tags[262] != null ? tags[262] : null;
         image._ph = ph;   // 供 getSamplePlan 判断反相
-        return {
+        return bigTiffFromBlob(file).then((big) => ({
           W: image.getWidth(), H: image.getHeight(),
           spp: image.getSamplesPerPixel(), bits: safeBits(image),
           sampleFormat: sf,             // 1=无符号整数 2=有符号 3=浮点
@@ -580,7 +600,8 @@ export function probeImage(file: Blob): Promise<ProbeInfo> {
           compression: tags[259] != null ? tags[259] : null,
           layout: layoutInfo(tags),
           image, tiff,
-        };
+          big,
+        }));
       });
     });
   });
@@ -590,6 +611,11 @@ export function probeImage(file: Blob): Promise<ProbeInfo> {
 // 为保持 probeImage 的 Blob 签名不变（Node 测试用 FileReader shim），此处直接包一层。
 async function tiffTagsFromBlob(file: Blob): Promise<Record<number, number>> {
   return tiffTags({ size: file.size, read: (o, l) => file.slice(o, o + l).arrayBuffer() });
+}
+
+// BigTIFF 判定同走 Blob→Source 包装（probeImage 加 big 字段）
+function bigTiffFromBlob(file: Blob): Promise<boolean> {
+  return isBigTiff({ size: file.size, read: (o, l) => file.slice(o, o + l).arrayBuffer() });
 }
 
 /* ---------------- Canvas 依赖注入（浏览器端注入真实 canvas，Node 不覆盖） ----------------
