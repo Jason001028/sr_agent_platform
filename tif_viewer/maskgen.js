@@ -241,18 +241,22 @@
         return new Uint8Array(buf);
     }
 
-    /* ---------------- 魔法棒：容差 + 边缘屏障 连通区域生长 ----------------
+    /* ---------------- 魔法棒：容差 + 边缘屏障 连通区域生长（自适应） ----------------
        rgba 为显示用 RGBA（Uint8ClampedArray，w*h*4）；(sx,sy) 种子像素；
-       tol 颜色容差（与种子色欧氏距离 ≤ tol）；edgeThresh 边缘梯度阈值（超过视为屏障）。
+       tol 用户容差（窗口下限）；edgeThresh 边缘梯度阈值（超过视为屏障）。
+       选区判定为「自适应区域生长」：7×7 种子窗初始化运行均值/方差，窗口 =
+       max(tol, K*spread)，spread 为已选区像素相对运行均值的逐像素 RGB 距离
+       RMS（除以 √cnt，与距离同单位，消除 per-channel σ 与 RGB 欧氏距离的 √3
+       维度错配）。窗口随选区增量重算、单调不减 —— 有纹理的区域能一次点选填
+       满，而非旧逻辑「固定 tol 对比种子像素」只选到种子邻域小椭圆。
        返回 Uint8Array(w*h) 二值选区（1=选中）。行扫描泛洪，带 8e6 像素安全上限。 */
     var WAND_MAX_PX = 8000000;
+    var WAND_K = 2.5;
     function floodSelect(w, h, rgba, sx, sy, tol, edgeThresh) {
         var n = w * h;
         var sel = new Uint8Array(n);
         if (sx < 0 || sx >= w || sy < 0 || sy >= h) return sel;
-        var seedIdx = sy * w + sx;
-        var sr = rgba[seedIdx * 4], sg = rgba[seedIdx * 4 + 1], sb = rgba[seedIdx * 4 + 2];
-        var tol2 = tol * tol, eth2 = edgeThresh * edgeThresh;
+        var eth2 = edgeThresh * edgeThresh;
         // 边缘屏障 =「穿越式」：相邻两像素灰差 > edgeThresh 才阻断跨越，不拦同侧像素。
         // edgeR[i]=1 表示 (i, i+1) 之间有强边缘；edgeD[i]=1 表示 (i, i+w) 之间有强边缘。
         var edgeR = new Uint8Array(n), edgeD = new Uint8Array(n);
@@ -273,7 +277,46 @@
                 }
             }
         }
-        sel[seedIdx] = 1;
+        // 7×7 种子窗初始化运行统计（避免以单像素为均值时的过早偏置）
+        var sumR = 0, sumG = 0, sumB = 0, sqR = 0, sqG = 0, sqB = 0, cnt = 0;
+        for (var dy = -3; dy <= 3; dy++) {
+            var py = sy + dy;
+            if (py < 0 || py >= h) continue;
+            for (var dx = -3; dx <= 3; dx++) {
+                var px = sx + dx;
+                if (px < 0 || px >= w) continue;
+                var o = (py * w + px) * 4;
+                var r = rgba[o], g = rgba[o + 1], b = rgba[o + 2];
+                sumR += r; sumG += g; sumB += b;
+                sqR += r * r; sqG += g * g; sqB += b * b; cnt++;
+            }
+        }
+        var muR = sumR / cnt, muG = sumG / cnt, muB = sumB / cnt;
+        function spread() {
+            var vr = Math.max(0, sqR - cnt * muR * muR);
+            var vg = Math.max(0, sqG - cnt * muG * muG);
+            var vb = Math.max(0, sqB - cnt * muB * muB);
+            return Math.sqrt(vr + vg + vb) / Math.sqrt(cnt);
+        }
+        var window = Math.max(tol, WAND_K * spread());
+        var win2 = window * window, since = 0;
+        function addStat(i) {
+            var o = i * 4;
+            var r = rgba[o], g = rgba[o + 1], b = rgba[o + 2];
+            sumR += r; sumG += g; sumB += b;
+            sqR += r * r; sqG += g * g; sqB += b * b; cnt++;
+            muR = sumR / cnt; muG = sumG / cnt; muB = sumB / cnt;
+            if ((++since & 255) === 0) {   // 每 256 像素重算一次窗口，单调不减
+                var nw = Math.max(tol, WAND_K * spread());
+                if (nw > window) { window = nw; win2 = window * window; }
+            }
+        }
+        function colorOk(i) {
+            var o = i * 4;
+            var dr = rgba[o] - muR, dg = rgba[o + 1] - muG, db = rgba[o + 2] - muB;
+            return dr * dr + dg * dg + db * db <= win2;
+        }
+        sel[sy * w + sx] = 1;
         var stack = [sx, sy];
         var count = 0;
         while (stack.length) {
@@ -281,13 +324,13 @@
             var xl = xx;
             while (xl > 0) {
                 var i2 = yy * w + (xl - 1);
-                if (!sel[i2] && !edgeR[i2] && colorClose(rgba, i2, sr, sg, sb, tol2)) { sel[i2] = 1; xl--; }
+                if (!sel[i2] && !edgeR[i2] && colorOk(i2)) { sel[i2] = 1; addStat(i2); xl--; }
                 else break;
             }
             var xr = xx;
             while (xr < w - 1) {
                 var i3 = yy * w + (xr + 1);
-                if (!sel[i3] && !edgeR[i3 - 1] && colorClose(rgba, i3, sr, sg, sb, tol2)) { sel[i3] = 1; xr++; }
+                if (!sel[i3] && !edgeR[i3 - 1] && colorOk(i3)) { sel[i3] = 1; addStat(i3); xr++; }
                 else break;
             }
             for (var c = xl; c <= xr; c++) {
@@ -296,20 +339,15 @@
                 var idx = yy * w + c;
                 if (yy > 0) {
                     var up = (yy - 1) * w + c;
-                    if (!sel[up] && !edgeD[idx - w] && colorClose(rgba, up, sr, sg, sb, tol2)) { sel[up] = 1; stack.push(c, yy - 1); }
+                    if (!sel[up] && !edgeD[idx - w] && colorOk(up)) { sel[up] = 1; addStat(up); stack.push(c, yy - 1); }
                 }
                 if (yy < h - 1) {
                     var dn = (yy + 1) * w + c;
-                    if (!sel[dn] && !edgeD[idx] && colorClose(rgba, dn, sr, sg, sb, tol2)) { sel[dn] = 1; stack.push(c, yy + 1); }
+                    if (!sel[dn] && !edgeD[idx] && colorOk(dn)) { sel[dn] = 1; addStat(dn); stack.push(c, yy + 1); }
                 }
             }
         }
         return sel;
-    }
-    function colorClose(rgba, i, sr, sg, sb, tol2) {
-        var o = i * 4;
-        var dr = rgba[o] - sr, dg = rgba[o + 1] - sg, db = rgba[o + 2] - sb;
-        return dr * dr + dg * dg + db * db <= tol2;
     }
 
     /* ---------------- 洞填充：把无法从边界背景到达的 0 像素填成 1 ----------------
@@ -439,6 +477,201 @@
         return rx * rx + ry * ry;
     }
 
+    /* ---------------- 光栅并集 + 连通分量合并（合并重叠/贴边区域） ----------------
+       掩码 .tif 的栅格化语义本就是「重叠/贴边即并集」（见 rowIntervals）。这里把
+       多个 ROI 光栅化成并集 mask，按连通分量重追踪轮廓：重叠/贴边的区域并成一个
+       连通多边形、真正分开的区域各自保留 —— 供「合并重叠」按钮调用。
+       polys 顶点坐标为给定像素空间（调用方传缩略图坐标）。 */
+    function rasterMask(polys, w, h) {
+        var m = new Uint8Array(w * h);
+        for (var r = 0; r < h; r++) {
+            var gaps = rowIntervals(polys, r);
+            for (var g = 0; g < gaps.length; g++) {
+                var c0 = Math.max(0, Math.ceil(gaps[g][0] - EPS));
+                var c1 = Math.min(w - 1, Math.floor(gaps[g][1] + EPS));
+                if (c0 <= c1) m.fill(1, r * w + c0, r * w + c1 + 1);
+            }
+        }
+        return m;
+    }
+    /* 连通分量标记：返回每个分量的像素索引列表（就地清零 work，避免另开标签数组）。 */
+    function connectedComponents(mask, w, h) {
+        var work = mask.slice();
+        var comps = [];
+        for (var y = 0; y < h; y++) {
+            for (var x = 0; x < w; x++) {
+                var i = y * w + x;
+                if (!work[i]) continue;
+                var list = [];
+                var q = [i];
+                work[i] = 0;
+                while (q.length) {
+                    var cur = q.pop();
+                    list.push(cur);
+                    var cx = cur % w, cy = (cur / w) | 0;
+                    if (cx > 0) { var a = cur - 1; if (work[a]) { work[a] = 0; q.push(a); } }
+                    if (cx < w - 1) { var b = cur + 1; if (work[b]) { work[b] = 0; q.push(b); } }
+                    if (cy > 0) { var c = cur - w; if (work[c]) { work[c] = 0; q.push(c); } }
+                    if (cy < h - 1) { var d = cur + w; if (work[d]) { work[d] = 0; q.push(d); } }
+                }
+                comps.push(list);
+            }
+        }
+        return comps;
+    }
+    /* 合并重叠/贴边区域（协程版）：
+       并集 mask（四周垫 1px 背景保证轮廓闭环）→ 洞填充 → 各连通分量在 **bbox 子图**
+       重追踪轮廓 + RDP 简化 → 返回合并后的多边形（原坐标空间）。
+       重循环按批让出主线程（gen 每批 yield {phase, progress}）：浏览器用
+       mergeConnectedAsync 驱动可实时刷进度、UI 不冻结；Node/测试用 mergeConnected
+       同步驱动到完成。每连通域只在自身 bbox 子图（+1px 背景）追踪，不再整图重扫/整图分配。 */
+    function* mergeConnectedGen(polys, w, h) {
+        var pw = w + 2, ph = h + 2, n = pw * ph;
+        var ROWS = 128;      // 栅格化每批行数
+        var OPS = 1 << 17;   // BFS/扫描/填充每批操作数（~13 万，单批 <16ms 预算）
+        var m = new Uint8Array(n);
+
+        /* 阶段 1：并集栅格化（逐行，每 ROWS 行让出） */
+        var r = 0;
+        while (r < h) {
+            var rEnd = Math.min(r + ROWS, h);
+            for (; r < rEnd; r++) {
+                var gaps = rowIntervals(polys, r);
+                for (var g = 0; g < gaps.length; g++) {
+                    var c0 = Math.max(0, Math.ceil(gaps[g][0] - EPS));
+                    var c1 = Math.min(w - 1, Math.floor(gaps[g][1] + EPS));
+                    if (c0 <= c1) m.fill(1, (r + 1) * pw + c0 + 1, (r + 1) * pw + c1 + 2);
+                }
+            }
+            yield { phase: '栅格化', progress: 0.25 * (r / h) };
+        }
+
+        /* 阶段 2：洞填充——从边框背景可达的 0 像素 BFS 标 out，不可达 0 就地补 1（每 OPS 让出） */
+        var out = new Uint8Array(n);
+        var stack = [];
+        for (var x = 0; x < pw; x++) {
+            if (!m[x]) { out[x] = 1; stack.push(x); }
+            var bI = (ph - 1) * pw + x;
+            if (!m[bI]) { out[bI] = 1; stack.push(bI); }
+        }
+        for (var yy = 0; yy < ph; yy++) {
+            var lI = yy * pw, rI = yy * pw + pw - 1;
+            if (!m[lI]) { out[lI] = 1; stack.push(lI); }
+            if (!m[rI]) { out[rI] = 1; stack.push(rI); }
+        }
+        var visited = 0;
+        while (stack.length) {
+            var ops = 0;
+            while (stack.length && ops++ < OPS) {
+                var i = stack.pop();
+                visited++;
+                var cx = i % pw, cy = (i / pw) | 0;
+                if (cx > 0) { var a = i - 1; if (!m[a] && !out[a]) { out[a] = 1; stack.push(a); } }
+                if (cx < pw - 1) { var d = i + 1; if (!m[d] && !out[d]) { out[d] = 1; stack.push(d); } }
+                if (cy > 0) { var u = i - pw; if (!m[u] && !out[u]) { out[u] = 1; stack.push(u); } }
+                if (cy < ph - 1) { var dn = i + pw; if (!m[dn] && !out[dn]) { out[dn] = 1; stack.push(dn); } }
+            }
+            yield { phase: '洞填充', progress: 0.25 + 0.25 * Math.min(1, visited / n) };
+        }
+        for (var p = 0; p < n; p++) if (!m[p] && !out[p]) m[p] = 1;
+
+        /* 阶段 3：连通域（行扫描 + BFS，每 OPS 让出）——记像素表 + bbox，m 就地清零当 work */
+        var comps = [];
+        var y = 0, col = 0, flood = 0, scanned = 0;
+        var list = null, bfs = null, box = null;
+        var scanDone = false;
+        while (!scanDone || bfs) {
+            var ops2 = 0;
+            while (ops2++ < OPS) {
+                if (bfs) {
+                    if (bfs.length) {
+                        var ii = bfs.pop();
+                        flood++;
+                        var fx = ii % pw, fy = (ii / pw) | 0;
+                        if (fx < box[0]) box[0] = fx; else if (fx > box[2]) box[2] = fx;
+                        if (fy < box[1]) box[1] = fy; else if (fy > box[3]) box[3] = fy;
+                        list.push(ii);
+                        if (fx > 0) { var na = ii - 1; if (m[na]) { m[na] = 0; bfs.push(na); } }
+                        if (fx < pw - 1) { var nb = ii + 1; if (m[nb]) { m[nb] = 0; bfs.push(nb); } }
+                        if (fy > 0) { var nc = ii - pw; if (m[nc]) { m[nc] = 0; bfs.push(nc); } }
+                        if (fy < ph - 1) { var nd = ii + pw; if (m[nd]) { m[nd] = 0; bfs.push(nd); } }
+                    } else {
+                        comps.push({ list: list, box: box });
+                        list = null; bfs = null; box = null;
+                    }
+                } else {
+                    while (y < ph && col >= pw) { y++; col = 0; }
+                    if (y >= ph) { scanDone = true; break; }
+                    var i3 = y * pw + col;
+                    scanned++;
+                    if (m[i3]) { m[i3] = 0; list = []; box = [col, y, col, y]; bfs = [i3]; }
+                    else col++;
+                }
+            }
+            yield { phase: '连通域', progress: 0.5 + 0.25 * Math.min(1, (scanned + flood) / (2 * n)) };
+        }
+
+        /* 阶段 4：逐连通域在 bbox 子图（+1px 背景）重追踪轮廓 + 简化；子图填充每 OPS 让出 */
+        var outPts = [];
+        for (var c = 0; c < comps.length; c++) {
+            var cm = comps[c];
+            var bw = cm.box[2] - cm.box[0] + 1, bh = cm.box[3] - cm.box[1] + 1;
+            var sw2 = bw + 2, sh2 = bh + 2;
+            var sub = new Uint8Array(sw2 * sh2);
+            var l2 = cm.list, li = 0;
+            while (li < l2.length) {
+                var liEnd = Math.min(li + OPS, l2.length);
+                for (; li < liEnd; li++) {
+                    var gi = l2[li];
+                    var gx = gi % pw, gy = (gi / pw) | 0;
+                    sub[(gy - cm.box[1] + 1) * sw2 + (gx - cm.box[0] + 1)] = 1;
+                }
+                yield { phase: '轮廓提取', progress: 0.75 + 0.25 * ((c + li / l2.length) / comps.length) };
+            }
+            var poly = traceContour(sub, sw2, sh2);
+            if (poly.length) {
+                var offX = cm.box[0] - 2, offY = cm.box[1] - 2;
+                var pts = new Array(poly.length);
+                for (var k = 0; k < poly.length; k++) pts[k] = [poly[k][0] + offX, poly[k][1] + offY];
+                poly = simplifyPoly(pts, 0.5);
+                if (poly.length >= 3) outPts.push(poly);
+            }
+        }
+        return outPts;
+    }
+    /* 同步版（Node 测试 / 兼容）：直接驱动 gen 到完成，忽略 yield。 */
+    function mergeConnected(polys, w, h) {
+        var g = mergeConnectedGen(polys, w, h);
+        var s = g.next();
+        while (!s.done) s = g.next();
+        return s.value;
+    }
+    /* 协程版（浏览器主线程）：每批 setTimeout 让出可实时刷进度；onPhase 阶段名、onProgress 0..1。 */
+    function mergeConnectedAsync(polys, w, h, opts) {
+        opts = opts || {};
+        var g = mergeConnectedGen(polys, w, h);
+        var onPhase = opts.onPhase || null, onProgress = opts.onProgress || null;
+        var lastPct = -1;
+        function emit(s) {
+            if (!s) return;
+            if (onPhase && s.phase) onPhase(s.phase);
+            if (onProgress && typeof s.progress === 'number') {
+                var pct = Math.round(s.progress * 100);
+                if (pct !== lastPct) { lastPct = pct; onProgress(s.progress); }
+            }
+        }
+        return new Promise(function (resolve, reject) {
+            (function step() {
+                var s;
+                try { s = g.next(); }
+                catch (e) { reject(e); return; }
+                if (s.done) { resolve(s.value); return; }
+                emit(s.value);
+                setTimeout(step, 0);
+            })();
+        });
+    }
+
     return {
         polygonCentroid: polygonCentroid,
         buildMaskTxt: buildMaskTxt,
@@ -447,6 +680,9 @@
         floodSelect: floodSelect,
         fillRegionHoles: fillRegionHoles,
         traceContour: traceContour,
-        simplifyPoly: simplifyPoly
+        simplifyPoly: simplifyPoly,
+        rasterMask: rasterMask,
+        mergeConnected: mergeConnected,
+        mergeConnectedAsync: mergeConnectedAsync
     };
 });

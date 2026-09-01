@@ -6,7 +6,7 @@
 
 - **窗口交接**：新会话先读 [docs/status/current-question.md](docs/status/current-question.md)，再读 [docs/experience/gui-experience.md](docs/experience/gui-experience.md)（经验），即可无断点继续。
 - **分类速查**：需求/计划 → [docs/planning/](docs/planning/)；经验 → [docs/experience/](docs/experience/)；规范 → [docs/conventions/](docs/conventions/)；背景知识 → [docs/knowledge/](docs/knowledge/)。
-- **新增文档**：先看 [docs/README.md](docs/README.md) §二分类规则，再落盘对应类目。
+- **新增文档**：先看 [docs/README.md](docs/README.md) §三分类规则，再落盘对应类目。
 
 ## 代码主产物
 

@@ -183,9 +183,11 @@
             <button id="toolRect" class="on">矩形</button>
             <button id="toolPoly">多边形</button>
             <button id="toolWand" title="魔棒：点击预览图上某处，按颜色容差自动选中连通区域并转成多边形 ROI">魔棒</button>
+            <button id="toolDel" title="删除：点击某个区域，柔和红色闪烁后移除">删除</button>
             <span class="lbl" title="魔棒颜色容差（0-255，与种子像素的欧氏距离）">容差</span>
             <input id="wandTol" type="number" min="0" max="255" step="1" value="20" class="num" title="魔棒颜色容差（0-255）">
             <span class="sep"></span>
+            <button id="mergeRoi" title="合并重叠：把重叠/贴边的区域并成连通区（掩码本就是并集语义，合并后预览不叠色、中心点不重复）">合并重叠</button>
             <button id="undoRoi">撤销</button>
             <button id="clearRoi">清空</button>
             <button id="exportMask">导出掩码JSON</button>
@@ -205,10 +207,12 @@ var marker = null;   // {tx, ty, until}：缩略图坐标 + 过期时间（红�
 var canvas, ctx, stage, mask, maskTitle, maskSub, progressWrap, progressBar, progressPct, errBox;
 var drawCanvas, drawCtx;                       // 掩码绘制叠加层（与 viewCanvas 同几何，pointer-events:none）
 var drawMode = false;                          // 是否处于「绘制掩码」模式
-var drawTool = 'rect';                         // 'rect' | 'polygon' | 'wand'
+var drawTool = 'rect';                         // 'rect' | 'polygon' | 'wand' | 'del'
 var pendingRect = null;                        // 绘制中的矩形 {x0,y0,x1,y1}（缩略图坐标）
 var pendingPts = null;                         // 绘制中的多边形顶点（缩略图坐标）
 var hoverPt = null;                            // 多边形当前鼠标位置（缩略图坐标，画橡皮筋）
+var hoverRoi = -1;                             // 删除工具：悬停命中的 ROI 下标（-1=无）
+var flashRoi = -1;                             // 删除工具：正在闪烁待删的 ROI 下标（-1=无）
 
 var PREVIEW_MAX = 2048;        // 整图预览长边上限（chunked/UTIF 路径；保快）
 var SPARSE_PREVIEW_MAX = 8192; // 稀疏条带预览长边上限（≈原始 1/3：网页显示与导出 JPG 同清晰度；无压缩文件抽样读仍秒级）。
@@ -1338,6 +1342,11 @@ function renderDraw() {
     var rois = getRois();
     drawCtx.lineJoin = 'round';
     for (var i = 0; i < rois.length; i++) strokePoly(rois[i], 'rgba(43,123,221,0.28)', '#2b7bdd', 2, false);
+    if (drawTool === 'del') {
+        // 删除工具叠加层：悬停柔和红边 + 待删区域柔和红闪（盖在普通蓝色之上，不辣眼）
+        if (hoverRoi >= 0 && hoverRoi < rois.length) strokePoly(rois[hoverRoi], 'rgba(216,90,80,0.14)', '#d8605a', 1.5, false);
+        if (flashRoi >= 0 && flashRoi < rois.length) strokePoly(rois[flashRoi], 'rgba(216,90,80,0.5)', '#d8605a', 2.5, false);
+    }
     if (pendingPts && pendingPts.length) {
         strokePoly(pendingPts, 'rgba(255,176,46,0.15)', '#ffb02e', 2, true);
         var last = pendingPts[pendingPts.length - 1];
@@ -1368,13 +1377,13 @@ function renderDraw() {
 function enterDraw() {
     if (!activeRec || !activeRec.thumb) { showErr('请先打开一张图'); return; }
     drawMode = true; drawTool = 'rect';
-    pendingRect = null; pendingPts = null; hoverPt = null;
+    pendingRect = null; pendingPts = null; hoverPt = null; hoverRoi = -1; flashRoi = -1;
     canvas.style.cursor = 'crosshair';
     updateDrawPanel(); renderDraw();
 }
 function exitDraw() {
     drawMode = false;
-    pendingRect = null; pendingPts = null; hoverPt = null;
+    pendingRect = null; pendingPts = null; hoverPt = null; hoverRoi = -1; flashRoi = -1;
     canvas.style.cursor = '';
     updateDrawPanel(); renderDraw();
 }
@@ -1385,9 +1394,11 @@ function updateDrawPanel() {
     if (mb) { mb.textContent = drawMode ? '绘制掩码 ✓' : '绘制掩码'; mb.classList.toggle('on', drawMode); }
     var tr = document.getElementById('toolRect'), tp = document.getElementById('toolPoly');
     var tw = document.getElementById('toolWand');
+    var td = document.getElementById('toolDel');
     if (tr) tr.classList.toggle('on', drawTool === 'rect');
     if (tp) tp.classList.toggle('on', drawTool === 'polygon');
     if (tw) tw.classList.toggle('on', drawTool === 'wand');
+    if (td) td.classList.toggle('on', drawTool === 'del');
     var cnt = document.getElementById('drawCount');
     var n = getRois().length;
     if (cnt) cnt.textContent = n ? ('ROI ' + n + ' 个') : '';
@@ -1417,6 +1428,70 @@ function clearRois() {
     pendingPts = null; pendingRect = null; hoverPt = null;
     updateDrawPanel(); renderDraw();
 }
+function mergeRois() {
+    if (!activeRec || !activeRec.thumb) { showErr('请先打开一张图'); return; }
+    var rois = getRois();
+    if (rois.length < 2) { showToast('少于 2 个区域，无需合并'); return; }
+    var tw = activeRec.thumb.width, th = activeRec.thumb.height;
+    var before = rois.length;
+    var owner = activeRec;   // 捕获：合并期间切图则丢弃结果（同步耗时大，防止写到别的图上）
+    var btn = document.getElementById('mergeRoi');
+    btn.disabled = true;
+    showMask('正在合并重叠（缩略图 ' + tw + '×' + th + '，' + before + ' 个区域）…', '准备中…', true);
+    return MaskGen.mergeConnectedAsync(rois, tw, th, {
+        onPhase: function (phase) { maskSub.textContent = phase + '…'; },
+        onProgress: function (f) {
+            var pct = Math.round(f * 100);
+            progressBar.style.width = pct + '%';
+            progressPct.textContent = pct + '%';
+        }
+    }).then(function (merged) {
+        hideMask(); btn.disabled = false;
+        if (activeRec !== owner) return;          // 合并期间切了图，丢弃不写
+        if (!merged.length) { showErr('合并失败：没有可保留的区域'); return; }
+        activeRec.maskRois = merged;
+        pendingPts = null; pendingRect = null; hoverRoi = -1; flashRoi = -1;
+        updateDrawPanel(); renderDraw();
+        showToast('合并重叠：' + before + ' 个区域 → ' + merged.length + ' 个连通区');
+    }).catch(function (e) {
+        hideMask(); btn.disabled = false;
+        if (activeRec === owner) showErr('合并失败：' + ((e && e.message) || e));
+    });
+}
+/* 点与多边形包含判定（射线法，用于删除工具命中检测） */
+function pointInPoly(x, y, poly) {
+    var inside = false;
+    for (var i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        var xi = poly[i][0], yi = poly[i][1], xj = poly[j][0], yj = poly[j][1];
+        if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) inside = !inside;
+    }
+    return inside;
+}
+function hitRoi(p) {
+    var rois = getRois();
+    for (var i = 0; i < rois.length; i++) if (pointInPoly(p.x, p.y, rois[i])) return i;
+    return -1;
+}
+function delClick(p) {
+    var idx = hitRoi(p);
+    if (idx < 0) return;
+    var rois = getRois();
+    if (idx >= rois.length) return;
+    var target = rois[idx];
+    var owner = activeRec;   // 捕获所属图像：闪烁期间切图/清空则不再删除
+    flashRoi = idx;
+    renderDraw();
+    setTimeout(function () {
+        // 延迟期间 ROI 列表可能已变（如点了撤销），按对象身份再定位，避免误删
+        if (activeRec === owner) {
+            var list = owner.maskRois;
+            var k = list ? list.indexOf(target) : -1;
+            if (k >= 0) list.splice(k, 1);
+        }
+        flashRoi = -1;
+        updateDrawPanel(); renderDraw();
+    }, 200);
+}
 function buildMaskJson() {
     var W = activeRec.W, H = activeRec.H;
     var polys = getRois().map(function (pts, i) {
@@ -1444,7 +1519,7 @@ function exportMaskJson() {
    Moore 追踪提外轮廓、RDP 简化，转成与矩形/多边形一致的缩略图坐标 ROI。
    大缩略图只取种子周围 WAND_WIN² 窗口，避免整幅 getImageData 的内存压力。 */
 var WAND_WIN = 4096;
-var WAND_EDGE = 32;
+var WAND_EDGE = 64;
 function wandSelect(sx, sy) {
     if (!activeRec || !activeRec.thumb || typeof MaskGen === 'undefined') { showErr('魔棒不可用'); return; }
     var thumb = activeRec.thumb, tw = thumb.width, th = thumb.height;
@@ -1493,9 +1568,9 @@ function genMask() {
     }).then(function (tif) {
         var txt = MaskGen.buildMaskTxt(W, H, polys);
         hideMask();
-        downloadBlob(new Blob([tif], { type: 'image/tiff' }), base + '.掩码.tif');
-        downloadBlob(new Blob([txt], { type: 'text/plain;charset=utf-8' }), base + '掩膜中心点坐标.txt');
-        showToast('已生成 掩码.tif + 掩膜中心点坐标.txt（' + polys.length + ' 区域，分辨率 ' + W + '×' + H + '）');
+        downloadBlob(new Blob([tif], { type: 'image/tiff' }), base + '_mask.tif');
+        downloadBlob(new Blob([txt], { type: 'text/plain;charset=utf-8' }), base + '_mask.txt');
+        showToast('已生成 mask.tif + mask.txt（' + polys.length + ' 区域，分辨率 ' + W + '×' + H + '）');
     }).catch(function (e) {
         hideMask();
         showErr('生成掩码失败：' + ((e && e.message) || e));
@@ -1752,6 +1827,9 @@ window.addEventListener('DOMContentLoaded', function () {
             } else if (drawTool === 'wand') {
                 wandSelect(Math.round(p.x), Math.round(p.y));
                 return;
+            } else if (drawTool === 'del') {
+                delClick(p);
+                return;
             } else {
                 if (!pendingPts) pendingPts = [];
                 pendingPts.push([p.x, p.y]);
@@ -1764,6 +1842,12 @@ window.addEventListener('DOMContentLoaded', function () {
         canvas.classList.add('dragging');
     });
     window.addEventListener('mousemove', function (e) {
+        if (drawMode && drawTool === 'del') {
+            var pd = mouseToThumb(e);
+            var hit = hitRoi(pd);
+            if (hit !== hoverRoi) { hoverRoi = hit; renderDraw(); }
+            return;
+        }
         if (drawMode && (pendingRect || pendingPts)) {
             var p = mouseToThumb(e);
             hoverPt = p;
@@ -1803,8 +1887,12 @@ window.addEventListener('DOMContentLoaded', function () {
         drawTool = 'polygon'; pendingRect = null; updateDrawPanel(); renderDraw();
     });
     document.getElementById('toolWand').addEventListener('click', function () {
-        drawTool = 'wand'; pendingRect = null; pendingPts = null; updateDrawPanel(); renderDraw();
+        drawTool = 'wand'; pendingRect = null; pendingPts = null; hoverRoi = -1; updateDrawPanel(); renderDraw();
     });
+    document.getElementById('toolDel').addEventListener('click', function () {
+        drawTool = 'del'; pendingRect = null; pendingPts = null; hoverRoi = -1; updateDrawPanel(); renderDraw();
+    });
+    document.getElementById('mergeRoi').addEventListener('click', mergeRois);
     document.getElementById('genMaskBtn').addEventListener('click', genMask);
     document.getElementById('undoRoi').addEventListener('click', undoRoi);
     document.getElementById('clearRoi').addEventListener('click', clearRois);
@@ -1813,7 +1901,7 @@ window.addEventListener('DOMContentLoaded', function () {
     window.addEventListener('keydown', function (e) {
         if (!drawMode) return;
         if (e.key === 'Escape') {
-            pendingPts = null; pendingRect = null; hoverPt = null; renderDraw();
+            pendingPts = null; pendingRect = null; hoverPt = null; hoverRoi = -1; flashRoi = -1; renderDraw();
         } else if (e.key === 'Enter' && pendingPts) {
             closePolygon();
         }

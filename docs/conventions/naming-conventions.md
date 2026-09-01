@@ -58,7 +58,7 @@
 
 - **顶层目录**：`backend/`、`frontend/`、`scripts/`、`data/`（运行时数据，gitignore）。
 - **Python（backend）**：模块 snake_case；分层为 `api/`（路由）、`services/`（业务）、`mta_grid/`（纯算法）、`tools/`（agent 工具）、`agent/`（编排）；测试 `tests/test_<模块>.py`。
-- **前端（frontend）**：组件文件 PascalCase（`TifCanvas.tsx`），非组件模块 camelCase（`tifDecode.ts`）；页面收 `pages/`、复用组件收 `components/`。
+- **前端（frontend）**：组件文件 PascalCase（`TifCanvas.vue`，`<script setup lang="ts">` 内写 TS），非组件模块 camelCase（`tifDecode.ts`）；页面收 `pages/`、复用组件收 `components/`。
 - **API 路由**：REST 复数资源，`/api/<资源>[/{id}]`（如 `/api/scenes/{name}/mask`）。
 - 完整目录结构与切换点见 `docs/planning/web-plan.md` §4。
 
