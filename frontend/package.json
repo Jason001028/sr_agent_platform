@@ -3,18 +3,29 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "sr_agent_platform 前端（Vue3+TS+Vite）· Phase 1 = 框架无关 TS 核心（tifDecode/maskgen/source）+ Node 像素 golden",
+  "description": "sr_agent_platform 前端（Vue3+TS+Vite）· Phase 1 = 框架无关 TS 核心 + Node 像素 golden；Phase 2 = Vue3 工程骨架（路由/状态层/vendor 落地）",
   "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
-    "gen:fixtures": "python scripts/gen-fixtures.py"
+    "typecheck": "vue-tsc --noEmit",
+    "gen:fixtures": "python scripts/gen-fixtures.py",
+    "package:offline": "bash scripts/package-offline.sh"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/pako": "^2.0.3",
+    "@vitejs/plugin-vue": "^5.2.4",
     "pako": "^2.1.0",
     "typescript": "^5.6.3",
-    "vitest": "^3.2.4"
+    "vitest": "^3.2.4",
+    "vue-tsc": "^2.2.12"
+  },
+  "dependencies": {
+    "pinia": "^3.0.4",
+    "vue": "^3.5.42",
+    "vue-router": "^4.6.4"
   }
 }
