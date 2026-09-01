@@ -4,7 +4,13 @@
 > **路径约定**：文档内引用一律用**项目根目录相对路径**（如 `tif_viewer/tif-viewer.html`）；跨文档引用写 `docs/<类目>/<文件>.md`。
 > 命名与归档规则依据：[naming-conventions.md](conventions/naming-conventions.md) §2。
 
-## 一、分类总览
+## 一、文档间导航速查
+
+- **交接入口**：[docs/status/current-question.md](status/current-question.md) —— 新窗口先读
+- **踩坑索引**：[docs/experience/gui-experience.md](experience/gui-experience.md)
+- **命名 / 归档规则**：[docs/conventions/naming-conventions.md](conventions/naming-conventions.md)
+
+## 二、分类总览
 
 | 类目 | 目录 | 职责 | 现有文档 |
 |---|---|---|---|
@@ -14,7 +20,7 @@
 | 规范与约定 | `docs/conventions/` | 命名 / 流程等约束 | [naming-conventions.md](conventions/naming-conventions.md)、[langchain-boundary.md](conventions/langchain-boundary.md) |
 | 交接与状态 | `docs/status/` | 当前问题、窗口交接 | [current-question.md](status/current-question.md) |
 
-## 二、怎么新增一个 .md（分类规则）
+## 三、怎么新增一个 .md（分类规则）
 
 写新文档前先判断类别，放入对应目录。**判断顺序**：
 
@@ -43,7 +49,7 @@
 ## 5. 常见问题
 ```
 
-## 三、历史迁移对照（2026-08-29）
+## 四、历史迁移对照（2026-08-29）
 
 原有 6 个文档从根目录 / tif_viewer 迁入本结构（git mv 保留历史；web-plan 用普通 mv，gitignore 不入库）：
 
@@ -57,9 +63,3 @@
 | `tif_viewer/JPG导出背景知识.md` | `docs/knowledge/jpg-export-background.md` |
 
 > 若在代码 / 脚本 / 其他文档中见到旧文件名，按上表改；`.gitignore` 中的 web-plan 规则已同步为新路径。
-
-## 四、文档间导航速查
-
-- **交接入口**：[docs/status/current-question.md](status/current-question.md) —— 新窗口先读
-- **踩坑索引**：[docs/experience/gui-experience.md](experience/gui-experience.md)
-- **命名 / 归档规则**：[docs/conventions/naming-conventions.md](conventions/naming-conventions.md)
