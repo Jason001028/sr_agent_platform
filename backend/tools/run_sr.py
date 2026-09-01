@@ -1,13 +1,22 @@
 """run_sr — submit a super-resolution job to Slurm (thin wrapper).
 
 Business logic in backend/services/run_sr.py: high-level params → config.xml
-+ batch script → sbatch. Returns a job_id; the agent polls it with the
-sr_job_status tool. Async by design (the job runs on the CentOS7 array server).
++ batch script → sbatch (idempotent via the sr_tasks table). Returns a job_id;
+the agent polls it with the sr_job_status tool. Async by design (the job runs
+on the CentOS7 array server).
+
+Placeholder / non-absolute paths are rejected here as err() — search_scenes
+fake results carry `<fake>/...` paths that must never reach Slurm. The err is
+fed back to the model (contract boundary), so it can change the params and
+retry; it never raises.
 """
 
 from __future__ import annotations
 
+import os
+
 from backend.services import run_sr as svc
+from backend.services import store as store_mod
 from .contract import err, ok, tool
 
 _DESC = (
@@ -16,6 +25,24 @@ _DESC = (
     "scale, output suffix) and returns a job_id — NOT the result. Poll the "
     "result with sr_job_status. Requires the Slurm scheduler host (sbatch)."
 )
+
+
+def _bad_path(path: str) -> str | None:
+    """Why a path cannot be handed to run_sr, or None if it is acceptable.
+
+    Rejects search_scenes fake rows (`<fake>/...`) and relative paths — Slurm
+    jobs run on the array server where only absolute real-array paths make
+    sense. This is validation returning an err (the loop self-heals), not an
+    exception.
+    """
+    if not path:
+        return None
+    if "<fake>" in path:
+        return ("is a fake/placeholder path from search_scenes fake results — "
+                "pick a real scene path on the array")
+    if not os.path.isabs(path):
+        return "must be an absolute path"
+    return None
 
 
 @tool(
@@ -76,6 +103,14 @@ def run_run_sr(**params) -> dict:
 
     if not lq_path:
         return err("lq_path is required")
+    bad = _bad_path(lq_path)
+    if bad:
+        return err(f"lq_path {bad}")
+    mask_path = params.get("mask_path")
+    if mask_path:
+        bad = _bad_path(str(mask_path).strip())
+        if bad:
+            return err(f"mask_path {bad}")
     if sr_scale < 1:
         return err("sr_scale must be >= 1")
     if gpu < 0:
@@ -92,7 +127,7 @@ def run_run_sr(**params) -> dict:
         "options_yml": params.get("options_yml"),
     }
     try:
-        data = svc.submit_run_sr(params)
+        data = svc.submit_run_sr(params, store=store_mod.default_store())
     except Exception as e:  # noqa: BLE001 — contract boundary
         return err(f"{type(e).__name__}: {e}")
     return ok(data)
