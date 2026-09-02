@@ -27,6 +27,8 @@ import { FileSource } from '../lib/source.js';
 import { browserKit } from '../lib/browserKit.js';
 import { decodeOne } from '../lib/decode.js';
 import type { DecodedRec } from '../lib/decode.js';
+import { sceneDecodePixels } from '../lib/scene.js';
+import type { SceneOpenMeta } from '../lib/scene.js';
 import { exportToJpg } from '../lib/exportJpg.js';
 import { getSaver, fsIO, setOutDirListener, downloadBlob } from '../lib/saver.js';
 import type { OutDirState } from '../lib/saver.js';
@@ -49,7 +51,8 @@ export interface ViewerRec {
   nbands: number;
   invert: boolean;
   stats: BandStats[] | null;
-  route: 'utif' | 'sparse' | 'chunked' | null;
+  /** 解码路由；'jpg' = 盘阵场景（服务器烘焙 JPG，无本地 TIF 字节） */
+  route: 'utif' | 'sparse' | 'chunked' | 'jpg' | null;
   layout: string;              // 即探标签摘要
   status: string;
   statusCls: '' | 'ok' | 'err';
@@ -70,6 +73,20 @@ interface ExportJob {
 
 const WAND_WIN = 4096;
 const WAND_EDGE = 64;
+
+/** 盘阵 JPG Blob → 全尺寸缩略图画布（服务器已 2% 拉伸，尺寸即 JPG 原生尺寸）。 */
+async function decodeJpgToCanvas(blob: Blob): Promise<HTMLCanvasElement> {
+  const bmp = await createImageBitmap(blob);
+  try {
+    const cv = browserKit.createCanvas(bmp.width, bmp.height) as unknown as HTMLCanvasElement;
+    const ctx = cv.getContext('2d');
+    if (!ctx) throw new Error('取不到 2d 上下文');
+    ctx.drawImage(bmp, 0, 0);
+    return cv;
+  } finally {
+    bmp.close();
+  }
+}
 
 function fmtBytes(n: number): string {
   if (n >= 1073741824) return (n / 1073741824).toFixed(2) + ' GB';
@@ -233,6 +250,47 @@ export const useViewerStore = defineStore('viewer', () => {
     if (activeId.value === rec.id) showErr('「' + rec.name + '」解码失败：' + msg);
   }
 
+  /* ---------------- 盘阵场景（阶段4：读服务器烘焙 JPG，route='jpg'） ----------------
+     JPG 即显示产物（稀疏采样 + 2% 线性拉伸已在服务器烤好）：不再读原始 TIF 字节、
+     不做二次拉伸、不本地导出 JPG（服务器 JPG 即交付物）。掩码仍照旧 —— 缩略图坐标
+     按元数据 W/H 换算回全分辨率（thumbToOrig scale 来自 rec.W/H 而非 probe）。 */
+  async function openSceneJpg(meta: SceneOpenMeta, blob: Blob) {
+    const dup = recs.value.find((r) => r.name === meta.name);
+    if (dup) { void activate(dup.id); return; }
+    busy.value = true;
+    showMask('正在加载盘阵场景…', meta.name + '（服务器烘焙 JPG，元数据 ' + meta.W + '×' + meta.H + '）', false);
+    try {
+      const cv = await decodeJpgToCanvas(blob);
+      const tw = cv.width, th = cv.height;
+      const ctx = cv.getContext('2d');
+      if (!ctx) throw new Error('取不到 2d 上下文');
+      const img = ctx.getImageData(0, 0, tw, th);
+      const d = sceneDecodePixels(img.data, tw, th);   // 固定 0..255 → linear 恒等
+      const rec: ViewerRec = {
+        id: nextId++,
+        file: markRaw(new File([blob], meta.name + '.jpg', { type: 'image/jpeg' })),
+        probe: null, name: meta.name, size: blob.size,
+        W: meta.W, H: meta.H,
+        thumb: markRaw(cv as unknown as KitCanvas),
+        src: markRaw(d.src), srcw: d.tw, srch: d.th, nbands: d.nbands,
+        invert: false, stats: d.stats ? markRaw(d.stats) : null,
+        route: 'jpg',
+        layout: '盘阵 JPG（已烘焙 2% 线性拉伸）',
+        status: '场景就绪：' + meta.name + ' · 元数据 ' + meta.W + '×' + meta.H + ' · JPG ' + d.tw + '×' + d.th,
+        statusCls: 'ok', paintedMode: null, maskRois: null,
+        _jpgBusy: false, _jpgDone: true,   // 服务器 JPG 即交付物：无本地再导出
+        _jpgToken: 0, jpgStatus: '', jpgCls: '',
+      };
+      recs.value.push(rec);
+      hideMask(); busy.value = false;
+      void activate(rec.id);
+      showToast('已打开盘阵场景「' + meta.name + '」（掩码按元数据 ' + meta.W + '×' + meta.H + ' 换算）');
+    } catch (e) {
+      hideMask(); busy.value = false;
+      showErr('加载盘阵场景失败：' + (e instanceof Error ? e.message : String(e)));
+    }
+  }
+
   function removeRec(id: number) {
     const i = recs.value.findIndex((r) => r.id === id);
     if (i < 0) return;
@@ -251,6 +309,10 @@ export const useViewerStore = defineStore('viewer', () => {
 
   /* ---------------- 拉伸 / 视图 ---------------- */
   function paintStretch(rec: ViewerRec) {
+    if (rec.route === 'jpg') {   // 盘阵 JPG 已烘焙：canvas 保持服务器原样，不二次拉伸
+      rec.paintedMode = stretchMode.value;
+      return;
+    }
     if (!rec.src || !rec.thumb) return;
     const rgba = stretchRgba(rec.src, rec.srcw, rec.srch, rec.nbands, rec.stats, stretchMode.value, rec.invert);
     const ctx = (rec.thumb as unknown as HTMLCanvasElement).getContext('2d');
@@ -488,7 +550,7 @@ export const useViewerStore = defineStore('viewer', () => {
     const json = buildMaskJson();
     if (!json) return;
     const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' });
-    downloadBlob(blob, rec.file.name.replace(/\.tiff?$/i, '') + '.mask.json');
+    downloadBlob(blob, rec.name.replace(/\.tiff?$/i, '') + '.mask.json');
     showToast('已导出掩码 JSON（' + polys.length + ' 个区域）。运行：python -m backend.services.mask <json文件> 掩码.tif 掩膜中心点坐标.txt；或直接点工具栏「生成掩码」在浏览器直出');
   }
 
@@ -501,7 +563,7 @@ export const useViewerStore = defineStore('viewer', () => {
     const W = rec.W, H = rec.H;
     const tw = rec.thumb.width, th = rec.thumb.height;
     const polys = rois.map((pts) => pts.map((p) => thumbToOrig(p[0], p[1], W, H, tw, th)));
-    const base = rec.file.name.replace(/\.tiff?$/i, '');
+    const base = rec.name.replace(/\.tiff?$/i, '');
     showMask('正在生成掩码（全分辨率 ' + W + '×' + H + '，' + polys.length + ' 区域）…', '', true);
     try {
       const tif = await buildTiff(W, H, polys, {
@@ -700,7 +762,7 @@ export const useViewerStore = defineStore('viewer', () => {
     wandTol, merging, autoExport, outDir, exportQueue, exportingNow, overlay, toast, error,
     sidebarCollapsed, busy,
     // 文件 / 解码
-    addFiles, removeRec, activate,
+    addFiles, removeRec, activate, openSceneJpg,
     // 拉伸 / 视图
     setStretch, setCanvasSize, fit, onWheel, onPan, locatePixel,
     // 掩码

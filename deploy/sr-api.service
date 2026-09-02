@@ -1,0 +1,40 @@
+# sr_agent_platform FastAPI 单元（阶段4 · 盘阵场景检索 + 懒生成预览）
+# ------------------------------------------------------------------
+# 用途：/api/scenes 检索与 /api/scenes/{id}/preview 懒生成，由 nginx 反代到 127.0.0.1:8000。
+# 路径白名单是双层保险的第二层 —— nginx 整块暴露场景根，后端再按 SR_SCENES_ROOT 校验。
+#
+# 安装：
+#   cp deploy/sr-api.service /etc/systemd/system/
+#   按真机改 Environment= 三行（SR_SCENES_ROOT 必填；SR_PREVIEWS_ROOT 可选，
+#   配了必须在 SR_SCENES_ROOT 之下）与 WorkingDirectory / ExecStart 的 venv 路径。
+#   systemctl daemon-reload && systemctl enable --now sr-api
+#   查日志：journalctl -u sr-api -f
+#
+# 依赖（内网机一次性离线装好）：fastapi uvicorn numpy pillow
+#   例：<venv>/bin/pip install fastapi 'uvicorn[standard]' numpy pillow
+
+[Unit]
+Description=sr_agent_platform FastAPI (scene browse + lazy preview JPG)
+After=network.target
+
+[Service]
+Type=simple
+User=nginx                       # 跑 nginx 同用户；需能读 SR_SCENES_ROOT 并写预览 JPG 缓存
+Group=nginx
+# WorkingDirectory=               # 仓库根（backend 包需在 import 路径上），真机填，例：
+WorkingDirectory=/data/www/sr-agent-platform
+# ExecStart=<venv>/bin/uvicorn backend.api.app:create_app --factory --host 127.0.0.1 --port 8000
+ExecStart=/opt/sr-venv/bin/uvicorn backend.api.app:create_app --factory --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=3
+
+# 阶段4 必填：盘阵场景根（nginx.conf 的 alias /data/scenes/ 须与此一致）
+Environment=SR_SCENES_ROOT=/data/scenes
+# 可选：预览 JPG 缓存根（默认落源同目录）。配了必须在 SR_SCENES_ROOT 之下。
+# Environment=SR_PREVIEWS_ROOT=/data/scenes/.previews
+# 可选：目录列表/磁盘行开关按需（未配走 fake 回退时 /api/scenes 返回空 + fake 提示）
+# Environment=SR_API_HOST=127.0.0.1
+# Environment=SR_API_PORT=8000
+
+[Install]
+WantedBy=multi-user.target
