@@ -322,5 +322,108 @@ class TestPersistence(unittest.TestCase):
             self._cleanup(store)
 
 
+def mock_cfg():
+    return Config(llm_base_url="http://localhost/v1", llm_api_key="test",
+                  llm_model="fake", llm_max_tokens=16, llm_temperature=0.0,
+                  llm_timeout=5, llm_mock=True)
+
+
+class TestMockChat(unittest.TestCase):
+    """SR_LLM_MOCK fixed-script chat (api-contract.md §5.1): no endpoint, but the
+    *real* search_scenes tool round trip runs so the SSE stream carries it."""
+
+    def test_mock_runs_real_search_then_summarizes(self):
+        def fake_call_tool(name, arguments_json):
+            self.assertEqual(name, "search_scenes")
+            return {"ok": True, "data": {
+                "source": "disk", "count": 3,
+                "results": [{"id": "s1"}, {"id": "s2"}, {"id": "s3"}]},
+                "error": None}
+
+        with mock.patch("backend.agent.loop.call_tool", fake_call_tool):
+            r = run_loop(mock_cfg(), "帮我看看盘阵上有哪些场景")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["turns"], 2)
+        self.assertIn("已检索盘阵场景 3 个", r["answer"])
+        self.assertIn("source=disk", r["answer"])
+        for sid in ("s1", "s2", "s3"):
+            self.assertIn(sid, r["answer"])
+        tools = [m for m in r["messages"] if m.get("role") == "tool"]
+        self.assertEqual(len(tools), 1)
+        self.assertEqual(tools[0]["name"], "search_scenes")
+
+    def test_mock_err_result_still_answers(self):
+        # search_scenes errors (scenes root missing) → mock still concludes
+        def fake_call_tool(name, arguments_json):
+            return {"ok": False, "data": None, "error": "boom"}
+
+        with mock.patch("backend.agent.loop.call_tool", fake_call_tool):
+            r = run_loop(mock_cfg(), "检索")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["turns"], 2)
+        self.assertIn("已检索盘阵场景 0 个", r["answer"])
+
+
+class TestOnStepSeam(unittest.TestCase):
+    """on_step observation seam (api-contract.md §4.2) — events mirror the
+    existing commit/return points; default None leaves the loop byte-identical."""
+
+    def test_no_tool_final_emits_assistant(self):
+        events = []
+
+        def chat(messages, tools):
+            return {"content": "直接答复", "tool_calls": []}
+
+        r = run_loop(cfg(), "hi", chat=chat, on_step=events.append)
+        self.assertTrue(r["ok"])
+        self.assertEqual(events,
+                         [{"type": "assistant", "content": "直接答复"}])
+
+    def test_tool_roundtrip_event_order(self):
+        events = []
+
+        def chat(messages, tools):
+            if not any(m.get("role") == "tool" for m in messages):
+                return {"content": None, "tool_calls": [{
+                    "id": "c1", "name": "fix_bad_lines",
+                    "arguments": '{"input_path": "no_such.tif"}'}]}
+            return {"content": "收尾", "tool_calls": []}
+
+        r = run_loop(cfg(), "修复", chat=chat, on_step=events.append)
+        self.assertTrue(r["ok"])
+        types = [e["type"] for e in events]
+        self.assertEqual(types, ["tool_call", "tool_result", "assistant"])
+        self.assertEqual(events[0]["name"], "fix_bad_lines")
+        self.assertEqual(events[0]["args"], {"input_path": "no_such.tif"})
+        self.assertFalse(events[1]["ok"])
+        self.assertIn("not found", events[1]["error"])
+        self.assertEqual(events[2]["content"], "收尾")
+
+    def test_llm_error_emits_error_event(self):
+        events = []
+
+        def chat(messages, tools):
+            raise ConnectionError("boom")
+
+        r = run_loop(cfg(), "x", chat=chat, on_step=events.append)
+        self.assertFalse(r["ok"])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["type"], "error")
+        self.assertIn("boom", events[0]["error"])
+
+    def test_max_turns_emits_error_event(self):
+        events = []
+
+        def chat(messages, tools):
+            return {"content": None, "tool_calls": [{
+                "id": f"c{len(messages)}", "name": "fix_bad_lines",
+                "arguments": '{"input_path": "no_such.tif"}'}]}
+
+        r = run_loop(cfg(), "x", max_turns=3, chat=chat, on_step=events.append)
+        self.assertFalse(r["ok"])
+        self.assertEqual(events[-1]["type"], "error")
+        self.assertIn("max_turns", events[-1]["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

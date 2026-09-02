@@ -1,17 +1,18 @@
-# sr_agent_platform FastAPI 单元（阶段4 · 盘阵场景检索 + 懒生成预览）
+# sr_agent_platform FastAPI 单元（阶段4 盘阵场景 + 阶段5 平台 API）
 # ------------------------------------------------------------------
-# 用途：/api/scenes 检索与 /api/scenes/{id}/preview 懒生成，由 nginx 反代到 127.0.0.1:8000。
+# 用途：/api/scenes 检索与懒生成预览；阶段5 /api/chat/* + /api/queue*（REST+SSE）
+# + /api/tools + /api/masks。由 nginx 反代到 127.0.0.1:8000（SSE 缓冲已关，见 nginx.conf）。
 # 路径白名单是双层保险的第二层 —— nginx 整块暴露场景根，后端再按 SR_SCENES_ROOT 校验。
 #
 # 安装：
 #   cp deploy/sr-api.service /etc/systemd/system/
-#   按真机改 Environment= 三行（SR_SCENES_ROOT 必填；SR_PREVIEWS_ROOT 可选，
-#   配了必须在 SR_SCENES_ROOT 之下）与 WorkingDirectory / ExecStart 的 venv 路径。
+#   按真机改：SR_SCENES_ROOT（必填）、SR_AGENT_DB 的目录归属，SR_PREVIEWS_ROOT 可选
+#   （配了必须在 SR_SCENES_ROOT 之下）；以及 WorkingDirectory / ExecStart 的 venv 路径。
 #   systemctl daemon-reload && systemctl enable --now sr-api
 #   查日志：journalctl -u sr-api -f
 #
-# 依赖（内网机一次性离线装好）：fastapi uvicorn numpy pillow
-#   例：<venv>/bin/pip install fastapi 'uvicorn[standard]' numpy pillow
+# 依赖（内网机一次性离线装好，见 requirements-api.txt）：fastapi uvicorn numpy pillow openai
+#   例：<venv>/bin/pip install -r deploy/requirements-api.txt
 
 [Unit]
 Description=sr_agent_platform FastAPI (scene browse + lazy preview JPG)
@@ -30,8 +31,23 @@ RestartSec=3
 
 # 阶段4 必填：盘阵场景根（nginx.conf 的 alias /data/scenes/ 须与此一致）
 Environment=SR_SCENES_ROOT=/data/scenes
+# 阶段5：SQLite 库路径（chat 会话消息 + sr_tasks 同库）。store 首次写自动建父目录，
+# 但 User=nginx 须有写权限——真机改到 nginx 可写目录或 chown（例：
+# mkdir -p /data/www/sr-agent-platform && chown nginx:nginx /data/www/sr-agent-platform）
+Environment=SR_AGENT_DB=/data/www/sr-agent-platform/sr_agent.db
+# 阶段5：真机显式关假实现 —— mock LLM / 假调度器都必须 =0（离机验收 / .e2e 才置 =1）
+Environment=SR_LLM_MOCK=0
+Environment=SR_SLURM_FAKE=0
 # 可选：预览 JPG 缓存根（默认落源同目录）。配了必须在 SR_SCENES_ROOT 之下。
 # Environment=SR_PREVIEWS_ROOT=/data/scenes/.previews
+# 可选：Slurm 作业工作目录（sbatch 脚本 / 作业日志输出根）
+# Environment=SR_SLURM_WORK_DIR=/data/slurm_work
+# 可选：队列状态轮询秒（/api/queue/events 广播刷新率，缺省 2）
+# Environment=SR_QUEUE_POLL_SEC=2
+# 可选：真 LLM 时配置（阶段5 默认 mock 已关，未配这些则 loop 走默认 base/空 key）
+# Environment=SR_LLM_BASE_URL=http://127.0.0.1:11434/v1
+# Environment=SR_LLM_API_KEY=
+# Environment=SR_LLM_MODEL=qwen2.5-7b
 # 可选：目录列表/磁盘行开关按需（未配走 fake 回退时 /api/scenes 返回空 + fake 提示）
 # Environment=SR_API_HOST=127.0.0.1
 # Environment=SR_API_PORT=8000

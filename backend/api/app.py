@@ -1,4 +1,4 @@
-"""FastAPI skeleton — 阶段4：盘阵场景检索 + 懒生成预览 JPG。
+"""FastAPI app — 阶段4 场景检索/预览 + 阶段5 平台 API（chat/queue/masks/tools）。
 
 启动：`uvicorn backend.api.app:create_app --factory`（env 式 config）。
 测试用 `from backend.api.app import create_app` 后自行注入 env 再构造。
@@ -7,11 +7,18 @@ Env
 ---
 SR_SCENES_ROOT    盘阵场景根（unset → fake 回退）
 SR_PREVIEWS_ROOT  可选预览缓存根（须在 scenes 根内）
+SR_AGENT_DB       SQLite 路径（chat 会话 + sr_tasks 同一库）
+SR_LLM_MOCK       =1 → 聊天走固定脚本假 LLM（api-contract.md §5.1）
+SR_SLURM_FAKE     =1 → 提交走内存假调度器（§5.2）
+SR_QUEUE_POLL_SEC 队列后台校准广播周期，缺省 2s
 SR_API_HOST/PORT  仅 `python -m backend.api` 直启用
 """
 
 from __future__ import annotations
 
+import asyncio
+import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
@@ -20,7 +27,9 @@ from fastapi.responses import FileResponse
 
 from backend.api import paths
 from backend.api.paths import PathDeniedError
-from backend.services import scene_search
+from backend.api.platform import _task_state, router as platform_router
+from backend.config import load_config
+from backend.services import scene_search, store as store_mod
 from backend.services.preview_jpg import (PreviewError, ensure_preview_jpg,
                                           scene_dims)
 
@@ -89,13 +98,52 @@ def _scene_row(scene: dict, root: Path | None) -> dict:
     return row
 
 
+async def _poll_loop(state) -> None:
+    """队列后台校准广播（api-contract.md §4.3）：周期扫 job_id 非空任务，
+    slurm.job_status 状态变化 → 写回 sr_tasks.status + 广播 job_update."""
+    while True:
+        await asyncio.sleep(state.poll_sec)
+        try:
+            await asyncio.to_thread(_poll_once, state)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — 单轮失败不 kill 循环
+            pass
+
+
+def _poll_once(state) -> None:
+    for task in state.store.list_sr_tasks():
+        if task["job_id"] is not None:
+            _task_state(state, task)
+
+
 def create_app() -> FastAPI:
     root = paths.scenes_root()
 
-    app = FastAPI(title="sr_agent_platform api", version="0.4.0")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.poller = asyncio.create_task(_poll_loop(app.state))
+        yield
+        app.state.poller.cancel()
+        try:
+            await app.state.poller
+        except asyncio.CancelledError:
+            pass
+
+    app = FastAPI(title="sr_agent_platform api", version="0.5.0",
+                  lifespan=lifespan)
     # 盘阵直连 IP:端口；前端另配 staticBase/apiBase，CORS 全放（内网）
     app.add_middleware(CORSMiddleware, allow_origins=["*"],
                        allow_methods=["*"], allow_headers=["*"])
+
+    # 阶段5 运行时状态：create_app 即建（env 已就绪）；lifespan 只额外启轮询。
+    app.state.store = store_mod.Store()          # SR_AGENT_DB，懒打开
+    app.state.cfg = load_config()
+    app.state.chat_locks = {}                    # session_id → asyncio.Lock
+    app.state.subscribers = set()                # /api/queue/events 订阅者
+    app.state.task_cache = {}                    # task_id → queue display state
+    app.state.poll_sec = float(os.environ.get("SR_QUEUE_POLL_SEC", "2"))
+    app.include_router(platform_router)
 
     @app.get("/api/health")
     def health():
