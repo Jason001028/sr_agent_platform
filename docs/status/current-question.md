@@ -15,7 +15,8 @@
 - **Agent 最小原型 M1（08-31 晚）**：`backend/agent/loop.py` 自己写的运行循环 + 第一个真实工具 `fix_bad_lines`（修复坏行/条带）；**M1 待完善的 P0①②③ 已补齐（09-01）**——SQLite 会话持久化、run_sr 防重复提交保护、假路径拦截，**114 个测试全部通过**（详见 §2.5）。
 - **阶段3 查看器 UI 组件化完成（09-01）**：把 tif-viewer.html 的交互层**移植而不是重写**到 Vue3——拆成 TifCanvas/Toolbar/FileList/DrawPanel/DecodeOverlay/StatusBar 六个组件 + `stores/viewer.ts` 统一调度 + `lib/{viewMath,browserKit,decode,exportJpg,saver}` 工具模块 + `window.__viewer` 调试钩子；核心算法逐字节保留，只把交互方式改成 Vue3 的惯用写法；**BigTIFF 读取方案修复**（本地内置的 UTIF 库解不了 BigTIFF，强制改走 geotiff.js 分块读取，这是本阶段唯一的行为差异）。75 个 Vitest 测试 + vue-tsc 类型检查零错误 + 浏览器回归测试 38 条断言全部通过（详见 §4 时间线）。
 - **阶段4 盘阵场景读 JPG 完成（09-02）**：浏览器**不再读盘阵原始 TIF**——后端新增 `backend/api/` FastAPI（`GET /api/scenes` 检索 + 每场景补 W/H【优先 .hdr，缺则探 TIF 头，缓存】+ jpgUrl；`GET /api/scenes/{id}/preview` **懒生成** JPG 幂等缓存）+ `backend/services/preview_jpg.py`（**镜像前端稀疏采样语义**的纯 numpy 条带抽读：`round(j*(W-1)/(pw-1))` 端点对齐 + 2% Linear + WhiteIsZero 反色 + Pillow JPEG；const 图 0→黑 / 其他→128）+ 路径白名单（`paths.py`：拒绝 `../` 穿越 / 白名单外绝对路径 / fake 占位）。前端新增 `/scenes` 盘阵场景页（卫星/传感器/日期/关键词筛选 + 行显示 W/H → 打开：jpgUrl 未就绪先调 /preview → JPG→canvas → **route='jpg' 同构 rec**，掩码按元数据 W/H 用 thumbToOrig 换算）+ 查看器拉伸下拉/导出在盘阵场景**禁用**（tooltip「已烘焙 2% 线性拉伸」）。**本地文件路径零改动**（稀疏 TIF 读法照旧）。后端 148 pytest + 前端 85 Vitest（75 基线 + 10 scene）+ vue-tsc 全绿。部署件 `deploy/nginx.conf`（`/disk-array/` alias 静态托管 + `/api/` 反代 + 缓存头）+ `deploy/sr-api.service`（systemd）+ `deploy/README.md`（阶段4 章节）+ `requirements-api.txt` 已交付；离线包脚本已含 backend。
-- **下一步**：① 在 CentOS7 盘阵机做阶段4 **真机验收**（清单见 §5.2，重点测首次 JPG 生成耗时与内存）→ 阶段5 平台 API 层 + 聊天/共享队列（prompt 见 `docs/planning/frontend-phase4-phase5-prompts.md`）；② 开发机可推进 P1 的 ④⑤⑥⑦（见 §2.5）；③ 配 LLM key 跑通真实闭环、真机验证 Slurm/run_sr（见 §2.6）。
+- **阶段5 平台 API 层完成（09-02）**：契约定稿 `docs/planning/api-contract.md`（状态→**已定**）。后端 FastAPI 新增 `backend/api/platform.py` 四组端点——`/api/tools`（manifest + 直调）、`/api/chat/*`（会话 REST + 单回合 **SSE**：loop 加 `on_step` 观察缝【不改变行为】+ mock LLM `SR_LLM_MOCK=1` 固定脚本先 search_scenes 再总结）、`/api/queue*`（共享 SR 队列 REST 提交/取消 + `GET /api/queue/events` SSE 状态广播；store 补 list/状态写回，slurm 加 `SR_SLURM_FAKE` 假调度器可配速推进）、`/api/masks`（多边形+W/H → Pillow 全分辨率栅格化写 `<原图目录>/<stem>_mask.tif`+`_mask.txt` → 返 task_draft）。前端新增 `/chat` 聊天页（会话侧栏 + SSE 事件归并渲染 + 刷新恢复历史）、`/queue` 共享队列页（提交表单 + 状态徽标随 SSE 实时刷 + 取消）、查看器「提交 SR」按钮（route='jpg' 画掩码 → 烘焙落盘 → 跳 `/queue` 预填**不自动提交**）。**门禁全绿**：后端 190 unittest（+42）+ 前端 Vitest **114** + vue-tsc 零错误 + `npm run build`；`.e2e/test-platform.js` **11 断言**真 uvicorn（mock+fake）驱动前端 A 聊天 SSE/历史 → B 队列 COMPLETED → C 掩码→SR 预填+确认，无浏览器错误/无外部请求。部署件同步：nginx `/api/` 反代 `proxy_buffering off`+清 `Connection`+`proxy_read_timeout 3600s`；`sr-api.service` 补 `SR_AGENT_DB`/`SR_LLM_MOCK=0`/`SR_SLURM_FAKE=0`；`requirements-api.txt` 补 `openai>=1.40,<2`（1.x 锁死）。
+- **下一步**：① 阶段4 + 阶段5 **真机验收**（CentOS7 盘阵机：阶段4 首次 JPG 生成耗时/内存；阶段5 真 LLM `SR_LLM_*` 指内网端点 + 真 Slurm 提交/取消 + 真实盘阵掩码落点 ENVI 核对 + nginx SSE 长连，清单见 §5.2）；② 开发机可推进 P1 的 ④⑤⑥⑦（见 §2.5）；③ 配 LLM key 跑通真实闭环（阶段5 起 /chat 页可直接连内网端点，见 §2.6）。
 - **约束提醒**：开发机的浏览器 e2e 测试**已恢复可用**（`.e2e/launchBrowser.js` 每次用独立的临时浏览器配置目录，彻底解决「浏览器闪退、退出码 0 无任何报错」的问题）；真实图片都在内网盘阵，外网开发机读不到（见 §5.1）。
 
 ## 2. 里程碑计划与待办
@@ -278,7 +279,12 @@
      d. 画一个矩形掩码 → 生成 `掩码.tif`，用 ENVI 打开核对区域位置是否按元数据 W/H 换算正确（在 JPG 上画 → 全分辨率落点）；
      e. `journalctl -u sr-api` 无越权访问告警；构造 `../` 越权 id/URL 应 403/404。
    - 阶段3 收尾项一并做：真实 24739×24199 大图本地文件路径的稀疏预览 8192 不崩、掩码直出、2% 线性导出 JPG 8192×8013 无条纹（本地文件路径零回归的红线）。
-2. **阶段5 平台 API 层 + 聊天/共享队列**：把已有后端（agent loop + 工具 + sr_tasks + slurm）暴露成 REST/SSE，实现聊天页 + 共享任务队列；提示词见 `docs/planning/frontend-phase4-phase5-prompts.md`【阶段5】（开发机可先做 mock 模型 MVP，真机项另排）。
+2. **阶段5 真机验收**（开发机已离机全绿：后端 190 + Vitest 114 + `.e2e/test-platform.js` 11 断言；契约 = `docs/planning/api-contract.md`，提示词见 `frontend-phase4-phase5-prompts.md`【阶段5】）：
+   - **真 LLM**：`SR_LLM_BASE_URL/API_KEY/MODEL` 指内网端点 + `SR_LLM_MOCK=0`，/chat 发一条 → 真实工具调用 + 最终回复；刷新恢复历史；
+   - **真 Slurm**：`SR_SLURM_FAKE=0`，/queue 提交 → sbatch 真实作业 → SSE `job_update` 随 squeue/sacct 推进到「完成」；取消按钮 scancel 生效；
+   - **盘阵掩码落点**：/viewer 打开真实场景画掩码 →「提交 SR」→ ENVI 打开 `<原图目录>/<stem>_mask.tif` 核对区域与 0817 消费路径一致（`_mask.txt` 质心坐标）；
+   - **nginx SSE 长连**：/chat 与 /queue 经反代挂 10min+ 无断流/攒批（心跳/断链重连正常）；
+   - **systemd 权限**：`nginx` 用户能读盘阵、写预览 JPG 缓存与 `SR_AGENT_DB`（见 deploy/README §三）。
 3. **开发机可推进**：P1 ④⑤⑥⑦（见 §2.5，.env / 瞬时错误重试 / 测试缺口 / CLI --resume）；配 LLM key 跑通真实闭环、真机验证 Slurm/run_sr（§2.6）。
 
 ### 5.3 关键文件
@@ -286,6 +292,8 @@
 - 查看器交付物：`tif_viewer/tif-viewer.html`（冻结）→ Vue3 版 `frontend/src/`（pages/ScenesPage.vue + components/ + stores/{viewer,scenes}.ts + lib/{tifDecode,maskgen,scene,source,viewMath}.ts）
 - 阶段4 后端：`backend/api/app.py`（FastAPI：/api/scenes + /preview）、`backend/api/paths.py`（白名单 + scene id codec）、`backend/services/preview_jpg.py`（稀疏采样 + 2% 拉伸 + Pillow 缓存）
 - 阶段4 部署：`deploy/nginx.conf`、`deploy/sr-api.service`、`deploy/requirements-api.txt`、`deploy/README.md`；离线包 `frontend/scripts/package-offline.sh`
+- 阶段5 契约/实现：`docs/planning/api-contract.md`（**已定**）、`backend/api/platform.py`（chat/queue/tools/masks + SSE 广播）+ `backend/api/app.py`（lifespan 轮询）、`frontend/src/{lib/api.ts, stores/{chat,queue}.ts, pages/{ChatPage,QueuePage}.vue}`、查看器「提交 SR」（`stores/viewer.ts::submitSr` + Toolbar 按钮）、`.e2e/test-platform.js`（11 断言）
+- 阶段5 部署增补：nginx `/api/` 反代 `proxy_buffering off`+`proxy_read_timeout 3600s`（SSE）；`sr-api.service` env（`SR_AGENT_DB`/`SR_LLM_MOCK=0`/`SR_SLURM_FAKE=0`）；`requirements-api.txt` 补 `openai>=1.40,<2`
 - 经验文档：`docs/experience/gui-experience.md`
 - E2E 测试：`.e2e/`（gitignore 本机资产：`test-vue-viewer.js` **42 断言**本地文件回归 + `test-scenes.js` **45 断言**场景 http 打开；puppeteer-core + 无界面 Edge + vue-lib.js 本地静态服务顶替 nginx + uvicorn 起真后端）
 - 测试图：`test-tifs/`（gitignore）、`frontend/fixtures/`（入库小图）

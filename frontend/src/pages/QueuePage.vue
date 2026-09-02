@@ -1,27 +1,242 @@
 <script setup lang="ts">
-// 阶段5 实现：共享任务队列（服务端唯一事实源 + 乐观更新 + SSE）
-import { useQueueStore } from '../stores/queue';
+/**
+ * QueuePage.vue — 共享 SR 任务队列（阶段5，api-contract.md §3.3）
+ * 顶部 = 提交 SR 作业表单（lq_path/mask_path/scale…，run_sr 参数）；掩码烘焙跳转
+ * 预填（setDraft → form），用户确认才提交（Slurm 是真副作用，不自动提交）。
+ * 下方 = 任务表：SSE job_update 实时刷 state 徽标（SUBMITTING→PENDING→RUNNING→COMPLETED/FAILED）。
+ */
+import { onMounted, onUnmounted, reactive, ref, watch } from 'vue';
+import { useQueueStore, defaultForm, draftToForm, formToSubmit, stateTone } from '../stores/queue.js';
+import type { QueueDraft, QueueForm } from '../stores/queue.js';
+import type { QueueTask } from '../lib/api.js';
 
 const queue = useQueueStore();
+const showForm = ref(false);
+const cancelling = ref<number | null>(null);
+const formErr = ref('');
+let lastSyncDraft: QueueDraft | null = null;
+
+const f = reactive<QueueForm>(defaultForm());
+
+const STATE_TEXT: Record<string, string> = {
+  SUBMITTING: '提交中', PENDING: '排队', RUNNING: '运行中',
+  COMPLETED: '完成', FAILED: '失败', UNKNOWN: '未知',
+};
+
+function stateText(t: QueueTask): string {
+  return STATE_TEXT[t.state] ?? t.state;
+}
+function stateCls(t: QueueTask): string {
+  return 'st-' + stateTone(String(t.state));
+}
+function isActive(t: QueueTask): boolean {
+  return t.state === 'SUBMITTING' || t.state === 'PENDING' || t.state === 'RUNNING';
+}
+function shortFp(s: string): string {
+  return s.length > 12 ? s.slice(0, 12) + '…' : s;
+}
+function pathLeaf(p: string | null): string {
+  if (!p) return '';
+  const parts = p.split(/[/\\]/).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : p;
+}
+function fmtTime(ts: number): string {
+  return ts ? new Date(ts * 1000).toLocaleString() : '—';
+}
+
+function syncFormFromDraft(d: QueueDraft): void {
+  Object.assign(f, draftToForm(d));
+  lastSyncDraft = d;
+  formErr.value = '';
+  showForm.value = true;
+}
+
+async function openSubmit(): Promise<void> {
+  formErr.value = '';
+  if (!f.lq_path) { formErr.value = '请填 lq_path（原图目录，须绝对路径）'; return; }
+  if (!f.lq_path.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(f.lq_path)) {
+    formErr.value = 'lq_path 须为绝对路径（盘阵挂载点，如 /DiskArray/…）';
+    return;
+  }
+  try {
+    const body = formToSubmit(f);
+    await queue.submit(body);
+    formErr.value = '';
+  } catch (e) {
+    formErr.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+async function onCancel(t: QueueTask): Promise<void> {
+  cancelling.value = t.task_id;
+  try { await queue.cancel(t.task_id); } finally { cancelling.value = null; }
+}
+
+watch(() => queue.draft, (d) => {
+  if (d && d !== lastSyncDraft) syncFormFromDraft(d);
+});
+
+onMounted(() => {
+  if (queue.draft) syncFormFromDraft(queue.draft);
+  void queue.list();
+  queue.connect();
+});
+onUnmounted(() => queue.disconnect());
 </script>
 
 <template>
-  <div class="stub">
-    <h2>任务队列</h2>
-    <p v-if="queue.jobs.length === 0">
-      占位页。阶段5 实现多人共享任务队列（REST 动作 + SSE 推送进度）。
+  <div class="queue-page">
+    <div class="qp-head">
+      <h2>共享任务队列 <span class="qp-sub">SR 作业（slurm / 假调度器）</span></h2>
+      <div class="qp-actions">
+        <span class="qp-dot" :class="{ on: queue.connected }"></span>
+        <span class="qp-conn">{{ queue.connected ? 'SSE 已连接' : 'SSE 断开' }}</span>
+        <button type="button" class="btn ghost" :disabled="queue.loading" @click="queue.list()">
+          {{ queue.loading ? '刷新中…' : '刷新' }}
+        </button>
+        <button type="button" class="btn" @click="showForm = !showForm">
+          {{ showForm ? '收起提交面板' : '提交 SR 作业' }}
+        </button>
+      </div>
+    </div>
+
+    <p v-if="queue.error || formErr" class="qp-err">
+      <template v-if="queue.error">{{ queue.error }}</template>
+      <template v-else>{{ formErr }}</template>
     </p>
-    <ul v-else>
-      <li v-for="j in queue.jobs" :key="j.id">{{ j.id }} — {{ j.status }} — {{ j.progress }}%</li>
-    </ul>
+
+    <!-- 提交表单（掩码烘焙后预填；确认才提交） -->
+    <section v-if="showForm" class="qp-form">
+      <div v-if="queue.draft" class="qp-draft-tip">
+        已带入查看器掩码烘焙结果（<code>{{ pathLeaf(queue.draft.mask_path) }}</code>）——检查参数后点提交。
+      </div>
+      <div class="qp-grid">
+        <label class="qp-cell wide">
+          <span>lq_path（原图目录，绝对路径）</span>
+          <input v-model="f.lq_path" type="text" spellcheck="false" placeholder="/DiskArray/GF07A03_xxx_L1_PAN" />
+        </label>
+        <label class="qp-cell wide">
+          <span>mask_path（掩膜，可空=全图）</span>
+          <input v-model="f.mask_path" type="text" spellcheck="false" placeholder="…_mask.tif" />
+        </label>
+        <label class="qp-cell">
+          <span>SR 倍率</span>
+          <input v-model.number="f.sr_scale" type="number" min="1" max="8" step="1" />
+        </label>
+        <label class="qp-cell">
+          <span>后缀</span>
+          <input v-model="f.suffix" type="text" spellcheck="false" placeholder="t / 空" />
+        </label>
+        <label class="qp-cell">
+          <span>GPU 数</span>
+          <input v-model.number="f.gpu" type="number" min="0" max="16" step="1" />
+        </label>
+        <label class="qp-cell">
+          <span>云量上限 %</span>
+          <input v-model.number="f.cloud_limit" type="number" min="0" max="100" step="1" />
+        </label>
+        <label class="qp-cell check">
+          <input v-model="f.delete_ori" type="checkbox" />
+          <span>完成删原图（delete_ori）</span>
+        </label>
+        <label class="qp-cell check">
+          <input v-model="f.grid_align" type="checkbox" />
+          <span>网格对齐（grid_align）</span>
+        </label>
+      </div>
+      <div class="qp-submit-row">
+        <button type="button" class="btn" :disabled="queue.loading" @click="openSubmit()">
+          提交到 Slurm
+        </button>
+        <span class="qp-hint">提交是真实副作用（假调度器下也会跑完整状态机）</span>
+      </div>
+    </section>
+
+    <!-- 任务表 -->
+    <div class="qp-tbl-wrap">
+      <table class="qp-tbl">
+        <thead>
+          <tr>
+            <th>状态</th><th>task_id</th><th>job_id</th><th class="left">指纹</th>
+            <th class="left">参数（lq_path / scale）</th>
+            <th>创建时间</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="t in queue.tasks" :key="t.task_id">
+            <td><span class="tag" :class="stateCls(t)">{{ stateText(t) }}</span></td>
+            <td>{{ t.task_id }}</td>
+            <td>{{ t.job_id ?? '—' }}</td>
+            <td class="left mono" :title="t.fingerprint">{{ shortFp(t.fingerprint) }}</td>
+            <td class="left" :title="t.params.lq_path">
+              {{ pathLeaf(t.params.lq_path) }}
+              <span v-if="t.params.mask_path" class="qp-mask" :title="t.params.mask_path">
+                掩膜 {{ pathLeaf(t.params.mask_path) }}
+              </span>
+              <span class="qp-sub2">×{{ t.params.sr_scale }} · {{ t.params.suffix || '无后缀' }}</span>
+            </td>
+            <td>{{ fmtTime(t.created_at) }}</td>
+            <td>
+              <button v-if="isActive(t) && t.job_id" type="button" class="btn mini ghost"
+                      :disabled="cancelling === t.task_id" @click="onCancel(t)">
+                {{ cancelling === t.task_id ? '取消中…' : '取消' }}
+              </button>
+              <span v-else class="qp-muted">—</span>
+            </td>
+          </tr>
+          <tr v-if="!queue.loading && !queue.tasks.length">
+            <td colspan="7" class="empty">暂无 SR 任务。在查看器画完掩码「提交 SR」，或在上方手填提交。</td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-if="queue.loading" class="qp-loading">加载中…</p>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.stub {
-  max-width: 640px;
-  margin: 40px auto;
-  text-align: center;
-  color: #7f8c9b;
+.queue-page { max-width: 1180px; margin: 0 auto; padding: 6px 4px 40px; }
+.qp-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.qp-head h2 { margin: 0 0 10px; font-size: 18px; display: flex; align-items: baseline; gap: 10px; }
+.qp-sub { font-size: 12px; color: #909399; font-weight: 400; }
+.qp-actions { display: flex; align-items: center; gap: 8px; }
+.qp-dot { width: 8px; height: 8px; border-radius: 50%; background: #c0c4cc; display: inline-block; }
+.qp-dot.on { background: #67c23a; box-shadow: 0 0 0 2px rgba(103, 194, 58, .2); }
+.qp-conn { font-size: 12px; color: #909399; }
+.qp-err { color: #f56c6c; font-size: 13px; }
+.btn { padding: 5px 12px; border: 1px solid #409eff; border-radius: 4px; background: #409eff; color: #fff; cursor: pointer; font-size: 13px; }
+.btn:disabled { opacity: .55; cursor: not-allowed; }
+.btn.ghost { background: transparent; color: #409eff; }
+.btn.mini { padding: 2px 8px; font-size: 12px; }
+
+.qp-form { background: #fff; border: 1px solid #ebeef5; border-radius: 6px; padding: 12px; margin: 6px 0 14px; }
+.qp-draft-tip { background: #f0f9eb; border: 1px solid #e1f3d8; color: #529b2e; font-size: 12.5px; padding: 6px 10px; border-radius: 4px; margin-bottom: 10px; }
+.qp-draft-tip code { font-family: ui-monospace, monospace; }
+.qp-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.qp-cell { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #606266; }
+.qp-cell.wide { grid-column: span 2; }
+.qp-cell.check { flex-direction: row; align-items: center; gap: 6px; font-size: 13px; }
+.qp-cell input[type="text"], .qp-cell input[type="number"] {
+  padding: 6px 8px; border: 1px solid #c0c4cc; border-radius: 4px; font-size: 13px; font-family: inherit;
 }
+.qp-submit-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.qp-hint { font-size: 12px; color: #909399; }
+
+.qp-tbl-wrap { position: relative; }
+.qp-tbl { width: 100%; border-collapse: collapse; font-size: 13px; background: #fff; }
+.qp-tbl th, .qp-tbl td { border: 1px solid #ebeef5; padding: 6px 8px; text-align: center; }
+.qp-tbl th { background: #f5f7fa; font-weight: 600; white-space: nowrap; }
+.qp-tbl td.left { text-align: left; }
+.qp-tbl td.empty { color: #909399; padding: 18px; }
+.qp-tbl .mono { font-family: ui-monospace, monospace; font-size: 12px; }
+.tag { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
+.st-pending { background: #fdf6ec; color: #e6a23c; }
+.st-run { background: #ecf5ff; color: #409eff; }
+.st-ok { background: #f0f9eb; color: #67c23a; }
+.st-fail { background: #fef0f0; color: #f56c6c; }
+.st-muted { background: #f4f4f5; color: #909399; }
+.qp-mask { color: #8c6bd1; background: #f5f0ff; padding: 0 4px; border-radius: 3px; margin-left: 6px; }
+.qp-sub2 { color: #909399; margin-left: 8px; font-size: 12px; }
+.qp-muted { color: #c0c4cc; }
+.qp-loading { color: #909399; font-size: 12px; }
 </style>

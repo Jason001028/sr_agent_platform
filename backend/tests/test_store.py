@@ -152,5 +152,45 @@ class TestSrTasks(unittest.TestCase):
         self.assertEqual(t["log_dir"], "/w")
 
 
+class TestSrTasksQueueApi(unittest.TestCase):
+    """阶段5 补充 — queue REST 端点依赖的查询/状态写回层."""
+
+    def setUp(self):
+        self.store, self._tmp = make_store()
+
+    def tearDown(self):
+        self.store.close()
+        self._tmp.cleanup()
+
+    def test_list_sr_tasks_newest_first(self):
+        self.store.put_sr_task("q1", {"lq_path": "/a"}, status="new", job_id=None)
+        self.store.update_sr_task_job("q1", job_id=1, status="submitted")
+        self.store.put_sr_task("q2", {"lq_path": "/b"}, status="new", job_id=None)
+        self.store.update_sr_task_job("q2", job_id=2, status="submitted")
+        ids = [t["task_id"] for t in self.store.list_sr_tasks()]
+        self.assertEqual(ids, sorted(ids, reverse=True))   # newest first
+        by_id = {t["task_id"]: t for t in self.store.list_sr_tasks()}
+        self.assertEqual(by_id[ids[0]]["job_id"], 2)       # q2 submitted last
+
+    def test_get_sr_task_by_id(self):
+        self.store.put_sr_task("q3", {"lq_path": "/c"}, status="new", job_id=None)
+        self.store.update_sr_task_job("q3", job_id=3, status="submitted")
+        by_fp = self.store.get_sr_task("q3")
+        by_pk = self.store.get_sr_task_by_id(by_fp["task_id"])
+        self.assertEqual(by_pk["fingerprint"], "q3")
+        self.assertEqual(by_pk["job_id"], 3)
+        self.assertIsNone(self.store.get_sr_task_by_id(99999))
+
+    def test_set_sr_task_state(self):
+        self.store.put_sr_task("q4", {"lq_path": "/d"}, status="new", job_id=None)
+        self.store.update_sr_task_job("q4", job_id=4, status="submitted")
+        t = self.store.get_sr_task("q4")
+        self.store.set_sr_task_state(t["task_id"], "RUNNING")
+        got = self.store.get_sr_task("q4")
+        self.assertEqual(got["status"], "RUNNING")
+        # the idempotency layer reads only job_id — status writeback is opaque to it
+        self.assertEqual(got["job_id"], 4)
+
+
 if __name__ == "__main__":
     unittest.main()
