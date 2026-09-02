@@ -14,6 +14,16 @@ const fileInput = ref<HTMLInputElement | null>(null);
 const locX = ref('');
 const locY = ref('');
 
+/** 盘阵场景激活：JPG 已烘焙，交互拉伸禁用（服务器只烤 2% 线性）。 */
+const sceneActive = computed(() => store.activeRec?.route === 'jpg');
+/** 场景下拉固定显示「2% 线性」（烘焙值），与 store.stretchMode 解耦。 */
+const stretchValue = computed(() => (sceneActive.value ? 'linear2' : store.stretchMode));
+const stretchTitle = computed(() =>
+  sceneActive.value
+    ? '盘阵 JPG 已烘焙 2% 线性拉伸（本地 TIF 路径保留全部拉伸模式）'
+    : '',
+);
+
 const STRETCH_OPTIONS: { value: StretchMode; label: string }[] = [
   { value: 'linear', label: '线性' },
   { value: 'linear2', label: '2% 线性' },
@@ -72,7 +82,9 @@ const outBtnTitle = computed(() =>
 
     <select
       class="stretch-sel"
-      :value="store.stretchMode"
+      :value="stretchValue"
+      :disabled="sceneActive"
+      :title="stretchTitle"
       @change="store.setStretch(($event.target as HTMLSelectElement).value as StretchMode)"
     >
       <option v-for="o in STRETCH_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
@@ -167,6 +179,7 @@ const outBtnTitle = computed(() =>
   outline: none;
 }
 .stretch-sel:hover { border-color: #2b7bdd; }
+.stretch-sel:disabled { opacity: 0.55; cursor: not-allowed; border-color: #3a4149; }
 
 .loc {
   display: inline-flex;

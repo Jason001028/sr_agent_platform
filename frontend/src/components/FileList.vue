@@ -39,7 +39,9 @@ function onJpgClick(e: MouseEvent, rec: ViewerRec) {
       @click="store.activate(rec.id)"
     >
       <span class="close" title="移除" @click.stop="store.removeRec(rec.id)">×</span>
-      <div class="name">{{ rec.name }}</div>
+      <div class="name">
+        <span v-if="rec.route === 'jpg'" class="scn" title="盘阵场景：服务器烘焙 JPG">盘阵</span>{{ rec.name }}
+      </div>
       <div class="meta">
         {{ fmtBytes(rec.size) }}
         <template v-if="rec.W"> · {{ rec.W }}×{{ rec.H }}</template>
@@ -104,6 +106,17 @@ function onJpgClick(e: MouseEvent, rec: ViewerRec) {
 }
 .file-item.active { border-color: #2b7bdd; background: #22304a; }
 .file-item .name { font-weight: 600; color: #e6e9ed; word-break: break-all; }
+.file-item .name .scn {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 5px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #1b1f24;
+  background: #7aa7ff;
+  border-radius: 3px;
+  vertical-align: 1px;
+}
 .file-item .meta { color: #8a93a0; font-size: 11px; margin-top: 3px; }
 .file-item .status { font-size: 11px; margin-top: 3px; color: #e2a541; }
 .file-item .status.err { color: #e05c5c; }

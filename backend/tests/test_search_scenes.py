@@ -79,6 +79,21 @@ class TestSearch(unittest.TestCase):
         for s in r["results"]:
             self.assertIn("kf02b04", s["id"].lower())
 
+    def test_sensor_filter(self):
+        r = svc.search_scenes(None, sensor="PMS05")
+        self.assertTrue(r["count"] > 0)
+        for s in r["results"]:
+            self.assertIn("pms05", s["sensor"].lower())
+
+    def test_sensor_filter_disk(self):
+        with tempfile.TemporaryDirectory() as d:
+            write_tif(d, "GF07A03_PMS01_20260722125045.tif")
+            write_tif(d, "KF02B04_PMS05_20260810120000.tif")
+            r = svc.search_scenes(d, sensor="PMS05")
+            self.assertEqual(r["source"], "disk")
+            self.assertEqual(len(r["results"]), 1)
+            self.assertIn("KF02B04", r["results"][0]["id"])
+
     def test_date_range_filter(self):
         r = svc.search_scenes(None, date_from="2026-07-22", date_to="2026-07-24")
         self.assertTrue(r["count"] > 0)
