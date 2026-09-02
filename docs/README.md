@@ -7,6 +7,8 @@
 ## 一、文档间导航速查
 
 - **交接入口**：[docs/status/current-question.md](status/current-question.md) —— 新窗口先读
+- **新手指南**（有 Web 基础想系统理解前后端与设计取舍）：[docs/knowledge/platform-tutorial.md](knowledge/platform-tutorial.md) —— 读代码前的首选教程
+- **面试八股**（功利向跳槽复习，教程的互补）：[docs/knowledge/interview/README.md](knowledge/interview/README.md) —— 项目已到阶段 5 的窗口可顺手更新
 - **踩坑索引**：[docs/experience/gui-experience.md](experience/gui-experience.md)
 - **命名 / 归档规则**：[docs/conventions/naming-conventions.md](conventions/naming-conventions.md)
 
@@ -14,7 +16,7 @@
 
 | 类目 | 目录 | 职责 | 现有文档 |
 |---|---|---|---|
-| 背景知识 | `docs/knowledge/` | 原理 / 学科背景 / 技术实现说明 | [jpg-export-background.md](knowledge/jpg-export-background.md)、[agent-orchestration-research.md](knowledge/agent-orchestration-research.md) |
+| 背景知识 | `docs/knowledge/` | 原理 / 学科背景 / 技术实现说明 | [platform-tutorial.md](knowledge/platform-tutorial.md)（从 0 开发教程）、[jpg-export-background.md](knowledge/jpg-export-background.md)、[agent-orchestration-research.md](knowledge/agent-orchestration-research.md)、[interview/](knowledge/interview/README.md)（面试八股 · 8 篇） |
 | 需求与规划 | `docs/planning/` | 需求规格、实施计划 | [gui-requirements.md](planning/gui-requirements.md)、[web-plan.md](planning/web-plan.md)（gitignore） |
 | 经验与复盘 | `docs/experience/` | 踩坑记录、已验证方案 | [gui-experience.md](experience/gui-experience.md) |
 | 规范与约定 | `docs/conventions/` | 命名 / 流程等约束 | [naming-conventions.md](conventions/naming-conventions.md)、[langchain-boundary.md](conventions/langchain-boundary.md) |
