@@ -270,6 +270,8 @@
 
 ### 5.2 下一步（给新窗口）
 
+> 真机部分已整理成带成功标准/耗时的打勾清单，见 **§6 真机一次出差：验收一页纸**；以下为要点速览。
+
 1. **阶段4 真机验收**（需在 **CentOS7/Win11 内网机**执行，重点测首次生成耗时与内存）：
    - 部署：按 `deploy/README.md` 在盘阵机起 nginx + systemd 的 FastAPI（`SR_SCENES_ROOT` 指真实挂载点）；开发机先 `npm run build && npm run package:offline` 拷包。
    - 用真实大图（GF07A03 1.11GB / KF02B04 1.78GB，24739×24199 级）验证：
@@ -298,3 +300,41 @@
 - E2E 测试：`.e2e/`（gitignore 本机资产：`test-vue-viewer.js` **42 断言**本地文件回归 + `test-scenes.js` **45 断言**场景 http 打开；puppeteer-core + 无界面 Edge + vue-lib.js 本地静态服务顶替 nginx + uvicorn 起真后端）
 - 测试图：`test-tifs/`（gitignore）、`frontend/fixtures/`（入库小图）
 - 记忆：`~/.claude/projects/.../memory/MEMORY.md`（6 条索引：local-vendor / browser-2gb / intranet-data / real-files-1row-strips / openai-pin / **phase4-disk-array-reads-jpg**）
+
+## 6. 真机一次出差：验收一页纸（CentOS7 盘阵机）
+
+> 目的：把文档里「真机项另排」一次性收口。从零部署 → 阶段4 场景 → 阶段5 调度/掩码/SSE，
+> 预计一个工作日。真 LLM **无可用端点** → 标灰为决策点，先验不依赖模型的项。
+> 部署细节以 `deploy/README.md` 为准；跑完把每项记录誊回本文件 §5.2 并勾掉。
+> 图例：`[ ]` 待勾 · `⏱` 参考耗时 · `✓=` 成功标准 · `记录:` 实测值（耗时/内存/异常）。
+
+### 6.1 出发前（开发机）
+- [ ] **打包拷包**（⏱30′）· 开发机 `npm run build && npm run package:offline` → 离线包 + 后端依赖 wheel 拷 U 盘 · ✓= 包内含 `dist/ backend/ nginx.conf sr-api.service requirements-api.txt` · 记录:
+- [ ] **确认目标图**（⏱5′）· 从盘阵挑两张真实大图（GF07A03 1.11GB / KF02B04 1.78GB），记下它们在第几行 · ✓= 知道 scene 名即可 curl 到 · 记录:
+
+### 6.2 首次部署（CentOS7）
+- [ ] **装 nginx + venv**（⏱30′）· EPEL 装 nginx；`python3 -m venv /opt/sr-venv`；离线装 requirements-api.txt（含 openai）· ✓= 两条命令均无报错 · 记录:
+- [ ] **放 nginx.conf**（⏱15′）· 拷到 conf.d，按真机改 `root`（dist 目录）、`alias`（盘阵根）、`proxy_pass` · ✓= `nginx -t` 通过 → `systemctl reload nginx` · 记录:
+- [ ] **放 sr-api.service**（⏱20′）· 拷 systemd；改 `WorkingDirectory` / `SR_SCENES_ROOT`（=nginx alias 同值）/ `SR_AGENT_DB` 父目录归属 / `ExecStart` venv 路径；**保持 `SR_LLM_MOCK=0` `SR_SLURM_FAKE=0` 不改** · ✓= `systemctl enable --now sr-api` 起来，`chown -R nginx` 库目录可写 · 记录:
+- [ ] **探活**（⏱10′）· `curl /api/health`、`/api/scenes`（有行、非 fake）、`/api/queue` · ✓= 三接口 200 且 scenes 返回真实 W/H · 记录:
+
+### 6.3 阶段4 场景验收（真机唯一不可替代项）
+- [ ] **场景行元数据**（⏱10′）· curl 目标图对应行 · ✓= `W/H` 与 ENVI 头一致、`jpgUrl` 非空或为 null（未生成前） · 记录:
+- [ ] **首访预览生成**（⏱依赖图大小）· curl `/api/scenes/<id>/preview` 并计时 · ✓= 几十秒内返回、期间 `ps` 记 FastAPI RSS 峰值不失控（逐条带只碰采样行） · 记录耗时 / 内存:
+- [ ] **二次幂等 + 静态直出**（⏱10′）· 再 curl 同 id preview；curl `/disk-array/<rel>` · ✓= 二次秒回；静态带缓存头 200 · 记录:
+- [ ] **浏览器出图**（⏱30′）· Win11 开 `/scenes` → 打开真实场景 · ✓= canvas 出图、文件列表「盘阵」chip、拉伸下拉禁用（tooltip「已烘焙 2% 线性」）、二次秒开 · 记录:
+- [ ] **越权拦截**（⏱10′）· 拼 `../` 越权 id / URL 各打一发 · ✓= 403/404；`journalctl -u sr-api` 无越权告警 · 记录:
+- [ ] **本地文件回归收尾**（⏱30′）· 真实大图走「选择 TIF…」本地路径 · ✓= 稀疏预览 8192 不崩、画掩码直出正常、2% Linear 导出 8192×8013 无条纹 · 记录:
+
+### 6.4 阶段5 调度验收（SR_SLURM_FAKE=0 真调度）
+- [ ] **真实提交 + 推进**（⏱20′）· `/queue` 手填**测试目录**的 lq_path 提交（勿碰生产数据）· ✓= sbatch 起真实作业，徽标随 squeue/sacct 从 排队→运行→完成，记录真实推进节奏 · 记录 job_id / 耗时:
+- [ ] **取消**（⏱10′）· 提交一个会排队的作业 → 点取消 · ✓= scancel 生效、状态变失败/取消 · 记录:
+- [ ] **重启校准**（⏱10′）· `systemctl restart sr-api` → 刷新 /queue · ✓= 内存缓存丢后 GET /api/queue 当场校准，已完成作业仍显示 完成 · 记录:
+
+### 6.5 阶段5 掩码→SR 真链 + SSE 长连
+- [ ] **掩码落盘 + ENVI 核对**（⏱30′）· 真实场景画矩形掩码 →「提交 SR」→ 落盘原图目录 · ✓= ENVI 打开 `<stem>_mask.tif` 区域位置正确（JPG 上画→全分辨率落点）+ `_mask.txt` 质心可读；顺带用带 MaskPath 的真作业确认 0817 消费链一致 · 记录:
+- [ ] **SSE 长连**（⏱30′，可挂后台）· 临时开 `SR_LLM_MOCK=1` 或挂 `/api/queue/events`，经 nginx 连 10min+ · ✓= 事件逐帧到达不攒批、断链后前端重连正常、无 502 · 记录:
+
+### 6.6 决策点（标灰，不阻塞；当天记结论）
+- [ ] **LLM 底座拍板** · 内网有无第二台 GPU → vLLM+Qwen / Ollama+Qwen / 第三方端点（§2.6⑤）· ✓= 出结论即可 · 结论:
+- [ ] **上线还差的两件事记账** · 真 LLM 复测一轮 /chat（配好端点后）；产物回到用户（队列「完成」之后的目录/对比/失败诊断）+ 多人权限要不要（M2）· ✓= 列进 §5.2 · 结论:
