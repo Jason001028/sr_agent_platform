@@ -65,6 +65,10 @@
 
 ## 【阶段5 · 平台 API 层 + 聊天/共享队列】
 
+> 状态：**已完成（2026-09-02）**——契约定稿 `api-contract.md`（已定），实现与门禁见
+> `docs/status/current-question.md` §1（后端 190 + Vitest 114 + `.e2e/test-platform.js` 11 断言）。
+> 以下为历史提示词，仅剩**真机验收**项（§5.2 清单），新窗口勿重复离机实现。
+
 你是本项目续接会话。先读 `CLAUDE.md` → `docs/status/current-question.md` → `docs/experience/gui-experience.md` → `docs/planning/frontend-migration.md` → `docs/planning/frontend-phase4-phase5-prompts.md`（本文件）。阶段1-4 已完成（含盘阵场景检索 + 读 JPG 查看 + 掩码；本地文件路径仍是稀疏 TIF 读法）。
 
 **目标**：把已有后端（agent loop + 4 工具 + sr_tasks + slurm）暴露成网页可调的 REST/SSE，实现两个页面：**聊天**（Agent 对话，MVP 用 mock 模型）与**共享任务队列**（SR 作业），并支持查看器画完掩码一键提交 SR。

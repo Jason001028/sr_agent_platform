@@ -1,12 +1,18 @@
-# sr_agent_platform 离线部署（阶段2 前端 + 阶段4 盘阵场景 API）
+# sr_agent_platform 离线部署（阶段2 前端 + 阶段4 盘阵场景 API + 阶段5 平台 API）
 
 > 产物自包含、全离线，无任何 CDN/外网依赖。本包 = `dist/`（前端产物）+ `nginx.conf`
-> + `backend/`（FastAPI 场景 API）+ `sr-api.service`（systemd）+ `requirements-api.txt`
+> + `backend/`（FastAPI 平台 API）+ `sr-api.service`（systemd）+ `requirements-api.txt`
 > + 本说明。开发机（Windows，外网）打包 → 拷到内网机（CentOS7）解压 → nginx + FastAPI 托管。
 
 阶段4 数据路径（09-02 决策）：浏览器**不再读盘阵原始 TIF**。盘阵场景由后端懒生成
 「稀疏采样 + 2% 线性拉伸」的 8192 长边灰度 JPG，nginx 整块静态直出；检索走 FastAPI。
 本地文件路径（选择 TIF…）保持原有稀疏 TIF 读法，零回归。
+
+阶段5 平台 API（09-02 定稿，契约 = `docs/planning/api-contract.md`）：FastAPI 在既有场景
+端点上新增 `/api/chat/*`（会话 REST + 单回合 SSE）、`/api/queue*`（共享 SR 队列 REST + SSE
+状态广播）、`/api/tools`（工具直调）、`/api/masks`（掩码烘焙到原图目录）；前端新增 `/chat`
+聊天页、`/queue` 共享队列页，查看器画完掩码点「提交 SR」→ 后端落盘掩码 → 跳 `/queue` 预填
+（不自动提交）。离机验收走 mock LLM + 假调度器；**真机必须显式关 fake**（见下方 systemd env）。
 
 ## 一、开发机打包
 
@@ -78,7 +84,7 @@ sr-agent-platform/
    /opt/sr-venv/bin/pip install -r /data/www/sr-agent-platform/requirements-api.txt
    ```
 
-3. **放 systemd 单元**，改三处后启动：
+3. **放 systemd 单元**，按真机核对下面几处后启动：
 
    ```bash
    cp /data/www/sr-agent-platform/sr-api.service /etc/systemd/system/
@@ -86,11 +92,15 @@ sr-agent-platform/
 
    - `WorkingDirectory=` → 解压根（默认 `/data/www/sr-agent-platform`，保证能 import `backend` 包）；
    - `Environment=SR_SCENES_ROOT=` → 盘阵根（**必填**，须与 nginx `alias` 同值）；
+   - `Environment=SR_AGENT_DB=` → SQLite 库（阶段5 起 chat 会话 + sr_tasks 同库；父目录须 `nginx` 可写）；
+   - `Environment=SR_LLM_MOCK=0` / `SR_SLURM_FAKE=0` → **真机显式关假实现**（service 已带默认，勿改成 1）；
+   - 真 LLM 再配 `SR_LLM_BASE_URL/API_KEY/MODEL`（内网端点，见 service 注释）；不配则 loop 默认连外网端点（离机/MVP 用 mock，见 §四）；
    - `ExecStart=` 的 venv 路径若不同则改。
 
    > 权限：systemd 默认以 `nginx` 用户跑（`User=` 已设）。该用户需能**读**盘阵 TIF、
-   > **写**预览 JPG 缓存（默认写源同目录 `<源>.preview.jpg`）。盘阵目录可写、所有组即可：
-   > `chgrp -R nginx <SR_SCENES_ROOT> && chmod -R g+rwX <SR_SCENES_ROOT>`。
+   > **写**预览 JPG 缓存（默认写源同目录 `<源>.preview.jpg`）、**写** `SR_AGENT_DB` 库。
+   > 盘阵目录可写、所有组即可：`chgrp -R nginx <SR_SCENES_ROOT> && chmod -R g+rwX <SR_SCENES_ROOT>`；
+   > 库目录单独给写权：`mkdir -p <SR_AGENT_DB 父目录> && chown -R nginx:nginx <SR_AGENT_DB 父目录>`。
 
    ```bash
    systemctl daemon-reload
@@ -118,6 +128,33 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1/disk-array/<某个rel>
 （大图几十秒，进度在 Network 里能看到 `/api/scenes/.../preview`），此后秒开（JPG 已落盘 +
 浏览器缓存）。F12 Network 里应只有本站请求（`./assets/*`、`/api/*`、`/disk-array/*`），
 **没有任何外网域名**。
+
+### 阶段5 平台 API（聊天 / 队列 / 掩码）
+
+> 真 LLM / 真 Slurm 就绪前，可先用假实现验链路（与开发机离机验收同基准）：把 service 的
+> `SR_LLM_MOCK` / `SR_SLURM_FAKE` 临时置 `1` → `systemctl restart sr-api` → 验完改回 `0`。
+
+```bash
+# 工具清单 / 队列列表
+curl -s http://127.0.0.1/api/tools | head -c 300            # {"tools":[…]}
+curl -s http://127.0.0.1/api/queue | head -c 400            # {"tasks":[…]}
+
+# 聊天：建会话 → 发消息看 SSE 帧（mock=1 固定先 search_scenes 再回最终回复）
+curl -s -X POST http://127.0.0.1/api/chat/sessions          # 201 {"session_id":…}
+curl -s -N -X POST http://127.0.0.1/api/chat/sessions/<id>/messages \
+     -H 'content-type: application/json' -d '{"content":"看看盘阵上有什么"}'
+     # 逐帧 data: {"type":"turn_start"|"tool_call"|"tool_result"|"assistant"|"turn_done",…}
+
+# 队列 SSE：挂起看 job_update（后台校准器广播）
+curl -s -N http://127.0.0.1/api/queue/events
+```
+
+浏览器：`http://<内网机IP>/chat` 发一条 → 工具行 ✓ + 最终回复（SSE 逐帧渲染），刷新可恢复
+历史；`/queue`「提交 SR 作业」手填 `lq_path` → 提交 → 状态徽标随 SSE 从 提交中/排队/运行中
+推进到「完成」（假调度器几百 ms；真 Slurm 为真实 squeue/sacct）；查看器画完掩码点「提交 SR」
+→ 自动跳 `/queue` 表单预填掩码与原图目录 → 检查后点「提交到 Slurm」。F12 Network 里
+`/api/chat/.../messages` 与 `/api/queue/events` 是 **SSE 长连接**（`text/event-stream`），nginx 已
+`proxy_buffering off`，应看到事件逐帧到达而非攒批。
 
 ## 五、升级 / 回滚
 

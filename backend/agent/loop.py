@@ -41,11 +41,57 @@ _REPAIR_ERROR = (
     "unknown — do not blindly retry. Check the external system (e.g. "
     "sr_job_status) or ask the user before resubmitting.")
 
+# SSE 观察事件类型（api-contract.md §4.2）：run_loop 不改状态机行为，
+# 只是在这些既有 return/commit 点同步回调 on_step，供 REST 层桥接 SSE。
+_EVENT_TYPES = ("tool_call", "tool_result", "assistant", "error")
+
 
 def build_client(cfg: Config) -> OpenAI:
     """OpenAI SDK client pointed at any OpenAI-compatible endpoint."""
     return OpenAI(base_url=cfg.llm_base_url, api_key=cfg.llm_api_key,
                   timeout=cfg.llm_timeout)
+
+
+def _mock_chat(cfg: Config):
+    """Fixed-script fake LLM (SR_LLM_MOCK=1, api-contract.md §5.1).
+
+    Deterministic, endpoint-free, and it *uses the real search_scenes tool* so
+    the SSE stream carries a real tool_call/tool_result round trip:
+      1. first assistant turn declares tool_call search_scenes (no args);
+      2. once the tool result is fed back, it answers with a summary built
+         from that result.
+    It replaces only the LLM call layer — the loop state machine is untouched
+    (still locked by the existing 18 tests)."""
+    def chat(messages, tools):
+        tool_results = [m for m in messages if m.get("role") == "tool"]
+        if not tool_results:
+            return {"content": None, "tool_calls": [{
+                "id": "call_mock_search", "name": "search_scenes",
+                "arguments": "{}"}]}
+        # deterministic final answer from the last tool result
+        ids, n, source = [], 0, "?"
+        try:
+            payload = json.loads(tool_results[-1]["content"])
+            if payload.get("ok") and payload.get("data"):
+                data = payload["data"]
+                source = data.get("source", "?")
+                n = data.get("count", len(data.get("results", [])))
+                for s in data.get("results", [])[:5]:
+                    ids.append(s.get("id", ""))
+        except (TypeError, ValueError):
+            pass
+        text = (f"已检索盘阵场景 {n} 个（mock 模型，source={source}）"
+                + (f"：{', '.join(ids)}。" if ids else "。"))
+        return {"content": text, "tool_calls": []}
+    return chat
+
+
+def _parse_args(arguments) -> dict:
+    try:
+        v = json.loads(arguments or "{}")
+        return v if isinstance(v, dict) else {"raw": v}
+    except (TypeError, ValueError):
+        return {"raw": arguments}
 
 
 def parse_response(resp) -> dict:
@@ -75,6 +121,8 @@ def call_tool(name, arguments_json) -> dict:
 
 
 def _default_chat(cfg: Config):
+    if cfg.llm_mock:
+        return _mock_chat(cfg)
     client = build_client(cfg)
 
     def chat(messages, tools):
@@ -141,12 +189,19 @@ def _transcript_from(messages: list[dict]) -> list[dict]:
 
 def run_loop(cfg, prompt, *, max_turns=8, system_prompt=DEFAULT_SYSTEM_PROMPT,
              chat=None, verbose=False, store=None, session_id=None,
-             resume=False):
+             resume=False, on_step=None):
     """Run the loop; returns {"ok", "turns", "messages", "answer", "error",
     "session_id"}.
 
     `chat(messages, tools)` → {"content", "tool_calls":[{id,name,arguments}]}
-    is injectable for tests; the default builds an OpenAI client from cfg.
+    is injectable for tests; the default builds an OpenAI client from cfg
+    (or a fixed-script fake chat when cfg.llm_mock).
+
+    `on_step(ev)` — optional observation seam (api-contract.md §4.2): called
+    synchronously at the existing commit/return points with {"type": ...} events
+    (tool_call / tool_result / assistant / error) so the REST layer can bridge
+    them to SSE. Default None → byte-identical to the pre-seam behavior; the
+    loop state machine is unchanged.
 
     `store` (backend.services.store.Store) enables SQLite persistence: every
     message is committed before the step that depends on it (checkpoint before
@@ -201,6 +256,8 @@ def run_loop(cfg, prompt, *, max_turns=8, system_prompt=DEFAULT_SYSTEM_PROMPT,
             if verbose:
                 print(f"[turn {turn}] LLM call failed: {error}")
             transcript.append({"role": "error", "error": error, "turn": turn})
+            if on_step is not None:
+                on_step({"type": "error", "error": error, "turn": turn})
             if store is not None:
                 store.set_session_status(session_id, "error")
             return {"ok": False, "turns": turn, "messages": transcript,
@@ -216,6 +273,8 @@ def run_loop(cfg, prompt, *, max_turns=8, system_prompt=DEFAULT_SYSTEM_PROMPT,
         if not tool_calls:
             commit({"role": "assistant", "content": content})
             transcript.append({"role": "assistant", "content": content})
+            if on_step is not None and content:
+                on_step({"type": "assistant", "content": content})
             if store is not None:
                 store.set_session_status(session_id, "done")
             return {"ok": True, "turns": turn, "messages": transcript,
@@ -234,12 +293,21 @@ def run_loop(cfg, prompt, *, max_turns=8, system_prompt=DEFAULT_SYSTEM_PROMPT,
         })
         transcript.append({"role": "assistant", "content": content,
                            "tool_calls": tool_calls})
+        if on_step is not None and content:
+            on_step({"type": "assistant", "content": content})
 
         for tc in tool_calls:
+            if on_step is not None:
+                on_step({"type": "tool_call", "name": tc["name"],
+                         "args": _parse_args(tc["arguments"])})
             result = call_tool(tc["name"], tc["arguments"])
             if verbose:
                 status = "ok" if result["ok"] else "ERR: " + (result["error"] or "")
                 print(f"[turn {turn}] tool {tc['name']} → {status}")
+            if on_step is not None:
+                on_step({"type": "tool_result", "name": tc["name"],
+                         "ok": bool(result["ok"]), "data": result["data"],
+                         "error": result["error"]})
             commit({"role": "tool", "tool_call_id": tc["id"],
                     "content": json.dumps(result, ensure_ascii=False)})
             transcript.append({"role": "tool", "name": tc["name"],
@@ -249,6 +317,8 @@ def run_loop(cfg, prompt, *, max_turns=8, system_prompt=DEFAULT_SYSTEM_PROMPT,
     if verbose:
         print(f"[loop] {error}")
     transcript.append({"role": "error", "error": error, "turn": max_turns})
+    if on_step is not None:
+        on_step({"type": "error", "error": error, "turn": max_turns})
     if store is not None:
         store.set_session_status(session_id, "error")
     return {"ok": False, "turns": max_turns, "messages": transcript,
