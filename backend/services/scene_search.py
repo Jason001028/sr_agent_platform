@@ -79,13 +79,14 @@ def fake_scenes(n=12) -> list[dict]:
     return scenes
 
 
-def search_scenes(root, query="", satellite=None, date_from=None, date_to=None,
-                  limit=20):
+def search_scenes(root, query="", satellite=None, sensor=None, date_from=None,
+                  date_to=None, limit=20):
     """Search the archive; returns {"source", "scanned", "count", "results"}.
 
     root — real directory (disk backend) or None/not-a-dir (falls back to fake).
     query — case-insensitive substring on scene id/path.
     satellite — case-insensitive substring on the parsed satellite id.
+    sensor — case-insensitive substring on the parsed sensor id.
     date_from/date_to — inclusive "YYYY-MM-DD" bounds; scenes without a parsed
     date are excluded once a bound is given.
     """
@@ -99,11 +100,14 @@ def search_scenes(root, query="", satellite=None, date_from=None, date_to=None,
 
     q = (query or "").strip().lower()
     sat = (satellite or "").strip().lower()
+    sen = (sensor or "").strip().lower()
 
     def keep(s):
         if q and q not in s["id"].lower() and q not in s["path"].lower():
             return False
         if sat and sat not in (s.get("satellite") or "").lower():
+            return False
+        if sen and sen not in (s.get("sensor") or "").lower():
             return False
         if s.get("date"):
             if date_from and s["date"] < date_from:

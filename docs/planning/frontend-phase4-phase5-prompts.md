@@ -1,55 +1,71 @@
 # 阶段4/5 提示词（新窗口粘贴用）
 
-> 日期：2026-09-02 · 状态：技术形态已由多轮提问定案
-> 用途：新窗口执行阶段4（查看器数据路径）、阶段5（平台 API 层 + 聊天/队列）时粘贴的提示词。
-> 前置：阶段1-3 已完成（`frontend/` 完整 Vue3 查看器 + `tifDecode/maskgen/source` + 51 Vitest + `.e2e` 回归；backend 有 agent/tools/services，114 pytest）。
+> 日期：2026-09-02 · 状态：阶段4 技术方向已变更定案（09-02 晚：盘阵路径改读**服务器预生成 JPG**，废弃原"HttpSource + nginx Range 读 TIF 字节"方案，理由见【阶段4】已定决策）
+> 用途：新窗口执行阶段4（查看器数据路径 · 盘阵读 JPG）、阶段5（平台 API 层 + 聊天/队列）时粘贴的提示词。
+> 前置：阶段1-3 已完成（`frontend/` 完整 Vue3 查看器 + `tifDecode/maskgen/source` + 75 Vitest + `.e2e` 38 断言；backend 有 agent/tools/services，114 pytest）。
 
 ---
 
-## 【阶段4 · 查看器数据路径】
+## 【阶段4 · 查看器数据路径（盘阵读 JPG）】
 
 你是本项目续接会话。先读 `CLAUDE.md` → `docs/status/current-question.md` → `docs/experience/gui-experience.md` → `docs/planning/frontend-migration.md`（§2 阶段表）。阶段1-3 已完成。
 
-**目标**：让查看器能从内网盘阵通过 HTTP 读大图，并加盘阵检索/查看。= 前端 `HttpSource` + 后端场景索引 API + nginx Range 托管 + 检索 UI。
+> ⚠️ **前置纠偏**：`frontend-migration.md` §2 阶段表（及 `source.ts` 注释）里阶段4 的"HttpSource / Range 读取 / strip-窗口读取端点"描述**已过时**——09-02 已拍板改走"盘阵读 JPG"，下文【阶段4】"已定决策"为准。
+
+**目标**：让查看器能浏览内网盘阵的遥感大图，并加盘阵检索/查看。显示 = **服务器预生成的 8192 JPG**，浏览器**不再对原始 TIF 做任何字节读取**。2026-09-02 已拍板改向（原 "HttpSource + nginx Range 稀疏读 TIF" 方案废弃），与 09-01"预览=JPG 中间产物"的原意对齐。
 
 ### 已定决策（不重议）
-- 字节读取 = **nginx 静态 + HTTP Range**：CentOS7 上 nginx 把盘阵目录映射成 URL 前缀（原生支持 Range），`HttpSource` 直接 Range 读。后端**零字节代码**，只出一个场景索引 API。
+- **显示 = 服务器预生成 JPG**：CentOS7 盘阵机把 TIF **稀疏采样 + 2% Linear 拉伸**烤成 8192 长边 JPEG，落缓存；浏览器 `<img>`/canvas 加载。首次生成约几十秒（后台/懒生成），之后 nginx 静态直出（原生缓存）。
+- **浏览器内不再读 TIF 字节**：`HttpSource` / Range 路径**砍掉，本阶段不实现**（`source.ts` 的 HttpSource 桩保留不动或删除均可，不被调用）。本地解码库（tifDecode/maskgen/sparse）**一律不动**。
+- **本地文件路径保持现状**：仍走稀疏 TIF 读法 + 全交互拉伸 + exportToJpg，这是阶段1-3 已交付行为，零改动、无回归。
+- 盘阵 JPG **只烤一种拉伸（2% Linear 默认）**：交互式拉伸下拉在盘阵场景**禁用**（tooltip 注明"盘阵 JPG 已烘焙 2% 线性拉伸"）；本地文件路径保留全部拉伸模式。
+- **掩码**：在 JPG 画布上绘制 → 坐标按**场景元数据 W/H** 换算回全分辨率（thumbToOrig 逻辑不变，scale 来自元数据而非 probe）。阶段4 掩码仍前端直出 `掩码.tif` 下载；阶段5 才改为后端栅格化写盘阵。
+- 导出 JPG：盘阵场景**不提供**（服务器已有即为交付物）；本地文件路径保留。
 - 连通 = 直连 IP:端口设计；部署文档注明走端口转发时只改 URL。
 - 盘阵结构未确认 → **双层保险**：nginx 整块暴露 + 后端路径白名单（部署时按实际收紧）。
-- 开发测试 = 逻辑层用本地静态服务/测试图；真机验收在 CentOS7 或 Win11 内网机（两者都能直接访问盘阵）。
-- 硬约束照旧：浏览器 2GB 分配上限、Canvas 16384²、CDN 不可达（本地 vendor）、补丁版 utif.js 绝不重装。
+- 硬约束照旧：本地文件路径仍受 2GB/16384 约束；第三方库本地 vendor；补丁版 utif.js 绝不重装。
 
 ### 现有代码状态
-- `frontend/src/lib/source.ts`：`HttpSource` 是桩（read 抛"尚未实现"）。`Source` 接口 = `read(offset,len)→Promise<ArrayBuffer>`，`FileSource` 已实现。tifDecode 全部只依赖 Source 接口。
-- `backend/services/scene_search.py`：已有 `search_scenes(root, query, satellite, date_from, date_to, limit)`（盘阵递归扫 + fake 回退），120 行。backend 目前**无任何 FastAPI/REST**。
-- 测试基建：frontend Vitest 51 项、`.e2e` puppeteer（file:// 直测）、backend pytest 114 项。
+- 前端 Vue3 查看器（阶段3 完成）：六组件 + `stores/viewer.ts`（718 行，`decodeRec` 填充 DecodedRec{W/H/thumb/src/stats/route} + `paintStretch`）。本阶段新增**场景来源模式**：加载 JPG → 构造 route='jpg' 的同构 rec（src 取 JPG 画布像素，已烘焙拉伸）→ 掩码/平移/缩放/删除/合并全部复用。
+- `frontend/src/lib/source.ts`：HttpSource 是桩 → **本阶段不需要**。
+- `backend/services/scene_search.py`：已有 `search_scenes(...)`（递归扫 + fake 回退 + 文件名解析卫星/传感器/日期），120 行。backend 目前**无任何 FastAPI/REST**。
+- 后端有 `services/mask.py`（Pillow，栅格化掩码）可参考 Pillow 用法；无 TIF 稀疏读取的 Python 实现（需新写，镜像前端 `parseStrips`/`sparseSample`/`stretch` 语义）。
+- 测试基建：frontend Vitest 75 项 + `.e2e` puppeteer、backend pytest 114 项。
 
 ### 任务清单
-1. **后端最小 FastAPI 骨架**（`backend/api/` 或 `backend/app.py`，遵循现有零框架依赖风格）：
-   - `GET /api/scenes` 场景检索（包 `search_scenes`；`SR_SCENES_ROOT` env 指盘阵根）
-   - **路径白名单校验**：返回的 path 必须落在白名单根目录下；拒绝 `../` 穿越与白名单外绝对路径（注意 `tools/run_sr.py` 已对 `<fake>` 路径做拦截，检索层同样要防）
+1. **后端 FastAPI 最小骨架**（`backend/api/` 或 `backend/app.py`，遵循现有零框架依赖风格，config 沿用 `backend/config.py` env 式）：
+   - `GET /api/scenes` 场景检索：包 `search_scenes`，每个场景补 `W`/`H`（优先伴生 `.hdr` ENVI 头，缺失则探测 TIF 头部；探测结果可缓存）+ `jpgUrl`（nginx 静态地址；JPG 未生成时为 null）
+   - `GET /api/scenes/{id}/preview`：**懒生成** JPG（存在且 mtime 不旧于源就跳过）→ `FileResponse` 返回；nginx 可对该路径加缓存
+   - **路径白名单校验**：返回/生成的 path 必须落在白名单根目录下；拒绝 `../` 穿越与白名单外绝对路径（`tools/run_sr.py` 已对 `<fake>` 路径拦截，检索层同样要防）
    - uvicorn 启动 + systemd unit 文件（nohup 备选）
-2. **前端 `HttpSource`**（`frontend/src/lib/source.ts`）：
-   - `fetch` + `Range: bytes=offset-(offset+len-1)`，206 处理；非 206/404/服务器不支持 Range 的错误处理
-   - 复用 `source.read` 契约，**tifDecode 零改动**；`parseStrips`/`sparseSample` 直接可用
-3. **盘阵检索/查看 UI**：场景列表 + 卫星/传感器/日期/关键词筛选 + 点击打开（HttpSource URL → 查看器走 probe→稀疏/分块）
+2. **后端 JPG 生成服务**（`backend/services/preview_jpg.py`）：
+   - 稀疏采样 = 前端语义的 Python 镜像：解析 TIFF 条带布局（纯 numpy 解析 IFD，不引新依赖）→ 每隔若干行抽一行 → 缩到长边 8192（上限 8192，源更小则原尺寸）
+   - 拉伸 = 2% Linear（与前端 stretch 语义一致；灰/单波段 16bit 输入）；Pillow 编码 JPEG
+   - 缓存幂等：落 `<源同目录>/<basename>.preview.jpg`（或独立缓存目录），存在且新于源则跳过；`jpgUrl` 由 nginx 静态托管
+   - 单测：小 fixture TIF（如 256² 无压缩）→ JPG 生成正确、二次调用不重新生成、白名单外拒绝
+3. **前端场景检索/查看 UI**：
+   - 场景列表（新路由 `/scenes` 或查看器侧栏）：卫星/传感器/日期/关键词筛选（复用 search_scenes 参数）+ 行显示 W/H
+   - 点击打开：`jpgUrl` 未就绪先调 `/preview` → `<img>` 加载 → 画到 canvas → 构造 route='jpg' 的同构 rec → 现有查看器全流程复用（掩码/合并/删除照旧）
+   - 掩码换算：`thumbToOrig` 的 scale 用元数据 W/H 计算；本地文件路径仍走 probe
+   - 盘阵场景禁掉拉伸下拉 + 导出按钮（tooltip 说明），本地场景照旧
 4. **测试**：
-   - `HttpSource` 单测：Node 里起本地 Range 静态服务器（Node `http`+`fs` 手写 Range 即可）验证 offset/len/越界/206/404
-   - 后端 pytest：`/api/scenes` 正常 + fake 回退 + 路径白名单穿越拒绝
-   - `.e2e`：起本地静态服务 → 打开 http 场景 → 查看器出图
-5. **部署**：nginx 配置（盘阵目录 `location` + Range 默认支持）+ systemd + 离线部署文档
-6. **真机验收（另排，不阻塞代码完成）**：CentOS7 起 nginx/FastAPI → Win11 浏览器打开盘阵大图
+   - 后端 pytest：`/api/scenes` 正常 + fake 回退（fake:true + 假尺寸）+ W/H 解析 + 白名单穿越拒绝 + `/preview` 生成/缓存幂等
+   - 前端 Vitest：route='jpg' 的 rec 构造 + 掩码换算分支
+   - `.e2e`：起本地静态服务（放一张真 JPG）顶替盘阵 → 打开 http 场景 → 查看器出图 + 掩码换算断言；本地文件路径回归（38 断言仍全绿）
+5. **部署**：nginx 配置（盘阵目录静态托管 + JPG 缓存目录 + `/preview` 缓存）+ systemd + 离线部署文档
+6. **真机验收（另排，不阻塞代码完成）**：CentOS7 起 nginx/FastAPI → Win11 浏览器开真实大图（1.1GB/1.78GB）→ 记录首次生成耗时、二次秒开、显示内存占用
 
 ### 验收（离机即算完成）
-- `HttpSource` 单测 + 后端 pytest + `.e2e`（本地静态服务顶替 nginx）全过
+- 后端 pytest + 前端 Vitest + `.e2e`（本地静态服务顶替 nginx）全过
+- **本地文件路径零回归**（75 Vitest + 38 .e2e 断言仍全绿，稀疏/交互拉伸/导出照旧）
 - nginx 配置 + systemd + 部署文档交付
-- 真机项列验收清单，注明"需在 CentOS7/Win11 内网机执行"
+- 真机项列验收清单，注明"需在 CentOS7/Win11 内网机执行，重点测首次生成耗时与内存"
 
 ---
 
 ## 【阶段5 · 平台 API 层 + 聊天/共享队列】
 
-你是本项目续接会话。先读 `CLAUDE.md` → `docs/status/current-question.md` → `docs/experience/gui-experience.md` → `docs/planning/frontend-migration.md` → `docs/planning/frontend-phase4-phase5-prompts.md`（本文件）。阶段1-4 已完成（含 HttpSource + 盘阵检索）。
+你是本项目续接会话。先读 `CLAUDE.md` → `docs/status/current-question.md` → `docs/experience/gui-experience.md` → `docs/planning/frontend-migration.md` → `docs/planning/frontend-phase4-phase5-prompts.md`（本文件）。阶段1-4 已完成（含盘阵场景检索 + 读 JPG 查看 + 掩码；本地文件路径仍是稀疏 TIF 读法）。
 
 **目标**：把已有后端（agent loop + 4 工具 + sr_tasks + slurm）暴露成网页可调的 REST/SSE，实现两个页面：**聊天**（Agent 对话，MVP 用 mock 模型）与**共享任务队列**（SR 作业），并支持查看器画完掩码一键提交 SR。
 
