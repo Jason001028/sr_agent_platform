@@ -1,10 +1,13 @@
-# sr_agent_platform 后端运行依赖（阶段4：场景检索 + 懒生成预览 JPG）
+# sr_agent_platform 后端运行依赖（阶段4 场景 + 阶段5 平台 API）
 # 内网机离线一次性安装：<venv>/bin/pip install -r requirements-api.txt
 #   fastapi      /api 路由（uvicorn 由下方显式列出）
 #   uvicorn      服务进程（systemd 单元 ExecStart 调用）
 #   numpy        稀疏条带采样 + 2% 拉伸的像素搬运
 #   pillow       灰度 JPEG 编码
+#   openai       阶段5 API 进程 import backend/agent/loop → openai。版本锁 1.x：
+#                openai 3.x 与既有 aiohttp 3.8.3 不兼容（实测装 1.109.1）
 fastapi>=0.110
 uvicorn[standard]>=0.29
 numpy>=1.24
 pillow>=10.0
+openai>=1.40,<2

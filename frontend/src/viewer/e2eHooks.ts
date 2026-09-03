@@ -24,6 +24,7 @@ import type { Saver } from '../lib/saver.js';
 import { thumbToOrig } from '../lib/viewMath.js';
 import MaskGen from '../lib/maskgen.js';
 import { FileSource } from '../lib/source.js';
+import type { SceneOpenMeta } from '../lib/scene.js';
 import { useViewerStore } from '../stores/viewer.js';
 import type { ViewerRec } from '../stores/viewer.js';
 
@@ -81,6 +82,9 @@ export interface ViewerHook {
   clearRois: () => void;
   mergeRois: () => Promise<void>;
   delClick: (tx: number, ty: number) => void;
+  // 阶段5：盘阵场景打开（route='jpg'，浏览器回归注入合成 JPG）+ 掩码→SR 提交
+  openSceneJpg: (meta: SceneOpenMeta, blob: Blob) => Promise<void>;
+  submitSr: () => Promise<void>;
   // 测试观测（Vue 无全局 recs → 摘要快照）
   recs: () => ViewerRecSummary[];
   activeRec: () => ViewerRecSummary | null;
@@ -155,6 +159,8 @@ export function mountE2EHooks(): ViewerHook {
     clearRois: () => useViewerStore().clearRois(),
     mergeRois: () => useViewerStore().mergeRois(),
     delClick: (tx, ty) => useViewerStore().delClick(tx, ty),
+    openSceneJpg: (meta, blob) => useViewerStore().openSceneJpg(meta, blob),
+    submitSr: () => useViewerStore().submitSr(),
     recs: () => useViewerStore().recs.map(summarize),
     activeRec: () => {
       const rec = useViewerStore().activeRec;

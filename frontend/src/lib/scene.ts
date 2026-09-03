@@ -111,11 +111,13 @@ export function sceneImageUrl(cfg: SrConfig, jpgUrl: string | null): string {
   return jpgUrl ? joinBase(cfg.staticBase, jpgUrl) : '';
 }
 
-/** 场景 → 查看器 openSceneJpg 的最小元数据（掩码换算用 W/H）。 */
+/** 场景 → 查看器 openSceneJpg 的最小元数据（掩码换算用 W/H；sceneId 供掩码烘焙）。 */
 export interface SceneOpenMeta {
   name: string;
   W: number;
   H: number;
+  /** 阶段4 不透明场景 id（/api/masks 用；route='jpg' rec 的 sceneId 来源）。 */
+  sceneId: string;
 }
 
 /* ---------------- JPG 像素 → 查看器 rec 的同构数据 ---------------- */

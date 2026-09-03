@@ -27,11 +27,15 @@ import { FileSource } from '../lib/source.js';
 import { browserKit } from '../lib/browserKit.js';
 import { decodeOne } from '../lib/decode.js';
 import type { DecodedRec } from '../lib/decode.js';
-import { sceneDecodePixels } from '../lib/scene.js';
+import { loadSrConfig, sceneDecodePixels } from '../lib/scene.js';
 import type { SceneOpenMeta } from '../lib/scene.js';
+import { apiBakeMask } from '../lib/api.js';
+import type { BakeMaskBody } from '../lib/api.js';
 import { exportToJpg } from '../lib/exportJpg.js';
 import { getSaver, fsIO, setOutDirListener, downloadBlob } from '../lib/saver.js';
 import type { OutDirState } from '../lib/saver.js';
+import { useQueueStore } from './queue.js';
+import router from '../router/index.js';
 
 export type DrawTool = 'rect' | 'polygon' | 'wand' | 'del';
 
@@ -53,6 +57,8 @@ export interface ViewerRec {
   stats: BandStats[] | null;
   /** 解码路由；'jpg' = 盘阵场景（服务器烘焙 JPG，无本地 TIF 字节） */
   route: 'utif' | 'sparse' | 'chunked' | 'jpg' | null;
+  /** 阶段4 不透明场景 id（route='jpg' 时必有；掩码烘焙 POST /api/masks 用）。 */
+  sceneId: string | null;
   layout: string;              // 即探标签摘要
   status: string;
   statusCls: '' | 'ok' | 'err';
@@ -132,6 +138,7 @@ export const useViewerStore = defineStore('viewer', () => {
   const error = ref('');
   const sidebarCollapsed = ref(false);
   const busy = ref(false);
+  const srBusy = ref(false);       // 「提交 SR」进行中（掩码服务端烘焙）
 
   const activeRec = computed<ViewerRec | null>(() =>
     recs.value.find((r) => r.id === activeId.value) || null,
@@ -157,7 +164,7 @@ export const useViewerStore = defineStore('viewer', () => {
       id: nextId++, file: markRaw(file),
       probe: null, name: file.name, size: file.size,
       W: 0, H: 0, thumb: null, src: null, srcw: 0, srch: 0, nbands: 0, invert: false,
-      stats: null, route: null, layout: '', status: '等待…', statusCls: '',
+      stats: null, route: null, sceneId: null, layout: '', status: '等待…', statusCls: '',
       paintedMode: null, maskRois: null,
       _jpgBusy: false, _jpgDone: false, _jpgToken: 0, jpgStatus: '', jpgCls: '',
     };
@@ -274,7 +281,7 @@ export const useViewerStore = defineStore('viewer', () => {
         thumb: markRaw(cv as unknown as KitCanvas),
         src: markRaw(d.src), srcw: d.tw, srch: d.th, nbands: d.nbands,
         invert: false, stats: d.stats ? markRaw(d.stats) : null,
-        route: 'jpg',
+        route: 'jpg', sceneId: meta.sceneId ?? null,
         layout: '盘阵 JPG（已烘焙 2% 线性拉伸）',
         status: '场景就绪：' + meta.name + ' · 元数据 ' + meta.W + '×' + meta.H + ' · JPG ' + d.tw + '×' + d.th,
         statusCls: 'ok', paintedMode: null, maskRois: null,
@@ -584,6 +591,49 @@ export const useViewerStore = defineStore('viewer', () => {
     }
   }
 
+  /**
+   * 掩码 → SR 提交（阶段5，api-contract.md §3.4）：掩码服务端烘焙落原图目录，
+   * 返回 task_draft 预填队列表单 → 跳 /queue 等用户确认（Slurm 是真副作用，不自动提交）。
+   * 仅 route='jpg'（带 sceneId）可用；本地 TIF 路径无 sceneId → 提示先经 /scenes 打开。
+   */
+  async function submitSr() {
+    const rec = activeRec.value;
+    if (!rec || rec.route !== 'jpg' || !rec.sceneId) {
+      showErr('提交 SR 仅对盘阵场景可用（先到「盘阵场景」打开一张图）');
+      return;
+    }
+    if (srBusy.value) return;
+    const json = buildMaskJson();
+    if (!json || !json.polygons.length) {
+      showErr('还没有任何掩码区域：先「绘制掩码」，用矩形/多边形/魔棒画 ROI');
+      return;
+    }
+    const body: BakeMaskBody = {
+      scene_id: rec.sceneId, polygons: json.polygons, W: json.width, H: json.height,
+    };
+    srBusy.value = true;
+    const owner = rec;                       // 烘焙期间切图则丢弃（异步）
+    showMask('正在把掩码烘焙到盘阵（服务端全分辨率 ' + json.width + '×' + json.height +
+      ' 栅格化）…', rec.name, false);
+    try {
+      const cfg = loadSrConfig();
+      const res = await apiBakeMask(cfg, body);
+      hideMask(); srBusy.value = false;
+      if (activeId.value !== owner.id) {
+        showToast('掩码已烘焙到盘阵，但查看器已切走，未跳队列页');
+        return;
+      }
+      useQueueStore().setDraft(res.task_draft);   // 预填，不自动提交
+      showToast('掩码已烘焙到盘阵，去「任务队列」确认后提交 SR');
+      void router.push('/queue');
+    } catch (e) {
+      hideMask(); srBusy.value = false;
+      if (activeId.value === owner.id) {
+        showErr('掩码烘焙失败：' + (e instanceof Error ? e.message : String(e)));
+      }
+    }
+  }
+
   /* ---------------- 画布事件路由（TifCanvas 绑定） ---------------- */
   /** mousedown 在绘制模式下的分派：rect 起框 / polygon 加点 / wand 调 wandSelect / del 调 delClick */
   function onCanvasDownDraw(p: Pt): boolean {
@@ -760,7 +810,7 @@ export const useViewerStore = defineStore('viewer', () => {
     recs, activeId, activeRec, view, canvasSize, renderTick, marker,
     stretchMode, drawMode, drawTool, pendingRect, pendingPts, hoverPt, hoverRoi, flashRoi,
     wandTol, merging, autoExport, outDir, exportQueue, exportingNow, overlay, toast, error,
-    sidebarCollapsed, busy,
+    sidebarCollapsed, busy, srBusy,
     // 文件 / 解码
     addFiles, removeRec, activate, openSceneJpg,
     // 拉伸 / 视图
@@ -768,7 +818,7 @@ export const useViewerStore = defineStore('viewer', () => {
     // 掩码
     enterDraw, exitDraw, setDrawTool, commitRect, closePolygon, undoRoi, clearRois,
     mergeRois, delClick, wandSelect, buildMaskJson, exportMaskJson, genMask,
-    getRois,
+    getRois, submitSr,
     // 画布事件
     onCanvasDownDraw, onCanvasMove, onCanvasUp, onDblClick, onKeyDown,
     // 导出
