@@ -90,7 +90,11 @@ class Store:
             parent = os.path.dirname(os.path.abspath(self.path))
             if parent:
                 os.makedirs(parent, exist_ok=True)
-            self._conn = sqlite3.connect(self.path)
+            # check_same_thread=False: 阶段5 API 跨线程共用同一 Store
+            # （SSE chat 在 to_thread 里写、sync 端点在 threadpool、poller 在
+            # event loop），SQLite 自带行锁 + busy timeout 兜底并发写。
+            self._conn = sqlite3.connect(self.path, timeout=10,
+                                         check_same_thread=False)
             self._conn.executescript(_SCHEMA)
         return self._conn
 
@@ -162,17 +166,47 @@ class Store:
 
     # ---- sr_tasks (idempotency for external Slurm jobs) ------------------
 
-    def get_sr_task(self, fingerprint: str) -> dict | None:
-        row = self._db().execute(
-            "SELECT id, fingerprint, session_id, job_id, status, params, "
-            "config_xml, batch_script, log_dir, created_at, updated_at "
-            "FROM sr_tasks WHERE fingerprint = ?", (fingerprint,)).fetchone()
-        if row is None:
-            return None
+    _SR_TASK_COLS = ("id, fingerprint, session_id, job_id, status, params, "
+                     "config_xml, batch_script, log_dir, created_at, updated_at")
+
+    @staticmethod
+    def _sr_task_row(row) -> dict:
         return {"task_id": row[0], "fingerprint": row[1], "session_id": row[2],
                 "job_id": row[3], "status": row[4], "params": json.loads(row[5]),
                 "config_xml": row[6], "batch_script": row[7], "log_dir": row[8],
                 "created_at": row[9], "updated_at": row[10]}
+
+    def get_sr_task(self, fingerprint: str) -> dict | None:
+        row = self._db().execute(
+            f"SELECT {self._SR_TASK_COLS} "
+            "FROM sr_tasks WHERE fingerprint = ?", (fingerprint,)).fetchone()
+        return self._sr_task_row(row) if row is not None else None
+
+    def get_sr_task_by_id(self, task_id: int) -> dict | None:
+        """Look up a task by its primary key (queue REST endpoints)."""
+        row = self._db().execute(
+            f"SELECT {self._SR_TASK_COLS} "
+            "FROM sr_tasks WHERE id = ?", (task_id,)).fetchone()
+        return self._sr_task_row(row) if row is not None else None
+
+    def list_sr_tasks(self, limit: int = 200) -> list[dict]:
+        """All SR tasks (the shared queue), newest first."""
+        rows = self._db().execute(
+            f"SELECT {self._SR_TASK_COLS} "
+            "FROM sr_tasks ORDER BY created_at DESC LIMIT ?",
+            (limit,)).fetchall()
+        return [self._sr_task_row(r) for r in rows]
+
+    def set_sr_task_state(self, task_id: int, state: str) -> None:
+        """Write back a queue display state (阶段5 校准器) + bump updated_at.
+
+        The idempotency layer (submit_run_sr) never reads `status`, so this
+        semantic upgrade is regression-free — see api-contract.md §3.3.
+        """
+        db = self._db()
+        db.execute("UPDATE sr_tasks SET status = ?, updated_at = ? WHERE id = ?",
+                   (state, time.time(), task_id))
+        db.commit()
 
     def put_sr_task(self, fingerprint: str, params: dict, *,
                     session_id: str | None = None, status: str = "submitted",

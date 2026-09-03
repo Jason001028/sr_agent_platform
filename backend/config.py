@@ -11,6 +11,8 @@ docs/knowledge/agent-orchestration-research.md §1).
     SR_LLM_MAX_TOKENS  per-turn completion cap, default 1024
     SR_LLM_TEMPERATURE sampling temperature, default 0.2
     SR_LLM_TIMEOUT     HTTP timeout seconds, default 60
+    SR_LLM_MOCK        =1 → _default_chat 返回假 chat（固定脚本，先调 search_scenes
+                       再回最终回复，不连任何端点）—— 离机验收/前端 e2e 的 mock LLM。
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ class Config:
     llm_max_tokens: int
     llm_temperature: float
     llm_timeout: float
+    llm_mock: bool = False
 
 
 def load_config() -> Config:
@@ -47,4 +50,5 @@ def load_config() -> Config:
         llm_max_tokens=env_int("SR_LLM_MAX_TOKENS", 1024),
         llm_temperature=env_float("SR_LLM_TEMPERATURE", 0.2),
         llm_timeout=env_float("SR_LLM_TIMEOUT", 60),
+        llm_mock=os.environ.get("SR_LLM_MOCK") == "1",
     )

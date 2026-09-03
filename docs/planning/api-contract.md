@@ -1,6 +1,6 @@
 # 平台 API 契约（阶段5 · REST / SSE）
 
-> 日期：2026-09-02 · 状态：**评审**（先文档后代码——红线：改动契约先改本文档，评审通过前不写实现）
+> 日期：2026-09-02 · 状态：**已定**（评审通过；实现已按本文档交付——后端 190 unittest + 前端 Vitest 114 + vue-tsc 零错误 + `.e2e/test-platform.js` 11 断言全绿。红线不变：后续改动契约仍须**先改本文档并置回「评审」**，通过后再改代码）
 > 目标读者：阶段5 实现会话（后端 FastAPI + 前端 Vue3）。范围：把既有后端（agent loop + 4 工具 + `sr_tasks` + slurm）暴露成网页可调 REST/SSE，交付 聊天 / 共享任务队列 / 查看器画完掩码提交 SR。
 > 前置：阶段4 已完成（FastAPI 骨架 `backend/api/app.py`：`/api/scenes` + `/api/scenes/{id}/preview` + 路径白名单；前端 `/scenes` 页 + route='jpg' rec + `/chat` `/queue` 占位路由）。
 
