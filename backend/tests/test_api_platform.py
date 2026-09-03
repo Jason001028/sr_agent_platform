@@ -397,9 +397,11 @@ class TestMasks(PlatformBase):
         self.assertFalse(draft["delete_ori"])
         self.assertTrue(draft["grid_align"])
         # mask 是 0/255 灰度（后端 0/1 → 0/255 归一）
+        # 读回用 Pillow（与 test_mask.py 及生产消费链 cv2/util.read_img 一致）；
+        # 不用 tifffile——老版 imagecodecs(2021) 解不动 Pillow 的 deflate TIF（环境缺陷，产物本身有效）。
         import numpy as np
-        import tifffile
-        arr = tifffile.imread(body["mask_path"])
+        from PIL import Image
+        arr = np.asarray(Image.open(body["mask_path"]))
         self.assertEqual(arr.dtype, np.uint8)
         self.assertEqual(sorted(np.unique(arr).tolist()), [0, 255])
         raw = Path(body["mask_txt"]).read_bytes()
