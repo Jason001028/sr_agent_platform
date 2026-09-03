@@ -1,14 +1,19 @@
-# 阶段4/5 提示词（新窗口粘贴用）
+# 阶段4/5 提示词（新窗口粘贴用）→ **已归档：阶段4/5 均已实现完成**
 
-> 日期：2026-09-02 · 状态：阶段4 技术方向已变更定案（09-02 晚：盘阵路径改读**服务器预生成 JPG**，废弃原"HttpSource + nginx Range 读 TIF 字节"方案，理由见【阶段4】已定决策）
-> 用途：新窗口执行阶段4（查看器数据路径 · 盘阵读 JPG）、阶段5（平台 API 层 + 聊天/队列）时粘贴的提示词。
-> 前置：阶段1-3 已完成（`frontend/` 完整 Vue3 查看器 + `tifDecode/maskgen/source` + 75 Vitest + `.e2e` 38 断言；backend 有 agent/tools/services，114 pytest）。
+> 日期：2026-09-02（阶段4 技术方向变更定案）· **2026-09-03 归档**：阶段4（盘阵读 JPG）与阶段5（平台 API + 聊天/队列）**均已完成离机实现并通过门禁**。
+> 状态：已完成（2026-09-02）——仅剩**真机验收**，见 `docs/status/current-question.md` §5.2 / §6 一页纸（CentOS7/Win11 内网机）。
+> 用途：（**归档**，供追溯）当初给新窗口执行阶段4/5 的提示词。新窗口**勿照抄重做**——已定决策/契约草案/验收清单在此留档，实现现状与计数以 `current-question.md` §1 与 `frontend-migration.md` §2/§6 为准。
+> 归档前原文记录：阶段4 技术方向变更定案见下【阶段4】已定决策（09-02 晚：盘阵改读**服务器预生成 JPG**，废弃"HttpSource + nginx Range 读 TIF 字节"）；阶段5 见【阶段5】头部完成注记。
 
 ---
 
 ## 【阶段4 · 查看器数据路径（盘阵读 JPG）】
 
-你是本项目续接会话。先读 `CLAUDE.md` → `docs/status/current-question.md` → `docs/experience/gui-experience.md` → `docs/planning/frontend-migration.md`（§2 阶段表）。阶段1-3 已完成。
+> 状态：**已完成（2026-09-02）**——盘阵读 JPG 已落地：后端 `/api/scenes` 检索补 W/H + `/api/scenes/{id}/preview` 懒生成 + `services/preview_jpg.py`（稀疏采样镜像）+ 路径白名单；前端 `/scenes` 页 + `route='jpg'` 同构 rec。
+> 门禁：backend pytest 148 + 前端 Vitest 85（75 基线 + 10 scene）+ `.e2e/test-scenes.js` 45 断言全绿（实现与计数以 `docs/status/current-question.md` §1 / `docs/planning/frontend-migration.md` §2 行4 为准）。
+> 以下为历史提示词，仅剩**真机验收**项（current-question §6.3 清单），新窗口勿重复离机实现。
+
+（归档前原文）你是本项目续接会话。先读 `CLAUDE.md` → `docs/status/current-question.md` → `docs/experience/gui-experience.md` → `docs/planning/frontend-migration.md`（§2 阶段表）。阶段1-3 已完成。
 
 > ⚠️ **前置纠偏**：`frontend-migration.md` §2 阶段表（及 `source.ts` 注释）里阶段4 的"HttpSource / Range 读取 / strip-窗口读取端点"描述**已过时**——09-02 已拍板改走"盘阵读 JPG"，下文【阶段4】"已定决策"为准。
 
