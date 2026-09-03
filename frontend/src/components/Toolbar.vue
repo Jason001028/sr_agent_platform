@@ -16,6 +16,12 @@ const locY = ref('');
 
 /** 盘阵场景激活：JPG 已烘焙，交互拉伸禁用（服务器只烤 2% 线性）。 */
 const sceneActive = computed(() => store.activeRec?.route === 'jpg');
+/** 「提交 SR」可用：盘阵场景已打开 + 已画掩码（sceneId 是烘焙前提）。 */
+const srReady = computed(() =>
+  sceneActive.value
+  && !!store.activeRec?.sceneId
+  && (store.activeRec?.maskRois?.length ?? 0) > 0,
+);
 /** 场景下拉固定显示「2% 线性」（烘焙值），与 store.stretchMode 解耦。 */
 const stretchValue = computed(() => (sceneActive.value ? 'linear2' : store.stretchMode));
 const stretchTitle = computed(() =>
@@ -134,6 +140,20 @@ const outBtnTitle = computed(() =>
       绘制掩码{{ store.drawMode ? ' ✓' : '' }}
     </button>
     <button type="button" class="btn" :disabled="store.busy" @click="store.genMask()">生成掩码</button>
+    <button
+      type="button"
+      class="outbtn"
+      :class="{ on: srReady }"
+      :disabled="store.srBusy || !srReady"
+      :title="sceneActive
+        ? (store.activeRec?.sceneId
+            ? '把掩码烘焙到盘阵原图目录，跳转队列页确认后提交 SR'
+            : '此图非盘阵场景打开，无法服务端烘焙掩码')
+        : '仅盘阵场景（先经「盘阵场景」打开）支持提交 SR'"
+      @click="store.submitSr()"
+    >
+      {{ store.srBusy ? '烘焙中…' : '提交 SR' }}
+    </button>
   </div>
 </template>
 
