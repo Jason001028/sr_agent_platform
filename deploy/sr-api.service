@@ -20,7 +20,10 @@ After=network.target
 
 [Service]
 Type=simple
-User=nginx                       # 跑 nginx 同用户；需能读 SR_SCENES_ROOT 并写预览 JPG 缓存
+# ⚠️ systemd 单元不支持「值后同行 # 注释」——会连注释一起当值读（User= 被读成脏名 → 217/USER）。
+#    注释必须独占一行。曾因此导致真机 217/USER 排查半天（2026-09-07）。
+User=nginx
+# 跑 nginx 同用户；需能读 SR_SCENES_ROOT 并写预览 JPG 缓存
 Group=nginx
 # WorkingDirectory=               # 仓库根（backend 包需在 import 路径上），真机填，例：
 WorkingDirectory=/data/www/sr-agent-platform

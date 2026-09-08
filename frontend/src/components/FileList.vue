@@ -65,13 +65,14 @@ function onJpgClick(e: MouseEvent, rec: ViewerRec) {
 </template>
 
 <style scoped>
+/* 侧栏：白色浮层，细边框区隔；文件项为浅色小卡，选中青绿描边 */
 .sidebar {
-  width: 260px;
+  width: 268px;
   flex: none;
-  background: #161a1f;
-  border-right: 1px solid #2c313a;
+  background: var(--surface);
+  border-right: 1px solid var(--line);
   overflow-y: auto;
-  padding: 8px;
+  padding: 10px;
 }
 .sidebar.collapsed {
   width: 0;
@@ -79,65 +80,75 @@ function onJpgClick(e: MouseEvent, rec: ViewerRec) {
   border-right: none;
   overflow: hidden;
 }
-.tip { color: #5c6670; font-size: 12px; padding: 10px 8px; }
+.tip { color: var(--ink-sub); font-size: 12px; padding: 12px 8px; }
 
 .side-toggle {
   flex: none;
-  width: 22px;
-  background: #1b1f24;
-  border-right: 1px solid #2c313a;
+  width: 26px;
+  background: var(--surface-2);
+  border-left: 1px solid var(--line);
+  border-right: none;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  color: #8a93a0;
+  color: var(--ink-sub);
   font-size: 13px;
   user-select: none;
+  transition: color 0.15s ease, background 0.15s ease;
 }
-.side-toggle:hover { color: #d5d9de; background: #22304a; }
+.side-toggle:hover { color: var(--accent-deep); background: var(--accent-soft); }
 
 .file-item {
-  padding: 8px 10px;
-  margin-bottom: 6px;
-  background: #1d2229;
-  border: 1px solid #2c313a;
-  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctrl);
   cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
-.file-item.active { border-color: #2b7bdd; background: #22304a; }
-.file-item .name { font-weight: 600; color: #e6e9ed; word-break: break-all; }
+.file-item:hover { border-color: #d6ddd9; }
+.file-item.active {
+  border-color: var(--accent-2);
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 1px rgba(61, 169, 164, 0.15);
+}
+.file-item .name { font-weight: 600; color: var(--ink); word-break: break-all; }
 .file-item .name .scn {
   display: inline-block;
   margin-right: 6px;
-  padding: 0 5px;
+  padding: 0 6px;
   font-size: 10px;
   font-weight: 600;
-  color: #1b1f24;
-  background: #7aa7ff;
-  border-radius: 3px;
+  color: #fff;
+  background: var(--accent-grad);
+  border-radius: 4px;
   vertical-align: 1px;
 }
-.file-item .meta { color: #8a93a0; font-size: 11px; margin-top: 3px; }
-.file-item .status { font-size: 11px; margin-top: 3px; color: #e2a541; }
-.file-item .status.err { color: #e05c5c; }
-.file-item .status.ok { color: #5bb974; }
+.file-item .meta { color: var(--ink-sub); font-size: 11px; margin-top: 3px; }
+.file-item .status { font-size: 11px; margin-top: 3px; color: var(--warn); }
+.file-item .status.err { color: var(--err); }
+.file-item .status.ok { color: var(--ok); }
 .file-item .jpg {
   font-size: 11px;
-  margin-top: 3px;
-  color: #7aa7ff;
+  margin-top: 4px;
+  color: var(--accent-ink);
   cursor: pointer;
   word-break: break-all;
 }
 .file-item .jpg:hover { text-decoration: underline; }
-.file-item .jpg.err { color: #e05c5c; cursor: default; }
-.file-item .jpg.ok { color: #7ab98a; cursor: pointer; }
-.file-item .jpg .rex { color: #2b7bdd; margin-left: 6px; }
+.file-item .jpg.err { color: var(--err); cursor: default; }
+.file-item .jpg.ok { color: var(--ok); cursor: pointer; }
+.file-item .jpg .rex { color: var(--accent-ink); margin-left: 6px; }
 .file-item .close {
   float: right;
-  color: #6b7480;
+  color: var(--ink-faint);
   cursor: pointer;
-  font-size: 14px;
+  font-size: 15px;
+  line-height: 1;
   padding: 0 4px;
+  border-radius: 4px;
 }
-.file-item .close:hover { color: #ff6b6b; }
+.file-item .close:hover { color: var(--err); background: var(--err-bg); }
 </style>

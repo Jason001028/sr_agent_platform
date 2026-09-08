@@ -39,13 +39,12 @@ onMounted(() => {
 </template>
 
 <style scoped>
+/* flush 路由贴边填满：画布井位用浅中性面，工具栏/侧栏/状态条为白卡浮层 */
 .viewer-page {
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: #0f1113;
-  border: 1px solid #2c313a;
-  border-radius: 8px;
+  background: #e9edeb;
   overflow: hidden;
 }
 

@@ -31,18 +31,19 @@ const store = useViewerStore();
 .rec-bar {
   flex: none;
   font-size: 12px;
-  color: #9fb0c0;
-  background: #1b1f24;
-  border-top: 1px solid #2c313a;
-  padding: 6px 14px;
+  color: var(--ink-sub);
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  padding: 7px 16px;
   word-break: break-all;
   line-height: 1.6;
+  font-variant-numeric: tabular-nums;
 }
 .rec-bar .name {
   font-weight: 600;
-  color: #e6e9ed;
+  color: var(--ink);
 }
 .rec-bar .layout {
-  color: #8a93a0;
+  color: var(--ink-faint);
 }
 </style>

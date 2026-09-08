@@ -6,6 +6,7 @@
 
 ## 一、文档间导航速查
 
+- **SR_CODE 生产管线**（问算法 / 调用契约 / Windows 移植环境）：[docs/sr_code/sr-pipeline-overview.md](sr_code/sr-pipeline-overview.md)（算法全览）、[docs/sr_code/sr-pipeline-interface.md](sr_code/sr-pipeline-interface.md)（调用契约）、[docs/sr_code/sr-windows-porting-pitfalls.md](sr_code/sr-windows-porting-pitfalls.md)（移植踩坑 + 环境总结）
 - **交接入口**：[docs/status/current-question.md](status/current-question.md) —— 新窗口先读
 - **新手指南**（有 Web 基础想系统理解前后端与设计取舍）：[docs/knowledge/platform-tutorial.md](knowledge/platform-tutorial.md) —— 读代码前的首选教程
 - **面试八股**（功利向跳槽复习，教程的互补）：[docs/knowledge/interview/README.md](knowledge/interview/README.md) —— 项目已到阶段 5 的窗口可顺手更新
@@ -21,6 +22,7 @@
 | 经验与复盘 | `docs/experience/` | 踩坑记录、已验证方案 | [gui-experience.md](experience/gui-experience.md) |
 | 规范与约定 | `docs/conventions/` | 命名 / 流程等约束 | [naming-conventions.md](conventions/naming-conventions.md)、[langchain-boundary.md](conventions/langchain-boundary.md) |
 | 交接与状态 | `docs/status/` | 当前问题、窗口交接 | [current-question.md](status/current-question.md) |
+| SR_CODE 生产管线 | `docs/sr_code/` | SR 超分算法 / 调用契约 / Windows 移植环境（**主题域类目**，见 [naming-conventions.md §2](conventions/naming-conventions.md)） | [sr-pipeline-overview.md](sr_code/sr-pipeline-overview.md)、[sr-pipeline-interface.md](sr_code/sr-pipeline-interface.md)、[sr-windows-porting-pitfalls.md](sr_code/sr-windows-porting-pitfalls.md) |
 
 ## 三、怎么新增一个 .md（分类规则）
 
