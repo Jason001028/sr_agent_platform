@@ -43,6 +43,13 @@ sr-agent-platform/
    systemctl enable nginx
    ```
 
+   > ⚠️ 部分内网机**没有任何启用的 yum 源**——`yum install` 报 `There are no enabled repos`
+   > （09-05 node81-135 实测），EPEL 装不了，**nginx 用户也不存在**（连带 `sr-api.service` 的
+   > `User=nginx` 起不来）。此时先找内网 yum 镜像：`ls /etc/yum.repos.d/` + 探 nexus 仓库
+   > `curl -s http://nexus.jl1.cn/service/rest/v1/repositories | grep -o '"name":"[^"]*"'`
+   > （看有无 centos/epel 代理仓库）配好 repo；或外网机下 EPEL `nginx-1.20.x.el7.x86_64.rpm`
+   > + 依赖（gperftools-libs 等）U 盘拷入 `rpm -ivh`。**别默认 EPEL 可达。**
+
 2. **拷包并解压**（U 盘 / scp 均可）：
 
    ```bash
@@ -71,17 +78,31 @@ sr-agent-platform/
 
 ## 三、内网机部署：FastAPI 场景 API（阶段4）
 
-1. **装 Python 3.9+ 与 venv**（联网装一次）：
+1. **Python ≥ 3.8**（⚠️ CentOS7 自带 `python3` = **3.6.8，不满足**）：后端依赖整链要求 ≥3.8，
+   在 3.6 上 `pip install -r` 只会解析到 2021 旧版——`openai 0.10.5` 无 1.x `OpenAI()` 客户端、
+   agent 代码跑不了；`fastapi 0.11x` 时代 / `numpy≤1.19.5` / `pillow≤8.4` / `uvicorn≤0.17`。
+   镜像本身有新版（实测 py3.10 从同一 nexus 源装到过 numpy 1.26.4），pip 显示旧版是**按解释器
+   版本过滤**，别据此降代码。
+
+   **落地方案（09-05 真机实测）**：`sr-api.service` 的 `ExecStart` 默认就是 `/opt/sr-venv/bin/uvicorn`，
+   所以拿一个**现成的 py3.8+ 解释器**建出这个 venv 即可，依赖全走 cgwx-pypi（pip 代理）。先认清本机
+   conda 现状，别在死频道上耗——内网 nexus 的 **conda 频道 `cgwx-anaconda` 404 已废**、`defaults` 断网
+   （`conda create` 触网报 HTTP 000；`--clone` 报 HTTPError；加 `--offline` 报 remote error）；若包缓存也
+   不全（`ls <conda>/pkgs | grep -E '^python-3\.9'` 为空）则**本机造不出新 conda 环境**。因此：
 
    ```bash
-   yum install -y python3 python3-pip
-   python3 -m venv /opt/sr-venv
+   conda env list    # 找一个现成 py3.8+ 环境（本机实测：destriping_py39 = python 3.9）
+   <conda>/envs/<py3.8+ 环境>/bin/python -m venv /opt/sr-venv   # 只借解释器二进制，不碰源环境任何包
    ```
 
-2. **装运行依赖**（离线：同版本 wheel 拷 U 盘 / 内网 PyPI 均可）：
+   无现成 ≥3.8 解释器时再向 IT 索取 python3.9+ rpm；若执意要真 conda 环境，只能在**有活频道或有完整
+   conda 包缓存**的机器上建好（`conda create -n web-sr-agent python=3.9`）再拷入，目标机不合适。
+
+2. **装运行依赖**（内网机从 nexus 镜像装；无镜像时用同版本 wheel 拷 U 盘）：
 
    ```bash
-   /opt/sr-venv/bin/pip install -r /data/www/sr-agent-platform/requirements-api.txt
+   /opt/sr-venv/bin/pip install -i http://nexus.jl1.cn/repository/cgwx-pypi/simple --trusted-host nexus.jl1.cn \
+       -r /data/www/sr-agent-platform/requirements-api.txt
    ```
 
 3. **放 systemd 单元**，按真机核对下面几处后启动：
@@ -95,7 +116,7 @@ sr-agent-platform/
    - `Environment=SR_AGENT_DB=` → SQLite 库（阶段5 起 chat 会话 + sr_tasks 同库；父目录须 `nginx` 可写）；
    - `Environment=SR_LLM_MOCK=0` / `SR_SLURM_FAKE=0` → **真机显式关假实现**（service 已带默认，勿改成 1）；
    - 真 LLM 再配 `SR_LLM_BASE_URL/API_KEY/MODEL`（内网端点，见 service 注释）；不配则 loop 默认连外网端点（离机/MVP 用 mock，见 §四）；
-   - `ExecStart=` 的 venv 路径若不同则改。
+   - `ExecStart=` 的 venv 路径若不同则改；用 conda 环境则填 `<conda>/envs/web-sr-agent/bin/uvicorn backend.api.app:create_app --factory --host 127.0.0.1 --port 8000`。
 
    > 权限：systemd 默认以 `nginx` 用户跑（`User=` 已设）。该用户需能**读**盘阵 TIF、
    > **写**预览 JPG 缓存（默认写源同目录 `<源>.preview.jpg`）、**写** `SR_AGENT_DB` 库。
@@ -156,13 +177,100 @@ curl -s -N http://127.0.0.1/api/queue/events
 `/api/chat/.../messages` 与 `/api/queue/events` 是 **SSE 长连接**（`text/event-stream`），nginx 已
 `proxy_buffering off`，应看到事件逐帧到达而非攒批。
 
-## 五、升级 / 回滚
+## 五、升级 / 重部署 / 回滚
 
-- **升级前端**：开发机重新 `npm run build && npm run package:offline` → 拷新包 → 解压覆盖
-  `dist/` → `systemctl reload nginx`。带 hash 的资源名每次变化，immutable 缓存不卡旧版。
-- **升级后端**：覆盖 `backend/` → `systemctl restart sr-api`（预览 JPG 缓存保留，无需重生成）。
-- **回滚**：保留上一版目录，改 nginx.conf 的 `root` 指旧版 dist；后端 `git checkout` 旧版
-  backend 覆盖后 `systemctl restart sr-api`。
+> 核心一句话：**改了哪一层就只动哪一层**。前端改动不需要重启后端，后端改动不需要重打前端。
+> 服务器路径用 `<APP>` 代指解压根：本文示例 `/data/www/sr-agent-platform`；真机 node81-135 的
+> 实际值是 `/run/media/root/SSD/workspace/wangrz/sr-agent-platform`（本机全部固定值速查见
+> `docs/status/real-machine-bringup.md` 开头表，命令结构不变、把 `<APP>` 换成真值即可）。
+
+### 判定：这次改了什么，就做哪几节
+
+| 改了哪里 | 开发机产物 | 服务器要动 | 用不到的 |
+| --- | --- | --- | --- |
+| 前端（`frontend/` 下 .vue/.ts/css） | `frontend/dist/`（重打） | reload nginx | restart sr-api、daemon-reload |
+| 后端（`backend/` 下 .py） | 拷 `backend/*` | restart sr-api | reload nginx、重打前端 |
+| systemd 环境变量 / 端口 / ExecStart（改 `sr-api.service`） | 拷 unit 文件 | daemon-reload + restart sr-api | 碰前端 |
+| nginx 站点（`nginx.conf`：root/alias/proxy 等） | 拷站点文件 | nginx -t + reload nginx | 碰后端 |
+
+> 盘阵根两处必须同值：`sr-api.service` 的 `SR_SCENES_ROOT` 与 `nginx.conf` 的 `alias`。只改其中一处
+> 会出现「列表有但图读不出来」或反过来，改完两边各自 reload/restart 一次。
+
+### 5.1 前端（Vue）改动 → 重打 dist → reload nginx
+
+只在开发机打包，产物就一个目录 `frontend/dist/`，后端进程全程不用动。
+
+开发机（Windows，git-bash）：
+
+```bash
+export PATH="/c/Users/lenovo/AppData/Local/nvm/v20.19.5:$PATH"   # node 在 nvm20，默认 PATH 里没有
+cd frontend
+npm run build                      # 产出 frontend/dist/
+```
+
+把产物拷到服务器并覆盖 `<APP>/dist/`（scp 目录内容，不是拷 dist 目录本身）：
+
+```bash
+scp -r frontend/dist/* root@<内网机IP>:<APP>/dist/
+```
+
+服务器上两步收尾：
+
+```bash
+chown -R nginx:nginx <APP>/dist    # nginx 用户要能读到新文件（此前整树 chown 过可省）
+systemctl reload nginx             # 前端热更：只 reload，别 restart sr-api
+```
+
+浏览器 **Ctrl+F5 强刷**一次（去掉浏览器缓存的旧页面）。带 hash 的资源名每次变化，
+immutable 缓存不卡旧版。判定：刷新后页面出现本次改动。
+
+### 5.2 后端（`backend/` 代码）改动 → restart sr-api
+
+```bash
+# 开发机：
+scp -r backend/* root@<内网机IP>:<APP>/backend/
+```
+
+```bash
+# 服务器：
+chown -R nginx:nginx <APP>/backend
+systemctl restart sr-api           # 预览 JPG 缓存保留，重启不会触发重生成
+systemctl status sr-api            # 判定： active (running)
+curl -s http://127.0.0.1:8000/api/health   # 判定： {"status":"ok",...}
+```
+
+> 改了后端但没加新依赖时，只用这一节。若 `requirements-api.txt` 也变（新增/升版本包），
+> 需先在服务器按 §三.2 重新 `pip install -r` 再 restart，否则 import 阶段就崩。
+
+### 5.3 配置层（systemd / nginx 站点）改动
+
+改了 `sr-api.service`（env 或端口）——本地改 `deploy/sr-api.service` 后拷到服务器，注意路径按
+真机替换：
+
+```bash
+cp deploy/sr-api.service /etc/systemd/system/   # 开发机 scp 亦可
+systemctl daemon-reload          # 改了 unit 文件必须 daemon-reload，restart 不读新 unit
+systemctl restart sr-api
+```
+
+改了 `nginx.conf`（root/alias/proxy 等）——本地改 `deploy/nginx.conf` 后拷到服务器：
+
+```bash
+nginx -t                          # 语法不过会拒绝 reload，先过这关
+systemctl reload nginx
+```
+
+### 5.4 回滚
+
+- **前端**：把上一版 `dist` 覆盖回来（或保留旧目录、把站点 `root` 指回旧 dist）→ `systemctl reload nginx`。
+- **后端**：恢复上一版 `backend/`（git 检出旧提交再拷）→ `systemctl restart sr-api`。
+- 预览 JPG 缓存随源图目录存、跨回滚保留，无需重生成。
+
+### 5.5 走完整离线包发布时的等价动作
+
+上面是日常迭代（开发机直连 scp）。若按 §一 `npm run package:offline` 打 tar.gz 发布，
+则升级 = 拷新包解压覆盖 `<APP>/` 下对应目录，前端 `systemctl reload nginx`、后端
+`systemctl restart sr-api`，动作同 §5.1/5.2，只是传输介质从 scp 换成整包。
 
 ## 六、硬性约束（移植期红线）
 

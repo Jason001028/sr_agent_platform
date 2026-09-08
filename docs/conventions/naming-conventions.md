@@ -33,6 +33,9 @@
 | `docs/status/` | 交接 / 状态 / 当前问题 | `current-question.md` |
 | `docs/conventions/` | 规范 / 约定 | `naming-conventions.md` |
 | `docs/readme/` | 使用说明 | （待定） |
+| `docs/sr_code/` | SR_CODE 生产管线文档（**按主题域归档的例外**） | `sr-pipeline-overview.md`、`sr-pipeline-interface.md`、`sr-windows-porting-pitfalls.md` |
+
+> **主题域例外说明**：`docs/sr_code/` 是唯一按**主题域**（而非按上表"用途"）归档的类目——三份文档同属 SR_CODE 生产管线、相互引用、常被整体调阅（问算法→全览、对接→契约、移植/环境→踩坑）。上表仍按用途分类；此例外在 §6 登记。
 
 ---
 
@@ -79,4 +82,5 @@
 ## 6. 变更与登记
 
 - 新增文档类型（§2）、新增外部导入（§3）、新增豁免（§5）→ 在本规范相应章节追加一行并 commit。
+- 2026-09-04：登记主题域类目 `docs/sr_code/`（SR_CODE 生产管线文档簇；三份文档自 docs/sr_code 原中文/下划线名改 snake_case 英文名 + 补齐头部元信息 + 相互引用改根相对路径；原 `docs/sr_code/` 下无其它文件）。
 - 本规范自身的修订走 git commit 记录，头部日期随修订更新。

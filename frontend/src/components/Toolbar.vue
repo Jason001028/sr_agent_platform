@@ -142,7 +142,7 @@ const outBtnTitle = computed(() =>
     <button type="button" class="btn" :disabled="store.busy" @click="store.genMask()">生成掩码</button>
     <button
       type="button"
-      class="outbtn"
+      class="outbtn grad"
       :class="{ on: srReady }"
       :disabled="store.srBusy || !srReady"
       :title="sceneActive
@@ -158,111 +158,130 @@ const outBtnTitle = computed(() =>
 </template>
 
 <style scoped>
+/* 工具栏：白色浮层承托，分隔线极浅冷灰 */
 .toolbar {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 14px;
-  height: 50px;
-  background: #1b1f24;
-  border-bottom: 1px solid #2c313a;
+  gap: 10px;
+  padding: 0 16px;
+  height: 52px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  box-shadow: 0 1px 4px rgba(46, 90, 78, 0.04);
+  z-index: 5;
 }
 
+/* 主按钮：青绿渐变（仅主操作） */
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  height: 34px;
+  height: 32px;
   padding: 0 16px;
-  background: #2b7bdd;
+  background: var(--accent-grad);
   color: #fff;
-  font-size: 14px;
+  font-size: 13px;
+  font-weight: 500;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--r-ctrl);
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
+  box-shadow: 0 2px 6px rgba(45, 164, 162, 0.25);
+  transition: filter 0.15s ease, box-shadow 0.15s ease;
 }
-.btn:hover { background: #357fd8; }
-.btn:disabled { opacity: 0.6; cursor: wait; }
+.btn:hover { filter: brightness(1.05); box-shadow: 0 3px 8px rgba(45, 164, 162, 0.32); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; filter: none; }
 
+/* 拉伸下拉：控件同族（浅底/白底 + 细边框，聚焦青绿描边） */
 .stretch-sel {
-  height: 34px;
-  padding: 0 8px;
-  background: #22262c;
-  color: #d5d9de;
+  height: 32px;
+  padding: 0 10px;
+  background: var(--surface-2);
+  color: var(--ink-body);
   font-size: 13px;
-  border: 1px solid #3a4149;
-  border-radius: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctrl);
   cursor: pointer;
   outline: none;
+  transition: border-color 0.15s ease, background 0.15s ease;
 }
-.stretch-sel:hover { border-color: #2b7bdd; }
-.stretch-sel:disabled { opacity: 0.55; cursor: not-allowed; border-color: #3a4149; }
+.stretch-sel:hover { border-color: var(--accent-2); }
+.stretch-sel:focus-visible { border-color: var(--accent-3); box-shadow: 0 0 0 3px rgba(45, 164, 162, 0.15); }
+.stretch-sel:disabled { opacity: 0.55; cursor: not-allowed; }
 
 .loc {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   flex: none;
-  color: #9fb0c0;
+  color: var(--ink-sub);
   font-size: 12px;
 }
 .loc input {
   width: 60px;
-  height: 30px;
+  height: 28px;
   padding: 0 8px;
-  background: #22262c;
-  color: #d5d9de;
-  border: 1px solid #3a4149;
-  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 8px;
   font-size: 13px;
   outline: none;
+  transition: border-color 0.15s ease;
 }
-.loc input:hover, .loc input:focus { border-color: #2b7bdd; }
+.loc input:hover, .loc input:focus { border-color: var(--accent-2); }
 .loc-btn {
-  height: 30px;
+  height: 28px;
   padding: 0 12px;
-  background: #2b7bdd;
-  color: #fff;
+  background: var(--accent-soft);
+  color: var(--accent-deep);
   font-size: 13px;
-  border: none;
-  border-radius: 6px;
+  font-weight: 500;
+  border: 1px solid transparent;
+  border-radius: 8px;
   cursor: pointer;
+  transition: background 0.15s ease;
 }
-.loc-btn:hover { background: #357fd8; }
+.loc-btn:hover { background: #d6ece9; }
 
+/* 次级按钮：白底 + 1px 细边框 + 灰字（状态用青绿/琥珀着字） */
 .outbtn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  height: 34px;
-  padding: 0 14px;
-  background: #22262c;
-  color: #9fb0c0;
+  height: 32px;
+  padding: 0 12px;
+  background: var(--surface);
+  color: var(--ink-body);
   font-size: 12px;
-  border: 1px solid #3a4149;
-  border-radius: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctrl);
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
 }
-.outbtn:hover { border-color: #2b7bdd; color: #d5d9de; }
-.outbtn.granted { color: #5bb974; border-color: #3a6b4d; }
-.outbtn.pending { color: #e2a541; border-color: #6b5a2d; }
-.outbtn.on { border-color: #2b7bdd; color: #d5d9de; background: #22304a; }
+.outbtn:hover:not(:disabled) { border-color: var(--accent-2); color: var(--accent-deep); }
+.outbtn:disabled { opacity: 0.5; cursor: not-allowed; }
+.outbtn.granted { color: var(--accent-deep); border-color: var(--ok-line); background: var(--ok-bg); }
+.outbtn.pending { color: var(--warn); border-color: var(--warn-line); background: var(--warn-bg); }
+/* 通用选中态（如绘制掩码 on）：浅青绿底 + 深青绿字，不做大色块 */
+.outbtn.on { border-color: var(--accent-2); color: var(--accent-deep); background: var(--accent-soft); }
+/* 提交 SR 就绪（grad.on）：转为主 CTA 青绿渐变 */
+.outbtn.grad.on { color: #fff; background: var(--accent-grad); border-color: transparent; box-shadow: 0 2px 6px rgba(45, 164, 162, 0.28); }
 
 .chk {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  color: #9fb0c0;
+  gap: 6px;
+  color: var(--ink-body);
   font-size: 12px;
   flex: none;
   cursor: pointer;
 }
-.chk input { accent-color: #2b7bdd; }
+.chk input { accent-color: var(--accent-3); }
 
 .spacer { flex: 1; }
 </style>
