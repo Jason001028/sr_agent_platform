@@ -1,10 +1,12 @@
 <script setup lang="ts">
 /**
- * ViewerPage.vue — 查看器页（阶段3 组件化：Toolbar + FileList + TifCanvas + StatusBar）
+ * ViewerPage.vue — 查看器页（阶段3 组件化 + 阶段6 右侧上下文侧舱 ContextPanel）
  * ------------------------------------------------------------------
- * 组合阶段3 各组件，onMounted 挂输出目录恢复（initFsIO）与 window.__viewer E2E 钩子。
+ * 组合各组件，onMounted 挂输出目录恢复（initFsIO）与 window.__viewer E2E 钩子。
  * 交互/掩码/导出状态全部在 stores/viewer.ts；TifCanvas 内部是双画布，其 slot 承载
  * 浮动面板（DrawPanel）与遮罩/toast/error（DecodeOverlay）。
+ * 布局行 = [FileList(sidebar+side-toggle)] [TifCanvas stage] [ContextPanel(ctx-toggle+rail)]，
+ * 右侧 rail 镜像左栏收起布局，默认收起且宽度持久化在 ContextPanel 内（见其组件注释）。
  */
 import { onMounted } from 'vue';
 import { useViewerStore } from '../stores/viewer';
@@ -14,6 +16,7 @@ import FileList from '../components/FileList.vue';
 import TifCanvas from '../components/TifCanvas.vue';
 import DrawPanel from '../components/DrawPanel.vue';
 import DecodeOverlay from '../components/DecodeOverlay.vue';
+import ContextPanel from '../components/ContextPanel.vue';
 import StatusBar from '../components/StatusBar.vue';
 
 const store = useViewerStore();
@@ -33,6 +36,7 @@ onMounted(() => {
         <DrawPanel />
         <DecodeOverlay />
       </TifCanvas>
+      <ContextPanel />
     </div>
     <StatusBar />
   </div>

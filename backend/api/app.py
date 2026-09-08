@@ -62,10 +62,12 @@ def _fake_dims(sid: str) -> tuple[int, int]:
 
 
 def _scene_row(scene: dict, root: Path | None) -> dict:
-    """Wrap one search_scenes row with W/H + jpgUrl (opaque id, no abs path).
+    """Wrap one search_scenes row with W/H + jpgUrl (opaque id, no abs file path).
 
     `id` 是供 /api/scenes/{id}/preview 解析的**不透明 id**（base64url rel），
     fake 行不可解析保留原串；`name` = 可读文件名（stem）。
+    仅 disk 行补只读 `lq_path`（scene 文件**父目录**绝对路径，无文件名）——供前端
+    viewer 上下文侧舱把 /api/queue 任务行关联回场景；场景文件本身绝对路径不泄露。
     """
     stem = scene["id"]
     row = {
@@ -78,6 +80,9 @@ def _scene_row(scene: dict, root: Path | None) -> dict:
         "fake": bool(scene.get("fake")),
         "W": None, "H": None,
         "rel": None, "jpgUrl": None, "hasPreview": False,
+        # 阶段5 viewer 上下文侧舱任务关联用：scene 文件父目录（= run_sr 的 lq_path，
+        # queue 行 params.lq_path 与之同值）。只读字段，仅 disk 行非空；fake 恒 null。
+        "lq_path": None,
     }
     if scene.get("fake") or root is None:
         w, h = _fake_dims(stem)
@@ -92,6 +97,7 @@ def _scene_row(scene: dict, root: Path | None) -> dict:
     rel = paths.rel_of_scene(abs_path, root)
     row["rel"] = rel
     row["id"] = paths.scene_id(rel)
+    row["lq_path"] = str(abs_path.parent)
     jpg = paths.preview_jpg_path(abs_path, root)
     row["hasPreview"] = jpg.is_file()
     row["jpgUrl"] = paths.rel_url(jpg, root)

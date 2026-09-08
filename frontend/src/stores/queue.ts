@@ -99,6 +99,38 @@ export function stateTone(state: string): 'pending' | 'run' | 'ok' | 'fail' | 'm
   return 'muted';
 }
 
+/* ---------------- tasksForScene：任务区关联当前场景（阶段6） ----------------
+   viewer 盘阵场景 ↔ /api/queue 行：lq_path == scene 父目录（run_sr 目录语义）且
+   mask_path 基名 == <scene stem>_mask.tif。只命中「以该场景掩码发起的 SR 任务」，
+   同目录下别家任务（不同 stem mask）与无掩码任务不误收。返回按 created_at 倒序。 */
+export interface SceneTaskRef {
+  lqPath: string | null;   // ViewerRec.lqPath（scene 文件父目录绝对路径）
+  stem: string;            // scene 可读名（原图 stem，掩码名 <stem>_mask.tif 的前缀）
+}
+
+/** 去尾部分隔符（'/a/b/'、'\\a\\b\\' 归一，Windows 盘符 'C:' 不受影响）。 */
+export function normDir(p: string): string {
+  return p.replace(/[/\\]+$/, '');
+}
+
+/** 取路径基名（兼容 '/' 与 Windows '\\'；空 → ''）。 */
+export function pathLeafOf(p: string): string {
+  const parts = p.split(/[/\\]/).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : '';
+}
+
+export function tasksForScene(tasks: QueueTask[], ref: SceneTaskRef): QueueTask[] {
+  if (!ref.lqPath) return [];
+  const dir = normDir(ref.lqPath);
+  const wantMask = ref.stem + '_mask.tif';
+  return tasks
+    .filter((t) =>
+      normDir(t.params.lq_path) === dir
+      && t.params.mask_path !== null
+      && pathLeafOf(t.params.mask_path) === wantMask)
+    .sort((a, b) => b.created_at - a.created_at);
+}
+
 /* ================= store ================= */
 
 export const useQueueStore = defineStore('queue', () => {
@@ -107,6 +139,9 @@ export const useQueueStore = defineStore('queue', () => {
   const loading = ref(false);
   const error = ref('');
   const draft = ref<QueueDraft | null>(null);
+  /** 阶段6 实时失败原因（task_id → job_update.error；仅运行期捕获，非契约字段，
+      页面重载后旧 FAILED 行无原因可追 → 展示回退「见 log_dir」）。 */
+  const failReason = ref<Record<number, string>>({});
   let _dispose: (() => void) | null = null;
 
   async function list(): Promise<void> {
@@ -156,8 +191,14 @@ export const useQueueStore = defineStore('queue', () => {
     _dispose = subscribeQueueEvents(
       cfg,
       (ev) => {
-        if (ev.type === 'job_update') {
-          tasks.value = mergeJobUpdate(tasks.value, ev);
+        if (ev.type !== 'job_update') return;
+        tasks.value = mergeJobUpdate(tasks.value, ev);
+        if (ev.state === 'FAILED' && ev.error) {
+          failReason.value = { ...failReason.value, [ev.task_id]: ev.error };
+        } else if (ev.state !== 'FAILED' && failReason.value[ev.task_id] !== undefined) {
+          const next = { ...failReason.value };
+          delete next[ev.task_id];
+          failReason.value = next;
         }
       },
       () => { connected.value = false; },
@@ -170,7 +211,7 @@ export const useQueueStore = defineStore('queue', () => {
   }
 
   return {
-    tasks, connected, loading, error, draft,
+    tasks, connected, loading, error, draft, failReason,
     list, submit, cancel, connect, disconnect,
     setDraft(d: QueueDraft | null) { draft.value = d; },
     clearDraft() { draft.value = null; },
