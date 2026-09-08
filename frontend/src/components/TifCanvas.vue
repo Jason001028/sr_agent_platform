@@ -24,6 +24,32 @@ let lastX = 0;
 let lastY = 0;
 let resizeObs: ResizeObserver | null = null;
 
+/* ---------------- 设计令牌 → canvas 覆盖层色（阶段6 侧舱选中 ROI 高亮） ----------------
+   canvas 不能直接写 var(--x)，这里运行期从根元素读令牌。仅新增覆盖层用令牌取色；
+   既有影像判读专用覆盖色（ROI 青绿 / 魔棒琥珀 / 删除红等，tif-viewer 直译）不在改造范围。 */
+function tokenColor(name: string, fallback: string): string {
+  try {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return v || fallback;
+  } catch {
+    return fallback;
+  }
+}
+function hexToRgba(hex: string, a: number): string {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return hex;
+  const n = parseInt(m[1], 16);
+  return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+}
+let selPalette: { line: string; halo: string; fill: string } | null = null;
+function selectedPalette() {
+  if (!selPalette) {
+    const line = tokenColor('--accent-2', '#3DA9A4');
+    selPalette = { line, halo: 'rgba(255,255,255,0.9)', fill: hexToRgba(line, 0.12) };
+  }
+  return selPalette;
+}
+
 /* ---------------- 尺寸同步 ---------------- */
 function resize() {
   const stage = stageRef.value;
@@ -89,14 +115,37 @@ function strokePoly(pts: Pt[], fill: string, stroke: string, lw: number, open: b
   if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw || 2; ctx.stroke(); }
 }
 
+/* 侧舱选中 ROI 高亮（非绘制模式也可见）：白 halo 分离影像 → 青绿主线 + 极浅填充 */
+function drawSelectedOutline(pts: Pt[]) {
+  if (!pts || pts.length < 3) return;
+  const dc = drawCanvasRef.value;
+  if (!dc) return;
+  const ctx = dc.getContext('2d')!;
+  const p = selectedPalette();
+  ctx.globalAlpha = 0.9;
+  strokePoly(pts, '', p.halo, 5, false);
+  ctx.globalAlpha = 0.14;
+  strokePoly(pts, p.fill, '', 0, false);
+  ctx.globalAlpha = 1;
+  strokePoly(pts, '', p.line, 2, false);
+  ctx.globalAlpha = 1;
+}
+
 function renderDraw() {
   const dc = drawCanvasRef.value;
   if (!dc) return;
   const ctx = dc.getContext('2d')!;
   ctx.clearRect(0, 0, dc.width, dc.height);
-  if (!store.drawMode || !store.activeRec || !store.activeRec.thumb) return;
+  if (!store.activeRec || !store.activeRec.thumb) return;
   const rois = store.getRois();
   ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  if (!store.drawMode) {
+    // 非绘制模式：只画侧舱选中 ROI 高亮（默认无选择 → 与原行为一致：无叠加层）
+    const si = store.roiSelIndex();
+    if (si >= 0 && si < rois.length) drawSelectedOutline(rois[si]);
+    return;
+  }
   for (let i = 0; i < rois.length; i++) {
     strokePoly(rois[i], 'rgba(45,164,162,0.22)', '#2da4a2', 2, false);
   }
