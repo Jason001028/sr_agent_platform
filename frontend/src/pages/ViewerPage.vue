@@ -39,12 +39,12 @@ onMounted(() => {
 </template>
 
 <style scoped>
-/* flush 路由贴边填满：画布井位用浅中性面，工具栏/侧栏/状态条为白卡浮层 */
+/* flush 路由贴边填满：页面底与顶层 chrome 同为浅莫兰迪；画布井位由 .stage 保持中性（不铺绿，利于调色判读） */
 .viewer-page {
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: #e9edeb;
+  background: var(--chrome);
   overflow: hidden;
 }
 

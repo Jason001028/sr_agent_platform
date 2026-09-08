@@ -15,6 +15,7 @@
   --surface-2: #F6F5FA;               /* 次级浅面：表头/标签底/输入底/图表区 */
   --surface-3: #EEF1F3;               /* 画布井位/更浅中性面 */
   --line: #ECECF0;                    /* 极浅冷灰描边/分隔线 */
+  --chrome: #DFE9E4;                  /* 顶层 chrome：浅莫兰迪平铺（查看器工具栏/侧栏/状态条，白卡浮其上） */
 
   /* ---- 强调：青绿渐变族（全页占比 <15%） ---- */
   --accent-1: #87CDCC;
@@ -25,11 +26,17 @@
   --accent-deep: #1E7B78;             /* 青绿面上的深文字/可读青绿 */
   --accent-ink: #2C8F8B;              /* 强调文字（青绿里更沉的一档） */
 
+  /* ---- 孔雀石深带（结构带：导航 / 查看器工具栏）：主题色的高对比锚点 ---- */
+  --band-1: #26837F;                  /* 深带·亮端（其上白字对比 ≥4.5） */
+  --band-2: #15615F;                  /* 深带·暗端 */
+  --band-grad: linear-gradient(180deg, var(--band-1), var(--band-2));
+  --on-band: #ffffff;                 /* 深带上的文字/图标 */
+
   /* ---- 文字色阶 ---- */
-  --ink: #15102F;                     /* 标题/关键数值（近黑藏青） */
-  --ink-body: #585665;                /* 正文 */
-  --ink-sub: #858B9C;                 /* 次要文字（介于正文与辅助之间，保证可读） */
-  --ink-faint: #B8BECB;               /* 弱辅助/占位（比规范 #EAEFFB 深一档以保持可读） */
+  --ink: #120E26;                     /* 标题/关键数值（近黑藏青） */
+  --ink-body: #45414F;                /* 正文（加深一档，提明度对比） */
+  --ink-sub: #6E7384;                 /* 次要文字（加深一档） */
+  --ink-faint: #A6ACBA;               /* 弱辅助/占位（加深一档） */
 
   /* ---- 语义状态（低饱和，融入整体） ---- */
   --ok: #3D8B77;   --ok-bg: #E6F3EE;   --ok-line: #CDE6DB;
@@ -79,25 +86,24 @@ body {
   height: 100%;
 }
 
-/* 顶栏：透明融入莫兰迪底色，不做大色块；当前项 = 深字 + 浅圆角底高亮 */
+/* 顶栏：孔雀石绿深带（全站结构带/唯一强锚点，白字）；当前项 = 白字 + 半透明白圆角底高亮 */
 .app-nav {
   display: flex;
   align-items: center;
   gap: 28px;
   padding: 0 24px;
   height: var(--topbar-h);
-  color: var(--ink);
+  color: var(--on-band);
   flex: none;
-  backdrop-filter: blur(6px);
-  background: linear-gradient(180deg, rgba(172, 199, 190, 0.9), rgba(172, 199, 190, 0.45));
-  border-bottom: 1px solid rgba(236, 236, 240, 0.55);
+  background: var(--band-grad);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.14);
 }
 
 .app-nav .brand {
   font-weight: 700;
   font-size: 16px;
   letter-spacing: 0.2px;
-  color: var(--ink);
+  color: var(--on-band);
   text-decoration: none;
   display: inline-flex;
   align-items: center;
@@ -108,8 +114,8 @@ body {
   width: 10px;
   height: 10px;
   border-radius: 3px;
-  background: var(--accent-grad);
-  box-shadow: 0 0 0 3px rgba(61, 169, 164, 0.18);
+  background: #fff;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.22);
 }
 
 .nav-links {
@@ -118,22 +124,23 @@ body {
 }
 
 .nav-links a {
-  color: var(--ink-body);
+  color: rgba(255, 255, 255, 0.9);
   text-decoration: none;
   font-size: 14px;
+  font-weight: 500;
   padding: 7px 16px;
   border-radius: var(--r-pill);
   transition: background 0.15s ease, color 0.15s ease;
 }
 .nav-links a:hover {
-  color: var(--ink);
-  background: rgba(255, 255, 255, 0.5);
+  color: #fff;
+  background: rgba(255, 255, 255, 0.14);
 }
 .nav-links a.router-link-exact-active {
-  color: var(--ink);
+  color: #fff;
   font-weight: 600;
-  background: rgba(255, 255, 255, 0.85);
-  box-shadow: 0 1px 4px rgba(46, 90, 78, 0.10);
+  background: rgba(255, 255, 255, 0.22);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
 }
 
 .app-main {
