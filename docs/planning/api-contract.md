@@ -53,6 +53,12 @@
 | `GET /api/queue/events` | SSE：队列状态变化广播 | 3.3 |
 | `POST /api/masks` | 多边形 JSON + W/H → 栅格化写盘阵（原图目录）→ `{mask_path, lq_path, task_draft}` | 3.4 |
 
+> **阶段6 增补（查看器上下文侧舱）**：`GET /api/scenes` 的 disk 行新增只读字段
+> `lq_path` = 该 scene 文件**父目录**的绝对路径（`run_sr` 的目录语义 lq_path；
+> fake 行恒 `null`）。作用：前端把 `/api/queue` 行按 `params.lq_path` 相等 +
+> `params.mask_path` 以 `<stem>_mask.tif` 结尾关联回当前 scene，做「当前场景最近任务」
+> 展示。字段只读、不含文件名；viewer 任务区以外的页面不消费它。
+
 ## 3. 端点细节
 
 ### 3.1 工具

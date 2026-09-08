@@ -29,6 +29,8 @@ import { decodeOne } from '../lib/decode.js';
 import type { DecodedRec } from '../lib/decode.js';
 import { loadSrConfig, sceneDecodePixels } from '../lib/scene.js';
 import type { SceneOpenMeta } from '../lib/scene.js';
+import { buildStats } from '../lib/roiStats.js';
+import type { RoiStats } from '../lib/roiStats.js';
 import { apiBakeMask } from '../lib/api.js';
 import type { BakeMaskBody } from '../lib/api.js';
 import { exportToJpg } from '../lib/exportJpg.js';
@@ -59,6 +61,9 @@ export interface ViewerRec {
   route: 'utif' | 'sparse' | 'chunked' | 'jpg' | null;
   /** 阶段4 不透明场景 id（route='jpg' 时必有；掩码烘焙 POST /api/masks 用）。 */
   sceneId: string | null;
+  /** 阶段6 scene 文件父目录绝对路径（= run_sr 目录语义，与 /api/queue
+   *  params.lq_path 同值）；任务区用它关联当前场景的队列行。本地文件恒 null。 */
+  lqPath: string | null;
   layout: string;              // 即探标签摘要
   status: string;
   statusCls: '' | 'ok' | 'err';
@@ -94,6 +99,36 @@ async function decodeJpgToCanvas(blob: Blob): Promise<HTMLCanvasElement> {
   }
 }
 
+/* 选中 ROI 在「当前显示层（stretch 后 thumb 画布 8bit）」上的确定性统计（阶段6）。
+   实现 = ROI bbox 局部 getImageData + 多边形平移进局部坐标系 → buildStats。
+   平移保持像元集合不变（区域内 (c,r) 相对坐标 = 全局坐标 − bbox 原点），局部裁剪让
+   大图不整张拷贝，只读 ROI 覆盖的行列；无 canvas / 多边形在画布外 → null。 */
+function roiStatsOnCanvas(rec: ViewerRec, poly: Poly): RoiStats | null {
+  const cv = rec.thumb as unknown as HTMLCanvasElement | null;
+  if (!cv) return null;
+  const tw = cv.width, th = cv.height;
+  const ctx = cv.getContext('2d');
+  if (!ctx || tw <= 0 || th <= 0 || poly.length < 3) return null;
+  let minx = Infinity, maxx = -Infinity, miny = Infinity, maxy = -Infinity;
+  for (let i = 0; i < poly.length; i++) {
+    const x = poly[i][0], y = poly[i][1];
+    if (x < minx) minx = x;
+    if (x > maxx) maxx = x;
+    if (y < miny) miny = y;
+    if (y > maxy) maxy = y;
+  }
+  if (!isFinite(minx) || !isFinite(miny)) return null;
+  const bx0 = Math.max(0, Math.floor(minx));
+  const by0 = Math.max(0, Math.floor(miny));
+  const bx1 = Math.min(tw - 1, Math.max(0, Math.ceil(maxx)));
+  const by1 = Math.min(th - 1, Math.max(0, Math.floor(maxy)));
+  const bw = bx1 - bx0 + 1, bh = by1 - by0 + 1;
+  if (bw < 1 || bh < 1) return null;
+  const region = ctx.getImageData(bx0, by0, bw, bh);
+  const shifted = poly.map((p) => [p[0] - bx0, p[1] - by0] as Pt);
+  return buildStats(region, shifted);
+}
+
 function fmtBytes(n: number): string {
   if (n >= 1073741824) return (n / 1073741824).toFixed(2) + ' GB';
   if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
@@ -127,6 +162,10 @@ export const useViewerStore = defineStore('viewer', () => {
   const hoverPt = ref<Pt | null>(null);
   const hoverRoi = ref(-1);
   const flashRoi = ref(-1);
+  /** 阶段6 侧舱选中的 ROI（按对象身份指向 rec.maskRois 里的多边形；切图/删改失效即清）。 */
+  const selRoi = ref<Poly | null>(null);
+  /** 选中 ROI 在「当前显示层」上的确定性统计缓存（stretch/选区变化后由 refresh 重算）。 */
+  const roiStats = ref<RoiStats | null>(null);
   const wandTol = ref(20);
   const merging = ref(false);
   const autoExport = ref(true);
@@ -164,7 +203,8 @@ export const useViewerStore = defineStore('viewer', () => {
       id: nextId++, file: markRaw(file),
       probe: null, name: file.name, size: file.size,
       W: 0, H: 0, thumb: null, src: null, srcw: 0, srch: 0, nbands: 0, invert: false,
-      stats: null, route: null, sceneId: null, layout: '', status: '等待…', statusCls: '',
+      stats: null, route: null, sceneId: null, lqPath: null,
+      layout: '', status: '等待…', statusCls: '',
       paintedMode: null, maskRois: null,
       _jpgBusy: false, _jpgDone: false, _jpgToken: 0, jpgStatus: '', jpgCls: '',
     };
@@ -187,6 +227,7 @@ export const useViewerStore = defineStore('viewer', () => {
     }
     marker.value = null;
     activeId.value = id;
+    clearRoiSel();                      // 切换图像：侧舱选择/统计随图失效
     if (drawMode.value) {
       pendingPts.value = null; pendingRect.value = null; hoverPt.value = null;
     }
@@ -281,7 +322,7 @@ export const useViewerStore = defineStore('viewer', () => {
         thumb: markRaw(cv as unknown as KitCanvas),
         src: markRaw(d.src), srcw: d.tw, srch: d.th, nbands: d.nbands,
         invert: false, stats: d.stats ? markRaw(d.stats) : null,
-        route: 'jpg', sceneId: meta.sceneId ?? null,
+        route: 'jpg', sceneId: meta.sceneId ?? null, lqPath: meta.lqPath ?? null,
         layout: '盘阵 JPG（已烘焙 2% 线性拉伸）',
         status: '场景就绪：' + meta.name + ' · 元数据 ' + meta.W + '×' + meta.H + ' · JPG ' + d.tw + '×' + d.th,
         statusCls: 'ok', paintedMode: null, maskRois: null,
@@ -304,6 +345,7 @@ export const useViewerStore = defineStore('viewer', () => {
     recs.value.splice(i, 1);
     if (activeId.value === id) {
       activeId.value = null;
+      clearRoiSel();
       const next = recs.value[recs.value.length - 1];
       if (next) void activate(next.id);
       else {
@@ -331,7 +373,11 @@ export const useViewerStore = defineStore('viewer', () => {
   function setStretch(mode: StretchMode) {
     stretchMode.value = mode;
     const rec = activeRec.value;
-    if (rec && rec.thumb && rec.src) { paintStretch(rec); renderTick.value++; }
+    if (rec && rec.thumb && rec.src) {
+      paintStretch(rec);
+      renderTick.value++;
+      refreshRoiStats();              // 显示层像素变了 → 选中 ROI 统计随层刷新
+    }
   }
 
   function setCanvasSize(w: number, h: number) {
@@ -394,6 +440,48 @@ export const useViewerStore = defineStore('viewer', () => {
     return rec.maskRois;
   }
 
+  /* ---------------- 侧舱 ROI 选择 / 确定性统计（阶段6，纯前端 L1） ----------------
+     选中 = 按对象身份引用 rec.maskRois 里的多边形（新增/删除其它 ROI 不破坏当前选择；
+     切图 / 清空 / 合并 / 删除自身 → refresh 检测失效自动清空）。统计只认当前显示层
+     thumb 画布像素（stretch 后），paintStretch/切图/选区变化触发 refreshRoiStats()。 */
+  function roiSelIndex(): number {
+    const rec = activeRec.value;
+    const sel = selRoi.value;
+    if (!rec || !sel) return -1;
+    const rois = rec.maskRois || [];
+    return rois.indexOf(sel);
+  }
+
+  /** 点 ROI 列表行 i（1-based 显示为 i+1）：锁定该对象并算一次确定性统计。 */
+  function selectRoi(i: number) {
+    const rec = activeRec.value;
+    const rois = getRois();
+    if (rec && i >= 0 && i < rois.length) {
+      selRoi.value = rois[i];
+      roiStats.value = roiStatsOnCanvas(rec, rois[i]);
+    } else {
+      selRoi.value = null;
+      roiStats.value = null;
+    }
+    renderTick.value++;                 // 通知画布重绘选中高亮
+  }
+
+  function clearRoiSel() {
+    selRoi.value = null;
+    roiStats.value = null;
+    renderTick.value++;
+  }
+
+  /** 重算选中 ROI 统计；选中对象已失效（删/合并/清空/切图）→ 清空选择。 */
+  function refreshRoiStats() {
+    const rec = activeRec.value;
+    const sel = selRoi.value;
+    if (!rec || !sel) { roiStats.value = null; return; }
+    const rois = rec.maskRois || [];
+    if (rois.indexOf(sel) < 0) { selRoi.value = null; roiStats.value = null; return; }
+    roiStats.value = roiStatsOnCanvas(rec, sel);
+  }
+
   function enterDraw() {
     const rec = activeRec.value;
     if (!rec || !rec.thumb) { showErr('请先打开一张图'); return; }
@@ -441,6 +529,7 @@ export const useViewerStore = defineStore('viewer', () => {
   function undoRoi() {
     getRois().pop();
     pendingPts.value = null; pendingRect.value = null; hoverPt.value = null;
+    refreshRoiStats();
     renderTick.value++;
   }
 
@@ -448,6 +537,7 @@ export const useViewerStore = defineStore('viewer', () => {
     const rec = activeRec.value;
     if (rec) rec.maskRois = [];
     pendingPts.value = null; pendingRect.value = null; hoverPt.value = null;
+    refreshRoiStats();
     renderTick.value++;
   }
 
@@ -470,6 +560,7 @@ export const useViewerStore = defineStore('viewer', () => {
       if (activeId.value !== owner.id) return;   // 合并期间切了图，丢弃不写
       if (!merged.length) { showErr('合并失败：没有可保留的区域'); return; }
       owner.maskRois = merged;
+      refreshRoiStats();                          // 合并重建对象 → 旧选择失效即清
       pendingPts.value = null; pendingRect.value = null;
       hoverRoi.value = -1; flashRoi.value = -1;
       renderTick.value++;
@@ -499,6 +590,7 @@ export const useViewerStore = defineStore('viewer', () => {
         const list = owner.maskRois;
         const k = list ? list.indexOf(target) : -1;
         if (k >= 0 && list) list.splice(k, 1);
+        refreshRoiStats();          // 删除的就是选中对象 → 选择自动失效
       }
       flashRoi.value = -1;
       renderTick.value++;
@@ -819,6 +911,8 @@ export const useViewerStore = defineStore('viewer', () => {
     enterDraw, exitDraw, setDrawTool, commitRect, closePolygon, undoRoi, clearRois,
     mergeRois, delClick, wandSelect, buildMaskJson, exportMaskJson, genMask,
     getRois, submitSr,
+    // 侧舱 ROI 选择 / 确定性统计
+    selRoi, roiStats, roiSelIndex, selectRoi, clearRoiSel, refreshRoiStats,
     // 画布事件
     onCanvasDownDraw, onCanvasMove, onCanvasUp, onDblClick, onKeyDown,
     // 导出

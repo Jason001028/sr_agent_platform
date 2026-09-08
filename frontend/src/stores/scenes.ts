@@ -111,7 +111,9 @@ export const useScenesStore = defineStore('scenes', () => {
       const img = await fetch(url);
       if (!img.ok) throw new Error('读 JPG 失败 HTTP ' + img.status);
       const blob = await img.blob();
-      await viewer.openSceneJpg({ name: row.name, W: row.W, H: row.H, sceneId: row.id }, blob);
+      await viewer.openSceneJpg({
+        name: row.name, W: row.W, H: row.H, sceneId: row.id, lqPath: row.lq_path,
+      }, blob);
     } catch (e) {
       viewer.showErr('打开场景失败：' + (e instanceof Error ? e.message : String(e)));
     } finally {
