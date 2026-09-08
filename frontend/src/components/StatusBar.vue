@@ -32,7 +32,7 @@ const store = useViewerStore();
   flex: none;
   font-size: 12px;
   color: var(--ink-sub);
-  background: var(--surface);
+  background: var(--chrome);
   border-top: 1px solid var(--line);
   padding: 7px 16px;
   word-break: break-all;
