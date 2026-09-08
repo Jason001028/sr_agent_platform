@@ -98,7 +98,7 @@ function renderDraw() {
   const rois = store.getRois();
   ctx.lineJoin = 'round';
   for (let i = 0; i < rois.length; i++) {
-    strokePoly(rois[i], 'rgba(43,123,221,0.28)', '#2b7bdd', 2, false);
+    strokePoly(rois[i], 'rgba(45,164,162,0.22)', '#2da4a2', 2, false);
   }
   if (store.drawTool === 'del') {
     // 删除工具叠加层：悬停柔和红边 + 待删区域柔和红闪（盖在普通蓝色之上，不辣眼）
@@ -134,8 +134,8 @@ function renderDraw() {
     const rb = thumbToScreen(store.view, store.pendingRect.x1, store.pendingRect.y1);
     const rx = Math.min(ra[0], rb[0]), ry = Math.min(ra[1], rb[1]);
     const rw = Math.abs(rb[0] - ra[0]), rh = Math.abs(rb[1] - ra[1]);
-    ctx.fillStyle = 'rgba(43,123,221,0.25)';
-    ctx.strokeStyle = '#2b7bdd';
+    ctx.fillStyle = 'rgba(45,164,162,0.22)';
+    ctx.strokeStyle = '#2da4a2';
     ctx.lineWidth = 2;
     ctx.fillRect(rx, ry, rw, rh);
     ctx.strokeRect(rx, ry, rw, rh);
@@ -251,7 +251,8 @@ onBeforeUnmount(() => {
   position: relative;
   flex: 1;
   overflow: hidden;
-  background: #0f1113;
+  /* 画布井位：浅中性面（影像区不铺莫兰迪绿，避免干扰调色判读） */
+  background: #e9edeb;
 }
 
 .view-canvas {

@@ -18,7 +18,9 @@ const store = useViewerStore();
       <div class="mask-title">{{ store.overlay.title }}</div>
       <div v-if="store.overlay.sub" class="mask-sub">{{ store.overlay.sub }}</div>
       <div v-if="store.overlay.bar" class="progress-wrap">
-        <div class="progress-bar" :style="{ width: store.overlay.progress + '%' }"></div>
+        <div class="progress-track">
+          <div class="progress-bar" :style="{ width: store.overlay.progress + '%' }"></div>
+        </div>
         <div class="progress-pct">{{ store.overlay.progress }}%</div>
       </div>
     </div>
@@ -32,13 +34,15 @@ const store = useViewerStore();
 </template>
 
 <style scoped>
+/* 解码遮罩：浅色毛玻璃，浮于浅色画布之上；内容为白色卡片 */
 .decode-mask {
   position: absolute;
   inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(10, 12, 14, 0.92);
+  background: rgba(233, 237, 235, 0.72);
+  backdrop-filter: blur(4px);
   z-index: 20;
   text-align: center;
 }
@@ -48,43 +52,45 @@ const store = useViewerStore();
   align-items: center;
   gap: 12px;
   max-width: 80%;
+  background: var(--surface);
+  border: 1px solid rgba(236, 236, 240, 0.9);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow-pop);
+  padding: 26px 34px;
 }
 .spinner {
-  width: 34px;
-  height: 34px;
-  border: 3px solid #2c313a;
-  border-top-color: #2b7bdd;
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--surface-2);
+  border-top-color: var(--accent-3);
   border-radius: 50%;
   animation: spin 0.9s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
-.mask-title { color: #e6e9ed; font-size: 15px; font-weight: 600; }
-.mask-sub { color: #9aa5b1; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+.mask-title { color: var(--ink); font-size: 15px; font-weight: 600; }
+.mask-sub { color: var(--ink-sub); font-size: 12px; white-space: pre-wrap; word-break: break-all; }
 
 .progress-wrap {
-  width: 320px;
+  width: 300px;
   display: flex;
   align-items: center;
   gap: 10px;
 }
-.progress-bar {
+.progress-track {
   flex: 1;
-  height: 8px;
-  background: #2c313a;
-  border-radius: 4px;
+  height: 6px;
+  background: var(--surface-2);
+  border-radius: 3px;
   overflow: hidden;
-  position: relative;
 }
-.progress-bar::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: #2b7bdd;
-  border-radius: 4px;
+.progress-bar {
+  height: 100%;
+  background: var(--accent-grad);
+  transition: width 0.2s;
 }
-.progress-bar[style] { background: transparent; }
-.progress-pct { color: #9aa5b1; font-size: 12px; min-width: 40px; text-align: right; }
+.progress-pct { color: var(--ink-sub); font-size: 12px; min-width: 40px; text-align: right; }
 
+/* toast：白色浮条 + 青绿语义色，替代原暗绿 */
 .toast {
   position: absolute;
   left: 50%;
@@ -92,10 +98,11 @@ const store = useViewerStore();
   transform: translateX(-50%);
   max-width: 70%;
   padding: 10px 16px;
-  background: #1d2a1d;
-  border: 1px solid #3a6b4d;
-  border-radius: 8px;
-  color: #8fd6a8;
+  background: var(--surface);
+  border: 1px solid var(--ok-line);
+  border-radius: 10px;
+  box-shadow: var(--shadow-pop);
+  color: var(--accent-deep);
   font-size: 13px;
   z-index: 30;
   text-align: center;
@@ -107,10 +114,10 @@ const store = useViewerStore();
   transform: translateX(-50%);
   max-width: 80%;
   padding: 8px 14px;
-  background: #2d1c1c;
-  border: 1px solid #6b3a3a;
-  border-radius: 8px;
-  color: #e8a0a0;
+  background: var(--err-bg);
+  border: 1px solid var(--err-line);
+  border-radius: 10px;
+  color: var(--err);
   font-size: 13px;
   z-index: 30;
   text-align: center;

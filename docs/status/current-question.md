@@ -16,7 +16,10 @@
 - **阶段3 查看器 UI 组件化完成（09-01）**：把 tif-viewer.html 的交互层**移植而不是重写**到 Vue3——拆成 TifCanvas/Toolbar/FileList/DrawPanel/DecodeOverlay/StatusBar 六个组件 + `stores/viewer.ts` 统一调度 + `lib/{viewMath,browserKit,decode,exportJpg,saver}` 工具模块 + `window.__viewer` 调试钩子；核心算法逐字节保留，只把交互方式改成 Vue3 的惯用写法；**BigTIFF 读取方案修复**（本地内置的 UTIF 库解不了 BigTIFF，强制改走 geotiff.js 分块读取，这是本阶段唯一的行为差异）。75 个 Vitest 测试 + vue-tsc 类型检查零错误 + 浏览器回归测试 38 条断言全部通过（详见 §4 时间线）。
 - **阶段4 盘阵场景读 JPG 完成（09-02）**：浏览器**不再读盘阵原始 TIF**——后端新增 `backend/api/` FastAPI（`GET /api/scenes` 检索 + 每场景补 W/H【优先 .hdr，缺则探 TIF 头，缓存】+ jpgUrl；`GET /api/scenes/{id}/preview` **懒生成** JPG 幂等缓存）+ `backend/services/preview_jpg.py`（**镜像前端稀疏采样语义**的纯 numpy 条带抽读：`round(j*(W-1)/(pw-1))` 端点对齐 + 2% Linear + WhiteIsZero 反色 + Pillow JPEG；const 图 0→黑 / 其他→128）+ 路径白名单（`paths.py`：拒绝 `../` 穿越 / 白名单外绝对路径 / fake 占位）。前端新增 `/scenes` 盘阵场景页（卫星/传感器/日期/关键词筛选 + 行显示 W/H → 打开：jpgUrl 未就绪先调 /preview → JPG→canvas → **route='jpg' 同构 rec**，掩码按元数据 W/H 用 thumbToOrig 换算）+ 查看器拉伸下拉/导出在盘阵场景**禁用**（tooltip「已烘焙 2% 线性拉伸」）。**本地文件路径零改动**（稀疏 TIF 读法照旧）。后端 148 pytest + 前端 85 Vitest（75 基线 + 10 scene）+ vue-tsc 全绿。部署件 `deploy/nginx.conf`（`/disk-array/` alias 静态托管 + `/api/` 反代 + 缓存头）+ `deploy/sr-api.service`（systemd）+ `deploy/README.md`（阶段4 章节）+ `requirements-api.txt` 已交付；离线包脚本已含 backend。
 - **阶段5 平台 API 层完成（09-02）**：契约定稿 `docs/planning/api-contract.md`（状态→**已定**）。后端 FastAPI 新增 `backend/api/platform.py` 四组端点——`/api/tools`（manifest + 直调）、`/api/chat/*`（会话 REST + 单回合 **SSE**：loop 加 `on_step` 观察缝【不改变行为】+ mock LLM `SR_LLM_MOCK=1` 固定脚本先 search_scenes 再总结）、`/api/queue*`（共享 SR 队列 REST 提交/取消 + `GET /api/queue/events` SSE 状态广播；store 补 list/状态写回，slurm 加 `SR_SLURM_FAKE` 假调度器可配速推进）、`/api/masks`（多边形+W/H → Pillow 全分辨率栅格化写 `<原图目录>/<stem>_mask.tif`+`_mask.txt` → 返 task_draft）。前端新增 `/chat` 聊天页（会话侧栏 + SSE 事件归并渲染 + 刷新恢复历史）、`/queue` 共享队列页（提交表单 + 状态徽标随 SSE 实时刷 + 取消）、查看器「提交 SR」按钮（route='jpg' 画掩码 → 烘焙落盘 → 跳 `/queue` 预填**不自动提交**）。**门禁全绿**：后端 190 unittest（+42）+ 前端 Vitest **114** + vue-tsc 零错误 + `npm run build`；`.e2e/test-platform.js` **11 断言**真 uvicorn（mock+fake）驱动前端 A 聊天 SSE/历史 → B 队列 COMPLETED → C 掩码→SR 预填+确认，无浏览器错误/无外部请求。部署件同步：nginx `/api/` 反代 `proxy_buffering off`+清 `Connection`+`proxy_read_timeout 3600s`；`sr-api.service` 补 `SR_AGENT_DB`/`SR_LLM_MOCK=0`/`SR_SLURM_FAKE=0`；`requirements-api.txt` 补 `openai>=1.40,<2`（1.x 锁死）。
-- **下一步**：① 阶段4 + 阶段5 **真机验收**（CentOS7 盘阵机：阶段4 首次 JPG 生成耗时/内存；阶段5 真 LLM `SR_LLM_*` 指内网端点 + 真 Slurm 提交/取消 + 真实盘阵掩码落点 ENVI 核对 + nginx SSE 长连，清单见 §5.2）；② 开发机可推进 P1 的 ④⑤⑥⑦（见 §2.5）；③ 配 LLM key 跑通真实闭环（阶段5 起 /chat 页可直接连内网端点，见 §2.6）。
+- **真机部署完成、Windows 可访问（09-07/08，node81-135）**：后端 `sr-api`（systemd，开机自启）+ 前端 `nginx`（:80，开机自启，已删出厂 default.conf 由本站点接管）均 running；Windows 浏览器直接开 `http://10.10.81.135` 可访问各页面（查看器 /scenes /chat /queue），查看器能稀疏读真实大 TIF。部署操作手册：`docs/status/real-machine-bringup.md`（ADHD 动作版：`real-machine-bringup-adhd.md`）。期间排掉两个启动坑（`User=` 行尾注释致 217/USER、py3.9 缺 eval-type-backport），均已入症状表归档。
+- **遗留一：真实盘阵根未定位**：默认 `SR_SCENES_ROOT=/data/scenes` 在 node81-135 **不存在**（`ls` 报无此目录）→ `/api/scenes` 返回 `source:fake` 的 12 条占位（`fake:true` / 0B）→ `/scenes` 页面全是假数据、场景打不开、查看器「提交 SR」灰掉（route=sparse 无 sceneId，设计如此）。真实 590MB `JL1KF02B01_PMS03_...` 那类数据在别处（曾从某入口在 viewer 打开过一张真图，来源未确认）。**待办**：确认真实场景根路径（在本机哪个挂载点，还是数据在别的机器）→ 把后端 `SR_SCENES_ROOT` 与 nginx `alias` 改成同值 → restart 后复核 `/api/scenes` 出真实行。
+- **遗留二：真机阶段4/5 验收清单（§6.3–6.5）未跑**：需先定位真实盘阵根再逐项执行（首次 JPG 生成耗时/内存、真实掩码烘焙落盘 ENVI 核对、真 Slurm 提交/取消、SSE 长连）。进度快照见 §6.0。
+- **下一步**：① 定位真实场景根 → 改 `SR_SCENES_ROOT` + nginx `alias`（同值）→ 复核 /api/scenes（进度 §6.0）；② 数据就位后按 §6.3–6.5 真机验收；③ commit 待归档变更（清单 §6.0）；④ 配 LLM key 跑通真实 /chat 闭环（§2.6）；⑤ 开发机推进 P1 ④⑤⑥⑦（§2.5）。
 - **约束提醒**：开发机的浏览器 e2e 测试**已恢复可用**（`.e2e/launchBrowser.js` 每次用独立的临时浏览器配置目录，彻底解决「浏览器闪退、退出码 0 无任何报错」的问题）；真实图片都在内网盘阵，外网开发机读不到（见 §5.1）。
 
 ## 2. 里程碑计划与待办
@@ -306,14 +309,35 @@
 > 目的：把文档里「真机项另排」一次性收口。从零部署 → 阶段4 场景 → 阶段5 调度/掩码/SSE，
 > 预计一个工作日。真 LLM **无可用端点** → 标灰为决策点，先验不依赖模型的项。
 > 部署细节以 `deploy/README.md` 为准；跑完把每项记录誊回本文件 §5.2 并勾掉。
+> 本机（node81-135）实测运行步骤——路径已按 workspace 修正、含 Windows 访问：`docs/status/real-machine-bringup.md`。
 > 图例：`[ ]` 待勾 · `⏱` 参考耗时 · `✓=` 成功标准 · `记录:` 实测值（耗时/内存/异常）。
+
+### 6.0 部署进度快照（node81-135，2026-09-07/08 实测）
+
+| 里程碑 | 状态 | 说明 |
+|---|---|---|
+| nginx 安装（无 yum 源 → U 盘 rpm） | 完成（09-05） | 见 §6.2 与 deploy/README §二 ⚠️ |
+| Python≥3.8 venv + 后端依赖 | 完成（09-05） | `/opt/sr-venv`（py3.9）；另需 eval-type-backport（见 §6.2 补注） |
+| sr-api 起服务（systemd，开机自启） | 完成（09-07） | 曾 217/USER（`User=` 行尾注释）+ py3.9 注解崩溃，均已修复并归档 |
+| nginx 站点 + Windows 访问 | 完成（09-07/08） | `http://10.10.81.135` 可开页面；需删出厂 default.conf |
+| /api/scenes 真实数据 | **未完成** | `/data/scenes` 不存在 → `source:fake` 12 条占位；待真实根路径 |
+| 提交 SR 端到端（阶段4/5 真链） | **未完成** | 依赖真实根 + Slurm 可达；清单见 §6.3–6.5 |
+| 本会话代码/文档变更归档 | **未 commit** | 清单见下方 |
+
+**下一步行动**
+1. 确认真实场景根在 node81-135 的挂载点（或数据在别的机器）。此前在 viewer 开过一张真实 590MB `JL1KF02B01_...`，来源未确认——找它即可定位真实根。
+2. 改两处并**保持同值**：后端 `SR_SCENES_ROOT`（`/etc/systemd/system/sr-api.service`）+ nginx `alias`（`/etc/nginx/conf.d/sr-agent-platform.conf`）→ `systemctl daemon-reload && systemctl restart sr-api` + `systemctl reload nginx` → `curl http://127.0.0.1:8000/api/scenes` 复核出真实行（非 fake）。
+3. 数据就位后按 §6.3–6.5 逐项真机验收。
+4. commit 下列待归档变更：`deploy/sr-api.service`（User= 行尾注释修复）、`deploy/requirements-api.txt`（+`eval-type-backport; python_version<"3.10"`）、`docs/status/real-machine-bringup.md` 与 `-adhd.md`（新增症状行）、`deploy/README.md`（真机落地、无 yum 源 ⚠️）、本会话 memory 更新。
+
+> 启动两个坑的完整排障（217/USER、py3.9 eval-type-backport）见 `real-machine-bringup.md` §5 症状表第 2/3 行。
 
 ### 6.1 出发前（开发机）
 - [ ] **打包拷包**（⏱30′）· 开发机 `npm run build && npm run package:offline` → 离线包 + 后端依赖 wheel 拷 U 盘 · ✓= 包内含 `dist/ backend/ nginx.conf sr-api.service requirements-api.txt` · 记录:
 - [ ] **确认目标图**（⏱5′）· 从盘阵挑两张真实大图（GF07A03 1.11GB / KF02B04 1.78GB），记下它们在第几行 · ✓= 知道 scene 名即可 curl 到 · 记录:
 
 ### 6.2 首次部署（CentOS7）
-- [ ] **装 nginx + venv**（⏱30′）· EPEL 装 nginx；`python3 -m venv /opt/sr-venv`；离线装 requirements-api.txt（含 openai）· ✓= 两条命令均无报错 · 记录:
+- [ ] **装 nginx + Python≥3.8 venv**（⏱30′）· 装 nginx（本机实测**无任何 yum 源**：`There are no enabled repos`，EPEL 不可达 → 内网 yum 镜像 / U 盘 rpm，见 deploy/README §二 ⚠️）；⚠️ CentOS7 自带 `python3`=3.6.8 **不可用**（后端整链要求 ≥3.8，3.6 上 pip 只会解析到 openai 0.10.5 等 2021 旧版）。conda 频道 `cgwx-anaconda` 404 死、`defaults` 断网、本机包缓存不全 → **造不出新 conda 环境**（09-05 实测 `create`/`clone` 均 HTTP 报错）——实际走法：拿现成 py3.8+ 解释器建 venv，`<conda>/envs/destriping_py39/bin/python -m venv /opt/sr-venv`（只借解释器，ExecStart 默认即此路径零改动），再 `/opt/sr-venv/bin/pip install -i http://nexus.jl1.cn/repository/cgwx-pypi/simple --trusted-host nexus.jl1.cn -r requirements-api.txt`（装法与镜像见 deploy/README §三）· ✓= 装完版本正常（实测 fastapi 0.128.8 / openai 1.109.1 / numpy 2.0.2 / pillow 11.3.0，非 0.10.5 时代） · 记录:
 - [ ] **放 nginx.conf**（⏱15′）· 拷到 conf.d，按真机改 `root`（dist 目录）、`alias`（盘阵根）、`proxy_pass` · ✓= `nginx -t` 通过 → `systemctl reload nginx` · 记录:
 - [ ] **放 sr-api.service**（⏱20′）· 拷 systemd；改 `WorkingDirectory` / `SR_SCENES_ROOT`（=nginx alias 同值）/ `SR_AGENT_DB` 父目录归属 / `ExecStart` venv 路径；**保持 `SR_LLM_MOCK=0` `SR_SLURM_FAKE=0` 不改** · ✓= `systemctl enable --now sr-api` 起来，`chown -R nginx` 库目录可写 · 记录:
 - [ ] **探活**（⏱10′）· `curl /api/health`、`/api/scenes`（有行、非 fake）、`/api/queue` · ✓= 三接口 200 且 scenes 返回真实 W/H · 记录:

@@ -6,8 +6,16 @@
 #   pillow       灰度 JPEG 编码
 #   openai       阶段5 API 进程 import backend/agent/loop → openai。版本锁 1.x：
 #                openai 3.x 与既有 aiohttp 3.8.3 不兼容（实测装 1.109.1）
+# ⚠️ 需 Python ≥ 3.8。镜像会按解释器版本过滤可用 wheel：若在 py3.6（CentOS7 自带 python3=3.6.8）
+#    上装，pip 只会解析到 2021 旧版——openai≤0.10.5（无 1.x OpenAI() 客户端，agent 代码跑不了）、
+#    numpy≤1.19.5 / pillow≤8.4 / uvicorn≤0.17 / fastapi 0.11x 时代。解法是换 Python ≥3.8 重装
+#    （deploy/README.md §三），勿为旧版降代码。
 fastapi>=0.110
 uvicorn[standard]>=0.29
 numpy>=1.24
 pillow>=10.0
 openai>=1.40,<2
+# ⚠️ Python<3.10 必需：后端注解用 PEP604 `X | None`，fastapi/pydantic 在 py3.9 上
+#    解析该注解需要它，缺则启动即崩 "Unable to evaluate type annotation 'str | None'"
+#    （2026-09-07 真机 node81-135 实测；venv 由 destriping_py39=py3.9 建出）。
+eval-type-backport; python_version < "3.10"

@@ -58,42 +58,46 @@ const roiCount = computed(() => store.getRois().length);
 <style scoped>
 .draw-panel {
   position: absolute;
-  left: 10px;
-  top: 10px;
+  left: 12px;
+  top: 12px;
   z-index: 15;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 8px;
-  background: rgba(27, 31, 36, 0.96);
-  border: 1px solid #2c313a;
-  border-radius: 8px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(236, 236, 240, 0.9);
+  border-radius: 12px;
+  box-shadow: var(--shadow-pop);
 }
 .draw-panel button {
   height: 28px;
-  padding: 0 10px;
-  background: #22262c;
-  color: #d5d9de;
+  padding: 0 11px;
+  background: var(--surface-2);
+  color: var(--ink-body);
   font-size: 12px;
-  border: 1px solid #3a4149;
-  border-radius: 5px;
+  border: 1px solid transparent;
+  border-radius: 7px;
   cursor: pointer;
   white-space: nowrap;
+  transition: background 0.15s ease, color 0.15s ease;
 }
-.draw-panel button:hover { border-color: #2b7bdd; }
-.draw-panel button.on { background: #2b7bdd; color: #fff; border-color: #2b7bdd; }
+.draw-panel button:hover { background: #e9eeea; color: var(--ink); }
+.draw-panel button.on { background: var(--accent-soft); color: var(--accent-deep); border-color: var(--accent-2); }
 .draw-panel button:disabled { opacity: 0.5; cursor: wait; }
-.draw-panel .lbl { color: #8a93a0; font-size: 11px; margin: 0 2px; }
-.draw-panel .sep { width: 1px; height: 18px; background: #2c313a; }
+.draw-panel .lbl { color: var(--ink-sub); font-size: 11px; margin: 0 2px; }
+.draw-panel .sep { width: 1px; height: 18px; background: var(--line); margin: 0 2px; }
 .draw-panel input[type=number] {
   width: 54px;
   height: 28px;
-  padding: 0 4px;
-  background: #22262c;
-  color: #d5d9de;
+  padding: 0 6px;
+  background: var(--surface-2);
+  color: var(--ink);
   font-size: 12px;
-  border: 1px solid #3a4149;
-  border-radius: 5px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  transition: border-color 0.15s ease;
 }
-.draw-panel input[type=number]:focus { outline: none; border-color: #2b7bdd; }
+.draw-panel input[type=number]:focus { outline: none; border-color: var(--accent-3); }
 </style>
