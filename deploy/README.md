@@ -183,6 +183,15 @@ curl -s -N http://127.0.0.1/api/queue/events
 > 服务器路径用 `<APP>` 代指解压根：本文示例 `/data/www/sr-agent-platform`；真机 node81-135 的
 > 实际值是 `/run/media/root/SSD/workspace/wangrz/sr-agent-platform`（本机全部固定值速查见
 > `docs/status/real-machine-bringup.md` 开头表，命令结构不变、把 `<APP>` 换成真值即可）。
+>
+> ⚠️ **真机路径 ≠ 仓库示例路径——拷配置先换路径，否则静态页全 500**。`nginx.conf` / `sr-api.service`
+> 里写的 `/data/www/...` 是**示例**；真机实际值见 `docs/status/real-machine-bringup.md` 开头速查表
+> （node81-135 = `/run/media/root/SSD/workspace/wangrz/...`）。**照拷不换的病征**（2026-09-08 实测踩中）：
+> 后端 `/api/*` 全 200、前端首页/各路由**全 500**（错误页带 `nginx/x.y.z`），`/var/log/nginx/error.log`
+> 刷 `rewrite or internal redirection cycle while internally redirecting to "/index.html"`——这是 SPA
+> `try_files` **死循环**，根源 = conf 的 `root` 还指着不存在的示例目录、读不到 `index.html`，**不是后端坏**。
+> 处置：把 `root`（及 `alias`）换成真机路径 → `nginx -t && nginx -s reload` → 复测（见下方冒烟两条）。
+> 同理 `sr-api.service` 的 `WorkingDirectory`/`ExecStart` 不换真值 = 服务起不来或 import 崩。
 
 ### 判定：这次改了什么，就做哪几节
 
@@ -195,6 +204,16 @@ curl -s -N http://127.0.0.1/api/queue/events
 
 > 盘阵根两处必须同值：`sr-api.service` 的 `SR_SCENES_ROOT` 与 `nginx.conf` 的 `alias`。只改其中一处
 > 会出现「列表有但图读不出来」或反过来，改完两边各自 reload/restart 一次。
+
+**改完无论哪层，先本地冒烟两条，别直接开浏览器**（哪条非 200 对症看对应日志）：
+
+```bash
+curl -s -o /dev/null -w '静态=%{http_code}\n' http://127.0.0.1/           # 前端页：应 200
+curl -s -o /dev/null -w '健康=%{http_code}\n' http://127.0.0.1/api/health # 后端：应 200
+```
+
+静态非 200 → 看 `/var/log/nginx/error.log`（改 nginx/dist 后）；健康非 200 → 看
+`journalctl -u sr-api`（改 backend/sr-api.service 后）。
 
 ### 5.1 前端（Vue）改动 → 重打 dist → reload nginx
 
@@ -223,6 +242,11 @@ systemctl reload nginx             # 前端热更：只 reload，别 restart sr-
 
 浏览器 **Ctrl+F5 强刷**一次（去掉浏览器缓存的旧页面）。带 hash 的资源名每次变化，
 immutable 缓存不卡旧版。判定：刷新后页面出现本次改动。
+
+> 只覆盖 conf `root` 指着的那个 `<APP>/dist`，**别新建/挪目录**——root 与文件一错位就是
+> 上面那个静态 500。真机 node81-135 的应用根在移动盘 `/run/media/root/SSD/...`：机器重启/
+> 重新插拔后挂载点一变，`nginx root`、`sr-api.service` 的 `WorkingDirectory` 会整片失效，同样
+> 症状复现。**真机重启后先确认 SSD 挂载与这些绝对路径还活着，再谈更新。**
 
 ### 5.2 后端（`backend/` 代码）改动 → restart sr-api
 
