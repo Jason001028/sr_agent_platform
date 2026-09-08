@@ -158,7 +158,7 @@ const outBtnTitle = computed(() =>
 </template>
 
 <style scoped>
-/* 工具栏：白色浮层承托，分隔线极浅冷灰 */
+/* 工具栏：孔雀石绿深带（与顶部导航同族的结构带）；控件 = 白/浅底 pill 浮其上，形成强对比 */
 .toolbar {
   flex: none;
   display: flex;
@@ -166,49 +166,49 @@ const outBtnTitle = computed(() =>
   gap: 10px;
   padding: 0 16px;
   height: 52px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--line);
-  box-shadow: 0 1px 4px rgba(46, 90, 78, 0.04);
+  background: var(--band-grad);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
   z-index: 5;
 }
 
-/* 主按钮：青绿渐变（仅主操作） */
+/* 主按钮：深带上白底 pill + 深孔雀石字（最高对比）；hover 微沉 */
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   height: 32px;
   padding: 0 16px;
-  background: var(--accent-grad);
-  color: #fff;
+  background: #fff;
+  color: var(--band-2);
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 600;
   border: none;
   border-radius: var(--r-ctrl);
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
-  box-shadow: 0 2px 6px rgba(45, 164, 162, 0.25);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
   transition: filter 0.15s ease, box-shadow 0.15s ease;
 }
-.btn:hover { filter: brightness(1.05); box-shadow: 0 3px 8px rgba(45, 164, 162, 0.32); }
+.btn:hover { filter: brightness(0.97); box-shadow: 0 2px 5px rgba(0, 0, 0, 0.24); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; filter: none; }
 
-/* 拉伸下拉：控件同族（浅底/白底 + 细边框，聚焦青绿描边） */
+/* 拉伸下拉：浅底 pill（白/浅面浮深带） */
 .stretch-sel {
   height: 32px;
   padding: 0 10px;
-  background: var(--surface-2);
+  background: rgba(255, 255, 255, 0.95);
   color: var(--ink-body);
   font-size: 13px;
-  border: 1px solid var(--line);
+  border: 1px solid rgba(255, 255, 255, 0.4);
   border-radius: var(--r-ctrl);
   cursor: pointer;
   outline: none;
   transition: border-color 0.15s ease, background 0.15s ease;
 }
-.stretch-sel:hover { border-color: var(--accent-2); }
-.stretch-sel:focus-visible { border-color: var(--accent-3); box-shadow: 0 0 0 3px rgba(45, 164, 162, 0.15); }
+.stretch-sel:hover { border-color: #fff; }
+.stretch-sel:focus-visible { border-color: #fff; box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.28); }
 .stretch-sel:disabled { opacity: 0.55; cursor: not-allowed; }
 
 .loc {
@@ -216,72 +216,77 @@ const outBtnTitle = computed(() =>
   align-items: center;
   gap: 6px;
   flex: none;
-  color: var(--ink-sub);
+  color: rgba(255, 255, 255, 0.85);
   font-size: 12px;
 }
 .loc input {
   width: 60px;
   height: 28px;
   padding: 0 8px;
-  background: var(--surface-2);
+  background: rgba(255, 255, 255, 0.95);
   color: var(--ink);
-  border: 1px solid var(--line);
+  border: 1px solid rgba(255, 255, 255, 0.4);
   border-radius: 8px;
   font-size: 13px;
   outline: none;
   transition: border-color 0.15s ease;
 }
-.loc input:hover, .loc input:focus { border-color: var(--accent-2); }
+.loc input:hover, .loc input:focus { border-color: #fff; }
 .loc-btn {
   height: 28px;
   padding: 0 12px;
-  background: var(--accent-soft);
-  color: var(--accent-deep);
+  background: rgba(255, 255, 255, 0.95);
+  color: var(--band-2);
   font-size: 13px;
   font-weight: 500;
-  border: 1px solid transparent;
+  border: 1px solid rgba(255, 255, 255, 0.5);
   border-radius: 8px;
   cursor: pointer;
   transition: background 0.15s ease;
 }
-.loc-btn:hover { background: #d6ece9; }
+.loc-btn:hover { background: #fff; }
 
-/* 次级按钮：白底 + 1px 细边框 + 灰字（状态用青绿/琥珀着字） */
+/* 次级按钮：透明 ghost（白描边白字）；状态色以浅底 pill 表达 */
 .outbtn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   height: 32px;
   padding: 0 12px;
-  background: var(--surface);
-  color: var(--ink-body);
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
   font-size: 12px;
-  border: 1px solid var(--line);
+  border: 1px solid rgba(255, 255, 255, 0.35);
   border-radius: var(--r-ctrl);
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
-  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
-.outbtn:hover:not(:disabled) { border-color: var(--accent-2); color: var(--accent-deep); }
+.outbtn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.2); color: #fff; border-color: rgba(255, 255, 255, 0.6); }
 .outbtn:disabled { opacity: 0.5; cursor: not-allowed; }
-.outbtn.granted { color: var(--accent-deep); border-color: var(--ok-line); background: var(--ok-bg); }
-.outbtn.pending { color: var(--warn); border-color: var(--warn-line); background: var(--warn-bg); }
-/* 通用选中态（如绘制掩码 on）：浅青绿底 + 深青绿字，不做大色块 */
-.outbtn.on { border-color: var(--accent-2); color: var(--accent-deep); background: var(--accent-soft); }
-/* 提交 SR 就绪（grad.on）：转为主 CTA 青绿渐变 */
-.outbtn.grad.on { color: #fff; background: var(--accent-grad); border-color: transparent; box-shadow: 0 2px 6px rgba(45, 164, 162, 0.28); }
+/* 输出目录授权/待授权：浅状态 pill（区别于 ghost） */
+.outbtn.granted { color: var(--accent-deep); border-color: transparent; background: var(--ok-bg); }
+.outbtn.pending { color: var(--warn); border-color: transparent; background: var(--warn-bg); }
+/* 激活态（绘制掩码 on / 提交SR grad.on）：白底深绿字 + 白环 = 高亮选中 */
+.outbtn.on, .outbtn.grad.on {
+  color: var(--band-2);
+  background: #fff;
+  border-color: #fff;
+  font-weight: 600;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.25);
+}
 
 .chk {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: var(--ink-body);
+  color: #fff;
   font-size: 12px;
   flex: none;
   cursor: pointer;
 }
-.chk input { accent-color: var(--accent-3); }
+.chk input { accent-color: #C7F0EC; }
 
 .spacer { flex: 1; }
 </style>
