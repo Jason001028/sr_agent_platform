@@ -16,6 +16,7 @@ import {
   useQueueStore, tasksForScene, stateTone, pathLeafOf,
 } from '../stores/queue';
 import type { QueueTask } from '../lib/api.js';
+import type { RoiStats } from '../lib/roiStats.js';
 import { roiOrigGeom, STAT_HI, STAT_CLIP } from '../lib/roiStats.js';
 
 const viewer = useViewerStore();
@@ -26,6 +27,22 @@ const rois = computed(() => rec.value?.maskRois ?? []);
 const selIndex = computed(() => viewer.roiSelIndex());
 const selValid = computed(() => selIndex.value >= 0);
 const selStats = computed(() => (selValid.value ? viewer.roiStats : null));
+
+/* ---------------- 云量估算卡（store.cloudScene/cloudView；threshold 与 ROI 同源） ---------------- */
+const cloudScene = computed(() => viewer.cloudScene);
+const cloudView = computed(() => viewer.cloudView);
+const ROUTE_NAMES: Record<string, string> = {
+  utif: 'UTIF', sparse: '稀疏条带', chunked: '分块', jpg: '盘阵 JPG',
+};
+const routeLabel = computed(() => {
+  const r = rec.value?.route;
+  return r ? (ROUTE_NAMES[r] ?? r) : '';
+});
+const sampledText = computed(() => {
+  const s = (cloudScene.value?.sampled && cloudScene.value) || (cloudView.value?.sampled && cloudView.value);
+  if (!s) return '';
+  return '行抽样统计（每 ' + s.stride + ' 行取 1 行，覆盖 ' + s.rowsSampled + '/' + s.rowSpan + ' 行）';
+});
 
 /** ROI 几何（原图尺度 bbox + 鞋带面积）；thumb/元数据未就绪 → null。 */
 const rows = computed(() => {
@@ -89,7 +106,21 @@ watch(
   },
   { immediate: true },
 );
-onUnmounted(() => queue.disconnect());
+
+/* 云量「当前视野」：pan/zoom 停稳后防抖刷新（只刷 cloudView，不重算整景/红叠）。 */
+let cloudTimer: ReturnType<typeof setTimeout> | null = null;
+watch(
+  () => viewer.view,
+  () => {
+    if (!rec.value?.thumb) return;
+    if (cloudTimer) clearTimeout(cloudTimer);
+    cloudTimer = setTimeout(() => { viewer.refreshCloudView(); }, 200);
+  },
+);
+onUnmounted(() => {
+  queue.disconnect();
+  if (cloudTimer) clearTimeout(cloudTimer);
+});
 
 /* ---------------- 格式化 ---------------- */
 function f1(n: number | null): string {
@@ -99,6 +130,12 @@ function f1(n: number | null): string {
 }
 function f2p(n: number): string {
   return (Math.round(n * 10) / 10).toFixed(1);
+}
+function pctText(s: RoiStats | null | undefined, key: 'hiPct' | 'clipPct'): string {
+  return s ? f2p(s[key]) + '%' : '—';
+}
+function pxText(s: RoiStats | null | undefined): string {
+  return s ? s.n.toLocaleString() : '—';
 }
 function areaText(a: number): string {
   if (a >= 1e6) return (a / 1e6).toFixed(2) + ' Mpx²';
@@ -113,6 +150,41 @@ function fmtTime(ts: number): string {
 <template>
   <div class="rt">
     <p class="rt-intro">统计作用于当前显示层（stretch 后 8bit 显示像元）；画 ROI 后在此查看/点选。</p>
+
+    <!-- 云量估算（阶段6 启发：无真云掩膜时 = 显示层高亮占比估算 + 疑似云区红叠） -->
+    <section class="rt-sec">
+      <h4 class="rt-h hrow">
+        <span>云量估算<template v-if="routeLabel"> · {{ routeLabel }}</template></span>
+        <button
+          type="button"
+          class="ob"
+          :class="{ on: viewer.cloudShow }"
+          :disabled="!rec || !rec.thumb"
+          @click="viewer.setCloudShow(!viewer.cloudShow)"
+        >
+          {{ viewer.cloudShow ? '叠加中' : '叠加' }}
+        </button>
+      </h4>
+
+      <p v-if="!rec || !rec.thumb" class="rt-empty">先在左侧打开一张图（或盘阵场景），看整景 / 当前视野疑似云占比。</p>
+      <div v-else class="stats-card">
+        <dl class="st-grid">
+          <div class="pct"><dt>整景 云≥{{ STAT_HI }}</dt><dd>{{ pctText(cloudScene, 'hiPct') }}</dd></div>
+          <div class="pct"><dt>当前视野 云≥{{ STAT_HI }}</dt><dd>{{ pctText(cloudView, 'hiPct') }}</dd></div>
+          <div class="pct"><dt>整景 过曝≥{{ STAT_CLIP }}</dt><dd>{{ pctText(cloudScene, 'clipPct') }}</dd></div>
+          <div class="pct"><dt>视野 过曝≥{{ STAT_CLIP }}</dt><dd>{{ pctText(cloudView, 'clipPct') }}</dd></div>
+        </dl>
+        <p v-if="cloudScene?.sampled || cloudView?.sampled" class="st-note">{{ sampledText }}</p>
+        <p v-else class="st-note">
+          整景 {{ pxText(cloudScene) }} 像元 · 视野 {{ pxText(cloudView) }} 像元（阈值与 ROI 统计同源）
+        </p>
+        <p class="st-note caveat">
+          当前显示层 Y≥{{ STAT_HI }} 高亮占比估算；PAN 无真云掩膜，亮雪 / 亮建筑会同样计入，「叠加」红区为疑似云区而非真云掩膜。
+          <template v-if="!cloudScene && !cloudView">（整幅读取失败——超大图受浏览器内存限制，整景/视野暂不可用）</template>
+          <template v-else-if="viewer.cloudShow && !viewer.cloudOverlay">（红叠生成失败，仅数字可见）</template>
+        </p>
+      </div>
+    </section>
 
     <!-- ROI 列表 -->
     <section class="rt-sec">
@@ -295,4 +367,19 @@ function fmtTime(ts: number): string {
 .qt-more { margin-top: 4px; font-size: 11px; color: var(--ink-sub); }
 .qt-more summary { cursor: pointer; color: var(--ink-sub); }
 .qt-mono { margin: 2px 0 0; font-size: 10px; font-family: var(--font-mono); color: var(--ink-faint); word-break: break-all; }
+
+/* 云量卡「叠加」开关 */
+.ob {
+  height: 22px; padding: 0 8px; font-size: 11px;
+  border: 1px solid var(--line); border-radius: var(--r-ctrl);
+  background: var(--surface); color: var(--ink-sub);
+  cursor: pointer; font-family: inherit;
+  transition: border-color 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+.ob:hover:not(:disabled) { border-color: var(--accent-2); }
+.ob:disabled { opacity: 0.5; cursor: default; }
+.ob.on {
+  background: var(--err-bg); border-color: var(--err-line); color: var(--err); font-weight: 600;
+}
+.st-note.caveat { color: var(--ink-sub); }
 </style>

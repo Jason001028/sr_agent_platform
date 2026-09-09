@@ -7,7 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   fitView, thumbToScreen, mouseToThumb, thumbToOrig, origToThumb, locateView, wheelZoom,
-  pointInPoly, hitRoi,
+  pointInPoly, hitRoi, visibleThumbRect,
 } from '../viewMath.js';
 import type { Poly } from '../maskgen.js';
 
@@ -100,6 +100,35 @@ describe('wheelZoom（以鼠标为锚点）', () => {
   it('scale 夹在 [0.05, 64]', () => {
     expect(wheelZoom({ scale: 0.01, ox: 0, oy: 0 }, 0, 0, 1.2).scale).toBe(0.05);
     expect(wheelZoom({ scale: 100, ox: 0, oy: 0 }, 0, 0, 1.2).scale).toBe(64);
+  });
+});
+
+describe('visibleThumbRect（当前视野可见缩略图像素矩形）', () => {
+  it('scale<1 整体适配（缩略图小于画布、居中留边）→ 整幅可见', () => {
+    // fitView(100,100,400,300) = { scale:1, ox:150, oy:100 }，图完全在画布内
+    const v = { scale: 1, ox: 150, oy: 100 };
+    expect(visibleThumbRect(v, 400, 300, 100, 100)).toEqual({ x0: 0, y0: 0, x1: 99, y1: 99 });
+  });
+  it('放大到左上（scale=2、ox=oy=0、画布 200×200、缩略图 200×200）→ 只露出左上 100×100', () => {
+    const v = { scale: 2, ox: 0, oy: 0 };
+    // 反投影屏幕 [0,200]² → thumb [0,100]²
+    expect(visibleThumbRect(v, 200, 200, 200, 200)).toEqual({ x0: 0, y0: 0, x1: 99, y1: 99 });
+  });
+  it('平移只看中间一块', () => {
+    // scale=1、画布 200×200、缩略图 1000×1000、ox=-300 → 可见 x∈[300,500)
+    const v = { scale: 1, ox: -300, oy: -400 };
+    expect(visibleThumbRect(v, 200, 200, 1000, 1000)).toEqual({ x0: 300, y0: 400, x1: 499, y1: 599 });
+  });
+  it('缩略图越过画布右/下缘 → clamp 到图边', () => {
+    // scale=2、ox=-100：可见 x∈[50,150)→clamp 99；oy=0 → y∈[0,100)
+    const v = { scale: 2, ox: -100, oy: 0 };
+    expect(visibleThumbRect(v, 200, 200, 100, 100)).toEqual({ x0: 50, y0: 0, x1: 99, y1: 99 });
+  });
+  it('视图整体在图外 / 空画布 → null', () => {
+    const off = { scale: 1, ox: 99999, oy: 99999 };
+    expect(visibleThumbRect(off, 200, 200, 100, 100)).toBeNull();
+    expect(visibleThumbRect({ scale: 1, ox: 0, oy: 0 }, 0, 200, 100, 100)).toBeNull();
+    expect(visibleThumbRect({ scale: 0, ox: 0, oy: 0 }, 200, 200, 100, 100)).toBeNull();
   });
 });
 
