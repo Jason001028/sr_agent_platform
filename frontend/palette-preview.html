@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>设计令牌色板 — sr_agent_platform</title>
+<!-- 直接引用真源 style.css：配色只看这一个文件，永不脱轨 -->
+<link rel="stylesheet" href="./src/style.css" />
+<style>
+  body { height: auto; min-height: 100vh; padding: 32px 40px; }
+  header h1 { font-size: 22px; color: var(--ink); margin: 0 0 4px; }
+  header p  { color: var(--ink-sub); margin: 0 0 24px; }
+  h2 { font-size: 13px; letter-spacing: .5px; text-transform: uppercase;
+       color: var(--ink-faint); margin: 28px 0 10px; border-bottom: 1px solid var(--line);
+       padding-bottom: 6px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+  .sw { border: 1px solid var(--line); border-radius: var(--r-ctrl);
+        overflow: hidden; background: var(--surface); box-shadow: var(--shadow-card); }
+  .chip { height: 64px; }
+  .meta { padding: 8px 10px; }
+  .meta .name { font: 600 12px var(--font-mono); color: var(--ink); }
+  .meta .hex  { font: 11px var(--font-mono); color: var(--ink-sub); }
+  .g  { background: linear-gradient(135deg,#87CDCC 0%,#3DA9A4 55%,#2DA4A2 100%); }
+  .row { display:flex; gap:10px; align-items:center; margin-top:6px; }
+  .dot { width:18px; height:18px; border-radius:6px; border:1px solid var(--line); flex:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>sr_agent_platform · 设计令牌色板</h1>
+  <p>真源：<code>src/style.css</code> · 莫兰迪薄荷绿打底 / 白做面 / 青绿点缀（占比 &lt;15%）· 双击本文件即可（file:// 可开，纯 CSS 无模块加载）</p>
+</header>
+
+<h2>面层 surface</h2>
+<div class="grid">
+  <div class="sw"><div class="chip" style="background:var(--bg-mint)"></div><div class="meta"><div class="name">--bg-mint</div><div class="hex">#ACC7BE</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--bg-mint-soft)"></div><div class="meta"><div class="name">--bg-mint-soft</div><div class="hex">rgba(255,255,255,.55)</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--surface)"></div><div class="meta"><div class="name">--surface</div><div class="hex">#FFFFFF</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--surface-2)"></div><div class="meta"><div class="name">--surface-2</div><div class="hex">#F6F5FA</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--surface-3)"></div><div class="meta"><div class="name">--surface-3</div><div class="hex">#EEF1F3</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--line)"></div><div class="meta"><div class="name">--line</div><div class="hex">#ECECF0</div></div></div>
+</div>
+
+<h2>强调 accent（青绿渐变族，&lt;15%）</h2>
+<div class="grid">
+  <div class="sw"><div class="chip" style="background:var(--accent-1)"></div><div class="meta"><div class="name">--accent-1</div><div class="hex">#87CDCC</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--accent-2)"></div><div class="meta"><div class="name">--accent-2</div><div class="hex">#3DA9A4</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--accent-3)"></div><div class="meta"><div class="name">--accent-3</div><div class="hex">#2DA4A2</div></div></div>
+  <div class="sw"><div class="chip g"></div><div class="meta"><div class="name">--accent-grad</div><div class="hex">135° 渐变</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--accent-soft)"></div><div class="meta"><div class="name">--accent-soft</div><div class="hex">#E3F1EF</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--accent-deep)"></div><div class="meta"><div class="name">--accent-deep</div><div class="hex">#1E7B78</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--accent-ink)"></div><div class="meta"><div class="name">--accent-ink</div><div class="hex">#2C8F8B</div></div></div>
+</div>
+
+<h2>文字色阶 ink</h2>
+<div class="grid">
+  <div class="sw"><div class="chip" style="background:var(--ink)"></div><div class="meta"><div class="name">--ink</div><div class="hex">#15102F</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--ink-body)"></div><div class="meta"><div class="name">--ink-body</div><div class="hex">#585665</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--ink-sub)"></div><div class="meta"><div class="name">--ink-sub</div><div class="hex">#858B9C</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--ink-faint)"></div><div class="meta"><div class="name">--ink-faint</div><div class="hex">#B8BECB</div></div></div>
+</div>
+
+<h2>语义状态 semantic</h2>
+<div class="grid">
+  <div class="sw"><div class="chip" style="background:var(--ok)"></div><div class="meta"><div class="name">--ok</div><div class="hex">#3D8B77</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--ok-bg)"></div><div class="meta"><div class="name">--ok-bg</div><div class="hex">#E6F3EE</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--ok-line)"></div><div class="meta"><div class="name">--ok-line</div><div class="hex">#CDE6DB</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--warn)"></div><div class="meta"><div class="name">--warn</div><div class="hex">#B98A3A</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--warn-bg)"></div><div class="meta"><div class="name">--warn-bg</div><div class="hex">#F8F1E4</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--warn-line)"></div><div class="meta"><div class="name">--warn-line</div><div class="hex">#ECE0C5</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--err)"></div><div class="meta"><div class="name">--err</div><div class="hex">#C25E5C</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--err-bg)"></div><div class="meta"><div class="name">--err-bg</div><div class="hex">#F9ECEC</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--err-line)"></div><div class="meta"><div class="name">--err-line</div><div class="hex">#EED4D3</div></div></div>
+</div>
+
+<h2>真源一致性抽查（应全部同色）</h2>
+<div class="grid">
+  <div class="sw"><div class="chip g"></div><div class="meta"><div class="name">--accent-grad 三档</div><div class="row"><span class="dot" style="background:#87CDCC"></span><span class="dot" style="background:#3DA9A4"></span><span class="dot" style="background:#2DA4A2"></span></div></div></div>
+</div>
+
+<script>
+// 让下方 hex 标签跟随 style.css 真源自动刷新（改 :root 令牌后此处不再手工过期）
+(function () {
+  const cs = getComputedStyle(document.documentElement);
+  document.querySelectorAll('.sw').forEach((card) => {
+    const nameEl = card.querySelector('.name');
+    const hexEl = card.querySelector('.hex');
+    if (!nameEl || !hexEl) return;
+    const token = nameEl.textContent.trim();
+    if (!token.startsWith('--')) return;
+    const v = cs.getPropertyValue(token).trim();
+    hexEl.textContent = v.startsWith('linear-gradient') ? '渐变' : v;
+  });
+})();
+</script>
+</body>
+</html>
