@@ -76,6 +76,38 @@ export function wheelZoom(
   return { scale: ns, ox: mx - ix * ns, oy: my - iy * ns };
 }
 
+/* ---------------- 可见缩略图像素矩形（阶段6 云量估算等按视野统计用） ---------------- */
+/** 缩略图像素矩形（整数、闭区间、含端点；与 maskgen 栅格化/ROI 统计同一像素语义）。 */
+export interface Rect {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+/**
+ * 当前画布可见的缩略图像素矩形：屏幕 [0,cw]×[0,ch] 经 view 反仿射 (s−ox)/scale
+ * 映射回缩略图坐标，与 [0,tw]×[0,th] 求交后整数化（含端点）。视图整体在图外 → null。
+ * （HTML 无此函数；scale<1 整体适配时返回整幅，调用方可按需复用整景结果。）
+ */
+export function visibleThumbRect(
+  view: ViewState, cw: number, ch: number, tw: number, th: number,
+): Rect | null {
+  if (!(view.scale > 0) || cw <= 0 || ch <= 0 || tw <= 0 || th <= 0) return null;
+  const s = view.scale;
+  const ax = Math.min(0 - view.ox, cw - view.ox) / s;
+  const bx = Math.max(0 - view.ox, cw - view.ox) / s;
+  const ay = Math.min(0 - view.oy, ch - view.oy) / s;
+  const by = Math.max(0 - view.oy, ch - view.oy) / s;
+  if (bx <= 0 || by <= 0 || ax >= tw || ay >= th) return null;
+  const x0 = Math.max(0, Math.floor(Math.max(0, ax)));
+  const y0 = Math.max(0, Math.floor(Math.max(0, ay)));
+  const x1 = Math.min(tw - 1, Math.max(x0, Math.ceil(Math.min(tw, bx)) - 1));
+  const y1 = Math.min(th - 1, Math.max(y0, Math.ceil(Math.min(th, by)) - 1));
+  if (x0 > x1 || y0 > y1) return null;
+  return { x0, y0, x1, y1 };
+}
+
 /* 点与多边形包含判定（射线法，HTML `pointInPoly`，逐行直译） */
 export function pointInPoly(x: number, y: number, poly: Poly): boolean {
   let inside = false;

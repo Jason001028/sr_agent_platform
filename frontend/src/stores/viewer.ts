@@ -21,15 +21,15 @@ import {
   floodSelect, fillRegionHoles, traceContour, simplifyPoly,
   mergeConnectedAsync, buildTiff, buildMaskTxt,
 } from '../lib/maskgen.js';
-import { fitView, locateView, wheelZoom, hitRoi, thumbToOrig } from '../lib/viewMath.js';
-import type { ViewState } from '../lib/viewMath.js';
+import { fitView, locateView, wheelZoom, hitRoi, thumbToOrig, visibleThumbRect } from '../lib/viewMath.js';
+import type { ViewState, Rect } from '../lib/viewMath.js';
 import { FileSource } from '../lib/source.js';
 import { browserKit } from '../lib/browserKit.js';
 import { decodeOne } from '../lib/decode.js';
 import type { DecodedRec } from '../lib/decode.js';
 import { loadSrConfig, sceneDecodePixels } from '../lib/scene.js';
 import type { SceneOpenMeta } from '../lib/scene.js';
-import { buildStats } from '../lib/roiStats.js';
+import { buildStats, luma, STAT_HI } from '../lib/roiStats.js';
 import type { RoiStats } from '../lib/roiStats.js';
 import { apiBakeMask } from '../lib/api.js';
 import type { BakeMaskBody } from '../lib/api.js';
@@ -84,6 +84,8 @@ interface ExportJob {
 
 const WAND_WIN = 4096;
 const WAND_EDGE = 64;
+/** 云叠画布长边上限：整幅降到 ≤2048（RGBA ≤16MB），避免 8192² 全幅叠加再撞画布/内存上限。 */
+const CLOUD_OVERLAY_MAX = 2048;
 
 /** 盘阵 JPG Blob → 全尺寸缩略图画布（服务器已 2% 拉伸，尺寸即 JPG 原生尺寸）。 */
 async function decodeJpgToCanvas(blob: Blob): Promise<HTMLCanvasElement> {
@@ -129,6 +131,73 @@ function roiStatsOnCanvas(rec: ViewerRec, poly: Poly): RoiStats | null {
   return buildStats(region, shifted);
 }
 
+/* ---------------- 云量估算（阶段6 侧栏云量卡：数字 + 疑似云区红叠，纯前端启发） ----------------
+   语义与 ROI 统计同源：整景/视野矩形多边形喂 buildStats，阈值 STAT_HI(=200) 高亮占比即
+   「疑似云占比」——PAN 无真云掩膜时这是亮度启发估算，亮雪/亮建筑会同样计入，非入库云量口径。 */
+
+/** 整景云量 +（可选）疑似云区红叠：同一份整幅 getImageData 喂 buildStats 与 makeCloudOverlay，
+    避免两次 256MB 级瞬态副本；整幅读失败（内存/画布上限）→ 双 null（UI 显 —，不崩）。 */
+function buildSceneCloud(rec: ViewerRec, wantOverlay: boolean): { stats: RoiStats | null; overlay: HTMLCanvasElement | null } {
+  const cv = rec.thumb as unknown as HTMLCanvasElement | null;
+  if (!cv) return { stats: null, overlay: null };
+  const tw = cv.width, th = cv.height;
+  if (tw <= 0 || th <= 0) return { stats: null, overlay: null };
+  const ctx = cv.getContext('2d');
+  if (!ctx) return { stats: null, overlay: null };
+  let img: ImageData;
+  try { img = ctx.getImageData(0, 0, tw, th); } catch { return { stats: null, overlay: null }; }
+  const stats = buildStats(img, [[0, 0], [tw, 0], [tw, th], [0, th]]);
+  let overlay: HTMLCanvasElement | null = null;
+  if (wantOverlay) {
+    try { overlay = makeCloudOverlay(img, tw, th); } catch { overlay = null; }
+  }
+  return { stats, overlay };
+}
+
+/** 把整幅 RGBA 降采样成 ≤CLOUD_OVERLAY_MAX 的半透明红叠画布：源像元 luma≥STAT_HI → 红。
+    逐目标像元按 step 抽源点（云是大片高亮区，抽样已足够）→ 输出画布 ≤2048² RGBA（≤16MB）。 */
+function makeCloudOverlay(img: ImageData, tw: number, th: number): HTMLCanvasElement {
+  const step = Math.max(1, Math.ceil(Math.max(tw, th) / CLOUD_OVERLAY_MAX));
+  const ow = Math.max(1, Math.ceil(tw / step));
+  const oh = Math.max(1, Math.ceil(th / step));
+  const data = img.data;
+  const out = new Uint8ClampedArray(ow * oh * 4);
+  for (let ry = 0; ry < oh; ry++) {
+    const sy = Math.min(th - 1, ry * step);
+    for (let cx = 0; cx < ow; cx++) {
+      const sx = Math.min(tw - 1, cx * step);
+      const o4 = (sy * tw + sx) * 4;
+      const Y = luma(data[o4], data[o4 + 1], data[o4 + 2]);
+      if (Y >= STAT_HI) {
+        const p = (ry * ow + cx) * 4;
+        out[p] = 255; out[p + 1] = 70; out[p + 2] = 70; out[p + 3] = 130;
+      }
+    }
+  }
+  const cv = browserKit.createCanvas(ow, oh) as unknown as HTMLCanvasElement;
+  const ctx = cv.getContext('2d');
+  if (!ctx) throw new Error('取不到 2d 上下文');
+  ctx.putImageData(new ImageData(out, ow, oh), 0, 0);
+  return cv;
+}
+
+/** 整数像素矩形精确裁剪 → 全幅 buildStats（避免多边形 gap 端点 off-by-one；缩略图坐标）。 */
+function statsOnRect(rec: ViewerRec, r: Rect): RoiStats | null {
+  const cv = rec.thumb as unknown as HTMLCanvasElement | null;
+  if (!cv) return null;
+  const tw = cv.width, th = cv.height;
+  if (tw <= 0 || th <= 0) return null;
+  const x0 = Math.max(0, r.x0), y0 = Math.max(0, r.y0);
+  const x1 = Math.min(tw - 1, r.x1), y1 = Math.min(th - 1, r.y1);
+  if (x0 > x1 || y0 > y1) return null;
+  const w = x1 - x0 + 1, h = y1 - y0 + 1;
+  const ctx = cv.getContext('2d');
+  if (!ctx) return null;
+  let img: ImageData;
+  try { img = ctx.getImageData(x0, y0, w, h); } catch { return null; }
+  return buildStats(img, [[0, 0], [w, 0], [w, h], [0, h]]);
+}
+
 function fmtBytes(n: number): string {
   if (n >= 1073741824) return (n / 1073741824).toFixed(2) + ' GB';
   if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
@@ -166,6 +235,13 @@ export const useViewerStore = defineStore('viewer', () => {
   const selRoi = ref<Poly | null>(null);
   /** 选中 ROI 在「当前显示层」上的确定性统计缓存（stretch/选区变化后由 refresh 重算）。 */
   const roiStats = ref<RoiStats | null>(null);
+  /** 云量估算（阶段6 启发卡，同源 buildStats/STAT_HI=200）：整景 / 当前视野 的亮像元统计。 */
+  const cloudScene = ref<RoiStats | null>(null);
+  const cloudView = ref<RoiStats | null>(null);
+  /** 疑似云区红叠开关（默认关，保持现行为；开启时图上亮云区半透明红）。 */
+  const cloudShow = ref(false);
+  /** 疑似云区红叠画布（≤2048，draw 时放大；整幅读失败/关闭 → null）。markRaw 重字段。 */
+  const cloudOverlay = ref<HTMLCanvasElement | null>(null);
   const wandTol = ref(20);
   const merging = ref(false);
   const autoExport = ref(true);
@@ -228,12 +304,14 @@ export const useViewerStore = defineStore('viewer', () => {
     marker.value = null;
     activeId.value = id;
     clearRoiSel();                      // 切换图像：侧舱选择/统计随图失效
+    clearCloud();                       // 云量数字/红叠随图失效（解码/缓存分支随后 refresh 补回）
     if (drawMode.value) {
       pendingPts.value = null; pendingRect.value = null; hoverPt.value = null;
     }
     if (rec.thumb) {
       if (rec.paintedMode !== stretchMode.value) paintStretch(rec);
       fit();
+      refreshCloudStats();           // 切回已解码文件 → 云量随新图刷新
       renderTick.value++;
       return;
     }
@@ -283,7 +361,11 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.statusCls = 'ok';
     paintStretch(rec);
     kickExport(rec);                 // 解码成功 → 自动生成 JPG 中间产物
-    if (activeId.value === rec.id) { fit(); renderTick.value++; }
+    if (activeId.value === rec.id) {
+      fit();
+      refreshCloudStats();           // 首次解码完 → 云量卡/红叠就绪
+      renderTick.value++;
+    }
   }
 
   function failRec(rec: ViewerRec, e: unknown) {
@@ -351,6 +433,7 @@ export const useViewerStore = defineStore('viewer', () => {
       else {
         view.value = { scale: 1, ox: 0, oy: 0 };
         marker.value = null;
+        clearCloud();                    // 无图可显：云卡回空态，释放红叠画布
         renderTick.value++;
       }
     }
@@ -377,6 +460,7 @@ export const useViewerStore = defineStore('viewer', () => {
       paintStretch(rec);
       renderTick.value++;
       refreshRoiStats();              // 显示层像素变了 → 选中 ROI 统计随层刷新
+      refreshCloudStats();            // …云量数字/红叠同理随显示层刷新
     }
   }
 
@@ -480,6 +564,78 @@ export const useViewerStore = defineStore('viewer', () => {
     const rois = rec.maskRois || [];
     if (rois.indexOf(sel) < 0) { selRoi.value = null; roiStats.value = null; return; }
     roiStats.value = roiStatsOnCanvas(rec, sel);
+  }
+
+  /* ---------------- 云量估算卡（阶段6 启发，纯前端） ---------------- */
+  /** 当前缩略图像素尺度下的可见视野矩形（thumb/view/canvas 就绪时）。 */
+  function currentViewRect(): Rect | null {
+    const rec = activeRec.value;
+    if (!rec || !rec.thumb) return null;
+    return visibleThumbRect(
+      view.value, canvasSize.value.w, canvasSize.value.h,
+      rec.thumb.width, rec.thumb.height,
+    );
+  }
+
+  /**
+   * 当前视野云量：视野≈整景（scale<1 整体适配，或可见面积 ≥99.5%）→ 直接复用整景结果
+   * （免对整幅再 getImageData）；否则按可见矩形局部统计（预算小，pan/zoom 停稳可反复算）。
+   */
+  function computeCloudView(scene: RoiStats | null): RoiStats | null {
+    const rec = activeRec.value;
+    if (!rec || !rec.thumb) return null;
+    const tw = rec.thumb.width, th = rec.thumb.height;
+    if (tw <= 0 || th <= 0) return null;
+    const r = currentViewRect();
+    if (view.value.scale < 1 || !r) return scene;
+    const area = (r.x1 - r.x0 + 1) * (r.y1 - r.y0 + 1);
+    if (area >= tw * th * 0.995) return scene;
+    return statsOnRect(rec, r);
+  }
+
+  /** 清空云量四态（切图/删图时随图失效；缓寸分支会在同 tick refreshCloudStats 补回）。 */
+  function clearCloud() {
+    cloudScene.value = null;
+    cloudView.value = null;
+    cloudOverlay.value = null;
+  }
+
+  /** 开图/换拉伸后重算：整景（+红叠，若开关开）与当前视野。thumb 未就绪 → 四态置空。 */
+  function refreshCloudStats() {
+    const rec = activeRec.value;
+    if (!rec || !rec.thumb) {
+      cloudScene.value = null;
+      cloudView.value = null;
+      cloudOverlay.value = null;
+      return;
+    }
+    const sc = buildSceneCloud(rec, cloudShow.value);
+    cloudScene.value = sc.stats;
+    cloudOverlay.value = sc.overlay ? markRaw(sc.overlay) : null;
+    cloudView.value = computeCloudView(sc.stats);
+  }
+
+  /** 仅刷当前视野（pan/zoom 停稳后 RoiToolsTab 防抖调用，不动整景/红叠）。 */
+  function refreshCloudView() {
+    cloudView.value = computeCloudView(cloudScene.value);
+  }
+
+  /** 疑似云区红叠开关：开时补齐 overlay（此前关闭未算）；关时释放画布内存。 */
+  function setCloudShow(v: boolean) {
+    if (cloudShow.value === v) return;
+    cloudShow.value = v;
+    if (v) {
+      const rec = activeRec.value;
+      if (rec && rec.thumb) {
+        const sc = buildSceneCloud(rec, true);
+        cloudScene.value = sc.stats;                       // 顺带校正整景数字
+        cloudOverlay.value = sc.overlay ? markRaw(sc.overlay) : null;
+        cloudView.value = computeCloudView(sc.stats);
+      }
+    } else {
+      cloudOverlay.value = null;                            // 释放
+    }
+    renderTick.value++;                                     // 通知画布加/减红叠
   }
 
   function enterDraw() {
@@ -913,6 +1069,9 @@ export const useViewerStore = defineStore('viewer', () => {
     getRois, submitSr,
     // 侧舱 ROI 选择 / 确定性统计
     selRoi, roiStats, roiSelIndex, selectRoi, clearRoiSel, refreshRoiStats,
+    // 云量估算（整景/当前视野 + 疑似云区红叠）
+    cloudScene, cloudView, cloudShow, cloudOverlay,
+    refreshCloudStats, refreshCloudView, setCloudShow,
     // 画布事件
     onCanvasDownDraw, onCanvasMove, onCanvasUp, onDblClick, onKeyDown,
     // 导出

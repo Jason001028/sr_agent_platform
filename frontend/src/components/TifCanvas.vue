@@ -140,6 +140,16 @@ function renderDraw() {
   const rois = store.getRois();
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
+  // 疑似云区红叠（非绘制模式，图层在图与 ROI 高亮之间；云叠 ≤2048 画布按同仿射放大上屏）。
+  // 与 ROI 统计同源阈值：云叠 canvas 里已标红的像元 = 显示层 luma≥200 的高亮区（启发估算）。
+  if (!store.drawMode && store.cloudShow && store.cloudOverlay) {
+    const ov = store.cloudOverlay;
+    ctx.drawImage(
+      ov as unknown as CanvasImageSource,
+      store.view.ox, store.view.oy,
+      ov.width * store.view.scale, ov.height * store.view.scale,
+    );
+  }
   if (!store.drawMode) {
     // 非绘制模式：只画侧舱选中 ROI 高亮（默认无选择 → 与原行为一致：无叠加层）
     const si = store.roiSelIndex();
