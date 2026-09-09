@@ -81,4 +81,5 @@ SR_LLM_MOCK=1 python -m backend.agent --tools            # 先确认 manifest �
 - 前端阶段线：`docs/planning/frontend-migration.md`（阶段 6 侧舱已落地）
 - Agent 架构取舍：`docs/knowledge/agent-orchestration-research.md`（M1 / 不引 langchain）
 - 边界约定：`docs/conventions/langchain-boundary.md`
+- 生态名词科普 + 选型对照（§3/§7 开放项的 2026-09-09 方向：3090+CentOS7 → GGUF Q4_K_M + llama.cpp）：`docs/knowledge/llm-serving-gguf-glossary.md`
 - 代码：`backend/config.py` · `backend/agent/loop.py` · `backend/tools/contract.py` · `frontend/src/components/AgentChatTab.vue`
