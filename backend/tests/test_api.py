@@ -67,6 +67,7 @@ class TestScenesFakeFallback(SceneListMixin):
             self.assertGreater(row["W"], 0)
             self.assertIsNone(row["jpgUrl"])
             self.assertFalse(row["hasPreview"])
+            self.assertIsNone(row["lq_path"])       # fake 无真实目录可关联
 
     def test_fake_filters_via_query(self):
         c = self.client(None)
@@ -104,6 +105,8 @@ class TestScenesDisk(SceneListMixin):
         self.assertEqual(row["jpgUrl"],
                          "/disk-array/GF07A03_PMS01_20260722125045.preview.jpg")
         self.assertFalse(row["hasPreview"])
+        # 上下文侧舱任务关联：lq_path = scene 文件父目录（= run_sr 目录语义）
+        self.assertEqual(row["lq_path"], os.path.realpath(self._root.name))
 
     def test_disk_hdr_dims_preferred(self):
         root = self._root.name
@@ -123,13 +126,17 @@ class TestScenesDisk(SceneListMixin):
         row = c.get("/api/scenes").json()["results"][0]
         self.assertEqual(row["rel"], "2026/07/KF02B04_PMS05_20260810120000.tif")
         self.assertTrue(row["jpgUrl"].startswith("/disk-array/2026/07/"))
+        self.assertEqual(row["lq_path"], os.path.realpath(str(sub)))
 
     def test_abs_path_not_leaked(self):
         make_scene(self._root.name, "GF07A03_PMS01_20260722125045.tif")
         c = self.client(self._root.name)
         row = c.get("/api/scenes").json()["results"][0]
-        self.assertNotIn("path", row)          # 绝不外泄服务器绝对路径
+        # 绝不外泄**场景文件本身**的绝对路径；lq_path 只给父目录（不含文件名），
+        # 且与 rel/jpgUrl 同语义（浏览器已能从 /api/queue 看到同款目录路径）。
+        self.assertNotIn("path", row)
         self.assertNotIn(self._root.name, row["jpgUrl"])
+        self.assertFalse(str(row["lq_path"]).endswith("GF07A03_PMS01_20260722125045.tif"))
 
 
 class TestPreview(SceneListMixin):

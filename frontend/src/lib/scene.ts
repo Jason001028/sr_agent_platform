@@ -59,6 +59,9 @@ export interface SceneRow {
   rel: string | null;       // scenes 根下相对路径（仅调试用）
   jpgUrl: string | null;    // 相对 /disk-array/…（JPG 已生成才非空）
   hasPreview: boolean;      // 服务器缓存 JPG 是否已生成
+  /** 阶段6 viewer 上下文侧舱：scene 文件父目录绝对路径（= run_sr 目录语义，
+   *  与 /api/queue params.lq_path 同值关联）；disk 行非空、fake 恒 null。 */
+  lq_path: string | null;
 }
 
 export interface SceneListResponse {
@@ -118,6 +121,8 @@ export interface SceneOpenMeta {
   H: number;
   /** 阶段4 不透明场景 id（/api/masks 用；route='jpg' rec 的 sceneId 来源）。 */
   sceneId: string;
+  /** 阶段6 scene 文件父目录（= run_sr 目录语义，任务区关联 queue 行用）。 */
+  lqPath: string | null;
 }
 
 /* ---------------- JPG 像素 → 查看器 rec 的同构数据 ---------------- */

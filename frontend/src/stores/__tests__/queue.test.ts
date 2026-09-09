@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   defaultForm, draftToForm, formToSubmit, mergeJobUpdate, stateTone,
+  tasksForScene, normDir, pathLeafOf,
 } from '../queue.js';
 import type { QueueDraft } from '../queue.js';
 import type { QueueTask } from '../../lib/api.js';
@@ -127,5 +128,61 @@ describe('stateTone（徽标样式映射）', () => {
     expect(stateTone('COMPLETED')).toBe('ok');
     expect(stateTone('FAILED')).toBe('fail');
     expect(stateTone('UNKNOWN')).toBe('muted');
+  });
+});
+
+/* ---------------- 阶段6：tasksForScene（viewer 任务区关联当前场景） ---------------- */
+function sTask(id: number, lq: string, mask: string | null, created: number): QueueTask {
+  return task({
+    task_id: id, created_at: created, updated_at: created,
+    params: {
+      lq_path: lq, mask_path: mask, sr_scale: 2, suffix: '',
+      gpu: 0, cloud_limit: 80, delete_ori: false, grid_align: true,
+    },
+  });
+}
+
+describe('tasksForScene（按 lq_path + <stem>_mask.tif 关联场景任务）', () => {
+  it('同目录同掩码命中；过滤别家掩码/无掩码/他目录，按 created_at 倒序', () => {
+    const rows = [
+      sTask(1, '/DiskArray/A', '/DiskArray/A/GF07_mask.tif', 10),
+      sTask(2, '/DiskArray/A/', '/DiskArray/A/GF07_mask.tif', 30),  // 尾分隔符差异 → 命中
+      sTask(3, '/DiskArray/A', '/DiskArray/A/L8_mask.tif', 20),     // 别家场景任务 → 剔除
+      sTask(4, '/DiskArray/A', null, 40),                           // 无掩码 → 剔除
+      sTask(5, '/DiskArray/B', '/DiskArray/B/GF07_mask.tif', 50),   // 他目录 → 剔除
+    ];
+    const got = tasksForScene(rows, { lqPath: '/DiskArray/A', stem: 'GF07' });
+    expect(got.map((t) => t.task_id)).toEqual([2, 1]);
+  });
+
+  it('Windows 盘符路径 + 反斜杠分隔同样命中', () => {
+    const rows = [
+      sTask(7, 'C:\\Disk\\GF07', 'C:\\Disk\\GF07\\GF07_mask.tif', 1),
+    ];
+    const got = tasksForScene(rows, { lqPath: 'C:\\Disk\\GF07', stem: 'GF07' });
+    expect(got.length).toBe(1);
+    expect(got[0].task_id).toBe(7);
+  });
+
+  it('无匹配 / 空列表 / ref 无 lqPath → 空数组', () => {
+    expect(tasksForScene([], { lqPath: '/DiskArray/A', stem: 'GF07' })).toEqual([]);
+    expect(tasksForScene([sTask(1, '/DiskArray/A', '/DiskArray/A/GF07_mask.tif', 1)],
+                         { lqPath: '/DiskArray/Z', stem: 'GF07' })).toEqual([]);
+    expect(tasksForScene([sTask(1, '/DiskArray/A', '/DiskArray/A/GF07_mask.tif', 1)],
+                         { lqPath: null, stem: 'GF07' })).toEqual([]);
+  });
+});
+
+describe('normDir / pathLeafOf（跨平台路径小工具）', () => {
+  it('去尾部分隔符；盘符 C: 不受影响', () => {
+    expect(normDir('/DiskArray/A')).toBe('/DiskArray/A');
+    expect(normDir('/DiskArray/A/')).toBe('/DiskArray/A');
+    expect(normDir('C:\\Disk\\GF07\\')).toBe('C:\\Disk\\GF07');
+    expect(normDir('C:')).toBe('C:');
+  });
+  it('取基名，兼容 / 与 \\', () => {
+    expect(pathLeafOf('/a/b/GF07_mask.tif')).toBe('GF07_mask.tif');
+    expect(pathLeafOf('C:\\run\\x\\GF07_mask.tif')).toBe('GF07_mask.tif');
+    expect(pathLeafOf('')).toBe('');
   });
 });
