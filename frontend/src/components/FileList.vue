@@ -65,11 +65,11 @@ function onJpgClick(e: MouseEvent, rec: ViewerRec) {
 </template>
 
 <style scoped>
-/* 侧栏：白色浮层，细边框区隔；文件项为浅色小卡，选中青绿描边 */
+/* 侧栏：浅莫兰迪 chrome，白文件卡浮其上；选中青绿描边 */
 .sidebar {
   width: 268px;
   flex: none;
-  background: var(--surface);
+  background: var(--chrome);
   border-right: 1px solid var(--line);
   overflow-y: auto;
   padding: 10px;
