@@ -296,6 +296,45 @@ systemctl reload nginx
 则升级 = 拷新包解压覆盖 `<APP>/` 下对应目录，前端 `systemctl reload nginx`、后端
 `systemctl restart sr-api`，动作同 §5.1/5.2，只是传输介质从 scp 换成整包。
 
+### 5.6 整包拷贝时代的操作纪律（2026-09-09 实测教训）
+
+如果你每次更新是**整份拷贝 `sr-agent-platform/` 文件夹**（U 盘/rsync 整包），先分清包里的两类文件，
+处置完全不同：
+
+| 文件 | 性质 | 每次更新 |
+| --- | --- | --- |
+| `dist/`、`backend/` | **代码产物**，里面没有本机路径 | **直接覆盖即可** |
+| `nginx.conf`、`sr-api.service` | **机器配置模板**，里面是出厂示例路径 `/data/www/...` | **别 cp 回 `/etc`**，除非真改了配置逻辑 |
+
+**为什么**：这两份配置在部署时被手工 sed 成真机路径（`root`/`WorkingDirectory`/venv 等）。它们只以
+`/etc/nginx/conf.d/`、`/etc/systemd/system/` 里的那份为准；包里的同名文件**永远停留在出厂示例值**。
+整包覆盖后再把模板 cp 回 `/etc` = 把真路径盖回 `/data/www` → 静态页全 500（nginx 找不到
+`index.html`、try_files 死循环）、或后端起不来（`status=200/CHDIR`）。§五顶部 ⚠️ 即此症状。
+
+**正确姿势**：更新只覆盖 `dist/` + `backend/` → `chown nginx:nginx` → reload/restart（§5.1/5.2）。
+`/etc` 那两份配置只在**配置内容真变了**才动，动完必须带路径替换。
+
+**如果已经误覆盖**（把出厂模板 cp 进 `/etc` 了），一次性救回——把两份配置里的示例路径改回真值：
+
+```bash
+# node81-135 真路径；其它机器把 APP 换成自己的
+APP=/run/media/root/SSD/workspace/wangrz/sr-agent-platform
+
+# nginx：root（及 alias 如需要）改回真路径
+sed -i "s#/data/www/sr-agent-platform/dist#$APP/dist#g" /etc/nginx/conf.d/sr-agent-platform.conf
+nginx -t && systemctl reload nginx
+curl -s -o /dev/null -w '静态=%{http_code}\n' http://127.0.0.1/        # 应 200
+
+# systemd：WorkingDirectory / SR_AGENT_DB 改回真路径
+sed -i "s#/data/www/sr-agent-platform#$APP#g" /etc/systemd/system/sr-api.service
+systemctl daemon-reload && systemctl restart sr-api
+curl -s -o /dev/null -w '健康=%{http_code}\n' http://127.0.0.1:8000/api/health   # 应 200
+```
+
+> `sed` 幂等：路径已是真值时执行无副作用，可以无脑补跑。
+> 更稳的做法：把上面救回逻辑存成盒上脚本 `/root/sr-conf-fix.sh`，整包拷贝后顺手跑一次，把
+> `/etc` 两份里残留的 `/data/www` 一律改回真路径，杜绝再次带病上线。
+
 ## 六、硬性约束（移植期红线）
 
 - **vendor 已打进 dist，全离线**：pako/utif(补丁版)/geotiff 均来自 `frontend/src/vendor/`，Vite 构建打进产物。

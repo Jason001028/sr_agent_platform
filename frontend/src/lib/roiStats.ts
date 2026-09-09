@@ -91,8 +91,8 @@ function emptyStats(sampled: boolean, stride: number, rowSpan: number): RoiStats
   };
 }
 
-/** 加权 RGB 亮度 Y（0..255 整数输入 → 0..255 浮点）。 */
-function luma(r: number, g: number, b: number): number {
+/** 加权 RGB 亮度 Y（0..255 整数输入 → 0..255 浮点）。导出供云叠/统计同源复用。 */
+export function luma(r: number, g: number, b: number): number {
   return 0.299 * r + 0.587 * g + 0.114 * b;
 }
 
