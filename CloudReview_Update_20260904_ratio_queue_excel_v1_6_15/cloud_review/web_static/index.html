@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>云影像空间复核</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <aside class="sidebar">
+      <header class="brand">
+        <div class="brand-mark">云</div>
+        <div><h1>影像空间复核</h1><p>Cloud Review · Web</p></div>
+      </header>
+
+      <section class="search-panel">
+        <div class="search-row">
+          <input id="keyword" type="search" placeholder="搜索影像ID、卫星、计划号">
+          <button id="refreshQueue" class="icon-button" title="加载待复核队列">↻</button>
+        </div>
+        <details>
+          <summary>组合检索</summary>
+          <label>盘阵路径<input id="rootPath" type="text" placeholder="为空时使用配置路径"></label>
+          <div class="two-cols">
+            <label>日期<input id="dateFilter" type="text" placeholder="20260802"></label>
+            <label>计划号<input id="planFilter" type="text" placeholder="200526892"></label>
+          </div>
+          <label>指定影像ID<textarea id="idFilter" rows="3" placeholder="逗号、加号或换行分隔"></textarea></label>
+          <div class="search-actions">
+            <button id="searchPath" class="primary">按条件加载</button>
+            <button id="searchIds">按ID加载</button>
+          </div>
+        </details>
+        <div class="filter-row">
+          <select id="sortMode" aria-label="排序">
+            <option value="date">时间倒序</option>
+            <option value="order_combined_rdc_omnicloudmask">综合 ≥ RDC ≥ Omni</option>
+            <option value="order_combined_omnicloudmask_rdc">综合 ≥ Omni ≥ RDC</option>
+            <option value="order_rdc_combined_omnicloudmask">RDC ≥ 综合 ≥ Omni</option>
+            <option value="order_rdc_omnicloudmask_combined">RDC ≥ Omni ≥ 综合</option>
+            <option value="order_omnicloudmask_combined_rdc">Omni ≥ 综合 ≥ RDC</option>
+            <option value="order_omnicloudmask_rdc_combined">Omni ≥ RDC ≥ 综合</option>
+            <option value="difference">方法差异↓</option>
+          </select>
+          <label class="compact-check"><input id="onlyVisible" type="checkbox">仅视野内</label>
+        </div>
+        <label class="precheck-row"><input id="validateBeforeLoad" type="checkbox" checked>加载前先验证数量</label>
+      </section>
+
+      <div class="list-summary"><span id="sceneCount">0 景</span><span id="geoCount">0 景有空间信息</span><label class="list-select-all"><input id="selectAllScenes" type="checkbox">全选</label></div>
+      <section id="sceneList" class="scene-list" aria-label="影像列表"></section>
+    </aside>
+
+    <section class="workspace">
+      <header class="toolbar">
+        <div class="tool-group">
+          <label class="switch"><input id="showBasemap" type="checkbox" checked><span></span>矢量底图</label>
+          <label class="switch"><input id="showImage" type="checkbox" checked><span></span>快视图</label>
+          <label class="switch"><input id="showBoundary" type="checkbox" checked><span></span>影像边界</label>
+          <label class="switch"><input id="showLabel" type="checkbox"><span></span>ID标签</label>
+        </div>
+        <div class="tool-group">
+          <label class="switch"><input id="showMask" type="checkbox"><span></span>云掩膜</label>
+          <label>云计算方法
+            <select id="maskLayer">
+              <option value="combined" selected>综合法</option>
+              <option value="rdc">RDC</option>
+              <option value="omnicloudmask">Omni</option>
+              <option value="final">最终结果</option>
+            </select>
+          </label>
+          <label>云量着色
+            <select id="maskColorMode">
+              <option value="auto" selected>按云量分级</option>
+              <option value="red">红色</option>
+              <option value="yellow">黄色</option>
+              <option value="green">绿色</option>
+            </select>
+          </label>
+          <button id="cloudColorSettings" class="small-setting">阈值设置</button>
+          <label class="switch"><input id="showCloudText" type="checkbox" checked><span></span>云量数字</label>
+          <button id="cloudTextSettings" class="small-setting">文字设置</button>
+          <label class="opacity-control">透明度<input id="layerOpacity" type="range" min="10" max="100" value="68"><output id="opacityValue">68%</output></label>
+        </div>
+        <div class="tool-group toolbar-right">
+          <button id="cloudStats" class="stats-button">云量统计</button>
+          <button id="fitAll">适合全部</button>
+          <button id="fitSelected">定位本景</button>
+          <button id="clearChecks">清除勾选</button>
+        </div>
+      </header>
+
+      <div id="mapWrap" class="map-wrap">
+        <canvas id="mapCanvas"></canvas>
+        <div class="map-hint">滚轮缩放 · 拖动平移 · 单击影像选择 · Web Mercator 世界范围 X/Y：-180～180（纬度 ±85.0511°）</div>
+        <div id="loading" class="loading hidden"><span></span><b id="loadingText">正在处理…</b></div>
+        <div class="zoom-buttons"><button id="zoomIn">+</button><button id="zoomOut">−</button></div>
+        <div id="legend" class="legend hidden"><span id="legendLow">&lt;10% 绿</span><i></i><span id="legendHigh">&gt;80% 红</span></div>
+      </div>
+
+      <footer id="detailBar" class="detail-bar">
+        <div class="empty-detail">从左侧列表或地图中选择一景</div>
+      </footer>
+    </section>
+  </main>
+  <div id="validationModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="validationTitle">
+    <section class="modal-card">
+      <div class="modal-icon">✓</div>
+      <h2 id="validationTitle">检索完成</h2>
+      <p id="validationMessage"></p>
+      <p class="modal-note">此时尚未读取快视图或生成影像缓存。</p>
+      <div class="modal-actions"><button id="cancelValidation">暂不加载</button><button id="confirmValidation" class="primary">确认加载</button></div>
+    </section>
+  </div>
+  <div id="textSettingsModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="textSettingsTitle">
+    <section class="modal-card settings-card">
+      <h2 id="textSettingsTitle">云量数字设置</h2>
+      <label>文字颜色<input id="cloudTextColor" type="color" value="#ef334e"></label>
+      <label>文字大小<input id="cloudTextSize" type="range" min="10" max="36" value="16"><output id="cloudTextSizeValue">16 px</output></label>
+      <label class="settings-check">方法名称<input id="cloudTextShowMethod" type="checkbox" checked><span>显示“综合 / RDC / Omni / 最终”</span></label>
+      <div class="text-preview" id="cloudTextPreview">综合 12.3%</div>
+      <div class="modal-actions"><button id="resetTextSettings">恢复默认</button><button id="closeTextSettings" class="primary">完成</button></div>
+    </section>
+  </div>
+  <div id="cloudColorModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="cloudColorTitle">
+    <section class="modal-card settings-card">
+      <h2 id="cloudColorTitle">云掩膜颜色分级</h2>
+      <p class="modal-note">当前方法的云量小于低阈值显示绿色，低阈值至高阈值显示黄色，大于高阈值显示红色。</p>
+      <label>低阈值（%）<input id="cloudLowThreshold" type="number" min="0" max="100" step="1" value="10"></label>
+      <label>高阈值（%）<input id="cloudHighThreshold" type="number" min="0" max="100" step="1" value="80"></label>
+      <div class="threshold-preview"><span class="green">绿色</span><span class="yellow">黄色</span><span class="red">红色</span></div>
+      <div class="modal-actions"><button id="resetCloudThresholds">恢复默认 10 / 80</button><button id="closeCloudColorSettings" class="primary">完成</button></div>
+    </section>
+  </div>
+  <div id="cloudStatsModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="cloudStatsTitle">
+    <section class="modal-card stats-card">
+      <h2 id="cloudStatsTitle">四种方法云量统计</h2>
+      <p id="cloudStatsScope" class="modal-note"></p>
+      <table class="cloud-stats-table">
+        <thead><tr><th>方法</th><th class="low">低云量</th><th class="middle">中云量</th><th class="high">高云量</th><th>无结果</th></tr></thead>
+        <tbody id="cloudStatsBody"></tbody>
+      </table>
+      <p class="modal-note">统计范围为当前左侧筛选后的影像列表，云量尚未计算完成或没有对应掩膜的景计入“无结果”。</p>
+      <div class="modal-actions"><button id="exportCloudStats">导出Excel</button><button id="closeCloudStats" class="primary">关闭</button></div>
+    </section>
+  </div>
+  <div id="toast" class="toast"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
