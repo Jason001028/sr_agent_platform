@@ -7,6 +7,7 @@ slurm_available.
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -110,6 +111,26 @@ class TestBuildConfigXml(unittest.TestCase):
 
 
 class TestBuildBatchScript(unittest.TestCase):
+    """The batch script is asserted by string: it is a shell artefact, and the
+    only way to check a CentOS7 job script from this machine is to pin its
+    exact shape."""
+
+    def setUp(self):
+        self._env = {}
+        for name in ("SR_SLURM_TIME", "SR_SLURM_CPUS", "SR_SLURM_PARTITION",
+                     "SR_SLURM_MEM", "SR_VERIFY_SCRIPT", "SR_PYTHON",
+                     "SR_BUNDLE_DIR"):
+            if name in os.environ:
+                self._env[name] = os.environ.pop(name)
+        self.addCleanup(self._restore_env)
+
+    def _restore_env(self):
+        for name in ("SR_SLURM_TIME", "SR_SLURM_CPUS", "SR_SLURM_PARTITION",
+                     "SR_SLURM_MEM", "SR_VERIFY_SCRIPT", "SR_PYTHON",
+                     "SR_BUNDLE_DIR"):
+            os.environ.pop(name, None)
+        os.environ.update(self._env)
+
     def test_defaults(self):
         script = svc.build_batch_script("/w/cfg.xml", "/w")
         self.assertIn("--gres=gpu:1", script)
@@ -123,6 +144,88 @@ class TestBuildBatchScript(unittest.TestCase):
         self.assertIn("--gres=gpu:4", script)
         self.assertIn("--partition=gpu", script)
         self.assertIn("/opt/venv/bin/python", script)
+
+    # ---- P2 additions ----------------------------------------------------
+    def test_env_driven_limits_and_job_name(self):
+        os.environ["SR_SLURM_TIME"] = "04:30:00"
+        os.environ["SR_SLURM_CPUS"] = "8"
+        os.environ["SR_SLURM_PARTITION"] = "gpup"
+        script = svc.build_batch_script("/w/run_sr_t1.xml", "/w")
+        self.assertIn("#SBATCH --time=04:30:00", script)
+        self.assertIn("#SBATCH --cpus-per-task=8", script)
+        self.assertIn("#SBATCH --partition=gpup", script)
+        self.assertIn("#SBATCH --job-name=run_sr_t1", script)   # suffix in name
+
+    def test_limits_fall_back_to_defaults(self):
+        script = svc.build_batch_script("/w/cfg.xml", "/w")
+        self.assertIn("#SBATCH --time=02:00:00", script)
+        self.assertIn("#SBATCH --cpus-per-task=4", script)
+
+    def test_export_none_is_set(self):
+        self.assertIn("#SBATCH --export=NONE", svc.build_batch_script("/w/c.xml", "/w"))
+
+    def test_mem_only_when_configured(self):
+        script = svc.build_batch_script("/w/c.xml", "/w")
+        self.assertNotIn("--mem", script)
+        os.environ["SR_SLURM_MEM"] = "64G"
+        self.assertIn("#SBATCH --mem=64G", svc.build_batch_script("/w/c.xml", "/w"))
+
+    def test_never_assigns_cuda_visible_devices(self):
+        # E2/E4: any assignment here would clobber what --gres allocated. The
+        # audit section only READS it, so match assignments, not mentions.
+        script = svc.build_batch_script("/w/c.xml", "/w")
+        assignments = re.findall(r"^\s*(?:export\s+)?CUDA_VISIBLE_DEVICES\s*=",
+                                 script, re.MULTILINE)
+        self.assertEqual(assignments, [], "the script must not pick a GPU")
+
+    def test_audit_preamble_records_the_allocation(self):
+        script = svc.build_batch_script("/w/c.xml", "/w",
+                                        python="/opt/sr/bin/python")
+        self.assertIn("SLURM_JOB_ID=", script)
+        self.assertIn("SLURM_JOB_GPUS=", script)
+        self.assertIn("CUDA_VISIBLE_DEVICES=", script)
+        self.assertIn("$(hostname)", script)
+        self.assertIn("/opt/sr/bin/python", script)
+        self.assertIn("/w/c.xml", script)
+        self.assertIn("nvidia-smi --query-gpu=index,uuid", script)
+
+    def test_pythonunbuffered_is_exported(self):
+        self.assertIn("export PYTHONUNBUFFERED=1",
+                      svc.build_batch_script("/w/c.xml", "/w"))
+
+    def test_cd_failure_exits_nonzero(self):
+        script = svc.build_batch_script("/w/c.xml", "/w")
+        cd_line = [ln for ln in script.splitlines() if ln.startswith("cd ")][0]
+        self.assertIn("|| {", cd_line)
+        self.assertIn("exit 1", cd_line)
+
+    def test_no_set_e(self):
+        # `set -e` would change the meaning of the `||`/pipeline lines below it.
+        script = svc.build_batch_script("/w/c.xml", "/w")
+        self.assertNotIn("set -e", script)
+
+    def test_verifier_runs_after_python_and_passes_its_exit_code_through(self):
+        script = svc.build_batch_script("/w/c.xml", "/w")
+        lines = script.splitlines()
+        run_i = lines.index("python code_0817_prod.py -f /w/c.xml")
+        self.assertEqual(lines[run_i + 1], "_sr_rc=$?")
+        self.assertIn("verify_sr_run.py --config /w/c.xml --sr-exit-code \"$_sr_rc\"",
+                      lines[run_i + 3])
+        self.assertEqual(lines[-1], "exit $?")
+
+    def test_verify_script_can_be_overridden(self):
+        os.environ["SR_VERIFY_SCRIPT"] = "/opt/sr/bin/my_verify.py"
+        script = svc.build_batch_script("/w/c.xml", "/w")
+        self.assertIn("/opt/sr/bin/my_verify.py --config /w/c.xml", script)
+
+    def test_job_name_is_slurm_safe(self):
+        script = svc.build_batch_script("/w/weird name/../x.xml", "/w",
+                                        job_name="run sr/../t1")
+        name = [ln for ln in script.splitlines()
+                if ln.startswith("#SBATCH --job-name=")][0].split("=", 1)[1]
+        self.assertNotIn(" ", name)
+        self.assertNotIn("/", name)
+        self.assertTrue(name)
 
 
 class TestSubmitRunSr(unittest.TestCase):
@@ -214,41 +317,81 @@ class TestRunSrIdempotency(unittest.TestCase):
         self.assertTrue(data["idempotent"])
         self.assertEqual(runner.calls, ["squeue"])     # no sbatch, no sacct
 
-    def test_replay_completed_reuses_no_resubmit(self):
-        first = dispatch_runner()
-        svc.submit_run_sr(PARAMS, run_cmd=first, store=self.store)
+    def write_verdict(self, lq_path, job_id, verdict=0, sr_exit_code=0):
+        """Drop the job's own verdict file where the platform looks for it."""
+        debug = Path(lq_path) / "Debug"
+        debug.mkdir(parents=True, exist_ok=True)
+        (debug / svc.EXIT_FILE_FMT.format(job_id=job_id)).write_text(
+            "job_id=%s\nsr_exit_code=%s\nverdict=%s\nskip=0\n"
+            % (job_id, sr_exit_code, verdict), encoding="utf-8")
 
-        runner = dispatch_runner(sacct_out="COMPLETED 0:0\n")
-        data = svc.submit_run_sr(PARAMS, run_cmd=runner, store=self.store)
+    def test_replay_contract_satisfied_reuses_no_resubmit(self):
+        params = {**PARAMS, "lq_path": self._tmp.name}
+        first = dispatch_runner()
+        svc.submit_run_sr(params, run_cmd=first, store=self.store)
+        self.write_verdict(self._tmp.name, 42)
+
+        runner = dispatch_runner()
+        data = svc.submit_run_sr(params, run_cmd=runner, store=self.store)
         self.assertEqual(data["status"], "RESUMED_COMPLETED")
         self.assertEqual(data["job_id"], 42)
         self.assertTrue(data["idempotent"])
-        self.assertEqual(runner.calls, ["squeue", "sacct"])  # no second sbatch
+        self.assertEqual(runner.calls, ["squeue"])       # no sacct, no sbatch
+
+    def test_replay_silent_failure_reruns_instead_of_caching_success(self):
+        # §2.3 毒药: exit 0 but the contract was not met. This must NOT be
+        # RESUMED_COMPLETED — the scene would stay un-super-resolved forever.
+        params = {**PARAMS, "lq_path": self._tmp.name}
+        first = dispatch_runner()
+        svc.submit_run_sr(params, run_cmd=first, store=self.store)
+        self.write_verdict(self._tmp.name, 42, verdict=90)
+
+        runner = dispatch_runner(sbatch_outputs=("Submitted batch job 43\n",))
+        data = svc.submit_run_sr(params, run_cmd=runner, store=self.store)
+        self.assertEqual(data["status"], "SUBMITTED")
+        self.assertEqual(data["job_id"], 43)
+        self.assertEqual(data["previous_state"], "FAILED")
+        self.assertEqual(runner.calls, ["squeue", "sbatch"])
 
     def test_replay_failed_reruns_with_new_job(self):
+        params = {**PARAMS, "lq_path": self._tmp.name}
         first = dispatch_runner()
-        svc.submit_run_sr(PARAMS, run_cmd=first, store=self.store)
+        svc.submit_run_sr(params, run_cmd=first, store=self.store)
+        self.write_verdict(self._tmp.name, 42, verdict=90, sr_exit_code=1)
 
-        runner = dispatch_runner(sbatch_outputs=("Submitted batch job 43\n",),
-                                 sacct_out="FAILED 1:0\n")
-        data = svc.submit_run_sr(PARAMS, run_cmd=runner, store=self.store)
+        runner = dispatch_runner(sbatch_outputs=("Submitted batch job 43\n",))
+        data = svc.submit_run_sr(params, run_cmd=runner, store=self.store)
         self.assertEqual(data["status"], "SUBMITTED")
         self.assertEqual(data["job_id"], 43)          # a fresh job, not 42
         self.assertEqual(data["previous_state"], "FAILED")
         self.assertEqual(data["previous_exit_code"], "1:0")
         self.assertEqual(data["previous_job_id"], 42)
-        self.assertEqual(runner.calls, ["squeue", "sacct", "sbatch"])
+        self.assertEqual(runner.calls, ["squeue", "sbatch"])
 
     def test_replay_unknown_reruns(self):
+        # No verdict file and nothing in squeue: accounting is disabled, so
+        # there is no oracle left — rerun rather than claim success.
+        params = {**PARAMS, "lq_path": self._tmp.name}
         first = dispatch_runner()
-        svc.submit_run_sr(PARAMS, run_cmd=first, store=self.store)
+        svc.submit_run_sr(params, run_cmd=first, store=self.store)
 
         runner = dispatch_runner(sbatch_outputs=("Submitted batch job 43\n",))
-        data = svc.submit_run_sr(PARAMS, run_cmd=runner, store=self.store)
+        data = svc.submit_run_sr(params, run_cmd=runner, store=self.store)
         self.assertEqual(data["status"], "SUBMITTED")
         self.assertEqual(data["job_id"], 43)
         self.assertEqual(data["previous_state"], "UNKNOWN")
-        self.assertEqual(runner.calls, ["squeue", "sacct", "sbatch"])
+        self.assertEqual(runner.calls, ["squeue", "sbatch"])
+
+    def test_replay_with_unwritable_lq_path_is_unknown_not_an_error(self):
+        # lq_path on a host that cannot read it (the dev machine's case): the
+        # verdict file is unreachable, which must degrade to a rerun, never to
+        # an exception that leaves the task neither reused nor rerun.
+        first = dispatch_runner()
+        svc.submit_run_sr(PARAMS, run_cmd=first, store=self.store)  # lq_path=/data
+        runner = dispatch_runner(sbatch_outputs=("Submitted batch job 43\n",))
+        data = svc.submit_run_sr(PARAMS, run_cmd=runner, store=self.store)
+        self.assertEqual(data["status"], "SUBMITTED")
+        self.assertEqual(data["previous_state"], "UNKNOWN")
 
     def test_interrupted_submit_no_job_id_does_not_resubmit(self):
         # intent recorded, sbatch outcome never persisted → outcome unknown.
@@ -277,32 +420,105 @@ class TestRunSrIdempotency(unittest.TestCase):
 
 
 class TestSlurmStatus(unittest.TestCase):
+    """Terminal state comes from the job's verdict file, not from sacct: the
+    array server runs with accounting disabled, so sacct has no output to give
+    (slurm-integration.md §2.4-2 / §一 "C 方案")."""
+
+    def setUp(self):
+        patcher = mock.patch.object(slurm, "slurm_available", lambda: True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def verdict_file(self, job_id=7, verdict=0, sr_exit_code=0, skip=0):
+        path = Path(self._tmp.name) / svc.EXIT_FILE_FMT.format(job_id=job_id)
+        path.write_text(
+            "job_id=%s\nsr_exit_code=%s\nverdict=%s\nskip=%s\n"
+            % (job_id, sr_exit_code, verdict, skip), encoding="utf-8")
+        return str(path)
+
     def test_active_from_squeue(self):
-        with mock.patch.object(slurm, "slurm_available", lambda: True):
-            fake = fake_run_script(("PENDING\n", "", 0))
-            st = slurm.job_status(7, run_cmd=fake)
-            self.assertEqual(st, {"job_id": 7, "active": True,
-                                  "state": "PENDING", "exit_code": None})
+        fake = fake_run_script(("PENDING\n", "", 0))
+        st = slurm.job_status(7, run_cmd=fake)
+        self.assertEqual(st, {"job_id": 7, "active": True,
+                              "state": "PENDING", "exit_code": None})
 
-    def test_terminal_from_sacct(self):
-        with mock.patch.object(slurm, "slurm_available", lambda: True):
-            fake = fake_run_script(("", "", 0), ("COMPLETED 0:0\n", "", 0))
-            st = slurm.job_status(7, run_cmd=fake)
-            self.assertEqual(st["active"], False)
-            self.assertEqual(st["state"], "COMPLETED")
-            self.assertEqual(st["exit_code"], "0:0")
+    def test_terminal_satisfied_from_verdict_file(self):
+        fake = fake_run_script(("", "", 0))
+        st = slurm.job_status(7, run_cmd=fake, exit_code_file=self.verdict_file())
+        self.assertEqual(st["active"], False)
+        self.assertEqual(st["state"], "COMPLETED")
+        self.assertEqual(st["exit_code"], "0:0")
 
-    def test_unknown(self):
-        with mock.patch.object(slurm, "slurm_available", lambda: True):
-            fake = fake_run_script(("", "", 0), ("", "", 0))
-            st = slurm.job_status(7, run_cmd=fake)
-            self.assertEqual(st["state"], "UNKNOWN")
-            self.assertIsNone(st["active"])
+    def test_terminal_contract_not_satisfied_is_failed(self):
+        # The silent-failure shape: exit 0, but the job's own verifier says the
+        # contract was not met. Slurm would call this COMPLETED; we must not.
+        fake = fake_run_script(("", "", 0))
+        st = slurm.job_status(7, run_cmd=fake,
+                              exit_code_file=self.verdict_file(verdict=90))
+        self.assertEqual(st["state"], "FAILED")
+        self.assertEqual(st["exit_code"], "0:0")
+
+    def test_terminal_nonzero_exit_is_failed(self):
+        fake = fake_run_script(("", "", 0))
+        st = slurm.job_status(7, run_cmd=fake,
+                              exit_code_file=self.verdict_file(sr_exit_code=3,
+                                                               verdict=90))
+        self.assertEqual(st["state"], "FAILED")
+        self.assertEqual(st["exit_code"], "3:0")
+
+    def test_sacct_is_never_consulted(self):
+        runner = dispatch_runner()
+        slurm.job_status(7, run_cmd=runner, exit_code_file=self.verdict_file())
+        self.assertEqual(runner.calls, ["squeue"])
+
+    def test_verdict_for_another_job_is_ignored(self):
+        # Job ids get recycled; a stranger's verdict must not be inherited.
+        fake = fake_run_script(("", "", 0))
+        st = slurm.job_status(7, run_cmd=fake,
+                              exit_code_file=self.verdict_file(job_id=99))
+        self.assertEqual(st["state"], "UNKNOWN")
+
+    def test_unknown_without_a_verdict_file(self):
+        fake = fake_run_script(("", "", 0))
+        st = slurm.job_status(7, run_cmd=fake, exit_code_file=None)
+        self.assertEqual(st["state"], "UNKNOWN")
+        self.assertIsNone(st["active"])
+
+    def test_missing_verdict_file_is_unknown_not_an_exception(self):
+        fake = fake_run_script(("", "", 0))
+        st = slurm.job_status(7, run_cmd=fake,
+                              exit_code_file=str(Path(self._tmp.name) / "nope"))
+        self.assertEqual(st["state"], "UNKNOWN")
+
+    def test_truncated_verdict_file_is_unknown(self):
+        path = Path(self._tmp.name) / "trunc.txt"
+        path.write_text("job_id=7\nsr_exit", encoding="utf-8")
+        fake = fake_run_script(("", "", 0))
+        st = slurm.job_status(7, run_cmd=fake, exit_code_file=str(path))
+        self.assertEqual(st["state"], "UNKNOWN")
+
+    def test_squeue_failure_degrades_to_the_verdict_file(self):
+        # squeue raising must not escape job_status (it used to reach
+        # run_sr._resolve_existing and turn a replay into a hard error).
+        def boom(cmd, timeout=30):
+            raise subprocess.TimeoutExpired(cmd, timeout)
+
+        st = slurm.job_status(7, run_cmd=boom,
+                              exit_code_file=self.verdict_file())
+        self.assertEqual(st["state"], "COMPLETED")
+
+    def test_job_status_never_raises_on_junk_input(self):
+        for bad in (None, "", str(Path(self._tmp.name)), "/dev/null"):
+            with self.subTest(path=bad):
+                fake = fake_run_script(("", "", 0))
+                st = slurm.job_status(7, run_cmd=fake, exit_code_file=bad)
+                self.assertEqual(st["state"], "UNKNOWN")
 
     def test_cancel_ok(self):
-        with mock.patch.object(slurm, "slurm_available", lambda: True):
-            fake = fake_run_script(("", "", 0))
-            self.assertTrue(slurm.cancel(7, run_cmd=fake))
+        fake = fake_run_script(("", "", 0))
+        self.assertTrue(slurm.cancel(7, run_cmd=fake))
 
 
 class TestToolRunSr(unittest.TestCase):

@@ -11,6 +11,8 @@
 - **新手指南**（有 Web 基础想系统理解前后端与设计取舍）：[docs/knowledge/platform-tutorial.md](knowledge/platform-tutorial.md) —— 读代码前的首选教程
 - **面试八股**（功利向跳槽复习，教程的互补）：[docs/knowledge/interview/README.md](knowledge/interview/README.md) —— 项目已到阶段 5 的窗口可顺手更新
 - **踩坑索引**：[docs/experience/gui-experience.md](experience/gui-experience.md)
+- **Slurm 真机接入**（上机验收 / 部署 / 变体差异）：[docs/status/slurm-acceptance.md](status/slurm-acceptance.md)（分阶段验收清单）、[docs/status/slurm-integration.md](status/slurm-integration.md)（决策与实测值）、[docs/sr_code/sr-slurm-deploy-variant.md](sr_code/sr-slurm-deploy-variant.md)（变体差异 E1–E9 + 校验器 + 上机必验项 V1–V6）、[deploy/README.md](deploy/README.md) §七（部署侧：变体安装 + 六项 env + 终态判定）
+- **打通「提交 SR」全链路**（缺口在哪、按什么顺序补）：[docs/planning/sr-pipeline-restore-plan.md](planning/sr-pipeline-restore-plan.md) —— 断点盘点 + 沙箱地基 + 五项代码改动 + 阶段 3–5 验收 + 切生产与回滚
 - **命名 / 归档规则**：[docs/conventions/naming-conventions.md](conventions/naming-conventions.md)
 
 ## 二、分类总览
@@ -18,11 +20,11 @@
 | 类目 | 目录 | 职责 | 现有文档 |
 |---|---|---|---|
 | 背景知识 | `docs/knowledge/` | 原理 / 学科背景 / 技术实现说明 | [platform-tutorial.md](knowledge/platform-tutorial.md)（从 0 开发教程）、[jpg-export-background.md](knowledge/jpg-export-background.md)、[agent-orchestration-research.md](knowledge/agent-orchestration-research.md)、[llm-serving-gguf-glossary.md](knowledge/llm-serving-gguf-glossary.md)（llama.cpp/GGUF 生态名词 + 本地部署选型）、[interview/](knowledge/interview/README.md)（面试八股 · 8 篇） |
-| 需求与规划 | `docs/planning/` | 需求规格、实施计划 | [gui-requirements.md](planning/gui-requirements.md)、[web-plan.md](planning/web-plan.md)（gitignore） |
+| 需求与规划 | `docs/planning/` | 需求规格、实施计划 | [sr-pipeline-restore-plan.md](planning/sr-pipeline-restore-plan.md)（**「提交 SR」→ Slurm + conda 超分 的分阶段恢复清单**：断点盘点 → 沙箱地基 → 五项代码改动 → 变体上机 → 冒烟 → 链路四结论 → 切生产）、[gui-requirements.md](planning/gui-requirements.md)、[web-plan.md](planning/web-plan.md)（gitignore） |
 | 经验与复盘 | `docs/experience/` | 踩坑记录、已验证方案 | [gui-experience.md](experience/gui-experience.md) |
 | 规范与约定 | `docs/conventions/` | 命名 / 流程等约束 | [naming-conventions.md](conventions/naming-conventions.md)、[langchain-boundary.md](conventions/langchain-boundary.md) |
-| 交接与状态 | `docs/status/` | 当前问题、窗口交接 | [current-question.md](status/current-question.md) |
-| SR_CODE 生产管线 | `docs/sr_code/` | SR 超分算法 / 调用契约 / Windows 移植环境（**主题域类目**，见 [naming-conventions.md §2](conventions/naming-conventions.md)） | [sr-pipeline-overview.md](sr_code/sr-pipeline-overview.md)、[sr-pipeline-interface.md](sr_code/sr-pipeline-interface.md)、[sr-windows-porting-pitfalls.md](sr_code/sr-windows-porting-pitfalls.md) |
+| 交接与状态 | `docs/status/` | 当前问题、窗口交接 | [current-question.md](status/current-question.md)、[real-machine-bringup.md](status/real-machine-bringup.md)（真机部署现状 + 症状表）、[real-machine-bringup-adhd.md](status/real-machine-bringup-adhd.md)（一次一步的动作版）、[slurm-integration.md](status/slurm-integration.md)（Slurm 接入决策快照 + 分批开工 prompt）、[slurm-acceptance.md](status/slurm-acceptance.md)（**Slurm 真机分阶段验收清单**：A 探针 → B 裸 Slurm 冒烟 → C 单场景真 SR → D 平台四条链路结论） |
+| SR_CODE 生产管线 | `docs/sr_code/` | SR 超分算法 / 调用契约 / Windows 移植环境（**主题域类目**，见 [naming-conventions.md §2](conventions/naming-conventions.md)） | [sr-pipeline-overview.md](sr_code/sr-pipeline-overview.md)、[sr-pipeline-interface.md](sr_code/sr-pipeline-interface.md)、[sr-windows-porting-pitfalls.md](sr_code/sr-windows-porting-pitfalls.md)、[sr-slurm-deploy-variant.md](sr_code/sr-slurm-deploy-variant.md)（Slurm 部署变体差异表 E1–E9） |
 
 ## 三、怎么新增一个 .md（分类规则）
 

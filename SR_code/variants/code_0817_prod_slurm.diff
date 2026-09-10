@@ -1,0 +1,99 @@
+--- SR_code/code_0817_prod.py
++++ SR_code/variants/code_0817_prod_slurm.py
+@@ -1,3 +1,15 @@
++# ===========================================================================
++# GENERATED FILE — DO NOT EDIT
++#
++# Slurm deployment variant of the SR production script.  Edit the
++# source and regenerate; hand edits here are lost and fail --check.
++#
++# Generator : SR_code/tools/gen_slurm_variant.py v1.0.0
++# Source    : SR_code/code_0817_prod.py
++# Source sha256 (CRLF->LF normalised) : 03c9b4fc3f64cfd5e3b331128be5a09477d5ebe0362b0e9e4927fcdd356d40af
++# Regenerate: python SR_code/tools/gen_slurm_variant.py
++# Verify    : python SR_code/tools/gen_slurm_variant.py --check
++# ===========================================================================
+ # =============================================================================
+ # SFSR inference - code_0817_prod (production)
+ # Based on 超分代码0803/code_0817.py (原 0817定版/code_0817_deploy，已去重删除);
+@@ -24,7 +36,10 @@
+ import pynvml
+ import socket
+ 
+-lib = npct.load_library("/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes/tools/ImgHistMatch", ".")
++try:
++    lib = npct.load_library("/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes/tools/ImgHistMatch", ".")
++except Exception:
++    lib = None
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -143,8 +158,15 @@
+     tm['config'] = time.time() - _t0; _t0 = time.time()
+ 
+     # ---- env / GPU ----
+-    os.environ['CUDA_VISIBLE_DEVICES'] = "0"
+-    gpuid = '0'
++    # CUDA_VISIBLE_DEVICES is injected by Slurm (--gres=gpu:1). Never overwrite it.
++    # gpuid is used only for pynvml/log reporting (physical index).
++    # Slurm may inject a UUID or MIG form; fall back to '0' if it is not
++    # a plain integer so the int(gpuid) calls below cannot raise.
++    try:
++        _cvd = os.environ.get('CUDA_VISIBLE_DEVICES', '0').split(',')[0]
++        gpuid = str(int(_cvd))
++    except (ValueError, TypeError):
++        gpuid = '0'
+ 
+     # ---- input discovery + meta ----
+     sr_previous_step = util.check_sr_previous_step(lq_path)
+@@ -157,6 +179,17 @@
+     cloudpercent_tmp = util.get_cfg_value(meta_abs_path, "CloudPercent")
+     cloudpercent = int(cloudpercent_tmp) if cloudpercent_tmp is not None else 0
+     if cloudpercent > cloudlimit:
++        # Legitimate policy skip.  Create SRLOG and write an explicit
++        # terminal line so this stays distinguishable from a silent
++        # failure (exit 0 with no SRLOG).
++        _skip_log = osp.join(lq_path, "Debug", img_name[:-4] + "_SRLOG.txt")
++        os.makedirs(osp.dirname(_skip_log), exist_ok=True)
++        with open(_skip_log, 'w') as _srlog:
++            _srlog.writelines('CloudPercent {:d} > CloudLimit {:d}, SR not needed.\n'
++                              .format(cloudpercent, cloudlimit))
++            _srlog.writelines("Run skipped: cloud limit exceeded\n")
++        print('CloudPercent {:d} > CloudLimit {:d}, SR skipped by policy.'
++              .format(cloudpercent, cloudlimit))
+         exit(0)
+ 
+     # ---- logger ----
+@@ -641,23 +674,23 @@
+ 
+     util.setup_logger('gpu', level=logging.INFO, screen=True)
+     logger = logging.getLogger('gpu')
+-    os.environ['CUDA_VISIBLE_DEVICES'] = "1"
+-
+-    pynvml.nvmlInit()
+-    gpu_count = pynvml.nvmlDeviceGetCount()
+-    pynvml.nvmlShutdown()
++    # CUDA_VISIBLE_DEVICES is injected by Slurm (--gres=gpu:1). Never overwrite it.
++
++    # Count the devices this job can actually see.  nvml reports the
++    # host's physical cards and ignores the list Slurm injects.
++    gpu_count = torch.cuda.device_count()
+ 
+     gpu_available = torch.cuda.is_available()
+     hostname = socket.gethostbyname(socket.gethostname())
+ 
+-    if gpu_available is False or gpu_count != 4:
++    if gpu_available is False or gpu_count < 1:
+         logger.info('Host {:s} gpu error, remove from product queue'.format(hostname))
+-        cmd = "systemctl stop slurmd.service"
+-        os.system(cmd)
++        # Slurm job: never stop the node daemon.  A failed job must not
++        # evict the node from the pool; report it via the exit code.
+         slurm_stop_log_file = "/DiskArray/ProductionSchedule/config/SlurmStopLog.txt"
+         if osp.exists(slurm_stop_log_file) is True:
+             with open(slurm_stop_log_file, 'a') as srlog:
+-                srlog.writelines("{:s} stop {:s}\n".format(util.get_timestamp(), hostname))
++                srlog.writelines("{:s} gpu-error {:s}\n".format(util.get_timestamp(), hostname))
+ 
+         print('GPU Error, gpu_available={:s} GPU COUNT = {:s}\n'.format(str(gpu_available), str(gpu_count)))
+         exit(3)

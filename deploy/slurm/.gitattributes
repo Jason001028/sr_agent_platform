@@ -1,0 +1,4 @@
+# This directory holds shell scripts that are copied to CentOS7 and executed
+# there. repo core.autocrlf=true would rewrite them to CRLF on checkout, and a
+# CRLF script dies with "$'\r': command not found". Pin LF for the transfer.
+*.sh text eol=lf
