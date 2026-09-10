@@ -43,10 +43,41 @@ Environment=SR_LLM_MOCK=0
 Environment=SR_SLURM_FAKE=0
 # 可选：预览 JPG 缓存根（默认落源同目录）。配了必须在 SR_SCENES_ROOT 之下。
 # Environment=SR_PREVIEWS_ROOT=/data/scenes/.previews
-# 可选：Slurm 作业工作目录（sbatch 脚本 / 作业日志输出根）
-# Environment=SR_SLURM_WORK_DIR=/data/slurm_work
 # 可选：队列状态轮询秒（/api/queue/events 广播刷新率，缺省 2）
 # Environment=SR_QUEUE_POLL_SEC=2
+#
+# ==========================================================================
+# Slurm 接入（6 项全部必填 —— 缺任一项 SR 作业提交必失败）
+# ==========================================================================
+# SR_PYTHON 是 **SR 生产环境**（conda torch1.9.1py36，python 3.6 + torch 1.9.1
+# + GDAL + ImgHistMatch.so），不是 API 自己的 /opt/sr-venv（python 3.9）。
+# 两个解释器平行存在、互不污染：平台后端不 import SR/torch/GDAL，只在批脚本里
+# 写一行解释器路径，该行在**计算节点**上解析。
+# 核对方式：<该 python> -c "import torch, gdal; print(torch.__version__)"
+# 2026-09-10 用户确认：**沿用本行文档旧值，不用 base conda 的 python**
+# （node81-135 登录 shell 默认在 (base) 环境，那与 SR 的生产解释器无关）。
+# 仅当 torch1.9.1py36 真的废弃时才换到 /root/miniconda3/envs/base/bin/python，
+# 且换前须确认该环境里 torch/GDAL/ImgHistMatch.so 齐。
+Environment=SR_PYTHON=/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python
+#
+# mmsr_bundle/codes：code_0817_prod.py / models / utils / options / tools 所在目录。
+# 拼写以 code_0817_prod.py:27 的 load_library() 为准，两者必须完全一致。
+Environment=SR_BUNDLE_DIR=/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes
+#
+# ⚠️ SR_SLURM_WORK_DIR 必须是**共享盘**：config.xml 与批脚本由 API 写在这里，
+#    而作业在 12 个计算节点（node81-129..140）之一上读它。默认值
+#    /tmp/sr_agent_work 是本机路径，多节点下作业秒挂（slurm-integration.md §2.6）。
+#    SR_SLURM_WORK_DIR=/tmp/sr_agent_work
+#    权限两套都要有：nginx（写 config.xml/脚本）与作业用户（写 %j.out/%j.err）。
+Environment=SR_SLURM_WORK_DIR=/DiskArray/tmp/wangrz/sr_agent_work
+#
+# 分区与作业限额。gpup = 真机主分区（sinfo -h -o "%P" 实测）；
+# 不用 --partition 时 Slurm 走默认分区，多分区集群下会不可控。
+Environment=SR_SLURM_PARTITION=gpup
+Environment=SR_SLURM_TIME=02:00:00
+Environment=SR_SLURM_CPUS=4
+# 备注：以上 6 项由 backend/config.sr_runtime() 在**调用时**读 env，改完
+# systemctl daemon-reload && systemctl restart sr-api 才生效。
 # 可选：真 LLM 时配置（阶段5 默认 mock 已关，未配这些则 loop 走默认 base/空 key）
 # Environment=SR_LLM_BASE_URL=http://127.0.0.1:11434/v1
 # Environment=SR_LLM_API_KEY=

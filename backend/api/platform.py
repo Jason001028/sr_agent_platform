@@ -118,7 +118,10 @@ def _task_state(state, task: dict) -> tuple[str, bool]:
         return (task.get("status") or "UNKNOWN").upper(), False
     prev = cache.get(task_id)
     try:
-        st = slurm.job_status(task["job_id"])
+        # Terminal states come from the job's own verdict file, which lives in
+        # the task's <DatarootLQ>/Debug/ — hence query_job_status(task=…)
+        # rather than a bare slurm.job_status (§一 "C 方案").
+        st = run_sr_svc.query_job_status(task["job_id"], task=task)
     except Exception:  # noqa: BLE001 — scheduler hiccup → keep last known
         return prev or "UNKNOWN", False
     state_name = _queue_state(st)
