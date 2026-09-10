@@ -20,6 +20,7 @@
 - **真机部署完成、Windows 可访问（09-07/08，node81-135）**：后端 `sr-api`（systemd，开机自启）+ 前端 `nginx`（:80，开机自启，已删出厂 default.conf 由本站点接管）均 running；Windows 浏览器直接开 `http://10.10.81.135` 可访问各页面（查看器 /scenes /chat /queue），查看器能稀疏读真实大 TIF。部署操作手册：`docs/status/real-machine-bringup.md`（ADHD 动作版：`real-machine-bringup-adhd.md`）。期间排掉两个启动坑（`User=` 行尾注释致 217/USER、py3.9 缺 eval-type-backport），均已入症状表归档。
 - **遗留一：真实盘阵根未定位**：默认 `SR_SCENES_ROOT=/data/scenes` 在 node81-135 **不存在**（`ls` 报无此目录）→ `/api/scenes` 返回 `source:fake` 的 12 条占位（`fake:true` / 0B）→ `/scenes` 页面全是假数据、场景打不开、查看器「提交 SR」灰掉（route=sparse 无 sceneId，设计如此）。真实 590MB `JL1KF02B01_PMS03_...` 那类数据在别处（曾从某入口在 viewer 打开过一张真图，来源未确认）。**待办**：确认真实场景根路径（在本机哪个挂载点，还是数据在别的机器）→ 把后端 `SR_SCENES_ROOT` 与 nginx `alias` 改成同值 → restart 后复核 `/api/scenes` 出真实行。
 - **遗留二：真机阶段4/5 验收清单（§6.3–6.5）未跑**：需先定位真实盘阵根再逐项执行（首次 JPG 生成耗时/内存、真实掩码烘焙落盘 ENVI 核对、真 Slurm 提交/取消、SSE 长连）。进度快照见 §6.0。
+- **遗留三：Slurm 接入待真机执行（09-10，第三批）**：探针（P1）与实测参数（P2）已回传，**本轮交付的是执行侧**——部署变体（`SR_code/variants/code_0817_prod_slurm.py`，锚点替换生成）+ 作业内契约校验器（`verify_sr_run.py`，退出码 0/90）+ 批脚本（`--gres=gpu:1` / `--export=NONE` / 两行调用）+ 退出码文件定终态（`slurm.py` 不再依赖 `sacct`）+ 分阶段验收清单（`docs/status/slurm-acceptance.md`，A 探针→B 裸 Slurm 冒烟→C 单场景真 SR→D 平台四条结论）。**真机命令由用户执行、输出贴回后判读**；文档侧已回填契约 v1.5 与 `deploy/README.md` §七。待跑：验收单 A/B/C/D。
 - **下一步**：① 定位真实场景根 → 改 `SR_SCENES_ROOT` + nginx `alias`（同值）→ 复核 /api/scenes（进度 §6.0）；② 数据就位后按 §6.3–6.5 真机验收；③ commit 待归档变更（清单 §6.0）；④ 配 LLM key 跑通真实 /chat 闭环（§2.6）；⑤ 开发机推进 P1 ④⑤⑥⑦（§2.5）。
 - **约束提醒**：开发机的浏览器 e2e 测试**已恢复可用**（`.e2e/launchBrowser.js` 每次用独立的临时浏览器配置目录，彻底解决「浏览器闪退、退出码 0 无任何报错」的问题）；真实图片都在内网盘阵，外网开发机读不到（见 §5.1）。
 
@@ -143,6 +144,12 @@
 - **部署形态**：SR = **裸机 + Slurm（不加 Docker 容器）**——TRT 版本锁定 + 机器固定不换 + Slurm 本来就在裸机上起作业，加 Docker 只会增加耦合；平台服务（FastAPI/Nginx）可以选 Docker 或裸机 venv + systemd 两种方式。
 - **两版对比**（`SR_code/`）：`code_0817_prod.py`（Linux 生产版：校验 GPU 数量，`gpu_count!=4` 就停掉 slurmd、路径硬编码 /DiskArray、没有进度条）vs `code_0820_prod_windows.py`（Windows 开发分支：库加载容错处理、进度条 + 五段耗时剖析、去掉了 Slurm 联动、只要 GPU≥1 张）。**核心处理流程逐行一致 → 合并**：以 0817 为底，把 0820 的进度条/剖析功能并回来，再加结构化进度 JSON（`{"tiles_done":N,"tiles_total":M}`）供队列日志跟踪（tail）后通过 SSE 推给前端。
 - **代码小改动**：`CUDA_VISIBLE_DEVICES` 从硬编码 `"0"` 改成**交给 Slurm 分配**（`--gres=gpu:1` 按作业申请）；清掉 `__main__` 里残留的 `"1"`。
+- **Slurm 接入定论（2026-09-10，取代上面「两版对比→合并」与「代码小改动」两条）**：
+  - **两版合并已取消**：`code_0817_prod.py` 作为**唯一真源**逐字节不动；Slurm 上跑的可运行版本由锚点替换生成器机械产出到 `SR_code/variants/code_0817_prod_slurm.py`（差异 E1–E9，见 `docs/sr_code/sr-slurm-deploy-variant.md`）。**不上机手改副本**——手改无法审计，真源更新后也无法可靠重构。
+  - **选卡交给 `--gres`**：批脚本 `#SBATCH --gres=gpu:1` 申请、Slurm 注入 `CUDA_VISIBLE_DEVICES`（真机实测注入的是**整数**，如 `0`）。变体已删除全部 `CUDA_VISIBLE_DEVICES` 赋值与读取 `<GPUIDS>` 选卡的逻辑，`<GPUIDS>` 降级为**审计字段**。
+  - **GPU 数量守卫已由变体删除**：判据 `!= 4` → `< 1`、计数改用 `torch.cuda.device_count()`、**不再执行 `systemctl stop slurmd.service`**（原脚本在单卡作业下必然 `exit(3)`，服务以 root 跑时还会真把节点从调度池摘掉）。
+  - **终态不看 `sacct`**：真机 `AccountingStorageType=accounting_storage/none` → `sacct` 永久不可用。改由作业内契约校验器 `verify_sr_run.py` 写**退出码文件** `<DatarootLQ>/Debug/_SREXIT_<job_id>.txt`、平台读盘判终态；**退出码 0 不等于成功**，契约不满足时校验器以**退出码 90** 结束（契约 v1.5 §2.3 / §2.4）。
+  - 部署与验收命令：`deploy/README.md` §七「Slurm 接入」、`docs/status/slurm-acceptance.md`（A 探针 → B 裸 Slurm 冒烟 → C 单场景真 SR → D 平台四条结论）。
 
 ### 3.3 掩码绘制（前端已落地 · 2026-08-31）
 
@@ -297,7 +304,7 @@
    - 阶段3 收尾项一并做：真实 24739×24199 大图本地文件路径的稀疏预览 8192 不崩、掩码直出、2% 线性导出 JPG 8192×8013 无条纹（本地文件路径零回归的红线）。
 2. **阶段5 真机验收**（开发机已离机全绿：后端 190 + Vitest 114 + `.e2e/test-platform.js` 11 断言；契约 = `docs/planning/api-contract.md`，提示词见 `frontend-phase4-phase5-prompts.md`【阶段5】）：
    - **真 LLM**：`SR_LLM_BASE_URL/API_KEY/MODEL` 指内网端点 + `SR_LLM_MOCK=0`，/chat 发一条 → 真实工具调用 + 最终回复；刷新恢复历史；
-   - **真 Slurm**：`SR_SLURM_FAKE=0`，/queue 提交 → sbatch 真实作业 → SSE `job_update` 随 squeue/sacct 推进到「完成」；取消按钮 scancel 生效；
+   - **真 Slurm**：`SR_SLURM_FAKE=0`，/queue 提交 → sbatch 真实作业 → SSE `job_update` 推进到「完成」（**终态读退出码文件，不是 `sacct`**——真机账务关闭，见 §3.2「Slurm 接入定论」）；装变体 + 校验器 + 六项 env 见 `deploy/README.md` §七，分阶段验收（含四条链路结论）见 `docs/status/slurm-acceptance.md`；取消按钮 scancel 生效；
    - **盘阵掩码落点**：/viewer 打开真实场景画掩码 →「提交 SR」→ ENVI 打开 `<原图目录>/<stem>_mask.tif` 核对区域与 0817 消费路径一致（`_mask.txt` 质心坐标）；
    - **nginx SSE 长连**：/chat 与 /queue 经反代挂 10min+ 无断流/攒批（心跳/断链重连正常）；
    - **systemd 权限**：`nginx` 用户能读盘阵、写预览 JPG 缓存与 `SR_AGENT_DB`（见 deploy/README §三）。
@@ -309,7 +316,8 @@
 - 阶段4 后端：`backend/api/app.py`（FastAPI：/api/scenes + /preview）、`backend/api/paths.py`（白名单 + scene id codec）、`backend/services/preview_jpg.py`（稀疏采样 + 2% 拉伸 + Pillow 缓存）
 - 阶段4 部署：`deploy/nginx.conf`、`deploy/sr-api.service`、`deploy/requirements-api.txt`、`deploy/README.md`；离线包 `frontend/scripts/package-offline.sh`
 - 阶段5 契约/实现：`docs/planning/api-contract.md`（**已定**）、`backend/api/platform.py`（chat/queue/tools/masks + SSE 广播）+ `backend/api/app.py`（lifespan 轮询）、`frontend/src/{lib/api.ts, stores/{chat,queue}.ts, pages/{ChatPage,QueuePage}.vue}`、查看器「提交 SR」（`stores/viewer.ts::submitSr` + Toolbar 按钮）、`.e2e/test-platform.js`（11 断言）
-- 阶段5 部署增补：nginx `/api/` 反代 `proxy_buffering off`+`proxy_read_timeout 3600s`（SSE）；`sr-api.service` env（`SR_AGENT_DB`/`SR_LLM_MOCK=0`/`SR_SLURM_FAKE=0`）；`requirements-api.txt` 补 `openai>=1.40,<2`
+- 阶段5 部署增补：nginx `/api/` 反代 `proxy_buffering off`+`proxy_read_timeout 3600s`（SSE）；`sr-api.service` env（`SR_AGENT_DB`/`SR_LLM_MOCK=0`/`SR_SLURM_FAKE=0` + Slurm 六项 `SR_PYTHON`/`SR_BUNDLE_DIR`/`SR_SLURM_WORK_DIR`/`SR_SLURM_PARTITION`/`SR_SLURM_TIME`/`SR_SLURM_CPUS`）；`requirements-api.txt` 补 `openai>=1.40,<2`
+- Slurm 接入件：`SR_code/variants/{code_0817_prod_slurm.py,verify_sr_run.py,.diff,.provenance.json}` + 生成器 `SR_code/tools/gen_slurm_variant.py`、只读探针 `deploy/slurm/probe_slurm.sh`；运行期 `backend/services/{run_sr,slurm}.py`；验收清单 `docs/status/slurm-acceptance.md`、差异表 `docs/sr_code/sr-slurm-deploy-variant.md`、契约 `docs/sr_code/sr-pipeline-interface.md` v1.5
 - 阶段6 上下文侧舱：`frontend/src/components/{ContextPanel,RoiToolsTab,AgentChatTab}.vue` + `lib/{roiStats,agentContext}.ts`（buildStats / tasksForScene / CTX_DIVIDER）+ viewer store 选中/统计钩子 + `/api/scenes` `lq_path`（阶段6 增补见 api-contract.md）
 - 经验文档：`docs/experience/gui-experience.md`
 - E2E 测试：`.e2e/`（gitignore 本机资产：`test-vue-viewer.js` **42 断言**本地文件回归 + `test-scenes.js` **45 断言**场景 http 打开；puppeteer-core + 无界面 Edge + vue-lib.js 本地静态服务顶替 nginx + uvicorn 起真后端）
@@ -333,7 +341,7 @@
 | sr-api 起服务（systemd，开机自启） | 完成（09-07） | 曾 217/USER（`User=` 行尾注释）+ py3.9 注解崩溃，均已修复并归档 |
 | nginx 站点 + Windows 访问 | 完成（09-07/08） | `http://10.10.81.135` 可开页面；需删出厂 default.conf |
 | /api/scenes 真实数据 | **未完成** | `/data/scenes` 不存在 → `source:fake` 12 条占位；待真实根路径 |
-| 提交 SR 端到端（阶段4/5 真链） | **未完成** | 依赖真实根 + Slurm 可达；清单见 §6.3–6.5 |
+| 提交 SR 端到端（阶段4/5 真链） | **未完成** | 依赖真实根 + Slurm 可达；清单见 §6.3–6.5。Slurm 侧代码/脚本/文档**已就绪**（部署变体 + 作业内校验器 + 退出码文件 + 分阶段验收清单 `slurm-acceptance.md`），只等真机执行——判据不再是 squeue/sacct，见 §3.2「Slurm 接入定论」 |
 | 本会话代码/文档变更归档 | **未 commit** | 清单见下方 |
 
 **下一步行动**
@@ -363,9 +371,20 @@
 - [ ] **本地文件回归收尾**（⏱30′）· 真实大图走「选择 TIF…」本地路径 · ✓= 稀疏预览 8192 不崩、画掩码直出正常、2% Linear 导出 8192×8013 无条纹 · 记录:
 
 ### 6.4 阶段5 调度验收（SR_SLURM_FAKE=0 真调度）
-- [ ] **真实提交 + 推进**（⏱20′）· `/queue` 手填**测试目录**的 lq_path 提交（勿碰生产数据）· ✓= sbatch 起真实作业，徽标随 squeue/sacct 从 排队→运行→完成，记录真实推进节奏 · 记录 job_id / 耗时:
+
+> ⚠️ **判据已改（09-10，取代原文的 squeue/sacct）**：真机 `AccountingStorageType=none`，`sacct` 永久
+> 不可用，**终态一律读作业写的退出码文件** `<DatarootLQ>/Debug/_SREXIT_<job_id>.txt`
+> （`verdict=0` → COMPLETED；其中 `skip=1` 的云量跳过也是 COMPLETED，`verdict!=0` → FAILED）。
+> 四条链路结论（静默失败不再被标成成功 / 幂等回归 / 云量跳过 / SSE）的分步命令 + 成功判据 + 失败处置
+> 见 **`docs/status/slurm-acceptance.md` §D**（本节保留一页纸勾选，细节不在此重复）。
+
+- [ ] **前置：装变体 + 六项 env**（⏱30′）· 按 `deploy/README.md` §7.1——变体**改名顶替** `$SR_BUNDLE_DIR/code_0817_prod.py`（原脚本先备份）+ 拷 `verify_sr_run.py` + 核对 `SR_PYTHON` / `SR_BUNDLE_DIR` / `SR_SLURM_WORK_DIR` / `SR_SLURM_PARTITION` / `SR_SLURM_TIME` / `SR_SLURM_CPUS` · ✓= `head -3 code_0817_prod.py` 见到 `GENERATED FILE` 横幅；`probe_slurm.sh` 除 sacct 两行外无 FAIL · 记录:
+- [ ] **真实提交 + 推进**（⏱20′）· `/queue` 手填**测试目录**的 lq_path + **非空 suffix** 提交（勿碰生产数据）· ✓= sbatch 起真实作业，徽标按 提交中→排队/运行中→**完成** 推进；`/api/queue` 的状态与退出码文件一致 · 记录 job_id / 耗时:
+- [ ] **静默失败不再被标成成功**（⏱15′）· 构造一个必然缺 SRLOG 的任务（如 SC 步目录里没有 `<目录名>.tif`）· ✓= 退出码文件 `verdict=90`、平台显示 **FAILED**、同参数重投返回 `SUBMITTED`（**不是** `RESUMED_COMPLETED`）· 记录:
+- [ ] **幂等回归**（⏱10′）· 同参数连投两次 · ✓= 活跃期 `RESUMED_ACTIVE`、终态 `RESUMED_COMPLETED`，**两次都不产生第二个 job_id** · 记录:
+- [ ] **云量跳过**（⏱10′）· 提交一个 `cloud_limit` 必然触发的任务 · ✓= COMPLETED、SRLOG 末行 `Run skipped:`、再投为 `RESUMED_COMPLETED`（**不被反复重投**）· 记录:
 - [ ] **取消**（⏱10′）· 提交一个会排队的作业 → 点取消 · ✓= scancel 生效、状态变失败/取消 · 记录:
-- [ ] **重启校准**（⏱10′）· `systemctl restart sr-api` → 刷新 /queue · ✓= 内存缓存丢后 GET /api/queue 当场校准，已完成作业仍显示 完成 · 记录:
+- [ ] **重启校准**（⏱10′）· `systemctl restart sr-api` → 刷新 /queue · ✓= 内存缓存丢后 GET /api/queue 当场校准（读退出码文件），已完成作业仍显示 完成 · 记录:
 
 ### 6.5 阶段5 掩码→SR 真链 + SSE 长连
 - [ ] **掩码落盘 + ENVI 核对**（⏱30′）· 真实场景画矩形掩码 →「提交 SR」→ 落盘原图目录 · ✓= ENVI 打开 `<stem>_mask.tif` 区域位置正确（JPG 上画→全分辨率落点）+ `_mask.txt` 质心可读；顺带用带 MaskPath 的真作业确认 0817 消费链一致 · 记录:

@@ -1,0 +1,73 @@
+{
+  "generator": "SR_code/tools/gen_slurm_variant.py",
+  "generator_version": "1.0.0",
+  "source": {
+    "path": "SR_code/code_0817_prod.py",
+    "sha256": "03c9b4fc3f64cfd5e3b331128be5a09477d5ebe0362b0e9e4927fcdd356d40af",
+    "normalisation": "CRLF->LF before hashing"
+  },
+  "variant": {
+    "path": "SR_code/variants/code_0817_prod_slurm.py",
+    "sha256": "041bea73b36f6e3c8289d4e4c029c5fe492cbd09502a178c5f1d9798287474a9"
+  },
+  "diff": {
+    "path": "SR_code/variants/code_0817_prod_slurm.diff",
+    "sha256": "f7756e7839ff888f2aa3ba16ce8b3e4c4cce472c70b61f18ff3f044f12f25256"
+  },
+  "edits": [
+    {
+      "id": "E1",
+      "note": "guard module-level load_library() so a missing .so cannot kill import",
+      "anchor_sha256": "2225e26640c835232a223a9271ea42094332c211bc0a803eac597693aa684f1f",
+      "occurrences": 1
+    },
+    {
+      "id": "E2",
+      "note": "drop the hard-coded GPU selection in main() (Slurm --gres decides)",
+      "anchor_sha256": "7db8a1e7be8c0835b5937f203cdc49aea2606a054cab0876e24fde04d6e6db42",
+      "occurrences": 1
+    },
+    {
+      "id": "E3",
+      "note": "derive gpuid from the environment with an int() fallback",
+      "anchor_sha256": "7d978be46a7d98ae02b39f859e413b3da0e374e5fd8e2db8f4c3c69ba09e2d37",
+      "occurrences": 1
+    },
+    {
+      "id": "E4",
+      "note": "drop the hard-coded GPU selection in __main__",
+      "anchor_sha256": "cfd982f719b5c9d59cca9319e9ef77695ff004a6074c3d4ef892eefc5bc2febe",
+      "occurrences": 1
+    },
+    {
+      "id": "E5",
+      "note": "count visible devices instead of physical cards (nvml)",
+      "anchor_sha256": "5a17f6284a5e97dff9e8d2db27ab45d95c738ca2ce645d02b85e86cb902d3640",
+      "occurrences": 1
+    },
+    {
+      "id": "E6",
+      "note": "GPU guard: '< 1' instead of '!= 4'",
+      "anchor_sha256": "8ce01ceacb4a69024fc9f1dd6e8c03baa15a9869182b0cedfa3fac3f1ce583e1",
+      "occurrences": 1
+    },
+    {
+      "id": "E7",
+      "note": "never systemctl stop slurmd from inside a job",
+      "anchor_sha256": "be2e3652cbece35e6c54a767d354af45dcc228c8e80b9ca0ffd410954f695210",
+      "occurrences": 1
+    },
+    {
+      "id": "E8",
+      "note": "GPU-error log wording no longer claims the node was stopped",
+      "anchor_sha256": "b25bffb9904a4b5cc3d99b89c6658bab105f2c18d65a0c9da3a8121e5c44a61e",
+      "occurrences": 1
+    },
+    {
+      "id": "E9",
+      "note": "cloud-limit skip writes SRLOG + 'Run skipped:' before exit(0)",
+      "anchor_sha256": "0ff4bda6194b0350c7aeabf8ac61c2752c3e9eed236f8f329f1d285458351f39",
+      "occurrences": 1
+    }
+  ]
+}

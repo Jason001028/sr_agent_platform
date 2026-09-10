@@ -115,6 +115,7 @@ sr-agent-platform/
    - `Environment=SR_SCENES_ROOT=` → 盘阵根（**必填**，须与 nginx `alias` 同值）；
    - `Environment=SR_AGENT_DB=` → SQLite 库（阶段5 起 chat 会话 + sr_tasks 同库；父目录须 `nginx` 可写）；
    - `Environment=SR_LLM_MOCK=0` / `SR_SLURM_FAKE=0` → **真机显式关假实现**（service 已带默认，勿改成 1）；
+   - Slurm 六项 env（`SR_PYTHON` / `SR_BUNDLE_DIR` / `SR_SLURM_WORK_DIR` / `SR_SLURM_PARTITION` / `SR_SLURM_TIME` / `SR_SLURM_CPUS`）→ 见 **§七 Slurm 接入**；缺任一项 SR 作业提交必失败；
    - 真 LLM 再配 `SR_LLM_BASE_URL/API_KEY/MODEL`（内网端点，见 service 注释）；不配则 loop 默认连外网端点（离机/MVP 用 mock，见 §四）；
    - `ExecStart=` 的 venv 路径若不同则改；用 conda 环境则填 `<conda>/envs/web-sr-agent/bin/uvicorn backend.api.app:create_app --factory --host 127.0.0.1 --port 8000`。
 
@@ -342,3 +343,90 @@ curl -s -o /dev/null -w '健康=%{http_code}\n' http://127.0.0.1:8000/api/health
 - **盘阵双层保险**：nginx `alias` 整块暴露 + 后端按 `SR_SCENES_ROOT` 白名单校验（拒绝 `../` 穿越、白名单外绝对路径、fake 占位）。URL 全用相对场景根的 `/disk-array/<rel>`。
 - **浏览器单次分配约 2GB、Canvas 面积上限 16384²**——盘阵场景因此由服务端烘焙 8192 JPG，浏览器只解码 JPG（远低于上限）。
 - 真实大图只在有盘阵的内网机（外网开发机读不到），解码回归用 `.e2e/` 本机资产 + `frontend/fixtures/` 入库小图；真机验收项见 docs/status/current-question.md。
+
+## 七、Slurm 接入（SR 作业提交链路）
+
+> 链路：`/queue` 提交 → 后端写 config.xml + 批脚本 → `sbatch` → 作业在计算节点上跑 SR →
+> 作业内校验器写退出码文件 → 后端读盘判终态 → SSE 推前端。
+>
+> 本文档位于 `deploy/`，本节引用的 `docs/...` 与 `SR_code/...` 都在**仓库**里，**不在离线包内**；
+> 上车前从仓库另拷。分阶段验收命令（A 探针 / B 裸 Slurm 冒烟 / C 单场景真 SR / D 平台四条结论）
+> 见 `docs/status/slurm-acceptance.md`；决策与实测背景见 `docs/status/slurm-integration.md`；
+> 调用契约见 `docs/sr_code/sr-pipeline-interface.md` v1.5。
+
+四个部件，缺一不可：
+
+| 部件 | 位置 | 作用 |
+| --- | --- | --- |
+| 只读探针 | `deploy/slurm/probe_slurm.sh` | 上机第一步：核对分区 / GRES / 记账 / 路径 / 权限，**只读不改**。`--deep` 会真提交一个 2 分钟作业，**默认不开** |
+| 部署变体 | `SR_code/variants/code_0817_prod_slurm.py` | 顶替 `$SR_BUNDLE_DIR/code_0817_prod.py`。重新生成：`python SR_code/tools/gen_slurm_variant.py`（`--check` 验新鲜度）；逐条差异见 `docs/sr_code/sr-slurm-deploy-variant.md` 的 E1–E9 |
+| 契约校验器 | `SR_code/variants/verify_sr_run.py` | 作业内第二个进程：判「退出码 0 + SRLOG 末行 `Run finished.` + 输出 tif」三条件，写退出码文件，**契约不满足时以退出码 90 结束**（纯标准库、py3.6 兼容） |
+| 平台侧代码 | `backend/services/run_sr.py`（生成批脚本 / 幂等指纹）+ `backend/services/slurm.py`（读退出码文件定终态） | 随 `backend/` 一起升（§5.2） |
+
+### 7.1 装什么（两份脚本 + 六个 env）
+
+脚本——`$BUNDLE` 即 `SR_BUNDLE_DIR`：
+
+```bash
+cd $BUNDLE
+cp -a code_0817_prod.py code_0817_prod.py.bak-$(date +%Y%m%d)   # 备份原始生产脚本（回滚 = 一条 mv）
+cp <上车目录>/code_0817_prod_slurm.py ./code_0817_prod.py       # ⚠️ 必须占用这个文件名
+cp <上车目录>/verify_sr_run.py        ./verify_sr_run.py
+head -3 code_0817_prod.py                                       # ✓= "GENERATED FILE — DO NOT EDIT" 横幅
+```
+
+> ⚠️ **必须改名顶替，不能并存**：平台批脚本按**固定文件名**调用这两个程序（`run_sr.py`），变体
+> 改叫别的名字放在旁边**永远不会被执行**。若图省事直接跑原脚本，其 `gpu_count != 4` 守卫在单卡
+> 分配下恒真 ⇒ 作业 `exit(3)`，更糟的是它还会执行 `systemctl stop slurmd.service`（作业以
+> `User=nginx` 跑是权限拒绝，服务以 root 跑则**真把节点从调度池里摘掉**）。
+
+env——`sr-api.service` 里六项全部必填，node81-135 实测值（详见 service 内注释）：
+
+| env | node81-135 实测值 | 说明 |
+| --- | --- | --- |
+| `SR_PYTHON` | `/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python` | **SR 生产解释器**（py3.6 + torch1.9.1 + GDAL + ImgHistMatch.so），与平台 venv `/opt/sr-venv`（py3.9）平行、互不污染——后端不 import SR/torch/GDAL，只在批脚本里写一行解释器路径，该行在**计算节点**上解析 |
+| `SR_BUNDLE_DIR` | `/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes` | `code_0817_prod.py` / `models` / `utils` / `options` 所在目录；拼写以 `code_0817_prod.py:27` 的 `load_library()` 为准 |
+| `SR_SLURM_WORK_DIR` | `/DiskArray/tmp/wangrz/sr_agent_work` | config.xml 与批脚本落盘处。**必须是共享盘**——12 个计算节点（node81-129..140）之一会读它；默认值 `/tmp/sr_agent_work` 是本机路径，多节点下作业秒挂 |
+| `SR_SLURM_PARTITION` | `gpup` | `sinfo -h -o "%P"` 实测主分区；不配则走默认分区，多分区集群下不可控 |
+| `SR_SLURM_TIME` | `02:00:00` | 作业时限（`#SBATCH --time`） |
+| `SR_SLURM_CPUS` | `4` | `#SBATCH --cpus-per-task` |
+
+改完 `systemctl daemon-reload && systemctl restart sr-api`（这六项由 `backend/config.sr_runtime()`
+在**调用时**读 env，不 restart 不生效）。
+
+### 7.2 两个权限坑（都用 `sudo -u nginx` 验）
+
+- 平台以 `User=nginx` 运行，它 `sbatch` 提交的作业**也以 nginx 身份在计算节点上执行**——不是 root；
+- 因此 `SR_SLURM_WORK_DIR` 与每个 `lq_path`（含其 `Debug/` 子目录）都要 **nginx 可写**：
+
+  ```bash
+  sudo -u nginx touch <目录>/w && echo OK      # ✓= OK
+  ```
+
+  写不了 `Debug/` 的直接后果：校验器写不出退出码文件 → 该任务永远 `UNKNOWN`。
+
+### 7.3 终态怎么判（**不要看 sacct**）
+
+真机 `AccountingStorageType=accounting_storage/none`，`sacct` 恒不可用（探针输出里 `sacct` 两行
+**FAIL 是预期结果**，不是故障）。终态由作业内校验器写盘、平台读盘：
+
+```text
+<DatarootLQ>/Debug/_SREXIT_<job_id>.txt        # job_id=… / sr_exit_code=… / verdict=0|90 / skip=0|1 / reason=…
+```
+
+映射：`verdict=0` → **COMPLETED**（含 `skip=1` 的云量跳过——合法跳过不是失败）；`verdict!=0` → **FAILED**。
+
+关键点：**进程退出码 0 不代表成功**。有一批静默失败（输入 PAN 缺失、RC 步尺寸不符、config 缺失等）
+同样是 `exit(0)`，且都发生在 SRLOG 建立之前——过去会被固化成 COMPLETED。退出码 90 就是为此引入的
+（契约 §2.3）：*退出码 0，但契约不满足*。
+
+### 7.4 就绪与否的一行判定
+
+```bash
+sh <APP>/deploy/slurm/probe_slurm.sh       # ✓= 结尾有 SUMMARY，除 sacct 两行外无 FAIL
+```
+
+探针只验「环境具备不具备」，不验链路。真正的验收按 `docs/status/slurm-acceptance.md` 分四阶段走：
+A 探针 → B 裸 Slurm 冒烟（`--export=NONE` 会不会切断 `LD_LIBRARY_PATH` / GPU 分配形态 / 退出码文件
+能不能落盘）→ C 单场景真 SR → D 平台链路四条结论（静默失败不再被标成成功 / 幂等回归 / 云量跳过 /
+SSE）。
