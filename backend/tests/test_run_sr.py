@@ -119,7 +119,7 @@ class TestBuildBatchScript(unittest.TestCase):
         self._env = {}
         for name in ("SR_SLURM_TIME", "SR_SLURM_CPUS", "SR_SLURM_PARTITION",
                      "SR_SLURM_MEM", "SR_VERIFY_SCRIPT", "SR_PYTHON",
-                     "SR_BUNDLE_DIR"):
+                     "SR_BUNDLE_DIR", "SR_SR_SCRIPT"):
             if name in os.environ:
                 self._env[name] = os.environ.pop(name)
         self.addCleanup(self._restore_env)
@@ -127,7 +127,7 @@ class TestBuildBatchScript(unittest.TestCase):
     def _restore_env(self):
         for name in ("SR_SLURM_TIME", "SR_SLURM_CPUS", "SR_SLURM_PARTITION",
                      "SR_SLURM_MEM", "SR_VERIFY_SCRIPT", "SR_PYTHON",
-                     "SR_BUNDLE_DIR"):
+                     "SR_BUNDLE_DIR", "SR_SR_SCRIPT"):
             os.environ.pop(name, None)
         os.environ.update(self._env)
 
@@ -145,15 +145,36 @@ class TestBuildBatchScript(unittest.TestCase):
         self.assertIn("--partition=gpu", script)
         self.assertIn("/opt/venv/bin/python", script)
 
+    # ---- SR_SR_SCRIPT: run the deployment variant while the production
+    # script stays untouched (docs/planning/sr-pipeline-restore-plan.md E-A) ---
+    def test_sr_script_defaults_to_the_production_script(self):
+        script = svc.build_batch_script("/w/cfg.xml", "/w")
+        self.assertIn("python code_0817_prod.py -f /w/cfg.xml", script)
+        self.assertIn('echo "SR_SCRIPT=code_0817_prod.py"', script)
+
+    def test_sr_script_env_switches_to_the_variant(self):
+        os.environ["SR_SR_SCRIPT"] = "code_0817_prod_slurm.py"
+        script = svc.build_batch_script("/w/cfg.xml", "/w")
+        self.assertIn("python code_0817_prod_slurm.py -f /w/cfg.xml", script)
+        # and nothing may still point at the production script
+        self.assertNotIn("code_0817_prod.py", script)
+
+    def test_sr_script_argument_beats_the_env(self):
+        os.environ["SR_SR_SCRIPT"] = "from-env.py"
+        script = svc.build_batch_script("/w/cfg.xml", "/w",
+                                        sr_script="from-arg.py")
+        self.assertIn("from-arg.py", script)
+        self.assertNotIn("from-env.py", script)
+
     # ---- P2 additions ----------------------------------------------------
     def test_env_driven_limits_and_job_name(self):
         os.environ["SR_SLURM_TIME"] = "04:30:00"
         os.environ["SR_SLURM_CPUS"] = "8"
-        os.environ["SR_SLURM_PARTITION"] = "gpup"
+        os.environ["SR_SLURM_PARTITION"] = "gpu"
         script = svc.build_batch_script("/w/run_sr_t1.xml", "/w")
         self.assertIn("#SBATCH --time=04:30:00", script)
         self.assertIn("#SBATCH --cpus-per-task=8", script)
-        self.assertIn("#SBATCH --partition=gpup", script)
+        self.assertIn("#SBATCH --partition=gpu", script)
         self.assertIn("#SBATCH --job-name=run_sr_t1", script)   # suffix in name
 
     def test_limits_fall_back_to_defaults(self):
@@ -184,6 +205,7 @@ class TestBuildBatchScript(unittest.TestCase):
         self.assertIn("SLURM_JOB_ID=", script)
         self.assertIn("SLURM_JOB_GPUS=", script)
         self.assertIn("CUDA_VISIBLE_DEVICES=", script)
+        self.assertIn("SR_SCRIPT=", script)          # which SR script ran
         self.assertIn("$(hostname)", script)
         self.assertIn("/opt/sr/bin/python", script)
         self.assertIn("/w/c.xml", script)
@@ -273,6 +295,157 @@ class TestSubmitRunSr(unittest.TestCase):
                     del os.environ["SR_SLURM_WORK_DIR"]
                     store.close()
                     tmp.cleanup()
+
+
+class TestSandboxPaths(unittest.TestCase):
+    """SR writes to its DatarootLQ (input renamed to *_NOSR.tif), so a submit
+    must be able to run against a copy instead of the directory the user typed."""
+
+    def setUp(self):
+        self._old = os.environ.pop("SR_SANDBOX_ROOT", None)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        os.environ.pop("SR_SANDBOX_ROOT", None)
+        if self._old is not None:
+            os.environ["SR_SANDBOX_ROOT"] = self._old
+
+    def test_off_by_default(self):
+        self.assertIsNone(svc.sandbox_scene_paths("/D/x/SCENE", "ab" * 32))
+
+    def test_scene_keeps_the_source_basename(self):
+        # the SC step reads <basename>.tif out of DatarootLQ — renaming the copy
+        # would change which file the job opens.
+        got = svc.sandbox_scene_paths("/D/x/JXGF07A03_101_001_L1_PAN", "c0ffee" * 8,
+                                      sandbox_root="/tmp/sbx/")
+        self.assertEqual(got["parent"], "/tmp/sbx/" + "c0ffee" * 2)
+        self.assertEqual(got["scene"],
+                         got["parent"] + "/JXGF07A03_101_001_L1_PAN")
+
+    def test_key_is_the_fingerprint_prefix(self):
+        a = svc.sandbox_scene_paths("/D/x/S", "a" * 64, sandbox_root="/tmp/s")
+        b = svc.sandbox_scene_paths("/D/x/S", "b" * 64, sandbox_root="/tmp/s")
+        self.assertNotEqual(a["parent"], b["parent"])
+
+    def test_env_supplies_the_root(self):
+        os.environ["SR_SANDBOX_ROOT"] = "/D/tmp/sbx"
+        got = svc.sandbox_scene_paths("/D/x/S", "a" * 64)
+        self.assertEqual(got["root"], "/D/tmp/sbx")
+
+    def test_relative_root_rejected(self):
+        with self.assertRaises(ValueError):
+            svc.sandbox_scene_paths("/D/x/S", "a" * 64, sandbox_root="tmp/sbx")
+
+    def test_shell_metacharacters_in_root_rejected(self):
+        # the root lands inside a generated `rm -rf "<root>/<key>"` line
+        for bad in ('/D/sbx"; rm -rf /', "/D/sbx`id`", "/D/sbx/../..", "/D/a b"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    svc.sandbox_scene_paths("/D/x/S", "a" * 64, sandbox_root=bad)
+
+    def test_non_hex_key_rejected(self):
+        with self.assertRaises(ValueError):
+            svc.sandbox_scene_paths("/D/x/S", 'a"; rm -rf /', sandbox_root="/D/s")
+
+
+class TestSandboxWiring(unittest.TestCase):
+    """config.xml and the job script must agree on where the copy lives — that
+    agreement is the whole mechanism (nothing is handed back at runtime)."""
+
+    def setUp(self):
+        self._old = os.environ.pop("SR_SANDBOX_ROOT", None)
+        self._work = tempfile.TemporaryDirectory()
+        os.environ["SR_SLURM_WORK_DIR"] = self._work.name
+        patcher = mock.patch.object(slurm, "slurm_available", lambda: True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self._work.cleanup)
+        self.addCleanup(self._restore)
+        self.store, self._db = temp_store()
+        self.addCleanup(self._db.cleanup)
+        self.addCleanup(self.store.close)
+
+    def _restore(self):
+        os.environ.pop("SR_SANDBOX_ROOT", None)
+        os.environ.pop("SR_SLURM_WORK_DIR", None)
+        if self._old is not None:
+            os.environ["SR_SANDBOX_ROOT"] = self._old
+
+    def _submit(self, params):
+        fake = fake_run_script(("Submitted batch job 42\n", "", 0))
+        return svc.submit_run_sr(params, run_cmd=fake, store=self.store)
+
+    def test_config_dataroot_points_at_the_copy(self):
+        os.environ["SR_SANDBOX_ROOT"] = "/D/tmp/sbx"
+        out = self._submit({"lq_path": "/D/prod/SCENE_A", "suffix": "t1"})
+        self.assertEqual(svc.read_dataroot_lq(out["config_xml"]),
+                         "/D/tmp/sbx/" + svc.task_fingerprint(
+                             {"lq_path": "/D/prod/SCENE_A", "suffix": "t1"})[:12]
+                         + "/SCENE_A")
+
+    def test_verdict_file_resolves_inside_the_sandbox(self):
+        # path is asserted by tail, not prefix: exit_code_file_for goes through
+        # Path(), which renders with the local separator on this Windows dev box
+        # and with `/` on the Linux target. The target is what has to be right.
+        os.environ["SR_SANDBOX_ROOT"] = "/D/tmp/sbx"
+        out = self._submit({"lq_path": "/D/prod/SCENE_A", "suffix": "t1"})
+        got = svc.exit_code_file_for(out["config_xml"], 42)
+        self.assertIn("sbx", got.split(os.sep))
+        self.assertTrue(got.endswith(os.sep.join(
+            ["SCENE_A", "Debug", "_SREXIT_42.txt"])), got)
+
+    def test_batch_script_copies_before_running_sr(self):
+        os.environ["SR_SANDBOX_ROOT"] = "/D/tmp/sbx"
+        out = self._submit({"lq_path": "/D/prod/SCENE_A", "suffix": "t1"})
+        script = Path(out["batch_script"]).read_text(encoding="utf-8")
+        self.assertIn('SBX_SRC="/D/prod/SCENE_A"', script)
+        self.assertIn('SBX_SCENE="$SBX_PARENT/$(basename "$SBX_SRC")"', script)
+        self.assertIn('cp -a "$SBX_SRC" "$SBX_PARENT/"', script)
+        self.assertIn('rm -rf "$SBX_PARENT"', script)
+        # the copy must happen before the SR script *runs* — the audit preamble
+        # also mentions the script name, so anchor on the invocation instead.
+        self.assertLess(script.index('cp -a "$SBX_SRC"'),
+                        script.index("-f " + out["config_xml"]))
+
+    def test_batch_script_never_reuses_a_stale_copy(self):
+        # a marker-file shortcut would make a re-run execute against the old
+        # copy of a source that has since been fixed.
+        os.environ["SR_SANDBOX_ROOT"] = "/D/tmp/sbx"
+        out = self._submit({"lq_path": "/D/prod/SCENE_A", "suffix": "t1"})
+        script = Path(out["batch_script"]).read_text(encoding="utf-8")
+        self.assertNotIn(".ready", script)
+        self.assertLess(script.index('rm -rf "$SBX_PARENT"'),
+                        script.index('cp -a "$SBX_SRC"'))
+
+    def test_half_copied_sandbox_is_refused(self):
+        os.environ["SR_SANDBOX_ROOT"] = "/D/tmp/sbx"
+        out = self._submit({"lq_path": "/D/prod/SCENE_A", "suffix": "t1"})
+        script = Path(out["batch_script"]).read_text(encoding="utf-8")
+        self.assertIn('if [ ! -d "$SBX_SCENE" ]; then', script)
+
+    def test_sandbox_off_runs_in_place(self):
+        out = self._submit({"lq_path": "/D/prod/SCENE_A", "suffix": "t1"})
+        self.assertEqual(svc.read_dataroot_lq(out["config_xml"]), "/D/prod/SCENE_A")
+        script = Path(out["batch_script"]).read_text(encoding="utf-8")
+        self.assertNotIn("cp -a ", script)
+        self.assertNotIn("SBX_PARENT", script)
+
+    def test_same_suffix_different_scenes_do_not_share_a_config(self):
+        # both jobs write config.xml into one work dir; sharing a path would make
+        # the second submit repoint the first task's verdict lookup.
+        a = self._submit({"lq_path": "/D/prod/SCENE_A", "suffix": "t1"})
+        b = self._submit({"lq_path": "/D/prod/SCENE_B", "suffix": "t1"})
+        self.assertNotEqual(a["config_xml"], b["config_xml"])
+        self.assertEqual(svc.read_dataroot_lq(a["config_xml"]), "/D/prod/SCENE_A")
+        self.assertEqual(svc.read_dataroot_lq(b["config_xml"]), "/D/prod/SCENE_B")
+
+    def test_bad_sandbox_root_stops_the_submit_before_sbatch(self):
+        os.environ["SR_SANDBOX_ROOT"] = "/D/sbx; rm -rf /"
+        runner = dispatch_runner()
+        with self.assertRaises(ValueError):
+            svc.submit_run_sr({"lq_path": "/D/prod/SCENE_A"}, run_cmd=runner,
+                              store=self.store)
+        self.assertEqual(runner.calls, [])       # nothing reached Slurm
 
 
 class TestRunSrIdempotency(unittest.TestCase):

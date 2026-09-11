@@ -142,6 +142,24 @@ def _task_state(state, task: dict) -> tuple[str, bool]:
     return state_name, True
 
 
+def _run_dataroot(task: dict) -> str | None:
+    """The directory the job actually works in — its private copy when the
+    sandbox is on, otherwise lq_path itself.
+
+    Surfaced because the two differ: the queue row shows the path the user
+    typed, but with SR_SANDBOX_ROOT set the product lands in the copy, so
+    "where is my result" has to be answerable from the API. Never raises —
+    the sandbox env may have changed since the task was created.
+    """
+    p = task.get("params") or {}
+    try:
+        sandbox = run_sr_svc.sandbox_scene_paths(p.get("lq_path"),
+                                                 task.get("fingerprint"))
+    except ValueError:
+        return None
+    return (sandbox or {}).get("scene") or p.get("lq_path")
+
+
 def _task_view(state, task: dict) -> dict:
     """Project an sr_task row onto the /api/queue response shape (params subset)."""
     p = task.get("params") or {}
@@ -160,6 +178,7 @@ def _task_view(state, task: dict) -> dict:
             "delete_ori": p.get("delete_ori", False),
             "grid_align": p.get("grid_align", True),
         },
+        "run_dataroot": _run_dataroot(task),
         "config_xml": task["config_xml"], "batch_script": task["batch_script"],
         "log_dir": task["log_dir"],
         "created_at": task["created_at"], "updated_at": task["updated_at"],

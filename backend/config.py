@@ -128,6 +128,7 @@ class SrRuntime:
     queue_poll_sec: float
     agent_db: str
     scenes_root: str | None   # None → fake-scene fallback (backend/api/paths.py)
+    sandbox_root: str | None  # None → SR runs in place, writing to lq_path
 
 
 def sr_runtime() -> SrRuntime:
@@ -165,4 +166,5 @@ def sr_runtime() -> SrRuntime:
         queue_poll_sec=env_float("SR_QUEUE_POLL_SEC", SR_DEFAULT_QUEUE_POLL_SEC),
         agent_db=os.environ.get("SR_AGENT_DB") or SR_DEFAULT_DB,
         scenes_root=os.environ.get("SR_SCENES_ROOT") or None,
+        sandbox_root=os.environ.get("SR_SANDBOX_ROOT") or None,
     )
