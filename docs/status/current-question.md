@@ -272,6 +272,69 @@
 - ✅ **部署**：`deploy/nginx.conf`（`location /disk-array/ { alias <root>/; }` 静态托管 + `.preview.jpg` 缓存头 + `location /api/` 反代 127.0.0.1:8000 `proxy_read_timeout 600s` + SPA 尾斜杠规则含 /scenes）；`deploy/sr-api.service`（systemd：uvicorn + SR_SCENES_ROOT/SR_PREVIEWS_ROOT env）；`deploy/requirements-api.txt`（fastapi/uvicorn/numpy/pillow）；`deploy/README.md` 重写为阶段2/4 双段部署文档；`package-offline.sh` 增补 backend + 后端部署件进离线包。
 - ⚠️ **待真机（内网 CentOS7 + Win11）验收**：首次 JPG 生成的耗时/内存（1.1GB/1.78GB 真实图）、二次秒开、显示占用、掩码按元数据 W/H 的换算精度；清单见 §5.2。
 
+### 2026-09-10 · 平台自建 SR 沙箱（SR_SANDBOX_ROOT）
+
+起因是一个提问：**「就不能前端填个盘阵路径，配好直接跑吗？」** —— 能，[QueuePage.vue:116](frontend/src/pages/QueuePage.vue#L116)
+的手填 `lq_path` 输入框早就在，`/api/queue` 也直接收这个路径，不经过 `/api/scenes`。卡住的只有一件事：
+**SR 对她的 `DatarootLQ` 不是只读的** —— [`util.py:1305`](SR_code/util.py#L1305) 的 `writeTiff` 写产物前必先把
+**输入**改名成 `*_NOSR.tif`（与 `Suffix` / `DeleteOriTifNeeded` 都无关）。所以「前端填一个路径」的字面含义是
+「那个目录会被改写」，而计划把首次生产写权放在阶段 6。
+
+三条路摆出来（平台自建副本 / 手工拷一次 / 直接填生产目录），选了**平台自建**。
+
+改动：`SR_SANDBOX_ROOT` → 作业第一步 `cp -a` 一份私有副本，config 的 `DatarootLQ` 指向副本。
+关键点是这个路径**由后端在 sbatch 之前就写进 config.xml**，而 `exit_code_file_for()` 事后从同一份 config
+反推退出码文件位置 —— 所以终态读取完全不受影响，作业侧不需要任何回传握手。不配这项 = 旧行为。
+
+同一批还修了两个会咬人的：① 配置文件按 `run_sr_<suffix>_<指纹前12位>.xml` 命名（原先同 suffix 的不同任务
+共用一份 config.xml，第二个提交会把第一个任务的终态查询指到别的场景去）；② `/api/queue` 每行新增
+`run_dataroot` 字段说明产物到底落在哪（开沙箱时 `params.lq_path` 是用户填的原路径，两者不同）。
+
+踩到的坑：最初写了 `.ready` 标记文件跳过重复复制，随后意识到**同一任务失败重跑时，源修好了、跑的却是旧副本** ——
+省几分钟赔一下午，删掉。改成每次无条件重拷。
+
+### 2026-09-11 · Slurm 第四批真机推进（env 就位）+ 一次生产文件覆盖事故
+
+**推进到哪**（`docs/status/slurm-acceptance.md` §0 前置）：
+
+- ✅ **§0.3 env 全绿**：systemd drop-in `/etc/systemd/system/sr-api.service.d/10-slurm.conf` 九个变量 + 主文件四个，
+  共 13 项经 `/proc/<PID>/environ` 确认进了**运行中的进程**（`active (running)`）。
+- ✅ **§0.2 变体就位**：`code_0817_prod_slurm.py`(30695B / `041bea73b36f`) 与 `verify_sr_run.py`(16419B / `92e400a71635`)
+  已在 `$BUNDLE`，与仓库**逐字节相同**，`head` 见 `GENERATED FILE` 横幅。
+- ✅ **§0.3 后半**：`$WORK`/`$SANDBOX` 建好、`chown nginx:nginx`、`sudo -u nginx touch` 得 `WRITE OK`。
+- ⬜ **A/B/C/D 全部未跑**。下一步 = §A 探针（只读）。
+
+**两处订正 / 坑**：
+
+1. **分区名 `gpup` → `gpu`（文档错值，已全仓订正）。** `sinfo -h -o "%P"` 实测 = `centos7 / deicc / gpu / gpu* / test`
+   （星号=默认分区），**没有 `gpup`**。早先 `slurm-integration.md` §2.7 那条「用户回传 `gpup`」是转述错误。
+   已改 `deploy/sr-api.service` / `deploy/README.md` §7.1 / `slurm-integration.md` / `slurm-acceptance.md` /
+   `sr-pipeline-restore-plan.md` / 两个测试夹具。**教训：真机当场跑的探查命令优先于文档里记的历史「实测值」**，
+   纠正用户前先让他把探查命令跑一遍。
+2. **`systemctl show -p Environment | tr ' ' '\n' | grep '^Environment='` 恒得 1 条** —— `show` 只在**第一个**值前
+   打印 `Environment=`，其余是裸的 `KEY=VAL`。该管道曾让人误判「env 没生效」白查半天。已把正确查法写进
+   `slurm-acceptance.md` §0.3。
+
+**⚠️ 事故：`$BUNDLE/code_0817_prod.py` 被覆盖（2026-09-11 09:55，不可恢复）**
+
+| | 覆盖前 | 现在 |
+|---|---|---|
+| 字节 | 33477 | **28703** |
+| sha256(去 CR) | `cfbf0bda4804` | `03c9b4fc3f64` |
+| mtime | 8月15 14:55 | 9月11 09:55 |
+| 权限 | 755 | 777 → 已 `chmod 755` 归一 |
+
+- 起因：仓库 `SR_code/code_0817_prod.py`（文档认定的**唯一真源**，`sr-slurm-deploy-variant.md` §1/§3）
+  来自 `centos7/code/` 那份；`$BUNDLE` 里那份是**没同步过的旧版**。用户把两边对齐了。
+- `find /DiskArray/ProductionSchedule/exe_CentOS7 -name 'code_0817_prod*.py'` 只剩改后两份，**旧版连同 `.bak` 都不在**，
+  且内网机传不出文件 → **已不可恢复**。
+- **性质**：这是本任务首次**覆盖生产既有文件**（此前全是「只加不改」：并置变体 + 加校验器 + 写我们自己的 unit）。
+  两种解释后果不同：源树→部署副本的**漂移修正**（方向对，但属生产变更，需团队知情认账）；
+  或把未评审版本**推上生产**（事故）。
+- **未决**：(a) `centos7/code/` 的完整路径 + 那份的 size/sha/mtime（确认真源没被动）；
+  (b) **平时是谁、用什么命令跑生产超分？有没有调度脚本指向哪个路径的 `code_0817_prod.py`？**
+  (b) 无答案前**不得进 §C（单场景真 SR）** —— 那是唯一会真跑超分、真写盘阵的一步。
+
 ### 2026-09-09 · 阶段6 查看器上下文侧舱（右侧 [ROI/工具] + [Agent]）
 
 - **范围（L1 确定性 + L2 Agent 解读）**：见 §1「阶段6」bullet 与 `docs/planning/api-contract.md`「阶段6 增补」blockquote；需求要点 = 右侧固定侧舱、默认收起、展开态持久化、ROI 统计只对**当前显示层**做确定性计算（绝不让 LLM 编数字）、Agent 与 /chat 同会话不另起炉灶。
@@ -341,7 +404,9 @@
 | sr-api 起服务（systemd，开机自启） | 完成（09-07） | 曾 217/USER（`User=` 行尾注释）+ py3.9 注解崩溃，均已修复并归档 |
 | nginx 站点 + Windows 访问 | 完成（09-07/08） | `http://10.10.81.135` 可开页面；需删出厂 default.conf |
 | /api/scenes 真实数据 | **未完成** | `/data/scenes` 不存在 → `source:fake` 12 条占位；待真实根路径 |
-| 提交 SR 端到端（阶段4/5 真链） | **未完成** | 依赖真实根 + Slurm 可达；清单见 §6.3–6.5。Slurm 侧代码/脚本/文档**已就绪**（部署变体 + 作业内校验器 + 退出码文件 + 分阶段验收清单 `slurm-acceptance.md`），只等真机执行——判据不再是 squeue/sacct，见 §3.2「Slurm 接入定论」 |
+| 提交 SR 端到端（阶段4/5 真链） | **前置完成（09-11）· 验收未跑** | Slurm 侧代码/脚本/文档已就绪。**§0 前置四项全绿**（上车 / 变体就位 / 13 项 env / 目录与可写性），见 §4 时间线 2026-09-11。**A/B/C/D 一步未跑** —— 下一步 §A 探针（只读）。判据不再是 squeue/sacct，见 §3.2「Slurm 接入定论」 |
+| 平台侧沙箱（`SR_SANDBOX_ROOT`） | 完成（09-10 代码侧 · 09-11 真机侧） | 每个作业自建 `lq_path` 副本，SR 只写副本 → 前端填**生产路径**也不会动生产数据。见 deploy/README §7.5。真机目录已建 + `nginx` 可写（`WRITE OK`） |
+| ⚠️ `$BUNDLE/code_0817_prod.py` 被覆盖 | **事故待善后** | 09-11 09:55 由 33477B/`cfbf0bda` 覆盖为 28703B/`03c9b4fc`，**旧版无备份、不可恢复**。待答：谁读这份文件？（详见 §4 时间线 2026-09-11） |
 | 本会话代码/文档变更归档 | **未 commit** | 清单见下方 |
 
 **下一步行动**
@@ -378,8 +443,8 @@
 > 四条链路结论（静默失败不再被标成成功 / 幂等回归 / 云量跳过 / SSE）的分步命令 + 成功判据 + 失败处置
 > 见 **`docs/status/slurm-acceptance.md` §D**（本节保留一页纸勾选，细节不在此重复）。
 
-- [ ] **前置：装变体 + 六项 env**（⏱30′）· 按 `deploy/README.md` §7.1——变体**改名顶替** `$SR_BUNDLE_DIR/code_0817_prod.py`（原脚本先备份）+ 拷 `verify_sr_run.py` + 核对 `SR_PYTHON` / `SR_BUNDLE_DIR` / `SR_SLURM_WORK_DIR` / `SR_SLURM_PARTITION` / `SR_SLURM_TIME` / `SR_SLURM_CPUS` · ✓= `head -3 code_0817_prod.py` 见到 `GENERATED FILE` 横幅；`probe_slurm.sh` 除 sacct 两行外无 FAIL · 记录:
-- [ ] **真实提交 + 推进**（⏱20′）· `/queue` 手填**测试目录**的 lq_path + **非空 suffix** 提交（勿碰生产数据）· ✓= sbatch 起真实作业，徽标按 提交中→排队/运行中→**完成** 推进；`/api/queue` 的状态与退出码文件一致 · 记录 job_id / 耗时:
+- [ ] **前置：装变体 + 九项 env**（⏱30′）· 按 `deploy/README.md` §7.1——变体与 `verify_sr_run.py` **并置**在 `$SR_BUNDLE_DIR`（**不覆盖** `code_0817_prod.py`，靠 `SR_SR_SCRIPT` 指过去）+ 核对 `SR_PYTHON` / `SR_BUNDLE_DIR` / `SR_SLURM_WORK_DIR` / `SR_SLURM_PARTITION` / `SR_SLURM_TIME` / `SR_SLURM_CPUS` / `SR_SR_SCRIPT` / `SR_VERIFY_SCRIPT` / `SR_SANDBOX_ROOT`（末项装法见 §7.5：建目录 + `chown nginx`）· ✓= `head -3 code_0817_prod_slurm.py` 见到 `GENERATED FILE` 横幅、`code_0817_prod.py` 未被改动；`probe_slurm.sh` 除 sacct 两行外无 FAIL · 记录:
+- [ ] **真实提交 + 推进**（⏱20′）· `/queue` 手填 lq_path + **非空 suffix** 提交。**配了 `SR_SANDBOX_ROOT` 就可以直接填生产路径**——平台在作业第一步自建副本，生产目录只读（§7.5）；没配就填测试目录 · ✓= sbatch 起真实作业，徽标按 提交中→排队/运行中→**完成** 推进；`/api/queue` 的 `run_dataroot` 指出产物位置，其状态与退出码文件一致；**提交前后 `lq_path` 目录 `ls` 一致（没多出 `*_NOSR.tif`）** · 记录 job_id / 耗时:
 - [ ] **静默失败不再被标成成功**（⏱15′）· 构造一个必然缺 SRLOG 的任务（如 SC 步目录里没有 `<目录名>.tif`）· ✓= 退出码文件 `verdict=90`、平台显示 **FAILED**、同参数重投返回 `SUBMITTED`（**不是** `RESUMED_COMPLETED`）· 记录:
 - [ ] **幂等回归**（⏱10′）· 同参数连投两次 · ✓= 活跃期 `RESUMED_ACTIVE`、终态 `RESUMED_COMPLETED`，**两次都不产生第二个 job_id** · 记录:
 - [ ] **云量跳过**（⏱10′）· 提交一个 `cloud_limit` 必然触发的任务 · ✓= COMPLETED、SRLOG 末行 `Run skipped:`、再投为 `RESUMED_COMPLETED`（**不被反复重投**）· 记录:

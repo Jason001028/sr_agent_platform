@@ -291,6 +291,27 @@ class TestQueue(PlatformBase):
         self.assertEqual(t["params"]["suffix"], "t")
         self.assertIn("config_xml", t)
 
+    def test_run_dataroot_is_the_sandbox_copy_when_configured(self):
+        # the product lands in the copy, not in the path the user typed — the
+        # row has to say where the job actually ran.
+        os.environ["SR_SANDBOX_ROOT"] = "/DiskArray/tmp/sbx"
+        self.addCleanup(os.environ.pop, "SR_SANDBOX_ROOT", None)
+        c = self.client()
+        self._submit(c)
+        t = c.get("/api/queue").json()["tasks"][0]
+        self.assertEqual(t["params"]["lq_path"], self.LQ)      # what was asked for
+        self.assertTrue(t["run_dataroot"].startswith("/DiskArray/tmp/sbx/"))
+        # only the basename survives the copy — the SC step derives its input
+        # name (`<目录名>.tif`) from the directory's own name.
+        self.assertEqual(t["run_dataroot"].rsplit("/", 1)[-1],
+                         self.LQ.rsplit("/", 1)[-1])
+
+    def test_run_dataroot_defaults_to_lq_path(self):
+        c = self.client()
+        self._submit(c)
+        t = c.get("/api/queue").json()["tasks"][0]
+        self.assertEqual(t["run_dataroot"], self.LQ)
+
     def test_cancel_pending_job(self):
         os.environ["SR_SLURM_FAKE_T_MS"] = "600000"    # 停在 PENDING/RUNNING
         c = self.client()

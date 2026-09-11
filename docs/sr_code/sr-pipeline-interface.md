@@ -226,7 +226,7 @@ if gpu_available is False or gpu_count != 4:
   - 计数改为 `torch.cuda.device_count()`——数"本作业看得见的卡"，而非 nvml 的物理卡数（4 卡节点恒为 4）；
   - 不再赋值 `CUDA_VISIBLE_DEVICES`（选卡唯一来源是 `--gres`，见 §9）；
   - 不再执行 `systemctl stop slurmd.service`，GPU 异常时只向 `SlurmStopLog.txt` 追加一行（措辞 `gpu-error`，不再写 `stop` 以免运维误判节点已下线）。
-- **上机安装**：必须让变体**占用 `$SR_BUNDLE_DIR/code_0817_prod.py` 这个文件名**（原文件先备份）——批脚本按固定名调用，变体改放在旁边叫别的名字永远不会被执行。完整步骤见 [docs/status/slurm-acceptance.md §0.2](../status/slurm-acceptance.md)。
+- **上机安装**：把变体与生产脚本**并置**在 `$SR_BUNDLE_DIR` 下，再用 `SR_SR_SCRIPT=code_0817_prod_slurm.py` 指定作业跑它——**不必改名顶替 `code_0817_prod.py`**，生产原文件因此保持字节不动（也就始终是生成器的对照物）。作业跑哪个脚本、以及校验器 `verify_sr_run.py`，都由 `SR_SR_SCRIPT` / `SR_VERIFY_SCRIPT` 两个 env 决定（不配则退回原脚本名，行为同旧版）。完整步骤见 [docs/status/slurm-acceptance.md §0.2](../status/slurm-acceptance.md) 与 [deploy/README.md §7.1](../../deploy/README.md)。
 - **新鲜度校验**：`python SR_code/tools/gen_slurm_variant.py --check`（逐字节比对，手改即报 STALE）。
 - **本地版与部署脚本不一致（已确认）**：真源硬编码使用 GPU 0（模块级曾设为 `"1"`，`main()` 内覆盖为 `"0"`）；模板 config.xml 里的 `<GPUIDS>` 原设计由部署脚本读取选卡（实测模板值 3）。**Slurm 接入后 `<GPUIDS>` 不再参与选卡**，降级为审计字段（见 §9）。
 
