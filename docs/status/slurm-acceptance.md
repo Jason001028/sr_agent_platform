@@ -18,8 +18,9 @@ BUNDLE=/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes
 SR_PYTHON=/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python
 WORK=/DiskArray/tmp/wangrz/sr_agent_work
 OPT=/DiskArray/tmp/wangrz/sr_utils/espan3_2026_gf04_tile500.yml
-TEST=/DiskArray/tmp/wangrz/sr_test
-PART=gpup
+TEST=/DiskArray/tmp/wangrz/sr_test          # 手工验证用的场景副本根（§C）
+SANDBOX=/DiskArray/tmp/wangrz/sr_sandbox    # 平台沙箱：每个作业的私有副本（§D）
+PART=gpu                                   # 2026-09-11 sinfo 实测：centos7/deicc/gpu/gpu*/test（无 gpup）
 export APP BUNDLE SR_PYTHON WORK OPT TEST PART
 
 echo "$APP"; echo "$SR_PYTHON"    # ✓= 两个空变量说明没贴全
@@ -28,7 +29,7 @@ echo "$APP"; echo "$SR_PYTHON"    # ✓= 两个空变量说明没贴全
 出处：`$BUNDLE/$SR_PYTHON/$WORK/$PART` 见 `deploy/sr-api.service` 的 `Environment=`；
 `$OPT` 见 `backend/config.SR_DEFAULT_OPTIONS_YML`；`$TEST` 是本清单新建的验收沙箱（**不碰生产数据**）。
 
-### 0.1 上车：三个文件从开发机拷到内网
+### 0.1 上车：两个文件从开发机拷到内网
 
 ```text
 SR_code/variants/code_0817_prod_slurm.py   部署变体
@@ -47,39 +48,58 @@ $SR_PYTHON code_0817_prod.py -f <cfg.xml>                                  # ←
 $SR_PYTHON verify_sr_run.py --config <cfg.xml> --sr-exit-code "$_sr_rc"    # ← 名字写死
 ```
 
-所以部署动作 = 把变体装进 `$BUNDLE`、占住这两个文件名，**原脚本先备份**：
+所以部署动作 = 把这两个文件拷进 `$BUNDLE`、名字保持原样（**生产原脚本一字不动**）：
 
 ```bash
 cd $BUNDLE
-cp -a code_0817_prod.py code_0817_prod.py.bak-20260910      # 备份原始生产脚本（回滚 = 一条 mv）
-ls -l code_0817_prod.py.bak-20260910
-
-cp /path/to/code_0817_prod_slurm.py ./code_0817_prod.py     # 变体顶替（CLI 与原脚本完全一致，只有 -f）
-cp /path/to/verify_sr_run.py       ./verify_sr_run.py
-head -12 code_0817_prod.py                                  # ✓= 看到 "GENERATED FILE — DO NOT EDIT" 横幅
+cp /path/to/code_0817_prod_slurm.py ./code_0817_prod_slurm.py   # 变体：与生产脚本并排，不覆盖
+cp /path/to/verify_sr_run.py        ./verify_sr_run.py
+head -12 code_0817_prod_slurm.py                                # ✓= "GENERATED FILE — DO NOT EDIT" 横幅
+ls -l code_0817_prod.py                                         # ✓= 生产原脚本仍在、未被改动
 ```
 
-`record:` `ls -l $BUNDLE/code_0817_prod.py*` 与变体首行横幅
+`record:` `ls -l $BUNDLE/code_0817_prod*` 与变体首行横幅
 
-> **为什么必须改名顶替**：批脚本里那一行写死了 `code_0817_prod.py`（`run_sr.py:180`），变体放在旁边叫别的名字
-> **永远不会被执行**。要两个文件并存，得给 `build_batch_script` 加一个脚本名参数（开发机一行改动 +
-> `test_run_sr.py` 同步），本批不做，按上面的顶替法走。
+> **不必改名顶替**：批脚本里那两个程序名由 `SR_SR_SCRIPT` / `SR_VERIFY_SCRIPT` 决定（`run_sr.py`），
+> 后端生成批脚本时把名字写进文本。所以变体只要与生产脚本同目录、名字与 `SR_SR_SCRIPT` 对上就会被执行，
+> 而 `gen_slurm_variant.py` 的对照物（生产原文件）始终保持字节不变，回滚 = 改回 env + restart。
 >
-> ⚠️ **不装变体直接跑 D 的后果**：原脚本 `gpu_count != 4` 的守卫在单卡分配下恒真 → 作业 `exit(3)`；
-> 更糟的是它会执行 `systemctl stop slurmd.service`（root 提交时**真把节点从池里摘掉**）。
+> ⚠️ **`SR_SR_SCRIPT` 不配就等于跑原脚本**，后果：`gpu_count != 4` 守卫在单卡分配下恒真 → 作业
+> `exit(3)`；强行把 `CUDA_VISIBLE_DEVICES` 写成 `0` → 并发作业全挤 0 号卡；失败时执行
+> `systemctl stop slurmd.service`（root 提交时**真把节点从池里摘掉**）。
 > A/B 阶段可以先不装，**进入 D 之前必须装完并复核横幅**。
 
 ### 0.3 service env 与重启
 
+env 分两处：主文件（`SR_SCENES_ROOT` / `SR_AGENT_DB` / `SR_LLM_MOCK` / `SR_SLURM_FAKE`）
++ drop-in `/etc/systemd/system/sr-api.service.d/10-slurm.conf`（Slurm/沙箱九项）。
+查 **systemd 实际读到的合并文本**（`systemctl cat` 按加载顺序拼接，`# 路径` 标明来源）：
+
 ```bash
-grep -nE '^Environment=(SR_BUNDLE_DIR|SR_PYTHON|SR_SLURM_WORK_DIR|SR_SLURM_PARTITION|SR_SLURM_TIME|SR_SLURM_CPUS|SR_SLURM_FAKE)' /etc/systemd/system/sr-api.service
+systemctl cat sr-api | grep -nE '^Environment=(SR_BUNDLE_DIR|SR_PYTHON|SR_SLURM_WORK_DIR|SR_SLURM_PARTITION|SR_SLURM_TIME|SR_SLURM_CPUS|SR_SR_SCRIPT|SR_VERIFY_SCRIPT|SR_SANDBOX_ROOT|SR_SLURM_FAKE)'
 ```
 
-✓= 六项都在，且 `SR_SLURM_FAKE=0`；`SR_SLURM_WORK_DIR` 指向共享盘
+✓= 九项都在（`SR_SLURM_FAKE=0` 也确认一下）；`SR_SLURM_WORK_DIR` 指向共享盘；
+`SR_SR_SCRIPT` 指向 `code_0817_prod_slurm.py`（不配就会跑原脚本，见 §0.2）；
+`SR_SANDBOX_ROOT` 指向大盘（不配 = SR 直接写 `lq_path`，见 `deploy/README.md` §7.5）
+
+> ⚠️ **别用 `systemctl show -p Environment | tr ' ' '\n' | grep '^Environment='` 数条数。**
+> `show` 只在**第一个**值前打印 `Environment=`，其余是裸的 `KEY=VAL` 空格分隔 —— 那个管道恒得 1 条，
+> 会让人误判成「env 没生效」白查半天（2026-09-10 实际踩过）。要看合并结果就 `systemctl show -p Environment`
+> 看**原始**输出（一行列全），或用上面的 `systemctl cat`。
+
+判据最终以**运行中进程**的环境为准 —— `daemon-reload` 只重读 unit 配置，**不改已跑进程的 env**：
+
+```bash
+systemctl daemon-reload && systemctl restart sr-api
+sleep 2
+tr '\0' '\n' < /proc/$(systemctl show sr-api -p MainPID | cut -d= -f2)/environ | grep '^SR_' | sort
+# ↑ 预期 13 行 SR_。systemd 219 无 `--value`，只能用 cut 取 MainPID。
+```
 
 ```bash
 mkdir -p $WORK && chown nginx:nginx $WORK
-systemctl daemon-reload && systemctl restart sr-api
+mkdir -p $SANDBOX && chown nginx:nginx $SANDBOX     # 沙箱根，同样要 nginx 可写
 systemctl status sr-api --no-pager | head -5      # ✓= active (running)
 ```
 
@@ -225,15 +245,28 @@ cat $TEST/b3_verify/Debug/_SREXIT_999999.txt          # ✓= verdict=90，reason
 ⚠️ **必须在场景副本上跑**：即使 `DeleteOriTifNeeded=False`、`Suffix` 非空，`util.writeTiff` 仍会把
 **输入**改名为 `*_NOSR.tif`。跑生产目录 = 动生产数据。
 
+> **本节是手工旁路。走平台请直接看 §D** —— 平台已能自建副本（`SR_SANDBOX_ROOT`，
+> `deploy/README.md` §7.5），前端填**生产路径**即可，不需要手工拷。本节留着是为了
+> 「先证明裸 SR 能跑通、再怀疑平台」这条排查顺序。
+
 ```bash
-SRC=<挑一个真实场景目录>            # 该目录含 <basename>.tif 与 <basename>_meta.xml
+SRC=<挑一个真实场景目录>            # 该目录含 <basename>.tif 与 <basename>{_,.}meta.xml
 BASE=$(basename "$SRC")
 mkdir -p $TEST/c_run
 cp -a "$SRC" $TEST/c_run/           # 目录名必须原样保留：SC 步的输入名 = 目录名 + ".tif"
 chown -R nginx:nginx $TEST/c_run
 
-grep -E 'CloudPercent|DataBits|SolarAzimuth' $TEST/c_run/$BASE/${BASE}_meta.xml
+# ⚠️ meta 的两种拼写都要试 —— 真机实测外层 _L1_PAN 目录里是**点**（<目录名>.meta.xml），
+#    不是本文档早期写的下划线。SR 两种都认不了时会静默当成"没有 meta"。
+META=$TEST/c_run/$BASE/${BASE}_meta.xml
+[ -f "$META" ] || META=$TEST/c_run/$BASE/${BASE}.meta.xml
+echo "meta=$META"; grep -E 'CloudPercent|DataBits|SolarAzimuth' "$META"
 ```
+
+> ⚠️ `cp -a` 整个目录在真机上约 **10 GB+**：一个 `_L1_PAN` 场景里除 `<目录名>.tif`（~5 GB）
+> 还有 `<目录名>_ori.tif`（~5 GB）、`<目录名>.tif.ori`、`.jpg` 与若干 `_000X_` 子目录。
+> 只想验证链路的话，可以只拷 `<目录名>.tif` + `<目录名>{_,.}meta.xml` + 建空的 `Debug/`
+> —— SR 不读 `_ori.tif`（`grep -n '_ori' code_0817_prod.py` 命中的都是 numpy 变量名，不是文件）。
 
 ✓= `CloudPercent` 是**数字**（0 / 1 / 3…）；`SolarAzimuth` 有值（走 SC 步）
 
@@ -298,19 +331,23 @@ print(build_batch_script('/w/c.xml','/w'))" | sed -n '1,22p'
 
 **D 阶段通例**（每条都要遵守，否则测出来的不是我们想测的东西）
 
-1. **`suffix` 必须非空且逐条不同**（`acc-d1` / `acc-d2` / `acc-d3` / `acc-d4`）。两个原因：空 suffix 会把
-   输入改名（破坏性）；而平台按 suffix 命名 config.xml 与批脚本（`run_sr_<suffix>.xml`），**不同用例
-   同 suffix 会互相覆盖配置文件**，把退出码文件的路径推断带偏。
-2. `lq_path` 一律指 `$TEST` 下的沙箱目录，**不碰生产数据**。
+1. **`suffix` 必须非空**（`acc-d1` / `acc-d2` / `acc-d3` / `acc-d4`）。空 suffix 会把**输入改名**，
+   这是破坏性的（契约 §2.4 第 1 条）。逐条不同不再是硬要求（09-10 起配置文件按
+   `run_sr_<suffix>_<任务指纹前12位>.xml` 命名，同 suffix 的不同任务不再互相覆盖），
+   但逐条不同能让日志好读。
+2. `lq_path`：配了 `SR_SANDBOX_ROOT` 就**可以指生产目录**（平台在作业第一步自建副本，生产只读）；
+   D1/D3 这类要造故障的用例仍指 `$TEST` 下手工弄坏的副本 —— 拿好数据去制造坏结果没有意义。
 3. POST 走 `http://127.0.0.1:8000`（后端直连）；SSE 走 `http://127.0.0.1`（经 nginx，真实链路）。
 
-查队列的一行过滤器（下面反复用到）：
+查队列的一行过滤器（下面反复用到）——`run_dataroot` 是**作业实际工作的目录**（开沙箱时 = 副本，
+产物和 `Debug/` 都在它下面，不是 `lq_path`）：
 
 ```bash
 curl -s http://127.0.0.1:8000/api/queue | /opt/sr-venv/bin/python -c '
 import json,sys
 for t in json.load(sys.stdin)["tasks"]:
-    p=t["params"]; print(t["task_id"], t["job_id"], t["state"], p["suffix"], p["lq_path"])'
+    p=t["params"]; print(t["task_id"], t["job_id"], t["state"], p["suffix"],
+                         "lq="+p["lq_path"], "run="+(t.get("run_dataroot") or "-"))'
 ```
 
 ### D1 · 静默失败不再被标成成功（§2.3 毒药的正面验证）
@@ -365,8 +402,9 @@ curl -s -X POST http://127.0.0.1:8000/api/queue -H 'content-type: application/js
 `record:` (a) 退出码文件全文 + 两次 `ls` 输出；(b) 队列行；(c) 两次 POST 的完整响应 JSON
 
 ✗ (b) `UNKNOWN` → 平台反推的路径与作业写的对不上：核对 config.xml 的 `DatarootLQ` 与
-  `run_sr.exit_code_file_for` 的推导（尤其有没有两条用例共用 suffix），以及 `<lq_path>/Debug/`
-  是否 nginx 可写（B3）。
+  `run_sr.exit_code_file_for` 的推导是否同值（用队列行的 `run_dataroot` 一眼比对），以及该目录下
+  `Debug/` 是否 nginx 可写（B3）。**沙箱开着时 `Debug/` 在副本里**——那说明沙箱没建成，
+  看作业 `.err` 有没有 `sandbox copy failed` / `sandbox copy incomplete`。
 ✗ (b) `COMPLETED` → 校验器没被执行。按 D0 复核批脚本里的两行调用，并确认 `$BUNDLE/verify_sr_run.py` 存在。
 ✗ (c) 回 `RESUMED_COMPLETED` → 平台把「退出码 0」当成了成功（正是本轮要消灭的行为），说明跑的还是旧
   `backend/services/slurm.py`：确认 `$APP/backend` 已更新到本批版本后 `systemctl restart sr-api`。

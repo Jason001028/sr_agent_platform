@@ -359,51 +359,64 @@ curl -s -o /dev/null -w '健康=%{http_code}\n' http://127.0.0.1:8000/api/health
 | 部件 | 位置 | 作用 |
 | --- | --- | --- |
 | 只读探针 | `deploy/slurm/probe_slurm.sh` | 上机第一步：核对分区 / GRES / 记账 / 路径 / 权限，**只读不改**。`--deep` 会真提交一个 2 分钟作业，**默认不开** |
-| 部署变体 | `SR_code/variants/code_0817_prod_slurm.py` | 顶替 `$SR_BUNDLE_DIR/code_0817_prod.py`。重新生成：`python SR_code/tools/gen_slurm_variant.py`（`--check` 验新鲜度）；逐条差异见 `docs/sr_code/sr-slurm-deploy-variant.md` 的 E1–E9 |
+| 部署变体 | `SR_code/variants/code_0817_prod_slurm.py` | 与生产脚本**并置**在 `$SR_BUNDLE_DIR` 下，由 `SR_SR_SCRIPT` 指定作业跑它（不必改名顶替，生产原文件保持字节不动）。重新生成：`python SR_code/tools/gen_slurm_variant.py`（`--check` 验新鲜度）；逐条差异见 `docs/sr_code/sr-slurm-deploy-variant.md` 的 E1–E9 |
 | 契约校验器 | `SR_code/variants/verify_sr_run.py` | 作业内第二个进程：判「退出码 0 + SRLOG 末行 `Run finished.` + 输出 tif」三条件，写退出码文件，**契约不满足时以退出码 90 结束**（纯标准库、py3.6 兼容） |
 | 平台侧代码 | `backend/services/run_sr.py`（生成批脚本 / 幂等指纹）+ `backend/services/slurm.py`（读退出码文件定终态） | 随 `backend/` 一起升（§5.2） |
 
-### 7.1 装什么（两份脚本 + 六个 env）
+### 7.1 装什么（两份脚本 + 九个 env）
 
-脚本——`$BUNDLE` 即 `SR_BUNDLE_DIR`：
+脚本——`$BUNDLE` 即 `SR_BUNDLE_DIR`。**并置即可，不覆盖生产脚本**：
 
 ```bash
 cd $BUNDLE
-cp -a code_0817_prod.py code_0817_prod.py.bak-$(date +%Y%m%d)   # 备份原始生产脚本（回滚 = 一条 mv）
-cp <上车目录>/code_0817_prod_slurm.py ./code_0817_prod.py       # ⚠️ 必须占用这个文件名
+cp <上车目录>/code_0817_prod_slurm.py ./code_0817_prod_slurm.py   # 变体：与原脚本并排
 cp <上车目录>/verify_sr_run.py        ./verify_sr_run.py
-head -3 code_0817_prod.py                                       # ✓= "GENERATED FILE — DO NOT EDIT" 横幅
+head -3 code_0817_prod_slurm.py                                  # ✓= "GENERATED FILE — DO NOT EDIT" 横幅
+ls -l code_0817_prod.py                                          # ✓= 生产原脚本仍在，未被改动
 ```
 
-> ⚠️ **必须改名顶替，不能并存**：平台批脚本按**固定文件名**调用这两个程序（`run_sr.py`），变体
-> 改叫别的名字放在旁边**永远不会被执行**。若图省事直接跑原脚本，其 `gpu_count != 4` 守卫在单卡
-> 分配下恒真 ⇒ 作业 `exit(3)`，更糟的是它还会执行 `systemctl stop slurmd.service`（作业以
-> `User=nginx` 跑是权限拒绝，服务以 root 跑则**真把节点从调度池里摘掉**）。
+> **为什么可以不顶替**：批脚本里那两个程序名是 `SR_SR_SCRIPT` / `SR_VERIFY_SCRIPT` 两个 env
+> 决定的（`run_sr.py`），后端在生成批脚本时把名字写进文本。所以变体只要跟原脚本放在同一目录、
+> 名字与 `SR_SR_SCRIPT` 对上就会被执行。好处是 `gen_slurm_variant.py` 的对照物（生产原文件）
+> 始终字节不变，回滚只是把 `SR_SR_SCRIPT` 改回 `code_0817_prod.py` + restart。
+>
+> ⚠️ **没配 `SR_SR_SCRIPT` 就等于跑原脚本**，而原脚本有三处会咬人：`gpu_count != 4` 守卫在
+> 单卡分配下恒真 ⇒ 作业 `exit(3)`；强行把 `CUDA_VISIBLE_DEVICES` 写成 `0` ⇒ 并发作业全挤 0 号
+> 卡；失败时执行 `systemctl stop slurmd.service`（作业以 `User=nginx` 跑是权限拒绝，服务以 root
+> 跑则**真把节点从调度池里摘掉**）。
 
-env——`sr-api.service` 里六项全部必填，node81-135 实测值（详见 service 内注释）：
+env——`sr-api.service` 里**前八项**全部必填、第九项强烈建议配，node81-135 实测值（详见 service 内注释）：
 
 | env | node81-135 实测值 | 说明 |
 | --- | --- | --- |
 | `SR_PYTHON` | `/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python` | **SR 生产解释器**（py3.6 + torch1.9.1 + GDAL + ImgHistMatch.so），与平台 venv `/opt/sr-venv`（py3.9）平行、互不污染——后端不 import SR/torch/GDAL，只在批脚本里写一行解释器路径，该行在**计算节点**上解析 |
 | `SR_BUNDLE_DIR` | `/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes` | `code_0817_prod.py` / `models` / `utils` / `options` 所在目录；拼写以 `code_0817_prod.py:27` 的 `load_library()` 为准 |
 | `SR_SLURM_WORK_DIR` | `/DiskArray/tmp/wangrz/sr_agent_work` | config.xml 与批脚本落盘处。**必须是共享盘**——12 个计算节点（node81-129..140）之一会读它；默认值 `/tmp/sr_agent_work` 是本机路径，多节点下作业秒挂 |
-| `SR_SLURM_PARTITION` | `gpup` | `sinfo -h -o "%P"` 实测主分区；不配则走默认分区，多分区集群下不可控 |
+| `SR_SLURM_PARTITION` | `gpu` | `sinfo -h -o "%P"` 实测（`centos7` / `deicc` / `gpu` / `gpu*` / `test`，星号=默认分区）。**没有 `gpup`** —— 早先文档那个值是转述错误；不配则走默认分区，多分区集群下不可控 |
 | `SR_SLURM_TIME` | `02:00:00` | 作业时限（`#SBATCH --time`） |
 | `SR_SLURM_CPUS` | `4` | `#SBATCH --cpus-per-task` |
+| `SR_SR_SCRIPT` | `code_0817_prod_slurm.py` | 作业跑哪个超分脚本（相对 `SR_BUNDLE_DIR`）。**不配 = 跑生产原脚本**，见上面的警告 |
+| `SR_VERIFY_SCRIPT` | `verify_sr_run.py` | 作业内契约校验器（相对 `SR_BUNDLE_DIR`）。不配也会跑这个名字，显式写出来是为了可审计 |
+| `SR_SANDBOX_ROOT` | `/DiskArray/tmp/wangrz/sr_sandbox` | **强烈建议配**：每个作业先在 `<根>/<任务指纹前12位>/` 下 `cp -a` 一份 `lq_path` 的私有副本，SR 全程只碰副本。不配 = SR 直接写 `lq_path`（阶段6 的生产形态）。详见 §7.5 |
 
-改完 `systemctl daemon-reload && systemctl restart sr-api`（这六项由 `backend/config.sr_runtime()`
-在**调用时**读 env，不 restart 不生效）。
+改完 `systemctl daemon-reload && systemctl restart sr-api`（前六项由 `backend/config.sr_runtime()`、
+后两项由 `run_sr.py` 在**调用时**读 env，不 restart 不生效；已经生成并提交的作业不受影响——
+脚本名是**生成时**写进批脚本文本的，批脚本本身带 `--export=NONE`，进程环境不会传进作业）。
 
 ### 7.2 两个权限坑（都用 `sudo -u nginx` 验）
 
 - 平台以 `User=nginx` 运行，它 `sbatch` 提交的作业**也以 nginx 身份在计算节点上执行**——不是 root；
-- 因此 `SR_SLURM_WORK_DIR` 与每个 `lq_path`（含其 `Debug/` 子目录）都要 **nginx 可写**：
+- 因此 `SR_SLURM_WORK_DIR` 与 `SR_SANDBOX_ROOT` 都要 **nginx 可写**：
 
   ```bash
   sudo -u nginx touch <目录>/w && echo OK      # ✓= OK
   ```
 
-  写不了 `Debug/` 的直接后果：校验器写不出退出码文件 → 该任务永远 `UNKNOWN`。
+  写不了 `SR_SLURM_WORK_DIR` 的直接后果：API 自己就写不出 config.xml/批脚本，提交必失败。
+- **`lq_path` 只需 nginx 可读**（开沙箱时）——`Debug/` 与产物都落在副本里，校验器写退出码文件
+  也写在副本。这正是沙箱的一个附带好处：不必为了让平台能跑，去给生产目录开写权限。
+  ⚠️ 不开沙箱（`SR_SANDBOX_ROOT` 空）时反过来：`lq_path/<目录>/Debug/` **必须 nginx 可写**，
+  否则校验器写不出退出码文件 → 该任务永远 `UNKNOWN`。
 
 ### 7.3 终态怎么判（**不要看 sacct**）
 
@@ -430,3 +443,53 @@ sh <APP>/deploy/slurm/probe_slurm.sh       # ✓= 结尾有 SUMMARY，除 sacct 
 A 探针 → B 裸 Slurm 冒烟（`--export=NONE` 会不会切断 `LD_LIBRARY_PATH` / GPU 分配形态 / 退出码文件
 能不能落盘）→ C 单场景真 SR → D 平台链路四条结论（静默失败不再被标成成功 / 幂等回归 / 云量跳过 /
 SSE）。
+
+### 7.5 沙箱：为什么平台不能直接写 `lq_path`
+
+**SR 对它的 `DatarootLQ` 不是只读的。** [`SR_code/util.py:1305`](../SR_code/util.py#L1305)
+（`writeTiff`）在写产物之前，先把**输入**改名：
+
+```python
+os.rename(path + tiftype, path + "_NOSR" + tiftype)   # → <目录名>_NOSR.tif
+```
+
+把 `Suffix` 留空、`DeleteOriTifNeeded=False` 都躲不掉这一步——它跟这两个开关无关。所以
+「用户在前端填了一个盘阵路径」的准确含义是**「那个目录会被改写」**。写生产目录 = 动生产数据，
+且是不可逆的改名。
+
+配了 `SR_SANDBOX_ROOT` 之后，作业的**第一步**是复制，SR 全程只碰副本：
+
+```text
+<SR_SANDBOX_ROOT>/<任务指纹前12位>/
+└── <场景目录名>/      ← cp -a 自 lq_path，**目录名必须原样**
+    ├── <目录名>.tif          ← SC 步的输入名由目录名推导：osp.basename(lq_path) + file_type
+    ├── <目录名>.tif.ori / _NOSR.tif / _<suffix>.tif   ← SR 在这里改名与写产物
+    └── Debug/               ← SRLOG + 退出码文件
+```
+
+**每次作业都重新复制**（先 `rm -rf` 再 `cp -a`），不做「已存在就跳过」的优化：同一组参数
+失败后重跑时，源可能已经修好，跳过复制会让人对着旧副本排查——省几分钟，赔一下午。
+
+三件事因此成立：**生产目录只读**；`exit_code_file_for()` 从 config.xml 的 `DatarootLQ`
+（已指向副本）反推出同一个退出码文件路径，平台照旧能读到终态；`/api/queue` 每行多一个
+`run_dataroot` 字段，说明产物到底落在哪儿（`params.lq_path` 是用户填的原路径，两者在开启沙箱时
+不同）。
+
+注意事项：
+
+- **空间**：每任务一份完整副本。一个 ~5 GB 的场景目录，跑完约 15 GB（副本 5 + `_NOSR` 5 + 产物 5）。
+  验收跑完手工清：`rm -rf <SR_SANDBOX_ROOT>/<指纹前12位>`；
+- **权限**：`SR_SANDBOX_ROOT` 要 **nginx 可写**（作业以 nginx 身份跑），装法：
+
+  ```bash
+  mkdir -p /DiskArray/tmp/wangrz/sr_sandbox
+  chown nginx:nginx /DiskArray/tmp/wangrz/sr_sandbox
+  sudo -u nginx touch /DiskArray/tmp/wangrz/sr_sandbox/w && echo OK   # ✓= OK
+  ```
+
+- **值的格式**：必须是不含空格 / 引号 / `` ` `` / `..` 的绝对路径——它会拼进作业脚本里一行
+  `rm -rf "<根>/<指纹>"`。非法值在**提交时**报 `ValueError`，不会静默降级；
+- **时间**：复制发生在作业内，算进 `--time`（默认 2h）。大场景 + 慢盘时留意；
+- **不配就是阶段 6 的生产形态**：SR 直接写 `lq_path`，输入被改名 `*_NOSR.tif`。
+  这是上游 SR 的既有契约（生产管线本来就依赖这个改名），所以阶段 6 之后关掉沙箱是正常的，
+  只是那一刻起，前端填什么路径就写什么路径。

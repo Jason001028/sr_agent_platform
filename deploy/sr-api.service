@@ -64,6 +64,15 @@ Environment=SR_PYTHON=/run/media/root/SSD/program/anaconda/installed/envs/torch1
 # 拼写以 code_0817_prod.py:27 的 load_library() 为准，两者必须完全一致。
 Environment=SR_BUNDLE_DIR=/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes
 #
+# 批脚本要跑的两个程序名（都在 SR_BUNDLE_DIR 里，作业 cd 进去后按名调用）。
+# ⚠️ 两个名字都是**部署时**由后端读 env 写死进批脚本文本的：批脚本带
+#    --export=NONE，本进程的环境变量不会传进作业，所以改完必须 restart。
+# 变体与生产脚本**并置**即可，不必改名顶替 code_0817_prod.py ——
+# 生产原文件因此保持字节不动，回滚 = 把 SR_SR_SCRIPT 改回 code_0817_prod.py。
+# 不配这两项时默认就是 code_0817_prod.py / verify_sr_run.py（行为同旧版）。
+Environment=SR_SR_SCRIPT=code_0817_prod_slurm.py
+Environment=SR_VERIFY_SCRIPT=verify_sr_run.py
+#
 # ⚠️ SR_SLURM_WORK_DIR 必须是**共享盘**：config.xml 与批脚本由 API 写在这里，
 #    而作业在 12 个计算节点（node81-129..140）之一上读它。默认值
 #    /tmp/sr_agent_work 是本机路径，多节点下作业秒挂（slurm-integration.md §2.6）。
@@ -71,13 +80,32 @@ Environment=SR_BUNDLE_DIR=/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mm
 #    权限两套都要有：nginx（写 config.xml/脚本）与作业用户（写 %j.out/%j.err）。
 Environment=SR_SLURM_WORK_DIR=/DiskArray/tmp/wangrz/sr_agent_work
 #
-# 分区与作业限额。gpup = 真机主分区（sinfo -h -o "%P" 实测）；
-# 不用 --partition 时 Slurm 走默认分区，多分区集群下会不可控。
-Environment=SR_SLURM_PARTITION=gpup
+# 分区与作业限额。gpu = 真机默认分区（2026-09-11 `sinfo -h -o "%P"` 实测：
+# centos7 / deicc / gpu / gpu* / test —— 星号是默认分区，**没有** `gpup` 这个分区，
+# 早先文档写作 gpup 是转述错误，已订正）。
+# 不用 --partition 时 Slurm 走默认分区（现在是 gpu*，与显式配置一致），
+# 但多分区集群下默认分区可能被改，显式写上更稳。
+Environment=SR_SLURM_PARTITION=gpu
 Environment=SR_SLURM_TIME=02:00:00
 Environment=SR_SLURM_CPUS=4
-# 备注：以上 6 项由 backend/config.sr_runtime() 在**调用时**读 env，改完
-# systemctl daemon-reload && systemctl restart sr-api 才生效。
+#
+# ── 沙箱（强烈建议配；不配 = 直接写 lq_path 指向的目录）─────────────────
+# SR 对她的 DatarootLQ **不是只读的**：util.writeTiff 在写产物前先把输入改名成
+# `*_NOSR.tif`。所以「用户在前端填了一个路径」= 「那个目录会被改写」。配上本项，
+# 每个作业在跑之前先 `cp -a` 一份私有副本，SR 全程只碰副本，生产目录一字节不动。
+#   布局：<根>/<任务指纹前12位>/<场景目录名>/   （目录名必须原样 —— SC 步的输入
+#   名由它推导：<目录名>.tif。每次作业都重新复制 —— 不做「已存在就跳过」的
+#   优化：同一任务失败重跑时，源可能已经修好，跳过复制会让人对着旧副本排查。）
+#   ⚠️ 空间：每任务一份完整场景副本（该场景 ~5 GB，跑完 ~15 GB：副本 + 产物 + _NOSR）。
+#      根要放在大盘上，验收结束后手工清理：rm -rf <根>/<指纹前12位>
+#   ⚠️ 值必须是不含空格/引号/`..` 的绝对路径 —— 它会被拼进作业脚本的 `rm -rf`。
+#      非法值会在提交时报错，不会静默降级。
+#   不配本项时的行为（= 阶段6 生产形态）：SR 直接写 lq_path，输入被改名 *_NOSR.tif。
+Environment=SR_SANDBOX_ROOT=/DiskArray/tmp/wangrz/sr_sandbox
+# 备注：以上各项由 backend/config.sr_runtime()（前 6 项）与 run_sr.py（后 2 项）
+# 在**调用时**读 env，改完 systemctl daemon-reload && systemctl restart sr-api
+# 才生效——没有一项是进程启动时快照，但批脚本按**当时的值**生成，改前生成的
+# 作业不受影响。
 # 可选：真 LLM 时配置（阶段5 默认 mock 已关，未配这些则 loop 走默认 base/空 key）
 # Environment=SR_LLM_BASE_URL=http://127.0.0.1:11434/v1
 # Environment=SR_LLM_API_KEY=

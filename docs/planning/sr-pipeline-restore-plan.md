@@ -28,15 +28,22 @@
 APP=/run/media/root/SSD/workspace/wangrz/sr-agent-platform
 BUNDLE=/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes
 SR_PYTHON=/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python
-TEST=/DiskArray/tmp/wangrz/sr_test          # 沙箱场景副本根（本计划全程用）
+TEST=/DiskArray/tmp/wangrz/sr_test          # 沙箱场景副本根（手工验证用；平台侧走 SR_SANDBOX_ROOT）
+SANDBOX=/DiskArray/tmp/wangrz/sr_sandbox    # 平台沙箱：每个作业的私有副本（2026-09-10 起平台自建）
 WORK=/DiskArray/tmp/wangrz/sr_agent_work    # Slurm 作业工作目录（多节点必须共享 → 留盘阵）
 PREV=/var/lib/sr-agent/previews             # 预览 JPG 缓存（本地盘，见决策点 ①）
 OPT=/DiskArray/tmp/wangrz/sr_utils/espan3_2026_gf04_tile500.yml
 PROD=/DiskArray/GSHC2IMPS                   # 生产盘阵根（仅阶段 6 使用）
-PART=gpup
+PART=gpu                                   # 2026-09-11 sinfo 实测（无 gpup）
 ```
 
-沙箱副本是本计划的地基：**阶段 0–5 全部在 `$TEST` 下跑，生产盘阵只读**。这样排查期生产目录里不会出现预览/掩码/Debug 等新文件。
+沙箱副本是本计划的地基：**阶段 0–5 全部在副本上跑，生产盘阵只读**。这样排查期生产目录里不会出现预览/掩码/Debug 等新文件。
+
+> **2026-09-10 修订 · 副本由平台自己建**。原计划让阶段 0.2 手工 `cp -a` 到 `$TEST`、阶段 4-5 前端填 `$TEST` 里的路径。改成：平台加 `SR_SANDBOX_ROOT`，**每个作业在批脚本第一步**把 `lq_path` 复制到 `<SANDBOX>/<任务指纹前12位>/<目录名>`，config 的 `DatarootLQ` 直接指向副本（见 [deploy/README §7.5](deploy/README.md)）。
+>
+> 动机有两条：① 每换一个场景就要手工拷一次，是**每次**的税，而不是**一次**的税；② `util.writeTiff` 对输入是改名而非只读（`os.rename(..., "_NOSR")`），"前端填路径"的字面含义就是"那个目录会被改写"——把只读保证交给人的记性，迟早会忘。
+>
+> 影响：**阶段 0.2 的手工 `$TEST` 副本只用于阶段 C（不碰平台的手工验证）**；阶段 4-5 前端填的是**生产路径**，平台自己拷。`$TEST` 仍保留给手工命令用。
 
 ---
 
@@ -104,7 +111,7 @@ chown -R nginx:nginx $PREV $WORK
 df -h $PREV $WORK
 ```
 
-**判据**：`$PREV` 在**本地盘**（非盘阵挂载点）；`$WORK` 在**共享存储**（分区 `gpup` 多节点，作业在计算节点上要读得到，见 [config.py:44-49](backend/config.py#L44-L49)）。
+**判据**：`$PREV` 在**本地盘**（非盘阵挂载点）；`$WORK` 在**共享存储**（分区 `gpu` 多节点，作业在计算节点上要读得到，见 [config.py:44-49](backend/config.py#L44-L49)）。
 **若不符**：`$PREV` 若落在开机不自动挂载的移动介质上，nginx 起服时目录不存在会 500 —— 换 `/var/lib/sr-agent/previews`。
 
 ### 0.4 环境清账
@@ -132,19 +139,23 @@ systemctl cat sr-api > /tmp/sr-api.service.snapshot
 
 ## 阶段 1 · 代码改动（离机，开发机，每项配测试）
 
-**目标**：把阶段 3–5 会撞到的五个坑在开发机上先改掉。全部改完跑一次 `python -m pytest backend/tests -q`（当前基线 **284 passed**）。
+**目标**：把阶段 3–5 会撞到的五个坑在开发机上先改掉。全部改完跑一次 `python -m pytest backend/tests -q`（基线 **284 passed**）。
 
-### E-A `SR_SR_SCRIPT` 开关（对应 B1）
+> **进度**：E-A 已完成（2026-09-10，测试 287 passed）。E-B/E-C/E-D/E-E 未动。
 
-**为什么必须要**：变体装法有二 —— ① 改名覆盖 `code_0817_prod.py`（现文档写法）；② 变体以 `code_0817_prod_slurm.py` 之名并置，用 env 指过去。选 ②，**生产原文件保持字节不动**，回滚只是改一行 env。
+### E-A `SR_SR_SCRIPT` 开关（对应 B1）· ✅ 已完成
 
-改动：
+**为什么必须要**：变体装法有二 —— ① 改名覆盖 `code_0817_prod.py`；② 变体以 `code_0817_prod_slurm.py` 之名并置，用 env 指过去。选 ②，**生产原文件保持字节不动**，回滚只是改一行 env。
+
+已落地：
 - [run_sr.py:100](backend/services/run_sr.py#L100) 函数签名加 `sr_script=None`；
-- [run_sr.py:131](backend/services/run_sr.py#L131) 旁加对称的一行：`sr_script = sr_script or os.environ.get("SR_SR_SCRIPT", "code_0817_prod.py")`；
-- [run_sr.py:180](backend/services/run_sr.py#L180) `code_0817_prod.py` → `{sr_script}`；
-- 同步 [run_sr.py:161](backend/services/run_sr.py#L161) 的 audit 回显（可加 `echo "SR_SCRIPT=..."`）。
+- [run_sr.py:131](backend/services/run_sr.py#L131) 旁加对称的一行（含"名字在生成期写进批脚本、不在作业里读 env"的说明）；
+- [run_sr.py:180](backend/services/run_sr.py#L180) 字面量 → `{sr_script}`；
+- audit 回显加 `echo "SR_SCRIPT=..."` —— 从 `%j.out` 就能看出跑的是原版还是变体。
 
-测试：`test_run_sr.py` 加两例 —— 默认输出含 `code_0817_prod.py`；`SR_SR_SCRIPT=code_0817_prod_slurm.py` 时输出含变体名且**不含**原文件名。
+测试（`test_run_sr.py`）：默认仍输出 `code_0817_prod.py`；`SR_SR_SCRIPT` 生效且**整份脚本不再出现原脚本名**；显式参数压过 env；audit 含 `SR_SCRIPT=`。
+
+同步更新：[deploy/sr-api.service](deploy/sr-api.service)（新增两项 env + 注释）、[deploy/README.md](../../deploy/README.md) §七（§7.1 改为并置装法 + 八项 env 表）、[docs/status/slurm-acceptance.md](../status/slurm-acceptance.md) §0.2/§0.3、[docs/sr_code/sr-pipeline-interface.md](../sr_code/sr-pipeline-interface.md) §7.1、[docs/status/current-question.md](../status/current-question.md) §6.4。
 
 ### E-B 空后缀归一（对应 B2）
 
@@ -235,7 +246,7 @@ $SR_PYTHON -c "import ast;ast.parse(open('$BUNDLE/code_0817_prod_slurm.py').read
 Environment=SR_BUNDLE_DIR=/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes
 Environment=SR_PYTHON=/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python
 Environment=SR_SLURM_WORK_DIR=/DiskArray/tmp/wangrz/sr_agent_work
-Environment=SR_SLURM_PARTITION=gpup
+Environment=SR_SLURM_PARTITION=gpu
 Environment=SR_SLURM_GRES=1
 Environment=SR_SCENES_ROOT=/DiskArray/tmp/wangrz/sr_test
 Environment=SR_SR_SCRIPT=code_0817_prod_slurm.py
@@ -289,9 +300,11 @@ location /previews/ { alias /var/lib/sr-agent/previews/; }
 
 ---
 
-## 阶段 4 · 走平台提交一次真 SR（沙箱场景）
+## 阶段 4 · 走平台提交一次真 SR（沙箱由平台自建）
 
 **目标**：用接口而非手工，把同一件事再跑一遍。
+
+**前置**：`SR_SANDBOX_ROOT` 已配且 nginx 可写（[deploy/README §7.5](deploy/README.md)）。
 
 ```bash
 # ① 从检索里拿到沙箱场景的 opaque id（验证 E-D 的过滤真的只收场景本身）
@@ -300,18 +313,17 @@ curl -s 'localhost:8000/api/scenes?limit=5' | python -m json.tool
 # ② 掩码：登录前端画一个 ROI → /api/masks；或用 curl 直接造
 #    预期 draft 的 suffix 已是默认值（E-B 生效）
 
-# ③ 提交
+# ③ 提交 —— lq_path 填**生产路径**（沙箱由平台自己建，不必手工拷贝）
 curl -s -XPOST localhost:8000/api/queue -H 'Content-Type: application/json' -d '{
-  "lq_path":"/DiskArray/tmp/wangrz/sr_test/<编号>",
-  "mask_path":"/DiskArray/tmp/wangrz/sr_test/<编号>/<编号>_mask.tif",
+  "lq_path":"/DiskArray/GSHC2IMPS/PRODUCT/<年>/<月>/<日>/<卫星>/<外层 …_L1_PAN>",
   "sr_scale":2,"suffix":"sr","gpu":0,"cloud_limit":80,
   "delete_ori":false,"grid_align":true}' | python -m json.tool
 
-# ④ 看状态推进
+# ④ 看状态推进；run_dataroot 就是产物所在（= 副本路径，不是 lq_path）
 curl -s localhost:8000/api/queue | python -m json.tool
 ```
 
-**判据**：`201` 返回 `job_id` 非空；`/api/queue` 状态由 `SUBMITTING → PENDING → RUNNING → COMPLETED`；输出 tif 与 `Debug/_SREXIT_<job_id>.txt` 都在。
+**判据**：`201` 返回 `job_id` 非空；`/api/queue` 状态由 `SUBMITTING → PENDING → RUNNING → COMPLETED`；**`lq_path` 目录一字节没变**（`ls` 前后一致，没有 `*_NOSR.tif`）；输出 tif 与 `Debug/_SREXIT_<job_id>.txt` 都在 `run_dataroot` 下。
 
 ---
 
@@ -321,12 +333,16 @@ curl -s localhost:8000/api/queue | python -m json.tool
 
 | # | 结论 | 造法 | 期望 |
 |---|---|---|---|
-| D1 | **静默失败不被标成成功** | 把沙箱场景的输入 tif 临时改名（触发 [util.py:1014](SR_code/util.py#L1014) 的 `exit()`），提交 | 平台 **FAILED**（不是 COMPLETED）；`_SREXIT_*.txt` 里 `verdict=90` |
+| D1 | **静默失败不被标成成功** | 在 `$TEST` 下备一个**故意弄坏**的副本（输入 tif 改名，触发 [util.py:1014](SR_code/util.py#L1014) 的 `exit()`），`lq_path` 指它，提交 | 平台 **FAILED**（不是 COMPLETED）；`_SREXIT_*.txt` 里 `verdict=90` |
 | D2 | **幂等回归** | 对**同一组参数**再提交一次 | `RESUMED_COMPLETED`（或 `RESUMED_ACTIVE`），**job_id 不变**、不产生第二个作业 |
-| D3 | **云量跳过** | 把沙箱 meta 的 `CloudPercent` 改到 `> cloud_limit`，提交 | 平台 **COMPLETED**；SRLOG 有 `Run skipped:`；`_SREXIT_*.txt` 里 `skip=1`；重复提交不重复投递 |
+| D3 | **云量跳过** | 在 `$TEST` 下备一个 `CloudPercent > cloud_limit` 的副本，`lq_path` 指它，提交 | 平台 **COMPLETED**；SRLOG 有 `Run skipped:`；`_SREXIT_*.txt` 里 `skip=1`；重复提交不重复投递 |
 | D4 | **SSE 实时** | `curl -N localhost:8000/api/queue/events` 保持连着，另一窗口提交/等待状态变化 | 收到 `job_update` 帧，`task_id`/`state` 与 REST 一致 |
 
 > D1 是**反向验证**：它证明的是"退出码 0 但没干成活"能被识别。D2/D3 的判据里都写着"不产生第二个作业" —— 这正是幂等层要看的东西。
+>
+> ⚠️ D1/D3 用的是 `$TEST` 下**手工弄坏的副本**，不是生产目录 —— 弄坏生产数据来测故障路径是反的。平台沙箱保护的是"别把好的写坏"，它不阻止你拿一个本来就坏的目录去提交。
+>
+> D1/D3 与阶段 4 用**不同** `lq_path`，因此任务指纹不同、沙箱目录也不同，互不干扰；沙箱每次作业都重新复制，改了源再重跑一定生效。
 
 **产物**：D1–D4 四段原始输出 + 对应的 `_SREXIT_*.txt` 内容。
 

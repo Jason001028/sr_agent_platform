@@ -27,6 +27,7 @@
 | nginx 站点 | `/etc/nginx/conf.d/sr-agent-platform.conf` |
 | 盘阵根 `SR_SCENES_ROOT` | `/data/scenes`（默认值，真机数据就位后再核对，见 §5 症状表） |
 | SQLite 库 | `<APP>/sr_agent.db`（父目录须 nginx 用户可写） |
+| SR 沙箱根 `SR_SANDBOX_ROOT` | `/DiskArray/tmp/wangrz/sr_sandbox`（须 nginx 可写；不配 = SR 直接写 `lq_path`，见 deploy/README §7.5） |
 
 ---
 
@@ -200,11 +201,13 @@ ssh -N -L 18080:127.0.0.1:80 root@<node81-135 IP>
 | 80 打不开 | 防火墙未放行 → `firewall-cmd --permanent --add-service=http && firewall-cmd --reload`；或 nginx 没 reload |
 | 首次开大图很慢 | 属正常：后端懒生成 8192 JPG，几十秒，Network 里能看到 `/api/scenes/<id>/preview`；此后秒开（已落盘 + 浏览器缓存） |
 | 探针输出里 `sacct` / `sacct-parse` 两行 **FAIL** | **预期结果，不是故障**：本机 `AccountingStorageType=accounting_storage/none`（账务关闭），`sacct` 恒返回非 0 且无输出 → 作业终态改读**退出码文件**，见 `deploy/README.md` §7.3 与 `current-question.md` §3.2「Slurm 接入定论」 |
-| 队列任务**永远 UNKNOWN**（作业明明跑完了） | 平台反推的退出码文件路径与作业写的对不上，或校验器根本写不出文件。逐层查：① `ls <lq_path>/Debug/_SREXIT_<job_id>.txt` 存不存在——不存在看作业 `.err` 有没有 `verify_sr_run: 无法写退出码文件`（作业以 **nginx** 身份跑，`<lq_path>/Debug/` 要 nginx 可写，`sudo -u nginx touch <lq_path>/Debug/w` 直接验）；② 存在但平台仍 UNKNOWN → 核对 config.xml 的 `DatarootLQ` 与作业实际 `lq_path` 是否同值；③ 多任务共用同一 `suffix` 会互相覆盖 config.xml/批脚本，把路径带偏（**验收与生产一律用互不相同的非空 suffix**） |
+| 队列任务**永远 UNKNOWN**（作业明明跑完了） | 平台反推的退出码文件路径与作业写的对不上，或校验器根本写不出文件。逐层查：① `ls <lq_path>/Debug/_SREXIT_<job_id>.txt` 存不存在——不存在看作业 `.err` 有没有 `verify_sr_run: 无法写退出码文件`（作业以 **nginx** 身份跑，`<lq_path>/Debug/` 要 nginx 可写，`sudo -u nginx touch <lq_path>/Debug/w` 直接验）；② 存在但平台仍 UNKNOWN → 核对 config.xml 的 `DatarootLQ` 与作业实际工作目录是否同值（开沙箱时 `DatarootLQ` 是副本路径，`/api/queue` 的 `run_dataroot` 字段就是它）；③ 配置文件名带任务指纹，同 suffix 的不同任务已不会互相覆盖（2026-09-10 前是手写 `run_sr_<suffix>.xml`，会串；老任务若仍 UNKNOWN 请重提） |
 | 作业秒挂 / 立刻失败 | `SR_SLURM_WORK_DIR` 不是**共享盘**：config.xml 与批脚本由 API 写在这个目录，作业却落到 12 个计算节点之一上读它。默认 `/tmp/sr_agent_work` 是本机路径 → 改到 `/DiskArray/...` 这类共享挂载（`srun -w node81-140 ls -d <WORK>` 直接验） |
 | 作业 `exit(3)`（GPU 守卫） | 两种可能：① `$SR_BUNDLE_DIR/code_0817_prod.py` **还是原脚本**（没装部署变体）——`head -3` 应见 `GENERATED FILE — DO NOT EDIT` 横幅，装法见 `deploy/README.md` §7.1；② 变体已装但 `--gres` 没给到卡——查作业 `.out` 审计段的 `CUDA_VISIBLE_DEVICES=` 是否为空 |
 | 作业 `.err` 报 `ImportError: libXXX.so` / `OSError` | 批脚本的 `#SBATCH --export=NONE` 把提交端环境（含 `LD_LIBRARY_PATH`）一起丢了，torch1.9.1 / GDAL 链不上系统库 → `backend/services/run_sr.py` 里把它改成 `#SBATCH --export=ALL`（唯一一处），重跑 `pytest backend/tests/test_run_sr.py` 后拷 `backend/` 到 `<APP>` 并 `systemctl restart sr-api`（上机必验项 V1） |
 | 平台显示 **FAILED** 但作业退出码是 0 | 这是**预期的新行为**：契约不满足（缺 SRLOG 或末行不是 `Run finished.` 或缺输出 tif）时校验器以**退出码 90** 结束。看退出码文件的 `reason` 字段点名缺哪条——这正是以前被固化成「成功」的那批静默失败 |
+| 跑完 SR 后，填的那个盘阵目录里输入被改名成 `*_NOSR.tif` | **不开沙箱时的预期行为**，不是 bug：`util.writeTiff` 写产物前必先改名输入（跟 `Suffix` / `DeleteOriTifNeeded` 都无关）。要生产目录只读就配 `SR_SANDBOX_ROOT`（deploy/README §7.5）：每个作业先 `cp -a` 一份副本，产物落在 `<根>/<task_fingerprint 前12位>/<目录名>/`，`/api/queue` 的 `run_dataroot` 字段指出确切位置 |
+| 提交报 `SR_SANDBOX_ROOT ... rejected` | 沙箱根含空格 / 引号 / `` ` `` / `..` —— 它会拼进作业脚本里的 `rm -rf`，被白名单挡下。改成纯 `/A-Za-z0-9._-/` 的绝对路径再重启 sr-api |
 | 云量超阈值的任务显示 COMPLETED 且没有输出 tif | **不是 bug**：合法跳过（`Run skipped:` 终态行 + 退出码文件 `skip=1`），契约只要求 SRLOG 存在，不要求输出 tif。若它显示 FAILED，说明 `$SR_BUNDLE_DIR/verify_sr_run.py` 不是本批版本 |
 
 浏览器侧闭环：`/scenes` 打开场景出图 · 画掩码点「提交 SR」跳 `/queue` 预填 · 提交后状态徽标随

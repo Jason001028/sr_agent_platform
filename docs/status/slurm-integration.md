@@ -84,7 +84,7 @@ P2 起这些值就是 `deploy/sr-api.service` 与 `backend/config.SR_DEFAULT_*` 
 
 | 项 | 实测值 | 来源 | 状态 |
 |---|---|---|---|
-| 主分区 | `gpup` | 用户回传（探针里 `SR_SLURM_PARTITION=<unset>`，即当时没显式配） | 已确认 |
+| 主分区 | `gpu` | 2026-09-11 `sinfo -h -o "%P"` 实测：`centos7` / `deicc` / `gpu` / `gpu*` / `test`（`*`=默认分区）。**无 `gpup`** —— 早先那条「用户回传 `gpup`」是转述错误，已订正 | 已确认（订正） |
 | 计算节点 | 12 个：`node81-129` … `node81-140` | `sinfo -N` | 已确认（⇒ §2.6 共享盘那条**适用**） |
 | bundle 目录 | `/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes` | 用户回传写作 `exe/CentOS7`+`msnr_bundle`；**采用 `code_0817_prod.py:27` 的拼写**（源码优先于转述） | 已确认（P3 用 `ls` 复核一次拼写） |
 | `SR_PYTHON` | `/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python` | 用户 2026-09-10 明确：**沿用文档旧值，不用本机 base 环境 python**（`(base) [root@node81-135 ...]` 只是登录 shell 所在环境） | 已确认（P3 仍建议跑一次 `<该 python> -c "import torch, gdal"` 验证 torch1.9.1 + GDAL 齐全） |
@@ -223,6 +223,85 @@ P2 起这些值就是 `deploy/sr-api.service` 与 `backend/config.SR_DEFAULT_*` 
 不要做：不要把探针里 --deep 的提交动作写成默认开启；不要在文档里留 <<CONFIRM>> 占位。
 
 验收：四条 D 阶段结论都有真实输出为证；文档里的路径与参数都能在真机上对上。
+```
+
+### P4 · 第四批：打通「提交 SR」全链路（半监督，跨真机）
+
+```text
+本轮任务：Slurm 真机接入 · 第四批（从「提交 SR」按钮到 Slurm 分配 + conda 环境超分，端到端打通）
+
+前置（先读，别重复调研）：
+- docs/planning/sr-pipeline-restore-plan.md —— 本轮的总清单（断点 B1–B6、阶段 0–6、决策点 ①②③）。
+  本窗口照它执行，不再另起方案。
+- docs/status/slurm-integration.md §一/§二（决策快照、已核实事实）与 docs/status/slurm-acceptance.md
+  （真机验收 A–D 的分步命令 + 成功判据 + 失败处置）。真机命令直接复用后者，不要重写。
+- backend/services/run_sr.py、backend/services/slurm.py、backend/api/platform.py、backend/api/paths.py、
+  backend/services/scene_search.py、frontend/src/stores/queue.ts。
+- 场景的判据以生产代码为准：SR_code/util.py 的 get_l1_pan_tif_rcsc / check_sr_previous_step。
+
+分工（半监督，务必按这个节奏，别跳）：
+- 你在开发机工作，只负责：改代码、跑本地测试、写文档、把真机命令整理成可整段粘贴的一段。
+- node81-135 上的任何动作都由用户执行。你给完命令就**停下等用户贴回输出**，判读后再决定下一步。
+  不要替用户猜输出，也不要跳过判读直接往下做。
+- 凡是影响实现方向的取舍（方案二选一、某个实测值、某条判据存疑），用 AskUserQuestion 提问并**等待**，
+  不要自己拍板。反复问没关系，问错了重做更贵。
+
+已完成，不要重做：
+- 上一批（部署变体 E1–E9 + 作业内校验器 + 平台 Slurm 层 + 探针 + 文档）已提交为 e06921d。
+- E-A（SR_SR_SCRIPT 开关）已在开发机完成：run_sr.py 四处 + test_run_sr.py 四例，
+  后端 287 项测试全过、变体 --check 通过；deploy/README.md §7.1、slurm-acceptance.md §0.2/§0.3、
+  sr-pipeline-interface.md §7.1、current-question.md §6.4 已改成「变体并置 + env 指定」的装法。
+  **不要退回「改名顶替 code_0817_prod.py」的旧写法。**
+
+本轮要做的，按顺序：
+
+第 0 步 · 三个决策点（先问，再动手）
+用 AskUserQuestion 一次性问清计划 §0.2 的三项：预览 JPG 缓存落点、默认后缀取值、阶段 6 生产写权范围。
+拿到答复之前，不要开始 E-B / E-E 的编码。
+
+第 1 步 · 阶段 0 真机结构核查（给命令 → 等用户贴回 → 你判读）
+把计划 §0.1 的 5 条只读命令整理成一段可整段粘贴的脚本交给用户，然后停下等输出。
+判读要点：生产编号目录里到底有没有 <目录名>.tif（SC 步）或 PAN.tif（RC 步）、有没有 <目录名>_meta.xml、
+有没有 Debug/ 子目录；层级是不是「年/月/日/生产编号」。
+⚠️ 这是唯一能证伪「场景 = 生产编号目录」这条判据的动作。若实测不符，**先停下来说明**——
+阶段 1 的 E-D 收件规则要按实测改写，不要硬套计划里的写法。
+
+第 2 步 · 阶段 1 剩余代码改动（你自动完成，边做边测）
+按计划 §E-B / §E-C / §E-D / §E-E 逐项实现，每项都要配测试：
+- E-B 空后缀归一：后端白名单归一（platform.py 的 _norm_sr_params 与 tools/run_sr.py 共用同一个函数，
+  两条入口必须同结果，否则幂等指纹会分叉）+ 掩码 draft 与前端默认值一起改。
+  **必须做字符白名单**：suffix 会拼进输出文件名，`../` 之类就是路径穿越。
+- E-C 变体 E10：云量字段解析容错，写进 gen_slurm_variant.py 的 EDITS，重新生成 + --check。
+- E-D 检索：收件规则改为 p.stem == p.parent.name 且同目录存在 <目录名>_meta.xml（一条规则即排除
+  _NOSR / _mask / _<suffix> 全部派生件）；再把它改成读服务器本地索引（索引落在 SR_SCENES_ROOT 之外）。
+- E-E 预览缓存迁出盘阵（仅当决策点 ① 选本地盘；选盘阵内则跳过本项）。
+每项做完跑 python -m pytest backend/tests -q，全绿再进下一项。实现取舍你可以自己定，
+但**改了什么语义、为什么**要在回复里讲清楚。
+
+第 3 步起 · 阶段 2 → 6，一段一段来
+每一段都是同一个循环：你给命令 → 用户跑 → 贴回 → 你判读 → 给下一段。不要一次抛五个问题。
+- 阶段 2 变体上机 + 八项 env + 重启自检 + 探针（**不带 --deep**）
+- 阶段 3 裸 Slurm 冒烟 B1–B3（绕开平台，先证明地基）
+- 阶段 4 走 /api/queue 提交一次真 SR（沙箱场景，非空 suffix）
+- 阶段 5 链路四结论 D1–D4：静默失败不再被标成成功 / 幂等回归 / 云量跳过 / SSE，每条留真实输出
+- 阶段 6 切生产（**仅在阶段 5 全绿之后**，并按决策点 ③ 的范围灰度，先只放开一个生产编号目录）
+每段结束时给一个明确的「下一步等你什么」。
+
+不要做：
+- 不要覆盖 $SR_BUNDLE_DIR/code_0817_prod.py —— 变体并置、用 SR_SR_SCRIPT 指定；生产原文件必须字节不动。
+- 不要在阶段 6 之前往生产盘阵写任何文件；阶段 0–5 一律用沙箱副本（cp -a 且**目录名不能改**）。
+- 不要把探针 --deep 的提交动作写成默认开启。
+- 不要在文档里留 <<CONFIRM>> / <占位> 这类没填的值；需要实测值就去要。
+- 不要 patch SR_code/util.py 里那族 exit()（由作业内校验器判成 90 / FAILED 兜住，见计划 E-C 备注）。
+- 不要相信 sacct 的任何输出（账务未启用，恒 rc=1）；终态一律读 Debug/_SREXIT_<job_id>.txt。
+
+验收：
+- 阶段 1 剩余四项落地且 pytest 全绿（基线 287，只增不减）；
+- 阶段 0 的结构核查有真实输出，且 E-D 的收件规则与实测一致；
+- 阶段 5 四条结论各有真实输出为证；
+- 文档里的路径与参数都能在真机上对上，全部是实测值。
+
+交付方式：每完成一段，回复只讲三件事——做成了什么、证据是什么（命令 + 输出）、下一步等你什么。
 ```
 
 ## 四、开发机可验 vs 必须真机验证

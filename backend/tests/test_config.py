@@ -89,7 +89,7 @@ class SrRuntimeEnvTest(unittest.TestCase):
         os.environ.update({
             "SR_PYTHON": "/opt/conda/envs/torch1.9.1py36/bin/python",
             "SR_SLURM_WORK_DIR": "/DiskArray/tmp/sr_agent_work",
-            "SR_SLURM_PARTITION": "gpup",
+            "SR_SLURM_PARTITION": "gpu",
             "SR_SLURM_GRES": "2",
             "SR_SLURM_TIME": "04:30:00",
             "SR_SLURM_CPUS": "8",
@@ -102,7 +102,7 @@ class SrRuntimeEnvTest(unittest.TestCase):
         rt = config.sr_runtime()
         self.assertEqual(rt.python, "/opt/conda/envs/torch1.9.1py36/bin/python")
         self.assertEqual(rt.slurm_work_dir, "/DiskArray/tmp/sr_agent_work")
-        self.assertEqual(rt.partition, "gpup")
+        self.assertEqual(rt.partition, "gpu")
         self.assertEqual(rt.gres, 2)
         self.assertEqual(rt.time, "04:30:00")
         self.assertEqual(rt.cpus, 8)
