@@ -113,7 +113,9 @@ sr-agent-platform/
 
    - `WorkingDirectory=` → 解压根（默认 `/data/www/sr-agent-platform`，保证能 import `backend` 包）；
    - `Environment=SR_SCENES_ROOT=` → 盘阵根（**必填**，须与 nginx `alias` 同值）；
-   - `Environment=SR_AGENT_DB=` → SQLite 库（阶段5 起 chat 会话 + sr_tasks 同库；父目录须 `nginx` 可写）；
+   - `Environment=SR_AGENT_DB=` → SQLite 库（阶段5 起 chat 会话 + sr_tasks 同库；**父目录**须 `nginx` 可写）。
+     ⚠️ 指向**应用解压根之外**的专用目录（模板已给 `/DiskArray/tmp/wangrz/sr_agent_db/`）——
+     塞在解压根里时 nginx 写不动，库一被碰就 `unable to open database file`（2026-09-11 实机实测）；
    - `Environment=SR_LLM_MOCK=0` / `SR_SLURM_FAKE=0` → **真机显式关假实现**（service 已带默认，勿改成 1）；
    - Slurm 六项 env（`SR_PYTHON` / `SR_BUNDLE_DIR` / `SR_SLURM_WORK_DIR` / `SR_SLURM_PARTITION` / `SR_SLURM_TIME` / `SR_SLURM_CPUS`）→ 见 **§七 Slurm 接入**；缺任一项 SR 作业提交必失败；
    - 真 LLM 再配 `SR_LLM_BASE_URL/API_KEY/MODEL`（内网端点，见 service 注释）；不配则 loop 默认连外网端点（离机/MVP 用 mock，见 §四）；
@@ -122,7 +124,8 @@ sr-agent-platform/
    > 权限：systemd 默认以 `nginx` 用户跑（`User=` 已设）。该用户需能**读**盘阵 TIF、
    > **写**预览 JPG 缓存（默认写源同目录 `<源>.preview.jpg`）、**写** `SR_AGENT_DB` 库。
    > 盘阵目录可写、所有组即可：`chgrp -R nginx <SR_SCENES_ROOT> && chmod -R g+rwX <SR_SCENES_ROOT>`；
-   > 库目录单独给写权：`mkdir -p <SR_AGENT_DB 父目录> && chown -R nginx:nginx <SR_AGENT_DB 父目录>`。
+   > 库目录单独给写权（**只给这一个目录，别 chown 整棵应用树**）：
+   > `mkdir -p <SR_AGENT_DB 父目录> && chown nginx:nginx <SR_AGENT_DB 父目录> && chmod 750 <SR_AGENT_DB 父目录>`。
 
    ```bash
    systemctl daemon-reload
@@ -391,7 +394,7 @@ env——`sr-api.service` 里**前八项**全部必填、第九项强烈建议�
 | --- | --- | --- |
 | `SR_PYTHON` | `/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python` | **SR 生产解释器**（py3.6 + torch1.9.1 + GDAL + ImgHistMatch.so），与平台 venv `/opt/sr-venv`（py3.9）平行、互不污染——后端不 import SR/torch/GDAL，只在批脚本里写一行解释器路径，该行在**计算节点**上解析 |
 | `SR_BUNDLE_DIR` | `/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes` | `code_0817_prod.py` / `models` / `utils` / `options` 所在目录；拼写以 `code_0817_prod.py:27` 的 `load_library()` 为准 |
-| `SR_SLURM_WORK_DIR` | `/DiskArray/tmp/wangrz/sr_agent_work` | config.xml 与批脚本落盘处。**必须是共享盘**——12 个计算节点（node81-129..140）之一会读它；默认值 `/tmp/sr_agent_work` 是本机路径，多节点下作业秒挂 |
+| `SR_SLURM_WORK_DIR` | `/DiskArray/tmp/wangrz/sr_agent_work` | config.xml 与批脚本落盘处。**必须是共享盘**——`gpu` 分区横跨 **76** 个节点（`node81-*` 与 `node104-*` 两族，2026-09-11 探针实测），作业落在哪台由调度器决定，每一台都要能读它；默认值 `/tmp/sr_agent_work` 是本机路径，多节点下作业秒挂 |
 | `SR_SLURM_PARTITION` | `gpu` | `sinfo -h -o "%P"` 实测（`centos7` / `deicc` / `gpu` / `gpu*` / `test`，星号=默认分区）。**没有 `gpup`** —— 早先文档那个值是转述错误；不配则走默认分区，多分区集群下不可控 |
 | `SR_SLURM_TIME` | `02:00:00` | 作业时限（`#SBATCH --time`） |
 | `SR_SLURM_CPUS` | `4` | `#SBATCH --cpus-per-task` |
