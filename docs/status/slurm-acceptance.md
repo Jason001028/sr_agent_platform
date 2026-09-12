@@ -71,8 +71,9 @@ ls -l code_0817_prod.py                                         # ✓= 生产原
 
 ### 0.3 service env 与重启
 
-env 分两处：主文件（`SR_SCENES_ROOT` / `SR_AGENT_DB` / `SR_LLM_MOCK` / `SR_SLURM_FAKE`）
-+ drop-in `/etc/systemd/system/sr-api.service.d/10-slurm.conf`（Slurm/沙箱九项）。
+env 分三处：主文件（`SR_SCENES_ROOT` / `SR_LLM_MOCK` / `SR_SLURM_FAKE`）
++ drop-in `/etc/systemd/system/sr-api.service.d/10-slurm.conf`（Slurm/沙箱九项）
++ drop-in `20-agentdb.conf`（`SR_AGENT_DB`，库移出应用树；见 §0.6）。
 查 **systemd 实际读到的合并文本**（`systemctl cat` 按加载顺序拼接，`# 路径` 标明来源）：
 
 ```bash
@@ -109,15 +110,24 @@ systemctl status sr-api --no-pager | head -5      # ✓= active (running)
 ### 0.4 待核项（`slurm-integration.md §2.7` 的「待核」行 + 两处上机复核）
 
 ```bash
-# (1) bundle 目录拼写（以源码 code_0817_prod.py:27 的 load_library() 为准）
-ls -d $BUNDLE && ls $BUNDLE/code_0817_prod.py $BUNDLE/util.py $BUNDLE/models $BUNDLE/options
+# (1) bundle 目录拼写 + 入口脚本真正 import 的三样
+#     以源码为准：code_0817_prod.py:27 load_library() 给目录拼写；
+#     :15-17 三行 import 给依赖清单（util.py 在 utils 包**里**，不是顶层文件）
+ls -d $BUNDLE && ls $BUNDLE/code_0817_prod.py $BUNDLE/models $BUNDLE/options $BUNDLE/utils/util.py
 
 # (2) SR_PYTHON 里 torch / GDAL 齐不齐（是 torch1.9.1py36，不是登录 shell 的 base 环境）
-$SR_PYTHON -c "import torch, gdal; print('torch', torch.__version__, '| gdal', gdal.__version__)"
+#     ⚠️ GDAL 用 VersionInfo()：py3.6 时代的 osgeo 绑定**没有** gdal.__version__，
+#     上一版这条命令因此抛 AttributeError（2026-09-11 实测），会被误读成「环境坏了」。
+$SR_PYTHON -c "import torch; from osgeo import gdal; print('torch', torch.__version__, '| gdal', gdal.VersionInfo())"
 
-# (3) 共享盘在不同计算节点上都可见（12 节点集群，本机路径必挂）
-srun -N1 -n1 -w node81-129 sh -c "ls -d $WORK $BUNDLE" ; echo "rc=$?"
-srun -N1 -n1 -w node81-140 sh -c "ls -d $WORK $BUNDLE" ; echo "rc=$?"
+# (3) 共享盘在**每一类**计算节点上都可见（gpu 分区横跨 node81-* 与 node104-* 两族，
+#     作业落在哪族由调度器决定，两族都得探）
+N81=$(sinfo -h -p $PART -N -o "%N %t" | awk '$2=="idle" && $1 ~ /^node81-/  {print $1; exit}')
+N04=$(sinfo -h -p $PART -N -o "%N %t" | awk '$2=="idle" && $1 ~ /^node104-/{print $1; exit}')
+echo "picked: node81=$N81  node104=$N04"
+for n in $N81 $N04; do
+  srun -N1 -n1 -w "$n" sh -c "hostname; ls -d $WORK $BUNDLE" ; echo "rc=$? node=$n"
+done
 ```
 
 `record:` 三条的实际输出；核完把 §2.7 对应行的「待核」改成「已核」
@@ -125,6 +135,12 @@ srun -N1 -n1 -w node81-140 sh -c "ls -d $WORK $BUNDLE" ; echo "rc=$?"
 ✗ (1) 拼写不符 → 改 `deploy/sr-api.service` 的 `SR_BUNDLE_DIR`（源码优先，先 `ls` 看清实际拼写）。
 ✗ (2) import 失败 → 换解释器前**先确认**新环境里 torch/GDAL/`ImgHistMatch.so` 齐（见 service 注释）。
 ✗ (3) 某节点看不到 `$WORK` → `SR_SLURM_WORK_DIR` 不是共享盘，作业会秒挂。
+
+> **2026-09-11 修正**：原文的 (1) 要求 `$BUNDLE/util.py`、(3) 钉死 `node81-129/140`，两处都与实测不符。
+> (1) 是 `probe_slurm.sh` 的检查清单写错了（它照抄了仓库 `SR_code/util.py` 的**扁平**布局，而真机 bundle 是
+> `mmsr_bundle/codes/utils/util.py` 的**包**布局）——`bundle FAIL missing util.py` 是假 FAIL；
+> (3) 当时以为集群是 12 节点，实测 `gpu` 分区有 **76** 个节点、横跨 `node81-*` 与 `node104-*` 两族（见 §2.7）。
+> 探针已改，但**不在本轮上机**（改的是我们自己的工具，不值得为它单独跑一趟 U 盘），先按上面的 (1) 用 `ls` 直接核。
 
 ### 0.5 沙箱目录
 
@@ -135,6 +151,54 @@ sudo -u nginx touch $TEST/w && echo "nginx-can-write-OK"
 
 **为什么是 nginx**：`sr-api` 以 `User=nginx` 运行，它 `sbatch` 提交的作业**也以 nginx 身份在计算节点上执行**。
 所以本清单里「作业用户可写」= **nginx 可写**，不是 root。
+
+### 0.6 库目录（`write-db FAIL` 的修法，D 阶段前必做）
+
+2026-09-11 探针实测：`PROBE: write-db FAIL nginx CANNOT write /run/media/root/SSD/workspace/wangrz/sr-agent-platform`。
+**这是真问题**（同一次运行里 `write-work OK` 走的是同一条 `sudo -n -u nginx test -w` 分支，说明前者的
+FAIL 不是 `sudo` 假阴性）：平台的 `SR_AGENT_DB` 落在应用解压根里，而解压根属 root，nginx 写不动。
+[`store.py:88-99`](../../backend/services/store.py#L88-L99) 是懒打开——首次用到就 `makedirs(parent)` →
+`connect` → `executescript(_SCHEMA)`（建表 = 写事务 = 要在**父目录**落 journal），所以目录不可写时
+**第一笔** `/api/queue` 提交、第一条 chat 会话就报 `unable to open database file`，poller 每 2 秒还会再炸一次。
+
+修法（**不动已部署的单元正文**，用 drop-in 覆盖；回滚 = 删这一个文件）：
+
+```bash
+APP=/run/media/root/SSD/workspace/wangrz/sr-agent-platform   # 应用树（属 root）
+DBDIR=/DiskArray/tmp/wangrz/sr_agent_db                      # 专用库目录（与 $WORK/$SANDBOX 同族）
+
+# ① 先取证：老库在不在、有没有数据（有数据才需要搬）
+ls -l $APP/sr_agent.db 2>/dev/null || echo "OLD DB: none"
+
+# ② 建目录并只给它写权（不要 chown 整棵应用树）
+mkdir -p $DBDIR && chown nginx:nginx $DBDIR && chmod 750 $DBDIR && ls -ld $DBDIR
+
+# ③ drop-in 覆盖（同变量多处赋值时 drop-in 胜出，因为它在主文件之后解析）
+mkdir -p /etc/systemd/system/sr-api.service.d
+cat > /etc/systemd/system/sr-api.service.d/20-agentdb.conf <<'EOF'
+[Service]
+Environment=SR_AGENT_DB=/DiskArray/tmp/wangrz/sr_agent_db/sr_agent.db
+EOF
+systemctl daemon-reload
+systemctl cat sr-api | grep -n 'SR_AGENT_DB'      # ✓= 两行（主文件旧值 + drop-in 新值）
+
+# ④ 老库有就搬（保留已有会话/任务）
+[ -f $APP/sr_agent.db ] && cp -p $APP/sr_agent.db $DBDIR/sr_agent.db && chown nginx:nginx $DBDIR/sr_agent.db && echo migrated || echo "no old db"
+
+# ⑤ 重启，并以**运行中进程的 env** 为准核对（daemon-reload 不改已跑进程）
+systemctl restart sr-api; sleep 2
+PID=$(systemctl show sr-api -p MainPID | cut -d= -f2)
+tr '\0' '\n' < /proc/$PID/environ | grep '^SR_AGENT_DB'
+```
+
+`record:` ①④⑤ 的输出；✓= ⑤ 打印的是新路径
+
+✗ ⑤ 仍打印旧路径 → drop-in 没被读到（`systemctl cat` 里没有那行 / 文件名写错）→ 回头核 ③。
+✗ `nginx` 建库仍失败 → 该目录所在文件系统的 SELinux 语境或挂载不允许写；换本地盘目录（如 `/var/lib/sr-agent-platform`）。
+
+> 两处**故意不做**的事：不把库留在应用树里（那是 root 的树，给 nginx 写权等于把代码目录交给服务进程）；
+> 不为了绕过权限而 `chown -R nginx` 整棵应用树（`real-machine-bringup.md §2.2` 的老建议，已被本节取代）。
+> NFS 上的 SQLite 只允许单主机单进程写：本平台只有 node81-135 跑 `sr-api`，成立；日后多机要换存储。
 
 ---
 
@@ -152,6 +216,9 @@ sh $APP/deploy/slurm/probe_slurm.sh
 ✗ `client-bin FAIL` → Slurm 客户端没装，后面全免谈（H-BIN）。
 ✗ `scontrol-ping FAIL` / `munge-auth FAIL` → 集群本身不通，先修 H-PING / H-MUNGE。
 ✗ `write-work FAIL`（nginx 不能写 `$WORK`）→ `chown nginx:nginx $WORK`；这是 D 阶段必踩的坑。
+✗ `write-db FAIL`（nginx 不能写库父目录）→ 按 **§0.6** 把库移出应用树；不改则 D 阶段队列/会话全废。
+✗ `bundle FAIL missing util.py` → **假 FAIL**（探针检查清单写错，见 §0.4 的 2026-09-11 修正），
+改用 §0.4(1) 的 `ls $BUNDLE/utils/util.py` 直接核。
 
 **GPU 分配形态（可选项，默认不跑）**——`--deep` 会**真的提交一个 2 分钟作业**，只在复核 E3 兜底或 B2 有疑问时才跑：
 

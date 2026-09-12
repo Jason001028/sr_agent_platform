@@ -6,6 +6,9 @@
 #
 # 安装：
 #   cp deploy/sr-api.service /etc/systemd/system/
+#   ⚠️ 真机上**不要直接改部署后的这份正文**：真机差异用 drop-in 覆盖
+#      （/etc/systemd/system/sr-api.service.d/*.conf，回滚=删文件；node81-135 上
+#      已有 10-slurm.conf 与 20-agentdb.conf 两个）。同变量多处赋值时 drop-in 胜出。
 #   按真机改：SR_SCENES_ROOT（必填）、SR_AGENT_DB 的目录归属，SR_PREVIEWS_ROOT 可选
 #   （配了必须在 SR_SCENES_ROOT 之下）；以及 WorkingDirectory / ExecStart 的 venv 路径。
 #   systemctl daemon-reload && systemctl enable --now sr-api
@@ -35,9 +38,17 @@ RestartSec=3
 # 阶段4 必填：盘阵场景根（nginx.conf 的 alias /data/scenes/ 须与此一致）
 Environment=SR_SCENES_ROOT=/data/scenes
 # 阶段5：SQLite 库路径（chat 会话消息 + sr_tasks 同库）。store 首次写自动建父目录，
-# 但 User=nginx 须有写权限——真机改到 nginx 可写目录或 chown（例：
-# mkdir -p /data/www/sr-agent-platform && chown nginx:nginx /data/www/sr-agent-platform）
-Environment=SR_AGENT_DB=/data/www/sr-agent-platform/sr_agent.db
+# 但 User=nginx 须能写**父目录**（SQLite 建表/日志要往父目录落 journal 文件）。
+# ⚠️ 别把库放在应用解压根里：解压根属 root、nginx 只读得动。2026-09-11 在 node81-135
+#    实测 nginx **写不了** <APP>（探针 `write-db FAIL`）——库第一次被碰就
+#    `unable to open database file`，于是 /api/queue 提交、chat 建会话全废，poller
+#    还会每 2 秒炸一次。改法：库单独放一个 nginx 可写的专用目录（与
+#    SR_SLURM_WORK_DIR 同处大盘，不塞进代码树），示例为 node81-135 实测值：
+#      mkdir -p /DiskArray/tmp/wangrz/sr_agent_db \
+#        && chown nginx:nginx /DiskArray/tmp/wangrz/sr_agent_db && chmod 750 /DiskArray/tmp/wangrz/sr_agent_db
+#    （SQLite 在 NFS 上只允许**单主机单进程**写——本平台只有 node81-135 跑 sr-api，成立；
+#      若日后多机跑，这个库要换成本地盘或真数据库。）
+Environment=SR_AGENT_DB=/DiskArray/tmp/wangrz/sr_agent_db/sr_agent.db
 # 阶段5：真机显式关假实现 —— mock LLM / 假调度器都必须 =0（离机验收 / .e2e 才置 =1）
 Environment=SR_LLM_MOCK=0
 Environment=SR_SLURM_FAKE=0
@@ -74,7 +85,7 @@ Environment=SR_SR_SCRIPT=code_0817_prod_slurm.py
 Environment=SR_VERIFY_SCRIPT=verify_sr_run.py
 #
 # ⚠️ SR_SLURM_WORK_DIR 必须是**共享盘**：config.xml 与批脚本由 API 写在这里，
-#    而作业在 12 个计算节点（node81-129..140）之一上读它。默认值
+#    而作业在 gpu 分区的 76 个节点（node81-* 与 node104-* 两族）之一上读它。默认值
 #    /tmp/sr_agent_work 是本机路径，多节点下作业秒挂（slurm-integration.md §2.6）。
 #    SR_SLURM_WORK_DIR=/tmp/sr_agent_work
 #    权限两套都要有：nginx（写 config.xml/脚本）与作业用户（写 %j.out/%j.err）。

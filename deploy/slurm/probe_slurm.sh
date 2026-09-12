@@ -447,7 +447,15 @@ fi
 
 _bundle_bad=""
 [ -d "$SR_BUNDLE_DIR" ] || _bundle_bad="$_bundle_bad missing-dir"
-for _sub in models utils options util.py; do
+# The entry script imports these by name at module level:
+#   code_0817_prod.py:16  import utils.util as util
+#   code_0817_prod.py:15  import options.options as option
+#   code_0817_prod.py:17  from models import create_model
+# and its header (line 7) lists the deps as models/, utils/, options/.
+# util.py lives INSIDE the utils package -- a top-level $BUNDLE/util.py is
+# never imported by the entry script, and demanding one made this probe
+# report FAIL on a bundle that was in fact complete (2026-09-11, node81-135).
+for _sub in models utils utils/util.py options; do
     [ -e "$SR_BUNDLE_DIR/$_sub" ] || _bundle_bad="$_bundle_bad $_sub"
 done
 # The batch script cds here and runs the entry file by name; a bundle without
@@ -455,7 +463,7 @@ done
 _entry=$(ls "$SR_BUNDLE_DIR"/code_*_prod*.py 2>/dev/null | head -1)
 [ -n "$_entry" ] || _bundle_bad="$_bundle_bad code_*_prod*.py(entry script)"
 if [ -z "$_bundle_bad" ]; then
-    report bundle OK "$SR_BUNDLE_DIR has models/ utils/ options/ util.py"
+    report bundle OK "$SR_BUNDLE_DIR has models/ utils/ utils/util.py options/"
 else
     report bundle FAIL "missing under $SR_BUNDLE_DIR:$_bundle_bad" \
         "H-PATH: point SR_BUNDLE_DIR at mmsr_bundle/codes (script + imports must live there)"

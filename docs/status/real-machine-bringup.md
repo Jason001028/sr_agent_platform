@@ -97,14 +97,23 @@ grep -nE 'WorkingDirectory|SR_AGENT_DB' /etc/systemd/system/sr-api.service   # �
 > --host 127.0.0.1 --port 8000`）、`SR_LLM_MOCK=0`、`SR_SLURM_FAKE=0`（真机必须保持 0，勿改成 1）。
 > `SR_SCENES_ROOT=/data/scenes` 先保持默认，真机数据就位后按 §5 核对。
 
-### 2.2 目录属主（nginx 用户要读 backend/dist、写库父目录）
+> **2026-09-11 修正（`SR_AGENT_DB` 这一处上面那条 sed 是错的）**：这条 sed 会把库一起指到
+> `<APP>` 里，而 `<APP>` 属 root、`nginx` 写不动 —— 实机探针 `write-db FAIL`。库要单独放一个
+> nginx 可写的目录，且**不要**为此把整棵应用树 `chown` 给 nginx。真机改法（drop-in，不动已部署
+> 的单元正文）：`/etc/systemd/system/sr-api.service.d/20-agentdb.conf` 里
+> `Environment=SR_AGENT_DB=/DiskArray/tmp/wangrz/sr_agent_db/sr_agent.db`，详见
+> `slurm-acceptance.md §0.6`。本次部署**后补**上了这个 drop-in。
+
+### 2.2 目录属主（nginx 用户要读 backend/dist；库父目录单独给写权）
 
 ```bash
 chown -R nginx:nginx /run/media/root/SSD/workspace/wangrz/sr-agent-platform
 ```
 
-> 会整棵树归 nginx；root 仍可读写、不影响 git。介意可只 `chown nginx:nginx` 库父目录 + 预建
-> `touch .../sr_agent.db && chown nginx:nginx .../sr_agent.db`，backend/dist 保持默认即可读。
+> 会整棵树归 nginx；root 仍可读写、不影响 git。**更稳的做法是只给库目录写权**
+> （`mkdir -p <库父目录> && chown nginx:nginx <库父目录> && chmod 750 <库父目录>`），
+> backend/dist 保持默认即可读 —— 2026-09-11 教训：库塞在应用树里、又指望 nginx 写得动，
+> 结果是第一笔队列提交就报 `unable to open database file`。
 
 ### 2.3 启动 + 探活
 
@@ -202,7 +211,7 @@ ssh -N -L 18080:127.0.0.1:80 root@<node81-135 IP>
 | 首次开大图很慢 | 属正常：后端懒生成 8192 JPG，几十秒，Network 里能看到 `/api/scenes/<id>/preview`；此后秒开（已落盘 + 浏览器缓存） |
 | 探针输出里 `sacct` / `sacct-parse` 两行 **FAIL** | **预期结果，不是故障**：本机 `AccountingStorageType=accounting_storage/none`（账务关闭），`sacct` 恒返回非 0 且无输出 → 作业终态改读**退出码文件**，见 `deploy/README.md` §7.3 与 `current-question.md` §3.2「Slurm 接入定论」 |
 | 队列任务**永远 UNKNOWN**（作业明明跑完了） | 平台反推的退出码文件路径与作业写的对不上，或校验器根本写不出文件。逐层查：① `ls <lq_path>/Debug/_SREXIT_<job_id>.txt` 存不存在——不存在看作业 `.err` 有没有 `verify_sr_run: 无法写退出码文件`（作业以 **nginx** 身份跑，`<lq_path>/Debug/` 要 nginx 可写，`sudo -u nginx touch <lq_path>/Debug/w` 直接验）；② 存在但平台仍 UNKNOWN → 核对 config.xml 的 `DatarootLQ` 与作业实际工作目录是否同值（开沙箱时 `DatarootLQ` 是副本路径，`/api/queue` 的 `run_dataroot` 字段就是它）；③ 配置文件名带任务指纹，同 suffix 的不同任务已不会互相覆盖（2026-09-10 前是手写 `run_sr_<suffix>.xml`，会串；老任务若仍 UNKNOWN 请重提） |
-| 作业秒挂 / 立刻失败 | `SR_SLURM_WORK_DIR` 不是**共享盘**：config.xml 与批脚本由 API 写在这个目录，作业却落到 12 个计算节点之一上读它。默认 `/tmp/sr_agent_work` 是本机路径 → 改到 `/DiskArray/...` 这类共享挂载（`srun -w node81-140 ls -d <WORK>` 直接验） |
+| 作业秒挂 / 立刻失败 | `SR_SLURM_WORK_DIR` 不是**共享盘**：config.xml 与批脚本由 API 写在这个目录，作业却落到 gpu 分区的 76 个节点之一上读它。默认 `/tmp/sr_agent_work` 是本机路径 → 改到 `/DiskArray/...` 这类共享挂载（`srun -w node81-140 ls -d <WORK>` 直接验） |
 | 作业 `exit(3)`（GPU 守卫） | 两种可能：① `$SR_BUNDLE_DIR/code_0817_prod.py` **还是原脚本**（没装部署变体）——`head -3` 应见 `GENERATED FILE — DO NOT EDIT` 横幅，装法见 `deploy/README.md` §7.1；② 变体已装但 `--gres` 没给到卡——查作业 `.out` 审计段的 `CUDA_VISIBLE_DEVICES=` 是否为空 |
 | 作业 `.err` 报 `ImportError: libXXX.so` / `OSError` | 批脚本的 `#SBATCH --export=NONE` 把提交端环境（含 `LD_LIBRARY_PATH`）一起丢了，torch1.9.1 / GDAL 链不上系统库 → `backend/services/run_sr.py` 里把它改成 `#SBATCH --export=ALL`（唯一一处），重跑 `pytest backend/tests/test_run_sr.py` 后拷 `backend/` 到 `<APP>` 并 `systemctl restart sr-api`（上机必验项 V1） |
 | 平台显示 **FAILED** 但作业退出码是 0 | 这是**预期的新行为**：契约不满足（缺 SRLOG 或末行不是 `Run finished.` 或缺输出 tif）时校验器以**退出码 90** 结束。看退出码文件的 `reason` 字段点名缺哪条——这正是以前被固化成「成功」的那批静默失败 |
