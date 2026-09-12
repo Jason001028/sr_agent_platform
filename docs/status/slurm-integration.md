@@ -85,7 +85,7 @@ P2 起这些值就是 `deploy/sr-api.service` 与 `backend/config.SR_DEFAULT_*` 
 | 项 | 实测值 | 来源 | 状态 |
 |---|---|---|---|
 | 主分区 | `gpu` | 2026-09-11 `sinfo -h -o "%P"` 实测：`centos7` / `deicc` / `gpu` / `gpu*` / `test`（`*`=默认分区）。**无 `gpup`** —— 早先那条「用户回传 `gpup`」是转述错误，已订正 | 已确认（订正） |
-| 计算节点 | 12 个：`node81-129` … `node81-140` | `sinfo -N` | 已确认（⇒ §2.6 共享盘那条**适用**） |
+| 计算节点 | **76 个**（`gpu` 分区）：`node81-[129-162,165-183,185-189]` + `node104-[27-39,41-45]`；整个集群 `sinfo -N` 计 **96** 行；控制器 `Slurmctld(primary) at node81-190`。2026-09-11 探针实测 `node81-133/134/135/136` 为 `down`（**本机 node81-135 是 `down*`** —— 从本机提交的作业不会落回本机） | 探针 §A（`scontrol show partition -o` + `sinfo -N`） | 已核（2026-09-11 订正：原记「12 个：node81-129…140」是当时的局部读数，⇒ §2.6 共享盘那条**更加适用**；另见 slurm-acceptance §0.4 新增的「两族节点都要探」） |
 | bundle 目录 | `/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes` | 用户回传写作 `exe/CentOS7`+`msnr_bundle`；**采用 `code_0817_prod.py:27` 的拼写**（源码优先于转述） | 已确认（P3 用 `ls` 复核一次拼写） |
 | `SR_PYTHON` | `/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python` | 用户 2026-09-10 明确：**沿用文档旧值，不用本机 base 环境 python**（`(base) [root@node81-135 ...]` 只是登录 shell 所在环境） | 已确认（P3 仍建议跑一次 `<该 python> -c "import torch, gdal"` 验证 torch1.9.1 + GDAL 齐全） |
 | `SR_SLURM_WORK_DIR` | `/DiskArray/tmp/wangrz/sr_agent_work` | 本窗口选定（必须在共享盘上，默认 `/tmp` 不满足） | **待核**：目录是否已存在、nginx 与作业用户是否都有写权限 |
