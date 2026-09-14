@@ -1,9 +1,10 @@
 /**
  * stores/viewer.ts — 查看器状态 + 编排（tif-viewer.html 交互层 Vue 化）
  * ------------------------------------------------------------------
- * 「移植不重写」：HTML 全局状态（recs/activeRec/view/curStretch/drawMode/exportQueue/
- * outHandle/...）平移到 Pinia store；动作逐函数直译（activate/decode/paintStretch/
- * 掩码/导出/落盘），仅把「直接操作 DOM」改为「状态变更 + renderTick 驱动 TifCanvas 重绘」。
+ * 「移植不重写」：HTML 全局状态（recs/activeRec/view/curStretch/drawMode/...）平移到
+ * Pinia store；动作逐函数直译（activate/decode/paintStretch/掩码），仅把「直接操作 DOM」
+ * 改为「状态变更 + renderTick 驱动 TifCanvas 重绘」。
+ * 最小原型删去了 HTML 的 browser JPG 导出/输出目录授权一条链路（前端不再落盘）。
  *
  * 重字段（Float32Array src / canvas thumb / BandStats stats）用 markRaw 存放，避免深代理。
  * renderTick 计数器是 TifCanvas 的重绘信号：任何影响视图的状态变更后 ++，TifCanvas watch 后重绘
@@ -12,7 +13,7 @@
 import { defineStore } from 'pinia';
 import { ref, computed, markRaw } from 'vue';
 import {
-  probeImage, tiffTags, layoutInfo, stretchRgba, JPG_QUALITY,
+  probeImage, tiffTags, layoutInfo, stretchRgba,
   setSparseMin as setSparseMinLib,
 } from '../lib/tifDecode.js';
 import type { ProbeInfo, BandStats, StretchMode, KitCanvas } from '../lib/tifDecode.js';
@@ -27,15 +28,12 @@ import { FileSource } from '../lib/source.js';
 import { browserKit } from '../lib/browserKit.js';
 import { decodeOne } from '../lib/decode.js';
 import type { DecodedRec } from '../lib/decode.js';
-import { loadSrConfig, sceneDecodePixels } from '../lib/scene.js';
+import { sceneDecodePixels } from '../lib/scene.js';
+import { classifyImages } from '../lib/imageFiles.js';
 import type { SceneOpenMeta } from '../lib/scene.js';
 import { buildStats, luma, STAT_HI } from '../lib/roiStats.js';
 import type { RoiStats } from '../lib/roiStats.js';
-import { apiBakeMask } from '../lib/api.js';
-import type { BakeMaskBody } from '../lib/api.js';
-import { exportToJpg } from '../lib/exportJpg.js';
-import { getSaver, fsIO, setOutDirListener, downloadBlob } from '../lib/saver.js';
-import type { OutDirState } from '../lib/saver.js';
+import { downloadBlob } from '../lib/saver.js';
 import { useQueueStore } from './queue.js';
 import router from '../router/index.js';
 
@@ -57,8 +55,9 @@ export interface ViewerRec {
   nbands: number;
   invert: boolean;
   stats: BandStats[] | null;
-  /** 解码路由；'jpg' = 盘阵场景（服务器烘焙 JPG，无本地 TIF 字节） */
-  route: 'utif' | 'sparse' | 'chunked' | 'jpg' | null;
+  /** 解码路由；'jpg' = 盘阵场景（服务器烘焙 JPG，可提交 SR）；
+      'img' = 本地打开的 .jpg/.jpeg（同一像素管线，但无 sceneId/lqPath → 不可提交）。 */
+  route: 'utif' | 'sparse' | 'chunked' | 'jpg' | 'img' | null;
   /** 阶段4 不透明场景 id（route='jpg' 时必有；掩码烘焙 POST /api/masks 用）。 */
   sceneId: string | null;
   /** 阶段6 scene 文件父目录绝对路径（= run_sr 目录语义，与 /api/queue
@@ -69,17 +68,6 @@ export interface ViewerRec {
   statusCls: '' | 'ok' | 'err';
   paintedMode: StretchMode | null;
   maskRois: Poly[] | null;     // 缩略图坐标 ROI
-  _jpgBusy: boolean;
-  _jpgDone: boolean;
-  _jpgToken: number;
-  _exportCap?: number;
-  jpgStatus: string;
-  jpgCls: '' | 'ok' | 'err';
-}
-
-interface ExportJob {
-  rec: ViewerRec;
-  token: number;
 }
 
 const WAND_WIN = 4096;
@@ -244,10 +232,6 @@ export const useViewerStore = defineStore('viewer', () => {
   const cloudOverlay = ref<HTMLCanvasElement | null>(null);
   const wandTol = ref(20);
   const merging = ref(false);
-  const autoExport = ref(true);
-  const outDir = ref<OutDirState>({ name: '', permission: 'prompt', ready: false });
-  const exportQueue = ref<ExportJob[]>([]);
-  const exportingNow = ref(false);
   const overlay = ref({ visible: false, title: '', sub: '', bar: false, progress: 0 });
   const toast = ref('');
   const error = ref('');
@@ -260,18 +244,20 @@ export const useViewerStore = defineStore('viewer', () => {
   );
 
   /* ---------------- 文件打开（HTML openFiles/openOne） ---------------- */
+  /** 选文件 / 拖入：TIF 走解码管线，.jpg/.jpeg 走显示就绪图片管线（§4.6）。 */
   function addFiles(fileList: FileList | File[] | File) {
     const files = Array.isArray(fileList)
       ? fileList
       : Array.from(fileList instanceof File ? [fileList] : fileList);
-    const tiffs = files.filter(
-      (f) => /\.tiff?$/i.test(f.name) || (f.type && f.type.indexOf('tiff') !== -1),
-    );
-    if (!tiffs.length) { showErr('没有识别到 tif/tiff 文件'); return; }
-    tiffs.forEach((f) => {
-      const dup = recs.value.some((r) => r.file.name === f.name && r.file.size === f.size);
-      if (!dup) openOne(f);
-    });
+    const { tifs, imgs } = classifyImages(files);
+    if (!tifs.length && !imgs.length) {
+      showErr('没有识别到影像文件（支持 .tif/.tiff/.jpg/.jpeg）');
+      return;
+    }
+    const isDup = (f: File): boolean =>
+      recs.value.some((r) => r.file.name === f.name && r.file.size === f.size);
+    tifs.forEach((f) => { if (!isDup(f)) openOne(f); });
+    imgs.forEach((f) => { if (!isDup(f)) void openLocalImage(f); });
   }
 
   function openOne(file: File) {
@@ -282,7 +268,6 @@ export const useViewerStore = defineStore('viewer', () => {
       stats: null, route: null, sceneId: null, lqPath: null,
       layout: '', status: '等待…', statusCls: '',
       paintedMode: null, maskRois: null,
-      _jpgBusy: false, _jpgDone: false, _jpgToken: 0, jpgStatus: '', jpgCls: '',
     };
     recs.value.push(rec);
     // 即探：只读头部标签，秒显压缩/布局，不等待解码
@@ -360,7 +345,6 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.status = '完成，' + (d.route === 'utif' ? '解码' : '读取') + '耗时 ' + fmtTime(d.ms) + routeText;
     rec.statusCls = 'ok';
     paintStretch(rec);
-    kickExport(rec);                 // 解码成功 → 自动生成 JPG 中间产物
     if (activeId.value === rec.id) {
       fit();
       refreshCloudStats();           // 首次解码完 → 云量卡/红叠就绪
@@ -378,6 +362,43 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.status = '解码失败：' + msg;
     rec.statusCls = 'err';
     if (activeId.value === rec.id) showErr('「' + rec.name + '」解码失败：' + msg);
+  }
+
+  /* ---------------- 本地影像（.jpg/.jpeg，route='img'） ----------------
+     本地 JPG 与盘阵 JPG 都是 8bit 显示就绪图，共用同一条像素管线
+     （createImageBitmap → 画布 RGBA → sceneDecodePixels 单波段 0..255）。
+     差别只在来源：本地图没有 sceneId/lqPath，故不能提交 SR，也不打「盘阵」徽标 —
+     所以给它独立的 route='img'，让「盘阵场景」相关的判断（徽标 / 拉伸禁用 /
+     ScenesPage 的 W/H 提示 / 提交 SR）都继续只认 route==='jpg'。
+     有 src + stats，因此拉伸模式、掩码绘制、云量卡、ROI 统计照常可用。 */
+  async function openLocalImage(file: File) {
+    busy.value = true;
+    showMask('正在读取图片…', file.name, false);
+    try {
+      const cv = await decodeJpgToCanvas(file);
+      const tw = cv.width, th = cv.height;
+      const ctx = cv.getContext('2d');
+      if (!ctx) throw new Error('取不到 2d 上下文');
+      const d = sceneDecodePixels(ctx.getImageData(0, 0, tw, th).data, tw, th);
+      const rec: ViewerRec = {
+        id: nextId++, file: markRaw(file),
+        probe: null, name: file.name, size: file.size,
+        W: tw, H: th,
+        thumb: markRaw(cv as unknown as KitCanvas),
+        src: markRaw(d.src), srcw: d.tw, srch: d.th, nbands: d.nbands,
+        invert: false, stats: d.stats ? markRaw(d.stats) : null,
+        route: 'img', sceneId: null, lqPath: null,
+        layout: '本地 JPG（8bit 显示就绪，' + tw + '×' + th + '）',
+        status: '已读取：' + file.name + ' · ' + tw + '×' + th,
+        statusCls: 'ok', paintedMode: null, maskRois: null,
+      };
+      recs.value.push(rec);
+      hideMask(); busy.value = false;
+      void activate(rec.id);
+    } catch (e) {
+      hideMask(); busy.value = false;
+      showErr('读取图片失败：' + (e instanceof Error ? e.message : String(e)));
+    }
   }
 
   /* ---------------- 盘阵场景（阶段4：读服务器烘焙 JPG，route='jpg'） ----------------
@@ -408,8 +429,6 @@ export const useViewerStore = defineStore('viewer', () => {
         layout: '盘阵 JPG（已烘焙 2% 线性拉伸）',
         status: '场景就绪：' + meta.name + ' · 元数据 ' + meta.W + '×' + meta.H + ' · JPG ' + d.tw + '×' + d.th,
         statusCls: 'ok', paintedMode: null, maskRois: null,
-        _jpgBusy: false, _jpgDone: true,   // 服务器 JPG 即交付物：无本地再导出
-        _jpgToken: 0, jpgStatus: '', jpgCls: '',
       };
       recs.value.push(rec);
       hideMask(); busy.value = false;
@@ -840,46 +859,25 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   /**
-   * 掩码 → SR 提交（阶段5，api-contract.md §3.4）：掩码服务端烘焙落原图目录，
-   * 返回 task_draft 预填队列表单 → 跳 /queue 等用户确认（Slurm 是真副作用，不自动提交）。
-   * 仅 route='jpg'（带 sceneId）可用；本地 TIF 路径无 sceneId → 提示先经 /scenes 打开。
+   * 场景 → SR 提交（最小原型 §4.3）：不再烘焙掩码，也不再要求先画掩码。
+   * 只把「这张图所在的原图目录」填进队列表单，掩码由后端按
+   * `<lq_path>/<目录名>_mask.tif` 推导并校验存在性 —— 前端不猜掩码文件名，
+   * 那条规则只有一处实现（backend/api/platform.py derived_mask_path）。
+   * 不自动提交：提交 SR 是真副作用，跳 /queue 等人工确认。
+   * 仅 route='jpg'（盘阵场景）可用 —— 本地 TIF 没有盘阵路径，无从提交。
    */
-  async function submitSr() {
+  function submitSr() {
     const rec = activeRec.value;
-    if (!rec || rec.route !== 'jpg' || !rec.sceneId) {
+    if (!rec || rec.route !== 'jpg' || !rec.lqPath) {
       showErr('提交 SR 仅对盘阵场景可用（先到「盘阵场景」打开一张图）');
       return;
     }
     if (srBusy.value) return;
-    const json = buildMaskJson();
-    if (!json || !json.polygons.length) {
-      showErr('还没有任何掩码区域：先「绘制掩码」，用矩形/多边形/魔棒画 ROI');
-      return;
-    }
-    const body: BakeMaskBody = {
-      scene_id: rec.sceneId, polygons: json.polygons, W: json.width, H: json.height,
-    };
     srBusy.value = true;
-    const owner = rec;                       // 烘焙期间切图则丢弃（异步）
-    showMask('正在把掩码烘焙到盘阵（服务端全分辨率 ' + json.width + '×' + json.height +
-      ' 栅格化）…', rec.name, false);
-    try {
-      const cfg = loadSrConfig();
-      const res = await apiBakeMask(cfg, body);
-      hideMask(); srBusy.value = false;
-      if (activeId.value !== owner.id) {
-        showToast('掩码已烘焙到盘阵，但查看器已切走，未跳队列页');
-        return;
-      }
-      useQueueStore().setDraft(res.task_draft);   // 预填，不自动提交
-      showToast('掩码已烘焙到盘阵，去「任务队列」确认后提交 SR');
-      void router.push('/queue');
-    } catch (e) {
-      hideMask(); srBusy.value = false;
-      if (activeId.value === owner.id) {
-        showErr('掩码烘焙失败：' + (e instanceof Error ? e.message : String(e)));
-      }
-    }
+    useQueueStore().setSrDraft(rec.lqPath);
+    showToast('已带入目录 ' + rec.lqPath + '，去「任务队列」确认后提交 SR');
+    void router.push('/queue');
+    srBusy.value = false;
   }
 
   /* ---------------- 画布事件路由（TifCanvas 绑定） ---------------- */
@@ -944,87 +942,6 @@ export const useViewerStore = defineStore('viewer', () => {
     }
   }
 
-  /* ---------------- JPG 导出（HTML 串行队列 + token 守卫 + 降档重试） ---------------- */
-  function setJpgStatus(rec: ViewerRec, text: string, cls: '' | 'ok' | 'err') {
-    rec.jpgStatus = text;
-    rec.jpgCls = cls || '';
-  }
-
-  function kickExport(rec: ViewerRec, force?: boolean) {
-    if (!force && !autoExport.value) return;
-    if (!rec || !rec.W || !rec.src || rec._jpgBusy || rec._jpgDone) return;
-    const s = getSaver();
-    if (!s) { setJpgStatus(rec, 'JPG 未授权（点工具栏「输出目录」后自动导出）', 'err'); return; }
-    rec._jpgBusy = true;
-    rec._jpgToken = (rec._jpgToken || 0) + 1;
-    exportQueue.value.push({ rec, token: rec._jpgToken });
-    pumpExport();
-  }
-
-  function reExportJpg(id: number) {
-    const rec = recs.value.find((r) => r.id === id);
-    if (!rec || rec._jpgBusy) return;
-    rec._jpgDone = false;
-    rec._jpgBusy = false;
-    kickExport(rec, true);
-  }
-
-  function scanPendingExports() {
-    recs.value.forEach((r) => { if (r.W && r.src && !r._jpgDone) kickExport(r); });
-  }
-
-  function pumpExport() {
-    if (exportingNow.value || !exportQueue.value.length) return;
-    const job = exportQueue.value.shift()!;
-    exportingNow.value = true;
-    void doExportJob(job).then(() => { exportingNow.value = false; pumpExport(); });
-  }
-
-  async function doExportJob(job: ExportJob) {
-    const rec = job.rec, tok = job.token;
-    setJpgStatus(rec, 'JPG 生成中…', '');
-    const source = new FileSource(rec.file, rec.name);
-    try {
-      const r = await exportToJpg(rec, source, browserKit, stretchMode.value, null, (f) => {
-        if (tok === rec._jpgToken) setJpgStatus(rec, 'JPG 生成中 ' + Math.round(f * 100) + '%…', '');
-      });
-      if (tok !== rec._jpgToken) return;
-      rec._jpgDone = true;
-      const extra = r.plan && r.plan.reduced ? '（受画布/内存限制已自动降档）' : '';
-      setJpgStatus(rec, 'JPG 已导出 ' + r.name + ' · ' + r.dims + ' · ' + stretchMode.value +
-        ' · q' + JPG_QUALITY + extra, 'ok');
-    } catch (e) {
-      if (tok !== rec._jpgToken) return;
-      const msg = (e instanceof Error ? e.message : String(e)) as string;
-      // 个别 Edge 构建在画布面积极限上会拒绝 → 降到 4096 重试一次
-      if (!rec._exportCap && /RangeError|allocation|Invalid|空|过大|enormous/i.test(msg)) {
-        rec._exportCap = 4096;   // 默认 8192 导出仍遇画布/内存失败 → 降到 4096 再试一次
-        rec._jpgBusy = false;
-        kickExport(rec, true);
-        return;
-      }
-      setJpgStatus(rec, 'JPG 失败: ' + msg, 'err');
-    } finally {
-      if (tok === rec._jpgToken) rec._jpgBusy = false;
-    }
-  }
-
-  /* ---------------- 落盘 / 输出目录（HTML fsIO 接线） ---------------- */
-  function initFsIO() {
-    setOutDirListener((s) => { outDir.value = { ...s }; });
-    void fsIO.init();   // 恢复上次授权目录（非阻塞）
-  }
-
-  async function authorizeOutDir() {
-    try {
-      await fsIO.authorize();
-      scanPendingExports();
-    } catch (e) {
-      if (e && (e as { name?: string }).name === 'AbortError') return;   // 用户取消选择
-      showErr('输出目录授权失败：' + ((e instanceof Error ? e.message : e) as string));
-    }
-  }
-
   /* ---------------- 遮罩 / toast / 错误 ---------------- */
   function showMask(title: string, sub: string, bar: boolean) {
     overlay.value = { visible: true, title, sub: sub || '', bar, progress: 0 };
@@ -1057,10 +974,10 @@ export const useViewerStore = defineStore('viewer', () => {
     // 状态
     recs, activeId, activeRec, view, canvasSize, renderTick, marker,
     stretchMode, drawMode, drawTool, pendingRect, pendingPts, hoverPt, hoverRoi, flashRoi,
-    wandTol, merging, autoExport, outDir, exportQueue, exportingNow, overlay, toast, error,
+    wandTol, merging, overlay, toast, error,
     sidebarCollapsed, busy, srBusy,
     // 文件 / 解码
-    addFiles, removeRec, activate, openSceneJpg,
+    addFiles, removeRec, activate, openSceneJpg, openLocalImage,
     // 拉伸 / 视图
     setStretch, setCanvasSize, fit, onWheel, onPan, locatePixel,
     // 掩码
@@ -1074,10 +991,8 @@ export const useViewerStore = defineStore('viewer', () => {
     refreshCloudStats, refreshCloudView, setCloudShow,
     // 画布事件
     onCanvasDownDraw, onCanvasMove, onCanvasUp, onDblClick, onKeyDown,
-    // 导出
-    kickExport, reExportJpg, scanPendingExports, setJpgStatus,
-    // 落盘 / UI
-    initFsIO, authorizeOutDir, showMask, hideMask, showToast, showErr,
+    // UI
+    showMask, hideMask, showToast, showErr,
     setSparseMin,
   };
 });

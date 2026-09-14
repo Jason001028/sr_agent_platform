@@ -22,8 +22,9 @@ from backend.services import store as store_mod
 
 ENV_NAMES = ("SR_BUNDLE_DIR", "SR_PYTHON", "SR_SLURM_WORK_DIR",
              "SR_SLURM_PARTITION", "SR_SLURM_GRES", "SR_SLURM_TIME",
-             "SR_SLURM_CPUS", "SR_SLURM_MEM", "SR_SLURM_FAKE",
-             "SR_QUEUE_POLL_SEC", "SR_AGENT_DB", "SR_SCENES_ROOT")
+             "SR_SLURM_CPUS", "SR_SLURM_MEM", "SR_SLURM_NODELIST",
+             "SR_SLURM_FAKE", "SR_QUEUE_POLL_SEC", "SR_AGENT_DB",
+             "SR_SCENES_ROOT")
 
 
 class SrRuntimeDefaultsTest(unittest.TestCase):
@@ -46,6 +47,7 @@ class SrRuntimeDefaultsTest(unittest.TestCase):
         self.assertEqual(rt.time, "02:00:00")
         self.assertEqual(rt.cpus, 4)
         self.assertEqual(rt.mem, "")
+        self.assertEqual(rt.nodelist, "")             # no --nodelist line
         self.assertFalse(rt.fake)
         self.assertEqual(rt.queue_poll_sec, 2.0)
         self.assertEqual(rt.agent_db, store_mod.DEFAULT_DB)

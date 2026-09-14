@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 import uuid
 
 from fastapi import APIRouter, HTTPException, Request
@@ -35,6 +37,8 @@ from fastapi.responses import StreamingResponse
 from backend.agent import loop as loop_mod
 from backend.api import paths
 from backend.api.paths import PathDeniedError
+from backend.config import sr_runtime
+from backend.services import local_exec
 from backend.services import mask as mask_svc
 from backend.services import run_sr as run_sr_svc
 from backend.services import slurm
@@ -360,19 +364,62 @@ async def chat_send(session_id: str, request: Request):
 # --------------------------------------------------------------------------
 # 3.3 共享任务队列
 # --------------------------------------------------------------------------
+#: <Suffix> is spliced into the output file name (`<stem>_<suffix>.tif`), so a
+#: value with a separator or a shell character is a writable-path hole, and an
+#: empty one makes the output name equal the input name — which SR turns into a
+#: rename of the input (sr-pipeline-interface.md §2.4-1). Fixed alphabet, and
+#: never empty (empty input falls back to SR_SUFFIX_DEFAULT).
+_SUFFIX_RE = re.compile(r"^[A-Za-z0-9_-]{1,16}$")
+
+
+def _leaf(path) -> str:
+    """Last path component, on either separator.
+
+    Array paths are POSIX and arrive POSIX-shaped, but this code also runs on
+    the Windows dev machine (tests, local preview), where os.path.basename
+    would still be right — splitting on both keeps it right either way.
+    """
+    return str(path).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+
+
+def _norm_dir(path) -> str:
+    """Trailing-slash-insensitive, symlink-resolved form for path comparison."""
+    return os.path.realpath(str(path).replace("\\", "/").rstrip("/") or "/")
+
+
+def derived_mask_path(lq_path) -> str:
+    """The mask a scene directory is expected to carry: `<leaf>_mask.tif` beside
+    the image (what `POST /api/masks` writes, and what the SR operator drops in
+    by hand when the mask was drawn elsewhere)."""
+    return os.path.join(str(lq_path).rstrip("/\\"), f"{_leaf(lq_path)}_mask.tif")
+
+
 def _norm_sr_params(body: dict) -> dict:
     """Normalize POST /api/queue body onto the run_sr param dict + validate.
 
     Mirrors tools/run_sr.run_run_sr exactly (same defaults / same key set), so
     a REST submit and a tool submit of identical params produce the SAME
     task_fingerprint — the idempotency layer is shared across both entries.
+    (The two extra rules below — locked directory, derived mask — are REST-only:
+    they belong to the human-facing submit form, not to the agent tool.)
+
+    Three prototype rules from docs/planning/sr-minimal-prototype-plan.md §4.3:
+
+    * **Locked directory.** With SR_LOCKED_DIR set, `lq_path` must be that
+      directory. The prototype is pinned to one test scene dir; a typo in a
+      free-text box would otherwise aim a job at another scene.
+    * **Derived mask.** A submit that carries no `mask_path` gets
+      `<lq_path>/<leaf>_mask.tif` *if that file exists*, else 400. Never a
+      silent full-image run — the operator would believe the mask applied.
+    * **Non-empty suffix.** See _SUFFIX_RE: empty means "rename the input".
     """
+    rt = sr_runtime()
     try:
         lq_path = str(body["lq_path"]).strip()
         sr_scale = int(body.get("sr_scale", 2))
         gpu = int(body.get("gpu", 0))
         cloud_limit = int(body.get("cloud_limit", 80))
-        suffix = str(body.get("suffix") or "")
+        suffix = str(body.get("suffix") or "").strip()
     except (KeyError, TypeError, ValueError) as e:
         raise HTTPException(status_code=400, detail=f"参数非法：{e}") from e
     if not lq_path:
@@ -380,11 +427,29 @@ def _norm_sr_params(body: dict) -> dict:
     bad = run_sr_tool._bad_path(lq_path)
     if bad:
         raise HTTPException(status_code=400, detail=f"lq_path {bad}")
+    if rt.locked_dir and _norm_dir(lq_path) != _norm_dir(rt.locked_dir):
+        raise HTTPException(
+            status_code=400,
+            detail=f"lq_path 已锁死为 {rt.locked_dir}（SR_LOCKED_DIR），不接受 {lq_path}")
     mask_path = body.get("mask_path")
     if mask_path:
         bad = run_sr_tool._bad_path(str(mask_path).strip())
         if bad:
             raise HTTPException(status_code=400, detail=f"mask_path {bad}")
+        mask_path = str(mask_path).strip()
+    else:
+        mask_path = derived_mask_path(lq_path)
+        if not os.path.isfile(mask_path):
+            raise HTTPException(
+                status_code=400,
+                detail=f"该目录缺少掩码文件：{mask_path}"
+                       f"（掩码须与影像同目录、命名为 <目录名>_mask.tif）")
+    if not suffix:
+        suffix = rt.suffix_default
+    if not _SUFFIX_RE.match(suffix):
+        raise HTTPException(
+            status_code=400,
+            detail=f"suffix 非法：{suffix!r}（只允许字母/数字/下划线/短横，长度 1..16）")
     if sr_scale < 1:
         raise HTTPException(status_code=400, detail="sr_scale 必须 >= 1")
     if gpu < 0:
@@ -393,7 +458,7 @@ def _norm_sr_params(body: dict) -> dict:
         raise HTTPException(status_code=400, detail="cloud_limit 须在 0..100")
     return {
         "lq_path": lq_path,
-        "mask_path": str(mask_path).strip() if mask_path else None,
+        "mask_path": mask_path,
         "sr_scale": sr_scale, "suffix": suffix, "gpu": gpu,
         "cloud_limit": cloud_limit,
         "delete_ori": bool(body.get("delete_ori", False)),
@@ -451,6 +516,15 @@ async def submit_queue(request: Request):
     for k in ("previous_state", "previous_exit_code", "previous_job_id"):
         if k in data:
             out[k] = data[k]
+    # 就地写入提示（工作单 §4.2 最后一条）：没有沙箱时 SR 直接写 lq_path，并把输入
+    # 改名为 *_NOSR.tif——该目录里已有一个 _NOSR.tif 就会被覆盖。同一句话也写进作业
+    # 日志（run_sr.build_batch_script 的 audit 段），两处都不能省。
+    if run_sr_svc.sandbox_scene_paths(params["lq_path"],
+                                      run_sr_svc.task_fingerprint(params)) is None:
+        out["in_place"] = True
+        out["notice"] = (
+            f"输出目录 = 输入目录（{params['lq_path']}）：SR 就地写入并把输入改名为 "
+            "*_NOSR.tif，该目录里已有的 _NOSR.tif 会被覆盖")
     return out
 
 
@@ -463,7 +537,12 @@ def cancel_queue(task_id: int, request: Request):
     if task["job_id"] is None:
         raise HTTPException(status_code=400,
                             detail="该任务无 job_id（中断遗留），无法取消")
-    cancelled = slurm.cancel(task["job_id"])
+    # Which "scheduler" owns the job follows SR_EXECUTOR — the local executor
+    # has its own process table; scancel knows nothing about it.
+    if sr_runtime().executor == "local":
+        cancelled = local_exec.cancel(task["job_id"])
+    else:
+        cancelled = slurm.cancel(task["job_id"])
     state_name, _ = _task_state(state, task)
     return {"task_id": task_id, "cancelled": cancelled, "state": state_name}
 
@@ -544,8 +623,10 @@ async def bake_mask(request: Request):
                             detail=f"掩码生成失败：{type(e).__name__}: {e}") from e
 
     lq_path = str(out_dir)
+    # Draft prefilled into the queue form — never an empty suffix (§4.3: the
+    # output name would equal the input name and SR would rename the input).
     draft = {"lq_path": lq_path, "mask_path": str(tif_path),
-             "sr_scale": 2, "suffix": "", "gpu": 0, "cloud_limit": 80,
-             "delete_ori": False, "grid_align": True}
+             "sr_scale": 2, "suffix": sr_runtime().suffix_default, "gpu": 0,
+             "cloud_limit": 80, "delete_ori": False, "grid_align": True}
     return {"mask_path": str(tif_path), "mask_txt": str(txt_path),
             "lq_path": lq_path, "task_draft": draft}

@@ -3,11 +3,11 @@
  * ------------------------------------------------------------------
  * 移植不重写：needGeo 决策、UTIF 全量解码、分块读取、稀疏条带、分配失败回退，
  * 全部逐行直译 HTML（757-878 行）。与 Vue 的接线差异（唯一改动）：
- *   - rec 变更 / paintStretch / kickExport / fit / render / 遮罩 DOM → 由 store 编排
+ *   - rec 变更 / paintStretch / fit / render / 遮罩 DOM → 由 store 编排
  *     （本文件经 DecodeCallbacks 回调进度/遮罩文案，store 决定是否刷新 UI）。
  *   - 数据源：稀疏/分块走 Source 抽象，UTIF 走 Blob（整文件 arrayBuffer）。
  *
- * 产出统一 DecodedRec，store 填充 rec 字段后自行 paintStretch + kickExport。
+ * 产出统一 DecodedRec，store 填充 rec 字段后自行 paintStretch。
  */
 import UTIF from '../vendor/utif.js';
 import {

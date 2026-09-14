@@ -71,6 +71,18 @@ export interface SceneListResponse {
   results: SceneRow[];
 }
 
+/** 该行是不是「显示就绪图」源（盘阵 .jpg/.jpeg，最小原型 §4.7）。
+ *
+ * 这类行的 jpgUrl 指向源文件本身、hasPreview 恒 true —— 没有「生成预览」这一步，
+ * 后端也确实不为它们落 <basename>.preview.jpg 缓存。仅用于列表文案（「已生成」
+ * 对一张本来就是 JPG 的场景是误导）；**是否列出**由后端
+ * scene_search.is_scene_file 决定，前端不参与筛选。
+ */
+export function isImageSource(row: Pick<SceneRow, 'name' | 'rel'>): boolean {
+  const path = row.rel || row.name || '';
+  return /\.jpe?g$/i.test(path);
+}
+
 /* ---------------- 检索 URL / query 拼装 ---------------- */
 export interface SceneQueryParams {
   query?: string;

@@ -9,6 +9,8 @@
 | 事项 | 决议 |
 |---|---|
 | GPU 分配 | **交给 Slurm `--gres=gpu:1`**。生产脚本内所有 `CUDA_VISIBLE_DEVICES` 赋值必须删除；config.xml 的 `<GPUIDS>` 降级为审计字段，不再决定选卡 |
+| **运行范围（2026-09-14 新需求，优先于本表其余各行）** | **所有作业只跑在「同一台 4×3090 物理机」内，不调度到其他服务器**；Slurm 的角色收窄为**本机排队 + 按单卡分配 GPU**。部署方向二选一：**①** 复用现有集群，`--nodelist` 锁定那台机器；**②** 本机自建**单节点 Slurm**（无跨节点依赖，顺带规避跨主机解析问题）。**①已排除**：2026-09-14 实测本机 node81-135 是 `gpu:4` 且状态 `down`（`sinfo -N`），DOWN 节点永不被分配，要用 ① 得让管理员把它恢复进池 —— 等于动集群、且此后别人也能往这台机提交 | **已定** |
+| **最小原型（2026-09-14 定）** | 目标收窄为：**前端点一下 → 后端用 conda 解释器在指定目录上跑掩码 + `.tif` → 产物落地**。① 不做前后端 `.tif` 传输（现状本来就是传路径）；② 规则式写死、不做场景检索；③ 输入与产物锁死在**一个目录**下，不关心文件数。**执行器：先试 ②（本机单节点 Slurm），一旦出现「性价比低」的苗头立刻退到「不起 Slurm，后端直接 subprocess 起 `$SR_PYTHON`」** —— 退路成本极低，因为平台生成的批脚本本身就是合法 bash 脚本（`#SBATCH` 那几行在 bash 眼里只是注释），换掉的只有 `sbatch` 那一跳。掩码来源：**目录里已有的掩码文件**（规则式，不存在就不传 `MaskPath`） | 已定（用户 2026-09-14 选） |
 | 生产脚本 | **保留原文件 + 生成器产出部署变体**。`SR_code/code_0817_prod.py` 逐字节不动；变体由脚本按锚点替换表机械产出，附 `.diff` + provenance，锚点找不到即报错退出 |
 | 契约三条件判定 | **落在作业内，用退出码表达**（`0` 契约满足 / `90` 契约不满足）。原定「平台调度层零改动」因账务关闭作废，见下一行 |
 | 作业终态判定 | **C 方案**：`squeue` 判活跃态 + 作业把退出码写进盘阵、平台读文件判终态。真机实测 `AccountingStorageType=accounting_storage/none`（§2.4-2），`sacct` **永久不可用** —— 平台不得依赖 sacct；`backend/services/slurm.py` 的 `sacct_status` / `job_status` 须在 P2 一并改（2026-09-10 拍板） |
@@ -87,10 +89,11 @@ P2 起这些值就是 `deploy/sr-api.service` 与 `backend/config.SR_DEFAULT_*` 
 | 主分区 | `gpu` | 2026-09-11 `sinfo -h -o "%P"` 实测：`centos7` / `deicc` / `gpu` / `gpu*` / `test`（`*`=默认分区）。**无 `gpup`** —— 早先那条「用户回传 `gpup`」是转述错误，已订正 | 已确认（订正） |
 | 计算节点 | **76 个**（`gpu` 分区）：`node81-[129-162,165-183,185-189]` + `node104-[27-39,41-45]`；整个集群 `sinfo -N` 计 **96** 行；控制器 `Slurmctld(primary) at node81-190`。2026-09-11 探针实测 `node81-133/134/135/136` 为 `down`（**本机 node81-135 是 `down*`** —— 从本机提交的作业不会落回本机） | 探针 §A（`scontrol show partition -o` + `sinfo -N`） | 已核（2026-09-11 订正：原记「12 个：node81-129…140」是当时的局部读数，⇒ §2.6 共享盘那条**更加适用**；另见 slurm-acceptance §0.4 新增的「两族节点都要探」） |
 | bundle 目录 | `/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes` | 用户回传写作 `exe/CentOS7`+`msnr_bundle`；**采用 `code_0817_prod.py:27` 的拼写**（源码优先于转述） | 已确认（P3 用 `ls` 复核一次拼写） |
-| `SR_PYTHON` | `/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python` | 用户 2026-09-10 明确：**沿用文档旧值，不用本机 base 环境 python**（`(base) [root@node81-135 ...]` 只是登录 shell 所在环境） | 已确认（P3 仍建议跑一次 `<该 python> -c "import torch, gdal"` 验证 torch1.9.1 + GDAL 齐全） |
+| `SR_PYTHON` | `/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python` | 用户 2026-09-10 明确：**沿用文档旧值，不用本机 base 环境 python**（`(base) [root@node81-135 ...]` 只是登录 shell 所在环境）。2026-09-14 实测该解释器：**torch 1.10.2+cu113 / GDAL 2.4.0**（目录名里的 1.9.1 ≠ 实际版本） | 已确认（路径存在、torch+GDAL 均可 import；旧记录写的「torch 1.9.1」是照抄目录名，已订正） |
 | `SR_SLURM_WORK_DIR` | `/DiskArray/tmp/wangrz/sr_agent_work` | 本窗口选定（必须在共享盘上，默认 `/tmp` 不满足） | **待核**：目录是否已存在、nginx 与作业用户是否都有写权限 |
 | 记账 | `AccountingStorageType=accounting_storage/none`，`sacct` 恒 rc=1 | 探针 | 已确认（§2.4-2） |
 | GRES 注入形态 | `--gres=gpu:1` 给整数 `CUDA_VISIBLE_DEVICES`，但 `SLURM_JOB_GPUS` 未设、作业内仍见 4 卡 | 探针 `--deep` | 已确认（E3 兜底够用；并发可能都挤卡 0，见 §2.5） |
+| 节点白名单 | `SR_SLURM_NODELIST` → 批脚本多一行 `#SBATCH --nodelist=`。**值必须是「那一台」主机名**（2026-09-14 新需求：作业只跑同一台 4×3090 机）；先前记的族口径 `node81-[129-162,165-183,185-189]` **已作废** —— 它会让作业散到几十台机器上，正是新需求要禁止的 | 起先（09-14 早）是为了规避 node104 族解析不了：`gpu` 分区的 **node104 族在提交机 node81-135 上解析不了**（idle 前 5 台 `getent hosts` 全空） | 实现已就位（`run_sr.build_batch_script` 的 `nodelist=` 与 `SR_SLURM_NODELIST`，非法值提交时报错）；**值待填** —— 由 `slurm-acceptance.md §B0` 定出机器名后再写进 `deploy/sr-api.service` 与真机 drop-in |
 
 ## 三、分批计划与开工 prompt
 

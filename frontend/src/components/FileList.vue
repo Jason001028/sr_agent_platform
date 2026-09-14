@@ -2,12 +2,12 @@
 /**
  * FileList.vue — 侧栏文件列表 + 收起/展开（tif-viewer.html #sidebar + addListItem 直译）
  * ------------------------------------------------------------------
- * 每项：名称 / 大小·W×H·布局 / 解码状态（绿红）/ JPG 导出状态 + 重新导出 / × 移除 / active 高亮。
+ * 每项：名称 / 大小·W×H·布局 / 解码状态（绿红）/ × 移除 / active 高亮。
  * 收起 toggle 秒出无动画（HTML sideToggle）。
+ * （HTML 的「JPG 导出状态 + 重新导出」一栏随浏览器 JPG 导出链路一并删去。）
  */
 import { computed } from 'vue';
 import { useViewerStore } from '../stores/viewer';
-import type { ViewerRec } from '../stores/viewer';
 
 const store = useViewerStore();
 
@@ -20,17 +20,11 @@ function fmtBytes(n: number): string {
   if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
   return n + ' B';
 }
-
-function onJpgClick(e: MouseEvent, rec: ViewerRec) {
-  e.stopPropagation();
-  const el = e.target as HTMLElement;
-  if (el.classList.contains('rex')) store.reExportJpg(rec.id);
-}
 </script>
 
 <template>
   <aside class="sidebar" :class="{ collapsed: store.sidebarCollapsed }">
-    <div v-if="!store.recs.length" class="tip">选择或拖入 TIF 文件开始</div>
+    <div v-if="!store.recs.length" class="tip">选择或拖入影像开始（.tif/.tiff/.jpg/.jpeg）</div>
     <div
       v-for="rec in store.recs"
       :key="rec.id"
@@ -48,15 +42,6 @@ function onJpgClick(e: MouseEvent, rec: ViewerRec) {
         <template v-if="rec.layout"> · {{ rec.layout }}</template>
       </div>
       <div class="status" :class="rec.statusCls">{{ rec.status }}</div>
-      <div
-        v-if="rec.jpgStatus"
-        class="jpg"
-        :class="rec.jpgCls"
-        @click.stop="onJpgClick($event, rec)"
-      >
-        {{ rec.jpgStatus }}
-        <span v-if="rec._jpgDone" class="rex" title="按当前拉伸模式重新生成 JPG">（重新导出）</span>
-      </div>
     </div>
   </aside>
   <div class="side-toggle" :title="collapseTitle" @click="store.sidebarCollapsed = !store.sidebarCollapsed">
@@ -130,17 +115,6 @@ function onJpgClick(e: MouseEvent, rec: ViewerRec) {
 .file-item .status { font-size: 11px; margin-top: 3px; color: var(--warn); }
 .file-item .status.err { color: var(--err); }
 .file-item .status.ok { color: var(--ok); }
-.file-item .jpg {
-  font-size: 11px;
-  margin-top: 4px;
-  color: var(--accent-ink);
-  cursor: pointer;
-  word-break: break-all;
-}
-.file-item .jpg:hover { text-decoration: underline; }
-.file-item .jpg.err { color: var(--err); cursor: default; }
-.file-item .jpg.ok { color: var(--ok); cursor: pointer; }
-.file-item .jpg .rex { color: var(--accent-ink); margin-left: 6px; }
 .file-item .close {
   float: right;
   color: var(--ink-faint);

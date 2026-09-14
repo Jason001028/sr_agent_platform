@@ -11,8 +11,13 @@
 阶段5 平台 API（09-02 定稿，契约 = `docs/planning/api-contract.md`）：FastAPI 在既有场景
 端点上新增 `/api/chat/*`（会话 REST + 单回合 SSE）、`/api/queue*`（共享 SR 队列 REST + SSE
 状态广播）、`/api/tools`（工具直调）、`/api/masks`（掩码烘焙到原图目录）；前端新增 `/chat`
-聊天页、`/queue` 共享队列页，查看器画完掩码点「提交 SR」→ 后端落盘掩码 → 跳 `/queue` 预填
+聊天页、`/queue` 共享队列页，查看器点「提交 SR」→ 带入当前场景目录 → 跳 `/queue` 预填
 （不自动提交）。离机验收走 mock LLM + 假调度器；**真机必须显式关 fake**（见下方 systemd env）。
+
+> **SR 最小原型（09-14）改了三处**，详见 `docs/planning/sr-minimal-prototype-plan.md` 与 §7.6：
+> ① 掩码不再由浏览器烘焙——`POST /api/masks` 保留但前端已不调用，改为用场景目录里**已有的**
+> `<目录名>_mask.tif`；② 作业可**不经过 Slurm**（`SR_EXECUTOR=local`，sr-api 本机 `bash` 直跑，
+> 单槽串行）；③ 浏览器端 JPG 导出 / FS Access「输出目录」授权整条链路已删除（掩码下载还在）。
 
 ## 一、开发机打包
 
@@ -153,6 +158,10 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1/disk-array/<某个rel>
 （大图几十秒，进度在 Network 里能看到 `/api/scenes/.../preview`），此后秒开（JPG 已落盘 +
 浏览器缓存）。F12 Network 里应只有本站请求（`./assets/*`、`/api/*`、`/disk-array/*`），
 **没有任何外网域名**。
+
+盘阵目录里**本来就是 JPG** 的影像（09-14 起）也作为场景行列出，行内标签显示「JPG 源」：
+`hasPreview` 恒真、`jpgUrl` 指向源文件本身，点「打开」不经过懒生成（列表里 `W/H` 由 Pillow
+读头得到）。后端自己烘焙的 `<basename>.preview.jpg` 缓存不会被当成场景列进去。
 
 ### 阶段5 平台 API（聊天 / 队列 / 掩码）
 
@@ -392,12 +401,13 @@ env——`sr-api.service` 里**前八项**全部必填、第九项强烈建议�
 
 | env | node81-135 实测值 | 说明 |
 | --- | --- | --- |
-| `SR_PYTHON` | `/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python` | **SR 生产解释器**（py3.6 + torch1.9.1 + GDAL + ImgHistMatch.so），与平台 venv `/opt/sr-venv`（py3.9）平行、互不污染——后端不 import SR/torch/GDAL，只在批脚本里写一行解释器路径，该行在**计算节点**上解析 |
+| `SR_PYTHON` | `/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python` | **SR 生产解释器**（py3.6 + torch + GDAL + ImgHistMatch.so），与平台 venv `/opt/sr-venv`（py3.9）平行、互不污染——后端不 import SR/torch/GDAL，只在批脚本里写一行解释器路径，该行在**计算节点**上解析。2026-09-14 实测：**torch 1.10.2+cu113 / GDAL 2.4.0**（目录名里的 1.9.1 ≠ 实际版本） |
 | `SR_BUNDLE_DIR` | `/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes` | `code_0817_prod.py` / `models` / `utils` / `options` 所在目录；拼写以 `code_0817_prod.py:27` 的 `load_library()` 为准 |
 | `SR_SLURM_WORK_DIR` | `/DiskArray/tmp/wangrz/sr_agent_work` | config.xml 与批脚本落盘处。**必须是共享盘**——`gpu` 分区横跨 **76** 个节点（`node81-*` 与 `node104-*` 两族，2026-09-11 探针实测），作业落在哪台由调度器决定，每一台都要能读它；默认值 `/tmp/sr_agent_work` 是本机路径，多节点下作业秒挂 |
 | `SR_SLURM_PARTITION` | `gpu` | `sinfo -h -o "%P"` 实测（`centos7` / `deicc` / `gpu` / `gpu*` / `test`，星号=默认分区）。**没有 `gpup`** —— 早先文档那个值是转述错误；不配则走默认分区，多分区集群下不可控 |
 | `SR_SLURM_TIME` | `02:00:00` | 作业时限（`#SBATCH --time`） |
 | `SR_SLURM_CPUS` | `4` | `#SBATCH --cpus-per-task` |
+| `SR_SLURM_NODELIST` | **待定（那一台 4 卡机的主机名）** | 白名单 → `#SBATCH --nodelist=`。2026-09-14 需求：**所有作业只跑在同一台 4×3090 物理机内、不调度到其他服务器**，Slurm 只做本机排队 + 单卡分配 —— 所以值是**单台**主机名，由 `docs/status/slurm-acceptance.md §B0` 的三条只读命令定出（`sinfo -N -o "%N %G %t"` 找 `gpu:4` 且非 `down` 的那台）。值是 Slurm host list，只允许字母/数字/`-`/`,`/`[`/`]`（非法值提交时报错）；不配 = 不加此行 = 调度器自选。**别填族白名单**（会把作业散到几十台机器上）。它是**硬**白名单：该机全忙时作业排队等待，不会溢出。若走「本机单节点 Slurm」方向则整项不需要 |
 | `SR_SR_SCRIPT` | `code_0817_prod_slurm.py` | 作业跑哪个超分脚本（相对 `SR_BUNDLE_DIR`）。**不配 = 跑生产原脚本**，见上面的警告 |
 | `SR_VERIFY_SCRIPT` | `verify_sr_run.py` | 作业内契约校验器（相对 `SR_BUNDLE_DIR`）。不配也会跑这个名字，显式写出来是为了可审计 |
 | `SR_SANDBOX_ROOT` | `/DiskArray/tmp/wangrz/sr_sandbox` | **强烈建议配**：每个作业先在 `<根>/<任务指纹前12位>/` 下 `cp -a` 一份 `lq_path` 的私有副本，SR 全程只碰副本。不配 = SR 直接写 `lq_path`（阶段6 的生产形态）。详见 §7.5 |
@@ -496,3 +506,56 @@ os.rename(path + tiftype, path + "_NOSR" + tiftype)   # → <目录名>_NOSR.tif
 - **不配就是阶段 6 的生产形态**：SR 直接写 `lq_path`，输入被改名 `*_NOSR.tif`。
   这是上游 SR 的既有契约（生产管线本来就依赖这个改名），所以阶段 6 之后关掉沙箱是正常的，
   只是那一刻起，前端填什么路径就写什么路径。
+
+### 7.6 最小原型：不走 Slurm，本机 conda 直接跑（`SR_EXECUTOR=local`）
+
+最小原型（09-14，工作单 `docs/planning/sr-minimal-prototype-plan.md`）要的是「前端点一下 →
+本机直接跑对应目录的掩码和 `.tif`」，不经过调度器。实现方式是把 `sbatch` 换成 `bash`：
+`run_sr.build_batch_script()` 生成的批脚本本身是合法 bash（`#SBATCH` 行在 bash 眼里就是注释），
+所以整条链路（config.xml → 作业内校验器 → 退出码文件 → 读盘定终态）一行不改地复用。
+
+| env | 值（示例） | 说明 |
+| --- | --- | --- |
+| `SR_EXECUTOR` | `local` | `slurm`（默认）/ `local` 二选一。改完必须 `systemctl restart sr-api` |
+| `SR_LOCKED_DIR` | 试验目录绝对路径 | **一旦设置，`POST /api/queue` 只接受这一个 `lq_path`**（两侧去尾部 `/` + `realpath` 后比较），不匹配返回 400；不设 = 保持旧行为（任意路径） |
+| `SR_LOCAL_GPU` | `0` | 透传成子进程的 `CUDA_VISIBLE_DEVICES`（本机多卡时选哪张） |
+| `SR_SUFFIX_DEFAULT` | `sr` | 前端不填 `suffix` 时的默认产物后缀。**不要留空**：空后缀会让产物名与输入同名 |
+
+```ini
+Environment=SR_EXECUTOR=local
+Environment=SR_LOCKED_DIR=<试验目录>
+Environment=SR_LOCAL_GPU=0
+Environment=SR_SUFFIX_DEFAULT=sr
+```
+
+与 Slurm 模式的差异（`backend/services/local_exec.py`）：
+
+- **单槽串行**：同一时刻只跑一个作业（模块级锁当槽位），后到的排队 `PENDING`，前一个结束才
+  `RUNNING`。日志 `<SR_SLURM_WORK_DIR>/<批脚本名>.<job_id>.out`；
+- **job_id**：自增整数，序号持久化在 `<SR_SLURM_WORK_DIR>/.local_job_seq`，sr-api 重启不重复
+  （`_SREXIT_<job_id>.txt` 靠它不串号）。作业脚本里显式带 `--job-id <id>`，因此不依赖
+  `$SLURM_JOB_ID`（本地模式没有这个变量）；
+- **子进程环境**：从 sr-api 的环境复制后只改四件事——删 `VIRTUAL_ENV`/`PYTHONHOME`/`PYTHONPATH`
+  （sr-api 跑在 `/opt/sr-venv` py3.9，别让这些变量漏进 conda py3.6）、`PATH` 前置
+  `dirname(SR_PYTHON)`、设 `CUDA_VISIBLE_DEVICES`、设 `SR_EXECUTOR=local`；其余原样保留
+  （**`LD_LIBRARY_PATH` 必须留**，torch/GDAL 靠它）；
+- **终态判定不变**：仍然读 `<lq_path>/Debug/_SREXIT_<job_id>.txt`，`verdict=0` → COMPLETED、
+  `90` → FAILED，**不看进程退出码**（§7.3 那批静默失败照旧）。读不到 = `UNKNOWN`；
+- **cancel**：排队中的直接标记取消；已在跑的对整个进程组 `SIGTERM`（POSIX `killpg`；Windows 上
+  退回 `taskkill /F /T`，否则只杀 bash 外壳、python 孙子进程会孤儿化并占着日志句柄）。
+
+两条环境要求与 Slurm 模式不同：
+
+1. **`SR_SANDBOX_ROOT` 必须不设**。沙箱会把 `DatarootLQ` 指到副本目录，产物就落在那儿，
+   直接违背「输出与原图同目录」这条需求。本地模式的写入目标就是 `SR_LOCKED_DIR`，
+   所以锁定目录本身应当是 `/DiskArray/tmp/wangrz/` 下的试验目录；
+2. **`lq_path` 必须 nginx 可写**（没有沙箱这层缓冲了）：SR 会就地改名输入为 `*_NOSR.tif`
+   并在同目录写产物与 `Debug/`。**每次真跑都要知道一次：这会覆盖该目录里已有的 `_NOSR.tif`。**
+
+掩码规则：请求里不传 `mask_path` 时，后端取 `<lq_path>/<目录名>_mask.tif`；文件不存在直接 400
+（不静默退化成全图超分）。前端「提交 SR」按钮只对**盘阵场景**（有 `lq_path` 的行）可用，
+本地打开的文件没有目录语义，按钮禁用。
+
+验收步骤见工作单 §5.2：A 段只验后端（curl 提交 → `GET /api/queue` 看 PENDING → RUNNING →
+COMPLETED → 看 `Debug/_SREXIT_<job_id>.txt` 的 `verdict=0` → 确认产物落在锁定目录）；
+B 段换前端点击。

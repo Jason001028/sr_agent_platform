@@ -14,22 +14,16 @@ import {
 } from '../lib/api.js';
 import type { QueueTask, QueueSubmitBody, QueueSubmitResult, JobUpdateEvent } from '../lib/api.js';
 
-/** 提交表单预填（/api/masks task_draft 同构；lq_path 为原图目录）。 */
+/** 从查看器场景带入的提交预填：只有原图目录。
+    掩码不进表单 —— 它由后端按 <lq_path>/<目录名>_mask.tif 推导并校验存在性
+    （最小原型 §4.3），前端只显示推导结果，不参与提交。 */
 export interface QueueDraft {
   lq_path: string;
-  mask_path: string | null;
-  sr_scale: number;
-  suffix: string;
-  gpu: number;
-  cloud_limit: number;
-  delete_ori: boolean;
-  grid_align: boolean;
 }
 
 /** 队列表单（QueuePage 编辑态；提交时剥掉未填项拼 body）。 */
 export interface QueueForm {
   lq_path: string;
-  mask_path: string;
   sr_scale: number;
   suffix: string;
   gpu: number;
@@ -40,30 +34,37 @@ export interface QueueForm {
 
 /* ================= 纯函数（vitest 可测） ================= */
 
-/** run_sr 参数默认值（镜像 services/run_sr + tools/run_sr 缺省）。 */
+/** run_sr 参数默认值（镜像 services/run_sr + tools/run_sr 缺省）。
+    后缀默认非空：空后缀会让 SR 的输出名等于输入名（契约 §2.4-1），
+    后端另有 SR_SUFFIX_DEFAULT 兜底，这里预填同一约定值让操作员看得见。 */
 export function defaultForm(): QueueForm {
   return {
-    lq_path: '', mask_path: '', sr_scale: 2, suffix: '',
+    lq_path: '', sr_scale: 2, suffix: 'sr',
     gpu: 0, cloud_limit: 80, delete_ori: false, grid_align: true,
   };
 }
 
-/** 掩码 task_draft → 队列表单（'' 归一为空串，提交时转 null）。 */
+/** 场景带入的目录 → 队列表单（其余字段取默认值）。 */
 export function draftToForm(d: QueueDraft): QueueForm {
-  return {
-    lq_path: d.lq_path, mask_path: d.mask_path ?? '',
-    sr_scale: d.sr_scale, suffix: d.suffix, gpu: d.gpu,
-    cloud_limit: d.cloud_limit, delete_ori: d.delete_ori, grid_align: d.grid_align,
-  };
+  return { ...defaultForm(), lq_path: d.lq_path };
 }
 
-/** 队列表单 → POST /api/queue body（空 mask_path/空串后缀转 null；数值夹取）。 */
+/** 后端 §4.3 的掩码推导规则，仅供界面显示「将读哪个掩膜」——权威实现在
+    backend/api/platform.py derived_mask_path，前端这一份不回传后端，猜错也不影响提交。 */
+export function derivedMaskPath(lqPath: string): string {
+  const dir = normDir(lqPath.trim());
+  const leaf = pathLeafOf(dir);
+  return leaf ? dir + '/' + leaf + '_mask.tif' : '';
+}
+
+/** 队列表单 → POST /api/queue body（数值夹取；mask_path 恒 null 交后端推导）。
+    后缀留空即交给后端的 SR_SUFFIX_DEFAULT，前端不替它决定。 */
 export function formToSubmit(f: QueueForm): QueueSubmitBody {
   const body: QueueSubmitBody = {
     lq_path: f.lq_path.trim(),
-    mask_path: f.mask_path.trim() || null,
+    mask_path: null,
     sr_scale: clampInt(f.sr_scale, 1, 8, 2),
-    suffix: f.suffix.trim() || '',
+    suffix: f.suffix.trim(),
     gpu: clampInt(f.gpu, 0, 16, 0),
     cloud_limit: clampInt(f.cloud_limit, 0, 100, 80),
     delete_ori: f.delete_ori,
@@ -213,6 +214,8 @@ export const useQueueStore = defineStore('queue', () => {
   return {
     tasks, connected, loading, error, draft, failReason,
     list, submit, cancel, connect, disconnect,
+    /** 查看器「提交 SR」带过来的目录（不自动提交）。 */
+    setSrDraft(lqPath: string) { draft.value = { lq_path: lqPath }; },
     setDraft(d: QueueDraft | null) { draft.value = d; },
     clearDraft() { draft.value = null; },
   };

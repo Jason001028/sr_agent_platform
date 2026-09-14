@@ -1,12 +1,15 @@
 <script setup lang="ts">
 /**
  * QueuePage.vue — 共享 SR 任务队列（阶段5，api-contract.md §3.3）
- * 顶部 = 提交 SR 作业表单（lq_path/mask_path/scale…，run_sr 参数）；掩码烘焙跳转
- * 预填（setDraft → form），用户确认才提交（Slurm 是真副作用，不自动提交）。
+ * 顶部 = 提交 SR 作业表单：lq_path 由查看器场景带入（只读），掩膜由后端按
+ * `<lq_path>/<目录名>_mask.tif` 推导（也只读，前端不提交），其余为 run_sr 参数。
+ * 用户确认才提交（运行 SR 是真副作用，不自动提交）。
  * 下方 = 任务表：SSE job_update 实时刷 state 徽标（SUBMITTING→PENDING→RUNNING→COMPLETED/FAILED）。
  */
-import { onMounted, onUnmounted, reactive, ref, watch } from 'vue';
-import { useQueueStore, defaultForm, draftToForm, formToSubmit, stateTone } from '../stores/queue.js';
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
+import {
+  useQueueStore, defaultForm, draftToForm, formToSubmit, derivedMaskPath, stateTone,
+} from '../stores/queue.js';
 import type { QueueDraft, QueueForm } from '../stores/queue.js';
 import type { QueueTask } from '../lib/api.js';
 
@@ -14,6 +17,8 @@ const queue = useQueueStore();
 const showForm = ref(false);
 const cancelling = ref<number | null>(null);
 const formErr = ref('');
+/** 提交成功后后端回的人话提示（就地写入 / 覆盖 _NOSR.tif）；不自动消失。 */
+const formNote = ref('');
 let lastSyncDraft: QueueDraft | null = null;
 
 const f = reactive<QueueForm>(defaultForm());
@@ -44,6 +49,9 @@ function fmtTime(ts: number): string {
   return ts ? new Date(ts * 1000).toLocaleString() : '—';
 }
 
+/** 将读的掩膜（后端 §4.3 推导的同名文件；仅展示，不随 body 提交）。 */
+const maskHint = computed(() => derivedMaskPath(f.lq_path));
+
 function syncFormFromDraft(d: QueueDraft): void {
   Object.assign(f, draftToForm(d));
   lastSyncDraft = d;
@@ -53,15 +61,17 @@ function syncFormFromDraft(d: QueueDraft): void {
 
 async function openSubmit(): Promise<void> {
   formErr.value = '';
-  if (!f.lq_path) { formErr.value = '请填 lq_path（原图目录，须绝对路径）'; return; }
+  if (!f.lq_path) { formErr.value = '请从「查看器 → 盘阵场景」打开一张图后点「提交 SR」带出目录'; return; }
   if (!f.lq_path.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(f.lq_path)) {
     formErr.value = 'lq_path 须为绝对路径（盘阵挂载点，如 /DiskArray/…）';
     return;
   }
+  if (!maskHint.value) { formErr.value = '无法从该目录推出掩膜路径'; return; }
   try {
     const body = formToSubmit(f);
-    await queue.submit(body);
+    const res = await queue.submit(body);
     formErr.value = '';
+    formNote.value = res.notice ?? '';
   } catch (e) {
     formErr.value = e instanceof Error ? e.message : String(e);
   }
@@ -105,19 +115,23 @@ onUnmounted(() => queue.disconnect());
       <template v-else>{{ formErr }}</template>
     </p>
 
-    <!-- 提交表单（掩码烘焙后预填；确认才提交） -->
+    <p v-if="formNote" class="qp-note">{{ formNote }}</p>
+
+    <!-- 提交表单（目录由场景带入；确认才提交） -->
     <section v-if="showForm" class="qp-form">
       <div v-if="queue.draft" class="qp-draft-tip">
-        已带入查看器掩码烘焙结果（<code>{{ pathLeaf(queue.draft.mask_path) }}</code>）——检查参数后点提交。
+        已带入查看器场景目录（<code>{{ f.lq_path }}</code>）——检查参数后点提交。
       </div>
       <div class="qp-grid">
         <label class="qp-cell wide">
-          <span>lq_path（原图目录，绝对路径）</span>
-          <input v-model="f.lq_path" type="text" spellcheck="false" placeholder="/DiskArray/GF07A03_xxx_L1_PAN" />
+          <span>lq_path（原图目录，绝对路径 · 由场景带入）</span>
+          <input v-model="f.lq_path" type="text" spellcheck="false" readonly
+                 placeholder="先在查看器打开盘阵场景，点「提交 SR」" />
         </label>
         <label class="qp-cell wide">
-          <span>mask_path（掩膜，可空=全图）</span>
-          <input v-model="f.mask_path" type="text" spellcheck="false" placeholder="…_mask.tif" />
+          <span>mask_path（掩膜 · 后端按目录推导）</span>
+          <input :value="maskHint" type="text" spellcheck="false" readonly
+                 placeholder="…_mask.tif（须与影像同目录，命名为 &lt;目录名&gt;_mask.tif）" />
         </label>
         <label class="qp-cell">
           <span>SR 倍率</span>
@@ -125,7 +139,7 @@ onUnmounted(() => queue.disconnect());
         </label>
         <label class="qp-cell">
           <span>后缀</span>
-          <input v-model="f.suffix" type="text" spellcheck="false" placeholder="t / 空" />
+          <input v-model="f.suffix" type="text" spellcheck="false" placeholder="空=用服务端默认" />
         </label>
         <label class="qp-cell">
           <span>GPU 数</span>
@@ -146,9 +160,9 @@ onUnmounted(() => queue.disconnect());
       </div>
       <div class="qp-submit-row">
         <button type="button" class="btn" :disabled="queue.loading" @click="openSubmit()">
-          提交到 Slurm
+          提交 SR
         </button>
-        <span class="qp-hint">提交是真实副作用（假调度器下也会跑完整状态机）</span>
+        <span class="qp-hint">提交是真实副作用：后端会立刻在原图目录上跑 SR（覆盖旧产物）</span>
       </div>
     </section>
 
@@ -204,6 +218,12 @@ onUnmounted(() => queue.disconnect());
 .qp-dot.on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
 .qp-conn { font-size: 12px; color: var(--ink-sub); }
 .qp-err { color: var(--err); font-size: 13px; margin: 0 0 12px; }
+/* 提交后的就地写入提示（覆盖 _NOSR.tif）：警示色，不自动消失 */
+.qp-note {
+  color: var(--warn); background: var(--warn-bg); border: 1px solid var(--warn-line);
+  font-size: 12.5px; line-height: 1.6; padding: 8px 12px;
+  border-radius: var(--r-ctrl); margin: 0 0 12px;
+}
 
 .btn {
   height: 32px; padding: 0 14px;

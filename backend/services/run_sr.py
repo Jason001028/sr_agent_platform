@@ -24,6 +24,12 @@ sbatch is absent → clean error) and the array server:
                         lq_path (see sandbox_scene_paths). Unset → run in place,
                         which writes to lq_path: SR's contract renames the input
                         to `*_NOSR.tif` before writing the result (util.writeTiff).
+                        Forced off when SR_EXECUTOR=local (see sandbox_scene_paths).
+    SR_EXECUTOR         "slurm" (default, sbatch) or "local" (backend/services/
+                        local_exec.py runs the same generated script with bash
+                        on this host, $SR_PYTHON, CUDA_VISIBLE_DEVICES=SR_LOCAL_GPU).
+                        The generated script is valid either way — `#SBATCH`
+                        lines are comments to bash.
 
 Idempotency (§5.3 "必写层，现在就该设计"): submit is keyed on a stable
 fingerprint of the params in the store's sr_tasks table. The intent is
@@ -50,6 +56,7 @@ from pathlib import Path
 from backend.config import SR_DEFAULT_BUNDLE_DIR, SR_DEFAULT_OPTIONS_YML
 from backend.config import SR_DEFAULT_WORK_DIR, sr_runtime
 
+from . import local_exec
 from . import slurm
 from . import store as store_mod
 
@@ -74,6 +81,14 @@ _SAFE_SANDBOX_ROOT = re.compile(r"^/[A-Za-z0-9._/-]+$")
 #: Hex chars of the task fingerprint that name a sandbox. Long enough that two
 #: tasks never share one, short enough to stay readable in `ls`.
 SANDBOX_KEY_LEN = 12
+
+#: A SR_SLURM_NODELIST we are willing to bake into the batch script. This is a
+#: Slurm host list (`node81-132`, or the bracketed form `node81-[132-134]`),
+#: written verbatim after `#SBATCH --nodelist=`; anything else (spaces, quotes,
+#: newlines) would either break the directive or inject a second one. Empty
+#: string means "no line". 2026-09-14: the real value is a **single** host — the
+#: one 4×3090 machine every job must stay on (docs/status/slurm-acceptance.md §B0).
+_SAFE_NODELIST = re.compile(r"^[A-Za-z0-9_,\[\]-]+$")
 
 #: Prefix on the SRLOG's last line for a legal policy skip (cloud cover over
 #: <CloudLimit>); the deploy variant writes it so a skip stops looking like a
@@ -106,7 +121,16 @@ def sandbox_scene_paths(lq_path, fingerprint, sandbox_root=None) -> dict | None:
     same verdict path from that config — so polling finds the result without any
     job-side handshake. A replay of the same submit resolves the same copy.
     """
-    root = sr_runtime().sandbox_root if sandbox_root is None else sandbox_root
+    rt = sr_runtime()
+    # Local execution runs SR *in* the locked directory on purpose: the
+    # requirement is "products land next to the input" (plan §1.1), and a
+    # sandbox copy would put them under <root>/<key>/ instead. So SR_EXECUTOR=
+    # local switches the sandbox off no matter what SR_SANDBOX_ROOT says — one
+    # choke point, so the submit path and the queue view (api/platform
+    # ._run_dataroot) cannot disagree about where the product went.
+    if sandbox_root is None and rt.executor == "local":
+        return None
+    root = rt.sandbox_root if sandbox_root is None else sandbox_root
     if not root or not str(root).strip():
         return None
     root = str(root).strip().rstrip("/")
@@ -162,7 +186,8 @@ def build_config_xml(params: dict, dataroot=None) -> str:
 def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
                        partition=None, gres=1, job_name=None,
                        verify_script=None, sr_script=None,
-                       sandbox_src=None, sandbox_parent=None) -> str:
+                       sandbox_src=None, sandbox_parent=None,
+                       nodelist=None, job_id=None) -> str:
     """Slurm batch script: audit the allocation, run the SR script, verify it.
 
     Shape (P2):
@@ -170,8 +195,9 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
       1. #SBATCH directives — gres / time / cpus / job-name / output, plus
          --export=NONE so the *submitting* environment cannot leak into the job.
          ⚠️ --export=NONE is an on-machine must-verify item: it also drops
-         LD_LIBRARY_PATH that a real CentOS7 SR env may rely on (torch 1.9.1 +
-         cu111 + GDAL are built against system libs). If the job fails to
+         LD_LIBRARY_PATH that a real CentOS7 SR env may rely on (the SR env's
+         torch + GDAL are built against system libs — node81-135 实测
+         torch 1.10.2+cu113 / GDAL 2.4.0，2026-09-14). If the job fails to
          import torch/GDAL, the fallback is a ONE-LINE change here:
          `--export=NONE` → `--export=ALL`. See
          docs/sr_code/sr-slurm-deploy-variant.md §5.1.
@@ -198,10 +224,18 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
     since been fixed — the failure that wastes an afternoon instead of five
     minutes.
 
+    `job_id` is for the local executor (backend/services/local_exec.py): the
+    verifier names its verdict file after the job id, and with no Slurm there is
+    no $SLURM_JOB_ID to fall back on, so the id has to be baked into the text at
+    generation time. Under Slurm it stays None and the verifier reads the
+    scheduler's id as before.
+
     Deliberate omissions: no `set -e` (it interacts subtly with `||` and
     pipelines in the middle of a job script), and no CUDA_VISIBLE_DEVICES
     assignment of any kind — GPU selection belongs to Slurm's --gres, and any
-    value written here would clobber the allocation (production E2/E4).
+    value written here would clobber the allocation (production E2/E4). (The
+    local executor sets the variable in the child's *environment* instead, which
+    this script never touches — the audit line below only reads it.)
     """
     rt = sr_runtime()
     python = python or rt.python
@@ -234,6 +268,19 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
         lines.append(f"#SBATCH --partition={partition}")
     if rt.mem:
         lines.append(f"#SBATCH --mem={rt.mem}")
+    # --nodelist: restrict the job to a named set of nodes. Needed on the
+    # CentOS7 cluster because the `gpu` partition spans two families and the
+    # node104-* one cannot be resolved from the submitting host (a job that
+    # lands there cannot be monitored from node81-135). Unset = no line =
+    # the scheduler decides, which is what every cluster had before.
+    nodelist = str(rt.nodelist if nodelist is None else nodelist).strip()
+    if nodelist:
+        if not _SAFE_NODELIST.match(nodelist):
+            raise ValueError(
+                f"SR_SLURM_NODELIST {nodelist!r} rejected: expected a Slurm "
+                "host list (letters, digits, `-`, `,`, `[`, `]`); the value is "
+                "written verbatim into the generated batch script")
+        lines.append(f"#SBATCH --nodelist={nodelist}")
     lines += [
         "#",
         "# Generated by backend/services/run_sr.build_batch_script — do not edit",
@@ -250,7 +297,21 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
         'echo "hostname=$(hostname)"',
         f'echo "SR_PYTHON={python}"',
         f'echo "SR_SCRIPT={sr_script}"',
+        # Which launcher produced this log — "slurm" (sbatch, the default) or
+        # "local" (local_exec sets SR_EXECUTOR=local in the child env). Under
+        # sbatch the var is absent because of --export=NONE, hence the default.
+        'echo "SR_EXECUTOR=${SR_EXECUTOR:-slurm}"',
         f'echo "config={config_xml_path}"',
+        # Running without a sandbox means SR writes *into* the scene directory
+        # and renames the input to `*_NOSR.tif` on the way (util.writeTiff) —
+        # a 4.9 GB file that already exists there gets overwritten. Say it in
+        # the log every single time (plan §4.2): the log is what gets read when
+        # a run is being explained afterwards.
+        *([] if (sandbox_src and sandbox_parent) else [
+            'echo "WARNING: no sandbox — SR runs in place: the input is renamed'
+            ' to *_NOSR.tif and an existing _NOSR.tif in that directory will be'
+            ' overwritten."',
+        ]),
         'echo "=== gpu index,uuid (filtered by CUDA_VISIBLE_DEVICES) ==="',
         "if command -v nvidia-smi >/dev/null 2>&1; then",
         "    nvidia-smi --query-gpu=index,uuid --format=csv,noheader 2>/dev/null"
@@ -289,6 +350,12 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
             '    echo "sandbox copy incomplete: $SBX_SCENE" >&2; exit 1',
             "fi",
         ]
+    verify_line = (f'{python} {verify_script} --config {config_xml_path} '
+                   '--sr-exit-code "$_sr_rc"')
+    if job_id is not None:
+        # No scheduler to name the verdict file after (local executor), so the
+        # id is written in: verify_sr_run.py prefers --job-id over $SLURM_JOB_ID.
+        verify_line += f" --job-id {int(job_id)}"
     lines += [
         "",
         f"cd {bundle_dir} || {{ echo \"cd {bundle_dir} failed\" >&2; exit 1; }}",
@@ -296,7 +363,7 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
         f"{python} {sr_script} -f {config_xml_path}",
         "_sr_rc=$?",
         "",
-        f'{python} {verify_script} --config {config_xml_path} --sr-exit-code "$_sr_rc"',
+        verify_line,
         "exit $?",
     ]
     return "\n".join(lines) + "\n"
@@ -350,17 +417,24 @@ def task_fingerprint(params: dict) -> str:
 
 
 def query_job_status(job_id, task: dict | None = None, run_cmd=None) -> dict:
-    """slurm.job_status for a task, pointing it at that task's verdict file.
+    """Scheduler status for a task, pointing it at that task's verdict file.
 
     A job's *terminal* state lives in `<DatarootLQ>/Debug/_SREXIT_<job_id>.txt`
     rather than in sacct (accounting is disabled on the array server). The path
     is derived from the task's own config.xml, so every caller that has the
     task row — submit replay and the queue view — resolves the same file.
 
+    Which scheduler answers depends on SR_EXECUTOR: Slurm (squeue → verdict
+    file) or the local executor (in-memory process table → the same verdict
+    file). Both return the same dict shape, and in both cases the verdict file
+    is what decides COMPLETED vs FAILED.
+
     `run_cmd=None` means "module default _run"; passing it through explicitly
-    would override the default with None and crash.
+    would override the default with None and crash. It is a Slurm-only seam.
     """
     exit_file = exit_code_file_for((task or {}).get("config_xml"), job_id)
+    if sr_runtime().executor == "local":
+        return local_exec.status(job_id, exit_code_file=exit_file)
     if run_cmd is not None:
         return slurm.job_status(job_id, run_cmd=run_cmd, exit_code_file=exit_file)
     return slurm.job_status(job_id, exit_code_file=exit_file)
@@ -404,7 +478,13 @@ def _resolve_existing(task: dict, run_cmd=None) -> dict:
 
 
 def submit_run_sr(params: dict, run_cmd=None, store=None) -> dict:
-    """Assemble config + batch script and sbatch-submit the job.
+    """Assemble config + batch script and hand the job to the executor.
+
+    Which executor is SR_EXECUTOR: "slurm" sbatch-submits on the cluster,
+    "local" (backend/services/local_exec.py) starts the very same script as a
+    child process on this host. Everything else — the config XML, the
+    fingerprint, the store rows, the verdict-file terminal state — is identical
+    on both paths, which is the point of reusing the batch script verbatim.
 
     Idempotent via the store's sr_tasks table (default store unless one is
     passed): before submitting, the task table is consulted and a stored
@@ -417,7 +497,14 @@ def submit_run_sr(params: dict, run_cmd=None, store=None) -> dict:
     is SUBMITTED for a fresh submission (possibly with `previous_state` when
     it re-submitted after a failed job) or a RESUMED_* reuse marker.
     """
-    if not slurm.slurm_available():
+    if sr_runtime().executor == "local":
+        # No scheduler involved: the API host runs the job itself. local_exec
+        # is always available (it only needs bash); the real precondition is
+        # that SR_PYTHON/SR_BUNDLE_DIR exist *on this host*, which the job's own
+        # log will report if they do not.
+        if not local_exec.available():
+            raise RuntimeError("local executor unavailable on this host")
+    elif not slurm.slurm_available():
         raise RuntimeError(
             "slurm not available on this host (sbatch not found) — run_sr "
             "targets the CentOS7 array server; set SR_BUNDLE_DIR/SR_PYTHON there")
@@ -434,7 +521,10 @@ def submit_run_sr(params: dict, run_cmd=None, store=None) -> dict:
             return resolved
         previous = resolved  # rerun: carry the prior failure info
 
+    local = sr_runtime().executor == "local"
     lq_path = str(params["lq_path"])
+    # None under the local executor — the product must land next to the input
+    # (see sandbox_scene_paths).
     sandbox = sandbox_scene_paths(lq_path, fp)
     work_dir = sr_runtime().slurm_work_dir
     work = Path(work_dir)
@@ -450,11 +540,18 @@ def submit_run_sr(params: dict, run_cmd=None, store=None) -> dict:
     cfg_path.write_text(build_config_xml(params, dataroot=(sandbox or {}).get("scene")),
                         encoding="utf-8")
 
+    # The local executor's id must exist before the script text is written: the
+    # verifier is told `--job-id <id>` so it names its verdict file after this
+    # job, and exit_code_file_for() re-derives the same name from the same id.
+    # (No side effect yet — reserving only bumps the counter on disk.)
+    job_id = local_exec.reserve_job_id() if local else None
+
     script_path = work / f"{stem}.sh"
     script_path.write_text(
         build_batch_script(cfg_path, work,
                            sandbox_src=(lq_path if sandbox else None),
-                           sandbox_parent=(sandbox or {}).get("parent")),
+                           sandbox_parent=(sandbox or {}).get("parent"),
+                           job_id=job_id),
         encoding="utf-8")
 
     # checkpoint the intent BEFORE the external side effect: a crash between
@@ -464,9 +561,13 @@ def submit_run_sr(params: dict, run_cmd=None, store=None) -> dict:
                       config_xml=str(cfg_path), batch_script=str(script_path),
                       log_dir=str(work))
 
-    # run_cmd=None → module default _run (see _resolve_existing).
-    job_id = (slurm.sbatch_submit(script_path, run_cmd=run_cmd)
-              if run_cmd is not None else slurm.sbatch_submit(script_path))
+    if local:
+        # job_id reserved above → reuse it, do not draw a second one.
+        job_id = local_exec.submit(script_path, job_id=job_id)
+    else:
+        # run_cmd=None → module default _run (see _resolve_existing).
+        job_id = (slurm.sbatch_submit(script_path, run_cmd=run_cmd)
+                  if run_cmd is not None else slurm.sbatch_submit(script_path))
     store.update_sr_task_job(fp, job_id=job_id, status="submitted",
                              config_xml=str(cfg_path),
                              batch_script=str(script_path), log_dir=str(work))
