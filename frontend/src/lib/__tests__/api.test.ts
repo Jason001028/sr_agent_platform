@@ -7,7 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   stepSse, parseSseEvents, apiUrl, sessionsUrl, sessionMessagesUrl,
-  queueEventsUrl, maskUrl,
+  queueEventsUrl,
 } from '../api.js';
 import type { PlatformSseEvent, ChatSseEvent } from '../api.js';
 
@@ -102,7 +102,6 @@ describe('apiUrl 拼接', () => {
     expect(apiUrl(CFG, '/api/queue')).toBe('/api/queue');
     expect(sessionsUrl(CFG)).toBe('/api/chat/sessions');
     expect(queueEventsUrl(CFG)).toBe('/api/queue/events');
-    expect(maskUrl(CFG)).toBe('/api/masks');
   });
 
   it('异源注入：joinBase 去重斜杠', () => {

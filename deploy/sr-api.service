@@ -60,11 +60,14 @@ Environment=SR_SLURM_FAKE=0
 # ==========================================================================
 # Slurm 接入（6 项全部必填 —— 缺任一项 SR 作业提交必失败）
 # ==========================================================================
-# SR_PYTHON 是 **SR 生产环境**（conda torch1.9.1py36，python 3.6 + torch 1.9.1
-# + GDAL + ImgHistMatch.so），不是 API 自己的 /opt/sr-venv（python 3.9）。
+# SR_PYTHON 是 **SR 生产环境**（conda env `torch1.9.1py36`，python 3.6 +
+# torch + GDAL + ImgHistMatch.so），不是 API 自己的 /opt/sr-venv（python 3.9）。
 # 两个解释器平行存在、互不污染：平台后端不 import SR/torch/GDAL，只在批脚本里
 # 写一行解释器路径，该行在**计算节点**上解析。
-# 核对方式：<该 python> -c "import torch, gdal; print(torch.__version__)"
+# 2026-09-14 node81-135 实测：torch **1.10.2+cu113** / GDAL **2.4.0** ——
+# 目录名里的 1.9.1 不是实际版本，别再照抄成「torch 1.9.1」。
+# 核对方式（GDAL 用 VersionInfo()：老 osgeo 绑定没有 gdal.__version__）：
+#   <该 python> -c "import torch; from osgeo import gdal; print(torch.__version__, gdal.VersionInfo())"
 # 2026-09-10 用户确认：**沿用本行文档旧值，不用 base conda 的 python**
 # （node81-135 登录 shell 默认在 (base) 环境，那与 SR 的生产解释器无关）。
 # 仅当 torch1.9.1py36 真的废弃时才换到 /root/miniconda3/envs/base/bin/python，
@@ -99,6 +102,18 @@ Environment=SR_SLURM_WORK_DIR=/DiskArray/tmp/wangrz/sr_agent_work
 Environment=SR_SLURM_PARTITION=gpu
 Environment=SR_SLURM_TIME=02:00:00
 Environment=SR_SLURM_CPUS=4
+#
+# 节点白名单：只让作业调度到这些节点 → `#SBATCH --nodelist=`。
+# 2026-09-14 需求：**所有作业只跑在同一台 4×3090 物理机内，不调度到其他服务器**，
+# Slurm 只负责本机排队 + 按单卡分配 GPU。所以这里的值是**那一台机器的主机名**（单台）。
+#   ⚠️ 本行**故意留空**，机器名待定：由 `slurm-acceptance.md §B0` 的三条只读命令定出
+#      （`sinfo -N -o "%N %G %t"` 看哪台是 `gpu:4`、它是不是 `down`），定出后再加一行
+#      `Environment=SR_SLURM_NODELIST=` 接机器名（同步真机 drop-in）。
+#      **定出前不要填 node81 族白名单** —— 那会把作业散到几十台机器上，正是新需求禁止的。
+#   值 = Slurm host list，原样写进批脚本，只允许 字母/数字/`-`/`,`/`[`/`]`；
+#   非法值在提交时报错（不静默降级）。不配 = 不加这一行 = 调度器自己挑（旧行为）。
+#   ⚠️ 白名单是**硬**约束：该机全忙时作业一直排队，不会溢出到别的机器。
+#   若最终走「本机自建单节点 Slurm」（方向②）则整项不需要：只有一台机器，跨节点不存在。
 #
 # ── 沙箱（强烈建议配；不配 = 直接写 lq_path 指向的目录）─────────────────
 # SR 对她的 DatarootLQ **不是只读的**：util.writeTiff 在写产物前先把输入改名成

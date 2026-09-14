@@ -2,10 +2,12 @@
 /**
  * ScenesPage.vue — 盘阵场景检索 + 查看（阶段4）
  * 检索参数镜像后端 search_scenes（卫星/传感器/日期/关键词），行内 W/H 由后端
- * 补（.hdr 优先 / TIF 头探测）。点「打开」→ 未生成先懒生成预览 JPG → 静态 jpgUrl
- * 读字节 → viewer route='jpg'（掩码按元数据 W/H 换算）。
+ * 补（.hdr 优先 / TIF 头探测 / JPG 走 Pillow 头）。点「打开」→ 未生成先懒生成预览
+ * JPG → 静态 jpgUrl 读字节 → viewer route='jpg'（掩码按元数据 W/H 换算）。
+ * 盘阵里的 .jpg/.jpeg 源（§4.7）行 jpgUrl 即源文件、跳过懒生成，打标签「JPG 源」。
  */
 import { onMounted } from 'vue';
+import { isImageSource } from '../lib/scene.js';
 import { useScenesStore } from '../stores/scenes.js';
 import { useViewerStore } from '../stores/viewer.js';
 
@@ -79,6 +81,7 @@ onMounted(() => { void scenes.list(); });
             <td class="right">{{ fmtBytes(row.size_bytes) }}</td>
             <td>
               <span v-if="row.fake" class="tag fake">fake</span>
+              <span v-else-if="isImageSource(row)" class="tag ok">JPG 源</span>
               <span v-else-if="row.hasPreview" class="tag ok">已生成</span>
               <span v-else class="tag">未生成</span>
             </td>
@@ -98,7 +101,8 @@ onMounted(() => { void scenes.list(); });
     </div>
 
     <p class="sp-hint">
-      场景 JPG 为服务器烘焙（稀疏采样 + 2% 线性拉伸），打开后掩码按元数据
+      场景 JPG 为服务器烘焙（稀疏采样 + 2% 线性拉伸）；标「JPG 源」的行本就是
+      显示就绪图，无需烘焙、直接打开。打开后掩码按元数据
       {{ viewer.activeRec?.route === 'jpg' ? dimsText(viewer.activeRec) : 'W/H' }} 换算回全分辨率；
       交互式拉伸/导出 JPG 在场景路径不可用（本地 TIF 路径照旧）。
     </p>

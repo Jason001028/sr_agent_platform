@@ -18,6 +18,12 @@ def write_tif(path, name):
     return p
 
 
+def write_jpg(path, name, w=8, h=6):
+    p = Path(path) / name
+    Image.fromarray(np.zeros((h, w), dtype=np.uint8)).save(p, format="JPEG")
+    return p
+
+
 class TestParseFilename(unittest.TestCase):
     def test_full_naming(self):
         meta = svc.parse_filename(
@@ -40,6 +46,50 @@ class TestParseFilename(unittest.TestCase):
     def test_invalid_timestamp_ignored(self):
         meta = svc.parse_filename("GF07A03_20261399_000000.tif")  # month 13
         self.assertEqual(meta["date"], None)
+
+
+class TestImageScenes(unittest.TestCase):
+    """§4.7：盘阵目录里的 .jpg/.jpeg 也算场景；后端自己烘焙的预览缓存不算。"""
+
+    def test_jpg_and_jpeg_are_scenes(self):
+        with tempfile.TemporaryDirectory() as d:
+            write_jpg(d, "GF07A03_PMS01_20260722125045.jpg")
+            write_jpg(d, "KF02B04_PMS05_20260810120000.JPEG")
+            write_tif(d, "ZY302_MUX_20260805120000.tif")
+            r = svc.search_scenes(d)
+            self.assertEqual(r["scanned"], 3)
+            exts = sorted(Path(s["path"]).suffix.lower() for s in r["results"])
+            self.assertEqual(exts, [".jpeg", ".jpg", ".tif"])
+
+    def test_jpg_metadata_and_filters_apply(self):
+        with tempfile.TemporaryDirectory() as d:
+            write_jpg(d, "GF07A03_PMS01_20260722125045.jpg")
+            write_jpg(d, "KF02B04_PMS05_20260810120000.jpg")
+            r = svc.search_scenes(d, satellite="KF02B04")
+            self.assertEqual(r["scanned"], 2)
+            self.assertEqual(len(r["results"]), 1)
+            self.assertEqual(r["results"][0]["satellite"], "KF02B04")
+            self.assertEqual(r["results"][0]["date"], "2026-08-10")
+
+    def test_preview_cache_is_not_a_scene(self):
+        with tempfile.TemporaryDirectory() as d:
+            write_tif(d, "GF07A03_PMS01_20260722125045.tif")
+            write_jpg(d, "GF07A03_PMS01_20260722125045.preview.jpg")
+            r = svc.search_scenes(d)
+            self.assertEqual(r["scanned"], 1)
+            self.assertEqual(r["results"][0]["id"],
+                             "GF07A03_PMS01_20260722125045")
+
+    def test_is_scene_file_predicate(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertTrue(svc.is_scene_file(write_jpg(d, "a.jpg")))
+            self.assertTrue(svc.is_scene_file(write_tif(d, "b.tiff")))
+            self.assertFalse(svc.is_scene_file(write_jpg(d, "c.preview.jpg")))
+            self.assertFalse(svc.is_scene_file(write_jpg(d, "d.png")))
+            self.assertFalse(svc.is_scene_file(Path(d) / "missing.jpg"))
+            sub = Path(d) / "dir.jpg"          # 目录后缀像影像也不算
+            sub.mkdir()
+            self.assertFalse(svc.is_scene_file(sub))
 
 
 class TestFakeScenes(unittest.TestCase):

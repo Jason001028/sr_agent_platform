@@ -2,8 +2,9 @@
 /**
  * Toolbar.vue — 顶部工具栏（tif-viewer.html #toolbar 直译）
  * ------------------------------------------------------------------
- * 选文件（multiple）/ 拉伸下拉 / 输出目录（未授权·待授权·已授权 三态）/ 自动JPG /
- * 像素定位 X/Y + 按钮 / 绘制掩码 toggle / 生成掩码。
+ * 选影像（multiple，tif/tiff/jpg/jpeg）/ 拉伸下拉 / 像素定位 X/Y + 按钮 /
+ * 绘制掩码 toggle / 生成掩码 / 提交 SR。
+ * 最小原型删去了 HTML 的「输出目录」三态按钮与「自动JPG」勾选（前端不再导出 JPG）。
  */
 import { computed, ref } from 'vue';
 import { useViewerStore } from '../stores/viewer';
@@ -16,11 +17,12 @@ const locY = ref('');
 
 /** 盘阵场景激活：JPG 已烘焙，交互拉伸禁用（服务器只烤 2% 线性）。 */
 const sceneActive = computed(() => store.activeRec?.route === 'jpg');
-/** 「提交 SR」可用：盘阵场景已打开 + 已画掩码（sceneId 是烘焙前提）。 */
+/** 「提交 SR」可用：盘阵场景已打开（有原图目录可提交）。不再要求先画掩码 ——
+    掩膜取目录里已有的 <目录名>_mask.tif，缺了由后端 400 报明缺哪个文件。 */
 const srReady = computed(() =>
   sceneActive.value
   && !!store.activeRec?.sceneId
-  && (store.activeRec?.maskRois?.length ?? 0) > 0,
+  && !!store.activeRec?.lqPath,
 );
 /** 场景下拉固定显示「2% 线性」（烘焙值），与 store.stretchMode 解耦。 */
 const stretchValue = computed(() => (sceneActive.value ? 'linear2' : store.stretchMode));
@@ -47,24 +49,6 @@ function onPick(e: Event) {
 function doLocate() {
   store.locatePixel(locX.value, locY.value);
 }
-
-const outBtnCls = computed(() => {
-  if (store.outDir.ready) return 'granted';
-  if (store.outDir.name) return 'pending';
-  return '';
-});
-const outBtnText = computed(() => {
-  if (!store.outDir.name && !store.outDir.ready) return '输出目录: 未授权';
-  if (store.outDir.ready) return '输出目录: ✓ ' + store.outDir.name;
-  return '输出目录: ' + (store.outDir.name || '…') + '（待授权）';
-});
-const outBtnTitle = computed(() =>
-  store.outDir.ready
-    ? ''
-    : store.outDir.name
-      ? '点击重新授权该目录'
-      : '点击选择输出目录（授权后自动按日期写 JPG 中间产物）',
-);
 </script>
 
 <template>
@@ -75,12 +59,12 @@ const outBtnTitle = computed(() =>
       :disabled="store.busy"
       @click="fileInput?.click()"
     >
-      选择 TIF…
+      选择影像…
     </button>
     <input
       ref="fileInput"
       type="file"
-      accept=".tif,.tiff,.TIF,.TIFF"
+      accept=".tif,.tiff,.jpg,.jpeg,.TIF,.TIFF,.JPG,.JPEG"
       multiple
       style="display: none"
       @change="onPick"
@@ -95,21 +79,6 @@ const outBtnTitle = computed(() =>
     >
       <option v-for="o in STRETCH_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
     </select>
-
-    <button
-      type="button"
-      class="outbtn"
-      :class="outBtnCls"
-      :title="outBtnTitle"
-      @click="store.authorizeOutDir()"
-    >
-      {{ outBtnText }}
-    </button>
-
-    <label class="chk">
-      <input v-model="store.autoExport" type="checkbox" @change="store.autoExport && store.scanPendingExports()" />
-      自动JPG
-    </label>
 
     <span class="loc">
       X
@@ -146,13 +115,13 @@ const outBtnTitle = computed(() =>
       :class="{ on: srReady }"
       :disabled="store.srBusy || !srReady"
       :title="sceneActive
-        ? (store.activeRec?.sceneId
-            ? '把掩码烘焙到盘阵原图目录，跳转队列页确认后提交 SR'
-            : '此图非盘阵场景打开，无法服务端烘焙掩码')
+        ? (store.activeRec?.lqPath
+            ? '带出该场景的原图目录，跳转队列页确认后提交 SR'
+            : '此图非盘阵场景打开，没有可提交的原图目录')
         : '仅盘阵场景（先经「盘阵场景」打开）支持提交 SR'"
       @click="store.submitSr()"
     >
-      {{ store.srBusy ? '烘焙中…' : '提交 SR' }}
+      提交 SR
     </button>
   </div>
 </template>
@@ -265,9 +234,6 @@ const outBtnTitle = computed(() =>
 }
 .outbtn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.2); color: #fff; border-color: rgba(255, 255, 255, 0.6); }
 .outbtn:disabled { opacity: 0.5; cursor: not-allowed; }
-/* 输出目录授权/待授权：浅状态 pill（区别于 ghost） */
-.outbtn.granted { color: var(--accent-deep); border-color: transparent; background: var(--ok-bg); }
-.outbtn.pending { color: var(--warn); border-color: transparent; background: var(--warn-bg); }
 /* 激活态（绘制掩码 on / 提交SR grad.on）：白底深绿字 + 白环 = 高亮选中 */
 .outbtn.on, .outbtn.grad.on {
   color: var(--band-2);
@@ -276,17 +242,6 @@ const outBtnTitle = computed(() =>
   font-weight: 600;
   box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.25);
 }
-
-.chk {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: #fff;
-  font-size: 12px;
-  flex: none;
-  cursor: pointer;
-}
-.chk input { accent-color: #C7F0EC; }
 
 .spacer { flex: 1; }
 </style>

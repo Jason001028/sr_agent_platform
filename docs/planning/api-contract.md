@@ -53,6 +53,22 @@
 | `GET /api/queue/events` | SSE：队列状态变化广播 | 3.3 |
 | `POST /api/masks` | 多边形 JSON + W/H → 栅格化写盘阵（原图目录）→ `{mask_path, lq_path, task_draft}` | 3.4 |
 
+> **SR 最小原型（09-14）**：`POST /api/masks` 端点**保留且可用**（测试照旧覆盖），
+> 但**当前前端已不再调用**——掩码来源改为「目录里已有的 `<名字>_mask.tif`」，前端
+> 提交时只带 `lq_path`，由后端推导并校验存在性（`services/platform.derived_mask_path`）。
+> 前端 `lib/api.ts` 里的 `apiBakeMask` / `MaskDraft` / `BakeMaskBody` / `MaskBakeResult`
+> 已删除；将来若回到「前端画掩码」，端点与渲染链（`services/mask.py`）都还在。
+> `POST /api/queue` 的响应另加两个**只读提示字段**（没有沙箱时出现，否则整个字段缺省）：
+> `in_place: true` + `notice`（人话：「输出目录 = 输入目录…已有的 `_NOSR.tif` 会被覆盖」）。
+> 同一句话也写进作业日志的 audit 段（`build_batch_script`），两处都不能省——日志是事后追责时
+> 唯一会去看的东西。
+> 同时 `GET /api/scenes` 的扫描后缀扩到 `.jpg/.jpeg`（`scene_search._IMAGE_EXTS`）：
+> 盘阵里本就是显示就绪图的 JPG 也作为场景行列出，行内 `hasPreview` 恒 `true`、
+> `jpgUrl` **指向源文件本身**（前端因此跳过 `/api/scenes/{id}/preview` 懒生成），
+> W/H 由 Pillow 读头得到；`GET …/preview` 对这种行直接回源字节。
+> 后端自己烘焙的 `<basename>.preview.jpg` 缓存不算场景（`is_scene_file` 排除），
+> 否则同一张图会在列表里出现两行。
+>
 > **阶段6 增补（查看器上下文侧舱）**：`GET /api/scenes` 的 disk 行新增只读字段
 > `lq_path` = 该 scene 文件**父目录**的绝对路径（`run_sr` 的目录语义 lq_path；
 > fake 行恒 `null`）。作用：前端把 `/api/queue` 行按 `params.lq_path` 相等 +
