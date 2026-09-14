@@ -7,7 +7,7 @@
 // 覆盖：列表/检索 → 盘阵 .jpg 源行（最小原型 §4.7：不烘焙直接开）→ 「生成并打开」的
 //      懒生成 + 静态读 JPG + 同构 rec → 派生件（.preview.jpg 缓存 / <名字>_mask.tif）不入
 //      列表 → 「去查看器」保状态跳转 → 掩码按**元数据** W/H 换算 → 「提交 SR」带出目录 →
-//      /queue 只读表单（§4.3）。
+//      /queue 预填表单（§4.3）→ 打开失败必须落在 .sp-err（错误不写 viewer 的错误条）。
 // 说明：本文件 2026-09-15 重建。原文件（45 断言）随 .e2e/ 被 gitignore 丢失，断言按
 //      当前实现（commit 8c197fc）重写，见 docs/status/current-question.md。
 //      注意 window.__viewer 与 .toolbar 只挂 /viewer（ViewerPage.vue），所以「打开场景」
@@ -245,10 +245,16 @@ async function readField(page, label) {
   return page.evaluate((l) => {
     const lab = [...document.querySelectorAll('.qp-form label')]
       .find((x) => { const s = x.querySelector('span'); return s && s.textContent.trim().startsWith(l); });
-    if (!lab) return { ok: false, value: null, readonly: false };
+    if (!lab) return { ok: false, value: null, readonly: false, cands: 0 };
     const inp = lab.querySelector('input');
-    return inp ? { ok: true, value: inp.value, readonly: inp.readOnly }
-               : { ok: false, value: null, readonly: false };
+    if (!inp) return { ok: false, value: null, readonly: false, cands: 0 };
+    // cands = 该 input 挂的 datalist 里的候选数（lq_path 的历史目录下拉）
+    const dl = inp.getAttribute('list')
+      ? document.getElementById(inp.getAttribute('list')) : null;
+    return {
+      ok: true, value: inp.value, readonly: inp.readOnly,
+      cands: dl ? dl.querySelectorAll('option').length : 0,
+    };
   }, label);
 }
 
@@ -491,8 +497,8 @@ async function main() {
       assert(toolbar.srDisabled === false,
         '「提交 SR」可用（sceneId + lqPath 都已带上）');
 
-      /* ---------- G. 提交 SR → /queue 只读表单（§4.3） ---------- */
-      console.log('\n[G] 「提交 SR」带出目录 → /queue 只读表单');
+      /* ---------- G. 提交 SR → /queue 预填表单（§4.3） ---------- */
+      console.log('\n[G] 「提交 SR」带出目录 → /queue 预填表单');
       await clickByText(page, '提交 SR');
       await waitFor(page, () => location.pathname.endsWith('/queue'), 15000, '跳 /queue');
       await waitFor(page, () => !!document.querySelector('.qp-form .qp-draft-tip'), 10000, '带入提示');
@@ -500,7 +506,11 @@ async function main() {
       const maskField = await readField(page, 'mask_path');
       const suffix = await readField(page, '后缀');
       assert(lq.ok && lq.value === scenesRoot, `lq_path 带入场景目录 ${lq.value}`);
-      assert(lq.readonly, 'lq_path 只读（由场景推导，不可手改）');
+      // 2026-09-15 起 lq_path 不再是只读：原型期 SR_LOCKED_DIR 没有 API 暴露，前端无从
+      // 得知"唯一合法目录"，只能拿历史任务里的目录当下拉候选，输入框仍须可手改。
+      // 此刻队列为空 → 候选 0；有候选的情况在 test-platform.js §B 断（那里有真任务）。
+      assert(!lq.readonly, 'lq_path 不再只读（允许从历史目录下拉里选）');
+      assert(lq.cands === 0, `队列为空 → 目录下拉无候选（cands=${lq.cands}）`);
       assert(maskField.ok && maskField.readonly
         && maskField.value === scenesRoot + '/scenes_mask.tif',
         `mask_path 只读展示后端推导值 ${maskField.value}`);
@@ -511,6 +521,31 @@ async function main() {
         return (await r.json()).tasks.length;
       }, apiBase);
       assert(tasks === 0, `未自动提交：队列仍为空 (${tasks})`);
+
+      /* ---------- I. 打开失败必须落在 .sp-err（错误只写 scenes.error） ---------- */
+      // 反例保护：这两处失败以前写进 viewer 的错误条（挂在 /viewer、6 秒自消失），
+      // 在 /scenes 上表现为「点了按钮没反应」。这里把 JPG 换成非图字节：静态服务照旧
+      // 200（不产生网络错误干扰 H 段），createImageBitmap 解码失败 → openSceneJpg 抛
+      // → scenes.error → .sp-err。用 setCacheEnabled(false) 绕开 §B 已缓存的旧字节。
+      console.log('\n[I] 打开失败 → .sp-err（不写 viewer 的错误条）');
+      await page.setCacheEnabled(false);
+      await page.goto(base + '/scenes', { waitUntil: 'networkidle2', timeout: 30000 });
+      await waitRows(page, 3);
+      const jpgFile = path.join(scenesRoot, JPG_ROW + '.jpg');
+      const jpgKeep = fs.readFileSync(jpgFile);
+      fs.writeFileSync(jpgFile, Buffer.from('not a jpeg at all'));
+      await clickRowButton(page, JPG_ROW);
+      await waitFor(page, () => {
+        const e = document.querySelector('.sp-err');
+        return e && e.textContent.trim().length > 0;
+      }, 15000, '失败提示 .sp-err');
+      const errText = await page.evaluate(
+        () => document.querySelector('.sp-err').textContent.trim());
+      assert(errText.includes('打开「' + JPG_ROW + '」失败'),
+        `失败原因显示在场景页（${errText.slice(0, 56)}…）`);
+      assert(await page.evaluate(() => location.pathname.endsWith('/scenes')),
+        '打开失败不跳路由（留在 /scenes）');
+      fs.writeFileSync(jpgFile, jpgKeep);
 
       /* ---------- H. 全程无错 ---------- */
       console.log('\n[H] 全程无错');

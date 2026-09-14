@@ -27,7 +27,10 @@ Three deliberate properties:
   ``SR_SLURM_WORK_DIR`` (read → +1 → write under the same lock) keeps ids
   unique across an ``sr-api`` restart. Uniqueness matters because the verdict
   file is named after the job id: a recycled id would let one run read another
-  run's verdict.
+  run's verdict. When that file is missing or unreadable the counter falls back
+  to the clock rather than restarting at 1 — the verdict files live in the scene
+  directories and outlive ``SR_SLURM_WORK_DIR`` (``/tmp`` by default), so
+  restarting at 1 *is* the recycled-id case.
 * **The terminal state is still the verdict file**, never the process exit
   code. SR has silent-failure paths that ``exit(0)`` without producing anything
   (contract §2.3), so ``status()`` delegates to
@@ -45,6 +48,7 @@ import shutil
 import signal
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 from backend.config import sr_runtime
@@ -137,7 +141,14 @@ def reserve_job_id(work_dir=None) -> int:
         try:
             n = int(seq_file.read_text(encoding="utf-8").strip())
         except (OSError, ValueError):
-            n = 0
+            # Nothing to continue from: a fresh work dir, or the file was lost or
+            # corrupted (SR_SLURM_WORK_DIR defaults to /tmp, which a reboot
+            # clears). Restarting at 1 would recycle ids whose verdict files are
+            # still lying in the scene directories — those outlive the work dir,
+            # and a recycled id would read a stranger's verdict and report a job
+            # that never ran as COMPLETED. Fall back to the clock, which cannot
+            # collide with an id already handed out.
+            n = int(time.time())
         n += 1
         seq_file.write_text(f"{n}\n", encoding="utf-8")
         return n

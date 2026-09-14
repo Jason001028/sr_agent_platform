@@ -93,6 +93,12 @@ def _broadcast(state, event: dict) -> None:
             state.subscribers.discard(sub)
 
 
+#: States a cancel can leave alone. Anything else — including UNKNOWN, which is
+#: what a restarted sr-api reports for a job it no longer has a record of — must
+#: not be answered with a bare "cancelled: false" (see cancel_queue).
+_TERMINAL_STATES = ("COMPLETED", "FAILED", "CANCELLED")
+
+
 def _queue_state(st: dict) -> str:
     """Map a slurm.job_status dict onto the queue display state machine (§3.3).
 
@@ -456,6 +462,10 @@ def _norm_sr_params(body: dict) -> dict:
         raise HTTPException(status_code=400, detail="gpu 必须 >= 0")
     if not (0 <= cloud_limit <= 100):
         raise HTTPException(status_code=400, detail="cloud_limit 须在 0..100")
+    # 原型期禁用（见 run_sr.DELETE_ORI_MSG）。在这里拦是为了给出 400 + 人话原因，
+    # 而不是让它落到 submit 里变成 422 的 "ValueError: ..."。
+    if body.get("delete_ori"):
+        raise HTTPException(status_code=400, detail=run_sr_svc.DELETE_ORI_MSG)
     return {
         "lq_path": lq_path,
         "mask_path": mask_path,
@@ -544,6 +554,16 @@ def cancel_queue(task_id: int, request: Request):
     else:
         cancelled = slurm.cancel(task["job_id"])
     state_name, _ = _task_state(state, task)
+    if not cancelled and state_name not in _TERMINAL_STATES:
+        # 200 + cancelled=false 会被当成"已经停下了"。走到这里说明本进程没有该 job
+        # 的记录（sr-api 重启过），而子进程可能还在就地写 lq_path —— 操作员据此重新
+        # 提交就会有两个 SR 进程同写一个目录。宁可给 409 也不要这个 200。
+        script = os.path.basename(task.get("batch_script") or "") or "run_sr"
+        raise HTTPException(
+            status_code=409,
+            detail=f"取消失败：本进程没有 job {task['job_id']} 的记录（sr-api 可能重启过），"
+                   f"子进程可能仍在运行。先 `ps -ef | grep {script}` 确认，再手工 kill；"
+                   "确认停止前不要重复提交同一目录")
     return {"task_id": task_id, "cancelled": cancelled, "state": state_name}
 
 

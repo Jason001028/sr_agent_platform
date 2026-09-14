@@ -83,16 +83,20 @@ export const useScenesStore = defineStore('scenes', () => {
     void list();
   }
 
-  /** 打开场景：确保 JPG 已生成 → 静态 jpgUrl 读字节 → viewer.openSceneJpg。 */
+  /** 打开场景：确保 JPG 已生成 → 静态 jpgUrl 读字节 → viewer.openSceneJpg。
+      失败一律写本 store 的 error —— 本页（ScenesPage）只渲染 scenes.error，而
+      viewer 的错误条挂在 /viewer、6 秒后自己消失；写错地方就等于按钮点了没反应。
+      JPG 读不到 / 字节不是图（openSceneJpg 解码失败会抛，见 viewer.ts）都归这里。 */
   async function open(row: SceneRow): Promise<void> {
     const viewer = useViewerStore();
     const cfg = loadSrConfig();
     if (row.fake) {
-      viewer.showErr('fake 占位场景无真实文件，不可打开');
+      error.value = '「' + row.name + '」是 fake 占位场景'
+        + '（未配 SR_SCENES_ROOT 或盘阵不可达），没有真实文件可打开';
       return;
     }
     if (!row.W || !row.H) {
-      viewer.showErr('「' + row.name + '」尺寸未知，无法换算掩码，拒绝打开');
+      error.value = '「' + row.name + '」尺寸未知（元数据缺 W/H），无法换算掩码，拒绝打开';
       return;
     }
     openingId.value = row.id;
@@ -115,7 +119,8 @@ export const useScenesStore = defineStore('scenes', () => {
         name: row.name, W: row.W, H: row.H, sceneId: row.id, lqPath: row.lq_path,
       }, blob);
     } catch (e) {
-      viewer.showErr('打开场景失败：' + (e instanceof Error ? e.message : String(e)));
+      error.value = '打开「' + row.name + '」失败：'
+        + (e instanceof Error ? e.message : String(e));
     } finally {
       openingId.value = null;
     }

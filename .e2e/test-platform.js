@@ -228,6 +228,54 @@ async function main() {
       const tags = await firstRowTags(page);
       assert(tags[0] === '完成', `提交后假调度器跑完 → 首行徽标「完成」 (${tags.join(',')})`);
 
+      // 行级信息 + 「以这行参数再提交」：耗时列 / 目录下拉候选 / 只填不提交
+      const rowInfo = await page.evaluate(() => {
+        const tr = document.querySelector('.qp-tbl tbody tr');
+        const tds = tr ? [...tr.querySelectorAll('td')] : [];
+        const lqInput = [...document.querySelectorAll('.qp-form label')]
+          .filter((l) => {
+            const s = l.querySelector('span');
+            return s && s.textContent.trim().startsWith('lq_path');
+          })
+          .map((l) => l.querySelector('input'))[0];
+        return {
+          elapsed: tds[6] ? tds[6].textContent.trim() : '',
+          ops: tds[7] ? [...tds[7].querySelectorAll('button')].map((b) => b.textContent.trim()) : [],
+          lqList: lqInput
+            ? { list: lqInput.getAttribute('list'), readonly: lqInput.readOnly } : null,
+          cands: (() => {
+            const dl = document.getElementById('qp-lq-cands');
+            return dl ? [...dl.querySelectorAll('option')].map((o) => o.value) : [];
+          })(),
+        };
+      });
+      assert(/^\d+ 秒$/.test(rowInfo.elapsed), `耗时列给出终态耗时（${rowInfo.elapsed}）`);
+      assert(rowInfo.ops.indexOf('再提交') >= 0, `每行给出「再提交」（${rowInfo.ops.join('/')}）`);
+      assert(rowInfo.lqList && rowInfo.lqList.readonly === false
+        && rowInfo.lqList.list === 'qp-lq-cands',
+        `lq_path 可手改且挂了历史候选 datalist（list=${rowInfo.lqList && rowInfo.lqList.list}）`);
+      assert(rowInfo.cands.length === 1 && path.resolve(rowInfo.cands[0]) === path.resolve(lqPath),
+        `目录下拉候选 = 队列里出现过的目录（${rowInfo.cands.join(',')}）`);
+
+      await clickByText(page, '再提交');
+      await waitFor(page, () => {
+        const t = document.querySelector('.qp-form .qp-draft-tip');
+        return t && t.textContent.indexOf('已带入任务 #') >= 0;
+      }, 10000, '「再提交」预填提示');
+      const back = await page.evaluate(() => {
+        const v = (l) => {
+          const lab = [...document.querySelectorAll('.qp-form label')]
+            .find((x) => { const s = x.querySelector('span'); return s && s.textContent.includes(l); });
+          const inp = lab && lab.querySelector('input');
+          return inp ? inp.value : null;
+        };
+        return { lq: v('lq_path'), scale: v('SR 倍率') };
+      });
+      assert(path.resolve(back.lq) === path.resolve(lqPath) && back.scale === '2',
+        `「再提交」把该行参数填回表单（lq_path=${back.lq} scale=${back.scale}）`);
+      assert((await firstRowTags(page)).length === 1,
+        '「再提交」只填表单、不自动提交（队列仍 1 行）');
+
       /* ---------- C. 场景→SR（查看器 → /queue 只读预填 → 用户确认提交） ---------- */
       console.log('\n[C] 查看器场景→SR（route=jpg + lqPath 带出 + 表单预填）');
       await page.goto(base + '/viewer', { waitUntil: 'networkidle2', timeout: 30000 });
