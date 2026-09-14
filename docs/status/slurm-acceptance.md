@@ -21,7 +21,8 @@ OPT=/DiskArray/tmp/wangrz/sr_utils/espan3_2026_gf04_tile500.yml
 TEST=/DiskArray/tmp/wangrz/sr_test          # 手工验证用的场景副本根（§C）
 SANDBOX=/DiskArray/tmp/wangrz/sr_sandbox    # 平台沙箱：每个作业的私有副本（§D）
 PART=gpu                                   # 2026-09-11 sinfo 实测：centos7/deicc/gpu/gpu*/test（无 gpup）
-export APP BUNDLE SR_PYTHON WORK OPT TEST PART
+NODELIST='node81-[129-162,165-183,185-189]'   # ⚠️ 旧口径（族白名单）。新需求=单机，§B0 定出机器名后改成那一台
+export APP BUNDLE SR_PYTHON WORK OPT TEST PART NODELIST
 
 echo "$APP"; echo "$SR_PYTHON"    # ✓= 两个空变量说明没贴全
 ```
@@ -228,6 +229,81 @@ sh $APP/deploy/slurm/probe_slurm.sh --deep     # ⚠️ 默认不跑
 
 `record:` 两种模式的完整输出都贴回（SUMMARY + HINTS 段必须有）
 
+### A 记录（2026-09-11 探针 + 09-14 env/节点/提交三查）
+
+**探针**（`probe_slurm.sh` @ `fb1cce1e…`，真机）：`OK=19 WARN=3 FAIL=5`。逐条判读：
+
+- **预期非 OK**（不算故障）：`sacct` / `sacct-parse` FAIL（账务关闭）、`assoc` / `assoc-nginx` WARN（同因）、
+  `write-lq` FAIL + `write-lq-debug` WARN（`SR_SCENES_ROOT=/data/scenes` 在本机不存在 = 遗留一）。
+- `bundle FAIL missing util.py` → **假 FAIL**，探针自己的检查清单写错（§0.4 修正）。
+- `write-db FAIL` → **真问题**，修法见 §0.6。
+- 集群：`gpu` 分区 76 节点、`sinfo -N` 96 行、控制器 node81-190、`node81-133/134/135/136` 为 `down`（本机 `down*`）。
+
+**env**（`systemctl cat sr-api`，13 行 `Environment=`，逐项对 §0.1 的九项）：
+
+| env | 机器值 | 判 |
+|---|---|---|
+| `SR_BUNDLE_DIR` | `/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes` | ✓ `ls` 见 `code_0817_prod.py` / `models/` / `options/` / `utils/util.py` |
+| `SR_PYTHON` | `…/envs/torch1.9.1py36/bin/python` | ✓ 路径在，实测 **torch 1.10.2+cu113 / GDAL 2.4.0** |
+| `SR_VERIFY_SCRIPT` | `verify_sr_run.py` | ✓ |
+| `SR_SR_SCRIPT` | **未设置** | ✗ **必须补，见下 ①** |
+| `SR_SLURM_WORK_DIR` | `/DiskArray/tmp/wangrz/sr_agent_work` | ✓ node81-129 上 `test -d` = `WORK_OK` |
+| `SR_SLURM_PARTITION` / `_TIME` / `_CPUS` | `gpu` / `02:00:00` / `4` | ✓ |
+| `SR_SANDBOX_ROOT` | `/DiskArray/tmp/wangrz/sr_sandbox` | ✓ 已配（不是空的） |
+| `SR_SCENES_ROOT` | `/data/scenes` | ✗ 本机不存在（遗留一，进 C/D 前必须定） |
+| `SR_AGENT_DB` | `…/sr-agent-platform/sr_agent.db` | ✗ nginx 写不动 → §0.6 |
+| `SR_LLM_MOCK` / `SR_SLURM_FAKE` | `0` / `0` | ✓ |
+| `SR_SCRIPT_PATH` | `/DiskArray/prod_slurm.py` | ⚠️ 死配置（见下 ②） |
+
+**两个必须处理的问题**：
+
+① **`SR_SR_SCRIPT` 没设 → 作业会去跑 `code_0817_prod.py`（生产原脚本），不是变体。**
+[`run_sr.py:222`](../../backend/services/run_sr.py#L222) 的兜底值就是 `code_0817_prod.py`；按 §0.2 的记录，
+原脚本里 `gpu_count != 4` 的守卫在单卡分配下恒真 → 作业 `exit(3)`。**症状会像「Slurm 环境有问题」，
+实际只是脚本名没指对**——B/C 之前必须先修。变体本体已在位（见下）。
+
+② `SR_SCRIPT_PATH=/DiskArray/prod_slurm.py` 是**死配置**：`SR_SCRIPT_PATH` 这个变量名在**整个仓库里零引用**
+（`grep -r` 无命中），且指向 `$BUNDLE` 之外的路径。像是当初本意要设 `SR_SR_SCRIPT` 却写错了名字。
+应删掉，否则下次读 unit 的人会以为入口脚本已经配好了。
+
+**变体落位**（`sha256sum -c` 对仓库 `SR_code/variants/`）：
+
+```
+041bea73…474a9  30695 B  code_0817_prod_slurm.py   ← 与 provenance.json 的 variant.sha256 一致
+92e400a7…3505d  16419 B  verify_sr_run.py
+```
+
+**其他实测**：
+
+- `sudo -u nginx sbatch --test-only …` **rc=0**（`Job 41140523 to start at … using 2 processors on nodes node81-131`）→ 提交权限与通路 OK。
+- `$TEST=/DiskArray/tmp/wangrz/sr_test` 已建；`sudo -u nginx touch $TEST/w` → `TEST WRITE OK`。
+- 共享盘可见：`node81-129` → `WORK_OK` + `BUNDLE_OK` ✓。
+- ⚠️ **`node104-27` 在本机解析不了**：`getent hosts node104-27` 空、`srun -w node104-27` 报
+  `getaddrinfo() failed … check slurm.conf`。它在 `gpu` 分区里且状态 idle。**这是集群侧问题，不是我们的配置**，
+  但两次探测都撞上它（它是该族里第一个 idle 节点）。已知影响面：`srun`（客户端直连）必失败；
+  `sbatch` 作业由控制器→slurmd 拉起，方向不同、**未验证**是否受影响。待办：向集群管理员报；B/C 里作业若莫名失败，
+  先 `scontrol show job <id>` 看落在哪台。
+- **未验完的一项**：`node104` 族只验到 `$BUNDLE` 可见（09-11 node104-04，`$WORK` 那行输出被截断）。
+
+`✓= A 通过` 的判据：补齐 ①、删掉 ②、§0.6 库目录修完，且**至少一个** `node81-*` 节点报
+`WORK_OK` + `BUNDLE_OK`（`node104-*` 那一族的验证改由 **B0** 承担，原因见下段）。
+
+**A 收尾确认（2026-09-14 第二轮）**：
+
+- `systemctl cat`/两个 unit 文件里 `SR_SCRIPT_PATH` **已搜不到**（`grep -rn` 空输出），
+  `/DiskArray/prod_slurm.py` 也不存在 → ② 闭合。（注：上一轮 `systemctl cat` 的输出里出现过这一行，
+  本轮两个文件里都没有 —— 要么两轮之间被移走了，要么上一轮那行是转写误差；**两种情况下现状都已确认为干净**。）
+- 变体自检：`sha256sum -c` 对 `code_0817_prod_slurm.py` 与 `verify_sr_run.py` 均 **OK**
+  → `$BUNDLE` 里这两个文件与仓库 `SR_code/variants/` 逐字节相同（A 阶段冻结合同仍然成立）。
+- drop-in 生效（以 `/proc/<pid>/environ` 为证）：`SR_SR_SCRIPT=code_0817_prod_slurm.py`、
+  `SR_AGENT_DB=/DiskArray/tmp/wangrz/sr_agent_db/sr_agent.db`、`SR_VERIFY_SCRIPT=verify_sr_run.py` → ① 闭合。
+- 老库存在并已 `cp -p` 到新目录（打印 `migrated`）。
+- `node81-132`：`WORK_OK` + `BUNDLE_OK` ✓。
+- ⚠️ **`node104-*` 一族不是「有一台坏」，是整族在本机解析不了**：idle 里前 5 台
+  （`node104-27/28/29/30/31`）`getent hosts` 全部为空。所以「用 `srun` 探 `node104-*`」这个做法**本身不成立**
+  —— `srun` 需要提交端直连节点，解析不了就必失败（错在探测手段，不是共享盘）。共享盘是否可见、以及**作业在这族上
+  到底能不能跑**，改由 **B0** 用 `sbatch` 验（`sbatch` 由控制器 → slurmd 拉起，正是平台真实用的路径）。
+
 ---
 
 ## B 裸 Slurm 冒烟（不碰平台；三个小作业，合计 ⏱ 3 分钟）
@@ -235,16 +311,62 @@ sh $APP/deploy/slurm/probe_slurm.sh --deep     # ⚠️ 默认不跑
 目的：把「平台能不能提交」「作业里的解释器能不能 import」「退出码文件能不能落盘」三件事**各自单独**验掉，
 D 阶段出事时就能立刻排除掉这三层。
 
+> **B1–B3 与部署方向无关，可以先跑**：它们验的是 `--export=NONE` 下的解释器 import、`--gres` 的分配形态、
+> 退出码文件落盘 —— 方向①（集群 + 锁单机）与方向②（本机单节点 Slurm）**都要这三条结论**。
+> 这里用 §0.0 的 `$NODELIST`（暂时仍是族口径）只是让作业有个落点；真正的单机锁定等方向定了再说（见 §B0）。
+
+### B0 · 先定方向：那台 4 卡机在集群里能不能被调度（**只读，不提交作业**，⏱ 30 秒）
+
+> **需求（用户 2026-09-14 定，优先于本清单此前所有口径）**：所有作业**只跑在同一台 4×3090 物理机内**，
+> **不调度到其他服务器**；Slurm 的角色收窄为**本机排队 + 按单卡分配 GPU**。部署方向二选一：
+> **①** 复用现有集群，用 `#SBATCH --nodelist=` 锁定那台机器；**②** 在**本机自建单节点 Slurm**
+> （无跨节点依赖，顺带规避跨主机域名解析问题）。**方向还没定** —— 由下面三条命令定。
+
+**为什么先跑这三条、再跑 B1–B3**：B1–B3 要么把作业钉在 `--nodelist` 上、要么依赖「作业能落到某台机器」，
+而**把作业钉在一台 `down` 的节点上 = 一直排队**（不是失败，是白等）。A 记录里已经有半条坏消息：
+`node81-133/134/135/136` 是 `down`，**本机 node81-135 是 `down*`**。所以先花 30 秒把三件事问清楚：
+
+```bash
+# (a) 哪几台是 4 卡机（%G=GRES，gpu:4 就是 4 张卡）+ 它们的实时状态（%t：idle/alloc/mix/down*）
+sinfo -h -N -o "%N %G %t %P" | grep -E 'gpu:[0-9]+' | sort -u
+
+# (b) 我现在在哪台机器上，它是不是被标成了 down
+hostname; scontrol show node $(hostname) | head -4
+
+# (c) 方向②的前提：本机有没有 slurmctld/slurmd 可执行文件、6817/6818 端口占没占
+#     （本机**没有 yum 源**，装不了新包，只能用手上已有的）
+which slurmctld slurmd munge 2>&1; systemctl is-active slurmd 2>&1; ss -lntp 2>/dev/null | grep -E ':6817|:6818'
+```
+
+`record:` 三条的完整输出（都很短）
+
+**判读（判读方用）**：
+
++ (a) 里带 `gpu:4` 的节点名 = 候选「那台 4 卡机」。它的状态列若是 `down*` → **方向① 直接死**：
+  DOWN 节点永远不会被分配，要恢复必须动集群（与「平台是接入方、不改集群」冲突）→ 走方向②。
++ (b) 若 `hostname` 就是 (a) 里那台、`State=DOWN*` → 同上；若本机不在 `gpu` 分区里 → 也要走方向②。
++ (c) `slurmctld` 不在 → 方向② 卡在「没有 yum 源装控制节点」；`:6818` 被占 → 本机已有 slurmd 在跑
+  （集群那份），方向② 必须换 cluster 名/端口，不能直接起第二份。这三条任一条不满足，方向② 也要先解决。
+
+✓= 三条输出到手 → 才谈方向①/② 的取舍（那是一个需要拍板的岔路，不是判读能自动得出的结论）。
+
+> **旧 B0 已退役**（备查，不再跑）：它用 `sbatch -w node104-27 … --wrap 'hostname'` 验 node104 族
+> 能不能跑作业，是**为「node81 族白名单」口径服务的**。新需求是单机，作业根本不落在 node104 族，
+> 结论不再影响任何决策。真想上报集群侧解析问题时再翻出来用。
+
 ### B1 · `--export=NONE` 会不会切断 `LD_LIBRARY_PATH`（P2 遗留必验项 V1）
 
 ```bash
-sudo -u nginx sbatch --parsable --job-name=acc_b1 -p $PART --gres=gpu:1 \
+sudo -u nginx sbatch --parsable --job-name=acc_b1 -p $PART --gres=gpu:1 --nodelist=$NODELIST \
   --time=00:05:00 --export=NONE \
   --output=$TEST/b1_%j.out --error=$TEST/b1_%j.err \
-  --wrap "$SR_PYTHON -c 'import torch, gdal; print(torch.__version__, gdal.__version__)'"
+  --wrap "$SR_PYTHON -c 'import torch; from osgeo import gdal; print(torch.__version__, gdal.VersionInfo())'"
 ```
 
-✓= `$TEST/b1_*.out` 里打印出版本号（如 `1.9.1 3.x`）
+✓= `$TEST/b1_*.out` 里打印出版本号（登录端实测为 `1.10.2+cu113 2020400`）
+✗ 打印 `ImportError: ... libc10.so / libgdal.so` → 就是本项要抓的那个失败，按下面的改法处理。
+（`gdal.VersionInfo()` 不是 `gdal.__version__`：老 osgeo 绑定没有 `__version__`，用错了会得到
+`AttributeError`，看着像环境坏了，其实只是 API 名不对。）
 
 ✗ `.err` 报 `ImportError: libXXX.so` / `OSError` → **一行改动**：`backend/services/run_sr.py` 里
 `"#SBATCH --export=NONE"` → `"#SBATCH --export=ALL"`；重跑 `pytest backend/tests/test_run_sr.py`，
@@ -256,7 +378,7 @@ sudo -u nginx sbatch --parsable --job-name=acc_b1 -p $PART --gres=gpu:1 \
 ### B2 · 分配审计段（`--gres` 到底给了什么）
 
 ```bash
-sudo -u nginx sbatch --parsable --job-name=acc_b2 -p $PART --gres=gpu:1 \
+sudo -u nginx sbatch --parsable --job-name=acc_b2 -p $PART --gres=gpu:1 --nodelist=$NODELIST \
   --time=00:05:00 --export=NONE \
   --output=$TEST/b2_%j.out --error=$TEST/b2_%j.err \
   --wrap 'echo "JOB=${SLURM_JOB_ID} GPUS=${SLURM_JOB_GPUS:-<unset>} CVD=${CUDA_VISIBLE_DEVICES:-<unset>} HOST=$(hostname)"; nvidia-smi --query-gpu=index,uuid --format=csv,noheader'
@@ -285,11 +407,14 @@ cat > $TEST/b3_cfg.xml <<EOF
 </SFSR_Config>
 EOF
 
-sudo -u nginx srun -N1 -n1 -p $PART --time=00:05:00 sh -c "
-  cd $BUNDLE || exit 1
-  $SR_PYTHON verify_sr_run.py --config $TEST/b3_cfg.xml --sr-exit-code 0 --job-id 999999
-  echo \"verifier_rc=\$?\""
+# 用 sbatch 而不是 srun：srun 要提交端直连节点，落在解析不了的 node104-* 上会假失败
+# （见 B0）；sbatch 是控制器 → slurmd 拉起，也正是平台真实用的路径。
+sudo -u nginx sbatch --parsable --job-name=acc_b3 -p $PART --nodelist=$NODELIST --time=00:05:00 --export=NONE \
+  --output=$TEST/b3_%j.out --error=$TEST/b3_%j.err \
+  --wrap "cd $BUNDLE; $SR_PYTHON verify_sr_run.py --config $TEST/b3_cfg.xml --sr-exit-code 0 --job-id 999999; echo verifier_rc=\$?"
 ```
+
+✓= `$TEST/b3_*.out` 里 `verifier_rc=90`（该目录里既没有 SRLOG 也没有输出 tif，**契约不满足才是正确结论**），且
 
 ✓= 打印 `verifier_rc=90`（该目录里既没有 SRLOG 也没有输出 tif，**契约不满足才是正确结论**），且
 
@@ -602,15 +727,16 @@ curl -s -X POST http://127.0.0.1:8000/api/queue -H 'content-type: application/js
 
 ---
 
-## E 回贴清单（把这七样贴回来即可判读并收口）
+## E 回贴清单（把这八样贴回来即可判读并收口）
 
 1. **A**：`probe_slurm.sh` 完整输出（SUMMARY + HINTS 段必须有）；跑了 `--deep` 的话一并贴。
 2. **§0.4**：三条待核项的实际输出（bundle 拼写 / torch+gdal 版本 / 两节点共享盘可见性）。
-3. **B**：B1 的 `.out`（版本号那行）+ B2 的审计行 + B3 的 `verifier_rc` 与退出码文件内容。
-4. **C**：`sr_rc` / `verifier_rc` / 退出码文件名 / 输出 tif 大小 / 端到端耗时 / SRLOG 末三行。
-5. **D1**：退出码文件全文 + 两次 `ls` 输出 + 队列行 + 两次 POST 的响应 JSON。
-6. **D2 / D3**：POST 的 `status`+`job_id`（D2 三次、D3 两次）+ 队列统计行；D3 的 SRLOG 末两行。
-7. **D4**：SSE 收到的前三帧原文（含 `type` / `state`）+ 浏览器徽标行为。
+3. **B0**：三条只读命令的完整输出（4 卡机是谁 + 我在哪台 + slurmd/端口状态）。
+4. **B**：B1 的 `.out`（版本号那行）+ B2 的审计行 + B3 的 `verifier_rc` 与退出码文件内容。
+5. **C**：`sr_rc` / `verifier_rc` / 退出码文件名 / 输出 tif 大小 / 端到端耗时 / SRLOG 末三行。
+6. **D1**：退出码文件全文 + 两次 `ls` 输出 + 队列行 + 两次 POST 的响应 JSON。
+7. **D2 / D3**：POST 的 `status`+`job_id`（D2 三次、D3 两次）+ 队列统计行；D3 的 SRLOG 末两行。
+8. **D4**：SSE 收到的前三帧原文（含 `type` / `state`）+ 浏览器徽标行为。
 
 判读口径（判读方用）：D1 看 `verdict=90 → FAILED → 重投变 SUBMITTED`；D2 看两次复用 + 单 job_id；
 D3 看 `skip=1 → COMPLETED → 复用`；D4 看 `job_update` 帧。四条都成立才算验收通过。

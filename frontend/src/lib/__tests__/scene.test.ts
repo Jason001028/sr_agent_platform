@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import {
   loadSrConfig, joinBase, scenesQuery, scenesListUrl, scenePreviewUrl,
   sceneImageUrl, graySrcFromRgba, sceneDecodePixels, thumbPolysToOrig,
+  isImageSource,
 } from '../scene.js';
 import { stretchRgba } from '../tifDecode.js';
 import { thumbToOrig } from '../viewMath.js';
@@ -121,5 +122,28 @@ describe('列表 URL 样例', () => {
       .toBe('/api/scenes?satellite=GF07A03&limit=20');
     expect(sceneImageUrl(cfg, '/disk-array/GF07A03_PMS01_20260722125045.preview.jpg'))
       .toBe('/disk-array/GF07A03_PMS01_20260722125045.preview.jpg');
+  });
+});
+
+describe('isImageSource（§4.7 盘阵 JPG 源行）', () => {
+  const row = (name: string, rel: string | null): { name: string; rel: string | null } =>
+    ({ name, rel });
+
+  it('.jpg/.jpeg 源（含大写）→ true', () => {
+    expect(isImageSource(row('a', '2026/07/a.jpg'))).toBe(true);
+    expect(isImageSource(row('a', 'a.jpeg'))).toBe(true);
+    expect(isImageSource(row('a', 'a.JPG'))).toBe(true);
+  });
+
+  it('光栅行 → false', () => {
+    expect(isImageSource(row('a', 'a.tif'))).toBe(false);
+    expect(isImageSource(row('a', 'a.img'))).toBe(false);
+    expect(isImageSource(row('a', 'a.tiff'))).toBe(false);
+  });
+
+  it('rel 缺失时退回 name；都没有 → false', () => {
+    expect(isImageSource(row('a.jpg', null))).toBe(true);
+    expect(isImageSource(row('GF07A03_PMS01_20260722125045', null))).toBe(false);
+    expect(isImageSource(row('', null))).toBe(false);
   });
 });

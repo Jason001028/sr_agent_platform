@@ -3,27 +3,22 @@
  * ------------------------------------------------------------------
  * 浏览器回归 + 真机验收都靠它，**始终暴露**（不只在 dev/build 注入）。
  * HTML 版 `window.__viewer`（1275-1285 行）的行为对齐：
- *   - 解码/导出：planExport / bakeJpg(canvasToJpegBlob) / getSaver / fsIO / setSaver /
- *     collectForExport / kickExport / reExportJpg / scanPendingExports / dateDirName /
- *     JPG_MAX / JPG_QUALITY
+ *   - 解码：planExport
  *   - 掩码：enterDraw / exitDraw / buildMaskJson / exportMaskJson / thumbToOrig /
  *     getRois / genMask / wandSelect / maskGen(MaskGen)
  *   - 新增（Vue 无 HTML 的全局 recs 数组，测试观测需要）：recs() / activeRec() 摘要快照。
  *   - setSparseMin：改写 tifDecode 的 SPARSE_MIN（默认 1e8 不动），让浏览器回归用小
  *     fixture 走稀疏路由。
+ *   - 删去（最小原型取消了浏览器 JPG 导出/输出目录一条链路）：bakeJpg / getSaver /
+ *     fsIO / setSaver / collectForExport / kickExport / reExportJpg /
+ *     scanPendingExports / dateDirName / JPG_MAX / JPG_QUALITY。
  *
- * 全部委托 store 动作 + lib 纯函数；store 的 ViewerRec 满足 ExportRecLike（file/probe/exportCap）。
+ * 全部委托 store 动作 + lib 纯函数。
  */
 import { browserKit } from '../lib/browserKit.js';
-import { planExport, JPG_MAX, JPG_QUALITY, setSparseMin } from '../lib/tifDecode.js';
-import type { ProbeInfo } from '../lib/tifDecode.js';
-import { collectForExport, canvasToJpegBlob } from '../lib/exportJpg.js';
-import type { ExportCollectResult } from '../lib/exportJpg.js';
-import { getSaver, fsIO, setSaverOverride, dateDirName } from '../lib/saver.js';
-import type { Saver } from '../lib/saver.js';
+import { planExport, setSparseMin } from '../lib/tifDecode.js';
 import { thumbToOrig } from '../lib/viewMath.js';
 import MaskGen from '../lib/maskgen.js';
-import { FileSource } from '../lib/source.js';
 import type { SceneOpenMeta } from '../lib/scene.js';
 import { useViewerStore } from '../stores/viewer.js';
 import type { ViewerRec } from '../stores/viewer.js';
@@ -40,30 +35,13 @@ export interface ViewerRecSummary {
   thumbW: number;
   thumbH: number;
   layout: string;
-  jpgStatus: string;
-  jpgCls: ViewerRec['jpgCls'];
-  jpgDone: boolean;
   /** 拉伸后的缩略图画布（页内采样用；等价 HTML rec.thumb） */
   thumb: HTMLCanvasElement | null;
 }
 
 export interface ViewerHook {
-  // 解码 / 导出
+  // 解码
   planExport: typeof planExport;
-  bakeJpg: (rgba: Uint8ClampedArray, sw: number, sh: number) => Promise<Blob>;
-  getSaver: typeof getSaver;
-  fsIO: typeof fsIO;
-  setSaver: (s: Saver | null) => void;
-  collectForExport: (
-    rec: { file: File; probe: ProbeInfo | null; _exportCap?: number },
-    onProgress?: (f: number) => void,
-  ) => Promise<ExportCollectResult>;
-  kickExport: (rec: ViewerRec, force?: boolean) => void;
-  reExportJpg: (id: number) => void;
-  scanPendingExports: () => void;
-  dateDirName: typeof dateDirName;
-  JPG_MAX: number;
-  JPG_QUALITY: number;
   // 掩码
   enterDraw: () => void;
   exitDraw: () => void;
@@ -84,7 +62,9 @@ export interface ViewerHook {
   delClick: (tx: number, ty: number) => void;
   // 阶段5：盘阵场景打开（route='jpg'，浏览器回归注入合成 JPG）+ 掩码→SR 提交
   openSceneJpg: (meta: SceneOpenMeta, blob: Blob) => Promise<void>;
-  submitSr: () => Promise<void>;
+  // 本地 .jpg/.jpeg 打开（route='img'，浏览器回归用小 JPG fixture 走同一像素管线）
+  openLocalImage: (file: File) => Promise<void>;
+  submitSr: () => void;
   // 测试观测（Vue 无全局 recs → 摘要快照）
   recs: () => ViewerRecSummary[];
   activeRec: () => ViewerRecSummary | null;
@@ -108,9 +88,6 @@ function summarize(rec: ViewerRec): ViewerRecSummary {
     thumbW: rec.thumb ? rec.thumb.width : 0,
     thumbH: rec.thumb ? rec.thumb.height : 0,
     layout: rec.layout,
-    jpgStatus: rec.jpgStatus,
-    jpgCls: rec.jpgCls,
-    jpgDone: rec._jpgDone,
     thumb: (rec.thumb as unknown as HTMLCanvasElement | null),
   };
 }
@@ -119,26 +96,6 @@ function summarize(rec: ViewerRec): ViewerRecSummary {
 export function mountE2EHooks(): ViewerHook {
   const hook: ViewerHook = {
     planExport,
-    bakeJpg: (rgba, sw, sh) => canvasToJpegBlob(rgba, sw, sh, browserKit),
-    getSaver,
-    fsIO,
-    setSaver: (s) => setSaverOverride(s),
-    collectForExport: (rec, onProgress) => {
-      const store = useViewerStore();
-      const src = new FileSource(rec.file, rec.file.name);
-      return collectForExport(
-        { file: rec.file, probe: rec.probe, exportCap: rec._exportCap },
-        src,
-        browserKit,
-        onProgress,
-      );
-    },
-    kickExport: (rec, force) => useViewerStore().kickExport(rec, force),
-    reExportJpg: (id) => useViewerStore().reExportJpg(id),
-    scanPendingExports: () => useViewerStore().scanPendingExports(),
-    dateDirName,
-    JPG_MAX,
-    JPG_QUALITY,
     enterDraw: () => useViewerStore().enterDraw(),
     exitDraw: () => useViewerStore().exitDraw(),
     buildMaskJson: () => useViewerStore().buildMaskJson(),
@@ -160,6 +117,7 @@ export function mountE2EHooks(): ViewerHook {
     mergeRois: () => useViewerStore().mergeRois(),
     delClick: (tx, ty) => useViewerStore().delClick(tx, ty),
     openSceneJpg: (meta, blob) => useViewerStore().openSceneJpg(meta, blob),
+    openLocalImage: (file) => useViewerStore().openLocalImage(file),
     submitSr: () => useViewerStore().submitSr(),
     recs: () => useViewerStore().recs.map(summarize),
     activeRec: () => {

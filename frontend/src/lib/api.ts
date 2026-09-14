@@ -108,26 +108,15 @@ export interface QueueSubmitResult {
   previous_job_id?: number;
   config_xml: string | null;
   log_dir: string | null;
+  /** 无沙箱就地跑（本地执行器恒如此）：输入会被改名 *_NOSR.tif，已有同名文件被覆盖。 */
+  in_place?: boolean;
+  /** 上一条的人话版本，提交成功后原样展示给操作者。 */
+  notice?: string;
 }
 
-/** POST /api/masks 返回 + task_draft（预填队列表单，不自动提交）。 */
-export interface MaskDraft {
-  lq_path: string;
-  mask_path: string;
-  sr_scale: number;
-  suffix: string;
-  gpu: number;
-  cloud_limit: number;
-  delete_ori: boolean;
-  grid_align: boolean;
-}
-
-export interface MaskBakeResult {
-  mask_path: string;
-  mask_txt: string;
-  lq_path: string;
-  task_draft: MaskDraft;
-}
+/* 注：后端 POST /api/masks（浏览器画掩码 → 服务端烘焙落盘）仍然存在且可用，
+   但最小原型已不再调用它 —— 掩码改为「目录里已有的 <目录名>_mask.tif」，
+   前端提交时只带 lq_path，掩码由后端推导（platform.derived_mask_path）。 */
 
 /* ---------------- URL 拼接 ---------------- */
 export const apiUrl = (cfg: SrConfig, path: string): string =>
@@ -138,7 +127,6 @@ export const sessionMessagesUrl = (cfg: SrConfig, sid: string): string =>
   apiUrl(cfg, `/api/chat/sessions/${encodeURIComponent(sid)}/messages`);
 export const queueUrl = (cfg: SrConfig): string => apiUrl(cfg, '/api/queue');
 export const queueEventsUrl = (cfg: SrConfig): string => apiUrl(cfg, '/api/queue/events');
-export const maskUrl = (cfg: SrConfig): string => apiUrl(cfg, '/api/masks');
 
 /* ---------------- SSE 帧切分 / 解析（纯函数） ---------------- */
 /** 切一段 SSE 文本成完整帧的 data 行；残片（无收尾空行）留在 rest。 */
@@ -290,24 +278,6 @@ export async function apiCancelQueue(
     method: 'POST',
   });
   return (await r.json()) as { task_id: number; cancelled: boolean; state: string };
-}
-
-export interface BakeMaskBody {
-  scene_id: string;
-  polygons: { label: string; points: number[][] }[];
-  W: number;
-  H: number;
-}
-
-export async function apiBakeMask(
-  cfg: SrConfig, body: BakeMaskBody,
-): Promise<MaskBakeResult> {
-  const r = await http(maskUrl(cfg), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  return (await r.json()) as MaskBakeResult;
 }
 
 /** 订阅队列 SSE：连接后在 onEvent 收到 job_update。返回断开函数。 */

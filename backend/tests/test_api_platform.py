@@ -26,7 +26,8 @@ from backend.services.run_sr import task_fingerprint
 
 _ENVS = ("SR_AGENT_DB", "SR_SCENES_ROOT", "SR_PREVIEWS_ROOT", "SR_LLM_MOCK",
          "SR_SLURM_FAKE", "SR_SLURM_FAKE_T_MS", "SR_SLURM_WORK_DIR",
-         "SR_QUEUE_POLL_SEC")
+         "SR_QUEUE_POLL_SEC", "SR_SANDBOX_ROOT", "SR_EXECUTOR",
+         "SR_LOCKED_DIR", "SR_LOCAL_GPU", "SR_SUFFIX_DEFAULT")
 
 
 def sse_events(text: str) -> list[dict]:
@@ -225,13 +226,26 @@ class TestChat(PlatformBase):
 
 
 class TestQueue(PlatformBase):
+    SCENE = "JL1KF02B03_xxx_L1_PAN"                  # 场景目录名 = SR 的 DatarootLQ
+
     def _set_env(self):
         super()._set_env()
         os.environ["SR_SLURM_FAKE"] = "1"
-        os.environ["SR_SLURM_FAKE_T_MS"] = "120"     # 每 stage 120ms
+        # 每 stage 的停留时间。**不能太小**：`_poll_state` 每 30ms 采一次样，而
+        # `test_submit_progresses_to_completed` 断言它**亲眼看到过** PENDING 与
+        # RUNNING —— stage 若短到两次采样之间就整个走完，采样会直接从 SUBMITTING
+        # 跳到 COMPLETED，断言随机失败。原先 120ms 在整包 300+ 用例的负载下就会漏采
+        # （2026-09-14 全量跑复现两次、单跑通过），抬到 500ms 给足采样裕度；本类
+        # 因此慢约 1s，换来的是不再随机红。
+        os.environ["SR_SLURM_FAKE_T_MS"] = "500"
         os.environ["SR_QUEUE_POLL_SEC"] = "60"       # 关闭 lifespan 轮询干扰
-
-    LQ = "/DiskArray/JL1KF02B03_xxx_L1_PAN"          # 绝对路径（fake 下不落盘外）
+        # 真实场景目录 + 目录里已有的掩码：POST /api/queue 现在要求
+        # <lq_path>/<目录名>_mask.tif 在场（plan §4.3），不再接受「不给掩码」。
+        self.scene_dir = Path(self._tmp.name) / self.SCENE
+        self.scene_dir.mkdir(parents=True, exist_ok=True)
+        self.mask_file = touch_tif(
+            self.scene_dir / f"{self.SCENE}_mask.tif")
+        self.LQ = str(self.scene_dir)
 
     def _submit(self, c, **over):
         body = {"lq_path": self.LQ, "suffix": "t"}
@@ -281,6 +295,21 @@ class TestQueue(PlatformBase):
         self.assertEqual(second["job_id"], first["job_id"])   # 未重复提交
         self.assertEqual(len(c.get("/api/queue").json()["tasks"]), 1)
 
+    def test_submit_says_the_run_writes_in_place(self):
+        # 无沙箱 = SR 就地写场景目录并把输入改名 *_NOSR.tif：提交响应必须自己说清
+        # 楚，别让操作者从别处推断（工作单 §4.2 最后一条）。
+        body = self._submit(self.client()).json()
+        self.assertTrue(body["in_place"])
+        self.assertIn("_NOSR.tif", body["notice"])
+        self.assertIn(self.LQ, body["notice"])
+
+    def test_no_in_place_notice_when_sandboxed(self):
+        os.environ["SR_SANDBOX_ROOT"] = "/DiskArray/tmp/sbx"
+        self.addCleanup(os.environ.pop, "SR_SANDBOX_ROOT", None)
+        body = self._submit(self.client()).json()
+        self.assertNotIn("in_place", body)
+        self.assertNotIn("notice", body)
+
     def test_list_queue_shows_params_subset(self):
         c = self.client()
         self._submit(c, sr_scale=3, mask_path="/DiskArray/x_mask.tif")
@@ -302,9 +331,11 @@ class TestQueue(PlatformBase):
         self.assertEqual(t["params"]["lq_path"], self.LQ)      # what was asked for
         self.assertTrue(t["run_dataroot"].startswith("/DiskArray/tmp/sbx/"))
         # only the basename survives the copy — the SC step derives its input
-        # name (`<目录名>.tif`) from the directory's own name.
-        self.assertEqual(t["run_dataroot"].rsplit("/", 1)[-1],
-                         self.LQ.rsplit("/", 1)[-1])
+        # name (`<目录名>.tif`) from the directory's own name. (The sandbox path
+        # is built POSIX-style: it is a path on the array server, not on this
+        # Windows box the test happens to run on.)
+        self.assertEqual(t["run_dataroot"].replace("\\", "/").split("/")[-1],
+                         self.LQ.replace("\\", "/").split("/")[-1])
 
     def test_run_dataroot_defaults_to_lq_path(self):
         c = self.client()
@@ -355,6 +386,73 @@ class TestQueue(PlatformBase):
         r = self._submit(c)
         self.assertEqual(r.status_code, 422)
         self.assertIn("slurm not available", r.json()["detail"])
+
+    # ---- plan §4.3: locked directory / derived mask / non-empty suffix ------
+
+    def test_derived_mask_is_used_when_the_request_omits_it(self):
+        # 目录里已有 <目录名>_mask.tif → 提交不带 mask_path 也照跑，且参数里
+        # 落的就是这个文件（规则式推导，不给用户手填的机会）。
+        c = self.client()
+        r = self._submit(c)                                  # no mask_path
+        self.assertEqual(r.status_code, 201)
+        t = c.get("/api/queue").json()["tasks"][0]
+        self.assertEqual(Path(t["params"]["mask_path"]).name,
+                         f"{self.SCENE}_mask.tif")
+        self.assertEqual(Path(t["params"]["mask_path"]).parent,
+                         Path(self.LQ))
+
+    def test_missing_mask_is_400_not_a_silent_full_image_run(self):
+        # 缺掩码必须报错：静默退化成全图超分，用户会以为掩码生效了。
+        self.mask_file.unlink()
+        r = self._submit(self.client())
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("缺少掩码文件", r.json()["detail"])
+
+    def test_explicit_mask_path_still_wins(self):
+        c = self.client()
+        r = self._submit(c, mask_path=str(self.mask_file))
+        self.assertEqual(r.status_code, 201)
+        t = c.get("/api/queue").json()["tasks"][0]
+        self.assertEqual(t["params"]["mask_path"], str(self.mask_file))
+
+    def test_locked_dir_accepts_its_own_path_and_rejects_others(self):
+        os.environ["SR_LOCKED_DIR"] = self.LQ
+        c = self.client()
+        self.assertEqual(self._submit(c).status_code, 201)
+        # 同值但带尾斜杠 → 仍算同一个目录（两侧都 realpath 归一）
+        self.assertEqual(self._submit(c, lq_path=self.LQ + "/").status_code, 201)
+        other = os.path.join(self._tmp.name, "another_scene")
+        Path(other).mkdir()
+        r = self._submit(c, lq_path=other)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("锁死", r.json()["detail"])
+
+    def test_unset_locked_dir_keeps_accepting_any_directory(self):
+        os.environ.pop("SR_LOCKED_DIR", None)
+        self.assertEqual(self._submit(self.client()).status_code, 201)
+
+    def test_suffix_defaults_to_sr_when_omitted_or_empty(self):
+        # 空后缀会把输出名变成输入名（SR 随即改名输入），所以空值一律取默认值。
+        os.environ.pop("SR_SUFFIX_DEFAULT", None)
+        c = self.client()
+        for body_suffix in (None, ""):                       # null 与 "" 都要落默认
+            with self.subTest(suffix=body_suffix):
+                self.assertEqual(
+                    self._submit(c, suffix=body_suffix).status_code, 201)
+                t = c.get("/api/queue").json()["tasks"][0]
+                self.assertEqual(t["params"]["suffix"], "sr")
+
+    def test_suffix_whitelist(self):
+        c = self.client()
+        for bad in ("a/b", "../x", "a b", "x" * 17, "suffix;rm", "掩码"):
+            with self.subTest(suffix=bad):
+                r = self._submit(c, suffix=bad)
+                self.assertEqual(r.status_code, 400)
+                self.assertIn("suffix", r.json()["detail"])
+        for good in ("sr", "acc-d1", "t_2", "X" * 16):
+            with self.subTest(suffix=good):
+                self.assertEqual(
+                    self._submit(c, suffix=good, sr_scale=2).status_code, 201)
 
     def test_events_broadcast_and_queue_state_mapping(self):
         # 广播机制：注册的订阅者收到 job_update 帧；_queue_state 覆盖 §3.3 映射

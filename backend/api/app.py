@@ -98,6 +98,12 @@ def _scene_row(scene: dict, root: Path | None) -> dict:
     row["rel"] = rel
     row["id"] = paths.scene_id(rel)
     row["lq_path"] = str(abs_path.parent)
+    if abs_path.suffix.lower() in (".jpg", ".jpeg"):
+        # 盘阵里的 JPG 就是显示就绪图本身（§4.7）：不需要烘焙预览，
+        # jpgUrl 直接指向源文件，前端拿到即开（不再走 /preview 生成端点）。
+        row["hasPreview"] = True
+        row["jpgUrl"] = paths.rel_url(abs_path, root)
+        return row
     jpg = paths.preview_jpg_path(abs_path, root)
     row["hasPreview"] = jpg.is_file()
     row["jpgUrl"] = paths.rel_url(jpg, root)
@@ -181,6 +187,11 @@ def create_app() -> FastAPI:
         except PathDeniedError as e:
             raise HTTPException(status_code=404,
                                 detail=f"场景不可访问：{e}") from e
+        if abs_path.suffix.lower() in (".jpg", ".jpeg"):
+            # 源就是显示就绪图（§4.7）：直接回源文件，不必（也无法）烘焙预览。
+            # 正常路径下前端拿 hasPreview/jpgUrl 走静态 URL，不会打到这里，
+            # 这是契约兜底：/preview 对任何场景行都返回可显示的 JPEG。
+            return FileResponse(str(abs_path), media_type="image/jpeg")
         jpg = paths.preview_jpg_path(abs_path, root)
         try:
             ensure_preview_jpg(str(abs_path), str(jpg))

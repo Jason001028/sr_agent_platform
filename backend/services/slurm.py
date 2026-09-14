@@ -226,11 +226,17 @@ def job_status(job_id, run_cmd: Callable = _run, exit_code_file=None) -> dict:
         st = None
     if st:
         return {"job_id": job_id, "active": True, "state": st, "exit_code": None}
-    return _terminal_from_exit_file(job_id, exit_code_file)
+    return terminal_from_exit_file(job_id, exit_code_file)
 
 
-def _terminal_from_exit_file(job_id, exit_code_file) -> dict:
-    """Terminal state from the job's own verdict file (or UNKNOWN)."""
+def terminal_from_exit_file(job_id, exit_code_file) -> dict:
+    """Terminal state from the job's own verdict file (or UNKNOWN).
+
+    Public because it is the *one* place the verdict contract is interpreted:
+    the local executor (backend/services/local_exec.py) has no scheduler to ask
+    and must reach the same verdict from the same file. A second copy of this
+    mapping would drift away from verify_sr_run.py's exit codes.
+    """
     rec = read_exit_code_file(exit_code_file)
     # A recycled job id would otherwise read a stranger's verdict: the file
     # records the id it was written for, so insist that it matches.
@@ -247,6 +253,10 @@ def _terminal_from_exit_file(job_id, exit_code_file) -> dict:
     # FAILURE here even though Slurm would call the step COMPLETED.
     return {"job_id": job_id, "active": False, "state": "FAILED",
             "exit_code": f"{rc if rc is not None else -1}:0"}
+
+
+# Kept for callers/tests written against the old private name.
+_terminal_from_exit_file = terminal_from_exit_file
 
 
 def cancel(job_id, run_cmd: Callable = _run) -> bool:

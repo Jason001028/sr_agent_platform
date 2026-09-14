@@ -2,7 +2,7 @@
 
 Defines the search interface and provides two backends behind it:
 
-  * disk — walk a real directory (set SR_SCENES_ROOT) for TIFF/IMG files and
+  * disk — walk a real directory (set SR_SCENES_ROOT) for TIFF/IMG/JPG files and
     parse scene metadata (satellite, sensor, date) from the filename. This is
     the real-array shape; pointing the root at the array mount is all the
     "integration" needed.
@@ -23,8 +23,25 @@ from datetime import datetime
 from pathlib import Path
 
 # Raster extensions treated as scenes (TIFF primary; IMG common on the array).
-_SCENE_EXTS = {".tif", ".tiff", ".img"}
+_RASTER_EXTS = {".tif", ".tiff", ".img"}
+# 最小原型 §4.7：盘阵目录里预生成的 JPG 也要能列出并直接打开（8bit 显示就绪，
+# 不需要后端再烘焙预览）。真值见 docs/status/phase4 —— 盘阵读 JPG 是既有做法。
+_IMAGE_EXTS = {".jpg", ".jpeg"}
+_SCENE_EXTS = _RASTER_EXTS | _IMAGE_EXTS
+# 派生件不算场景：后端自己缓存的 <basename>.preview.jpg（api/paths.preview_jpg_path
+# 的产物）。列出来只会在同一张图上多出一行、且 jpgUrl 指向缓存而非源文件。
+_DERIVED_SUFFIX = ".preview.jpg"
 _TS_RE = re.compile(r"\d{8,14}")
+
+
+def is_scene_file(path) -> bool:
+    """该文件是否算一个可列出的盘阵场景（确在盘上 + 后缀白名单 + 排除派生预览）。"""
+    p = Path(path)
+    if not p.is_file():
+        return False
+    if p.suffix.lower() not in _SCENE_EXTS:
+        return False
+    return not p.name.lower().endswith(_DERIVED_SUFFIX)
 
 
 def parse_filename(path) -> dict:
@@ -52,7 +69,7 @@ def scan_root(root) -> list[dict]:
     if not base.is_dir():
         return scenes
     for p in sorted(base.rglob("*")):
-        if p.suffix.lower() in _SCENE_EXTS and p.is_file():
+        if is_scene_file(p):
             meta = parse_filename(p)
             scenes.append({**meta, "id": p.stem, "path": str(p),
                            "size_bytes": p.stat().st_size, "fake": False})

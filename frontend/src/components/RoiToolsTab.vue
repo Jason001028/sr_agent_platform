@@ -32,7 +32,8 @@ const selStats = computed(() => (selValid.value ? viewer.roiStats : null));
 const cloudScene = computed(() => viewer.cloudScene);
 const cloudView = computed(() => viewer.cloudView);
 const ROUTE_NAMES: Record<string, string> = {
-  utif: 'UTIF', sparse: '稀疏条带', chunked: '分块', jpg: '盘阵 JPG',
+  utif: 'UTIF', sparse: '稀疏条带', chunked: '分块',
+  jpg: '盘阵 JPG', img: '本地 JPG',
 };
 const routeLabel = computed(() => {
   const r = rec.value?.route;

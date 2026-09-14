@@ -220,15 +220,26 @@ def probe_tiff(path) -> dict:
 
 
 def scene_dims(path) -> dict | None:
-    """W/H for a scene path: ENVI .hdr preferred, else TIFF header probe."""
+    """W/H for a scene path: ENVI .hdr preferred, else TIFF header probe.
+
+    JPG/JPEG（最小原型 §4.7 盘阵里的显示就绪图）走 Pillow 头解析：只读标记段取
+    W/H，不解码像素（`Image.open` 本身是懒的，几十 MB 的图也是毫秒级）。
+    """
     dims = dims_from_envi_header(path)
     if dims:
         return {"W": dims["W"], "H": dims["H"]}
-    if Path(path).suffix.lower() in (".tif", ".tiff"):
+    suffix = Path(path).suffix.lower()
+    if suffix in (".tif", ".tiff"):
         try:
             info = probe_tiff(path)
             return {"W": info["W"], "H": info["H"]}
         except PreviewError:
+            return None
+    if suffix in (".jpg", ".jpeg"):
+        try:
+            with Image.open(path) as im:
+                return {"W": im.width, "H": im.height}
+        except Exception:  # noqa: BLE001 — 坏文件/非图片：无尺寸比抛错好
             return None
     return None
 

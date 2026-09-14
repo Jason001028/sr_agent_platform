@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 import tifffile
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from backend.api import paths
 from backend.api.app import create_app
@@ -137,6 +138,59 @@ class TestScenesDisk(SceneListMixin):
         self.assertNotIn("path", row)
         self.assertNotIn(self._root.name, row["jpgUrl"])
         self.assertFalse(str(row["lq_path"]).endswith("GF07A03_PMS01_20260722125045.tif"))
+
+
+class TestScenesImageSource(SceneListMixin):
+    """§4.7：盘阵 .jpg/.jpeg 行 = 显示就绪图本身（无烘焙、jpgUrl 指源文件）。"""
+
+    def make_jpg(self, name, w=40, h=30, dirp=None):
+        p = Path(dirp or self._root.name) / name
+        Image.fromarray(np.full((h, w), 128, dtype=np.uint8)).save(
+            p, format="JPEG")
+        return p
+
+    def test_jpg_row_is_self_previewing(self):
+        self.make_jpg("GF07A03_PMS01_20260722125045.jpg", 40, 30)
+        c = self.client(self._root.name)
+        body = c.get("/api/scenes").json()
+        self.assertEqual(body["scanned"], 1)
+        row = body["results"][0]
+        self.assertEqual((row["W"], row["H"]), (40, 30))       # Pillow 头
+        self.assertTrue(row["hasPreview"])                     # 无需烘焙
+        self.assertTrue(row["jpgUrl"].endswith(".jpg"))
+        self.assertNotIn(".preview.jpg", row["jpgUrl"])
+        self.assertEqual(row["rel"], "GF07A03_PMS01_20260722125045.jpg")
+        self.assertEqual(row["lq_path"], os.path.realpath(self._root.name))
+
+    def test_preview_endpoint_serves_the_source(self):
+        p = self.make_jpg("KF02B04_PMS05_20260810120000.jpg")
+        c = self.client(self._root.name)
+        row = c.get("/api/scenes").json()["results"][0]
+        r = c.get(f"/api/scenes/{row['id']}/preview")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.content, p.read_bytes())
+        # 不给源是 JPG 的场景落 .preview.jpg 缓存
+        self.assertFalse(Path(self._root.name,
+                              "KF02B04_PMS05_20260810120000.preview.jpg").is_file())
+
+    def test_baked_preview_cache_is_not_listed(self):
+        make_scene(self._root.name, "GF07A03_PMS01_20260722125045.tif")
+        c = self.client(self._root.name)
+        scene = c.get("/api/scenes").json()["results"][0]
+        self.assertEqual(c.get(f"/api/scenes/{scene['id']}/preview").status_code,
+                         200)                       # 落盘 <stem>.preview.jpg
+        body = c.get("/api/scenes").json()
+        self.assertEqual(body["scanned"], 1)         # 缓存不新增行
+        self.assertEqual(body["results"][0]["name"],
+                         "GF07A03_PMS01_20260722125045")
+
+    def test_tif_and_jpg_same_stem_are_two_rows(self):
+        make_scene(self._root.name, "ZY302_MUX_20260805120000.tif")
+        self.make_jpg("ZY302_MUX_20260805120000.jpg")
+        rows = self.client(self._root.name).get("/api/scenes").json()["results"]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(len({r["id"] for r in rows}), 2)   # id 互不相同
+        self.assertEqual({r["name"] for r in rows}, {"ZY302_MUX_20260805120000"})
 
 
 class TestPreview(SceneListMixin):

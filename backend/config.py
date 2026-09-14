@@ -51,15 +51,44 @@ SR_DEFAULT_WORK_DIR = "/tmp/sr_agent_work"
 #: Options yml passed as <OPT>; carries scale/tile size and tif_type.
 SR_DEFAULT_OPTIONS_YML = "/DiskArray/tmp/wangrz/sr_utils/espan3_2026_gf04_tile500.yml"
 
-#: Interpreter that runs code_0817_prod.py *inside the job* — py3.6 + torch
-#: 1.9.1 + GDAL, a different world from the API's own /opt/sr-venv (py3.9).
+#: Interpreter that runs code_0817_prod.py *inside the job* — the SR production
+#: env, a different world from the API's own /opt/sr-venv (py3.9).
+#: 2026-09-14 node81-135 实测：torch 1.10.2+cu113 / GDAL 2.4.0（版本号用
+#: `gdal.VersionInfo()` 取——py3.6 时代的 osgeo 绑定没有 `gdal.__version__`）。
+#: ⚠️ 目录名叫 `torch1.9.1py36`，但里面装的**不是** 1.9.1 —— 别拿目录名当版本号。
 #: See docs/status/real-machine-bringup.md §1.
 SR_DEFAULT_PYTHON = "python"
 
 #: Slurm job limits/limits applied by run_sr.build_batch_script.
+#: No default node list: unset means "let the scheduler decide" (the behaviour
+#: every cluster had before 2026-09-14). SR_SLURM_NODELIST exists because the
+#: `gpu` partition spans two node families and one of them (node104-*) cannot be
+#: resolved from the submitting host — see docs/status/slurm-acceptance.md §B0.
 SR_DEFAULT_SLURM_TIME = "02:00:00"
 SR_DEFAULT_SLURM_CPUS = 4
 SR_DEFAULT_SLURM_GRES = 1
+
+#: How the SR job is launched: "slurm" (sbatch on the cluster) or "local"
+#: (a plain child process on the API host, backend/services/local_exec.py).
+#: Local is the minimal-prototype mode — see
+#: docs/planning/sr-minimal-prototype-plan.md §1.2. Default stays "slurm" so an
+#: un-updated deployment keeps behaving exactly as before.
+SR_DEFAULT_EXECUTOR = "slurm"
+
+#: The one scene directory /api/queue accepts while the prototype is pinned to
+#: a single test directory (SR_LOCKED_DIR). Unset → the historical behaviour
+#: (any absolute path the caller sends). Local mode + a set value means every
+#: submit must name this directory and nothing else.
+SR_DEFAULT_LOCKED_DIR = None
+
+#: GPU handed to the local child via CUDA_VISIBLE_DEVICES (SR_LOCAL_GPU). Only
+#: meaningful with SR_EXECUTOR=local — under Slurm the card comes from --gres.
+SR_DEFAULT_LOCAL_GPU = "0"
+
+#: Default <Suffix> when a submit does not carry one. Non-empty on purpose: an
+#: empty suffix makes the output name equal the input name, which SR turns into
+#: a rename of the input (sr-pipeline-interface.md §2.4-1).
+SR_DEFAULT_SUFFIX = "sr"
 
 #: Queue-state calibration period for GET /api/queue + SSE job_update frames.
 SR_DEFAULT_QUEUE_POLL_SEC = 2.0
@@ -124,11 +153,16 @@ class SrRuntime:
     time: str                 # Slurm --time, "HH:MM:SS"
     cpus: int
     mem: str                  # "" → no --mem line
+    nodelist: str             # "" → no --nodelist line (scheduler picks)
     fake: bool
     queue_poll_sec: float
     agent_db: str
     scenes_root: str | None   # None → fake-scene fallback (backend/api/paths.py)
     sandbox_root: str | None  # None → SR runs in place, writing to lq_path
+    executor: str             # "slurm" | "local" — who launches the job
+    locked_dir: str | None    # None → /api/queue accepts any absolute lq_path
+    local_gpu: str            # CUDA_VISIBLE_DEVICES for the local child
+    suffix_default: str       # <Suffix> when a submit omits one (never "")
 
 
 def sr_runtime() -> SrRuntime:
@@ -162,9 +196,15 @@ def sr_runtime() -> SrRuntime:
         time=os.environ.get("SR_SLURM_TIME") or SR_DEFAULT_SLURM_TIME,
         cpus=env_int("SR_SLURM_CPUS", SR_DEFAULT_SLURM_CPUS),
         mem=os.environ.get("SR_SLURM_MEM") or "",
+        nodelist=os.environ.get("SR_SLURM_NODELIST") or "",
         fake=os.environ.get("SR_SLURM_FAKE") == "1",
         queue_poll_sec=env_float("SR_QUEUE_POLL_SEC", SR_DEFAULT_QUEUE_POLL_SEC),
         agent_db=os.environ.get("SR_AGENT_DB") or SR_DEFAULT_DB,
         scenes_root=os.environ.get("SR_SCENES_ROOT") or None,
         sandbox_root=os.environ.get("SR_SANDBOX_ROOT") or None,
+        executor=(os.environ.get("SR_EXECUTOR") or SR_DEFAULT_EXECUTOR).strip().lower(),
+        locked_dir=os.environ.get("SR_LOCKED_DIR") or None,
+        local_gpu=os.environ.get("SR_LOCAL_GPU") or SR_DEFAULT_LOCAL_GPU,
+        suffix_default=(os.environ.get("SR_SUFFIX_DEFAULT")
+                        or SR_DEFAULT_SUFFIX).strip(),
     )

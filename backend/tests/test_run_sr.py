@@ -118,16 +118,16 @@ class TestBuildBatchScript(unittest.TestCase):
     def setUp(self):
         self._env = {}
         for name in ("SR_SLURM_TIME", "SR_SLURM_CPUS", "SR_SLURM_PARTITION",
-                     "SR_SLURM_MEM", "SR_VERIFY_SCRIPT", "SR_PYTHON",
-                     "SR_BUNDLE_DIR", "SR_SR_SCRIPT"):
+                     "SR_SLURM_MEM", "SR_SLURM_NODELIST", "SR_VERIFY_SCRIPT",
+                     "SR_PYTHON", "SR_BUNDLE_DIR", "SR_SR_SCRIPT"):
             if name in os.environ:
                 self._env[name] = os.environ.pop(name)
         self.addCleanup(self._restore_env)
 
     def _restore_env(self):
         for name in ("SR_SLURM_TIME", "SR_SLURM_CPUS", "SR_SLURM_PARTITION",
-                     "SR_SLURM_MEM", "SR_VERIFY_SCRIPT", "SR_PYTHON",
-                     "SR_BUNDLE_DIR", "SR_SR_SCRIPT"):
+                     "SR_SLURM_MEM", "SR_SLURM_NODELIST", "SR_VERIFY_SCRIPT",
+                     "SR_PYTHON", "SR_BUNDLE_DIR", "SR_SR_SCRIPT"):
             os.environ.pop(name, None)
         os.environ.update(self._env)
 
@@ -176,6 +176,35 @@ class TestBuildBatchScript(unittest.TestCase):
         self.assertIn("#SBATCH --cpus-per-task=8", script)
         self.assertIn("#SBATCH --partition=gpu", script)
         self.assertIn("#SBATCH --job-name=run_sr_t1", script)   # suffix in name
+
+    # ---- SR_SLURM_NODELIST: keep jobs off the node family the submitting host
+    # cannot resolve (docs/status/slurm-acceptance.md §B0, 2026-09-14) ---------
+    def test_nodelist_unset_emits_no_line(self):
+        script = svc.build_batch_script("/w/cfg.xml", "/w")
+        self.assertNotIn("--nodelist", script)
+
+    def test_nodelist_env_emits_the_directive(self):
+        os.environ["SR_SLURM_NODELIST"] = "node81-[129-162,165-183]"
+        script = svc.build_batch_script("/w/cfg.xml", "/w")
+        self.assertIn("#SBATCH --nodelist=node81-[129-162,165-183]", script)
+
+    def test_nodelist_argument_beats_the_env(self):
+        os.environ["SR_SLURM_NODELIST"] = "from-env"
+        script = svc.build_batch_script("/w/cfg.xml", "/w", nodelist="node81-132")
+        self.assertIn("#SBATCH --nodelist=node81-132", script)
+        self.assertNotIn("from-env", script)
+
+    def test_nodelist_blank_means_no_line(self):
+        script = svc.build_batch_script("/w/cfg.xml", "/w", nodelist="   ")
+        self.assertNotIn("--nodelist", script)
+
+    def test_nodelist_rejects_injection(self):
+        # the value is written verbatim, so anything that could end the
+        # directive or start a new one has to be refused, not sanitised
+        for bad in ("node81-132\n#SBATCH --gres=gpu:8", "node81 132",
+                    "node81;id", "node81-132'", 'node81-132"/x', "node81-132&"):
+            with self.assertRaises(ValueError):
+                svc.build_batch_script("/w/cfg.xml", "/w", nodelist=bad)
 
     def test_limits_fall_back_to_defaults(self):
         script = svc.build_batch_script("/w/cfg.xml", "/w")
@@ -239,6 +268,39 @@ class TestBuildBatchScript(unittest.TestCase):
         os.environ["SR_VERIFY_SCRIPT"] = "/opt/sr/bin/my_verify.py"
         script = svc.build_batch_script("/w/c.xml", "/w")
         self.assertIn("/opt/sr/bin/my_verify.py --config /w/c.xml", script)
+
+    def test_in_place_run_warns_about_the_nosr_rename_in_the_log(self):
+        # No sandbox → SR writes into the scene dir and renames the input to
+        # *_NOSR.tif. That overwrites an existing 4.9 GB _NOSR.tif, so the job
+        # log has to say so (plan §4.2, last bullet).
+        script = svc.build_batch_script("/w/c.xml", "/w")
+        self.assertIn("WARNING: no sandbox", script)
+        self.assertIn("_NOSR.tif", script)
+
+    def test_sandboxed_script_has_no_in_place_warning(self):
+        script = svc.build_batch_script(
+            "/w/c.xml", "/w",
+            sandbox_src="/DiskArray/tmp/wangrz/SCENE",
+            sandbox_parent="/DiskArray/tmp/wangrz/sr_sandbox/abc123")
+        self.assertNotIn("WARNING: no sandbox", script)
+
+    def test_no_job_id_line_without_a_job_id(self):
+        # Under Slurm the verifier reads $SLURM_JOB_ID; passing --job-id too
+        # would make the two sources able to disagree.
+        script = svc.build_batch_script("/w/c.xml", "/w")
+        self.assertNotIn("--job-id", script)
+
+    def test_job_id_is_baked_into_the_verifier_call(self):
+        # Local execution has no $SLURM_JOB_ID, so the id carried in the script
+        # text is the only thing that names the verdict file — the verifier must
+        # be told it, and it must be the same id exit_code_file_for re-derives.
+        script = svc.build_batch_script("/w/c.xml", "/w", job_id=41)
+        self.assertIn("verify_sr_run.py --config /w/c.xml --sr-exit-code "
+                      '"$_sr_rc" --job-id 41', script)
+
+    def test_executor_is_echoed_for_the_log(self):
+        self.assertIn('echo "SR_EXECUTOR=${SR_EXECUTOR:-slurm}"',
+                      svc.build_batch_script("/w/c.xml", "/w"))
 
     def test_job_name_is_slurm_safe(self):
         script = svc.build_batch_script("/w/weird name/../x.xml", "/w",

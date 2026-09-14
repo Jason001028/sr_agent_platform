@@ -2,11 +2,11 @@
  * queue.test.ts — 队列 store 纯函数（表单归一 / SSE 归并 / 状态徽标）
  * ------------------------------------------------------------------
  * Node 环境：只测纯函数（不触碰 pinia store）。覆盖 api-contract.md §3.3 提交
- * body 归一（空 mask_path → null、数值夹取）与 job_update 按 task_id 归并。
+ * body 归一（mask_path 交后端推导、数值夹取）与 job_update 按 task_id 归并。
  */
 import { describe, it, expect } from 'vitest';
 import {
-  defaultForm, draftToForm, formToSubmit, mergeJobUpdate, stateTone,
+  defaultForm, draftToForm, formToSubmit, derivedMaskPath, mergeJobUpdate, stateTone,
   tasksForScene, normDir, pathLeafOf,
 } from '../queue.js';
 import type { QueueDraft } from '../queue.js';
@@ -27,47 +27,71 @@ function task(over: Partial<QueueTask> = {}): QueueTask {
 }
 
 describe('默认值（镜像后端 run_sr 缺省）', () => {
-  it('sr_scale=2 / cloud_limit=80 / grid_align=true', () => {
+  it('sr_scale=2 / suffix=sr / cloud_limit=80 / grid_align=true', () => {
     expect(defaultForm()).toEqual({
-      lq_path: '', mask_path: '', sr_scale: 2, suffix: '',
+      lq_path: '', sr_scale: 2, suffix: 'sr',
       gpu: 0, cloud_limit: 80, delete_ori: false, grid_align: true,
     });
   });
+
+  it('后缀默认非空（空后缀会让 SR 把输入改名）', () => {
+    expect(defaultForm().suffix).not.toBe('');
+  });
 });
 
-describe('掩码 task_draft → 表单', () => {
-  it('null mask → 空串；值原样透传', () => {
-    const d: QueueDraft = {
-      lq_path: '/DiskArray/GF07A03_xxx_L1_PAN',
-      mask_path: '/DiskArray/GF07A03_xxx_L1_PAN/GF07A03_xxx_mask.tif',
-      sr_scale: 3, suffix: 't', gpu: 1, cloud_limit: 90,
-      delete_ori: false, grid_align: true,
-    };
+describe('场景目录 → 表单', () => {
+  it('只带目录，其余取默认值', () => {
+    const d: QueueDraft = { lq_path: '/DiskArray/GF07A03_xxx_L1_PAN' };
     const f = draftToForm(d);
-    expect(f.mask_path).toBe(d.mask_path);
-    expect(f.sr_scale).toBe(3);
+    expect(f.lq_path).toBe(d.lq_path);
+    expect(f.sr_scale).toBe(2);
+    expect(f.suffix).toBe('sr');
+  });
+});
 
-    const noMask = draftToForm({ ...d, mask_path: null });
-    expect(noMask.mask_path).toBe('');
+describe('derivedMaskPath（后端 §4.3 规则的显示镜像）', () => {
+  it('同目录 <目录名>_mask.tif', () => {
+    expect(derivedMaskPath('/DiskArray/A/B/GF07A03_x'))
+      .toBe('/DiskArray/A/B/GF07A03_x/GF07A03_x_mask.tif');
+  });
+
+  it('尾部分隔符 / 两侧空白不影响结果', () => {
+    expect(derivedMaskPath('  /DiskArray/A/GF07  '))
+      .toBe('/DiskArray/A/GF07/GF07_mask.tif');
+    expect(derivedMaskPath('/DiskArray/A/GF07/'))
+      .toBe('/DiskArray/A/GF07/GF07_mask.tif');
+  });
+
+  it('空目录 → 空串（不猜文件名）', () => {
+    expect(derivedMaskPath('')).toBe('');
+    expect(derivedMaskPath('   ')).toBe('');
   });
 });
 
 describe('formToSubmit（提交 body 归一）', () => {
-  it('trim + 空 mask → null + 数值夹取', () => {
+  it('trim + mask_path 恒 null（交后端推导）+ 字段透传', () => {
     const body = formToSubmit({
-      lq_path: '  /DiskArray/x  ', mask_path: '   ', sr_scale: 2, suffix: '',
+      lq_path: '  /DiskArray/x  ', sr_scale: 2, suffix: 'sr',
       gpu: 0, cloud_limit: 80, delete_ori: false, grid_align: true,
     });
     expect(body.lq_path).toBe('/DiskArray/x');
     expect(body.mask_path).toBeNull();
-    expect(body.suffix).toBe('');
+    expect(body.suffix).toBe('sr');
     expect(body.grid_align).toBe(true);
     expect(body.delete_ori).toBe(false);
   });
 
-  it('超界数值夹到合法域（sr_scale 0→1、8→8、cloud_limit 150→100）', () => {
+  it('清空后缀 → 空串（交给后端 SR_SUFFIX_DEFAULT，前端不替它决定）', () => {
     const body = formToSubmit({
-      lq_path: '/a', mask_path: '', sr_scale: 0, suffix: 't',
+      lq_path: '/a', sr_scale: 2, suffix: '  ',
+      gpu: 0, cloud_limit: 80, delete_ori: false, grid_align: true,
+    });
+    expect(body.suffix).toBe('');
+  });
+
+  it('超界数值夹到合法域（sr_scale 0→1、cloud_limit 150→100）', () => {
+    const body = formToSubmit({
+      lq_path: '/a', sr_scale: 0, suffix: 't',
       gpu: -2, cloud_limit: 150, delete_ori: true, grid_align: false,
     });
     expect(body.sr_scale).toBe(1);
@@ -78,7 +102,7 @@ describe('formToSubmit（提交 body 归一）', () => {
 
   it('NaN → 各自默认', () => {
     const body = formToSubmit({
-      lq_path: '/a', mask_path: '', sr_scale: Number.NaN, suffix: '',
+      lq_path: '/a', sr_scale: Number.NaN, suffix: '',
       gpu: Number.NaN, cloud_limit: Number.NaN, delete_ori: false, grid_align: true,
     });
     expect(body.sr_scale).toBe(2);
