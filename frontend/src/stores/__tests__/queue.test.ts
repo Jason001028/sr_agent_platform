@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import {
   defaultForm, draftToForm, formToSubmit, derivedMaskPath, mergeJobUpdate, stateTone,
   tasksForScene, normDir, pathLeafOf,
+  isActiveState, taskElapsed, formatDuration,
 } from '../queue.js';
 import type { QueueDraft } from '../queue.js';
 import type { QueueTask } from '../../lib/api.js';
@@ -46,6 +47,65 @@ describe('场景目录 → 表单', () => {
     expect(f.lq_path).toBe(d.lq_path);
     expect(f.sr_scale).toBe(2);
     expect(f.suffix).toBe('sr');
+  });
+});
+
+describe('draftToForm（「以这行参数再提交」整组带回）', () => {
+  it('tunables 覆盖默认值；delete_ori 不给也恒 false（原型期禁用）', () => {
+    const f = draftToForm({
+      lq_path: '/DiskArray/A', taskId: 7, from: 'task',
+      tunables: { sr_scale: 4, suffix: 'x2', gpu: 1, cloud_limit: 30, grid_align: false },
+    });
+    expect(f).toEqual({
+      lq_path: '/DiskArray/A', sr_scale: 4, suffix: 'x2', gpu: 1,
+      cloud_limit: 30, delete_ori: false, grid_align: false,
+    });
+  });
+
+  it('tunables 只给一部分 → 其余取默认', () => {
+    const f = draftToForm({ lq_path: '/a', taskId: 3, from: 'task', tunables: { suffix: 'sr2' } });
+    expect(f.suffix).toBe('sr2');
+    expect(f.sr_scale).toBe(2);
+  });
+});
+
+describe('isActiveState / taskElapsed（耗时列）', () => {
+  it('未终结态 = SUBMITTING / PENDING / RUNNING', () => {
+    for (const s of ['SUBMITTING', 'PENDING', 'RUNNING']) expect(isActiveState(s)).toBe(true);
+    for (const s of ['COMPLETED', 'FAILED', 'UNKNOWN', '']) expect(isActiveState(s)).toBe(false);
+  });
+
+  it('终态行 = updated_at − created_at（后端每次状态写回都刷 updated_at）', () => {
+    const t = task({ state: 'COMPLETED', created_at: 1000, updated_at: 1073 });
+    expect(taskElapsed(t, 99999)).toEqual({ seconds: 73, running: false });
+  });
+
+  it('运行中的行按 nowSec 现算，不受 updated_at 束缚', () => {
+    const t = task({ state: 'RUNNING', created_at: 1000, updated_at: 1000 });
+    expect(taskElapsed(t, 1042)).toEqual({ seconds: 42, running: true });
+  });
+
+  it('缺 created_at → null（界面显示「—」，不假装 0 秒）', () => {
+    expect(taskElapsed(task({ state: 'COMPLETED' }), 100)).toBeNull();
+  });
+
+  it('时间戳倒挂 → 夹到 0', () => {
+    expect(taskElapsed(task({ state: 'COMPLETED', created_at: 100, updated_at: 50 }), 10))
+      .toEqual({ seconds: 0, running: false });
+  });
+});
+
+describe('formatDuration（耗时文案）', () => {
+  it('秒 / 分秒 / 时分', () => {
+    expect(formatDuration(0)).toBe('0 秒');
+    expect(formatDuration(12)).toBe('12 秒');
+    expect(formatDuration(192)).toBe('3 分 12 秒');
+    expect(formatDuration(3600)).toBe('1 时 00 分');
+    expect(formatDuration(7500)).toBe('2 时 05 分');
+  });
+
+  it('负数夹到 0（时钟回拨不显示负耗时）', () => {
+    expect(formatDuration(-5)).toBe('0 秒');
   });
 });
 

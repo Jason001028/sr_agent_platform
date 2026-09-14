@@ -372,6 +372,29 @@ class TestQueue(PlatformBase):
         self.assertEqual(r.status_code, 400)
         self.assertIn("job_id", r.json()["detail"])
 
+    def test_cancel_without_a_local_record_is_409(self):
+        # sr-api 重启后，本进程没有该 job 的记录（local_exec._JOBS 为空）而子进程可能
+        # 还在就地写 lq_path。200 + cancelled=false 会被读成"已经停下了"，操作员据此
+        # 重新提交就会有两个 SR 进程同写一个目录 —— 必须报错并给出下一步。
+        app, c = self.app_client()
+        params = {"lq_path": self.LQ, "mask_path": None, "sr_scale": 2,
+                  "suffix": "t", "gpu": 0, "cloud_limit": 80,
+                  "delete_ori": False, "grid_align": True,
+                  "options_yml": None}
+        app.state.store.put_sr_task(task_fingerprint(params), params,
+                                    status="new", job_id=987654)
+        tid = app.state.store.list_sr_tasks()[0]["task_id"]
+        r = c.post(f"/api/queue/{tid}/cancel")
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("987654", r.json()["detail"])
+        self.assertIn("ps -ef", r.json()["detail"])
+
+    def test_delete_ori_rejected_400(self):
+        # 原型期禁用：SR 会删原图/就地覆盖且本机模式无沙箱，误开不可恢复。
+        r = self._submit(self.client(), delete_ori=True)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("delete_ori", r.json()["detail"])
+
     def test_bad_path_rejected_400(self):
         c = self.client()
         self.assertEqual(
