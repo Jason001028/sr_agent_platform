@@ -165,11 +165,18 @@ def read_exit_code_file(path):
         job_id=42 / sr_exit_code=0 / verdict=0|90 / skip=0|1 / ...
     Tolerates missing/extra keys and a truncated write by requiring only
     `verdict`; anything unreadable degrades to None (= no verdict).
+
+    Encoding is pinned so this side does not depend on the *writer's* locale:
+    the verifier runs in the job env (py3.6, --export=NONE drops LANG) and the
+    `reason` field carries Chinese text. `errors="replace"` keeps a
+    locale-encoded legacy file parseable too — every field we read is ASCII, so
+    only the free-text reason can lose bytes, and it can never be the reason a
+    finished job reads back as UNKNOWN.
     """
     if not path:
         return None
     try:
-        with open(str(path), "r") as f:
+        with open(str(path), "r", encoding="utf-8", errors="replace") as f:
             data = f.read(8192)
     except Exception:                        # missing, unreadable, is-a-dir…
         return None

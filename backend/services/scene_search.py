@@ -28,20 +28,28 @@ _RASTER_EXTS = {".tif", ".tiff", ".img"}
 # 不需要后端再烘焙预览）。真值见 docs/status/phase4 —— 盘阵读 JPG 是既有做法。
 _IMAGE_EXTS = {".jpg", ".jpeg"}
 _SCENE_EXTS = _RASTER_EXTS | _IMAGE_EXTS
-# 派生件不算场景：后端自己缓存的 <basename>.preview.jpg（api/paths.preview_jpg_path
-# 的产物）。列出来只会在同一张图上多出一行、且 jpgUrl 指向缓存而非源文件。
+# 派生件不算场景（两种，都是「别的东西的输入/产物」，不是可提交对象）：
+#   1) 后端自己缓存的 <basename>.preview.jpg（api/paths.preview_jpg_path 的产物）——
+#      列出来只会在同一张图上多出一行、且 jpgUrl 指向缓存而非源文件。
+#   2) 场景目录里预生成的掩膜 <名字>_mask.<ext>（最小原型 §4.3：这是「提交 SR」的*输入*，
+#      不是可提交的场景）。真机目录里它和场景同名同目录，列出来会多一行：卫星/传感器
+#      从掩膜文件名解析（satellite=<父目录名>、sensor="mask"）、尺寸取掩膜 TIFF 头，
+#      且「提交 SR」可点（同目录 → 同指纹 → 幂等命中，不至于重复跑，但列表是脏的）。
 _DERIVED_SUFFIX = ".preview.jpg"
+_DERIVED_STEM_SUFFIX = "_mask"
 _TS_RE = re.compile(r"\d{8,14}")
 
 
 def is_scene_file(path) -> bool:
-    """该文件是否算一个可列出的盘阵场景（确在盘上 + 后缀白名单 + 排除派生预览）。"""
+    """该文件是否算一个可列出的盘阵场景（确在盘上 + 后缀白名单 + 排除派生件）。"""
     p = Path(path)
     if not p.is_file():
         return False
     if p.suffix.lower() not in _SCENE_EXTS:
         return False
-    return not p.name.lower().endswith(_DERIVED_SUFFIX)
+    if p.name.lower().endswith(_DERIVED_SUFFIX):
+        return False
+    return not p.stem.lower().endswith(_DERIVED_STEM_SUFFIX)
 
 
 def parse_filename(path) -> dict:

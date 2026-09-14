@@ -358,6 +358,10 @@ curl -s -o /dev/null -w '健康=%{http_code}\n' http://127.0.0.1:8000/api/health
 
 ## 七、Slurm 接入（SR 作业提交链路）
 
+> ⚠️ **2026-09-14 起本节整体中止**：当前路线是 **§7.6「本机 conda 直跑」（`SR_EXECUTOR=local`）**，
+> 不经过调度器（判据见 `docs/planning/sr-minimal-prototype-plan.md` §1.3）。本节与
+> `docs/status/slurm-acceptance.md` 一并保留为**重启 Slurm 时的存量**，内容未失效。
+>
 > 链路：`/queue` 提交 → 后端写 config.xml + 批脚本 → `sbatch` → 作业在计算节点上跑 SR →
 > 作业内校验器写退出码文件 → 后端读盘判终态 → SSE 推前端。
 >
@@ -386,6 +390,10 @@ cp <上车目录>/verify_sr_run.py        ./verify_sr_run.py
 head -3 code_0817_prod_slurm.py                                  # ✓= "GENERATED FILE — DO NOT EDIT" 横幅
 ls -l code_0817_prod.py                                          # ✓= 生产原脚本仍在，未被改动
 ```
+
+> ⚠️ `verify_sr_run.py` 的仓库副本 **2026-09-15 起为 17164 B / `5fa627d8…`**（退出码文件的
+> 编码锁定，见 `docs/status/current-question.md` §4）。机上若还是 09-11 拷的 16419 B 旧版，
+> A/B/C 不受影响，**走 D 之前重新拷一次**。
 
 > **为什么可以不顶替**：批脚本里那两个程序名是 `SR_SR_SCRIPT` / `SR_VERIFY_SCRIPT` 两个 env
 > 决定的（`run_sr.py`），后端在生成批脚本时把名字写进文本。所以变体只要跟原脚本放在同一目录、

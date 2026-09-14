@@ -434,6 +434,109 @@ class VerdictFileTests(unittest.TestCase):
         self.assertTrue(Path(path).is_file())
 
 
+#: Child program for the C-locale case: write a verdict whose `reason` is
+#: non-ASCII, then report the encoding the platform default resolved to.
+#: Raw string on purpose — the escapes below belong to the *child's* source.
+_CHILD_WRITE_PROBE = r"""
+import importlib.util, locale, sys
+
+spec = importlib.util.spec_from_file_location("verify_sr_run", %(verifier)r)
+v = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(v)
+
+verdict = v.Verdict()
+verdict.lq_path = sys.argv[1]
+verdict.fail("缺少 SRLOG — the job never reached the log stage")
+# check_contract() normally joins reasons into reason_text; set it here so the
+# written body really carries non-ASCII (an empty reason would make this probe
+# pass under any encoding, i.e. prove nothing).
+verdict.reason_text = "; ".join(verdict.reasons)
+path = v.write_exit_code_file(verdict, 4242, 0)
+sys.stderr.write("preferred=%%s\n" %% locale.getpreferredencoding(False))
+sys.stderr.write("path=%%s\n" %% (path,))
+"""
+
+
+class VerdictFileEncodingTests(unittest.TestCase):
+    """The verdict file must not depend on either side's locale.
+
+    The verifier runs *inside the job*: Slurm's --export=NONE has dropped LANG,
+    and the SR interpreter is py3.6, whose `open()` default is then plain ASCII.
+    `reason` carries Chinese text, so a locale-encoded write raises — and the
+    `except` in write_exit_code_file turns that into "no file", which the
+    platform reads as UNKNOWN for a job that actually failed the contract. That
+    is the exact silent failure the verdict file exists to rule out, which is
+    why the encoding is pinned in the source rather than left to the environment.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.fx = ContractFixture(self._tmp.name)
+
+    def verdict_path(self, job_id):
+        return self.fx.lq / "Debug" / ("_SREXIT_%s.txt" % job_id)
+
+    def test_write_survives_an_ascii_default_locale(self):
+        """Re-run the write under LC_ALL=C — the real job environment.
+
+        POSIX-only: Windows has no locale that forces a non-UTF-8 default (its
+        ANSI code page always decodes the ASCII field set), so the portable half
+        of this lock is test_failure_verdict_is_written_too reading utf-8.
+        """
+        if os.name != "posix":
+            self.skipTest("forcing a non-UTF-8 default encoding needs LC_ALL")
+        child = Path(self._tmp.name) / "write_under_c_locale.py"
+        child.write_text(_CHILD_WRITE_PROBE % {"verifier": str(VERIFIER_PATH)},
+                         encoding="utf-8")
+        env = dict(os.environ, LC_ALL="C", LANG="C",
+                   PYTHONCOERCECLOCALE="0", PYTHONUTF8="0")
+        proc = subprocess.run([sys.executable, str(child), str(self.fx.lq)],
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=60, env=env)
+        found = re.search(r"preferred=(\S+)", proc.stderr or "")
+        self.assertIsNotNone(found, proc.stderr)
+        if found.group(1).lower().replace("-", "") == "utf8":
+            self.skipTest("interpreter kept UTF-8 (%s)" % found.group(1))
+        path = self.verdict_path(4242)
+        self.assertTrue(path.is_file(),
+                        "no verdict file under %s\n%s" % (found.group(1),
+                                                          proc.stderr))
+        text = path.read_text(encoding="utf-8")     # utf-8 or the test fails
+        self.assertIn("verdict=90", text)
+        self.assertIn("缺少 SRLOG", text)
+
+    def test_reader_accepts_a_legacy_locale_encoded_file(self):
+        """A verdict written by an unpinned build (GBK) still resolves.
+
+        On the API host the default encoding is UTF-8, where decoding those
+        bytes raises — before `errors="replace"` that degraded to UNKNOWN, i.e.
+        a failed job reported as "no verdict". Every field the platform acts on
+        is ASCII, so only the free-text reason may lose bytes.
+        """
+        from backend.services import slurm as svc
+
+        path = self.verdict_path(9)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(("job_id=9\nsr_exit_code=0\nverdict=90\nskip=0\n"
+                          "reason=缺少 SRLOG\n").encode("gbk"))
+        st = svc.terminal_from_exit_file(9, str(path))
+        self.assertEqual(st["state"], "FAILED")
+        self.assertEqual(st["exit_code"], "0:0")
+
+    def test_reader_accepts_a_utf8_file_written_under_any_locale(self):
+        """The counterpart: what the pinned verifier writes is what we read."""
+        from backend.services import slurm as svc
+
+        path = self.verdict_path(7)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes("job_id=7\nsr_exit_code=0\nverdict=0\nskip=1\n"
+                         "reason=云量超限，跳过\n".encode("utf-8"))
+        st = svc.terminal_from_exit_file(7, str(path))
+        self.assertEqual(st["state"], "COMPLETED")
+        self.assertEqual(st["exit_code"], "0:0")
+
+
 class NamingContractTests(unittest.TestCase):
     """The path run_sr.py recomputes must equal the one the job writes."""
 

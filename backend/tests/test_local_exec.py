@@ -12,7 +12,6 @@ record), and the child environment the SR interpreter needs.
 """
 
 import os
-import shutil
 import tempfile
 import time
 import unittest
@@ -20,7 +19,9 @@ from pathlib import Path
 
 from backend.services import local_exec
 
-BASH = shutil.which("bash")
+#: Same resolution the executor uses (which skips the System32 WSL launcher on
+#: Windows) — so "no bash here" skips instead of failing every case.
+BASH = local_exec._bash_path()
 
 _ENVS = ("SR_SLURM_WORK_DIR", "SR_PYTHON", "SR_LOCAL_GPU", "SR_BUNDLE_DIR")
 

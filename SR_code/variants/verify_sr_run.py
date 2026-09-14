@@ -161,7 +161,10 @@ def _yml_scalar(path, keys):
     if not path or not os.path.isfile(path):
         return None
     try:
-        with open(path, "r") as f:
+        # encoding/errors pinned like the verdict write: the yml is a human
+        # artifact (comments may be non-ASCII) and a locale-decoded read under
+        # --export=NONE could raise or mangle it; we only need the ASCII keys.
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
             lines = f.read().splitlines()
     except Exception:
         return None
@@ -383,7 +386,13 @@ def write_exit_code_file(v, job_id, sr_exit_code):
         debug_dir = os.path.dirname(path)
         if debug_dir and not os.path.isdir(debug_dir):
             os.makedirs(debug_dir)
-        with open(path, "w") as f:
+        # encoding pinned on purpose: `reason` carries Chinese text, and this
+        # runs under the job env, where Slurm's --export=NONE has dropped LANG —
+        # py3.6 then defaults to ASCII and a locale-encoded write would raise
+        # UnicodeEncodeError, which the except below swallows into "no file".
+        # The platform reads that as UNKNOWN instead of FAILED, which is exactly
+        # the silent failure this file exists to rule out.
+        with open(path, "w", encoding="utf-8") as f:
             f.write(body)
     except Exception as exc:
         sys.stderr.write("verify_sr_run: 无法写退出码文件 %s: %s\n" % (path, exc))
