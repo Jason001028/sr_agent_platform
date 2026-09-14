@@ -20,9 +20,11 @@
 - **真机部署完成、Windows 可访问（09-07/08，node81-135）**：后端 `sr-api`（systemd，开机自启）+ 前端 `nginx`（:80，开机自启，已删出厂 default.conf 由本站点接管）均 running；Windows 浏览器直接开 `http://10.10.81.135` 可访问各页面（查看器 /scenes /chat /queue），查看器能稀疏读真实大 TIF。部署操作手册：`docs/status/real-machine-bringup.md`（ADHD 动作版：`real-machine-bringup-adhd.md`）。期间排掉两个启动坑（`User=` 行尾注释致 217/USER、py3.9 缺 eval-type-backport），均已入症状表归档。
 - **遗留一：真实盘阵根未定位**：默认 `SR_SCENES_ROOT=/data/scenes` 在 node81-135 **不存在**（`ls` 报无此目录）→ `/api/scenes` 返回 `source:fake` 的 12 条占位（`fake:true` / 0B）→ `/scenes` 页面全是假数据、场景打不开、查看器「提交 SR」灰掉（route=sparse 无 sceneId，设计如此）。真实 590MB `JL1KF02B01_PMS03_...` 那类数据在别处（曾从某入口在 viewer 打开过一张真图，来源未确认）。**待办**：确认真实场景根路径（在本机哪个挂载点，还是数据在别的机器）→ 把后端 `SR_SCENES_ROOT` 与 nginx `alias` 改成同值 → restart 后复核 `/api/scenes` 出真实行。
 - **遗留二：真机阶段4/5 验收清单（§6.3–6.5）未跑**：需先定位真实盘阵根再逐项执行（首次 JPG 生成耗时/内存、真实掩码烘焙落盘 ENVI 核对、真 Slurm 提交/取消、SSE 长连）。进度快照见 §6.0。
-- **遗留三：Slurm 接入待真机执行（09-10，第三批）**：探针（P1）与实测参数（P2）已回传，**本轮交付的是执行侧**——部署变体（`SR_code/variants/code_0817_prod_slurm.py`，锚点替换生成）+ 作业内契约校验器（`verify_sr_run.py`，退出码 0/90）+ 批脚本（`--gres=gpu:1` / `--export=NONE` / 两行调用）+ 退出码文件定终态（`slurm.py` 不再依赖 `sacct`）+ 分阶段验收清单（`docs/status/slurm-acceptance.md`，A 探针→B 裸 Slurm 冒烟→C 单场景真 SR→D 平台四条结论）。**真机命令由用户执行、输出贴回后判读**；文档侧已回填契约 v1.5 与 `deploy/README.md` §七。待跑：验收单 A/B/C/D。**09-14 需求收敛**：所有作业**只跑在同一台 4×3090 物理机内**、不调度到其他服务器，Slurm 的角色收窄为「本机排队 + 按单卡分配 GPU」；部署方向二选一（① 复用现有集群 + `--nodelist` 锁定那台机器 / ② 本机自建单节点 Slurm），**方向未定**，判据 = `slurm-acceptance.md §B0` 的三条只读命令（已有半条反证：A 记录里 `node81-133/134/135/136` 是 `down`，本机 node81-135 是 `down*`）。
-- **下一步**：① 定位真实场景根 → 改 `SR_SCENES_ROOT` + nginx `alias`（同值）→ 复核 /api/scenes（进度 §6.0）；② 数据就位后按 §6.3–6.5 真机验收；③ commit 待归档变更（清单 §6.0）；④ 配 LLM key 跑通真实 /chat 闭环（§2.6）；⑤ 开发机推进 P1 ④⑤⑥⑦（§2.5）。
-- **约束提醒**：开发机的浏览器 e2e 测试**已恢复可用**（`.e2e/launchBrowser.js` 每次用独立的临时浏览器配置目录，彻底解决「浏览器闪退、退出码 0 无任何报错」的问题）；真实图片都在内网盘阵，外网开发机读不到（见 §5.1）。
+- **遗留三：Slurm 接入待真机执行（09-10，第三批）**：探针（P1）与实测参数（P2）已回传，**本轮交付的是执行侧**——部署变体（`SR_code/variants/code_0817_prod_slurm.py`，锚点替换生成）+ 作业内契约校验器（`verify_sr_run.py`，退出码 0/90）+ 批脚本（`--gres=gpu:1` / `--export=NONE` / 两行调用）+ 退出码文件定终态（`slurm.py` 不再依赖 `sacct`）+ 分阶段验收清单（`docs/status/slurm-acceptance.md`，A 探针→B 裸 Slurm 冒烟→C 单场景真 SR→D 平台四条结论）。**真机命令由用户执行、输出贴回后判读**；文档侧已回填契约 v1.5 与 `deploy/README.md` §七。待跑：验收单 A/B/C/D。**09-14 需求收敛**：所有作业**只跑在同一台 4×3090 物理机内**、不调度到其他服务器，Slurm 的角色收窄为「本机排队 + 按单卡分配 GPU」；部署方向二选一（① 复用现有集群 + `--nodelist` 锁定那台机器 / ② 本机自建单节点 Slurm）——**当天即收口：两条都不走，Slurm 全线中止**（判据见下条）。Slurm 侧交付物（变体 `code_0817_prod_slurm.py` + 校验器 + 验收清单）**保留为存量**，重启 Slurm 时从 `slurm-acceptance.md` 接着跑。
+- **09-14 路线改向：Slurm 中止 → 本机 conda 直跑**（工作单 [`docs/planning/sr-minimal-prototype-plan.md`](planning/sr-minimal-prototype-plan.md)，状态「已定」）：前端点「提交 SR」→ 后端在 node81-135 用 SR 生产 conda 解释器**直接起进程**（`SR_EXECUTOR=local`），读**锁定目录**里已有的 `.tif` + `<目录名>_mask.tif`，产物写回同目录；`sbatch` 换 `bash`，配置 XML / 审计段 / 契约校验器 / 退出码文件整套原样复用。中止判据（§1.3，已在真机核实）：node81-135 在集群里是 `gpu:4 down`、DOWN 节点不会被分配作业；自建单节点 Slurm 的 6818 端口被 `slurmd` 占用；单卡分配用 `CUDA_VISIBLE_DEVICES` 即可。**代码侧 8 项改动已全部落地**（commit `8c197fc`，41 文件 +1981/−988）：新增 `backend/services/local_exec.py`（单槽串行 + job_id 持久化）、`SR_LOCKED_DIR` 锁死 + 掩码自动推导 + `suffix` 白名单、浏览器端 JPG 导出与 FS Access「输出目录」授权**整条链路删除**、本地 `.jpg` 与盘阵 `.jpg` 均可预览。
+- **09-15 开发机收口：红测试修复 + 真机预演 + 浏览器回归全绿**（人不在内网机，能做的一次做完）：`8c197fc` 之后开发机其实是 **338 passed / 8 failed**（① `bash` 被 Windows 的 WSL 壳截胡；② 退出码文件没锁编码 → 真机上中文 `reason=` 写不进去、异常被吞 → **失败被误报成 UNKNOWN**）；修完再加 `backend/tests/test_local_chain.py`（4 例）把本地执行链**整条跑通**（真 config/批脚本/bash/校验器/退出码文件，仅 SR 算法换 stub）。浏览器三套回归（此前**从未在浏览器里验过**）全部复跑修正：`test-scenes.js` 按当前实现重建 58 断言、`test-platform.js` 修 3 处被 8c197fc 改掉的前置 12 断言、`test-vue-viewer.js` 删掉已取消的导出段 35 断言。同时修掉一个产品缺陷（`<目录名>_mask.tif` 被当成场景列出）并把 `.e2e/` 脚本纳入版本库。详见 §4 时间线。
+- **下一步**：① 真机**三项只读确认**（工作单 §3：锁定目录拼写 `datahub`/`databub`、`SR_SR_SCRIPT` 是否指到变体、前端产物送机通道）；② 按工作单 §6 追加 env（`SR_EXECUTOR=local` / `SR_LOCKED_DIR` / `SR_LOCAL_GPU` / `SR_SUFFIX_DEFAULT` / `SR_SR_SCRIPT`→变体 / `SR_PYTHON`，**`SR_SANDBOX_ROOT` 必须不设**）后跑 §5.2 A/B 段验收；⚠️ 验收前**重新拷一次** `SR_code/variants/verify_sr_run.py`（已改为 17164B/`5fa627d8…`）；③ 定位真实场景根 → `SR_SCENES_ROOT` 与 nginx `alias` 同值 → 复核 `/api/scenes`（进度 §6.0）；④ 配 LLM key 跑通真实 /chat 闭环（§2.6）；⑤ 开发机推进 P1 ④⑤⑥⑦（§2.5）——开发机侧**已无已知红项**。
+- **约束提醒**：开发机的浏览器 e2e 测试**已恢复可用**（`.e2e/launchBrowser.js` 每次用独立的临时浏览器配置目录；**候选顺序 Chrome 优先**——本机 Edge 与正在运行的 Edge 实例握手会 `Code: 0` 闪退）；真实图片都在内网盘阵，外网开发机读不到（见 §5.1）。
 
 ## 2. 里程碑计划与待办
 
@@ -335,6 +337,36 @@
   (b) **平时是谁、用什么命令跑生产超分？有没有调度脚本指向哪个路径的 `code_0817_prod.py`？**
   (b) 无答案前**不得进 §C（单场景真 SR）** —— 那是唯一会真跑超分、真写盘阵的一步。
 
+### 2026-09-14 · Slurm 路线中止，最小原型落地（commit `8c197fc`）
+
+- **决策**：不走 Slurm，改成「后端在本机用 SR 生产 conda 解释器直接起进程」。工作单 = `docs/planning/sr-minimal-prototype-plan.md`（已定），判据与已定决策见该文 §1.2/§1.3。Slurm 侧交付物（变体 + 校验器 + `slurm-acceptance.md`）保留为存量，不做删除。
+- **落地（8 项，全部在 `8c197fc`）**：`backend/services/local_exec.py`（单槽串行执行器，接口与 `slurm.py` 对齐：`available/submit/status/cancel`；job_id 持久化在 `SR_SLURM_WORK_DIR/.local_job_seq`；终态仍读退出码文件，复用 `slurm.terminal_from_exit_file`，不另写一份映射）· `SR_EXECUTOR`/`SR_LOCKED_DIR`/`SR_LOCAL_GPU`/`SR_SUFFIX_DEFAULT` 四个配置项 · `/api/queue` 的锁定目录 400 + 掩码自动推导（`<lq_path>/<leaf>_mask.tif`）+ `suffix` 白名单（空后缀=把输入改名，属破坏性配置）· 盘阵目录 `.jpg` 可列出（排除自产的 `.preview.jpg`）· 本地 `.jpg` 可打开 · 前端删掉整个浏览器端 JPG 导出与 FS Access 授权链路 · 队列页 `lq_path`/`mask_path` 改只读。
+- **真机未做**：§5.2 A/B 段验收与 §6 的 env 全部未执行（人不在内网机）。
+
+### 2026-09-15 · 最小原型的红测试修复（开发机）+ 一处真机风险
+
+- **实测**：`8c197fc` 之后本机是 **338 passed / 8 failed** —— 与工作单 §5.1「保持全绿」直接冲突，说明这批新测试**在开发机上从未真正跑过**。两个根因：
+  1. **`bash` 被 Windows 的 WSL 壳截胡**（7 个红）：`Popen(["bash", …])` 走 `CreateProcess`，而它**先搜 System32、后搜 PATH**（与 `shutil.which` 不同），于是命中 `C:\Windows\System32\bash.exe`（WSL 启动器，实测 rc=1「未安装分发」），而不是 PATH 上的 Git Bash。修：`local_exec._bash_path()` 自己扫 PATH 并跳过 System32 那个，交给 `Popen` 绝对路径；`available()` 改为「解析得到可用 bash」才为真（否则只会在启动后才失败、且表现为 UNKNOWN，像 SR 静默失败）。
+  2. **退出码文件没锁编码**（1 个红，**同时是真机风险**）：`verify_sr_run.py` 写、`slurm.read_exit_code_file` 读都走平台默认编码。真机上批脚本带 `--export=NONE` 会丢掉 `LANG`，而 SR 的 conda 是 **py3.6** → `open()` 默认 ASCII → `reason=` 字段里的中文写不进去 → 异常被 `except` 吞掉 → **退出码文件根本不落盘** → 平台读到 UNKNOWN 而不是 FAILED。这正是 §6.4「静默失败不再被标成成功」要防的失败模式。修：写侧 `encoding="utf-8"`、读侧 `encoding="utf-8", errors="replace"`（ASCII 字段不受影响，兼容旧文件），OPT yml 读取同样锁定。
+- **新增回归测试**：POSIX 下用 `LC_ALL=C` 起子进程复现作业环境（Windows 强制不出非 UTF-8 默认编码 → skip）；读侧分别接受 GBK 旧文件与 UTF-8 新文件。子进程探针**先手动跑通过**（否则它会在 CentOS7 上才第一次执行——第一版就踩了非 raw 字符串把 `\n` 提前展开的坑）。
+- **⚠️ 变更影响（上机前必读）**：`verify_sr_run.py` 由 16419B / `92e400a7…` 变为 **17164B / `5fa627d8…`**。机上那份是旧版、行为正确但少这两处编码锁定 → **下次上机要重新拷一次**（变体 `code_0817_prod_slurm.py` 与其 sha 未动）。`slurm-acceptance.md` §0.2 的比对值已就地标注。
+- 结果：`python -m pytest backend/tests -q` = **348 passed / 1 skipped / 0 failed**；耗时 148s → 9s（此前 7 个红用例每个都在等 20s 超时）。
+
+#### 同日续：真机预演（T1-3）+ 三套浏览器回归复绿（T1-4）
+
+人不在内网机，能做的都做完了：把「本机执行链」整条跑通，再把 `8c197fc` 之后**从未在浏览器里验过**的回归全部复跑修正。
+
+- ✅ **`backend/tests/test_local_chain.py`（新增 4 例）——本机把本地执行链跑通**。除 SR 算法外全部是真的：真 `config.xml` + 真 `build_batch_script` + 真 bash + 真 `SR_code/variants/verify_sr_run.py` + 真退出码文件 + 真幂等表；只有 `code_0817_prod.py` 换 stub（`SR_SR_SCRIPT=stub_sr.py`，stub 自己按 PAC/RC 规则命名产物）。四条断言链：① `SUBMITTED→RUNNING→COMPLETED`、`exit_code=0:0`、SRLOG + `<stem>_sr.tif` 落地、退出码文件含 `verdict=0`；② **静默失败**（exit 0 但无产物）→ `FAILED` 且仍写退出码文件（`verdict=90`）；③ 同参重提 → `RESUMED_COMPLETED`、job_id 不变、`_JOBS` 仅 1 条；④ 队列页要回读的路径（config/batch script/log_dir/`read_dataroot_lq`）提交即存在。**意义**：真机上剩下的不确定性收窄到解释器（conda py3.6 + torch/GDAL）与 GPU，不再是接线。
+- ✅ **浏览器回归三套全绿**（前置 `npm run build`；命令见 §5.3）：
+  - `.e2e/test-scenes.js` **58 断言** —— 原文件（45 断言）随 `.e2e/` 被 gitignore 丢失，本日**按当前实现重建**。fixture 故意让 `.hdr`（3200×2000）与 TIFF/Pillow 实测尺寸（900×450 / 400×200）**不一致**，这样「掩码必须按元数据 W/H 换算」那条断言是可被证伪的，不是恒真。跨页状态断言走场景页「去查看器」**页内跳转**——`page.goto` 会整页重载丢掉 pinia store。
+  - `.e2e/test-platform.js` **12 断言** —— 8c197fc 改了产品行为，修三处前置：提交需自带 `<目录名>_mask.tif`（§4.3 起掩码按约定推导、缺文件直接 400）、按钮文案 `提交到 Slurm`→`提交 SR`（改成两步式）、[C] 段打开场景必须带 `lqPath`（否则 `srReady` 为假、按钮禁用）。末尾那条「掩码任务 COMPLETED」的失败**不是回归**：同参重提被幂等层命中 `RESUMED_COMPLETED`（§4.3 起前端恒传 `mask_path: null` → 指纹必然相同），已改为「先断言不产生第二行，再改倍率→真新建任务」。
+  - `.e2e/test-vue-viewer.js` **35 断言** —— 删掉针对**已取消功能**的整段导出/降档重试断言（`setSaver`/`reExportJpg`/`scanPendingExports`/`jpgStatus` 已随 §4.5 从 `e2eHooks.ts` 移除），钩子清单同步为现役 22 个。留着的旧断言只会长期报红。
+- ⚠️ **本机浏览器回归必须用 Chrome**：Edge 与用户正在运行的 Edge 实例握手会 `Failed to launch the browser process: Code: 0`（临时 profile 挡不住）。已把 `launchBrowser.js` 候选顺序改为 **Chrome 优先**（`SR_E2E_BROWSER` 仍排最前可覆盖）。
+- 🐛 **发现并修掉一个产品缺陷：`<目录名>_mask.tif` 被当成场景列出**。`scene_search.is_scene_file` 原先只排除 `.preview.jpg`；真机形态是掩膜与场景**同名同目录**，于是每个已带掩膜的目录都会在 `/scenes` 多出一行——卫星/传感器由掩膜文件名解析（`satellite=<父目录名>`、`sensor='mask'`）、尺寸取掩膜 TIFF 头、「提交 SR」还可点（同目录 → 同指纹 → 幂等命中，不至于重复跑，但列表是脏的）。修：`is_scene_file` 增加 `_DERIVED_STEM_SUFFIX = "_mask"` 判定（只认**结尾**标记，`GF07A03_mask_PMS01_….tif` 仍是场景），后端 +3 例、`test-scenes.js` 的【已知问题】**镜像断言**改为「掩膜未出现在列表」（5 行 → 3 行）。
+- 🗂 **`.e2e/` 从「整目录忽略」改为「只忽略依赖/大图」**：`test-scenes.js` 就是这么丢的。现在 `*.js` / `lib/` / `package.json` / `package-lock.json` / `*.py` 入库，`node_modules/`、`fixtures/`、`*.tif`、`*.jpg` 仍忽略。**后果**：以后清理工作区不会再丢掉可复跑的回归资产。
+- 全绿实测：后端 **354 passed / 1 skipped**（348 + 4 链路 + 2 掩膜）、前端 Vitest **160 passed**、浏览器 **58 + 12 + 35 断言**。
+- 📝 **文档债（已修一部分，剩下的下次）**：本次顺手改了 `current-question.md`、`api-contract.md`、`frontend-migration.md`、`platform-tutorial.md`、`project-deep-dive.md`（对外摘要里「用 Slurm 提交」已改为本机直跑）与 `CLAUDE.md`。**未改**：`docs/knowledge/interview/` 下的专题篇（`http-sse.md` Q24 / `db-storage.md` / `fastapi-rest.md` / `python-concurrency.md`）仍以 `sbatch` 讲幂等与「先记意图后记结果」。机制本身没变（执行器接口对齐、`slurm.py` 作为存量保留且仍是 `SR_EXECUTOR=slurm` 的代码路径），但叙述该补一句"提交动作经可切换执行器、默认 bash"。另有历史条目里的旧计数（`frontend-migration.md` §阶段5、`frontend-phase4-phase5-prompts.md` 门禁）按"当时实测"保留不改。
+
 ### 2026-09-09 · 阶段6 查看器上下文侧舱（右侧 [ROI/工具] + [Agent]）
 
 - **范围（L1 确定性 + L2 Agent 解读）**：见 §1「阶段6」bullet 与 `docs/planning/api-contract.md`「阶段6 增补」blockquote；需求要点 = 右侧固定侧舱、默认收起、展开态持久化、ROI 统计只对**当前显示层**做确定性计算（绝不让 LLM 编数字）、Agent 与 /chat 同会话不另起炉灶。
@@ -343,14 +375,14 @@
 - ✅ **L2 Agent tab**：`lib/agentContext.ts`（`buildContextNote`/`roiStatLine`/`CTX_DIVIDER`/`agentPayload`，数字全确定性）；`AgentChatTab.vue` 复用 chat store（无 init；首问 newSession → send(agentPayload)），工具回合单行摘要、气泡内分隔上下文、禁用原因就地显示。
 - ✅ **接线**：ViewerPage 布局行 `[FileList][TifCanvas][ContextPanel]`；三个组件 ContextPanel（rail+toggle+localStorage）/RoiToolsTab/AgentChatTab；`ViewerRec.lqPath` 全链路（后端 `lq_path` → scene.ts → scenes store → viewer openSceneJpg）。
 - ✅ **验证**：前端 Vitest **140**（新增 roiStats.test 14 / agentContext.test 7 / queue.test +5）；vue-tsc 零错误；`npm run build` 通过；后端 190（test_api 断言 lq_path=父目录 / fake→None）。提交 = 阶段6 单 commit（+ 其前置的已暂存设计令牌 restyle 单 commit）。
-- ⚠️ **真机/浏览器回归遗留**：阶段6 不改 `.rec-bar`/Toolbar/`window.__viewer`，开发机 e2e（.e2e/test-vue-viewer 42 + test-scenes 45 + test-platform 11 断言）预期不受影响——待有浏览器会话复跑一遍；RoiToolsTab/AgentChatTab 均为新组件，尚未有 jsdom 渲染测试（纯逻辑已由纯函数测试覆盖）。
+- ⚠️ **真机/浏览器回归遗留**：阶段6 不改 `.rec-bar`/Toolbar/`window.__viewer`，开发机 e2e 预期不受影响——**2026-09-15 已复跑**（`test-vue-viewer` 35 + `test-scenes` 58 + `test-platform` 12 断言全绿；见 §4 09-15 条）；RoiToolsTab/AgentChatTab 均为新组件，尚未有 jsdom 渲染测试（纯逻辑已由纯函数测试覆盖）。
 
 ## 5. 交接（给新窗口）
 
 ### 5.1 环境约束
 
 - 开发机是**外网机**（能上网），真实遥感图全部在**内网机的盘阵**上，无法导出/复制/读取文件头来探测结构。文件结构只能靠**用户回传 ENVI 头信息**（Edit Headers 里的 Compression/Interleave 字段）或**根据已知信息推断尺寸**。不能要求用户提供文件路径。
-- 开发机浏览器 e2e **可用**（`.e2e/launchBrowser.js`：puppeteer-core 驱动无界面 Edge/Chrome + 每次用独立临时配置目录，彻底解决退出码 0 闪退）；浏览器单次内存分配约 2GB、Canvas 画布面积上限 16384²、CDN 无法访问（第三方库必须本地内置）。
+- 开发机浏览器 e2e **可用**（`.e2e/launchBrowser.js`：puppeteer-core 驱动无界面 Chrome/Edge + 每次用独立临时配置目录）；**候选顺序 Chrome 优先**（2026-09-15 实测：本机 Edge 与正在运行的 Edge 实例握手失败 `Code: 0`，Chrome 通过；要换浏览器设 `SR_E2E_BROWSER`）；浏览器单次内存分配约 2GB、Canvas 画布面积上限 16384²、CDN 无法访问（第三方库必须本地内置）。
 
 ### 5.2 下一步（给新窗口）
 
@@ -365,25 +397,27 @@
      d. 画一个矩形掩码 → 生成 `掩码.tif`，用 ENVI 打开核对区域位置是否按元数据 W/H 换算正确（在 JPG 上画 → 全分辨率落点）；
      e. `journalctl -u sr-api` 无越权访问告警；构造 `../` 越权 id/URL 应 403/404。
    - 阶段3 收尾项一并做：真实 24739×24199 大图本地文件路径的稀疏预览 8192 不崩、掩码直出、2% 线性导出 JPG 8192×8013 无条纹（本地文件路径零回归的红线）。
-2. **阶段5 真机验收**（开发机已离机全绿：后端 190 + Vitest 114 + `.e2e/test-platform.js` 11 断言；契约 = `docs/planning/api-contract.md`，提示词见 `frontend-phase4-phase5-prompts.md`【阶段5】）：
+2. **阶段5 真机验收**（开发机已离机全绿：后端 354 + Vitest 160 + `.e2e/test-platform.js` 12 断言；契约 = `docs/planning/api-contract.md`，提示词见 `frontend-phase4-phase5-prompts.md`【阶段5】）：
    - **真 LLM**：`SR_LLM_BASE_URL/API_KEY/MODEL` 指内网端点 + `SR_LLM_MOCK=0`，/chat 发一条 → 真实工具调用 + 最终回复；刷新恢复历史；
    - **真 Slurm**：`SR_SLURM_FAKE=0`，/queue 提交 → sbatch 真实作业 → SSE `job_update` 推进到「完成」（**终态读退出码文件，不是 `sacct`**——真机账务关闭，见 §3.2「Slurm 接入定论」）；装变体 + 校验器 + 六项 env 见 `deploy/README.md` §七，分阶段验收（含四条链路结论）见 `docs/status/slurm-acceptance.md`；取消按钮 scancel 生效；
    - **盘阵掩码落点**：/viewer 打开真实场景画掩码 →「提交 SR」→ ENVI 打开 `<原图目录>/<stem>_mask.tif` 核对区域与 0817 消费路径一致（`_mask.txt` 质心坐标）；
    - **nginx SSE 长连**：/chat 与 /queue 经反代挂 10min+ 无断流/攒批（心跳/断链重连正常）；
    - **systemd 权限**：`nginx` 用户能读盘阵、写预览 JPG 缓存与 `SR_AGENT_DB`（见 deploy/README §三）。
-3. **开发机可推进**：P1 ④⑤⑥⑦（见 §2.5，.env / 瞬时错误重试 / 测试缺口 / CLI --resume）；配 LLM key 跑通真实闭环、真机验证 Slurm/run_sr（§2.6）。
+3. **当前路线（最小原型）上机前**：`docs/planning/sr-minimal-prototype-plan.md` §3 三项只读确认 → §6 六项 env（`SR_SANDBOX_ROOT` **不设**）+ `systemctl restart sr-api` → §5.2 A/B 段验收。⚠️ **改过的 `SR_code/variants/verify_sr_run.py` 需重新拷回真机**（16419B/`92e400a7…` → **17164B/`5fa627d8…`**，编码锁定两处），验收 D 步之前必须重拷。
+4. **开发机可推进**：P1 ④⑤⑥⑦（见 §2.5，.env / 瞬时错误重试 / 测试缺口 / CLI --resume）；配 LLM key 跑通真实闭环（§2.6）。本地执行链已验证，浏览器回归已全绿 —— 开发机侧**没有已知红项**。
 
 ### 5.3 关键文件
 
 - 查看器交付物：`tif_viewer/tif-viewer.html`（冻结）→ Vue3 版 `frontend/src/`（pages/ScenesPage.vue + components/ + stores/{viewer,scenes}.ts + lib/{tifDecode,maskgen,scene,source,viewMath}.ts）
 - 阶段4 后端：`backend/api/app.py`（FastAPI：/api/scenes + /preview）、`backend/api/paths.py`（白名单 + scene id codec）、`backend/services/preview_jpg.py`（稀疏采样 + 2% 拉伸 + Pillow 缓存）
 - 阶段4 部署：`deploy/nginx.conf`、`deploy/sr-api.service`、`deploy/requirements-api.txt`、`deploy/README.md`；离线包 `frontend/scripts/package-offline.sh`
-- 阶段5 契约/实现：`docs/planning/api-contract.md`（**已定**）、`backend/api/platform.py`（chat/queue/tools/masks + SSE 广播）+ `backend/api/app.py`（lifespan 轮询）、`frontend/src/{lib/api.ts, stores/{chat,queue}.ts, pages/{ChatPage,QueuePage}.vue}`、查看器「提交 SR」（`stores/viewer.ts::submitSr` + Toolbar 按钮）、`.e2e/test-platform.js`（11 断言）
+- 阶段5 契约/实现：`docs/planning/api-contract.md`（**已定**）、`backend/api/platform.py`（chat/queue/tools/masks + SSE 广播）+ `backend/api/app.py`（lifespan 轮询）、`frontend/src/{lib/api.ts, stores/{chat,queue}.ts, pages/{ChatPage,QueuePage}.vue}`、查看器「提交 SR」（`stores/viewer.ts::submitSr` + Toolbar 按钮）、`.e2e/test-platform.js`（12 断言）
 - 阶段5 部署增补：nginx `/api/` 反代 `proxy_buffering off`+`proxy_read_timeout 3600s`（SSE）；`sr-api.service` env（`SR_AGENT_DB`/`SR_LLM_MOCK=0`/`SR_SLURM_FAKE=0` + Slurm 六项 `SR_PYTHON`/`SR_BUNDLE_DIR`/`SR_SLURM_WORK_DIR`/`SR_SLURM_PARTITION`/`SR_SLURM_TIME`/`SR_SLURM_CPUS`）；`requirements-api.txt` 补 `openai>=1.40,<2`
 - Slurm 接入件：`SR_code/variants/{code_0817_prod_slurm.py,verify_sr_run.py,.diff,.provenance.json}` + 生成器 `SR_code/tools/gen_slurm_variant.py`、只读探针 `deploy/slurm/probe_slurm.sh`；运行期 `backend/services/{run_sr,slurm}.py`；验收清单 `docs/status/slurm-acceptance.md`、差异表 `docs/sr_code/sr-slurm-deploy-variant.md`、契约 `docs/sr_code/sr-pipeline-interface.md` v1.5
 - 阶段6 上下文侧舱：`frontend/src/components/{ContextPanel,RoiToolsTab,AgentChatTab}.vue` + `lib/{roiStats,agentContext}.ts`（buildStats / tasksForScene / CTX_DIVIDER）+ viewer store 选中/统计钩子 + `/api/scenes` `lq_path`（阶段6 增补见 api-contract.md）
 - 经验文档：`docs/experience/gui-experience.md`
-- E2E 测试：`.e2e/`（gitignore 本机资产：`test-vue-viewer.js` **42 断言**本地文件回归 + `test-scenes.js` **45 断言**场景 http 打开；puppeteer-core + 无界面 Edge + vue-lib.js 本地静态服务顶替 nginx + uvicorn 起真后端）
+- 真机预演（无内网机时可跑）：`backend/tests/test_local_chain.py`（4 例，除 SR 算法外全真：真 config/批脚本/bash/校验器/退出码文件；`code_0817_prod.py` 换 stub）
+- E2E 测试：`.e2e/`（**2026-09-15 起入库**，只忽略 `node_modules/`+`fixtures/`+大图）——`test-vue-viewer.js` **35 断言**本地文件回归 · `test-scenes.js` **58 断言**场景 http 打开 · `test-platform.js` **12 断言** REST/SSE 全链路；跑法 `cd .e2e && node test-<name>.js`（前置 `cd frontend && npm run build`；puppeteer-core + 无界面 Chrome + 本地静态服务顶替 nginx + uvicorn 起真后端）
 - 测试图：`test-tifs/`（gitignore）、`frontend/fixtures/`（入库小图）
 - 记忆：`~/.claude/projects/.../memory/MEMORY.md`（6 条索引：local-vendor / browser-2gb / intranet-data / real-files-1row-strips / openai-pin / **phase4-disk-array-reads-jpg**）
 

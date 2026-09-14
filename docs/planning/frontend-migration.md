@@ -59,7 +59,7 @@ frontend/
 | 层 | 运行器 | 覆盖 |
 |---|---|---|
 | 纯算法层 | Vitest（Node，脱离浏览器） | maskgen 17 项直译 + tifDecode 像素 golden |
-| 交互层 | puppeteer 浏览器 e2e（file:// 或 Vite dev server） | 由 .e2e/ 承担（gitignore 本地资产） |
+| 交互层 | puppeteer 浏览器 e2e（file:// 或 Vite dev server） | 由 .e2e/ 承担（2026-09-15 起**脚本入库**，只忽略 `node_modules/`+fixtures+大图） |
 | 接线 | jsdom | Vue3 组件接线冒烟（Phase 3） |
 
 - **fixtures 自包含（2026-09-01 定）**：`frontend/scripts/gen-fixtures.py`（零依赖）+ 提交小尺寸 golden 图入库，`npm test` 全新 clone 离线即跑。真实大图（8192²/134MB）回归仍靠 `.e2e/` 本机资产。

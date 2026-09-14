@@ -14,7 +14,7 @@
 
 - [tif_viewer/tif-viewer.html](tif_viewer/tif-viewer.html) —— 遥感大 TIF 查看器（UTIF / geotiff 分块 / 稀疏条带 三路分派 + JPG 中间产物导出）。本地 vendor，离线可用。
 - [quick-look.html](quick-look.html) —— 快速查看器（旧）。
-- 测试：[.e2e/](.e2e/)（puppeteer-core + 无头 Edge，本地 vendor）；测试图 [test-tifs/](test-tifs/)（gitignore）。
+- 测试：[.e2e/](.e2e/)（puppeteer-core + 无头 Chrome，本地 vendor；脚本**入库**、只忽略 `node_modules/`，跑法见 [docs/status/current-question.md](docs/status/current-question.md) §5.3）；测试图 [test-tifs/](test-tifs/)（gitignore）。
 
 ## 硬性约束（详见 gui-experience.md §1）
 
