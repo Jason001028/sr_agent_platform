@@ -103,7 +103,9 @@ class TestBuildConfigXml(unittest.TestCase):
         self.assertEqual(tags["Suffix"], "abc")
         self.assertEqual(tags["GPUIDS"], "2")
         self.assertEqual(tags["CloudLimit"], "90")
-        self.assertEqual(tags["DeleteOriTifNeeded"], "True")
+        # delete_ori 已禁用：即使参数里带了 True，生成的 config 也必须是 False
+        # （提交入口另有 400 拦截，这一层是兜底 —— SR 会不可恢复地删/覆盖原图）。
+        self.assertEqual(tags["DeleteOriTifNeeded"], "False")
 
     def test_well_formed(self):
         xml = svc.build_config_xml({"lq_path": "/s"})
@@ -772,6 +774,12 @@ class TestToolRunSr(unittest.TestCase):
         r = run_run_sr(lq_path="/data")
         self.assertFalse(r["ok"])
         self.assertIn("slurm", r["error"])
+
+    def test_delete_ori_is_rejected(self):
+        # 参数校验先于调度器可用性：dev 机没有 sbatch，但这里必须先报 delete_ori
+        r = run_run_sr(lq_path="/data", delete_ori=True)
+        self.assertFalse(r["ok"])
+        self.assertIn("delete_ori", r["error"])
 
 
 class TestToolRunSrPathGuard(unittest.TestCase):

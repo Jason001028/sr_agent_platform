@@ -14,11 +14,21 @@ import {
 } from '../lib/api.js';
 import type { QueueTask, QueueSubmitBody, QueueSubmitResult, JobUpdateEvent } from '../lib/api.js';
 
-/** 从查看器场景带入的提交预填：只有原图目录。
+/** 队列表单里的可调参数（「以这行参数再提交」整组带回）。 */
+export type QueueTunables = Pick<
+  QueueForm, 'sr_scale' | 'suffix' | 'gpu' | 'cloud_limit' | 'grid_align'
+>;
+
+/** 提交预填。两个来源：查看器场景（只带目录）、任务行「再提交」（带整组参数）。
     掩码不进表单 —— 它由后端按 <lq_path>/<目录名>_mask.tif 推导并校验存在性
     （最小原型 §4.3），前端只显示推导结果，不参与提交。 */
 export interface QueueDraft {
   lq_path: string;
+  /** 不带时其余字段取 defaultForm 的值。 */
+  tunables?: Partial<QueueTunables>;
+  /** 「再提交」来自哪一行（仅用于表单顶部提示）。 */
+  taskId?: number;
+  from?: 'viewer' | 'task';
 }
 
 /** 队列表单（QueuePage 编辑态；提交时剥掉未填项拼 body）。 */
@@ -36,7 +46,10 @@ export interface QueueForm {
 
 /** run_sr 参数默认值（镜像 services/run_sr + tools/run_sr 缺省）。
     后缀默认非空：空后缀会让 SR 的输出名等于输入名（契约 §2.4-1），
-    后端另有 SR_SUFFIX_DEFAULT 兜底，这里预填同一约定值让操作员看得见。 */
+    后端另有 SR_SUFFIX_DEFAULT 兜底，这里预填同一约定值让操作员看得见。
+
+    delete_ori 恒为 false：该开关原型期已禁用（backend/services/run_sr.py 的
+    DELETE_ORI_MSG，传 true 会被 400 拒），表单里也没有对应控件。 */
 export function defaultForm(): QueueForm {
   return {
     lq_path: '', sr_scale: 2, suffix: 'sr',
@@ -44,9 +57,9 @@ export function defaultForm(): QueueForm {
   };
 }
 
-/** 场景带入的目录 → 队列表单（其余字段取默认值）。 */
+/** 场景带入的目录 / 任务行带回的参数 → 队列表单（缺省字段取默认值）。 */
 export function draftToForm(d: QueueDraft): QueueForm {
-  return { ...defaultForm(), lq_path: d.lq_path };
+  return { ...defaultForm(), lq_path: d.lq_path, ...(d.tunables ?? {}) };
 }
 
 /** 后端 §4.3 的掩码推导规则，仅供界面显示「将读哪个掩膜」——权威实现在
@@ -76,6 +89,38 @@ export function formToSubmit(f: QueueForm): QueueSubmitBody {
 function clampInt(v: number, lo: number, hi: number, def: number): number {
   if (!Number.isFinite(v)) return def;
   return Math.min(hi, Math.max(lo, Math.round(v)));
+}
+
+/** 一行任务的耗时。终态行 = updated_at − created_at（后端每次状态写回都更新
+    updated_at，见 services/store.set_sr_task_state），受状态轮询间隔影响；
+    运行中的行用 nowSec 现算。时间戳缺失/倒挂 → null，界面显示「—」而不是 0 秒。 */
+export interface TaskElapsed {
+  seconds: number;
+  running: boolean;
+}
+
+export function taskElapsed(t: QueueTask, nowSec: number): TaskElapsed | null {
+  const start = Number(t.created_at);
+  if (!Number.isFinite(start) || start <= 0) return null;
+  const running = isActiveState(String(t.state));
+  const end = running ? nowSec : (Number(t.updated_at) || start);
+  return { seconds: Math.max(0, Math.round(end - start)), running };
+}
+
+/** 未终结（还会自己推进）的状态。 */
+export function isActiveState(state: string): boolean {
+  return state === 'SUBMITTING' || state === 'PENDING' || state === 'RUNNING';
+}
+
+/** 秒 → 「1 时 02 分」/「3 分 12 秒」/「12 秒」。 */
+export function formatDuration(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h) return h + ' 时 ' + String(m).padStart(2, '0') + ' 分';
+  if (m) return m + ' 分 ' + String(sec).padStart(2, '0') + ' 秒';
+  return sec + ' 秒';
 }
 
 /** SSE job_update → 覆盖匹配 task 的 state；无匹配不动（权威在 list()）。 */
@@ -216,6 +261,21 @@ export const useQueueStore = defineStore('queue', () => {
     list, submit, cancel, connect, disconnect,
     /** 查看器「提交 SR」带过来的目录（不自动提交）。 */
     setSrDraft(lqPath: string) { draft.value = { lq_path: lqPath }; },
+    /** 「以这行参数再提交」：整组参数填回表单，仍然要点提交才真的跑。
+        掩码不进表单 —— 每行的 mask_path 都是后端按 `<lq_path>/<目录名>_mask.tif`
+        推导出来的，重提交会推导出同一个文件。 */
+    setDraftFromTask(t: QueueTask) {
+      draft.value = {
+        lq_path: t.params.lq_path,
+        taskId: t.task_id,
+        from: 'task',
+        tunables: {
+          sr_scale: t.params.sr_scale, suffix: t.params.suffix,
+          gpu: t.params.gpu, cloud_limit: t.params.cloud_limit,
+          grid_align: t.params.grid_align,
+        },
+      };
+    },
     setDraft(d: QueueDraft | null) { draft.value = d; },
     clearDraft() { draft.value = null; },
   };
