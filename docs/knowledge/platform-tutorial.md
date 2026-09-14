@@ -142,7 +142,7 @@ sr_agent_platform/
 │  └─ tests/                pytest
 ├─ docs/                     全部文档（分类：planning / experience / knowledge / status…）
 ├─ deploy/                   nginx.conf / systemd 单元 / 依赖清单 / 部署 README
-├─ .e2e/                    浏览器端到端测试（gitignore，本机资产）
+├─ .e2e/                    浏览器端到端测试（脚本入库；只忽略 node_modules/ 与大图）
 ├─ test-tifs/                本地大测试图（gitignore）
 └─ CLAUDE.md                 项目导航（新会话先读这个 + docs 索引）
 ```

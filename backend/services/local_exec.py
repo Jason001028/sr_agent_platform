@@ -41,6 +41,7 @@ second worker host ever needs this, that is the moment to go back to Slurm.
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 import threading
@@ -70,13 +71,48 @@ _SLOT = threading.Lock()
 _JOBS: dict[int, dict] = {}
 
 
-def available() -> bool:
-    """Always true — local execution needs no scheduler, only bash.
+def _wsl_stub(path: str) -> bool:
+    """True for ``%SystemRoot%\\System32\\bash.exe`` — the WSL launcher, not bash."""
+    root = os.environ.get("SystemRoot") or os.environ.get("windir") or r"C:\Windows"
+    system32 = os.path.normcase(os.path.join(root, "System32"))
+    return os.path.normcase(os.path.dirname(os.path.abspath(path))) == system32
 
-    Kept for interface parity with ``slurm.slurm_available`` so run_sr's
-    availability gate reads the same shape either way.
+
+def _bash_path() -> str | None:
+    """Absolute path of a bash that can actually run a script, or None.
+
+    Windows ships a ``bash.exe`` in System32 that is **not** bash: it is the WSL
+    launcher, which exits non-zero ("no installed distributions") unless a
+    distro happens to be installed. ``CreateProcess`` searches System32 *before*
+    PATH — unlike ``shutil.which`` — so a bare ``["bash", …]`` picks that stub
+    over the real Git/MSYS bash sitting on PATH. The dev machine has both; the
+    SR host (CentOS7, ``/bin/bash``) has neither problem. Hence: scan PATH
+    ourselves, skip the stub, hand Popen an absolute path.
     """
-    return True
+    if os.name == "posix":
+        return shutil.which("bash") or "/bin/bash"
+    for entry in (os.environ.get("PATH") or "").split(os.pathsep):
+        if not entry:
+            continue
+        candidate = os.path.join(entry.strip('"'), "bash.exe")
+        if os.path.isfile(candidate) and not _wsl_stub(candidate):
+            return candidate
+    return None
+
+
+def available() -> bool:
+    """True when a usable bash exists — local execution needs no scheduler.
+
+    Bash is the one real dependency of this executor, so it is what the gate
+    checks: without it ``submit`` could only start something that dies instantly
+    and leaves no verdict file (reported as UNKNOWN, which reads like a silent
+    SR failure rather than a missing interpreter). Telling the caller *before*
+    the job is created keeps those two apart.
+
+    Same shape as ``slurm.slurm_available`` so run_sr's availability gate reads
+    either executor identically.
+    """
+    return _bash_path() is not None
 
 
 def _reset() -> None:
@@ -203,13 +239,18 @@ def _run_job(jid: int, script: str, log_path: Path, env) -> None:
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_fp = open(log_path, "wb")
+            # Absolute path, not the bare name: see _bash_path (Windows would
+            # otherwise launch the System32 WSL stub).
+            bash = _bash_path()
+            if bash is None:
+                raise RuntimeError("no bash on PATH — cannot run the batch script")
             # cwd: the bundle when it exists (same place the batch script cds
             # into), else the API process's own cwd. Never a hard failure — on
             # the dev machine there is no bundle dir to cd to.
             bundle = sr_runtime().bundle_dir
             cwd = bundle if bundle and os.path.isdir(bundle) else None
             proc = subprocess.Popen(
-                ["bash", script], stdout=log_fp, stderr=subprocess.STDOUT,
+                [bash, script], stdout=log_fp, stderr=subprocess.STDOUT,
                 env=_child_env(env), cwd=cwd,
                 start_new_session=(os.name == "posix"))
         except Exception as e:  # noqa: BLE001 — unlaunchable: no verdict → UNKNOWN
