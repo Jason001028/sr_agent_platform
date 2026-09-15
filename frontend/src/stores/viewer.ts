@@ -436,7 +436,9 @@ export const useViewerStore = defineStore('viewer', () => {
       showToast('已打开盘阵场景「' + meta.name + '」（掩码按元数据 ' + meta.W + '×' + meta.H + ' 换算）');
     } catch (e) {
       hideMask(); busy.value = false;
-      showErr('加载盘阵场景失败：' + (e instanceof Error ? e.message : String(e)));
+      // 就地抛出，不自己弹错：唯一调用方是 scenes.open（/scenes 页），它把原因写进
+      // scenes.error 才显示得出来；viewer 的错误条挂在 /viewer，写进去等于没报。
+      throw e;
     }
   }
 

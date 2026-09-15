@@ -1,6 +1,6 @@
 # Slurm 真机接入 · 分阶段验收清单（node81-135）
 
-> 日期：2026-09-10 · 状态：**待执行**（命令由运维在 node81-135 上跑，输出贴回后判读）· 读者：运维本人 + 接手 Agent 窗口
+> 日期：2026-09-10 · 状态：**已中止（2026-09-14）** —— 路线改走「后端本机 conda 直跑」，见 [sr-minimal-prototype-plan.md](../planning/sr-minimal-prototype-plan.md)（判据：node81-135 在集群里是 `gpu:4 down`，DOWN 节点不会被分配作业；自建单节点 Slurm 的 6818 端口已被 `slurmd` 占用；单卡分配用 `CUDA_VISIBLE_DEVICES` 即可）。**本清单保留为重启 Slurm 时的执行页**，B/C/D 的判据与命令未失效。读者：运维本人 + 接手 Agent 窗口
 > 前置：[docs/status/slurm-integration.md](slurm-integration.md) §一 决策快照 / §二 已核实事实 / §2.7 P1 实测值；[sr-pipeline-interface.md](../sr_code/sr-pipeline-interface.md) v1.5（调用契约）
 > 定位：本文件是 P3 的**执行页**——A 探针 → B 裸 Slurm 冒烟 → C 单场景真 SR → D 平台链路。
 > 图例：`⏱` 参考耗时 · `✓=` 成功判据 · `record:` 要记下来回贴的值 · `✗` 失败怎么办。
@@ -270,8 +270,14 @@ sh $APP/deploy/slurm/probe_slurm.sh --deep     # ⚠️ 默认不跑
 
 ```
 041bea73…474a9  30695 B  code_0817_prod_slurm.py   ← 与 provenance.json 的 variant.sha256 一致
-92e400a7…3505d  16419 B  verify_sr_run.py
+92e400a7…3505d  16419 B  verify_sr_run.py           ← ⚠️ 已过期：机上那份是旧版
 ```
+
+> ⚠️ **2026-09-15：`verify_sr_run.py` 仓库副本已变**（退出码文件的编码锁定，见
+> [current-question.md](current-question.md) §4 时间线 2026-09-15）：新值 **17164 B /
+> `5fa627d8…`**。机上那份 16419 B 的**行为仍正确**（`A/B/C` 不受影响），但少了两处
+> `-export=NONE` + 非 UTF-8 locale 下才暴露的编码保护 → 重启 Slurm 走 **D** 之前必须重新拷一次。
+> 变体 `code_0817_prod_slurm.py` 未改动，§0.2 的变体比对（含 `provenance.json`）继续有效。
 
 **其他实测**：
 

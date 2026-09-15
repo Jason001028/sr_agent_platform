@@ -80,11 +80,41 @@ class TestImageScenes(unittest.TestCase):
             self.assertEqual(r["results"][0]["id"],
                              "GF07A03_PMS01_20260722125045")
 
+    def test_mask_is_not_a_scene(self):
+        """§4.3：<名字>_mask.tif 是「提交 SR」的输入，不该和它的场景并列成第二行。
+
+        真机形态：场景与掩膜同名同目录（`<目录名>.tif` + `<目录名>_mask.tif`），所以
+        排除一旦失效，页面上每个场景都会多出一行 — 卫星/传感器由掩膜文件名解析得到
+        （satellite=<父目录名>、sensor='mask'），尺寸取掩膜 TIFF 头。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            write_tif(d, "GF07A03_PMS01_20260722125045.tif")
+            write_tif(d, "GF07A03_PMS01_20260722125045_mask.tif")
+            write_jpg(d, "KF02B04_PMS05_20260810120000.jpg")
+            write_jpg(d, "KF02B04_PMS05_20260810120000_mask.jpg")
+            r = svc.search_scenes(d)
+            self.assertEqual(r["scanned"], 2)
+            self.assertEqual(sorted(s["id"] for s in r["results"]),
+                             ["GF07A03_PMS01_20260722125045",
+                              "KF02B04_PMS05_20260810120000"])
+
+    def test_mask_marker_must_be_the_trailing_token(self):
+        """`_mask` 出现在名字中段的仍是场景 —— 只排除结尾的派生标记。"""
+        with tempfile.TemporaryDirectory() as d:
+            write_tif(d, "GF07A03_mask_PMS01_20260722125045.tif")
+            r = svc.search_scenes(d)
+            self.assertEqual(r["scanned"], 1)          # 不被误伤
+            self.assertFalse(svc.is_scene_file(
+                write_tif(d, "GF07A03_PMS01_20260722125045_mask.tiff")))
+            self.assertTrue(svc.is_scene_file(
+                Path(d) / "GF07A03_mask_PMS01_20260722125045.tif"))
+
     def test_is_scene_file_predicate(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertTrue(svc.is_scene_file(write_jpg(d, "a.jpg")))
             self.assertTrue(svc.is_scene_file(write_tif(d, "b.tiff")))
             self.assertFalse(svc.is_scene_file(write_jpg(d, "c.preview.jpg")))
+            self.assertFalse(svc.is_scene_file(write_tif(d, "c_mask.tif")))
             self.assertFalse(svc.is_scene_file(write_jpg(d, "d.png")))
             self.assertFalse(svc.is_scene_file(Path(d) / "missing.jpg"))
             sub = Path(d) / "dir.jpg"          # 目录后缀像影像也不算
