@@ -149,12 +149,30 @@ def sandbox_scene_paths(lq_path, fingerprint, sandbox_root=None) -> dict | None:
             "scene": f"{parent}/{_posix_basename(lq_path)}"}
 
 
+#: delete_ori 在原型期禁用，两个提交入口（REST 的 api/platform.py 与 agent 工具
+#: tools/run_sr.py）共用这一句话。原因：SR 侧（SR_code/util.py）在 True 时
+#: ``os.remove`` 原图，而对 >=2GB 的输入连删除分支都不走 —— 直接 ``driver.Create``
+#: 覆盖同名文件、不留 *_NOSR 备份；本机执行器又没有沙箱（写入目标就是 lq_path
+#: 本身），所以误开一次就是不可恢复的数据丢失。
+DELETE_ORI_MSG = (
+    "delete_ori 已禁用：SR 会删除原图（输入 >=2GB 时直接覆盖、不留 *_NOSR 备份），"
+    "而本机模式没有沙箱、写入目标就是 lq_path 本身，一旦执行不可恢复。"
+    "如需删除原图，请在作业验收通过后手工处理")
+
+
+def _reject_delete_ori(params: dict) -> None:
+    """Reject a submit that asks for delete_ori — see DELETE_ORI_MSG."""
+    if params.get("delete_ori"):
+        raise ValueError(DELETE_ORI_MSG)
+
+
 def build_config_xml(params: dict, dataroot=None) -> str:
     """Serialize run_sr params into an <SFSR_Config> XML string.
 
     DatarootLQ is required. MaskPath is emitted only when given (absent → the
     SR script does full-image SR). GridAlign defaults on; emitted `false` only
-    when disabled.
+    when disabled. DeleteOriTifNeeded is always emitted as False (see
+    DELETE_ORI_MSG) so the generated config keeps its shape.
 
     `dataroot` overrides params["lq_path"] as <DatarootLQ> — the sandbox uses
     this to point the job at its private copy while the task keeps recording the
@@ -170,7 +188,9 @@ def build_config_xml(params: dict, dataroot=None) -> str:
     add("DatarootLQ", dataroot or params.get("lq_path"))
     add("GPUIDS", params.get("gpu", 0))
     add("CloudLimit", params.get("cloud_limit", 80))
-    add("DeleteOriTifNeeded", "True" if params.get("delete_ori") else "False")
+    # Always False — delete_ori is disabled (DELETE_ORI_MSG). Emitted anyway so
+    # the generated config.xml keeps the tag the SR side reads.
+    add("DeleteOriTifNeeded", "False")
     add("SRScale", params.get("sr_scale", 2))
     add("Suffix", params.get("suffix") or "")
     add("OPT", params.get("options_yml") or DEFAULT_OPTIONS_YML)
@@ -497,6 +517,7 @@ def submit_run_sr(params: dict, run_cmd=None, store=None) -> dict:
     is SUBMITTED for a fresh submission (possibly with `previous_state` when
     it re-submitted after a failed job) or a RESUMED_* reuse marker.
     """
+    _reject_delete_ori(params)      # 原型期禁用，见 DELETE_ORI_MSG；两个入口共用
     if sr_runtime().executor == "local":
         # No scheduler involved: the API host runs the job itself. local_exec
         # is always available (it only needs bash); the real precondition is

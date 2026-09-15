@@ -1,0 +1,23 @@
+{
+  "name": "sr-agent-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "tif-viewer 浏览器回归（puppeteer-core + 系统 Edge/Chrome，本地 file:// 直测）",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node test-bootstrap.js && node test-types.js && node test-sparse.js && node test-maskgen.js",
+    "test:bootstrap": "node test-bootstrap.js",
+    "test:types": "node test-types.js",
+    "test:sparse": "node test-sparse.js",
+    "test:maskgen": "node test-maskgen.js",
+    "test:platform": "node test-platform.js",
+    "test:scenes": "node test-scenes.js",
+    "gen:sparse": "python gen-test-images.py ../test-tifs/sparse"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "puppeteer-core": "^25.9.0"
+  }
+}
