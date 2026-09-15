@@ -12,7 +12,6 @@ record), and the child environment the SR interpreter needs.
 """
 
 import os
-import shutil
 import tempfile
 import time
 import unittest
@@ -20,7 +19,9 @@ from pathlib import Path
 
 from backend.services import local_exec
 
-BASH = shutil.which("bash")
+#: Same resolution the executor uses (which skips the System32 WSL launcher on
+#: Windows) — so "no bash here" skips instead of failing every case.
+BASH = local_exec._bash_path()
 
 _ENVS = ("SR_SLURM_WORK_DIR", "SR_PYTHON", "SR_LOCAL_GPU", "SR_BUNDLE_DIR")
 
@@ -120,15 +121,33 @@ class TestJobIds(LocalExecBase):
         self.assertTrue(local_exec.available())
 
     def test_sequence_persists_across_a_restart(self):
-        self.assertEqual(local_exec.reserve_job_id(), 1)
-        self.assertEqual(local_exec.reserve_job_id(), 2)
+        first = local_exec.reserve_job_id()
+        self.assertEqual(local_exec.reserve_job_id(), first + 1)
         local_exec._reset()                      # sr-api restarted: memory gone
-        self.assertEqual(local_exec.reserve_job_id(), 3)   # file carries on
-        self.assertEqual((self.work / local_exec.SEQ_FILE).read_text().strip(), "3")
+        self.assertEqual(local_exec.reserve_job_id(), first + 2)  # file carries on
+        self.assertEqual((self.work / local_exec.SEQ_FILE).read_text().strip(),
+                         str(first + 2))
 
     def test_ids_are_never_reused(self):
         ids = {local_exec.reserve_job_id() for _ in range(20)}
         self.assertEqual(len(ids), 20)
+
+    def test_a_lost_counter_never_restarts_at_one(self):
+        """计数器丢了（`/tmp` 被重启清掉 / work dir 换了）也不能从 1 重来。
+
+        `_SREXIT_<job_id>.txt` 留在场景目录里，比计数器活得久；从 1 重号会让一个
+        还没跑（或跑到一半就崩）的作业读到上一轮的 `verdict=0`，在队列里显示成
+        COMPLETED。`SR_SLURM_WORK_DIR` 默认在 `/tmp`，所以这不是角落情形。
+        """
+        local_exec.reserve_job_id()                          # 先正常发过号
+        (self.work / local_exec.SEQ_FILE).unlink()            # 计数器随后丢了
+        local_exec._reset()
+        self.assertGreater(local_exec.reserve_job_id(), 1_000_000)
+
+    def test_a_corrupt_counter_never_restarts_at_one(self):
+        (self.work / local_exec.SEQ_FILE).write_text("")      # 写一半断电的空文件
+        local_exec._reset()
+        self.assertGreater(local_exec.reserve_job_id(), 1_000_000)
 
 
 class TestChildEnv(LocalExecBase):

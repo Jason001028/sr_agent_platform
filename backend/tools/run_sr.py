@@ -77,7 +77,9 @@ def _bad_path(path: str) -> str | None:
             },
             "delete_ori": {
                 "type": "boolean", "default": False,
-                "description": "Delete the original L1 after SR.",
+                "description": "Disabled in this prototype: passing true is "
+                               "rejected (SR would delete or overwrite the "
+                               "original in place, with no backup).",
             },
             "grid_align": {
                 "type": "boolean", "default": True,
