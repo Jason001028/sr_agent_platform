@@ -249,7 +249,7 @@ scp -r frontend/dist/* root@<内网机IP>:<APP>/dist/
 服务器上两步收尾：
 
 ```bash
-chown -R nginx:nginx <APP>/dist    # nginx 用户要能读到新文件（此前整树 chown 过可省）
+chown -R nginx:nginx <APP>/dist    # 每次覆盖后都要重跑：新文件属主是 root，此前 chown 过 ≠ 新文件可读
 systemctl reload nginx             # 前端热更：只 reload，别 restart sr-api
 ```
 
@@ -278,6 +278,21 @@ curl -s http://127.0.0.1:8000/api/health   # 判定： {"status":"ok",...}
 
 > 改了后端但没加新依赖时，只用这一节。若 `requirements-api.txt` 也变（新增/升版本包），
 > 需先在服务器按 §三.2 重新 `pip install -r` 再 restart，否则 import 阶段就崩。
+>
+> **漏了 `chown` 的病征**（2026-09-15 实测踩中）：scp / 网盘拖拽进来的文件属主是 **root**
+> （且常见 600），而服务以 `User=nginx` 跑（`sr-api.service:28`），nginx 连 import 都读不到。
+> 表现是重启后 `curl :8000/api/health` 返回 **`000`**（连接被拒 = 没人监听）、
+> `ss -ltnp | grep :8000` 空，`journalctl -u sr-api -n 25` 末尾：
+>
+> ```text
+> PermissionError: [Errno 13] Permission denied: '<APP>/backend/api/app.py'
+> ```
+>
+> **这不是代码坏了**——`chown` 补上、restart 即恢复，别去回滚 `backend/`。
+> 另注：`systemctl is-active` 只反映 systemd 这一刻的状态，服务起来又立刻挂掉时它可能恰好
+> 打印 `active`；**判定以 `health=200` 为准**。
+> 同理 ⚠️ §5.1 那句「此前整树 chown 过可省」**对新拷进来的文件不成立**：每次覆盖 `backend/`
+> 或 `dist/` 之后，`chown` 都要重跑一遍。
 
 ### 5.3 配置层（systemd / nginx 站点）改动
 
@@ -288,6 +303,35 @@ curl -s http://127.0.0.1:8000/api/health   # 判定： {"status":"ok",...}
 cp deploy/sr-api.service /etc/systemd/system/   # 开发机 scp 亦可
 systemctl daemon-reload          # 改了 unit 文件必须 daemon-reload，restart 不读新 unit
 systemctl restart sr-api
+```
+
+#### 5.3.1 线上加 / 改 env：用 drop-in，别改已部署的 unit
+
+已部署的 `/etc/systemd/system/sr-api.service` 通常已按真机改过路径，包里的那份是**模板**，
+覆盖它会把真机路径冲掉。加 env 走 drop-in：
+
+```bash
+printf '[Service]\nEnvironment=SR_EXECUTOR=local\n' \
+  > /etc/systemd/system/sr-api.service.d/40-local-exec.conf
+systemctl daemon-reload && systemctl restart sr-api
+```
+
+`/etc/systemd/system/sr-api.service.d/` 下的 `NN-<名字>.conf`，`NN` 决定加载顺序，
+**后加载的同名变量覆盖先前的**（本机现有：`10-slurm.conf`、`20-agentdb.conf`、
+`30-srscript.conf`、`40-local-exec.conf`、`99-locked-dir.conf`）。
+
+> ⚠️ **第一行必须是 `[Service]`**（或其它合法段头）。漏了它 systemd **不报错、不警告，
+> 整个文件被静默忽略**：`systemctl cat sr-api` 照常把那几行打印出来，看着像生效了，实际
+> 一条都没进进程环境。2026-09-15 实测踩中——机上遗留的 `override.conf` 只有三行
+> `Environment=`、没有段头，`SR_EXECUTOR=local` 因此从未生效，后端一直退回默认的 `slurm`，
+> 一提交就会去 `sbatch` 而不是本机直跑。
+>
+> **判定是否生效只能看 `systemctl show`，不能看 `systemctl cat`**（前者是合并后进程真正拿到的
+> 值，后者只是文件文本的拼接，含被忽略的死行）：
+
+```bash
+systemctl show -p Environment sr-api | tr ' ' '\n' | grep SR_   # 生效值
+systemctl cat sr-api | grep -n Environment=                     # 文本（可能含死行）
 ```
 
 改了 `nginx.conf`（root/alias/proxy 等）——本地改 `deploy/nginx.conf` 后拷到服务器：
@@ -401,7 +445,7 @@ env——`sr-api.service` 里**前八项**全部必填、第九项强烈建议�
 
 | env | node81-135 实测值 | 说明 |
 | --- | --- | --- |
-| `SR_PYTHON` | `/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python` | **SR 生产解释器**（py3.6 + torch + GDAL + ImgHistMatch.so），与平台 venv `/opt/sr-venv`（py3.9）平行、互不污染——后端不 import SR/torch/GDAL，只在批脚本里写一行解释器路径，该行在**计算节点**上解析。2026-09-14 实测：**torch 1.10.2+cu113 / GDAL 2.4.0**（目录名里的 1.9.1 ≠ 实际版本） |
+| `SR_PYTHON` | `/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python` | **SR 生产解释器**（py3.6 + torch + GDAL + ImgHistMatch.so），与平台 venv `/opt/sr-venv`（py3.9）平行、互不污染——后端不 import SR/torch/GDAL，只在批脚本里写一行解释器路径，该行在**计算节点**上解析。2026-09-14 实测：**torch 1.10.2+cu113 / GDAL 2.4.0**（目录名里的 1.9.1 ≠ 实际版本）。2026-09-15 `ls -d` 复核：该前缀存在，可直接照抄（备选的 `/media/node81-135/SSD` 不存在） |
 | `SR_BUNDLE_DIR` | `/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes` | `code_0817_prod.py` / `models` / `utils` / `options` 所在目录；拼写以 `code_0817_prod.py:27` 的 `load_library()` 为准 |
 | `SR_SLURM_WORK_DIR` | `/DiskArray/tmp/wangrz/sr_agent_work` | config.xml 与批脚本落盘处。**必须是共享盘**——`gpu` 分区横跨 **76** 个节点（`node81-*` 与 `node104-*` 两族，2026-09-11 探针实测），作业落在哪台由调度器决定，每一台都要能读它；默认值 `/tmp/sr_agent_work` 是本机路径，多节点下作业秒挂 |
 | `SR_SLURM_PARTITION` | `gpu` | `sinfo -h -o "%P"` 实测（`centos7` / `deicc` / `gpu` / `gpu*` / `test`，星号=默认分区）。**没有 `gpup`** —— 早先文档那个值是转述错误；不配则走默认分区，多分区集群下不可控 |
