@@ -200,7 +200,42 @@ def cancel(job_id) -> bool
    + `cat <锁定目录>/Debug/_SREXIT_<job_id>.txt`（应 `verdict=0`）
 6. 确认输出确实落在锁定目录（需求「输出与原图同目录」）。
 
+**A 段执行结果（2026-09-15）**
+
+| 步 | 结果 |
+| --- | --- |
+| 1–2 部署 + env | 通过：三项 env（`SR_EXECUTOR`/`SR_LOCAL_GPU`/`SR_LOCKED_DIR`）生效 |
+| 3 提交 | 通过：`201`，`task_id=1` / `job_id=1` / `in_place:true`；`mask_path` 按目录推导正确 |
+| 4 状态推进 | 通过：真的推进了（提交 → RUNNING → 终态），不是假调度器；但平台侧未收敛到 FAILED（见第 5 步） |
+| 5 终态 | 契约判 FAILED：`_SREXIT_1.txt` 写出非 0 verdict，理由 `SRLOG 早于 config.xml, 是上次残留` |
+| 6 产物落盘 | 未产出——SR 未执行超分（见下） |
+
+**根因**：场景 `JL1KF02B03_PMS09_…_L1_PAN` 在 **9/12 就已超分过**，
+`util.py:1003-1011` 的 SC 分支发现 `<目录名>.tif` 体积不在三个接受区间内 → 打印
+`already SRed before` → **`return`（`exit()` 被注释掉，源码标 `# huai`）**，既不做处理、也不建新
+SRLOG。校验器随后判定 `Debug/_SRLOG.txt`（9/12 的）是上次残留、不计入本次成果 → 契约不满足。
+若沿用 sacct 判据，这次会被标成 COMPLETED 并固化。
+
+**待核**：作业终态已由 `_SREXIT_1.txt` 判为 FAILED，但 `GET /api/queue` 两次复核均报 `RUNNING`。
+`local_exec.status()`（`backend/services/local_exec.py:257-271`）只在本地子进程仍存活时返回 RUNNING，
+且此时不读退出码文件——需先分清进程是否真的还在。
+
+**顺带被证实（审计段）**：`SR_SR_SCRIPT=code_0817_prod_slurm.py`（变体在用，`CUDA_VISIBLE_DEVICES`
+没被原脚本覆盖）、`CUDA_VISIBLE_DEVICES=0` 且绑到真实 GPU UUID、conda 解释器确实启动
+（跑到 SC 分支判断 + nvml + SolarAzimuth）。**「前端提交 → 后端用 conda 解释器跑 SR」这条链已验证，
+缺的只是让 SR 干活的输入。**
+
+**下一步**：造一个未超分过的场景。二选一——① 换一个 `<目录名>.tif` 体积落在
+`0–1.1` / `1.5–1.7` / `3.8–4.1` GB 区间内的场景目录；② 把本目录的 `<目录名>_NOSR.tif`
+（= 9/12 超分前的原始输入）改名还原回 `<目录名>.tif` ——**必须先备份现存的超分产物**（rename 会覆盖）。
+
 #### B 段：前端点击验收
+
+> **前置（09-15 定）**：`SR_SCENES_ROOT` 必须配，且与 nginx `alias` 同值。原因：`/scenes` 盘阵场景页
+> 的行来自 `/api/scenes`，查看器的「提交 SR」按钮只对 `route='jpg' && lqPath` 的记录可用，
+> 而 `lqPath` 只由 disk 场景行提供——**场景列表是那个按钮的唯一入口**。
+> **本阶段不维护场景检索**：根暂指 `/DiskArray/tmp/wangrz/datahub/`，接受同一景被列成多行
+> （收件规则只有后缀白名单、派生件也计入，缺口与后续修法见 `current-question.md §6.0` 下一步①）。
 
 1. 构建 `frontend/dist` 并按 §3.3 确认的通道送到机器，刷新页面。
 2. 盘阵场景页打开锁定目录的场景 → 点「提交 SR」→ 队列页确认 → 提交。
