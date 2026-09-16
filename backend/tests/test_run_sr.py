@@ -272,11 +272,14 @@ class TestBuildBatchScript(unittest.TestCase):
         self.assertIn("/opt/sr/bin/my_verify.py --config /w/c.xml", script)
 
     def test_in_place_run_warns_about_the_nosr_rename_in_the_log(self):
-        # No sandbox → SR writes into the scene dir and renames the input to
-        # *_NOSR.tif. That overwrites an existing 4.9 GB _NOSR.tif, so the job
-        # log has to say so (plan §4.2, last bullet).
+        # No sandbox → SR writes into the scene dir: the result tif lands next to
+        # the input, and a file already sitting at that output path is renamed to
+        # *_NOSR.tif before being overwritten (util.writeTiff renames the output
+        # path, not the input), so the job log has to say so (plan §4.2, last
+        # bullet). A 4.9 GB previous output is the file that gets renamed.
         script = svc.build_batch_script("/w/c.xml", "/w")
         self.assertIn("WARNING: no sandbox", script)
+        self.assertIn("leaves the input", script)
         self.assertIn("_NOSR.tif", script)
 
     def test_sandboxed_script_has_no_in_place_warning(self):
@@ -362,8 +365,9 @@ class TestSubmitRunSr(unittest.TestCase):
 
 
 class TestSandboxPaths(unittest.TestCase):
-    """SR writes to its DatarootLQ (input renamed to *_NOSR.tif), so a submit
-    must be able to run against a copy instead of the directory the user typed."""
+    """SR writes its result tif / Debug log / meta update into its DatarootLQ,
+    so a submit must be able to run against a copy instead of the directory the
+    user typed."""
 
     def setUp(self):
         self._old = os.environ.pop("SR_SANDBOX_ROOT", None)
@@ -781,6 +785,21 @@ class TestToolRunSr(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertIn("delete_ori", r["error"])
 
+    def test_bad_suffix_is_rejected_like_the_rest_entry_point(self):
+        # 工具侧过去完全不校验 suffix —— 一个 `a/b` 会一路拼进输出文件名。
+        for bad in ("a/b", "a b", "x" * 17, "掩码"):
+            with self.subTest(suffix=bad):
+                r = run_run_sr(lq_path="/data", suffix=bad)
+                self.assertFalse(r["ok"])
+                self.assertIn("suffix 非法", r["error"])
+
+    def test_empty_suffix_is_defaulted_not_rejected(self):
+        # 留空 = 取 SR 配置里的 <Suffix>，与 REST 入口同规矩：走到服务层，
+        # 于是 err 只能是 dev 机没有 slurm 的那条。
+        r = run_run_sr(lq_path="/data", suffix="   ")
+        self.assertFalse(r["ok"])
+        self.assertIn("slurm", r["error"])
+
 
 class TestToolRunSrPathGuard(unittest.TestCase):
     """P0③ — run_sr must reject search_scenes fake / non-absolute paths."""
@@ -826,6 +845,141 @@ class TestToolRunSrPathGuard(unittest.TestCase):
                       json.dumps({"lq_path": "<fake>/GF07A03_PMS01.tif"}))
         self.assertFalse(r["ok"])
         self.assertIn("fake", r["error"])
+
+
+def write_bundle_cfg(bundle_dir, body, name=None):
+    """Write one candidate of the SR team's config into a fake bundle dir."""
+    name = name or svc.BUNDLE_SUFFIX_CONFIG_NAMES[0]
+    os.makedirs(bundle_dir, exist_ok=True)
+    path = Path(bundle_dir, name)
+    path.write_text(body, encoding="utf-8")
+    return str(path)
+
+
+SUFFIX_CFG = ("<?xml version='1.0' encoding='UTF-8'?>\n"
+              "<SFSR_Config><Suffix>260318</Suffix></SFSR_Config>\n")
+
+
+class TestSuffixResolution(unittest.TestCase):
+    """默认后缀 = SR 团队那份配置里的 <Suffix>，读不到才回落内置值。
+
+    这些分支必须单独钉住：开发机上真实 bundle 目录并不存在，只测"默认值是 sr"
+    的话，即使读取逻辑整个写坏也会因为回落而通过。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.bundle = self._tmp.name
+
+    def test_reads_the_tag(self):
+        write_bundle_cfg(self.bundle, SUFFIX_CFG)
+        self.assertEqual(svc.read_bundle_suffix(bundle_dir=self.bundle), "260318")
+
+    def test_absent_dir_and_file_are_none(self):
+        self.assertIsNone(svc.read_bundle_suffix(bundle_dir=self.bundle))
+        self.assertIsNone(
+            svc.read_bundle_suffix(bundle_dir=os.path.join(self.bundle, "nope")))
+
+    def test_malformed_xml_is_none(self):
+        write_bundle_cfg(self.bundle, "<SFSR_Config><Suffix>260318")
+        self.assertIsNone(svc.read_bundle_suffix(bundle_dir=self.bundle))
+
+    def test_missing_or_empty_tag_is_none(self):
+        for body in ("<?xml version='1.0'?><SFSR_Config><SRScale>2</SRScale>"
+                     "</SFSR_Config>",
+                     "<?xml version='1.0'?><SFSR_Config><Suffix/></SFSR_Config>",
+                     "<?xml version='1.0'?><SFSR_Config><Suffix>  </Suffix>"
+                     "</SFSR_Config>"):
+            with self.subTest(body=body):
+                write_bundle_cfg(self.bundle, body)
+                self.assertIsNone(
+                    svc.read_bundle_suffix(bundle_dir=self.bundle))
+
+    def test_first_candidate_wins_and_a_broken_one_does_not_shadow(self):
+        # 磁盘上的名字与契约文档记的不一致（confgig vs config），两个都探。
+        first, second = svc.BUNDLE_SUFFIX_CONFIG_NAMES
+        write_bundle_cfg(self.bundle, SUFFIX_CFG, name=first)
+        write_bundle_cfg(
+            self.bundle,
+            "<?xml version='1.0'?><SFSR_Config><Suffix>999999</Suffix>"
+            "</SFSR_Config>", name=second)
+        self.assertEqual(svc.read_bundle_suffix(bundle_dir=self.bundle), "260318")
+        # 第一个坏掉 → 回退到第二个，而不是直接放弃
+        write_bundle_cfg(self.bundle, "<broken", name=first)
+        self.assertEqual(svc.read_bundle_suffix(bundle_dir=self.bundle), "999999")
+
+    def test_default_suffix_uses_the_file_then_falls_back(self):
+        with mock.patch.dict(os.environ, {"SR_BUNDLE_DIR": self.bundle}):
+            self.assertEqual(svc.default_suffix(), "sr")     # 无文件
+            write_bundle_cfg(self.bundle, SUFFIX_CFG)
+            self.assertEqual(svc.default_suffix(), "260318")
+            # 文件里的值不合法 → 丢弃并回落（它是拼进输出文件名的，不能放行）
+            for bad in ("a/b", "x" * 17, "掩码"):
+                with self.subTest(value=bad):
+                    write_bundle_cfg(
+                        self.bundle,
+                        f"<?xml version='1.0'?><SFSR_Config><Suffix>{bad}"
+                        "</Suffix></SFSR_Config>")
+                    self.assertEqual(svc.default_suffix(), "sr")
+
+    def test_normalize_suffix_covers_both_entries(self):
+        with mock.patch.dict(os.environ, {"SR_BUNDLE_DIR": self.bundle}):
+            write_bundle_cfg(self.bundle, SUFFIX_CFG)
+            for empty in (None, "", "   "):
+                with self.subTest(value=empty):
+                    self.assertEqual(svc.normalize_suffix(empty), "260318")
+            self.assertEqual(svc.normalize_suffix("  t1  "), "t1")   # 显式值优先
+            for bad in ("a/b", "../x", "a b", "x" * 17, "suffix;rm", "掩码"):
+                with self.subTest(value=bad):
+                    with self.assertRaises(ValueError) as ctx:
+                        svc.normalize_suffix(bad)
+                    self.assertIn("suffix 非法", str(ctx.exception))
+
+
+class TestEntryPointParity(unittest.TestCase):
+    """REST 与 agent 工具对同一个逻辑提交必须给出同一个指纹。
+
+    幂等表按 task_fingerprint 建键，两个入口的默认值只要差一个字（过去 REST 是
+    "sr"、工具是 ""），同一次提交就会变成两个作业，而不是复用旧作业。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.bundle = os.path.join(self._tmp.name, "bundle")
+        write_bundle_cfg(self.bundle, SUFFIX_CFG)
+        # 场景目录：REST 入口会推导 <目录名>_mask.tif，没有就 400
+        self.scene = os.path.join(self._tmp.name, "SCENE_L1_PAN")
+        os.makedirs(self.scene)
+        self.mask = os.path.join(self.scene, "SCENE_L1_PAN_mask.tif")
+        Path(self.mask).write_bytes(b"")
+        env = {"SR_BUNDLE_DIR": self.bundle, "SR_LOCKED_DIR": "",
+               "SR_AGENT_DB": os.path.join(self._tmp.name, "db.sqlite")}
+        patcher = mock.patch.dict(os.environ, env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_same_logical_submit_same_fingerprint(self):
+        from backend.api.platform import _norm_sr_params
+
+        captured = {}
+
+        def spy(params, **kw):
+            captured["tool"] = params
+            raise RuntimeError("stop before the scheduler")   # 不需要真 sbatch
+
+        with mock.patch.object(svc, "submit_run_sr", side_effect=spy):
+            r = run_run_sr(lq_path=self.scene, mask_path=self.mask, suffix="")
+        self.assertFalse(r["ok"])
+
+        rest = _norm_sr_params({"lq_path": self.scene, "mask_path": self.mask,
+                                "suffix": ""})
+        self.assertEqual(captured["tool"]["suffix"], "260318")
+        self.assertEqual(rest["suffix"], "260318")
+        self.assertEqual(svc.task_fingerprint(captured["tool"]),
+                         svc.task_fingerprint(rest))
+        self.assertEqual(captured["tool"], rest)   # 连键值集合都一致，不只是哈希
 
 
 class TestToolJobStatus(unittest.TestCase):

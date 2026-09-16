@@ -23,7 +23,7 @@
 - **遗留三：Slurm 接入待真机执行（09-10，第三批）**：探针（P1）与实测参数（P2）已回传，**本轮交付的是执行侧**——部署变体（`SR_code/variants/code_0817_prod_slurm.py`，锚点替换生成）+ 作业内契约校验器（`verify_sr_run.py`，退出码 0/90）+ 批脚本（`--gres=gpu:1` / `--export=NONE` / 两行调用）+ 退出码文件定终态（`slurm.py` 不再依赖 `sacct`）+ 分阶段验收清单（`docs/status/slurm-acceptance.md`，A 探针→B 裸 Slurm 冒烟→C 单场景真 SR→D 平台四条结论）。**真机命令由用户执行、输出贴回后判读**；文档侧已回填契约 v1.5 与 `deploy/README.md` §七。待跑：验收单 A/B/C/D。**09-14 需求收敛**：所有作业**只跑在同一台 4×3090 物理机内**、不调度到其他服务器，Slurm 的角色收窄为「本机排队 + 按单卡分配 GPU」；部署方向二选一（① 复用现有集群 + `--nodelist` 锁定那台机器 / ② 本机自建单节点 Slurm）——**当天即收口：两条都不走，Slurm 全线中止**（判据见下条）。Slurm 侧交付物（变体 `code_0817_prod_slurm.py` + 校验器 + 验收清单）**保留为存量**，重启 Slurm 时从 `slurm-acceptance.md` 接着跑。
 - **09-14 路线改向：Slurm 中止 → 本机 conda 直跑**（工作单 [`docs/planning/sr-minimal-prototype-plan.md`](planning/sr-minimal-prototype-plan.md)，状态「已定」）：前端点「提交 SR」→ 后端在 node81-135 用 SR 生产 conda 解释器**直接起进程**（`SR_EXECUTOR=local`），读**锁定目录**里已有的 `.tif` + `<目录名>_mask.tif`，产物写回同目录；`sbatch` 换 `bash`，配置 XML / 审计段 / 契约校验器 / 退出码文件整套原样复用。中止判据（§1.3，已在真机核实）：node81-135 在集群里是 `gpu:4 down`、DOWN 节点不会被分配作业；自建单节点 Slurm 的 6818 端口被 `slurmd` 占用；单卡分配用 `CUDA_VISIBLE_DEVICES` 即可。**代码侧 8 项改动已全部落地**（commit `8c197fc`，41 文件 +1981/−988）：新增 `backend/services/local_exec.py`（单槽串行 + job_id 持久化）、`SR_LOCKED_DIR` 锁死 + 掩码自动推导 + `suffix` 白名单、浏览器端 JPG 导出与 FS Access「输出目录」授权**整条链路删除**、本地 `.jpg` 与盘阵 `.jpg` 均可预览。
 - **09-15 开发机收口：红测试修复 + 真机预演 + 浏览器回归全绿**（人不在内网机，能做的一次做完）：`8c197fc` 之后开发机其实是 **338 passed / 8 failed**（① `bash` 被 Windows 的 WSL 壳截胡；② 退出码文件没锁编码 → 真机上中文 `reason=` 写不进去、异常被吞 → **失败被误报成 UNKNOWN**）；修完再加 `backend/tests/test_local_chain.py`（4 例）把本地执行链**整条跑通**（真 config/批脚本/bash/校验器/退出码文件，仅 SR 算法换 stub）。浏览器三套回归（此前**从未在浏览器里验过**）全部复跑修正：`test-scenes.js` 按当前实现重建 58 断言、`test-platform.js` 修 3 处被 8c197fc 改掉的前置 12 断言、`test-vue-viewer.js` 删掉已取消的导出段 35 断言。同时修掉一个产品缺陷（`<目录名>_mask.tif` 被当成场景列出）并把 `.e2e/` 脚本纳入版本库。详见 §4 时间线。
-- **下一步**：① 真机**三项只读确认**（工作单 §3：锁定目录拼写 `datahub`/`databub`、`SR_SR_SCRIPT` 是否指到变体、前端产物送机通道）；② 按工作单 §6 追加 env（`SR_EXECUTOR=local` / `SR_LOCKED_DIR` / `SR_LOCAL_GPU` / `SR_SUFFIX_DEFAULT` / `SR_SR_SCRIPT`→变体 / `SR_PYTHON`，**`SR_SANDBOX_ROOT` 必须不设**）后跑 §5.2 A/B 段验收；⚠️ 验收前**重新拷一次** `SR_code/variants/verify_sr_run.py`（已改为 17164B/`5fa627d8…`）；③ 定位真实场景根 → `SR_SCENES_ROOT` 与 nginx `alias` 同值 → 复核 `/api/scenes`（进度 §6.0）；④ 配 LLM key 跑通真实 /chat 闭环（§2.6）；⑤ 开发机推进 P1 ④⑤⑥⑦（§2.5）——开发机侧**已无已知红项**。
+- **下一步**：① 真机**三项只读确认**（工作单 §3：锁定目录拼写 `datahub`/`databub`、`SR_SR_SCRIPT` 是否指到变体、前端产物送机通道）；② 按工作单 §6 追加 env（`SR_EXECUTOR=local` / `SR_LOCKED_DIR` / `SR_LOCAL_GPU` / `SR_SR_SCRIPT`→变体 / `SR_PYTHON`，**`SR_SANDBOX_ROOT` 必须不设**；此处原列的 `SR_SUFFIX_DEFAULT` **2026-09-16 已作废、不要设**，后缀默认值改由平台读 SR 配置文件里的 `<Suffix>`）后跑 §5.2 A/B 段验收；⚠️ 验收前**重新拷一次** `SR_code/variants/verify_sr_run.py`（已改为 17164B/`5fa627d8…`）；③ 定位真实场景根 → `SR_SCENES_ROOT` 与 nginx `alias` 同值 → 复核 `/api/scenes`（进度 §6.0）；④ 配 LLM key 跑通真实 /chat 闭环（§2.6）；⑤ 开发机推进 P1 ④⑤⑥⑦（§2.5）——开发机侧**已无已知红项**。
 - **约束提醒**：开发机的浏览器 e2e 测试**已恢复可用**（`.e2e/launchBrowser.js` 每次用独立的临时浏览器配置目录；**候选顺序 Chrome 优先**——本机 Edge 与正在运行的 Edge 实例握手会 `Code: 0` 闪退）；真实图片都在内网盘阵，外网开发机读不到（见 §5.1）。
 - **遗留三：Slurm 接入待真机执行（09-10，第三批）**：探针（P1）与实测参数（P2）已回传，**本轮交付的是执行侧**——部署变体（`SR_code/variants/code_0817_prod_slurm.py`，锚点替换生成）+ 作业内契约校验器（`verify_sr_run.py`，退出码 0/90）+ 批脚本（`--gres=gpu:1` / `--export=NONE` / 两行调用）+ 退出码文件定终态（`slurm.py` 不再依赖 `sacct`）+ 分阶段验收清单（`docs/status/slurm-acceptance.md`，A 探针→B 裸 Slurm 冒烟→C 单场景真 SR→D 平台四条结论）。**真机命令由用户执行、输出贴回后判读**；文档侧已回填契约 v1.5 与 `deploy/README.md` §七。待跑：验收单 A/B/C/D。**09-14 需求收敛**：所有作业**只跑在同一台 4×3090 物理机内**、不调度到其他服务器，Slurm 的角色收窄为「本机排队 + 按单卡分配 GPU」；部署方向二选一（① 复用现有集群 + `--nodelist` 锁定那台机器 / ② 本机自建单节点 Slurm），**方向未定**，判据 = `slurm-acceptance.md §B0` 的三条只读命令（已有半条反证：A 记录里 `node81-133/134/135/136` 是 `down`，本机 node81-135 是 `down*`）。
 - **SR 最小原型首跑（09-15，本机直跑 SR，不走 Slurm）**：需求收敛为「前端点提交 → 后端在 node81-135 上用**生产 conda 解释器直接跑 SR**，读锁定目录里的 `.tif` + 目录里已有的 `<目录名>_mask.tif`，产物写回同目录」。代码侧八项已落地（执行器二选一 `SR_EXECUTOR=slurm|local`、`SR_LOCKED_DIR` 路径锁、掩码改目录推导、前端删「输出目录」+ 自动 JPG 链路、放宽本地 `.jpg`、盘阵 `.jpg` 场景可列出）。**09-15 首次提交成功**：`POST /api/queue` → `HTTP 201`、`task_id=1` / `job_id=1` / `state=SUBMITTING` / `in_place:true`。**终态已验（09-15 晚）= FAILED，判据正确**：作业确实跑完了，审计段证实 `SR_EXECUTOR=local`、`SR_SR_SCRIPT=code_0817_prod_slurm.py`（变体在用）、`CUDA_VISIBLE_DEVICES=0` + 真实 GPU UUID、conda 解释器真的起来了——**「后端能调起 conda 解释器」已由实测确认**；但 SR 自身**没干活**：场景 9/12 就已超分过，`util.py:1009-1011` 判定 `already SRed before` 后提前 `return`（`exit()` 被注释掉，源码标 `# huai`），未建新 SRLOG；校验器发现 SRLOG 早于 config.xml、判为上次残留 → 契约不满足 → 退出码文件写非 0 verdict。**契约判据在此首次生效**：若沿用 sacct 时代的判据，这一次会被标成 COMPLETED 并固化。**新阻塞 = 需要一个未超分过的场景**才能真跑出产物；工作单 = `docs/planning/sr-minimal-prototype-plan.md`，实况见 §4 时间线 2026-09-15。**另有一处未收敛**：退出码文件已判 FAILED，`GET /api/queue` 仍报 `RUNNING`（详见 §4 时间线判读节第 3 条）。
@@ -282,9 +282,16 @@
 
 起因是一个提问：**「就不能前端填个盘阵路径，配好直接跑吗？」** —— 能，[QueuePage.vue:116](frontend/src/pages/QueuePage.vue#L116)
 的手填 `lq_path` 输入框早就在，`/api/queue` 也直接收这个路径，不经过 `/api/scenes`。卡住的只有一件事：
-**SR 对她的 `DatarootLQ` 不是只读的** —— [`util.py:1305`](SR_code/util.py#L1305) 的 `writeTiff` 写产物前必先把
-**输入**改名成 `*_NOSR.tif`（与 `Suffix` / `DeleteOriTifNeeded` 都无关）。所以「前端填一个路径」的字面含义是
-「那个目录会被改写」，而计划把首次生产写权放在阶段 6。
+**SR 对她的 `DatarootLQ` 不是只读的** —— [`util.py:1282`](SR_code/util.py#L1282) 的 `writeTiff` 把产物 tif、
+`Debug/` 日志与 meta.xml 更新都写进那个目录。所以「前端填一个路径」的字面含义是「那个目录会被写入」，
+而计划把首次生产写权放在阶段 6。
+
+> **2026-09-16 订正**：本节原写「写产物前必先把**输入**改名成 `*_NOSR.tif`（与 `Suffix` /
+> `DeleteOriTifNeeded` 都无关）」。该改名（`util.writeTiff` 里的 `os.rename(path + tiftype, …)`）作用在
+> **输出路径**上：非空 `Suffix` 时首跑该文件不存在（`FileNotFoundError` 被吞），重跑时被改名的是上一次的
+> 产物；只有 `Suffix` 为空、输出名 == 输入名时才是输入本身。平台两个入口恒发非空 `Suffix`
+> （空值回落到 SR 配置文件的 `<Suffix>`，该文件缺失/值非法时才回落到内置 `sr`；显式值非法 400），
+> 所以本节的**结论**（那个目录会被写、写权留到阶段 6）不变，错的只是机制描述。见契约 §2.4 第 1 条与 §6。
 
 三条路摆出来（平台自建副本 / 手工拷一次 / 直接填生产目录），选了**平台自建**。
 
@@ -366,7 +373,7 @@
   - `.e2e/test-platform.js` **12 断言** —— 8c197fc 改了产品行为，修三处前置：提交需自带 `<目录名>_mask.tif`（§4.3 起掩码按约定推导、缺文件直接 400）、按钮文案 `提交到 Slurm`→`提交 SR`（改成两步式）、[C] 段打开场景必须带 `lqPath`（否则 `srReady` 为假、按钮禁用）。末尾那条「掩码任务 COMPLETED」的失败**不是回归**：同参重提被幂等层命中 `RESUMED_COMPLETED`（§4.3 起前端恒传 `mask_path: null` → 指纹必然相同），已改为「先断言不产生第二行，再改倍率→真新建任务」。
   - `.e2e/test-vue-viewer.js` **35 断言** —— 删掉针对**已取消功能**的整段导出/降档重试断言（`setSaver`/`reExportJpg`/`scanPendingExports`/`jpgStatus` 已随 §4.5 从 `e2eHooks.ts` 移除），钩子清单同步为现役 22 个。留着的旧断言只会长期报红。
 - ⚠️ **本机浏览器回归必须用 Chrome**：Edge 与用户正在运行的 Edge 实例握手会 `Failed to launch the browser process: Code: 0`（临时 profile 挡不住）。已把 `launchBrowser.js` 候选顺序改为 **Chrome 优先**（`SR_E2E_BROWSER` 仍排最前可覆盖）。
-- 🐛 **发现并修掉一个产品缺陷：`<目录名>_mask.tif` 被当成场景列出**。`scene_search.is_scene_file` 原先只排除 `.preview.jpg`；真机形态是掩膜与场景**同名同目录**，于是每个已带掩膜的目录都会在 `/scenes` 多出一行——卫星/传感器由掩膜文件名解析（`satellite=<父目录名>`、`sensor='mask'`）、尺寸取掩膜 TIFF 头、「提交 SR」还可点（同目录 → 同指纹 → 幂等命中，不至于重复跑，但列表是脏的）。修：`is_scene_file` 增加 `_DERIVED_STEM_SUFFIX = "_mask"` 判定（只认**结尾**标记，`GF07A03_mask_PMS01_….tif` 仍是场景），后端 +3 例、`test-scenes.js` 的【已知问题】**镜像断言**改为「掩膜未出现在列表」（5 行 → 3 行）。
+- 🐛 **发现并修掉一个产品缺陷：`<目录名>_mask.tif` 被当成场景列出**。`scene_search.is_scene_file` 原先只排除 `.preview.jpg`；真机形态是掩膜与场景**同名同目录**，于是每个已带掩膜的目录都会在 `/scenes` 多出一行——卫星/传感器由掩膜文件名解析（`satellite=<父目录名>`、`sensor='mask'`）、尺寸取掩膜 TIFF 头、「提交 SR」还可点（同目录 → 同指纹 → 幂等命中，不至于重复跑，但列表是脏的）。修：`is_scene_file` 增加 `_DERIVED_STEM_SUFFIX = "_mask"` 判定（只认**结尾**标记，`GF07A03_mask_PMS01_….tif` 仍是场景），后端 +3 例、`test-scenes.js` 的【已知问题】**镜像断言**改为「掩膜未出现在列表」（5 行 → 3 行）。**（2026-09-16 已被白名单收件规则取代，见 §4 时间线同名条目——那条 `_DERIVED_STEM_SUFFIX` 常量已删。）**
 - 🗂 **`.e2e/` 从「整目录忽略」改为「只忽略依赖/大图」**：`test-scenes.js` 就是这么丢的。现在 `*.js` / `lib/` / `package.json` / `package-lock.json` / `*.py` 入库，`node_modules/`、`fixtures/`、`*.tif`、`*.jpg` 仍忽略。**后果**：以后清理工作区不会再丢掉可复跑的回归资产。
 - 全绿实测：后端 **354 passed / 1 skipped**（348 + 4 链路 + 2 掩膜）、前端 Vitest **160 passed**、浏览器 **58 + 12 + 35 断言**。
 - 📝 **文档债（已修一部分，剩下的下次）**：本次顺手改了 `current-question.md`、`api-contract.md`、`frontend-migration.md`、`platform-tutorial.md`、`project-deep-dive.md`（对外摘要里「用 Slurm 提交」已改为本机直跑）与 `CLAUDE.md`。**未改**：`docs/knowledge/interview/` 下的专题篇（`http-sse.md` Q24 / `db-storage.md` / `fastapi-rest.md` / `python-concurrency.md`）仍以 `sbatch` 讲幂等与「先记意图后记结果」。机制本身没变（执行器接口对齐、`slurm.py` 作为存量保留且仍是 `SR_EXECUTOR=slurm` 的代码路径），但叙述该补一句"提交动作经可切换执行器、默认 bash"。另有历史条目里的旧计数（`frontend-migration.md` §阶段5、`frontend-phase4-phase5-prompts.md` 门禁）按"当时实测"保留不改。
@@ -485,6 +492,71 @@
    本身**（或祖先）才通得过 `paths._is_within` 的两边 `.resolve()` 比较，**建在根内会被判越权**——
    这条把「建符号链接」这个选项收窄成了一句话。
 
+### 2026-09-16 · 产物后缀默认值改为读 SR 团队配置文件（开发机）
+
+**起因**：检查平台 SR 命名逻辑时发现，平台侧的默认后缀是写死的 `"sr"`（`SR_SUFFIX_DEFAULT`
+环境变量可覆盖），而 SR 团队自己的配置样例写的是 `<Suffix>260318</Suffix>`（日期式）。两边
+约定不同源，产物名就对不上。
+
+**改动（已落地，开发机全绿）**：
+
+1. 请求不带 `suffix` 时，平台读 `$SR_BUNDLE_DIR` 下 SR 团队配置文件里的 `<Suffix>` 当默认值；
+   文件缺失 / 坏 XML / 标签缺失或为空 / 值不合白名单 → 回落内置 `"sr"`。**每次提交现读，不缓存**
+   （指纹含 suffix 文本，缓存会让指纹变成进程启动时刻的函数 → 同一逻辑提交重复投作业）。
+2. `SR_SUFFIX_DEFAULT` 环境变量**作废**（设了不读）。**真机 systemd 里如果加过这一行，删掉**；
+   要改后缀改那份 XML。
+3. 顺带修一个现存缺陷：agent 工具 `run_sr` 此前不做 strip / 不给默认值 / 不校验，而 REST 入口
+   三样都做——同一个"不传 suffix"的提交，两入口算出**不同指纹 → 幂等失效 → 重复投作业**。
+   现由 `services/run_sr.py::normalize_suffix` 单点收口，两入口共用。有测试钉住两入口指纹相等。
+4. 前端不再预填 `'sr'`（预填值会作为显式参数压过配置文件），后缀输入框留空 + 占位文案说明来源。
+5. 文件名拼写：磁盘上是 `sfsr_confgig_test_espan2_cuda1.xml`（`confgig`），契约文档记的是
+   `sfsr_config_…`。生产 `$SR_BUNDLE_DIR` 里是哪个未核实，读取逻辑**两个拼写都探**。
+
+**验证**：后端 `pytest backend/tests -q` → 375 passed / 1 skipped；前端 `npm test` → 169 passed，
+`vue-tsc` 零错误；`.e2e/test-scenes.js` 61 断言、`.e2e/test-platform.js` 18 断言全过；
+另外真起 uvicorn 冒烟：临时 `SR_BUNDLE_DIR` 放该 XML → `POST /api/queue` 留空 → `params.suffix=260318`，
+删掉 XML 重提 → `sr`。
+
+**流程偏差（须复核）**：`docs/planning/api-contract.md` §3.3 有契约改动，按该文档 §7 红线本应
+「先改文档置评审、通过后再改代码」。这次代码与文档同批落地（理由是它同时在修那个幂等缺陷，拆开
+会留下一个已知会重复投作业的中间态）。该文档状态已置回**「评审」**并写明挂起项，**请复核后改回
+「已定」**。
+
+### 2026-09-16 · 场景列表改为白名单（`<目录名>_meta.xml` 锚定）+ 页面改名「场景库」
+
+**起因**：真机接上 `SR_SCENES_ROOT=/DiskArray/tmp/wangrz/datahub/` 后，`/api/scenes` 扫出 18 行，
+其中 16 行是派生件——`_thumb.jpg` / `_cloud.preview.jpg` / `_sr.preview.jpg` /
+`<目录名>.preview.jpg` / `PAN.preview.jpg`，以及 `Debug/` 下十几张调试图
+（`TiaoJiaoImage1..4` / `TC_B1_inner` / `RChalf_B1_inner` / `RC_B1_test1` / `RC_B1_inner` /
+`DD_B1` / `B1_outerCMOS` / `seamTif…`）。原来的黑名单（后缀白名单 + 排 `.preview.jpg` +
+排结尾 `_mask`）每冒出一类新派生件就得补一条，补不完。
+
+**改动**：`scene_search.is_scene_file()` 换成白名单，两条同时成立才收：
+
+1. 所在目录是**场景目录**（内有 `<目录名>_meta.xml`，新增 `is_scene_dir()`）。这不是新发明的
+   约定——SR 脚本本来就靠它判 RC/SC（`util.check_sr_previous_step`），没有它的目录提交也跑不起来，
+   所以它同时也是「这个目录里的东西能不能提交」的判据；
+2. 文件名 = `<目录名>.<ext>`（SC 步骤的输入）或 `PAN.<ext>`（RC 步骤的输入，`util.get_l1_pan_tif_rcsc`
+   的 RC 分支读的就是 `PAN.tif`）。
+
+**顺带纠正的语义**：`_scene_row` 的 `lq_path` 从「场景文件父目录」= 盘阵根，变成真正的场景目录，
+与真机 `/DiskArray/GSHC2IMPS/年/月/日/生产编号` 一致；`/queue` 表单带出的 `lq_path` 也随之改变
+（`.e2e/test-scenes.js`、`test-platform.js` 的断言已同步）。
+
+**代价（已接受）**：没有 `<目录名>_meta.xml` 的目录整个不显示。
+
+**页面**：导航与页标题「盘阵场景」→「场景库」（`App.vue` 导航项、`ScenesPage.vue` 标题与文件头注释、
+`Toolbar.vue` 的按钮 tooltip）。页面里另外约 20 处「盘阵场景」说的是**图从哪来**（盘阵 vs 本地 TIF），
+与该页名无关，不改。「场景（文件）」列由截断省略号改为 `word-break: break-all` 换行完整显示
+（生产场景名 50+ 字符、中间无空格），页宽 1180 → 1360。
+
+**测试**：后端 `pytest backend/tests -q` → 379 passed / 1 skipped。三处夹具按真机形态重造
+（`<root>/<[子目录/]编号>/<编号>.<ext>` + `<编号>_meta.xml`）：`test_search_scenes.py`（新增
+`write_scene` 助手 + `test_derived_products_are_not_scenes` / `test_debug_dir_is_not_a_scene` /
+`test_rc_input_pan_is_a_scene` / `test_dir_without_meta_is_not_a_scene`）、`test_api.py`、
+`test_api_platform.py`。前端 Vitest 169 passed、`vue-tsc` 零错误；`.e2e/test-scenes.js` 61 断言、
+`.e2e/test-platform.js` 18 断言全过。
+
 ## 5. 交接（给新窗口）
 
 ### 5.1 环境约束
@@ -519,7 +591,7 @@
 - 查看器交付物：`tif_viewer/tif-viewer.html`（冻结）→ Vue3 版 `frontend/src/`（pages/ScenesPage.vue + components/ + stores/{viewer,scenes}.ts + lib/{tifDecode,maskgen,scene,source,viewMath}.ts）
 - 阶段4 后端：`backend/api/app.py`（FastAPI：/api/scenes + /preview）、`backend/api/paths.py`（白名单 + scene id codec）、`backend/services/preview_jpg.py`（稀疏采样 + 2% 拉伸 + Pillow 缓存）
 - 阶段4 部署：`deploy/nginx.conf`、`deploy/sr-api.service`、`deploy/requirements-api.txt`、`deploy/README.md`；离线包 `frontend/scripts/package-offline.sh`
-- 阶段5 契约/实现：`docs/planning/api-contract.md`（**已定**）、`backend/api/platform.py`（chat/queue/tools/masks + SSE 广播）+ `backend/api/app.py`（lifespan 轮询）、`frontend/src/{lib/api.ts, stores/{chat,queue}.ts, pages/{ChatPage,QueuePage}.vue}`、查看器「提交 SR」（`stores/viewer.ts::submitSr` + Toolbar 按钮）、`.e2e/test-platform.js`（12 断言）
+- 阶段5 契约/实现：`docs/planning/api-contract.md`（**评审**——2026-09-16 挂起 §3.3 的 `suffix` 默认值条款，见 §4 该日条目；评审通过后改回「已定」）、`backend/api/platform.py`（chat/queue/tools/masks + SSE 广播）+ `backend/api/app.py`（lifespan 轮询）、`frontend/src/{lib/api.ts, stores/{chat,queue}.ts, pages/{ChatPage,QueuePage}.vue}`、查看器「提交 SR」（`stores/viewer.ts::submitSr` + Toolbar 按钮）、`.e2e/test-platform.js`（12 断言）
 - 阶段5 部署增补：nginx `/api/` 反代 `proxy_buffering off`+`proxy_read_timeout 3600s`（SSE）；`sr-api.service` env（`SR_AGENT_DB`/`SR_LLM_MOCK=0`/`SR_SLURM_FAKE=0` + Slurm 六项 `SR_PYTHON`/`SR_BUNDLE_DIR`/`SR_SLURM_WORK_DIR`/`SR_SLURM_PARTITION`/`SR_SLURM_TIME`/`SR_SLURM_CPUS`）；`requirements-api.txt` 补 `openai>=1.40,<2`
 - Slurm 接入件：`SR_code/variants/{code_0817_prod_slurm.py,verify_sr_run.py,.diff,.provenance.json}` + 生成器 `SR_code/tools/gen_slurm_variant.py`、只读探针 `deploy/slurm/probe_slurm.sh`；运行期 `backend/services/{run_sr,slurm}.py`；验收清单 `docs/status/slurm-acceptance.md`、差异表 `docs/sr_code/sr-slurm-deploy-variant.md`、契约 `docs/sr_code/sr-pipeline-interface.md` v1.5
 - 阶段6 上下文侧舱：`frontend/src/components/{ContextPanel,RoiToolsTab,AgentChatTab}.vue` + `lib/{roiStats,agentContext}.ts`（buildStats / tasksForScene / CTX_DIVIDER）+ viewer store 选中/统计钩子 + `/api/scenes` `lq_path`（阶段6 增补见 api-contract.md）
@@ -545,25 +617,64 @@
 | Python≥3.8 venv + 后端依赖 | 完成（09-05） | `/opt/sr-venv`（py3.9）；另需 eval-type-backport（见 §6.2 补注） |
 | sr-api 起服务（systemd，开机自启） | 完成（09-07） | 曾 217/USER（`User=` 行尾注释）+ py3.9 注解崩溃，均已修复并归档 |
 | nginx 站点 + Windows 访问 | 完成（09-07/08） | `http://10.10.81.135` 可开页面；需删出厂 default.conf |
-| /api/scenes 真实数据 | **未完成** | `/data/scenes` 不存在 → `source:fake` 12 条占位；待真实根路径 |
-| **SR 最小原型（本机直跑，不走 Slurm）** | **提交通（09-15）· 终态已验 = FAILED（判据正确）· 平台状态未收敛（待核）· 差一个未超分场景** | `SR_EXECUTOR=local` / `SR_LOCAL_GPU=0` / `SR_LOCKED_DIR` 生效；`POST /api/queue` → `201`（`task_id=1` / `job_id=1` / `in_place:true`）。**job 1 判读（09-15 晚）**：审计段证实 `SR_SR_SCRIPT=code_0817_prod_slurm.py`（变体在用）+ `CUDA_VISIBLE_DEVICES=0` + 真实 GPU UUID + conda 解释器起来了 → **提交链路与 conda 调用已通**；但 SR 未干活——场景 9/12 已超分，`util.py:1009-1011` 判 `already SRed before` 提前 `return`、未建新 SRLOG → 校验器判 SRLOG 为残留 → 契约不满足 → **FAILED；契约判据避免了把这次记成假成功**（详见 §4 时间线「2026-09-15（判读）」）。**另：`GET /api/queue` 仍报 `RUNNING`，与退出码文件不一致，待核**。**待办**：① 造一个未超分过的场景真跑一次；② `frontend/dist` 已重打进开发机、**待传**（粘贴板传不了目录树）；③ `SR_SCENES_ROOT` 不覆盖 datahub 目录（**B 段前提**；单根、软链须建在根本身）。工作单 `docs/planning/sr-minimal-prototype-plan.md` |
+| /api/scenes 真实数据 | **完成（09-16）** | `SR_SCENES_ROOT` drop-in（`scenes.conf`）与 nginx `alias`（`conf.d/sr-agent-platform.conf`）同指 `/DiskArray/tmp/wangrz/datahub` → `{"ok":true,"source":"disk"}`、`/api/scenes` 出 disk 行、`/disk-array/<rel>` 200 `image/tiff`。收件规则同日改白名单（18 行 → 真实场景行） |
+| **SR 最小原型（本机直跑，不走 Slurm）** | **A 段验收通过（09-15，job 3）** | `SR_EXECUTOR=local` / `SR_LOCAL_GPU=0`。**job 1/2 = FAILED（判据正确，非平台缺陷）**：job 1 死在 bundle `util.py` 的 `already SRed before` 提前退出（退出码 0、无产物 → 校验器判 SRLOG 为残留，契约判据避免了记成假成功）；job 2 死在 `NotImplementedError: Generator model [Espan2] not recognized` —— 根因是 `SR_BUNDLE_DIR` 指了不认 Espan2 的 ProductionSchedule 那套。**换到 wangrz/mmsr_bundle_240617 后 job 3 真跑完**：`<目录名>_sr.tif` 1.9G 与输入同目录落盘、SRLOG 末行 `Run finished.`、退出码文件 `verdict=0`、平台 `/api/queue` 状态 `COMPLETED`。**遗留小缺陷（外观）**：`POST /api/queue` 的 `notice` 与作业 WARNING 段是无条件写的，后缀非空时「输入改名 `*_NOSR.tif`」这句不成立（`writeTiff` 只在输出名 == 输入名时才改名）。工作单 `docs/planning/sr-minimal-prototype-plan.md`；bundle 结论见 memory `sr-real-bundle-is-wangrz-240617` |
 | ~~提交 SR 端到端（Slurm 路线）~~ | **路线已中止（09-14）** | 代码/脚本/文档仍在（`SR_EXECUTOR=slurm` 分支、变体、校验器、`slurm-acceptance.md` 的 A–D 清单），但**不再按此推进**。**§0 前置四项曾全绿**（上车 / 变体就位 / 13 项 env / 目录与可写性，见 §4 时间线 2026-09-11），A/B/C/D 一步未跑。判据（终态读退出码文件）仍适用于本地执行器 |
 | 平台侧沙箱（`SR_SANDBOX_ROOT`） | 完成（09-10 代码侧 · 09-11 真机侧） | 每个作业自建 `lq_path` 副本，SR 只写副本 → 前端填**生产路径**也不会动生产数据。见 deploy/README §7.5。真机目录已建 + `nginx` 可写（`WRITE OK`） |
 | ⚠️ `$BUNDLE/code_0817_prod.py` 被覆盖 | **事故待善后** | 09-11 09:55 由 33477B/`cfbf0bda` 覆盖为 28703B/`03c9b4fc`，**旧版无备份、不可恢复**。待答：谁读这份文件？（详见 §4 时间线 2026-09-11） |
 | 本会话代码/文档变更归档 | **未 commit** | 清单见下方 |
 
+**真机配置与仓库默认值的偏差（2026-09-16 实测，全部经 `systemctl show` / `nginx -T` 核对）**
+
+代码侧三项都可经环境变量切换，不必改仓库——但**迁移代码后要照着这张表在真机重建 drop-in**，
+否则会退回仓库默认值（尤其 `SR_BUNDLE_DIR`，指回不认 Espan2 的那套）。
+
+| 项 | 仓库默认 | 真机值 | 载体 |
+|---|---|---|---|
+| `SR_BUNDLE_DIR` | `/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes` | `/DiskArray/tmp/wangrz/mmsr_bundle_240617/codes` | `/etc/systemd/system/sr-api.service.d/srscript.conf` |
+| `SR_SR_SCRIPT` | `code_0817_prod.py` | `code_0817_prod_slurm.py` | 同上 |
+| `SR_SCENES_ROOT` | 无（不设 → `source:fake`） | `/DiskArray/tmp/wangrz/datahub` | `/etc/systemd/system/sr-api.service.d/scenes.conf` |
+| nginx `alias` | `deploy/nginx.conf` 里是 `/data/scenes/` | `/DiskArray/tmp/wangrz/datahub`（同值） | `/etc/nginx/conf.d/sr-agent-platform.conf` |
+
+两条踩过的坑：
+
+- **drop-in 必须有 `[Service]` 段头**。`scenes.conf` 第一版只写了 `Environment=…` 一行，systemd
+  静默忽略整个文件（`systemctl show` 里看不到该变量、接口照旧 `source:fake`）。正确写法：
+  `printf '[Service]\nEnvironment=SR_SCENES_ROOT=/DiskArray/tmp/wangrz/datahub\n' > $D/scenes.conf`，
+  再 `systemctl daemon-reload && systemctl restart sr-api`。
+- **`/etc/nginx/nginx.conf` 里没有服务配置**。该文件只有 1–34 行（全局段 + `include conf.d/*.conf`），
+  `location` / `alias` / `proxy_pass` 全在 `/etc/nginx/conf.d/sr-agent-platform.conf`。改动前先用
+  `nginx -T | grep '^# configuration file'` 找到真身；对着 `nginx.conf` 做 `sed` 是空操作。
+  URL 前缀保持仓库默认 `/disk-array/`，不要改成 `/DiskArray/`（后者会被 `location /` 兜底成
+  index.html，返回 200 `text/html` 459 字节，看着像成功）。
+
 **下一步行动**
 1. **`SR_SCENES_ROOT` 的定位（09-15 定）**：本阶段**不维护场景检索**，优先保证「提交 SR」链路跑通。据此：
 
    - 这个 env **不能不配**：`/scenes` 盘阵场景页的行来自 `/api/scenes`，而查看器的「提交 SR」按钮只对 `route='jpg' && lqPath` 的记录可用，`lqPath` 又只由 disk 场景行提供——**场景列表是那个按钮的唯一入口**。
-   - 但也不必现在就挑生产根。暂定指向 `/DiskArray/tmp/wangrz/datahub/`，nginx `alias` 取同值。该目录下会把同一景列成多行（`_NOSR` / `_mask` / `_old` / `_ori` 等派生件都会被当场景收进来，根因见下条），**本阶段接受**。
+   - 但也不必现在就挑生产根。暂定指向 `/DiskArray/tmp/wangrz/datahub/`，nginx `alias` 取同值。
    - `SR_PREVIEWS_ROOT` 不设，预览 JPG 写在源文件旁边，正好落在 alias 根内。
    - **与既有记录的关系**：生产盘阵根此前确认为 `/DiskArray/GSHC2IMPS/`（层级 年/月/日/生产编号），`datahub` 更像临时工作区；两者关系（拷贝？软链？）按本阶段目标不必先弄清。此前在 viewer 开过的那张 590MB `JL1KF02B01_...` 来源仍未确认。
 
-   **已知缺口（本阶段不修，先记录）**：`scene_search.is_scene_file()`（[scene_search.py:37-44](../../backend/services/scene_search.py#L37-L44)）的收件规则只有「后缀白名单 + 排除 `.preview.jpg`」，**没有**「文件名与目录同名」或「同目录存在 `<目录名>_meta.xml`」判据（grep 全 `backend/`，`_meta.xml` 只出现在校验器的测试里）。后果：一个含 `.tif/.jpg` 的目录被整体递归扫成场景行，派生件一并计入，同一景出多行且 `parse_filename` 给出的 satellite/sensor/date 完全相同。`_scene_row` 的 `lq_path`（= 场景文件父目录）因此有指错目录的风险——在 datahub 这类扁平目录里各行 parent 相同、侥幸无害。另：`scan_root()` 每次请求全树 `rglob` + 逐文件 `stat()`，无缓存。**B 段跑通后若要恢复场景检索的可用性，先补收件规则，再谈换根。**
-2. 改两处并**保持同值**：后端 `SR_SCENES_ROOT`（`/etc/systemd/system/sr-api.service`）+ nginx `alias`（`/etc/nginx/conf.d/sr-agent-platform.conf`）→ `systemctl daemon-reload && systemctl restart sr-api` + `systemctl reload nginx` → `curl http://127.0.0.1:8000/api/scenes` 复核出真实行（非 fake）。
-3. 数据就位后按 §6.3–6.5 逐项真机验收。
-4. commit 下列待归档变更：`deploy/sr-api.service`（User= 行尾注释修复）、`deploy/requirements-api.txt`（+`eval-type-backport; python_version<"3.10"`）、`docs/status/real-machine-bringup.md` 与 `-adhd.md`（新增症状行）、`deploy/README.md`（真机落地、无 yum 源 ⚠️）、本会话 memory 更新。
+   **收件规则（2026-09-16 已修：黑名单 → 白名单，原「已知缺口」消项）**：`scene_search.is_scene_file()`
+   （[scene_search.py:57-76](../../backend/services/scene_search.py#L57-L76)）改为两条同时成立：
+   ① 所在目录是**场景目录**（内有 `<目录名>_meta.xml`，新增 `is_scene_dir()`）；
+   ② 文件名叫 `<目录名>.<ext>`（SC 步骤的输入）或 `PAN.<ext>`（RC 步骤的输入）。
+   旧规则只有「后缀白名单 + 排 `.preview.jpg` + 排结尾 `_mask`」，每冒出一类派生件就得补一条：
+   2026-09-15 真机接上 datahub 后 18 行里 16 行是脏数据（`_thumb` / `_cloud` / `_sr` / `_NOSR` /
+   `Debug/` 下十几张调试图）。白名单一次全挡住。附带把 `_scene_row` 的 `lq_path` 从
+   「场景文件父目录」（在扁平根里等于盘阵根）改成真正的场景目录，与
+   `/DiskArray/GSHC2IMPS/年/月/日/生产编号` 的目录语义一致。代价（已接受）：没有
+   `<目录名>_meta.xml` 的目录整个不显示。另：`scan_root()` 仍是每次请求全树 `rglob` + 逐文件
+   `stat()`，无缓存。
+2. ~~改两处并**保持同值**~~ **已完成（09-16）**：`SR_SCENES_ROOT`（`sr-api.service.d/scenes.conf`）
+   与 nginx `alias`（`conf.d/sr-agent-platform.conf`）同指 `/DiskArray/tmp/wangrz/datahub`，
+   `curl /api/scenes` 出 disk 行、`/disk-array/<rel>` 返 `image/tiff`。
+3. **`frontend/dist` 已重打进开发机，待传 node81-135**（粘贴板传不了目录树；真机 dist 位
+   `/run/media/root/SSD/workspace/wangrz/sr-agent-platform/dist`）。本次 dist 含场景库改名 +
+   场景名完整显示 + 后缀留空三项前端改动。
+4. 数据就位后按 §6.3–6.5 逐项真机验收（§6.3 场景项现在可跑：收件规则已改、根已接）。
+5. commit 下列待归档变更：`deploy/sr-api.service`（User= 行尾注释修复）、`deploy/requirements-api.txt`（+`eval-type-backport; python_version<"3.10"`）、`docs/status/real-machine-bringup.md` 与 `-adhd.md`（新增症状行）、`deploy/README.md`（真机落地、无 yum 源 ⚠️）、本会话 memory 更新，以及本轮的场景收件规则 / 后缀默认值 / 页面改名三批改动。
 
 > 启动两个坑的完整排障（217/USER、py3.9 eval-type-backport）见 `real-machine-bringup.md` §5 症状表第 2/3 行。
 

@@ -21,13 +21,29 @@ from fastapi.testclient import TestClient
 from backend.api.app import create_app
 from backend.api.platform import (_Subscriber, _broadcast, _queue_state,
                                   chat_send)
+from backend.services import run_sr as svc
 from backend.services import slurm
 from backend.services.run_sr import task_fingerprint
 
 _ENVS = ("SR_AGENT_DB", "SR_SCENES_ROOT", "SR_PREVIEWS_ROOT", "SR_LLM_MOCK",
          "SR_SLURM_FAKE", "SR_SLURM_FAKE_T_MS", "SR_SLURM_WORK_DIR",
          "SR_QUEUE_POLL_SEC", "SR_SANDBOX_ROOT", "SR_EXECUTOR",
-         "SR_LOCKED_DIR", "SR_LOCAL_GPU", "SR_SUFFIX_DEFAULT")
+         "SR_LOCKED_DIR", "SR_LOCAL_GPU", "SR_BUNDLE_DIR")
+
+
+def write_bundle_suffix(bundle_dir, value, name=None):
+    """Drop a stub of the SR team's config into a fake SR_BUNDLE_DIR.
+
+    Only <Suffix> matters to the platform; the rest of the file's tags are the
+    SR team's own test-run values and are deliberately not reproduced here.
+    """
+    name = name or svc.BUNDLE_SUFFIX_CONFIG_NAMES[0]
+    os.makedirs(bundle_dir, exist_ok=True)
+    path = os.path.join(bundle_dir, name)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"<?xml version='1.0' encoding='UTF-8'?>\n"
+                f"<SFSR_Config><Suffix>{value}</Suffix></SFSR_Config>\n")
+    return path
 
 
 def sse_events(text: str) -> list[dict]:
@@ -77,6 +93,12 @@ class PlatformBase(unittest.TestCase):
     def _set_env(self):
         os.environ["SR_AGENT_DB"] = os.path.join(self._tmp.name, "db.sqlite")
         os.environ["SR_SLURM_WORK_DIR"] = os.path.join(self._tmp.name, "work")
+        # Point the bundle at an empty dir: the suffix default reads <Suffix> out
+        # of the SR team's config there, so without this the suite would quietly
+        # follow whatever SR_BUNDLE_DIR the developer's shell happens to export
+        # (and on the dev box the real one is absent anyway, so the tests would
+        # pass for the wrong reason — see test_suffix_defaults_* below).
+        os.environ["SR_BUNDLE_DIR"] = os.path.join(self._tmp.name, "bundle")
 
     def client(self) -> TestClient:
         return TestClient(self._make_app())
@@ -252,6 +274,11 @@ class TestQueue(PlatformBase):
         body.update(over)
         return c.post("/api/queue", json=body)
 
+    def _task(self, c, task_id):
+        """The queue row for one task_id (the POST reply carries no params)."""
+        tasks = c.get("/api/queue").json()["tasks"]
+        return next(t for t in tasks if t["task_id"] == task_id)
+
     def _poll_state(self, c, tid, timeout=4.0):
         states = []
         deadline = time.time() + timeout
@@ -296,12 +323,15 @@ class TestQueue(PlatformBase):
         self.assertEqual(len(c.get("/api/queue").json()["tasks"]), 1)
 
     def test_submit_says_the_run_writes_in_place(self):
-        # 无沙箱 = SR 就地写场景目录并把输入改名 *_NOSR.tif：提交响应必须自己说清
-        # 楚，别让操作者从别处推断（工作单 §4.2 最后一条）。
+        # 无沙箱 = SR 就地写场景目录：输出按管线命名为 <输入名>_<suffix>.tif，输入 tif
+        # 不改名也不删除（Suffix 恒非空），只有同名旧输出会被改名 *_NOSR.tif。提交响应
+        # 必须自己说清楚，别让操作者从别处推断（工作单 §4.2 最后一条）。
         body = self._submit(self.client()).json()
         self.assertTrue(body["in_place"])
-        self.assertIn("_NOSR.tif", body["notice"])
         self.assertIn(self.LQ, body["notice"])
+        self.assertIn("<输入名>_t.tif", body["notice"])   # 输出名按管线拼接
+        self.assertIn("不改名也不删除", body["notice"])     # 输入不动
+        self.assertIn("_NOSR.tif", body["notice"])        # 同名旧输出的去向
 
     def test_no_in_place_notice_when_sandboxed(self):
         os.environ["SR_SANDBOX_ROOT"] = "/DiskArray/tmp/sbx"
@@ -454,16 +484,48 @@ class TestQueue(PlatformBase):
         os.environ.pop("SR_LOCKED_DIR", None)
         self.assertEqual(self._submit(self.client()).status_code, 201)
 
-    def test_suffix_defaults_to_sr_when_omitted_or_empty(self):
-        # 空后缀会把输出名变成输入名（SR 随即改名输入），所以空值一律取默认值。
-        os.environ.pop("SR_SUFFIX_DEFAULT", None)
+    def test_suffix_defaults_to_the_bundle_config(self):
+        # 默认后缀来自 SR 团队自己那份配置里的 <Suffix>，不是代码里写死的字面量。
+        # 空后缀会把输出名变成输入名（SR 随即改名输入），所以空值一律走这条路。
+        write_bundle_suffix(os.environ["SR_BUNDLE_DIR"], "260318")
         c = self.client()
         for body_suffix in (None, ""):                       # null 与 "" 都要落默认
             with self.subTest(suffix=body_suffix):
-                self.assertEqual(
-                    self._submit(c, suffix=body_suffix).status_code, 201)
-                t = c.get("/api/queue").json()["tasks"][0]
+                r = self._submit(c, suffix=body_suffix)
+                self.assertEqual(r.status_code, 201)
+                t = self._task(c, r.json()["task_id"])
+                self.assertEqual(t["params"]["suffix"], "260318")
+
+    def test_suffix_falls_back_to_the_builtin_when_the_file_is_absent(self):
+        # 基类把 SR_BUNDLE_DIR 指到空目录（= 开发机 / 尚未放该文件的机器）：
+        # 读不到就回落内置值，提交照常成功。
+        c = self.client()
+        r = self._submit(c, suffix="")
+        self.assertEqual(r.status_code, 201)
+        t = self._task(c, r.json()["task_id"])
+        self.assertEqual(t["params"]["suffix"], "sr")
+
+    def test_unusable_bundle_suffix_falls_back_instead_of_failing(self):
+        # 文件里的值不合法（运维手改出格）→ 回落内置值，不把提交打成 400：
+        # 那个值是拼进输出文件名的，宁可换个安全名字也不能让它落地。
+        for bad in ("a/b", "x" * 17, "掩码"):
+            with self.subTest(value=bad):
+                write_bundle_suffix(os.environ["SR_BUNDLE_DIR"], bad)
+                c = self.client()
+                r = self._submit(c, suffix="")
+                self.assertEqual(r.status_code, 201)
+                t = self._task(c, r.json()["task_id"])
                 self.assertEqual(t["params"]["suffix"], "sr")
+
+    def test_sr_suffix_default_env_var_is_retired(self):
+        # 2026-09-16：环境变量已删，文件是唯一权威 —— 设了它不应有任何作用。
+        os.environ["SR_SUFFIX_DEFAULT"] = "zzz"
+        self.addCleanup(os.environ.pop, "SR_SUFFIX_DEFAULT", None)
+        write_bundle_suffix(os.environ["SR_BUNDLE_DIR"], "260318")
+        c = self.client()
+        r = self._submit(c, suffix="")
+        t = self._task(c, r.json()["task_id"])
+        self.assertEqual(t["params"]["suffix"], "260318")
 
     def test_suffix_whitelist(self):
         c = self.client()
@@ -471,7 +533,7 @@ class TestQueue(PlatformBase):
             with self.subTest(suffix=bad):
                 r = self._submit(c, suffix=bad)
                 self.assertEqual(r.status_code, 400)
-                self.assertIn("suffix", r.json()["detail"])
+                self.assertIn("suffix 非法", r.json()["detail"])
         for good in ("sr", "acc-d1", "t_2", "X" * 16):
             with self.subTest(suffix=good):
                 self.assertEqual(
@@ -511,9 +573,17 @@ class TestMasks(PlatformBase):
         os.mkdir(os.environ["SR_SCENES_ROOT"])
 
     def _scene_row(self, c):
-        scene = touch_tif(os.path.join(
-            os.environ["SR_SCENES_ROOT"],
-            "GF07A03_PMS01_20260722125045.tif"))
+        """真机形态的场景目录：<root>/<编号>/<编号>.tif + <编号>_meta.xml。
+
+        scene_search 的场景判据是目录里有 <目录名>_meta.xml，平铺的裸 tif 不会被列出。
+        """
+        stem = "GF07A03_PMS01_20260722125045"
+        d = os.path.join(os.environ["SR_SCENES_ROOT"], stem)
+        os.mkdir(d)
+        scene = touch_tif(os.path.join(d, stem + ".tif"))
+        Path(d, stem + "_meta.xml").write_text(
+            '<?xml version="1.0"?><SolarAzimuth>181.79</SolarAzimuth>',
+            encoding="utf-8")
         rows = c.get("/api/scenes").json()["results"]
         return rows[0], scene
 
@@ -538,6 +608,7 @@ class TestMasks(PlatformBase):
         self.assertEqual(draft["sr_scale"], 2)
         self.assertFalse(draft["delete_ori"])
         self.assertTrue(draft["grid_align"])
+        self.assertEqual(draft["suffix"], "sr")   # 无 SR 配置 → 内置兜底值
         # mask 是 0/255 灰度（后端 0/1 → 0/255 归一）
         # 读回用 Pillow（与 test_mask.py 及生产消费链 cv2/util.read_img 一致）；
         # 不用 tifffile——老版 imagecodecs(2021) 解不动 Pillow 的 deflate TIF（环境缺陷，产物本身有效）。
@@ -549,6 +620,20 @@ class TestMasks(PlatformBase):
         raw = Path(body["mask_txt"]).read_bytes()
         self.assertIn("掩膜".encode("utf-8"), raw)   # 参考格式全角表头
         self.assertIn(b"\r\n", raw)                  # CRLF（read_text 会吞掉）
+
+    def test_bake_mask_draft_carries_the_bundle_suffix(self):
+        # 预填给队列表单的后缀与提交时将会用到的默认值同源（同一份 SR 配置），
+        # 否则操作员看到的和实际产物名会对不上。
+        write_bundle_suffix(os.environ["SR_BUNDLE_DIR"], "260318")
+        c = self.client()
+        row, _ = self._scene_row(c)
+        r = c.post("/api/masks", json={
+            "scene_id": row["id"],
+            "polygons": [{"label": "roi_1",
+                          "points": [[5, 5], [40, 5], [40, 30], [5, 30]]}],
+            "W": 60, "H": 40})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["task_draft"]["suffix"], "260318")
 
     def test_traversal_and_unknown_scene_404(self):
         c = self.client()

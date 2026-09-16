@@ -20,7 +20,7 @@ const queue = useQueueStore();
 const showForm = ref(false);
 const cancelling = ref<number | null>(null);
 const formErr = ref('');
-/** 提交成功后后端回的人话提示（就地写入 / 覆盖 _NOSR.tif）；不自动消失。 */
+/** 提交成功后后端回的人话提示（就地写入 / 同名旧输出的 _NOSR 改名）；不自动消失。 */
 const formNote = ref('');
 let lastSyncDraft: QueueDraft | null = null;
 /** 运行中任务的耗时每秒现算；只有存在未终结任务时才推进（见 onMounted）。 */
@@ -191,7 +191,8 @@ onUnmounted(() => {
         </label>
         <label class="qp-cell">
           <span>后缀</span>
-          <input v-model="f.suffix" type="text" spellcheck="false" placeholder="空=用服务端默认" />
+          <input v-model="f.suffix" type="text" spellcheck="false"
+                 placeholder="空=用 SR 配置里的 &lt;Suffix&gt;（如 260318）" />
         </label>
         <label class="qp-cell">
           <span>GPU 数</span>
@@ -210,8 +211,9 @@ onUnmounted(() => {
         <button type="button" class="btn" :disabled="queue.loading" @click="openSubmit()">
           提交 SR
         </button>
-        <span class="qp-hint">提交是真实副作用：后端会立刻在原图目录上跑 SR（覆盖旧产物）；
-          完成删原图（delete_ori）已禁用 —— 它会不可恢复地删除或覆盖原图</span>
+        <span class="qp-hint">提交是真实副作用：后端会立刻在原图目录上跑 SR（同名旧产物会被改名为
+          _NOSR.tif 后覆盖）；完成删原图（delete_ori）已禁用 —— 它会不可恢复地删除或覆盖
+          输出路径上的文件（空后缀时那个文件就是原图）</span>
       </div>
     </section>
 
@@ -269,7 +271,7 @@ onUnmounted(() => {
 .qp-dot.on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
 .qp-conn { font-size: 12px; color: var(--ink-sub); }
 .qp-err { color: var(--err); font-size: 13px; margin: 0 0 12px; }
-/* 提交后的就地写入提示（覆盖 _NOSR.tif）：警示色，不自动消失 */
+/* 提交后的就地写入提示（就地写入 / _NOSR 改名）：警示色，不自动消失 */
 .qp-note {
   color: var(--warn); background: var(--warn-bg); border: 1px solid var(--warn-line);
   font-size: 12.5px; line-height: 1.6; padding: 8px 12px;

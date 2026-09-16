@@ -85,9 +85,14 @@ SR_DEFAULT_LOCKED_DIR = None
 #: meaningful with SR_EXECUTOR=local — under Slurm the card comes from --gres.
 SR_DEFAULT_LOCAL_GPU = "0"
 
-#: Default <Suffix> when a submit does not carry one. Non-empty on purpose: an
-#: empty suffix makes the output name equal the input name, which SR turns into
-#: a rename of the input (sr-pipeline-interface.md §2.4-1).
+#: LAST-RESORT <Suffix>, not a knob. The default a submit actually gets is read
+#: from the SR team's own config inside SR_BUNDLE_DIR (services/run_sr.py::
+#: default_suffix); this literal is only what's left when that file is missing,
+#: unparseable or carries an unusable value. It used to be overridable through
+#: SR_SUFFIX_DEFAULT — that env var was retired 2026-09-16, the file is the
+#: authority. Non-empty on purpose: an empty suffix makes the output name equal
+#: the input name, which SR turns into a rename of the input
+#: (sr-pipeline-interface.md §2.4-1).
 SR_DEFAULT_SUFFIX = "sr"
 
 #: Queue-state calibration period for GET /api/queue + SSE job_update frames.
@@ -162,7 +167,6 @@ class SrRuntime:
     executor: str             # "slurm" | "local" — who launches the job
     locked_dir: str | None    # None → /api/queue accepts any absolute lq_path
     local_gpu: str            # CUDA_VISIBLE_DEVICES for the local child
-    suffix_default: str       # <Suffix> when a submit omits one (never "")
 
 
 def sr_runtime() -> SrRuntime:
@@ -205,6 +209,4 @@ def sr_runtime() -> SrRuntime:
         executor=(os.environ.get("SR_EXECUTOR") or SR_DEFAULT_EXECUTOR).strip().lower(),
         locked_dir=os.environ.get("SR_LOCKED_DIR") or None,
         local_gpu=os.environ.get("SR_LOCAL_GPU") or SR_DEFAULT_LOCAL_GPU,
-        suffix_default=(os.environ.get("SR_SUFFIX_DEFAULT")
-                        or SR_DEFAULT_SUFFIX).strip(),
     )

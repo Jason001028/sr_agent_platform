@@ -1,6 +1,9 @@
 # 平台 API 契约（阶段5 · REST / SSE）
 
-> 日期：2026-09-02 · 状态：**已定**（评审通过；实现已按本文档交付——后端 190 unittest + 前端 Vitest 114 + vue-tsc 零错误 + `.e2e/test-platform.js` 11 断言全绿。红线不变：后续改动契约仍须**先改本文档并置回「评审」**，通过后再改代码）
+> 日期：2026-09-02 · 状态：**评审**（2026-09-16 按 §7 红线置回，待复核后改回「已定」）
+>
+> **本轮挂起项（唯一）**：§3.3 新增「`suffix` 默认值来源」条款——省略/留空不再固定为内置 `"sr"`，改为读 `$SR_BUNDLE_DIR` 下 SR 团队配置文件里的 `<Suffix>`，`SR_SUFFIX_DEFAULT` 环境变量作废；同批把 agent 工具 `run_sr` 的归一化与 REST 入口对齐（此前工具既不 strip 也不给默认值，同一逻辑提交两入口指纹不同 → 幂等失效、重复投作业，属修缺陷）。
+> **须说明的流程偏差**：上述改动**已与本文档同批落到代码**（不是"先评审后写码"）。理由是它同时修一个现存缺陷（两入口指纹不一致），拆开会让仓库停在一个已知会重复投作业的中间态。请复核本节，通过后把状态改回「已定」。此前其余条款自 2026-09-02 起均未变（评审通过时的交付基线：后端 190 unittest + 前端 Vitest 114 + vue-tsc 零错误 + `.e2e/test-platform.js` 11 断言全绿）。
 > 目标读者：阶段5 实现会话（后端 FastAPI + 前端 Vue3）。范围：把既有后端（agent loop + 4 工具 + `sr_tasks` + slurm）暴露成网页可调 REST/SSE，交付 聊天 / 共享任务队列 / 查看器画完掩码提交 SR。
 > 前置：阶段4 已完成（FastAPI 骨架 `backend/api/app.py`：`/api/scenes` + `/api/scenes/{id}/preview` + 路径白名单；前端 `/scenes` 页 + route='jpg' rec + `/chat` `/queue` 占位路由）。
 
@@ -59,21 +62,27 @@
 > 前端 `lib/api.ts` 里的 `apiBakeMask` / `MaskDraft` / `BakeMaskBody` / `MaskBakeResult`
 > 已删除；将来若回到「前端画掩码」，端点与渲染链（`services/mask.py`）都还在。
 > `POST /api/queue` 的响应另加两个**只读提示字段**（没有沙箱时出现，否则整个字段缺省）：
-> `in_place: true` + `notice`（人话：「输出目录 = 输入目录…已有的 `_NOSR.tif` 会被覆盖」）。
-> 同一句话也写进作业日志的 audit 段（`build_batch_script`），两处都不能省——日志是事后追责时
-> 唯一会去看的东西。
+> `in_place: true` + `notice`（人话：「输出目录 = 输入目录（…）：SR 就地把结果写成
+> `<输入名>_<suffix>.tif`，输入 tif 不改名也不删除；该目录里已存在同名输出时，旧输出先被改名为
+> `<同名>_NOSR.tif` 再覆盖」）。
+> 同一层意思也以 WARNING 写进作业日志的 audit 段（`build_batch_script`），两处都不能省——日志是
+> 事后追责时唯一会去看的东西。
 > 同时 `GET /api/scenes` 的扫描后缀扩到 `.jpg/.jpeg`（`scene_search._IMAGE_EXTS`）：
 > 盘阵里本就是显示就绪图的 JPG 也作为场景行列出，行内 `hasPreview` 恒 `true`、
 > `jpgUrl` **指向源文件本身**（前端因此跳过 `/api/scenes/{id}/preview` 懒生成），
 > W/H 由 Pillow 读头得到；`GET …/preview` 对这种行直接回源字节。
-> 后端自己烘焙的 `<basename>.preview.jpg` 缓存不算场景（`is_scene_file` 排除），
-> 否则同一张图会在列表里出现两行。**场景目录里预生成的 `<目录名>_mask.tif` 同样不算**
-> （2026-09-15 补：它是「提交 SR」的*输入*，不是可提交对象；真机上它与场景**同名同目录**，
-> 不排除则每个已带掩膜的目录都会多出一行——卫星/传感器由掩膜文件名解析、尺寸取掩膜 TIFF 头）。
-> 判定只认**结尾**的 `_mask` 标记，`GF07A03_mask_PMS01_….tif` 这类名字中段含 mask 的仍是场景。
+> **收件规则是白名单（2026-09-16 改，取代此前逐条排除派生件的黑名单）**：
+> `scene_search.is_scene_file()` 收一个文件，当且仅当两条同时成立——
+> ① 所在目录是**场景目录**（内有 `<目录名>_meta.xml`，`is_scene_dir()`；SR 脚本本来就靠
+> 它判 RC/SC，没有它的目录提交也跑不起来）；② 文件名 = `<目录名>.<ext>`（SC 步骤的输入）
+> 或 `PAN.<ext>`（RC 步骤的输入）。于是这些一律不再入列表：SR 产物与输入备份
+> （`_sr` / `_NOSR` / `_ori`）、云量图（`_cloud`）、缩略图（`_thumb`）、提交 SR 的输入掩膜
+> （`_mask`）、后端自己烘焙的 `<basename>.preview.jpg` 缓存、`Debug/` 下的调试图。
+> 旧规则每冒出一类派生件就得补一条：真机接上盘阵后 18 行里 16 行是脏数据。
+> **代价**：没有 `<目录名>_meta.xml` 的目录整个不显示。
 >
 > **阶段6 增补（查看器上下文侧舱）**：`GET /api/scenes` 的 disk 行新增只读字段
-> `lq_path` = 该 scene 文件**父目录**的绝对路径（`run_sr` 的目录语义 lq_path；
+> `lq_path` = 该 scene 文件**父目录**的绝对路径（= 场景目录，`run_sr` 的目录语义 lq_path；
 > fake 行恒 `null`）。作用：前端把 `/api/queue` 行按 `params.lq_path` 相等 +
 > `params.mask_path` 以 `<stem>_mask.tif` 结尾关联回当前 scene，做「当前场景最近任务」
 > 展示。字段只读、不含文件名；viewer 任务区以外的页面不消费它。
@@ -138,6 +147,7 @@ submit_run_sr 返回 → 队列状态：
   直接调 `services.run_sr.submit_run_sr(params, store=default_store())`（幂等层既在：重复同参 → RESUMED_ACTIVE/COMPLETED 复用，失败才重跑，中断无 job_id → 409 报"勿盲重试"）。返回：
   `201 {"task_id", "job_id", "status":"SUBMITTED"|"RESUMED_ACTIVE"|"RESUMED_COMPLETED"|…, "state":…, "previous_state"?, "config_xml", "log_dir"}`。
   校验：`lq_path` 必填 + 绝对路径 + 不含 `<fake>`（复用 tools/run_sr `_bad_path` 语义）；mask_path 同规则；sbatch 不可用且未开 fake → 422「slurm not available … 需在盘阵机配置」。
+  **`suffix` 的默认值来源（2026-09-16 改，见 §7 评审挂起）**：body 省略或留空 → 平台读 `$SR_BUNDLE_DIR` 下 SR 团队自己的配置文件（`sfsr_confgig_test_espan2_cuda1.xml`，兼容另一种拼写 `sfsr_config_…`）里的 `<Suffix>` 作默认值；文件缺失 / 坏 XML / 标签缺失或为空 / 值不合白名单 → 回落到内置 `"sr"`。**每次提交现读**，不缓存（`task_fingerprint` 把 `suffix` 文本哈希在内，缓存会让指纹变成进程启动时刻的函数 → 重启或双 worker 对同一逻辑提交得出不同指纹，正是幂等层要防的重复投作业）。显式传值仍走白名单 `^[A-Za-z0-9_-]{1,16}$`，不合法 400（`detail` 含「suffix 非法」）。**agent 工具 `run_sr` 共用同一套归一化**（`services/run_sr.py::normalize_suffix`），同一逻辑提交在两入口得到同一 `task_fingerprint`。原 `SR_SUFFIX_DEFAULT` 环境变量同日作废，设了不读。
 - `POST /api/queue/{task_id}/cancel` → 查 task（404 无），`job_id` 非空则 `slurm.cancel` → `200 {"task_id","cancelled":bool,"state":…}`；无 job_id（中断遗留）→ 400。
 - `GET /api/queue/events` — SSE：订阅所有任务的 `state` 变化。**驱动** = app 生命周期后台 asyncio 任务（§4.3）：周期（`SR_QUEUE_POLL_SEC`，缺省 2s）对每个 `job_id` 非空 task 调 `slurm.job_status`，状态与前值不同 → 更新内存缓存 + 写回 `sr_tasks.status` + 广播一帧。事件 schema：
 

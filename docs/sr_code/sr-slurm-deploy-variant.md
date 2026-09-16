@@ -93,7 +93,7 @@ if cloudpercent > cloudlimit:
 
 | 项 | 现象 | 归属 / 处置 |
 |---|---|---|
-| 空 `suffix` 覆盖语义 | `suffix=""` ⇒ 输出名 == 输入名 ⇒ 输入被 `rename` 成 `*_NOSR.tif` | 平台 `_norm_sr_params` 默认即 `""`。契约 §2.4 第 1 条；**验收与生产一律传非空 suffix** |
+| 空 `suffix` 覆盖语义 | `suffix=""` ⇒ 输出名 == 输入名 ⇒ 输出路径上的那个文件就是输入 ⇒ 输入被 `rename` 成 `*_NOSR.tif` | 平台 REST 入口 `_norm_sr_params` 空值回落到默认 `sr`、非法值 400，走不到这条；**agent 工具 `backend/tools/run_sr.py` 不校验 suffix、默认恰是 `""`**，能走到。契约 §2.4 第 1 条；**验收与生产一律传非空 suffix** |
 | `sacct` 解析不可用 | 真机 `AccountingStorageType=accounting_storage/none` ⇒ `sacct` 恒返回非 0 且无输出；即便账务开启，`--format=State%20,ExitCode%10` 在状态串含空格时（如 `CANCELLED by 1000`）`split()` 也会错位 | 契约 §2.4 第 2 条；**终态改由退出码文件判定**（本文件 §6.3），`backend/services/slurm.py` 的 `sacct_status` 在真机路径上不再使用（仅假调度器/离线测试保留） |
 | 对已超分场景会再超分一遍 | `util.py:1009-1011` 的 `exit()` 被注释掉，函数只打印 `already SRed before` 后返回原路径，不是幂等跳过 | 契约 §2.4 第 3 条；真重跑，非本次修复范围；调用方提交前自行判重 |
 
