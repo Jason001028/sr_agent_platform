@@ -14,6 +14,15 @@ Filename convention (matches SR_code, e.g.
 JL1KF02B03_PMS05_20260722125045_200524168_102_0034_001_L1_PAN_mask.txt):
 the first `_`-separated parts are satellite and sensor, and the first
 8..14-digit run is the acquisition timestamp (YYYYMMDD...). Unknown parts → None.
+
+What counts as a scene (disk backend) is a whitelist, not a blacklist: the file
+must sit in a *scene directory* — one containing `<dirname>_meta.xml` — and be
+named either `<dirname>.<ext>` (the SC step's input) or `PAN.<ext>` (the RC
+step's). Everything else in a scene directory is something else's input or
+output: SR products and the input backup (_sr/_NOSR/_ori), the cloud map
+(_cloud), thumbnails (_thumb), the ROI mask (_mask — it is an *input* to
+"submit SR", not a scene), the backend's own `<stem>.preview.jpg` cache, and the
+dozens of debug renders under `Debug/`. See is_scene_file.
 """
 
 from __future__ import annotations
@@ -28,28 +37,43 @@ _RASTER_EXTS = {".tif", ".tiff", ".img"}
 # 不需要后端再烘焙预览）。真值见 docs/status/phase4 —— 盘阵读 JPG 是既有做法。
 _IMAGE_EXTS = {".jpg", ".jpeg"}
 _SCENE_EXTS = _RASTER_EXTS | _IMAGE_EXTS
-# 派生件不算场景（两种，都是「别的东西的输入/产物」，不是可提交对象）：
-#   1) 后端自己缓存的 <basename>.preview.jpg（api/paths.preview_jpg_path 的产物）——
-#      列出来只会在同一张图上多出一行、且 jpgUrl 指向缓存而非源文件。
-#   2) 场景目录里预生成的掩膜 <名字>_mask.<ext>（最小原型 §4.3：这是「提交 SR」的*输入*，
-#      不是可提交的场景）。真机目录里它和场景同名同目录，列出来会多一行：卫星/传感器
-#      从掩膜文件名解析（satellite=<父目录名>、sensor="mask"）、尺寸取掩膜 TIFF 头，
-#      且「提交 SR」可点（同目录 → 同指纹 → 幂等命中，不至于重复跑，但列表是脏的）。
-_DERIVED_SUFFIX = ".preview.jpg"
-_DERIVED_STEM_SUFFIX = "_mask"
+#: 场景目录的判据：目录里躺着一份 <目录名>_meta.xml。SR 脚本靠它判 RC/SC
+#: （util.check_sr_previous_step），没有它的目录提交也跑不起来 —— 所以它同时也是
+#: 「这个目录里的东西能不能提交」的判据。
+_META_SUFFIX = "_meta.xml"
+
+#: RC 步骤的输入文件名（util.get_l1_pan_tif_rcsc 的 RC 分支读的就是 PAN.tif）。
+_RC_INPUT_STEM = "pan"
+
 _TS_RE = re.compile(r"\d{8,14}")
 
 
+def is_scene_dir(path) -> bool:
+    """该目录是不是一个可提交的场景目录（内含 <目录名>_meta.xml）。"""
+    d = Path(path)
+    return d.is_dir() and (d / (d.name + _META_SUFFIX)).is_file()
+
+
 def is_scene_file(path) -> bool:
-    """该文件是否算一个可列出的盘阵场景（确在盘上 + 后缀白名单 + 排除派生件）。"""
+    """该文件是否算一个可列出的盘阵场景。
+
+    白名单，两条同时成立：所在目录是场景目录（is_scene_dir），且文件名要么等于目录名
+    （SC 步骤的输入 `<目录名>.<ext>`），要么是 `PAN.<ext>`（RC 步骤的输入）。
+
+    这样一次挡住全部「别的东西的输入/产物」：SR 产物与输入备份（_sr/_NOSR/_ori）、
+    云量图（_cloud）、缩略图（_thumb）、提交 SR 的输入掩膜（_mask）、后端自己烘焙的
+    `<stem>.preview.jpg` 缓存，以及 Debug/ 下十几张调试图。此前用的是黑名单，每冒出
+    一类新派生件就得补一条 —— 2026-09-15 真机接上盘阵时，18 行里有 16 行是这种脏数据。
+    """
     p = Path(path)
     if not p.is_file():
         return False
     if p.suffix.lower() not in _SCENE_EXTS:
         return False
-    if p.name.lower().endswith(_DERIVED_SUFFIX):
+    if not is_scene_dir(p.parent):
         return False
-    return not p.stem.lower().endswith(_DERIVED_STEM_SUFFIX)
+    stem = p.stem.lower()
+    return stem == p.parent.name.lower() or stem == _RC_INPUT_STEM
 
 
 def parse_filename(path) -> dict:

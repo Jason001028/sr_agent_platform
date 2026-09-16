@@ -45,14 +45,16 @@ export interface QueueForm {
 /* ================= 纯函数（vitest 可测） ================= */
 
 /** run_sr 参数默认值（镜像 services/run_sr + tools/run_sr 缺省）。
-    后缀默认非空：空后缀会让 SR 的输出名等于输入名（契约 §2.4-1），
-    后端另有 SR_SUFFIX_DEFAULT 兜底，这里预填同一约定值让操作员看得见。
+    后缀留空、不在前端预填：空值由后端解析成 SR 团队配置里的 `<Suffix>`
+    （backend/services/run_sr.py::default_suffix，如 260318），前端猜不出这个值。
+    注意别改成「预填后端默认值」——预填值会作为显式参数发出去，按优先级反而
+    压过配置文件，把一个可能过期的日期钉死在表单里。
 
     delete_ori 恒为 false：该开关原型期已禁用（backend/services/run_sr.py 的
     DELETE_ORI_MSG，传 true 会被 400 拒），表单里也没有对应控件。 */
 export function defaultForm(): QueueForm {
   return {
-    lq_path: '', sr_scale: 2, suffix: 'sr',
+    lq_path: '', sr_scale: 2, suffix: '',
     gpu: 0, cloud_limit: 80, delete_ori: false, grid_align: true,
   };
 }
@@ -71,7 +73,7 @@ export function derivedMaskPath(lqPath: string): string {
 }
 
 /** 队列表单 → POST /api/queue body（数值夹取；mask_path 恒 null 交后端推导）。
-    后缀留空即交给后端的 SR_SUFFIX_DEFAULT，前端不替它决定。 */
+    后缀留空即由后端按 SR 配置文件里的 `<Suffix>` 决定，前端不替它决定。 */
 export function formToSubmit(f: QueueForm): QueueSubmitBody {
   const body: QueueSubmitBody = {
     lq_path: f.lq_path.trim(),
@@ -263,7 +265,11 @@ export const useQueueStore = defineStore('queue', () => {
     setSrDraft(lqPath: string) { draft.value = { lq_path: lqPath }; },
     /** 「以这行参数再提交」：整组参数填回表单，仍然要点提交才真的跑。
         掩码不进表单 —— 每行的 mask_path 都是后端按 `<lq_path>/<目录名>_mask.tif`
-        推导出来的，重提交会推导出同一个文件。 */
+        推导出来的，重提交会推导出同一个文件。
+
+        suffix 带回来的可能是空串：改动前的旧行由 agent 工具写入、当时不做归一化。
+        重提交时空串按新规则解析成配置文件里的值，与那一行自己的指纹对不上，
+        于是新建任务而不是复用——只影响旧行，且产物名不同，属正确行为。 */
     setDraftFromTask(t: QueueTask) {
       draft.value = {
         lq_path: t.params.lq_path,

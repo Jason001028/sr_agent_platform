@@ -440,8 +440,9 @@ cat $TEST/b3_verify/Debug/_SREXIT_999999.txt          # ✓= verdict=90，reason
 
 目的：证明在真机上按契约跑得通一遍**真的超分**（不是冒烟、不是跳过），且变体没把原脚本改坏。
 
-⚠️ **必须在场景副本上跑**：即使 `DeleteOriTifNeeded=False`、`Suffix` 非空，`util.writeTiff` 仍会把
-**输入**改名为 `*_NOSR.tif`。跑生产目录 = 动生产数据。
+⚠️ **必须在场景副本上跑**：即使 `DeleteOriTifNeeded=False`、`Suffix` 非空，SR 仍会把产物 tif、
+`Debug/` 日志与 meta.xml 更新写进 `DatarootLQ`（非空 suffix 下源图不改名也不删除，见契约 §2.4
+第 1 条与 §6）。跑生产目录 = 动生产数据。
 
 > **本节是手工旁路。走平台请直接看 §D** —— 平台已能自建副本（`SR_SANDBOX_ROOT`，
 > `deploy/README.md` §7.5），前端填**生产路径**即可，不需要手工拷。本节留着是为了
@@ -493,14 +494,16 @@ sudo -u nginx srun -N1 -n1 -p $PART --gres=gpu:1 --time=01:00:00 sh -c "
 ```
 
 > `<Suffix>acc</Suffix>` 是**非空**后缀，本轮一律如此——空 `<Suffix/>` 是已知破坏性语义
-> （输出名 == 输入名 ⇒ 把输入改名），见契约 §2.4 第 1 条，本批不修。
+> （输出名 == 输入名 ⇒ 被改名/删除的是输入本身），见契约 §2.4 第 1 条，本批不修。
+> 本轮期望的目录变化只有三处新增：`<目录名>_acc.tif`、`Debug/` 下的日志与退出码文件、
+> meta.xml 更新；输入 `<目录名>.tif` 的 mtime 不变。
 
 ✓= 四条同时成立：
 
 ```bash
 tail -c 4096 $TEST/c_run/$BASE/Debug/${BASE}_SRLOG.txt | tail -3   # ✓= 最后一个非空行 "Run finished."
 ls -l $TEST/c_run/$BASE/${BASE}_acc.tif                            # ✓= 存在、非 0 字节（uint16）
-ls -l $TEST/c_run/$BASE/${BASE}_NOSR.tif                           # ✓= 输入已改名为 _NOSR（预期）
+ls -l $TEST/c_run/$BASE/${BASE}.tif                                # ✓= 输入原样（非空 suffix 不改名、不删除）
 cat $TEST/c_run/$BASE/Debug/_SREXIT_<job_id>.txt                   # ✓= verdict=0 / skip=0
 ```
 

@@ -90,6 +90,8 @@ export interface QueueSubmitBody {
   lq_path: string;
   mask_path?: string | null;
   sr_scale?: number;
+  /** 输出文件名后缀。省略或留空 → 后端读 SR 团队配置文件里的 <Suffix>
+   *  （services/run_sr.py::default_suffix，如 260318），前端不预填、也猜不到。 */
   suffix?: string;
   gpu?: number;
   cloud_limit?: number;
@@ -108,7 +110,8 @@ export interface QueueSubmitResult {
   previous_job_id?: number;
   config_xml: string | null;
   log_dir: string | null;
-  /** 无沙箱就地跑（本地执行器恒如此）：输入会被改名 *_NOSR.tif，已有同名文件被覆盖。 */
+  /** 无沙箱就地跑（本地执行器恒如此）：结果按 <输入名>_<suffix>.tif 落进场景目录，
+   *  输入 tif 不改名也不删除；同名旧输出先被改名为 <同名>_NOSR.tif 再覆盖。 */
   in_place?: boolean;
   /** 上一条的人话版本，提交成功后原样展示给操作者。 */
   notice?: string;

@@ -118,7 +118,7 @@ function doLocate() {
         ? (store.activeRec?.lqPath
             ? '带出该场景的原图目录，跳转队列页确认后提交 SR'
             : '此图非盘阵场景打开，没有可提交的原图目录')
-        : '仅盘阵场景（先经「盘阵场景」打开）支持提交 SR'"
+        : '仅盘阵场景（先经「场景库」打开）支持提交 SR'"
       @click="store.submitSr()"
     >
       提交 SR

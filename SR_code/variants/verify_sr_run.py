@@ -45,10 +45,13 @@ Semantics are copied from the production source, not from intuition
   does at :165/:582 and the two must agree even for odd extensions.
 * `<Suffix></Suffix>` (or `<Suffix />`) means "no suffix" (util.get_cfg_value
   returns None when the node has no children), so the output keeps the input
-  stem and `util.writeTiff` RENAMES the input to `*_NOSR.tif`. Empty suffix is
-  the default in the platform's `_norm_sr_params`, and it is known-broken -- we
-  reproduce it faithfully here so the verifier cannot pass a run the pipeline
-  itself considers a collision.
+  stem and `util.writeTiff` RENAMES the file sitting at that output path -- the
+  input itself -- to `*_NOSR.tif` (`PAN.tif` -> `PAN_ori.tif`). The platform's
+  REST submit rejects an empty suffix (`_norm_sr_params`; the agent tool
+  defaults to `""` instead), so this path is rare but reachable -- we reproduce
+  it faithfully here so the verifier cannot pass a run that the pipeline itself
+  considers a collision. With a non-empty suffix the same rename hits the
+  *previous output* at that path, never the input.
 * output path = `<DatarootLQ>/<img_name[:-4]>` + ("_"+suffix if any) + tiftype,
   which is code_0817_prod.py:582/585 plus the extension `util.writeTiff` adds.
 * RC-vs-SC input choice mirrors `util.check_sr_previous_step`: `<SolarAzimuth>`
