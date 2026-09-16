@@ -511,16 +511,21 @@ SSE）。
 
 ### 7.5 沙箱：为什么平台不能直接写 `lq_path`
 
-**SR 对它的 `DatarootLQ` 不是只读的。** [`SR_code/util.py:1305`](../SR_code/util.py#L1305)
-（`writeTiff`）在写产物之前，先把**输入**改名：
+**SR 对它的 `DatarootLQ` 不是只读的。** [`SR_code/util.py:1282`](../SR_code/util.py#L1282)
+（`writeTiff`）把产物 tif、`Debug/` 日志与 meta.xml 更新都写进这个目录；写产物之前还会把
+**输出路径上已存在的同名文件**改名：
 
 ```python
-os.rename(path + tiftype, path + "_NOSR" + tiftype)   # → <目录名>_NOSR.tif
+os.rename(path + tiftype, path + "_NOSR" + tiftype)   # 首跑时该文件不存在，改名不生效
 ```
 
-把 `Suffix` 留空、`DeleteOriTifNeeded=False` 都躲不掉这一步——它跟这两个开关无关。所以
-「用户在前端填了一个盘阵路径」的准确含义是**「那个目录会被改写」**。写生产目录 = 动生产数据，
-且是不可逆的改名。
+`path` 是**输出路径**（[`code_0817_prod.py:582`](../SR_code/code_0817_prod.py#L582)：
+`<输入名>_<Suffix>.tif`），不是输入。平台恒定非空 `Suffix`，所以这一步平时碰不到源图——首跑时
+目标不存在（`FileNotFoundError` 被吞掉），重跑时被改名为 `<输出名>_NOSR.tif` 的是上一次的产物。
+只有 `Suffix` 为空、输出名 == 输入名时才会动到源图（契约 §2.4 第 1 条），平台不接受空 `Suffix`。
+
+但「写产物 + 写 `Debug/` + 改 meta」本身就够了：所以「用户在前端填了一个盘阵路径」的准确含义是
+**「那个目录会被写入」**。写生产目录 = 动生产数据。
 
 配了 `SR_SANDBOX_ROOT` 之后，作业的**第一步**是复制，SR 全程只碰副本：
 
@@ -528,7 +533,7 @@ os.rename(path + tiftype, path + "_NOSR" + tiftype)   # → <目录名>_NOSR.tif
 <SR_SANDBOX_ROOT>/<任务指纹前12位>/
 └── <场景目录名>/      ← cp -a 自 lq_path，**目录名必须原样**
     ├── <目录名>.tif          ← SC 步的输入名由目录名推导：osp.basename(lq_path) + file_type
-    ├── <目录名>.tif.ori / _NOSR.tif / _<suffix>.tif   ← SR 在这里改名与写产物
+    ├── <目录名>_<suffix>.tif   ← SR 写的产物（输入 <目录名>.tif 原样不动）
     └── Debug/               ← SRLOG + 退出码文件
 ```
 
@@ -542,7 +547,8 @@ os.rename(path + tiftype, path + "_NOSR" + tiftype)   # → <目录名>_NOSR.tif
 
 注意事项：
 
-- **空间**：每任务一份完整副本。一个 ~5 GB 的场景目录，跑完约 15 GB（副本 5 + `_NOSR` 5 + 产物 5）。
+- **空间**：每任务一份完整副本。一个 ~5 GB 的场景目录，跑完约 15 GB（副本 5 + 产物 5 + 源目录
+  里自带的 `_NOSR` / `_ori` 等派生件）。
   验收跑完手工清：`rm -rf <SR_SANDBOX_ROOT>/<指纹前12位>`；
 - **权限**：`SR_SANDBOX_ROOT` 要 **nginx 可写**（作业以 nginx 身份跑），装法：
 
@@ -555,8 +561,9 @@ os.rename(path + tiftype, path + "_NOSR" + tiftype)   # → <目录名>_NOSR.tif
 - **值的格式**：必须是不含空格 / 引号 / `` ` `` / `..` 的绝对路径——它会拼进作业脚本里一行
   `rm -rf "<根>/<指纹>"`。非法值在**提交时**报 `ValueError`，不会静默降级；
 - **时间**：复制发生在作业内，算进 `--time`（默认 2h）。大场景 + 慢盘时留意；
-- **不配就是阶段 6 的生产形态**：SR 直接写 `lq_path`，输入被改名 `*_NOSR.tif`。
-  这是上游 SR 的既有契约（生产管线本来就依赖这个改名），所以阶段 6 之后关掉沙箱是正常的，
+- **不配就是阶段 6 的生产形态**：SR 直接写 `lq_path`（产物 + `Debug/` + meta 更新），平台恒定
+  非空 `Suffix`，源图不改名也不删除。上游生产管线用空 `Suffix` 就地写时才会把原图改名为
+  `*_NOSR.tif`（契约 §2.4 第 1 条），平台不走那条路。所以阶段 6 之后关掉沙箱是正常的，
   只是那一刻起，前端填什么路径就写什么路径。
 
 ### 7.6 最小原型：不走 Slurm，本机 conda 直接跑（`SR_EXECUTOR=local`）
@@ -571,14 +578,18 @@ os.rename(path + tiftype, path + "_NOSR" + tiftype)   # → <目录名>_NOSR.tif
 | `SR_EXECUTOR` | `local` | `slurm`（默认）/ `local` 二选一。改完必须 `systemctl restart sr-api` |
 | `SR_LOCKED_DIR` | 试验目录绝对路径 | **一旦设置，`POST /api/queue` 只接受这一个 `lq_path`**（两侧去尾部 `/` + `realpath` 后比较），不匹配返回 400；不设 = 保持旧行为（任意路径） |
 | `SR_LOCAL_GPU` | `0` | 透传成子进程的 `CUDA_VISIBLE_DEVICES`（本机多卡时选哪张） |
-| `SR_SUFFIX_DEFAULT` | `sr` | 前端不填 `suffix` 时的默认产物后缀。**不要留空**：空后缀会让产物名与输入同名 |
 
 ```ini
 Environment=SR_EXECUTOR=local
 Environment=SR_LOCKED_DIR=<试验目录>
 Environment=SR_LOCAL_GPU=0
-Environment=SR_SUFFIX_DEFAULT=sr
 ```
+
+**产物后缀的来源（2026-09-16 改）**：请求不带 `suffix` 时，平台读 `$SR_BUNDLE_DIR` 下
+SR 团队自己的配置文件（`sfsr_confgig_test_espan2_cuda1.xml`，同时兼容另一种拼写
+`sfsr_config_...`）里的 `<Suffix>` 作为默认值，读不到或不合法才回落到内置的 `sr`。
+原 `SR_SUFFIX_DEFAULT` 环境变量同日**作废**，设了也不会被读（`tests/test_config.py`
+有回归测试钉住）。改后缀请改那份 XML，不要再往 systemd 单元里加变量。
 
 与 Slurm 模式的差异（`backend/services/local_exec.py`）：
 
@@ -601,8 +612,9 @@ Environment=SR_SUFFIX_DEFAULT=sr
 1. **`SR_SANDBOX_ROOT` 必须不设**。沙箱会把 `DatarootLQ` 指到副本目录，产物就落在那儿，
    直接违背「输出与原图同目录」这条需求。本地模式的写入目标就是 `SR_LOCKED_DIR`，
    所以锁定目录本身应当是 `/DiskArray/tmp/wangrz/` 下的试验目录；
-2. **`lq_path` 必须 nginx 可写**（没有沙箱这层缓冲了）：SR 会就地改名输入为 `*_NOSR.tif`
-   并在同目录写产物与 `Debug/`。**每次真跑都要知道一次：这会覆盖该目录里已有的 `_NOSR.tif`。**
+2. **`lq_path` 必须 nginx 可写**（没有沙箱这层缓冲了）：SR 在同目录写产物
+   `<目录名>_<suffix>.tif` 与 `Debug/`（输入 tif 不改名也不删除）。**每次真跑都要知道一次：
+   同名旧产物会被改名为 `<同名>_NOSR.tif`，然后被新产物覆盖。**
 
 掩码规则：请求里不传 `mask_path` 时，后端取 `<lq_path>/<目录名>_mask.tif`；文件不存在直接 400
 （不静默退化成全图超分）。前端「提交 SR」按钮只对**盘阵场景**（有 `lq_path` 的行）可用，

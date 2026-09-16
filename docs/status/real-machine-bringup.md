@@ -217,7 +217,7 @@ ssh -N -L 18080:127.0.0.1:80 root@<node81-135 IP>
 | 作业 `exit(3)`（GPU 守卫） | 两种可能：① `$SR_BUNDLE_DIR/code_0817_prod.py` **还是原脚本**（没装部署变体）——`head -3` 应见 `GENERATED FILE — DO NOT EDIT` 横幅，装法见 `deploy/README.md` §7.1；② 变体已装但 `--gres` 没给到卡——查作业 `.out` 审计段的 `CUDA_VISIBLE_DEVICES=` 是否为空 |
 | 作业 `.err` 报 `ImportError: libXXX.so` / `OSError` | 批脚本的 `#SBATCH --export=NONE` 把提交端环境（含 `LD_LIBRARY_PATH`）一起丢了，torch1.9.1 / GDAL 链不上系统库 → `backend/services/run_sr.py` 里把它改成 `#SBATCH --export=ALL`（唯一一处），重跑 `pytest backend/tests/test_run_sr.py` 后拷 `backend/` 到 `<APP>` 并 `systemctl restart sr-api`（上机必验项 V1） |
 | 平台显示 **FAILED** 但作业退出码是 0 | 这是**预期的新行为**：契约不满足（缺 SRLOG 或末行不是 `Run finished.` 或缺输出 tif）时校验器以**退出码 90** 结束。看退出码文件的 `reason` 字段点名缺哪条——这正是以前被固化成「成功」的那批静默失败 |
-| 跑完 SR 后，填的那个盘阵目录里输入被改名成 `*_NOSR.tif` | **不开沙箱时的预期行为**，不是 bug：`util.writeTiff` 写产物前必先改名输入（跟 `Suffix` / `DeleteOriTifNeeded` 都无关）。要生产目录只读就配 `SR_SANDBOX_ROOT`（deploy/README §7.5）：每个作业先 `cp -a` 一份副本，产物落在 `<根>/<task_fingerprint 前12位>/<目录名>/`，`/api/queue` 的 `run_dataroot` 字段指出确切位置 |
+| 跑完 SR 后，填的那个盘阵目录里多出产物 tif、`Debug/` 目录与 meta.xml 更新 | **不开沙箱时的预期行为**，不是 bug：SR 把产物、`Debug/` 日志与 meta 更新写进 `DatarootLQ`（平台恒定非空 `Suffix`，所以源图不改名也不删除；只有同名的旧产物会被改名为 `*_NOSR.tif` 再覆盖）。要生产目录只读就配 `SR_SANDBOX_ROOT`（deploy/README §7.5）：每个作业先 `cp -a` 一份副本，产物落在 `<根>/<task_fingerprint 前12位>/<目录名>/`，`/api/queue` 的 `run_dataroot` 字段指出确切位置 |
 | 提交报 `SR_SANDBOX_ROOT ... rejected` | 沙箱根含空格 / 引号 / `` ` `` / `..` —— 它会拼进作业脚本里的 `rm -rf`，被白名单挡下。改成纯 `/A-Za-z0-9._-/` 的绝对路径再重启 sr-api |
 | 云量超阈值的任务显示 COMPLETED 且没有输出 tif | **不是 bug**：合法跳过（`Run skipped:` 终态行 + 退出码文件 `skip=1`），契约只要求 SRLOG 存在，不要求输出 tif。若它显示 FAILED，说明 `$SR_BUNDLE_DIR/verify_sr_run.py` 不是本批版本 |
 

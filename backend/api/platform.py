@@ -28,7 +28,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import uuid
 
 from fastapi import APIRouter, HTTPException, Request
@@ -370,12 +369,10 @@ async def chat_send(session_id: str, request: Request):
 # --------------------------------------------------------------------------
 # 3.3 共享任务队列
 # --------------------------------------------------------------------------
-#: <Suffix> is spliced into the output file name (`<stem>_<suffix>.tif`), so a
-#: value with a separator or a shell character is a writable-path hole, and an
-#: empty one makes the output name equal the input name — which SR turns into a
-#: rename of the input (sr-pipeline-interface.md §2.4-1). Fixed alphabet, and
-#: never empty (empty input falls back to SR_SUFFIX_DEFAULT).
-_SUFFIX_RE = re.compile(r"^[A-Za-z0-9_-]{1,16}$")
+#: <Suffix> validation and the default both live in the service module now
+#: (run_sr_svc.SUFFIX_RE / .normalize_suffix): the agent tool has to apply the
+#: exact same rules, and two copies would drift into two different task
+#: fingerprints for the same logical submit.
 
 
 def _leaf(path) -> str:
@@ -406,6 +403,9 @@ def _norm_sr_params(body: dict) -> dict:
     Mirrors tools/run_sr.run_run_sr exactly (same defaults / same key set), so
     a REST submit and a tool submit of identical params produce the SAME
     task_fingerprint — the idempotency layer is shared across both entries.
+    That parity is enforced, not just asserted in prose: both entries default
+    the suffix through run_sr_svc.normalize_suffix and a test pins the two
+    fingerprints equal (tests/test_run_sr.py::TestEntryPointParity).
     (The two extra rules below — locked directory, derived mask — are REST-only:
     they belong to the human-facing submit form, not to the agent tool.)
 
@@ -417,7 +417,11 @@ def _norm_sr_params(body: dict) -> dict:
     * **Derived mask.** A submit that carries no `mask_path` gets
       `<lq_path>/<leaf>_mask.tif` *if that file exists*, else 400. Never a
       silent full-image run — the operator would believe the mask applied.
-    * **Non-empty suffix.** See _SUFFIX_RE: empty means "rename the input".
+    * **Non-empty suffix.** An omitted one resolves through
+      `run_sr_svc.normalize_suffix` to the `<Suffix>` in the SR team's own
+      config inside SR_BUNDLE_DIR (falling back to "sr"); an explicit one must
+      match run_sr_svc.SUFFIX_RE. Empty is never passed through: it means
+      "rename the input".
     """
     rt = sr_runtime()
     try:
@@ -450,12 +454,10 @@ def _norm_sr_params(body: dict) -> dict:
                 status_code=400,
                 detail=f"该目录缺少掩码文件：{mask_path}"
                        f"（掩码须与影像同目录、命名为 <目录名>_mask.tif）")
-    if not suffix:
-        suffix = rt.suffix_default
-    if not _SUFFIX_RE.match(suffix):
-        raise HTTPException(
-            status_code=400,
-            detail=f"suffix 非法：{suffix!r}（只允许字母/数字/下划线/短横，长度 1..16）")
+    try:
+        suffix = run_sr_svc.normalize_suffix(suffix)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     if sr_scale < 1:
         raise HTTPException(status_code=400, detail="sr_scale 必须 >= 1")
     if gpu < 0:
@@ -526,15 +528,18 @@ async def submit_queue(request: Request):
     for k in ("previous_state", "previous_exit_code", "previous_job_id"):
         if k in data:
             out[k] = data[k]
-    # 就地写入提示（工作单 §4.2 最后一条）：没有沙箱时 SR 直接写 lq_path，并把输入
-    # 改名为 *_NOSR.tif——该目录里已有一个 _NOSR.tif 就会被覆盖。同一句话也写进作业
-    # 日志（run_sr.build_batch_script 的 audit 段），两处都不能省。
+    # 就地写入提示（工作单 §4.2 最后一条）：没有沙箱时 SR 直接写 lq_path——输出 tif
+    # 落在场景目录里，输入 tif 本身不改名也不删除（Suffix 恒非空、delete_ori 已禁用）；
+    # 只有该目录里已存在同名输出时，SR 才把旧输出改名为 <输出名>_NOSR.tif 再覆盖
+    # （util.writeTiff 的改名对象是输出路径上的同名文件，不是输入）。同一句话也写进
+    # 作业日志（run_sr.build_batch_script 的 audit 段），两处都不能省。
     if run_sr_svc.sandbox_scene_paths(params["lq_path"],
                                       run_sr_svc.task_fingerprint(params)) is None:
         out["in_place"] = True
         out["notice"] = (
-            f"输出目录 = 输入目录（{params['lq_path']}）：SR 就地写入并把输入改名为 "
-            "*_NOSR.tif，该目录里已有的 _NOSR.tif 会被覆盖")
+            f"输出目录 = 输入目录（{params['lq_path']}）：SR 就地把结果写成 "
+            f"<输入名>_{params['suffix']}.tif，输入 tif 不改名也不删除；"
+            "该目录里已存在同名输出时，旧输出先被改名为 <同名>_NOSR.tif 再覆盖")
     return out
 
 
@@ -645,8 +650,10 @@ async def bake_mask(request: Request):
     lq_path = str(out_dir)
     # Draft prefilled into the queue form — never an empty suffix (§4.3: the
     # output name would equal the input name and SR would rename the input).
+    # The value comes from the SR team's own config (services/run_sr.py::
+    # default_suffix), so the form shows the suffix the submit would get.
     draft = {"lq_path": lq_path, "mask_path": str(tif_path),
-             "sr_scale": 2, "suffix": sr_runtime().suffix_default, "gpu": 0,
+             "sr_scale": 2, "suffix": run_sr_svc.default_suffix(), "gpu": 0,
              "cloud_limit": 80, "delete_ori": False, "grid_align": True}
     return {"mask_path": str(tif_path), "mask_txt": str(txt_path),
             "lq_path": lq_path, "task_draft": draft}

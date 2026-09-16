@@ -139,12 +139,18 @@ function isIgnorableConsole(msg) {
 async function main() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sr-e2e-p5-'));
   const scenesRoot = path.join(tmp, 'scenes');
-  fs.mkdirSync(scenesRoot, { recursive: true });
-  fs.writeFileSync(path.join(scenesRoot, 'GF07A03_PMS01_20260722125045.tif'), Buffer.alloc(0));
+  // 场景 = 一个目录（真机是「年/月/日/生产编号」），里面躺着 <目录名>.tif 与
+  // <目录名>_meta.xml —— scene_search 的判据。lq_path 就是它（不是盘阵根）。
+  const SCENE = 'GF07A03_PMS01_20260722125045';
+  const sceneDir = path.join(scenesRoot, SCENE);
+  fs.mkdirSync(sceneDir, { recursive: true });
+  fs.writeFileSync(path.join(sceneDir, SCENE + '.tif'), Buffer.alloc(0));
+  fs.writeFileSync(path.join(sceneDir, SCENE + '_meta.xml'),
+    '<?xml version="1.0" encoding="UTF-8"?><SolarAzimuth>181.79</SolarAzimuth>');
   // §4.3 起：POST /api/queue 不带 mask_path 时按 <lq_path>/<目录名>_mask.tif 推导，
   // 文件不存在直接 400（不许静默全图超分）。所以提交场景必须自带掩膜 —— 后端只
   // 校验存在性，内容不读。
-  fs.writeFileSync(path.join(scenesRoot, path.basename(scenesRoot) + '_mask.tif'), Buffer.alloc(0));
+  fs.writeFileSync(path.join(sceneDir, SCENE + '_mask.tif'), Buffer.alloc(0));
   const workDir = path.join(tmp, 'work');
   fs.mkdirSync(workDir, { recursive: true });
 
@@ -217,7 +223,7 @@ async function main() {
       await page.goto(base + '/queue', { waitUntil: 'networkidle2', timeout: 30000 });
       await waitText(page, 'SSE 已连接', 10000);
       await clickByText(page, '提交 SR 作业');
-      const lqPath = path.join(scenesRoot);
+      const lqPath = sceneDir;
       await setField(page, 'lq_path', lqPath);
       await clickByText(page, '提交 SR');
       // SSE job_update（+list 快照）驱动：SUB…→PENDING→RUNNING→COMPLETED
@@ -320,11 +326,13 @@ async function main() {
       const mask = maskField.ok ? maskField.value : '';
       const lq = lqField.ok ? lqField.value : '';
       assert(mask.indexOf('_mask.tif') >= 0, `掩码已预填 ${path.basename(mask || '')}`);
-      assert(path.resolve(lq) === path.resolve(scenesRoot), `lq_path 预填原图目录 ${lq}`);
+      assert(path.resolve(lq) === path.resolve(sceneDir), `lq_path 预填原图目录 ${lq}`);
       let tagsBefore = (await firstRowTags(page)).length;
       assert(tagsBefore === 1, `未自动提交：此时队列仍只有上一任务 (${tagsBefore})`);
       // 先原样确认一次：与上一任务**参数完全相同**（同 lq_path + 同默认值，§4.3 起
       // 前端恒传 mask_path=null）→ 幂等层命中 RESUMED_COMPLETED，队列**不该**多出一行。
+      // 后缀两次都留空：指纹里那个值由后端现读 SR 配置文件得到（2026-09-16 起），
+      // 两次解析同源，所以"原样再提交"仍然成立；这段不是"两次都传 'sr'"的巧合。
       await clickByText(page, '提交 SR');
       await waitFor(page, () => !document.querySelector('.qp-form .qp-draft-tip'),
         15000, '提交往返完成（预填被清）');

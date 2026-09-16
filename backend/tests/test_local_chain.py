@@ -179,9 +179,10 @@ class LocalChainTests(unittest.TestCase):
                 "delete_ori": False, "grid_align": True,
                 "options_yml": str(self.opt_yml)}
 
-    def submit(self) -> dict:
+    def submit(self, params: dict | None = None) -> dict:
         with mock.patch.object(svc, "build_batch_script", _host_script):
-            return svc.submit_run_sr(self.params(), store=self.store)
+            return svc.submit_run_sr(params if params is not None else self.params(),
+                                     store=self.store)
 
     def verdict_path(self, job_id) -> Path:
         return self.scene / "Debug" / ("_SREXIT_%s.txt" % job_id)
@@ -252,6 +253,32 @@ class LocalChainTests(unittest.TestCase):
         self.assertEqual(again["job_id"], res["job_id"])
         self.assertTrue(again["idempotent"])
         self.assertEqual(len(local_exec._JOBS), 1)
+
+    def test_the_bundle_config_suffix_reaches_the_artefact_name(self):
+        """An omitted suffix resolves from the SR config file — end to end.
+
+        The only test that shows the value really travels to the product name:
+        bundle config file → normalize_suffix("") → <Suffix> in the generated
+        config.xml → the filename the SR script writes. Everything upstream of
+        the script is the real code path; the stub is the SR half, as in the
+        rest of this file. Both entry points (REST / agent tool) hand over the
+        same "" here, which is what makes them agree on the fingerprint.
+        """
+        (self.bundle / svc.BUNDLE_SUFFIX_CONFIG_NAMES[0]).write_text(
+            "<?xml version='1.0' encoding='UTF-8'?>\n"
+            "<SFSR_Config><Suffix>260318</Suffix></SFSR_Config>\n",
+            encoding="utf-8")
+        params = self.params()
+        params["suffix"] = svc.normalize_suffix("")
+        self.assertEqual(params["suffix"], "260318")   # not the built-in "sr"
+
+        res = self.submit(params)
+        st = self.wait_terminal(res["job_id"], res)
+        self.assertEqual(st["state"], "COMPLETED", st)
+        self.assertTrue((self.scene / "SCENE_L1_PAN_260318.tif").is_file())
+        self.assertFalse((self.scene / "SCENE_L1_PAN_sr.tif").exists())
+        self.assertIn("<Suffix>260318</Suffix>",
+                      Path(res["config_xml"]).read_text(encoding="utf-8"))
 
     def test_config_and_script_land_where_the_queue_view_looks(self):
         """The paths the platform re-derives later must exist up front."""
