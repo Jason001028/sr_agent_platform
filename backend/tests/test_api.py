@@ -19,9 +19,21 @@ from backend.api.app import create_app
 
 
 def make_scene(dirp, name, w=320, h=640):
-    p = Path(dirp) / name
+    """造一个真机形态的场景目录，返回场景文件路径。
+
+    真机布局是 <root>/…/<生产编号>/<生产编号>.tif，且同目录内有
+    <生产编号>_meta.xml —— scene_search 的场景判据（is_scene_dir）。平铺的裸
+    文件不会被列出。
+    """
+    stem = Path(name).stem
+    d = Path(dirp) / stem
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / name
     arr = (np.arange(w * h).reshape(h, w) % 65535).astype(np.uint16)
     tifffile.imwrite(p, arr, photometric="minisblack")
+    (d / (stem + "_meta.xml")).write_text(
+        '<?xml version="1.0"?><SolarAzimuth>181.79</SolarAzimuth>',
+        encoding="utf-8")
     return p
 
 
@@ -102,12 +114,16 @@ class TestScenesDisk(SceneListMixin):
         row = body["results"][0]
         self.assertFalse(row["fake"])
         self.assertEqual((row["W"], row["H"]), (320, 640))
-        self.assertEqual(row["rel"], "GF07A03_PMS01_20260722125045.tif")
-        self.assertEqual(row["jpgUrl"],
-                         "/disk-array/GF07A03_PMS01_20260722125045.preview.jpg")
+        self.assertEqual(
+            row["rel"],
+            "GF07A03_PMS01_20260722125045/GF07A03_PMS01_20260722125045.tif")
+        self.assertEqual(
+            row["jpgUrl"], "/disk-array/GF07A03_PMS01_20260722125045/"
+                           "GF07A03_PMS01_20260722125045.preview.jpg")
         self.assertFalse(row["hasPreview"])
         # 上下文侧舱任务关联：lq_path = scene 文件父目录（= run_sr 目录语义）
-        self.assertEqual(row["lq_path"], os.path.realpath(self._root.name))
+        self.assertEqual(row["lq_path"], os.path.realpath(
+            os.path.join(self._root.name, "GF07A03_PMS01_20260722125045")))
 
     def test_disk_hdr_dims_preferred(self):
         root = self._root.name
@@ -125,9 +141,12 @@ class TestScenesDisk(SceneListMixin):
         make_scene(str(sub), "KF02B04_PMS05_20260810120000.tif")
         c = self.client(str(root))
         row = c.get("/api/scenes").json()["results"][0]
-        self.assertEqual(row["rel"], "2026/07/KF02B04_PMS05_20260810120000.tif")
+        self.assertEqual(
+            row["rel"], "2026/07/KF02B04_PMS05_20260810120000/"
+                        "KF02B04_PMS05_20260810120000.tif")
         self.assertTrue(row["jpgUrl"].startswith("/disk-array/2026/07/"))
-        self.assertEqual(row["lq_path"], os.path.realpath(str(sub)))
+        self.assertEqual(row["lq_path"], os.path.realpath(
+            str(sub / "KF02B04_PMS05_20260810120000")))
 
     def test_abs_path_not_leaked(self):
         make_scene(self._root.name, "GF07A03_PMS01_20260722125045.tif")
@@ -144,9 +163,15 @@ class TestScenesImageSource(SceneListMixin):
     """§4.7：盘阵 .jpg/.jpeg 行 = 显示就绪图本身（无烘焙、jpgUrl 指源文件）。"""
 
     def make_jpg(self, name, w=40, h=30, dirp=None):
-        p = Path(dirp or self._root.name) / name
+        """场景目录里的显示就绪 JPG（真机 <目录名>_meta.xml + <目录名>.jpg）。"""
+        d = Path(dirp or self._root.name) / Path(name).stem
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / name
         Image.fromarray(np.full((h, w), 128, dtype=np.uint8)).save(
             p, format="JPEG")
+        (d / (Path(name).stem + "_meta.xml")).write_text(
+            '<?xml version="1.0"?><SolarAzimuth>181.79</SolarAzimuth>',
+            encoding="utf-8")
         return p
 
     def test_jpg_row_is_self_previewing(self):
@@ -159,8 +184,11 @@ class TestScenesImageSource(SceneListMixin):
         self.assertTrue(row["hasPreview"])                     # 无需烘焙
         self.assertTrue(row["jpgUrl"].endswith(".jpg"))
         self.assertNotIn(".preview.jpg", row["jpgUrl"])
-        self.assertEqual(row["rel"], "GF07A03_PMS01_20260722125045.jpg")
-        self.assertEqual(row["lq_path"], os.path.realpath(self._root.name))
+        self.assertEqual(
+            row["rel"],
+            "GF07A03_PMS01_20260722125045/GF07A03_PMS01_20260722125045.jpg")
+        self.assertEqual(row["lq_path"], os.path.realpath(
+            os.path.join(self._root.name, "GF07A03_PMS01_20260722125045")))
 
     def test_preview_endpoint_serves_the_source(self):
         p = self.make_jpg("KF02B04_PMS05_20260810120000.jpg")
@@ -170,7 +198,7 @@ class TestScenesImageSource(SceneListMixin):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.content, p.read_bytes())
         # 不给源是 JPG 的场景落 .preview.jpg 缓存
-        self.assertFalse(Path(self._root.name,
+        self.assertFalse(Path(self._root.name, "KF02B04_PMS05_20260810120000",
                               "KF02B04_PMS05_20260810120000.preview.jpg").is_file())
 
     def test_baked_preview_cache_is_not_listed(self):
@@ -205,14 +233,14 @@ class TestPreview(SceneListMixin):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.headers["content-type"], "image/jpeg")
         self.assertTrue(r.content.startswith(b"\xff\xd8"))
-        jpg = Path(self._root.name,
+        jpg = Path(self._root.name, "GF07A03_PMS01_20260722125045",
                    "GF07A03_PMS01_20260722125045.preview.jpg")
         self.assertTrue(jpg.is_file())
 
     def test_second_call_is_cached(self):
         c = self._disk_client_with_scene()
         scene = c.get("/api/scenes").json()["results"][0]
-        jpg = Path(self._root.name,
+        jpg = Path(self._root.name, "GF07A03_PMS01_20260722125045",
                    "GF07A03_PMS01_20260722125045.preview.jpg")
         self.assertEqual(c.get(f"/api/scenes/{scene['id']}/preview").status_code,
                          200)

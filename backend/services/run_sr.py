@@ -22,9 +22,10 @@ sbatch is absent → clean error) and the array server:
                         instead, leaving the production script untouched.
     SR_SANDBOX_ROOT     dir under which each job gets a private copy of its
                         lq_path (see sandbox_scene_paths). Unset → run in place,
-                        which writes to lq_path: SR's contract renames the input
-                        to `*_NOSR.tif` before writing the result (util.writeTiff).
-                        Forced off when SR_EXECUTOR=local (see sandbox_scene_paths).
+                        which writes to lq_path: the result tif, its Debug/ log
+                        and the meta.xml update all land in the scene directory
+                        (util.writeTiff). Forced off when SR_EXECUTOR=local
+                        (see sandbox_scene_paths).
     SR_EXECUTOR         "slurm" (default, sbatch) or "local" (backend/services/
                         local_exec.py runs the same generated script with bash
                         on this host, $SR_PYTHON, CUDA_VISIBLE_DEVICES=SR_LOCAL_GPU).
@@ -54,7 +55,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from backend.config import SR_DEFAULT_BUNDLE_DIR, SR_DEFAULT_OPTIONS_YML
-from backend.config import SR_DEFAULT_WORK_DIR, sr_runtime
+from backend.config import SR_DEFAULT_SUFFIX, SR_DEFAULT_WORK_DIR, sr_runtime
 
 from . import local_exec
 from . import slurm
@@ -66,6 +67,7 @@ from . import store as store_mod
 DEFAULT_BUNDLE_DIR = SR_DEFAULT_BUNDLE_DIR
 DEFAULT_WORK_DIR = SR_DEFAULT_WORK_DIR
 DEFAULT_OPTIONS_YML = SR_DEFAULT_OPTIONS_YML
+DEFAULT_SUFFIX = SR_DEFAULT_SUFFIX
 
 #: Exit-code file name written by SR_code/variants/verify_sr_run.py. Kept in
 #: sync by test_sr_verify.py::TestNamingContract — do not change one alone.
@@ -95,6 +97,26 @@ _SAFE_NODELIST = re.compile(r"^[A-Za-z0-9_,\[\]-]+$")
 #: silent failure. See docs/sr_code/sr-slurm-deploy-variant.md §3.2 (E9).
 RUN_SKIPPED_PREFIX = "Run skipped:"
 RUN_FINISHED_MARKER = "Run finished."
+
+#: The SR team's own sfsr config inside SR_BUNDLE_DIR, read for the default
+#: <Suffix> (see default_suffix). TWO spellings because the file on disk and the
+#: name the interface doc records disagree: SR_code/ holds
+#: `sfsr_confgig_test_espan2_cuda1.xml` (the SR team's own typo), while
+#: docs/sr_code/sr-pipeline-interface.md §5 records `sfsr_config_...` as the real
+#: one (2026-08-17 核对). Which spelling a given deployment has is unverified, so
+#: both are probed; flip the order here once someone checks the array machine.
+BUNDLE_SUFFIX_CONFIG_NAMES = (
+    "sfsr_confgig_test_espan2_cuda1.xml",
+    "sfsr_config_test_espan2_cuda1.xml",
+)
+
+#: <Suffix> is spliced into the output file name (`<stem>_<suffix>.tif`), so a
+#: separator or shell character is a writable-path hole, and an empty one makes
+#: the output name equal the input name — which SR turns into a rename of the
+#: input (sr-pipeline-interface.md §2.4-1). One alphabet, checked in exactly one
+#: place (normalize_suffix) so both submit entries agree.
+SUFFIX_RE = re.compile(r"^[A-Za-z0-9_-]{1,16}$")
+SUFFIX_RULE = "只允许字母/数字/下划线/短横，长度 1..16"
 
 
 def _posix_basename(path) -> str:
@@ -150,12 +172,16 @@ def sandbox_scene_paths(lq_path, fingerprint, sandbox_root=None) -> dict | None:
 
 
 #: delete_ori 在原型期禁用，两个提交入口（REST 的 api/platform.py 与 agent 工具
-#: tools/run_sr.py）共用这一句话。原因：SR 侧（SR_code/util.py）在 True 时
-#: ``os.remove`` 原图，而对 >=2GB 的输入连删除分支都不走 —— 直接 ``driver.Create``
-#: 覆盖同名文件、不留 *_NOSR 备份；本机执行器又没有沙箱（写入目标就是 lq_path
-#: 本身），所以误开一次就是不可恢复的数据丢失。
+#: tools/run_sr.py）共用这一句话。原因：SR 侧（SR_code/util.py 的 writeTiff）在 True
+#: 时删/覆盖的是**输出路径上的同名文件**、且不留备份 —— 小于 2GB 走 ``os.remove``，
+#: 大于 2GB 由 ``driver.Create`` 直接覆盖。输出名 == 输入名时（``<Suffix>`` 为空）
+#: 被删的就是原图；``Suffix`` 非空时被删的是上一次的同名输出。本机执行器没有沙箱
+#: （写入目标就是 lq_path 本身），两种情形都不可恢复。空 ``Suffix`` 现在两个入口都
+#: 到不了（normalize_suffix 会补上默认值），但仍留着这条说明：它是 SR 侧的真实语义，
+#: 也解释了为什么默认后缀必须非空。
 DELETE_ORI_MSG = (
-    "delete_ori 已禁用：SR 会删除原图（输入 >=2GB 时直接覆盖、不留 *_NOSR 备份），"
+    "delete_ori 已禁用：SR 不删源图而是删/覆盖输出路径上的同名文件、不留备份"
+    "（<Suffix> 为空时输出名 == 输入名，被删的就是原图），"
     "而本机模式没有沙箱、写入目标就是 lq_path 本身，一旦执行不可恢复。"
     "如需删除原图，请在作业验收通过后手工处理")
 
@@ -234,9 +260,9 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
 
     Optional sandbox step (both args given): the job first copies `sandbox_src`
     into `sandbox_parent`, and the config's DatarootLQ already points at the
-    copy. SR is not read-only against its DatarootLQ — util.writeTiff renames the
-    input to `*_NOSR.tif` before writing the result — so without this step a
-    submit writes to wherever the user pointed it.
+    copy. SR is not read-only against its DatarootLQ — util.writeTiff writes the
+    result tif there, plus the Debug/ log and the meta.xml update — so without
+    this step a submit writes to wherever the user pointed it.
 
     The copy is made unconditionally, never reused. A marker file would save a
     few minutes when the same task is re-run after a failure, but it would also
@@ -322,15 +348,16 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
         # sbatch the var is absent because of --export=NONE, hence the default.
         'echo "SR_EXECUTOR=${SR_EXECUTOR:-slurm}"',
         f'echo "config={config_xml_path}"',
-        # Running without a sandbox means SR writes *into* the scene directory
-        # and renames the input to `*_NOSR.tif` on the way (util.writeTiff) —
-        # a 4.9 GB file that already exists there gets overwritten. Say it in
-        # the log every single time (plan §4.2): the log is what gets read when
-        # a run is being explained afterwards.
+        # Running without a sandbox means SR writes *into* the scene directory:
+        # the result tif lands next to the input, and an existing file at that
+        # output path is renamed to `*_NOSR.tif` before being overwritten
+        # (util.writeTiff). Say it in the log every single time (plan §4.2): the
+        # log is what gets read when a run is being explained afterwards.
         *([] if (sandbox_src and sandbox_parent) else [
-            'echo "WARNING: no sandbox — SR runs in place: the input is renamed'
-            ' to *_NOSR.tif and an existing _NOSR.tif in that directory will be'
-            ' overwritten."',
+            'echo "WARNING: no sandbox — SR runs in place: it writes'
+            ' <input>_<suffix>.tif into the scene directory and leaves the input'
+            ' tif untouched; an existing file at that output path is renamed to'
+            ' <output>_NOSR.tif before being overwritten."',
         ]),
         'echo "=== gpu index,uuid (filtered by CUDA_VISIBLE_DEVICES) ==="',
         "if command -v nvidia-smi >/dev/null 2>&1; then",
@@ -352,8 +379,9 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
         lines += [
             "",
             "# ---- sandbox: work on a private copy, the source dir stays read-only ----",
-            "# SR renames its input to *_NOSR.tif (util.writeTiff), so running",
-            "# against the source directory would mutate production data.",
+            "# SR writes its product into <DatarootLQ> (it has to land next to the",
+            "# input), so running against the source directory would write new",
+            "# tifs and Debug/ logs into production data.",
             f'echo "sandbox_src={sandbox_src}"',
             f'echo "sandbox_scene={scene}"',
             f'SBX_SRC="{sandbox_src}"',
@@ -410,6 +438,75 @@ def read_dataroot_lq(config_xml_path) -> str | None:
     if node is None or not (node.text or "").strip():
         return None
     return node.text.strip()
+
+
+def read_bundle_suffix(bundle_dir=None, config_name=None) -> str | None:
+    """`<Suffix>` out of the SR team's own sfsr config, or None.
+
+    That file sits next to the SR code (`SR_BUNDLE_DIR`, i.e. beside
+    `code_0817_prod.py`) and is the SR team's own hand-maintained sample — the
+    platform reads it so its default output suffix matches what the production
+    runs use (`<Suffix>260318</Suffix>` in the copy at SR_code/). ONLY <Suffix>
+    is taken from it: its <DatarootLQ>/<MaskPath> are scene-specific values of
+    someone's test run, not platform inputs.
+
+    Two candidate names, probed in order, because the on-disk spelling and the
+    spelling the interface doc records disagree (see BUNDLE_SUFFIX_CONFIG_NAMES).
+    A candidate that cannot be parsed is skipped; one that parses but carries no
+    non-empty <Suffix> does not shadow the next. Never raises — same contract as
+    read_dataroot_lq: "no opinion" is always a legitimate answer, and the caller
+    falls back rather than failing a submit.
+    """
+    base = str(bundle_dir if bundle_dir is not None else sr_runtime().bundle_dir)
+    names = (config_name,) if config_name else BUNDLE_SUFFIX_CONFIG_NAMES
+    for name in names:
+        try:
+            root = ET.parse(os.path.join(base, name)).getroot()
+        except Exception:                  # missing / unreadable / malformed
+            continue
+        node = root.find("Suffix")
+        value = (node.text or "").strip() if node is not None else ""
+        if value:
+            return value
+    return None
+
+
+def default_suffix() -> str:
+    """The <Suffix> a submit that carries none gets.
+
+    The file's value wins; anything unusable — file absent, unparseable, or a
+    value that fails SUFFIX_RE — falls back to DEFAULT_SUFFIX. A bad value is
+    DISCARDED rather than sanitised: it gets spliced into an output file name,
+    so a separator or shell character must never reach the pipeline.
+
+    Deliberately NOT cached, for the same reason sr_runtime() is not: the value
+    feeds task_fingerprint, so a cached one would make the fingerprint a
+    function of process start time — a restart (or a second worker) would then
+    disagree about the same logical submit and produce a SECOND Slurm job
+    writing the same output path, which is exactly what the idempotency layer
+    exists to prevent. The visible consequence of reading live is that editing
+    <Suffix> between two submits makes the second one a new task; that is
+    correct (it names different output files) and shows up on the queue row.
+    """
+    value = read_bundle_suffix()
+    return value if value and SUFFIX_RE.match(value) else DEFAULT_SUFFIX
+
+
+def normalize_suffix(value) -> str:
+    """explicit (stripped) → file <Suffix> → DEFAULT_SUFFIX; raises ValueError.
+
+    The single choke point both submit entries share (api/platform.py and
+    tools/run_sr.py), so an identical logical submit from REST and from the
+    agent tool normalizes to the same params dict — and therefore to the same
+    task_fingerprint. They used to diverge (REST defaulted and whitelisted,
+    the tool did neither), which meant a duplicate job rather than a reuse.
+    """
+    raw = str(value).strip() if value is not None else ""
+    if not raw:
+        return default_suffix()
+    if not SUFFIX_RE.match(raw):
+        raise ValueError(f"suffix 非法：{raw!r}（{SUFFIX_RULE}）")
+    return raw
 
 
 def exit_code_file_for(config_xml_path, job_id) -> str | None:
@@ -556,7 +653,7 @@ def submit_run_sr(params: dict, run_cmd=None, store=None) -> dict:
     # other's config, and `exit_code_file_for` reads DatarootLQ back out of that
     # file to find each job's verdict — the second submit would silently point
     # the first task's polling at the wrong scene.
-    stem = f"run_sr_{params.get('suffix') or 'sr'}_{fp[:SANDBOX_KEY_LEN]}"
+    stem = f"run_sr_{params.get('suffix') or DEFAULT_SUFFIX}_{fp[:SANDBOX_KEY_LEN]}"
     cfg_path = work / f"{stem}.xml"
     cfg_path.write_text(build_config_xml(params, dataroot=(sandbox or {}).get("scene")),
                         encoding="utf-8")

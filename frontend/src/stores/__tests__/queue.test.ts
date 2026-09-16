@@ -28,15 +28,16 @@ function task(over: Partial<QueueTask> = {}): QueueTask {
 }
 
 describe('默认值（镜像后端 run_sr 缺省）', () => {
-  it('sr_scale=2 / suffix=sr / cloud_limit=80 / grid_align=true', () => {
+  it('sr_scale=2 / suffix 留空 / cloud_limit=80 / grid_align=true', () => {
     expect(defaultForm()).toEqual({
-      lq_path: '', sr_scale: 2, suffix: 'sr',
+      lq_path: '', sr_scale: 2, suffix: '',
       gpu: 0, cloud_limit: 80, delete_ori: false, grid_align: true,
     });
   });
 
-  it('后缀默认非空（空后缀会让 SR 把输入改名）', () => {
-    expect(defaultForm().suffix).not.toBe('');
+  it('后缀默认留空（交给后端按 SR 配置文件的 <Suffix> 决定）', () => {
+    // 前端一旦预填，该值就会作为显式参数压过配置文件 —— 别把它填回去。
+    expect(defaultForm().suffix).toBe('');
   });
 });
 
@@ -46,7 +47,7 @@ describe('场景目录 → 表单', () => {
     const f = draftToForm(d);
     expect(f.lq_path).toBe(d.lq_path);
     expect(f.sr_scale).toBe(2);
-    expect(f.suffix).toBe('sr');
+    expect(f.suffix).toBe('');
   });
 });
 
@@ -141,7 +142,7 @@ describe('formToSubmit（提交 body 归一）', () => {
     expect(body.delete_ori).toBe(false);
   });
 
-  it('清空后缀 → 空串（交给后端 SR_SUFFIX_DEFAULT，前端不替它决定）', () => {
+  it('清空后缀 → 空串（交给后端按 SR 配置文件决定，前端不替它决定）', () => {
     const body = formToSubmit({
       lq_path: '/a', sr_scale: 2, suffix: '  ',
       gpu: 0, cloud_limit: 80, delete_ori: false, grid_align: true,

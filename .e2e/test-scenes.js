@@ -129,15 +129,36 @@ def jpg(rel, w, h):
     Image.fromarray(arr, mode="L").save(p, "JPEG", quality=80)
     return p
 
-tif("GF07A03_PMS01_20260722125045.tif", 1600, 800)
-with open(os.path.join(root, "GF07A03_PMS01_20260722125045.hdr"), "w") as f:
-    f.write("samples = 3200\\nlines = 2000\\nbands = 1\\n")
-tif("sub/KF02B04_PMS05_20260723083000.tif", 900, 450)
-jpg("GF04_PMS02_20260801120000.jpg", 400, 200)
-# 「<目录名>_mask.tif」：后端 §4.3 的掩膜推导读的就是这个名（<lq_path>/<leaf>_mask.tif）。
-# 故意留在 fixture 里：@2026-09-15 起 is_scene_file 排除它，列表必须只剩 3 行影像。
-tif("scenes_mask.tif", 8, 8)
-tif("sub/sub_mask.tif", 8, 8)
+def scene(dir_rel, name, ext, w, h, hdr=None):
+    """造一个真机形态的场景目录，返回相对 root 的路径。
+
+    真机布局是 <root>/<年/月/日>/<生产编号>/<生产编号>.tif，同目录里躺着一份
+    <生产编号>_meta.xml —— scene_search 的场景判据（is_scene_dir）。平铺的裸文件
+    不会被列出，所以 fixture 必须按目录造。
+    """
+    rel = os.path.join(dir_rel, name, name + "." + ext) if dir_rel \\
+        else os.path.join(name, name + "." + ext)
+    d = os.path.dirname(os.path.join(root, rel))
+    os.makedirs(d, exist_ok=True)
+    (tif if ext == "tif" else jpg)(rel, w, h)
+    if hdr:
+        with open(os.path.join(root, os.path.splitext(rel)[0] + ".hdr"), "w") as f:
+            f.write(hdr)
+    with open(os.path.join(d, name + "_meta.xml"), "w") as f:
+        f.write('<?xml version="1.0" encoding="UTF-8"?>'
+                "<SolarAzimuth>181.79</SolarAzimuth>")
+    return rel
+
+scene("", "GF07A03_PMS01_20260722125045", "tif", 1600, 800,
+      hdr="samples = 3200\\nlines = 2000\\nbands = 1\\n")
+scene("sub", "KF02B04_PMS05_20260723083000", "tif", 900, 450)
+scene("", "GF04_PMS02_20260801120000", "jpg", 400, 200)
+# 「<目录名>_mask.tif」：后端 §4.3 的掩膜推导读的就是这个名（<lq_path>/<leaf>_mask.tif），
+# 真机上它和场景同名同目录。故意留在 fixture 里：is_scene_file 的白名单把它挡在列表外，
+# 3 个场景必须仍是 3 行 —— 一旦失效，页面上每个场景都会多出一行（卫星/传感器从掩膜
+# 文件名解析、尺寸取掩膜 TIFF 头）。
+tif("GF07A03_PMS01_20260722125045/GF07A03_PMS01_20260722125045_mask.tif", 8, 8)
+tif("sub/KF02B04_PMS05_20260723083000/KF02B04_PMS05_20260723083000_mask.tif", 8, 8)
 `;
 
 function makeFixtures(scenesRoot) {
@@ -366,10 +387,10 @@ async function main() {
       await sleep(600);
       assert(countUrl(previewRe) === 0,
         `没有为 JPG 源发 /preview 请求（后端不为它烘焙）(${countUrl(previewRe)})`);
-      assert(!fs.existsSync(path.join(scenesRoot, JPG_ROW + '.preview.jpg')),
+      assert(!fs.existsSync(path.join(scenesRoot, JPG_ROW, JPG_ROW + '.preview.jpg')),
         '盘上确实没有生成它的预览缓存');
-      assert(countUrl(new RegExp(`^${base}${DISK_PREFIX}${JPG_ROW}\\.jpg$`)) >= 1,
-        '静态读的是源文件本身 /disk-array/<场景>.jpg');
+      assert(countUrl(new RegExp(`^${base}${DISK_PREFIX}${JPG_ROW}/${JPG_ROW}\\.jpg$`)) >= 1,
+        '静态读的是源文件本身 /disk-array/<场景>/<场景>.jpg');
       assert(await page.evaluate(() => location.pathname.endsWith('/scenes')),
         '打开场景不跳路由（留在 /scenes）');
       rs = await rows(page);
@@ -378,15 +399,15 @@ async function main() {
 
       /* ---------- C. 未烘焙 TIFF：懒生成 + 静态直读 ---------- */
       console.log('\n[C] 「生成并打开」= 懒生成预览 + 静态直读');
-      const previewJpg = path.join(scenesRoot, HDR_ROW + '.preview.jpg');
+      const previewJpg = path.join(scenesRoot, HDR_ROW, HDR_ROW + '.preview.jpg');
       assert(!fs.existsSync(previewJpg), '点击前盘上没有这张图的预览缓存');
       await clickRowButton(page, HDR_ROW);
       await waitRowTag(page, HDR_ROW, '已生成');
       assert(countUrl(previewRe) === 1,
         `调用 1 次 /api/scenes/{id}/preview 懒生成 (${countUrl(previewRe)})`);
       assert(fs.existsSync(previewJpg), `后端落盘 ${path.basename(previewJpg)}`);
-      assert(countUrl(new RegExp(`^${base}${DISK_PREFIX}${HDR_ROW}\\.preview\\.jpg$`)) >= 1,
-        '静态读图走 /disk-array/…preview.jpg（nginx alias 位）');
+      assert(countUrl(new RegExp(`^${base}${DISK_PREFIX}${HDR_ROW}/${HDR_ROW}\\.preview\\.jpg$`)) >= 1,
+        '静态读图走 /disk-array/<场景>/…preview.jpg（nginx alias 位）');
       const rowsNow = await rows(page);
       assert(rowsNow[2].tag === '已生成' && rowsNow[2].btn === '打开',
         `列表行就地翻牌为「已生成」+「打开」（${rowsNow[2].tag}/${rowsNow[2].btn}）`);
@@ -505,17 +526,22 @@ async function main() {
       const lq = await readField(page, 'lq_path');
       const maskField = await readField(page, 'mask_path');
       const suffix = await readField(page, '后缀');
-      assert(lq.ok && lq.value === scenesRoot, `lq_path 带入场景目录 ${lq.value}`);
+      // 场景目录 = 真机的「生产编号」目录（scene 文件的父目录），不是盘阵根。
+      assert(lq.ok && lq.value === path.join(scenesRoot, HDR_ROW),
+        `lq_path 带入场景目录 ${lq.value}`);
       // 2026-09-15 起 lq_path 不再是只读：原型期 SR_LOCKED_DIR 没有 API 暴露，前端无从
       // 得知"唯一合法目录"，只能拿历史任务里的目录当下拉候选，输入框仍须可手改。
       // 此刻队列为空 → 候选 0；有候选的情况在 test-platform.js §B 断（那里有真任务）。
       assert(!lq.readonly, 'lq_path 不再只读（允许从历史目录下拉里选）');
       assert(lq.cands === 0, `队列为空 → 目录下拉无候选（cands=${lq.cands}）`);
       assert(maskField.ok && maskField.readonly
-        && maskField.value === scenesRoot + '/scenes_mask.tif',
+        && maskField.value === path.join(scenesRoot, HDR_ROW) + '/' + HDR_ROW + '_mask.tif',
         `mask_path 只读展示后端推导值 ${maskField.value}`);
-      assert(suffix.ok && suffix.value.trim() === 'sr',
-        `后缀默认非空 'sr'（空后缀会让输出名等于输入名）(${suffix.value})`);
+      // 2026-09-16 起后缀不再预填 'sr'：留空即由后端按 SR 团队配置文件里的
+      // <Suffix> 决定（services/run_sr.py::default_suffix）。预填的值会作为
+      // 显式参数压过配置文件，所以这里断"必须是空的"。
+      assert(suffix.ok && suffix.value.trim() === '',
+        `后缀默认留空、交后端按 SR 配置决定 (${suffix.value})`);
       const tasks = await page.evaluate(async (ab) => {
         const r = await fetch(ab + '/api/queue');
         return (await r.json()).tasks.length;
@@ -531,7 +557,7 @@ async function main() {
       await page.setCacheEnabled(false);
       await page.goto(base + '/scenes', { waitUntil: 'networkidle2', timeout: 30000 });
       await waitRows(page, 3);
-      const jpgFile = path.join(scenesRoot, JPG_ROW + '.jpg');
+      const jpgFile = path.join(scenesRoot, JPG_ROW, JPG_ROW + '.jpg');
       const jpgKeep = fs.readFileSync(jpgFile);
       fs.writeFileSync(jpgFile, Buffer.from('not a jpeg at all'));
       await clickRowButton(page, JPG_ROW);

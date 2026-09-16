@@ -47,7 +47,8 @@
 + 场景目录就是 SR 的 `DatarootLQ`：`backend/api/app.py:100` 给出的 `lq_path` 是场景文件的父目录；`backend/services/run_sr.py:154` 把它写成 `<DatarootLQ>`。
 + 掩码落盘位置：`backend/api/platform.py:536-546`，`out_dir / f"{stem}_mask.tif"`，即场景文件同目录。
 + 预览 JPG 位置：`backend/api/paths.py:118-135`，默认 `<源文件同目录>/<源文件 stem>.preview.jpg`。也就是说「JPG 与原图同目录」这条，后端本来就是对的。
-+ SR 会改写入参目录：`SR_code/util.py:1312`、`:1355`、`:1424` 用 `os.rename(path + tiftype, path + "_NOSR" + tiftype)` 把输入改名；POSIX rename 会覆盖同名文件。锁定目录里已有一个 4.9GB 的 `_NOSR.tif`，再次运行会覆盖它。
++ SR 会写入入参目录：产物 tif（`SR_code/code_0817_prod.py:582`，名 = `<输入名>_<Suffix>.tif`）、`Debug/` 日志与 meta.xml 更新都落在那里。另有 `SR_code/util.py:1312`、`:1355`、`:1424` 的 `os.rename(path + tiftype, path + "_NOSR" + tiftype)` —— `path` 是**输出路径**，非空 suffix 下首跑该文件不存在（异常被吞），重跑时被改名并覆盖的是上一次的产物；只有 suffix 为空（输出名 == 输入名）时被改名的才是输入。`DeleteOriTifNeeded` 同理只作用于输出路径上的文件。
+  （**2026-09-16 订正**：本行原文写「用 `os.rename(…)` 把**输入**改名」，与实现不符；结论「入参目录会被写入」不变。见契约 §2.4 第 1 条与 §6。）
 + SR 自己创建 `Debug/`：`SR_code/code_0817_prod.py:166` 有 `os.makedirs(..., exist_ok=True)`，不需要预先建目录。
 + 终态判定：`<DatarootLQ>/Debug/_SREXIT_<job_id>.txt`，由 `SR_code/variants/verify_sr_run.py` 写。`job_id` 取自命令行 `--job-id`，没有该参数时取 `$SLURM_JOB_ID`（`verify_sr_run.py:40`、`:394-418`）。集群账务未启用，`sacct` 永远不可用（恒 rc=1）。
 + 显卡：生产脚本 `SR_code/code_0817_prod.py:146` 与 `:644` 直接把 `CUDA_VISIBLE_DEVICES` 写成 `"0"` / `"1"`；变体 `SR_code/variants/code_0817_prod_slurm.py:161-166`、`:677` 改成读取环境变量。**所以本地执行必须把 `SR_SR_SCRIPT` 指向变体**，否则外部指定的显卡被覆盖。
@@ -130,7 +131,7 @@ def cancel(job_id) -> bool
   + `build_batch_script()`（`:170-325`）增加参数 `job_id=None`。给了 job_id 时，把最后一行校验器调用改成 `... --sr-exit-code "$_sr_rc" --job-id <job_id>`，这样本地执行不依赖 `$SLURM_JOB_ID`。审计段加一行 `echo "SR_EXECUTOR=${SR_EXECUTOR:-slurm}"`。
   + `submit_run_sr()`（`:429-504`）：按 `rt.executor` 选择 `slurm.sbatch_submit` 或 `local_exec.submit`；`available()` 的判据同理由 `slurm.slurm_available()` 换成对应执行器（本地模式恒为 True）。
   + `query_job_status()`（`:375-389`）：本地模式下走 `local_exec.status`。
-  + 本地模式下强制关闭沙箱：`SR_SANDBOX_ROOT` 不参与。原因是沙箱会把 `DatarootLQ` 指向 `<sandbox>/<key>/<目录名>`，SR 的结果就写到那里，直接违背「输出与原图同目录」这条需求。锁定目录本身是 `/DiskArray/tmp/wangrz/` 下的试验目录，可以接受就地写入（但要在 API 响应与日志里把「输出目录 = 输入目录，会覆盖已有 `_NOSR.tif`」写清楚）。
+  + 本地模式下强制关闭沙箱：`SR_SANDBOX_ROOT` 不参与。原因是沙箱会把 `DatarootLQ` 指向 `<sandbox>/<key>/<目录名>`，SR 的结果就写到那里，直接违背「输出与原图同目录」这条需求。锁定目录本身是 `/DiskArray/tmp/wangrz/` 下的试验目录，可以接受就地写入（但要在 API 响应与日志里把「输出目录 = 输入目录，会覆盖同名旧产物；输入 tif 不改名也不删除」写清楚）。
 
 ### 4.3 后端：路径锁死与掩码规则（`backend/api/platform.py` 的 `POST /api/queue`）
 
@@ -249,10 +250,13 @@ SRLOG。校验器随后判定 `Debug/_SRLOG.txt`（9/12 的）是上次残留、
 Environment=SR_EXECUTOR=local
 Environment=SR_LOCKED_DIR=<§3.1 确认后的锁定目录>
 Environment=SR_LOCAL_GPU=0
-Environment=SR_SUFFIX_DEFAULT=sr
 Environment=SR_SR_SCRIPT=code_0817_prod_slurm.py
 Environment=SR_PYTHON=<conda 环境的 python 绝对路径>
 ```
+
+> **2026-09-16 订正**：上面这份块里的 `Environment=SR_SUFFIX_DEFAULT=sr` 已删除。该变量同日作废
+> （设了也不读）：产物后缀的默认值改由平台读 `$SR_BUNDLE_DIR` 下 SR 团队配置文件里的 `<Suffix>`
+> 得出，读不到或值非法才回落到内置 `sr`。见 [deploy/README.md §7.6](deploy/README.md)。
 
 要点：
 
@@ -268,5 +272,5 @@ Environment=SR_PYTHON=<conda 环境的 python 绝对路径>
 + 不往生产盘阵写文件。本原型的写入目标是 `/DiskArray/tmp/wangrz/` 下的试验目录。
 + 不要用 `sacct` 判终态（账务未启用，恒 rc=1），终态一律读 `Debug/_SREXIT_<job_id>.txt`。
 + 文档里不留 `<<CONFIRM>>`、`<占位>` 这类没填的值。
-+ 运行 SR 会覆盖锁定目录里已有的 `_NOSR.tif`（4.9GB）。这是已知且接受的代价，但每次真跑之前要说一次。
++ 运行 SR 会往锁定目录里就地写产物，并覆盖**同名**旧产物（非空 suffix 下不碰目录里已有的 `_NOSR.tif`，它是 9/12 那次的原始输入）。这是已知且接受的代价，但每次真跑之前要说一次。
 + 后端测试基线 309 passed，任何改动后都要保持全绿。

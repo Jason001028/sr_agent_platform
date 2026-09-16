@@ -65,7 +65,9 @@ def _bad_path(path: str) -> str | None:
             },
             "suffix": {
                 "type": "string", "default": "",
-                "description": "Output filename suffix.",
+                "description": "Output filename suffix (letters/digits/_/-, "
+                               "1..16 chars). Empty or omitted → the <Suffix> "
+                               "configured in the SR team's own config file.",
             },
             "gpu": {
                 "type": "integer", "minimum": 0, "default": 0,
@@ -78,8 +80,9 @@ def _bad_path(path: str) -> str | None:
             "delete_ori": {
                 "type": "boolean", "default": False,
                 "description": "Disabled in this prototype: passing true is "
-                               "rejected (SR would delete or overwrite the "
-                               "original in place, with no backup).",
+                               "rejected (SR deletes or overwrites the file at "
+                               "the output path with no backup; with an empty "
+                               "suffix that file is the original itself).",
             },
             "grid_align": {
                 "type": "boolean", "default": True,
@@ -99,7 +102,6 @@ def run_run_sr(**params) -> dict:
         sr_scale = int(params.get("sr_scale", 2))
         gpu = int(params.get("gpu", 0))
         cloud_limit = int(params.get("cloud_limit", 80))
-        suffix = str(params.get("suffix") or "")
     except (KeyError, TypeError, ValueError) as e:
         return err(f"bad params: {e}")
 
@@ -119,6 +121,16 @@ def run_run_sr(**params) -> dict:
         return err("gpu must be >= 0")
     if not (0 <= cloud_limit <= 100):
         return err("cloud_limit must be in 0..100")
+    # Same normalization the REST entry point applies (api/platform.py::
+    # _norm_sr_params), deliberately shared and not copied: the two entries must
+    # agree on the effective suffix or an identical logical submit produces two
+    # different task_fingerprints and therefore a duplicate job instead of a
+    # reuse. Returns err rather than raising — this is a contract boundary, the
+    # model is meant to read the rule and retry.
+    try:
+        suffix = svc.normalize_suffix(params.get("suffix"))
+    except ValueError as e:
+        return err(str(e))
 
     params = {
         "lq_path": lq_path, "mask_path": params.get("mask_path"),

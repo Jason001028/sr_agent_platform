@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * ScenesPage.vue — 盘阵场景检索 + 查看（阶段4）
+ * ScenesPage.vue — 场景库：盘阵场景检索 + 查看（阶段4）
  * 检索参数镜像后端 search_scenes（卫星/传感器/日期/关键词），行内 W/H 由后端
  * 补（.hdr 优先 / TIF 头探测 / JPG 走 Pillow 头）。点「打开」→ 未生成先懒生成预览
  * JPG → 静态 jpgUrl 读字节 → viewer route='jpg'（掩码按元数据 W/H 换算）。
@@ -31,7 +31,7 @@ onMounted(() => { void scenes.list(); });
 <template>
   <div class="scenes-page">
     <div class="sp-head">
-      <h2>盘阵场景</h2>
+      <h2>场景库</h2>
       <span class="sp-src" :class="scenes.source === 'fake' ? 'fake' : 'disk'">
         {{ scenes.source === 'fake' ? 'fake 回退（未配 SR_SCENES_ROOT）' : '盘阵' }}
         · 扫 {{ scenes.scanned }} · 命中 {{ scenes.count }}
@@ -111,7 +111,7 @@ onMounted(() => { void scenes.list(); });
 
 <style scoped>
 /* 盘阵场景检索：莫兰迪绿打底，检索条与结果表为白色浮层卡 */
-.scenes-page { max-width: 1180px; margin: 0 auto; padding: 10px 20px 44px; }
+.scenes-page { max-width: 1360px; margin: 0 auto; padding: 10px 20px 44px; }
 
 /* 页头：大标题（藏青）直接落在莫兰迪底上，来源 chip 用白/浅胶囊 */
 .sp-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 16px; }
@@ -223,7 +223,10 @@ onMounted(() => { void scenes.list(); });
 }
 .sp-tbl td.left { text-align: left; }
 .sp-tbl td.right { text-align: right; font-variant-numeric: tabular-nums; }
-.sp-tbl td.name { max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 场景名完整显示：不截断、不省略号。生产场景名是「卫星_传感器_时间戳_…_L1_PAN」
+   这种 50+ 字符的长串，中间没有空格，靠 table 布局自己挤不出空间，必须允许换行
+   并按字符断行（word-break），否则又被 ellipsis 截掉。 */
+.sp-tbl td.name { min-width: 300px; word-break: break-all; line-height: 1.45; }
 .sp-tbl td.empty { color: var(--ink-sub); text-align: center; padding: 22px; }
 .sp-tbl tbody tr { transition: background 0.12s ease; }
 .sp-tbl tbody tr:hover td { background: #fafcfa; }

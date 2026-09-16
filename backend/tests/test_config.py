@@ -13,6 +13,7 @@ Two things are pinned:
 
 import inspect
 import os
+import tempfile
 import unittest
 from unittest import mock
 
@@ -57,10 +58,26 @@ class SrRuntimeDefaultsTest(unittest.TestCase):
         self.assertEqual(svc.DEFAULT_BUNDLE_DIR, config.SR_DEFAULT_BUNDLE_DIR)
         self.assertEqual(svc.DEFAULT_WORK_DIR, config.SR_DEFAULT_WORK_DIR)
         self.assertEqual(svc.DEFAULT_OPTIONS_YML, config.SR_DEFAULT_OPTIONS_YML)
+        self.assertEqual(svc.DEFAULT_SUFFIX, config.SR_DEFAULT_SUFFIX)
         # and the constants equal what the verifier's deploy docs promise
         self.assertEqual(svc.DEFAULT_BUNDLE_DIR,
                          config.sr_runtime().bundle_dir)
         self.assertEqual(svc.DEFAULT_WORK_DIR, config.sr_runtime().slurm_work_dir)
+
+    def test_suffix_default_is_not_an_env_knob_any_more(self):
+        """SR_SUFFIX_DEFAULT was retired 2026-09-16.
+
+        The default <Suffix> now comes from the SR team's own config file inside
+        SR_BUNDLE_DIR (services/run_sr.py::default_suffix), so setting the old
+        env var must change nothing. Pinned because "the unit file still exports
+        a variable nobody reads" is a silent misconfiguration: an operator would
+        set it and believe it took effect.
+        """
+        tmp = tempfile.TemporaryDirectory()       # empty bundle → no config file
+        self.addCleanup(tmp.cleanup)
+        os.environ["SR_BUNDLE_DIR"] = tmp.name
+        os.environ["SR_SUFFIX_DEFAULT"] = "zzz"
+        self.assertEqual(svc.default_suffix(), config.SR_DEFAULT_SUFFIX)
 
     def test_scenes_root_default_matches_paths_module(self):
         from backend.api import paths
