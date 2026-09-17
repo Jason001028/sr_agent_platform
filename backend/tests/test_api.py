@@ -122,8 +122,8 @@ class TestScenesDisk(SceneListMixin):
                            "GF07A03_PMS01_20260722125045.preview.jpg")
         self.assertFalse(row["hasPreview"])
         # 上下文侧舱任务关联：lq_path = scene 文件父目录（= run_sr 目录语义）
-        self.assertEqual(row["lq_path"], os.path.realpath(
-            os.path.join(self._root.name, "GF07A03_PMS01_20260722125045")))
+        self.assertEqual(row["lq_path"], Path(os.path.realpath(
+            os.path.join(self._root.name, "GF07A03_PMS01_20260722125045"))).as_posix())
 
     def test_disk_hdr_dims_preferred(self):
         root = self._root.name
@@ -145,8 +145,9 @@ class TestScenesDisk(SceneListMixin):
             row["rel"], "2026/07/KF02B04_PMS05_20260810120000/"
                         "KF02B04_PMS05_20260810120000.tif")
         self.assertTrue(row["jpgUrl"].startswith("/disk-array/2026/07/"))
-        self.assertEqual(row["lq_path"], os.path.realpath(
-            str(sub / "KF02B04_PMS05_20260810120000")))
+        self.assertEqual(row["lq_path"],
+                         Path(os.path.realpath(
+                             str(sub / "KF02B04_PMS05_20260810120000"))).as_posix())
 
     def test_abs_path_not_leaked(self):
         make_scene(self._root.name, "GF07A03_PMS01_20260722125045.tif")
@@ -187,8 +188,8 @@ class TestScenesImageSource(SceneListMixin):
         self.assertEqual(
             row["rel"],
             "GF07A03_PMS01_20260722125045/GF07A03_PMS01_20260722125045.jpg")
-        self.assertEqual(row["lq_path"], os.path.realpath(
-            os.path.join(self._root.name, "GF07A03_PMS01_20260722125045")))
+        self.assertEqual(row["lq_path"], Path(os.path.realpath(
+            os.path.join(self._root.name, "GF07A03_PMS01_20260722125045"))).as_posix())
 
     def test_preview_endpoint_serves_the_source(self):
         p = self.make_jpg("KF02B04_PMS05_20260810120000.jpg")

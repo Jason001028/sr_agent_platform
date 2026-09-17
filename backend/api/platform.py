@@ -29,6 +29,7 @@ import asyncio
 import json
 import os
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -37,10 +38,17 @@ from backend.agent import loop as loop_mod
 from backend.api import paths
 from backend.api.paths import PathDeniedError
 from backend.config import sr_runtime
+from backend.pathguard import (
+    ensure_allowed, normalize_submit_path, to_posix_array_path)
 from backend.services import local_exec
 from backend.services import mask as mask_svc
 from backend.services import run_sr as run_sr_svc
+from backend.services import scene_search
 from backend.services import slurm
+#: 掩码命名的唯一实现搬到了 services（REST 与 agent 工具两个入口都要用同一份
+#: 推导，见 scene_search.derived_mask_path）；这里转出给既有调用方
+#: （本模块 bake_mask / _norm_sr_params、api/app.py::resolve）。
+from backend.services.scene_search import derived_mask_path, mask_stem
 from backend.tools import run_sr as run_sr_tool
 from backend.tools.contract import list_tools
 
@@ -137,17 +145,25 @@ def _task_state(state, task: dict) -> tuple[str, bool]:
     if state_name == prev:
         return state_name, False
     cache[task_id] = state_name
+    updated_at = None
     try:
-        state.store.set_sr_task_state(task_id, state_name)
+        updated_at = state.store.set_sr_task_state(task_id, state_name)
     except Exception:  # noqa: BLE001 — DB write must not break the list
         pass
-    _broadcast(state, {"type": "job_update", "task_id": task_id,
-                       "job_id": task["job_id"], "state": state_name,
-                       "prev_state": prev,
-                       "ok": state_name in ("PENDING", "RUNNING", "COMPLETED"),
-                       "error": None
-                       if state_name not in ("FAILED", "UNKNOWN")
-                       else f"state={state_name}"})
+    frame = {"type": "job_update", "task_id": task_id,
+             "job_id": task["job_id"], "state": state_name,
+             "prev_state": prev,
+             "ok": state_name in ("PENDING", "RUNNING", "COMPLETED"),
+             "error": None
+             if state_name not in ("FAILED", "UNKNOWN")
+             else f"state={state_name}"}
+    # 终态行的耗时 = updated_at − created_at。只推 state 的话，客户端手上那份
+    # updated_at 还停在上一次 GET 的快照（提交刚落库时 updated_at == created_at），
+    # 运行中靠本地现算看不出问题，一进终态就退化成「0 秒」。写库成功才带上这个值：
+    # 写失败时 DB 里没变，凭本地时钟发一个只会让界面与库对不上。
+    if updated_at is not None:
+        frame["updated_at"] = updated_at
+    _broadcast(state, frame)
     return state_name, True
 
 
@@ -390,11 +406,47 @@ def _norm_dir(path) -> str:
     return os.path.realpath(str(path).replace("\\", "/").rstrip("/") or "/")
 
 
-def derived_mask_path(lq_path) -> str:
-    """The mask a scene directory is expected to carry: `<leaf>_mask.tif` beside
-    the image (what `POST /api/masks` writes, and what the SR operator drops in
-    by hand when the mask was drawn elsewhere)."""
-    return os.path.join(str(lq_path).rstrip("/\\"), f"{_leaf(lq_path)}_mask.tif")
+def _mask_target_dir(body: dict) -> Path:
+    """`POST /api/masks` 要往哪儿写掩码 —— 返回**输入影像**的绝对路径。
+
+    两种入口，都要过白名单：
+
+    * `lq_path`：盘阵上任意一个合法场景目录（手工行用；Windows 形态 `W:\\...`
+      也吃）。**不要求 SR_SCENES_ROOT**，这正是"打开任意场景目录"的前提。
+      路径本身要存在（kind="dir"）。
+    * `scene_id`：库行的不透明 id，沿用旧语义（需要 SR_SCENES_ROOT）。
+
+    两条路都收敛到 `scene_search.input_scene_path`，掩码文件名再由
+    `mask_stem` 取 —— 目录是不是场景目录，判断只此一处。
+    """
+    lq_path = body.get("lq_path")
+    if isinstance(lq_path, str) and lq_path.strip():
+        try:
+            d = ensure_allowed(to_posix_array_path(lq_path), kind="dir")
+        except PathDeniedError as e:
+            raise HTTPException(status_code=403,
+                                detail=f"路径不可用：{e}") from e
+        inp = scene_search.input_scene_path(d)
+        if inp is None:
+            cands = "、".join(c.name for c in scene_search.input_candidates(d))
+            raise HTTPException(
+                status_code=404,
+                detail=f"不是合法场景目录：{d}"
+                       f"（需含 <目录名>_meta.xml，且含 {cands} 之一）")
+        return inp
+    root = paths.scenes_root()
+    if root is None:
+        raise HTTPException(status_code=404,
+                            detail="盘阵未配置（SR_SCENES_ROOT），无场景可掩码")
+    scene_id = body.get("scene_id")
+    if not isinstance(scene_id, str) or not scene_id:
+        raise HTTPException(status_code=400, detail="scene_id 或 lq_path 必填")
+    try:
+        return paths.scene_id_to_abs(scene_id, root)
+    except PathDeniedError as e:
+        raise HTTPException(status_code=404, detail=f"场景不可访问：{e}") from e
+
+
 
 
 def _norm_sr_params(body: dict) -> dict:
@@ -415,8 +467,11 @@ def _norm_sr_params(body: dict) -> dict:
       directory. The prototype is pinned to one test scene dir; a typo in a
       free-text box would otherwise aim a job at another scene.
     * **Derived mask.** A submit that carries no `mask_path` gets
-      `<lq_path>/<leaf>_mask.tif` *if that file exists*, else 400. Never a
-      silent full-image run — the operator would believe the mask applied.
+      `<lq_path>/<input image stem>_mask.tif` *if that file exists*, else 400.
+      Never a silent full-image run — the operator would believe the mask
+      applied. The stem comes from the scene's input image (SC scenes:
+      `<dirname>.tif`; RC scenes: `PAN.tif`), not from the directory name —
+      see services/scene_search.mask_stem.
     * **Non-empty suffix.** An omitted one resolves through
       `run_sr_svc.normalize_suffix` to the `<Suffix>` in the SR team's own
       config inside SR_BUNDLE_DIR (falling back to "sr"); an explicit one must
@@ -437,6 +492,13 @@ def _norm_sr_params(body: dict) -> dict:
     bad = run_sr_tool._bad_path(lq_path)
     if bad:
         raise HTTPException(status_code=400, detail=f"lq_path {bad}")
+    # 归一化到盘阵 POSIX 绝对路径（`W:\...` 也吃）。与 agent 工具入口共用
+    # pathguard.normalize_submit_path —— 两个入口对同一次提交必须算出同一个
+    # task_fingerprint，否则幂等层失效、重复投作业。
+    try:
+        lq_path = normalize_submit_path(lq_path)
+    except PathDeniedError as e:
+        raise HTTPException(status_code=400, detail=f"lq_path 不可用：{e}") from e
     if rt.locked_dir and _norm_dir(lq_path) != _norm_dir(rt.locked_dir):
         raise HTTPException(
             status_code=400,
@@ -446,14 +508,19 @@ def _norm_sr_params(body: dict) -> dict:
         bad = run_sr_tool._bad_path(str(mask_path).strip())
         if bad:
             raise HTTPException(status_code=400, detail=f"mask_path {bad}")
-        mask_path = str(mask_path).strip()
+        try:
+            mask_path = normalize_submit_path(str(mask_path).strip())
+        except PathDeniedError as e:
+            raise HTTPException(status_code=400,
+                                detail=f"mask_path 不可用：{e}") from e
     else:
         mask_path = derived_mask_path(lq_path)
         if not os.path.isfile(mask_path):
             raise HTTPException(
                 status_code=400,
                 detail=f"该目录缺少掩码文件：{mask_path}"
-                       f"（掩码须与影像同目录、命名为 <目录名>_mask.tif）")
+                       f"（掩码须与影像同目录、按输入影像命名 "
+                       f"{mask_stem(lq_path)}_mask.tif）")
     try:
         suffix = run_sr_svc.normalize_suffix(suffix)
     except ValueError as e:
@@ -599,17 +666,7 @@ async def bake_mask(request: Request):
     state = request.app.state
     body = await _json_body(request)
 
-    root = paths.scenes_root()
-    if root is None:
-        raise HTTPException(status_code=404,
-                            detail="盘阵未配置（SR_SCENES_ROOT），无场景可掩码")
-    scene_id = body.get("scene_id")
-    if not isinstance(scene_id, str) or not scene_id:
-        raise HTTPException(status_code=400, detail="scene_id 必填")
-    try:
-        scene_abs = paths.scene_id_to_abs(scene_id, root)
-    except PathDeniedError as e:
-        raise HTTPException(status_code=404, detail=f"场景不可访问：{e}") from e
+    scene_abs = _mask_target_dir(body)
 
     try:
         W = int(body["W"])
@@ -638,7 +695,9 @@ async def bake_mask(request: Request):
         polygons.append(pts)
 
     out_dir = scene_abs.parent
-    stem = scene_abs.stem
+    # 与 derived_mask_path 同源（同一个 mask_stem）：写出去的名字和提交时去找的
+    # 名字必须是同一个，否则 RC（PAN.tif）场景写进去也白写。
+    stem = mask_stem(out_dir)
     tif_path = out_dir / f"{stem}_mask.tif"
     txt_path = out_dir / f"{stem}_mask.txt"
     try:
@@ -647,13 +706,17 @@ async def bake_mask(request: Request):
         raise HTTPException(status_code=422,
                             detail=f"掩码生成失败：{type(e).__name__}: {e}") from e
 
-    lq_path = str(out_dir)
+    # 回给前端的一律是盘阵 POSIX 形态（与提交侧 _norm_sr_params 存进 params 的
+    # 那个字符串逐字节相同）。这里若回宿主形态，同一份掩码在"写入响应"与
+    # "提交时推导"两条路上就是两个字符串，前端拿哪个显示都对不上。
+    lq_path = out_dir.as_posix()
+    mask_path = derived_mask_path(lq_path)     # 与上面写出去的必然是同一份
     # Draft prefilled into the queue form — never an empty suffix (§4.3: the
     # output name would equal the input name and SR would rename the input).
     # The value comes from the SR team's own config (services/run_sr.py::
     # default_suffix), so the form shows the suffix the submit would get.
-    draft = {"lq_path": lq_path, "mask_path": str(tif_path),
+    draft = {"lq_path": lq_path, "mask_path": mask_path,
              "sr_scale": 2, "suffix": run_sr_svc.default_suffix(), "gpu": 0,
              "cloud_limit": 80, "delete_ori": False, "grid_align": True}
-    return {"mask_path": str(tif_path), "mask_txt": str(txt_path),
+    return {"mask_path": mask_path, "mask_txt": txt_path.as_posix(),
             "lq_path": lq_path, "task_draft": draft}

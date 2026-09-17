@@ -197,16 +197,24 @@ class Store:
             (limit,)).fetchall()
         return [self._sr_task_row(r) for r in rows]
 
-    def set_sr_task_state(self, task_id: int, state: str) -> None:
+    def set_sr_task_state(self, task_id: int, state: str) -> float:
         """Write back a queue display state (阶段5 校准器) + bump updated_at.
 
         The idempotency layer (submit_run_sr) never reads `status`, so this
         semantic upgrade is regression-free — see api-contract.md §3.3.
+
+        Returns the timestamp written. The terminal-row elapsed time is
+        `updated_at − created_at`, so whoever broadcasts the change has to hand
+        clients this exact value: a client that only learns the new `state`
+        keeps its stale `updated_at` (a GET snapshot from submit time, where
+        `updated_at == created_at`) and renders every finished job as 0 秒.
         """
         db = self._db()
+        now = time.time()
         db.execute("UPDATE sr_tasks SET status = ?, updated_at = ? WHERE id = ?",
-                   (state, time.time(), task_id))
+                   (state, now, task_id))
         db.commit()
+        return now
 
     def put_sr_task(self, fingerprint: str, params: dict, *,
                     session_id: str | None = None, status: str = "submitted",

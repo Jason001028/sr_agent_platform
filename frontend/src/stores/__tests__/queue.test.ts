@@ -203,6 +203,56 @@ describe('mergeJobUpdate（SSE 归并）', () => {
       expect(rows[0].state).toBe(st);
     }
   });
+
+  it('帧带 updated_at → 一并覆盖（终态耗时靠它算）', () => {
+    const rows = [task({ task_id: 1, state: 'RUNNING', created_at: 1000, updated_at: 1000 })];
+    const next = mergeJobUpdate(rows, {
+      type: 'job_update', task_id: 1, job_id: 101,
+      state: 'COMPLETED', prev_state: 'RUNNING', ok: true, error: null,
+      updated_at: 1073,
+    });
+    expect(next[0].updated_at).toBe(1073);
+    expect(taskElapsed(next[0], 99999)).toEqual({ seconds: 73, running: false });
+  });
+
+  it('回归钉：任务跑完不再退化成「0 秒」', () => {
+    // 本地快照取自提交刚落库那一次 GET（updated_at == created_at），随后只有
+    // SSE 在推状态。修复前：一进终态就改用这份快照 → 耗时恒为 0 秒。
+    let rows = [task({ task_id: 1, state: 'SUBMITTING', created_at: 1000, updated_at: 1000 })];
+    const at = (st: string, updated_at?: number) => {
+      rows = mergeJobUpdate(rows, {
+        type: 'job_update', task_id: 1, job_id: 101,
+        state: st, prev_state: rows[0].state, ok: true, error: null, updated_at,
+      });
+    };
+    at('RUNNING', 1000);
+    expect(formatDuration(taskElapsed(rows[0], 1173)!.seconds)).toBe('2 分 53 秒');
+    at('COMPLETED', 1173);
+    const e = taskElapsed(rows[0], 99999)!;
+    expect(e.running).toBe(false);
+    expect(formatDuration(e.seconds)).toBe('2 分 53 秒');   // 不是「0 秒」
+  });
+
+  it('老后端不带 updated_at → 保留本地快照（不回退成 undefined）', () => {
+    const rows = [task({ task_id: 1, state: 'RUNNING', created_at: 1000, updated_at: 1042 })];
+    const next = mergeJobUpdate(rows, {
+      type: 'job_update', task_id: 1, job_id: 101,
+      state: 'COMPLETED', prev_state: 'RUNNING', ok: true, error: null,
+    });
+    expect(next[0].updated_at).toBe(1042);       // 丢掉的话整列会变「—」
+  });
+
+  it('帧里的 updated_at 非法（0 / NaN / 缺失）→ 不覆盖', () => {
+    for (const bad of [0, Number.NaN, undefined]) {
+      const rows = [task({ task_id: 1, state: 'RUNNING', created_at: 1000, updated_at: 1042 })];
+      const next = mergeJobUpdate(rows, {
+        type: 'job_update', task_id: 1, job_id: 101,
+        state: 'RUNNING', prev_state: 'RUNNING', ok: true, error: null,
+        updated_at: bad,
+      });
+      expect(next[0].updated_at).toBe(1042);
+    }
+  });
 });
 
 describe('stateTone（徽标样式映射）', () => {

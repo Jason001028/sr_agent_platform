@@ -2,7 +2,8 @@
 /**
  * QueuePage.vue — 共享 SR 任务队列（阶段5，api-contract.md §3.3）
  * 顶部 = 提交 SR 作业表单：lq_path 由查看器场景带入，也可以从历史任务里选；掩膜由
- * 后端按 `<lq_path>/<目录名>_mask.tif` 推导（只读，前端不提交），其余为 run_sr 参数。
+ * 后端按 `<lq_path>/<输入影像 stem>_mask.tif` 推导（只读，前端不提交），其余为
+ * run_sr 参数。
  * 用户确认才提交（运行 SR 是真副作用，不自动提交）。
  * 下方 = 任务表：SSE job_update 实时刷 state 徽标（SUBMITTING→PENDING→RUNNING→
  * COMPLETED/FAILED）；每行可「以这行参数再提交」——同参数同目录会命中幂等复用旧作业，
@@ -63,8 +64,18 @@ function elapsedText(t: QueueTask): string {
 const ELAPSED_TITLE =
   '终态行 = updated_at − created_at（含状态轮询间隔，为估算值）；运行中的行每秒刷新';
 
-/** 将读的掩膜（后端 §4.3 推导的同名文件；仅展示，不随 body 提交）。 */
-const maskHint = computed(() => derivedMaskPath(f.lq_path));
+/** 将读的掩膜（后端 §4.3 推导；仅展示，不随 body 提交 —— formToSubmit 恒发
+    mask_path: null，让后端按同一规则重推一遍）。
+
+    优先用**后端给过的权威值**（查看器带入 / 该任务行自己的 params），只有在拿不到
+    或用户已经手改了 lq_path 时才退回 derivedMaskPath 那份无 stat 的镜像：镜像拿
+    目录名顶输入影像 stem，`<目录名>.tif`（SC）场景两者相同，`PAN.tif`（RC）场景
+    会指错文件。手改目录后用镜像只是即时反馈，提交时仍以后端推导为准。 */
+const maskHint = computed(() => {
+  const d = queue.draft;
+  if (d?.mask_path && normDir(d.lq_path) === normDir(f.lq_path)) return d.mask_path;
+  return derivedMaskPath(f.lq_path);
+});
 
 /** 表单的目录候选：队列里出现过的 lq_path（即服务端接受过的目录）。
     原型期 SR_LOCKED_DIR 没有走 API 暴露，前端无从得知"唯一合法值"，所以这里只能
@@ -181,9 +192,9 @@ onUnmounted(() => {
           </datalist>
         </label>
         <label class="qp-cell wide">
-          <span>mask_path（掩膜 · 后端按目录推导）</span>
+          <span>mask_path（掩膜 · 以服务端推导为准）</span>
           <input :value="maskHint" type="text" spellcheck="false" readonly
-                 placeholder="…_mask.tif（须与影像同目录，命名为 &lt;目录名&gt;_mask.tif）" />
+                 placeholder="…_mask.tif（须与影像同目录，命名为 &lt;输入影像名&gt;_mask.tif）" />
         </label>
         <label class="qp-cell">
           <span>SR 倍率</span>
@@ -224,7 +235,7 @@ onUnmounted(() => {
           <tr>
             <th>状态</th><th>task_id</th><th>job_id</th><th class="left">指纹</th>
             <th class="left">参数（lq_path / scale）</th>
-            <th>创建时间</th><th>耗时</th><th>操作</th>
+            <th class="created">创建时间</th><th class="elapsed">耗时</th><th>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -233,15 +244,15 @@ onUnmounted(() => {
             <td>{{ t.task_id }}</td>
             <td>{{ t.job_id ?? '—' }}</td>
             <td class="left mono" :title="t.fingerprint">{{ shortFp(t.fingerprint) }}</td>
-            <td class="left" :title="t.params.lq_path">
+            <td class="left params" :title="t.params.lq_path">
               {{ pathLeaf(t.params.lq_path) }}
               <span v-if="t.params.mask_path" class="qp-mask" :title="t.params.mask_path">
                 掩膜 {{ pathLeaf(t.params.mask_path) }}
               </span>
               <span class="qp-sub2">×{{ t.params.sr_scale }} · {{ t.params.suffix || '无后缀' }}</span>
             </td>
-            <td>{{ fmtTime(t.created_at) }}</td>
-            <td :title="ELAPSED_TITLE">{{ elapsedText(t) }}</td>
+            <td class="created">{{ fmtTime(t.created_at) }}</td>
+            <td class="elapsed" :title="ELAPSED_TITLE">{{ elapsedText(t) }}</td>
             <td class="qp-ops">
               <button v-if="isActive(t) && t.job_id" type="button" class="btn mini ghost"
                       :disabled="cancelling === t.task_id" @click="onCancel(t)">
@@ -262,7 +273,7 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.queue-page { max-width: 1240px; margin: 0 auto; padding: 10px 20px 44px; }
+.queue-page { max-width: var(--page-w); margin: 0 auto; padding: 10px 20px 44px; }
 .qp-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; }
 .qp-head h2 { margin: 0; font-size: 24px; font-weight: 700; color: var(--ink); display: flex; align-items: baseline; gap: 10px; }
 .qp-sub { font-size: 12px; color: var(--ink-sub); font-weight: 400; }
@@ -348,6 +359,16 @@ onUnmounted(() => {
 }
 .qp-tbl th { background: var(--surface-2); color: var(--ink); font-weight: 600; white-space: nowrap; }
 .qp-tbl td.left { text-align: left; }
+/* 耗时 / 创建时间：定长格式，一律不换行 —— 「已运行 3 分 20 秒」断成两行会被读成
+   两个数。tabular-nums 让秒数跳动时列宽不抖（同 §场景库 的数值列）。 */
+.qp-tbl th.elapsed, .qp-tbl td.elapsed,
+.qp-tbl th.created, .qp-tbl td.created {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+/* 参数列吸收宽度：lq_path 的叶子名是无空格长串，按字符断行，否则上面两列的
+   nowrap 会把整表撑出容器 —— .qp-tbl-wrap 是 overflow: hidden，撑出去直接看不见。 */
+.qp-tbl td.params { overflow-wrap: anywhere; }
 .qp-tbl td.empty { color: var(--ink-sub); padding: 22px; text-align: center; }
 .qp-tbl tbody tr:hover td { background: #fafcfa; }
 .qp-tbl tbody tr:last-child td { border-bottom: none; }

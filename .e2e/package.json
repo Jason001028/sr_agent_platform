@@ -12,6 +12,7 @@
     "test:maskgen": "node test-maskgen.js",
     "test:platform": "node test-platform.js",
     "test:scenes": "node test-scenes.js",
+    "test:manual-scene": "node test-manual-scene.js",
     "gen:sparse": "python gen-test-images.py ../test-tifs/sparse"
   },
   "engines": {

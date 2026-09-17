@@ -511,12 +511,48 @@ async function main() {
           srDisabled: sr ? sr.disabled : null,
         };
       });
-      assert(toolbar.stretch === 'linear2' && toolbar.stretchDisabled === true,
-        `场景路径拉伸固定 2% 线性且禁用（${toolbar.stretch}/disabled=${toolbar.stretchDisabled}）`);
-      assert(toolbar.stretchTitle.includes('已烘焙'),
-        `拉伸控件给出「服务器已烘焙」说明（${toolbar.stretchTitle.slice(0, 30)}…）`);
+      assert(toolbar.stretch === 'equal' && toolbar.stretchDisabled === false,
+        `场景路径拉伸可改，起手直方图均衡（${toolbar.stretch}/disabled=${toolbar.stretchDisabled}）`);
+      assert(toolbar.stretchTitle.includes('烘焙'),
+        `拉伸控件说明服务器烘焙与二次拉伸的关系（${toolbar.stretchTitle.slice(0, 40)}…）`);
       assert(toolbar.srDisabled === false,
         '「提交 SR」可用（sceneId + lqPath 都已带上）');
+
+      // 起手值不是只写在下拉框上：这张图**确实**按直方图均衡重画过。
+      // 修复前 route==='jpg' 会跳过绘制，画面永远停在服务器烤的那份 2% 线性上。
+      const paintedAtOpen = await page.evaluate(() => window.__viewer.activeRec().paintedMode);
+      assert(paintedAtOpen === 'equal',
+        `场景 rec 的 paintedMode = 起手值（${paintedAtOpen}）`);
+
+      // 换模式 → 画布像素随之变化（「无法使用其他选项」的直接反证）
+      const thumbMean = () => page.evaluate(() => {
+        const c = window.__viewer.activeRec().thumb;
+        const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+        let s = 0;
+        for (let i = 0; i < d.length; i += 4) s += d[i];
+        return +(s / (d.length / 4)).toFixed(2);
+      });
+      const meanEqual = await thumbMean();
+      await page.select('.toolbar select', 'log');
+      await sleep(400);
+      const meanLog = await thumbMean();
+      assert(Math.abs(meanLog - meanEqual) > 1,
+        `切到对数后画布像素变化（均衡均值 ${meanEqual} → 对数均值 ${meanLog}）`);
+
+      // 拉伸是每张图各自的属性：改了这张，别的已打开场景 rec 不受影响
+      const afterSwitch = await page.evaluate(() => {
+        const act = window.__viewer.activeRec();
+        return {
+          sel: document.querySelector('.toolbar select').value,
+          painted: act.paintedMode,
+          others: window.__viewer.recs().filter((r) => r.name !== act.name)
+            .map((r) => r.paintedMode),
+        };
+      });
+      assert(afterSwitch.sel === 'log' && afterSwitch.painted === 'log',
+        `下拉与 rec 记录同步（sel=${afterSwitch.sel}/painted=${afterSwitch.painted}）`);
+      assert(afterSwitch.others.every((m) => m === 'equal'),
+        `别的场景 rec 不被连带改掉（${JSON.stringify(afterSwitch.others)}）`);
 
       /* ---------- G. 提交 SR → /queue 预填表单（§4.3） ---------- */
       console.log('\n[G] 「提交 SR」带出目录 → /queue 预填表单');
@@ -527,7 +563,10 @@ async function main() {
       const maskField = await readField(page, 'mask_path');
       const suffix = await readField(page, '后缀');
       // 场景目录 = 真机的「生产编号」目录（scene 文件的父目录），不是盘阵根。
-      assert(lq.ok && lq.value === path.join(scenesRoot, HDR_ROW),
+      // 后端回的 lq_path 一律盘阵 POSIX 形态（_scene_row 用 as_posix()）：它会与
+      // /api/queue 行 params.lq_path（提交侧归一化后的值）逐字比对，宿主形态在
+      // Windows 开发机上永远比不中。Linux 上 as_posix() 与 str() 同值。
+      assert(lq.ok && lq.value === path.join(scenesRoot, HDR_ROW).replace(/\\/g, '/'),
         `lq_path 带入场景目录 ${lq.value}`);
       // 2026-09-15 起 lq_path 不再是只读：原型期 SR_LOCKED_DIR 没有 API 暴露，前端无从
       // 得知"唯一合法目录"，只能拿历史任务里的目录当下拉候选，输入框仍须可手改。
@@ -535,7 +574,8 @@ async function main() {
       assert(!lq.readonly, 'lq_path 不再只读（允许从历史目录下拉里选）');
       assert(lq.cands === 0, `队列为空 → 目录下拉无候选（cands=${lq.cands}）`);
       assert(maskField.ok && maskField.readonly
-        && maskField.value === path.join(scenesRoot, HDR_ROW) + '/' + HDR_ROW + '_mask.tif',
+        && maskField.value === path.join(scenesRoot, HDR_ROW).replace(/\\/g, '/')
+                              + '/' + HDR_ROW + '_mask.tif',
         `mask_path 只读展示后端推导值 ${maskField.value}`);
       // 2026-09-16 起后缀不再预填 'sr'：留空即由后端按 SR 团队配置文件里的
       // <Suffix> 决定（services/run_sr.py::default_suffix）。预填的值会作为
