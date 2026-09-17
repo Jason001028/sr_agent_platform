@@ -13,8 +13,11 @@
 //   B. 画矩形 → 「保存掩码到盘阵」→ Node 侧断言 `<场景目录>/<编号>_mask.tif` 落盘；
 //   C. 「提交 SR」→ /queue 预填（不自动提交）→ 确认提交 → 假调度器跑到「完成」；
 //   D. 猜错必须报错：粘不存在的编号 → `.sp-err` 带候选路径与原因，查看器不新增 rec；
-//   E. 本地文件反推：文件名带成像时间戳 → 命中关联（提交按钮转可用）；目录不存在 →
-//      报错且按钮仍禁用；文件名里没有日期 → 只提示手填，一个 resolve 请求都不发；
+//   E. 拖本地文件进查看器 → 按**文件名 + 字节数**双指纹反推盘阵目录：
+//      命中（同名同字节）→ 不做本地解码，直接换成服务端烘焙 JPG（临时缓存那条
+//      端点 /preview-tmp），rec 升级成 route='jpg' + lqPath + sceneId，提交按钮转可用；
+//      同名但字节数不同 / 目录不存在 → 报错（写进 rec.linkNote）且按钮仍禁用，
+//      退回本地解码；文件名里没有日期 → 只提示手填，一个 resolve 请求都不发；
 //   F. PAN.tif（RC）场景：掩码名取**输入名的 stem**（`PAN_mask.tif`），不取目录名 ——
 //      这正是"写出去的掩码与提交时去找的那份不一致"的陷阱（§6）。
 //   G. 粘**单个 .tif 文件路径**（不在场景目录里）：照样能看，且预览按 1/2 烤进源图
@@ -145,9 +148,12 @@ scene(os.path.join(base, pan_name), "PAN.tif", 640, 320, pan_name)
 
 # 生产树真形态：<日>/<卫星型号>/<段级目录>/<景级目录>（多两层）。
 # 段级目录名 = 景级目录名去掉「景号」那一段（真机实测的层级关系）。
+# 输入影像叫 <景级目录名>.tif（不是 PAN.tif）：E 段拖的就是「这张图自己」，
+# 双指纹要求名字也对得上 —— PAN.tif 那种 RC 形态的名字拆不出成像时间戳，
+# 压根到不了指纹这一步（前端只会发文件名）。RC 形态另由 PAN_DIR 覆盖（F 段）。
 tok = prod_name.split("_")
 prod_dir = os.path.join(base, tok[0], "_".join(tok[:5] + tok[6:]), prod_name)
-scene(prod_dir, "PAN.tif", 512, 256, prod_name)
+scene(prod_dir, prod_name + ".tif", 512, 256, prod_name)
 
 # 裸 TIF（G 段）：**不在任何场景目录里**（没有 _meta.xml、父目录也不是场景名），
 # 用来验「粘单个 .tif 文件路径」。400×200 是特意选的：旧规则（长边 8192 封顶）
@@ -297,22 +303,30 @@ async function main() {
   const PROD_DIR = path.join(ARRAY, 'A', PROD_MID, PROD);
 
   const datahub = path.join(tmp, 'datahub');
+  // 拖拽入口的临时预览缓存根（1 天 TTL，按 YYYY-MM-DD 分桶）
+  const tmpPreviews = path.join(tmp, 'tmp-previews');
   const workDir = path.join(tmp, 'work');
   const upDir = path.join(tmp, 'upload');
   fs.mkdirSync(datahub, { recursive: true });
+  fs.mkdirSync(tmpPreviews, { recursive: true });
   fs.mkdirSync(workDir, { recursive: true });
   fs.mkdirSync(upDir, { recursive: true });
   makeFixtures(tmp, ymd, SC, PAN, PROD);
 
-  // 上传用的本地 TIF：真图（能解码），只改文件名 —— 反推只用文件名里的时间戳。
+  // 反推命中的两份必须**真的**是从盘阵上拷出来的那一份文件：判据是「文件名 +
+  // 字节数」双指纹，拿 fixture 里那张凑数的小图（名字对、字节数不对）会被后端
+  // 正确地拒掉 —— 那正是下面 upBadBytes 要单独立一条的用例。
   const upOk = path.join(upDir, SC + '.tif');
   const upProd = path.join(upDir, PROD + '.tif');
   const upMiss = path.join(upDir, MISSING + '.tif');
   const upNoDate = path.join(upDir, 'local_nodate.tif');
-  fs.copyFileSync(LOCAL_TIF, upOk);
-  fs.copyFileSync(LOCAL_TIF, upProd);
-  fs.copyFileSync(LOCAL_TIF, upMiss);
-  fs.copyFileSync(LOCAL_TIF, upNoDate);
+  const upBadBytes = path.join(upDir, 'badbytes', SC + '.tif');
+  fs.mkdirSync(path.dirname(upBadBytes), { recursive: true });
+  fs.copyFileSync(path.join(SC_DIR, SC + '.tif'), upOk);          // 同名同字节
+  fs.copyFileSync(path.join(PROD_DIR, PROD + '.tif'), upProd);    // 同名同字节
+  fs.copyFileSync(LOCAL_TIF, upMiss);                             // 名字对、盘阵上没有
+  fs.copyFileSync(LOCAL_TIF, upNoDate);                           // 名字里没有时间戳
+  fs.copyFileSync(LOCAL_TIF, upBadBytes);                         // 同名**不同字节**
 
   // 开发机是 Windows：临时目录带盘符，而盘阵路径一律经 pathguard 归一，所以既要
   // 把 `W:\` 映射到盘阵根，也得补一条"宿主盘符映射到自身"（backend/tests/__init__.py
@@ -331,6 +345,9 @@ async function main() {
       ...process.env,
       SR_AGENT_DB: path.join(tmp, 'db.sqlite'),
       SR_SCENES_ROOT: datahub,
+      // 拖拽入口的临时预览缓存：指向临时目录（不是系统 /tmp），E 段要靠它断言
+      // 「拖进来的图烤在了临时缓存里，没往生产数据目录撒文件」。
+      SR_TEMP_PREVIEWS_ROOT: tmpPreviews,
       SR_SLURM_WORK_DIR: workDir,
       SR_LLM_MOCK: '1',
       SR_SLURM_FAKE: '1',
@@ -365,6 +382,8 @@ async function main() {
     const countUrl = (re) => seen.filter((u) => re.test(u)).length;
     const resolveRe = new RegExp(`^${apiBase}/api/scenes/resolve$`);
     const previewRe = new RegExp(`^${apiBase}/api/scenes/[^/]+/preview$`);
+    // 拖拽入口那条**临时**预览（独立端点、独立缓存根、1 天 TTL）
+    const tmpPreviewRe = new RegExp(`^${apiBase}/api/scenes/[^/]+/preview-tmp$`);
 
     await page.evaluateOnNewDocument((cfg) => { window.__SR_CFG__ = cfg; },
       { apiBase, staticBase: '' });
@@ -404,7 +423,12 @@ async function main() {
       await clickByText(page, '去查看器');
       await waitFor(page, () => location.pathname.endsWith('/viewer'), 15000, '跳 /viewer');
       await waitFor(page, () => !!window.__viewer, 15000, '__viewer 钩子');
-      await waitFor(page, () => window.__viewer.recs().length === 1, 30000, '场景进查看器');
+      // 等 activeRec 而不是 recs().length：openSceneJpg 现在**先**把 rec 推进列表
+      // 再去解码烘焙字节，只看条数会撞进「推了但还没装好」那一瞬（route 还是 null）。
+      await waitFor(page, () => {
+        const r = window.__viewer.activeRec();
+        return !!r && r.route === 'jpg';
+      }, 30000, '场景装进查看器');
       const rec = await page.evaluate(() => window.__viewer.activeRec());
       assert(rec.name === SC, `查看器打开的就是这个场景（${rec.name}）`);
       assert(rec.route === 'jpg', `手工场景走盘阵 JPG 路由（route=${rec.route}）`);
@@ -491,33 +515,61 @@ async function main() {
       assert(await recCount(page) === beforeRecs,
         '打开失败不留任何可提交的东西（rec 数不变）');
 
-      /* ---------- E. 本地文件反推 ---------- */
-      console.log('\n[E] 查看器选本地 tif → 按文件名反推盘阵目录');
+      /* ---------- E. 拖本地文件 → 双指纹反推 → 走服务端烘焙 JPG ---------- */
+      console.log('\n[E] 查看器拖本地 tif → 同名同字节才关联，命中即换服务端 JPG');
       await clickLink(page, '查看器');
       await waitFor(page, () => location.pathname.endsWith('/viewer'), 15000, '回 /viewer');
       const input = await page.$('input[type=file]');
       if (!input) throw new Error('未找到 input[type=file]');
+      const lastRec = () => page.evaluate(() => {
+        const rs = window.__viewer.recs();
+        return rs[rs.length - 1];
+      });
+      const srEnabled = () => page.evaluate(() => {
+        const b = [...document.querySelectorAll('.toolbar button')]
+          .find((x) => x.textContent.trim() === '提交 SR');
+        return b ? !b.disabled : null;
+      });
+
+      const previewBefore = countUrl(previewRe);
+      const tmpBefore = countUrl(tmpPreviewRe);
       await input.uploadFile(upOk);
       await waitFor(page, () => {
         const rs = window.__viewer.recs();
         const r = rs[rs.length - 1];
         return r && r.lqPath;
-      }, 20000, '反推关联命中');
-      const linked = await page.evaluate(() => {
-        const rs = window.__viewer.recs();
-        return rs[rs.length - 1];
-      });
+      }, 20000, '双指纹反推命中');
+      const linked = await lastRec();
+      assert(linked.name === SC + '.tif',
+        `rec 还是用户拖进来的那个文件（${linked.name}）`);
       assert(linked.lqPath === SC_DIR.replace(/\\/g, '/'),
         `命中即关联上盘阵目录（${linked.lqPath}）`);
+      // 命中之后**不再做本地解码**：像素来自服务端烘焙 JPG（各边 1/2），
+      // 尺寸是元数据的 1600×800、缩略图 800×400 —— 本地解码这张 2.5MB 的
+      // uint16 也出得来缩略图，所以判据取 route 与字节来源。
+      assert(linked.route === 'jpg',
+        `命中即升级成盘阵 JPG 路由（route=${linked.route}）`);
+      assert(linked.W === 1600 && linked.H === 800,
+        `尺寸取影像头 1600×800（${linked.W}×${linked.H}）`);
+      assert(linked.thumbW === 800 && linked.thumbH === 400,
+        `像素来自服务端 1/2 烘焙 JPG（缩略图 ${linked.thumbW}×${linked.thumbH}）`);
+      assert(!!linked.sceneId, `升级后带上场景 id（${String(linked.sceneId).slice(0, 12)}…）`);
+      assert(await srEnabled(), '关联成功后「提交 SR」由灰转可用');
+      assert(countUrl(tmpPreviewRe) === tmpBefore + 1
+        && countUrl(previewRe) === previewBefore,
+        '取的是拖拽专用端点 /preview-tmp，没碰生产那条 /preview');
+      // 临时预览落在**独立**缓存根里、按当天分桶，生产数据目录一个字节都不写。
+      const bucket = path.join(tmpPreviews, y + '-' + mo + '-' + d);
+      assert(fs.existsSync(bucket)
+        && fs.readdirSync(bucket).some((f) => f.endsWith('.jpg')),
+        `临时 JPG 落在 SR_TEMP_PREVIEWS_ROOT/<今天>/（${path.basename(bucket)}）`);
+      assert(fs.existsSync(path.join(bucket, '.sr-tmp-preview')),
+        '桶里带本模块的标记文件（清理只认带标记的桶）');
+
       await waitFor(page, () => {
         const t = document.querySelector('.toast');
         return t && t.textContent.includes('已关联盘阵目录');
       }, 10000, '关联 toast');
-      assert(await page.evaluate(() => {
-        const b = [...document.querySelectorAll('.toolbar button')]
-          .find((x) => x.textContent.trim() === '提交 SR');
-        return b && !b.disabled;
-      }), '关联成功后「提交 SR」由灰转可用');
 
       // 生产树真形态（<日>/<卫星型号>/<段级目录>/<景级目录>）：多两层也要命中。
       // 反推候选由后端算（前端只发裸文件名），这里钉的就是那条生产树候选。
@@ -527,32 +579,50 @@ async function main() {
         const r = rs[rs.length - 1];
         return r && r.lqPath === want;
       }, 20000, '生产树反推关联命中', PROD_DIR.replace(/\\/g, '/'));
-      assert(true, `生产树命中：${PROD_DIR.replace(/\\/g, '/')}`);
+      const prodLinked = await lastRec();
+      assert(prodLinked.route === 'jpg',
+        `生产树命中并升级成 JPG 路由：${PROD_DIR.replace(/\\/g, '/')}`);
+      // 命中的图**没有**往生产场景目录里落预览缓存（那条是长期缓存才做的事）
+      assert(!fs.existsSync(path.join(PROD_DIR, PROD + '.preview.jpg')),
+        '拖拽入口不往生产场景目录写预览缓存');
+
+      // 同名**不同字节**：最要紧的一条回归钉子 —— 只比名字的话，用户拖进来的
+      // 是另一张图，掩码坐标会整片落在别的影像上。必须拒绝并退回本地解码。
+      await input.uploadFile(upBadBytes);
+      // 等到「报错 + 本地解码已收尾」：route 要等 decodeRec 跑完才有值，早一步
+      // 看到的是 null，断言会误判成「没退回本地解码」。
+      await waitFor(page, () => {
+        const rs = window.__viewer.recs();
+        const r = rs[rs.length - 1];
+        return r && r.linkNote && r.route && r.thumbW > 0;
+      }, 30000, '字节数不符 → 报错并退回本地解码');
+      const bad = await lastRec();
+      assert(bad.linkNote.includes('字节数'),
+        `同名不同字节被拒，原因写进 linkNote（${bad.linkNote.slice(0, 60)}…）`);
+      assert(bad.lqPath === null, '指纹不符就不写 lqPath（绝不静默提交）');
+      assert(['utif', 'chunked', 'sparse'].includes(bad.route),
+        `退回浏览器本地解码（route=${bad.route}）`);
+      assert((await srEnabled()) === false, '「提交 SR」保持禁用');
 
       // 文件名里有日期但盘阵上没有这个目录 → 报错，按钮仍禁用
       await input.uploadFile(upMiss);
       await waitFor(page, () => {
-        const e = document.querySelector('.err-box');
-        return e && e.textContent.includes('未能关联盘阵目录');
-      }, 20000, '反推失败的报错');
-      const errE = await page.evaluate(() => document.querySelector('.err-box').textContent.trim());
-      assert(errE.includes(MISSING) && errE.includes('目录不存在'),
-        `反推落空时说明原因与候选（${errE.slice(0, 60)}…）`);
-      assert(await page.evaluate(() => {
         const rs = window.__viewer.recs();
-        return rs[rs.length - 1].lqPath === null;
-      }), '没命中就不写 lqPath（绝不静默提交）');
-      assert(await page.evaluate(() => {
-        const b = [...document.querySelectorAll('.toolbar button')]
-          .find((x) => x.textContent.trim() === '提交 SR');
-        return b && b.disabled;
-      }), '「提交 SR」保持禁用');
+        const r = rs[rs.length - 1];
+        return r && r.linkNote;
+      }, 20000, '反推失败的报错');
+      const miss = await lastRec();
+      assert(miss.linkNote.includes(MISSING) && miss.linkNote.includes('目录不存在'),
+        `反推落空时说明原因与候选（${miss.linkNote.slice(0, 60)}…）`);
+      assert(miss.lqPath === null, '没命中就不写 lqPath（绝不静默提交）');
+      assert((await srEnabled()) === false, '「提交 SR」保持禁用');
 
       // 文件名里没有成像时间戳 → 后端报「没有时间戳」，提示手粘目录；不写 lqPath
       await input.uploadFile(upNoDate);
       await waitFor(page, () => {
-        const e = document.querySelector('.err-box');
-        return e && e.textContent.includes('时间戳');
+        const rs = window.__viewer.recs();
+        const r = rs[rs.length - 1];
+        return r && r.linkNote && r.linkNote.includes('时间戳');
       }, 20000, '无时间戳报错');
       assert(await page.evaluate(() => {
         const rs = window.__viewer.recs();
@@ -638,14 +708,15 @@ async function main() {
 
       /* ---------- H. 全程无错 ---------- */
       console.log('\n[H] 全程无错');
-      // D / E 两处是**刻意**打出来的 404（猜错的路径），E 里还有一次刻意打的
-      // 400（文件名没有时间戳，后端据此拒绝反推）—— 浏览器对任何非 2xx 响应都会
-      // 往控制台写一条，这不算程序缺陷，但也不能睁一只眼闭一只眼：数目必须恰好
-      // 等于刻意的那几次，多一条就是有别的资源没取到。
+      // D / E 里**刻意**打出来的 404：D 一次（盘阵上没有那个目录）、E 两次
+      // （同名不同字节；有日期但目录不存在）。E 里还有一次刻意打的 400（文件名
+      // 没有时间戳，后端据此拒绝反推）—— 浏览器对任何非 2xx 响应都会往控制台写
+      // 一条，这不算程序缺陷，但也不能睁一只眼闭一只眼：数目必须恰好等于刻意的
+      // 那几次，多一条就是有别的资源没取到。
       const deliberate = /status of (404|400)/;
       const notFound = errors.filter((e) => /status of 404/.test(e));
-      assert(notFound.length === 2,
-        `控制台里的 404 恰好是刻意的那两次（${notFound.length}）`);
+      assert(notFound.length === 3,
+        `控制台里的 404 恰好是刻意的那三次（${notFound.length}）`);
       const badRequest = errors.filter((e) => /status of 400/.test(e));
       assert(badRequest.length === 1,
         `控制台里的 400 恰好是刻意的那一次（无时间戳反推，${badRequest.length}）`);

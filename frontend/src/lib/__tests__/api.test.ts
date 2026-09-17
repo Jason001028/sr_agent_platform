@@ -5,10 +5,10 @@
  * fetchSceneJpg 那组把全局 fetch 打桩，钉的是「走哪条 URL、onPhase 何时响」——
  * 不碰真实网络。聊天流式 fetch 走浏览器 .e2e 回归覆盖。
  */
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import {
   stepSse, parseSseEvents, apiUrl, sessionsUrl, sessionMessagesUrl,
-  queueEventsUrl, fetchSceneJpg,
+  queueEventsUrl, fetchSceneJpg, fetchTempSceneJpg, apiResolveScene,
 } from '../api.js';
 import type { PlatformSseEvent, ChatSseEvent } from '../api.js';
 import type { SceneRow } from '../scene.js';
@@ -191,5 +191,73 @@ describe('fetchSceneJpg', () => {
   it('onPhase 是可选的（旧调用方不传也不炸）', async () => {
     stubFetch({ '/api/scenes/~YWJj/preview': 'PREVIEW' });
     expect(await (await fetchSceneJpg(CFG, row({}))).text()).toBe('PREVIEW');
+  });
+});
+
+/* ---------------- 拖拽入口：临时预览 + resolve 双指纹 ---------------- */
+describe('fetchTempSceneJpg', () => {
+  const row = (over: Partial<SceneRow>): SceneRow => ({
+    id: '~YWJj', name: 'SC', satellite: null, sensor: null, date: null,
+    size_bytes: 0, fake: false, W: 200, H: 100, rel: null,
+    jpgUrl: null, hasPreview: false, lq_path: null, ...over,
+  });
+
+  let urls: string[];
+  function stubFetch(bodies: Record<string, string>): void {
+    urls = [];
+    vi.stubGlobal('fetch', (u: string) => {
+      urls.push(u);
+      if (!(u in bodies)) return Promise.resolve(new Response('nope', { status: 404 }));
+      return Promise.resolve(new Response(bodies[u], { status: 200 }));
+    });
+  }
+
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('打的是 /preview-tmp，不是生产那条 /preview', async () => {
+    stubFetch({ '/api/scenes/~YWJj/preview-tmp': 'TMP' });
+    expect(await (await fetchTempSceneJpg(CFG, '~YWJj')).text()).toBe('TMP');
+    expect(urls).toEqual(['/api/scenes/~YWJj/preview-tmp']);
+  });
+
+  it('**绝不**改写 row.hasPreview（那是生产缓存在不在的真值）', async () => {
+    // 被临时路径置真之后，用户再从场景库打开同一场景就会跳过懒生成、直接打一个
+    // 404 的静态 URL，图再也出不来 —— 所以这条是硬约束。
+    stubFetch({ '/api/scenes/~YWJj/preview-tmp': 'TMP' });
+    const r = row({ jpgUrl: '/disk-array/a/b.jpg', hasPreview: false });
+    await fetchTempSceneJpg(CFG, r.id);
+    expect(r.hasPreview).toBe(false);
+    expect(r.jpgUrl).toBe('/disk-array/a/b.jpg');
+  });
+
+  it('onPhase 每次都提示要等服务端烘焙（临时缓存不保证在）', async () => {
+    stubFetch({ '/api/scenes/~YWJj/preview-tmp': 'TMP' });
+    const phase = vi.fn();
+    await fetchTempSceneJpg(CFG, '~YWJj', phase);
+    expect(phase).toHaveBeenCalledTimes(1);
+    expect(phase.mock.calls[0][0]).toContain('烘焙');
+  });
+});
+
+describe('apiResolveScene 双指纹透传', () => {
+  let bodies: string[];
+  beforeEach(() => {
+    bodies = [];
+    vi.stubGlobal('fetch', (_u: string, init: RequestInit) => {
+      bodies.push(String(init.body));
+      return Promise.resolve(new Response(JSON.stringify({ source: 'manual' }),
+        { status: 200 }));
+    });
+  });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('size_bytes 原样进 body（服务端靠它 + 名字判同一文件）', async () => {
+    await apiResolveScene(CFG, { name: 'SC.tif', size_bytes: 2560256 });
+    expect(JSON.parse(bodies[0])).toEqual({ name: 'SC.tif', size_bytes: 2560256 });
+  });
+
+  it('不给 size_bytes 就不出现在 body 里（粘路径那条老调用不受影响）', async () => {
+    await apiResolveScene(CFG, { path: 'W:\\a\\b' });
+    expect(JSON.parse(bodies[0])).toEqual({ path: 'W:\\a\\b' });
   });
 });

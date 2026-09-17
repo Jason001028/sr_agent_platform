@@ -29,7 +29,9 @@ import { browserKit } from '../lib/browserKit.js';
 import { decodeOne } from '../lib/decode.js';
 import type { DecodedRec } from '../lib/decode.js';
 import { sceneDecodePixels, loadSrConfig, startStretch } from '../lib/scene.js';
-import { apiResolveScene, apiBakeMask, fetchSceneJpg } from '../lib/api.js';
+import {
+  apiResolveScene, apiBakeMask, fetchSceneJpg, fetchTempSceneJpg,
+} from '../lib/api.js';
 import type { SceneResolveResult } from '../lib/api.js';
 import { classifyImages } from '../lib/imageFiles.js';
 import type { SceneOpenMeta } from '../lib/scene.js';
@@ -64,14 +66,24 @@ export interface ViewerRec {
   sceneId: string | null;
   /** 阶段6 scene 文件父目录绝对路径（= run_sr 目录语义，与 /api/queue
    *  params.lq_path 同值）；任务区用它关联当前场景的队列行。本地文件恒 null，
-   *  除非 tryLinkScenes 把它关联到了盘阵目录。 */
+   *  除非 tryLinkScenes 命中了盘阵目录并把它升级成 route='jpg'。 */
   lqPath: string | null;
   /** 掩码写到服务端后，服务端告知的绝对路径（`bakeMaskToServer` 成功才非空）。
    *  显示用；提交时真正的值由后端按同一规则重新推导。 */
   serverMaskPath?: string | null;
   /** 已经试过反推关联盘阵目录（成功或失败都算）。每个文件只试一次 ——
-   *  切来切去不该反复打同一个请求、反复弹同一条错。 */
+   *  切来切去不该反复打同一个请求、反复弹同一条错。网络失败/超时不算「试过」，
+   *  那种情况不留痕，下次激活还能再试。 */
   linkTried?: boolean;
+  /** 反推关联失败时服务端给的原因（原样展示）。单独一个字段而不是写进
+   *  `status`：activate 里紧接着的本地解码几百毫秒内就会覆盖 status，写在那儿
+   *  等于没写；用户与 e2e 都只看得到这一份。 */
+  linkNote?: string;
+  /** 像素写令牌：每次「有新的写者要接管这张图的像素」时 +1（本地解码
+   *  `decodeRec` / 盘阵 JPG 升级 `applySceneJpgToRec`）。落笔前比对，对不上就说
+   *  明期间有更新的写者接手，自己这份已经过期 —— 真机上本地解码要几十秒，
+   *  切图/升级完全可能挤在中间完成，旧解码结果绝不能盖到新图上。 */
+  token: number;
   layout: string;              // 即探标签摘要
   status: string;
   statusCls: '' | 'ok' | 'err';
@@ -286,12 +298,14 @@ export const useViewerStore = defineStore('viewer', () => {
       W: 0, H: 0, thumb: null, src: null, srcw: 0, srch: 0, nbands: 0, invert: false,
       stats: null, route: null, sceneId: null, lqPath: null,
       layout: '', status: '等待…', statusCls: '',
-      paintedMode: null, maskRois: null,
+      paintedMode: null, maskRois: null, token: 0,
     };
     recs.value.push(rec);
-    // 即探：只读头部标签，秒显压缩/布局，不等待解码
+    // 即探：只读头部标签，秒显压缩/布局，不等待解码。
+    // 落笔前判 route：帧头解析虽快，但若这期间 rec 已被升级成盘阵场景
+    // （route='jpg'），标签摘要就会把「盘阵 JPG」那行文案盖掉。
     tiffTags(new FileSource(file, rec.name)).then((tags) => {
-      rec.layout = layoutInfo(tags);
+      if (rec.route === null) rec.layout = layoutInfo(tags);
     }).catch(() => { /* 头部解析失败不阻塞 */ });
     void activate(rec.id);
   }
@@ -312,11 +326,6 @@ export const useViewerStore = defineStore('viewer', () => {
     if (drawMode.value) {
       pendingPts.value = null; pendingRect.value = null; hoverPt.value = null;
     }
-    // 打开/切到本地文件时试着反推它的盘阵目录（不阻塞解码，每个文件只试一次）。
-    // 盘阵场景（route='jpg'）不走这条路：它们的目录是 POST /api/scenes/resolve
-    // 按**绝对路径**给出的权威值，而反推只能拿裸文件名去猜，猜出来的可能是另一个
-    // 目录（同名不同景），拿它提交 SR 就是错的；tryLinkScenes 里也会再挡一次。
-    void tryLinkScenes(rec);
     if (rec.thumb) {
       repaintOnActivate(rec);
       fit();
@@ -324,15 +333,26 @@ export const useViewerStore = defineStore('viewer', () => {
       renderTick.value++;
       return;
     }
+    // 未解码：先试着反推盘阵目录。**命中就直接用服务端烘焙 JPG，不做本地解码** ——
+    // 真机上一次全图解码要几十秒、几百 MB，而盘阵那份 1/2 预览已经在手边上；
+    // 顺带也避开了「本地图先画出来、几百毫秒后又被 JPG 换掉」的闪烁。
+    // 盘阵场景（route='jpg'）不走这条路：它们的目录是 resolve 按绝对路径给出的
+    // 权威值，而反推只能拿裸文件名去猜，猜出来的可能是另一个目录（同名不同景），
+    // 拿它提交 SR 就是错的；tryLinkScenes 里也会再挡一次。
+    // 未命中（盘阵上没有 / 指纹不符 / 后端不可达）才回落本地解码，能力不变。
+    if (!rec.route && await tryLinkScenes(rec)) return;
+    if (!recs.value.includes(rec)) return;      // 关联期间被移除了
     await decodeRec(rec);
   }
 
   async function decodeRec(rec: ViewerRec) {
+    const my = ++rec.token;                     // 领号：本地解码要接管像素了
     busy.value = true;
     let probe: ProbeInfo | null = null;
     try { probe = await probeImage(rec.file); } catch (e) { probe = null; }
     rec.probe = probe;
     if (!probe) {
+      if (rec.token !== my) return;             // 已过期：别覆盖新写者的状态
       rec.status = '解码失败：无法读取文件属性';
       rec.statusCls = 'err';
       if (activeId.value === rec.id) showErr('「' + rec.name + '」解码失败：无法读取文件属性');
@@ -345,16 +365,19 @@ export const useViewerStore = defineStore('viewer', () => {
         onOverlay: (title, sub, bar) => showMask(title, sub, bar),
         onProgress: (f) => { if (activeId.value === rec.id) updateProgressUI(f); },
       });
-      applyDecoded(rec, d);
+      applyDecoded(rec, d, my);
     } catch (e) {
-      failRec(rec, e);
+      if (rec.token === my) failRec(rec, e);
     } finally {
       busy.value = false;
       hideMask();
     }
   }
 
-  function applyDecoded(rec: ViewerRec, d: DecodedRec) {
+  function applyDecoded(rec: ViewerRec, d: DecodedRec, token: number) {
+    // 解码是几十秒级的异步过程：期间这张图可能已经被升级成盘阵 JPG（或又被解码
+    // 一次），那份结果比这份新。令牌对不上就整份丢掉，一个字都不写。
+    if (rec.token !== token) return;
     rec.thumb = markRaw(d.thumb);
     rec.W = d.W; rec.H = d.H;
     rec.src = markRaw(d.src);
@@ -415,7 +438,7 @@ export const useViewerStore = defineStore('viewer', () => {
         route: 'img', sceneId: null, lqPath: null,
         layout: '本地 JPG（8bit 显示就绪，' + tw + '×' + th + '）',
         status: '已读取：' + file.name + ' · ' + tw + '×' + th,
-        statusCls: 'ok', paintedMode: null, maskRois: null,
+        statusCls: 'ok', paintedMode: null, maskRois: null, token: 0,
       };
       recs.value.push(rec);
       hideMask(); busy.value = false;
@@ -431,39 +454,86 @@ export const useViewerStore = defineStore('viewer', () => {
      TIF 字节、不做二次拉伸、不本地导出 JPG（服务器 JPG 即交付物）。掩码仍照旧 ——
      缩略图坐标按元数据 W/H 换算回全分辨率（thumbToOrig scale 来自 rec.W/H 而非
      probe，所以 JPG 尺寸变了也不影响掩码落点）。 */
+  /** 按场景身份找已在列表里的 rec：先认 `sceneId`（权威），退回名字。
+   *
+   *  升级过的 rec 名字仍是用户拖进来的那个文件名（`SC.tif`），而库行给的名字是
+   *  `SC` —— 只按名字找会漏，于是同一个场景会开出两条 rec、两份 maskRois。 */
+  function findRecByMeta(meta: { sceneId?: string | null; name: string })
+      : ViewerRec | undefined {
+    return recs.value.find((r) =>
+      (!!meta.sceneId && r.sceneId === meta.sceneId) || r.name === meta.name);
+  }
+
+  /** 把「服务端烘焙 JPG + 元数据」装进一条**已有**的 rec（新建 / 就地升级共用）。
+   *
+   *  收尾动作一个都不能少：云量卡要 `refreshCloudStats`、拉伸起手值要按新 route
+   *  走 `startStretch`、画面要重绘 —— 漏一个就是「云量卡不刷 / 拉伸下拉显示错 /
+   *  画面不重画」。返回是否真的装上了（令牌对不上 = 期间有更新的写者接手，没装）。
+   *
+   *  `rec.file`/`name`/`size` 归调用方管：拖拽升级那条路要**保持**用户拖进来的
+   *  那个文件名与字节数（FileList 展示与 addFiles 查重都靠它），只换像素与身份。 */
+  async function applySceneJpgToRec(rec: ViewerRec, meta: SceneOpenMeta,
+                                    blob: Blob): Promise<boolean> {
+    const my = ++rec.token;                     // 领号：JPG 要接管像素了
+    const cv = await decodeJpgToCanvas(blob);
+    if (rec.token !== my || !recs.value.includes(rec)) return false;
+    const tw = cv.width, th = cv.height;
+    const ctx = cv.getContext('2d');
+    if (!ctx) throw new Error('取不到 2d 上下文');
+    const img = ctx.getImageData(0, 0, tw, th);
+    const d = sceneDecodePixels(img.data, tw, th);   // 固定 0..255 → linear 恒等
+    rec.thumb = markRaw(cv as unknown as KitCanvas);
+    rec.W = meta.W; rec.H = meta.H;
+    rec.src = markRaw(d.src); rec.srcw = d.tw; rec.srch = d.th;
+    rec.nbands = d.nbands;
+    rec.invert = false;
+    rec.stats = d.stats ? markRaw(d.stats) : null;
+    rec.route = 'jpg';
+    rec.sceneId = meta.sceneId ?? null;
+    rec.lqPath = meta.lqPath ?? null;
+    rec.layout = '盘阵 JPG（1/2 尺度 + 直方图均衡，服务端已烘焙）';
+    rec.status = '场景就绪：' + meta.name + ' · 元数据 ' + meta.W + '×' + meta.H
+      + ' · JPG ' + d.tw + '×' + d.th;
+    rec.statusCls = 'ok';
+    rec.linkNote = undefined;                   // 关联成功了，旧的失败原因留着是误导
+    // 手工场景由 resolve 带着权威掩码路径进来（场景库页那条入口也走这里）；
+    // 库行没有这个字段 → null，写掩码时再拿后端回的值。
+    rec.serverMaskPath = meta.serverMaskPath ?? null;
+    // 像素刚换过 → 一律重画（沿用已选模式，不重置用户的选择）
+    paintStretch(rec, rec.paintedMode ?? startStretch(rec.route, stretchMode.value));
+    if (activeId.value === rec.id) {
+      fit();
+      refreshCloudStats();
+      renderTick.value++;
+    }
+    return true;
+  }
+
   async function openSceneJpg(meta: SceneOpenMeta, blob: Blob) {
-    const dup = recs.value.find((r) => r.name === meta.name);
+    const dup = findRecByMeta(meta);
     if (dup) { void activate(dup.id); return; }
     busy.value = true;
     showMask('正在加载盘阵场景…', meta.name + '（服务器烘焙 JPG，元数据 ' + meta.W + '×' + meta.H + '）', false);
+    const rec: ViewerRec = {
+      id: nextId++,
+      file: markRaw(new File([blob], meta.name + '.jpg', { type: 'image/jpeg' })),
+      probe: null, name: meta.name, size: blob.size,
+      W: meta.W, H: meta.H,
+      thumb: null, src: null, srcw: 0, srch: 0, nbands: 0, invert: false,
+      stats: null, route: null, sceneId: null, lqPath: null,
+      layout: '', status: '正在加载盘阵场景…', statusCls: '',
+      paintedMode: null, maskRois: null, token: 0,
+    };
+    recs.value.push(rec);
     try {
-      const cv = await decodeJpgToCanvas(blob);
-      const tw = cv.width, th = cv.height;
-      const ctx = cv.getContext('2d');
-      if (!ctx) throw new Error('取不到 2d 上下文');
-      const img = ctx.getImageData(0, 0, tw, th);
-      const d = sceneDecodePixels(img.data, tw, th);   // 固定 0..255 → linear 恒等
-      const rec: ViewerRec = {
-        id: nextId++,
-        file: markRaw(new File([blob], meta.name + '.jpg', { type: 'image/jpeg' })),
-        probe: null, name: meta.name, size: blob.size,
-        W: meta.W, H: meta.H,
-        thumb: markRaw(cv as unknown as KitCanvas),
-        src: markRaw(d.src), srcw: d.tw, srch: d.th, nbands: d.nbands,
-        invert: false, stats: d.stats ? markRaw(d.stats) : null,
-        route: 'jpg', sceneId: meta.sceneId ?? null, lqPath: meta.lqPath ?? null,
-        layout: '盘阵 JPG（1/2 尺度 + 直方图均衡，服务端已烘焙）',
-        status: '场景就绪：' + meta.name + ' · 元数据 ' + meta.W + '×' + meta.H + ' · JPG ' + d.tw + '×' + d.th,
-        statusCls: 'ok', paintedMode: null, maskRois: null,
-        // 手工场景由 resolve 带着权威掩码路径进来（场景库页那条入口也走这里）；
-        // 库行没有这个字段 → null，写掩码时再拿后端回的值。
-        serverMaskPath: meta.serverMaskPath ?? null,
-      };
-      recs.value.push(rec);
+      await applySceneJpgToRec(rec, meta, blob);
       hideMask(); busy.value = false;
       void activate(rec.id);
       showToast('已打开盘阵场景「' + meta.name + '」（掩码按元数据 ' + meta.W + '×' + meta.H + ' 换算）');
     } catch (e) {
+      // 解不开就整条撤掉：留一条空壳 rec 在列表里，点它只会再失败一次。
+      const i = recs.value.indexOf(rec);
+      if (i >= 0) recs.value.splice(i, 1);
       hideMask(); busy.value = false;
       // 就地抛出，不自己弹错：唯一调用方是 scenes.open（/scenes 页），它把原因写进
       // scenes.error 才显示得出来；viewer 的错误条挂在 /viewer，写进去等于没报。
@@ -936,47 +1006,84 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   /* ---------------- 手工盘阵场景（查看器侧入口） ---------------- */
-  /** 反推关联成功后的落账：只写 lqPath（提交 SR 用）与 serverMaskPath（显示用）。
-   *
-   *  **不写 sceneId**：sceneId 是「库行」的身份（/api/scenes 的相对路径 id）。
-   *  手工/关联出来的场景不在库里，其 id 是 `~` 形态的绝对路径编码 —— 写进去
-   *  会让 Agent 上下文与任务区按库行去查，查不到。提交与掩码都不需要它
-   *  （两者只认 lqPath）。 */
-  function attachSceneLink(rec: ViewerRec, res: SceneResolveResult): void {
-    rec.lqPath = res.resolved.dir;
-    rec.serverMaskPath = res.resolved.mask_path;
-    rec.status = '已关联盘阵目录：' + res.resolved.dir;
-    rec.statusCls = 'ok';
-  }
-
-  /** 本地 TIF 打开后**试着**关联盘阵目录（不阻塞打开）。
+  /** 本地 TIF 打开后**试着**关联盘阵目录。返回是否**命中并已升级成盘阵 JPG** ——
+   *  命中时调用方（`activate`）直接返回，不要再做本地解码。
    *
    *  浏览器拿不到本地文件的绝对路径（`File` 只有 name/size/type），所以只能把
-   *  **裸文件名**交给后端，由它按生产命名规则 + SR_SCENE_PATH_TEMPLATE 反推候选
-   *  目录 —— 规则唯一真源在 backend/pathguard.py，前端不自拼路径。命中才写
-   *  lqPath；没命中就是一条 4xx，`detail` 里写着试过哪些候选、各自为什么不行，
-   *  原样展示给用户，本地图照常能看。猜错必须报错，绝不静默提交。
+   *  **裸文件名 + 字节数**交给后端，由它按生产命名规则 + SR_SCENE_PATH_TEMPLATE
+   *  反推候选目录 —— 规则唯一真源在 backend/pathguard.py，前端不自拼路径。
+   *
+   *  两个指纹都得给：同一个场景目录里可能躺着不止一张图（RC 场景的输入影像是
+   *  `PAN.tif`），光凭文件名反推有可能认到一张**不是用户拖进来**的图，那之后画的
+   *  掩码坐标会整片落在别的图上。判定在服务端做（`_fingerprint_mismatch`），前端
+   *  只负责把 name + size 原样递过去。
+   *
+   *  三种「没命中」的处理各不相同：
+   *  * 服务端明确 4xx（盘阵上没这个目录 / 指纹不符）：写 `rec.linkNote` 原样留着
+   *    给用户看，**不留 linkTried 之外的痕迹**，本地图照常能看。这是「这张图不在
+   *    盘阵上」的正常答案，不是错误，所以不弹 showErr。
+   *  * 网络失败 / 超时（4s）：**清掉 linkTried**，下次激活还能再试 —— 那不是服务端
+   *    的答案，留着等于「问过了、没有」，用户永远拿不到第二次机会。
+   *  * 命中了但临时 JPG 烤不出来：报错 + 回落本地解码，不写 lqPath。
    *
    *  **route='jpg' 一律不试**：那种 rec 的目录已经由 resolve 按绝对路径定过（就是
    *  权威值）。粘单个 .tif 且父目录不是场景目录时它的 lqPath 是 null —— 这时若按
    *  文件名去反推，可能命中**另一个**目录，用户点「提交 SR」就会拿着错的 lq_path
    *  去跑，而这正是「绝不静默提交」要防的事。父目录不是场景目录，就是不能提交。 */
-  async function tryLinkScenes(rec?: ViewerRec | null): Promise<void> {
+  async function tryLinkScenes(rec?: ViewerRec | null): Promise<boolean> {
     const r = rec ?? activeRec.value;
     // 已是盘阵场景 / 走过 resolve / 已关联过 / 已试过 —— 都直接返回
-    if (!r || r.lqPath || r.linkTried || r.route === 'jpg') return;
+    if (!r) return false;
+    if (r.route === 'jpg') return true;             // 本来就是盘阵场景，无需本地解码
+    if (r.lqPath || r.linkTried) return false;
     r.linkTried = true;
+    r.status = '正在关联盘阵目录…';
+    r.statusCls = '';
+    let res: SceneResolveResult;
     try {
-      const res = await apiResolveScene(loadSrConfig(), { name: r.name });
-      if (!recs.value.includes(r)) return;            // 期间已切图/关掉
-      attachSceneLink(r, res);
-      showToast('已关联盘阵目录 ' + res.resolved.dir + '，可以提交 SR 了');
-      if (r === activeRec.value) renderTick.value++;
+      res = await apiResolveScene(loadSrConfig(),
+        { name: r.name, size_bytes: r.file.size },
+        { signal: AbortSignal.timeout(4000) });
     } catch (e) {
-      if (!recs.value.includes(r)) return;
-      const msg = e instanceof Error ? e.message : String(e);
-      showErr('未能关联盘阵目录（' + r.name + '）：' + msg
-        + ' —— 本地文件仍可查看；要提交 SR 请在「盘阵场景」栏粘贴该场景目录后打开。');
+      if (!recs.value.includes(r)) return false;
+      const err = e as Error;
+      if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
+        r.linkTried = false;                        // 不是服务端的答案，下回还能试
+        r.status = '等待解码…';
+        return false;
+      }
+      r.linkNote = err instanceof Error ? err.message : String(err);
+      showToast('「' + r.name + '」没有关联到盘阵场景，按本地文件查看'
+        + '（要提交 SR 请在「盘阵场景」栏粘贴该场景目录）');
+      return false;
+    }
+    if (!recs.value.includes(r)) return false;      // 期间已切图/关掉
+    // 命中：把这张 rec 就地升级成盘阵场景。**不新建 rec** —— 用户拖进来的那个
+    // 文件就是这张图，新建一条会多出第二份 maskRois。
+    try {
+      const blob = await fetchTempSceneJpg(loadSrConfig(), res.row.id, (text) => {
+        if (r === activeRec.value) showMask('正在关联盘阵场景…', text, false);
+      });
+      hideMask();
+      if (!recs.value.includes(r)) return false;
+      const ok = await applySceneJpgToRec(r, {
+        name: res.row.name, W: res.row.W as number, H: res.row.H as number,
+        sceneId: res.row.id,
+        lqPath: res.resolved.sr_capable ? res.resolved.dir : null,
+        serverMaskPath: res.resolved.mask_path,
+      }, blob);
+      if (!ok) return false;
+      showToast('已关联盘阵目录 ' + res.resolved.dir + '，可以提交 SR 了');
+      return true;
+    } catch (e) {
+      hideMask();
+      if (!recs.value.includes(r)) return false;
+      // 升级失败：字段一个都别留（半升级的 rec 既不像本地图也不像盘阵场景），
+      // 回落本地解码，能力不变。
+      r.statusCls = 'err';
+      showErr('关联到盘阵目录 ' + res.resolved.dir + ' 了，但取预览图失败：'
+        + (e instanceof Error ? e.message : String(e)) + ' —— 已改用本地解码查看');
+      return false;
     }
   }
 
@@ -1009,7 +1116,7 @@ export const useViewerStore = defineStore('viewer', () => {
         sceneId: res.row.id,
         lqPath: res.resolved.sr_capable ? res.resolved.dir : null,
       }, blob);
-      const rec = recs.value.find((x) => x.name === res.row.name);
+      const rec = findRecByMeta({ sceneId: res.row.id, name: res.row.name });
       if (rec) {
         rec.serverMaskPath = res.resolved.mask_path;
         if (!res.resolved.sr_capable) {
@@ -1186,7 +1293,7 @@ export const useViewerStore = defineStore('viewer', () => {
     mergeRois, delClick, wandSelect, buildMaskJson, exportMaskJson, genMask,
     getRois, submitSr, bakeMaskToServer,
     // 手工盘阵场景：打开任意场景目录 / 本地图反推关联
-    openScenePath, tryLinkScenes, attachSceneLink,
+    openScenePath, tryLinkScenes,
     // 侧舱 ROI 选择 / 确定性统计
     selRoi, roiStats, roiSelIndex, selectRoi, clearRoiSel, refreshRoiStats,
     // 云量估算（整景/当前视野 + 疑似云区红叠）
