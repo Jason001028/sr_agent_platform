@@ -9,6 +9,7 @@
 - **SR_CODE 生产管线**（问算法 / 调用契约 / Windows 移植环境）：[docs/sr_code/sr-pipeline-overview.md](sr_code/sr-pipeline-overview.md)（算法全览）、[docs/sr_code/sr-pipeline-interface.md](sr_code/sr-pipeline-interface.md)（调用契约）、[docs/sr_code/sr-windows-porting-pitfalls.md](sr_code/sr-windows-porting-pitfalls.md)（移植踩坑 + 环境总结）、[docs/sr_code/production-scene-naming.md](sr_code/production-scene-naming.md)（生产场景命名规则与目录层级 —— 反推盘阵路径的依据）
 - **交接入口**：[docs/status/current-question.md](status/current-question.md) —— 新窗口先读；开新窗口时可直接把 [docs/status/handoff-prompt.md](status/handoff-prompt.md) 整篇粘过去
 - **新手指南**（有 Web 基础想系统理解前后端与设计取舍）：[docs/knowledge/platform-tutorial.md](knowledge/platform-tutorial.md) —— 读代码前的首选教程
+- **盘阵场景预览烘焙管线**（改 `/preview` 烘焙、缓存规则、场景行字段、裸 `.tif` 入口前先读）：[docs/knowledge/preview-bake-pipeline.md](knowledge/preview-bake-pipeline.md) —— 端到端链路 + 三张流程图 + 易判错点
 - **面试八股**（功利向跳槽复习，教程的互补）：[docs/knowledge/interview/README.md](knowledge/interview/README.md) —— 项目已到阶段 5 的窗口可顺手更新
 - **踩坑索引**：[docs/experience/gui-experience.md](experience/gui-experience.md)
 - **「提交 SR」当前路线（2026-09-14 起）= 本机 conda 直跑**：[docs/planning/sr-minimal-prototype-plan.md](planning/sr-minimal-prototype-plan.md) —— 前端点「提交 SR」→ 后端在 node81-135 直接起进程（`SR_EXECUTOR=local`）+ 锁定目录 + 用目录里已有的掩码；代码已落地（commit `8c197fc`），**待跑**真机三项只读确认与 A/B 段验收。部署侧见 [deploy/README.md](deploy/README.md) §7.6
@@ -20,7 +21,7 @@
 
 | 类目 | 目录 | 职责 | 现有文档 |
 |---|---|---|---|
-| 背景知识 | `docs/knowledge/` | 原理 / 学科背景 / 技术实现说明 | [platform-tutorial.md](knowledge/platform-tutorial.md)（从 0 开发教程）、[jpg-export-background.md](knowledge/jpg-export-background.md)、[agent-orchestration-research.md](knowledge/agent-orchestration-research.md)、[llm-serving-gguf-glossary.md](knowledge/llm-serving-gguf-glossary.md)（llama.cpp/GGUF 生态名词 + 本地部署选型）、[interview/](knowledge/interview/README.md)（面试八股 · 8 篇） |
+| 背景知识 | `docs/knowledge/` | 原理 / 学科背景 / 技术实现说明 | [platform-tutorial.md](knowledge/platform-tutorial.md)（从 0 开发教程）、[preview-bake-pipeline.md](knowledge/preview-bake-pipeline.md)（**盘阵场景预览烘焙管线**：resolve → 烘焙 → 缓存判定 → 显示的完整链路 + 三张 mermaid 流程图）、[jpg-export-background.md](knowledge/jpg-export-background.md)、[agent-orchestration-research.md](knowledge/agent-orchestration-research.md)、[llm-serving-gguf-glossary.md](knowledge/llm-serving-gguf-glossary.md)（llama.cpp/GGUF 生态名词 + 本地部署选型）、[interview/](knowledge/interview/README.md)（面试八股 · 8 篇） |
 | 需求与规划 | `docs/planning/` | 需求规格、实施计划 | [sr-minimal-prototype-plan.md](planning/sr-minimal-prototype-plan.md)（**当前路线**：前端提交 → 本机 conda 直跑的最小原型，含三项上机前确认 + 8 项改动清单 + A/B 验收）、[sr-pipeline-restore-plan.md](planning/sr-pipeline-restore-plan.md)（「提交 SR」→ Slurm + conda 超分的分阶段恢复清单，**路线已中止**）、[api-contract.md](planning/api-contract.md)（平台 API 契约）、[gui-requirements.md](planning/gui-requirements.md)、[web-plan.md](planning/web-plan.md)（gitignore） |
 | 经验与复盘 | `docs/experience/` | 踩坑记录、已验证方案 | [gui-experience.md](experience/gui-experience.md) |
 | 规范与约定 | `docs/conventions/` | 命名 / 流程等约束 | [naming-conventions.md](conventions/naming-conventions.md)、[langchain-boundary.md](conventions/langchain-boundary.md) |
