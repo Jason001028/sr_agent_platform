@@ -29,6 +29,10 @@
 - **SR 最小原型首跑（09-15，本机直跑 SR，不走 Slurm）**：需求收敛为「前端点提交 → 后端在 node81-135 上用**生产 conda 解释器直接跑 SR**，读锁定目录里的 `.tif` + 目录里已有的 `<目录名>_mask.tif`，产物写回同目录」。代码侧八项已落地（执行器二选一 `SR_EXECUTOR=slurm|local`、`SR_LOCKED_DIR` 路径锁、掩码改目录推导、前端删「输出目录」+ 自动 JPG 链路、放宽本地 `.jpg`、盘阵 `.jpg` 场景可列出）。**09-15 首次提交成功**：`POST /api/queue` → `HTTP 201`、`task_id=1` / `job_id=1` / `state=SUBMITTING` / `in_place:true`。**终态已验（09-15 晚）= FAILED，判据正确**：作业确实跑完了，审计段证实 `SR_EXECUTOR=local`、`SR_SR_SCRIPT=code_0817_prod_slurm.py`（变体在用）、`CUDA_VISIBLE_DEVICES=0` + 真实 GPU UUID、conda 解释器真的起来了——**「后端能调起 conda 解释器」已由实测确认**；但 SR 自身**没干活**：场景 9/12 就已超分过，`util.py:1009-1011` 判定 `already SRed before` 后提前 `return`（`exit()` 被注释掉，源码标 `# huai`），未建新 SRLOG；校验器发现 SRLOG 早于 config.xml、判为上次残留 → 契约不满足 → 退出码文件写非 0 verdict。**契约判据在此首次生效**：若沿用 sacct 时代的判据，这一次会被标成 COMPLETED 并固化。**新阻塞 = 需要一个未超分过的场景**才能真跑出产物；工作单 = `docs/planning/sr-minimal-prototype-plan.md`，实况见 §4 时间线 2026-09-15。**另有一处未收敛**：退出码文件已判 FAILED，`GET /api/queue` 仍报 `RUNNING`（详见 §4 时间线判读节第 3 条）。
 - **下一步**：① **A 段收尾只剩一件事：造一个未超分过的场景**——job 1 已证「提交链路 + conda 环境 + 变体 + 单卡绑定」全通，缺的只是让 SR 真干活（现场景 9/12 已超分 → `already SRed before` 提前 return）。二选一：换一个 `<目录名>.tif` 体积落在 `util.py:1006` 三个区间内的场景目录；或把该目录的 `<目录名>_NOSR.tif`（= 9/12 前的原始输入）改名还原回 `<目录名>.tif`（**先备份现有的超分产物**）。跑通后再定要不要重打/传 `frontend/dist`（**09-15 已在开发机重打完成**，见 §4 时间线）；② `SR_SCENES_ROOT=/data/scenes` 不覆盖 datahub → 场景列表看不到它（`/scenes` 页是「提交 SR」按钮的唯一入口，所以这个 env 必须配）。**09-15 定：本阶段不维护场景检索**，只把根指向 `datahub` + nginx `alias` 同值、接受同景多行，优先保证提交链路通；收件规则的缺口与后续修法见 §6.0「下一步行动」第 1 条（`SR_SCENES_ROOT` 是**单根**，没有多根写法；符号链接**只有建在根本身**才通过 `paths._is_within` 的 realpath 比较，建在根内会被判越权）；③ 定位真实场景根 → 改 `SR_SCENES_ROOT` + nginx `alias`（同值）→ 复核 /api/scenes（进度 §6.0）；④ 数据就位后按 §6.3–6.5 真机验收；⑤ commit 待归档变更（清单 §6.0）；⑥ 配 LLM key 跑通真实 /chat 闭环（§2.6）；⑦ 开发机推进 P1 ④⑤⑥⑦（§2.5）。
 - **约束提醒**：开发机的浏览器 e2e 测试**已恢复可用**（`.e2e/launchBrowser.js` 每次用独立的临时浏览器配置目录，彻底解决「浏览器闪退、退出码 0 无任何报错」的问题）；真实图片都在内网盘阵，外网开发机读不到（见 §5.1）。
+- **盘阵任意场景目录（09-17，开发机）**：`SR_SCENES_ROOT`（datahub）之外的合法场景目录（真机生产树 `/DiskArray/GSHC2IMPS/PRODUCT/<年>/<月>/<日>/<生产编号>`）现在也能在查看器打开、画掩码、写回该目录、就地提交 SR，不必先把数据搬进 datahub。两个入口（场景库页检索条下的输入框、查看器工具栏的「盘阵场景」栏）共用 `ScenePathBar.vue`，用户粘 Windows 形态 `W:\…`，后端按 `SR_DRIVE_MAP`（默认 `W:=/DiskArray`）译成服务端形态；`SR_ALLOWED_ROOTS`（默认 `/DiskArray`）做前缀白名单。**绝不扫盘**：只 `stat` 用户给的目录，测试用 `patch(Path, "rglob"/"glob"/"iterdir")` + `os.listdir`/`scandir`/`walk` 打成 `AssertionError` 钉住。新增 `POST /api/scenes/resolve`（§3.5）、`backend/pathguard.py`；同时修正一处会必然 400 的缺陷 —— `bake_mask` 按输入影像命名、`derived_mask_path` 按目录名命名，RC（`PAN.tif`）场景两者不同名，现由 `scene_search.mask_stem` 单点同源。验证：后端 454 passed / 1 skipped、前端 177 passed + `vue-tsc` 零错误、e2e `test-manual-scene.js` **37 断言**（新）与 `test-scenes.js` 61 / `test-platform.js` 18 无回归。真机待确认 5 项见 §4 该日条目（**第一项 `SR_LOCKED_DIR` 未清会让所有新场景提交 400**）。
+- **反推模板修正为生产树六层（09-17，开发机）**：上一条的「拖入本地 `.jpg` → 自动关联盘阵目录」在生产树上**永远落空** —— 反推模板是 `PRODUCT\{y}\{m}\{d}\{name}`（四层），真机是 `PRODUCT\<年>\<月>\<日>\<卫星型号>\<段级目录>\<景级目录>`（六层），少两层。按用户给的 9 段生产命名规范做成纯词法反推：`{sat}` = 名字第 1 段，`{mid}`（段级）= 景级名去掉景号那一段，`{y}/{m}/{d}` 取 14 位成像时刻前 8 位。顺带收口一处双真源：模板原先前后端各写一份，前端写死的那份让 `SR_SCENE_PATH_TEMPLATE` **从未生效**；现只留在 `backend/pathguard.py`。验证：后端 **464 passed / 1 skipped**、前端 171 passed + `vue-tsc` 零错误 + `npm run build`、e2e 39/61/18 断言。真机待确认：「段级 = 景级去景号」目前只有一组真机样本，其它卫星/产品待核。规则全文 [docs/sr_code/production-scene-naming.md](sr_code/production-scene-naming.md)，时间线见 §4。
+- **队列页三处前端缺陷修复（09-17，开发机）**：① 「耗时」列在 SR 跑完后从正常数值掉成「0 秒」—— 根因是 SSE `job_update` 帧不带 `updated_at`，前端那份时间戳冻结在提交时的 GET 快照（`updated_at == created_at`），运行中靠本地现算看不出、一进终态就归零；现由 `store.set_sr_task_state` 返回写入的时间戳、`_task_state` 广播时带出、前端 `mergeJobUpdate` 一并写回（写库失败则不发，避免界面与库对不上）。② 耗时列与创建时间列加 `nowrap` + `tabular-nums`，不再折行；参数列加 `overflow-wrap: anywhere` 吸收宽度。③ 新增 `--page-w: 1360px` 令牌，场景库 / 队列 / 聊天三页同宽（原先 1360 / 1240 / 1240，各写各的）。验证：后端 **466 passed / 1 skipped**、前端 **175 passed** + `vue-tsc` 零错误 + `npm run build`、e2e 39/61/**21**（`test-platform.js` 新增 3 条断言并做过反证：摘掉前端写回即红在「页内 0 秒 / 接口 1 秒」）。**交付须同时更新 `dist` 与 `backend` 两个包**，只换 dist 修不好。时间线见 §4。
+- **盘阵场景拉伸放开（09-17，开发机）**：盘阵 JPG 的拉伸下拉原先是**禁用**的、固定停在「2% 线性」（`Toolbar` 的 `:disabled` + `paintStretch` 对 `route==='jpg'` 直接早退），场景图一个模式都换不了 —— 而同一条像素管线的本地 JPG（`route==='img'`）从来可以随便拉，闸门给的理由（「别对已烘焙图二次拉伸」）在数据形态上不成立。现按用户决策放开：**盘阵场景以直方图均衡起手**（`lib/scene.startStretch`，换起手值只改这一个常量），拉伸成为**每张图各自的属性**（`rec.paintedMode`：切走再回来不重置、图与图之间不互相覆盖），且场景改模式**不写回全局**，免得看过一张场景图就改掉本地 TIF 的起手值。代价：服务器按 2% 裁掉的两端拉不回来。验证：前端 **178 passed** + `vue-tsc` 零错误 + `npm run build`、e2e 39/**65**/21（`test-scenes.js` 新增 4 条断言，反证过：把 jpg 早退回填即红在「下拉动了、画面没动」）。**真机待确认：8192 长边场景每次打开/换模式都要重算一遍全图，性能与内存需实测**（开发机 fixture 只有 1600×800）。时间线见 §4。
 
 ## 2. 里程碑计划与待办
 
@@ -557,7 +561,231 @@
 `test_api_platform.py`。前端 Vitest 169 passed、`vue-tsc` 零错误；`.e2e/test-scenes.js` 61 断言、
 `.e2e/test-platform.js` 18 断言全过。
 
+### 2026-09-17 · 盘阵任意场景目录：可打开 / 可画掩码 / 可就地提交 SR（开发机）
+
+**起因**：生产数据在 `/DiskArray/GSHC2IMPS/PRODUCT/<年>/<月>/<日>/<生产编号>`，与
+`SR_SCENES_ROOT`（`/DiskArray/tmp/wangrz/datahub`）是两棵树。原来只有 datahub 下的场景能在
+查看器打开、进而才能提交 SR，于是生产场景要先搬进 datahub 才能用。目标改为：盘阵上**任何
+合法场景目录**（目录内含 `<目录名>_meta.xml`，且含 `<目录名>.tif` 或 `PAN.tif`）都能打开 →
+画掩码 → 写回该目录 → 就地提交，不搬数据。
+
+**红线（用户逐条给的）**：
+
+- **绝不扫盘**。盘阵数据量极庞大，后端只 `stat` 用户给的那一个路径，判场景目录只试固定文件名，
+  禁止 `ls`/`glob`/`rglob`/`iterdir`。测试用 `patch(Path, "rglob"/"glob"/"iterdir")` 与
+  `os.listdir`/`scandir`/`walk` 全打成 `AssertionError` 来钉这条。
+- 用户粘的是 Windows 形态 `W:\GSHC2IMPS\PRODUCT\2026\09\17\<生产编号>`；`W:\` = `/DiskArray`。
+- 白名单是**可配前缀**（默认 `/DiskArray`），不是"扫出来再过滤"。
+- 本地 tif 按文件名反推服务端路径：**命中才允许提交，猜错必须报错**，绝不静默提交。
+
+**新增/改动**：
+
+1. `backend/pathguard.py`（新，零 backend 依赖）：`to_posix_array_path`（纯词法归一：剥引号 →
+   拒 UNC/控制字符 → 盘符映射 → 反斜杠转正 → 拒 `..` → 折叠）、`allowed_roots` /
+   `ensure_allowed`（`SR_ALLOWED_ROOTS`，**不做 `is_dir()` 检查** —— 白名单是词法策略，
+   开发机没有 `/DiskArray` 也要能跑测试）、`infer_scene_paths`（`SR_SCENE_PATH_TEMPLATE`
+   反推）。`api/paths.py` 改为从这里 import，`scenes_root` 等语义原样不动。
+2. `POST /api/scenes/resolve`：请求 `{path}` 或 `{name, date}`（二选一），返回与 `/api/scenes`
+   行**同形**的 `{source:"manual", row, resolved}`，前端直接 `scenes.open(row)`。手工行 id 是
+   `~` + base64url(绝对路径)（`~` 不在 base64url 字母表里，库行 id 一字未变）。错误码分工：
+   400 形态非法 · 403 越白名单 · 404 不是合法场景目录（`detail` 列出试过哪些候选、各自原因）·
+   422 读不到尺寸。
+3. **掩码命名同源**（本轮最大的一处实质修正）：`bake_mask` 写的是输入影像的 stem，
+   `derived_mask_path` 取的是**目录名** —— SC 场景（`<目录名>.tif`）两者恰好相同，
+   RC 场景（`PAN.tif`）不同名，于是写进去叫 `PAN_mask.tif`、提交时却去找
+   `<目录名>_mask.tif`，**必然 400**。现由 `scene_search.mask_stem` 单点决定，写与读同源。
+4. 提交侧两入口（REST `_norm_sr_params` 与 agent 工具 `run_sr`）共用
+   `pathguard.normalize_submit_path`：同一个场景写成 `W:\…` 与 `/DiskArray/…` 必须算出同一个
+   `task_fingerprint`，否则幂等层失效、重复投作业。
+5. 前端：`ScenePathBar.vue`（两处入口共用：场景库页检索条下 + 查看器工具栏）、
+   `lib/scene.ts` 的 `todayScenePrefix`/`inferScenePath`/`parseSceneDate`、
+   `apiResolveScene`/`apiBakeMask`、`stores/scenes.ts::resolvePath`、查看器的
+   `tryLinkScenes`/`bakeMaskToServer` 与「保存掩码到盘阵」按钮。`srReady` 放宽为
+   `!!activeRec?.lqPath`（判据是"这张图有没有盘阵目录"，不是"它是怎么打开的"）。
+6. 队列表单的掩码名改为**优先显示后端给的权威值**（resolve 响应 / 写掩码响应 / 该任务行自己的
+   `params.mask_path`），拿不到或用户手改了 `lq_path` 才退回前端那份无 stat 的镜像 ——
+   镜像拿目录名顶输入影像 stem，PAN 场景会指错文件。
+
+**验证**（开发机全绿）：后端 `pytest backend/` → **454 passed / 1 skipped**；前端
+`npx vitest run` → **177 passed**、`vue-tsc --noEmit` 零错误、`npm run build` 通过；
+e2e `.e2e/test-manual-scene.js` **37 断言**（粘 `W:\…` 打开 → 画矩形 → 保存掩码到盘阵 →
+提交 SR → 假调度器跑完；不存在的编号报错且不留可提交物；本地 tif 反推命中/落空/无日期三条路；
+PAN 场景掩码名取输入名不取目录名，含队列表单显示的那一份），另有 `test-scenes.js` 61 断言、
+`test-platform.js` 18 断言无回归。**新增仓库文件**：`.e2e/test-manual-scene.js`。
+
+**真机待确认（上线前必查，一票否决项排第一）**：
+
+1. **`SR_LOCKED_DIR` 是否已设**（`platform.py::_norm_sr_params`）。设了的话所有新场景提交都会被
+   400 拒 —— 上线前确认，设了要清掉或改成白名单语义。
+2. 服务账号（`User=nginx`）对 `/DiskArray/GSHC2IMPS/PRODUCT/.../<编号>/` 的**写权限**：meta.xml
+   回写、`Debug/` 日志、掩码写入、`.preview.jpg` 缓存四处都要写。resolve 响应里带 `writable`
+   标志，前端可提前提示；探针命令见 `deploy/sr-api.service` 新增段落。
+3. ~~`/DiskArray/GSHC2IMPS/PRODUCT/<年>/<月>/<日>` 这一层是否就是 `<编号>/<编号>.tif` +
+   `<编号>_meta.xml`~~ **2026-09-17 真机否掉**：这一层下面是 `<卫星型号>/<段级目录>/<景级目录>`，
+   `<年>/<月>/<日>` 之后还有两层（详见同日时间线条目「反推模板少两层」）。
+4. `SR_SANDBOX_ROOT` 若已配，提交会先复制场景目录 —— 掩码必须先写真实目录再提交（当前交互顺序
+   天然如此，但 UI 文案要写清）。
+5. 大 tif 首次 `/preview` 要解压采样整幅，耗时在 API 主机上；nginx `proxy_read_timeout` 已是
+   3600s，够用，但界面可给"首次较慢"的提示。
+
+**文档**：`docs/planning/api-contract.md` 新增 §3.5、改 §3.4 body 与状态挂起项；
+`deploy/sr-api.service` 新增 `SR_ALLOWED_ROOTS`/`SR_DRIVE_MAP`/`SR_SCENE_PATH_TEMPLATE`
+说明段；`deploy/nginx.conf` 注明**本条不需要改**（手工场景预览走 `/api` 反代，别把
+`/disk-array/` 的 alias 放大到整个盘阵 —— 那会让白名单从第二层保险退化成唯一一层）。
+
+### 2026-09-17 · 反推模板少两层：生产树「文件名 → 场景目录」永远落空（开发机）
+
+**现象（真机）**：把生产树上的一个 `.jpg` 拖进查看器，弹窗报
+
+```
+未能关联盘阵目录 (W:\GSHC2IMPS\PRODUCT\2026\09\02\JL1KF02B03_..._102_0025_001_L1_PAN)：
+没找到合法场景目录 —— /DiskArray/GSHC2IMPS/PRODUCT/2026/09/02/JL1KF02B03_..._L1_PAN：目录不存在
+```
+
+**根因**：反推模板是 `PRODUCT\{y}\{m}\{d}\{name}`（**四层**），而生产树实际是
+`PRODUCT\<年>\<月>\<日>\<卫星型号>\<段级目录>\<景级目录>`（**六层**），少两层 —— 所以不是
+"猜错了日期"，是模板结构本身在生产树上 100% 落空。用户 `ls` 证实
+`/DiskArray/GSHC2IMPS/PRODUCT/2026/09/02` 存在，下面才是 `JL1KF02B03/`。
+同一轮还发现：模板在 `pathguard.py` 与 `scene.ts` 各写了一份，前端写死的那份让
+`SR_SCENE_PATH_TEMPLATE` 这个 env **从未生效过**。
+
+**规则（用户给的命名规范，纯词法、不扫盘）**：`JXGF07D03_PMS_20260622052600_200516571_101_0006_001_L1_MSS`
+按 `_` 分 9 段 = 卫星型号 / 传感器 / 14 位成像时刻 / 9 位任务计划号 / 3 位段号 / 4 位景号 /
+生产次数 / 级别 / 产品（MSS|PAN）。于是：
+
+- `{sat}` = 第 0 段 → 外层目录；
+- `{mid}`（段级目录）= 景级名**去掉第 5 段（景号）**；真机对照
+  `..._102_0025_001_L1_PAN`（景级）↔ `..._102_001_L1_PAN`（段级）；
+- `{y}/{m}/{d}` = 第 2 段那 14 位的前 8 位。
+
+**改动**：`backend/pathguard.py` 新增 `scene_name_layers` / `strip_raster_ext`，默认模板改六层，
+名字推不出 `{sat}/{mid}` 时**跳过**该候选（不硬拼空段）；候选 = 生产树模板 + 旧扁平
+`PRODUCT\{y}\{m}\{d}\{name}`（兼容平铺部署），配了 `SR_SCENE_PATH_TEMPLATE` 就只走那一条。
+`POST /api/scenes/resolve` 的 `{name, date}` 放宽为 `{name}`（date 可省，后端自己从文件名解析）。
+前端 `scene.ts` 删掉 `parseSceneDate`/`inferScenePath`/`stripRasterExt`/`mapWinPathToPosix`
+与 `viewer.ts` 里自拼路径那段 —— **模板与命名规则只剩 pathguard.py 一处真源**，env 从此真正生效。
+"命中才提交、猜错必须报错"不变：候选全落空 → 400 并列出试过的候选与各自原因。
+
+**验证**（开发机）：后端 `pytest backend/` → **464 passed / 1 skipped**（基线 454）；前端
+`npx vitest run` → **171 passed**（基线 177，删掉 6 条随后端规则迁移的用例）、`vue-tsc --noEmit`
+零错误、`npm run build` 通过；e2e `test-manual-scene.js` **39 断言**（含生产树层级夹具）、
+`test-scenes.js` 61、`test-platform.js` 18 无回归。
+
+**真机待确认**：「段级 = 景级去景号」这条关系目前**只有一组真机样本**支撑，其它卫星/产品是否
+同样成立待核（`ls .../PRODUCT/<年>/<月>/<日>/<卫星型号>/` 一眼可见）。规则若不成立，表现是
+反推落空并报出候选 —— 不会静默指错目录。规则全文见
+[docs/sr_code/production-scene-naming.md](../sr_code/production-scene-naming.md)。
+
+### 2026-09-17 · 队列页三处前端缺陷：耗时掉成「0 秒」/ 耗时列折行 / 页宽不齐（开发机）
+
+**现象（真机，客户端）**：① 「任务队列」页里 SR 跑完后，「耗时」列从一个正常数值**迅速变成
+「0 秒」**；② 该列偏窄，`已运行 3 分 20 秒` 经常折成两行；③ 「聊天」与「任务队列」页的正文
+宽度比「场景库」窄。
+
+**根因（①，读代码可判定，已用 e2e 反证）**：终态行的耗时 = `updated_at − created_at`，而
+客户端的 `updated_at` 只来自 `GET /api/queue`。链路三处对、一处缺：后端每次状态写回都刷
+`updated_at`（`store.set_sr_task_state`），接口也返回它（`platform._task_view`），但 **SSE
+`job_update` 帧不带这个字段**，前端 `mergeJobUpdate` 又只覆盖 `state`。于是页内那份
+`updated_at` 冻结在上一次 `list()` —— 而那次 `list()` 就发生在提交刚落库之后，
+`created_at` 与 `updated_at` 是同一个 `now`，差值为 0。运行中用的是本地现算的 `nowSec`，
+数字正常增长；一进终态改用那份快照，恰好等于 `created_at` → 「0 秒」。
+
+②③ 是纯样式：耗时列的 `td` 没有 `nowrap`，文案里的空格就是断行点；三页各写各的
+`max-width`（场景库 1360 / 队列 1240 / 聊天 1240）。
+
+**改动**：
+
+- `backend/services/store.py`：`set_sr_task_state` 返回值由 `None` 改为写入的 `updated_at`
+  （两个调用方都忽略返回值，无回归）。
+- `backend/api/platform.py`：`_task_state` 广播帧带上 `updated_at`；**写库失败就不带** ——
+  库里没变，凭本地时钟发一个只会让界面与库对不上。
+- `frontend/src/lib/api.ts` / `stores/queue.ts`：`JobUpdateEvent.updated_at?` 可选字段，
+  `mergeJobUpdate` 在 state 之外一并写回 `updated_at`；值非法（缺失 / 0 / NaN）时不覆盖，
+  保留本地快照（老后端下退化为原行为，而不是把整列变成「—」）。
+- `frontend/src/pages/QueuePage.vue`：耗时列与创建时间列 `white-space: nowrap` +
+  `tabular-nums`（定长格式，秒数跳动时列宽不抖）；参数列加 `overflow-wrap: anywhere`
+  吸收宽度，否则上面两列的 nowrap 会把整表撑出 `.qp-tbl-wrap` 的 `overflow: hidden`。
+- `frontend/src/style.css` 新增 `--page-w: 1360px`，场景库 / 队列 / 聊天三页统一引用 ——
+  这次的宽度漂移就是这个毛病，收敛成一处令牌后不会再各自漂。
+- 契约同步：`api-contract.md` §3.3 的 `job_update` 事件 schema 补 `updated_at`。
+
+**验证**（开发机，全绿）：后端 `pytest backend/` → **466 passed / 1 skipped**（基线 464，
+新增 2 例：广播帧带 `updated_at`、写库失败时不带）；前端 `npx vitest run` → **175 passed**
+（基线 171，新增 4 例，含一条回归钉「任务跑完不再退化成 0 秒」）、`vue-tsc --noEmit` 零错误、
+`npm run build` 通过；e2e `test-manual-scene.js` 39 / `test-scenes.js` 61 /
+`test-platform.js` **21**（基线 18，新增 3 条断言）无回归。
+
+新断言做过反证：把前端的 `updated_at` 写回临时摘掉（后端保持已修）重新构建跑
+`test-platform.js`，红在 `耗时列 = 接口真值（页内 0 秒 / 接口 1 秒）` —— 正是真机看到的现象；
+恢复后转绿（页内 1 秒 / 接口 1 秒）。新增的布局断言同时钉住「三页同宽
+（1360 / 1360 / 1360）」与「耗时列 `white-space=nowrap`」。
+
+**真机待确认**：① 交付需**同时更新 `frontend/dist` 与 `backend/` 两个包** —— 只换 dist 的话，
+新前端收不到旧后端不发的时间戳，耗时列会退回到「保留旧快照」，即原现象（`mergeJobUpdate`
+对缺失字段是容错的，不会报错，只是不修）；② 真机上跑完一个任务后「耗时」列应显示真实耗时，
+且点「刷新」后数值不变；③ 三页正文是否确实同宽（窗口宽度 > 1360 时才会体现出差异）。
+
+### 2026-09-17 · 盘阵场景拉伸下拉被禁用：一个模式都用不了（开发机）
+
+**现象（真机，客户端）**：打开盘阵场景后，工具栏的拉伸下拉是灰的、固定停在「2% 线性」，
+悬停提示「盘阵 JPG 已烘焙 2% 线性拉伸」，换不了任何别的模式。
+
+**根因（读代码可判定，已用 e2e 反证）**：不是崩溃，是一条**刻意的闸门**，但它给的理由在
+数据形态上不成立。`Toolbar.vue` 用 `sceneActive`（`route === 'jpg'`）同时禁掉下拉并强制显示
+`linear2`；`viewer.paintStretch` 又在开头对 `route === 'jpg'` 直接 `return`（只记
+`paintedMode`、不重画）。理由是「别对已烘焙图做二次拉伸」—— 可是本地拖入的 JPG
+（`route === 'img'`，走同一个 `sceneDecodePixels`、同一份 stats）从来就可以随便拉：数据形态
+完全一样，能力一边有一边没有。
+
+另有一条被忽略的事实：`sceneDecodePixels` 用 `computeStats(..., 0, 255)`，所以 `linear` 在
+这张图上恒等。也就是说**即使放开闸门、起手值仍取线性，画面与服务器烤的也逐像素一致** ——
+放开本身不会毁掉烘焙值，真正的取舍只在「起手值取哪个模式」。
+
+**改动**（用户决策：场景起手值取**直方图均衡**）：
+
+- `frontend/src/lib/scene.ts`：新增 `SCENE_START_STRETCH = 'equal'` 与纯函数
+  `startStretch(route, current)` —— 盘阵场景恒以直方图均衡起手，其余路径沿用当前模式。
+- `frontend/src/stores/viewer.ts`：`paintStretch(rec, mode)` 收显式模式、**删掉 jpg 早退**；
+  新增 `repaintOnActivate`（没画过就按起手值画；画过的本地图仍跟随工具栏，**盘阵场景不跟随**）；
+  `setStretch` 改的是当前这张图（记在 `rec.paintedMode` 上）且**场景不写回全局**；新增
+  `activeStretch` 计算属性 = 下拉显示的真值（`paintedMode ?? 起手值`）。
+- `frontend/src/components/Toolbar.vue`：去掉 `:disabled` 与 `'linear2'` 强制值，改显示
+  `store.activeStretch`；title 改为说明「服务器烤的 2% 线性是底图，这里改的是二次拉伸，
+  两端已被裁掉，拉不回来」。
+- `frontend/src/components/AgentChatTab.vue`：送 Agent 的上下文如实报**当前显示层**模式
+  （原先 `route==='jpg'` 时写死「2% 线性（盘阵烘焙）」）。
+- `frontend/src/pages/ScenesPage.vue`：页脚提示由「交互式拉伸/导出 JPG 在场景路径不可用」
+  改为「显示层拉伸可改（起手值直方图均衡），烘焙时裁掉的两端拉不回来」；顺带删掉已不存在的
+  「导出 JPG」半句（导出链路 09-14 已整体删除）。
+- `frontend/src/viewer/e2eHooks.ts`：`__viewer` 补 `activeStretch()` / `setStretch()`，rec 摘要
+  补 `paintedMode`（浏览器回归要用）。
+- 不改：`rec.layout` 文案「盘阵 JPG（已烘焙 2% 线性拉伸）」—— 它描述的是**文件本身**，仍成立。
+
+**验证**（开发机，全绿）：后端 `pytest backend/` → **466 passed / 1 skipped**（本轮未动后端，
+基线复核）；前端 `npx vitest run` → **178 passed**（基线 175，新增 3 例：场景起手值恒为均衡 /
+其余路径沿用当前模式 / 场景数据上 `equal` 确实改像素）、`vue-tsc --noEmit` 零错误、
+`npm run build` 通过；e2e `test-manual-scene.js` 39 / `test-scenes.js` **65**（基线 61，新增 4 条
+断言）/ `test-platform.js` 21，无回归。
+
+新断言做过反证：把 `paintStretch` 的 jpg 早退临时加回去重新构建跑 `test-scenes.js`，红在
+`切到对数后画布像素变化（均衡均值 126.96 → 对数均值 126.96）` —— **下拉动了、画面没动**，
+正是真机看到的现象；恢复后转绿（127.58 → 141.01）。同时钉住「下拉值与 rec 记录同步」与
+「别的场景 rec 不被连带改掉」。
+
+**真机待确认**：① **性能与内存**（本轮最大的未知数）—— 盘阵 JPG 长边 8192，整幅约 6700 万
+像素；放开后**每次**打开场景、**每次**换模式都要在显示层做一遍全图 `stretchRgba`
+（一遍全图循环 + 一份 RGBA ≈256MB 瞬时分配，画布与 `src` 另占约 500MB）。开发机 fixture 只有
+1600×800（128 万像素），这个开销完全看不出来。真机上如果「打开场景变慢」或页面卡顿/崩，
+需要改成降采样或分块再算 —— 请回传体感与机器配置。② **直方图均衡是否真的比 2% 线性更利于
+判读** —— 这是选它当起手值的假设，看图确认；不合适改 `SCENE_START_STRETCH` 一个常量即可，
+也可以直接告诉我要换成哪个模式。③ 在同一张场景图上改过模式后，切到别的图再切回来应保持
+（每图独立），且本地 TIF 的起手值不应被场景上的操作改掉。
+
 ## 5. 交接（给新窗口）
+
+> 开新窗口时按用途挑一份整篇粘过去：[handoff-prompt.md](handoff-prompt.md)（梳理框架与当前思路）、
+> [bugfix-prompt.md](bugfix-prompt.md)（修一个 bug，末尾留了 bug 描述粘贴位）。
+> 两份都含协作方式、硬约束、仓库地图与验证命令。
 
 ### 5.1 环境约束
 
@@ -595,9 +823,10 @@
 - 阶段5 部署增补：nginx `/api/` 反代 `proxy_buffering off`+`proxy_read_timeout 3600s`（SSE）；`sr-api.service` env（`SR_AGENT_DB`/`SR_LLM_MOCK=0`/`SR_SLURM_FAKE=0` + Slurm 六项 `SR_PYTHON`/`SR_BUNDLE_DIR`/`SR_SLURM_WORK_DIR`/`SR_SLURM_PARTITION`/`SR_SLURM_TIME`/`SR_SLURM_CPUS`）；`requirements-api.txt` 补 `openai>=1.40,<2`
 - Slurm 接入件：`SR_code/variants/{code_0817_prod_slurm.py,verify_sr_run.py,.diff,.provenance.json}` + 生成器 `SR_code/tools/gen_slurm_variant.py`、只读探针 `deploy/slurm/probe_slurm.sh`；运行期 `backend/services/{run_sr,slurm}.py`；验收清单 `docs/status/slurm-acceptance.md`、差异表 `docs/sr_code/sr-slurm-deploy-variant.md`、契约 `docs/sr_code/sr-pipeline-interface.md` v1.5
 - 阶段6 上下文侧舱：`frontend/src/components/{ContextPanel,RoiToolsTab,AgentChatTab}.vue` + `lib/{roiStats,agentContext}.ts`（buildStats / tasksForScene / CTX_DIVIDER）+ viewer store 选中/统计钩子 + `/api/scenes` `lq_path`（阶段6 增补见 api-contract.md）
+- 生产命名/反推规则：`docs/sr_code/production-scene-naming.md`（9 段名字 + 六层目录 + 由文件名反推场景目录）；实现唯一真源 `backend/pathguard.py::scene_name_layers` / `infer_scene_paths`
 - 经验文档：`docs/experience/gui-experience.md`
 - 真机预演（无内网机时可跑）：`backend/tests/test_local_chain.py`（4 例，除 SR 算法外全真：真 config/批脚本/bash/校验器/退出码文件；`code_0817_prod.py` 换 stub）
-- E2E 测试：`.e2e/`（**2026-09-15 起入库**，只忽略 `node_modules/`+`fixtures/`+大图）——`test-vue-viewer.js` **35 断言**本地文件回归 · `test-scenes.js` **58 断言**场景 http 打开 · `test-platform.js` **12 断言** REST/SSE 全链路；跑法 `cd .e2e && node test-<name>.js`（前置 `cd frontend && npm run build`；puppeteer-core + 无界面 Chrome + 本地静态服务顶替 nginx + uvicorn 起真后端）
+- E2E 测试：`.e2e/`（**2026-09-15 起入库**，只忽略 `node_modules/`+`fixtures/`+大图）——`test-vue-viewer.js` **35 断言**本地文件回归 · `test-scenes.js` **61 断言**场景 http 打开 · `test-platform.js` **18 断言** REST/SSE 全链路 · `test-manual-scene.js` **37 断言**盘阵任意场景目录（粘 `W:\…` 打开 → 画掩码 → 写盘阵 → 提交 SR，含 PAN 掩码命名与反推失败两条路）；跑法 `cd .e2e && node test-<name>.js`（前置 `cd frontend && npm run build`；puppeteer-core + 无界面 Chrome + 本地静态服务顶替 nginx + uvicorn 起真后端）
 - 测试图：`test-tifs/`（gitignore）、`frontend/fixtures/`（入库小图）
 - 记忆：`~/.claude/projects/.../memory/MEMORY.md`（6 条索引：local-vendor / browser-2gb / intranet-data / real-files-1row-strips / openai-pin / **phase4-disk-array-reads-jpg**）
 

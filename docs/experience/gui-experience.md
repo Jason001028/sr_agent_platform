@@ -173,7 +173,7 @@ needGeo → decodeGeoTiff：
 - **决策**：盘阵场景浏览器**不读原始 TIF**，改读服务器懒生成的 8192 长边 JPG（稀疏采样 + 2% Linear 烘焙）。HttpSource/Range 方案废弃——本地 `tifDecode`/`sparse` 仍是浏览器读 TIF 的唯一路径（本地文件用），不与盘阵 JPG 混用。
 - **服务端生成必须镜像前端稀疏语义**：预览/导出看起来要一致，就照抄前端映射——`ps=min(1,8192/max(W,H))`、`out(i,j)=src[round(i*(H-1)/(ph-1)), round(j*(W-1)/(pw-1))]`（端点对齐，杀右/下边条纹）；拉伸用 2% Linear + WhiteIsZero 先反色；const 图规则与前端一致（全 0→黑，其他 const→128）。**同一组常量前后端各写一份，改任一端都要同步另一端的单测。**
 - **逐条带抽读只碰采样行**：大图不整图载入——每采样行定位到所在条带（无压缩常一行一条带）读其字节跨距、只留采样列。这样进程内存与图幅解耦，1.78GB 图也只在几十秒内生成完。
-- **route='jpg' rec 的关键是 stats 固定 0..255**：JPG 像素已是烘焙值，src 的 min/max 设成 0..255 → 任何交互拉伸都是恒等，服务器烘焙像素不会被二次拉伸破坏；`paintStretch` 对 jpg 直接早退更省事。
+- **route='jpg' rec 的关键是 stats 固定 0..255**：JPG 像素已是烘焙值，src 的 min/max 设成 0..255 → `linear` 拉伸恒等，不改线性模式下看到的就是服务器烤的那份；其余模式（平方根/对数/直方图均衡）在显示层做二次拉伸。**2026-09-17 改向**：此前 `paintStretch` 对 jpg 直接早退、拉伸下拉也禁用，导致场景图一个选项都用不了；现在场景照走同一条绘制链路，起手值为直方图均衡（`lib/scene.startStretch`）。代价：烘焙时按 2% 裁掉的两端拉不回来。
 - **掩码换算用元数据 W/H，不探 TIF**：盘阵场景坐标回全分辨率 = `thumbToOrig`，scale 分母用服务端给的 W/H（元数据），不是本地 probe。
 - **场景 id 用 base64url(rel path)**：URL 安全 + 无歧义；resolve 时 repad 补 '='、拒 `..`、realpath 校验必须在 scenes root 内（`<fake>` 占位路径同样拒）——fake 回退数据永远不许被当作真实文件去生成预览。
 

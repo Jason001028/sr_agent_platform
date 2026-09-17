@@ -9,6 +9,7 @@ TestClient 内存驱动。覆盖：
 import asyncio
 import json
 import os
+import shutil
 import tempfile
 import time
 import unittest
@@ -20,7 +21,8 @@ from fastapi.testclient import TestClient
 
 from backend.api.app import create_app
 from backend.api.platform import (_Subscriber, _broadcast, _queue_state,
-                                  chat_send)
+                                  _task_state, chat_send)
+from backend.tests import allowed_roots_env
 from backend.services import run_sr as svc
 from backend.services import slurm
 from backend.services.run_sr import task_fingerprint
@@ -28,7 +30,8 @@ from backend.services.run_sr import task_fingerprint
 _ENVS = ("SR_AGENT_DB", "SR_SCENES_ROOT", "SR_PREVIEWS_ROOT", "SR_LLM_MOCK",
          "SR_SLURM_FAKE", "SR_SLURM_FAKE_T_MS", "SR_SLURM_WORK_DIR",
          "SR_QUEUE_POLL_SEC", "SR_SANDBOX_ROOT", "SR_EXECUTOR",
-         "SR_LOCKED_DIR", "SR_LOCAL_GPU", "SR_BUNDLE_DIR")
+         "SR_LOCKED_DIR", "SR_LOCAL_GPU", "SR_BUNDLE_DIR",
+         "SR_ALLOWED_ROOTS", "SR_DRIVE_MAP")
 
 
 def write_bundle_suffix(bundle_dir, value, name=None):
@@ -99,6 +102,9 @@ class PlatformBase(unittest.TestCase):
         # (and on the dev box the real one is absent anyway, so the tests would
         # pass for the wrong reason — see test_suffix_defaults_* below).
         os.environ["SR_BUNDLE_DIR"] = os.path.join(self._tmp.name, "bundle")
+        # 临时目录就是这些用例的"盘阵"：提交侧的白名单（SR_ALLOWED_ROOTS）
+        # 默认只放行 /DiskArray，不配的话每个提交都会被 400 挡下。
+        os.environ.update(allowed_roots_env(self._tmp.name))
 
     def client(self) -> TestClient:
         return TestClient(self._make_app())
@@ -268,6 +274,10 @@ class TestQueue(PlatformBase):
         self.mask_file = touch_tif(
             self.scene_dir / f"{self.SCENE}_mask.tif")
         self.LQ = str(self.scene_dir)
+        # 提交侧会把 lq_path 归一成盘阵 POSIX 形态（`W:\...` 与 `/DiskArray/...`
+        # 必须落到同一个字符串，幂等才成立）。真机上是 Linux，两种写法本来就
+        # 同串；开发机上才有区别，所以断言用归一形态。
+        self.LQ_POSIX = self.scene_dir.as_posix()
 
     def _submit(self, c, **over):
         body = {"lq_path": self.LQ, "suffix": "t"}
@@ -328,7 +338,7 @@ class TestQueue(PlatformBase):
         # 必须自己说清楚，别让操作者从别处推断（工作单 §4.2 最后一条）。
         body = self._submit(self.client()).json()
         self.assertTrue(body["in_place"])
-        self.assertIn(self.LQ, body["notice"])
+        self.assertIn(self.LQ_POSIX, body["notice"])
         self.assertIn("<输入名>_t.tif", body["notice"])   # 输出名按管线拼接
         self.assertIn("不改名也不删除", body["notice"])     # 输入不动
         self.assertIn("_NOSR.tif", body["notice"])        # 同名旧输出的去向
@@ -342,10 +352,12 @@ class TestQueue(PlatformBase):
 
     def test_list_queue_shows_params_subset(self):
         c = self.client()
-        self._submit(c, sr_scale=3, mask_path="/DiskArray/x_mask.tif")
+        other_mask = self.scene_dir / "other_mask.tif"
+        touch_tif(other_mask)
+        self._submit(c, sr_scale=3, mask_path=str(other_mask))
         t = c.get("/api/queue").json()["tasks"][0]
-        self.assertEqual(t["params"]["lq_path"], self.LQ)
-        self.assertEqual(t["params"]["mask_path"], "/DiskArray/x_mask.tif")
+        self.assertEqual(t["params"]["lq_path"], self.LQ_POSIX)
+        self.assertEqual(t["params"]["mask_path"], other_mask.as_posix())
         self.assertEqual(t["params"]["sr_scale"], 3)
         self.assertEqual(t["params"]["suffix"], "t")
         self.assertIn("config_xml", t)
@@ -358,7 +370,7 @@ class TestQueue(PlatformBase):
         c = self.client()
         self._submit(c)
         t = c.get("/api/queue").json()["tasks"][0]
-        self.assertEqual(t["params"]["lq_path"], self.LQ)      # what was asked for
+        self.assertEqual(t["params"]["lq_path"], self.LQ_POSIX)      # what was asked for
         self.assertTrue(t["run_dataroot"].startswith("/DiskArray/tmp/sbx/"))
         # only the basename survives the copy — the SC step derives its input
         # name (`<目录名>.tif`) from the directory's own name. (The sandbox path
@@ -371,7 +383,7 @@ class TestQueue(PlatformBase):
         c = self.client()
         self._submit(c)
         t = c.get("/api/queue").json()["tasks"][0]
-        self.assertEqual(t["run_dataroot"], self.LQ)
+        self.assertEqual(t["run_dataroot"], self.LQ_POSIX)
 
     def test_cancel_pending_job(self):
         os.environ["SR_SLURM_FAKE_T_MS"] = "600000"    # 停在 PENDING/RUNNING
@@ -466,7 +478,7 @@ class TestQueue(PlatformBase):
         r = self._submit(c, mask_path=str(self.mask_file))
         self.assertEqual(r.status_code, 201)
         t = c.get("/api/queue").json()["tasks"][0]
-        self.assertEqual(t["params"]["mask_path"], str(self.mask_file))
+        self.assertEqual(t["params"]["mask_path"], self.mask_file.as_posix())
 
     def test_locked_dir_accepts_its_own_path_and_rejects_others(self):
         os.environ["SR_LOCKED_DIR"] = self.LQ
@@ -565,6 +577,63 @@ class TestQueue(PlatformBase):
         self.assertEqual(_queue_state({"active": None, "state": "UNKNOWN"}),
                          "UNKNOWN")
 
+    def test_job_update_frame_carries_updated_at(self):
+        """状态变化帧必须带上这次写库的 updated_at。
+
+        界面上的终态耗时 = updated_at − created_at，而客户端本地的 updated_at
+        是上一次 GET /api/queue 的快照 —— 那次 GET 通常就在提交刚落库之后
+        （updated_at == created_at）。只广播 state 的话，任务一完成，耗时列
+        就从运行中的正常值掉成「0 秒」（2026-09-17 实测现象）。
+        """
+        app, c = self.app_client()
+        tid = self._submit(c).json()["task_id"]
+        # 冻结成终态：绕过假调度器的时序，直接让校准器看到 COMPLETED
+        with mock.patch.object(svc, "query_job_status",
+                               return_value={"active": False,
+                                             "state": "COMPLETED"}):
+
+            async def scenario():
+                q = asyncio.Queue()
+                app.state.subscribers.add(
+                    _Subscriber(asyncio.get_running_loop(), q))
+                st, changed = _task_state(
+                    app.state, app.state.store.get_sr_task_by_id(tid))
+                self.assertEqual((st, changed), ("COMPLETED", True))
+                return sse_events(await asyncio.wait_for(q.get(), 1))
+
+            frames = asyncio.run(scenario())
+
+        self.assertEqual(len(frames), 1)
+        ev = frames[0]
+        self.assertEqual(ev["type"], "job_update")
+        self.assertEqual(ev["state"], "COMPLETED")
+        # 帧里的值 = 库里刚写进去的那个（客户端据此算耗时，不能是另一个数）
+        row = app.state.store.get_sr_task_by_id(tid)
+        self.assertEqual(ev["updated_at"], row["updated_at"])
+
+    def test_updated_at_is_not_broadcast_when_the_db_write_fails(self):
+        """写库失败就不带 updated_at —— 库里没变，凭本地时钟发一个只会让界面
+        与库对不上；此时让客户端保留旧快照，与 GET 的读数保持一致。"""
+        app, c = self.app_client()
+        tid = self._submit(c).json()["task_id"]
+        with mock.patch.object(svc, "query_job_status",
+                               return_value={"active": False,
+                                             "state": "COMPLETED"}), \
+             mock.patch.object(app.state.store, "set_sr_task_state",
+                               side_effect=RuntimeError("db down")):
+
+            async def scenario():
+                q = asyncio.Queue()
+                app.state.subscribers.add(
+                    _Subscriber(asyncio.get_running_loop(), q))
+                _task_state(app.state, app.state.store.get_sr_task_by_id(tid))
+                return sse_events(await asyncio.wait_for(q.get(), 1))
+
+            frames = asyncio.run(scenario())
+
+        self.assertEqual(frames[0]["state"], "COMPLETED")   # 状态照推
+        self.assertNotIn("updated_at", frames[0])
+
 
 class TestMasks(PlatformBase):
     def _set_env(self):
@@ -601,7 +670,7 @@ class TestMasks(PlatformBase):
         self.assertEqual(mask.name, scene.stem + "_mask.tif")
         self.assertTrue(mask.is_file())
         self.assertTrue(Path(body["mask_txt"]).is_file())
-        self.assertEqual(body["lq_path"], str(scene.parent))
+        self.assertEqual(body["lq_path"], scene.parent.as_posix())
         draft = body["task_draft"]
         self.assertEqual(draft["lq_path"], body["lq_path"])
         self.assertEqual(draft["mask_path"], body["mask_path"])
@@ -646,6 +715,131 @@ class TestMasks(PlatformBase):
                 "polygons": [{"points": [[1, 1], [2, 1], [1, 2]]}],
                 "W": 10, "H": 10})
             self.assertEqual(r.status_code, 404)
+
+    # -- 手工场景（盘阵上任意合法目录，走 lq_path） --------------------------
+    def _manual_scene(self, name="260318", *, pan=False, meta=True, tif=True):
+        """SR_SCENES_ROOT **之外**的一个合法场景目录（真机形态的编号目录）。"""
+        # 与真机同构：盘阵根用 `W:\` 表达。开发机（Windows）上临时目录带盘符，
+        # 再给那个盘符加一条恒等映射，好让本机绝对路径也能表达同一个目录。
+        maps = f"W:={Path(self._tmp.name).as_posix()}"
+        drv = Path(self._tmp.name).drive
+        if drv:
+            maps += f";{drv}={drv}"
+        os.environ["SR_DRIVE_MAP"] = maps
+        os.environ["SR_ALLOWED_ROOTS"] = "W:\\"
+        d = Path(self._tmp.name, "GSHC2IMPS", "PRODUCT", "2026", "09", "17", name)
+        d.mkdir(parents=True, exist_ok=True)
+        if tif:
+            touch_tif(d / f"{name}.tif")
+        if pan:
+            touch_tif(d / "PAN.tif")
+        if meta:
+            (d / f"{name}_meta.xml").write_text(
+                '<?xml version="1.0"?><SolarAzimuth>181.79</SolarAzimuth>',
+                encoding="utf-8")
+        # 回 POSIX 形态：盘阵路径在平台内部一律 POSIX（提交侧存的、
+        # /api/masks 回的、resolve 报的掩码路径都是同一个字符串）
+        return d.as_posix()
+
+    def _post_mask(self, c, body):
+        return c.post("/api/masks", json={
+            **body, "W": 60, "H": 40,
+            "polygons": [{"points": [[5, 5], [40, 5], [40, 30], [5, 30]]}]})
+
+    def test_bake_mask_by_lq_path_writes_into_that_dir(self):
+        # 场景不在 SR_SCENES_ROOT 之下也要能画能写 —— 这正是"打开盘阵任意目录"
+        d = self._manual_scene()
+        self.assertNotIn(os.path.realpath(d), os.path.realpath(
+            os.environ["SR_SCENES_ROOT"]))
+        r = self._post_mask(self.client(), {"lq_path": d})
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        # 掩码路径一律 POSIX 形态入库（见 scene_search.derived_mask_path）：
+        # 它会被存进 params、参与 task_fingerprint，不能随宿主平台变
+        self.assertEqual(body["mask_path"], f"{d}/260318_mask.tif")
+        self.assertTrue(Path(body["mask_path"]).is_file())
+        self.assertEqual(body["lq_path"], d)
+        self.assertEqual(body["task_draft"]["lq_path"], d)
+        self.assertEqual(body["task_draft"]["mask_path"], body["mask_path"])
+
+    def test_bake_mask_windows_form_lq_path(self):
+        d = self._manual_scene()
+        rel = Path(d).relative_to(self._tmp.name).as_posix()
+        r = self._post_mask(self.client(), {"lq_path": "W:\\" + rel.replace("/", "\\")})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["lq_path"], d)
+
+    def test_pan_scene_writes_the_mask_the_submit_side_will_look_for(self):
+        """RC 场景（输入 PAN.tif）：写出去的名字 == 提交时去找的名字。
+
+        以前 bake_mask 取输入文件名、derived_mask_path 取目录名，这里会一个
+        写 PAN_mask.tif、一个找 260318_mask.tif —— 提交必 400。这条用例钉住
+        两者同源。
+        """
+        from backend.api.platform import derived_mask_path
+        d = self._manual_scene(pan=True, tif=False)
+        r = self._post_mask(self.client(), {"lq_path": d})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["mask_path"], f"{d}/PAN_mask.tif")
+        self.assertEqual(derived_mask_path(d), r.json()["mask_path"])
+
+    def test_sc_scene_mask_name_is_input_stem(self):
+        from backend.api.platform import derived_mask_path
+        d = self._manual_scene()
+        r = self._post_mask(self.client(), {"lq_path": d})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(derived_mask_path(d), r.json()["mask_path"])
+
+    def test_library_rc_row_bake_matches_derived_mask(self):
+        # 库行也不能例外：PAN 行经 scene_id 进来时掩码名同样跟输入影像走
+        from backend.api.platform import derived_mask_path
+        stem = "KF02B04_PMS05_20260722125045"
+        d = Path(os.environ["SR_SCENES_ROOT"], stem)
+        d.mkdir(parents=True)
+        touch_tif(d / "PAN.tif")
+        (d / f"{stem}_meta.xml").write_text(
+            '<?xml version="1.0"?><SolarAzimuth>181.79</SolarAzimuth>',
+            encoding="utf-8")
+        c = self.client()
+        rows = [r for r in c.get("/api/scenes").json()["results"]
+                if r["name"] == "PAN"]
+        self.assertTrue(rows, "PAN.tif 应被列为一条场景")
+        r = self._post_mask(c, {"scene_id": rows[0]["id"]})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(derived_mask_path(str(d)), r.json()["mask_path"])
+        self.assertEqual(Path(r.json()["mask_path"]).name, "PAN_mask.tif")
+
+    def test_lq_path_outside_whitelist_403(self):
+        d = self._manual_scene()
+        outside = Path(self._tmp.name).parent / "sr-not-allowed" / "260318"
+        outside.mkdir(parents=True, exist_ok=True)
+        (outside / "260318_meta.xml").write_text("<x/>", encoding="utf-8")
+        touch_tif(outside / "260318.tif")
+        try:
+            r = self._post_mask(self.client(), {"lq_path": str(outside)})
+            self.assertEqual(r.status_code, 403, r.text)
+            self.assertIn("SR_ALLOWED_ROOTS", r.json()["detail"])
+        finally:
+            shutil.rmtree(outside.parent, ignore_errors=True)
+
+    def test_lq_path_not_a_scene_dir_404_lists_candidates(self):
+        d = self._manual_scene(meta=False)
+        r = self._post_mask(self.client(), {"lq_path": d})
+        self.assertEqual(r.status_code, 404, r.text)
+        detail = r.json()["detail"]
+        self.assertIn("_meta.xml", detail)
+        self.assertIn("260318.tif", detail)
+
+    def test_lq_path_missing_dir_403(self):
+        self._manual_scene()                 # 只为把白名单/盘符配好
+        ghost = Path(self._tmp.name, "GSHC2IMPS", "PRODUCT", "2026", "09", "17", "nope")
+        r = self._post_mask(self.client(), {"lq_path": str(ghost)})
+        self.assertEqual(r.status_code, 403, r.text)     # kind="dir" 要求存在
+
+    def test_neither_scene_id_nor_lq_path_400(self):
+        self._manual_scene()
+        r = self._post_mask(self.client(), {})
+        self.assertEqual(r.status_code, 400, r.text)
 
     def test_invalid_payload_400(self):
         c = self.client()

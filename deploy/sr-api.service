@@ -132,6 +132,51 @@ Environment=SR_SLURM_CPUS=4
 #   不配本项时的行为（= 阶段6 生产形态）：SR 直接把产物与 Debug/ 写进 lq_path；
 #   平台恒定非空 Suffix，源图不改名也不删除。
 Environment=SR_SANDBOX_ROOT=/DiskArray/tmp/wangrz/sr_sandbox
+#
+# ==========================================================================
+# 盘阵任意场景目录（2026-09-17）—— 三项都**有默认值**，常见部署一项都不用配
+# ==========================================================================
+# 用途：让 SR_SCENES_ROOT（datahub）之外的合法场景目录也能在查看器打开、画掩码、
+# 就地提交 SR。判据与库内场景相同（目录含 <目录名>_meta.xml，且含 <目录名>.tif
+# 或 PAN.tif）。前端「盘阵场景」栏粘 Windows 形态路径，由 SR_DRIVE_MAP 译成服务端
+# 形态；后端只 stat 用户给的那一个目录，不列举、不扫盘。
+#
+# 允许访问的盘阵前缀，`;` 分隔。**默认 /DiskArray**，即整个盘阵都放行；生产目录
+# （/DiskArray/GSHC2IMPS/PRODUCT）本来就在这个默认值之下，所以不改也够用。若要收紧
+# （例如只许生产树、不许 datahub），在这里列白名单：
+#   Environment=SR_ALLOWED_ROOTS=/DiskArray/GSHC2IMPS/PRODUCT
+#   ⚠️ 收紧后落在白名单外的路径提交会被 400 拒（含 datahub 场景），改前先确认没人依赖。
+#   这是**词法**策略：不要求路径存在，所以开发机没有 /DiskArray 也能跑测试。
+# Environment=SR_ALLOWED_ROOTS=/DiskArray
+#
+# 盘符映射，`;` 分隔的多条 `KEY=VAL`。默认 `W:=/DiskArray`（用户侧 W: 就是盘阵根）。
+# 用户在资源管理器里看到的是 W:\GSHC2IMPS\PRODUCT\...，粘进来照这个表翻译。
+#   ⚠️ 表里没有的盘符一律拒（400 报「未知盘符 X:」），不会静默当相对路径处理。
+# Environment=SR_DRIVE_MAP=W:=/DiskArray
+#
+# 「文件名 → 场景目录」反推模板。占位符：
+#   {y} {m} {d}  成像日（文件名里的 14 位或 8 位时间戳，取不到就报错让用户手粘）
+#   {name}       裸文件名（后缀已剥掉）= 景级场景目录名
+#   {sat}        卫星型号（文件名第 1 段，如 JL1KF02B03）
+#   {mid}        段级目录名 = 景级名去掉「景号」那一段
+# 默认 W:\GSHC2IMPS\PRODUCT\{y}\{m}\{d}\{sat}\{mid}\{name} —— 即真机生产树的六层
+#   <年>\<月>\<日>\<卫星型号>\<段级目录>\<景级目录>（2026-09-17 真机确认）。
+# 配了就**只按这一条**走；**不配**则依次 stat 两条候选：上面那条生产树模板，
+# 外加旧扁平形态 W:\GSHC2IMPS\PRODUCT\{y}\{m}\{d}\{name}（平铺部署仍靠它命中）。
+# 名字不符合生产命名规则（拆不出 {sat}/{mid}）时跳过该候选，不硬拼空段。
+# 反推命中才允许提交；一条都命中不了就报错并列出试过的候选与原因，绝不静默提交。
+# ⚠️ 2026-09-17 前前端自己写死过一份同样的模板，这个 env 其实从未生效；现在前端
+#    只把裸文件名发给后端，模板与命名规则**只有 pathguard.py 一处真源**。
+# 命名规则与分段含义见 docs/sr_code/production-scene-naming.md。
+# Environment=SR_SCENE_PATH_TEMPLATE=W:\GSHC2IMPS\PRODUCT\{y}\{m}\{d}\{sat}\{mid}\{name}
+#
+# ⚠️ 写权限：User=nginx 需要对生产场景目录**可写** —— 画好的掩码 <输入影像名>_mask.tif
+#    写回该目录，SR 跑了之后产物 tif、Debug/ 日志、meta.xml 更新也落在同一个目录。
+#    上线前在该目录下试一次：
+#      sudo -u nginx touch /DiskArray/GSHC2IMPS/PRODUCT/<年>/<月>/<日>/<生产编号>/.wtest \
+#        && echo WRITE-OK && rm -f .../.wtest
+#    只读的话会在写掩码/提交时才暴露，用户看到的是 403/500，而不是"这个目录不能写"。
+#
 # 备注：以上各项由 backend/config.sr_runtime()（前 6 项）与 run_sr.py（后 2 项）
 # 在**调用时**读 env，改完 systemctl daemon-reload && systemctl restart sr-api
 # 才生效——没有一项是进程启动时快照，但批脚本按**当时的值**生成，改前生成的

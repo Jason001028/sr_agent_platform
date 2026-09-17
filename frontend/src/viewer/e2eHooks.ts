@@ -17,6 +17,7 @@
  */
 import { browserKit } from '../lib/browserKit.js';
 import { planExport, setSparseMin } from '../lib/tifDecode.js';
+import type { StretchMode } from '../lib/tifDecode.js';
 import { thumbToOrig } from '../lib/viewMath.js';
 import MaskGen from '../lib/maskgen.js';
 import type { SceneOpenMeta } from '../lib/scene.js';
@@ -35,8 +36,14 @@ export interface ViewerRecSummary {
   thumbW: number;
   thumbH: number;
   layout: string;
+  /** 盘阵目录（提交 SR 的判据；反推关联成功后才非空） */
+  lqPath: string | null;
+  /** 掩码写进服务端后的路径（保存掩码到盘阵成功才非空） */
+  serverMaskPath: string | null;
   /** 拉伸后的缩略图画布（页内采样用；等价 HTML rec.thumb） */
   thumb: HTMLCanvasElement | null;
+  /** 这张图**实际**画出来的拉伸模式（null = 还没画过）。 */
+  paintedMode: StretchMode | null;
 }
 
 export interface ViewerHook {
@@ -65,9 +72,17 @@ export interface ViewerHook {
   // 本地 .jpg/.jpeg 打开（route='img'，浏览器回归用小 JPG fixture 走同一像素管线）
   openLocalImage: (file: File) => Promise<void>;
   submitSr: () => void;
+  // 盘阵任意场景目录（手工路径）：打开 / 本地文件反推关联 / 掩码写进服务端
+  openScenePath: (path: string) => Promise<boolean>;
+  tryLinkScenes: () => Promise<void>;
+  bakeMaskToServer: () => Promise<boolean>;
   // 测试观测（Vue 无全局 recs → 摘要快照）
   recs: () => ViewerRecSummary[];
   activeRec: () => ViewerRecSummary | null;
+  /** 当前图实际的拉伸模式（工具栏下拉显示的那个值）。 */
+  activeStretch: () => StretchMode;
+  /** 直接切拉伸（等效工具栏下拉 change）。 */
+  setStretch: (m: StretchMode) => void;
 }
 
 declare global {
@@ -88,7 +103,10 @@ function summarize(rec: ViewerRec): ViewerRecSummary {
     thumbW: rec.thumb ? rec.thumb.width : 0,
     thumbH: rec.thumb ? rec.thumb.height : 0,
     layout: rec.layout,
+    lqPath: rec.lqPath,
+    serverMaskPath: rec.serverMaskPath ?? null,
     thumb: (rec.thumb as unknown as HTMLCanvasElement | null),
+    paintedMode: rec.paintedMode,
   };
 }
 
@@ -119,11 +137,16 @@ export function mountE2EHooks(): ViewerHook {
     openSceneJpg: (meta, blob) => useViewerStore().openSceneJpg(meta, blob),
     openLocalImage: (file) => useViewerStore().openLocalImage(file),
     submitSr: () => useViewerStore().submitSr(),
+    openScenePath: (p) => useViewerStore().openScenePath(p),
+    tryLinkScenes: () => useViewerStore().tryLinkScenes(),
+    bakeMaskToServer: () => useViewerStore().bakeMaskToServer(),
     recs: () => useViewerStore().recs.map(summarize),
     activeRec: () => {
       const rec = useViewerStore().activeRec;
       return rec ? summarize(rec) : null;
     },
+    activeStretch: () => useViewerStore().activeStretch,
+    setStretch: (m) => useViewerStore().setStretch(m),
   };
   if (window.__viewer !== hook) window.__viewer = hook;
   return hook;

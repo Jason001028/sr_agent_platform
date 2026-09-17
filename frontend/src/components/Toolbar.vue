@@ -15,20 +15,22 @@ const fileInput = ref<HTMLInputElement | null>(null);
 const locX = ref('');
 const locY = ref('');
 
-/** 盘阵场景激活：JPG 已烘焙，交互拉伸禁用（服务器只烤 2% 线性）。 */
+/** 盘阵场景激活：只用来决定 title 文案（服务器烤的 2% 线性是二次拉伸的底图，
+    两端已被裁掉）。**不再**禁用下拉 —— 场景图照样可在显示层换模式，
+    默认起手值也不再是「2% 线性」而是直方图均衡（见 lib/scene.startStretch）。
+    注意判据是 route==='jpg'，反推关联上的本地 rec 仍是它本来的 route。 */
 const sceneActive = computed(() => store.activeRec?.route === 'jpg');
-/** 「提交 SR」可用：盘阵场景已打开（有原图目录可提交）。不再要求先画掩码 ——
-    掩膜取目录里已有的 <目录名>_mask.tif，缺了由后端 400 报明缺哪个文件。 */
-const srReady = computed(() =>
-  sceneActive.value
-  && !!store.activeRec?.sceneId
-  && !!store.activeRec?.lqPath,
-);
-/** 场景下拉固定显示「2% 线性」（烘焙值），与 store.stretchMode 解耦。 */
-const stretchValue = computed(() => (sceneActive.value ? 'linear2' : store.stretchMode));
+/** 「提交 SR」可用：这张图有盘阵目录（= 提交时 lq_path 的语义）。
+    盘阵场景打开的有，反推关联上的本地 TIF 也**有** —— 判据从「是不是盘阵场景」
+    放宽成「有没有盘阵目录」，否则本地关联那条路走通了按钮还是灰的。 */
+const srReady = computed(() => !!store.activeRec?.lqPath);
+/** 下拉显示**当前这张图实际**的拉伸模式（store.activeStretch），不是全局那份：
+    全局只决定新打开的本地图用什么起手，场景图另有起手值且各记各的。 */
+const stretchValue = computed(() => store.activeStretch);
 const stretchTitle = computed(() =>
   sceneActive.value
-    ? '盘阵 JPG 已烘焙 2% 线性拉伸（本地 TIF 路径保留全部拉伸模式）'
+    ? '这张盘阵 JPG 在服务器端已按 2% 线性烘焙，这里改的是显示层的二次拉伸'
+      + '（两端已被裁掉，拉不回来）'
     : '',
 );
 
@@ -73,7 +75,6 @@ function doLocate() {
     <select
       class="stretch-sel"
       :value="stretchValue"
-      :disabled="sceneActive"
       :title="stretchTitle"
       @change="store.setStretch(($event.target as HTMLSelectElement).value as StretchMode)"
     >
@@ -111,14 +112,23 @@ function doLocate() {
     <button type="button" class="btn" :disabled="store.busy" @click="store.genMask()">生成掩码</button>
     <button
       type="button"
+      class="outbtn"
+      :disabled="store.srBusy || !store.activeRec?.lqPath"
+      :title="store.activeRec?.lqPath
+        ? '把当前掩码写到盘阵场景目录（<输入名>_mask.tif，与提交时去找的那份同源）'
+        : '这张图没有盘阵目录，掩码无处可写'"
+      @click="store.bakeMaskToServer()"
+    >
+      {{ store.srBusy ? '写入中…' : '保存掩码到盘阵' }}
+    </button>
+    <button
+      type="button"
       class="outbtn grad"
       :class="{ on: srReady }"
       :disabled="store.srBusy || !srReady"
-      :title="sceneActive
-        ? (store.activeRec?.lqPath
-            ? '带出该场景的原图目录，跳转队列页确认后提交 SR'
-            : '此图非盘阵场景打开，没有可提交的原图目录')
-        : '仅盘阵场景（先经「场景库」打开）支持提交 SR'"
+      :title="srReady
+        ? '带出该场景的目录，跳转队列页确认后提交 SR'
+        : '提交 SR 需要盘阵目录：用上面的「盘阵场景」栏打开，或让本地文件按文件名关联'"
       @click="store.submitSr()"
     >
       提交 SR
@@ -178,7 +188,6 @@ function doLocate() {
 }
 .stretch-sel:hover { border-color: #fff; }
 .stretch-sel:focus-visible { border-color: #fff; box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.28); }
-.stretch-sel:disabled { opacity: 0.55; cursor: not-allowed; }
 
 .loc {
   display: inline-flex;

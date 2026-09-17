@@ -7,11 +7,12 @@
  *     e2e/异源部署注入 window.__SR_CFG__。
  *   - 场景检索 query 串拼装（镜像后端 search_scenes 参数）。
  *   - JPG 画布 RGBA → 单波段自然值 src（灰图 R=G=B；stats 固定 0..255 → 线性=恒等，
- *     不再二次拉伸）。与本地稀疏路径的 rec 结构同构（route 不同）。
+ *     其余拉伸模式是显示层的二次拉伸，起手值见 startStretch）。与本地稀疏路径的
+ *     rec 结构同构（route 不同）。
  *   - 掩码换算：缩略图坐标 → 全分辨率（thumbToOrig，scale 由元数据 W/H 提供而非 probe）。
  */
 import { computeStats } from './tifDecode.js';
-import type { BandStats } from './tifDecode.js';
+import type { BandStats, StretchMode } from './tifDecode.js';
 import { thumbToOrig } from './viewMath.js';
 import type { Poly } from './maskgen.js';
 
@@ -62,6 +63,9 @@ export interface SceneRow {
   /** 阶段6 viewer 上下文侧舱：scene 文件父目录绝对路径（= run_sr 目录语义，
    *  与 /api/queue params.lq_path 同值关联）；disk 行非空、fake 恒 null。 */
   lq_path: string | null;
+  /** 手工打开的盘阵场景（POST /api/scenes/resolve，不在 SR_SCENES_ROOT 之下）。
+   *  这类行不进场景库表格，只进查看器；库行的 id 语义不受影响。 */
+  manual?: boolean;
 }
 
 export interface SceneListResponse {
@@ -116,6 +120,34 @@ export function scenesListUrl(cfg: SrConfig, p: SceneQueryParams): string {
   return joinBase(cfg.apiBase, '/api/scenes' + scenesQuery(p));
 }
 
+/* ---------------- 手工场景路径（盘阵任意合法场景目录） ----------------
+ * 这一组是**预填/展示**用的镜像，不是权威：唯一权威在服务端
+ * （backend/pathguard.py 的模板、命名规则与白名单）。前端**不再自拼候选路径** ——
+ * 反推由后端做（POST /api/scenes/resolve 收 `{name}`，日期也由它从文件名里取），
+ * 前端只发裸文件名。后端算出的候选要 stat 一次才算数；不准时报错让用户手粘目录，
+ * 绝不静默提交。
+ */
+
+/** 盘符映射的默认值（与 backend/pathguard.py 的 SR_DRIVE_MAP 默认一致）。 */
+export const WIN_DRIVE = 'W:';
+
+/** 当天场景目录前缀（Windows 形态），按**客户端本地日期**生成。
+ *
+ * 用户描述的真机布局：`W:\GSHC2IMPS\PRODUCT\<年>\<月>\<日>`，其余目录都是
+ * 当天的数据。月份/日期补零，与服务端 `{y}/{m}/{d}` 模板一致。 */
+export function todayScenePrefix(now: Date = new Date(),
+                                 drive: string = WIN_DRIVE): string {
+  const y = String(now.getFullYear());
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `${drive}\\GSHC2IMPS\\PRODUCT\\${y}\\${m}\\${d}`;
+}
+
+/** 解决端点 URL：POST /api/scenes/resolve。 */
+export function sceneResolveUrl(cfg: SrConfig): string {
+  return joinBase(cfg.apiBase, '/api/scenes/resolve');
+}
+
 /** 懒生成预览端点 URL：GET /api/scenes/{id}/preview → JPEG 字节。 */
 export function scenePreviewUrl(cfg: SrConfig, id: string): string {
   return joinBase(cfg.apiBase, `/api/scenes/${encodeURIComponent(id)}/preview`);
@@ -135,6 +167,10 @@ export interface SceneOpenMeta {
   sceneId: string;
   /** 阶段6 scene 文件父目录（= run_sr 目录语义，任务区关联 queue 行用）。 */
   lqPath: string | null;
+  /** 后端推导的掩码路径（手工场景才拿得到：POST /api/scenes/resolve 的
+   *  resolved.mask_path）。库行没有这个字段 —— 那时前端不该猜，写掩码时后端
+   *  会回权威值。 */
+  serverMaskPath?: string | null;
 }
 
 /* ---------------- JPG 像素 → 查看器 rec 的同构数据 ---------------- */
@@ -154,7 +190,8 @@ export function graySrcFromRgba(rgba: Uint8Array | Uint8ClampedArray, n: number)
   return g;
 }
 
-/** 由 JPG 画布 RGBA 构造 route='jpg' 的同构数据（stretch 线性退化为恒等）。 */
+/** 由 JPG 画布 RGBA 构造 route='jpg' 的同构数据（stats 固定 0..255 → 线性为恒等，
+    其余模式是显示层的二次拉伸，见 startStretch）。 */
 export function sceneDecodePixels(
   rgba: Uint8Array | Uint8ClampedArray, tw: number, th: number,
 ): SceneDecoded {
@@ -162,6 +199,23 @@ export function sceneDecodePixels(
   const src = graySrcFromRgba(rgba, n);
   const stats = computeStats(src, tw, th, 1, 0, 255);
   return { src, tw, th, nbands: 1 as const, invert: false as const, stats };
+}
+
+/* ---------------- 显示层拉伸的起手值 ---------------- */
+/** 盘阵场景（route='jpg'）打开时的默认拉伸 = 直方图均衡。
+    服务器烤的是 2% 线性，两端已被裁掉；偏灰、地物集中在窄亮度带的场景这样看判读
+    吃力，均衡后对比度拉开、更实用。用户可在工具栏改，改动记在该图自己身上。 */
+export const SCENE_START_STRETCH: StretchMode = 'equal';
+
+/** 一张图**首次**绘制用什么拉伸：盘阵场景恒为 SCENE_START_STRETCH，其余路径沿用
+    调用方当前的模式（本地 TIF / 本地 JPG 照旧跟随工具栏）。
+
+    只对第一次生效 —— 画过之后以 rec.paintedMode 为准，切走再回来不会被重置，
+    用户对某张图的选择也就不会被另一张图的默认值覆盖。 */
+export function startStretch(
+  route: string | null | undefined, current: StretchMode,
+): StretchMode {
+  return route === 'jpg' ? SCENE_START_STRETCH : current;
 }
 
 /* ---------------- 掩码换算（元数据 W/H 分支） ---------------- */
