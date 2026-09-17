@@ -21,6 +21,7 @@ from unittest import mock
 import numpy as np
 import tifffile
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from backend.api.app import create_app
 from backend.api.paths import scene_id, scene_id_abs
@@ -330,6 +331,121 @@ class TestResolveErrors(ResolveBase):
         self.assertEqual(r.status_code, 400)
 
 
+class TestBareTifPath(ResolveBase):
+    """`{path}` 也可以是一张**裸 .tif**：用户只想看张图，不关心它是不是场景。
+
+    这条入口最大的风险是**把裸 tif 误当成可提交场景** —— 能不能提交 SR 只看
+    lqPath / sr_capable，判错就会让用户提交出一个在盘阵上根本跑不起来的作业。
+    所以「可提交」和「不可提交」两种情形这里都要钉死。
+    """
+
+    def scratch_tif(self, name="random.tif", w=64, h=32) -> Path:
+        """非场景目录（没有 meta.xml）里的一张 tif。"""
+        d = (self.root / "GSHC2IMPS" / "PRODUCT" / "2026" / "09" / "17"
+             / "scratch")
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / name
+        tifffile.imwrite(p, (np.arange(w * h).reshape(h, w) % 4000)
+                         .astype(np.uint16), photometric="minisblack")
+        return p
+
+    def test_bare_tif_inside_scene_dir_is_sr_capable(self):
+        """父目录确实是场景目录、且这个文件就是它的输入影像 → 可提交。"""
+        d = self.make_scene()
+        src = d / f"{SCENE_NAME}.tif"
+        r = self.client().post("/api/scenes/resolve",
+                               json={"path": self.win_path(src)})
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertTrue(body["resolved"]["sr_capable"])
+        self.assertEqual(body["resolved"]["dir"], d.as_posix())
+        self.assertEqual(body["resolved"]["input_name"], f"{SCENE_NAME}.tif")
+        self.assertEqual(body["row"]["lq_path"], d.as_posix())
+        self.assertEqual((body["row"]["W"], body["row"]["H"]), (320, 640))
+        # mask_path 一律盘阵 POSIX 形态（提交侧与它对字），不是宿主 str()
+        self.assertEqual(body["resolved"]["mask_path"],
+                         (d / f"{SCENE_NAME}_mask.tif").as_posix())
+
+    def test_bare_tif_in_non_scene_dir_is_not_sr_capable(self):
+        """关键防线：随手粘的一张 tif 不能变成可提交场景。"""
+        p = self.scratch_tif()
+        r = self.client().post("/api/scenes/resolve",
+                               json={"path": self.win_path(p)})
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertFalse(body["resolved"]["sr_capable"])
+        self.assertIsNone(body["resolved"]["mask_path"])
+        self.assertIsNone(body["row"]["lq_path"],
+                          "lq_path 非空即等于给前端开了 SR 提交入口")
+        self.assertEqual(body["row"]["name"], "random")
+
+    def test_bare_tif_preview_bakes_half_size_beside_source(self):
+        """裸 tif 也能出图，且产物落在**源同目录**、尺寸是源的一半。"""
+        p = self.scratch_tif(w=64, h=32)
+        c = self.client()
+        row = c.post("/api/scenes/resolve",
+                     json={"path": self.win_path(p)}).json()["row"]
+        self.assertIsNone(row["jpgUrl"], "库外没有静态 URL，走 /preview 回字节")
+        self.assertFalse(row["hasPreview"])
+        r = c.get(f"/api/scenes/{row['id']}/preview")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.headers["content-type"], "image/jpeg")
+        jpg = p.with_suffix(".preview.jpg")
+        self.assertTrue(jpg.is_file(), "预览要落在源文件同目录")
+        with Image.open(jpg) as im:
+            self.assertEqual(im.size, (32, 16))          # 64×32 → 各 1/2
+
+    def test_hasPreview_becomes_true_after_baking(self):
+        """hasPreview 是「缓存到底在不在」的真值（库外同样要准）。
+
+        前端靠它决定要不要提示「首次烘焙较慢」；库外一律 False 的话，第二次
+        打开（其实命中缓存、秒开）还会吓唬用户说第一次很慢。"""
+        p = self.scratch_tif()
+        c = self.client()
+        win = self.win_path(p)
+        c.post("/api/scenes/resolve", json={"path": win})
+        c.get(f"/api/scenes/{c.post('/api/scenes/resolve', json={'path': win})
+              .json()['row']['id']}/preview")
+        row = c.post("/api/scenes/resolve", json={"path": win}).json()["row"]
+        self.assertTrue(row["hasPreview"])
+
+    def test_tiff_extension_also_accepted(self):
+        p = self.scratch_tif(name="upper.tiff")
+        r = self.client().post("/api/scenes/resolve",
+                               json={"path": self.win_path(p)})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["row"]["name"], "upper")
+
+    # -- 错误码分工 --------------------------------------------------------
+    def test_non_tif_file_400(self):
+        d = self.make_scene()
+        meta = d / f"{SCENE_NAME}_meta.xml"
+        r = self.client().post("/api/scenes/resolve",
+                               json={"path": self.win_path(meta)})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("不是 .tif", r.json()["detail"])
+
+    def test_missing_tif_404(self):
+        d = self.make_scene()
+        r = self.client().post(
+            "/api/scenes/resolve",
+            json={"path": self.win_path(d / "nope.tif")})
+        self.assertEqual(r.status_code, 404)
+
+    def test_tif_outside_whitelist_403(self):
+        # 先过白名单才 stat，所以这个文件不必真的存在
+        r = self.client().post("/api/scenes/resolve",
+                               json={"path": "X:\\nope.tif"})
+        self.assertEqual(r.status_code, 403)
+
+    def test_broken_tif_422(self):
+        p = self.scratch_tif(name="broken.tif")
+        p.write_bytes(b"not a tiff at all")
+        r = self.client().post("/api/scenes/resolve",
+                               json={"path": self.win_path(p)})
+        self.assertEqual(r.status_code, 422)
+
+
 class TestNeverListsDirectories(ResolveBase):
     """不扫盘是可执行的保证，不是注释里的承诺。
 
@@ -357,6 +473,26 @@ class TestNeverListsDirectories(ResolveBase):
             pv = c.get(f"/api/scenes/{r.json()['row']['id']}/preview")
             self.assertEqual(pv.status_code, 200, pv.text)
             self.assertEqual(pv.headers["content-type"], "image/jpeg")
+
+    def test_bare_tif_resolve_and_preview_without_listing(self):
+        """裸 tif 入口同样不扫盘：判「父目录是不是场景目录」只试 6 个固定
+        候选名（input_scene_path），绝不列举。"""
+        d = self.make_scene()
+        c = self.client()
+        with ExitStack() as st:
+            for name in self.BANNED:
+                st.enter_context(mock.patch.object(
+                    Path, name,
+                    side_effect=AssertionError(f"禁止 Path.{name}（扫盘）")))
+            for name in ("listdir", "scandir", "walk"):
+                st.enter_context(mock.patch.object(
+                    os, name,
+                    side_effect=AssertionError(f"禁止 os.{name}（扫盘）")))
+            r = c.post("/api/scenes/resolve",
+                       json={"path": self.win_path(d / f"{SCENE_NAME}.tif")})
+            self.assertEqual(r.status_code, 200, r.text)
+            pv = c.get(f"/api/scenes/{r.json()['row']['id']}/preview")
+            self.assertEqual(pv.status_code, 200, pv.text)
 
     def test_probes_a_bounded_number_of_files(self):
         """最多 6 次候选探测 + 若干 stat，绝不随目录内容增长。

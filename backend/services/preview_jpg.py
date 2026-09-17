@@ -1,20 +1,27 @@
-"""Disk-array scene preview JPEG generation (server-side, 09-02 decision).
+"""Disk-array scene preview JPEG generation (server-side).
 
-Mirrors the browser sparse-preview semantics of frontend tifDecode
-(parseStrips / sparseSample / stretchRgba) so the baked preview looks like the
-local sparse preview / exported JPG:
+规则 v2（2026-09-17 起）：**长宽各为源图的 1/2**，显示值用**直方图均衡**。
 
-    ps   = min(1, 8192 / max(W, H))
-    pw   = round(W * ps),  ph = round(H * ps)
+    ps   = min(1, max_edge / max(W, H))，max_edge = round(max(W,H) * PREVIEW_SCALE)
+    pw   = round(W * ps),  ph = round(H * ps)   # ps 恒为 0.5 → 严格各 1/2
     out(i, j) = src[ round(i * (H-1) / (ph-1)), round(j * (W-1) / (pw-1)) ]
 
-  * Sampling is row-wise: for each sampled row read its byte span from the
-    containing strip and keep only the sampled columns — never the whole file
-    (the same trick as the browser sparse path).
-  * Display = 2% Linear stretch (p2..p98 → 0..255), WhiteIsZero (photometric 0)
-    inverted first, matching stretchRgba + invert; constant images follow the
-    frontend rule (all-zero → black, other constant → mid-gray 128).
+  * 采样逐行进行：只读采样行的条带字节、行内只留采样列，绝不用整个文件（与浏览器
+    稀疏路径同一手法）。1/2 采样下恰好只读源文件一半的字节 —— 这是所有读法里最
+    省的（块读 / memmap / 整文件顺序读都会多读一倍，实测更慢）。
+  * 读取按行分段并行，**每线程开自己的句柄**（Windows 没有 os.pread，句柄不能共享）。
+    这条是为**延迟**而非带宽优化的：1/2 尺度要发约 1.2 万次读，盘阵上单次读若有
+    毫秒级延迟，串行就是十几秒，8 路并发把它压回一秒量级；页缓存命中时它只快
+    1.4 倍，所以开发机上几乎量不出收益。
+  * Display = 直方图均衡，逐式镜像前端 tifDecode 的 stretchMap(mode='equal') +
+    computeStats（min..max → 1024 bin 直方图 → CDF 查表）；WhiteIsZero
+    (photometric 0) inverted first, matching stretchRgba + invert；常量图沿用前端
+    规则（全零 → 黑 0，其它常量 → 中灰 128）。
   * Encoded as grayscale JPEG via Pillow (already a dev dep).
+
+**缓存失效靠写进 JPEG 注释的规则戳**，不是只看 mtime：升级后旧规则烤出来的图
+mtime 比源新，只看 mtime 会把它判为有效而永不重烤，真机上换包后看不到任何变化。
+规则戳 = PREVIEW_RULE_VERSION + quality，改规则/改质量都要跟着 bump。
 
 Pure-struct TIFF header/IFD parsing — no new runtime dependency, classic TIFF
 (42) and BigTIFF (43) both handled. The reader targets the confirmed real
@@ -24,7 +31,7 @@ fully — a 1.1 GB scene would blow memory) and raise otherwise.
 
 Cache policy lives at the call site (api layer): the caller derives jpg_path;
 ensure_preview_jpg() skips generation when an existing file is not older than
-the source.
+the source *and* carries the current rule stamp.
 """
 
 from __future__ import annotations
@@ -32,14 +39,34 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
-PREVIEW_MAX_EDGE = 8192          # 与前端 SPARSE_PREVIEW_MAX / JPG_MAX 一致
-PREVIEW_JPG_QUALITY = 90         # 服务端预览质量（显示用）
+PREVIEW_SCALE = 0.5              # 预览 = 源图各边 × 0.5（用户决策：严格 1/2，不封顶）
+PREVIEW_JPG_QUALITY = 85         # 服务端预览质量（显示用；1/2 尺度下 q90 约 117MB）
 PILLOW_FALLBACK_MAX_PX = 1 << 26  # 67M px：Pillow 兜底只敢接小文件（整图解码）
+
+#: 规则版本戳：改动「尺寸 / 拉伸 / 质量」任一规则都必须 bump，否则旧缓存不会失效。
+PREVIEW_RULE_VERSION = "v2"
+#: 并行读的行数阈值：小图线程开销盖过收益，保持串行（也让小 fixture 的测试确定）。
+PARALLEL_MIN_ROWS = 512
+#: 并行度。盘阵若是单块 HDD，磁头竞争可能让更高并发反而更慢，故取保守的 8。
+READ_THREADS = 8
+#: 直方图均衡的桶数，与前端 computeStats 的 BINS 一致。
+EQUAL_BINS = 1024
+#: 拉伸的行块大小（4M px ≈ 32MB float64）：避免在 1.5 亿像素量级上整图转 float64。
+_STRETCH_CHUNK = 1 << 22
+
+# Pillow 默认的像素上限（8948 万）是防「小文件声明巨大尺寸」的炸弹的，但它会
+# **误伤我们自己的产物**：1/2 尺度下 2.4 万像素级的源烤出来就是 1.5 亿像素，超过
+# 1× 阈值只是警告，超过 2×（1.79 亿）会直接抛 DecompressionBombError —— 那会让
+# _cache_hit 的 Image.open 失败、缓存永远判不中，于是每次打开都重烤一遍。
+# 这里放到 1<<30（约 10.7 亿，仍能挡住声明 21 亿像素以上的文件），给合法产物留
+# 出 10 倍余量。本模块打开的都是本地盘阵上的可信文件。
+Image.MAX_IMAGE_PIXELS = 1 << 30
 
 # TIFF type sizes（与前端 parseStrips tsize 表一致；index 0 无效）
 _TYPESIZE = (None, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8,
@@ -244,6 +271,20 @@ def scene_dims(path) -> dict | None:
     return None
 
 
+def preview_max_edge(source_path) -> int:
+    """本次烘焙的长边上限 = 源图长边 × PREVIEW_SCALE（严格各 1/2，不封顶）。
+
+    只读头 / `.hdr` 拿尺寸，极便宜（`scene_dims`），不解码任何像素。
+    """
+    src = Path(source_path)
+    if not src.is_file():
+        raise PreviewError("场景文件不存在")
+    dims = scene_dims(src)
+    if not dims:
+        raise PreviewError(f"无法读取图像尺寸：{src.name}")
+    return max(1, int(round(max(dims["W"], dims["H"]) * PREVIEW_SCALE)))
+
+
 # --------------------------------------------------------------------------
 # 稀疏采样（前端 sparseSample / stretchMap 语义的 Python 镜像）
 # --------------------------------------------------------------------------
@@ -316,43 +357,108 @@ def sample_strips(path, endian, scalars, arrays, max_edge: int):
                if pw > 1 else np.zeros(1, dtype=np.int64))
     row_idx = [int(round(i * (H - 1) / (ph - 1))) for i in range(ph)]
 
-    with open(path, "rb") as f:
-        for i, r in enumerate(row_idx):
-            si = r // rps
-            row_off = (r % rps) * row_bytes
-            avail = int(lens[si])
-            if row_off >= avail:
-                raise PreviewError("条带偏移越界")
-            length = min(avail - row_off, row_bytes)
-            f.seek(int(offs[si]) + row_off)
-            data = f.read(length)
-            if len(data) < row_bytes and len(data) < length:
-                raise PreviewError("读取条带失败（文件截断？）")
-            arr = np.frombuffer(data, dtype=dt, count=len(data) // bpp)
-            if arr.size < W:
-                raise PreviewError("条带宽度小于图像宽度")
-            out[i] = arr[col_idx]
-    u8 = stretch_2pct(out)
+    def read_rows(start: int, end: int) -> None:
+        """把采样行 [start, end) 读进 out。
+
+        每段开自己的文件句柄 —— 线程间不能共享（seek 位置是句柄状态），而
+        Windows 没有 os.pread，所以这是唯一可移植的并行读法。
+        """
+        with open(path, "rb") as f:
+            for i in range(start, end):
+                r = row_idx[i]
+                si = r // rps
+                row_off = (r % rps) * row_bytes
+                avail = int(lens[si])
+                if row_off >= avail:
+                    raise PreviewError("条带偏移越界")
+                length = min(avail - row_off, row_bytes)
+                f.seek(int(offs[si]) + row_off)
+                data = f.read(length)
+                if len(data) < row_bytes and len(data) < length:
+                    raise PreviewError("读取条带失败（文件截断？）")
+                arr = np.frombuffer(data, dtype=dt, count=len(data) // bpp)
+                if arr.size < W:
+                    raise PreviewError("条带宽度小于图像宽度")
+                out[i] = arr[col_idx]
+
+    n_rows = len(row_idx)
+    if n_rows >= PARALLEL_MIN_ROWS:
+        step = -(-n_rows // READ_THREADS)          # ceil，均分成 READ_THREADS 段
+        spans = [(s, min(s + step, n_rows)) for s in range(0, n_rows, step)]
+        with ThreadPoolExecutor(max_workers=len(spans)) as ex:
+            # 必须消费 map 的结果：异常在线程里抛出，迭代时才转交给调用方
+            list(ex.map(lambda se: read_rows(*se), spans))
+    else:
+        read_rows(0, n_rows)
+
+    u8 = stretch_equal(out)
     if photo == 0:
         u8 = 255 - u8
     return u8, ph, pw
 
 
-def stretch_2pct(arr: np.ndarray) -> np.ndarray:
-    """2% Linear stretch（p2..p98 → 0..255；镜像 stretchMap linear2）。
+def _finite_of(chunk: np.ndarray, is_float: bool) -> np.ndarray:
+    """统计用视图：丢掉非有限值（镜像 computeStats 里 `v===v && isFinite(v)` 跳过）。"""
+    if not is_float:
+        return chunk
+    mask = np.isfinite(chunk)
+    return chunk[mask] if not mask.all() else chunk
 
+
+def stretch_equal(arr: np.ndarray) -> np.ndarray:
+    """直方图均衡（镜像前端 stretchMap(mode='equal') + computeStats）。
+
+    逐式对齐前端，两处公式故意不同、不要"顺手统一"：
+      * 直方图入桶：`q = ((v - lo) * BINS / (hi - lo)) | 0`（computeStats 的 sc）
+      * 查表下标：  `k = ((v - lo) / (hi - lo) * (BINS - 1)) | 0`（stretchMap 的 t）
     常量/退化图沿用前端规则：全零 → 黑 0，其它常量 → 中灰 128。
+
+    按行块处理：1/2 尺度下 out 有 1.5 亿像素，整图 astype(np.float64) 会产生
+    1.2GB 副本，分块后额外峰值只有 ~32MB。
     """
-    flat = arr.reshape(-1).astype(np.float64)
-    finite = flat[np.isfinite(flat)]
-    if finite.size == 0:
+    flat = arr.reshape(-1)
+    is_float = arr.dtype.kind == "f"
+    if is_float:
+        finite = flat[np.isfinite(flat)]
+        if finite.size == 0:
+            return np.zeros(arr.shape, dtype=np.uint8)
+        lo, hi = float(finite.min()), float(finite.max())
+    else:
+        lo, hi = float(flat.min()), float(flat.max())
+
+    out = np.empty(flat.shape, dtype=np.uint8)
+    if not hi > lo:
+        out.fill(0 if lo == 0 else 128)
+        return out.reshape(arr.shape)
+
+    hist = np.zeros(EQUAL_BINS, dtype=np.int64)
+    sc = EQUAL_BINS / (hi - lo)
+    for s in range(0, flat.size, _STRETCH_CHUNK):
+        c = np.asarray(_finite_of(flat[s:s + _STRETCH_CHUNK], is_float),
+                       dtype=np.float64)
+        if c.size == 0:
+            continue
+        q = ((c - lo) * sc).astype(np.int64)
+        np.clip(q, 0, EQUAL_BINS - 1, out=q)
+        hist += np.bincount(q, minlength=EQUAL_BINS)
+
+    total = int(hist.sum())
+    if total == 0:
         return np.zeros(arr.shape, dtype=np.uint8)
-    p2, p98 = np.percentile(finite, [2.0, 98.0])
-    if p98 > p2:
-        v = (flat - p2) / (p98 - p2) * 255.0
-        np.clip(v, 0, 255, out=v)
-        return v.reshape(arr.shape).astype(np.uint8)
-    return np.full(arr.shape, 0 if p2 == 0 else 128, dtype=np.uint8)
+    # 前端把结果写进 Uint8ClampedArray，那是「四舍五入（ties-to-even）」；
+    # 直接 astype(uint8) 是截断，会整体差 1 个灰阶。np.rint 同为 ties-to-even。
+    lut = np.clip(np.rint(np.cumsum(hist) / total * 255.0), 0, 255).astype(np.uint8)
+
+    for s in range(0, flat.size, _STRETCH_CHUNK):
+        c = np.asarray(flat[s:s + _STRETCH_CHUNK], dtype=np.float64)
+        t = (c - lo) / (hi - lo)
+        np.clip(t, 0.0, 1.0, out=t)
+        # NaN 在剪裁后仍是 NaN，而 `(NaN * n) | 0` 在前端是 0 → 这里同样落到 0 号桶
+        np.nan_to_num(t, copy=False, nan=0.0, posinf=1.0, neginf=0.0)
+        k = (t * (EQUAL_BINS - 1)).astype(np.int64)
+        np.clip(k, 0, EQUAL_BINS - 1, out=k)
+        out[s:s + _STRETCH_CHUNK] = lut[k]
+    return out.reshape(arr.shape)
 
 
 # --------------------------------------------------------------------------
@@ -375,8 +481,10 @@ def _pillow_preview(path, max_edge: int) -> np.ndarray:
         raise PreviewError(f"Pillow 兜底失败：{e}") from e
 
 
-def build_preview_pixels(path, max_edge: int = PREVIEW_MAX_EDGE) -> np.ndarray:
+def build_preview_pixels(path, max_edge: int | None = None) -> np.ndarray:
     """uint8 grayscale preview pixels (h×w) for a scene TIFF.
+
+    max_edge 省略时按 PREVIEW_SCALE 从源图尺寸推出（= 长边的一半）。
 
     Prefers the sparse strip sampler (real-array layout); falls back to Pillow
     for anything the sampler can't handle (compressed / tiled / multi-band),
@@ -388,6 +496,8 @@ def build_preview_pixels(path, max_edge: int = PREVIEW_MAX_EDGE) -> np.ndarray:
         raise PreviewError("场景文件不存在")
     if p.suffix.lower() not in (".tif", ".tiff"):
         raise PreviewError(f"仅支持 TIFF 生成预览（{p.suffix}）")
+    if max_edge is None:
+        max_edge = preview_max_edge(p)
     is_big, endian, ifd_off = _parse_tiff_header(path)
     scalars, arrays = _read_ifd(path, is_big, endian, ifd_off)
     try:
@@ -400,21 +510,42 @@ def build_preview_pixels(path, max_edge: int = PREVIEW_MAX_EDGE) -> np.ndarray:
         raise
 
 
-def ensure_preview_jpg(source_path, jpg_path, max_edge: int = PREVIEW_MAX_EDGE,
+def rule_stamp(quality: int = PREVIEW_JPG_QUALITY) -> bytes:
+    """当前烘焙规则的签名（写进 JPEG 注释，用来判缓存是否还符合现规则）。"""
+    return f"srprev:{PREVIEW_RULE_VERSION}:half+equal:q{quality}".encode("ascii")
+
+
+def _cache_hit(dst: Path, quality: int) -> dict | None:
+    """缓存可用则返回 {w, h}，否则 None（缺戳 / 旧规则 / 损坏一律按需重烤）。"""
+    try:
+        with Image.open(dst) as im:
+            stamp = im.info.get("comment")
+            w, h = im.width, im.height
+    except Exception:  # noqa: BLE001 — 缓存损坏按重新生成处理
+        return None
+    if stamp != rule_stamp(quality):
+        return None
+    return {"w": w, "h": h}
+
+
+def ensure_preview_jpg(source_path, jpg_path, max_edge: int | None = None,
                        quality: int = PREVIEW_JPG_QUALITY) -> dict:
     """Generate preview JPEG if missing/stale; idempotent (cache by caller).
+
+    命中要求两条同时成立：**不比源旧**，且**规则戳等于当前规则**。只看 mtime 会
+    让升级前烤的图永远不重烤 —— 它的 mtime 就是比源新。
 
     Returns {"status": "generated"|"cached", "path", "w", "h", "error": None}.
     Raises PreviewError on generation failure.
     """
     src, dst = Path(source_path), Path(jpg_path)
     if dst.is_file() and os.path.getmtime(dst) >= os.path.getmtime(src):
-        try:
-            with Image.open(dst) as im:
-                return {"status": "cached", "path": str(dst),
-                        "w": im.width, "h": im.height, "error": None}
-        except Exception:  # noqa: BLE001 — 缓存损坏按重新生成处理
-            pass
+        hit = _cache_hit(dst, quality)
+        if hit is not None:
+            return {"status": "cached", "path": str(dst),
+                    "w": hit["w"], "h": hit["h"], "error": None}
+    if max_edge is None:
+        max_edge = preview_max_edge(src)
     pixels = build_preview_pixels(str(src), max_edge)
     h, w = pixels.shape
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -422,8 +553,8 @@ def ensure_preview_jpg(source_path, jpg_path, max_edge: int = PREVIEW_MAX_EDGE,
                                dir=str(dst.parent))
     try:
         with os.fdopen(fd, "wb") as f:
-            Image.fromarray(pixels, mode="L").save(f, format="JPEG",
-                                                   quality=quality)
+            Image.fromarray(pixels).save(f, format="JPEG", quality=quality,
+                                         comment=rule_stamp(quality))
         os.replace(tmp, dst)
     finally:
         if os.path.exists(tmp):

@@ -70,6 +70,9 @@ onMounted(() => { void scenes.list(); });
     <ScenePathBar class="sp-path" :busy="!!scenes.openingId" @open="openPastedPath" />
 
     <p v-if="scenes.error" class="sp-err">{{ scenes.error }}</p>
+    <!-- 首次打开要在服务端烘焙（读一遍大图，几十秒）。遮罩只挂在 /viewer 上，
+         本页没有遮罩，就用这一行说明在忙什么，别让按钮一直停在「打开中…」。 -->
+    <p v-if="scenes.phase" class="sp-loading sp-phase">{{ scenes.phase }}</p>
 
     <div class="sp-tbl-wrap">
       <table class="sp-tbl">
@@ -110,10 +113,10 @@ onMounted(() => { void scenes.list(); });
     </div>
 
     <p class="sp-hint">
-      场景 JPG 为服务器烘焙（稀疏采样 + 2% 线性拉伸）；标「JPG 源」的行本就是
-      显示就绪图，无需烘焙、直接打开。打开后掩码按元数据
+      场景 JPG 为服务器烘焙（稀疏采样 + 直方图均衡，长宽各为源图的 1/2）；标
+      「JPG 源」的行本就是显示就绪图，无需烘焙、直接打开。打开后掩码按元数据
       {{ viewer.activeRec?.route === 'jpg' ? dimsText(viewer.activeRec) : 'W/H' }} 换算回全分辨率；
-      显示层拉伸可改（起手值直方图均衡），但烘焙时裁掉的两端拉不回来。
+      显示层拉伸可改（起手值直方图均衡），但均衡是不可逆的，改不回去。
     </p>
   </div>
 </template>
@@ -254,6 +257,8 @@ onMounted(() => { void scenes.list(); });
 .tag.ok { background: var(--ok-bg); color: var(--ok); border-color: var(--ok-line); }
 .tag.fake { background: var(--warn-bg); color: var(--warn); border-color: var(--warn-line); }
 .sp-loading { color: var(--ink-sub); font-size: 12px; }
+/* 打开阶段文案：与 sp-err 同一个位置，但用中性色 —— 它不是错误 */
+.sp-phase { margin: 0 0 10px; line-height: 1.6; }
 .sp-hint {
   color: var(--ink-sub);
   font-size: 12px;

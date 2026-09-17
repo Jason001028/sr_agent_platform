@@ -210,6 +210,11 @@ submit_run_sr 返回 → 队列状态：
 ```
 
 - `path`：`W:\…`（经 `SR_DRIVE_MAP` 映射）或 `/DiskArray/…` 都吃，要写到**景级目录**这一层。
+  **也可以直接给单个 `.tif` 文件路径**（2026-09-17 增补）——随手贴一张图也能看。此时走
+  「裸 TIF」分支：`resolved.dir` = 该文件的父目录、`input` = 该文件；**父目录确实是合法场景
+  目录**（`input_scene_path` 命中）时与目录形态完全等价，否则 `row.lq_path` 与 `mask_path`
+  一起为 `null`、`sr_capable=false`（能看，但提交 SR 在盘阵上跑不起来）。给的文件后缀不是
+  `.tif/.tiff`（`.jpg` 源、`meta.xml`、掩码…）→ **400** 说清，而不是掉进目录逻辑报「目录不存在」。
 - `{name}`（`date` 可省）：查看器里选了本地影像后的反推路径。浏览器拿不到本地文件的
   绝对路径（`File` 只有 name/size/type），只能把**裸文件名**交给后端，由
   `backend/pathguard.infer_scene_paths` 反推候选目录 —— 命名规则与模板的唯一真源就在
@@ -223,11 +228,15 @@ submit_run_sr 返回 → 队列状态：
   [docs/sr_code/production-scene-naming.md](../sr_code/production-scene-naming.md)。
 - 响应 `200 {"source":"manual", "row": <与 /api/scenes 行同形>, "resolved": {...}}`：
   `row.id` 是 `~` + base64url(绝对路径)（手工行形态，见 `api/paths.py`；库行 id 一字未变），
-  `row.manual=true`、`jpgUrl=null`、`hasPreview=false`（预览走 `GET /api/scenes/{id}/preview`
-  回 JPEG 字节），`row.W/H` 由 `preview_jpg.scene_dims` 回填。
-  `resolved` = `{dir, input, input_name, mask_path, mask_exists, writable}`，三者路径一律
-  **盘阵 POSIX 形态**（与提交侧归一化同一口径，前端 lq_path / mask_path 逐字比得上）。
+  `row.manual=true`、`jpgUrl` 在**库外**为 `null`（预览走 `GET /api/scenes/{id}/preview` 回
+  JPEG 字节）、`row.W/H` 由 `preview_jpg.scene_dims` 回填。
+  **`row.hasPreview` 一律填缓存到底在不在的真值**（库外没有静态 URL，但前端要靠它判断
+  「这次会不会触发首次烘焙」并提示用户等待），`row.lq_path` 与 `resolved.sr_capable` 同源同真假。
+  `resolved` = `{dir, input, input_name, mask_path, mask_exists, writable, sr_capable}`，
+  路径一律**盘阵 POSIX 形态**（与提交侧归一化同一口径，前端 lq_path / mask_path 逐字比得上）。
   `writable` = 服务账号对该目录是否有写权限，提前告知好过提交后才发现写不了。
+  `sr_capable` = 这个目录能不能提交 SR：目录形态**恒为 true**；裸 `.tif` 时看它父目录是不是
+  合法场景目录。前端 `lqPath` 就是按它写的（`lqPath` 是「能否提交 SR」的唯一判据）。
 - **不扫盘**：只 `stat` 用户给的目录，判定顺序是固定候选文件名（`<目录名>.tif/.tiff/.img`
   再 `PAN.*`），上界 6 次 stat，不 `ls`/`glob`/`rglob`/`iterdir`。盘阵数据量极大，
   列举一次就可能卡死；这条由测试用 `patch(Path, "rglob"/"glob"/"iterdir")` + `os.listdir`
