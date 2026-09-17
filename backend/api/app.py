@@ -21,14 +21,18 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from backend.api import paths
 from backend.api.paths import PathDeniedError
-from backend.api.platform import _task_state, router as platform_router
+from backend.api.platform import (
+    _json_body, _task_state, derived_mask_path, router as platform_router)
 from backend.config import load_config
+from backend.pathguard import (
+    ensure_allowed, infer_scene_paths, is_within, parse_scene_date,
+    to_posix_array_path)
 from backend.services import scene_search, store as store_mod
 from backend.services.preview_jpg import (PreviewError, ensure_preview_jpg,
                                           scene_dims)
@@ -97,7 +101,10 @@ def _scene_row(scene: dict, root: Path | None) -> dict:
     rel = paths.rel_of_scene(abs_path, root)
     row["rel"] = rel
     row["id"] = paths.scene_id(rel)
-    row["lq_path"] = str(abs_path.parent)
+    # lq_path 一律盘阵 POSIX 形态：它会与 /api/queue 行 params.lq_path（提交侧
+    # 归一化的 POSIX 值）逐字比对，宿主形态在 Windows 开发机上永远比不中。
+    # Linux 上 as_posix() 与 str() 同值，生产行为不变。
+    row["lq_path"] = abs_path.parent.as_posix()
     if abs_path.suffix.lower() in (".jpg", ".jpeg"):
         # 盘阵里的 JPG 就是显示就绪图本身（§4.7）：不需要烘焙预览，
         # jpgUrl 直接指向源文件，前端拿到即开（不再走 /preview 生成端点）。
@@ -107,6 +114,38 @@ def _scene_row(scene: dict, root: Path | None) -> dict:
     jpg = paths.preview_jpg_path(abs_path, root)
     row["hasPreview"] = jpg.is_file()
     row["jpgUrl"] = paths.rel_url(jpg, root)
+    return row
+
+
+def _manual_row(abs_path: Path, dir_path: Path, root: Path | None) -> dict:
+    """手工场景行（用户手填/反推的盘阵路径），与 `/api/scenes` 行同形。
+
+    差别只有三处：`id` 是 `~` + base64url(绝对路径)（库行是 rel 的 base64url，
+    两者靠前缀区分）；`rel` 只在源恰好落在 SR_SCENES_ROOT 之下时才有；`manual`
+    恒为 True。后端不列举任何目录，`W/H` 来自文件头探测。
+    """
+    meta = scene_search.parse_filename(abs_path)
+    row = {
+        "id": paths.scene_id_abs(abs_path),
+        "name": abs_path.stem,
+        "satellite": meta["satellite"],
+        "sensor": meta["sensor"],
+        "date": meta["date"],
+        "size_bytes": abs_path.stat().st_size,
+        "fake": False,
+        "W": None, "H": None,
+        "rel": None, "jpgUrl": None, "hasPreview": False,
+        # 同 _scene_row：lq_path 一律 POSIX（它会被原样带进提交表单）。
+        "lq_path": dir_path.as_posix(),
+        "manual": True,
+    }
+    if root is not None and is_within(abs_path, root):
+        # 恰好也在场景库根之下（例如用户手填了库内路径）：静态预览 URL 可用，
+        # 与库行行为对齐，省掉一次 /preview 生成。
+        row["rel"] = paths.rel_of_scene(abs_path, root)
+        jpg = paths.preview_jpg_for(abs_path, root)
+        row["hasPreview"] = jpg.is_file()
+        row["jpgUrl"] = paths.rel_url(jpg, root)
     return row
 
 
@@ -177,11 +216,123 @@ def create_app() -> FastAPI:
         return {"source": out["source"], "scanned": out["scanned"],
                 "count": out["count"], "results": rows}
 
+    @app.post("/api/scenes/resolve")
+    async def resolve_scene(request: Request):
+        """把用户给的盘阵路径（或「文件名 + 日期」）解析成一条可打开的场景行。
+
+        路径只能来自用户输入：后端**只 stat 用户给的那一个目录，绝不列举**
+        （盘阵数据量极大）。猜错必须报错 —— 200 只在真的找到一个合法场景目录
+        时才返回，其余一律 4xx，`detail` 里写清试过哪些候选、各自为什么不行。
+
+        请求体二选一：`{path}`（`W:\\GSHC2IMPS\\...` 或 `/DiskArray/...`）或
+        `{name}`（+ 可选 `date = YYYY-MM-DD`，不给就由后端从文件名里的成像
+        时间戳自己取）。
+
+        错误码分工：**400** 形态非法或压根反推不出来（相对路径 / `..` / UNC /
+        未知盘符 / 日期格式 / 名字里没有时间戳 / 名字不符合生产命名规则）·
+        **403** 越白名单 · **404** 反推成立但盘阵上没有合法场景目录或没有输入
+        影像 · **422** 场景成立但读不到影像尺寸（前端开图要 W/H）。
+        """
+        body = await _json_body(request)
+        raw_path = body.get("path")
+        if isinstance(raw_path, str) and raw_path.strip():
+            try:
+                posix = to_posix_array_path(raw_path)
+            except PathDeniedError as e:
+                raise HTTPException(status_code=400,
+                                    detail=f"路径形态非法：{e}") from e
+            try:
+                ensure_allowed(posix)
+            except PathDeniedError as e:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"路径不在允许的盘阵前缀内：{e}") from e
+            tried = [posix]
+        else:
+            name, date = body.get("name"), body.get("date")
+            if not isinstance(name, str) or not name.strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail="需给 path，或给 name（可选 date = YYYY-MM-DD）")
+            if not isinstance(date, str) or not date.strip():
+                # 日期可由后端自己从文件名取 —— 前端不必再实现一套同样的正则
+                date = parse_scene_date(name) or ""
+            if not date:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"反推路径失败：文件名里没有 14/8 位成像时间戳"
+                           f"（{name}）—— 请把该场景目录粘进「盘阵场景」栏打开")
+            try:
+                tried = infer_scene_paths(name, date)
+            except PathDeniedError as e:
+                raise HTTPException(status_code=400,
+                                    detail=f"反推路径失败：{e}") from e
+            if not tried:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"反推路径失败：{name} 不符合生产命名规则"
+                           "（缺段号/景号段，拆不出卫星型号与段级目录）—— "
+                           "请把该场景目录粘进「盘阵场景」栏打开")
+            for cand in tried:
+                try:
+                    ensure_allowed(cand)
+                except PathDeniedError as e:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"路径不在允许的盘阵前缀内：{e}") from e
+
+        reasons: list[str] = []
+        hit: tuple[Path, Path] | None = None
+        for cand in tried:
+            d = Path(cand)
+            if not d.is_dir():
+                reasons.append(f"{d}：目录不存在")
+                continue
+            inp = scene_search.input_scene_path(d)
+            if inp is None:
+                if not (d / (d.name + "_meta.xml")).is_file():
+                    reasons.append(
+                        f"{d}：缺 {d.name}_meta.xml（SR 靠它判 RC/SC，没有就跑不起来）")
+                else:
+                    names = "、".join(c.name
+                                      for c in scene_search.input_candidates(d))
+                    reasons.append(f"{d}：目录里没有输入影像（找过 {names}）")
+                continue
+            hit = (d, inp)
+            break
+        if hit is None:
+            raise HTTPException(status_code=404,
+                                detail="没找到合法场景目录 —— "
+                                       + "；".join(reasons))
+        d, inp = hit
+        dims = _cached_dims(inp)
+        if not dims:
+            raise HTTPException(
+                status_code=422,
+                detail=f"场景成立但读不到影像尺寸（{inp}）—— 前端开图需要 W/H")
+        row = _manual_row(inp, d, root)
+        row["W"], row["H"] = dims["W"], dims["H"]
+        mask_path = derived_mask_path(str(d))
+        return {
+            "source": "manual",
+            "row": row,
+            "resolved": {
+                # 盘阵 POSIX 形态（与 mask_path / 提交侧归一化同一口径）：
+                # dir 会被原样带进队列表单的 lq_path，宿主形态在开发机上与
+                # 归一化结果对不上。Linux 上 as_posix() 与 str() 同值。
+                "dir": d.as_posix(),
+                "input": inp.as_posix(),
+                "input_name": inp.name,
+                "mask_path": mask_path,
+                "mask_exists": Path(mask_path).is_file(),
+                # 服务账号对场景目录的写权限：meta.xml 回写、Debug/ 日志、掩码、
+                # 预览缓存四处都要写。提前告知，好过提交后 422。
+                "writable": os.access(str(d), os.W_OK),
+            },
+        }
+
     @app.get("/api/scenes/{scene_id}/preview")
     def preview(scene_id: str):
-        if root is None:
-            raise HTTPException(status_code=404,
-                                detail="盘阵未配置，无场景可预览")
         try:
             abs_path = paths.scene_id_to_abs(scene_id, root)
         except PathDeniedError as e:
@@ -192,7 +343,7 @@ def create_app() -> FastAPI:
             # 正常路径下前端拿 hasPreview/jpgUrl 走静态 URL，不会打到这里，
             # 这是契约兜底：/preview 对任何场景行都返回可显示的 JPEG。
             return FileResponse(str(abs_path), media_type="image/jpeg")
-        jpg = paths.preview_jpg_path(abs_path, root)
+        jpg = paths.preview_jpg_for(abs_path, root)
         try:
             ensure_preview_jpg(str(abs_path), str(jpg))
         except PreviewError as e:

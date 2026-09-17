@@ -185,11 +185,15 @@ class TestSrTasksQueueApi(unittest.TestCase):
         self.store.put_sr_task("q4", {"lq_path": "/d"}, status="new", job_id=None)
         self.store.update_sr_task_job("q4", job_id=4, status="submitted")
         t = self.store.get_sr_task("q4")
-        self.store.set_sr_task_state(t["task_id"], "RUNNING")
+        written = self.store.set_sr_task_state(t["task_id"], "RUNNING")
         got = self.store.get_sr_task("q4")
         self.assertEqual(got["status"], "RUNNING")
         # the idempotency layer reads only job_id — status writeback is opaque to it
         self.assertEqual(got["job_id"], 4)
+        # 返回值 = 这次写进库的 updated_at。调用方（api.platform._task_state）要拿
+        # 它去广播：客户端只有拿到这个值，才算得对终态行的耗时。
+        self.assertEqual(written, got["updated_at"])
+        self.assertGreaterEqual(written, t["updated_at"])
 
 
 if __name__ == "__main__":

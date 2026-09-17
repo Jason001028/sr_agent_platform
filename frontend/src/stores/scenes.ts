@@ -5,6 +5,11 @@
  * 点击打开时若缓存 JPG 未生成先调 GET /api/scenes/{id}/preview 懒生成，再走静态
  * jpgUrl（nginx 直出）；字节交给 viewer store 构造 route='jpg' 的同构 rec。
  *
+ * 另一条入口 resolvePath：盘阵上**不在** SR_SCENES_ROOT 之下的场景（生产数据
+ * `W:\GSHC2IMPS\PRODUCT\<年>\<月>\<日>\<编号>`）。这类行没有静态 jpgUrl，
+ * /preview 的响应体本身就是图，直接拿来用 —— 两条路最终都汇到 view
+ * openSceneJpg，rec 结构同构。
+ *
  * 运行期 base（apiBase/staticBase）每次从 loadSrConfig() 读取 —— 默认同源（nginx
  * 同时暴露 /api 与 /disk-array）；e2e/异源注入 window.__SR_CFG__。
  */
@@ -12,9 +17,9 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { useViewerStore } from './viewer.js';
 import type { SceneRow, SceneQueryParams } from '../lib/scene.js';
-import {
-  loadSrConfig, scenesListUrl, scenePreviewUrl, sceneImageUrl,
-} from '../lib/scene.js';
+import { loadSrConfig, scenesListUrl } from '../lib/scene.js';
+import { apiResolveScene, fetchSceneJpg } from '../lib/api.js';
+import type { SceneResolveResult } from '../lib/api.js';
 
 export const useScenesStore = defineStore('scenes', () => {
   const rows = ref<SceneRow[]>([]);
@@ -87,7 +92,7 @@ export const useScenesStore = defineStore('scenes', () => {
       失败一律写本 store 的 error —— 本页（ScenesPage）只渲染 scenes.error，而
       viewer 的错误条挂在 /viewer、6 秒后自己消失；写错地方就等于按钮点了没反应。
       JPG 读不到 / 字节不是图（openSceneJpg 解码失败会抛，见 viewer.ts）都归这里。 */
-  async function open(row: SceneRow): Promise<void> {
+  async function open(row: SceneRow, resolved?: SceneResolveResult['resolved']): Promise<void> {
     const viewer = useViewerStore();
     const cfg = loadSrConfig();
     if (row.fake) {
@@ -102,21 +107,14 @@ export const useScenesStore = defineStore('scenes', () => {
     openingId.value = row.id;
     error.value = '';
     try {
-      // JPG 未生成 → 先懒生成（后端落盘），之后静态 jpgUrl 才可读
-      if (!row.hasPreview || !row.jpgUrl) {
-        const p = await fetch(scenePreviewUrl(cfg, row.id));
-        if (!p.ok) {
-          const detail = await p.text().catch(() => '');
-          throw new Error('预览生成失败 HTTP ' + p.status + (detail ? ' · ' + detail : ''));
-        }
-        row.hasPreview = true;
-      }
-      const url = sceneImageUrl(cfg, row.jpgUrl);
-      const img = await fetch(url);
-      if (!img.ok) throw new Error('读 JPG 失败 HTTP ' + img.status);
-      const blob = await img.blob();
+      // 库行走静态 jpgUrl、库外场景走 /preview 响应体，两条来源都在这里收口
+      const blob = await fetchSceneJpg(cfg, row);
       await viewer.openSceneJpg({
         name: row.name, W: row.W, H: row.H, sceneId: row.id, lqPath: row.lq_path,
+        // 手工场景（resolvePath 进来的）：把后端推导的掩码路径一并带上，
+        // 否则这条入口的 rec 少一个 serverMaskPath，「保存掩码到盘阵」前后
+        // 显示的掩码路径与查看器那条入口不一致（两边最终都以后端回的为准）。
+        serverMaskPath: resolved ? resolved.mask_path : null,
       }, blob);
     } catch (e) {
       error.value = '打开「' + row.name + '」失败：'
@@ -126,10 +124,36 @@ export const useScenesStore = defineStore('scenes', () => {
     }
   }
 
+  /** 手工打开盘阵上的任意一个合法场景目录（`W:\GSHC2IMPS\PRODUCT\...\<编号>`
+      或 `/DiskArray/...`）。
+
+      **不扫盘**：只把用户给的这一个路径交给后端 stat（POST /api/scenes/resolve）。
+      找不到就报错 —— 后端的 detail 里带着试过哪些候选、各自为什么不行，原样
+      呈现给用户让他手填。成功才 open(row)，失败什么都不留下（没有可提交的
+      东西），绝不静默换一条路径。返回是否成功。 */
+  async function resolvePath(path: string): Promise<boolean> {
+    const trimmed = String(path ?? '').trim();
+    error.value = '';
+    if (!trimmed) {
+      error.value = '请填写场景目录路径';
+      return false;
+    }
+    try {
+      const res = await apiResolveScene(loadSrConfig(), { path: trimmed });
+      await open(res.row, res.resolved);
+      return !error.value;
+    } catch (e) {
+      error.value = '打开失败：' + (e instanceof Error ? e.message : String(e));
+      return false;
+    } finally {
+      openingId.value = null;
+    }
+  }
+
   return {
     rows, source, scanned, count, loading, openingId, error,
     query, satellite, sensor, dateFrom, dateTo,
     satellites, sensors, dates,
-    list, resetFilters, open,
+    list, resetFilters, open, resolvePath,
   };
 });

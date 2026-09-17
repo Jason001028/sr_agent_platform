@@ -6,8 +6,8 @@
 
 ## 一、文档间导航速查
 
-- **SR_CODE 生产管线**（问算法 / 调用契约 / Windows 移植环境）：[docs/sr_code/sr-pipeline-overview.md](sr_code/sr-pipeline-overview.md)（算法全览）、[docs/sr_code/sr-pipeline-interface.md](sr_code/sr-pipeline-interface.md)（调用契约）、[docs/sr_code/sr-windows-porting-pitfalls.md](sr_code/sr-windows-porting-pitfalls.md)（移植踩坑 + 环境总结）
-- **交接入口**：[docs/status/current-question.md](status/current-question.md) —— 新窗口先读
+- **SR_CODE 生产管线**（问算法 / 调用契约 / Windows 移植环境）：[docs/sr_code/sr-pipeline-overview.md](sr_code/sr-pipeline-overview.md)（算法全览）、[docs/sr_code/sr-pipeline-interface.md](sr_code/sr-pipeline-interface.md)（调用契约）、[docs/sr_code/sr-windows-porting-pitfalls.md](sr_code/sr-windows-porting-pitfalls.md)（移植踩坑 + 环境总结）、[docs/sr_code/production-scene-naming.md](sr_code/production-scene-naming.md)（生产场景命名规则与目录层级 —— 反推盘阵路径的依据）
+- **交接入口**：[docs/status/current-question.md](status/current-question.md) —— 新窗口先读；开新窗口时可直接把 [docs/status/handoff-prompt.md](status/handoff-prompt.md) 整篇粘过去
 - **新手指南**（有 Web 基础想系统理解前后端与设计取舍）：[docs/knowledge/platform-tutorial.md](knowledge/platform-tutorial.md) —— 读代码前的首选教程
 - **面试八股**（功利向跳槽复习，教程的互补）：[docs/knowledge/interview/README.md](knowledge/interview/README.md) —— 项目已到阶段 5 的窗口可顺手更新
 - **踩坑索引**：[docs/experience/gui-experience.md](experience/gui-experience.md)
@@ -24,8 +24,8 @@
 | 需求与规划 | `docs/planning/` | 需求规格、实施计划 | [sr-minimal-prototype-plan.md](planning/sr-minimal-prototype-plan.md)（**当前路线**：前端提交 → 本机 conda 直跑的最小原型，含三项上机前确认 + 8 项改动清单 + A/B 验收）、[sr-pipeline-restore-plan.md](planning/sr-pipeline-restore-plan.md)（「提交 SR」→ Slurm + conda 超分的分阶段恢复清单，**路线已中止**）、[api-contract.md](planning/api-contract.md)（平台 API 契约）、[gui-requirements.md](planning/gui-requirements.md)、[web-plan.md](planning/web-plan.md)（gitignore） |
 | 经验与复盘 | `docs/experience/` | 踩坑记录、已验证方案 | [gui-experience.md](experience/gui-experience.md) |
 | 规范与约定 | `docs/conventions/` | 命名 / 流程等约束 | [naming-conventions.md](conventions/naming-conventions.md)、[langchain-boundary.md](conventions/langchain-boundary.md) |
-| 交接与状态 | `docs/status/` | 当前问题、窗口交接 | [current-question.md](status/current-question.md)、[real-machine-bringup.md](status/real-machine-bringup.md)（真机部署现状 + 症状表）、[real-machine-bringup-adhd.md](status/real-machine-bringup-adhd.md)（一次一步的动作版）、[slurm-integration.md](status/slurm-integration.md)（Slurm 接入决策快照 + 分批开工 prompt）、[slurm-acceptance.md](status/slurm-acceptance.md)（Slurm 真机分阶段验收清单：A 探针 → B 裸 Slurm 冒烟 → C 单场景真 SR → D 平台四条链路结论；**2026-09-14 已中止，保留为存量**） |
-| SR_CODE 生产管线 | `docs/sr_code/` | SR 超分算法 / 调用契约 / Windows 移植环境（**主题域类目**，见 [naming-conventions.md §2](conventions/naming-conventions.md)） | [sr-pipeline-overview.md](sr_code/sr-pipeline-overview.md)、[sr-pipeline-interface.md](sr_code/sr-pipeline-interface.md)、[sr-windows-porting-pitfalls.md](sr_code/sr-windows-porting-pitfalls.md)、[sr-slurm-deploy-variant.md](sr_code/sr-slurm-deploy-variant.md)（Slurm 部署变体差异表 E1–E9） |
+| 交接与状态 | `docs/status/` | 当前问题、窗口交接 | [current-question.md](status/current-question.md)、[handoff-prompt.md](status/handoff-prompt.md)（新窗口开工提示词：梳理框架用）、[bugfix-prompt.md](status/bugfix-prompt.md)（新窗口开工提示词：修 bug 用）、[real-machine-bringup.md](status/real-machine-bringup.md)（真机部署现状 + 症状表）、[real-machine-bringup-adhd.md](status/real-machine-bringup-adhd.md)（一次一步的动作版）、[slurm-integration.md](status/slurm-integration.md)（Slurm 接入决策快照 + 分批开工 prompt）、[slurm-acceptance.md](status/slurm-acceptance.md)（Slurm 真机分阶段验收清单：A 探针 → B 裸 Slurm 冒烟 → C 单场景真 SR → D 平台四条链路结论；**2026-09-14 已中止，保留为存量**） |
+| SR_CODE 生产管线 | `docs/sr_code/` | SR 超分算法 / 调用契约 / Windows 移植环境（**主题域类目**，见 [naming-conventions.md §2](conventions/naming-conventions.md)） | [sr-pipeline-overview.md](sr_code/sr-pipeline-overview.md)、[sr-pipeline-interface.md](sr_code/sr-pipeline-interface.md)、[sr-windows-porting-pitfalls.md](sr_code/sr-windows-porting-pitfalls.md)、[sr-slurm-deploy-variant.md](sr_code/sr-slurm-deploy-variant.md)（Slurm 部署变体差异表 E1–E9）、[production-scene-naming.md](sr_code/production-scene-naming.md)（生产场景命名 9 段 + 六层目录 + 由文件名反推场景目录的规则） |
 
 ## 三、怎么新增一个 .md（分类规则）
 

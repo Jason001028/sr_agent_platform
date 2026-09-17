@@ -20,10 +20,15 @@ export type QueueTunables = Pick<
 >;
 
 /** 提交预填。两个来源：查看器场景（只带目录）、任务行「再提交」（带整组参数）。
-    掩码不进表单 —— 它由后端按 <lq_path>/<目录名>_mask.tif 推导并校验存在性
-    （最小原型 §4.3），前端只显示推导结果，不参与提交。 */
+    掩码**不进提交体** —— 它由后端按 <lq_path>/<输入影像 stem>_mask.tif 推导并
+    校验存在性（最小原型 §4.3）；这里带的 mask_path 只用于表单显示，让用户看到
+    后端认的是哪个文件（PAN.tif（RC）场景与目录名不同名）。 */
 export interface QueueDraft {
   lq_path: string;
+  /** 后端给的**权威**掩码路径（查看器场景来自 resolve/写掩码的响应，任务行来自
+   *  该行自己的 params）。有它表单就显示它；没有才退回 derivedMaskPath 那份
+   *  无 stat 的镜像 —— PAN.tif（RC）场景两者不同名，镜像会指错文件。 */
+  mask_path?: string | null;
   /** 不带时其余字段取 defaultForm 的值。 */
   tunables?: Partial<QueueTunables>;
   /** 「再提交」来自哪一行（仅用于表单顶部提示）。 */
@@ -64,8 +69,12 @@ export function draftToForm(d: QueueDraft): QueueForm {
   return { ...defaultForm(), lq_path: d.lq_path, ...(d.tunables ?? {}) };
 }
 
-/** 后端 §4.3 的掩码推导规则，仅供界面显示「将读哪个掩膜」——权威实现在
-    backend/api/platform.py derived_mask_path，前端这一份不回传后端，猜错也不影响提交。 */
+/** 掩码推导规则的**无 stat 镜像**，只在拿不到权威值时兜底显示「将读哪个掩膜」。
+    权威实现是 backend/services/scene_search.derived_mask_path（掩码名取**输入
+    影像**的 stem），前端这里没有 stat 只能拿目录名顶替 —— `<目录名>.tif`（SC）
+    场景两者相同，`PAN.tif`（RC）场景不同名。所以表单优先用后端给的
+    `QueueDraft.mask_path`，这份镜像只用于用户手改目录后的即时反馈。
+    它不回传后端，猜错也不影响提交。 */
 export function derivedMaskPath(lqPath: string): string {
   const dir = normDir(lqPath.trim());
   const leaf = pathLeafOf(dir);
@@ -125,13 +134,23 @@ export function formatDuration(seconds: number): string {
   return sec + ' 秒';
 }
 
-/** SSE job_update → 覆盖匹配 task 的 state；无匹配不动（权威在 list()）。 */
+/** SSE job_update → 覆盖匹配 task 的 state（+ 后端给的话一并覆盖 updated_at）；
+    无匹配不动（权威在 list()）。
+
+    updated_at 必须跟着 state 一起落到本地，否则终态行的耗时会退化成 0 秒：
+    本地的 updated_at 是上一次 GET /api/queue 的快照，而那次 GET 通常发生在
+    提交刚落库时（updated_at == created_at）；运行中用 nowSec 现算看不出来，
+    一进终态改用快照就成了 0。老后端不发这个字段 → 保留本地值，不回退成
+    undefined（否则时间戳丢掉，整列变「—」，比 0 秒更糟）。 */
 export function mergeJobUpdate(tasks: QueueTask[], ev: JobUpdateEvent): QueueTask[] {
   let hit = false;
+  const at = Number(ev.updated_at);
   const next = tasks.map((t) => {
     if (t.task_id === ev.task_id) {
       hit = true;
-      return { ...t, state: ev.state };
+      return Number.isFinite(at) && at > 0
+        ? { ...t, state: ev.state, updated_at: at }
+        : { ...t, state: ev.state };
     }
     return t;
   });
@@ -261,11 +280,15 @@ export const useQueueStore = defineStore('queue', () => {
   return {
     tasks, connected, loading, error, draft, failReason,
     list, submit, cancel, connect, disconnect,
-    /** 查看器「提交 SR」带过来的目录（不自动提交）。 */
-    setSrDraft(lqPath: string) { draft.value = { lq_path: lqPath }; },
+    /** 查看器「提交 SR」带过来的目录（不自动提交）。
+        maskPath 传后端给的权威值（resolve 响应或写掩码响应里的；拿不到传 null
+        让表单退回本地镜像推导）。 */
+    setSrDraft(lqPath: string, maskPath?: string | null) {
+      draft.value = { lq_path: lqPath, mask_path: maskPath ?? null };
+    },
     /** 「以这行参数再提交」：整组参数填回表单，仍然要点提交才真的跑。
-        掩码不进表单 —— 每行的 mask_path 都是后端按 `<lq_path>/<目录名>_mask.tif`
-        推导出来的，重提交会推导出同一个文件。
+        掩码带该行自己的 params.mask_path 只为显示 —— 后端重提交时仍按
+        `<lq_path>/<输入影像 stem>_mask.tif` 推导，同一目录会推导出同一个文件。
 
         suffix 带回来的可能是空串：改动前的旧行由 agent 工具写入、当时不做归一化。
         重提交时空串按新规则解析成配置文件里的值，与那一行自己的指纹对不上，
@@ -273,6 +296,7 @@ export const useQueueStore = defineStore('queue', () => {
     setDraftFromTask(t: QueueTask) {
       draft.value = {
         lq_path: t.params.lq_path,
+        mask_path: t.params.mask_path,
         taskId: t.task_id,
         from: 'task',
         tunables: {

@@ -32,7 +32,10 @@ from datetime import datetime
 from pathlib import Path
 
 # Raster extensions treated as scenes (TIFF primary; IMG common on the array).
-_RASTER_EXTS = {".tif", ".tiff", ".img"}
+# 有序元组是给 input_candidates 用的（"试过哪些"的诊断信息要求顺序稳定）；
+# 集合供成员测试。
+_RASTER_EXT_ORDER = (".tif", ".tiff", ".img")
+_RASTER_EXTS = set(_RASTER_EXT_ORDER)
 # 最小原型 §4.7：盘阵目录里预生成的 JPG 也要能列出并直接打开（8bit 显示就绪，
 # 不需要后端再烘焙预览）。真值见 docs/status/phase4 —— 盘阵读 JPG 是既有做法。
 _IMAGE_EXTS = {".jpg", ".jpeg"}
@@ -74,6 +77,71 @@ def is_scene_file(path) -> bool:
         return False
     stem = p.stem.lower()
     return stem == p.parent.name.lower() or stem == _RC_INPUT_STEM
+
+
+def input_candidates(dir_path) -> list[Path]:
+    """场景目录里输入影像的候选路径（有序，恰好 6 个）。
+
+    顺序即优先级：SC 步骤读 `<目录名>.<ext>`，RC 步骤读 `PAN.<ext>`；扩展名按
+    `_RASTER_EXT_ORDER`。**只拼名字，不 stat、不列举** —— 调用方自己挑第一个
+    存在的，或者把整串拿去做"试过哪些"的诊断信息。
+    """
+    d = Path(dir_path)
+    return [d / f"{stem}{ext}"
+            for stem in (d.name, _RC_INPUT_STEM.upper())
+            for ext in _RASTER_EXT_ORDER]
+
+
+def input_scene_path(dir_path) -> Path | None:
+    """该场景目录里的输入影像（= 提交 SR 时的 `lq_path` 指向的那份文件）。
+
+    与 `is_scene_file` 同一套判据，但**只试 6 个固定文件名、绝不列举目录**
+    （盘阵数据量大，任何形式的目录扫描都不可接受）。目录不是场景目录（缺
+    `<目录名>_meta.xml`）、或 6 个候选一个都不在 → None。
+
+    这里的判据同时决定两件事：能不能打开/提交，以及掩码该叫什么名字
+    （见 `api/platform.derived_mask_path`）—— 两处必须同源，否则 PAN
+    场景会写成 `PAN_mask.tif` 而提交时找的是 `<目录名>_mask.tif`。
+    """
+    if not is_scene_dir(dir_path):
+        return None
+    for cand in input_candidates(dir_path):
+        if cand.is_file():
+            return cand
+    return None
+
+
+def mask_stem(lq_path) -> str:
+    """掩码文件名的主干：**输入影像的 stem**，不是目录名。
+
+    SC 场景里两者相同（`<目录名>.tif` 躺在以目录名命名的目录里），RC 场景里
+    不同（输入叫 `PAN.tif`）。以前 `derived_mask_path` 取目录名、`bake_mask`
+    取输入文件名，RC 场景下掩码写进去叫 `PAN_mask.tif`、提交时却去找
+    `<目录名>_mask.tif` → 必然 400。`<MaskPath>` 是平台自己写进配置 XML 的
+    （services/run_sr.py），SR 脚本只照读，所以只要这两处同源即可。
+
+    目录不构成场景目录（缺 meta.xml）时退回目录名：`derived_mask_path`
+    也服务于"目录里手工放了掩码"的诊断，不该因为拿不到输入文件就变空。
+    """
+    d = str(lq_path).replace("\\", "/").rstrip("/") or "/"
+    inp = input_scene_path(d)
+    return inp.stem if inp is not None else d.rsplit("/", 1)[-1]
+
+
+def derived_mask_path(lq_path) -> str:
+    """场景目录该带的掩码：`<输入名>_mask.tif`，与影像同目录。
+
+    这就是 `POST /api/masks` 写出去的那份，也是提交 SR 时去找的那份；不传
+    `mask_path` 时由它推导（REST 与 agent 工具两个入口共用 —— 各自推一份的话
+    同一次提交会算出两个 `task_fingerprint`，幂等层失效、重复投作业）。
+
+    不用 os.path.join、且把反斜杠一并转正：这条路径会被存进 params、参与
+    `task_fingerprint`，还必须在「resolve 告诉前端的掩码路径」与「提交侧自己
+    推导的掩码路径」之间逐字节相同，不能随宿主平台（谁的分隔符）变。传进来的
+    lq_path 可能还是宿主形态（`str(Path(...))` 在 Windows 上带反斜杠）。
+    """
+    base = str(lq_path).replace("\\", "/").rstrip("/")
+    return base + "/" + mask_stem(lq_path) + "_mask.tif"
 
 
 def parse_filename(path) -> dict:

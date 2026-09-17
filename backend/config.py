@@ -162,7 +162,9 @@ class SrRuntime:
     fake: bool
     queue_poll_sec: float
     agent_db: str
-    scenes_root: str | None   # None → fake-scene fallback (backend/api/paths.py)
+    # 注：**没有** scenes_root。场景根的唯一读取处是 backend/api/paths.py::
+    # scenes_root()（每次读环境、且要求目录存在）—— 在这里再镜像一份就等于
+    # 制造第二处真源，SR/Slurm 层也没人消费它（2026-09-17 删除）。
     sandbox_root: str | None  # None → SR runs in place, writing to lq_path
     executor: str             # "slurm" | "local" — who launches the job
     locked_dir: str | None    # None → /api/queue accepts any absolute lq_path
@@ -204,7 +206,6 @@ def sr_runtime() -> SrRuntime:
         fake=os.environ.get("SR_SLURM_FAKE") == "1",
         queue_poll_sec=env_float("SR_QUEUE_POLL_SEC", SR_DEFAULT_QUEUE_POLL_SEC),
         agent_db=os.environ.get("SR_AGENT_DB") or SR_DEFAULT_DB,
-        scenes_root=os.environ.get("SR_SCENES_ROOT") or None,
         sandbox_root=os.environ.get("SR_SANDBOX_ROOT") or None,
         executor=(os.environ.get("SR_EXECUTOR") or SR_DEFAULT_EXECUTOR).strip().lower(),
         locked_dir=os.environ.get("SR_LOCKED_DIR") or None,

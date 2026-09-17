@@ -2,8 +2,9 @@
 
 > 日期：2026-09-02 · 状态：**评审**（2026-09-16 按 §7 红线置回，待复核后改回「已定」）
 >
-> **本轮挂起项（唯一）**：§3.3 新增「`suffix` 默认值来源」条款——省略/留空不再固定为内置 `"sr"`，改为读 `$SR_BUNDLE_DIR` 下 SR 团队配置文件里的 `<Suffix>`，`SR_SUFFIX_DEFAULT` 环境变量作废；同批把 agent 工具 `run_sr` 的归一化与 REST 入口对齐（此前工具既不 strip 也不给默认值，同一逻辑提交两入口指纹不同 → 幂等失效、重复投作业，属修缺陷）。
-> **须说明的流程偏差**：上述改动**已与本文档同批落到代码**（不是"先评审后写码"）。理由是它同时修一个现存缺陷（两入口指纹不一致），拆开会让仓库停在一个已知会重复投作业的中间态。请复核本节，通过后把状态改回「已定」。此前其余条款自 2026-09-02 起均未变（评审通过时的交付基线：后端 190 unittest + 前端 Vitest 114 + vue-tsc 零错误 + `.e2e/test-platform.js` 11 断言全绿）。
+> **挂起项一**：§3.3 新增「`suffix` 默认值来源」条款——省略/留空不再固定为内置 `"sr"`，改为读 `$SR_BUNDLE_DIR` 下 SR 团队配置文件里的 `<Suffix>`，`SR_SUFFIX_DEFAULT` 环境变量作废；同批把 agent 工具 `run_sr` 的归一化与 REST 入口对齐（此前工具既不 strip 也不给默认值，同一逻辑提交两入口指纹不同 → 幂等失效、重复投作业，属修缺陷）。
+> **挂起项二（2026-09-17）**：新增 §3.5 `POST /api/scenes/resolve`（打开盘阵上 `SR_SCENES_ROOT` 之外的任意合法场景目录），并改 §3.4 `POST /api/masks` 的 body（新增 `lq_path`，legacy `scene_id` 保留）。同时约定 `lq_path` / `dir` / `input` / `mask_path` 一律回**盘阵 POSIX 形态**、提交侧两入口共用 `pathguard.normalize_submit_path`——这两条不改行为口径，只是把"同一场景两种写法算出两个指纹"的隐患收口。
+> **须说明的流程偏差**：上述改动**已与本文档同批落到代码**（不是"先评审后写码"）。理由是它同时修一个现存缺陷（两入口指纹不一致），拆开会让仓库停在一个已知会重复投作业的中间态；09-17 那批同理，前端要用的字段与端点不一起落地就没法验收。请复核，通过后把状态改回「已定」。此前其余条款自 2026-09-02 起均未变（评审通过时的交付基线：后端 190 unittest + 前端 Vitest 114 + vue-tsc 零错误 + `.e2e/test-platform.js` 11 断言全绿）。
 > 目标读者：阶段5 实现会话（后端 FastAPI + 前端 Vue3）。范围：把既有后端（agent loop + 4 工具 + `sr_tasks` + slurm）暴露成网页可调 REST/SSE，交付 聊天 / 共享任务队列 / 查看器画完掩码提交 SR。
 > 前置：阶段4 已完成（FastAPI 骨架 `backend/api/app.py`：`/api/scenes` + `/api/scenes/{id}/preview` + 路径白名单；前端 `/scenes` 页 + route='jpg' rec + `/chat` `/queue` 占位路由）。
 
@@ -44,6 +45,7 @@
 |---|---|---|
 | `GET /api/health` | 存活 + 数据源（已有，返回 `{ok,source}`） | — |
 | `GET /api/scenes` · `GET /api/scenes/{id}/preview` | 场景检索/懒生成（阶段4 已有，不改） | — |
+| `POST /api/scenes/resolve` | 手填/反推一个盘阵场景目录 → 与库行同形的 `{source,row,resolved}` | 3.5 |
 | `GET /api/tools` | 工具清单（manifest 机械生成，供 UI/文档） | 3.1 |
 | `POST /api/tools/{name}` | 直调单个工具（绕过 LLM；validate + 白名单照常） | 3.1 |
 | `POST /api/chat/sessions` | 新建会话 → `201 {session_id}` | 3.2 |
@@ -54,13 +56,15 @@
 | `POST /api/queue` | 提交 SR 作业（表单=run_sr 参数，幂等） | 3.3 |
 | `POST /api/queue/{task_id}/cancel` | scancel 取消 | 3.3 |
 | `GET /api/queue/events` | SSE：队列状态变化广播 | 3.3 |
-| `POST /api/masks` | 多边形 JSON + W/H → 栅格化写盘阵（原图目录）→ `{mask_path, lq_path, task_draft}` | 3.4 |
+| `POST /api/masks` | 多边形 JSON + W/H → 栅格化写盘阵（原图目录）→ `{mask_path, lq_path, task_draft}`（body 现收 `lq_path`，legacy `scene_id` 保留） | 3.4 |
 
-> **SR 最小原型（09-14）**：`POST /api/masks` 端点**保留且可用**（测试照旧覆盖），
-> 但**当前前端已不再调用**——掩码来源改为「目录里已有的 `<名字>_mask.tif`」，前端
-> 提交时只带 `lq_path`，由后端推导并校验存在性（`services/platform.derived_mask_path`）。
-> 前端 `lib/api.ts` 里的 `apiBakeMask` / `MaskDraft` / `BakeMaskBody` / `MaskBakeResult`
-> 已删除；将来若回到「前端画掩码」，端点与渲染链（`services/mask.py`）都还在。
+> **SR 最小原型（09-14）**：掩码来源改为「目录里已有的 `<输入影像名>_mask.tif`」，
+> 提交时只带 `lq_path`，由后端推导并校验存在性
+> （`services/scene_search.derived_mask_path`）；`POST /api/masks` 退居补充出口。
+> **2026-09-17 恢复调用**：90% 的生产场景本来就没有掩码，查看器里现场画完要能直接
+> 写回服务端场景目录，所以 `apiBakeMask` / `MaskBakeResult` 重新进 `lib/api.ts`
+> （body 见 3.4），随后提交仍走同一条推导 —— 两条路写出去/找回来的是同一个文件名，
+> 由后端 `scene_search.mask_stem` 单点保证。
 > `POST /api/queue` 的响应另加两个**只读提示字段**（没有沙箱时出现，否则整个字段缺省）：
 > `in_place: true` + `notice`（人话：「输出目录 = 输入目录（…）：SR 就地把结果写成
 > `<输入名>_<suffix>.tif`，输入 tif 不改名也不删除；该目录里已存在同名输出时，旧输出先被改名为
@@ -152,23 +156,92 @@ submit_run_sr 返回 → 队列状态：
 - `GET /api/queue/events` — SSE：订阅所有任务的 `state` 变化。**驱动** = app 生命周期后台 asyncio 任务（§4.3）：周期（`SR_QUEUE_POLL_SEC`，缺省 2s）对每个 `job_id` 非空 task 调 `slurm.job_status`，状态与前值不同 → 更新内存缓存 + 写回 `sr_tasks.status` + 广播一帧。事件 schema：
 
 ```json
-{"type":"job_update","task_id":3,"job_id":12345,"state":"RUNNING","prev_state":"PENDING","ok":true,"error":null}
-{"type":"job_update","task_id":3,"job_id":12345,"state":"FAILED","prev_state":"RUNNING","ok":false,"error":"exit 1"}
+{"type":"job_update","task_id":3,"job_id":12345,"state":"RUNNING","prev_state":"PENDING","ok":true,"error":null,"updated_at":1789000000.12}
+{"type":"job_update","task_id":3,"job_id":12345,"state":"FAILED","prev_state":"RUNNING","ok":false,"error":"exit 1","updated_at":1789000060.5}
 // 心跳（可选，防代理断链）：{"type":"ping"}
 ```
 
+`updated_at`（2026-09-17 增）= 这次状态写回 `sr_tasks` 的时间戳，与 `GET /api/queue` 同名字段
+同源。**终态行的耗时 = `updated_at − created_at`**，所以它必须随帧下发：客户端手上那份
+`updated_at` 只来自 `GET`，而那次 GET 通常就发生在提交刚落库之后（`updated_at == created_at`）
+—— 只推 `state` 的话，任务一完成耗时列就从运行中的正常值掉成「0 秒」（2026-09-17 真机现象）。
+写库失败时该字段**缺席**（不发本地时钟值），客户端保留旧快照，与 GET 的读数保持一致；因此
+客户端须按「字段可能不存在」实现。
+
 ### 3.4 掩码（查看器 → SR 提交）
 
-`POST /api/masks` — body：
+`POST /api/masks` — body（`lq_path` 与 `scene_id` 二选一，都给时 `lq_path` 优先）：
 ```json
-{"scene_id":"<阶段4 不透明 scene id>",
+{"lq_path":"/DiskArray/GSHC2IMPS/PRODUCT/2026/09/17/<生产编号>",
  "polygons":[{"label":"roi_1","points":[[x,y],…]}, …],
  "W": 24739, "H": 24199}
 ```
-- **路径语义（已与用户确认）**：服务端按 `scene_id` 经 `paths.scene_id_to_abs` 解析回**场景文件绝对路径**（fake/越界 → 404/400，白名单照旧）。掩码落盘到**该场景文件所在目录**：`<原图目录>/<stem>_mask.tif`（0/255 Deflate，`services.mask.write_mask_tif`）+ `<stem>_mask.txt`（`write_mask_centroid_txt` 参考格式）。超分结果 `.tif` 也落同目录（run_sr/0817 脚本自身行为，本端点不处理）。
+或 legacy 形态 `{"scene_id":"<阶段4 不透明 scene id>", "polygons":…, "W":…, "H":…}`。
+
+- **路径语义（已与用户确认）**：`lq_path` 走 `pathguard.to_posix_array_path` +
+  `ensure_allowed(kind="dir")`（Windows 形态 `W:\…` 也吃；白名单外 → 403，不是场景目录
+  → 404 并列出试过的候选名）。legacy `scene_id` 经 `paths.scene_id_to_abs` 解析回场景文件
+  绝对路径（fake/越界 → 404/400，需配 `SR_SCENES_ROOT`）。两条路都收敛到
+  `scene_search.input_scene_path` —— 「是不是场景目录」只此一处判断。
+- **落盘位置与命名**：掩码写进**该场景输入影像所在目录**，名字取
+  `scene_search.mask_stem`（= **输入影像的 stem**，不是目录名）：SC 场景是
+  `<目录名>.tif` → `<目录名>_mask.tif`；RC 场景输入叫 `PAN.tif` → `PAN_mask.tif`。
+  与提交侧推导同源，否则 RC 场景写进去也白写（提交时去找的是另一个名字）。
+  两份产物：`<stem>_mask.tif`（0/255 Deflate，`services.mask.write_mask_tif`）+
+  `<stem>_mask.txt`（`write_mask_centroid_txt` 参考格式）。超分结果 `.tif` 也落同目录
+  （run_sr/0817 脚本自身行为，本端点不处理）。
 - 复用 `services.mask`：`rasterize_polygons(W,H, polygons→points)`（全分辨率 Pillow；24739×24199 ≈ 580MB 位图，盘阵机内存可扛，**不落浏览器**）。W/H 以 body 为准（= 元数据 W/H，不探 TIF）。
 - 返回 `200 {"mask_path": "<绝对路径>", "mask_txt": "<绝对路径>", "lq_path": "<原图所在目录>", "task_draft": {lq_path, mask_path, …默认 sr 参数}}`。`task_draft` 供前端**预填**队列表单（不自动提交，Slurm 是真副作用；用户点提交才发 POST /api/queue）。
 - 幂等：同 scene_id 重复提交 → 覆盖同名掩码（掩码生成无副作用风险，允许重复）。
+
+### 3.5 盘阵任意场景目录（`POST /api/scenes/resolve`，2026-09-17）
+
+用途：让 `SR_SCENES_ROOT`（datahub）之外的生产场景目录（真机在
+`/DiskArray/GSHC2IMPS/PRODUCT/<年>/<月>/<日>/<卫星型号>/<段级目录>/<景级目录>`）
+也能在查看器打开、画掩码、就地提交 SR，不必把数据搬进 datahub。前端两个入口
+（场景库页检索条下的输入框、查看器工具栏的「盘阵场景」栏）共用一个 `ScenePathBar`。
+
+请求体二选一：
+```json
+{"path": "W:\\GSHC2IMPS\\PRODUCT\\2026\\09\\02\\JL1KF02B03\\<段级目录>\\<景级目录>"}
+```
+```json
+{"name": "<用户拖进来的文件名，可带后缀>", "date": "2026-09-02"}
+```
+
+- `path`：`W:\…`（经 `SR_DRIVE_MAP` 映射）或 `/DiskArray/…` 都吃，要写到**景级目录**这一层。
+- `{name}`（`date` 可省）：查看器里选了本地影像后的反推路径。浏览器拿不到本地文件的
+  绝对路径（`File` 只有 name/size/type），只能把**裸文件名**交给后端，由
+  `backend/pathguard.infer_scene_paths` 反推候选目录 —— 命名规则与模板的唯一真源就在
+  那里，**前端不自拼路径**（2026-09-17 前前端自己写死过一份，导致 `SR_SCENE_PATH_TEMPLATE`
+  从未生效）。日期不给就由后端从文件名里的 14/8 位时间戳取，**取不到就报错让用户手粘**。
+  候选按序（最多两条，依次 stat）：
+  1. `W:\GSHC2IMPS\PRODUCT\{y}\{m}\{d}\{sat}\{mid}\{name}` —— 生产树六层真形态；
+  2. `W:\GSHC2IMPS\PRODUCT\{y}\{m}\{d}\{name}` —— 旧扁平形态（平铺部署仍靠它命中）。
+  配了 `SR_SCENE_PATH_TEMPLATE` 则只按配置的那一条走。名字不符合生产命名规则
+  （拆不出 `{sat}`/`{mid}`）时跳过第 1 条，不硬拼空段。规则见
+  [docs/sr_code/production-scene-naming.md](../sr_code/production-scene-naming.md)。
+- 响应 `200 {"source":"manual", "row": <与 /api/scenes 行同形>, "resolved": {...}}`：
+  `row.id` 是 `~` + base64url(绝对路径)（手工行形态，见 `api/paths.py`；库行 id 一字未变），
+  `row.manual=true`、`jpgUrl=null`、`hasPreview=false`（预览走 `GET /api/scenes/{id}/preview`
+  回 JPEG 字节），`row.W/H` 由 `preview_jpg.scene_dims` 回填。
+  `resolved` = `{dir, input, input_name, mask_path, mask_exists, writable}`，三者路径一律
+  **盘阵 POSIX 形态**（与提交侧归一化同一口径，前端 lq_path / mask_path 逐字比得上）。
+  `writable` = 服务账号对该目录是否有写权限，提前告知好过提交后才发现写不了。
+- **不扫盘**：只 `stat` 用户给的目录，判定顺序是固定候选文件名（`<目录名>.tif/.tiff/.img`
+  再 `PAN.*`），上界 6 次 stat，不 `ls`/`glob`/`rglob`/`iterdir`。盘阵数据量极大，
+  列举一次就可能卡死；这条由测试用 `patch(Path, "rglob"/"glob"/"iterdir")` + `os.listdir`
+  /`os.scandir`/`os.walk` 全打成 `AssertionError` 来钉。
+- **判据**：目录含 `<目录名>_meta.xml` **且**含输入影像之一（与库内场景同一套判据，
+  `scene_search.is_scene_dir` / `input_scene_path`）。缺 meta.xml 的场景 SR 脚本判不出
+  RC/SC，本就不该放进来。
+- 错误码分工：**400** 形态非法或压根反推不出来（相对路径 / `..` / UNC / 未知盘符 /
+  日期格式 / 文件名里没有时间戳 / 名字不符合生产命名规则）· **403** 越
+  `SR_ALLOWED_ROOTS` 白名单 · **404** 反推成立但盘阵上没有合法场景目录或没有输入影像 ·
+  **422** 场景成立但读不到影像尺寸（前端开图要 W/H）。
+  404 的 `detail` 必须列出试过哪些候选、各自为什么不行（前端原样渲染）——「猜错必须报错」
+  的落地。`detail` 只能是**字符串**：`api.ts::http()` 把它直接塞进 `Error`，给对象
+  用户看到的是 `[object Object]`。
 
 ## 4. 关键实现机制（契约约束）
 

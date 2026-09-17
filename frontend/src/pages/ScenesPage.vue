@@ -10,9 +10,16 @@ import { onMounted } from 'vue';
 import { isImageSource } from '../lib/scene.js';
 import { useScenesStore } from '../stores/scenes.js';
 import { useViewerStore } from '../stores/viewer.js';
+import ScenePathBar from '../components/ScenePathBar.vue';
 
 const scenes = useScenesStore();
 const viewer = useViewerStore();
+
+/** 手工路径：只把用户填的这一个目录交给后端 stat（不扫盘）。错误由本页
+ *  统一渲染（scenes.error，就在检索条下方），所以这里不用再弹提示。 */
+function openPastedPath(path: string): void {
+  void scenes.resolvePath(path);
+}
 
 function fmtBytes(n: number): string {
   if (n >= 1073741824) return (n / 1073741824).toFixed(2) + ' GB';
@@ -60,6 +67,8 @@ onMounted(() => { void scenes.list(); });
               title="打开 /viewer 查看当前激活场景" @click="$router.push('/viewer')">去查看器</button>
     </div>
 
+    <ScenePathBar class="sp-path" :busy="!!scenes.openingId" @open="openPastedPath" />
+
     <p v-if="scenes.error" class="sp-err">{{ scenes.error }}</p>
 
     <div class="sp-tbl-wrap">
@@ -104,14 +113,14 @@ onMounted(() => { void scenes.list(); });
       场景 JPG 为服务器烘焙（稀疏采样 + 2% 线性拉伸）；标「JPG 源」的行本就是
       显示就绪图，无需烘焙、直接打开。打开后掩码按元数据
       {{ viewer.activeRec?.route === 'jpg' ? dimsText(viewer.activeRec) : 'W/H' }} 换算回全分辨率；
-      交互式拉伸/导出 JPG 在场景路径不可用（本地 TIF 路径照旧）。
+      显示层拉伸可改（起手值直方图均衡），但烘焙时裁掉的两端拉不回来。
     </p>
   </div>
 </template>
 
 <style scoped>
 /* 盘阵场景检索：莫兰迪绿打底，检索条与结果表为白色浮层卡 */
-.scenes-page { max-width: 1360px; margin: 0 auto; padding: 10px 20px 44px; }
+.scenes-page { max-width: var(--page-w); margin: 0 auto; padding: 10px 20px 44px; }
 
 /* 页头：大标题（藏青）直接落在莫兰迪底上，来源 chip 用白/浅胶囊 */
 .sp-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 16px; }
@@ -190,7 +199,8 @@ onMounted(() => { void scenes.list(); });
   font-weight: 500;
 }
 
-.sp-err { color: var(--err); font-size: 13px; margin: 0 0 10px; }
+.sp-path { margin-bottom: 10px; }
+.sp-err { color: var(--err); font-size: 13px; margin: 0 0 10px; white-space: pre-wrap; }
 
 /* 结果表：白色卡片，圆角裁掉表头直角 */
 .sp-tbl-wrap {

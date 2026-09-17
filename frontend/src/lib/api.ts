@@ -6,8 +6,10 @@
  * 的运行期 apiBase（默认同源 nginx 反代；e2e/异源注入 window.__SR_CFG__）。
  * 聊天走 POST + fetch ReadableStream 手工切 SSE（EventSource 只支持 GET）。
  */
-import { loadSrConfig, joinBase } from './scene.js';
-import type { SrConfig } from './scene.js';
+import {
+  loadSrConfig, joinBase, sceneResolveUrl, scenePreviewUrl, sceneImageUrl,
+} from './scene.js';
+import type { SceneRow, SrConfig } from './scene.js';
 
 export { loadSrConfig } from './scene.js';
 
@@ -48,7 +50,9 @@ export type ChatSseEvent =
   | { type: 'turn_done'; content: string; error: string | null }
   | { type: 'error'; error: string };
 
-/** 队列 SSE 事件（§3.3 job_update）。 */
+/** 队列 SSE 事件（§3.3 job_update）。
+    `updated_at` = 后端这次写回 sr_tasks 的时间戳（终态行的耗时就是它减
+    created_at）。老后端不发这个字段，故可选 —— 缺省时前端保留本地快照。 */
 export interface JobUpdateEvent {
   type: 'job_update';
   task_id: number;
@@ -57,6 +61,7 @@ export interface JobUpdateEvent {
   prev_state: string | null;
   ok: boolean;
   error: string | null;
+  updated_at?: number;
 }
 
 export type PlatformSseEvent = ChatSseEvent | JobUpdateEvent | { type: 'ping' };
@@ -117,9 +122,37 @@ export interface QueueSubmitResult {
   notice?: string;
 }
 
-/* 注：后端 POST /api/masks（浏览器画掩码 → 服务端烘焙落盘）仍然存在且可用，
-   但最小原型已不再调用它 —— 掩码改为「目录里已有的 <目录名>_mask.tif」，
-   前端提交时只带 lq_path，掩码由后端推导（platform.derived_mask_path）。 */
+/* 注：掩码仍是「目录里已有的 <输入名>_mask.tif」，提交时只带 lq_path、由后端
+   推导（services/scene_search.derived_mask_path）。apiBakeMask 是**手工场景**的
+   补充出口：盘阵上那 90% 本来没有掩码的场景，画完直接写进服务端场景目录，
+   之后提交就走同一条推导。两条路写出去的必须是同一个文件名（后端同源保证）。 */
+
+/** POST /api/scenes/resolve 响应（打开盘阵任意合法场景目录）。 */
+export interface SceneResolveResult {
+  source: 'manual';
+  row: SceneRow;
+  resolved: {
+    /** 场景目录（盘阵 POSIX） */
+    dir: string;
+    /** 输入影像绝对路径（提交 SR 时 lq_path 指向的就是它的父目录） */
+    input: string;
+    input_name: string;
+    /** 平台推导的掩码路径：与提交侧去找的那份逐字节相同 */
+    mask_path: string;
+    mask_exists: boolean;
+    /** 服务账号对该目录有写权限（meta.xml 回写 / Debug 日志 / 掩码 / 预览缓存） */
+    writable: boolean;
+  };
+}
+
+/** POST /api/masks 响应（画好的掩码写进服务端场景目录）。 */
+export interface MaskBakeResult {
+  mask_path: string;
+  mask_txt: string;
+  lq_path: string;
+  /** 预填到提交表单的草稿（suffix 已按 SR 团队配置取默认值，不为空） */
+  task_draft: QueueSubmitBody & { lq_path: string; mask_path: string };
+}
 
 /* ---------------- URL 拼接 ---------------- */
 export const apiUrl = (cfg: SrConfig, path: string): string =>
@@ -301,6 +334,67 @@ export function subscribeQueueEvents(
     }
   })();
   return () => ctrl.abort();
+}
+
+/** 取一条场景行的显示 JPG 字节。两条来源，调用方不必区分：
+ *
+ *  * 库行（jpgUrl 非空）：缓存没生成过就先 POST 一下懒生成，然后走静态 URL
+ *    （nginx 直出，大图不经过 API 进程）。
+ *  * 库外的场景（手工 resolve 的盘阵目录，jpgUrl 为空）：没有静态 URL，
+ *    /api/scenes/{id}/preview 的**响应体本身**就是那张 JPEG。
+ *
+ *  两条路都必须真正取到字节 —— 库外那条早期版本把响应取到手又丢掉，结果手工
+ *  场景一律打不开。首次要解压采样整幅大图，可能较慢。 */
+export async function fetchSceneJpg(cfg: SrConfig, row: SceneRow): Promise<Blob> {
+  if (!row.jpgUrl) {
+    const p = await http(scenePreviewUrl(cfg, row.id));
+    row.hasPreview = true;
+    return await p.blob();
+  }
+  if (!row.hasPreview) {
+    await http(scenePreviewUrl(cfg, row.id));
+    row.hasPreview = true;
+  }
+  const img = await http(sceneImageUrl(cfg, row.jpgUrl));
+  return await img.blob();
+}
+
+/** 打开盘阵上任意一个合法场景目录：POST /api/scenes/resolve。
+ *
+ * 二选一：`{path}`（`W:\...` 或 `/DiskArray/...`，服务端归一）或
+ * `{name}`（裸文件名，+ 可选 `date`；不给日期就由后端从文件名里的成像时间戳
+ * 取，前端不再自解析 —— 命名规则与模板的唯一真源在 backend/pathguard.py）。
+ * **没找到就抛**（4xx），`Error.message` 是后端给的候选与原因清单，调用方原样
+ * 展示即可 —— 反推不准时必须让用户看见为什么、然后手粘目录，绝不静默换一条
+ * 路径。
+ *
+ * 首次调用可能要解压采样整幅大图（生成预览缓存），界面应提示「首次较慢」。 */
+export async function apiResolveScene(
+  cfg: SrConfig,
+  body: { path: string } | { name: string; date?: string },
+): Promise<SceneResolveResult> {
+  const r = await http(sceneResolveUrl(cfg), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return (await r.json()) as SceneResolveResult;
+}
+
+/** 把浏览器里画好的掩码写进服务端场景目录：POST /api/masks。
+ *
+ * `polygons` 是**全分辨率**坐标（缩略图坐标先经 thumbPolysToOrig 换算）。
+ * W/H 必须是源影像的真实尺寸 —— 栅格化按它建画布。 */
+export async function apiBakeMask(
+  cfg: SrConfig,
+  body: { lq_path: string; W: number; H: number; polygons: unknown },
+): Promise<MaskBakeResult> {
+  const r = await http(apiUrl(cfg, '/api/masks'), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return (await r.json()) as MaskBakeResult;
 }
 
 /** 新会话随手一张（ChatPage 顶部用）。 */
