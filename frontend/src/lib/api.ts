@@ -137,11 +137,16 @@ export interface SceneResolveResult {
     /** 输入影像绝对路径（提交 SR 时 lq_path 指向的就是它的父目录） */
     input: string;
     input_name: string;
-    /** 平台推导的掩码路径：与提交侧去找的那份逐字节相同 */
-    mask_path: string;
+    /** 平台推导的掩码路径：与提交侧去找的那份逐字节相同。
+     *  裸 .tif 且父目录不是场景目录时为 null（那种情况没有可提交的场景）。 */
+    mask_path: string | null;
     mask_exists: boolean;
     /** 服务账号对该目录有写权限（meta.xml 回写 / Debug 日志 / 掩码 / 预览缓存） */
     writable: boolean;
+    /** 这个目录能不能提交 SR。目录形态恒为 true；**粘单个 .tif 时可能为 false**
+     *  —— 随手贴的一张图不该拿到提交入口，否则 SR 在盘阵上根本跑不起来。
+     *  `row.lq_path` 与它同源同真假（场景库入口直接读的是 row.lq_path）。 */
+    sr_capable: boolean;
   };
 }
 
@@ -344,8 +349,19 @@ export function subscribeQueueEvents(
  *    /api/scenes/{id}/preview 的**响应体本身**就是那张 JPEG。
  *
  *  两条路都必须真正取到字节 —— 库外那条早期版本把响应取到手又丢掉，结果手工
- *  场景一律打不开。首次要解压采样整幅大图，可能较慢。 */
-export async function fetchSceneJpg(cfg: SrConfig, row: SceneRow): Promise<Blob> {
+ *  场景一律打不开。首次要解压采样整幅大图，可能较慢。
+ *
+ *  `onPhase` 在「本次会触发服务端烘焙」时被调用一次（只有这一次，没有百分比）：
+ *  首次烘焙要读一遍源图，2.4 万像素级的场景在盘阵上要几秒到几十秒，调用方拿它
+ *  更新遮罩文案，别让界面看起来像卡死了。判据是 `row.hasPreview` —— 后端填的是
+ *  缓存到底在不在的真值（库外同样准），所以第二次打开不会再提示。 */
+export async function fetchSceneJpg(
+  cfg: SrConfig,
+  row: SceneRow,
+  onPhase?: (text: string) => void,
+): Promise<Blob> {
+  if (!row.hasPreview) onPhase?.('首次打开：正在服务器烘焙 1/2 预览图（直方图均衡），'
+    + '要读一遍大图，可能要等几十秒…');
   if (!row.jpgUrl) {
     const p = await http(scenePreviewUrl(cfg, row.id));
     row.hasPreview = true;

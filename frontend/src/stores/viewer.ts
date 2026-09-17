@@ -313,7 +313,9 @@ export const useViewerStore = defineStore('viewer', () => {
       pendingPts.value = null; pendingRect.value = null; hoverPt.value = null;
     }
     // 打开/切到本地文件时试着反推它的盘阵目录（不阻塞解码，每个文件只试一次）。
-    // 盘阵场景 route='jpg' 已有 lqPath，tryLinkScenes 直接返回。
+    // 盘阵场景（route='jpg'）不走这条路：它们的目录是 POST /api/scenes/resolve
+    // 按**绝对路径**给出的权威值，而反推只能拿裸文件名去猜，猜出来的可能是另一个
+    // 目录（同名不同景），拿它提交 SR 就是错的；tryLinkScenes 里也会再挡一次。
     void tryLinkScenes(rec);
     if (rec.thumb) {
       repaintOnActivate(rec);
@@ -425,9 +427,10 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   /* ---------------- 盘阵场景（阶段4：读服务器烘焙 JPG，route='jpg'） ----------------
-     JPG 即显示产物（稀疏采样 + 2% 线性拉伸已在服务器烤好）：不再读原始 TIF 字节、
-     不做二次拉伸、不本地导出 JPG（服务器 JPG 即交付物）。掩码仍照旧 —— 缩略图坐标
-     按元数据 W/H 换算回全分辨率（thumbToOrig scale 来自 rec.W/H 而非 probe）。 */
+     JPG 即显示产物（各边 1/2 的稀疏采样 + 直方图均衡已在服务器烤好）：不再读原始
+     TIF 字节、不做二次拉伸、不本地导出 JPG（服务器 JPG 即交付物）。掩码仍照旧 ——
+     缩略图坐标按元数据 W/H 换算回全分辨率（thumbToOrig scale 来自 rec.W/H 而非
+     probe，所以 JPG 尺寸变了也不影响掩码落点）。 */
   async function openSceneJpg(meta: SceneOpenMeta, blob: Blob) {
     const dup = recs.value.find((r) => r.name === meta.name);
     if (dup) { void activate(dup.id); return; }
@@ -449,7 +452,7 @@ export const useViewerStore = defineStore('viewer', () => {
         src: markRaw(d.src), srcw: d.tw, srch: d.th, nbands: d.nbands,
         invert: false, stats: d.stats ? markRaw(d.stats) : null,
         route: 'jpg', sceneId: meta.sceneId ?? null, lqPath: meta.lqPath ?? null,
-        layout: '盘阵 JPG（已烘焙 2% 线性拉伸）',
+        layout: '盘阵 JPG（1/2 尺度 + 直方图均衡，服务端已烘焙）',
         status: '场景就绪：' + meta.name + ' · 元数据 ' + meta.W + '×' + meta.H + ' · JPG ' + d.tw + '×' + d.th,
         statusCls: 'ok', paintedMode: null, maskRois: null,
         // 手工场景由 resolve 带着权威掩码路径进来（场景库页那条入口也走这里）；
@@ -503,8 +506,8 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   /** 按 mode 重画 rec 的显示画布，并把「这张图现在是这个模式」记在它自己身上。
-      盘阵场景同样走这条路：服务器烤的 2% 线性只是**底图**，显示层照常可二次拉伸
-      （两端已被烤掉，拉不回来 —— 这一点在工具栏 title 里说明）。 */
+      盘阵场景同样走这条路：服务器烤的直方图均衡只是**底图**，显示层照常可二次
+      拉伸（均衡是不可逆的，拉不回来 —— 这一点在工具栏 title 里说明）。 */
   function paintStretch(rec: ViewerRec, mode: StretchMode = stretchMode.value) {
     if (!rec.src || !rec.thumb) return;
     const rgba = stretchRgba(rec.src, rec.srcw, rec.srch, rec.nbands, rec.stats, mode, rec.invert);
@@ -952,10 +955,16 @@ export const useViewerStore = defineStore('viewer', () => {
    *  **裸文件名**交给后端，由它按生产命名规则 + SR_SCENE_PATH_TEMPLATE 反推候选
    *  目录 —— 规则唯一真源在 backend/pathguard.py，前端不自拼路径。命中才写
    *  lqPath；没命中就是一条 4xx，`detail` 里写着试过哪些候选、各自为什么不行，
-   *  原样展示给用户，本地图照常能看。猜错必须报错，绝不静默提交。 */
+   *  原样展示给用户，本地图照常能看。猜错必须报错，绝不静默提交。
+   *
+   *  **route='jpg' 一律不试**：那种 rec 的目录已经由 resolve 按绝对路径定过（就是
+   *  权威值）。粘单个 .tif 且父目录不是场景目录时它的 lqPath 是 null —— 这时若按
+   *  文件名去反推，可能命中**另一个**目录，用户点「提交 SR」就会拿着错的 lq_path
+   *  去跑，而这正是「绝不静默提交」要防的事。父目录不是场景目录，就是不能提交。 */
   async function tryLinkScenes(rec?: ViewerRec | null): Promise<void> {
     const r = rec ?? activeRec.value;
-    if (!r || r.lqPath || r.linkTried) return;        // 已是盘阵场景 / 已关联过 / 已试过
+    // 已是盘阵场景 / 走过 resolve / 已关联过 / 已试过 —— 都直接返回
+    if (!r || r.lqPath || r.linkTried || r.route === 'jpg') return;
     r.linkTried = true;
     try {
       const res = await apiResolveScene(loadSrConfig(), { name: r.name });
@@ -986,16 +995,26 @@ export const useViewerStore = defineStore('viewer', () => {
         showToast('提示：服务账号对 ' + res.resolved.dir + ' 没有写权限，'
           + '保存掩码到盘阵会失败');
       }
-      const blob = await fetchSceneJpg(loadSrConfig(), res.row);
+      // 首次要服务端烘焙 1/2 预览图（读一遍大图）——把遮罩文案换成这一句，
+      // 否则几十秒里界面看起来像卡死了。
+      const blob = await fetchSceneJpg(loadSrConfig(), res.row, (text) => {
+        showMask('正在打开盘阵场景…', text, false);
+      });
       hideMask();
+      // lqPath 是「能不能提交 SR」的唯一判据（见 submitSr）。粘单个 .tif 进来时
+      // 它可能不在场景目录里 —— 那种图能看，但 SR 在盘阵上跑不起来，所以不写
+      // lqPath（后端用 sr_capable 告诉你），让它走 submitSr 的「需要盘阵目录」分支。
       await openSceneJpg({
         name: res.row.name, W: res.row.W as number, H: res.row.H as number,
-        sceneId: res.row.id, lqPath: res.resolved.dir,
+        sceneId: res.row.id,
+        lqPath: res.resolved.sr_capable ? res.resolved.dir : null,
       }, blob);
       const rec = recs.value.find((x) => x.name === res.row.name);
       if (rec) {
         rec.serverMaskPath = res.resolved.mask_path;
-        if (!res.resolved.mask_exists) {
+        if (!res.resolved.sr_capable) {
+          showToast('这张图不在场景目录里，只能查看，不能提交 SR');
+        } else if (!res.resolved.mask_exists) {
           showToast('该场景目前没有掩码（' + res.resolved.mask_path
             + '）—— 画完点「保存掩码到盘阵」再提交');
         }

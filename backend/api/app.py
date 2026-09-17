@@ -117,6 +117,19 @@ def _scene_row(scene: dict, root: Path | None) -> dict:
     return row
 
 
+def _same_file(a: Path, b: Path) -> bool:
+    """两个路径是否指向同一个文件。
+
+    不能直接用 `Path.__eq__`：它在 Windows 上是**大小写敏感**的字符串比较，而
+    文件系统不是 —— 用户把盘符写成小写就会假阴性（把可提交的场景判成不可提交）。
+    先试 `samefile`（stat 级判定，最准），失败再退回规范化字符串比较。
+    """
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return os.path.normcase(str(a)) == os.path.normcase(str(b))
+
+
 def _manual_row(abs_path: Path, dir_path: Path, root: Path | None) -> dict:
     """手工场景行（用户手填/反推的盘阵路径），与 `/api/scenes` 行同形。
 
@@ -139,12 +152,15 @@ def _manual_row(abs_path: Path, dir_path: Path, root: Path | None) -> dict:
         "lq_path": dir_path.as_posix(),
         "manual": True,
     }
+    # hasPreview 一律填真值（缓存到底在不在），与是否在库内无关：库外没有静态
+    # URL，但前端要靠它判断「这次会不会触发首次烘焙」并提示用户等待，所以不能
+    # 因为「库外用不上」就一律留 False。
+    jpg = paths.preview_jpg_for(abs_path, root)
+    row["hasPreview"] = jpg.is_file()
     if root is not None and is_within(abs_path, root):
         # 恰好也在场景库根之下（例如用户手填了库内路径）：静态预览 URL 可用，
         # 与库行行为对齐，省掉一次 /preview 生成。
         row["rel"] = paths.rel_of_scene(abs_path, root)
-        jpg = paths.preview_jpg_for(abs_path, root)
-        row["hasPreview"] = jpg.is_file()
         row["jpgUrl"] = paths.rel_url(jpg, root)
     return row
 
@@ -216,6 +232,47 @@ def create_app() -> FastAPI:
         return {"source": out["source"], "scanned": out["scanned"],
                 "count": out["count"], "results": rows}
 
+    def _resolve_bare_tif(src: Path) -> dict:
+        """裸 `.tif` 文件路径的 resolve 结果（与目录分支同形的响应）。
+
+        用户可能只想看一张图，并不关心它是不是一个可提交的 SR 场景。所以这里
+        **不做场景目录判定**：目录里的输入影像、meta.xml、掩码一概不要求。
+
+        代价是「能不能提交 SR」必须显式区分：`sr_capable` 只在**父目录恰好是合法
+        场景目录、且该目录的输入影像就是这一个文件**时才为真。否则用户随手粘一个
+        tif 就会拿到一条可提交的 rec，提交后 SR 在盘阵上跑不起来。
+        `row.lq_path` 与它同源同真假 —— 场景库入口直接拿的是 row.lq_path。
+        """
+        dims = _cached_dims(src)
+        if not dims:
+            raise HTTPException(
+                status_code=422,
+                detail=f"读不到影像尺寸（{src}）—— 前端开图需要 W/H")
+        parent = src.parent
+        scene_dir = None
+        inp = scene_search.input_scene_path(parent)
+        if inp is not None and _same_file(inp, src):
+            scene_dir = parent
+        row = _manual_row(src, parent, root)
+        row["W"], row["H"] = dims["W"], dims["H"]
+        if scene_dir is None:
+            # 与 sr_capable 同源：没有 scene_dir 就没有可提交的目录。
+            row["lq_path"] = None
+        mask_path = derived_mask_path(str(scene_dir)) if scene_dir else None
+        return {
+            "source": "manual",
+            "row": row,
+            "resolved": {
+                "dir": parent.as_posix(),
+                "input": src.as_posix(),
+                "input_name": src.name,
+                "mask_path": mask_path,
+                "mask_exists": bool(mask_path) and Path(mask_path).is_file(),
+                "writable": os.access(str(parent), os.W_OK),
+                "sr_capable": scene_dir is not None,
+            },
+        }
+
     @app.post("/api/scenes/resolve")
     async def resolve_scene(request: Request):
         """把用户给的盘阵路径（或「文件名 + 日期」）解析成一条可打开的场景行。
@@ -228,10 +285,15 @@ def create_app() -> FastAPI:
         `{name}`（+ 可选 `date = YYYY-MM-DD`，不给就由后端从文件名里的成像
         时间戳自己取）。
 
+        `{path}` 还接受**单个 `.tif/.tiff` 文件**（用户只想看一张图，不关心它
+        是不是可提交场景）：不做场景目录判定，但 `resolved.sr_capable` /
+        `row.lq_path` 只在父目录确实是合法场景目录时才给，免得被误当可提交场景。
+
         错误码分工：**400** 形态非法或压根反推不出来（相对路径 / `..` / UNC /
-        未知盘符 / 日期格式 / 名字里没有时间戳 / 名字不符合生产命名规则）·
-        **403** 越白名单 · **404** 反推成立但盘阵上没有合法场景目录或没有输入
-        影像 · **422** 场景成立但读不到影像尺寸（前端开图要 W/H）。
+        未知盘符 / 日期格式 / 名字里没有时间戳 / 名字不符合生产命名规则 /
+        路径指向非 TIFF 文件）· **403** 越白名单 · **404** 反推成立但盘阵上
+        没有合法场景目录或没有输入影像 · **422** 场景成立但读不到影像尺寸
+        （前端开图要 W/H）。
         """
         body = await _json_body(request)
         raw_path = body.get("path")
@@ -247,6 +309,16 @@ def create_app() -> FastAPI:
                 raise HTTPException(
                     status_code=403,
                     detail=f"路径不在允许的盘阵前缀内：{e}") from e
+            target = Path(posix)
+            if target.is_file():
+                # 裸文件形态：只接受 TIFF。别的文件（.jpg 源、meta.xml、掩码…）
+                # 一律 400 说清，而不是掉进下面按目录处理的逻辑里报「目录不存在」。
+                if target.suffix.lower() not in (".tif", ".tiff"):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"路径指向文件 {target.name}，但它不是 .tif/.tiff"
+                               " —— 请粘场景目录，或粘单个 .tif 文件路径")
+                return _resolve_bare_tif(target)
             tried = [posix]
         else:
             name, date = body.get("name"), body.get("date")
@@ -328,6 +400,9 @@ def create_app() -> FastAPI:
                 # 服务账号对场景目录的写权限：meta.xml 回写、Debug/ 日志、掩码、
                 # 预览缓存四处都要写。提前告知，好过提交后 422。
                 "writable": os.access(str(d), os.W_OK),
+                # 目录分支走到这里就已经确认是合法场景目录（有 meta.xml 且有
+                # 输入影像），所以恒为 True。裸 .tif 分支才可能是 False。
+                "sr_capable": True,
             },
         }
 

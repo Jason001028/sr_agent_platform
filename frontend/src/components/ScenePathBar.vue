@@ -1,10 +1,10 @@
 <script setup lang="ts">
 /**
- * ScenePathBar.vue — 手工打开盘阵场景目录（场景库页 / 查看器工具栏共用）
+ * ScenePathBar.vue — 手工打开盘阵场景目录 / 单个 TIF（场景库页 / 查看器工具栏共用）
  * ------------------------------------------------------------------
  * 输入框预填**当天**的场景前缀（`W:\GSHC2IMPS\PRODUCT\<年>\<月>\<日>`），用户
  * 补上生产编号即可。支持两种形态：Windows 的 `W:\...`（服务端按 SR_DRIVE_MAP
- * 映射到 /DiskArray）与 `/DiskArray/...`。
+ * 映射到 /DiskArray）与 `/DiskArray/...`；也接受**单个 `.tif` 文件路径**。
  *
  * 两条纪律：
  *  1. **不扫盘**。组件只把用户填的这一个路径往外抛，由调用方交给后端
@@ -22,7 +22,7 @@ const props = withDefaults(defineProps<{
   placeholder?: string;
 }>(), {
   busy: false,
-  placeholder: '粘贴场景目录，如 W:\\GSHC2IMPS\\PRODUCT\\2026\\09\\17\\<生产编号>',
+  placeholder: '粘贴场景目录（W:\\GSHC2IMPS\\PRODUCT\\2026\\09\\17\\<生产编号>）或单个 .tif 文件路径',
 });
 
 const emit = defineEmits<{ (e: 'open', path: string): void }>();
@@ -53,9 +53,11 @@ function resetToday(): void {
     <button type="button" class="btn mini ghost" :disabled="props.busy"
             title="填回当天前缀" @click="resetToday">今天</button>
     <span class="spb-hint">
-      支持 W:\ 形态（服务端自动映射到 /DiskArray）；只打开你填的这一个目录，
+      支持 W:\ 形态（服务端自动映射到 /DiskArray）；只打开你填的这一个路径，
       不扫盘。目录须含 &lt;目录名&gt;_meta.xml，以及 &lt;目录名&gt;.tif
-      或 PAN.tif。首次打开要生成预览，可能较慢。
+      或 PAN.tif；<strong>也可以直接粘单个 .tif 文件路径</strong> —— 那张图照样
+      能看，但父目录不是场景目录时不能提交 SR。首次打开要在服务器烘焙 1/2 预览图
+      （要读一遍大图），可能较慢；此后打开读缓存，很快。
     </span>
   </div>
 </template>

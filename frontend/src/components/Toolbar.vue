@@ -15,9 +15,9 @@ const fileInput = ref<HTMLInputElement | null>(null);
 const locX = ref('');
 const locY = ref('');
 
-/** 盘阵场景激活：只用来决定 title 文案（服务器烤的 2% 线性是二次拉伸的底图，
-    两端已被裁掉）。**不再**禁用下拉 —— 场景图照样可在显示层换模式，
-    默认起手值也不再是「2% 线性」而是直方图均衡（见 lib/scene.startStretch）。
+/** 盘阵场景激活：只用来决定 title 文案（服务器烤的直方图均衡是二次拉伸的底图，
+    均衡不可逆）。**不再**禁用下拉 —— 场景图照样可在显示层换模式，
+    默认起手值也同样是直方图均衡（见 lib/scene.startStretch）。
     注意判据是 route==='jpg'，反推关联上的本地 rec 仍是它本来的 route。 */
 const sceneActive = computed(() => store.activeRec?.route === 'jpg');
 /** 「提交 SR」可用：这张图有盘阵目录（= 提交时 lq_path 的语义）。
@@ -29,8 +29,8 @@ const srReady = computed(() => !!store.activeRec?.lqPath);
 const stretchValue = computed(() => store.activeStretch);
 const stretchTitle = computed(() =>
   sceneActive.value
-    ? '这张盘阵 JPG 在服务器端已按 2% 线性烘焙，这里改的是显示层的二次拉伸'
-      + '（两端已被裁掉，拉不回来）'
+    ? '这张盘阵 JPG 在服务器端已按直方图均衡烘焙，这里改的是显示层的二次拉伸'
+      + '（均衡不可逆，拉不回来）'
     : '',
 );
 

@@ -48,7 +48,7 @@ const snap = computed<ViewerContextSnap | null>(() => {
   const dispW = r.thumb ? r.thumb.width : 0;
   const dispH = r.thumb ? r.thumb.height : 0;
   // 报**这张图当前显示出来**的那个模式（viewer.activeStretch）。盘阵场景的底图
-  // 是服务器烤的 2% 线性，但显示层可能已经二次拉伸过，Agent 看到的是后者。
+  // 是服务器烤的直方图均衡，但显示层可能已经二次拉伸过，Agent 看到的是后者。
   const mode = viewer.activeStretch;
   const stretch = STRETCH_LABEL[mode] ?? mode;
   let roi: ViewerContextSnap['roi'] = null;
