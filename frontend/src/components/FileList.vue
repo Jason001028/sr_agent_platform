@@ -42,6 +42,9 @@ function fmtBytes(n: number): string {
         <template v-if="rec.layout"> · {{ rec.layout }}</template>
       </div>
       <div class="status" :class="rec.statusCls">{{ rec.status }}</div>
+      <!-- 反推关联失败的原因单独一行：rec.status 会被解码进度/结果覆盖，写在那里
+           等于没写（用户只看得到「完成，解码耗时…」）。 -->
+      <div v-if="rec.linkNote" class="link-note" :title="rec.linkNote">{{ rec.linkNote }}</div>
     </div>
   </aside>
   <div class="side-toggle" :title="collapseTitle" @click="store.sidebarCollapsed = !store.sidebarCollapsed">
@@ -115,6 +118,17 @@ function fmtBytes(n: number): string {
 .file-item .status { font-size: 11px; margin-top: 3px; color: var(--warn); }
 .file-item .status.err { color: var(--err); }
 .file-item .status.ok { color: var(--ok); }
+/* 关联失败原因：比 status 弱一档（它不是错误，是「这张图不在盘阵上」），
+   但限两行，避免长候选清单把侧栏撑爆 —— 完整内容在 title 里。 */
+.file-item .link-note {
+  font-size: 10px;
+  margin-top: 2px;
+  color: var(--ink-faint);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 .file-item .close {
   float: right;
   color: var(--ink-faint);

@@ -933,6 +933,73 @@ Python 的 `stretch_equal` 与真实前端 TS 用 `vite-node` 跨语言逐像素
 
 **交付提醒**：`backend/` 与重建的 `frontend/dist` 两个包要一起更新（同前两条）。
 
+### 2026-09-18 · 拖拽盘阵 `.tif` 改走服务端烘焙 JPG（临时缓存 1 天 TTL，开发机）
+
+#### 起因
+
+用户问的是这条链路能不能整条走通：「拖进一个盘阵中未超分的 `.tif` → 预览它的 `.jpg` →
+在上面画掩码 → 保存 → 点『提交 SR』」。逐段核对后：能力都在，但**拖拽那一段走的是浏览器
+本地解码**（route ∈ `utif/chunked/sparse`），而场景库/粘路径走的是服务端烘焙 JPG —— 同一个
+文件、同一个人，两条入口的观感与成本完全不同（真机 1.1GB 的图每拖一次要重解一遍，吃几百 MB）。
+用户拍板：**拖拽也走 JPG，但那份 JPG 是临时缓存，有效期一天，第二天 0 点清除**。
+
+#### 改动
+
+后端：
+
+- 新增 `backend/services/preview_cache.py`：`tmp_preview_path()` = `SR_TEMP_PREVIEWS_ROOT/<YYYY-MM-DD>/<sha256(源绝对路径)[:16]>.jpg`，**每次调用读 env**（测试要能按请求换根），只 `mkdir` + `stat`，**绝不列举目录**（「禁止扫盘」是硬约束）。`purge_temp_previews()` 只删「桶名是 ISO 日期、名 < 今天、且带 `.sr-tmp-preview` 标记文件」的目录，符号链接与非目录一律跳过，根是符号链接/指向文件系统根时拒绝清理，任何异常都吞掉（清理失败不该让服务起不来）。
+- `backend/api/app.py`：新增后台任务 `_tmp_preview_purge_loop`（**启动先清一次** → 睡到下一个本地 0 点 → 清 → 重复），`lifespan` 从单个 `app.state.poller` 改成**任务列表**逐个 cancel。清理**不进请求路径**（`iterdir` 会踩「禁止扫盘」的测试钉子）。
+- `POST /api/scenes/resolve` 的 `{name}` 分支新增可选 `size_bytes`，命中候选后过 `_fingerprint_mismatch`：**文件名（去光栅后缀）与字节数都吻合**才认，不符则记原因后继续试下一条候选（最终仍是 404 并列出候选与原因，不新增错误码）；非正整数 400。
+- 新增 `GET /api/scenes/{id}/preview-tmp`：与 `/preview` 同一条烘焙链、同样的规则戳，只差落点（临时根 + 当天桶）与响应头（`Cache-Control: no-store`）。
+
+前端：
+
+- `viewer.activate` 改成 `if (!rec.route && await tryLinkScenes(rec)) return;` —— **命中就不做本地解码**，顺带避开「本地图先画出来又被 JPG 换掉」的闪烁。`tryLinkScenes` 返回 `Promise<boolean>`，body 带 `size_bytes: r.file.size`，`AbortSignal.timeout(4000)`；服务端 4xx 写 `rec.linkNote`（**不再 `showErr`**，那不是错误而是「这张图不在盘阵上」），网络失败/超时**清掉 `linkTried`**（那不是服务端的答案，下回还能再试），烘焙失败则报错 + 回落本地解码。
+- 抽出 `applySceneJpgToRec`（新建 rec 与就地升级共用）：`openSceneJpg` 原来那一串收尾动作（`sceneDecodePixels` → `markRaw` → `layout` → `startStretch` → `fit` → `refreshCloudStats`）一个都不能漏，漏一个就是云量卡不刷/拉伸下拉显示错/画面不重画。
+- 查重加上 `sceneId`（`findRecByMeta`）：升级过的 rec 名字还是用户拖进来的 `SC.tif`，库行给的名字是 `SC` —— 只按名字找会开出两条 rec、两份 maskRois。
+- 三处异步写加 `rec.token` 令牌守卫（本地解码 `applyDecoded`、JPG 升级 `applySceneJpgToRec`、`openOne` 的帧头 `layout` 写入）。
+- 取临时图用**独立函数** `fetchTempSceneJpg`，**不改写** `row.hasPreview` —— 那是「生产 `<stem>.preview.jpg` 此刻在不在」的真值，被置真之后再从场景库打开同一场景就会跳过懒生成、直接打一个 404 的静态 URL。
+
+#### 一条偏离计划的设计决定
+
+计划里写的清理拒绝条件是「根是符号链接 / 根落在 `SR_SCENES_ROOT` 之内 / 根为 `/`」。实际只实现了**符号链接 + 文件系统根**两条，去掉了 `SR_SCENES_ROOT` 包含检查：那条会让「配在 scenes 根以内」这种合法（但不推荐）的配置**静默地永不清理**（服务照跑、缓存无限涨，且没有任何人会发现）。真正的安全保障是**标记文件**：只删「桶名像日期 **且**桶里有 `.sr-tmp-preview`」的目录 —— 这把「这个目录是我们建的」变成可判定的事实，比任何路径白名单都可靠，也不依赖配置正确。`deploy/sr-api.service` 里仍然写明别把临时根放进 `SR_SCENES_ROOT`（临时缓存不该混进生产数据目录），那是**建议**，不是唯一防线。
+
+#### 验证（开发机，全绿）
+
+后端 `python -m pytest backend/tests -q` → **511 passed / 3 skipped / 74 subtests**（基线 490；
+新增 `tests/test_preview_cache.py` 12 例 + `TestResolveFingerprint` 7 例 + `TestTempPreview` 5 例）。
+**3 个 skipped 是符号链接那三条**：本机（Windows，非开发者模式）建不了符号链接，那两条防线
+（根是链接 → 拒绝清理、桶是链接 → 跳过）只做到了逻辑覆盖，**真机（Linux）上会真跑**。
+
+前端 `npx vitest run` → **188 passed**（基线 183；新增 `tmpPreviewUrl` / `fetchTempSceneJpg`
+三例 / `apiResolveScene` 透传两例）、`vue-tsc --noEmit` 零错误、`npm run build` 通过。
+
+e2e 四套全绿：`test-manual-scene.js` **61**（基线 48，E 段重写并新增双指纹/临时落点/回落本地解码
+三类断言）、`test-scenes.js` 65 / `test-platform.js` 22 / `test-vue-viewer.js` 35（无回归）。
+
+E 段的改造要点：原来那两处「命中」用例上传的是 fixture 里那张凑数的小图（名字对、字节数不对），
+双指纹一上**必红**；现在改成从盘阵侧 `fs.copyFileSync` 真那份再上传，并断言 `route==='jpg'` +
+`thumbW===400`（= 元数据 800 的一半，证明像素来自服务端烘焙而非本地解码）+ 只打
+`/preview-tmp` 不打生产 `/preview` + 临时 JPG 落在 `SR_TEMP_PREVIEWS_ROOT/<今天>/` 且桶里有标记
+文件 + **生产场景目录里没有多出 `.preview.jpg`**。另新增两例：同名不同字节 → 404 + `linkNote`
+带「字节数」+ 退回本地解码（`route` ∈ `utif/chunked/sparse`）+ 提交按钮保持禁用；以及
+`.err-box` 断言全部换成 `rec.linkNote`（`decodeRec` 几百毫秒内就会覆盖 `rec.status`，
+断言 `status` 必 flaky）。§H 的刻意 404 计数从 2 改 3、400 仍为 1。
+
+#### 真机待确认
+
+1. **`SR_TEMP_PREVIEWS_ROOT` 必须显式配**（默认是系统临时目录，CentOS7 的 `/tmp` 常是 tmpfs
+   内存盘，而 1/2 尺度不封顶、单张可能上百 MB）。配到 nginx 可写的大盘上，**不要**放在
+   `SR_SCENES_ROOT` 之下。上线前用同款 `touch` 探针确认写权限。
+2. **磁盘预算**：只保留当天那一桶，桶内不设上限 —— 一天的拖拽量要能放得下。嫌大就给
+   临时路径单独设 `max_edge`（需要**独立的规则戳**，别和生产那份混用 `rule_stamp()`）。
+3. **双指纹在真机上的表现**：真机上 `<目录名>.tif` 与 `PAN.tif` 并存是常态（RC 场景），
+   拖 `PAN.tif` 那条路本来就到不了指纹这一步（名字里没有 14 位成像时刻，反推先报 400）——
+   真正生效的是「用户拖的确实是输入影像本身」这条正向判定。请回传一次真机拖拽的体感
+   （首次等待时长、是否退回本地解码）。
+4. **`ensure_preview_jpg` 没有单飞**：同一场景并发两次会各烤一遍（既有风险，拖拽路径会放大）。
+   本次不修。
+
 ## 5. 交接（给新窗口）
 
 > 开新窗口时按用途挑一份整篇粘过去：[handoff-prompt.md](handoff-prompt.md)（梳理框架与当前思路）、
