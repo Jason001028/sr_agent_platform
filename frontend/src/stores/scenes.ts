@@ -28,6 +28,9 @@ export const useScenesStore = defineStore('scenes', () => {
   const count = ref(0);
   const loading = ref(false);
   const openingId = ref<string | null>(null);
+  /** 打开中的阶段文案（首次烘焙很慢，本页没有遮罩，就靠这一行说明在忙什么）。
+   *  只在打开期间非空，见 open()。 */
+  const phase = ref('');
   const error = ref('');
   const limit = 200;
 
@@ -107,10 +110,14 @@ export const useScenesStore = defineStore('scenes', () => {
     openingId.value = row.id;
     error.value = '';
     try {
-      // 库行走静态 jpgUrl、库外场景走 /preview 响应体，两条来源都在这里收口
-      const blob = await fetchSceneJpg(cfg, row);
+      // 首次要服务端烘焙（读一遍大图，几十秒）。遮罩（viewer.showMask）只挂在
+      // /viewer 上，本页调了也看不见，所以这里走自己的 phase 文案行。
+      const blob = await fetchSceneJpg(cfg, row, (text) => { phase.value = text; });
       await viewer.openSceneJpg({
-        name: row.name, W: row.W, H: row.H, sceneId: row.id, lqPath: row.lq_path,
+        name: row.name, W: row.W, H: row.H, sceneId: row.id,
+        // 裸 .tif 且父目录不是场景目录时后端把它置 null（= 不能提交 SR），
+        // 这里不用再判 sr_capable —— 与 resolved.sr_capable 同源同真假。
+        lqPath: row.lq_path,
         // 手工场景（resolvePath 进来的）：把后端推导的掩码路径一并带上，
         // 否则这条入口的 rec 少一个 serverMaskPath，「保存掩码到盘阵」前后
         // 显示的掩码路径与查看器那条入口不一致（两边最终都以后端回的为准）。
@@ -120,6 +127,7 @@ export const useScenesStore = defineStore('scenes', () => {
       error.value = '打开「' + row.name + '」失败：'
         + (e instanceof Error ? e.message : String(e));
     } finally {
+      phase.value = '';
       openingId.value = null;
     }
   }
@@ -151,7 +159,7 @@ export const useScenesStore = defineStore('scenes', () => {
   }
 
   return {
-    rows, source, scanned, count, loading, openingId, error,
+    rows, source, scanned, count, loading, openingId, phase, error,
     query, satellite, sensor, dateFrom, dateTo,
     satellites, sensors, dates,
     list, resetFilters, open, resolvePath,

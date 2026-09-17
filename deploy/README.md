@@ -5,8 +5,13 @@
 > + 本说明。开发机（Windows，外网）打包 → 拷到内网机（CentOS7）解压 → nginx + FastAPI 托管。
 
 阶段4 数据路径（09-02 决策）：浏览器**不再读盘阵原始 TIF**。盘阵场景由后端懒生成
-「稀疏采样 + 2% 线性拉伸」的 8192 长边灰度 JPG，nginx 整块静态直出；检索走 FastAPI。
+「稀疏采样 + 直方图均衡拉伸」的灰度 JPG，nginx 整块静态直出；检索走 FastAPI。
 本地文件路径（选择 TIF…）保持原有稀疏 TIF 读法，零回归。
+
+> **烘焙规则 v2（09-17）**：尺寸从「长边 8192 封顶」改为**各边严格 1/2、不封顶**，拉伸
+> 从 2% Linear 改为**直方图均衡**；规则签名写进 JPEG 注释，旧缓存在首次打开时会被判定
+> 失效并原地重烤（覆盖同名 `<stem>.preview.jpg`，不产生第二份文件）。详见
+> [experience/gui-experience.md](../docs/experience/gui-experience.md) §9.1。
 
 阶段5 平台 API（09-02 定稿，契约 = `docs/planning/api-contract.md`）：FastAPI 在既有场景
 端点上新增 `/api/chat/*`（会话 REST + 单回合 SSE）、`/api/queue*`（共享 SR 队列 REST + SSE
@@ -154,7 +159,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1/disk-array/<某个rel>
 ```
 
 浏览器打开 `http://<内网机IP>/scenes` → 过滤/点「打开」→ 场景图出在查看器，文件列表项带
-「盘阵」标记、拉伸下拉禁用（提示"盘阵 JPG 已烘焙 2% 线性拉伸"）。首次打开会懒生成预览
+「盘阵」标记、拉伸下拉禁用（提示"盘阵 JPG 已按直方图均衡烘焙"）。首次打开会懒生成预览
 （大图几十秒，进度在 Network 里能看到 `/api/scenes/.../preview`），此后秒开（JPG 已落盘 +
 浏览器缓存）。F12 Network 里应只有本站请求（`./assets/*`、`/api/*`、`/disk-array/*`），
 **没有任何外网域名**。
@@ -345,7 +350,10 @@ systemctl reload nginx
 
 - **前端**：把上一版 `dist` 覆盖回来（或保留旧目录、把站点 `root` 指回旧 dist）→ `systemctl reload nginx`。
 - **后端**：恢复上一版 `backend/`（git 检出旧提交再拷）→ `systemctl restart sr-api`。
-- 预览 JPG 缓存随源图目录存、跨回滚保留，无需重生成。
+- 预览 JPG 缓存随源图目录存、跨回滚保留，一般无需重生成。**例外：烘焙规则变更**（如 09-17 v2：各边
+  1/2 + 直方图均衡）——旧图缺新规则签名，回滚/升级后首次打开会被判定失效并**原地重烤一次**（覆盖同名
+  `<stem>.preview.jpg`），属预期行为，见 [docs/experience/gui-experience.md](../docs/experience/gui-experience.md) §9.1。另注意 nginx 给
+  `.preview.jpg` 的 `max-age=3600`：升级后浏览器可能还在用旧图，硬刷新一次即可。
 
 ### 5.5 走完整离线包发布时的等价动作
 
@@ -397,7 +405,7 @@ curl -s -o /dev/null -w '健康=%{http_code}\n' http://127.0.0.1:8000/api/health
 - **vendor 已打进 dist，全离线**：pako/utif(补丁版)/geotiff 均来自 `frontend/src/vendor/`，Vite 构建打进产物。
 - **utif.js 为补丁版（cmpr 8/32946 走 pako inflate），绝不能被 npm 重装覆盖**——只能从 `src/vendor/utif.js` 本地引入。
 - **盘阵双层保险**：nginx `alias` 整块暴露 + 后端按 `SR_SCENES_ROOT` 白名单校验（拒绝 `../` 穿越、白名单外绝对路径、fake 占位）。URL 全用相对场景根的 `/disk-array/<rel>`。
-- **浏览器单次分配约 2GB、Canvas 面积上限 16384²**——盘阵场景因此由服务端烘焙 8192 JPG，浏览器只解码 JPG（远低于上限）。
+- **浏览器单次分配约 2GB、Canvas 面积上限 16384²**——盘阵场景因此由服务端烘焙 JPG（v2：各边 1/2），浏览器只解码 JPG（远低于上限）。
 - 真实大图只在有盘阵的内网机（外网开发机读不到），解码回归用 `.e2e/` 本机资产 + `frontend/fixtures/` 入库小图；真机验收项见 docs/status/current-question.md。
 
 ## 七、Slurm 接入（SR 作业提交链路）

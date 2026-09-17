@@ -1,15 +1,17 @@
 /**
  * api.test.ts — 阶段5 API 客户端纯函数（SSE 帧切分/解析 + URL + 类型守卫）
  * ------------------------------------------------------------------
- * Node 环境（无 DOM，不 fetch）：只测纯函数 —— stepSse 残片处理 / parseSseEvents
- * 坏帧丢弃 / apiUrl joinBase 行为。聊天流式 fetch 走浏览器 .e2e 回归覆盖。
+ * 以纯函数为主（stepSse 残片处理 / parseSseEvents 坏帧丢弃 / apiUrl joinBase 行为）；
+ * fetchSceneJpg 那组把全局 fetch 打桩，钉的是「走哪条 URL、onPhase 何时响」——
+ * 不碰真实网络。聊天流式 fetch 走浏览器 .e2e 回归覆盖。
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   stepSse, parseSseEvents, apiUrl, sessionsUrl, sessionMessagesUrl,
-  queueEventsUrl,
+  queueEventsUrl, fetchSceneJpg,
 } from '../api.js';
 import type { PlatformSseEvent, ChatSseEvent } from '../api.js';
+import type { SceneRow } from '../scene.js';
 
 const CFG = { apiBase: '', staticBase: '' };
 const CFG_BASE = { apiBase: 'http://127.0.0.1:8000', staticBase: 'http://static:9000' };
@@ -114,5 +116,80 @@ describe('apiUrl 拼接', () => {
   it('session id 含特殊字符安全进 URL', () => {
     expect(sessionMessagesUrl(CFG, 'a/b c+d=='))
       .toBe('/api/chat/sessions/a%2Fb%20c%2Bd%3D%3D/messages');
+  });
+});
+
+/* ---------------- fetchSceneJpg 取字节 + 首次烘焙回调 ---------------- */
+describe('fetchSceneJpg', () => {
+  /** 一条最小可用的场景行；W/H 是元数据尺寸，与 JPG 像素尺寸无关。 */
+  const row = (over: Partial<SceneRow>): SceneRow => ({
+    id: '~YWJj', name: 'GF07A03', satellite: null, sensor: null, date: null,
+    size_bytes: 0, fake: false, W: 200, H: 100, rel: null,
+    jpgUrl: null, hasPreview: false, lq_path: null, ...over,
+  });
+
+  let urls: string[];
+  /** 打桩 fetch：记下每个 URL，按 URL 返回对应字节；非 2xx 交给 http() 抛。 */
+  function stubFetch(bodies: Record<string, string>): void {
+    urls = [];
+    vi.stubGlobal('fetch', (u: string) => {
+      urls.push(u);
+      if (!(u in bodies)) return Promise.resolve(new Response('nope', { status: 404 }));
+      return Promise.resolve(new Response(bodies[u], { status: 200 }));
+    });
+  }
+
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('库外场景（jpgUrl 为 null）：/preview 的响应体就是图，不再打静态 URL', async () => {
+    stubFetch({ '/api/scenes/~YWJj/preview': 'PREVIEW' });
+    const r = row({ jpgUrl: null, hasPreview: false });
+    expect(await (await fetchSceneJpg(CFG, r)).text()).toBe('PREVIEW');
+    expect(urls).toEqual(['/api/scenes/~YWJj/preview']);
+    expect(r.hasPreview).toBe(true);          // 取到手就记上，下次不再当首次
+  });
+
+  it('库行未生成：先 POST 懒生成再取静态 jpgUrl（两次请求，顺序固定）', async () => {
+    stubFetch({
+      'http://127.0.0.1:8000/api/scenes/~YWJj/preview': 'ok',
+      'http://static:9000/disk-array/a/b.jpg': 'STATIC',
+    });
+    const r = row({ jpgUrl: '/disk-array/a/b.jpg', hasPreview: false });
+    expect(await (await fetchSceneJpg(CFG_BASE, r)).text()).toBe('STATIC');
+    expect(urls).toEqual([
+      'http://127.0.0.1:8000/api/scenes/~YWJj/preview',
+      'http://static:9000/disk-array/a/b.jpg',
+    ]);
+  });
+
+  it('库行已有缓存：只取静态 jpgUrl，不再打 /preview', async () => {
+    stubFetch({ 'http://static:9000/disk-array/a/b.jpg': 'STATIC' });
+    const r = row({ jpgUrl: '/disk-array/a/b.jpg', hasPreview: true });
+    expect(await (await fetchSceneJpg(CFG_BASE, r)).text()).toBe('STATIC');
+    expect(urls).toEqual(['http://static:9000/disk-array/a/b.jpg']);
+  });
+
+  it('onPhase 只在「本次会触发服务端烘焙」时响一次', async () => {
+    const phase = vi.fn();
+    stubFetch({
+      '/api/scenes/~YWJj/preview': 'ok',
+      '/disk-array/a/b.jpg': 'STATIC',
+    });
+    // hasPreview=false → 一定会先打 /preview（懒生成），提示用户等
+    await fetchSceneJpg(CFG, row({ jpgUrl: '/disk-array/a/b.jpg',
+      hasPreview: false }), phase);
+    expect(phase).toHaveBeenCalledTimes(1);
+    expect(phase.mock.calls[0][0]).toContain('首次打开');
+
+    // 缓存已在（hasPreview=true）→ 响都不该响，否则每次打开都吓人一跳
+    phase.mockClear();
+    await fetchSceneJpg(CFG, row({ jpgUrl: '/disk-array/a/b.jpg',
+      hasPreview: true }), phase);
+    expect(phase).not.toHaveBeenCalled();
+  });
+
+  it('onPhase 是可选的（旧调用方不传也不炸）', async () => {
+    stubFetch({ '/api/scenes/~YWJj/preview': 'PREVIEW' });
+    expect(await (await fetchSceneJpg(CFG, row({}))).text()).toBe('PREVIEW');
   });
 });

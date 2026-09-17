@@ -107,8 +107,13 @@ function startStaticServer(scenesRoot) {
 
 /* ---------------- 盘阵 fixture（真 TIFF + 真 JPEG + 掩膜） ---------------- */
 // GF07A03：.hdr 报 3200×2000 而 tif 实际 1600×800 —— 等价于盘阵上「显示 JPG 比源图小」
-// 的真实比例（nginx 直出的是长边 8192 的降采样图）。掩码按 JPG 尺寸换算就会错、按元数据
-// 换算才对 —— 这是本文件里唯一能被证伪的错误路径，所以 fixture 尺寸必须不一致。
+// 的真实比例（烘焙规则 v2 是各边 1/2，降采样后的图就是比源图小）。掩码按 JPG 尺寸换算
+// 就会错、按元数据换算才对 —— 这是本文件里唯一能被证伪的错误路径，所以 fixture 尺寸必须
+// 不一致。
+// 注意这条 .hdr 谎报恰好让 1/2 规则**落在 tif 的真实尺寸上**：max_edge 由元数据算出 =
+// 3200/2 = 1600，而 tif 只有 1600 宽 → ps = min(1, 1600/1600) = 1.0 → 预览就是 1600×800
+// 整幅（不是 1600×1000）。所以这里的 JPG 尺寸断言证明不了 1/2 规则 —— 那件事由
+// test-manual-scene.js 的 G 段钉（裸 TIF，无 .hdr，400×200 → 200×100）。
 const FIXTURE_PY = `
 import os, sys
 import numpy as np, tifffile
@@ -519,7 +524,7 @@ async function main() {
         '「提交 SR」可用（sceneId + lqPath 都已带上）');
 
       // 起手值不是只写在下拉框上：这张图**确实**按直方图均衡重画过。
-      // 修复前 route==='jpg' 会跳过绘制，画面永远停在服务器烤的那份 2% 线性上。
+      // 修复前 route==='jpg' 会跳过绘制，画面永远停在服务器烤的那份底图上。
       const paintedAtOpen = await page.evaluate(() => window.__viewer.activeRec().paintedMode);
       assert(paintedAtOpen === 'equal',
         `场景 rec 的 paintedMode = 起手值（${paintedAtOpen}）`);
