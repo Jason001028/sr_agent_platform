@@ -10,6 +10,8 @@
 //   B. 队列：/queue 手填 lq_path 提交 → 假调度器推进 → SSE job_update 推到 COMPLETED。
 //   C. 掩码→SR：/viewer 打开盘阵场景（合成 JPG + 画 ROI）→ 点「提交 SR」→
 //      POST /api/masks 落盘 → 自动跳 /queue 表单预填（不自动提交）→ 用户确认提交。
+//   D. 布局：三页同宽 —— 1600 视口下实测正文盒宽（不是只比 max-width 字符串）+
+//      顶住 --page-w 上限；耗时列 white-space=nowrap。
 // 用法：cd .e2e && node test-platform.js
 const http = require('http');
 const fs = require('fs');
@@ -368,20 +370,38 @@ async function main() {
 
       /* ---------- D. 布局：三页同宽（--page-w）+ 耗时列不换行 ---------- */
       console.log('\n[D] 布局（页宽令牌 / 耗时列 nowrap）');
+      // 视口必须先撑过 1360：puppeteer 默认 800px，那个宽度下三页都被视口压扁成一样宽，
+      // 只比 max-width 字符串或只比实际宽度都是恒真（改前各写各的 1180/1240/1240 也糊得过去）。
+      // 撑开后量的是真实渲染宽度。
+      await page.setViewport({ width: 1600, height: 900 });
       const pageRoots = [['/scenes', '.scenes-page'], ['/queue', '.queue-page'],
                          ['/chat', '.chat-page']];
-      const maxW = {};
+      const maxW = {};    // 解析后的 max-width：钉「引没引用 --page-w 令牌」
+      const bodyW = {};   // 实测正文盒宽 = border-box 宽 − 左右内衬：钉「真渲染出来多宽」
       for (const [route, sel] of pageRoots) {
         await page.goto(base + route, { waitUntil: 'networkidle2', timeout: 30000 });
-        maxW[sel] = await page.evaluate((s) => {
+        const m = await page.evaluate((s) => {
           const el = document.querySelector(s);
-          return el ? getComputedStyle(el).maxWidth : null;
+          if (!el) return null;
+          const cs = getComputedStyle(el);
+          const r = el.getBoundingClientRect();
+          return {
+            maxW: cs.maxWidth,
+            bodyW: +(r.width - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)).toFixed(2),
+          };
         }, sel);
+        maxW[sel] = m && m.maxW;
+        bodyW[sel] = m && m.bodyW;
       }
-      // 改前三页各写各的：场景库 1360、队列/聊天 1240 —— 宽度就是这么漂开的。
-      assert(maxW['.scenes-page'] && maxW['.scenes-page'] === maxW['.queue-page']
-        && maxW['.queue-page'] === maxW['.chat-page'],
-        `场景库 / 队列 / 聊天 三页同宽（${pageRoots.map(([, s]) => maxW[s]).join(' / ')}）`);
+      const sels = pageRoots.map(([, s]) => s);
+      // 改前：场景库各写 1360、队列/聊天各写 1240 —— 宽度就是这么漂开的。
+      assert(sels.every((s) => bodyW[s] && bodyW[s] === bodyW[sels[0]]),
+        `场景库 / 队列 / 聊天 三页实测同宽（${sels.map((s) => bodyW[s]).join(' / ')}）`);
+      // 同宽还不够：「三页都跟着视口走」也是同宽。必须再钉住它们确实顶在 --page-w 上限上
+      // （1320 = 1360 − 2×20 内衬），否则等于没测。
+      assert(bodyW[sels[0]] === 1320 && sels.every((s) => maxW[s] === '1360px'),
+        `三页都顶在 --page-w 上限（正文盒 ${sels.map((s) => bodyW[s]).join(' / ')}，max-width ${sels.map((s) => maxW[s]).join(' / ')}）`);
+      await page.setViewport({ width: 800, height: 600 });   // 复位 puppeteer 默认视口，别影响后文
 
       await page.goto(base + '/queue', { waitUntil: 'networkidle2', timeout: 30000 });
       await waitFor(page, () => !!document.querySelector('.qp-tbl tbody td.elapsed'),
