@@ -17,6 +17,8 @@
 //      报错且按钮仍禁用；文件名里没有日期 → 只提示手填，一个 resolve 请求都不发；
 //   F. PAN.tif（RC）场景：掩码名取**输入名的 stem**（`PAN_mask.tif`），不取目录名 ——
 //      这正是"写出去的掩码与提交时去找的那份不一致"的陷阱（§6）。
+//   G. 粘**单个 .tif 文件路径**（不在场景目录里）：照样能看，且预览按 1/2 烤进源图
+//      自己的目录；但它不能提交 SR（lqPath 为 null → 按钮禁用）。
 // 用法：cd .e2e && node test-manual-scene.js
 const http = require('http');
 const fs = require('fs');
@@ -146,6 +148,12 @@ scene(os.path.join(base, pan_name), "PAN.tif", 640, 320, pan_name)
 tok = prod_name.split("_")
 prod_dir = os.path.join(base, tok[0], "_".join(tok[:5] + tok[6:]), prod_name)
 scene(prod_dir, "PAN.tif", 512, 256, prod_name)
+
+# 裸 TIF（G 段）：**不在任何场景目录里**（没有 _meta.xml、父目录也不是场景名），
+# 用来验「粘单个 .tif 文件路径」。400×200 是特意选的：旧规则（长边 8192 封顶）
+# 会把它整幅留下（400×200），新规则（各边 1/2）烤出 200×100 —— 尺寸断言因此
+# 能区分两套规则，而不是两边都给同一个值。
+tif(os.path.join(root, "loose", "LOOSE_" + ymd + "120000.tif"), 400, 200)
 `;
 
 function makeFixtures(root, ymd, scName, panName, prodName) {
@@ -245,6 +253,18 @@ function isTiff(file) {
 
 function isIgnorableConsole(msg) {
   return /AbortError|ERR_ABORTED|queue\/events|net::ERR/i.test(msg);
+}
+
+/** 读一张 JPEG 的**像素**尺寸（Node 没有解码器，借 fixture 用的那个 Python + Pillow）。
+    读不到返回 null —— 调用处用断言把「没生成」和「尺寸不对」分开报。 */
+function jpegSize(p) {
+  if (!fs.existsSync(p)) return null;
+  const r = spawnSync('python', ['-c',
+    'import sys;from PIL import Image;im=Image.open(sys.argv[1]);print(im.width, im.height)',
+    p], { encoding: 'utf-8' });
+  if (r.status !== 0) return null;
+  const m = r.stdout.trim().split(/\s+/).map(Number);
+  return m.length === 2 && m.every((n) => Number.isFinite(n)) ? { w: m[0], h: m[1] } : null;
 }
 
 async function main() {
@@ -570,8 +590,54 @@ async function main() {
       assert(panMaskField.ok
         && panMaskField.value === PAN_DIR.replace(/\\/g, '/') + '/PAN_mask.tif',
         `队列表单显示后端权威掩码名（…${(panMaskField.value || '').slice(-20)}）`);
-      /* ---------- G. 全程无错 ---------- */
-      console.log('\n[G] 全程无错');
+      /* ---------- G. 粘单个 .tif 文件路径（裸 TIF 入口） ---------- */
+      console.log('\n[G] 粘单个 .tif 文件路径：能看，但不能提交 SR');
+      const LOOSE = 'LOOSE_' + ymd + '120000';
+      const LOOSE_DIR = path.join(tmp, 'loose');
+      const looseJpg = path.join(LOOSE_DIR, LOOSE + '.preview.jpg');
+      assert(!fs.existsSync(looseJpg), '打开前这个裸 TIF 旁边没有预览缓存');
+
+      await clickLink(page, '场景库');
+      await waitFor(page, () => location.pathname.endsWith('/scenes'), 15000, '回 /scenes');
+      const resolveBefore = countUrl(resolveRe);
+      await openPathBar(page, 'W:\\loose\\' + LOOSE + '.tif');
+      await waitNode(() => countUrl(resolveRe) === resolveBefore + 1, 15000,
+        '裸 TIF 的 resolve 往返');
+      assert(countUrl(resolveRe) === resolveBefore + 1,
+        '裸文件同样只 stat 用户给的那一条路径（resolve 恰好一次）');
+      assert(await page.evaluate(() => !document.querySelector('.sp-err')),
+        '裸 TIF 打开成功：场景页没有错误提示');
+
+      await clickByText(page, '去查看器');
+      await waitFor(page, () => location.pathname.endsWith('/viewer'), 15000, '跳 /viewer');
+      await waitFor(page, (want) => {
+        const r = window.__viewer.activeRec();
+        return !!r && r.name === want;
+      }, 30000, '裸 TIF 进查看器', LOOSE);
+      const looseRec = await page.evaluate(() => window.__viewer.activeRec());
+      assert(looseRec.route === 'jpg', `裸 TIF 也走 JPG 路由显示（route=${looseRec.route}）`);
+      assert(looseRec.W === 400 && looseRec.H === 200,
+        `尺寸取影像头 400×200（${looseRec.W}×${looseRec.H}）`);
+      assert(looseRec.lqPath === null,
+        `不在场景目录里 → 不写 lqPath（${JSON.stringify(looseRec.lqPath)}）`);
+      assert(await page.evaluate(() => {
+        const b = [...document.querySelectorAll('.toolbar button')]
+          .find((x) => x.textContent.trim() === '提交 SR');
+        return b && b.disabled;
+      }), '「提交 SR」保持禁用（这张图在盘阵上跑不了 SR）');
+
+      // 1/2 尺度的落盘证据：缓存文件名与源同目录同名 + .preview.jpg；像素恰好一半。
+      // 400×200 → 200×100；旧规则（长边 8192 封顶）会留下整幅 400×200。
+      await waitNode(() => !!jpegSize(looseJpg), 30000, '裸 TIF 的预览落盘');
+      const sz = jpegSize(looseJpg);
+      assert(sz.w === 200 && sz.h === 100,
+        `预览 JPG 各边为源图 1/2（400×200 → ${sz.w}×${sz.h}）`);
+      assert(fs.existsSync(looseJpg)
+        && path.dirname(looseJpg) === LOOSE_DIR,
+        `预览烤在源图**自己的目录**里（${path.basename(looseJpg)}）`);
+
+      /* ---------- H. 全程无错 ---------- */
+      console.log('\n[H] 全程无错');
       // D / E 两处是**刻意**打出来的 404（猜错的路径），E 里还有一次刻意打的
       // 400（文件名没有时间戳，后端据此拒绝反推）—— 浏览器对任何非 2xx 响应都会
       // 往控制台写一条，这不算程序缺陷，但也不能睁一只眼闭一只眼：数目必须恰好

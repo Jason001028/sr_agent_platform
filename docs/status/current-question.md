@@ -8,7 +8,7 @@
 
 - **查看器已可用（08-29）**：`tif_viewer/tif-viewer.html` 能正常打开、预览本地遥感图像，用户实测等待时间可以接受。
 - **真实文件结构已确认**：GF07A03（1.11GB）与 KF02B04（1.78GB）都是**无压缩、每行一个条带（strip）**的单波段 16bit 影像。因为没压缩、条带又很规整，就不用做金字塔（预先生成多级缩小图来加速浏览），直接采用**稀疏条带预览**（只抽样读取部分行和列，秒级出图；134MB 测试图从整图解码 4.5s 降到 1.3s，预计真实 1.1GB 文件从约 2 分钟降到秒级）。
-- **预览方案拍板（09-01）= JPG 中间产物**：网页/预览显示导出的 JPG（长边 8192 像素 ≈ 原图 1/3），放弃了在浏览器内对原始 TIF 做全分辨率切片读取的做法（决策记录见 §3.4）。
+- **预览方案拍板（09-01）= JPG 中间产物**：网页/预览显示导出的 JPG（长边 8192 像素 ≈ 原图 1/3），放弃了在浏览器内对原始 TIF 做全分辨率切片读取的做法（决策记录见 §3.4）。**尺寸与拉伸规则已于 09-17 改成 v2：各边 1/2 + 直方图均衡**（见本文件末条摘要与 §4 该日条目）；正文描述的 8192 是当时的规则，浏览器侧导出链已在 09-14 整体删除。
 - **掩码绘制已实现（08-31）**：tif_viewer「绘制掩码」模式（矩形/多边形/魔棒三种工具）；浏览器**直接生成** `掩码.tif`（像素值只有 0 和 255，0=不处理、255=要处理）+ `掩膜中心点坐标.txt`，也可以导出矢量 JSON 交给 `python -m backend.services.mask` 处理后端生成（详见 §3.3）。
 - **魔棒/合并/删除打磨（09-01）**：魔棒改成**自适应区域生长**（修复了「总是选出一块默认大小的椭圆」的问题）；新增「合并重叠」按钮（把重叠或相互接触的区域并成一个连通区域）与「删除」工具（点中后区域柔和红闪一下再移除）。详见 §3.3。
 - **SR 部署方案拍板（08-31）**：目标机器就是那台 CentOS7 盘阵机；生产环境跑 `realesrgan_trt` 这套超分流程；继续保留 Slurm；SR 采用**裸机 + Slurm** 的方式部署（TRT 版本锁定，不加 Docker 容器）；程序包（bundle）/模型权重/编译好的库文件（.so）/TensorRT 引擎文件全都放在 `/DiskArray`（Linux 下读写明显更快），打包时直接挂载复用、代码路径零改动（详见 §3.2）。
@@ -31,8 +31,9 @@
 - **约束提醒**：开发机的浏览器 e2e 测试**已恢复可用**（`.e2e/launchBrowser.js` 每次用独立的临时浏览器配置目录，彻底解决「浏览器闪退、退出码 0 无任何报错」的问题）；真实图片都在内网盘阵，外网开发机读不到（见 §5.1）。
 - **盘阵任意场景目录（09-17，开发机）**：`SR_SCENES_ROOT`（datahub）之外的合法场景目录（真机生产树 `/DiskArray/GSHC2IMPS/PRODUCT/<年>/<月>/<日>/<生产编号>`）现在也能在查看器打开、画掩码、写回该目录、就地提交 SR，不必先把数据搬进 datahub。两个入口（场景库页检索条下的输入框、查看器工具栏的「盘阵场景」栏）共用 `ScenePathBar.vue`，用户粘 Windows 形态 `W:\…`，后端按 `SR_DRIVE_MAP`（默认 `W:=/DiskArray`）译成服务端形态；`SR_ALLOWED_ROOTS`（默认 `/DiskArray`）做前缀白名单。**绝不扫盘**：只 `stat` 用户给的目录，测试用 `patch(Path, "rglob"/"glob"/"iterdir")` + `os.listdir`/`scandir`/`walk` 打成 `AssertionError` 钉住。新增 `POST /api/scenes/resolve`（§3.5）、`backend/pathguard.py`；同时修正一处会必然 400 的缺陷 —— `bake_mask` 按输入影像命名、`derived_mask_path` 按目录名命名，RC（`PAN.tif`）场景两者不同名，现由 `scene_search.mask_stem` 单点同源。验证：后端 454 passed / 1 skipped、前端 177 passed + `vue-tsc` 零错误、e2e `test-manual-scene.js` **37 断言**（新）与 `test-scenes.js` 61 / `test-platform.js` 18 无回归。真机待确认 5 项见 §4 该日条目（**第一项 `SR_LOCKED_DIR` 未清会让所有新场景提交 400**）。
 - **反推模板修正为生产树六层（09-17，开发机）**：上一条的「拖入本地 `.jpg` → 自动关联盘阵目录」在生产树上**永远落空** —— 反推模板是 `PRODUCT\{y}\{m}\{d}\{name}`（四层），真机是 `PRODUCT\<年>\<月>\<日>\<卫星型号>\<段级目录>\<景级目录>`（六层），少两层。按用户给的 9 段生产命名规范做成纯词法反推：`{sat}` = 名字第 1 段，`{mid}`（段级）= 景级名去掉景号那一段，`{y}/{m}/{d}` 取 14 位成像时刻前 8 位。顺带收口一处双真源：模板原先前后端各写一份，前端写死的那份让 `SR_SCENE_PATH_TEMPLATE` **从未生效**；现只留在 `backend/pathguard.py`。验证：后端 **464 passed / 1 skipped**、前端 171 passed + `vue-tsc` 零错误 + `npm run build`、e2e 39/61/18 断言。真机待确认：「段级 = 景级去景号」目前只有一组真机样本，其它卫星/产品待核。规则全文 [docs/sr_code/production-scene-naming.md](sr_code/production-scene-naming.md)，时间线见 §4。
-- **队列页三处前端缺陷修复（09-17，开发机）**：① 「耗时」列在 SR 跑完后从正常数值掉成「0 秒」—— 根因是 SSE `job_update` 帧不带 `updated_at`，前端那份时间戳冻结在提交时的 GET 快照（`updated_at == created_at`），运行中靠本地现算看不出、一进终态就归零；现由 `store.set_sr_task_state` 返回写入的时间戳、`_task_state` 广播时带出、前端 `mergeJobUpdate` 一并写回（写库失败则不发，避免界面与库对不上）。② 耗时列与创建时间列加 `nowrap` + `tabular-nums`，不再折行；参数列加 `overflow-wrap: anywhere` 吸收宽度。③ 新增 `--page-w: 1360px` 令牌，场景库 / 队列 / 聊天三页同宽（原先 1360 / 1240 / 1240，各写各的）。验证：后端 **466 passed / 1 skipped**、前端 **175 passed** + `vue-tsc` 零错误 + `npm run build`、e2e 39/61/**21**（`test-platform.js` 新增 3 条断言并做过反证：摘掉前端写回即红在「页内 0 秒 / 接口 1 秒」）。**交付须同时更新 `dist` 与 `backend` 两个包**，只换 dist 修不好。时间线见 §4。
+- **队列页三处前端缺陷修复（09-17，开发机）**：① 「耗时」列在 SR 跑完后从正常数值掉成「0 秒」—— 根因是 SSE `job_update` 帧不带 `updated_at`，前端那份时间戳冻结在提交时的 GET 快照（`updated_at == created_at`），运行中靠本地现算看不出、一进终态就归零；现由 `store.set_sr_task_state` 返回写入的时间戳、`_task_state` 广播时带出、前端 `mergeJobUpdate` 一并写回（写库失败则不发，避免界面与库对不上）。② 耗时列与创建时间列加 `nowrap` + `tabular-nums`，不再折行；参数列加 `overflow-wrap: anywhere` 吸收宽度。③ 新增 `--page-w: 1360px` 令牌，场景库 / 队列 / 聊天三页同宽（原先 1360 / 1240 / 1240，各写各的）。验证：后端 **466 passed / 1 skipped**、前端 **175 passed** + `vue-tsc` 零错误 + `npm run build`、e2e 39/61/**21**（`test-platform.js` 新增 3 条断言并做过反证：摘掉前端写回即红在「页内 0 秒 / 接口 1 秒」）。**交付须同时更新 `dist` 与 `backend` 两个包**，只换 dist 修不好。同日续：那条页宽断言当时只比 `max-width` **字符串**、且跑在 800px 默认视口下（那个宽度里三页都被视口压扁，等于没测），已改成 1600 视口**实测正文盒** + 「顶住 `--page-w` 上限」两条，`test-platform.js` 现 **22** 断言；同时发现盘上 `dist` 停在 09-15（产物仍是 1180/1240/1240），已重建。时间线见 §4「页宽断言加严」条。
 - **盘阵场景拉伸放开（09-17，开发机）**：盘阵 JPG 的拉伸下拉原先是**禁用**的、固定停在「2% 线性」（`Toolbar` 的 `:disabled` + `paintStretch` 对 `route==='jpg'` 直接早退），场景图一个模式都换不了 —— 而同一条像素管线的本地 JPG（`route==='img'`）从来可以随便拉，闸门给的理由（「别对已烘焙图二次拉伸」）在数据形态上不成立。现按用户决策放开：**盘阵场景以直方图均衡起手**（`lib/scene.startStretch`，换起手值只改这一个常量），拉伸成为**每张图各自的属性**（`rec.paintedMode`：切走再回来不重置、图与图之间不互相覆盖），且场景改模式**不写回全局**，免得看过一张场景图就改掉本地 TIF 的起手值。代价：服务器按 2% 裁掉的两端拉不回来。验证：前端 **178 passed** + `vue-tsc` 零错误 + `npm run build`、e2e 39/**65**/21（`test-scenes.js` 新增 4 条断言，反证过：把 jpg 早退回填即红在「下拉动了、画面没动」）。**真机待确认：8192 长边场景每次打开/换模式都要重算一遍全图，性能与内存需实测**（开发机 fixture 只有 1600×800）。时间线见 §4。
+- **烘焙规则 v2（09-17，开发机）**：服务端烤的预览图由「长边封顶 8192 + 2% 线性」改成「**长宽各为源图的 1/2 + 直方图均衡**」，且**能粘单个 `.tif` 文件路径**打开（裸 TIF 在盘阵任意目录都行）。查看器/场景库不再直接阅读原始 TIF，一律先读这张同目录的 `<stem>.preview.jpg`。规则戳写进 JPEG 注释（`srprev:v2:half+equal:q85`）—— 只看 mtime 的话，真机上换包后旧图 mtime 比源新会被判有效而**永不重烤**。顺带修掉两个真 bug：Pillow 的 `MAX_IMAGE_PIXELS` 默认上限会让 1/2 尺度的大图（1.5 亿像素）抛 `DecompressionBombError` → 缓存永远判不中 → 每次打开都重烤；裸 TIF 会被 `tryLinkScenes` 拿裸文件名反推目录（可能命中**另一个**目录，提交 SR 就是错的）。验证：后端 **490 passed / 1 skipped**、前端 **183 passed** + `vue-tsc` 零错误 + `npm run build`、e2e **48**/65/22/35 全绿。**真机待确认：① 12370×12100 的浏览器内存（峰值可能 1.2–1.8GB）② q85 下 100.7MB 的下载耗时 ③ 单块 HDD 上 8 线程是否反而更慢**。时间线见 §4。
 
 ## 2. 里程碑计划与待办
 
@@ -781,6 +782,157 @@ PAN 场景掩码名取输入名不取目录名，含队列表单显示的那一�
 也可以直接告诉我要换成哪个模式。③ 在同一张场景图上改过模式后，切到别的图再切回来应保持
 （每图独立），且本地 TIF 的起手值不应被场景上的操作改掉。
 
+### 2026-09-17 · 页宽断言加严：旧断言抓不到「三页一起漂」，顺带发现 dist 停在 09-15（开发机）
+
+**现象（复核上一日「队列页三处缺陷」的收尾项 ③「三页正文是否确实同宽」）**：源码里三页确实
+已统一到 `--page-w`，但盘上 `frontend/dist` 构建于 **09-15**，产物里仍是旧值 ——
+`ScenesPage` **1180px** / `QueuePage` **1240px** / `ChatPage` **1240px**。这与上一条记录里
+「e2e `test-platform.js` 21 断言全绿（含三页同宽）」对不上：那条断言读的正是 dist 的
+`getComputedStyle().maxWidth`，按盘上这版产物跑必然红。
+
+**根因**：① `dist/` 在 `frontend/.gitignore` 里、不入库，git 不管它；源码改了不重新
+`npm run build`，产物就一直是旧的。那次绿跑之后 dist 被旧产物覆盖过（是被谁覆盖的已不可考，
+只确认盘上这版早于 09-17 的令牌改动）。② 那条断言本身也弱：只比 `max-width` **字符串**，
+且跑在 puppeteer 默认 **800px** 视口下 —— 那个宽度里三页都被视口压扁成一样宽，
+比字符串也好、比实际宽度也好都是恒真。
+
+**改动**：
+
+- **重建 dist**（`frontend/`：`npm run build`）。产物核对：三页均为 `max-width: var(--page-w)`、
+  `index-*.css` 里 `--page-w: 1360px`，全库无 `1180px` / `1240px` 残留。
+- `.e2e/test-platform.js` D 段：量之前先 `page.setViewport({width: 1600, height: 900})`
+  （量完复位 800×600，不影响后文）；量的是实测正文盒宽 = `getBoundingClientRect().width`
+  减左右内衬，不再只看字符串。断言拆成两条：
+  ① 三页**实测同宽**；② 该宽度 **= 1320**（= 1360 − 2×20）—— 半句是防「三页一起跟着视口走」
+  也算同宽，没有它这条断言等于没测。
+
+**验证**（开发机，全绿）：`.e2e/test-platform.js` → **22 项断言**（基线 21，+1）；
+[D] 段输出「三页实测同宽（1320 / 1320 / 1320）」「三页都顶在 --page-w 上限
+（正文盒 1320 / 1320 / 1320，max-width 1360px / 1360px / 1360px）」。
+
+**反证（两条，都实测过）**：
+
+1. 场景库改回各写各的（`max-width: 1240px` 字面量）重新构建 → 红在
+   `场景库 / 队列 / 聊天 三页实测同宽（1200 / 1320 / 1320）`。
+2. **只**把 `--page-w` 改成 `1240px`（三页一起漂，正是旧断言漏掉的那类）→ 第一条**照样绿**
+   （`1200 / 1200 / 1200`），红在第二条 `三页都顶在 --page-w 上限（正文盒 1200 / 1200 / 1200，
+   max-width 1240px / 1240px / 1240px）`—— 证明新增的第二条确实补上了旧断言的漏。
+
+两条还原后重新构建，`git status` 只剩 `.e2e/test-platform.js` 一处改动（src 逐字节还原），
+再跑一遍转绿。
+
+**实测附带结论（1600 视口）**：三页外框均 1360、左边缘同为 x=120、正文盒 1320。唯一差异是
+聊天页内部两栏 —— `.cp-side` 固定 232px + 14px gap，`.cp-main` 实测 **1074**。这是布局设计，
+不是宽度漂移；要让聊天主体也占满 1320 得动两栏结构，属另一个改动。
+
+**交付提醒**：本次交付必须带上**这一版重建的 `dist`**（盘上旧包就是 1180/1240/1240）；
+且按前一条记录的提醒，`frontend/dist` 与 `backend/` 两个包要一起更新。
+
+### 2026-09-17 · 烘焙规则 v2：各边 1/2 + 直方图均衡，并接受「单张 .tif」入口（开发机）
+
+**需求（用户原话）**：「当前查看器打开一个 tif 时，不直接阅读该 tif，而是在其目录将 tif "阅读"并生成
+一个质量约为（长宽各为原先 1/2 质量）的 .jpg，然后读取 .jpg」；「烘焙速度越快越好」。
+
+**六条已拍板的决策**（两轮问答 + 计划批准，实现中不再改）：
+
+1. **入口**：只做「服务端路径」那条（盘阵场景目录 / 场景库），**外加**支持粘单个 `.tif` 文件路径。
+2. **尺寸**：严格各 1/2，**不封顶**（24739×24199 → 12370×12100）。小图同样走 1/2。
+3. **产物**：**覆盖**现有 `<stem>.preview.jpg`，不新建第二份；拉伸由「2% 线性」改「**直方图均衡**」。
+4. **首次等待**：等烘焙完再显示（不退回「先读 TIF 顶着」）。
+5. **显示层起手拉伸**：盘阵场景仍取 `equal`（`SCENE_START_STRETCH` 不动）。
+6. **加速**：并行读 **8 线程**；JPEG **q85**。
+
+#### 改动
+
+**后端 `backend/services/preview_jpg.py`（这条链的规格）**
+
+- `PREVIEW_SCALE = 0.5`；`ensure_preview_jpg` 先用 `scene_dims`（只读 `.hdr`/TIF 头，很便宜）算
+  `max_edge = round(max(W,H) * PREVIEW_SCALE)`，再交给 `build_preview_pixels`。**采样算法一行没改** ——
+  原来的 `ps = min(1, max_edge / max(W,H))` 传 1/2 就是严格各 1/2。`PREVIEW_MAX_EDGE = 8192` 删除。
+- `stretch_2pct` → `stretch_equal`，逐式镜像前端 `tifDecode.ts` 的 `mode='equal'`（**min/max，不是
+  p2/p98**；1024 桶；CDF 查表；常量图沿用前端规则：全零→0、其它→128）。WhiteIsZero 反相照旧。
+  两遍 + 行块（`_STRETCH_CHUNK = 4M px`）：1.5 亿像素量级下整图 `astype(float64)` 会产生 1.2GB 副本。
+- 读取按行分段并行（`READ_THREADS = 8`，`PARALLEL_MIN_ROWS = 512` 以下串行）。**Windows 没有
+  `os.pread`**，所以每线程开自己的句柄。`ex.map(...)` 的结果必须 `list()` 消费掉 —— 异常在线程里
+  抛出，不迭代就不会转交给调用方，会变成静默漏读。
+- 规则戳写进 JPEG 注释（`srprev:v2:half+equal:q85`），命中时比对 —— 光看 mtime 不行：真机上换包后
+  旧的 8192+2% 图 mtime 比源新，会被判有效而**永不重烤**。改尺寸/拉伸/质量任一都要 bump
+  `PREVIEW_RULE_VERSION`。
+- `Image.MAX_IMAGE_PIXELS = 1 << 30`：**这是一个真 bug**，不是保险。1/2 尺度把 2.4 万像素级的源烤成
+  1.5 亿像素，超过 Pillow 默认上限（8948 万）的 2 倍就抛 `DecompressionBombError` → `_cache_hit` 的
+  `Image.open` 失败 → 缓存永远判不中 → **每次打开都重烤一遍**，整条优化全部抵消。
+
+**后端 `backend/api/app.py`（裸 .tif 入口）**：`resolve_scene` 的 `{path}` 分支加一个文件判定 ——
+`.tif/.tiff` 走 `_resolve_bare_tif`，别的后缀 400 说清（不是掉进目录逻辑报「目录不存在」）。
+响应新增 `sr_capable`：裸 TIF 的父目录**确实是**合法场景目录时才是 true，否则 `mask_path` 与
+`row.lq_path` 一起为 null。另修一处 `_same_file`：原用 `Path.__eq__` 比路径，它在 Windows 上
+大小写敏感，用户把盘符写成小写就会把可提交的场景误判成不可提交。
+
+**前端**：`fetchSceneJpg` 新增可选 `onPhase`（只在「本次会触发烘焙」时响一次，接 `row.hasPreview`）；
+`viewer.openScenePath` 按 `sr_capable` 决定写不写 `lqPath`（`lqPath` 是能否提交 SR 的唯一判据）；
+场景库页加一行 `scenes.phase` 文案（遮罩 `viewer.showMask` 只挂在 `/viewer`，本页调了看不见）；
+`ScenePathBar` 文案补「也可以粘单个 .tif 文件路径」；五处「2% 线性」文案改「直方图均衡」。
+
+**顺带修掉一个自己的改动引出的缺陷**：`activate()` 会为「没有 lqPath 的 rec」调 `tryLinkScenes`
+反推目录。裸 TIF 恰好是 `route='jpg'` 且 `lqPath=null`，于是它拿**裸文件名**去反推 —— 这是**错的**：
+那张图的目录已经由 resolve 按**绝对路径**定过，反推按名字猜的可能是另一个目录，用户点「提交 SR」
+就会拿着错的 `lq_path` 去跑。现在 `tryLinkScenes` 对 `route==='jpg'` 一律不试（e2e 的 404 计数抓住了它：
+从 2 条刻意 404 变成 3 条）。
+
+#### 两条被推翻的计划前提（测量过，别再按它优化）
+
+- 「去掉 `stretch_2pct` 里的 `astype(np.float64)`（1.2GB 副本）是主要提速点」→ **实测 0.131s**，
+  不是热点。行块实现仍保留（1.5 亿像素下它是内存保障），但别再把它当性能项。
+- 「逐行 `seek+read` 换成块读更快」→ **实测更慢**：块读 0.583s vs 逐行 0.324s（块读要多读一倍字节）。
+  memmap 0.567s、整文件顺序读 0.654s，都更慢。**没换**。
+  逐行 1/2 采样只读源文件一半的字节（1.2GB 的源读 599MB），已经是所有读法里最省的。
+
+真正的收益在**延迟隐藏**：1/2 尺度要发约 1.2 万次读，盘阵上单次读若有毫秒级延迟，串行就是十几秒，
+8 路并发压回一秒量级（页缓存命中时只快 1.4 倍，所以开发机上几乎量不出收益）。
+
+#### 验证（开发机，全绿）
+
+后端 `pytest backend/` → **490 passed / 1 skipped / 74 subtests**（基线 466）；前端
+`npx vitest run` → **183 passed**（基线 178，新增 5 例 `fetchSceneJpg`：库外走 `/preview` 响应体 /
+库行先懒生成再静态读 / 已有缓存只读静态 / `onPhase` 只响一次 / `onPhase` 可选）、
+`vue-tsc --noEmit` 零错误、`npm run build` 通过；e2e `test-manual-scene.js` **48**（基线 39，新增
+G 段 9 条）/ `test-scenes.js` **65**（无回归，只改注释）/ `test-platform.js` **22** /
+`test-vue-viewer.js` **35**，四个套件全绿。
+
+开发机端到端实测（24739×24199 16bit，源 1.198GB，页缓存命中）：首次烘焙 **2.87s** → 12370×12100、
+**100.7 MB**（q85）；二次烘焙 0.0003s；戳 = `b'srprev:v2:half+equal:q85'`。
+Python 的 `stretch_equal` 与真实前端 TS 用 `vite-node` 跨语言逐像素核对，**7 个用例 0 差异**。
+
+#### 反证（三条，都实测过）
+
+1. **e2e 尺寸**：把 `PREVIEW_SCALE` 临时改成 `1.0` 跑 `test-manual-scene.js` → 红在
+   `预览 JPG 各边为源图 1/2（400×200 → 400×200）`；还原后 `200×100` 转绿。（这条 G 段断言是
+   唯一真能区分新旧规则的：`test-scenes.js` 的 fixture 靠 `.hdr` 谎报尺寸，1/2 恰好落在 tif 真实
+   尺寸上，两边同值 —— 已在该文件注释里写明，别再指望它钉规则。）
+2. **前端 `onPhase`**：把 `if (!row.hasPreview)` 临时改成 `if (true)` → 红在
+   `onPhase 只在「本次会触发服务端烘焙」时响一次`；还原转绿。
+3. **后端并行读**：`test_parallel_path_matches_serial` 用 `mock.patch` 把阈值顶到天上强制串行，
+   两边逐像素比。已反证（丢掉最后一段即红）。**注意它钉的是分块覆盖**，读行逻辑本身由斜坡/常量/
+   WhiteIsZero 等内容测试钉 —— 两个分支共用同一个 `read_rows` 闭包，那里的 bug 会互相抵消。
+
+另有两个「我的断言写错了、不是代码错」的：斜坡 `row[0]` 是 1 不是 0（CDF 把最小那档自己算进去）、
+`Uint8ClampedArray` 是 ties-to-even 而 `astype(np.uint8)` 是截断（已改用 `np.rint`，否则整图差 1 个灰阶）。
+
+#### 真机待确认
+
+1. **浏览器内存（本次最大的未知数）**：12370×12100 下位图 + `getImageData` + `graySrcFromRgba` 的
+   Float32Array 各约 600MB，峰值可能到 1.2–1.8GB（2GB 单次分配上限内，但离得不远）。开发机
+   fixture 只有 1600×800，看不出来。真机若卡顿/崩，退路是调小 `PREVIEW_SCALE` 或加一个长边上限
+   （改一个常量）。
+2. **下载体积**：q85 下这块 JPG 是 **100.7MB**，比旧的 8192 封顶产物（约 52MB）大一倍。慢内网里
+   「下载」可能比「烘焙」还久 —— 请回传体感。
+3. **盘阵是单块 HDD 时 8 线程可能更慢**（磁头竞争）。这个数只能真机量。
+4. **nginx 缓存**：`deploy/nginx.conf` 给 `.preview.jpg` 设了 `max-age=3600`，升级后浏览器可能继续
+   用同名的旧图一小时（后端戳已能识别，但浏览器拿的是缓存）。交付说明里要写硬刷新。
+5. **首次打开会变慢一次**（旧缓存无戳 → 判失效 → 重烤），属预期。
+
+**交付提醒**：`backend/` 与重建的 `frontend/dist` 两个包要一起更新（同前两条）。
+
 ## 5. 交接（给新窗口）
 
 > 开新窗口时按用途挑一份整篇粘过去：[handoff-prompt.md](handoff-prompt.md)（梳理框架与当前思路）、
@@ -826,7 +978,7 @@ PAN 场景掩码名取输入名不取目录名，含队列表单显示的那一�
 - 生产命名/反推规则：`docs/sr_code/production-scene-naming.md`（9 段名字 + 六层目录 + 由文件名反推场景目录）；实现唯一真源 `backend/pathguard.py::scene_name_layers` / `infer_scene_paths`
 - 经验文档：`docs/experience/gui-experience.md`
 - 真机预演（无内网机时可跑）：`backend/tests/test_local_chain.py`（4 例，除 SR 算法外全真：真 config/批脚本/bash/校验器/退出码文件；`code_0817_prod.py` 换 stub）
-- E2E 测试：`.e2e/`（**2026-09-15 起入库**，只忽略 `node_modules/`+`fixtures/`+大图）——`test-vue-viewer.js` **35 断言**本地文件回归 · `test-scenes.js` **61 断言**场景 http 打开 · `test-platform.js` **18 断言** REST/SSE 全链路 · `test-manual-scene.js` **37 断言**盘阵任意场景目录（粘 `W:\…` 打开 → 画掩码 → 写盘阵 → 提交 SR，含 PAN 掩码命名与反推失败两条路）；跑法 `cd .e2e && node test-<name>.js`（前置 `cd frontend && npm run build`；puppeteer-core + 无界面 Chrome + 本地静态服务顶替 nginx + uvicorn 起真后端）
+- E2E 测试：`.e2e/`（**2026-09-15 起入库**，只忽略 `node_modules/`+`fixtures/`+大图）——`test-vue-viewer.js` **35 断言**本地文件回归 · `test-scenes.js` **65 断言**场景 http 打开 · `test-platform.js` **22 断言** REST/SSE 全链路 + 布局（1600 视口实测页宽同宽 + 耗时列 nowrap）· `test-manual-scene.js` **48 断言**盘阵任意场景目录（粘 `W:\…` 打开 → 画掩码 → 写盘阵 → 提交 SR，含 PAN 掩码命名与反推失败两条路；**G 段**粘单个 `.tif` 文件路径 → 预览按各边 1/2 烤进源图目录、且不能提交 SR）；跑法 `cd .e2e && node test-<name>.js`（前置 `cd frontend && npm run build`；puppeteer-core + 无界面 Chrome + 本地静态服务顶替 nginx + uvicorn 起真后端）。四个数字 **2026-09-17 实测复核**过（此前该行停在 35/61/18/37，其中三个已过期；同日 `test-manual-scene.js` 39 → **48**）
 - 测试图：`test-tifs/`（gitignore）、`frontend/fixtures/`（入库小图）
 - 记忆：`~/.claude/projects/.../memory/MEMORY.md`（6 条索引：local-vendor / browser-2gb / intranet-data / real-files-1row-strips / openai-pin / **phase4-disk-array-reads-jpg**）
 
