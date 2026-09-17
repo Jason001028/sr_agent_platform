@@ -52,6 +52,7 @@
   --shadow-pop: 0 10px 30px rgba(46, 90, 78, 0.14);
   --topbar-h: 56px;
   --page-pad: 24px;
+  --page-w: 1360px;   /* 内容页统一最大宽度（场景库/任务队列/聊天同宽） */
 
   /* ---- 字体 ---- */
   --font-sans: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;

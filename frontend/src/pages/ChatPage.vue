@@ -146,7 +146,7 @@ onMounted(() => {
   height: calc(100vh - var(--topbar-h));
   display: flex;
   gap: 14px;
-  max-width: 1240px;
+  max-width: var(--page-w);
   margin: 0 auto;
   padding: 14px 20px 16px;
   box-sizing: border-box;

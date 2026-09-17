@@ -15,6 +15,7 @@ import inspect
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from backend import config
@@ -52,7 +53,6 @@ class SrRuntimeDefaultsTest(unittest.TestCase):
         self.assertFalse(rt.fake)
         self.assertEqual(rt.queue_poll_sec, 2.0)
         self.assertEqual(rt.agent_db, store_mod.DEFAULT_DB)
-        self.assertIsNone(rt.scenes_root)             # unset → fake fallback
 
     def test_run_sr_constants_are_the_config_defaults(self):
         self.assertEqual(svc.DEFAULT_BUNDLE_DIR, config.SR_DEFAULT_BUNDLE_DIR)
@@ -79,11 +79,19 @@ class SrRuntimeDefaultsTest(unittest.TestCase):
         os.environ["SR_SUFFIX_DEFAULT"] = "zzz"
         self.assertEqual(svc.default_suffix(), config.SR_DEFAULT_SUFFIX)
 
-    def test_scenes_root_default_matches_paths_module(self):
+    def test_scenes_root_has_a_single_source(self):
+        # 场景根只由 paths.scenes_root() 读（每次读环境 + 要求目录存在）。
+        # SrRuntime 曾经镜像过一份，是第二处真源 —— 2026-09-17 删掉了，这里
+        # 钉住"没人再镜像"，避免它悄悄长回来。
         from backend.api import paths
         self.assertIsNone(paths.scenes_root())
         os.environ["SR_SCENES_ROOT"] = "/data/scenes"
-        self.assertEqual(config.sr_runtime().scenes_root, "/data/scenes")
+        self.assertIsNone(paths.scenes_root())      # 目录不存在 → 与镜像字段的差别
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        os.environ["SR_SCENES_ROOT"] = tmp.name
+        self.assertEqual(paths.scenes_root(), Path(tmp.name))
+        self.assertFalse(hasattr(config.sr_runtime(), "scenes_root"))
 
 
 class SrRuntimeEnvTest(unittest.TestCase):
@@ -129,7 +137,6 @@ class SrRuntimeEnvTest(unittest.TestCase):
         self.assertTrue(rt.fake)
         self.assertEqual(rt.queue_poll_sec, 5.0)
         self.assertEqual(rt.agent_db, "/var/lib/sr/agent.db")
-        self.assertEqual(rt.scenes_root, "/data/scenes")
 
     def test_empty_string_falls_back_to_the_default(self):
         # `Environment=SR_SLURM_PARTITION=` in a unit file yields "" — treat an

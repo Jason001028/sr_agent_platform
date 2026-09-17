@@ -17,6 +17,17 @@ import DrawPanel from '../components/DrawPanel.vue';
 import DecodeOverlay from '../components/DecodeOverlay.vue';
 import ContextPanel from '../components/ContextPanel.vue';
 import StatusBar from '../components/StatusBar.vue';
+import ScenePathBar from '../components/ScenePathBar.vue';
+import { useViewerStore } from '../stores/viewer.js';
+
+const viewer = useViewerStore();
+
+/** 手工打开盘阵场景目录（不扫盘：只把用户填的这个目录交给后端 stat 一次）。
+ *  错误写进查看器的错误条（DecodeOverlay 那条）—— ScenesPage 写的是
+ *  scenes.error，两处入口各自的错误面不同。 */
+function openPastedPath(path: string): void {
+  void viewer.openScenePath(path);
+}
 
 onMounted(() => {
   mountE2EHooks();      // window.__viewer（浏览器回归 + 真机验收）
@@ -26,6 +37,7 @@ onMounted(() => {
 <template>
   <div class="viewer-page">
     <Toolbar />
+    <ScenePathBar class="vp-pathbar" :busy="viewer.busy" @open="openPastedPath" />
     <div class="viewer-body">
       <FileList />
       <TifCanvas>
@@ -46,6 +58,13 @@ onMounted(() => {
   height: 100%;
   background: var(--chrome);
   overflow: hidden;
+}
+
+/* 盘阵场景栏：深色工具栏与画布之间的一条白色工作带（不参与 .viewer-body 的
+   flex 计算，画布高度按剩余空间自适应） */
+.vp-pathbar {
+  flex: none;
+  margin: 8px 12px 0;
 }
 
 .viewer-body {

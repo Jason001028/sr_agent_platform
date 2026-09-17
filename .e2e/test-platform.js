@@ -171,6 +171,15 @@ async function main() {
       SR_QUEUE_POLL_SEC: '0.3',
       SR_API_HOST: '127.0.0.1',
       SR_API_PORT: String(apiPort),
+      // 提交侧（normalize_submit_path）要求 lq_path 落在盘阵前缀白名单内，并且
+      // 会把路径归一化：开发机的临时目录带盘符，不补一条"该盘符映射到自身"的
+      // 规则，本机绝对路径会因「未知盘符」被 400。与 backend/tests/__init__.py::
+      // allowed_roots_env 同一套（Linux 上 Path(r).drive 为空，这条例外不生效）。
+      SR_ALLOWED_ROOTS: scenesRoot,
+      SR_DRIVE_MAP: (() => {
+        const drv = path.parse(scenesRoot).root.replace(/[\\/]+$/, '');
+        return `${drv}=${drv}`;
+      })(),
     },
   });
   child.stdout.on('data', () => {});
@@ -256,6 +265,14 @@ async function main() {
         };
       });
       assert(/^\d+ 秒$/.test(rowInfo.elapsed), `耗时列给出终态耗时（${rowInfo.elapsed}）`);
+      // 终态耗时的真值 = 后端 updated_at − created_at（假调度器下恒 < 60 秒，所以
+      // 只会是「N 秒」，不会走到「N 分 N 秒」分支）。页内那份 updated_at 若停在上
+      // 一次 GET 的快照 —— 提交刚落库时 updated_at == created_at —— 任务一完成耗
+      // 时就掉成「0 秒」，点一下刷新才露出真值。这里直接与接口读数对齐。
+      const apiTasks = (await (await fetch(apiBase + '/api/queue')).json()).tasks;
+      const truth = Math.round(apiTasks[0].updated_at - apiTasks[0].created_at) + ' 秒';
+      assert(rowInfo.elapsed === truth,
+        `耗时列 = 接口真值（页内 ${rowInfo.elapsed} / 接口 ${truth}）`);
       assert(rowInfo.ops.indexOf('再提交') >= 0, `每行给出「再提交」（${rowInfo.ops.join('/')}）`);
       assert(rowInfo.lqList && rowInfo.lqList.readonly === false
         && rowInfo.lqList.list === 'qp-lq-cands',
@@ -348,6 +365,31 @@ async function main() {
         return tags2.length === 2 && tags2[0] === '完成';
       }, 25000, '改参后的任务 COMPLETED');
       assert(true, '确认提交后队列出现第 2 个任务并跑完');
+
+      /* ---------- D. 布局：三页同宽（--page-w）+ 耗时列不换行 ---------- */
+      console.log('\n[D] 布局（页宽令牌 / 耗时列 nowrap）');
+      const pageRoots = [['/scenes', '.scenes-page'], ['/queue', '.queue-page'],
+                         ['/chat', '.chat-page']];
+      const maxW = {};
+      for (const [route, sel] of pageRoots) {
+        await page.goto(base + route, { waitUntil: 'networkidle2', timeout: 30000 });
+        maxW[sel] = await page.evaluate((s) => {
+          const el = document.querySelector(s);
+          return el ? getComputedStyle(el).maxWidth : null;
+        }, sel);
+      }
+      // 改前三页各写各的：场景库 1360、队列/聊天 1240 —— 宽度就是这么漂开的。
+      assert(maxW['.scenes-page'] && maxW['.scenes-page'] === maxW['.queue-page']
+        && maxW['.queue-page'] === maxW['.chat-page'],
+        `场景库 / 队列 / 聊天 三页同宽（${pageRoots.map(([, s]) => maxW[s]).join(' / ')}）`);
+
+      await page.goto(base + '/queue', { waitUntil: 'networkidle2', timeout: 30000 });
+      await waitFor(page, () => !!document.querySelector('.qp-tbl tbody td.elapsed'),
+        10000, '耗时列在场');
+      const elapsedStyle = await page.evaluate(() =>
+        getComputedStyle(document.querySelector('.qp-tbl tbody td.elapsed')).whiteSpace);
+      // 改前没有 nowrap：「已运行 3 分 20 秒」中间的三个空格就是断行点。
+      assert(elapsedStyle === 'nowrap', `耗时列不换行（white-space=${elapsedStyle}）`);
 
       const appErrors = errors.filter((e) => !isIgnorableConsole(e));
       assert(appErrors.length === 0, `无浏览器错误 (${JSON.stringify(appErrors.slice(0, 4))})`);

@@ -8,6 +8,7 @@ slurm_available.
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -18,6 +19,7 @@ from unittest import mock
 from backend.services import run_sr as svc
 from backend.services import slurm
 from backend.services import store as store_mod
+from backend.tests import allowed_roots_env
 from backend.tools.run_sr import run_run_sr
 
 # full param dict shaped like the tool's, for fingerprint-stable submits
@@ -762,6 +764,11 @@ class TestSlurmStatus(unittest.TestCase):
         self.assertTrue(slurm.cancel(7, run_cmd=fake))
 
 
+#: 工具入口（`run_run_sr`）会过提交侧白名单 SR_ALLOWED_ROOTS —— 这些用例
+#: 只想验证"能走到服务层"，所以用一个默认白名单内的路径。
+SCENE = "/DiskArray/GSHC2IMPS/PRODUCT/2026/09/17/260318"
+
+
 class TestToolRunSr(unittest.TestCase):
     def test_missing_lq_path(self):
         r = run_run_sr()
@@ -769,19 +776,19 @@ class TestToolRunSr(unittest.TestCase):
         self.assertIn("lq_path", r["error"])
 
     def test_bad_sr_scale(self):
-        r = run_run_sr(lq_path="/data", sr_scale=0)
+        r = run_run_sr(lq_path=SCENE, sr_scale=0)
         self.assertFalse(r["ok"])
         self.assertIn("sr_scale", r["error"])
 
     def test_valid_but_slurm_unavailable(self):
         # dev machine: real slurm_available() is False → clean err
-        r = run_run_sr(lq_path="/data")
+        r = run_run_sr(lq_path=SCENE)
         self.assertFalse(r["ok"])
         self.assertIn("slurm", r["error"])
 
     def test_delete_ori_is_rejected(self):
         # 参数校验先于调度器可用性：dev 机没有 sbatch，但这里必须先报 delete_ori
-        r = run_run_sr(lq_path="/data", delete_ori=True)
+        r = run_run_sr(lq_path=SCENE, delete_ori=True)
         self.assertFalse(r["ok"])
         self.assertIn("delete_ori", r["error"])
 
@@ -789,14 +796,14 @@ class TestToolRunSr(unittest.TestCase):
         # 工具侧过去完全不校验 suffix —— 一个 `a/b` 会一路拼进输出文件名。
         for bad in ("a/b", "a b", "x" * 17, "掩码"):
             with self.subTest(suffix=bad):
-                r = run_run_sr(lq_path="/data", suffix=bad)
+                r = run_run_sr(lq_path=SCENE, suffix=bad)
                 self.assertFalse(r["ok"])
                 self.assertIn("suffix 非法", r["error"])
 
     def test_empty_suffix_is_defaulted_not_rejected(self):
         # 留空 = 取 SR 配置里的 <Suffix>，与 REST 入口同规矩：走到服务层，
         # 于是 err 只能是 dev 机没有 slurm 的那条。
-        r = run_run_sr(lq_path="/data", suffix="   ")
+        r = run_run_sr(lq_path=SCENE, suffix="   ")
         self.assertFalse(r["ok"])
         self.assertIn("slurm", r["error"])
 
@@ -955,7 +962,8 @@ class TestEntryPointParity(unittest.TestCase):
         self.mask = os.path.join(self.scene, "SCENE_L1_PAN_mask.tif")
         Path(self.mask).write_bytes(b"")
         env = {"SR_BUNDLE_DIR": self.bundle, "SR_LOCKED_DIR": "",
-               "SR_AGENT_DB": os.path.join(self._tmp.name, "db.sqlite")}
+               "SR_AGENT_DB": os.path.join(self._tmp.name, "db.sqlite"),
+               **allowed_roots_env(self._tmp.name)}   # 提交侧白名单：临时目录
         patcher = mock.patch.dict(os.environ, env)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -980,6 +988,139 @@ class TestEntryPointParity(unittest.TestCase):
         self.assertEqual(svc.task_fingerprint(captured["tool"]),
                          svc.task_fingerprint(rest))
         self.assertEqual(captured["tool"], rest)   # 连键值集合都一致，不只是哈希
+
+
+class TestSubmitPathNormalization(unittest.TestCase):
+    """同一个场景的两种写法必须归一成同一个字符串。
+
+    用户从客户端粘的是 `W:\\GSHC2IMPS\\PRODUCT\\2026\\09\\17\\<编号>`，服务端
+    内部一律用 `/DiskArray/...`。若两个入口各自处理（REST 走 `_bad_path`、工具
+    原样透传），同一个场景的两种写法会算出两个 `task_fingerprint`，幂等层失效、
+    同一次提交被投成两个作业。这里钉的就是「两入口同一结果 + 两写法同一结果」。
+    """
+
+    SCENE_NAME = "JL1KF02B03_PMS02_20260917124710_200536960_101_0005_001_L1_PAN"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name).resolve()
+        self.bundle = os.path.join(self._tmp.name, "bundle")
+        write_bundle_cfg(self.bundle, SUFFIX_CFG)
+        self.scene = (self.root / "GSHC2IMPS" / "PRODUCT" / "2026" / "09"
+                      / "17" / self.SCENE_NAME)
+        self.scene.mkdir(parents=True)
+        (self.scene / f"{self.SCENE_NAME}_meta.xml").write_text(
+            "<?xml version='1.0'?><x/>", encoding="utf-8")
+        self.mask = self.scene / f"{self.SCENE_NAME}_mask.tif"
+        self.mask.write_bytes(b"")
+        # 白名单同时收 W: 形态与「本机绝对路径」形态：真机上后者就是
+        # /DiskArray/...（与默认白名单同源），开发机上是临时目录本身。两种写法
+        # 等价这条用例必须两边都表达得出来，否则测的只是映射的一半。
+        host = allowed_roots_env(self.root)
+        env = {"SR_BUNDLE_DIR": self.bundle, "SR_LOCKED_DIR": "",
+               "SR_AGENT_DB": os.path.join(self._tmp.name, "db.sqlite"),
+               "SR_DRIVE_MAP": ";".join(
+                   p for p in (f"W:={self.root.as_posix()}",
+                               host.get("SR_DRIVE_MAP")) if p),
+               "SR_ALLOWED_ROOTS": f"W:\\;{host['SR_ALLOWED_ROOTS']}"}
+        patcher = mock.patch.dict(os.environ, env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    @property
+    def win_path(self) -> str:
+        """用户在客户端真正会粘的那一串。"""
+        rel = self.scene.relative_to(self.root).as_posix()
+        return "W:\\" + rel.replace("/", "\\")
+
+    def _tool_params(self, **kw) -> dict:
+        from backend.tools.run_sr import run_run_sr
+
+        captured = {}
+
+        def spy(params, **k):
+            captured.update(params)
+            raise RuntimeError("stop before the scheduler")   # 不需要真 sbatch
+
+        with mock.patch.object(svc, "submit_run_sr", side_effect=spy):
+            r = run_run_sr(**kw)
+        self.assertFalse(r["ok"])
+        return captured
+
+    def _tool_result(self, **kw) -> dict:
+        """工具入口的原样返回值 —— 要断言 error 文本时用它（`_tool_params`
+        只回被捕获的参数，被拒的提交根本走不到捕获点）。"""
+        from backend.tools.run_sr import run_run_sr
+
+        with mock.patch.object(svc, "submit_run_sr",
+                               side_effect=RuntimeError("no sbatch")):
+            return run_run_sr(**kw)
+
+    def test_windows_form_normalizes_to_array_posix(self):
+        from backend.api.platform import _norm_sr_params
+
+        rest = _norm_sr_params({"lq_path": self.win_path, "mask_path": None,
+                                "suffix": ""})
+        posix = self.scene.as_posix()
+        self.assertEqual(rest["lq_path"], posix)
+        self.assertNotIn("\\", rest["lq_path"])              # 反斜杠不进存储层
+        self.assertEqual(rest["mask_path"], self.mask.as_posix())
+
+    def test_two_spellings_are_one_submission(self):
+        """两种写法 → 同一个指纹（幂等表按指纹建键，这条不成立就会重复投作业）。"""
+        from backend.api.platform import _norm_sr_params
+
+        win = _norm_sr_params({"lq_path": self.win_path, "suffix": ""})
+        posix = _norm_sr_params({"lq_path": self.scene.as_posix(), "suffix": ""})
+        self.assertEqual(win, posix)
+        self.assertEqual(svc.task_fingerprint(win), svc.task_fingerprint(posix))
+
+    def test_tool_entry_accepts_the_same_two_forms(self):
+        a = self._tool_params(lq_path=self.win_path, suffix="")
+        b = self._tool_params(lq_path=self.scene.as_posix(), suffix="")
+        self.assertEqual(a, b)
+        self.assertEqual(svc.task_fingerprint(a), svc.task_fingerprint(b))
+
+    def test_both_entries_agree_on_one_submission(self):
+        from backend.api.platform import _norm_sr_params
+
+        tool = self._tool_params(lq_path=self.win_path, suffix="")
+        rest = _norm_sr_params({"lq_path": self.win_path, "suffix": ""})
+        self.assertEqual(tool, rest)
+        self.assertEqual(svc.task_fingerprint(tool), svc.task_fingerprint(rest))
+
+    def test_mask_path_is_normalized_too(self):
+        # 显式掩码路径也可能被粘成 Windows 形态 —— 同样要落到存储层的 POSIX 形态
+        win_mask = self.win_path + "\\" + self.mask.name
+        tool = self._tool_params(lq_path=self.win_path, mask_path=win_mask,
+                                 suffix="")
+        self.assertEqual(tool["mask_path"], self.mask.as_posix())
+
+    def test_outside_whitelist_rejected_by_both_entries(self):
+        """白名单外的路径，两个入口都必须报错（同一套规则，不是各判各的）。"""
+        from backend.api.platform import _norm_sr_params
+        from fastapi import HTTPException
+
+        outside = self.root.parent / "not-allowed" / self.SCENE_NAME
+        outside.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(lambda: shutil.rmtree(outside.parent, ignore_errors=True))
+        win_out = "X:\\not-allowed\\" + self.SCENE_NAME
+        # 研发机上把临时根的父目录补一条盘符映射，好让"白名单外"能用真实路径
+        # 表达。盘符自映射那条要留着 —— 丢了的话 SR_ALLOWED_ROOTS 里的本机条目
+        # 先解析失败，测的就不是"前缀比较"这一层了。
+        maps = f"W:={self.root.as_posix()};X:={self.root.parent.as_posix()}"
+        extra = allowed_roots_env(self.root).get("SR_DRIVE_MAP")
+        if extra:
+            maps += f";{extra}"
+        with mock.patch.dict(os.environ, {"SR_DRIVE_MAP": maps}):
+            r = self._tool_result(lq_path=win_out, suffix="")
+            self.assertFalse(r["ok"])
+            self.assertIn("allowed array prefix", r["error"])
+            with self.assertRaises(HTTPException) as ctx:
+                _norm_sr_params({"lq_path": win_out, "suffix": ""})
+            self.assertEqual(ctx.exception.status_code, 400)
+            self.assertIn("SR_ALLOWED_ROOTS", ctx.exception.detail)
 
 
 class TestToolJobStatus(unittest.TestCase):
