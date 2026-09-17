@@ -13,6 +13,16 @@
 > 失效并原地重烤（覆盖同名 `<stem>.preview.jpg`，不产生第二份文件）。详见
 > [experience/gui-experience.md](../docs/experience/gui-experience.md) §9.1。
 
+> **拖拽入口改走服务端烘焙 JPG（09-18）**：把盘阵上的 `.tif` 拖进查看器，现在也走
+> 服务端烘焙的 1/2 预览 JPG（与场景库同一条渲染路径），不再在浏览器里重新解码整幅
+> 原图。这份 JPG 是**临时缓存**：落 `SR_TEMP_PREVIEWS_ROOT`，按 `YYYY-MM-DD` 分桶，
+> 每天 0 点整桶删除（服务启动时也先清一次）。命中判据是**文件名 + 字节数**双指纹
+> （后端 `_fingerprint_mismatch`），对不上就退回浏览器本地解码 —— 绝不静默关联到
+> 一张不是用户拖进来的影像上。**上线前必须显式配 `SR_TEMP_PREVIEWS_ROOT`**：
+> 默认值是系统临时目录，CentOS7 的 `/tmp` 常是 tmpfs，而 1/2 尺度不封顶、单张可能
+> 上百 MB；要放在 User=nginx 可写的大盘上，且**不要**放在 `SR_SCENES_ROOT` 之下。
+> 场景库 / 粘路径的长期预览缓存（源同目录或 `SR_PREVIEWS_ROOT` 镜像树）不受影响。
+
 阶段5 平台 API（09-02 定稿，契约 = `docs/planning/api-contract.md`）：FastAPI 在既有场景
 端点上新增 `/api/chat/*`（会话 REST + 单回合 SSE）、`/api/queue*`（共享 SR 队列 REST + SSE
 状态广播）、`/api/tools`（工具直调）、`/api/masks`（掩码烘焙到原图目录）；前端新增 `/chat`

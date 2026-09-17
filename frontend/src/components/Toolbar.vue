@@ -18,7 +18,9 @@ const locY = ref('');
 /** 盘阵场景激活：只用来决定 title 文案（服务器烤的直方图均衡是二次拉伸的底图，
     均衡不可逆）。**不再**禁用下拉 —— 场景图照样可在显示层换模式，
     默认起手值也同样是直方图均衡（见 lib/scene.startStretch）。
-    注意判据是 route==='jpg'，反推关联上的本地 rec 仍是它本来的 route。 */
+    注意判据是 route==='jpg'：反推关联**命中**的本地 TIF 也会被就地升级成
+    route='jpg'（拿的是服务端烘焙 JPG，见 stores/viewer.tryLinkScenes），
+    没命中的才保持本地 route。 */
 const sceneActive = computed(() => store.activeRec?.route === 'jpg');
 /** 「提交 SR」可用：这张图有盘阵目录（= 提交时 lq_path 的语义）。
     盘阵场景打开的有，反推关联上的本地 TIF 也**有** —— 判据从「是不是盘阵场景」

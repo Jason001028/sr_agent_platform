@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   loadSrConfig, joinBase, scenesQuery, scenesListUrl, scenePreviewUrl,
+  tmpPreviewUrl,
   sceneImageUrl, graySrcFromRgba, sceneDecodePixels, thumbPolysToOrig,
   todayScenePrefix, sceneResolveUrl,
   isImageSource, startStretch, SCENE_START_STRETCH,
@@ -48,6 +49,11 @@ describe('scenesQuery / 列表 URL', () => {
   it('id 含特殊字符安全进 URL', () => {
     expect(scenePreviewUrl({ apiBase: '', staticBase: '' }, 'a/b+c=='))
       .toBe('/api/scenes/a%2Fb%2Bc%3D%3D/preview');
+    // 临时那条是**另一个端点**，不是同 URL 带参数：落点与生命周期都不同
+    expect(tmpPreviewUrl({ apiBase: '', staticBase: '' }, 'a/b+c=='))
+      .toBe('/api/scenes/a%2Fb%2Bc%3D%3D/preview-tmp');
+    expect(tmpPreviewUrl({ apiBase: 'http://127.0.0.1:8000/', staticBase: '' }, 'x'))
+      .toBe('http://127.0.0.1:8000/api/scenes/x/preview-tmp');
     expect(sceneImageUrl({ apiBase: '', staticBase: '' }, '/disk-array/x/y.jpg'))
       .toBe('/disk-array/x/y.jpg');
     expect(sceneImageUrl({ apiBase: '', staticBase: 'http://static:9000' }, '/disk-array/a b.jpg'))
