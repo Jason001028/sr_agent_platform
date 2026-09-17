@@ -54,6 +54,18 @@ Environment=SR_LLM_MOCK=0
 Environment=SR_SLURM_FAKE=0
 # 可选：预览 JPG 缓存根（默认落源同目录）。配了必须在 SR_SCENES_ROOT 之下。
 # Environment=SR_PREVIEWS_ROOT=/data/scenes/.previews
+#
+# 可选：**拖拽入口**的临时预览缓存根（2026-09-18）。用户把盘阵上的 .tif 拖进浏览器
+# 时走这条：烘焙规则与上面那份长期缓存完全相同，但落在**独立**目录、按
+# YYYY-MM-DD 分桶，每天 0 点整桶删除（服务启动时也先清一次）。
+#   ⚠️ 生产**必须显式配**，别用默认值：默认是系统临时目录，而 CentOS7 的 /tmp
+#      常常是 tmpfs（内存盘）—— 1/2 尺度不封顶，一张 2.4 万像素级的场景预览
+#      可能上百 MB，写爆内存。放在大盘上。
+#   ⚠️ 必须是 User=nginx 可写、且**不是** SR_SCENES_ROOT 之下的目录（临时缓存
+#      不该混进生产数据目录）。清理只删「名字是 ISO 日期、且带本模块写的
+#      .sr-tmp-preview 标记文件」的子目录，别的目录一个字节都不碰。
+#   容量：只保留当天那一桶，等于一天的拖拽量；桶内不设上限。要缩就到磁盘配额去限。
+#   Environment=SR_TEMP_PREVIEWS_ROOT=/DiskArray/tmp/wangrz/sr_tmp_previews
 # 可选：队列状态轮询秒（/api/queue/events 广播刷新率，缺省 2）
 # Environment=SR_QUEUE_POLL_SEC=2
 #

@@ -8,6 +8,7 @@
  */
 import {
   loadSrConfig, joinBase, sceneResolveUrl, scenePreviewUrl, sceneImageUrl,
+  tmpPreviewUrl,
 } from './scene.js';
 import type { SceneRow, SrConfig } from './scene.js';
 
@@ -375,6 +376,25 @@ export async function fetchSceneJpg(
   return await img.blob();
 }
 
+/** 拖拽入口取**临时**预览 JPG：GET /api/scenes/{id}/preview-tmp。
+ *
+ * 为什么必须与 `fetchSceneJpg` 分开（而不是加个参数）：那个函数会写
+ * `row.hasPreview = true`，而该字段的语义是「生产 `<stem>.preview.jpg` **此刻
+ * 在不在**」。被临时路径置真之后，用户再从场景库打开同一个场景就会跳过懒生成、
+ * 直接打一个 404 的静态 URL，图再也出不来。这里不碰任何 SceneRow 字段。
+ *
+ * 也不走静态 URL（`SR_TEMP_PREVIEWS_ROOT` 不在 nginx 的 /disk-array 映射里），
+ * 响应体本身就是那张 JPEG。 */
+export async function fetchTempSceneJpg(
+  cfg: SrConfig,
+  id: string,
+  onPhase?: (text: string) => void,
+): Promise<Blob> {
+  onPhase?.('已关联到盘阵场景：正在服务器烘焙 1/2 预览图，首次要读一遍大图…');
+  const r = await http(tmpPreviewUrl(cfg, id));
+  return await r.blob();
+}
+
 /** 打开盘阵上任意一个合法场景目录：POST /api/scenes/resolve。
  *
  * 二选一：`{path}`（`W:\...` 或 `/DiskArray/...`，服务端归一）或
@@ -384,15 +404,24 @@ export async function fetchSceneJpg(
  * 展示即可 —— 反推不准时必须让用户看见为什么、然后手粘目录，绝不静默换一条
  * 路径。
  *
+ * 拖拽入口在 `{name}` 上再带一个 `size_bytes`（浏览器 File.size）：服务端要求
+ * 盘阵上的输入影像**同名且字节数一致**才认（backend/api/app.py 的
+ * `_fingerprint_mismatch`）。只看名字不够 —— 同目录里可能存在另一张图（RC 场景
+ * 的输入影像是 PAN.tif），关联错了掩码坐标就整片落在别的图上；只看字节数也不够。
+ * 不符时后端回 404 并把原因写进 detail，调用方应当**退回本地解码**而不是报死错。
+ *
  * 首次调用可能要解压采样整幅大图（生成预览缓存），界面应提示「首次较慢」。 */
 export async function apiResolveScene(
   cfg: SrConfig,
-  body: { path: string } | { name: string; date?: string },
+  body: { path: string }
+      | { name: string; date?: string; size_bytes?: number },
+  opts?: { signal?: AbortSignal },
 ): Promise<SceneResolveResult> {
   const r = await http(sceneResolveUrl(cfg), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
+    signal: opts?.signal,
   });
   return (await r.json()) as SceneResolveResult;
 }

@@ -46,6 +46,7 @@
 | `GET /api/health` | 存活 + 数据源（已有，返回 `{ok,source}`） | — |
 | `GET /api/scenes` · `GET /api/scenes/{id}/preview` | 场景检索/懒生成（阶段4 已有，不改） | — |
 | `POST /api/scenes/resolve` | 手填/反推一个盘阵场景目录 → 与库行同形的 `{source,row,resolved}` | 3.5 |
+| `GET /api/scenes/{id}/preview-tmp` | **拖拽入口专用**的临时预览 JPG（独立缓存根、1 天 TTL、每日 0 点清；不进库行，URL 不可静态映射） | 3.6 |
 | `GET /api/tools` | 工具清单（manifest 机械生成，供 UI/文档） | 3.1 |
 | `POST /api/tools/{name}` | 直调单个工具（绕过 LLM；validate + 白名单照常） | 3.1 |
 | `POST /api/chat/sessions` | 新建会话 → `201 {session_id}` | 3.2 |
@@ -251,6 +252,45 @@ submit_run_sr 返回 → 队列状态：
   404 的 `detail` 必须列出试过哪些候选、各自为什么不行（前端原样渲染）——「猜错必须报错」
   的落地。`detail` 只能是**字符串**：`api.ts::http()` 把它直接塞进 `Error`，给对象
   用户看到的是 `[object Object]`。
+- **`{name}` 可再带 `size_bytes`（2026-09-18，拖拽入口用）：把本地文件的字节数一起发过来，
+  后端要求候选目录里的输入影像**同名且字节数一致**才认**（`_fingerprint_mismatch`）。
+  不传则只看目录/影像存不存在（粘路径、第三方调用一切照旧）。
+  - 为什么两个都要：`input_scene_path` 的候选次序是 `<目录名>.{tif,tiff,img}` 在前、
+    `PAN.{tif,tiff,img}` 在后，返回第一个存在的。RC 场景的输入影像是 `PAN.tif`，而同目录
+    里往往还躺着 `<目录名>.tif`（上游 SC 步骤的产物）—— 光比字节数，用户拖进来的可能是
+    另一张图；那之后画的掩码坐标会整片落在别的影像上。
+  - 不符时**按这条候选不合格处理**（记进 `reasons` 后继续试下一条候选），最终仍是 404 且
+    `detail` 里列出盘阵侧那个文件的名字与字节数，**不新增错误码**。
+  - `size_bytes` 非正整数 → **400**。`{path}` 分支是精确路径，不收这个字段。
+
+### 3.6 拖拽入口的临时预览（`GET /api/scenes/{id}/preview-tmp`，2026-09-18）
+
+用途：用户把盘阵上的 `.tif` **拖进查看器**时，不再让浏览器重新解码整幅原图（真机上一次
+几十秒、几百 MB），改用服务端烘焙的 1/2 预览 JPG —— 与场景库打开同一张图的渲染路径、
+同一套烘焙规则（`rule_stamp` 相同），所以两条链出来的字节一致。
+
+与 `GET /api/scenes/{id}/preview` 的差别**只有落点**：
+
+| | `/preview`（长期） | `/preview-tmp`（临时） |
+|---|---|---|
+| 落点 | 源同目录 `<stem>.preview.jpg`，或 `SR_PREVIEWS_ROOT` 镜像树 | `SR_TEMP_PREVIEWS_ROOT/<YYYY-MM-DD>/<sha256(源绝对路径)[:16]>.jpg` |
+| 生命周期 | 跟场景数据长期存在 | **1 天**：每天本地 0 点整桶删除（服务启动时先清一次） |
+| 响应头 | 无（静态 URL 那条走 nginx 的 `max-age=3600`） | `Cache-Control: no-store` |
+| 消费方 | 场景库行、粘路径打开 | **只有**拖拽入口（`viewer.tryLinkScenes` 命中后升级 rec） |
+
+- **不写生产数据目录**：拖进来的源可能是盘阵上任意一张图，这份缓存不该撒进场景目录。
+  桶名是 ISO 日期、且桶里有本模块写的 `.sr-tmp-preview` 标记文件才会被删 —— 清理只认
+  自己建的目录，根是符号链接/指向文件系统根时一律拒绝清理。
+- **URL 不可静态映射**：临时根不在 nginx 的 `/disk-array/` alias 之下（那个 alias 只暴露
+  `SR_SCENES_ROOT`），响应体本身就是那张 JPEG。nginx 对这条**不用改**：`location ~* /api/scenes/[^/]+/preview$`
+  的 `$` 锚点本来就不匹配 `/preview-tmp`，它落到外层 `location /api/` 正好拿到 `no-store`
+  的效果（别把 `$` 去掉）。
+- **不进库行**：前端取这条用的是独立函数 `api.fetchTempSceneJpg`，**不改写** `row.hasPreview`
+  / `row.jpgUrl` —— 那两个字段的语义是「生产 `<stem>.preview.jpg` 此刻在不在」，被临时
+  路径置真之后再从场景库打开同一场景就会跳过懒生成、直接打一个 404 的静态 URL。
+- 错误码与 `/preview` 同口径：`.jpg/.jpeg` 源直接回源字节；不可访问 **404**；烘焙失败 **422**。
+- **清理不在请求路径里**：`purge_temp_previews` 要列举缓存根，而「不扫盘」是硬约束（见 3.5），
+  所以它只出现在 `api/app.py` 的后台任务 `_tmp_preview_purge_loop` 里。
 
 ## 4. 关键实现机制（契约约束）
 

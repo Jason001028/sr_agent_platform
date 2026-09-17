@@ -15,6 +15,7 @@ import shutil
 import tempfile
 import unittest
 from contextlib import ExitStack
+from datetime import date
 from pathlib import Path
 from unittest import mock
 
@@ -29,7 +30,7 @@ from backend.services import slurm
 from backend.tests import allowed_roots_env
 
 _ENVS = ("SR_AGENT_DB", "SR_SCENES_ROOT", "SR_PREVIEWS_ROOT", "SR_LLM_MOCK",
-         "SR_SLURM_FAKE", "SR_EXECUTOR", "SR_BUNDLE_DIR",
+         "SR_SLURM_FAKE", "SR_EXECUTOR", "SR_BUNDLE_DIR", "SR_TEMP_PREVIEWS_ROOT",
          "SR_DRIVE_MAP", "SR_ALLOWED_ROOTS", "SR_SCENE_PATH_TEMPLATE")
 
 #: 生产编号 —— 真机形态，14 位成像时间嵌在中间（反推靠它取日期）。
@@ -515,6 +516,145 @@ class TestNeverListsDirectories(ResolveBase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertNotIn("noise_0.dat", calls)
         self.assertLessEqual(len(calls), 30, calls)
+
+
+class TestResolveFingerprint(ResolveBase):
+    """拖拽入口的双指纹（`size_bytes`）：**名字 + 字节数**都吻合才认。
+
+    缺了名字那一半，「目录名 .tif 与 PAN.tif 共存」的 RC 场景会被冒名顶替 ——
+    见 `_fingerprint_mismatch` 的 docstring。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.d = self.make_scene()
+        self.tif = self.d / f"{SCENE_NAME}.tif"
+        self.size = self.tif.stat().st_size
+
+    def resolve(self, **body):
+        return self.client().post("/api/scenes/resolve", json=body)
+
+    def test_matching_size_and_name_ok(self):
+        r = self.resolve(name=SCENE_NAME + ".tif", size_bytes=self.size)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["row"]["lq_path"], self.d.as_posix())
+
+    def test_missing_size_bytes_still_ok(self):
+        # 向后兼容：不带指纹的老调用（粘路径、第三方）一切照旧
+        r = self.resolve(name=SCENE_NAME)
+        self.assertEqual(r.status_code, 200, r.text)
+
+    def test_wrong_size_404_with_reason_and_candidates(self):
+        r = self.resolve(name=SCENE_NAME, size_bytes=self.size + 1)
+        self.assertEqual(r.status_code, 404)
+        detail = r.json()["detail"]
+        self.assertIn("字节数", detail)
+        self.assertIn(str(self.size), detail)       # 报错要给出盘阵那一侧的数
+        self.assertIn(str(self.size + 1), detail)
+
+    def test_lookalike_name_is_rejected(self):
+        """名字那一半的钉子（本方案最要紧的一条）。
+
+        RC 形态的目录里输入影像是 `PAN.tif`（`<目录名>.tif` 不存在），
+        `input_scene_path` 返回的就是它。若用户拖进来的是别处一张**恰好同字节
+        数**的 `<场景名>.tif`，只比字节数就会关联成功 —— 于是掩码按拖进来那张
+        画，SR 却在盘阵上按 `PAN.tif` 跑，坐标整片错位。名字对不上一律不认。
+        """
+        self.tif.unlink()                       # 只留 PAN.tif
+        d = self.scene_dir
+        make_scene(d, SCENE_NAME, tif=False)
+        arr = (np.arange(320 * 640).reshape(640, 320) % 65535).astype(np.uint16)
+        pan = d / "PAN.tif"
+        tifffile.imwrite(pan, arr, photometric="minisblack")
+
+        r = self.resolve(name=SCENE_NAME, size_bytes=pan.stat().st_size)
+        self.assertEqual(r.status_code, 404, r.text)
+        self.assertIn("不是同一个文件", r.json()["detail"])
+        # 不带上限的裸调用（老行为）仍然打得开 —— 这条守卫只针对带指纹的入口
+        self.assertEqual(self.resolve(name=SCENE_NAME).status_code, 200)
+
+    def test_nonpositive_size_400(self):
+        for bad in (0, -1, True):
+            r = self.resolve(name=SCENE_NAME, size_bytes=bad)
+            self.assertEqual(r.status_code, 400, f"{bad!r} → {r.text}")
+            self.assertIn("size_bytes", r.json()["detail"])
+
+    def test_non_integer_size_400(self):
+        r = self.resolve(name=SCENE_NAME, size_bytes="2560256")
+        self.assertEqual(r.status_code, 400)
+
+    def test_path_branch_ignores_size_bytes(self):
+        """`{path}` 是精确路径，天然没有冒名问题 —— 带不带指纹都开得了。"""
+        r = self.resolve(path=self.win_path(self.d), size_bytes=1)
+        self.assertEqual(r.status_code, 200, r.text)
+
+
+class TestTempPreview(ResolveBase):
+    """`/preview-tmp`：拖拽入口的临时缓存 —— 落独立目录、不碰源同目录。"""
+
+    def setUp(self):
+        super().setUp()
+        self.tmp_root = self.root / "tmp-previews"
+        os.environ["SR_TEMP_PREVIEWS_ROOT"] = str(self.tmp_root)
+        self.d = self.make_scene()
+        self.tif = self.d / f"{SCENE_NAME}.tif"
+
+    def scene_id_of_manual(self, c) -> str:
+        return c.post("/api/scenes/resolve",
+                      json={"path": self.win_path(self.d)}).json()["row"]["id"]
+
+    def test_bakes_into_temp_root_not_beside_source(self):
+        c = self.client()
+        r = c.get(f"/api/scenes/{self.scene_id_of_manual(c)}/preview-tmp")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.headers["content-type"], "image/jpeg")
+        self.assertEqual(r.headers["cache-control"], "no-store")
+        bucket = self.tmp_root / date.today().isoformat()
+        self.assertTrue((bucket / ".sr-tmp-preview").is_file())
+        self.assertTrue(list(bucket.glob("*.jpg")))
+        # 核心证据：临时路径**不写**源同目录那份长期缓存
+        self.assertFalse((self.d / f"{SCENE_NAME}.preview.jpg").exists())
+
+    def test_second_request_hits_cache(self):
+        """第二次不再重烤：mtime 不变（烘焙一次大图很贵，别每次都来）。"""
+        c = self.client()
+        sid = self.scene_id_of_manual(c)
+        c.get(f"/api/scenes/{sid}/preview-tmp")
+        bucket = self.tmp_root / date.today().isoformat()
+        jpg = next(iter(bucket.glob("*.jpg")))
+        first = jpg.stat().st_mtime_ns
+        r = c.get(f"/api/scenes/{sid}/preview-tmp")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(jpg.stat().st_mtime_ns, first)
+
+    def test_jpeg_source_short_circuits(self):
+        """源本身就是 JPG（显示就绪图）：回源文件，不尝试烘焙 ——
+        `build_preview_pixels` 只认 TIFF，不给这行短路就会 422。"""
+        jpg_scene = self.d / "display.jpg"
+        Image.new("L", (32, 32), 7).save(jpg_scene)
+        r = self.client().get(f"/api/scenes/{scene_id_abs(jpg_scene)}/preview-tmp")
+        self.assertEqual(r.status_code, 200, r.text)
+
+    def test_outside_whitelist_404(self):
+        outside = Path("/etc/passwd") if os.name != "nt" else Path("C:/Windows/win.ini")
+        r = self.client().get(f"/api/scenes/{scene_id_abs(outside)}/preview-tmp")
+        self.assertEqual(r.status_code, 404)
+
+    def test_never_lists_directories(self):
+        """禁止扫盘的钉子同样管着临时路径：`tmp_preview_path` 只 mkdir + stat。"""
+        c = self.client()
+        sid = self.scene_id_of_manual(c)
+        with ExitStack() as st:
+            for name in ("rglob", "glob", "iterdir"):
+                st.enter_context(mock.patch.object(
+                    Path, name,
+                    side_effect=AssertionError(f"禁止 Path.{name}（扫盘）")))
+            for name in ("listdir", "scandir", "walk"):
+                st.enter_context(mock.patch.object(
+                    os, name,
+                    side_effect=AssertionError(f"禁止 os.{name}（扫盘）")))
+            r = c.get(f"/api/scenes/{sid}/preview-tmp")
+            self.assertEqual(r.status_code, 200, r.text)
 
 
 class TestManualSceneId(ResolveBase):

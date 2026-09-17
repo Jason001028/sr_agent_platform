@@ -6,7 +6,10 @@
 Env
 ---
 SR_SCENES_ROOT    盘阵场景根（unset → fake 回退）
-SR_PREVIEWS_ROOT  可选预览缓存根（须在 scenes 根内）
+SR_PREVIEWS_ROOT  可选预览缓存根（须在 scenes 根内，长期缓存）
+SR_TEMP_PREVIEWS_ROOT 拖拽入口的**临时**预览缓存根（1 天 TTL，每日 0 点清）；
+                  默认系统临时目录，生产须显式配到真实磁盘上
+                  （见 services/preview_cache.py 的约定）
 SR_AGENT_DB       SQLite 路径（chat 会话 + sr_tasks 同一库）
 SR_LLM_MOCK       =1 → 聊天走固定脚本假 LLM（api-contract.md §5.1）
 SR_SLURM_FAKE     =1 → 提交走内存假调度器（§5.2）
@@ -19,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -32,7 +36,8 @@ from backend.api.platform import (
 from backend.config import load_config
 from backend.pathguard import (
     ensure_allowed, infer_scene_paths, is_within, parse_scene_date,
-    to_posix_array_path)
+    strip_raster_ext, to_posix_array_path)
+from backend.services import preview_cache
 from backend.services import scene_search, store as store_mod
 from backend.services.preview_jpg import (PreviewError, ensure_preview_jpg,
                                           scene_dims)
@@ -184,18 +189,85 @@ def _poll_once(state) -> None:
             _task_state(state, task)
 
 
+def _seconds_to_next_midnight(now: datetime | None = None) -> float:
+    """到下一个**本地** 0 点的秒数（临时预览缓存的清扫时刻）。
+
+    用 `combine(明天, min.time())` 而不是「now + 1 天再抹掉时分秒」：后者是在
+    加了 24 小时之后取的日期，夏令时切换日会多/少一小时。这里只是决定什么时候
+    删过期桶，差一小时无害，但算对更省事。下界 1s，避免时钟跳变导致的忙循环。
+    """
+    now = now or datetime.now()
+    nxt = datetime.combine(now.date() + timedelta(days=1), datetime.min.time())
+    return max(1.0, (nxt - now).total_seconds())
+
+
+async def _tmp_preview_purge_loop() -> None:
+    """临时预览缓存清扫（services/preview_cache.py）：**启动先清一次**，
+    之后每天本地 0 点清一次，只留当天的桶。
+
+    为什么放在后台任务里而不是请求路径上：`purge_temp_previews` 要 iterdir
+    缓存根，而 `tests/test_scene_resolve.py::TestNeverListsDirectories` 在请求
+    作用域内把 `os.listdir/scandir/walk` 与 `Path.rglob/glob/iterdir` 全打成了
+    AssertionError ——「禁止扫盘」是硬约束，请求里碰不得。
+
+    「算下一个 0 点」也放进 try：它若抛异常，任务会带着异常静默死掉，之后再没
+    人清理（服务照跑，缓存无限涨）。单轮失败只该跳过这一轮。
+    """
+    while True:
+        try:
+            await asyncio.to_thread(preview_cache.purge_temp_previews)
+            delay = _seconds_to_next_midnight()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — 清理失败不 kill 循环
+            delay = 3600.0   # 算不出 0 点就退化成每小时试一次
+        await asyncio.sleep(delay)
+
+
+def _fingerprint_mismatch(inp: Path, name: str, size_bytes: int) -> str | None:
+    """拖拽入口的双指纹：**文件名 + 字节数**都吻合才算同一个文件。
+    返回人话原因（并入 404 的候选清单），None = 吻合。
+
+    为什么名字这一半不能省：`scene_search.input_candidates` 的次序是
+    `<目录名>.{tif,tiff,img}` 在前、`PAN.{tif,tiff,img}` 在后，
+    `input_scene_path` 返回第一个存在的。RC 场景的输入影像是 `PAN.tif`，但同
+    目录里往往还躺着 `<目录名>.tif`（上游 SC 步骤的产物）。用户拖的若是后者，
+    只比字节数就可能通过 —— 而 SR 在盘阵上跑的是 `PAN.tif`，用户画的掩码坐标
+    会整片落在另一张图上。名字对不上一律不认，宁可退回浏览器本地解码。
+    """
+    want = strip_raster_ext(name)
+    if inp.stem != want:
+        return (f"{inp.parent}：目录里的输入影像是 {inp.name}，与拖入的 {want} "
+                "不是同一个文件（SR 在这个目录上跑的是前者）")
+    try:
+        actual = inp.stat().st_size
+    except OSError as e:
+        return f"{inp.parent}：读不到输入影像的大小（{e}）"
+    if actual != size_bytes:
+        return (f"{inp.parent}：输入影像 {inp.name} 的字节数与拖入的文件不一致"
+                f"（盘阵 {actual} vs 拖入 {size_bytes}）")
+    return None
+
+
 def create_app() -> FastAPI:
     root = paths.scenes_root()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        app.state.poller = asyncio.create_task(_poll_loop(app.state))
+        # 任务列表而不是单个 poller：漏 cancel 一个，它会在 app 关闭后继续跑
+        # （测试里就是往下一个用例的 env 上写）。
+        app.state.tasks = [
+            asyncio.create_task(_poll_loop(app.state)),
+            asyncio.create_task(_tmp_preview_purge_loop()),
+        ]
         yield
-        app.state.poller.cancel()
-        try:
-            await app.state.poller
-        except asyncio.CancelledError:
-            pass
+        for t in app.state.tasks:
+            t.cancel()
+        for t in app.state.tasks:
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
 
     app = FastAPI(title="sr_agent_platform api", version="0.5.0",
                   lifespan=lifespan)
@@ -294,8 +366,24 @@ def create_app() -> FastAPI:
         路径指向非 TIFF 文件）· **403** 越白名单 · **404** 反推成立但盘阵上
         没有合法场景目录或没有输入影像 · **422** 场景成立但读不到影像尺寸
         （前端开图要 W/H）。
+
+        请求体：`{path}` 精确路径，或 `{name, date?}` 裸文件名（日期可由后端
+        从文件名里取）。`{name}` 可再带 `size_bytes`（拖拽入口用，见
+        `_fingerprint_mismatch`）：给了就要求候选目录里的输入影像**同名且字节
+        数一致**，否则这条候选记原因后跳过（最终仍是 404 并列出原因）；不给
+        则只看目录/影像存不存在。`{path}` 分支是精确路径，不收这个字段。
         """
         body = await _json_body(request)
+        # 拖拽入口的可选双指纹（{name} 分支才用得上，见 _fingerprint_mismatch）：
+        # 给了就必须是正整数；不给则一切照旧（粘路径 / 场景库不走这里）。
+        size_bytes = body.get("size_bytes")
+        if size_bytes is not None and (
+                isinstance(size_bytes, bool) or not isinstance(size_bytes, int)
+                or size_bytes <= 0):
+            raise HTTPException(
+                status_code=400,
+                detail=f"size_bytes 须为正整数（收到 {size_bytes!r}）")
+        name = ""       # 仅 name 分支赋值；path 分支是精确路径，无需指纹
         raw_path = body.get("path")
         if isinstance(raw_path, str) and raw_path.strip():
             try:
@@ -321,7 +409,7 @@ def create_app() -> FastAPI:
                 return _resolve_bare_tif(target)
             tried = [posix]
         else:
-            name, date = body.get("name"), body.get("date")
+            name, date = body.get("name") or "", body.get("date")
             if not isinstance(name, str) or not name.strip():
                 raise HTTPException(
                     status_code=400,
@@ -370,6 +458,13 @@ def create_app() -> FastAPI:
                                       for c in scene_search.input_candidates(d))
                     reasons.append(f"{d}：目录里没有输入影像（找过 {names}）")
                 continue
+            if size_bytes is not None and name:
+                why = _fingerprint_mismatch(inp, name, size_bytes)
+                if why:
+                    # 指纹不认就当作**这条候选**不合格，接着试下一条（旧扁平
+                    # 模板），不要立刻 404 —— 报错口径仍由下面统一出。
+                    reasons.append(why)
+                    continue
             hit = (d, inp)
             break
         if hit is None:
@@ -425,5 +520,42 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=422,
                                 detail=f"预览生成失败：{e}") from e
         return FileResponse(str(jpg), media_type="image/jpeg")
+
+    @app.get("/api/scenes/{scene_id}/preview-tmp")
+    def preview_tmp(scene_id: str):
+        """拖拽入口专用的**临时**预览图（默认 1 天 TTL，见 services/preview_cache）。
+
+        与 `/preview` 只差落点：那份长期缓存写源同目录或 `SR_PREVIEWS_ROOT` 的
+        镜像树，跟着场景数据活；这份写 `SR_TEMP_PREVIEWS_ROOT/<今天>/<hash>.jpg`，
+        第二天 0 点整桶删掉。**烘焙规则完全相同**，所以同一场景两条链出来的
+        字节是一样的，观感一致。
+
+        为什么不复用 `/preview` 加个 query 参数：`/preview` 的语义（含
+        `hasPreview`/`jpgUrl` 静态 URL）绑死在「生产 `<stem>.preview.jpg` 在不
+        在」上，拖拽的源多半落在库外、不该往生产数据目录撒文件。分成两个端点，
+        前端也就不会把临时字节写进库行的状态里。
+
+        `Cache-Control: no-store`：URL 按 scene id 稳定、内容跨天会变，不加这句
+        浏览器会按启发式缓存把隔夜的字节端上来（桶都删了还能看见旧的）。
+        """
+        headers = {"Cache-Control": "no-store"}
+        try:
+            abs_path = paths.scene_id_to_abs(scene_id, root)
+        except PathDeniedError as e:
+            raise HTTPException(status_code=404,
+                                detail=f"场景不可访问：{e}") from e
+        if abs_path.suffix.lower() in (".jpg", ".jpeg"):
+            # 源本身就是显示就绪图：回源文件即可（build_preview_pixels 只认
+            # TIFF，不给这行短路会抛「仅支持 TIFF 生成预览」）。
+            return FileResponse(str(abs_path), media_type="image/jpeg",
+                                headers=headers)
+        jpg = preview_cache.tmp_preview_path(abs_path)
+        try:
+            ensure_preview_jpg(str(abs_path), str(jpg))
+        except PreviewError as e:
+            raise HTTPException(status_code=422,
+                                detail=f"预览生成失败：{e}") from e
+        return FileResponse(str(jpg), media_type="image/jpeg",
+                            headers=headers)
 
     return app

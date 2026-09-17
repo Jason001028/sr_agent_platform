@@ -230,10 +230,13 @@ rec 的 `route` 记为 `'jpg'`，`layout` 记为「盘阵 JPG（1/2 尺度 + 直
 
 ### 4.8 落点与原子写
 
-落点由 `preview_jpg_for` 决定：
+落点有**三种**（2026-09-18 起）。前两种是长期缓存，由 `preview_jpg_for` 决定；第三种是拖拽入口的临时缓存，由 `preview_cache.tmp_preview_path` 决定：
 
 - 源在 `SR_SCENES_ROOT` 之下 → `preview_jpg_path`：默认 `<源同目录>/<stem>.preview.jpg`；若配了 `SR_PREVIEWS_ROOT`（必须在 scenes root 之下，否则 nginx 单根 alias 覆盖不到）则搬到 `<previews_root>/<rel 目录>/<stem>.preview.jpg`，URL 不变。
-- 源在库外 → 恒为 `<源同目录>/<stem>.preview.jpg`。这类不走 nginx 静态 URL，不需要在 URL 层面可映射。
+- 源在库外（粘路径 / 裸 `.tif` 打开）→ 恒为 `<源同目录>/<stem>.preview.jpg`。这类不走 nginx 静态 URL，不需要在 URL 层面可映射。
+- **拖拽入口**（`GET /api/scenes/{id}/preview-tmp`）→ `SR_TEMP_PREVIEWS_ROOT/<YYYY-MM-DD>/<sha256(源绝对路径)[:16]>.jpg`。烘焙规则与前两种完全相同（同一份 `ensure_preview_jpg`），差别只在落点与生命周期：按日期分桶、每天 0 点整桶删（`preview_cache.purge_temp_previews`，由 `api/app.py` 的后台任务 `_tmp_preview_purge_loop` 驱动），源目录一个字节都不写。响应带 `Cache-Control: no-store`。
+
+为什么拖拽那份要单独走：拖进来的源可能是盘阵上**任意**一张图，往生产数据目录里撒缓存文件不可接受；而它又不需要长期保留（同一张图第二天重新打开，重烤一次即可）。清理只删「桶名是 ISO 日期、且桶里带 `.sr-tmp-preview` 标记文件」的目录 —— 标记文件把「这个目录是我们建的」变成可判定的事实，比任何路径白名单都可靠。
 
 写盘走「临时文件 → `os.replace`」：`os.replace` 在 POSIX 与 Windows 上都是原子替换，读者不会读到半个文件。临时文件建在目标同目录（`tempfile.mkstemp` 的 `dir`），保证与目标同一文件系统。
 
@@ -252,6 +255,15 @@ rec 的 `route` 记为 `'jpg'`，`layout` 记为「盘阵 JPG（1/2 尺度 + 直
 
 **Q：`/preview` 返回的尺寸和 `row.W/H` 不一致，是 bug 吗？**
 不是。`row.W/H` 是元数据尺寸（源图尺寸），JPEG 是各边 1/2。前端按元数据换算掩码坐标正是依赖这一点。
+
+**Q：拖拽入口的临时缓存为什么要每天重烤一次？**
+因为它按设计只活一天：桶在第二天 0 点整桶删除，之后打开同一张图会重新烤。代价是每天第一次拖会出现一次几十秒的等待；换来的是「不往生产数据目录撒缓存文件」+「缓存占用有上界（只有当天那一桶）」。长期缓存（场景库 / 粘路径）不受影响，仍然跟着场景数据长期存在。
+
+**Q：拖拽命中为什么需要「文件名 + 字节数」两个指纹？**
+同一个场景目录里可能躺着不止一张图：RC 场景的输入影像是 `PAN.tif`，而 `input_scene_path` 的候选次序是 `<目录名>.tif` 在前，返回的是它。只比字节数，用户拖进来的可能是一张**不是 SR 实际会读**的影像，那之后画的掩码坐标会整片落在别的图上。判定在服务端（`_fingerprint_mismatch`），对不上就 404 + 列出原因，前端退回浏览器本地解码。
+
+**Q：拖拽命中之后，本地文件那条解码还跑吗？**
+不跑。`viewer.activate` 先 `await tryLinkScenes(rec)`，命中就直接返回 —— 真机上一次全图解码几十秒、几百 MB，而服务端那份预览已经在手上。也顺带避开了「本地图先画出来、几百毫秒后又被 JPG 换掉」的闪烁。没命中才走本地解码。
 
 **Q：什么时候会走 Pillow 兜底？**
 采样器判定布局不支持（压缩、tiled、多波段、planar≠1）时。兜底只对像素数 ≤ 67M 的文件开放，因为 Pillow 会整图解码，1.1GB 的场景会直接打爆内存。超过 67M 的不支持布局会以 `PreviewError` 上报 422，而不是勉强解码。

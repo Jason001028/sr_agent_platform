@@ -44,6 +44,11 @@ export interface ViewerRecSummary {
   thumb: HTMLCanvasElement | null;
   /** 这张图**实际**画出来的拉伸模式（null = 还没画过）。 */
   paintedMode: StretchMode | null;
+  /** 不透明场景 id（route='jpg' 才有；升级/打开盘阵场景后非空）。 */
+  sceneId: string | null;
+  /** 反推关联**失败**时服务端给的原因（成功或没试过则 undefined）。
+   *  单独暴露：rec.status 会被解码进度覆盖，失败原因在别处看不到。 */
+  linkNote?: string;
 }
 
 export interface ViewerHook {
@@ -74,7 +79,8 @@ export interface ViewerHook {
   submitSr: () => void;
   // 盘阵任意场景目录（手工路径）：打开 / 本地文件反推关联 / 掩码写进服务端
   openScenePath: (path: string) => Promise<boolean>;
-  tryLinkScenes: () => Promise<void>;
+  /** 反推关联当前图；**返回是否命中并已升级成盘阵 JPG**（命中即不做本地解码）。 */
+  tryLinkScenes: () => Promise<boolean>;
   bakeMaskToServer: () => Promise<boolean>;
   // 测试观测（Vue 无全局 recs → 摘要快照）
   recs: () => ViewerRecSummary[];
@@ -107,6 +113,8 @@ function summarize(rec: ViewerRec): ViewerRecSummary {
     serverMaskPath: rec.serverMaskPath ?? null,
     thumb: (rec.thumb as unknown as HTMLCanvasElement | null),
     paintedMode: rec.paintedMode,
+    sceneId: rec.sceneId,
+    linkNote: rec.linkNote,
   };
 }
 

@@ -149,9 +149,22 @@ export function sceneResolveUrl(cfg: SrConfig): string {
   return joinBase(cfg.apiBase, '/api/scenes/resolve');
 }
 
-/** 懒生成预览端点 URL：GET /api/scenes/{id}/preview → JPEG 字节。 */
+/** 懒生成预览端点 URL：GET /api/scenes/{id}/preview → JPEG 字节。
+ *
+ * 这是**长期**缓存那条链（写源同目录或 SR_PREVIEWS_ROOT 镜像树）。只有场景库
+ * 与粘路径的入口该用它；拖拽入口走 `tmpPreviewUrl`，别混。 */
 export function scenePreviewUrl(cfg: SrConfig, id: string): string {
   return joinBase(cfg.apiBase, `/api/scenes/${encodeURIComponent(id)}/preview`);
+}
+
+/** 拖拽入口的**临时**预览端点 URL：GET /api/scenes/{id}/preview-tmp。
+ *
+ * 与 `scenePreviewUrl` 是两个端点（不是同一个 URL 的参数）：这条落在
+ * `SR_TEMP_PREVIEWS_ROOT/<今天>/` 下，第二天 0 点整桶清除；生产目录一个字节
+ * 都不写。烘焙规则与长期那条完全相同，所以字节一致。响应带 `no-store`
+ * （URL 稳定、内容跨天变），浏览器不会拿隔夜的缓存糊弄。 */
+export function tmpPreviewUrl(cfg: SrConfig, id: string): string {
+  return joinBase(cfg.apiBase, `/api/scenes/${encodeURIComponent(id)}/preview-tmp`);
 }
 
 /** 已生成 JPG 的静态 URL（cfg.staticBase 前缀 + 后端相对 /disk-array/…）。 */
