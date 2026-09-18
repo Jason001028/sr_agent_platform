@@ -5,9 +5,11 @@
 `~` 形态的场景 id 能走 /preview；**绝不列举目录**（把 rglob/glob/iterdir/
 listdir/scandir/walk 全部打桩成抛错，resolve 仍须 200）。
 
-夹具用真机布局 `<根>/GSHC2IMPS/PRODUCT/<年>/<月>/<日>/<编号>/<编号>.tif` +
-`<编号>_meta.xml`，并把 W: 映射到临时根 —— 这样测试里写的 `W:\\...` 就是
-用户在客户端真正会粘的那一串。
+夹具就是真机布局（六层生产树）
+`<根>/GSHC2IMPS/PRODUCT/<年>/<月>/<日>/<卫星型号>/<段级目录>/<景级目录>/<景级目录>.tif`
++ `_meta.xml`，并把 W: 映射到临时根 —— 这样测试里写的 `W:\\...` 就是用户在客户端
+真正会粘的那一串。**没有平铺那条捷径**：`{name}` 反推必须真能拼出 `{sat}`/`{mid}`
+两层才命中（平铺形态只在一个专门验诊断措辞的用例里现搭）。
 """
 
 import os
@@ -34,12 +36,18 @@ _ENVS = ("SR_AGENT_DB", "SR_SCENES_ROOT", "SR_PREVIEWS_ROOT", "SR_LLM_MOCK",
          "SR_DRIVE_MAP", "SR_ALLOWED_ROOTS", "SR_SCENE_PATH_TEMPLATE")
 
 #: 生产编号 —— 真机形态，14 位成像时间嵌在中间（反推靠它取日期）。
-SCENE_NAME = "JL1KF02B03_PMS02_20260917124710_200536960_101_0005_001_L1_PAN"
+#: **型号/传感器段刻意压成一个字母**：六层生产树要叠在临时目录前缀（~70 字符）
+#: 之下，真机那种 57 字符全名会顶爆 Windows 260 的路径上限（>250 即
+#: FileNotFoundError）；盘阵是 Linux，没这个限制。判据一个不少 —— 卫星型号段、
+#: 3 位段号、4 位景号、14 位成像时刻都在。
+SCENE_NAME = "A_B_20260917124710_200536960_101_0005_001_L1_PAN"
 SCENE_DATE = "2026-09-17"
 #: 生产树里它上面那一层（段级目录）= 去掉景号段（`0005`）。
-PROD_MID = "JL1KF02B03_PMS02_20260917124710_200536960_101_001_L1_PAN"
-#: 合成样本名（同样符合生产命名规则）：喂 Windows 260 路径上限的场景用。
-SHORT_NAME = "A_B_20260917124710_200536960_102_0025_001_L1_PAN"
+PROD_MID = "A_B_20260917124710_200536960_101_001_L1_PAN"
+#: 另一段（`101` → `102`）的段级目录名：造「另一个场景」用。
+MID_OTHER = "A_B_20260917124710_200536960_102_001_L1_PAN"
+#: 卫星型号层（生产名的第 0 段）。
+SAT_NAME = "A"
 
 
 def make_scene(dirp, name, w=320, h=640, meta=True, tif=True):
@@ -98,10 +106,19 @@ class ResolveBase(unittest.TestCase):
         return TestClient(app)
 
     # -- 夹具 ---------------------------------------------------------------
+    #: 六层生产树：`<根>/GSHC2IMPS/PRODUCT/<年>/<月>/<日>/<卫星型号>/<段级>/<景级>`
+    #: —— 夹具就是真机形态，不存在「平铺」那条捷径，反推必须真能拼出这两层。
+    @property
+    def day_dir(self) -> Path:
+        return self.root / "GSHC2IMPS" / "PRODUCT" / "2026" / "09" / "17"
+
+    @property
+    def sat_dir(self) -> Path:
+        return self.day_dir / SAT_NAME
+
     @property
     def scene_dir(self) -> Path:
-        return (self.root / "GSHC2IMPS" / "PRODUCT" / "2026" / "09" / "17"
-                / SCENE_NAME)
+        return self.sat_dir / PROD_MID / SCENE_NAME
 
     def win_path(self, dirp: Path) -> str:
         """把临时根下的目录写成用户会粘的 Windows 形态。"""
@@ -126,8 +143,8 @@ class TestResolveOk(ResolveBase):
         self.assertEqual(row["name"], SCENE_NAME)
         self.assertEqual(row["lq_path"], d.as_posix())   # 契约：盘阵 POSIX 形态
         self.assertEqual(row["date"], SCENE_DATE)
-        self.assertEqual(row["satellite"], "JL1KF02B03")
-        self.assertEqual(row["sensor"], "PMS02")
+        self.assertEqual(row["satellite"], SAT_NAME)     # 生产名第 0 段
+        self.assertEqual(row["sensor"], "B")             # 第 1 段
         self.assertFalse(row["fake"])
         self.assertEqual((row["W"], row["H"]), (320, 640))
         self.assertGreater(row["size_bytes"], 0)
@@ -186,24 +203,30 @@ class TestResolveOk(ResolveBase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json()["row"]["lq_path"], d.as_posix())
 
-    def test_reverse_lookup_hits_production_tree(self):
-        """生产树真形态：`<日>/<卫星型号>/<段级目录>/<景级目录>` 也要能命中。
+    def test_reverse_lookup_hits_next_day_dir(self):
+        """名字含 0917 的景躺在 **0918** 目录下 —— 次日候选要能命中（用户报的 bug）。
 
-        扁平形态那条候选故意不建目录 —— 命中只可能来自生产树候选。
+        盘阵按**生产日**建目录，夜里成像的景记在第二天：`…_20260917124710_…`
+        （23 时以后）落进 `…/09/18/…`。名字里的 14 位是**成像**时刻，只当得了
+        下界；修复前只按这一天拼目录，于是大部分图都报「目录不存在」。
 
-        名字是**合成样本且刻意取短**：临时目录前缀已占 ~90 字符，真实的 57 字符
-        场景名再加两层目录会超过 Windows 260 的路径上限（本机 >250 即
-        FileNotFoundError）。本用例验的是层级与反推，不是名字长度。
+        用例只造次日的目录（夹具的真身没建），所以命中只可能来自次日那条候选。
         """
-        name = SHORT_NAME
-        mid = "A_B_20260917124710_200536960_102_001_L1_PAN"
-        d = (self.root / "GSHC2IMPS" / "PRODUCT" / "2026" / "09" / "17"
-             / "A" / mid / name)
-        make_scene(d, name)
-        self.assertFalse(self.scene_dir.exists())
-        r = self.client().post("/api/scenes/resolve", json={"name": name})
+        d = (self.root / "GSHC2IMPS" / "PRODUCT" / "2026" / "09" / "18"
+             / SAT_NAME / PROD_MID / SCENE_NAME)       # ← 18，名字里是 17
+        make_scene(d, SCENE_NAME)
+        r = self.client().post("/api/scenes/resolve", json={"name": SCENE_NAME})
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json()["row"]["lq_path"], d.as_posix())
+
+    def test_reverse_lookup_prefers_imaging_day(self):
+        """两天都有同名目录时，**成像日**那条先命中（顺序即优先级）。"""
+        for day in ("17", "18"):
+            make_scene(self.root / "GSHC2IMPS" / "PRODUCT" / "2026" / "09"
+                       / day / SAT_NAME / PROD_MID / SCENE_NAME, SCENE_NAME)
+        r = self.client().post("/api/scenes/resolve", json={"name": SCENE_NAME})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn("/2026/09/17/", r.json()["row"]["lq_path"])
 
     def test_row_inside_scenes_root_gets_static_preview_url(self):
         d = self.make_scene()
@@ -215,7 +238,8 @@ class TestResolveOk(ResolveBase):
         # rel 与库行同义：相对 scenes 根、**含文件名**的路径（scene_id 靠它反解）
         self.assertEqual(
             row["rel"],
-            f"GSHC2IMPS/PRODUCT/2026/09/17/{SCENE_NAME}/{SCENE_NAME}.tif")
+            f"GSHC2IMPS/PRODUCT/2026/09/17/{SAT_NAME}/{PROD_MID}/"
+            f"{SCENE_NAME}/{SCENE_NAME}.tif")
         self.assertTrue(row["jpgUrl"].startswith("/disk-array/"))
 
     def test_pan_scene_input_is_pan_tif_and_mask_follows_input(self):
@@ -271,7 +295,8 @@ class TestResolveErrors(ResolveBase):
         目录。以前报「缺 17_meta.xml」—— `<目录名>_meta.xml` 的前缀是**完整生产
         名**（含 14 位成像时刻），`17` 这种前缀不可能构成它，用户读完也不知道
         该粘哪一层。"""
-        d = self.make_scene().parent            # …/2026/09/17
+        self.make_scene()
+        d = self.day_dir                        # …/2026/09/17
         detail = self.paste_404(d)
         self.assertIn("日期目录", detail)
         self.assertIn(str(d), detail)
@@ -279,7 +304,7 @@ class TestResolveErrors(ResolveBase):
         self.assertIn("<景级目录>", detail)          # 说清该粘哪一层
 
     def test_satellite_dir_404_points_two_levels_down(self):
-        sat = self.scene_dir.parent / "JL1KF02B03"
+        sat = self.sat_dir
         sat.mkdir(parents=True)
         detail = self.paste_404(sat)
         self.assertIn("卫星型号层", detail)
@@ -288,7 +313,7 @@ class TestResolveErrors(ResolveBase):
     def test_mid_dir_404_points_one_level_down(self):
         """段级目录（= 景级目录去掉景号那段）。它的名字**也**带 14 位成像时刻，
         光看名字会误报「缺 <段级名>_meta.xml」—— 得按层数认下来。"""
-        mid = self.scene_dir.parent / "JL1KF02B03" / PROD_MID
+        mid = self.sat_dir / PROD_MID
         mid.mkdir(parents=True)                 # 只判层，不必造影像
         detail = self.paste_404(mid)
         self.assertIn("段级", detail)
@@ -296,22 +321,21 @@ class TestResolveErrors(ResolveBase):
         self.assertNotIn(f"{PROD_MID}_meta.xml", detail)
 
     def test_scene_subdir_404_says_too_deep(self):
-        """扁平拓扑（本夹具就是 `<年>/<月>/<日>/<场景名>`）里，场景目录再深一层
-        是它**内部**，不是段级层 —— 这两种拓扑得分开认。"""
-        d = self.make_scene() / "Debug"         # 场景目录内部的子目录
-        d.mkdir()
-        detail = self.paste_404(d)
-        self.assertIn("子目录", detail)
-        self.assertNotIn("段级", detail)
-
-    def test_six_layer_scene_subdir_404_says_too_deep(self):
-        """六层树：景级目录内部再深一层。这里用短名样本 —— 真机那种全名的路径
-        会顶到 Windows 260 上限（同 TestResolveLongPath 的理由）。"""
-        mid = "A_B_20260917124710_200536960_102_001_L1_PAN"   # 段级名：去掉景号段
-        scene = self.scene_dir.parent / "JL1KF02B03" / mid / SHORT_NAME
+        """六层树：景级目录内部再深一层。用第 102 景（段级名跟着换）。"""
+        scene = self.sat_dir / MID_OTHER / SCENE_NAME
         (scene / "Debug").mkdir(parents=True)
         detail = self.paste_404(scene / "Debug")
         self.assertIn("场景目录内部的子目录", detail)
+
+    def test_flat_topology_scene_subdir_404_says_too_deep(self):
+        """扁平拓扑（`<年>/<月>/<日>/<场景名>`，非生产树部署仍有）里，场景目录
+        再深一层是它**内部**，不是段级层 —— 这两种拓扑得分开认。"""
+        flat = self.day_dir / SCENE_NAME
+        d = make_scene(flat, SCENE_NAME, tif=False) / "Debug"
+        d.mkdir(parents=True, exist_ok=True)
+        detail = self.paste_404(d)
+        self.assertIn("子目录", detail)
+        self.assertNotIn("段级", detail)
 
     def test_non_production_dir_404_says_name_shape(self):
         d = self.root / "GSHC2IMPS" / "PRODUCT" / "scratch"
@@ -331,16 +355,28 @@ class TestResolveErrors(ResolveBase):
         self.assertIn("PAN.tif", detail)
 
     def test_reverse_lookup_wrong_date_404(self):
-        self.make_scene()
+        """用户手填了个错日期：两天候选都落空，404 要说清试过哪些、试的是哪两天。"""
+        self.make_scene()                       # 真身在 09/17
         r = self.client().post("/api/scenes/resolve",
                                json={"name": SCENE_NAME, "date": "2026-09-18"})
         self.assertEqual(r.status_code, 404)
         detail = r.json()["detail"]
         self.assertIn(SCENE_NAME, detail)
         self.assertIn("目录不存在", detail)
-        # 两条候选都要列出来（生产树 + 旧扁平），缺一条就说不清"试过哪些"。
+        # 两条候选都要列出来（09/18 与 09/19），缺一条就说不清"试过哪些"。
         # 只断言目录名：路径分隔符是宿主形态（Windows 上 str(Path) 是反斜杠）。
         self.assertIn(PROD_MID, detail)
+        self.assertEqual(detail.count("目录不存在"), 2)
+        self.assertIn("成像日与次日都找过", detail)
+
+    def test_404_without_two_days_has_no_day_note(self):
+        """自定模板不含日期占位符 → 只有一条候选，别硬塞「两天都找过」那句。"""
+        os.environ["SR_SCENE_PATH_TEMPLATE"] = \
+            (self.root / "nowhere").as_posix() + "/{name}"
+        r = self.client().post("/api/scenes/resolve", json={"name": SCENE_NAME})
+        self.assertEqual(r.status_code, 404, r.text)
+        self.assertIn("目录不存在", r.json()["detail"])
+        self.assertNotIn("次日", r.json()["detail"])
 
     def test_reverse_lookup_without_timestamp_400(self):
         r = self.client().post("/api/scenes/resolve", json={"name": "PAN"})
@@ -829,7 +865,8 @@ class TestManualSceneId(ResolveBase):
         d = self.make_scene()
         os.environ["SR_SCENES_ROOT"] = str(self.root)
         c = self.client()
-        rel = f"GSHC2IMPS/PRODUCT/2026/09/17/{SCENE_NAME}/{SCENE_NAME}.tif"
+        rel = (f"GSHC2IMPS/PRODUCT/2026/09/17/{SAT_NAME}/{PROD_MID}/"
+               f"{SCENE_NAME}/{SCENE_NAME}.tif")
         r = c.get(f"/api/scenes/{scene_id(rel)}/preview")
         self.assertEqual(r.status_code, 200, r.text)
         self.assertTrue((d / f"{SCENE_NAME}.preview.jpg").is_file())

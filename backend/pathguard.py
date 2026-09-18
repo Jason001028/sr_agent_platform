@@ -18,9 +18,9 @@
 * SR_ALLOWED_ROOTS 允许访问的盘阵前缀，`;` 分隔，默认 `/DiskArray`。
 * SR_SCENE_PATH_TEMPLATE 反推模板（含盘符，便于沿用用户侧写法）。可用占位符
                    `{y} {m} {d} {name} {sat} {mid}`；**配了只按它一条走**，未配
-                   则按默认的生产树模板 + 旧扁平形态两条候选。后两个占位符由
-                   生产命名规则从文件名拆出（见 docs/sr_code/
-                   production-scene-naming.md），拆不出就跳过该条。
+                   则按默认的生产树模板。后两个占位符由生产命名规则从文件名拆出
+                   （见 docs/sr_code/production-scene-naming.md），拆不出就跳过
+                   该条。**日期给两天**（成像日与次日），见 `infer_scene_paths`。
 * 白名单是**词法**策略，不做 `is_dir()` 检查（路径可能还没 stat，开发机也
   没有 /DiskArray）；与 `api/paths.py::scenes_root()` 的"必须存在"不同。
 """
@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import date, timedelta
 from pathlib import Path
 
 _DEFAULT_DRIVE_MAP = "W:=/DiskArray"
@@ -206,10 +207,9 @@ def normalize_submit_path(raw: str | Path) -> str:
 _DEFAULT_SCENE_TEMPLATE = (
     "W:\\GSHC2IMPS\\PRODUCT\\{y}\\{m}\\{d}\\{sat}\\{mid}\\{name}")
 
-#: 旧扁平形态。默认（未配 SR_SCENE_PATH_TEMPLATE）时作为**第二条候选**保留：
-#: 非生产树部署（平铺的盘阵根、e2e 假拓扑）仍然在这一条上命中。生产环境里它
-#: 必然落空，只会让 404 的候选清单多一行，代价是一次 stat。
-_LEGACY_SCENE_TEMPLATE = "W:\\GSHC2IMPS\\PRODUCT\\{y}\\{m}\\{d}\\{name}"
+#: 日期偏移：名字里的日期只当**下界**用 —— 盘阵按生产日建目录，深夜成像的景记在
+#: 第二天，所以每个模板按「成像日、次日」各渲染一条（`0, 1` 天）。
+_DAY_OFFSETS = (0, 1)
 
 #: 文件名里可解析出的日期：优先 14 位（YYYYMMDDHHMMSS），其次 8 位。
 _TS_RE = re.compile(r"(?<!\d)(\d{14}|\d{8})(?!\d)")
@@ -353,8 +353,12 @@ def infer_scene_paths(name: str, iso_date: str) -> list[str]:
 
     候选来源：
     * 配了 ``SR_SCENE_PATH_TEMPLATE`` → **只按它一条**渲染；
-    * 未配 → 生产树模板（``{sat}/{mid}`` 两层）在前、旧扁平形态兜底在后，
-      共两条。
+    * 未配 → 生产树模板（``{sat}/{mid}`` 两层）。
+
+    每个模板**渲染两条**：成像日与次日（``_DAY_OFFSETS``）。名字里的 14 位是
+    **成像**时刻，而盘阵按**生产日**建目录 —— 深夜成像的景落进第二天，
+    `…_20260917124710_…` 常躺在 ``…/09/18/…``，只按名字里的日子拼必然找不到。
+    模板若不含日期占位符，两天渲染出同一条，去重后仍只有一条。
 
     名字不符合生产命名规则（拆不出卫星型号/段级目录名）时跳过用到
     ``{sat}``/``{mid}`` 的模板 —— **不拿空串硬拼一条注定不存在的路径**；
@@ -373,21 +377,28 @@ def infer_scene_paths(name: str, iso_date: str) -> list[str]:
     if not (len(y) == 4 and len(mo) == 2 and len(d) == 2 and
             y.isdigit() and mo.isdigit() and d.isdigit()):
         raise PathDeniedError(f"日期须为 YYYY-MM-DD：{iso_date!r}")
+    try:
+        first = date(int(y), int(mo), int(d))
+    except ValueError as e:                  # 形如 2026-09-31：位数对、日子不存在
+        raise PathDeniedError(f"日期须为 YYYY-MM-DD：{iso_date!r}") from e
 
     layers = scene_name_layers(stem)
     sat, mid = layers if layers else ("", "")
-    fields = {"y": y, "m": mo, "d": d, "name": stem, "sat": sat, "mid": mid}
     templates = ([scene_path_template()] if os.environ.get("SR_SCENE_PATH_TEMPLATE")
-                 else [_DEFAULT_SCENE_TEMPLATE, _LEGACY_SCENE_TEMPLATE])
+                 else [_DEFAULT_SCENE_TEMPLATE])
     out: list[str] = []
     for tpl in templates:
         if layers is None and ("{sat}" in tpl or "{mid}" in tpl):
             continue
-        try:
-            rendered = tpl.format(**fields)
-        except (KeyError, IndexError, ValueError) as e:
-            raise PathDeniedError(f"反推模板无法渲染（{tpl}）：{e}") from e
-        posix = to_posix_array_path(rendered)
-        if posix not in out:
-            out.append(posix)
+        for offset in _DAY_OFFSETS:
+            day = first + timedelta(days=offset)
+            fields = {"y": f"{day.year:04d}", "m": f"{day.month:02d}",
+                      "d": f"{day.day:02d}", "name": stem, "sat": sat, "mid": mid}
+            try:
+                rendered = tpl.format(**fields)
+            except (KeyError, IndexError, ValueError) as e:
+                raise PathDeniedError(f"反推模板无法渲染（{tpl}）：{e}") from e
+            posix = to_posix_array_path(rendered)
+            if posix not in out:
+                out.append(posix)
     return out
