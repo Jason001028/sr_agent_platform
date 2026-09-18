@@ -43,10 +43,11 @@ mkdir -p "$OUT_DIR"
 # 当成远程主机（`Cannot connect to D`），这是 Windows 上必踩的坑。
 cd "$OUT_DIR"
 tar -czf "$DIST_PKG" -C "${REPO_ROOT}/frontend" dist
-# backend 包排除测试与字节码：跑测试用开发机仓库，内网机只跑服务。
-# --exclude 匹配成员名，命中目录即整棵子树一起排除。
+# backend 包排除测试、字节码与本地缓存：跑测试用开发机仓库，内网机只跑服务。
+# --exclude 匹配成员名，命中目录即整棵子树一起排除；不含 `/` 的模式按**文件名部分**匹配，
+# 所以 `__pycache__` / `.pytest_cache` 各层都排得掉（`backend/tests` 要锚到顶层才写全路径）。
 tar -czf "$BACK_PKG" -C "$REPO_ROOT" \
-  --exclude='__pycache__' --exclude='backend/tests' \
+  --exclude='__pycache__' --exclude='.pytest_cache' --exclude='backend/tests' \
   backend
 
 # —— 清掉 release/ 里同族的旧包（只认这三个前缀，无关文件一律不碰）——
