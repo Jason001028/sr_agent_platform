@@ -500,7 +500,7 @@ async function main() {
       assert(rec.thumbW === 1600 && rec.thumbH === 800,
         `缩略图画布 = JPG 实际像素 ${rec.thumbW}×${rec.thumbH}`);
       assert(rec.layout.includes('盘阵 JPG'), `布局文案：${rec.layout}`);
-      assert(rec.status.includes('元数据 3200×2000'), `状态行含元数据尺寸（${rec.status.slice(0, 48)}…）`);
+      assert(rec.status === '场景就绪', `状态是短标签、不再重抄名字与尺寸（${rec.status}）`);
       const other = recs.find((r) => r.name === JPG_ROW);
       assert(other && other.W === 400 && other.H === 200 && other.thumbW === 400,
         `JPG 源 rec 的 W/H = Pillow 头尺寸 ${other && other.W}×${other && other.H}`);
