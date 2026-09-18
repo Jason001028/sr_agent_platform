@@ -56,15 +56,10 @@ function resetToday(): void {
     <button type="button" class="btn mini ghost" :disabled="props.busy"
             title="填回当天前缀" @click="resetToday">今天</button>
     <span class="spb-hint">
-      预填的只是<strong>当天日期前缀</strong>，要往下补三层到景级目录
-      （&lt;年&gt;\&lt;月&gt;\&lt;日&gt;\&lt;卫星型号&gt;\&lt;段级目录&gt;\&lt;景级目录&gt;）；
-      日期目录本身不是场景目录。场景目录的目录名就是<strong>完整生产名</strong>
-      （如 JXGF07D03_PMS_20260622052600_200516571_101_0006_001_L1_MSS），
-      目录须含 &lt;目录名&gt;_meta.xml 以及 &lt;目录名&gt;.tif 或 PAN.tif。
-      支持 W:\ 形态（服务端自动映射到 /DiskArray）；只打开你填的这一个路径，
-      不扫盘。<strong>也可以直接粘单个 .tif 文件路径</strong> —— 那张图照样
-      能看，但父目录不是场景目录时不能提交 SR。首次打开要在服务器烘焙 1/2 预览图
-      （要读一遍大图），可能较慢；此后打开读缓存，很快。
+      预填的只是<strong>当天日期前缀</strong>，还要往下补三层
+      （&lt;卫星型号&gt;\&lt;段级目录&gt;\&lt;景级目录&gt;）才是场景目录。
+      路径认两种写法：<strong>W:\…（盘阵）</strong>与 /DiskArray/…；
+      只打开你填的这一个路径，不扫盘。
     </span>
   </div>
 </template>

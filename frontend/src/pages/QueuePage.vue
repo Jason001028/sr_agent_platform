@@ -153,7 +153,7 @@ onUnmounted(() => {
 <template>
   <div class="queue-page">
     <div class="qp-head">
-      <h2>共享任务队列 <span class="qp-sub">SR 作业（slurm / 假调度器）</span></h2>
+      <h2>共享任务队列</h2>
       <div class="qp-actions">
         <span class="qp-dot" :class="{ on: queue.connected }"></span>
         <span class="qp-conn">{{ queue.connected ? 'SSE 已连接' : 'SSE 断开' }}</span>
@@ -224,9 +224,6 @@ onUnmounted(() => {
         <button type="button" class="btn" :disabled="queue.loading" @click="openSubmit()">
           提交 SR
         </button>
-        <span class="qp-hint">提交是真实副作用：后端会立刻在原图目录上跑 SR（同名旧产物会被改名为
-          _NOSR.tif 后覆盖）；完成删原图（delete_ori）已禁用 —— 它会不可恢复地删除或覆盖
-          输出路径上的文件（空后缀时那个文件就是原图）</span>
       </div>
     </section>
 
@@ -278,7 +275,6 @@ onUnmounted(() => {
 .queue-page { max-width: var(--page-w); margin: 0 auto; padding: 10px 20px 44px; }
 .qp-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; }
 .qp-head h2 { margin: 0; font-size: 24px; font-weight: 700; color: var(--ink); display: flex; align-items: baseline; gap: 10px; }
-.qp-sub { font-size: 12px; color: var(--ink-sub); font-weight: 400; }
 .qp-actions { display: flex; align-items: center; gap: 10px; }
 .qp-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-faint); display: inline-block; transition: background 0.2s ease; }
 .qp-dot.on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
@@ -335,7 +331,6 @@ onUnmounted(() => {
 .qp-cell input[type="checkbox"] { accent-color: var(--accent-3); width: 15px; height: 15px; }
 .qp-submit-row { display: flex; align-items: center; gap: 10px; margin-top: 16px; }
 .qp-submit-row .btn { height: 36px; padding: 0 22px; }
-.qp-hint { font-size: 12px; color: var(--ink-faint); }
 
 /* 任务表：白色卡片 */
 .qp-tbl-wrap {

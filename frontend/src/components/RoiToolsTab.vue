@@ -150,7 +150,6 @@ function fmtTime(ts: number): string {
 
 <template>
   <div class="rt">
-    <p class="rt-intro">统计作用于当前显示层（stretch 后 8bit 显示像元）；画 ROI 后在此查看/点选。</p>
 
     <!-- 云量估算（阶段6 启发：无真云掩膜时 = 显示层高亮占比估算 + 疑似云区红叠） -->
     <section class="rt-sec">
@@ -287,8 +286,6 @@ function fmtTime(ts: number): string {
   box-sizing: border-box;
   background: var(--surface);
 }
-.rt-intro { margin: 0; font-size: 11px; color: var(--ink-faint); line-height: 1.6; }
-
 .rt-sec { background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-ctrl); padding: 8px 10px; }
 .rt-h { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--ink); }
 .rt-h.hrow { display: flex; align-items: center; justify-content: space-between; }
