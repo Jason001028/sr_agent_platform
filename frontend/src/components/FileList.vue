@@ -2,7 +2,7 @@
 /**
  * FileList.vue — 侧栏文件列表 + 收起/展开（tif-viewer.html #sidebar + addListItem 直译）
  * ------------------------------------------------------------------
- * 每项：小图预览 / 名称 / 大小·W×H·布局 / 解码状态（绿红）/ × 移除 / active 高亮。
+ * 每项：小图预览 / 名称 / 大小·W×H·布局 / 状态标签行（绿红）/ × 移除 / active 高亮。
  * 收起 toggle 秒出无动画（HTML sideToggle）。
  * （HTML 的「JPG 导出状态 + 重新导出」一栏随浏览器 JPG 导出链路一并删去。）
  */
@@ -20,6 +20,13 @@ function fmtBytes(n: number): string {
   if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
   if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
   return n + ' B';
+}
+
+/** 关联失败的短标签。后端那句以「没找到合法场景目录 —— 」开头、后面还跟着整条候选
+ *  路径与原因，卡片上放不下，整句仍进 title。字节数不符是「目录在、文件对不上」，
+ *  与「目录不存在」不是一回事，分开说。 */
+function linkTag(note: string): string {
+  return note.includes('字节数') ? '文件对不上' : '未找到目录';
 }
 </script>
 
@@ -45,10 +52,14 @@ function fmtBytes(n: number): string {
         <template v-if="rec.W"> · {{ rec.W }}×{{ rec.H }}</template>
         <template v-if="rec.layout"> · {{ rec.layout }}</template>
       </div>
-      <div class="status" :class="rec.statusCls">{{ rec.status }}</div>
-      <!-- 反推关联失败的原因单独一行：rec.status 会被解码进度/结果覆盖，写在那里
-           等于没写（用户只看得到「完成，解码耗时…」）。 -->
-      <div v-if="rec.linkNote" class="link-note" :title="rec.linkNote">{{ rec.linkNote }}</div>
+      <!-- 状态与关联结果同排一行、都做成短标签（2026-09-18）：原先两者各占一行，
+           且各自又把文件名抄了一遍 —— 一张卡三行里三处同名。
+           关联原因仍然单独一个字段：rec.status 会被解码进度/结果覆盖，写在那里
+           等于没写（用户只看得到「完成，解码耗时…」）。整句理由进 title。 -->
+      <div class="tags">
+        <span class="status" :class="rec.statusCls">{{ rec.status }}</span>
+        <span v-if="rec.linkNote" class="link-tag" :title="rec.linkNote">{{ linkTag(rec.linkNote) }}</span>
+      </div>
     </div>
   </aside>
   <div class="side-toggle" :title="collapseTitle" @click="store.sidebarCollapsed = !store.sidebarCollapsed">
@@ -122,20 +133,22 @@ function fmtBytes(n: number): string {
   vertical-align: 1px;
 }
 .file-item .meta { color: var(--ink-sub); font-size: 11px; margin-top: 3px; }
-.file-item .status { font-size: 11px; margin-top: 3px; color: var(--warn); }
+/* 状态与关联结果同排一行，都是短标签（见模板注释）。 */
+.file-item .tags { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 4px; }
+.file-item .status, .file-item .link-tag {
+  font-size: 10px;
+  line-height: 1.7;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+.file-item .status { color: var(--warn); }
 .file-item .status.err { color: var(--err); }
 .file-item .status.ok { color: var(--ok); }
-/* 关联失败原因：比 status 弱一档（它不是错误，是「这张图不在盘阵上」），
-   但限两行，避免长候选清单把侧栏撑爆 —— 完整内容在 title 里。 */
-.file-item .link-note {
-  font-size: 10px;
-  margin-top: 2px;
-  color: var(--ink-faint);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
+/* 关联失败：比 status 弱一档（它不是错误，是「这张图不在盘阵上」）——
+   完整原因（哪条候选、缺什么）在 title 里。 */
+.file-item .link-tag { color: var(--ink-faint); cursor: help; }
 .file-item .close {
   float: right;
   color: var(--ink-faint);

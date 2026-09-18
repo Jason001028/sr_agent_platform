@@ -440,7 +440,9 @@ export const useViewerStore = defineStore('viewer', () => {
         invert: false, stats: d.stats ? markRaw(d.stats) : null,
         route: 'img', sceneId: null, lqPath: null,
         layout: '本地 JPG（8bit 显示就绪，' + tw + '×' + th + '）',
-        status: '已读取：' + file.name + ' · ' + tw + '×' + th,
+        // 状态只留短词：文件名是卡片标题那一行，尺寸在上一行的图属性里 —— 三行里
+        // 三处同名同数，2026-09-18 收掉。
+        status: '已读取',
         statusCls: 'ok', paintedMode: null, maskRois: null, token: 0,
       };
       recs.value.push(rec);
@@ -513,8 +515,8 @@ export const useViewerStore = defineStore('viewer', () => {
     // 默认是服务端烘焙那份的口径；拖本地 jpg 升级进来的那条路自报来源
     // （它的像素是用户拖进来的原图，说「服务端已烘焙」就是假话）。
     rec.layout = layout ?? '盘阵 JPG（1/2 尺度 + 直方图均衡，服务端已烘焙）';
-    rec.status = '场景就绪：' + meta.name + ' · 元数据 ' + meta.W + '×' + meta.H
-      + ' · JPG ' + d.tw + '×' + d.th;
+    // 同上：名字与尺寸卡片上已有（标题行、图属性行、布局行），状态只表态
+    rec.status = '场景就绪';
     rec.statusCls = 'ok';
     rec.linkNote = undefined;                   // 关联成功了，旧的失败原因留着是误导
     // 手工场景由 resolve 带着权威掩码路径进来（场景库页那条入口也走这里）；
