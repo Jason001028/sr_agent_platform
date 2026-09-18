@@ -8,6 +8,7 @@
  */
 import { computed, ref } from 'vue';
 import { useViewerStore } from '../stores/viewer';
+import { parseLocPair } from '../lib/viewMath';
 import type { StretchMode } from '../lib/tifDecode';
 
 const store = useViewerStore();
@@ -53,6 +54,25 @@ function onPick(e: Event) {
 function doLocate() {
   store.locatePixel(locX.value, locY.value);
 }
+
+/** 粘进来的「30766.11,21862.51」拆到两个框里（认法见 lib/viewMath.parseLocPair）。
+    只在**带分隔符**时才当坐标对：单个数是正在手输，管它就把输入打断了；带分隔符却
+    认不出来的（多数是连编号一起拷的整行）必须出声，不能默默截一半去定位。
+    两个框都挂这个处理 —— 粘到 Y 框里，文本仍然是「X,Y」的顺序。
+    拆完不自动跳：手输了 X 再输 Y 的人也是按「定位」，两处行为保持一致。 */
+function onLocInput() {
+  for (const raw of [locX.value, locY.value]) {
+    if (!/[,，\s]/.test(raw)) continue;          // 单个数 = 正在手输，放行
+    const pair = parseLocPair(raw);
+    if (!pair) {
+      store.showErr('坐标对认不出来（要的是「X,Y」两个数，例如 30766.11,21862.51）');
+      return;
+    }
+    locX.value = pair[0];
+    locY.value = pair[1];
+    return;
+  }
+}
 </script>
 
 <template>
@@ -83,19 +103,23 @@ function doLocate() {
       <option v-for="o in STRETCH_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
     </select>
 
-    <span class="loc">
+    <!-- 两个框都是 text 而不是 number：number 框会把「30766.11,21862.51」这种整串
+         判为非法、值直接变空，粘进来等于什么都没发生（见 onLocInput）。 -->
+    <span class="loc" title="X、Y 可分开填；也可以把「X,Y」两个数粘进任意一个框，例如 30766.11,21862.51">
       X
       <input
         v-model="locX"
-        type="number"
-        min="0"
+        type="text"
+        inputmode="decimal"
+        @input="onLocInput"
         @keydown.enter="doLocate"
       />
       Y
       <input
         v-model="locY"
-        type="number"
-        min="0"
+        type="text"
+        inputmode="decimal"
+        @input="onLocInput"
         @keydown.enter="doLocate"
       />
       <button type="button" class="loc-btn" @click="doLocate">定位</button>
