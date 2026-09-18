@@ -39,20 +39,24 @@
 ```bash
 cd frontend
 npm run build            # 产出 dist/（全离线，含 vue/router/pinia/vendor 三库）
-npm run package:offline  # 产出 release/sr-agent-platform-<日期>-<版本>.tar.gz
+npm run package:offline  # 产出仓库根 release/ 下两个包（也可 -- build 先构建再打包）
 ```
 
-产物结构：
+**前后端各一个包**，都产出到仓库根 `release/`，顶层**不带** `sr-agent-platform/` 前缀
+——真机是 `tar -xzf <包> -C $APP` 直接解进应用目录，多一层目录会解出 `$APP/dist-<日期>/`
+而不是覆盖 `$APP/dist/`：
 
 ```
-sr-agent-platform/
-├── dist/                  # ← 前端产物（Vite base:'./'，相对路径引用，随便放哪都行）
-├── backend/               # ← FastAPI 场景 API（含 api/ + services/，已去 pycache/测试）
-├── nginx.conf             # → /etc/nginx/conf.d/
-├── sr-api.service         # → /etc/systemd/system/
-├── requirements-api.txt   # 后端运行依赖清单
-└── README.md              # 本说明
+release/
+├── dist-<日期>-<时分>-<版本>.tar.gz       # 顶层 dist/    ← 前端产物（Vite base:'./'，相对路径，随便放哪）
+└── backend-<日期>-<时分>-<版本>.tar.gz    # 顶层 backend/ ← FastAPI 场景 API（含 api/ + services/，已去 pycache/测试）
 ```
+
+> **首次安装件不进包**（`nginx.conf` / `sr-api.service` / `requirements-api.txt` / 本 README）：
+> 它们是机器配置模板，真机上已被手工 `sed` 成真实路径，进包解压会把真路径盖回出厂示例
+> （正是 §5.6 那类事故）。首次部署时这四份从仓库 `deploy/` 直接拷，见 §二；这两个包只用于
+> 「已装好的机器换新版本」。打包脚本每次还会清掉 `release/` 里同族的旧包（`dist-*` /
+> `backend-*` / 历史 `sr-agent-platform-*`），无关文件不碰；清掉的清单会逐条打印。
 
 ## 二、内网机部署：前端 + 盘阵静态（nginx，CentOS7）
 
@@ -73,9 +77,11 @@ sr-agent-platform/
 2. **拷包并解压**（U 盘 / scp 均可）：
 
    ```bash
-   mkdir -p /data/www
-   tar xzf sr-agent-platform-*.tar.gz -C /data/www
-   # 得到 /data/www/sr-agent-platform/{dist,backend,nginx.conf,...}
+   mkdir -p /data/www/sr-agent-platform
+   tar xzf dist-*.tar.gz    -C /data/www/sr-agent-platform     # → /data/www/sr-agent-platform/dist
+   tar xzf backend-*.tar.gz -C /data/www/sr-agent-platform     # → /data/www/sr-agent-platform/backend
+   # 首次安装还要把仓库 deploy/ 里的 nginx.conf / sr-api.service / requirements-api.txt 拷进来
+   # （这四份**不在包里**，理由见 §一）；换版本时只解上面两个包。
    ```
 
 3. **放 nginx 配置并生效**：
@@ -367,9 +373,13 @@ systemctl reload nginx
 
 ### 5.5 走完整离线包发布时的等价动作
 
-上面是日常迭代（开发机直连 scp）。若按 §一 `npm run package:offline` 打 tar.gz 发布，
-则升级 = 拷新包解压覆盖 `<APP>/` 下对应目录，前端 `systemctl reload nginx`、后端
-`systemctl restart sr-api`，动作同 §5.1/5.2，只是传输介质从 scp 换成整包。
+上面是日常迭代（开发机直连 scp）。若按 §一 `npm run package:offline` 打 tar.gz 发布：
+两个包拷到 `<机器>:/tmp`（只换前端就只拷 `dist-*`，只换后端就只拷 `backend-*`），分别
+`tar -xzf <包> -C <APP>` 覆盖对应目录，前端 `systemctl reload nginx`、后端
+`systemctl restart sr-api`，动作同 §5.1/5.2，只是传输介质从 scp 换成整包。回滚 = 把改之前的
+那一版包再解一次（真机上现有的做法是留 `dist.bak.<日期>` / `backend.bak.<日期>.tar.gz`）。
+解压是**覆盖**而不是替换：旧版本留下的 `assets/<旧哈希>.js` 会一直躺在目录里（没人引用，
+无害），要清就手工清。
 
 ### 5.6 整包拷贝时代的操作纪律（2026-09-09 实测教训）
 
