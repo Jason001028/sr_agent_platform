@@ -55,6 +55,22 @@ export function origToThumb(x: number, y: number, tw: number, th: number, W: num
   return [x * (tw / W), y * (th / H)];
 }
 
+/* 「X,Y」文本 → 两个坐标串（Vue 版新增，HTML 版没有这一条）。
+
+   给两个输入框用：从别处拷来的坐标是**一对数一句话**的形态（掩码的「掩膜中心点坐标」
+   txt 里就是 `30766.11,21862.51`），而 `type=number` 的框会把整串直接吞成空值。
+   分隔符认半角/全角逗号与空白（从表格、日志里拷出来常常是制表符或空格），首尾空白忽略；
+   带符号与小数都收。
+
+   **认不出来一律返回 null，不做任何截断**：把「1,30766.11,21862.51」（整行掩膜记录）
+   当成「1,30766.11」会把标记跳到别的地方去 —— 那比不跳更糟，调用方必须出声。 */
+export function parseLocPair(raw: string): [string, string] | null {
+  const parts = String(raw).trim().split(/[,，\s]+/).filter(Boolean);
+  if (parts.length !== 2) return null;
+  if (!parts.every((p) => /^[+-]?(\d+\.?\d*|\.\d+)$/.test(p))) return null;
+  return [parts[0], parts[1]];
+}
+
 /* 像素定位后的视图（HTML `locatePixel` 数学）：
    目标 = 把缩略图坐标 (tx,ty) 居中到画布中心；scale < 1 时先放大到像素级（min scale 1）。 */
 export function locateView(
