@@ -11,7 +11,10 @@ Three tables behind one Store:
   sr_tasks  — idempotency table for external Slurm side effects (§5.3): run_sr
               records its intent here before sbatch and its job_id after, so a
               crashed-loop replay looks the job up in squeue/sacct instead of
-              submitting a duplicate.
+              submitting a duplicate. 一行 = 一个**指纹**（不是一次运行），所以行上
+              有两组时间戳，别混：created_at/updated_at 属于**行**（队列排序、每次
+              写回），started_at/finished_at 属于**本次运行**（首次看到 RUNNING →
+              终态；队列页「耗时」的唯一来源，2026-09-18 增）。
 
 Shape borrowed from langgraph checkpoint-sqlite (state snapshot + pending
 writes); stored payloads are the OpenAI wire-format messages themselves, not
@@ -59,11 +62,34 @@ CREATE TABLE IF NOT EXISTS sr_tasks (
     batch_script TEXT,
     log_dir      TEXT,
     created_at   REAL NOT NULL,
-    updated_at   REAL NOT NULL
+    updated_at   REAL NOT NULL,
+    started_at   REAL,
+    finished_at  REAL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sr_tasks_fingerprint
     ON sr_tasks(fingerprint);
 """
+
+#: sr_tasks 里发布后新增的列。`CREATE TABLE IF NOT EXISTS` 对**已存在**的表一个字
+#: 都不改，所以升级前建的库（生产上就有）只能靠 ALTER TABLE 补 —— 见 _ensure_columns。
+_SR_TASK_ADDED_COLUMNS = (("started_at", "REAL"), ("finished_at", "REAL"))
+
+
+def _ensure_columns(db: sqlite3.Connection) -> None:
+    """Add the post-release sr_tasks columns to an existing DB.
+
+    幂等：先问 PRAGMA 有什么，缺哪列补哪列。补出来的列在老行里是 NULL，**不回填**
+    —— 那些行的 created_at 语义已被「复用行」污染（同一行被重交过，created_at 还是
+    第一次提交的时刻），回填等于把一个错数固化进历史。老行的耗时显示「—」。
+    """
+    have = {row[1] for row in db.execute("PRAGMA table_info(sr_tasks)")}
+    added = False
+    for name, decl in _SR_TASK_ADDED_COLUMNS:
+        if name not in have:
+            db.execute(f"ALTER TABLE sr_tasks ADD COLUMN {name} {decl}")
+            added = True
+    if added:
+        db.commit()
 
 
 def default_db_path() -> str:
@@ -96,6 +122,7 @@ class Store:
             self._conn = sqlite3.connect(self.path, timeout=10,
                                          check_same_thread=False)
             self._conn.executescript(_SCHEMA)
+            _ensure_columns(self._conn)
         return self._conn
 
     def close(self) -> None:
@@ -167,14 +194,16 @@ class Store:
     # ---- sr_tasks (idempotency for external Slurm jobs) ------------------
 
     _SR_TASK_COLS = ("id, fingerprint, session_id, job_id, status, params, "
-                     "config_xml, batch_script, log_dir, created_at, updated_at")
+                     "config_xml, batch_script, log_dir, created_at, updated_at, "
+                     "started_at, finished_at")
 
     @staticmethod
     def _sr_task_row(row) -> dict:
         return {"task_id": row[0], "fingerprint": row[1], "session_id": row[2],
                 "job_id": row[3], "status": row[4], "params": json.loads(row[5]),
                 "config_xml": row[6], "batch_script": row[7], "log_dir": row[8],
-                "created_at": row[9], "updated_at": row[10]}
+                "created_at": row[9], "updated_at": row[10],
+                "started_at": row[11], "finished_at": row[12]}
 
     def get_sr_task(self, fingerprint: str) -> dict | None:
         row = self._db().execute(
@@ -197,24 +226,43 @@ class Store:
             (limit,)).fetchall()
         return [self._sr_task_row(r) for r in rows]
 
-    def set_sr_task_state(self, task_id: int, state: str) -> float:
+    def set_sr_task_state(self, task_id: int, state: str, *,
+                          mark_started: bool = False,
+                          mark_finished: bool = False) -> dict:
         """Write back a queue display state (阶段5 校准器) + bump updated_at.
 
         The idempotency layer (submit_run_sr) never reads `status`, so this
         semantic upgrade is regression-free — see api-contract.md §3.3.
 
-        Returns the timestamp written. The terminal-row elapsed time is
-        `updated_at − created_at`, so whoever broadcasts the change has to hand
-        clients this exact value: a client that only learns the new `state`
-        keeps its stale `updated_at` (a GET snapshot from submit time, where
-        `updated_at == created_at`) and renders every finished job as 0 秒.
+        `mark_started` / `mark_finished` 另外钉住**本次运行的时间窗**（队列页的
+        「耗时」就是它两的差）：首次落库 RUNNING = 排队结束、真开始跑；落库
+        COMPLETED/FAILED = 跑完。都是观测到的时刻，不是猜的 —— 没观测到就没有值。
+
+        Returns the row **as read back after the write**, which is what callers must
+        hand to clients: a caller that only forwards the new `state` leaves the
+        client holding its own older snapshot of the row, and the elapsed column
+        renders that snapshot's numbers (2026-09-17 的「0 秒」与 2026-09-18 的
+        「几十小时」是同一个坑的两面：值要么缺席，要么是上一个快照的)。
         """
         db = self._db()
         now = time.time()
-        db.execute("UPDATE sr_tasks SET status = ?, updated_at = ? WHERE id = ?",
-                   (state, now, task_id))
+        sets = ["status = ?", "updated_at = ?"]
+        vals: list = [state, now]
+        if mark_started:
+            sets.append("started_at = ?")
+            vals.append(now)
+        if mark_finished:
+            sets.append("finished_at = ?")
+            vals.append(now)
+        vals.append(task_id)
+        db.execute(f"UPDATE sr_tasks SET {', '.join(sets)} WHERE id = ?", vals)
         db.commit()
-        return now
+        row = self.get_sr_task_by_id(task_id)
+        if row is None:      # 行在写回与读回之间消失（无删除 API，纯防御）
+            return {"task_id": task_id, "status": state, "updated_at": now,
+                    "started_at": now if mark_started else None,
+                    "finished_at": now if mark_finished else None}
+        return row
 
     def put_sr_task(self, fingerprint: str, params: dict, *,
                     session_id: str | None = None, status: str = "submitted",
@@ -226,6 +274,12 @@ class Store:
         Used by run_sr to record the submit *intent* (job_id=None) before the
         sbatch side effect, then to record the resulting job_id. Returns the
         task row as read back.
+
+        **UPDATE 分支恰好等于「又是一次真提交」**：run_sr 的幂等复用（RESUMED_ACTIVE /
+        RESUMED_COMPLETED）在走到这里之前就返回了（submit_run_sr），所以能把本次运行
+        的时间窗在这里清零 —— started_at / finished_at 归 NULL，等校准器首次看到
+        RUNNING / 终态再钉。created_at 不动：它是这一行**第一次**提交的时刻，队列排序
+        与「创建时间」列都靠它，而耗时已不再派生自它。
         """
         now = time.time()
         db = self._db()
@@ -235,8 +289,9 @@ class Store:
         if existing is None:
             db.execute(
                 "INSERT INTO sr_tasks (fingerprint, session_id, job_id, status, "
-                "params, config_xml, batch_script, log_dir, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "params, config_xml, batch_script, log_dir, created_at, updated_at, "
+                "started_at, finished_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)",
                 (fingerprint, session_id, job_id, status,
                  json.dumps(params, ensure_ascii=False), config_xml,
                  batch_script, log_dir, now, now))
@@ -244,7 +299,8 @@ class Store:
             db.execute(
                 "UPDATE sr_tasks SET session_id = ?, job_id = ?, status = ?, "
                 "params = ?, config_xml = ?, batch_script = ?, log_dir = ?, "
-                "updated_at = ? WHERE id = ?",
+                "updated_at = ?, started_at = NULL, finished_at = NULL "
+                "WHERE id = ?",
                 (session_id, job_id, status,
                  json.dumps(params, ensure_ascii=False), config_xml,
                  batch_script, log_dir, now, existing[0]))

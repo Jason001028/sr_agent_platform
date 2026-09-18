@@ -18,6 +18,12 @@
 //      端点 /preview-tmp），rec 升级成 route='jpg' + lqPath + sceneId，提交按钮转可用；
 //      同名但字节数不同 / 目录不存在 → 报错（写进 rec.linkNote）且按钮仍禁用，
 //      退回本地解码；文件名里没有日期 → 只提示手填，一个 resolve 请求都不发；
+//   E2. 拖盘阵上的 `<编号>.jpg`（与同名 .tif 同目录）：名字对得上就关联成同一场景，
+//      **像素用拖进来那张原图**（不调 /preview-tmp、不调 /preview），掩码能落盘；
+//      关联不上 → 弹窗给后端原因（`.notice-modal`），状态栏不卡在「正在关联…」；
+//   E3. 拖**纯 RC** 目录（里面只有 `PAN.tif`）那份 `<编号>.jpg`：也要关联上。
+//      jpg 名比的是**场景目录名**，不是栅格输入的 stem —— 比后者的话，纯 RC
+//      场景恒 404，而它恰恰是 SR 真要跑的场景（真机「极少出现盘阵小标」的根因）；
 //   F. PAN.tif（RC）场景：掩码名取**输入名的 stem**（`PAN_mask.tif`），不取目录名 ——
 //      这正是"写出去的掩码与提交时去找的那份不一致"的陷阱（§6）。
 //   G. 粘**单个 .tif 文件路径**（不在场景目录里）：照样能看，且预览按 1/2 烤进源图
@@ -169,6 +175,26 @@ function makeFixtures(root, ymd, scName, panName, prodName) {
   if (r.status !== 0) throw new Error('fixture 生成失败: ' + (r.stderr || r.stdout));
 }
 
+/* ---------------- E2 段要拖的「盘阵 <编号>.jpg」替身 ---------------- */
+// 真机上这份 jpg 是 8bit 显示就绪的预览产物：与同目录的 <编号>.tif **同名不同
+// 后缀、字节数也必然不等**。尺寸取场景各边 1/2（1600×800 → 800×400），与真机那
+// 份预览同尺度，缩略图 → 原图仍是 1:4 的换算。
+const JPG_PY = `
+import sys
+import numpy as np
+from PIL import Image
+w, h = int(sys.argv[2]), int(sys.argv[3])
+a = (np.arange(w * h, dtype=np.uint32).reshape(h, w) % 256).astype(np.uint8)
+Image.fromarray(a, mode="L").save(sys.argv[1], "JPEG", quality=85)
+`;
+
+function makeJpg(file, w, h) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const r = spawnSync('python', ['-c', JPG_PY, file, String(w), String(h)],
+    { encoding: 'utf-8' });
+  if (r.status !== 0) throw new Error('JPEG 生成失败: ' + (r.stderr || r.stdout));
+}
+
 /* ---------------- 页面助手 ---------------- */
 async function clickByText(page, text) {
   const ok = await page.evaluate((t) => {
@@ -242,6 +268,22 @@ const toolbarState = (page) =>
 
 const recCount = (page) =>
   page.evaluate(() => (window.__viewer ? window.__viewer.recs().length : -1));
+
+/** 侧栏文件卡上那颗「盘阵」小标的文案；没渲染出来 → null。
+ *
+ *  小标是**另一个条件**（`FileList.vue` 的 `v-if="rec.route === 'jpg'"`），与
+ *  `__viewer.recs()` 里那个 `route` 字段不是一回事：store 里对了、DOM 不更新
+ *  （响应式代理那条坑，见交接文档）时，只查 store 是查不出来的。 */
+const badgeOf = (page, name) =>
+  page.evaluate((n) => {
+    const item = [...document.querySelectorAll('.file-item')]
+      .find((el) => {
+        const nm = el.querySelector('.name');
+        return nm && nm.textContent.includes(n);
+      });
+    const b = item && item.querySelector('.name .scn');
+    return b ? b.textContent.trim() : null;
+  }, name);
 
 /** is a real TIFF file?（掩码落盘只看"是不是一张真图"，不解析内容） */
 function isTiff(file) {
@@ -321,12 +363,17 @@ async function main() {
   const upMiss = path.join(upDir, MISSING + '.tif');
   const upNoDate = path.join(upDir, 'local_nodate.tif');
   const upBadBytes = path.join(upDir, 'badbytes', SC + '.tif');
+  // E2：拖盘阵上那份 .jpg 进来（生产全名，与同名 .tif 同目录）
+  const upJpg = path.join(upDir, SC + '.jpg');
+  const upJpgMiss = path.join(upDir, MISSING + '.jpg');
   fs.mkdirSync(path.dirname(upBadBytes), { recursive: true });
   fs.copyFileSync(path.join(SC_DIR, SC + '.tif'), upOk);          // 同名同字节
   fs.copyFileSync(path.join(PROD_DIR, PROD + '.tif'), upProd);    // 同名同字节
   fs.copyFileSync(LOCAL_TIF, upMiss);                             // 名字对、盘阵上没有
   fs.copyFileSync(LOCAL_TIF, upNoDate);                           // 名字里没有时间戳
   fs.copyFileSync(LOCAL_TIF, upBadBytes);                         // 同名**不同字节**
+  makeJpg(upJpg, 800, 400);                                       // 与 SC.tif 同目录同名
+  makeJpg(upJpgMiss, 800, 400);                                   // 有日期、盘阵上没有
 
   // 开发机是 Windows：临时目录带盘符，而盘阵路径一律经 pathguard 归一，所以既要
   // 把 `W:\` 映射到盘阵根，也得补一条"宿主盘符映射到自身"（backend/tests/__init__.py
@@ -629,6 +676,117 @@ async function main() {
         return rs[rs.length - 1].lqPath === null;
       }), '取不到日期就不写 lqPath（绝不静默提交）');
 
+      /* ---------- E2. 拖盘阵上的 .jpg → 关联同一场景目录 ---------- */
+      // 用户的下手方式：直接从盘阵目录里把那张 <编号>.jpg 拖进查看器。它与
+      // <编号>.tif 同目录、同 stem、不同后缀 —— 名字那一半对得上就算同一个场景
+      // （字节数那一半对 JPEG 无意义：那是另一份产物，永远不可能与 TIF 同字节）。
+      console.log('\n[E2] 拖盘阵 .jpg → 关联同场景目录，掩码能落盘');
+      const bakeBefore = countUrl(previewRe);
+      const tmpBakeBefore = countUrl(tmpPreviewRe);
+      await input.uploadFile(upJpg);
+      await waitFor(page, () => {
+        const rs = window.__viewer.recs();
+        const r = rs[rs.length - 1];
+        return r && r.route === 'jpg';
+      }, 20000, '拖入的 jpg 关联上场景目录');
+      const jpgRec = await lastRec();
+      assert(jpgRec.name === SC + '.jpg',
+        `rec 还是用户拖进来的那个文件（${jpgRec.name}）`);
+      assert(jpgRec.lqPath === SC_DIR.replace(/\\/g, '/'),
+        `关联到同一场景目录（${jpgRec.lqPath}）`);
+      assert(!!jpgRec.sceneId, `升级后带上场景 id（${String(jpgRec.sceneId).slice(0, 12)}…）`);
+      assert(jpgRec.W === 1600 && jpgRec.H === 800,
+        `W/H 取影像头 1600×800（${jpgRec.W}×${jpgRec.H}）—— 掩码换算回原图就靠它`);
+      // 本次改动的要点：像素用**拖进来那张 jpg 自己**的，不去服务端烤一份 1/2 预览。
+      // 早先只有 .tif 才试关联，jpg 一律 route='img'；改成两条路合并后，若照搬
+      // tif 那条（调 /preview-tmp）就会拿服务端缩图顶掉用户自己拖的图。
+      assert(countUrl(tmpPreviewRe) === tmpBakeBefore
+        && countUrl(previewRe) === bakeBefore,
+        '没走 /preview-tmp 也没走 /preview（用拖进来的原图，不服务端烘焙）');
+      assert(jpgRec.thumbW === 800 && jpgRec.thumbH === 400,
+        `缩略图就是拖进来那张 jpg 的像素（${jpgRec.thumbW}×${jpgRec.thumbH}）`);
+      assert(jpgRec.layout.includes('拖入的原图'),
+        `布局按实际来源写，不谎称「服务端已烘焙」（${jpgRec.layout}）`);
+      // 用户看得见的那一件事：侧栏文件卡上那颗「盘阵」小标。它由 route 决定，
+      // 但**必须落到 DOM 上**才算数（store 对、页面不更新是踩过的坑）。
+      const jpgBadge = await badgeOf(page, SC + '.jpg');
+      assert(jpgBadge === '盘阵', `侧栏出现「盘阵」小标（${jpgBadge}）`);
+      const jpgBtns = await toolbarState(page);
+      assert(jpgBtns.bake === true && jpgBtns.sr === true,
+        `「保存掩码到盘阵」「提交 SR」均由灰转亮（bake=${jpgBtns.bake}/sr=${jpgBtns.sr}）`);
+      // B 段写过同一份掩码，先撤掉 —— 否则"文件在"证明不了是这次写的
+      fs.rmSync(scMask, { force: true });
+      await page.evaluate(() => window.__viewer.commitRect({ x0: 80, y0: 40, x1: 240, y1: 120 }));
+      await clickByText(page, '保存掩码到盘阵');
+      await waitNode(() => isTiff(scMask), 30000, 'jpg 场景的掩码落盘');
+      assert(fs.statSync(scMask).size > 0,
+        `掩码写进场景目录（${path.basename(scMask)}）`);
+
+      // 关联不上时**弹窗**说清（拖 jpg 的人多半就是冲着场景目录来的），
+      // 而不是一句 6 秒就消失的 toast —— 后端那句常常是「哪个目录缺什么」。
+      await input.uploadFile(upJpgMiss);
+      await waitFor(page, () => !!document.querySelector('.notice-modal'), 20000, '失败弹窗');
+      const modal = await page.evaluate(() => {
+        const el = document.querySelector('.notice-modal');
+        return {
+          title: el.querySelector('.nm-title').textContent.trim(),
+          body: el.querySelector('.nm-body').textContent.trim(),
+          hint: el.querySelector('.nm-hint') ? el.querySelector('.nm-hint').textContent.trim() : '',
+        };
+      });
+      assert(modal.body.includes(MISSING) && modal.body.includes('目录不存在'),
+        `弹窗给出后端的原因与候选（${modal.body.slice(0, 56)}…）`);
+      assert(modal.hint.includes('盘阵场景'),
+        `弹窗给出下一步怎么办（${modal.hint.slice(0, 30)}…）`);
+      // 关联失败后状态栏不能卡在「正在关联盘阵目录…」—— jpg 这条路后面没有解码
+      // 会去覆盖它（tif 那条有），得由关联自己把文案放回去。
+      await waitFor(page, () => {
+        const rs = window.__viewer.recs();
+        const r = rs[rs.length - 1];
+        return r && !r.status.includes('正在关联');
+      }, 10000, '状态文案复位');
+      const missJpg = await lastRec();
+      assert(missJpg.route === 'img' && missJpg.lqPath === null,
+        `没关联上就仍是本地图片（route=${missJpg.route}/lqPath=${JSON.stringify(missJpg.lqPath)}）`);
+      assert((await toolbarState(page)).bake === false, '「保存掩码到盘阵」保持禁用');
+      assert(await badgeOf(page, MISSING + '.jpg') === null,
+        '没关联上的 jpg 不出现「盘阵」小标');
+      await page.evaluate(() => window.__viewer.hideModal());
+      await waitFor(page, () => !document.querySelector('.notice-modal'), 5000, '弹窗关闭');
+      assert(true, '弹窗可关（「知道了」/ Esc 同一条路）');
+
+      /* ---------- E3. 拖**纯 RC** 目录（只有 PAN.tif）里的 <编号>.jpg ---------- */
+      // 真机报的「极少出现盘阵小标」就是这个：RC 场景目录里只有 `PAN.tif`
+      // （`<编号>.tif` 不存在），而那份显示件叫 `<编号>.jpg`。早先后端拿 jpg 名去
+      // 比**栅格输入**的 stem（"PAN"），永远比不过 —— 于是只有「目录里恰好还躺着
+      // `<编号>.tif`」的场景（SC，或 RC 目录留着上游 SC 产物）才关联得上，看着就
+      // 像随机。E2 那一条走的是 SC 目录，复现不出这个 bug。
+      console.log('\n[E3] 拖纯 RC 目录（只有 PAN.tif）的 <编号>.jpg → 仍要关联上');
+      const upPanJpg = path.join(upDir, PAN + '.jpg');
+      makeJpg(upPanJpg, 320, 160);                  // 各边 1/2，与真机那份显示件同尺度
+      await input.uploadFile(upPanJpg);
+      await waitFor(page, () => {
+        const rs = window.__viewer.recs();
+        const r = rs[rs.length - 1];
+        return r && r.route === 'jpg';
+      }, 20000, '纯 RC 目录的 jpg 关联上场景目录');
+      const panJpgRec = await lastRec();
+      assert(panJpgRec.name === PAN + '.jpg',
+        `rec 还是用户拖进来的那个文件（${panJpgRec.name}）`);
+      assert(panJpgRec.lqPath === PAN_DIR.replace(/\\/g, '/'),
+        `关联到 PAN 场景目录（${panJpgRec.lqPath}）`);
+      // 掩码名仍按**输入影像**的 stem（PAN_mask.tif）—— jpg 只是显示件，
+      // 关联上之后这条 rec 就是那个 RC 场景，提交时读的还是 PAN.tif。
+      assert(String(panJpgRec.serverMaskPath).endsWith('/PAN_mask.tif'),
+        `掩码路径仍是输入影像那份（…${String(panJpgRec.serverMaskPath).slice(-16)}）`);
+      assert(panJpgRec.W === 640 && panJpgRec.H === 320,
+        `W/H 取影像头 640×320（${panJpgRec.W}×${panJpgRec.H}）`);
+      assert(panJpgRec.layout.includes('拖入的原图'),
+        `像素用拖进来那张（${panJpgRec.layout}）`);
+      const panJpgBadge = await badgeOf(page, PAN + '.jpg');
+      assert(panJpgBadge === '盘阵',
+        `纯 RC 场景的 jpg 也出「盘阵」小标（${panJpgBadge}）`);
+
       /* ---------- F. PAN.tif（RC）场景的掩码命名 ---------- */
       console.log('\n[F] PAN.tif 场景：掩码名取输入名 stem，不取目录名');
       await openPathBar(page, WIN_PREFIX + '\\' + PAN);
@@ -708,15 +866,15 @@ async function main() {
 
       /* ---------- H. 全程无错 ---------- */
       console.log('\n[H] 全程无错');
-      // D / E 里**刻意**打出来的 404：D 一次（盘阵上没有那个目录）、E 两次
-      // （同名不同字节；有日期但目录不存在）。E 里还有一次刻意打的 400（文件名
-      // 没有时间戳，后端据此拒绝反推）—— 浏览器对任何非 2xx 响应都会往控制台写
-      // 一条，这不算程序缺陷，但也不能睁一只眼闭一只眼：数目必须恰好等于刻意的
-      // 那几次，多一条就是有别的资源没取到。
+      // D / E / E2 里**刻意**打出来的 404：D 一次（盘阵上没有那个目录）、E 两次
+      // （同名不同字节；有日期但目录不存在）、E2 一次（同上，换成 .jpg 拖入）。
+      // E 里还有一次刻意打的 400（文件名没有时间戳，后端据此拒绝反推）—— 浏览器
+      // 对任何非 2xx 响应都会往控制台写一条，这不算程序缺陷，但也不能睁一只眼闭
+      // 一只眼：数目必须恰好等于刻意的那几次，多一条就是有别的资源没取到。
       const deliberate = /status of (404|400)/;
       const notFound = errors.filter((e) => /status of 404/.test(e));
-      assert(notFound.length === 3,
-        `控制台里的 404 恰好是刻意的那三次（${notFound.length}）`);
+      assert(notFound.length === 4,
+        `控制台里的 404 恰好是刻意的那四次（${notFound.length}）`);
       const badRequest = errors.filter((e) => /status of 400/.test(e));
       assert(badRequest.length === 1,
         `控制台里的 400 恰好是刻意的那一次（无时间戳反推，${badRequest.length}）`);

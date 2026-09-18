@@ -40,16 +40,20 @@ function startApiServer() {
   const tasks = [
     { task_id: 1003, fingerprint: 'sha256:41f7…c90a', session_id: 'sess_9f4a2b7c01', job_id: 8871, state: 'RUNNING',
       params: { lq_path: '/DiskArray/GF07A03_xxx_L1_PAN', mask_path: '/DiskArray/masks/GF07A03_xxx_L1_PAN_roi.tif', sr_scale: 4, suffix: 't', gpu: 1, cloud_limit: 5, delete_ori: false, grid_align: true },
-      config_xml: null, batch_script: null, log_dir: '/DiskArray/logs/1003', created_at: 1744360000, updated_at: 1744361000 },
+      config_xml: null, batch_script: null, log_dir: '/DiskArray/logs/1003', created_at: 1744360000, updated_at: 1744361000,
+      started_at: 1744361000, finished_at: null },
     { task_id: 1002, fingerprint: 'sha256:7be1…0d2c', session_id: null, job_id: null, state: 'PENDING',
       params: { lq_path: '/DiskArray/KF02B04_xxx_L1_PAN', mask_path: null, sr_scale: 2, suffix: '', gpu: 4, cloud_limit: 10, delete_ori: false, grid_align: false },
-      config_xml: null, batch_script: null, log_dir: null, created_at: 1744359000, updated_at: 1744359000 },
+      config_xml: null, batch_script: null, log_dir: null, created_at: 1744359000, updated_at: 1744359000,
+      started_at: null, finished_at: null },        // 排队中：还没开始跑 → 耗时「—」
     { task_id: 1001, fingerprint: 'sha256:0b4c…9f12', session_id: null, job_id: 8804, state: 'COMPLETED',
       params: { lq_path: '/DiskArray/GF02B02_legacy', mask_path: '/DiskArray/masks/legacy_roi.tif', sr_scale: 4, suffix: 't', gpu: 1, cloud_limit: 0, delete_ori: true, grid_align: false },
-      config_xml: null, batch_script: null, log_dir: '/DiskArray/logs/1001', created_at: 1744350000, updated_at: 1744352000 },
+      config_xml: null, batch_script: null, log_dir: '/DiskArray/logs/1001', created_at: 1744350000, updated_at: 1744352000,
+      started_at: 1744350120, finished_at: 1744352000 },   // 跑了 31 分 20 秒
     { task_id: 1000, fingerprint: 'sha256:dead…beef', session_id: null, job_id: null, state: 'FAILED',
       params: { lq_path: '/DiskArray/bad_input', mask_path: null, sr_scale: 4, suffix: 't', gpu: 1, cloud_limit: 0, delete_ori: false, grid_align: false },
-      config_xml: null, batch_script: null, log_dir: null, created_at: 1744340000, updated_at: 1744341000 },
+      config_xml: null, batch_script: null, log_dir: null, created_at: 1744340000, updated_at: 1744341000,
+      started_at: 1744340020, finished_at: 1744341000 },   // 跑了 16 分 20 秒
   ];
 
   const server = http.createServer((req, res) => {

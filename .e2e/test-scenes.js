@@ -227,6 +227,20 @@ const waitRowTag = (page, name, want, timeoutMs = 20000) =>
     return !!tag && tag.textContent.trim() === w;
   }, timeoutMs, `行「${name}」标签=${want}`, name, want);
 
+/** 等某行的按钮文案变成 want。**「已生成」标签比按钮先翻**：lib/api.ts 的
+ *  fetchSceneJpg 在去取静态 JPG **之前**就把 `row.hasPreview` 置真了，而
+ *  scenes.open() 要等字节到手、解码完成，才在 finally 里清 openingId。所以
+ *  「等标签 → 立即读按钮」是竞态：机器忙时会读到还没清的「打开中…」。 */
+const waitRowBtn = (page, name, want, timeoutMs = 20000) =>
+  waitFor(page, (n, w) => {
+    const tr = [...document.querySelectorAll('.sp-tbl tbody tr')].find((r) => {
+      const td = r.querySelector('td.name');
+      return td && td.textContent.trim() === n;
+    });
+    const btn = tr && tr.querySelector('td button');
+    return !!btn && btn.textContent.trim() === w;
+  }, timeoutMs, `行「${name}」按钮=${want}`, name, want);
+
 /** 点某场景行的「打开 / 生成并打开」按钮（按钮文案随状态变） */
 async function clickRowButton(page, name) {
   const ok = await page.evaluate((n) => {
@@ -413,6 +427,7 @@ async function main() {
       assert(fs.existsSync(previewJpg), `后端落盘 ${path.basename(previewJpg)}`);
       assert(countUrl(new RegExp(`^${base}${DISK_PREFIX}${HDR_ROW}/${HDR_ROW}\\.preview\\.jpg$`)) >= 1,
         '静态读图走 /disk-array/<场景>/…preview.jpg（nginx alias 位）');
+      await waitRowBtn(page, HDR_ROW, '打开');   // 按钮落定再读，理由见 waitRowBtn
       const rowsNow = await rows(page);
       assert(rowsNow[2].tag === '已生成' && rowsNow[2].btn === '打开',
         `列表行就地翻牌为「已生成」+「打开」（${rowsNow[2].tag}/${rowsNow[2].btn}）`);
