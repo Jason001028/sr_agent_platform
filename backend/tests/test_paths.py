@@ -12,7 +12,8 @@ from pathlib import Path
 
 from backend.pathguard import (
     PathDeniedError, allowed_roots, drive_map, ensure_allowed,
-    infer_scene_paths, is_allowed, is_within, parse_scene_date,
+    flat_scene_layout, infer_scene_paths, is_allowed, is_within,
+    looks_like_scene_name, parse_scene_date, production_tree_depth,
     scene_name_layers, strip_raster_ext, to_posix_array_path,
 )
 
@@ -246,6 +247,92 @@ class TestSceneNameLayers(EnvMixin):
                     "A_B_C_D_E_F_G"):                           # 段号/景号非数字
             with self.subTest(bad=bad):
                 self.assertIsNone(scene_name_layers(bad))
+
+    def test_space_separated_name(self):
+        """用户口径里的空格形态（`JXGF07D03 PMS … MSS`）也要拆得出来。
+
+        段级目录名必须**沿用原文的分隔符** —— 空格名拼出下划线的段级目录必然
+        在盘阵上 stat 不到。
+        """
+        self.assertEqual(
+            scene_name_layers(
+                "JXGF07D03 PMS 20260622052600 200516571 101 0006 001 L1 MSS"),
+            ("JXGF07D03",
+             "JXGF07D03 PMS 20260622052600 200516571 101 001 L1 MSS"))
+
+    def test_leading_or_trailing_separator_returns_none(self):
+        # 首尾带分隔符 → 段下标整体错位，宁可判不合规则也不猜
+        for bad in ("_A_B_C_D_E_0006_F", "A_B_C_D_E_0006_F_"):
+            with self.subTest(bad=bad):
+                self.assertIsNone(scene_name_layers(bad))
+
+
+class TestProductionTreeDepth(EnvMixin):
+    """目录在生产树的第几层 —— 只给 404 的措辞用（纯词法，不 stat）。"""
+
+    def test_levels_of_six_layer_tree(self):
+        base = "/DiskArray/GSHC2IMPS/PRODUCT/2026/09/18"
+        self.assertEqual(production_tree_depth(base), 0)                 # 日期目录
+        self.assertEqual(production_tree_depth(base + "/JL1KF02B03"), 1)  # 卫星型号
+        self.assertEqual(production_tree_depth(base + "/JL1KF02B03/MID"), 2)   # 段级
+        self.assertEqual(production_tree_depth(base + "/JL1KF02B03/MID/SC"), 3)  # 景级
+        self.assertEqual(
+            production_tree_depth(base + "/JL1KF02B03/MID/SC/Debug"), 4)  # 场景目录里的子目录
+
+    def test_windows_form_and_trailing_slash(self):
+        self.assertEqual(
+            production_tree_depth("W:\\GSHC2IMPS\\PRODUCT\\2026\\09\\18"), 0)
+        self.assertEqual(
+            production_tree_depth("/DiskArray/GSHC2IMPS/PRODUCT/2026/09/18/"), 0)
+
+    def test_no_date_segment_returns_none(self):
+        for path in ("/DiskArray/GSHC2IMPS/PRODUCT", "/DiskArray/GSHC2IMPS/PRODUCT/scratch",
+                     "/DiskArray/2026/13/40", "/DiskArray/2026/09"):
+            with self.subTest(path=path):
+                self.assertIsNone(production_tree_depth(path))
+
+    def test_takes_rightmost_date_run(self):
+        # 路径里出现两段日期形态时取最靠右的那段（离被粘的目录最近）
+        self.assertEqual(
+            production_tree_depth("/x/2020/01/02/2026/09/18/JL1KF02B03"), 1)
+
+
+class TestFlatSceneLayout(EnvMixin):
+    """两种拓扑都支持，且**日期目录下面那段含义不同** —— 这是 404 措辞的分水岭。"""
+
+    PROD = TestSceneNameLayers.PROD
+
+    def test_six_layer_tree_is_not_flat(self):
+        base = f"/DiskArray/GSHC2IMPS/PRODUCT/2026/09/18/JL1KF02B03/{self.PROD}"
+        self.assertFalse(flat_scene_layout(base))
+        self.assertFalse(flat_scene_layout("/DiskArray/GSHC2IMPS/PRODUCT/2026/09/18"))
+        self.assertFalse(
+            flat_scene_layout("/DiskArray/GSHC2IMPS/PRODUCT/2026/09/18/JL1KF02B03"))
+
+    def test_flat_layout_recognised(self):
+        self.assertTrue(flat_scene_layout(
+            f"/DiskArray/GSHC2IMPS/PRODUCT/2026/09/18/{self.PROD}"))
+        # 扁平形态下再深一层是场景目录**内部**，仍然算扁平拓扑
+        self.assertTrue(flat_scene_layout(
+            f"/DiskArray/GSHC2IMPS/PRODUCT/2026/09/18/{self.PROD}/Debug"))
+
+    def test_no_date_run_is_not_flat(self):
+        self.assertFalse(flat_scene_layout("/DiskArray/GSHC2IMPS/PRODUCT/scratch"))
+
+
+class TestLooksLikeSceneName(EnvMixin):
+    def test_recognises_full_production_name(self):
+        for name in (TestSceneNameLayers.PROD,
+                     "JXGF07D03_PMS_20260622052600_200516571_101_0006_001_L1_MSS",
+                     "GF07A03_20260722"):
+            with self.subTest(name=name):
+                self.assertTrue(looks_like_scene_name(name))
+
+    def test_rejects_truncated_names(self):
+        # 日期目录的 `18`、卫星型号层的 `JXGF07D03`：拿不出 14/8 位成像时刻
+        for name in ("18", "JXGF07D03", "JL1KF02B03", "scratch", "PAN", "2026"):
+            with self.subTest(name=name):
+                self.assertFalse(looks_like_scene_name(name))
 
 
 class TestInferScenePaths(EnvMixin):

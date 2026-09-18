@@ -259,6 +259,67 @@ class TestResolveErrors(ResolveBase):
         self.assertIn("_meta.xml", detail)
         self.assertIn(str(d), detail)
 
+    # -- 粘错了层：404 要说清「差在哪一层」-----------------------------------
+    def paste_404(self, dirp: Path) -> str:
+        r = self.client().post("/api/scenes/resolve",
+                               json={"path": self.win_path(dirp)})
+        self.assertEqual(r.status_code, 404, r.text)
+        return r.json()["detail"]
+
+    def test_day_dir_404_points_three_levels_down(self):
+        """场景栏预填的就是这一层：日期目录 `…/PRODUCT/2026/09/17`，本身不是场景
+        目录。以前报「缺 17_meta.xml」—— `<目录名>_meta.xml` 的前缀是**完整生产
+        名**（含 14 位成像时刻），`17` 这种前缀不可能构成它，用户读完也不知道
+        该粘哪一层。"""
+        d = self.make_scene().parent            # …/2026/09/17
+        detail = self.paste_404(d)
+        self.assertIn("日期目录", detail)
+        self.assertIn(str(d), detail)
+        self.assertNotIn("17_meta.xml", detail)     # 不许再编这种 meta 名
+        self.assertIn("<景级目录>", detail)          # 说清该粘哪一层
+
+    def test_satellite_dir_404_points_two_levels_down(self):
+        sat = self.scene_dir.parent / "JL1KF02B03"
+        sat.mkdir(parents=True)
+        detail = self.paste_404(sat)
+        self.assertIn("卫星型号层", detail)
+        self.assertIn("<段级目录>/<景级目录>", detail)
+
+    def test_mid_dir_404_points_one_level_down(self):
+        """段级目录（= 景级目录去掉景号那段）。它的名字**也**带 14 位成像时刻，
+        光看名字会误报「缺 <段级名>_meta.xml」—— 得按层数认下来。"""
+        mid = self.scene_dir.parent / "JL1KF02B03" / PROD_MID
+        mid.mkdir(parents=True)                 # 只判层，不必造影像
+        detail = self.paste_404(mid)
+        self.assertIn("段级", detail)
+        self.assertIn("<景级目录>", detail)
+        self.assertNotIn(f"{PROD_MID}_meta.xml", detail)
+
+    def test_scene_subdir_404_says_too_deep(self):
+        """扁平拓扑（本夹具就是 `<年>/<月>/<日>/<场景名>`）里，场景目录再深一层
+        是它**内部**，不是段级层 —— 这两种拓扑得分开认。"""
+        d = self.make_scene() / "Debug"         # 场景目录内部的子目录
+        d.mkdir()
+        detail = self.paste_404(d)
+        self.assertIn("子目录", detail)
+        self.assertNotIn("段级", detail)
+
+    def test_six_layer_scene_subdir_404_says_too_deep(self):
+        """六层树：景级目录内部再深一层。这里用短名样本 —— 真机那种全名的路径
+        会顶到 Windows 260 上限（同 TestResolveLongPath 的理由）。"""
+        mid = "A_B_20260917124710_200536960_102_001_L1_PAN"   # 段级名：去掉景号段
+        scene = self.scene_dir.parent / "JL1KF02B03" / mid / SHORT_NAME
+        (scene / "Debug").mkdir(parents=True)
+        detail = self.paste_404(scene / "Debug")
+        self.assertIn("场景目录内部的子目录", detail)
+
+    def test_non_production_dir_404_says_name_shape(self):
+        d = self.root / "GSHC2IMPS" / "PRODUCT" / "scratch"
+        d.mkdir(parents=True)
+        detail = self.paste_404(d)
+        self.assertIn("不是完整生产名", detail)
+        self.assertNotIn("scratch_meta.xml", detail)
+
     def test_dir_without_input_image_404_lists_tried_names(self):
         d = self.make_scene(tif=False)
         r = self.client().post("/api/scenes/resolve",
@@ -404,9 +465,9 @@ class TestBareTifPath(ResolveBase):
         p = self.scratch_tif()
         c = self.client()
         win = self.win_path(p)
-        c.post("/api/scenes/resolve", json={"path": win})
-        c.get(f"/api/scenes/{c.post('/api/scenes/resolve', json={'path': win})
-              .json()['row']['id']}/preview")
+        rid = c.post("/api/scenes/resolve",
+                     json={"path": win}).json()["row"]["id"]
+        c.get(f"/api/scenes/{rid}/preview")
         row = c.post("/api/scenes/resolve", json={"path": win}).json()["row"]
         self.assertTrue(row["hasPreview"])
 
@@ -572,6 +633,30 @@ class TestResolveFingerprint(ResolveBase):
         self.assertIn("不是同一个文件", r.json()["detail"])
         # 不带上限的裸调用（老行为）仍然打得开 —— 这条守卫只针对带指纹的入口
         self.assertEqual(self.resolve(name=SCENE_NAME).status_code, 200)
+
+    def test_jpg_name_skips_size_check(self):
+        """拖盘阵上那份 `<场景名>.jpg` 也要能关联（查看器的 jpg 拖拽入口）。
+
+        盘阵目录里的 jpg 是**另一份产物**（8bit 显示就绪的预览，见
+        `scene_search._IMAGE_EXTS`），与输入的 TIF 不可能同字节 —— 字节数那一半
+        对 JPEG 无意义，比下去只会把这条入口恒堵死。名字那一半仍成立（同名同
+        目录），所以仍算同一个场景，lq_path 照给。
+        """
+        jpg = self.d / f"{SCENE_NAME}.jpg"
+        jpg.write_bytes(b"\xff\xd8\xff\xd9")        # 内容不参与判定，只走名字+尺寸
+        r = self.resolve(name=jpg.name, size_bytes=jpg.stat().st_size)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["row"]["lq_path"], self.d.as_posix())
+
+    def test_other_raster_suffix_still_checks_size(self):
+        """放行的是「拖进来的是 JPEG」这一件事，不是「后缀跟盘阵不一样」。
+
+        泛化成后者的话，本机另存过一份 `<场景名>.tiff`（与盘阵的 `.tif` 同 stem
+        不同字节）也会被认成同一个场景 —— 而那正是字节数这一半要挡的。
+        """
+        r = self.resolve(name=SCENE_NAME + ".tiff", size_bytes=self.size + 1)
+        self.assertEqual(r.status_code, 404, r.text)
+        self.assertIn("字节数", r.json()["detail"])
 
     def test_nonpositive_size_400(self):
         for bad in (0, -1, True):
