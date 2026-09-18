@@ -1,6 +1,7 @@
 """Tests for the SQLite session store (P0① sessions + messages + sr_tasks)."""
 
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -190,10 +191,81 @@ class TestSrTasksQueueApi(unittest.TestCase):
         self.assertEqual(got["status"], "RUNNING")
         # the idempotency layer reads only job_id — status writeback is opaque to it
         self.assertEqual(got["job_id"], 4)
-        # 返回值 = 这次写进库的 updated_at。调用方（api.platform._task_state）要拿
-        # 它去广播：客户端只有拿到这个值，才算得对终态行的耗时。
-        self.assertEqual(written, got["updated_at"])
-        self.assertGreaterEqual(written, t["updated_at"])
+        # 返回值 = 这次写回后从库里读回的整行。调用方（api.platform._task_state）要拿
+        # 它去广播/回显：客户端只有拿到写之后的值，才算得对耗时列。
+        self.assertEqual(written["updated_at"], got["updated_at"])
+        self.assertGreaterEqual(written["updated_at"], t["updated_at"])
+        # 没让钉运行窗的写回就不动那两列
+        self.assertIsNone(got["started_at"])
+        self.assertIsNone(got["finished_at"])
+
+    def test_run_window_is_stamped_only_when_asked(self):
+        self.store.put_sr_task("q5", {"lq_path": "/e"}, status="new", job_id=None)
+        self.store.update_sr_task_job("q5", job_id=5, status="submitted")
+        tid = self.store.get_sr_task("q5")["task_id"]
+
+        running = self.store.set_sr_task_state(tid, "RUNNING", mark_started=True)
+        self.assertIsNotNone(running["started_at"])
+        self.assertIsNone(running["finished_at"], "还没跑完，没有终点")
+
+        done = self.store.set_sr_task_state(tid, "COMPLETED", mark_finished=True)
+        self.assertEqual(done["started_at"], running["started_at"], "起点不回退/不改写")
+        self.assertGreaterEqual(done["finished_at"], running["started_at"])
+
+    def test_resubmit_resets_the_run_window_but_keeps_created_at(self):
+        """重交（同一指纹复用同一行）时必须把运行窗清零。
+
+        否则新一次跑会带着**上一次**的起点/终点进队列页：起点是上次的，终点是这次
+        的，差值就是行龄 —— 用户看到的「大几十个小时」（2026-09-18）。
+        created_at 不动：它是这一行第一次提交的时刻，队列排序靠它。
+        """
+        self.store.put_sr_task("q6", {"lq_path": "/f"}, status="new", job_id=None)
+        self.store.update_sr_task_job("q6", job_id=6, status="submitted")
+        t = self.store.get_sr_task("q6")
+        self.store.set_sr_task_state(t["task_id"], "RUNNING", mark_started=True)
+        self.store.set_sr_task_state(t["task_id"], "FAILED", mark_finished=True)
+
+        self.store.put_sr_task("q6", {"lq_path": "/f"}, status="new", job_id=None)
+        again = self.store.get_sr_task("q6")
+        self.assertIsNone(again["started_at"])
+        self.assertIsNone(again["finished_at"])
+        self.assertEqual(again["created_at"], t["created_at"])
+
+    def test_existing_db_without_the_run_columns_is_migrated(self):
+        """升级前的库（sr_tasks 已存在、没有这两列）打开时补列。
+
+        生产上的 sr_agent.db 就是这种：`CREATE TABLE IF NOT EXISTS` 对已存在的表
+        一个字都不改，不补列的话每次读写都撞 "no such column: started_at"。
+        """
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        path = os.path.join(d.name, "old.sqlite")
+        old = sqlite3.connect(path)
+        old.executescript(
+            "CREATE TABLE sr_tasks ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT, fingerprint TEXT NOT NULL,"
+            " session_id TEXT, job_id INTEGER, status TEXT NOT NULL,"
+            " params TEXT NOT NULL, config_xml TEXT, batch_script TEXT,"
+            " log_dir TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL);"
+            "CREATE UNIQUE INDEX idx_sr_tasks_fingerprint"
+            " ON sr_tasks(fingerprint);")
+        old.execute("INSERT INTO sr_tasks (fingerprint, status, params,"
+                    " created_at, updated_at) VALUES ('old', 'COMPLETED', '{}',"
+                    " 100, 101)")
+        old.commit()
+        old.close()
+
+        store = Store(path)
+        self.addCleanup(store.close)
+        legacy = store.get_sr_task("old")
+        self.assertEqual(legacy["status"], "COMPLETED")
+        self.assertIsNone(legacy["started_at"], "老行不回填：那会把错的数固化成历史")
+        self.assertIsNone(legacy["finished_at"])
+
+        store.put_sr_task("new", {"lq_path": "/a"}, status="new", job_id=None)   # 补过列才写得进
+        row = store.get_sr_task("new")
+        store.set_sr_task_state(row["task_id"], "RUNNING", mark_started=True)
+        self.assertIsNotNone(store.get_sr_task("new")["started_at"])
 
 
 if __name__ == "__main__":

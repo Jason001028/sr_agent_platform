@@ -33,7 +33,7 @@ import {
   apiResolveScene, apiBakeMask, fetchSceneJpg, fetchTempSceneJpg,
 } from '../lib/api.js';
 import type { SceneResolveResult } from '../lib/api.js';
-import { classifyImages } from '../lib/imageFiles.js';
+import { classifyImages, imageKindOf } from '../lib/imageFiles.js';
 import type { SceneOpenMeta } from '../lib/scene.js';
 import { buildStats, luma, STAT_HI } from '../lib/roiStats.js';
 import type { RoiStats } from '../lib/roiStats.js';
@@ -256,6 +256,9 @@ export const useViewerStore = defineStore('viewer', () => {
   const overlay = ref({ visible: false, title: '', sub: '', bar: false, progress: 0 });
   const toast = ref('');
   const error = ref('');
+  /** 模态提示：**不自动消失**，得用户点掉。给的是后端那些一长串、需要照着做的
+   *  原因（toast 六秒既看不完也留不住）。全局只有一个，后弹的顶掉先弹的。 */
+  const modal = ref({ visible: false, title: '', body: '', hint: '' });
   const sidebarCollapsed = ref(false);
   const busy = ref(false);
   const srBusy = ref(false);       // 「提交 SR」进行中（掩码服务端烘焙）
@@ -441,8 +444,24 @@ export const useViewerStore = defineStore('viewer', () => {
         statusCls: 'ok', paintedMode: null, maskRois: null, token: 0,
       };
       recs.value.push(rec);
+      // 入列之后一律用 recs 里那份（响应式代理）：上面这个局部变量是**原始对象**，
+      // 直接改它的字段不会触发渲染 —— 关联成功后工具栏那两颗按钮会一直是灰的
+      // （store 里的值是对的，页面上的 DOM 不更新）。其余入口都是 recs.find(...)
+      // 拿的代理，只有这里差点漏掉。
+      const live = recs.value.find((r) => r.id === rec.id) ?? rec;
+      const ready = live.status;
       hideMask(); busy.value = false;
-      void activate(rec.id);
+      void activate(live.id);
+      // 盘阵场景目录里那份 jpg 就是这条 rec 自己（拖进来的是生产全名，后端能反推
+      // 出目录），所以顺带试一次关联：命中就按场景身份升级，拿到 lqPath 才能提交
+      // SR / 保存掩码。**不 await** —— 关联要发请求，本地图该显示就先显示。
+      // 没连上（盘阵上没有这个目录 / 后端不可达）就什么都不改，本地图能力不变。
+      void tryLinkScenes(live).then((linked) => {
+        // 关联失败时 tryLinkScenes 已经把状态改成了「正在关联盘阵目录…」，而这条
+        // 路后面没有解码会去覆盖它 —— 不还原的话状态栏就永远卡在那句上。
+        if (linked || !recs.value.includes(live) || live.route !== 'img') return;
+        live.status = ready; live.statusCls = 'ok';
+      });
     } catch (e) {
       hideMask(); busy.value = false;
       showErr('读取图片失败：' + (e instanceof Error ? e.message : String(e)));
@@ -473,7 +492,7 @@ export const useViewerStore = defineStore('viewer', () => {
    *  `rec.file`/`name`/`size` 归调用方管：拖拽升级那条路要**保持**用户拖进来的
    *  那个文件名与字节数（FileList 展示与 addFiles 查重都靠它），只换像素与身份。 */
   async function applySceneJpgToRec(rec: ViewerRec, meta: SceneOpenMeta,
-                                    blob: Blob): Promise<boolean> {
+                                    blob: Blob, layout?: string): Promise<boolean> {
     const my = ++rec.token;                     // 领号：JPG 要接管像素了
     const cv = await decodeJpgToCanvas(blob);
     if (rec.token !== my || !recs.value.includes(rec)) return false;
@@ -491,7 +510,9 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.route = 'jpg';
     rec.sceneId = meta.sceneId ?? null;
     rec.lqPath = meta.lqPath ?? null;
-    rec.layout = '盘阵 JPG（1/2 尺度 + 直方图均衡，服务端已烘焙）';
+    // 默认是服务端烘焙那份的口径；拖本地 jpg 升级进来的那条路自报来源
+    // （它的像素是用户拖进来的原图，说「服务端已烘焙」就是假话）。
+    rec.layout = layout ?? '盘阵 JPG（1/2 尺度 + 直方图均衡，服务端已烘焙）';
     rec.status = '场景就绪：' + meta.name + ' · 元数据 ' + meta.W + '×' + meta.H
       + ' · JPG ' + d.tw + '×' + d.th;
     rec.statusCls = 'ok';
@@ -1016,14 +1037,16 @@ export const useViewerStore = defineStore('viewer', () => {
    *  两个指纹都得给：同一个场景目录里可能躺着不止一张图（RC 场景的输入影像是
    *  `PAN.tif`），光凭文件名反推有可能认到一张**不是用户拖进来**的图，那之后画的
    *  掩码坐标会整片落在别的图上。判定在服务端做（`_fingerprint_mismatch`），前端
-   *  只负责把 name + size 原样递过去。
+   *  只负责把 name + size 原样递过去 —— 拖 jpg 时后端比的是「jpg 名 == 场景目录
+   *  名」，不跟输入的 TIF 比（详见那里的注释）。
    *
    *  三种「没命中」的处理各不相同：
    *  * 服务端明确 4xx（盘阵上没这个目录 / 指纹不符）：写 `rec.linkNote` 原样留着
    *    给用户看，**不留 linkTried 之外的痕迹**，本地图照常能看。这是「这张图不在
    *    盘阵上」的正常答案，不是错误，所以不弹 showErr。
-   *  * 网络失败 / 超时（4s）：**清掉 linkTried**，下次激活还能再试 —— 那不是服务端
-   *    的答案，留着等于「问过了、没有」，用户永远拿不到第二次机会。
+   *  * 网络失败 / 超时（20s）：**清掉 linkTried**，下次激活还能再试 —— 那不是服务端
+   *    的答案，留着等于「问过了、没有」，用户永远拿不到第二次机会。超时要出提示：
+   *    后端答不上来时用户看得见的只有「拖完什么都没发生」。
    *  * 命中了但临时 JPG 烤不出来：报错 + 回落本地解码，不写 lqPath。
    *
    *  **route='jpg' 一律不试**：那种 rec 的目录已经由 resolve 按绝对路径定过（就是
@@ -1043,27 +1066,50 @@ export const useViewerStore = defineStore('viewer', () => {
     try {
       res = await apiResolveScene(loadSrConfig(),
         { name: r.name, size_bytes: r.file.size },
-        { signal: AbortSignal.timeout(4000) });
+        { signal: AbortSignal.timeout(20000) });
     } catch (e) {
       if (!recs.value.includes(r)) return false;
       const err = e as Error;
       if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
         r.linkTried = false;                        // 不是服务端的答案，下回还能试
         r.status = '等待解码…';
+        // 超时以前是**一声不吭**的：用户拖完什么都不发生，也无从知道该不该重试。
+        // resolve 里要读一次输入影像的头（盘阵冷缓存时慢），20 秒仍答不上来说明
+        // 后端真出问题了，得说出来。
+        showToast('关联盘阵目录超时（后端 20 秒没答）—— 可以再拖一次，或稍后重试');
         return false;
       }
       r.linkNote = err instanceof Error ? err.message : String(err);
-      showToast('「' + r.name + '」没有关联到盘阵场景，按本地文件查看'
-        + '（要提交 SR 请在「盘阵场景」栏粘贴该场景目录）');
+      if (imageKindOf(r.file) === 'jpg') {
+        // 拖 jpg 进来的人多半就是冲着这个场景目录来的，而失败原因往往是后端那
+        // 一长串「哪个目录、缺什么」，toast 六秒既看不完也留不住 —— 改弹窗。
+        // 后端那句已经点明了「这份 jpg 的名字认不出一景」，这里补上入口的形状。
+        showModal('这张 JPG 没有关联到盘阵目录', r.linkNote,
+          '它仍按本地图片打开了，只是没有盘阵目录、不能提交 SR。能关联的 jpg 只有'
+          + '名字与场景目录名一致的那份（<目录名>.jpg）—— 改过名、另存过的不认，'
+          + '平台不猜目录。要提交请把该场景目录粘进上方的「盘阵场景」栏打开。');
+      } else {
+        showToast('「' + r.name + '」没有关联到盘阵场景，按本地文件查看'
+          + '（要提交 SR 请在「盘阵场景」栏粘贴该场景目录）');
+      }
       return false;
     }
     if (!recs.value.includes(r)) return false;      // 期间已切图/关掉
     // 命中：把这张 rec 就地升级成盘阵场景。**不新建 rec** —— 用户拖进来的那个
     // 文件就是这张图，新建一条会多出第二份 maskRois。
+    // 拖进来的本来就是 jpg（且是生产全名）→ 它就是这张图的原图，**不再去服务端
+    // 烤一份 1/2 预览**：用户要看的就是自己拖的那张，拿服务端缩图顶掉反而降清，
+    // 还白等一次解压采样。其余情况（裸 .tif 反推命中）仍走阶段4 那条老路。
+    const localJpg = imageKindOf(r.file) === 'jpg';
     try {
-      const blob = await fetchTempSceneJpg(loadSrConfig(), res.row.id, (text) => {
-        if (r === activeRec.value) showMask('正在关联盘阵场景…', text, false);
-      });
+      let blob: Blob;
+      if (localJpg) {
+        blob = r.file;                     // File 是 Blob 子类，直接喂解码
+      } else {
+        blob = await fetchTempSceneJpg(loadSrConfig(), res.row.id, (text) => {
+          if (r === activeRec.value) showMask('正在关联盘阵场景…', text, false);
+        });
+      }
       hideMask();
       if (!recs.value.includes(r)) return false;
       const ok = await applySceneJpgToRec(r, {
@@ -1071,7 +1117,7 @@ export const useViewerStore = defineStore('viewer', () => {
         sceneId: res.row.id,
         lqPath: res.resolved.sr_capable ? res.resolved.dir : null,
         serverMaskPath: res.resolved.mask_path,
-      }, blob);
+      }, blob, localJpg ? '盘阵场景 JPG（拖入的原图，本地解码）' : undefined);
       if (!ok) return false;
       showToast('已关联盘阵目录 ' + res.resolved.dir + '，可以提交 SR 了');
       return true;
@@ -1081,8 +1127,10 @@ export const useViewerStore = defineStore('viewer', () => {
       // 升级失败：字段一个都别留（半升级的 rec 既不像本地图也不像盘阵场景），
       // 回落本地解码，能力不变。
       r.statusCls = 'err';
-      showErr('关联到盘阵目录 ' + res.resolved.dir + ' 了，但取预览图失败：'
-        + (e instanceof Error ? e.message : String(e)) + ' —— 已改用本地解码查看');
+      // 措辞对两条来源都成立：裸 .tif 那条是烤预览失败，jpg 那条只可能是拖进来的
+      // 文件解不动（本地解码也失败，所以不说「改用本地解码」）。
+      showErr('关联到盘阵目录 ' + res.resolved.dir + ' 了，但装载像素失败：'
+        + (e instanceof Error ? e.message : String(e)) + ' —— 仍按本地文件查看');
       return false;
     }
   }
@@ -1271,6 +1319,13 @@ export const useViewerStore = defineStore('viewer', () => {
     if (errTimer) clearTimeout(errTimer);
     errTimer = setTimeout(() => { error.value = ''; }, 6000);
   }
+  /** 模态提示：没有计时器，只能由用户关掉（或切换/离开页面时 hideModal）。 */
+  function showModal(title: string, body: string, hint = '') {
+    modal.value = { visible: true, title, body, hint };
+  }
+  function hideModal() {
+    modal.value.visible = false;
+  }
 
   /* ---------------- 测试钩子 ---------------- */
   /** 改写稀疏路径判定阈值（默认 1e8 不动；浏览器回归用小 fixture 走稀疏路由时调用） */
@@ -1282,7 +1337,7 @@ export const useViewerStore = defineStore('viewer', () => {
     // 状态
     recs, activeId, activeRec, view, canvasSize, renderTick, marker,
     stretchMode, activeStretch, drawMode, drawTool, pendingRect, pendingPts, hoverPt, hoverRoi, flashRoi,
-    wandTol, merging, overlay, toast, error,
+    wandTol, merging, overlay, toast, error, modal,
     sidebarCollapsed, busy, srBusy,
     // 文件 / 解码
     addFiles, removeRec, activate, openSceneJpg, openLocalImage,
@@ -1302,7 +1357,7 @@ export const useViewerStore = defineStore('viewer', () => {
     // 画布事件
     onCanvasDownDraw, onCanvasMove, onCanvasUp, onDblClick, onKeyDown,
     // UI
-    showMask, hideMask, showToast, showErr,
+    showMask, hideMask, showToast, showErr, showModal, hideModal,
     setSparseMin,
   };
 });

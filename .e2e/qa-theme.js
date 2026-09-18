@@ -24,10 +24,12 @@ function startApiServer() {
   const tasks = [
     { task_id: 1003, fingerprint: 'f1', session_id: null, job_id: 1, state: 'RUNNING',
       params: { lq_path: '/DiskArray/A', mask_path: '/DiskArray/m.tif', sr_scale: 4, suffix: 't', gpu: 1, cloud_limit: 5, delete_ori: false, grid_align: true },
-      config_xml: null, batch_script: null, log_dir: null, created_at: 1744360000, updated_at: 1744360001 },
+      config_xml: null, batch_script: null, log_dir: null, created_at: 1744360000, updated_at: 1744360001,
+      started_at: 1744360001, finished_at: null },
     { task_id: 1001, fingerprint: 'f2', session_id: null, job_id: null, state: 'COMPLETED',
       params: { lq_path: '/DiskArray/B', mask_path: null, sr_scale: 2, suffix: '', gpu: 4, cloud_limit: 10, delete_ori: false, grid_align: false },
-      config_xml: null, batch_script: null, log_dir: null, created_at: 1744350000, updated_at: 1744350001 },
+      config_xml: null, batch_script: null, log_dir: null, created_at: 1744350000, updated_at: 1744350001,
+      started_at: 1744350001, finished_at: 1744350193 },
   ];
   const server = http.createServer((req, res) => {
     const u = decodeURIComponent(req.url.split('?')[0]);

@@ -82,6 +82,9 @@ export interface ViewerHook {
   /** 反推关联当前图；**返回是否命中并已升级成盘阵 JPG**（命中即不做本地解码）。 */
   tryLinkScenes: () => Promise<boolean>;
   bakeMaskToServer: () => Promise<boolean>;
+  /** 模态提示当前内容（没弹则 visible=false）。全局单例，与具体 rec 无关。 */
+  modal: () => ReturnType<typeof useViewerStore>['modal'];
+  hideModal: () => void;
   // 测试观测（Vue 无全局 recs → 摘要快照）
   recs: () => ViewerRecSummary[];
   activeRec: () => ViewerRecSummary | null;
@@ -148,6 +151,8 @@ export function mountE2EHooks(): ViewerHook {
     openScenePath: (p) => useViewerStore().openScenePath(p),
     tryLinkScenes: () => useViewerStore().tryLinkScenes(),
     bakeMaskToServer: () => useViewerStore().bakeMaskToServer(),
+    modal: () => useViewerStore().modal,
+    hideModal: () => useViewerStore().hideModal(),
     recs: () => useViewerStore().recs.map(summarize),
     activeRec: () => {
       const rec = useViewerStore().activeRec;
