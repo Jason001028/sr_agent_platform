@@ -2,12 +2,13 @@
 /**
  * FileList.vue — 侧栏文件列表 + 收起/展开（tif-viewer.html #sidebar + addListItem 直译）
  * ------------------------------------------------------------------
- * 每项：名称 / 大小·W×H·布局 / 解码状态（绿红）/ × 移除 / active 高亮。
+ * 每项：小图预览 / 名称 / 大小·W×H·布局 / 解码状态（绿红）/ × 移除 / active 高亮。
  * 收起 toggle 秒出无动画（HTML sideToggle）。
  * （HTML 的「JPG 导出状态 + 重新导出」一栏随浏览器 JPG 导出链路一并删去。）
  */
 import { computed } from 'vue';
 import { useViewerStore } from '../stores/viewer';
+import FileThumb from './FileThumb.vue';
 
 const store = useViewerStore();
 
@@ -32,8 +33,11 @@ function fmtBytes(n: number): string {
       :class="{ active: rec.id === store.activeId }"
       @click="store.activate(rec.id)"
     >
-      <span class="close" title="移除" @click.stop="store.removeRec(rec.id)">×</span>
+      <FileThumb :rec="rec" />
+      <!-- × 是 float:right，必须留在**名字行里面**：放到缩略图之前会让浮动框去挤
+           横幅那个块（横幅是 BFC，会为了避开浮动而整体缩窄），视觉上就是缩略图缺一角。 -->
       <div class="name">
+        <span class="close" title="移除" @click.stop="store.removeRec(rec.id)">×</span>
         <span v-if="rec.route === 'jpg'" class="scn" title="盘阵场景：服务器烘焙 JPG">盘阵</span>{{ rec.name }}
       </div>
       <div class="meta">
@@ -53,9 +57,12 @@ function fmtBytes(n: number): string {
 </template>
 
 <style scoped>
-/* 侧栏：浅莫兰迪 chrome，白文件卡浮其上；选中青绿描边 */
+/* 侧栏：浅莫兰迪 chrome，白文件卡浮其上；选中青绿描边。
+   宽度 400：生产全名（约 40 字）与下面那行尺寸/布局说明在这个宽度里能排开，
+   再窄就得靠 break-all 从词中间断开，一行文件名看着像坏了；右侧栏同样是 400，
+   两栏对齐。小图预览横幅要的横向空间也在这里出（见 FileThumb.vue）。 */
 .sidebar {
-  width: 268px;
+  width: 400px;
   flex: none;
   background: var(--chrome);
   border-right: 1px solid var(--line);

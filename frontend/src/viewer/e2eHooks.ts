@@ -7,6 +7,8 @@
  *   - 掩码：enterDraw / exitDraw / buildMaskJson / exportMaskJson / thumbToOrig /
  *     getRois / genMask / wandSelect / maskGen(MaskGen)
  *   - 新增（Vue 无 HTML 的全局 recs 数组，测试观测需要）：recs() / activeRec() 摘要快照。
+ *   - 待修复清单（HTML 版没有这个功能）：qcImport / qcClose / qcSetStatus / qcOutput /
+ *     qcState / qcOpenByName。
  *   - setSparseMin：改写 tifDecode 的 SPARSE_MIN（默认 1e8 不动），让浏览器回归用小
  *     fixture 走稀疏路由。
  *   - 删去（最小原型取消了浏览器 JPG 导出/输出目录一条链路）：bakeJpg / getSaver /
@@ -23,6 +25,9 @@ import MaskGen from '../lib/maskgen.js';
 import type { SceneOpenMeta } from '../lib/scene.js';
 import { useViewerStore } from '../stores/viewer.js';
 import type { ViewerRec } from '../stores/viewer.js';
+import { useQcListStore } from '../stores/qclist.js';
+import { useScenesStore } from '../stores/scenes.js';
+import type { QcStatus } from '../lib/qclist.js';
 
 /** rec 摘要快照（浏览器测试观测用；HTML 直接读全局 recs 的等价物） */
 export interface ViewerRecSummary {
@@ -92,6 +97,23 @@ export interface ViewerHook {
   activeStretch: () => StretchMode;
   /** 直接切拉伸（等效工具栏下拉 change）。 */
   setStretch: (m: StretchMode) => void;
+  // 待修复清单（ROI/工具 置顶面板）：导入 / 标记 / 生成写回文本。
+  // 写盘那一步（FSA 文件选择器）没法自动点，回归只验到 output() 为止。
+  qcImport: (name: string, text: string) => boolean;
+  qcClose: () => void;
+  qcSetStatus: (name: string, s: QcStatus) => void;
+  /** 要写回文档的全文（上半部分原文 + 终态行）。 */
+  qcOutput: () => string;
+  qcState: () => {
+    loaded: boolean;
+    sourceName: string;
+    total: number;
+    done: number;
+    selName: string | null;
+    statuses: Record<string, QcStatus>;
+  };
+  /** 按生产全名去盘阵开场景（真机验收用；外网开发机没有盘阵，必然报错）。 */
+  qcOpenByName: (name: string) => Promise<string>;
 }
 
 declare global {
@@ -160,6 +182,22 @@ export function mountE2EHooks(): ViewerHook {
     },
     activeStretch: () => useViewerStore().activeStretch,
     setStretch: (m) => useViewerStore().setStretch(m),
+    qcImport: (name, text) => useQcListStore().importText(name, text, 'utf-8'),
+    qcClose: () => useQcListStore().close(),
+    qcSetStatus: (name, s) => useQcListStore().setStatus(name, s),
+    qcOutput: () => useQcListStore().output(),
+    qcState: () => {
+      const qc = useQcListStore();
+      return {
+        loaded: qc.loaded,
+        sourceName: qc.sourceName,
+        total: qc.counts.total,
+        done: qc.counts.done,
+        selName: qc.selName,
+        statuses: { ...qc.statuses },
+      };
+    },
+    qcOpenByName: (name) => useScenesStore().openByName(name),
   };
   if (window.__viewer !== hook) window.__viewer = hook;
   return hook;

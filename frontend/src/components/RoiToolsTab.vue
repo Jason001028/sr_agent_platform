@@ -9,6 +9,8 @@
  * - 任务状态：当前盘阵场景的最近 SR 队列任务（关联 lqPath + <stem>_mask.tif），
  *   queue store 实时 SSE；无 sceneId / 离开页面 → 整块隐藏/断开。
  * - 空态：无图 / 无 ROI 时给操作提示；无 sceneId 时任务块隐藏。
+ * - 置顶「待修复清单」（QcListPanel）：质检部门给的 .txt 的导入/标记/写回，自成一块，
+ *   与本 tab 其余部分没有数据往来（它只借这里的显隐位置）。
  */
 import { computed, onUnmounted, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
@@ -18,6 +20,7 @@ import {
 import type { QueueTask } from '../lib/api.js';
 import type { RoiStats } from '../lib/roiStats.js';
 import { roiOrigGeom, STAT_HI, STAT_CLIP } from '../lib/roiStats.js';
+import QcListPanel from './QcListPanel.vue';
 
 const viewer = useViewerStore();
 const queue = useQueueStore();
@@ -150,6 +153,8 @@ function fmtTime(ts: number): string {
 
 <template>
   <div class="rt">
+    <!-- 置顶：待修复清单（质检 .txt 的导入 / 标记 / 写回） -->
+    <QcListPanel />
 
     <!-- 云量估算（阶段6 启发：无真云掩膜时 = 显示层高亮占比估算 + 疑似云区红叠） -->
     <section class="rt-sec">
