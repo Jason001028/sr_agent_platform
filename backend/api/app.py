@@ -226,28 +226,46 @@ async def _tmp_preview_purge_loop() -> None:
 
 
 def _fingerprint_mismatch(inp: Path, name: str, size_bytes: int) -> str | None:
-    """拖拽入口的双指纹：**文件名 + 字节数**都吻合才算同一个文件。
+    """拖拽入口的身份门：拖进来的是**栅格**时比「名字 + 字节数」，是 **jpg** 时只比名字。
     返回人话原因（并入 404 的候选清单），None = 吻合。
 
-    为什么名字这一半不能省：`scene_search.input_candidates` 的次序是
+    栅格为什么名字这一半不能省：`scene_search.input_candidates` 的次序是
     `<目录名>.{tif,tiff,img}` 在前、`PAN.{tif,tiff,img}` 在后，
     `input_scene_path` 返回第一个存在的。RC 场景的输入影像是 `PAN.tif`，但同
     目录里往往还躺着 `<目录名>.tif`（上游 SC 步骤的产物）。用户拖的若是后者，
     只比字节数就可能通过 —— 而 SR 在盘阵上跑的是 `PAN.tif`，用户画的掩码坐标
     会整片落在另一张图上。名字对不上一律不认，宁可退回浏览器本地解码。
+
+    **栅格与 JPG 比的是两个不同的对象**，别混：
+
+    * 拖进来的是栅格（.tif/.tiff/.img）：比 `<输入影像 stem>` + 字节数。两份都
+      是栅格产物，字节数这一半是有意义的。
+    * 拖进来的是 JPG：比 `<场景目录名>`，且**只**比它。盘阵上那份 jpg 是显示件
+      （8bit 就绪的预览，见 `scene_search._IMAGE_EXTS`），SR 从来不在它上面跑，
+      所以拿它的名字去比栅格输入的 stem 是比错了对象 —— 纯 RC 场景（目录里只有
+      `PAN.tif`）下 `inp.stem` 是 `PAN`，而显示件叫 `<目录名>.jpg`（生产全名），
+      永远比不过，于是「拖 jpg」这条入口恰恰在 SR 真要跑的那些场景上恒 404
+      （2026-09-18 复现确认）。字节数那一半对 JPG 本就无意义（两份不同产物），
+      照旧不比。
     """
     want = strip_raster_ext(name)
+    if Path(name).suffix.lower() in (".jpg", ".jpeg"):
+        # 比的是**场景目录名**。默认模板下候选目录名就是由这个名字（去后缀）拼出来
+        # 的，所以 dir 存在时这条必然成立 —— 它挡的不是「这份 jpg 不属于这个场景」，
+        # 而是「换了 SR_SCENE_PATH_TEMPLATE、场景目录改了命名」的部署（那种情况下
+        # `<目录名>.jpg` 与推断出的目录名对不上）。真正把派生件（`_cloud.jpg`、
+        # `.preview.jpg`）挡在外面的是候选目录根本不存在。
+        # 大小写按 `scene_search.is_scene_file` 的口径（Windows 上用户拖进来的名字
+        # 大小写不保证）。
+        if want.lower() == inp.parent.name.lower():
+            return None
+        return (f"{inp.parent}：拖入的 {want} 与场景目录名 {inp.parent.name} "
+                f"不是同一个名字（盘阵上这份显示件叫 {inp.parent.name}.jpg）")
     if inp.stem != want:
         return (f"{inp.parent}：目录里的输入影像是 {inp.name}，与拖入的 {want} "
                 "不是同一个文件（SR 在这个目录上跑的是前者）")
-    # 拖进来的是 JPG：名字对上了就算同一个场景。字节数那一半对 JPEG 无意义 ——
-    # 盘阵上那份 <目录名>.jpg 是**另一份产物**（8bit 显示就绪的预览，见
-    # scene_search._IMAGE_EXTS），与输入的 TIF 不可能同字节，比下去只会恒不通过，
-    # 白白把「拖 jpg 进查看器」这条入口堵死。
-    # 只对 jpg 放行、不泛化成「后缀不同就放行」：那会连 SC.tiff 与 SC.tif 也放过，
-    # 而拖错后缀（本机另存过一份 TIFF）恰恰是这一层要挡的。
-    if Path(name).suffix.lower() in (".jpg", ".jpeg"):
-        return None
+    # 这一层不泛化成「后缀不同就放行」：那会连 SC.tiff 与 SC.tif 也放过，而拖错
+    # 后缀（本机另存过一份 TIFF）恰恰是字节数这一半要挡的。
     try:
         actual = inp.stat().st_size
     except OSError as e:
@@ -449,9 +467,10 @@ def create_app() -> FastAPI:
 
         请求体：`{path}` 精确路径，或 `{name, date?}` 裸文件名（日期可由后端
         从文件名里取）。`{name}` 可再带 `size_bytes`（拖拽入口用，见
-        `_fingerprint_mismatch`）：给了就要求候选目录里的输入影像**同名且字节
-        数一致**，否则这条候选记原因后跳过（最终仍是 404 并列出原因）；不给
-        则只看目录/影像存不存在。`{path}` 分支是精确路径，不收这个字段。
+        `_fingerprint_mismatch`）：给了就要求**名字与字节数都对得上** —— 栅格名
+        比输入影像的 stem、jpg 名比场景目录名（两份产物，比的对象不同）—— 否则
+        这条候选记原因后跳过（最终仍是 404 并列出原因）；不给则只看目录/影像存
+        不存在。`{path}` 分支是精确路径，不收这个字段。
         """
         body = await _json_body(request)
         # 拖拽入口的可选双指纹（{name} 分支才用得上，见 _fingerprint_mismatch）：
@@ -498,6 +517,18 @@ def create_app() -> FastAPI:
                 # 日期可由后端自己从文件名取 —— 前端不必再实现一套同样的正则
                 date = parse_scene_date(name) or ""
             if not date:
+                # 拖进来的是 jpg：反推的唯一依据就是文件名，而这份名字里没有生产
+                # 全名（含 14 位成像时刻）—— 也就无从知道该去 `<年>/<月>/<日>` 哪
+                # 一天找。平台**不猜目录**（猜错就是拿着另一景的 lq_path 提交），
+                # 所以这里如实说清「认不出来 + 该怎么办」。
+                if Path(name).suffix.lower() in (".jpg", ".jpeg"):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"这张 jpg 的名字里没有生产全名（缺 14 位成像时刻）："
+                               f"{name} —— 平台不猜目录。能关联的 jpg 只有名字与场景"
+                               f"目录名一致的那份（<目录名>.jpg）；改过名、另存过、"
+                               f"或叫 PAN.jpg 这类都不认。请改拖那份，或把该场景目录"
+                               f"粘进「盘阵场景」栏打开")
                 raise HTTPException(
                     status_code=400,
                     detail=f"反推路径失败：文件名里没有 14/8 位成像时间戳"

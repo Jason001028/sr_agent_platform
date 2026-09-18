@@ -131,7 +131,7 @@
 
 ### 3.3 共享任务队列（仅 SR 作业 · 服务端唯一事实源）
 
-**数据模型**：`store.sr_tasks`（阶段4 幂等表，既有列 id/fingerprint/job_id/status/params/config_xml/batch_script/log_dir/时间）。`status` 列**语义升级**为"队列展示状态"（阶段5 后台校准器写入，见下）；幂等层不读它（只读 job_id），无回归风险。需给 store 补 `list_sr_tasks()`。
+**数据模型**：`store.sr_tasks`（阶段4 幂等表，既有列 id/fingerprint/job_id/status/params/config_xml/batch_script/log_dir/时间，2026-09-18 增 `started_at`/`finished_at` 本次运行时间窗 —— 老库打开时 `store._ensure_columns` 用 ALTER TABLE 补列、不回填）。`status` 列**语义升级**为"队列展示状态"（阶段5 后台校准器写入，见下）；幂等层不读它（只读 job_id），无回归风险。需给 store 补 `list_sr_tasks()`。
 
 **队列状态机**（Slurm 无百分比 → 状态机即进度）：
 
@@ -146,7 +146,8 @@ submit_run_sr 返回 → 队列状态：
        sacct 无记录              → UNKNOWN（保留，可重跑）
 ```
 
-- `GET /api/queue` → `200 {"tasks":[{task_id, fingerprint, session_id, job_id, state, params:{lq_path,mask_path,sr_scale,suffix,gpu,cloud_limit,delete_ori,grid_align}, config_xml, batch_script, log_dir, created_at, updated_at}, …]}`，按 created_at 倒序。`state` 取内存最近校准结果（缓存），无缓存则当场校准一次（squeue/sacct，镜像 `slurm.job_status`）。
+- `GET /api/queue` → `200 {"tasks":[{task_id, fingerprint, session_id, job_id, state, params:{lq_path,mask_path,sr_scale,suffix,gpu,cloud_limit,delete_ori,grid_align}, config_xml, batch_script, log_dir, created_at, updated_at, started_at, finished_at}, …]}`，按 created_at 倒序。`state` 取内存最近校准结果（缓存），无缓存则当场校准一次（squeue/sacct，镜像 `slurm.job_status`）。
+  **两组时间戳别混**（2026-09-18 增 `started_at`/`finished_at`，见下「耗时」）：`created_at` = 这一行**第一次**提交的时刻（同一指纹重交复用同一行，不刷新）、`updated_at` = 最近一次写回，两者属**行**；`started_at` = 校准器首次观测到 RUNNING 的时刻（排队结束）、`finished_at` = 终态落库时刻，两者属**本次运行**。本次运行的起点/终点都没观测到就是 `null`（界面「—」），**不**退回 `created_at` 顶替。
 - `POST /api/queue` — body（run_sr 参数，`lq_path` 必填，其余带默认）：
   `{lq_path, mask_path?, sr_scale?=2, suffix?="", gpu?=0, cloud_limit?=80, delete_ori?=false, grid_align?=true, options_yml?}`。
   直接调 `services.run_sr.submit_run_sr(params, store=default_store())`（幂等层既在：重复同参 → RESUMED_ACTIVE/COMPLETED 复用，失败才重跑，中断无 job_id → 409 报"勿盲重试"）。返回：
@@ -157,17 +158,31 @@ submit_run_sr 返回 → 队列状态：
 - `GET /api/queue/events` — SSE：订阅所有任务的 `state` 变化。**驱动** = app 生命周期后台 asyncio 任务（§4.3）：周期（`SR_QUEUE_POLL_SEC`，缺省 2s）对每个 `job_id` 非空 task 调 `slurm.job_status`，状态与前值不同 → 更新内存缓存 + 写回 `sr_tasks.status` + 广播一帧。事件 schema：
 
 ```json
-{"type":"job_update","task_id":3,"job_id":12345,"state":"RUNNING","prev_state":"PENDING","ok":true,"error":null,"updated_at":1789000000.12}
-{"type":"job_update","task_id":3,"job_id":12345,"state":"FAILED","prev_state":"RUNNING","ok":false,"error":"exit 1","updated_at":1789000060.5}
+{"type":"job_update","task_id":3,"job_id":12345,"state":"RUNNING","prev_state":"PENDING","ok":true,"error":null,"updated_at":1789000000.12,"started_at":1789000000.12,"finished_at":null}
+{"type":"job_update","task_id":3,"job_id":12345,"state":"FAILED","prev_state":"RUNNING","ok":false,"error":"exit 1","updated_at":1789000060.5,"started_at":1789000000.12,"finished_at":1789000060.5}
 // 心跳（可选，防代理断链）：{"type":"ping"}
 ```
 
-`updated_at`（2026-09-17 增）= 这次状态写回 `sr_tasks` 的时间戳，与 `GET /api/queue` 同名字段
-同源。**终态行的耗时 = `updated_at − created_at`**，所以它必须随帧下发：客户端手上那份
-`updated_at` 只来自 `GET`，而那次 GET 通常就发生在提交刚落库之后（`updated_at == created_at`）
-—— 只推 `state` 的话，任务一完成耗时列就从运行中的正常值掉成「0 秒」（2026-09-17 真机现象）。
-写库失败时该字段**缺席**（不发本地时钟值），客户端保留旧快照，与 GET 的读数保持一致；因此
-客户端须按「字段可能不存在」实现。
+`updated_at`（2026-09-17 增）、`started_at`/`finished_at`（2026-09-18 增）= 这次写回 `sr_tasks`
+的值，与 `GET /api/queue` 同名字段同源。它们必须随帧下发：客户端手上那份只来自 `GET`，而那次
+GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—— 只推 `state` 的话，任务一完成耗时列
+就从运行中的正常值掉成「0 秒」（2026-09-17 真机）。写库失败时这些字段**缺席**（不发本地时钟值），
+客户端保留旧快照，与 GET 的读数保持一致；因此客户端须按「字段可能不存在」实现。
+
+**耗时（队列页那一列）**：`finished_at − started_at`，运行中的行用浏览器时钟现算。两个锚点都钉在
+**真实转换点**上（首次看到 RUNNING / 看到 COMPLETED·FAILED），所以量的是**本次运行**、不含排队。
+两个坑各自对应一次真机现象，改的时候别退回去：
+
+- **不能拿 `created_at` 当起点**。一行 = 一个指纹，同一场景同一参数重交时幂等层复用同一行
+  （`run_sr._resolve_existing`），`created_at` 停在**第一次**提交的时刻 —— 于是「耗时」量的是行龄。
+  真机表现：昨天失败的那次重交后跑完，「耗时」显示「30 时 00 分」，实际只跑了 200 多秒
+  （2026-09-18）。
+- **重启（校准缓存为空）不能重算**。`state.task_cache` 是内存态，校准器原来只拿它当比较基准：
+  sr-api 一重启，每行都被判成「状态变了」→ 全部写回 + 刷新时间戳，几天前跑完的行集体变行龄。
+  现在基准缺失时回落到 `sr_tasks.status`（库里存的状态），只补发真正变了的行（2026-09-18）。
+- 本次运行的起点没观测到（整段运行期间 sr-api 不在）→ `started_at` 为 `null`，界面显示「—」。
+  概率低（校准时距 2s），且**不猜**：退回 `created_at` 就是把上面第一个坑请回来。
+- 加这两列前建的行不回填，其耗时也显示「—」（`store._ensure_columns` 只补列不改数据）。
 
 ### 3.4 掩码（查看器 → SR 提交）
 
@@ -264,19 +279,28 @@ submit_run_sr 返回 → 队列状态：
   原语判（`production_tree_depth` / `flat_scene_layout` / `looks_like_scene_name`），
   **不参与准入** —— 准入始终只有一条：`<目录名>_meta.xml` 在不在。
 - **`{name}` 可再带 `size_bytes`（2026-09-18，拖拽入口用）：把本地文件的字节数一起发过来，
-  后端要求候选目录里的输入影像**同名且字节数一致**才认**（`_fingerprint_mismatch`）。
-  不传则只看目录/影像存不存在（粘路径、第三方调用一切照旧）。
-  - 为什么两个都要：`input_scene_path` 的候选次序是 `<目录名>.{tif,tiff,img}` 在前、
+  后端要求名字与字节数都对得上才认**（`_fingerprint_mismatch`）。**比的对象按拖入的是栅格
+  还是 jpg 分岔**：栅格比「输入影像 stem + 字节数」，jpg 只比「场景目录名」。
+  不传 `size_bytes` 则只看目录/影像存不存在（粘路径、第三方调用一切照旧）。
+  - 栅格为什么两个都要：`input_scene_path` 的候选次序是 `<目录名>.{tif,tiff,img}` 在前、
     `PAN.{tif,tiff,img}` 在后，返回第一个存在的。RC 场景的输入影像是 `PAN.tif`，而同目录
     里往往还躺着 `<目录名>.tif`（上游 SC 步骤的产物）—— 光比字节数，用户拖进来的可能是
     另一张图；那之后画的掩码坐标会整片落在别的影像上。
   - 不符时**按这条候选不合格处理**（记进 `reasons` 后继续试下一条候选），最终仍是 404 且
     `detail` 里列出盘阵侧那个文件的名字与字节数，**不新增错误码**。
-  - **例外：`name` 以 `.jpg/.jpeg` 结尾时只比名字，不比字节数**（2026-09-18）。盘阵目录里
-    那份 `<编号>.jpg` 是另一份产物（8bit 显示就绪预览，见 `scene_search._IMAGE_EXTS`），与
-    输入的 TIF 不可能同字节 —— 比下去只会把「拖 jpg 进查看器」这条入口恒堵死。名字那一半
-    仍然生效。**只对 jpg 放行**，不泛化成「后缀不同就放行」：那会连 `SC.tiff` 与 `SC.tif`
-    一起放过，而字节数那一半正是为「本机另存过一份」设的。
+  - **`name` 以 `.jpg/.jpeg` 结尾时：名字比 `<场景目录名>`，字节数不比**（2026-09-18 订正）。
+    盘阵那份 jpg 是**显示件**（8bit 就绪预览，见 `scene_search._IMAGE_EXTS`），SR 从不在
+    它上面跑，与输入的 TIF 是两份产物、不可能同字节 —— 所以字节数那一半对它无意义。名字
+    这一半**不能拿栅格输入的 stem 去比**：纯 RC 场景（目录里只有 `PAN.tif`）`inp.stem` 是
+    `PAN`，而显示件叫 `<编号>.jpg`（生产全名），永远比不过 —— 那会让「拖 jpg」这条入口
+    恰好在 SR 真要跑的场景上恒 404（初版实现如此，真机表现为「极少出现盘阵小标」）。
+    判据只有一条：jpg 名（去后缀）== 场景目录名。默认模板下候选目录名就是由这个名字拼出来
+    的，所以这条通常直接成立 —— 它挡的是「换了 `SR_SCENE_PATH_TEMPLATE`、场景目录改了命名」
+    的部署；真正挡住派生件（`_cloud.jpg`、`.preview.jpg`）的是候选目录根本不存在。
+    也**不泛化成「后缀不同就放行」**：那会连 `SC.tiff` 与 `SC.tif` 一起放过。
+  - 名字里取不到 14/8 位成像时刻的 jpg（`PAN.jpg`、Windows 副本、别处导出的图）→ **400**，
+    说清「平台不猜目录」以及该改拖哪一份。反推路径的唯一依据是文件名，没有日期就不知道该去
+    `<年>/<月>/<日>` 哪一天找，猜一个就是拿别景的 `lq_path` 去提交。
   - `size_bytes` 非正整数 → **400**。`{path}` 分支是精确路径，不收这个字段。
 
 ### 3.6 拖拽入口的临时预览（`GET /api/scenes/{id}/preview-tmp`，2026-09-18）

@@ -8,7 +8,7 @@
  * 布局行 = [FileList(sidebar+side-toggle)] [TifCanvas stage] [ContextPanel(ctx-toggle+rail)]，
  * 右侧 rail 镜像左栏收起布局，默认收起且宽度持久化在 ContextPanel 内（见其组件注释）。
  */
-import { onMounted } from 'vue';
+import { onMounted, onUnmounted } from 'vue';
 import { mountE2EHooks } from '../viewer/e2eHooks';
 import Toolbar from '../components/Toolbar.vue';
 import FileList from '../components/FileList.vue';
@@ -16,6 +16,7 @@ import TifCanvas from '../components/TifCanvas.vue';
 import DrawPanel from '../components/DrawPanel.vue';
 import DecodeOverlay from '../components/DecodeOverlay.vue';
 import ContextPanel from '../components/ContextPanel.vue';
+import NoticeModal from '../components/NoticeModal.vue';
 import StatusBar from '../components/StatusBar.vue';
 import ScenePathBar from '../components/ScenePathBar.vue';
 import { useViewerStore } from '../stores/viewer.js';
@@ -32,6 +33,9 @@ function openPastedPath(path: string): void {
 onMounted(() => {
   mountE2EHooks();      // window.__viewer（浏览器回归 + 真机验收）
 });
+
+// 模态提示不自动消失，而 store 是全局单例：不关就换页，它会跟着到别的页面上。
+onUnmounted(() => viewer.hideModal());
 </script>
 
 <template>
@@ -47,6 +51,8 @@ onMounted(() => {
       <ContextPanel />
     </div>
     <StatusBar />
+    <!-- 挂在页面根（不在 TifCanvas 的 slot 里）：.stage 的 transform 祖先会困住 fixed -->
+    <NoticeModal />
   </div>
 </template>
 

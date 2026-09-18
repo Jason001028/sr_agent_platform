@@ -102,19 +102,27 @@ function clampInt(v: number, lo: number, hi: number, def: number): number {
   return Math.min(hi, Math.max(lo, Math.round(v)));
 }
 
-/** 一行任务的耗时。终态行 = updated_at − created_at（后端每次状态写回都更新
-    updated_at，见 services/store.set_sr_task_state），受状态轮询间隔影响；
-    运行中的行用 nowSec 现算。时间戳缺失/倒挂 → null，界面显示「—」而不是 0 秒。 */
+/** 一行任务的耗时 = **本次运行**的时长：终态行取 finished_at − started_at，运行中
+    用 nowSec 现算。两列都由后端在观测到真实转换点时钉下（RUNNING / 终态，见
+    api/platform._task_state），所以量的是跑的时间，不含排队，也不是行的年龄。
+
+    为什么不拿 created_at 当起点：一行 = 一个指纹，同一场景同一参数重交时幂等层
+    复用同一行，created_at 停在**第一次**提交的时刻 —— 那样算出来的「耗时」是行龄，
+    真机上表现为「30 时 00 分」（2026-09-18）。
+
+    started_at 缺失（整段运行期间后端不在）或终态行缺 finished_at（升级前的老行）
+    → null，界面显示「—」：宁可空着，不回落到 created_at 编一个数。 */
 export interface TaskElapsed {
   seconds: number;
   running: boolean;
 }
 
 export function taskElapsed(t: QueueTask, nowSec: number): TaskElapsed | null {
-  const start = Number(t.created_at);
+  const start = Number(t.started_at);
   if (!Number.isFinite(start) || start <= 0) return null;
   const running = isActiveState(String(t.state));
-  const end = running ? nowSec : (Number(t.updated_at) || start);
+  const end = running ? nowSec : Number(t.finished_at);
+  if (!Number.isFinite(end) || end <= 0) return null;
   return { seconds: Math.max(0, Math.round(end - start)), running };
 }
 
@@ -134,25 +142,25 @@ export function formatDuration(seconds: number): string {
   return sec + ' 秒';
 }
 
-/** SSE job_update → 覆盖匹配 task 的 state（+ 后端给的话一并覆盖 updated_at）；
+/** SSE job_update → 覆盖匹配 task 的 state（+ 后端给的话一并覆盖时间戳）；
     无匹配不动（权威在 list()）。
 
-    updated_at 必须跟着 state 一起落到本地，否则终态行的耗时会退化成 0 秒：
-    本地的 updated_at 是上一次 GET /api/queue 的快照，而那次 GET 通常发生在
-    提交刚落库时（updated_at == created_at）；运行中用 nowSec 现算看不出来，
-    一进终态改用快照就成了 0。老后端不发这个字段 → 保留本地值，不回退成
-    undefined（否则时间戳丢掉，整列变「—」，比 0 秒更糟）。 */
+    时间戳必须跟着 state 一起落到本地，否则耗时会用上一次 GET 的快照算：本地那份
+    通常就采于提交刚落库时（started_at/finished_at 还是 NULL），运行中靠 nowSec
+    现算看不出来，一进终态就成了「—」（2026-09-17 的「0 秒」是同一个坑的前身）。
+    后端只在自己**写库成功**时带这些字段 → 缺席即保留本地值，不回退成 undefined
+    （时间戳丢掉整列变「—」，比旧值更糟）。 */
 export function mergeJobUpdate(tasks: QueueTask[], ev: JobUpdateEvent): QueueTask[] {
   let hit = false;
-  const at = Number(ev.updated_at);
   const next = tasks.map((t) => {
-    if (t.task_id === ev.task_id) {
-      hit = true;
-      return Number.isFinite(at) && at > 0
-        ? { ...t, state: ev.state, updated_at: at }
-        : { ...t, state: ev.state };
+    if (t.task_id !== ev.task_id) return t;
+    hit = true;
+    const patch: Partial<QueueTask> = { state: ev.state };
+    for (const col of ['updated_at', 'started_at', 'finished_at'] as const) {
+      const v = Number(ev[col]);
+      if (Number.isFinite(v) && v > 0) patch[col] = v;
     }
-    return t;
+    return { ...t, ...patch };
   });
   return hit ? next : tasks;
 }

@@ -583,7 +583,8 @@ class TestResolveFingerprint(ResolveBase):
     """拖拽入口的双指纹（`size_bytes`）：**名字 + 字节数**都吻合才认。
 
     缺了名字那一半，「目录名 .tif 与 PAN.tif 共存」的 RC 场景会被冒名顶替 ——
-    见 `_fingerprint_mismatch` 的 docstring。
+    见 `_fingerprint_mismatch` 的 docstring。拖 jpg 时比的对象不同（名字比**场景
+    目录名**、字节数不比）：jpg 是显示件，与 SR 跑的那份栅格输入不是同一个文件。
     """
 
     def setUp(self):
@@ -639,14 +640,74 @@ class TestResolveFingerprint(ResolveBase):
 
         盘阵目录里的 jpg 是**另一份产物**（8bit 显示就绪的预览，见
         `scene_search._IMAGE_EXTS`），与输入的 TIF 不可能同字节 —— 字节数那一半
-        对 JPEG 无意义，比下去只会把这条入口恒堵死。名字那一半仍成立（同名同
-        目录），所以仍算同一个场景，lq_path 照给。
+        对 JPEG 无意义，比下去只会把这条入口恒堵死。名字那一半仍然成立，只是比的
+        是**场景目录名**（见下一条），所以仍算同一个场景，lq_path 照给。
         """
         jpg = self.d / f"{SCENE_NAME}.jpg"
         jpg.write_bytes(b"\xff\xd8\xff\xd9")        # 内容不参与判定，只走名字+尺寸
         r = self.resolve(name=jpg.name, size_bytes=jpg.stat().st_size)
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json()["row"]["lq_path"], self.d.as_posix())
+
+    def test_jpg_matches_dir_name_even_when_input_is_pan(self):
+        """钉子：纯 RC 场景（目录里只有 `PAN.tif`）拖 `<场景名>.jpg` 必须命中。
+
+        这一条 2026-09-18 复现出来的 bug：拖 .jpg 这条入口**恰好在 SR 真要跑的
+        场景上恒 404**。原因是 jpg 名被拿去和**栅格输入**的 stem 比，而纯 RC 目录里
+        `input_scene_path` 返回的是 `PAN.tif`（`inp.stem == "PAN"`），显示件却是
+        生产全名，永远比不过 —— 于是「极少出现盘阵小标」：只有目录里恰好躺着
+        `<目录名>.tif`（SC 场景，或 RC 目录留着上游 SC 产物）时才关联得上。
+
+        正确判据是 jpg 名 == **场景目录名**（生产全名 = `<目录名>_meta.xml` 的前缀）。
+        """
+        self.tif.unlink()                           # 只留 PAN.tif：纯 RC
+        arr = (np.arange(320 * 640).reshape(640, 320) % 65535).astype(np.uint16)
+        tifffile.imwrite(self.d / "PAN.tif", arr, photometric="minisblack")
+        jpg = self.d / f"{SCENE_NAME}.jpg"
+        jpg.write_bytes(b"\xff\xd8\xff\xd9")
+        r = self.resolve(name=jpg.name, size_bytes=jpg.stat().st_size)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["row"]["lq_path"], self.d.as_posix())
+        # 同一目录下，栅格那条名字门照旧拦着 PAN.tif 之外的同名字节相同件
+        self.assertEqual(self.resolve(name=SCENE_NAME,
+                                     size_bytes=self.size).status_code, 404)
+
+    def test_derived_and_renamed_jpg_404_never_link(self):
+        """派生件 / 副本 / 别处导出的 jpg：一个都不许关联上。
+
+        `_cloud.jpg`（云量图）、`.preview.jpg`（平台自己烤的缓存）、` - 副本.jpg`
+        这些名字**带着时间戳**，所以能走到候选判定这一层；但它们手里的「生产名」
+        是残的（后缀粘在最后一段上，或整个目录名对不上），反推出来的目录在盘阵上
+        不存在 → 404，一条候选都命中不了。
+
+        注意它们**不是**被「名字不一致」那一关挡下的：默认模板下场景目录名就是由
+        这个名字（去后缀）得来的，dir 存在时 `want == d.name` 必然成立 —— 名字那
+        一关是给「换了 SR_SCENE_PATH_TEMPLATE、目录改了命名」的部署留的守卫，在
+        默认部署里不发力。这里真正挡住它们的是「目录不存在」。
+        """
+        for bad in (f"{SCENE_NAME}_cloud.jpg", f"{SCENE_NAME}.preview.jpg",
+                    f"{SCENE_NAME} - 副本.jpg"):
+            with self.subTest(bad=bad):
+                r = self.resolve(name=bad, size_bytes=12345)
+                self.assertEqual(r.status_code, 404, r.text)
+                self.assertIn("目录不存在", r.json()["detail"])
+
+    def test_jpg_without_timestamp_400_says_what_to_drag(self):
+        """名字里没有生产全名的 jpg：400，且要说清「平台不猜目录、该拖哪一份」。
+
+        `PAN.jpg` 这类名字里没有 14 位成像时刻 —— 反推路径的唯一依据就是文件名，
+        拿不到日期就不知道该去 `<年>/<月>/<日>` 哪一天找。**绝不猜**（猜错就是拿
+        另一景的 lq_path 去提交），所以只能如实说认不出来。
+        """
+        r = self.resolve(name="PAN.jpg", size_bytes=12345)
+        self.assertEqual(r.status_code, 400, r.text)
+        detail = r.json()["detail"]
+        self.assertIn("不猜目录", detail)
+        self.assertIn("<目录名>.jpg", detail)
+        # 栅格那条 400 的措辞不受影响（它是「没有时间戳」，不是「不像生产全名」）
+        r2 = self.resolve(name="local_nodate.tif", size_bytes=12345)
+        self.assertEqual(r2.status_code, 400)
+        self.assertIn("14/8 位成像时间戳", r2.json()["detail"])
 
     def test_other_raster_suffix_still_checks_size(self):
         """放行的是「拖进来的是 JPEG」这一件事，不是「后缀跟盘阵不一样」。

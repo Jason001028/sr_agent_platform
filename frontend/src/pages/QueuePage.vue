@@ -62,7 +62,9 @@ function elapsedText(t: QueueTask): string {
   return (e.running ? '已运行 ' : '') + formatDuration(e.seconds);
 }
 const ELAPSED_TITLE =
-  '终态行 = updated_at − created_at（含状态轮询间隔，为估算值）；运行中的行每秒刷新';
+  '本次运行时长 = finished_at − started_at：'
+  + '后端首次看到「运行中」到落终态之间的时间，纯算力、不含排队；运行中的行每秒刷新。'
+  + '「—」= 这次运行没被观测到（整段期间后端不在），或这一行建于加这两列之前。';
 
 /** 将读的掩膜（后端 §4.3 推导；仅展示，不随 body 提交 —— formToSubmit 恒发
     mask_path: null，让后端按同一规则重推一遍）。
