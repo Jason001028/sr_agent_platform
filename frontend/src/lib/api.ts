@@ -52,8 +52,9 @@ export type ChatSseEvent =
   | { type: 'error'; error: string };
 
 /** 队列 SSE 事件（§3.3 job_update）。
-    `updated_at` = 后端这次写回 sr_tasks 的时间戳（终态行的耗时就是它减
-    created_at）。老后端不发这个字段，故可选 —— 缺省时前端保留本地快照。 */
+    `updated_at` / `started_at` / `finished_at` = 后端这次写回 sr_tasks 的值，
+    与 GET /api/queue 同名字段同源（耗时 = finished_at − started_at）。都是可选：
+    老后端不发，写库失败时也不发 —— 缺省时前端保留本地快照。 */
 export interface JobUpdateEvent {
   type: 'job_update';
   task_id: number;
@@ -63,6 +64,8 @@ export interface JobUpdateEvent {
   ok: boolean;
   error: string | null;
   updated_at?: number;
+  started_at?: number | null;
+  finished_at?: number | null;
 }
 
 export type PlatformSseEvent = ChatSseEvent | JobUpdateEvent | { type: 'ping' };
@@ -87,8 +90,15 @@ export interface QueueTask {
   config_xml: string | null;
   batch_script: string | null;
   log_dir: string | null;
+  /** 行的时间戳：created_at = 这一行**第一次**提交的时刻（同一指纹重交复用同一行，
+   *  它不会刷新），updated_at = 最后一次写回。队列排序与「创建时间」列用它们。 */
   created_at: number;
   updated_at: number;
+  /** **本次运行**的时间窗：首次被观测到 RUNNING → 终态落库。耗时列的唯一来源
+   *  （不派生自 created_at —— 那是行的生日，复用行会退化成行龄）。NULL = 没观测到
+   *  开始（整段运行期间后端不在）或升级前建的老行 → 界面显示「—」。 */
+  started_at: number | null;
+  finished_at: number | null;
 }
 
 /** POST /api/queue 请求体（run_sr 参数，lq_path 必填）。 */

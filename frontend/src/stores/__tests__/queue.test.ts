@@ -22,7 +22,7 @@ function task(over: Partial<QueueTask> = {}): QueueTask {
       gpu: 0, cloud_limit: 80, delete_ori: false, grid_align: true,
     },
     config_xml: null, batch_script: null, log_dir: null,
-    created_at: 0, updated_at: 0,
+    created_at: 0, updated_at: 0, started_at: null, finished_at: null,
     ...over,
   };
 }
@@ -76,22 +76,40 @@ describe('isActiveState / taskElapsed（耗时列）', () => {
     for (const s of ['COMPLETED', 'FAILED', 'UNKNOWN', '']) expect(isActiveState(s)).toBe(false);
   });
 
-  it('终态行 = updated_at − created_at（后端每次状态写回都刷 updated_at）', () => {
-    const t = task({ state: 'COMPLETED', created_at: 1000, updated_at: 1073 });
+  it('终态行 = finished_at − started_at（本次运行的时长）', () => {
+    const t = task({ state: 'COMPLETED', created_at: 1000, updated_at: 1073,
+                     started_at: 1000, finished_at: 1073 });
     expect(taskElapsed(t, 99999)).toEqual({ seconds: 73, running: false });
   });
 
-  it('运行中的行按 nowSec 现算，不受 updated_at 束缚', () => {
-    const t = task({ state: 'RUNNING', created_at: 1000, updated_at: 1000 });
+  it('运行中的行按 nowSec 现算，不受 finished_at 束缚', () => {
+    const t = task({ state: 'RUNNING', started_at: 1000, finished_at: null });
     expect(taskElapsed(t, 1042)).toEqual({ seconds: 42, running: true });
   });
 
-  it('缺 created_at → null（界面显示「—」，不假装 0 秒）', () => {
-    expect(taskElapsed(task({ state: 'COMPLETED' }), 100)).toBeNull();
+  it('回归钉：耗时不是行的年龄（复用行 created_at 是第一次提交的时刻）', () => {
+    // 2026-09-18 真机现象：同一场景同一参数重交，幂等层复用同一行 —— created_at
+    // 停在第一次提交（30 小时前），这一次运行只跑了 200 多秒。修复前耗时就取
+    // updated_at − created_at，量出来是行龄「30 时 00 分」。
+    const t = task({ state: 'COMPLETED', created_at: 1_000_000, updated_at: 1_000_200,
+                     started_at: 1_108_000, finished_at: 1_108_200 });
+    const e = taskElapsed(t, 9_999_999)!;
+    expect(e.seconds).toBe(200);
+    expect(formatDuration(e.seconds)).toBe('3 分 20 秒');
+  });
+
+  it('还没开始跑（started_at 缺）→ null，界面显示「—」', () => {
+    expect(taskElapsed(task({ state: 'PENDING', created_at: 1000 }), 100)).toBeNull();
+    expect(taskElapsed(task({ state: 'SUBMITTING', created_at: 1000 }), 100)).toBeNull();
+  });
+
+  it('终态行缺 finished_at（升级前的老行）→ null，不回落到 created_at 编一个数', () => {
+    expect(taskElapsed(task({ state: 'COMPLETED', created_at: 1000, updated_at: 1073,
+                              started_at: 1000 }), 100)).toBeNull();
   });
 
   it('时间戳倒挂 → 夹到 0', () => {
-    expect(taskElapsed(task({ state: 'COMPLETED', created_at: 100, updated_at: 50 }), 10))
+    expect(taskElapsed(task({ state: 'COMPLETED', started_at: 100, finished_at: 50 }), 10))
       .toEqual({ seconds: 0, running: false });
   });
 });
@@ -204,42 +222,46 @@ describe('mergeJobUpdate（SSE 归并）', () => {
     }
   });
 
-  it('帧带 updated_at → 一并覆盖（终态耗时靠它算）', () => {
-    const rows = [task({ task_id: 1, state: 'RUNNING', created_at: 1000, updated_at: 1000 })];
+  it('帧带 started_at / finished_at → 一并覆盖（耗时靠它们算）', () => {
+    const rows = [task({ task_id: 1, state: 'RUNNING', started_at: 1000 })];
     const next = mergeJobUpdate(rows, {
       type: 'job_update', task_id: 1, job_id: 101,
       state: 'COMPLETED', prev_state: 'RUNNING', ok: true, error: null,
-      updated_at: 1073,
+      updated_at: 1073, started_at: 1000, finished_at: 1073,
     });
-    expect(next[0].updated_at).toBe(1073);
+    expect(next[0].finished_at).toBe(1073);
     expect(taskElapsed(next[0], 99999)).toEqual({ seconds: 73, running: false });
   });
 
-  it('回归钉：任务跑完不再退化成「0 秒」', () => {
-    // 本地快照取自提交刚落库那一次 GET（updated_at == created_at），随后只有
-    // SSE 在推状态。修复前：一进终态就改用这份快照 → 耗时恒为 0 秒。
-    let rows = [task({ task_id: 1, state: 'SUBMITTING', created_at: 1000, updated_at: 1000 })];
-    const at = (st: string, updated_at?: number) => {
+  it('回归钉：任务跑完不退化成「—」（本地快照还是提交时那份）', () => {
+    // 本地快照取自提交刚落库那一次 GET（两列都还是 NULL），随后只有 SSE 在推
+    // 状态。不带时间戳的话，一进终态就只能显示「—」（2026-09-17 是「0 秒」，
+    // 同一个坑的前身）。
+    let rows = [task({ task_id: 1, state: 'SUBMITTING', created_at: 1000 })];
+    const at = (st: string, ev: { started_at?: number; finished_at?: number }) => {
       rows = mergeJobUpdate(rows, {
         type: 'job_update', task_id: 1, job_id: 101,
-        state: st, prev_state: rows[0].state, ok: true, error: null, updated_at,
+        state: st, prev_state: rows[0].state, ok: true, error: null,
+        updated_at: 1000, ...ev,
       });
     };
-    at('RUNNING', 1000);
+    at('RUNNING', { started_at: 1000 });
     expect(formatDuration(taskElapsed(rows[0], 1173)!.seconds)).toBe('2 分 53 秒');
-    at('COMPLETED', 1173);
+    at('COMPLETED', { started_at: 1000, finished_at: 1173 });
     const e = taskElapsed(rows[0], 99999)!;
     expect(e.running).toBe(false);
-    expect(formatDuration(e.seconds)).toBe('2 分 53 秒');   // 不是「0 秒」
+    expect(formatDuration(e.seconds)).toBe('2 分 53 秒');   // 既不是「—」也不是「0 秒」
   });
 
-  it('老后端不带 updated_at → 保留本地快照（不回退成 undefined）', () => {
-    const rows = [task({ task_id: 1, state: 'RUNNING', created_at: 1000, updated_at: 1042 })];
+  it('帧不带这些字段（老后端/写库失败）→ 保留本地值，不回退成 undefined', () => {
+    const rows = [task({ task_id: 1, state: 'RUNNING', started_at: 1000, finished_at: null,
+                         updated_at: 1042 })];
     const next = mergeJobUpdate(rows, {
       type: 'job_update', task_id: 1, job_id: 101,
       state: 'COMPLETED', prev_state: 'RUNNING', ok: true, error: null,
     });
-    expect(next[0].updated_at).toBe(1042);       // 丢掉的话整列会变「—」
+    expect(next[0].started_at).toBe(1000);       // 丢掉的话整列会变「—」
+    expect(next[0].updated_at).toBe(1042);
   });
 
   it('帧里的 updated_at 非法（0 / NaN / 缺失）→ 不覆盖', () => {

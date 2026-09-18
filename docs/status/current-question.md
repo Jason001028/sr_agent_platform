@@ -34,6 +34,7 @@
 - **队列页三处前端缺陷修复（09-17，开发机）**：① 「耗时」列在 SR 跑完后从正常数值掉成「0 秒」—— 根因是 SSE `job_update` 帧不带 `updated_at`，前端那份时间戳冻结在提交时的 GET 快照（`updated_at == created_at`），运行中靠本地现算看不出、一进终态就归零；现由 `store.set_sr_task_state` 返回写入的时间戳、`_task_state` 广播时带出、前端 `mergeJobUpdate` 一并写回（写库失败则不发，避免界面与库对不上）。② 耗时列与创建时间列加 `nowrap` + `tabular-nums`，不再折行；参数列加 `overflow-wrap: anywhere` 吸收宽度。③ 新增 `--page-w: 1360px` 令牌，场景库 / 队列 / 聊天三页同宽（原先 1360 / 1240 / 1240，各写各的）。验证：后端 **466 passed / 1 skipped**、前端 **175 passed** + `vue-tsc` 零错误 + `npm run build`、e2e 39/61/**21**（`test-platform.js` 新增 3 条断言并做过反证：摘掉前端写回即红在「页内 0 秒 / 接口 1 秒」）。**交付须同时更新 `dist` 与 `backend` 两个包**，只换 dist 修不好。同日续：那条页宽断言当时只比 `max-width` **字符串**、且跑在 800px 默认视口下（那个宽度里三页都被视口压扁，等于没测），已改成 1600 视口**实测正文盒** + 「顶住 `--page-w` 上限」两条，`test-platform.js` 现 **22** 断言；同时发现盘上 `dist` 停在 09-15（产物仍是 1180/1240/1240），已重建。时间线见 §4「页宽断言加严」条。
 - **盘阵场景拉伸放开（09-17，开发机）**：盘阵 JPG 的拉伸下拉原先是**禁用**的、固定停在「2% 线性」（`Toolbar` 的 `:disabled` + `paintStretch` 对 `route==='jpg'` 直接早退），场景图一个模式都换不了 —— 而同一条像素管线的本地 JPG（`route==='img'`）从来可以随便拉，闸门给的理由（「别对已烘焙图二次拉伸」）在数据形态上不成立。现按用户决策放开：**盘阵场景以直方图均衡起手**（`lib/scene.startStretch`，换起手值只改这一个常量），拉伸成为**每张图各自的属性**（`rec.paintedMode`：切走再回来不重置、图与图之间不互相覆盖），且场景改模式**不写回全局**，免得看过一张场景图就改掉本地 TIF 的起手值。代价：服务器按 2% 裁掉的两端拉不回来。验证：前端 **178 passed** + `vue-tsc` 零错误 + `npm run build`、e2e 39/**65**/21（`test-scenes.js` 新增 4 条断言，反证过：把 jpg 早退回填即红在「下拉动了、画面没动」）。**真机待确认：8192 长边场景每次打开/换模式都要重算一遍全图，性能与内存需实测**（开发机 fixture 只有 1600×800）。时间线见 §4。
 - **烘焙规则 v2（09-17，开发机）**：服务端烤的预览图由「长边封顶 8192 + 2% 线性」改成「**长宽各为源图的 1/2 + 直方图均衡**」，且**能粘单个 `.tif` 文件路径**打开（裸 TIF 在盘阵任意目录都行）。查看器/场景库不再直接阅读原始 TIF，一律先读这张同目录的 `<stem>.preview.jpg`。规则戳写进 JPEG 注释（`srprev:v2:half+equal:q85`）—— 只看 mtime 的话，真机上换包后旧图 mtime 比源新会被判有效而**永不重烤**。顺带修掉两个真 bug：Pillow 的 `MAX_IMAGE_PIXELS` 默认上限会让 1/2 尺度的大图（1.5 亿像素）抛 `DecompressionBombError` → 缓存永远判不中 → 每次打开都重烤；裸 TIF 会被 `tryLinkScenes` 拿裸文件名反推目录（可能命中**另一个**目录，提交 SR 就是错的）。验证：后端 **490 passed / 1 skipped**、前端 **183 passed** + `vue-tsc` 零错误 + `npm run build`、e2e **48**/65/22/35 全绿。**真机待确认：① 12370×12100 的浏览器内存（峰值可能 1.2–1.8GB）② q85 下 100.7MB 的下载耗时 ③ 单块 HDD 上 8 线程是否反而更慢**。时间线见 §4。
+- **队列「耗时」改成本次运行时长（09-18，开发机）**：用户报「耗时列出现大几十个小时，实际单次最多 200 多秒」。定位到耗时量的是**行的年龄**（`updated_at − created_at`），两个触发点都实测复现。① **复用行**：`sr_tasks` 按 `task_fingerprint` 唯一，同场景同参数重交会复用同一行、真重跑，而 `created_at` 停在**第一次**提交的时刻。② **后端重启**：校准器的比较基准 `state.task_cache` 是内存态，重启后为空 → 每行都被判成「状态变了」→ 写回 + 刷时间戳，几天前跑完的行集体变行龄（**真机上部署一次就中一条**）。按用户决策把口径改成**纯算力、不含排队**：新增 `started_at`/`finished_at` 两列（首次观测到 RUNNING → 终态落库），耗时 = 两者之差；重启时基准回落到库里存的状态；老库 ALTER TABLE 补列、**不回填**（老行显示「—」）。验证：后端 **539 passed / 3 skipped**、前端 **190 passed** + `vue-tsc` 零错误 + `npm run build`、e2e 全绿。时间线见 §4。
 
 ## 2. 里程碑计划与待办
 
@@ -1000,6 +1001,291 @@ E 段的改造要点：原来那两处「命中」用例上传的是 fixture 里
 4. **`ensure_preview_jpg` 没有单飞**：同一场景并发两次会各烤一遍（既有风险，拖拽路径会放大）。
    本次不修。
 
+### 2026-09-18 · 交付打包统一：**前后端各一个包**（开发机）
+
+**起因**：用户贴出真机那套更新/回滚命令（`tar -xzf /tmp/dist-….tar.gz -C $APP` +
+`tar -xzf /tmp/backend-….tar.gz -C $APP`，回滚用 `dist.bak.<日期>` / `backend.bak.<日期>.tar.gz`），
+指出打包应当**前后端各一个包**。此前盘上有两个 release 目录、13 个包混在一起（根 `release/`
+是 09-17 手工拆的 3 个 `backend-*` + 4 个 `dist-*`，`frontend/release/` 里还有 6 个更早的、
+含一个「前后端合一」的 `sr-agent-platform-*.tar.gz`）。
+
+**改动**（`frontend/scripts/package-offline.sh` 重写）：
+
+- 产出固定到**仓库根** `release/`，**两个**包、都**不带** `sr-agent-platform/` 前缀（顶层直接是
+  `dist/` 与 `backend/`，才能 `tar -xzf … -C $APP` 直接落位）：`dist-<日期>-<时分>-<版本>.tar.gz`
+  与 `backend-*.tar.gz`（backend 包照旧去 `__pycache__/` 与 `tests/`）。
+- 打完自动清掉 `release/` 里同族的旧包（`dist-*` / `backend-*` / 历史 `sr-agent-platform-*`），逐条打印；
+  无关文件不碰。
+- 修一个 Windows 硬伤：GNU tar 见到归档名里的 `D:` 会按 `host:path` 当远程主机（`Cannot connect to D`）
+  → 改为先 `cd` 进输出目录、用相对包名打包。
+- **首次安装件（`nginx.conf` / `sr-api.service` / `requirements-api.txt` / 本 README）不进包**（用户选定）：
+  它们是机器配置模板、真机上被手工 sed 成过真实路径，进包解压会把真路径盖回出厂示例 —— 正是
+  `deploy/README.md` §5.6 那类事故的结构性消除。`deploy/README.md` §一/§二/§五、本文件 §6.1 已同步改口径。
+
+**删除的冗余**：根 `release/` 7 个 + `frontend/release/` 6 个（含目录本身），共 13 个 `.tar.gz`。
+全部在 gitignore 内、未入库，可从 git 历史重建（checkout 对应提交 → `npm run build` + `npm run package:offline`）。
+
+**验证**：模拟真机解压 —— 两个包解进同一个空目录后顶层就是 `dist/` 与 `backend/`；包内 `dist` 含
+`preview-tmp`（证明拖拽那条新链路在包里）、`backend/services/preview_cache.py` 在、`tests`/`__pycache__` 为 0；
+清旧包逻辑用假旧包 + 无关文件各造一个实测（旧包被删、无关文件保留）。产物：`dist-20260918-0922-b1bd87e.tar.gz`
+（327K）/ `backend-20260918-0922-b1bd87e.tar.gz`（90K）。
+
+**同日复查出的两处**（都影响此前记录的可信度）：
+
+1. **盘上 `frontend/dist` 停在 09-17 17:59**，早于 `1b2a415`(23:57) 与 `b1bd87e`(00:21) —— 里面连
+   「1/2 预览图」文案都没有，更没有 `preview-tmp`。直接跑 `.e2e/test-manual-scene.js` 时 E 段红在
+   `命中即升级成盘阵 JPG 路由（route=chunked）`（后端是新源码、前端是旧包）。**已重建**，四套 e2e
+   复跑 **61/65/22/35 全绿**，这才与文档记的数字对得上。
+2. **`backend/tests/test_scene_resolve.py` 在 HEAD 上不是合法 Python**：第 407-409 行的 f-string 把表达式
+   跨了行（PEP 701，3.12+ 才允许），`bdc6d4d` 那版还好、`1b2a415` 引入。本机 `python` 是 3.11.3，
+   `python -m pytest backend/tests -q` 在**收集阶段**就 SyntaxError，一条都跑不了 —— 也就是说
+   09-17/09-18 记的「490 / 511 passed」用文档那条命令复现不出来（本机无任何 3.12+ 解释器）。
+   临时改成单行等价写法后该文件 **48 passed**，全量 **463 + 48 = 511**，与文档数字吻合 → 坏的只是这个
+   测试文件。**尚未修（工作区已还原）**；它不进交付包（脚本排除 `tests/`），但开发机门禁仍红。
+   同日晚些时候**已修**（见下一条）：`resolve → row.id → preview` 三步拆开，该文件恢复收集。
+
+### 2026-09-18 · 拖盘阵 `.jpg` 进查看器：关联场景目录、掩码能落盘（开发机）
+
+**起因**：用户报「把盘阵上那些 `.jpg` 拖进查看器（应当作 `PAN.tif` 的原图读），鼠标悬在
+『保存掩码到盘阵』上却提示『这张图没有盘阵目录』」。两处原因，各一处改动：
+
+1. **前端压根没试过关联**：`addFiles` 按扩展名分堆（`.tif` → `openOne`，`.jpg` → `openLocalImage`），
+   而 `openLocalImage` 建完 rec 就 `activate` 完事，从没调过 `tryLinkScenes`。
+2. **后端指纹排除 jpg**：`_fingerprint_mismatch` 要求与输入影像**字节数完全相等** —— 盘阵上那份
+   `<编号>.jpg` 是另一份产物（8bit 显示就绪预览），与输入的 TIF 不可能同字节，比下去恒不通过。
+
+`tryLinkScenes` 本身对 `route === 'img'` 的 rec 完全可用（它只挡 `route === 'jpg'` 与
+`lqPath/linkTried`），所以主要工作是把已经写好的函数**调一下**。
+
+**改动**：
+
+- `backend/api/app.py::_fingerprint_mismatch`：名字那半之后加一句 `Path(name).suffix.lower() in
+  (".jpg", ".jpeg")` → 直接返回 None（放行）。名字那半**原样保留**（它挡的是「拖了 `<编号>.jpg`
+  而 SR 实际跑的是 `PAN.tif`」）。**没有**泛化成「后缀不同就放行」—— 那会连 `SC.tiff` 与 `SC.tif`
+  一起放过，而字节数那一半正是为这种「本机另存过一份」设的。
+- `frontend/src/stores/viewer.ts::openLocalImage`：`activate` 之后补 `void tryLinkScenes(live)`。
+- `tryLinkScenes` 命中分支：拖进来的就是 jpg 时 `blob = r.file`（**不调 `/preview-tmp`**）——
+  用户要看的就是自己拖的那张，拿服务端 1/2 缩图顶掉反而降清，还白等一次解压采样。裸 `.tif`
+  反推命中仍走阶段4 那条老路。`applySceneJpgToRec` 加可选第四参 `layout`，本地 jpg 那条路
+  自报来源（否则会显示「1/2 尺度 + 直方图均衡，服务端已烘焙」这句假话）。
+- 新增 `frontend/src/components/NoticeModal.vue` + store 的 `modal` 状态（`showModal/hideModal`）：
+  关联失败时 **jpg 走弹窗**（后端那句 detail 常常是「试过哪几个目录、各缺什么」，toast 六秒
+  既看不完也留不住），tif 维持原 toast。**不新增错误码** —— 现有 404 的 detail 已是能直接给人
+  看的话。挂在 `ViewerPage.vue` 页面根（不放 `TifCanvas` 的 slot：`.stage` 的 transform 祖先会
+  困住 `fixed`），并 `onUnmounted(() => viewer.hideModal())`（store 是全局单例，不关就换页会跟着走）。
+- 顺带修 `backend/tests/test_scene_resolve.py:407-409` 的跨行 f-string（PEP 701，只有 3.12+ 能解析，
+  本机 3.11.3 收集阶段就 SyntaxError）。
+
+**实测踩出来的一个坑（值得记住）**：`openLocalImage` 里 `recs.value.push(rec)` 之后，局部变量
+`rec` 是**原始对象**，直接改它的字段**不触发渲染** —— 关联成功了、`__viewer.activeRec().lqPath`
+也是对的，但工具栏那两颗按钮**一直是灰的**（store 值对、DOM 不更新）。改成 `recs.value.find(...)`
+取的**响应式代理**再往下传。其余入口本来就是 `recs.find(...)` 拿的代理，只有新增的这条差点漏掉。
+这类「store 对、页面不对」的偏差只看 `__viewer` 快照是查不出来的，得看 DOM。
+
+**验证（开发机，全绿）**：后端 `python -m pytest backend/tests -q` → **513 passed / 3 skipped**
+（基线 511；`TestResolveFingerprint` 新增 2 例：jpg 名 + 字节数故意不等 → 200，`.tiff` 名 +
+字节数不等 → 仍 404）。前端 `npx vitest run` 188 passed、`vue-tsc --noEmit` 零错误、`npm run build`
+通过。e2e 四套：`test-manual-scene.js` **75**（新增 E2 段）、`test-scenes.js` 65 / `test-platform.js`
+22 / `test-vue-viewer.js` 35（无回归）。E2 段断言：`route==='jpg'` + `lqPath` = 场景目录 +
+`W/H` 取影像头 1600×800 + **`/preview-tmp` 与 `/preview` 请求计数都不变**（证明没走服务端烘焙）+
+缩略图 = 拖进来那张 jpg 的像素（800×400）+ 布局文案不谎称服务端已烘焙 + 两颗按钮由灰转亮 +
+掩码真落进场景目录；失败那条断言弹窗给后端原因、状态栏不卡在「正在关联盘阵目录…」、按钮保持禁用。
+§H 的刻意 404 计数 3 → 4。
+
+**残留风险（两条，未修）**：
+
+1. **名字那半仍要求 `strip_raster_ext(jpg 名) == 输入影像 stem`**。所以若某个 RC 目录里**只有
+   `PAN.tif`**、没有同名的 `<编号>.tif`，拖 `<编号>.jpg` 会被拒（弹窗会原样显示「目录里的输入
+   影像是 PAN.tif，与拖入的 X 不是同一个文件」）。用户称同目录有 tif 是 99% 的情况，先按此接受；
+   真机上若发现这就是常见形态，放宽一行即可（jpg 拖入时只要目录里有输入影像就认）。
+   **当天即被真机证伪并修掉** —— 这就是常见形态（纯 RC 目录只有 `PAN.tif`），用户报「极少出现
+   盘阵小标」。见本篇后面那条「拖盘阵 `.jpg` 极少出现「盘阵」小标：jpg 的名字门比错了对象」。
+2. **没有宽高比校验** → 若那张 jpg 与输入 tif 比例不一致（被裁过 / 加过注记），掩码坐标会整片偏。
+
+**真机待确认**：拖一个 `<编号>.jpg` → 应出「已关联盘阵目录 …」toast 且「保存掩码到盘阵」变亮；
+画 ROI → 保存 → 盘阵上应出现 `<场景目录>/<编号>_mask.tif`；回归拖 `.tif` 的老路径行为不变
+（含字节数不符仍被拒）。
+
+### 2026-09-18 · 打开报「缺 18_meta.xml」：粘错层时不再编一个 meta 文件名（开发机）
+
+**起因**：用户报打开失败 —— `没找到合法场景目录 —— /DiskArray/GSHC2IMPS/PRODUCT/2026/09/18：
+缺 18_meta.xml（SR 靠它判 RC/SC，没有就跑不起来）`，并指出「`_meta.xml` 前一般是完整前缀」，
+同时给出标准形态：`W:\GSHC2IMPS\PRODUCT\2026\09\02\JL1KF02B03\<段级>\<景级>`（换言之，
+被粘的那一层**少了两层文件夹**）。
+
+**定位**：resolve 的目录分支对**所有**非场景目录一律报 `缺 <目录名>_meta.xml`。而
+`<目录名>_meta.xml` 的前缀是**完整生产名**（含 14 位成像时刻），这句话只在目录名本身就是
+生产名时才讲得通。复现证明唯一能产出这串字面的输入是**日期目录这一层**
+（`…/PRODUCT/2026/09/18`）—— 正是 `ScenePathBar.vue` 的预填值 `todayScenePrefix()`，
+用户点「打开」即中；粘完整景级路径（下划线名、空格名都试过）都是 200。`{name}`（拖拽）
+分支不可能产出这种候选：它的候选永远是 `<…>/<年>/<月>/<日>/<卫星型号>/<段级>/<名字>`。
+这与 09-17 那条「反推模板少两层」是同一族问题的另一面：**平台知道树有六层，但没在任何一处
+告诉用户**。
+
+**改动**：
+
+- `backend/pathguard.py` 新增三个**纯词法**原语（不 stat、不列举，只服务诊断措辞）：
+  `production_tree_depth`（日期目录之下第几层）、`flat_scene_layout`（扁平形态：日期目录下
+  一段就是生产名）、`looks_like_scene_name`（名字里认不认得出 14/8 位成像时刻）。
+- `backend/api/app.py::_why_not_scene_dir`：404 的原因按**粘错哪一层**分派 —— 日期目录报
+  「场景目录在它下面 3 层 `<卫星型号>/<段级目录>/<景级目录>`」、卫星型号层报 2 层、段级目录
+  报 1 层、场景目录内部子目录报「比场景目录还深」、名字不是生产名的报「不是完整生产名」。
+  只有**层与名字都指向「它就该是场景目录」**时才报「缺 `<完整生产名>_meta.xml`」（这句本身
+  是对的，也正是 SR 的判据 `osp.basename(lq_path) + "_meta.xml"`）。**准入判定一字未改**。
+- **段级目录名同样带 14 位成像时刻**，所以先按层数认、再按名字认 —— 否则「缺
+  `<段级名>_meta.xml`」这句同类的废话会原样搬到下一层去。
+- 扁平拓扑（`<年>/<月>/<日>/<场景名>`，平铺部署与 e2e 假拓扑）里场景目录再深一层是它**内部**
+  而非段级层 —— `flat_scene_layout` 就是为分开这两种拓扑加的，夹具本身就是扁平形态，这条
+  被 `test_scene_subdir_404_says_too_deep` 钉住。
+- `backend/pathguard.py::scene_name_layers`：各段分隔符**下划线与空格都认**，段级目录名按
+  **原文的分隔符**重建（空格名拼出下划线的段级目录必然 stat 不到）。盘阵真形态是下划线，
+  这条是防御性的（用户口径里出现过空格写法）。
+- `frontend/src/components/ScenePathBar.vue`：预填值仍是当天日期前缀，但提示语与占位符改教
+  真形态六层 —— 原来那句「用户补上生产编号即可」还是 09-17 前的四层口径，而预填的日期目录
+  本身**不是**场景目录，直接点「打开」必 404。
+
+**验证（开发机，全绿）**：后端 `python -m pytest backend/tests -q` → **530 passed / 3 skipped**
+（本次新增 17 例，基线 513）。前端 `npx vitest run` 188 passed、`vue-tsc --noEmit` 零错误。
+新增用例：`test_paths.py` 的 `TestProductionTreeDepth` / `TestFlatSceneLayout` /
+`TestLooksLikeSceneName` + 空格形态拆段 + 首尾分隔符拒判；`test_scene_resolve.py` 的
+`test_day_dir_404_points_three_levels_down`（钉死「不许再出现 `17_meta.xml`」）与卫星型号层 /
+段级层 / 场景目录子目录（六层与扁平各一）/ 非生产名四条。临时验收脚本（跑完即删）按用户回传的
+标准路径实测六种错层各报对应层，下划线六层场景 200，拖空格名 `.jpg` 反推命中六层树 200
+（改前必失败）。
+
+**残留风险（两条，未修）**：
+
+1. 层数靠 `<年>/<月>/<日>` 三段形态做**位置推断**：路径里若有一段无关的 `2026/09/18` 目录
+   （比如把场景目录挂在别处），措辞会按那个位置报。只影响提示文案，不影响能不能打开。
+2. 空格分隔符这条是**推测性的**：盘阵上实际是下划线（用户回传的标准路径可见），空格形态只在
+   用户口径里出现过。若真机确认不存在空格名，这两行可以直接删掉（不删也无副作用）。
+
+**真机待确认**：粘日期目录 / 卫星型号层 / 段级目录三种错层，界面是否给出「还差几层」；
+`W:\…\JL1KF02B03\<段级>\<景级>` 这一串应直接 200。
+
+### 2026-09-18 · 拖盘阵 `.jpg` 极少出现「盘阵」小标：jpg 的名字门比错了对象（开发机）
+
+**起因**：真机客户端拖入 `.jpg` 极少关联上盘阵，左上角「盘阵」小标几乎不出现；界面不报错、
+不提示，「拖完什么都没发生」。
+
+**定位（已复现）**：`backend/api/app.py::_fingerprint_mismatch` 的名字那一半拿**显示件 jpg**
+去比**栅格输入**的 stem。`inp` 是 `scene_search.input_scene_path(d)`，即
+`<目录名>.{tif,tiff,img}` / `PAN.{tif,tiff,img}` 里第一份存在的（候选里**根本没有 jpg**）。
+纯 RC 场景目录里只有 `PAN.tif` → `inp.stem == "PAN"`，而盘阵那份显示件叫 `<编号>.jpg`
+（生产全名）→ 永远比不过 → 404。六层真机形态夹具 + TestClient 打真请求的复现表：
+
+| 场景目录里有什么 | 拖 `<编号>.jpg` | 拖 `PAN.jpg` |
+|---|---|---|
+| 只有 `PAN.tif`（纯 RC） | **404** | 400 |
+| `<编号>.tif` + `PAN.tif` | 200 | 400 |
+| 只有 `<编号>.tif`（纯 SC） | 200 | 400 |
+
+小标只在「目录里恰好还躺着 `<编号>.tif`」时出现（SC 场景，或 RC 目录留着上游 SC 产物）
+—— 看着就像随机。09-18 那次加的「jpg 免字节数」在这条路上是**死代码**：名字门已经先拒了。
+
+第二道门：拖 `PAN.jpg`（RC 输入自己的配套显示件）名字里没有 14 位成像时刻 →
+`parse_scene_date` 取不到 → **400，候选目录一个都没试**。重命名件、别处导出的图同理。
+
+第三道（静默）：`frontend/src/stores/viewer.ts::tryLinkScenes` 的 `AbortSignal.timeout(4000)`
+到点后**一声不吭**地收场（清 `linkTried`、状态栏复位）。resolve 里要读一次输入影像的头，
+盘阵冷缓存时超过 4 秒是可能的。
+
+**改动**（按用户选定的三条）：
+
+- jpg 的名字门改比**场景目录名**（生产全名），不再比栅格输入的 stem；字节数照旧不比。
+  默认模板下候选目录名就是由这个名字（去后缀）拼出来的，所以这条通常直接成立 —— 它是给
+  「换了 `SR_SCENE_PATH_TEMPLATE`、场景目录改了命名」的部署留的守卫；真正把派生件
+  （`_cloud.jpg`、`.preview.jpg`）挡在外面的是候选目录不存在。
+- 名字里取不到成像时刻的 jpg：400 的措辞改成可照做的（平台不猜目录 + 该改拖 `<目录名>.jpg`）；
+  前端失败弹窗补一句「能关联的 jpg 只有名字与场景目录名一致的那份」。
+- 关联超时 4s → **20s**，并出一条 toast（原来什么都不说）。
+
+**验证（开发机，全绿）**：后端 `python -m pytest backend/tests -q` → **533 passed / 3 skipped**
+（新增 3 例：纯 RC 拖 `<编号>.jpg` 必须 200 的回归钉子、派生件/副本 404、无时间戳 jpg 的
+400 措辞）。前端 `npx vitest run` 188 passed、`vue-tsc --noEmit` 零错误、
+`npm run build` 通过。`.e2e/test-manual-scene.js` 新增 **E3** 段（拖纯 RC 目录里的
+`<编号>.jpg`，断言 lqPath / 掩码名仍是 `PAN_mask.tif` / W·H / 像素来源）→ **80 项断言全绿**；
+E2 那条拖的是 SC 目录，**复现不出这个 bug**，所以必须单立 E3。
+
+**残留风险（两条）**：
+
+1. 名字里没有生产全名的 jpg（`PAN.jpg`、副本、别处导出的图）仍然关联不上，而且**只能**
+   这样：名字里没有日期，后端不知道该去 `<年>/<月>/<日>` 哪一天找，猜一个就是拿别景的
+   `lq_path` 去提交。要覆盖它得加「用户点确认，把它关联到刚打开的那个目录」的入口 —— 本轮
+   按用户决定只改善措辞，没做这个入口。
+2. jpg 的名字门在默认部署下**不可能不成立**（见改动第一条），所以它现在是**守卫**而不是
+   过滤器。哪天真需要「这份 jpg 是不是这一景的」这种判断，得靠内容（尺寸之外的证据），
+   目前给不出来。
+
+**真机待确认**：拖 `<景级目录名>.jpg`（**无论目录里有没有** `<编号>.tif`）都应出现「盘阵」
+小标，状态栏出现「已关联盘阵目录 …，可以提交 SR 了」。若仍不出现，请把失败弹窗里那句后端
+原因原样回传 —— 它现在会直说比的是哪个名字。另请确认部署的后端包含 commit `b1bd87e`
+（不含它的话，连 SC 场景那条路也关联不上，与本次定位无关但会盖住结论）。
+
+### 2026-09-18 · 队列「耗时」量的是行的年龄，不是这次跑的时长（开发机）
+
+**起因**：用户报队列页「耗时」列出现**大几十个小时**，而实际单次 SR 最多 200 多秒。
+
+**定位（两个触发点都实测复现）**：那一列当时算的是 `updated_at − created_at`，也就是
+**这一行的年龄**。问题出在行的身份上 —— `sr_tasks` 按 `task_fingerprint`（参数 sha256）
+唯一，**一行 = 一套参数，不是一次运行**；同场景同参数重交会复用同一行并**真重跑**，而
+`created_at` 停在**第一次**提交的时刻（`run_sr.submit_run_sr` 命中复用分支时在
+`put_sr_task` **之前**就返回了，所以走到 `put_sr_task` 的 UPDATE 分支 == 这是一次真重跑）。
+
+| 触发点 | 复现（开发机 pytest） | 界面读数 |
+|---|---|---|
+| ① 复用行：第一次跑挂/被取消，第二天重交 | 真跑了 1.0 秒 | **108001 秒 = 「30 时 00 分」** |
+| ② 后端重启：校准器基准 `state.task_cache` 是内存态，重启后为空 → 每行都被判成「状态变了」→ 写回 + 刷 `updated_at` | 回填 `created_at` 到 30 小时前、重起应用 | 第 1 次 `GET /api/queue` 仍 1 秒，**第 2 次起 108001 秒** |
+
+②在真机上**部署一次就中一条**（几天前跑完的行集体变成行龄）；①是「隔天重交」的日常。
+两个触发点合起来解释了「大几十个小时」——那正好是两次提交之间的间隔。
+
+**改动**（按用户选定的口径 = **纯算力耗时，不含排队**）：
+
+- `sr_tasks` 新增 `started_at` / `finished_at` 两列（`store.py`）：只在**真的发生状态跃迁**
+  时写 —— 首次观测到 RUNNING 记 `started_at`，进 COMPLETED/FAILED 记 `finished_at`。
+  这两列是「**某一次运行**」的窗口，与 `created_at`（行第一次提交）/`updated_at`（最后一次写）
+  是两个族，都不能拿来算耗时。
+- 该写、该记、该广播集中在一处：`set_sr_task_state(..., mark_started=, mark_finished=)`
+  返回写入后的整行，`_task_state` 广播的 `job_update` 帧带上这三个时间戳，前端
+  `mergeJobUpdate` 一并写回（写库失败则不发，界面与库不会对不上）。
+- 重启不再变行龄：校准器的比较基准 `prev` 从内存缓存**回落到库里存的状态**，
+  终态行重启后不再被判成「变了」（②的复现路径被掐掉）。
+- 前端 `taskElapsed` 改为 `finished_at − started_at`（运行中 = `now − started_at`），
+  两列缺一即显示「—」；**不回落到 `created_at`** —— 那正是原来那个 bug。列头悬停说明
+  写明「纯算力、不含排队」与「—」的两种成因。
+- 老库用 `PRAGMA table_info` + `ALTER TABLE … ADD COLUMN` 补列（部署机上 `CREATE TABLE
+  IF NOT EXISTS` 是空操作），**不回填**。
+
+**验证（开发机，全绿）**：后端 `python -m pytest backend/tests -q` → **539 passed /
+3 skipped**（`test_api_platform.py` 新增 3 例：跨 30 小时重交后耗时仍是本次、没观测到
+RUNNING 时耗时为空、重启不动已跑完的行；`test_store.py` 新增 3 例：两列只在被要求时写、
+重交重置窗口但不动 `created_at`、**手工造老 schema 库验证 ALTER 迁移**）。前端
+`npx vitest run` **190 passed** + `vue-tsc --noEmit` 零错误 + `npm run build` 通过。
+e2e `test-platform.js` **22** / `test-scenes.js` **65** / `test-vue-viewer.js` **35** /
+`test-manual-scene.js` **83** 全绿。契约与实况同步：`docs/planning/api-contract.md` §3.3
+（GET 形状 + SSE 帧 + 「耗时」列的三个坑）。
+
+**残留风险（都是有意为之，不是待修）**：
+
+1. **整段运行都没被观测到**（后端全程不在）→ `started_at` 为空 → 耗时显示「—」。
+   回落到 `created_at` 会把上面那个 bug 原样请回来，所以宁可空着。
+2. **升级前的老行**显示「—」（不回填），同上。
+3. 运行中的耗时用**浏览器时钟**（`now − started_at`），与服务器时钟有偏差时可能微跳。
+4. Slurm 路线若重新启用，作业被 requeue 会重新观测到一次 RUNNING → 起点后移，
+   耗时只算**后一段**。本阶段 `SR_EXECUTOR=local` 单槽串行，不触发。
+
+**真机待确认**：① 部署须**同时更新 `backend` 与 `frontend/dist`** 两个包，且后端要**重启**
+（建列那次迁移在首次打开库时跑，不重启就没有这两列 → 接口缺字段、界面全「—」）；
+② 确认部署的后端含本次改动（上一包是 `b1bd87e`）；③ 升级后**历史行一律显示「—」**属预期，
+新提交的任务才有时长；④ 随便挑一条重交过的场景看一眼：耗时应当是**这一次**的秒数，
+不再是两次提交之间的间隔。
+
+**顺带修掉的一处测试脆弱**（与本次改动无关，但会咬人）：`test-scenes.js` 那条
+「列表行就地翻牌为『已生成』+『打开』」偶发红 —— `fetchSceneJpg` 在**去取静态 JPG 之前**
+就把 `row.hasPreview` 置真，标签先翻、按钮要等解码完才从「打开中…」变回来，而断言在
+等标签后**立刻**读按钮。改成等按钮也落定（新增 `waitRowBtn`），机器忙时不再假红。
+
 ## 5. 交接（给新窗口）
 
 > 开新窗口时按用途挑一份整篇粘过去：[handoff-prompt.md](handoff-prompt.md)（梳理框架与当前思路）、
@@ -1127,7 +1413,7 @@ E 段的改造要点：原来那两处「命中」用例上传的是 fixture 里
 > 启动两个坑的完整排障（217/USER、py3.9 eval-type-backport）见 `real-machine-bringup.md` §5 症状表第 2/3 行。
 
 ### 6.1 出发前（开发机）
-- [ ] **打包拷包**（⏱30′）· 开发机 `npm run build && npm run package:offline` → 离线包 + 后端依赖 wheel 拷 U 盘 · ✓= 包内含 `dist/ backend/ nginx.conf sr-api.service requirements-api.txt` · 记录:
+- [ ] **打包拷包**（⏱30′）· 开发机 `npm run build && npm run package:offline` → 仓库根 `release/` 出**两个**包（`dist-*.tar.gz` 顶层 `dist/`、`backend-*.tar.gz` 顶层 `backend/`）+ 后端依赖 wheel 拷 U 盘 · ✓= 两包解到 `$APP` 后 `$APP/dist` 与 `$APP/backend` 就位；`nginx.conf`/`sr-api.service`/`requirements-api.txt` **在仓库 `deploy/`**（不进包，见 §4 2026-09-18 打包条）· 记录:
 - [ ] **确认目标图**（⏱5′）· 从盘阵挑两张真实大图（GF07A03 1.11GB / KF02B04 1.78GB），记下它们在第几行 · ✓= 知道 scene 名即可 curl 到 · 记录:
 
 ### 6.2 首次部署（CentOS7）

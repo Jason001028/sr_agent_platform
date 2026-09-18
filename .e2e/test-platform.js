@@ -267,12 +267,14 @@ async function main() {
         };
       });
       assert(/^\d+ 秒$/.test(rowInfo.elapsed), `耗时列给出终态耗时（${rowInfo.elapsed}）`);
-      // 终态耗时的真值 = 后端 updated_at − created_at（假调度器下恒 < 60 秒，所以
-      // 只会是「N 秒」，不会走到「N 分 N 秒」分支）。页内那份 updated_at 若停在上
-      // 一次 GET 的快照 —— 提交刚落库时 updated_at == created_at —— 任务一完成耗
-      // 时就掉成「0 秒」，点一下刷新才露出真值。这里直接与接口读数对齐。
+      // 终态耗时的真值 = 后端 finished_at − started_at（本次运行的时长；假调度器下
+      // 恒 < 60 秒，所以只会是「N 秒」，不会走到「N 分 N 秒」分支）。两列都由后端
+      // 在观测到 RUNNING / 终态时钉下并随 SSE 帧下发 —— 页内那份若停在上一次 GET
+      // 的快照（提交刚落库时两列都还是 NULL），任务一完成耗时列就变「—」。这里直接
+      // 与接口读数对齐。**不是** updated_at − created_at：那是行的年龄，同一指纹
+      // 重交复用同一行时会量出几十个小时（2026-09-18 真机）。
       const apiTasks = (await (await fetch(apiBase + '/api/queue')).json()).tasks;
-      const truth = Math.round(apiTasks[0].updated_at - apiTasks[0].created_at) + ' 秒';
+      const truth = Math.round(apiTasks[0].finished_at - apiTasks[0].started_at) + ' 秒';
       assert(rowInfo.elapsed === truth,
         `耗时列 = 接口真值（页内 ${rowInfo.elapsed} / 接口 ${truth}）`);
       assert(rowInfo.ops.indexOf('再提交') >= 0, `每行给出「再提交」（${rowInfo.ops.join('/')}）`);

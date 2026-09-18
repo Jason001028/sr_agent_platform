@@ -578,15 +578,20 @@ class TestQueue(PlatformBase):
                          "UNKNOWN")
 
     def test_job_update_frame_carries_updated_at(self):
-        """状态变化帧必须带上这次写库的 updated_at。
+        """状态变化帧必须带上这次写库的时间戳（updated_at + 运行窗两端）。
 
-        界面上的终态耗时 = updated_at − created_at，而客户端本地的 updated_at
-        是上一次 GET /api/queue 的快照 —— 那次 GET 通常就在提交刚落库之后
-        （updated_at == created_at）。只广播 state 的话，任务一完成，耗时列
-        就从运行中的正常值掉成「0 秒」（2026-09-17 实测现象）。
+        界面上的耗时 = finished_at − started_at，而客户端本地那份是上一次
+        GET /api/queue 的快照（通常就在提交刚落库之后，两列都还是 NULL）。
+        只广播 state 的话，任务一完成耗时列就从运行中的正常值掉成「0 秒」
+        （2026-09-17 实测），或者干脆停在上一次运行/上一个快照的数字上。
         """
         app, c = self.app_client()
         tid = self._submit(c).json()["task_id"]
+        # 先让校准器看到 RUNNING，把本次运行的起点钉下来
+        with mock.patch.object(svc, "query_job_status",
+                               return_value={"active": True,
+                                             "state": "RUNNING"}):
+            self._task(c, tid)                      # GET 即校准一次
         # 冻结成终态：绕过假调度器的时序，直接让校准器看到 COMPLETED
         with mock.patch.object(svc, "query_job_status",
                                return_value={"active": False,
@@ -596,9 +601,10 @@ class TestQueue(PlatformBase):
                 q = asyncio.Queue()
                 app.state.subscribers.add(
                     _Subscriber(asyncio.get_running_loop(), q))
-                st, changed = _task_state(
+                st, changed, fresh = _task_state(
                     app.state, app.state.store.get_sr_task_by_id(tid))
                 self.assertEqual((st, changed), ("COMPLETED", True))
+                self.assertIsNotNone(fresh)         # 写回后的整行，给调用方用
                 return sse_events(await asyncio.wait_for(q.get(), 1))
 
             frames = asyncio.run(scenario())
@@ -607,13 +613,14 @@ class TestQueue(PlatformBase):
         ev = frames[0]
         self.assertEqual(ev["type"], "job_update")
         self.assertEqual(ev["state"], "COMPLETED")
-        # 帧里的值 = 库里刚写进去的那个（客户端据此算耗时，不能是另一个数）
+        # 帧里的值 = 库里刚写进去的那些（客户端据此算耗时，不能是另一个数）
         row = app.state.store.get_sr_task_by_id(tid)
-        self.assertEqual(ev["updated_at"], row["updated_at"])
+        for col in ("updated_at", "started_at", "finished_at"):
+            self.assertEqual(ev[col], row[col], col)
+        self.assertIsNotNone(row["started_at"])     # RUNNING 那一步钉过
+        self.assertGreaterEqual(row["finished_at"], row["started_at"])
 
     def test_updated_at_is_not_broadcast_when_the_db_write_fails(self):
-        """写库失败就不带 updated_at —— 库里没变，凭本地时钟发一个只会让界面
-        与库对不上；此时让客户端保留旧快照，与 GET 的读数保持一致。"""
         app, c = self.app_client()
         tid = self._submit(c).json()["task_id"]
         with mock.patch.object(svc, "query_job_status",
@@ -633,6 +640,87 @@ class TestQueue(PlatformBase):
 
         self.assertEqual(frames[0]["state"], "COMPLETED")   # 状态照推
         self.assertNotIn("updated_at", frames[0])
+
+    def test_elapsed_counts_this_run_not_the_row_age(self):
+        """重交复用的行：耗时必须是**这一次**跑的时长，不是这一行的年龄。
+
+        现场（2026-09-18 真机）：一行 = 一个指纹。第一次交上去挂了/被取消，第二天
+        修好再交 —— 幂等层复用同一行，而 created_at 是**第一次**提交的时刻。耗时列
+        原来量 updated_at − created_at，于是新跑的这一遍显示成「30 时 00 分」，实际
+        只跑了 200 多秒。这里把复现钉死：行确实旧 30 小时，耗时仍然只是这一次的。
+        """
+        app, c = self.app_client()
+        os.environ["SR_SLURM_FAKE_T_MS"] = "600000"     # 停在 PENDING，等被取消
+        tid = self._submit(c).json()["task_id"]
+        c.post(f"/api/queue/{tid}/cancel")
+
+        # 把这一行整体放旧 30 小时：等效于「昨天交的那一次」
+        row0 = app.state.store.get_sr_task_by_id(tid)
+        old = row0["created_at"] - 30 * 3600
+        db = app.state.store._db()
+        db.execute("UPDATE sr_tasks SET created_at = ?, updated_at = ? WHERE id = ?",
+                   (old, old, tid))
+        db.commit()
+
+        os.environ["SR_SLURM_FAKE_T_MS"] = "500"
+        r2 = self._submit(c)                            # 同参数 → 复用同一行、真重跑
+        self.assertEqual(r2.json()["task_id"], tid, "幂等层复用的是同一行")
+        self.assertEqual(self._poll_state(c, tid)[-1], "COMPLETED")
+
+        row = self._task(c, tid)
+        self.assertGreater(row["updated_at"] - row["created_at"], 29 * 3600,
+                           "这一行确实是大几十小时前建的")
+        self.assertLess(row["finished_at"] - row["started_at"], 10,
+                        "耗时量的是这一次跑的时长")
+        self.assertIsNotNone(row["started_at"], "本次运行的起点在 RUNNING 那一步钉下了")
+
+    def test_elapsed_absent_when_the_run_was_never_observed(self):
+        """没观测到「开始跑」就不编一个耗时：两列都是 NULL，界面显示「—」。
+
+        现场是整段运行期间 sr-api 不在（停机/重启跨过去了）。退回 created_at 顶替
+        是不行的 —— 那是行的生日，复用行会退化成行龄，正是这一轮要修的错。
+        """
+        c = self.client()
+        tid = self._submit(c).json()["task_id"]
+        with mock.patch.object(svc, "query_job_status",
+                               return_value={"active": False, "state": "COMPLETED"}):
+            row = self._task(c, tid)                    # 第一次校准就直接看见终态
+
+        self.assertEqual(row["state"], "COMPLETED")
+        self.assertIsNotNone(row["finished_at"])
+        self.assertIsNone(row["started_at"])
+
+    def test_restart_does_not_age_a_finished_row(self):
+        """sr-api 重启不重算耗时：已终态的行不该被写回、updated_at 不该被抬到「现在」。
+
+        第二个触发点（2026-09-18 实测）：`state.task_cache` 是内存态，重启后是空的。
+        校准器原来只拿它当比较基准，空缓存 → 每一行都被判成「状态变了」→ 写回 + 刷新
+        updated_at，于是一行几天前就跑完的任务，重启后显示成行龄（实测第 2 次 GET
+        起「30 时 00 分」）。现在基准缺失时回落到**库里存的状态**。
+        """
+        app, c = self.app_client()
+        tid = self._submit(c).json()["task_id"]
+        self._poll_state(c, tid)                        # 跑到 COMPLETED
+        row = self._task(c, tid)
+        elapsed = row["finished_at"] - row["started_at"]
+
+        old = row["created_at"] - 30 * 3600             # 整行放旧 30 小时
+        db = app.state.store._db()
+        db.execute("UPDATE sr_tasks SET created_at = ?, updated_at = ? WHERE id = ?",
+                   (old, old, tid))
+        db.commit()
+        before = self._task(c, tid)
+
+        app2 = self._make_app()                         # 「重启」：新 app、同一个库、空缓存
+        c2 = TestClient(app2)
+        for _ in range(3):
+            got = next(t for t in c2.get("/api/queue").json()["tasks"]
+                       if t["task_id"] == tid)
+
+        self.assertEqual(got["updated_at"], before["updated_at"],
+                         "重启不该重写已终态的行")
+        self.assertEqual(got["finished_at"] - got["started_at"], elapsed,
+                         "重启后的耗时仍是这一次运行的时长")
 
 
 class TestMasks(PlatformBase):
