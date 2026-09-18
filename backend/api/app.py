@@ -35,7 +35,8 @@ from backend.api.platform import (
     _json_body, _task_state, derived_mask_path, router as platform_router)
 from backend.config import load_config
 from backend.pathguard import (
-    ensure_allowed, infer_scene_paths, is_within, parse_scene_date,
+    ensure_allowed, flat_scene_layout, infer_scene_paths, is_within,
+    looks_like_scene_name, parse_scene_date, production_tree_depth,
     strip_raster_ext, to_posix_array_path)
 from backend.services import preview_cache
 from backend.services import scene_search, store as store_mod
@@ -239,6 +240,14 @@ def _fingerprint_mismatch(inp: Path, name: str, size_bytes: int) -> str | None:
     if inp.stem != want:
         return (f"{inp.parent}：目录里的输入影像是 {inp.name}，与拖入的 {want} "
                 "不是同一个文件（SR 在这个目录上跑的是前者）")
+    # 拖进来的是 JPG：名字对上了就算同一个场景。字节数那一半对 JPEG 无意义 ——
+    # 盘阵上那份 <目录名>.jpg 是**另一份产物**（8bit 显示就绪的预览，见
+    # scene_search._IMAGE_EXTS），与输入的 TIF 不可能同字节，比下去只会恒不通过，
+    # 白白把「拖 jpg 进查看器」这条入口堵死。
+    # 只对 jpg 放行、不泛化成「后缀不同就放行」：那会连 SC.tiff 与 SC.tif 也放过，
+    # 而拖错后缀（本机另存过一份 TIFF）恰恰是这一层要挡的。
+    if Path(name).suffix.lower() in (".jpg", ".jpeg"):
+        return None
     try:
         actual = inp.stat().st_size
     except OSError as e:
@@ -247,6 +256,77 @@ def _fingerprint_mismatch(inp: Path, name: str, size_bytes: int) -> str | None:
         return (f"{inp.parent}：输入影像 {inp.name} 的字节数与拖入的文件不一致"
                 f"（盘阵 {actual} vs 拖入 {size_bytes}）")
     return None
+
+
+#: 六层生产树里日期目录以下的三层；场景目录就是最深那层，目录名即**完整生产名**。
+_SCENE_LEVELS = ("<卫星型号>", "<段级目录>", "<景级目录>")
+#: 摆一个完整生产名，比抽象描述好认（用户回传的真机形态）。
+_SCENE_NAME_EXAMPLE = "JXGF07D03_PMS_20260622052600_200516571_101_0006_001_L1_MSS"
+
+#: 被粘目录在生产树里的位置（404 措辞按它分派）。
+_LEVEL_DAY = "day"      # 日期目录 `<年>/<月>/<日>`
+_LEVEL_SAT = "sat"      # 卫星型号层
+_LEVEL_MID = "mid"      # 段级产品目录（景级目录名去掉景号那段）
+_LEVEL_SCENE = "scene"  # 景级 = 场景目录
+_LEVEL_BELOW = "below"  # 场景目录内部的子目录
+_LEVEL_FLAT = "flat"    # 旧扁平形态里的场景目录（`<年>/<月>/<日>/<生产名>`）
+
+_LEVEL_DESC = {
+    _LEVEL_DAY: "这是日期目录（<年>/<月>/<日>）",
+    _LEVEL_SAT: "这是生产树的卫星型号层",
+    _LEVEL_MID: "这是段级产品目录（景级目录名去掉「景号」那一段所得）",
+}
+#: 各层之下、直到景级场景目录的那几层（404 消息里要指名道姓地列出来）。
+_LEVEL_BELOW_LEVELS = {
+    _LEVEL_DAY: _SCENE_LEVELS,
+    _LEVEL_SAT: _SCENE_LEVELS[1:],
+    _LEVEL_MID: _SCENE_LEVELS[2:],
+}
+
+
+def _dir_level(d: Path) -> str | None:
+    """被粘目录在生产树里的位置 —— 纯词法（pathguard 两个原语），不 stat、不列举。"""
+    depth = production_tree_depth(d)
+    if depth is None:
+        return None
+    if flat_scene_layout(d):
+        return _LEVEL_FLAT if depth == 1 else _LEVEL_BELOW
+    return {0: _LEVEL_DAY, 1: _LEVEL_SAT, 2: _LEVEL_MID,
+            3: _LEVEL_SCENE}.get(depth, _LEVEL_BELOW)
+
+
+def _why_not_scene_dir(d: Path) -> str:
+    """目录在、却不是场景目录时，说清**差在哪一层**（并进 404 的原因清单）。
+
+    这里以前一律报「缺 <目录名>_meta.xml」，于是粘日期目录
+    （`…/PRODUCT/2026/09/18`）得到的是「缺 18_meta.xml」：`<目录名>_meta.xml`
+    的前缀是**完整生产名**（含 14 位成像时刻），`18` 这类前缀根本不可能构成它，
+    用户读完也仍不知道该怎么办。
+
+    层数由 `production_tree_depth` + `flat_scene_layout`（纯词法）判、名字由
+    `looks_like_scene_name` 判，**两者都不参与准入** —— 准入仍是
+    `<目录名>_meta.xml` 在不在（与 SR 的 `osp.basename(lq_path) + "_meta.xml"`
+    同一口径，非生产树部署里的短名场景目录照样认）。
+    """
+    name = d.name
+    level = _dir_level(d)
+    # 目录就该是场景目录（扁平形态的它 / 六层树的景级层），或名字本身就是完整
+    # 生产名 → 只差一份 meta，照实说。**段级层是唯一的例外**：它的名字也带 14 位
+    # 成像时刻，光看名字会误报「缺 <段级名>_meta.xml」。
+    if level in (_LEVEL_FLAT, _LEVEL_SCENE) or (
+            level is None and looks_like_scene_name(name)):
+        return f"{d}：缺 {name}_meta.xml（SR 靠它判 RC/SC，没有就跑不起来）"
+    if level in _LEVEL_DESC:
+        below = _LEVEL_BELOW_LEVELS[level]
+        return (f"{d}：{_LEVEL_DESC[level]}，场景目录在它下面 {len(below)} 层 "
+                f"{'/'.join(below)} —— 目录名 = 完整生产名（如 "
+                f"{_SCENE_NAME_EXAMPLE}），里面的输入影像与 <目录名>_meta.xml 才成套")
+    if level == _LEVEL_BELOW:
+        return (f"{d}：这是场景目录内部的子目录 —— 请直接粘场景目录本身"
+                f"（目录名 = 完整生产名，如 {_SCENE_NAME_EXAMPLE}）")
+    return (f"{d}：目录名「{name}」不是完整生产名（生产名含 14 位成像时刻，如 "
+            f"{_SCENE_NAME_EXAMPLE}）—— 场景目录是 {'/'.join(_SCENE_LEVELS)} 里"
+            f"最深那层，<目录名>_meta.xml 的前缀取的就是它")
 
 
 def create_app() -> FastAPI:
@@ -451,8 +531,7 @@ def create_app() -> FastAPI:
             inp = scene_search.input_scene_path(d)
             if inp is None:
                 if not (d / (d.name + "_meta.xml")).is_file():
-                    reasons.append(
-                        f"{d}：缺 {d.name}_meta.xml（SR 靠它判 RC/SC，没有就跑不起来）")
+                    reasons.append(_why_not_scene_dir(d))
                 else:
                     names = "、".join(c.name
                                       for c in scene_search.input_candidates(d))
