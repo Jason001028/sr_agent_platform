@@ -7,7 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   fitView, thumbToScreen, mouseToThumb, thumbToOrig, origToThumb, locateView, wheelZoom,
-  pointInPoly, hitRoi, visibleThumbRect,
+  pointInPoly, hitRoi, visibleThumbRect, parseLocPair,
 } from '../viewMath.js';
 import type { Poly } from '../maskgen.js';
 
@@ -80,6 +80,35 @@ describe('origToThumb / locateView（像素定位）', () => {
     expect(v.scale).toBe(1);
     expect(v.ox).toBe(800 / 2 - 100);
     expect(v.oy).toBe(600 / 2 - 50);
+  });
+});
+
+describe('parseLocPair（输入框里的「X,Y」文本）', () => {
+  it('掩膜中心点坐标那种形态：半角逗号 + 小数', () => {
+    expect(parseLocPair('30766.11,21862.51')).toEqual(['30766.11', '21862.51']);
+  });
+  it('全角逗号 / 空格 / 制表符分隔、首尾空白都收', () => {
+    expect(parseLocPair(' 30766.11，21862.51 ')).toEqual(['30766.11', '21862.51']);
+    expect(parseLocPair('30766 21862')).toEqual(['30766', '21862']);
+    expect(parseLocPair('30766.11\t21862.51')).toEqual(['30766.11', '21862.51']);
+    expect(parseLocPair('30766.11,21862.51,')).toEqual(['30766.11', '21862.51']);  // 尾随分隔符不算第三个数
+  });
+  it('整数、带符号、省略整数位的小数都认', () => {
+    expect(parseLocPair('0,0')).toEqual(['0', '0']);
+    expect(parseLocPair('-1.5,+2')).toEqual(['-1.5', '+2']);
+    expect(parseLocPair('.5,2.')).toEqual(['.5', '2.']);
+  });
+  it('单个数不是坐标对（正在手输，调用方据此放行）', () => {
+    expect(parseLocPair('30766.11')).toBeNull();
+    expect(parseLocPair('')).toBeNull();
+    expect(parseLocPair('   ')).toBeNull();
+  });
+  it('**三个数一律不认**（拷了整行掩膜记录）：截前两个会把标记跳到别处', () => {
+    expect(parseLocPair('1,30766.11,21862.51')).toBeNull();
+  });
+  it('不是数的内容不认', () => {
+    expect(parseLocPair('X,Y')).toBeNull();
+    expect(parseLocPair('30766.11,abc')).toBeNull();
   });
 });
 
