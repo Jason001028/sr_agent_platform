@@ -8,8 +8,9 @@
 //       "宿主盘符映射到自身"的开发机补丁与 backend/tests/__init__.py::
 //       allowed_roots_env 同一套（Linux 上 Path(r).drive 为空，不生效）。
 // 覆盖：
-//   A. 场景库页：输入框预填**当天**前缀 → 粘 `W:\GSHC2IMPS\PRODUCT\<y>\<m>\<d>\<编号>`
-//      → 「打开」（不扫盘：只 resolve 这一次）→ 页内跳查看器 → rec 带上盘阵目录；
+//   A. 场景库页：输入框预填**当天**前缀 → 粘 `W:\GSHC2IMPS\PRODUCT\<y>\<m>\<d>\
+//      <卫星型号>\<段级目录>\<景级目录>` → 「打开」（不扫盘：只 resolve 这一次）
+//      → 页内跳查看器 → rec 带上盘阵目录；
 //   B. 画矩形 → 「保存掩码到盘阵」→ Node 侧断言 `<场景目录>/<编号>_mask.tif` 落盘；
 //   C. 「提交 SR」→ /queue 预填（不自动提交）→ 确认提交 → 假调度器跑到「完成」；
 //   D. 猜错必须报错：粘不存在的编号 → `.sp-err` 带候选路径与原因，查看器不新增 rec；
@@ -125,7 +126,7 @@ function startStaticServer() {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
 }
 
-/* ---------------- 盘阵 fixture：真机布局 <根>/GSHC2IMPS/PRODUCT/<y>/<m>/<d>/<编号> ---------------- */
+/* ---------------- 盘阵 fixture：真机布局 <根>/GSHC2IMPS/PRODUCT/<y>/<m>/<d>/<卫星型号>/<段级>/<景级> ---------------- */
 // 每个场景目录含 `<编号>.tif`（SC）或 `PAN.tif`（RC）+ `<目录名>_meta.xml` —— 正是
 // scene_search 的判据。**故意不放掩码**：手工入口要验的就是"没有掩码 → 现画 → 写到
 // 服务端"，90% 的生产场景就是这个状态。
@@ -148,17 +149,25 @@ def scene(d, image_name, w, h, scene_name):
                 "<SolarAzimuth>181.79</SolarAzimuth>")
     return d
 
-base = os.path.join(root, "GSHC2IMPS", "PRODUCT", ymd[:4], ymd[4:6], ymd[6:8])
-scene(os.path.join(base, sc_name), sc_name + ".tif", 1600, 800, sc_name)
-scene(os.path.join(base, pan_name), "PAN.tif", 640, 320, pan_name)
+# 生产树的层级关系（真机实测）：<日>/<卫星型号>/<段级目录>/<景级目录>，
+# 段级目录名 = 景级目录名去掉「景号」那一段（…_101_0005_001 → …_101_001）。
+# 反推**只认这一种形态**（旧扁平形态那条兜底候选已删），所以夹具必须是它。
+def tree(scene_name):
+    tok = scene_name.split("_")
+    return tok[0], "_".join(tok[:5] + tok[6:])
 
-# 生产树真形态：<日>/<卫星型号>/<段级目录>/<景级目录>（多两层）。
-# 段级目录名 = 景级目录名去掉「景号」那一段（真机实测的层级关系）。
+base = os.path.join(root, "GSHC2IMPS", "PRODUCT", ymd[:4], ymd[4:6], ymd[6:8])
+sat, mid = tree(sc_name)
+scene(os.path.join(base, sat, mid, sc_name), sc_name + ".tif", 1600, 800, sc_name)
+sat_p, mid_p = tree(pan_name)
+# RC 形态：目录里只有 PAN.tif（名字里没有成像时刻，反推认不出它，只靠粘路径打开）。
+scene(os.path.join(base, sat_p, mid_p, pan_name), "PAN.tif", 640, 320, pan_name)
+
 # 输入影像叫 <景级目录名>.tif（不是 PAN.tif）：E 段拖的就是「这张图自己」，
 # 双指纹要求名字也对得上 —— PAN.tif 那种 RC 形态的名字拆不出成像时间戳，
 # 压根到不了指纹这一步（前端只会发文件名）。RC 形态另由 PAN_DIR 覆盖（F 段）。
-tok = prod_name.split("_")
-prod_dir = os.path.join(base, tok[0], "_".join(tok[:5] + tok[6:]), prod_name)
+sat_d, mid_d = tree(prod_name)
+prod_dir = os.path.join(base, sat_d, mid_d, prod_name)
 scene(prod_dir, prod_name + ".tif", 512, 256, prod_name)
 
 # 裸 TIF（G 段）：**不在任何场景目录里**（没有 _meta.xml、父目录也不是场景名），
@@ -328,21 +337,28 @@ async function main() {
   const TMP_POSIX = tmp.replace(/\\/g, '/');
   const ARRAY = path.join(tmp, 'GSHC2IMPS', 'PRODUCT', y, mo, d);
   const ARRAY_POSIX = TMP_POSIX + '/GSHC2IMPS/PRODUCT/' + y + '/' + mo + '/' + d;
-  const WIN_PREFIX = 'W:\\GSHC2IMPS\\PRODUCT\\' + y + '\\' + mo + '\\' + d;
+  // 临时根下的目录 → 用户会粘的 Windows 形态（W: 映射到临时根，见后端 SR_DRIVE_MAP）
+  const winPath = (p) => 'W:\\' + path.relative(tmp, p).replace(/\//g, '\\');
+  const WIN_PREFIX = winPath(ARRAY);       // 日期目录本身（场景栏预填的那一层）
 
-  const SC = 'JL1KF02B03_PMS02_' + ymd + '124710_200536960_101_0005_001_L1_PAN';
-  const PAN = 'JL1KF02B03_PMS02_' + ymd + '130500_200536960_101_0005_001_L1_PAN';
+  // 场景名一律用**合成短名**：六层生产树（<卫星型号>/<段级> 两层）要叠在
+  // os.tmpdir() 前缀（~78 字符）之下，真机那种 61 字符的名字必然顶爆 Windows 260
+  // 的路径上限（>250 就 FileNotFoundError）；盘阵是 Linux，没这个限制。判据一个
+  // 不少 —— 卫星型号段、3 位段号、4 位景号、14 位成像时刻都在（后端反推要它）。
+  const SC = 'A_B_' + ymd + '124710_200536960_101_0005_001';
+  const PAN = 'A_B_' + ymd + '130500_200536960_101_0005_001';
   // 有日期、盘阵上不存在 —— 用来验"猜错必须报错"
-  const MISSING = 'JL1KF02B03_PMS02_' + ymd + '135900_200536960_101_0005_001_L1_PAN';
-  const SC_DIR = path.join(ARRAY, SC);
-  const PAN_DIR = path.join(ARRAY, PAN);
-  // 生产树（多两层）用的**合成短名**：Windows 路径上限 260，而 os.tmpdir()
-  // 前缀已占 ~70 字符 —— 用真机那种 57 字符的名字再加两层目录必然超限
-  // （本机 >250 就 FileNotFoundError）。名字仍符合生产命名规则（段号 3 位、
-  // 景号 4 位），段级目录名 = 去掉景号那一段。
+  const MISSING = 'A_B_' + ymd + '135900_200536960_101_0005_001';
   const PROD = 'A_B_' + ymd + '124710_200536960_102_0025_001';
-  const PROD_MID = 'A_B_' + ymd + '124710_200536960_102_001';
-  const PROD_DIR = path.join(ARRAY, 'A', PROD_MID, PROD);
+  // 场景目录 = <日>/<卫星型号>/<段级目录>/<景级目录>；段级名 = 去掉景号那一段。
+  // 与后端 pathguard.scene_name_layers 同一套规则，夹具 python 侧也这么拼。
+  const treeOf = (name) => {
+    const t = name.split('_');
+    return [t[0], t.slice(0, 5).concat(t.slice(6)).join('_'), name];
+  };
+  const SC_DIR = path.join(ARRAY, ...treeOf(SC));
+  const PAN_DIR = path.join(ARRAY, ...treeOf(PAN));
+  const PROD_DIR = path.join(ARRAY, ...treeOf(PROD));
 
   const datahub = path.join(tmp, 'datahub');
   // 拖拽入口的临时预览缓存根（1 天 TTL，按 YYYY-MM-DD 分桶）
@@ -448,7 +464,7 @@ async function main() {
         [...document.querySelectorAll('.spb button')].map((b) => b.textContent.trim()).join(',')))
         === '打开,今天', '场景栏给出「打开 / 今天」两个按钮');
 
-      const scWin = WIN_PREFIX + '\\' + SC;
+      const scWin = winPath(SC_DIR);
       await openPathBar(page, scWin);
       await waitNode(() => countUrl(resolveRe) === 1, 15000, 'resolve 往返');
       assert(countUrl(resolveRe) === 1,
@@ -549,7 +565,7 @@ async function main() {
       await clickLink(page, '场景库');
       await waitFor(page, () => location.pathname.endsWith('/scenes'), 15000, '回 /scenes');
       await waitFor(page, () => !!document.querySelector('.spb-in'), 15000, '场景栏');
-      await openPathBar(page, WIN_PREFIX + '\\' + MISSING);
+      await openPathBar(page, winPath(path.join(ARRAY, ...treeOf(MISSING))));
       await waitFor(page, () => {
         const e = document.querySelector('.sp-err');
         return e && e.textContent.trim().length > 0;
@@ -789,7 +805,7 @@ async function main() {
 
       /* ---------- F. PAN.tif（RC）场景的掩码命名 ---------- */
       console.log('\n[F] PAN.tif 场景：掩码名取输入名 stem，不取目录名');
-      await openPathBar(page, WIN_PREFIX + '\\' + PAN);
+      await openPathBar(page, winPath(PAN_DIR));
       // 期望值必须当实参传进页面：page.evaluate 的函数体在页面里跑，够不到 Node 变量
       await waitFor(page, (want) => {
         const r = window.__viewer.activeRec();

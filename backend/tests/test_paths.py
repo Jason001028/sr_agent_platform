@@ -338,25 +338,35 @@ class TestLooksLikeSceneName(EnvMixin):
 class TestInferScenePaths(EnvMixin):
     PROD = TestSceneNameLayers.PROD
 
-    def test_default_two_candidates(self):
-        """默认两条：生产树（卫星/段级两层）在前，旧扁平形态兜底在后。"""
+    def test_default_two_days(self):
+        """默认按生产树渲染**两条**：成像日在前，次日在后。
+
+        盘阵按生产日建目录，深夜成像的景记在第二天 —— 名字里的 14 位只当
+        下界用（用户 2026-09-18 报的 bug：名含 0917 的图大半在 0918 目录下）。
+        """
         self.setenv(SR_SCENE_PATH_TEMPLATE=None, SR_DRIVE_MAP=None)
         got = infer_scene_paths(self.PROD, "2026-09-02")
         self.assertEqual(got, [
             "/DiskArray/GSHC2IMPS/PRODUCT/2026/09/02/JL1KF02B03/"
             "JL1KF02B03_PMS09_20260902120156_200535158_102_001_L1_PAN/"
-            "JL1KF02B03_PMS09_20260902120156_200535158_102_0025_001_L1_PAN",
-            "/DiskArray/GSHC2IMPS/PRODUCT/2026/09/02/" + self.PROD,
+            + self.PROD,
+            "/DiskArray/GSHC2IMPS/PRODUCT/2026/09/03/JL1KF02B03/"
+            "JL1KF02B03_PMS09_20260902120156_200535158_102_001_L1_PAN/"
+            + self.PROD,
         ])
 
-    def test_default_non_production_name_flat_only(self):
-        """名字拆不出那两层 → 不硬拼，只剩旧扁平形态一条。"""
+    def test_default_non_production_name_no_candidate(self):
+        """名字拆不出那两层 → 不硬拼，一条候选也不构造。"""
         self.setenv(SR_SCENE_PATH_TEMPLATE=None, SR_DRIVE_MAP=None)
         got = infer_scene_paths("JL1KF02B03_PMS02_20260910124710_L1_PAN",
                                 "2026-09-10")
-        self.assertEqual(
-            got, ["/DiskArray/GSHC2IMPS/PRODUCT/2026/09/10/"
-                  "JL1KF02B03_PMS02_20260910124710_L1_PAN"])
+        self.assertEqual(got, [])
+
+    def test_next_day_rolls_over_month(self):
+        """次日跨月靠 timedelta 算，不字符串加一。"""
+        self.setenv(SR_SCENE_PATH_TEMPLATE="/prod/{y}/{m}/{d}/{name}")
+        self.assertEqual(infer_scene_paths("SC1", "2026-09-30"),
+                         ["/prod/2026/09/30/SC1", "/prod/2026/10/01/SC1"])
 
     def test_strips_raster_ext(self):
         """前端发来的是**用户拖进来的文件名**（带后缀）；目录名从不带后缀。"""
@@ -371,10 +381,14 @@ class TestInferScenePaths(EnvMixin):
         self.assertEqual(strip_raster_ext("A.tif.bak"), "A.tif.bak")
 
     def test_env_template_with_layers(self):
+        """自定模板同样给两天：模板里的 {d} 也按成像日/次日各渲染一遍。"""
         self.setenv(SR_SCENE_PATH_TEMPLATE="/prod/{y}/{m}/{d}/{sat}/{mid}/{name}")
         got = infer_scene_paths(self.PROD, "2026-09-02")
         self.assertEqual(got, [
             "/prod/2026/09/02/JL1KF02B03/"
+            "JL1KF02B03_PMS09_20260902120156_200535158_102_001_L1_PAN/"
+            + self.PROD,
+            "/prod/2026/09/03/JL1KF02B03/"
             "JL1KF02B03_PMS09_20260902120156_200535158_102_001_L1_PAN/"
             + self.PROD])
 
@@ -383,21 +397,43 @@ class TestInferScenePaths(EnvMixin):
         self.setenv(SR_SCENE_PATH_TEMPLATE="/prod/{y}/{m}/{d}/{sat}/{name}")
         self.assertEqual(infer_scene_paths("SC1", "2026-01-02"), [])
 
+    def test_env_template_without_date_placeholder(self):
+        """模板不含日期占位符 → 两天渲染出同一条，去重后仍只有一条。"""
+        self.setenv(SR_SCENE_PATH_TEMPLATE="/prod/scenes/{name}")
+        self.assertEqual(infer_scene_paths("SC1", "2026-01-02"),
+                         ["/prod/scenes/SC1"])
+
     def test_custom_template(self):
         self.setenv(SR_SCENE_PATH_TEMPLATE="/prod/{y}/{m}/{d}/{name}")
         got = infer_scene_paths("SC1", "2026-01-02")
-        self.assertEqual(got, ["/prod/2026/01/02/SC1"])
+        self.assertEqual(got, ["/prod/2026/01/02/SC1", "/prod/2026/01/03/SC1"])
 
     def test_pure_lexical_no_stat(self):
         # 反推只拼字符串：目录根本不存在也要照样返回
         self.setenv(SR_SCENE_PATH_TEMPLATE="/prod/{y}/{m}/{d}/{name}")
         got = infer_scene_paths("NOT_EXIST_AT_ALL", "2026-01-02")
-        self.assertEqual(got, ["/prod/2026/01/02/NOT_EXIST_AT_ALL"])
+        self.assertEqual(got, ["/prod/2026/01/02/NOT_EXIST_AT_ALL",
+                              "/prod/2026/01/03/NOT_EXIST_AT_ALL"])
 
     def test_rejects_stem_with_separator(self):
-        for bad in ("a/b", "a\\b", "..", "a\x00b", ""):
+        for bad in ("a/b", "a\\b", "a\x00b", ""):
             with self.subTest(bad=bad), self.assertRaises(PathDeniedError):
                 infer_scene_paths(bad, "2026-09-10")
+
+    def test_bare_dotdot_yields_no_candidate(self):
+        """`..` 单独当名字：拆不出六段形态 → 一条候选都构造不出（空列表），不抛。
+
+        空列表与 PathDeniedError 都是拒绝（调用方一律回 400），只是文案不同。
+        """
+        self.setenv(SR_SCENE_PATH_TEMPLATE=None, SR_DRIVE_MAP=None)
+        self.assertEqual(infer_scene_paths("..", "2026-09-10"), [])
+
+    def test_rejects_traversal_rendered_into_path(self):
+        """`..` 混在名字里被拼进路径（卫星型号段）→ 渲染后按穿越段拒掉。"""
+        self.setenv(SR_SCENE_PATH_TEMPLATE="/prod/{y}/{m}/{d}/{sat}/{mid}/{name}")
+        name = ".._PMS02_20260910124710_200536960_101_0005_001_L1_PAN"
+        with self.assertRaises(PathDeniedError):
+            infer_scene_paths(name, "2026-09-10")
 
     def test_rejects_bad_date(self):
         for bad in ("2026/09/10", "2026-9-10", "today", "20260910"):

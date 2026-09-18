@@ -466,8 +466,9 @@ def create_app() -> FastAPI:
         （前端开图要 W/H）。
 
         请求体：`{path}` 精确路径，或 `{name, date?}` 裸文件名（日期可由后端
-        从文件名里取）。`{name}` 可再带 `size_bytes`（拖拽入口用，见
-        `_fingerprint_mismatch`）：给了就要求**名字与字节数都对得上** —— 栅格名
+        从文件名里取；它是**成像日**，反推会在这一天和次日各找一次 —— 盘阵按
+        生产日建目录，深夜成像的景记在第二天）。`{name}` 可再带 `size_bytes`
+        （拖拽入口用，见 `_fingerprint_mismatch`）：给了就要求**名字与字节数都对得上** —— 栅格名
         比输入影像的 stem、jpg 名比场景目录名（两份产物，比的对象不同）—— 否则
         这条候选记原因后跳过（最终仍是 404 并列出原因）；不给则只看目录/影像存
         不存在。`{path}` 分支是精确路径，不收这个字段。
@@ -483,6 +484,9 @@ def create_app() -> FastAPI:
                 status_code=400,
                 detail=f"size_bytes 须为正整数（收到 {size_bytes!r}）")
         name = ""       # 仅 name 分支赋值；path 分支是精确路径，无需指纹
+        # 404 的补充说明：反推按「成像日 + 次日」找了**两天**时，得让用户知道
+        # 这件事，否则他看见两条只差一天的路径只会更懵（见 infer_scene_paths）。
+        day_note = ""
         raw_path = body.get("path")
         if isinstance(raw_path, str) and raw_path.strip():
             try:
@@ -544,6 +548,9 @@ def create_app() -> FastAPI:
                     detail=f"反推路径失败：{name} 不符合生产命名规则"
                            "（缺段号/景号段，拆不出卫星型号与段级目录）—— "
                            "请把该场景目录粘进「盘阵场景」栏打开")
+            if len(tried) > 1:
+                day_note = ("（成像日与次日都找过 —— 盘阵按生产日建目录，"
+                            "深夜成像的景常记在次日）")
             for cand in tried:
                 try:
                     ensure_allowed(cand)
@@ -571,8 +578,8 @@ def create_app() -> FastAPI:
             if size_bytes is not None and name:
                 why = _fingerprint_mismatch(inp, name, size_bytes)
                 if why:
-                    # 指纹不认就当作**这条候选**不合格，接着试下一条（旧扁平
-                    # 模板），不要立刻 404 —— 报错口径仍由下面统一出。
+                    # 指纹不认就当作**这条候选**不合格，接着试下一条（次日那条），
+                    # 不要立刻 404 —— 报错口径仍由下面统一出。
                     reasons.append(why)
                     continue
             hit = (d, inp)
@@ -580,7 +587,7 @@ def create_app() -> FastAPI:
         if hit is None:
             raise HTTPException(status_code=404,
                                 detail="没找到合法场景目录 —— "
-                                       + "；".join(reasons))
+                                       + "；".join(reasons) + day_note)
         d, inp = hit
         dims = _cached_dims(inp)
         if not dims:
