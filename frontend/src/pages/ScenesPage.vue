@@ -9,11 +9,9 @@
 import { onMounted } from 'vue';
 import { isImageSource } from '../lib/scene.js';
 import { useScenesStore } from '../stores/scenes.js';
-import { useViewerStore } from '../stores/viewer.js';
 import ScenePathBar from '../components/ScenePathBar.vue';
 
 const scenes = useScenesStore();
-const viewer = useViewerStore();
 
 /** 手工路径：只把用户填的这一个目录交给后端 stat（不扫盘）。错误由本页
  *  统一渲染（scenes.error，就在检索条下方），所以这里不用再弹提示。 */
@@ -112,12 +110,6 @@ onMounted(() => { void scenes.list(); });
       <p v-if="scenes.loading" class="sp-loading">检索中…</p>
     </div>
 
-    <p class="sp-hint">
-      场景 JPG 为服务器烘焙（稀疏采样 + 直方图均衡，长宽各为源图的 1/2）；标
-      「JPG 源」的行本就是显示就绪图，无需烘焙、直接打开。打开后掩码按元数据
-      {{ viewer.activeRec?.route === 'jpg' ? dimsText(viewer.activeRec) : 'W/H' }} 换算回全分辨率；
-      显示层拉伸可改（起手值直方图均衡），但均衡是不可逆的，改不回去。
-    </p>
   </div>
 </template>
 
@@ -259,11 +251,4 @@ onMounted(() => { void scenes.list(); });
 .sp-loading { color: var(--ink-sub); font-size: 12px; }
 /* 打开阶段文案：与 sp-err 同一个位置，但用中性色 —— 它不是错误 */
 .sp-phase { margin: 0 0 10px; line-height: 1.6; }
-.sp-hint {
-  color: var(--ink-sub);
-  font-size: 12px;
-  margin-top: 12px;
-  line-height: 1.7;
-  max-width: 900px;
-}
 </style>
