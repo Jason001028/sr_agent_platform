@@ -158,10 +158,34 @@ export const useScenesStore = defineStore('scenes', () => {
     }
   }
 
+  /** 按**生产全名**打开一个盘阵场景（查看器「待修复清单」面板的行内「打开」用）。
+   *
+   *  与 resolvePath 的差别只在请求体：那条给 `{path}`，这条给 `{name}` —— 日期由
+   *  后端从名字里的成像时间戳自己取，所以清单里那串产品名（含时间戳）直接就能用。
+   *
+   *  返回值是**错误串而不是布尔**：本函数的调用方在 /viewer，而 `open()` 按老规矩
+   *  把失败写进 `scenes.error`，那个 ref 只在 ScenesPage 渲染 —— 在查看器上写它
+   *  等于没写，用户只会看到「点了没反应」。所以由调用方拿去喂 viewer.showErr。
+   *  返回 '' 表示成功。 */
+  async function openByName(name: string): Promise<string> {
+    const trimmed = String(name ?? '').trim();
+    if (!trimmed) return '名字为空';
+    error.value = '';
+    try {
+      const res = await apiResolveScene(loadSrConfig(), { name: trimmed });
+      await open(res.row, res.resolved);
+    } catch (e) {
+      return '打开「' + trimmed + '」失败：' + (e instanceof Error ? e.message : String(e));
+    }
+    // open() 内部也会失败（fake 行 / 缺 W,H / 拉 JPG 出错），原因已经写在 error 里，
+    // 原样带出去 —— 后端 resolve 的 detail 里有「试过哪些候选、各自为什么不行」。
+    return error.value || ('打开「' + trimmed + '」失败');
+  }
+
   return {
     rows, source, scanned, count, loading, openingId, phase, error,
     query, satellite, sensor, dateFrom, dateTo,
     satellites, sensors, dates,
-    list, resetFilters, open, resolvePath,
+    list, resetFilters, open, resolvePath, openByName,
   };
 });

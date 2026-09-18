@@ -8,14 +8,16 @@
  *
  * 事件：wheel 缩放、mousedown/move/up（绘制模式分派 rect/polygon/wand/del，否则平移）、
  * dblclick（drawMode→closePolygon，否则 fit）、contextmenu（drawMode→closePolygon）、
- * window keydown（Esc/Enter）、window dragover/drop（文件拖入）。
+ * window keydown（Esc/Enter）、window dragover/drop（文件拖入；.txt 走待修复清单）。
  */
 import { ref, onMounted, onBeforeUnmount, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
+import { useQcListStore } from '../stores/qclist';
 import { mouseToThumb, thumbToScreen } from '../lib/viewMath';
 import type { Pt } from '../lib/maskgen';
 
 const store = useViewerStore();
+const qc = useQcListStore();
 const stageRef = ref<HTMLDivElement | null>(null);
 const viewCanvasRef = ref<HTMLCanvasElement | null>(null);
 const drawCanvasRef = ref<HTMLCanvasElement | null>(null);
@@ -254,7 +256,15 @@ function onDragOver(e: DragEvent) { e.preventDefault(); }
 
 function onDrop(e: DragEvent) {
   e.preventDefault();
-  if (e.dataTransfer && e.dataTransfer.files) store.addFiles(e.dataTransfer.files);
+  const files = e.dataTransfer?.files;
+  if (!files || !files.length) return;
+  // 按扩展名分流：`.txt` = 待修复清单（走 qc store），其余是影像（走解码管线）。
+  // 两类可以一起拖进来，各走各的；多个 .txt 只取第一个（清单同时只有一份）。
+  const all = Array.from(files);
+  const txt = all.filter((f) => /\.txt$/i.test(f.name));
+  const rest = all.filter((f) => !/\.txt$/i.test(f.name));
+  if (txt.length) void qc.importFile(txt[0]);
+  if (rest.length) store.addFiles(rest);
 }
 
 /* ---------------- 生命周期：重绘信号 + 尺寸 + window 事件 ---------------- */

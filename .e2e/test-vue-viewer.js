@@ -9,6 +9,8 @@
 //   E. 像素定位：locatePixel → 视图居中 + 红叉 marker + 7s 过期
 //   F. 掩码冒烟：enterDraw → commitRect/getRois 造 ROI → buildMaskJson 坐标反算 →
 //      genMask 两次下载 → mergeRois 重叠→1 区 → del 红闪+移除 → undo/clear
+//   G. 待修复清单：导入 → 原样 round-trip → 拒收无关 .txt → 标记终态/中间态 →
+//      写回文本上半部分逐字不变 + 下半部分只含终态 → 未完成筛选 → 刷新仍在 → ✕ 清空
 // （HTML 版原有的 G. 导出段已于 2026-09-15 删除：最小原型取消了浏览器侧 JPG 导出 /
 //   输出目录一条链路（sr-minimal-prototype-plan.md §4.5），setSaver / reExportJpg /
 //   scanPendingExports / jpgStatus 等钩子随之从 e2eHooks.ts 移除。针对已取消功能的
@@ -154,7 +156,8 @@ async function main() {
     for (const k of ['planExport', 'enterDraw', 'exitDraw', 'buildMaskJson', 'exportMaskJson',
       'thumbToOrig', 'getRois', 'genMask', 'wandSelect', 'maskGen', 'setSparseMin',
       'setDrawTool', 'commitRect', 'undoRoi', 'clearRois', 'mergeRois', 'delClick',
-      'openSceneJpg', 'openLocalImage', 'submitSr', 'recs', 'activeRec']) {
+      'openSceneJpg', 'openLocalImage', 'submitSr', 'recs', 'activeRec',
+      'qcImport', 'qcClose', 'qcSetStatus', 'qcOutput', 'qcState', 'qcOpenByName']) {
       if (!hookKeys.includes(k)) throw new Error('__viewer 缺钩子 ' + k);
     }
     assert(true, `__viewer 钩子齐全 (${hookKeys.length} 个)`);
@@ -253,6 +256,50 @@ async function main() {
         return n;
       });
       assert(centerRed > 0, `定位后中心出现红叉 marker (红像素 ${centerRed})`);
+
+      // 粘「X,Y」一对数进 X 框（掩膜中心点坐标那种形态）→ 拆成两个框 → 定位到 (64,32)
+      const sampleCenterRed = () => page.evaluate(() => {
+        const c = document.querySelector('canvas.tif-canvas');
+        const g = c.getContext('2d');
+        const w = c.width, h = c.height;
+        const d = g.getImageData(Math.floor(w / 2) - 30, Math.floor(h / 2) - 30, 60, 60).data;
+        let n = 0;
+        for (let i = 0; i < d.length; i += 4) {
+          if (d[i] > 180 && d[i + 1] < 130 && d[i + 2] < 130) n++;
+        }
+        return n;
+      });
+      await page.evaluate(() => {
+        const x = document.querySelectorAll('.loc input')[0];
+        x.value = '64,32';
+        x.dispatchEvent(new Event('input'));
+      });
+      await sleep(150);
+      const pairVals = await page.evaluate(() =>
+        [...document.querySelectorAll('.loc input')].map((el) => el.value));
+      assert(pairVals[0] === '64' && pairVals[1] === '32',
+        `粘「64,32」→ 两个框各得一半 (${pairVals.join(' / ')})`);
+      await page.click('.loc-btn');
+      await sleep(250);
+      assert(await sampleCenterRed() > 0, '拆开后的「定位」跳到 (64,32)（中心出现红叉）');
+
+      // 拷了整行（三个数）不许当坐标对：截前两个会把标记跳到别处，必须出声
+      await page.evaluate(() => {
+        const x = document.querySelectorAll('.loc input')[0];
+        x.value = '1,64,32';
+        x.dispatchEvent(new Event('input'));
+      });
+      await sleep(150);
+      const badPair = await page.evaluate(() => {
+        const err = document.querySelector('.err-box');
+        return {
+          vals: [...document.querySelectorAll('.loc input')].map((el) => el.value),
+          err: err ? err.textContent.trim() : '',
+        };
+      });
+      assert(badPair.err.indexOf('坐标对认不出来') >= 0 && badPair.vals[0] === '1,64,32',
+        `三个数不猜、按原样留着并报错 (${badPair.err.slice(0, 20)}…)`);
+
       await sleep(7600);   // marker 7s 过期
       const centerRedAfter = await page.evaluate(() => {
         const c = document.querySelector('canvas.tif-canvas');
@@ -336,6 +383,114 @@ async function main() {
         window.__viewer.clearRois();
       });
       assert(await page.evaluate(() => window.__viewer.getRois().length) === 0, 'clear 清空');
+    }
+
+    /* ============ G. 待修复清单（导入 / 标记 / 写回） ============ */
+    console.log('--- G. 待修复清单 ---');
+    {
+      // 样例照抄质检部门真实给的那份形态：上半部分问题行（第一列尾部带逗号、desc 在括号里），
+      // 空行，下半部分我们自己补的处置结果。制表符走 T 常量拼接 —— 直接写转义在这种
+      // 长中文串里改一次错一次，拼出来的是同一个字符，但肉眼能看清列边界在哪。
+      const T = '\t';
+      const N6 = 'JL1KF02B02_PMS07_20260917122028_200538707_101_0006_001_L1';
+      const N20 = 'JL1KF02B04_PMS03_20260917120612_200538728_101_0020_001_L1';
+      const N21 = 'JL1KF02B04_PMS03_20260917120612_200538728_101_0021_001_L1';
+      const N22 = 'JL1KF02B04_PMS03_20260917120612_200538728_101_0022_001_L1';
+      const issue = (n, row, col, ty, who) => n + ',' + T
+        + '产品存在伪影 (问题类型:产品存在伪影 行列号:' + row + ',' + col + ' 影像类型:' + ty + ' )' + T + who;
+      const TOP = [
+        issue(N6, '30766.11', '21862.51', 'PAN', '李鹏飞'),
+        issue(N20, '7300.26', '1737.98', 'pan', '李佳峻'),
+        issue(N21, '30768.07', '10886.95', 'PAN', '李佳峻'),
+        issue(N22, '20931.93', '4841.22', 'pan', '李佳峻'),
+      ].join('\n');
+      const SAMPLE = TOP + '\n\n' + N6 + T + '修复通过\n';
+
+      const imported = await page.evaluate((t) => window.__viewer.qcImport('待修复清单.txt', t), SAMPLE);
+      assert(imported === true, '导入标准格式清单');
+      let qs = await page.evaluate(() => window.__viewer.qcState());
+      assert(qs.loaded && qs.total === 4, `4 行问题全部列出 (${qs.total})`);
+      // 下半部分那行是「已修复」的既有状态，导入时就该读出来
+      assert(qs.done === 1 && qs.statuses[N6] === 'fixed', '0006 从下半部分读到「已修复」');
+
+      // 什么都不改直接写回 == 原文（上半部分逐字保留 + 下半部分只重排终态行的最强保证）
+      const rt = await page.evaluate(() => window.__viewer.qcOutput());
+      assert(rt === SAMPLE, '未改动时写回 == 原文（含空行与列内空白）');
+
+      // 拖无关 .txt 进来（画布上就是拖拽入口）：一份问题行都解不出来时不许顶掉当前清单
+      const junk = await page.evaluate((t) => window.__viewer.qcImport('掩膜中心点坐标.txt', t), '1,2\n3,4\n');
+      assert(junk === false, '解不出问题行的 .txt 被拒收');
+      assert(await page.evaluate(() => window.__viewer.qcOutput()) === SAMPLE, '拒收后现有清单原封不动');
+
+      // DOM：面板真的渲染出来了（钩子绕过 UI，这一条是 UI 那一半的证据）。
+      // 计数与徽标都要 trim：模板里插值两侧的换行会被 Vue 压成单个空格。
+      const dom = await page.evaluate(() => {
+        const c = document.querySelector('.qc-count');
+        return {
+          count: c ? c.textContent.trim() : null,
+          rows: document.querySelectorAll('.qc-list .qc-row').length,
+          badges: [...document.querySelectorAll('.qc-badge')].map((e) => e.textContent.trim()),
+          l2: [...document.querySelectorAll('.qc-row .qc-l2')].map((e) => e.textContent.replace(/\s+/g, ' ').trim()),
+        };
+      });
+      assert(dom.count === '1/4' && dom.rows === 4, `面板渲染 4 行、计数 ${dom.count}`);
+      assert(dom.badges.length === 1 && dom.badges[0].indexOf('已修复') >= 0,
+        `只有 0006 带状态徽标 (${dom.badges.join(',')})`);
+      // 行列号是 (行, 列)：0020 行必须「行 7300.26」在「列 1737.98」**之前**。
+      // 不比整串：.qc-l2 是 flex，分隔符两侧的空白文本节点编译期就被压掉了，
+      // 逐字比对会假红；顺序 + 三个字段在场才是真正要守的东西。
+      const l2 = dom.l2[1] || '';
+      assert(l2.indexOf('行 7300.26') >= 0 && l2.indexOf('列 1737.98') > l2.indexOf('行 7300.26')
+        && l2.indexOf('pan') > 0 && l2.indexOf('李佳峻') > 0,
+        `0020 行按「行,列」显示坐标与影像类型/责任人「${l2}」`);
+
+      // 标记：0020 已修复、0021 驳回、0022 只到「已提交任务」（中间态）
+      await page.evaluate(([a, b, c]) => {
+        window.__viewer.qcSetStatus(a, 'fixed');
+        window.__viewer.qcSetStatus(b, 'rejected');
+        window.__viewer.qcSetStatus(c, 'submitted');
+      }, [N20, N21, N22]);
+      // 中间态不进文档：0022 在面板里是「已提交任务」，写回文本里不该有它的行
+      const out = await page.evaluate(() => window.__viewer.qcOutput());
+      const chunks = out.split('\n\n');
+      assert(chunks.length === 2 && chunks[0] === TOP, '写回：上半部分与原文逐字相同');
+      assert(chunks[1] === [N6, N20, N21].map((n, i) => n + T + (i === 2 ? '驳回' : '修复通过')).join('\n') + '\n',
+        '写回：下半部分只含终态行（顺序随上半部分，中间态不落文档）');
+      qs = await page.evaluate(() => window.__viewer.qcState());
+      assert(qs.done === 3, `计数按终态算 (${qs.done}/4)`);
+
+      // 再点当前状态 = 取消（写成一个 toggle，省一个「清除」按钮）
+      await page.evaluate((n) => window.__viewer.qcSetStatus(n, 'rejected'), N21);
+      assert((await page.evaluate(() => window.__viewer.qcOutput())).indexOf('驳回') < 0, '再点一次取消该行状态');
+      await page.evaluate((n) => window.__viewer.qcSetStatus(n, 'rejected'), N21);
+
+      // 「未完成」筛选：0022 停在中间态 → 只剩它一行
+      await page.evaluate(() => {
+        [...document.querySelectorAll('.qc-ob')].find((b) => b.textContent.trim() === '未完成').click();
+      });
+      await sleep(120);
+      assert(await page.evaluate(() => document.querySelectorAll('.qc-list .qc-row').length) === 1,
+        '「未完成」只留没出终态的行');
+      await page.evaluate(() => {
+        [...document.querySelectorAll('.qc-ob')].find((b) => b.textContent.trim() === '未完成').click();
+      });
+
+      // 刷新 → 原文与状态都还在（localStorage）
+      await page.reload({ waitUntil: 'networkidle0' });
+      await page.waitForFunction(() => !!(window.__viewer && window.__viewer.qcState), { timeout: 15000 });
+      qs = await page.evaluate(() => window.__viewer.qcState());
+      assert(qs.loaded && qs.total === 4 && qs.sourceName === '待修复清单.txt',
+        `刷新后清单还在 (${qs.total} 行，源 ${qs.sourceName})`);
+      assert(qs.done === 3, `刷新后状态还在 (${qs.done}/4)`);
+      assert(await page.evaluate(() => window.__viewer.qcOutput()) === out, '刷新后写回文本与刷新前一致');
+
+      // ✕：回到未导入态，缓存一并清掉（否则下次打开又冒出来）
+      await page.evaluate(() => window.__viewer.qcClose());
+      qs = await page.evaluate(() => window.__viewer.qcState());
+      const lsLeft = await page.evaluate(() => localStorage.getItem('sr.viewer.qcList'));
+      assert(!qs.loaded && qs.total === 0, '✕ 后回到未导入态');
+      assert(lsLeft === null, '✕ 后 localStorage 缓存被清掉');
+      assert(await page.evaluate(() => window.__viewer.qcOutput()) === '', '✕ 后写回文本为空');
     }
 
     assert(errors.length === 0, `无浏览器错误 (${JSON.stringify(errors.slice(0, 5))})`);
