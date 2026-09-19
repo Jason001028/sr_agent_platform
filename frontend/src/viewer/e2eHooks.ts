@@ -97,16 +97,24 @@ export interface ViewerHook {
   activeStretch: () => StretchMode;
   /** 直接切拉伸（等效工具栏下拉 change）。 */
   setStretch: (m: StretchMode) => void;
-  // 待修复清单（ROI/工具 置顶面板）：导入 / 标记 / 生成写回文本。
-  // 写盘那一步（FSA 文件选择器）没法自动点，回归只验到 output() 为止。
+  // 待修复清单（ROI/工具 置顶面板）：导入 / 标记 / 生成写回文本 / 真的写回。
+  // 写盘改走后端之后这步进得了回归了（原先走 FSA 系统弹窗，只能验到 output() 为止）；
+  // qcSync 要真跑通得有后端 + 盘阵根，所以只在 test-manual-scene 那套里调。
   qcImport: (name: string, text: string) => boolean;
   qcClose: () => void;
   qcSetStatus: (name: string, s: QcStatus) => void;
   /** 要写回文档的全文（上半部分原文 + 终态行）。 */
   qcOutput: () => string;
+  /** 设置写回目标路径（等价用户往页脚输入框里粘）。 */
+  qcSetTarget: (path: string) => void;
+  /** 把整份文档写回盘阵上那份 .txt（等价点页脚「同步」）。false = 失败，原因见错误条。 */
+  qcSync: () => Promise<boolean>;
   qcState: () => {
     loaded: boolean;
     sourceName: string;
+    /** 导入时判定的原编码（写回就按它写）。 */
+    sourceEncoding: string;
+    targetPath: string;
     total: number;
     done: number;
     selName: string | null;
@@ -186,11 +194,15 @@ export function mountE2EHooks(): ViewerHook {
     qcClose: () => useQcListStore().close(),
     qcSetStatus: (name, s) => useQcListStore().setStatus(name, s),
     qcOutput: () => useQcListStore().output(),
+    qcSetTarget: (path) => useQcListStore().setTarget(path),
+    qcSync: () => useQcListStore().syncToTarget(),
     qcState: () => {
       const qc = useQcListStore();
       return {
         loaded: qc.loaded,
         sourceName: qc.sourceName,
+        sourceEncoding: qc.sourceEncoding,
+        targetPath: qc.targetPath,
         total: qc.counts.total,
         done: qc.counts.done,
         selName: qc.selName,

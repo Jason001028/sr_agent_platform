@@ -4,18 +4,17 @@
  * 解析/写回的规则全在 lib/qclist.ts（纯函数、有单测）；本文件只管**状态与副作用**：
  * 当前清单、逐行状态、选中行、持久化、以及把内容写回盘阵上的 .txt。
  *
- * 持久化：localStorage 存「原文 + 状态表」。刷新页面不该把一下午的标记弄丢；
- * 存原文而不是只存解析结果，是为了刷新后重新走一遍 parse（规则改了也能自愈）。
- * 同步用的**文件句柄不持久化** —— FileSystemFileHandle 要存 IndexedDB，而那个
- * 句柄过一阵子还会失效变只读，存了反而给用户一个点不动的按钮。刷新后重选一次
- * 目标文件，代价可接受。
+ * 持久化：localStorage 存「原文 + 状态表 + 写回目标路径」。刷新页面不该把一下午的
+ * 标记弄丢；存原文而不是只存解析结果，是为了刷新后重新走一遍 parse（规则改了也能自愈）。
  */
 import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 import {
-  parseQcList, buildQcDoc, encodeQcText, decodeQcBytes, isTerminal, QC_STATUS_LABEL,
+  parseQcList, buildQcDoc, decodeQcBytes, isTerminal, QC_STATUS_LABEL,
 } from '../lib/qclist.js';
 import type { QcIssue, QcList, QcStatus, QcEncoding } from '../lib/qclist.js';
+import { loadSrConfig } from '../lib/scene.js';
+import { apiWriteQcList } from '../lib/api.js';
 import { pathLeafOf } from './queue.js';
 import { useViewerStore } from './viewer.js';
 
@@ -27,28 +26,9 @@ interface Persisted {
   enc: QcEncoding;
   text: string;
   statuses: Record<string, QcStatus>;
-}
-
-/* ---------------- File System Access API 的最小声明 ----------------
-   TS 5.6 的 lib.dom 里还没有 showOpenFilePicker / createWritable，这里补最小形状。
-   不图省事写 any：写盘的参数写错要到运行时才炸，而这功能一炸就是覆盖用户文件。 */
-interface FsaWritable {
-  write(data: Blob): Promise<void>;
-  close(): Promise<void>;
-}
-interface FsaHandle {
-  readonly name: string;
-  createWritable(): Promise<FsaWritable>;
-}
-type FsaPicker = (opts?: {
-  types?: { description?: string; accept: Record<string, string[]> }[];
-  multiple?: boolean;
-}) => Promise<FsaHandle[]>;
-
-/** 拿 picker，拿不到返回 null（Firefox/Safari 没有这个 API）。 */
-function fsaPicker(): FsaPicker | null {
-  const p = (window as unknown as { showOpenFilePicker?: FsaPicker }).showOpenFilePicker;
-  return typeof p === 'function' ? p : null;
+  /** 写回目标（用户粘的盘阵路径）。老缓存里没有这两个字段，读的时候都得兜底。 */
+  path?: string;
+  mtime?: number | null;
 }
 
 function errMsg(e: unknown): string {
@@ -66,12 +46,12 @@ export const useQcListStore = defineStore('qclist', () => {
   const sourceEncoding = ref<QcEncoding>('utf-8');
   /** 当前选中的行（点行、或当前打开的图自动命中）。 */
   const selName = ref<string | null>(null);
-  /** 同步目标文件名（仅显示用；句柄本身在模块变量里，见下）。 */
-  const targetName = ref('');
-
-  /** 同步目标的文件句柄。**不是 ref** —— 它不需要参与渲染，塞进响应式只会让
-   *  Vue 去代理一个宿主对象。选过一次就留着，之后一键同步不再弹窗。 */
-  let targetHandle: FsaHandle | null = null;
+  /** 写回目标：盘阵上那份 .txt 的路径（用户粘的，既是输入也是显示）。 */
+  const targetPath = ref('');
+  /** 导入那一刻源文件的 mtime（秒）。**只有从 File 导入才有** —— 写回时带上给后端
+   *  对护栏：盘阵上的清单在导入之后被别人改过就拒写。粘文本导入的没有时间戳可言，
+   *  留 null（后端见了就不查这一项）。 */
+  const sourceMtime = ref<number | null>(null);
 
   const issues = computed<QcIssue[]>(() => list.value?.issues ?? []);
   const loaded = computed(() => list.value !== null);
@@ -109,6 +89,8 @@ export const useQcListStore = defineStore('qclist', () => {
         enc: sourceEncoding.value,
         text: sourceText.value,
         statuses: statuses.value,
+        path: targetPath.value,
+        mtime: sourceMtime.value,
       };
       localStorage.setItem(LS_KEY, JSON.stringify(payload));
     } catch { /* 隐私模式 / 配额满：放弃持久化，不影响本次会话 */ }
@@ -133,6 +115,8 @@ export const useQcListStore = defineStore('qclist', () => {
       sourceName.value = typeof p.name === 'string' ? p.name : '';
       sourceText.value = p.text;
       sourceEncoding.value = p.enc === 'gbk' ? 'gbk' : 'utf-8';
+      targetPath.value = typeof p.path === 'string' ? p.path : '';
+      sourceMtime.value = typeof p.mtime === 'number' ? p.mtime : null;
       // 状态以缓存为准（它含还没同步出去的改动），文件下半部分只作首次导入的起点。
       statuses.value = { ...(p.statuses ?? {}) };
     } catch {
@@ -157,6 +141,7 @@ export const useQcListStore = defineStore('qclist', () => {
     sourceName.value = name;
     sourceText.value = text;
     sourceEncoding.value = enc;
+    sourceMtime.value = null;          // 粘文本进来的，没有「源文件时间」可言
     selName.value = null;
     persist();
     return true;
@@ -166,7 +151,13 @@ export const useQcListStore = defineStore('qclist', () => {
   async function importFile(file: File): Promise<boolean> {
     const buf = await file.arrayBuffer();
     const { text, encoding } = decodeQcBytes(buf);
-    if (importText(file.name, text, encoding)) return true;
+    if (importText(file.name, text, encoding)) {
+      // 记住源文件的时间戳：路径是用户粘的、文件在盘阵上，两者只有这处对得上，
+      // 写回时带过去让后端拦住「导入之后别人又改了一版」。
+      sourceMtime.value = file.lastModified / 1000;
+      persist();
+      return true;
+    }
     useViewerStore().showErr('「' + file.name + '」里没解析出问题行，没敢拿它替换当前清单');
     return false;
   }
@@ -176,9 +167,11 @@ export const useQcListStore = defineStore('qclist', () => {
     statuses.value = {};
     sourceName.value = '';
     sourceText.value = '';
+    sourceMtime.value = null;
     selName.value = null;
-    targetName.value = '';
-    targetHandle = null;
+    // 目标路径跟着清单一起清：换一份清单还留着上一份的路径，下一次「同步」就会
+    // 把新清单盖到旧文档上。宁可让用户重粘一次。
+    targetPath.value = '';
     dropPersisted();
   }
 
@@ -233,59 +226,49 @@ export const useQcListStore = defineStore('qclist', () => {
     return list.value ? buildQcDoc(list.value, statuses.value) : '';
   }
 
-  /** 把 output() 写回指定的 .txt（原地覆盖）。
-   *  第一次点会弹文件选择器，之后句柄留着，再点就是纯粹的一键同步。 */
+  /** 把 output() 写回盘阵上那份 .txt（原地覆盖）。
+   *
+   *  目标**由用户粘路径指定**，不再弹文件选择器：浏览器的文件选择器只能选到用户本机
+   *  的文件，而清单在盘阵上 —— 真机页面还是 http，那个 API 压根不存在（写盘改走后端
+   *  POST /api/qclist/write，契约见 api-contract.md §3.7）。
+   *  「哪一份清单」本来也该由人确认：错一个字符就是盖掉另一个场景的记录。
+   *  代价是「路径与文件对不对得上」只能靠后端 stat 与导入时记下的 mtime（见 sourceMtime）。 */
   async function syncToTarget(): Promise<boolean> {
     const viewer = useViewerStore();
     if (!list.value) {
       viewer.showErr('还没有导入清单');
       return false;
     }
-
-    if (!targetHandle) {
-      const pick = fsaPicker();
-      if (!pick) {
-        viewer.showErr('这个浏览器不支持「原地覆盖」写盘（需要 Edge / Chrome，且本页得是 https 或 localhost）');
-        return false;
-      }
-      try {
-        // 必须带上 window 当接收者：解构出来直接调会抛 Illegal invocation。
-        const picked = await pick.call(window, {
-          types: [{ description: '待修复清单', accept: { 'text/plain': ['.txt'] } }],
-        });
-        targetHandle = picked[0] ?? null;
-      } catch {
-        return false;                       // 用户取消选择器：不出声
-      }
-      if (!targetHandle) return false;
-      targetName.value = targetHandle.name;
+    const path = targetPath.value.trim();
+    if (!path) {
+      viewer.showErr('先填要写回的清单路径 —— 盘阵上那份 .txt 的完整路径');
+      return false;
     }
-
-    const { blob, fellBack } = encodeQcText(output(), sourceEncoding.value);
     try {
-      const w = await targetHandle.createWritable();
-      await w.write(blob);
-      await w.close();
+      const res = await apiWriteQcList(loadSrConfig(), {
+        path,
+        text: output(),
+        encoding: sourceEncoding.value,
+        ...(sourceMtime.value === null ? {} : { mtime: sourceMtime.value }),
+      });
+      persist();          // 顺手把用户刚粘的路径存下来，刷新后不用重粘
+      // 展示用后端解析后的路径（与 /api/masks 同口径）：用户粘的可能是 W:\ 形态，
+      // 而写下去的是它译出来的盘阵路径，回显这个才说明白「到底写进了哪一份」。
       viewer.showToast(
-        '已同步至 ' + targetName.value
-        + (fellBack ? '（原文件是 GBK：浏览器编不出 GBK，本次按 UTF-8 带 BOM 写回，记事本/Excel 能正常显示）' : ''),
+        '已同步至 ' + res.path + '（' + res.encoding.toUpperCase() + '，' + res.bytes + ' 字节）',
       );
       return true;
     } catch (e) {
-      // 权限被收回（句柄过期）→ 丢掉句柄，下次点重新选，否则这按钮会永远点不动。
-      if ((e as DOMException)?.name === 'NotAllowedError') {
-        targetHandle = null;
-        targetName.value = '';
-      }
-      viewer.showErr('写盘失败：' + errMsg(e) + ' —— 文件若正被记事本 / Excel 打开，关掉再试');
+      // 后端的 detail 是中文原话（路径不在白名单、不是 .txt、mtime 对不上、目录不可写…），
+      // 原样转给用户比前端再猜一遍强。
+      viewer.showErr('写回失败：' + errMsg(e));
       return false;
     }
   }
 
-  /** 忘掉同步目标（用户想换一份文档写）。 */
-  function forgetTarget(): void {
-    targetHandle = null;
-    targetName.value = '';
+  /** 设置写回目标路径（输入框用）。空串 = 清除。 */
+  function setTarget(path: string): void {
+    targetPath.value = path;
   }
 
   /** 状态 → 中文标签（组件直接用，省得到处 import）。 */
@@ -298,11 +281,11 @@ export const useQcListStore = defineStore('qclist', () => {
   return {
     // 状态
     list, issues, statuses, loaded, counts,
-    sourceName, sourceEncoding, selName, selIssue, targetName,
+    sourceName, sourceEncoding, selName, selIssue, targetPath,
     // 动作
     importText, importFile, close,
     setStatus, statusOf, labelOf,
     noteSubmitted, noteSubmittedDirs, select, selectForScene,
-    output, syncToTarget, forgetTarget,
+    output, syncToTarget, setTarget,
   };
 });

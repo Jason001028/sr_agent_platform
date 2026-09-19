@@ -157,7 +157,8 @@ async function main() {
       'thumbToOrig', 'getRois', 'genMask', 'wandSelect', 'maskGen', 'setSparseMin',
       'setDrawTool', 'commitRect', 'undoRoi', 'clearRois', 'mergeRois', 'delClick',
       'openSceneJpg', 'openLocalImage', 'submitSr', 'recs', 'activeRec',
-      'qcImport', 'qcClose', 'qcSetStatus', 'qcOutput', 'qcState', 'qcOpenByName']) {
+      'qcImport', 'qcClose', 'qcSetStatus', 'qcOutput', 'qcSetTarget', 'qcSync',
+      'qcState', 'qcOpenByName']) {
       if (!hookKeys.includes(k)) throw new Error('__viewer 缺钩子 ' + k);
     }
     assert(true, `__viewer 钩子齐全 (${hookKeys.length} 个)`);
