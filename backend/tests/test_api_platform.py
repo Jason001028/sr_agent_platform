@@ -954,5 +954,162 @@ class TestMasks(PlatformBase):
         self.assertEqual(r.status_code, 404)
 
 
+class TestQcListWrite(PlatformBase):
+    """`POST /api/qclist/write` —— 《待修复清单》原地写回（api-contract.md §3.7）。
+
+    真机 http 下浏览器写不了盘阵文件（File System Access API 在规范里是
+    `[SecureContext]` 标的，Chrome 只在 https/localhost 页面暴露它），所以改走后端。
+    这里钉的是：写进去的字节对不对、编码（GBK）对不对、护栏拦不拦得住「导入之后
+    别人又改了一版」、以及各条拒绝路径下**原文件一个字节都不动**。
+    """
+
+    def _set_env(self):
+        super()._set_env()
+        # 白名单 = <临时根>/array，W: 也映射到它 —— 用例里就能写用户真会粘的
+        # `W:\待修复清单.txt`。白名单刻意收在子目录上：好造「真实存在、但在白名单外」
+        # 的越界用例，跨平台都成立（不靠盘符）。
+        self.array = Path(self._tmp.name).resolve() / "array"
+        self.array.mkdir(parents=True, exist_ok=True)
+        env = allowed_roots_env(self.array)
+        os.environ["SR_ALLOWED_ROOTS"] = env["SR_ALLOWED_ROOTS"]
+        os.environ["SR_DRIVE_MAP"] = (
+            f"W:={self.array.as_posix()};{env.get('SR_DRIVE_MAP', '')}").rstrip(";")
+
+    # -- 夹具 ---------------------------------------------------------------
+    def _make(self, text="上半部分\n", enc="utf-8", name="待修复清单.txt") -> Path:
+        p = self.array / name
+        p.write_bytes(text.encode(enc))
+        return p
+
+    def _win(self, p: Path) -> str:
+        """用户会粘的那种 Windows 形态。"""
+        rel = p.resolve().relative_to(self.array).as_posix()
+        return "W:\\" + rel.replace("/", "\\")
+
+    def _body(self, p: Path, text: str, **over) -> dict:
+        return {"path": self._win(p), "text": text, **over}
+
+    # -- 正常路径 -----------------------------------------------------------
+    def test_writes_text_back_in_place(self):
+        p = self._make("旧内容\n")
+        doc = "上半部分逐字保留\n\nN1\t修复通过\n"
+        r = self.client().post("/api/qclist/write", json=self._body(p, doc))
+        self.assertEqual(r.status_code, 200, r.text)
+        # 回的是盘阵 POSIX 形态（与 /api/masks 同口径），不是 Windows 形态
+        self.assertEqual(r.json()["path"], p.resolve().as_posix())
+        self.assertEqual(r.json()["bytes"], len(doc.encode("utf-8")))
+        self.assertEqual(p.read_text(encoding="utf-8"), doc)
+
+    def test_gbk_written_as_gbk(self):
+        p = self._make("旧内容\n", enc="gbk")
+        doc = "产品存在伪影 (问题类型:产品存在伪影)\nN1\t修复通过\n"
+        r = self.client().post("/api/qclist/write",
+                               json=self._body(p, doc, encoding="gbk"))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["encoding"], "gbk")
+        self.assertEqual(p.read_bytes().decode("gbk"), doc)
+        # 真写成 GBK 了 —— 浏览器写盘那条路只能降级成 UTF-8+BOM，这条是修好的部分
+        self.assertNotEqual(p.read_bytes(), doc.encode("utf-8"))
+
+    @unittest.skipIf(os.name == "nt", "Windows 的 chmod 只切只读位，测不出权限位")
+    def test_preserves_mode_bits(self):
+        # mkstemp 出来的是 0600，直接 os.replace 会把原文件的权限一起换掉
+        p = self._make("旧内容\n")
+        os.chmod(p, 0o640)
+        r = self.client().post("/api/qclist/write", json=self._body(p, "新\n"))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(os.stat(p).st_mode & 0o777, 0o640)
+
+    # -- mtime 护栏 ---------------------------------------------------------
+    def test_mtime_guard(self):
+        p = self._make("旧内容\n")
+        os.utime(p, (1_700_000_000, 1_700_000_000))
+        c = self.client()
+        # 导入时看到的就是这个时间 → 放行
+        r = c.post("/api/qclist/write",
+                   json=self._body(p, "新\n", mtime=1_700_000_000))
+        self.assertEqual(r.status_code, 200, r.text)
+
+        os.utime(p, (1_700_000_600, 1_700_000_600))    # 盘阵上被改过
+        r = c.post("/api/qclist/write", json=self._body(p, "又新\n"))
+        self.assertEqual(r.status_code, 200, r.text)   # 不带 mtime：护栏不参与
+        r = c.post("/api/qclist/write",
+                   json=self._body(p, "又新\n", mtime=1_700_000_000))
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("重新导入", r.json()["detail"])
+        self.assertEqual(p.read_text(encoding="utf-8"), "又新\n")
+
+    # -- 拒绝路径（每一条都要确认原文件没被动过）----------------------------
+    def test_rejects_dir_and_missing_file(self):
+        c = self.client()
+        d = self.array / "某个目录.txt"
+        d.mkdir()
+        r = c.post("/api/qclist/write", json=self._body(d, "x"))
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("文件不存在", r.json()["detail"])
+
+        r = c.post("/api/qclist/write", json={
+            "path": self._win(self.array / "没有这个.txt"), "text": "x"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("文件不存在", r.json()["detail"])
+
+    def test_rejects_non_txt(self):
+        p = self._make("旧内容\n", name="清单.md")
+        r = self.client().post("/api/qclist/write", json=self._body(p, "x"))
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("只能写回", r.json()["detail"])
+        self.assertEqual(p.read_text(encoding="utf-8"), "旧内容\n")
+
+    def test_rejects_outside_whitelist(self):
+        outside = Path(self._tmp.name).resolve() / "外面.txt"   # 真实存在，但在白名单外
+        outside.write_text("旧内容\n", encoding="utf-8")
+        r = self.client().post("/api/qclist/write", json={
+            "path": outside.as_posix(), "text": "x"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("写回目标不可用", r.json()["detail"])
+        self.assertEqual(outside.read_text(encoding="utf-8"), "旧内容\n")
+
+    def test_rejects_text_and_encoding_gbk_cannot_encode(self):
+        p = self._make("旧内容\n", enc="gbk")
+        r = self.client().post("/api/qclist/write",
+                               json=self._body(p, "🛰\n", encoding="gbk"))
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("gbk", r.json()["detail"])
+        self.assertEqual(p.read_bytes().decode("gbk"), "旧内容\n")
+
+    def test_rejects_bad_body(self):
+        c = self.client()
+        p = self._make("旧内容\n")
+        r = c.post("/api/qclist/write", json={"text": "x"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("path", r.json()["detail"])
+        r = c.post("/api/qclist/write", json={"path": self._win(p), "text": 5})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("text", r.json()["detail"])
+        r = c.post("/api/qclist/write", json=self._body(p, "x", encoding="utf-16"))
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("encoding", r.json()["detail"])
+        r = c.post("/api/qclist/write", json=self._body(p, "x", mtime="昨天"))
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("mtime", r.json()["detail"])
+        # 穿越段在 to_posix_array_path 就被挡下（同一个守卫，不另写一套）
+        r = c.post("/api/qclist/write", json={"path": "W:\\..\\x.txt", "text": "x"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("穿越", r.json()["detail"])
+
+    def test_never_lists_directories(self):
+        """「绝不列举目录」是硬约束：写回只认用户给的那一个路径（不扫盘、不找同名文件）。"""
+        p = self._make("旧内容\n")
+        c = self.client()
+        with mock.patch("os.listdir", side_effect=AssertionError("不该列举目录")), \
+                mock.patch("os.scandir", side_effect=AssertionError("不该列举目录")), \
+                mock.patch("os.walk", side_effect=AssertionError("不该列举目录")), \
+                mock.patch("pathlib.Path.iterdir",
+                           side_effect=AssertionError("不该列举目录")):
+            r = c.post("/api/qclist/write", json=self._body(p, "新\n"))
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(p.read_text(encoding="utf-8"), "新\n")
+
+
 if __name__ == "__main__":
     unittest.main()

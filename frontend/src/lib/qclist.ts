@@ -220,15 +220,7 @@ export function decodeQcBytes(buf: ArrayBuffer): { text: string; encoding: QcEnc
   }
 }
 
-/**
- * 文本 → 要写盘的 Blob。原编码是 UTF-8 就照写；是 **GBK 则写不了** ——
- * 浏览器只有 UTF-8 编码器（TextEncoder 不认别的），编不出 GBK 字节。
- * 这种就退成 UTF-8 + BOM 并置 fellBack=true，由调用方明确告诉用户一声：
- * 现代记事本/Excel 认 BOM 能正常显示，但下游若有认 GBK 的脚本会乱码。
- */
-export function encodeQcText(text: string, encoding: QcEncoding): { blob: Blob; fellBack: boolean } {
-  if (encoding === 'gbk') {
-    return { blob: new Blob([BOM + text], { type: 'text/plain' }), fellBack: true };
-  }
-  return { blob: new Blob([text], { type: 'text/plain' }), fellBack: false };
-}
+/* 导出方向没有对应的 encodeQcText：浏览器只有 UTF-8 编码器（TextEncoder 不认别的），
+   编不出 GBK 字节 —— 当初只能退成 UTF-8 + BOM 写回，下游认 GBK 的脚本就乱码。
+   写盘改走后端之后由 Python 编码，这份降级函数（连同它的单测）一并删掉，
+   免得以后有人以为「前端也能编 GBK」。见 api-contract.md §3.7。 */
