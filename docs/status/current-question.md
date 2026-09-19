@@ -55,8 +55,8 @@
   文档」原地覆盖写回（上半部分与原文逐字相同、下半部分**只含终态行**，未完成的行省略、中间态不落文档）。打开
   场景按目录名自动选中对应行、提交 SR 自动推进到「已提交任务」。同时左右栏都由 268 → **400**（对齐），左栏文件卡加
   小图预览横幅。验证：vitest **229**、vue-tsc + build、e2e 22/65/83/58 全绿。**待留意：两栏都开时 chrome 占
-  852px，1366 屏上画布只剩 ~510px；FSA 写盘那一步只能真机手验（系统文件选择器点不了，需 Edge/Chrome +
-  https/localhost）**。时间线见 §4。
+  852px，1366 屏上画布只剩 ~510px**。写盘那一步当天已从 FSA 改走后端（见 §4 末段），不再靠「真机手验
+  一个点不通的入口」。时间线见 §4。
 
 - **图名日期与目录日期差一天（09-18，开发机，用户报的重大 bug）**：用户报「图名含 0917 的、大部分所属目录
   为 0918，导致大部分图匹配不到盘阵」。根因是**日期取错了口径**：`infer_scene_paths` 拿文件名里那 14 位
@@ -1093,8 +1093,9 @@ E 段的改造要点：原来那两处「命中」用例上传的是 fixture 里
 - ⚠️ **版本戳只是 `git describe`（HEAD = `9182c7c`），而工作区有未提交改动**（待修复清单那一批 +
   左右栏 400px + 左栏小图预览）。也就是说这两个包的内容**不等于 `9182c7c` 这个提交**。要按提交号
   回滚/追责的话，先提交再重打一次。
-- ⚠️ **待修复清单的写盘一步没有真机验证过**：`showOpenFilePicker` 是系统弹窗，自动化点不了，
-  浏览器回归只验到 `output()` 为止。真机首测要点见本节前面那条「查看器接入《待修复清单》」。
+- ~~⚠️ 待修复清单的写盘一步没有真机验证过~~ —— **当天即改**：真机上 `showOpenFilePicker` 是不存在的
+  （页面是 `http://内网IP`，那个 API 是 `[SecureContext]` 标的），写盘改走后端之后既有回归又能真机跑，
+  见本节末「清单写回改走后端」。
 
 ### 2026-09-18 · 拖盘阵 `.jpg` 进查看器：关联场景目录、掩码能落盘（开发机）
 
@@ -1397,13 +1398,14 @@ e2e 里没有断言依赖被删的那几句文案）；`.e2e/shot-theme.js` 重�
   的行），写回时原样吐出 —— 「上半部分就是原始内容」要是字面意义上的原样，而不是重新生成的近似；换行符
   （`\r\n` / `\n`）随原文。写回的下半部分按上半部分顺序只输出**终态**行。
 - 编码：导入先按 UTF-8 严解（`fatal:true`），失败退 GBK（老记事本存的 ANSI 就是 GBK），写回跟原编码。
-  **浏览器只有 GBK 解码器、没有编码器** —— 原文件是 GBK 时按 UTF-8 带 BOM 写回，并在提示里说明。
+  ⚠️ 当时的写法是「浏览器只有 GBK 解码器、没有编码器，原文件是 GBK 时就按 UTF-8 带 BOM 写回」——
+  **09-18 改走后端之后这条降级没有了**：编码由后端做，GBK 进 GBK 出（`encodeQcText` 连同它的用例已删）。
 - **坐标陷阱**（在代码注释里写明）：清单里的「行列号」是 **(行, 列)**，而 `parseLocPair` / `locatePixel(x, y)`
   要的是 **(列, 行)**。跳转处传 `locatePixel(col, row)`，照抄顺序必错。
 - `stores/qclist.ts`（新）：清单 / 逐行状态 / 选中行 + localStorage 持久化 + 写盘。持久化存**原文 + 状态
-  表**（存原文而不是解析结果，规则改了还能自愈），刷新不丢一下午的标记。写盘走 File System Access API
-  原地覆盖，**句柄不持久化** —— 它要存 IndexedDB，而且过一阵子会失效变只读，存了反而给用户一个点不动的
-  按钮；刷新后重选一次目标文件，代价可接受。
+  表**（存原文而不是解析结果，规则改了还能自愈），刷新不丢一下午的标记。
+  ⚠️ **写盘那条路 2026-09-18 当天就整条换掉了**（原为 File System Access API 原地覆盖，真机 http 下
+  不可用）—— 详见本节末的「清单写回改走后端」条目，这里保留的是当时的形态。
 - **数据丢失护栏**：一份问题行都解不出来的文本**一律拒收**。拖拽入口就在画布上（拖 `.txt` 即导入清单），
   顺手把「掩膜中心点坐标.txt」这类文件丢进来是很容易发生的事，照单全收会把已经标了一下午的清单无声冲掉。
 - `QcListPanel.vue`（新）挂在 `RoiToolsTab` 置顶：行列表（状态点 + 生产全名 + 行/列 · 影像类型 · 责任人）、
@@ -1433,9 +1435,11 @@ CRLF 保留、BOM 剥离、只上半部分 / 空文件 / 认不出的行 / 同�
 
 - 两栏同时展开时 chrome 占 852px，**1366 宽屏上画布只剩 ~510px**。两栏都能收起（`«` / `»`），实现不做
   额外处理，但这是选 400px 时已知的代价。
-- 「同步至指定文档」的**写盘那一步进不了自动化回归**（`showOpenFilePicker` 是系统弹窗，点不了），回归只
-  验到 `output()` 为止。真机验收要点：必须是 **Edge / Chrome 且页面在 https 或 localhost**（Firefox /
-  Safari 没有这个 API）；目标 .txt 别用记事本 / Excel 开着（占用会写失败，错误文案里写了这一条）。
+- ~~「同步至指定文档」的写盘那一步进不了自动化回归，回归只验到 `output()` 为止；真机要求 Edge/Chrome +
+  https 或 localhost~~ —— **同一天作废**：`showOpenFilePicker` 在真机（http + 内网 IP）上压根不存在，
+  写盘已改走后端 `POST /api/qclist/write`，这一步现在有回归（`test-manual-scene.js` §H，从磁盘读回比对）。
+  剩下的真机注意事项只有两条：清单目录要对 **nginx** 可写（替换后属主会变成 nginx），以及目标 .txt
+  别用记事本 / Excel 开着（占用会写失败，错误文案里写了这一条）。
 
 ### 2026-09-18 · 反推日期改按「成像日 + 次日」两天，删掉旧扁平形态兜底候选（开发机）
 
@@ -1513,6 +1517,48 @@ e2e `test-scenes.js` **65 断言**、`test-manual-scene.js` **83 断言**全绿�
 **另**：用户先说过「缩略图鸡肋、注释掉」，随即改口「缩略图先别动」，所以左栏的小图预览横幅
 （`FileThumb.vue`）**保持原样**，本次未改动。
 
+### 2026-09-18 · 清单写回改走后端：真机 http 下浏览器根本写不了盘阵（开发机）
+
+**起因（用户报）**：用户原话 ——「当前还有一个 bug：『这个浏览器不支持原地覆盖写盘』，可是当前浏览器
+是 chrome」。真机复述：页面是 **nginx（`http://内网IP`，`deploy/nginx.conf` 是 `listen 80` 明文）**，
+清单本身在**盘阵**上。
+
+**根因**（不是浏览器的问题，也**不是偶发**）：原先的写回读 `window.showOpenFilePicker`，而这个 API 在
+规范里是 **`[SecureContext]` 标的** —— Chrome 只在 `https://`、`http://localhost`、`http://127.0.0.1`
+的页面上把它挂到 `window` 上。真机是 http + 内网 IP，所以这条路**在真机上永远点不通**：功能从一开始
+就选错了对象（清单在盘阵上，而浏览器的文件选择器只能选到操作员**本机**的文件）。而后端本来就写得到
+盘阵 —— 掩码、SR 产物、烘焙 JPG 全是它（`User=nginx`）写的。
+
+**改动**（契约先落：`docs/planning/api-contract.md` §2 表 + §3.7，再写代码）：
+
+- 后端新增 `POST /api/qclist/write`（`backend/api/platform.py`）：路径走 `to_posix_array_path` +
+  `ensure_allowed(kind="file")`（与 `/api/scenes/resolve` 的 path 分支同一套），必须**已存在且是文件**、
+  **只收 `.txt`**、可选 `mtime` 护栏（差 > 2 秒拒写，挡住「导入之后质检又更新了一版」）、写前
+  `os.access` 查目录与文件权限、`mkstemp` 同目录 + `chmod` 保留权限位 + `os.replace` 原子替换。
+  请求侧被拒一律 **400**（detail 说清哪一种），写盘 `OSError` → **422**；**没有**照搬 §3.5 那套
+  400/403/404 分类（前端只把 detail 原样显示，分类没有消费者）。正文不设大小上限。
+- 前端**净删** FSA 那条路：`stores/qclist.ts` 的 `FsaHandle/FsaPicker/fsaPicker/句柄/forgetTarget` 全删，
+  `lib/qclist.ts` 的 `encodeQcText`（连同它的 2 条 vitest）删掉 —— 留着只会让人以为「前端也能编 GBK」。
+  目标从「文件选择器选出来的句柄」换成**操作员粘的盘阵路径**（`targetPath`，进 localStorage），页脚是
+  一行「路径输入框 + 同步（空路径时禁用）」。
+- **顺带修好的两件事**：① GBK 清单以前只能降级成 UTF-8+BOM 写回（浏览器只有 UTF-8 编码器），现在由
+  后端编码，**GBK 进 GBK 出**；② 写盘这一步**第一次进了自动化回归**（原先是系统弹窗，点不了）。
+
+**已知副作用（必须知道）**：原子替换后文件的**属主变成跑 API 的 nginx**（nginx 无权 chown 回去，
+权限位保留）。质检部门若还要直接编辑这份 txt，清单所在目录得给组写权限 —— 已写进 `deploy/README.md`。
+
+**验证**：后端 `pytest backend/tests -q` **554 passed / 4 skipped**（新增
+`TestQcListWrite` 10 例：正常写回逐字节比对、GBK 按 GBK 读回、权限位 0o640 写前写后一致（Windows 上
+跳过）、mtime 护栏放行与拒绝、目录/不存在/非 `.txt`/白名单外/穿越段/坏编码/GBK 编不出的字符各条拒绝
+路径下**原文件一字节不动**、以及桩掉 `listdir/scandir/walk/iterdir` 断言写回**不列举任何目录**）；
+前端 vitest **227 passed**（删 2 条）、`vue-tsc` 干净；e2e `test-manual-scene.js` **98 断言**（新增 H 段：
+Python 转码造一份 **GBK** 清单 → 导入认成 gbk → 粘 `W:\…\待修复清单.txt` → 同步 → **从磁盘按字节读回**，
+未改动时与原文完全一致、标终态后上半部分逐字不动；不存在路径 → 后端原话进错误条且不新建文件）、
+`test-vue-viewer.js` **58**、`test-scenes.js` **65** 全绿（钩子名清单补了 `qcSetTarget`/`qcSync`）。
+
+**另**：真机首测只剩两件人工事 —— 粘一次真实路径看是否写进去、确认那份 txt 的目录对 nginx 可写
+（`deploy/README.md` 里那两条注意事项）。
+
 ## 5. 交接（给新窗口）
 
 > 开新窗口时按用途挑一份整篇粘过去：[handoff-prompt.md](handoff-prompt.md)（梳理框架与当前思路）、
@@ -1558,7 +1604,7 @@ e2e `test-scenes.js` **65 断言**、`test-manual-scene.js` **83 断言**全绿�
 - 生产命名/反推规则：`docs/sr_code/production-scene-naming.md`（9 段名字 + 六层目录 + 由文件名反推场景目录）；实现唯一真源 `backend/pathguard.py::scene_name_layers` / `infer_scene_paths`
 - 经验文档：`docs/experience/gui-experience.md`
 - 真机预演（无内网机时可跑）：`backend/tests/test_local_chain.py`（4 例，除 SR 算法外全真：真 config/批脚本/bash/校验器/退出码文件；`code_0817_prod.py` 换 stub）
-- E2E 测试：`.e2e/`（**2026-09-15 起入库**，只忽略 `node_modules/`+`fixtures/`+大图）——`test-vue-viewer.js` **58 断言**本地文件回归（含 G 段待修复清单）· `test-scenes.js` **65 断言**场景 http 打开 · `test-platform.js` **22 断言** REST/SSE 全链路 + 布局（1600 视口实测页宽同宽 + 耗时列 nowrap）· `test-manual-scene.js` **83 断言**盘阵任意场景目录（粘 `W:\…` 打开 → 画掩码 → 写盘阵 → 提交 SR，含 PAN 掩码命名与反推失败两条路；**G 段**粘单个 `.tif` 文件路径 → 预览按各边 1/2 烤进源图目录、且不能提交 SR）；跑法 `cd .e2e && node test-<name>.js`（前置 `cd frontend && npm run build`；puppeteer-core + 无界面 Chrome + 本地静态服务顶替 nginx + uvicorn 起真后端）。四个数字 **2026-09-18 实测复核**过（此前该行停在 35/65/22/48，其中两个已过期：09-18 加 G 段后 `test-vue-viewer.js` 38 → **58**；`test-manual-scene.js` 记的 48 是更早的值，实测已到 **83**）
+- E2E 测试：`.e2e/`（**2026-09-15 起入库**，只忽略 `node_modules/`+`fixtures/`+大图）——`test-vue-viewer.js` **58 断言**本地文件回归（含 G 段待修复清单）· `test-scenes.js` **65 断言**场景 http 打开 · `test-platform.js` **22 断言** REST/SSE 全链路 + 布局（1600 视口实测页宽同宽 + 耗时列 nowrap）· `test-manual-scene.js` **98 断言**盘阵任意场景目录（粘 `W:\…` 打开 → 画掩码 → 写盘阵 → 提交 SR，含 PAN 掩码命名与反推失败两条路；**G 段**粘单个 `.tif` 文件路径 → 预览按各边 1/2 烤进源图目录、且不能提交 SR；**H 段**《待修复清单》写回：导入 GBK 清单 → 粘路径 → 同步 → **从磁盘按字节读回**比对）；跑法 `cd .e2e && node test-<name>.js`（前置 `cd frontend && npm run build`；puppeteer-core + 无界面 Chrome + 本地静态服务顶替 nginx + uvicorn 起真后端）。四个数字 **2026-09-18 实测复核**过（此前该行停在 35/65/22/48，其中两个已过期：09-18 加 G 段后 `test-vue-viewer.js` 38 → **58**；`test-manual-scene.js` 记的 48 是更早的值，当天加 H 段后实测已到 **98**）
 - 测试图：`test-tifs/`（gitignore）、`frontend/fixtures/`（入库小图）
 - 记忆：`~/.claude/projects/.../memory/MEMORY.md`（6 条索引：local-vendor / browser-2gb / intranet-data / real-files-1row-strips / openai-pin / **phase4-disk-array-reads-jpg**）
 
@@ -1675,6 +1721,7 @@ e2e `test-scenes.js` **65 断言**、`test-manual-scene.js` **83 断言**全绿�
 
 ### 6.5 阶段5 掩码→SR 真链 + SSE 长连
 - [ ] **掩码落盘 + ENVI 核对**（⏱30′）· 真实场景画矩形掩码 →「提交 SR」→ 落盘原图目录 · ✓= ENVI 打开 `<stem>_mask.tif` 区域位置正确（JPG 上画→全分辨率落点）+ `_mask.txt` 质心可读；顺带用带 MaskPath 的真作业确认 0817 消费链一致 · 记录:
+- [ ] **《待修复清单》写回**（⏱20′）· 盘阵上放一份**真实清单**（GBK，先备份）→ `/viewer` 导入 → 页脚粘完整路径（`W:\…\待修复清单.txt`）→「同步」 · ✓= 文件真被改写：上半部分逐字没动、下半部分只剩终态行、编码仍是 GBK（记事本「另存为」看编码或 `file -i`）；顺带 `ls -l` 确认替换后**属主变成 nginx**、权限位没变，以及该目录对 nginx 可写（见 deploy/README 那两条注意事项） · 记录:
 - [ ] **SSE 长连**（⏱30′，可挂后台）· 临时开 `SR_LLM_MOCK=1` 或挂 `/api/queue/events`，经 nginx 连 10min+ · ✓= 事件逐帧到达不攒批、断链后前端重连正常、无 502 · 记录:
 
 ### 6.6 决策点（标灰，不阻塞；当天记结论）

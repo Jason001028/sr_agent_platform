@@ -25,9 +25,21 @@
 
 阶段5 平台 API（09-02 定稿，契约 = `docs/planning/api-contract.md`）：FastAPI 在既有场景
 端点上新增 `/api/chat/*`（会话 REST + 单回合 SSE）、`/api/queue*`（共享 SR 队列 REST + SSE
-状态广播）、`/api/tools`（工具直调）、`/api/masks`（掩码烘焙到原图目录）；前端新增 `/chat`
+状态广播）、`/api/tools`（工具直调）、`/api/masks`（掩码烘焙到原图目录）、
+`/api/qclist/write`（《待修复清单》原地写回盘阵，09-18）；前端新增 `/chat`
 聊天页、`/queue` 共享队列页，查看器点「提交 SR」→ 带入当前场景目录 → 跳 `/queue` 预填
 （不自动提交）。离机验收走 mock LLM + 假调度器；**真机必须显式关 fake**（见下方 systemd env）。
+
+> **《待修复清单》写回（09-18）**：查看器的清单面板把标记结果原地写回盘阵上那份 `.txt`。
+> 原先走浏览器 File System Access API，可那个 API 在规范里是 `[SecureContext]` 标的，
+> 而本机页面是 `http://内网IP`（nginx `listen 80`）—— 在真机上永远点不通，不是偶发；
+> 现改由后端写（`User=nginx`，与掩码/SR 产物/烘焙 JPG 同一条路），顺带把 GBK 清单
+> 真按 GBK 写回（浏览器编不出 GBK）。契约见 `docs/planning/api-contract.md` §3.7。
+> **两条部署注意**：① 写回目标由操作员在面板里**粘完整路径**（不再弹本机文件选择器），
+> 所以清单必须落在 `SR_ALLOWED_ROOTS` 之内；② 写回是「同目录临时文件 + `os.replace`
+> 原子替换」，**替换后文件属主变成 nginx**（nginx 无权 chown 回去，权限位保留）。
+> 质检部门若还要直接编辑这份 txt，清单所在目录得给组写权限。
+> 幂等排查见 §四的 `POST /api/qclist/write` 一条。
 
 > **SR 最小原型（09-14）改了三处**，详见 `docs/planning/sr-minimal-prototype-plan.md` 与 §7.6：
 > ① 掩码不再由浏览器烘焙——`POST /api/masks` 保留但前端已不调用，改为用场景目录里**已有的**
@@ -202,6 +214,15 @@ curl -s -N -X POST http://127.0.0.1/api/chat/sessions/<id>/messages \
 
 # 队列 SSE：挂起看 job_update（后台校准器广播）
 curl -s -N http://127.0.0.1/api/queue/events
+
+# 《待修复清单》写回（先备份那份 txt 再试）：路径形态与面板里粘的一致（W:\ 或 /DiskArray/）
+curl -s -X POST http://127.0.0.1/api/qclist/write \
+     -H 'content-type: application/json' \
+     -d '{"path":"W:\\GSHC2IMPS\\PRODUCT\\<y>\\<m>\\<d>\\<卫星型号>\\<段级>\\<景级>\\待修复清单.txt",
+          "text":"<整份文档>","encoding":"gbk"}'
+     # {"path":"/DiskArray/…/待修复清单.txt","bytes":1234,"encoding":"gbk"}
+     # 400 = 请求侧被拒（路径不在白名单 / 不存在 / 非 .txt / 编码写不出 / mtime 冲突），detail 是原因；
+     # 422 = 写盘本身失败（多为目录不可写或文件被占用）
 ```
 
 浏览器：`http://<内网机IP>/chat` 发一条 → 工具行 ✓ + 最终回复（SSE 逐帧渲染），刷新可恢复

@@ -28,7 +28,11 @@
 //   F. PAN.tif（RC）场景：掩码名取**输入名的 stem**（`PAN_mask.tif`），不取目录名 ——
 //      这正是"写出去的掩码与提交时去找的那份不一致"的陷阱（§6）。
 //   G. 粘**单个 .tif 文件路径**（不在场景目录里）：照样能看，且预览按 1/2 烤进源图
-//      自己的目录；但它不能提交 SR（lqPath 为 null → 按钮禁用）。
+//      自己的目录；但它不能提交 SR（lqPath 为 null → 按钮禁用）；
+//   H. 《待修复清单》写回盘阵（POST /api/qclist/write）：导入一份 **GBK** 清单
+//      （Node 编不出 GBK，用 Python 转码落盘）→ 粘 `W:\…\待修复清单.txt` → 同步 →
+//      从磁盘按字节读回：未改动时与原文**完全一致**（GBK 没被转成 UTF-8）、标了终态
+//      之后上半部分仍逐字不动；粘一个不存在的路径 → 后端原话进错误条、不新建文件。
 // 用法：cd .e2e && node test-manual-scene.js
 const http = require('http');
 const fs = require('fs');
@@ -322,6 +326,24 @@ function jpegSize(p) {
   if (r.status !== 0) return null;
   const m = r.stdout.trim().split(/\s+/).map(Number);
   return m.length === 2 && m.every((n) => Number.isFinite(n)) ? { w: m[0], h: m[1] } : null;
+}
+
+/** UTF-8 文本文件 → GBK 落盘。**只能借 Python**：Node 的 Buffer 不支持 'gbk'
+    （只有 utf8/latin1/utf16le/base64/hex），而盘阵上的清单正是 GBK。 */
+function writeGbk(text, dst) {
+  const r = spawnSync('python', ['-c',
+    'import sys;open(sys.argv[2],"wb").write(sys.argv[1].encode("gbk"))',
+    text, dst], { encoding: 'utf-8' });
+  if (r.status !== 0) throw new Error('写 GBK 文件失败: ' + r.stderr);
+}
+
+/** 按 GBK 读回来（验「写回的是 GBK 而不是 UTF-8」）。 */
+function readGbk(p) {
+  const r = spawnSync('python', ['-c',
+    'import sys;sys.stdout.buffer.write(open(sys.argv[1],encoding="gbk").read().encode("utf-8"))',
+    p], { encoding: 'utf-8' });
+  if (r.status !== 0) throw new Error('读 GBK 文件失败: ' + r.stderr);
+  return r.stdout;
 }
 
 async function main() {
@@ -880,20 +902,84 @@ async function main() {
         && path.dirname(looseJpg) === LOOSE_DIR,
         `预览烤在源图**自己的目录**里（${path.basename(looseJpg)}）`);
 
-      /* ---------- H. 全程无错 ---------- */
-      console.log('\n[H] 全程无错');
+      /* ---------- H. 《待修复清单》写回盘阵（POST /api/qclist/write） ---------- */
+      console.log('\n[H] 导入 GBK 清单 → 粘盘阵路径 → 同步 → 从磁盘按字节读回');
+      // 真机页面是 http://内网IP，而浏览器的 File System Access API 是 [SecureContext]
+      // 标的 —— 原先那条「原地覆盖写盘」在真机上永远点不通。写盘改走后端（§3.7），
+      // 于是这一步头一次进得了回归。三件事要在这条链路上钉死：
+      //   ① 导入认得出 GBK（下半部分的状态词是 GBK 字节）；
+      //   ② 写回**真按 GBK 写**（浏览器只有 UTF-8 编码器，原先只能降级成 UTF-8+BOM）；
+      //   ③ 上半部分逐字没动。
+      const QC_TXT = '待修复清单.txt';
+      const QC = path.join(tmp, QC_TXT);            // 在 W:\ 底下（= 白名单内）
+      const qcTop = SC + ',\t产品存在伪影 (问题类型:产品存在伪影 行列号:7300.26,1737.98 影像类型:pan )\t李佳峻';
+      const qcDoc0 = qcTop + '\n\n' + SC + '\t修复通过\n';
+      writeGbk(qcDoc0, QC);
+      const qcBytes0 = fs.readFileSync(QC);
+      assert(!qcBytes0.toString('utf-8').includes('产品存在伪影'),
+        'fixture 真按 GBK 落盘（按 UTF-8 读是乱码）');
+
+      const qcInput = await page.$('.qc-h input[type=file]');
+      assert(!!qcInput, '清单面板的导入入口在 DOM 里（那个隐藏 input）');
+      await qcInput.uploadFile(QC);
+      await waitFor(page, () => window.__viewer.qcState().loaded, 10000, '清单导入');
+      const qs2 = await page.evaluate(() => window.__viewer.qcState());
+      assert(qs2.total === 1 && qs2.statuses[SC] === 'fixed',
+        `GBK 清单解析出 1 行、下半部分读到「已修复」（${qs2.total} 行）`);
+      assert(qs2.sourceEncoding === 'gbk', `按 GBK 解码（${qs2.sourceEncoding}）`);
+      assert(qs2.targetPath === '', '刚导入时写回路径是空的（要人自己粘）');
+
+      const foot = await page.evaluate(() => {
+        const b = document.querySelector('.qc-sync');
+        return { path: !!document.querySelector('.qc-path'), disabled: b ? b.disabled : null };
+      });
+      assert(foot.path && foot.disabled === true, '页脚有路径输入框，路径为空时「同步」禁用');
+
+      // 粘 W:\ 形态路径 → 同步。什么都不改时写回 == 原文，且必须是**同一个字节序列**：
+      // 这一条同时证明「GBK 没被转成 UTF-8」「上半部分逐字保留」「换行符没被改」。
+      await page.evaluate((p) => window.__viewer.qcSetTarget(p), winPath(QC));
+      assert(await page.evaluate(() => window.__viewer.qcSync()) === true, '同步成功（后端写盘）');
+      assert(fs.readFileSync(QC).equals(qcBytes0),
+        '未改动时写回：磁盘字节与原文完全一致（GBK 仍是 GBK）');
+
+      // 标一个终态再同步：下半部分整个重排，上半部分仍逐字不动。
+      await page.evaluate((n) => window.__viewer.qcSetStatus(n, 'rejected'), SC);
+      assert(await page.evaluate(() => window.__viewer.qcSync()) === true, '改标后再同步成功');
+      const qcBytes1 = fs.readFileSync(QC);
+      assert(readGbk(QC) === qcTop + '\n\n' + SC + '\t驳回\n',
+        '写回内容 = 上半部分原文 + 空行 + 终态行（按 GBK 读回逐字比对）');
+      assert(qcBytes1.length < qcBytes0.length,
+        `「驳回」比「修复通过」短，字节数随之变小（${qcBytes0.length} → ${qcBytes1.length}）`);
+      const qcToast = await page.evaluate(
+        () => document.querySelector('.toast')?.textContent.replace(/\s+/g, ' ').trim() ?? '');
+      assert(qcToast.indexOf('已同步至') >= 0 && qcToast.indexOf('GBK') >= 0,
+        `成功提示带盘阵路径与编码（${qcToast}）`);
+
+      // 拒绝路径：后端原话进错误条，不静默；且别的文件一个字节没动。
+      await page.evaluate(() => window.__viewer.qcSetTarget('W:\\没有这份清单.txt'));
+      assert(await page.evaluate(() => window.__viewer.qcSync()) === false,
+        '盘阵上不存在那份清单：同步失败（不新建文件）');
+      const qcErr = await page.evaluate(
+        () => document.querySelector('.err-box')?.textContent.replace(/\s+/g, ' ').trim() ?? '');
+      assert(/文件不存在/.test(qcErr), `错误条给的是后端原话（${qcErr}）`);
+      assert(fs.readFileSync(QC).equals(qcBytes1), '失败的那次没有碰任何文件');
+      await page.evaluate(() => window.__viewer.qcClose());
+
+      /* ---------- I. 全程无错 ---------- */
+      console.log('\n[I] 全程无错');
       // D / E / E2 里**刻意**打出来的 404：D 一次（盘阵上没有那个目录）、E 两次
       // （同名不同字节；有日期但目录不存在）、E2 一次（同上，换成 .jpg 拖入）。
-      // E 里还有一次刻意打的 400（文件名没有时间戳，后端据此拒绝反推）—— 浏览器
-      // 对任何非 2xx 响应都会往控制台写一条，这不算程序缺陷，但也不能睁一只眼闭
-      // 一只眼：数目必须恰好等于刻意的那几次，多一条就是有别的资源没取到。
+      // 刻意打的 400 有两次：E 一次（文件名没有时间戳，后端据此拒绝反推）、
+      // H 一次（往盘阵上不存在的清单路径写回）。浏览器对任何非 2xx 响应都会往
+      // 控制台写一条，这不算程序缺陷，但也不能睁一只眼闭一只眼：数目必须恰好
+      // 等于刻意的那几次，多一条就是有别的资源没取到。
       const deliberate = /status of (404|400)/;
       const notFound = errors.filter((e) => /status of 404/.test(e));
       assert(notFound.length === 4,
         `控制台里的 404 恰好是刻意的那四次（${notFound.length}）`);
       const badRequest = errors.filter((e) => /status of 400/.test(e));
-      assert(badRequest.length === 1,
-        `控制台里的 400 恰好是刻意的那一次（无时间戳反推，${badRequest.length}）`);
+      assert(badRequest.length === 2,
+        `控制台里的 400 恰好是刻意的那两次（无时间戳反推 + 不存在的清单，${badRequest.length}）`);
       const appErrors = errors.filter((e) => !isIgnorableConsole(e) && !deliberate.test(e));
       assert(appErrors.length === 0, `无浏览器错误 (${JSON.stringify(appErrors.slice(0, 4))})`);
       assert(external.length === 0,
