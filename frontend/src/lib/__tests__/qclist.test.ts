@@ -8,7 +8,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  parseQcList, buildQcDoc, decodeQcBytes, encodeQcText,
+  parseQcList, buildQcDoc, decodeQcBytes,
   QC_STAGES, QC_FINALS, QC_DOC_WORD, QC_STATUS_LABEL, isTerminal,
 } from '../qclist.js';
 import type { QcStatus } from '../qclist.js';
@@ -253,28 +253,10 @@ describe('编码', () => {
     expect(r.text).toBe('修复通过');
   });
 
-  // 断言一律看**原始字节**，不用 blob.text()：Blob.text() 走的是 UTF-8 decode，
-  // 按规范会把开头的 BOM 吃掉，用它根本验不出「到底写没写 BOM」。
-  const bytesOfBlob = async (b: Blob) => new Uint8Array(await b.arrayBuffer());
-  const UTF8_BOM = [0xEF, 0xBB, 0xBF];
-
-  it('写回：UTF-8 原样，不加 BOM', async () => {
-    const { blob, fellBack } = encodeQcText('修复通过', 'utf-8');
-    expect(fellBack).toBe(false);
-    const buf = await bytesOfBlob(blob);
-    expect([...buf.slice(0, 3)]).not.toEqual(UTF8_BOM);
-    expect(new TextDecoder('utf-8').decode(buf)).toBe('修复通过');
-  });
-
-  it('写回：原编码是 GBK → 编不回去，退 UTF-8+BOM 并置 fellBack', async () => {
-    const { blob, fellBack } = encodeQcText('修复通过', 'gbk');
-    expect(fellBack).toBe(true);
-    const buf = await bytesOfBlob(blob);
-    expect([...buf.slice(0, 3)]).toEqual(UTF8_BOM);
-    expect(new TextDecoder('utf-8').decode(buf.subarray(3))).toBe('修复通过');
-  });
-
-  it('GBK 清单走完一整圈：解码 → 解析 → 写回 → 再解码，中文不出乱码', () => {
+  // 编码方向（encodeQcText）的单测已随函数一起删掉：浏览器编不出 GBK，写盘改由后端
+  // 编码（api-contract.md §3.7），编码正确性改在 backend/tests/test_api_platform.py
+  // 的 TestQcListWrite 里按字节验。
+  it('GBK 清单走完一整圈：解码 → 解析 → 拼写回文档，中文不出乱码', () => {
     // 「修复通过」的 GBK 字节，前面拼一段纯 ASCII 的问题行
     const gbkLine = new Uint8Array([0xD0, 0xDE, 0xB8, 0xB4, 0xCD, 0xA8, 0xB9, 0xFD]);
     const ascii = new TextEncoder().encode(`${N6},\tdesc\towner\n\n${N6}\t`);

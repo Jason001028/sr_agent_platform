@@ -10,7 +10,7 @@
  * - 「当前打开的图」自动选中对应行（按 lqPath 末段 = 生产全名匹配，见 store.selectForScene）。
  *   点该行会把画布跳到清单上的坐标 —— 注意清单写的是 **(行, 列)**，而 locatePixel(x, y)
  *   是 **(列, 行)**，传参顺序见 onRow。
- * - 「同步至指定文档」写在页脚而不是每行：它写的是整份文档，不是某一行的状态。
+ * - 「同步」（写回盘阵）写在页脚而不是每行：它写的是整份文档，不是某一行的状态。
  */
 import { computed, ref, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
@@ -55,6 +55,26 @@ function onPick(e: Event) {
   const f = el.files?.[0];
   if (f) void qc.importFile(f);
   el.value = '';                 // 允许重复选同一个文件
+}
+
+/* ---------------- 写回 ---------------- */
+
+const syncing = ref(false);
+
+function onPath(e: Event) {
+  qc.setTarget((e.target as HTMLInputElement).value);
+}
+
+/** 把整份文档写回盘阵上那份 .txt。忙的时候挡住重复点（写盘是不能并行的事）。
+ *  出错时 store 已经弹了后端原话，这里不重复报。 */
+async function sync() {
+  if (syncing.value || !qc.targetPath.trim()) return;
+  syncing.value = true;
+  try {
+    await qc.syncToTarget();
+  } finally {
+    syncing.value = false;
+  }
 }
 
 /** 点行：选中；若这行就是当前打开的图，顺手把视图跳过去。 */
@@ -219,16 +239,28 @@ watch(
         </div>
       </div>
 
-      <!-- 页脚：写的是整份文档，所以不属于任何一行 -->
+      <!-- 页脚：写的是整份文档，所以不属于任何一行。
+           目标是**粘路径**而不是文件选择器：清单在盘阵上，浏览器的选择器只能选到
+           本机文件（真机页面还是 http，那个 API 干脆没有）。详注见 store。 -->
       <div class="qc-foot">
-        <button type="button" class="qc-sync" @click="qc.syncToTarget()">同步至指定文档</button>
+        <input
+          class="qc-path"
+          type="text"
+          spellcheck="false"
+          placeholder="W:\...\待修复清单.txt"
+          title="盘阵上那份《待修复清单》的完整路径；W:\ 与 /DiskArray/ 两种形态都认"
+          :value="qc.targetPath"
+          :disabled="syncing"
+          @input="onPath"
+          @keyup.enter="sync"
+        />
         <button
-          v-if="qc.targetName"
           type="button"
-          class="qc-target"
-          title="点击换一份目标文档"
-          @click="qc.forgetTarget()"
-        >→ {{ qc.targetName }}</button>
+          class="qc-sync"
+          :disabled="syncing || !qc.targetPath.trim()"
+          :title="qc.targetPath.trim() ? '把整份文档写回这个文件（原地覆盖）' : '先填路径'"
+          @click="sync"
+        >{{ syncing ? '同步中…' : '同步' }}</button>
       </div>
     </template>
   </section>
@@ -437,6 +469,23 @@ watch(
   align-items: center;
   gap: 6px;
 }
+/* 目标路径输入：一行的宽度要能塞下完整盘阵路径，所以占满剩余空间（10px 等宽，
+   与 FileList 里那些路径同口径）。 */
+.qc-path {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctrl);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+.qc-path::placeholder { color: var(--ink-faint); }
+.qc-path:focus { outline: none; border-color: var(--accent-2); }
+.qc-path:disabled { color: var(--ink-faint); background: transparent; }
 .qc-sync {
   height: 26px;
   padding: 0 12px;
@@ -451,23 +500,11 @@ watch(
   box-shadow: 0 2px 5px rgba(45, 164, 162, 0.22);
   transition: filter 0.15s ease;
 }
-.qc-sync:hover { filter: brightness(1.05); }
-.qc-target {
-  flex: 1;
-  min-width: 0;
-  height: 22px;
-  padding: 0 6px;
-  font-size: 10px;
-  text-align: left;
-  border: 1px dashed var(--line);
-  border-radius: var(--r-ctrl);
-  background: transparent;
-  color: var(--ink-sub);
-  cursor: pointer;
-  font-family: var(--font-mono);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.qc-sync:hover:not(:disabled) { filter: brightness(1.05); }
+.qc-sync:disabled {
+  cursor: default;
+  background: var(--surface-3);
+  color: var(--ink-faint);
+  box-shadow: none;
 }
-.qc-target:hover { border-color: var(--accent-2); color: var(--accent-deep); }
 </style>

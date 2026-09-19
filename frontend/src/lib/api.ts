@@ -452,5 +452,26 @@ export async function apiBakeMask(
   return (await r.json()) as MaskBakeResult;
 }
 
+/** 把《待修复清单》整份原地写回盘阵：POST /api/qclist/write。
+ *
+ * 写盘**走后端**（契约见 docs/planning/api-contract.md §3.7）。原先走浏览器的
+ * File System Access API，可那个 API 在规范里是 `[SecureContext]` 标的，而真机页面
+ * 是 `http://内网IP` —— 在真机上这功能永远点不通，不是偶发。顺带修好编码：
+ * 浏览器只有 UTF-8 编码器，GBK 清单以前只能降级成 UTF-8+BOM 写回，现在由后端编。
+ *
+ * `mtime` 是导入那一刻的 `File.lastModified / 1000`。路径是用户粘的、文件是盘子上的，
+ * 两者只有这一处能对上；后端拿它对护栏，盘阵上的清单在导入之后被人改过就拒写。 */
+export async function apiWriteQcList(
+  cfg: SrConfig,
+  body: { path: string; text: string; encoding: 'utf-8' | 'gbk'; mtime?: number },
+): Promise<{ path: string; bytes: number; encoding: string }> {
+  const r = await http(apiUrl(cfg, '/api/qclist/write'), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return (await r.json()) as { path: string; bytes: number; encoding: string };
+}
+
 /** 新会话随手一张（ChatPage 顶部用）。 */
 export const freshApi = () => loadSrConfig();

@@ -58,6 +58,7 @@
 | `POST /api/queue/{task_id}/cancel` | scancel 取消 | 3.3 |
 | `GET /api/queue/events` | SSE：队列状态变化广播 | 3.3 |
 | `POST /api/masks` | 多边形 JSON + W/H → 栅格化写盘阵（原图目录）→ `{mask_path, lq_path, task_draft}`（body 现收 `lq_path`，legacy `scene_id` 保留） | 3.4 |
+| `POST /api/qclist/write` | 《待修复清单》原地写回盘阵（真机 http 下浏览器写不了盘阵文件） | 3.7 |
 
 > **SR 最小原型（09-14）**：掩码来源改为「目录里已有的 `<输入影像名>_mask.tif`」，
 > 提交时只带 `lq_path`，由后端推导并校验存在性
@@ -341,6 +342,57 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
 - 错误码与 `/preview` 同口径：`.jpg/.jpeg` 源直接回源字节；不可访问 **404**；烘焙失败 **422**。
 - **清理不在请求路径里**：`purge_temp_previews` 要列举缓存根，而「不扫盘」是硬约束（见 3.5），
   所以它只出现在 `api/app.py` 的后台任务 `_tmp_preview_purge_loop` 里。
+
+### 3.7 《待修复清单》写回（`POST /api/qclist/write`，2026-09-18）
+
+> **状态：已定**（同日按上面这份评审稿落地）。后端 `backend/api/platform.py` +
+> `backend/tests/test_api_platform.py::TestQcListWrite`；前端同步删掉 FSA 那条路
+> （`stores/qclist.ts` 的文件选择器/句柄、`lib/qclist.ts::encodeQcText`）；写盘第一次进
+> 回归：`.e2e/test-manual-scene.js` §H 走「导入 GBK 清单 → 粘路径 → 同步 → 从磁盘读回」。
+
+用途：查看器的《待修复清单》面板把操作员标好的处置结果**原地写回**盘阵上那份 txt。
+
+初版走浏览器 File System Access API（`showOpenFilePicker` + `createWritable`），2026-09-18
+在真机上直接不可用：那个 API 在规范里是 `[SecureContext]` 标的，Chrome 只在 `https://`、
+`http://localhost`、`http://127.0.0.1` 的页面上把它挂到 `window` 上，而真机是 nginx
+`listen 80` 的 `http://内网IP`。清单本来就在盘阵上，而后端 `User=nginx` 本来就写得进去
+（掩码、SR 产物、烘焙 JPG 全是它写的），所以改成后端写盘：http 下也能用，还顺带把
+「GBK 清单写回 GBK」做对了（浏览器编不出 GBK，旧代码只能降级成 UTF-8+BOM）。
+
+body：
+```json
+{"path":"W:\\GSHC2IMPS\\PRODUCT\\2026\\09\\17\\待修复清单.txt",
+ "text":"<整份文档：上半部分逐字保留、下半部分只含终态行>",
+ "encoding":"gbk",
+ "mtime":1758171234.0}
+```
+
+- **路径语义**：`pathguard.to_posix_array_path` → `ensure_allowed(posix, kind="file")` —— 与
+  `/api/scenes/resolve` 的 path 分支、`/api/masks` 的 `lq_path` 分支**同一套**（`W:\…` 靠
+  `SR_DRIVE_MAP` 译成服务端形态，白名单靠 `SR_ALLOWED_ROOTS`）。**必须已存在、且必须是文件**：
+  不让这个端点凭空造文件（路径敲错一个字，盘阵上就多一个垃圾文件）。
+- **只收 `.txt`**（大小写不敏感）：本端点的语义是「覆盖」，不设后缀门就等于「盘阵上任何存在的
+  文件都能被它改写」—— 一颗写错的 bug 足以盖掉 `.tif` 或 `meta.xml`。
+- **`mtime` 护栏（可选）**：带了就与 `os.stat(target).st_mtime` 比，差超过 2 秒（网络盘/FAT 的
+  时间戳粒度）一律拒。挡的是「操作员导入之后，质检那边又更新了一版清单」—— 照写会把他们的新行
+  整段盖掉。前端传的是导入那个 `File` 的 `lastModified`；不带这个字段（curl、e2e）护栏自动跳过。
+- **写前查权限**：目标目录与目标文件各做一次 `os.access(…, os.W_OK)`，不可写就直接拒并说清是
+  哪一个，别让用户拿到 EACCES 原文。注意**原子替换只需要目录可写**（文件自己的 mode 拦不住
+  `os.replace`），所以这两道检查不是冗余。
+- **落盘**：`tempfile.mkstemp(dir=目标同目录)` → `os.chmod` 保留原权限位 → `os.replace` 原子替换
+  （`services/preview_jpg.py` 那套）。先写临时文件再替换，是为了不出现「写了一半的清单」——
+  这份 txt 是操作员一下午的标记，被截断比写不进去严重得多。
+- **已知副作用**：替换后文件的**属主变成跑 API 的 nginx**（nginx 无权 chown 回去），权限位保留。
+  质检部门若还要直接改这份 txt，清单所在目录要给组写权限 —— 见 `deploy/README.md`。
+- **编码**：`encoding ∈ {"utf-8","gbk"}`（缺省 `utf-8`），由**后端**编码。正文里有 GBK 表示不了
+  的字符 → 400。前端不再插手编码，只把导入时认出来的编码原样传过来（`lib/qclist.ts::decodeQcBytes`）。
+- **`text` 不设大小上限**：清单是文本、且由本平台自己生成，人造上限只会误伤长清单。
+- **错误码不分类**：请求侧被拒一律 **400**（detail 说清是路径形态、白名单、不存在、非 `.txt`、
+  编码还是 mtime 冲突）；写盘 `OSError` → **422**。与 §3.5 那套 400/403/404 分门别类不同 ——
+  前端只把 detail 原样显示，分类没有消费者。`PathDeniedError` 一律转 400。
+- 返回 `200 {"path":"<posix 绝对路径>","bytes":1234,"encoding":"gbk"}`。
+- **回归**：写盘这一步以前进不了自动化（`showOpenFilePicker` 是系统弹窗，见 §4 那条注记），
+  改成 HTTP 之后 `.e2e/test-manual-scene.js` 整条能走通：导入 → 设路径 → 同步 → 从磁盘读回比对。
 
 ## 4. 关键实现机制（契约约束）
 
