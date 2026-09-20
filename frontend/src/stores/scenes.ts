@@ -112,7 +112,10 @@ export const useScenesStore = defineStore('scenes', () => {
     try {
       // 首次要服务端烘焙（读一遍大图，几十秒）。遮罩（viewer.showMask）只挂在
       // /viewer 上，本页调了也看不见，所以这里走自己的 phase 文案行。
-      const blob = await fetchSceneJpg(cfg, row, (text) => { phase.value = text; });
+      // 档位取 viewer store 里的那份（工具栏拖动条写的就是它）—— 这样用户拖完
+      // 滑块不必刷新页面就生效；loadPreviewDiv() 只负责冷启动时的初值。
+      const blob = await fetchSceneJpg(cfg, row, viewer.previewDiv,
+                                       (text) => { phase.value = text; });
       await viewer.openSceneJpg({
         name: row.name, W: row.W, H: row.H, sceneId: row.id,
         // 裸 .tif 且父目录不是场景目录时后端把它置 null（= 不能提交 SR），

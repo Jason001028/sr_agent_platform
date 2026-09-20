@@ -15,6 +15,8 @@ Three tables behind one Store:
               有两组时间戳，别混：created_at/updated_at 属于**行**（队列排序、每次
               写回），started_at/finished_at 属于**本次运行**（首次看到 RUNNING →
               终态；队列页「耗时」的唯一来源，2026-09-18 增）。
+              preview_state/preview_note 是**产物预览急烤**的进度（2026-09-20 增）：
+              NULL → running → done/skipped/failed，同样属于「本次运行」，重交即归零。
 
 Shape borrowed from langgraph checkpoint-sqlite (state snapshot + pending
 writes); stored payloads are the OpenAI wire-format messages themselves, not
@@ -72,7 +74,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_sr_tasks_fingerprint
 
 #: sr_tasks 里发布后新增的列。`CREATE TABLE IF NOT EXISTS` 对**已存在**的表一个字
 #: 都不改，所以升级前建的库（生产上就有）只能靠 ALTER TABLE 补 —— 见 _ensure_columns。
-_SR_TASK_ADDED_COLUMNS = (("started_at", "REAL"), ("finished_at", "REAL"))
+#:
+#: preview_state / preview_note（2026-09-20）：产物预览的服务端急烤状态。见
+#: `list_preview_candidates` 那一段。补出来的列在老行里是 NULL，**这正是想要的**
+#: —— NULL 的含义是「没烤过」，急烤循环只认这个值，所以升级当天的历史 COMPLETED
+#: 行会被认领；挡它的是**年龄窗口**（`finished_at` 超出窗口就不烤），不是回填。
+_SR_TASK_ADDED_COLUMNS = (("started_at", "REAL"), ("finished_at", "REAL"),
+                          ("preview_state", "TEXT"), ("preview_note", "TEXT"))
 
 
 def _ensure_columns(db: sqlite3.Connection) -> None:
@@ -195,7 +203,7 @@ class Store:
 
     _SR_TASK_COLS = ("id, fingerprint, session_id, job_id, status, params, "
                      "config_xml, batch_script, log_dir, created_at, updated_at, "
-                     "started_at, finished_at")
+                     "started_at, finished_at, preview_state, preview_note")
 
     @staticmethod
     def _sr_task_row(row) -> dict:
@@ -203,7 +211,8 @@ class Store:
                 "job_id": row[3], "status": row[4], "params": json.loads(row[5]),
                 "config_xml": row[6], "batch_script": row[7], "log_dir": row[8],
                 "created_at": row[9], "updated_at": row[10],
-                "started_at": row[11], "finished_at": row[12]}
+                "started_at": row[11], "finished_at": row[12],
+                "preview_state": row[13], "preview_note": row[14]}
 
     def get_sr_task(self, fingerprint: str) -> dict | None:
         row = self._db().execute(
@@ -264,6 +273,76 @@ class Store:
                     "finished_at": now if mark_finished else None}
         return row
 
+    # ---- 产物预览急烤（api/app.py::_eager_bake_tick 的队列） ---------------
+    #
+    # 为什么队列是**从库派生**的，而不是在状态转换点上入队：写终态的
+    # `platform._task_state` 有**两个**调用者 —— 后台 `_poll_once` 与请求路径
+    # `_task_view`（GET /api/queue）。谁先观测到 RUNNING→COMPLETED 谁把「变了」
+    # 这个信号拿走，另一个看到的是「没变化」，挂在转换点上的入队钩子必然偶发漏烤。
+    # 派生 + `claim_preview_bake` 的原子 CAS 之后，这个竞态在结构上不存在：
+    # 急烤循环不关心「谁先看到」，它只关心「这行还没被认领」。
+    #
+    # preview_state 取值：NULL（没烤）→ running → done | skipped | failed。
+    # 粒度是**行**（= 一个 task_fingerprint），所以同一 suffix 重跑必须重新武装，
+    # 由 put_sr_task 的 UPDATE 分支负责（见那里的注释）。
+
+    #: 每轮最多看一眼多少行 COMPLETED 候选（不是每轮烤多少 —— 那恒为 1）。
+    _PREVIEW_SCAN_LIMIT = 20
+
+    def list_preview_candidates(self, *, max_age_sec: float,
+                                limit: int | None = None) -> list[dict]:
+        """等着做产物预览的 COMPLETED 行，最新跑完的在前。
+
+        三条判据都是必须的：
+          * `status='COMPLETED'` —— **FAILED 绝不烤**。`writeTiff` 先 rename 再写，
+            失败的运行会在产物路径上留下半截文件，烤出来是坏图。
+          * `preview_state IS NULL` —— 还没被认领过（认领即写 'running'）。
+          * `finished_at >= ?` —— 年龄窗口。`finished_at IS NULL` 的行（加这两列之前
+            建的、或整段运行期间 sr-api 不在场没观测到开始的）**一律排除**：那个值是
+            NOT NULL 比较，NULL 天然不在窗口内，所以不用额外写条件，但这条判据是
+            升级当天不把历史 COMPLETED 行全烤一遍的**唯一**屏障。
+        """
+        cutoff = time.time() - float(max_age_sec)
+        rows = self._db().execute(
+            f"SELECT {self._SR_TASK_COLS} FROM sr_tasks "
+            "WHERE status = 'COMPLETED' AND preview_state IS NULL "
+            "AND finished_at IS NOT NULL AND finished_at >= ? "
+            "ORDER BY finished_at DESC LIMIT ?",
+            (cutoff, int(limit or self._PREVIEW_SCAN_LIMIT))).fetchall()
+        return [self._sr_task_row(r) for r in rows]
+
+    def claim_preview_bake(self, task_id: int) -> dict | None:
+        """认领一行的产物预览烘焙。抢到返回该行，被人抢在前面则 None。
+
+        这是并发与重复认领的**唯一裁决点**：CAS 写 `preview_state='running'`，
+        只有 `rowcount == 1` 才算抢到。`status='COMPLETED'` 一并写进 WHERE，是为了
+        挡住「认领与重跑赛跑」—— 用户在这一行刚跑完、急烤还没动手时又交了同一个
+        suffix，`put_sr_task` 会把 status 打回 submitted 并清 preview_state，
+        此时这份认领必须失效（否则会去烤一个正在被重写的产物）。
+        """
+        db = self._db()
+        cur = db.execute(
+            "UPDATE sr_tasks SET preview_state = 'running', preview_note = NULL "
+            "WHERE id = ? AND preview_state IS NULL AND status = 'COMPLETED'",
+            (task_id,))
+        db.commit()
+        if cur.rowcount != 1:
+            return None
+        return self.get_sr_task_by_id(task_id)
+
+    def set_preview_state(self, task_id: int, state: str,
+                          note: str | None = None) -> dict | None:
+        """写回急烤结局（done / skipped / failed）+ 人话说明。
+
+        **不碰 updated_at**：那个列是「这行最近一次写回」的时刻，队列按它排序、
+        界面上也有对应读数。预览烤没烤成与作业本身无关，抬它会让人以为作业动了。
+        """
+        db = self._db()
+        db.execute("UPDATE sr_tasks SET preview_state = ?, preview_note = ? "
+                   "WHERE id = ?", (state, note, task_id))
+        db.commit()
+        return self.get_sr_task_by_id(task_id)
+
     def put_sr_task(self, fingerprint: str, params: dict, *,
                     session_id: str | None = None, status: str = "submitted",
                     job_id: int | None = None, config_xml: str | None = None,
@@ -280,6 +359,11 @@ class Store:
         的时间窗在这里清零 —— started_at / finished_at 归 NULL，等校准器首次看到
         RUNNING / 终态再钉。created_at 不动：它是这一行**第一次**提交的时刻，队列排序
         与「创建时间」列都靠它，而耗时已不再派生自它。
+
+        `preview_state / preview_note` 一并归 NULL：**同一 suffix 重跑必须重新武装
+        急烤**，否则第二次跑完永远停在旧的 `done` 上、盘上那份预览还是上一次的产物。
+        这个重置依赖「提交发生在轮询观测到终态之前」—— 顺序天然成立（提交是同步的
+        请求路径，终态要等调度器回话），但它是**隐含依赖**，所以写在这里。
         """
         now = time.time()
         db = self._db()
@@ -290,8 +374,8 @@ class Store:
             db.execute(
                 "INSERT INTO sr_tasks (fingerprint, session_id, job_id, status, "
                 "params, config_xml, batch_script, log_dir, created_at, updated_at, "
-                "started_at, finished_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)",
+                "started_at, finished_at, preview_state, preview_note) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)",
                 (fingerprint, session_id, job_id, status,
                  json.dumps(params, ensure_ascii=False), config_xml,
                  batch_script, log_dir, now, now))
@@ -299,7 +383,8 @@ class Store:
             db.execute(
                 "UPDATE sr_tasks SET session_id = ?, job_id = ?, status = ?, "
                 "params = ?, config_xml = ?, batch_script = ?, log_dir = ?, "
-                "updated_at = ?, started_at = NULL, finished_at = NULL "
+                "updated_at = ?, started_at = NULL, finished_at = NULL, "
+                "preview_state = NULL, preview_note = NULL "
                 "WHERE id = ?",
                 (session_id, job_id, status,
                  json.dumps(params, ensure_ascii=False), config_xml,

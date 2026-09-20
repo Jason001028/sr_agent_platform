@@ -8,9 +8,10 @@
  */
 import {
   loadSrConfig, joinBase, sceneResolveUrl, scenePreviewUrl, sceneImageUrl,
-  tmpPreviewUrl,
+  dropPreviewUrl, isBakedPreviewUrl, previewDivLabel, previewNeedsBake,
+  loadPreviewDiv, rasterPreviewWins, sceneSiblingsUrl,
 } from './scene.js';
-import type { SceneRow, SrConfig } from './scene.js';
+import type { SceneRow, SrConfig, RasterPreview } from './scene.js';
 
 export { loadSrConfig } from './scene.js';
 
@@ -68,7 +69,20 @@ export interface JobUpdateEvent {
   finished_at?: number | null;
 }
 
-export type PlatformSseEvent = ChatSseEvent | JobUpdateEvent | { type: 'ping' };
+/** 队列 SSE 事件（§4.x preview_update）：**服务端急烤产物预览**的结局。
+    刻意与 job_update 分开 —— 那是「作业状态变了」，这是「预览烤好了」，两者无关
+    （作业 COMPLETED 了预览也可能因为沙箱/产物缺失/目录不可写而没烤）。收到它只需
+    改这一行的预览字段，不必重取整行。 */
+export interface PreviewUpdateEvent {
+  type: 'preview_update';
+  task_id: number;
+  /** null = 从没烤过；running 是认领后的中间态（只在重取时可能看到）。 */
+  state: 'running' | 'done' | 'skipped' | 'failed' | null;
+  note: string | null;
+}
+
+export type PlatformSseEvent =
+  | ChatSseEvent | JobUpdateEvent | PreviewUpdateEvent | { type: 'ping' };
 
 /** 队列任务（GET /api/queue 行；params 已按契约投影子集）。 */
 export interface QueueTask {
@@ -99,6 +113,14 @@ export interface QueueTask {
    *  开始（整段运行期间后端不在）或升级前建的老行 → 界面显示「—」。 */
   started_at: number | null;
   finished_at: number | null;
+  /** **产物预览的服务端急烤**进度（与 state 无关）：null = 没烤过，running = 正在烤，
+   *  done = 盘上已有当前档位的产物预览，skipped / failed 见 preview_note 里那句人话。
+   *  作业跑完不一定烤成 —— 沙箱私有副本、产物缺失（云限额跳过的作业是合法 COMPLETED
+   *  但没有产物）、场景目录不可写都会如实记为 skipped。 */
+  preview_state?: 'running' | 'done' | 'skipped' | 'failed' | null;
+  /** 急烤结局的人话说明，形如 `<slug>: …`（slug 固定为 sandbox / product_missing /
+   *  unwritable / source_changed / no_suffix / failed）。 */
+  preview_note?: string | null;
 }
 
 /** POST /api/queue 请求体（run_sr 参数，lq_path 必填）。 */
@@ -354,54 +376,131 @@ export function subscribeQueueEvents(
 
 /** 取一条场景行的显示 JPG 字节。两条来源，调用方不必区分：
  *
- *  * 库行（jpgUrl 非空）：缓存没生成过就先 POST 一下懒生成，然后走静态 URL
- *    （nginx 直出，大图不经过 API 进程）。
+ *  * 库行（jpgUrl 非空）：缓存没生成过、或**盘上那份不是当前档位**，就先打一次
+ *    `/preview?div=N` 懒生成，再走静态 URL 取字节（nginx 直出，大图不经过
+ *    API 进程）；档位已对上就直接取静态 URL。
  *  * 库外的场景（手工 resolve 的盘阵目录，jpgUrl 为空）：没有静态 URL，
  *    /api/scenes/{id}/preview 的**响应体本身**就是那张 JPEG。
  *
  *  两条路都必须真正取到字节 —— 库外那条早期版本把响应取到手又丢掉，结果手工
  *  场景一律打不开。首次要解压采样整幅大图，可能较慢。
  *
+ *  库行这条为什么要「先把重烤那一下白打掉」，而不是直接拿它的响应体当图：那张图
+ *  得由 nginx 直出（几 MB 到几十 MB，走 API 进程是白占一个工作进程的内存与带宽）。
+ *  代价是重烤那一次下两遍（第一遍纯触发烘焙、丢掉响应）；稳态下只有一遍。
+ *  换档位不会因此看到旧图 —— 静态 URL 带 `?div=N`（见 sceneImageUrl），
+ *  nginx 的 `max-age=3600` 缓存键跟着变，第二遍拿到的一定是新烤的。
+ *
+ *  **重烤判据不能只看 `hasPreview`**：它不认档位，换完档位盘上那份旧图仍在，
+ *  只看它就会跳过重烤、把旧档位的图端上来（而且是每次换档都这样）。
+ *  `row.previewDiv` 是后端从 JPEG 注释戳里解出来的实际档位，`null` 表示
+ *  「不知道是哪一档」（旧格式戳 / 源本身是显示件）—— 前者要重烤，后者不能重烤，
+ *  所以还要用 `isBakedPreviewUrl` 把「源本身就是 JPG」那一类摘出去（见
+ *  `previewNeedsBake`）。
+ *
  *  `onPhase` 在「本次会触发服务端烘焙」时被调用一次（只有这一次，没有百分比）：
  *  首次烘焙要读一遍源图，2.4 万像素级的场景在盘阵上要几秒到几十秒，调用方拿它
- *  更新遮罩文案，别让界面看起来像卡死了。判据是 `row.hasPreview` —— 后端填的是
- *  缓存到底在不在的真值（库外同样准），所以第二次打开不会再提示。 */
+ *  更新遮罩文案，别让界面看起来像卡死了。 */
 export async function fetchSceneJpg(
   cfg: SrConfig,
   row: SceneRow,
+  div: number = loadPreviewDiv(),
   onPhase?: (text: string) => void,
 ): Promise<Blob> {
-  if (!row.hasPreview) onPhase?.('首次打开：正在服务器烘焙 1/2 预览图（直方图均衡），'
-    + '要读一遍大图，可能要等几十秒…');
+  const rp = row.rasterPreview;
+  if (rp && rasterPreviewWins(rp, div)) {
+    return await fetchRasterPreview(cfg, row, rp, div, onPhase);
+  }
+  const baked = isBakedPreviewUrl(row.jpgUrl);
+  const needBake = previewNeedsBake(row, div);
+  // 会不会**真的**触发服务端烘焙（onPhase 的判据）。与 previewNeedsBake 的差别只在
+  // 库外那一支：库外每次都走 /preview，但缓存已在时它是命中、不是烘焙，别吓人。
+  const willBake = !row.jpgUrl ? !row.hasPreview
+    : (!row.hasPreview || (baked && row.previewDiv !== div));
+  if (willBake) {
+    onPhase?.(`首次打开：正在服务器烘焙 ${previewDivLabel(div)} 预览图`
+      + '（直方图均衡），要读一遍大图，可能要等几十秒…');
+  }
   if (!row.jpgUrl) {
-    const p = await http(scenePreviewUrl(cfg, row.id));
+    // 库外：没有静态 URL，这次请求的**响应体本身**就是那张 JPEG。
+    const p = await http(scenePreviewUrl(cfg, row.id, div));
     row.hasPreview = true;
     return await p.blob();
   }
-  if (!row.hasPreview) {
-    await http(scenePreviewUrl(cfg, row.id));
+  if (needBake) {
+    await http(scenePreviewUrl(cfg, row.id, div));   // 只触发烘焙，字节丢掉
     row.hasPreview = true;
+    row.previewDiv = div;      // 记上实际档位：同一会话内再打开不必重烤
   }
-  const img = await http(sceneImageUrl(cfg, row.jpgUrl));
+  const img = await http(sceneImageUrl(cfg, row.jpgUrl, div));
   return await img.blob();
 }
 
-/** 拖拽入口取**临时**预览 JPG：GET /api/scenes/{id}/preview-tmp。
+/** 显示件 jpg 的「同名栅格赢」那一支：取**栅格那份**预览（见 rasterPreviewWins）。
  *
- * 为什么必须与 `fetchSceneJpg` 分开（而不是加个参数）：那个函数会写
- * `row.hasPreview = true`，而该字段的语义是「生产 `<stem>.preview.jpg` **此刻
- * 在不在**」。被临时路径置真之后，用户再从场景库打开同一个场景就会跳过懒生成、
- * 直接打一个 404 的静态 URL，图再也出不来。这里不碰任何 SceneRow 字段。
+ * 请求的还是**这条行自己的 id** —— 后端在 `/preview` 那一层把 jpg 换成同名栅格
+ * （落点 `with_suffix(".preview.jpg")` 对 jpg 与 tif 是同一个文件名，也就是栅格行
+ * 用的那一份），所以前端不必知道换没换，也不必先取一次栅格的 id、更不必多一次往返。
  *
- * 也不走静态 URL（`SR_TEMP_PREVIEWS_ROOT` 不在 nginx 的 /disk-array 映射里），
- * 响应体本身就是那张 JPEG。 */
-export async function fetchTempSceneJpg(
+ * 写回的是 `row.rasterPreview` 自己的 `hasPreview` / `previewDiv`（就地改，下一同
+ * 会话语义与栅格行一致），**绝不碰** `row.hasPreview / row.jpgUrl / row.previewDiv`
+ * —— 那三个字段说的是源 jpg 自己。碰了会让「源是显示件」这一判定漂移：用户再从
+ * 场景库打开这个场景就会跳过懒生成、去打一个 404 的静态 URL（fetchDropSceneJpg
+ * 那段注释记的就是同一个坑）。 */
+async function fetchRasterPreview(
   cfg: SrConfig,
-  id: string,
+  row: SceneRow,
+  rp: RasterPreview,
+  div: number,
   onPhase?: (text: string) => void,
 ): Promise<Blob> {
-  onPhase?.('已关联到盘阵场景：正在服务器烘焙 1/2 预览图，首次要读一遍大图…');
-  const r = await http(tmpPreviewUrl(cfg, id));
+  const needBake = !rp.hasPreview || rp.previewDiv !== div;
+  if (needBake) {
+    onPhase?.(`首次打开：正在服务器从同名栅格 ${rp.name} 烘焙 `
+      + `${previewDivLabel(div)} 预览图（直方图均衡），要读一遍大图，`
+      + '可能要等几十秒…');
+  }
+  if (!rp.jpgUrl) {
+    // 库外栅格：没有静态 URL，这次请求的**响应体本身**就是那张 JPEG。
+    const p = await http(scenePreviewUrl(cfg, row.id, div));
+    rp.hasPreview = true;
+    rp.previewDiv = div;
+    return await p.blob();
+  }
+  if (needBake) {
+    await http(scenePreviewUrl(cfg, row.id, div));   // 只触发烘焙，字节丢掉
+    rp.hasPreview = true;
+    rp.previewDiv = div;
+  }
+  const img = await http(sceneImageUrl(cfg, rp.jpgUrl, div));
+  return await img.blob();
+}
+
+/** 拖入链取预览 JPG：GET /api/scenes/{id}/preview-drop?div=N。
+ *
+ * 产物落**源所在的盘阵场景目录**（`<stem>_preview.jpg`），场景目录不可写时才退回
+ * 临时缓存 —— 那时响应带 `X-SR-Preview-Fallback: tmp`，这里据此在 `onPhase` 里
+ * 如实带一句，用户就不会以为「明明能打开，怎么说没落盘阵」。
+ *
+ * 为什么不复用 `fetchSceneJpg`：那个函数会写 `row.previewDiv` / `hasPreview`，而
+ * 那些字段的语义锚在**平台自己那份 `<stem>.preview.jpg`** 上（探的就是它）。
+ * 被这条链的产物置真之后，用户再从场景库打开同一个场景就会跳过懒生成、直接打一个
+ * 404 的静态 URL，图再也出不来。这里一个 SceneRow 字段都不碰。
+ *
+ * 也不走静态 URL（产物名不在 nginx 的 /disk-array 映射语义里，兜底更是落在临时根），
+ * 响应体本身就是那张 JPEG。 */
+export async function fetchDropSceneJpg(
+  cfg: SrConfig,
+  id: string,
+  div: number = loadPreviewDiv(),
+  onPhase?: (text: string) => void,
+): Promise<Blob> {
+  onPhase?.(`已关联到盘阵场景：正在服务器烘焙 ${previewDivLabel(div)} 预览图，`
+    + '首次要读一遍大图…');
+  const r = await http(dropPreviewUrl(cfg, id, div));
+  if (r.headers.get('X-SR-Preview-Fallback') === 'tmp') {
+    onPhase?.('该场景目录不可写，预览暂时落在服务器临时缓存，次日会清掉。');
+  }
   return await r.blob();
 }
 
@@ -434,6 +533,79 @@ export async function apiResolveScene(
     signal: opts?.signal,
   });
   return (await r.json()) as SceneResolveResult;
+}
+
+/* ---------------- 场景内三类图（GET /api/scenes/{id}/siblings） ---------------- */
+
+/** 一类图。字段与 backend/api/app.py 里 `scene_siblings.item()` 一一对应，
+ *  **名字也一样**（后端就是这么取的）——两边一起改的时候不容易漏。 */
+export interface SceneSibling {
+  kind: 'input' | 'product' | 'nosr';
+  /** 这一类自己的不透明 id（供 /api/scenes/{id}/preview）。拼不出名字时为 null。 */
+  id: string | null;
+  name: string | null;
+  rel: string | null;
+  exists: boolean;
+  sizeBytes: number | null;
+  mtime: number | null;
+  W: number | null;
+  H: number | null;
+  hasPreview: boolean;
+  previewDiv: number | null;
+  jpgUrl: string | null;
+}
+
+export interface SceneSiblings {
+  sceneId: string;
+  /** 场景目录绝对路径（= 提交 SR 的 lq_path 语义）。产物的 rec 靠它拿到盘阵关联。 */
+  lqPath: string;
+  suffix: string | null;
+  /** 用到的 suffix 是哪来的：用户断言 / 最近跑过的任务 / 配置缺省。
+   *  「按配置猜的名字」与「真跑过的名字」长得一样，不标出来就分不清。 */
+  suffixFrom: 'query' | 'task' | 'default' | null;
+  /** 服务端急烤用的档位，仅供界面标注；**不参与任何前端决策**。 */
+  div: number;
+  items: SceneSibling[];
+  /** product 那一类试过哪些文件名（一个都没命中时用它说明「试过什么」）。 */
+  productCandidates: string[];
+}
+
+/** 场景内三类图。**纯只读端点**：永不烘焙、永不写盘、永不列目录。
+ *  找不到也是答案（`exists:false` + `productCandidates`），不抛。 */
+export async function apiSceneSiblings(
+  cfg: SrConfig, sceneId: string, suffix?: string,
+): Promise<SceneSiblings> {
+  const r = await http(sceneSiblingsUrl(cfg, sceneId, suffix));
+  return (await r.json()) as SceneSiblings;
+}
+
+/** 把一类图装成 `fetchSceneJpg` 认的**库行**，好复用现有的取图路径。
+ *
+ *  `fetchSceneJpg` 只读 `id / name / W / H / hasPreview / previewDiv / jpgUrl /
+ *  rasterPreview` 这几个字段（烘焙触发、`onPhase` 文案、`previewNeedsBake`、
+ *  「栅格赢」判定全在里面），所以补上的 `satellite/sensor/date/size_bytes/fake/
+ *  lq_path` 只是为了满足类型，在这条路上不参与任何判断。
+ *
+ *  `rasterPreview` 恒 null：那是「源是显示件 jpg 且同目录配着同名栅格」才有的东西，
+ *  三类图（tif/jpg）都不适用 —— 不看它就走「按自己 id 烤自己那份预览」的正路。
+ *
+ *  `jpgUrl` 为空（场景不在 SR_SCENES_ROOT 之下，取不到静态 URL）时，
+ *  `fetchSceneJpg` 走「响应体本身就是 JPEG」那条支，与手工场景同一条路。 */
+export function siblingRow(res: SceneSiblings, item: SceneSibling): SceneRow {
+  return {
+    id: item.id ?? '',
+    name: item.name ?? '',
+    satellite: null, sensor: null, date: null,
+    size_bytes: item.sizeBytes ?? 0,
+    fake: false,
+    W: item.W, H: item.H,
+    rel: item.rel,
+    jpgUrl: item.jpgUrl,
+    hasPreview: item.hasPreview,
+    previewDiv: item.previewDiv,
+    lq_path: res.lqPath,
+    rasterPreview: null,
+  };
 }
 
 /** 把浏览器里画好的掩码写进服务端场景目录：POST /api/masks。

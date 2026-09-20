@@ -13,6 +13,11 @@ const store = useViewerStore();
 
 <template>
   <div v-if="store.activeRec" class="rec-bar">
+    <!-- 分屏时先说清这条讲的是**哪一侧**：整条的字段全部来自 activeRec，也就是
+         活动侧那张（掩码/云量/任务状态跟着它走）。不说这一句，分屏下看数字会认错图。 -->
+    <span v-if="store.split" class="side" data-e2e="sb-side">
+      [{{ store.activeSide === 'A' ? '左' : '右' }}]
+    </span>
     <span class="name">{{ store.activeRec.name }}</span>
     <template v-if="store.activeRec.W">
       · {{ store.activeRec.W }}×{{ store.activeRec.H }}
@@ -45,5 +50,9 @@ const store = useViewerStore();
 }
 .rec-bar .layout {
   color: var(--ink-faint);
+}
+.rec-bar .side {
+  font-weight: 600;
+  color: var(--cmp-active);
 }
 </style>

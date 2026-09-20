@@ -69,6 +69,117 @@
   **83** 断言全绿（夹具已从平铺改成六层生产树）。文档同步：`docs/sr_code/production-scene-naming.md` §三/§四、
   `docs/planning/api-contract.md` §3.5、`deploy/sr-api.service` 的模板注释。时间线见 §4。
 
+- **预览烘焙档位改成用户可调（09-19，开发机）**：服务端烤预览的尺度原先是写死的各边 1/2（2.4 万像素级的源
+  烤出来 1.5 亿像素、q85 上百 MB，首次打开要读一遍整幅大图）。现改为工具栏**定位组件右侧**一条 5 档拖动条
+  （各边 ÷2 · ÷4 · ÷8 · ÷16 · ÷32，**默认 ÷4**），作用域是**全局** —— 拖入 / 场景库 / 粘盘阵路径三条入口
+  都按当前档位烤；档位进规则戳（`v2` → `v3`：`srprev:v3:div<N>+equal:q<Q>`），换档即重烤。同时拖入链的产物
+  从临时缓存改成**盘阵场景目录里的 `<stem>_preview.jpg`**（端点随之改名 `preview-tmp` → `preview-drop`），
+  不再是「当天有效、次日删」，同一场景反复打开不再重烤；临时缓存**保留为兜底**（场景目录写不进去时才用，
+  回响应头 `X-SR-Preview-Fallback: tmp`）。行上新增 `previewDiv`（读 JPEG 注释戳）—— 没有它，`hasPreview`
+  认不出档位，滑了滑块还会端着旧档位那张图上桌。验证：后端 **567 passed / 4 skipped**、前端 **238 passed**
+  + vue-tsc + build、e2e 105/65/58/22 全绿。**换包须知：盘上旧缓存（`v2` 戳）会逐个场景首次打开时惰性重烤
+  一轮；`frontend/dist` 与 `backend` 必须同包更新（端点改名，只换一个会 404）**。时间线见 §4。
+
+- **三类图服务端烘焙 + 产物急烤 + 显示源比较规则（09-20，开发机）**：为查看器的**对比**功能铺服务端这一半
+  （对比 UI 本轮不做，用户随后单独提需求）。三件事：
+  ① **三类图各有落点、不新增烘焙端点** —— 输入影像 `<stem>.preview.jpg`、本次产物 `<stem>_<suffix>.preview.jpg`、
+  上一次产物 `<stem>_<suffix>_NOSR.preview.jpg`，各拿自己的场景 id 调现有 `GET /api/scenes/{id}/preview?div=N` 即可。
+  命名推导（`product_candidates` / `nosr_path_for` / `sibling_raster_path`）全部落在 `scene_search.py`，
+  与 `input_candidates` 同纪律：**只拼名字 + 只 stat，绝不列举目录**。新增只读端点
+  `GET /api/scenes/{id}/siblings`（§3.8）把三类图一次交代清楚（`suffix` 三级取值 `?suffix=` → 最近 COMPLETED 任务
+  → 配置缺省，`suffixFrom` 如实回报是哪一个；找不到也返回 `exists:false` + `productCandidates`）。
+  ② **产物急烤**：作业转 COMPLETED 后由后台循环顺手烤掉产物那份（只烤产物，输入与 `_NOSR` 不烤）。**不挂在状态
+  转换上、改成从库派生**——`platform._task_state` 有后台 `_poll_once` 与请求路径 `_task_view` 两个调用者，挂那里必然
+  偶发漏烤；改成「`status='COMPLETED' AND preview_state IS NULL`」后竞态在结构上不存在。两列 `preview_state`/
+  `preview_note` 随 `GET /api/queue` 带出，广播走新帧 `preview_update`（不混进 `job_update`）。状态机
+  `NULL → running → done|skipped|failed`，slug 六个（`no_suffix`/`sandbox`/`product_missing`/`unwritable`/
+  `source_changed`/`failed`）。两个 env：`SR_PRODUCT_PREVIEW_DIV`（默认 4、**0 = 关**、非法值当 0 不抛异常）与
+  `SR_PRODUCT_PREVIEW_MAX_AGE_SEC`（默认 86400）；它们与前端那个「默认 ÷4」是**两个独立的 4，互不联动**。
+  ③ **显示源比较规则（工作流 B）**：拖入/打开的 `.jpg` 显示件在同目录有位更清晰的栅格、且
+  `round(max(rasterW,rasterH)/div) > max(jpgW,jpgH)`（**严格大于**）时，显示源换成服务端从栅格烤的那份；
+  `/preview` 与 `/preview-drop` 各插一次同名栅格探测，命中就把源换成栅格再往下走（落点、`?div=`、兜底头全部照旧）。
+  jpg 行因此多一个**只读**字段 `rasterPreview`；**`hasPreview`/`jpgUrl`/`previewDiv` 的语义一个字未动**（§9.2 红线）。
+
+  **必须知道的三件事**：
+  - **默认档位 ÷4 下工作流 B 基本不触发**，这是算术不是 bug：24000 源 + 8192 显示件时 ÷2 → `12000>8192` 赢、
+    ÷4 → `6000>8192` 输。验收口径只能写这条比较规则本身，**不能**写「jpg 行一律走服务端」；现有 e2e 夹具在 ÷4 下
+    全部判 jpg 赢，那些断言**一字不改地继续绿**（这就是本次的回归钉子）。
+  - **升级日策略**：两列走 `_ensure_columns`（幂等 ALTER、**不回填**），老行的 `preview_state` 全是 `NULL`；唯一的
+    屏障是年龄窗口（`finished_at >= now - SR_PRODUCT_PREVIEW_MAX_AGE_SEC`）。所以升级当天**先用
+    `SR_PRODUCT_PREVIEW_DIV=0` 起一次确认无异常，再打开**。
+  - **沙箱与急烤**：判据必须是 `platform._run_dataroot()`，**不能直接比 `SR_SANDBOX_ROOT`** —— 真机当前是
+    「配了 `SR_SANDBOX_ROOT` + `SR_EXECUTOR=local`」这条路线，而 `run_sr.sandbox_scene_paths` 在 local 下恒返回
+    `None`，直接比 env 会把本可以烤的产物判成沙箱而**永不烤**（有专门的回归钉子钉这条）。切回 slurm 提交时，
+    跑在沙箱私有副本上的任务会自动 `skipped: sandbox`（正常结局，不是故障）。
+
+  **留作下轮议题（不在本轮范围）**：一个场景在库里有 `<目录名>.jpg` 与 `<目录名>.tif` **两行**（收件白名单两样都收），
+  工作流 B 之后**两行预览完全一样**（共用同一份 `<stem>.preview.jpg` 落点），且同一份落点会被不同档位的客户端
+  互相顶掉（div 抖动）。本轮在文档里点明，不装作没有；去重与带档位落点都留给对比 UI 那一轮一起定。
+
+  验证：后端 **632 passed / 4 skipped**、前端 vitest **254 passed** + `vue-tsc` 零错误、e2e
+  `test-manual-scene.js` **114** / `test-scenes.js` **79** / `test-platform.js` **23** 断言全绿。
+  `test-platform.js` 那条急烤断言钉的是**跑出来的事实**：假调度器只推状态机、**不写任何产物 tif**，所以该行落在
+  `skipped` + `product_missing: …都不存在`（**不凭猜写 `done`**；也未钉后缀字面量 `sr`，它来自 SR 配置文件，
+  钉死会把环境差异报成回归）。**真机待确认**：`<输入名>_<suffix>_NOSR.tif` 这个拼法是从 `SR_code/util.py` 推的、
+  尚无真机实证 —— 缓解是候选名做成元组（加名字是一行的事）+ `/siblings` 回报 `productCandidates`，拿到
+  `ls -l` 后校准。文档：契约新增 §3.8 / §4.5 / §4.6（挂起项三记录本轮的流程偏差：代码与文档同批落地）。
+
+- **查看器「图像对比」（09-20，开发机）**：用户需求 = 工具栏加「图像对比」入口，三种模式（关闭 / 点选对比 /
+  分屏对比，默认关闭）。分屏是「左右各一张、滚轮与拖动同步作用两侧、拖进来的图落在鼠标所在那半」；点选对比是
+  「拖进来即覆盖当前这张，再在清单里来回切」。已按批准的计划（`~/.claude/plans/dapper-booping-parrot.md`）交付完。
+
+  ① **分屏 = 一个画布 + 两个裁剪矩形**（不是两个 canvas）。渲染时 `save → rect+clip(pane.rect) →
+  translate(rect.x, rect.y) → drawImage`，而**每格的 `ViewState` 用该格自己的局部坐标** —— 正因为这样，
+  `fitView`/`locateView`/`visibleThumbRect`/`mouseToThumb` 全部原样复用。`view` 改成按侧的可写 computed
+  （`get`/`set` 看 `activeSide`），**`activeId` 仍是「活动侧那张」**，所以掩码/ROI 统计/云量卡/任务状态/
+  待修复清单选中/状态栏/工具栏可用性约 40 处消费点**一处未改**。滚轮不改活动侧（否则缩放时掩码与云量卡会闪）。
+  ② **落点决定进哪格**：`onDrop` 按落点算 `side`（左半 `'A'`/右半 `'B'`，正好压在分隔线上算右格），
+  `addFiles(files, side)` → `placeRec(id, side)` 一条规则贯穿；不 split 时（关闭 / 点选对比）**只有一个格子**，
+  于是「点选对比拖进即覆盖」不需要任何特判。点选清单挂在《待修复清单》上方，进对比模式播种当前文件列表全体，
+  点行换到活动侧，「清除」只把条目移出清单（文件列表条目、像素、屏幕上那张都不动）。
+  ③ **分隔线可拖 + 「回正」**：拖只改比例**不重新适配**；回正 = 比例回 0.5 **且两侧重新适配**；比例持久化在
+  `sr.viewer.cmpSplitRatio`（对比模式本身**不持久化**，刷新回关闭）。进分屏自动收起右侧栏、退出恢复用户此前的手动状态
+  （`ctxRailOpen`/`ctxRailPrevOpen` 从 `ContextPanel` 提升到 store）。
+  ④ **对比模式只读**：不画掩码、不建 ROI（`enterDraw` 加守卫、切模式时 `exitDraw`）。
+  ⑤ **拖放门**：关闭模式**全窗口行为一字不改**（拖到侧栏也能打开）；对比模式下只收画布内的影像，画布外给 toast；
+  `.txt` 在任何模式、任何位置都照旧喂待修复清单；`dropEffect` 任何情况都保持 `copy`（改 `'none'` 会抑制
+  `drop` 事件，把 `.txt` 一起吞掉）。契约新增 §4.7 记这条模式差异。
+  ⑥ **三类图快捷入口接上**：`apiSceneSiblings` 客户端 + 对比条上三枚芯片（输入影像 / 本次产物 / 上一次产物），
+  绑**活动侧 rec 的 `sceneId`**（本地文件 → 整排禁用并说明原因）；拿到 item 的 `id` 走现有
+  `GET /api/scenes/{id}/preview?div=N`，**没有新增取图路径、没有新增烘焙入口**。产物与 `_NOSR` 拖进来过不了
+  后端身份门（`_fingerprint_mismatch` 拿输入影像 stem 比文件名，这两类永远对不上 → 必然 404），芯片是它们的廉价通道。
+  契约新增 §3.8.1 记前端消费口径。
+
+  **本轮抓出一个真 bug（已修，值得记住）**：同步缩放第一版把锚点算成了「画布局部坐标」
+  （`anchorAt(rect,u,v) = rect.x + u*rect.w`），而每格的变换是**格局部的** —— 右格的 `ViewState.ox` 里没有那个
+  左格宽，于是滚轮一滚，非指针那格整体平移一个左格宽、图飞出视野。**我自己的单测当时是按错语义写的，全绿**；
+  修法是删掉 `anchorAt`、换成 `anchorAtLocal`，参数按**角色**命名（`pPane`/`oPane` + 显式 `pointerSide`），
+  并在单测里补一条反向断言（旧公式与新公式至少差 1）。详细复盘见 `gui-experience.md` §10。
+
+  **单屏快速路径保留字面写法**（`render()` 不 save/clip/translate，`onWheel`/`onPan` 不进新数学）：
+  归一化往返是「一次除法 + 一次乘法」，`100/1314*1314 = 99.99999999999999`，而 `test-vue-viewer.js` 的 D/E 段
+  直接采样画布中心 60×60 像素断言位图 —— 把单屏塞进新数学会让一整套既有断言要重写，收益为零。新数学只服务分屏。
+
+  验证：前端 vitest **288 passed** + `vue-tsc` 零错误 + `npm run build`；e2e `test-vue-viewer.js` **122**（H 段
+  64 条新断言，含真 DragEvent 的落位提示 / 落右半 / 落画布外 / `.txt` 恒通 / 同步缩放平移 / 分隔线 / 点选清单）、
+  `test-manual-scene.js` **131**（J 段 17 条新断言：真后端下拖放落右半 → resolve +1、`/preview-drop` +1、
+  生产那条 `/preview` +0、新图落在右格、只发 dragover 时**请求数 0**）、`test-scenes.js` **79**、
+  `test-platform.js` **23**；后端**零改动零回归**：`632 passed / 4 skipped`（与基线一致）。
+  新夹具首次纳入 `.e2e/lib/drag.js` —— 全仓第一个 DragEvent 模拟（`dropFiles` 与 `dragOverOnly` 必须是两个入口：
+  落位提示在 `onDrop` 里被同步清掉）。
+
+  **待核**：产物 tif 是输入影像尺寸的 **2 倍**（`SR_code/code_0817_prod.py:566` 的 `scale: 2`、
+  `util.py:1521-1526`，尚无真机实证）。若如此，分屏两侧是「同一地面区域、不同像素网格」，对齐只能按**百分比**，
+  ±1 像素级比对做不到 —— 要给用户说明白，别让人以为是对齐精度损失。
+
+  **留作下轮议题**：① **攒图吃内存**（每个 rec 的预览分辨率 `Float32Array` 永不释放，÷4 约 145MB/张、
+  ÷2 约 600MB/张；分屏按设计同时压两张、点选清单鼓励多开，风险比之前大 —— 本轮只记录，不做 LRU 释放）；
+  ② 同场景 `<目录名>.jpg` 与 `<目录名>.tif` 两行预览相同（上一轮「栅格赢」让两行落到同一份落点），
+  点选清单会把它们列成两条看起来一样的条目 —— 加提示是纯前端的事，另开一轮；③ `.e2e/qa-theme.js` 有 6 条
+  **陈旧 FAIL**（期望的是 2026-09-09 restyle 之前的白色 chrome/渐变主按钮，与实际主题不符，也含两条依赖运行时
+  数据 `.rec-bar`/`.qp-dot.on` 的检查）—— 本轮确认**不是本轮引入**（`git diff` 里 style.css 只加 `--cmp-*`
+  15 行、Toolbar.vue 只加新规则、零删除行），未动它：究竟该改脚本期望值还是改主题，得由人定。
+
 ## 2. 里程碑计划与待办
 
 ### 2.1 平台里程碑（M1 / M2 / M3）
@@ -1118,7 +1229,10 @@ E 段的改造要点：原来那两处「命中」用例上传的是 fixture 里
   一起放过，而字节数那一半正是为这种「本机另存过一份」设的。
 - `frontend/src/stores/viewer.ts::openLocalImage`：`activate` 之后补 `void tryLinkScenes(live)`。
 - `tryLinkScenes` 命中分支：拖进来的就是 jpg 时 `blob = r.file`（**不调 `/preview-tmp`**）——
-  用户要看的就是自己拖的那张，拿服务端 1/2 缩图顶掉反而降清，还白等一次解压采样。裸 `.tif`
+  用户要看的就是自己拖的那张，拿服务端 1/2 缩图顶掉反而降清，还白等一次解压采样。（**2026-09-20 批注**：
+  这条仍是**默认**行为，但不再是一律 —— 同目录配着一位更清晰的栅格、且当前档位下服务端从它烤出来的比这张 jpg
+  更清晰时，jpg 那一路也改走服务端，见 api-contract §4.6 与本文 §1 的 09-20 条目。保留原句是因为它解释的是
+  「为什么默认不烤」，删掉会让后来人以为被推翻了。）裸 `.tif`
   反推命中仍走阶段4 那条老路。`applySceneJpgToRec` 加可选第四参 `layout`，本地 jpg 那条路
   自报来源（否则会显示「1/2 尺度 + 直方图均衡，服务端已烘焙」这句假话）。
 - 新增 `frontend/src/components/NoticeModal.vue` + store 的 `modal` 状态（`showModal/hideModal`）：
@@ -1558,6 +1672,133 @@ Python 转码造一份 **GBK** 清单 → 导入认成 gbk → 粘 `W:\…\待�
 
 **另**：真机首测只剩两件人工事 —— 粘一次真实路径看是否写进去、确认那份 txt 的目录对 nginx 可写
 （`deploy/README.md` 里那两条注意事项）。
+
+### 2026-09-19 · 预览烘焙档位改成用户可调（全局 5 档），拖入链的产物改落盘阵（开发机）
+
+**需求**：用户提「拖入 `.tif` 时通过下采样获取同名 `_preview.jpg` 至盘阵，下采样精度可用户调节，
+放在定位组件右侧做成分档拖动条」，随后改口径为**全局**（三条入口同档）。
+
+**定了什么**（用户拍板）：档位 = 各边 ÷2 · ÷4 · ÷8 · ÷16 · ÷32，**默认 ÷4**；作用域 = **全局**
+（拖入 / 场景库 / 粘盘阵路径三条入口都按滑块当前档位烤）；拖入链落点 = **盘阵场景目录
+`<源同目录>/<stem>_preview.jpg`**（新）；其余两条落点不变（`<stem>.preview.jpg`）；
+临时缓存**保留但降级为兜底**（场景目录写不进去时才用）。
+
+**为什么改**：尺度和拉伸原先写死在各处（`PREVIEW_SCALE = 0.5` + 前端两句硬编码「1/2」）。
+真机上一张 2.4 万像素级的源，1/2 烤出来是 1.5 亿像素、q85 下上百 MB，首次打开要读一遍整幅大图
+（几十秒）+ 传输 + 浏览器解码，用户没有回旋余地。拖入链那份落临时缓存、次日 0 点删，等于
+**每天第一次拖入都要重烤一遍**。
+
+**改了什么**：
+- 后端：`PREVIEW_DIVISORS = (2,4,8,16,32)` 为唯一档位真源；`preview_max_edge(src, div)` 取代
+  `PREVIEW_SCALE`；`ensure_preview_jpg(..., div=)`（尺寸与规则戳同一个入参推导，结构上不可能不同步）；
+  规则戳 bump `v2` → **`v3`**、档位进戳 `srprev:v3:div<N>+equal:q<Q>`；端点改名
+  `preview-tmp` → **`preview-drop`**、落点换 `paths.drop_preview_path`、两条端点都接 `div`
+  （非法 400）；先 `os.access(dir, W_OK)` 预判，不可写/写失败 → 退回临时缓存 + 响应头
+  `X-SR-Preview-Fallback: tmp`（已加进 CORS `expose_headers`），两条都失败才 422。
+- 行上新增 **`previewDiv`**（`_scene_row` / `_manual_row`）：从盘上那份 JPEG 的注释戳解出它是在
+  哪一档烤的，按 `(path, mtime)` 缓存，读不出 → `null`；`hasPreview` / `jpgUrl` 语义一字不动。
+- 前端：`lib/scene.ts` 加 `SCENE_PREVIEW_DIVS` / `DEFAULT_PREVIEW_DIV = 4` / 档位直读 localStorage
+  的纯函数（**不依赖 Pinia 创建顺序** —— `stores/scenes.ts` 会用到它，那时 viewer store 未必建过）；
+  `sceneImageUrl` **只对 `.preview.jpg` 结尾的 URL 拼 `?div=N`**（击穿 nginx `max-age=3600` 的唯一手段，
+  且无条件拼会打红「源本身就是 JPG」那条行）；`Toolbar.vue` 在定位组件右侧插 5 档 range。
+- **本轮唯一的真陷阱**：前端那次「先打 `/preview` 重烤、再取静态 URL」是**带条件**的（只在
+  `!row.hasPreview` 时才打），而 `hasPreview = jpg.is_file()` **不认档位** → 滑了滑块之后盘上那份
+  仍在 → `hasPreview` 仍为真 → 跳过重烤 → **看到的还是旧档位那张图**，磁盘上一个字节都没变。
+  红的是凡有静态 URL 的行；库外手工行每次走 `/preview` 回字节，不受影响。这就是 `previewDiv` 的来由。
+- **试过又退回来**：把 `/preview` 的响应体直接当 blob（一次下载、不补静态 URL）。被
+  `.e2e/test-scenes.js` 打红 —— 那条断言要求「静态读图走 nginx 的 `/disk-array/` alias 位」，
+  几 MB 的 JPEG 不该占 API 进程的内存与带宽。改回「先打 `/preview` 触发烘焙（字节丢掉）+ 再取静态 URL」：
+  稳态下只有一次下载（换档后的正确性已由 `?div=N` 保证 —— 缓存键变了，第二次取的一定是新图）。
+
+**验证**：后端 **567 passed / 4 skipped**、前端 **238 passed** + `vue-tsc --noEmit` 零错误 +
+`npm run build`；e2e `test-manual-scene.js` **105**（含新增的 1366 视口工具栏不溢出 + 拖动条位置/档位
+四条）、`test-scenes.js` **65**、`test-vue-viewer.js` **58**、`test-locator.js` ALL PASS。
+`test-platform.js` **22**，**三跑一红**（见下）。
+
+**两处与本次改动无关、但本机跑不干净的地方**（都核过不在本次 diff 里，都不动）：
+- `test-regress.js` / `test-sparse.js` 跑不出 —— 要 `test-tifs/types/big_u16.tif`（8192² 134MB），
+  该 fixture 由 `.e2e/gen-test-images.py` 生成、`test-tifs/` 已 gitignore，本机没生成。
+- `test-platform.js` 偶发红在「耗时列给出终态耗时（—）」：`.e2e/test-platform.js:172-173` 把假调度器
+  阶段设成 `SR_SLURM_FAKE_T_MS=250`（RUNNING 窗口 = 250ms 宽）而校准广播周期是
+  `SR_QUEUE_POLL_SEC=0.3`（300ms）—— **轮询周期比它要观测的窗口还宽**，于是会整个跨过 RUNNING，
+  直接由 PENDING 跳到终态。`platform.py:179` 的 `mark_started` 只在**观测到**进入 RUNNING 的那次转换上
+  打点，这一次没打上 → `started_at` 留 NULL → 耗时列如实显示「—」，断言 `/^\d+ 秒$/` 红。
+  **只在假调度器这个配置下出现**：真机本机直跑一次 200+ 秒，2s 周期必然抓到 RUNNING。
+  修法是一行（把 `SR_QUEUE_POLL_SEC` 调到明显小于档位宽，例如 `'0.05'`），但那是 09-18 那条改动的地盘，
+  本次不越界去改。
+
+**换包须知**：① **必然重烤一轮** —— 盘上所有 `<stem>.preview.jpg` 的戳是 `v2`，新代码认 `v3`，
+逐个场景首次打开时重烤（**惰性**，不是一次性全量；把滑块停在 ÷2 也一样）；② `frontend/dist` 与
+`backend` **必须同包更新** —— 端点改了名，只换一个会 404。
+
+**真机待确认**：① 服务账号（`User=nginx`）对场景目录有没有写权限 —— 这决定拖入链走主落点还是兜底；
+② 新落点 `<stem>_preview.jpg` **没有任何清理者**且**不吃 `SR_PREVIEWS_ROOT`**（配了镜像树的部署下
+同一场景会有两份缓存），磁盘预算要把它算进去。
+
+**并更正一条旧约定**：本文件 2026-09-17 那条「临时路径要单独设 `max_edge` 就得独立一套规则戳」
+**已被「档位进同一个戳」取代**，别再按那条旧字面实现两套戳（见
+[knowledge/preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md) §4.6）。
+
+### 2026-09-20 · 查看器「图像对比」：一个画布两个格子 + 共享变换（开发机）
+
+**需求（用户原话）**：「定位那一栏加入按键入口『图像对比』，下拉框默认关闭，可切换：点选对比 & 分屏对比。
+分屏对比的业务逻辑是：常规拖进一张 `.jpg` 时默认关联盘阵，拖入一张新的会覆盖掉，左侧新增一条图像信息结果；
+一旦拖动滑块至两侧，那么拖动新的 `.jpg` 进入时会左右分屏，并自动收回右侧工具栏；即将分屏时会有左右落位提示。
+点选对比就是：即将拖入新的 `.jpg` 时落位会有区域提示，然后简单地覆盖掉，通过点选可以在点选清单中来回切换；
+点选清单会显示在《待修复清单》上方，可以随时清掉指定的几张图」。
+
+**本轮定的口径**（用户拍板，与计划一致）：入口 = 工具栏「定位」组一个按钮，点开在**工具栏下方**展开一条
+（**不放进工具栏**：那条有「1366 下不横向溢出」的 e2e 守卫，三个模式 + 图例 + 芯片塞进去必然溢出）；
+三选一用按钮组而不是下拉框（与全仓既有 tab 形态一致）；三类图来源 = **拖文件 + 场景内快捷入口**；
+拉伸档位 = 对比模式下**改拉伸同时刷两侧**（关闭模式仍是每张图各自记，`test-scenes.js` 那条断言因此一字未改）。
+
+**核心改动**：把「视图变换」从全局单例拆成**按侧**（`viewA`/`viewB` + 按侧的可写 computed `view`），
+而渲染仍是一个画布 —— 每格 `save → rect+clip → translate(rect.x, rect.y) → drawImage`。
+让既有代码零改动的关键是 **`activeId` 仍是「活动侧那张」**：`placeRec(id, side)` 在激活开头把它与活动格对齐，
+于是掩码、ROI 统计、云量卡、任务状态、待修复清单选中、状态栏、工具栏可用性约 40 处消费点自动跟随。
+新数学只有四件：`clampSplitRatio` / `splitRects` / `paneAtX` / `normAnchor`+`anchorAtLocal`+`wheelZoomBoth`+`panBoth`，
+全在 `lib/viewMath.ts`，全有单测。
+
+**真 bug（本轮最有价值的一条）**：同步缩放的锚点第一版算的是「画布局部坐标」
+（`anchorAt(rect,u,v) = rect.x + u*rect.w`），而每格的变换是**格局部的** —— 右格的 `ViewState.ox` 里没有
+那个左格宽。后果：滚轮一滚，**非指针那格整体平移一个左格宽、图直接飞出视野**；指针在右格时连它自己的锚点也错。
+修法：删掉 `anchorAt`、换成 `anchorAtLocal(rect,u,v) = [u*rect.w, v*rect.h]`，参数按**角色**命名
+（`pPane`/`oPane` + 显式 `pointerSide`，光看两个 `PaneRect` 分不出哪个是 A）。
+**两次教训**：① 我自己的单测**当时是按错语义写的，全绿** —— 所以修完必须在单测里补一条**反向断言**
+（旧公式与新公式算出的 `ox` 至少差 1），否则「改好了」与「这条用例本来就不会发现」长得一样；
+② 第一次修完还是错的（参数名按「是不是 A 格」命名，指针在右格时整体错位），是新增的右格用例抓出来的。
+e2e 侧随之把分隔线位置暴露成 `splitX()`（画布局部坐标里的左格宽），**落点判据与测试共用一个值**，
+不在测试里自己拿比例乘一遍（比例是浮点、`splitX` 已取整，自己乘会差不到 1px、正好压在分隔线上时判到另一格）。
+
+**另一处易错点（写进了契约 §4.7）**：`dropEffect` 在任何模式、任何位置都保持 `copy`。
+画布外卖成 `'none'` 能拿到系统的「禁止」光标，但按规范它**同时会抑制 `drop` 事件** —— 而 `.txt` 必须在
+任何模式、任何位置都能进待修复清单；且 `dragover` 阶段 Chrome 不暴露文件名，没法按类型区分。
+所以视觉提示只由 overlay 负责，**真正的门在 `drop` 处理里**（`.txt` 先分流，再判影像的落点门；
+顺序反了，画布外拖一份 `.txt` 会被那道门连坐吞掉）。
+
+**新增测试设施**：`.e2e/lib/drag.js` —— 全仓第一个 DragEvent 模拟。既有脚本一律走 `input.uploadFile`
+（文件选择框那条路），而拖放这条路监听在 window 上，**至今没有被测过**。两个入口**不能合并**：
+`dropFiles` 发 dragover + drop，`dragOverOnly` 只发 dragover —— 落位提示在 `onDrop` 里被同步清掉，
+要观察提示就必须在 drop 之前单独问一次。兜底：某些 Chrome/Edge 造的 `DataTransfer` 里 `files` 是空列表
+（页面只读 `dataTransfer.files`），长度不符时在实例上 `defineProperty('files', …)` 覆盖。
+
+**验证**：前端 vitest **288 passed**（新 `compare.test.ts` 14 例 + `viewMath.test.ts` 扩到 48 例）+ `vue-tsc` 零错误
++ `npm run build`；e2e `test-vue-viewer.js` **122**（H 段 64 条新断言：关闭态无条无清单 → 三选一默认关闭 →
+分屏两格且 `rectA.w+rectB.w===画布宽`、右栏自动收起 → 落位提示只剩一侧 → 落右半（+1 rec、活动侧转 B、
+左格不动、非活动侧也重新适配）→ 落画布外（有 toast、不新增）→ `.txt` 拖到侧栏照旧导入 → 真滚轮 ×1.2
+两侧同步 + 拖动两侧同增 40 → 分隔线 0.7/回正 → 点选对比覆盖 + 清单点行/清除 → 回关闭后拖侧栏仍能打开）、
+`test-manual-scene.js` **131**（J 段 17 条：真后端下拖盘阵那份 `.jpg` 到**右半** → `resolve +1`、
+`/preview-drop +1`、生产那条 `/preview +0`，新图落在右格、左格那张不动，只发 dragover 时**请求数 0**）、
+`test-scenes.js` **79**、`test-platform.js` **23**；后端**零改动零回归**：`632 passed / 4 skipped`。
+
+**踩到的测试坑（值得记住）**：`.jpg` 走 `openLocalImage`，它先 `await decodeJpgToCanvas(file)` 才 push rec ——
+所以「drop 之后同步读条数」必然是没变，那不是缺陷。`.tif` 那条（`openOne`）才是同步入列，
+`test-vue-viewer.js` H 段断的瞬时 +1 是它。两条路各有各的口径，别互抄断言。
+
+**未动**：`.e2e/qa-theme.js` 的 6 条 FAIL 是**陈旧期望**（2026-09-09 restyle 之前的白色 chrome / 渐变主按钮，
+另两条依赖当时不存在的运行时数据）。已核**不是本轮引入**：`git diff` 里 `style.css` 只加 `--cmp-*` 15 行、
+`Toolbar.vue` 只加新规则、**零删除行**，而 `.toolbar` 的 `background: var(--band-grad)` /
+`--chrome: #DFE9E4` 都来自 09-09 那次 restyle。改脚本期望值还是改主题，得由人定。
 
 ## 5. 交接（给新窗口）
 

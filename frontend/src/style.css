@@ -43,6 +43,20 @@
   --warn: #B98A3A; --warn-bg: #F8F1E4; --warn-line: #ECE0C5;
   --err: #C25E5C;  --err-bg: #F9ECEC;  --err-line: #EED4D3;
 
+  /* ---- 图像对比（2026-09-20）：左右两侧各一套浅色调 ----
+     取蓝 / 琥珀这一对（对红绿色盲安全），刻意避开 --accent-* 青绿族与 ok/warn/err
+     三个语义色 —— 对比的左右是**位置标识**，不该让人读成「哪边更好」。 */
+  --cmp-a: #3F6DA8;          --cmp-a-bg: #EDF3FB;    --cmp-a-line: #C6D9EF;
+  --cmp-b: #96631A;          --cmp-b-bg: #FBF3E4;    --cmp-b-line: #EBD9B6;
+  --cmp-hint-a: rgba(63, 109, 168, 0.10);            /* 落位提示：左半 */
+  --cmp-hint-b: rgba(150, 99, 26, 0.10);             /* 落位提示：右半 */
+  --cmp-veil: rgba(255, 255, 255, 0.72);             /* 提示白纱：压住影像，字仍可读 */
+  --cmp-empty-bg: #F1F4F6;   --cmp-empty-line: #C9D2DA;
+  --cmp-divider: #FFFFFF;                            /* 分隔线：白线 + 深色发丝描边，
+                                                       亮图暗图上都看得见 */
+  --cmp-divider-edge: rgba(18, 14, 38, 0.35);
+  --cmp-active: #3F6DA8;                             /* 活动侧外框 */
+
   /* ---- 形状 / 阴影 / 间距 ---- */
   --r-card: 16px;    /* 大卡片 */
   --r-panel: 14px;   /* 面板/表容器 */

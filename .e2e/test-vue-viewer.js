@@ -19,8 +19,10 @@
 // 用法: cd .e2e && node test-vue-viewer.js
 const http = require('http');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { launchPage } = require('./launchBrowser');
+const drag = require('./lib/drag');
 
 const DIST = path.resolve(__dirname, '..', 'frontend', 'dist');
 const FIXTURES = path.resolve(__dirname, '..', 'frontend', 'fixtures');
@@ -62,11 +64,9 @@ function startServer() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// 上传文件并等待解码完成，返回 activeRec 摘要
-async function uploadAndWait(page, filePath, timeoutMs) {
-  const input = await page.$('input[type=file]');
-  if (!input) throw new Error('未找到 input[type=file]');
-  await input.uploadFile(filePath);
+// 等**活动侧**那张解码完成，返回 activeRec 摘要。
+// 分屏下用不上「上传」这个动作时（拖放落图），就只调这个 —— 拖进来的那张会成为活动侧。
+async function waitDecoded(page, timeoutMs) {
   const t0 = Date.now();
   for (;;) {
     const rec = await page.evaluate(() => window.__viewer.activeRec());
@@ -77,6 +77,14 @@ async function uploadAndWait(page, filePath, timeoutMs) {
     if (Date.now() - t0 > (timeoutMs || 30000)) throw new Error('超时等待解码，最近状态: ' + (rec && rec.status));
     await sleep(200);
   }
+}
+
+// 上传文件并等待解码完成，返回 activeRec 摘要
+async function uploadAndWait(page, filePath, timeoutMs) {
+  const input = await page.$('input[type=file]');
+  if (!input) throw new Error('未找到 input[type=file]');
+  await input.uploadFile(filePath);
+  return waitDecoded(page, timeoutMs);
 }
 
 // 页内把 activeRec.thumb 画到 size×size 再采样统计（等价 HTML capture.js sampleThumb）
@@ -153,12 +161,19 @@ async function main() {
     await page.waitForFunction(() => !!(window.__viewer && window.__viewer.recs), { timeout: 15000 });
     const hookKeys = await page.evaluate(() => Object.keys(window.__viewer).sort());
     // 与 e2eHooks.ts 的 ViewerHook 一一对应（导出链路的钩子已随功能取消，见文件头）
+    // **子集检查**：只对缺键报错，多了不报 —— 但这是 window.__viewer 的成文契约，
+    // 新增钩子必须补在这里（否则下一个人以为它不存在）。
     for (const k of ['planExport', 'enterDraw', 'exitDraw', 'buildMaskJson', 'exportMaskJson',
       'thumbToOrig', 'getRois', 'genMask', 'wandSelect', 'maskGen', 'setSparseMin',
       'setDrawTool', 'commitRect', 'undoRoi', 'clearRois', 'mergeRois', 'delClick',
-      'openSceneJpg', 'openLocalImage', 'submitSr', 'recs', 'activeRec',
+      'openSceneJpg', 'openLocalImage', 'submitSr',
+      'openScenePath', 'tryLinkScenes', 'bakeMaskToServer', 'modal', 'hideModal',
+      'recs', 'activeRec', 'activeStretch', 'setStretch', 'previewDiv', 'setPreviewDiv',
       'qcImport', 'qcClose', 'qcSetStatus', 'qcOutput', 'qcSetTarget', 'qcSync',
-      'qcState', 'qcOpenByName']) {
+      'qcState', 'qcOpenByName',
+      'cmpMode', 'setCmpMode', 'cmpStripOpen', 'setCmpStripOpen', 'cmpPanes',
+      'activeSide', 'setActiveSide', 'splitRatio', 'setSplitRatio', 'splitX', 'cmpReset',
+      'dragHint', 'cmpList', 'cmpClear', 'ctxRail', 'setCtxRail']) {
       if (!hookKeys.includes(k)) throw new Error('__viewer 缺钩子 ' + k);
     }
     assert(true, `__viewer 钩子齐全 (${hookKeys.length} 个)`);
@@ -236,29 +251,6 @@ async function main() {
     /* ============ E. 像素定位 ============ */
     console.log('--- E. 像素定位 ---');
     {
-      // 定位原图中心 (128, 64) → 视图居中 + 红叉 marker
-      await page.evaluate(() => {
-        const inputs = document.querySelectorAll('.loc input');
-        const setVal = (el, v) => { el.value = v; el.dispatchEvent(new Event('input')); };
-        setVal(inputs[0], '128');
-        setVal(inputs[1], '64');
-      });
-      await page.click('.loc-btn');
-      await sleep(250);
-      const centerRed = await page.evaluate(() => {
-        const c = document.querySelector('canvas.tif-canvas');
-        const g = c.getContext('2d');
-        const w = c.width, h = c.height;
-        const d = g.getImageData(Math.floor(w / 2) - 30, Math.floor(h / 2) - 30, 60, 60).data;
-        let n = 0;
-        for (let i = 0; i < d.length; i += 4) {
-          if (d[i] > 180 && d[i + 1] < 130 && d[i + 2] < 130) n++;
-        }
-        return n;
-      });
-      assert(centerRed > 0, `定位后中心出现红叉 marker (红像素 ${centerRed})`);
-
-      // 粘「X,Y」一对数进 X 框（掩膜中心点坐标那种形态）→ 拆成两个框 → 定位到 (64,32)
       const sampleCenterRed = () => page.evaluate(() => {
         const c = document.querySelector('canvas.tif-canvas');
         const g = c.getContext('2d');
@@ -270,38 +262,65 @@ async function main() {
         }
         return n;
       });
-      await page.evaluate(() => {
-        const x = document.querySelectorAll('.loc input')[0];
-        x.value = '64,32';
-        x.dispatchEvent(new Event('input'));
+      const locVal = () => page.evaluate(() => document.querySelector('.loc input').value);
+      const setLoc = (v) => page.evaluate((val) => {
+        const el = document.querySelector('.loc input');
+        el.value = val;
+        el.dispatchEvent(new Event('input'));
+      }, v);
+      const errText = () => page.evaluate(() => {
+        const err = document.querySelector('.err-box');
+        return err ? err.textContent.trim() : '';
       });
-      await sleep(150);
-      const pairVals = await page.evaluate(() =>
-        [...document.querySelectorAll('.loc input')].map((el) => el.value));
-      assert(pairVals[0] === '64' && pairVals[1] === '32',
-        `粘「64,32」→ 两个框各得一半 (${pairVals.join(' / ')})`);
+
+      // X、Y 合流成一个框：只有这一个输入框，未输入时靠占位文本说清填什么形态，
+      // 且占位文本必须整句看得见（框比它窄就成了「输入坐标（X,…」这种半句话提示）。
+      const locBox = await page.evaluate(() => {
+        const inputs = document.querySelectorAll('.loc input');
+        const el = inputs[0];
+        const cs = getComputedStyle(el);
+        const c = document.createElement('canvas').getContext('2d');
+        c.font = `${cs.fontSize} ${cs.fontFamily}`;
+        const textW = c.measureText(el.placeholder).width;
+        const inner = el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+        return { n: inputs.length, ph: el.placeholder, textW: Math.round(textW), inner: Math.round(inner) };
+      });
+      assert(locBox.n === 1, `定位只有一个输入框（X、Y 已合流，实际 ${locBox.n} 个）`);
+      assert(locBox.ph === '输入坐标（X,Y）:123.456,456.123',
+        `未输入时的占位提示（${locBox.ph}）`);
+      assert(locBox.inner >= locBox.textW,
+        `占位提示整句放得下（可用 ${locBox.inner}px ≥ 文本 ${locBox.textW}px）`);
+
+      // 定位原图中心 (128, 64)：单框里填「X,Y」→ 视图居中 + 红叉 marker
+      await setLoc('128,64');
       await page.click('.loc-btn');
       await sleep(250);
-      assert(await sampleCenterRed() > 0, '拆开后的「定位」跳到 (64,32)（中心出现红叉）');
+      const centerRed = await sampleCenterRed();
+      assert(centerRed > 0, `定位后中心出现红叉 marker (红像素 ${centerRed})`);
+      assert(await locVal() === '128,64', `定位成功后框里是规范化「X,Y」(实际 ${await locVal()})`);
 
-      // 拷了整行（三个数）不许当坐标对：截前两个会把标记跳到别处，必须出声
-      await page.evaluate(() => {
-        const x = document.querySelectorAll('.loc input')[0];
-        x.value = '1,64,32';
-        x.dispatchEvent(new Event('input'));
-      });
+      // 掩膜中心点坐标那种形态：全角逗号照样认，成功后框里回写成半角「X,Y」→ 跳到 (64,32)
+      await setLoc('64，32');
+      await page.click('.loc-btn');
+      await sleep(250);
+      assert(await sampleCenterRed() > 0, '全角逗号分隔的「64，32」同样跳到 (64,32)（中心出现红叉）');
+      assert(await locVal() === '64,32', `回写成半角「X,Y」(实际 ${await locVal()})`);
+
+      // 单个数（手输到一半的形态）不是坐标对：不许拿它跳，必须出声且原样留着
+      await setLoc('64');
+      await page.click('.loc-btn');
       await sleep(150);
-      const badPair = await page.evaluate(() => {
-        const err = document.querySelector('.err-box');
-        return {
-          vals: [...document.querySelectorAll('.loc input')].map((el) => el.value),
-          err: err ? err.textContent.trim() : '',
-        };
-      });
-      assert(badPair.err.indexOf('坐标对认不出来') >= 0 && badPair.vals[0] === '1,64,32',
-        `三个数不猜、按原样留着并报错 (${badPair.err.slice(0, 20)}…)`);
+      assert((await errText()).indexOf('坐标对认不出来') >= 0 && await locVal() === '64',
+        `单个数不猜、按原样留着并报错 (${(await errText()).slice(0, 20)}…)`);
 
-      await sleep(7600);   // marker 7s 过期
+      // 拷了整行（三个数）同样不许当坐标对：截前两个会把标记跳到别处，必须出声
+      await setLoc('1,64,32');
+      await page.click('.loc-btn');
+      await sleep(150);
+      assert((await errText()).indexOf('坐标对认不出来') >= 0 && await locVal() === '1,64,32',
+        `三个数不猜、按原样留着并报错 (${(await errText()).slice(0, 20)}…)`);
+
+      await sleep(7600);   // marker 7s 过期（从上一次**成功**定位起算，失败那两次不动 marker）
       const centerRedAfter = await page.evaluate(() => {
         const c = document.querySelector('canvas.tif-canvas');
         const g = c.getContext('2d');
@@ -492,6 +511,376 @@ async function main() {
       assert(!qs.loaded && qs.total === 0, '✕ 后回到未导入态');
       assert(lsLeft === null, '✕ 后 localStorage 缓存被清掉');
       assert(await page.evaluate(() => window.__viewer.qcOutput()) === '', '✕ 后写回文本为空');
+    }
+
+    /* ============ H. 图像对比（关闭 / 点选对比 / 分屏对比） ============ */
+    // 这一段不经后端：两张 fixture 都是 256×256（gray16_grad / bigtiff_strips），同尺寸，
+    // 于是两格里看到的差异只来自拉伸，不掺几何 —— 顺带避开「产物是输入 2 倍」那条待核事实。
+    console.log('--- H. 图像对比 ---');
+    {
+      // 默认视口 800×600 放不下「左栏 400 + 右栏 400 + 画布」，而这一段要验的就是
+      // 「进分屏自动收右栏、退出恢复」。1366 与 test-manual-scene 的工具栏守卫同一条宽度。
+      await page.setViewport({ width: 1366, height: 768 });
+      await sleep(400);
+      await drag.installDragKit(page);     // 每次导航后都要重装（G 段末尾 reload 过）
+
+      const panes = () => page.evaluate(() => window.__viewer.cmpPanes());
+      const rail = () => page.evaluate(() => window.__viewer.ctxRail());
+      const hintDom = () => page.evaluate(() => {
+        const el = document.querySelector('[data-e2e="cmp-hint"]');
+        return el ? { side: el.getAttribute('data-side'), text: el.textContent.trim() } : null;
+      });
+      const toastText = () => page.evaluate(() => {
+        const t = document.querySelector('.toast');
+        return t ? t.textContent.trim() : '';
+      });
+
+      // 关闭态：没有对比条、没有叠加层、没有点选清单。G 段末尾 reload 过 → 文件列表已空。
+      assert(await page.evaluate(() => window.__viewer.cmpMode()) === 'off'
+        && await page.evaluate(() => window.__viewer.cmpStripOpen()) === false,
+        '初始是「关闭」且对比条收起');
+      assert(await page.evaluate(() => !document.querySelector('[data-e2e="cmp-bar"]')
+        && !document.querySelector('[data-e2e="cmp-overlay"]')
+        && !document.querySelector('[data-e2e="cmp-list"]')),
+        '关闭态：无对比条 / 无叠加层 / 无点选清单');
+
+      // 工具栏入口 → 展开一条，三选一，默认「关闭」
+      await page.click('[data-e2e="cmp-open"]');
+      await sleep(150);
+      const bar = await page.evaluate(() => {
+        const modes = [...document.querySelectorAll('.cmp-mode')];
+        const on = document.querySelector('.cmp-mode.on');
+        return {
+          n: modes.length,
+          labels: modes.map((b) => b.textContent.trim()),
+          on: on ? on.textContent.trim() : null,
+          checked: modes.map((b) => b.getAttribute('aria-checked')),
+        };
+      });
+      assert(bar.n === 3 && bar.on === '关闭' && bar.checked.join(',') === 'true,false,false',
+        `对比条三选一、默认「关闭」(${bar.labels.join(' / ')})`);
+
+      // 第一张走选文件那条路（落活动侧）
+      const rec1 = await uploadAndWait(page, F('gray16_grad.tif'), 30000);
+      // 本地文件没有 sceneId → 三枚场景芯片整排禁用（廉价通道要先有盘阵关联）
+      const chips = await page.evaluate(() => {
+        const btns = [...document.querySelectorAll('.cmp-scene')];
+        const note = document.querySelector('[data-e2e="cmp-sib-note"]');
+        return { n: btns.length, disabled: btns.filter((b) => b.disabled).length, note: note ? note.textContent.trim() : null };
+      });
+      assert(chips.n === 3 && chips.disabled === 3 && !!chips.note,
+        `本地文件时三枚场景芯片禁用并说明原因（${chips.note}）`);
+
+      // 右栏先展开：进分屏要「自动收起」，退出要「恢复成展开」
+      await page.evaluate(() => window.__viewer.setCtxRail(true));
+      await sleep(200);
+      assert((await rail()).open === true, '进分屏前右栏是展开的');
+
+      // 切分屏（走 DOM 按钮，不只是钩子）
+      await page.click('[data-e2e="cmp-mode-split"]');
+      await sleep(300);
+      const geom = await page.evaluate(() => {
+        const p = window.__viewer.cmpPanes();
+        const r = document.querySelector('canvas.view-canvas').getBoundingClientRect();
+        return { n: p.length, a: p[0], b: p[1], splitX: window.__viewer.splitX(), cw: r.width };
+      });
+      assert(geom.n === 2 && geom.a.rect.x === 0 && geom.b.rect.x === geom.a.rect.w,
+        '分屏 = 两块格子，左起排列');
+      assert(geom.a.rect.w + geom.b.rect.w === Math.round(geom.cw),
+        `两块宽度正好铺满画布 (${geom.a.rect.w}+${geom.b.rect.w} = ${Math.round(geom.cw)})`);
+      assert(geom.splitX > 0 && geom.splitX === geom.a.rect.w && geom.n === 2
+        && geom.b.rect.w > 0,
+        `分隔位置与左格同源、右格非空 (splitX=${geom.splitX})`);
+      assert(geom.a.recId === rec1.id && geom.b.recId === null && geom.a.active && !geom.b.active,
+        '当前这张进左格，右格空着，活动侧是左格');
+      const railIn = await rail();
+      assert(railIn.open === false && railIn.prev === true,
+        `进分屏自动收起右栏（记住了进入前的状态 prev=${railIn.prev}）`);
+
+      // 右格占位 + 两侧文件名条（占位是虚的，名字是实的）
+      const halves = await page.evaluate(() => {
+        const h = [...document.querySelectorAll('.cmp-half')];
+        const t = (s) => { const e = document.querySelector(s); return e ? e.textContent.replace(/\s+/g, ' ').trim() : null; };
+        return {
+          n: h.length,
+          b: h[1] ? h[1].textContent.trim() : null,
+          aHasEmpty: h[0] ? !!h[0].querySelector('.cmp-empty') : null,
+          tagA: t('[data-e2e="cmp-tag-a"]'), tagB: t('[data-e2e="cmp-tag-b"]'),
+        };
+      });
+      assert(halves.n === 2 && halves.b === '把影像拖到这一侧' && halves.aHasEmpty === false,
+        `右格出落位占位（"${halves.b}"）`);
+      assert(halves.tagA.indexOf('gray16_grad.tif') >= 0 && halves.tagB.indexOf('空') >= 0,
+        `两侧标签各说自己的图（${halves.tagA} | ${halves.tagB}）`);
+
+      const pts = await drag.canvasPoints(page);
+      const overRight = await drag.dragOverOnly(page, {
+        files: [{ path: F('bigtiff_strips.tif') }], clientX: pts.right, clientY: pts.midY,
+      });
+      assert(overRight.hint.active && overRight.hint.side === 'B',
+        `拖到右半 → 落位提示归右侧 (${JSON.stringify(overRight.hint)})`);
+      const hd = await hintDom();
+      assert(hd && hd.side === 'B' && hd.text.indexOf('放在右侧') >= 0,
+        `提示只画右半（data-side=${hd && hd.side}，"${hd && hd.text}"）`);
+      assert(overRight.defaultPrevented === true,
+        'dragover 一律 preventDefault（不拦的话浏览器会导航到拖进来的文件）');
+
+      const overOut = await drag.dragOverOnly(page, {
+        files: [{ path: F('bigtiff_strips.tif') }], clientX: pts.outside, clientY: pts.outsideY,
+      });
+      assert(overOut.hint.side === null, `画布外的落点没有归属 (${JSON.stringify(overOut.hint)})`);
+      assert(await hintDom() === null, '画布外不显示落位提示');
+
+      // 真正落图：落右半 → 进右格、成为活动侧、不顶掉左格
+      const ratioBefore = await page.evaluate(() => window.__viewer.splitRatio());
+      const dropped = await drag.dropFiles(page, {
+        files: [{ path: F('bigtiff_strips.tif') }], clientX: pts.right, clientY: pts.midY,
+      });
+      assert(dropped.defaultPrevented === true, 'drop 被接管（defaultPrevented）');
+      assert(dropped.after === dropped.before + 1, `右半落图新增 1 条 (${dropped.before}→${dropped.after})`);
+      assert(await hintDom() === null, 'drop 之后落位提示立刻熄掉');
+      const rec2 = await waitDecoded(page, 30000);
+      const p2 = await panes();
+      assert(p2[0].recId === rec1.id && p2[1].recId === rec2.id,
+        '两张分列两侧，左格那张没被顶掉');
+      assert(await page.evaluate(() => window.__viewer.activeSide()) === 'B',
+        '落图的那一侧成为活动侧（掩码/云量/任务状态跟着它）');
+      assert(Math.abs(await page.evaluate(() => window.__viewer.splitRatio()) - ratioBefore) < 1e-12,
+        '落图不动分隔比例');
+      // 右格那张是在**非活动侧**解码完成的：旧守卫（`if (activeId === rec.id) fit()`）
+      // 会漏掉它，让右格停在 {scale:1, ox:0, oy:0}（图缩在左上角）。ox>0 只有适配过才有。
+      assert(p2[1].view.ox > 0 && Math.abs(p2[1].view.ox - p2[0].view.ox) < 1.5,
+        `非活动侧解码完也各自适配过 (A.ox=${p2[0].view.ox.toFixed(1)} B.ox=${p2[1].view.ox.toFixed(1)})`);
+      assert(await page.evaluate(() => !document.querySelectorAll('.cmp-half')[1].querySelector('.cmp-empty')),
+        '右格占位消失');
+
+      // 画布外落图：不新增、有提示、仍然 preventDefault
+      const before4 = await page.evaluate(() => window.__viewer.recs().length);
+      const outDrop = await drag.dropFiles(page, {
+        files: [{ path: F('f32_grad.tif') }], clientX: pts.outside, clientY: pts.outsideY,
+      });
+      assert(outDrop.defaultPrevented === true && outDrop.after === before4,
+        `画布外落图：接管但不新增 rec (${before4})`);
+      const tt = await toastText();
+      assert(tt.indexOf('只能把影像拖到画布上') >= 0, `画布外落图有提示（"${tt}"）`);
+      assert((await panes())[1].recId === rec2.id, '画布外那一次没动到画面上这两张');
+
+      // `.txt` 在任何模式、任何位置都照旧进待修复清单 —— 这是「dropEffect 永远 copy」
+      // （而不是画布外设 'none'）的唯一理由：设成 none 会抑制 drop 事件。
+      const txtPath = path.join(os.tmpdir(), 'sr-e2e-qc-' + process.pid + '.txt');
+      fs.writeFileSync(txtPath,
+        'JL1KF02B04_PMS03_20260917120612_200538728_101_0030_001_L1,\t'
+        + '产品存在伪影 (问题类型:产品存在伪影 行列号:1,2 影像类型:PAN )\t李佳峻\n', 'utf8');
+      const txtDrop = await drag.dropFiles(page, {
+        files: [{ path: txtPath }], clientX: 200, clientY: 300, target: '.sidebar',
+      });
+      await sleep(400);
+      const qs2 = await page.evaluate(() => window.__viewer.qcState());
+      assert(txtDrop.defaultPrevented && qs2.loaded && qs2.total === 1,
+        `分屏下把 .txt 拖到侧栏仍进待修复清单（${qs2.total} 行）`);
+      await page.evaluate(() => window.__viewer.qcClose());
+      fs.unlinkSync(txtPath);
+
+      // 滚轮同步：在左半滚一格 → 两侧各按同一倍数缩放
+      const v0 = await panes();
+      await page.mouse.move(pts.left, pts.midY);
+      await page.mouse.wheel({ deltaY: -100 });
+      await sleep(200);
+      const v1 = await panes();
+      assert(Math.abs(v1[0].view.scale - v0[0].view.scale * 1.2) < 1e-9
+        && Math.abs(v1[1].view.scale - v0[1].view.scale * 1.2) < 1e-9,
+        `真实滚轮同步缩放两侧 (A ${v0[0].view.scale.toFixed(3)}→${v1[0].view.scale.toFixed(3)}, `
+        + `B ${v0[1].view.scale.toFixed(3)}→${v1[1].view.scale.toFixed(3)})`);
+
+      // 锚点守恒：自己派发一次滚轮，坐标可控。**两格都要守恒，且各自守恒在自己那一格的
+      // 局部坐标系里** —— 这里抓到过一个真 bug：右格的锚点被算成 `rect.x + u*rect.w`
+      // （多算一个左格宽），一滚右格整幅飞出视野。
+      //
+      // 坐标必须全用**整数 client 坐标**推：`MouseEvent.clientX/clientY` 的 IDL 类型是
+      // `long`，构造时传小数会被取整；而处理函数是拿 `clientX - rect.left` 反推格局部的，
+      // rect.left 本身是小数 —— 传 `r.left + 300` 进去，处理函数看到的是 299.8125，
+      // 与测试这边以为的 300 差 0.19px，肉眼看着「守恒」但 1e-6 的断言会红。
+      const anchor = await page.evaluate(() => {
+        const c = document.querySelector('canvas.view-canvas');
+        const r = c.getBoundingClientRect();
+        const clientX = Math.round(r.left + 300), clientY = Math.round(r.top + 200);
+        const mx = clientX - r.left, my = clientY - r.top;     // 与 onWheel 同源
+        const pair = (p, x, y) => [(x - p.view.ox) / p.view.scale, (y - p.view.oy) / p.view.scale];
+        const before = window.__viewer.cmpPanes();
+        const A = before[0], B = before[1];
+        const u = (mx - A.rect.x) / A.rect.w;                  // 指针在左格里的相对位置
+        const bx = u * B.rect.w;                               // 右格里的同一相对位置（右格自己的局部坐标）
+        c.dispatchEvent(new WheelEvent('wheel', {
+          clientX, clientY, deltaY: -100, bubbles: true, cancelable: true,
+        }));
+        const after = window.__viewer.cmpPanes();
+        return {
+          a0: pair(A, mx, my), a1: pair(after[0], mx, my),
+          b0: pair(B, bx, my), b1: pair(after[1], bx, my),
+          sa0: A.view.scale, sa1: after[0].view.scale,
+          sb0: B.view.scale, sb1: after[1].view.scale,
+        };
+      });
+      const near = (p, q) => Math.abs(p[0] - q[0]) < 1e-9 && Math.abs(p[1] - q[1]) < 1e-9;
+      assert(Math.abs(anchor.sa1 - anchor.sa0 * 1.2) < 1e-9
+        && Math.abs(anchor.sb1 - anchor.sb0 * 1.2) < 1e-9,
+        `两格各按同一倍数缩放（A ${anchor.sa0}→${anchor.sa1}, B ${anchor.sb0}→${anchor.sb1}）`);
+      assert(near(anchor.a0, anchor.a1),
+        `指针所在格：指针下的缩略图坐标守恒 `
+        + `(A ${anchor.a0[0].toFixed(2)},${anchor.a0[1].toFixed(2)} → `
+        + `${anchor.a1[0].toFixed(2)},${anchor.a1[1].toFixed(2)})`);
+      assert(near(anchor.b0, anchor.b1),
+        `另一格锚在「同一相对位置」（B 的缩略图坐标守恒 `
+        + `${anchor.b0[0].toFixed(2)},${anchor.b0[1].toFixed(2)} → `
+        + `${anchor.b1[0].toFixed(2)},${anchor.b1[1].toFixed(2)}）`);
+
+      // 拖动同步：在左半按下 → 活动侧切到左格，两格同量平移
+      await page.mouse.move(pts.left, pts.midY);
+      await page.mouse.down();
+      await sleep(80);
+      assert(await page.evaluate(() => window.__viewer.activeSide()) === 'A',
+        '在左半按下 → 活动侧切到左格');
+      const v1b = await panes();          // 上面两次滚轮之后的基线，别用更早的 v1
+      await page.mouse.move(pts.left + 40, pts.midY, { steps: 1 });
+      await sleep(150);
+      const v2 = await panes();
+      assert(Math.abs(v2[0].view.ox - v1b[0].view.ox - 40) < 1e-9
+        && Math.abs(v2[1].view.ox - v1b[1].view.ox - 40) < 1e-9,
+        `拖动同量平移两侧 (A.ox ${v1b[0].view.ox.toFixed(1)}→${v2[0].view.ox.toFixed(1)}, `
+        + `B.ox ${v1b[1].view.ox.toFixed(1)}→${v2[1].view.ox.toFixed(1)})`);
+      assert(Math.abs(v2[0].view.oy - v1b[0].view.oy) < 1e-9, '只横向拖 → 纵向不动');
+      await page.mouse.up();
+
+      // 拖分隔线 / 改比例：只重新分配，不重新适配
+      const scaleBefore = (await panes())[0].view.scale;
+      await page.evaluate(() => window.__viewer.setSplitRatio(0.7));
+      await sleep(200);
+      const s7 = await panes();
+      assert(Math.abs(await page.evaluate(() => window.__viewer.splitRatio()) - 0.7) < 1e-9
+        && s7[0].rect.w > s7[1].rect.w,
+        `比例 0.7 → 左格更宽 (${s7[0].rect.w} vs ${s7[1].rect.w})`);
+      assert(Math.abs(s7[0].view.scale - scaleBefore) < 1e-9,
+        '改比例不重新适配（露出同一变换的更多）');
+      assert(await page.evaluate(() => localStorage.getItem('sr.viewer.cmpSplitRatio')) === '0.7',
+        '分隔比例记进 localStorage');
+
+      // 回正：比例回 0.5 且两侧重新适配
+      await page.click('[data-e2e="cmp-reset"]');
+      await sleep(200);
+      const sReset = await panes();
+      assert(Math.abs(await page.evaluate(() => window.__viewer.splitRatio()) - 0.5) < 1e-9,
+        '回正 → 比例回 0.5');
+      assert(sReset[0].view.ox > 0 && Math.abs(sReset[0].view.ox - sReset[1].view.ox) < 1.5,
+        `回正 → 两侧重新适配 (ox ${sReset[0].view.ox.toFixed(1)} / ${sReset[1].view.ox.toFixed(1)})`);
+
+      // 点选对比：整块画布一个落位区，拖入即覆盖当前这张
+      await page.click('[data-e2e="cmp-mode-click"]');
+      await sleep(300);
+      const pClick = await panes();
+      assert(await page.evaluate(() => window.__viewer.cmpMode()) === 'click'
+        && pClick.length === 1 && pClick[0].rect.x === 0,
+        '点选对比：回到单格、不分左右');
+      const railClick = await rail();
+      assert(railClick.open === true && railClick.prev === null,
+        '退出分屏 → 右栏恢复成进入前的展开状态');
+      // 布局变了（右栏恢复展开 → 画布变窄），落点要重新量，不能沿用分屏时那套坐标
+      const pts2 = await drag.canvasPoints(page);
+      const overClick = await drag.dragOverOnly(page, {
+        files: [{ path: F('f32_grad.tif') }], clientX: pts2.right, clientY: pts2.midY,
+      });
+      assert(overClick.hint.side === 'A', '点选对比：落位区是整块画布（只有一个归属）');
+      const hd2 = await hintDom();
+      assert(hd2 && hd2.text.indexOf('覆盖当前这张') >= 0,
+        `点选对比的提示说清是覆盖（"${hd2 && hd2.text}"）`);
+
+      const before5 = await page.evaluate(() => window.__viewer.recs().length);
+      const overwrite = await drag.dropFiles(page, {
+        files: [{ path: F('f32_grad.tif') }], clientX: pts2.right, clientY: pts2.midY,
+      });
+      assert(overwrite.after === before5 + 1, `点选对比：拖入新增一条 (${before5}→${overwrite.after})`);
+      const rec4 = await waitDecoded(page, 30000);
+      const p3 = await panes();
+      assert(p3.length === 1 && p3[0].recId === rec4.id && rec4.name === 'f32_grad.tif',
+        '画面上换成新拖入的那张（原来是哪张就顶掉哪张）');
+      assert(await page.evaluate(() => window.__viewer.recs().length) === before5 + 1,
+        '被顶掉的那张仍在文件列表里');
+      // 顶掉的那张（点选前活动侧的 rec1）确实已经不在画面上了
+      assert(p3[0].recId !== rec1.id, '当前这张被顶掉（不是两张同时在画面上）');
+
+      // 点选清单：显示在《待修复清单》上方，点一行换到活动侧，「清除」只移出清单
+      const cl = await page.evaluate(() => {
+        const rows = [...document.querySelectorAll('[data-e2e="cmp-row"]')];
+        const count = document.querySelector('[data-e2e="cmp-count"]');
+        const qc = document.querySelector('.qc-sec') || document.querySelector('.qc-list');
+        const list = document.querySelector('[data-e2e="cmp-list"]');
+        return {
+          list: window.__viewer.cmpList(),
+          rows: rows.length,
+          count: count ? count.textContent.trim() : null,
+          recs: window.__viewer.recs().length,
+          // 清单在《待修复清单》上面：同一个滚动容器里 DOM 顺序在前
+          above: !!(list && qc) ? !!(list.compareDocumentPosition(qc) & Node.DOCUMENT_POSITION_FOLLOWING) : null,
+        };
+      });
+      assert(cl.list.length === cl.rows && cl.list.length === cl.recs && cl.rows >= 3,
+        `点选清单列出当前文件列表全体（${cl.rows} 行，计数 ${cl.count}）`);
+      assert(cl.above === true, '点选清单排在《待修复清单》上方');
+
+      // 点第一行 → 画面上换成它
+      await page.evaluate(() => {
+        document.querySelectorAll('[data-e2e="cmp-row"]')[0].click();
+      });
+      await sleep(300);
+      const p4 = await panes();
+      assert(p4[0].recId === cl.list[0], `点清单一行 → 画面上换成那张 (rec ${cl.list[0]})`);
+
+      // 「清除」：只把这一条移出清单，屏幕/文件列表/像素都不动。
+      // **清的是非活动的那一行**：行内「清除」少写了 `.stop` 的话，行自己的
+      // `activate` 会跟着触发，活动侧就会被换掉 —— 清活动行看不出这个区别。
+      const keep = await page.evaluate(() => ({
+        active: window.__viewer.activeRec().id, recs: window.__viewer.recs().length,
+      }));
+      await page.evaluate(() => {
+        document.querySelectorAll('[data-e2e="cmp-row"]')[1]
+          .querySelector('[data-e2e="cmp-row-clear"]').click();
+      });
+      await sleep(250);
+      const afterClear = await page.evaluate(() => ({
+        list: window.__viewer.cmpList(),
+        recs: window.__viewer.recs().length,
+        active: window.__viewer.activeRec().id,
+        pane: window.__viewer.cmpPanes()[0].recId,
+      }));
+      assert(afterClear.list.length === cl.list.length - 1
+        && afterClear.list.indexOf(cl.list[1]) < 0, '「清除」把这一条移出清单');
+      assert(afterClear.recs === keep.recs && afterClear.active === keep.active
+        && afterClear.pane === keep.active,
+        '「清除」不动文件列表条目、不动像素、不动屏幕上那张');
+
+      // 回「关闭」：单格、叠加层撤掉、清单清空，右栏保持展开
+      await page.click('[data-e2e="cmp-mode-off"]');
+      await sleep(300);
+      const off = await page.evaluate(() => ({
+        mode: window.__viewer.cmpMode(),
+        panes: window.__viewer.cmpPanes().length,
+        list: window.__viewer.cmpList(),
+        bar: !!document.querySelector('[data-e2e="cmp-bar"]'),
+        overlay: !!document.querySelector('[data-e2e="cmp-overlay"]'),
+        listDom: !!document.querySelector('[data-e2e="cmp-list"]'),
+      }));
+      assert(off.mode === 'off' && off.panes === 1, '回「关闭」→ 单格');
+      assert(off.overlay === false, '回「关闭」→ 叠加层撤掉（画布上不再有分隔线/提示）');
+      assert(off.list.length === 0 && off.listDom === false, '回「关闭」→ 点选清单清空并撤掉');
+      assert(off.bar === true, '对比条仍展开（模式回关闭，条不收）');
+
+      // 关闭模式下全窗口拖放行为一字未改：拖到侧栏（画布之外）照样打开
+      const before6 = await page.evaluate(() => window.__viewer.recs().length);
+      const sideDrop = await drag.dropFiles(page, {
+        files: [{ path: F('u16_whitezero.tif') }], clientX: 200, clientY: 300, target: '.sidebar',
+      });
+      assert(sideDrop.after === before6 + 1,
+        `关闭模式：拖到侧栏也能打开（落点不参与决策）(${before6}→${sideDrop.after})`);
+      await waitDecoded(page, 30000);
     }
 
     assert(errors.length === 0, `无浏览器错误 (${JSON.stringify(errors.slice(0, 5))})`);

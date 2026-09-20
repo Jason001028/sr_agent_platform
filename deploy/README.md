@@ -8,20 +8,47 @@
 「稀疏采样 + 直方图均衡拉伸」的灰度 JPG，nginx 整块静态直出；检索走 FastAPI。
 本地文件路径（选择 TIF…）保持原有稀疏 TIF 读法，零回归。
 
-> **烘焙规则 v2（09-17）**：尺寸从「长边 8192 封顶」改为**各边严格 1/2、不封顶**，拉伸
-> 从 2% Linear 改为**直方图均衡**；规则签名写进 JPEG 注释，旧缓存在首次打开时会被判定
-> 失效并原地重烤（覆盖同名 `<stem>.preview.jpg`，不产生第二份文件）。详见
-> [experience/gui-experience.md](../docs/experience/gui-experience.md) §9.1。
+> **烘焙规则 v3：档位可调（09-19）**：尺寸从「各边严格 1/2」改为**各边 ÷2 · ÷4 · ÷8 ·
+> ÷16 · ÷32 五档可选，默认 ÷4**，由查看器工具栏定位组件右侧那条拖动条定（全局：拖入 /
+> 场景库 / 粘路径三条入口同档，存浏览器 localStorage）。拉伸仍为直方图均衡；规则签名写进
+> JPEG 注释（`srprev:v3:div<N>+equal:q<Q>`），**档位进了签名**。旧缓存（`v2` 戳）在首次
+> 打开时会被判定失效并原地重烤（覆盖同名文件，不产生第二份）。
+> **换包须知**：这一轮盘上所有 `<stem>.preview.jpg` 都必然重烤一次（惰性，逐个场景首次
+> 打开时触发；把滑块停在 ÷2 也一样）；`frontend/dist` 与 `backend` **必须同包更新** ——
+> 端点改了名（`/preview-tmp` → `/preview-drop`），只换一个会 404。
+> 详见 [knowledge/preview-bake-pipeline.md](../docs/knowledge/preview-bake-pipeline.md) §4.4/§4.6。
 
-> **拖拽入口改走服务端烘焙 JPG（09-18）**：把盘阵上的 `.tif` 拖进查看器，现在也走
-> 服务端烘焙的 1/2 预览 JPG（与场景库同一条渲染路径），不再在浏览器里重新解码整幅
-> 原图。这份 JPG 是**临时缓存**：落 `SR_TEMP_PREVIEWS_ROOT`，按 `YYYY-MM-DD` 分桶，
-> 每天 0 点整桶删除（服务启动时也先清一次）。命中判据是**文件名 + 字节数**双指纹
-> （后端 `_fingerprint_mismatch`），对不上就退回浏览器本地解码 —— 绝不静默关联到
-> 一张不是用户拖进来的影像上。**上线前必须显式配 `SR_TEMP_PREVIEWS_ROOT`**：
-> 默认值是系统临时目录，CentOS7 的 `/tmp` 常是 tmpfs，而 1/2 尺度不封顶、单张可能
-> 上百 MB；要放在 User=nginx 可写的大盘上，且**不要**放在 `SR_SCENES_ROOT` 之下。
+> **拖拽入口改落盘阵（09-18 起走服务端烘焙，09-19 改落点）**：把盘阵上的 `.tif` 拖进查看器
+> 不落盘阵时，走服务端烘焙的下采样预览 JPG（与场景库同一条渲染路径），不在浏览器里重新
+> 解码整幅原图。产物落**源文件同目录的 `<stem>_preview.jpg`**（09-19 起；此前落
+> `SR_TEMP_PREVIEWS_ROOT` 的当天桶里，次日 0 点整桶删 —— 等于每天第一次拖入都要重烤）。
+> 命中判据是**文件名 + 字节数**双指纹（后端 `_fingerprint_mismatch`），对不上就退回浏览器
+> 本地解码 —— 绝不静默关联到一张不是用户拖进来的影像上。
+> `SR_TEMP_PREVIEWS_ROOT` **降级为兜底**：场景目录不可写时（服务账号对盘阵目录的写权限在
+> 真机上仍是待确认项）才落到那里，按 `YYYY-MM-DD` 分桶、每天 0 点整桶删，并在响应头
+> `X-SR-Preview-Fallback: tmp` 里如实告诉前端。仍建议显式配这个变量：默认值是系统临时目录，
+> CentOS7 的 `/tmp` 常是 tmpfs，而单张可能上百 MB；要放在 `User=nginx` 可写的大盘上，
+> 且**不要**放在 `SR_SCENES_ROOT` 之下。
 > 场景库 / 粘路径的长期预览缓存（源同目录或 `SR_PREVIEWS_ROOT` 镜像树）不受影响。
+> **磁盘预算注意**：新落点的 `<stem>_preview.jpg` **没有任何清理者**（原地覆盖，不堆积，
+> 但它与 `<stem>.preview.jpg` 是两份文件），且它**不吃 `SR_PREVIEWS_ROOT`**，恒在场景目录里。
+
+> **产物预览急烤 + 显示件 jpg 改从同名栅格烤（09-20）**：两件事，都在服务端。
+> ① **急烤**：作业转 COMPLETED 后，后台循环顺手把**产物那一份**预览烤掉（只烤产物；
+> 输入影像与 `_NOSR` 两份仍按打开时惰性烤），用户跑完立刻打开就不必等一次读盘 + 采样。
+> 两个新 env 都有默认值、不配即生效：`SR_PRODUCT_PREVIEW_DIV`（默认 4，**0 = 关**，
+> 取值非法当 0 处理并在启动日志写一行）与 `SR_PRODUCT_PREVIEW_MAX_AGE_SEC`（默认 86400）。
+> 结局随 `GET /api/queue` 的 `preview_state` / `preview_note` 两列带出（另有 SSE 帧
+> `preview_update`）。**升级当天建议先置 `SR_PRODUCT_PREVIEW_DIV=0` 起一次确认无异常再打开**：
+> 那两列是 ALTER TABLE 加的、**不回填**，老行的值全是 `NULL`，挡历史行全量重烤的唯一屏障
+> 就是那道年龄窗口。沙箱**实际生效**时（作业跑在私有副本上）急烤自动 `skipped: sandbox`
+> —— 判据是沙箱有没有真生效，**不是** `SR_SANDBOX_ROOT` 在不在，详见 §7.5 末条。
+> ② **显示件 jpg**：拖入/打开的 `.jpg` 若同目录配着一位更清晰的栅格、且当前档位下服务端
+> 从它烤出来的比它更清晰，显示源就换成服务端那份（`/preview` 与 `/preview-drop` 都改，
+> 落点与 `?div=` 照旧）；否则行为**一个字节都不变**。默认档位 ÷4 下基本不触发（24000 源 +
+> 8192 显示件时只有 ÷2 才赢）—— 这是算术，不是没生效。
+> **nginx 不用改**（没有新 URL 形态：静态那条仍是 `/disk-array/…/*.preview.jpg`）。
+> 详见 [knowledge/preview-bake-pipeline.md](../docs/knowledge/preview-bake-pipeline.md) §4.1/§4.8/§4.9。
 
 阶段5 平台 API（09-02 定稿，契约 = `docs/planning/api-contract.md`）：FastAPI 在既有场景
 端点上新增 `/api/chat/*`（会话 REST + 单回合 SSE）、`/api/queue*`（共享 SR 队列 REST + SSE
@@ -446,7 +473,7 @@ curl -s -o /dev/null -w '健康=%{http_code}\n' http://127.0.0.1:8000/api/health
 - **vendor 已打进 dist，全离线**：pako/utif(补丁版)/geotiff 均来自 `frontend/src/vendor/`，Vite 构建打进产物。
 - **utif.js 为补丁版（cmpr 8/32946 走 pako inflate），绝不能被 npm 重装覆盖**——只能从 `src/vendor/utif.js` 本地引入。
 - **盘阵双层保险**：nginx `alias` 整块暴露 + 后端按 `SR_SCENES_ROOT` 白名单校验（拒绝 `../` 穿越、白名单外绝对路径、fake 占位）。URL 全用相对场景根的 `/disk-array/<rel>`。
-- **浏览器单次分配约 2GB、Canvas 面积上限 16384²**——盘阵场景因此由服务端烘焙 JPG（v2：各边 1/2），浏览器只解码 JPG（远低于上限）。
+- **浏览器单次分配约 2GB、Canvas 面积上限 16384²**——盘阵场景因此由服务端烘焙 JPG（v3：各边 ÷2…÷32，默认 ÷4），浏览器只解码 JPG（远低于上限）。
 - 真实大图只在有盘阵的内网机（外网开发机读不到），解码回归用 `.e2e/` 本机资产 + `frontend/fixtures/` 入库小图；真机验收项见 docs/status/current-question.md。
 
 ## 七、Slurm 接入（SR 作业提交链路）
@@ -614,6 +641,13 @@ os.rename(path + tiftype, path + "_NOSR" + tiftype)   # 首跑时该文件不存
   非空 `Suffix`，源图不改名也不删除。上游生产管线用空 `Suffix` 就地写时才会把原图改名为
   `*_NOSR.tif`（契约 §2.4 第 1 条），平台不走那条路。所以阶段 6 之后关掉沙箱是正常的，
   只是那一刻起，前端填什么路径就写什么路径。
+- **与产物预览急烤的关系（2026-09-20）**：作业转 COMPLETED 后，后端会顺手把**产物那一份**
+  预览烤掉（见 `deploy/sr-api.service` 里 `SR_PRODUCT_PREVIEW_DIV` 那段）。沙箱**实际生效**时
+  产物落在私有副本上、盘阵里根本没有产物，这项会自动跳过并在队列行上写
+  `skipped: sandbox`（如实跳过，不是故障，也不会往临时盘撒文件）。
+  **判据是沙箱有没有真生效，不是这个 env 在不在**：`run_sr.sandbox_scene_paths` 在
+  `SR_EXECUTOR=local`（§7.6 那条最小原型路线）时恒返回 `None` —— 所以真机上现在配着
+  `SR_SANDBOX_ROOT` 但跑 local，**急烤照烤**，别照「配了沙箱就不会烤」去理解。
 
 ### 7.6 最小原型：不走 Slurm，本机 conda 直接跑（`SR_EXECUTOR=local`）
 

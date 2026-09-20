@@ -18,20 +18,26 @@ from unittest import mock
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from PIL import Image
 
-from backend.api.app import create_app
+from backend.api.app import create_app, _eager_bake_tick
 from backend.api.platform import (_Subscriber, _broadcast, _queue_state,
                                   _task_state, chat_send)
 from backend.tests import allowed_roots_env
+from backend.tests.test_preview_jpg import make_strip_tif
 from backend.services import run_sr as svc
 from backend.services import slurm
 from backend.services.run_sr import task_fingerprint
+from backend.api import app as app_mod
 
 _ENVS = ("SR_AGENT_DB", "SR_SCENES_ROOT", "SR_PREVIEWS_ROOT", "SR_LLM_MOCK",
          "SR_SLURM_FAKE", "SR_SLURM_FAKE_T_MS", "SR_SLURM_WORK_DIR",
          "SR_QUEUE_POLL_SEC", "SR_SANDBOX_ROOT", "SR_EXECUTOR",
          "SR_LOCKED_DIR", "SR_LOCAL_GPU", "SR_BUNDLE_DIR",
-         "SR_ALLOWED_ROOTS", "SR_DRIVE_MAP")
+         "SR_ALLOWED_ROOTS", "SR_DRIVE_MAP",
+         # 产物急烤的两个开关。用例会按需改它们，不还原就会漏到后面的用例上
+         # （急烤是「按 env 现读」的，泄漏的效果正是随机烤/随机不烤）。
+         "SR_PRODUCT_PREVIEW_DIV", "SR_PRODUCT_PREVIEW_MAX_AGE_SEC")
 
 
 def write_bundle_suffix(bundle_dir, value, name=None):
@@ -721,6 +727,369 @@ class TestQueue(PlatformBase):
                          "重启不该重写已终态的行")
         self.assertEqual(got["finished_at"] - got["started_at"], elapsed,
                          "重启后的耗时仍是这一次运行的时长")
+
+
+class TestProductPreviewBake(PlatformBase):
+    """产物预览急烤（app.py::_eager_bake_tick）。
+
+    **直接调 tick，不等后台循环**：循环的间隔就是 `SR_QUEUE_POLL_SEC`，本仓库的
+    惯例是把它设成 60 秒来关掉轮询干扰，等它等于让每个用例睡一分钟。tick 是纯同步
+    函数、`state` 上的东西 `create_app` 里已经备齐（`scenes_root` 不在 lifespan
+    里），正适合直接驱动。
+
+    夹具造的是一个**真场景目录**（`<目录名>_meta.xml` + `<目录名>.tif`）加一份真
+    strip tif 产物 —— `input_scene_path` / `build_preview_pixels` 的实际判据都在
+    这条链上，用空文件顶替会让「产物缺失」「读不出尺寸」这类断言变成假绿。
+    """
+
+    SCENE = "JL1KF02B03_xxx_L1_PAN"
+    SUFFIX = "260318"
+
+    def _set_env(self):
+        super()._set_env()
+        os.environ["SR_QUEUE_POLL_SEC"] = "60"
+        self.scene_dir = Path(self._tmp.name) / self.SCENE
+        self.scene_dir.mkdir(parents=True, exist_ok=True)
+        (self.scene_dir / (self.SCENE + "_meta.xml")).write_text(
+            "<x/>", encoding="utf-8")
+        self.inp, _ = make_strip_tif(self.scene_dir, self.SCENE + ".tif", 64, 32)
+        self.LQ = self.scene_dir.as_posix()
+
+    # ---- 夹具 -------------------------------------------------------------
+
+    def _row(self, app, *, suffix=None, lq_path=None, status="COMPLETED"):
+        """在库里造一行（默认已跑到 COMPLETED 且钉了 finished_at）。"""
+        params = {"lq_path": lq_path if lq_path is not None else self.LQ,
+                  "mask_path": None, "sr_scale": 2,
+                  "suffix": self.SUFFIX if suffix is None else suffix,
+                  "gpu": 0, "cloud_limit": 80, "delete_ori": False,
+                  "grid_align": True, "options_yml": None}
+        fp = task_fingerprint(params)
+        app.state.store.put_sr_task(fp, params, status="new", job_id=None)
+        tid = app.state.store.get_sr_task(fp)["task_id"]
+        if status == "COMPLETED":
+            app.state.store.set_sr_task_state(tid, "COMPLETED", mark_finished=True)
+        elif status == "FAILED":
+            app.state.store.set_sr_task_state(tid, "FAILED", mark_finished=True)
+        return tid
+
+    def _product(self, name=None, w=64, h=32):
+        return make_strip_tif(self.scene_dir, name or f"{self.SCENE}_{self.SUFFIX}.tif",
+                              w, h)[0]
+
+    def _jpg(self, product):
+        return product.with_suffix(".preview.jpg")
+
+    def _row_state(self, app, tid):
+        row = app.state.store.get_sr_task_by_id(tid)
+        return row["preview_state"], row["preview_note"]
+
+    def _rearm(self, app, tid):
+        """把 preview_state 打回 NULL（等价于 put_sr_task 的 UPDATE 分支），
+        但**保留 finished_at** —— 直接走提交会连 finished_at 一起清掉，那一行就
+        不再落在急烤的年龄窗口里了。"""
+        db = app.state.store._db()
+        db.execute("UPDATE sr_tasks SET preview_state = NULL, preview_note = NULL "
+                   "WHERE id = ?", (tid,))
+        db.commit()
+
+    def _dims(self, path):
+        with Image.open(path) as im:
+            return im.size
+
+    # ---- 正常路径 ---------------------------------------------------------
+
+    def test_bakes_the_product_of_a_completed_task(self):
+        app, _ = self.app_client()
+        tid = self._row(app)
+        product = self._product()
+
+        _eager_bake_tick(app.state)
+
+        state_name, note = self._row_state(app, tid)
+        self.assertEqual(state_name, "done")
+        self.assertIn("baked", note)
+        jpg = self._jpg(product)
+        self.assertTrue(jpg.is_file(), "产物旁边出现了 <产物 stem>.preview.jpg")
+        self.assertEqual(self._dims(jpg), (16, 8), "÷4：64×32 → 16×8")
+        # 落点与**输入影像**那份天然不同名 —— 三类图互不覆盖的前提
+        self.assertNotEqual(jpg, self.inp.with_suffix(".preview.jpg"))
+
+    def test_input_image_is_not_baked(self):
+        """急烤只烤产物。输入影像那份是惰性的：用户看不看它，打开之前无从知道。"""
+        app, _ = self.app_client()
+        self._row(app)
+        self._product()
+        _eager_bake_tick(app.state)
+        self.assertFalse(self.inp.with_suffix(".preview.jpg").exists())
+
+    def test_div_comes_from_the_env_default_four(self):
+        app, _ = self.app_client()
+        self._row(app)
+        product = self._product(w=80, h=40)
+        _eager_bake_tick(app.state)
+        self.assertEqual(self._dims(self._jpg(product)), (20, 10))
+
+    def test_div_is_reread_from_the_env_each_tick(self):
+        """档位不在 create_app 里快照：改 env 就该下一轮生效。"""
+        app, _ = self.app_client()
+        os.environ["SR_PRODUCT_PREVIEW_DIV"] = "2"
+        tid = self._row(app)
+        product = self._product(w=64, h=32)
+        _eager_bake_tick(app.state)
+        self.assertEqual(self._dims(self._jpg(product)), (32, 16))
+        self.assertIn("÷2", self._row_state(app, tid)[1])
+
+        os.environ["SR_PRODUCT_PREVIEW_DIV"] = "8"
+        self._rearm(app, tid)
+        _eager_bake_tick(app.state)
+
+        self.assertEqual(self._dims(self._jpg(product)), (8, 4),
+                         "换档位后重烤，不是留着上一档那份")
+        self.assertIn("÷8", self._row_state(app, tid)[1])
+
+    def test_already_baked_at_this_div_is_a_cache_hit(self):
+        """用户先打开过、盘上那份已是当前档位 → 不重烤（省掉读遍大图那几十秒）。
+        判据与惰性路径是**同一个** cache_hit，所以这里命中的正是用户刚烤的那份。"""
+        app, _ = self.app_client()
+        tid = self._row(app)
+        product = self._product()
+        _eager_bake_tick(app.state)
+        self._rearm(app, tid)
+
+        _eager_bake_tick(app.state)
+
+        self.assertIn("cached", self._row_state(app, tid)[1])
+        self.assertEqual(self._dims(self._jpg(product)), (16, 8))
+
+    def test_one_tick_bakes_at_most_one_item(self):
+        """单消费者、并发 1：÷4 烤一份 40000² 产物峰值内存约 400MB，并发会把内存
+        乘上去。代价是「同时完成 20 个作业时最后一件要等」——那是可解释的。"""
+        app, _ = self.app_client()
+        a = self._row(app, suffix="s1", lq_path=self.LQ)
+        b = self._row(app, suffix="s2", lq_path=self.LQ)
+        self._product(f"{self.SCENE}_s1.tif")
+        self._product(f"{self.SCENE}_s2.tif")
+
+        _eager_bake_tick(app.state)
+
+        states = [self._row_state(app, t)[0] for t in (a, b)]
+        # 不写死是哪一条：两行的 finished_at 是同一个瞬间，排序不该被断言
+        self.assertEqual(states.count("done"), 1, "本轮只烤一条")
+        self.assertEqual(states.count(None), 1, "另一件留到下一轮")
+
+    def test_request_path_observing_completed_first_does_not_lose_the_bake(self):
+        """`GET /api/queue` 会走 `_task_state`（与后台轮询是**同一**个写终态的函数）。
+
+        把急烤挂在「状态转换」上的话，谁先观测到 COMPLETED 谁把这次转换拿走，另一个
+        就看到「没变化」—— 请求路径抢先看一眼队列，这份预览就永远不烤了。改成从库
+        派生之后这个竞态在结构上不存在：这里先打几次队列再跑 tick，照样烤。
+        """
+        app, c = self.app_client()
+        tid = self._row(app)
+        product = self._product()
+        for _ in range(3):
+            rows = c.get("/api/queue").json()["tasks"]
+            self.assertEqual(next(t for t in rows if t["task_id"] == tid)["state"],
+                             "COMPLETED")
+
+        _eager_bake_tick(app.state)
+
+        self.assertEqual(self._row_state(app, tid)[0], "done")
+        self.assertTrue(self._jpg(product).is_file())
+
+    # ---- env 开关 ---------------------------------------------------------
+
+    def test_div_zero_disables_eager_baking(self):
+        app, _ = self.app_client()
+        os.environ["SR_PRODUCT_PREVIEW_DIV"] = "0"
+        tid = self._row(app)
+        product = self._product()
+
+        _eager_bake_tick(app.state)
+
+        self.assertIsNone(self._row_state(app, tid)[0], "关掉时连认领都不做")
+        self.assertFalse(self._jpg(product).exists())
+
+    def test_invalid_div_is_treated_as_off_not_as_a_crash(self):
+        """配置写错不该让服务起不来（也不会让轮询炸掉），代价只是「这轮不烤」。"""
+        app, _ = self.app_client()
+        os.environ["SR_PRODUCT_PREVIEW_DIV"] = "3"       # 不在 PREVIEW_DIVISORS 里
+        tid = self._row(app)
+        self._product()
+        _eager_bake_tick(app.state)
+        self.assertIsNone(self._row_state(app, tid)[0])
+
+        os.environ["SR_PRODUCT_PREVIEW_DIV"] = "abc"
+        _eager_bake_tick(app.state)
+        self.assertIsNone(self._row_state(app, tid)[0])
+
+    def test_max_age_window_keeps_history_out(self):
+        """升级当天不把历史 COMPLETED 行全烤一遍 —— 补列之后老行的 preview_state
+        全是 NULL，而 NULL 的含义正是「没烤过」。"""
+        app, _ = self.app_client()
+        tid = self._row(app)
+        product = self._product()
+        db = app.state.store._db()
+        db.execute("UPDATE sr_tasks SET finished_at = ? WHERE id = ?",
+                   (time.time() - 90 * 86400, tid))
+        db.commit()
+
+        _eager_bake_tick(app.state)
+
+        self.assertIsNone(self._row_state(app, tid)[0])
+        self.assertFalse(self._jpg(product).exists())
+
+    # ---- 各条「不烤」的分支 -----------------------------------------------
+
+    def test_failed_row_is_never_touched(self):
+        app, _ = self.app_client()
+        tid = self._row(app, status="FAILED")
+        self._product()                       # 半截产物也在盘上（writeTiff 先改名再写）
+        _eager_bake_tick(app.state)
+        self.assertIsNone(self._row_state(app, tid)[0],
+                          "FAILED 行连 preview_state 都不该被写")
+
+    def test_missing_product_reports_both_candidate_names(self):
+        """COMPLETED 但没有产物是**正常结局**（云限额的 `Run skipped:` 就判成合法
+        COMPLETED），所以 note 必须列出试过的名字，好让运维一眼分辨「名字猜错了」
+        还是「作业本身没产出」。"""
+        app, _ = self.app_client()
+        tid = self._row(app)
+        _eager_bake_tick(app.state)
+
+        state_name, note = self._row_state(app, tid)
+        self.assertEqual(state_name, "skipped")
+        self.assertIn("product_missing", note)
+        self.assertIn(f"{self.SCENE}_{self.SUFFIX}.tif", note)
+        self.assertIn(f"{self.SCENE}_{self.SUFFIX}.tiff", note)
+
+    def test_row_without_a_suffix_pins_nothing(self):
+        app, _ = self.app_client()
+        tid = self._row(app, suffix="")
+        _eager_bake_tick(app.state)
+        state_name, note = self._row_state(app, tid)
+        self.assertEqual(state_name, "skipped")
+        self.assertIn("no_suffix", note)
+
+    def test_sandboxed_run_is_skipped(self):
+        """跑在沙箱私有副本上时产物落在副本里，盘阵那份是**上一次**的 —— 烤了用户
+        也看不到，还往临时盘撒文件。"""
+        app, _ = self.app_client()
+        os.environ["SR_EXECUTOR"] = "slurm"
+        os.environ["SR_SANDBOX_ROOT"] = "/DiskArray/tmp/sbx"
+        tid = self._row(app)
+        self._product()
+
+        _eager_bake_tick(app.state)
+
+        state_name, note = self._row_state(app, tid)
+        self.assertEqual(state_name, "skipped")
+        self.assertIn("sandbox", note)
+
+    def test_sandbox_root_with_local_executor_still_bakes(self):
+        """**真机当前就是这条路线**：配了 `SR_SANDBOX_ROOT`，但 `SR_EXECUTOR=local`。
+
+        `SR_EXECUTOR=local` 的意义就是「就地跑、产物落在盘阵里」（run_sr
+        .sandbox_scene_paths 对 local 恒返回 None），所以这里必须照烤。判据若写成
+        「直接看 SR_SANDBOX_ROOT 在不在」，真机上会**永远不烤**，而且是静默的。
+        """
+        app, _ = self.app_client()
+        os.environ["SR_EXECUTOR"] = "local"
+        os.environ["SR_SANDBOX_ROOT"] = "/DiskArray/tmp/sbx"
+        tid = self._row(app)
+        product = self._product()
+
+        _eager_bake_tick(app.state)
+
+        self.assertEqual(self._row_state(app, tid)[0], "done")
+        self.assertTrue(self._jpg(product).is_file())
+
+    def test_malformed_sandbox_root_is_skipped_not_guessed(self):
+        """`_run_dataroot` 回 None = 「产物落在哪不可知」。宁可如实跳过也不猜。"""
+        app, _ = self.app_client()
+        os.environ["SR_EXECUTOR"] = "slurm"
+        os.environ["SR_SANDBOX_ROOT"] = "relative/not/absolute"
+        tid = self._row(app)
+        self._product()
+
+        _eager_bake_tick(app.state)
+
+        state_name, note = self._row_state(app, tid)
+        self.assertEqual(state_name, "skipped")
+        self.assertIn("sandbox", note)
+
+    def test_unwritable_directory_is_skipped_not_fallen_back(self):
+        """目录不可写就如实跳过，**不退回 SR_TEMP_PREVIEWS_ROOT**：那份按天清，而急烤
+        的意义是长期命中；更要命的是急烤没有 HTTP 响应头能告诉用户「这次退化了」，
+        静默退化等于骗人。"""
+        app, _ = self.app_client()
+        tid = self._row(app)
+        product = self._product()
+
+        with mock.patch.object(app_mod.os, "access", return_value=False):
+            _eager_bake_tick(app.state)
+
+        state_name, note = self._row_state(app, tid)
+        self.assertEqual(state_name, "skipped")
+        self.assertIn("unwritable", note)
+        self.assertFalse(self._jpg(product).exists())
+
+    def test_source_rewritten_mid_bake_writes_nothing(self):
+        """同一 suffix 重跑会覆盖同一个产物路径。不复核的话，一次「读的时候是旧产物、
+        写的时候新产物已经在写」就会把一张半截图永久留在盘上 —— 而缓存判据是「不比
+        源旧」，新产物的 mtime 可能仍晚于刚写的 jpg，它不会自愈。"""
+        app, _ = self.app_client()
+        tid = self._row(app)
+        product = self._product()
+        real = app_mod.build_preview_pixels
+
+        def _rewrite_then_build(src, max_edge):
+            # 读像素的中途，同一 suffix 的重跑把产物覆盖了（尺寸也变了）
+            make_strip_tif(self.scene_dir, product.name, 48, 24)
+            return real(src, max_edge)
+
+        with mock.patch.object(app_mod, "build_preview_pixels",
+                               side_effect=_rewrite_then_build):
+            _eager_bake_tick(app.state)
+
+        state_name, note = self._row_state(app, tid)
+        self.assertEqual(state_name, "skipped")
+        self.assertIn("source_changed", note)
+        self.assertFalse(self._jpg(product).exists(), "一个字节都没写")
+
+    def test_build_failure_lands_as_failed_with_the_reason(self):
+        app, _ = self.app_client()
+        tid = self._row(app)
+        self._product()
+        with mock.patch.object(app_mod, "build_preview_pixels",
+                               side_effect=RuntimeError("boom")):
+            _eager_bake_tick(app.state)
+        state_name, note = self._row_state(app, tid)
+        self.assertEqual(state_name, "failed")
+        self.assertIn("boom", note)
+
+    # ---- 队列可见性 -------------------------------------------------------
+
+    def test_queue_row_exposes_the_preview_fields(self):
+        app, c = self.app_client()
+        tid = self._row(app)
+        self._product()
+
+        before = next(t for t in c.get("/api/queue").json()["tasks"]
+                      if t["task_id"] == tid)
+        self.assertIn("preview_state", before, "字段恒在，没烤过时是 null")
+        self.assertIsNone(before["preview_state"])
+        self.assertIsNone(before["preview_note"])
+
+        _eager_bake_tick(app.state)
+
+        after = next(t for t in c.get("/api/queue").json()["tasks"]
+                     if t["task_id"] == tid)
+        self.assertEqual(after["preview_state"], "done")
+        self.assertIn("baked", after["preview_note"])
+        self.assertEqual(after["state"], "COMPLETED",
+                         "急烤写回不该动作业状态")
 
 
 class TestMasks(PlatformBase):

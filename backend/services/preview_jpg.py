@@ -1,14 +1,15 @@
 """Disk-array scene preview JPEG generation (server-side).
 
-规则 v2（2026-09-17 起）：**长宽各为源图的 1/2**，显示值用**直方图均衡**。
+规则 v3（2026-09-20 起）：**长宽各为源图的 1/div**，显示值用**直方图均衡**。
+div 由调用方按用户的滑块档位传入（`div ∈ PREVIEW_DIVISORS`，缺省 `LEGACY_PREVIEW_DIV`）。
 
-    ps   = min(1, max_edge / max(W, H))，max_edge = round(max(W,H) * PREVIEW_SCALE)
-    pw   = round(W * ps),  ph = round(H * ps)   # ps 恒为 0.5 → 严格各 1/2
+    ps   = min(1, max_edge / max(W, H))，max_edge = round(max(W,H) / div)
+    pw   = round(W * ps),  ph = round(H * ps)
     out(i, j) = src[ round(i * (H-1) / (ph-1)), round(j * (W-1) / (pw-1)) ]
 
   * 采样逐行进行：只读采样行的条带字节、行内只留采样列，绝不用整个文件（与浏览器
-    稀疏路径同一手法）。1/2 采样下恰好只读源文件一半的字节 —— 这是所有读法里最
-    省的（块读 / memmap / 整文件顺序读都会多读一倍，实测更慢）。
+    稀疏路径同一手法）。1/div 采样下恰好只读源文件 1/div 的字节 —— 这是所有读法里最
+    省的（块读 / memmap / 整文件顺序读都会多读整数倍，实测更慢）。
   * 读取按行分段并行，**每线程开自己的句柄**（Windows 没有 os.pread，句柄不能共享）。
     这条是为**延迟**而非带宽优化的：1/2 尺度要发约 1.2 万次读，盘阵上单次读若有
     毫秒级延迟，串行就是十几秒，8 路并发把它压回一秒量级；页缓存命中时它只快
@@ -21,7 +22,7 @@
 
 **缓存失效靠写进 JPEG 注释的规则戳**，不是只看 mtime：升级后旧规则烤出来的图
 mtime 比源新，只看 mtime 会把它判为有效而永不重烤，真机上换包后看不到任何变化。
-规则戳 = PREVIEW_RULE_VERSION + quality，改规则/改质量都要跟着 bump。
+规则戳 = PREVIEW_RULE_VERSION + div + quality，改规则/改档位/改质量都要跟着 bump。
 
 Pure-struct TIFF header/IFD parsing — no new runtime dependency, classic TIFF
 (42) and BigTIFF (43) both handled. The reader targets the confirmed real
@@ -45,12 +46,22 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-PREVIEW_SCALE = 0.5              # 预览 = 源图各边 × 0.5（用户决策：严格 1/2，不封顶）
+#: 预览下采样档位：预览长宽各为源图的 1/div。**档位的唯一真源** ——
+#: HTTP 层的 `?div=` 与前端滑块都只能取这里面的值。
+PREVIEW_DIVISORS = (2, 4, 8, 16, 32)
+
+#: 缺档位参数时用的值。取 2（逐字节等于 v2 那套「各边 1/2」）而不是产品的默认 4：
+#: 只换 backend、没换 dist 的部署不会因为少一个 query 参数就把盘上所有预览判废。
+#: 「产品默认 ÷4」只活在前端的 `DEFAULT_PREVIEW_DIV` 一个常量里。
+LEGACY_PREVIEW_DIV = 2
+
 PREVIEW_JPG_QUALITY = 85         # 服务端预览质量（显示用；1/2 尺度下 q90 约 117MB）
 PILLOW_FALLBACK_MAX_PX = 1 << 26  # 67M px：Pillow 兜底只敢接小文件（整图解码）
 
-#: 规则版本戳：改动「尺寸 / 拉伸 / 质量」任一规则都必须 bump，否则旧缓存不会失效。
-PREVIEW_RULE_VERSION = "v2"
+#: 规则版本戳：改动「尺寸 / 档位 / 拉伸 / 质量」任一规则都必须 bump，否则旧缓存不会失效。
+#: v3（2026-09-20）：尺度从写死的 1/2 变成可调档位，戳里必须带上 div，
+#: 否则同一落点上换个档位会被判成缓存命中 —— 界面滑了、盘上的图一个字节都不变。
+PREVIEW_RULE_VERSION = "v3"
 #: 并行读的行数阈值：小图线程开销盖过收益，保持串行（也让小 fixture 的测试确定）。
 PARALLEL_MIN_ROWS = 512
 #: 并行度。盘阵若是单块 HDD，磁头竞争可能让更高并发反而更慢，故取保守的 8。
@@ -63,7 +74,7 @@ _STRETCH_CHUNK = 1 << 22
 # Pillow 默认的像素上限（8948 万）是防「小文件声明巨大尺寸」的炸弹的，但它会
 # **误伤我们自己的产物**：1/2 尺度下 2.4 万像素级的源烤出来就是 1.5 亿像素，超过
 # 1× 阈值只是警告，超过 2×（1.79 亿）会直接抛 DecompressionBombError —— 那会让
-# _cache_hit 的 Image.open 失败、缓存永远判不中，于是每次打开都重烤一遍。
+# cache_hit 的 Image.open 失败、缓存永远判不中，于是每次打开都重烤一遍。
 # 这里放到 1<<30（约 10.7 亿，仍能挡住声明 21 亿像素以上的文件），给合法产物留
 # 出 10 倍余量。本模块打开的都是本地盘阵上的可信文件。
 Image.MAX_IMAGE_PIXELS = 1 << 30
@@ -271,18 +282,24 @@ def scene_dims(path) -> dict | None:
     return None
 
 
-def preview_max_edge(source_path) -> int:
-    """本次烘焙的长边上限 = 源图长边 × PREVIEW_SCALE（严格各 1/2，不封顶）。
+def preview_max_edge(source_path, div: int = LEGACY_PREVIEW_DIV) -> int:
+    """本次烘焙的长边上限 = 源图长边 / div（不封顶）。
 
     只读头 / `.hdr` 拿尺寸，极便宜（`scene_dims`），不解码任何像素。
+
+    `div` 非法一律抛 `PreviewError`：HTTP 层会先校验成 400，走到这儿还不合法就是
+    调用方漏了校验 —— 宁可报错，也不要拿一个奇怪的尺寸烤出一张图来。
     """
+    if div not in PREVIEW_DIVISORS:
+        raise PreviewError(
+            f"下采样档位非法：{div}（只认 {'/'.join(map(str, PREVIEW_DIVISORS))}）")
     src = Path(source_path)
     if not src.is_file():
         raise PreviewError("场景文件不存在")
     dims = scene_dims(src)
     if not dims:
         raise PreviewError(f"无法读取图像尺寸：{src.name}")
-    return max(1, int(round(max(dims["W"], dims["H"]) * PREVIEW_SCALE)))
+    return max(1, int(round(max(dims["W"], dims["H"]) / div)))
 
 
 # --------------------------------------------------------------------------
@@ -484,7 +501,8 @@ def _pillow_preview(path, max_edge: int) -> np.ndarray:
 def build_preview_pixels(path, max_edge: int | None = None) -> np.ndarray:
     """uint8 grayscale preview pixels (h×w) for a scene TIFF.
 
-    max_edge 省略时按 PREVIEW_SCALE 从源图尺寸推出（= 长边的一半）。
+    max_edge 省略时按 `LEGACY_PREVIEW_DIV`（各边 1/2）从源图尺寸推出 —— 只有直接
+    调本函数的地方（测试）会走那个分支；`ensure_preview_jpg` 一定显式算好再传进来。
 
     Prefers the sparse strip sampler (real-array layout); falls back to Pillow
     for anything the sampler can't handle (compressed / tiled / multi-band),
@@ -510,43 +528,85 @@ def build_preview_pixels(path, max_edge: int | None = None) -> np.ndarray:
         raise
 
 
-def rule_stamp(quality: int = PREVIEW_JPG_QUALITY) -> bytes:
-    """当前烘焙规则的签名（写进 JPEG 注释，用来判缓存是否还符合现规则）。"""
-    return f"srprev:{PREVIEW_RULE_VERSION}:half+equal:q{quality}".encode("ascii")
+def rule_stamp(quality: int = PREVIEW_JPG_QUALITY,
+               div: int = LEGACY_PREVIEW_DIV) -> bytes:
+    """当前烘焙规则的签名（写进 JPEG 注释，用来判缓存是否还符合现规则）。
+
+    **div 进戳**（v3 起）：同一个落点上换个档位必须判废重烤 —— 只按落点判的话，
+    界面上的滑块动了、盘上那张图一个字节都不会变。v2 那代戳是 `…:half+equal:…`，
+    与这里的 `…:div2+equal:…` 字符串本就不同，所以 v2 产物一律重烤一轮（预期内）。
+    """
+    return f"srprev:{PREVIEW_RULE_VERSION}:div{div}+equal:q{quality}".encode("ascii")
 
 
-def _cache_hit(dst: Path, quality: int) -> dict | None:
-    """缓存可用则返回 {w, h}，否则 None（缺戳 / 旧规则 / 损坏一律按需重烤）。"""
+#: 规则戳的形态。`ver` 宽松匹配（v1 那代是 `8192+linear2`，本式匹配不上）。
+_STAMP_RE = re.compile(r"^srprev:(?P<ver>[^:]+):div(?P<div>\d+)\+equal:q(?P<q>\d+)$")
+
+
+def stamp_div(stamp) -> int | None:
+    """解出这份产物**是按哪一档烤的**；解不出（缺戳 / 旧格式 / 非法档位）→ None。
+
+    场景行的 `previewDiv` 用它：前端据「盘上这份的档位 ≠ 当前档位」决定要不要重烤。
+    v2 那代戳解不出 div —— 返回 None 会让前端重烤一次，这正是想要的
+    （那代图迟早要按新档位重烤，而且换包后本来就要烤一轮）。
+    """
+    if isinstance(stamp, (bytes, bytearray)):
+        try:
+            stamp = bytes(stamp).decode("ascii")
+        except UnicodeDecodeError:
+            return None
+    m = _STAMP_RE.match(str(stamp or "").strip())
+    if not m:
+        return None
+    div = int(m.group("div"))
+    return div if div in PREVIEW_DIVISORS else None
+
+
+def preview_div_of(jpg_path) -> int | None:
+    """盘上某个预览 JPG 是按哪一档烤的；文件不在 / 读不出 / 旧格式 → None。
+
+    只 `Image.open` 读头拿注释，**不解码像素** —— 与 `scene_dims` 同级，可以在
+    列表路径上逐行调。
+    """
+    try:
+        with Image.open(jpg_path) as im:
+            return stamp_div(im.info.get("comment"))
+    except Exception:  # noqa: BLE001 — 读不出就当「不知道是哪一档」
+        return None
+
+
+def cache_hit(dst: Path, quality: int, div: int) -> dict | None:
+    """缓存可用则返回 {w, h}，否则 None（缺戳 / 旧规则 / 换档 / 损坏一律按需重烤）。
+
+    公开（无下划线）是因为**产物急烤**（`api/app.py::_eager_bake_tick`）要在动手读
+    大图之前先问一遍：用户可能刚打开过这份产物、盘上那份就是当前档位的 —— 那时
+    再读一遍 GB 级文件纯属白干。判据本身与惰性路径**逐字相同**，没有第二套。
+    """
     try:
         with Image.open(dst) as im:
             stamp = im.info.get("comment")
             w, h = im.width, im.height
     except Exception:  # noqa: BLE001 — 缓存损坏按重新生成处理
         return None
-    if stamp != rule_stamp(quality):
+    if stamp != rule_stamp(quality, div):
         return None
     return {"w": w, "h": h}
 
 
-def ensure_preview_jpg(source_path, jpg_path, max_edge: int | None = None,
-                       quality: int = PREVIEW_JPG_QUALITY) -> dict:
-    """Generate preview JPEG if missing/stale; idempotent (cache by caller).
+def write_preview_jpg(jpg_path, pixels, *,
+                      quality: int = PREVIEW_JPG_QUALITY,
+                      div: int = LEGACY_PREVIEW_DIV) -> dict:
+    """把灰度像素落成预览 JPEG（先写临时文件再 `os.replace`，原子替换）。
 
-    命中要求两条同时成立：**不比源旧**，且**规则戳等于当前规则**。只看 mtime 会
-    让升级前烤的图永远不重烤 —— 它的 mtime 就是比源新。
+    从 `ensure_preview_jpg` 里抽出来，是为了让**产物急烤**能在「像素已读出」与
+    「落盘」之间插一次源文件复核（见 `api/app.py::_eager_bake_tick`）：作业重跑会
+    覆盖同一个产物路径，若不复核就可能把一份半截产物的图永久留在盘上，而缓存判据
+    是「不比源旧」，它不会自愈。
 
-    Returns {"status": "generated"|"cached", "path", "w", "h", "error": None}.
-    Raises PreviewError on generation failure.
+    规则戳按 `div` 写进 JPEG 注释 —— 与 `ensure_preview_jpg` 同一件事，别在这里
+    另起一套。返回 `{path, w, h}`。
     """
-    src, dst = Path(source_path), Path(jpg_path)
-    if dst.is_file() and os.path.getmtime(dst) >= os.path.getmtime(src):
-        hit = _cache_hit(dst, quality)
-        if hit is not None:
-            return {"status": "cached", "path": str(dst),
-                    "w": hit["w"], "h": hit["h"], "error": None}
-    if max_edge is None:
-        max_edge = preview_max_edge(src)
-    pixels = build_preview_pixels(str(src), max_edge)
+    dst = Path(jpg_path)
     h, w = pixels.shape
     dst.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=dst.name + ".", suffix=".tmp",
@@ -554,7 +614,7 @@ def ensure_preview_jpg(source_path, jpg_path, max_edge: int | None = None,
     try:
         with os.fdopen(fd, "wb") as f:
             Image.fromarray(pixels).save(f, format="JPEG", quality=quality,
-                                         comment=rule_stamp(quality))
+                                         comment=rule_stamp(quality, div))
         os.replace(tmp, dst)
     finally:
         if os.path.exists(tmp):
@@ -562,8 +622,34 @@ def ensure_preview_jpg(source_path, jpg_path, max_edge: int | None = None,
                 os.remove(tmp)
             except OSError:
                 pass
-    return {"status": "generated", "path": str(dst), "w": w, "h": h,
-            "error": None}
+    return {"path": str(dst), "w": w, "h": h}
+
+
+def ensure_preview_jpg(source_path, jpg_path, div: int = LEGACY_PREVIEW_DIV,
+                       quality: int = PREVIEW_JPG_QUALITY) -> dict:
+    """Generate preview JPEG if missing/stale; idempotent (cache by caller).
+
+    命中要求两条同时成立：**不比源旧**，且**规则戳等于当前规则**（含档位）。只看
+    mtime 会让升级前烤的图永远不重烤 —— 它的 mtime 就是比源新。
+
+    `div` 是**尺寸与规则戳的共同来源**（不是分开的两个参数）：两者只要有一处不同步，
+    就会出现「尺寸换了但戳没换 → 缓存永远命中 → 界面滑了盘上不动」这种哑火，所以
+    干脆不给它们分开的机会。
+
+    Returns {"status": "generated"|"cached", "path", "w", "h", "error": None}.
+    Raises PreviewError on generation failure.
+    """
+    src, dst = Path(source_path), Path(jpg_path)
+    max_edge = preview_max_edge(src, div)      # 顺带校验 div 合法
+    if dst.is_file() and os.path.getmtime(dst) >= os.path.getmtime(src):
+        hit = cache_hit(dst, quality, div)
+        if hit is not None:
+            return {"status": "cached", "path": str(dst),
+                    "w": hit["w"], "h": hit["h"], "error": None}
+    pixels = build_preview_pixels(str(src), max_edge)
+    out = write_preview_jpg(dst, pixels, quality=quality, div=div)
+    return {"status": "generated", "path": out["path"],
+            "w": out["w"], "h": out["h"], "error": None}
 
 
 def is_uncompressed_strip_error(msg: str) -> bool:

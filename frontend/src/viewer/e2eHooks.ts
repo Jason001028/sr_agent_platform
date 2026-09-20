@@ -97,6 +97,10 @@ export interface ViewerHook {
   activeStretch: () => StretchMode;
   /** 直接切拉伸（等效工具栏下拉 change）。 */
   setStretch: (m: StretchMode) => void;
+  /** 预览烘焙档位（各边 ÷N，工具栏拖动条那个值）。 */
+  previewDiv: () => number;
+  /** 直接切档位（等效工具栏拖动条 input）。 */
+  setPreviewDiv: (div: number) => void;
   // 待修复清单（ROI/工具 置顶面板）：导入 / 标记 / 生成写回文本 / 真的写回。
   // 写盘改走后端之后这步进得了回归了（原先走 FSA 系统弹窗，只能验到 output() 为止）；
   // qcSync 要真跑通得有后端 + 盘阵根，所以只在 test-manual-scene 那套里调。
@@ -122,6 +126,43 @@ export interface ViewerHook {
   };
   /** 按生产全名去盘阵开场景（真机验收用；外网开发机没有盘阵，必然报错）。 */
   qcOpenByName: (name: string) => Promise<string>;
+  // 图像对比（关闭 / 点选对比 / 分屏对比，2026-09-20）
+  /** 当前模式。 */
+  cmpMode: () => import('../lib/compare.js').CompareMode;
+  /** 切模式（等效对比条三选一）。 */
+  setCmpMode: (m: import('../lib/compare.js').CompareMode) => void;
+  /** 对比条是否展开。 */
+  cmpStripOpen: () => boolean;
+  setCmpStripOpen: (open: boolean) => void;
+  /** 两格的渲染输入：每格的视口矩形、视图变换、上面那张 rec 的 id、是不是活动侧。
+   *  单屏时只有一条（rect 铺满画布）。 */
+  cmpPanes: () => {
+    side: 'A' | 'B';
+    rect: { x: number; y: number; w: number; h: number };
+    view: { scale: number; ox: number; oy: number };
+    recId: number | null;
+    active: boolean;
+  }[];
+  /** 活动侧（分屏下决定掩码/云量/任务状态跟着谁）。 */
+  activeSide: () => 'A' | 'B';
+  setActiveSide: (s: 'A' | 'B') => void;
+  /** 分隔比例（0.5 = 正中）。 */
+  splitRatio: () => number;
+  setSplitRatio: (r: number) => void;
+  /** 分隔线在**画布局部**坐标里的位置（= 左格宽；单屏时等于画布宽）。
+   *  落点判据与 `paneAtX` 都用它，所以 e2e 要能直接读到，别自己再算一遍。 */
+  splitX: () => number;
+  /** 回正（比例回 0.5 且两侧重新适配）。 */
+  cmpReset: () => void;
+  /** 落位提示（dragover 期间为真，500ms 无新事件自己熄）。 */
+  dragHint: () => { active: boolean; side: 'A' | 'B' | null };
+  /** 点选清单里的 rec id（有序）。 */
+  cmpList: () => number[];
+  /** 把一条移出点选清单（等效行内「清除」）。 */
+  cmpClear: (id: number) => void;
+  /** 右侧栏是否展开 + 进分屏前的记忆值（撤销自动收起用）。 */
+  ctxRail: () => { open: boolean; prev: boolean | null };
+  setCtxRail: (open: boolean) => void;
 }
 
 declare global {
@@ -190,6 +231,8 @@ export function mountE2EHooks(): ViewerHook {
     },
     activeStretch: () => useViewerStore().activeStretch,
     setStretch: (m) => useViewerStore().setStretch(m),
+    previewDiv: () => useViewerStore().previewDiv,
+    setPreviewDiv: (div) => useViewerStore().setPreviewDiv(div),
     qcImport: (name, text) => useQcListStore().importText(name, text, 'utf-8'),
     qcClose: () => useQcListStore().close(),
     qcSetStatus: (name, s) => useQcListStore().setStatus(name, s),
@@ -210,6 +253,31 @@ export function mountE2EHooks(): ViewerHook {
       };
     },
     qcOpenByName: (name) => useScenesStore().openByName(name),
+    cmpMode: () => useViewerStore().compareMode,
+    setCmpMode: (m) => useViewerStore().setCompareMode(m),
+    cmpStripOpen: () => useViewerStore().cmpStripOpen,
+    setCmpStripOpen: (open) => useViewerStore().setCmpStripOpen(open),
+    cmpPanes: () => useViewerStore().panes.map((p) => ({
+      side: p.side,
+      rect: { ...p.rect },
+      view: { ...p.view },
+      recId: p.rec ? p.rec.id : null,
+      active: p.active,
+    })),
+    activeSide: () => useViewerStore().activeSide,
+    setActiveSide: (s) => useViewerStore().setActiveSide(s),
+    splitRatio: () => useViewerStore().splitRatio,
+    setSplitRatio: (r) => useViewerStore().setSplitRatio(r),
+    splitX: () => useViewerStore().splitX,
+    cmpReset: () => useViewerStore().resetSplit(),
+    dragHint: () => ({ ...useViewerStore().dragHint }),
+    cmpList: () => [...useViewerStore().compareList],
+    cmpClear: (id) => useViewerStore().clearCompareEntry(id),
+    ctxRail: () => ({
+      open: useViewerStore().ctxRailOpen,
+      prev: useViewerStore().ctxRailPrevOpen,
+    }),
+    setCtxRail: (open) => useViewerStore().setCtxRailOpen(open),
   };
   if (window.__viewer !== hook) window.__viewer = hook;
   return hook;

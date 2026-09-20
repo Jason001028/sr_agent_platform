@@ -198,6 +198,21 @@ class TestImageScenes(unittest.TestCase):
             sub.mkdir()
             self.assertFalse(svc.is_scene_file(sub))
 
+    def test_drop_preview_beside_source_is_not_a_scene(self):
+        """拖入链烤出来的 `<stem>_preview.jpg` 不得被列成一行场景。
+
+        它跟源同目录、后缀也是 .jpg，只有「stem 必须等于目录名」这条能挡住它 ——
+        白名单一旦放宽，用户拖入一次就会在场景库里多出一行假场景。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            scene = write_scene(d, "GF07A03_PMS01_20260722125045")
+            self.assertTrue(svc.is_scene_file(scene))
+            self.assertFalse(svc.is_scene_file(
+                scene.parent / "GF07A03_PMS01_20260722125045_preview.jpg"))
+            # 平台自己那份缓存（点号名）同样不列 —— 已有的行为，一起钉住
+            self.assertFalse(svc.is_scene_file(
+                scene.parent / "GF07A03_PMS01_20260722125045.preview.jpg"))
+
 
 class TestFakeScenes(unittest.TestCase):
     def test_shape(self):

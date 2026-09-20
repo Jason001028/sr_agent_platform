@@ -771,8 +771,8 @@ class TestResolveFingerprint(ResolveBase):
         self.assertEqual(r.status_code, 200, r.text)
 
 
-class TestTempPreview(ResolveBase):
-    """`/preview-tmp`：拖拽入口的临时缓存 —— 落独立目录、不碰源同目录。"""
+class TestDropPreview(ResolveBase):
+    """`/preview-drop`：拖入链的预览 —— **写进生产场景目录**，落不下才退回临时缓存。"""
 
     def setUp(self):
         super().setUp()
@@ -780,50 +780,145 @@ class TestTempPreview(ResolveBase):
         os.environ["SR_TEMP_PREVIEWS_ROOT"] = str(self.tmp_root)
         self.d = self.make_scene()
         self.tif = self.d / f"{SCENE_NAME}.tif"
+        self.drop_jpg = self.d / f"{SCENE_NAME}_preview.jpg"
 
     def scene_id_of_manual(self, c) -> str:
         return c.post("/api/scenes/resolve",
                       json={"path": self.win_path(self.d)}).json()["row"]["id"]
 
-    def test_bakes_into_temp_root_not_beside_source(self):
+    def tmp_bucket(self) -> Path:
+        return self.tmp_root / date.today().isoformat()
+
+    def test_bakes_into_scene_dir(self):
+        """核心：拖入链的产物落在**源同目录**、叫 `<stem>_preview.jpg`。"""
         c = self.client()
-        r = c.get(f"/api/scenes/{self.scene_id_of_manual(c)}/preview-tmp")
+        r = c.get(f"/api/scenes/{self.scene_id_of_manual(c)}/preview-drop")
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.headers["content-type"], "image/jpeg")
         self.assertEqual(r.headers["cache-control"], "no-store")
-        bucket = self.tmp_root / date.today().isoformat()
-        self.assertTrue((bucket / ".sr-tmp-preview").is_file())
-        self.assertTrue(list(bucket.glob("*.jpg")))
-        # 核心证据：临时路径**不写**源同目录那份长期缓存
+        self.assertTrue(self.drop_jpg.is_file())
+        # 没有走兜底
+        self.assertNotIn("x-sr-preview-fallback", r.headers)
+        # 不写平台自己那份缓存，也不碰临时桶
         self.assertFalse((self.d / f"{SCENE_NAME}.preview.jpg").exists())
+        self.assertFalse(self.tmp_bucket().exists())
 
     def test_second_request_hits_cache(self):
         """第二次不再重烤：mtime 不变（烘焙一次大图很贵，别每次都来）。"""
         c = self.client()
         sid = self.scene_id_of_manual(c)
-        c.get(f"/api/scenes/{sid}/preview-tmp")
-        bucket = self.tmp_root / date.today().isoformat()
-        jpg = next(iter(bucket.glob("*.jpg")))
-        first = jpg.stat().st_mtime_ns
-        r = c.get(f"/api/scenes/{sid}/preview-tmp")
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(jpg.stat().st_mtime_ns, first)
+        c.get(f"/api/scenes/{sid}/preview-drop")
+        first = self.drop_jpg.stat().st_mtime_ns
+        self.assertEqual(c.get(f"/api/scenes/{sid}/preview-drop").status_code, 200)
+        self.assertEqual(self.drop_jpg.stat().st_mtime_ns, first)
+
+    def test_div_change_rebakes_in_place(self):
+        """换档位 → **同一个落点原地重烤**（尺寸变了，文件数不变）。
+
+        这是「div 进戳」的直接验收：只按落点判缓存的话，这里第二次会命中、
+        盘上那张图一个字节都不变。
+        """
+        c = self.client()
+        sid = self.scene_id_of_manual(c)
+        c.get(f"/api/scenes/{sid}/preview-drop?div=2")
+        with Image.open(self.drop_jpg) as im:
+            self.assertEqual(im.size, (160, 320))
+        c.get(f"/api/scenes/{sid}/preview-drop?div=8")
+        with Image.open(self.drop_jpg) as im:
+            self.assertEqual(im.size, (40, 80))
+        self.assertEqual(len(list(self.d.glob("*_preview.jpg"))), 1)
+
+    def test_each_div_bakes_its_own_size(self):
+        """档位维度的尺寸表：源 320×640（竖幅），长边 = 640/div。"""
+        c = self.client()
+        sid = self.scene_id_of_manual(c)
+        for div, (w, h) in ((2, (160, 320)), (4, (80, 160)), (8, (40, 80)),
+                            (16, (20, 40)), (32, (10, 20))):
+            with self.subTest(div=div):
+                self.assertEqual(
+                    c.get(f"/api/scenes/{sid}/preview-drop?div={div}").status_code,
+                    200, f"div={div}")
+                with Image.open(self.drop_jpg) as im:
+                    self.assertEqual(im.size, (w, h))
+
+    def test_invalid_div_400(self):
+        """非法档位一律 400（三条入口同一套校验），且不落任何文件。"""
+        c = self.client()
+        sid = self.scene_id_of_manual(c)
+        for bad in (0, 1, 3, 64, -4):
+            with self.subTest(div=bad):
+                r = c.get(f"/api/scenes/{sid}/preview-drop?div={bad}")
+                self.assertEqual(r.status_code, 400, r.text)
+        self.assertFalse(self.drop_jpg.exists())
+
+    def test_fallback_to_tmp_when_scene_dir_unwritable(self):
+        """场景目录不可写 → 退回临时缓存，回响应头如实说明。"""
+        c = self.client()
+        sid = self.scene_id_of_manual(c)
+        real_access = os.access
+        with mock.patch.object(
+                os, "access",
+                side_effect=lambda p, m, **kw: (False if Path(p) == self.d
+                                                else real_access(p, m, **kw))):
+            r = c.get(f"/api/scenes/{sid}/preview-drop")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.headers["x-sr-preview-fallback"], "tmp")
+        self.assertFalse(self.drop_jpg.exists())
+        self.assertTrue(list(self.tmp_bucket().glob("*.jpg")))
+
+    def test_both_paths_fail_422(self):
+        """两条落点都写不进去 → 422，而不是 500 逃出去。"""
+        from backend.api import app as app_mod
+        c = self.client()
+        sid = self.scene_id_of_manual(c)
+        real_access = os.access
+        with mock.patch.object(
+                os, "access",
+                side_effect=lambda p, m, **kw: (False if Path(p) == self.d
+                                                else real_access(p, m, **kw))), \
+                mock.patch.object(app_mod, "ensure_preview_jpg",
+                                  side_effect=OSError("磁盘满")):
+            r = c.get(f"/api/scenes/{sid}/preview-drop")
+        self.assertEqual(r.status_code, 422, r.text)
+        self.assertIn("预览生成失败", r.json()["detail"])
 
     def test_jpeg_source_short_circuits(self):
         """源本身就是 JPG（显示就绪图）：回源文件，不尝试烘焙 ——
         `build_preview_pixels` 只认 TIFF，不给这行短路就会 422。"""
         jpg_scene = self.d / "display.jpg"
         Image.new("L", (32, 32), 7).save(jpg_scene)
-        r = self.client().get(f"/api/scenes/{scene_id_abs(jpg_scene)}/preview-tmp")
+        r = self.client().get(
+            f"/api/scenes/{scene_id_abs(jpg_scene)}/preview-drop")
         self.assertEqual(r.status_code, 200, r.text)
 
     def test_outside_whitelist_404(self):
         outside = Path("/etc/passwd") if os.name != "nt" else Path("C:/Windows/win.ini")
-        r = self.client().get(f"/api/scenes/{scene_id_abs(outside)}/preview-tmp")
+        r = self.client().get(f"/api/scenes/{scene_id_abs(outside)}/preview-drop")
         self.assertEqual(r.status_code, 404)
 
+    def test_drop_preview_is_not_listed_as_a_scene(self):
+        """`<stem>_preview.jpg` 不会在场景库里多出一行。
+
+        `scene_search.is_scene_file` 是「文件名 == 目录名 或 PAN」的白名单，
+        下划线名本来就拒 —— 这条把它钉住，免得日后有人把白名单放宽。
+        """
+        c = self.client()
+        self.assertEqual(c.get(f"/api/scenes/{self.scene_id_of_manual(c)}"
+                               "/preview-drop").status_code, 200)
+        self.assertTrue(self.drop_jpg.is_file())
+        names = [r["name"] for r in
+                 self._listed_rows(self.root)]
+        self.assertNotIn(f"{SCENE_NAME}_preview", names)
+
+    def _listed_rows(self, root: Path) -> list[dict]:
+        os.environ["SR_SCENES_ROOT"] = str(root)
+        try:
+            return self.client().get("/api/scenes").json()["results"]
+        finally:
+            os.environ.pop("SR_SCENES_ROOT", None)
+
     def test_never_lists_directories(self):
-        """禁止扫盘的钉子同样管着临时路径：`tmp_preview_path` 只 mkdir + stat。"""
+        """禁止扫盘的钉子同样管着这条链：落点只 mkdir + stat + os.access。"""
         c = self.client()
         sid = self.scene_id_of_manual(c)
         with ExitStack() as st:
@@ -835,8 +930,262 @@ class TestTempPreview(ResolveBase):
                 st.enter_context(mock.patch.object(
                     os, name,
                     side_effect=AssertionError(f"禁止 os.{name}（扫盘）")))
-            r = c.get(f"/api/scenes/{sid}/preview-tmp")
+            r = c.get(f"/api/scenes/{sid}/preview-drop")
             self.assertEqual(r.status_code, 200, r.text)
+
+
+class TestResolveRasterPreview(ResolveBase):
+    """显示件 jpg 的「同名栅格」比较依据（api-contract 的「显示源比较规则」）。
+
+    两条入口各自算一份，因为它们的 `row` 来源不同：
+      * **库行**（`/api/scenes` 列表，`<目录名>.jpg` 是白名单内的场景文件）：
+        `_scene_row` 的 jpg 短路分支里按**这份 jpg 自己**算；
+      * **拖拽**（`POST /api/scenes/resolve {name}`）：`row` 描述的是**栅格**输入
+        影像，所以那句按 jpg 源算的逻辑必然为 None，得单独按**盘阵那张 jpg** 补。
+
+    比较所需的两个尺寸都从后端读（前端拿不到盘阵文件，也不该为此多发一次请求）。
+
+    这里同时钉住一条**红线**：`hasPreview / jpgUrl / previewDiv` 的语义一个字都不
+    变 —— jpg 行的显示源仍是那张 jpg，`rasterPreview` 是**另加**的一路参考
+    （gui-experience §9.2，也是 e2e `test-scenes.js` 的「JPG 源」判据）。
+    """
+
+    def _write_jpg(self, path: Path, w: int, h: int) -> Path:
+        arr = (np.arange(w * h).reshape(h, w) % 256).astype(np.uint8)
+        Image.fromarray(arr).save(path, quality=90)
+        return path
+
+    def _library_row(self, name: str, ext: str = ".tif") -> dict:
+        """把临时根当场景库列出，取 `<name><ext>` 那一行。
+
+        **必须带后缀筛**：同一目录里 `<目录名>.tif` 与 `<目录名>.jpg` 都在白名单内
+        （`is_scene_file` 判的是 stem == 目录名），所以库里本来就是**两行同名**的
+        场景 —— 这不本轮去重（计划 §六.4 留作下轮议题），但取行时得说清要哪一份。
+        `rel` 含文件名，是唯一能分辨两者的字段。
+        """
+        os.environ["SR_SCENES_ROOT"] = str(self.root)
+        try:
+            rows = self.client().get("/api/scenes").json()["results"]
+        finally:
+            os.environ.pop("SR_SCENES_ROOT", None)
+        hit = [r for r in rows
+               if r["name"] == name and (r["rel"] or "").endswith(ext)]
+        self.assertEqual(len(hit), 1,
+                         f"{name}{ext} 该恰好一行：{[(r['name'], r['rel']) for r in rows]}")
+        return hit[0]
+
+    # ---- 库行入口 ---------------------------------------------------------
+
+    def test_library_jpg_row_carries_the_comparison(self):
+        """盘阵显示件（320×640 的栅格配 64×32 的 `<目录名>.jpg`）→ 都交给前端比。"""
+        d = self.make_scene()
+        self._write_jpg(d / f"{SCENE_NAME}.jpg", 64, 32)
+
+        row = self._library_row(SCENE_NAME, ".jpg")
+
+        rp = row["rasterPreview"]
+        self.assertIsNotNone(rp, "同目录有同名栅格 → 必须给出比较依据")
+        self.assertEqual(rp["name"], f"{SCENE_NAME}.tif")
+        self.assertEqual((rp["rasterW"], rp["rasterH"]), (320, 640))
+        self.assertEqual((rp["jpgW"], rp["jpgH"]), (64, 32))
+        self.assertFalse(rp["hasPreview"], "还没人烤过，前端据此提示首次较慢")
+
+    def test_library_jpg_row_keeps_its_own_display_source(self):
+        """**红线**：加了 rasterPreview 之后，这一行自己的三个字段语义不变。
+
+        jpg 行的显示源就是那张 jpg（`hasPreview=True` / `jpgUrl` 直指源文件 /
+        `previewDiv` 留 None —— 它不是烤出来的预览）。`rasterPreview` 是**另加**的
+        一路参考，不是把这三个字段改指向栅格。
+        """
+        d = self.make_scene()
+        self._write_jpg(d / f"{SCENE_NAME}.jpg", 64, 32)
+
+        row = self._library_row(SCENE_NAME, ".jpg")
+
+        self.assertTrue(row["hasPreview"], "还是那句「jpg 就是显示源」")
+        self.assertTrue(row["jpgUrl"].endswith(f"{SCENE_NAME}.jpg"))
+        self.assertFalse(row["jpgUrl"].endswith(".preview.jpg"))
+        self.assertIsNone(row["previewDiv"])
+        # 栅格那一路是**另**一个 id（指向 .tif），不是这一行的 id
+        self.assertNotEqual(row["rasterPreview"]["id"], row["id"])
+
+    def test_library_jpg_row_without_a_sibling_raster_is_null(self):
+        """**没有配套 .tif 就回退显示 jpg 本身**：rasterPreview 为 null，前端照旧。"""
+        d = self.make_scene(tif=False)
+        self._write_jpg(d / f"{SCENE_NAME}.jpg", 64, 32)
+
+        row = self._library_row(SCENE_NAME, ".jpg")
+
+        self.assertIsNone(row["rasterPreview"])
+        self.assertTrue(row["hasPreview"], "退化了也还是能直接看那张 jpg")
+
+    def test_library_raster_row_has_no_raster_preview(self):
+        """栅格行不需要它 —— 它自己就是那条「从栅格烤」的路。"""
+        self.make_scene()
+        row = self._library_row(SCENE_NAME, ".tif")
+        self.assertIsNone(row["rasterPreview"])
+        # 栅格行的 jpgUrl 指的是烤出来的预览（与上面 jpg 行正好相反）
+        self.assertTrue(row["jpgUrl"].endswith(f"{SCENE_NAME}.preview.jpg"))
+
+    # ---- 拖拽入口 ---------------------------------------------------------
+
+    def test_dragged_jpg_gets_the_comparison_against_the_array_jpg(self):
+        """拖 `<目录名>.jpg` 进来时 `row` 描述的是**栅格**输入影像（id/W/H/hasPreview
+        全指向那份 tif），所以比较依据得单独按**盘阵那张 jpg** 补。
+
+        这一条钉的正是「拖 jpg 这条路走不通」的实现错法：把 `_manual_row(inp, ...)`
+        里那句按 jpg 源算的逻辑当成答案，它必然是 None（`inp` 是 .tif），于是前端
+        永远拿不到比较依据、永远显示那张不够清晰的 jpg。
+        """
+        d = self.make_scene()
+        jpg = self._write_jpg(d / f"{SCENE_NAME}.jpg", 64, 32)
+        r = self.client().post("/api/scenes/resolve",
+                               json={"name": jpg.name, "size_bytes": jpg.stat().st_size})
+        self.assertEqual(r.status_code, 200, r.text)
+        row = r.json()["row"]
+
+        # 这一行仍然是栅格行（红线：row 的来源不变）
+        self.assertEqual(row["name"], SCENE_NAME)
+        self.assertNotEqual(row["rasterPreview"], None)
+        self.assertEqual((row["W"], row["H"]), (320, 640))
+
+        rp = row["rasterPreview"]
+        self.assertEqual((rp["rasterW"], rp["rasterH"]), (320, 640), "栅格那一侧")
+        self.assertEqual((rp["jpgW"], rp["jpgH"]), (64, 32),
+                         "盘阵那张 jpg 的尺寸，不是用户本地那份")
+
+    def test_dragged_jpg_uses_the_array_copy_not_the_local_one(self):
+        """**必须量盘阵那张 jpg**：指纹对 jpg 只比名字（不比字节数），所以用户本地
+        那份可能是另存过、缩过的 —— 拿它来比会把「服务端更清晰」判反。
+
+        这里让本地那份**报一个更大的尺寸**（名字相同），盘阵那份仍是 64×32：
+        比较结果必须是按盘阵那份算出来的。
+        """
+        d = self.make_scene()
+        local = self._write_jpg(Path(self._tmp.name) / "local_copy.jpg", 300, 600)
+        self._write_jpg(d / f"{SCENE_NAME}.jpg", 64, 32)     # 盘阵那份
+        r = self.client().post(
+            "/api/scenes/resolve",
+            json={"name": f"{SCENE_NAME}.jpg", "size_bytes": local.stat().st_size})
+        self.assertEqual(r.status_code, 200, r.text)
+
+        rp = r.json()["row"]["rasterPreview"]
+        self.assertEqual((rp["jpgW"], rp["jpgH"]), (64, 32),
+                         "量的是盘阵那份（本地那份是 300×600）")
+
+    def test_dragged_jpg_missing_on_the_array_falls_back_to_local(self):
+        """盘阵上那份 jpg 被删/改名（用户手上只有本地副本）→ 判不出就不换图。
+
+        以前这里会 500：`_cached_dims` 上来就 stat，文件不在就 FileNotFoundError。
+        该退化成「继续显示本地那份」——保守方向是对的。
+        """
+        d = self.make_scene()
+        local = self._write_jpg(Path(self._tmp.name) / "only_local.jpg", 64, 32)
+        r = self.client().post(
+            "/api/scenes/resolve",
+            json={"name": f"{SCENE_NAME}.jpg", "size_bytes": local.stat().st_size})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIsNone(r.json()["row"]["rasterPreview"])
+
+    def test_dragged_jpg_needs_a_raster_to_resolve_at_all(self):
+        """拖 jpg 这条入口**只在有栅格输入的目录上成立** —— 反推命中要求
+        `input_scene_path(d)` 非空（SR 的输入影像），所以「拖 jpg 但目录里没有配套
+        栅格」这个组合压根到不了栅格比较那一步：resolve 自己 404。
+
+        换句话说，拖拽路径上的 `rasterPreview` 只要 resolve 成功就必然非空
+        （除非盘阵那份 jpg 不在，见上一条）——「没有配套 .tif 就回退显示 jpg」那条
+        规则在**库行**入口上才见得到。
+        """
+        d = self.make_scene(tif=False)
+        jpg = self._write_jpg(d / f"{SCENE_NAME}.jpg", 64, 32)
+        r = self.client().post("/api/scenes/resolve",
+                               json={"name": jpg.name, "size_bytes": jpg.stat().st_size})
+        self.assertEqual(r.status_code, 404, r.text)
+
+    def test_dragged_tif_is_unaffected(self):
+        """拖 .tif 那条入口一个字不改（rasterPreview 恒 null，走的是老路）。"""
+        d = self.make_scene()
+        self._write_jpg(d / f"{SCENE_NAME}.jpg", 64, 32)
+        tif = d / f"{SCENE_NAME}.tif"
+        r = self.client().post("/api/scenes/resolve",
+                               json={"name": tif.name, "size_bytes": tif.stat().st_size})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIsNone(r.json()["row"]["rasterPreview"])
+
+    def test_dragged_jpg_resolve_probes_without_listing(self):
+        """新增的那几次探测（找同名栅格）同样只拼名字 + `is_file`，绝不扫盘。
+
+        `sibling_raster_path` 只试 `.tif/.tiff/.img` 三个固定后缀 —— 与
+        `TestNeverListsDirectories` 同一条约束，这里补的是**拖 jpg 这条入口**。
+        """
+        d = self.make_scene()
+        jpg = self._write_jpg(d / f"{SCENE_NAME}.jpg", 64, 32)
+        c = self.client()
+        for i in range(50):
+            (d / f"noise_{i}.dat").write_bytes(b"")
+        with ExitStack() as st:
+            for name in ("rglob", "glob", "iterdir"):
+                st.enter_context(mock.patch.object(
+                    Path, name,
+                    side_effect=AssertionError(f"禁止 Path.{name}（扫盘）")))
+            for name in ("listdir", "scandir", "walk"):
+                st.enter_context(mock.patch.object(
+                    os, name,
+                    side_effect=AssertionError(f"禁止 os.{name}（扫盘）")))
+            r = c.post("/api/scenes/resolve",
+                       json={"name": jpg.name, "size_bytes": jpg.stat().st_size})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIsNotNone(r.json()["row"]["rasterPreview"])
+
+    def test_dragged_jpg_resolve_probes_a_bounded_number_of_files(self):
+        """探测次数不随目录内容增长（与 `TestNeverListsDirectories` 同一口径）。
+
+        拖 jpg 比拖 tif 多几次探测（同名栅格的 3 个后缀 + 盘阵 jpg 的 W/H 头读），
+        那些都是**固定次数**的：本条实测 25 次，上限放到 35 留余量。真正要挡的是
+        「换成列举目录再筛」—— 那种改法下这个数会随那 50 个噪声文件涨上去。
+        """
+        d = self.make_scene()
+        for i in range(50):
+            (d / f"noise_{i}.dat").write_bytes(b"")
+        jpg = self._write_jpg(d / f"{SCENE_NAME}.jpg", 64, 32)
+        c = self.client()
+        real_stat = Path.stat
+        calls: list[str] = []
+
+        def counting_stat(self, *a, **kw):
+            calls.append(self.name)
+            return real_stat(self, *a, **kw)
+
+        with mock.patch.object(Path, "stat", counting_stat):
+            r = c.post("/api/scenes/resolve",
+                       json={"name": jpg.name, "size_bytes": jpg.stat().st_size})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertNotIn("noise_0.dat", calls)
+        self.assertLessEqual(len(calls), 35, calls)
+
+    def test_preview_div_is_read_from_the_existing_bake(self):
+        """盘上那份预览按哪一档烤的也要报出来 —— 前端据此判断要不要重烤。
+
+        「从栅格烤」的落点与栅格行**同一份** `<stem>.preview.jpg`（`with_suffix`
+        对 jpg 与 tif 是同一个文件名），所以这里烤过一次之后，jpg 行的
+        `rasterPreview.hasPreview/previewDiv` 就该跟着变 —— 两行共用一个缓存，
+        不会各烤一份。
+        """
+        d = self.make_scene()
+        self._write_jpg(d / f"{SCENE_NAME}.jpg", 64, 32)
+        os.environ["SR_SCENES_ROOT"] = str(self.root)
+        c = self.client()
+        sid = scene_id(f"GSHC2IMPS/PRODUCT/2026/09/17/{SAT_NAME}/{PROD_MID}/"
+                       f"{SCENE_NAME}/{SCENE_NAME}.tif")
+        for div in (2, 8):
+            pv = c.get(f"/api/scenes/{sid}/preview", params={"div": div})
+            self.assertEqual(pv.status_code, 200, pv.text)
+            row = self._library_row(SCENE_NAME, ".jpg")
+            self.assertTrue(row["rasterPreview"]["hasPreview"])
+            self.assertEqual(row["rasterPreview"]["previewDiv"], div,
+                             "档位从落点那份 jpg 的注释里读回来")
+            # 落点与栅格行同一份（`with_suffix` 对 jpg 与 tif 是同一个文件名）
+            self.assertTrue((d / f"{SCENE_NAME}.preview.jpg").is_file())
 
 
 class TestManualSceneId(ResolveBase):

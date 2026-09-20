@@ -4,6 +4,7 @@ Env is injected per-test before create_app(); TestClient drives the app in
 memory. Fixtures are uncompressed strip TIFFs under a temp SR_SCENES_ROOT.
 """
 
+import io
 import os
 import tempfile
 import unittest
@@ -16,6 +17,7 @@ from PIL import Image
 
 from backend.api import paths
 from backend.api.app import create_app
+from backend.services.preview_jpg import rule_stamp, stamp_div
 
 
 def make_scene(dirp, name, w=320, h=640):
@@ -291,6 +293,85 @@ class TestPreview(SceneListMixin):
         r = c.get("/api/health")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["source"], "disk")
+
+
+class TestPreviewDiv(SceneListMixin):
+    """下采样档位：`?div=` 参数 + 行上的 `previewDiv` 回填。
+
+    前端据 `previewDiv` 与当前档位比对来决定要不要重烤 —— 只看 `hasPreview`
+    不够（它不认档位），这是「滑了滑块盘上却不动」那个哑火的根因。
+    """
+
+    NAME = "GF07A03_PMS01_20260722125045"
+
+    def setUp(self):
+        super().setUp()
+        make_scene(self._root.name, self.NAME + ".tif", 320, 640)
+        self.jpg = Path(self._root.name, self.NAME, self.NAME + ".preview.jpg")
+
+    def _client(self):
+        return self.client(self._root.name)
+
+    def _row(self, c):
+        return c.get("/api/scenes").json()["results"][0]
+
+    def test_row_preview_div_is_none_before_baking(self):
+        row = self._row(self._client())
+        self.assertFalse(row["hasPreview"])
+        self.assertIsNone(row["previewDiv"])
+
+    def test_row_preview_div_reflects_the_baked_level(self):
+        c = self._client()
+        sid = self._row(c)["id"]
+        c.get(f"/api/scenes/{sid}/preview?div=8")
+        row = self._row(c)
+        self.assertTrue(row["hasPreview"])
+        self.assertEqual(row["previewDiv"], 8)
+        # 换档位、原地重烤 → 行字段跟着变
+        c.get(f"/api/scenes/{sid}/preview?div=2")
+        self.assertEqual(self._row(c)["previewDiv"], 2)
+
+    def test_legacy_stamp_reads_as_none(self):
+        """v2 那代戳解不出 div → None → 前端按当前档位重烤一轮（惰性，预期内）。"""
+        c = self._client()
+        sid = self._row(c)["id"]
+        self.jpg.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.jpg, "wb") as f:
+            Image.new("L", (16, 32)).save(
+                f, format="JPEG", comment=rule_stamp(85, 2).replace(
+                    b"div2", b"half"))
+        os.utime(self.jpg, None)
+        self.assertIsNone(self._row(c)["previewDiv"])
+
+    def test_each_div_bakes_its_own_size_and_stamp(self):
+        c = self._client()
+        sid = self._row(c)["id"]
+        for div, (w, h) in ((2, (160, 320)), (4, (80, 160)), (8, (40, 80)),
+                            (16, (20, 40)), (32, (10, 20))):
+            with self.subTest(div=div):
+                r = c.get(f"/api/scenes/{sid}/preview?div={div}")
+                self.assertEqual(r.status_code, 200, r.text)
+                with Image.open(io.BytesIO(r.content)) as im:
+                    self.assertEqual(im.size, (w, h))
+                    self.assertEqual(stamp_div(im.info.get("comment")), div)
+
+    def test_invalid_div_400(self):
+        c = self._client()
+        sid = self._row(c)["id"]
+        for bad in (0, 1, 3, 64):
+            with self.subTest(div=bad):
+                self.assertEqual(
+                    c.get(f"/api/scenes/{sid}/preview?div={bad}").status_code, 400)
+        self.assertFalse(self.jpg.exists())
+
+    def test_default_div_is_legacy_two(self):
+        """缺 `div` 参数 = 逐字节等于换档位之前的行为（旧 dist 配新 backend 不乱套）。"""
+        c = self._client()
+        sid = self._row(c)["id"]
+        r = c.get(f"/api/scenes/{sid}/preview")
+        with Image.open(io.BytesIO(r.content)) as im:
+            self.assertEqual(im.size, (160, 320))
+            self.assertEqual(im.info.get("comment"), rule_stamp(85, 2))
 
 
 if __name__ == "__main__":

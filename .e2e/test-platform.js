@@ -284,6 +284,28 @@ async function main() {
       assert(rowInfo.cands.length === 1 && path.resolve(rowInfo.cands[0]) === path.resolve(lqPath),
         `目录下拉候选 = 队列里出现过的目录（${rowInfo.cands.join(',')}）`);
 
+      // 产物预览急烤：作业转 COMPLETED 之后，后端**从库里派生**出一件待烤的活
+      // （不挂在状态转换上，那个竞态见 api-contract §3.3），队列行随之多两个字段。
+      // 急烤是后台循环（每 SR_QUEUE_POLL_SEC 一轮、每轮至多一件），所以这里等到它
+      // 落定再断 —— 提交完立刻读会读到 `preview_state` 还是 null 的那一刻。
+      const pk = await waitFor(page, async (ab) => {
+        const r = await fetch(ab + '/api/queue');
+        const t = (await r.json()).tasks[0];
+        return t && t.preview_state ? t : null;
+      }, 20000, '急烤落定', apiBase);
+      // 事实（跑出来的，不是猜的）：假调度器只推状态机、**不写任何产物 tif**，
+      // 于是急烤拿到的是「完成但没有产物」—— 记 skipped + product_missing，
+      // **不是 failed**：云限额跳过的作业同样是合法 COMPLETED，运维看到「跳过」
+      // 得能从 note 里立刻分清是哪一种，所以 note 必须列出试过的候选名。
+      // 断到「有两个候选、都按输入名派生」为止，**不钉后缀字面量**：那个后缀来自
+      // SR 团队的配置文件（这里是缺省 `sr`），换台机器/换个包就变，钉死会把环境
+      // 差异报成回归。要钉的是「试过哪些名字都说出来了」这件事。
+      const note = String(pk.preview_note ?? '');
+      assert(pk.preview_state === 'skipped' && note.startsWith('product_missing:')
+        && note.includes(SCENE + '_') && note.split('/').length === 2
+        && note.trim().endsWith('.tiff，都不存在'),
+        `没有产物 → skipped/product_missing 并列出两个候选名 (${note})`);
+
       await clickByText(page, '再提交');
       await waitFor(page, () => {
         const t = document.querySelector('.qp-form .qp-draft-tip');

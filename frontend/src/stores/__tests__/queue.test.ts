@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   defaultForm, draftToForm, formToSubmit, derivedMaskPath, mergeJobUpdate, stateTone,
+  mergePreviewUpdate,
   tasksForScene, normDir, pathLeafOf,
   isActiveState, taskElapsed, formatDuration,
 } from '../queue.js';
@@ -23,6 +24,7 @@ function task(over: Partial<QueueTask> = {}): QueueTask {
     },
     config_xml: null, batch_script: null, log_dir: null,
     created_at: 0, updated_at: 0, started_at: null, finished_at: null,
+    preview_state: null, preview_note: null,
     ...over,
   };
 }
@@ -274,6 +276,41 @@ describe('mergeJobUpdate（SSE 归并）', () => {
       });
       expect(next[0].updated_at).toBe(1042);
     }
+  });
+});
+
+describe('mergePreviewUpdate（SSE 归并：产物急烤）', () => {
+  it('task_id 匹配 → 覆盖两个预览字段，其余行不动', () => {
+    const rows = [task({ task_id: 1, state: 'COMPLETED' }),
+                  task({ task_id: 2, state: 'COMPLETED', preview_state: 'done',
+                         preview_note: 'old' })];
+    const next = mergePreviewUpdate(rows, {
+      type: 'preview_update', task_id: 1,
+      state: 'skipped', note: 'product_missing: 没有找到产物，试过 a_260318.tif、a_260318.tiff',
+    });
+    expect(next[0].preview_state).toBe('skipped');
+    expect(next[0].preview_note).toContain('product_missing');
+    expect(next[1].preview_state).toBe('done');   // task 2 不受影响
+    expect(rows[0].preview_state).toBeNull();     // 不可变：原数组未动
+  });
+
+  it('无匹配 task → 原数组引用不变（权威始终在 list()）', () => {
+    // 急烤的认领与广播都在后端，前端可能还没把这个 task 拉进列表 —— 这时既不该
+    // 凭空补一行，也不该让上游误以为「变了」而重渲染。
+    const rows = [task({ task_id: 1 })];
+    expect(mergePreviewUpdate(rows, {
+      type: 'preview_update', task_id: 99, state: 'done', note: null,
+    })).toBe(rows);
+  });
+
+  it('note 缺席时为 null（done 那档本来就没人话，不该留上一轮的旧话）', () => {
+    const rows = [task({ task_id: 1, preview_state: 'running',
+                         preview_note: 'product_missing: …' })];
+    const next = mergePreviewUpdate(rows, {
+      type: 'preview_update', task_id: 1, state: 'done', note: null,
+    });
+    expect(next[0].preview_state).toBe('done');
+    expect(next[0].preview_note).toBeNull();
   });
 });
 

@@ -4,14 +4,18 @@
  * Node 环境（无 DOM）：只测纯函数 —— query 拼装 / RGBA→1band src（线性=恒等）/
  * 元数据 W/H 的 thumbToOrig 换算分支。JPG 加载/画布在浏览器 .e2e 回归覆盖。
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   loadSrConfig, joinBase, scenesQuery, scenesListUrl, scenePreviewUrl,
-  tmpPreviewUrl,
+  dropPreviewUrl,
   sceneImageUrl, graySrcFromRgba, sceneDecodePixels, thumbPolysToOrig,
   todayScenePrefix, sceneResolveUrl,
   isImageSource, startStretch, SCENE_START_STRETCH,
+  isBakedPreviewUrl, previewNeedsBake, previewDivLabel, loadPreviewDiv,
+  savePreviewDiv, SCENE_PREVIEW_DIVS, DEFAULT_PREVIEW_DIV,
+  rasterPreviewWins,
 } from '../scene.js';
+import type { SceneRow, RasterPreview } from '../scene.js';
 import { stretchRgba } from '../tifDecode.js';
 import { thumbToOrig } from '../viewMath.js';
 
@@ -47,17 +51,184 @@ describe('scenesQuery / 列表 URL', () => {
   });
 
   it('id 含特殊字符安全进 URL', () => {
-    expect(scenePreviewUrl({ apiBase: '', staticBase: '' }, 'a/b+c=='))
-      .toBe('/api/scenes/a%2Fb%2Bc%3D%3D/preview');
-    // 临时那条是**另一个端点**，不是同 URL 带参数：落点与生命周期都不同
-    expect(tmpPreviewUrl({ apiBase: '', staticBase: '' }, 'a/b+c=='))
-      .toBe('/api/scenes/a%2Fb%2Bc%3D%3D/preview-tmp');
-    expect(tmpPreviewUrl({ apiBase: 'http://127.0.0.1:8000/', staticBase: '' }, 'x'))
-      .toBe('http://127.0.0.1:8000/api/scenes/x/preview-tmp');
+    expect(scenePreviewUrl({ apiBase: '', staticBase: '' }, 'a/b+c==', 4))
+      .toBe('/api/scenes/a%2Fb%2Bc%3D%3D/preview?div=4');
+    // 拖入那条是**另一个端点**，不是同 URL 带参数：落点与生命周期都不同
+    expect(dropPreviewUrl({ apiBase: '', staticBase: '' }, 'a/b+c==', 8))
+      .toBe('/api/scenes/a%2Fb%2Bc%3D%3D/preview-drop?div=8');
+    expect(dropPreviewUrl({ apiBase: 'http://127.0.0.1:8000/', staticBase: '' }, 'x'))
+      .toBe(`http://127.0.0.1:8000/api/scenes/x/preview-drop`
+        + `?div=${DEFAULT_PREVIEW_DIV}`);
     expect(sceneImageUrl({ apiBase: '', staticBase: '' }, '/disk-array/x/y.jpg'))
       .toBe('/disk-array/x/y.jpg');
     expect(sceneImageUrl({ apiBase: '', staticBase: 'http://static:9000' }, '/disk-array/a b.jpg'))
       .toBe('http://static:9000/disk-array/a b.jpg');
+  });
+});
+
+describe('预览档位（全局下采样）', () => {
+  const CFG = { apiBase: '', staticBase: 'http://static:9000' };
+
+  it('静态 URL 只对**烤出来的**预览拼 ?div=（源本身就是 JPG 的行不拼）', () => {
+    expect(sceneImageUrl(CFG, '/disk-array/a/b.preview.jpg', 8))
+      .toBe('http://static:9000/disk-array/a/b.preview.jpg?div=8');
+    // 源即显示件：档位对它无意义，拼了反而打红逐字断言的 e2e
+    expect(sceneImageUrl(CFG, '/disk-array/a/b.jpg', 8))
+      .toBe('http://static:9000/disk-array/a/b.jpg');
+    expect(sceneImageUrl(CFG, '/disk-array/a/b.preview.jpg'))
+      .toBe('http://static:9000/disk-array/a/b.preview.jpg');
+    expect(sceneImageUrl(CFG, null, 8)).toBe('');
+  });
+
+  it('isBakedPreviewUrl 认的是产物名，不是「后缀是 jpg」', () => {
+    expect(isBakedPreviewUrl('/disk-array/a/b.preview.jpg')).toBe(true);
+    expect(isBakedPreviewUrl('/disk-array/a/b.preview.jpeg')).toBe(true);
+    expect(isBakedPreviewUrl('/disk-array/a/b.jpg')).toBe(false);
+    expect(isBakedPreviewUrl('/disk-array/a/b_preview.jpg')).toBe(false);
+    expect(isBakedPreviewUrl(null)).toBe(false);
+  });
+
+  const row = (over: Partial<SceneRow>): SceneRow => ({
+    id: 'x', name: 'n', satellite: null, sensor: null, date: null,
+    size_bytes: 0, fake: false, W: 1, H: 1, rel: null,
+    jpgUrl: null, hasPreview: false, lq_path: null, ...over,
+  });
+
+  it('previewNeedsBake：四条分支', () => {
+    // 库外（无静态 URL）→ 打 /preview，会烤
+    expect(previewNeedsBake(row({ jpgUrl: null }), 4)).toBe(true);
+    // 缓存不在 → 烤
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a.preview.jpg',
+      hasPreview: false }), 4)).toBe(true);
+    // 在，但档位不符（含旧格式戳 null）→ 烤
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a.preview.jpg', hasPreview: true,
+      previewDiv: 8 }), 4)).toBe(true);
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a.preview.jpg', hasPreview: true,
+      previewDiv: null }), 4)).toBe(true);
+    // 在且档位对得上 → 不烤
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a.preview.jpg', hasPreview: true,
+      previewDiv: 4 }), 4)).toBe(false);
+    // 源即显示件 → 永不烤
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a.jpg', hasPreview: true,
+      previewDiv: null }), 4)).toBe(false);
+  });
+
+  it('档位表与后端 PREVIEW_DIVISORS 同序同值，默认 ÷4', () => {
+    expect([...SCENE_PREVIEW_DIVS]).toEqual([2, 4, 8, 16, 32]);
+    expect(DEFAULT_PREVIEW_DIV).toBe(4);
+    expect(previewDivLabel(16)).toBe('1/16');
+  });
+
+  it('loadPreviewDiv / savePreviewDiv：读回存的值，脏值退回默认', () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
+      setItem: (k: string, v: string) => { store.set(k, v); },
+    });
+    expect(loadPreviewDiv()).toBe(DEFAULT_PREVIEW_DIV);   // 没存过
+    savePreviewDiv(16);
+    expect(loadPreviewDiv()).toBe(16);
+    store.set('sr.previewDiv', '3');                      // 不是合法档位
+    expect(loadPreviewDiv()).toBe(DEFAULT_PREVIEW_DIV);
+    store.set('sr.previewDiv', 'abc');
+    expect(loadPreviewDiv()).toBe(DEFAULT_PREVIEW_DIV);
+    vi.unstubAllGlobals();
+  });
+
+  it('localStorage 不可用（opaque origin / 隐私模式）不抛，一律回默认档', () => {
+    vi.stubGlobal('localStorage', {
+      getItem: () => { throw new Error('SecurityError'); },
+      setItem: () => { throw new Error('SecurityError'); },
+    });
+    expect(loadPreviewDiv()).toBe(DEFAULT_PREVIEW_DIV);
+    expect(() => savePreviewDiv(8)).not.toThrow();
+    vi.unstubAllGlobals();
+  });
+});
+
+describe('显示源比较规则：谁清晰用谁（rasterPreviewWins）', () => {
+  const rp = (over: Partial<RasterPreview>): RasterPreview => ({
+    id: 'raster-id', name: 'PAN.tif', rel: 'a/PAN.tif',
+    jpgUrl: '/disk-array/a/PAN.preview.jpg',
+    rasterW: 24000, rasterH: 24000, jpgW: 8192, jpgH: 8192,
+    hasPreview: false, previewDiv: null, ...over,
+  });
+
+  it('判据就是 round(长边/div) > 显示件长边（与后端 preview_max_edge 同式）', () => {
+    // 真机量级：24000 源 + 8192 显示件。÷2 烤出 12000 → 赢
+    expect(rasterPreviewWins(rp({}), 2)).toBe(true);
+    // ÷4 烤出 6000 → 输。**默认档位下这条规则基本不触发**，这正是要如实告诉用户的
+    expect(rasterPreviewWins(rp({}), 4)).toBe(false);
+    expect(rasterPreviewWins(rp({}), 8)).toBe(false);
+  });
+
+  it('相等不换（严格大于）：换过去要付一次烘焙，换来一样清晰就没理由动', () => {
+    // 1600 源 ÷4 = 400，显示件长边正好 400 → 平手，保持现状
+    expect(rasterPreviewWins(rp({ rasterW: 1600, rasterH: 800,
+      jpgW: 400, jpgH: 200 }), 4)).toBe(false);
+    // 显示件长边 399 → 400 > 399，差一像素也换：判据是算出来的数，不是「差不多」
+    expect(rasterPreviewWins(rp({ rasterW: 1600, rasterH: 800,
+      jpgW: 399, jpgH: 200 }), 4)).toBe(true);
+    // 除数是**四舍五入**不是向上取整：round(1601/4)=400，仍与显示件平手
+    expect(rasterPreviewWins(rp({ rasterW: 1601, rasterH: 800,
+      jpgW: 400, jpgH: 200 }), 4)).toBe(false);
+    expect(rasterPreviewWins(rp({ rasterW: 1602, rasterH: 800,
+      jpgW: 400, jpgH: 200 }), 4)).toBe(true);   // round(1602/4)=401
+  });
+
+  it('两侧都取长边比（不是宽比宽）', () => {
+    // 栅格长边 640 ÷4 = 160；显示件长边 600 → 输，尽管栅格在题目里比显示件「高」
+    expect(rasterPreviewWins(rp({ rasterW: 320, rasterH: 640,
+      jpgW: 600, jpgH: 10 }), 4)).toBe(false);
+    // 反过来：栅格是横长条，长边 1600 ÷4 = 400 > 显示件长边 399 → 赢
+    expect(rasterPreviewWins(rp({ rasterW: 1600, rasterH: 100,
+      jpgW: 399, jpgH: 20 }), 4)).toBe(true);
+  });
+
+  it('保守兜底一律 false（继续显示那张 jpg，绝不因为找不到更好的把图弄没了）', () => {
+    expect(rasterPreviewWins(null, 4)).toBe(false);
+    expect(rasterPreviewWins(undefined, 4)).toBe(false);
+    expect(rasterPreviewWins(rp({ jpgW: 0 }), 4)).toBe(false);
+    expect(rasterPreviewWins(rp({ jpgH: 0 }), 4)).toBe(false);
+    expect(rasterPreviewWins(rp({ rasterW: 0 }), 2)).toBe(false);
+    // div 不是合法档位 → 不认（否则「除以 3」这种前端到处没实现的档位会算出个假答案）
+    expect(rasterPreviewWins(rp({}), 3)).toBe(false);
+    expect(rasterPreviewWins(rp({ rasterW: 24000, jpgW: 1 }), 0)).toBe(false);
+  });
+
+  const row = (over: Partial<SceneRow>): SceneRow => ({
+    id: 'x', name: 'n', satellite: null, sensor: null, date: null,
+    size_bytes: 0, fake: false, W: 1, H: 1, rel: null,
+    jpgUrl: null, hasPreview: false, lq_path: null, ...over,
+  });
+
+  it('previewNeedsBake 的栅格分支：按**栅格那份预览**判，不看源 jpg 的三个字段', () => {
+    const win = rp({ rasterW: 24000, rasterH: 24000, jpgW: 8192, jpgH: 8192 });
+    // 栅格赢且栅格那份预览还没烤过 → 要烤
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a.jpg', hasPreview: true,
+      previewDiv: null, rasterPreview: win }), 2)).toBe(true);
+    // 烤过但不是这一档 → 要烤
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a.jpg', hasPreview: true,
+      previewDiv: null, rasterPreview: { ...win, hasPreview: true, previewDiv: 4 } }),
+      2)).toBe(true);
+    // 烤过且档位对得上 → 不烤
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a.jpg', hasPreview: true,
+      previewDiv: null, rasterPreview: { ...win, hasPreview: true, previewDiv: 2 } }),
+      2)).toBe(false);
+    // 栅格**输**（÷4）→ 落回源 jpg 那套：源即显示件，永不烤
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a.jpg', hasPreview: true,
+      previewDiv: null, rasterPreview: win }), 4)).toBe(false);
+  });
+
+  it('不给 rasterPreview（旧后端 / 无同名栅格）→ 行为与今天逐字节一致', () => {
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a.jpg', hasPreview: true }), 4)).toBe(false);
+    expect(previewNeedsBake(row({ jpgUrl: null }), 4)).toBe(true);
+  });
+
+  it('sceneImageUrl 对 rasterPreview.jpgUrl 自动附 ?div=（它就是 .preview.jpg）', () => {
+    const CFG = { apiBase: '', staticBase: 'http://static:9000' };
+    expect(sceneImageUrl(CFG, rp({}).jpgUrl, 8))
+      .toBe('http://static:9000/disk-array/a/PAN.preview.jpg?div=8');
   });
 });
 

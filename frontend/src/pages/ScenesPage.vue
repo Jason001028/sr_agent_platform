@@ -7,11 +7,16 @@
  * 盘阵里的 .jpg/.jpeg 源（§4.7）行 jpgUrl 即源文件、跳过懒生成，打标签「JPG 源」。
  */
 import { onMounted } from 'vue';
-import { isImageSource } from '../lib/scene.js';
+import { isImageSource, previewNeedsBake } from '../lib/scene.js';
 import { useScenesStore } from '../stores/scenes.js';
+import { useViewerStore } from '../stores/viewer.js';
 import ScenePathBar from '../components/ScenePathBar.vue';
 
 const scenes = useScenesStore();
+// 只为了读当前预览档位（工具栏那条拖动条写的就是它）——「已生成 / 未生成」与
+// 「打开 / 生成并打开」都得认档位：盘上有旧档位的图时 `hasPreview` 仍为真，
+// 只看它就会说「已生成」，点下去却要等一輪重烤。
+const viewer = useViewerStore();
 
 /** 手工路径：只把用户填的这一个目录交给后端 stat（不扫盘）。错误由本页
  *  统一渲染（scenes.error，就在检索条下方），所以这里不用再弹提示。 */
@@ -92,13 +97,15 @@ onMounted(() => { void scenes.list(); });
             <td>
               <span v-if="row.fake" class="tag fake">fake</span>
               <span v-else-if="isImageSource(row)" class="tag ok">JPG 源</span>
-              <span v-else-if="row.hasPreview" class="tag ok">已生成</span>
+              <span v-else-if="!previewNeedsBake(row, viewer.previewDiv)"
+                    class="tag ok">已生成</span>
               <span v-else class="tag">未生成</span>
             </td>
             <td>
               <button type="button" class="btn mini" :disabled="scenes.openingId === row.id"
                       @click="scenes.open(row)">
-                {{ scenes.openingId === row.id ? '打开中…' : row.hasPreview ? '打开' : '生成并打开' }}
+                {{ scenes.openingId === row.id ? '打开中…'
+                   : previewNeedsBake(row, viewer.previewDiv) ? '生成并打开' : '打开' }}
               </button>
             </td>
           </tr>

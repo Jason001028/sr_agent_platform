@@ -15,15 +15,20 @@
 //   C. 「提交 SR」→ /queue 预填（不自动提交）→ 确认提交 → 假调度器跑到「完成」；
 //   D. 猜错必须报错：粘不存在的编号 → `.sp-err` 带候选路径与原因，查看器不新增 rec；
 //   E. 拖本地文件进查看器 → 按**文件名 + 字节数**双指纹反推盘阵目录：
-//      命中（同名同字节）→ 不做本地解码，直接换成服务端烘焙 JPG（临时缓存那条
-//      端点 /preview-tmp），rec 升级成 route='jpg' + lqPath + sceneId，提交按钮转可用；
+//      命中（同名同字节）→ 不做本地解码，直接换成服务端烘焙 JPG（拖入那条端点
+//      /preview-drop；产物落**生产场景目录** `<编号>_preview.jpg`，不落临时缓存），
+//      rec 升级成 route='jpg' + lqPath + sceneId，提交按钮转可用；
 //      同名但字节数不同 / 目录不存在 → 报错（写进 rec.linkNote）且按钮仍禁用，
 //      退回本地解码；文件名里没有日期 → 只提示手填，一个 resolve 请求都不发；
 //   E2. 拖盘阵上的 `<编号>.jpg`（与同名 .tif 同目录）：名字对得上就关联成同一场景，
-//      **像素用拖进来那张原图**（不调 /preview-tmp、不调 /preview），掩码能落盘；
+//      **像素用拖进来那张原图**（不调 /preview-drop、不调 /preview），掩码能落盘；
 //      关联不上 → 弹窗给后端原因（`.notice-modal`），状态栏不卡在「正在关联…」；
 //   E3. 拖**纯 RC** 目录（里面只有 `PAN.tif`）那份 `<编号>.jpg`：也要关联上。
 //      jpg 名比的是**场景目录名**，不是栅格输入的 stem —— 比后者的话，纯 RC
+//   E4. 盘阵上那份显示件**不够清晰**时（栅格 1600×800 vs 同名 jpg 320×160，
+//      ÷2 烤出 800 > 320）→ 改用服务端从栅格烤的那份：走 /preview-drop、面板文案
+//      回到默认那句。E2 是它的对照组（盘阵上没有同名 jpg；就算有，800×400 在 ÷2
+//      下也判 jpg 赢 —— 判据是**严格大于**）。
 //      场景恒 404，而它恰恰是 SR 真要跑的场景（真机「极少出现盘阵小标」的根因）；
 //   F. PAN.tif（RC）场景：掩码名取**输入名的 stem**（`PAN_mask.tif`），不取目录名 ——
 //      这正是"写出去的掩码与提交时去找的那份不一致"的陷阱（§6）。
@@ -33,6 +38,10 @@
 //      （Node 编不出 GBK，用 Python 转码落盘）→ 粘 `W:\…\待修复清单.txt` → 同步 →
 //      从磁盘按字节读回：未改动时与原文**完全一致**（GBK 没被转成 UTF-8）、标了终态
 //      之后上半部分仍逐字不动；粘一个不存在的路径 → 后端原话进错误条、不新建文件。
+//   J. 图像对比的**窗口拖放**（A–H 走的都是 input.uploadFile，那是另一条路）：真
+//      DragEvent（.e2e/lib/drag.js）拖盘阵那份 `<编号>.jpg` 到**右半** → 新图只进右格、
+//      左格那张不动、活动侧转右；仍走同一条盘阵关联链（resolve +1、/preview-drop +1、
+//      生产那条 /preview +0）；只发 dragover（落位提示）**一个请求都不发**。
 // 用法：cd .e2e && node test-manual-scene.js
 const http = require('http');
 const fs = require('fs');
@@ -41,6 +50,7 @@ const path = require('path');
 const net = require('net');
 const { spawn, spawnSync } = require('child_process');
 const { launchPage } = require('./launchBrowser');
+const drag = require('./lib/drag');
 
 const REPO = path.resolve(__dirname, '..');
 const DIST = path.join(REPO, 'frontend', 'dist');
@@ -138,7 +148,7 @@ const FIXTURE_PY = `
 import os, sys
 import numpy as np, tifffile
 
-root, ymd, sc_name, pan_name, prod_name = sys.argv[1:6]
+root, ymd, sc_name, pan_name, prod_name, win_name = sys.argv[1:7]
 
 def tif(p, w, h):
     os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -174,6 +184,15 @@ sat_d, mid_d = tree(prod_name)
 prod_dir = os.path.join(base, sat_d, mid_d, prod_name)
 scene(prod_dir, prod_name + ".tif", 512, 256, prod_name)
 
+# E4（工作流 B）那条的栅格：1600×800，与同目录那份**只有 320×160** 的
+# <编号>.jpg 差着 5 倍。jpg 由 makeJpg 在 JS 侧落盘（本函数只管 .tif），
+# 但**尺寸的对比关系必须在这里定死**：÷2 下 round(1600/2)=800 > 320 → 栅格赢。
+# 三层都要拼上（段级之下还有景级目录本身）：少一层就把 tif 与 meta 写进段级目录，
+# 反推看到的是一份「缺 <目录名>_meta.xml」的目录，前后端都认不出这个场景。
+sat_w, mid_w = tree(win_name)
+scene(os.path.join(base, sat_w, mid_w, win_name),
+      win_name + ".tif", 1600, 800, win_name)
+
 # 裸 TIF（G 段）：**不在任何场景目录里**（没有 _meta.xml、父目录也不是场景名），
 # 用来验「粘单个 .tif 文件路径」。400×200 是特意选的：旧规则（长边 8192 封顶）
 # 会把它整幅留下（400×200），新规则（各边 1/2）烤出 200×100 —— 尺寸断言因此
@@ -181,9 +200,9 @@ scene(prod_dir, prod_name + ".tif", 512, 256, prod_name)
 tif(os.path.join(root, "loose", "LOOSE_" + ymd + "120000.tif"), 400, 200)
 `;
 
-function makeFixtures(root, ymd, scName, panName, prodName) {
+function makeFixtures(root, ymd, scName, panName, prodName, winName) {
   const r = spawnSync('python',
-    ['-c', FIXTURE_PY, root, ymd, scName, panName, prodName],
+    ['-c', FIXTURE_PY, root, ymd, scName, panName, prodName, winName],
     { encoding: 'utf-8' });
   if (r.status !== 0) throw new Error('fixture 生成失败: ' + (r.stderr || r.stdout));
 }
@@ -209,15 +228,32 @@ function makeJpg(file, w, h) {
 }
 
 /* ---------------- 页面助手 ---------------- */
-async function clickByText(page, text) {
-  const ok = await page.evaluate((t) => {
-    const b = [...document.querySelectorAll('button')]
-      .find((x) => x.textContent.trim() === t && !x.disabled);
-    if (!b) return false;
-    b.click();
-    return true;
-  }, text);
-  if (!ok) throw new Error(`按钮未找到或已禁用: ${text}`);
+/**
+ * 点一个按钮（按文字精确匹配）。
+ *
+ * 按钮在（禁用）状态时会重试到 timeoutMs —— 页面上好几个按钮跟着 store 的 loading
+ * 一起灰（如「去查看器」吃 `scenes.loading`），只差一拍就判失败会把「机器忙」误报成
+ * 「按钮没了」。真的等不到才抛，并把候选按钮一起带出来：不然只能看到「未找到」，
+ * 无从判断是文案变了、按钮一直灰着，还是根本没渲染。
+ */
+async function clickByText(page, text, timeoutMs = 15000) {
+  const t0 = Date.now();
+  for (;;) {
+    const r = await page.evaluate((t) => {
+      const all = [...document.querySelectorAll('button')];
+      const b = all.find((x) => x.textContent.trim() === t && !x.disabled);
+      if (b) { b.click(); return { ok: true }; }
+      return { ok: false, near: all
+        .filter((x) => x.textContent.includes(t.slice(0, 2)))
+        .map((x) => `${x.textContent.trim()}${x.disabled ? '(禁用)' : ''}`) };
+    }, text);
+    if (r.ok) return;
+    if (Date.now() - t0 > timeoutMs) {
+      throw new Error(`按钮未找到或已禁用: ${text}`
+        + `（候选：${r.near.join(' / ') || '无'}）`);
+    }
+    await sleep(150);
+  }
 }
 
 /** 点顶部导航的 RouterLink（页内跳转，保 pinia store） */
@@ -372,6 +408,8 @@ async function main() {
   // 有日期、盘阵上不存在 —— 用来验"猜错必须报错"
   const MISSING = 'A_B_' + ymd + '135900_200536960_101_0005_001';
   const PROD = 'A_B_' + ymd + '124710_200536960_102_0025_001';
+  // E4：盘阵上那份显示件（320×160）明显不如同名栅格（1600×800）的那一类场景。
+  const WIN = 'A_B_' + ymd + '140000_200536960_101_0005_001';
   // 场景目录 = <日>/<卫星型号>/<段级目录>/<景级目录>；段级名 = 去掉景号那一段。
   // 与后端 pathguard.scene_name_layers 同一套规则，夹具 python 侧也这么拼。
   const treeOf = (name) => {
@@ -381,6 +419,7 @@ async function main() {
   const SC_DIR = path.join(ARRAY, ...treeOf(SC));
   const PAN_DIR = path.join(ARRAY, ...treeOf(PAN));
   const PROD_DIR = path.join(ARRAY, ...treeOf(PROD));
+  const WIN_DIR = path.join(ARRAY, ...treeOf(WIN));
 
   const datahub = path.join(tmp, 'datahub');
   // 拖拽入口的临时预览缓存根（1 天 TTL，按 YYYY-MM-DD 分桶）
@@ -391,7 +430,7 @@ async function main() {
   fs.mkdirSync(tmpPreviews, { recursive: true });
   fs.mkdirSync(workDir, { recursive: true });
   fs.mkdirSync(upDir, { recursive: true });
-  makeFixtures(tmp, ymd, SC, PAN, PROD);
+  makeFixtures(tmp, ymd, SC, PAN, PROD, WIN);
 
   // 反推命中的两份必须**真的**是从盘阵上拷出来的那一份文件：判据是「文件名 +
   // 字节数」双指纹，拿 fixture 里那张凑数的小图（名字对、字节数不对）会被后端
@@ -412,6 +451,13 @@ async function main() {
   fs.copyFileSync(LOCAL_TIF, upBadBytes);                         // 同名**不同字节**
   makeJpg(upJpg, 800, 400);                                       // 与 SC.tif 同目录同名
   makeJpg(upJpgMiss, 800, 400);                                   // 有日期、盘阵上没有
+  // E4：盘阵上**真有**那份显示件（320×160，比同名栅格差得远），另外再复制一份
+  // **尺寸不同**的到本地拖进来。两份尺寸必须不一样，断言才分得清像素来自哪边：
+  // 640×320 是本地那份，「服务端从栅格烤的」是 1600×800 ÷2 = 800×400。
+  const winJpg = path.join(WIN_DIR, WIN + '.jpg');
+  const upWinJpg = path.join(upDir, WIN + '.jpg');
+  makeJpg(winJpg, 320, 160);
+  makeJpg(upWinJpg, 640, 320);
 
   // 开发机是 Windows：临时目录带盘符，而盘阵路径一律经 pathguard 归一，所以既要
   // 把 `W:\` 映射到盘阵根，也得补一条"宿主盘符映射到自身"（backend/tests/__init__.py
@@ -466,12 +512,24 @@ async function main() {
     });
     const countUrl = (re) => seen.filter((u) => re.test(u)).length;
     const resolveRe = new RegExp(`^${apiBase}/api/scenes/resolve$`);
-    const previewRe = new RegExp(`^${apiBase}/api/scenes/[^/]+/preview$`);
-    // 拖拽入口那条**临时**预览（独立端点、独立缓存根、1 天 TTL）
-    const tmpPreviewRe = new RegExp(`^${apiBase}/api/scenes/[^/]+/preview-tmp$`);
+    // `?div=` 是必须吃的：档位进了 URL（换档位要击穿 nginx 的 max-age）。
+    const previewRe = new RegExp(`^${apiBase}/api/scenes/[^/]+/preview\\?div=\\d+$`);
+    // 拖入那道入口是**另一个端点**：产物落生产场景目录，只写一次、长期可用
+    const dropPreviewRe =
+      new RegExp(`^${apiBase}/api/scenes/[^/]+/preview-drop\\?div=\\d+$`);
 
     await page.evaluateOnNewDocument((cfg) => { window.__SR_CFG__ = cfg; },
       { apiBase, staticBase: '' });
+    // 档位钉到 ÷2：本脚本测的是「拖入 / 关联 / 掩码 / 提交」这条链，不是档位
+    // 本身 —— 尺寸断言（1600×800 → 800×400）都是按 1/2 写的，跟随产品默认的
+    // ÷4 会让每一处都变成 400×200，把「链通了没有」淹在一堆数字改动里。
+    // 必须 try/catch：这个回调在 about:blank 上也会跑，opaque origin 下
+    // localStorage 抛 SecurityError，而本脚本末尾有一条 appErrors 必须为 0 的断言。
+    await page.evaluateOnNewDocument(() => {
+      try {
+        localStorage.setItem('sr.previewDiv', '2');
+      } catch (e) { /* opaque origin（about:blank）：真实页面加载时会再跑一次 */ }
+    });
 
     try {
       /* ---------- A. 场景库页：当天前缀 + 手工打开盘阵场景 ---------- */
@@ -529,6 +587,38 @@ async function main() {
       const before = await toolbarState(page);
       assert(before.sr === true && before.bake === true,
         `工具栏「提交 SR」「保存掩码到盘阵」均可用（sr=${before.sr}/bake=${before.bake}）`);
+
+      // 工具栏在 1366 视口（真机常见宽度）下不许横向溢出：定位组件右侧新插的
+      // 档位拖动条是有代价的，宽度预算得有人守着 —— 溢出时右端的「提交 SR」会被
+      // 挤出可视区，而那正是这条链最后要点的那个按钮。
+      await page.setViewport({ width: 1366, height: 768 });
+      const tb = await page.evaluate(() => {
+        const el = document.querySelector('.toolbar');
+        if (!el) return null;
+        const box = el.getBoundingClientRect();
+        return {
+          scrollW: el.scrollWidth,
+          clientW: el.clientWidth,
+          over: [...el.children]
+            .filter((c) => c.getBoundingClientRect().right > box.right + 0.5)
+            .map((c) => c.className || c.tagName),
+        };
+      });
+      assert(tb && tb.scrollW <= tb.clientW + 1,
+        `1366 视口下工具栏不横向溢出（scrollW=${tb && tb.scrollW} / clientW=${tb && tb.clientW}）`);
+      assert(tb && tb.over.length === 0,
+        `没有控件被挤出工具栏右缘（${tb && tb.over.join(',')}）`);
+      const divsel = await page.evaluate(() => {
+        const el = document.querySelector('[data-e2e="preview-div"]');
+        const r = el ? el.querySelector('input[type=range]') : null;
+        return el ? { text: el.textContent.trim(), value: r ? r.value : null,
+          max: r ? r.max : null } : null;
+      });
+      assert(divsel && divsel.max === '4',
+        `档位拖动条在定位组件右侧、5 档（${divsel && JSON.stringify(divsel)}）`);
+      assert(divsel && divsel.value === '0' && divsel.text.includes('1/2'),
+        `拖动条停在 localStorage 里那个档位（本脚本钉的是 ÷2）(${divsel && divsel.text})`);
+      await page.setViewport({ width: 800, height: 600 });
 
       /* ---------- B. 画掩码 → 写进盘阵 ---------- */
       console.log('\n[B] 画矩形 → 「保存掩码到盘阵」→ 文件落进场景目录');
@@ -617,7 +707,13 @@ async function main() {
       });
 
       const previewBefore = countUrl(previewRe);
-      const tmpBefore = countUrl(tmpPreviewRe);
+      const dropBefore = countUrl(dropPreviewRe);
+      // 平台自己那份 `<编号>.preview.jpg` 在 A 段粘路径打开时就已经落下了（那条链
+      // 走 /preview，落源同目录）。这里要钉的是「拖入链**不碰**它」—— 用 mtime
+      // 而不是存在性：它本来就该在，判存在性等于什么都没验。
+      const platJpg = path.join(SC_DIR, SC + '.preview.jpg');
+      const platMtime = fs.existsSync(platJpg) ? fs.statSync(platJpg).mtimeMs : null;
+      assert(platMtime !== null, 'A 段粘路径打开时已落下平台那份 .preview.jpg');
       await input.uploadFile(upOk);
       await waitFor(page, () => {
         const rs = window.__viewer.recs();
@@ -640,16 +736,22 @@ async function main() {
         `像素来自服务端 1/2 烘焙 JPG（缩略图 ${linked.thumbW}×${linked.thumbH}）`);
       assert(!!linked.sceneId, `升级后带上场景 id（${String(linked.sceneId).slice(0, 12)}…）`);
       assert(await srEnabled(), '关联成功后「提交 SR」由灰转可用');
-      assert(countUrl(tmpPreviewRe) === tmpBefore + 1
+      assert(countUrl(dropPreviewRe) === dropBefore + 1
         && countUrl(previewRe) === previewBefore,
-        '取的是拖拽专用端点 /preview-tmp，没碰生产那条 /preview');
-      // 临时预览落在**独立**缓存根里、按当天分桶，生产数据目录一个字节都不写。
+        '取的是拖入专用端点 /preview-drop，没碰生产那条 /preview');
+      // 产物落在**生产场景目录**里（`<编号>_preview.jpg`）：烤一次长期可用，
+      // 而不是每天第一次拖入都重烤一遍 —— 这是这次改动的要点。
+      const dropJpg = path.join(SC_DIR, SC + '_preview.jpg');
+      assert(fs.existsSync(dropJpg),
+        `拖入的预览写进生产场景目录（${path.basename(dropJpg)}）`);
+      // 平台自己那份长期缓存（点号名）不该被这条链动过：两份产物分工不同
+      // （点号那份给场景库的静态 URL 用、下划线那份是拖入链的），混了的话
+      // `hasPreview`/`previewDiv` 那套判定就跟着乱。
+      assert(fs.statSync(platJpg).mtimeMs === platMtime,
+        '拖入链没动平台自己那份 <编号>.preview.jpg（两份产物各归各的）');
+      // 场景目录可写 → **不该**走兜底：临时缓存桶里一个新文件都不该有
       const bucket = path.join(tmpPreviews, y + '-' + mo + '-' + d);
-      assert(fs.existsSync(bucket)
-        && fs.readdirSync(bucket).some((f) => f.endsWith('.jpg')),
-        `临时 JPG 落在 SR_TEMP_PREVIEWS_ROOT/<今天>/（${path.basename(bucket)}）`);
-      assert(fs.existsSync(path.join(bucket, '.sr-tmp-preview')),
-        '桶里带本模块的标记文件（清理只认带标记的桶）');
+      assert(!fs.existsSync(bucket), '场景目录可写时不动临时缓存（兜底没被触发）');
 
       await waitFor(page, () => {
         const t = document.querySelector('.toast');
@@ -667,9 +769,13 @@ async function main() {
       const prodLinked = await lastRec();
       assert(prodLinked.route === 'jpg',
         `生产树命中并升级成 JPG 路由：${PROD_DIR.replace(/\\/g, '/')}`);
-      // 命中的图**没有**往生产场景目录里落预览缓存（那条是长期缓存才做的事）
+      // 生产树命中同样落**它自己的**场景目录（不是上一个场景那个目录）
+      const prodJpg = path.join(PROD_DIR, PROD + '_preview.jpg');
+      assert(fs.existsSync(prodJpg),
+        `生产树命中的预览落它自己的场景目录（${path.basename(prodJpg)}）`);
+      // 这个场景只被拖入链碰过（没从场景库打开过）→ 平台那份压根不该存在
       assert(!fs.existsSync(path.join(PROD_DIR, PROD + '.preview.jpg')),
-        '拖拽入口不往生产场景目录写预览缓存');
+        '拖入链不写平台自己那份 <编号>.preview.jpg');
 
       // 同名**不同字节**：最要紧的一条回归钉子 —— 只比名字的话，用户拖进来的
       // 是另一张图，掩码坐标会整片落在别的影像上。必须拒绝并退回本地解码。
@@ -720,7 +826,7 @@ async function main() {
       // （字节数那一半对 JPEG 无意义：那是另一份产物，永远不可能与 TIF 同字节）。
       console.log('\n[E2] 拖盘阵 .jpg → 关联同场景目录，掩码能落盘');
       const bakeBefore = countUrl(previewRe);
-      const tmpBakeBefore = countUrl(tmpPreviewRe);
+      const dropBakeBefore = countUrl(dropPreviewRe);
       await input.uploadFile(upJpg);
       await waitFor(page, () => {
         const rs = window.__viewer.recs();
@@ -735,12 +841,12 @@ async function main() {
       assert(!!jpgRec.sceneId, `升级后带上场景 id（${String(jpgRec.sceneId).slice(0, 12)}…）`);
       assert(jpgRec.W === 1600 && jpgRec.H === 800,
         `W/H 取影像头 1600×800（${jpgRec.W}×${jpgRec.H}）—— 掩码换算回原图就靠它`);
-      // 本次改动的要点：像素用**拖进来那张 jpg 自己**的，不去服务端烤一份 1/2 预览。
+      // 本次改动的要点：像素用**拖进来那张 jpg 自己**的，不去服务端烤一份预览。
       // 早先只有 .tif 才试关联，jpg 一律 route='img'；改成两条路合并后，若照搬
-      // tif 那条（调 /preview-tmp）就会拿服务端缩图顶掉用户自己拖的图。
-      assert(countUrl(tmpPreviewRe) === tmpBakeBefore
+      // tif 那条（调 /preview-drop）就会拿服务端缩图顶掉用户自己拖的图。
+      assert(countUrl(dropPreviewRe) === dropBakeBefore
         && countUrl(previewRe) === bakeBefore,
-        '没走 /preview-tmp 也没走 /preview（用拖进来的原图，不服务端烘焙）');
+        '没走 /preview-drop 也没走 /preview（用拖进来的原图，不服务端烘焙）');
       assert(jpgRec.thumbW === 800 && jpgRec.thumbH === 400,
         `缩略图就是拖进来那张 jpg 的像素（${jpgRec.thumbW}×${jpgRec.thumbH}）`);
       assert(jpgRec.layout.includes('拖入的原图'),
@@ -824,6 +930,83 @@ async function main() {
       const panJpgBadge = await badgeOf(page, PAN + '.jpg');
       assert(panJpgBadge === '盘阵',
         `纯 RC 场景的 jpg 也出「盘阵」小标（${panJpgBadge}）`);
+
+      /* ---------- E4. 盘阵那份显示件不够清晰 → 改用服务端从栅格烤的那份 ---------- */
+      // 真机上这件事就是用户报的那句话：目录里那份预生成的显示件（PAN.jpg 之类）
+      // 分辨率不够，实际预览得改成服务端从配套 .tif 下采样。判据只有一条：
+      //   round(max(栅格长边)/div) > max(显示件长边)
+      // 这边栅格 1600×800、显示件 320×160、档位钉在 ÷2（本脚本开头）→ 800 > 320
+      // 成立，于是像素改用服务端那份。E2 是**对照组**：那边盘阵上没有同名 jpg，
+      // 就算补一个 800×400 的，÷2 烤出 800 也不严格大于 800 → 判 jpg 赢，一字不动。
+      console.log('\n[E4] 同名栅格更清晰 → 预览改用服务端下采样（工作流 B）');
+      const winBakeBefore = countUrl(previewRe);
+      const winDropBefore = countUrl(dropPreviewRe);
+      await input.uploadFile(upWinJpg);
+      // 等到**新加的那条** rec 装载走完：只等 route 会撞上「已关联、像素还没到」，
+      // 只判状态更糟 —— 上一条（E3 那条）本来就是「场景就绪」，条件立刻为真、
+      // 等于没等。失败也放行，好把后端那句话原样带进断言消息里。
+      const recsBefore = await page.evaluate(() => window.__viewer.recs().length);
+      await input.uploadFile(upWinJpg);
+      try {
+        await waitFor(page, (n) => {
+          const rs = window.__viewer.recs();
+          const r = rs[rs.length - 1];
+          return rs.length > n && r.route === 'jpg'
+            && (r.status === '场景就绪' || r.statusCls === 'err');
+        }, 30000, '拖入的 jpg 关联上并换成服务端预览', recsBefore);
+      } catch (e) {
+        const dbg = await page.evaluate(() => {
+          const rs = window.__viewer.recs();
+          const r = rs[rs.length - 1];
+          const m = document.querySelector('.notice-modal');
+          return { n: rs.length, last: r && { name: r.name, route: r.route,
+            status: r.status, cls: r.statusCls, linkNote: r.linkNote },
+            modal: m ? m.querySelector('.nm-body').textContent.trim() : null,
+            err: document.querySelector('.err-box')?.textContent.trim() ?? null };
+        });
+        throw new Error(`E4 诊断：${JSON.stringify(dbg)}`);
+      }
+      const winRec = await lastRec();
+      const winErr = await page.evaluate(
+        () => document.querySelector('.err-box')?.textContent.replace(/\s+/g, ' ').trim() ?? '');
+      assert(winRec.status === '场景就绪',
+        `装载走完没报错（status=${winRec.status}${winErr ? ' / ' + winErr : ''}）`);
+      assert(winRec.lqPath === WIN_DIR.replace(/\\/g, '/'),
+        `关联到那个场景目录（${winRec.lqPath}）`);
+      // 走的是**拖入那条**端点：落点在场景目录里（<编号>_preview.jpg），
+      // 不是生产那条 <stem>.preview.jpg —— 两条落点不同，混了会互相顶掉。
+      // 计数断言要**等**：页面那边的状态与 Node 这边的 `request` 回调是两条独立
+      // 的投递（同一条 CDP 连接，但 evaluate 的响应可能抢在那条 request 事件前面
+      // 回到 Node），加载已完成而计数还没涨是常态、不是缺陷。所以先等它涨上来。
+      await waitNode(() => countUrl(dropPreviewRe) >= winDropBefore + 1, 15000,
+        '拖入预览这一跳的请求计数');
+      // 面板文案回到默认那句：走服务端时前端不传 layout，由 openSceneJpg 自己写。
+      assert(winRec.layout.includes('服务端已烘焙'),
+        `面板如实说是服务端烤的（${winRec.layout}）`);
+      assert(winRec.layout.includes('1/2'),
+        `并写明是哪一档（${winRec.layout}）`);
+      // 像素来自**服务端从栅格烤的** 800×400，不是本地那份 640×320：
+      // 两边的尺寸是特意错开的，这一条就是「谁赢」的可执行判据。
+      assert(winRec.thumbW === 800 && winRec.thumbH === 400,
+        `像素取服务端从 1600×800 栅格烤的 800×400（${winRec.thumbW}×${winRec.thumbH}）`);
+      assert(winRec.W === 1600 && winRec.H === 800,
+        `W/H 仍是影像头尺寸 1600×800（${winRec.W}×${winRec.H}）`);
+      assert(!winRec.layout.includes('拖入的原图'),
+        '不谎称用的是拖进来那张原图');
+      // 盘上真有那么一份产物：这是「改了显示源」与「只是没报错」的分界。
+      const winDrop = path.join(WIN_DIR, WIN + '_preview.jpg');
+      await waitNode(() => jpegSize(winDrop), 30000, '拖入预览落盘');
+      const winSz = jpegSize(winDrop);
+      assert(winSz.w === 800 && winSz.h === 400,
+        `落盘那份也是 800×400（${winSz.w}×${winSz.h}）`);
+      // 计数在这里才断（上面等过一次、中间又过了几拍页面往返，该到的请求都到了）：
+      // **恰好一次** /preview-drop、且一次都没碰生产那条 /preview。写成 +N 而不是
+      // 不断言，是为了让「重复拖入 / 重复取图」这类回归在这里就露头。
+      assert(countUrl(dropPreviewRe) === winDropBefore + 1
+        && countUrl(previewRe) === winBakeBefore,
+        `只走了一次 /preview-drop，没碰生产那条 /preview`
+        + `（drop +${countUrl(dropPreviewRe) - winDropBefore}`
+        + ` / preview +${countUrl(previewRe) - winBakeBefore}）`);
 
       /* ---------- F. PAN.tif（RC）场景的掩码命名 ---------- */
       console.log('\n[F] PAN.tif 场景：掩码名取输入名 stem，不取目录名');
@@ -964,6 +1147,120 @@ async function main() {
       assert(/文件不存在/.test(qcErr), `错误条给的是后端原话（${qcErr}）`);
       assert(fs.readFileSync(QC).equals(qcBytes1), '失败的那次没有碰任何文件');
       await page.evaluate(() => window.__viewer.qcClose());
+
+      /* ---------- J. 分屏对比：窗口拖放落右半 ---------- */
+      // A–H 走的都是 `input.uploadFile`（文件选择框那条路）。真实用户是把图**拖**进
+      // 画布的：那条链挂在 window 上，落点决定进哪一格（TifCanvas 的 onDrop →
+      // store.addFiles(files, side)）。用真 DragEvent 把整条链跑通，钉住三件只在这条
+      // 路上才会发生的事：
+      //   ① 落点算出的 side 真的穿到了 placeRec —— 新图进右格、左格那张不被顶掉；
+      //   ② 拖入走的仍是**同一条**盘阵关联链（resolve 一次 + /preview-drop 一次）；
+      //   ③ 只发 dragover（落位提示）**一个请求都不发** —— 提示是纯本地状态。
+      console.log('\n[J] 分屏对比：窗口拖放落右半 → 只进右格，仍走盘阵关联链');
+      await drag.installDragKit(page);   // 每次页面导航后都要重装（E 段导航过一次）
+      // 这份 jpg 与 E4 那份同名，但**字节数不同**：前端按 name+size 去重，同名同字节
+      // 会被认成「列表里已经有了」而走 placeRec，一条新 rec 都不开，这条用例就白写了。
+      // jpg 的盘阵反推认的是**文件名**（E2/E4 已证），改尺寸不影响它命中哪个场景。
+      const upSplitJpg = path.join(upDir, 'split', WIN + '.jpg');
+      fs.mkdirSync(path.dirname(upSplitJpg), { recursive: true });
+      makeJpg(upSplitJpg, 500, 250);   // 500 < 800（栅格 1600 的 ÷2）→ 判服务端赢
+
+      const leftBefore = await page.evaluate(() => {
+        const r = window.__viewer.activeRec();
+        return r ? r.id : null;
+      });
+      await page.evaluate(() => window.__viewer.setCmpMode('split'));
+      const panes0 = await page.evaluate(() => window.__viewer.cmpPanes());
+      const cw = await page.evaluate(
+        () => document.querySelector('canvas.view-canvas').getBoundingClientRect().width);
+      assert(panes0.length === 2, `切分屏后是两格（${panes0.length}）`);
+      assert(panes0[0].rect.w + panes0[1].rect.w === Math.round(cw),
+        `两格宽之和恰好等于画布宽，无缝无叠（${panes0[0].rect.w}+${panes0[1].rect.w} / ${Math.round(cw)}）`);
+      assert(panes0[0].recId === leftBefore && leftBefore !== null,
+        `左格接住进入分屏前那张（${panes0[0].recId} / ${leftBefore}）`);
+      assert(panes0[1].recId === null, `右格是空的，等着接拖进来的图（${panes0[1].recId}）`);
+
+      const pts = await drag.canvasPoints(page);
+      const jSeenBefore = seen.length;
+      const over = await drag.dragOverOnly(page,
+        { files: [{ path: upSplitJpg }], clientX: pts.right, clientY: pts.midY });
+      // 等一拍再数请求：dragover 真要发什么，request 事件要在 Node 这边报出来
+      // 才数得到；不等就断，这条断言等于什么都没验。
+      await sleep(400);
+      assert(over.hint.active === true && over.hint.side === 'B',
+        `悬停右半：落位提示指向右格（${JSON.stringify(over.hint)}）`);
+      assert(seen.length === jSeenBefore,
+        `只发 dragover 不产生任何请求（${seen.length - jSeenBefore} 条）`);
+
+      const jResBefore = countUrl(resolveRe);
+      const jDropBefore = countUrl(dropPreviewRe);
+      const jBakeBefore = countUrl(previewRe);
+      const jjnBefore = await page.evaluate(() => window.__viewer.recs().length);
+      const dropped = await drag.dropFiles(page,
+        { files: [{ path: upSplitJpg }], clientX: pts.right, clientY: pts.midY });
+      assert(dropped.defaultPrevented === true,
+        'drop 被处理掉了（preventDefault：浏览器不会导航到拖进来的文件）');
+      // 这里**不**断「马上多一条 rec」：.jpg 走的是 openLocalImage，它先
+      // `await decodeJpgToCanvas(file)` 才 push rec —— 同一个 evaluate 里同步读到的
+      // 条数必然还没变，那不是缺陷。.tif 那条（openOne）是同步 push 的，
+      // `test-vue-viewer.js` H 段断的就是那个瞬时 +1；两条路各有各的口径。
+      // 落列与否由下面那个 waitFor 判（条件里带 lqPath 与 thumbW，真的等到装载走完）。
+      assert(dropped.after >= dropped.before,
+        `落图这个动作本身没抛（条数 ${dropped.before} → ${dropped.after}，jpg 异步入列）`);
+      try {
+        await waitFor(page, (n) => {
+          const rs = window.__viewer.recs();
+          const r = rs[rs.length - 1];
+          return rs.length > n && r.lqPath && r.thumbW > 0;
+        }, 30000, '落右半的 jpg 关联上并换成服务端预览', jjnBefore);
+      } catch (e) {
+        const dbg = await page.evaluate(() => {
+          const rs = window.__viewer.recs();
+          const r = rs[rs.length - 1];
+          const m = document.querySelector('.notice-modal');
+          return { n: rs.length, last: r && { name: r.name, route: r.route,
+            status: r.status, lqPath: r.lqPath, linkNote: r.linkNote },
+            panes: window.__viewer.cmpPanes().map((p) => [p.side, p.recId]),
+            modal: m ? m.querySelector('.nm-body').textContent.trim() : null,
+            err: document.querySelector('.err-box')?.textContent.trim() ?? null };
+        });
+        throw new Error(`J 诊断：${JSON.stringify(dbg)}`);
+      }
+      const jrec = await lastRec();
+      assert(jrec.name === WIN + '.jpg', `rec 是拖进来那个文件（${jrec.name}）`);
+      assert(jrec.lqPath === WIN_DIR.replace(/\\/g, '/'),
+        `关联到盘阵那个场景目录（${jrec.lqPath}）`);
+      // 500×250 是本地那份、800×400 是服务端从 1600×800 栅格烤的 ÷2 —— 两边尺寸
+      // 特意错开，这一条就是「像素来自哪边」的可执行判据（与 E4 同一套判据，
+      // 换到拖放这条路上再验一次）。
+      assert(jrec.thumbW === 800 && jrec.thumbH === 400,
+        `像素取服务端烤的 800×400，不是拖进来那张 500×250（${jrec.thumbW}×${jrec.thumbH}）`);
+      await waitNode(() => countUrl(dropPreviewRe) >= jDropBefore + 1, 15000,
+        '落右半这一跳的请求计数');
+      const panes1 = await page.evaluate(() => window.__viewer.cmpPanes());
+      assert(panes1[1].recId === jrec.id,
+        `新图落在**右**格（右格 recId=${panes1[1].recId} / 新 rec=${jrec.id}）`);
+      assert(panes1[0].recId === leftBefore,
+        `左格那张没被顶掉（${panes1[0].recId} / ${leftBefore}）`);
+      assert(panes1[1].active === true && panes1[0].active === false,
+        '活动侧跟着落点转到右侧（掩码/云量/状态栏跟着它）');
+      const hint1 = await page.evaluate(() => window.__viewer.dragHint());
+      assert(hint1.active === false && hint1.side === null,
+        `落图之后落位提示已经收掉（${JSON.stringify(hint1)}）`);
+      // 计数在这里才断：中间过了几拍页面往返，该到的请求都到了。写成 +N 而不是不断言，
+      // 是为了让「重复拖入 / 拖入顺带又取了一次图」这类回归在这里露头。
+      assert(countUrl(resolveRe) === jResBefore + 1
+        && countUrl(dropPreviewRe) === jDropBefore + 1
+        && countUrl(previewRe) === jBakeBefore,
+        `拖入链仍是 resolve 一次 + /preview-drop 一次，没碰生产那条 /preview`
+        + `（resolve +${countUrl(resolveRe) - jResBefore}`
+        + ` / drop +${countUrl(dropPreviewRe) - jDropBefore}`
+        + ` / preview +${countUrl(previewRe) - jBakeBefore}）`);
+      // 回单幅：分屏是**不动后端**的那一半，收尾把模式还原，免得影响下面 §I 的
+      // 错误计数口径（对比模式下画布少一半，任何后续交互都可能落在画布外）。
+      await page.evaluate(() => window.__viewer.setCmpMode('off'));
+      const panes2 = await page.evaluate(() => window.__viewer.cmpPanes());
+      assert(panes2.length === 1, `回「关闭」后仍是单幅（${panes2.length}）`);
 
       /* ---------- I. 全程无错 ---------- */
       console.log('\n[I] 全程无错');

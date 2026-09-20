@@ -12,8 +12,10 @@
  */
 import { ref, onMounted, onBeforeUnmount, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
+import type { Pane } from '../stores/viewer';
 import { useQcListStore } from '../stores/qclist';
-import { mouseToThumb, thumbToScreen } from '../lib/viewMath';
+import { mouseToThumb, thumbToScreen, paneAtX } from '../lib/viewMath';
+import { dropSideAt } from '../lib/compare';
 import type { Pt } from '../lib/maskgen';
 
 const store = useViewerStore();
@@ -66,25 +68,66 @@ function resize() {
 }
 
 /* ---------------- 渲染 ---------------- */
+/** 分屏时把绘制上下文限制在活动格内，并把原点挪到该格左上角。
+ *
+ *  每格的 `ViewState` 就是**该格自己的局部屏幕坐标**，`store.view` 又是活动侧那一套，
+ *  所以 translate 之后原先所有 `store.view.*` 的表达式逐字可用 —— 掩码/ROI/云叠/红叉
+ *  一行都不用改，也不必给 `strokePoly` 加 view 参数。
+ *
+ *  单屏返回 false 且**什么都不做**：那是刻意保留的快速路径（`test-vue-viewer.js`
+ *  的 D/E 段直接采样画布中心像素，多一趟 save/clip/translate 会带进亚像素差）。 */
+function clipToActivePane(ctx: CanvasRenderingContext2D, ps: Pane[]): boolean {
+  if (ps.length === 1) return false;
+  const p = ps.find((x) => x.active) ?? ps[0];
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(p.rect.x, p.rect.y, p.rect.w, p.rect.h);
+  ctx.clip();
+  ctx.translate(p.rect.x, p.rect.y);
+  return true;
+}
+
 function render() {
   const vc = viewCanvasRef.value;
   const dc = drawCanvasRef.value;
   if (!vc || !dc) return;
   const ctx = vc.getContext('2d')!;
   ctx.clearRect(0, 0, vc.width, vc.height);
-  const rec = store.activeRec;
-  if (rec && rec.thumb) {
-    ctx.imageSmoothingEnabled = store.view.scale < 4;
-    ctx.drawImage(
-      rec.thumb as unknown as CanvasImageSource,
-      store.view.ox, store.view.oy,
-      rec.thumb.width * store.view.scale, rec.thumb.height * store.view.scale,
-    );
+  const ps = store.panes;
+  if (ps.length === 1) {
+    // 单屏：与「一次一张」时期逐字相同的写法
+    const rec = ps[0].rec;
+    const v = ps[0].view;
+    if (rec && rec.thumb) {
+      ctx.imageSmoothingEnabled = v.scale < 4;
+      ctx.drawImage(
+        rec.thumb as unknown as CanvasImageSource,
+        v.ox, v.oy, rec.thumb.width * v.scale, rec.thumb.height * v.scale,
+      );
+    }
+  } else {
+    for (const p of ps) {
+      const rec = p.rec;
+      if (!rec || !rec.thumb) continue;      // 空侧不画：占位由 CompareOverlay 出
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(p.rect.x, p.rect.y, p.rect.w, p.rect.h);
+      ctx.clip();
+      ctx.translate(p.rect.x, p.rect.y);
+      ctx.imageSmoothingEnabled = p.view.scale < 4;
+      ctx.drawImage(
+        rec.thumb as unknown as CanvasImageSource,
+        p.view.ox, p.view.oy,
+        rec.thumb.width * p.view.scale, rec.thumb.height * p.view.scale,
+      );
+      ctx.restore();
+    }
   }
   renderDraw();
   // 像素定位红叉（约 7 秒，随缩放/平移保持在目标像素上）
   const m = store.marker;
   if (m) {
+    const clipped = clipToActivePane(ctx, ps);
     const sx = store.view.ox + m.tx * store.view.scale;
     const sy = store.view.oy + m.ty * store.view.scale;
     const L = 14;
@@ -97,6 +140,7 @@ function render() {
     ctx.stroke();
     ctx.fillStyle = '#ff4040';
     ctx.fillRect(sx - 1.5, sy - 1.5, 3, 3);
+    if (clipped) ctx.restore();
   }
 }
 
@@ -138,7 +182,20 @@ function renderDraw() {
   if (!dc) return;
   const ctx = dc.getContext('2d')!;
   ctx.clearRect(0, 0, dc.width, dc.height);
-  if (!store.activeRec || !store.activeRec.thumb) return;
+  const active = store.activeRec;
+  if (!active || !active.thumb) return;
+  // 掩码/ROI/云叠/选中高亮**只画活动侧**：它们本来就读 store.getRois()
+  // （= activeRec.maskRois）与 store.cloudOverlay，「跟随活动侧」是自然结果，
+  // 不必按侧存两份。分屏时裁到活动格并平移原点，格内表达式逐字不变。
+  const clipped = clipToActivePane(ctx, store.panes);
+  try {
+    renderDrawBody(ctx);
+  } finally {
+    if (clipped) ctx.restore();
+  }
+}
+
+function renderDrawBody(ctx: CanvasRenderingContext2D) {
   const rois = store.getRois();
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
@@ -212,7 +269,8 @@ function mousePos(e: MouseEvent): Pt {
 
 function onWheel(e: WheelEvent) {
   const vc = viewCanvasRef.value;
-  if (!vc || !store.activeRec || !store.activeRec.thumb) return;
+  // 分屏下只要**任一侧**有图就该响应：活动侧恰好空着时也还能缩放另一侧。
+  if (!vc || !store.panes.some((p) => p.rec && p.rec.thumb)) return;
   const r = vc.getBoundingClientRect();
   const mx = e.clientX - r.left, my = e.clientY - r.top;
   const f = e.deltaY < 0 ? 1.2 : 1 / 1.2;
@@ -220,7 +278,18 @@ function onWheel(e: WheelEvent) {
 }
 
 function onMouseDown(e: MouseEvent) {
-  if (e.button !== 0 || !store.activeRec || !store.activeRec.thumb) return;
+  if (e.button !== 0) return;
+  const ps = store.panes;
+  if (ps.length > 1) {
+    // 分屏：点在另一半上先把活动侧切过去（掩码/云量/任务状态跟着切）。
+    // **滚轮刻意不切**：缩放时活动侧跟着闪会让人以为选错了图。
+    const vc = viewCanvasRef.value;
+    if (vc) {
+      const r = vc.getBoundingClientRect();
+      store.setActiveSide(paneAtX(e.clientX - r.left, store.splitX));
+    }
+  }
+  if (!store.activeRec || !store.activeRec.thumb) return;
   const p = mousePos(e);
   if (store.onCanvasDownDraw(p)) return;   // 绘制模式已处理
   dragging.value = true;
@@ -252,20 +321,55 @@ function onContextMenu(e: MouseEvent) {
   if (store.drawMode) { e.preventDefault(); store.closePolygon(); }
 }
 
-function onDragOver(e: DragEvent) { e.preventDefault(); }
+/** 拖放落点归哪一格。compare 关闭 → null（全窗口都是拖放目标，落点不参与决策）。 */
+function dropSide(e: DragEvent): 'A' | 'B' | null {
+  if (!store.compareOn) return null;
+  const vc = viewCanvasRef.value;
+  if (!vc) return null;
+  return dropSideAt(e.clientX, e.clientY, vc.getBoundingClientRect(),
+                    store.compareMode, store.splitX);
+}
+
+function onDragOver(e: DragEvent) {
+  // **永远 preventDefault**：不拦的话浏览器会导航到拖进来的文件。
+  e.preventDefault();
+  // **dropEffect 永远 copy**：设成 'none' 能拿到系统的「禁止」光标，但按规范它同时会
+  // 抑制 drop 事件 —— 而 .txt 必须在任何模式、任何位置都能进待修复清单。且 dragover
+  // 阶段浏览器不暴露文件名（只在 drop 阶段有），没法按类型区分。所以视觉提示只由
+  // CompareOverlay 负责，真正的门在 onDrop 里。
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  if (!store.compareOn) { store.setDragHint(false, null); return; }
+  // 提示在画布外不显示（dropSide 回 null），由 store 的 500ms 定时器收尾
+  store.setDragHint(true, dropSide(e));
+}
 
 function onDrop(e: DragEvent) {
   e.preventDefault();
+  store.setDragHint(false, null);
   const files = e.dataTransfer?.files;
   if (!files || !files.length) return;
   // 按扩展名分流：`.txt` = 待修复清单（走 qc store），其余是影像（走解码管线）。
   // 两类可以一起拖进来，各走各的；多个 .txt 只取第一个（清单同时只有一份）。
+  // **.txt 先走，且无条件**：任何模式、画布内外都照旧导入。
   const all = Array.from(files);
   const txt = all.filter((f) => /\.txt$/i.test(f.name));
   const rest = all.filter((f) => !/\.txt$/i.test(f.name));
   if (txt.length) void qc.importFile(txt[0]);
-  if (rest.length) store.addFiles(rest);
+  if (!rest.length) return;
+  let side: 'A' | 'B' | undefined;
+  if (store.compareOn) {
+    const hit = dropSide(e);
+    if (hit === null) {
+      store.showToast('图像对比模式下只能把影像拖到画布上');
+      return;
+    }
+    side = hit;
+  }
+  store.addFiles(rest, side);
 }
+
+/** 拖出窗口 / 拖放结束 → 立刻熄掉落位提示（定时器之外的另一道手）。 */
+function clearDragHint() { store.setDragHint(false, null); }
 
 /* ---------------- 生命周期：重绘信号 + 尺寸 + window 事件 ---------------- */
 watch(
@@ -282,6 +386,8 @@ onMounted(() => {
   window.addEventListener('keydown', store.onKeyDown);
   window.addEventListener('dragover', onDragOver);
   window.addEventListener('drop', onDrop);
+  window.addEventListener('dragend', clearDragHint);
+  window.addEventListener('blur', clearDragHint);
   window.addEventListener('mousemove', onWindowMouseMove);
   window.addEventListener('mouseup', onWindowMouseUp);
 });
@@ -291,6 +397,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', store.onKeyDown);
   window.removeEventListener('dragover', onDragOver);
   window.removeEventListener('drop', onDrop);
+  window.removeEventListener('dragend', clearDragHint);
+  window.removeEventListener('blur', clearDragHint);
   window.removeEventListener('mousemove', onWindowMouseMove);
   window.removeEventListener('mouseup', onWindowMouseUp);
 });

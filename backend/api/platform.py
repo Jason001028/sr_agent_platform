@@ -244,6 +244,11 @@ def _task_view(state, task: dict) -> dict:
         # （整段运行期间 sr-api 不在场，或这一行是加这两列之前建的）—— 客户端显示
         # 「—」，不拿 created_at 顶替：那个值是**行**的生日，复用行会退化成行龄。
         "started_at": task["started_at"], "finished_at": task["finished_at"],
+        # 产物预览的服务端急烤进度（api-contract §4.x）。null = 没烤过；
+        # running / done / skipped / failed 见 `preview_note` 里那句人话。
+        # 与 `state` 无关：作业跑完了、预览也可能因为沙箱/产物缺失/目录不可写而没烤。
+        "preview_state": task.get("preview_state"),
+        "preview_note": task.get("preview_note"),
     }
 
 

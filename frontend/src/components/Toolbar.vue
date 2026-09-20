@@ -3,18 +3,19 @@
  * Toolbar.vue — 顶部工具栏（tif-viewer.html #toolbar 直译）
  * ------------------------------------------------------------------
  * 选影像（multiple，tif/tiff/jpg/jpeg）/ 拉伸下拉 / 像素定位 X/Y + 按钮 /
- * 绘制掩码 toggle / 生成掩码 / 提交 SR。
+ * 预览下采样档位拖动条 / 绘制掩码 toggle / 生成掩码 / 提交 SR。
  * 最小原型删去了 HTML 的「输出目录」三态按钮与「自动JPG」勾选（前端不再导出 JPG）。
  */
 import { computed, ref } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import { parseLocPair } from '../lib/viewMath';
+import { SCENE_PREVIEW_DIVS, previewDivLabel } from '../lib/scene';
 import type { StretchMode } from '../lib/tifDecode';
 
 const store = useViewerStore();
 const fileInput = ref<HTMLInputElement | null>(null);
-const locX = ref('');
-const locY = ref('');
+/** 定位框：一个框装「X,Y」两个数（原先是 X、Y 两个框，拆开填反而要用户自己数着填）。 */
+const locText = ref('');
 
 /** 盘阵场景激活：只用来决定 title 文案（服务器烤的直方图均衡是二次拉伸的底图，
     均衡不可逆）。**不再**禁用下拉 —— 场景图照样可在显示层换模式，
@@ -37,6 +38,22 @@ const stretchTitle = computed(() =>
     : '',
 );
 
+/** 预览烘焙档位（各边 ÷N）：**平台级**设置，拖入 / 场景库 / 粘盘阵路径三条入口
+    都按它烤。拖动条按**下标**走（`SCENE_PREVIEW_DIVS` 的次序），不是按档位值本身 ——
+    ÷2…÷32 是等比数列，用下标每格等宽，用户按起来才是均匀的。 */
+const DIVS = SCENE_PREVIEW_DIVS;
+const divIndex = computed(() => {
+  const i = (DIVS as readonly number[]).indexOf(store.previewDiv);
+  return i < 0 ? (DIVS as readonly number[]).indexOf(4) : i;
+});
+const divLabel = computed(() => previewDivLabel(store.previewDiv));
+function onDivInput(e: Event) {
+  store.setPreviewDiv(DIVS[Number((e.target as HTMLInputElement).value)] ?? 4);
+}
+
+/** 对比模式的中文短名（按钮上那个后缀，与 CompareBar 的三选一同一套叫法）。 */
+const cmpModeLabel = computed(() => (store.compareMode === 'split' ? '分屏' : '点选'));
+
 const STRETCH_OPTIONS: { value: StretchMode; label: string }[] = [
   { value: 'linear', label: '线性' },
   { value: 'linear2', label: '2% 线性' },
@@ -51,27 +68,24 @@ function onPick(e: Event) {
   el.value = '';   // 允许重复选同一文件（触发 change）
 }
 
-function doLocate() {
-  store.locatePixel(locX.value, locY.value);
-}
+/** 「定位」：框里要的是「X,Y」两个数（1000.23,3000.27 这种形态，认法见 lib/viewMath.parseLocPair，
+    半角/全角逗号、空格、制表符分隔都收）。
 
-/** 粘进来的「30766.11,21862.51」拆到两个框里（认法见 lib/viewMath.parseLocPair）。
-    只在**带分隔符**时才当坐标对：单个数是正在手输，管它就把输入打断了；带分隔符却
-    认不出来的（多数是连编号一起拷的整行）必须出声，不能默默截一半去定位。
-    两个框都挂这个处理 —— 粘到 Y 框里，文本仍然是「X,Y」的顺序。
-    拆完不自动跳：手输了 X 再输 Y 的人也是按「定位」，两处行为保持一致。 */
-function onLocInput() {
-  for (const raw of [locX.value, locY.value]) {
-    if (!/[,，\s]/.test(raw)) continue;          // 单个数 = 正在手输，放行
-    const pair = parseLocPair(raw);
-    if (!pair) {
-      store.showErr('坐标对认不出来（要的是「X,Y」两个数，例如 30766.11,21862.51）');
-      return;
-    }
-    locX.value = pair[0];
-    locY.value = pair[1];
+    **只在点按钮 / 回车时校验，不边敲边管**：单框之后敲字的过程必然经过「只有一个数」
+    「尾随一个逗号」这些中间态，input 事件上校验等于每输一个逗号就骂一次。
+    认不出来（只给了一个数、或连编号一起拷了整行的三个数）一律出声不跳 ——
+    把「1,30766.11,21862.51」截前两个去定位，比不跳更糟。
+
+    认出来就把框统一回写成规范化的「X,Y」：全角逗号、空格、尾随分隔符都收掉了，
+    用户能对照着看解析结果 —— 越界报错时也看得到底拿的是哪个点。 */
+function doLocate() {
+  const pair = parseLocPair(locText.value);
+  if (!pair) {
+    store.showErr('坐标对认不出来（要的是「X,Y」两个数，例如 1000.23,3000.27）');
     return;
   }
+  locText.value = pair[0] + ',' + pair[1];
+  store.locatePixel(pair[0], pair[1]);
 }
 </script>
 
@@ -103,34 +117,69 @@ function onLocInput() {
       <option v-for="o in STRETCH_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
     </select>
 
-    <!-- 两个框都是 text 而不是 number：number 框会把「30766.11,21862.51」这种整串
-         判为非法、值直接变空，粘进来等于什么都没发生（见 onLocInput）。 -->
-    <span class="loc" title="X、Y 可分开填；也可以把「X,Y」两个数粘进任意一个框，例如 30766.11,21862.51">
-      X
+    <!-- 单框 text 而不是 number：number 框会把「1000.23,3000.27」这种整串判为非法、
+         值直接变空，粘进来等于什么都没发生（拆法见 doLocate / parseLocPair）。
+         不再另挂「坐标」标签：占位文本自己就以「输入坐标」开头，两句话说的是同一件事，
+         框一填上字标签又成了唯一线索 —— 不如把这份宽度给占位文本。 -->
+    <span class="loc" title="填「X,Y」两个数，例如 1000.23,3000.27（逗号、空格分隔都收）">
       <input
-        v-model="locX"
+        v-model="locText"
         type="text"
         inputmode="decimal"
-        @input="onLocInput"
-        @keydown.enter="doLocate"
-      />
-      Y
-      <input
-        v-model="locY"
-        type="text"
-        inputmode="decimal"
-        @input="onLocInput"
+        placeholder="输入坐标（X,Y）:123.456,456.123"
         @keydown.enter="doLocate"
       />
       <button type="button" class="loc-btn" @click="doLocate">定位</button>
     </span>
 
+    <!-- 图像对比：开启位置在定位与预览档位之间（都是「看图方式」的控件）。
+         点它展开/收起工具栏下方那条 CompareBar（三选一 + 场景芯片）。
+         注意本条只在**关闭态**才收起，正对比时再点它只是折叠那条区域、不改模式。 -->
+    <button
+      type="button"
+      class="cmp-btn"
+      :class="{ on: store.compareOn }"
+      data-e2e="cmp-open"
+      :title="store.compareOn
+        ? '图像对比已开启（' + cmpModeLabel + '）；点这里收起或展开对比条'
+        : '图像对比：点选对比（拖入即覆盖当前这张）或分屏对比（左右各一张、缩放平移同步）'"
+      @click="store.setCmpStripOpen(!store.cmpStripOpen)"
+    >
+      图像对比{{ store.compareOn ? ' · ' + cmpModeLabel : '' }}
+    </button>
+
+    <!-- 预览下采样档位：紧邻定位组件，因为两者是同一类「看图前先定参数」的控件。
+         文案「预览 1/N」而不是「缩放」：它改的是**服务端烤出来的那张 JPG**的分辨率，
+         不是画布的显示缩放（那个在右下角，别混）。 -->
+    <span
+      class="divsel"
+      data-e2e="preview-div"
+      :title="'服务端预览档位：长宽各为源图的 ' + divLabel + '。'
+        + '档位越小越清晰、首次打开越慢（要读一遍大图）；'
+        + '改档后已打开过的场景会在下次打开时按新档重新烘焙（原地覆盖，不堆积）。'"
+    >
+      预览 {{ divLabel }}
+      <input
+        type="range"
+        :min="0"
+        :max="DIVS.length - 1"
+        step="1"
+        :value="divIndex"
+        aria-label="预览下采样档位"
+        @input="onDivInput"
+      />
+    </span>
+
     <span class="spacer"></span>
 
+    <!-- 对比模式只读（store.enterDraw 也有一道守卫）：分屏里画掩码会画到哪一格、
+         写进哪一张 rec 都不明确，与其给出一个含糊的结果，不如把按钮明确置灰。 -->
     <button
       type="button"
       class="outbtn"
       :class="{ on: store.drawMode }"
+      :disabled="store.compareOn"
+      :title="store.compareOn ? '图像对比模式下不绘制掩码，请先切回「关闭」' : ''"
       @click="store.drawMode ? store.exitDraw() : store.enterDraw()"
     >
       绘制掩码{{ store.drawMode ? ' ✓' : '' }}
@@ -224,7 +273,11 @@ function onLocInput() {
   font-size: 12px;
 }
 .loc input {
-  width: 60px;
+  /* 一个框装两串数，宽度按**占位文本**定：「输入坐标（X,Y）:123.456,456.123」
+     在 13px 下实测 200px，加左右 padding 16px 是 216px —— 取 240px 而不是贴着放，
+     换个字体/回退字体就可能多吃几个像素，提示截成半句话比多占 24px 难看得多。
+     1366 视口下工具栏要到输入框 ~470px 才横向溢出（实测），这点加宽不挤右端的按钮。 */
+  width: 240px;
   height: 28px;
   padding: 0 8px;
   background: rgba(255, 255, 255, 0.95);
@@ -249,6 +302,40 @@ function onLocInput() {
   transition: background 0.15s ease;
 }
 .loc-btn:hover { background: #fff; }
+
+/* 预览档位拖动条：与 .loc 同一族的浅底 pill（白面浮深带）。整块给一个 pill 底，
+   滑轨只占其中一段 —— 深带上一条裸滑轨的对比度不够，也跟右侧按钮不成系列。 */
+.divsel {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  height: 28px;
+  padding: 0 10px;
+  background: rgba(255, 255, 255, 0.95);
+  color: var(--band-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 8px;
+  white-space: nowrap;
+  user-select: none;
+  transition: border-color 0.15s ease;
+}
+.divsel:hover { border-color: #fff; }
+.divsel input[type='range'] {
+  width: 84px;
+  height: 16px;
+  margin: 0;
+  background: transparent;
+  accent-color: var(--band-2);
+  cursor: pointer;
+}
+.divsel input[type='range']:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.18);
+  border-radius: 8px;
+}
 
 /* 次级按钮：透明 ghost（白描边白字）；状态色以浅底 pill 表达 */
 .outbtn {
@@ -279,4 +366,32 @@ function onLocInput() {
 }
 
 .spacer { flex: 1; }
+
+/* 图像对比：与 .outbtn 同一套形态（深色工具栏上的描边按钮），单独一个类名是为了
+   在「已开启」时换一套更醒目的白底 —— 对比模式是个**模式**，得一眼看出还开着。
+   宽度预算：1366 下工具栏还有约 470px 余量（见下方注释），这颗约 92px / 带后缀约 140px。 */
+.cmp-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
+  padding: 0 12px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  font-size: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: var(--r-ctrl);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.cmp-btn:hover { background: rgba(255, 255, 255, 0.2); border-color: rgba(255, 255, 255, 0.6); }
+.cmp-btn.on {
+  color: var(--band-2);
+  background: #fff;
+  border-color: #fff;
+  font-weight: 600;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.25);
+}
 </style>

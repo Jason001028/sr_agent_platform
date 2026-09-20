@@ -22,17 +22,27 @@ import {
   floodSelect, fillRegionHoles, traceContour, simplifyPoly,
   mergeConnectedAsync, buildTiff, buildMaskTxt,
 } from '../lib/maskgen.js';
-import { fitView, locateView, wheelZoom, hitRoi, thumbToOrig, visibleThumbRect } from '../lib/viewMath.js';
-import type { ViewState, Rect } from '../lib/viewMath.js';
+import { fitView, locateView, wheelZoom, hitRoi, thumbToOrig, visibleThumbRect,
+  clampSplitRatio, splitRects, paneAtX, wheelZoomBoth, panBoth } from '../lib/viewMath.js';
+import type { ViewState, Rect, PaneRect } from '../lib/viewMath.js';
+import {
+  parseCompareMode, loadSplitRatio, saveSplitRatio, seedCompareList,
+  addCompareEntry, removeCompareEntry, pruneCompareList, DEFAULT_SPLIT_RATIO,
+} from '../lib/compare.js';
+import type { CompareMode } from '../lib/compare.js';
 import { FileSource } from '../lib/source.js';
 import { browserKit } from '../lib/browserKit.js';
 import { decodeOne } from '../lib/decode.js';
 import type { DecodedRec } from '../lib/decode.js';
-import { sceneDecodePixels, loadSrConfig, startStretch } from '../lib/scene.js';
 import {
-  apiResolveScene, apiBakeMask, fetchSceneJpg, fetchTempSceneJpg,
+  sceneDecodePixels, loadSrConfig, startStretch, loadPreviewDiv,
+  savePreviewDiv, SCENE_PREVIEW_DIVS, previewDivLabel, rasterPreviewWins,
+} from '../lib/scene.js';
+import {
+  apiResolveScene, apiBakeMask, apiSceneSiblings, fetchSceneJpg, fetchDropSceneJpg,
+  siblingRow,
 } from '../lib/api.js';
-import type { SceneResolveResult } from '../lib/api.js';
+import type { SceneResolveResult, SceneSibling } from '../lib/api.js';
 import { classifyImages, imageKindOf } from '../lib/imageFiles.js';
 import type { SceneOpenMeta } from '../lib/scene.js';
 import { buildStats, luma, STAT_HI } from '../lib/roiStats.js';
@@ -89,6 +99,19 @@ export interface ViewerRec {
   statusCls: '' | 'ok' | 'err';
   paintedMode: StretchMode | null;
   maskRois: Poly[] | null;     // 缩略图坐标 ROI
+}
+
+/** 渲染器的一格（图像对比，2026-09-20）。
+ *
+ * `rect` 是画布内的屏幕矩形，`view` 是**这一格自己的局部坐标**（原点 = 该格左上角）——
+ * 于是 fitView/locateView/visibleThumbRect/mouseToThumb 全部原样可用。
+ * 单屏时 `panes` 只含一个铺满全画布的格子，渲染走与今天逐字相同的快速路径。 */
+export interface Pane {
+  side: 'A' | 'B';
+  rect: PaneRect;
+  view: ViewState;
+  rec: ViewerRec | null;
+  active: boolean;
 }
 
 const WAND_WIN = 4096;
@@ -223,16 +246,41 @@ let nextId = 1;
 let markerTimer: ReturnType<typeof setTimeout> | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 let errTimer: ReturnType<typeof setTimeout> | null = null;
+/** 落位提示的续期定时器（每次 dragover 重置，见 setDragHint）。 */
+let dragHintTimer: ReturnType<typeof setTimeout> | null = null;
+
+/* ---------------- 右侧栏展开状态（从 ContextPanel 提升，2026-09-20） ----------------
+   分屏要能自动收起它、退出时再恢复，所以这份状态不能再留在组件里。
+   **key 与默认值一字不改**：老用户的「上次收起来了」继续生效。 */
+const CTX_RAIL_KEY = 'sr.viewer.ctxRailOpen';
+function readCtxRailOpen(): boolean {
+  try {
+    if (typeof localStorage === 'undefined') return false;
+    return localStorage.getItem(CTX_RAIL_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+function saveCtxRailOpen(open: boolean): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(CTX_RAIL_KEY, open ? '1' : '0');
+  } catch {
+    /* 忽略：存不下不影响本次会话 */
+  }
+}
 
 export const useViewerStore = defineStore('viewer', () => {
   /* ---------------- 状态 ---------------- */
   const recs = ref<ViewerRec[]>([]);
   const activeId = ref<number | null>(null);
-  const view = ref<ViewState>({ scale: 1, ox: 0, oy: 0 });
   const canvasSize = ref({ w: 0, h: 0 });
   const renderTick = ref(0);
   const marker = ref<{ tx: number; ty: number; until: number } | null>(null);
   const stretchMode = ref<StretchMode>('linear');
+  /** 预览烘焙档位（各边 ÷N），平台级设置，初值从 localStorage 来。
+   *  工具栏那条拖动条读写它；取图的两处调用点也读它。 */
+  const previewDiv = ref(loadPreviewDiv());
   const drawMode = ref(false);
   const drawTool = ref<DrawTool>('rect');
   const pendingRect = ref<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
@@ -263,6 +311,66 @@ export const useViewerStore = defineStore('viewer', () => {
   const busy = ref(false);
   const srBusy = ref(false);       // 「提交 SR」进行中（掩码服务端烘焙）
 
+  /* ---------------- 图像对比（2026-09-20） ----------------
+
+     分屏 = **一个画布、两个裁剪矩形**：每格一套 ViewState（viewA/viewB），下面那个
+     `view` 是**可写 computed**，代理到活动侧那一套。于是全仓读 `view.value` 的地方
+     （TifCanvas 与 store 内约十二处）一行都不用改。
+
+     `activeId` 仍是「活动侧那张 rec」：`placeRec` 在 `activate` 开头把两者对齐，
+     掩码 / ROI 统计 / 云量卡 / 任务状态 / 待修复清单自动选中 / StatusBar /
+     Toolbar 可用性（约四十处 activeRec 消费点）全部自动跟随活动侧。
+
+     三态与纯判据（落点归属、清单增删、比例解析）在 lib/compare.ts；分屏几何在
+     lib/viewMath.ts。这里只放状态与编排。 */
+
+  const compareMode = ref<CompareMode>('off');
+  /** 工具栏下方那条区域的展开与否。**不持久化**：刷新即回关闭。 */
+  const cmpStripOpen = ref(false);
+  const paneA = ref<number | null>(null);
+  const paneB = ref<number | null>(null);
+  /** 非分屏恒为 'A'。 */
+  const activeSide = ref<'A' | 'B'>('A');
+  /** 分隔比例。跨会话记住 —— 只有它持久化，对比模式本身不。 */
+  const splitRatio = ref(loadSplitRatio());
+  const viewA = ref<ViewState>({ scale: 1, ox: 0, oy: 0 });
+  const viewB = ref<ViewState>({ scale: 1, ox: 0, oy: 0 });
+  /** 点选清单成员（有序 rec id）。 */
+  const compareList = ref<number[]>([]);
+  const dragHint = ref<{ active: boolean; side: 'A' | 'B' | null }>({ active: false, side: null });
+  /** 右侧栏是否展开（从 ContextPanel 提升）。进分屏自动收起、退出时按 prev 还原。 */
+  const ctxRailOpen = ref(readCtxRailOpen());
+  const ctxRailPrevOpen = ref<boolean | null>(null);
+
+  /** 活动侧的视图变换。**全仓 `view.value = …` 只有 5 处，都在本文件内**，
+     读点一个都不用改。Pinia 会解包 computed，`store.view.ox` 照旧可用。 */
+  const view = computed<ViewState>({
+    get: () => (activeSide.value === 'B' ? viewB.value : viewA.value),
+    set: (v) => { if (activeSide.value === 'B') viewB.value = v; else viewA.value = v; },
+  });
+
+  /** 分屏中（关闭 / 点选对比都是单屏）。 */
+  const split = computed(() => compareMode.value === 'split');
+  /** 任一对比模式 —— 拖放门、只读、右栏自动收起都看它。 */
+  const compareOn = computed(() => compareMode.value !== 'off');
+
+  /** 分隔线在画布局部坐标里的 x。 */
+  const splitX = computed(
+    () => splitRects(splitRatio.value, canvasSize.value.w, canvasSize.value.h).a.w,
+  );
+
+  /** 某一格的视口矩形。单屏 = 铺满画布（与今天同义）。 */
+  function rectForSide(side: 'A' | 'B'): PaneRect {
+    const { w, h } = canvasSize.value;
+    if (!split.value) return { x: 0, y: 0, w, h };
+    const r = splitRects(splitRatio.value, w, h);
+    return side === 'A' ? r.a : r.b;
+  }
+
+  function activePaneRect(): PaneRect {
+    return rectForSide(activeSide.value);
+  }
+
   const activeRec = computed<ViewerRec | null>(() =>
     recs.value.find((r) => r.id === activeId.value) || null,
   );
@@ -277,9 +385,347 @@ export const useViewerStore = defineStore('viewer', () => {
     return rec.paintedMode ?? startStretch(rec.route, stretchMode.value);
   });
 
+  /** 某一格上摆着哪张 rec。**单屏时与 `activeRec` 同源** —— 于是渲染器只有
+      `panes` 一个输入，不必分「单屏走老路、分屏走新路」。 */
+  function recForSide(side: 'A' | 'B'): ViewerRec | null {
+    if (!split.value) return activeRec.value;
+    const id = side === 'A' ? paneA.value : paneB.value;
+    return id === null ? null : recs.value.find((r) => r.id === id) ?? null;
+  }
+
+  /** 渲染器的唯一输入：单屏 = 一个铺满的格子（`length === 1` 走逐字保留的快速
+      路径），分屏 = 左右两格。 */
+  const panes = computed<Pane[]>(() => {
+    const { w, h } = canvasSize.value;
+    if (!split.value) {
+      return [{ side: 'A', rect: { x: 0, y: 0, w, h }, view: viewA.value, rec: recForSide('A'), active: true }];
+    }
+    const r = splitRects(splitRatio.value, w, h);
+    return [
+      { side: 'A', rect: r.a, view: viewA.value, rec: recForSide('A'), active: activeSide.value === 'A' },
+      { side: 'B', rect: r.b, view: viewB.value, rec: recForSide('B'), active: activeSide.value === 'B' },
+    ];
+  });
+
+  /* ---------------- 归位（placeRec）：新图进哪一格 ---------------- */
+
+  /** 把这 id 放进它该在的格子，并让它成为活动侧。**整套落点规则就这一个函数**：
+   *
+   *  - 单屏（关闭 / 点选对比）→ 唯一格子，直接顶掉当前这张。于是「点选对比拖进来
+   *    就覆盖当前这张」不需要任何特判。
+   *  - 分屏 + 给了 side（拖放落点）→ 落那一格；
+   *  - 分屏 + 没给 side（文件列表点击 / 盘阵栏 / 待修复清单「打开」）→ 落活动侧。
+   *
+   *  另有一条：若**另一格**已经是同一张图，则两格**互换**。否则从点选清单点到一张正
+   *  显示在另一侧的图，会变成「两格同一张」或者「另一格被挖空」，两种都比互换糟。
+   *
+   *  返回「目标格换了一张图」（= 那一格的视口需要重新适配）。调用方据此决定要不要
+   *  `fit()` —— 同一张图留在原格时不重适配，用户的缩放不该被一次多余的点选抹掉。 */
+  function placeRec(id: number, side?: 'A' | 'B'): boolean {
+    if (!split.value) {
+      const changed = paneA.value !== id;
+      paneA.value = id;
+      paneB.value = null;
+      activeSide.value = 'A';
+      activeId.value = id;
+      return changed;
+    }
+    const s: 'A' | 'B' = side ?? activeSide.value;
+    const other: 'A' | 'B' = s === 'A' ? 'B' : 'A';
+    const cur = s === 'A' ? paneA.value : paneB.value;
+    const otherId = other === 'A' ? paneA.value : paneB.value;
+    if (s === 'A') paneA.value = id; else paneB.value = id;
+    if (otherId === id) {
+      if (other === 'A') paneA.value = cur; else paneB.value = cur;
+    }
+    activeSide.value = s;
+    activeId.value = id;
+    return cur !== id;
+  }
+
+  /** 切图/切侧时的公共重置。`activate` 与 `setActiveSide` 共用 —— 两处各写一遍
+      迟早漂移，漏一个就是「云量卡还挂着上一张的数」。 */
+  function switchActive(id: number, doFit = false) {
+    marker.value = null;
+    activeId.value = id;
+    clearRoiSel();                   // 侧舱选择/统计随图失效
+    clearCloud();                    // 云量数字/红叠随图失效（随后 refresh 补回）
+    if (drawMode.value) {
+      pendingPts.value = null;
+      pendingRect.value = null;
+      hoverPt.value = null;
+    }
+    const rec = recs.value.find((r) => r.id === id);
+    if (rec && rec.thumb) {
+      if (doFit) fit();
+      refreshCloudStats();
+    }
+  }
+
+  /** 手动切活动侧（点分屏的另一半）。
+   *  **刻意不调 `activate`**：两格本来就都显示着自己的图，切的是「哪一侧在响应
+   *  掩码/云量/任务状态」，不该重新解码、重新适配、惊动侧舱。 */
+  function setActiveSide(side: 'A' | 'B') {
+    if (!split.value || activeSide.value === side) return;
+    const id = side === 'A' ? paneA.value : paneB.value;
+    if (id === null) return;               // 空侧没什么可切的，忽略（点击退化为平移）
+    activeSide.value = side;
+    switchActive(id);
+    renderTick.value++;
+  }
+
+  /* ---------------- 分屏适配 ---------------- */
+
+  /** 只适配某一格（按它自己的视口矩形）。 */
+  function fitSide(side: 'A' | 'B') {
+    const rec = recForSide(side);
+    if (!rec || !rec.thumb) return;
+    const rect = rectForSide(side);
+    const v = fitView(rec.thumb.width, rec.thumb.height, rect.w, rect.h);
+    if (side === 'B') viewB.value = v; else viewA.value = v;
+  }
+
+  /** 两格各自适配 —— 进分屏、回正、画布尺寸变化时用。半幅是新的视口，
+     沿用全幅那次的适配两边都不对。 */
+  function fitBoth() {
+    fitSide('A');
+    fitSide('B');
+  }
+
+  /** 解码/取图完成后的收尾。旧写法是 `if (activeId === rec.id) { fit(); … }`——
+     分屏下这张可能在**非活动侧**解码完成，那样那一格的 ViewState 会停在 {1,0,0}
+     （图缩在左上角）。所以改成「显示着这张 rec 的格子各适配一次」。 */
+  function afterPixels(rec: ViewerRec) {
+    if (split.value) {
+      if (paneA.value === rec.id) fitSide('A');
+      if (paneB.value === rec.id) fitSide('B');
+      if (activeId.value === rec.id) refreshCloudStats();
+      renderTick.value++;
+      return;
+    }
+    if (activeId.value === rec.id) {
+      fit();
+      refreshCloudStats();
+      renderTick.value++;
+    }
+  }
+
+  /* ---------------- 模式切换 ---------------- */
+
+  /** 进分屏：自动收起右侧栏，并记住用户此前的展开状态（退出时还原）。
+      只记第一次 —— 从点选切到分屏不该把已经记住的手动状态覆盖掉。 */
+  function collapseRailForCompare() {
+    if (ctxRailPrevOpen.value === null) ctxRailPrevOpen.value = ctxRailOpen.value;
+    ctxRailOpen.value = false;
+    saveCtxRailOpen(false);
+  }
+  function restoreRailAfterCompare() {
+    if (ctxRailPrevOpen.value === null) return;
+    ctxRailOpen.value = ctxRailPrevOpen.value;
+    saveCtxRailOpen(ctxRailOpen.value);
+    ctxRailPrevOpen.value = null;
+  }
+
+  /** 切「关闭 / 点选对比 / 分屏对比」。 */
+  function setCompareMode(mode: CompareMode) {
+    const next = parseCompareMode(mode);
+    if (next === compareMode.value) return;
+    const wasSplit = split.value;
+    if (next !== 'off') exitDraw();        // 对比模式只读：不画掩码、不建 ROI
+
+    if (next === 'split') {
+      if (!wasSplit) {
+        // 进分屏：当前这张进左格，右格空着等拖入。两侧都是新视口 → 两边重新适配。
+        paneA.value = activeId.value;
+        paneB.value = null;
+        activeSide.value = 'A';
+      }
+      compareMode.value = next;
+      compareList.value = seedCompareList(recs.value.map((r) => r.id));
+      collapseRailForCompare();
+      fitBoth();
+      renderTick.value++;
+      return;
+    }
+
+    if (wasSplit) {
+      // 退出分屏：留下**此前活动侧**那张（单屏显示它），重新适配整幅。
+      const keep = recForSide(activeSide.value);
+      compareMode.value = next;
+      paneB.value = null;
+      activeSide.value = 'A';
+      if (keep) { paneA.value = keep.id; activeId.value = keep.id; }
+      restoreRailAfterCompare();
+      if (next === 'off') compareList.value = [];
+      fit();
+      renderTick.value++;
+      return;
+    }
+
+    // 关闭 ↔ 点选：单屏语义完全不变，只换模式与清单播种。
+    compareMode.value = next;
+    if (next === 'off') {
+      compareList.value = [];
+      paneB.value = null;
+      activeSide.value = 'A';
+    } else {
+      compareList.value = seedCompareList(recs.value.map((r) => r.id));
+    }
+    renderTick.value++;
+  }
+
+  function setCmpStripOpen(open: boolean) {
+    cmpStripOpen.value = !!open;
+  }
+
+  /* ---------------- 分隔比例 ---------------- */
+
+  /** 设比例。**顺手持久化**：一次 localStorage 写 20 字节，比这次改动触发的重绘
+      便宜得多，不值得为它多开一个 commit 接口。 */
+  function setSplitRatio(r: number) {
+    const next = clampSplitRatio(r, canvasSize.value.w);
+    if (next === splitRatio.value) return;
+    splitRatio.value = next;
+    saveSplitRatio(next);
+    renderTick.value++;
+  }
+
+  /** 回正：比例回 0.5 **且两侧重新适配**。只把线挪回中间而不重新适配，会让两侧
+      各留一半旧视口，看起来像「图被裁掉了」。 */
+  function resetSplit() {
+    splitRatio.value = clampSplitRatio(DEFAULT_SPLIT_RATIO, canvasSize.value.w);
+    saveSplitRatio(splitRatio.value);
+    fitBoth();
+    renderTick.value++;
+  }
+
+  /* ---------------- 落位提示 ---------------- */
+
+  /** 落位提示的开关，**每次 dragover 续期一次**（500ms 没再来就自己熄）。
+      用超时而不是 dragenter/dragleave 计数：指针穿过画布上的子元素时计数会失配，
+      提示就卡住了。drop / dragend / window blur 会立即清掉它。
+      **刻意不碰 renderTick** —— dragover 是高频事件，每次重绘整张画布没有必要，
+      overlay 是 Vue 组件，读 dragHint 自己会重渲。 */
+  const DRAG_HINT_TTL = 500;
+  function setDragHint(active: boolean, side: 'A' | 'B' | null) {
+    if (dragHintTimer) { clearTimeout(dragHintTimer); dragHintTimer = null; }
+    if (!active) {
+      if (dragHint.value.active || dragHint.value.side !== null) {
+        dragHint.value = { active: false, side: null };
+      }
+      return;
+    }
+    const next = { active: true, side };
+    dragHint.value = next;
+    dragHintTimer = setTimeout(() => {
+      dragHintTimer = null;
+      dragHint.value = { active: false, side: null };
+    }, DRAG_HINT_TTL);
+  }
+
+  /* ---------------- 点选清单 ---------------- */
+
+  /** 新拖入的图自动加入清单（幂等）。 */
+  function noteCompareEntry(id: number) {
+    if (!compareOn.value) return;
+    compareList.value = addCompareEntry(compareList.value, id);
+  }
+
+  /** 「清除」：**只把这一条移出清单**。文件列表条目、像素、屏幕上那张、activeId
+      都不动 —— 屏幕上那张继续显示，只是不再参与清单轮换。
+      文件列表点击**不会**把它加回清单（只有新拖入或重新进入对比模式才会），
+      这样「清除」才是粘住的。 */
+  function clearCompareEntry(id: number) {
+    compareList.value = removeCompareEntry(compareList.value, id);
+  }
+
+  /** 清单里的 rec（按 id 顺序，找不到的跳过 —— removeRec 会剪枝，这里是双保险）。 */
+  const cmpListRecs = computed<ViewerRec[]>(() =>
+    compareList.value
+      .map((id) => recs.value.find((r) => r.id === id))
+      .filter((r): r is ViewerRec => !!r),
+  );
+
+  function setCtxRailOpen(open: boolean) {
+    ctxRailOpen.value = !!open;
+    saveCtxRailOpen(ctxRailOpen.value);
+  }
+
+  /* ---------------- 场景内快捷入口：三张图的廉价通道 ----------------
+
+     为什么需要它：后端关联盘阵时是拿**场景输入影像的 stem** 去比用户拖进来的文件名
+     （backend/api/app.py 的 `_fingerprint_mismatch`），产物叫 `<输入名>_<suffix>.tif`、
+     `_NOSR` 更不必说，名字永远对不上 → 拖这两类进来必然 404，退回浏览器本地稀疏解码
+     （真机大图几十秒、几百 MB，还拿不到 lqPath/sceneId，掩码没处写）。
+     `/siblings` 恰好给了三类各自的 id，拿它调 `/preview` 就是服务端烤好的下采样 jpg。
+
+     芯片绑**活动侧 rec 的 sceneId**：活动侧是本地文件（没有 sceneId）时整排禁用。 */
+
+  /** 当前活动侧那张图的场景 id（没有 → null，芯片整排禁用）。 */
+  function activeSceneId(): string | null {
+    const rec = activeRec.value;
+    return rec && rec.sceneId ? rec.sceneId : null;
+  }
+
+  /** 打开活动侧场景里的某一类图（input / product / nosr），落在活动侧。 */
+  async function openSceneSibling(kind: SceneSibling['kind']): Promise<boolean> {
+    const sid = activeSceneId();
+    if (!sid) { showToast('先打开一张带盘阵关联的图，才能取同场景的其它图'); return false; }
+    busy.value = true;
+    showMask('正在查找同场景的图…', '三类图（输入 / 本次产物 / 上一次产物）', false);
+    try {
+      const res = await apiSceneSiblings(loadSrConfig(), sid);
+      const item = res.items.find((it) => it.kind === kind);
+      if (!item || !item.id || !item.exists) {
+        // 「找不到」如实交代：把试过哪些名字一并说出来，别只说一句「没有」。
+        const kindName = kind === 'input' ? '输入影像'
+          : kind === 'product' ? '本次产物' : '上一次产物';
+        const tried = res.productCandidates.length
+          ? '（试过 ' + res.productCandidates.join(' / ') + '）' : '';
+        const why = !res.suffix
+          ? '—— 这个场景还没有可用的 suffix，拼不出产物名'
+          : tried;
+        showToast('盘阵上没有' + kindName + why);
+        hideMask(); busy.value = false;
+        return false;
+      }
+      if (item.W == null || item.H == null) {
+        // 尺寸读不出来就不能开：掩码换算按 rec.W/H 建画布，0 会让落点全错。
+        showErr('「' + (item.name ?? kind) + '」读不出影像尺寸，不能打开');
+        hideMask(); busy.value = false;
+        return false;
+      }
+      const row = siblingRow(res, item);
+      const blob = await fetchSceneJpg(loadSrConfig(), row, previewDiv.value, (text) => {
+        showMask('正在加载同场景的图…', text, false);
+      });
+      hideMask(); busy.value = false;
+      // 名字取 stem：与场景库那些行一个口径（列表里两个名字并排时不至于一个带后缀
+      // 一个不带）。lqPath 用场景目录 —— 产物的 rec 因此也拿到盘阵关联，掩码写回
+      // 才有落点。
+      const stem = (item.name ?? kind).replace(/\.(tif|tiff|jpg|jpeg)$/i, '');
+      await openSceneJpg({
+        name: stem, W: item.W, H: item.H,
+        sceneId: item.id, lqPath: res.lqPath, serverMaskPath: null,
+      }, blob, split.value ? activeSide.value : undefined);
+      if (res.suffixFrom !== 'query') {
+        showToast('suffix 用的是'
+          + (res.suffixFrom === 'task' ? '「最近跑过的任务」' : '「配置缺省」')
+          + ' ' + res.suffix + '，若与实际不符请核对');
+      }
+      return true;
+    } catch (e) {
+      hideMask(); busy.value = false;
+      showErr('打开失败：' + (e instanceof Error ? e.message : String(e)));
+      return false;
+    }
+  }
+
   /* ---------------- 文件打开（HTML openFiles/openOne） ---------------- */
-  /** 选文件 / 拖入：TIF 走解码管线，.jpg/.jpeg 走显示就绪图片管线（§4.6）。 */
-  function addFiles(fileList: FileList | File[] | File) {
+  /** 选文件 / 拖入：TIF 走解码管线，.jpg/.jpeg 走显示就绪图片管线（§4.6）。
+   *  `side` 只在分屏下由拖放落点给出（落在左半是 'A'、右半是 'B'）；选文件对话框、
+   *  场景快捷入口、以及任何别的调用都不给 → 落活动侧。 */
+  function addFiles(fileList: FileList | File[] | File, side?: 'A' | 'B') {
     const files = Array.isArray(fileList)
       ? fileList
       : Array.from(fileList instanceof File ? [fileList] : fileList);
@@ -288,13 +734,21 @@ export const useViewerStore = defineStore('viewer', () => {
       showErr('没有识别到影像文件（支持 .tif/.tiff/.jpg/.jpeg）');
       return;
     }
-    const isDup = (f: File): boolean =>
-      recs.value.some((r) => r.file.name === f.name && r.file.size === f.size);
-    tifs.forEach((f) => { if (!isDup(f)) openOne(f); });
-    imgs.forEach((f) => { if (!isDup(f)) void openLocalImage(f); });
+    const dupOf = (f: File): ViewerRec | undefined =>
+      recs.value.find((r) => r.file.name === f.name && r.file.size === f.size);
+    tifs.forEach((f) => {
+      const dup = dupOf(f);
+      // 重复的仍然走一遍 activate：分屏下「把同一张图拖到另一侧」是有意义的操作，
+      // 归位规则（含两格互换）在 placeRec 里。
+      if (dup) void activate(dup.id, side); else openOne(f, side);
+    });
+    imgs.forEach((f) => {
+      const dup = dupOf(f);
+      if (dup) void activate(dup.id, side); else void openLocalImage(f, side);
+    });
   }
 
-  function openOne(file: File) {
+  function openOne(file: File, side?: 'A' | 'B') {
     const rec: ViewerRec = {
       id: nextId++, file: markRaw(file),
       probe: null, name: file.name, size: file.size,
@@ -310,14 +764,22 @@ export const useViewerStore = defineStore('viewer', () => {
     tiffTags(new FileSource(file, rec.name)).then((tags) => {
       if (rec.route === null) rec.layout = layoutInfo(tags);
     }).catch(() => { /* 头部解析失败不阻塞 */ });
-    void activate(rec.id);
+    void activate(rec.id, side);
   }
 
   /* ---------------- 激活 / 解码（HTML activate + decodeGeoTiff/decodeUtif） ---------------- */
-  async function activate(id: number) {
+  /** 激活一条 rec。`side` 只在分屏下有意义（拖放落点算出来的那一半）；不给就是
+      「落活动侧」（文件列表点击 / 盘阵栏 / 待修复清单「打开」都不给）。 */
+  async function activate(id: number, side?: 'A' | 'B') {
     const rec = recs.value.find((r) => r.id === id);
     if (!rec) return;
-    if (activeId.value === id && rec.thumb) {
+    const already = activeId.value === id;
+    const moved = placeRec(id, side);
+    noteCompareEntry(id);                // 对比模式下露面的这张要进点选清单（幂等）
+    if (already && rec.thumb) {
+      // 已经是活动侧这张：只重画。**只有它真的换了格子才重新适配** ——
+      // 同一张图留在原格时若也 fit，一次多余的点选就把用户的缩放抹了。
+      if (moved) fit();
       repaintOnActivate(rec);
       renderTick.value++;
       return;
@@ -331,7 +793,7 @@ export const useViewerStore = defineStore('viewer', () => {
     }
     if (rec.thumb) {
       repaintOnActivate(rec);
-      fit();
+      fit();                             // 单屏 = 全幅；分屏 = 只配活动格
       refreshCloudStats();           // 切回已解码文件 → 云量随新图刷新
       renderTick.value++;
       return;
@@ -396,11 +858,7 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.statusCls = 'ok';
     // 像素刚换过 → 一律重画。已选过模式的（同一 rec 重复解码）沿用原模式，不重置。
     paintStretch(rec, rec.paintedMode ?? startStretch(rec.route, stretchMode.value));
-    if (activeId.value === rec.id) {
-      fit();
-      refreshCloudStats();           // 首次解码完 → 云量卡/红叠就绪
-      renderTick.value++;
-    }
+    afterPixels(rec);                // 分屏下这张可能在非活动侧解码完成
   }
 
   function failRec(rec: ViewerRec, e: unknown) {
@@ -422,7 +880,7 @@ export const useViewerStore = defineStore('viewer', () => {
      所以给它独立的 route='img'，让「盘阵场景」相关的判断（徽标 / 拉伸禁用 /
      ScenesPage 的 W/H 提示 / 提交 SR）都继续只认 route==='jpg'。
      有 src + stats，因此拉伸模式、掩码绘制、云量卡、ROI 统计照常可用。 */
-  async function openLocalImage(file: File) {
+  async function openLocalImage(file: File, side?: 'A' | 'B') {
     busy.value = true;
     showMask('正在读取图片…', file.name, false);
     try {
@@ -453,7 +911,7 @@ export const useViewerStore = defineStore('viewer', () => {
       const live = recs.value.find((r) => r.id === rec.id) ?? rec;
       const ready = live.status;
       hideMask(); busy.value = false;
-      void activate(live.id);
+      void activate(live.id, side);
       // 盘阵场景目录里那份 jpg 就是这条 rec 自己（拖进来的是生产全名，后端能反推
       // 出目录），所以顺带试一次关联：命中就按场景身份升级，拿到 lqPath 才能提交
       // SR / 保存掩码。**不 await** —— 关联要发请求，本地图该显示就先显示。
@@ -471,7 +929,7 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   /* ---------------- 盘阵场景（阶段4：读服务器烘焙 JPG，route='jpg'） ----------------
-     JPG 即显示产物（各边 1/2 的稀疏采样 + 直方图均衡已在服务器烤好）：不再读原始
+     JPG 即显示产物（各边 ÷2…÷32、当前档位见 viewer.previewDiv 的稀疏采样 + 直方图均衡已在服务器烤好）：不再读原始
      TIF 字节、不做二次拉伸、不本地导出 JPG（服务器 JPG 即交付物）。掩码仍照旧 ——
      缩略图坐标按元数据 W/H 换算回全分辨率（thumbToOrig scale 来自 rec.W/H 而非
      probe，所以 JPG 尺寸变了也不影响掩码落点）。 */
@@ -514,7 +972,11 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.lqPath = meta.lqPath ?? null;
     // 默认是服务端烘焙那份的口径；拖本地 jpg 升级进来的那条路自报来源
     // （它的像素是用户拖进来的原图，说「服务端已烘焙」就是假话）。
-    rec.layout = layout ?? '盘阵 JPG（1/2 尺度 + 直方图均衡，服务端已烘焙）';
+    // 尺度报当前档位 —— 取图的两处调用点都用 `previewDiv.value` 烤，所以
+    // 「刚拿到手的这张是按哪一档烤的」就是它（用户若在取图途中又拖了滑块，
+    // 文案最多早一拍，下次打开即对齐）。
+    rec.layout = layout
+      ?? `盘阵 JPG（${previewDivLabel(previewDiv.value)} 尺度 + 直方图均衡，服务端已烘焙）`;
     // 同上：名字与尺寸卡片上已有（标题行、图属性行、布局行），状态只表态
     rec.status = '场景就绪';
     rec.statusCls = 'ok';
@@ -524,17 +986,14 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.serverMaskPath = meta.serverMaskPath ?? null;
     // 像素刚换过 → 一律重画（沿用已选模式，不重置用户的选择）
     paintStretch(rec, rec.paintedMode ?? startStretch(rec.route, stretchMode.value));
-    if (activeId.value === rec.id) {
-      fit();
-      refreshCloudStats();
-      renderTick.value++;
-    }
+    afterPixels(rec);
     return true;
   }
 
-  async function openSceneJpg(meta: SceneOpenMeta, blob: Blob) {
+  /** `side` 只在分屏下由调用方（场景快捷入口按活动侧 / 拖放落点）给出。 */
+  async function openSceneJpg(meta: SceneOpenMeta, blob: Blob, side?: 'A' | 'B') {
     const dup = findRecByMeta(meta);
-    if (dup) { void activate(dup.id); return; }
+    if (dup) { void activate(dup.id, side); return; }
     busy.value = true;
     showMask('正在加载盘阵场景…', meta.name + '（服务器烘焙 JPG，元数据 ' + meta.W + '×' + meta.H + '）', false);
     const rec: ViewerRec = {
@@ -551,7 +1010,7 @@ export const useViewerStore = defineStore('viewer', () => {
     try {
       await applySceneJpgToRec(rec, meta, blob);
       hideMask(); busy.value = false;
-      void activate(rec.id);
+      void activate(rec.id, side);
       showToast('已打开盘阵场景「' + meta.name + '」（掩码按元数据 ' + meta.W + '×' + meta.H + ' 换算）');
     } catch (e) {
       // 解不开就整条撤掉：留一条空壳 rec 在列表里，点它只会再失败一次。
@@ -568,17 +1027,27 @@ export const useViewerStore = defineStore('viewer', () => {
     const i = recs.value.findIndex((r) => r.id === id);
     if (i < 0) return;
     recs.value.splice(i, 1);
+    // 分屏的两格与点选清单都可能还指着它
+    let paneCleared = false;
+    if (paneA.value === id) { paneA.value = null; paneCleared = true; }
+    if (paneB.value === id) { paneB.value = null; paneCleared = true; }
+    compareList.value = pruneCompareList(compareList.value, recs.value.map((r) => r.id));
     if (activeId.value === id) {
       activeId.value = null;
       clearRoiSel();
       const next = recs.value[recs.value.length - 1];
+      // 走 activate → placeRec：活动侧那张被关掉后，格子与 activeId 的不变量自动恢复
       if (next) void activate(next.id);
       else {
+        activeSide.value = 'A';          // 两格都空了 → 活动侧回左，view 写回 viewA
         view.value = { scale: 1, ox: 0, oy: 0 };
         marker.value = null;
         clearCloud();                    // 无图可显：云卡回空态，释放红叠画布
         renderTick.value++;
       }
+    } else if (paneCleared) {
+      // 关掉的是**非活动侧**那张：那一格当场空出来，得重画（活动侧什么都没变）
+      renderTick.value++;
     }
   }
 
@@ -614,38 +1083,95 @@ export const useViewerStore = defineStore('viewer', () => {
       模式更新成同一个值，作为之后新打开的本地图的起手。
 
       盘阵场景不写回全局：那会让「看过一张场景图」默默改掉本地 TIF 的起手模式，
-      而场景那条链路用户要的是本图独立。 */
+      而场景那条链路用户要的是本图独立。
+
+      **对比模式下改一次刷两侧**：并排看的两张图若用着不同拉伸，看到的差异里混着
+      拉伸差异，对比结论就是错的。关闭模式下仍是「每张图各自记」（e2e 盯着这条）。 */
   function setStretch(mode: StretchMode) {
     const rec = activeRec.value;
     if (!rec || rec.route !== 'jpg') stretchMode.value = mode;
-    if (rec && rec.thumb && rec.src) {
+    if (split.value) {
+      let painted = false;
+      for (const side of ['A', 'B'] as const) {
+        const r = recForSide(side);
+        if (r && r.thumb && r.src) { paintStretch(r, mode); painted = true; }
+      }
+      if (!painted) return;
+    } else if (rec && rec.thumb && rec.src) {
       paintStretch(rec, mode);
-      renderTick.value++;
-      refreshRoiStats();              // 显示层像素变了 → 选中 ROI 统计随层刷新
-      refreshCloudStats();            // …云量数字/红叠同理随显示层刷新
+    } else {
+      return;
     }
+    renderTick.value++;
+    refreshRoiStats();              // 显示层像素变了 → 选中 ROI 统计随层刷新
+    refreshCloudStats();            // …云量数字/红叠同理随显示层刷新
+  }
+
+  /** 切换预览烘焙档位（工具栏拖动条）。
+
+  点选即生效：只写进 store + localStorage，**不去动已经打开的图** —— 当前这张的
+  像素已经在手上了，重烤它既慢又不是用户此刻的诉求。档位在下次取图时生效
+  （`fetchSceneJpg` / `fetchDropSceneJpg` 自己读它）。 */
+  function setPreviewDiv(div: number) {
+    if (!(SCENE_PREVIEW_DIVS as readonly number[]).includes(div)) return;
+    previewDiv.value = div;
+    savePreviewDiv(div);
   }
 
   function setCanvasSize(w: number, h: number) {
     canvasSize.value = { w, h };
+    if (split.value) {
+      // 半幅宽度变了 → 比例先收进新界限，再两格各自适配
+      splitRatio.value = clampSplitRatio(splitRatio.value, w);
+      fitBoth();
+      renderTick.value++;
+      return;
+    }
     const rec = activeRec.value;
     if (rec && rec.thumb) { fit(); renderTick.value++; }
   }
 
+  /** 只适配**活动格**。单屏时活动格就是整块画布 → 与今天完全等价。 */
   function fit() {
     const rec = activeRec.value;
     if (!rec || !rec.thumb) return;
-    view.value = fitView(rec.thumb.width, rec.thumb.height, canvasSize.value.w, canvasSize.value.h);
+    const rect = activePaneRect();
+    view.value = fitView(rec.thumb.width, rec.thumb.height, rect.w, rect.h);
   }
 
   function onWheel(mx: number, my: number, factor: number) {
+    if (split.value) {
+      // 指针落在哪一格，就以那一格里的归一化位置为锚点，同一个归一化位置施加到另一格。
+      // 两格等宽且都 fit 时这条规则就是逐像素锁定。
+      if (!recForSide('A') && !recForSide('B')) return;
+      const r = splitRects(splitRatio.value, canvasSize.value.w, canvasSize.value.h);
+      const onA = paneAtX(mx, r.a.w) === 'A';
+      const pPane = onA ? r.a : r.b;      // 指针所在格
+      const oPane = onA ? r.b : r.a;      // 另一格
+      const out = wheelZoomBoth(viewA.value, viewB.value, pPane, oPane,
+        onA ? 'A' : 'B', mx, my, factor);
+      viewA.value = out.a;
+      viewB.value = out.b;
+      renderTick.value++;
+      return;
+    }
     const rec = activeRec.value;
     if (!rec || !rec.thumb) return;
+    // **单屏刻意保留这条字面表达式**：改走 normAnchor/anchorAt 会多一次除法与乘法，
+    // IEEE double 下不保证往返（100/1314*1314 = 99.99999999999999），
+    // 而 test-vue-viewer.js 的 D/E 段在采样画布中心像素。
     view.value = wheelZoom(view.value, mx, my, factor);
     renderTick.value++;
   }
 
   function onPan(dx: number, dy: number) {
+    if (split.value) {
+      const out = panBoth(viewA.value, viewB.value, dx, dy);
+      viewA.value = out.a;
+      viewB.value = out.b;
+      renderTick.value++;
+      return;
+    }
     view.value = { ...view.value, ox: view.value.ox + dx, oy: view.value.oy + dy };
     renderTick.value++;
   }
@@ -662,7 +1188,9 @@ export const useViewerStore = defineStore('viewer', () => {
     }
     const t = rec.thumb;
     const tx = xi * (t.width / W), ty = yi * (t.height / H);
-    view.value = locateView(view.value.scale, tx, ty, canvasSize.value.w, canvasSize.value.h);
+    // 居中到**活动格**的中心：分屏下把点定位到右半屏的中心，而不是整块画布的中心。
+    const rect = activePaneRect();
+    view.value = locateView(view.value.scale, tx, ty, rect.w, rect.h);
     showMarker(tx, ty);
     renderTick.value++;
   }
@@ -729,12 +1257,17 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   /* ---------------- 云量估算卡（阶段6 启发，纯前端） ---------------- */
-  /** 当前缩略图像素尺度下的可见视野矩形（thumb/view/canvas 就绪时）。 */
+  /** 当前缩略图像素尺度下的可见视野矩形（thumb/view/canvas 就绪时）。
+   *
+   *  **分屏下必须用活动格而不是整块画布**：`visibleThumbRect` 假定「一个铺满画布的
+   *  视口」，直接用整幅宽高会把分隔线另一边也当成可见区，云量数字就偏了。
+   *  这是「单视口」假设在整个 store 里仅有的两个泄漏点之一（另一个见 computeCloudView）。 */
   function currentViewRect(): Rect | null {
     const rec = activeRec.value;
     if (!rec || !rec.thumb) return null;
+    const rect = activePaneRect();
     return visibleThumbRect(
-      view.value, canvasSize.value.w, canvasSize.value.h,
+      view.value, rect.w, rect.h,
       rec.thumb.width, rec.thumb.height,
     );
   }
@@ -803,6 +1336,9 @@ export const useViewerStore = defineStore('viewer', () => {
   function enterDraw() {
     const rec = activeRec.value;
     if (!rec || !rec.thumb) { showErr('请先打开一张图'); return; }
+    // 对比模式只读：分屏里画掩码会画到哪一格、写进哪一张 rec 都不明确，
+    // 与其给出一个含糊的结果，不如明确挡住（工具栏那颗按钮同期置灰）。
+    if (compareOn.value) { showErr('图像对比模式下不绘制掩码，请先切回「关闭」'); return; }
     drawMode.value = true;
     drawTool.value = 'rect';
     pendingRect.value = null; pendingPts.value = null; hoverPt.value = null;
@@ -1099,16 +1635,27 @@ export const useViewerStore = defineStore('viewer', () => {
     if (!recs.value.includes(r)) return false;      // 期间已切图/关掉
     // 命中：把这张 rec 就地升级成盘阵场景。**不新建 rec** —— 用户拖进来的那个
     // 文件就是这张图，新建一条会多出第二份 maskRois。
-    // 拖进来的本来就是 jpg（且是生产全名）→ 它就是这张图的原图，**不再去服务端
-    // 烤一份 1/2 预览**：用户要看的就是自己拖的那张，拿服务端缩图顶掉反而降清，
+    // 拖进来的本来就是 jpg（且是生产全名）→ 它就是这张图的原图，**默认不去服务端
+    // 烤一份预览**：用户要看的就是自己拖的那张，拿服务端缩图顶掉反而降清，
     // 还白等一次解压采样。其余情况（裸 .tif 反推命中）仍走阶段4 那条老路。
+    //
+    // 默认之外的**例外**：盘阵上有同名栅格、且当前档位下服务端从栅格烤出来的比
+    // 这张 jpg 更清晰 → 换成服务端那份（判据与场景库页同一条 rasterPreviewWins，
+    // 尺寸全在 resolve 响应里，不多一次往返）。用**盘阵那张 jpg** 的尺寸判，
+    // 不用用户拖进来这份的：指纹对 jpg 行只比名字，本地那份可能另存过，
+    // 平台口径是「盘阵上的才是基准」。
     const localJpg = imageKindOf(r.file) === 'jpg';
+    const rp = res.row.rasterPreview;
+    const useServer = localJpg && !!rp && rasterPreviewWins(rp, previewDiv.value);
     try {
       let blob: Blob;
-      if (localJpg) {
+      if (localJpg && !useServer) {
         blob = r.file;                     // File 是 Blob 子类，直接喂解码
       } else {
-        blob = await fetchTempSceneJpg(loadSrConfig(), res.row.id, (text) => {
+        // 未走服务端时那句 layout 自报来源；走服务端时传 undefined，让
+        // openSceneJpg 用默认的「服务端已烘焙」——那才是实话。
+        blob = await fetchDropSceneJpg(loadSrConfig(), res.row.id, previewDiv.value,
+                                       (text) => {
           if (r === activeRec.value) showMask('正在关联盘阵场景…', text, false);
         });
       }
@@ -1119,7 +1666,8 @@ export const useViewerStore = defineStore('viewer', () => {
         sceneId: res.row.id,
         lqPath: res.resolved.sr_capable ? res.resolved.dir : null,
         serverMaskPath: res.resolved.mask_path,
-      }, blob, localJpg ? '盘阵场景 JPG（拖入的原图，本地解码）' : undefined);
+      }, blob, localJpg && !useServer
+        ? '盘阵场景 JPG（拖入的原图，本地解码）' : undefined);
       if (!ok) return false;
       showToast('已关联盘阵目录 ' + res.resolved.dir + '，可以提交 SR 了');
       return true;
@@ -1129,8 +1677,9 @@ export const useViewerStore = defineStore('viewer', () => {
       // 升级失败：字段一个都别留（半升级的 rec 既不像本地图也不像盘阵场景），
       // 回落本地解码，能力不变。
       r.statusCls = 'err';
-      // 措辞对两条来源都成立：裸 .tif 那条是烤预览失败，jpg 那条只可能是拖进来的
-      // 文件解不动（本地解码也失败，所以不说「改用本地解码」）。
+      // 措辞对三条来源都成立：裸 .tif 那条是烤预览失败；拖 jpg 那条要么是这份
+      // 本地文件解不动（本地解码也失败，所以不说「改用本地解码」），要么是它被判
+      // 「服务端那份更清晰」后服务端烤失败了 —— 两种情况都是「装载像素失败」。
       showErr('关联到盘阵目录 ' + res.resolved.dir + ' 了，但装载像素失败：'
         + (e instanceof Error ? e.message : String(e)) + ' —— 仍按本地文件查看');
       return false;
@@ -1152,9 +1701,10 @@ export const useViewerStore = defineStore('viewer', () => {
         showToast('提示：服务账号对 ' + res.resolved.dir + ' 没有写权限，'
           + '保存掩码到盘阵会失败');
       }
-      // 首次要服务端烘焙 1/2 预览图（读一遍大图）——把遮罩文案换成这一句，
+      // 首次要服务端烘焙预览图（读一遍大图）——把遮罩文案换成这一句，
       // 否则几十秒里界面看起来像卡死了。
-      const blob = await fetchSceneJpg(loadSrConfig(), res.row, (text) => {
+      const blob = await fetchSceneJpg(loadSrConfig(), res.row, previewDiv.value,
+                                       (text) => {
         showMask('正在打开盘阵场景…', text, false);
       });
       hideMask();
@@ -1339,18 +1889,29 @@ export const useViewerStore = defineStore('viewer', () => {
     // 状态
     recs, activeId, activeRec, view, canvasSize, renderTick, marker,
     stretchMode, activeStretch, drawMode, drawTool, pendingRect, pendingPts, hoverPt, hoverRoi, flashRoi,
+    previewDiv,
     wandTol, merging, overlay, toast, error, modal,
     sidebarCollapsed, busy, srBusy,
     // 文件 / 解码
     addFiles, removeRec, activate, openSceneJpg, openLocalImage,
     // 拉伸 / 视图
-    setStretch, setCanvasSize, fit, onWheel, onPan, locatePixel,
+    setStretch, setPreviewDiv, setCanvasSize, fit, onWheel, onPan, locatePixel,
     // 掩码
     enterDraw, exitDraw, setDrawTool, commitRect, closePolygon, undoRoi, clearRois,
     mergeRois, delClick, wandSelect, buildMaskJson, exportMaskJson, genMask,
     getRois, submitSr, bakeMaskToServer,
     // 手工盘阵场景：打开任意场景目录 / 本地图反推关联
     openScenePath, tryLinkScenes,
+    // 图像对比（关闭 / 点选对比 / 分屏对比）
+    compareMode, compareOn, split, setCompareMode,
+    cmpStripOpen, setCmpStripOpen,
+    panes, splitX, splitRatio, setSplitRatio, resetSplit,
+    activeSide, setActiveSide, paneA, paneB, recForSide, rectForSide, activePaneRect,
+    fitBoth, fitSide,
+    compareList, cmpListRecs, clearCompareEntry,
+    dragHint, setDragHint,
+    ctxRailOpen, ctxRailPrevOpen, setCtxRailOpen,
+    activeSceneId, openSceneSibling,
     // 侧舱 ROI 选择 / 确定性统计
     selRoi, roiStats, roiSelIndex, selectRoi, clearRoiSel, refreshRoiStats,
     // 云量估算（整景/当前视野 + 疑似云区红叠）

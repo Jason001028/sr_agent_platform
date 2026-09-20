@@ -39,7 +39,7 @@ __all__ = [
     "PathDeniedError",
     "scenes_root", "previews_root", "disk_url_prefix",
     "ensure_within", "rel_of_scene", "scene_id", "scene_id_to_abs",
-    "rel_url", "preview_jpg_path", "preview_jpg_for",
+    "rel_url", "preview_jpg_path", "preview_jpg_for", "drop_preview_path",
 ]
 
 
@@ -176,3 +176,21 @@ def preview_jpg_for(source_abs: Path, root: Path | None) -> Path:
     if root is not None and _is_within(source_abs, root):
         return preview_jpg_path(source_abs, root)
     return source_abs.with_suffix(".preview.jpg")
+
+
+def drop_preview_path(source_abs: Path) -> Path:
+    """拖入链的落点：**恒** `<源同目录>/<stem>_preview.jpg`（下划线，非点号）。
+
+    与 `preview_jpg_for` 的三点不同，都是有意为之：
+
+    1. **不吃 `SR_PREVIEWS_ROOT`** —— 拖入链要的是「烤一次长期可用」，落进生产场景目录
+       才成立；搬去缓存根就又变成缓存了。代价是同一场景会有两份产物（`_preview.jpg`
+       与 `.preview.jpg`），且这个新名**没有任何清理者**（原地覆盖、不堆积）。
+    2. **恒落源同目录**，不区分库内库外 —— 拖入的生产场景本来就在盘阵里，而库外路径
+       （手工粘贴的任意绝对路径）也没有第二个合理的落点。
+    3. **下划线而非点号**：`_preview.jpg` 不在 `scene_search.is_scene_file` 的白名单里
+       （要求 stem == 目录名 或 PAN），所以它**不会**在场景库列表里多出一行。
+
+    库外路径由 `ensure_allowed` 的前缀白名单把关，白名单之外的在调用方就被挡了。
+    """
+    return Path(source_abs).with_name(Path(source_abs).stem + "_preview.jpg")

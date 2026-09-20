@@ -12,7 +12,10 @@ import { loadSrConfig } from '../lib/scene.js';
 import {
   apiListQueue, apiSubmitQueue, apiCancelQueue, subscribeQueueEvents,
 } from '../lib/api.js';
-import type { QueueTask, QueueSubmitBody, QueueSubmitResult, JobUpdateEvent } from '../lib/api.js';
+import type {
+  QueueTask, QueueSubmitBody, QueueSubmitResult, JobUpdateEvent,
+  PreviewUpdateEvent,
+} from '../lib/api.js';
 
 /** 队列表单里的可调参数（「以这行参数再提交」整组带回）。 */
 export type QueueTunables = Pick<
@@ -165,6 +168,24 @@ export function mergeJobUpdate(tasks: QueueTask[], ev: JobUpdateEvent): QueueTas
   return hit ? next : tasks;
 }
 
+/** SSE preview_update → 覆盖匹配 task 的产物预览字段；无匹配不动（权威在 list()）。
+
+    与 mergeJobUpdate 分开是**刻意的**：预览烤没烤成与作业状态无关（COMPLETED 的作业
+    也可能因为沙箱/产物缺失/目录不可写而没烤），合成一个函数就得同时处理两套字段，
+    调用点也得判「这一帧到底带没带 state」。无匹配不动这一条同样重要 —— 急烤的认领
+    与广播都在后端，前端可能还没把这个 task 拉进列表。 */
+export function mergePreviewUpdate(
+  tasks: QueueTask[], ev: PreviewUpdateEvent,
+): QueueTask[] {
+  let hit = false;
+  const next = tasks.map((t) => {
+    if (t.task_id !== ev.task_id) return t;
+    hit = true;
+    return { ...t, preview_state: ev.state, preview_note: ev.note };
+  });
+  return hit ? next : tasks;
+}
+
 /** 展示态 → badge 类别（表头标签/行内样式复用）。 */
 export function stateTone(state: string): 'pending' | 'run' | 'ok' | 'fail' | 'muted' {
   if (state === 'SUBMITTING' || state === 'PENDING') return 'pending';
@@ -266,6 +287,10 @@ export const useQueueStore = defineStore('queue', () => {
     _dispose = subscribeQueueEvents(
       cfg,
       (ev) => {
+        if (ev.type === 'preview_update') {
+          tasks.value = mergePreviewUpdate(tasks.value, ev);
+          return;
+        }
         if (ev.type !== 'job_update') return;
         tasks.value = mergeJobUpdate(tasks.value, ev);
         if (ev.state === 'FAILED' && ev.error) {

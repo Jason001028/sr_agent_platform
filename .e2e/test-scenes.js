@@ -171,6 +171,25 @@ function makeFixtures(scenesRoot) {
   if (r.status !== 0) throw new Error('fixture 生成失败: ' + (r.stderr || r.stdout));
 }
 
+/* ---------------- B2 段中途补的「同名栅格」 ---------------- */
+// 为什么不在 FIXTURE_PY 里一次造好：B2 是**两行同名**的形态，会改掉行数 / 行序 /
+// rec 指纹那一批断言的前提，只能等它们都跑完再补。数值与 FIXTURE_PY 的 tif() 同款。
+const TIF_PY = `
+import os, sys
+import numpy as np, tifffile
+p = sys.argv[1]
+w, h = int(sys.argv[2]), int(sys.argv[3])
+os.makedirs(os.path.dirname(p), exist_ok=True)
+arr = (np.arange(w * h, dtype=np.uint32).reshape(h, w) % 4096).astype(np.uint16)
+tifffile.imwrite(p, arr, photometric="minisblack")
+`;
+
+function makeTif(file, w, h) {
+  const r = spawnSync('python', ['-c', TIF_PY, file, String(w), String(h)],
+    { encoding: 'utf-8' });
+  if (r.status !== 0) throw new Error('TIFF 生成失败: ' + (r.stderr || r.stdout));
+}
+
 /* ---------------- 页面读取/操作助手 ---------------- */
 function rows(page) {
   return page.evaluate(() =>
@@ -258,6 +277,43 @@ async function clickRowButton(page, name) {
   }, name);
   if (!ok) throw new Error('行按钮未找到或已禁用: ' + name);
 }
+
+/** 按「行名 + 尺寸列」点行按钮。
+ *
+ * 只有 B2 段用得上：那时同一场景在库里是**两行同名**（`<编号>.jpg` 与
+ * `<编号>.tif`），列表没有 rel 列，尺寸是唯一分得开的那一列。 */
+async function clickRowButtonByDims(page, name, dims) {
+  const ok = await page.evaluate((n, d) => {
+    const tr = [...document.querySelectorAll('.sp-tbl tbody tr')].find((r) => {
+      const td = r.querySelector('td.name');
+      const dm = r.querySelectorAll('td')[4];
+      return td && td.textContent.trim() === n
+        && dm && dm.textContent.trim() === d;
+    });
+    if (!tr) return false;
+    const b = tr.querySelector('button');
+    if (!b || b.disabled) return false;
+    b.click();
+    return true;
+  }, name, dims);
+  if (!ok) throw new Error(`行按钮未找到或已禁用: ${name} / ${dims}`);
+}
+
+/** 等「行名 + 尺寸列」那一行的**按钮**变成 want（B2 段专用，理由同上）。
+ *
+ * 这里等按钮而不是等「已生成」标签：JPG 源行的 tag 由 `isImageSource` 决定，
+ * 恒为「JPG 源」、烤完也不翻（B 段打开后那一行仍是「JPG 源」）。能翻的是按钮 ——
+ * 烤完 `previewNeedsBake` 转假，「生成并打开」回到「打开」。 */
+const waitRowBtnByDims = (page, name, dims, want, timeoutMs = 30000) =>
+  waitFor(page, (n, d, w) => {
+    const tr = [...document.querySelectorAll('.sp-tbl tbody tr')].find((r) => {
+      const td = r.querySelector('td.name');
+      const dm = r.querySelectorAll('td')[4];
+      return td && td.textContent.trim() === n && dm && dm.textContent.trim() === d;
+    });
+    const b = tr && tr.querySelector('td button');
+    return !!b && b.textContent.trim() === w;
+  }, timeoutMs, `行「${name}/${dims}」按钮=${want}`, name, dims, want);
 
 async function clickByText(page, text) {
   const ok = await page.evaluate((t) => {
@@ -354,7 +410,8 @@ async function main() {
       }
     });
     const countUrl = (re) => seen.filter((u) => re.test(u)).length;
-    const previewRe = new RegExp(`^${apiBase}/api/scenes/[^/]+/preview$`);
+    // `?div=` 必须吃：档位进了 URL（换档位要击穿 nginx 的 max-age）
+    const previewRe = new RegExp(`^${apiBase}/api/scenes/[^/]+/preview\\?div=\\d+$`);
     const listRe = new RegExp(`^${apiBase}/api/scenes\\?`);
     /** 点「检索」/「重置」并等**真的**完成一次列表往返（行数不变时也能等） */
     const relist = async (label) => {
@@ -366,6 +423,15 @@ async function main() {
 
     await page.evaluateOnNewDocument((cfg) => { window.__SR_CFG__ = cfg; },
       { apiBase, staticBase: base });
+    // 档位钉到 ÷2：本脚本测的是「列表 → 懒生成 → 静态直读」这条链，不是档位本身。
+    // 夹具的 .hdr 与尺寸断言都是按 1/2 配的，跟随产品默认的 ÷4 只会把「链通了没有」
+    // 淹在一堆数字改动里。try/catch 是必须的：回调在 about:blank 上也跑，opaque
+    // origin 下 localStorage 抛 SecurityError。
+    await page.evaluateOnNewDocument(() => {
+      try {
+        localStorage.setItem('sr.previewDiv', '2');
+      } catch (e) { /* about:blank：真实页面加载时会再跑一次 */ }
+    });
 
     try {
       /* ---------- A. 列表 ---------- */
@@ -425,8 +491,9 @@ async function main() {
       assert(countUrl(previewRe) === 1,
         `调用 1 次 /api/scenes/{id}/preview 懒生成 (${countUrl(previewRe)})`);
       assert(fs.existsSync(previewJpg), `后端落盘 ${path.basename(previewJpg)}`);
-      assert(countUrl(new RegExp(`^${base}${DISK_PREFIX}${HDR_ROW}/${HDR_ROW}\\.preview\\.jpg$`)) >= 1,
-        '静态读图走 /disk-array/<场景>/…preview.jpg（nginx alias 位）');
+      assert(countUrl(new RegExp(`^${base}${DISK_PREFIX}${HDR_ROW}/${HDR_ROW}\\.preview\\.jpg\\?div=2$`)) >= 1,
+        '静态读图走 /disk-array/<场景>/…preview.jpg?div=2（nginx alias 位；'
+        + '查询串是击穿 max-age 用的，location 匹配不看它）');
       await waitRowBtn(page, HDR_ROW, '打开');   // 按钮落定再读，理由见 waitRowBtn
       const rowsNow = await rows(page);
       assert(rowsNow[2].tag === '已生成' && rowsNow[2].btn === '打开',
@@ -607,6 +674,96 @@ async function main() {
         return (await r.json()).tasks.length;
       }, apiBase);
       assert(tasks === 0, `未自动提交：队列仍为空 (${tasks})`);
+
+      /* ---------- B2. .jpg 源配上同名栅格 → 显示源改用服务端那份 ---------- */
+      // 真机常态：场景目录里 `<编号>.tif` 与 `<编号>.jpg` 并存，而那份预生成的 jpg
+      // 分辨率不够，实际预览要改成服务端从配套 .tif 下采样。判据只有一条：
+      //     round(max(栅格长边)/div) > max(显示件长边)
+      // 这里栅格 1600×800、显示件 400×200、档位钉在 ÷2 → 800 > 400 成立。
+      //
+      // **为什么这一段排在最后**：补上这个同名栅格会让同一个场景在库里变成**两行
+      // 同名**（`<编号>.tif` 与 `<编号>.jpg` 都过 is_scene_file 的白名单，只有 rel
+      // 能分辨），行数 / 行序 / rec 指纹的断言全在前面（A/D/E/F）。所以补栅格只能
+      // 在它们之后做，做完再删掉 —— 后面的 I 段要把这份 jpg 换成非图字节验失败
+      // 路径，留着栅格的话那次打开会走服务端烘焙、反倒成功了。
+      console.log('\n[B2] .jpg 源配上同名栅格 → 预览改用服务端从栅格下采样');
+      const jpgRowDir = path.join(scenesRoot, JPG_ROW);
+      const rowTif = path.join(jpgRowDir, JPG_ROW + '.tif');
+      assert(!fs.existsSync(rowTif), '补之前该目录里没有同名栅格（B 段「JPG 源」的前提）');
+      makeTif(rowTif, 1600, 800);
+      await page.goto(base + '/scenes', { waitUntil: 'networkidle2', timeout: 30000 });
+      await waitRows(page, 4);
+      rs = await rows(page);
+      // 两行同名，只有尺寸列分得开：一个还是那份 jpg 的 400×200，一个是栅格的 1600×800。
+      assert(rs.filter((r) => r.name === JPG_ROW).length === 2,
+        `同一场景现在两行同名（${rs.map((r) => r.name + '/' + r.dims).join(' | ')}）`);
+      assert(rs.filter((r) => r.name === JPG_ROW && r.dims === '400×200').length === 1
+        && rs.filter((r) => r.name === JPG_ROW && r.dims === '1600×800').length === 1,
+        '一行是 jpg 源（400×200）、一行是栅格（1600×800）');
+      // 两列在这里**故意不同步**，各自说的不是一件事：
+      //   * tag「JPG 源」说的是**这一行是什么**（§4.7：源即显示件的行），判据是
+      //     `isImageSource`，本轮一个字没动 —— 它没变成「未生成」是对的；
+      //   * 按钮说的是**打开时会不会先烤一下**，由 `previewNeedsBake` 决定，而它
+      //     新增的栅格分支现在为真（有更清晰的一份可烤）→「打开」变「生成并打开」。
+      // 把两者绑在一起判（"有更清晰的栅格 ⇒ tag 也该翻"）会逼着去改那个 tag 判据，
+      // 而那正是本轮划在界外的事（§六.3）。
+      const jpgRow = rs.find((r) => r.name === JPG_ROW && r.dims === '400×200');
+      assert(jpgRow.tag === 'JPG 源',
+        `tag 仍是「JPG 源」（这一行还是那个显示件，不是「未生成」）(${jpgRow.tag})`);
+      assert(jpgRow.btn === '生成并打开',
+        `按钮改成「生成并打开」（打开前得先烤栅格那份）(${jpgRow.btn})`);
+
+      // 行自己的三个字段（`hasPreview` / `jpgUrl` / `previewDiv`）说的是**源 jpg**
+      // 自己，语义必须原样：它们是 GUI 那条「源即显示件」红线的判据，一漂移，
+      // 从场景库再打开就会跳过懒生成、去打一个 404 的静态 URL。
+      const listRow = await page.evaluate(async (ab, want) => {
+        const r = await fetch(ab + '/api/scenes?query=' + encodeURIComponent(want));
+        const rows2 = (await r.json()).results;
+        return rows2.filter((x) => x.name === want)
+          .map((x) => ({ rel: x.rel, W: x.W, H: x.H, hasPreview: x.hasPreview,
+            jpgUrl: x.jpgUrl, previewDiv: x.previewDiv, rasterPreview: x.rasterPreview }));
+      }, apiBase, JPG_ROW);
+      const jpgJson = listRow.find((x) => (x.rel || '').endsWith('.jpg'));
+      assert(jpgJson && jpgJson.hasPreview === true
+        && String(jpgJson.jpgUrl).endsWith(JPG_ROW + '.jpg') && jpgJson.previewDiv === null,
+        `jpg 行自身字段不变（hasPreview=${jpgJson && jpgJson.hasPreview}/`
+        + `previewDiv=${jpgJson && jpgJson.previewDiv}）`);
+      assert(jpgJson.rasterPreview
+        && jpgJson.rasterPreview.rasterW === 1600 && jpgJson.rasterPreview.rasterH === 800
+        && jpgJson.rasterPreview.jpgW === 400 && jpgJson.rasterPreview.jpgH === 200,
+        `后端回报了两边尺寸供判定（栅格 ${jpgJson.rasterPreview.rasterW}×`
+        + `${jpgJson.rasterPreview.rasterH} / jpg ${jpgJson.rasterPreview.jpgW}×`
+        + `${jpgJson.rasterPreview.jpgH}）`);
+
+      const b2Preview = countUrl(previewRe);
+      await clickRowButtonByDims(page, JPG_ROW, '400×200');
+      await waitRowBtnByDims(page, JPG_ROW, '400×200', '打开');
+      assert(countUrl(previewRe) === b2Preview + 1,
+        `打开这个 jpg 行打了一次 /preview（栅格那份预览由后端落到同一处）`
+        + `(${countUrl(previewRe) - b2Preview})`);
+      assert(countUrl(new RegExp(`^${base}${DISK_PREFIX}${JPG_ROW}/`
+        + `${JPG_ROW}\\.preview\\.jpg\\?div=2$`)) >= 1,
+        '图走静态 /disk-array/<场景>/<场景>.preview.jpg?div=2');
+      assert(fs.existsSync(path.join(jpgRowDir, JPG_ROW + '.preview.jpg')),
+        '盘上真落了那份预览（不是"没报错"就算过）');
+
+      await clickByText(page, '去查看器');
+      await waitFor(page, () => location.pathname.endsWith('/viewer'), 15000, '跳 /viewer');
+      await waitFor(page, () => !!window.__viewer, 15000, '__viewer 钩子');
+      const b2rec = await page.evaluate(() => window.__viewer.activeRec());
+      assert(b2rec && b2rec.name === JPG_ROW, `激活的是刚打开那条（${b2rec && b2rec.name}）`);
+      // 像素是**服务端从 1600×800 栅格烤的** 800×400，不是那份 400×200 的 jpg。
+      assert(b2rec.thumbW === 800 && b2rec.thumbH === 400,
+        `像素取服务端烤的 800×400（${b2rec.thumbW}×${b2rec.thumbH}）`);
+      assert(b2rec.layout.includes('服务端已烘焙'),
+        `布局文案如实写服务端烤的（${b2rec.layout}）`);
+      // 行声明的 W/H 仍是那份 jpg 的 400×200 —— 显示源换了，**行的身份没换**：
+      // 掩码仍按 400×200 换算（这条行是 jpg 自己的场景，与栅格那行是两个场景）。
+      assert(b2rec.W === 400 && b2rec.H === 200,
+        `rec 的 W/H 仍是 jpg 行自己的 400×200（${b2rec.W}×${b2rec.H}）`);
+
+      // 收尾：删掉栅格，行数回到 3 —— 后面的失败路径用例要的是「没有同名栅格」。
+      fs.rmSync(rowTif, { force: true });
 
       /* ---------- I. 打开失败必须落在 .sp-err（错误只写 scenes.error） ---------- */
       // 反例保护：这两处失败以前写进 viewer 的错误条（挂在 /viewer、6 秒自消失），

@@ -11,9 +11,11 @@
 import { onMounted, onUnmounted } from 'vue';
 import { mountE2EHooks } from '../viewer/e2eHooks';
 import Toolbar from '../components/Toolbar.vue';
+import CompareBar from '../components/CompareBar.vue';
 import FileList from '../components/FileList.vue';
 import TifCanvas from '../components/TifCanvas.vue';
 import DrawPanel from '../components/DrawPanel.vue';
+import CompareOverlay from '../components/CompareOverlay.vue';
 import DecodeOverlay from '../components/DecodeOverlay.vue';
 import ContextPanel from '../components/ContextPanel.vue';
 import NoticeModal from '../components/NoticeModal.vue';
@@ -41,11 +43,17 @@ onUnmounted(() => viewer.hideModal());
 <template>
   <div class="viewer-page">
     <Toolbar />
+    <!-- 对比条在工具栏与路径栏之间：**刻意不放进 .toolbar** —— 那条有「1366 下不横向
+         溢出」的 e2e 守卫，三个模式 + 图例 + 场景芯片塞进去必然溢出。
+         代价记在 CompareBar 的文件头：多一行会改变舞台高度，而既有语义是尺寸一变就
+         重新适配，所以展开/收起它会重置当前缩放。 -->
+    <CompareBar />
     <ScenePathBar class="vp-pathbar" :busy="viewer.busy" @open="openPastedPath" />
     <div class="viewer-body">
       <FileList />
       <TifCanvas>
         <DrawPanel />
+        <CompareOverlay />
         <DecodeOverlay />
       </TifCanvas>
       <ContextPanel />

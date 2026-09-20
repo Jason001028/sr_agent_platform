@@ -66,6 +66,24 @@ Environment=SR_SLURM_FAKE=0
 #      .sr-tmp-preview 标记文件」的子目录，别的目录一个字节都不碰。
 #   容量：只保留当天那一桶，等于一天的拖拽量；桶内不设上限。要缩就到磁盘配额去限。
 #   Environment=SR_TEMP_PREVIEWS_ROOT=/DiskArray/tmp/wangrz/sr_tmp_previews
+#
+# 可选（2026-09-20）：**产物预览急烤**——作业转 COMPLETED 后由后台循环顺手把**产物那一份**
+# 预览烤掉（只烤产物；输入影像与 _NOSR 两份仍按打开时惰性烤）。两个都有默认值，不配即生效。
+#   SR_PRODUCT_PREVIEW_DIV 用哪一档（÷N），**0 = 关**（只留惰性路径），缺省 4。
+#     取值不在 (2,4,8,16,32) 里 → 当 0 处理并在启动日志写一行，**不抛异常**。
+#     ⚠️ 它与前端工具栏那条拖动条的默认值（同为 ÷4）是**两个独立的 4**，互不联动 ——
+#        浏览器档位存在 localStorage，服务端看不见，所以急烤必须有服务端自己的默认档。
+#     ⚠️ 升级当天先置 0 起一次确认无异常再打开：两列是 ALTER TABLE 加的、**不回填**，
+#        老行的 preview_state 全是 NULL（挡历史行的唯一屏障是下面那道年龄窗口）。
+#   SR_PRODUCT_PREVIEW_MAX_AGE_SEC 只烤 finished_at 落在这个窗口内的行，缺省 86400；
+#     finished_at IS NULL 的一律不烤。调大 = 升级那天会把更多历史行翻出来烤。
+#   急烤的结局随 GET /api/queue 的 preview_state / preview_note 两列带出（另有 SSE 帧
+#   preview_update）。跳过时的 slug：sandbox / product_missing / unwritable / source_changed / no_suffix。
+#   ⚠️ 沙箱**实际生效**时（作业跑在私有副本上）产物不在盘阵，急烤自动 skipped: sandbox；
+#      但配了 SR_SANDBOX_ROOT 而 SR_EXECUTOR=local 时沙箱并不生效，急烤**照烤**（判据是
+#      run_sr.sandbox_scene_paths，不是这个 env 在不在）。
+#   Environment=SR_PRODUCT_PREVIEW_DIV=4
+#   Environment=SR_PRODUCT_PREVIEW_MAX_AGE_SEC=86400
 # 可选：队列状态轮询秒（/api/queue/events 广播刷新率，缺省 2）
 # Environment=SR_QUEUE_POLL_SEC=2
 #
@@ -143,6 +161,10 @@ Environment=SR_SLURM_CPUS=4
 #      非法值会在提交时报错，不会静默降级。
 #   不配本项时的行为（= 阶段6 生产形态）：SR 直接把产物与 Debug/ 写进 lq_path；
 #   平台恒定非空 Suffix，源图不改名也不删除。
+#   ⚠️ 与**产物预览急烤**的关系（2026-09-20）：沙箱**实际生效**时产物落在私有副本上、盘阵里
+#      没有产物，急烤判 `_run_dataroot` 后自动 skipped: sandbox（如实跳过，不往临时盘撒文件）。
+#      但沙箱只在 slurm 路线下生效（`run_sr.sandbox_scene_paths` 在 SR_EXECUTOR=local 时恒返回
+#      None）—— 所以本行配着、SR_EXECUTOR 是 local 时急烤照烤，别照「配了沙箱就不烤」去理解。
 Environment=SR_SANDBOX_ROOT=/DiskArray/tmp/wangrz/sr_sandbox
 #
 # ==========================================================================

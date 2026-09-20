@@ -144,6 +144,71 @@ def derived_mask_path(lq_path) -> str:
     return base + "/" + mask_stem(lq_path) + "_mask.tif"
 
 
+# --------------------------------------------------------------------------
+# SR 三类图（输入影像 / 本次产物 / 上一次产物）的命名推导
+# --------------------------------------------------------------------------
+#: 产物的扩展名候选。SR 侧 `writeTiff(result_sr, lq_path + "/" + img_name[0:-4]
+#: + "_" + suffix, tiftype=tiftype, ...)` 里的 `tiftype` 是配置给定值，生产上是
+#: `.tif`；`.tiff` 一并试是因为盘阵上两种拼写都出现过。加名字是一行的事。
+_PRODUCT_EXT_ORDER = (".tif", ".tiff")
+
+
+def sibling_raster_path(image_path) -> Path | None:
+    """与 `image_path` **同目录同名**的栅格文件（只换后缀），没有则 None。
+
+    用来认「盘阵里的显示件 jpg 配着一张同名栅格」：SC 场景里 `<目录名>.jpg` 配
+    `<目录名>.tif`，RC 场景里 `PAN.jpg` 配 `PAN.tif`。按 `_RASTER_EXT_ORDER` 拼
+    候选名逐个 `is_file()`，**只拼名字、不列举目录**（与 input_candidates 同一纪律）。
+
+    `.hdr` 之类伴随文件不参与：调用方要的是能拿去烘焙像素的栅格。
+    """
+    p = Path(image_path)
+    for ext in _RASTER_EXT_ORDER:
+        cand = p.with_suffix(ext)
+        if cand.is_file():
+            return cand
+    return None
+
+
+def product_candidates(input_path, suffix: str) -> list[Path]:
+    """本次 SR 产物的候选路径（有序，恰好 `len(_PRODUCT_EXT_ORDER)` 个）。
+
+    真源是 `SR_code/code_0817_prod.py`：`img_name = basename(输入影像)`，
+    `writeTiff(..., lq_path + "/" + img_name[0:-4] + "_" + suffix, ...)` —— 产物就
+    躺在**输入影像的目录**里，名字是「输入名去掉最后 4 个字符 + 下划线 + suffix」。
+
+    **必须字面切片 `[:-4]`，不能用 `Path.with_suffix`**：`verify_sr_run.py::
+    output_path_for` 用的也是 `img_name[:-4]`，而输入名是 `a.tiff` 时
+    `with_suffix("")` 得 `a`、字面切片得 `a.ti` —— 两者不等，用 with_suffix 会在
+    `.tiff` 场景下永远算出「产物不存在」。这里的字符串运算与 SR 侧同源，不要
+    「顺手改漂亮」。
+
+    只拼名字，**不 stat**：调用方自己挑第一个存在的，或把整串拿去做「试过哪些」的
+    诊断信息（`GET /api/scenes/{id}/siblings` 就是这么用的）。
+    """
+    p = Path(input_path)
+    base = p.name[:-4]
+    return [p.parent / f"{base}_{suffix}{ext}" for ext in _PRODUCT_EXT_ORDER]
+
+
+def nosr_path_for(product_path) -> Path:
+    """上一次产物的路径：`<产物 stem>_NOSR<ext>`，与产物同目录。
+
+    对齐 `SR_code/util.py::writeTiff` 的改名规则 —— 它改的是**输出路径**
+    （`os.rename(path + tiftype, path + "_NOSR" + tiftype)`），改名的前提是目标
+    已存在。所以这个文件：
+
+      * 是**上一次**同一 suffix 的产物，**不是**输入影像的备份（输入影像全程不动）；
+      * 只在同一 suffix 跑过**两次以上**时才存在 —— 首跑那次 rename 撞
+        `FileNotFoundError` 被 `except` 吞掉，什么都不留下。
+
+    调用方不能把它当成恒定存在的第三项。特例 `_ori`（输出名恰好等于 `PAN`、即空
+    suffix 跑 RC）走不到：平台侧 `run_sr.normalize_suffix` 保证 suffix 非空。
+    """
+    p = Path(product_path)
+    return p.with_name(p.stem + "_NOSR" + p.suffix)
+
+
 def parse_filename(path) -> dict:
     """Extract {satellite, sensor, date} from a scene filename; unknown → None."""
     parts = Path(path).stem.split("_")

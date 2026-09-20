@@ -7,13 +7,25 @@ Env
 ---
 SR_SCENES_ROOT    盘阵场景根（unset → fake 回退）
 SR_PREVIEWS_ROOT  可选预览缓存根（须在 scenes 根内，长期缓存）
-SR_TEMP_PREVIEWS_ROOT 拖拽入口的**临时**预览缓存根（1 天 TTL，每日 0 点清）；
-                  默认系统临时目录，生产须显式配到真实磁盘上
+SR_TEMP_PREVIEWS_ROOT 拖拽入口的**兜底**预览缓存根（1 天 TTL，每日 0 点清）；
+                  仅在场景目录不可写时才用，默认系统临时目录
                   （见 services/preview_cache.py 的约定）
+
+预览下采样档位：三条入口（拖入 / 场景库 / 粘盘阵路径）都由查询参数 `div` 指定，
+取值限 `preview_jpg.PREVIEW_DIVISORS`（各边 ÷2…÷32），缺省 2（= 旧行为，逐字节不变）。
+「默认 ÷4」只是**前端**的 UI 默认值，不是本层的契约。
 SR_AGENT_DB       SQLite 路径（chat 会话 + sr_tasks 同一库）
 SR_LLM_MOCK       =1 → 聊天走固定脚本假 LLM（api-contract.md §5.1）
 SR_SLURM_FAKE     =1 → 提交走内存假调度器（§5.2）
 SR_QUEUE_POLL_SEC 队列后台校准广播周期，缺省 2s
+SR_PRODUCT_PREVIEW_DIV
+                  作业转 COMPLETED 后服务端主动烤**产物**预览用哪一档（÷N）；
+                  **0 = 关**（只留打开时的惰性路径），缺省 4。取值非法当 0 处理。
+                  与前端 DEFAULT_PREVIEW_DIV 是两个独立的 4，互不联动 —— 浏览器
+                  的档位在 localStorage，服务端看不见，所以急烤必须有服务端默认档。
+SR_PRODUCT_PREVIEW_MAX_AGE_SEC
+                  只烤 `finished_at` 在这个窗口内的 COMPLETED 行，缺省 86400。
+                  这是升级当天不把历史 COMPLETED 行全烤一遍的唯一屏障。
 SR_API_HOST/PORT  仅 `python -m backend.api` 直启用
 """
 
@@ -32,16 +44,21 @@ from fastapi.responses import FileResponse
 from backend.api import paths
 from backend.api.paths import PathDeniedError
 from backend.api.platform import (
-    _json_body, _task_state, derived_mask_path, router as platform_router)
+    _broadcast, _json_body, _run_dataroot, _task_state, derived_mask_path,
+    router as platform_router)
 from backend.config import load_config
 from backend.pathguard import (
     ensure_allowed, flat_scene_layout, infer_scene_paths, is_within,
     looks_like_scene_name, parse_scene_date, production_tree_depth,
     strip_raster_ext, to_posix_array_path)
 from backend.services import preview_cache
+from backend.services import run_sr as run_sr_svc
 from backend.services import scene_search, store as store_mod
-from backend.services.preview_jpg import (PreviewError, ensure_preview_jpg,
-                                          scene_dims)
+from backend.services.preview_jpg import (PREVIEW_DIVISORS, PREVIEW_JPG_QUALITY,
+                                          PreviewError, build_preview_pixels,
+                                          cache_hit, ensure_preview_jpg,
+                                          preview_div_of, preview_max_edge,
+                                          scene_dims, write_preview_jpg)
 
 # W/H 探测缓存：LRU，key = (绝对路径, mtime)，header 级读取很廉价但盘阵文件多
 _DIMS_CACHE: dict[tuple[str, float], dict] = {}
@@ -52,7 +69,19 @@ _FAKE_H = [20000, 2048, 6000, 8192, 8000, 12000]
 
 
 def _cached_dims(abs_path: Path) -> dict | None:
-    mtime = abs_path.stat().st_mtime
+    """影像尺寸（带 LRU 缓存）；**文件不在/读不出 → None**，不抛。
+
+    None 而不是抛异常，是和 `scene_dims` 对齐的：这个函数的语义是「能读就读，
+    读不出就不知道」，而「不知道」在调用方那里都有明确且正确的去向（行不带 W/H、
+    比较判不出就不换图）。以前这里是直接 stat，调用方全都先验证过文件存在所以
+    从没撞上；`_raster_preview` 是第一个可能拿到不存在路径的调用方
+    （盘阵那份显示件 jpg 被删/改名，用户手上只有本地副本）—— 那种情况该退化成
+    「不换图」，不该把整个 resolve 打成 500。
+    """
+    try:
+        mtime = abs_path.stat().st_mtime
+    except OSError:
+        return None
     key = (str(abs_path), mtime)
     hit = _DIMS_CACHE.get(key)
     if hit is not None:
@@ -65,10 +94,98 @@ def _cached_dims(abs_path: Path) -> dict | None:
     return dims
 
 
+# 预览档位缓存：LRU，key = (预览 JPG 绝对路径, mtime)。与 _DIMS_CACHE 同一范式 ——
+# 只读 JPEG 注释头、不解码像素，但列表路径上逐行都要来一次，仍值得缓存。
+# 注意 `None` 是**合法结果**（「不知道是哪一档」），所以判命中必须用 `in` 而不是 .get()。
+_DIV_CACHE: dict[tuple[str, float], int | None] = {}
+_DIV_CACHE_MAX = 1024
+
+
+def _cached_preview_div(jpg: Path) -> int | None:
+    """盘上这份预览 JPG 是按哪一档烤的；不存在 / 旧格式 / 读不出 → None。
+
+    None 对前端的含义是「不知道是哪一档」→ 按当前档位重烤一轮。v2 那代戳解不出
+    div，所以换包后每个场景首次打开都会重烤一次（惰性，预期内）。
+    """
+    try:
+        mtime = jpg.stat().st_mtime
+    except OSError:
+        return None
+    key = (str(jpg), mtime)
+    if key in _DIV_CACHE:
+        return _DIV_CACHE[key]
+    if len(_DIV_CACHE) >= _DIV_CACHE_MAX:
+        _DIV_CACHE.clear()
+    div = preview_div_of(jpg)
+    _DIV_CACHE[key] = div
+    return div
+
+
+def _check_div(div: int) -> int:
+    """校验下采样档位，非法 → 400（而不是烘出一张奇怪尺寸的图）。"""
+    if div not in PREVIEW_DIVISORS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"下采样档位非法：{div}（只认 "
+                   f"{'/'.join(map(str, PREVIEW_DIVISORS))}）")
+    return div
+
+
 def _fake_dims(sid: str) -> tuple[int, int]:
     """Deterministic placeholder W/H for fake rows (no real file)."""
     acc = sum(ord(c) for c in sid)
     return _FAKE_W[acc % len(_FAKE_W)], _FAKE_H[acc % len(_FAKE_H)]
+
+
+def _norm_dir(path) -> str:
+    """目录路径归一成 POSIX、去尾斜杠 —— 跨来源比对用（提交侧存的是 POSIX 形态）。"""
+    return str(path or "").replace("\\", "/").rstrip("/")
+
+
+def _raster_preview(abs_path: Path, root: Path | None) -> dict | None:
+    """显示件 jpg 的「同名栅格」预览信息；不适用 → None。
+
+    盘阵里预生成的显示件（`PAN.jpg` / `<编号>.jpg`，长边约 8192）配着一张同名栅格
+    （`PAN.tif` / `<编号>.tif`）。服务端从那张栅格烤出来的图可能比这张 jpg 更清晰
+    （`max_edge = round(max(W,H)/div)` 与这张 jpg 的长边比大小，见 api-contract
+    「显示源比较规则」）——所以这一项存在的意义就是**把比较所需的两个尺寸交给前端**：
+    栅格 W/H 与 jpg W/H 都得后端读（前端拿不到库外文件，也不该为此多发一次请求）。
+
+    落点与栅格行**同一份** `<stem>.preview.jpg`（`with_suffix` 对 jpg 与 tif 是同一个
+    文件名），所以 `jpgUrl` 指的就是栅格行会用的那个 URL —— 同一份缓存，不重复烤。
+
+    `rel` 只在栅格落在 SR_SCENES_ROOT 之下才有（库外没有静态 URL，与行本身的
+    `rel/jpgUrl` 同一条规则）；`id` 跟着走：库内用 rel 的 id，库外用 `~` 形态的
+    绝对路径 id，两种 `/api/scenes/{id}/preview` 都认。
+
+    尺寸任一侧读不出 → None（**保守**：宁可继续显示那张 jpg，也不拿一个算不准的
+    比较结果把图换掉）。
+    """
+    if abs_path.suffix.lower() not in (".jpg", ".jpeg"):
+        return None
+    raster = scene_search.sibling_raster_path(abs_path)
+    if raster is None:
+        return None
+    rdims = _cached_dims(raster)
+    jdims = _cached_dims(abs_path)
+    if not rdims or not jdims:
+        return None
+    jpg = paths.preview_jpg_for(raster, root)
+    out = {
+        "id": paths.scene_id_abs(raster),
+        "name": raster.name,
+        "rel": None, "jpgUrl": None,
+        "rasterW": rdims["W"], "rasterH": rdims["H"],
+        "jpgW": jdims["W"], "jpgH": jdims["H"],
+        "hasPreview": jpg.is_file(),
+        "previewDiv": _cached_preview_div(jpg),
+    }
+    if root is not None and is_within(raster, root):
+        out["rel"] = paths.rel_of_scene(raster, root)
+        out["id"] = paths.scene_id(out["rel"])
+        if is_within(jpg, root):
+            out["jpgUrl"] = paths.rel_url(jpg, root)
+    return out
 
 
 def _scene_row(scene: dict, root: Path | None) -> dict:
@@ -90,9 +207,15 @@ def _scene_row(scene: dict, root: Path | None) -> dict:
         "fake": bool(scene.get("fake")),
         "W": None, "H": None,
         "rel": None, "jpgUrl": None, "hasPreview": False,
+        # 盘上那份预览是按哪一档烤的（null = 没有/旧格式/读不出）。前端据它与
+        # 当前档位比对，决定要不要重烤 —— hasPreview 不认档位，只看它不够。
+        "previewDiv": None,
         # 阶段5 viewer 上下文侧舱任务关联用：scene 文件父目录（= run_sr 的 lq_path，
         # queue 行 params.lq_path 与之同值）。只读字段，仅 disk 行非空；fake 恒 null。
         "lq_path": None,
+        # 显示件 jpg 的同名栅格（见 _raster_preview）。**只对 jpg 源非空**，其余
+        # 行恒 null —— 它是「要不要改从栅格烤」的比较依据，不是这一行自己的预览。
+        "rasterPreview": None,
     }
     if scene.get("fake") or root is None:
         w, h = _fake_dims(stem)
@@ -116,10 +239,18 @@ def _scene_row(scene: dict, root: Path | None) -> dict:
         # jpgUrl 直接指向源文件，前端拿到即开（不再走 /preview 生成端点）。
         row["hasPreview"] = True
         row["jpgUrl"] = paths.rel_url(abs_path, root)
+        # previewDiv 留 None：这不是烤出来的预览，不参与档位（前端靠 jpgUrl
+        # 是不是 `.preview.jpg` 就能分辨，所以这里不需要额外哨兵值）。
+        #
+        # 上面三个字段的语义**一个字都不动**（gui-experience §9.2 的红线：这张 jpg
+        # 就是这一行的显示源）。同目录若有同名栅格，它烤出来可能更清晰 —— 那件事
+        # 由 rasterPreview 单独表达，由前端按「谁清晰用谁」决定，**不改这里的指向**。
+        row["rasterPreview"] = _raster_preview(abs_path, root)
         return row
     jpg = paths.preview_jpg_path(abs_path, root)
     row["hasPreview"] = jpg.is_file()
     row["jpgUrl"] = paths.rel_url(jpg, root)
+    row["previewDiv"] = _cached_preview_div(jpg)
     return row
 
 
@@ -154,15 +285,20 @@ def _manual_row(abs_path: Path, dir_path: Path, root: Path | None) -> dict:
         "fake": False,
         "W": None, "H": None,
         "rel": None, "jpgUrl": None, "hasPreview": False,
+        # 同 _scene_row：盘上那份预览是按哪一档烤的（null = 没有/旧格式/读不出）。
+        "previewDiv": None,
         # 同 _scene_row：lq_path 一律 POSIX（它会被原样带进提交表单）。
         "lq_path": dir_path.as_posix(),
         "manual": True,
+        # 同 _scene_row：显示件 jpg 的同名栅格（只对 jpg 源非空）。
+        "rasterPreview": _raster_preview(abs_path, root),
     }
     # hasPreview 一律填真值（缓存到底在不在），与是否在库内无关：库外没有静态
     # URL，但前端要靠它判断「这次会不会触发首次烘焙」并提示用户等待，所以不能
     # 因为「库外用不上」就一律留 False。
     jpg = paths.preview_jpg_for(abs_path, root)
     row["hasPreview"] = jpg.is_file()
+    row["previewDiv"] = _cached_preview_div(jpg)
     if root is not None and is_within(abs_path, root):
         # 恰好也在场景库根之下（例如用户手填了库内路径）：静态预览 URL 可用，
         # 与库行行为对齐，省掉一次 /preview 生成。
@@ -188,6 +324,234 @@ def _poll_once(state) -> None:
     for task in state.store.list_sr_tasks():
         if task["job_id"] is not None:
             _task_state(state, task)
+
+
+# --------------------------------------------------------------------------
+# 产物预览急烤（api-contract.md §4.x）
+# --------------------------------------------------------------------------
+#: 急烤的默认档位（÷4）。与前端 `DEFAULT_PREVIEW_DIV` **数值相同但互不联动**：
+#: 浏览器的档位在 localStorage 里，服务端看不见 —— 这就是急烤必须有自己缺省的原因。
+#: 两者改一个不会带动另一个，要同步得两边都改。
+DEFAULT_PRODUCT_PREVIEW_DIV = 4
+
+#: 急烤只处理 `finished_at` 落在这么久以内的 COMPLETED 行。
+DEFAULT_PRODUCT_PREVIEW_MAX_AGE_SEC = 86400.0
+
+#: 每轮最多扫多少条候选（不是每轮烤多少 —— 那恒为 1）。不开成 env：配置面越小越好。
+_EAGER_SCAN_LIMIT = 20
+
+
+def _product_preview_div() -> int:
+    """产物急烤用哪一档；**0 = 关**。
+
+    **每次调用读 env**，不要在 create_app 里快照 —— 测试要能按用例改档位，真机上
+    也不必为了关掉急烤而重启（改 service 文件后 restart 是常规操作，但少一次总好）。
+
+    非法值（不在 `PREVIEW_DIVISORS` 里、或不是数字）**当 0 处理**而不是抛异常：
+    配置写错不该让服务起不来，代价只是「这轮不烤」。
+    """
+    raw = (os.environ.get("SR_PRODUCT_PREVIEW_DIV") or "").strip()
+    if not raw:
+        return DEFAULT_PRODUCT_PREVIEW_DIV
+    try:
+        div = int(raw)
+    except ValueError:
+        return 0
+    return div if div in PREVIEW_DIVISORS else 0
+
+
+def _product_preview_max_age() -> float:
+    """急烤的年龄窗口（秒）。读不出 / 负数 → 默认值。
+
+    这是升级当天不把历史 COMPLETED 行全烤一遍的**唯一**屏障：`preview_state` 补列
+    后老行全是 NULL，而 NULL 的含义就是「没烤过」。
+    """
+    raw = (os.environ.get("SR_PRODUCT_PREVIEW_MAX_AGE_SEC") or "").strip()
+    try:
+        val = float(raw) if raw else DEFAULT_PRODUCT_PREVIEW_MAX_AGE_SEC
+    except ValueError:
+        return DEFAULT_PRODUCT_PREVIEW_MAX_AGE_SEC
+    return val if val > 0 else DEFAULT_PRODUCT_PREVIEW_MAX_AGE_SEC
+
+
+def _source_sig(path: Path) -> tuple[float, int]:
+    """源文件的身份 (mtime, size)，用来在落盘前复核它有没有被改写。"""
+    st = path.stat()
+    return (st.st_mtime, st.st_size)
+
+
+async def _eager_preview_loop(state) -> None:
+    """产物预览急烤的后台循环。
+
+    与 `_poll_loop` 同形（睡一轮 → `to_thread` 干一轮 → 单轮失败不 kill 循环）。
+    **第一件事是 sleep**，不和启动抢盘：服务刚起来还要做别的（校准队列、清缓存桶），
+    而这里一动就是要读遍一个 GB 级文件。
+
+    `SR_QUEUE_POLL_SEC` 在这里复用为「两件之间的间隔」：烤一份 40000² 产物真机要
+    几十秒，2 秒的间隔等于每 ~30 秒一件，够快也不会把磁盘占满。
+    """
+    while True:
+        await asyncio.sleep(state.poll_sec)
+        try:
+            await asyncio.to_thread(_eager_bake_tick, state)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — 单轮失败不 kill 循环
+            pass
+
+
+def _eager_bake_tick(state) -> None:
+    """烤**一件**产物的预览（同步函数，由 `to_thread` 调用）。
+
+    每轮只烤一件是**有意选的**：÷4 烤一份 40000² 产物的峰值内存约 400MB、要把整个
+    文件读一遍，并发会把内存乘上去、把盘阵的带宽占满。单消费者 + 并发 1 的代价只是
+    「一次性完成 20 个作业时最后一件要等十分钟」，而那是可解释的。
+    """
+    div = _product_preview_div()
+    if not div:
+        return
+    for cand in state.store.list_preview_candidates(
+            max_age_sec=_product_preview_max_age(), limit=_EAGER_SCAN_LIMIT):
+        task = state.store.claim_preview_bake(cand["task_id"])
+        if task is None:
+            continue        # 被别处抢先认领，或这行在认领的空隙里被重交了
+        _bake_product_preview(state, task, div)
+        return
+
+
+def _finish_preview(state, task: dict, state_name: str, note: str) -> None:
+    """写回急烤结局并广播。任何结局都要走这里，不然行会永远停在 `running`。"""
+    row = None
+    try:
+        row = state.store.set_preview_state(task["task_id"], state_name, note)
+    except Exception:  # noqa: BLE001 — 写库失败不该让这一轮炸掉
+        return
+    if row is None:
+        return
+    # 单独的帧类型，不混进 job_update：那是「作业状态变了」。预览烤好了是另一件事，
+    # 混在一起前端收到就得重取整行，而预览与作业状态无关。
+    _broadcast(state, {"type": "preview_update", "task_id": row["task_id"],
+                       "state": row.get("preview_state"),
+                       "note": row.get("preview_note")})
+
+
+def _bake_product_preview(state, task: dict, div: int) -> None:
+    """把一条 COMPLETED 任务的**产物**预览烤出来（其余两类走惰性路径）。
+
+    只烤产物，不烤输入影像、不烤 `_NOSR`：那两份的「用户到底要不要看」在打开之前
+    无法知道，而产物是刚刚跑完的、几乎一定会被打开。三个落点天然独立
+    （`<stem>.preview.jpg` / `<stem>_<suffix>.preview.jpg` / `…_NOSR.preview.jpg`），
+    各烤各的，互不覆盖。
+    """
+    params = task.get("params") or {}
+    lq_path = params.get("lq_path")
+    suffix = str(params.get("suffix") or "")
+    if not lq_path or not suffix:
+        _finish_preview(state, task, "skipped",
+                        "no_suffix: 任务行里没有 lq_path/suffix，拼不出产物名")
+        return
+
+    # 沙箱判据**必须是 `_run_dataroot`**，不能直接比 `SR_SANDBOX_ROOT`。
+    # `_run_dataroot` 内部走 run_sr.sandbox_scene_paths，而那条在 SR_EXECUTOR=local
+    # 时恒返回 None —— 真机当前正是「配了 SR_SANDBOX_ROOT + local executor」这条
+    # 路线，直接比 env 会把本可以烤的产物判成「沙箱内」而永不烤。反过来，真在沙箱
+    # 里跑时产物落在私有副本上，烤了用户也看不到，还往临时盘撒文件。
+    dataroot = _run_dataroot(task)
+    if dataroot is None:
+        # `_run_dataroot` 只在沙箱开着、且 SR_SANDBOX_ROOT / fingerprint 不合法时
+        # 返回 None。这时产物落在哪**不可知**，宁可如实跳过也不猜。
+        _finish_preview(state, task, "skipped",
+                        "sandbox: 沙箱根配置不可用，无法确定产物落在盘阵还是副本里，未烤")
+        return
+    if _norm_dir(dataroot) != _norm_dir(lq_path):
+        _finish_preview(state, task, "skipped",
+                        f"sandbox: 这次跑在沙箱私有副本上（{_norm_dir(dataroot)}），"
+                        "盘阵里没有产物，未烤")
+        return
+
+    scene_dir = Path(_norm_dir(dataroot))
+    inp = scene_search.input_scene_path(scene_dir)
+    if inp is None:
+        _finish_preview(state, task, "skipped",
+                        f"product_missing: {scene_dir} 里找不到输入影像"
+                        "（缺 <目录名>_meta.xml 或缺影像文件）")
+        return
+
+    cands = scene_search.product_candidates(inp, suffix)
+    product = next((c for c in cands if c.is_file()), None)
+    if product is None:
+        # COMPLETED 但没有产物是**正常结局**（云限额跳过就是一个合法 COMPLETED），
+        # 所以必须把试过的候选名报出来，好让运维一眼分辨「名字猜错了」还是
+        # 「作业本身没产出」。
+        _finish_preview(state, task, "skipped",
+                        "product_missing: 试过 "
+                        + " / ".join(c.name for c in cands) + "，都不存在")
+        return
+
+    # 目录不可写就如实跳过，**不退回 SR_TEMP_PREVIEWS_ROOT**：那份按天清，而急烤
+    # 的意义是长期命中；更要命的是急烤**没有 HTTP 响应头**能告诉用户「这次退化了」，
+    # 静默退化等于骗人。留给打开时的兜底路径去处理。
+    if not os.access(str(product.parent), os.W_OK):
+        _finish_preview(state, task, "skipped",
+                        f"unwritable: {product.parent} 对服务账号不可写，"
+                        "留给打开时的兜底路径")
+        return
+
+    jpg = paths.preview_jpg_for(product, state.scenes_root)
+    # 用户在急烤动手之前先打开过这份产物：盘上那份已是当前档位，重烤纯属白干
+    # （几十秒 + 读遍 GB 级文件）。判据与惰性路径**同一个函数**，没有第二套。
+    try:
+        if jpg.is_file() and os.path.getmtime(jpg) >= os.path.getmtime(product):
+            hit = cache_hit(jpg, PREVIEW_JPG_QUALITY, div)
+            if hit is not None:
+                _finish_preview(state, task, "done",
+                                f"cached: 盘上那份已是 ÷{div}"
+                                f"（{hit['w']}×{hit['h']}）")
+                return
+    except OSError:
+        pass        # 读不了 mtime 就当没命中，往下走正常流程
+
+    try:
+        before = _source_sig(product)
+        max_edge = preview_max_edge(product, div)
+        pixels = build_preview_pixels(str(product), max_edge)
+        # **落盘前复核**：同一 suffix 重跑会覆盖同一个产物路径。若不复核，一次
+        # 「读的时候是旧产物、写的时候新产物已经在写」就会把一张半截图永久留在盘上，
+        # 而缓存判据是「不比源旧」—— 新的 mtime 可能仍晚于我们刚写的 jpg，它不会自愈。
+        if _source_sig(product) != before:
+            _finish_preview(state, task, "skipped",
+                            "source_changed: 产物在烘焙途中被改写，本次一个字节都没写")
+            return
+        out = write_preview_jpg(jpg, pixels, div=div)
+        _finish_preview(state, task, "done",
+                        f"baked: ÷{div}（{out['w']}×{out['h']}）")
+    except (PreviewError, OSError) as e:
+        _finish_preview(state, task, "failed", f"failed: {e}")
+    except Exception as e:  # noqa: BLE001 — 后台循环不该被一行拖死
+        _finish_preview(state, task, "failed", f"failed: {type(e).__name__}: {e}")
+
+
+def _latest_completed_suffix(store, lq_path: str) -> str | None:
+    """该场景目录最近一条 **COMPLETED** 任务的 suffix；没有则 None。
+
+    只认 COMPLETED：FAILED 已经动过产物路径，名字拼得出来但内容是半截 —— 让它进
+    界面只会让人以为「这就是本次结果」。
+
+    比对用归一化后的 POSIX 路径（提交侧存进 params 的就是 POSIX 形态，Windows 开发
+    机上的宿主形态永远比不中）。走 `list_sr_tasks` 的内存过滤而不是 SQL LIKE：路径里
+    的下划线在 LIKE 里是通配符，生产目录名全是下划线，靠转义兜着不如不写这条 SQL。
+    """
+    want = _norm_dir(lq_path)
+    for row in store.list_sr_tasks():
+        if (row.get("status") or "").upper() != "COMPLETED":
+            continue
+        p = row.get("params") or {}
+        if _norm_dir(p.get("lq_path")) != want:
+            continue
+        s = p.get("suffix")
+        if s:
+            return str(s)
+    return None
 
 
 def _seconds_to_next_midnight(now: datetime | None = None) -> float:
@@ -357,6 +721,7 @@ def create_app() -> FastAPI:
         app.state.tasks = [
             asyncio.create_task(_poll_loop(app.state)),
             asyncio.create_task(_tmp_preview_purge_loop()),
+            asyncio.create_task(_eager_preview_loop(app.state)),
         ]
         yield
         for t in app.state.tasks:
@@ -369,9 +734,13 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="sr_agent_platform api", version="0.5.0",
                   lifespan=lifespan)
-    # 盘阵直连 IP:端口；前端另配 staticBase/apiBase，CORS 全放（内网）
+    # 盘阵直连 IP:端口；前端另配 staticBase/apiBase，CORS 全放（内网）。
+    # expose_headers 必须显式给：跨源响应里前端**读不到**自定义头（CORS 规范），
+    # `allow_headers` 管的是请求方向，管不到这个。e2e 与前后端分源的部署都是跨源，
+    # 不列这里的话 X-SR-Preview-Fallback 恒为 null，那条提示就是死代码。
     app.add_middleware(CORSMiddleware, allow_origins=["*"],
-                       allow_methods=["*"], allow_headers=["*"])
+                       allow_methods=["*"], allow_headers=["*"],
+                       expose_headers=["X-SR-Preview-Fallback"])
 
     # 阶段5 运行时状态：create_app 即建（env 已就绪）；lifespan 只额外启轮询。
     app.state.store = store_mod.Store()          # SR_AGENT_DB，懒打开
@@ -380,6 +749,9 @@ def create_app() -> FastAPI:
     app.state.subscribers = set()                # /api/queue/events 订阅者
     app.state.task_cache = {}                    # task_id → queue display state
     app.state.poll_sec = float(os.environ.get("SR_QUEUE_POLL_SEC", "2"))
+    # 场景根快照：`/api/scenes` 一直用的是 create_app 时的这个值，急烤循环在模块级
+    # 函数里跑、拿不到闭包，所以放到 state 上让两条路看同一个根。
+    app.state.scenes_root = root
     app.include_router(platform_router)
 
     @app.get("/api/health")
@@ -596,6 +968,20 @@ def create_app() -> FastAPI:
                 detail=f"场景成立但读不到影像尺寸（{inp}）—— 前端开图需要 W/H")
         row = _manual_row(inp, d, root)
         row["W"], row["H"] = dims["W"], dims["H"]
+        # 拖 jpg 进来时这一行描述的是**栅格**输入影像（`_manual_row(inp, ...)`，上面
+        # 的 id/W/H/hasPreview 全都指向那份 tif），所以 `_manual_row` 里那句按 `inp`
+        # 算的 rasterPreview 必然是 None（它只对 jpg 源非空）。
+        #
+        # 但「要不要改从栅格烤」这个比较恰恰是这条入口最需要的：用户拖进来的
+        # `<目录名>.jpg` 就是盘阵那份 8192 显示件，而更清晰的底图是同一目录的栅格。
+        # 比较的对象只能是**盘阵那张 jpg**（`d / name`）的尺寸，不能拿用户本地那份
+        # 来量 —— 指纹对 jpg 只比名字，本地那份可能另存过、缩过（见
+        # `_fingerprint_mismatch`），平台口径是「盘阵上的才是基准」。
+        #
+        # 盘阵上没有这份 jpg（删了/改名了，只有本地副本）时 `_cached_dims` 读不出
+        # → None → 前端老实显示本地那份。保守方向是对的。
+        if Path(name).suffix.lower() in (".jpg", ".jpeg"):
+            row["rasterPreview"] = _raster_preview(d / Path(name).name, root)
         mask_path = derived_mask_path(str(d))
         return {
             "source": "manual",
@@ -619,12 +1005,26 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/api/scenes/{scene_id}/preview")
-    def preview(scene_id: str):
+    def preview(scene_id: str, div: int = Query(2)):
+        """场景预览 JPG（响应体即字节）。`?div=` 选下采样档位（各边 ÷div）。
+
+        落点：源同目录（或 `SR_PREVIEWS_ROOT` 镜像树）的 `<stem>.preview.jpg`，
+        **与档位无关** —— 换档位是原地覆盖同一份，靠戳里的 div 判废重烤。
+        """
+        div = _check_div(div)
         try:
             abs_path = paths.scene_id_to_abs(scene_id, root)
         except PathDeniedError as e:
             raise HTTPException(status_code=404,
                                 detail=f"场景不可访问：{e}") from e
+        # 源是显示件 jpg、但同目录配着同名栅格：改从**栅格**烤。落点不需要变 ——
+        # `with_suffix(".preview.jpg")` 对 `PAN.jpg` 与 `PAN.tif` 是同一个文件名，
+        # 也就是栅格行用的那一份，所以「前端调 jpg 行的 id」与「栅格行自己打开」
+        # 命中同一份缓存，不会烤两次。换不换由后端在这一层决定，前端不必知道。
+        # 前端只在「栅格烤出来更清晰」时才走到这里（见 api-contract「显示源比较规则」）。
+        raster = scene_search.sibling_raster_path(abs_path)
+        if raster is not None:
+            abs_path = raster
         if abs_path.suffix.lower() in (".jpg", ".jpeg"):
             # 源就是显示就绪图（§4.7）：直接回源文件，不必（也无法）烘焙预览。
             # 正常路径下前端拿 hasPreview/jpgUrl 走静态 URL，不会打到这里，
@@ -632,47 +1032,172 @@ def create_app() -> FastAPI:
             return FileResponse(str(abs_path), media_type="image/jpeg")
         jpg = paths.preview_jpg_for(abs_path, root)
         try:
-            ensure_preview_jpg(str(abs_path), str(jpg))
+            ensure_preview_jpg(str(abs_path), str(jpg), div=div)
         except PreviewError as e:
             raise HTTPException(status_code=422,
                                 detail=f"预览生成失败：{e}") from e
         return FileResponse(str(jpg), media_type="image/jpeg")
 
-    @app.get("/api/scenes/{scene_id}/preview-tmp")
-    def preview_tmp(scene_id: str):
-        """拖拽入口专用的**临时**预览图（默认 1 天 TTL，见 services/preview_cache）。
+    @app.get("/api/scenes/{scene_id}/preview-drop")
+    def preview_drop(scene_id: str, div: int = Query(2)):
+        """拖入链的预览图：**写回源所在的盘阵场景目录**，`<stem>_preview.jpg`。
 
-        与 `/preview` 只差落点：那份长期缓存写源同目录或 `SR_PREVIEWS_ROOT` 的
-        镜像树，跟着场景数据活；这份写 `SR_TEMP_PREVIEWS_ROOT/<今天>/<hash>.jpg`，
-        第二天 0 点整桶删掉。**烘焙规则完全相同**，所以同一场景两条链出来的
-        字节是一样的，观感一致。
+        与 `/preview` 的有意差别是落点：那份是「平台自己的缓存」（源同目录或
+        `SR_PREVIEWS_ROOT`），这份落进生产场景目录、跟着场景数据长期活 ——
+        拖入的场景就该烤一次长期可用，而不是每天第一次拖入重烤一遍。
 
-        为什么不复用 `/preview` 加个 query 参数：`/preview` 的语义（含
-        `hasPreview`/`jpgUrl` 静态 URL）绑死在「生产 `<stem>.preview.jpg` 在不
-        在」上，拖拽的源多半落在库外、不该往生产数据目录撒文件。分成两个端点，
-        前端也就不会把临时字节写进库行的状态里。
+        兜底：场景目录不可写（服务账号没有写权限）时退回
+        `SR_TEMP_PREVIEWS_ROOT/<今天>/`，并回 `X-SR-Preview-Fallback: tmp`
+        让界面如实说明「这次没落盘阵」。两条都失败才 422。
 
-        `Cache-Control: no-store`：URL 按 scene id 稳定、内容跨天会变，不加这句
-        浏览器会按启发式缓存把隔夜的字节端上来（桶都删了还能看见旧的）。
+        `Cache-Control: no-store`：URL 按 scene id 稳定、内容随档位变，不加这句
+        浏览器会按启发式缓存端上旧档位的字节。
         """
+        div = _check_div(div)
         headers = {"Cache-Control": "no-store"}
         try:
             abs_path = paths.scene_id_to_abs(scene_id, root)
         except PathDeniedError as e:
             raise HTTPException(status_code=404,
                                 detail=f"场景不可访问：{e}") from e
+        # 同 /preview：显示件 jpg 若配着同名栅格，改从栅格烤。拖入链的落点是
+        # `<stem>_preview.jpg`，对 jpg 与 tif 也是同一个文件名。
+        raster = scene_search.sibling_raster_path(abs_path)
+        if raster is not None:
+            abs_path = raster
         if abs_path.suffix.lower() in (".jpg", ".jpeg"):
             # 源本身就是显示就绪图：回源文件即可（build_preview_pixels 只认
             # TIFF，不给这行短路会抛「仅支持 TIFF 生成预览」）。
             return FileResponse(str(abs_path), media_type="image/jpeg",
                                 headers=headers)
-        jpg = preview_cache.tmp_preview_path(abs_path)
+        main_jpg = paths.drop_preview_path(abs_path)
+        # 主落点与兜底包在**同一个 try** 里：兜底自己也要 mkdir + 原子写，临时根
+        # 同样可能不可写（配到只读盘、磁盘满），漏掉就是 500 逃出请求。
         try:
-            ensure_preview_jpg(str(abs_path), str(jpg))
-        except PreviewError as e:
-            raise HTTPException(status_code=422,
-                                detail=f"预览生成失败：{e}") from e
-        return FileResponse(str(jpg), media_type="image/jpeg",
+            if not os.access(str(main_jpg.parent), os.W_OK):
+                raise PreviewError(f"场景目录不可写：{main_jpg.parent}")
+            ensure_preview_jpg(str(abs_path), str(main_jpg), div=div)
+        except (PreviewError, OSError) as e:
+            try:
+                tmp_jpg = preview_cache.tmp_preview_path(abs_path)
+                ensure_preview_jpg(str(abs_path), str(tmp_jpg), div=div)
+            except (PreviewError, OSError) as e2:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"预览生成失败：场景目录不可写（{e}）；"
+                           f"临时缓存也不可用（{e2}）") from e2
+            headers["X-SR-Preview-Fallback"] = "tmp"
+            return FileResponse(str(tmp_jpg), media_type="image/jpeg",
+                                headers=headers)
+        return FileResponse(str(main_jpg), media_type="image/jpeg",
                             headers=headers)
+
+    @app.get("/api/scenes/{scene_id}/siblings")
+    def scene_siblings(scene_id: str, request: Request,
+                       suffix: str | None = Query(default=None)):
+        """这个场景的三类图：输入影像 / 本次产物 / 上一次产物。
+
+        **纯只读**：固定候选名的 `is_file()` + 尺寸探测 + 读 JPEG 注释里的档位。
+        永不烘焙、永不写盘、永不列举目录 —— 它回答的是「三份各叫什么、在不在、
+        各自的场景 id 是什么」，**找不到也是回答**（`productCandidates` 说明试过
+        哪些名字，`exists: false` 说明结果）。
+
+        每一类都直接拿它自己的 id 调 `GET /api/scenes/{id}/preview?div=N` 就能看图
+        （三类各有自己的 `<stem>.preview.jpg` 落点，天然不撞名），所以这个端点
+        **不新增任何烘焙入口**。
+
+        `suffix` 取值顺序：`?suffix=`（用户断言）→ 该 `lq_path` 最近一条 COMPLETED
+        任务的 `params.suffix`（权威：跑的就是它）→ `run_sr.default_suffix()`
+        （配置缺省）。**`suffixFrom` 如实回报用到的是哪一个** —— 「按配置猜的名字」
+        与「真跑过的名字」看起来一样，不标出来就分不清。没有可用的 suffix 时
+        product/nosr 两类**不出现**（拼不出名字就不编）。
+
+        LAST-PRODUCT 那一类的名字是 `SR_code/util.py::writeTiff` 的改名规则推出来的
+        （它改的是**输出路径**，且只在同一 suffix 跑过两次以上时才存在）——真机
+        尚未实证，所以这里把拼出来的候选名一并回报，好让它能被核对。
+        """
+        try:
+            abs_path = paths.scene_id_to_abs(scene_id, root)
+        except PathDeniedError as e:
+            raise HTTPException(status_code=404,
+                                detail=f"场景不可访问：{e}") from e
+        scene_dir = abs_path.parent
+        suffix_from: str | None = None
+        if suffix:
+            if not run_sr_svc.SUFFIX_RE.match(suffix):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"suffix 非法：{suffix!r}（{run_sr_svc.SUFFIX_RULE}）")
+            suffix_from = "query"
+        else:
+            suffix = _latest_completed_suffix(request.app.state.store,
+                                              scene_dir.as_posix())
+            suffix_from = "task" if suffix else None
+            if not suffix:
+                suffix = run_sr_svc.default_suffix()
+                suffix_from = "default" if suffix else None
+
+        def item(kind: str, p: Path | None) -> dict:
+            """一类图。`p` 为 None = 这一类拼不出名字（没有可用的 suffix）。"""
+            row = {"kind": kind, "id": None, "name": None, "rel": None,
+                   "exists": False, "sizeBytes": None, "mtime": None,
+                   "W": None, "H": None,
+                   "hasPreview": False, "previewDiv": None, "jpgUrl": None}
+            if p is None:
+                return row
+            row["name"] = p.name
+            if root is not None and is_within(p, root):
+                row["rel"] = paths.rel_of_scene(p, root)
+                row["id"] = paths.scene_id(row["rel"])
+            else:
+                row["id"] = paths.scene_id_abs(p)
+            try:
+                st = p.stat()
+            except OSError:
+                st = None
+            row["exists"] = st is not None
+            if st is not None:
+                row["sizeBytes"] = st.st_size
+                row["mtime"] = st.st_mtime
+                dims = _cached_dims(p)
+                if dims:
+                    row["W"], row["H"] = dims["W"], dims["H"]
+            jpg = paths.preview_jpg_for(p, root)
+            row["hasPreview"] = jpg.is_file()
+            row["previewDiv"] = _cached_preview_div(jpg)
+            if root is not None and is_within(jpg, root):
+                row["jpgUrl"] = paths.rel_url(jpg, root)
+            return row
+
+        inp = scene_search.input_scene_path(scene_dir)
+        items = [item("input", inp)]
+        cand_names: list[str] = []
+        if inp is not None and suffix:
+            cands = scene_search.product_candidates(inp, suffix)
+            cand_names = [c.name for c in cands]
+            # 拼完的名字再过一道白名单：SUFFIX_RE 挡得住分隔符，挡不住「全是合法
+            # 字符、却拼到白名单外」的想象。suffix 会进文件名，两道是纪律。
+            for c in cands:
+                try:
+                    ensure_allowed(c.as_posix())
+                except PathDeniedError as e:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"产物路径不在允许的盘阵前缀内：{e}") from e
+            # 没有一个存在时回报第一个候选（`.tif`）并置 exists: false —— 报错口径
+            # 由 productCandidates + exists 一起给出，不在这里编一个"差不多"的路径。
+            product = next((c for c in cands if c.is_file()), cands[0])
+            items.append(item("product", product))
+            items.append(item("nosr", scene_search.nosr_path_for(product)))
+        return {
+            "sceneId": scene_id,
+            "lqPath": scene_dir.as_posix(),
+            "suffix": suffix, "suffixFrom": suffix_from,
+            # 服务端急烤用的档位，仅供界面标注「服务端已烤成 ÷N」——
+            # **不参与任何前端决策**（前端的档位是用户滑块那个）。
+            "div": _product_preview_div(),
+            "items": items,
+            "productCandidates": cand_names,
+        }
 
     return app
