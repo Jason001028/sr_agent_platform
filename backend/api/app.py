@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -443,6 +444,32 @@ def _finish_preview(state, task: dict, state_name: str, note: str) -> None:
                        "note": row.get("preview_note")})
 
 
+def _mirror_preview_name(jpg: Path, source: Path) -> str:
+    """把平台自己那份预览再落一份**下划线**名：`<源 stem>_preview.jpg`（用户口径）。
+
+    拖入链（`POST /api/scenes/{id}/preview-drop`）与未超分那一份
+    （`_bake_nosr_preview`）落的就是这个名字 —— 场景目录 `ls` 一眼看下去，一份栅格
+    该只有一个规矩（`preview` 前面是 `_`）。
+
+    点号那份**必须留着**，所以这里是「再落一份」而不是「换个名字」：
+    `hasPreview` / `previewDiv`、静态 `jpgUrl`，以及前端 `isBakedPreviewUrl`
+    （它按结尾 `.preview.jpg` 认「这是烤出来的预览」，据此决定拼 `?div=` 与换档后
+    重烤）全都锚在点号那份上。改名等于让服务端读不到自己刚烤的图。
+
+    已经**不低于**点号那份新的下划线文件不覆盖：拖入链可能刚按别的档位烤过它。
+    返回一段可拼进 note 的说明（正常情形为空串）——镜像失败不改行的结论，它只是
+    给人看的那一份。
+    """
+    out = paths.drop_preview_path(source)
+    try:
+        if out.is_file() and os.path.getmtime(out) >= os.path.getmtime(jpg):
+            return ""
+        shutil.copyfile(jpg, out)
+        return ""
+    except OSError as e:
+        return f"；同名（下划线）那份没落上：{e}"
+
+
 def _bake_product_preview(state, task: dict, div: int) -> None:
     """把一条 COMPLETED 任务的**产物**预览烤出来（本函数只管产物这一份）。
 
@@ -451,6 +478,9 @@ def _bake_product_preview(state, task: dict, div: int) -> None:
     （`<stem>.preview.jpg` / `<stem>_<suffix>.preview.jpg` / `…_NOSR.preview.jpg`），
     各烤各的，互不覆盖。**未超分那一份由 `_bake_nosr_preview` 另烤**（2026-09-21
     用户口径），本函数的结论一个字都不为它改 —— 两份的结局各自独立。
+
+    写到产物名那份（点号，服务端自己读它）之后，再按 `_mirror_preview_name` 落一份
+    **下划线**名 —— 与拖入链、未超分那两份同名同规矩（2026-09-21 用户口径）。
     """
     params = task.get("params") or {}
     lq_path = params.get("lq_path")
@@ -515,7 +545,8 @@ def _bake_product_preview(state, task: dict, div: int) -> None:
             if hit is not None:
                 _finish_preview(state, task, "done",
                                 f"cached: 盘上那份已是 ÷{div}"
-                                f"（{hit['w']}×{hit['h']}）")
+                                f"（{hit['w']}×{hit['h']}）"
+                                + _mirror_preview_name(jpg, product))
                 return
     except OSError:
         pass        # 读不了 mtime 就当没命中，往下走正常流程
@@ -533,7 +564,8 @@ def _bake_product_preview(state, task: dict, div: int) -> None:
             return
         out = write_preview_jpg(jpg, pixels, div=div)
         _finish_preview(state, task, "done",
-                        f"baked: ÷{div}（{out['w']}×{out['h']}）")
+                        f"baked: ÷{div}（{out['w']}×{out['h']}）"
+                        + _mirror_preview_name(jpg, product))
     except (PreviewError, OSError) as e:
         _finish_preview(state, task, "failed", f"failed: {e}")
     except Exception as e:  # noqa: BLE001 — 后台循环不该被一行拖死
