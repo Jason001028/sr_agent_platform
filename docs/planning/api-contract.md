@@ -9,6 +9,7 @@
 > **挂起项五（2026-09-21）**：① §3.5 `POST /api/scenes/resolve` 的 `{name}` 分支**也认中间产物**（`<目录名>_<suffix>.jpg` / `<目录名>_<suffix>_NOSR.jpg`）——新增 jpg 专属的第二阶段候选（去尾段反推，仅前一阶段全落空时展开），`resolved` 新增 `kind` / `suffix`，且 `kind != 'input'` 时 `row.lq_path = null`、`sr_capable = false`、`mask_path = null`（`row` 同时改为描述**该环节自己**那份栅格）；② `suffix` 的 400 文案改为实话（可拖的不止显示件）；③ 新增 `backend/pathguard.scene_name_layers` 的段数下界修正（六段名走进 `seps[_SCENE_IDX]` 越界 → 本该 400 的输入变 500，是这条新候选暴露出的既有缺陷）。**`/siblings` 一个字段都没加** —— 计划里提过给每项补 `suffix`，落地时发现响应顶层本来就有 `suffix` / `suffixFrom`，前端 `openSceneSibling` 用的就是它，再加一份是重复。
 > **挂起项六（2026-09-21 第二轮，真机反馈）**：§3.5 `{name}` 分支**再认一种名字** —— 平台自己烤的那份预览 `<栅格 stem>_preview.jpg`（拖入链写进场景目录的，`preview-drop` 的产物）。`preview` 一直在 `scene_search._NON_STAGE_TAILS` 里，于是「平台写下的文件、平台自己不认」，真机上拖它回来得到的是一屏「目录不存在 + 两条自己拼出来的假路径」（`…_preview/…_preview`）。现在 `preview` 是那份名单里**唯一可以剥**的尾巴（`scene_search.strip_preview_tail`，`de_suffixed_stems` 与 `stage_of_jpg` 各剥一次），剥一层为止：`<目录名>_preview` → 本体、`<目录名>_sr_preview` → 那份产物；剥完仍在名单里（`<目录名>_cloud_preview`）照旧 404。另四个尾段（cloud/thumb/mask/ori）剥不得 —— 它们剥掉会正好落到真实场景目录上。前端只改一句失败弹窗的文案。
 > **挂起项七（2026-09-21 第三轮，真机反馈）**：§3.5 `{name}` 分支新增**可选字段 `anchor`** —— 拖拽入口把「用户当前打开着的场景目录」一并发过来（前端 `sceneAnchors`：最近显示过的那一景 → A 格 → B 格，上限 3 条），后端按序在这些目录里认这份 jpg（判据与 `scan` 段完全相同，只是不过 `_fingerprint_mismatch`，真门仍是「这一环节自己的栅格躺在同级」）。**只给名字里没有场景身份的那一类用**：RC 场景的产物叫 `PAN_<suffix>.jpg`（产物名按输入影像名拼，RC 的输入是 `PAN.tif`），既无卫星段也无成像时刻，反推那一步就 400 —— 用户真机上拖它进来正是这个现象。名字自己能反推时 anchor 连一次 stat 都不花；坏值一律跳过并把原因追加进 400 的 `detail`（只有白名单是硬的），不新增错误码、不改 `/siblings`。**这不是「平台猜目录」**：目录来自用户自己打开的上下文，不是从文件名推的。另有前端一句弹窗文案同步改写（原文说「能关联的 jpg 只有名字与场景目录名一致的那份」，对 RC 产物是假话）。
+> **挂起项八（2026-09-21 第四轮，真机口径）**：§4.5 的急烤队列**顺带**多烤一份未超分的预览 —— 同一轮 tick 在产物之后把 `<场景目录>/PAN_NOSR.tif` 按**全局档位**下采样成 `<场景目录>/PAN_NOSR_preview.jpg`（落点复用拖入链的 `<源 stem>_preview.jpg` 规则）。**不是新的烘焙入口、不动任何响应字段、不动产物的状态机**：源是固定名字，不判沙箱（那份栅格是盘阵上的既有文件），结局只写盘 + 一行 stdout（`[nosr-preview] task=<id> <状态>`）。名字按用户口径钉死；仓库 `SR_code/util.py::writeTiff` 推出来的 `<产物 stem>_NOSR.tif` 与它对不上，属**待核**（记在 current-question）。
 > **须说明的流程偏差**：上述改动**已与本文档同批落到代码**（不是"先评审后写码"）。理由是它同时修一个现存缺陷（两入口指纹不一致），拆开会让仓库停在一个已知会重复投作业的中间态；09-17、09-20 两批同理，前端要用的字段与端点不一起落地就没法验收（09-20 那批还带着 §4.5 那个后台循环，文档与循环必须同批，否则运维会照着一份没写急烤的契约去配 env）。请复核，通过后把状态改回「已定」。此前其余条款自 2026-09-02 起均未变（评审通过时的交付基线：后端 190 unittest + 前端 Vitest 114 + vue-tsc 零错误 + `.e2e/test-platform.js` 11 断言全绿）。
 > 目标读者：阶段5 实现会话（后端 FastAPI + 前端 Vue3）。范围：把既有后端（agent loop + 4 工具 + `sr_tasks` + slurm）暴露成网页可调 REST/SSE，交付 聊天 / 共享任务队列 / 查看器画完掩码提交 SR。
 > 前置：阶段4 已完成（FastAPI 骨架 `backend/api/app.py`：`/api/scenes` + `/api/scenes/{id}/preview` + 路径白名单；前端 `/scenes` 页 + route='jpg' rec + `/chat` `/queue` 占位路由）。
@@ -790,6 +791,17 @@ NULL ──claim──> running ──> done
 - 两个 env 见 §1：`SR_PRODUCT_PREVIEW_DIV`（缺省 4、**0 = 关**、非法值当 0 且不抛异常）与
   `SR_PRODUCT_PREVIEW_MAX_AGE_SEC`（缺省 86400）。急烤的 4 与前端 `DEFAULT_PREVIEW_DIV = 4`
   是**两个独立的 4，互不联动**。
+
+**顺带烤未超分那一份（2026-09-21 增，用户口径，不算新的烘焙入口）**：同一轮 tick 在产物之后
+多烤一份 `<场景目录>/PAN_NOSR_preview.jpg`（源 = 场景目录里的 `PAN_NOSR.tif`，档位取同一个
+全局值，命中判定同一个 `cache_hit`）。三处与产物那一份**故意不同**：源是**固定名字**而不是
+拼出来的；**不判沙箱**（这份栅格是盘阵上的既有文件，与这次跑在盘阵还是私有副本上无关）；
+**不动 `preview_state`/`preview_note`**（那一列描述的是产物预览，一个字段说不出两份文件的
+结局），只写盘 + 往 stdout 打一行 `[nosr-preview] task=<id> <状态>`，没那份栅格时也照报。
+名字按用户当面口径**钉死**，不顺手把 `SR_code/util.py::writeTiff` 推出来的
+`<产物 stem>_NOSR.tif` 也试一遍（两者对不上，属待核，见
+[preview-bake-pipeline §4.11](../knowledge/preview-bake-pipeline.md)）。**没有任何响应字段
+为它变化**：`/siblings` 的「上一次产物」那一项找的仍是点号落点。
 
 ### 4.6 显示源比较规则：谁清晰用谁（2026-09-20）
 

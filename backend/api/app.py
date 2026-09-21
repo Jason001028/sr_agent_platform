@@ -401,11 +401,15 @@ async def _eager_preview_loop(state) -> None:
 
 
 def _eager_bake_tick(state) -> None:
-    """烤**一件**产物的预览（同步函数，由 `to_thread` 调用）。
+    """烤**一件**产物的预览（同步函数，由 `to_thread` 调用），外加该场景未超分那
+    一份（`_bake_nosr_preview`，2026-09-21 用户口径：超分跑完就顺带把它烤出来）。
 
     每轮只烤一件是**有意选的**：÷4 烤一份 40000² 产物的峰值内存约 400MB、要把整个
     文件读一遍，并发会把内存乘上去、把盘阵的带宽占满。单消费者 + 并发 1 的代价只是
-    「一次性完成 20 个作业时最后一件要等十分钟」，而那是可解释的。
+    「一次性完成 20 个作业时最后一件要等十分钟」，而那是可解释的。顺带那一份**不改**
+    这条并发纪律：它跟在产物后面、同一个线程里、还是串行，只是这一轮多读一个文件
+    （且盘上已是当前档位时连读都不读）。成本交代清楚：一个场景目录里没有
+    `PAN_NOSR.tif` 时它只花一次 `is_file()`。
     """
     div = _product_preview_div()
     if not div:
@@ -416,6 +420,10 @@ def _eager_bake_tick(state) -> None:
         if task is None:
             continue        # 被别处抢先认领，或这行在认领的空隙里被重交了
         _bake_product_preview(state, task, div)
+        # 顺带烤**未超分**那一份（用户 2026-09-21 口径）。它与本行的结论无关，
+        # 所以不碰 preview_state / 不广播，只写盘 + 打一行 stdout 供排查。
+        print(f"[nosr-preview] task={task.get('task_id')} "
+              f"{_bake_nosr_preview(task, div)}")
         return
 
 
@@ -436,12 +444,13 @@ def _finish_preview(state, task: dict, state_name: str, note: str) -> None:
 
 
 def _bake_product_preview(state, task: dict, div: int) -> None:
-    """把一条 COMPLETED 任务的**产物**预览烤出来（其余两类走惰性路径）。
+    """把一条 COMPLETED 任务的**产物**预览烤出来（本函数只管产物这一份）。
 
-    只烤产物，不烤输入影像、不烤 `_NOSR`：那两份的「用户到底要不要看」在打开之前
-    无法知道，而产物是刚刚跑完的、几乎一定会被打开。三个落点天然独立
+    只烤产物，不烤输入影像：输入影像那份的「用户到底要不要看」在打开之前无法知道，
+    而产物是刚刚跑完的、几乎一定会被打开。三个落点天然独立
     （`<stem>.preview.jpg` / `<stem>_<suffix>.preview.jpg` / `…_NOSR.preview.jpg`），
-    各烤各的，互不覆盖。
+    各烤各的，互不覆盖。**未超分那一份由 `_bake_nosr_preview` 另烤**（2026-09-21
+    用户口径），本函数的结论一个字都不为它改 —— 两份的结局各自独立。
     """
     params = task.get("params") or {}
     lq_path = params.get("lq_path")
@@ -529,6 +538,67 @@ def _bake_product_preview(state, task: dict, div: int) -> None:
         _finish_preview(state, task, "failed", f"failed: {e}")
     except Exception as e:  # noqa: BLE001 — 后台循环不该被一行拖死
         _finish_preview(state, task, "failed", f"failed: {type(e).__name__}: {e}")
+
+
+#: 未超分那份栅格的名字（用户口径，2026-09-21，真机 RC 场景），两种扩展名都认。
+#: **待核**：仓库里 `SR_code/util.py::writeTiff` 的改名规则（改的是输出路径 →
+#: `<产物 stem>_NOSR.tif`，即 `PAN_260318_NOSR.tif`）推不出这个名字，两者对不上。
+#: 这里按用户当面给的机械口径钉死，**不顺手把另一个名字也试一遍** —— 真机 `ls` 一
+#: 次就能分清，而多试一个名字会让「烤的是哪一份」变得说不清。
+_NOSR_STEM = "PAN_NOSR"
+_NOSR_EXT_ORDER = (".tif", ".tiff")
+
+
+def _bake_nosr_preview(task: dict, div: int) -> str:
+    """顺带烤一份**未超分**那份栅格的预览 → `<场景目录>/PAN_NOSR_preview.jpg`。
+
+    用户口径：没超分的那份 tif 就叫 `PAN_NOSR.tif`，按**全局档位**下采样即可，
+    不分支。落点直接复用拖入链那条规则（`paths.drop_preview_path`：
+    `<源同目录>/<源 stem>_preview.jpg`），所以文件名天然是 `PAN_NOSR_preview.jpg`
+    —— 与「一份栅格一份预览、名字由源 stem 拼」这条既有约定同源，不是另立规矩。
+
+    与产物那一份（`_bake_product_preview`）的两点不同，都是有意为之：
+
+    * **不看沙箱**：这一份是盘阵上的既有文件，与这次跑在盘阵还是私有副本上无关
+      —— 沙箱跑时它照样在，照样该烤（产物那一份才需要判沙箱，因为它刚被写出来）。
+    * **不动行的结论**：`preview_state` / `preview_note` 那一列描述的是**产物**预览，
+      一个字段说不出两份文件的结局。这里只写盘，结局由调用方打一行 stdout。
+
+    返回一行状态（`baked:` / `cached:` / `skipped:` / `failed:`），调用方与测试都看它。
+    """
+    lq_path = (task.get("params") or {}).get("lq_path")
+    if not lq_path:
+        return "skipped: 任务行里没有 lq_path"
+    scene_dir = Path(_norm_dir(lq_path))
+    cands = [scene_dir / (_NOSR_STEM + ext) for ext in _NOSR_EXT_ORDER]
+    source = next((c for c in cands if c.is_file()), None)
+    if source is None:
+        # 如实报「没这份」而不是静默返回：这个名字对不对只有真机能证，报出来才看得出
+        return f"skipped: {scene_dir} 里没有 {_NOSR_STEM}.tif"
+    if not os.access(str(scene_dir), os.W_OK):
+        return f"skipped: {scene_dir} 对服务账号不可写"
+    out = paths.drop_preview_path(source)
+    # 盘上那份已是当前档位就不重烤（同 suffix 反复迭代时省掉每次读遍 GB 级文件）。
+    # 判据与打开链/产物那份**同一个** cache_hit，没有第二套。
+    try:
+        if out.is_file() and os.path.getmtime(out) >= os.path.getmtime(source):
+            hit = cache_hit(out, PREVIEW_JPG_QUALITY, div)
+            if hit is not None:
+                return f"cached: {out.name} 已是 ÷{div}（{hit['w']}×{hit['h']}）"
+    except OSError:
+        pass        # 读不了 mtime 就当没命中，往下走正常流程
+    try:
+        before = _source_sig(source)
+        pixels = build_preview_pixels(str(source), preview_max_edge(source, div))
+        # 落盘前复核，理由同产物那一份：读到一半源被改写会留下半截图
+        if _source_sig(source) != before:
+            return "skipped: 源在烘焙途中被改写，本次一个字节都没写"
+        res = write_preview_jpg(out, pixels, div=div)
+        return f"baked: {out.name} ÷{div}（{res['w']}×{res['h']}）"
+    except (PreviewError, OSError) as e:
+        return f"failed: {e}"
+    except Exception as e:  # noqa: BLE001 — 一份烤不动不该影响别的事
+        return f"failed: {type(e).__name__}: {e}"
 
 
 def _latest_completed_suffix(store, lq_path: str) -> str | None:

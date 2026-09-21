@@ -20,7 +20,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from backend.api.app import create_app, _eager_bake_tick
+from backend.api.app import create_app, _bake_nosr_preview, _eager_bake_tick
 from backend.api.platform import (_Subscriber, _broadcast, _queue_state,
                                   _task_state, chat_send)
 from backend.tests import allowed_roots_env
@@ -1090,6 +1090,77 @@ class TestProductPreviewBake(PlatformBase):
         self.assertIn("baked", after["preview_note"])
         self.assertEqual(after["state"], "COMPLETED",
                          "急烤写回不该动作业状态")
+
+    # ---- 顺带那一份：未超分（`PAN_NOSR.tif`，2026-09-21 用户口径）----------
+
+    def _nosr(self, w=64, h=32, name=None):
+        """未超分那一份栅格：场景目录里的 `PAN_NOSR.tif`（用户给的那个名字）。"""
+        return make_strip_tif(self.scene_dir, name or "PAN_NOSR.tif", w, h)[0]
+
+    def _nosr_jpg(self):
+        """它的预览落点：拖入链那条规则（`<源 stem>_preview.jpg`，下划线）。"""
+        return self.scene_dir / "PAN_NOSR_preview.jpg"
+
+    def _nosr_task(self, tid):
+        """`_bake_nosr_preview` 只看 params 里的 lq_path，不必真去库里取整行。"""
+        return {"task_id": tid,
+                "params": {"lq_path": self.LQ, "suffix": self.SUFFIX}}
+
+    def test_nosr_preview_is_baked_by_the_same_tick(self):
+        """超分跑完那一轮里顺带把它烤了：源是 `PAN_NOSR.tif`，档位取全局。"""
+        app, _ = self.app_client()
+        self._row(app)
+        product = self._product()
+        self._nosr()
+
+        _eager_bake_tick(app.state)
+
+        self.assertTrue(self._jpg(product).is_file())
+        nosr_jpg = self._nosr_jpg()
+        self.assertTrue(nosr_jpg.is_file(), "场景目录里出现了 PAN_NOSR_preview.jpg")
+        self.assertEqual(self._dims(nosr_jpg), (16, 8), "÷4：64×32 → 16×8")
+        self.assertNotEqual(nosr_jpg, self._jpg(product), "两份各一落点，互不覆盖")
+
+    def test_no_nosr_raster_no_nosr_preview(self):
+        """没有那份栅格就什么都不写，但「没这份」要报得出来 ——
+        这个名字对不对只有真机能证，静默跳过等于没人看得见。"""
+        app, _ = self.app_client()
+        tid = self._row(app)
+        self._product()
+
+        _eager_bake_tick(app.state)
+
+        self.assertFalse(self._nosr_jpg().exists())
+        status = _bake_nosr_preview(self._nosr_task(tid), 4)
+        self.assertTrue(status.startswith("skipped:"), status)
+        self.assertIn("PAN_NOSR.tif", status)
+
+    def test_nosr_preview_is_baked_even_when_the_product_bake_skips(self):
+        """两份互不牵连：产物没产出（云限额跳过是合法 COMPLETED）时，
+        未超分那份照样烤 —— 它跟这次跑得成不成功本来就无关。"""
+        app, _ = self.app_client()
+        tid = self._row(app)
+        self._nosr()
+
+        _eager_bake_tick(app.state)
+
+        self.assertEqual(self._row_state(app, tid)[0], "skipped")
+        self.assertTrue(self._nosr_jpg().is_file())
+
+    def test_nosr_preview_at_the_same_div_is_a_cache_hit(self):
+        """同 suffix 反复迭代不该每次重读一遍 GB 级文件：盘上那份是当前档位就不重烤，
+        判据与产物那份**同一个** cache_hit。"""
+        app, _ = self.app_client()
+        tid = self._row(app)
+        self._nosr()
+        task = self._nosr_task(tid)
+
+        self.assertIn("baked", _bake_nosr_preview(task, 4))
+        self.assertEqual(self._dims(self._nosr_jpg()), (16, 8))
+        self.assertIn("cached", _bake_nosr_preview(task, 4))
+
+        self.assertIn("baked", _bake_nosr_preview(task, 8), "换档位就该重烤")
+        self.assertEqual(self._dims(self._nosr_jpg()), (8, 4))
 
 
 class TestMasks(PlatformBase):

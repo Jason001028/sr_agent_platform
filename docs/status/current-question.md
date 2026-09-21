@@ -2170,6 +2170,50 @@ SC 场景的产物」（`jpg_stage_name` 要求目录名前缀，RC 产物对不
 然后拖 —— 预期 200 且卡片上出「盘阵 + 序号 + SR」三标；不先打开就拖，预期仍是 400，且 detail 末尾
 多一句「另外，当前打开的场景：…」。④ 完全没打开过任何场景时拖它 → 400 文案与上一轮一字不差。
 
+### 2026-09-21 · 超分跑完顺带烤未超分那一份 → `PAN_NOSR_preview.jpg`（开发机）
+
+**用户原话**：「我希望增加一条烘焙链路，就是在超分后，顺带会产生 `NOSR_preview.jpg`，你实现的越简单
+越好，可以向我提问」。问过两件事，用户口径：
+
+1. 烤哪一份 —— 「将 **`PAN_NOSR.tif`** 按照全局采样率进行下采样，**不考虑其他分支**，一般后端走超分，
+   tif 产物名称也是 `PAN_NOSR.tif`」；
+2. 落哪个名 —— **`PAN_NOSR_preview.jpg`**。
+
+**实现（只动急烤那一条链）**：`app.py::_bake_nosr_preview(task, div)`，在 `_eager_bake_tick` 里紧跟
+产物那一份调用。源 = `<lq_path>/PAN_NOSR.tif`（`.tiff` 也认，最多两次 `is_file()`）；落点直接用
+`paths.drop_preview_path(source)`，于是文件名天然是 `PAN_NOSR_preview.jpg`（与拖入链同一条
+`<源 stem>_preview.jpg` 规则，不是另立名字）；档位 = 同一个全局 `div`；命中判定 = 同一个 `cache_hit`
+（盘上已是当前档位就不重读）。三条有意为之的边界：
+
+- **不判沙箱** —— 那份栅格是盘阵上的既有文件，与这次跑在盘阵还是私有副本上无关（产物那份必须判，
+  因为它刚被写出来）；
+- **不动 `preview_state`/`preview_note`** —— 那一列描述的是产物预览，一个字段说不出两份文件的结局；
+  这一份只写盘 + 打一行 stdout `[nosr-preview] task=<id> <状态>`（`baked:`/`cached:`/`skipped:`/`failed:`）；
+- **名字钉死**，不把仓库规则推出来的 `<产物 stem>_NOSR.tif` 也顺手试一遍（见下「待确认 ⑤」）。
+
+**没改的东西**：不新增端点、不动任何响应字段、不动产物那一份的结论与广播、`/siblings` 的「上一次
+产物」那一项找的仍是点号落点 `…_NOSR.preview.jpg`（所以**这份新文件今天没有任何服务端消费方**，
+它的用途是人看 / 拖回查看器 —— 拖回时 `stage_of_jpg` 剥掉 `preview` 尾段后按 `PAN_NOSR.tif` 判环节）。
+
+**验证（开发机）**：后端 **659 passed / 4 skipped**（+4 例，`TestProductPreviewBake` 里新增：同一次
+tick 烤出来且 ÷4 尺寸对、没有那份栅格时什么都不写但状态报得出「没这份」、**产物烤跳过时它也照烤**、
+同档位命中 `cached` 而换档位重烤）。前端一行未动，故未重跑。
+
+**待确认（真机）**：
+
+- ⑤ **`PAN_NOSR.tif` 这个名字与仓库规则对不上**。`SR_code/util.py::writeTiff` 的改名对象是**输出路径**
+  （`os.rename(path + tiftype, path + "_NOSR" + tiftype)`），推出来的是 `<产物 stem>_NOSR.tif`，即
+  **`PAN_260318_NOSR.tif`**；而用户说真机上那份未超分的 tif 就叫 `PAN_NOSR.tif`。请 `ls -l` 一次：
+  这两个名字哪个在、各自多大、什么时候写的。若在的是后者，那 **`/siblings` 的「上一次产物」那一项
+  在真机上恒为 `exists: false`**（它按 `nosr_path_for` 拼名），对比视图里也就永远少一张 —— 这是同一个
+  名字问题的第二个出口，届时一起订正。
+- ⑥ **`PAN_NOSR.tif` 是不是 SR 真正吃进去的那份低质输入？** 用户说「一般后端走超分」，而
+  `util.get_l1_pan_tif_rcsc_nosr` 的 **SC 分支**恰好把 `<lq_path>/<目录名>_NOSR.tif` 当低质输入读
+  （读不到真包会 `exit()`）。若真机 RC 场景的输入其实是 `PAN_NOSR.tif`，那平台今天认的输入影像
+  （`input_scene_path`：先 `<目录名>.tif`、再 `PAN.tif`）可能**不是 SR 真正吃的那一份** ——
+  `/siblings` 的「输入影像」与对比视图的「本体」都会指错。这一条要靠真机的 `ls` + 一次实际提交才能定，
+  先记着，**不要据此改 `input_scene_path`**。
+
 ## 5. 交接（给新窗口）
 
 > 开新窗口时按用途挑一份整篇粘过去：[handoff-prompt.md](handoff-prompt.md)（梳理框架与当前思路）、
