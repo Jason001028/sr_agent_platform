@@ -13,7 +13,7 @@ import {
   isImageSource, startStretch, SCENE_START_STRETCH,
   isBakedPreviewUrl, previewNeedsBake, previewDivLabel, loadPreviewDiv,
   savePreviewDiv, SCENE_PREVIEW_DIVS, DEFAULT_PREVIEW_DIV,
-  rasterPreviewWins, previewCacheKey,
+  rasterPreviewWins, previewCacheKey, sceneAnchors, ANCHOR_MAX,
 } from '../scene.js';
 import type { SceneRow, RasterPreview } from '../scene.js';
 import { stretchRgba } from '../tifDecode.js';
@@ -409,5 +409,26 @@ describe('previewCacheKey（预览 blob 的缓存键）', () => {
     // 'a|4|jpg' 与栅格名恰好叫 'jpg' 的情形：前缀不同，撞不上
     expect(previewCacheKey({ id: 'a' }, 4, { name: 'jpg' }))
       .not.toBe(previewCacheKey({ id: 'a' }, 4));
+  });
+});
+
+describe('sceneAnchors —— 拖 jpg 时递给后端的锚定目录', () => {
+  it('按给进来的顺序保留（顺序就是优先级，后端取第一个成立的）', () => {
+    expect(sceneAnchors(['/d/近', '/d/远'])).toEqual(['/d/近', '/d/远']);
+  });
+
+  it('空值丢掉、重复只留一份', () => {
+    expect(sceneAnchors([null, '/d/a', undefined, '', '/d/a', '/d/b']))
+      .toEqual(['/d/a', '/d/b']);
+  });
+
+  it('最多 ANCHOR_MAX 个 —— 它是提示不是断言，不该被拿来灌请求', () => {
+    const many = ['/d/1', '/d/2', '/d/3', '/d/4', '/d/5'];
+    expect(sceneAnchors(many)).toHaveLength(ANCHOR_MAX);
+    expect(sceneAnchors(many)[0]).toBe('/d/1');
+  });
+
+  it('一个都没有 → 空数组（后端照旧按名字反推）', () => {
+    expect(sceneAnchors([null, undefined, ''])).toEqual([]);
   });
 });

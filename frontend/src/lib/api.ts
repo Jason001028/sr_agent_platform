@@ -581,11 +581,17 @@ export async function fetchDropSceneJpg(
  * 的输入影像是 PAN.tif），关联错了掩码坐标就整片落在别的图上；只看字节数也不够。
  * 不符时后端回 404 并把原因写进 detail，调用方应当**退回本地解码**而不是报死错。
  *
+ * `anchor` 也只在拖拽入口给：一个或几个**当前打开着的**盘阵场景目录。名字里没有
+ * 场景身份的 jpg（RC 场景的产物 `PAN_<suffix>.jpg`、裸 `PAN.jpg`）反推不出目录，
+ * 后端就照这几个目录 stat 环节自己的栅格。它是**提示不是断言**：名字自己能反推时
+ * 后端一个字都不用它，给了坏值也只是跳过。分屏时按「离落点近的那一景在前」排序 ——
+ * 后端取第一个成立的（见 backend/api/app.py 的 `_anchor_stage_hit`）。
+ *
  * 首次调用可能要解压采样整幅大图（生成预览缓存），界面应提示「首次较慢」。 */
 export async function apiResolveScene(
   cfg: SrConfig,
   body: { path: string }
-      | { name: string; date?: string; size_bytes?: number },
+      | { name: string; date?: string; size_bytes?: number; anchor?: string[] },
   opts?: { signal?: AbortSignal },
 ): Promise<SceneResolveResult> {
   const r = await http(sceneResolveUrl(cfg), {

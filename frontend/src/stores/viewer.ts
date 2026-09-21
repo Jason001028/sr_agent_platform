@@ -39,6 +39,7 @@ import type { DecodedRec } from '../lib/decode.js';
 import {
   sceneDecodePixels, loadSrConfig, startStretch, loadPreviewDiv,
   savePreviewDiv, SCENE_PREVIEW_DIVS, previewDivLabel, rasterPreviewWins,
+  sceneAnchors,
 } from '../lib/scene.js';
 import {
   apiResolveScene, apiBakeMask, apiSceneSiblings, fetchSceneJpg, fetchDropSceneJpg,
@@ -358,6 +359,11 @@ export const useViewerStore = defineStore('viewer', () => {
   const dragHint = ref<{ active: boolean; side: 'A' | 'B' | null }>({ active: false, side: null });
   /** 右侧栏是否展开（从 ContextPanel 提升）。进分屏自动收起、退出时按 prev 还原。 */
   const ctxRailOpen = ref(readCtxRailOpen());
+  /** 最近一次**显示过**的场景目录（`recs` 里带 `lqPath` 的那张被换上来时记一次）。
+   *  拖 jpg 时它当 `anchor` 递给后端 —— 名字里没有场景身份的 jpg（RC 场景的产物
+   *  `PAN_<suffix>.jpg`）反推不出目录，只有「用户当前在看哪一景」这条线索。
+   *  **不是响应式 state**：它只喂请求，不上屏。 */
+  let lastSceneDir: string | null = null;
   const ctxRailPrevOpen = ref<boolean | null>(null);
 
   /** 活动侧的视图变换。**全仓 `view.value = …` 只有 5 处，都在本文件内**，
@@ -439,7 +445,20 @@ export const useViewerStore = defineStore('viewer', () => {
    *
    *  返回「目标格换了一张图」（= 那一格的视口需要重新适配）。调用方据此决定要不要
    *  `fit()` —— 同一张图留在原格时不重适配，用户的缩放不该被一次多余的点选抹掉。 */
+  /** 一张 rec 属于哪个场景目录（盘阵 POSIX）。中间产物的 `lqPath` 是空的 —— 它不
+   *  可提交 —— 但 `sceneDir` 有，而「用户在看的这一景」两个都算。 */
+  function sceneDirOf(r: ViewerRec | null | undefined): string | null {
+    return r?.sceneDir ?? r?.lqPath ?? null;
+  }
+
+  /** 记下「用户当前打开的这一景」。拖 jpg 时当 `anchor` 递给后端（见 tryLinkScenes）。 */
+  function noteSceneDir(r: ViewerRec | null | undefined): void {
+    const d = sceneDirOf(r);
+    if (d) lastSceneDir = d;
+  }
+
   function placeRec(id: number, side?: 'A' | 'B'): boolean {
+    noteSceneDir(recs.value.find((r) => r.id === id));      // 换进来的那张
     if (!split.value) {
       const changed = paneA.value !== id;
       paneA.value = id;
@@ -1184,6 +1203,9 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.sceneId = meta.sceneId ?? null;
     rec.lqPath = meta.lqPath ?? null;
     rec.sceneDir = meta.sceneDir ?? null;
+    // 这一景是「用户当前打开着的」——记下来，供下一次拖没有场景身份的 jpg 时当
+    // `anchor` 用（见 lastSceneDir）。中途产物那条路 lqPath 是空的，用 sceneDir。
+    noteSceneDir(rec);
     // 环节（本体 / 产物 / NOSR）：两处入口（拖拽升级、快捷芯片）都在 meta 里给，
     // 缺省按本体 —— 只有盘阵场景才有这一项，本地图片 stageKind 保持 undefined。
     // 标签在这一个漏斗里算出来，卡片直接渲染，不必各自再判一遍。
@@ -1933,7 +1955,11 @@ export const useViewerStore = defineStore('viewer', () => {
    *  **route='jpg' 一律不试**：那种 rec 的目录已经由 resolve 按绝对路径定过（就是
    *  权威值）。粘单个 .tif 且父目录不是场景目录时它的 lqPath 是 null —— 这时若按
    *  文件名去反推，可能命中**另一个**目录，用户点「提交 SR」就会拿着错的 lq_path
-   *  去跑，而这正是「绝不静默提交」要防的事。父目录不是场景目录，就是不能提交。 */
+   *  去跑，而这正是「绝不静默提交」要防的事。父目录不是场景目录，就是不能提交。
+   *
+   *  请求里还带一串 `anchor` = 「用户当前打开的那几景」（见 `noteSceneDir`）。产物名
+   *  里**没有场景身份**时（RC 场景的 `PAN_<suffix>.jpg`）后端只能靠它 —— 名字能反推
+   *  时它一个字都不起作用，所以照旧先反推、失败才用到它。 */
   async function tryLinkScenes(rec?: ViewerRec | null): Promise<boolean> {
     const r = rec ?? activeRec.value;
     // 已是盘阵场景 / 走过 resolve / 已关联过 / 已试过 —— 都直接返回
@@ -1944,9 +1970,14 @@ export const useViewerStore = defineStore('viewer', () => {
     r.status = '正在关联盘阵目录…';
     r.statusCls = '';
     let res: SceneResolveResult;
+    // 当前打开的那几景（分屏两块格格子各自的那一景），最近的排在最前 —— 后端按这个
+    // 顺序取第一个成立的。名字能自己反推时它完全用不上（后端连 stat 都不花）。
+    const anchor = sceneAnchors([
+      lastSceneDir, sceneDirOf(recForSide('A')), sceneDirOf(recForSide('B')),
+    ]);
     try {
       res = await apiResolveScene(loadSrConfig(),
-        { name: r.name, size_bytes: r.file.size },
+        { name: r.name, size_bytes: r.file.size, anchor },
         { signal: AbortSignal.timeout(20000) });
     } catch (e) {
       if (!recs.value.includes(r)) return false;
@@ -1971,10 +2002,10 @@ export const useViewerStore = defineStore('viewer', () => {
           + '<目录名>_<suffix>.jpg），以及平台自己烤的那份预览'
           + '（<栅格 stem>_preview.jpg）—— 都在场景目录里，且同级要有同名栅格；'
           + '改过名、另存过、或叫 PAN.jpg 这类都不认，平台不猜目录。'
-          + 'RC 场景（目录里的输入影像叫 PAN.tif）的产物名是 PAN_<suffix>.jpg，'
-          + '上一次产物要同一 suffix 跑过两次才留得下 —— 这两个名字里没有成像时刻，'
-          + '认不出是哪一景，拖不进来。要看产物请把该场景目录粘进上方的「盘阵场景」栏'
-          + '打开，再用同场景芯片切到产物。');
+          + 'RC 场景（目录里的输入影像叫 PAN.tif）的产物叫 PAN_<suffix>.jpg，上次的产物'
+          + '叫 <产物名>_NOSR —— 这两个名字里没有成像时刻，先打开那一景再拖进来才'
+          + '认得出（平台照当前场景目录点同级栅格）。把该场景目录粘进上方的「盘阵场景」'
+          + '栏打开，再拖一次即可；也可以直接用同场景芯片切到产物。');
       } else {
         showToast('「' + r.name + '」没有关联到盘阵场景，按本地文件查看'
           + '（要提交 SR 请在「盘阵场景」栏粘贴该场景目录）');

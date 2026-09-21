@@ -799,6 +799,183 @@ class TestResolveFingerprint(ResolveBase):
         self.assertEqual(r.status_code, 200, r.text)
 
 
+class TestResolveAnchored(ResolveBase):
+    """名字里没有场景身份的 jpg（RC 场景的产物 `PAN_<suffix>.jpg`）+ `anchor`。
+
+    产物名按**输入影像名**拼，不按目录名：RC 场景的输入叫 `PAN.tif`，产物于是叫
+    `PAN_260318.jpg` —— 名字没错，但里面没有卫星段、没有成像时刻，反推不出它在
+    哪一天哪一景的目录下。这条入口的接法是前端把「当前打开的那一景」当 `anchor`
+    递过来（**一个或几个目录**），后端在这一层里 stat 环节自己的栅格。
+
+    这一节钉四件事：
+    1. 锚定目录成立时能关联，且与反推那条**同解**（描述产物自己、摘掉可提交落点）；
+    2. 锚定目录不成立时**不关联**（真门是「这一环节的栅格躺在同级」，锚错了过不去）；
+    3. 锚定是**最后一条**路：名字自己能反推的一律按反推，锚定连 stat 都不花；
+    4. 白名单是硬的：名单外的目录不读、也不说存在性（否则这字段成探测窗口）。
+    """
+
+    PROD_W, PROD_H = 640, 1280
+
+    def _rc_scene(self, *, prod: bool = True, bare_jpg: bool = False):
+        """RC 形态的一景：输入影像就叫 `PAN.tif`（`<目录名>.tif` 不存在）。"""
+        d = self.make_scene(tif=False, meta=True)
+        arr = (np.arange(320 * 640).reshape(640, 320) % 65535).astype(np.uint16)
+        tifffile.imwrite(d / "PAN.tif", arr, photometric="minisblack")
+        if prod:
+            arr2 = (np.arange(self.PROD_W * self.PROD_H)
+                    .reshape(self.PROD_H, self.PROD_W) % 65535).astype(np.uint16)
+            tifffile.imwrite(d / "PAN_260318.tif", arr2, photometric="minisblack")
+            (d / "PAN_260318.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+        if bare_jpg:
+            (d / "PAN.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+        return d
+
+    def resolve(self, **body):
+        return self.client().post("/api/scenes/resolve", json=body)
+
+    def test_rc_product_jpg_links_via_the_open_scene(self):
+        """`PAN_260318.jpg` + 锚定目录 → 关联成那一景的**产物**（与反推那条同解）。"""
+        d = self._rc_scene()
+        prod = d / "PAN_260318.jpg"
+        r = self.resolve(name=prod.name, size_bytes=prod.stat().st_size,
+                         anchor=d.as_posix())
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["resolved"]["kind"], "product")
+        self.assertEqual(body["resolved"]["suffix"], "260318")
+        self.assertEqual(body["resolved"]["dir"], d.as_posix())
+        # 这一行描述**产物自己**（W/H 是那份 `PAN_260318.tif` 的），可提交落点全摘
+        row = body["row"]
+        self.assertEqual(row["name"], "PAN_260318")
+        self.assertEqual((row["W"], row["H"]), (self.PROD_W, self.PROD_H))
+        self.assertIsNone(row["lq_path"])
+        self.assertFalse(body["resolved"]["sr_capable"])
+        # 本体那一路仍如实回报：SR 真要跑的是 PAN.tif
+        self.assertEqual(body["resolved"]["input_name"], "PAN.tif")
+
+    def test_anchor_links_the_bare_pan_jpg_as_the_input(self):
+        """锚定目录也让 `PAN.jpg`（同样没有成像时刻）按**本体**关联。
+
+        它是 RC 场景的显示件，判据本来就在 `stage_of_jpg` 的第一条里（stem ==
+        输入影像的 stem）；把它挡在外面的只是「名字里没有成像时刻，反推不出目录」。
+        锚定目录补上这一半。
+        """
+        d = self._rc_scene(prod=False, bare_jpg=True)
+        pan = d / "PAN.jpg"
+        r = self.resolve(name=pan.name, size_bytes=pan.stat().st_size,
+                         anchor=d.as_posix())
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["resolved"]["kind"], "input")
+        self.assertEqual(body["resolved"]["suffix"], "")
+        self.assertTrue(body["resolved"]["sr_capable"])
+        self.assertEqual(body["row"]["lq_path"], d.as_posix())
+
+    def test_mixed_dir_rc_product_uses_the_rc_base(self):
+        """混合目录：上游 SC 遗留的 `<目录名>.tif` 与 RC 真读的 `PAN.tif` 同时躺着。
+
+        平台挑中的输入影像仍是 `<目录名>.tif`（`input_candidates` 的次序，与提交
+        口径一致），但这份产物是 RC 跑出来的、叫 `PAN_260318` —— 判名字那一半必须
+        也按 `PAN` 这条基准试一遍，否则这种目录里 RC 的产物全都认不出。
+        """
+        d = self._rc_scene()
+        arr = (np.arange(320 * 640).reshape(640, 320) % 65535).astype(np.uint16)
+        tifffile.imwrite(d / f"{SCENE_NAME}.tif", arr, photometric="minisblack")
+        prod = d / "PAN_260318.jpg"
+
+        r = self.resolve(name=prod.name, size_bytes=prod.stat().st_size,
+                         anchor=d.as_posix())
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["resolved"]["input_name"], f"{SCENE_NAME}.tif")
+        self.assertEqual(body["resolved"]["kind"], "product")
+        self.assertEqual(body["row"]["name"], "PAN_260318")
+
+    def test_anchors_are_tried_in_order(self):
+        """给了几个锚定目录时按顺序试，**第一个成立的**算数。
+
+        分屏时两块格子里各开着一景，前端按「离落点近的那一景在前」排序——哪一景
+        在前就只有哪一景算数，后端不替用户选。
+        """
+        other = self.sat_dir / MID_OTHER / f"{SCENE_NAME.replace('_101_', '_102_')}"
+        make_scene(other, other.name, tif=False, meta=True)
+        tifffile.imwrite(other / "PAN.tif",
+                         (np.arange(320 * 640).reshape(640, 320) % 65535)
+                         .astype(np.uint16), photometric="minisblack")
+        tifffile.imwrite(other / "PAN_260318.tif",
+                         (np.arange(64 * 32).reshape(32, 64) % 65535)
+                         .astype(np.uint16), photometric="minisblack")
+        d = self._rc_scene()
+        prod = d / "PAN_260318.jpg"
+
+        r = self.resolve(name=prod.name, size_bytes=prod.stat().st_size,
+                         anchor=[other.as_posix(), d.as_posix()])
+        self.assertEqual(r.status_code, 200, r.text)
+        # 两个锚都成立（各自都躺着 PAN_260318.tif）→ 取先给的那个
+        self.assertEqual(r.json()["resolved"]["dir"], other.as_posix())
+
+    def test_anchor_that_does_not_hold_400_lists_what_was_tried(self):
+        """锚错了不关联：真门是「这一环节的栅格躺在同级」，那条过不去就 400。
+
+        400 的说明里要写清「在哪儿、找的是什么」—— 用户明明开着那一景却报认不出，
+        不写清楚他只会以为平台坏了。
+        """
+        d = self._rc_scene(prod=False)
+        prod = d / "PAN_260318.jpg"
+        prod.write_bytes(b"\xff\xd8\xff\xd9")       # jpg 在，同名栅格不在
+        r = self.resolve(name=prod.name, size_bytes=prod.stat().st_size,
+                         anchor=d.as_posix())
+        self.assertEqual(r.status_code, 400, r.text)
+        detail = r.json()["detail"]
+        self.assertIn("不猜目录", detail)
+        self.assertIn("这一景里没有 PAN_260318.tif/.tiff", detail)
+
+    def test_anchor_outside_the_whitelist_is_skipped(self):
+        """白名单外的锚定目录：**跳过并记原因**，不 403、不说它存不存在。
+
+        `X:` 映射到临时根的父目录（`ResolveBase.setUp` 里那条），是真实存在但不在
+        白名单内的路径 —— 若它被 stat，这个字段就成了「任意路径探测」的入口。
+        """
+        outside = self.root.parent.as_posix()
+        r = self.resolve(name="PAN_260318.jpg", size_bytes=123,
+                         anchor=[outside, self.root.as_posix()])
+        self.assertEqual(r.status_code, 400, r.text)
+        detail = r.json()["detail"]
+        self.assertIn("不在允许的盘阵前缀内", detail)
+        self.assertEqual(detail.count(outside), 1)      # 只作为「不读」的说明出现
+        self.assertNotIn("这一景里没有", detail)
+
+    def test_normal_name_still_wins_over_the_anchor(self):
+        """名字自己能反推时一律走反推 —— 锚定目录连 stat 都不花。
+
+        名字指的是哪一景是它自己说的，比「用户当时在看哪一景」权威。这里给一个
+        **成立但不相干**的锚（另一景的目录），结果仍按名字落到本景上。
+        """
+        other = self.sat_dir / MID_OTHER / f"{SCENE_NAME.replace('_101_', '_102_')}"
+        make_scene(other, other.name, tif=False, meta=True)
+        tifffile.imwrite(other / "PAN.tif",
+                         (np.arange(64 * 32).reshape(32, 64) % 65535)
+                         .astype(np.uint16), photometric="minisblack")
+        d, name, _, jpg = self._make_product()
+
+        r = self.resolve(name=jpg.name, size_bytes=jpg.stat().st_size,
+                         anchor=other.as_posix())
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["resolved"]["dir"], d.as_posix())
+        self.assertEqual(d, self.scene_dir, "本景就是名字反推出来的那一景")
+
+    def _make_product(self, suffix: str = "sr"):
+        """SC 形态的一景 + 一份 `<目录名>_<suffix>` 的栅格与显示件 jpg。"""
+        d = self.make_scene()
+        pname = f"{SCENE_NAME}_{suffix}"
+        tifffile.imwrite(d / f"{pname}.tif",
+                         (np.arange(64 * 32).reshape(32, 64) % 65535)
+                         .astype(np.uint16), photometric="minisblack")
+        jpg = d / f"{pname}.jpg"
+        jpg.write_bytes(b"\xff\xd8\xff\xd9")
+        return d, pname, d / f"{pname}.tif", jpg
+
+
 class TestResolveStages(ResolveBase):
     """拖进来的 jpg 属于哪个环节：本体 / 本次产物 / 上一次产物（2026-09-21）。
 
