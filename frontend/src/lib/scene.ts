@@ -443,3 +443,27 @@ export function thumbPolysToOrig(
   return polys.map((pts) =>
     pts.map((p) => thumbToOrig(p[0], p[1], W, H, tw, th)));
 }
+
+/* ---------------- 拖 jpg 时给后端的「当前打开的这一景」 ---------------- */
+/** `anchor` 的上限。它是**提示不是断言**：一个够用，多给几个只是让分屏下多一条
+ *  可试的（后端逐个试、取第一个成立的，自己的上限是 4）。 */
+export const ANCHOR_MAX = 3;
+
+/** 拖进来的 jpg 名字里没有场景身份时递给后端的锚定目录（`POST /api/scenes/resolve`
+ *  的 `anchor`）。RC 场景的产物 `PAN_<suffix>.jpg` 是典型：产物名按输入影像名拼，
+ *  里面没有卫星段也没有成像时刻，反推不出它在哪一天哪一景的目录下 —— 唯一不猜的
+ *  线索是「用户当时正开着哪一景」。
+ *
+ *  **顺序就是优先级**：后端取第一个「这一环节的栅格躺在同级」成立的。所以调用方按
+ *  「离落点近的那一景在前」传进来。空值丢掉、重复只留一份、最多 `ANCHOR_MAX` 个。
+ *
+ *  返回空数组 = 没有可锚的景，后端照旧按名字反推（这条提示对能反推的名字从来不起
+ *  作用，见 backend/api/app.py 的 `_anchor_stage_hit`）。 */
+export function sceneAnchors(dirs: (string | null | undefined)[]): string[] {
+  const out: string[] = [];
+  for (const d of dirs) {
+    if (d && !out.includes(d)) out.push(d);
+    if (out.length >= ANCHOR_MAX) break;
+  }
+  return out;
+}

@@ -2120,9 +2120,55 @@ SC 场景的产物」（`jpg_stage_name` 要求目录名前缀，RC 产物对不
 
 **待确认**：① 那一景 `ls -l`（`PAN.tif` 在不在？上游 `<目录名>.tif` 在不在？`PAN_260318.tif`
 与同名 `.jpg` 各是什么时候写的？有没有 `_NOSR`）—— 决定同场景芯片这条路今天能不能走通；
-② 要不要做「锚定当前已打开场景目录」的拖入认产物（前端把当前 rec 的场景目录当提示传给后端，
-后端**在那个目录里** `stat <stem>.tif` 存在才认）—— 顺手做的事，但 `PAN_<suffix>` 反推不出目录，
-这是唯一不靠猜的接法；不做则 RC 产物只能从同场景芯片进。
+② ~~要不要做「锚定当前已打开场景目录」的拖入认产物~~ → **用户当轮拍板「让拖 `PAN_<suffix>.jpg`
+也能关联吧」，已实现，见下条**。
+
+### 2026-09-21 · 拖 `PAN_<suffix>.jpg` 能关联了：锚点是用户给的目录，不是猜的（开发机）
+
+**用户原话**：「让拖 `PAN_<suffix>.jpg` 也能关联吧」。
+
+**口径（上一轮已在回复里说清、用户认可）**：`PAN_<suffix>.jpg` 里没有卫星段也没有成像时刻，
+**按名字反推哪一景是做不到的**（那一步只能 400，这一条不改）。要关联就换一条来路：把**用户当前
+打开着的场景目录**交给后端，后端**在他指的那个目录里**认这份 jpg。这不是「平台猜目录」—— 猜是
+从名字编一个路径再 stat 上去，这里目录来自用户的打开状态；平台**不搜盘、不列举、不反推**。
+
+**请求契约**：`POST /api/scenes/resolve` 的 `{name}` 分支新增可选 `anchor` —— 一个或几个盘阵
+目录（前端 `lib/scene.ts::sceneAnchors([最近显示过的 sceneDir, A 格, B 格])`，`ANCHOR_MAX = 3`，
+顺序即优先级）。全部细节见 [api-contract §3.5](../planning/api-contract.md)。
+
+**后端**（`backend/api/app.py` + `backend/services/scene_search.py`）：
+
+- `_parse_anchors`：归一化成盘阵 POSIX 目录并逐个过白名单。坏值一律**跳过并记原因**，不 400
+  也不 403 —— 它是提示不是断言，不该因为前端塞了个陈旧目录就把整次拖拽打回。接受字符串或数组，
+  数组取前 4 条。
+- `_anchor_stage_hit`：挨个锚定目录跑「`input_scene_path` 命中 → `stage_of_jpg`」，**不过
+  `_fingerprint_mismatch`**（那条比的是「jpg 名 == 场景目录名」，`PAN_260318.jpg` 恰恰不是目录名，
+  复用就把这条路重新堵死）。真门仍是 `stage_of_jpg` 的第 2 条：**这一环节自己的栅格躺在同级**。
+- **只在名字自己反推不出来时才用**（`parse_scene_date` 取不到时间戳且后缀是 `.jpg/.jpeg`）：
+  有成像时刻的名字照旧走候选，`anchor` 连一次 stat 都不花 —— 老路径的探测量上限纹丝未动。
+- `resolve_scene` 的 200 收尾提成嵌套 `finish(hit)`，锚定命中与反推命中共用（`kind`/`suffix`/
+  `row` 描述该环节自己那份栅格、产物上 `lq_path=null` 等一律照旧）。
+- **`scene_search.stage_bases`（新）**：产物名的基准是**那份被超分的影像的 stem**，而一个目录里
+  可能有多份输入候选（RC 场景常残留上游的 `<目录名>.tif`）。`stage_of_jpg` 改成**把
+  `input_candidates` 的各个 stem 都试一遍**，不再钉死目录名 —— 这是上一轮那个错误的根：
+  `<目录名>` 只在 SC 场景上成立。
+- 400 的 `detail` 把每个锚定目录**各自为什么不行**追加进去（「目录不存在」/「不是可提交的场景
+  目录」/「这一景里没有 `PAN_260318.tif/.tiff`」）。
+
+**前端**：`apiResolveScene` 收 `anchor?: string[]`；`viewer.ts` 记一个**非响应式**的
+`lastSceneDir`（`placeRec` 与 `applySceneJpgToRec` 两处都记 —— 主流程是拖显示件时升级已有 rec，
+`lqPath` 出现在 `placeRec` 之后），拖 jpg 时按 `[lastSceneDir, A 格, B 格]` 发出去。失败弹窗
+改写：原文那句「能关联的 jpg 只有名字与场景目录名一致的那份」对 RC 产物是假话，现在说明
+「先打开那一景再拖进来才认得出」。
+
+**验证（开发机）**：后端 **655 passed / 4 skipped**（+7 例，`TestResolveAnchored`）；
+前端 **vitest 329 passed**（+4 例 `sceneAnchors`）+ `vue-tsc --noEmit` 退出码 0。
+`TestNeverListsDirectories` 的 ≤30 / jpg ≤35 stat 钉子全过（`stage_bases` 不花 stat、
+`anchor` 缺席时零 stat、命中时只有固定名字的 `is_file()`）。
+
+**待确认（真机）**：③ 拖 `PAN_260318.jpg` 前**先把那一景打开**（左栏芯片或「盘阵场景」栏粘目录），
+然后拖 —— 预期 200 且卡片上出「盘阵 + 序号 + SR」三标；不先打开就拖，预期仍是 400，且 detail 末尾
+多一句「另外，当前打开的场景：…」。④ 完全没打开过任何场景时拖它 → 400 文案与上一轮一字不差。
 
 ## 5. 交接（给新窗口）
 

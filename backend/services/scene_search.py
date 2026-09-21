@@ -316,8 +316,8 @@ def de_suffixed_stems(name: str, max_segments: int = 2) -> list[str]:
     return out
 
 
-def jpg_stage_name(stem: str, dir_name: str) -> tuple[str, str] | None:
-    """纯词法：`<目录名>_<suffix>.jpg` / `<目录名>_<suffix>_NOSR.jpg` → (环节, suffix)。
+def jpg_stage_name(stem: str, base: str) -> tuple[str, str] | None:
+    """纯词法：`<基准名>_<suffix>.jpg` / `<基准名>_<suffix>_NOSR.jpg` → (环节, suffix)。
 
     **不 stat、不查任务库、不查配置**。返回 `('product', suffix)` /
     `('nosr', suffix)`，两种形状都不符合时 None（调用方要么按本体处理，要么报
@@ -328,12 +328,18 @@ def jpg_stage_name(stem: str, dir_name: str) -> tuple[str, str] | None:
     「名字写着 `_sr`」本身就是比库里那条记录更直接的事实。查库那条路留给
     `/siblings`（它要在不知道 suffix 的情况下**拼**产物名，只能靠配置与任务）。
 
-    目录名是判断的基准：产物/上一次产物都躺在场景目录里，名字是「目录名 + 尾段」。
+    基准名（`base`）是**那份被超分的影像的 stem**，不是目录名 —— 产物名按输入影像名
+    拼（模块头「产物名的规则」那段）：SC 场景输入是 `<目录名>.tif`，基准名与目录名
+    恰好相同（所以这条判据以前写成「目录名 + 尾段」也一直对）；RC 场景输入是
+    `PAN.tif`，基准名就是 `PAN`，产物叫 `PAN_<suffix>`。调用方把该场景**所有**输入
+    影像候选的 stem 都试一遍（`input_candidates`，只拼名字不 stat），因为混合目录
+    里「上游 SC 遗留的 `<目录名>.tif`」与「RC 真读的 `PAN.tif`」可能同时在。
+
     尾段两种形态，且 NOSR 只在末尾、只出现一次。
     """
-    if not stem.lower().startswith(dir_name.lower() + "_"):
+    if not stem.lower().startswith(base.lower() + "_"):
         return None
-    tail = stem[len(dir_name) + 1:]
+    tail = stem[len(base) + 1:]
     if not tail:
         return None
     is_nosr = tail.lower().endswith(_NOSR_TAIL.lower())
@@ -343,6 +349,24 @@ def jpg_stage_name(stem: str, dir_name: str) -> tuple[str, str] | None:
     if suffix.lower() in _NON_STAGE_TAILS:
         return None
     return ("nosr" if is_nosr else "product"), suffix
+
+
+def stage_bases(dir_path, input_path) -> list[str]:
+    """判定产物名时可用的**基准名**（= 各份输入影像的 stem），按优先级排序。
+
+    第一项恒是 `input_scene_path` 挑中的那份（SC 与 RC 谁在就谁，与提交口径一致），
+    其余按 `input_candidates` 的顺序补上 —— 混合目录里「上游 SC 遗留的 `<目录名>.tif`」
+    与「RC 真读的 `PAN.tif`」可能同时躺着，而产物是按**当初真跑的那份**命名的：
+    RC 跑出来的叫 `PAN_<suffix>`，即便平台挑中的输入是 `<目录名>.tif`。
+
+    只拼名字、不 stat、不列举（`input_candidates` 的 6 个固定名）。
+    """
+    first = Path(input_path).stem
+    out = [first]
+    for cand in input_candidates(dir_path):
+        if cand.stem != first and cand.stem not in out:
+            out.append(cand.stem)
+    return out
 
 
 def stage_of_jpg(dir_path, input_path, stem: str) -> tuple[str, str, Path] | None:
@@ -356,10 +380,10 @@ def stage_of_jpg(dir_path, input_path, stem: str) -> tuple[str, str, Path] | Non
     判据有两条，**两条都得成立**：
 
     1. 名字切得干净：要么就是本体的显示件（stem == 目录名，或 == 输入影像的 stem
-       —— RC 场景的 `PAN.jpg`），要么是 `<目录名>_<suffix>[_NOSR]` 这种产物名
-       （见 `jpg_stage_name`）。**这一条只管 SC 场景的产物**：`jpg_stage_name` 要求
-       前缀是目录名，而 RC 的产物叫 `PAN_<suffix>`，前缀对不上；何况那种名字连反推
-       都过不了（模块头「产物名的规则」那段），根本到不了这里；
+       —— RC 场景的 `PAN.jpg`），要么是「某份输入影像的 stem + 一段尾段」这种产物名
+       （见 `jpg_stage_name`）。基准名按 `input_candidates` 逐个试：SC 场景里
+       `<目录名>.tif` 与 RC 场景里 `PAN.tif` 各是一条，混合目录（上游 SC 遗留件与
+       RC 真读的那份同在）两条都算；
     2. **同级栅格真的在**：`<目录>/<stem>.tif|.tiff` 存在（按 `_PRODUCT_EXT_ORDER`
        的顺序试，命中即止）。
 
@@ -367,6 +391,9 @@ def stage_of_jpg(dir_path, input_path, stem: str) -> tuple[str, str, Path] | Non
     十几样东西，`<目录名>_cloud.jpg` 这种名字同样切得干净 —— 只有「它有一份同名的
     栅格」才能说明这份 jpg 是**某个环节影像的显示件**，而不是随手导出的图。
     `_NON_STAGE_TAILS` 挡的是另一半（云量图这类真有同名栅格的派生件）。
+
+    第 2 条与基准名无关（栅格名只由这份 jpg 的 stem 决定），所以基准名那一轮循环
+    只做词法判断，**stat 仍只花在栅格那一轮**。
 
     本体那两种形态**不花任何额外 stat**（不试同级栅格）：它们是既有的关联对象，
     判据在 `is_scene_file` 与 `_fingerprint_mismatch` 里已经写过一遍了。
@@ -382,7 +409,11 @@ def stage_of_jpg(dir_path, input_path, stem: str) -> tuple[str, str, Path] | Non
         # 本体的显示件：环节的栅格就是本体的输入影像（`input_path` 非空由调用方
         # 保证 —— 它是「这个目录算不算场景」的另一半判据）。
         return "input", "", Path(input_path)
-    named = jpg_stage_name(stem, p.name)
+    named = None
+    for base in stage_bases(p, input_path):
+        named = jpg_stage_name(stem, base)
+        if named is not None:
+            break
     if named is None:
         return None
     kind, suffix = named
