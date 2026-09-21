@@ -231,6 +231,31 @@ _SUFFIX_RE = re.compile(r"^[A-Za-z0-9_-]{1,16}$")
 #: 上一次产物的尾标记（对齐 SR_code/util.py 的改名规则）。
 _NOSR_TAIL = "_NOSR"
 
+#: 平台自烤的预览缓存尾标记（`api/paths.drop_preview_path` 产出的
+#: `<栅格 stem>_preview.jpg`）。它在 `_NON_STAGE_TAILS` 里也有一份，但**是唯一
+#: 能剥掉的那一个** —— 剥掉它就是那份栅格的 stem：
+#: * `<目录名>_preview` 剥出来正好等于场景目录名（本体显示件的预览）；
+#: * `<目录名>_sr_preview` 剥出来是 `<目录名>_sr`，即产物的栅格 stem。
+#: 另四个（cloud/thumb/mask/ori）是盘阵侧的派生件，剥掉会正好落到真实场景目录上，
+#: 云量图就被认成本体了 —— 剥与不剥的界线在这里（见 `de_suffixed_stems`）。
+#:
+#: 两个形态各一个常量，因为它们在不同的比较里：`_NON_STAGE_TAILS` 那份名单比的是
+#: **切出来的尾段**（不含前导下划线），`endswith` / 切片要的是**带上它**的形态。
+_PREVIEW_SEG = "preview"
+_PREVIEW_TAIL = "_" + _PREVIEW_SEG
+
+
+def strip_preview_tail(stem: str) -> str:
+    """`<栅格 stem>_preview` → `<栅格 stem>`；不带这个尾巴的原样返回。
+
+    拖入链烤的那份（后台静默烤、长期落盘在场景目录里）名字长这样，用户把它再拖
+    回来时按它代表的那份栅格认：本体那份等价于拖场景显示件，产物那份等价于拖
+    `<目录名>_sr.jpg`。**只剥一层** —— 盘阵上不存在 `..._preview_preview`。
+    """
+    if stem.lower().endswith(_PREVIEW_TAIL):
+        return stem[:-len(_PREVIEW_TAIL)]
+    return stem
+
 
 def de_suffixed_stems(name: str, max_segments: int = 2) -> list[str]:
     """「去掉环节尾段」的候选 stem（拖进来的 jpg 是中间产物时反推目录名用）。
@@ -250,6 +275,11 @@ def de_suffixed_stems(name: str, max_segments: int = 2) -> list[str]:
     字符约束）：不干净（` - 副本`、`.preview` 那种）就不再往下切，一条也不生成 ——
     免得拿一个明明是别的名字的东西去反推目录，把 404 的原因写得莫名其妙。
 
+    平台自己烤的那份（`<栅格 stem>_preview.jpg`）也走这条路：`preview` 是
+    `_NON_STAGE_TAILS` 里唯一能剥的尾巴，剥掉就回到了那份栅格的真名 ——
+    `<目录名>_preview` 剥出 `<目录名>`（本体），`<目录名>_sr_preview` 剥出
+    `<目录名>_sr` 再切一段才得到 `<目录名>`（产物，见 `_PREVIEW_TAIL`）。
+
     返回的是**去后缀的 stem**（调用方自己拼回原后缀再交给 pathguard）：这条链上
     下游看后缀分流（`_fingerprint_mismatch`），也看后缀读 W/H。
     """
@@ -265,7 +295,13 @@ def de_suffixed_stems(name: str, max_segments: int = 2) -> list[str]:
         cut.insert(0, rest[i + 1:])
         rest = rest[:i]
         tail = "_".join(cut)
-        if not _SUFFIX_RE.match(tail) or tail.lower() in _NON_STAGE_TAILS:
+        if not _SUFFIX_RE.match(tail):
+            break
+        # `_NON_STAGE_TAILS` 里只有 `preview` 能剥（见 `_PREVIEW_TAIL`）：它是平台自己
+        # 烤的那份，剥掉才是真名字。剥完**接着往下切**而不是就地停 —— `<目录名>_sr_preview`
+        # 要先剥 preview 才切得出 `<目录名>`。另四个照旧当场停：它们剥掉会落到真实场景
+        # 目录上。
+        if tail.lower() in _NON_STAGE_TAILS and tail.lower() != _PREVIEW_SEG:
             break
         if rest not in out:
             out.append(rest)
@@ -324,8 +360,13 @@ def stage_of_jpg(dir_path, input_path, stem: str) -> tuple[str, str, Path] | Non
 
     本体那两种形态**不花任何额外 stat**（不试同级栅格）：它们是既有的关联对象，
     判据在 `is_scene_file` 与 `_fingerprint_mismatch` 里已经写过一遍了。
+
+    `stem` 先过一遍 `strip_preview_tail`：平台自己烤的 `<栅格 stem>_preview.jpg`
+    被拖回来时，判的是**它代表的那份栅格**（`_PREVIEW_TAIL`）。这一步不改本体的
+    零 stat 性质 —— 剥完照样先与目录名比。
     """
     p = Path(dir_path)
+    stem = strip_preview_tail(stem)
     low = stem.lower()
     if low == p.name.lower() or low == Path(input_path).stem.lower():
         # 本体的显示件：环节的栅格就是本体的输入影像（`input_path` 非空由调用方

@@ -303,6 +303,15 @@ rec 的 `route` 记为 `'jpg'`，`layout` 记为「盘阵 JPG（1/4 尺度 + 直
 （`<stem>.jpg`）区分开，不会被误判成「源本身就是显示件」。代价是它不吃 `SR_PREVIEWS_ROOT`，
 所以在配了镜像树的部署下同一场景会有两份缓存，且盘上多出的这一份没有清理者（原地覆盖，不堆积）。
 
+**这份预览被拖回来时按它代表的栅格认（2026-09-21 晚）**：它落在场景目录里，长得就跟一份
+「场景里的 jpg」一样，用户会顺手把它再拖进去 —— 而 `preview` 原本在
+`scene_search._NON_STAGE_TAILS` 里，于是「平台写下的文件、平台自己不认」，404 还列出两条
+自己拼出来的假路径（`…_preview/…_preview`）。现在 `preview` 是那份名单里**唯一可以剥**的
+尾巴：`strip_preview_tail` 把 `<栅格 stem>_preview` 还原成 `<栅格 stem>`，`de_suffixed_stems`
+与 `stage_of_jpg` 各用一次 → `<目录名>_preview.jpg` 等价于拖本体显示件（可提交 SR），
+`<目录名>_sr_preview.jpg` 等价于拖那份产物（`lq_path` 仍为空）。只剥一层，剥完仍在名单里
+（`<目录名>_cloud_preview`）照旧不认。
+
 **栅格行与 jpg 行共用同一份落点（2026-09-20）**：`.preview.jpg` 是 `with_suffix` 换出来的，
 对 `PAN.tif` 与 `PAN.jpg` 是**同一个文件名**。工作流 B 把 jpg 源的烘焙换到栅格上之后，
 两行命中的是同一份缓存 —— 好处是不会烤两次、用户从哪一行打开看到的字节都一样；
