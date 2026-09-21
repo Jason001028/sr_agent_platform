@@ -1091,6 +1091,65 @@ class TestProductPreviewBake(PlatformBase):
         self.assertEqual(after["state"], "COMPLETED",
                          "急烤写回不该动作业状态")
 
+    # ---- 下划线同名那一份（拖入链的名字，2026-09-21 用户口径）--------------
+
+    def _drop_jpg(self, product):
+        """产物预览的下划线落点：`<产物 stem>_preview.jpg`（拖入链那条规则）。"""
+        return self.scene_dir / (product.stem + "_preview.jpg")
+
+    def test_product_preview_also_lands_the_underscore_name(self):
+        """点号那份服务端自己读；`ls` 场景目录时该只有下划线一个规矩 ——
+        两份字节相同，不是两次编码出来的两张图。"""
+        app, _ = self.app_client()
+        tid = self._row(app)
+        product = self._product()
+
+        _eager_bake_tick(app.state)
+
+        drop = self._drop_jpg(product)
+        self.assertTrue(drop.is_file(), "产物旁边出现了 <产物 stem>_preview.jpg")
+        self.assertEqual(drop.read_bytes(), self._jpg(product).read_bytes(),
+                         "同一份像素，不是又烤了一遍")
+        self.assertEqual(self._dims(drop), (16, 8))
+        note = self._row_state(app, tid)[1]
+        self.assertIn("baked", note)
+        self.assertNotIn("没落上", note)
+
+    def test_mirror_does_not_clobber_a_newer_drop_file(self):
+        """拖入链可能刚按别的档位烤过这个名字，比我们这份新 —— 那就别覆盖它。"""
+        app, _ = self.app_client()
+        tid = self._row(app)
+        product = self._product()
+        _eager_bake_tick(app.state)
+
+        drop = self._drop_jpg(product)
+        drop.write_bytes(b"drag-baked-elsewhere")
+        newer = os.path.getmtime(self._jpg(product)) + 10
+        os.utime(drop, (newer, newer))
+
+        self._rearm(app, tid)
+        _eager_bake_tick(app.state)
+
+        self.assertEqual(drop.read_bytes(), b"drag-baked-elsewhere")
+        self.assertIn("cached", self._row_state(app, tid)[1])
+
+    def test_cached_branch_also_lands_the_underscore_name(self):
+        """盘上那份点号文件本来是「用户先打开过」烤下的、下划线那份却不在
+        （老版本留下的目录）—— 命中缓存这一轮要把它补上，否则这个目录永远
+        只有点号那一份。"""
+        app, _ = self.app_client()
+        tid = self._row(app)
+        product = self._product()
+        _eager_bake_tick(app.state)
+
+        drop = self._drop_jpg(product)
+        drop.unlink()
+        self._rearm(app, tid)
+        _eager_bake_tick(app.state)
+
+        self.assertIn("cached", self._row_state(app, tid)[1])
+        self.assertTrue(drop.is_file(), "命中缓存也要把下划线那份补上")
+
     # ---- 顺带那一份：未超分（`PAN_NOSR.tif`，2026-09-21 用户口径）----------
 
     def _nosr(self, w=64, h=32, name=None):
