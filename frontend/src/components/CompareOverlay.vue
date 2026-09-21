@@ -15,7 +15,6 @@
  */
 import { computed, ref } from 'vue';
 import { useViewerStore } from '../stores/viewer';
-import { ratioFromPointer } from '../lib/viewMath';
 
 const store = useViewerStore();
 const rootRef = ref<HTMLDivElement | null>(null);
@@ -45,18 +44,32 @@ const halfB = computed(() => ({
   width: 'calc(100% - ' + splitPx.value + 'px)',
 }));
 
+/** 判定阈值（px）：按在抓取带上但没挪过这么远 = 没打算改分隔，这一下什么都不做。
+    没有阈值时，按下就先按指针位置改一次比例（线被吸到指针上）；而刚进分屏时线正好在
+    画布正中，随手在中间按下拖动很容易压在抓取带上 —— 那一下既不平移、比例又跟着指针
+    跳，看起来就是「图不动、左右在换」。过阈值之后按**位移增量**改比例，线不再吸指针。 */
+const DIVIDER_DRAG_THRESHOLD = 4;
+
 function onDividerDown(e: PointerEvent) {
   const el = rootRef.value;
   if (!el) return;
   const target = e.currentTarget as HTMLElement;
   target.setPointerCapture(e.pointerId);
-  draggingDivider.value = true;
-  store.setSplitRatio(ratioFromPointer(e.clientX, el.getBoundingClientRect().left, el.clientWidth));
+  const startX = e.clientX;
+  const startY = e.clientY;
+  const startRatio = store.splitRatio;      // 按下那一刻的比例，后面按位移加
+  let armed = false;                        // 挪过阈值才算真的在拖分隔线
 
   const move = (ev: PointerEvent) => {
+    if (!armed) {
+      if (Math.abs(ev.clientX - startX) < DIVIDER_DRAG_THRESHOLD
+        && Math.abs(ev.clientY - startY) < DIVIDER_DRAG_THRESHOLD) return;
+      armed = true;
+      draggingDivider.value = true;         // 拖分隔线期间收落位提示、换光标
+    }
     // 拖的过程中可能刚换过布局（收起侧栏 / 展开对比条）→ 每次都重新取
     const r = el.getBoundingClientRect();
-    store.setSplitRatio(ratioFromPointer(ev.clientX, r.left, r.width));
+    store.setSplitRatio(startRatio + (ev.clientX - startX) / r.width);
   };
   const up = () => {
     draggingDivider.value = false;

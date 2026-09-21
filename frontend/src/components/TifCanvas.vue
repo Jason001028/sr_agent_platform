@@ -330,6 +330,15 @@ function dropSide(e: DragEvent): 'A' | 'B' | null {
                     store.compareMode, store.splitX);
 }
 
+/** 这次拖放真带着文件吗。页面内拖放（拖一段选中的文字、拖个链接）同样会发 dragover，
+    但它 drop 时 `files` 是空的 —— 什么都放不进来，onDrop 直接 return。这种拖放不该亮
+    落位提示：分屏下用户只是在画面里拖动/选字，提示一亮就像马上要换格（2026-09-21 用户报）。
+    判 `types` 而不是等 drop，是因为提示要在 dragover 阶段就决定亮不亮。 */
+function dragHasFiles(e: DragEvent): boolean {
+  const types = e.dataTransfer?.types;
+  return !!types && Array.from(types).indexOf('Files') >= 0;
+}
+
 function onDragOver(e: DragEvent) {
   // **永远 preventDefault**：不拦的话浏览器会导航到拖进来的文件。
   e.preventDefault();
@@ -338,7 +347,7 @@ function onDragOver(e: DragEvent) {
   // 阶段浏览器不暴露文件名（只在 drop 阶段有），没法按类型区分。所以视觉提示只由
   // CompareOverlay 负责，真正的门在 onDrop 里。
   if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
-  if (!store.compareOn) { store.setDragHint(false, null); return; }
+  if (!store.compareOn || !dragHasFiles(e)) { store.setDragHint(false, null); return; }
   // 提示在画布外不显示（dropSide 回 null），由 store 的 500ms 定时器收尾
   store.setDragHint(true, dropSide(e));
 }

@@ -109,6 +109,33 @@ async function installDragKit(page) {
 }
 
 /**
+ * 发一次「页面内拖放」形态的 dragover：dataTransfer 里只有 text、**没有 Files**。
+ * 在页面上拖一段选中的文字（或拖个链接）就是这一种 —— 浏览器照样发 dragover/drop，
+ * 但 drop 时 `files` 是空的，什么都放不进来。用来验「落位提示只对真拖文件亮」：
+ * 这种拖放一亮提示，用户就以为画面里拖一下要换格（2026-09-21 报的那个 bug）。
+ * @returns {Promise<{hint:{active:boolean,side:'A'|'B'|null}, defaultPrevented:boolean, types:string[]}>}
+ */
+async function dragOverText(page, opts) {
+  const {
+    text = '一段被选中的文字', clientX = 0, clientY = 0, target = DEFAULT_TARGET,
+  } = opts || {};
+  return page.evaluate((sel, t, x, y) => {
+    const el = document.querySelector(sel) || document.body;
+    const dt = new DataTransfer();
+    dt.setData('text/plain', t);
+    const ev = new DragEvent('dragover', {
+      dataTransfer: dt, clientX: x, clientY: y, bubbles: true, cancelable: true,
+    });
+    el.dispatchEvent(ev);
+    return {
+      hint: window.__viewer.dragHint(),
+      defaultPrevented: ev.defaultPrevented,
+      types: Array.from(dt.types || []),
+    };
+  }, target, text, clientX, clientY);
+}
+
+/**
  * 画布矩形的视口坐标 + 关键落点（左半心 / 右半心 / 画布外）。
  * 画布之外的点故意取画布左侧 40px（侧栏上方）—— 只要落在画布矩形外即可，
  * `dropSideAt` 判的是矩形包含，不看上面盖着什么元素。
@@ -133,4 +160,6 @@ async function canvasPoints(page) {
   });
 }
 
-module.exports = { installDragKit, dragOverOnly, dropFiles, canvasPoints, DEFAULT_TARGET };
+module.exports = {
+  installDragKit, dragOverOnly, dragOverText, dropFiles, canvasPoints, DEFAULT_TARGET,
+};

@@ -613,6 +613,43 @@ async function main() {
       assert(halves.tagA.indexOf('gray16_grad.tif') >= 0 && halves.tagB.indexOf('空') >= 0,
         `两侧标签各说自己的图（${halves.tagA} | ${halves.tagB}）`);
 
+      // 画布区（含叠加层的文字）不许起文本选择：起点压在右格标签 / 右格空位提示上拖动，
+      // 必须照旧平移，且拉不出任何选中文字。**这是「拖画面 vs 换格」那次的根**——
+      // 叠加层里只要有一层可选中的文字，第一次拖先把文字选中，此后**每一次**压在选中
+      // 文字上的拖动都被 Chrome 当成「拖选中内容」走原生拖放：页面收到 dragover →
+      // 落位提示（「放在右侧」）亮起，看起来像马上要换格；而画布始终收不到 mousedown，
+      // 平移一动不动。解码遮罩当初就漏了 `user-select: none`（现在有了）。
+      const overlayPts = await page.evaluate(() => {
+        const at = (sel, atRight) => {
+          const el = document.querySelector(sel);
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return {
+            x: Math.round(atRight ? r.right - 8 : r.left + r.width / 2),
+            y: Math.round(r.top + r.height / 2),
+          };
+        };
+        return { tag: at('[data-e2e="cmp-tag-b"]', true), empty: at('.cmp-empty-text', false) };
+      });
+      for (const [name, pt] of [['右格文件名标签', overlayPts.tag], ['右格空位提示文字', overlayPts.empty]]) {
+        assert(!!pt, `找得到${name}（叠加层结构没变）`);
+        const b = await panes();
+        await page.mouse.move(pt.x, pt.y);
+        await page.mouse.down();
+        await page.mouse.move(pt.x + 40, pt.y, { steps: 2 });
+        await sleep(150);
+        const sel = await page.evaluate(() => String(window.getSelection() || ''));
+        await page.mouse.up();
+        await sleep(80);
+        const a = await panes();
+        assert(sel === '', `在${name}上起手拖动不产生文本选择（选中="${sel}"）`);
+        assert(Math.abs(a[0].view.ox - b[0].view.ox - 40) < 1e-9,
+          `在${name}上起手拖动照样是平移 (A.ox ${b[0].view.ox.toFixed(1)}→${a[0].view.ox.toFixed(1)})`);
+      }
+      // 上面拉过视角，落图断言按「适配态」算，先回正
+      await page.evaluate(() => window.__viewer.cmpReset());
+      await sleep(150);
+
       const pts = await drag.canvasPoints(page);
       const overRight = await drag.dragOverOnly(page, {
         files: [{ path: F('bigtiff_strips.tif') }], clientX: pts.right, clientY: pts.midY,
@@ -630,6 +667,20 @@ async function main() {
       });
       assert(overOut.hint.side === null, `画布外的落点没有归属 (${JSON.stringify(overOut.hint)})`);
       assert(await hintDom() === null, '画布外不显示落位提示');
+
+      // 落位提示只对**真带文件**的拖放亮。页面内拖放（拖一段选中的文字、拖个链接）
+      // 同样发 dragover，但它 drop 时 `files` 是空的、什么都放不进来 —— 提示一亮，
+      // 用户就以为画面里拖一下要换格（这正是「拖动换区撞上两图调换」的表现）。
+      const overText = await drag.dragOverText(page, { clientX: pts.right, clientY: pts.midY });
+      assert(overText.types.indexOf('Files') < 0 && overText.hint.active === false && await hintDom() === null,
+        `不带文件的 dragover 不亮落位提示 (types=${JSON.stringify(overText.types)}, hint=${JSON.stringify(overText.hint)})`);
+      assert(overText.defaultPrevented === true, '不带文件的 dragover 一样 preventDefault（别放浏览器去导航）');
+      // 紧跟着再来一次真拖文件的形态：提示必须照旧亮（别把整条路一起关了）
+      const overRight2 = await drag.dragOverOnly(page, {
+        files: [{ path: F('bigtiff_strips.tif') }], clientX: pts.right, clientY: pts.midY,
+      });
+      assert(overRight2.hint.active && overRight2.hint.side === 'B',
+        `带 Files 的 dragover 提示照旧 (${JSON.stringify(overRight2.hint)})`);
 
       // 真正落图：落右半 → 进右格、成为活动侧、不顶掉左格
       const ratioBefore = await page.evaluate(() => window.__viewer.splitRatio());
@@ -772,6 +823,49 @@ async function main() {
         '回正 → 比例回 0.5');
       assert(sReset[0].view.ox > 0 && Math.abs(sReset[0].view.ox - sReset[1].view.ox) < 1.5,
         `回正 → 两侧重新适配 (ox ${sReset[0].view.ox.toFixed(1)} / ${sReset[1].view.ox.toFixed(1)})`);
+
+      // 分隔线抓取带的判定阈值：按在带上但没挪过 4px = 什么都不做（比例不动、画面也不动）。
+      // 没有阈值时按下就先按指针位置改一次比例，而刚进分屏时线正好落在画布正中 —— 随手在
+      // 中间按下拖动很容易压在抓取带上：那一下既不平移，比例还跟着指针跳（用户看到的
+      // 「图不动、左右在换」）。过阈值之后按**位移增量**改比例，线不再被吸到指针上。
+      const divGeo = await page.evaluate(() => {
+        const c = document.querySelector('canvas.view-canvas').getBoundingClientRect();
+        return {
+          x: Math.round(c.left + window.__viewer.splitX()),
+          y: Math.round(c.top + c.height / 2),
+          w: c.width,
+        };
+      });
+      const ratio0 = await page.evaluate(() => window.__viewer.splitRatio());
+      const vTap0 = await panes();
+      await page.mouse.move(divGeo.x + 3, divGeo.y);
+      await page.mouse.down();
+      await page.mouse.move(divGeo.x + 5, divGeo.y, { steps: 1 });     // 阈值内
+      await sleep(150);
+      const ratioTap = await page.evaluate(() => window.__viewer.splitRatio());
+      await page.mouse.up();
+      await sleep(80);
+      const vTap1 = await panes();
+      assert(Math.abs(ratioTap - ratio0) < 1e-12,
+        `抓取带内按下、挪不到 4px → 比例不动 (${ratio0} → ${ratioTap})`);
+      assert(Math.abs(vTap1[0].view.ox - vTap0[0].view.ox) < 1e-12,
+        '阈值内那一按什么都不做（画面也不动）');
+
+      await page.mouse.move(divGeo.x + 3, divGeo.y);
+      await page.mouse.down();
+      await page.mouse.move(divGeo.x + 23, divGeo.y, { steps: 1 });    // 挪 20px
+      await sleep(150);
+      const ratioDrag = await page.evaluate(() => window.__viewer.splitRatio());
+      await page.mouse.up();
+      await sleep(80);
+      const byDelta = ratio0 + 20 / divGeo.w;        // 按位移增量
+      const byPointer = ratio0 + 23 / divGeo.w;      // 按指针绝对位置（旧行为，会多算按下时那 3px）
+      assert(Math.abs(ratioDrag - byDelta) < 1e-6,
+        `过阈值后按位移增量改比例 (期望 ${byDelta.toFixed(4)}，实际 ${ratioDrag.toFixed(4)}）`);
+      assert(Math.abs(ratioDrag - byPointer) > 1e-4,
+        `线不再被吸到指针上（按绝对位置会得 ${byPointer.toFixed(4)}）`);
+      await page.click('[data-e2e="cmp-reset"]');    // 回正，别把改过的比例留给后面的用例
+      await sleep(200);
 
       // 点选对比：整块画布一个落位区，拖入即覆盖当前这张
       await page.click('[data-e2e="cmp-mode-click"]');

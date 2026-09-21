@@ -1873,6 +1873,54 @@ Node 侧的请求**不经过页面**，所以不污染 `page.on('request')` 那�
 所以可能正好读到「running 且 note 为空」→ 断言消息里那句候选名成了空括号 `()`。本轮撞上一次、重跑即过。
 要根治得把等待条件改成「**非 running** 的终态」，属另一个模块的测试，未擅自改。
 
+### 2026-09-21 · 分屏对比里「在画面内拖动」撞上「换格 / 改分隔」（开发机）
+
+**用户原话**：「主要是在画面上拉的时候，会有交换的提示（尤其是刚打开分屏对比的时候），和画面内拉的放大看图
+逻辑撞了；我认为增加左右交换的判定阈值」。先用提问钉住两个事实：那次拖动「没拖文件，纯在画面上拉」；把
+「输入影像」这份文件拖到右半幅的期望结果是「右格=输入影像，左格=本次产物」——**即两格互换是正确行为，必须保留**。
+
+**定位结论：一次纯平移换不了格**。所以问题不在 `placeRec` 的互换分支，而在「让人以为马上要换格」的提示与
+分隔线抓取带。证据三条：① 平移走 `.view-canvas` 的 `mousedown` → `onPan` → `panBoth`（两格同一屏幕位移），
+这条路上没有任何 `placeRec` / `activate` 调用；② `placeRec` 里唯一的换位是 `otherId === id` 那一支（把已在对
+面那半的图归位到本半），只能由 `activate(id, side)` 到达；③ 现实里到得了的入口只有两条 —— **文件拖放到另
+一侧**、**点文件列表/对比清单里那张已在对面的行**（场景芯片与文件框给的 `side` 是 `activeSide`，同一侧不会换）。
+
+**三条真撞法（各自独立，都已修）**：
+
+1. **落位提示对「页面内拖放」也亮**。`onDragOver` 以前只判 `compareOn` 就 `setDragHint(true, dropSide(e))`，
+   而页面内拖一段选中的文字、拖个链接同样会发 `dragover`（`drop` 时 `files` 为空、`onDrop` 直接 return）。
+   于是分屏下在画面里随便拖一下，白纱 +「放在左侧 / 放在右侧」就亮起来 —— 正是用户说的「交换的提示」。
+   改：`TifCanvas.vue::dragHasFiles(e)` 判 `e.dataTransfer.types` 里有没有 `'Files'`，没有就
+   `setDragHint(false, null)`；`preventDefault()` 与 `dropEffect = 'copy'` 仍**无条件**（不拦会让浏览器导航到拖进来的文件）。
+   实测：`lib/drag.js::dragOverText` 发一条只带 `text/plain` 的 dragover → `types` 无 `Files`、`hint.active === false`、
+   DOM 里没有 `.cmp-hint`，而 `defaultPrevented === true`；同位置带 `Files` 的对照仍亮且 `side === 'B'`。
+2. **解码遮罩上的文字可选**（`user-select` 默认开着）→ 在遮罩上按住拖动会先拉出一个文本选择：画布收不到
+   mousedown（平移一动不动），且此后**每次**在选中文字上按下拖动，Chrome 都按「拖选中内容」走原生
+   drag-and-drop → dragover → 提示亮起。这是「刚打开分屏对比时」尤其明显的成因：那一刻遮罩正显示「正在解码…」。
+   改：`.decode-mask { user-select: none; }`，**只禁选中、不放开点击** —— 生成掩码/合并期间画布本该是惰性的
+   （`onCanvasDownDraw` 一直没有 busy 守卫）。**这条是代码事实 + Chrome 行为推断，不是实测**：无头环境下按不住那块遮罩。
+3. **分隔线抓取带没有判定阈值**。9px 抓取带（`width: 9px; margin-left: -4px`，`pointer-events: auto`）正压在
+   「刚进分屏时居于画布正中」那条线上，而旧 `onDividerDown` 一按下就按**指针绝对位置**改一次比例 → 线被吸到
+   指针上，图不动、左右在换。改（`CompareOverlay.vue`）：`DIVIDER_DRAG_THRESHOLD = 4` —— 挪过 4px 之前什么都
+   不做（不改比例、不吸指针、不设 `draggingDivider`），过阈值之后按**位移增量**改比例（`startRatio + dx / 宽度`）。
+   实测：在 `splitX()+3` 按下 → 移到 `+5px`，比例变化在 1e-12 内、视图一格不动；再在 `+3` 按下 → 移到 `+23px`，
+   比例 = `ratio0 + 20/宽度`（±1e-6），且与「按绝对位置算」的 `ratio0 + 23/宽度` 相差 > 1e-4 —— 后者正是旧行为
+   「吸指针」的可执行判据。
+
+**保留**：`placeRec` 的互换分支一字未动（用户已认定「拖到另一侧 = 两格互换」是期望行为）。三种手势的分工
+（平移 / 换格 / 改分隔）与判定阈值一并写进 [gui-experience.md](../experience/gui-experience.md) §10.8。
+
+**验证**：`vue-tsc` 零错误 + `npm run build`；前端 vitest **317 passed**；e2e `test-vue-viewer.js` **161**
+（新 11 条：真鼠标 40px 拖动分别起于 `cmp-tag-b` 与 `.cmp-empty-text` → `getSelection()` 为空且只看 A 的 `ox`
+精确 +40；`dragOverText` 三条；分隔线阈值两条 + 位移增量一条）、`test-manual-scene.js` **160** 全绿。
+
+**顺带记一个既有 flake（不是本轮引入，也没擅自改）**：`test-manual-scene.js:964/969` 连发两次
+`uploadFile(upWinJpg)` 之间没有任何等待，而 `uploadFile` 在 CDP 应答时就返回、页面的 `change` 处理器要晚一
+拍才跑；第 969 行那次上传的「同名同字节去重」于是有机会还没看到第 964 行建出的那条 rec → 建出第二条 rec →
+E4 末尾那条严格等于 +1 的计数断言读到 `drop +2`。本轮撞上一次、原地重跑即过（160 全绿），并另用一段临时探针
+确认去重本身正常（同一份文件连传三次仍只有一条 rec）。根治要么在两次上传之间等 rec 出现、要么放宽那条断言，
+属另一段测试的取舍，未动。
+
 ## 5. 交接（给新窗口）
 
 > 开新窗口时按用途挑一份整篇粘过去：[handoff-prompt.md](handoff-prompt.md)（梳理框架与当前思路）、
