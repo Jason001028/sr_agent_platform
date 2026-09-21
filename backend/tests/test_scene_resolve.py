@@ -745,6 +745,34 @@ class TestResolveFingerprint(ResolveBase):
         self.assertEqual(r2.status_code, 400)
         self.assertIn("14/8 位成像时间戳", r2.json()["detail"])
 
+    def test_rc_product_jpg_400_and_names_the_reason(self):
+        """RC 场景的产物 jpg（`PAN_<suffix>.jpg`）拖不进来 —— 名字里没有场景身份。
+
+        产物名是**按输入影像名**拼的（`code_0817_prod.py`：`img_name[:-4] + "_" +
+        suffix`）：SC 场景的输入叫 `<目录名>.tif`，产物才正好叫 `<目录名>_<suffix>`；
+        RC 场景的输入就叫 `PAN.tif`，产物于是叫 `PAN_260318.jpg`。这个名字**没写错**，
+        但它既没有卫星段也没有 14 位成像时刻 —— 反推不出属于哪一天哪一景的目录，
+        所以 400（真机上 2026-09-21 报的就是这一条）。文案要把这个原因说出来，否则
+        用户只会以为「格式不对」，去反复改名。
+        """
+        self.tif.unlink()                           # 把这一景改成 RC 形态
+        d = self.scene_dir
+        make_scene(d, SCENE_NAME, tif=False)
+        arr = (np.arange(320 * 640).reshape(640, 320) % 65535).astype(np.uint16)
+        tifffile.imwrite(d / "PAN.tif", arr, photometric="minisblack")
+        tifffile.imwrite(d / "PAN_260318.tif", arr, photometric="minisblack")
+        prod = d / "PAN_260318.jpg"
+        prod.write_bytes(b"\xff\xd8\xff\xd9")
+
+        r = self.resolve(name=prod.name, size_bytes=prod.stat().st_size)
+        self.assertEqual(r.status_code, 400, r.text)
+        detail = r.json()["detail"]
+        self.assertIn("不猜目录", detail)
+        self.assertIn("<目录名>.jpg", detail)
+        # 说清 RC 场景的产物长什么样，以及为什么它认不出来（而不是「格式不对」）
+        self.assertIn("PAN_<suffix>.jpg", detail)
+        self.assertIn("认不出是哪一景", detail)
+
     def test_other_raster_suffix_still_checks_size(self):
         """放行的是「拖进来的是 JPEG」这一件事，不是「后缀跟盘阵不一样」。
 

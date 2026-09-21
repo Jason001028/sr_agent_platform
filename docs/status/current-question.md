@@ -2076,6 +2076,54 @@ uvicorn 直接断连，浏览器侧表现为 `TypeError: Failed to fetch`（第�
 **真机待确认**：① 拖回 `<目录名>_preview.jpg` 后卡片是否与拖显示件同形（同场景目录、同序号、
 三标齐全、提交按钮可用）；② 产物那份预览拖回来是否显示 `[盘阵][n][SR]` 且两个按钮仍灰。
 
+### 2026-09-21 · RC 场景的产物叫 `PAN_<suffix>.jpg`：名字没错，是它里面没有场景身份（开发机）
+
+**用户原话**：「可是超分后的 jpg 名为 PAN_260318.jpg 啊，你这个格式也不对，而且我在超分后找不到
+PAN_NOSR.jpg 的中间产物」。
+
+**先查 SR 侧真源，不猜**：
+
+1. **产物名是按输入影像名拼的**，不是按目录名：`code_0817_prod.py` 里
+   `img_name = basename(输入影像)`、输出 `img_name[0:-4] + "_" + suffix`（`product_candidates`
+   的 docstring 引的就是这一段）。SC 场景输入是 `<目录名>.tif` → 产物才正好叫 `<目录名>_<suffix>`；
+   **RC 场景的输入就是 `PAN.tif`**（`util.check_sr_previous_step`：`<SolarAzimuth>` 为空即 RC）→
+   产物叫 `PAN_<suffix>`。`docs/sr_code/sr-pipeline-overview.md` §4.6 记的 `PAN_<六位数>` 即此。
+   用户那份 `260318` 正是六位 Suffix。**所以名字是对的** —— 错的是我上一轮写进弹窗与 400 文案的
+   「中间产物叫 `<目录名>_<suffix>.jpg`」，那只对 SC 场景成立。
+2. **找不到的 `_NOSR` 该叫什么**：`util.writeTiff` 的改名对象是**同一输出路径上已经存在的文件**
+   （`os.rename(path + tiftype, path + "_NOSR" + tiftype)`）。同一 Suffix **第一次**跑时那个路径
+   还不存在 → `FileNotFoundError` 被 `except` 吞掉，**什么都不留**；跑**第二遍**时才留下
+   **`PAN_260318_NOSR.tif`** —— 是整个产物名（含 Suffix）加尾巴，不是 `PAN_NOSR.*`；而且是
+   `.tif`（SR 管线不写 jpg）。只有产物名恰好是 `PAN`（空 Suffix、输出名 == 输入名，
+   `basename(path)` 既 `startswith("PAN")` 又 `endswith("PAN")`）时才走 `_ori` 分支 →
+   `PAN_ori.tif`。**「超分后找不到」符合规则，不是丢了文件。**
+
+**实测（临时探针，跑完删）**：造一个干净 RC 场景（目录里只有 `PAN.tif`、`PAN_260318.tif`、
+`PAN_260318.jpg`）——
+
+- 拖 `PAN_260318.jpg` → **400**：`这张 jpg 的名字里没有生产全名（缺 14 位成像时刻）…
+  平台不猜目录…`。这个名字里既没有卫星段也没有成像时刻，反推不出是哪一天哪一景的目录，
+  所以走不到「判环节」那一步（与 `PAN.jpg` 同一类，不是 `_preview` 那种「尾巴没剥」）。
+- `GET /siblings?suffix=260318` → `input=PAN.tif`（在）、`product=PAN_260318.tif`（**在**）、
+  `nosr=PAN_260318_NOSR.tif`（不在）。这条链是拿**输入影像名**拼的，RC 场景正好对。
+- 但若同目录里还躺着上游 SC 遗留的 `<目录名>.tif`，`/siblings` 的「输入影像」会挑中那一份，
+  产物名跟着拼成 `<目录名>_260318.tif`（不存在）—— 属于哪种要看真机目录，见下「待确认 ①」。
+
+**改法（只改文案与注释，判据一行未动）**：三个出口（`app.py` 的 jpg-无时间戳 400、候选被拒的
+`reasons`、前端那张失败弹窗）把「能关联的产物名」写成两种形态 —— SC `<目录名>_<suffix>.jpg`、
+RC `PAN_<suffix>.jpg`（并说明后者名字里同样没有成像时刻，认不出是哪一景）。`scene_search.py`
+模块头新增一段「产物名的规则是按输入影像名拼的」，`stage_of_jpg` 的判据 1 那句补上「这一条只管
+SC 场景的产物」（`jpg_stage_name` 要求目录名前缀，RC 产物对不上；何况它连反推都过不了）。
+新增用例 `test_rc_product_jpg_400_and_names_the_reason`。
+
+**验证（开发机）**：后端 **648 passed / 4 skipped**（+1 例）。前端只动一句字符串。
+
+**待确认**：① 那一景 `ls -l`（`PAN.tif` 在不在？上游 `<目录名>.tif` 在不在？`PAN_260318.tif`
+与同名 `.jpg` 各是什么时候写的？有没有 `_NOSR`）—— 决定同场景芯片这条路今天能不能走通；
+② 要不要做「锚定当前已打开场景目录」的拖入认产物（前端把当前 rec 的场景目录当提示传给后端，
+后端**在那个目录里** `stat <stem>.tif` 存在才认）—— 顺手做的事，但 `PAN_<suffix>` 反推不出目录，
+这是唯一不靠猜的接法；不做则 RC 产物只能从同场景芯片进。
+
 ## 5. 交接（给新窗口）
 
 > 开新窗口时按用途挑一份整篇粘过去：[handoff-prompt.md](handoff-prompt.md)（梳理框架与当前思路）、
