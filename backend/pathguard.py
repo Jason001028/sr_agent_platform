@@ -253,7 +253,12 @@ def scene_name_layers(name: str) -> tuple[str, str] | None:
     """
     raw = str(name).strip()
     tokens = _FIELD_SEP_RE.split(raw)
-    if len(tokens) <= _SCENE_IDX:
+    # 至少 `_SCENE_IDX + 2` 段：段号那段（tokens[_SEG_IDX]）与景号那段
+    # （tokens[_SCENE_IDX]）都要在**名字里**，而且下面还要读分隔符 seps[_SCENE_IDX]
+    # —— 分隔符比段少一个，所以门槛比「够读到景号」再高一段。少了就判不合规则
+    # （调用方按 400 处理）；早先只挡到 `_SCENE_IDX`，六段的名字会走进
+    # `seps[_SCENE_IDX]` 越界，一个本该 400 的输入变成 500。
+    if len(tokens) <= _SCENE_IDX + 1:
         return None
     seps = _FIELD_SEP_RE.findall(raw)
     if len(seps) != len(tokens) - 1:         # 首尾有分隔符：形态不整，不猜

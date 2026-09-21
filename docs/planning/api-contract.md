@@ -6,6 +6,7 @@
 > **挂起项二（2026-09-17）**：新增 §3.5 `POST /api/scenes/resolve`（打开盘阵上 `SR_SCENES_ROOT` 之外的任意合法场景目录），并改 §3.4 `POST /api/masks` 的 body（新增 `lq_path`，legacy `scene_id` 保留）。同时约定 `lq_path` / `dir` / `input` / `mask_path` 一律回**盘阵 POSIX 形态**、提交侧两入口共用 `pathguard.normalize_submit_path`——这两条不改行为口径，只是把"同一场景两种写法算出两个指纹"的隐患收口。
 > **挂起项三（2026-09-20）**：① 新增 §3.8 `GET /api/scenes/{id}/siblings`（一个场景的三类图：输入影像 / 本次产物 / 上一次产物），纯只读、永不烘焙；② 新增 §4.5 **产物预览急烤队列**（作业转 COMPLETED 后服务端顺手烤产物那一份，从库派生而非挂在状态转换上），`/api/queue` 每行随之多出 `preview_state` / `preview_note` 两列与新的 SSE 帧 `preview_update`（§3.3）；③ 新增 §4.6 **显示源比较规则**：拖入/打开的 `.jpg` 显示件在同目录有位更清晰的栅格、且当前档位下服务端从它烤出来的比它更清晰时，显示源换成服务端那份（`/preview` 与 `/preview-drop` 各插一次同名栅格探测，落点与 `?div=` 全部照旧），jpg 行上因此多出只读的 `rasterPreview` 字段（§3.5）。**`hasPreview` / `jpgUrl` / `previewDiv` 三个字段的语义一个字未动**。同时记两个 env（§1）。
 > **挂起项四（2026-09-20 第二轮）**：后端**零改动、零新增端点**。这一轮只把前端的取图纪律写进契约：① 新增 §3.8.2 —— 预览 blob 的**本地缓存键**（`{id}|{div}|jpg`，源是显示件且同名栅格胜出时另一支用 `{id}|{div}|ras:{栅格名}`，两支不能串味）与**预取边界**（只取 `/siblings` 里 `exists && hasPreview && previewDiv === div` 且没有已开 rec 的那几项，**绝不触发服务端烘焙**；开关默认关、持久化在 `sr.viewer.cmpPrefetch`）；② 同一节记下 `openSceneSibling` 的**去重**口径（命中已开的 rec → 一次 `/siblings` + 零次 `/preview`）。`/preview` 与 `/siblings` 的**请求与响应一字未改**。
+> **挂起项五（2026-09-21）**：① §3.5 `POST /api/scenes/resolve` 的 `{name}` 分支**也认中间产物**（`<目录名>_<suffix>.jpg` / `<目录名>_<suffix>_NOSR.jpg`）——新增 jpg 专属的第二阶段候选（去尾段反推，仅前一阶段全落空时展开），`resolved` 新增 `kind` / `suffix`，且 `kind != 'input'` 时 `row.lq_path = null`、`sr_capable = false`、`mask_path = null`（`row` 同时改为描述**该环节自己**那份栅格）；② `suffix` 的 400 文案改为实话（可拖的不止显示件）；③ 新增 `backend/pathguard.scene_name_layers` 的段数下界修正（六段名走进 `seps[_SCENE_IDX]` 越界 → 本该 400 的输入变 500，是这条新候选暴露出的既有缺陷）。**`/siblings` 一个字段都没加** —— 计划里提过给每项补 `suffix`，落地时发现响应顶层本来就有 `suffix` / `suffixFrom`，前端 `openSceneSibling` 用的就是它，再加一份是重复。
 > **须说明的流程偏差**：上述改动**已与本文档同批落到代码**（不是"先评审后写码"）。理由是它同时修一个现存缺陷（两入口指纹不一致），拆开会让仓库停在一个已知会重复投作业的中间态；09-17、09-20 两批同理，前端要用的字段与端点不一起落地就没法验收（09-20 那批还带着 §4.5 那个后台循环，文档与循环必须同批，否则运维会照着一份没写急烤的契约去配 env）。请复核，通过后把状态改回「已定」。此前其余条款自 2026-09-02 起均未变（评审通过时的交付基线：后端 190 unittest + 前端 Vitest 114 + vue-tsc 零错误 + `.e2e/test-platform.js` 11 断言全绿）。
 > 目标读者：阶段5 实现会话（后端 FastAPI + 前端 Vue3）。范围：把既有后端（agent loop + 4 工具 + `sr_tasks` + slurm）暴露成网页可调 REST/SSE，交付 聊天 / 共享任务队列 / 查看器画完掩码提交 SR。
 > 前置：阶段4 已完成（FastAPI 骨架 `backend/api/app.py`：`/api/scenes` + `/api/scenes/{id}/preview` + 路径白名单；前端 `/scenes` 页 + route='jpg' rec + `/chat` `/queue` 占位路由）。
@@ -269,6 +270,14 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
   （2026-09-18 起）：盘阵上的真形态是下划线，而用户口径里出现过空格写法；段级目录名按
   **原文的分隔符**重建，拿空格名拼出下划线的段级目录必然 stat 不到。规则见
   [docs/sr_code/production-scene-naming.md](../sr_code/production-scene-naming.md)。
+  - **第二阶段候选（2026-09-21，仅 jpg）**：中间产物的文件名是**在生产全名后面再粘一段**
+    （`<目录名>_sr.jpg`），按原名反推出的目录名会带上那条尾巴（`…/<目录名>_sr`），盘阵上
+    没有那个目录。所以 jpg 还会按「去掉尾段」的名字再反推一遍 —— 尾段两种读法各给一条
+    候选（去末尾一段、以及先去 `_NOSR` 再去末尾一段；`sr_2` 这类**带下划线的 suffix** 也能
+    整段切掉，按段数猜会切错，见 `scene_search.de_suffixed_stems`）。尾段过不了
+    `SUFFIX_RE` 的字符约束（`- 副本` 这类带空格的、`.preview`）就一条候选都不生成。
+    **只在前一阶段全落空时才展开**：常见情形（本体显示件、`.tif` 反推、粘路径）一个 stat
+    都不多花 —— 钉住探测量上限的那几条用例正走在上面。
 - 响应 `200 {"source":"manual", "row": <与 /api/scenes 行同形>, "resolved": {...}}`：
   `row.id` 是 `~` + base64url(绝对路径)（手工行形态，见 `api/paths.py`；库行 id 一字未变），
   `row.manual=true`、`jpgUrl` 在**库外**为 `null`（预览走 `GET /api/scenes/{id}/preview` 回
@@ -287,22 +296,45 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
   用户本地拖进来那份的：指纹对 jpg 行只比名字（见上），本地那份可能另存过、缩过，平台口径
   是「盘阵上的才是基准」。盘阵上那份 jpg 被删/改名而只剩本地副本时读不出尺寸 → `null` →
   前端老实显示本地那份（保守方向是对的）。
-  `resolved` = `{dir, input, input_name, mask_path, mask_exists, writable, sr_capable}`，
-  路径一律**盘阵 POSIX 形态**（与提交侧归一化同一口径，前端 lq_path / mask_path 逐字比得上）。
+  **`row` 描述的是「用户拖进来的那一个环节」自己那份栅格**（2026-09-21）：本体的显示件
+  指向本体输入影像，中间产物指向 `<目录名>_<suffix>.tif`（见下面「中间产物也能关联」）。
+  `W`/`H` 因此是那一份的尺寸 —— 产物的各边是本体的倍数，拿本体的尺寸建画布整张比例都是错的。
+  `resolved` = `{dir, input, input_name, mask_path, mask_exists, writable, sr_capable,
+  kind, suffix}`，路径一律**盘阵 POSIX 形态**（与提交侧归一化同一口径，前端 lq_path /
+  mask_path 逐字比得上）。
   `writable` = 服务账号对该目录是否有写权限，提前告知好过提交后才发现写不了。
   `sr_capable` = 这个目录能不能提交 SR：目录形态**恒为 true**；裸 `.tif` 时看它父目录是不是
-  合法场景目录。前端 `lqPath` 就是按它写的（`lqPath` 是「能否提交 SR」的唯一判据）。
+  合法场景目录，**中间产物恒为 false**（见下条）。前端 `lqPath` 就是按它写的（`lqPath` 是
+  「能否提交 SR」的唯一判据）。
+  `resolved.input` / `input_name` **恒指本体输入影像**，即便这次拖进来的是产物 —— 它的语义
+  是「SR 跑的是哪份文件」，不是「这一行描述哪张图」（后者看 `row`）。
+  - **`kind`**（2026-09-21 增）= 这次拖进来的影像是场景里的哪个环节，取值
+    `input` / `product` / `nosr`；`{path}` 分支与 `.tif` 反推恒为 `input`。
+  - **`suffix`** = 中间产物那一段后缀（`product` / `nosr` 时非空，本体为空串），**从文件名
+    本身切**，不查任务库也不查配置：SR 常在平台外跑，库里没有记录时照样得认得出。
+  - **中间产物的三条例外**（`kind != 'input'`，同一件事的三种表现，缺一不可）：
+    `row.lq_path = null`、`resolved.sr_capable = false`、`resolved.mask_path = null`
+    且 `mask_exists = false`。原因是**掩码与 SR 都建在本体影像的网格上**，产物是它的放大
+    结果，在产物上画的坐标写到本体掩码文件上整片都是错的。第一道锁在服务端（这里），第二道
+    在前端 `stageKind`（`lib/stage.ts`）。**`lq_path` 置空是这道锁的本体**：前端
+    `bakeMaskToServer` 是拿 `rec.lqPath` + `rec.W/H` 去 POST `/api/masks` 的，产物尺寸的
+    W/H 配上本体的 lq_path 会把一张产物尺寸的掩码**静默写到本体的掩码文件上**（§3.4 那段按
+    lq_path 找输入影像的逻辑）。
 - **不扫盘**：只 `stat` 用户给的目录，判定顺序是固定候选文件名（`<目录名>.tif/.tiff/.img`
   再 `PAN.*`），上界 6 次 stat，不 `ls`/`glob`/`rglob`/`iterdir`。盘阵数据量极大，
   列举一次就可能卡死；这条由测试用 `patch(Path, "rglob"/"glob"/"iterdir")` + `os.listdir`
   /`os.scandir`/`os.walk` 全打成 `AssertionError` 来钉。
+  环节判定（`stage_of_jpg`）**不额外探测本体**（本体的判据在 `is_scene_file` 与
+  `_fingerprint_mismatch` 里已经写过一遍），产物最多多 2 次 `is_file()`；整条请求的
+  `Path.stat` 总次数另有上限钉着（`TestNeverListsDirectories` ≤30、jpg 那条 ≤35）。
 - **判据**：目录含 `<目录名>_meta.xml` **且**含输入影像之一（与库内场景同一套判据，
   `scene_search.is_scene_dir` / `input_scene_path`）。缺 meta.xml 的场景 SR 脚本判不出
   RC/SC，本就不该放进来。
 - 错误码分工：**400** 形态非法或压根反推不出来（相对路径 / `..` / UNC / 未知盘符 /
   日期格式 / 文件名里没有时间戳 / 名字不符合生产命名规则）· **403** 越
-  `SR_ALLOWED_ROOTS` 白名单 · **404** 反推成立但盘阵上没有合法场景目录或没有输入影像 ·
-  **422** 场景成立但读不到影像尺寸（前端开图要 W/H）。
+  `SR_ALLOWED_ROOTS` 白名单 · **404** 反推成立但盘阵上没有合法场景目录、没有输入影像，
+  或拖进来的 jpg **不是本景的输入件或中间产物**（名字切不干净，或那条环节的同名栅格不在）·
+  **422** 场景成立但读不到**该环节那份栅格**的尺寸（前端开图要 W/H）。
   404 的 `detail` 必须列出试过哪些候选、各自为什么不行（前端原样渲染）——「猜错必须报错」
   的落地。`detail` 只能是**字符串**：`api.ts::http()` 把它直接塞进 `Error`，给对象
   用户看到的是 `[object Object]`。反推按两天找过（候选 > 1 条）时，`detail` 末尾补一句
@@ -337,6 +369,18 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
     的，所以这条通常直接成立 —— 它挡的是「换了 `SR_SCENE_PATH_TEMPLATE`、场景目录改了命名」
     的部署；真正挡住派生件（`_cloud.jpg`、`.preview.jpg`）的是候选目录根本不存在。
     也**不泛化成「后缀不同就放行」**：那会连 `SC.tiff` 与 `SC.tif` 一起放过。
+    名字比的是**场景目录名**，不是栅格输入的 stem（见上一条）—— 目录由**名字**锁死，
+    环节由 `stage_of_jpg` 判（见下）。
+  - **中间产物名（2026-09-21 增）**：拖 `2026-09-21` 起不止认显示件，也认它的中间产物
+    —— 用户想「把跑出来的产物拖进来看一眼」是自然动作。可拖的三类名字：
+    `<目录名>.jpg`（本体显示件）、`<目录名>_<suffix>.jpg`（本次产物）、
+    `<目录名>_<suffix>_NOSR.jpg`（上一次产物，即本次跑 SR 的输入备份）。
+    **真门是「同级栅格真的在」**（`<目录>/<名>.tif|.tiff`，按 `_PRODUCT_EXT_ORDER` 试）：
+    「名字切得干净」只说明它长得像产物名，而一个场景目录里躺着十几样东西，
+    `<目录名>_cloud.jpg` 同样切得干净 —— 只有「它有一份同名栅格」才说明这份 jpg 是某个
+    **环节影像的显示件**。另配一份小名单 `_NON_STAGE_TAILS`（`cloud`/`thumb`/`mask`/`ori`/
+    `preview`）挡住那些真有同名栅格的派生件（云量图在真机上确实存在）。
+    两头都不成立 → 这条候选不合格，原因记进 `reasons`，最终 404。
   - 名字里取不到 14/8 位成像时刻的 jpg（`PAN.jpg`、Windows 副本、别处导出的图）→ **400**，
     说清「平台不猜目录」以及该改拖哪一份。反推路径的唯一依据是文件名，没有日期就不知道该去
     `<年>/<月>/<日>` 哪一天找，猜一个就是拿别景的 `lq_path` 去提交。
@@ -594,6 +638,10 @@ body：
   目标项若已有 rec 开着（判据与 `openSceneJpg` 的 `findRecByMeta` 同源：认 `sceneId`）
   就直接切过去，**不发 `/preview`**。于是「同一枚芯片连点两次」= 一次 `/siblings` +
   零次 `/preview`；`test-manual-scene.js` K 段钉着这个增量。
+  **芯片打开也要带环节**（2026-09-21）：产物项用 `item.kind` 当 `stageKind`、响应顶层的
+  `suffix` 当后缀（不额外加字段，见挂起项五）。不这么做的话，同一份产物会变成「拖进来
+  不能改、芯片打开能改」两个说法 —— 前后端各一道锁的前提是同一份图在哪条路口走进来都
+  被认成同一类。
 - **对比模式后台预取**：用户开关（**默认关**，持久化在 `localStorage['sr.viewer.cmpPrefetch']`），
   进对比模式（或对比模式内换了活动侧那张图）时触发，顺序取、并发 1、失败静默、不占遮罩、
   不建 rec、不进点选清单。**合格项的判据是 `exists && id && name && W/H 非空 &&

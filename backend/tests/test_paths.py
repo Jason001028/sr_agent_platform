@@ -248,6 +248,20 @@ class TestSceneNameLayers(EnvMixin):
             with self.subTest(bad=bad):
                 self.assertIsNone(scene_name_layers(bad))
 
+    def test_exactly_six_segments_returns_none(self):
+        """**恰好六段**是最窄的边界：段号与景号都在（第 4、5 段），但读分隔符时
+        越界过 —— 早先那道门槛只挡到 `_SCENE_IDX`，六段的名字走进
+        `seps[_SCENE_IDX]` 抛 IndexError，本该 400 的输入变成 500（拖中间产物 jpg
+        时被去尾切短的候选名字正好是这个段数，2026-09-21 实测）。"""
+        six = "JL1KF02B03_PMS09_20260902120156_200535158_102_0025"
+        self.assertEqual(len(six.split("_")), 6)
+        self.assertIsNone(scene_name_layers(six))
+        # 七段就能拆了（多出来的那一段是景号之后的生产次数）
+        self.assertEqual(
+            scene_name_layers(six + "_001"),
+            ("JL1KF02B03",
+             "JL1KF02B03_PMS09_20260902120156_200535158_102_001"))
+
     def test_space_separated_name(self):
         """用户口径里的空格形态（`JXGF07D03 PMS … MSS`）也要拆得出来。
 

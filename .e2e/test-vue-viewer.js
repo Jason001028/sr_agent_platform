@@ -66,12 +66,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // 等**活动侧**那张解码完成，返回 activeRec 摘要。
 // 分屏下用不上「上传」这个动作时（拖放落图），就只调这个 —— 拖进来的那张会成为活动侧。
+//
+// 「状态就绪」与「画面可交互」是两件事：状态先写好，随后装载收尾还有一段**缩放预热**
+// 在盖着遮罩跑（见 stores/viewer.warmZoom）。遮罩是个普通元素、盖在画布上，真实
+// `page.mouse.wheel` 会被它按命中测试吃掉（合成 dispatchEvent 才绕得过）—— 不等它
+// 收起，后面那段滚轮断言测的就不是画布。所以这里一并等遮罩收起才返回。
 async function waitDecoded(page, timeoutMs) {
   const t0 = Date.now();
   for (;;) {
     const rec = await page.evaluate(() => window.__viewer.activeRec());
     if (rec && rec.status) {
-      if (rec.status.indexOf('完成') === 0) return rec;
+      if (rec.status.indexOf('完成') === 0) {
+        const masked = await page.evaluate(() =>
+          !!(window.__viewer.overlayVisible && window.__viewer.overlayVisible()));
+        if (!masked) return rec;
+      }
       if (rec.status.indexOf('解码失败') === 0) throw new Error('解码失败: ' + rec.status);
     }
     if (Date.now() - t0 > (timeoutMs || 30000)) throw new Error('超时等待解码，最近状态: ' + (rec && rec.status));

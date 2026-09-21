@@ -330,13 +330,18 @@ function dropSide(e: DragEvent): 'A' | 'B' | null {
                     store.compareMode, store.splitX);
 }
 
-/** 这次拖放真带着文件吗。页面内拖放（拖一段选中的文字、拖个链接）同样会发 dragover，
-    但它 drop 时 `files` 是空的 —— 什么都放不进来，onDrop 直接 return。这种拖放不该亮
-    落位提示：分屏下用户只是在画面里拖动/选字，提示一亮就像马上要换格（2026-09-21 用户报）。
-    判 `types` 而不是等 drop，是因为提示要在 dragover 阶段就决定亮不亮。 */
-function dragHasFiles(e: DragEvent): boolean {
+/** 这次拖放真能落图吗：系统文件（`Files`）**或**侧栏卡片（`REC_MIME`，值为 rec.id）。
+ *
+    页面内拖放（拖一段选中的文字、拖个链接）同样会发 dragover，但它两种都不带 ——
+    什么都放不进来，onDrop 里也是空的。这种拖放不该亮落位提示：分屏下用户只是在画面里
+    拖动/选字，提示一亮就像马上要换格（2026-09-21 用户报）。
+    判 `types` 而不是等 drop，是因为提示要在 dragover 阶段就决定亮不亮 —— 浏览器在
+    dragover 阶段不让读值，但类型名给读。 */
+function dragHasPayload(e: DragEvent): boolean {
   const types = e.dataTransfer?.types;
-  return !!types && Array.from(types).indexOf('Files') >= 0;
+  if (!types) return false;
+  const list = Array.from(types);
+  return list.indexOf('Files') >= 0 || list.indexOf(store.REC_MIME) >= 0;
 }
 
 function onDragOver(e: DragEvent) {
@@ -347,7 +352,7 @@ function onDragOver(e: DragEvent) {
   // 阶段浏览器不暴露文件名（只在 drop 阶段有），没法按类型区分。所以视觉提示只由
   // CompareOverlay 负责，真正的门在 onDrop 里。
   if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
-  if (!store.compareOn || !dragHasFiles(e)) { store.setDragHint(false, null); return; }
+  if (!store.compareOn || !dragHasPayload(e)) { store.setDragHint(false, null); return; }
   // 提示在画布外不显示（dropSide 回 null），由 store 的 500ms 定时器收尾
   store.setDragHint(true, dropSide(e));
 }
@@ -355,6 +360,24 @@ function onDragOver(e: DragEvent) {
 function onDrop(e: DragEvent) {
   e.preventDefault();
   store.setDragHint(false, null);
+  // 侧栏卡片（页面内拖放）：载荷是一张「票」（rec.id），没有文件。**先于 files 那道
+  // 早退**判它，否则卡片拖放会掉进「没有文件」那条 return 里什么都不发生。
+  // 落点仍由 dropSide 决定（分屏下落在哪半就是哪半），落格/适配/重绘全在
+  // activate 里，这里不重复实现一套。
+  const recId = Number(e.dataTransfer?.getData(store.REC_MIME) || '');
+  if (Number.isInteger(recId) && recId > 0) {
+    let side: 'A' | 'B' | undefined;
+    if (store.compareOn) {
+      const hit = dropSide(e);
+      if (hit === null) {
+        store.showToast('图像对比模式下只能把影像拖到画布上');
+        return;
+      }
+      side = hit;
+    }
+    void store.activate(recId, side);
+    return;
+  }
   const files = e.dataTransfer?.files;
   if (!files || !files.length) return;
   // 按扩展名分流：`.txt` = 待修复清单（走 qc store），其余是影像（走解码管线）。

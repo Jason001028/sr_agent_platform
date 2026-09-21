@@ -856,6 +856,10 @@ def create_app() -> FastAPI:
                 status_code=400,
                 detail=f"size_bytes 须为正整数（收到 {size_bytes!r}）")
         name = ""       # 仅 name 分支赋值；path 分支是精确路径，无需指纹
+        # 第二阶段的候选（(目录, 指纹名) 两元组）：拖进来的 jpg 是中间产物时才非空，
+        # 且**只在第一阶段全落空时**才展开（见下面两处 scan 调用）。在这里先置空
+        # 是因为 path 分支不经过构造它的那段代码。
+        late: list[tuple[str, str]] = []
         # 404 的补充说明：反推按「成像日 + 次日」找了**两天**时，得让用户知道
         # 这件事，否则他看见两条只差一天的路径只会更懵（见 infer_scene_paths）。
         day_note = ""
@@ -882,7 +886,7 @@ def create_app() -> FastAPI:
                         detail=f"路径指向文件 {target.name}，但它不是 .tif/.tiff"
                                " —— 请粘场景目录，或粘单个 .tif 文件路径")
                 return _resolve_bare_tif(target)
-            tried = [posix]
+            tried = [(posix, "")]
         else:
             name, date = body.get("name") or "", body.get("date")
             if not isinstance(name, str) or not name.strip():
@@ -902,15 +906,16 @@ def create_app() -> FastAPI:
                         status_code=400,
                         detail=f"这张 jpg 的名字里没有生产全名（缺 14 位成像时刻）："
                                f"{name} —— 平台不猜目录。能关联的 jpg 只有名字与场景"
-                               f"目录名一致的那份（<目录名>.jpg）；改过名、另存过、"
-                               f"或叫 PAN.jpg 这类都不认。请改拖那份，或把该场景目录"
-                               f"粘进「盘阵场景」栏打开")
+                               f"目录名一致的那份（<目录名>.jpg），以及它的中间产物"
+                               f"（<目录名>_sr.jpg、<目录名>_sr_NOSR.jpg，同级要有"
+                               f"同名栅格）；改过名、另存过、或叫 PAN.jpg 这类都不认。"
+                               f"请改拖那几份，或把该场景目录粘进「盘阵场景」栏打开")
                 raise HTTPException(
                     status_code=400,
                     detail=f"反推路径失败：文件名里没有 14/8 位成像时间戳"
                            f"（{name}）—— 请把该场景目录粘进「盘阵场景」栏打开")
             try:
-                tried = infer_scene_paths(name, date)
+                tried = [(c, name) for c in infer_scene_paths(name, date)]
             except PathDeniedError as e:
                 raise HTTPException(status_code=400,
                                     detail=f"反推路径失败：{e}") from e
@@ -919,11 +924,30 @@ def create_app() -> FastAPI:
                     status_code=400,
                     detail=f"反推路径失败：{name} 不符合生产命名规则"
                            "（缺段号/景号段，拆不出卫星型号与段级目录）—— "
-                           "请把该场景目录粘进「盘阵场景」栏打开")
+                           "请把场景目录粘进「盘阵场景」栏打开")
             if len(tried) > 1:
                 day_note = ("（成像日与次日都找过 —— 盘阵按生产日建目录，"
                             "深夜成像的景常记在次日）")
-            for cand in tried:
+            # 第二阶段的候选（**只在第一阶段全落空时才展开**，见下面 scan 的两处调用）：
+            # 拖进来的 jpg 若是中间产物（`<目录名>_sr.jpg` / `<目录名>_sr_NOSR.jpg`），
+            # 多出来的尾段会让反推出的目录名带上尾巴（`…/<目录名>_sr`）—— 盘阵上
+            # 根本没有那个目录，真正该去的是**去掉尾段**的那条。尾段两种形态各给一条
+            # 候选：去掉末尾一段、以及先去 `_NOSR` 再去末尾一段（`sr_2` 这类带下划线的
+            # suffix 也能整段切掉 —— 按段数猜会切错）。
+            #
+            # 名字仍由 pathguard 同一套模板渲染（日期 / 卫星型号 / 段级目录照旧反推），
+            # 前端与这里都不自拼路径；尾巴先过 `jpg_stage_name` 那套字符约束，切不出
+            # 干净尾段（` - 副本`、`.preview` 那种）就一条候选都不生成。
+            #
+            # 为什么分两阶段而不是一开始就一起试：第一阶段（今天的全部行为）命中的
+            # 常见情形**一个 stat 都不多花** —— 钉住探测量上限的那几条用例正走在上面。
+            if Path(name).suffix.lower() in (".jpg", ".jpeg"):
+                for stem in scene_search.de_suffixed_stems(name):
+                    for cand in infer_scene_paths(stem + Path(name).suffix, date):
+                        if all(cand != c for c, _ in tried) and \
+                                all(cand != c for c, _ in late):
+                            late.append((cand, stem + Path(name).suffix))
+            for cand, _ in tried:
                 try:
                     ensure_allowed(cand)
                 except PathDeniedError as e:
@@ -932,45 +956,95 @@ def create_app() -> FastAPI:
                         detail=f"路径不在允许的盘阵前缀内：{e}") from e
 
         reasons: list[str] = []
-        hit: tuple[Path, Path] | None = None
-        for cand in tried:
-            d = Path(cand)
-            if not d.is_dir():
-                reasons.append(f"{d}：目录不存在")
-                continue
-            inp = scene_search.input_scene_path(d)
-            if inp is None:
-                if not (d / (d.name + "_meta.xml")).is_file():
-                    reasons.append(_why_not_scene_dir(d))
-                else:
-                    names = "、".join(c.name
-                                      for c in scene_search.input_candidates(d))
-                    reasons.append(f"{d}：目录里没有输入影像（找过 {names}）")
-                continue
-            if size_bytes is not None and name:
-                why = _fingerprint_mismatch(inp, name, size_bytes)
-                if why:
-                    # 指纹不认就当作**这条候选**不合格，接着试下一条（次日那条），
-                    # 不要立刻 404 —— 报错口径仍由下面统一出。
-                    reasons.append(why)
+
+        # 命中四元组：场景目录 / 本体输入影像 / 环节 / 该环节**自己的栅格**。
+        # 环节只对拖进来的 jpg 有第三种取值；.tif 反推与粘路径恒为 'input'。
+        hit: tuple[Path, Path, str, str, Path] | None = None
+
+        def scan(cands: list[tuple[str, str]]
+                 ) -> tuple[Path, Path, str, str, Path] | None:
+            """按顺序挑第一条成立的候选；每条不成立的原因都记进 `reasons`。
+
+            候选是 `(目录, 指纹用的名字)` 两元组。名字那一半是给
+            `_fingerprint_mismatch` 用的：**它按后缀分流**，去尾变体必须连原后缀
+            一起给（`<目录名>.jpg`），给裸 stem 会掉进「栅格」那一支去比字节数，
+            于是每条候选都被判「字节数不符」—— 明明名字都对上了。
+            """
+            for cand, fp_name in cands:
+                try:
+                    ensure_allowed(cand)
+                except PathDeniedError as e:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"路径不在允许的盘阵前缀内：{e}") from e
+                d = Path(cand)
+                if not d.is_dir():
+                    reasons.append(f"{d}：目录不存在")
                     continue
-            hit = (d, inp)
-            break
+                inp = scene_search.input_scene_path(d)
+                if inp is None:
+                    if not (d / (d.name + "_meta.xml")).is_file():
+                        reasons.append(_why_not_scene_dir(d))
+                    else:
+                        names = "、".join(c.name
+                                          for c in scene_search.input_candidates(d))
+                        reasons.append(f"{d}：目录里没有输入影像（找过 {names}）")
+                    continue
+                if size_bytes is not None and fp_name:
+                    why = _fingerprint_mismatch(inp, fp_name, size_bytes)
+                    if why:
+                        # 指纹不认就当作**这条候选**不合格，接着试下一条（次日那条），
+                        # 不要立刻 404 —— 报错口径仍由下面统一出。
+                        reasons.append(why)
+                        continue
+                kind, suffix, raster = "input", "", inp
+                if fp_name and Path(fp_name).suffix.lower() in (".jpg", ".jpeg"):
+                    # 拖 jpg：除了目录还得认**这份 jpg 是哪个环节**。目录名对不上
+                    # 环节名（`_cloud` / `.preview` / `- 副本` 那些），或该环节自己
+                    # 的栅格不在同级 → 这条候选不合格（见 scene_search.stage_of_jpg）。
+                    # 判据喂的是**用户拖进来那个名字**（`name`，带着尾段），不是
+                    # `fp_name`：后者是反推目录用的去尾名（见上面 late 的构造），
+                    # 拿它去判环节，任何产物都会被认成本体的显示件。
+                    stage = scene_search.stage_of_jpg(d, inp, Path(name).stem)
+                    if stage is None:
+                        reasons.append(
+                            f"{d}：{Path(name).name} 这个名字不是本景的输入件或"
+                            f"中间产物（输入件叫 {d.name}.jpg，中间产物叫"
+                            f" <目录名>_<suffix>.jpg / <目录名>_<suffix>_NOSR.jpg，"
+                            f"且同级要有同名栅格）")
+                        continue
+                    kind, suffix, raster = stage
+                return d, inp, kind, suffix, raster
+            return None
+
+        hit = scan(tried)
+        if hit is None and late:
+            hit = scan(late)
         if hit is None:
             raise HTTPException(status_code=404,
                                 detail="没找到合法场景目录 —— "
                                        + "；".join(reasons) + day_note)
-        d, inp = hit
-        dims = _cached_dims(inp)
+        d, inp, kind, suffix, raster = hit
+        dims = _cached_dims(raster)
         if not dims:
             raise HTTPException(
                 status_code=422,
-                detail=f"场景成立但读不到影像尺寸（{inp}）—— 前端开图需要 W/H")
-        row = _manual_row(inp, d, root)
+                detail=f"场景成立但读不到影像尺寸（{raster}）—— 前端开图需要 W/H")
+        # 这一行描述的是**这一环节自己的栅格**（本体 / 产物 / 上一次产物）：产物的
+        # W/H 是本体的倍数，拿本体的尺寸建画布，整张图的比例都是错的。
+        row = _manual_row(raster, d, root)
         row["W"], row["H"] = dims["W"], dims["H"]
-        # 拖 jpg 进来时这一行描述的是**栅格**输入影像（`_manual_row(inp, ...)`，上面
-        # 的 id/W/H/hasPreview 全都指向那份 tif），所以 `_manual_row` 里那句按 `inp`
-        # 算的 rasterPreview 必然是 None（它只对 jpg 源非空）。
+        if kind != "input":
+            # **中间产物不可修复**，而这条服务的形状是「能不能提交 / 掩码写哪」，
+            # 所以在这里就把口径定死，不指望前端记得住：
+            # `lq_path` 置空 → 前端那颗「提交 SR」与「保存掩码到盘阵」都拿不到落点
+            # （`bakeMaskToServer` 是拿 rec.lqPath + rec.W/H 去 POST /api/masks 的，
+            # 产物尺寸的掩码配本体的 lq_path，后端会把一张产物尺寸的掩码静默写到
+            # 本体的掩码文件上）。前端另有一道 stageKind 门，这里是第一道。
+            row["lq_path"] = None
+        # 拖 jpg 进来时这一行描述的是**栅格**（`_manual_row(raster, ...)`，上面的
+        # id/W/H/hasPreview 全都指向那份 tif/jpg 同名的栅格），所以 `_manual_row` 里
+        # 那句按栅格算的 rasterPreview 必然是 None（它只对 jpg 源非空）。
         #
         # 但「要不要改从栅格烤」这个比较恰恰是这条入口最需要的：用户拖进来的
         # `<目录名>.jpg` 就是盘阵那份 8192 显示件，而更清晰的底图是同一目录的栅格。
@@ -982,7 +1056,9 @@ def create_app() -> FastAPI:
         # → None → 前端老实显示本地那份。保守方向是对的。
         if Path(name).suffix.lower() in (".jpg", ".jpeg"):
             row["rasterPreview"] = _raster_preview(d / Path(name).name, root)
-        mask_path = derived_mask_path(str(d))
+        # 中间产物没有「可提交的场景」这一说（上面把 row.lq_path 置了空），掩码路径
+        # 也就无从推起 —— 推出来的那份是本体的掩码，与这张产物毫无关系。
+        mask_path = derived_mask_path(str(d)) if kind == "input" else None
         return {
             "source": "manual",
             "row": row,
@@ -991,16 +1067,28 @@ def create_app() -> FastAPI:
                 # dir 会被原样带进队列表单的 lq_path，宿主形态在开发机上与
                 # 归一化结果对不上。Linux 上 as_posix() 与 str() 同值。
                 "dir": d.as_posix(),
+                # 本体的输入影像：**恒指本体**（`inp`），即便这次拖进来的是产物。
+                # 它的语义是「SR 跑的是哪份文件」，不是「这一行描述哪张图」——
+                # 后者看 row（row 指向环节自己的栅格）。
                 "input": inp.as_posix(),
                 "input_name": inp.name,
                 "mask_path": mask_path,
-                "mask_exists": Path(mask_path).is_file(),
+                "mask_exists": bool(mask_path) and Path(mask_path).is_file(),
                 # 服务账号对场景目录的写权限：meta.xml 回写、Debug/ 日志、掩码、
                 # 预览缓存四处都要写。提前告知，好过提交后 422。
                 "writable": os.access(str(d), os.W_OK),
                 # 目录分支走到这里就已经确认是合法场景目录（有 meta.xml 且有
                 # 输入影像），所以恒为 True。裸 .tif 分支才可能是 False。
-                "sr_capable": True,
+                # **例外**：拖进来的中间产物（kind != 'input'）恒为 False —— 那一类
+                # 不是可修复对象，前端据此不给提交/写掩码的入口。
+                "sr_capable": kind == "input",
+                # 这一次拖进来的影像是场景里的哪个环节（2026-09-21 起中间产物也能
+                # 关联）。三种取值，只有 `input` 是可修复对象 —— 掩码与 SR 都建在
+                # 本体影像的网格上，产物的尺寸是它的倍数（见 lib/stage.ts）。
+                "kind": kind,
+                # 中间产物的 suffix：从**文件名本身**切出来的那一段（不查任务库也
+                # 不查配置 —— SR 常在平台外跑，库里没记录照样得认得出）。本体为空串。
+                "suffix": suffix,
             },
         }
 

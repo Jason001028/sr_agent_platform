@@ -10,6 +10,7 @@ import { computed, ref } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import { parseLocPair } from '../lib/viewMath';
 import { SCENE_PREVIEW_DIVS, previewDivLabel } from '../lib/scene';
+import { isIntermediateStage } from '../lib/stage';
 import type { StretchMode } from '../lib/tifDecode';
 
 const store = useViewerStore();
@@ -27,7 +28,16 @@ const sceneActive = computed(() => store.activeRec?.route === 'jpg');
 /** 「提交 SR」可用：这张图有盘阵目录（= 提交时 lq_path 的语义）。
     盘阵场景打开的有，反推关联上的本地 TIF 也**有** —— 判据从「是不是盘阵场景」
     放宽成「有没有盘阵目录」，否则本地关联那条路走通了按钮还是灰的。 */
-const srReady = computed(() => !!store.activeRec?.lqPath);
+const srReady = computed(() => !!store.activeRec?.lqPath && !intermediate.value);
+/** 当前这张是不是场景里的中间产物（SR / NOSR）。中间产物也有盘阵目录，所以
+    「有没有 lqPath」这一条判不出它 —— 得看环节。修复（画掩码 / 写掩码 / 提交 SR）
+    一律只在**本体**上做：掩码与 SR 都建在本体影像的网格上，产物的尺寸是它的倍数，
+    拿产物那张去写就会把一张产物尺寸的掩码盖到本体的掩码文件上（同样的道理见
+    stores/viewer 里那三道门，这里置灰只是别让用户点了才知道）。 */
+const intermediate = computed(() => isIntermediateStage(store.activeRec?.stageKind));
+const roTitle = computed(() =>
+  '本图像是中间产物（' + (store.activeRec?.stageLabel ?? '产物')
+  + '），仅用于对比，不作修复 —— 请打开本体再修复与提交');
 /** 下拉显示**当前这张图实际**的拉伸模式（store.activeStretch），不是全局那份：
     全局只决定新打开的本地图用什么起手，场景图另有起手值且各记各的。 */
 const stretchValue = computed(() => store.activeStretch);
@@ -178,8 +188,9 @@ function doLocate() {
       type="button"
       class="outbtn"
       :class="{ on: store.drawMode }"
-      :disabled="store.compareOn"
-      :title="store.compareOn ? '图像对比模式下不绘制掩码，请先切回「关闭」' : ''"
+      :disabled="store.compareOn || intermediate"
+      :title="intermediate ? roTitle
+        : store.compareOn ? '图像对比模式下不绘制掩码，请先切回「关闭」' : ''"
       @click="store.drawMode ? store.exitDraw() : store.enterDraw()"
     >
       绘制掩码{{ store.drawMode ? ' ✓' : '' }}
@@ -188,10 +199,11 @@ function doLocate() {
     <button
       type="button"
       class="outbtn"
-      :disabled="store.srBusy || !store.activeRec?.lqPath"
-      :title="store.activeRec?.lqPath
-        ? '把当前掩码写到盘阵场景目录（<输入名>_mask.tif，与提交时去找的那份同源）'
-        : '这张图没有盘阵目录，掩码无处可写'"
+      :disabled="store.srBusy || !store.activeRec?.lqPath || intermediate"
+      :title="intermediate ? roTitle
+        : store.activeRec?.lqPath
+          ? '把当前掩码写到盘阵场景目录（<输入名>_mask.tif，与提交时去找的那份同源）'
+          : '这张图没有盘阵目录，掩码无处可写'"
       @click="store.bakeMaskToServer()"
     >
       {{ store.srBusy ? '写入中…' : '保存掩码到盘阵' }}
@@ -201,9 +213,10 @@ function doLocate() {
       class="outbtn grad"
       :class="{ on: srReady }"
       :disabled="store.srBusy || !srReady"
-      :title="srReady
-        ? '带出该场景的目录，跳转队列页确认后提交 SR'
-        : '提交 SR 需要盘阵目录：用上面的「盘阵场景」栏打开，或让本地文件按文件名关联'"
+      :title="intermediate ? roTitle
+        : srReady
+          ? '带出该场景的目录，跳转队列页确认后提交 SR'
+          : '提交 SR 需要盘阵目录：用上面的「盘阵场景」栏打开，或让本地文件按文件名关联'"
       @click="store.submitSr()"
     >
       提交 SR

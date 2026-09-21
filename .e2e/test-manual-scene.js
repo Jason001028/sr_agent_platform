@@ -21,15 +21,16 @@
 //      同名但字节数不同 / 目录不存在 → 报错（写进 rec.linkNote）且按钮仍禁用，
 //      退回本地解码；文件名里没有日期 → 只提示手填，一个 resolve 请求都不发；
 //   E2. 拖盘阵上的 `<编号>.jpg`（与同名 .tif 同目录）：名字对得上就关联成同一场景，
-//      **像素用拖进来那张原图**（不调 /preview-drop、不调 /preview），掩码能落盘；
+//      **像素用拖进来那张原图**（不调 /preview）；另外后台静默烤一跳 /preview-drop
+//      （落 `<编号>_preview.jpg` 进场景目录，不遮罩、不改像素）；
 //      关联不上 → 弹窗给后端原因（`.notice-modal`），状态栏不卡在「正在关联…」；
 //   E3. 拖**纯 RC** 目录（里面只有 `PAN.tif`）那份 `<编号>.jpg`：也要关联上。
 //      jpg 名比的是**场景目录名**，不是栅格输入的 stem —— 比后者的话，纯 RC
+//      场景恒 404，而它恰恰是 SR 真要跑的场景（真机「极少出现盘阵小标」的根因）；
 //   E4. 盘阵上那份显示件**不够清晰**时（栅格 1600×800 vs 同名 jpg 320×160，
 //      ÷2 烤出 800 > 320）→ 改用服务端从栅格烤的那份：走 /preview-drop、面板文案
 //      回到默认那句。E2 是它的对照组（盘阵上没有同名 jpg；就算有，800×400 在 ÷2
 //      下也判 jpg 赢 —— 判据是**严格大于**）。
-//      场景恒 404，而它恰恰是 SR 真要跑的场景（真机「极少出现盘阵小标」的根因）；
 //   F. PAN.tif（RC）场景：掩码名取**输入名的 stem**（`PAN_mask.tif`），不取目录名 ——
 //      这正是"写出去的掩码与提交时去找的那份不一致"的陷阱（§6）。
 //   G. 粘**单个 .tif 文件路径**（不在场景目录里）：照样能看，且预览按 1/2 烤进源图
@@ -42,6 +43,19 @@
 //      DragEvent（.e2e/lib/drag.js）拖盘阵那份 `<编号>.jpg` 到**右半** → 新图只进右格、
 //      左格那张不动、活动侧转右；仍走同一条盘阵关联链（resolve +1、/preview-drop +1、
 //      生产那条 /preview +0）；只发 dragover（落位提示）**一个请求都不发**。
+//   L. 本轮新增的两件事（J 已覆盖「从外面拖文件进来」，L 覆盖「拖左栏卡片」与
+//      「拖中间产物」）：
+//      L1–L3 左栏卡片自己带票（`application/x-sr-rec`）拖进画布 → 活动侧换图；
+//            分屏下按落点进 B 格；对比模式拖到画布外沿用那句 toast，活动图不动。
+//            （卡片没带 `draggable`、画布只认 `Files` 时这条链根本不存在。）
+//      L4    拖中间产物 `<编号>_sr.jpg`（同级有 `<编号>_sr.tif`）：认出 kind=product、
+//            卡片上「盘阵+序号+SR」三标齐全（序号与本体那张**同号**）、只读小标、
+//            三颗修复按钮置灰；W/H 取产物自己的栅格（3200×1600）而像素仍是拖进来的
+//            原图（1600×800）；后台静默烤 `<编号>_sr_preview.jpg`（1600×800 —— 与
+//            本体那份 800×400 差一倍，据此分清烤的是哪一份栅格）。
+//      L5    产物上三道修复入口逐条打一遍：绘制掩码被拒且不进绘制态、保存掩码返回
+//            false 且**本体那份掩码的 mtime 一个字节没动**（本次唯一的破坏性风险）、
+//            提交 SR 不跳队列页且队列一条不多。
 // 用法：cd .e2e && node test-manual-scene.js
 const http = require('http');
 const fs = require('fs');
@@ -848,11 +862,27 @@ async function main() {
       const bakeBefore = countUrl(previewRe);
       const dropBakeBefore = countUrl(dropPreviewRe);
       await input.uploadFile(upJpg);
-      await waitFor(page, () => {
-        const rs = window.__viewer.recs();
-        const r = rs[rs.length - 1];
-        return r && r.route === 'jpg';
-      }, 20000, '拖入的 jpg 关联上场景目录');
+      // 失败也放行，好把后端那句话 / 弹窗原样带进断言消息里（E4 同一套做法）：
+      // 只报「超时」看不出是关联被拒了、还是解码那一步卡住了。
+      try {
+        await waitFor(page, () => {
+          const rs = window.__viewer.recs();
+          const r = rs[rs.length - 1];
+          return r && r.route === 'jpg';
+        }, 20000, '拖入的 jpg 关联上场景目录');
+      } catch (e) {
+        const dbg = await page.evaluate(() => {
+          const rs = window.__viewer.recs();
+          const r = rs[rs.length - 1];
+          const m = document.querySelector('.notice-modal');
+          return { n: rs.length, last: r && { name: r.name, route: r.route,
+            status: r.status, statusCls: r.statusCls, linkNote: r.linkNote,
+            lqPath: r.lqPath },
+            modal: m ? m.querySelector('.nm-body').textContent.trim() : null,
+            err: document.querySelector('.err-box')?.textContent.trim() ?? null };
+        });
+        throw new Error(`E2 诊断：${JSON.stringify(dbg)}`);
+      }
       const jpgRec = await lastRec();
       assert(jpgRec.name === SC + '.jpg',
         `rec 还是用户拖进来的那个文件（${jpgRec.name}）`);
@@ -864,9 +894,23 @@ async function main() {
       // 本次改动的要点：像素用**拖进来那张 jpg 自己**的，不去服务端烤一份预览。
       // 早先只有 .tif 才试关联，jpg 一律 route='img'；改成两条路合并后，若照搬
       // tif 那条（调 /preview-drop）就会拿服务端缩图顶掉用户自己拖的图。
-      assert(countUrl(dropPreviewRe) === dropBakeBefore
-        && countUrl(previewRe) === bakeBefore,
-        '没走 /preview-drop 也没走 /preview（用拖进来的原图，不服务端烘焙）');
+      //
+      // 像素不走服务端，但**请求仍要发一次**（2026-09-21 起）：拖 jpg 进来之后后台
+      // 静默烤一份 `<这份影像的 stem>_preview.jpg` 进场景目录 —— 用户口径是「盘阵上
+      // 得留下这一份」，而像素仍用他拖进来的原图。所以要钉的是两件事分开：像素
+      // 没被顶掉（上面两条），以及那一跳**恰好烤的是这一环节自己的栅格**
+      // （rec.sceneId = 本体那份 `<编号>.tif` 的场景 id，不是别的目录）。
+      const dropPreviewUrl = (sid) =>
+        `${apiBase}/api/scenes/${encodeURIComponent(sid)}/preview-drop?div=2`;
+      await waitNode(() => countUrl(dropPreviewRe) >= dropBakeBefore + 1, 15000,
+        '拖 jpg 之后的后台静默烤');
+      const bakeUrls = seen.filter((u) => dropPreviewRe.test(u)).slice(dropBakeBefore);
+      assert(bakeUrls.length === 1 && bakeUrls[0] === dropPreviewUrl(jpgRec.sceneId),
+        `后台静默烤烤的是这一环节自己的栅格（${bakeUrls[0]}）`);
+      assert(countUrl(previewRe) === bakeBefore,
+        `生产那条 /preview 一次没碰（+${countUrl(previewRe) - bakeBefore}）`);
+      assert(jpegSize(path.join(SC_DIR, SC + '_preview.jpg')) !== null,
+        `场景目录里那份 ${SC}_preview.jpg 在（拖入链的落点，长期留存）`);
       assert(jpgRec.thumbW === 800 && jpgRec.thumbH === 400,
         `缩略图就是拖进来那张 jpg 的像素（${jpgRec.thumbW}×${jpgRec.thumbH}）`);
       assert(jpgRec.layout.includes('拖入的原图'),
@@ -1495,6 +1539,225 @@ async function main() {
       await page.evaluate(() => window.__viewer.setCmpPrefetch(false));
       assert(await page.evaluate(() => window.__viewer.cmpPrefetchOn()) === false,
         '预取开关复位成默认关');
+
+      /* ---------- L. 左栏卡片拖进画布；中间产物 jpg 只能对比 ---------- */
+      // 2026-09-21 用户报的两个 bug，各验一条**用户手上那一下**：
+      //   ① 左栏的图拖不进中间画布（只能与系统文件夹交互）—— 早先卡片没带
+      //      `draggable`，画布的落图门又只认 `dataTransfer.types` 里的 `Files`，
+      //      这条链从头到尾不存在；
+      //   ② 拖进来的若是**中间产物**（`<编号>_sr.jpg`），要能关联到盘阵、卡片上
+      //      带「盘阵 + 同一景序号 + 环节」三颗小标，**修复入口全部堵死**（掩码与
+      //      SR 都建在本体影像的网格上），并在盘阵上留下它自己那份 `_preview.jpg`。
+      console.log('\n[L] 左栏卡片拖进画布；中间产物 jpg 关联后只读');
+      await page.evaluate(() => window.__viewer.setCmpMode('off'));
+      const ptsL = await drag.canvasPoints(page);
+      const midX = ptsL.rect.left + ptsL.rect.width / 2;
+      const idOfCard = (n) => page.evaluate((name) => {
+        const r = window.__viewer.recs().find((x) => x.name === name);
+        return r ? r.id : null;
+      }, n);
+      const panCardId = await idOfCard(PAN + '.jpg');
+      const scCardId = await idOfCard(SC + '.jpg');
+      assert(!!panCardId && !!scCardId && panCardId !== scCardId,
+        `左栏有可拖的卡片（${PAN}.jpg=${panCardId} / ${SC}.jpg=${scCardId}）`);
+
+      // L1：单幅下把卡片拖进画布 —— 换活动图（拖另一张再换回去，两个方向都验）。
+      const dragL1 = await drag.dragCard(page,
+        { cardName: PAN + '.jpg', clientX: midX, clientY: ptsL.midY });
+      assert(dragL1.payload === String(panCardId),
+        `卡片把票放进了 DataTransfer（${dragL1.payload}）—— 不是我们替它 setData 的`);
+      assert(dragL1.defaultPrevented === true,
+        'drop 被画布处理掉了（preventDefault：浏览器不会拿这张图去导航）');
+      await waitFor(page, (id) => {
+        const r = window.__viewer.activeRec();
+        return !!r && r.id === id;
+      }, 10000, '拖卡片换活动图', panCardId);
+      const dragL2 = await drag.dragCard(page,
+        { cardName: SC + '.jpg', clientX: midX, clientY: ptsL.midY });
+      const lActiveName = await waitFor(page, (id) => {
+        const r = window.__viewer.activeRec();
+        return r && r.id === id ? r.name : null;
+      }, 10000, '再拖一张换回来', scCardId);
+      assert(dragL2.payload === String(scCardId) && lActiveName === SC + '.jpg',
+        `再拖另一张，活动图跟着换（${lActiveName}）`);
+
+      // L2：分屏下落进光标所在那一格（落点算出的 side 真的穿到了 activate）。
+      await page.evaluate(() => window.__viewer.setCmpMode('split'));
+      const panesL0 = await page.evaluate(() => window.__viewer.cmpPanes());
+      const dragL3 = await drag.dragCard(page,
+        { cardName: PAN + '.jpg', clientX: ptsL.right, clientY: ptsL.midY });
+      assert(dragL3.hint.active === true && dragL3.hint.side === 'B',
+        `悬停右半：落位提示指向右格（${JSON.stringify(dragL3.hint)}）`);
+      await waitFor(page, (id) => {
+        const p = window.__viewer.cmpPanes();
+        return p[1] && p[1].recId === id;
+      }, 10000, '卡片落在右格', panCardId);
+      const panesL1 = await page.evaluate(() => window.__viewer.cmpPanes());
+      assert(panesL1[0].recId === panesL0[0].recId,
+        `左格那张没被顶掉（${panesL1[0].recId} / ${panesL0[0].recId}）`);
+      assert(panesL1[1].active === true,
+        '活动侧跟着落点转到右侧（掩码/云量/状态栏跟着它）');
+
+      // L3：对比模式下拖到画布外 —— 给一句人话，别默默什么都没发生。
+      await page.evaluate(() => window.__viewer.setCmpMode('click'));
+      const lActiveBefore = await page.evaluate(() => window.__viewer.activeRec().id);
+      await drag.dragCard(page,
+        { cardName: PAN + '.jpg', clientX: ptsL.outside, clientY: ptsL.outsideY });
+      const lToast = await waitFor(page, () => {
+        const t = document.querySelector('.toast');
+        return t ? t.textContent.trim() : null;
+      }, 10000, '画布外拖卡片的那句 toast');
+      assert(lToast.includes('只能把影像拖到画布上'),
+        `画布外那一下给一句人话（${lToast}）`);
+      assert(await page.evaluate(() => window.__viewer.activeRec().id) === lActiveBefore,
+        '画布外那一下不改活动图');
+      await page.evaluate(() => window.__viewer.setCmpMode('off'));
+
+      // L4：拖**中间产物** jpg 进来。产物在真机上由 SR 跑出来（各边 2×），显示件
+      // `<编号>_sr.jpg` 是它自己那份。夹具里没有现成的，两条都现造：栅格 3200×1600
+      // （÷2 烤出 1600×800，与本体 1600×800 ÷2 = 800×400 差着一倍，断言因此能分清
+      // 「烤的是哪一份栅格」），本地那份拖进来的 jpg 1600×800（盘阵上没有同名 jpg
+      // → 判本地赢，像素用拖进来那张）。
+      const SR = SC + '_sr';
+      const srRaster = path.join(SC_DIR, SR + '.tif');
+      makeTif(srRaster, 3200, 1600);
+      const upSrJpg = path.join(upDir, SR + '.jpg');
+      makeJpg(upSrJpg, 1600, 800);
+      const lResBefore = countUrl(resolveRe);
+      const lDropBefore = countUrl(dropPreviewRe);
+      const lRecsBefore = await page.evaluate(() => window.__viewer.recs().length);
+      await input.uploadFile(upSrJpg);
+      try {
+        await waitFor(page, (n) => {
+          const rs = window.__viewer.recs();
+          const r = rs[rs.length - 1];
+          return rs.length > n && r.route === 'jpg' && r.stageKind === 'product';
+        }, 30000, '产物 jpg 关联上盘阵场景', lRecsBefore);
+      } catch (e) {
+        const dbg = await page.evaluate(() => {
+          const rs = window.__viewer.recs();
+          const r = rs[rs.length - 1];
+          const m = document.querySelector('.notice-modal');
+          return { n: rs.length, last: r && { name: r.name, route: r.route,
+            status: r.status, statusCls: r.statusCls, linkNote: r.linkNote },
+            modal: m ? m.querySelector('.nm-body').textContent.trim() : null,
+            err: document.querySelector('.err-box')?.textContent.trim() ?? null };
+        });
+        throw new Error(`L4 诊断：${JSON.stringify(dbg)}`);
+      }
+      const srRec = await lastRec();
+      assert(srRec.name === SR + '.jpg',
+        `rec 还是拖进来那个文件（${srRec.name}）`);
+      assert(srRec.stageKind === 'product' && srRec.stageLabel === 'SR',
+        `后端认出它是本次产物（kind=${srRec.stageKind} / 标签 ${srRec.stageLabel}）`);
+      assert(srRec.lqPath === null,
+        `关联上了但 lqPath 为空 —— 服务端拒绝把中间产物当可提交场景（${JSON.stringify(srRec.lqPath)}）`);
+      assert(srRec.sceneDir === SC_DIR.replace(/\\/g, '/'),
+        `仍属这一景（场景目录 ${srRec.sceneDir}）`);
+      assert(srRec.W === 3200 && srRec.H === 1600,
+        `W/H 取**产物自己**那份栅格 3200×1600，不是本体的 1600×800（${srRec.W}×${srRec.H}）`);
+      assert(srRec.thumbW === 1600 && srRec.thumbH === 800
+        && srRec.layout.includes('拖入的原图'),
+        `像素仍用拖进来那张原图（${srRec.thumbW}×${srRec.thumbH} / ${srRec.layout}）`);
+      const lTag = await waitFor(page, () => {
+        const t = document.querySelector('.toast');
+        return t && t.textContent.includes('仅用于对比') ? t.textContent.trim() : null;
+      }, 10000, '中间产物那句 toast');
+      assert(lTag.includes('修复请打开本体'),
+        `关联成功的提示如实说清它不能修（${lTag.slice(0, 60)}…）`);
+      // 三颗小标必须落到 DOM 上（store 里对、页面不更新是踩过的坑）：序号与本体
+      // 那张**同一个号** —— 这就是「同一景的图归在一组」那件事。
+      const cardChips = (n) => page.evaluate((name) => {
+        const item = [...document.querySelectorAll('.file-item')].find((el) => {
+          const nm = el.querySelector('.name');
+          return nm && nm.textContent.includes(name);
+        });
+        if (!item) return null;
+        const q = (s) => {
+          const e = item.querySelector(s);
+          return e ? e.textContent.trim() : null;
+        };
+        return { scn: q('.name .scn'), ord: q('.name .ord'), stage: q('.name .stage'),
+          ro: q('.tags .ro-tag'), name: item.querySelector('.name').textContent };
+      }, n);
+      const srChips = await cardChips(SR + '.jpg');
+      const scChips = await cardChips(SC + '.jpg');
+      assert(srChips.scn === '盘阵' && srChips.stage === 'SR',
+        `产物卡片上「盘阵 + SR」齐全（${JSON.stringify(srChips)}）`);
+      assert(Number(srChips.ord) > 0 && srChips.ord === scChips.ord,
+        `同一景共用同一个序号（产物 ${srChips.ord} / 本体 ${scChips.ord}）`);
+      assert(srChips.ro === '仅对比，不作修复',
+        `产物卡片多一颗只读小标（${srChips.ro}）`);
+      assert(scChips.ro === null,
+        `本体卡片没有那颗只读小标（${JSON.stringify(scChips.ro)}）`);
+      // 修复入口三处全堵：工具栏两颗按钮置灰（可见的那道），store 里那三道门是
+      // 键盘快捷键与程序化调用那条路（下面 L5 逐条打一遍）。
+      const srBtns = await toolbarState(page);
+      const lDrawBtn = await page.evaluate(() => {
+        const b = [...document.querySelectorAll('.toolbar button')]
+          .find((x) => x.textContent.trim() === '绘制掩码');
+        return b ? { disabled: b.disabled, title: b.title } : null;
+      });
+      assert(srBtns.sr === false && srBtns.bake === false,
+        `「提交 SR」「保存掩码到盘阵」都置灰（sr=${srBtns.sr} / bake=${srBtns.bake}）`);
+      assert(lDrawBtn && lDrawBtn.disabled === true
+        && lDrawBtn.title.includes('中间产物'),
+        `「绘制掩码」也置灰并写明理由（${lDrawBtn && lDrawBtn.title}）`);
+      // 落盘：后台静默烤的那一份是**产物自己**的栅格（3200×1600 ÷2 = 1600×800）。
+      // 本体那份是 800×400，差一倍 —— 这一条就是「烤的是哪一份」的可执行判据。
+      const srDropJpg = path.join(SC_DIR, SR + '_preview.jpg');
+      await waitNode(() => jpegSize(srDropJpg) !== null, 30000, '产物的 _preview.jpg 落盘');
+      const srSz = jpegSize(srDropJpg);
+      assert(srSz.w === 1600 && srSz.h === 800,
+        `场景目录里落下 ${SR}_preview.jpg，烤的是产物自己的栅格（${srSz.w}×${srSz.h}）`);
+      // 这一跳走的是拖入链那条端点，产物**不回**生产过程那条 /preview（两条落点不同）。
+      assert(countUrl(resolveRe) === lResBefore + 1
+        && countUrl(dropPreviewRe) === lDropBefore + 1,
+        `拖入链仍是 resolve 一次 + /preview-drop 一次`
+        + `（resolve +${countUrl(resolveRe) - lResBefore}`
+        + ` / drop +${countUrl(dropPreviewRe) - lDropBefore}）`);
+
+      // L5：三道门逐条打一遍。掩码这一条是本次唯一的破坏性风险 —— 产物尺寸
+      // （3200×1600）的掩码配本体的 lq_path 写出去，本体那份掩码就被静默盖掉了，
+      // 所以判据取**盘上那份掩码的 mtime 一动不动**，不是「有没有报错」。
+      // 三处共用同一句话（`lib/stage.ts` 的 stageRefusal），文案只在第一处验一次
+      // —— 后两处再验同一个串的话，读到的是不是本次写进去的就说不清了（错误条
+      // 六秒才自清）；后两处改为各验各的**效果**。
+      const srMaskPath = path.join(SC_DIR, SC + '_mask.tif');
+      const srMaskMtime = fs.existsSync(srMaskPath) ? fs.statSync(srMaskPath).mtimeMs : null;
+      assert(srMaskMtime !== null, 'E2 段写下的本体掩码还在（对照组）');
+      assert(srRec.serverMaskPath === null,
+        `服务端一个掩码路径都没给产物（${JSON.stringify(srRec.serverMaskPath)}）—— 第一道锁`);
+      const lRoisBefore = await page.evaluate(() => window.__viewer.getRois().length);
+      await page.evaluate(() => window.__viewer.enterDraw());
+      const lDrawErr = await waitFor(page, () => {
+        const el = document.querySelector('.err-box');
+        return el && el.textContent.includes('不作修复')
+          ? el.textContent.replace(/\s+/g, ' ').trim() : null;
+      }, 10000, '「绘制掩码」的拒绝语');
+      assert(lDrawErr.includes('中间产物') && lDrawErr.includes('请先打开本体'),
+        `「绘制掩码」给出人话拒绝（${lDrawErr.slice(0, 48)}…）`);
+      assert(await page.evaluate(() => window.__viewer.getRois().length) === lRoisBefore,
+        `也没进绘制态（ROI 仍是 ${lRoisBefore} 个）`);
+      const lBakeOk = await page.evaluate(() => window.__viewer.bakeMaskToServer());
+      await sleep(300);
+      assert(lBakeOk === false, `「保存掩码到盘阵」直接返回 false（${lBakeOk}）`);
+      assert(fs.statSync(srMaskPath).mtimeMs === srMaskMtime,
+        '本体那份掩码一个字节都没被动过（产物写回本体是这次唯一要防的事）');
+      const lTasksBefore = await page.evaluate(async (ab) => {
+        const r = await fetch(ab + '/api/queue');
+        return (await r.json()).tasks.length;
+      }, apiBase);
+      await page.evaluate(() => window.__viewer.submitSr());
+      await sleep(400);
+      assert(!(await page.evaluate(() => location.pathname)).endsWith('/queue'),
+        '没有跳去队列页（拒绝发生在取数之前，不是"提交了才报错"）');
+      const lTasksAfter = await page.evaluate(async (ab) => {
+        const r = await fetch(ab + '/api/queue');
+        return (await r.json()).tasks.length;
+      }, apiBase);
+      assert(lTasksAfter === lTasksBefore,
+        `队列里一条都没多（${lTasksBefore} → ${lTasksAfter}）`);
 
       /* ---------- I. 全程无错 ---------- */
       console.log('\n[I] 全程无错');

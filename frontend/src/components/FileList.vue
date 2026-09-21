@@ -8,12 +8,20 @@
  */
 import { computed } from 'vue';
 import { useViewerStore } from '../stores/viewer';
+import { isIntermediateStage } from '../lib/stage.js';
 import FileThumb from './FileThumb.vue';
 
 const store = useViewerStore();
 
 const collapseBtn = computed(() => (store.sidebarCollapsed ? '»' : '«'));
 const collapseTitle = computed(() => (store.sidebarCollapsed ? '展开文件列表' : '收起文件列表'));
+
+/* 三颗小标各说一件事，用法（尤其「序号」是会话内编号而不是盘阵上的编号）写进
+   title —— 不然用户会以为那颗数字是盘阵给景编的号，回头去别处找同一个号。 */
+const SCENE_TITLE = '盘阵场景：服务器烘焙 JPG（这张图在盘阵上有对应场景目录）';
+const ORD_TITLE = '同一景（同一个场景目录）的图共用这个序号 —— 本次会话内按出现顺序发号，不是盘阵上的编号';
+const STAGE_TITLE = '环节：本体（PAN / 输入影像） / SR（本次超分产物） / NOSR（上一次超分产物）';
+const RO_TITLE = '中间产物仅用于与本体对比，不作修复 —— 掩码与 SR 都建在本体影像的网格上，请打开本体再修复与提交';
 
 function fmtBytes(n: number): string {
   if (n >= 1073741824) return (n / 1073741824).toFixed(2) + ' GB';
@@ -38,14 +46,20 @@ function linkTag(note: string): string {
       :key="rec.id"
       class="file-item"
       :class="{ active: rec.id === store.activeId }"
+      draggable="true"
       @click="store.activate(rec.id)"
+      @dragstart="store.startRecDrag(rec, $event)"
+      @dragend="store.endRecDrag()"
     >
       <FileThumb :rec="rec" />
       <!-- × 是 float:right，必须留在**名字行里面**：放到缩略图之前会让浮动框去挤
            横幅那个块（横幅是 BFC，会为了避开浮动而整体缩窄），视觉上就是缩略图缺一角。 -->
       <div class="name">
         <span class="close" title="移除" @click.stop="store.removeRec(rec.id)">×</span>
-        <span v-if="rec.route === 'jpg'" class="scn" title="盘阵场景：服务器烘焙 JPG">盘阵</span>{{ rec.name }}
+        <!-- 三颗小标挤在一行里、**不留换行**：换行会被 Vue 编成空白文本节点，
+             名字的 textContent 会多出空格（e2e 有整串比对名字的断言）。间距一律
+             由 CSS 的 margin-right 给。 -->
+        <template v-if="rec.route === 'jpg'"><span class="scn" :title="SCENE_TITLE">盘阵</span><span v-if="rec.sceneDir" class="ord" :title="ORD_TITLE">{{ store.sceneOrdinalOf(rec) }}</span><span class="stage" :class="rec.stageKind" :title="STAGE_TITLE">{{ rec.stageLabel }}</span></template>{{ rec.name }}
       </div>
       <div class="meta">
         {{ fmtBytes(rec.size) }}
@@ -58,6 +72,13 @@ function linkTag(note: string): string {
            等于没写（用户只看得到「完成，解码耗时…」）。整句理由进 title。 -->
       <div class="tags">
         <span class="status" :class="rec.statusCls">{{ rec.status }}</span>
+        <!-- 中间产物：说清它与本体的关系。卡片上那三颗小标只说「哪一景、哪个环节」，
+             这一条说的是「所以你不能对它做什么」。 -->
+        <span
+          v-if="isIntermediateStage(rec.stageKind)"
+          class="link-tag ro-tag"
+          :title="RO_TITLE"
+        >仅对比，不作修复</span>
         <span v-if="rec.linkNote" class="link-tag" :title="rec.linkNote">{{ linkTag(rec.linkNote) }}</span>
       </div>
     </div>
@@ -121,17 +142,36 @@ function linkTag(note: string): string {
   box-shadow: 0 0 0 1px rgba(61, 169, 164, 0.15);
 }
 .file-item .name { font-weight: 600; color: var(--ink); word-break: break-all; }
-.file-item .name .scn {
+/* 名字行里的小标（盘阵 / 序号 / 环节）：同一条基线、同样的圆角与内距，
+   `vertical-align: 1px` 把 10px 的小方块抬到与名字的视觉中线上。
+   间距只在每个小标自己的 margin-right 上 —— 模板里刻意没有换行。 */
+.file-item .name .scn,
+.file-item .name .ord,
+.file-item .name .stage {
   display: inline-block;
-  margin-right: 6px;
+  margin-right: 4px;
   padding: 0 6px;
   font-size: 10px;
   font-weight: 600;
-  color: #fff;
-  background: var(--accent-grad);
   border-radius: 4px;
   vertical-align: 1px;
 }
+.file-item .name .scn { color: #fff; background: var(--accent-grad); }
+/* 序号：中性面。它是索引不是状态，不该跟环节抢颜色。 */
+.file-item .name .ord {
+  color: var(--ink-sub);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  min-width: 8px;
+  text-align: center;
+}
+/* 环节：三色区分。取 --cmp-a/--cmp-b 这一对（2026-09-20 挑的蓝/琥珀，对红绿色盲
+   安全，且刻意避开了青绿族与 ok/warn/err 三个语义色 —— 环节是**位置标识**，
+   不该让人读成「哪个更好」）；本体另用青绿软底，与「盘阵」那颗呼应。 */
+.file-item .name .stage { color: var(--ink-sub); background: var(--surface-2); border: 1px solid var(--line); }
+.file-item .name .stage.input { color: var(--accent-deep); background: var(--accent-soft); border-color: var(--accent-1); }
+.file-item .name .stage.product { color: var(--cmp-a); background: var(--cmp-a-bg); border-color: var(--cmp-a-line); }
+.file-item .name .stage.nosr { color: var(--cmp-b); background: var(--cmp-b-bg); border-color: var(--cmp-b-line); }
 .file-item .meta { color: var(--ink-sub); font-size: 11px; margin-top: 3px; }
 /* 状态与关联结果同排一行，都是短标签（见模板注释）。 */
 .file-item .tags { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 4px; }
@@ -149,6 +189,9 @@ function linkTag(note: string): string {
 /* 关联失败：比 status 弱一档（它不是错误，是「这张图不在盘阵上」）——
    完整原因（哪条候选、缺什么）在 title 里。 */
 .file-item .link-tag { color: var(--ink-faint); cursor: help; }
+/* 只读（中间产物）：比「未找到目录」重一档 —— 那条是「没关联上」，这条是
+   「关联上了，但这份不是可修复对象」，得让眼睛停一下。 */
+.file-item .ro-tag { color: var(--warn); border-color: var(--warn-line); background: var(--warn-bg); }
 .file-item .close {
   float: right;
   color: var(--ink-faint);

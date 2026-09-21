@@ -389,6 +389,41 @@ RUNNING→COMPLETED 谁把 `changed` 拿走，在那里挂入队钩子必然偶�
 `set_preview_state` **不碰 `updated_at`**，`put_sr_task` 的 UPDATE 分支**清这两列**（同一 suffix
 重跑必须重新武装，否则第二次跑完永远停在旧 `done`）。
 
+### 4.10 拖入 jpg 的后台静默烤（2026-09-21）
+
+用户把场景目录里的 jpg（显示件或中间产物）拖进查看器，关联成功之后**顺手**在场景目录里
+留下 `<该环节栅格的 stem>_preview.jpg`。这一节只讲那条烘焙，认环节的判据见
+[api-contract.md](../planning/api-contract.md) §3.5。
+
+**落点是 `_preview.jpg` 而不是 `.preview.jpg`，这是两套命名，别当成一回事**：
+
+| | 谁写的 | 名字 | 谁在读 |
+|---|---|---|---|
+| 预览缓存 | `ensure_preview_jpg`（惰性 / 急烤） | `<stem>.preview.jpg` | 服务端自己（`hasPreview` / `/preview` 命中） |
+| 拖入链 | `POST /api/scenes/{id}/preview-drop` | `<stem>_preview.jpg` | 给人看的：`ls` 一眼就知道这份图有预览 |
+
+两者刻意不互相顶替：`_preview.jpg` 在 `scene_search.is_scene_file` 的白名单**之外**（它是
+「派生物」，不是场景件），所以它不会被当成新的一类图收进列表；而缓存那份的档位戳
+（§4.8）与规则签名（§4.6）只对 `.preview.jpg` 有意义，`_preview.jpg` 不参与任何命中判定。
+
+**静默**是用户口径，也是实现约束（`stores/viewer.ts::bakeDropPreview`）：拖进来的 jpg 若
+判本地那份赢（§4.6，本地那份更清晰时），展示像素用**用户拖进来那张原图**，同时
+`void fetch(...).catch(() => {})` 发一跳 —— 不 `await`、不占遮罩、不给 `onPhase`、不看结果。
+两个直接后果：
+
+- **不阻塞**：用户拿到画面不用等一次读大图（真机上产物的 ÷2 也是几十秒量级），像素也
+  不降清。烤失败只是盘阵上少一份预览，不该在用户眼前报错。
+- **e2e 的写法**：因为它不是请求-响应式的，`.e2e/test-manual-scene.js` E2/L4 只能**轮询
+  落盘**（`waitNode(() => jpegSize(p) !== null)`），断言的是「文件最终在」+「烤的是哪一份
+  栅格」（按尺寸区分：本体 1600×800 ÷2 = 800×400，产物 3200×1600 ÷2 = 1600×800，差一倍）。
+
+**为什么必须走服务端**：真机页面是 `http://内网IP`，SecureContext 的浏览器 API（`showSaveFilePicker`
+一类）在那里根本不存在，页面无权往盘阵写任何东西。写盘阵只有一条路：交给后端（跑在盘阵
+那台机器上、以 nginx 身份写）。
+
+**只在「本地那份赢」时分岔**：判服务端那份赢时（§4.6）本来就发过 `/preview-drop` 了，
+同一条请求不重复发 —— 那一路的字节日志本来就没人用，不额外多跳。
+
 ---
 
 ## 5. 常见问题

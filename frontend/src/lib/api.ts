@@ -180,8 +180,18 @@ export interface SceneResolveResult {
     writable: boolean;
     /** 这个目录能不能提交 SR。目录形态恒为 true；**粘单个 .tif 时可能为 false**
      *  —— 随手贴的一张图不该拿到提交入口，否则 SR 在盘阵上根本跑不起来。
-     *  `row.lq_path` 与它同源同真假（场景库入口直接读的是 row.lq_path）。 */
+     *  `row.lq_path` 与它同源同真假（场景库入口直接读的是 row.lq_path）。
+     *  **拖进来的中间产物（`kind != 'input'`）也是 false**：那一类的 `row.lq_path`
+     *  被服务端置空，前端别指望能提交（见 kind）。 */
     sr_capable: boolean;
+    /** 拖进来的这份影像属于场景里的哪个环节（2026-09-21 起中间产物也能关联）。
+     *  `'input'` = 本体（显示件 / 输入影像，可修复可提交）；`'product'` = 本次
+     *  SR 产物；`'nosr'` = 上一次的产物。**只有 kind='input' 才是可修复对象** ——
+     *  掩码与 SR 建在本体影像的网格上，产物的尺寸是它的倍数。 */
+    kind: 'input' | 'product' | 'nosr';
+    /** 本次产物的 suffix（从**文件名本身**切出来的那一段，不是查任务库来的）。
+     *  kind='input' 时是空串。标签与提示用。 */
+    suffix: string;
   };
 }
 

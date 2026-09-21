@@ -23,6 +23,7 @@ import type { StretchMode } from '../lib/tifDecode.js';
 import { thumbToOrig } from '../lib/viewMath.js';
 import MaskGen from '../lib/maskgen.js';
 import type { SceneOpenMeta } from '../lib/scene.js';
+import type { StageKind } from '../lib/stage.js';
 import { useViewerStore } from '../stores/viewer.js';
 import type { ViewerRec } from '../stores/viewer.js';
 import { useQcListStore } from '../stores/qclist.js';
@@ -51,9 +52,18 @@ export interface ViewerRecSummary {
   paintedMode: StretchMode | null;
   /** 不透明场景 id（route='jpg' 才有；升级/打开盘阵场景后非空）。 */
   sceneId: string | null;
+  /** 场景目录（卡片上「同一景共用一个序号」那颗小标的分组键，与 `lqPath` 正交：
+   *  中间产物的 `lqPath` 是空的、这一项照给）。库外单张图为 null。 */
+  sceneDir: string | null;
+  /** 环节与它的标签（卡片上「本体 / SR / NOSR」那颗小标的数据源）。 */
+  stageKind: StageKind | null;
+  stageLabel: string | null;
   /** 反推关联**失败**时服务端给的原因（成功或没试过则 undefined）。
    *  单独暴露：rec.status 会被解码进度覆盖，失败原因在别处看不到。 */
   linkNote?: string;
+  /** 缩放预热是否已经做过这份显示画布（见 stores/viewer.warmZoom）。
+   *  探针/回归要能分辨「预热没做」与「预热做了但不灵」。 */
+  warmed: boolean;
 }
 
 export interface ViewerHook {
@@ -90,6 +100,10 @@ export interface ViewerHook {
   /** 模态提示当前内容（没弹则 visible=false）。全局单例，与具体 rec 无关。 */
   modal: () => ReturnType<typeof useViewerStore>['modal'];
   hideModal: () => void;
+  /** 解码/预热遮罩是否还盖着。**状态就绪 ≠ 可以发真实输入**：遮罩盖着画布时
+      `page.mouse.wheel` 会被它吃掉（命中测试走它，合成 dispatchEvent 才绕得过），
+      于是「手势零效果」会被误读成「渲染没干活」。发真实鼠标事件前先等它收起。 */
+  overlayVisible: () => boolean;
   // 测试观测（Vue 无全局 recs → 摘要快照）
   recs: () => ViewerRecSummary[];
   activeRec: () => ViewerRecSummary | null;
@@ -197,7 +211,11 @@ function summarize(rec: ViewerRec): ViewerRecSummary {
     thumb: (rec.thumb as unknown as HTMLCanvasElement | null),
     paintedMode: rec.paintedMode,
     sceneId: rec.sceneId,
+    sceneDir: rec.sceneDir ?? null,
+    stageKind: rec.stageKind ?? null,
+    stageLabel: rec.stageLabel ?? null,
     linkNote: rec.linkNote,
+    warmed: !!rec.thumb && rec.warmed === rec.thumb,
   };
 }
 
@@ -233,6 +251,7 @@ export function mountE2EHooks(): ViewerHook {
     bakeMaskToServer: () => useViewerStore().bakeMaskToServer(),
     modal: () => useViewerStore().modal,
     hideModal: () => useViewerStore().hideModal(),
+    overlayVisible: () => !!useViewerStore().overlay.visible,
     recs: () => useViewerStore().recs.map(summarize),
     activeRec: () => {
       const rec = useViewerStore().activeRec;

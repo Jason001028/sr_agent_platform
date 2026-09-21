@@ -1921,6 +1921,74 @@ E4 末尾那条严格等于 +1 的计数断言读到 `drop +2`。本轮撞上一
 确认去重本身正常（同一份文件连传三次仍只有一条 rec）。根治要么在两次上传之间等 rec 出现、要么放宽那条断言，
 属另一段测试的取舍，未动。
 
+### 2026-09-21 · 左栏卡片拖不进画布 + 拖入的产物 jpg 关联不上盘阵（开发机）
+
+**用户原话**：「查看器左侧栏目图像无法拖动到中间区域预览，而是只能与文件夹交互；拖动进来的 jpg，
+文件夹不会生成 `NOSR_preview.jpg`，而且 preview 无法关联至盘阵」。开工前用两轮提问钉住口径：
+拖的是**场景目录里的显示件** `<目录名>.jpg`；**真正要超分的永远是本体**（RC 场景的 `PAN.tif`、SC 场景的
+`<目录名>.tif`），中间产物的 preview 只需要「关联到盘阵 + 明确提示不参与修复」；左栏卡片要能用
+「盘阵 + 序号 + 环节标（`PAN`/`SR`/`NOSR`）」区分同一景的不同环节；拖 jpg 之后**后台静默烤**
+一份 `<源名>_preview.jpg`（不阻塞、不弹遮罩、不报进度，展示像素仍用用户拖进来那张）。
+
+**Bug 1 是双重的、且这条链根本不存在**：`FileList.vue` 的 `.file-item` 没带 `draggable`（浏览器压根
+不发 `dragstart`），而 `TifCanvas.vue` 的落图门只认 `dataTransfer.types` 里的 `'Files'`，页面内拖放
+（不含 Files）在 `onDrop` 里直接 `return`。改：卡片加 `draggable="true"` +
+`@dragstart/@dragend` → store 的 `startRecDrag/endRecDrag` 往 `DataTransfer` 里放自定义 MIME
+`application/x-sr-rec`（不用 `text/plain`：那会让画面上拖选文字也被当成换图）；画布的门放宽成
+`dragHasPayload`（`Files` **或** `REC_MIME`），`onDrop` 在 `files.length` 那道早退**之前**先读
+`REC_MIME`，命中就 `activate(id, side)`（`side` 仍由 `dropSide(e)` 给，分屏下按落点进格）。
+`.txt`/影像文件那条老路一个字没动。
+
+**Bug 2 有两半**。前半：本地 jpg 胜出那条分支（`localJpg && !useServer`）**一次服务端往返都不发**，
+自然没有 `_preview.jpg` 落进场景目录 —— 改成本地赢时也 `void fetch(/preview-drop).catch(() => {})`
+一发（不 await、不占遮罩、不看结果、不发 `onPhase`）。后半：中间产物的目录名是从**整个文件名**反推的，
+带着 `_sr` 尾巴的那份名字反推出的目录根本不存在，所以它连 resolve 都过不去。改：jpg 专属的
+**第二阶段候选**（`de_suffixed_stems` 去尾段后重新反推，尾段两种读法各给一条；**只在前一阶段全落空时
+才展开**，常见情形一个 stat 都不多花），命中后再过 `stage_of_jpg` 认环节 —— **真门是「同级栅格真的
+在」**，名字切得干净只说明它长得像产物名（`_cloud.jpg` 同样切得干净），另配 `_NON_STAGE_TAILS` 小名单
+挡住那些真有同名栅格的派生件。`resolved` 随之多出 `kind` / `suffix`。
+
+**唯一的破坏性风险是「产物上画掩码写回本体」**：`bakeMaskToServer` 是拿 `rec.lqPath` + `rec.W/H` 去
+POST `/api/masks` 的，产物尺寸的 W/H 配上本体的 lq_path，后端会把一张产物尺寸的掩码**静默写到本体的
+掩码文件上**。两道锁：服务端 `kind != 'input'` 时把 `row.lq_path` 置空、`sr_capable=false`、
+`mask_path=null`（第一道），前端 `stageKind` 门（`lib/stage.ts`）+ 工具栏置灰（第二道）。
+`row` 同时改为描述**该环节自己**那份栅格 —— 产物的 W/H 是本体的倍数，拿本体的尺寸建画布整张比例都是错的。
+
+**顺带修掉一个既有缺陷（本次新候选把它顶了出来）**：`backend/pathguard.scene_name_layers` 的段数
+守卫只挡到 `_SCENE_IDX`，六段的名字会走进 `seps[_SCENE_IDX]` 越界 —— 本该 400 的输入变成 500，
+uvicorn 直接断连，浏览器侧表现为 `TypeError: Failed to fetch`（第一次 e2e 跑就是死在这里）。
+修法是补齐门槛（段数不足即判不合规则），不是加 try/except：改完 `infer_scene_paths` 对它返回 `[]`，
+那条候选自然被丢掉，错误码回到 400。两条新用例钉住（`test_paths.py` 六段名 → `None`；
+`test_scene_resolve.py` 七段名的 jpg 拖入 → 200，末段换成 `002` → 404 且 `detail` 仍含「目录不存在」）。
+
+**一个流程上的取舍**：计划里 `/siblings` 每项补 `suffix` 那一条**没做**。落地时发现响应顶层本来就有
+`suffix` / `suffixFrom`，前端 `openSceneSibling` 用的就是它，再加一份是重复。芯片打开那条路同时补上
+`stageKind: item.kind` —— 否则同一份产物会变成「拖进来不能改、芯片打开能改」两个说法。
+
+**验证（开发机）**：后端 `python -m pytest backend/tests -q` → **642 passed / 4 skipped**；
+前端 `npm test` → **325 passed**（新增 `lib/__tests__/stage.test.ts` 8 条）、`vue-tsc` 零错误、
+`npm run build` 通过；e2e `.e2e/test-vue-viewer.js` **161** 项、`test-scenes.js` **79** 项全绿
+（这两套里有对 `.name` 文案的整串比对，卡片上的小标因此只在 `route==='jpg'` 且关联上了的行上渲染，
+且模板里刻意不留换行 —— 换行会被 Vue 编成空白文本节点，`textContent` 就多一个空格）。
+`test-manual-scene.js` → **194 项断言**（新增 L 段 L1–L5：卡片自己带票拖进
+画布 / 分屏按落点进 B 格 / 对比模式画布外沿用那句 toast；拖产物 jpg → 卡片上「盘阵+序号+SR」三标齐全
+且序号与本体**同号**、三颗修复按钮置灰、`<编号>_sr_preview.jpg` 落盘且**烤的是产物自己的栅格**
+（1600×800，与本体那份 800×400 差一倍）；三道修复入口逐条打一遍 —— 绘制掩码被拒且不进绘制态、
+保存掩码返回 false 且**本体那份掩码的 mtime 一个字节没动**、提交 SR 不跳队列页且队列一条不多）。
+
+**记一个既有 flake（不是本轮引入，已用对照实验定性，未擅自改）**：`.e2e/test-platform.js` 的
+「耗时列给出终态耗时（—）」会偶发失败（页内那行已显示「完成」，但耗时列还是「—」—— 页内那份
+停在上一次 GET 的快照上、SSE 帧还没到）。做法是 `git stash` 掉本轮全部改动 → 重新 `npm run build`
+→ 同一台机器上连跑对照：**基线 2/4 通过、带本轮改动 2/3 通过**，两边一样地偶发，与本轮无关。
+另有一条同类的（产物急烤那条：`waitFor` 的判据 `t.preview_state` 会把中间态 `'running'` 也算命中，
+于是偶发读到 `running` 而非 `skipped`，note 为空）。两条都属「测试自己的等待条件不够严」，
+要根治得改等待判据（前者等耗时列 != '—'、后者排除 `'running'`），留待下一轮。
+
+**真机待确认**：① 拖产物 jpg（真机上由 SR 跑出来的那份）能否关联上、三颗小标是否如预期；
+② `SR_SCENE_PATH_TEMPLATE` 非默认的部署上，去尾段反推是否仍成立（默认模板下候选目录名就是由名字
+拼出来的，这一条通常直接成立）；③ 左栏卡片拖放是页面内行为，与 `http://内网IP` 那套限制无关，但
+**真机上「拖进来看」的操作习惯要用户确认一遍**。
+
 ## 5. 交接（给新窗口）
 
 > 开新窗口时按用途挑一份整篇粘过去：[handoff-prompt.md](handoff-prompt.md)（梳理框架与当前思路）、
@@ -1966,7 +2034,7 @@ E4 末尾那条严格等于 +1 的计数断言读到 `drop +2`。本轮撞上一
 - 生产命名/反推规则：`docs/sr_code/production-scene-naming.md`（9 段名字 + 六层目录 + 由文件名反推场景目录）；实现唯一真源 `backend/pathguard.py::scene_name_layers` / `infer_scene_paths`
 - 经验文档：`docs/experience/gui-experience.md`
 - 真机预演（无内网机时可跑）：`backend/tests/test_local_chain.py`（4 例，除 SR 算法外全真：真 config/批脚本/bash/校验器/退出码文件；`code_0817_prod.py` 换 stub）
-- E2E 测试：`.e2e/`（**2026-09-15 起入库**，只忽略 `node_modules/`+`fixtures/`+大图）——`test-vue-viewer.js` **58 断言**本地文件回归（含 G 段待修复清单）· `test-scenes.js` **65 断言**场景 http 打开 · `test-platform.js` **22 断言** REST/SSE 全链路 + 布局（1600 视口实测页宽同宽 + 耗时列 nowrap）· `test-manual-scene.js` **98 断言**盘阵任意场景目录（粘 `W:\…` 打开 → 画掩码 → 写盘阵 → 提交 SR，含 PAN 掩码命名与反推失败两条路；**G 段**粘单个 `.tif` 文件路径 → 预览按各边 1/2 烤进源图目录、且不能提交 SR；**H 段**《待修复清单》写回：导入 GBK 清单 → 粘路径 → 同步 → **从磁盘按字节读回**比对）；跑法 `cd .e2e && node test-<name>.js`（前置 `cd frontend && npm run build`；puppeteer-core + 无界面 Chrome + 本地静态服务顶替 nginx + uvicorn 起真后端）。四个数字 **2026-09-18 实测复核**过（此前该行停在 35/65/22/48，其中两个已过期：09-18 加 G 段后 `test-vue-viewer.js` 38 → **58**；`test-manual-scene.js` 记的 48 是更早的值，当天加 H 段后实测已到 **98**）
+- E2E 测试：`.e2e/`（**2026-09-15 起入库**，只忽略 `node_modules/`+`fixtures/`+大图）——`test-vue-viewer.js` **58 断言**本地文件回归（含 G 段待修复清单）· `test-scenes.js` **65 断言**场景 http 打开 · `test-platform.js` **22 断言** REST/SSE 全链路 + 布局（1600 视口实测页宽同宽 + 耗时列 nowrap）· `test-manual-scene.js` **194 断言**盘阵任意场景目录（粘 `W:\…` 打开 → 画掩码 → 写盘阵 → 提交 SR，含 PAN 掩码命名与反推失败两条路；**G 段**粘单个 `.tif` 文件路径 → 预览按各边 1/2 烤进源图目录、且不能提交 SR；**H 段**《待修复清单》写回：导入 GBK 清单 → 粘路径 → 同步 → **从磁盘按字节读回**比对；**J/K 段**对比模式的窗口拖放与三类图芯片、后台预取边界；**L 段**左栏卡片带票拖进画布、拖中间产物 jpg 关联盘阵并挡住三处修复入口 —— 见 §4 该日条目）；跑法 `cd .e2e && node test-<name>.js`（前置 `cd frontend && npm run build`；puppeteer-core + 无界面 Chrome + 本地静态服务顶替 nginx + uvicorn 起真后端）。四个数字 **2026-09-18 实测复核**过（此前该行停在 35/65/22/48，其中两个已过期：09-18 加 G 段后 `test-vue-viewer.js` 38 → **58**；`test-manual-scene.js` 记的 48 是更早的值，当天加 H 段后实测已到 **98**）
 - 测试图：`test-tifs/`（gitignore）、`frontend/fixtures/`（入库小图）
 - 记忆：`~/.claude/projects/.../memory/MEMORY.md`（6 条索引：local-vendor / browser-2gb / intranet-data / real-files-1row-strips / openai-pin / **phase4-disk-array-reads-jpg**）
 

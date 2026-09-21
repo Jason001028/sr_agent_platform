@@ -121,6 +121,9 @@ export const useScenesStore = defineStore('scenes', () => {
         // 裸 .tif 且父目录不是场景目录时后端把它置 null（= 不能提交 SR），
         // 这里不用再判 sr_capable —— 与 resolved.sr_capable 同源同真假。
         lqPath: row.lq_path,
+        // 场景目录（同上，与能不能提交无关）：卡片上那颗「同一景共用一个序号」
+        // 的小标按它分组，场景库开出来的行同样该有号。
+        sceneDir: row.lq_path,
         // 手工场景（resolvePath 进来的）：把后端推导的掩码路径一并带上，
         // 否则这条入口的 rec 少一个 serverMaskPath，「保存掩码到盘阵」前后
         // 显示的掩码路径与查看器那条入口不一致（两边最终都以后端回的为准）。

@@ -771,6 +771,213 @@ class TestResolveFingerprint(ResolveBase):
         self.assertEqual(r.status_code, 200, r.text)
 
 
+class TestResolveStages(ResolveBase):
+    """拖进来的 jpg 属于哪个环节：本体 / 本次产物 / 上一次产物（2026-09-21）。
+
+    用户口径：一景里只有**本体**是可修复对象（SR 与掩码都建在它的网格上），中间
+    产物只要关联到盘阵、标出环节、明说「仅对比不作修复」。所以这一节钉两件事：
+
+    1. 产物 / 上一次产物的名字都要**认得出来**（suffix 从文件名本身切，不查任务库）；
+    2. 认出来之后这一行描述的是**产物自己**（W/H 是它那张栅格的），而
+       `lq_path` / `sr_capable` / `mask_path` 一律**摘掉** —— 否则前端会拿产物的
+       W/H 配本体的 lq_path，把一张产物尺寸的掩码写到本体的掩码文件上。
+    """
+
+    #: 产物那张栅格用的尺寸，刻意与本体（320×640）不同：判「这一行描述谁」全靠它。
+    PROD_W, PROD_H = 640, 1280
+
+    def _write_jpg(self, path: Path, w: int = 64, h: int = 32) -> Path:
+        arr = (np.arange(w * h).reshape(h, w) % 256).astype(np.uint8)
+        Image.fromarray(arr).save(path, quality=90)
+        return path
+
+    def _write_raster(self, path: Path, w: int, h: int) -> Path:
+        arr = (np.arange(w * h).reshape(h, w) % 65535).astype(np.uint16)
+        tifffile.imwrite(path, arr, photometric="minisblack")
+        return path
+
+    def resolve(self, **body):
+        return self.client().post("/api/scenes/resolve", json=body)
+
+    def _make_product(self, suffix: str, nosr: bool = False):
+        """本体场景 + 一份 `<目录名>_<suffix>[_NOSR]` 的栅格与显示件 jpg。"""
+        d = self.make_scene()
+        name = f"{SCENE_NAME}_{suffix}" + ("_NOSR" if nosr else "")
+        raster = self._write_raster(d / f"{name}.tif", self.PROD_W, self.PROD_H)
+        jpg = self._write_jpg(d / f"{name}.jpg")
+        return d, name, raster, jpg
+
+    def test_product_jpg_links_but_cannot_repair(self):
+        """本次产物：认得出、描述的是它自己、但**没有**可提交的落点。"""
+        d, name, raster, jpg = self._make_product("sr")
+
+        r = self.resolve(name=jpg.name, size_bytes=jpg.stat().st_size)
+
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["resolved"]["kind"], "product")
+        self.assertEqual(body["resolved"]["suffix"], "sr")
+        # 这一行描述**产物自己**：id/名字/尺寸都指向那份 `_sr.tif`
+        row = body["row"]
+        self.assertEqual(row["name"], name)
+        self.assertEqual((row["W"], row["H"]), (self.PROD_W, self.PROD_H))
+        self.assertEqual(row["size_bytes"], raster.stat().st_size)
+        # 但「能不能提交 / 掩码写哪」三件全摘 —— 见类注释第 2 条
+        self.assertIsNone(row["lq_path"], "产物没有可提交的 lq_path")
+        self.assertFalse(body["resolved"]["sr_capable"])
+        self.assertIsNone(body["resolved"]["mask_path"])
+        self.assertFalse(body["resolved"]["mask_exists"])
+        # 本体那一路仍然如实回报（SR 真要跑的是它）
+        self.assertEqual(body["resolved"]["input_name"], f"{SCENE_NAME}.tif")
+        self.assertEqual(body["resolved"]["dir"], d.as_posix())
+
+    def test_nosr_jpg_is_the_previous_product(self):
+        """上一次产物：`<目录名>_<suffix>_NOSR` —— 环节是 nosr，suffix 仍是那一段。"""
+        _, name, _, jpg = self._make_product("sr", nosr=True)
+
+        r = self.resolve(name=jpg.name, size_bytes=jpg.stat().st_size)
+
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["resolved"]["kind"], "nosr")
+        self.assertEqual(r.json()["resolved"]["suffix"], "sr")
+        self.assertIsNone(r.json()["row"]["lq_path"])
+
+    def test_suffix_with_underscore_is_cut_whole(self):
+        """带下划线的 suffix（`sr_2`）**整段**切，不按段数猜。
+
+        按段数猜（去一段）会切出 `_2`、反推出一个叫 `…_sr` 的目录；真机上的 suffix
+        是用户自定的短串（`SR_code` 侧只限 `[A-Za-z0-9_-]{1,16}`），带下划线完全合法。
+        """
+        d, name, _, jpg = self._make_product("sr_2")
+
+        r = self.resolve(name=jpg.name, size_bytes=jpg.stat().st_size)
+
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["resolved"]["suffix"], "sr_2")
+        self.assertEqual(r.json()["row"]["name"], name)
+        self.assertEqual(r.json()["row"]["lq_path"] is None, True)
+
+    def test_product_jpg_without_its_raster_404(self):
+        """**真门**：同名栅格不在 → 不认这一份。
+
+        这条同时挡住「切得干净就算数」那种松判据：`<目录名>_sr.jpg` 的名字确实能
+        切出本景目录名（本体目录是存在的），但盘阵上并没有 `<目录名>_sr.tif` ——
+        那份 jpg 是别处拿来的图，不是本景的产物。此时不得退回按本体关联：用户看的
+        是产物，却拿到本体的尺寸与可提交入口，掩码坐标整片错位。
+        """
+        d = self.make_scene()
+        jpg = self._write_jpg(d / f"{SCENE_NAME}_sr.jpg")
+
+        r = self.resolve(name=jpg.name, size_bytes=jpg.stat().st_size)
+
+        self.assertEqual(r.status_code, 404, r.text)
+        self.assertIn("不是本景的输入件或中间产物", r.json()["detail"])
+
+    def test_cloud_jpg_with_a_raster_still_404(self):
+        """云量图这类派生件：**即便同名栅格真的在**，也不认它是产物。
+
+        `_cloud` 与 `_thumb` 在真机目录里是真有栅格的（`scene_search` 的文档里点名
+        过），只靠「同级栅格在」挡不住它们 —— 那一小张显式名单就是这么来的。
+        """
+        d = self.make_scene()
+        self._write_raster(d / f"{SCENE_NAME}_cloud.tif", 160, 320)
+        jpg = self._write_jpg(d / f"{SCENE_NAME}_cloud.jpg")
+
+        r = self.resolve(name=jpg.name, size_bytes=jpg.stat().st_size)
+
+        self.assertEqual(r.status_code, 404, r.text)
+
+    def test_input_jpg_keeps_every_right(self):
+        """本体（显示件）一切照旧：可提交、有掩码路径 —— 这条改动不许动它。"""
+        d = self.make_scene()
+        jpg = self._write_jpg(d / f"{SCENE_NAME}.jpg")
+
+        r = self.resolve(name=jpg.name, size_bytes=jpg.stat().st_size)
+
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["resolved"]["kind"], "input")
+        self.assertEqual(body["resolved"]["suffix"], "")
+        self.assertTrue(body["resolved"]["sr_capable"])
+        self.assertEqual(body["row"]["lq_path"], d.as_posix())
+        self.assertEqual(body["row"]["name"], SCENE_NAME)
+        self.assertTrue(body["resolved"]["mask_path"].endswith(f"{SCENE_NAME}_mask.tif"))
+
+    def test_pan_display_jpg_is_input_not_product(self):
+        """RC 场景的 `PAN.jpg` 是**本体**的显示件，不是 `PAN` 这个 suffix 的产物。"""
+        d = self.make_scene(tif=False)
+        self._write_raster(d / "PAN.tif", 320, 640)
+        jpg = self._write_jpg(d / "PAN.jpg")
+        # PAN.jpg 这个名字里没有生产全名 → 前端本来就送不到这里；
+        # 但真按名字给到（例如换过模板的部署），也不该被认成产物。
+        r = self.resolve(name=jpg.name, size_bytes=jpg.stat().st_size)
+        self.assertEqual(r.status_code, 400, r.text)   # 无时间戳，猜不出是哪一天
+        self.assertIn("不猜目录", r.json()["detail"])
+
+    def test_failed_product_name_probes_are_bounded(self):
+        """第二阶段（去掉尾段再反推）也要**定数探测**，不随目录内容增长。
+
+        与 `TestNeverListsDirectories` 同一口径，补的是新增的那条路：产物名第一
+        阶段必然落空（`…/<目录名>_sr` 这个目录不存在），于是会去试去掉尾段的候选。
+        那条路照样只拼固定名字 + `is_file`，50 个噪声文件一个都不该被 stat。
+        """
+        d = self.make_scene()
+        for i in range(50):
+            (d / f"noise_{i}.dat").write_bytes(b"")
+        jpg = self._write_jpg(d / f"{SCENE_NAME}_sr.jpg")      # 没有同名栅格 → 404
+        c = self.client()
+        real_stat = Path.stat
+        calls: list[str] = []
+
+        def counting_stat(self, *a, **kw):
+            calls.append(self.name)
+            return real_stat(self, *a, **kw)
+
+        with ExitStack() as st:
+            for name in ("rglob", "glob", "iterdir"):
+                st.enter_context(mock.patch.object(
+                    Path, name,
+                    side_effect=AssertionError(f"禁止 Path.{name}（扫盘）")))
+            for name in ("listdir", "scandir", "walk"):
+                st.enter_context(mock.patch.object(
+                    os, name,
+                    side_effect=AssertionError(f"禁止 os.{name}（扫盘）")))
+            st.enter_context(mock.patch.object(Path, "stat", counting_stat))
+            r = c.post("/api/scenes/resolve",
+                       json={"name": jpg.name, "size_bytes": jpg.stat().st_size})
+
+        self.assertEqual(r.status_code, 404, r.text)
+        self.assertNotIn("noise_0.dat", calls)
+        self.assertLessEqual(len(calls), 30, calls)
+
+    def test_short_name_candidates_do_not_blow_up_the_request(self):
+        """名字短到「去尾之后拆不出生产层」时，那两条候选各走各的（跳过），整个
+        请求不能被它们拖垮。
+
+        实测（2026-09-21 浏览器回归）：七段的名字去一次尾就剩六段，
+        `scene_name_layers` 在 `seps[_SCENE_IDX]` 上越界 —— 本该 200 的拖入回到
+        前端只有一句 `Failed to fetch`。这里两个方向都钉：命中的那条（本体 jpg）
+        照旧 200，落空的那条（同名产物名）照旧 404，都不许变成 500。
+        """
+        name = "A_B_20260917124710_200536960_101_0005_001"
+        self.assertEqual(len(name.split("_")), 7)
+        d = make_scene(
+            self.sat_dir / "A_B_20260917124710_200536960_101_001" / name, name)
+        jpg = self._write_jpg(d / f"{name}.jpg")
+
+        r = self.resolve(name=jpg.name, size_bytes=jpg.stat().st_size)
+
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["resolved"]["kind"], "input")
+        self.assertEqual(r.json()["resolved"]["dir"], d.as_posix())
+
+        # 同一个名字换掉最后一段（盘阵上没有那景）→ 仍要是一个干净的 404
+        missing = name[:-3] + "002.jpg"
+        r2 = self.resolve(name=missing, size_bytes=jpg.stat().st_size)
+        self.assertEqual(r2.status_code, 404, r2.text)
+        self.assertIn("目录不存在", r2.json()["detail"])
+
+
 class TestDropPreview(ResolveBase):
     """`/preview-drop`：拖入链的预览 —— **写进生产场景目录**，落不下才退回临时缓存。"""
 

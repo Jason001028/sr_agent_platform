@@ -23,6 +23,11 @@ output: SR products and the input backup (_sr/_NOSR/_ori), the cloud map
 (_cloud), thumbnails (_thumb), the ROI mask (_mask — it is an *input* to
 "submit SR", not a scene), the backend's own `<stem>.preview.jpg` cache, and the
 dozens of debug renders under `Debug/`. See is_scene_file.
+
+Dragging a jpg in is a separate, equally closed rule (2026-09-21): its name must cut
+cleanly to the scene directory name plus one of the three stage tails, *and* that
+stage's own raster must sit next to it — `<目录名>.jpg` / `<目录名>_<suffix>.jpg` /
+`<目录名>_<suffix>_NOSR.jpg`. See stage_of_jpg. Nothing here ever lists a directory.
 """
 
 from __future__ import annotations
@@ -207,6 +212,134 @@ def nosr_path_for(product_path) -> Path:
     """
     p = Path(product_path)
     return p.with_name(p.stem + "_NOSR" + p.suffix)
+
+
+# --------------------------------------------------------------------------
+# 拖进来的 jpg 属于哪个环节（2026-09-21：中间产物也要能关联到盘阵）
+# --------------------------------------------------------------------------
+#: 平台已知的**非环节**派生件尾段：云量图、缩略图、掩码、上一次的输入备份。
+#: 真机上这些栅格可能真的存在，只靠下面的「同级栅格在」挡不住它们 —— 显式点名。
+#: 与 is_scene_file 的黑名单不同，这里没有「每冒一类就得补一条」的负担：这个名单
+#: 不决定什么能**提交**，只决定拖进来的 jpg 能不能被认成「产物」这个身份标签。
+_NON_STAGE_TAILS = ("cloud", "thumb", "mask", "ori", "preview")
+
+#: SR 产物/上一次产物的后缀上限（与 services.run_sr.SUFFIX_RE 同口径：1..16 个
+#: `[A-Za-z0-9_-]`）。这里自己写一份正则而不是 import run_sr，是为了让 scene_search
+#: 保持「纯文件名推导、无服务依赖」——app.py 那边仍会用 run_sr 的权威值。
+_SUFFIX_RE = re.compile(r"^[A-Za-z0-9_-]{1,16}$")
+
+#: 上一次产物的尾标记（对齐 SR_code/util.py 的改名规则）。
+_NOSR_TAIL = "_NOSR"
+
+
+def de_suffixed_stems(name: str, max_segments: int = 2) -> list[str]:
+    """「去掉环节尾段」的候选 stem（拖进来的 jpg 是中间产物时反推目录名用）。
+
+    场景目录名 = 生产全名，而中间产物的文件名是**在生产全名后面**再粘一段
+    （`<目录名>_sr.jpg`、`<目录名>_sr_NOSR.jpg`，见 `jpg_stage_name`）；按原名字
+    反推出的目录名会带上那条尾巴，盘阵上没有那个目录。
+
+    切成几条候选，而不是只认一条：**suffix 里可以带下划线**
+    （`SUFFIX_RE` 允许 `_`，用户的 suffix 是自定短串），所以「切一段」与「切两段」
+    两种读法都成立 —— `<目录名>_sr_2.jpg` 可能是 `<目录名>` 的 `sr_2` 产物，也可能是
+    `<目录名>_sr` 的 `2` 产物。哪一条是真的由盘阵回答（目录在不在、同级栅格在不在、
+    名字对不对得上），这里不猜。名字以 `_NOSR` 结尾时先去它，再从剩下的部分切 ——
+    目录名里从不含 `_NOSR`。
+
+    每一条都要求切出来的尾巴是**干净的 suffix 形态**（与 `jpg_stage_name` 同一套
+    字符约束）：不干净（` - 副本`、`.preview` 那种）就不再往下切，一条也不生成 ——
+    免得拿一个明明是别的名字的东西去反推目录，把 404 的原因写得莫名其妙。
+
+    返回的是**去后缀的 stem**（调用方自己拼回原后缀再交给 pathguard）：这条链上
+    下游看后缀分流（`_fingerprint_mismatch`），也看后缀读 W/H。
+    """
+    stem = Path(name).stem
+    if stem.lower().endswith(_NOSR_TAIL.lower()):
+        stem = stem[:-len(_NOSR_TAIL)]
+    out: list[str] = []
+    rest, cut = stem, []
+    for _ in range(max_segments):
+        i = rest.rfind("_")
+        if i <= 0:
+            break
+        cut.insert(0, rest[i + 1:])
+        rest = rest[:i]
+        tail = "_".join(cut)
+        if not _SUFFIX_RE.match(tail) or tail.lower() in _NON_STAGE_TAILS:
+            break
+        if rest not in out:
+            out.append(rest)
+    return out
+
+
+def jpg_stage_name(stem: str, dir_name: str) -> tuple[str, str] | None:
+    """纯词法：`<目录名>_<suffix>.jpg` / `<目录名>_<suffix>_NOSR.jpg` → (环节, suffix)。
+
+    **不 stat、不查任务库、不查配置**。返回 `('product', suffix)` /
+    `('nosr', suffix)`，两种形状都不符合时 None（调用方要么按本体处理，要么报
+    「这不是场景里的图」）。
+
+    为什么 suffix 从**文件名本身**切，而不是查最近跑过的任务：SR 常常在平台外跑
+    （用户在别的机器上直接调 SR 脚本），库里没有记录时照样得认得出这三类图；而且
+    「名字写着 `_sr`」本身就是比库里那条记录更直接的事实。查库那条路留给
+    `/siblings`（它要在不知道 suffix 的情况下**拼**产物名，只能靠配置与任务）。
+
+    目录名是判断的基准：产物/上一次产物都躺在场景目录里，名字是「目录名 + 尾段」。
+    尾段两种形态，且 NOSR 只在末尾、只出现一次。
+    """
+    if not stem.lower().startswith(dir_name.lower() + "_"):
+        return None
+    tail = stem[len(dir_name) + 1:]
+    if not tail:
+        return None
+    is_nosr = tail.lower().endswith(_NOSR_TAIL.lower())
+    suffix = tail[:-len(_NOSR_TAIL)] if is_nosr else tail
+    if not suffix or not _SUFFIX_RE.match(suffix):
+        return None
+    if suffix.lower() in _NON_STAGE_TAILS:
+        return None
+    return ("nosr" if is_nosr else "product"), suffix
+
+
+def stage_of_jpg(dir_path, input_path, stem: str) -> tuple[str, str, Path] | None:
+    """拖进来的这份 jpg 是该场景的哪个环节 →
+    `(('input'|'product'|'nosr'), suffix, **这一环节自己的栅格**)`；不是 → None。
+
+    返回栅格路径是这条判据的一半用处：命中之后这一行要**描述那个环节自己**，
+    不是描述本体（产物的 W/H 是本体的倍数，拿本体的尺寸建画布整张比例都是错的）。
+    所以三个值一起给，调用方不必再拼一次名字 —— 也就不可能拼错。
+
+    判据有两条，**两条都得成立**：
+
+    1. 名字切得干净：要么就是本体的显示件（stem == 目录名，或 == 输入影像的 stem
+       —— RC 场景的 `PAN.jpg`），要么是 `<目录名>_<suffix>[_NOSR]` 这种产物名
+       （见 `jpg_stage_name`）；
+    2. **同级栅格真的在**：`<目录>/<stem>.tif|.tiff` 存在（按 `_PRODUCT_EXT_ORDER`
+       的顺序试，命中即止）。
+
+    第 2 条才是真门。第 1 条只说明「名字切得干净」，而盘阵上一个场景目录里躺着
+    十几样东西，`<目录名>_cloud.jpg` 这种名字同样切得干净 —— 只有「它有一份同名的
+    栅格」才能说明这份 jpg 是**某个环节影像的显示件**，而不是随手导出的图。
+    `_NON_STAGE_TAILS` 挡的是另一半（云量图这类真有同名栅格的派生件）。
+
+    本体那两种形态**不花任何额外 stat**（不试同级栅格）：它们是既有的关联对象，
+    判据在 `is_scene_file` 与 `_fingerprint_mismatch` 里已经写过一遍了。
+    """
+    p = Path(dir_path)
+    low = stem.lower()
+    if low == p.name.lower() or low == Path(input_path).stem.lower():
+        # 本体的显示件：环节的栅格就是本体的输入影像（`input_path` 非空由调用方
+        # 保证 —— 它是「这个目录算不算场景」的另一半判据）。
+        return "input", "", Path(input_path)
+    named = jpg_stage_name(stem, p.name)
+    if named is None:
+        return None
+    kind, suffix = named
+    for ext in _PRODUCT_EXT_ORDER:
+        cand = p / (stem + ext)
+        if cand.is_file():
+            return kind, suffix, cand
+    return None
 
 
 def parse_filename(path) -> dict:

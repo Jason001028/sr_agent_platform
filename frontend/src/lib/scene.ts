@@ -16,6 +16,7 @@ import { computeStats } from './tifDecode.js';
 import type { BandStats, StretchMode } from './tifDecode.js';
 import { thumbToOrig } from './viewMath.js';
 import type { Poly } from './maskgen.js';
+import type { StageKind } from './stage.js';
 
 /* ---------------- 运行期配置（前后端 / e2e 注入） ---------------- */
 export interface SrConfig {
@@ -371,10 +372,20 @@ export interface SceneOpenMeta {
   sceneId: string;
   /** 阶段6 scene 文件父目录（= run_sr 目录语义，任务区关联 queue 行用）。 */
   lqPath: string | null;
+  /** 这一行所属的场景目录（**与 lqPath 正交**：中间产物的 lqPath 为空 —— 它不可
+   *  提交 —— 但仍属于本景的目录，卡片上那颗「同一景共用一个序号」的小标按它分组）。
+   *  裸 .tif / 库外单张图没有场景目录，传 null。 */
+  sceneDir?: string | null;
   /** 后端推导的掩码路径（手工场景才拿得到：POST /api/scenes/resolve 的
    *  resolved.mask_path）。库行没有这个字段 —— 那时前端不该猜，写掩码时后端
    *  会回权威值。 */
   serverMaskPath?: string | null;
+  /** 这是场景里的哪个环节（resolve 的 resolved.kind / siblings 的 item.kind）。
+   *  缺省按 `'input'` 算 —— 场景库列出的行只可能是本体（`is_scene_file` 只认
+   *  目录名同名的输入件与 PAN），中间产物只能从拖拽 / 快捷芯片这两条路进来。 */
+  stageKind?: StageKind;
+  /** 本次产物的 suffix（标签用；后端给什么写什么，前端不猜）。 */
+  stageSuffix?: string | null;
 }
 
 /* ---------------- JPG 像素 → 查看器 rec 的同构数据 ---------------- */

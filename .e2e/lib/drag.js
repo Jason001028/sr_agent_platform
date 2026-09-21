@@ -136,6 +136,53 @@ async function dragOverText(page, opts) {
 }
 
 /**
+ * **页面内**把左栏文件卡拖到画布上（2026-09-21 那个 bug 的回归）。
+ *
+ * 与上面三个入口的区别：载荷不是文件，而是卡片自己往 `dataTransfer` 里放的一张
+ * 「票」（`application/x-sr-rec` → rec.id）。所以这一条**必须先发 dragstart 打在卡片
+ * 上**，让卡片自己的 `@dragstart` 处理函数把票填进同一个 DataTransfer —— 那正是要测
+ * 的那段代码（早先 `.file-item` 连 `draggable` 都没有，这条链从头到尾不存在）。
+ * 手工 `setData` 一份票再发 dragover/drop 会把被测的那一段绕过去。
+ *
+ * 卡片按 `.name` 文本包含 `cardName` 找（与 `badgeOf` 同一套找法）。
+ * @returns {Promise<{beforeId:number|null, hint:any, defaultPrevented:boolean, payload:string}>}
+ *          payload 是票的内容，空串 = 卡片没往 DataTransfer 里放东西（拖不起来）。
+ */
+async function dragCard(page, opts) {
+  const {
+    cardName, clientX = 0, clientY = 0, target = DEFAULT_TARGET, times = 3,
+  } = opts || {};
+  return page.evaluate((sel, name, x, y, n) => {
+    const item = [...document.querySelectorAll('.file-item')]
+      .find((el) => {
+        const nm = el.querySelector('.name');
+        return nm && nm.textContent.includes(name);
+      });
+    if (!item) throw new Error('drag.js: 左栏找不到卡片 ' + name);
+    const before = window.__viewer.activeRec();
+    const dt = new DataTransfer();
+    const fire = (el, type) => {
+      const ev = new DragEvent(type, {
+        dataTransfer: dt, clientX: x, clientY: y, bubbles: true, cancelable: true,
+      });
+      el.dispatchEvent(ev);
+      return ev;
+    };
+    fire(item, 'dragstart');                  // ← 被测的那一段：卡片自己填票
+    const el = document.querySelector(sel) || document.body;
+    for (let i = 0; i < n; i++) fire(el, 'dragover');
+    const hint = window.__viewer.dragHint();
+    const drop = fire(el, 'drop');
+    return {
+      beforeId: before ? before.id : null,
+      hint,
+      defaultPrevented: drop.defaultPrevented,
+      payload: dt.getData('application/x-sr-rec'),
+    };
+  }, target, cardName, clientX, clientY, times);
+}
+
+/**
  * 画布矩形的视口坐标 + 关键落点（左半心 / 右半心 / 画布外）。
  * 画布之外的点故意取画布左侧 40px（侧栏上方）—— 只要落在画布矩形外即可，
  * `dropSideAt` 判的是矩形包含，不看上面盖着什么元素。
@@ -161,5 +208,6 @@ async function canvasPoints(page) {
 }
 
 module.exports = {
-  installDragKit, dragOverOnly, dragOverText, dropFiles, canvasPoints, DEFAULT_TARGET,
+  installDragKit, dragOverOnly, dragOverText, dropFiles, dragCard, canvasPoints,
+  DEFAULT_TARGET,
 };

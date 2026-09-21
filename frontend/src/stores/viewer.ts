@@ -11,7 +11,7 @@
  * （语义等价 HTML 各处直接调 render()/renderDraw()）。
  */
 import { defineStore } from 'pinia';
-import { ref, computed, markRaw } from 'vue';
+import { ref, computed, markRaw, nextTick } from 'vue';
 import {
   probeImage, tiffTags, layoutInfo, stretchRgba,
   setSparseMin as setSparseMinLib,
@@ -47,6 +47,8 @@ import {
 import type { SceneResolveResult, SceneSibling, SceneSiblings } from '../lib/api.js';
 import { classifyImages, imageKindOf } from '../lib/imageFiles.js';
 import type { SceneOpenMeta } from '../lib/scene.js';
+import { isIntermediateStage, stageLabel, stageRefusal } from '../lib/stage.js';
+import type { StageKind } from '../lib/stage.js';
 import { buildStats, luma, STAT_HI } from '../lib/roiStats.js';
 import type { RoiStats } from '../lib/roiStats.js';
 import { downloadBlob } from '../lib/saver.js';
@@ -83,6 +85,20 @@ export interface ViewerRec {
   /** 掩码写到服务端后，服务端告知的绝对路径（`bakeMaskToServer` 成功才非空）。
    *  显示用；提交时真正的值由后端按同一规则重新推导。 */
   serverMaskPath?: string | null;
+  /** 盘阵场景里的环节（盘阵 JPG 才有）：本体输入 / 本次产物 / 上一次产物。
+   *  **与 `lqPath` 正交** —— 三者都在同一个场景目录里，`lqPath` 都是同一个值；
+   *  能不能修复只看这一项（见 lib/stage.ts 顶部那段）。 */
+  stageKind?: StageKind;
+  /** 环节标签（`PAN` / `本体` / `SR` / `NOSR`），卡片小标用。 */
+  stageLabel?: string;
+  /** 这一行**所属的场景目录**（知道了就一定写，与能不能提交无关）。
+   *  与 `lqPath` 的区别只在中间产物上：那类的 `lqPath` 被服务端置空（不可提交），
+   *  但它仍属于某个场景目录 —— 卡片上那颗「同一景共用一个序号」的小标按这一项
+   *  分组。裸 .tif / 场景库之外的单张图没有场景目录，这里与 `lqPath` 同为 null。 */
+  sceneDir?: string | null;
+  /** 已经预热过缩放的那份**显示画布**（`=== thumb` 即热过）。存引用而不是布尔：
+   *  换过像素（重新解码 / 换预览档位）就是新画布，缩放缓存不作数，得重新热。 */
+  warmed?: KitCanvas | null;
   /** 已经试过反推关联盘阵目录（成功或失败都算）。每个文件只试一次 ——
    *  切来切去不该反复打同一个请求、反复弹同一条错。网络失败/超时不算「试过」，
    *  那种情况不留痕，下次激活还能再试。 */
@@ -744,6 +760,57 @@ export const useViewerStore = defineStore('viewer', () => {
     }, DRAG_HINT_TTL);
   }
 
+  /* ---------------- 侧栏卡片拖进画布（2026-09-21） ---------------- */
+
+  /** 页面内拖放的载荷类型：侧栏文件卡（值为 `rec.id`）。
+   *
+   *  **刻意不用 `text/plain`**：画面上拖一段选中的文字、拖个链接也都是 text/plain，
+   *  那两种落进画布什么都不该发生。自定义 MIME 同时也是 TifCanvas 的落图门 ——
+   *  `dataTransfer.types` 在 dragover 阶段就能读到（浏览器不让读值，但类型名给读），
+   *  所以落位提示能跟拖文件时一样提前亮。 */
+  const REC_MIME = 'application/x-sr-rec';
+
+  /** 卡片开始被拖：只在 dataTransfer 里放一张「票」（rec.id），**不搬像素**。
+   *  落点由 TifCanvas 的 `dropSide` 算，最终还走 `activate(id, side)` 那条老路
+   *  （换格 / 适配 / 重绘 / 进点选清单它都做齐了）。 */
+  function startRecDrag(rec: ViewerRec, e: DragEvent): void {
+    if (!e.dataTransfer) return;
+    e.dataTransfer.setData(REC_MIME, String(rec.id));
+    e.dataTransfer.effectAllowed = 'copy';
+  }
+
+  /** 拖放结束（含中途按 Esc、拖出窗口）：熄掉落位提示。`drop` 自己也会熄一次，
+   *  这条是兜底 —— 否则提示得等 500ms 超时。 */
+  function endRecDrag(): void {
+    setDragHint(false, null);
+  }
+
+  /* ---------------- 同景序号（卡片小标） ---------------- */
+
+  /** 同一景（同一个场景目录）在侧栏共用一个序号；不在场景目录里（裸 .tif、库外
+   *  单张图）返回 0，卡片那边不渲染这一颗。
+   *
+   *  按 `sceneDir` 分组而**不是** `sceneId`：`sceneId` 是整条路径的编码，同一目录里
+   *  的本体与产物是两个不同的 id，按它分组会把一景拆成三组 —— 而「它们是一景」
+   *  恰恰是这颗小标要表达的唯一一件事。也**不是** `lqPath`：中间产物的 `lqPath`
+   *  被服务端置空（不可提交，见 resolve 的 kind 分岔），按它分组会让产物一个号都
+   *  拿不到，正是最需要「这张和本体是一景」的那一类。`sceneDir` 两者都覆盖。
+   *
+   *  Map 刻意**不做成响应式**（不是 ref）：它在渲染期按需发号，做成响应式等于在
+   *  渲染中改状态，Vue 会警告递归更新；发号结果也不需要触发重渲（rec 列表本身
+   *  变了才会有这次渲染）。只增不减 —— 移除一张再拖回来，还是原来的号。 */
+  const sceneOrdinals = new Map<string, number>();
+  function sceneOrdinalOf(rec: ViewerRec): number {
+    const key = rec.sceneDir;
+    if (!key) return 0;
+    let n = sceneOrdinals.get(key);
+    if (n === undefined) {
+      n = sceneOrdinals.size + 1;
+      sceneOrdinals.set(key, n);
+    }
+    return n;
+  }
+
   /* ---------------- 点选清单 ---------------- */
 
   /** 新拖入的图自动加入清单（幂等）。 */
@@ -832,12 +899,16 @@ export const useViewerStore = defineStore('viewer', () => {
       });
       hideMask(); busy.value = false;
       // 名字取 stem：与场景库那些行一个口径（列表里两个名字并排时不至于一个带后缀
-      // 一个不带）。lqPath 用场景目录 —— 产物的 rec 因此也拿到盘阵关联，掩码写回
-      // 才有落点。
+      // 一个不带）。lqPath 用场景目录 —— 任务区靠它关联当前场景的队列行。
+      // 环节照实带上：产物/上一次产物**不是可修复对象**（掩码与 SR 都建在本体网格
+      // 上），拖拽那条路进来的产物已经有这个字段了，这条入口没有的话，同一份产物
+      // 就成了「拖进来不能改、芯片打开能改」两个说法。
       const stem = (item.name ?? kind).replace(/\.(tif|tiff|jpg|jpeg)$/i, '');
       await openSceneJpg({
         name: stem, W: item.W, H: item.H,
-        sceneId: item.id, lqPath: res.lqPath, serverMaskPath: null,
+        sceneId: item.id, lqPath: res.lqPath, sceneDir: res.lqPath,
+        serverMaskPath: null,
+        stageKind: item.kind, stageSuffix: res.suffix,
       }, blob, split.value ? activeSide.value : undefined);
       if (res.suffixFrom !== 'query') {
         showToast('suffix 用的是'
@@ -968,6 +1039,8 @@ export const useViewerStore = defineStore('viewer', () => {
         onProgress: (f) => { if (activeId.value === rec.id) updateProgressUI(f); },
       });
       applyDecoded(rec, d, my);
+      // 遮罩还盖着（finally 里才收）：把首次缩放那笔一次性重采样在这里付掉
+      await warmZoom(rec);
     } catch (e) {
       if (rec.token === my) failRec(rec, e);
     } finally {
@@ -1047,8 +1120,11 @@ export const useViewerStore = defineStore('viewer', () => {
       // 拿的代理，只有这里差点漏掉。
       const live = recs.value.find((r) => r.id === rec.id) ?? rec;
       const ready = live.status;
+      // 先上屏再预热：预热要在「这张 rec 真的摆在格子里」时才做（否则热的是别张图
+      // 的画布）。activate 对已有像素的 rec 是同步走完的，等它不吃亏。
+      await activate(live.id, side);
+      await warmZoom(live);
       hideMask(); busy.value = false;
-      void activate(live.id, side);
       // 盘阵场景目录里那份 jpg 就是这条 rec 自己（拖进来的是生产全名，后端能反推
       // 出目录），所以顺带试一次关联：命中就按场景身份升级，拿到 lqPath 才能提交
       // SR / 保存掩码。**不 await** —— 关联要发请求，本地图该显示就先显示。
@@ -1107,6 +1183,12 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.route = 'jpg';
     rec.sceneId = meta.sceneId ?? null;
     rec.lqPath = meta.lqPath ?? null;
+    rec.sceneDir = meta.sceneDir ?? null;
+    // 环节（本体 / 产物 / NOSR）：两处入口（拖拽升级、快捷芯片）都在 meta 里给，
+    // 缺省按本体 —— 只有盘阵场景才有这一项，本地图片 stageKind 保持 undefined。
+    // 标签在这一个漏斗里算出来，卡片直接渲染，不必各自再判一遍。
+    rec.stageKind = meta.stageKind ?? 'input';
+    rec.stageLabel = stageLabel(rec.stageKind, meta.stageSuffix, rec.name);
     // 默认是服务端烘焙那份的口径；拖本地 jpg 升级进来的那条路自报来源
     // （它的像素是用户拖进来的原图，说「服务端已烘焙」就是假话）。
     // 尺度报当前档位 —— 取图的两处调用点都用 `previewDiv.value` 烤，所以
@@ -1130,7 +1212,13 @@ export const useViewerStore = defineStore('viewer', () => {
   /** `side` 只在分屏下由调用方（场景快捷入口按活动侧 / 拖放落点）给出。 */
   async function openSceneJpg(meta: SceneOpenMeta, blob: Blob, side?: 'A' | 'B') {
     const dup = findRecByMeta(meta);
-    if (dup) { void activate(dup.id, side); return; }
+    if (dup) {
+      // 已经在列表里的场景：只需重新上屏。**仍要过一遍预热** —— 重复打开往往正是
+      // 换过预览档位之后（画布换了），那份旧画布的缩放缓存不作数。
+      await activate(dup.id, side);
+      await warmZoom(dup);
+      return;
+    }
     busy.value = true;
     showMask('正在加载盘阵场景…', meta.name + '（服务器烘焙 JPG，元数据 ' + meta.W + '×' + meta.H + '）', false);
     const rec: ViewerRec = {
@@ -1146,8 +1234,9 @@ export const useViewerStore = defineStore('viewer', () => {
     recs.value.push(rec);
     try {
       await applySceneJpgToRec(rec, meta, blob);
+      await activate(rec.id, side);
+      await warmZoom(rec);                 // 遮罩仍盖着：把首次缩放的代价在这里付掉
       hideMask(); busy.value = false;
-      void activate(rec.id, side);
       showToast('已打开盘阵场景「' + meta.name + '」（掩码按元数据 ' + meta.W + '×' + meta.H + ' 换算）');
     } catch (e) {
       // 解不开就整条撤掉：留一条空壳 rec 在列表里，点它只会再失败一次。
@@ -1277,6 +1366,91 @@ export const useViewerStore = defineStore('viewer', () => {
     const rect = activePaneRect();
     view.value = fitView(rec.thumb.width, rec.thumb.height, rect.w, rect.h);
     viewFor[activeSide.value] = { w: rec.thumb.width, h: rec.thumb.height };
+  }
+
+  /* ---------------- 大图缩放预热（2026-09-21） ----------------
+
+     现象（真机实测：RTX 3060 + 16012×15422 显示画布）：一张图**头两次**滚轮手势里
+     各有一两帧 ~600ms，而那一帧的 drawImage/clearRect/getImageData 耗时全都≈0；
+     此后永久流畅（含空闲 1.5s 之后）。所以那不是主线程的活儿，是合成器/光栅线程
+     头一回按某个缩略比给这张巨图做重采样的代价。三条实测结论定它的形状：
+       · 与手势次数无关：第二次手势紧接第一次，照样 ~600ms（不是「每次手势都付」）；
+       · 不随空闲失效：停 1.5s 再动，最大帧 16.8ms、零掉帧（不是「空闲被驱逐」）；
+       · **按尺度分档**：只有走过某些缩略比的帧才贵 —— 于是「热一次就永久好」。
+
+     对策：把这份代价挪到装载时、解码遮罩还盖着的时候付掉 —— 用**真视图画布**按
+     几档缩略比各画一帧。为什么不能用离屏小画布顶替：这份代价记在（源画布 × 目标
+     画布 × 缩略比）这一组上，离屏画布热出来的缓存对真画布不作数。
+
+     档位取 [1/4, 1/2, 1, 2, 4]：覆盖实际会用的「缩到 1/4 … 放到 4 倍」这段重采样
+     区制（真机手势范围 0.26–6.93，fit 约 0.06）。确切的分档边界未知，多热一档只
+     多花一次全图重采样的装载时间、不影响正确性，所以宁可多热。 */
+  /** 预热档位（缩略比）。 */
+  const WARM_SCALES = [0.25, 0.5, 1, 2, 4] as const;
+  /** 源画布面积低于这个数就不预热：本地 TIF 那条路 buildThumb 上限 2048，
+      两万像素级的图首次缩放本来就不掉帧，热它纯属白等。 */
+  const WARM_MIN_PX = 2048 * 2048;
+
+  /** 让出**两帧**。drawImage 只是「提交」，重采样在光栅线程上、晚一帧才发生 ——
+      不把这一帧让出去，几档会挤进同一帧、只热了最后一档（等于没热）。
+      兜底 400ms：后台页/无合成帧时 rAF 不跑，绝不能把装载流程挂死。 */
+  function twoFrames(): Promise<void> {
+    return new Promise((res) => {
+      if (typeof requestAnimationFrame !== 'function') { setTimeout(res, 0); return; }
+      let done = false;
+      const fin = () => { if (!done) { done = true; res(); } };
+      const t = setTimeout(fin, 400);
+      requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(t); fin(); }));
+    });
+  }
+
+  /** 把 rec 的显示画布按 WARM_SCALES 各重采样一帧，付掉首次缩放的那笔一次性开销。
+   *
+   *  只热**画面上真的摆着这张 rec 的格子**：单屏 = 那一格（铺满画布），分屏 = 它落
+   *  的那半边。两格的视口矩形不同 → 分屏下另一格要等它自己那轮预热，不在这里重复付
+   *  （多热一格 = 多花一倍装载时间，而实测里分屏只是「稍稍严重一些」）。
+   *
+   *  调用时机一律是「rec 已经上屏、遮罩还没收」——热完把 view 逐格还原再 `renderTick++`，
+   *  用户看到的仍是适配好的那一帧，中间那几帧全在遮罩底下。遮罩本来不在（例如从
+   *  位置文件升级盘阵场景那条路）就自己盖一个、热完再收，不改变调用方的编排。 */
+  async function warmZoom(rec: ViewerRec | null): Promise<void> {
+    if (!rec) return;
+    // 入列之后一律用 recs 里那份**代理**：调用方可能递来入列前的原始对象
+    // （openSceneJpg 那条正是如此），拿它去比 `p.rec === rec` 永远不等，
+    // 预热会被静默跳过 —— 而「静默跳过」在这里等于「功能没上」。
+    const live = recs.value.find((r) => r.id === rec.id) ?? rec;
+    const thumb = live.thumb as unknown as HTMLCanvasElement | null;
+    if (!thumb) return;
+    if (thumb.width * thumb.height < WARM_MIN_PX) return;
+    if (live.warmed === live.thumb) return;            // 这份像素热过了
+    if (typeof document !== 'undefined' && document.hidden) return;   // 后台页：等激活时再说
+    const targets = panes.value.filter((p) => p.rec === live);
+    if (!targets.length) return;                       // 没在画面上：热了也白热
+    // 已经在盖遮罩的（解码 / 取图那几条路）只把文案换成实话；没盖的（从位置文件
+    // 升级盘阵场景那条路）自己盖一个、热完收回 —— 调用方不必重复编排这件事。
+    const mine = overlay.value.visible;
+    showMask('正在预热缩放…', live.name, false);
+    const keep = targets.map((p) => ({ side: p.side, view: p.view, marked: viewFor[p.side] }));
+    try {
+      for (const s of WARM_SCALES) {
+        for (const p of targets) {
+          // 以该格中心为锚：与用户滚轮缩放的落点无关，只是要让整张图都进重采样路径
+          setSideView(p.side, {
+            scale: s,
+            ox: p.rect.w / 2 - (thumb.width * s) / 2,
+            oy: p.rect.h / 2 - (thumb.height * s) / 2,
+          });
+        }
+        renderTick.value++;
+        await nextTick();                              // Vue 刷新 → watcher → render() 提交 drawImage
+        await twoFrames();                             // …再等它真的光栅化完
+      }
+    } finally {
+      for (const k of keep) { setSideView(k.side, k.view); viewFor[k.side] = k.marked; }
+      renderTick.value++;
+      live.warmed = live.thumb;
+      if (!mine) hideMask();
+    }
   }
 
   function onWheel(mx: number, my: number, factor: number) {
@@ -1476,6 +1650,11 @@ export const useViewerStore = defineStore('viewer', () => {
   function enterDraw() {
     const rec = activeRec.value;
     if (!rec || !rec.thumb) { showErr('请先打开一张图'); return; }
+    // 中间产物只读：掩码是建在**本体影像**网格上的，产物是它的放大结果，在产物上
+    // 画的坐标写到本体掩码文件上整片都是错的（工具栏那颗按钮同期置灰）。
+    if (isIntermediateStage(rec.stageKind)) {
+      showErr(stageRefusal(rec.stageLabel ?? '产物')); return;
+    }
     // 对比模式只读：分屏里画掩码会画到哪一格、写进哪一张 rec 都不明确，
     // 与其给出一个含糊的结果，不如明确挡住（工具栏那颗按钮同期置灰）。
     if (compareOn.value) { showErr('图像对比模式下不绘制掩码，请先切回「关闭」'); return; }
@@ -1689,6 +1868,11 @@ export const useViewerStore = defineStore('viewer', () => {
    */
   function submitSr() {
     const rec = activeRec.value;
+    // 中间产物不提交：SR 跑的是本体（RC 场景的 PAN.tif），从产物视图提交等于让
+    // 用户以为「我在修这张产物」。与绘制掩码同一句话，先于 lqPath 那道判。
+    if (rec && isIntermediateStage(rec.stageKind)) {
+      showErr(stageRefusal(rec.stageLabel ?? '产物')); return;
+    }
     // 判据是「这张图有没有盘阵目录」，不是「它是怎么打开的」：盘阵 JPG 场景与
     // 反推关联上的本地 TIF 都能提交；纯本地文件（没有 lqPath）不行。
     if (!rec || !rec.lqPath) {
@@ -1705,6 +1889,25 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   /* ---------------- 手工盘阵场景（查看器侧入口） ---------------- */
+
+  /** 关联成功后**后台静默**把 `<这份影像的 stem>_preview.jpg` 烤进场景目录。
+   *
+   *  用户口径（2026-09-21）：「后台静默烤」—— 不阻塞、不弹遮罩、不报进度，用户
+   *  继续看他拖进来的原图（那张更清晰，不该被服务端缩图顶掉）。这条请求只为了
+   *  **在盘阵上留下一个中间产物预览**，像素谁都不用。
+   *
+   *  失败也一声不吭：它不影响这次关联（rec 的像素、lqPath、掩码路径都已定下），
+   *  报出来只会让用户以为关联有问题。真要暴露给用户的失败（盘阵不可写）会在
+   *  用户主动「保存掩码到盘阵」时以他自己的动作报出来。
+   *
+   *  `rec.sceneId` 就是这条路径的权威文件（stage 自己的栅格），服务端据此落
+   *  `<stem>_preview.jpg` —— 产物会落成 `<产物名>_preview.jpg`，正是这条路要的。 */
+  function bakeDropPreview(rec: ViewerRec): void {
+    if (!rec.sceneId) return;
+    void fetchDropSceneJpg(loadSrConfig(), rec.sceneId, previewDiv.value)
+      .catch(() => { /* 静默：见上 */ });
+  }
+
   /** 本地 TIF 打开后**试着**关联盘阵目录。返回是否**命中并已升级成盘阵 JPG** ——
    *  命中时调用方（`activate`）直接返回，不要再做本地解码。
    *
@@ -1763,9 +1966,11 @@ export const useViewerStore = defineStore('viewer', () => {
         // 一长串「哪个目录、缺什么」，toast 六秒既看不完也留不住 —— 改弹窗。
         // 后端那句已经点明了「这份 jpg 的名字认不出一景」，这里补上入口的形状。
         showModal('这张 JPG 没有关联到盘阵目录', r.linkNote,
-          '它仍按本地图片打开了，只是没有盘阵目录、不能提交 SR。能关联的 jpg 只有'
-          + '名字与场景目录名一致的那份（<目录名>.jpg）—— 改过名、另存过的不认，'
-          + '平台不猜目录。要提交请把该场景目录粘进上方的「盘阵场景」栏打开。');
+          '它仍按本地图片打开了，只是没有盘阵目录、不能提交 SR。能关联的 jpg 是'
+          + '这一景的场景显示件（<目录名>.jpg）与它的中间产物（<目录名>_sr.jpg、'
+          + '<目录名>_sr_NOSR.jpg）—— 那三份都在场景目录里，且同级要有同名栅格；'
+          + '改过名、另存过、或叫 PAN.jpg 这类都不认，平台不猜目录。要看产物请把该'
+          + '场景目录粘进上方的「盘阵场景」栏打开，再用同场景芯片切到产物。');
       } else {
         showToast('「' + r.name + '」没有关联到盘阵场景，按本地文件查看'
           + '（要提交 SR 请在「盘阵场景」栏粘贴该场景目录）');
@@ -1805,11 +2010,32 @@ export const useViewerStore = defineStore('viewer', () => {
         name: res.row.name, W: res.row.W as number, H: res.row.H as number,
         sceneId: res.row.id,
         lqPath: res.resolved.sr_capable ? res.resolved.dir : null,
+        // 场景目录**照给**（与能否提交无关）：中间产物的 lqPath 是空的，但它仍
+        // 属于这个目录 —— 卡片上那颗「同一景共用一个序号」的小标按它分组。
+        sceneDir: res.resolved.dir,
         serverMaskPath: res.resolved.mask_path,
+        stageKind: res.resolved.kind,
+        stageSuffix: res.resolved.suffix,
       }, blob, localJpg && !useServer
         ? '盘阵场景 JPG（拖入的原图，本地解码）' : undefined);
       if (!ok) return false;
-      showToast('已关联盘阵目录 ' + res.resolved.dir + '，可以提交 SR 了');
+      // 就地升级：画布换了 → 旧的缩放缓存不作数。这条路上面已经把遮罩收了，
+      // 由 warmZoom 自己再盖一个（见它的注释）。
+      await warmZoom(r);
+      // 后台静默烤一份 `<这份影像的 stem>_preview.jpg` 到场景目录（用户口径：
+      // 不阻塞、不弹遮罩、不看结果）。只在**本地原图胜出**这条分支补 —— 服务端
+      // 那份更清晰时上面那次 fetchDropSceneJpg 已经把同一份烤好了，再发一次是
+      // 白烤一张图。它不碰 rec 的像素，所以不 await 也不会跟画面抢。
+      if (localJpg && !useServer && r.sceneId) void bakeDropPreview(r);
+      if (isIntermediateStage(r.stageKind)) {
+        // 中间产物：如实说清它与本体的关系。此处**不能**说「可以提交 SR 了」——
+        // 这一条的 lqPath 已被服务端置空（见 resolve 的 kind 分岔），提交按钮是
+        // 灰的，说了就是空头支票。
+        showToast('已关联盘阵场景 ' + res.resolved.dir + '（' + r.stageLabel
+          + ' 是中间产物，仅用于对比，不作修复；修复请打开本体）');
+      } else {
+        showToast('已关联盘阵目录 ' + res.resolved.dir + '，可以提交 SR 了');
+      }
       return true;
     } catch (e) {
       hideMask();
@@ -1855,6 +2081,7 @@ export const useViewerStore = defineStore('viewer', () => {
         name: res.row.name, W: res.row.W as number, H: res.row.H as number,
         sceneId: res.row.id,
         lqPath: res.resolved.sr_capable ? res.resolved.dir : null,
+        sceneDir: res.resolved.dir,
       }, blob);
       const rec = findRecByMeta({ sceneId: res.row.id, name: res.row.name });
       if (rec) {
@@ -1882,6 +2109,12 @@ export const useViewerStore = defineStore('viewer', () => {
   async function bakeMaskToServer(): Promise<boolean> {
     const rec = activeRec.value;
     if (!rec || !rec.thumb) { showErr('请先打开一张图'); return false; }
+    // 中间产物：**这一道必须排在 lqPath 那道前面**。产物也有 lqPath（任务区关联
+    // 队列行要用），若先撞上 lqPath 空那条件就会说「这张图没有盘阵目录」—— 而它
+    // 明明在场景目录里，用户按这句话去粘目录只会更糊涂。机制在 lib/stage.ts 顶部。
+    if (isIntermediateStage(rec.stageKind)) {
+      showErr(stageRefusal(rec.stageLabel ?? '产物')); return false;
+    }
     if (!rec.lqPath) {
       showErr('这张图没有盘阵目录，掩码无处可写 —— 请先在「盘阵场景」栏打开对应目录');
       return false;
@@ -2050,6 +2283,8 @@ export const useViewerStore = defineStore('viewer', () => {
     fitBoth, fitSide,
     compareList, cmpListRecs, clearCompareEntry,
     dragHint, setDragHint,
+    // 侧栏卡片拖进画布：载荷类型 + 起手/收尾 + 同景序号（卡片小标）
+    REC_MIME, startRecDrag, endRecDrag, sceneOrdinalOf,
     ctxRailOpen, ctxRailPrevOpen, setCtxRailOpen,
     activeSceneId, openSceneSibling,
     // 设置浮层（右上角）：对比模式后台预取开关 + 本地预览缓存
