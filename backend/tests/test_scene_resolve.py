@@ -887,6 +887,76 @@ class TestResolveStages(ResolveBase):
 
         self.assertEqual(r.status_code, 404, r.text)
 
+    def test_own_preview_jpg_links_as_the_input(self):
+        """平台自己烤的 `<目录名>_preview.jpg` 拖回来 ≡ 拖本体的显示件。
+
+        `paths.drop_preview_path` 把这份预览落在**场景目录里**，于是它长得跟一份
+        「场景里的 jpg」一样。剥掉 `_preview` 得到的正好是场景目录名，所以这一行
+        与拖 `<目录名>.jpg` 同解：可提交 SR、掩码写本体。此前它恒 404，报错还列了
+        两条自己拼出来的假路径（`…_preview/…_preview`）—— 平台烤的文件平台自己不认。
+        """
+        d = self.make_scene()                                  # 含 `<目录名>.tif` + meta
+        preview = self._write_jpg(d / f"{SCENE_NAME}_preview.jpg")
+
+        r = self.resolve(name=preview.name, size_bytes=preview.stat().st_size)
+
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["resolved"]["kind"], "input")
+        self.assertEqual(body["resolved"]["suffix"], "")
+        self.assertTrue(body["resolved"]["sr_capable"])
+        self.assertEqual(body["resolved"]["dir"], d.as_posix())
+        self.assertEqual(body["row"]["lq_path"], d.as_posix())
+        self.assertEqual(body["row"]["name"], SCENE_NAME)
+
+    def test_product_preview_jpg_links_as_that_product(self):
+        """产物的预览 `<目录名>_sr_preview.jpg` → 仍是**产物**那一行，不是本体。
+
+        剥 `_preview` 只剥一层，剥完是 `<目录名>_sr`（产物的栅格 stem）—— 环节由
+        `stage_of_jpg` 照旧判成 product，于是 `lq_path` 仍是空的、提交按钮仍该是灰的。
+        """
+        d, name, raster, _ = self._make_product("sr")
+        preview = self._write_jpg(d / f"{name}_preview.jpg")
+
+        r = self.resolve(name=preview.name, size_bytes=preview.stat().st_size)
+
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["resolved"]["kind"], "product")
+        self.assertEqual(body["resolved"]["suffix"], "sr")
+        self.assertEqual(body["row"]["name"], name)
+        self.assertEqual((body["row"]["W"], body["row"]["H"]),
+                         (self.PROD_W, self.PROD_H))
+        self.assertIsNone(body["row"]["lq_path"])
+        self.assertFalse(body["resolved"]["sr_capable"])
+
+    def test_cloud_with_a_preview_tail_still_404(self):
+        """界线：剥掉 `preview` 之后还是黑名单尾巴 → 照旧不认。
+
+        `<目录名>_cloud_preview.jpg` 剥一层得到 `<目录名>_cloud`，`cloud` 仍在
+        `_NON_STAGE_TAILS` 里。**只剥 `preview` 那一层**，不因为名单里放行了一个就
+        整份名单失效 —— 否则云量图会顺着这条路被认成本体的显示件。
+        """
+        d = self.make_scene()
+        self._write_raster(d / f"{SCENE_NAME}_cloud.tif", 160, 320)
+        jpg = self._write_jpg(d / f"{SCENE_NAME}_cloud_preview.jpg")
+
+        r = self.resolve(name=jpg.name, size_bytes=jpg.stat().st_size)
+
+        self.assertEqual(r.status_code, 404, r.text)
+        self.assertIn("不是本景的输入件或中间产物", r.json()["detail"])
+
+    def test_preview_of_a_missing_scene_still_404(self):
+        """`_preview` 只是个尾巴，不是通行证：那景真不在盘阵上仍是 404。"""
+        d = self.make_scene()
+        missing = f"{SCENE_NAME[:-3]}009_preview.jpg"
+        jpg = self._write_jpg(d / missing)
+
+        r = self.resolve(name=jpg.name, size_bytes=jpg.stat().st_size)
+
+        self.assertEqual(r.status_code, 404, r.text)
+        self.assertIn("目录不存在", r.json()["detail"])
+
     def test_input_jpg_keeps_every_right(self):
         """本体（显示件）一切照旧：可提交、有掩码路径 —— 这条改动不许动它。"""
         d = self.make_scene()
@@ -942,6 +1012,35 @@ class TestResolveStages(ResolveBase):
                 st.enter_context(mock.patch.object(
                     os, name,
                     side_effect=AssertionError(f"禁止 os.{name}（扫盘）")))
+            st.enter_context(mock.patch.object(Path, "stat", counting_stat))
+            r = c.post("/api/scenes/resolve",
+                       json={"name": jpg.name, "size_bytes": jpg.stat().st_size})
+
+        self.assertEqual(r.status_code, 404, r.text)
+        self.assertNotIn("noise_0.dat", calls)
+        self.assertLessEqual(len(calls), 30, calls)
+
+    def test_preview_name_probes_are_bounded(self):
+        """`_preview` 那条路（剥离 + 去尾）同样定数探测，不随目录内容增长。
+
+        与上面那条同一口径：这一份名字以 `_preview` 结尾，剥掉后还要切一段才轮到
+        真目录名，是候选最多的一条路（相位一 2 条 + 去尾后 4 条，共 6 个候选目录）。
+        本条实测 23 次，上限放到 30 留余量。真正要挡的是「随目录内容增长」—— 50 个
+        噪声文件一个都不该被 stat，探测只由候选名字决定。
+        """
+        d = self.make_scene()
+        for i in range(50):
+            (d / f"noise_{i}.dat").write_bytes(b"")
+        jpg = self._write_jpg(d / f"{SCENE_NAME[:-3]}009_preview.jpg")   # 那景不存在
+        c = self.client()
+        real_stat = Path.stat
+        calls: list[str] = []
+
+        def counting_stat(self, *a, **kw):
+            calls.append(self.name)
+            return real_stat(self, *a, **kw)
+
+        with ExitStack() as st:
             st.enter_context(mock.patch.object(Path, "stat", counting_stat))
             r = c.post("/api/scenes/resolve",
                        json={"name": jpg.name, "size_bytes": jpg.stat().st_size})
