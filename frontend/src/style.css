@@ -114,9 +114,12 @@ body {
   border-bottom: 1px solid rgba(255, 255, 255, 0.14);
 }
 
+/* 品牌区：一颗 logo（见 .brand-mark）+ 平台名。
+   名字比四个导航项大一号（18px 对 14px）—— 它是「这是哪个平台」的锚点，导航项是
+   「去哪儿」，两者不该同级；`.nav-links a` 的字号因此一个字不动。 */
 .app-nav .brand {
   font-weight: 700;
-  font-size: 16px;
+  font-size: 18px;
   letter-spacing: 0.2px;
   color: var(--on-band);
   text-decoration: none;
@@ -124,13 +127,39 @@ body {
   align-items: center;
   gap: 10px;
 }
-.app-nav .brand::before {
+
+/* logo 预留区：min-width 兜住 28×28，所以「服务器上还没放 logo」时也占着这块地方，
+   平台名不会左右跳；方形 mark 正好填满它，横长的字标（公司全称那种）向右自然撑开，
+   不裁不挤。（宽度只由 png 自己的宽高比决定 —— 素材不在手上，预不成一个死宽。） */
+.app-nav .brand-mark {
+  min-width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+/* 占位小方块：原先是 .brand 的 ::before，现在搬进预留区居中；有真 logo 时让位 */
+.app-nav .brand-mark::before {
   content: '';
   width: 10px;
   height: 10px;
   border-radius: 3px;
   background: #fff;
   box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.22);
+}
+.app-nav .brand.has-logo .brand-mark::before {
+  display: none;
+}
+
+/* 真 logo：高度吃满 28px 那条带，宽度按 png 比例（160px 上限挡异常素材把名字顶出屏）。
+   不设 object-fit —— 没有强制的框，就按原比例摆。 */
+.app-nav .brand-logo {
+  max-height: 28px;
+  max-width: 160px;
+  width: auto;
+  height: auto;
+  display: block;
 }
 
 .nav-links {

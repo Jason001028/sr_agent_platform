@@ -6,6 +6,7 @@
  * - ChatPage / QueuePage 为占位页，功能在阶段5（先写 REST/SSE 契约再写代码）。
  */
 import { createRouter, createWebHistory } from 'vue-router';
+import { APP_NAME } from '../lib/brand';
 
 const router = createRouter({
   history: createWebHistory(),
@@ -41,8 +42,8 @@ const router = createRouter({
 
 router.afterEach((to) => {
   document.title = to.meta.title
-    ? `${String(to.meta.title)} — sr_agent_platform`
-    : 'sr_agent_platform';
+    ? `${String(to.meta.title)} — ${APP_NAME}`
+    : APP_NAME;
 });
 
 export default router;
