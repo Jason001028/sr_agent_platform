@@ -141,6 +141,22 @@ release/
    firewall-cmd --permanent --add-service=http && firewall-cmd --reload
    ```
 
+5. **放顶栏 logo**（可选，与后面几节都无关的独立一步）：
+
+   ```bash
+   cp /tmp/logo.png /data/www/sr-agent-platform/dist/logo.png
+   chown nginx:nginx /data/www/sr-agent-platform/dist/logo.png
+   ```
+
+   > 平台名（顶栏左上角「长光卫星-修图智能体平台」）左边预留了 28×28 的 logo 区。
+   > **文件名固定 `logo.png`、位置固定 `<APP>/dist/` 根**（`index.html` 边上）—— 前端按
+   > `base:'./'` 的相对路径取它，写死别的路径或换文件名都不会被认出来。
+   > 高度缩到 28px、宽度按 png 自己的宽高比走（上限 160px），方形 mark 与横长字标都放得下。
+   > **没有这个文件就是正常的部署态**：预留区留空、显示那颗占位小方块，不会出现破图。
+   > 素材最好是**透明底**的；带白底的 png 会在孔雀石深带上显出一个白方块。
+   > 放上去之后浏览器 **Ctrl+F5 硬刷一次** —— 前端对缺失的 logo 不再重试（省掉每次刷新
+   > 一个白跑的请求），所以补文件不会自动生效。
+
 ## 三、内网机部署：FastAPI 场景 API（阶段4）
 
 1. **Python ≥ 3.8**（⚠️ CentOS7 自带 `python3` = **3.6.8，不满足**）：后端依赖整链要求 ≥3.8，
@@ -324,6 +340,9 @@ systemctl reload nginx             # 前端热更：只 reload，别 restart sr-
 
 浏览器 **Ctrl+F5 强刷**一次（去掉浏览器缓存的旧页面）。带 hash 的资源名每次变化，
 immutable 缓存不卡旧版。判定：刷新后页面出现本次改动。
+
+> 顶栏那颗 `logo.png`（§二 第 5 步放的）**不受升级影响** —— `scp -r dist/*` 是覆盖式拷贝，
+> 不删多余文件，所以换版本不用重放 logo；但手工 `rm -rf dist` 重建会连它一起清掉，那就得重放一次。
 
 > 只覆盖 conf `root` 指着的那个 `<APP>/dist`，**别新建/挪目录**——root 与文件一错位就是
 > 上面那个静态 500。真机 node81-135 的应用根在移动盘 `/run/media/root/SSD/...`：机器重启/
