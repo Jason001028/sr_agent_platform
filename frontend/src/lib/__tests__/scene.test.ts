@@ -13,7 +13,7 @@ import {
   isImageSource, startStretch, SCENE_START_STRETCH,
   isBakedPreviewUrl, previewNeedsBake, previewDivLabel, loadPreviewDiv,
   savePreviewDiv, SCENE_PREVIEW_DIVS, DEFAULT_PREVIEW_DIV,
-  rasterPreviewWins,
+  rasterPreviewWins, previewCacheKey,
 } from '../scene.js';
 import type { SceneRow, RasterPreview } from '../scene.js';
 import { stretchRgba } from '../tifDecode.js';
@@ -370,5 +370,44 @@ describe('手工场景路径（盘阵任意合法场景目录）', () => {
       .toBe('/api/scenes/resolve');
     expect(sceneResolveUrl({ apiBase: 'http://127.0.0.1:8000', staticBase: '' }))
       .toBe('http://127.0.0.1:8000/api/scenes/resolve');
+  });
+});
+
+describe('previewCacheKey（预览 blob 的缓存键）', () => {
+  it('同一条行 + 同档位 → 稳定（同参数两次调用逐字相同）', () => {
+    const row = { id: 'abc123' };
+    expect(previewCacheKey(row, 4)).toBe(previewCacheKey({ id: 'abc123' }, 4));
+    expect(previewCacheKey(row, 4)).toBe('abc123|4|jpg');
+  });
+
+  it('档位进键：同一张图的不同档位互不覆盖', () => {
+    const row = { id: 'abc123' };
+    expect(previewCacheKey(row, 4)).not.toBe(previewCacheKey(row, 8));
+  });
+
+  it('不同的行互不覆盖', () => {
+    expect(previewCacheKey({ id: 'a' }, 4)).not.toBe(previewCacheKey({ id: 'b' }, 4));
+  });
+
+  it('栅格那份与源 jpg 那份是两个键（栅格赢的档位端上来的不是同一张图）', () => {
+    const row = { id: 'abc123' };
+    const rp = { name: 'PAN.tif' };
+    expect(previewCacheKey(row, 4, rp)).toBe('abc123|4|ras:PAN.tif');
+    expect(previewCacheKey(row, 4, rp)).not.toBe(previewCacheKey(row, 4));
+    // 同名栅格换了张图（不同 name）也要分开
+    expect(previewCacheKey(row, 4, { name: 'PAN.tif' }))
+      .not.toBe(previewCacheKey(row, 4, { name: 'GF07A03.tif' }));
+  });
+
+  it('raster 传 null / undefined 等同于「源 jpg 那份」', () => {
+    const row = { id: 'abc123' };
+    expect(previewCacheKey(row, 4, null)).toBe(previewCacheKey(row, 4));
+    expect(previewCacheKey(row, 4, undefined)).toBe(previewCacheKey(row, 4));
+  });
+
+  it('键里没有裸的下划线/空格歧义：行 id 与栅格名之间不会撞车', () => {
+    // 'a|4|jpg' 与栅格名恰好叫 'jpg' 的情形：前缀不同，撞不上
+    expect(previewCacheKey({ id: 'a' }, 4, { name: 'jpg' }))
+      .not.toBe(previewCacheKey({ id: 'a' }, 4));
   });
 });

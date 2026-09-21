@@ -5,6 +5,7 @@
 > **挂起项一**：§3.3 新增「`suffix` 默认值来源」条款——省略/留空不再固定为内置 `"sr"`，改为读 `$SR_BUNDLE_DIR` 下 SR 团队配置文件里的 `<Suffix>`，`SR_SUFFIX_DEFAULT` 环境变量作废；同批把 agent 工具 `run_sr` 的归一化与 REST 入口对齐（此前工具既不 strip 也不给默认值，同一逻辑提交两入口指纹不同 → 幂等失效、重复投作业，属修缺陷）。
 > **挂起项二（2026-09-17）**：新增 §3.5 `POST /api/scenes/resolve`（打开盘阵上 `SR_SCENES_ROOT` 之外的任意合法场景目录），并改 §3.4 `POST /api/masks` 的 body（新增 `lq_path`，legacy `scene_id` 保留）。同时约定 `lq_path` / `dir` / `input` / `mask_path` 一律回**盘阵 POSIX 形态**、提交侧两入口共用 `pathguard.normalize_submit_path`——这两条不改行为口径，只是把"同一场景两种写法算出两个指纹"的隐患收口。
 > **挂起项三（2026-09-20）**：① 新增 §3.8 `GET /api/scenes/{id}/siblings`（一个场景的三类图：输入影像 / 本次产物 / 上一次产物），纯只读、永不烘焙；② 新增 §4.5 **产物预览急烤队列**（作业转 COMPLETED 后服务端顺手烤产物那一份，从库派生而非挂在状态转换上），`/api/queue` 每行随之多出 `preview_state` / `preview_note` 两列与新的 SSE 帧 `preview_update`（§3.3）；③ 新增 §4.6 **显示源比较规则**：拖入/打开的 `.jpg` 显示件在同目录有位更清晰的栅格、且当前档位下服务端从它烤出来的比它更清晰时，显示源换成服务端那份（`/preview` 与 `/preview-drop` 各插一次同名栅格探测，落点与 `?div=` 全部照旧），jpg 行上因此多出只读的 `rasterPreview` 字段（§3.5）。**`hasPreview` / `jpgUrl` / `previewDiv` 三个字段的语义一个字未动**。同时记两个 env（§1）。
+> **挂起项四（2026-09-20 第二轮）**：后端**零改动、零新增端点**。这一轮只把前端的取图纪律写进契约：① 新增 §3.8.2 —— 预览 blob 的**本地缓存键**（`{id}|{div}|jpg`，源是显示件且同名栅格胜出时另一支用 `{id}|{div}|ras:{栅格名}`，两支不能串味）与**预取边界**（只取 `/siblings` 里 `exists && hasPreview && previewDiv === div` 且没有已开 rec 的那几项，**绝不触发服务端烘焙**；开关默认关、持久化在 `sr.viewer.cmpPrefetch`）；② 同一节记下 `openSceneSibling` 的**去重**口径（命中已开的 rec → 一次 `/siblings` + 零次 `/preview`）。`/preview` 与 `/siblings` 的**请求与响应一字未改**。
 > **须说明的流程偏差**：上述改动**已与本文档同批落到代码**（不是"先评审后写码"）。理由是它同时修一个现存缺陷（两入口指纹不一致），拆开会让仓库停在一个已知会重复投作业的中间态；09-17、09-20 两批同理，前端要用的字段与端点不一起落地就没法验收（09-20 那批还带着 §4.5 那个后台循环，文档与循环必须同批，否则运维会照着一份没写急烤的契约去配 env）。请复核，通过后把状态改回「已定」。此前其余条款自 2026-09-02 起均未变（评审通过时的交付基线：后端 190 unittest + 前端 Vitest 114 + vue-tsc 零错误 + `.e2e/test-platform.js` 11 断言全绿）。
 > 目标读者：阶段5 实现会话（后端 FastAPI + 前端 Vue3）。范围：把既有后端（agent loop + 4 工具 + `sr_tasks` + slurm）暴露成网页可调 REST/SSE，交付 聊天 / 共享任务队列 / 查看器画完掩码提交 SR。
 > 前置：阶段4 已完成（FastAPI 骨架 `backend/api/app.py`：`/api/scenes` + `/api/scenes/{id}/preview` + 路径白名单；前端 `/scenes` 页 + route='jpg' rec + `/chat` `/queue` 占位路由）。
@@ -568,6 +569,42 @@ body：
   `name` 取**去掉扩展名的 stem**（与场景库那些行一个口径）。`lqPath` 用**场景目录**
   （不是那一类图自己的路径）—— 产物的 rec 因此也拿到盘阵关联，掩码写回才有落点。
 - **`div` 字段前端不看**：它是服务端急烤的档位，仅供标注；前端认的是用户滑块那个档位。
+
+#### 3.8.2 前端侧的取图纪律：blob 缓存、去重与预取边界（2026-09-20）
+
+这一节写的全是**客户端行为**（`lib/api.ts` / `lib/blobCache.ts` / `stores/viewer.ts`），
+服务端那两条端点一个字节都没改。列出来是因为它们决定了「什么样的请求会打到服务端」，
+而这正是运维在盘阵上看得见的东西。
+
+- **预览 blob 本地缓存**：模块级单例，**按字节封顶的 LRU**（`PREVIEW_BLOB_CACHE_MAX = 128MB`）。
+  上限按字节而不是条数，因为条数在大图上完全不代表内存（÷2 档一条几 MB 到几十 MB）。
+  缓存的是**压缩态 blob**、不是解码后的位图：rec 的像素本来就常驻（`thumb` 画布 4 B/px +
+  `src` Float32Array 4 B/px，尺寸是服务端 jpg 的原生尺寸、不封顶），再缓存位图只会翻倍，
+  而收益只覆盖「关掉再打开」这一种情形。**单条就超过上限的不进缓存**（放了也会立刻被自己
+  挤出去）。暴露 `previewCacheStats()` / `clearPreviewCache()`（设置浮层那行读数与「清空」）。
+- **缓存键**：`previewCacheKey(row, div[, raster])` = `${id}|${div}|jpg` 或
+  `${id}|${div}|ras:${栅格名}`。**必须把「取的是哪一份」编进键**：同一条行 id + 同档位，
+  在「同名栅格胜出」（§4.6）时端上来的是栅格那份、另一张图的字节流，与源 jpg 那份不是
+  同一串字节。`ras:jpg` 与前缀 `jpg` 因此刻意不同名。
+- **命中缓存时照做网络路径的两行副作用**（`row.hasPreview = true`；有 `jpgUrl` 时
+  `row.previewDiv = div`）：`previewNeedsBake` 靠它们判断，少写就会出现「盘上明明有这一档
+  的预览，却每次都判成要重烤」。命中时**不调 `onPhase`** —— 本来就没有烘焙，不该弹
+  「首次打开正在烘焙」那句。
+- **芯片入口去重**（`openSceneSibling`）：先拿 `/siblings`（必须问，才知道对应哪条 rec），
+  目标项若已有 rec 开着（判据与 `openSceneJpg` 的 `findRecByMeta` 同源：认 `sceneId`）
+  就直接切过去，**不发 `/preview`**。于是「同一枚芯片连点两次」= 一次 `/siblings` +
+  零次 `/preview`；`test-manual-scene.js` K 段钉着这个增量。
+- **对比模式后台预取**：用户开关（**默认关**，持久化在 `localStorage['sr.viewer.cmpPrefetch']`），
+  进对比模式（或对比模式内换了活动侧那张图）时触发，顺序取、并发 1、失败静默、不占遮罩、
+  不建 rec、不进点选清单。**合格项的判据是 `exists && id && name && W/H 非空 &&
+  hasPreview && previewDiv === div` 且没有已开 rec** —— 这条判据本身就是「服务端已有一份
+  现成预览」的定义，于是**结构性地保证预取永不触发烘焙**（会重烤的那几类留给用户点击时再烤）。
+  真机上不允许出现「我什么都没点，盘阵却在读大图」；`test-manual-scene.js` K2b/K2c 用
+  同一个场景把这条边界的两侧各钉一次（盘上没有现成预览 → `/preview` 增量 0；补一份现成的
+  → 恰好 +1 且就是那一份的 URL）。
+- **离开对比模式即作废**：`stopPrefetch()` 清掉去重表并推进代数计数（`prefetchGen`），
+  在飞的预取发现代数变了就不再开始下一项。**不用 `AbortController`**：取图那两个 API
+  不收 `AbortSignal`（要兼容静态 URL 那条支路），掐不断在飞的那个请求。
 
 ## 4. 关键实现机制（契约约束）
 

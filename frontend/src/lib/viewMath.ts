@@ -241,6 +241,39 @@ export function wheelZoomBoth(
   };
 }
 
+/**
+ * 换图时把视图按**相对视野**搬到另一张图上（对比模式专用，2026-09-20）。
+ *
+ * 对比场景要的是「同一片地面来回看」，所以换图不该 fit（一 fit 就把用户的位置抹了）。
+ * 归一化坐标 = 缩略图像素 / 该图自己的缩略图尺寸，于是这里的「归一化」等价于
+ * 「整幅图的相对位置」，两张尺寸不同（产物是输入的 2 倍，待核）也指着同一片地面。
+ *
+ * **以水平为准**：归一化可视宽度仍铺满格子宽度，纵向按新图的比例自然延伸。
+ * 两格左右并排、宽度才是稀缺维度；若两张的宽高比本来就不同，纵向没办法两头都顾。
+ *
+ * 两张缩略图尺寸**逐字相同**时原样返回入参，一个数都不动 —— 那张是同一场景的两份
+ * 预览（常见情形），不做一次除法再乘回来的往返（IEEE double 下
+ * `100/1314*1314 = 99.99999999999999`），e2e 才敢断 `|Δ| < 1e-9`。
+ *
+ * 尺寸/scale 非法时也原样返回：对比时画面不动比乱动好。
+ */
+export function remapViewForImage(
+  view: ViewState,
+  from: { w: number; h: number },
+  to: { w: number; h: number },
+  cw: number, ch: number,
+): ViewState {
+  if (from.w === to.w && from.h === to.h) return view;
+  if (!(from.w > 0 && from.h > 0 && to.w > 0 && to.h > 0)
+      || !(view.scale > 0) || !(cw > 0) || !(ch > 0)) return view;
+  const s0 = view.scale;
+  const u0 = -view.ox / (s0 * from.w);        // 视野左上角的归一化坐标
+  const v0 = -view.oy / (s0 * from.h);
+  const uw = cw / (s0 * from.w);              // 归一化可视宽度 → 必须仍铺满 cw
+  const scale = cw / (uw * to.w);
+  return { scale, ox: -u0 * to.w * scale, oy: -v0 * to.h * scale };
+}
+
 /** 一次拖动同时平移两格（同一个屏幕位移量）。入参不改。 */
 export function panBoth(
   va: ViewState, vb: ViewState, dx: number, dy: number,

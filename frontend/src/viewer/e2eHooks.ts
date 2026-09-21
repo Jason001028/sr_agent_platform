@@ -163,6 +163,15 @@ export interface ViewerHook {
   /** 右侧栏是否展开 + 进分屏前的记忆值（撤销自动收起用）。 */
   ctxRail: () => { open: boolean; prev: boolean | null };
   setCtxRail: (open: boolean) => void;
+  /** 右上角设置浮层是否开着。 */
+  settingsOpen: () => boolean;
+  setSettingsOpen: (open: boolean) => void;
+  /** 对比模式后台预取开关（默认关；持久化在 localStorage['sr.viewer.cmpPrefetch']）。 */
+  cmpPrefetchOn: () => boolean;
+  setCmpPrefetch: (on: boolean) => void;
+  /** 本地预览 blob 缓存的现状（条数 / 字节 / 上限）。 */
+  previewCacheStats: () => { count: number; bytes: number; maxBytes: number };
+  clearPreviewCache: () => void;
 }
 
 declare global {
@@ -278,6 +287,12 @@ export function mountE2EHooks(): ViewerHook {
       prev: useViewerStore().ctxRailPrevOpen,
     }),
     setCtxRail: (open) => useViewerStore().setCtxRailOpen(open),
+    settingsOpen: () => useViewerStore().settingsOpen,
+    setSettingsOpen: (open) => useViewerStore().setSettingsOpen(open),
+    cmpPrefetchOn: () => useViewerStore().cmpPrefetchOn,
+    setCmpPrefetch: (on) => useViewerStore().setCmpPrefetch(on),
+    previewCacheStats: () => useViewerStore().previewCacheStats(),
+    clearPreviewCache: () => useViewerStore().clearPreviewCache(),
   };
   if (window.__viewer !== hook) window.__viewer = hook;
   return hook;

@@ -227,6 +227,26 @@ function makeJpg(file, w, h) {
   if (r.status !== 0) throw new Error('JPEG 生成失败: ' + (r.stderr || r.stdout));
 }
 
+/* ---------------- K 段要用的「SR 产物」替身 ---------------- */
+// 与 FIXTURE_PY 里那个 tif() 同一套写法（uint16 灰度 + 无压缩），保证后端读
+// 尺寸走的是与其它夹具完全一样的路径。产物在真机上由 SR 跑出来，夹具里没有，
+// 而 K 段要验的正是「盘上已有一份现成预览时预取会去取它」—— 没有这份就没有
+// 可预取的对象，那几条断言等于没写。
+const TIF_PY = `
+import sys
+import numpy as np, tifffile
+w, h = int(sys.argv[2]), int(sys.argv[3])
+a = (np.arange(w * h, dtype=np.uint32).reshape(h, w) % 4096).astype(np.uint16)
+tifffile.imwrite(sys.argv[1], a, photometric="minisblack")
+`;
+
+function makeTif(file, w, h) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const r = spawnSync('python', ['-c', TIF_PY, file, String(w), String(h)],
+    { encoding: 'utf-8' });
+  if (r.status !== 0) throw new Error('TIFF 生成失败: ' + (r.stderr || r.stdout));
+}
+
 /* ---------------- 页面助手 ---------------- */
 /**
  * 点一个按钮（按文字精确匹配）。
@@ -1261,6 +1281,220 @@ async function main() {
       await page.evaluate(() => window.__viewer.setCmpMode('off'));
       const panes2 = await page.evaluate(() => window.__viewer.cmpPanes());
       assert(panes2.length === 1, `回「关闭」后仍是单幅（${panes2.length}）`);
+
+      /* ---------- K. 场景芯片去重 + 对比模式后台预取 ---------- */
+      // 两件事都属于「别为同一份字节跑第二趟」：
+      //   ① `openSceneSibling` 命中**已经开着**的那张就别再要像素（`/preview` 一次
+      //      可能几 MB）；第二次点同一枚芯片只该多一次 `/siblings`（要问才知道它
+      //      对应哪条 rec）。
+      //   ② 对比模式下的后台预取（用户开关，**默认关**）只取「服务端已有一份现成
+      //      预览、且档位对得上」的那几类。真机上「我什么都没点，盘阵却在读大图」
+      //      是这条最该钉住的边界，所以同一个场景验两遍：先把那份现成预览**按住
+      //      不给**（预取必须一个字节都不取），再把它烤上（预取必须恰好取它一份）。
+      console.log('\n[K] 场景芯片：已开的图不再要像素；预取只取现成预览');
+      const sibRe = new RegExp(`^${apiBase}/api/scenes/[^/]+/siblings(\\?|$)`);
+      // Node 侧直接问后端。**不经过页面** —— page.on('request') 看不到它，所以
+      // 它不会污染下面那些「页面发了几个请求」的增量。
+      const sibOf = async (sid) => {
+        const r = await fetch(`${apiBase}/api/scenes/${encodeURIComponent(sid)}/siblings`);
+        if (!r.ok) throw new Error(`siblings HTTP ${r.status}（${sid}）`);
+        return r.json();
+      };
+      // 与前端 `scenePreviewUrl` 逐字同形（场景 id 是 base64url + `~` 前缀，URL 安全，
+      // encodeURIComponent 后原样落地）。下面用它算「这一份该被取」的期望 URL。
+      const prevUrlOf = (id) => `${apiBase}/api/scenes/${encodeURIComponent(id)}/preview?div=2`;
+      const byKind = (sib, kind) => sib.items.find((it) => it.kind === kind);
+
+      const kActive0 = await page.evaluate(() => window.__viewer.activeRec());
+      assert(!!(kActive0 && kActive0.sceneId),
+        `J 收尾时活动图带盘阵关联（${kActive0 && kActive0.name}）`);
+      const kSid = kActive0.sceneId;
+      const sib0 = await sibOf(kSid);
+      const prod0 = byKind(sib0, 'product');
+      const nosr0 = byKind(sib0, 'nosr');
+      assert(!!(prod0 && prod0.name) && !!(nosr0 && nosr0.name),
+        `后端拼得出两类产物名（suffix=${sib0.suffix} 来自 ${sib0.suffixFrom}，`
+        + `候选 ${JSON.stringify(sib0.productCandidates)}）`);
+      // 名字一律取**后端自己拼的候选名**：本脚本不重复实现那套命名规则（`[:-4]`
+      // 切片 + suffix），名字改了这里跟着改，不会两边各说各话。尺寸特意与输入影像
+      // （1600×800）错开，缩略图尺寸因此能分清端上来的是哪一份。
+      const prodPath = path.join(sib0.lqPath, prod0.name);
+      const nosrPath = path.join(sib0.lqPath, nosr0.name);
+      makeTif(prodPath, 800, 400);
+      makeTif(nosrPath, 640, 320);
+      const sib1 = await sibOf(kSid);
+      const prod1 = byKind(sib1, 'product');
+      const nosr1 = byKind(sib1, 'nosr');
+      assert(prod1.exists && prod1.W === 800 && prod1.H === 400,
+        `造出来的「本次产物」被认成 800×400（exists=${prod1.exists} / `
+        + `${prod1.W}×${prod1.H}）`);
+      assert(nosr1.exists && nosr1.W === 640 && nosr1.H === 320,
+        `造出来的「上一次产物」被认成 640×320（exists=${nosr1.exists} / `
+        + `${nosr1.W}×${nosr1.H}）`);
+      assert(!prod1.hasPreview && !nosr1.hasPreview,
+        '两份都还没有预览 —— 也就是说，此刻盘上没有任何"现成的那份"');
+      // 只烤「本次产物」那一份（K1 要点的芯片）。「上一次产物」先按住不烤：K2 前半
+      // 段断言的就是「盘上没有现成预览 → 预取一个字节都不取」。
+      const bakeProd = await fetch(prevUrlOf(prod1.id));
+      assert(bakeProd.ok, `服务端烤「本次产物」的 ÷2 预览（HTTP ${bakeProd.status}）`);
+      await bakeProd.arrayBuffer();          // 必须读完：不读会吊着这条连接
+      const prod2 = byKind(await sibOf(kSid), 'product');
+      assert(prod2.hasPreview === true && prod2.previewDiv === 2,
+        `盘上那份预览带 ÷2 的档位戳（hasPreview=${prod2.hasPreview} / `
+        + `previewDiv=${prod2.previewDiv}）`);
+
+      // ---- K1. 芯片：第一次点取像素，第二次点只问 id ----
+      // 芯片条默认收起（工具条上那颗按钮开的），这里先展开 —— 这一段点的是真按钮。
+      await page.evaluate(() => window.__viewer.setCmpStripOpen(true));
+      const chipReady = async (label) => {
+        await waitFor(page, () => {
+          const b = document.querySelector('[data-e2e="cmp-sib-product"]');
+          return !!b && !b.disabled;
+        }, 15000, label);
+      };
+      await chipReady('「本次产物」芯片可用');
+      const k1Sib = countUrl(sibRe);
+      const k1Prev = countUrl(previewRe);
+      const k1Recs = await page.evaluate(() => window.__viewer.recs().length);
+      await page.click('[data-e2e="cmp-sib-product"]');
+      await waitFor(page, (sid) => window.__viewer.recs().some((r) => r.sceneId === sid),
+        20000, '「本次产物」开出来了', prod2.id);
+      await waitNode(() => countUrl(sibRe) === k1Sib + 1, 15000, '芯片那一跳的 /siblings');
+      const k1RecsAfter = await page.evaluate(() => window.__viewer.recs().length);
+      assert(k1RecsAfter === k1Recs + 1,
+        `芯片开出恰好一条 rec（${k1Recs} → ${k1RecsAfter}）`);
+      assert(countUrl(previewRe) === k1Prev + 1,
+        `第一次点芯片：/preview 恰好 +1（取那份 jpg；实际 +${countUrl(previewRe) - k1Prev}）`);
+      const kProdRec = await page.evaluate(
+        (sid) => window.__viewer.recs().find((r) => r.sceneId === sid), prod2.id);
+      assert(kProdRec.thumbW === 400 && kProdRec.thumbH === 200,
+        `缩略图就是那份 ÷2 预览的尺寸 400×200（${kProdRec.thumbW}×${kProdRec.thumbH}）`);
+      assert(kProdRec.lqPath === sib0.lqPath.replace(/\\/g, '/'),
+        `产物的 rec 也拿到盘阵关联，掩码写回才有落点（${kProdRec.lqPath}）`);
+
+      await chipReady('芯片回到可用（第一次那跳收尾）');
+      const k2Sib = countUrl(sibRe);
+      const k2Prev = countUrl(previewRe);
+      const k2Recs = await page.evaluate(() => window.__viewer.recs().length);
+      const k2Active = await page.evaluate(() => {
+        const r = window.__viewer.activeRec();
+        return r ? r.id : null;
+      });
+      await page.click('[data-e2e="cmp-sib-product"]');
+      await waitNode(() => countUrl(sibRe) === k2Sib + 1, 15000, '第二次点芯片的 /siblings');
+      await sleep(500);            // 真要发 /preview，这半秒足够它冒出来
+      assert(countUrl(previewRe) === k2Prev,
+        `第二次点同一枚芯片：/preview 一个都没发（实际 +${countUrl(previewRe) - k2Prev}）`);
+      const k2State = await page.evaluate(() => {
+        const r = window.__viewer.activeRec();
+        return { n: window.__viewer.recs().length, id: r ? r.id : null };
+      });
+      assert(k2State.n === k2Recs && k2State.id === k2Active,
+        `rec 条数与活动图都没动（${k2Recs}→${k2State.n} / ${k2Active}→${k2State.id}）`);
+
+      // ---- K2. 预取：开关关 → 零请求；开关开 → 只取「现成的那份」 ----
+      // 合格项的判据与 store 里那套逐条对齐：在盘上（exists）、有尺寸、**已有现成
+      // 预览且档位对得上**、并且没有哪条 rec 正开着它。写成 Node 侧算一遍而不是
+      // 写死「应该取哪一份」，断言钉的才是**过滤语义**，不是夹具的巧合。
+      const eligibleNow = async (sid) => {
+        const open = await page.evaluate(
+          () => window.__viewer.recs().map((r) => r.sceneId).filter(Boolean));
+        const sib = await sibOf(sid);
+        return sib.items.filter((it) => it.exists && it.id && it.name
+          && it.W != null && it.H != null && it.hasPreview && it.previewDiv === 2
+          && !open.includes(it.id));
+      };
+      const kSid2 = await page.evaluate(() => {
+        const r = window.__viewer.activeRec();
+        return r ? r.sceneId : null;
+      });
+      assert(!!kSid2, `K1 之后活动图仍带场景（${kSid2}）`);
+      const brief = (its) => JSON.stringify(its.map((it) => [it.kind, it.name]));
+
+      // K2a：开关**关着**（默认态）进对比模式 —— 两个端点都不该被碰。
+      await page.evaluate(() => window.__viewer.setCmpPrefetch(false));
+      assert(await page.evaluate(() => window.__viewer.cmpPrefetchOn()) === false,
+        '预取开关是关的（默认态）');
+      let sibMark = countUrl(sibRe);
+      let prevMark = countUrl(previewRe);
+      await page.evaluate(() => window.__viewer.setCmpMode('click'));
+      await sleep(700);
+      assert(countUrl(sibRe) === sibMark && countUrl(previewRe) === prevMark,
+        `开关关着进对比模式：一个请求都不发（/siblings +${countUrl(sibRe) - sibMark}`
+        + ` / /preview +${countUrl(previewRe) - prevMark}）`);
+
+      // K2b：开关开着 —— 但盘上那份「上一次产物」还没烤过，合格项是**空集**。
+      // 空集也要如实判一次：接下来「一个字节都不取」才有可解释的理由（钉的是
+      // 「预取绝不触发烘焙」）。
+      await page.evaluate(() => window.__viewer.setCmpMode('off'));
+      await page.evaluate(() => window.__viewer.setCmpPrefetch(true));
+      await sleep(500);
+      assert(countUrl(sibRe) === sibMark && countUrl(previewRe) === prevMark,
+        '只打开开关、还没进对比模式：也不发请求（预取不是"点开就取"）');
+      const eligB = await eligibleNow(kSid2);
+      assert(eligB.length === 0,
+        `此刻没有可预取的项（「上一次产物」在盘上但还没预览：${brief(eligB)}）`);
+      sibMark = countUrl(sibRe);
+      prevMark = countUrl(previewRe);
+      const recsB = await page.evaluate(() => window.__viewer.recs().length);
+      await page.evaluate(() => window.__viewer.setCmpMode('click'));
+      await waitNode(() => countUrl(sibRe) === sibMark + 1, 15000,
+        '开关开时进对比模式的那次 /siblings');
+      await sleep(900);            // 预取是顺序 await 的；给"多发一次"留够露头的时间
+      assert(countUrl(previewRe) === prevMark,
+        `盘上没有现成预览 → 预取一个字节都不取，绝不触发烘焙`
+        + `（/preview +${countUrl(previewRe) - prevMark}）`);
+      assert(await page.evaluate(() => window.__viewer.recs().length) === recsB,
+        '预取不建 rec');
+
+      // K2c：把那份「上一次产物」的预览烤上（**在页面之外**烤的，不算页面发的
+      // 请求），再进一次对比模式：这次合格项恰好是它一项。
+      const nosr2 = byKind(await sibOf(kSid2), 'nosr');
+      const bakeNosr = await fetch(prevUrlOf(nosr2.id));
+      assert(bakeNosr.ok, `服务端烤「上一次产物」的 ÷2 预览（HTTP ${bakeNosr.status}）`);
+      await bakeNosr.arrayBuffer();
+      const nosrN = byKind(await sibOf(kSid2), 'nosr');
+      assert(nosrN.hasPreview === true && nosrN.previewDiv === 2,
+        `盘上那份预览带 ÷2 的档位戳（previewDiv=${nosrN.previewDiv}）`);
+      await page.evaluate(() => window.__viewer.setCmpMode('off'));
+      const eligC = await eligibleNow(kSid2);
+      assert(eligC.length === 1 && eligC[0].kind === 'nosr',
+        `合格项恰好是「上一次产物」一项（${brief(eligC)}）`);
+      const wantUrl = prevUrlOf(eligC[0].id);
+      sibMark = countUrl(sibRe);
+      prevMark = countUrl(previewRe);
+      const recsC = await page.evaluate(() => window.__viewer.recs().length);
+      const activeC = await page.evaluate(() => {
+        const r = window.__viewer.activeRec();
+        return r ? r.id : null;
+      });
+      await page.evaluate(() => window.__viewer.setCmpMode('click'));
+      await waitNode(() => countUrl(previewRe) >= prevMark + 1, 20000,
+        '预取把那一份取回来');
+      await waitNode(() => countUrl(sibRe) === sibMark + 1, 15000, '预取那次 /siblings');
+      const fetched = seen.filter((u) => previewRe.test(u)).slice(prevMark);
+      assert(fetched.length === 1 && fetched[0] === wantUrl,
+        `预取只取了那"现成的一份"（${JSON.stringify(fetched)}）`);
+      const afterC = await page.evaluate(() => {
+        const r = window.__viewer.activeRec();
+        return {
+          n: window.__viewer.recs().length,
+          id: r ? r.id : null,
+          mask: !!document.querySelector('.decode-mask'),
+        };
+      });
+      assert(afterC.n === recsC, `预取不建 rec（${recsC} → ${afterC.n}）`);
+      assert(afterC.id === activeC, `预取不换活动图（${activeC} → ${afterC.id}）`);
+      assert(afterC.mask === false,
+        '预取不占用遮罩 —— 用户此刻在看别的图，不该冒出"正在加载"');
+      assert((await page.evaluate(() => window.__viewer.cmpList())).length === recsC,
+        '点选清单里的还是原来那些（预取不进清单）');
+
+      // 收尾：复位成默认（开关关、回单幅），免得影响 §I 的错误计数口径。
+      await page.evaluate(() => window.__viewer.setCmpMode('off'));
+      await page.evaluate(() => window.__viewer.setCmpPrefetch(false));
+      assert(await page.evaluate(() => window.__viewer.cmpPrefetchOn()) === false,
+        '预取开关复位成默认关');
 
       /* ---------- I. 全程无错 ---------- */
       console.log('\n[I] 全程无错');

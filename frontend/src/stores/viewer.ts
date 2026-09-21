@@ -23,11 +23,13 @@ import {
   mergeConnectedAsync, buildTiff, buildMaskTxt,
 } from '../lib/maskgen.js';
 import { fitView, locateView, wheelZoom, hitRoi, thumbToOrig, visibleThumbRect,
-  clampSplitRatio, splitRects, paneAtX, wheelZoomBoth, panBoth } from '../lib/viewMath.js';
+  clampSplitRatio, splitRects, paneAtX, wheelZoomBoth, panBoth,
+  remapViewForImage } from '../lib/viewMath.js';
 import type { ViewState, Rect, PaneRect } from '../lib/viewMath.js';
 import {
   parseCompareMode, loadSplitRatio, saveSplitRatio, seedCompareList,
   addCompareEntry, removeCompareEntry, pruneCompareList, DEFAULT_SPLIT_RATIO,
+  loadCmpPrefetch, saveCmpPrefetch,
 } from '../lib/compare.js';
 import type { CompareMode } from '../lib/compare.js';
 import { FileSource } from '../lib/source.js';
@@ -40,9 +42,9 @@ import {
 } from '../lib/scene.js';
 import {
   apiResolveScene, apiBakeMask, apiSceneSiblings, fetchSceneJpg, fetchDropSceneJpg,
-  siblingRow,
+  siblingRow, previewCacheStats, clearPreviewCache,
 } from '../lib/api.js';
-import type { SceneResolveResult, SceneSibling } from '../lib/api.js';
+import type { SceneResolveResult, SceneSibling, SceneSiblings } from '../lib/api.js';
 import { classifyImages, imageKindOf } from '../lib/imageFiles.js';
 import type { SceneOpenMeta } from '../lib/scene.js';
 import { buildStats, luma, STAT_HI } from '../lib/roiStats.js';
@@ -476,13 +478,29 @@ export const useViewerStore = defineStore('viewer', () => {
 
   /* ---------------- 分屏适配 ---------------- */
 
-  /** 只适配某一格（按它自己的视口矩形）。 */
+  /** 每格当前的 ViewState 是**按哪个缩略图尺寸**算出来的（null = 这格没适配过 / 现在空着）。
+   *
+   *  换图时靠它决定「该 remap 还是该 fit」—— 它记的就是「此前摆在这格的是多大的图」。
+   *  `activate` 与 `afterPixels` 这两条换图路径是**异步**的（.jpg 要先解码），把账记在
+   *  这里就不必跨 await 传「上一张是谁」。
+   *
+   *  **非响应式**：只参与判断，不进渲染 —— 画布尺寸、比例、视图各自有 ref 在管它。 */
+  const viewFor: { A: { w: number; h: number } | null; B: { w: number; h: number } | null }
+    = { A: null, B: null };
+
+  function setSideView(side: 'A' | 'B', v: ViewState) {
+    if (side === 'B') viewB.value = v; else viewA.value = v;
+  }
+
+  /** 只适配某一格（按它自己的视口矩形）。空格（没图 / 没像素）直接返回，
+   *  **不记账** —— 「这格没适配过」正是「往空格里拖图该老实 fit」的判据。 */
   function fitSide(side: 'A' | 'B') {
     const rec = recForSide(side);
     if (!rec || !rec.thumb) return;
     const rect = rectForSide(side);
     const v = fitView(rec.thumb.width, rec.thumb.height, rect.w, rect.h);
-    if (side === 'B') viewB.value = v; else viewA.value = v;
+    setSideView(side, v);
+    viewFor[side] = { w: rec.thumb.width, h: rec.thumb.height };
   }
 
   /** 两格各自适配 —— 进分屏、回正、画布尺寸变化时用。半幅是新的视口，
@@ -492,19 +510,40 @@ export const useViewerStore = defineStore('viewer', () => {
     fitSide('B');
   }
 
+  /** **换图**之后那一格的适配：对比模式下按相对视野搬过去，其余情况老实 fit。
+   *
+   *  `side` = 这张图落在哪一格（`placeRec` 之后 `activeSide` 就是它）。
+   *  `viewFor[side]` 为空 = 这一格此前空着（进分屏时的右格）或从没适配过 → 老实 fit，
+   *  否则用户会看到一张缩在左上角的图。 */
+  function fitAfterImageChange(side: 'A' | 'B', rec: ViewerRec) {
+    if (!rec.thumb) return;
+    const rect = rectForSide(side);
+    const size = { w: rec.thumb.width, h: rec.thumb.height };
+    const prev = viewFor[side];
+    const cur = side === 'B' ? viewB.value : viewA.value;
+    setSideView(side, (compareOn.value && prev)
+      ? remapViewForImage(cur, prev, size, rect.w, rect.h)
+      : fitView(size.w, size.h, rect.w, rect.h));
+    viewFor[side] = size;
+  }
+
   /** 解码/取图完成后的收尾。旧写法是 `if (activeId === rec.id) { fit(); … }`——
      分屏下这张可能在**非活动侧**解码完成，那样那一格的 ViewState 会停在 {1,0,0}
-     （图缩在左上角）。所以改成「显示着这张 rec 的格子各适配一次」。 */
+     （图缩在左上角）。所以改成「显示着这张 rec 的格子各适配一次」。
+
+     2026-09-20：两块都改走 `fitAfterImageChange` —— 对比模式下换图不再把用户的
+     缩放与位置抹掉（按相对视野搬过去）。关闭模式 `compareOn` 为假，仍然走 `fit()`。 */
   function afterPixels(rec: ViewerRec) {
     if (split.value) {
-      if (paneA.value === rec.id) fitSide('A');
-      if (paneB.value === rec.id) fitSide('B');
+      if (paneA.value === rec.id) fitAfterImageChange('A', rec);
+      if (paneB.value === rec.id) fitAfterImageChange('B', rec);
       if (activeId.value === rec.id) refreshCloudStats();
       renderTick.value++;
       return;
     }
     if (activeId.value === rec.id) {
-      fit();
+      if (compareOn.value) fitAfterImageChange('A', rec);
+      else fit();
       refreshCloudStats();
       renderTick.value++;
     }
@@ -531,6 +570,7 @@ export const useViewerStore = defineStore('viewer', () => {
     const next = parseCompareMode(mode);
     if (next === compareMode.value) return;
     const wasSplit = split.value;
+    const wasOff = compareMode.value === 'off';
     if (next !== 'off') exitDraw();        // 对比模式只读：不画掩码、不建 ROI
 
     if (next === 'split') {
@@ -538,12 +578,14 @@ export const useViewerStore = defineStore('viewer', () => {
         // 进分屏：当前这张进左格，右格空着等拖入。两侧都是新视口 → 两边重新适配。
         paneA.value = activeId.value;
         paneB.value = null;
+        viewFor.B = null;                  // 右格空着 = 没适配过（往它里面落图该老实 fit）
         activeSide.value = 'A';
       }
       compareMode.value = next;
       compareList.value = seedCompareList(recs.value.map((r) => r.id));
       collapseRailForCompare();
       fitBoth();
+      if (wasOff) void maybePrefetchCompare();
       renderTick.value++;
       return;
     }
@@ -553,11 +595,12 @@ export const useViewerStore = defineStore('viewer', () => {
       const keep = recForSide(activeSide.value);
       compareMode.value = next;
       paneB.value = null;
+      viewFor.B = null;
       activeSide.value = 'A';
       if (keep) { paneA.value = keep.id; activeId.value = keep.id; }
       restoreRailAfterCompare();
-      if (next === 'off') compareList.value = [];
-      fit();
+      if (next === 'off') { compareList.value = []; stopPrefetch(); }
+      fit();                               // 重记 viewFor.A（单屏视口，全幅）
       renderTick.value++;
       return;
     }
@@ -567,15 +610,93 @@ export const useViewerStore = defineStore('viewer', () => {
     if (next === 'off') {
       compareList.value = [];
       paneB.value = null;
+      viewFor.B = null;
       activeSide.value = 'A';
+      stopPrefetch();
     } else {
       compareList.value = seedCompareList(recs.value.map((r) => r.id));
+      if (wasOff) void maybePrefetchCompare();
     }
     renderTick.value++;
   }
 
   function setCmpStripOpen(open: boolean) {
     cmpStripOpen.value = !!open;
+  }
+
+  /* ---------------- 设置浮层 ---------------- */
+
+  const settingsOpen = ref(false);
+  function setSettingsOpen(open: boolean) {
+    settingsOpen.value = !!open;
+  }
+
+  /* ---------------- 对比模式后台预取（用户开关，默认关） ----------------
+
+     进对比模式时提前把同场景另两类图的预览取到本地：真机上切图的等待几乎全在
+     「取一份几 MB 的盘阵 jpg」上，提前取好就是零等待。
+
+     **绝不触发服务端烘焙**：只取 `hasPreview && previewDiv === div` 的那几类
+     （服务端已经现成烤好的那份），判据本身就把「会重烤的」挡在外面 —— 真机上
+     「我什么都没点，盘阵却在读大图」是件让人不安的事。开关默认关，装好后行为
+     与没有这个功能时完全一样。 */
+
+  const cmpPrefetchOn = ref(loadCmpPrefetch());
+  /** 已经预取过的 `sceneId|档位`。同一个场景 + 同一档位只做一次。
+   *  离开对比模式时清空 —— 那时 blob 缓存可能也被清过，重进该重取一遍。 */
+  const prefetched = new Set<string>();
+  /** 代数计数：离开对比模式 / 换场景就 +1，在飞的预取自己发现过期就收手。
+   *  取图的两个 API 都不收 AbortSignal（它们要兼容静态 URL 那条支路），
+   *  所以取消做成「不开始下一项」而不是「掐断在飞的那个」。 */
+  let prefetchGen = 0;
+
+  function setCmpPrefetch(on: boolean) {
+    const next = !!on;
+    if (next === cmpPrefetchOn.value) return;
+    cmpPrefetchOn.value = next;
+    saveCmpPrefetch(next);
+    if (next) void maybePrefetchCompare();   // 当场打开就当场开始，不用等下次切图
+  }
+
+  /** 收手：离开对比模式、或活动图不再是盘阵场景时调。 */
+  function stopPrefetch() {
+    prefetchGen++;
+    prefetched.clear();
+  }
+
+  /** 预取同场景另两类图的预览。三道门：对比模式 + 开关开 + 活动图有 sceneId。 */
+  async function maybePrefetchCompare(): Promise<void> {
+    if (!compareOn.value || !cmpPrefetchOn.value) return;
+    const sid = activeSceneId();
+    if (!sid) return;
+    const div = previewDiv.value;
+    const key = sid + '|' + div;
+    if (prefetched.has(key)) return;
+    prefetched.add(key);                    // 先记上：免得连着几次 activate 各起一轮
+    const my = prefetchGen;
+    const cfg = loadSrConfig();
+    let res: SceneSiblings;
+    try {
+      res = await apiSceneSiblings(cfg, sid);
+    } catch {
+      return;                               // 预取失败不打扰用户，点的时候照旧会去取
+    }
+    if (my !== prefetchGen) return;
+    // 只挑「服务端已有一份现成预览、且档位对得上」的那几类，且**没开着的**。
+    const todo = res.items.filter((it) => it.exists && it.id && it.name
+      && it.W != null && it.H != null
+      && it.hasPreview && it.previewDiv === div
+      && !recs.value.some((r) => r.sceneId === it.id));
+    for (const it of todo) {
+      if (my !== prefetchGen) return;
+      try {
+        // 顺序取（并发 1）：真机上别同时读几份盘阵预览。
+        // **不传 onPhase**：预取不该占用遮罩，用户此刻在看别的。
+        await fetchSceneJpg(cfg, siblingRow(res, it), div);
+      } catch {
+        /* 单张失败就跳过，接着取下一张 */
+      }
+    }
   }
 
   /* ---------------- 分隔比例 ---------------- */
@@ -695,6 +816,16 @@ export const useViewerStore = defineStore('viewer', () => {
         hideMask(); busy.value = false;
         return false;
       }
+      // 已经开着这张就别去要像素了：`/preview` 是一次可能几 MB 的往返，而这张图的
+      // 像素已经在 rec 里。判据与 `openSceneJpg` 的 `findRecByMeta` 同源（认 `sceneId`）
+      // —— 同一个场景若开出两条 rec，两份 maskRois 就各写各的了。
+      // 于是「同一枚芯片连点两次」= 一次 `/siblings`（仍要问，才知道它对应哪条 rec）+ 零次 `/preview`。
+      const opened = recs.value.find((r) => r.sceneId === item.id);
+      if (opened) {
+        hideMask(); busy.value = false;
+        await activate(opened.id, split.value ? activeSide.value : undefined);
+        return true;
+      }
       const row = siblingRow(res, item);
       const blob = await fetchSceneJpg(loadSrConfig(), row, previewDiv.value, (text) => {
         showMask('正在加载同场景的图…', text, false);
@@ -779,7 +910,9 @@ export const useViewerStore = defineStore('viewer', () => {
     if (already && rec.thumb) {
       // 已经是活动侧这张：只重画。**只有它真的换了格子才重新适配** ——
       // 同一张图留在原格时若也 fit，一次多余的点选就把用户的缩放抹了。
-      if (moved) fit();
+      // 换了格子（两格互换）也走 `fitAfterImageChange`：新格子的视口与图都换了，
+      // 对比模式下按相对视野搬过去，与「换图」同一套规矩。
+      if (moved) fitAfterImageChange(activeSide.value, rec);
       repaintOnActivate(rec);
       renderTick.value++;
       return;
@@ -793,8 +926,10 @@ export const useViewerStore = defineStore('viewer', () => {
     }
     if (rec.thumb) {
       repaintOnActivate(rec);
-      fit();                             // 单屏 = 全幅；分屏 = 只配活动格
+      // 分屏（对比）下换图保住用户的缩放与位置，其余情况看全幅；见 fitAfterImageChange。
+      fitAfterImageChange(activeSide.value, rec);
       refreshCloudStats();           // 切回已解码文件 → 云量随新图刷新
+      void maybePrefetchCompare();   // 对比模式里换了另一张 → 可能换了场景
       renderTick.value++;
       return;
     }
@@ -808,6 +943,8 @@ export const useViewerStore = defineStore('viewer', () => {
     if (!rec.route && await tryLinkScenes(rec)) return;
     if (!recs.value.includes(rec)) return;      // 关联期间被移除了
     await decodeRec(rec);
+    // 解完才有 sceneId（本地解码的那条路不会命中盘阵，这里多半直接返回）。
+    void maybePrefetchCompare();
   }
 
   async function decodeRec(rec: ViewerRec) {
@@ -1029,8 +1166,8 @@ export const useViewerStore = defineStore('viewer', () => {
     recs.value.splice(i, 1);
     // 分屏的两格与点选清单都可能还指着它
     let paneCleared = false;
-    if (paneA.value === id) { paneA.value = null; paneCleared = true; }
-    if (paneB.value === id) { paneB.value = null; paneCleared = true; }
+    if (paneA.value === id) { paneA.value = null; paneCleared = true; viewFor.A = null; }
+    if (paneB.value === id) { paneB.value = null; paneCleared = true; viewFor.B = null; }
     compareList.value = pruneCompareList(compareList.value, recs.value.map((r) => r.id));
     if (activeId.value === id) {
       activeId.value = null;
@@ -1041,6 +1178,7 @@ export const useViewerStore = defineStore('viewer', () => {
       else {
         activeSide.value = 'A';          // 两格都空了 → 活动侧回左，view 写回 viewA
         view.value = { scale: 1, ox: 0, oy: 0 };
+        viewFor.A = null; viewFor.B = null;   // 没图了 = 没适配过
         marker.value = null;
         clearCloud();                    // 无图可显：云卡回空态，释放红叠画布
         renderTick.value++;
@@ -1131,12 +1269,14 @@ export const useViewerStore = defineStore('viewer', () => {
     if (rec && rec.thumb) { fit(); renderTick.value++; }
   }
 
-  /** 只适配**活动格**。单屏时活动格就是整块画布 → 与今天完全等价。 */
+  /** 只适配**活动格**（看全幅）。单屏时活动格就是整块画布 → 与今天完全等价。
+      **写 `viewFor`**：这就是「这格当前视图是按多大的一张图算的」这笔账。 */
   function fit() {
     const rec = activeRec.value;
     if (!rec || !rec.thumb) return;
     const rect = activePaneRect();
     view.value = fitView(rec.thumb.width, rec.thumb.height, rect.w, rect.h);
+    viewFor[activeSide.value] = { w: rec.thumb.width, h: rec.thumb.height };
   }
 
   function onWheel(mx: number, my: number, factor: number) {
@@ -1912,6 +2052,10 @@ export const useViewerStore = defineStore('viewer', () => {
     dragHint, setDragHint,
     ctxRailOpen, ctxRailPrevOpen, setCtxRailOpen,
     activeSceneId, openSceneSibling,
+    // 设置浮层（右上角）：对比模式后台预取开关 + 本地预览缓存
+    settingsOpen, setSettingsOpen,
+    cmpPrefetchOn, setCmpPrefetch,
+    previewCacheStats, clearPreviewCache,
     // 侧舱 ROI 选择 / 确定性统计
     selRoi, roiStats, roiSelIndex, selectRoi, clearRoiSel, refreshRoiStats,
     // 云量估算（整景/当前视野 + 疑似云区红叠）

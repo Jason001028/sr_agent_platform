@@ -263,6 +263,19 @@ export function previewDivLabel(div: number): string {
   return `1/${div}`;
 }
 
+/** 预览 blob 缓存的键（见 lib/blobCache.ts 与 api.fetchSceneJpg）。
+ *
+ * **必须把「取的是哪一份」编进去**：同一条行 id + 同一个档位，在「同名栅格赢」成立时
+ * 端上来的是**栅格**那份预览（另一张图、另一串字节），与源 jpg 那份不是一回事。
+ * 只按 id+div 存，用户把档位调到栅格赢的那一档再调回去，就会拿到上一档的图 ——
+ * 而且看不出来（两张都是这张场景的预览，只是清晰度不同）。
+ */
+export function previewCacheKey(
+  row: { id: string }, div: number, raster?: { name: string } | null,
+): string {
+  return raster ? `${row.id}|${div}|ras:${raster.name}` : `${row.id}|${div}|jpg`;
+}
+
 /* ---------------- 显示源比较规则：谁清晰用谁 ----------------
  * 盘阵里预生成的显示件（`PAN.jpg` / `<编号>.jpg`，长边约 8192）配着一张**同名栅格**
  * （`PAN.tif` / `<编号>.tif`）。服务端从那张栅格烤出来的图**在档位够浅时**比这张 jpg

@@ -883,6 +883,200 @@ async function main() {
       await waitDecoded(page, 30000);
     }
 
+
+    console.log('--- I. 设置浮层（右上角） ---');
+    {
+      assert(await page.evaluate(() => !!document.querySelector('[data-e2e="set-open"]')),
+        '工具栏右端有「设置」入口');
+      assert(await page.evaluate(() => !document.querySelector('[data-e2e="set-panel"]')),
+        '默认没有浮层（不点不出现）');
+
+      await page.click('[data-e2e="set-open"]');
+      await sleep(200);
+      const st = await page.evaluate(() => {
+        const p = document.querySelector('[data-e2e="set-panel"]');
+        const sw = document.querySelector('[data-e2e="set-prefetch"]');
+        const line = document.querySelector('[data-e2e="set-cache-line"]');
+        return {
+          panel: !!p,
+          role: p ? p.getAttribute('role') : null,
+          sw: !!sw,
+          swRole: sw ? sw.getAttribute('role') : null,
+          checked: sw ? sw.getAttribute('aria-checked') : null,
+          line: line ? line.textContent.trim() : null,
+          clear: !!document.querySelector('[data-e2e="set-cache-clear"]'),
+          btnOn: !!document.querySelector('[data-e2e="set-open"].on'),
+        };
+      });
+      assert(st.panel && st.role === 'dialog' && st.btnOn,
+        '点开后出浮层（role=dialog），入口呈选中态');
+      assert(st.sw && st.swRole === 'switch' && st.checked === 'false',
+        '预取开关默认关（首次、没记过）');
+      assert(st.line && /^\d+ 项 \/ [\d.]+ MB$/.test(st.line) && st.clear,
+        `缓存行与「清空」按钮都在（"${st.line}"）`);
+
+      // 打开开关：立刻写 localStorage（重新载入后仍是开）
+      await page.click('[data-e2e="set-prefetch"]');
+      await sleep(150);
+      assert(await page.evaluate(() => document.querySelector('[data-e2e="set-prefetch"]')
+        .getAttribute('aria-checked')) === 'true'
+        && await page.evaluate(() => localStorage.getItem('sr.viewer.cmpPrefetch')) === '1',
+        '开关打开 → aria-checked=true 且记进 localStorage');
+
+      await page.click('[data-e2e="set-cache-clear"]');
+      await sleep(150);
+      const zeroed = await page.evaluate(() =>
+        document.querySelector('[data-e2e="set-cache-line"]').textContent.trim());
+      assert(zeroed.indexOf('0 项') === 0, `「清空」后缓存行归零（"${zeroed}"）`);
+
+      await page.keyboard.press('Escape');
+      await sleep(200);
+      assert(await page.evaluate(() => !document.querySelector('[data-e2e="set-panel"]')),
+        'Esc 关闭浮层');
+
+      // 再开一次：状态还在；然后点浮层之外关闭（画布中心那一下该被透明捕手吃掉）
+      await page.click('[data-e2e="set-open"]');
+      await sleep(200);
+      assert(await page.evaluate(() => document.querySelector('[data-e2e="set-prefetch"]')
+        .getAttribute('aria-checked')) === 'true', '重开浮层：开关状态还在');
+      const cen = await page.evaluate(() => {
+        const r = document.querySelector('canvas.view-canvas').getBoundingClientRect();
+        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+      });
+      await page.mouse.click(cen.x, cen.y);
+      await sleep(200);
+      assert(await page.evaluate(() => !document.querySelector('[data-e2e="set-panel"]')),
+        '点浮层之外关闭');
+
+      // 收尾复位：后面的段不该带着「预取开」跑
+      await page.evaluate(() => window.__viewer.setCmpPrefetch(false));
+      assert(await page.evaluate(() => localStorage.getItem('sr.viewer.cmpPrefetch')) === '0'
+        && await page.evaluate(() => window.__viewer.cmpPrefetchOn()) === false,
+        '开关复位成默认关（存 0 也算关）');
+    }
+
+    console.log('--- J. 对比模式换图保持视图 ---');
+    {
+      await page.evaluate(() => window.__viewer.setCmpMode('off'));
+      await sleep(200);
+
+      const panes = () => page.evaluate(() => window.__viewer.cmpPanes());
+      const viewOf = async () => (await panes())[0].view;
+      const rectOf = async () => (await panes())[0].rect;
+      /** fitView 的等价副本（判据在 lib/viewMath.fitView：min(cw/tw, ch/th, 1) + 居中）。 */
+      const fitOf = (tw, th, r) => {
+        const s = Math.min(r.w / tw, r.h / th, 1);
+        return { scale: s, ox: (r.w - tw * s) / 2, oy: (r.h - th * s) / 2 };
+      };
+      const near3 = (a, b) => Math.abs(a.scale - b.scale) < 1e-9
+        && Math.abs(a.ox - b.ox) < 1e-9 && Math.abs(a.oy - b.oy) < 1e-9;
+      /** 点文件列表一行（关闭模式下换图只有这条入口）。 */
+      const clickFile = async (id) => {
+        const ok = await page.evaluate((rid) => {
+          const i = window.__viewer.recs().findIndex((r) => r.id === rid);
+          const rows = [...document.querySelectorAll('.file-item')];
+          if (i < 0 || !rows[i]) return false;
+          rows[i].click();
+          return true;
+        }, id);
+        assert(ok, `文件列表里有 rec ${id}`);
+        await sleep(300);
+      };
+      /** 点「点选清单」一行（对比模式下才有这一块）。 */
+      const clickRow = async (id) => {
+        const ok = await page.evaluate((rid) => {
+          const i = window.__viewer.cmpList().indexOf(rid);
+          const rows = [...document.querySelectorAll('[data-e2e="cmp-row"]')];
+          if (i < 0 || !rows[i]) return false;
+          rows[i].click();
+          return true;
+        }, id);
+        assert(ok, `点选清单里有 rec ${id}`);
+        await sleep(300);
+      };
+      /** 把当前这张推到非默认形态：真实滚轮放大 + 真实拖动平移。 */
+      const nudge = async () => {
+        const c = await page.evaluate(() => {
+          const r = document.querySelector('canvas.view-canvas').getBoundingClientRect();
+          return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+        });
+        await page.mouse.move(c.x, c.y);
+        await page.mouse.wheel({ deltaY: -100 });
+        await sleep(150);
+        await page.mouse.down();
+        await page.mouse.move(c.x + 60, c.y + 30, { steps: 1 });
+        await page.mouse.up();
+        await sleep(200);
+      };
+
+      const info = await page.evaluate(() => window.__viewer.recs()
+        .map((r) => ({ id: r.id, name: r.name, tw: r.thumbW, th: r.thumbH }))
+        .filter((r) => r.tw > 0 && r.th > 0));
+      const key = (r) => r.tw + '×' + r.th;
+      let pair = null;
+      for (let i = 0; i < info.length && !pair; i++) {
+        for (let j = i + 1; j < info.length; j++) {
+          if (key(info[i]) === key(info[j])) { pair = [info[i], info[j]]; break; }
+        }
+      }
+      const diff = pair ? info.find((r) => key(r) !== key(pair[0])) : null;
+      assert(!!pair && !!diff, '既有同缩略图尺寸的两张、也有尺寸不同的一张（'
+        + info.map((r) => r.name + '=' + key(r)).join(', ') + '）');
+
+      // 1) 关闭模式基线：换图仍旧「看全幅」——这条守住「关闭模式行为一字不改」
+      await clickFile(pair[0].id);
+      await nudge();
+      const movedOff = await viewOf();
+      const fit0 = fitOf(pair[0].tw, pair[0].th, await rectOf());
+      assert(!near3(movedOff, fit0),
+        `关闭模式：视图已被推到非默认形态 (scale ${fit0.scale.toFixed(3)}→${movedOff.scale.toFixed(3)})`);
+      await clickFile(pair[1].id);
+      const vOff = await viewOf();
+      assert(near3(vOff, fitOf(pair[1].tw, pair[1].th, await rectOf())),
+        `关闭模式换图仍然重新适配整幅 (scale=${vOff.scale.toFixed(4)})`);
+
+      // 2) 进「点选对比」：同尺寸换图 → 缩放与位置一个数都不动
+      await page.evaluate(() => window.__viewer.setCmpMode('click'));
+      await sleep(250);
+      await clickRow(pair[0].id);
+      await nudge();
+      const vA = await viewOf();
+      const rA = await rectOf();
+      assert(!near3(vA, fitOf(pair[0].tw, pair[0].th, rA)),
+        `对比模式：视图已被推到非默认形态 (scale=${vA.scale.toFixed(4)})`);
+      await clickRow(pair[1].id);
+      const vB = await viewOf();
+      assert(vA.scale === vB.scale && vA.ox === vB.ox && vA.oy === vB.oy,
+        `两张缩略图同尺寸 → 换图后视图逐字不变 `
+        + `(A ${vA.scale}/${vA.ox.toFixed(2)}/${vA.oy.toFixed(2)} → `
+        + `B ${vB.scale}/${vB.ox.toFixed(2)}/${vB.oy.toFixed(2)})`);
+
+      // 3) 换到尺寸不同的那张：归一化视野守恒（看的是同一片相对区域），scale 确实变了
+      await clickRow(diff.id);
+      const vC = await viewOf();
+      const rC = await rectOf();
+      const nw = (v, r, tw) => r.w / (v.scale * tw);
+      const nl = (v, tw) => -v.ox / (v.scale * tw);
+      const nt = (v, th) => -v.oy / (v.scale * th);
+      assert(Math.abs(nw(vC, rC, diff.tw) - nw(vB, rA, pair[1].tw)) < 1e-9
+        && Math.abs(nl(vC, diff.tw) - nl(vB, pair[1].tw)) < 1e-9
+        && Math.abs(nt(vC, diff.th) - nt(vB, pair[1].th)) < 1e-9,
+        `换到不同尺寸：归一化可视范围守恒 (${nw(vC, rC, diff.tw).toFixed(4)} vs `
+        + `${nw(vB, rA, pair[1].tw).toFixed(4)})`);
+      assert(Math.abs(vC.scale - vB.scale) > 1e-9,
+        `换了张尺寸不同的图 → scale 确实变了 (${vB.scale.toFixed(4)}→${vC.scale.toFixed(4)})`);
+
+      // 4) 回「关闭」：换图又是「看全幅」
+      await page.evaluate(() => window.__viewer.setCmpMode('off'));
+      await sleep(250);
+      await clickFile(pair[0].id);
+      const vOff2 = await viewOf();
+      assert(near3(vOff2, fitOf(pair[0].tw, pair[0].th, await rectOf())),
+        `回「关闭」后换图重新适配 (scale=${vOff2.scale.toFixed(4)})`);
+      assert(await page.evaluate(() => window.__viewer.cmpMode()) === 'off',
+        '收尾：模式回「关闭」（后面的断言不该带着对比模式跑）');
+    }
+
     assert(errors.length === 0, `无浏览器错误 (${JSON.stringify(errors.slice(0, 5))})`);
     console.log(`\n[test-vue-viewer] ✅ 全部通过 (${pass} 项断言)`);
   } finally {

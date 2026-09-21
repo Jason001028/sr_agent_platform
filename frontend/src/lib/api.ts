@@ -9,9 +9,11 @@
 import {
   loadSrConfig, joinBase, sceneResolveUrl, scenePreviewUrl, sceneImageUrl,
   dropPreviewUrl, isBakedPreviewUrl, previewDivLabel, previewNeedsBake,
-  loadPreviewDiv, rasterPreviewWins, sceneSiblingsUrl,
+  loadPreviewDiv, rasterPreviewWins, sceneSiblingsUrl, previewCacheKey,
 } from './scene.js';
 import type { SceneRow, SrConfig, RasterPreview } from './scene.js';
+import { createBlobCache } from './blobCache.js';
+import type { BlobCacheStats } from './blobCache.js';
 
 export { loadSrConfig } from './scene.js';
 
@@ -374,6 +376,38 @@ export function subscribeQueueEvents(
   return () => ctrl.abort();
 }
 
+/* ---------------- 预览 JPG 的本地 blob 缓存（2026-09-20 新增） ----------------
+
+   同一张图来回切（对比模式）不该每次都走一遍网络与读盘：磁盘上那份服务端早就烤好
+   了，前端再取就是纯重复。缓存的是**压缩 blob** 而不是解码后的位图 —— 理由见
+   lib/blobCache.ts 的文件头（一句话：rec 的像素本来就常驻，位图缓存只会翻倍）。
+
+   按字节封顶，不按条数：÷2 档一张通常几 MB～几十 MB，128MB 约合十来张；条数在大图上
+   完全不代表内存。超上限的条目由 LRU 淘汰，超过上限的单条干脆不进。 */
+export const PREVIEW_BLOB_CACHE_MAX = 128 * 1024 * 1024;
+const previewBlobs = createBlobCache(PREVIEW_BLOB_CACHE_MAX);
+
+/** 缓存占用（设置浮层里那一行「本地预览缓存 N 项 / X MB」）。 */
+export function previewCacheStats(): BlobCacheStats {
+  return previewBlobs.stats();
+}
+
+/** 清空（设置浮层的「清空」按钮）。 */
+export function clearPreviewCache(): void {
+  previewBlobs.clear();
+}
+
+/** 丢弃并重建缓存。**只给单测用**：模块级单例会在用例之间串味。 */
+export function resetPreviewCache(): void {
+  previewBlobs.clear();
+}
+
+/** 存进缓存并原样返回（三处 return 都走它，免得漏存或存了不返）。 */
+function cacheBlob(key: string, blob: Blob): Blob {
+  previewBlobs.set(key, blob);
+  return blob;
+}
+
 /** 取一条场景行的显示 JPG 字节。两条来源，调用方不必区分：
  *
  *  * 库行（jpgUrl 非空）：缓存没生成过、或**盘上那份不是当前档位**，就先打一次
@@ -413,6 +447,15 @@ export async function fetchSceneJpg(
   }
   const baked = isBakedPreviewUrl(row.jpgUrl);
   const needBake = previewNeedsBake(row, div);
+  // 本地已有一份（同一场景 + 同一档位，见 previewCacheKey）→ 直接用。
+  // **命中也要照做网络路径那两行副作用**：下一同会话语义（previewNeedsBake）靠它们，
+  // 少了就会出现「盘上明明有这一档的预览，却每次都判成要重烤」。
+  const cached = previewBlobs.get(previewCacheKey(row, div));
+  if (cached) {
+    row.hasPreview = true;
+    if (row.jpgUrl) row.previewDiv = div;
+    return cached;
+  }
   // 会不会**真的**触发服务端烘焙（onPhase 的判据）。与 previewNeedsBake 的差别只在
   // 库外那一支：库外每次都走 /preview，但缓存已在时它是命中、不是烘焙，别吓人。
   const willBake = !row.jpgUrl ? !row.hasPreview
@@ -425,7 +468,7 @@ export async function fetchSceneJpg(
     // 库外：没有静态 URL，这次请求的**响应体本身**就是那张 JPEG。
     const p = await http(scenePreviewUrl(cfg, row.id, div));
     row.hasPreview = true;
-    return await p.blob();
+    return cacheBlob(previewCacheKey(row, div), await p.blob());
   }
   if (needBake) {
     await http(scenePreviewUrl(cfg, row.id, div));   // 只触发烘焙，字节丢掉
@@ -433,7 +476,7 @@ export async function fetchSceneJpg(
     row.previewDiv = div;      // 记上实际档位：同一会话内再打开不必重烤
   }
   const img = await http(sceneImageUrl(cfg, row.jpgUrl, div));
-  return await img.blob();
+  return cacheBlob(previewCacheKey(row, div), await img.blob());
 }
 
 /** 显示件 jpg 的「同名栅格赢」那一支：取**栅格那份**预览（见 rasterPreviewWins）。
@@ -455,6 +498,15 @@ async function fetchRasterPreview(
   onPhase?: (text: string) => void,
 ): Promise<Blob> {
   const needBake = !rp.hasPreview || rp.previewDiv !== div;
+  // 键里带 `rp.name`：这一支端上来的是**栅格**那份预览，与源 jpg 那份不是同一串字节
+  // （见 previewCacheKey）。
+  const key = previewCacheKey(row, div, rp);
+  const cached = previewBlobs.get(key);
+  if (cached) {
+    rp.hasPreview = true;
+    rp.previewDiv = div;
+    return cached;
+  }
   if (needBake) {
     onPhase?.(`首次打开：正在服务器从同名栅格 ${rp.name} 烘焙 `
       + `${previewDivLabel(div)} 预览图（直方图均衡），要读一遍大图，`
@@ -465,7 +517,7 @@ async function fetchRasterPreview(
     const p = await http(scenePreviewUrl(cfg, row.id, div));
     rp.hasPreview = true;
     rp.previewDiv = div;
-    return await p.blob();
+    return cacheBlob(key, await p.blob());
   }
   if (needBake) {
     await http(scenePreviewUrl(cfg, row.id, div));   // 只触发烘焙，字节丢掉
@@ -473,7 +525,7 @@ async function fetchRasterPreview(
     rp.previewDiv = div;
   }
   const img = await http(sceneImageUrl(cfg, rp.jpgUrl, div));
-  return await img.blob();
+  return cacheBlob(key, await img.blob());
 }
 
 /** 拖入链取预览 JPG：GET /api/scenes/{id}/preview-drop?div=N。

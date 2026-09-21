@@ -9,6 +9,7 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import {
   stepSse, parseSseEvents, apiUrl, sessionsUrl, sessionMessagesUrl,
   queueEventsUrl, fetchSceneJpg, fetchDropSceneJpg, apiResolveScene,
+  resetPreviewCache, previewCacheStats, clearPreviewCache, PREVIEW_BLOB_CACHE_MAX,
 } from '../api.js';
 import type { PlatformSseEvent, ChatSseEvent } from '../api.js';
 import type { SceneRow } from '../scene.js';
@@ -142,6 +143,10 @@ describe('fetchSceneJpg', () => {
   }
 
   afterEach(() => { vi.unstubAllGlobals(); });
+  // 预览 blob 缓存是**模块级单例**（store 与设置浮层共用一份），用例之间会串味：
+  // 上一条把 `~YWJj|4|jpg` 烤出来，下一条同名同档位就变成缓存命中、请求数归零。
+  // 每条用例从空缓存起跑，「走哪条 URL」才是它在钉的东西。
+  beforeEach(() => { resetPreviewCache(); });
 
   it('库外场景（jpgUrl 为 null）：/preview 的响应体就是图，不再打静态 URL', async () => {
     stubFetch({ '/api/scenes/~YWJj/preview?div=2': 'PREVIEW' });
@@ -244,6 +249,9 @@ describe('fetchSceneJpg', () => {
     expect(phase).not.toHaveBeenCalled();
 
     phase.mockClear();
+    // 本地 blob 缓存也得清：不清的话第二次直接命中本地那份，onPhase 照样不响。
+    // 这条钉的是**服务端**那层缓存（hasPreview）决定的 onPhase，两层要分开看。
+    resetPreviewCache();
     await fetchSceneJpg(CFG, row({ jpgUrl: null, hasPreview: false }), 4, phase);
     expect(phase).toHaveBeenCalledTimes(1);
   });
@@ -251,6 +259,72 @@ describe('fetchSceneJpg', () => {
   it('onPhase 是可选的（旧调用方不传也不炸）', async () => {
     stubFetch({ '/api/scenes/~YWJj/preview?div=4': 'PREVIEW' });
     expect(await (await fetchSceneJpg(CFG, row({}), 4)).text()).toBe('PREVIEW');
+  });
+
+  /* ---------------- 本地 blob 缓存（对比模式来回切图靠它） ---------------- */
+
+  it('同一行 + 同一档位取第二次：零请求，拿到同一份字节', async () => {
+    stubFetch({ '/api/scenes/~YWJj/preview?div=4': 'PREVIEW' });
+    const r = row({ jpgUrl: null });
+    expect(await (await fetchSceneJpg(CFG, r, 4)).text()).toBe('PREVIEW');
+    expect(urls.length).toBe(1);
+
+    expect(await (await fetchSceneJpg(CFG, r, 4)).text()).toBe('PREVIEW');
+    expect(urls.length).toBe(1);          // 第二次一个请求都没发
+  });
+
+  it('命中缓存时照旧做那两行记账（hasPreview / previewDiv），语义不漂移', async () => {
+    // 库行这条支路是「先 /preview 烤、再静态取图」两次请求
+    stubFetch({
+      '/api/scenes/~YWJj/preview?div=4': 'PREVIEW',
+      '/disk-array/a/b.preview.jpg?div=4': 'STATIC',
+    });
+    expect(await (await fetchSceneJpg(CFG, row({ jpgUrl: BAKED }), 4)).text())
+      .toBe('STATIC');
+    expect(urls.length).toBe(2);
+
+    // 第二次：**同 id、记账字段是旧值**的行（等价于刷新后重进场景库）
+    const again = row({ jpgUrl: BAKED, hasPreview: false, previewDiv: null });
+    expect(await (await fetchSceneJpg(CFG, again, 4)).text()).toBe('STATIC');
+    expect(again.hasPreview).toBe(true);       // 命中缓存也照旧记上
+    expect(again.previewDiv).toBe(4);
+    expect(urls.length).toBe(2);               // 一个请求都没多发
+  });
+
+  it('档位进键：换了档位就不是命中，得重新取（并触发烘焙）', async () => {
+    stubFetch({
+      '/disk-array/a/b.preview.jpg?div=2': 'D2',       // 档位对得上 → 只取静态
+      '/api/scenes/~YWJj/preview?div=8': 'ok',         // 档位不符 → 先重烤
+      '/disk-array/a/b.preview.jpg?div=8': 'D8',
+    });
+    const r = row({ jpgUrl: BAKED, hasPreview: true, previewDiv: 2 });
+    expect(await (await fetchSceneJpg(CFG, r, 2)).text()).toBe('D2');
+    expect(await (await fetchSceneJpg(CFG, r, 8)).text()).toBe('D8');
+    expect(urls.length).toBe(3);
+  });
+
+  it('栅格那份与源 jpg 那份是两个键：档位翻到「栅格赢」时不会命中源 jpg 的缓存', async () => {
+    // ÷4 栅格赢（400 > 320）、÷32 栅格输（50 < 320）→ 同一行同一时刻会走两条不同的支路，
+    // 端上来的是**两张不同的图**。只按 id+div 存键的话这里会串味。
+    stubFetch({
+      '/api/scenes/~YWJj/preview?div=4': 'RASTER',
+      '/disk-array/a/PAN.preview.jpg?div=4': 'RASTER',
+      '/disk-array/a/PAN.jpg': 'SOURCE',
+    });
+    const r = rasterRow();
+    expect(await (await fetchSceneJpg(CFG, r, 4)).text()).toBe('RASTER');
+    expect(await (await fetchSceneJpg(CFG, r, 32)).text()).toBe('SOURCE');
+    expect(urls.length).toBe(3);
+    // 再切回 ÷4：这次才是真的命中（此前那份栅格还在缓存里）
+    expect(await (await fetchSceneJpg(CFG, r, 4)).text()).toBe('RASTER');
+    expect(urls.length).toBe(3);
+  });
+
+  it('缓存上限是从 api 层能读到的（设置浮层要用它报「N 项 / X MB」）', async () => {
+    stubFetch({});
+    expect(previewCacheStats()).toEqual({ count: 0, bytes: 0, maxBytes: PREVIEW_BLOB_CACHE_MAX });
+    clearPreviewCache();
+    expect(previewCacheStats().count).toBe(0);
   });
 
   /* ---------------- 显示源比较规则：同名栅格赢的那一支 ---------------- */

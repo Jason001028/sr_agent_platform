@@ -454,6 +454,7 @@ div 抖动）——代价是多花一次几十秒，不是错误结果。
 - [docs/status/current-question.md](../status/current-question.md) —— 交接入口，§4 记录了烘焙规则 v2 的六项决策与验证数据
 - [docs/experience/gui-experience.md](../experience/gui-experience.md) —— §9 与 §9.1 收录了这条链路改版时遇到的具体问题；§10 是**图像对比**（一个画布两个格子）的经验，与本文的关系在下面这一段
 - **本文与图像对比的关系（2026-09-20 一句话）**：对比功能自己**不烘焙**，它烤的就是本文这条路 —— 想看同场景的三类图（输入 / 本次产物 / 上一次产物）时，前端拿 `GET /api/scenes/{id}/siblings` 给出的 id 直接调本文的 `GET /api/scenes/{id}/preview?div=N`，三条入口共用同一套档位与规则戳，落点各归各的 `<stem>[.<suffix>].preview.jpg`；前端消费口径见契约 §3.8.1，两个格子的坐标与共享变换见 `gui-experience.md` §10。
+- **前端这一层怎么少烤几次（2026-09-20 补）**：客户端有「预览 blob 的字节封顶 LRU + 已开图去重 + 进对比模式的后台预取（默认关）」三件事，**预取的合格项判据就是「盘上已有一份现成预览且档位对得上」**，所以预取只可能命中本文写下的文件、永不触发烘焙。键与边界见契约 §3.8.2；为什么以**水平**归一化范围为准、`viewFor` 怎么记账见 `gui-experience.md` §10.7。
 - [docs/planning/api-contract.md](../planning/api-contract.md) —— §3.5 是场景接口的契约描述
 - [docs/knowledge/jpg-export-background.md](jpg-export-background.md) —— 浏览器侧的 JPG 导出，与本文的产物是两回事
 - [docs/knowledge/platform-tutorial.md](platform-tutorial.md) —— §7 从架构角度说明盘阵场景为何改为读服务端 JPG

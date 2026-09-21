@@ -9,7 +9,7 @@ import {
   fitView, thumbToScreen, mouseToThumb, thumbToOrig, origToThumb, locateView, wheelZoom,
   pointInPoly, hitRoi, visibleThumbRect, parseLocPair,
   clampSplitRatio, splitRects, paneAtX, ratioFromPointer, normAnchor, anchorAtLocal,
-  wheelZoomBoth, panBoth, SPLIT_MIN_HALF_PX,
+  wheelZoomBoth, panBoth, remapViewForImage, SPLIT_MIN_HALF_PX,
 } from '../viewMath.js';
 import type { Poly } from '../maskgen.js';
 
@@ -350,5 +350,89 @@ describe('panBoth（同步平移）', () => {
     expect(r.b).toEqual({ scale: 3, ox: 35, oy: -8 });
     expect(va).toEqual({ scale: 2, ox: 10, oy: 20 });   // 未改
     expect(vb).toEqual({ scale: 3, ox: -5, oy: 7 });
+  });
+});
+
+describe('remapViewForImage（换图保持视图）', () => {
+  /** 归一化可视宽度：屏幕宽度 cw 里能看见整幅图的几分之几。 */
+  const normW = (v: { scale: number; ox: number }, tw: number, cw: number) => cw / (v.scale * tw);
+  /** 视野左上角在整幅图里的归一化位置。 */
+  const normL = (v: { scale: number; ox: number }, tw: number) => -v.ox / (v.scale * tw);
+  const normT = (v: { scale: number; oy: number }, th: number) => -v.oy / (v.scale * th);
+
+  it('两张尺寸逐字相同 → 原样返回（同一个对象，一个数都没动）', () => {
+    const v = { scale: 0.7, ox: -33.25, oy: 12.5 };
+    const r = remapViewForImage(v, { w: 1314, h: 1314 }, { w: 1314, h: 1314 }, 900, 600);
+    expect(r).toBe(v);
+    expect(Object.is(r.scale, v.scale)).toBe(true);
+    expect(Object.is(r.ox, v.ox)).toBe(true);
+    expect(Object.is(r.oy, v.oy)).toBe(true);
+  });
+
+  it('尺寸不同 → 归一化可视宽度与归一化左上角守恒', () => {
+    const cw = 600, ch = 400;
+    const from = { w: 256, h: 256 }, to = { w: 500, h: 250 };
+    const v0 = fitView(from.w, from.h, cw, ch);
+    // 先真的缩放/平移到非默认形态，免得断言落在「恰好的默认值」上
+    const v = { scale: v0.scale * 2.5, ox: -120, oy: 40 };
+    const r = remapViewForImage(v, from, to, cw, ch);
+    expect(normW(r, to.w, cw)).toBeCloseTo(normW(v, from.w, cw), 9);
+    expect(normL(r, to.w)).toBeCloseTo(normL(v, from.w), 9);
+    expect(normT(r, to.h)).toBeCloseTo(normT(v, from.h), 9);
+    // 纵向按新图的比例自然延伸，不额外约束：高度比不同 → oy 不守恒
+    expect(r.scale).not.toBeCloseTo(v.scale, 6);
+  });
+
+  it('来回 remap 回到原值（A→B→A）', () => {
+    const cw = 800, ch = 500;
+    const a = { w: 256, h: 256 }, b = { w: 500, h: 250 };
+    const v = { scale: 1.7, ox: -95.5, oy: 18.25 };
+    const once = remapViewForImage(v, a, b, cw, ch);
+    const back = remapViewForImage(once, b, a, cw, ch);
+    expect(back.scale).toBeCloseTo(v.scale, 9);
+    expect(back.ox).toBeCloseTo(v.ox, 9);
+    expect(back.oy).toBeCloseTo(v.oy, 9);
+  });
+
+  it('长宽比相同、只是分辨率不同 → 偏移不变、scale 按像素比走（画面内容一模一样）', () => {
+    // 512 的缩略图换成 256 的（同一片地面、像素少一半）：要盖住同一片地面，
+    // 「缩略图像素 → 屏幕像素」的倍数就得翻倍；而 `scale × 图宽` 不变，
+    // 于是 ox/oy 一个数都不用动。
+    const v = { scale: 1.4, ox: -30, oy: -12 };
+    const r = remapViewForImage(v, { w: 512, h: 512 }, { w: 256, h: 256 }, 600, 400);
+    expect(r.scale).toBeCloseTo(2.8, 9);
+    expect(r.ox).toBeCloseTo(-30, 9);
+    expect(r.oy).toBeCloseTo(-12, 9);
+    // 反过来：缩略图像素翻倍 → scale 减半
+    const back = remapViewForImage(v, { w: 256, h: 256 }, { w: 512, h: 512 }, 600, 400);
+    expect(back.scale).toBeCloseTo(0.7, 9);
+    expect(back.ox).toBeCloseTo(-30, 9);
+  });
+
+  it('退化输入一律原样返回（不动比乱动好）', () => {
+    const v = { scale: 2, ox: 10, oy: 20 };
+    const cases: [Parameters<typeof remapViewForImage>[0], number, number, number, number][] = [
+      [{ scale: 0, ox: 0, oy: 0 }, 0, 1, 600, 400],       // view.scale<=0
+      [{ scale: -1, ox: 0, oy: 0 }, 0, 1, 600, 400],
+      [{ scale: 2, ox: 10, oy: 20 }, 0, 256, 600, 400],    // from.w<=0
+      [{ scale: 2, ox: 10, oy: 20 }, 256, 0, 600, 400],    // to.h<=0
+      [{ scale: 2, ox: 10, oy: 20 }, 256, 256, 0, 400],    // cw<=0
+      [{ scale: 2, ox: 10, oy: 20 }, 256, 256, 600, 0],    // ch<=0
+    ];
+    for (const [view, fw, tw, cw, ch] of cases) {
+      const r = remapViewForImage(view, { w: fw, h: fw }, { w: tw, h: tw }, cw, ch);
+      expect(r).toBe(view);
+    }
+    // 尺度和目标尺寸都正，但彼此只有一边相同 → 仍然照常换算（不是退化）
+    const r = remapViewForImage(v, { w: 256, h: 256 }, { w: 256, h: 128 }, 600, 400);
+    expect(r).not.toBe(v);
+  });
+
+  it('fit 出来的默认形态换到同比例的另一档：可视范围守恒，scale 按像素比走', () => {
+    const v = fitView(256, 256, 600, 400);          // scale=1（fit 封顶 1）、居中
+    const r = remapViewForImage(v, { w: 256, h: 256 }, { w: 1024, h: 1024 }, 600, 400);
+    expect(normW(r, 1024, 600)).toBeCloseTo(normW(v, 256, 600), 9);
+    expect(r.scale).toBeCloseTo(0.25, 9);           // 1024 的图要比 256 的缩小 4 倍才盖住同一片地面
+    expect(normL(r, 1024)).toBeCloseTo(normL(v, 256), 9);
   });
 });

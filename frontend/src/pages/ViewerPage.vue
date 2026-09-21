@@ -19,6 +19,7 @@ import CompareOverlay from '../components/CompareOverlay.vue';
 import DecodeOverlay from '../components/DecodeOverlay.vue';
 import ContextPanel from '../components/ContextPanel.vue';
 import NoticeModal from '../components/NoticeModal.vue';
+import SettingsPanel from '../components/SettingsPanel.vue';
 import StatusBar from '../components/StatusBar.vue';
 import ScenePathBar from '../components/ScenePathBar.vue';
 import { useViewerStore } from '../stores/viewer.js';
@@ -61,6 +62,7 @@ onUnmounted(() => viewer.hideModal());
     <StatusBar />
     <!-- 挂在页面根（不在 TifCanvas 的 slot 里）：.stage 的 transform 祖先会困住 fixed -->
     <NoticeModal />
+    <SettingsPanel />
   </div>
 </template>
 

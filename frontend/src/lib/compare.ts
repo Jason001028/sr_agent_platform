@@ -63,6 +63,35 @@ export function saveSplitRatio(r: number): void {
   }
 }
 
+/* ---------------- 对比模式后台预取（用户开关，默认关） ----------------
+
+   进对比模式时提前把同场景另两类图的预览取到本地，切图直接命中。做成开关是因为它
+   **会主动读盘阵** —— 真机上「我什么都没点，盘阵却在读」是件让人不安的事，得让用户
+   自己决定。默认关：装好后行为与没有这个功能时完全一样。 */
+
+const CMP_PREFETCH_KEY = 'sr.viewer.cmpPrefetch';
+
+/** 读开关。**只有明确存过 `'1'` 才算开** —— 没存过、存了脏值、localStorage 不可用
+ *  一律当关（与 `readCtxRailOpen` 同口径，但默认值相反：这个是「未开启」。） */
+export function loadCmpPrefetch(): boolean {
+  try {
+    if (typeof localStorage === 'undefined') return false;
+    return localStorage.getItem(CMP_PREFETCH_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+/** 写开关。写不进去就算了 —— 只是下次回到默认关，不该抛。 */
+export function saveCmpPrefetch(on: boolean): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(CMP_PREFETCH_KEY, on ? '1' : '0');
+  } catch {
+    /* 忽略：开关是偏好，存不下不影响本次会话 */
+  }
+}
+
 /* ---------------- 拖放落点 → 归哪一格 ---------------- */
 
 /** 画布矩形（只用到这四边；结构上兼容 DOMRect 与 getBoundingClientRect() 的返回）。 */

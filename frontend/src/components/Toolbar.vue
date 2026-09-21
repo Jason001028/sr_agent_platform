@@ -208,6 +208,21 @@ function doLocate() {
     >
       提交 SR
     </button>
+
+    <!-- 设置（右上角浮层）：对比模式后台预取开关 + 本地预览缓存的行与清空。
+         摆在最右端而不是挤进中间那串看图控件里 —— 它是**偏好**，不是一次性动作。
+         类名不用 `.btn`：qa-theme.js 用 `document.querySelector('.toolbar .btn')`
+         取第一颗主按钮，别去动它。 -->
+    <button
+      type="button"
+      class="set-btn"
+      :class="{ on: store.settingsOpen }"
+      data-e2e="set-open"
+      title="设置：对比模式的后台预取、本地预览缓存"
+      @click="store.setSettingsOpen(!store.settingsOpen)"
+    >
+      设置
+    </button>
   </div>
 </template>
 
@@ -388,6 +403,33 @@ function doLocate() {
 }
 .cmp-btn:hover { background: rgba(255, 255, 255, 0.2); border-color: rgba(255, 255, 255, 0.6); }
 .cmp-btn.on {
+  color: var(--band-2);
+  background: #fff;
+  border-color: #fff;
+  font-weight: 600;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.25);
+}
+
+/* 设置：与 .outbtn 同一形态（深带上描边按钮），最右端一枚。
+   宽度预算：1366 下右端这串还有百余像素余量，这颗「设置」约 56px。 */
+.set-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
+  padding: 0 12px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  font-size: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: var(--r-ctrl);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.set-btn:hover { background: rgba(255, 255, 255, 0.2); border-color: rgba(255, 255, 255, 0.6); }
+.set-btn.on {
   color: var(--band-2);
   background: #fff;
   border-color: #fff;

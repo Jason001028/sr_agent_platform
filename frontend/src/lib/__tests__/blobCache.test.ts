@@ -1,0 +1,134 @@
+/**
+ * blobCache.test.ts — 按字节封顶的 LRU blob 缓存（2026-09-20）
+ * ------------------------------------------------------------------
+ * 这是给预览 jpg 用的那一层的判据：谁先被淘汰、上限怎么算、超大单条怎么办。
+ * 三条都直接影响真机表现 —— 淘汰顺序错了等于缓存白做（刚看过的被挤掉），
+ * 上限算错了等于内存没兜住。
+ *
+ * Node 环境有 `Blob`（node 18+ 全局），不需要 DOM。
+ */
+import { describe, it, expect } from 'vitest';
+import { createBlobCache } from '../blobCache.js';
+
+/** 造一个 size 恰好为 n 字节的 blob（内容无所谓，缓存只按 size 记账）。 */
+function blobOf(n: number): Blob {
+  return new Blob([new Uint8Array(n)]);
+}
+
+describe('createBlobCache — 基本出入', () => {
+  it('set 后 get 拿得回同一个 blob；未存过的键 undefined', () => {
+    const c = createBlobCache(1000);
+    const b = blobOf(100);
+    c.set('a', b);
+    expect(c.get('a')).toBe(b);
+    expect(c.get('nope')).toBeUndefined();
+  });
+
+  it('重复 set 同一个键：只留新的，字节数不叠加', () => {
+    const c = createBlobCache(1000);
+    c.set('a', blobOf(300));
+    c.set('a', blobOf(100));
+    expect(c.get('a')?.size).toBe(100);
+    expect(c.stats().count).toBe(1);
+    expect(c.stats().bytes).toBe(100);
+  });
+
+  it('stats 暴露条数 / 字节 / 上限，且 bytes 与各条 size 之和一致', () => {
+    const c = createBlobCache(1000);
+    c.set('a', blobOf(120));
+    c.set('b', blobOf(80));
+    const s = c.stats();
+    expect(s.count).toBe(2);
+    expect(s.bytes).toBe(200);
+    expect(s.maxBytes).toBe(1000);
+  });
+});
+
+describe('createBlobCache — LRU 顺序', () => {
+  it('超上限时先淘汰最旧的那条', () => {
+    const c = createBlobCache(300);
+    c.set('a', blobOf(100));
+    c.set('b', blobOf(100));
+    c.set('c', blobOf(100));
+    c.set('d', blobOf(100));          // 400 > 300 → 挤掉 a
+    expect(c.get('a')).toBeUndefined();
+    expect(c.get('b')).toBeDefined();
+    expect(c.get('d')).toBeDefined();
+    expect(c.stats().bytes).toBe(300);
+  });
+
+  it('get 命中即刷新新鲜度：被读过的那条不再是最旧的', () => {
+    const c = createBlobCache(300);
+    c.set('a', blobOf(100));
+    c.set('b', blobOf(100));
+    c.set('c', blobOf(100));
+    c.get('a');                        // a 变成最新 → 下一个被淘汰的该是 b
+    c.set('d', blobOf(100));
+    expect(c.get('a')).toBeDefined();
+    expect(c.get('b')).toBeUndefined();
+    expect(c.stats().bytes).toBe(300);
+  });
+
+  it('一条就把上限占满时，后来的会把它挤掉（不是留着旧的不放）', () => {
+    const c = createBlobCache(100);
+    c.set('a', blobOf(100));
+    c.set('b', blobOf(100));
+    expect(c.get('a')).toBeUndefined();
+    expect(c.get('b')).toBeDefined();
+    expect(c.stats().count).toBe(1);
+  });
+});
+
+describe('createBlobCache — 边界', () => {
+  it('单条超过上限的直接不进缓存（放了也会立刻把自己挤出去）', () => {
+    const c = createBlobCache(100);
+    c.set('big', blobOf(101));
+    expect(c.get('big')).toBeUndefined();
+    expect(c.stats().count).toBe(0);
+    expect(c.stats().bytes).toBe(0);
+  });
+
+  it('单条超上限不影响已经在里面的（别为了放它清空别人）', () => {
+    const c = createBlobCache(100);
+    c.set('a', blobOf(60));
+    c.set('big', blobOf(500));
+    expect(c.get('a')).toBeDefined();
+    expect(c.stats().bytes).toBe(60);
+  });
+
+  it('大小恰好等于上限的那条留得住（判据是 > 而不是 >=）', () => {
+    const c = createBlobCache(100);
+    c.set('a', blobOf(100));
+    expect(c.get('a')).toBeDefined();
+    expect(c.stats().bytes).toBe(100);
+  });
+
+  it('maxBytes <= 0 退化成「什么都不缓存」，但不抛', () => {
+    for (const m of [0, -1]) {
+      const c = createBlobCache(m);
+      c.set('a', blobOf(1));
+      expect(c.get('a')).toBeUndefined();
+      expect(c.stats().count).toBe(0);
+    }
+  });
+
+  it('clear 后 stats 归零，之前存的都取不回来', () => {
+    const c = createBlobCache(1000);
+    c.set('a', blobOf(100));
+    c.set('b', blobOf(100));
+    c.clear();
+    expect(c.stats()).toEqual({ count: 0, bytes: 0, maxBytes: 1000 });
+    expect(c.get('a')).toBeUndefined();
+    // 清空之后还能接着用
+    c.set('c', blobOf(50));
+    expect(c.stats().bytes).toBe(50);
+  });
+
+  it('两个实例互不干扰（模块级单例之外的隔离性）', () => {
+    const c1 = createBlobCache(1000);
+    const c2 = createBlobCache(1000);
+    c1.set('a', blobOf(10));
+    expect(c2.get('a')).toBeUndefined();
+    expect(c2.stats().count).toBe(0);
+  });
+});
