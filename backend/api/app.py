@@ -907,8 +907,10 @@ def create_app() -> FastAPI:
                         detail=f"这张 jpg 的名字里没有生产全名（缺 14 位成像时刻）："
                                f"{name} —— 平台不猜目录。能关联的 jpg 只有名字与场景"
                                f"目录名一致的那份（<目录名>.jpg），以及它的中间产物"
-                               f"（<目录名>_sr.jpg、<目录名>_sr_NOSR.jpg，同级要有"
-                               f"同名栅格）；改过名、另存过、或叫 PAN.jpg 这类都不认。"
+                               f"（SC 场景叫 <目录名>_<suffix>.jpg；RC 场景的产物叫"
+                               f" PAN_<suffix>.jpg，那个名字里同样没有成像时刻，"
+                               f"认不出是哪一景）。两份都要求同级有同名栅格；"
+                               f"改过名、另存过、或叫 PAN.jpg 这类都不认。"
                                f"请改拖那几份，或把该场景目录粘进「盘阵场景」栏打开")
                 raise HTTPException(
                     status_code=400,
@@ -1009,8 +1011,8 @@ def create_app() -> FastAPI:
                     if stage is None:
                         reasons.append(
                             f"{d}：{Path(name).name} 这个名字不是本景的输入件或"
-                            f"中间产物（输入件叫 {d.name}.jpg，中间产物叫"
-                            f" <目录名>_<suffix>.jpg / <目录名>_<suffix>_NOSR.jpg，"
+                            f"中间产物（输入件叫 {d.name}.jpg，SC 场景的中间产物"
+                            f"叫 <目录名>_<suffix>.jpg / <目录名>_<suffix>_NOSR.jpg，"
                             f"且同级要有同名栅格）")
                         continue
                     kind, suffix, raster = stage

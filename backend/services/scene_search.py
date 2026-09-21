@@ -28,6 +28,14 @@ Dragging a jpg in is a separate, equally closed rule (2026-09-21): its name must
 cleanly to the scene directory name plus one of the three stage tails, *and* that
 stage's own raster must sit next to it — `<目录名>.jpg` / `<目录名>_<suffix>.jpg` /
 `<目录名>_<suffix>_NOSR.jpg`. See stage_of_jpg. Nothing here ever lists a directory.
+
+产物名的规则本身是**按输入影像名**拼的，不是按目录名（SR_code/code_0817_prod.py:
+`img_name[:-4] + "_" + suffix`，即 product_candidates）：SC 场景的输入是
+`<目录名>.tif`，所以产物正好是 `<目录名>_<suffix>`；RC 场景的输入是 `PAN.tif`，产物
+就是 `PAN_<suffix>.jpg` / `PAN_<suffix>_NOSR.tif`。**这个名字是对的，但里面没有任何
+场景身份**（没有卫星段、没有成像时刻）—— 反推不出它是哪一天哪一景的目录，所以拖不
+进来（resolve_scene 在反推那一步就 400 了，走不到这里）。RC 的产物今天只能从
+`/siblings` 那条路看，它是拿输入影像名拼的。
 """
 
 from __future__ import annotations
@@ -349,7 +357,9 @@ def stage_of_jpg(dir_path, input_path, stem: str) -> tuple[str, str, Path] | Non
 
     1. 名字切得干净：要么就是本体的显示件（stem == 目录名，或 == 输入影像的 stem
        —— RC 场景的 `PAN.jpg`），要么是 `<目录名>_<suffix>[_NOSR]` 这种产物名
-       （见 `jpg_stage_name`）；
+       （见 `jpg_stage_name`）。**这一条只管 SC 场景的产物**：`jpg_stage_name` 要求
+       前缀是目录名，而 RC 的产物叫 `PAN_<suffix>`，前缀对不上；何况那种名字连反推
+       都过不了（模块头「产物名的规则」那段），根本到不了这里；
     2. **同级栅格真的在**：`<目录>/<stem>.tif|.tiff` 存在（按 `_PRODUCT_EXT_ORDER`
        的顺序试，命中即止）。
 
