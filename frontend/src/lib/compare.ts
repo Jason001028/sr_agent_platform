@@ -1,7 +1,8 @@
 /**
  * compare.ts — 图像对比的纯判据（2026-09-20 新增）
  * ------------------------------------------------------------------
- * 「关闭 / 点选对比 / 分屏对比」三态、分隔比例、落点归属、点选清单的增删 —— 这些是
+ * 「关闭 / 点选对比 / 分屏对比」三态、分隔比例、落点归属（哪一格）与落格
+ * （进那一格之后两格怎么摆）、点选清单的增删 —— 这些是
  * **判据**，不是交互。它们放在这里而不是 store 里，是因为 store（stores/viewer.ts）
  * 需要 canvas/DOM 才能跑（paintStretch / decodeJpgToCanvas），而判据值得单测。
  * 本文件不碰 DOM、不碰 Pinia，localStorage 是可选的（读不出就用默认值）。
@@ -122,6 +123,36 @@ export function dropSideAt(
   if (!inside) return null;
   if (mode === 'click') return 'A';
   return clientX - rect.left < splitX ? 'A' : 'B';
+}
+
+/* ---------------- 落格：这一张进哪一格 ---------------- */
+
+/** 分屏下「这一张摆在哪儿」的判据：进哪一格、要不要互换，全在这一个函数里。
+ *
+ * - `side` 给了（拖放落点算出来的那一半）就进那一格；没给（文件列表点击、场景快捷
+ *   入口）就进活动侧。
+ * - **另一格已经是同一张 → 两格互换**：落点那半放它，另一格接住落点那半原来那张。
+ *   不互换的话要么「两格同一张」，要么落点那半的原图凭空消失，两种都比互换糟。
+ * - **但目标格空着的时候没有「原来那张」可接** —— 此时「互换」等于把另一格挖空，而
+ *   人把一张已经在另一侧的图拖过来，要看的是它出现在这一格，不是让那一侧空掉
+ *   （2026-09-22 用户报：刚进分屏，把左格那张拖到空的右格，左图当场变空）。空目标格
+ *   按「照常落图、另一格不动」处理 —— 于是两格摆同一张，这是这一刻唯一不透支用户
+ *   已有画面的结果。
+ *
+ * `moved` = 落点那一格换了一张图（空 → 有图也算），调用方据此决定要不要重新适配它。 */
+export function placeInSplit(
+  paneA: number | null, paneB: number | null, id: number,
+  side: 'A' | 'B' | null, activeSide: 'A' | 'B',
+): { paneA: number | null; paneB: number | null; side: 'A' | 'B'; moved: boolean } {
+  const s: 'A' | 'B' = side ?? activeSide;
+  const other: 'A' | 'B' = s === 'A' ? 'B' : 'A';
+  const cur = s === 'A' ? paneA : paneB;
+  const otherId = other === 'A' ? paneA : paneB;
+  let out = s === 'A' ? { paneA: id, paneB } : { paneA, paneB: id };
+  if (otherId === id && cur !== null) {
+    out = other === 'A' ? { ...out, paneA: cur } : { ...out, paneB: cur };
+  }
+  return { ...out, side: s, moved: cur !== id };
 }
 
 /* ---------------- 点选清单的成员集合（有序 id 列表） ---------------- */

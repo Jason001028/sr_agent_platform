@@ -48,6 +48,8 @@
 //      L1–L3 左栏卡片自己带票（`application/x-sr-rec`）拖进画布 → 活动侧换图；
 //            分屏下按落点进 B 格；对比模式拖到画布外沿用那句 toast，活动图不动。
 //            （卡片没带 `draggable`、画布只认 `Files` 时这条链根本不存在。）
+//      L2b   刚进分屏、右格空着时把**左格那张自己**拖到右半：左格那张仍在（旧规则的
+//            「互换」在空目标格上等于把左格挖空 —— 2026-09-22 用户报的「左图变为空」）。
 //      L4    拖中间产物 `<编号>_sr.jpg`（同级有 `<编号>_sr.tif`）：认出 kind=product、
 //            卡片上「盘阵+序号+SR」三标齐全（序号与本体那张**同号**）、只读小标、
 //            三颗修复按钮置灰；W/H 取产物自己的栅格（3200×1600）而像素仍是拖进来的
@@ -1595,6 +1597,25 @@ async function main() {
         `左格那张没被顶掉（${panesL1[0].recId} / ${panesL0[0].recId}）`);
       assert(panesL1[1].active === true,
         '活动侧跟着落点转到右侧（掩码/云量/状态栏跟着它）');
+
+      // L2b（2026-09-22 用户报）：刚进分屏、右格还空着时，把**左格那张自己**拖到右半
+      // —— 旧规则的「互换」在目标格空着时没有「原来那张」可接，等于把左格挖空，
+      // 用户看到的是「左图变成空的（只剩占位框）」。判据已改成「空目标格照常落图、
+      // 另一格不动」。这里走真拖动：卡片自己填票 → 落点算出的 side = 'B'。
+      // 先绕一圈 off 再进分屏：分屏只在**进的那一下**播种（paneA = 活动图、paneB 空），
+      // 已经在分屏里再调一次 split 是空操作，右格会留着上一段那张。
+      await page.evaluate(() => window.__viewer.setCmpMode('off'));
+      await page.evaluate(() => window.__viewer.setCmpMode('split'));
+      const panesB0 = await page.evaluate(() => window.__viewer.cmpPanes());
+      assert(panesB0[0].recId === panCardId && panesB0[1].recId === null,
+        `回到分屏：左格是当时那张、右格空着（${panesB0[0].recId} / ${panesB0[1].recId}）`);
+      await drag.dragCard(page,
+        { cardName: PAN + '.jpg', clientX: ptsL.right, clientY: ptsL.midY });
+      const panesB1 = await page.evaluate(() => window.__viewer.cmpPanes());
+      assert(panesB1[0].recId === panCardId,
+        `左格那张还在（${panesB1[0].recId}）—— 空目标格不再把另一格挖空`);
+      assert(panesB1[1].recId === panCardId && panesB1[1].active === true,
+        `右格摆上它、活动侧跟着过去（${panesB1[1].recId} / active=${panesB1[1].active}）`);
 
       // L3：对比模式下拖到画布外 —— 给一句人话，别默默什么都没发生。
       await page.evaluate(() => window.__viewer.setCmpMode('click'));

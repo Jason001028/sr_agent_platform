@@ -29,7 +29,7 @@ import type { ViewState, Rect, PaneRect } from '../lib/viewMath.js';
 import {
   parseCompareMode, loadSplitRatio, saveSplitRatio, seedCompareList,
   addCompareEntry, removeCompareEntry, pruneCompareList, DEFAULT_SPLIT_RATIO,
-  loadCmpPrefetch, saveCmpPrefetch,
+  loadCmpPrefetch, saveCmpPrefetch, placeInSplit,
 } from '../lib/compare.js';
 import type { CompareMode } from '../lib/compare.js';
 import { FileSource } from '../lib/source.js';
@@ -440,8 +440,8 @@ export const useViewerStore = defineStore('viewer', () => {
    *  - 分屏 + 给了 side（拖放落点）→ 落那一格；
    *  - 分屏 + 没给 side（文件列表点击 / 盘阵栏 / 待修复清单「打开」）→ 落活动侧。
    *
-   *  另有一条：若**另一格**已经是同一张图，则两格**互换**。否则从点选清单点到一张正
-   *  显示在另一侧的图，会变成「两格同一张」或者「另一格被挖空」，两种都比互换糟。
+   *  分屏的那一支（进哪一格、要不要互换、目标格空着怎么办）全在纯函数
+   *  `lib/compare.placeInSplit` 里 —— 它是判据，值得单测；这里只把结果写进响应式状态。
    *
    *  返回「目标格换了一张图」（= 那一格的视口需要重新适配）。调用方据此决定要不要
    *  `fit()` —— 同一张图留在原格时不重适配，用户的缩放不该被一次多余的点选抹掉。 */
@@ -467,17 +467,12 @@ export const useViewerStore = defineStore('viewer', () => {
       activeId.value = id;
       return changed;
     }
-    const s: 'A' | 'B' = side ?? activeSide.value;
-    const other: 'A' | 'B' = s === 'A' ? 'B' : 'A';
-    const cur = s === 'A' ? paneA.value : paneB.value;
-    const otherId = other === 'A' ? paneA.value : paneB.value;
-    if (s === 'A') paneA.value = id; else paneB.value = id;
-    if (otherId === id) {
-      if (other === 'A') paneA.value = cur; else paneB.value = cur;
-    }
-    activeSide.value = s;
+    const r = placeInSplit(paneA.value, paneB.value, id, side ?? null, activeSide.value);
+    paneA.value = r.paneA;
+    paneB.value = r.paneB;
+    activeSide.value = r.side;
     activeId.value = id;
-    return cur !== id;
+    return r.moved;
   }
 
   /** 切图/切侧时的公共重置。`activate` 与 `setActiveSide` 共用 —— 两处各写一遍
