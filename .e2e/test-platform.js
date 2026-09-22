@@ -7,7 +7,9 @@
 // 覆盖 api-contract.md §5.3：
 //   A. 聊天：/chat 新建会话 → 发一条 → SSE 全事件归并 → 工具行 + 最终回复渲染；
 //      切走再回来 → GET messages 恢复历史（刷新可恢复）。
-//   B. 队列：/queue 手填 lq_path 提交 → 假调度器推进 → SSE job_update 推到 COMPLETED。
+//   B. 队列：/queue 手填 lq_path 提交 → 假调度器推进 → SSE job_update 推到 COMPLETED
+//      → 同一帧在右下角弹出「超分完成」提醒（2026-09-22 增：真 SSE → 提醒 这条链
+//      只有这里跑得通）。
 //   C. 掩码→SR：/viewer 打开盘阵场景（合成 JPG + 画 ROI）→ 点「提交 SR」→
 //      POST /api/masks 落盘 → 自动跳 /queue 表单预填（不自动提交）→ 用户确认提交。
 //   D. 布局：三页同宽 —— 1600 视口下实测正文盒宽（不是只比 max-width 字符串）+
@@ -244,6 +246,26 @@ async function main() {
       }, 25000, '队列 COMPLETED');
       const tags = await firstRowTags(page);
       assert(tags[0] === '完成', `提交后假调度器跑完 → 首行徽标「完成」 (${tags.join(',')})`);
+
+      // 同一帧还要在右下角弹一条提醒。这是「真后端 → SSE job_update → jobNotice → 提醒
+      // 栈」**唯一**跑得通的链路回归（test-vue-viewer 的 K 段没有后端，只能拿 pushNotice
+      // 直接塞；两边合起来才覆盖整条）。文案口径一并钉住：标题只报 task_id —— 帧里没有
+      // 产物文件名，第二行取**列表行**的 lq_path 末段 + 倍率，所以它必须与提交时的目录同名。
+      const notice = await waitFor(page, () => {
+        const el = document.querySelector('[data-e2e="job-notice-ok"]');
+        return el ? el.textContent.replace(/\s+/g, ' ').trim() : null;
+      }, 10000, '完成提醒');
+      assert(notice.indexOf('超分完成') === 0 && /#\d+/.test(notice),
+        `完成帧弹出右下角提醒（"${notice.slice(0, 34)}…"）`);
+      assert(notice.indexOf(path.basename(lqPath)) >= 0 && notice.indexOf('×') >= 0,
+        `提醒第二行取列表行的目录名 + 倍率（"${notice}"）`);
+      // 点整条 = 去队列页（已经在这页上，是幂等的）并把这条收掉；顺手把屏面清干净，
+      // 免得后面那些真实点击被右下角这张卡挡住。
+      await page.click('[data-e2e="job-notice-ok"] .jn-body');
+      await sleep(300);
+      assert(await page.evaluate(() => location.pathname) === '/queue'
+        && await page.evaluate(() => !document.querySelector('[data-e2e="job-notice-ok"]')),
+        '点整条提醒：仍在队列页且这条已收掉');
 
       // 行级信息 + 「以这行参数再提交」：耗时列 / 目录下拉候选 / 只填不提交
       const rowInfo = await page.evaluate(() => {

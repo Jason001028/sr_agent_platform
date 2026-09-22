@@ -372,20 +372,35 @@ export async function apiCancelQueue(
 }
 
 /** 订阅队列 SSE：连接后在 onEvent 收到 job_update。返回断开函数。 */
+/** 订阅队列 SSE。
+ *
+ *  `onOpen` 在响应头到手（HTTP 200，流还没读）时回调一次 —— 这是**唯一**能确认
+ *  「连上了」的时刻：后端这条流没有心跳帧（`api/platform.queue_events` 只转发
+ *  broadcast 的 job_update，忙时可能几分钟一个字都没有），所以「最近没报错」推不出
+ *  「还连着」。应用级常驻订阅靠它把 `connected` 置真、把重连退避重置。
+ *
+ *  `onClose` 在**流结束时**回调：正常读完（对端关连接）给 `null`，异常给那个 Error
+ *  （`onError` 之后）。**主动 abort 两个都不给** —— 那是调用方自己关的，回调回去只会
+ *  让它把自己关掉的连接当成掉线、反复重连。返回的退订函数就是这次 abort。 */
 export function subscribeQueueEvents(
   cfg: SrConfig,
   onEvent: (e: PlatformSseEvent) => void,
   onError?: (err: Error) => void,
+  onOpen?: () => void,
+  onClose?: (err: Error | null) => void,
 ): () => void {
   const ctrl = new AbortController();
   void (async () => {
     try {
       const r = await fetch(queueEventsUrl(cfg), { signal: ctrl.signal });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      if (onOpen) onOpen();
       await readSseStream(r.body, onEvent);
+      if (onClose) onClose(null);
     } catch (e) {
       if ((e as Error).name === 'AbortError') return;
       if (onError) onError(e as Error);
+      if (onClose) onClose(e as Error);
     }
   })();
   return () => ctrl.abort();
@@ -400,7 +415,24 @@ export function subscribeQueueEvents(
    按字节封顶，不按条数：÷2 档一张通常几 MB～几十 MB，128MB 约合十来张；条数在大图上
    完全不代表内存。超上限的条目由 LRU 淘汰，超过上限的单条干脆不进。 */
 export const PREVIEW_BLOB_CACHE_MAX = 128 * 1024 * 1024;
-const previewBlobs = createBlobCache(PREVIEW_BLOB_CACHE_MAX);
+
+/** 「缓存内容变了」的订阅者（见 `watchPreviewCache`）。 */
+const previewCacheWatchers = new Set<() => void>();
+const previewBlobs = createBlobCache(PREVIEW_BLOB_CACHE_MAX, () => {
+  for (const cb of previewCacheWatchers) cb();
+});
+
+/** 订阅本地预览缓存的内容变化，返回退订函数。
+ *
+ *  **为什么需要**：设置浮层那一行「本地预览缓存 N 项 / X MB」如果只在打开浮层时读
+ *  一次快照，那么**改它的人就在同一个浮层里**（预取开关）也看不到变化 —— 用户点开
+ *  开关、盯着紧挨着的那行数字，数字永远停在打开时的值（多半是 0），只能得出「预取
+ *  没生效」。所以那一行必须是实时的；缓存自己通知，而不是让浮层去轮询或把 stats
+ *  挂成响应式（后者会给每次取图都加一次渲染，这个只在一进一出时各响一次）。 */
+export function watchPreviewCache(cb: () => void): () => void {
+  previewCacheWatchers.add(cb);
+  return () => { previewCacheWatchers.delete(cb); };
+}
 
 /** 缓存占用（设置浮层里那一行「本地预览缓存 N 项 / X MB」）。 */
 export function previewCacheStats(): BlobCacheStats {

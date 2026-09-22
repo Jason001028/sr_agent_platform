@@ -179,3 +179,81 @@ describe('createBlobCache — 边界', () => {
     expect(c2.stats().count).toBe(0);
   });
 });
+
+/* 内容变化的通知（onChange）。设置浮层那一行「本地预览缓存 N 项」靠它保持实时：
+   改缓存的按钮（预取开关）就在那一行上面，只在打开时读一次快照，用户就永远看不到
+   自己刚触发的那一次 —— 现象是「预取开着、缓存始终 0 项」。判据是**内容真的变了**
+   才响，读命中与空操作不响（否则一次取图两次渲染，白响）。 */
+describe('createBlobCache — onChange（内容变化通知）', () => {
+  it('set 进一条就响一次', () => {
+    let n = 0;
+    const c = createBlobCache(1000, () => { n++; });
+    c.set('a', blobOf(10));
+    expect(n).toBe(1);
+  });
+
+  it('get 命中（只挪 LRU 次序）不响', () => {
+    let n = 0;
+    const c = createBlobCache(1000, () => { n++; });
+    c.set('a', blobOf(10));
+    c.get('a');
+    c.get('没这条');
+    expect(n).toBe(1);
+  });
+
+  it('同键覆盖也算变了（字节数会变），响', () => {
+    let n = 0;
+    const c = createBlobCache(1000, () => { n++; });
+    c.set('a', blobOf(10));
+    c.set('a', blobOf(20));
+    expect(n).toBe(2);
+  });
+
+  it('被拒的单条（超上限 / 上限为 0）不响：缓存里什么都没变', () => {
+    let n = 0;
+    const c = createBlobCache(100, () => { n++; });
+    c.set('big', blobOf(101));
+    expect(n).toBe(0);
+    let m = 0;
+    const z = createBlobCache(0, () => { m++; });
+    z.set('a', blobOf(1));
+    expect(m).toBe(0);
+  });
+
+  it('LRU 淘汰连带响一次（进一条挤掉一条也是内容变化）', () => {
+    let n = 0;
+    const c = createBlobCache(100, () => { n++; });
+    c.set('a', blobOf(60));
+    c.set('b', blobOf(60));      // 挤掉 a
+    expect(n).toBe(2);
+    expect(c.stats().count).toBe(1);
+  });
+
+  it('clear：真有东西才响；空缓存上 clear 不响', () => {
+    let n = 0;
+    const c = createBlobCache(1000, () => { n++; });
+    c.clear();
+    expect(n).toBe(0);
+    c.set('a', blobOf(10));
+    c.clear();
+    expect(n).toBe(2);
+  });
+
+  it('deletePrefix：删掉了才响，一条没删不响', () => {
+    let n = 0;
+    const c = createBlobCache(1000, () => { n++; });
+    c.set('~a|2|jpg', blobOf(10));
+    c.set('~b|2|jpg', blobOf(10));
+    expect(c.deletePrefix('~zzz|')).toBe(0);
+    expect(n).toBe(2);
+    expect(c.deletePrefix('~a|')).toBe(1);
+    expect(n).toBe(3);
+  });
+
+  it('不传 onChange 照常工作（回调是可选的）', () => {
+    const c = createBlobCache(1000);
+    c.set('a', blobOf(10));
+    c.clear();
+    expect(c.stats().count).toBe(0);
+  });
+});

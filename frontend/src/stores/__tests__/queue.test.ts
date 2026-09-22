@@ -10,6 +10,7 @@ import {
   mergePreviewUpdate,
   tasksForScene, normDir, pathLeafOf,
   isActiveState, taskElapsed, formatDuration,
+  nextBackoff, RECONNECT_BASE_MS, RECONNECT_MAX_MS,
 } from '../queue.js';
 import type { QueueDraft } from '../queue.js';
 import type { QueueTask } from '../../lib/api.js';
@@ -378,5 +379,28 @@ describe('normDir / pathLeafOf（跨平台路径小工具）', () => {
     expect(pathLeafOf('/a/b/GF07_mask.tif')).toBe('GF07_mask.tif');
     expect(pathLeafOf('C:\\run\\x\\GF07_mask.tif')).toBe('GF07_mask.tif');
     expect(pathLeafOf('')).toBe('');
+  });
+});
+
+describe('nextBackoff（掉线重连的退避）', () => {
+  it('从基准翻倍，封顶 30 秒', () => {
+    expect(nextBackoff(RECONNECT_BASE_MS)).toBe(4000);
+    expect(nextBackoff(4000)).toBe(8000);
+    expect(nextBackoff(16000)).toBe(RECONNECT_MAX_MS);
+    expect(nextBackoff(RECONNECT_MAX_MS)).toBe(RECONNECT_MAX_MS);
+    expect(nextBackoff(1e9)).toBe(RECONNECT_MAX_MS);
+  });
+
+  it('脏值回到基准（退回 NaN / 0 不该让重连彻底停摆）', () => {
+    expect(nextBackoff(NaN)).toBe(RECONNECT_BASE_MS);
+    expect(nextBackoff(0)).toBe(RECONNECT_BASE_MS);
+    expect(nextBackoff(-5)).toBe(RECONNECT_BASE_MS);
+  });
+
+  it('序列单调不减：2s → 4s → 8s → 16s → 30s → 30s…', () => {
+    const seq: number[] = [];
+    let cur = RECONNECT_BASE_MS;
+    for (let i = 0; i < 6; i++) { cur = nextBackoff(cur); seq.push(cur); }
+    expect(seq).toEqual([4000, 8000, 16000, 30000, 30000, 30000]);
   });
 });

@@ -15,8 +15,9 @@ import { useViewerStore } from '../stores/viewer';
 
 const store = useViewerStore();
 
-/** 缓存的展示值。**不是实时的** —— 打开浮层时读一次、清空后读一次就够；
-    挂在响应式上等于给每次取图都加一个渲染触发，代价与收益不成比例。 */
+/** 缓存的展示值。**跟着缓存的内容走**（打开浮层时读一次，之后每逢内容变化再读一次，
+    见 store 的 previewCacheRev）—— 改这份缓存的按钮（预取开关）就在这一行上面，
+    只读打开时那一次快照，用户点完开关盯着这行数字看，数字永远停在之前的值。 */
 const cache = ref({ count: 0, bytes: 0, maxBytes: 0 });
 const cacheText = ref('0 项 / 0.0 MB');
 
@@ -26,7 +27,8 @@ function refreshCache() {
     + (cache.value.bytes / (1024 * 1024)).toFixed(1) + ' MB';
 }
 
-watch(() => store.settingsOpen, (open) => { if (open) refreshCache(); });
+watch([() => store.settingsOpen, () => store.previewCacheRev],
+  ([open]) => { if (open) refreshCache(); });
 
 function clearCache() {
   store.clearPreviewCache();
@@ -60,6 +62,12 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
         <div class="set-note">
           进对比模式时提前把同场景另两类图的预览取到本地，切图不必现取。
           只取服务端已有现成的那份，不会触发烘焙。
+        </div>
+        <!-- 上一次预取干了什么。**为「缓存行停在 0 项」提供解释**：
+             第一次打开某个场景时合格项本来就是空的（另两类还没人烤过），
+             不写出来，用户分不清「没东西可预取」与「预取坏了」。 -->
+        <div v-if="store.prefetchNote" class="set-out" data-e2e="set-prefetch-note">
+          {{ store.prefetchNote }}
         </div>
       </div>
 
@@ -138,6 +146,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
   color: var(--accent-deep);
 }
 .set-note { color: var(--ink-sub); font-size: 11px; line-height: 1.6; opacity: 0.9; }
+/* 预取结果行：与说明同字号，但**不透明度更低** —— 它是过程回执，不是说明。 */
+.set-out {
+  color: var(--ink-sub);
+  font-size: 11px;
+  line-height: 1.6;
+  opacity: 0.75;
+}
 
 .set-line { color: var(--ink-sub); }
 .set-num { color: var(--ink); font-variant-numeric: tabular-nums; }

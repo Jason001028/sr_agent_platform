@@ -141,6 +141,9 @@
   `sr.viewer.cmpSplitRatio`（对比模式本身**不持久化**，刷新回关闭）。进分屏自动收起右侧栏、退出恢复用户此前的手动状态
   （`ctxRailOpen`/`ctxRailPrevOpen` 从 `ContextPanel` 提升到 store）。
   ④ **对比模式只读**：不画掩码、不建 ROI（`enterDraw` 加守卫、切模式时 `exitDraw`）。
+     **（2026-09-22 作废，见 §4 该日条目②）**：这条守卫已删 —— 掩码/ROI 就认活动侧，分屏里点哪半
+     哪半是，落点是唯一的。留下的唯一一道门是「只能画在本体影像上」（产物尺寸的掩码会把本体那份
+     静默盖掉），三处共用；`setCompareMode` 也不再 `exitDraw`。
   ⑤ **拖放门**：关闭模式**全窗口行为一字不改**（拖到侧栏也能打开）；对比模式下只收画布内的影像，画布外给 toast；
   `.txt` 在任何模式、任何位置都照旧喂待修复清单；`dropEffect` 任何情况都保持 `copy`（改 `'none'` 会抑制
   `drop` 事件，把 `.txt` 一起吞掉）。契约新增 §4.7 记这条模式差异。
@@ -1867,6 +1870,10 @@ e2e 侧随之把分隔线位置暴露成 `splitX()`（画布局部坐标里的�
 一份且 URL 逐字对上、预取不建 rec / 不换活动图 / 不占遮罩 / 不进清单）、`test-scenes.js` **79**、
 `test-platform.js` **23**；后端**零改动零回归**：`632 passed / 4 skipped`。
 
+**订正（2026-09-22）**：上面这版的「本地预览缓存 N 项 / X MB」只在**浮层被打开时**读一次快照，
+用户报「预取打开后缓存始终 0 项」即由此而来 —— 详见 §4 的
+《2026-09-22 · 设置浮层里的缓存读数是个快照：预取开着、数字永远是 0 项》。
+
 **K 段的夹具要点（下轮别重踩）**：夹具里**没有 SR 产物**（真机才有），而 K 段要验的正是「盘上已有一份
 现成的预览时预取会去取它」—— 于是测试自己在运行期造两份 `<输入名>_<suffix>.tif`（名字取 `/siblings`
 回报的 `productCandidates[0]`，**不重复实现命名规则**）、并用 Node 侧 `fetch` 调 `/preview` 把其中一份烤上。
@@ -2396,12 +2403,111 @@ e2e 里 `tr.querySelector('button')` 取的是「打开」那颗按钮）。空�
 却照样「通过」，失败信息与真因差一整列。`qa-theme.js` 仍是 **9 条 FAIL**（陈旧期望，与本轮无关：
 与上一轮记录过的 FAIL 集合同名同类）。
 
+### 2026-09-22 · 设置浮层里的缓存读数是个快照：预取开着、数字永远是 0 项（开发机）
+
+**用户报的原话**：「『对比模式后台预取』经过我打开后，缓存始终为 0 项」。这是纯前端缺陷，
+**后端零改动**。
+
+**先复现，再改。** 缺陷在设置浮层那一行「本地预览缓存 N 项 / X MB」：它只在**浮层被打开的那一刻**
+读一次 `previewCacheStats()`（外加清空之后重读一次），而**唯一能改这份缓存的开关（预取）就挂在
+同一浮层的上一行**。于是用户点开开关、眼睛盯着紧挨着的那个数字，看到的永远是打开浮层那一刻的值；
+走拖入链进来时那份缓存本来就是空的，所以**永远停在「0 项」**，只能得出「预取没生效」这个结论。
+按用户的动作在开发机上复现（造一份盘上已烤好的产物预览 → 进对比模式 → 开预取 → **面板不关**）：
+缓存实际 1 项 → 2 项，行里始终写着打开时那一次的数字。**同一浮层里一个控件的结果显示在另一个控件
+旁边，读数就必须订阅而不是快照** —— 这条是本轮留下的一般教训（已进 `gui-experience.md` §10.7）。
+
+**修法**（三处，都刻意选最小的面积）：
+
+1. `lib/blobCache.ts`：`createBlobCache(maxBytes, onChange?)` 多一个可选的「内容变了」回调。
+   判据是**内容真的变了**：`set` 进/换条目、LRU 淘汰、非空的 `clear`、删到东西的 `deletePrefix`
+   各响一次；`get` 命中（只挪 LRU 次序）、被拒的超大条目、空 `clear`、`deletePrefix` 一条没删
+   **都不响** —— 否则一次取图要白响两次。
+2. `lib/api.ts`：把它包成订阅 `watchPreviewCache(cb): () => void`（返回退订），不把 `stats()` 本身
+   做成响应式：那样每次取图都要重算一次渲染，收益为零。
+3. `stores/viewer.ts` + `SettingsPanel.vue`：store 里落一个 `previewCacheRev` 计数器，浮层的
+   `watch` 从「只看 `settingsOpen`」改成 `[settingsOpen, previewCacheRev]`，**面板开着也跟着涨**。
+
+**顺带把预取的结果说出来**（同一浮层新增备注行 `data-e2e="set-prefetch-note"`）：预取原先静默跑，
+于是「没可预取的」和「预取坏了」在界面上长得一模一样，正与这次的误判同源。现在四种收场都有话说：
+`siblings` 查不到 / **这次没有可预取的**（另两类在盘上还没有现成预览，写明**预取不触发烘焙**、
+打开过一次之后就有了）/ **正在预取 i/n** / **已预取 N 项**（有没取到的则记 `N/总数`）；
+`setCmpPrefetch` 关掉时连备注一起擦掉（关了就收手）。
+
+**验证（开发机，全绿）**：前端 vitest **364 passed**（`blobCache.test.ts` 新增 8 例 onChange：
+进一条响一次 / `get` 不响 / 同键覆盖算变了 / 被拒的不响 / 淘汰连带响 / 空 `clear` 不响 /
+`deletePrefix` 删到才响 / 回调可省；`api.test.ts` 新增 1 例：取图落地会通知订阅者）+ `vue-tsc`
+零错误 + `npm run build`；e2e `test-manual-scene.js` **202 断言**（K 段新增 5 条：开预取前缓存行可读
+→ 空集时备注写「没有可预取的」→ **面板开着**、预取落地那一刻行里的项数 **+1**（`4 项 → 5 项`）→
+且与 `window.__viewer.previewCacheStats()` 渲染出的真值**逐字一致** → 收尾备注 `已预取 1 项，切图不必现取`）；
+后端**零改动零回归**。复现/验证用的两个临时探针脚本（`.e2e/probe-prefetch-cache*.js`）用完即删。
+
 **待确认（真机，一条，**未解决**）**：**服务账号（`User=nginx`）对盘阵场景目录有没有删除权限**
 ——见 deploy/README 那两条注意事项（替换件的属主会变成 nginx，说明它对那些目录可写，但**没验过
 `unlink`**）。没权限时本功能只会逐条报「失败 + 原因」，**不会删掉任何东西**，也不影响其他目录；
 真机第一件事：`sudo -u nginx rm <某场景目录>/<某景>_preview.jpg` 试一发（或用场景库清一个场景看明细）。
 次要待确认：`.sp-tbl` 在 1600 视口下加第 9 列后的观感（`test-platform.js` 的三页同宽断言仍绿，
 但那是页宽不是表宽）。
+
+### 2026-09-22 · 右下角任务提醒 + 对比模式下画掩码（开发机）
+
+**用户要求**（原话）：「在任务队列进行超分时不是可以切到查看器嘛，完成超分时会在右下方用**非主题色**
+提醒；然后再**对比模式下可以绘制掩码**」。两轮确认（每条都取推荐项）：触发取 **COMPLETED + FAILED**；
+范围取**所有页面**；颜色取**琥珀橙**；绘制语义取**只画活动侧、且必须是本体影像**；成功条自动消失 /
+失败条常驻、点任一条跳 `/queue`；SSE 掉线**自动重连 + 重连后校准**；刷新期间跑完的**不补弹**；提醒
+**不按提交者过滤**（所有任务）。后端**零改动**。
+
+**① 提醒为什么原来收不到（定位）**：队列 SSE 原先只在两种时刻被订阅 —— `/queue` 挂载时、查看器侧舱
+需要活动场景时。用户提交完**切到查看器**，这两种都不成立：这条流**根本没人订阅**，后端推什么前端都
+收不到。所以这不是「加一个 toast」，而是要把订阅提到**应用外壳**上：`App.vue` 挂载时 `queue.connect()`，
+`stores/queue` 里按**引用计数**收（归零才真断）—— 队列页与侧舱那两个既有调用点**原样保留**，它们
+卸载时不会把外壳那一份带走。配套三件（都是这条常驻订阅带来的必然）：
+
+- **没有心跳帧**（`platform.py::_broadcast` 只广播业务帧，契约里那行 `{"type":"ping"}` 服务端不发）
+  → 「还连着」只能由 fetch 拿到响应头证明（`subscribeQueueEvents` 新增 `onOpen`）；对端关流时
+  `readSseStream` 是**正常返回**、不抛错，只有 `onClose` 才算得出掉线。
+- **掉线自动重连**：退避 2s 起、翻倍、封顶 30s（`nextBackoff`，纯函数、单测钉住），连上即复位。
+- **重连成功后补拉一次 `GET /api/queue`**：这条流**没有历史回放**，断着那段时间的变化全丢了；
+  靠服务端「按库里存的状态重判、只补发真正变过的行」那条口径对齐（契约 §3.3 两侧口径写在了一起）。
+
+**② 对比模式画掩码：删的是守卫，改的是坐标**。原 `enterDraw` 挡着「对比模式只读」，理由是「分屏里
+画到哪一格、写进哪张 rec 都不明确」—— `activeId`/`activeSide` 落地后这条理由不成立了（活动侧本来就
+是掩码/统计/云量/任务状态跟随的那一张）。**真正动手改的是指针换算**：分屏下每格的 `ViewState` 用
+**该格自己的局部坐标**（渲染时 `translate(rect.x, rect.y)`），而 `mouseToThumb` 拿的是**画布**原点 ——
+`TifCanvas.mousePos` 原先直接对接，在右格画掩码时落点整体偏一个**左格宽**。这个错不会表现为
+「画不出来」：绘制层是按活动格裁 + 平移画的，框照常出现在指针附近，**肉眼与截图都看不出来**，
+只有把 ROI 坐标读出来比才现形。留下的唯一一道门是 `canDrawOn`（有显示像素 **且** 是本体影像，
+产物尺寸的掩码配本体 lq_path 会静默盖掉本体那份），三处共用：`enterDraw`、绘制期间 `setActiveSide`
+（**出声说明**，不静默忽略）、`onCanvasDownDraw` 兜底；`setCompareMode` 不再 `exitDraw`（切模式不该
+把画了一半的框丢掉，pendingRect 存的是缩略图坐标，换视口仍指着同一片影像）。绘制面板顺带多一枚
+`画在：右 · <文件名>` 芯片（只在对比模式下显示）。
+
+**改动清单（前端 11 处）**：新增 `lib/notices.ts`（纯函数：终态判定 + 文案）、`stores/notices.ts`
+（栈：去重键 `<task_id>:<state>`、封顶 4 条、成功条 8s 自走）、`components/JobNoticeStack.vue`（挂
+`App.vue`，`role=status`）+ `style.css` 四个琥珀令牌（**刻意非主题色**，青绿族是常规元素的语言）；
+改 `stores/queue.ts`（引用计数 + 退避重连 + 重连校准 + 终态推提醒）、`lib/api.ts`（`onOpen`/`onClose`）、
+`stores/viewer.ts`（`canDrawOn` 三处 + 删守卫）、`components/TifCanvas.vue`（`mousePos` 减活动格原点）、
+`components/{Toolbar,DrawPanel}.vue`、`viewer/e2eHooks.ts`（三个观测钩子）。
+
+**文案口径（与最初那张草图不同，如实记一笔）**：提醒第二行写的是**场景目录名 + 倍率**，不是产物文件名
+—— `job_update` 帧里**没有产物文件名**（只有 task_id/state/时间戳），要显示产物名就得前端自己按
+`suffix` 拼，那正是 09-21 那次「名字没错、是它里面没有场景身份」踩过的坑。行还没 GET 回来时**只报
+task_id**（订阅常驻，这次会话可能还没拉过队列），失败原因优先用帧里的 `error`，没有才回落到 `log_dir`
+末段 /「原因见队列页」。
+
+**验证（开发机，全绿）**：前端 vitest **380 passed / 16 文件**（新增 `lib/__tests__/notices.test.ts`
+13 例 + `stores/__tests__/queue.test.ts` 3 例退避）+ `vue-tsc` 零错误 + `npm run build`；
+`.e2e/test-vue-viewer.js` **190 断言**（新增 K 段 28 条：产物 rec 上 `enterDraw` 被拒且按钮置灰 →
+分屏后真鼠标在**右格**画框、ROI 落在**该格局部**坐标 ±1px（少减那格宽的话 x 会落在 200 宽的缩略图
+之外，必红）→ 左半青绿像素必须为 0 → 绘制中点半屏另一半活动侧不动 + 出声 + **不落框** → 完成之后
+照旧可切、切到产物立刻置灰 → 提醒栈：琥珀三个令牌解析出来比对、且与 `--accent-3`/`--accent-deep`/`--ok`
+**都不相等**、8s 后成功条走而失败条留、点条跳 `/queue`、跨页面常驻、× 收尾）；`.e2e/test-platform.js`
+**26 断言**（新增 3 条走**真后端 → 真 SSE → 提醒**那条链：COMPLETED 帧弹出「超分完成 #1 + 目录名 · ×2」、
+点整条仍在队列页且已收掉）—— 这是提醒链**唯一**跑得通的真链路回归，`test-vue-viewer` 那份没有后端，
+只能拿 `pushNotice` 直接塞栈，两边合起来才覆盖整条。后端零改动零回归。
+
+**待确认（真机，一条）**：`/api/queue/events` 经 nginx 反代**长时间挂着**时，掉线→退避重连→校准这套
+在真机网络下的表现（开发机的 e2e 全程连不上后端，验的是「掉线一侧」；真机才有长时间真实长连）。
+次要：提醒条在**底部居中 toast** 很宽时会在右下角压住它（z-index 40 vs 30，只影响观感、不影响点击）。
 
 ## 5. 交接（给新窗口）
 
@@ -2431,7 +2537,7 @@ e2e 里 `tr.querySelector('button')` 取的是「打开」那颗按钮）。空�
    - **真 LLM**：`SR_LLM_BASE_URL/API_KEY/MODEL` 指内网端点 + `SR_LLM_MOCK=0`，/chat 发一条 → 真实工具调用 + 最终回复；刷新恢复历史；
    - **真 Slurm**：`SR_SLURM_FAKE=0`，/queue 提交 → sbatch 真实作业 → SSE `job_update` 推进到「完成」（**终态读退出码文件，不是 `sacct`**——真机账务关闭，见 §3.2「Slurm 接入定论」）；装变体 + 校验器 + 六项 env 见 `deploy/README.md` §七，分阶段验收（含四条链路结论）见 `docs/status/slurm-acceptance.md`；取消按钮 scancel 生效；
    - **盘阵掩码落点**：/viewer 打开真实场景画掩码 →「提交 SR」→ ENVI 打开 `<原图目录>/<stem>_mask.tif` 核对区域与 0817 消费路径一致（`_mask.txt` 质心坐标）；
-   - **nginx SSE 长连**：/chat 与 /queue 经反代挂 10min+ 无断流/攒批（心跳/断链重连正常）；
+   - **nginx SSE 长连**：/chat 与 /queue 经反代挂 10min+ 无断流/攒批。⚠️ 服务端**不发心跳帧**（2026-09-22 核实，`platform.py::_broadcast` 只推业务帧；契约里 `{"type":"ping"}` 那行是备选不是现状），所以**别拿「有没有心跳」当判据**——挂半天一条帧没有是正常的。要判活看 `/queue` 是否仍能推 `job_update`；真断了前端会自己退避重连（2s→30s 封顶）并重拉一次 `GET /api/queue` 校准，消费端契约见 `docs/planning/api-contract.md` §3.3 末；
    - **systemd 权限**：`nginx` 用户能读盘阵、写预览 JPG 缓存与 `SR_AGENT_DB`（见 deploy/README §三）。
 3. **当前路线（最小原型）上机前**：`docs/planning/sr-minimal-prototype-plan.md` §3 三项只读确认 → §6 六项 env（`SR_SANDBOX_ROOT` **不设**）+ `systemctl restart sr-api` → §5.2 A/B 段验收。⚠️ **改过的 `SR_code/variants/verify_sr_run.py` 需重新拷回真机**（16419B/`92e400a7…` → **17164B/`5fa627d8…`**，编码锁定两处），验收 D 步之前必须重拷。
 4. **开发机可推进**：P1 ④⑤⑥⑦（见 §2.5，.env / 瞬时错误重试 / 测试缺口 / CLI --resume）；配 LLM key 跑通真实闭环（§2.6）。本地执行链已验证，浏览器回归已全绿 —— 开发机侧**没有已知红项**。
@@ -2448,7 +2554,9 @@ e2e 里 `tr.querySelector('button')` 取的是「打开」那颗按钮）。空�
 - 生产命名/反推规则：`docs/sr_code/production-scene-naming.md`（9 段名字 + 六层目录 + 由文件名反推场景目录）；实现唯一真源 `backend/pathguard.py::scene_name_layers` / `infer_scene_paths`
 - 经验文档：`docs/experience/gui-experience.md`
 - 真机预演（无内网机时可跑）：`backend/tests/test_local_chain.py`（4 例，除 SR 算法外全真：真 config/批脚本/bash/校验器/退出码文件；`code_0817_prod.py` 换 stub）
-- E2E 测试：`.e2e/`（**2026-09-15 起入库**，只忽略 `node_modules/`+`fixtures/`+大图）——`test-vue-viewer.js` **58 断言**本地文件回归（含 G 段待修复清单）· `test-scenes.js` **65 断言**场景 http 打开 · `test-platform.js` **22 断言** REST/SSE 全链路 + 布局（1600 视口实测页宽同宽 + 耗时列 nowrap）· `test-manual-scene.js` **194 断言**盘阵任意场景目录（粘 `W:\…` 打开 → 画掩码 → 写盘阵 → 提交 SR，含 PAN 掩码命名与反推失败两条路；**G 段**粘单个 `.tif` 文件路径 → 预览按各边 1/2 烤进源图目录、且不能提交 SR；**H 段**《待修复清单》写回：导入 GBK 清单 → 粘路径 → 同步 → **从磁盘按字节读回**比对；**J/K 段**对比模式的窗口拖放与三类图芯片、后台预取边界；**L 段**左栏卡片带票拖进画布、拖中间产物 jpg 关联盘阵并挡住三处修复入口 —— 见 §4 该日条目）；跑法 `cd .e2e && node test-<name>.js`（前置 `cd frontend && npm run build`；puppeteer-core + 无界面 Chrome + 本地静态服务顶替 nginx + uvicorn 起真后端）。四个数字 **2026-09-18 实测复核**过（此前该行停在 35/65/22/48，其中两个已过期：09-18 加 G 段后 `test-vue-viewer.js` 38 → **58**；`test-manual-scene.js` 记的 48 是更早的值，当天加 H 段后实测已到 **98**）
+- E2E 测试：`.e2e/`（**2026-09-15 起入库**，只忽略 `node_modules/`+`fixtures/`+大图）——`test-vue-viewer.js` **190 断言**本地文件回归（含 G 段待修复清单、K 段对比绘制 + 右下角提醒）· `test-scenes.js` **112 断言**场景 http 打开（含 `[J]` 场景库清除缓存 33 条）· `test-platform.js` **26 断言** REST/SSE 全链路 + 布局（1600 视口实测页宽同宽 + 耗时列 nowrap；含**真后端 → 真 SSE → 右下角提醒**那条唯一真链路）· `test-manual-scene.js` **202 断言**盘阵任意场景目录（粘 `W:\…` 打开 → 画掩码 → 写盘阵 → 提交 SR，含 PAN 掩码命名与反推失败两条路；**G 段**粘单个 `.tif` 文件路径 → 预览按各边 1/2 烤进源图目录、且不能提交 SR；**H 段**《待修复清单》写回：导入 GBK 清单 → 粘路径 → 同步 → **从磁盘按字节读回**比对；**J/K 段**对比模式的窗口拖放与三类图芯片、后台预取边界；**L 段**左栏卡片带票拖进画布、拖中间产物 jpg 关联盘阵并挡住三处修复入口 —— 见 §4 该日条目）；跑法 `cd .e2e && node test-<name>.js`（前置 `cd frontend && npm run build`；puppeteer-core + 无界面 Chrome + 本地静态服务顶替 nginx + uvicorn 起真后端）。四个数字里 **190 / 26 是 2026-09-22 实测**（K 段 28 条 + `test-platform.js` 3 条真链路断言），
+**112 是 2026-09-22 清除缓存那轮实测**，**202 是 2026-09-22 预取缓存那轮实测**——本轮只跑了前两个，
+后两个沿用当天更早的记录（更旧的值 58 / 65 / 22 / 197 都已过期，别照着用）
 - 测试图：`test-tifs/`（gitignore）、`frontend/fixtures/`（入库小图）
 - 记忆：`~/.claude/projects/.../memory/MEMORY.md`（6 条索引：local-vendor / browser-2gb / intranet-data / real-files-1row-strips / openai-pin / **phase4-disk-array-reads-jpg**）
 

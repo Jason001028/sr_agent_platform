@@ -43,8 +43,12 @@ export interface BlobCache {
 /** 造一个按字节封顶的 LRU 缓存。
  *
  * `maxBytes <= 0` 时退化成「什么都不缓存」：门还开着，`set` 直接丢。
- */
-export function createBlobCache(maxBytes: number): BlobCache {
+ *
+ * `onChange` 在**内容真的变了**（进了 / 退了条目）时被调一次；读命中（`get` 只挪
+ * LRU 次序）、被拒的大条目、空 `clear` 都不算。设置浮层靠它把「本地预览缓存 N 项」
+ * 那一行做成实时的：那一行的数据由**同一个浮层里的按钮**（预取开关）和后台预取
+ * 改动，只在打开时读一次快照，用户就永远看不到自己刚触发的那一次。 */
+export function createBlobCache(maxBytes: number, onChange?: () => void): BlobCache {
   /** 插入序 = 从旧到新。`get` 命中会把它挪到末尾（刷新新鲜度）。 */
   const items = new Map<string, Blob>();
   let bytes = 0;
@@ -81,11 +85,14 @@ export function createBlobCache(maxBytes: number): BlobCache {
       items.set(key, blob);
       bytes += blob.size;
       while (bytes > maxBytes && items.size > 0) dropOldest();
+      onChange?.();
     },
 
     clear() {
+      const had = items.size > 0;
       items.clear();
       bytes = 0;
+      if (had) onChange?.();
     },
 
     deletePrefix(prefix) {
@@ -96,6 +103,7 @@ export function createBlobCache(maxBytes: number): BlobCache {
         bytes -= b.size;
         n++;
       }
+      if (n) onChange?.();
       return n;
     },
 

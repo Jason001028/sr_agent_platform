@@ -10,7 +10,7 @@ import {
   stepSse, parseSseEvents, apiUrl, sessionsUrl, sessionMessagesUrl,
   queueEventsUrl, fetchSceneJpg, fetchDropSceneJpg, apiResolveScene,
   resetPreviewCache, previewCacheStats, clearPreviewCache, PREVIEW_BLOB_CACHE_MAX,
-  apiClearScenePreviews,
+  apiClearScenePreviews, watchPreviewCache,
 } from '../api.js';
 import type { PlatformSseEvent, ChatSseEvent } from '../api.js';
 import type { SceneRow } from '../scene.js';
@@ -354,6 +354,29 @@ describe('fetchSceneJpg', () => {
     expect(previewCacheStats()).toEqual({ count: 0, bytes: 0, maxBytes: PREVIEW_BLOB_CACHE_MAX });
     clearPreviewCache();
     expect(previewCacheStats().count).toBe(0);
+  });
+
+  it('缓存内容变化会通知订阅者（设置浮层那一行靠它保持实时）', async () => {
+    // 触发一次真正的写入：库外行 → 响应体本身就是那张 JPEG
+    const row: SceneRow = {
+      id: '~YWJj', name: 'SC', satellite: null, sensor: null, date: null,
+      size_bytes: 0, fake: false, W: 200, H: 100, rel: null,
+      jpgUrl: null, hasPreview: false, lq_path: null,
+    };
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response('PREVIEW', { status: 200 })));
+
+    let n = 0;
+    const off = watchPreviewCache(() => { n++; });
+    expect(n).toBe(0);
+
+    await fetchSceneJpg(CFG, row, 2);
+    expect(previewCacheStats().count).toBe(1);
+    expect(n).toBe(1);
+
+    // 退订之后不再响（模块级单例会跨用例活着，别让订阅堆在这儿）
+    off();
+    clearPreviewCache();
+    expect(n).toBe(1);
   });
 
   /* ---------------- 显示源比较规则：同名栅格赢的那一支 ---------------- */
