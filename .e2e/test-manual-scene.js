@@ -1368,17 +1368,17 @@ async function main() {
       const prod1 = byKind(sib1, 'product');
       const nosr1 = byKind(sib1, 'nosr');
       assert(prod1.exists && prod1.W === 800 && prod1.H === 400,
-        `造出来的「本次产物」被认成 800×400（exists=${prod1.exists} / `
+        `造出来的「本轮超分产物」被认成 800×400（exists=${prod1.exists} / `
         + `${prod1.W}×${prod1.H}）`);
       assert(nosr1.exists && nosr1.W === 640 && nosr1.H === 320,
-        `造出来的「上一次产物」被认成 640×320（exists=${nosr1.exists} / `
+        `造出来的「未超分产物」被认成 640×320（exists=${nosr1.exists} / `
         + `${nosr1.W}×${nosr1.H}）`);
       assert(!prod1.hasPreview && !nosr1.hasPreview,
         '两份都还没有预览 —— 也就是说，此刻盘上没有任何"现成的那份"');
-      // 只烤「本次产物」那一份（K1 要点的芯片）。「上一次产物」先按住不烤：K2 前半
+      // 只烤「本轮超分产物」那一份（K1 要点的芯片）。「未超分产物」先按住不烤：K2 前半
       // 段断言的就是「盘上没有现成预览 → 预取一个字节都不取」。
       const bakeProd = await fetch(prevUrlOf(prod1.id));
-      assert(bakeProd.ok, `服务端烤「本次产物」的 ÷2 预览（HTTP ${bakeProd.status}）`);
+      assert(bakeProd.ok, `服务端烤「本轮超分产物」的 ÷2 预览（HTTP ${bakeProd.status}）`);
       await bakeProd.arrayBuffer();          // 必须读完：不读会吊着这条连接
       const prod2 = byKind(await sibOf(kSid), 'product');
       assert(prod2.hasPreview === true && prod2.previewDiv === 2,
@@ -1394,13 +1394,13 @@ async function main() {
           return !!b && !b.disabled;
         }, 15000, label);
       };
-      await chipReady('「本次产物」芯片可用');
+      await chipReady('「本轮超分产物」芯片可用');
       const k1Sib = countUrl(sibRe);
       const k1Prev = countUrl(previewRe);
       const k1Recs = await page.evaluate(() => window.__viewer.recs().length);
       await page.click('[data-e2e="cmp-sib-product"]');
       await waitFor(page, (sid) => window.__viewer.recs().some((r) => r.sceneId === sid),
-        20000, '「本次产物」开出来了', prod2.id);
+        20000, '「本轮超分产物」开出来了', prod2.id);
       await waitNode(() => countUrl(sibRe) === k1Sib + 1, 15000, '芯片那一跳的 /siblings');
       const k1RecsAfter = await page.evaluate(() => window.__viewer.recs().length);
       assert(k1RecsAfter === k1Recs + 1,
@@ -1465,7 +1465,7 @@ async function main() {
         `开关关着进对比模式：一个请求都不发（/siblings +${countUrl(sibRe) - sibMark}`
         + ` / /preview +${countUrl(previewRe) - prevMark}）`);
 
-      // K2b：开关开着 —— 但盘上那份「上一次产物」还没烤过，合格项是**空集**。
+      // K2b：开关开着 —— 但盘上那份「未超分产物」还没烤过，合格项是**空集**。
       // 空集也要如实判一次：接下来「一个字节都不取」才有可解释的理由（钉的是
       // 「预取绝不触发烘焙」）。
       await page.evaluate(() => window.__viewer.setCmpMode('off'));
@@ -1475,7 +1475,7 @@ async function main() {
         '只打开开关、还没进对比模式：也不发请求（预取不是"点开就取"）');
       const eligB = await eligibleNow(kSid2);
       assert(eligB.length === 0,
-        `此刻没有可预取的项（「上一次产物」在盘上但还没预览：${brief(eligB)}）`);
+        `此刻没有可预取的项（「未超分产物」在盘上但还没预览：${brief(eligB)}）`);
       sibMark = countUrl(sibRe);
       prevMark = countUrl(previewRe);
       const recsB = await page.evaluate(() => window.__viewer.recs().length);
@@ -1489,11 +1489,11 @@ async function main() {
       assert(await page.evaluate(() => window.__viewer.recs().length) === recsB,
         '预取不建 rec');
 
-      // K2c：把那份「上一次产物」的预览烤上（**在页面之外**烤的，不算页面发的
+      // K2c：把那份「未超分产物」的预览烤上（**在页面之外**烤的，不算页面发的
       // 请求），再进一次对比模式：这次合格项恰好是它一项。
       const nosr2 = byKind(await sibOf(kSid2), 'nosr');
       const bakeNosr = await fetch(prevUrlOf(nosr2.id));
-      assert(bakeNosr.ok, `服务端烤「上一次产物」的 ÷2 预览（HTTP ${bakeNosr.status}）`);
+      assert(bakeNosr.ok, `服务端烤「未超分产物」的 ÷2 预览（HTTP ${bakeNosr.status}）`);
       await bakeNosr.arrayBuffer();
       const nosrN = byKind(await sibOf(kSid2), 'nosr');
       assert(nosrN.hasPreview === true && nosrN.previewDiv === 2,
@@ -1501,7 +1501,7 @@ async function main() {
       await page.evaluate(() => window.__viewer.setCmpMode('off'));
       const eligC = await eligibleNow(kSid2);
       assert(eligC.length === 1 && eligC[0].kind === 'nosr',
-        `合格项恰好是「上一次产物」一项（${brief(eligC)}）`);
+        `合格项恰好是「未超分产物」一项（${brief(eligC)}）`);
       const wantUrl = prevUrlOf(eligC[0].id);
       sibMark = countUrl(sibRe);
       prevMark = countUrl(previewRe);
@@ -1647,7 +1647,7 @@ async function main() {
       assert(srRec.name === SR + '.jpg',
         `rec 还是拖进来那个文件（${srRec.name}）`);
       assert(srRec.stageKind === 'product' && srRec.stageLabel === 'SR',
-        `后端认出它是本次产物（kind=${srRec.stageKind} / 标签 ${srRec.stageLabel}）`);
+        `后端认出它是本轮超分产物（kind=${srRec.stageKind} / 标签 ${srRec.stageLabel}）`);
       assert(srRec.lqPath === null,
         `关联上了但 lqPath 为空 —— 服务端拒绝把中间产物当可提交场景（${JSON.stringify(srRec.lqPath)}）`);
       assert(srRec.sceneDir === SC_DIR.replace(/\\/g, '/'),

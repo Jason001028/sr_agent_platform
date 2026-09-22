@@ -24,7 +24,7 @@ describe('isIntermediateStage', () => {
 });
 
 describe('stageLabel', () => {
-  it('本次产物用后端给的 suffix 大写', () => {
+  it('本轮超分产物用后端给的 suffix 大写', () => {
     expect(stageLabel('product', 'sr', SC + '_sr.jpg')).toBe('SR');
   });
 
@@ -33,7 +33,7 @@ describe('stageLabel', () => {
     expect(stageLabel('product', '', SC + '_sr_2.jpg')).toBe('2');
   });
 
-  it('上一次产物恒标 NOSR（它没有属于自己的 suffix）', () => {
+  it('未超分产物恒标 NOSR（它没有属于自己的 suffix）', () => {
     expect(stageLabel('nosr', 'sr', SC + '_sr_NOSR.jpg')).toBe('NOSR');
   });
 

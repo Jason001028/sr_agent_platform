@@ -33,8 +33,8 @@ const sceneId = computed(() => store.activeSceneId());
 
 const CHIPS: { kind: 'input' | 'product' | 'nosr'; label: string }[] = [
   { kind: 'input', label: '输入影像' },
-  { kind: 'product', label: '本次产物' },
-  { kind: 'nosr', label: '上一次产物' },
+  { kind: 'product', label: '本轮超分产物' },
+  { kind: 'nosr', label: '未超分产物' },
 ];
 
 function pick(kind: 'input' | 'product' | 'nosr') {
