@@ -348,7 +348,7 @@ rec 的 `route` 记为 `'jpg'`，`layout` 记为「盘阵 JPG（1/4 尺度 + 直
 前三节说的都是**惰性**烘焙：用户打开时才烤。产物那一份多一条**主动**路径 —— 作业转
 COMPLETED 之后由后台循环顺手烤掉，用户跑完立刻打开时盘上已经有了。
 
-**为什么只烤产物**：输入影像与「上一次产物」两份「用户到底要不要看」在打开之前无从知道（对比 UI
+**为什么只烤产物**：输入影像与「未超分产物」两份「用户到底要不要看」在打开之前无从知道（对比 UI
 还没做），而产物是刚跑完的、几乎一定会被打开。三份落点天然独立（各由自己的源 stem 拼出
 `<stem>_preview.jpg`，见 §4.8 那条唯一规则），各烤各的、互不覆盖，所以**不新增任何
 烘焙入口**：三类图各拿自己的 id 调现有的 `GET /api/scenes/{id}/preview?div=N` 就行。
@@ -492,7 +492,7 @@ RUNNING→COMPLETED 谁把 `changed` 拿走，在那里挂入队钩子必然偶�
   真机 `ls` 一次就能分清；在代码里两个名字都试一遍，只会让「烤的到底是哪一份」说不清。
   待核项记在 [current-question.md](../status/current-question.md)。
 
-谁**不**读这个文件（今天）：服务端不给它算 `hasPreview`（`/siblings` 的「上一次产物」那一项找的是
+谁**不**读这个文件（今天）：服务端不给它算 `hasPreview`（`/siblings` 的「未超分产物」那一项找的是
 落点 `…_NOSR_preview.jpg`），前端也不按它取图。它是一份给人看、给人拖的产物 —— 拖回查看器
 那条路能认（`stage_of_jpg` 剥掉 `preview` 尾巴后按 `PAN_NOSR.tif` 判环节）。
 
@@ -560,7 +560,7 @@ div 抖动）——代价是多花一次几十秒，不是错误结果。
 
 - [docs/status/current-question.md](../status/current-question.md) —— 交接入口，§4 记录了烘焙规则 v2 的六项决策与验证数据
 - [docs/experience/gui-experience.md](../experience/gui-experience.md) —— §9 与 §9.1 收录了这条链路改版时遇到的具体问题；§10 是**图像对比**（一个画布两个格子）的经验，与本文的关系在下面这一段
-- **本文与图像对比的关系（2026-09-20 一句话）**：对比功能自己**不烘焙**，它烤的就是本文这条路 —— 想看同场景的三类图（输入 / 本次产物 / 上一次产物）时，前端拿 `GET /api/scenes/{id}/siblings` 给出的 id 直接调本文的 `GET /api/scenes/{id}/preview?div=N`，三条入口共用同一套档位与规则戳，落点各归各的（`<各族自己的源 stem>_preview.jpg`，见 §4.8）；前端消费口径见契约 §3.8.1，两个格子的坐标与共享变换见 `gui-experience.md` §10。
+- **本文与图像对比的关系（2026-09-20 一句话）**：对比功能自己**不烘焙**，它烤的就是本文这条路 —— 想看同场景的三类图（输入 / 本轮超分产物 / 未超分产物）时，前端拿 `GET /api/scenes/{id}/siblings` 给出的 id 直接调本文的 `GET /api/scenes/{id}/preview?div=N`，三条入口共用同一套档位与规则戳，落点各归各的（`<各族自己的源 stem>_preview.jpg`，见 §4.8）；前端消费口径见契约 §3.8.1，两个格子的坐标与共享变换见 `gui-experience.md` §10。
 - **前端这一层怎么少烤几次（2026-09-20 补）**：客户端有「预览 blob 的字节封顶 LRU + 已开图去重 + 进对比模式的后台预取（默认关）」三件事，**预取的合格项判据就是「盘上已有一份现成预览且档位对得上」**，所以预取只可能命中本文写下的文件、永不触发烘焙。键与边界见契约 §3.8.2；为什么以**水平**归一化范围为准、`viewFor` 怎么记账见 `gui-experience.md` §10.7。
 - [docs/planning/api-contract.md](../planning/api-contract.md) —— §3.5 是场景接口的契约描述
 - [docs/knowledge/jpg-export-background.md](jpg-export-background.md) —— 浏览器侧的 JPG 导出，与本文的产物是两回事

@@ -158,7 +158,7 @@ def derived_mask_path(lq_path) -> str:
 
 
 # --------------------------------------------------------------------------
-# SR 三类图（输入影像 / 本次产物 / 上一次产物）的命名推导
+# SR 三类图（输入影像 / 本轮超分产物 / 未超分产物）的命名推导
 # --------------------------------------------------------------------------
 #: 产物的扩展名候选。SR 侧 `writeTiff(result_sr, lq_path + "/" + img_name[0:-4]
 #: + "_" + suffix, tiftype=tiftype, ...)` 里的 `tiftype` 是配置给定值，生产上是
@@ -205,7 +205,7 @@ def product_candidates(input_path, suffix: str) -> list[Path]:
 
 
 def nosr_path_for(product_path) -> Path:
-    """上一次产物的路径：`<产物 stem>_NOSR<ext>`，与产物同目录。
+    """未超分产物的路径：`<产物 stem>_NOSR<ext>`，与产物同目录。
 
     对齐 `SR_code/util.py::writeTiff` 的改名规则 —— 它改的是**输出路径**
     （`os.rename(path + tiftype, path + "_NOSR" + tiftype)`），改名的前提是目标
@@ -231,12 +231,12 @@ def nosr_path_for(product_path) -> Path:
 #: 不决定什么能**提交**，只决定拖进来的 jpg 能不能被认成「产物」这个身份标签。
 _NON_STAGE_TAILS = ("cloud", "thumb", "mask", "ori", "preview")
 
-#: SR 产物/上一次产物的后缀上限（与 services.run_sr.SUFFIX_RE 同口径：1..16 个
+#: SR 产物/未超分产物的后缀上限（与 services.run_sr.SUFFIX_RE 同口径：1..16 个
 #: `[A-Za-z0-9_-]`）。这里自己写一份正则而不是 import run_sr，是为了让 scene_search
 #: 保持「纯文件名推导、无服务依赖」——app.py 那边仍会用 run_sr 的权威值。
 _SUFFIX_RE = re.compile(r"^[A-Za-z0-9_-]{1,16}$")
 
-#: 上一次产物的尾标记（对齐 SR_code/util.py 的改名规则）。
+#: 未超分产物的尾标记（对齐 SR_code/util.py 的改名规则）。
 _NOSR_TAIL = "_NOSR"
 
 #: 平台自烤的预览缓存尾标记（`api/paths.drop_preview_path` 产出的

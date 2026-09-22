@@ -189,7 +189,7 @@ export interface SceneResolveResult {
      *  SR 产物；`'nosr'` = 上一次的产物。**只有 kind='input' 才是可修复对象** ——
      *  掩码与 SR 建在本体影像的网格上，产物的尺寸是它的倍数。 */
     kind: 'input' | 'product' | 'nosr';
-    /** 本次产物的 suffix（从**文件名本身**切出来的那一段，不是查任务库来的）。
+    /** 本轮超分产物的 suffix（从**文件名本身**切出来的那一段，不是查任务库来的）。
      *  kind='input' 时是空串。标签与提示用。 */
     suffix: string;
   };

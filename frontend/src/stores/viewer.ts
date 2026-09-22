@@ -86,7 +86,7 @@ export interface ViewerRec {
   /** 掩码写到服务端后，服务端告知的绝对路径（`bakeMaskToServer` 成功才非空）。
    *  显示用；提交时真正的值由后端按同一规则重新推导。 */
   serverMaskPath?: string | null;
-  /** 盘阵场景里的环节（盘阵 JPG 才有）：本体输入 / 本次产物 / 上一次产物。
+  /** 盘阵场景里的环节（盘阵 JPG 才有）：本体输入 / 本轮超分产物 / 未超分产物。
    *  **与 `lqPath` 正交** —— 三者都在同一个场景目录里，`lqPath` 都是同一个值；
    *  能不能修复只看这一项（见 lib/stage.ts 顶部那段）。 */
   stageKind?: StageKind;
@@ -879,14 +879,14 @@ export const useViewerStore = defineStore('viewer', () => {
     const sid = activeSceneId();
     if (!sid) { showToast('先打开一张带盘阵关联的图，才能取同场景的其它图'); return false; }
     busy.value = true;
-    showMask('正在查找同场景的图…', '三类图（输入 / 本次产物 / 上一次产物）', false);
+    showMask('正在查找同场景的图…', '三类图（输入 / 本轮超分产物 / 未超分产物）', false);
     try {
       const res = await apiSceneSiblings(loadSrConfig(), sid);
       const item = res.items.find((it) => it.kind === kind);
       if (!item || !item.id || !item.exists) {
         // 「找不到」如实交代：把试过哪些名字一并说出来，别只说一句「没有」。
         const kindName = kind === 'input' ? '输入影像'
-          : kind === 'product' ? '本次产物' : '上一次产物';
+          : kind === 'product' ? '本轮超分产物' : '未超分产物';
         const tried = res.productCandidates.length
           ? '（试过 ' + res.productCandidates.join(' / ') + '）' : '';
         const why = !res.suffix
@@ -919,7 +919,7 @@ export const useViewerStore = defineStore('viewer', () => {
       hideMask(); busy.value = false;
       // 名字取 stem：与场景库那些行一个口径（列表里两个名字并排时不至于一个带后缀
       // 一个不带）。lqPath 用场景目录 —— 任务区靠它关联当前场景的队列行。
-      // 环节照实带上：产物/上一次产物**不是可修复对象**（掩码与 SR 都建在本体网格
+      // 环节照实带上：产物/未超分产物**不是可修复对象**（掩码与 SR 都建在本体网格
       // 上），拖拽那条路进来的产物已经有这个字段了，这条入口没有的话，同一份产物
       // 就成了「拖进来不能改、芯片打开能改」两个说法。
       const stem = (item.name ?? kind).replace(/\.(tif|tiff|jpg|jpeg)$/i, '');

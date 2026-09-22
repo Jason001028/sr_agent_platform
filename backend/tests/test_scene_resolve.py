@@ -977,12 +977,12 @@ class TestResolveAnchored(ResolveBase):
 
 
 class TestResolveStages(ResolveBase):
-    """拖进来的 jpg 属于哪个环节：本体 / 本次产物 / 上一次产物（2026-09-21）。
+    """拖进来的 jpg 属于哪个环节：本体 / 本轮超分产物 / 未超分产物（2026-09-21）。
 
     用户口径：一景里只有**本体**是可修复对象（SR 与掩码都建在它的网格上），中间
     产物只要关联到盘阵、标出环节、明说「仅对比不作修复」。所以这一节钉两件事：
 
-    1. 产物 / 上一次产物的名字都要**认得出来**（suffix 从文件名本身切，不查任务库）；
+    1. 产物 / 未超分产物的名字都要**认得出来**（suffix 从文件名本身切，不查任务库）；
     2. 认出来之后这一行描述的是**产物自己**（W/H 是它那张栅格的），而
        `lq_path` / `sr_capable` / `mask_path` 一律**摘掉** —— 否则前端会拿产物的
        W/H 配本体的 lq_path，把一张产物尺寸的掩码写到本体的掩码文件上。
@@ -1013,7 +1013,7 @@ class TestResolveStages(ResolveBase):
         return d, name, raster, jpg
 
     def test_product_jpg_links_but_cannot_repair(self):
-        """本次产物：认得出、描述的是它自己、但**没有**可提交的落点。"""
+        """本轮超分产物：认得出、描述的是它自己、但**没有**可提交的落点。"""
         d, name, raster, jpg = self._make_product("sr")
 
         r = self.resolve(name=jpg.name, size_bytes=jpg.stat().st_size)
@@ -1037,7 +1037,7 @@ class TestResolveStages(ResolveBase):
         self.assertEqual(body["resolved"]["dir"], d.as_posix())
 
     def test_nosr_jpg_is_the_previous_product(self):
-        """上一次产物：`<目录名>_<suffix>_NOSR` —— 环节是 nosr，suffix 仍是那一段。"""
+        """未超分产物：`<目录名>_<suffix>_NOSR` —— 环节是 nosr，suffix 仍是那一段。"""
         _, name, _, jpg = self._make_product("sr", nosr=True)
 
         r = self.resolve(name=jpg.name, size_bytes=jpg.stat().st_size)
