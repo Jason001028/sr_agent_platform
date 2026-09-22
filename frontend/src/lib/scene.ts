@@ -81,6 +81,19 @@ export interface SceneRow {
    *  `hasPreview/jpgUrl/previewDiv` 三个字段的语义不受它影响（那张 jpg 仍是这一行的
    *  显示源声明）。见 rasterPreviewWins。 */
   rasterPreview?: RasterPreview | null;
+  /** **只活在前端这一次会话**：试过打开这一行，而盘阵上已经没有这个文件了
+   *  （打开路径撞的 404，见 lib/api.ts 的 isSceneGone）。列表是「上次检索」那一刻
+   *  的快照，盘阵上的数据却会被自动清理，于是行还在、文件已经没了 —— 撞过一次就
+   *  记下来，那一行的「打开」改成不可点的灰色「已自动清除」（ScenesPage）。
+   *
+   *  这是 `presumedPurged` 两条来源里**先被观测到**的那一条：老景又没预览的那一类
+   *  在渲染时就直接按已清除处理（`presumedPurged` 的日期那一条），剩下还能点的行
+   *  （档位不同、jpg 源、新景）撞上 404 才轮到它。
+   *
+   *  后端列表不带这个字段：它是「试过一次、撞上了」的观测，不是盘上的事实
+   *  （盘上只剩「取不到」）。重新检索会连行一起换掉，那时这个标记自然消失 ——
+   *  文件真没了，它不会再出现在列表里。 */
+  purged?: boolean;
 }
 
 export interface SceneListResponse {
@@ -365,6 +378,78 @@ export function previewNeedsBake(row: SceneRow, div: number): boolean {
   if (!row.jpgUrl) return true;
   if (!row.hasPreview) return true;
   return isBakedPreviewUrl(row.jpgUrl) && row.previewDiv !== div;
+}
+
+/* ---------------- 「已经被自动清除」的推定（列表那一格灰块） ----------------
+ * 盘阵对生产数据有「产出后存放 N 天自动清空」的规矩（用户口径，见 PURGED_AGE_DAYS）。
+ * 被清掉的景**不会**再出现在列表里（后端 is_scene_file 要文件真的在），所以列表里
+ * 每一行在「检索那一刻」都是活的；会 404 的是**列表比盘阵旧**（快照 + 清理）。这条
+ * 推定的用处只有一个：老景又连一份预览都没有时，别让用户对同一堵墙反复点（见
+ * presumedPurged）。
+ */
+
+/** 超过这几天、又没有预览的行，就按「盘阵已经自动清除」处理。
+ *
+ * 真机规矩是「产出后存放 N 天自动清空」，用户 2026-09-22 亲自定的 N = 3（原话里是
+ * 10 天，看到「新景也会被变灰」的代价后改小到 3 天）。**这个数是用户口径，不是实测**：
+ * 盘阵的清理周期不会对外声明，真要改，改这一个常量。 */
+export const PURGED_AGE_DAYS = 3;
+
+/** 文件名/目录名称里那个日期距今几天（按本机日历、按天计）；读不出 → null。
+ *
+ * 用 `new Date(y, m-1, d)` 而不是 `new Date('2026-08-01')`：后者按 **UTC** 解析，
+ * UTC+8 下会偏 8 小时，跨天那一格就会算错一天。 */
+function daysSince(y: number, m: number, d: number, now: Date): number {
+  const then = new Date(y, m - 1, d);
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((today.getTime() - then.getTime()) / 86400000);
+}
+
+/** 这一行**看日期有多老**（天）。两个来源都试，取**最年轻**的那个：
+ *
+ *   * 文件名里的时间戳（后端解析出的 `row.date`）—— 采集时间；
+ *   * `rel` 目录里的 `年/月/日`（真机盘阵是 `<根>/年/月/日/<生产编号>/`）—— 产出时间。
+ *
+ * 取最年轻是**故意保守**：两个日期都只能证明「可能有多老」，不是清理记录。老影像
+ * 重新处理过的场景，采集时间可以老得多而数据是刚产出的 —— 取最年轻的就不会把它
+ * 误判成已清除（反过来最多是让它多出现几次「能点但撞 404」，那正是 PURGED 这条路
+ * 要兜的）。两个都读不出 → null（调用方不动它）。 */
+function sceneAgeDays(row: SceneRow, now: Date): number | null {
+  const out: number[] = [];
+  const named = /(\d{4})-(\d{2})-(\d{2})/.exec((row.date || '').trim());
+  if (named) out.push(daysSince(+named[1], +named[2], +named[3], now));
+  // rel 只取**文件名之前**那一段：目录里的年月日才是产出日期，文件名里的时间戳
+  // 已经在上面那一条里处理过了，别重复算（也不该被它顶掉）。
+  const relDir = (row.rel || '').replace(/\\/g, '/').split('/').slice(0, -1).join('/');
+  const inPath = /(?:^|\/)(\d{4})\/(\d{2})\/(\d{2})(?:\/|$)/.exec(relDir);
+  if (inPath) out.push(daysSince(+inPath[1], +inPath[2], +inPath[3], now));
+  return out.length ? Math.min(...out) : null;
+}
+
+/** 该不该把这一行的「打开」直接当成「盘上数据已被自动清除」（ScenesPage 的灰块）。
+ *
+ * 两条来源，都不是盘上的事实：
+ *   * `row.purged` —— 真点过一次、撞了 404（见 lib/api.ts 的 isSceneGone）；
+ *   * **老景 + 要烤才能看** —— 没有预览、且日期比 `PURGED_AGE_DAYS` 更早。
+ *
+ * 三条排除，每一条都对应一种「盘上其实还在、而且能打开」，把它们变成灰块就是拿一个
+ * 猜的原因盖住能用的功能：
+ *   * **档位不同不算**：只认「盘上一份预览都没有」，不看 `previewNeedsBake` ——
+ *     否则改一次档位、整张表都会变灰，而盘上那份预览就是刚刚烤的；
+ *   * **新景不算**：平台只为**产物**急烤，从不预烤输入影像（`_bake_product_preview`
+ *     的注释：用户到底要不要看在打开之前无法知道）—— 「没有预览」的行恰恰是还没被
+ *     打开过的新景，一律变灰会把「选景 → 打开 → 画掩码 → 提交 SR」挡掉；
+ *   * **jpg 源行不算**：它被列出来本身就证明盘上那份 jpg 在（is_scene_file 要求
+ *     文件存在），打开它不需要烘焙。
+ * 日期读不出（文件名与目录都没有年月日）也不动它 —— 同上，宁可让它能点。 */
+export function presumedPurged(row: SceneRow, now: Date = new Date()): boolean {
+  if (row.purged) return true;
+  if (isImageSource(row)) return false;
+  const rp = row.rasterPreview;
+  const noPreview = rp ? !rp.hasPreview : !row.hasPreview;
+  if (!noPreview) return false;
+  const age = sceneAgeDays(row, now);
+  return age !== null && age > PURGED_AGE_DAYS;
 }
 
 /** 场景 → 查看器 openSceneJpg 的最小元数据（掩码换算用 W/H；sceneId 供掩码烘焙）。 */

@@ -291,6 +291,36 @@ export async function readSseStream(
 }
 
 /* ---------------- fetch 封装（读运行期 apiBase） ---------------- */
+
+/** HTTP 层的失败，**带状态码**。`message` 仍是给人看的那份文案（JSON 错误体里
+ *  后端给的 detail 优先；非 JSON 体 —— nginx 直出的静态文件就是这种 —— 退回裸的
+ *  `HTTP <status>`），`status` 留给调用方按码分派（见 isSceneGone）。
+ *
+ *  只有 `http()` 抛它。聊天与队列 SSE 那两处（apiChatSend / subscribeQueueEvents）
+ *  自己抛 Error：它们的失败与「盘阵上这个文件在不在」无关，不需要状态码。 */
+export class HttpError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'HttpError';
+    this.status = status;
+  }
+}
+
+/** 这次失败是不是「盘阵上已经没有这个文件」——打开路径撞上的 404。
+ *
+ *  判据只有 404。**刻意不认 422**：那是「源还在、但烤不出预览」（档位非法 / 不是
+ *  单波段 / 条带读失败 / 文件过小…），把它也说成「已自动清除」就是拿一个猜的原因
+ *  盖住真实故障，用户会照着一个假的结论去等它自己好。
+ *
+ *  为什么 404 就能当成「文件不在」：打开路径上先打的是 `/api/scenes/{id}/preview`
+ *  （后端对解不到授权根之内的 id 才回 404，正常列表行不会），拿到静态 URL 后打的
+ *  是 nginx 直出的 `/disk-array/...` —— 那底下没有这个文件时回的就是 404，而且
+ *  是**非 JSON 体**（前端拿到的 message 只有裸的「HTTP 404」，正是用户报的那句）。 */
+export function isSceneGone(e: unknown): boolean {
+  return e instanceof HttpError && e.status === 404;
+}
+
 async function http(url: string, init?: RequestInit): Promise<Response> {
   const resp = await fetch(url, init);
   if (!resp.ok) {
@@ -301,7 +331,7 @@ async function http(url: string, init?: RequestInit): Promise<Response> {
     } catch {
       /* 非 JSON 错误体 */
     }
-    throw new Error(detail);
+    throw new HttpError(resp.status, detail);
   }
   return resp;
 }

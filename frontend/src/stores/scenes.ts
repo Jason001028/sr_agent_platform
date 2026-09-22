@@ -19,7 +19,8 @@ import { useViewerStore } from './viewer.js';
 import type { ClearResponse, SceneRow, SceneQueryParams } from '../lib/scene.js';
 import { clearSummaryText, loadSrConfig, rowsAfterClear,
          scenesListUrl } from '../lib/scene.js';
-import { apiClearScenePreviews, apiResolveScene, fetchSceneJpg } from '../lib/api.js';
+import { apiClearScenePreviews, apiResolveScene, fetchSceneJpg,
+         isSceneGone } from '../lib/api.js';
 import type { SceneResolveResult } from '../lib/api.js';
 
 export const useScenesStore = defineStore('scenes', () => {
@@ -29,6 +30,10 @@ export const useScenesStore = defineStore('scenes', () => {
   const count = ref(0);
   const loading = ref(false);
   const openingId = ref<string | null>(null);
+  /** 本会话是否已经检索过（`ensureSearched` 的判据）。 */
+  const searched = ref(false);
+  /** 上一次检索的**发起**时刻；页面那行「上次检索 HH:MM」用它。 */
+  const searchedAt = ref<Date | null>(null);
   /** 打开中的阶段文案（首次烘焙很慢，本页没有遮罩，就靠这一行说明在忙什么）。
    *  只在打开期间非空，见 open()。 */
   const phase = ref('');
@@ -67,6 +72,10 @@ export const useScenesStore = defineStore('scenes', () => {
   async function list(): Promise<void> {
     loading.value = true;
     error.value = '';
+    // 「已经检索过」在这一刻就成立（不等返回）：失败也算 —— 失败原因已经写在页面上，
+    // 再进本页不该自动重来一遍（盘阵上那次全树扫描不便宜），要重来用户按「检索」。
+    searched.value = true;
+    searchedAt.value = new Date();
     const cfg = loadSrConfig();
     // 新一次检索 = 全新的一批行：旧的选中集与上一次清除结论都作废（否则「已选 3 项」
     // 会指向一批已经不在列表里的 id，下次「清除选定」发出去的就是死 id）。
@@ -90,6 +99,20 @@ export const useScenesStore = defineStore('scenes', () => {
     } finally {
       loading.value = false;
     }
+  }
+
+  /** 进入场景库页面时调它：**只在本次会话还没检索过时**发一次检索。
+   *
+   *  以前是每次进入都 `list()`。那条路会把上一轮「清除缓存」的结果当场抹掉 —— 摘掉的
+   *  行全回来、结果汇总行消失，用户看到的就是「清除没生效」（清除删的是盘阵上的文件，
+   *  那一刻其实没有任何东西被撤销）。现在列表留在页面上，直到用户**自己**按「检索」/
+   *  「重置」：与清除那套「摘掉的行要回来得重新检索」（clearSummaryText）同一个口径。
+   *
+   *  代价是列表可以是旧的（新落盘的场景、别处刚烤出来的预览都不反映），所以状态 chip
+   *  旁边带一行「上次检索 HH:MM」，让用户看得出这份数据是什么时候的。单个 `.jpg`/`.tif`
+   *  的标签由取图那一侧就地翻牌（lib/api.ts 的 fetchSceneJpg 写回本行），不靠重检索。 */
+  function ensureSearched(): void {
+    if (!searched.value) void list();
   }
 
   function resetFilters(): void {
@@ -191,7 +214,15 @@ export const useScenesStore = defineStore('scenes', () => {
   /** 打开场景：确保 JPG 已生成 → 静态 jpgUrl 读字节 → viewer.openSceneJpg。
       失败一律写本 store 的 error —— 本页（ScenesPage）只渲染 scenes.error，而
       viewer 的错误条挂在 /viewer、6 秒后自己消失；写错地方就等于按钮点了没反应。
-      JPG 读不到 / 字节不是图（openSceneJpg 解码失败会抛，见 viewer.ts）都归这里。 */
+      JPG 读不到 / 字节不是图（openSceneJpg 解码失败会抛，见 viewer.ts）都归这里。
+
+      其中「盘阵上已经没有这个文件」（404）多一步：把这一行标成 `purged`，
+      页面上那格的「打开」换成不可点的「已自动清除」（见 catch 里的注释）。
+      这一格还有**不用点就灰**的另一半：老景又没预览的行渲染时就直接按已清除处理
+      （lib/scene.ts 的 presumedPurged，那一类轮不到这里）。
+
+      反过来，**打开成功**也是一条实证：那一景还在盘上（而且这趟之后盘上有了它当前
+      档位的预览）。所以成功路径顺带把列表里同一景的那一行翻回来，见 try 末尾。 */
   async function open(row: SceneRow, resolved?: SceneResolveResult['resolved']): Promise<void> {
     const viewer = useViewerStore();
     const cfg = loadSrConfig();
@@ -226,9 +257,33 @@ export const useScenesStore = defineStore('scenes', () => {
         // 显示的掩码路径与查看器那条入口不一致（两边最终都以后端回的为准）。
         serverMaskPath: resolved ? resolved.mask_path : null,
       }, blob);
+      // 打开成功 = 这一景**确实还在盘上**的实证，而且这一趟之后盘上必有它当前档位的
+      // 预览（fetchSceneJpg 的保证）。若当前列表里也有它，就地翻回来 —— 那一格的灰块
+      // 「已自动清除」是按**推定**画的，别让列表继续印着一个刚落空的结论。
+      // 手工入口（路径栏 / 按名打开）拿到的是另一份行对象，只能按场景目录对回去。
+      const listed = rows.value.find((r) => r !== row && !!r.lq_path
+        && r.lq_path === row.lq_path);
+      if (listed) {
+        listed.hasPreview = true;
+        listed.previewDiv = viewer.previewDiv;
+        listed.purged = false;
+      }
     } catch (e) {
-      error.value = '打开「' + row.name + '」失败：'
-        + (e instanceof Error ? e.message : String(e));
+      if (isSceneGone(e)) {
+        // 盘阵上已经没有这个文件了（打开路径撞的 404，判据见 api.ts 的 isSceneGone）。
+        // 列表是「上次检索」那一刻的快照，盘阵上的数据却会被自动清理 —— 于是行还在、
+        // 文件没了。撞一次就记在这行上，那一格的「打开」就此作废（灰色「已自动清除」，
+        // 见 SceneRow.purged）：再点一次还是同一个 404，留着一颗能点的按钮只会让人
+        // 反复撞墙。**只陈述「取不到」，不写死原因** —— 自动清理是最像的那个（用户的
+        // 口径：产出后几天），但平台没在盘上看到过清理这件事。
+        row.purged = true;
+        error.value = '打开「' + row.name + '」失败：盘阵上已没有这个文件（HTTP 404）。'
+          + '这一行的「打开」已改成「已自动清除」；'
+          + '列表可能是清理之前的旧结果，按「检索」刷新即知它还在不在。';
+      } else {
+        error.value = '打开「' + row.name + '」失败：'
+          + (e instanceof Error ? e.message : String(e));
+      }
     } finally {
       phase.value = '';
       openingId.value = null;
@@ -287,9 +342,10 @@ export const useScenesStore = defineStore('scenes', () => {
 
   return {
     rows, source, scanned, count, loading, openingId, phase, error,
+    searched, searchedAt,
     query, satellite, sensor, dateFrom, dateTo,
     satellites, sensors, dates,
-    list, resetFilters, open, resolvePath, openByName,
+    list, ensureSearched, resetFilters, open, resolvePath, openByName,
     // 清除预览缓存（SceneCacheBar 用）
     selected, clearing, clearResult, clearRemoved, clearError, clearSummary,
     selectableRows, selectedCount, allSelected,
