@@ -21,7 +21,7 @@ named either `<dirname>.<ext>` (the SC step's input) or `PAN.<ext>` (the RC
 step's). Everything else in a scene directory is something else's input or
 output: SR products and the input backup (_sr/_NOSR/_ori), the cloud map
 (_cloud), thumbnails (_thumb), the ROI mask (_mask — it is an *input* to
-"submit SR", not a scene), the backend's own `<stem>.preview.jpg` cache, and the
+"submit SR", not a scene), the backend's own `<stem>_preview.jpg` cache, and the
 dozens of debug renders under `Debug/`. See is_scene_file.
 
 Dragging a jpg in is a separate, equally closed rule (2026-09-21): its name must cut
@@ -78,7 +78,7 @@ def is_scene_file(path) -> bool:
 
     这样一次挡住全部「别的东西的输入/产物」：SR 产物与输入备份（_sr/_NOSR/_ori）、
     云量图（_cloud）、缩略图（_thumb）、提交 SR 的输入掩膜（_mask）、后端自己烘焙的
-    `<stem>.preview.jpg` 缓存，以及 Debug/ 下十几张调试图。此前用的是黑名单，每冒出
+    `<stem>_preview.jpg` 缓存，以及 Debug/ 下十几张调试图。此前用的是黑名单，每冒出
     一类新派生件就得补一条 —— 2026-09-15 真机接上盘阵时，18 行里有 16 行是这种脏数据。
     """
     p = Path(path)

@@ -70,21 +70,25 @@ describe('预览档位（全局下采样）', () => {
   const CFG = { apiBase: '', staticBase: 'http://static:9000' };
 
   it('静态 URL 只对**烤出来的**预览拼 ?div=（源本身就是 JPG 的行不拼）', () => {
-    expect(sceneImageUrl(CFG, '/disk-array/a/b.preview.jpg', 8))
-      .toBe('http://static:9000/disk-array/a/b.preview.jpg?div=8');
+    expect(sceneImageUrl(CFG, '/disk-array/a/b_preview.jpg', 8))
+      .toBe('http://static:9000/disk-array/a/b_preview.jpg?div=8');
     // 源即显示件：档位对它无意义，拼了反而打红逐字断言的 e2e
     expect(sceneImageUrl(CFG, '/disk-array/a/b.jpg', 8))
       .toBe('http://static:9000/disk-array/a/b.jpg');
-    expect(sceneImageUrl(CFG, '/disk-array/a/b.preview.jpg'))
-      .toBe('http://static:9000/disk-array/a/b.preview.jpg');
+    expect(sceneImageUrl(CFG, '/disk-array/a/b_preview.jpg'))
+      .toBe('http://static:9000/disk-array/a/b_preview.jpg');
     expect(sceneImageUrl(CFG, null, 8)).toBe('');
   });
 
   it('isBakedPreviewUrl 认的是产物名，不是「后缀是 jpg」', () => {
-    expect(isBakedPreviewUrl('/disk-array/a/b.preview.jpg')).toBe(true);
-    expect(isBakedPreviewUrl('/disk-array/a/b.preview.jpeg')).toBe(true);
+    expect(isBakedPreviewUrl('/disk-array/a/b_preview.jpg')).toBe(true);
+    expect(isBakedPreviewUrl('/disk-array/a/b_preview.jpeg')).toBe(true);
     expect(isBakedPreviewUrl('/disk-array/a/b.jpg')).toBe(false);
-    expect(isBakedPreviewUrl('/disk-array/a/b_preview.jpg')).toBe(false);
+    // 改名（2026-09-22）前的点号那份：两代都认 —— 静态 URL 是后端给的，
+    // 两边版本错开一档时必须认得出，认不出换档位后最长一小时看到旧图
+    expect(isBakedPreviewUrl('/disk-array/a/b.preview.jpg')).toBe(true);
+    expect(isBakedPreviewUrl('/disk-array/a/bjpeg.jpg')).toBe(false);
+    expect(isBakedPreviewUrl('/disk-array/a/preview.jpg')).toBe(false);
     expect(isBakedPreviewUrl(null)).toBe(false);
   });
 
@@ -98,15 +102,15 @@ describe('预览档位（全局下采样）', () => {
     // 库外（无静态 URL）→ 打 /preview，会烤
     expect(previewNeedsBake(row({ jpgUrl: null }), 4)).toBe(true);
     // 缓存不在 → 烤
-    expect(previewNeedsBake(row({ jpgUrl: '/d/a.preview.jpg',
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a_preview.jpg',
       hasPreview: false }), 4)).toBe(true);
     // 在，但档位不符（含旧格式戳 null）→ 烤
-    expect(previewNeedsBake(row({ jpgUrl: '/d/a.preview.jpg', hasPreview: true,
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a_preview.jpg', hasPreview: true,
       previewDiv: 8 }), 4)).toBe(true);
-    expect(previewNeedsBake(row({ jpgUrl: '/d/a.preview.jpg', hasPreview: true,
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a_preview.jpg', hasPreview: true,
       previewDiv: null }), 4)).toBe(true);
     // 在且档位对得上 → 不烤
-    expect(previewNeedsBake(row({ jpgUrl: '/d/a.preview.jpg', hasPreview: true,
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a_preview.jpg', hasPreview: true,
       previewDiv: 4 }), 4)).toBe(false);
     // 源即显示件 → 永不烤
     expect(previewNeedsBake(row({ jpgUrl: '/d/a.jpg', hasPreview: true,
@@ -149,7 +153,7 @@ describe('预览档位（全局下采样）', () => {
 describe('显示源比较规则：谁清晰用谁（rasterPreviewWins）', () => {
   const rp = (over: Partial<RasterPreview>): RasterPreview => ({
     id: 'raster-id', name: 'PAN.tif', rel: 'a/PAN.tif',
-    jpgUrl: '/disk-array/a/PAN.preview.jpg',
+    jpgUrl: '/disk-array/a/PAN_preview.jpg',
     rasterW: 24000, rasterH: 24000, jpgW: 8192, jpgH: 8192,
     hasPreview: false, previewDiv: null, ...over,
   });
@@ -225,10 +229,10 @@ describe('显示源比较规则：谁清晰用谁（rasterPreviewWins）', () =>
     expect(previewNeedsBake(row({ jpgUrl: null }), 4)).toBe(true);
   });
 
-  it('sceneImageUrl 对 rasterPreview.jpgUrl 自动附 ?div=（它就是 .preview.jpg）', () => {
+  it('sceneImageUrl 对 rasterPreview.jpgUrl 自动附 ?div=（它就是 _preview.jpg）', () => {
     const CFG = { apiBase: '', staticBase: 'http://static:9000' };
     expect(sceneImageUrl(CFG, rp({}).jpgUrl, 8))
-      .toBe('http://static:9000/disk-array/a/PAN.preview.jpg?div=8');
+      .toBe('http://static:9000/disk-array/a/PAN_preview.jpg?div=8');
   });
 });
 
@@ -323,8 +327,8 @@ describe('列表 URL 样例', () => {
     const cfg = { apiBase: '', staticBase: '' };
     expect(scenesListUrl(cfg, { satellite: 'GF07A03', limit: 20 }))
       .toBe('/api/scenes?satellite=GF07A03&limit=20');
-    expect(sceneImageUrl(cfg, '/disk-array/GF07A03_PMS01_20260722125045.preview.jpg'))
-      .toBe('/disk-array/GF07A03_PMS01_20260722125045.preview.jpg');
+    expect(sceneImageUrl(cfg, '/disk-array/GF07A03_PMS01_20260722125045_preview.jpg'))
+      .toBe('/disk-array/GF07A03_PMS01_20260722125045_preview.jpg');
   });
 });
 

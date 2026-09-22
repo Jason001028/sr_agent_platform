@@ -488,7 +488,7 @@ class TestBareTifPath(ResolveBase):
         r = c.get(f"/api/scenes/{row['id']}/preview")
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.headers["content-type"], "image/jpeg")
-        jpg = p.with_suffix(".preview.jpg")
+        jpg = p.with_name(p.stem + "_preview.jpg")
         self.assertTrue(jpg.is_file(), "预览要落在源文件同目录")
         with Image.open(jpg) as im:
             self.assertEqual(im.size, (32, 16))          # 64×32 → 各 1/2
@@ -1515,7 +1515,7 @@ class TestResolveRasterPreview(ResolveBase):
 
         self.assertTrue(row["hasPreview"], "还是那句「jpg 就是显示源」")
         self.assertTrue(row["jpgUrl"].endswith(f"{SCENE_NAME}.jpg"))
-        self.assertFalse(row["jpgUrl"].endswith(".preview.jpg"))
+        self.assertFalse(row["jpgUrl"].endswith("_preview.jpg"))
         self.assertIsNone(row["previewDiv"])
         # 栅格那一路是**另**一个 id（指向 .tif），不是这一行的 id
         self.assertNotEqual(row["rasterPreview"]["id"], row["id"])
@@ -1536,7 +1536,7 @@ class TestResolveRasterPreview(ResolveBase):
         row = self._library_row(SCENE_NAME, ".tif")
         self.assertIsNone(row["rasterPreview"])
         # 栅格行的 jpgUrl 指的是烤出来的预览（与上面 jpg 行正好相反）
-        self.assertTrue(row["jpgUrl"].endswith(f"{SCENE_NAME}.preview.jpg"))
+        self.assertTrue(row["jpgUrl"].endswith(f"{SCENE_NAME}_preview.jpg"))
 
     # ---- 拖拽入口 ---------------------------------------------------------
 
@@ -1677,8 +1677,8 @@ class TestResolveRasterPreview(ResolveBase):
     def test_preview_div_is_read_from_the_existing_bake(self):
         """盘上那份预览按哪一档烤的也要报出来 —— 前端据此判断要不要重烤。
 
-        「从栅格烤」的落点与栅格行**同一份** `<stem>.preview.jpg`（`with_suffix`
-        对 jpg 与 tif 是同一个文件名），所以这里烤过一次之后，jpg 行的
+        「从栅格烤」的落点与栅格行**同一份** `<stem>_preview.jpg`（名字只由源 stem
+        拼，对 jpg 与 tif 是同一个文件名），所以这里烤过一次之后，jpg 行的
         `rasterPreview.hasPreview/previewDiv` 就该跟着变 —— 两行共用一个缓存，
         不会各烤一份。
         """
@@ -1696,7 +1696,7 @@ class TestResolveRasterPreview(ResolveBase):
             self.assertEqual(row["rasterPreview"]["previewDiv"], div,
                              "档位从落点那份 jpg 的注释里读回来")
             # 落点与栅格行同一份（`with_suffix` 对 jpg 与 tif 是同一个文件名）
-            self.assertTrue((d / f"{SCENE_NAME}.preview.jpg").is_file())
+            self.assertTrue((d / f"{SCENE_NAME}_preview.jpg").is_file())
 
 
 class TestManualSceneId(ResolveBase):
@@ -1708,7 +1708,7 @@ class TestManualSceneId(ResolveBase):
         r = c.get(f"/api/scenes/{row['id']}/preview")
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.headers["content-type"], "image/jpeg")
-        self.assertTrue((d / f"{SCENE_NAME}.preview.jpg").is_file())
+        self.assertTrue((d / f"{SCENE_NAME}_preview.jpg").is_file())
 
     def test_abs_id_outside_whitelist_404(self):
         # 手工 id 也不许越白名单（解码后仍过 ensure_allowed）
@@ -1729,7 +1729,7 @@ class TestManualSceneId(ResolveBase):
                f"{SCENE_NAME}/{SCENE_NAME}.tif")
         r = c.get(f"/api/scenes/{scene_id(rel)}/preview")
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertTrue((d / f"{SCENE_NAME}.preview.jpg").is_file())
+        self.assertTrue((d / f"{SCENE_NAME}_preview.jpg").is_file())
         bad = c.get(f"/api/scenes/{scene_id('no/such.tif')}/preview")
         self.assertEqual(bad.status_code, 404)
 

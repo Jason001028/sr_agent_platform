@@ -121,7 +121,7 @@ class TestScenesDisk(SceneListMixin):
             "GF07A03_PMS01_20260722125045/GF07A03_PMS01_20260722125045.tif")
         self.assertEqual(
             row["jpgUrl"], "/disk-array/GF07A03_PMS01_20260722125045/"
-                           "GF07A03_PMS01_20260722125045.preview.jpg")
+                           "GF07A03_PMS01_20260722125045_preview.jpg")
         self.assertFalse(row["hasPreview"])
         # 上下文侧舱任务关联：lq_path = scene 文件父目录（= run_sr 目录语义）
         self.assertEqual(row["lq_path"], Path(os.path.realpath(
@@ -186,7 +186,7 @@ class TestScenesImageSource(SceneListMixin):
         self.assertEqual((row["W"], row["H"]), (40, 30))       # Pillow 头
         self.assertTrue(row["hasPreview"])                     # 无需烘焙
         self.assertTrue(row["jpgUrl"].endswith(".jpg"))
-        self.assertNotIn(".preview.jpg", row["jpgUrl"])
+        self.assertNotIn("_preview.jpg", row["jpgUrl"])
         self.assertEqual(
             row["rel"],
             "GF07A03_PMS01_20260722125045/GF07A03_PMS01_20260722125045.jpg")
@@ -200,16 +200,16 @@ class TestScenesImageSource(SceneListMixin):
         r = c.get(f"/api/scenes/{row['id']}/preview")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.content, p.read_bytes())
-        # 不给源是 JPG 的场景落 .preview.jpg 缓存
+        # 不给源是 JPG 的场景落 _preview.jpg 缓存
         self.assertFalse(Path(self._root.name, "KF02B04_PMS05_20260810120000",
-                              "KF02B04_PMS05_20260810120000.preview.jpg").is_file())
+                              "KF02B04_PMS05_20260810120000_preview.jpg").is_file())
 
     def test_baked_preview_cache_is_not_listed(self):
         make_scene(self._root.name, "GF07A03_PMS01_20260722125045.tif")
         c = self.client(self._root.name)
         scene = c.get("/api/scenes").json()["results"][0]
         self.assertEqual(c.get(f"/api/scenes/{scene['id']}/preview").status_code,
-                         200)                       # 落盘 <stem>.preview.jpg
+                         200)                       # 落盘 <stem>_preview.jpg
         body = c.get("/api/scenes").json()
         self.assertEqual(body["scanned"], 1)         # 缓存不新增行
         self.assertEqual(body["results"][0]["name"],
@@ -237,14 +237,14 @@ class TestPreview(SceneListMixin):
         self.assertEqual(r.headers["content-type"], "image/jpeg")
         self.assertTrue(r.content.startswith(b"\xff\xd8"))
         jpg = Path(self._root.name, "GF07A03_PMS01_20260722125045",
-                   "GF07A03_PMS01_20260722125045.preview.jpg")
+                   "GF07A03_PMS01_20260722125045_preview.jpg")
         self.assertTrue(jpg.is_file())
 
     def test_second_call_is_cached(self):
         c = self._disk_client_with_scene()
         scene = c.get("/api/scenes").json()["results"][0]
         jpg = Path(self._root.name, "GF07A03_PMS01_20260722125045",
-                   "GF07A03_PMS01_20260722125045.preview.jpg")
+                   "GF07A03_PMS01_20260722125045_preview.jpg")
         self.assertEqual(c.get(f"/api/scenes/{scene['id']}/preview").status_code,
                          200)
         mtime1 = jpg.stat().st_mtime
@@ -253,6 +253,21 @@ class TestPreview(SceneListMixin):
                          200)
         self.assertEqual(jpg.stat().st_mtime, mtime1)
 
+    def test_legacy_dot_preview_is_swept_on_open(self):
+        """改名（2026-09-22）前烤的那份点号文件已无任何读者：打开这一景时顺手删掉，
+        免得场景目录里躺着两个几乎同名的文件。"""
+        c = self._disk_client_with_scene()
+        d = Path(self._root.name, "GF07A03_PMS01_20260722125045")
+        legacy = d / "GF07A03_PMS01_20260722125045.preview.jpg"
+        legacy.write_bytes(b"old-dot-name-bake")
+        scene = c.get("/api/scenes").json()["results"][0]
+
+        r = c.get(f"/api/scenes/{scene['id']}/preview")
+
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(legacy.exists(), "老点号那份被清掉")
+        self.assertTrue((d / "GF07A03_PMS01_20260722125045_preview.jpg").is_file())
+
     def test_has_preview_flips_after_generation(self):
         c = self._disk_client_with_scene()
         scene = c.get("/api/scenes").json()["results"][0]
@@ -260,7 +275,7 @@ class TestPreview(SceneListMixin):
         c.get(f"/api/scenes/{scene['id']}/preview")
         row = c.get("/api/scenes").json()["results"][0]
         self.assertTrue(row["hasPreview"])
-        self.assertTrue(row["jpgUrl"].endswith(".preview.jpg"))
+        self.assertTrue(row["jpgUrl"].endswith("_preview.jpg"))
 
     def test_traversal_id_rejected(self):
         c = self._disk_client_with_scene()
@@ -307,7 +322,7 @@ class TestPreviewDiv(SceneListMixin):
     def setUp(self):
         super().setUp()
         make_scene(self._root.name, self.NAME + ".tif", 320, 640)
-        self.jpg = Path(self._root.name, self.NAME, self.NAME + ".preview.jpg")
+        self.jpg = Path(self._root.name, self.NAME, self.NAME + "_preview.jpg")
 
     def _client(self):
         return self.client(self._root.name)

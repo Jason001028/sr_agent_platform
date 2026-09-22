@@ -85,7 +85,7 @@ class TestSiblingsOk(SiblingsBase):
         self.assertTrue(got_nosr["exists"])
 
         # 每一类都有自己的 id → 各拿自己的 id 调 /preview 就能看图，
-        # 三类各有自己的 <stem>.preview.jpg 落点，天然不撞名。
+        # 三类各有自己的 <stem>_preview.jpg 落点，天然不撞名。
         ids = [i["id"] for i in body["items"]]
         self.assertEqual(len(set(ids)), 3, "三个 id 必须互不相同")
         for i in body["items"]:
@@ -241,11 +241,11 @@ class TestSiblingsIsReadOnly(SiblingsBase):
         c = self.client()
         row = self.resolve(c, d)
         self.q(c, row["id"], suffix=SUFFIX)
-        self.assertFalse((d / f"{SCENE_NAME}.preview.jpg").exists())
+        self.assertFalse((d / f"{SCENE_NAME}_preview.jpg").exists())
 
         pv = c.get(f"/api/scenes/{row['id']}/preview")
         self.assertEqual(pv.status_code, 200, pv.text)
-        self.assertTrue((d / f"{SCENE_NAME}.preview.jpg").is_file())
+        self.assertTrue((d / f"{SCENE_NAME}_preview.jpg").is_file())
 
 
 class TestSiblingsNeverListsDirectories(SiblingsBase):

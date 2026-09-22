@@ -93,7 +93,7 @@ export interface SceneListResponse {
 /** 该行是不是「显示就绪图」源（盘阵 .jpg/.jpeg，最小原型 §4.7）。
  *
  * 这类行的 jpgUrl 指向源文件本身、hasPreview 恒 true —— 没有「生成预览」这一步，
- * 后端也确实不为它们落 <basename>.preview.jpg 缓存。仅用于列表文案（「已生成」
+ * 后端也确实不为它们落 `<basename>_preview.jpg` 缓存。仅用于列表文案（「已生成」
  * 对一张本来就是 JPG 的场景是误导）；**是否列出**由后端
  * scene_search.is_scene_file 决定，前端不参与筛选。
  */
@@ -177,7 +177,7 @@ export function scenePreviewUrl(cfg: SrConfig, id: string,
  *
  * 纯只读：回答「输入影像 / 本次产物 / 上一次产物 各叫什么、在不在、各自的 id 是什么」。
  * 每类拿它自己的 `id` 调 `scenePreviewUrl` 就能看图 —— **三类各有自己的
- * `<stem>.preview.jpg` 落点**，所以这条端点不新增任何烘焙入口。
+ * `<stem>_preview.jpg` 落点**，所以这条端点不新增任何烘焙入口。
  * `suffix` 只在用户手动断言时给；不给由后端按「最近一条 COMPLETED 任务 → 配置缺省」
  * 的顺序定，并用响应里的 `suffixFrom` 回报用的是哪一个。 */
 export function sceneSiblingsUrl(cfg: SrConfig, id: string, suffix?: string): string {
@@ -200,10 +200,14 @@ export function dropPreviewUrl(cfg: SrConfig, id: string,
 /** 这条 jpgUrl 指的是不是**平台烤出来的预览**（而不是源本身就是显示件）。
  *
  * 决定两件事，都是必须的：静态 URL 要不要拼 `?div=`；换档位后要不要重烤。
- * `.preview.jpg` 是 `paths.preview_jpg_path` 的产物名，盘阵里显示就绪的源
- * `.jpg` 不含它 —— 档位对后者毫无意义（后端也确实不为它们烤）。 */
+ * `<stem>_preview.jpg` 是 `paths.preview_jpg_name` 的产物名，盘阵里显示就绪的源
+ * `.jpg` 不含它 —— 档位对后者毫无意义（后端也确实不为它们烤）。
+ *
+ * 点号那代（`<stem>.preview.jpg`，2026-09-22 改名前的产物名）一并认下：名字虽换了，
+ * 「这是平台烤的」这条语义两代相同，而静态 URL 是后端给的，两边版本错开一档时
+ * 认得出比认不出安全（认不出就会把 `?div=` 吞掉，换档位后最长一小时看到旧图）。 */
 export function isBakedPreviewUrl(jpgUrl: string | null): boolean {
-  return !!jpgUrl && /\.preview\.jpe?g$/i.test(jpgUrl);
+  return !!jpgUrl && /[_\.]preview\.jpe?g$/i.test(jpgUrl);
 }
 
 /** 已生成 JPG 的静态 URL（cfg.staticBase 前缀 + 后端相对 /disk-array/…）。
@@ -282,8 +286,8 @@ export function previewCacheKey(
  * （`PAN.tif` / `<编号>.tif`）。服务端从那张栅格烤出来的图**在档位够浅时**比这张 jpg
  * 更清晰，那就该用服务端那份；否则保持显示这张 jpg 本身（它就是为显示生成的）。
  *
- * 落点与栅格行**同一份** `<stem>.preview.jpg`（`with_suffix` 对 jpg 与 tif 是同一个
- * 文件名），所以「打开这条 jpg 行」与「打开同目录的栅格行」命中同一份缓存。
+ * 落点与栅格行**同一份**（`<源 stem>_preview.jpg`，名字只由源 stem 拼，对 jpg 与 tif
+ * 是同一个文件名），所以「打开这条 jpg 行」与「打开同目录的栅格行」命中同一份缓存。
  *
  * 为什么要比较而不是一律走服务端：24000 的源配 8192 的显示件时，÷2 烤出 12000（赢）、
  * ÷4 烤出 6000（**输**）、÷8 烤出 3000（输）—— 一律走服务端会在默认档位下把图换成
@@ -305,7 +309,7 @@ export interface RasterPreview {
   /** **盘阵那张 jpg** 的尺寸（不是用户本地拖进来那份的）——见 rasterPreviewWins。 */
   jpgW: number;
   jpgH: number;
-  /** 栅格那份 `<stem>.preview.jpg` 在不在盘上。 */
+  /** 栅格那份 `<stem>_preview.jpg` 在不在盘上。 */
   hasPreview: boolean;
   /** 栅格那份预览是按哪一档烤的；null = 没有 / 旧格式戳 / 读不出。 */
   previewDiv: number | null;

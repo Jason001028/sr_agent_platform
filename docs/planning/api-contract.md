@@ -9,7 +9,7 @@
 > **挂起项五（2026-09-21）**：① §3.5 `POST /api/scenes/resolve` 的 `{name}` 分支**也认中间产物**（`<目录名>_<suffix>.jpg` / `<目录名>_<suffix>_NOSR.jpg`）——新增 jpg 专属的第二阶段候选（去尾段反推，仅前一阶段全落空时展开），`resolved` 新增 `kind` / `suffix`，且 `kind != 'input'` 时 `row.lq_path = null`、`sr_capable = false`、`mask_path = null`（`row` 同时改为描述**该环节自己**那份栅格）；② `suffix` 的 400 文案改为实话（可拖的不止显示件）；③ 新增 `backend/pathguard.scene_name_layers` 的段数下界修正（六段名走进 `seps[_SCENE_IDX]` 越界 → 本该 400 的输入变 500，是这条新候选暴露出的既有缺陷）。**`/siblings` 一个字段都没加** —— 计划里提过给每项补 `suffix`，落地时发现响应顶层本来就有 `suffix` / `suffixFrom`，前端 `openSceneSibling` 用的就是它，再加一份是重复。
 > **挂起项六（2026-09-21 第二轮，真机反馈）**：§3.5 `{name}` 分支**再认一种名字** —— 平台自己烤的那份预览 `<栅格 stem>_preview.jpg`（拖入链写进场景目录的，`preview-drop` 的产物）。`preview` 一直在 `scene_search._NON_STAGE_TAILS` 里，于是「平台写下的文件、平台自己不认」，真机上拖它回来得到的是一屏「目录不存在 + 两条自己拼出来的假路径」（`…_preview/…_preview`）。现在 `preview` 是那份名单里**唯一可以剥**的尾巴（`scene_search.strip_preview_tail`，`de_suffixed_stems` 与 `stage_of_jpg` 各剥一次），剥一层为止：`<目录名>_preview` → 本体、`<目录名>_sr_preview` → 那份产物；剥完仍在名单里（`<目录名>_cloud_preview`）照旧 404。另四个尾段（cloud/thumb/mask/ori）剥不得 —— 它们剥掉会正好落到真实场景目录上。前端只改一句失败弹窗的文案。
 > **挂起项七（2026-09-21 第三轮，真机反馈）**：§3.5 `{name}` 分支新增**可选字段 `anchor`** —— 拖拽入口把「用户当前打开着的场景目录」一并发过来（前端 `sceneAnchors`：最近显示过的那一景 → A 格 → B 格，上限 3 条），后端按序在这些目录里认这份 jpg（判据与 `scan` 段完全相同，只是不过 `_fingerprint_mismatch`，真门仍是「这一环节自己的栅格躺在同级」）。**只给名字里没有场景身份的那一类用**：RC 场景的产物叫 `PAN_<suffix>.jpg`（产物名按输入影像名拼，RC 的输入是 `PAN.tif`），既无卫星段也无成像时刻，反推那一步就 400 —— 用户真机上拖它进来正是这个现象。名字自己能反推时 anchor 连一次 stat 都不花；坏值一律跳过并把原因追加进 400 的 `detail`（只有白名单是硬的），不新增错误码、不改 `/siblings`。**这不是「平台猜目录」**：目录来自用户自己打开的上下文，不是从文件名推的。另有前端一句弹窗文案同步改写（原文说「能关联的 jpg 只有名字与场景目录名一致的那份」，对 RC 产物是假话）。
-> **挂起项九（2026-09-21 第五轮，真机反馈）**：急烤产物那份预览写完之后**再落一份下划线同名件**（`<产物 stem>_preview.jpg`，`app.py::_mirror_preview_name`，与缓存那份同字节）—— 用户 `ls` 场景目录时，「`preview` 前面是 `_`」这一个规矩要覆盖全部三条烘焙链（急烤 / 拖入链 / 未超分）。**点号那份一个字不动**（`hasPreview`/`previewDiv`/静态 `jpgUrl`/前端 `isBakedPreviewUrl` 全锚在它上面），所以这是「加一份」不是「改名」。详见 §4.5 与 [preview-bake-pipeline §4.9/§4.10](../knowledge/preview-bake-pipeline.md)。
+> **挂起项九（2026-09-21 第五轮 → 2026-09-22 收口，真机反馈）**：预览文件名**全平台统一成一条规则** `<源栅格 stem>_preview.jpg`（`paths.preview_jpg_name`），三条烘焙链（急烤 / 惰性打开 / 拖入）落同一个名字，差别只剩目录。09-21 那版是「点号那份不动、再 `copyfile` 一份下划线同名件」（`app.py::_mirror_preview_name`）—— 那份镜像同日被删：它把「一份栅格两个文件」从缓存层搬到了每一份产物上，用户要的是**只有一个名字**。读判据同步搬过去（`hasPreview`/`previewDiv`/静态 `jpgUrl` 从同一份落点算；前端 `isBakedPreviewUrl` 认结尾 `[_\.]preview\.jpe?g`），旧的点号文件由 `_sweep_legacy_preview` 在每条链处理到那份栅格时顺手删掉，没有全盘清扫（平台不列目录）。详见 §4.5 与 [preview-bake-pipeline §4.8/§4.9/§4.10](../knowledge/preview-bake-pipeline.md)。
 > **挂起项八（2026-09-21 第四轮，真机口径）**：§4.5 的急烤队列**顺带**多烤一份未超分的预览 —— 同一轮 tick 在产物之后把 `<场景目录>/PAN_NOSR.tif` 按**全局档位**下采样成 `<场景目录>/PAN_NOSR_preview.jpg`（落点复用拖入链的 `<源 stem>_preview.jpg` 规则）。**不是新的烘焙入口、不动任何响应字段、不动产物的状态机**：源是固定名字，不判沙箱（那份栅格是盘阵上的既有文件），结局只写盘 + 一行 stdout（`[nosr-preview] task=<id> <状态>`）。名字按用户口径钉死；仓库 `SR_code/util.py::writeTiff` 推出来的 `<产物 stem>_NOSR.tif` 与它对不上，属**待核**（记在 current-question）。
 > **须说明的流程偏差**：上述改动**已与本文档同批落到代码**（不是"先评审后写码"）。理由是它同时修一个现存缺陷（两入口指纹不一致），拆开会让仓库停在一个已知会重复投作业的中间态；09-17、09-20 两批同理，前端要用的字段与端点不一起落地就没法验收（09-20 那批还带着 §4.5 那个后台循环，文档与循环必须同批，否则运维会照着一份没写急烤的契约去配 env）。请复核，通过后把状态改回「已定」。此前其余条款自 2026-09-02 起均未变（评审通过时的交付基线：后端 190 unittest + 前端 Vitest 114 + vue-tsc 零错误 + `.e2e/test-platform.js` 11 断言全绿）。
 > 目标读者：阶段5 实现会话（后端 FastAPI + 前端 Vue3）。范围：把既有后端（agent loop + 4 工具 + `sr_tasks` + slurm）暴露成网页可调 REST/SSE，交付 聊天 / 共享任务队列 / 查看器画完掩码提交 SR。
@@ -93,7 +93,7 @@
 > 它判 RC/SC，没有它的目录提交也跑不起来）；② 文件名 = `<目录名>.<ext>`（SC 步骤的输入）
 > 或 `PAN.<ext>`（RC 步骤的输入）。于是这些一律不再入列表：SR 产物与输入备份
 > （`_sr` / `_NOSR` / `_ori`）、云量图（`_cloud`）、缩略图（`_thumb`）、提交 SR 的输入掩膜
-> （`_mask`）、后端自己烘焙的 `<basename>.preview.jpg` 缓存、`Debug/` 下的调试图。
+> （`_mask`）、后端自己烘焙的 `<basename>_preview.jpg` 缓存、`Debug/` 下的调试图。
 > 旧规则每冒出一类派生件就得补一条：真机接上盘阵后 18 行里 16 行是脏数据。
 > **代价**：没有 `<目录名>_meta.xml` 的目录整个不显示。
 >
@@ -298,7 +298,7 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
   JPEG 字节）、`row.W/H` 由 `preview_jpg.scene_dims` 回填。
   **`row.hasPreview` 一律填缓存到底在不在的真值**（库外没有静态 URL，但前端要靠它判断
   「这次会不会触发首次烘焙」并提示用户等待），`row.lq_path` 与 `resolved.sr_capable` 同源同真假。
-  **`row.previewDiv`**（2026-09-19）填盘上那份 `<stem>.preview.jpg` **是在哪一档烤的**，
+  **`row.previewDiv`**（2026-09-19）填盘上那份 `<stem>_preview.jpg` **是在哪一档烤的**，
   读不出戳 → `null` —— 前端拿它 + 全局档位一起判「要不要重烤」，只看 `hasPreview` 会在
   改档位后端着旧档位那张图上桌（见 3.6）。
   **`row.rasterPreview`（2026-09-20 增）**：源是显示件 jpg、且同目录有位更清晰的栅格时，
@@ -381,7 +381,7 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
     恰好在 SR 真要跑的场景上恒 404（初版实现如此，真机表现为「极少出现盘阵小标」）。
     判据只有一条：jpg 名（去后缀）== 场景目录名。默认模板下候选目录名就是由这个名字拼出来
     的，所以这条通常直接成立 —— 它挡的是「换了 `SR_SCENE_PATH_TEMPLATE`、场景目录改了命名」
-    的部署；真正挡住派生件（`_cloud.jpg`、`.preview.jpg`）的是候选目录根本不存在。
+    的部署；真正挡住派生件（`_cloud.jpg`、`_preview.jpg`）的是候选目录根本不存在。
     也**不泛化成「后缀不同就放行」**：那会连 `SC.tiff` 与 `SC.tif` 一起放过。
     名字比的是**场景目录名**，不是栅格输入的 stem（见上一条）—— 目录由**名字**锁死，
     环节由 `stage_of_jpg` 判（见下）。
@@ -438,7 +438,8 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
 **两条端点同款的一处前置（2026-09-20）**：请求里的源是 `.jpg/.jpeg` 时，先
 `scene_search.sibling_raster_path(源)` 探一次同名栅格，命中就把源换成那份栅格再往下走。
 `/preview` 与 `/preview-drop` 各插三行、逻辑相同。**其余一切照旧**：落点规则不变
-（`.preview.jpg` 对 jpg 与对 tif 是同一个文件名，栅格行与 jpg 行因此**共用同一份落点**）、
+（`preview_jpg_name` 只由源 stem 拼，对 jpg 与 tif 是同一个文件名，栅格行与 jpg 行因此
+  **共用同一份落点**）、
 `?div=` 语义不变、`X-SR-Preview-Fallback` 兜底不变、也没有多出一次列举目录 ——
 探的是固定候选名（`.tif/.tiff/.img`，见 `_RASTER_EXT_ORDER`），逐个 `is_file()`。
 探不到栅格就**逐字节维持原行为**（回源字节）。也就是说：换不换只有后端知道，前端只管
@@ -493,7 +494,7 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
   `/preview` 回字节）天然不受影响，红的是**凡有静态 URL 的行**。
 - **不进库行的那部分语义照旧**：前端取这条用的是独立函数 `api.fetchDropSceneJpg`，
   **不改写** `row.hasPreview` / `row.jpgUrl` / `row.previewDiv` —— 那三个字段锚在**生产那份
-  `<stem>.preview.jpg`** 上，被这条链的产物置真之后，用户再从场景库打开同一场景就会跳过
+  `<stem>_preview.jpg`** 上，被这条链的产物置真之后，用户再从场景库打开同一场景就会跳过
   懒生成、直接打一个 404 的静态 URL。（有测试钉着这条。）
 - **URL 不可静态映射**：响应体本身就是那张 JPEG。nginx 对这条**不用改**：`location ~* /api/scenes/[^/]+/preview$`
   的 `$` 锚点本来就不匹配 `/preview-drop`，它落到外层 `location /api/` 正好拿到 `no-store`
@@ -598,7 +599,7 @@ body：
 
 - `kind ∈ {"input","product","nosr"}`，**顺序固定**（输入、本次产物、上一次产物）。
 - `id` 是**该图自己的场景 id**，可以直接拿去调 `GET /api/scenes/{id}/preview?div=N` ——
-  三类图各有自己的 `<stem>.preview.jpg` 落点，天然不撞名，所以**这个端点不新增任何烘焙入口**。
+  三类图各有自己的 `<源 stem>_preview.jpg` 落点（各由自己的源拼），天然不撞名，所以**这个端点不新增任何烘焙入口**。
   落在 `SR_SCENES_ROOT` 之下时 `id` 走库内编码（base64url 相对路径）、`rel` 有值；
   之外走手工行编码（`~` + base64url 绝对路径）、`rel` 为 `null`。
 - `exists: false` 的项**照样返回**（名字、id、`productCandidates` 都有）。**「找不到」本身就是
@@ -618,7 +619,7 @@ body：
   「全是合法字符、却拼到白名单外」。这一道不过 → **403**（detail 说清是哪个前缀）。
 - 场景不可访问（`PathDeniedError`）→ **404**，与 §3.5/§3.6 同款。
 - **回归钉子**：`.e2e/` 与 `backend/tests/test_scene_siblings.py` 跑完要断言目录里
-  **没多出** `.preview.jpg`、`stat` 次数没涨 —— 这个端点一个字都不许写盘。
+  **没多出** `_preview.jpg`、`stat` 次数没涨 —— 这个端点一个字都不许写盘。
 
 #### 3.8.1 前端怎么用它（2026-09-20 接上）
 
@@ -802,16 +803,17 @@ NULL ──claim──> running ──> done
 名字按用户当面口径**钉死**，不顺手把 `SR_code/util.py::writeTiff` 推出来的
 `<产物 stem>_NOSR.tif` 也试一遍（两者对不上，属待核，见
 [preview-bake-pipeline §4.11](../knowledge/preview-bake-pipeline.md)）。**没有任何响应字段
-为它变化**：`/siblings` 的「上一次产物」那一项找的仍是点号落点。
+为它变化**：`/siblings` 的「上一次产物」那一项找的仍是 `PAN_NOSR_preview.jpg`
+（2026-09-22 起与其余落点同一规则）。
 
-**烤完再落一份下划线同名件（2026-09-21 增，用户口径）**：产物那份预览写盘（或命中缓存）之后，
-把它 `copyfile` 成 `<产物 stem>_preview.jpg`（`app.py::_mirror_preview_name`）—— 与拖入链
-（§3.5 那条静默烤）和未超分那份同一个名字规矩，用户 `ls` 场景目录时不会一份点号一份下划线。
-**是「再落一份」而不是「改名」**：点号那份写着档位戳，`hasPreview`/`previewDiv`/静态 `jpgUrl`
-与前端 `isBakedPreviewUrl`（按结尾 `.preview.jpg` 认「烤出来的预览」，决定拼 `?div=` 与换档后
-重烤）都锚在它上面，改名等于服务端读不到自己刚烤的图。两条不变式：**不覆盖比缓存更新的同名件**
-（拖入链可能刚按别的档位烤过它），**失败只往 note 尾巴追加一句提示、不改行的结论**（它只是给
-人看的那一份）。缓存命中那一轮也补落一次，好让「只有点号那份」的老目录补齐。
+**预览文件名统一（2026-09-22，用户口径）**：三条烘焙链（惰性打开 / 急烤 / 拖入）落同一个名字
+`<源栅格 stem>_preview.jpg`（`paths.preview_jpg_name`），改名前的点号那份
+（`<stem>.preview.jpg`）不再由任何链产出。改名不是改个字符串：读判据跟着走才是同一件事 ——
+服务端的 `hasPreview`/`previewDiv`/静态 `jpgUrl` 都从同一份落点算（自动一致），前端
+`isBakedPreviewUrl` 认结尾 `[_\.]preview\.jpe?g`（点号那代一并认下：静态 URL 是后端给的，
+版本错开一档时认得出比认不出安全），决定拼不拼 `?div=` 与换档后要不要重烤。旧文件由
+`_sweep_legacy_preview` 在每条链处理到那份栅格时顺手删掉（烤之前一次、命中缓存一次），
+失败不报错；**没有全盘清扫**（平台不列目录），没被任何链碰过的目录里那份会留着。
 
 ### 4.6 显示源比较规则：谁清晰用谁（2026-09-20）
 
@@ -824,7 +826,7 @@ NULL ──claim──> running ──> done
 ```
 同目录存在同名 .tif/.tiff/.img
   且 round(max(rasterW, rasterH) / div) > max(jpgW, jpgH)
-      → 显示源改用服务端从栅格烤出来的那份（落点与栅格行同一份 <stem>.preview.jpg）
+      → 显示源改用服务端从栅格烤出来的那份（落点与栅格行同一份 `<stem>_preview.jpg`）
   否则 → 保持显示源 jpg（现状）
 不存在同名栅格 / 任一侧尺寸读不出 / div 不在 PREVIEW_DIVISORS 里
       → 保持显示源 jpg（保守）
@@ -848,8 +850,9 @@ NULL ──claim──> running ──> done
   里前缀一个栅格分支（判据与栅格行相同：`!rp.hasPreview || rp.previewDiv !== div`），
   于是 `ScenesPage.vue` 的按钮文案、`fetchSceneJpg` 的预判、`openScenePath` 三处自动同步。
 - **`?div=` 抖动**（明知故犯，§六.5）：栅格行与 jpg 行走的是**同一份落点**
-  （`.preview.jpg` 对两者是同一个文件名），所以两个档位的客户端会互相顶掉同一份文件 ——
-  这个病今天就在，工作流 B 只是把它拖进更多行。本轮在文档里点明，不装作没有。
+  （`preview_jpg_name` 只由源 stem 拼，对 jpg 与 tif 是同一个文件名），所以两个档位的客户端会
+  互相顶掉同一份文件 —— 这个病今天就在，工作流 B 只是把它拖进更多行。本轮在文档里点明，
+  不装作没有。
 
 ### 4.7 拖放门的模式差异（图像对比，2026-09-20）
 

@@ -218,15 +218,16 @@ needGeo → decodeGeoTiff：
 只读头不解像素）。`previewDiv` 为 `null`（旧格式戳）同样按「不符」处理，代价是一次惰性重烤。
 
 **别把「改写 row 字段」和「取这张图」混起来。** 拖入链用的是独立函数 `fetchDropSceneJpg`，
-**不许**改写 `row.hasPreview` / `row.jpgUrl` / `row.previewDiv` —— 那三个字段锚在**生产那份
-`<stem>.preview.jpg`** 上。被拖入那条链的产物置真之后，用户再从场景库打开同一场景就会跳过
+**不许**改写 `row.hasPreview` / `row.jpgUrl` / `row.previewDiv` —— 那三个字段锚在**平台自己烤的
+那份 `<stem>_preview.jpg`** 上。被拖入那条链的产物置真之后，用户再从场景库打开同一场景就会跳过
 懒生成、直接打一个 404 的静态 URL，图再也出不来。这条是硬约束，有测试钉着。
 
 **`?div=N` 是击穿 nginx `max-age=3600` 的唯一手段。** 改档位后 URL 不变、内容变了，
-查询串变了才能让浏览器重新取。但**只对平台自己烤的那份拼**（`.preview.jpg` 结尾）——
+查询串变了才能让浏览器重新取。但**只对平台自己烤的那份拼**（`[_\.]preview\.jpe?g` 结尾，见 `isBakedPreviewUrl`）——
 无条件拼会打红「源本身就是 JPG」那条行，而档位对显示件毫无意义。同理 `previewDiv` 对
 `.jpg/.jpeg` 源恒为 `null`，前端若把 `null` 一律当「档位不符」，每次打开都会白打一次 `/preview`。
-判据是 `isBakedPreviewUrl()`（`/\.preview\.jpe?g$/`）。
+判据是 `isBakedPreviewUrl()`（`/[_\.]preview\.jpe?g$/i`；点号那代一并认下，理由是静态 URL
+由后端给，两边版本错开一档时认得出比认不出安全）。
 
 **试过又退回来的方案：把 `/preview` 的响应体直接当 blob。** 一次下载、不补静态 URL，
 看着更省。实测被 `.e2e/test-scenes.js` 打红 —— 那条断言要求「静态读图走 nginx 的
@@ -244,7 +245,7 @@ needGeo → decodeGeoTiff：
 **注入回调必须 try/catch** —— 它在 `about:blank` 上也跑，opaque origin 下 `localStorage`
 抛 SecurityError，会撞上脚本尾部那条「无浏览器错误」断言。
 
-**换包须知**：所有现存 `<stem>.preview.jpg` 的戳是 `v2`，新代码认 `v3` → 逐个场景首次打开时
+**换包须知**：所有现存预览的戳是 `v2`，新代码认 `v3` → 逐个场景首次打开时
 惰性重烤一轮（把滑块停在 ÷2 也一样）；`frontend/dist` 与 `backend` **必须同包更新** ——
 端点从 `preview-tmp` 改名 `preview-drop`，只换一个会 404。
 
@@ -285,12 +286,13 @@ round(max(rasterW, rasterH) / div) > max(jpgW, jpgH)  → 显示源换成服务�
 **换不换在后端定，不在前端定。** `/preview` 与 `/preview-drop` 各插一次同名栅格探测
 （`sibling_raster_path`：固定候选名 `.tif/.tiff/.img` 逐个 `is_file()`，**不列举目录**），
 命中就把源换成栅格再往下走。前端只管按档位取图，两条入口换出来的字节因此完全一致。
-落点不需要变：`.preview.jpg` 对 `PAN.jpg` 与 `PAN.tif` 是同一个文件名，**两行共用同一份缓存**
+落点不需要变：文件名只由源 stem 拼（`preview_jpg_name`），对 `PAN.jpg` 与 `PAN.tif` 是同一个
+名字，**两行共用同一份缓存**
 （好处是不烤两次；代价见下）。
 
 **留给下一轮的病：同一份落点会被不同档位的客户端互相顶掉。** 这个病今天就有
 （两台机器的滑块停在不同档位就会互烤），工作流 B 只是把它拖进更多行。本轮不治理
-（不引入带档位的落点 `<stem>.preview.div2.jpg`），在文档里点明，不装作没有。
+（不引入带档位的落点 `<stem>_preview.div2.jpg`），在文档里点明，不装作没有。
 
 **e2e 夹具的坑：盘阵场景目录要拼满三层。** `tree()` 返回的是段级之下的两层，写夹具时
 少拼一层就会把 tif 与 `_meta.xml` 写进段级目录，反推看到的是一份「缺 `<目录名>_meta.xml`」
@@ -506,8 +508,9 @@ store 里那三道门是兜底（键盘快捷键、程序化调用），服务�
 lq_path，会把一张产物尺寸的掩码**静默写到本体的掩码文件上**。
 
 **(4) 拖 jpg 之后后台静默烤一份 `_preview.jpg`。** 不阻塞、不弹遮罩、不报进度，展示像素
-仍用用户拖进来那张（那张更清晰，不该被服务端缩图顶掉）。落点与缓存那份 `.preview.jpg`
-**是两套命名**，别混：见 [preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md) §4.10。
+仍用用户拖进来那张（那张更清晰，不该被服务端缩图顶掉）。落点与缓存那份**同一个名字**
+（2026-09-22 前是两套命名，已统一）：见
+[preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md) §4.10。
 
 ### 10.10 顶栏品牌区：平台名 + logo 预留区（2026-09-21 用户要求）
 
