@@ -9,7 +9,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  parseCompareMode, parseSplitRatio, dropSideAt,
+  parseCompareMode, parseSplitRatio, dropSideAt, placeInSplit,
   seedCompareList, addCompareEntry, removeCompareEntry, pruneCompareList,
   DEFAULT_SPLIT_RATIO,
 } from '../compare.js';
@@ -79,6 +79,54 @@ describe('dropSideAt（落点归哪一格）', () => {
     // click 模式同一条门：画布外也忽略
     expect(dropSideAt(99, 300, rect, 'click', splitX)).toBeNull();
     expect(dropSideAt(300, 651, rect, 'click', splitX)).toBeNull();
+  });
+});
+
+describe('placeInSplit（这一张进哪一格）', () => {
+  it('给了落点就进那一格，另一格不动', () => {
+    expect(placeInSplit(7, null, 9, 'B', 'A'))
+      .toEqual({ paneA: 7, paneB: 9, side: 'B', moved: true });
+    expect(placeInSplit(7, 8, 9, 'A', 'B'))
+      .toEqual({ paneA: 9, paneB: 8, side: 'A', moved: true });
+  });
+
+  it('没给落点（文件列表点击 / 场景入口）→ 进活动侧', () => {
+    expect(placeInSplit(7, 8, 9, null, 'B'))
+      .toEqual({ paneA: 7, paneB: 9, side: 'B', moved: true });
+    expect(placeInSplit(7, 8, 9, null, 'A'))
+      .toEqual({ paneA: 9, paneB: 8, side: 'A', moved: true });
+  });
+
+  it('两格都占着 + 另一格已经是同一张 → 反转：落点那半放它，另一格接住原来那张', () => {
+    expect(placeInSplit(7, 8, 7, 'B', 'A'))
+      .toEqual({ paneA: 8, paneB: 7, side: 'B', moved: true });
+    expect(placeInSplit(7, 8, 8, 'A', 'B'))
+      .toEqual({ paneA: 8, paneB: 7, side: 'A', moved: true });
+  });
+
+  it('目标格空着 → 照常落图、另一格**不动**（2026-09-22：刚进分屏把左格那张拖到右格，左图变空）', () => {
+    // 此时「互换」没有「原来那张」可接，等于把左格挖空 —— 拖它过来的人看的是它
+    // 出现在右格，不是让左边空掉。
+    expect(placeInSplit(7, null, 7, 'B', 'A'))
+      .toEqual({ paneA: 7, paneB: 7, side: 'B', moved: true });
+    // 对称的那一侧同理
+    expect(placeInSplit(null, 8, 8, 'A', 'B'))
+      .toEqual({ paneA: 8, paneB: 8, side: 'A', moved: true });
+  });
+
+  it('落点那半本来就是它 → 什么都不变，moved 为假（不重适配，用户的缩放留着）', () => {
+    expect(placeInSplit(7, 8, 7, 'A', 'A'))
+      .toEqual({ paneA: 7, paneB: 8, side: 'A', moved: false });
+  });
+
+  it('两格都空 → 落进落点那半', () => {
+    expect(placeInSplit(null, null, 9, 'B', 'B'))
+      .toEqual({ paneA: null, paneB: 9, side: 'B', moved: true });
+  });
+
+  it('顶掉：目标格有别的图、另一格不是这张 → 目标格换掉，另一格不动', () => {
+    expect(placeInSplit(7, 8, 9, 'B', 'A'))
+      .toEqual({ paneA: 7, paneB: 9, side: 'B', moved: true });
   });
 });
 
