@@ -11,6 +11,7 @@ import {
   queueEventsUrl, fetchSceneJpg, fetchDropSceneJpg, apiResolveScene,
   resetPreviewCache, previewCacheStats, clearPreviewCache, PREVIEW_BLOB_CACHE_MAX,
   apiClearScenePreviews, watchPreviewCache,
+  HttpError, isSceneGone,
 } from '../api.js';
 import type { PlatformSseEvent, ChatSseEvent } from '../api.js';
 import type { SceneRow } from '../scene.js';
@@ -661,5 +662,58 @@ describe('apiClearScenePreviews', () => {
     await apiClearScenePreviews(CFG, ['~YWJj']);
 
     expect(previewCacheStats().count).toBe(1);
+  });
+});
+
+/* ---------------- 打开失败的分派：盘阵上文件已经没了（404 → 已自动清除） ----------------
+ * ScenesPage 那一格灰色「已自动清除」的**实测那一半**判据全在这里：store 的 open()
+ * 拿 catch 到的东西问 isSceneGone。所以既要钉「404 认出来」，也要钉「422 不认」——
+ * 后者被误认，一个真故障（源在、烤不出来）就会被一句「已自动清除」盖住。
+ * 另一半（不用点就按年龄推定，presumedPurged）在 scene.test.ts 里。 */
+describe('isSceneGone / HttpError', () => {
+  const row = (over: Partial<SceneRow>): SceneRow => ({
+    id: '~YWJj', name: 'GF07A03', satellite: null, sensor: null, date: null,
+    size_bytes: 0, fake: false, W: 200, H: 100, rel: null,
+    jpgUrl: null, hasPreview: false, lq_path: null, ...over,
+  });
+  const BAKED = '/disk-array/a/b_preview.jpg';
+
+  beforeEach(() => { resetPreviewCache(); });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('非 JSON 错误体（nginx 直出的静态文件）：message 只有裸「HTTP 404」，status 照样带上', async () => {
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response('nope', { status: 404 })));
+    const e = await fetchSceneJpg(CFG, row({ jpgUrl: BAKED, hasPreview: true,
+      previewDiv: 2 }), 2).catch((err: unknown) => err);
+    expect(e).toBeInstanceOf(HttpError);
+    expect((e as HttpError).status).toBe(404);
+    expect((e as Error).message).toBe('HTTP 404');   // 用户报的那句原文
+    expect(isSceneGone(e)).toBe(true);
+  });
+
+  it('JSON 错误体的 detail 仍是给人看的 message（状态码同时保留）', async () => {
+    vi.stubGlobal('fetch', () => Promise.resolve(
+      new Response(JSON.stringify({ detail: '盘阵根未配置' }), { status: 404 })));
+    const e = await fetchSceneJpg(CFG, row({}), 2).catch((err: unknown) => err);
+    expect((e as Error).message).toBe('盘阵根未配置');
+    expect(isSceneGone(e)).toBe(true);
+  });
+
+  it('**422 不算「已自动清除」**：源还在、只是烤不出来（那是真故障，不能拿猜的原因盖住）', async () => {
+    vi.stubGlobal('fetch', () => Promise.resolve(
+      new Response(JSON.stringify({ detail: '预览生成失败：仅支持单波段（spp=3）' }),
+        { status: 422 })));
+    const e = await fetchSceneJpg(CFG, row({}), 2).catch((err: unknown) => err);
+    expect(e).toBeInstanceOf(HttpError);
+    expect((e as HttpError).status).toBe(422);
+    expect(isSceneGone(e)).toBe(false);
+  });
+
+  it('网络层失败（fetch 自己抛）不算：没拿到任何状态码，就不知道盘上有没有', async () => {
+    vi.stubGlobal('fetch', () => Promise.reject(new TypeError('Failed to fetch')));
+    const e = await fetchSceneJpg(CFG, row({}), 2).catch((err: unknown) => err);
+    expect(e).toBeInstanceOf(TypeError);
+    expect(isSceneGone(e)).toBe(false);
+    expect(isSceneGone(new Error('HTTP 404'))).toBe(false);   // 只有 HttpError 认
   });
 });
