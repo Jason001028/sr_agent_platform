@@ -14,8 +14,9 @@ import {
   isBakedPreviewUrl, previewNeedsBake, previewDivLabel, loadPreviewDiv,
   savePreviewDiv, SCENE_PREVIEW_DIVS, DEFAULT_PREVIEW_DIV,
   rasterPreviewWins, previewCacheKey, sceneAnchors, ANCHOR_MAX,
+  sceneClearPreviewUrl, rowsAfterClear, clearSummaryText,
 } from '../scene.js';
-import type { SceneRow, RasterPreview } from '../scene.js';
+import type { SceneRow, RasterPreview, ClearResult, ClearSummary } from '../scene.js';
 import { stretchRgba } from '../tifDecode.js';
 import { thumbToOrig } from '../viewMath.js';
 
@@ -434,5 +435,86 @@ describe('sceneAnchors —— 拖 jpg 时递给后端的锚定目录', () => {
 
   it('一个都没有 → 空数组（后端照旧按名字反推）', () => {
     expect(sceneAnchors([null, undefined, ''])).toEqual([]);
+  });
+});
+
+describe('清除预览缓存 —— URL / 去留 / 汇总文案', () => {
+  it('端点 URL 走 apiBase，路径是 /api/scenes/clear-preview', () => {
+    expect(sceneClearPreviewUrl(loadSrConfig()))
+      .toBe('/api/scenes/clear-preview');
+    expect(sceneClearPreviewUrl({ apiBase: 'http://127.0.0.1:8000/', staticBase: '' }))
+      .toBe('http://127.0.0.1:8000/api/scenes/clear-preview');
+  });
+
+  describe('rowsAfterClear —— 哪些行从列表摘掉', () => {
+    const rows = [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }];
+    const res = (id: string, status: ClearResult['status']) => ({
+      id, status, reason: null, dir: null,
+      removed: [], skipped: [], failed: [], marked: 0,
+    });
+
+    it('cleared 与 nothing 摘掉；skipped / failed 留下（用户要看得见原因）', () => {
+      const out = rowsAfterClear(rows, [
+        res('a', 'cleared'), res('b', 'failed'),
+        res('c', 'nothing'), res('d', 'skipped'),
+      ]);
+      expect(out.map((r) => r.id)).toEqual(['b', 'd']);
+    });
+
+    it('nothing 也要摘：盘上没有缓存，留着就是继续显示「已生成」这个谎', () => {
+      expect(rowsAfterClear(rows, [res('a', 'nothing')]).map((r) => r.id))
+        .toEqual(['b', 'c', 'd']);
+    });
+
+    it('一条命中都没有时原样返回（同一个数组引用，不做无谓的重建）', () => {
+      expect(rowsAfterClear(rows, [res('a', 'failed')])).toBe(rows);
+      expect(rowsAfterClear(rows, [])).toBe(rows);
+    });
+
+    it('结论里有列表里没有的 id（别的会话/别的筛选留下来的）也不炸', () => {
+      const out = rowsAfterClear(rows, [res('zzz', 'cleared')]);
+      expect(out.map((r) => r.id)).toEqual(['a', 'b', 'c', 'd']);
+    });
+  });
+
+  describe('clearSummaryText —— 表上方那一行', () => {
+    const s = (over: Partial<ClearSummary> = {}): ClearSummary => ({
+      cleared: 0, nothing: 0, skipped: 0, failed: 0,
+      dirs: 0, files: 0, marked: 0, ...over,
+    });
+
+    it('全清干净：报目录数 / 文件数，并说明行只是从列表移除', () => {
+      const text = clearSummaryText(
+        s({ cleared: 1, dirs: 1, files: 3, marked: 2 }), 1);
+      expect(text).toContain('已清除 1 项');
+      expect(text).toContain('1 个场景目录');
+      expect(text).toContain('3 份预览缓存');
+      expect(text).toContain('已从列表移除 1 行，重新检索可回来');
+    });
+
+    it('一景两行：项数按 id 报、目录与文件数不重复计数', () => {
+      const text = clearSummaryText(s({ cleared: 2, dirs: 1, files: 2 }), 2);
+      expect(text).toContain('已清除 2 项');
+      expect(text).toContain('1 个场景目录');
+      expect(text).toContain('2 份预览缓存');
+    });
+
+    it('混合结局：四类各报各的，没有的类别不出现', () => {
+      const text = clearSummaryText(
+        s({ cleared: 2, dirs: 2, files: 4, nothing: 1, failed: 1 }), 3);
+      expect(text).toContain('已清除 2 项');
+      expect(text).toContain('无需清除 1 项');
+      expect(text).toContain('失败 1 项');
+      expect(text).not.toContain('跳过');
+    });
+
+    it('一项都没动（全 skipped）时不说「已从列表移除」', () => {
+      const text = clearSummaryText(s({ skipped: 2 }), 0);
+      expect(text).toBe('跳过 2 项');
+    });
+
+    it('空汇总不报成「已清除 0 项」', () => {
+      expect(clearSummaryText(s(), 0)).toBe('没有可清除的场景');
+    });
   });
 });

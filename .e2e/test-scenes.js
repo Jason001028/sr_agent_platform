@@ -190,23 +190,31 @@ function makeTif(file, w, h) {
   if (r.status !== 0) throw new Error('TIFF 生成失败: ' + (r.stderr || r.stdout));
 }
 
-/* ---------------- 页面读取/操作助手 ---------------- */
+/* ---------------- 页面读取/操作助手 ----------------
+   列一律按 CSS 类取（`.c-sat` / `.c-dims` / …），**不按 td 下标**：2026-09-22 加了
+   首列勾选框（8 列 → 9 列），按下标写的断言会整体错位一位、还照样「通过」——
+   取到隔壁列的文字然后与期望值比对，失败信息指向的地方和真正的原因差一整列。
+   类名在 ScenesPage.vue 的 th/td 上，加列时只需改这里的一处映射。 */
+const COLS = ['sat', 'sensor', 'date', 'name', 'dims', 'size', 'tag', 'act'];
+
 function rows(page) {
-  return page.evaluate(() =>
+  return page.evaluate((cols) =>
     [...document.querySelectorAll('.sp-tbl tbody tr')].map((tr) => {
       if (tr.querySelector('td.empty')) return null;
-      const tds = [...tr.querySelectorAll('td')];
-      if (tds.length < 8) return null;
-      const tag = tds[6].querySelector('.tag');
-      const btn = tds[7].querySelector('button');
-      return {
-        sat: tds[0].textContent.trim(), sensor: tds[1].textContent.trim(),
-        date: tds[2].textContent.trim(), name: tds[3].textContent.trim(),
-        dims: tds[4].textContent.trim(), size: tds[5].textContent.trim(),
-        tag: tag ? tag.textContent.trim() : '',
-        btn: btn ? btn.textContent.trim() : '',
-      };
-    }).filter(Boolean));
+      const cell = (c) => tr.querySelector('td.c-' + c);
+      if (!cell('act')) return null;            // 结构不对的行（表头/空行）不当行看
+      const tag = tr.querySelector('td.c-tag .tag');
+      const btn = tr.querySelector('td.c-act button');
+      const box = tr.querySelector('td.c-pick input[type=checkbox]');
+      const out = { pick: !!box, picked: !!(box && box.checked) };
+      for (const c of cols) {
+        if (c === 'tag' || c === 'act') continue;
+        out[c] = cell(c) ? cell(c).textContent.trim() : '';
+      }
+      out.tag = tag ? tag.textContent.trim() : '';
+      out.btn = btn ? btn.textContent.trim() : '';
+      return out;
+    }).filter(Boolean), COLS);
 }
 
 const waitRows = (page, n, timeoutMs) =>
@@ -286,7 +294,7 @@ async function clickRowButtonByDims(page, name, dims) {
   const ok = await page.evaluate((n, d) => {
     const tr = [...document.querySelectorAll('.sp-tbl tbody tr')].find((r) => {
       const td = r.querySelector('td.name');
-      const dm = r.querySelectorAll('td')[4];
+      const dm = r.querySelector('td.c-dims');
       return td && td.textContent.trim() === n
         && dm && dm.textContent.trim() === d;
     });
@@ -308,7 +316,7 @@ const waitRowBtnByDims = (page, name, dims, want, timeoutMs = 30000) =>
   waitFor(page, (n, d, w) => {
     const tr = [...document.querySelectorAll('.sp-tbl tbody tr')].find((r) => {
       const td = r.querySelector('td.name');
-      const dm = r.querySelectorAll('td')[4];
+      const dm = r.querySelector('td.c-dims');
       return td && td.textContent.trim() === n && dm && dm.textContent.trim() === d;
     });
     const b = tr && tr.querySelector('td button');
@@ -352,6 +360,43 @@ async function readField(page, label) {
       cands: dl ? dl.querySelectorAll('option').length : 0,
     };
   }, label);
+}
+
+/* ---------------- J 段（清除预览缓存）助手 ---------------- */
+
+/** 勾选/取消某行的清除复选框（首列 `td.c-pick input[type=checkbox]`）。
+ *  点的必须是 input：`.sp-tbl` 里 `tr.querySelector('button')` 是「打开」那颗按钮，
+ *  首列若做成按钮形状的勾选框，B/C/F/I 段的行按钮就会取错元素。 */
+async function clickRowPick(page, name) {
+  const ok = await page.evaluate((n) => {
+    const tr = [...document.querySelectorAll('.sp-tbl tbody tr')].find((r) => {
+      const td = r.querySelector('td.name');
+      return td && td.textContent.trim() === n;
+    });
+    if (!tr) return false;
+    const b = tr.querySelector('td.c-pick input[type=checkbox]');
+    if (!b || b.disabled) return false;
+    b.click();
+    return true;
+  }, name);
+  if (!ok) throw new Error('行勾选框未找到或已禁用: ' + name);
+}
+
+/** 读工具行/结果行里某个元素的文本（空白折叠成单空格，便于 includes 断言） */
+const barText = (page, sel) => page.evaluate((s) => {
+  const el = document.querySelector(s);
+  return el ? el.textContent.replace(/\s+/g, ' ').trim() : '';
+}, sel);
+
+/** 往「全部清除」的确认词输入框里打字。v-model 认 input 事件（同 setFilter），
+ *  所以这里不能只写 el.value —— 那样 DOM 上有字、组件里的状态还是空的。 */
+async function typeClearWord(page, v) {
+  await page.evaluate((val) => {
+    const el = document.querySelector('.scb-in');
+    if (!el) throw new Error('确认词输入框不存在');
+    el.value = val;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }, v);
 }
 
 function isIgnorableConsole(msg) {
@@ -789,6 +834,163 @@ async function main() {
       assert(await page.evaluate(() => location.pathname.endsWith('/scenes')),
         '打开失败不跳路由（留在 /scenes）');
       fs.writeFileSync(jpgFile, jpgKeep);
+
+      /* ---------- J. 清除预览缓存（勾选 → 清除选定 / 全部清除） ---------- */
+      // 清的是**盘阵上**那份 `<源 stem>_preview.jpg`（缓存），判据里带 `srprev:` 规则戳。
+      // 本节的断言分两半，后一半才是这个功能真正的风险所在：
+      //   删掉的必须是缓存；
+      //   留下的必须是**生产数据**（场景源 .tif/.jpg 与 `<编号>_mask.tif`）——
+      //   所以逐个数着断，不是「没报错就算过」。
+      console.log('\n[J] 清除预览缓存：勾选 → 清除选定 → 全部清除（要确认词）');
+      await page.goto(base + '/scenes', { waitUntil: 'networkidle2', timeout: 30000 });
+      await waitRows(page, 3);
+      const subDir = path.join(scenesRoot, 'sub', SUB_ROW);   // 嵌套目录那一景
+      const srcFiles = [
+        path.join(scenesRoot, JPG_ROW, JPG_ROW + '.jpg'),      // 源即显示件（§4.7）
+        path.join(subDir, SUB_ROW + '.tif'),
+        path.join(scenesRoot, HDR_ROW, HDR_ROW + '.tif'),
+        path.join(scenesRoot, HDR_ROW, HDR_ROW + '_mask.tif'),  // 掩膜：SR 的输入
+        path.join(subDir, SUB_ROW + '_mask.tif'),
+      ];
+      const srcSizes = srcFiles.map((p) => fs.statSync(p).size);
+      assert(srcSizes.every((n) => n > 0), `清之前 5 份生产数据都在（${srcSizes.join(',')} 字节）`);
+      const jpgPreview = path.join(jpgRowDir, JPG_ROW + '_preview.jpg');   // B2 段烤的那份
+
+      rs = await rows(page);
+      assert(rs.length === 3 && rs.every((r) => r.pick),
+        `每行首列都有勾选框（${rs.filter((r) => r.pick).length}/3）`);
+      assert(await page.evaluate(() => {
+        const th = document.querySelector('.sp-tbl thead th.c-pick');
+        return !!th && th.textContent.trim() === '';
+      }), '表头勾选列留空（「全选」只在工具行上，表头再放一颗会变成两个全选）');
+
+      /** 读某颗按钮的禁用态（找不到 = null） */
+      const btnDisabled = (label) => page.evaluate((t) => {
+        const b = [...document.querySelectorAll('button')]
+          .find((x) => x.textContent.trim() === t);
+        return b ? b.disabled : null;
+      }, label);
+      assert(await btnDisabled('清除选定') === true, '未勾选时「清除选定」禁用（没得清）');
+      assert(await btnDisabled('全部清除') === false, '列表里有可清的行 → 「全部清除」可用');
+
+      await clickRowPick(page, HDR_ROW);
+      assert((await barText(page, '.scb-count')).includes('已选 1'),
+        `勾一行后计数跟上（${await barText(page, '.scb-count')}）`);
+      assert(await btnDisabled('清除选定') === false, '勾选后「清除选定」可用');
+
+      // J1. 取消必须是真的取消：确认条先弹，取消后盘上文件一个不动。
+      await clickByText(page, '清除选定');
+      await waitFor(page, () => !!document.querySelector('.scb-ask'), 10000, '确认条');
+      const askText = await barText(page, '.scb-ask-text');
+      assert(askText.includes('不进回收站'), `确认条写明不可逆（${askText.slice(0, 34)}…）`);
+      assert(fs.existsSync(previewJpg), '还没点确认 → 盘上文件没动');
+      await clickByText(page, '取消');
+      await waitFor(page, () => !document.querySelector('.scb-ask'), 10000, '确认条收起');
+      assert(fs.existsSync(previewJpg), '点「取消」后文件仍在');
+
+      // J2. 清除选定：删缓存 + 该行从列表移除（不重新检索）。
+      await clickByText(page, '清除选定');
+      await waitFor(page, () => !!document.querySelector('.scb-ask'), 10000, '确认条');
+      await clickByText(page, '确认清除');
+      await waitRows(page, 2);
+      assert(!fs.existsSync(previewJpg), `盘上的缓存被删掉（${path.basename(previewJpg)}）`);
+      rs = await rows(page);
+      assert(!rs.some((r) => r.name === HDR_ROW), '该行从列表移除（没重新检索）');
+      assert(rs.length === 2, `其余行原地留下（${rs.map((r) => r.name).join(',')}）`);
+      const sumText = await barText(page, '.scb-sum');
+      assert(sumText.includes('重新检索可回来'),
+        `汇总行说清「移除」是页面局部的（${sumText}）`);
+      const chipAfter = await page.evaluate(
+        () => document.querySelector('.sp-src').textContent.replace(/\s+/g, ' '));
+      assert(/命中 2\b/.test(chipAfter), `命中计数随移除递减（${chipAfter}）`);
+      assert(srcFiles.every((p) => fs.existsSync(p)),
+        '场景源与掩膜一个都没少（清的是缓存，不是数据）');
+
+      // J2b. **不是本平台烤的同名件一个字节都不动**，且必须出现在明细里。
+      // 这是整个功能最该被钉住的一条：删除判据里「有 srprev: 规则戳」那一把锁
+      // 如果在浏览器里没生效，误删的就是生产数据目录里别人的文件。
+      const foreign = path.join(subDir, 'MANUAL_preview.jpg');
+      fs.writeFileSync(foreign, 'not our preview');
+      await relist('检索');
+      await waitRows(page, 3);
+      await clickRowPick(page, SUB_ROW);
+      await clickByText(page, '清除选定');
+      await waitFor(page, () => !!document.querySelector('.scb-ask'), 10000, '确认条');
+      await clickByText(page, '确认清除');
+      await waitFor(page, () => !!document.querySelector('.scb-det'), 15000, '明细区');
+      assert(fs.readFileSync(foreign, 'utf8') === 'not our preview',
+        '没有规则戳的同名件没被删（判据生效，字节都没动）');
+      rs = await rows(page);
+      assert(rs.some((r) => r.name === SUB_ROW), '结论是「跳过」的行留在列表里（要让人看见）');
+      const det = await barText(page, '.scb-det');
+      assert(det.includes('MANUAL_preview.jpg') && det.includes('规则戳'),
+        `明细逐条给出没删的那份与原因（${det.slice(0, 56)}…）`);
+
+      // J3. 清了就真的没了 → 重新检索回来是「未生成」，点开才重烤（不自动重烤）。
+      await relist('检索');
+      await waitRows(page, 3);
+      const hdrBack = (await rows(page)).find((r) => r.name === HDR_ROW);
+      assert(hdrBack && hdrBack.tag === '未生成' && hdrBack.btn === '生成并打开',
+        `重新检索后该行回到「未生成」+「生成并打开」（${hdrBack && hdrBack.tag}/`
+        + `${hdrBack && hdrBack.btn}）`);
+      const beforeReopen = countUrl(previewRe);
+      await clickRowButton(page, HDR_ROW);
+      await waitRowTag(page, HDR_ROW, '已生成');
+      assert(countUrl(previewRe) === beforeReopen + 1,
+        `点开时重新烘焙（/preview 又发一次：本地 blob 缓存也随清除失效了）`
+        + `(${countUrl(previewRe) - beforeReopen})`);
+      assert(fs.existsSync(previewJpg), '盘上重新落了这份缓存');
+
+      // J4. 全部清除：范围 = 当前列表，且必须输入确认词。
+      await clickByText(page, '全部清除');
+      await waitFor(page, () => !!document.querySelector('.scb-ask'), 10000, '确认条');
+      const allText = await barText(page, '.scb-ask-text');
+      assert(allText.includes('当前列表里的 3 项'),
+        `确认条写明范围是当前列表（${allText.slice(0, 40)}…）`);
+      assert(await btnDisabled('确认清除') === true, '没输入确认词 → 「确认清除」禁用');
+      await typeClearWord(page, '清');
+      assert(await btnDisabled('确认清除') === true, '确认词不完整 → 仍禁用（不是「有字就行」）');
+      await typeClearWord(page, '清除全部');
+      assert(await btnDisabled('确认清除') === false, '输入确认词后才放行');
+      await clickByText(page, '确认清除');
+      await waitRows(page, 1);   // 3 → 1：SUB 那一景有同名外来件，结论是「跳过」，行留下
+      assert(!fs.existsSync(previewJpg) && !fs.existsSync(jpgPreview),
+        '两份缓存（本景 re-baked 的 + B2 段烤的）都清了');
+      rs = await rows(page);
+      assert(rs.length === 1 && rs[0].name === SUB_ROW,
+        `跳过的行不跟着消失（剩 ${rs.map((r) => r.name).join(',')}）——`
+        + '「清不到」和「清干净了」是两件事，行去留按结论分');
+      assert(fs.readFileSync(foreign, 'utf8') === 'not our preview',
+        '全部清除也没碰那份外来件');
+      assert(srcFiles.every((p) => fs.existsSync(p))
+        && srcFiles.every((p, i) => fs.statSync(p).size === srcSizes[i]),
+        '5 份生产数据原样还在、字节数一字不差（宁可不删也不删错）');
+
+      // J4b. 盘上真的没缓存了 → 再清一次：整批「无需清除」，行全走、空态文案换一种。
+      // 空态有两个来源（清空 / 本来就没命中），这里走的是前者的文案分支。
+      fs.rmSync(foreign);
+      await relist('检索');
+      await waitRows(page, 3);
+      await clickByText(page, '全部清除');
+      await waitFor(page, () => !!document.querySelector('.scb-ask'), 10000, '确认条');
+      await typeClearWord(page, '清除全部');
+      await clickByText(page, '确认清除');
+      await waitFor(page, () => !!document.querySelector('.sp-tbl td.empty'), 15000, '空态行');
+      const emptyAfter = await page.evaluate(
+        () => document.querySelector('.sp-tbl td.empty').textContent.replace(/\s+/g, ' ').trim());
+      assert(emptyAfter.includes('已从列表移除'),
+        `空态说的是「已移除」而不是「没有场景」（${emptyAfter}）`);
+
+      // J5. 回得来：重新检索 → 3 行，且不会自动重烤。
+      await relist('检索');
+      await waitRows(page, 3);
+      rs = await rows(page);
+      const hdrAgain = rs.find((r) => r.name === HDR_ROW);
+      assert(hdrAgain && hdrAgain.tag === '未生成' && hdrAgain.btn === '生成并打开',
+        `清完全部后没有自动重烤，仍是「未生成」+「生成并打开」`
+        + `（${hdrAgain && hdrAgain.tag}/${hdrAgain && hdrAgain.btn}）`);
+      assert(!fs.existsSync(previewJpg) && !fs.existsSync(jpgPreview),
+        '检索本身不会顺手把缓存烤回来');
 
       /* ---------- H. 全程无错 ---------- */
       console.log('\n[H] 全程无错');

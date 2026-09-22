@@ -9,11 +9,13 @@
 import {
   loadSrConfig, joinBase, sceneResolveUrl, scenePreviewUrl, sceneImageUrl,
   dropPreviewUrl, isBakedPreviewUrl, previewDivLabel, previewNeedsBake,
-  loadPreviewDiv, rasterPreviewWins, sceneSiblingsUrl, previewCacheKey,
+  loadPreviewDiv, rasterPreviewWins, sceneClearPreviewUrl, sceneSiblingsUrl,
+  previewCacheKey,
 } from './scene.js';
 import type { SceneRow, SrConfig, RasterPreview } from './scene.js';
 import { createBlobCache } from './blobCache.js';
 import type { BlobCacheStats } from './blobCache.js';
+import type { ClearResponse } from './scene.js';
 
 export { loadSrConfig } from './scene.js';
 
@@ -119,9 +121,12 @@ export interface QueueTask {
    *  done = 盘上已有当前档位的产物预览，skipped / failed 见 preview_note 里那句人话。
    *  作业跑完不一定烤成 —— 沙箱私有副本、产物缺失（云限额跳过的作业是合法 COMPLETED
    *  但没有产物）、场景目录不可写都会如实记为 skipped。 */
-  preview_state?: 'running' | 'done' | 'skipped' | 'failed' | null;
+  preview_state?: 'running' | 'done' | 'skipped' | 'failed' | 'cleared' | null;
   /** 急烤结局的人话说明，形如 `<slug>: …`（slug 固定为 sandbox / product_missing /
-   *  unwritable / source_changed / no_suffix / failed）。 */
+   *  unwritable / source_changed / no_suffix / failed / cleared）。
+   *
+   *  `cleared` 那一条是**人工**结局：场景库的「清除缓存」把盘上那份删掉后标上它，
+   *  让这一行不再被急烤认领 —— 不标的话几秒后文件就被烤回来。 */
   preview_note?: string | null;
 }
 
@@ -412,6 +417,40 @@ export function resetPreviewCache(): void {
   previewBlobs.clear();
 }
 
+/** 丢掉这些场景在本地的预览字节（场景库「清除缓存」的另一半）。
+ *
+ *  **不丢会怎样**：服务端文件没了，但 `fetchSceneJpg` 命中本地那份就直接返回旧
+ *  字节 —— 同一会话里再打开既不重新烘焙也不显示新图，用户只会看到「清了没用」。
+ *  用户选的是「清服务端预览 JPG」，这里不是多清一层，而是让那件事真的成立。
+ *
+ *  一个场景可能有多档 / 栅格两份条目，键都以 `${id}|` 开头（见 previewCacheKey），
+ *  所以按前缀丢。返回丢掉的条数（调用方一般不看，单测看）。 */
+export function forgetScenePreviewBlobs(ids: string[]): number {
+  let n = 0;
+  for (const id of ids) {
+    if (id) n += previewBlobs.deletePrefix(`${id}|`);
+  }
+  return n;
+}
+
+/** 清除服务端预览缓存并**顺带**丢掉本地对应的那份。
+ *
+ *  两件事必须一起做，所以包在一个函数里：调用方（scenes store）只调这一个。 */
+export async function apiClearScenePreviews(
+  cfg: SrConfig, ids: string[],
+): Promise<ClearResponse> {
+  const r = await http(sceneClearPreviewUrl(cfg), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ids }),
+  });
+  const body = (await r.json()) as ClearResponse;
+  // 丢在**请求成功之后**：请求失败（网络 / 400）时盘上什么都没变，本地这份还是
+  // 有效的，先丢等于白丢一次缓存（下次还得重新烘焙几十秒）。
+  forgetScenePreviewBlobs(ids);
+  return body;
+}
+
 /** 存进缓存并原样返回（三处 return 都走它，免得漏存或存了不返）。 */
 function cacheBlob(key: string, blob: Blob): Blob {
   previewBlobs.set(key, blob);
@@ -485,7 +524,15 @@ export async function fetchSceneJpg(
     row.hasPreview = true;
     row.previewDiv = div;      // 记上实际档位：同一会话内再打开不必重烤
   }
-  const img = await http(sceneImageUrl(cfg, row.jpgUrl, div));
+  // 刚烤过这一下 → 静态 URL 那份缓存整个作废，绕开浏览器 HTTP 缓存去拿。
+  // 判据正是 needBake：只有它成立时我们才**知道**服务端刚刚重写了那个文件，而
+  // `?div=N` 那条击穿只对「档位变了」有效。**档位没变但内容重烤**有两条路：
+  // 规则戳换代（v2→v3，盘上原地重烤）与场景库的「清除缓存」——后者的整个卖点
+  // 就是「下次打开看新的」，若这里吃浏览器那份（nginx `max-age=3600`）旧字节，
+  // 用户会以为清了个寂寞。代价：每次真烘焙后这一次多走一趟网络（本来就在等
+  // 几十秒的烘焙，这点开销看不见）。
+  const img = await http(sceneImageUrl(cfg, row.jpgUrl, div),
+                         needBake ? { cache: 'no-store' } : undefined);
   return cacheBlob(previewCacheKey(row, div), await img.blob());
 }
 
@@ -535,7 +582,9 @@ async function fetchRasterPreview(
     rp.hasPreview = true;
     rp.previewDiv = div;
   }
-  const img = await http(sceneImageUrl(cfg, rp.jpgUrl, div));
+  // 刚烤过 → 绕开浏览器 HTTP 缓存取（理由同 fetchSceneJpg 那一处）
+  const img = await http(sceneImageUrl(cfg, rp.jpgUrl, div),
+                         needBake ? { cache: 'no-store' } : undefined);
   return cacheBlob(key, await img.blob());
 }
 

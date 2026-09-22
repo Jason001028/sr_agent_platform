@@ -562,17 +562,57 @@ def stamp_div(stamp) -> int | None:
     return div if div in PREVIEW_DIVISORS else None
 
 
+def _comment_of(jpg_path):
+    """JPEG 注释原文（规范化成 str）；读不出 → None。
+
+    只读文件头，**不解码像素**。`info["comment"]` 由 Pillow 从 COM 段取，形态随
+    Pillow 版本可能是 bytes 也可能是 str，所以在这里统一成 str —— 下游（`stamp_div`
+    / `has_rule_stamp`）就不必各写一遍 bytes 分支。多段 COM 时 Pillow 可能给出
+    bytes 以外的形态（元组/列表），那种情况 `str()` 之后前缀判不过、就是「判不出」，
+    对调用方都是安全的保守结论。
+    """
+    try:
+        with Image.open(jpg_path) as im:
+            stamp = im.info.get("comment")
+    except Exception:  # noqa: BLE001 — 读不出就当「不知道」
+        return None
+    if stamp is None:
+        return None
+    if isinstance(stamp, (bytes, bytearray)):
+        try:
+            return bytes(stamp).decode("ascii")
+        except UnicodeDecodeError:
+            return None
+    return str(stamp)
+
+
 def preview_div_of(jpg_path) -> int | None:
     """盘上某个预览 JPG 是按哪一档烤的；文件不在 / 读不出 / 旧格式 → None。
 
     只 `Image.open` 读头拿注释，**不解码像素** —— 与 `scene_dims` 同级，可以在
     列表路径上逐行调。
     """
-    try:
-        with Image.open(jpg_path) as im:
-            return stamp_div(im.info.get("comment"))
-    except Exception:  # noqa: BLE001 — 读不出就当「不知道是哪一档」
-        return None
+    return stamp_div(_comment_of(jpg_path))
+
+
+#: 规则戳的前缀。三代戳都以此开头 —— v1 那代是 `srprev:8192+linear2`（`_STAMP_RE`
+#: 那套严格形态匹配不上它，但前缀照样在），所以「这份文件是不是我们烤的」只判前缀。
+_STAMP_PREFIX = "srprev:"
+
+
+def has_rule_stamp(jpg_path) -> bool:
+    """这份 JPG 带不带**本平台的烘焙规则戳**（只读头，不解码像素）。
+
+    判据取「前缀是 `srprev:`」而不是 `_STAMP_RE` 那套完整形态：后者认不出 v1 那代
+    （`srprev:8192+linear2` 没有 `:divN+equal:qN` 尾巴），而 v1/v2 烤的图同样是
+    我们写的、同样该被清理。读不出注释（不是 JPEG / 没戳 / 文件不在）→ False。
+
+    只有一处调用方：**删除前**的判据（`services/preview_clear.py`）。它的意义是
+    「只删自己烤出来的那份」—— 盘阵上别人手放的 `*_preview.jpg`、以及万一后缀
+    恰好叫 `preview` 的**产物**（`<源 stem>_preview.jpg` 会与产物同名），都没有这
+    个戳，因此一个都不会被误删。
+    """
+    return str(_comment_of(jpg_path) or "").strip().startswith(_STAMP_PREFIX)
 
 
 def cache_hit(dst: Path, quality: int, div: int) -> dict | None:

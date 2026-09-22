@@ -16,9 +16,10 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { useViewerStore } from './viewer.js';
-import type { SceneRow, SceneQueryParams } from '../lib/scene.js';
-import { loadSrConfig, scenesListUrl } from '../lib/scene.js';
-import { apiResolveScene, fetchSceneJpg } from '../lib/api.js';
+import type { ClearResponse, SceneRow, SceneQueryParams } from '../lib/scene.js';
+import { clearSummaryText, loadSrConfig, rowsAfterClear,
+         scenesListUrl } from '../lib/scene.js';
+import { apiClearScenePreviews, apiResolveScene, fetchSceneJpg } from '../lib/api.js';
 import type { SceneResolveResult } from '../lib/api.js';
 
 export const useScenesStore = defineStore('scenes', () => {
@@ -67,6 +68,12 @@ export const useScenesStore = defineStore('scenes', () => {
     loading.value = true;
     error.value = '';
     const cfg = loadSrConfig();
+    // 新一次检索 = 全新的一批行：旧的选中集与上一次清除结论都作废（否则「已选 3 项」
+    // 会指向一批已经不在列表里的 id，下次「清除选定」发出去的就是死 id）。
+    clearSelection();
+    clearResult.value = null;
+    clearRemoved.value = 0;
+    clearError.value = '';
     try {
       const resp = await fetch(scenesListUrl(cfg, params()));
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
@@ -90,6 +97,96 @@ export const useScenesStore = defineStore('scenes', () => {
     dateFrom.value = ''; dateTo.value = '';
     void list();
   }
+
+  /* ---------------- 清除预览缓存（勾选 + 清除选定 / 全部清除） ----------------
+   * 服务端把盘阵上那一景的 `<stem>_preview.jpg` 删掉（判据在
+   * backend/services/preview_clear.py）。本 store 只管三件事：谁被选中、发请求、
+   * 按结论决定哪些行留在列表里。 */
+
+  /** 选中态按 id 记（不是按行下标）：清除后行会从 rows 里摘掉，下标全变。 */
+  const selected = ref<Set<string>>(new Set());
+  const clearing = ref(false);
+  /** 上一次清除的完整结论（null = 还没清过）。明细展不展开由组件决定。 */
+  const clearResult = ref<ClearResponse | null>(null);
+  /** 上一次清除摘掉了几行 —— 汇总文案里那句「已从列表移除 N 行」用它。 */
+  const clearRemoved = ref(0);
+  const clearError = ref('');
+
+  /** 能清的行 = 非 fake。fake 行在盘上没有文件（未配 SR_SCENES_ROOT 的占位），
+   *  发过去只会换来一条「场景不可访问」，所以连勾选框都不给。 */
+  function isSelectable(row: SceneRow): boolean {
+    return !row.fake;
+  }
+
+  const selectableRows = computed(() => rows.value.filter(isSelectable));
+  const selectedCount = computed(() => selected.value.size);
+  const allSelected = computed(() =>
+    selectableRows.value.length > 0
+    && selectableRows.value.every((r) => selected.value.has(r.id)));
+
+  function toggleSelect(id: string): void {
+    const s = selected.value;
+    if (s.has(id)) s.delete(id);
+    else s.add(id);
+  }
+
+  function setAllSelected(flag: boolean): void {
+    selected.value = flag
+      ? new Set(selectableRows.value.map((r) => r.id))
+      : new Set();
+  }
+
+  function clearSelection(): void {
+    selected.value = new Set();
+  }
+
+  /** 清除一组 id 的预览缓存，按结论摘行。
+   *
+   *  `cleared` / `nothing` 的行摘掉（盘上的事实是「没有缓存」，留着就是继续显示
+   *  「已生成」这个谎），`skipped` / `failed` 的留下 —— 用户要看得见失败和原因。
+   *  **不重新检索**：这次不动的行照旧待在列表里，用户看得到自己刚做了什么；
+   *  摘掉的行要回来得重新检索（汇总文案里明说了）。 */
+  async function runClear(ids: string[]): Promise<void> {
+    if (clearing.value || !ids.length) return;
+    clearing.value = true;
+    clearError.value = '';
+    try {
+      const body = await apiClearScenePreviews(loadSrConfig(), ids);
+      clearResult.value = body;
+      const before = rows.value.length;
+      rows.value = rowsAfterClear(rows.value, body.results);
+      clearRemoved.value = before - rows.value.length;
+      // 表头 chip 上的「命中 N」得跟着动，否则与可见行数对不上
+      count.value = Math.max(0, count.value - clearRemoved.value);
+      // 摘掉的行不该还留在选中集里（否则下次「清除选定」会发一批已经不存在的 id）
+      const left = new Set(rows.value.map((r) => r.id));
+      selected.value = new Set([...selected.value].filter((id) => left.has(id)));
+    } catch (e) {
+      clearError.value = '清除缓存失败：'
+        + (e instanceof Error ? e.message : String(e));
+      clearResult.value = null;
+      clearRemoved.value = 0;
+    } finally {
+      clearing.value = false;
+    }
+  }
+
+  /** 清除选定：只清勾上的那些行。 */
+  async function clearSelected(): Promise<void> {
+    await runClear([...selected.value]);
+  }
+
+  /** 全部清除：**当前检索结果**（受筛选影响，就是列表里那些行）。
+   *
+   *  不含 fake 行；`limit` 截断时超出列表的部分也清不到 —— 这两件事都由
+   *  SceneCacheBar 在确认文案里写明，用户不必猜自己清了多大范围。 */
+  async function clearAllRows(): Promise<void> {
+    await runClear(selectableRows.value.map((r) => r.id));
+  }
+
+  /** 汇总一行文案（纯函数在 lib/scene.ts，便于单测）。 */
+  const clearSummary = computed(() => clearResult.value
+    ? clearSummaryText(clearResult.value.summary, clearRemoved.value) : '');
 
   /** 打开场景：确保 JPG 已生成 → 静态 jpgUrl 读字节 → viewer.openSceneJpg。
       失败一律写本 store 的 error —— 本页（ScenesPage）只渲染 scenes.error，而
@@ -193,5 +290,10 @@ export const useScenesStore = defineStore('scenes', () => {
     query, satellite, sensor, dateFrom, dateTo,
     satellites, sensors, dates,
     list, resetFilters, open, resolvePath, openByName,
+    // 清除预览缓存（SceneCacheBar 用）
+    selected, clearing, clearResult, clearRemoved, clearError, clearSummary,
+    selectableRows, selectedCount, allSelected,
+    isSelectable, toggleSelect, setAllSelected, clearSelection,
+    clearSelected, clearAllRows,
   };
 });

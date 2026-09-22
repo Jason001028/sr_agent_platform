@@ -27,6 +27,16 @@ export interface BlobCache {
   set(key: string, blob: Blob): void;
   /** 清空（设置浮层里那颗「清空」按钮）。 */
   clear(): void;
+  /** 丢掉所有以 `prefix` 开头的条目，返回丢了几条。
+   *
+   *  用途是**按场景**失效：键是 `<场景 id>|<档位>|jpg`（见 lib/scene.ts 的
+   *  previewCacheKey），同一个场景可能有多个档位的条目，而调用方手里只有 id。
+   *  清除服务端缓存时必须把本地这一份一起丢掉 —— 不丢的话同一会话里再打开会
+   *  直接命中旧字节，既不重新烘焙也不显示新图，用户以为清除没生效。
+   *
+   *  **字节数必须跟着减**：只删条目不减 bytes，stats() 会越报越大，LRU 也会提前
+   *  把别人挤出去。 */
+  deletePrefix(prefix: string): number;
   stats(): BlobCacheStats;
 }
 
@@ -76,6 +86,17 @@ export function createBlobCache(maxBytes: number): BlobCache {
     clear() {
       items.clear();
       bytes = 0;
+    },
+
+    deletePrefix(prefix) {
+      let n = 0;
+      for (const [k, b] of items) {
+        if (!k.startsWith(prefix)) continue;
+        items.delete(k);
+        bytes -= b.size;
+        n++;
+      }
+      return n;
     },
 
     stats() {
