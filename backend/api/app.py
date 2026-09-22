@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shutil
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -152,8 +151,8 @@ def _raster_preview(abs_path: Path, root: Path | None) -> dict | None:
     「显示源比较规则」）——所以这一项存在的意义就是**把比较所需的两个尺寸交给前端**：
     栅格 W/H 与 jpg W/H 都得后端读（前端拿不到库外文件，也不该为此多发一次请求）。
 
-    落点与栅格行**同一份** `<stem>.preview.jpg`（`with_suffix` 对 jpg 与 tif 是同一个
-    文件名），所以 `jpgUrl` 指的就是栅格行会用的那个 URL —— 同一份缓存，不重复烤。
+    落点与栅格行**同一份** `<stem>_preview.jpg`（名字只由源 stem 拼，对 jpg 与 tif 是
+    同一个文件名），所以 `jpgUrl` 指的就是栅格行会用的那个 URL —— 同一份缓存，不重复烤。
 
     `rel` 只在栅格落在 SR_SCENES_ROOT 之下才有（库外没有静态 URL，与行本身的
     `rel/jpgUrl` 同一条规则）；`id` 跟着走：库内用 rel 的 id，库外用 `~` 形态的
@@ -241,7 +240,7 @@ def _scene_row(scene: dict, root: Path | None) -> dict:
         row["hasPreview"] = True
         row["jpgUrl"] = paths.rel_url(abs_path, root)
         # previewDiv 留 None：这不是烤出来的预览，不参与档位（前端靠 jpgUrl
-        # 是不是 `.preview.jpg` 就能分辨，所以这里不需要额外哨兵值）。
+        # 是不是 `_preview.jpg` 结尾就能分辨，所以这里不需要额外哨兵值）。
         #
         # 上面三个字段的语义**一个字都不动**（gui-experience §9.2 的红线：这张 jpg
         # 就是这一行的显示源）。同目录若有同名栅格，它烤出来可能更清晰 —— 那件事
@@ -444,43 +443,35 @@ def _finish_preview(state, task: dict, state_name: str, note: str) -> None:
                        "note": row.get("preview_note")})
 
 
-def _mirror_preview_name(jpg: Path, source: Path) -> str:
-    """把平台自己那份预览再落一份**下划线**名：`<源 stem>_preview.jpg`（用户口径）。
+def _sweep_legacy_preview(jpg: Path, source: Path) -> None:
+    """把改名前的点号那份删掉（2026-09-22 起预览只有一个名字）。
 
-    拖入链（`POST /api/scenes/{id}/preview-drop`）与未超分那一份
-    （`_bake_nosr_preview`）落的就是这个名字 —— 场景目录 `ls` 一眼看下去，一份栅格
-    该只有一个规矩（`preview` 前面是 `_`）。
-
-    点号那份**必须留着**，所以这里是「再落一份」而不是「换个名字」：
-    `hasPreview` / `previewDiv`、静态 `jpgUrl`，以及前端 `isBakedPreviewUrl`
-    （它按结尾 `.preview.jpg` 认「这是烤出来的预览」，据此决定拼 `?div=` 与换档后
-    重烤）全都锚在点号那份上。改名等于让服务端读不到自己刚烤的图。
-
-    已经**不低于**点号那份新的下划线文件不覆盖：拖入链可能刚按别的档位烤过它。
-    返回一段可拼进 note 的说明（正常情形为空串）——镜像失败不改行的结论，它只是
-    给人看的那一份。
+    只在**这次真的处理到这份栅格**时调用（算出落点之后 / 写盘或命中缓存之后），
+    不列目录、不做全盘扫描 —— 「后端不列目录」那条红线照旧。删不掉（权限、被占用）
+    就算了：这是纯清理，不是任何结论的前提。源自己就叫那个点号名时跳过。
     """
-    out = paths.drop_preview_path(source)
+    legacy = paths.legacy_preview_path(jpg)
+    if legacy == jpg or legacy == Path(source):
+        return
     try:
-        if out.is_file() and os.path.getmtime(out) >= os.path.getmtime(jpg):
-            return ""
-        shutil.copyfile(jpg, out)
-        return ""
-    except OSError as e:
-        return f"；同名（下划线）那份没落上：{e}"
+        legacy.unlink()
+    except OSError:
+        pass
 
 
 def _bake_product_preview(state, task: dict, div: int) -> None:
     """把一条 COMPLETED 任务的**产物**预览烤出来（本函数只管产物这一份）。
 
     只烤产物，不烤输入影像：输入影像那份的「用户到底要不要看」在打开之前无法知道，
-    而产物是刚刚跑完的、几乎一定会被打开。三个落点天然独立
-    （`<stem>.preview.jpg` / `<stem>_<suffix>.preview.jpg` / `…_NOSR.preview.jpg`），
+    而产物是刚刚跑完的、几乎一定会被打开。三份落点天然独立
+    （输入影像 `<stem>_preview.jpg`、产物 `<产物 stem>_preview.jpg`、
+    上一次产物 `…_NOSR_preview.jpg`），
     各烤各的，互不覆盖。**未超分那一份由 `_bake_nosr_preview` 另烤**（2026-09-21
     用户口径），本函数的结论一个字都不为它改 —— 两份的结局各自独立。
 
-    写到产物名那份（点号，服务端自己读它）之后，再按 `_mirror_preview_name` 落一份
-    **下划线**名 —— 与拖入链、未超分那两份同名同规矩（2026-09-21 用户口径）。
+    落点与拖入链、未超分那两份**同一个名字**（`<产物 stem>_preview.jpg`）——
+    2026-09-22 起点号那份（`<产物 stem>.preview.jpg`）不再产出，由
+    `_sweep_legacy_preview` 顺手删掉。
     """
     params = task.get("params") or {}
     lq_path = params.get("lq_path")
@@ -537,6 +528,8 @@ def _bake_product_preview(state, task: dict, div: int) -> None:
         return
 
     jpg = paths.preview_jpg_for(product, state.scenes_root)
+    # 老点号那份在这里就该消失（本次要么覆盖它、要么它本来就没人读了）
+    _sweep_legacy_preview(jpg, product)
     # 用户在急烤动手之前先打开过这份产物：盘上那份已是当前档位，重烤纯属白干
     # （几十秒 + 读遍 GB 级文件）。判据与惰性路径**同一个函数**，没有第二套。
     try:
@@ -545,8 +538,7 @@ def _bake_product_preview(state, task: dict, div: int) -> None:
             if hit is not None:
                 _finish_preview(state, task, "done",
                                 f"cached: 盘上那份已是 ÷{div}"
-                                f"（{hit['w']}×{hit['h']}）"
-                                + _mirror_preview_name(jpg, product))
+                                f"（{hit['w']}×{hit['h']}）")
                 return
     except OSError:
         pass        # 读不了 mtime 就当没命中，往下走正常流程
@@ -564,8 +556,7 @@ def _bake_product_preview(state, task: dict, div: int) -> None:
             return
         out = write_preview_jpg(jpg, pixels, div=div)
         _finish_preview(state, task, "done",
-                        f"baked: ÷{div}（{out['w']}×{out['h']}）"
-                        + _mirror_preview_name(jpg, product))
+                        f"baked: ÷{div}（{out['w']}×{out['h']}）")
     except (PreviewError, OSError) as e:
         _finish_preview(state, task, "failed", f"failed: {e}")
     except Exception as e:  # noqa: BLE001 — 后台循环不该被一行拖死
@@ -610,6 +601,7 @@ def _bake_nosr_preview(task: dict, div: int) -> str:
     if not os.access(str(scene_dir), os.W_OK):
         return f"skipped: {scene_dir} 对服务账号不可写"
     out = paths.drop_preview_path(source)
+    _sweep_legacy_preview(out, source)      # 老点号那份（打开过这张图才有）顺手删掉
     # 盘上那份已是当前档位就不重烤（同 suffix 反复迭代时省掉每次读遍 GB 级文件）。
     # 判据与打开链/产物那份**同一个** cache_hit，没有第二套。
     try:
@@ -778,7 +770,7 @@ def _fingerprint_mismatch(inp: Path, name: str, size_bytes: int) -> str | None:
         # 的，所以 dir 存在时这条必然成立 —— 它挡的不是「这份 jpg 不属于这个场景」，
         # 而是「换了 SR_SCENE_PATH_TEMPLATE、场景目录改了命名」的部署（那种情况下
         # `<目录名>.jpg` 与推断出的目录名对不上）。真正把派生件（`_cloud.jpg`、
-        # `.preview.jpg`）挡在外面的是候选目录根本不存在。
+        # `_preview.jpg`）挡在外面的是候选目录根本不存在。
         # 大小写按 `scene_search.is_scene_file` 的口径（Windows 上用户拖进来的名字
         # 大小写不保证）。
         if want.lower() == inp.parent.name.lower():
@@ -1297,7 +1289,7 @@ def create_app() -> FastAPI:
     def preview(scene_id: str, div: int = Query(2)):
         """场景预览 JPG（响应体即字节）。`?div=` 选下采样档位（各边 ÷div）。
 
-        落点：源同目录（或 `SR_PREVIEWS_ROOT` 镜像树）的 `<stem>.preview.jpg`，
+        落点：源同目录（或 `SR_PREVIEWS_ROOT` 镜像树）的 `<stem>_preview.jpg`，
         **与档位无关** —— 换档位是原地覆盖同一份，靠戳里的 div 判废重烤。
         """
         div = _check_div(div)
@@ -1307,7 +1299,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404,
                                 detail=f"场景不可访问：{e}") from e
         # 源是显示件 jpg、但同目录配着同名栅格：改从**栅格**烤。落点不需要变 ——
-        # `with_suffix(".preview.jpg")` 对 `PAN.jpg` 与 `PAN.tif` 是同一个文件名，
+        # 名字只由源 stem 拼，对 `PAN.jpg` 与 `PAN.tif` 是同一个文件名，
         # 也就是栅格行用的那一份，所以「前端调 jpg 行的 id」与「栅格行自己打开」
         # 命中同一份缓存，不会烤两次。换不换由后端在这一层决定，前端不必知道。
         # 前端只在「栅格烤出来更清晰」时才走到这里（见 api-contract「显示源比较规则」）。
@@ -1325,15 +1317,17 @@ def create_app() -> FastAPI:
         except PreviewError as e:
             raise HTTPException(status_code=422,
                                 detail=f"预览生成失败：{e}") from e
+        _sweep_legacy_preview(jpg, abs_path)     # 老点号那份没有任何读者了
         return FileResponse(str(jpg), media_type="image/jpeg")
 
     @app.get("/api/scenes/{scene_id}/preview-drop")
     def preview_drop(scene_id: str, div: int = Query(2)):
         """拖入链的预览图：**写回源所在的盘阵场景目录**，`<stem>_preview.jpg`。
 
-        与 `/preview` 的有意差别是落点：那份是「平台自己的缓存」（源同目录或
-        `SR_PREVIEWS_ROOT`），这份落进生产场景目录、跟着场景数据长期活 ——
-        拖入的场景就该烤一次长期可用，而不是每天第一次拖入重烤一遍。
+        **名字与 `/preview` 那条完全一样**（2026-09-22 起点号那份不再产出），差别只剩
+        目录：那份是「平台自己的缓存」（源同目录，配了 `SR_PREVIEWS_ROOT` 就搬进镜像
+        树），这份**恒落生产场景目录**、跟着场景数据长期活 —— 拖入的场景就该烤一次长期
+        可用，而不是每天第一次拖入重烤一遍。
 
         兜底：场景目录不可写（服务账号没有写权限）时退回
         `SR_TEMP_PREVIEWS_ROOT/<今天>/`，并回 `X-SR-Preview-Fallback: tmp`
@@ -1366,6 +1360,7 @@ def create_app() -> FastAPI:
             if not os.access(str(main_jpg.parent), os.W_OK):
                 raise PreviewError(f"场景目录不可写：{main_jpg.parent}")
             ensure_preview_jpg(str(abs_path), str(main_jpg), div=div)
+            _sweep_legacy_preview(main_jpg, abs_path)
         except (PreviewError, OSError) as e:
             try:
                 tmp_jpg = preview_cache.tmp_preview_path(abs_path)
@@ -1392,7 +1387,7 @@ def create_app() -> FastAPI:
         哪些名字，`exists: false` 说明结果）。
 
         每一类都直接拿它自己的 id 调 `GET /api/scenes/{id}/preview?div=N` 就能看图
-        （三类各有自己的 `<stem>.preview.jpg` 落点，天然不撞名），所以这个端点
+        （三类各有自己的 `<stem>_preview.jpg` 落点，天然不撞名），所以这个端点
         **不新增任何烘焙入口**。
 
         `suffix` 取值顺序：`?suffix=`（用户断言）→ 该 `lq_path` 最近一条 COMPLETED

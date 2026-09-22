@@ -49,7 +49,7 @@
 
 ### 2.5 缓存签名
 
-烘焙产物就地覆盖，文件名不随规则变（`<stem>.preview.jpg`，拖入那条是 `<stem>_preview.jpg`）。因此「这份缓存还符不符合当前规则」不能靠文件名区分，靠的是写在 JPEG 注释段里的一个 ASCII 串：
+烘焙产物就地覆盖，文件名不随规则变（一条规则：`<源 stem>_preview.jpg`，见 §4.8）。因此「这份缓存还符不符合当前规则」不能靠文件名区分，靠的是写在 JPEG 注释段里的一个 ASCII 串：
 
 ```
 srprev:v3:div4+equal:q85
@@ -77,7 +77,7 @@ flowchart TD
 
     FETCH -->|"无 jpgUrl（库外）"| P1["GET /api/scenes/{id}/preview<br/>后端按需烘焙，直接回字节"]
     FETCH -->|"有 jpgUrl，无缓存（库内首开）"| P2["GET /api/scenes/{id}/preview<br/>这一步只为把缓存烤出来"] --> P3
-    FETCH -->|"有 jpgUrl，有缓存"| P3["GET 静态 URL /disk-array/.../*.preview.jpg<br/>nginx 直接返回"]
+    FETCH -->|"有 jpgUrl，有缓存"| P3["GET 静态 URL /disk-array/.../*_preview.jpg<br/>nginx 直接返回"]
 
     P1 --> BLOB["JPEG 字节"]
     P3 --> BLOB
@@ -166,7 +166,7 @@ flowchart TD
 
 源文件本身就是 `.jpg/.jpeg` 时（盘阵里的显示就绪图），不烘焙：`hasPreview` 恒真、`previewDiv` 恒 `null`
 （档位对显示件没有意义）、`jpgUrl` 直接指向源文件，`/preview` 也直接回该文件。前端靠
-`isBakedPreviewUrl()`（`/\.preview\.jpe?g$/`）把这类行与「平台自己烤的」区分开，否则会把恒为 `null`
+`isBakedPreviewUrl()`（`/[_\.]preview\.jpe?g$/i`）把这类行与「平台自己烤的」区分开，否则会把恒为 `null`
 的 `previewDiv` 一律当成「档位不符」，每次打开都白打一次 `/preview`。
 
 **2026-09-20 起这条多一个岔路（工作流 B）**：显示件 jpg 若是「盘阵预生成的中间产物、分辨率不够」，
@@ -204,7 +204,7 @@ round(max(rasterW, rasterH) / div) > max(jpgW, jpgH)   → 换成服务端从栅
 ### 4.3 取字节的两条路
 
 - **库外（裸 `.tif`）**：没有可以映射成静态 URL 的位置，走 `GET /api/scenes/{id}/preview`，后端烘焙完直接 `FileResponse` 回字节。
-- **库内**：优先走 nginx 静态 URL `/disk-array/.../*.preview.jpg`，由 nginx 原生缓存承担重复请求。缓存尚未生成时，先打一次 `/preview` 把它烤出来，再取静态 URL——这一步是必须的，因为 nginx 不会去触发后端生成。
+- **库内**：优先走 nginx 静态 URL `/disk-array/.../*_preview.jpg`，由 nginx 原生缓存承担重复请求。缓存尚未生成时，先打一次 `/preview` 把它烤出来，再取静态 URL——这一步是必须的，因为 nginx 不会去触发后端生成。
 
 场景 id 有两种形态，靠前缀区分：库行是 `base64url(rel)`，手工行（resolve 出来的）是 `~` + `base64url(绝对路径)`。后者经 pathguard 的前缀白名单校验，`..`、白名单外的绝对路径、非绝对路径一律拒绝。
 
@@ -286,13 +286,27 @@ rec 的 `route` 记为 `'jpg'`，`layout` 记为「盘阵 JPG（1/4 尺度 + 直
 
 ### 4.8 落点与原子写
 
-落点有**三种**，都由「源在哪、走哪条入口」决定，与档位无关（档位只进规则戳，不改文件名）：
+**文件名只有一条规则**（2026-09-22 起，`paths.preview_jpg_name`）：
 
-- 源在 `SR_SCENES_ROOT` 之下 → `preview_jpg_path`：默认 `<源同目录>/<stem>.preview.jpg`；若配了 `SR_PREVIEWS_ROOT`（必须在 scenes root 之下，否则 nginx 单根 alias 覆盖不到）则搬到 `<previews_root>/<rel 目录>/<stem>.preview.jpg`，URL 不变。
-- 源在库外（粘路径 / 裸 `.tif` 打开）→ 恒为 `<源同目录>/<stem>.preview.jpg`。这类不走 nginx 静态 URL，不需要在 URL 层面可映射。
-- **拖拽入口**（`GET /api/scenes/{id}/preview-drop`）→ **也落源同目录** `<stem>_preview.jpg`（`paths.drop_preview_path`）。
-  与上面两条的三点差别：多了个下划线、**不吃 `SR_PREVIEWS_ROOT`**（恒落源同目录）、
-  **没有任何清理者**。响应带 `Cache-Control: no-store`。
+```text
+<源栅格 stem>_preview.jpg
+```
+
+三条链（惰性打开 / 急烤 / 拖入）落的是同一个名字，**差别只剩目录**。档位不参与命名，
+只进规则戳（换档位原地覆盖同一份）。
+
+- 源在 `SR_SCENES_ROOT` 之下 → `preview_jpg_path`：默认 `<源同目录>/<stem>_preview.jpg`；若配了 `SR_PREVIEWS_ROOT`（必须在 scenes root 之下，否则 nginx 单根 alias 覆盖不到）则搬到 `<previews_root>/<rel 目录>/<stem>_preview.jpg`，URL 不变。
+- 源在库外（粘路径 / 裸 `.tif` 打开）→ 恒为 `<源同目录>/<stem>_preview.jpg`。这类不走 nginx 静态 URL，不需要在 URL 层面可映射。
+- **拖拽入口**（`GET /api/scenes/{id}/preview-drop`）→ 也是这个名字（`paths.drop_preview_path`），
+  差别只有一条：**不吃 `SR_PREVIEWS_ROOT`**，恒落源同目录 —— 拖入链要的是「烤一次长期可用」，
+  搬去缓存根就又变成缓存了。响应带 `Cache-Control: no-store`。
+
+**改名前的点号那份（`<stem>.preview.jpg`）不再由任何链产出，也没有任何读者**：改名把三条链的
+落点统一之后，旧文件由 `paths.legacy_preview_path` 从新落点反推（同目录、同源 stem，只差一个
+字符），在每条链**处理到那份栅格时**顺手删掉 —— 烤之前删一次（`_bake_product_preview` /
+`_bake_nosr_preview`）、命中缓存时也删（`/preview` 与 `/preview-drop` 两个端点各一次），
+失败不报错（`_sweep_legacy_preview` 只吞 `OSError`）。**没有全盘清扫**：平台不列目录（硬约束），
+所以没被任何链碰过的场景目录里那份点号文件会一直留着 —— 它不影响任何判定，只是占地方。
 
 拖拽那份 2026-09-19 改成了落盘阵（此前落在 `SR_TEMP_PREVIEWS_ROOT` 的当天桶里，次日 0 点整桶删）。
 改的理由：当天有效意味着**每天第一次拖入都要重烤一遍**（几十秒），而这份产物本来就与场景数据
@@ -312,11 +326,11 @@ rec 的 `route` 记为 `'jpg'`，`layout` 记为「盘阵 JPG（1/4 尺度 + 直
 `<目录名>_sr_preview.jpg` 等价于拖那份产物（`lq_path` 仍为空）。只剥一层，剥完仍在名单里
 （`<目录名>_cloud_preview`）照旧不认。
 
-**栅格行与 jpg 行共用同一份落点（2026-09-20）**：`.preview.jpg` 是 `with_suffix` 换出来的，
-对 `PAN.tif` 与 `PAN.jpg` 是**同一个文件名**。工作流 B 把 jpg 源的烘焙换到栅格上之后，
+**栅格行与 jpg 行共用同一份落点（2026-09-20）**：文件名只由**源 stem** 拼（`preview_jpg_name`），
+对 `PAN.tif` 与 `PAN.jpg` 是**同一个文件名**（2026-09-22 改名后仍成立）。工作流 B 把 jpg 源的烘焙换到栅格上之后，
 两行命中的是同一份缓存 —— 好处是不会烤两次、用户从哪一行打开看到的字节都一样；
 代价是**同一份落点会被不同档位的客户端互相顶掉**（这个病今天就有，工作流 B 只是把它拖进更多行）。
-本轮不治理 div 抖动（不引入带档位的落点 `<stem>.preview.div2.jpg`），在文档里点明，不装作没有。
+本轮不治理 div 抖动（不引入带档位的落点 `<stem>_preview.div2.jpg`），在文档里点明，不装作没有。
 
 **落盘阵失败时兜底**：写盘阵要求服务账号（`User=nginx`）对场景目录有写权限，这一条在真机上仍是
 待确认项。所以先 `os.access(dir, W_OK)` 预判，不可写或写失败 → 退回原来的临时缓存落点
@@ -335,20 +349,17 @@ rec 的 `route` 记为 `'jpg'`，`layout` 记为「盘阵 JPG（1/4 尺度 + 直
 COMPLETED 之后由后台循环顺手烤掉，用户跑完立刻打开时盘上已经有了。
 
 **为什么只烤产物**：输入影像与「上一次产物」两份「用户到底要不要看」在打开之前无从知道（对比 UI
-还没做），而产物是刚跑完的、几乎一定会被打开。三份落点天然独立（`<stem>.preview.jpg` /
-`<stem>_<suffix>.preview.jpg` / `…_NOSR.preview.jpg`），各烤各的、互不覆盖，所以**不新增任何
+还没做），而产物是刚跑完的、几乎一定会被打开。三份落点天然独立（各由自己的源 stem 拼出
+`<stem>_preview.jpg`，见 §4.8 那条唯一规则），各烤各的、互不覆盖，所以**不新增任何
 烘焙入口**：三类图各拿自己的 id 调现有的 `GET /api/scenes/{id}/preview?div=N` 就行。
-（2026-09-21 起多烤一份**未超分**的，但走的是另一个落点与另一个函数，见 §4.11 —— 上面这
-三个点号落点的惰性地位一个字没变。）
+（2026-09-21 起多烤一份**未超分**的，但走的是另一个函数，见 §4.11 —— 上面这三份的惰性
+地位一个字没变。）
 
-**烤完那一份之后再落一份下划线同名件**（2026-09-21 用户口径，`app.py::_mirror_preview_name`）：
-写盘成功后把它 `copyfile` 成 `<产物 stem>_preview.jpg` —— 与拖入链（§4.10）、未超分那份
-（§4.11）同一个名字规矩，`ls` 场景目录时不会一份是点号一份是下划线。**这是「再落一份」，
-不是「把点号那份改名」**：点号那份必须留着，理由见 §4.10 那张表下面的一段。命中缓存那一轮
-也补这一次（老目录只剩点号那份时，靠它把下划线那份补齐），但**不覆盖更新的那份** —— 拖入链
-可能刚按别的档位烤过它（`mtime` 比缓存新就原样不动）。镜像失败只在 `preview_note` 尾巴上
-加一句「同名（下划线）那份没落上：<原因>」，**不改行的结论**：它只是给人看的那一份，产物
-预览的成败由点号那份定。
+**急烤的落点与惰性那条链现在是同一个文件**（2026-09-22 起；此前是「点号那份再镜像一份下划线
+件」，`_mirror_preview_name` 已删）：用户跑完立刻打开命中的就是急烤那份，字节不差 ——
+`test_api_platform.py::TestProductPreviewBake::test_the_eager_bake_and_a_lazy_open_are_the_same_file`
+钉的就是这条，顺带钉「一个场景目录里只有一份预览名」。改名前的点号那份在这一轮里被顺手删掉
+（§4.8 末段）。
 
 状态机（两列 `preview_state` / `preview_note`，随 `GET /api/queue` 每行带出）：
 
@@ -415,30 +426,25 @@ RUNNING→COMPLETED 谁把 `changed` 拿走，在那里挂入队钩子必然偶�
 留下 `<该环节栅格的 stem>_preview.jpg`。这一节只讲那条烘焙，认环节的判据见
 [api-contract.md](../planning/api-contract.md) §3.5。
 
-**落点是 `_preview.jpg` 而不是 `.preview.jpg`，这是两套命名，别当成一回事**：
+**落点就是 §4.8 那条唯一规则 `<源栅格 stem>_preview.jpg`** —— 与惰性/急烤两份同名（2026-09-22
+前拖入链是唯一用下划线的那条，改名后三条链一致）：
 
-| | 谁写的 | 名字 | 谁在读 |
-|---|---|---|---|
-| 预览缓存 | `ensure_preview_jpg`（惰性 / 急烤） | `<stem>.preview.jpg` | 服务端自己（`hasPreview` / `/preview` 命中） |
-| 拖入链 | `POST /api/scenes/{id}/preview-drop` | `<stem>_preview.jpg` | 给人看的：`ls` 一眼就知道这份图有预览 |
+| 谁写的 | 名字 | 谁在读 |
+|---|---|---|
+| `ensure_preview_jpg`（惰性 / 急烤） | `<stem>_preview.jpg` | 服务端自己（`hasPreview` / `previewDiv` / 静态 `jpgUrl` 命中） |
+| `POST /api/scenes/{id}/preview-drop` | 同一个名字 | 同一套判据；另外 `ls` 一眼就知道这份图有预览 |
 
-两者刻意不互相顶替：`_preview.jpg` 在 `scene_search.is_scene_file` 的白名单**之外**（它是
-「派生物」，不是场景件），所以它不会被当成新的一类图收进列表；而缓存那份的档位戳
-（§4.8）与规则签名（§4.6）只对 `.preview.jpg` 有意义，`_preview.jpg` 不参与任何命中判定。
+三条链同名之后，读判据也必须跟着走，否则就会出现「写了却没人认」的空转：
 
-**两条链烤的是同一份像素，那就该有两个同名件 —— 2026-09-21 起急烤也落一份下划线名**
-（§4.9）：用户 `ls` 下来，一份栅格一个规矩，不会一份点号一份下划线。**下划线那份永远不能
-顶替点号那份**，它只是给人看的：
+- 服务端 `hasPreview` / `previewDiv`（行与 `/siblings` 两处）与静态 `jpgUrl`
+  都取自同一份落点，改名后自动一致；
+- 前端 `lib/scene.ts::isBakedPreviewUrl` 认结尾 `[_\.]preview\.jpe?g`，据此决定拼不拼
+  `?div=`（击穿 nginx 的 `max-age=3600`）以及换档位后要不要重烤（`previewNeedsBake`）。
+  **点号那代一并认下**：静态 URL 是后端给的，两边版本错开一档时认得出比认不出安全
+  （认不出会把 `?div=` 吞掉，换档位后最长一小时看到旧图）。
 
-- 服务端自己的读判据全锚在点号那份上：`hasPreview` / `previewDiv`（行与 `/siblings` 两处）、
-  静态 `jpgUrl`；
-- 前端 `lib/scene.ts::isBakedPreviewUrl` 按**结尾 `.preview.jpg`** 认「这是烤出来的预览」，
-  据此决定拼不拼 `?div=`（击穿 nginx 的 `max-age=3600`）以及换档位后要不要重烤
-  （`previewNeedsBake`）。`_preview.jpg` 结尾不匹配那个正则 —— 一旦把落点改成下划线，
-  烤出来的预览会被当成「源本身就是显示件」，档位与重烤两条逻辑同时失效。
-
-所以「去掉点号那份」不是改个字符串，而是要把上面这些读判据一起搬过去；当前的选择是加一份
-同字节件（`_mirror_preview_name`），两边都不动。
+`_preview.jpg` 仍在 `scene_search.is_scene_file` 的白名单**之外**（它要求文件名等于目录名或
+`PAN`，`_preview.jpg` 两个都不沾边 —— 有测试钉着），所以它不会被收成一行新场景。
 
 **静默**是用户口径，也是实现约束（`stores/viewer.ts::bakeDropPreview`）：拖进来的 jpg 若
 判本地那份赢（§4.6，本地那份更清晰时），展示像素用**用户拖进来那张原图**，同时
@@ -487,7 +493,7 @@ RUNNING→COMPLETED 谁把 `changed` 拿走，在那里挂入队钩子必然偶�
   待核项记在 [current-question.md](../status/current-question.md)。
 
 谁**不**读这个文件（今天）：服务端不给它算 `hasPreview`（`/siblings` 的「上一次产物」那一项找的是
-点号落点 `…_NOSR.preview.jpg`），前端也不按它取图。它是一份给人看、给人拖的产物 —— 拖回查看器
+落点 `…_NOSR_preview.jpg`），前端也不按它取图。它是一份给人看、给人拖的产物 —— 拖回查看器
 那条路能认（`stage_of_jpg` 剥掉 `preview` 尾巴后按 `PAN_NOSR.tif` 判环节）。
 
 ---
@@ -502,7 +508,7 @@ RUNNING→COMPLETED 谁把 `changed` 拿走，在那里挂入队钩子必然偶�
 
 **Q：改了烘焙规则，需要清理盘阵上的旧缓存吗？**
 不需要。旧图没有新签名，首次打开时会被判定失效并原地重烤。代价是每张图在升级后第一次打开会慢一次。
-2026-09-19 的档位改版就是这种情况：盘上所有 `<stem>.preview.jpg` 的戳是 `v2`，新代码认 `v3`，
+2026-09-19 的档位改版就是这种情况：盘上所有预览的戳是 `v2`，新代码认 `v3`，
 于是逐个场景首次打开时重烤一轮（**惰性**，不是一次性全量；把滑块停在 ÷2 也一样会重烤）。
 静态 URL 那条另有一层 nginx 的 `max-age=3600`，靠前端给 URL 拼 `?div=N` 击穿 —— 档位变了查询串
 就变，浏览器拿不到旧档位那张。
@@ -554,7 +560,7 @@ div 抖动）——代价是多花一次几十秒，不是错误结果。
 
 - [docs/status/current-question.md](../status/current-question.md) —— 交接入口，§4 记录了烘焙规则 v2 的六项决策与验证数据
 - [docs/experience/gui-experience.md](../experience/gui-experience.md) —— §9 与 §9.1 收录了这条链路改版时遇到的具体问题；§10 是**图像对比**（一个画布两个格子）的经验，与本文的关系在下面这一段
-- **本文与图像对比的关系（2026-09-20 一句话）**：对比功能自己**不烘焙**，它烤的就是本文这条路 —— 想看同场景的三类图（输入 / 本次产物 / 上一次产物）时，前端拿 `GET /api/scenes/{id}/siblings` 给出的 id 直接调本文的 `GET /api/scenes/{id}/preview?div=N`，三条入口共用同一套档位与规则戳，落点各归各的 `<stem>[.<suffix>].preview.jpg`；前端消费口径见契约 §3.8.1，两个格子的坐标与共享变换见 `gui-experience.md` §10。
+- **本文与图像对比的关系（2026-09-20 一句话）**：对比功能自己**不烘焙**，它烤的就是本文这条路 —— 想看同场景的三类图（输入 / 本次产物 / 上一次产物）时，前端拿 `GET /api/scenes/{id}/siblings` 给出的 id 直接调本文的 `GET /api/scenes/{id}/preview?div=N`，三条入口共用同一套档位与规则戳，落点各归各的（`<各族自己的源 stem>_preview.jpg`，见 §4.8）；前端消费口径见契约 §3.8.1，两个格子的坐标与共享变换见 `gui-experience.md` §10。
 - **前端这一层怎么少烤几次（2026-09-20 补）**：客户端有「预览 blob 的字节封顶 LRU + 已开图去重 + 进对比模式的后台预取（默认关）」三件事，**预取的合格项判据就是「盘上已有一份现成预览且档位对得上」**，所以预取只可能命中本文写下的文件、永不触发烘焙。键与边界见契约 §3.8.2；为什么以**水平**归一化范围为准、`viewFor` 怎么记账见 `gui-experience.md` §10.7。
 - [docs/planning/api-contract.md](../planning/api-contract.md) —— §3.5 是场景接口的契约描述
 - [docs/knowledge/jpg-export-background.md](jpg-export-background.md) —— 浏览器侧的 JPG 导出，与本文的产物是两回事

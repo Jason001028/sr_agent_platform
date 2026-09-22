@@ -5,7 +5,7 @@
 //      两个 location：`/disk-array/` → 场景根（alias）、其余 → dist。
 //      页面经 evaluateOnNewDocument 注入 window.__SR_CFG__ = { apiBase, staticBase }。
 // 覆盖：列表/检索 → 盘阵 .jpg 源行（最小原型 §4.7：不烘焙直接开）→ 「生成并打开」的
-//      懒生成 + 静态读 JPG + 同构 rec → 派生件（.preview.jpg 缓存 / <名字>_mask.tif）不入
+//      懒生成 + 静态读 JPG + 同构 rec → 派生件（_preview.jpg 缓存 / <名字>_mask.tif）不入
 //      列表 → 「去查看器」保状态跳转 → 掩码按**元数据** W/H 换算 → 「提交 SR」带出目录 →
 //      /queue 预填表单（§4.3）→ 打开失败必须落在 .sp-err（错误不写 viewer 的错误条）。
 // 说明：本文件 2026-09-15 重建。原文件（45 断言）随 .e2e/ 被 gitignore 丢失，断言按
@@ -472,7 +472,7 @@ async function main() {
       await sleep(600);
       assert(countUrl(previewRe) === 0,
         `没有为 JPG 源发 /preview 请求（后端不为它烘焙）(${countUrl(previewRe)})`);
-      assert(!fs.existsSync(path.join(scenesRoot, JPG_ROW, JPG_ROW + '.preview.jpg')),
+      assert(!fs.existsSync(path.join(scenesRoot, JPG_ROW, JPG_ROW + '_preview.jpg')),
         '盘上确实没有生成它的预览缓存');
       assert(countUrl(new RegExp(`^${base}${DISK_PREFIX}${JPG_ROW}/${JPG_ROW}\\.jpg$`)) >= 1,
         '静态读的是源文件本身 /disk-array/<场景>/<场景>.jpg');
@@ -484,15 +484,15 @@ async function main() {
 
       /* ---------- C. 未烘焙 TIFF：懒生成 + 静态直读 ---------- */
       console.log('\n[C] 「生成并打开」= 懒生成预览 + 静态直读');
-      const previewJpg = path.join(scenesRoot, HDR_ROW, HDR_ROW + '.preview.jpg');
+      const previewJpg = path.join(scenesRoot, HDR_ROW, HDR_ROW + '_preview.jpg');
       assert(!fs.existsSync(previewJpg), '点击前盘上没有这张图的预览缓存');
       await clickRowButton(page, HDR_ROW);
       await waitRowTag(page, HDR_ROW, '已生成');
       assert(countUrl(previewRe) === 1,
         `调用 1 次 /api/scenes/{id}/preview 懒生成 (${countUrl(previewRe)})`);
       assert(fs.existsSync(previewJpg), `后端落盘 ${path.basename(previewJpg)}`);
-      assert(countUrl(new RegExp(`^${base}${DISK_PREFIX}${HDR_ROW}/${HDR_ROW}\\.preview\\.jpg\\?div=2$`)) >= 1,
-        '静态读图走 /disk-array/<场景>/…preview.jpg?div=2（nginx alias 位；'
+      assert(countUrl(new RegExp(`^${base}${DISK_PREFIX}${HDR_ROW}/${HDR_ROW}_preview\\.jpg\\?div=2$`)) >= 1,
+        '静态读图走 /disk-array/<场景>/…_preview.jpg?div=2（nginx alias 位；'
         + '查询串是击穿 max-age 用的，location 匹配不看它）');
       await waitRowBtn(page, HDR_ROW, '打开');   // 按钮落定再读，理由见 waitRowBtn
       const rowsNow = await rows(page);
@@ -501,12 +501,12 @@ async function main() {
       assert(rowsNow[1].tag === '未生成', '未打开的第三张图不受影响（仍是「未生成」）');
 
       /* ---------- D. 派生件不入列表 ---------- */
-      console.log('\n[D] 烘焙出的 .preview.jpg 不算新场景');
+      console.log('\n[D] 烘焙出的 _preview.jpg 不算新场景');
       await relist('检索');
       await waitRows(page, 3);
       rs = await rows(page);
-      assert(rs.length === 3, `重检索仍是 3 行（is_scene_file 排除派生的 .preview.jpg）(${rs.length})`);
-      assert(rs.every((r) => !r.name.endsWith('.preview')), '没有一行是 .preview.jpg 缓存');
+      assert(rs.length === 3, `重检索仍是 3 行（is_scene_file 排除派生的 _preview.jpg）(${rs.length})`);
+      assert(rs.every((r) => !r.name.endsWith('_preview')), '没有一行是 _preview.jpg 缓存');
       assert(rs[2].tag === '已生成', '重检索后已生成的仍是「已生成」（缓存被识别）');
 
       /* ---------- E. 检索过滤 ---------- */
@@ -742,9 +742,9 @@ async function main() {
         `打开这个 jpg 行打了一次 /preview（栅格那份预览由后端落到同一处）`
         + `(${countUrl(previewRe) - b2Preview})`);
       assert(countUrl(new RegExp(`^${base}${DISK_PREFIX}${JPG_ROW}/`
-        + `${JPG_ROW}\\.preview\\.jpg\\?div=2$`)) >= 1,
-        '图走静态 /disk-array/<场景>/<场景>.preview.jpg?div=2');
-      assert(fs.existsSync(path.join(jpgRowDir, JPG_ROW + '.preview.jpg')),
+        + `${JPG_ROW}_preview\\.jpg\\?div=2$`)) >= 1,
+        '图走静态 /disk-array/<场景>/<场景>_preview.jpg?div=2');
+      assert(fs.existsSync(path.join(jpgRowDir, JPG_ROW + '_preview.jpg')),
         '盘上真落了那份预览（不是"没报错"就算过）');
 
       await clickByText(page, '去查看器');

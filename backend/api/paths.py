@@ -7,7 +7,7 @@
 ----
 * SR_SCENES_ROOT   盘阵场景根目录（disk 后端与白名单根；unset → fake 回退）。
 * SR_PREVIEWS_ROOT 可选：预览 JPG 缓存根。默认 = 与源同目录
-                   （<源dir>/<basename>.preview.jpg）。若设置则必须落在
+                   （<源dir>/<源 stem>_preview.jpg）。若设置则必须落在
                    SR_SCENES_ROOT 之下（nginx 单根 alias 即可同时覆盖
                    raw TIF 与预览 JPG）。URL 一律用相对 scenes 根的
                    `/disk-array/<rel>` 表达。
@@ -39,7 +39,8 @@ __all__ = [
     "PathDeniedError",
     "scenes_root", "previews_root", "disk_url_prefix",
     "ensure_within", "rel_of_scene", "scene_id", "scene_id_to_abs",
-    "rel_url", "preview_jpg_path", "preview_jpg_for", "drop_preview_path",
+    "rel_url", "preview_jpg_name", "preview_jpg_path", "preview_jpg_for",
+    "drop_preview_path", "legacy_preview_path",
 ]
 
 
@@ -144,12 +145,25 @@ def rel_url(path: Path, root: Path) -> str:
     return disk_url_prefix() + quoted
 
 
+def preview_jpg_name(source_abs: Path) -> str:
+    """预览 JPG 的文件名 —— **全平台唯一一条**：`<源 stem>_preview.jpg`。
+
+    2026-09-22 起由 `<stem>.preview.jpg` 改名而来。理由不是好看：同一份栅格被三条链
+    各烤一份（急烤 / 打开时的惰性 / 拖入链），点号那份与下划线那份只差一个字符，
+    真机上就是一个场景目录里躺着两个几乎同名、内容相同的文件，谁也说不清该看哪个。
+    现在三条链落同一个名字，点号那份**没有任何读者**了 —— 旧文件由
+    `legacy_preview_path` 在每条链处理到那份栅格时顺手删掉。
+    """
+    return Path(source_abs).stem + "_preview.jpg"
+
+
 def preview_jpg_path(source_abs: Path, root: Path) -> Path:
     """Cache location for a scene's preview JPG.
 
-    Default = `<源同目录>/<basename>.preview.jpg`（09-02 决策首选）；若配了
-    SR_PREVIEWS_ROOT（必须仍在 scenes root 内）则放 `<previews_root>/<rel 目录>
-    /<basename>.preview.jpg`，nginx 单根 alias 下 URL 不变。
+    Default = `<源同目录>/<源 stem>_preview.jpg`；若配了 SR_PREVIEWS_ROOT（必须仍在
+    scenes root 内）则放 `<previews_root>/<rel 目录>/<源 stem>_preview.jpg`，nginx
+    单根 alias 下 URL 不变。**名字与档位无关**：换档位是原地覆盖同一份、靠戳里的 div
+    判废重烤（见 `preview_jpg.rule_stamp`）。
     """
     if not _is_within(source_abs, root):
         raise PathDeniedError("源路径在白名单之外")
@@ -160,37 +174,49 @@ def preview_jpg_path(source_abs: Path, root: Path) -> Path:
                 f"SR_PREVIEWS_ROOT（{pre}）必须在 SR_SCENES_ROOT 之下，"
                 "否则 nginx 单根暴露覆盖不到")
         rel_dir = source_abs.resolve().relative_to(root.resolve()).parent
-        return (pre.resolve() / rel_dir) / (source_abs.stem + ".preview.jpg")
-    return source_abs.with_suffix(".preview.jpg")
+        return (pre.resolve() / rel_dir) / preview_jpg_name(source_abs)
+    return source_abs.with_name(preview_jpg_name(source_abs))
 
 
 def preview_jpg_for(source_abs: Path, root: Path | None) -> Path:
-    """预览 JPG 的落点：库内沿用老规则，库外（手工路径）落源同目录。
+    """预览 JPG 的落点：库内 `preview_jpg_path`，库外（手工路径）落源同目录。
 
-    库内（source 在 SR_SCENES_ROOT 之下）语义与 `preview_jpg_path` 完全一致
-    （含 SR_PREVIEWS_ROOT 缓存搬家，URL 仍可被 nginx 单根 alias 覆盖）。
-    库外没有 scenes 根可用，直接 `<源同目录>/<stem>.preview.jpg` —— 这类
-    场景不走 nginx 静态 URL，由 `GET /api/scenes/{id}/preview` 直接回字节，
-    所以不需要在 URL 层面可映射。
+    两个分支**文件名相同**，差别只在目录（库内可被 `SR_PREVIEWS_ROOT` 搬去镜像树；
+    库外没有 scenes 根可用，恒落源同目录 —— 这类场景不走 nginx 静态 URL，由
+    `GET /api/scenes/{id}/preview` 直接回字节，所以不需要在 URL 层面可映射）。
     """
     if root is not None and _is_within(source_abs, root):
         return preview_jpg_path(source_abs, root)
-    return source_abs.with_suffix(".preview.jpg")
+    return drop_preview_path(source_abs)
 
 
 def drop_preview_path(source_abs: Path) -> Path:
-    """拖入链的落点：**恒** `<源同目录>/<stem>_preview.jpg`（下划线，非点号）。
+    """拖入链的落点：**恒** `<源同目录>/<源 stem>_preview.jpg`。
 
-    与 `preview_jpg_for` 的三点不同，都是有意为之：
+    与 `preview_jpg_for` 现在**同名**（2026-09-22 起），差别只剩目录：
 
     1. **不吃 `SR_PREVIEWS_ROOT`** —— 拖入链要的是「烤一次长期可用」，落进生产场景目录
-       才成立；搬去缓存根就又变成缓存了。代价是同一场景会有两份产物（`_preview.jpg`
-       与 `.preview.jpg`），且这个新名**没有任何清理者**（原地覆盖、不堆积）。
+       才成立；搬去缓存根就又变成缓存了。
     2. **恒落源同目录**，不区分库内库外 —— 拖入的生产场景本来就在盘阵里，而库外路径
        （手工粘贴的任意绝对路径）也没有第二个合理的落点。
-    3. **下划线而非点号**：`_preview.jpg` 不在 `scene_search.is_scene_file` 的白名单里
-       （要求 stem == 目录名 或 PAN），所以它**不会**在场景库列表里多出一行。
+    3. **不进场景库列表**：`_preview.jpg` 不在 `scene_search.is_scene_file` 的白名单里
+       （要求 stem == 目录名 或 PAN），所以它不会被当成新的一类图收进来。
 
     库外路径由 `ensure_allowed` 的前缀白名单把关，白名单之外的在调用方就被挡了。
     """
-    return Path(source_abs).with_name(Path(source_abs).stem + "_preview.jpg")
+    return Path(source_abs).with_name(preview_jpg_name(source_abs))
+
+
+def legacy_preview_path(jpg_path: Path) -> Path:
+    """改名前的点号落点（`<stem>.preview.jpg`）：**由新落点反推**。
+
+    同一目录、同一源 stem，只差文件名里一个字符 —— 两条老规则（`with_suffix` 与
+    `SR_PREVIEWS_ROOT` 的镜像树）都把那份文件放在新落点同一个目录里，所以反推不需要
+    root。传进来的不是本函数的落点（stem 不以 `_preview` 结尾）时**原样返回**，好让
+    调用方能一眼跳过。
+    """
+    p = Path(jpg_path)
+    tail = "_preview"
+    if not p.stem.endswith(tail):
+        return p
+    return p.with_name(p.stem[: -len(tail)] + ".preview" + p.suffix)

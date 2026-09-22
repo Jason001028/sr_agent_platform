@@ -20,6 +20,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from backend.api import paths
 from backend.api.app import create_app, _bake_nosr_preview, _eager_bake_tick
 from backend.api.platform import (_Subscriber, _broadcast, _queue_state,
                                   _task_state, chat_send)
@@ -778,7 +779,8 @@ class TestProductPreviewBake(PlatformBase):
                               w, h)[0]
 
     def _jpg(self, product):
-        return product.with_suffix(".preview.jpg")
+        """落点：`<源 stem>_preview.jpg`（2026-09-22 起全平台唯一一条命名规则）。"""
+        return product.with_name(product.stem + "_preview.jpg")
 
     def _row_state(self, app, tid):
         row = app.state.store.get_sr_task_by_id(tid)
@@ -810,10 +812,10 @@ class TestProductPreviewBake(PlatformBase):
         self.assertEqual(state_name, "done")
         self.assertIn("baked", note)
         jpg = self._jpg(product)
-        self.assertTrue(jpg.is_file(), "产物旁边出现了 <产物 stem>.preview.jpg")
+        self.assertTrue(jpg.is_file(), "产物旁边出现了 <产物 stem>_preview.jpg")
         self.assertEqual(self._dims(jpg), (16, 8), "÷4：64×32 → 16×8")
         # 落点与**输入影像**那份天然不同名 —— 三类图互不覆盖的前提
-        self.assertNotEqual(jpg, self.inp.with_suffix(".preview.jpg"))
+        self.assertNotEqual(jpg, self._jpg(self.inp))
 
     def test_input_image_is_not_baked(self):
         """急烤只烤产物。输入影像那份是惰性的：用户看不看它，打开之前无从知道。"""
@@ -821,7 +823,7 @@ class TestProductPreviewBake(PlatformBase):
         self._row(app)
         self._product()
         _eager_bake_tick(app.state)
-        self.assertFalse(self.inp.with_suffix(".preview.jpg").exists())
+        self.assertFalse(self._jpg(self.inp).exists())
 
     def test_div_comes_from_the_env_default_four(self):
         app, _ = self.app_client()
@@ -1091,64 +1093,74 @@ class TestProductPreviewBake(PlatformBase):
         self.assertEqual(after["state"], "COMPLETED",
                          "急烤写回不该动作业状态")
 
-    # ---- 下划线同名那一份（拖入链的名字，2026-09-21 用户口径）--------------
+    # ---- 改名遗留：老点号那份要被清掉（2026-09-22）-------------------------
 
-    def _drop_jpg(self, product):
-        """产物预览的下划线落点：`<产物 stem>_preview.jpg`（拖入链那条规则）。"""
-        return self.scene_dir / (product.stem + "_preview.jpg")
-
-    def test_product_preview_also_lands_the_underscore_name(self):
-        """点号那份服务端自己读；`ls` 场景目录时该只有下划线一个规矩 ——
-        两份字节相同，不是两次编码出来的两张图。"""
-        app, _ = self.app_client()
-        tid = self._row(app)
+    def test_the_eager_bake_and_a_lazy_open_are_the_same_file(self):
+        """改名后的核心不变式：**急烤烤的那份与打开时烤的那份是同一个文件**。
+        改名之前两条链各落一份（只差一个字符），急烤那份命中不了打开路径。"""
+        app, c = self.app_client()
+        self._row(app)
         product = self._product()
 
         _eager_bake_tick(app.state)
+        jpg = self._jpg(product)
+        baked = jpg.read_bytes()
 
-        drop = self._drop_jpg(product)
-        self.assertTrue(drop.is_file(), "产物旁边出现了 <产物 stem>_preview.jpg")
-        self.assertEqual(drop.read_bytes(), self._jpg(product).read_bytes(),
-                         "同一份像素，不是又烤了一遍")
-        self.assertEqual(self._dims(drop), (16, 8))
-        note = self._row_state(app, tid)[1]
-        self.assertIn("baked", note)
-        self.assertNotIn("没落上", note)
+        sid = paths.scene_id_abs(product)
+        r = c.get(f"/api/scenes/{sid}/preview?div=4")
 
-    def test_mirror_does_not_clobber_a_newer_drop_file(self):
-        """拖入链可能刚按别的档位烤过这个名字，比我们这份新 —— 那就别覆盖它。"""
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.content, baked, "打开时命中的就是急烤那份，字节不差")
+        self.assertEqual([p.name for p in sorted(self.scene_dir.glob("*preview*"))],
+                         [jpg.name], "一个场景目录里只有一份预览名")
+
+    def _legacy(self, product):
+        """改名前的点号落点：`<产物 stem>.preview.jpg`（真机升级后只剩老目录里有）。"""
+        return product.with_suffix(".preview.jpg")
+
+    def test_legacy_dot_name_is_removed_when_baking(self):
+        """改名后点号那份没有任何读者了 —— 重烤这一份栅格时就顺手删掉，
+        免得场景目录里躺着两个几乎同名的文件。"""
+        app, _ = self.app_client()
+        self._row(app)
+        product = self._product()
+        legacy = self._legacy(product)
+        legacy.write_bytes(b"old-dot-name-bake")
+
+        _eager_bake_tick(app.state)
+
+        self.assertFalse(legacy.exists(), "老点号那份被清掉")
+        self.assertTrue(self._jpg(product).is_file(), "新名字那份照落")
+
+    def test_legacy_dot_name_is_removed_even_on_a_cache_hit(self):
+        """盘上那份已是当前档位（本轮不重烤）时也得删 —— 「谁看谁清」，
+        不靠重烤那一次机会。"""
         app, _ = self.app_client()
         tid = self._row(app)
         product = self._product()
-        _eager_bake_tick(app.state)
-
-        drop = self._drop_jpg(product)
-        drop.write_bytes(b"drag-baked-elsewhere")
-        newer = os.path.getmtime(self._jpg(product)) + 10
-        os.utime(drop, (newer, newer))
-
+        _eager_bake_tick(app.state)          # 先有新的那一份
+        legacy = self._legacy(product)
+        legacy.write_bytes(b"old-dot-name-bake")
         self._rearm(app, tid)
-        _eager_bake_tick(app.state)
 
-        self.assertEqual(drop.read_bytes(), b"drag-baked-elsewhere")
-        self.assertIn("cached", self._row_state(app, tid)[1])
-
-    def test_cached_branch_also_lands_the_underscore_name(self):
-        """盘上那份点号文件本来是「用户先打开过」烤下的、下划线那份却不在
-        （老版本留下的目录）—— 命中缓存这一轮要把它补上，否则这个目录永远
-        只有点号那一份。"""
-        app, _ = self.app_client()
-        tid = self._row(app)
-        product = self._product()
-        _eager_bake_tick(app.state)
-
-        drop = self._drop_jpg(product)
-        drop.unlink()
-        self._rearm(app, tid)
         _eager_bake_tick(app.state)
 
         self.assertIn("cached", self._row_state(app, tid)[1])
-        self.assertTrue(drop.is_file(), "命中缓存也要把下划线那份补上")
+        self.assertFalse(legacy.exists())
+
+    def test_legacy_sweep_is_best_effort(self):
+        """删不掉（这里用目录占住那个名字制造 OSError）不该影响结论 ——
+        它是纯清理，不是任何判定的前提。"""
+        app, _ = self.app_client()
+        tid = self._row(app)
+        product = self._product()
+        legacy = self._legacy(product)
+        legacy.mkdir()                       # unlink 一个目录 → OSError
+
+        _eager_bake_tick(app.state)
+
+        self.assertEqual(self._row_state(app, tid)[0], "done")
+        self.assertTrue(self._jpg(product).is_file())
 
     # ---- 顺带那一份：未超分（`PAN_NOSR.tif`，2026-09-21 用户口径）----------
 

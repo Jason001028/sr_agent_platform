@@ -492,8 +492,9 @@ export async function fetchSceneJpg(
 /** 显示件 jpg 的「同名栅格赢」那一支：取**栅格那份**预览（见 rasterPreviewWins）。
  *
  * 请求的还是**这条行自己的 id** —— 后端在 `/preview` 那一层把 jpg 换成同名栅格
- * （落点 `with_suffix(".preview.jpg")` 对 jpg 与 tif 是同一个文件名，也就是栅格行
- * 用的那一份），所以前端不必知道换没换，也不必先取一次栅格的 id、更不必多一次往返。
+ * （落点 `<源 stem>_preview.jpg`，名字只由源 stem 拼，对 jpg 与 tif 是同一个文件名，
+ * 也就是栅格行用的那一份），所以前端不必知道换没换，也不必先取一次栅格的 id、
+ * 更不必多一次往返。
  *
  * 写回的是 `row.rasterPreview` 自己的 `hasPreview` / `previewDiv`（就地改，下一同
  * 会话语义与栅格行一致），**绝不碰** `row.hasPreview / row.jpgUrl / row.previewDiv`
@@ -545,7 +546,7 @@ async function fetchRasterPreview(
  * 如实带一句，用户就不会以为「明明能打开，怎么说没落盘阵」。
  *
  * 为什么不复用 `fetchSceneJpg`：那个函数会写 `row.previewDiv` / `hasPreview`，而
- * 那些字段的语义锚在**平台自己那份 `<stem>.preview.jpg`** 上（探的就是它）。
+ * 那些字段的语义锚在**平台自己那份 `<stem>_preview.jpg`** 上（探的就是它）。
  * 被这条链的产物置真之后，用户再从场景库打开同一个场景就会跳过懒生成、直接打一个
  * 404 的静态 URL，图再也出不来。这里一个 SceneRow 字段都不碰。
  *

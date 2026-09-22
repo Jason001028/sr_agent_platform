@@ -8,12 +8,23 @@
 「稀疏采样 + 直方图均衡拉伸」的灰度 JPG，nginx 整块静态直出；检索走 FastAPI。
 本地文件路径（选择 TIF…）保持原有稀疏 TIF 读法，零回归。
 
+> **预览文件名统一成下划线一条（09-22）**：全平台的预览 JPG 现在只有一个名字
+> `<源栅格 stem>_preview.jpg`（此前分两套：缓存那份叫 `<stem>.preview.jpg`，拖入链那份叫
+> `<stem>_preview.jpg`，同一场景目录里躺着两个几乎同名的文件）。三条链（惰性打开 / 急烤 /
+> 拖入）都落这个名字，差别只剩目录（配了 `SR_PREVIEWS_ROOT` 时缓存那份进镜像树）。
+> **换包须知**：① `frontend/dist` 与 `backend` **必须同包更新** —— 认「这是烤出来的预览」
+> 的那条正则两边各有一份，只换一个会让 `?div=` 拼不上（换档位后最长一小时看到旧图）；
+> ② 旧的点号文件由服务端**顺手删**（每条链处理到那份栅格时，烤之前一次、命中缓存一次），
+> **没有全盘清扫** —— 平台不列目录，所以没被任何链碰过的场景目录里那份会一直留着，
+> 它不再被任何代码读写，只是占地方，可以人工删。
+> 详见 [knowledge/preview-bake-pipeline.md](../docs/knowledge/preview-bake-pipeline.md) §4.8/§4.10。
+
 > **烘焙规则 v3：档位可调（09-19）**：尺寸从「各边严格 1/2」改为**各边 ÷2 · ÷4 · ÷8 ·
 > ÷16 · ÷32 五档可选，默认 ÷4**，由查看器工具栏定位组件右侧那条拖动条定（全局：拖入 /
 > 场景库 / 粘路径三条入口同档，存浏览器 localStorage）。拉伸仍为直方图均衡；规则签名写进
 > JPEG 注释（`srprev:v3:div<N>+equal:q<Q>`），**档位进了签名**。旧缓存（`v2` 戳）在首次
 > 打开时会被判定失效并原地重烤（覆盖同名文件，不产生第二份）。
-> **换包须知**：这一轮盘上所有 `<stem>.preview.jpg` 都必然重烤一次（惰性，逐个场景首次
+> **换包须知**：这一轮盘上所有预览都必然重烤一次（惰性，逐个场景首次
 > 打开时触发；把滑块停在 ÷2 也一样）；`frontend/dist` 与 `backend` **必须同包更新** ——
 > 端点改了名（`/preview-tmp` → `/preview-drop`），只换一个会 404。
 > 详见 [knowledge/preview-bake-pipeline.md](../docs/knowledge/preview-bake-pipeline.md) §4.4/§4.6。
@@ -31,7 +42,7 @@
 > 且**不要**放在 `SR_SCENES_ROOT` 之下。
 > 场景库 / 粘路径的长期预览缓存（源同目录或 `SR_PREVIEWS_ROOT` 镜像树）不受影响。
 > **磁盘预算注意**：新落点的 `<stem>_preview.jpg` **没有任何清理者**（原地覆盖，不堆积，
-> 但它与 `<stem>.preview.jpg` 是两份文件），且它**不吃 `SR_PREVIEWS_ROOT`**，恒在场景目录里。
+> 它与缓存那份**同一个名字**，差别只在目录），且它**不吃 `SR_PREVIEWS_ROOT`**，恒在场景目录里。
 
 > **产物预览急烤 + 显示件 jpg 改从同名栅格烤（09-20）**：两件事，都在服务端。
 > ① **急烤**：作业转 COMPLETED 后，后台循环顺手把**产物那一份**预览烤掉（只烤产物；
@@ -47,7 +58,7 @@
 > 从它烤出来的比它更清晰，显示源就换成服务端那份（`/preview` 与 `/preview-drop` 都改，
 > 落点与 `?div=` 照旧）；否则行为**一个字节都不变**。默认档位 ÷4 下基本不触发（24000 源 +
 > 8192 显示件时只有 ÷2 才赢）—— 这是算术，不是没生效。
-> **nginx 不用改**（没有新 URL 形态：静态那条仍是 `/disk-array/…/*.preview.jpg`）。
+> **nginx 不用改**（没有新 URL 形态：静态那条仍是 `/disk-array/…/*_preview.jpg`）。
 > 详见 [knowledge/preview-bake-pipeline.md](../docs/knowledge/preview-bake-pipeline.md) §4.1/§4.8/§4.9。
 
 阶段5 平台 API（09-02 定稿，契约 = `docs/planning/api-contract.md`）：FastAPI 在既有场景
@@ -203,7 +214,7 @@ release/
    - `ExecStart=` 的 venv 路径若不同则改；用 conda 环境则填 `<conda>/envs/web-sr-agent/bin/uvicorn backend.api.app:create_app --factory --host 127.0.0.1 --port 8000`。
 
    > 权限：systemd 默认以 `nginx` 用户跑（`User=` 已设）。该用户需能**读**盘阵 TIF、
-   > **写**预览 JPG 缓存（默认写源同目录 `<源>.preview.jpg`）、**写** `SR_AGENT_DB` 库。
+   > **写**预览 JPG 缓存（默认写源同目录 `<源 stem>_preview.jpg`）、**写** `SR_AGENT_DB` 库。
    > 盘阵目录可写、所有组即可：`chgrp -R nginx <SR_SCENES_ROOT> && chmod -R g+rwX <SR_SCENES_ROOT>`；
    > 库目录单独给写权（**只给这一个目录，别 chown 整棵应用树**）：
    > `mkdir -p <SR_AGENT_DB 父目录> && chown nginx:nginx <SR_AGENT_DB 父目录> && chmod 750 <SR_AGENT_DB 父目录>`。
@@ -237,7 +248,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1/disk-array/<某个rel>
 
 盘阵目录里**本来就是 JPG** 的影像（09-14 起）也作为场景行列出，行内标签显示「JPG 源」：
 `hasPreview` 恒真、`jpgUrl` 指向源文件本身，点「打开」不经过懒生成（列表里 `W/H` 由 Pillow
-读头得到）。后端自己烘焙的 `<basename>.preview.jpg` 缓存不会被当成场景列进去。
+读头得到）。后端自己烘焙的 `<basename>_preview.jpg` 缓存不会被当成场景列进去。
 
 ### 阶段5 平台 API（聊天 / 队列 / 掩码）
 
@@ -435,8 +446,8 @@ systemctl reload nginx
 - **后端**：恢复上一版 `backend/`（git 检出旧提交再拷）→ `systemctl restart sr-api`。
 - 预览 JPG 缓存随源图目录存、跨回滚保留，一般无需重生成。**例外：烘焙规则变更**（如 09-17 v2：各边
   1/2 + 直方图均衡）——旧图缺新规则签名，回滚/升级后首次打开会被判定失效并**原地重烤一次**（覆盖同名
-  `<stem>.preview.jpg`），属预期行为，见 [docs/experience/gui-experience.md](../docs/experience/gui-experience.md) §9.1。另注意 nginx 给
-  `.preview.jpg` 的 `max-age=3600`：升级后浏览器可能还在用旧图，硬刷新一次即可。
+  `<stem>_preview.jpg`），属预期行为，见 [docs/experience/gui-experience.md](../docs/experience/gui-experience.md) §9.1。另注意 nginx 给
+  预览 JPG 的 `max-age=3600`：升级后浏览器可能还在用旧图，硬刷新一次即可。
 
 ### 5.5 走完整离线包发布时的等价动作
 

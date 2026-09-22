@@ -742,12 +742,12 @@ async function main() {
 
       const previewBefore = countUrl(previewRe);
       const dropBefore = countUrl(dropPreviewRe);
-      // 平台自己那份 `<编号>.preview.jpg` 在 A 段粘路径打开时就已经落下了（那条链
-      // 走 /preview，落源同目录）。这里要钉的是「拖入链**不碰**它」—— 用 mtime
-      // 而不是存在性：它本来就该在，判存在性等于什么都没验。
-      const platJpg = path.join(SC_DIR, SC + '.preview.jpg');
-      const platMtime = fs.existsSync(platJpg) ? fs.statSync(platJpg).mtimeMs : null;
-      assert(platMtime !== null, 'A 段粘路径打开时已落下平台那份 .preview.jpg');
+      // 2026-09-22 起预览只有一个名字 `<栅格 stem>_preview.jpg`：平台那份（A 段粘路径
+      // 打开时走 /preview 烤的）与拖入链的落点**是同一个文件**。这条钉「打开时就已经
+      // 有一份」，也是下面「场景目录里只有一份预览」的前提。
+      const platJpg = path.join(SC_DIR, SC + '_preview.jpg');
+      assert(fs.existsSync(platJpg),
+        'A 段粘路径打开时已落下 <编号>_preview.jpg（平台自己那份）');
       await input.uploadFile(upOk);
       await waitFor(page, () => {
         const rs = window.__viewer.recs();
@@ -774,15 +774,13 @@ async function main() {
         && countUrl(previewRe) === previewBefore,
         '取的是拖入专用端点 /preview-drop，没碰生产那条 /preview');
       // 产物落在**生产场景目录**里（`<编号>_preview.jpg`）：烤一次长期可用，
-      // 而不是每天第一次拖入都重烤一遍 —— 这是这次改动的要点。
+      // 而不是每天第一次拖入都重烤一遍 —— 这是这次改动的要点。落点与打开时那份
+      // 同名，所以场景目录里不会躺着两个几乎同名的文件（用户报的就是这个）。
       const dropJpg = path.join(SC_DIR, SC + '_preview.jpg');
       assert(fs.existsSync(dropJpg),
         `拖入的预览写进生产场景目录（${path.basename(dropJpg)}）`);
-      // 平台自己那份长期缓存（点号名）不该被这条链动过：两份产物分工不同
-      // （点号那份给场景库的静态 URL 用、下划线那份是拖入链的），混了的话
-      // `hasPreview`/`previewDiv` 那套判定就跟着乱。
-      assert(fs.statSync(platJpg).mtimeMs === platMtime,
-        '拖入链没动平台自己那份 <编号>.preview.jpg（两份产物各归各的）');
+      assert(fs.readdirSync(SC_DIR).filter((n) => /preview/i.test(n)).length === 1,
+        '场景目录里只有一份预览名（改名前的点号那份没有残留）');
       // 场景目录可写 → **不该**走兜底：临时缓存桶里一个新文件都不该有
       const bucket = path.join(tmpPreviews, y + '-' + mo + '-' + d);
       assert(!fs.existsSync(bucket), '场景目录可写时不动临时缓存（兜底没被触发）');
@@ -807,9 +805,9 @@ async function main() {
       const prodJpg = path.join(PROD_DIR, PROD + '_preview.jpg');
       assert(fs.existsSync(prodJpg),
         `生产树命中的预览落它自己的场景目录（${path.basename(prodJpg)}）`);
-      // 这个场景只被拖入链碰过（没从场景库打开过）→ 平台那份压根不该存在
+      // 改名前的点号那份不再产出（旧名只会在各条链处理到那份栅格时被顺手删掉）
       assert(!fs.existsSync(path.join(PROD_DIR, PROD + '.preview.jpg')),
-        '拖入链不写平台自己那份 <编号>.preview.jpg');
+        '点号那份不再产出');
 
       // 同名**不同字节**：最要紧的一条回归钉子 —— 只比名字的话，用户拖进来的
       // 是另一张图，掩码坐标会整片落在别的影像上。必须拒绝并退回本地解码。
@@ -1037,8 +1035,8 @@ async function main() {
         `装载走完没报错（status=${winRec.status}${winErr ? ' / ' + winErr : ''}）`);
       assert(winRec.lqPath === WIN_DIR.replace(/\\/g, '/'),
         `关联到那个场景目录（${winRec.lqPath}）`);
-      // 走的是**拖入那条**端点：落点在场景目录里（<编号>_preview.jpg），
-      // 不是生产那条 <stem>.preview.jpg —— 两条落点不同，混了会互相顶掉。
+      // 走的是**拖入那条**端点：落点在场景目录里（`<编号>_preview.jpg`）。
+      // 名字与平台自己那份相同（2026-09-22 起落点统一），差别只剩由哪条链触发。
       // 计数断言要**等**：页面那边的状态与 Node 这边的 `request` 回调是两条独立
       // 的投递（同一条 CDP 连接，但 evaluate 的响应可能抢在那条 request 事件前面
       // 回到 Node），加载已完成而计数还没涨是常态、不是缺陷。所以先等它涨上来。
@@ -1107,7 +1105,7 @@ async function main() {
       console.log('\n[G] 粘单个 .tif 文件路径：能看，但不能提交 SR');
       const LOOSE = 'LOOSE_' + ymd + '120000';
       const LOOSE_DIR = path.join(tmp, 'loose');
-      const looseJpg = path.join(LOOSE_DIR, LOOSE + '.preview.jpg');
+      const looseJpg = path.join(LOOSE_DIR, LOOSE + '_preview.jpg');
       assert(!fs.existsSync(looseJpg), '打开前这个裸 TIF 旁边没有预览缓存');
 
       await clickLink(page, '场景库');
@@ -1139,8 +1137,8 @@ async function main() {
         return b && b.disabled;
       }), '「提交 SR」保持禁用（这张图在盘阵上跑不了 SR）');
 
-      // 1/2 尺度的落盘证据：缓存文件名与源同目录同名 + .preview.jpg；像素恰好一半。
-      // 400×200 → 200×100；旧规则（长边 8192 封顶）会留下整幅 400×200。
+      // 1/2 尺度的落盘证据：缓存落在源同目录、名字是 `<源 stem>_preview.jpg`；像素恰好
+      // 一半。400×200 → 200×100；旧规则（长边 8192 封顶）会留下整幅 400×200。
       await waitNode(() => !!jpegSize(looseJpg), 30000, '裸 TIF 的预览落盘');
       const sz = jpegSize(looseJpg);
       assert(sz.w === 200 && sz.h === 100,
