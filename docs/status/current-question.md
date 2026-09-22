@@ -83,7 +83,7 @@
 - **三类图服务端烘焙 + 产物急烤 + 显示源比较规则（09-20，开发机）**：为查看器的**对比**功能铺服务端这一半
   （对比 UI 本轮不做，用户随后单独提需求）。三件事：
   ① **三类图各有落点、不新增烘焙端点** —— 输入影像 `<stem>.preview.jpg`、本轮超分产物 `<stem>_<suffix>.preview.jpg`、
-  未超分产物 `<stem>_<suffix>_NOSR.preview.jpg`，各拿自己的场景 id 调现有 `GET /api/scenes/{id}/preview?div=N` 即可。
+  NOSR `<stem>_<suffix>_NOSR.preview.jpg`，各拿自己的场景 id 调现有 `GET /api/scenes/{id}/preview?div=N` 即可。
   命名推导（`product_candidates` / `nosr_path_for` / `sibling_raster_path`）全部落在 `scene_search.py`，
   与 `input_candidates` 同纪律：**只拼名字 + 只 stat，绝不列举目录**。新增只读端点
   `GET /api/scenes/{id}/siblings`（§3.8）把三类图一次交代清楚（`suffix` 三级取值 `?suffix=` → 最近 COMPLETED 任务
@@ -144,7 +144,7 @@
   ⑤ **拖放门**：关闭模式**全窗口行为一字不改**（拖到侧栏也能打开）；对比模式下只收画布内的影像，画布外给 toast；
   `.txt` 在任何模式、任何位置都照旧喂待修复清单；`dropEffect` 任何情况都保持 `copy`（改 `'none'` 会抑制
   `drop` 事件，把 `.txt` 一起吞掉）。契约新增 §4.7 记这条模式差异。
-  ⑥ **三类图快捷入口接上**：`apiSceneSiblings` 客户端 + 对比条上三枚芯片（输入影像 / 本轮超分产物 / 未超分产物），
+  ⑥ **三类图快捷入口接上**：`apiSceneSiblings` 客户端 + 对比条上三枚芯片（输入影像 / 本轮超分产物 / NOSR），
   绑**活动侧 rec 的 `sceneId`**（本地文件 → 整排禁用并说明原因）；拿到 item 的 `id` 走现有
   `GET /api/scenes/{id}/preview?div=N`，**没有新增取图路径、没有新增烘焙入口**。产物与 `_NOSR` 拖进来过不了
   后端身份门（`_fingerprint_mismatch` 拿输入影像 stem 比文件名，这两类永远对不上 → 必然 404），芯片是它们的廉价通道。
@@ -2204,7 +2204,7 @@ tick 烤出来且 ÷4 尺寸对、没有那份栅格时什么都不写但状态�
 - ⑤ **`PAN_NOSR.tif` 这个名字与仓库规则对不上**。`SR_code/util.py::writeTiff` 的改名对象是**输出路径**
   （`os.rename(path + tiftype, path + "_NOSR" + tiftype)`），推出来的是 `<产物 stem>_NOSR.tif`，即
   **`PAN_260318_NOSR.tif`**；而用户说真机上那份未超分的 tif 就叫 `PAN_NOSR.tif`。请 `ls -l` 一次：
-  这两个名字哪个在、各自多大、什么时候写的。若在的是后者，那 **`/siblings` 的「未超分产物」那一项
+  这两个名字哪个在、各自多大、什么时候写的。若在的是后者，那 **`/siblings` 的「NOSR」那一项
   在真机上恒为 `exists: false`**（它按 `nosr_path_for` 拼名），对比视图里也就永远少一张 —— 这是同一个
   名字问题的第二个出口，届时一起订正。
 - ⑥ **`PAN_NOSR.tif` 是不是 SR 真正吃进去的那份低质输入？** 用户说「一般后端走超分」，而
