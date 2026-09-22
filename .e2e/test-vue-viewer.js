@@ -11,6 +11,10 @@
 //      genMask 两次下载 → mergeRois 重叠→1 区 → del 红闪+移除 → undo/clear
 //   G. 待修复清单：导入 → 原样 round-trip → 拒收无关 .txt → 标记终态/中间态 →
 //      写回文本上半部分逐字不变 + 下半部分只含终态 → 未完成筛选 → 刷新仍在 → ✕ 清空
+//   K. 对比模式绘制掩码（右格真鼠标的落点坐标 + 产物那半不可画）+ 右下角任务提醒
+//      （琥珀令牌 / 成功条自动走 / 失败条常驻 / 点条跳队列 / 跨页面常驻）
+//      段序里 I（设置浮层）与 J（对比换图保持视图）夹在 H 与 K 之间，K 自己重置了
+//      需要的状态（回单屏 → 造两张盘阵场景 rec），不依赖前面几段的收尾形态。
 // （HTML 版原有的 G. 导出段已于 2026-09-15 删除：最小原型取消了浏览器侧 JPG 导出 /
 //   输出目录一条链路（sr-minimal-prototype-plan.md §4.5），setSaver / reExportJpg /
 //   scanPendingExports / jpgStatus 等钩子随之从 e2eHooks.ts 移除。针对已取消功能的
@@ -182,7 +186,8 @@ async function main() {
       'qcState', 'qcOpenByName',
       'cmpMode', 'setCmpMode', 'cmpStripOpen', 'setCmpStripOpen', 'cmpPanes',
       'activeSide', 'setActiveSide', 'splitRatio', 'setSplitRatio', 'splitX', 'cmpReset',
-      'dragHint', 'cmpList', 'cmpClear', 'ctxRail', 'setCtxRail']) {
+      'dragHint', 'cmpList', 'cmpClear', 'ctxRail', 'setCtxRail',
+      'notices', 'pushNotice', 'dismissNotice']) {
       if (!hookKeys.includes(k)) throw new Error('__viewer 缺钩子 ' + k);
     }
     assert(true, `__viewer 钩子齐全 (${hookKeys.length} 个)`);
@@ -1178,6 +1183,297 @@ async function main() {
         `回「关闭」后换图重新适配 (scale=${vOff2.scale.toFixed(4)})`);
       assert(await page.evaluate(() => window.__viewer.cmpMode()) === 'off',
         '收尾：模式回「关闭」（后面的断言不该带着对比模式跑）');
+    }
+
+    /* ============ K. 对比模式绘制掩码 + 右下角任务提醒 ============ */
+    // 两件 2026-09-22 加的东西，共同点是「原本以为不行」：
+    //  1. 对比模式下画掩码。原来 enterDraw 里挡着「对比模式只读」（理由是分屏里画到哪一格
+    //     不明确）；现在掩码就认活动侧，与掩码/云量/统计同一条规则。剩下唯一那道门是
+    //     「只能画在本体影像上」—— 这一段拿真·产物 rec 摆到另一半上打这条门。
+    //  2. 右下角任务提醒。它是**应用级**的（挂 App 外壳 + 队列 SSE 常驻订阅），所以这一段
+    //     在看 查看器 的页面上就能验到「别的页面上跑完的任务」。真跑一条 SR 到 COMPLETED
+    //     不在回归的时间预算里，提醒条本身用 pushNotice 直接塞（SSE → 提醒 那条映射的
+    //     单测在 lib/__tests__/notices.test.ts）。
+    console.log('--- K. 对比模式绘制掩码 + 右下角任务提醒 ---');
+    {
+      const panes = () => page.evaluate(() => window.__viewer.cmpPanes());
+      const rois = () => page.evaluate(() => window.__viewer.getRois());
+      // ROI 条数只能在页内数：getRois() 给回的是 store 里那份**响应式**数组，跨
+      // evaluate 边界会退化成带数字键的普通对象（`.length` 是 undefined，按下标读又是对的）。
+      const roiCount = () => page.evaluate(() => window.__viewer.getRois().length);
+      const errText = () => page.evaluate(() => {
+        const el = document.querySelector('.err-box');
+        return el ? el.textContent.replace(/\s+/g, ' ').trim() : '';
+      });
+      const toastText = () => page.evaluate(() => {
+        const t = document.querySelector('.toast');
+        return t ? t.textContent.trim() : '';
+      });
+      /** 「绘制掩码」那颗按钮（开着时文案带 ✓，按前缀找）。 */
+      const drawBtn = () => page.evaluate(() => {
+        const b = [...document.querySelectorAll('.toolbar button')]
+          .find((x) => x.textContent.trim().indexOf('绘制掩码') === 0);
+        return b ? { disabled: b.disabled, title: b.title } : null;
+      });
+
+      // 两张盘阵场景 rec（合成 JPEG，不经后端）：本体 + 本轮产物。产物这一份是本段的
+      // 关键对照物 —— 「活动侧是不是可修复对象」那条判据在没有后端的回归里，只能这样
+      // 摆到分屏的另一半上（真机上它来自 resolve/siblings 的 kind）。
+      await page.evaluate(() => window.__viewer.setCmpMode('off'));
+      await sleep(200);
+      const demoJpg = await page.evaluate(() => {
+        const c = document.createElement('canvas');
+        c.width = 200; c.height = 100;
+        const g = c.getContext('2d');
+        g.fillStyle = '#8a8a8a'; g.fillRect(0, 0, 200, 100);
+        g.fillStyle = '#3c3c3c'; g.fillRect(0, 0, 40, 100);
+        g.fillStyle = '#d8d8d8'; g.fillRect(160, 0, 40, 100);
+        return c.toDataURL('image/jpeg', 0.92);
+      });
+      /** dataURL → Blob → openSceneJpg，等它真的上屏（遮罩收起 + 有缩略图）。 */
+      const openDemo = async (meta) => {
+        await page.evaluate(async (url, m) => {
+          const blob = await (await fetch(url)).blob();
+          await window.__viewer.openSceneJpg(m, blob);
+        }, demoJpg, meta);
+        for (let i = 0; i < 80; i++) {
+          const st = await page.evaluate(() => ({
+            busy: window.__viewer.overlayVisible(), rec: window.__viewer.activeRec(),
+          }));
+          if (!st.busy && st.rec && st.rec.thumbW > 0) return st.rec;
+          await sleep(100);
+        }
+        throw new Error('盘阵场景没装上：' + JSON.stringify(await page.evaluate(() => window.__viewer.activeRec())));
+      };
+      // 两个名字互不为子串：左栏按名字拖卡片时不会认错人
+      const IN_NAME = 'DEMO_PAN_260922_L1';
+      const SR_NAME = 'DEMO_SR_260922_L1';
+      const inRec = await openDemo({
+        name: IN_NAME, W: 400, H: 200, sceneId: 'demo-in',
+        lqPath: '/DiskArray/DEMO/' + IN_NAME, sceneDir: '/DiskArray/DEMO/' + IN_NAME,
+        stageKind: 'input',
+      });
+      assert(inRec.stageKind === 'input' && inRec.thumbW === 200 && inRec.thumbH === 100,
+        `本体 rec 就位（${inRec.name} 缩略图 ${inRec.thumbW}×${inRec.thumbH} / ${inRec.stageKind}）`);
+      const srRec = await openDemo({
+        name: SR_NAME, W: 800, H: 400, sceneId: 'demo-sr',
+        lqPath: '/DiskArray/DEMO/' + IN_NAME, sceneDir: '/DiskArray/DEMO/' + IN_NAME,
+        stageKind: 'product', stageSuffix: 'SR',
+      });
+      assert(srRec.stageKind === 'product' && srRec.stageLabel === 'SR',
+        `产物 rec 就位（${srRec.name} / 环节标签 ${srRec.stageLabel}）`);
+
+      // 活动侧是产物：修复入口两处都堵上（可见的那颗按钮 + store 那道门）
+      const btnOnSr = await drawBtn();
+      assert(btnOnSr && btnOnSr.disabled === true && btnOnSr.title.indexOf('中间产物') >= 0,
+        `活动侧是产物 →「绘制掩码」置灰并写明理由（${btnOnSr && btnOnSr.title}）`);
+      await page.evaluate(() => window.__viewer.enterDraw());
+      await sleep(200);
+      assert((await errText()).indexOf('不作修复') >= 0
+        && await page.evaluate(() => !document.querySelector('[data-e2e="draw-target"]')),
+        `产物上 enterDraw 被拒且没进绘制态（${(await errText()).slice(0, 36)}…）`);
+
+      // 分屏：产物留在左格（它就是当前这张），本体从左栏拖到右半
+      await page.evaluate(() => window.__viewer.setCmpMode('split'));
+      await sleep(300);
+      const cpts = await drag.canvasPoints(page);
+      const dropped = await drag.dragCard(page, {
+        cardName: IN_NAME, clientX: cpts.right, clientY: cpts.midY,
+      });
+      assert(dropped.defaultPrevented === true, '卡片拖到右半被接管（defaultPrevented）');
+      let two = null;
+      for (let i = 0; i < 60 && !two; i++) {
+        const p = await panes();
+        if (p.length === 2 && p[1].recId === inRec.id) two = p;
+        else await sleep(100);
+      }
+      assert(!!two, `本体进了右格（${JSON.stringify((await panes()).map((p) => p.recId))}）`);
+      assert(two[0].active === false && two[1].active === true,
+        '落右半 → 右格成为活动侧（掩码/云量/统计跟着它）');
+
+      // 对比模式下的绘制入口：**能用**（2026-09-22 前这里整颗置灰）
+      const btnOnIn = await drawBtn();
+      assert(btnOnIn && btnOnIn.disabled === false,
+        `对比模式下「绘制掩码」可用（${btnOnIn && JSON.stringify(btnOnIn.title)}）`);
+      await page.evaluate(() => {
+        [...document.querySelectorAll('.toolbar button')]
+          .find((x) => x.textContent.trim().indexOf('绘制掩码') === 0).click();
+      });
+      await sleep(250);
+      const chip = await page.evaluate(() => {
+        const el = document.querySelector('[data-e2e="draw-target"]');
+        return el ? el.textContent.trim() : null;
+      });
+      assert(chip === '画在：右 · ' + IN_NAME,
+        `面板写明这一笔落在哪张（"${chip}"）`);
+
+      // 真鼠标在**右格**画一个矩形 —— 这一段的核心断言。
+      // 右格那套 ViewState 是**该格自己的局部坐标**（渲染时 translate(rect.x, rect.y)），
+      // 指针换算必须先减去右格左上角；少减这一下，落点会整体偏一个左格宽（再除以 scale），
+      // 而框照常画得出来、看着还挺正常（2026-09-22 修，见 TifCanvas.mousePos）。
+      // 判据用**右格局部**的缩略图坐标：偏了那一格宽的话，x 会落在缩略图之外（200 宽
+      // 的图上出现 800+），这条断言必红。
+      const crect = await page.evaluate(() => {
+        const c = document.querySelector('canvas.view-canvas').getBoundingClientRect();
+        return { left: c.left, top: c.top };
+      });
+      const pB = two[1];
+      const toClient = (tx, ty) => ({
+        x: Math.round(crect.left + pB.rect.x + pB.view.ox + tx * pB.view.scale),
+        y: Math.round(crect.top + pB.rect.y + pB.view.oy + ty * pB.view.scale),
+      });
+      const corner0 = toClient(20, 10);
+      const corner1 = toClient(60, 40);
+      await page.mouse.move(corner0.x, corner0.y);
+      await page.mouse.down();
+      await page.mouse.move(corner1.x, corner1.y, { steps: 3 });
+      await page.mouse.up();
+      await sleep(250);
+      const r0 = (await rois())[0];
+      assert(r0 && Math.abs(r0[0][0] - 20) <= 1 && Math.abs(r0[0][1] - 10) <= 1
+        && Math.abs(r0[2][0] - 60) <= 1 && Math.abs(r0[2][1] - 40) <= 1,
+        `右格真鼠标画的框落在右格自己的缩略图坐标上（实得 ${JSON.stringify(r0)}）`);
+
+      // 画在右格，就只出现在右半：绘制层按活动格裁剪 + 平移，左半一个像素都不该有
+      const paint = await page.evaluate(() => {
+        const c = document.querySelector('canvas.draw-canvas');
+        const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+        const sx = window.__viewer.splitX();
+        let left = 0, right = 0;
+        for (let y = 0; y < c.height; y++) {
+          for (let x = 0; x < c.width; x++) {
+            const i = (y * c.width + x) * 4;
+            if (d[i + 3] > 0 && d[i] < 130 && d[i + 1] > 130 && d[i + 2] > 130) {
+              if (x < sx) left++; else right++;
+            }
+          }
+        }
+        return { left, right };
+      });
+      assert(paint.right > 50, `掩码描边画在右格（右半青绿像素 ${paint.right}）`);
+      assert(paint.left === 0, `左半一个掩码像素都没有（${paint.left}）—— 画的是活动侧那张`);
+
+      // 绘制期间点另一半：活动侧**不动**（左格是产物，放过去就等于在产物上画掩码），
+      // 而且出声说明 —— 点了没反应比一句说明更让人迷惑。
+      const pA = two[0];
+      const leftPt = {
+        x: Math.round(crect.left + pA.rect.x + pA.rect.w / 2),
+        y: Math.round(crect.top + pA.rect.y + pA.rect.h / 2),
+      };
+      const toastBefore = await toastText();
+      await page.mouse.click(leftPt.x, leftPt.y);
+      await sleep(250);
+      const toastAfter = await toastText();
+      const afterClick = await panes();
+      assert(afterClick[1].active === true && afterClick[0].active === false,
+        '绘制中点半屏另一半：活动侧仍停在可绘制的那张（右格）');
+      assert(toastAfter !== toastBefore && toastAfter.indexOf('（SR不能画掩码）') >= 0
+        && toastAfter.indexOf('先点「完成」再切') >= 0,
+        `并给出说明（"${toastAfter.slice(0, 44)}…"）`);
+      assert(await roiCount() === 1,
+        `那一下也没顺手在活动侧落一个框（ROI 仍是 ${await roiCount()} 个）`);
+
+      // 「完成」之后照样能切活动侧；切到产物那半，绘制入口随之置灰（判据跟着活动侧走）
+      await page.evaluate(() => window.__viewer.exitDraw());
+      await sleep(150);
+      await page.mouse.click(leftPt.x, leftPt.y);
+      await sleep(250);
+      assert(await page.evaluate(() => window.__viewer.activeSide()) === 'A',
+        '「完成」之后点半屏另一半，活动侧照旧可以切');
+      const btnOnSr2 = await drawBtn();
+      assert(btnOnSr2 && btnOnSr2.disabled === true && btnOnSr2.title.indexOf('中间产物') >= 0,
+        '活动侧换成产物：绘制入口立刻置灰（不是只在打开时判一次）');
+
+      /* ---- 右下角任务提醒 ---- */
+      assert(await page.evaluate(() => !document.querySelector('[data-e2e="job-notice-ok"]')),
+        '开塞之前栈里没有任务提醒');
+      await page.evaluate(() => {
+        window.__viewer.pushNotice({ key: 'e2e-ok', taskId: 901, kind: 'ok',
+          title: '超分完成 #901', text: 'DEMO_PAN_260922_L1 · ×2', reason: '', persist: false });
+        window.__viewer.pushNotice({ key: 'e2e-fail', taskId: 902, kind: 'fail',
+          title: '超分失败 #902', text: 'DEMO_PAN_260922_L1 · ×2',
+          reason: '写盘失败：只读文件系统', persist: true });
+      });
+      await sleep(250);
+      const stack = await page.evaluate(() => {
+        /** 把一个颜色令牌解析成 computed 色值（拿探针元素问，不自己拼十六进制）。 */
+        const tok = (name) => {
+          const el = document.createElement('div');
+          el.style.color = 'var(' + name + ')';
+          document.body.appendChild(el);
+          const v = getComputedStyle(el).color;
+          el.remove();
+          return v;
+        };
+        const ok = document.querySelector('[data-e2e="job-notice-ok"]');
+        const fail = document.querySelector('[data-e2e="job-notice-fail"]');
+        return {
+          okText: ok ? ok.textContent.replace(/\s+/g, ' ').trim() : null,
+          failText: fail ? fail.textContent.replace(/\s+/g, ' ').trim() : null,
+          okBorder: ok ? getComputedStyle(ok).borderLeftColor : null,
+          failBorder: fail ? getComputedStyle(fail).borderLeftColor : null,
+          failBg: fail ? getComputedStyle(fail).backgroundColor : null,
+          titleColor: fail ? getComputedStyle(fail.querySelector('.jn-title')).color : null,
+          hasClose: !!document.querySelector('[data-e2e="job-notice-close-fail"]'),
+          okHasClose: !!document.querySelector('[data-e2e="job-notice-close-ok"]'),
+          offline: !!document.querySelector('[data-e2e="job-notice-offline"]'),
+          hook: window.__viewer.notices(),
+          amber: { line: tok('--notice-job'), bg: tok('--notice-job-bg'), ink: tok('--notice-job-ink') },
+          theme: { a3: tok('--accent-3'), deep: tok('--accent-deep'), ok: tok('--ok') },
+        };
+      });
+      assert(stack.okText && stack.okText.indexOf('超分完成 #901') === 0
+        && stack.failText && stack.failText.indexOf('超分失败 #902') === 0
+        && stack.failText.indexOf('写盘失败：只读文件系统') > 0,
+        `成功与失败两条都在、原因如实写（"${stack.okText}" / "${stack.failText}"）`);
+      assert(stack.okBorder === stack.amber.line && stack.failBorder === stack.amber.line
+        && stack.failBg === stack.amber.bg && stack.titleColor === stack.amber.ink,
+        `橙条/浅底/深字全用琥珀令牌（${stack.okBorder} / ${stack.failBg} / ${stack.titleColor}）`);
+      assert(stack.amber.line !== stack.theme.a3 && stack.amber.line !== stack.theme.deep
+        && stack.amber.line !== stack.theme.ok,
+        `这条提醒是**非主题色**：琥珀 ${stack.amber.line} 与青绿族 `
+        + `(${stack.theme.a3} / ${stack.theme.deep} / ${stack.theme.ok}) 都不撞`);
+      assert(stack.hasClose && !stack.okHasClose,
+        '常驻那条才有关闭按钮（会自己走的成功条不配 ×）');
+      assert(stack.offline && stack.hook.connected === false && stack.hook.reconnecting === true
+        && stack.hook.items.length === 2,
+        '没有后端 → 连接状态那行如实写「已断开」（本脚本全程没有 /api/queue/events）');
+
+      // 完成条 8 秒自己走掉、失败条留着（用户口径 2026-09-22）
+      await sleep(8600);
+      const later = await page.evaluate(() => ({
+        ok: !!document.querySelector('[data-e2e="job-notice-ok"]'),
+        fail: !!document.querySelector('[data-e2e="job-notice-fail"]'),
+        n: window.__viewer.notices().items.length,
+      }));
+      assert(!later.ok && later.fail && later.n === 1,
+        `8 秒后完成条自己走掉、失败条留着（ok=${later.ok} fail=${later.fail} 栈内 ${later.n} 条）`);
+
+      // 点整条 = 去队列页看这一行；点过的那条跟着收掉
+      await page.click('[data-e2e="job-notice-fail"] .jn-body');
+      await sleep(500);
+      assert(await page.evaluate(() => location.pathname) === '/queue',
+        '点整条提醒 → 跳到任务队列页');
+      assert(await page.evaluate(() => !document.querySelector('[data-e2e="job-notice-fail"]')),
+        '点过的那条跟着收掉（人都到队列页了，屏上再挂着就是噪音）');
+
+      // 跨页面常驻：站到队列页上再塞一条 → 在队列页也收得到；切回查看器还在
+      await page.evaluate(() => window.__viewer.pushNotice({ key: 'e2e-fail-2', taskId: 903,
+        kind: 'fail', title: '超分失败 #903', text: 'DEMO_PAN_260922_L1 · ×3',
+        reason: '原因见队列页', persist: true }));
+      await sleep(250);
+      assert(await page.evaluate(() => !!document.querySelector('[data-e2e="job-notice-fail"]')),
+        '在队列页上照样收得到提醒（栈挂在外壳上，不随页面卸载消失）');
+      await page.click('.nav-links a[href="/viewer"]');
+      await sleep(600);
+      assert(await page.evaluate(() => location.pathname) === '/viewer'
+        && await page.evaluate(() => !!document.querySelector('[data-e2e="job-notice-fail"]')),
+        '切回查看器：那条失败提醒一直在（跨页面常驻的另一半）');
+      await page.click('[data-e2e="job-notice-close-fail"]');
+      await sleep(200);
+      assert(await page.evaluate(() => !document.querySelector('[data-e2e="job-notice-fail"]'))
+        && await page.evaluate(() => window.__viewer.notices().items.length) === 0,
+        '× 关掉常驻的那条（清栈收尾）');
     }
 
     assert(errors.length === 0, `无浏览器错误 (${JSON.stringify(errors.slice(0, 5))})`);

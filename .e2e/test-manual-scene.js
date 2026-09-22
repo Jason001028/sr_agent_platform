@@ -1490,6 +1490,18 @@ async function main() {
         + `（/preview +${countUrl(previewRe) - prevMark}）`);
       assert(await page.evaluate(() => window.__viewer.recs().length) === recsB,
         '预取不建 rec');
+      // K2b-注：这一次合格项是空集，缓存行会如实停在原处（0 项 / 别的数字）—— 用户
+      // 无从分辨「没东西可预取」与「预取坏了」。所以预取必须**把结果说出来**。
+      await page.click('[data-e2e="set-open"]');
+      await sleep(250);
+      const noteB = await page.evaluate(() => {
+        const el = document.querySelector('[data-e2e="set-prefetch-note"]');
+        return el ? el.textContent.trim() : null;
+      });
+      assert(!!noteB && noteB.includes('没有可预取'),
+        `空集也要如实说明「没有可预取的」（"${noteB}"）`);
+      await page.keyboard.press('Escape');
+      await sleep(200);
 
       // K2c：把那份「NOSR」的预览烤上（**在页面之外**烤的，不算页面发的
       // 请求），再进一次对比模式：这次合格项恰好是它一项。
@@ -1512,6 +1524,22 @@ async function main() {
         const r = window.__viewer.activeRec();
         return r ? r.id : null;
       });
+      // 面板**先开着别关**：那一行的数字要在预取落地时自己变 —— 它是这份缓存唯一的
+      // 显示面，而改这份缓存的按钮（预取开关）就长在它上面。只在打开时读一次快照的话，
+      // 用户点开开关盯着紧挨着的那行数字，数字永远停在打开时那一次（多半是 0 项），
+      // 只能得出「预取没生效」（2026-09-22 用户报的就是这一条）。
+      await page.click('[data-e2e="set-open"]');
+      await sleep(250);
+      const lineCount = async () => {
+        const t = await page.evaluate(() => {
+          const el = document.querySelector('[data-e2e="set-cache-line"]');
+          return el ? el.textContent.trim() : null;
+        });
+        const m = /^(\d+) 项/.exec(t || '');
+        return { text: t, n: m ? Number(m[1]) : -1 };
+      };
+      const lineBefore = await lineCount();
+      assert(lineBefore.n >= 0, `开预取前缓存行可读（"${lineBefore.text}"）`);
       await page.evaluate(() => window.__viewer.setCmpMode('click'));
       await waitNode(() => countUrl(previewRe) >= prevMark + 1, 20000,
         '预取把那一份取回来');
@@ -1533,6 +1561,24 @@ async function main() {
         '预取不占用遮罩 —— 用户此刻在看别的图，不该冒出"正在加载"');
       assert((await page.evaluate(() => window.__viewer.cmpList())).length === recsC,
         '点选清单里的还是原来那些（预取不进清单）');
+
+      // 面板那一行跟着预取**实时**更新：面板一直开着，预取落地（上面那两条 waitNode
+      // 已经等到）之后，行里的项数该涨，且与 `previewCacheStats()` 的真值逐字对上。
+      const lineAfter = await lineCount();
+      const truth = await page.evaluate(() => window.__viewer.previewCacheStats());
+      const truthText = `${truth.count} 项 / ${(truth.bytes / (1024 * 1024)).toFixed(1)} MB`;
+      assert(lineAfter.n === lineBefore.n + 1,
+        `预取落地后缓存行的项数 +1（${lineBefore.text} → ${lineAfter.text}）`);
+      assert(lineAfter.text === truthText,
+        `缓存行与真值逐字一致（"${lineAfter.text}" vs "${truthText}"）`);
+      const noteC = await page.evaluate(() => {
+        const el = document.querySelector('[data-e2e="set-prefetch-note"]');
+        return el ? el.textContent.trim() : null;
+      });
+      assert(!!noteC && noteC.includes('已预取'),
+        `取完了也如实说（"${noteC}"）`);
+      await page.keyboard.press('Escape');
+      await sleep(200);
 
       // 收尾：复位成默认（开关关、回单幅），免得影响 §I 的错误计数口径。
       await page.evaluate(() => window.__viewer.setCmpMode('off'));

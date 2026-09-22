@@ -28,6 +28,8 @@ import { useViewerStore } from '../stores/viewer.js';
 import type { ViewerRec } from '../stores/viewer.js';
 import { useQcListStore } from '../stores/qclist.js';
 import { useScenesStore } from '../stores/scenes.js';
+import { useNoticesStore } from '../stores/notices.js';
+import { useQueueStore } from '../stores/queue.js';
 import type { QcStatus } from '../lib/qclist.js';
 
 /** rec 摘要快照（浏览器测试观测用；HTML 直接读全局 recs 的等价物） */
@@ -186,6 +188,20 @@ export interface ViewerHook {
   /** 本地预览 blob 缓存的现状（条数 / 字节 / 上限）。 */
   previewCacheStats: () => { count: number; bytes: number; maxBytes: number };
   clearPreviewCache: () => void;
+  /** 右下角任务提醒栈的现状（条数 + 连接状态）。提醒是**应用级**的，所以在查看器页
+   *  里也能观测到「别的页面上发生的事」——浏览器回归就是靠它验跨页常驻。 */
+  notices: () => {
+    items: { id: number; kind: string; title: string; text: string; reason: string }[];
+    connected: boolean;
+    reconnecting: boolean;
+  };
+  /** 直接塞一条提醒（不经过 SSE）。浏览器回归用它验栈的渲染与点击跳转 ——
+   *  真跑一条 SR 作业到 COMPLETED 不在回归的时间预算里。 */
+  pushNotice: (draft: {
+    key: string; taskId: number; kind: 'ok' | 'fail';
+    title: string; text: string; reason: string; persist: boolean;
+  }) => void;
+  dismissNotice: (id: number) => void;
 }
 
 declare global {
@@ -312,6 +328,19 @@ export function mountE2EHooks(): ViewerHook {
     setCmpPrefetch: (on) => useViewerStore().setCmpPrefetch(on),
     previewCacheStats: () => useViewerStore().previewCacheStats(),
     clearPreviewCache: () => useViewerStore().clearPreviewCache(),
+    notices: () => {
+      const notices = useNoticesStore();
+      const queue = useQueueStore();
+      return {
+        items: notices.items.map((n) => ({
+          id: n.id, kind: n.kind, title: n.title, text: n.text, reason: n.reason,
+        })),
+        connected: queue.connected,
+        reconnecting: queue.reconnecting,
+      };
+    },
+    pushNotice: (draft) => useNoticesStore().push({ ...draft }),
+    dismissNotice: (id) => useNoticesStore().dismiss(id),
   };
   if (window.__viewer !== hook) window.__viewer = hook;
   return hook;

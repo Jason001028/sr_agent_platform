@@ -5,16 +5,25 @@
  * job_update（GET /api/queue/events SSE），前端仅按 task_id 归并覆盖 state。
  * 任务行状态机 = 进度（§3.3）：SUBMITTING → PENDING → RUNNING → COMPLETED/FAILED。
  * 掩码烘焙（查看器）→ setDraft() 预填队列表单（不自动提交，提交是真副作用）。
+ *
+ * **订阅改成应用级常驻 + 引用计数（2026-09-22）**：原来是「任务队列页挂载时连、离开
+ * 即断」，于是提交完切去查看器干活的人**收不到任何完成提示**（后端这条流没有历史回放，
+ * 断着的那段时间发生的事不会补发）。现在 App 外壳常驻一份订阅，终端态一到就推一条
+ * 提醒进 stores/notices（右下角弹条）。引用计数保证队列页 / 查看器侧舱各自的
+ * connect/disconnect 不再互相掐断，也保证外壳那一份不会被它们的 unmount 带走。
+ * 掉线自动重连（指数退避，见 nextBackoff），重连成功后补拉一次 list 校准。
  */
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { loadSrConfig } from '../lib/scene.js';
+import { jobNotice } from '../lib/notices.js';
+import { useNoticesStore } from './notices.js';
 import {
   apiListQueue, apiSubmitQueue, apiCancelQueue, subscribeQueueEvents,
 } from '../lib/api.js';
 import type {
   QueueTask, QueueSubmitBody, QueueSubmitResult, JobUpdateEvent,
-  PreviewUpdateEvent,
+  PreviewUpdateEvent, PlatformSseEvent,
 } from '../lib/api.js';
 
 /** 队列表单里的可调参数（「以这行参数再提交」整组带回）。 */
@@ -195,6 +204,22 @@ export function stateTone(state: string): 'pending' | 'run' | 'ok' | 'fail' | 'm
   return 'muted';
 }
 
+/* ---------------- 断线重连的退避（纯函数，vitest 可测） ---------------- */
+
+/** 掉线后第一次重连的等待，之后每次翻倍，封顶 RECONNECT_MAX_MS。 */
+export const RECONNECT_BASE_MS = 2000;
+export const RECONNECT_MAX_MS = 30000;
+
+/** 下一次重连的等待时长。
+ *
+ *  抽成纯函数是为了能被钉住：退避写错（除零、翻倍不封顶、退避表算反）在界面上表现为
+ *  「任务跑完了没提醒」——那是最难复现、也最容易被当成「本来就这样」的一类问题。
+ *  非有限值 / 非正值一律回到基准（脏值不该让重连彻底停摆）。 */
+export function nextBackoff(prev: number): number {
+  if (!Number.isFinite(prev) || prev <= 0) return RECONNECT_BASE_MS;
+  return Math.min(RECONNECT_MAX_MS, prev * 2);
+}
+
 /* ---------------- tasksForScene：任务区关联当前场景（阶段6） ----------------
    viewer 盘阵场景 ↔ /api/queue 行：lq_path == scene 父目录（run_sr 目录语义）且
    mask_path 基名 == <scene stem>_mask.tif。只命中「以该场景掩码发起的 SR 任务」，
@@ -238,7 +263,97 @@ export const useQueueStore = defineStore('queue', () => {
   /** 阶段6 实时失败原因（task_id → job_update.error；仅运行期捕获，非契约字段，
       页面重载后旧 FAILED 行无原因可追 → 展示回退「见 log_dir」）。 */
   const failReason = ref<Record<number, string>>({});
+  /** 掉线重连中（**连过之后**掉线才为真；首次连接前为假）。
+   *  提醒栈用它显示一行「提醒已断开，正在重连」—— 这条流没有心跳帧，断了是**看不出来**
+   *  的：不主动说，用户只会以为「任务还没跑完」。 */
+  const reconnecting = ref(false);
+
+  /* ---------------- 订阅的生命周期（应用级常驻 + 引用计数 + 断线重连） ----------------
+     引用计数的持有者：App 外壳一份（常驻）、任务队列页一份、查看器侧舱一份。
+     谁先退订都不该掐断别人的订阅 —— 尤其是外壳那一份常驻的。 */
+  let _refs = 0;
   let _dispose: (() => void) | null = null;
+  let _retry: ReturnType<typeof setTimeout> | null = null;
+  let _backoff = RECONNECT_BASE_MS;
+  /** 断过线（决定重连成功后要不要补拉一次 list 校准）。 */
+  let _wasDown = false;
+  /** 正在主动关闭这条订阅 —— abort 触发的 onClose 不算掉线，否则每次主动关
+      都会被当成一次掉线，接着又自己重连起来。 */
+  let _closing = false;
+
+  /** 关掉当前这条订阅（主动关 / 掉线收尾共用）。 */
+  function _closeStream(): void {
+    const d = _dispose;
+    if (!d) return;
+    _dispose = null;
+    _closing = true;
+    try { d(); } finally { _closing = false; }
+  }
+
+  function _openStream(): void {
+    if (_dispose || _refs <= 0) return;
+    const cfg = loadSrConfig();
+    _dispose = subscribeQueueEvents(cfg, _onEvent, _onError, _onOpen, _onClose);
+  }
+
+  function _scheduleRetry(): void {
+    if (_refs <= 0 || _retry !== null) return;
+    const wait = _backoff;
+    _backoff = nextBackoff(_backoff);
+    _retry = setTimeout(() => { _retry = null; _openStream(); }, wait);
+  }
+
+  /** 掉线收尾（错误与「对端关流」共用）。 */
+  function _dropped(): void {
+    if (_refs <= 0) return;
+    connected.value = false;
+    reconnecting.value = true;
+    _wasDown = true;
+    _closeStream();
+    _scheduleRetry();
+  }
+
+  function _onOpen(): void {
+    connected.value = true;
+    _backoff = RECONNECT_BASE_MS;
+    if (!_wasDown) return;
+    _wasDown = false;
+    reconnecting.value = false;
+    // 断着的那段时间里状态变化全丢了（后端无历史回放）→ 补拉一次，把列表与耗时列校准。
+    // list() 自己会置 error，这里不再包一层：连不上时队列页/侧舱本来就该报出来。
+    void list();
+  }
+
+  function _onError(): void { _dropped(); }
+
+  function _onClose(): void {
+    if (_closing) return;          // 自己 abort 的，不算掉线
+    _dropped();
+  }
+
+  /** SSE 帧分发（订阅回调，闭包内直接用 store 状态）。 */
+  function _onEvent(ev: PlatformSseEvent): void {
+    if (ev.type === 'preview_update') {
+      tasks.value = mergePreviewUpdate(tasks.value, ev);
+      return;
+    }
+    if (ev.type !== 'job_update') return;
+    tasks.value = mergeJobUpdate(tasks.value, ev);
+    if (ev.state === 'FAILED' && ev.error) {
+      failReason.value = { ...failReason.value, [ev.task_id]: ev.error };
+    } else if (ev.state !== 'FAILED' && failReason.value[ev.task_id] !== undefined) {
+      const next = { ...failReason.value };
+      delete next[ev.task_id];
+      failReason.value = next;
+    }
+    // 终态 → 右下角提醒（去重与文案在 lib/notices + stores/notices）。
+    // **行可能不在列表里**（订阅是应用级常驻的，这次会话可能还没 GET 过队列）——
+    // jobNotice 允许 task 传 null，只报 task_id，不编目录名。
+    useNoticesStore().push(jobNotice(
+      ev, tasks.value.find((t) => t.task_id === ev.task_id) ?? null,
+      failReason.value[ev.task_id],
+    ));
+  }
 
   async function list(): Promise<void> {
     loading.value = true;
@@ -279,39 +394,29 @@ export const useQueueStore = defineStore('queue', () => {
     }
   }
 
-  /** 订阅队列 SSE；页面 mount 时 connect、unmount 时 disconnect。 */
+  /** 订阅队列 SSE。**引用计数**：同一个订阅被多处持有（App 外壳常驻、任务队列页、
+      查看器侧舱），每处 mount/进入场景各 connect 一次、unmount/离开各 disconnect 一次，
+      计数归零才真的断开。所以任何一处退订都不会掐掉别人的提醒。 */
   function connect(): void {
-    if (_dispose) return;
-    const cfg = loadSrConfig();
-    connected.value = true;
-    _dispose = subscribeQueueEvents(
-      cfg,
-      (ev) => {
-        if (ev.type === 'preview_update') {
-          tasks.value = mergePreviewUpdate(tasks.value, ev);
-          return;
-        }
-        if (ev.type !== 'job_update') return;
-        tasks.value = mergeJobUpdate(tasks.value, ev);
-        if (ev.state === 'FAILED' && ev.error) {
-          failReason.value = { ...failReason.value, [ev.task_id]: ev.error };
-        } else if (ev.state !== 'FAILED' && failReason.value[ev.task_id] !== undefined) {
-          const next = { ...failReason.value };
-          delete next[ev.task_id];
-          failReason.value = next;
-        }
-      },
-      () => { connected.value = false; },
-    );
+    _refs++;
+    if (_dispose || _retry !== null) return;      // 已在连 / 正在等重连
+    _openStream();
   }
 
+  /** 释放一份订阅（计数归零才真的断，见 connect）。 */
   function disconnect(): void {
-    if (_dispose) { _dispose(); _dispose = null; }
+    _refs = Math.max(0, _refs - 1);
+    if (_refs > 0) return;
+    if (_retry !== null) { clearTimeout(_retry); _retry = null; }
+    _closeStream();
     connected.value = false;
+    reconnecting.value = false;
+    _backoff = RECONNECT_BASE_MS;
+    _wasDown = false;
   }
 
   return {
-    tasks, connected, loading, error, draft, failReason,
+    tasks, connected, reconnecting, loading, error, draft, failReason,
     list, submit, cancel, connect, disconnect,
     /** 查看器「提交 SR」带过来的目录（不自动提交）。
         maskPath 传后端给的权威值（resolve 响应或写掩码响应里的；拿不到传 null

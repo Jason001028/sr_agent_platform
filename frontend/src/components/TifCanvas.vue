@@ -261,10 +261,19 @@ function renderDrawBody(ctx: CanvasRenderingContext2D) {
 }
 
 /* ---------------- 交互事件 ---------------- */
+/** 指针 → 活动侧的缩略图坐标。
+ *
+ *  **必须先减去活动格的左上角**（2026-09-22 修）：分屏下每格的 `ViewState` 用的是
+ *  该格**自己的**局部坐标（渲染时 `translate(rect.x, rect.y)`），而 `mouseToThumb`
+ *  拿的是画布原点。右格的 `rect.x` 是左格宽 —— 不减的话在右格画掩码，坐标会整体偏
+ *  一个左格宽（除以缩放比之后更明显），而框会照常画出来、看着还挺正常。
+ *  单屏时 `activePaneRect()` 是 `{x:0,y:0}`，与改前逐字节相同。 */
 function mousePos(e: MouseEvent): Pt {
   const vc = viewCanvasRef.value!;
   const rect = vc.getBoundingClientRect();
-  return mouseToThumb(store.view, e.clientX, e.clientY, { left: rect.left, top: rect.top });
+  const pane = store.activePaneRect();
+  return mouseToThumb(store.view, e.clientX - pane.x, e.clientY - pane.y,
+    { left: rect.left, top: rect.top });
 }
 
 function onWheel(e: WheelEvent) {

@@ -43,7 +43,7 @@ import {
 } from '../lib/scene.js';
 import {
   apiResolveScene, apiBakeMask, apiSceneSiblings, fetchSceneJpg, fetchDropSceneJpg,
-  siblingRow, previewCacheStats, clearPreviewCache,
+  siblingRow, previewCacheStats, clearPreviewCache, watchPreviewCache,
 } from '../lib/api.js';
 import type { SceneResolveResult, SceneSibling, SceneSiblings } from '../lib/api.js';
 import { classifyImages, imageKindOf } from '../lib/imageFiles.js';
@@ -501,6 +501,15 @@ export const useViewerStore = defineStore('viewer', () => {
     if (!split.value || activeSide.value === side) return;
     const id = side === 'A' ? paneA.value : paneB.value;
     if (id === null) return;               // 空侧没什么可切的，忽略（点击退化为平移）
+    // 绘制期间不让活动侧落到不可绘制的那张（分屏里点产物那一半就是这条路）：
+    // 掩码只认活动侧（见 enterDraw），放过去就等于「在产物上画掩码」。
+    // 不静默忽略 —— 点了没反应比一句说明更让人迷惑。
+    const next = recs.value.find((r) => r.id === id) ?? null;
+    if (drawMode.value && !canDrawOn(next)) {
+      showToast('绘制掩码中：活动侧停在可绘制的那张图（' +
+        (next?.stageLabel ?? '产物') + '不能画掩码），先点「完成」再切');
+      return;
+    }
     activeSide.value = side;
     switchActive(id);
     renderTick.value++;
@@ -601,7 +610,9 @@ export const useViewerStore = defineStore('viewer', () => {
     if (next === compareMode.value) return;
     const wasSplit = split.value;
     const wasOff = compareMode.value === 'off';
-    if (next !== 'off') exitDraw();        // 对比模式只读：不画掩码、不建 ROI
+    // **刻意不再 exitDraw()**（2026-09-22）：对比模式下可以继续画掩码（活动侧那张），
+    // 切模式不该把用户画了一半的框丢掉。pendingRect/pendingPts 存的是缩略图坐标，
+    // 换了视口也仍然指着同一片影像区域，所以留着是对的。
 
     if (next === 'split') {
       if (!wasSplit) {
@@ -661,6 +672,15 @@ export const useViewerStore = defineStore('viewer', () => {
     settingsOpen.value = !!open;
   }
 
+  /** 本地预览缓存的**代数**：内容一变就 +1，设置浮层那一行靠它保持实时。
+   *
+   *  不做成「把 stats() 挂成响应式」：那样每次取图都要重算一次渲染。代数只在缓存
+   *  一进一出时各响一次（见 lib/api.ts 的 watchPreviewCache），而**它必须响** ——
+   *  改缓存的那颗按钮（预取开关）就在那一行上面，不响的话用户永远看不到自己刚触发
+   *  的那一次，只会得出「预取没生效，缓存始终是 0 项」。 */
+  const previewCacheRev = ref(0);
+  watchPreviewCache(() => { previewCacheRev.value++; });
+
   /* ---------------- 对比模式后台预取（用户开关，默认关） ----------------
 
      进对比模式时提前把同场景另两类图的预览取到本地：真机上切图的等待几乎全在
@@ -672,6 +692,12 @@ export const useViewerStore = defineStore('viewer', () => {
      与没有这个功能时完全一样。 */
 
   const cmpPrefetchOn = ref(loadCmpPrefetch());
+  /** 上一次预取干了什么（设置浮层里那个开关下面一行）。**空串 = 还没跑过**。
+   *
+   *  为什么要说出来：预取的合格项是「盘上已有一份现成预览」，第一次打开某个场景时
+   *  这个集合**本来就是空的**（另两类还没人烤过）。这时缓存行会如实停在 0 项，用户
+   *  无从分辨「没东西可预取」与「预取坏了」—— 所以结果必须自己讲出来。 */
+  const prefetchNote = ref('');
   /** 已经预取过的 `sceneId|档位`。同一个场景 + 同一档位只做一次。
    *  离开对比模式时清空 —— 那时 blob 缓存可能也被清过，重进该重取一遍。 */
   const prefetched = new Set<string>();
@@ -686,12 +712,14 @@ export const useViewerStore = defineStore('viewer', () => {
     cmpPrefetchOn.value = next;
     saveCmpPrefetch(next);
     if (next) void maybePrefetchCompare();   // 当场打开就当场开始，不用等下次切图
+    else stopPrefetch();                     // 关掉就收手，并把上一次的结果行擦掉
   }
 
   /** 收手：离开对比模式、或活动图不再是盘阵场景时调。 */
   function stopPrefetch() {
     prefetchGen++;
     prefetched.clear();
+    prefetchNote.value = '';
   }
 
   /** 预取同场景另两类图的预览。三道门：对比模式 + 开关开 + 活动图有 sceneId。 */
@@ -709,6 +737,7 @@ export const useViewerStore = defineStore('viewer', () => {
     try {
       res = await apiSceneSiblings(cfg, sid);
     } catch {
+      prefetchNote.value = '预取没问成：同场景三类图没查到';
       return;                               // 预取失败不打扰用户，点的时候照旧会去取
     }
     if (my !== prefetchGen) return;
@@ -717,16 +746,28 @@ export const useViewerStore = defineStore('viewer', () => {
       && it.W != null && it.H != null
       && it.hasPreview && it.previewDiv === div
       && !recs.value.some((r) => r.sceneId === it.id));
+    if (!todo.length) {
+      prefetchNote.value = '这次没有可预取的：另两类在盘上还没有现成预览'
+        + '（预取不触发烘焙，打开过一次之后就有了）';
+      return;
+    }
+    let done = 0;
     for (const it of todo) {
       if (my !== prefetchGen) return;
+      prefetchNote.value = `正在预取 ${done + 1}/${todo.length}…`;
       try {
         // 顺序取（并发 1）：真机上别同时读几份盘阵预览。
         // **不传 onPhase**：预取不该占用遮罩，用户此刻在看别的。
         await fetchSceneJpg(cfg, siblingRow(res, it), div);
+        done++;
       } catch {
         /* 单张失败就跳过，接着取下一张 */
       }
     }
+    if (my !== prefetchGen) return;
+    prefetchNote.value = done === todo.length
+      ? `已预取 ${done} 项，切图不必现取`
+      : `预取了 ${done}/${todo.length} 项（其余没取到）`;
   }
 
   /* ---------------- 分隔比例 ---------------- */
@@ -1664,17 +1705,33 @@ export const useViewerStore = defineStore('viewer', () => {
     renderTick.value++;                                     // 通知画布加/减红叠
   }
 
+  /** 掩码能画在谁身上：这张 rec 得有显示像素，且是**本体影像**。
+   *
+   *  中间产物（SR 放大结果 / NOSR）不能画：掩码是建在**本体影像**网格上的，在产物上
+   *  画的坐标写到本体掩码文件上整片都是错的（工具栏那颗按钮同期置灰）。
+   *  对比模式下这是**唯一**的判据 —— 见 enterDraw 的注释。 */
+  function canDrawOn(rec: ViewerRec | null): boolean {
+    return Boolean(rec && rec.thumb && !isIntermediateStage(rec.stageKind));
+  }
+
+  /** 进入绘制模式。**对比模式下也可以画（2026-09-22 改）**。
+   *
+   *  原来这里挡着「对比模式只读」，理由是「分屏里画掩码会画到哪一格、写进哪一张 rec
+   *  都不明确」。那条理由已经不成立了：活动侧（`activeId`/`activeSide`）本来就是
+   *  「掩码/ROI 统计/云量/任务状态跟随的那一张」，分屏里点哪半哪半就是活动侧 ——
+   *  掩码画到活动侧那张 rec 上是**唯一**的结果，与其它几块数据同一条规则。
+   *  剩下真正含糊的那件事（在本体影像上画、却在产物上落笔）由 canDrawOn 挡住：
+   *  活动侧是产物时这里照旧拒绝，绘制期间也不让活动侧切到产物（setActiveSide）。
+   *
+   *  画布的坐标也要跟着改：分屏下每格的 ViewState 是**该格自己的局部坐标**，
+   *  指针要先减去活动格左上角（TifCanvas.mousePos）。
+   */
   function enterDraw() {
     const rec = activeRec.value;
     if (!rec || !rec.thumb) { showErr('请先打开一张图'); return; }
-    // 中间产物只读：掩码是建在**本体影像**网格上的，产物是它的放大结果，在产物上
-    // 画的坐标写到本体掩码文件上整片都是错的（工具栏那颗按钮同期置灰）。
-    if (isIntermediateStage(rec.stageKind)) {
+    if (!canDrawOn(rec)) {
       showErr(stageRefusal(rec.stageLabel ?? '产物')); return;
     }
-    // 对比模式只读：分屏里画掩码会画到哪一格、写进哪一张 rec 都不明确，
-    // 与其给出一个含糊的结果，不如明确挡住（工具栏那颗按钮同期置灰）。
-    if (compareOn.value) { showErr('图像对比模式下不绘制掩码，请先切回「关闭」'); return; }
     drawMode.value = true;
     drawTool.value = 'rect';
     pendingRect.value = null; pendingPts.value = null; hoverPt.value = null;
@@ -2195,6 +2252,16 @@ export const useViewerStore = defineStore('viewer', () => {
   /** mousedown 在绘制模式下的分派：rect 起框 / polygon 加点 / wand 调 wandSelect / del 调 delClick */
   function onCanvasDownDraw(p: Pt): boolean {
     if (!drawMode.value) return false;
+    // 兜底：绘制期间活动侧被换成了不可绘制的图（拖放落格、清单点选、盘阵栏都能换）。
+    // 退出绘制并说明，而不是默默把 ROI 写到产物上 —— 那种错要等到掩码文件送进 SR
+    // 才会暴露，且表现为「坐标整片偏了」，很难倒查回来。
+    // （分屏里点另一半那条常见路径在 setActiveSide 就挡住了，这里管的是其余入口。）
+    if (!canDrawOn(activeRec.value)) {
+      const rec = activeRec.value;
+      exitDraw();
+      showErr(rec ? stageRefusal(rec.stageLabel ?? '产物') : '请先打开一张图');
+      return true;
+    }
     if (drawTool.value === 'rect') {
       pendingRect.value = { x0: p[0], y0: p[1], x1: p[0], y1: p[1] };
     } else if (drawTool.value === 'wand') {
@@ -2319,8 +2386,8 @@ export const useViewerStore = defineStore('viewer', () => {
     activeSceneId, openSceneSibling,
     // 设置浮层（右上角）：对比模式后台预取开关 + 本地预览缓存
     settingsOpen, setSettingsOpen,
-    cmpPrefetchOn, setCmpPrefetch,
-    previewCacheStats, clearPreviewCache,
+    cmpPrefetchOn, setCmpPrefetch, prefetchNote,
+    previewCacheStats, clearPreviewCache, previewCacheRev,
     // 侧舱 ROI 选择 / 确定性统计
     selRoi, roiStats, roiSelIndex, selectRoi, clearRoiSel, refreshRoiStats,
     // 云量估算（整景/当前视野 + 疑似云区红叠）

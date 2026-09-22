@@ -182,15 +182,16 @@ function doLocate() {
 
     <span class="spacer"></span>
 
-    <!-- 对比模式只读（store.enterDraw 也有一道守卫）：分屏里画掩码会画到哪一格、
-         写进哪一张 rec 都不明确，与其给出一个含糊的结果，不如把按钮明确置灰。 -->
+    <!-- 对比模式下**也能画**（2026-09-22 改，原来置灰）：掩码只画到活动侧那张 rec 上
+         （分屏点哪半哪半就是活动侧，与掩码/云量/统计跟随活动侧同一条规则），所以不再是
+         「画到哪一格不明确」。仍置灰的只有一件事：活动侧是本轮超分产物 / NOSR
+         （掩码建在本体影像网格上，在产物上画，坐标写进掩码文件整片都是错的）。 -->
     <button
       type="button"
       class="outbtn"
       :class="{ on: store.drawMode }"
-      :disabled="store.compareOn || intermediate"
-      :title="intermediate ? roTitle
-        : store.compareOn ? '图像对比模式下不绘制掩码，请先切回「关闭」' : ''"
+      :disabled="intermediate"
+      :title="intermediate ? roTitle : ''"
       @click="store.drawMode ? store.exitDraw() : store.enterDraw()"
     >
       绘制掩码{{ store.drawMode ? ' ✓' : '' }}
