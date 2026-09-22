@@ -282,9 +282,12 @@ class Store:
     # 派生 + `claim_preview_bake` 的原子 CAS 之后，这个竞态在结构上不存在：
     # 急烤循环不关心「谁先看到」，它只关心「这行还没被认领」。
     #
-    # preview_state 取值：NULL（没烤）→ running → done | skipped | failed。
+    # preview_state 取值：NULL（没烤）→ running → done | skipped | failed | cleared。
     # 粒度是**行**（= 一个 task_fingerprint），所以同一 suffix 重跑必须重新武装，
     # 由 put_sr_task 的 UPDATE 分支负责（见那里的注释）。
+    # `cleared` 是**人工**结局、不由烘焙流程写：场景库的「清除缓存」把文件删掉后
+    # 标上它，让这行不再是候选（否则下一轮急烤会把文件重新烤回来，用户以为白清了）。
+    # 写它的入口只有一个 —— `mark_preview_cleared`（CAS，见那里的注释）。
 
     #: 每轮最多看一眼多少行 COMPLETED 候选（不是每轮烤多少 —— 那恒为 1）。
     _PREVIEW_SCAN_LIMIT = 20
@@ -342,6 +345,36 @@ class Store:
                    "WHERE id = ?", (state, note, task_id))
         db.commit()
         return self.get_sr_task_by_id(task_id)
+
+    def mark_preview_cleared(self, task_id: int, note: str | None = None) -> bool:
+        """把一行的预览状态标成 `cleared`（人工清了缓存），挡掉后续急烤认领。
+
+        **这是 CAS，不能用 `set_preview_state` 顶替。** 后者是无条件 UPDATE，会把
+        别人写下的 `'running'` 一起盖掉 —— 那个 running 属于一个**正在跑**的
+        `_bake_product_preview`，它跑完还会调 `set_preview_state(..., 'done')` 把值
+        写回来。于是库里说 done、盘上文件已被我们删掉，两边都以为自己是对的。
+        抢不到就返回 False，由调用方如实报成「后台正在烘焙这一景」。
+
+        WHERE 里的 `preview_state IS NULL OR preview_state != 'running'`：
+        SQL 中 `NULL != 'running'` 求值为 NULL 而非 TRUE，只写后半句会把「从没烤过」
+        的行整个漏掉 —— 而它们恰恰最需要被挡住（急烤下一轮就会认领，几秒后文件
+        复活，用户以为清除没生效）。
+
+        `status = 'COMPLETED'` 也是判据：正在排队/运行的同一 fingerprint 不该被标，
+        否则那次运行跑完后不会再有自动预览（该行 preview_state 已被我们钉成非
+        NULL）。用户清的是**旧缓存**，新的一次运行理应照常烤 —— 而重新提交会经
+        `put_sr_task` 把 preview_state 归 NULL 重新武装，这条不冲突。
+
+        不碰 updated_at，理由同 `set_preview_state`。
+        """
+        db = self._db()
+        cur = db.execute(
+            "UPDATE sr_tasks SET preview_state = 'cleared', preview_note = ? "
+            "WHERE id = ? AND status = 'COMPLETED' "
+            "AND (preview_state IS NULL OR preview_state != 'running')",
+            (note, task_id))
+        db.commit()
+        return cur.rowcount == 1
 
     def put_sr_task(self, fingerprint: str, params: dict, *,
                     session_id: str | None = None, status: str = "submitted",

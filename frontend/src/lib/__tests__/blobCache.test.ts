@@ -44,6 +44,53 @@ describe('createBlobCache — 基本出入', () => {
   });
 });
 
+describe('createBlobCache — deletePrefix（场景缓存被清后按场景失效）', () => {
+  it('只丢命中的那些键，返回丢掉的条数', () => {
+    const c = createBlobCache(10000);
+    c.set('sc1|2|jpg', blobOf(100));
+    c.set('sc1|4|jpg', blobOf(200));
+    c.set('sc1|4|ras:PAN.tif', blobOf(300));
+    c.set('sc2|4|jpg', blobOf(400));
+
+    expect(c.deletePrefix('sc1|')).toBe(3);
+
+    expect(c.get('sc1|4|jpg')).toBeUndefined();
+    expect(c.get('sc2|4|jpg')?.size).toBe(400);
+    expect(c.stats().count).toBe(1);
+  });
+
+  it('字节数跟着减 —— 只删条目不减 bytes，stats 会越报越大、LRU 也会提前挤掉别人',
+    () => {
+      const c = createBlobCache(10000);
+      c.set('sc1|4|jpg', blobOf(300));
+      c.set('sc2|4|jpg', blobOf(200));
+      c.deletePrefix('sc1|');
+      expect(c.stats().bytes).toBe(200);
+      expect(c.stats().count).toBe(1);
+    });
+
+  it('纯字符串前缀匹配：不做 id 识别，也不误伤无关的键', () => {
+    const c = createBlobCache(10000);
+    c.set('sc1|4|jpg', blobOf(100));
+    // 'sc1' 也是前缀（本函数只比字符串）—— 所以调用方必须自己补竖线，
+    // 否则 'sc10|4|jpg' 这种也会被一起丢掉。见 forgetScenePreviewBlobs。
+    expect(c.deletePrefix('sc1')).toBe(1);
+    expect(c.deletePrefix('nope|')).toBe(0);
+    expect(c.stats().bytes).toBe(0);
+  });
+
+  it('丢掉的键再 set 回来是全新的（旧字节不会被复用）', () => {
+    const c = createBlobCache(10000);
+    c.set('sc1|4|jpg', blobOf(100));
+    c.deletePrefix('sc1|');
+    expect(c.get('sc1|4|jpg')).toBeUndefined();
+    const fresh = blobOf(150);
+    c.set('sc1|4|jpg', fresh);
+    expect(c.get('sc1|4|jpg')).toBe(fresh);
+    expect(c.stats().bytes).toBe(150);
+  });
+});
+
 describe('createBlobCache — LRU 顺序', () => {
   it('超上限时先淘汰最旧的那条', () => {
     const c = createBlobCache(300);

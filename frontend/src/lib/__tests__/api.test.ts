@@ -10,6 +10,7 @@ import {
   stepSse, parseSseEvents, apiUrl, sessionsUrl, sessionMessagesUrl,
   queueEventsUrl, fetchSceneJpg, fetchDropSceneJpg, apiResolveScene,
   resetPreviewCache, previewCacheStats, clearPreviewCache, PREVIEW_BLOB_CACHE_MAX,
+  apiClearScenePreviews,
 } from '../api.js';
 import type { PlatformSseEvent, ChatSseEvent } from '../api.js';
 import type { SceneRow } from '../scene.js';
@@ -254,6 +255,34 @@ describe('fetchSceneJpg', () => {
     resetPreviewCache();
     await fetchSceneJpg(CFG, row({ jpgUrl: null, hasPreview: false }), 4, phase);
     expect(phase).toHaveBeenCalledTimes(1);
+  });
+
+  it('**同一档位重烤后取静态图必须绕开浏览器缓存**（清除缓存 / 规则换代那条）', async () => {
+    // `?div=N` 只击穿「档位变了」这种情况。档位没变而服务端把同一个 URL 下的文件
+    // 重写了一遍（场景库「清除缓存」、规则戳 v2→v3 原地重烤）时，URL 逐字相同，
+    // nginx 的 max-age=3600 会让浏览器把旧字节端上来 —— 用户以为清了个寂寞。
+    // 判据是 needBake：只有它成立时才**知道**服务端刚重写过。
+    const inits: (RequestInit | undefined)[] = [];
+    vi.stubGlobal('fetch', (u: string, init?: RequestInit) => {
+      inits.push(init);
+      const bodies: Record<string, string> = {
+        '/api/scenes/~YWJj/preview?div=4': 'ok',
+        '/disk-array/a/b_preview.jpg?div=4': 'REBAKED',
+      };
+      if (!(u in bodies)) return Promise.resolve(new Response('nope', { status: 404 }));
+      return Promise.resolve(new Response(bodies[u], { status: 200 }));
+    });
+    // 行是服务端刚回的（清完缓存 → hasPreview false、previewDiv null）
+    const r = row({ jpgUrl: BAKED, hasPreview: false, previewDiv: null });
+    expect(await (await fetchSceneJpg(CFG, r, 4)).text()).toBe('REBAKED');
+    expect(inits[1]?.cache).toBe('no-store');   // 第二次 = 静态取图那一下
+
+    // 没重烤（档位已对上）时不要多这一道 —— 常态下白绕缓存等于每次打开都重下一遍
+    inits.length = 0;
+    resetPreviewCache();
+    await fetchSceneJpg(CFG, row({ jpgUrl: BAKED, hasPreview: true, previewDiv: 4 }), 4);
+    expect(inits.length).toBe(1);
+    expect(inits[0]?.cache).toBeUndefined();
   });
 
   it('onPhase 是可选的（旧调用方不传也不炸）', async () => {
@@ -525,5 +554,89 @@ describe('apiResolveScene 双指纹透传', () => {
   it('不给 size_bytes 就不出现在 body 里（粘路径那条老调用不受影响）', async () => {
     await apiResolveScene(CFG, { path: 'W:\\a\\b' });
     expect(JSON.parse(bodies[0])).toEqual({ path: 'W:\\a\\b' });
+  });
+});
+
+/* ---------------- 清除预览缓存（POST /api/scenes/clear-preview） ---------------- */
+describe('apiClearScenePreviews', () => {
+  const CLEAR_URL = '/api/scenes/clear-preview';
+  const OK_BODY = {
+    results: [{ id: '~YWJj', status: 'cleared', reason: null, dir: '/d',
+      removed: [{ name: 'a_preview.jpg' }], skipped: [], failed: [], marked: 1 }],
+    summary: { cleared: 1, nothing: 0, skipped: 0, failed: 0,
+      dirs: 1, files: 1, marked: 1 },
+  };
+  let calls: { url: string; body: string }[];
+
+  function stub(handler: (url: string) => Response): void {
+    calls = [];
+    vi.stubGlobal('fetch', (u: string, init: RequestInit) => {
+      calls.push({ url: u, body: String(init?.body ?? '') });
+      return Promise.resolve(handler(u));
+    });
+  }
+
+  // 模块级单例，用例之间会串味（同上）：每条从空缓存起跑。
+  beforeEach(() => { resetPreviewCache(); vi.unstubAllGlobals(); });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('POST ids + 解析响应（200 只表示受理，逐条结论在 body 里）', async () => {
+    stub(() => new Response(JSON.stringify(OK_BODY), { status: 200 }));
+
+    const body = await apiClearScenePreviews(CFG, ['~YWJj', '~YWJk']);
+
+    expect(calls[0].url).toBe(CLEAR_URL);
+    expect(JSON.parse(calls[0].body)).toEqual({ ids: ['~YWJj', '~YWJk'] });
+    expect(body.results[0].status).toBe('cleared');
+    expect(body.summary.files).toBe(1);
+  });
+
+  it('成功之后丢掉这些场景在本地的那一份（不丢就等于没清，见函数注释）', async () => {
+    // 先让本地缓存真的存下一份：stub 一次 fetchSceneJpg
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response('PREVIEW', { status: 200 })));
+    await fetchSceneJpg(CFG, {
+      id: '~YWJj', name: 'SC', satellite: null, sensor: null, date: null,
+      size_bytes: 0, fake: false, W: 200, H: 100, rel: null,
+      jpgUrl: null, hasPreview: false, lq_path: null,
+    }, 2);
+    expect(previewCacheStats().count).toBe(1);
+
+    stub(() => new Response(JSON.stringify(OK_BODY), { status: 200 }));
+    await apiClearScenePreviews(CFG, ['~YWJj']);
+
+    expect(previewCacheStats().count).toBe(0);
+    expect(previewCacheStats().bytes).toBe(0);
+  });
+
+  it('请求失败时**不丢**本地那份：盘上什么都没变，丢了下次还得重新烘焙', async () => {
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response('PREVIEW', { status: 200 })));
+    await fetchSceneJpg(CFG, {
+      id: '~YWJj', name: 'SC', satellite: null, sensor: null, date: null,
+      size_bytes: 0, fake: false, W: 200, H: 100, rel: null,
+      jpgUrl: null, hasPreview: false, lq_path: null,
+    }, 2);
+
+    stub(() => new Response(JSON.stringify({ detail: '盘阵根未配置' }),
+      { status: 400 }));
+
+    await expect(apiClearScenePreviews(CFG, ['~YWJj'])).rejects.toThrow('盘阵根未配置');
+    expect(previewCacheStats().count).toBe(1);
+  });
+
+  it('只丢命中的那些 id —— 别的场景本地那份留着', async () => {
+    const mk = (id: string): SceneRow => ({
+      id, name: 'SC', satellite: null, sensor: null, date: null,
+      size_bytes: 0, fake: false, W: 200, H: 100, rel: null,
+      jpgUrl: null, hasPreview: false, lq_path: null,
+    });
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response('P', { status: 200 })));
+    await fetchSceneJpg(CFG, mk('~YWJj'), 2);
+    await fetchSceneJpg(CFG, mk('~YWJk'), 2);
+    expect(previewCacheStats().count).toBe(2);
+
+    stub(() => new Response(JSON.stringify(OK_BODY), { status: 200 }));
+    await apiClearScenePreviews(CFG, ['~YWJj']);
+
+    expect(previewCacheStats().count).toBe(1);
   });
 });

@@ -57,6 +57,7 @@
 | `POST /api/scenes/resolve` | 手填/反推一个盘阵场景目录 → 与库行同形的 `{source,row,resolved}`（2026-09-20 起 `row` 也带 `rasterPreview`） | 3.5 |
 | `GET /api/scenes/{id}/preview-drop` | **拖拽入口专用**的预览 JPG（落盘阵场景目录 `<stem>_preview.jpg`；目录不可写时兜底到临时缓存并回 `X-SR-Preview-Fallback: tmp`；不进库行，URL 不可静态映射） | 3.6 |
 | `GET /api/scenes/{id}/siblings` | **只读**诊断：一个场景的三类图（输入 / 本轮超分产物 / NOSR `_NOSR`）各叫什么、在不在、各是什么 id —— 供下一轮对比视图消费，也是 `_NOSR` 拼法待真机核对时的窗口 | 3.8 |
+| `POST /api/scenes/clear-preview` | **删盘阵文件**（本契约里唯一一条）：场景库「清除选定 / 全部清除」按场景目录清掉预览 JPG 缓存，逐条回报；判据与边界见章节 | 3.9 |
 | `GET /api/tools` | 工具清单（manifest 机械生成，供 UI/文档） | 3.1 |
 | `POST /api/tools/{name}` | 直调单个工具（绕过 LLM；validate + 白名单照常） | 3.1 |
 | `POST /api/chat/sessions` | 新建会话 → `201 {session_id}` | 3.2 |
@@ -159,9 +160,12 @@ submit_run_sr 返回 → 队列状态：
 
 - `GET /api/queue` → `200 {"tasks":[{task_id, fingerprint, session_id, job_id, state, params:{lq_path,mask_path,sr_scale,suffix,gpu,cloud_limit,delete_ori,grid_align}, config_xml, batch_script, log_dir, created_at, updated_at, started_at, finished_at, preview_state, preview_note}, …]}`，按 created_at 倒序。`state` 取内存最近校准结果（缓存），无缓存则当场校准一次（squeue/sacct，镜像 `slurm.job_status`）。
   **`preview_state` / `preview_note`（2026-09-20 增）**：产物预览急烤的结局，见 §4.5。
-  `preview_state ∈ {null, "running", "done", "skipped", "failed"}`（null = 从没烤过），
+  `preview_state ∈ {null, "running", "done", "skipped", "failed", "cleared"}`（null = 从没烤过；
+  `cleared`（2026-09-22 增）= 场景库「清除缓存」把它人工清了，**只由那条端点写**，见 §3.9），
   `preview_note` 形如 `"<slug>: <人话>"`，slug 固定为 `sandbox` / `product_missing` /
-  `unwritable` / `source_changed` / `no_suffix` / `failed`。两列与作业状态**无关**
+  `unwritable` / `source_changed` / `no_suffix` / `failed`（`cleared` 的 note 是
+  `cleared: <时间> 场景库人工清除缓存，下次打开会重新烘焙`，不属于上面这组 slug）。
+  两列与作业状态**无关**
   （COMPLETED 也可能没烤成），客户端别把两者耦合成一个状态机。
   **两组时间戳别混**（2026-09-18 增 `started_at`/`finished_at`，见下「耗时」）：`created_at` = 这一行**第一次**提交的时刻（同一指纹重交复用同一行，不刷新）、`updated_at` = 最近一次写回，两者属**行**；`started_at` = 校准器首次观测到 RUNNING 的时刻（排队结束）、`finished_at` = 终态落库时刻，两者属**本次运行**。本次运行的起点/终点都没观测到就是 `null`（界面「—」），**不**退回 `created_at` 顶替。
 - `POST /api/queue` — body（run_sr 参数，`lq_path` 必填，其余带默认）：
@@ -690,6 +694,45 @@ body：
 - **离开对比模式即作废**：`stopPrefetch()` 清掉去重表并推进代数计数（`prefetchGen`），
   在飞的预取发现代数变了就不再开始下一项。**不用 `AbortController`**：取图那两个 API
   不收 `AbortSignal`（要兼容静态 URL 那条支路），掐不断在飞的那个请求。
+
+### 3.9 人工清除预览缓存（`POST /api/scenes/clear-preview`，2026-09-22）
+
+场景库表格卡片头部那条工具行（「清除选定」/「全部清除」）的服务端一半。**这是本契约里
+唯一一条会删除盘阵上文件的端点**，判据与回报都按「宁可不删，也不删错」写，机制细节见
+[preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md) §4.12。
+
+```http
+POST /api/scenes/clear-preview
+{ "ids": ["<scene id>", "…"] }        // 库行 id 与 `~` 开头的手工行 id 都吃；≤ 500 条
+→ 200 {"results":[{id, status, reason, dir, removed:[{name,dir}],
+                   skipped:[{name,reason,dir}], failed:[{name,reason,dir}], marked}],
+       "summary":{cleared, nothing, skipped, failed, dirs, files, marked}}
+```
+
+- **`status`** 四值：`cleared`（删到了东西；**同目录里还有同名件没被认成缓存时另带 `reason`**）/
+  `nothing`（盘上本来就没有这一景的缓存，**且一个同名件都没有**）/
+  `skipped`（**整个目录一个文件都没删**：id 不可访问 —— 白名单外 / 文件不存在；该景**此刻**有任务
+  `preview_state='running'`；或目录里只有同名外来件。见下）/
+  `failed`（该删但删不掉，逐条给原因）。**逐条回报、逐条尽力**：一个目录删不掉不影响其他目录，
+  一条坏 id 也不影响其他 id（坏 id 不致 5xx）。
+- **`nothing` 与 `skipped` 不能混**（前端的行去留按结论分：`cleared`/`nothing` 摘行，`skipped`/`failed`
+  留行）。目录里躺着 `<stem>_preview.jpg` 但不是我们的缓存（没规则戳 / 是场景源）时报 `nothing`
+  是假话，还会把行从列表里摘掉 —— 盘上那份文件明明还在，重新检索又出现「已生成」，看起来像
+  清除没生效。所以只有「一个同名件都没有」才叫 `nothing`。
+- **按目录去重**：同一景的两行（`<目录名>.tif` 与 `PAN.tif`）共用一个目录，只清一次；
+  `summary.dirs` 是去重后的目录数，`summary.files` 是真正删掉的文件数。
+- **删什么**：该场景目录（配了 `SR_PREVIEWS_ROOT` 时含镜像树里对应的那一层）里
+  `<stem>_preview.jpg` / `<stem>.preview.jpg`，且 **JPEG 注释带 `srprev:` 规则戳**、
+  不是场景源（`is_scene_file`）、不是符号链接。**不递归、不扫根、不删空目录。**
+  场景源 `.tif` / `<编号>_mask.tif` / 源即显示件那份 `.jpg` 一律不碰。
+- **库里怎么记**：该目录所有 `COMPLETED` 任务行写 `preview_state='cleared'`
+  （CAS，`preview_state IS NULL OR != 'running'`），挡住急烤的后续认领；`running` 的那一行
+  不覆盖。**不自动重烤** —— 下次打开走惰性路径重烤。
+- **`ids` 非空数组且 ≤ 500**（超出 400，不静默截断）：一次动几十上百个生产目录的请求，
+  宁可让调用方分批，也不替它决定砍掉哪一半。
+- 删除动作在客户端也有对应记账：命中的 scene id 前缀丢本地 blob 缓存，且**本次真的重烤过**
+  时取静态图带 `cache:'no-store'` 绕开浏览器 HTTP 缓存（§3.8.2 那条 `?div=N` 只击穿换档位，
+  击穿不了同档位重烤）。
 
 ## 4. 关键实现机制（契约约束）
 

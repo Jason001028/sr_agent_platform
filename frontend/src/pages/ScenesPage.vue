@@ -11,6 +11,7 @@ import { isImageSource, previewNeedsBake } from '../lib/scene.js';
 import { useScenesStore } from '../stores/scenes.js';
 import { useViewerStore } from '../stores/viewer.js';
 import ScenePathBar from '../components/ScenePathBar.vue';
+import SceneCacheBar from '../components/SceneCacheBar.vue';
 
 const scenes = useScenesStore();
 // 只为了读当前预览档位（工具栏那条拖动条写的就是它）——「已生成 / 未生成」与
@@ -78,30 +79,46 @@ onMounted(() => { void scenes.list(); });
     <p v-if="scenes.phase" class="sp-loading sp-phase">{{ scenes.phase }}</p>
 
     <div class="sp-tbl-wrap">
+      <SceneCacheBar />
       <table class="sp-tbl">
         <thead>
           <tr>
-            <th>卫星</th><th>传感器</th><th>日期</th>
-            <th class="left">场景（文件）</th><th class="right">尺寸</th>
-            <th class="right">大小</th><th>预览 JPG</th><th>打开</th>
+            <!-- 首列：勾选（清缓存的选中态）。表头留空 —— 全选复选框在 SceneCacheBar
+                 上，「已选 N 项」也在那儿，表头再放一颗会变成两个「全选」。 -->
+            <th class="c-pick"></th>
+            <th class="c-sat">卫星</th><th class="c-sensor">传感器</th>
+            <th class="c-date">日期</th>
+            <th class="left c-name">场景（文件）</th><th class="right c-dims">尺寸</th>
+            <th class="right c-size">大小</th><th class="c-tag">预览 JPG</th>
+            <th class="c-act">打开</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="row in scenes.rows" :key="row.id">
-            <td>{{ row.satellite ?? '—' }}</td>
-            <td>{{ row.sensor ?? '—' }}</td>
-            <td>{{ row.date ?? '—' }}</td>
-            <td class="left name" :title="row.rel ?? ''">{{ row.name }}</td>
-            <td class="right">{{ dimsText(row) }}</td>
-            <td class="right">{{ fmtBytes(row.size_bytes) }}</td>
-            <td>
+            <td class="c-pick">
+              <!-- 必须是 input[type=checkbox]：e2e 里 `tr.querySelector('button')`
+                   取的是「打开」那颗按钮，放个 button 形状的勾选框会把它顶掉。 -->
+              <input v-if="scenes.isSelectable(row)" type="checkbox"
+                     class="sp-pick" :checked="scenes.selected.has(row.id)"
+                     :disabled="scenes.clearing"
+                     :title="'选中「' + row.name + '」（清除缓存用）'"
+                     @change="scenes.toggleSelect(row.id)" />
+              <span v-else class="sp-nopick" title="fake 占位行在盘上没有文件，不可清除">—</span>
+            </td>
+            <td class="c-sat">{{ row.satellite ?? '—' }}</td>
+            <td class="c-sensor">{{ row.sensor ?? '—' }}</td>
+            <td class="c-date">{{ row.date ?? '—' }}</td>
+            <td class="left name c-name" :title="row.rel ?? ''">{{ row.name }}</td>
+            <td class="right c-dims">{{ dimsText(row) }}</td>
+            <td class="right c-size">{{ fmtBytes(row.size_bytes) }}</td>
+            <td class="c-tag">
               <span v-if="row.fake" class="tag fake">fake</span>
               <span v-else-if="isImageSource(row)" class="tag ok">JPG 源</span>
               <span v-else-if="!previewNeedsBake(row, viewer.previewDiv)"
                     class="tag ok">已生成</span>
               <span v-else class="tag">未生成</span>
             </td>
-            <td>
+            <td class="c-act">
               <button type="button" class="btn mini" :disabled="scenes.openingId === row.id"
                       @click="scenes.open(row)">
                 {{ scenes.openingId === row.id ? '打开中…'
@@ -110,7 +127,13 @@ onMounted(() => { void scenes.list(); });
             </td>
           </tr>
           <tr v-if="!scenes.loading && !scenes.rows.length">
-            <td colspan="8" class="empty">没有匹配场景（或未连接盘阵）</td>
+            <!-- 空表有两个来源，不能都写成「没有匹配场景」：清除缓存把行摘光时，
+                 盘阵上这些场景明明还在，说「没有」是假话（重新检索就回来）。 -->
+            <td colspan="9" class="empty">
+              {{ scenes.clearRemoved
+                 ? '这批已从列表移除（场景与源文件都还在盘阵上），重新检索即回来'
+                 : '没有匹配场景（或未连接盘阵）' }}
+            </td>
           </tr>
         </tbody>
       </table>
@@ -234,6 +257,11 @@ onMounted(() => { void scenes.list(); });
   letter-spacing: 0.2px;
 }
 .sp-tbl td.left { text-align: left; }
+/* 勾选列压到最窄：本表已有 8 列长内容，第 9 列多占一像素都可能把
+   .sp-tbl-wrap（overflow:hidden）里的表尾挤没。 */
+.sp-tbl th.c-pick, .sp-tbl td.c-pick { width: 34px; padding: 9px 6px; }
+.sp-pick { width: 14px; height: 14px; margin: 0; cursor: pointer; vertical-align: middle; }
+.sp-nopick { color: var(--ink-faint); }
 .sp-tbl td.right { text-align: right; font-variant-numeric: tabular-nums; }
 /* 场景名完整显示：不截断、不省略号。生产场景名是「卫星_传感器_时间戳_…_L1_PAN」
    这种 50+ 字符的长串，中间没有空格，靠 table 布局自己挤不出空间，必须允许换行

@@ -52,6 +52,7 @@ from backend.pathguard import (
     looks_like_scene_name, parse_scene_date, production_tree_depth,
     strip_raster_ext, to_posix_array_path)
 from backend.services import preview_cache
+from backend.services import preview_clear
 from backend.services import run_sr as run_sr_svc
 from backend.services import scene_search, store as store_mod
 from backend.services.preview_jpg import (PREVIEW_DIVISORS, PREVIEW_JPG_QUALITY,
@@ -646,6 +647,164 @@ def _latest_completed_suffix(store, lq_path: str) -> str | None:
         if s:
             return str(s)
     return None
+
+
+# --------------------------------------------------------------------------
+# 人工清除预览缓存（场景库「清除选定 / 全部清除」，2026-09-22）
+# --------------------------------------------------------------------------
+#: 一次最多清多少个场景 id（前端「全部清除」按当前检索结果发，limit 上限 500）。
+_CLEAR_MAX_IDS = 500
+
+#: 找「这一景的任务行」时最多看多少条任务（见 `_completed_rows_for_dir` 里
+#: 关于这个上界的代价说明）。
+_CLEAR_TASK_SCAN_LIMIT = 1000
+
+
+def _clear_note() -> str:
+    """标进 `preview_note` 的人话（沿用 `<slug>: <人话>` 形态，见 api-contract §3.3）。
+
+    带时间是因为这条动作**不碰 `updated_at`**（那一列属于作业、不属于预览，抬它会让
+    队列页的「最近写回」说谎），于是这里的时间戳就是「什么时候清的」的唯一记录。
+    """
+    return (f"cleared: {datetime.now():%Y-%m-%d %H:%M} 场景库人工清除缓存，"
+            "下次打开会重新烘焙")
+
+
+def _clear_result(sid: str, status: str, reason: str | None) -> dict:
+    """一条 id 的结论骨架：明细三列表恒在（空列表，不是缺键）。
+
+    前端要按 id 批量渲染明细，缺键就得处处判 `?? []` —— 形状固定住更省事。
+    """
+    return {"id": sid, "status": status, "reason": reason, "dir": None,
+            "removed": [], "skipped": [], "failed": [], "marked": 0}
+
+
+def _completed_rows_for_dir(store, scene_dir) -> list[dict]:
+    """这个场景目录的 COMPLETED 任务行（该目录下**所有** suffix、所有历史行）。
+
+    **必须全都要，不能只找「有产物预览的那一行」。** 急烤循环（`_eager_bake_tick`，
+    缺省每 2 秒一轮）认领的是 `preview_state IS NULL` 的 COMPLETED 行 —— 同目录只要
+    还剩任何一行没被标掉，它下一轮就把预览重新烤回来，用户看到的是「清了又回来」。
+    同目录多行多半出自不同 suffix（`sr`/`sr2`…），各自对应一份产物预览。
+
+    扫描范围**有界**（最近 `_CLEAR_TASK_SCAN_LIMIT` 条，`list_sr_tasks` 缺省只有
+    200，这里显式放大）。落在范围外的代价要说清：某行若创建得很早、但刚跑完（长
+    作业），它的 `preview_state` 改不到，急烤仍会把它烤回来 —— 代价是**多烤一次、
+    多一份文件**，不是数据损坏，再点一次「清除」即可。
+
+    比对口径与 `_latest_completed_suffix` 完全一致（`_norm_dir` 归一后的 POSIX）。
+    走内存过滤而不是 SQL LIKE：生产目录名里全是下划线，LIKE 的通配符得靠转义兜着。
+    """
+    want = _norm_dir(scene_dir)
+    out = []
+    for row in store.list_sr_tasks(limit=_CLEAR_TASK_SCAN_LIMIT):
+        if (row.get("status") or "").upper() != "COMPLETED":
+            continue
+        if _norm_dir((row.get("params") or {}).get("lq_path")) == want:
+            out.append(row)
+    return out
+
+
+def _clear_dirs_for(abs_path: Path, root: Path | None) -> list[Path]:
+    """这一景的预览可能落在哪些目录（保序去重，第 0 个是场景目录本身）。
+
+    **两个落点都得列**，只清一个会留下另一半：
+      * **场景目录** —— 拖入链（`preview_drop`）与未超分那份（`_bake_nosr_preview`）
+        恒落源同目录，不吃 `SR_PREVIEWS_ROOT`；
+      * **镜像树** —— 配了 `SR_PREVIEWS_ROOT` 时，`GET /preview` 的惰性链与急烤的
+        产物那份走 `preview_jpg_path`，落 `<previews_root>/<rel dir>/`。
+
+    镜像目录由 `paths.preview_jpg_path` 算（落点规则的唯一来源），这里不另写一遍；
+    库外的手工路径不在白名单内，只有场景目录一个落点。
+
+    源是显示件 jpg 且配着同名栅格时 `/preview` 会改从栅格烤 —— 这里**不必**跟着换：
+    落点名字只由 stem 拼（`PAN.jpg` 与 `PAN.tif` 同名同目录）。
+    """
+    dirs = [abs_path.parent]
+    if root is not None and is_within(abs_path, root):
+        mirror = paths.preview_jpg_path(abs_path, root).parent
+        if not _same_dir(mirror, dirs[0]):
+            dirs.append(mirror)
+    return dirs
+
+
+def _same_dir(a: Path, b: Path) -> bool:
+    """两个目录是不是同一个（大小写不敏感的宿主形态归一后比字符串）。
+
+    只用来避免把同一个目录列举两遍 —— 比错了的代价只是多一次 `iterdir`（第二次
+    必然报「无需清除」），所以不上 `resolve()` 那套真路径比对。
+    """
+    return os.path.normcase(str(a)) == os.path.normcase(str(b))
+
+
+def _clear_one_scene(state, dirs: list[Path], scene_dir) -> dict:
+    """清一景的预览：**先标状态，再删文件**（顺序即正确性，见下方各分支注释）。
+
+    返回 `{"status", "reason", "dirs", "removed", "skipped", "failed", "marked"}`，
+    status ∈ `cleared` / `nothing` / `skipped` / `failed`。
+    """
+    rows = _completed_rows_for_dir(state.store, scene_dir)
+
+    # 后台正在烤这一景 → 整景不动。删了也会被那个正在跑的 `_bake_product_preview`
+    # 在几十秒后写回来（它是先写临时文件再 rename），用户只会看见「清了又回来」，
+    # 然后怀疑这个功能是假的。如实说「稍后再清」比删一半诚实。
+    if any((r.get("preview_state") or "") == "running" for r in rows):
+        return {"status": "skipped", "dirs": dirs, "marked": 0,
+                "reason": "后台正在烘焙这一景（preview_state=running）—— "
+                          "等它跑完再清，否则它会把文件写回来",
+                "removed": [], "skipped": [], "failed": []}
+
+    # 先标后删：标记是**挡住后续认领**的那一步。顺序倒过来的话，两轮急烤之间
+    # （2 秒）就足够把刚删掉的文件重新烤出来。
+    note = _clear_note()
+    marked = 0
+    for r in rows:
+        try:
+            if state.store.mark_preview_cleared(r["task_id"], note):
+                marked += 1
+                _broadcast(state, {"type": "preview_update",
+                                   "task_id": r["task_id"],
+                                   "state": "cleared", "note": note})
+        except Exception:  # noqa: BLE001 — 写库失败不该挡住删除动作
+            pass
+
+    removed, skipped, failed = [], [], []
+    for d in dirs:
+        res = preview_clear.clear_dir_previews(d)
+        # 名字在「场景目录 + 镜像树」两处会重样，明细里带上目录才分得清是哪一份。
+        posix = d.as_posix()
+        removed += [{"name": n, "dir": posix} for n in res["removed"]]
+        skipped += [{"name": n, "reason": why, "dir": posix}
+                    for n, why in res["skipped"]]
+        failed += [{"name": n, "reason": why, "dir": posix}
+                   for n, why in res["failed"]]
+
+    out = {"dirs": dirs, "removed": removed, "skipped": skipped,
+           "failed": failed, "marked": marked, "reason": None}
+    if failed:
+        out["status"] = "failed"
+        out["reason"] = (f"{len(failed)} 个文件删不掉（多半是权限或文件被占用，"
+                         "见明细）")
+    elif removed or marked:
+        out["status"] = "cleared"
+        if skipped:
+            # 删到了东西，但同目录里还有同名件没被认成缓存（无规则戳 / 是场景源）。
+            # 结论仍是 cleared，但不能让它悄悄消失在明细里 —— 用户看到「已清除」
+            # 之后多半不会再展开明细，而「有一份没删」正是他该知道的事。
+            out["reason"] = (f"另有 {len(skipped)} 个同名文件不是本平台的缓存"
+                             "（见明细），没删")
+    elif skipped:
+        # 目录里有同名件、但一个都不是我们的缓存。**这不能报成 `nothing`**
+        # （「盘上本来就没有」）—— 那句话是假的，而且前端按结论决定行去留：
+        # 报 nothing 会把这一行从列表里摘掉，可盘上那份文件明明还在，
+        # 重新检索又出现「已生成」，看起来像清除没生效。
+        out["status"] = "skipped"
+        out["reason"] = (f"{len(skipped)} 个同名文件不是本平台的预览缓存"
+                         "（无 srprev: 规则戳 / 是场景源），一个都没删")
+    else:
+        out["status"] = "nothing"
+        out["reason"] = "盘上本来就没有这一景的预览缓存"
+    return out
 
 
 def _seconds_to_next_midnight(now: datetime | None = None) -> float:
@@ -1375,6 +1534,79 @@ def create_app() -> FastAPI:
                                 headers=headers)
         return FileResponse(str(main_jpg), media_type="image/jpeg",
                             headers=headers)
+
+    @app.post("/api/scenes/clear-preview")
+    async def clear_scene_previews(request: Request):
+        """人工清除若干场景的预览 JPG 缓存（场景库「清除选定 / 全部清除」）。
+
+        请求体 `{"ids": [...]}`，id 两种形态都吃（库行的 rel id、手工行的 `~` 绝对
+        路径 id）。**200 = 请求被受理**，逐条结论在 `results` 里 —— 这不等于「全都
+        清了」：`nothing`（盘上本来就没有）/ `skipped`（不能清，带原因）/ `failed`
+        （删不掉，带原因）都是合法结局，前端按 id 决定哪些行从列表移除。
+
+        删除判据全在 `services/preview_clear.py`（只列这一层 + 名字两种形态 + JPEG
+        规则戳 + 不是场景源 + 不是符号链接）；这里只管编排：解析 id、按目录归并、
+        标库挡急烤、删、广播、汇总。
+
+        **同一景的两行只清一次是设计，不是漏删**：`<目录名>.tif` 与 `PAN.tif` 指向
+        同一个场景目录，预览也是同一批文件；按父目录归并后逐目录处理，两个 id 各自
+        拿到本目录的结论。
+
+        fake 行 / 坏 id / 白名单外**不是 5xx**：它们进 `skipped` 带原因，与「动手失败」
+        （`failed`）分开 —— 前者是这条请求本身没意义，后者是盘上没删成。
+        """
+        body = await _json_body(request)
+        raw = body.get("ids")
+        if not isinstance(raw, list) or not raw:
+            raise HTTPException(status_code=400, detail="ids 须为非空数组")
+        if len(raw) > _CLEAR_MAX_IDS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"一次最多清 {_CLEAR_MAX_IDS} 个场景（收到 {len(raw)}）—— "
+                       "请缩小检索范围后分批清")
+
+        per_id: dict[str, dict] = {}
+        order: list[str] = []
+        resolved: list[tuple[str, Path]] = []
+        for sid in raw:
+            # 非字符串（JSON 里混进数字/null）与重复 id 一并安静跳过：它们既不是
+            # 「清掉了」也不是「清不掉」，报进明细只会让用户去猜自己发了什么。
+            if not isinstance(sid, str) or not sid or sid in per_id:
+                continue
+            if sid in order:
+                continue
+            order.append(sid)
+            try:
+                abs_path = paths.scene_id_to_abs(sid, root)
+            except PathDeniedError as e:
+                per_id[sid] = _clear_result(sid, "skipped", f"场景不可访问：{e}")
+                continue
+            resolved.append((sid, abs_path))
+
+        # 目录 → 结论。同一个目录被多个 id 指到只处理一次（`_clear_one_scene` 会
+        # 真删文件，重复跑第二遍只会报「无需清除」，还会把明细里的跳过项重复一遍）。
+        outcomes: dict[str, dict] = {}
+        for sid, abs_path in resolved:
+            dirs = _clear_dirs_for(abs_path, root)
+            key = os.path.normcase(str(dirs[0]))
+            if key not in outcomes:
+                outcomes[key] = _clear_one_scene(app.state, dirs, dirs[0])
+            o = outcomes[key]
+            per_id[sid] = {**_clear_result(sid, o["status"], o["reason"]),
+                           "dir": dirs[0].as_posix(),
+                           "removed": o["removed"], "skipped": o["skipped"],
+                           "failed": o["failed"], "marked": o["marked"]}
+
+        results = [per_id[sid] for sid in order]
+        summary = {"cleared": 0, "nothing": 0, "skipped": 0, "failed": 0}
+        for r in results:
+            summary[r["status"]] = summary.get(r["status"], 0) + 1
+        # 这三个数按**去重后的目录**算：两个 id 指同一景时文件只有一批，按结果累加
+        # 会把它数成两份，汇总行就会说「清了 4 个文件」而盘上只少了 2 个。
+        summary["dirs"] = len(outcomes)
+        summary["files"] = sum(len(o["removed"]) for o in outcomes.values())
+        summary["marked"] = sum(o["marked"] for o in outcomes.values())
+        return {"results": results, "summary": summary}
 
     @app.get("/api/scenes/{scene_id}/siblings")
     def scene_siblings(scene_id: str, request: Request,

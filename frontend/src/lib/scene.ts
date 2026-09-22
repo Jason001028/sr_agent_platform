@@ -471,3 +471,108 @@ export function sceneAnchors(dirs: (string | null | undefined)[]): string[] {
   }
   return out;
 }
+
+/* ---------------- 清除预览缓存（场景库「清除选定 / 全部清除」） ----------------
+ * 服务端删盘阵上那批 `<stem>_preview.jpg`（判据见 backend/services/preview_clear.py）；
+ * 前端这边只有两件事要做，都在本文件与 lib/api.ts 里：
+ *
+ *   1. 把清掉的行从列表里摘掉（`rowsAfterClear`）—— 行还在列表里显示「已生成」就是
+ *      谎话，而这些行本来也要重新检索才会回来；
+ *   2. 丢掉这些场景在**本地 blob 缓存**里的那一份（lib/api.ts 的
+ *      `forgetScenePreviewBlobs`）—— 不丢的话同一会话里再打开会直接命中本地旧字节，
+ *      既不重新烘焙也看不到新图，用户会以为清除没生效。
+ */
+
+/** 清除端点 URL：POST /api/scenes/clear-preview（请求体 `{ids: [...]}`）。
+ *
+ *  **POST 而不是 DELETE**：一批 id（几十上百个）得放请求体，而 DELETE 带 body
+ *  是被允许但很容易在代理链上被吃掉的形式；这本来也是「批量动作」，不是「删某一条
+ *  资源」。返回 200 只表示**请求被受理** —— 逐条结论在响应体里（见 ClearResult）。 */
+export function sceneClearPreviewUrl(cfg: SrConfig): string {
+  return joinBase(cfg.apiBase, '/api/scenes/clear-preview');
+}
+
+/** 明细里的一条（文件名 + 原因 + 它在哪个目录）。 */
+export interface ClearDetail {
+  name: string;
+  /** 为什么跳过 / 失败；`removed` 里的条目没有这一项。 */
+  reason?: string | null;
+  /** 场景目录或镜像树目录 —— 同一个文件名两处都有时靠它分清。 */
+  dir?: string;
+}
+
+/** 服务端对**一个 id** 的结论。四种 status 都是正常结局，不是错误码：
+ *
+ *  * `cleared`  确实清了（文件删掉、或库里那条急烤状态被标掉，或两者都有）；
+ *  * `nothing`  盘上本来就没有这一景的缓存；
+ *  * `skipped`  不能清：后台正在烘焙 / 是场景源 / 没有规则戳 / id 本身不合法；
+ *  * `failed`   该清但没清成（权限、被占用）。
+ *
+ *  `cleared` 与 `nothing` 的行从列表摘掉，`skipped` / `failed` 留着 —— 用户得看见它们
+ *  以及为什么（尤其是「正在烘焙，稍后再清」这种等一下就能成的）。 */
+export interface ClearResult {
+  id: string;
+  status: 'cleared' | 'nothing' | 'skipped' | 'failed';
+  /** 一句话结论（skipped / failed 时必有；cleared / nothing 可能为 null）。 */
+  reason: string | null;
+  /** 这一条实际处理的是哪个场景目录（同景两行会是同一个值）。 */
+  dir: string | null;
+  removed: ClearDetail[];
+  skipped: ClearDetail[];
+  failed: ClearDetail[];
+  /** 库里被标成 `cleared` 的急烤状态行数（0 = 这一景没跑过超分）。 */
+  marked: number;
+}
+
+/** 汇总。前四项按**请求里的 id** 数，后三项按**去重后的场景目录**数 ——
+ *  一景两行时 `cleared` 是 2 而 `dirs/files` 是 1 与实际文件数，不重复计数。 */
+export interface ClearSummary {
+  cleared: number;
+  nothing: number;
+  skipped: number;
+  failed: number;
+  dirs: number;
+  files: number;
+  marked: number;
+}
+
+export interface ClearResponse {
+  results: ClearResult[];
+  summary: ClearSummary;
+}
+
+/** 清除后哪些行该从列表摘掉：`cleared` 与 `nothing` 两种。
+ *
+ *  `nothing` 也要摘 —— 它说的是「盘上本来就没有这一景的缓存」，也就是说「已生成」
+ *  那一列早就该显示「未生成」，留着这一行等于继续挂着一个错的显示。
+ *
+ *  纯函数、返回新数组（不就地改）：store 那层只负责把它贴回 rows。`skipped` /
+ *  `failed` 的行留在列表里，用户要看得到失败与原因。 */
+export function rowsAfterClear<T extends { id: string }>(
+  rows: T[], results: ClearResult[],
+): T[] {
+  const gone = new Set<string>();
+  for (const r of results) {
+    if (r.status === 'cleared' || r.status === 'nothing') gone.add(r.id);
+  }
+  return gone.size ? rows.filter((r) => !gone.has(r.id)) : rows;
+}
+
+/** 表上方那一行汇总文案（纯函数，便于单测）。
+ *
+ *  「已从列表移除」的尾注只在真的有移除时给：它是这个功能最容易让人误会的一点
+ *  —— 行消失了不等于场景被删了，重新检索就回来。 */
+export function clearSummaryText(s: ClearSummary, removed: number): string {
+  const bits: string[] = [];
+  if (s.cleared) {
+    bits.push(`已清除 ${s.cleared} 项（${s.dirs} 个场景目录，`
+      + `${s.files} 份预览缓存）`);
+  }
+  if (s.nothing) bits.push(`无需清除 ${s.nothing} 项`);
+  if (s.skipped) bits.push(`跳过 ${s.skipped} 项`);
+  if (s.failed) bits.push(`失败 ${s.failed} 项`);
+  const head = bits.length ? bits.join('，') : '没有可清除的场景';
+  return removed
+    ? `${head}；已从列表移除 ${removed} 行，重新检索可回来`
+    : head;
+}
