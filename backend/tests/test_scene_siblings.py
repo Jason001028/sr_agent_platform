@@ -1,4 +1,4 @@
-"""GET /api/scenes/{id}/siblings —— 一个场景的三类图（输入 / 本轮超分产物 / 未超分产物）。
+"""GET /api/scenes/{id}/siblings —— 一个场景的三类图（输入 / 本轮超分产物 / NOSR）。
 
 这是**只读诊断端点**：把「三份各叫什么、在不在、各自的场景 id 是什么」一次交代清楚，
 供查看器的对比视图直接消费；也是 `_NOSR` 拼法尚无真机实证时的核对窗口（`productCandidates`

@@ -33,7 +33,7 @@ describe('stageLabel', () => {
     expect(stageLabel('product', '', SC + '_sr_2.jpg')).toBe('2');
   });
 
-  it('未超分产物恒标 NOSR（它没有属于自己的 suffix）', () => {
+  it('NOSR恒标 NOSR（它没有属于自己的 suffix）', () => {
     expect(stageLabel('nosr', 'sr', SC + '_sr_NOSR.jpg')).toBe('NOSR');
   });
 

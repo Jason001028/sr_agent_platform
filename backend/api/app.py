@@ -465,7 +465,7 @@ def _bake_product_preview(state, task: dict, div: int) -> None:
     只烤产物，不烤输入影像：输入影像那份的「用户到底要不要看」在打开之前无法知道，
     而产物是刚刚跑完的、几乎一定会被打开。三份落点天然独立
     （输入影像 `<stem>_preview.jpg`、产物 `<产物 stem>_preview.jpg`、
-    未超分产物 `…_NOSR_preview.jpg`），
+    NOSR `…_NOSR_preview.jpg`），
     各烤各的，互不覆盖。**未超分那一份由 `_bake_nosr_preview` 另烤**（2026-09-21
     用户口径），本函数的结论一个字都不为它改 —— 两份的结局各自独立。
 
@@ -1035,7 +1035,7 @@ def create_app() -> FastAPI:
                 raise HTTPException(
                     status_code=422,
                     detail=f"场景成立但读不到影像尺寸（{raster}）—— 前端开图需要 W/H")
-            # 这一行描述的是**这一环节自己的栅格**（本体 / 产物 / 未超分产物）：产物的
+            # 这一行描述的是**这一环节自己的栅格**（本体 / 产物 / NOSR）：产物的
             # W/H 是本体的倍数，拿本体的尺寸建画布，整张图的比例都是错的。
             row = _manual_row(raster, d, root)
             row["W"], row["H"] = dims["W"], dims["H"]
@@ -1379,7 +1379,7 @@ def create_app() -> FastAPI:
     @app.get("/api/scenes/{scene_id}/siblings")
     def scene_siblings(scene_id: str, request: Request,
                        suffix: str | None = Query(default=None)):
-        """这个场景的三类图：输入影像 / 本轮超分产物 / 未超分产物。
+        """这个场景的三类图：输入影像 / 本轮超分产物 / NOSR。
 
         **纯只读**：固定候选名的 `is_file()` + 尺寸探测 + 读 JPEG 注释里的档位。
         永不烘焙、永不写盘、永不列举目录 —— 它回答的是「三份各叫什么、在不在、

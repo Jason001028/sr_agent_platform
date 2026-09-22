@@ -175,7 +175,7 @@ export function scenePreviewUrl(cfg: SrConfig, id: string,
 
 /** 场景内三类图端点 URL：GET /api/scenes/{id}/siblings[?suffix=…]。
  *
- * 纯只读：回答「输入影像 / 本轮超分产物 / 未超分产物 各叫什么、在不在、各自的 id 是什么」。
+ * 纯只读：回答「输入影像 / 本轮超分产物 / NOSR 各叫什么、在不在、各自的 id 是什么」。
  * 每类拿它自己的 `id` 调 `scenePreviewUrl` 就能看图 —— **三类各有自己的
  * `<stem>_preview.jpg` 落点**，所以这条端点不新增任何烘焙入口。
  * `suffix` 只在用户手动断言时给；不给由后端按「最近一条 COMPLETED 任务 → 配置缺省」
