@@ -2252,6 +2252,9 @@ JSON detail 仍是 message、**422 不认**、`fetch` 自己抛的 TypeError 不
 部署一次后端包。要覆盖它，最小改法是让 `app.py::preview` 在 `abs_path.is_file()` 为假时回
 **404**（顺带堵住「jpg 源不存在时 `FileResponse` 抛 500」那个洞），之后前端这条判据一行不用改。
 
+> ⚠️ **本节的口径已于 2026-09-24 撤销**（按年龄推定的那一半整条删掉，灰块只留给「真撞过 404」的行），
+> 起因与修法见下方 09-24 那一条。本节保留原文以便追溯当时为什么这么定。
+
 ### 2026-09-22 · 「打开」那一格按年龄推定「已自动清除」：老景 + 没预览 + 超过 3 天（开发机）
 
 **用户原话**：「或者要不更直白一些，『生成并打开』统一换为『已自动清除』，因为 99% 都是这种情况，
@@ -2331,6 +2334,141 @@ presumedPurged(row) = row.purged
 的形态，需要看一批真实目录名才能定。② 这条口径下**新景永远不灰**，所以「3 天以内、文件已被清掉」的行
 点下去仍会是后端那条 422（上一轮记的缺口），改造 `/preview`（源文件不存在回 404）仍然值得做。
 
+### 2026-09-24 · 「已自动清除」取消按年龄推定；顺带定位一次 nginx 反代回归（真机 + 开发机）
+
+**现象（用户报）**：一批日期较早的行点不动了（灰块），但那些场景目录在盘阵上还在、粘路径能打开。
+
+**定位出的是两件事，不是一件。** 先按用户的口径把机器上的请求逐条探下来，而不是照着「年龄」这条
+线继续推：
+
+**一、nginx 反代回归（09-19 引入，09-23 起显形）。** `/api/` 下那个只为给 `/preview` 加
+`Cache-Control` 而套的嵌套 location，**漏了同一层的 `proxy_pass`**。nginx 只选一个 location，
+嵌套块**不继承** `proxy_pass`（final-location-handling 指令），但**继承** `proxy_set_header` /
+`proxy_buffering` / `proxy_read_timeout` 这些普通指令 —— 于是那一条 URL 落回 `root` 下的静态查找、
+由 nginx 自己回 **404 HTML**，字节根本没到后端。
+
+前端当时的 `isSceneGone(e)` 只看 `e.status === 404`，把这种「没走到后端」的 404 当成了「盘阵上
+文件已被清除」：文件明明在，行却被标成灰块/「已清除」。**推定那半条规则只是把这件事放大**——
+老景 + 盘上没预览本来就容易落进推定，两条合起来就是用户看到的一片灰。
+
+真机实证（同一台机上，改前改后）：
+
+```text
+改前：/api/scenes/<不存在的 id>/preview  →  404  text/html          ← nginx 自己回的
+改后：/api/scenes/<不存在的 id>/preview  →  404  application/json   ← 请求走到了后端
+      /api/scenes/<真实 id>/preview      →  200  image/jpeg
+      + Cache-Control: public, max-age=300                          ← 嵌套策略仍生效
+```
+
+补丁本身只有一行（子块里再写一次 `proxy_pass http://127.0.0.1:8000;`）。**踩过的坑**：第一次
+打补丁用的 heredoc 里写了中文注释，内网机裸 `python` 是 **2.7**，整段脚本 `SyntaxError` 后
+**文件一个字都没写**，而紧跟的 `nginx -t && nginx -s reload` 照样成功 —— 差点把「没生效」读成
+「改了也没用」。后续落到机器上的脚本一律纯 ASCII + py2 兼容，写完先自查再 reload。
+
+**二、按年龄推定这条口径撤销。** 理由是 09-22 自己记下的那两条事实：列表里的每一行在**检索那一刻**
+源文件都在盘上；平台**从不为输入影像预烤**。「盘上没预览」因此是**还没打开过的新景的常态**，
+拿它加上年龄去挡「打开」，等于用一个猜的结论封掉一条本来走得通的路。用户的口径回到最初那句：
+**取消按年龄推定，只认真撞过 404。**
+
+**改动（三处，都在前端；后端一行未动）**：
+
+1. `lib/scene.ts`：删掉 `presumedPurged` / `PURGED_AGE_DAYS` / `sceneAgeDays` / `daysSince` 整套
+   （含「较年轻的日期」那套兜底逻辑）。`SceneRow.purged` 的判据只剩一条 —— 打开时撞过 404。
+   新增 `isDiskArrayUrl(url)`：把 URL 里的协议/主机/查询串剥掉，只看 path 是否落在 `/disk-array/`。
+2. `lib/api.ts`：`HttpError` 带上 `url` 与 `jsonBody`（响应体是不是 JSON）；`isSceneGone(e)` =
+   **404 且 `isDiskArrayUrl(e.url)`** —— 只有盘阵**静态链**上的 404 才能证明文件没了；新增
+   `isProxyMiss(e)` = 非 JSON 响应 且 不是 `/disk-array/`（= 请求没走到后端）。
+3. `stores/scenes.ts::open` 的 catch 分三支：静态链 404 → `row.purged = true`（灰块「已自动清除」，
+   文案不变）；`isProxyMiss` → **不置 `purged`**，如实说明「这次请求没走到平台后端（多半是 nginx
+   反代配置：`/api/` 下的 location 少了同一层的 `proxy_pass`，见 `deploy/nginx.conf`）……这个状态码
+   说明不了盘阵上还有没有这一景」；其余原样。
+
+呈现随之回到「四种标签 + 两种按钮」：能点的行一律「打开」（含「未生成」—— 要烤就点下去再烤），
+灰块只留给**真的撞过 404** 的行。09-22 那条「退路」（粘路径）不再是灰块的唯一出口 ——
+灰块现在只出现在盘上真没了的时候，路径栏入口本身照旧保留（库外场景仍走它）。
+
+**仓库侧同步（防复发）**：`deploy/nginx.conf` 的子块补上 `proxy_pass` 并在两处写清「在 `/api/` 下
+再套 location 时 `proxy_pass` 必须重写一遍」；`deploy/README.md` §四 与 §5.3 各加一条落盘自查：
+
+```bash
+curl -s -o /dev/null -w '反代=%{http_code} ct=%{content_type}\n' \
+     'http://127.0.0.1/api/scenes/__none__/preview?div=4'   # 判定：ct=application/json
+```
+
+**验证（开发机，全绿）**：前端 **390 passed**（删掉 09-22 那 10 条年龄用例、新增 `isDiskArrayUrl` 4 条
+与 `HttpError`/`isProxyMiss` 6 条）+ `vue-tsc` 零错误 + `npm run build`；
+`.e2e/test-scenes.js` **132 断言**全绿（老景那几条从「不可交互」改回「可点、点下去才烤」，
+灰块仍由 `[K]` 的真实 404 那条路覆盖）。
+
+**待核 / 未收口（两条，均未动）**：
+
+1. `deploy/nginx.conf` 里 `location /disk-array/` 内那条 `location ~* \.preview\.jpg$`
+   （给预览 JPG 加 `max-age=3600`）**在 09-22 改名成 `_preview.jpg` 之后就不再匹配了**，
+   那条缓存策略事实上失效 —— 现在预览 JPG 不带 `Cache-Control`，由浏览器启发式缓存兜着。
+   要不要改回匹配 `_preview.jpg`（还是干脆删掉这条子 location）需人定。
+2. 更彻底的做法是把 `max-age=300` 挪到后端响应头里，然后**删掉整个嵌套 location**（回归面直接
+   消失）。这要重新部署后端包，本轮没做。
+
+### 2026-09-24 · 未超分那份（NOSR）：名字口径统一 + 拖入显示件时预热（开发机）
+
+**需求（用户口径）**：拖入关联盘阵场景的 `<目录名>.jpg`（本体显示件）或产物显示件 → 平台**自动**
+去该场景目录找「未超分那份」（NOSR）并烤成 jpg → 之后这份 NOSR 显示件出现在界面上时，名字后面
+带一颗 `NOSR` 标（与「本体」标区分）。标可点 → 开进当前活动格。
+
+口径由用户分三轮定死：**触发只有拖入**（从场景库打开、从路径栏打开都不触发）；盘上没有那份栅格时
+界面上**什么都不出现**；判断与等待表示与打开任何产物完全一样。
+
+**查实：平台里有两套 NOSR 名字，彼此对不上，所以这条路径两头都断。**
+
+- `app.py::_bake_nosr_preview` 里**硬编码成 `PAN_NOSR.tif`**（RC 场景的名字，09-21 那轮按用户
+  原话写死）。SC 场景（输入件是 `<目录名>.tif`，目录里根本没有 `PAN` 这个名字）于是永远走
+  `skipped: … 里没有 PAN_NOSR.tif`。
+- `/api/scenes/{id}/siblings` 的 NOSR 那一项只认 `scene_search.nosr_path_for` —— 从
+  `SR_code/util.py::writeTiff` 的改名规则推出来的 `<产物 stem>_NOSR.tif`。用户目录里没有这个名字，
+  于是恒报 `nosr.exists=false`，对比条那颗 NOSR 芯片永远打不开（那颗芯片 09-20 就有了，只是从来
+  没命中过）。
+- 拖进来的那份 `<目录名>_NOSR_preview.jpg` 还**判错环节**：`jpg_stage_name` 拿到的 `tail`
+  是**已经剥掉分隔下划线**的 `NOSR`，用它去 `endswith("_nosr")` 恒为假，于是判成
+  「产物、suffix 恰好叫 NOSR」。**显示上还是对的**（标签文字正是 `NOSR`），错的是配色、工具提示
+  与下游判据 —— 错得无声。两处根因写在
+  [gui-experience.md](../experience/gui-experience.md) §9.6。
+
+**口径（本次定死）**：未超分那份 = **输入影像的 stem + `_NOSR`**（SC 即 `<目录名>_NOSR.tif`，
+RC 即 `PAN_NOSR.tif`）；writeTiff 那个名字**退为次选**，仍在候选清单里。候选**有序、只拼名字**，
+命中哪一个如实报出名字，不猜。清单由 `scene_search.nosr_candidates(dir, input, product)` 一处产出，
+两个消费点（`/siblings` 与 `_bake_nosr_preview`）读同一份 —— 这正是 09-21 那轮缺的东西。
+
+**改动**：
+
+| 层 | 文件 | 改了什么 |
+|---|---|---|
+| 后端 | `services/scene_search.py` | 新增 `nosr_candidates`；`jpg_stage_name` 补「裸 `_NOSR` 尾 = `('nosr','')`」；`de_suffixed_stems` 修掉预剥 `_NOSR` 的写法（见 §9.6 坑二） |
+| 后端 | `api/app.py` | `/siblings` 的 nosr 项改读候选清单、**不再依赖 suffix**，响应新增 `nosrCandidates`；`_bake_nosr_preview` 的源名同源，`skipped:` 报出试过哪些名字 |
+| 前端 | `lib/api.ts` | `SceneSiblings.nosrCandidates` + 纯函数 `nosrItemOf`（取 `kind==='nosr'` 且 `exists` 的项） |
+| 前端 | `stores/viewer.ts` | 新增 `warmNosrPreview(rec)`：拖入**显示件**时静默预热同景那一份（`/siblings` → `fetchSceneJpg`），按 `sceneDir`（缺则 `sceneId`）去重、**烤上了才记账**；`openSceneSibling` 的失败提示按 kind 列对应的候选清单 |
+| 前端 | `components/FileList.vue` | 环节标的工具提示改成两义都说（输入 stem 那份 / writeTiff 那份），原先只写了后者 |
+
+**两个触发点（都是既有语义的延伸，没有新入口）**：① 超分跑完顺带烤（09-21 那条，源名换成候选
+清单）；② 拖入显示件时前端预热（本轮新增）—— 后者与 09-21 那条 `bakeDropPreview` 并列，烤的是
+**同景的另一份**而不是拖进来那份自己。两条都静默、都不 `await`、失败都不报错。
+见 [preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md) §4.11。
+
+**验证（开发机，全绿）**：后端 **720 passed / 5 skipped**（基线 696/5；新增 NOSR 命名、
+候选清单、解析、`/siblings`、烘焙共 22 条）；前端 **393 passed** + `vue-tsc` 零错误 + `npm run build`；
+`.e2e/test-manual-scene.js` **214 断言**（基线 202，新增 L6/L7 两段：新造一个 SC 场景 + 一份
+`<目录名>_NOSR.tif`，断言拖入显示件后确实对那一份发了 `/preview`、烤出的 jpg 落盘尺寸对得上，
+再把它拖回来断言环节 `nosr`、标签 `NOSR`、**与本体卡共用同一个序号**、只读小标只在它上面、
+两颗修复按钮都置灰、标类是 `stage nosr`）。全程无错的口径不变：404 恰好四次、400 恰好两次。
+
+**待真机 / 未收口**：
+
+1. 真机上那份栅格**实际叫什么名字**仍无实证 —— 候选清单两条都试，命中哪个都报出来，所以不阻塞；
+   拿到 `ls -l` 后按 `nosrCandidates` 校准**顺序**即可。需随包更新 dist + backend。
+2. 拖入的那份 NOSR jpg 若**名字里没有 14 位成像时间戳**（RC 场景的 `PAN_NOSR.jpg`），在没有开着
+   同景卡时会走「名字里没有生产全名」那条 400 —— 与拖同景产物 jpg 完全同口径（靠锚定目录）。
+   SC 场景的名字自带时间戳，走反推，不受影响（e2e 覆盖的是这一路）。
+3. 配了 `SR_PREVIEWS_ROOT` 时，预热落的镜像树与手动拖的那份不在一处（真机未配该变量）。
+4. 上一节那两条 nginx 待定项本轮未动。
 
 ---
 

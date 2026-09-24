@@ -43,7 +43,7 @@ import {
 } from '../lib/scene.js';
 import {
   apiResolveScene, apiBakeMask, apiSceneSiblings, fetchSceneJpg, fetchDropSceneJpg,
-  siblingRow, previewCacheStats, clearPreviewCache, watchPreviewCache,
+  siblingRow, nosrItemOf, previewCacheStats, clearPreviewCache, watchPreviewCache,
 } from '../lib/api.js';
 import type { SceneResolveResult, SceneSibling, SceneSiblings } from '../lib/api.js';
 import { classifyImages, imageKindOf } from '../lib/imageFiles.js';
@@ -923,9 +923,12 @@ export const useViewerStore = defineStore('viewer', () => {
         // 「找不到」如实交代：把试过哪些名字一并说出来，别只说一句「没有」。
         const kindName = kind === 'input' ? '输入影像'
           : kind === 'product' ? '本轮超分产物' : 'NOSR';
-        const tried = res.productCandidates.length
-          ? '（试过 ' + res.productCandidates.join(' / ') + '）' : '';
-        const why = !res.suffix
+        // 两个类别的名字来源不同，试过的名字也就不是同一串：产物的名字靠 suffix，
+        // NOSR 的名字由输入影像的 stem 拼（与 suffix 无关），各报各的。
+        const cands = kind === 'nosr' ? res.nosrCandidates : res.productCandidates;
+        const tried = cands.length
+          ? '（试过 ' + cands.join(' / ') + '）' : '';
+        const why = kind === 'product' && !res.suffix
           ? '—— 这个场景还没有可用的 suffix，拼不出产物名'
           : tried;
         showToast('盘阵上没有' + kindName + why);
@@ -1982,6 +1985,46 @@ export const useViewerStore = defineStore('viewer', () => {
       .catch(() => { /* 静默：见上 */ });
   }
 
+  /** 同一景只预热一次「未超分那份」。键取**场景目录**（不是 sceneId）：本体与
+   *  产物各有自己的 id，同一个目录的两次拖入不该问两遍。 */
+  const nosrWarmed = new Set<string>();
+
+  /** 拖进显示件时**顺手把「未超分那份」烤成 jpg**（后台静默，与 `bakeDropPreview`
+   *  同口径：不阻塞、不弹遮罩、不看结果，失败一声不吭）。
+   *
+   *  用户口径（2026-09-24）：拖入本体的显示件（`<目录名>.jpg`）或产物的显示件时，
+   *  平台去**同一个场景目录**里找 `<输入 stem>_NOSR.tif`（用户说的「未超分那份」）
+   *  并烤成它自己的 `<stem>_preview.jpg`。这样随后把那份 jpg 拖进来、或者在对比条上
+   *  点「NOSR」都是现成的，不必等一次烘焙。盘上没有那份时什么都不做 —— 界面上也
+   *  就不出现任何东西。
+   *
+   *  为什么先问 `/siblings` 再取图，而不是自己拼一个 URL 去打 `/preview`：名字的
+   *  口径只在后端一处（`scene_search.nosr_candidates`），前端再拼一遍就是第二份口径，
+   *  而这份口径恰恰刚刚改过（`PAN_NOSR` → 输入 stem 优先）。
+   *
+   *  与 `maybePrefetchCompare` 的预取**不是**一回事：那个只在对比模式下、且已有
+   *  现成预览时才取（不触发烘焙），这条无论界面形态都触发一次烘焙。
+   *
+   *  像素谁都不用（`fetchSceneJpg` 的返回值丢掉），所以不 await、也不碰 rec。 */
+  function warmNosrPreview(rec: ViewerRec): void {
+    const sid = rec.sceneId;
+    const key = rec.sceneDir || sid;
+    if (!sid || !key || nosrWarmed.has(key)) return;
+    nosrWarmed.add(key);                  // 先记上：连着拖几张别各起一轮
+    void (async () => {
+      const cfg = loadSrConfig();
+      const res = await apiSceneSiblings(cfg, sid);
+      const item = nosrItemOf(res);
+      if (!item) return;                  // 盘上没有那份：什么都不做
+      await fetchSceneJpg(cfg, siblingRow(res, item), previewDiv.value);
+    })().catch(() => {
+      // 静默（见上），但**把这一景从已试清单里放掉**：失败多半是「盘阵暂时写不进」
+      // 这类可恢复的事，锁住的话再拖几次都悄无声息。盘上没有那份（`!item` 提前返回）
+      // 不算失败 —— 那是盘上的事实，同一次会话里不会变。
+      nosrWarmed.delete(key);
+    });
+  }
+
   /** 本地 TIF 打开后**试着**关联盘阵目录。返回是否**命中并已升级成盘阵 JPG** ——
    *  命中时调用方（`activate`）直接返回，不要再做本地解码。
    *
@@ -2114,6 +2157,11 @@ export const useViewerStore = defineStore('viewer', () => {
       // 那份更清晰时上面那次 fetchDropSceneJpg 已经把同一份烤好了，再发一次是
       // 白烤一张图。它不碰 rec 的像素，所以不 await 也不会跟画面抢。
       if (localJpg && !useServer && r.sceneId) void bakeDropPreview(r);
+      // 顺带把「未超分那份」也烤成 jpg 放在场景目录里（用户口径 2026-09-24）。
+      // 触发点**只有拖入显示件**这一处（场景库、路径栏打开都不触发），而它由
+      // `localJpg` 精确圈定：能走到这里的 jpg 都是显示件，本体与产物各是一次。
+      // 拖进来的若本来就是那份 NOSR，别再往回烤一次（stageKind 挡掉）。
+      if (localJpg && r.sceneId && r.stageKind !== 'nosr') void warmNosrPreview(r);
       if (isIntermediateStage(r.stageKind)) {
         // 中间产物：如实说清它与本体的关系。此处**不能**说「可以提交 SR 了」——
         // 这一条的 lqPath 已被服务端置空（见 resolve 的 kind 分岔），提交按钮是

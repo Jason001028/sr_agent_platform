@@ -20,7 +20,10 @@ const collapseTitle = computed(() => (store.sidebarCollapsed ? '展开文件列�
    title —— 不然用户会以为那颗数字是盘阵给景编的号，回头去别处找同一个号。 */
 const SCENE_TITLE = '盘阵场景：服务器烘焙 JPG（这张图在盘阵上有对应场景目录）';
 const ORD_TITLE = '同一景（同一个场景目录）的图共用这个序号 —— 本次会话内按出现顺序发号，不是盘阵上的编号';
-const STAGE_TITLE = '环节：本体（PAN / 输入影像） / SR（本次超分产物） / NOSR（上一次超分产物）';
+/* NOSR 一名两义，取决于盘上那份叫什么（后端按输入影像的 stem 先找，见
+   app.py::scene_siblings）。第一义是用户的口径，第二义是 writeTiff 改名留下的
+   那份 —— 两种都如实标 NOSR，所以工具提示把两义都说出来，别默认只有一义。 */
+const STAGE_TITLE = '环节：本体（PAN / 输入影像） / SR（本次超分产物） / NOSR（未超分那份；取自上一次产物名的那份则是上一次超分产物）';
 const RO_TITLE = '中间产物仅用于与本体对比，不作修复 —— 掩码与 SR 都建在本体影像的网格上，请打开本体再修复与提交';
 
 function fmtBytes(n: number): string {

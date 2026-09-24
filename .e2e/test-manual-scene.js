@@ -58,6 +58,13 @@
 //      L5    产物上三道修复入口逐条打一遍：绘制掩码被拒且不进绘制态、保存掩码返回
 //            false 且**本体那份掩码的 mtime 一个字节没动**（本次唯一的破坏性风险）、
 //            提交 SR 不跳队列页且队列一条不多。
+//      L6–L7 本轮（2026-09-24）新增的「未超分那份」：L6 拖入一景的**本体显示件** →
+//            平台去同一场景目录找 `<目录名>_NOSR.tif` 并顺手烤成 jpg（只对那一份发
+//            一次 /preview，落点尺寸按当前档位）；L7 把烤出来那份 jpg 拖回来 → 卡片上
+//            「盘阵 + 同序号 + NOSR」三标齐全（缺它时那颗标只是文案侥幸对、配色属于
+//            产物那族）、只读小标在、修复入口同样堵死。
+//            现造一景（SC2）而不是复用前面的：预热按**场景目录**记账，同一景这一会话
+//            里只做一次，复用前面那景只能验到「第二次不再烤」。
 // 用法：cd .e2e && node test-manual-scene.js
 const http = require('http');
 const fs = require('fs');
@@ -1823,6 +1830,104 @@ async function main() {
       }, apiBase);
       assert(lTasksAfter === lTasksBefore,
         `队列里一条都没多（${lTasksBefore} → ${lTasksAfter}）`);
+
+      /* ---------- L6–L7. 「未超分那份」：拖显示件时顺手烤；烤出来那份拖回来带 NOSR 标 ---------- */
+      // 2026-09-24 用户口径：拖入 `<目录名>.jpg`（本体显示件）或产物显示件时，平台去
+      // **同一个场景目录**里找 `<输入影像 stem>_NOSR.tif`（未超分那份）并烤成它自己的
+      // `<stem>_preview.jpg`；把这份 jpg 拖回来时，卡片上要带「NOSR」标。
+      //
+      // 为什么要现造一景：这份预热按**场景目录**记账（同一景这一会话只做一次），前面
+      // 那些景在 K 段造出 NOSR 栅格**之前**就已经被拖过一次了 —— 复用它们只能验到
+      // 「第二次不再烤」，验不到「拖一下就烤」。
+      console.log('\n[L6] 拖入显示件顺手烤「未超分那份」');
+      const SC2 = 'A_B_' + ymd + '141200_200536960_101_0005_001';
+      const sc2Dir = path.join(ARRAY, ...treeOf(SC2));
+      const sc2Nosr = SC2 + '_NOSR.tif';           // 用户口径的名字：输入 stem + _NOSR
+      const sc2Baked = SC2 + '_NOSR_preview.jpg';  // 烤出来的落点
+      makeTif(path.join(sc2Dir, SC2 + '.tif'), 1600, 800);
+      makeTif(path.join(sc2Dir, sc2Nosr), 640, 320);
+      fs.writeFileSync(path.join(sc2Dir, SC2 + '_meta.xml'),
+        '<?xml version="1.0" encoding="UTF-8"?><SolarAzimuth>181.79</SolarAzimuth>');
+      // 本地那份显示件（用户在浏览器里选/拖的那一份，盘阵上没有同名 jpg）
+      const upSc2Jpg = path.join(upDir, SC2 + '.jpg');
+      makeJpg(upSc2Jpg, 800, 400);
+      assert(!fs.existsSync(path.join(sc2Dir, sc2Baked)),
+        '开跑时场景目录里还没有那份烤出来的 jpg（对照）');
+
+      const l6PrevBefore = countUrl(previewRe);
+      const l6RecsBefore = await page.evaluate(() => window.__viewer.recs().length);
+      await input.uploadFile(upSc2Jpg);
+      const l6Rec = await waitFor(page, (n) => {
+        const rs = window.__viewer.recs();
+        const r = rs[rs.length - 1];
+        return rs.length > n && r.route === 'jpg' && r.stageKind === 'input'
+          ? { id: r.id, sceneId: r.sceneId, lqPath: r.lqPath } : null;
+      }, 30000, '本体显示件关联上盘阵场景', l6RecsBefore);
+      assert(l6Rec.lqPath === sc2Dir.replace(/\\/g, '/'),
+        `命中这一景（lqPath=${l6Rec.lqPath}）`);
+      // 后台那次「顺手烤」：文件落盘要等它读完那张栅格，所以等文件而不是等计数。
+      await waitNode(() => jpegSize(path.join(sc2Dir, sc2Baked)) !== null, 30000,
+        '未超分那份的 _preview.jpg 落盘');
+      const l6Sz = jpegSize(path.join(sc2Dir, sc2Baked));
+      assert(l6Sz.w === 320 && l6Sz.h === 160,
+        `${sc2Baked} 落盘，烤的是那一份栅格（÷2：640×320 → ${l6Sz.w}×${l6Sz.h}）`);
+      // 只该对**那一份**发一次 /preview：请求的 URL 就是它的场景 id。
+      const l6Seen = seen.filter((u) => previewRe.test(u)).slice(l6PrevBefore);
+      const nosrL6 = byKind(await sibOf(l6Rec.sceneId), 'nosr');
+      assert(l6Seen.length === 1 && l6Seen[0] === prevUrlOf(nosrL6.id),
+        `这一次拖入只对「未超分那份」发了 /preview（${l6Seen.join(' ') || '一个都没发'}）`);
+
+      console.log('\n[L7] 把烤出来那份 jpg 拖回来：带 NOSR 标、同序号、不可修复');
+      const l7RecsBefore = await page.evaluate(() => window.__viewer.recs().length);
+      await input.uploadFile(path.join(sc2Dir, sc2Baked));
+      try {
+        await waitFor(page, (n) => {
+          const rs = window.__viewer.recs();
+          const r = rs[rs.length - 1];
+          return rs.length > n && r.route === 'jpg' && r.stageKind === 'nosr';
+        }, 30000, '未超分那份的 jpg 关联上盘阵场景', l7RecsBefore);
+      } catch (e) {
+        const dbg = await page.evaluate(() => {
+          const rs = window.__viewer.recs();
+          const r = rs[rs.length - 1];
+          const m = document.querySelector('.notice-modal');
+          return { n: rs.length, last: r && { name: r.name, route: r.route,
+            stageKind: r.stageKind, status: r.status, linkNote: r.linkNote },
+            modal: m ? m.querySelector('.nm-body').textContent.trim() : null };
+        });
+        throw new Error(`L7 诊断：${JSON.stringify(dbg)}`);
+      }
+      const nosrRec = await lastRec();
+      assert(nosrRec.stageKind === 'nosr' && nosrRec.stageLabel === 'NOSR',
+        `后端认出它是未超分那份（kind=${nosrRec.stageKind} / 标签 ${nosrRec.stageLabel}）`);
+      assert(nosrRec.lqPath === null,
+        `lqPath 为空 —— 服务端拒绝把未超分那份当可提交场景（${JSON.stringify(nosrRec.lqPath)}）`);
+      assert(nosrRec.sceneDir === sc2Dir.replace(/\\/g, '/'),
+        `仍属这一景（场景目录 ${nosrRec.sceneDir}）`);
+      const nosrChips = await cardChips(sc2Baked);
+      const sc2Chips = await cardChips(SC2 + '.jpg');
+      assert(nosrChips.scn === '盘阵' && nosrChips.stage === 'NOSR',
+        `这份卡片上「盘阵 + NOSR」齐全（${JSON.stringify(nosrChips)}）`);
+      assert(Number(nosrChips.ord) > 0 && nosrChips.ord === sc2Chips.ord,
+        `与本体共用同一个序号（未超分那份 ${nosrChips.ord} / 本体 ${sc2Chips.ord}）`);
+      assert(nosrChips.ro === '仅对比，不作修复' && sc2Chips.ro === null,
+        `只读小标只在这份上（NOSR=${nosrChips.ro} / 本体=${sc2Chips.ro}）`);
+      const nosrBtns = await toolbarState(page);
+      assert(nosrBtns.sr === false && nosrBtns.bake === false,
+        `「提交 SR」「保存掩码到盘阵」都置灰（sr=${nosrBtns.sr} / bake=${nosrBtns.bake}）`);
+      // 卡片上那颗环节标的 CSS 类跟着环节走：`.stage.nosr` 是琥珀族，与 `.stage.input`
+      // （本体，青绿）、`.stage.product`（产物，蓝）三者互不相同。文案侥幸相同、
+      // 配色与工具提示属于产物那族，是这条链最初的样子（判据漏了「裸 _NOSR」那一支）。
+      const nosrCls = await page.evaluate((name) => {
+        const item = [...document.querySelectorAll('.file-item')].find((el) => {
+          const nm = el.querySelector('.name');
+          return nm && nm.textContent.includes(name);
+        });
+        const st = item && item.querySelector('.name .stage');
+        return st ? { cls: st.className, title: st.title } : null;
+      }, sc2Baked);
+      assert(nosrCls && nosrCls.cls.includes('nosr'),
+        `那颗标的类是 nosr（${JSON.stringify(nosrCls)}）`);
 
       /* ---------- I. 全程无错 ---------- */
       console.log('\n[I] 全程无错');

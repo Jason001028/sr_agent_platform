@@ -10,10 +10,10 @@ import {
   stepSse, parseSseEvents, apiUrl, sessionsUrl, sessionMessagesUrl,
   queueEventsUrl, fetchSceneJpg, fetchDropSceneJpg, apiResolveScene,
   resetPreviewCache, previewCacheStats, clearPreviewCache, PREVIEW_BLOB_CACHE_MAX,
-  apiClearScenePreviews, watchPreviewCache,
-  HttpError, isSceneGone,
+  apiClearScenePreviews, watchPreviewCache, nosrItemOf,
+  HttpError, isSceneGone, isProxyMiss,
 } from '../api.js';
-import type { PlatformSseEvent, ChatSseEvent } from '../api.js';
+import type { PlatformSseEvent, ChatSseEvent, SceneSiblings, SceneSibling } from '../api.js';
 import type { SceneRow } from '../scene.js';
 
 const CFG = { apiBase: '', staticBase: '' };
@@ -665,12 +665,16 @@ describe('apiClearScenePreviews', () => {
   });
 });
 
-/* ---------------- 打开失败的分派：盘阵上文件已经没了（404 → 已自动清除） ----------------
- * ScenesPage 那一格灰色「已自动清除」的**实测那一半**判据全在这里：store 的 open()
- * 拿 catch 到的东西问 isSceneGone。所以既要钉「404 认出来」，也要钉「422 不认」——
- * 后者被误认，一个真故障（源在、烤不出来）就会被一句「已自动清除」盖住。
- * 另一半（不用点就按年龄推定，presumedPurged）在 scene.test.ts 里。 */
-describe('isSceneGone / HttpError', () => {
+/* ---------------- 打开失败的分派：两个 404 不是一回事（静态链 / 后端 / 没到后端） ----------------
+ * ScenesPage 那一格灰色「已自动清除」的判据全在这里：store 的 open() 拿 catch 到的
+ * 东西问 isSceneGone / isProxyMiss。三条边界都要钉住：
+ *   * 静态链（`/disk-array/…`）上的 404 → 「盘阵上已没有这个文件」；
+ *   * 后端给的 404（`/api/…` + JSON detail）→ **不算**，它说明不了盘上的文件在不在；
+ *   * 打 `/api/` 却拿到非 JSON 的 404 → 请求根本没走到后端（isProxyMiss），更不算。
+ * 2026-09-23 那次「老景打不开」正是第三条被当成了第一条：nginx 在 `location /api/`
+ * 下漏了同一层的 proxy_pass，`/preview` 回 404 HTML，于是**能打开的场景**被标成
+ * 「盘阵上已没有这个文件」。 */
+describe('isSceneGone / isProxyMiss / HttpError', () => {
   const row = (over: Partial<SceneRow>): SceneRow => ({
     id: '~YWJj', name: 'GF07A03', satellite: null, sensor: null, date: null,
     size_bytes: 0, fake: false, W: 200, H: 100, rel: null,
@@ -681,22 +685,50 @@ describe('isSceneGone / HttpError', () => {
   beforeEach(() => { resetPreviewCache(); });
   afterEach(() => { vi.unstubAllGlobals(); });
 
-  it('非 JSON 错误体（nginx 直出的静态文件）：message 只有裸「HTTP 404」，status 照样带上', async () => {
+  it('静态链非 JSON 404 = 文件不在：认出来，message 只有裸「HTTP 404」', async () => {
     vi.stubGlobal('fetch', () => Promise.resolve(new Response('nope', { status: 404 })));
     const e = await fetchSceneJpg(CFG, row({ jpgUrl: BAKED, hasPreview: true,
       previewDiv: 2 }), 2).catch((err: unknown) => err);
     expect(e).toBeInstanceOf(HttpError);
     expect((e as HttpError).status).toBe(404);
+    expect((e as HttpError).url).toBe('/disk-array/a/b_preview.jpg?div=2');
+    expect((e as HttpError).jsonBody).toBe(false);
     expect((e as Error).message).toBe('HTTP 404');   // 用户报的那句原文
+    expect(isSceneGone(e)).toBe(true);
+    expect(isProxyMiss(e)).toBe(false);
+  });
+
+  it('静态链是绝对源（异源部署注入 staticBase）时同样认出来', async () => {
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response('nope', { status: 404 })));
+    const e = await fetchSceneJpg(CFG_BASE, row({ jpgUrl: BAKED, hasPreview: true,
+      previewDiv: 2 }), 2).catch((err: unknown) => err);
+    expect((e as HttpError).url)
+      .toBe('http://static:9000/disk-array/a/b_preview.jpg?div=2');
     expect(isSceneGone(e)).toBe(true);
   });
 
-  it('JSON 错误体的 detail 仍是给人看的 message（状态码同时保留）', async () => {
+  it('**后端回的 404 不算「文件没了」**：detail 仍是给人看的 message，但不置 purged', async () => {
     vi.stubGlobal('fetch', () => Promise.resolve(
-      new Response(JSON.stringify({ detail: '盘阵根未配置' }), { status: 404 })));
+      new Response(JSON.stringify({ detail: '场景不可访问：不在授权根之内' }),
+        { status: 404 })));
     const e = await fetchSceneJpg(CFG, row({}), 2).catch((err: unknown) => err);
-    expect((e as Error).message).toBe('盘阵根未配置');
-    expect(isSceneGone(e)).toBe(true);
+    expect((e as Error).message).toBe('场景不可访问：不在授权根之内');
+    expect((e as HttpError).status).toBe(404);
+    expect((e as HttpError).jsonBody).toBe(true);
+    expect(isSceneGone(e)).toBe(false);
+    expect(isProxyMiss(e)).toBe(false);
+  });
+
+  it('**打 /api/ 却拿到非 JSON 的 404 = 请求没走到后端**（nginx 漏 proxy_pass 那次）', async () => {
+    vi.stubGlobal('fetch', () => Promise.resolve(
+      new Response('<html><head><title>404 Not Found</title></head></html>',
+        { status: 404 })));
+    const e = await fetchSceneJpg(CFG, row({}), 2).catch((err: unknown) => err);
+    expect(e).toBeInstanceOf(HttpError);
+    expect((e as HttpError).url).toBe('/api/scenes/~YWJj/preview?div=2');
+    expect((e as HttpError).jsonBody).toBe(false);
+    expect(isSceneGone(e)).toBe(false);   // 不能标成「盘阵上已没有这个文件」
+    expect(isProxyMiss(e)).toBe(true);    // 是配置问题，得如实报出来
   });
 
   it('**422 不算「已自动清除」**：源还在、只是烤不出来（那是真故障，不能拿猜的原因盖住）', async () => {
@@ -707,6 +739,7 @@ describe('isSceneGone / HttpError', () => {
     expect(e).toBeInstanceOf(HttpError);
     expect((e as HttpError).status).toBe(422);
     expect(isSceneGone(e)).toBe(false);
+    expect(isProxyMiss(e)).toBe(false);
   });
 
   it('网络层失败（fetch 自己抛）不算：没拿到任何状态码，就不知道盘上有没有', async () => {
@@ -714,6 +747,36 @@ describe('isSceneGone / HttpError', () => {
     const e = await fetchSceneJpg(CFG, row({}), 2).catch((err: unknown) => err);
     expect(e).toBeInstanceOf(TypeError);
     expect(isSceneGone(e)).toBe(false);
+    expect(isProxyMiss(e)).toBe(false);
     expect(isSceneGone(new Error('HTTP 404'))).toBe(false);   // 只有 HttpError 认
+  });
+});
+
+describe('nosrItemOf（未超分那份能不能用）', () => {
+  const item = (kind: SceneSibling['kind'], exists: boolean): SceneSibling => ({
+    kind, id: exists ? '~' + kind : null, name: kind + '.tif', rel: null,
+    exists, sizeBytes: null, mtime: null, W: exists ? 100 : null, H: exists ? 50 : null,
+    hasPreview: false, previewDiv: null, jpgUrl: null,
+  });
+  const res = (items: SceneSibling[]): SceneSiblings => ({
+    sceneId: '~abc', lqPath: 'W:\\a\\b', suffix: '260318', suffixFrom: 'default',
+    div: 4, items,
+    productCandidates: ['a_260318.tif'], nosrCandidates: ['a_NOSR.tif'],
+  });
+
+  it('盘上有那份 → 给出来（这一段就是背景预热要烤的东西）', () => {
+    const got = nosrItemOf(res([item('input', true), item('product', true),
+                               item('nosr', true)]));
+    expect(got?.kind).toBe('nosr');
+    expect(got?.id).toBe('~nosr');
+  });
+
+  it('这一类在、但盘上没有 → null（用户口径：什么都不显示）', () => {
+    expect(nosrItemOf(res([item('input', true), item('nosr', false)]))).toBeNull();
+  });
+
+  it('压根没有这一类（拼不出名字）→ null，不抛', () => {
+    expect(nosrItemOf(res([item('input', true), item('product', false)]))).toBeNull();
+    expect(nosrItemOf(res([]))).toBeNull();
   });
 });

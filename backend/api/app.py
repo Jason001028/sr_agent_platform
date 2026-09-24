@@ -409,8 +409,9 @@ def _eager_bake_tick(state) -> None:
     文件读一遍，并发会把内存乘上去、把盘阵的带宽占满。单消费者 + 并发 1 的代价只是
     「一次性完成 20 个作业时最后一件要等十分钟」，而那是可解释的。顺带那一份**不改**
     这条并发纪律：它跟在产物后面、同一个线程里、还是串行，只是这一轮多读一个文件
-    （且盘上已是当前档位时连读都不读）。成本交代清楚：一个场景目录里没有
-    `PAN_NOSR.tif` 时它只花一次 `is_file()`。
+    （且盘上已是当前档位时连读都不读）。成本交代清楚：一个场景目录里没有未超分
+    那份时，它只花几条固定候选名的 `is_file()`（不列举目录，见
+    `scene_search.nosr_candidates`）。
     """
     div = _product_preview_div()
     if not div:
@@ -564,22 +565,18 @@ def _bake_product_preview(state, task: dict, div: int) -> None:
         _finish_preview(state, task, "failed", f"failed: {type(e).__name__}: {e}")
 
 
-#: 未超分那份栅格的名字（用户口径，2026-09-21，真机 RC 场景），两种扩展名都认。
-#: **待核**：仓库里 `SR_code/util.py::writeTiff` 的改名规则（改的是输出路径 →
-#: `<产物 stem>_NOSR.tif`，即 `PAN_260318_NOSR.tif`）推不出这个名字，两者对不上。
-#: 这里按用户当面给的机械口径钉死，**不顺手把另一个名字也试一遍** —— 真机 `ls` 一
-#: 次就能分清，而多试一个名字会让「烤的是哪一份」变得说不清。
-_NOSR_STEM = "PAN_NOSR"
-_NOSR_EXT_ORDER = (".tif", ".tiff")
-
-
 def _bake_nosr_preview(task: dict, div: int) -> str:
-    """顺带烤一份**未超分**那份栅格的预览 → `<场景目录>/PAN_NOSR_preview.jpg`。
+    """顺带烤一份**未超分**那份栅格的预览 → `<场景目录>/<输入 stem>_NOSR_preview.jpg`。
 
-    用户口径：没超分的那份 tif 就叫 `PAN_NOSR.tif`，按**全局档位**下采样即可，
-    不分支。落点直接复用拖入链那条规则（`paths.drop_preview_path`：
-    `<源同目录>/<源 stem>_preview.jpg`），所以文件名天然是 `PAN_NOSR_preview.jpg`
-    —— 与「一份栅格一份预览、名字由源 stem 拼」这条既有约定同源，不是另立规矩。
+    用户口径（2026-09-21 提出，2026-09-24 定名）：没超分的那份 tif 叫
+    `<输入影像的 stem>_NOSR.tif` —— SC 场景是 `<目录名>_NOSR.tif`，RC 场景是
+    `PAN_NOSR.tif`。名字**只由 `scene_search.nosr_candidates` 一处给出**（候选
+    有序，次选是 `writeTiff` 改名留下的上一次产物），本函数不再自己拼名字 ——
+    以前这里硬编码成 `PAN_NOSR.tif`，SC 场景于是永远走 `skipped`。
+    按**全局档位**下采样即可，不分支。落点直接复用拖入链那条规则
+    （`paths.drop_preview_path`：`<源同目录>/<源 stem>_preview.jpg`），所以文件名
+    天然是 `<输入 stem>_NOSR_preview.jpg` —— 与「一份栅格一份预览、名字由源 stem
+    拼」这条既有约定同源，不是另立规矩。
 
     与产物那一份（`_bake_product_preview`）的两点不同，都是有意为之：
 
@@ -594,11 +591,14 @@ def _bake_nosr_preview(task: dict, div: int) -> str:
     if not lq_path:
         return "skipped: 任务行里没有 lq_path"
     scene_dir = Path(_norm_dir(lq_path))
-    cands = [scene_dir / (_NOSR_STEM + ext) for ext in _NOSR_EXT_ORDER]
+    cands = scene_search.nosr_candidates(scene_dir,
+                                         scene_search.input_scene_path(scene_dir))
     source = next((c for c in cands if c.is_file()), None)
     if source is None:
-        # 如实报「没这份」而不是静默返回：这个名字对不对只有真机能证，报出来才看得出
-        return f"skipped: {scene_dir} 里没有 {_NOSR_STEM}.tif"
+        # 如实报「没这份」而不是静默返回：把**试过哪些名字**一起报出来，真机 `ls`
+        # 一次就能核对口径（这两个名字长期对不上，见 current-question 的待核条目）。
+        names = "、".join(c.name for c in cands)
+        return f"skipped: {scene_dir} 里没有未超分那份（找过 {names}）"
     if not os.access(str(scene_dir), os.W_OK):
         return f"skipped: {scene_dir} 对服务账号不可写"
     out = paths.drop_preview_path(source)
@@ -1615,8 +1615,8 @@ def create_app() -> FastAPI:
 
         **纯只读**：固定候选名的 `is_file()` + 尺寸探测 + 读 JPEG 注释里的档位。
         永不烘焙、永不写盘、永不列举目录 —— 它回答的是「三份各叫什么、在不在、
-        各自的场景 id 是什么」，**找不到也是回答**（`productCandidates` 说明试过
-        哪些名字，`exists: false` 说明结果）。
+        各自的场景 id 是什么」，**找不到也是回答**（`productCandidates` /
+        `nosrCandidates` 说明试过哪些名字，`exists: false` 说明结果）。
 
         每一类都直接拿它自己的 id 调 `GET /api/scenes/{id}/preview?div=N` 就能看图
         （三类各有自己的 `<stem>_preview.jpg` 落点，天然不撞名），所以这个端点
@@ -1626,11 +1626,15 @@ def create_app() -> FastAPI:
         任务的 `params.suffix`（权威：跑的就是它）→ `run_sr.default_suffix()`
         （配置缺省）。**`suffixFrom` 如实回报用到的是哪一个** —— 「按配置猜的名字」
         与「真跑过的名字」看起来一样，不标出来就分不清。没有可用的 suffix 时
-        product/nosr 两类**不出现**（拼不出名字就不编）。
+        **只有产物那一类**不出现（拼不出名字就不编）；NOSR 那一类与 suffix 无关
+        （它的名字由输入影像的 stem 拼，见 `scene_search.nosr_candidates`），照旧回报。
 
-        LAST-PRODUCT 那一类的名字是 `SR_code/util.py::writeTiff` 的改名规则推出来的
-        （它改的是**输出路径**，且只在同一 suffix 跑过两次以上时才存在）——真机
-        尚未实证，所以这里把拼出来的候选名一并回报，好让它能被核对。
+        NOSR 两类名字的来源不同，**候选顺序即优先级**（2026-09-24 用户口径）：
+        先试 `<输入 stem>_NOSR.tif/.tiff`（SC 场景是 `<目录名>_NOSR.tif`，RC 场景是
+        `PAN_NOSR.tif` —— 用户口径里「未超分那份」就是它），最后才试
+        `<产物 stem>_NOSR.tif/.tiff`（`SR_code/util.py::writeTiff` 的改名规则推出来的
+        **上一次产物**，只在同一 suffix 跑过两次以上时才存在，真机尚未实证）。
+        命中哪一个由回报的 `name` 说明，两者同时存在时先认输入 stem 那条。
         """
         try:
             abs_path = paths.scene_id_to_abs(scene_id, root)
@@ -1685,26 +1689,37 @@ def create_app() -> FastAPI:
                 row["jpgUrl"] = paths.rel_url(jpg, root)
             return row
 
-        inp = scene_search.input_scene_path(scene_dir)
-        items = [item("input", inp)]
-        cand_names: list[str] = []
-        if inp is not None and suffix:
-            cands = scene_search.product_candidates(inp, suffix)
-            cand_names = [c.name for c in cands]
-            # 拼完的名字再过一道白名单：SUFFIX_RE 挡得住分隔符，挡不住「全是合法
-            # 字符、却拼到白名单外」的想象。suffix 会进文件名，两道是纪律。
+        def whitelist(cands: list[Path], what: str) -> None:
+            """拼完的名字再过一道白名单：SUFFIX_RE 挡得住分隔符，挡不住「全是合法
+            字符、却拼到白名单外」的想象。suffix 会进文件名，两道是纪律。"""
             for c in cands:
                 try:
                     ensure_allowed(c.as_posix())
                 except PathDeniedError as e:
                     raise HTTPException(
                         status_code=403,
-                        detail=f"产物路径不在允许的盘阵前缀内：{e}") from e
+                        detail=f"{what}路径不在允许的盘阵前缀内：{e}") from e
+
+        inp = scene_search.input_scene_path(scene_dir)
+        items = [item("input", inp)]
+        cand_names: list[str] = []
+        product: Path | None = None
+        if inp is not None and suffix:
+            cands = scene_search.product_candidates(inp, suffix)
+            cand_names = [c.name for c in cands]
+            whitelist(cands, "产物")
             # 没有一个存在时回报第一个候选（`.tif`）并置 exists: false —— 报错口径
             # 由 productCandidates + exists 一起给出，不在这里编一个"差不多"的路径。
             product = next((c for c in cands if c.is_file()), cands[0])
             items.append(item("product", product))
-            items.append(item("nosr", scene_search.nosr_path_for(product)))
+        nosr_names: list[str] = []
+        if inp is not None:
+            nosr_cands = scene_search.nosr_candidates(scene_dir, inp, product)
+            nosr_names = [c.name for c in nosr_cands]
+            whitelist(nosr_cands, "未超分那份的")
+            items.append(item("nosr",
+                              next((c for c in nosr_cands if c.is_file()),
+                                   nosr_cands[0])))
         return {
             "sceneId": scene_id,
             "lqPath": scene_dir.as_posix(),
@@ -1714,6 +1729,7 @@ def create_app() -> FastAPI:
             "div": _product_preview_div(),
             "items": items,
             "productCandidates": cand_names,
+            "nosrCandidates": nosr_names,
         }
 
     return app

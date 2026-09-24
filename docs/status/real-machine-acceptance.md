@@ -1,6 +1,6 @@
 # real_machine_acceptance — 真机验收单（CentOS7 盘阵机 node81-135）
 
-> 日期：2026-09-23 · 状态：已定 · 来源：原 `current-question.md` §6「真机一次出差：验收一页纸」。
+> 日期：2026-09-24 · 状态：已定 · 来源：原 `current-question.md` §6「真机一次出差：验收一页纸」。
 >
 > 用途：一次出差把「真机项」收口。本文只放**验收判据与勾选**。
 > 部署步骤不在此重复 —— 见 [real-machine-bringup.md](real-machine-bringup.md)（本机实测运行手册）、
@@ -57,6 +57,31 @@
   权限从未验证** —— 见 [deploy/README.md](../../deploy/README.md) 中「替换件属主变 nginx」两条注意事项）；
   清掉的行重新检索应显示「未生成」，点开重烤一次；`ls -l <场景目录>` 确认场景源 `.tif` 与
   `<编号>_mask.tif` 一个没少 · 记录:
+- [ ] **反代自查：`/api/` 下的嵌套 location 没有吃掉请求**（⏱3′，09-24 新增）· 一条命令：
+
+  ```bash
+  curl -s -o /dev/null -w '%{http_code} %{content_type}\n' \
+       'http://127.0.0.1/api/scenes/__none__/preview?div=4'
+  ```
+
+  ✓= `404 application/json`（请求走到了后端，后端如实说没有这个场景）；
+  ✗= `404 text/html`（**nginx 自己回的** —— `/api/` 下的 location 少了同一层的 `proxy_pass`，见附录第三条）。
+  这条同时是「老景点不动」那类故障的判别命令：09-23 线上正是它 · 记录:
+- [ ] **冷开一个「未生成」预览的场景**（⏱30′，09-24 新增）· 场景库挑一行预览列写「未生成」的
+  （别挑已生成的），点「打开」；顺手点一行日期较早的老景。
+  ✓= 出阶段文案、Network 见一次 `/api/scenes/<id>/preview`（懒生成），随后出图、该行翻成「已生成」；
+  **「未生成」不表示打不开** —— 盘上有源就该烤得出来。灰块「已自动清除」只留给**打开时真撞过
+  `404`（静态链）**的行，09-24 起不再按年龄推定（旧口径见 [timeline-archive.md](timeline-archive.md) 09-22/09-24 两条）· 记录:
+
+- [ ] **未超分那份（NOSR）的拖入预热**（⏱20′，09-24 新增）· 挑一个目录里有 `<目录名>_NOSR.tif` 的
+  场景（现场已超分的景通常也有 —— `_NOSR` 是超分前的原图留档），把场景目录里的 `<目录名>.jpg`
+  拖进查看器。
+  ✓= 随后场景目录里出现 `<目录名>_NOSR_preview.jpg`（Network 里是一次 `/api/scenes/<id>/preview?div=N`；
+  这一步**静默** —— 不出提示、不占遮罩）；再把这份 jpg 拖回来应认成 `NOSR`：卡片上序号之后那颗标、
+  标可点开进当前活动格、两颗修复按钮置灰、「仅对比，不作修复」只在这份上、序号与本体卡相同。
+  ✗= 那份栅格不在目录里 → 界面上**什么都不该出现**（不报错，也不是 bug）。
+  顺带把**真机上那份的实际名字**记下来：看 `/api/scenes/<id>/siblings` 的 `nosrCandidates` 与命中的
+  `name`，据此校准候选顺序（[preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md) §4.11）· 记录:
 
 ## D 阶段 5 调度验收（真调度 · `SR_SLURM_FAKE=0`）
 
@@ -112,9 +137,9 @@
 
 ---
 
-## 附 部署期两条已知坑
+## 附 部署期三条已知坑
 
-均为 2026-09-16 核实时记录，改动前先看这一节：
+前两条为 2026-09-16 核实时记录、第三条为 2026-09-24 线上故障后补，改动前先看这一节：
 
 - **systemd drop-in 必须有 `[Service]` 段头。** 只写 `Environment=…` 一行会被 systemd 静默忽略整个文件
   （`systemctl show` 里看不到该变量、接口照旧 `source:fake`）。正确写法：
@@ -125,3 +150,12 @@
   `nginx -T | grep '^# configuration file'` 找到真身；对着 `nginx.conf` 做 `sed` 是空操作。
   URL 前缀保持仓库默认 `/disk-array/`，**不要**改成 `/DiskArray/`（后者会被 `location /` 兜底成
   `index.html`，返回 200 `text/html`，看着像成功）。
+- **`/api/` 下再套 location 时，子块里必须重写一遍 `proxy_pass`**（2026-09-24 记录，09-23 线上故障的
+  根因）。nginx 只选**一个** location，嵌套块**不继承** `proxy_pass`（final-location-handling 指令），
+  但**继承** `proxy_set_header` / `proxy_buffering` / `proxy_read_timeout` 这些普通指令 —— 子块里只写
+  `add_header`（如给 `/preview` 加 `Cache-Control`）就等于那条 URL 由一个「没有动作」的 location 处理，
+  落回 `root` 下的静态查找、由 nginx 自己回 **404 text/html**。前端当时只看状态码，把这种 404 当成了
+  「盘阵上文件已被清除」（前端 09-24 起只认静态链 `/disk-array/…` 上的 404，并把这种情形单独报出来）。
+  落盘后跑上面的「反代自查」一条即可区分。运维注意：往这台机器贴补丁脚本要**纯 ASCII + py2 兼容**
+  （裸 `python` 是 **2.7**，含中文注释的 heredoc 会 `SyntaxError`，脚本一个字都不写、而随后的
+  `nginx -t && nginx -s reload` 照样成功 —— 极易误判成「改了没用」）。

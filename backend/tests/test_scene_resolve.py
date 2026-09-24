@@ -1047,6 +1047,72 @@ class TestResolveStages(ResolveBase):
         self.assertEqual(r.json()["resolved"]["suffix"], "sr")
         self.assertIsNone(r.json()["row"]["lq_path"])
 
+    def test_bare_nosr_jpg_is_the_un_sred_copy(self):
+        """**未超分那份**：`<目录名>_NOSR` —— 环节 nosr，且**没有属于自己的 suffix**。
+
+        与上一条是两个东西：它是输入影像的那份没超分的栅格（2026-09-24 用户口径），
+        不是 `writeTiff` 改名留下的上一次产物。名字上只差中间那一段 suffix，判据
+        落在 `jpg_stage_name` 里（见那一条的文档）。
+        """
+        d = self.make_scene()
+        raster = self._write_raster(d / f"{SCENE_NAME}_NOSR.tif",
+                                    self.PROD_W, self.PROD_H)
+        jpg = self._write_jpg(d / f"{SCENE_NAME}_NOSR.jpg")
+
+        r = self.resolve(name=jpg.name, size_bytes=jpg.stat().st_size)
+
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["resolved"]["kind"], "nosr")
+        self.assertEqual(body["resolved"]["suffix"], "")
+        # 这一行描述那份 NOSR 栅格自己；可提交入口一律摘掉（同产物那一类）
+        row = body["row"]
+        self.assertEqual(row["name"], f"{SCENE_NAME}_NOSR")
+        self.assertEqual((row["W"], row["H"]), (self.PROD_W, self.PROD_H))
+        self.assertEqual(row["size_bytes"], raster.stat().st_size)
+        self.assertIsNone(row["lq_path"])
+        self.assertFalse(body["resolved"]["sr_capable"])
+        # 本体那一路仍如实回报（SR 真要跑的是它）
+        self.assertEqual(body["resolved"]["input_name"], f"{SCENE_NAME}.tif")
+
+    def test_baked_nosr_preview_jpg_links_as_the_un_sred_copy(self):
+        """平台烤出来那份（`<目录名>_NOSR_preview.jpg`）拖回来 ≡ 拖 `<目录名>_NOSR.jpg`。
+
+        这是用户手上真正会拖的那一份：拖入本体显示件时后台把未超分那份烤成
+        `<场景目录>/<目录名>_NOSR_preview.jpg`（见 `paths.drop_preview_path`）。
+        它的名字里带着完整的生产名（含 14 位时间戳），所以**不需要锚定目录**也认得出
+        —— 与拖产物的预览同一口径。
+        """
+        d = self.make_scene()
+        self._write_raster(d / f"{SCENE_NAME}_NOSR.tif", self.PROD_W, self.PROD_H)
+        preview = self._write_jpg(d / f"{SCENE_NAME}_NOSR_preview.jpg")
+
+        r = self.resolve(name=preview.name, size_bytes=preview.stat().st_size)
+
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["resolved"]["kind"], "nosr")
+        self.assertEqual(body["resolved"]["suffix"], "")
+        self.assertEqual(body["resolved"]["dir"], d.as_posix())
+        self.assertEqual(body["row"]["name"], f"{SCENE_NAME}_NOSR")
+        self.assertIsNone(body["row"]["lq_path"])
+
+    def test_bare_nosr_jpg_without_its_raster_404(self):
+        """那份 tif 不在盘上 → 不作数（前端据此「什么都不显示」）。
+
+        与 `test_product_jpg_without_its_raster_404` 同一条真门：`<目录名>_NOSR.jpg`
+        的名字切得干净、场景目录也在，但同级栅格不在 —— 这份 jpg 不是本景某个环节
+        的显示件，不得退回按本体关联（否则用户看的是另一份图，却拿到本体的尺寸与
+        可提交入口）。
+        """
+        d = self.make_scene()
+        jpg = self._write_jpg(d / f"{SCENE_NAME}_NOSR.jpg")
+
+        r = self.resolve(name=jpg.name, size_bytes=jpg.stat().st_size)
+
+        self.assertEqual(r.status_code, 404, r.text)
+        self.assertIn("不是本景的输入件或中间产物", r.json()["detail"])
+
     def test_suffix_with_underscore_is_cut_whole(self):
         """带下划线的 suffix（`sr_2`）**整段**切，不按段数猜。
 

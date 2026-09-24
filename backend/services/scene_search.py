@@ -236,8 +236,11 @@ _NON_STAGE_TAILS = ("cloud", "thumb", "mask", "ori", "preview")
 #: 保持「纯文件名推导、无服务依赖」——app.py 那边仍会用 run_sr 的权威值。
 _SUFFIX_RE = re.compile(r"^[A-Za-z0-9_-]{1,16}$")
 
-#: NOSR的尾标记（对齐 SR_code/util.py 的改名规则）。
-_NOSR_TAIL = "_NOSR"
+#: NOSR的尾标记（对齐 SR_code/util.py 的改名规则）。两种形态各一个常量，理由与
+#: `_PREVIEW_SEG` / `_PREVIEW_TAIL` 那一对相同：尾段里**分隔符已经被剥掉**，
+#: `endswith` 要的是带上它的形态，而整段就是它本身时要的是不含下划线的形态。
+_NOSR_SEG = "NOSR"
+_NOSR_TAIL = "_" + _NOSR_SEG
 
 #: 平台自烤的预览缓存尾标记（`api/paths.drop_preview_path` 产出的
 #: `<栅格 stem>_preview.jpg`）。它在 `_NON_STAGE_TAILS` 里也有一份，但**是唯一
@@ -276,8 +279,13 @@ def de_suffixed_stems(name: str, max_segments: int = 2) -> list[str]:
     （`SUFFIX_RE` 允许 `_`，用户的 suffix 是自定短串），所以「切一段」与「切两段」
     两种读法都成立 —— `<目录名>_sr_2.jpg` 可能是 `<目录名>` 的 `sr_2` 产物，也可能是
     `<目录名>_sr` 的 `2` 产物。哪一条是真的由盘阵回答（目录在不在、同级栅格在不在、
-    名字对不对得上），这里不猜。名字以 `_NOSR` 结尾时先去它，再从剩下的部分切 ——
-    目录名里从不含 `_NOSR`。
+    名字对不对得上），这里不猜。
+
+    `_NOSR` 尾段**照常走这一轮切**（它像 `preview` 一样是「必须剥掉才回到真名」的
+    尾段，目录名里从不含它），别在循环外先剥：先剥掉再切的话，`<目录名>_NOSR` 剥完
+    剩下的正好是目录名，而循环恒要切至少一段 —— 那个真名反而一条候选都进不去，
+    于是拖平台烤的那份裸 NOSR jpg 会报「目录不存在」，理由列的还是两个被多切一段的
+    假目录（2026-09-24 实测；带 `_preview` 尾巴的那份走的是另一条路，一直是对的）。
 
     每一条都要求切出来的尾巴是**干净的 suffix 形态**（与 `jpg_stage_name` 同一套
     字符约束）：不干净（` - 副本`、`.preview` 那种）就不再往下切，一条也不生成 ——
@@ -292,8 +300,6 @@ def de_suffixed_stems(name: str, max_segments: int = 2) -> list[str]:
     下游看后缀分流（`_fingerprint_mismatch`），也看后缀读 W/H。
     """
     stem = Path(name).stem
-    if stem.lower().endswith(_NOSR_TAIL.lower()):
-        stem = stem[:-len(_NOSR_TAIL)]
     out: list[str] = []
     rest, cut = stem, []
     for _ in range(max_segments):
@@ -308,7 +314,9 @@ def de_suffixed_stems(name: str, max_segments: int = 2) -> list[str]:
         # `_NON_STAGE_TAILS` 里只有 `preview` 能剥（见 `_PREVIEW_TAIL`）：它是平台自己
         # 烤的那份，剥掉才是真名字。剥完**接着往下切**而不是就地停 —— `<目录名>_sr_preview`
         # 要先剥 preview 才切得出 `<目录名>`。另四个照旧当场停：它们剥掉会落到真实场景
-        # 目录上。
+        # 目录上。`_NOSR` 不在这份名单里（它在 `jpg_stage_name` 那是一段真的环节尾段），
+        # 于是这一轮切到它时不会停 —— 剥掉它得的那条候选正是 `<目录名>_NOSR` 的目录名，
+        # 见函数文档里那一节。
         if tail.lower() in _NON_STAGE_TAILS and tail.lower() != _PREVIEW_SEG:
             break
         if rest not in out:
@@ -317,11 +325,11 @@ def de_suffixed_stems(name: str, max_segments: int = 2) -> list[str]:
 
 
 def jpg_stage_name(stem: str, base: str) -> tuple[str, str] | None:
-    """纯词法：`<基准名>_<suffix>.jpg` / `<基准名>_<suffix>_NOSR.jpg` → (环节, suffix)。
+    """纯词法：`<基准名>_<suffix>` / `<基准名>_<suffix>_NOSR` / `<基准名>_NOSR` → (环节, suffix)。
 
     **不 stat、不查任务库、不查配置**。返回 `('product', suffix)` /
-    `('nosr', suffix)`，两种形状都不符合时 None（调用方要么按本体处理，要么报
-    「这不是场景里的图」）。
+    `('nosr', suffix)` / `('nosr', '')`，三种形状都不符合时 None（调用方要么按本体
+    处理，要么报「这不是场景里的图」）。
 
     为什么 suffix 从**文件名本身**切，而不是查最近跑过的任务：SR 常常在平台外跑
     （用户在别的机器上直接调 SR 脚本），库里没有记录时照样得认得出这三类图；而且
@@ -335,13 +343,29 @@ def jpg_stage_name(stem: str, base: str) -> tuple[str, str] | None:
     影像候选的 stem 都试一遍（`input_candidates`，只拼名字不 stat），因为混合目录
     里「上游 SC 遗留的 `<目录名>.tif`」与「RC 真读的 `PAN.tif`」可能同时在。
 
-    尾段两种形态，且 NOSR 只在末尾、只出现一次。
+    尾段三种形态，且 NOSR 只在末尾、只出现一次：
+
+    * `<基准名>_NOSR` —— **未超分那份**（2026-09-24 用户口径：SC 场景叫
+      `<目录名>_NOSR.tif`，RC 场景叫 `PAN_NOSR.tif`）。整段就是标记本身，没有属于
+      自己的 suffix，返回 `('nosr', '')`。它**不能**走下面那条 `ends_with(_NOSR_TAIL)`：
+      `tail` 里已经不含分隔下划线（上面切掉了），`"nosr".endswith("_nosr")` 恒假，
+      这条会掉进「suffix 名叫 NOSR 的产物」，环节被判成 `product` —— 标签文案侥幸
+      还是 `NOSR`（suffix 大写），配色与工具提示却是产物那一套，错得无声。
+    * `<基准名>_<suffix>_NOSR` —— `writeTiff` 改名留下的**上一次产物**（见
+      `nosr_path_for`），suffix 是自己的，返回 `('nosr', suffix)`。
+    * `<基准名>_<suffix>` —— 本轮超分产物，返回 `('product', suffix)`。
+
+    残留歧义：`SUFFIX_RE` 允许用户把 suffix 起名叫 `NOSR`，那种情况下
+    `<输入名>_NOSR.tif` 既是「未超分那份」也是「suffix = NOSR 的产物」。按用户口径
+    （`app.py::_bake_nosr_preview` 一开始就是照这个读法写的）认前一种。
     """
     if not stem.lower().startswith(base.lower() + "_"):
         return None
     tail = stem[len(base) + 1:]
     if not tail:
         return None
+    if tail.lower() == _NOSR_SEG.lower():
+        return "nosr", ""
     is_nosr = tail.lower().endswith(_NOSR_TAIL.lower())
     suffix = tail[:-len(_NOSR_TAIL)] if is_nosr else tail
     if not suffix or not _SUFFIX_RE.match(suffix):
@@ -366,6 +390,31 @@ def stage_bases(dir_path, input_path) -> list[str]:
     for cand in input_candidates(dir_path):
         if cand.stem != first and cand.stem not in out:
             out.append(cand.stem)
+    return out
+
+
+def nosr_candidates(dir_path, input_path, product_path=None) -> list[Path]:
+    """**未超分那份**的候选路径（有序，只拼名字，与 `product_candidates` 同形制）。
+
+    用户口径（2026-09-24 当面确认）：未超分那份叫**输入影像的 stem + `_NOSR`** ——
+    SC 场景即 `<目录名>_NOSR.tif`，RC 场景即 `PAN_NOSR.tif`。基准名取 `stage_bases`，
+    于是 SC / RC / 混合目录（上游 SC 遗留件与 RC 真读的那份同在）全覆盖，与产物名的
+    拼法同一套规则。扩展名沿用产物那一组（生产上 `.tif` 与 `.tiff` 两种拼写都出现过）。
+
+    `product_path` 给了就把 `nosr_path_for(product_path)` 追加为**最后一条次选**：
+    那是 `SR_code/util.py::writeTiff` 的改名产物（上一次同一 suffix 的**超分结果**，
+    只在同一 suffix 跑过两次以上时存在，见 `nosr_path_for`）。它与用户口径那份不是
+    一回事，优先级排在后面；两条名字在盘上同时存在时先认输入 stem 那条。
+
+    命中哪一个**由调用方如实报出名字**，这里不猜（`/siblings` 会把试过的名字一起
+    回报）。只拼名字，**不 stat、不列举** —— 调用方自己挑第一个存在的。
+    """
+    d = Path(dir_path)
+    bases = stage_bases(d, input_path) if input_path else [d.name]
+    out = [d / f"{base}{_NOSR_TAIL}{ext}"
+           for base in bases for ext in _PRODUCT_EXT_ORDER]
+    if product_path is not None:
+        out.append(nosr_path_for(product_path))
     return out
 
 

@@ -5,7 +5,7 @@
 >
 > 本文件只写**现在是什么**。变更经过见 [timeline-archive.md](timeline-archive.md)（历史时间线），
 > 真机勾选项见 [real-machine-acceptance.md](real-machine-acceptance.md)（验收单）。
-> 日期：2026-09-23 · 状态：已定。
+> 日期：2026-09-24 · 状态：已定。
 
 ---
 
@@ -19,7 +19,9 @@
 
 - **`/viewer` 查看器** —— 两种数据源（本地 TIF 文件 / 盘阵场景 JPG）。功能：亮度拉伸、像素定位、
   ROI 统计、掩码绘制（矩形 / 多边形 / 魔棒 / 合并重叠 / 删除）、图像对比（点选 / 分屏）、
-  《待修复清单》导入与写回、提交 SR。右侧「上下文侧舱」含 `[ROI/工具]` 与 `[Agent]` 两个页签。
+  《待修复清单》导入与写回、提交 SR。拖入盘阵场景的显示件时会自动预热同景的**未超分那份**
+  （NOSR），它出现在列表里时带 `NOSR` 标（与本体标区分、可点开进当前活动格）。
+  右侧「上下文侧舱」含 `[ROI/工具]` 与 `[Agent]` 两个页签。
 - **`/scenes` 场景库** —— 盘阵场景检索（卫星 / 传感器 / 日期 / 关键词）、行内显示 W/H、
   打开（首次访问懒生成预览）、清除预览缓存（选定 / 全部）。
 - **`/queue` 共享队列** —— 提交 SR、状态随 SSE 推进、取消作业、耗时与产物目录。
@@ -60,8 +62,13 @@
 
 ### 3.2 待真机确认（尚无实证）
 
-1. `<输入名>_<suffix>_NOSR.tif` 的拼法系从 `SR_code/util.py` 推导，无真机实证。
-   缓解：候选名做成元组，`/api/scenes/{id}/siblings` 回报 `productCandidates`，拿到 `ls -l` 后校准。
+1. **未超分那份在真机上实际叫什么名字**（⏱口径本身 2026-09-24 已定，不再是问题）。
+   未超分那份 = **输入影像的 stem + `_NOSR`**（SC 即 `<目录名>_NOSR.tif`，RC 即 `PAN_NOSR.tif`）；
+   从 `SR_code/util.py::writeTiff` 推导出的 `<产物 stem>_NOSR.tif` 退为**次选**候选，仍在清单里
+   （那份也可能真在盘上）。候选有序、只拼名字不 stat，命中哪一个**如实报出名字**，不猜 ——
+   `/api/scenes/{id}/siblings` 的 `nosrCandidates` 就是这份清单，拿到真机 `ls -l` 可据此校准
+   **顺序**（不影响能否命中）。详见 [preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md) §4.11；
+   验收动作见 [real-machine-acceptance.md](real-machine-acceptance.md) §C 末条。
 2. 产物 tif 尺寸为输入影像的 **2 倍**（`code_0817_prod.py` 的 `scale: 2`），无真机实证。
    若成立，分屏对比两侧是「同一地面区域、不同像素网格」，对齐只能按百分比，±1 像素级比对做不到。
 3. 生产树目录日期取「成像日 / 次日」中命中者，现按较年轻者推定，需一批真实目录名验证。
@@ -72,8 +79,9 @@
 
 ### 3.3 已记录，暂不处理
 
-1. `/preview` 在源文件不存在时回 422（而非 404），故「3 天以内的新景、文件已被清」这一路
-   走不到「已自动清除」灰块。改造只需后端一行，但需重新部署。
+1. `/preview` 在源文件不存在时回 422（而非 404）：这一路点下去拿到的是「预览生成失败：场景文件
+   不存在」，前端只认**盘阵静态链**上的 404，所以不会亮灰块（也不会标 `purged`）。改造只需后端
+   一行（`app.py::preview` 在 `abs_path.is_file()` 为假时回 404），但需重新部署，见 §4.1。
 2. 09-15 记录：退出码文件已判 FAILED，而 `GET /api/queue` 仍报 RUNNING。此后 `_task_state`
    经 09-18、09-20 两轮改动，**未复核该现象是否仍存在** —— 下次真机提交时顺带确认。
 3. [.e2e/qa-theme.js](../../.e2e/qa-theme.js) 有 6 条陈旧失败断言（期望值是 2026-09-09 改版前的
@@ -87,6 +95,10 @@
 7. `SR_SCENES_ROOT` 是**单根**，没有多根写法；符号链接只有建在根本身才能通过路径校验。
 8. 场景检索采用白名单：所在目录须含 `<目录名>_meta.xml`，且文件名为 `<目录名>.<ext>` 或 `PAN.<ext>`。
     **代价**：没有该 xml 的目录整个不显示（已接受）。
+9. `deploy/nginx.conf` 里 `location /disk-array/` 内那条 `location ~* \.preview\.jpg$`
+   （给预览 JPG 加 `max-age=3600`）**在 09-22 预览名收口成 `_preview.jpg` 之后就不再匹配**，
+   该缓存策略事实上失效（现在预览 JPG 不带 `Cache-Control`，靠浏览器启发式缓存兜着）。
+   要么把正则改回匹配 `_preview.jpg`，要么删掉这条子 location，需人定。
 
 ## 4. 下一步
 
@@ -106,6 +118,7 @@
 
 - 上传本轮的 `frontend/dist` 与 `backend` 两个包（**必须同包更新**）到 node81-135。
 - A 段收尾：造一个未超分过的场景，跑出真实产物（见 §3.1）。
+- 未超分那份（NOSR）的拖入预热 + 真机名字校准（09-24 新增，判据见 §3.2 第 1 条与验收单 §C 末条）。
 - 阶段 4 场景验收、阶段 5 掩码 → SR 真链、SSE 长连。
 - 配置 LLM 端点后跑通真实 `/chat` 闭环。
 
@@ -120,6 +133,10 @@
   那一个路径。测试有用例把 `os.listdir` / `scandir` / `walk` 打成 `AssertionError` 来固定这条。
 - **真机页面是 http，不是 SecureContext**：`showOpenFilePicker`、剪贴板等 API 一律不存在。
   需要写盘阵的功能必须走后端（服务账号 `nginx`）。
+- **nginx：`/api/` 下再套 location 时，子块里必须重写一遍 `proxy_pass`**。nginx 只选一个 location，
+  嵌套块**不继承** `proxy_pass`（final-location-handling 指令），漏了就是 nginx 自己回 404 HTML
+  —— 2026-09-23 线上「老景打不开」正是这条（见 timeline-archive 09-24 条）。落盘后按
+  [deploy/README.md](../../deploy/README.md) §四 的 `/preview` 一条自查（`ct` 必须是 `application/json`）。
 - **浏览器 e2e 可用**：`.e2e/launchBrowser.js`（puppeteer-core + 无头浏览器，每次使用独立的临时配置目录）。
   候选顺序 **Chrome 优先** —— 本机 Edge 与正在运行的 Edge 实例握手会 `Code: 0` 闪退；
   换浏览器设 `SR_E2E_BROWSER`。
@@ -148,22 +165,29 @@
 - **掩码**：值域 0/255（0 = 不处理，255 = 处理）；`run_sr` 用 `cv2.threshold(>0)` 读取。
   矢量格式 `{"width":W,"height":H,"polygons":[{"label":"roi","points":[[x,y],...]}]}`，
   x 为列、y 为行，均为原图像素坐标。
-- **SR 产物命名**：`<源 stem>_<suffix>.tif`；未超分那份为 `<源 stem>_<suffix>_NOSR.tif`（拼法待真机确认，见 §3.2）。
+- **SR 产物命名**：`<源 stem>_<suffix>.tif`；未超分那份为 **`<输入 stem>_NOSR.tif`**
+  （SC 即 `<目录名>_NOSR.tif`），`<产物 stem>_NOSR.tif` 为次选。两义都标 `NOSR`，见 §3.2 与
+  [preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md)。
 - **场景判据**：目录须含 `<目录名>_meta.xml`；场景文件为 `<目录名>.<ext>`（SC 步输入）或
   `PAN.<ext>`（RC 步输入）。派生件按 `p.stem == p.parent.name` 排除。
 - **路径映射**：`SR_DRIVE_MAP` 默认 `W:=/DiskArray`；`SR_ALLOWED_ROOTS` 默认 `/DiskArray`。
-- **「已自动清除」推定阈值**：`PURGED_AGE_DAYS = 3`（老景 + 盘上无任何预览 + 年龄 > 3 天）。
-  该标记只活在前端单次会话，重新检索即消失。
+- **「已清除」灰块的判据只有一条（2026-09-24 起）**：打开这一行时在**盘阵静态链**
+  （`/disk-array/…`）上撞了 404（`lib/api.ts::isSceneGone` = 404 且 URL 落在 `/disk-array/`）。
+  打后端的 `/api/` 请求回 404 **不算**（那说明请求没走到后端，见 `isProxyMiss`）；按年龄的推定
+  已于 09-24 整条删除。该标记只活在前端单次会话，重新检索即消失。
 - **队列耗时口径**：纯算力时长（`started_at` → `finished_at`），不含排队；重启后基准回落库中状态。
 - **任务表唯一键**：`sr_tasks.task_fingerprint`（参数内容 sha256），同参数重交复用同一行。
 
-### 6.3 测试基线（2026-09-22 实测）
+### 6.3 测试基线
 
-- 后端：**696 passed / 5 skipped**（`python -m pytest backend/`）。
-- 前端：**394 passed** + `vue-tsc` 零错误 + `npm run build`（Vitest）。
+- 后端：**720 passed / 5 skipped**（`python -m pytest backend/`，2026-09-24；09-22 基线 696 ——
+  本轮 NOSR 名字口径相关的命名 / 候选清单 / 解析 / `/siblings` / 烘焙用例净增 24 条）。
+- 前端：**393 passed** + `vue-tsc` 零错误 + `npm run build`（Vitest，2026-09-24；09-22 为 394 ——
+  按年龄推定的 10 条用例随该口径删除、新增 6 条 URL/响应体判据用例；09-24 再加 3 条 `nosrItemOf`）。
 - 浏览器回归（`.e2e/`，先 `cd frontend && npm run build`）：
-  `test-scenes.js` **130** 断言 · `test-manual-scene.js` **202** · `test-platform.js` **26** ·
-  `test-vue-viewer.js` **190**（沿用当天更早记录）。
+  `test-scenes.js` **132** 断言 · `test-manual-scene.js` **214**（2026-09-24；09-22 为 202 ——
+  新增 L6/L7 两段：拖入显示件顺带烤「未超分那份」以及对它的环节判定）· `test-platform.js` **26** ·
+  `test-vue-viewer.js` **190**（后三项沿用 09-22 记录，本轮未重跑）。
   更旧的值（58 / 65 / 22 / 197 等）已过期，不要据此判断回归。
 
 ## 7. 去哪查什么

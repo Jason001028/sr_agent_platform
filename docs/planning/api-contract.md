@@ -11,6 +11,7 @@
 > **挂起项七（2026-09-21 第三轮，真机反馈）**：§3.5 `{name}` 分支新增**可选字段 `anchor`** —— 拖拽入口把「用户当前打开着的场景目录」一并发过来（前端 `sceneAnchors`：最近显示过的那一景 → A 格 → B 格，上限 3 条），后端按序在这些目录里认这份 jpg（判据与 `scan` 段完全相同，只是不过 `_fingerprint_mismatch`，真门仍是「这一环节自己的栅格躺在同级」）。**只给名字里没有场景身份的那一类用**：RC 场景的产物叫 `PAN_<suffix>.jpg`（产物名按输入影像名拼，RC 的输入是 `PAN.tif`），既无卫星段也无成像时刻，反推那一步就 400 —— 用户真机上拖它进来正是这个现象。名字自己能反推时 anchor 连一次 stat 都不花；坏值一律跳过并把原因追加进 400 的 `detail`（只有白名单是硬的），不新增错误码、不改 `/siblings`。**这不是「平台猜目录」**：目录来自用户自己打开的上下文，不是从文件名推的。另有前端一句弹窗文案同步改写（原文说「能关联的 jpg 只有名字与场景目录名一致的那份」，对 RC 产物是假话）。
 > **挂起项九（2026-09-21 第五轮 → 2026-09-22 收口，真机反馈）**：预览文件名**全平台统一成一条规则** `<源栅格 stem>_preview.jpg`（`paths.preview_jpg_name`），三条烘焙链（急烤 / 惰性打开 / 拖入）落同一个名字，差别只剩目录。09-21 那版是「点号那份不动、再 `copyfile` 一份下划线同名件」（`app.py::_mirror_preview_name`）—— 那份镜像同日被删：它把「一份栅格两个文件」从缓存层搬到了每一份产物上，用户要的是**只有一个名字**。读判据同步搬过去（`hasPreview`/`previewDiv`/静态 `jpgUrl` 从同一份落点算；前端 `isBakedPreviewUrl` 认结尾 `[_\.]preview\.jpe?g`），旧的点号文件由 `_sweep_legacy_preview` 在每条链处理到那份栅格时顺手删掉，没有全盘清扫（平台不列目录）。详见 §4.5 与 [preview-bake-pipeline §4.8/§4.9/§4.10](../knowledge/preview-bake-pipeline.md)。
 > **挂起项八（2026-09-21 第四轮，真机口径）**：§4.5 的急烤队列**顺带**多烤一份未超分的预览 —— 同一轮 tick 在产物之后把 `<场景目录>/PAN_NOSR.tif` 按**全局档位**下采样成 `<场景目录>/PAN_NOSR_preview.jpg`（落点复用拖入链的 `<源 stem>_preview.jpg` 规则）。**不是新的烘焙入口、不动任何响应字段、不动产物的状态机**：源是固定名字，不判沙箱（那份栅格是盘阵上的既有文件），结局只写盘 + 一行 stdout（`[nosr-preview] task=<id> <状态>`）。名字按用户口径钉死；仓库 `SR_code/util.py::writeTiff` 推出来的 `<产物 stem>_NOSR.tif` 与它对不上，属**待核**（记在 current-question）。
+> **挂起项十（2026-09-24 用户口径，订正上面的挂起项八）**：① **NOSR 那一份的名字口径订正** —— 未超分那份 = **输入影像的 stem + `_NOSR`**（SC 场景 `<目录名>_NOSR.tif`，RC 场景 `PAN_NOSR.tif`）；`SR_code/util.py::writeTiff` 推出来的 `<产物 stem>_NOSR.tif` **退为次选**，留在候选清单最后。候选由 `scene_search.nosr_candidates()` **一处**产出，`/siblings` 与急烤那条链读同一份 —— 挂起项八那版把名字**硬编码成 RC 的名字** `PAN_NOSR.tif`，SC 场景因此永远走 `skipped:`，而 `/siblings` 又只认次选那条，两处彼此对不上。② `/api/scenes/{id}/siblings` 响应**新增 `nosrCandidates`**（与 `productCandidates` 同形制、顺序即优先级），`nosr` 项**不再依赖 `suffix`**（名字由输入影像的 stem 拼，有测试钉着）。③ §3.5 `{name}` 分支**再认两种名字**：裸 `<目录名>_NOSR.jpg` 判 `('nosr','')`；`de_suffixed_stems` 的 `_NOSR` 尾段改在切段循环**内**剥（原先在循环外预剥，`<目录名>_NOSR` 的**真名**反而一条候选都进不去）。④ 前端在**拖入显示件**时对同景那一份多做一次静默预热（`stores/viewer.ts::warmNosrPreview`，命中才记账）—— 拖入不再只烤「自己那份」。详见 [preview-bake-pipeline §4.11](../knowledge/preview-bake-pipeline.md)。
 > **须说明的流程偏差**：上述改动**已与本文档同批落到代码**（不是"先评审后写码"）。理由是它同时修一个现存缺陷（两入口指纹不一致），拆开会让仓库停在一个已知会重复投作业的中间态；09-17、09-20 两批同理，前端要用的字段与端点不一起落地就没法验收（09-20 那批还带着 §4.5 那个后台循环，文档与循环必须同批，否则运维会照着一份没写急烤的契约去配 env）。请复核，通过后把状态改回「已定」。此前其余条款自 2026-09-02 起均未变（评审通过时的交付基线：后端 190 unittest + 前端 Vitest 114 + vue-tsc 零错误 + `.e2e/test-platform.js` 11 断言全绿）。
 > 目标读者：阶段5 实现会话（后端 FastAPI + 前端 Vue3）。范围：把既有后端（agent loop + 4 工具 + `sr_tasks` + slurm）暴露成网页可调 REST/SSE，交付 聊天 / 共享任务队列 / 查看器画完掩码提交 SR。
 > 前置：阶段4 已完成（FastAPI 骨架 `backend/api/app.py`：`/api/scenes` + `/api/scenes/{id}/preview` + 路径白名单；前端 `/scenes` 页 + route='jpg' rec + `/chat` `/queue` 占位路由）。
@@ -56,7 +57,7 @@
 | `GET /api/scenes` · `GET /api/scenes/{id}/preview` | 场景检索/懒生成（阶段4 已有；**2026-09-19 起接 `div` 档位参数**、行上多 `previewDiv`；**2026-09-20 起 jpg 行多只读字段 `rasterPreview`**，见 §4.6） | — |
 | `POST /api/scenes/resolve` | 手填/反推一个盘阵场景目录 → 与库行同形的 `{source,row,resolved}`（2026-09-20 起 `row` 也带 `rasterPreview`） | 3.5 |
 | `GET /api/scenes/{id}/preview-drop` | **拖拽入口专用**的预览 JPG（落盘阵场景目录 `<stem>_preview.jpg`；目录不可写时兜底到临时缓存并回 `X-SR-Preview-Fallback: tmp`；不进库行，URL 不可静态映射） | 3.6 |
-| `GET /api/scenes/{id}/siblings` | **只读**诊断：一个场景的三类图（输入 / 本轮超分产物 / NOSR `_NOSR`）各叫什么、在不在、各是什么 id —— 供下一轮对比视图消费，也是 `_NOSR` 拼法待真机核对时的窗口 | 3.8 |
+| `GET /api/scenes/{id}/siblings` | **只读**诊断：一个场景的三类图（输入 / 本轮超分产物 / NOSR `_NOSR`）各叫什么、在不在、各是什么 id —— 供下一轮对比视图消费；NOSR 那份的候选清单（`nosrCandidates`）也从这里出 | 3.8 |
 | `POST /api/scenes/clear-preview` | **删盘阵文件**（本契约里唯一一条）：场景库「清除选定 / 全部清除」按场景目录清掉预览 JPG 缓存，逐条回报；判据与边界见章节 | 3.9 |
 | `GET /api/tools` | 工具清单（manifest 机械生成，供 UI/文档） | 3.1 |
 | `POST /api/tools/{name}` | 直调单个工具（绕过 LLM；validate + 白名单照常） | 3.1 |
@@ -304,10 +305,14 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
   [docs/sr_code/production-scene-naming.md](../sr_code/production-scene-naming.md)。
   - **第二阶段候选（2026-09-21，仅 jpg）**：中间产物的文件名是**在生产全名后面再粘一段**
     （`<目录名>_sr.jpg`），按原名反推出的目录名会带上那条尾巴（`…/<目录名>_sr`），盘阵上
-    没有那个目录。所以 jpg 还会按「去掉尾段」的名字再反推一遍 —— 尾段两种读法各给一条
-    候选（去末尾一段、以及先去 `_NOSR` 再去末尾一段；`sr_2` 这类**带下划线的 suffix** 也能
-    整段切掉，按段数猜会切错，见 `scene_search.de_suffixed_stems`）。尾段过不了
-    `SUFFIX_RE` 的字符约束（`- 副本` 这类带空格的、`.preview`）就一条候选都不生成。
+    没有那个目录。所以 jpg 还会按「去掉尾段」的名字再反推一遍 —— 逐段切最多**两段**，
+    每切一段给一条候选（切一段与切两段两种读法都成立：`<目录名>_sr_2.jpg` 可能是
+    `<目录名>` 的 `sr_2` 产物，也可能是 `<目录名>_sr` 的 `2` 产物；`sr_2` 这类**带下划线的
+    suffix** 因此也能整段切掉，按段数猜会切错，见 `scene_search.de_suffixed_stems`）。
+    尾段过不了 `SUFFIX_RE` 的字符约束（`- 副本` 这类带空格的、`.preview`）就停止下切。
+    **`_NOSR` 与 `preview` 由这一轮的切负责剥**（2026-09-24 订正）：两者都是「剥掉才回到
+    真名」的环节尾段，所以都在切段循环**内**处理，不在循环外预剥 —— 预剥会让
+    `<目录名>_NOSR` 剩下的真名一条候选都进不去（`de_suffixed_stems` 的文档记了这个坑）。
     **只在前一阶段全落空时才展开**：常见情形（本体显示件、`.tif` 反推、粘路径）一个 stat
     都不多花 —— 钉住探测量上限的那几条用例正走在上面。
   - **平台自烤的那份预览也认（2026-09-21 晚）**：`<栅格 stem>_preview.jpg` 是拖入链
@@ -319,7 +324,7 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
     的一个：剥掉后正是那份栅格的 stem（`<目录名>_preview` → `<目录名>`＝本体，
     `<目录名>_sr_preview` → `<目录名>_sr`＝产物），环节照旧由
     `scene_search.stage_of_jpg` 判。**只剥一层**，剥完仍在名单里（`<目录名>_cloud_preview`）
-    照旧不认。
+    照旧不认。（`_NOSR` 不在这份名单里 —— 它是一段真的环节尾段，由上一段的切段逻辑剥掉。）
 - 响应 `200 {"source":"manual", "row": <与 /api/scenes 行同形>, "resolved": {...}}`：
   `row.id` 是 `~` + base64url(绝对路径)（手工行形态，见 `api/paths.py`；库行 id 一字未变），
   `row.manual=true`、`jpgUrl` 在**库外**为 `null`（预览走 `GET /api/scenes/{id}/preview` 回
@@ -414,9 +419,11 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
     名字比的是**场景目录名**，不是栅格输入的 stem（见上一条）—— 目录由**名字**锁死，
     环节由 `stage_of_jpg` 判（见下）。
   - **中间产物名（2026-09-21 增）**：拖 `2026-09-21` 起不止认显示件，也认它的中间产物
-    —— 用户想「把跑出来的产物拖进来看一眼」是自然动作。可拖的三类名字：
+    —— 用户想「把跑出来的产物拖进来看一眼」是自然动作。可拖的四类名字：
     `<目录名>.jpg`（本体显示件）、`<目录名>_<suffix>.jpg`（本轮超分产物）、
-    `<目录名>_<suffix>_NOSR.jpg`（NOSR，即本次跑 SR 的输入备份）。
+    `<目录名>_NOSR.jpg`（未超分那份，2026-09-24 用户口径）、
+    `<目录名>_<suffix>_NOSR.jpg`（writeTiff 改名留下的上一次产物，标同一个 `NOSR` 标；
+    两义与候选次序见 [preview-bake-pipeline §4.11](../knowledge/preview-bake-pipeline.md)）。
     **真门是「同级栅格真的在」**（`<目录>/<名>.tif|.tiff`，按 `_PRODUCT_EXT_ORDER` 试）：
     「名字切得干净」只说明它长得像产物名，而一个场景目录里躺着十几样东西，
     `<目录名>_cloud.jpg` 同样切得干净 —— 只有「它有一份同名栅格」才说明这份 jpg 是某个
@@ -587,7 +594,8 @@ body：
 
 用途：把「这个场景的**输入影像**、**本轮超分产物**、**NOSR**各叫什么、在不在、各自的
 场景 id 是什么」一次交代清楚。翻看器对比功能（下轮）要同时取这三张图，这个端点就是它的
-取名与存在性来源；也是 `<...>_NOSR.tif` 真机文件名尚未实证时的诊断窗口。
+取名与存在性来源；也是 NOSR 那份候选清单（`nosrCandidates`）的出口 —— 真机上命中的是哪个
+名字，看这里。
 
 **纯只读，四条永不**：永不烘焙、永不写盘、永不列举目录、永不改任何状态。全部探测都是
 **固定候选名**的 `is_file()` / `stat()` —— 与 §3.5 的「不扫盘」是同一条纪律，实现里没有
@@ -601,7 +609,7 @@ body：
 | 1 | `?suffix=`（调用方断言；过 `run_sr.SUFFIX_RE = ^[A-Za-z0-9_-]{1,16}$`，不合法 → **400**） | `"query"` |
 | 2 | 该 `lq_path` **最近一条 COMPLETED** 任务的 `params.suffix`（跑的就是它，最权威） | `"task"` |
 | 3 | `run_sr.default_suffix()`（配置文件里的 `<Suffix>`，读不出/不合法则回落 `DEFAULT_SUFFIX`） | `"default"` |
-| — | 三级都拿不到 → 两类**不出现** | `null` |
+| — | 三级都拿不到 → **只有产物那一类**不出现（拼不出名字就不编）；`nosr` 与 suffix 无关，照旧出现 | `null` |
 
 - **必须回报 `suffixFrom`**：「按配置猜出来的名字」与「真跑过的名字」在响应里长得一样，
   不标出来，前端（和人）就没法知道这个 `_260318.tif` 是实事求是还是碰运气。
@@ -622,7 +630,9 @@ body：
     "W":24000,"H":24000,"hasPreview":false,"previewDiv":null,"jpgUrl":null},
    {"kind":"product","…":"…"},
    {"kind":"nosr","…":"…"}],
- "productCandidates":["A_B_…_001_260318.tif","A_B_…_001_260318.tiff"]}
+ "productCandidates":["A_B_…_001_260318.tif","A_B_…_001_260318.tiff"],
+ "nosrCandidates":["A_B_…_001_NOSR.tif","A_B_…_001_NOSR.tiff",
+                   "A_B_…_001_260318_NOSR.tif","A_B_…_001_260318_NOSR.tiff"]}
 ```
 
 - `kind ∈ {"input","product","nosr"}`，**顺序固定**（输入、本轮超分产物、NOSR）。
@@ -638,9 +648,15 @@ body：
   「试过哪些」。拼法必须字面切片 `输入名[:-4]`，**不能用 `Path.with_suffix`** —— SR 侧
   `variants/verify_sr_run.py::output_path_for` 用的就是 `img_name[:-4]`，输入名是 `.tiff`
   时两者不等。
-- `nosr` 的名字 = `product stem + "_NOSR" + 原后缀`，对齐 `SR_code/util.py::writeTiff` 的
-  改名规则。**待真机确认**：这条是从源码推的，尚无实证，所以候选名与 `exists` 一并回报，
-  拿到真机 `ls -l` 后校准（加名字是一行的事）。
+- `nosrCandidates` = `scene_search.nosr_candidates()` 拼出的**全部候选名**，**顺序即优先级**
+  （2026-09-24 用户口径）：先试 `<输入 stem>_NOSR.tif/.tiff`（SC 场景即 `<目录名>_NOSR.tif`，
+  RC 场景即 `PAN_NOSR.tif`）—— 用户口径里「未超分那份」就是它；最后才试
+  `<产物 stem>_NOSR.tif/.tiff`（`SR_code/util.py::writeTiff` 的改名规则推出来的**上一次产物**，
+  只在同一 suffix 跑过两次以上时才存在）。两者同时存在时先认输入 stem 那条，命中哪个由该项的
+  `name` 说明。**`nosr` 那一项与 `suffix` 无关**（名字由输入影像的 stem 拼），所以拼不出
+  suffix 时它照旧出现，只有 `product` 那一类消失。**真机上实际命中哪个名字尚无实证** ——
+  候选两条都试、命中即如实回报，拿到真机 `ls -l` 后按这份清单校准**顺序**即可，不影响能否命中。
+  两义都标 `NOSR` 标，见 [preview-bake-pipeline §4.11](../knowledge/preview-bake-pipeline.md)。
 - `div` = 服务端**急烤**档位（§4.5），**仅供界面标注**，不参与任何前端决策 —— 前端认的
   是用户滑块那个档位，服务端看不见它（这正是必须有服务端默认档的原因）。
 - **拼完的名字再过一道 `pathguard.ensure_allowed`**：`SUFFIX_RE` 挡得住分隔符，挡不住
@@ -878,17 +894,20 @@ NULL ──claim──> running ──> done
   `SR_PRODUCT_PREVIEW_MAX_AGE_SEC`（缺省 86400）。急烤的 4 与前端 `DEFAULT_PREVIEW_DIV = 4`
   是**两个独立的 4，互不联动**。
 
-**顺带烤未超分那一份（2026-09-21 增，用户口径，不算新的烘焙入口）**：同一轮 tick 在产物之后
-多烤一份 `<场景目录>/PAN_NOSR_preview.jpg`（源 = 场景目录里的 `PAN_NOSR.tif`，档位取同一个
-全局值，命中判定同一个 `cache_hit`）。三处与产物那一份**故意不同**：源是**固定名字**而不是
-拼出来的；**不判沙箱**（这份栅格是盘阵上的既有文件，与这次跑在盘阵还是私有副本上无关）；
+**顺带烤未超分那一份（2026-09-21 增 / 名字口径 2026-09-24 订正，用户口径，不算新的烘焙入口）**：
+同一轮 tick 在产物之后多烤一份 `<场景目录>/<那一份栅格 stem>_preview.jpg`（源 = 候选清单里
+第一个存在的 `…_NOSR.tif`，档位取同一个全局值，命中判定同一个 `cache_hit`）。
+三处与产物那一份**故意不同**：源是一份**候选清单**（`scene_search.nosr_candidates`，只拼名字）；
+**不判沙箱**（这份栅格是盘阵上的既有文件，与这次跑在盘阵还是私有副本上无关）；
 **不动 `preview_state`/`preview_note`**（那一列描述的是产物预览，一个字段说不出两份文件的
-结局），只写盘 + 往 stdout 打一行 `[nosr-preview] task=<id> <状态>`，没那份栅格时也照报。
-名字按用户当面口径**钉死**，不顺手把 `SR_code/util.py::writeTiff` 推出来的
-`<产物 stem>_NOSR.tif` 也试一遍（两者对不上，属待核，见
-[preview-bake-pipeline §4.11](../knowledge/preview-bake-pipeline.md)）。**没有任何响应字段
-为它变化**：`/siblings` 的「NOSR」那一项找的仍是 `PAN_NOSR_preview.jpg`
-（2026-09-22 起与其余落点同一规则）。
+结局），只写盘 + 往 stdout 打一行 `[nosr-preview] task=<id> <状态>`，**`skipped:` 要报出试过哪些
+名字**（一个名字都不在盘上时，只有把清单打出来才看得出是名字不对还是那份本就不存在）。
+候选清单与次序见 §3.8 的 `nosrCandidates`（2026-09-24 前这里是硬编码的 RC 名字
+`PAN_NOSR.tif`，SC 场景因此永远烤不出来）。**没有任何响应字段为它变化**：`/siblings` 的
+「NOSR」那一项找的仍是同一份 `<栅格 stem>_preview.jpg` 落点（2026-09-22 起与其余落点同一规则）。
+
+前端**拖入显示件**时也会对同一份做一次静默预热（2026-09-24 增，`stores/viewer.ts::warmNosrPreview`，
+命中才记账），见 [preview-bake-pipeline §4.11](../knowledge/preview-bake-pipeline.md)。
 
 **预览文件名统一（2026-09-22，用户口径）**：三条烘焙链（惰性打开 / 急烤 / 拖入）落同一个名字
 `<源栅格 stem>_preview.jpg`（`paths.preview_jpg_name`），改名前的点号那份

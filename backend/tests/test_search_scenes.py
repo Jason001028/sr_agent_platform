@@ -214,6 +214,152 @@ class TestImageScenes(unittest.TestCase):
                 scene.parent / "GF07A03_PMS01_20260722125045.preview.jpg"))
 
 
+class TestNosrNaming(unittest.TestCase):
+    """未超分那份（NOSR）的**名字**判据（2026-09-24 口径）。
+
+    盘阵上叫 NOSR 的东西其实有两份，名字只差中间一段 suffix：
+
+      * `<输入 stem>_NOSR.tif` —— **未超分那份**（用户口径；SC 场景即
+        `<目录名>_NOSR.tif`，RC 场景即 `PAN_NOSR.tif`）；
+      * `<输入 stem>_<suffix>_NOSR.tif` —— `SR_code/util.py::writeTiff` 改名留下的
+        **上一次产物**（见 `nosr_path_for`）。
+
+    两者都认成环节 `nosr`，区别在 suffix：前者是空的（没有属于自己的 suffix）。
+    下面只有 `stage_of_jpg` 那几条真落盘 —— 它的判据要求同级栅格存在。
+    """
+
+    SCENE = "GF07A03_PMS01_20260722125045"
+
+    def test_tail_suffix_is_a_product(self):
+        self.assertEqual(svc.jpg_stage_name(self.SCENE + "_sr", self.SCENE),
+                         ("product", "sr"))
+
+    def test_suffix_then_nosr_is_the_previous_product(self):
+        self.assertEqual(svc.jpg_stage_name(self.SCENE + "_sr_NOSR", self.SCENE),
+                         ("nosr", "sr"))
+
+    def test_bare_nosr_is_the_un_sred_copy(self):
+        """整段就是 `_NOSR`（没有属于自己的 suffix）。
+
+        `tail` 走到这里时**分隔下划线已经被剥掉**了（是 `"NOSR"` 而不是
+        `"_NOSR"`），所以它靠 `endswith("_NOSR")` 认不出来。漏掉这条分支时会掉进
+        「suffix 名叫 NOSR 的产物」：环节判成 product，标签文案侥幸还对（suffix
+        大写恰好是 `NOSR`），配色与工具提示却是产物那一套 —— 错得无声。
+        """
+        self.assertEqual(svc.jpg_stage_name(self.SCENE + "_NOSR", self.SCENE),
+                         ("nosr", ""))
+
+    def test_bare_nosr_is_case_insensitive(self):
+        self.assertEqual(svc.jpg_stage_name(self.SCENE + "_nosr", self.SCENE),
+                         ("nosr", ""))
+        self.assertEqual(svc.jpg_stage_name(self.SCENE + "_sr_nosr", self.SCENE),
+                         ("nosr", "sr"))
+
+    def test_other_base_does_not_match(self):
+        """基准名对不上就不是这个场景的图（`<目录名>_NOSR` 对 `PAN` 不成立）。"""
+        self.assertIsNone(svc.jpg_stage_name(self.SCENE + "_NOSR", "PAN"))
+
+    def test_non_stage_tail_is_none(self):
+        """`_NON_STAGE_TAILS` 那几个派生件照旧不认（云量图这类真有同名栅格）。"""
+        self.assertIsNone(svc.jpg_stage_name(self.SCENE + "_cloud", self.SCENE))
+
+    def test_bare_nosr_jpg_is_the_un_sred_copy(self):
+        """带同级栅格的 `<目录名>_NOSR.jpg` → 环节 nosr、栅格是那份 tif 自己。"""
+        with tempfile.TemporaryDirectory() as d:
+            inp = write_scene(d, self.SCENE)
+            raster = write_tif(inp.parent, self.SCENE + "_NOSR.tif")
+            for stem in (self.SCENE + "_NOSR", self.SCENE + "_NOSR_preview"):
+                write_jpg(inp.parent, stem + ".jpg")
+                got = svc.stage_of_jpg(inp.parent, inp, stem)
+                self.assertIsNotNone(got, stem)
+                self.assertEqual(got[:2], ("nosr", ""), stem)
+                self.assertEqual(got[2], raster, stem)
+
+    def test_suffix_nosr_jpg_keeps_its_own_suffix(self):
+        with tempfile.TemporaryDirectory() as d:
+            inp = write_scene(d, self.SCENE)
+            raster = write_tif(inp.parent, self.SCENE + "_sr_NOSR.tif")
+            got = svc.stage_of_jpg(inp.parent, inp, self.SCENE + "_sr_NOSR")
+            self.assertIsNotNone(got)
+            self.assertEqual(got[:2], ("nosr", "sr"))
+            self.assertEqual(got[2], raster)
+
+    def test_nosr_name_without_its_raster_is_not_a_stage(self):
+        """名字切得干净但同级栅格不在 → None。
+
+        盘阵上一个场景目录里躺着十几样东西，只有「它有一份同名栅格」能说明这份
+        jpg 是某个环节影像的显示件。前端据 None 决定「什么都不显示」。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            inp = write_scene(d, self.SCENE)
+            write_jpg(inp.parent, self.SCENE + "_NOSR.jpg")
+            self.assertIsNone(svc.stage_of_jpg(inp.parent, inp, self.SCENE + "_NOSR"))
+
+    def test_reverse_inference_keeps_the_bare_nosr_stem(self):
+        """反推目录名时 `_NOSR` 是**在切段那一轮里**剥的 → 剥得的真名自己进候选。
+
+        曾经的写法是在循环外先把 `_NOSR` 剥掉、再进切段循环，而切段恒切至少一段：
+        `<目录名>_NOSR` 剥完剩下的**正好就是目录名**，那个真名于是一条候选都进不去，
+        报出来的理由是「…_L1 目录不存在」这类被多切一段的假目录。带 `_preview` 尾巴
+        的那份走的是另一条路（剥 preview 那一步本身就顶掉了一次切段），一直是对的 ——
+        所以这条只在裸 NOSR 上发作。
+        """
+        self.assertEqual(svc.de_suffixed_stems(self.SCENE + "_NOSR")[0], self.SCENE)
+        self.assertIn(self.SCENE, svc.de_suffixed_stems(self.SCENE + "_sr_NOSR"))
+        for stem in svc.de_suffixed_stems(self.SCENE + "_NOSR"):
+            self.assertNotIn("_NOSR", stem, "目录名里从不含 _NOSR")
+
+    def test_rc_nosr_name_is_pan_nosr(self):
+        """RC 场景（输入 `PAN.tif`）的未超分那份叫 `PAN_NOSR.tif`。"""
+        with tempfile.TemporaryDirectory() as d:
+            inp = write_scene(d, self.SCENE)
+            pan = write_tif(inp.parent, "PAN.tif")
+            inp.unlink()                      # 只剩 PAN.tif，即 RC 场景的输入
+            raster = write_tif(inp.parent, "PAN_NOSR.tif")
+            got = svc.stage_of_jpg(inp.parent, pan, "PAN_NOSR")
+            self.assertIsNotNone(got)
+            self.assertEqual(got[:2], ("nosr", ""))
+            self.assertEqual(got[2], raster)
+
+
+class TestNosrCandidates(unittest.TestCase):
+    """未超分那份的候选名：输入 stem 优先，`writeTiff` 那套垫底。
+
+    扩展名只用产物那一组（`.tif` / `.tiff`），与 `_PRODUCT_EXT_ORDER` 同源。
+    """
+
+    SCENE = "GF07A03_PMS01_20260722125045"
+
+    def test_input_stem_first_and_pan_still_among_them(self):
+        with tempfile.TemporaryDirectory() as d:
+            inp = write_scene(d, self.SCENE)
+            cands = svc.nosr_candidates(inp.parent, inp)
+            self.assertEqual(cands[0], inp.parent / (self.SCENE + "_NOSR.tif"))
+            self.assertEqual(cands[1], inp.parent / (self.SCENE + "_NOSR.tiff"))
+            # 混合目录里上游 SC 遗留件与 RC 真读的那份同在，两条名字都要试
+            self.assertIn(inp.parent / "PAN_NOSR.tif", cands)
+
+    def test_product_stem_name_is_the_last_resort(self):
+        with tempfile.TemporaryDirectory() as d:
+            inp = write_scene(d, self.SCENE)
+            product = inp.parent / (self.SCENE + "_260318.tif")
+            cands = svc.nosr_candidates(inp.parent, inp, product)
+            self.assertEqual(cands[0], inp.parent / (self.SCENE + "_NOSR.tif"),
+                             "次选不得抢到前面")
+            self.assertEqual(cands[-1],
+                             inp.parent / (self.SCENE + "_260318_NOSR.tif"))
+
+    def test_no_input_falls_back_to_the_dirname(self):
+        d = Path("D:/nowhere") / self.SCENE
+        cands = svc.nosr_candidates(d, None)
+        self.assertEqual(cands[0], d / (self.SCENE + "_NOSR.tif"))
+
+    def test_names_only_never_stats(self):
+        """拼名字，不 stat：目录不存在也照样把整串给出来（「试过哪些」靠它）。"""
+        d = Path("D:/nowhere") / self.SCENE
+        self.assertEqual(len(svc.nosr_candidates(d, d / (self.SCENE + ".tif"))), 4)
+
+
 class TestFakeScenes(unittest.TestCase):
     def test_shape(self):
         rows = svc.fake_scenes(8)

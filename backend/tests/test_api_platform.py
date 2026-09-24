@@ -1162,15 +1162,22 @@ class TestProductPreviewBake(PlatformBase):
         self.assertEqual(self._row_state(app, tid)[0], "done")
         self.assertTrue(self._jpg(product).is_file())
 
-    # ---- 顺带那一份：未超分（`PAN_NOSR.tif`，2026-09-21 用户口径）----------
+    # ---- 顺带那一份：未超分（`<输入 stem>_NOSR.tif`，2026-09-24 用户口径）----
+    #
+    # 名字只由 `scene_search.nosr_candidates` 给出：先试输入 stem 那条（这个夹具的
+    # 场景里是 `<SCENE>_NOSR.tif`），`PAN_NOSR.tif` 是同一串里的另一个候选（混合
+    # 目录里两条都试），最后才试 `writeTiff` 改名那套 `<产物 stem>_NOSR.tif`。
+    # 以前这里硬编码成 `PAN_NOSR.tif`：SC 场景（输入件 = `<目录名>.tif`）于是永远
+    # 走 skipped —— 而那正是用户天天开的那些景。
 
     def _nosr(self, w=64, h=32, name=None):
-        """未超分那一份栅格：场景目录里的 `PAN_NOSR.tif`（用户给的那个名字）。"""
-        return make_strip_tif(self.scene_dir, name or "PAN_NOSR.tif", w, h)[0]
+        """未超分那一份栅格，缺省用**用户口径那条名字**（输入 stem + `_NOSR`）。"""
+        return make_strip_tif(self.scene_dir,
+                              name or f"{self.SCENE}_NOSR.tif", w, h)[0]
 
-    def _nosr_jpg(self):
+    def _nosr_jpg(self, name=None):
         """它的预览落点：拖入链那条规则（`<源 stem>_preview.jpg`，下划线）。"""
-        return self.scene_dir / "PAN_NOSR_preview.jpg"
+        return self.scene_dir / (name or f"{self.SCENE}_NOSR_preview.jpg")
 
     def _nosr_task(self, tid):
         """`_bake_nosr_preview` 只看 params 里的 lq_path，不必真去库里取整行。"""
@@ -1178,7 +1185,7 @@ class TestProductPreviewBake(PlatformBase):
                 "params": {"lq_path": self.LQ, "suffix": self.SUFFIX}}
 
     def test_nosr_preview_is_baked_by_the_same_tick(self):
-        """超分跑完那一轮里顺带把它烤了：源是 `PAN_NOSR.tif`，档位取全局。"""
+        """超分跑完那一轮里顺带把它烤了：源是 `<输入 stem>_NOSR.tif`，档位取全局。"""
         app, _ = self.app_client()
         self._row(app)
         product = self._product()
@@ -1188,13 +1195,42 @@ class TestProductPreviewBake(PlatformBase):
 
         self.assertTrue(self._jpg(product).is_file())
         nosr_jpg = self._nosr_jpg()
-        self.assertTrue(nosr_jpg.is_file(), "场景目录里出现了 PAN_NOSR_preview.jpg")
+        self.assertTrue(nosr_jpg.is_file(),
+                        f"场景目录里出现了 {nosr_jpg.name}")
         self.assertEqual(self._dims(nosr_jpg), (16, 8), "÷4：64×32 → 16×8")
         self.assertNotEqual(nosr_jpg, self._jpg(product), "两份各一落点，互不覆盖")
 
+    def test_pan_nosr_is_still_a_candidate(self):
+        """RC（或混合）目录里那份叫 `PAN_NOSR.tif` —— 候选串里照旧有它。"""
+        app, _ = self.app_client()
+        self._row(app)
+        self._product()
+        self._nosr(name="PAN_NOSR.tif")
+
+        _eager_bake_tick(app.state)
+
+        self.assertTrue(self._nosr_jpg("PAN_NOSR_preview.jpg").is_file())
+
+    def test_input_stem_name_wins_when_both_are_on_disk(self):
+        """两条名字同时在盘上时先认输入 stem 那条：**只烤一份**、落点只有一个。
+
+        另一条（`writeTiff` 改名留下的上一次产物）不是同一份东西，抢在前面就会
+        把「未超分那份」显示成上一轮的产物图。
+        """
+        app, _ = self.app_client()
+        self._row(app)
+        self._product()
+        self._nosr()
+        self._nosr(name="PAN_NOSR.tif")
+
+        _eager_bake_tick(app.state)
+
+        self.assertTrue(self._nosr_jpg().is_file())
+        self.assertFalse(self._nosr_jpg("PAN_NOSR_preview.jpg").exists())
+
     def test_no_nosr_raster_no_nosr_preview(self):
-        """没有那份栅格就什么都不写，但「没这份」要报得出来 ——
-        这个名字对不对只有真机能证，静默跳过等于没人看得见。"""
+        """没有那份栅格就什么都不写，但「没这份」要报得出来 —— 试过哪些名字一起报，
+        真机 `ls` 一次就能核对口径，静默跳过等于没人看得见。"""
         app, _ = self.app_client()
         tid = self._row(app)
         self._product()
@@ -1204,6 +1240,8 @@ class TestProductPreviewBake(PlatformBase):
         self.assertFalse(self._nosr_jpg().exists())
         status = _bake_nosr_preview(self._nosr_task(tid), 4)
         self.assertTrue(status.startswith("skipped:"), status)
+        # 报的是**整串试过的名字**：输入 stem 那条与 PAN 那条都要在场
+        self.assertIn(f"{self.SCENE}_NOSR.tif", status)
         self.assertIn("PAN_NOSR.tif", status)
 
     def test_nosr_preview_is_baked_even_when_the_product_bake_skips(self):

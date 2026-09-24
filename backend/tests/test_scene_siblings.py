@@ -19,6 +19,7 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest import mock
 
+from backend.services import run_sr as run_sr_svc
 from backend.services.run_sr import task_fingerprint
 from backend.tests.test_preview_jpg import make_strip_tif
 from backend.tests.test_scene_resolve import SCENE_NAME, ResolveBase
@@ -204,6 +205,80 @@ class TestSiblingsOk(SiblingsBase):
         c = self.client()
         r = self.siblings(c, "~L3RtcC9ub3QtaW4td2hpdGVsaXN0")   # ~/tmp/not-in-whitelist
         self.assertIn(r.status_code, (404, 403))
+
+
+class TestSiblingsNosr(SiblingsBase):
+    """未超分那份的**候选与优先**（2026-09-24 用户口径）。
+
+    盘上有两套 NOSR 名字，优先级不同：
+
+      * `<输入 stem>_NOSR.tif` —— 用户口径的「未超分那份」（SC 场景即
+        `<目录名>_NOSR.tif`），**先试**；
+      * `<产物 stem>_NOSR.tif` —— `writeTiff` 改名留下的上一次产物，**垫底**。
+
+    两者同时存在时命中哪一个由回报的 `name` 说明，不猜。
+    """
+
+    def test_input_stem_name_wins(self):
+        d = self.make_scene()
+        mine = make_strip_tif(d, f"{SCENE_NAME}_NOSR.tif", 80, 40)[0]
+        previous = self._product(d, f"{SUFFIX}_NOSR")
+        c = self.client()
+        row = self.resolve(c, d)
+
+        body = self.q(c, row["id"], suffix=SUFFIX)
+
+        nosr = self.by_kind(body, "nosr")
+        self.assertEqual(nosr["name"], mine.name, "先认输入 stem 那条")
+        self.assertTrue(nosr["exists"])
+        self.assertEqual(body["nosrCandidates"][0], mine.name)
+        self.assertEqual(body["nosrCandidates"][-1], previous.name)
+
+    def test_product_stem_name_is_still_the_fallback(self):
+        """只有 `writeTiff` 那套名字时照样命中（真机上那份也真可能出现）。"""
+        d = self.make_scene()
+        previous = self._product(d, f"{SUFFIX}_NOSR")
+        c = self.client()
+        row = self.resolve(c, d)
+
+        body = self.q(c, row["id"], suffix=SUFFIX)
+
+        nosr = self.by_kind(body, "nosr")
+        self.assertEqual(nosr["name"], previous.name)
+        self.assertTrue(nosr["exists"])
+
+    def test_missing_nosr_reports_the_names_tried(self):
+        """不在也是回答：报第一个候选（`exists: false`）+ 试过哪些名字，不编路径。"""
+        d = self.make_scene()
+        c = self.client()
+        row = self.resolve(c, d)
+
+        body = self.q(c, row["id"], suffix=SUFFIX)
+
+        nosr = self.by_kind(body, "nosr")
+        self.assertEqual(nosr["name"], f"{SCENE_NAME}_NOSR.tif")
+        self.assertFalse(nosr["exists"])
+        self.assertEqual(body["nosrCandidates"][0], f"{SCENE_NAME}_NOSR.tif")
+
+    def test_nosr_item_does_not_need_a_suffix(self):
+        """NOSR 的名字由**输入 stem** 拼，与 suffix 无关：没有可用的 suffix 时它照旧在。
+
+        产物那一类才是「拼不出名字就不编」——此前 nosr 项被写在同一个 `if suffix`
+        里，跟着一起消失了。
+        """
+        d = self.make_scene()
+        mine = make_strip_tif(d, f"{SCENE_NAME}_NOSR.tif", 80, 40)[0]
+        c = self.client()
+        row = self.resolve(c, d)
+
+        with mock.patch.object(run_sr_svc, "default_suffix", return_value=""):
+            body = self.q(c, row["id"])
+
+        self.assertEqual([i["kind"] for i in body["items"]], ["input", "nosr"])
+        self.assertEqual(body["productCandidates"], [])
+        nosr = self.by_kind(body, "nosr")
+        self.assertEqual(nosr["name"], mine.name)
+        self.assertTrue(nosr["exists"])
 
 
 class TestSiblingsSuffixValidation(SiblingsBase):
