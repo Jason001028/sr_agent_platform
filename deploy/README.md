@@ -238,7 +238,22 @@ curl -s 'http://127.0.0.1/api/scenes?limit=5' | head -c 400    # 场景 JSON（�
 
 # 盘阵静态直出（取列表里第一行 rel 拼 /disk-array/<rel>）
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1/disk-array/<某个rel>  # 200
+
+# 反代自查（2026-09-24 起每次动过 nginx.conf 都跑一遍）：拿一个不存在的场景 id 打 /preview
+curl -s -o /dev/null -w '反代=%{http_code} ct=%{content_type}\n' \
+     'http://127.0.0.1/api/scenes/__none__/preview?div=4'
+     # ✓= 反代=404 ct=application/json  ← 请求走到了后端（后端如实说没有这个场景）
+     # ✗= 反代=404 ct=text/html        ← nginx 自己回的，这个 location 少了 proxy_pass
 ```
+
+> **这一条为什么必做**：nginx 只选**一个** location，嵌套的 location 不继承外层同名的
+> `proxy_pass`（它是 final-location-handling 指令），但**继承** `proxy_set_header` /
+> `proxy_buffering` / `proxy_read_timeout` 这些普通指令。所以 `/api/` 里那个只为了让
+> `/preview` 带 `Cache-Control` 而套的子 location，光写 `add_header` 是不够的——子块里少了
+> `proxy_pass`，请求就落回 `root` 下的静态查找、由 nginx 自己回 404 HTML。
+> 2026-09-23 线上正是这么坏的：页面上「老景打开失败」，前端拿到非 JSON 的 404，误判成
+> 「盘阵上文件已被自动清除」（前端自 2026-09-24 起已收紧判据，只认 `/disk-array/…` 静态链
+> 上的 404，并把这种「没走到后端」的情况单独报出来）。跑上面的自查即可区分。
 
 浏览器打开 `http://<内网机IP>/scenes` → 过滤/点「打开」→ 场景图出在查看器，文件列表项带
 「盘阵」标记、拉伸下拉禁用（提示"盘阵 JPG 已按直方图均衡烘焙"）。首次打开会懒生成预览
@@ -438,6 +453,8 @@ systemctl cat sr-api | grep -n Environment=                     # 文本（可�
 ```bash
 nginx -t                          # 语法不过会拒绝 reload，先过这关
 systemctl reload nginx
+curl -s -o /dev/null -w '反代=%{http_code} ct=%{content_type}\n' \
+     'http://127.0.0.1/api/scenes/__none__/preview?div=4'   # 判定：ct=application/json（见 §四）
 ```
 
 ### 5.4 回滚

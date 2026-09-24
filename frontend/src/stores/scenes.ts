@@ -20,7 +20,7 @@ import type { ClearResponse, SceneRow, SceneQueryParams } from '../lib/scene.js'
 import { clearSummaryText, loadSrConfig, rowsAfterClear,
          scenesListUrl } from '../lib/scene.js';
 import { apiClearScenePreviews, apiResolveScene, fetchSceneJpg,
-         isSceneGone } from '../lib/api.js';
+         isSceneGone, isProxyMiss } from '../lib/api.js';
 import type { SceneResolveResult } from '../lib/api.js';
 
 export const useScenesStore = defineStore('scenes', () => {
@@ -216,10 +216,10 @@ export const useScenesStore = defineStore('scenes', () => {
       viewer 的错误条挂在 /viewer、6 秒后自己消失；写错地方就等于按钮点了没反应。
       JPG 读不到 / 字节不是图（openSceneJpg 解码失败会抛，见 viewer.ts）都归这里。
 
-      其中「盘阵上已经没有这个文件」（404）多一步：把这一行标成 `purged`，
-      页面上那格的「打开」换成不可点的「已自动清除」（见 catch 里的注释）。
-      这一格还有**不用点就灰**的另一半：老景又没预览的行渲染时就直接按已清除处理
-      （lib/scene.ts 的 presumedPurged，那一类轮不到这里）。
+      其中「盘阵上已经没有这个文件」（**静态链**上的 404）多一步：把这一行标成
+      `purged`，页面上那格的「打开」换成不可点的「已自动清除」（见 catch 里的注释）。
+      **别的 404 不在这一支** —— 打后端的请求回 404 说明不了文件在不在，如实报出来
+      （见 api.ts 的 isProxyMiss）。
 
       反过来，**打开成功**也是一条实证：那一景还在盘上（而且这趟之后盘上有了它当前
       档位的预览）。所以成功路径顺带把列表里同一景的那一行翻回来，见 try 末尾。 */
@@ -270,16 +270,26 @@ export const useScenesStore = defineStore('scenes', () => {
       }
     } catch (e) {
       if (isSceneGone(e)) {
-        // 盘阵上已经没有这个文件了（打开路径撞的 404，判据见 api.ts 的 isSceneGone）。
-        // 列表是「上次检索」那一刻的快照，盘阵上的数据却会被自动清理 —— 于是行还在、
-        // 文件没了。撞一次就记在这行上，那一格的「打开」就此作废（灰色「已自动清除」，
-        // 见 SceneRow.purged）：再点一次还是同一个 404，留着一颗能点的按钮只会让人
-        // 反复撞墙。**只陈述「取不到」，不写死原因** —— 自动清理是最像的那个（用户的
-        // 口径：产出后几天），但平台没在盘上看到过清理这件事。
+        // 盘阵**静态链**上已经没有这个文件了（打开撞的 404，判据见 api.ts 的
+        // isSceneGone）。列表是「上次检索」那一刻的快照，盘阵上的数据却会被自动清理
+        // —— 于是行还在、文件没了。撞一次就记在这行上，那一格的「打开」就此作废
+        // （灰色「已自动清除」，见 SceneRow.purged）：再点一次还是同一个 404，留着一颗
+        // 能点的按钮只会让人反复撞墙。**只陈述「取不到」，不写死原因** —— 自动清理是
+        // 最像的那个（用户的口径：产出后几天），但平台没在盘上看到过清理这件事。
         row.purged = true;
         error.value = '打开「' + row.name + '」失败：盘阵上已没有这个文件（HTTP 404）。'
           + '这一行的「打开」已改成「已自动清除」；'
           + '列表可能是清理之前的旧结果，按「检索」刷新即知它还在不在。';
+      } else if (isProxyMiss(e)) {
+        // 打后端的请求**没走到后端**（响应不是 JSON）。**不置 purged**：这个状态码
+        // 来自别人，说明不了盘上有没有这一景 —— 2026-09-23 那次「老景打不开」正是
+        // 这一支（nginx 在 /api/ 下漏了同一层的 proxy_pass），当时只看 404 就把能打开
+        // 的行标成了「已自动清除」。这里如实说清是配置问题并给出自查方向。
+        error.value = '打开「' + row.name + '」失败：'
+          + (e instanceof Error ? e.message : String(e))
+          + '，且响应不是后端给的 JSON —— 这次请求没走到平台后端（多半是 nginx 反代'
+          + '配置：/api/ 下的 location 少了同一层的 proxy_pass，见 deploy/nginx.conf）。'
+          + '这个状态码说明不了盘阵上还有没有这一景。';
       } else {
         error.value = '打开「' + row.name + '」失败：'
           + (e instanceof Error ? e.message : String(e));

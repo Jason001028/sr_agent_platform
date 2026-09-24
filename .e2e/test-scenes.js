@@ -4,11 +4,13 @@
 // 拓扑：真 uvicorn（SR_SCENES_ROOT = 临时盘阵根）+ 本地静态服务**同时**顶替 nginx 的
 //      两个 location：`/disk-array/` → 场景根（alias）、其余 → dist。
 //      页面经 evaluateOnNewDocument 注入 window.__SR_CFG__ = { apiBase, staticBase }。
-// 覆盖：列表/检索 → 盘阵 .jpg 源行（最小原型 §4.7：不烘焙直接开）→ 老景没预览 = 灰块
-//      「已自动清除」（不点不烤；退路是路径栏粘目录）+ 当天新景的懒生成 + 静态读 JPG +
-//      同构 rec → 派生件（_preview.jpg 缓存 / <名字>_mask.tif）不入
-//      列表 → 「去查看器」保状态跳转 → 掩码按**元数据** W/H 换算 → 「提交 SR」带出目录 →
-//      /queue 预填表单（§4.3）→ 打开失败必须落在 .sp-err（错误不写 viewer 的错误条）。
+// 覆盖：列表/检索 → 盘阵 .jpg 源行（最小原型 §4.7：不烘焙直接开）→ 没预览的景仍是可点的
+//      「打开」（不点不烤；2026-09-24 起**取消**了「老景一律按已清除处理」的年龄推定）+
+//      当天新景的懒生成 + 静态读 JPG + 同构 rec → 派生件（_preview.jpg 缓存 /
+//      <名字>_mask.tif）不入列表 → 「去查看器」保状态跳转 → 掩码按**元数据** W/H 换算 →
+//      「提交 SR」带出目录 → /queue 预填表单（§4.3）→ 打开失败必须落在 .sp-err
+//      （错误不写 viewer 的错误条）→ 清除预览缓存 → 盘阵上文件真没了：打开撞静态 404
+//      才出灰块「已自动清除」（K 段，09-24 起灰块**只有这一条来源**）。
 // 说明：本文件 2026-09-15 重建。原文件（45 断言）随 .e2e/ 被 gitignore 丢失，断言按
 //      当前实现（commit 8c197fc）重写，见 docs/status/current-question.md。
 //      注意 window.__viewer 与 .toolbar 只挂 /viewer（ViewerPage.vue），所以「打开场景」
@@ -192,9 +194,10 @@ function makeTif(file, w, h) {
 }
 
 /* ---------------- 「当天产出的新景」夹具 ----------------
- * 场景库按**文件名里的日期**判断新旧（老景 + 没预览 → 灰块「已自动清除」，见
- * lib/scene.ts 的 presumedPurged）。夹具的日期必须取**跑测当天**：写死一个日期，
- * 过几天它自己就变成「老景」，C/F 两段的前提当场失效。 */
+ * 日期取**跑测当天**只是让它读起来像「新景」（场景库按日期倒序排，这一景会排在头
+ * 一行）。它**不再是任何判据**：2026-09-24 起取消了「老景 + 没预览 → 灰块」的年龄
+ * 推定，日期不参与「能不能点」的判断（那条推定当年就是为了绕开「没预览的老景点下去
+ * 要等烘焙」，真因在 nginx 反代，见 deploy/nginx.conf 的 /api/）。 */
 const FRESH_ROW = (() => {
   const d = new Date();
   const p = (n) => String(n).padStart(2, '0');
@@ -365,9 +368,9 @@ async function clickByText(page, text) {
 /** 用「盘阵场景」路径栏打开一个场景目录，等这一趟**收尾**（按钮从「打开中…」回到
  *  「打开」）。
  *
- *  这是灰块那条路的正经退路：老景一律按「已自动清除」呈现之后，「粘路径打开」就是
- *  打开老景的唯一入口 —— 所以它得有人钉着。`.spb-in` 是 v-model，必须补一次 input
- *  事件（同 setFilter），只写 el.value 组件里还是空的。 */
+ *  它是**列表点不动时的退路**：灰块「已自动清除」的行（K 段那种真撞过 404 的）只能
+ *  从这儿开，库外的场景目录也只走这条 —— 所以它得有人钉着。`.spb-in` 是 v-model，
+ *  必须补一次 input 事件（同 setFilter），只写 el.value 组件里还是空的。 */
 async function openViaPathBar(page, dir, done, timeoutMs = 30000) {
   await page.evaluate((p) => {
     const el = document.querySelector('.spb .spb-in');
@@ -588,9 +591,11 @@ async function main() {
       assert(rs[0].dims === '400×200', `JPG 源行尺寸走 Pillow 头：400×200 (${rs[0].dims})`);
       assert(rs.every((r) => r.size !== '0 B' && /\d/.test(r.size)),
         `大小列非 0（${rs.map((r) => r.size).join(', ')}）`);
-      assert(rs[1].tag === '已清除' && rs[1].btn === '已自动清除',
-        `老景 + 没预览 = 「已清除」+ 灰块「已自动清除」（${rs[1].tag}/${rs[1].btn}）`);
-      assert(rs[2].tag === '已清除', '带 .hdr 的 TIFF 同样按老景处理（日期取文件名/目录里那个）');
+      assert(rs[1].tag === '未生成' && rs[1].btn === '打开',
+        `没预览的景 = 「未生成」+ 可点的「打开」（日期不再参与判定）`
+        + `（${rs[1].tag}/${rs[1].btn}）`);
+      assert(rs[2].tag === '未生成' && rs[2].btn === '打开',
+        `带 .hdr 的 TIFF 同样只是「未生成」，不是灰块（${rs[2].tag}/${rs[2].btn}）`);
       assert(rs[0].tag === 'JPG 源' && rs[0].btn === '打开',
         `盘阵 .jpg 源行 = 「JPG 源」+「打开」（§4.7 不烘焙）(${rs[0].tag}/${rs[0].btn})`);
 
@@ -610,26 +615,31 @@ async function main() {
       assert(rs[0].tag === 'JPG 源' && rs[0].btn === '打开',
         `打开后该行标签/按钮不变（本来就是「显示就绪图」）(${rs[0].tag}/${rs[0].btn})`);
 
-      /* ---------- C. 老景没预览 = 灰块；当天的新景照旧可点（点下去才懒生成） ---------- */
-      console.log('\n[C] 老景没预览 → 灰块「已自动清除」（不点、不烤）');
+      /* ---------- C. 没预览的老景：仍是可点的「打开」，点下去才懒生成 ---------- */
+      // 2026-09-24 起这一格不再按年龄推定成灰块（当时的真因在 nginx 反代，见
+      // deploy/nginx.conf 的 /api/）。这里钉两条：列表本身**不烘焙**（不点不烤），
+      // 点一下才发 /preview、才落盘 —— 也就是用户报的那条链现在是通的。
+      console.log('\n[C] 没预览的老景 → 「未生成」+ 可点的「打开」（点下去才烤）');
       const previewJpg = path.join(scenesRoot, HDR_ROW, HDR_ROW + '_preview.jpg');
       assert(!fs.existsSync(previewJpg), '点之前盘上没有这张图的预览缓存');
       const beforeC = countUrl(previewRe);
-      let refusedC = false;
-      try { await clickRowButton(page, HDR_ROW); } catch (e) { refusedC = true; }
-      assert(refusedC, '灰块点了也白点：按钮已禁用（点击助手拒绝，不是「点了没反应」）');
-      await sleep(400);
-      assert(countUrl(previewRe) === beforeC,
-        `一次 /preview 都没发（不点就不烤）(${countUrl(previewRe) - beforeC})`);
-      assert(!fs.existsSync(previewJpg), '盘上也没多出预览缓存');
+      assert(beforeC === 0, `列表本身不烘焙：此前一次 /preview 都没发过（${beforeC}）`);
+      await clickRowButton(page, HDR_ROW);
+      await waitRowTag(page, HDR_ROW, '已生成');
+      assert(countUrl(previewRe) === beforeC + 1,
+        `点一下才发一次 /preview 懒生成（${countUrl(previewRe) - beforeC}）`);
+      assert(fs.existsSync(previewJpg), `盘上落了 ${path.basename(previewJpg)}`);
+      assert(countUrl(new RegExp(`^${base}${DISK_PREFIX}${HDR_ROW}/`
+        + `${HDR_ROW}_preview\\.jpg\\?div=2$`)) >= 1,
+        '静态读图走 /disk-array/<场景>/…_preview.jpg?div=2（nginx alias 位）');
+      await waitRowBtn(page, HDR_ROW, '打开');
       rs = await rows(page);
-      assert(rs[2].tag === '已清除' && rs[2].btn === '已自动清除',
-        `那一格当场就是灰块，不用等点一次才知道（${rs[2].tag}/${rs[2].btn}）`);
+      assert(rs[2].tag === '已生成' && rs[2].btn === '打开',
+        `那一行就地翻牌为「已生成」（${rs[2].tag}/${rs[2].btn}）`);
 
-      // 新景（当天产出、同样没有预览）**不该**跟着变灰：平台只为**产物**急烤，从不
-      // 预烤输入影像（`_bake_product_preview` 的注释：用户到底要不要看，在打开之前
-      // 无法知道）——「没有预览」的行恰恰是还没被打开过的新景，一律变灰会把
-      // 「选景 → 打开 → 画掩码 → 提交 SR」这条主链路挡掉。这里把这条链走完。
+      // 新景（当天产出、同样没有预览）与老景走的是同一条路：平台只为**产物**急烤，
+      // 从不预烤输入影像（`_bake_product_preview` 的注释：用户到底要不要看，在打开
+      // 之前无法知道）——「没有预览」只说明还没被打开过。这里把这条链走完。
       console.log('\n[C2] 当天产出的新景：懒生成 + 静态直读（主链路仍在）');
       addFreshScene(scenesRoot);
       await relist('检索');
@@ -656,8 +666,10 @@ async function main() {
       const freshNow = rowsNow.find((r) => r.name === FRESH_ROW);
       assert(freshNow.tag === '已生成' && freshNow.btn === '打开',
         `列表行就地翻牌为「已生成」+「打开」（${freshNow.tag}/${freshNow.btn}）`);
-      assert(rowsNow.filter((r) => r.tag === '已清除').length === 2,
-        '没打开的两张老景不受影响（仍是灰块）');
+      assert(rowsNow.filter((r) => r.tag === '已清除').length === 0,
+        '没有任何一行被推定成灰块（灰块只由打开撞静态 404 产生，见 K 段）');
+      assert(rowsNow.find((r) => r.name === SUB_ROW).tag === '未生成',
+        `没打开过的那一景仍是「未生成」（${rowsNow.map((r) => r.tag).join(',')}）`);
       dropFreshScene(scenesRoot);
       await relist('检索');
       await waitRows(page, 3);
@@ -669,8 +681,9 @@ async function main() {
       rs = await rows(page);
       assert(rs.length === 3, `重检索仍是 3 行（is_scene_file 排除派生的 _preview.jpg）(${rs.length})`);
       assert(rs.every((r) => !r.name.endsWith('_preview')), '没有一行是 _preview.jpg 缓存');
-      assert(rs.every((r) => r.tag === '已清除' || r.tag === 'JPG 源'),
-        `重检索没有把灰块翻回来（没人给老景烤过）(${rs.map((r) => r.tag).join(',')})`);
+      assert(rs.every((r) => r.tag === '已生成' || r.tag === '未生成' || r.tag === 'JPG 源'),
+        `重检索按盘上事实读：烤过的「已生成」、没烤的「未生成」，没有一行是灰块`
+        + `(${rs.map((r) => r.tag).join(',')})`);
 
       /* ---------- E. 检索过滤 ---------- */
       console.log('\n[E] 检索过滤（卫星/传感器/日期/关键词/重置）');
@@ -713,9 +726,9 @@ async function main() {
         '重置后空态行消失（又列出全部 3 行）');
 
       /* ---------- F. 页内跳转 /viewer：rec 同构 + 掩码按元数据换算 ---------- */
-      // 开的是**老景**（HDR 行在列表里是灰块），走**路径栏**粘场景目录 —— 灰块那条路
-      // 的退路就在这里被钉住：列表不给点之后，粘路径是打开老景的唯一入口，而且它同样
-      // 会懒生成预览（J 段要清的就是这一份）。掩码断言仍针对 3200×2000 那一景。
+      // 走的还是**路径栏**（粘场景目录）：它与列表点击是两条独立入口，库外场景与灰块行
+      // 都只有它可用，所以每次都得有人钉着。此刻 HDR 那一景在 C 段已经烤过，这一趟是
+      // 命中缓存、不再发 /preview（J 段清掉的正是同一份）。掩码断言仍针对 3200×2000。
       console.log('\n[F] 路径栏粘场景目录打开老景 → 「去查看器」页内跳转 → rec 与掩码换算');
       await openViaPathBar(page, winPath(path.join(scenesRoot, HDR_ROW)),
         () => fs.existsSync(previewJpg));
@@ -1054,15 +1067,14 @@ async function main() {
       assert(det.includes('MANUAL_preview.jpg') && det.includes('规则戳'),
         `明细逐条给出没删的那份与原因（${det.slice(0, 56)}…）`);
 
-      // J3. 清了就真的没了 → 重新检索回来是老景 + 没预览 = 灰块（也不会自动重烤）。
-      //     重烤只能走**路径栏**：列表那一格已经不给点了（这正是「已自动清除」现行口径：
-      //     老景 + 盘上一份预览都没有 = 推定被清掉了），而这一景的文件其实还在盘上。
-      //     灰块是**推定**不是事实，退路必须钉住 —— 这里就是钉它的地方。
+      // J3. 清了就真的没了 → 重新检索回来是「未生成」+ 可点的「打开」（不会自动重烤）。
+      //     重烤这一趟走**路径栏**：它与列表点击是两条独立入口，库外场景与灰块行都只有
+      //     它可用，所以固定拿它当这条链的入口。
       await relist('检索');
       await waitRows(page, 3);
       const hdrBack = (await rows(page)).find((r) => r.name === HDR_ROW);
-      assert(hdrBack && hdrBack.tag === '已清除' && hdrBack.btn === '已自动清除',
-        `清掉缓存后重检索：这一行又成了灰块（${hdrBack && hdrBack.tag}/`
+      assert(hdrBack && hdrBack.tag === '未生成' && hdrBack.btn === '打开',
+        `清掉缓存后重检索：这一行回到「未生成」+ 可点（${hdrBack && hdrBack.tag}/`
         + `${hdrBack && hdrBack.btn}）`);
       assert(!fs.existsSync(previewJpg), '检索本身不会顺手把缓存烤回来');
       const beforeReopen = countUrl(previewRe);
@@ -1072,13 +1084,12 @@ async function main() {
         `路径栏打开重新烘焙（/preview 又发一次：本地 blob 缓存也随清除失效了）`
         + `(${countUrl(previewRe) - beforeReopen})`);
       assert(fs.existsSync(previewJpg), '盘上重新落了这份缓存');
-      // 打开成功也是「这一景还在盘上」的实证：列表里同一景的那一行要跟着翻回来，
-      // 不能继续挂着按推定画的灰块（store.open 末尾按场景目录对回列表那一行）。
+      // 打开成功也是「这一景还在盘上、而且现在有预览了」的实证：列表里同一景的那一行
+      // 要跟着翻回来（store.open 末尾按场景目录对回列表那一行）。
       await waitRowTag(page, HDR_ROW, '已生成');
       const hdrFlipped = (await rows(page)).find((r) => r.name === HDR_ROW);
       assert(hdrFlipped.btn === '打开',
-        `那一行当场翻回来（${hdrFlipped.tag}/${hdrFlipped.btn}）——`
-        + '灰块是推定，被这一趟证伪了');
+        `那一行当场翻牌（${hdrFlipped.tag}/${hdrFlipped.btn}）`);
       // 打开**真的收尾**这件事由 openViaPathBar 的第二个判据保证（busy 里的 openingId
       // 已清，即 open() 的 finally 跑完）：工具行整排的禁用
       // （SceneCacheBar 的 busy = clearing ‖ loading ‖ openingId）随之解除，下面
@@ -1156,21 +1167,22 @@ async function main() {
       await waitRows(page, 3);
       rs = await rows(page);
       const hdrAgain = rs.find((r) => r.name === HDR_ROW);
-      assert(hdrAgain && hdrAgain.tag === '已清除' && hdrAgain.btn === '已自动清除',
-        `清完全部后没有自动重烤：这一景回到「老景 + 没预览」= 灰块`
+      assert(hdrAgain && hdrAgain.tag === '未生成' && hdrAgain.btn === '打开',
+        `清完全部后没有自动重烤：这一景回到「未生成」+ 可点`
         + `（${hdrAgain && hdrAgain.tag}/${hdrAgain && hdrAgain.btn}）`);
       assert(!fs.existsSync(previewJpg) && !fs.existsSync(jpgPreview),
         '检索本身不会顺手把缓存烤回来');
 
       /* ---------- K. 盘阵上文件已经没了：打开撞 404 → 那一格变「已自动清除」 ---------- */
       // 现实里的形态就是「列表比盘阵旧」：列表是「上次检索」那一刻的快照，盘阵上的生产
-      // 数据却会被自动清除。于是行还在、文件已经没了 —— 点「打开」只能撞 404，而且
+      // 数据却会被自动清理。于是行还在、文件已经没了 —— 点「打开」只能撞 404，而且
       // 点几次都是同一个 404（用户报的就是这个：功能「鸡肋」）。这里按同一顺序造：
       // 先在列好表之后删掉那一景的 .jpg 源（JPG 源行不烘焙、直接打静态 URL，正是那条
       // 路），再点「打开」。
       //
-      // 这一段与 C/灰块那条路互补：灰块是**没点就推定**（老景 + 没预览），这里是
-      // **点下去撞了真的 404** 之后的实证 —— 两者落到同一格同一个文案上。
+      // **这是灰块唯一的来源**（2026-09-24 起）：判据是「打开时撞了**静态链**上真
+      // 的 404」（`/disk-array/…`，nginx 直出），而不是年龄之类的推定 —— 打后端的
+      // `/api/…` 回 404 不算（它说明不了文件在不在，见 lib/api.ts 的 isProxyMiss）。
       console.log('\n[K] 盘阵上文件已被清掉 → 打开撞 404 → 那一格改「已自动清除」');
       const jpgSrc = path.join(scenesRoot, JPG_ROW, JPG_ROW + '.jpg');
       const jpgBackup = fs.readFileSync(jpgSrc);

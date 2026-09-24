@@ -14,7 +14,7 @@ import {
   isBakedPreviewUrl, previewNeedsBake, previewDivLabel, loadPreviewDiv,
   savePreviewDiv, SCENE_PREVIEW_DIVS, DEFAULT_PREVIEW_DIV,
   rasterPreviewWins, previewCacheKey, sceneAnchors, ANCHOR_MAX,
-  presumedPurged, PURGED_AGE_DAYS,
+  isDiskArrayUrl,
   sceneClearPreviewUrl, rowsAfterClear, clearSummaryText,
 } from '../scene.js';
 import type { SceneRow, RasterPreview, ClearResult, ClearSummary } from '../scene.js';
@@ -520,82 +520,27 @@ describe('清除预览缓存 —— URL / 去留 / 汇总文案', () => {
   });
 });
 
-describe('presumedPurged —— 「已经被自动清除」的推定（列表那一格灰块）', () => {
-  // 固定「今天」，否则阈值那几条断言会随跑测的日期漂。
-  const NOW = new Date(2026, 8, 22);        // 2026-09-22（本机日历）
-  const row = (over: Partial<SceneRow> = {}): SceneRow => ({
-    id: 'x', name: 'n', satellite: null, sensor: null, date: null,
-    size_bytes: 0, fake: false, W: 1, H: 1, rel: null,
-    jpgUrl: null, hasPreview: false, lq_path: null, ...over,
+describe('isDiskArrayUrl —— 404 是「文件不在」还是「没走到后端」的分水岭', () => {
+  it('同源相对 URL（staticBase 为空）：静态链认出来', () => {
+    expect(isDiskArrayUrl('/disk-array/a/b_preview.jpg')).toBe(true);
+    expect(isDiskArrayUrl('/disk-array/a/b_preview.jpg?div=4')).toBe(true);
   });
 
-  it('老景 + 盘上一份预览都没有 → 按已清除处理', () => {
-    expect(presumedPurged(row({ date: '2026-09-18', hasPreview: false }), NOW)).toBe(true);
+  it('绝对源（异源部署注入 staticBase）与协议相对形式同样认出来', () => {
+    expect(isDiskArrayUrl('http://10.0.0.2:9000/disk-array/a/b.jpg')).toBe(true);
+    expect(isDiskArrayUrl('//10.0.0.2/disk-array/a/b.jpg')).toBe(true);
   });
 
-  it('阈值是「早于 PURGED_AGE_DAYS 天」：第 3 天还能碰，第 4 天就灰', () => {
-    expect(PURGED_AGE_DAYS).toBe(3);
-    expect(presumedPurged(row({ date: '2026-09-19' }), NOW)).toBe(false);   // 3 天
-    expect(presumedPurged(row({ date: '2026-09-18' }), NOW)).toBe(true);    // 4 天
+  it('/api/ 上的 URL 一律不是 —— 那种 404 是别人给的答复，说明不了盘上的文件', () => {
+    expect(isDiskArrayUrl('/api/scenes/zzz/preview?div=4')).toBe(false);
+    expect(isDiskArrayUrl('http://10.0.0.2:8000/api/scenes/zzz/preview')).toBe(false);
+    // 路径里带这个串但不是那棵树：前缀匹配不能写松
+    expect(isDiskArrayUrl('/api/disk-array/x.jpg')).toBe(false);
   });
 
-  it('**档位不同不算**：盘上有预览（哪怕是别的档位）就还能点', () => {
-    // 这一条是整条规则里最容易写错的一条：若改成看 previewNeedsBake，用户一改档位
-    // 整张表都会变灰，而盘上那份预览就是刚刚烤的。
-    expect(presumedPurged(row({ date: '2026-01-01', hasPreview: true,
-      previewDiv: 4, jpgUrl: '/d/a_preview.jpg' }), NOW)).toBe(false);
-    expect(presumedPurged(row({ date: '2026-01-01', hasPreview: true,
-      previewDiv: null, jpgUrl: '/d/a_preview.jpg' }), NOW)).toBe(false);
-  });
-
-  it('新景不算：平台只为产物急烤，「没有预览」恰恰是还没被打开过的新景', () => {
-    expect(previewNeedsBake(row({ date: '2026-09-22', jpgUrl: '/d/a_preview.jpg' }), 4))
-      .toBe(true);
-    expect(presumedPurged(row({ date: '2026-09-22', jpgUrl: '/d/a_preview.jpg' }), NOW))
-      .toBe(false);
-  });
-
-  it('jpg 源行不算：它被列出来就证明那份 jpg 在，打开它不需要烘焙', () => {
-    expect(presumedPurged(row({ date: '2026-01-01', rel: 'a/PAN.jpg',
-      name: 'PAN', hasPreview: true }), NOW)).toBe(false);
-  });
-
-  it('日期取**最年轻**的那个：目录里的年月日是产出日期，能救回重新处理过的老影像', () => {
-    // 采集时间 2020 年、场景目录却是今天产出的 → 不该灰
-    expect(presumedPurged(row({
-      date: '2020-01-01', rel: '2026/09/22/GF01_WFV01_20200101/GF01_WFV01_20200101.tif',
-    }), NOW)).toBe(false);
-    // 反过来：目录老、文件名新（少见，但取最年轻那条 → 不灰）
-    expect(presumedPurged(row({
-      date: '2026-09-22', rel: '2026/01/01/GF01_WFV01_x/GF01_WFV01_x.tif',
-    }), NOW)).toBe(false);
-  });
-
-  it('文件名里的时间戳不算目录日期（别把「编号_卫星_传感器_时间戳」当成年/月/日）', () => {
-    expect(presumedPurged(row({
-      date: '2026-09-01',
-      rel: 'a/GF01_WFV01_20260901120000/GF01_WFV01_20260901120000.tif',
-    }), NOW)).toBe(true);
-  });
-
-  it('日期读不出就不动它（不拿一个猜的原因盖住能开的行）', () => {
-    expect(presumedPurged(row({ date: null, rel: 'a/b.tif' }), NOW)).toBe(false);
-    expect(presumedPurged(row({ date: '', rel: null }), NOW)).toBe(false);
-  });
-
-  it('一眼看不出是栅格还是显示件时，按 rasterPreview 那一份算', () => {
-    const rp = (hasPreview: boolean): RasterPreview => ({
-      id: 'r', name: 'PAN.tif', rel: 'a/PAN.tif', jpgUrl: null,
-      rasterW: 1600, rasterH: 800, jpgW: 400, jpgH: 200, hasPreview, previewDiv: null,
-    });
-    expect(presumedPurged(row({ date: '2026-01-01', rel: 'a/PAN.tif',
-      hasPreview: true, rasterPreview: rp(false) }), NOW)).toBe(true);
-    expect(presumedPurged(row({ date: '2026-01-01', rel: 'a/PAN.tif',
-      hasPreview: true, rasterPreview: rp(true) }), NOW)).toBe(false);
-  });
-
-  it('撞过 404 的行一律灰（连同新景、jpg 源这些本来还能点的）', () => {
-    expect(presumedPurged(row({ date: '2026-09-22', rel: 'a/PAN.jpg', purged: true }), NOW))
-      .toBe(true);
+  it('空值 / 缺尾斜杠 / 只有主机都不给假阳性', () => {
+    expect(isDiskArrayUrl('')).toBe(false);
+    expect(isDiskArrayUrl('/disk-array')).toBe(false);
+    expect(isDiskArrayUrl('http://host')).toBe(false);
   });
 });

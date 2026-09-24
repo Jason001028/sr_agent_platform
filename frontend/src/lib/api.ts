@@ -10,7 +10,7 @@ import {
   loadSrConfig, joinBase, sceneResolveUrl, scenePreviewUrl, sceneImageUrl,
   dropPreviewUrl, isBakedPreviewUrl, previewDivLabel, previewNeedsBake,
   loadPreviewDiv, rasterPreviewWins, sceneClearPreviewUrl, sceneSiblingsUrl,
-  previewCacheKey,
+  previewCacheKey, isDiskArrayUrl,
 } from './scene.js';
 import type { SceneRow, SrConfig, RasterPreview } from './scene.js';
 import { createBlobCache } from './blobCache.js';
@@ -296,42 +296,74 @@ export async function readSseStream(
  *  后端给的 detail 优先；非 JSON 体 —— nginx 直出的静态文件就是这种 —— 退回裸的
  *  `HTTP <status>`），`status` 留给调用方按码分派（见 isSceneGone）。
  *
+ *  `url` 与 `jsonBody` 是**给分派用的**：同一个 404，打的是 `/disk-array/…` 还是
+ *  `/api/…`、响应是不是后端给的 JSON，能得出的结论完全相反（见下面两个判据）。
+ *
  *  只有 `http()` 抛它。聊天与队列 SSE 那两处（apiChatSend / subscribeQueueEvents）
  *  自己抛 Error：它们的失败与「盘阵上这个文件在不在」无关，不需要状态码。 */
 export class HttpError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
+  /** 请求的 URL（原样，含查询串）。 */
+  readonly url: string;
+  /** 错误体是不是 JSON。后端 HTTPException 一律是（`{"detail": …}`），
+   *  nginx 的静态/错误页不是。 */
+  readonly jsonBody: boolean;
+  constructor(status: number, message: string, url = '', jsonBody = false) {
     super(message);
     this.name = 'HttpError';
     this.status = status;
+    this.url = url;
+    this.jsonBody = jsonBody;
   }
 }
 
-/** 这次失败是不是「盘阵上已经没有这个文件」——打开路径撞上的 404。
+/** 这次失败是不是「盘阵上已经没有这个文件」——**静态链**上撞的 404。
  *
- *  判据只有 404。**刻意不认 422**：那是「源还在、但烤不出预览」（档位非法 / 不是
- *  单波段 / 条带读失败 / 文件过小…），把它也说成「已自动清除」就是拿一个猜的原因
- *  盖住真实故障，用户会照着一个假的结论去等它自己好。
+ *  两个条件缺一不可，2026-09-24 起第二条是新增的：
  *
- *  为什么 404 就能当成「文件不在」：打开路径上先打的是 `/api/scenes/{id}/preview`
- *  （后端对解不到授权根之内的 id 才回 404，正常列表行不会），拿到静态 URL 后打的
- *  是 nginx 直出的 `/disk-array/...` —— 那底下没有这个文件时回的就是 404，而且
- *  是**非 JSON 体**（前端拿到的 message 只有裸的「HTTP 404」，正是用户报的那句）。 */
+ *  1. **404**。刻意不认 422：那是「源还在、但烤不出预览」（档位非法 / 不是单波段 /
+ *     条带读失败 / 文件过小…），把它也说成「已自动清除」就是拿一个猜的原因盖住真实
+ *     故障，用户会照着一个假的结论去等它自己好。
+ *  2. **打的是 nginx 直出的 `/disk-array/…`**（`isDiskArrayUrl`）。只有这条链上的
+ *     404 才是「这棵树里没有这个文件」——由 nginx 在 root/alias 下真找过。`/api/…`
+ *     上的 404 是别人给的答复（后端对解不到授权根之内的 id 回 404，路径不对也会），
+ *     它说明不了盘上的文件在不在。
+ *
+ *  第二条件是 09-23「老景打不开」那次事故的直接产物：当时 nginx 在 `location /api/`
+ *  下套了一个只有 `add_header` 的嵌套 location，`/preview` 被当静态文件在 root 下找，
+ *  回的是 nginx 自己的 404 HTML —— 只看状态码就把**能打开的场景**标成了「盘阵上已没有
+ *  这个文件」。见 deploy/nginx.conf 与 isProxyMiss。 */
 export function isSceneGone(e: unknown): boolean {
-  return e instanceof HttpError && e.status === 404;
+  return e instanceof HttpError && e.status === 404 && isDiskArrayUrl(e.url);
+}
+
+/** 这次失败是不是「打后端的请求拿到了非 JSON 的响应」——请求多半**没走到后端**。
+ *
+ *  能落到这一支的：nginx 反代没配好（`location /api/` 下的嵌套 location 漏了
+ *  `proxy_pass`、`alias`/`root` 指错）、上游没起、中间还有一层不认识 `/api` 的东西。
+ *  共同点是状态码来自别人，**说明不了盘上的情况** —— 所以既不当「文件没了」（它可能
+ *  好好地在盘上，只是后端没收到这次请求），也不当普通错误悄悄放过：调用方该把这件事
+ *  如实说出来，否则用户看到的就是一个没有解释的 `HTTP 404`。
+ *
+ *  `!/disk-array/` 那条排除是必须的：静态链上的 404 也非 JSON，但那是**正常结局**
+ *  （文件真不在），归 isSceneGone 管。 */
+export function isProxyMiss(e: unknown): boolean {
+  return e instanceof HttpError && !e.jsonBody && !isDiskArrayUrl(e.url);
 }
 
 async function http(url: string, init?: RequestInit): Promise<Response> {
   const resp = await fetch(url, init);
   if (!resp.ok) {
     let detail = `HTTP ${resp.status}`;
+    let jsonBody = false;
     try {
       const body = (await resp.json()) as { detail?: string };
+      jsonBody = true;
       if (body.detail) detail = body.detail;
     } catch {
       /* 非 JSON 错误体 */
     }
-    throw new HttpError(resp.status, detail);
+    throw new HttpError(resp.status, detail, url, jsonBody);
   }
   return resp;
 }
@@ -748,6 +780,9 @@ export interface SceneSiblings {
   items: SceneSibling[];
   /** product 那一类试过哪些文件名（一个都没命中时用它说明「试过什么」）。 */
   productCandidates: string[];
+  /** nosr 那一类试过哪些文件名。它的名字**与 suffix 无关**（由输入影像的 stem
+   *  拼），所以拼不出 suffix 时这一类照样在，照样有候选清单。 */
+  nosrCandidates: string[];
 }
 
 /** 场景内三类图。**纯只读端点**：永不烘焙、永不写盘、永不列目录。
@@ -786,6 +821,19 @@ export function siblingRow(res: SceneSiblings, item: SceneSibling): SceneRow {
     lq_path: res.lqPath,
     rasterPreview: null,
   };
+}
+
+/** 「未超分那份」能不能用：`nosr` 那一类**且盘上真有**时给出它，否则 null。
+ *
+ *  两种落空都返回 null，且**调用方一律什么都不显示**（用户口径 2026-09-24）：
+ *  盘上没有那份栅格、或这一类压根拼不出名字 —— 「找不到」不是要展示的答案，
+ *  它只是这条背景预热不必再往下走。
+ *
+ *  名字口径全在后端一处（`scene_search.nosr_candidates`：先 `<输入 stem>_NOSR`，
+ *  RC 目录里的 `PAN_NOSR` 次之，`writeTiff` 改名那套垫底），前端只认类别与存在性。 */
+export function nosrItemOf(res: SceneSiblings): SceneSibling | null {
+  const it = res.items.find((i) => i.kind === 'nosr');
+  return it && it.exists ? it : null;
 }
 
 /** 把浏览器里画好的掩码写进服务端场景目录：POST /api/masks。

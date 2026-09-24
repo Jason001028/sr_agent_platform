@@ -7,7 +7,7 @@
  * 盘阵里的 .jpg/.jpeg 源（§4.7）行 jpgUrl 即源文件、跳过懒生成，打标签「JPG 源」。
  */
 import { onMounted } from 'vue';
-import { isImageSource, previewNeedsBake, presumedPurged } from '../lib/scene.js';
+import { isImageSource, previewNeedsBake } from '../lib/scene.js';
 import { useScenesStore } from '../stores/scenes.js';
 import { useViewerStore } from '../stores/viewer.js';
 import ScenePathBar from '../components/ScenePathBar.vue';
@@ -16,8 +16,8 @@ import SceneCacheBar from '../components/SceneCacheBar.vue';
 const scenes = useScenesStore();
 // 只为了读当前预览档位（工具栏那条拖动条写的就是它）——「已生成 / 未生成」得认档位：
 // 盘上有旧档位的图时 `hasPreview` 仍为真，只看它就会说「已生成」，点下去却要等一輪重烤。
-// 注意「打开」那一格**不看档位**了：它只分「按已自动清除处理」（presumedPurged）与
-// 「打开」两种，能点的行一律写「打开」—— 要烤的话按下去就烤。
+// 注意「打开」那一格**不看档位**：它只分「撞过 404」（row.purged，见 stores/scenes.ts
+// 的 open）与「打开」两种，能点的行一律写「打开」—— 要烤的话按下去就烤。
 const viewer = useViewerStore();
 
 /** 手工路径：只把用户填的这一个目录交给后端 stat（不扫盘）。错误由本页
@@ -134,10 +134,10 @@ onMounted(() => { scenes.ensureSearched(); });
             <td class="right c-dims">{{ dimsText(row) }}</td>
             <td class="right c-size">{{ fmtBytes(row.size_bytes) }}</td>
             <td class="c-tag">
-              <!-- 按「盘上数据已被自动清除」处理的行：标签栏也得跟着改口径 ——
+              <!-- 撞过 404 的行：标签栏也得跟着改口径 ——
                    旁边那颗「已自动清除」与「已生成 / 未生成」摆在一起是自相矛盾的。 -->
-              <span v-if="presumedPurged(row)" class="tag gone"
-                    title="按「盘阵上的数据已被自动清除」处理：盘上没有这一景的预览（多半产出后几天就被清掉了），或者打开时真的撞上了 404">已清除</span>
+              <span v-if="row.purged" class="tag gone"
+                    title="试过打开这一行，盘阵静态链上撞了 404：这一景的文件取不到了（多半是生产数据已被自动清除）。列表是「上次检索」的快照，按「检索」刷新即知它还在不在">已清除</span>
               <span v-else-if="row.fake" class="tag fake">fake</span>
               <span v-else-if="isImageSource(row)" class="tag ok">JPG 源</span>
               <span v-else-if="!previewNeedsBake(row, viewer.previewDiv)"
@@ -145,12 +145,11 @@ onMounted(() => { scenes.ensureSearched(); });
               <span v-else class="tag">未生成</span>
             </td>
             <td class="c-act">
-              <!-- 数据多半已经被自动清除的行（presumedPurged 那一格）：这一格换成不可点的
-                   灰块，别再让人对着同一堵墙点第二遍。仍然是 `<button disabled>` 而不是
-                   div —— e2e 的 rows() 按 `td.c-act button` 读这一格（也会按 disabled
-                   判断它不可点）。 -->
-              <button v-if="presumedPurged(row)" type="button" class="btn mini gone" disabled
-                      title="按「盘阵上的数据已被自动清除」处理：盘上没有这一景的预览（多半产出后几天就被清掉了），或者打开时真的撞过 404。列表是上次检索的快照，按「检索」刷新即知它还在不在；若确认数据仍在，把场景路径粘到上方路径栏仍可打开">
+              <!-- 撞过 404 的行（row.purged）：这一格换成不可点的灰块，别再让人对着同一堵墙
+                   点第二遍。仍然是 `<button disabled>` 而不是 div —— e2e 的 rows() 按
+                   `td.c-act button` 读这一格（也会按 disabled 判断它不可点）。 -->
+              <button v-if="row.purged" type="button" class="btn mini gone" disabled
+                      title="试过打开这一行，盘阵静态链上撞了 404：这一景的文件取不到了（多半是生产数据已被自动清除）。列表是「上次检索」的快照，按「检索」刷新即知它还在不在；若确认数据仍在，把场景路径粘到上方路径栏仍可打开">
                 已自动清除
               </button>
               <button v-else type="button" class="btn mini"
@@ -258,7 +257,7 @@ onMounted(() => { scenes.ensureSearched(); });
   font-size: 12px;
   font-weight: 500;
 }
-/* 「已自动清除」：盘阵上文件已经没了（或按年龄推定已没了）的行。不是「禁用中的按钮」（那颗看着像还能救），
+/* 「已自动清除」：试过打开、盘阵静态链上撞了 404 的行。不是「禁用中的按钮」（那颗看着像还能救），
    是一块**已经把话说完的灰块** —— 所以显式压掉 .btn:disabled 的半透明，让字读得清；
    cursor 保持 not-allowed，鼠标移上去不给人「或许能点」的错觉。 */
 .btn.mini.gone {
@@ -329,7 +328,7 @@ onMounted(() => { scenes.ensureSearched(); });
 }
 .tag.ok { background: var(--ok-bg); color: var(--ok); border-color: var(--ok-line); }
 .tag.fake { background: var(--warn-bg); color: var(--warn); border-color: var(--warn-line); }
-/* 打开时撞过 404 的行：盘阵上已经没有这一景的文件（与旁边那块「已自动清除」同义） */
+/* 打开时撞过 404 的行：盘阵上取不到这一景的文件（与旁边那块「已自动清除」同义） */
 .tag.gone { background: var(--surface-2); color: var(--ink-sub); border-color: var(--line); }
 .sp-loading { color: var(--ink-sub); font-size: 12px; }
 /* 打开阶段文案：与 sp-err 同一个位置，但用中性色 —— 它不是错误 */
