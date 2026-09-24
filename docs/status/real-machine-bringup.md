@@ -8,7 +8,8 @@
 > 图例：`⏱` 参考耗时 · `✓=` 本步成功标准 · 所有命令在 CentOS7 上**逐条贴**（别一次粘多行，会碎）。
 > **ADHD 友好版**（一次一步、少讲为什么、带即时反馈）：`docs/status/real-machine-bringup-adhd.md`。
 >
-> **部署进度（2026-09-07/08 实测）**：§2 后端 + §3 nginx 均已跑通——Windows 浏览器开 `http://10.10.81.135` 可访问各页面（/viewer /scenes /chat /queue）。**遗留**：`SR_SCENES_ROOT` 默认值 `/data/scenes` 在本机**不存在** → `/api/scenes` 返回 `source:fake`（12 条 0B 占位），真实盘阵根未定位、提交 SR 端到端未验。真实根定位后按 §2.1 改 env、同步 §3.1 的 nginx `alias`（两处须同值）并重启，详见 §5 症状表「/api/scenes 返回空+fake」行与 `current-question.md` §6.0。
+> **部署进度（2026-09-07/08 实测）**：§2 后端 + §3 nginx 均已跑通——Windows 浏览器开 `http://10.10.81.135` 可访问各页面（/viewer /scenes /chat /queue）。**遗留**：`SR_SCENES_ROOT` 默认值 `/data/scenes` 在本机**不存在** → `/api/scenes` 返回 `source:fake`（12 条 0B 占位），真实盘阵根未定位、提交 SR 端到端未验。真实根定位后按 §2.1 改 env、同步 §3.1 的 nginx `alias`（两处须同值）并重启，详见 §5 症状表「/api/scenes 返回空+fake」行；验收勾选见
+[real-machine-acceptance.md](real-machine-acceptance.md) §B。
 >
 > **Slurm 侧（09-10 第三批）**：部署变体 + 作业内校验器 + 退出码文件定终态已备齐，**上机尚未执行**——
 > 按 `docs/status/slurm-acceptance.md` 的 A→B→C→D 逐条跑，命令逐条贴、输出回传判读。注意两条与本文
@@ -211,7 +212,7 @@ ssh -N -L 18080:127.0.0.1:80 root@<node81-135 IP>
 | 静态文件 403 / Failed to open file | CentOS7 SELinux 拦 nginx 读 `/run/media` → `chcon -Rt httpd_sys_content_t <APP>/dist`；反代连不上再 `setsebool -P httpd_can_network_connect 1` |
 | 80 打不开 | 防火墙未放行 → `firewall-cmd --permanent --add-service=http && firewall-cmd --reload`；或 nginx 没 reload |
 | 首次开大图很慢 | 属正常：后端懒生成 JPG（v3 起各边 ÷2…÷32、默认 ÷4，档位在查看器工具栏调；直方图均衡，读一遍大图），几十秒到数分钟，Network 里能看到 `/api/scenes/<id>/preview`；此后秒开（已落盘 + 浏览器缓存）。**换包后第一次打开也会重烤一次**（旧图缺 v3 规则签名，见 gui-experience §9.2）；若同名 JPG 被 nginx `max-age=3600` 缓存住，硬刷新一次 |
-| 探针输出里 `sacct` / `sacct-parse` 两行 **FAIL** | **预期结果，不是故障**：本机 `AccountingStorageType=accounting_storage/none`（账务关闭），`sacct` 恒返回非 0 且无输出 → 作业终态改读**退出码文件**，见 `deploy/README.md` §7.3 与 `current-question.md` §3.2「Slurm 接入定论」 |
+| 探针输出里 `sacct` / `sacct-parse` 两行 **FAIL** | **预期结果，不是故障**：本机 `AccountingStorageType=accounting_storage/none`（账务关闭），`sacct` 恒返回非 0 且无输出 → 作业终态改读**退出码文件**，见 `deploy/README.md` §7.3 与 [sr-pipeline-overview.md](../sr_code/sr-pipeline-overview.md) §13.5 |
 | 队列任务**永远 UNKNOWN**（作业明明跑完了） | 平台反推的退出码文件路径与作业写的对不上，或校验器根本写不出文件。逐层查：① `ls <lq_path>/Debug/_SREXIT_<job_id>.txt` 存不存在——不存在看作业 `.err` 有没有 `verify_sr_run: 无法写退出码文件`（作业以 **nginx** 身份跑，`<lq_path>/Debug/` 要 nginx 可写，`sudo -u nginx touch <lq_path>/Debug/w` 直接验）；② 存在但平台仍 UNKNOWN → 核对 config.xml 的 `DatarootLQ` 与作业实际工作目录是否同值（开沙箱时 `DatarootLQ` 是副本路径，`/api/queue` 的 `run_dataroot` 字段就是它）；③ 配置文件名带任务指纹，同 suffix 的不同任务已不会互相覆盖（2026-09-10 前是手写 `run_sr_<suffix>.xml`，会串；老任务若仍 UNKNOWN 请重提） |
 | 作业秒挂 / 立刻失败 | `SR_SLURM_WORK_DIR` 不是**共享盘**：config.xml 与批脚本由 API 写在这个目录，作业却落到 gpu 分区的 76 个节点之一上读它。默认 `/tmp/sr_agent_work` 是本机路径 → 改到 `/DiskArray/...` 这类共享挂载（`srun -w node81-140 ls -d <WORK>` 直接验） |
 | 作业 `exit(3)`（GPU 守卫） | 两种可能：① `$SR_BUNDLE_DIR/code_0817_prod.py` **还是原脚本**（没装部署变体）——`head -3` 应见 `GENERATED FILE — DO NOT EDIT` 横幅，装法见 `deploy/README.md` §7.1；② 变体已装但 `--gres` 没给到卡——查作业 `.out` 审计段的 `CUDA_VISIBLE_DEVICES=` 是否为空 |
@@ -222,7 +223,7 @@ ssh -N -L 18080:127.0.0.1:80 root@<node81-135 IP>
 | 云量超阈值的任务显示 COMPLETED 且没有输出 tif | **不是 bug**：合法跳过（`Run skipped:` 终态行 + 退出码文件 `skip=1`），契约只要求 SRLOG 存在，不要求输出 tif。若它显示 FAILED，说明 `$SR_BUNDLE_DIR/verify_sr_run.py` 不是本批版本 |
 
 浏览器侧闭环：`/scenes` 打开场景出图 · 画掩码点「提交 SR」跳 `/queue` 预填 · 提交后状态徽标随
-SSE 推进。详细验收项以 `docs/status/current-question.md` §6 为准，跑完把每项记录誊回并勾掉。
+SSE 推进。详细验收项以 [real-machine-acceptance.md](real-machine-acceptance.md) 为准，跑完把每项记录誊回并勾掉。
 
 **Slurm 作业链路**（提交 → 作业内契约校验器 → 退出码文件 → 平台判终态）的上机操作与分阶段验收
 （A 探针 / B 裸 Slurm 冒烟 / C 单场景真 SR / D 四条链路结论）见 **`docs/status/slurm-acceptance.md`**；

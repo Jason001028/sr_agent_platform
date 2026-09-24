@@ -115,7 +115,7 @@
 - **不引入 Spring Boot 等大型全家桶**：公司无统一技术标准，遥感后端全部基于 Python，额外引入 Java 门面只增加维护成本。
 - **不基于 LangChain/LangGraph 开发**：Agent 流程较短，以约 200 行自写状态机实现更可控；当出现"跨小时断点续跑 / 人工审核"等需求时，再评估引入 LangGraph 薄封装。
 
-选型完整推演见 [docs/status/current-question.md](docs/status/current-question.md) §3.1 的决策表。
+选型完整推演见本篇附录 A 的决策表。
 
 ### 3.2 仓库结构（先认路）
 
@@ -310,7 +310,8 @@ else if 无压缩 + 条带 + 单波段 + 大影像 → 稀疏条带预览（仅�
 2. 浏览器**不再接触盘阵原始 TIF 字节**，从机制上消除 2GB 与 16384² 两项约束在盘阵场景下的影响。
 3. **本地文件路径保持原读取方式**（仍走稀疏 TIF 读取），阶段 1~3 的行为不做改动；两种数据源并存。
 
-后端随之首次承担图像处理职责：在盘阵机本地读取 TIF、生成 JPG、托管静态产物——"重处理放数据所在机器"的原则在盘阵场景落地。对应决策见 [docs/status/current-question.md](docs/status/current-question.md) §3.4 与 §9，及 gui-experience §9。
+后端随之首次承担图像处理职责：在盘阵机本地读取 TIF、生成 JPG、托管静态产物——"重处理放数据所在机器"的原则在盘阵场景落地。对应决策见本篇附录 A、
+[sr-pipeline-overview.md](docs/sr_code/sr-pipeline-overview.md) §13，及 gui-experience §9。
 
 ### 7.2 FastAPI 最小骨架
 
@@ -538,3 +539,55 @@ POST /api/chat/sessions/{id}/messages     ← 前端发送一条消息
 ---
 
 > 附：本篇为"教程视角"的梳理；具体数值与细节若与档案冲突，以档案为准（问题与经验 [gui-experience.md](docs/experience/gui-experience.md)、当前状态 [current-question.md](docs/status/current-question.md)、阶段需求 [frontend-phase4-phase5-prompts.md](docs/planning/frontend-phase4-phase5-prompts.md)）。
+
+---
+
+## 附录 A 技术选型决策记录（2026-08-30 定调 · 08-31 补充）
+
+> 结论速览见 §3.1；此处保留推演过程与当时的约束条件。
+
+### A.1 定调时的四个前提
+
+四个关键问题的结论（2026-08-30）：
+
+- **LLM 底座未定**：统一按 OpenAI 兼容接口（`/v1/chat/completions` + `tools` 参数）编写，
+  底座可随时更换（Ollama / vLLM / 第三方端点均不改业务代码）。
+- **保留 Slurm**：用 Slurm 调度 GPU，FastAPI 作为它的客户端；SR 脚本本身已集成 Slurm
+  （带健康检查闸门，GPU 数量不符则停掉 `slurmd`）。CPU 小任务（如掩码栅格化）可自建轻量队列。
+- **cv 工具箱从零开发**，近期优先做工具库（P1）。
+- **LangChain 不是地基**，推迟为以后可选的薄层。
+
+组织前提：公司没有统一的技术标准（2026-08-31 确认），Nginx / Redis 均属可选项，技术栈完全自由。
+原先考虑的「用 Spring Boot 做门面层」折中方案作废。
+
+### A.2 技术栈决策
+
+| 层 | 选型 | 依据 |
+|---|---|---|
+| 前端 | Vue3 + TypeScript（Vite 构建 + Nginx 静态托管，第三方库全部本地内置、离线可用） | 多视图 + 共享状态 + 实时进度 |
+| 前端迁移 | **移植不重写** `tif-viewer.html` | 把已验证的解码 / 亮度拉伸 / 稀疏条带读取逻辑抽成与框架无关的 TS 模块，供 Vue3 应用直接 import |
+| 后端框架 | FastAPI（REST + SSE） | Agent / SR / cv 工具均在 Python 侧，避免维护两种语言；SSE 用于向浏览器推送任务进度 |
+| 作业队列 | Slurm 调度 GPU + FastAPI 作为客户端（轮询）+ SQLite 记录作业 | SR 长时间占用 GPU，需要排队；SQLite 存任务元数据，Redis 暂不引入 |
+| LLM 底座 | 未定，统一按 OpenAI 兼容接口编写 | 有第二台 GPU 则 vLLM + Qwen2.5-14B；单卡则 Ollama + 量化版，与 SR 错开时间使用 |
+| Agent 层 | 原生 function-calling + 自写约 200 行状态机 | 出现跨小时断点续跑 / 人工审核需求时再评估 LangGraph；`langchain-master` 只作参考、不引为依赖 |
+
+> 修订（2026-09-01）：前端由 React + TS 改为 Vue3 + TS；「移植不重写」的决定不变。
+
+### A.3 前端实现约束（2026-08-31 两轮问答确认）
+
+| 约束 | 结论 |
+|---|---|
+| 浏览器 | 只需支持 Chrome / Edge，不做降级兼容 |
+| 查看器数据源 | 本地 File 与盘阵 HTTP 并存 → 解码层统一为 `source.read(offset, len) → Promise<ArrayBuffer>` 接口（FileSource / HttpSource 两个实现） |
+| 掩码 | 键盘鼠标 + 像素坐标（不做 GIS 地理坐标），掩码为像素坐标数组，存于后端 |
+| 任务队列 | 多人共享同一条队列 → 前端实时同步 + 乐观更新 + 并发处理；服务端为唯一权威数据源 |
+| 实时通道 | `pushClient` 单独模块抽象，先做 SSE（对反向代理友好、单向推送够用），必要时可换 WebSocket；操作类请求走 REST |
+| 构建 / 部署 | 产物自带全部依赖，Vite 构建，Nginx 托管 |
+| 时间预算 | 1–2 个月 |
+
+### A.4 前端迁移策略（2026-09-01 更新）
+
+- HTML 侧功能集已定稿，`tif_viewer/tif-viewer.html` 冻结，不再新增功能。
+- 冻结后新增功能直接进 Vue3：盘阵 HTTP 读图、多视图、任务队列均不再加进 HTML。
+- 阶段 3 组件化已提前完成（不等 P2）：交互层移植入 Vue3（六组件 + store + lib + `window.__viewer`）。
+- 可提前项：`tifDecode.ts` 抽取 + Node 像素级黄金对照单测已完成，为移植备好回归基准。

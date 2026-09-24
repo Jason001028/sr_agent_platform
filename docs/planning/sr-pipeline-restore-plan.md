@@ -155,7 +155,7 @@ systemctl cat sr-api > /tmp/sr-api.service.snapshot
 
 测试（`test_run_sr.py`）：默认仍输出 `code_0817_prod.py`；`SR_SR_SCRIPT` 生效且**整份脚本不再出现原脚本名**；显式参数压过 env；audit 含 `SR_SCRIPT=`。
 
-同步更新：[deploy/sr-api.service](deploy/sr-api.service)（新增两项 env + 注释）、[deploy/README.md](../../deploy/README.md) §七（§7.1 改为并置装法 + 八项 env 表）、[docs/status/slurm-acceptance.md](../status/slurm-acceptance.md) §0.2/§0.3、[docs/sr_code/sr-pipeline-interface.md](../sr_code/sr-pipeline-interface.md) §7.1、[docs/status/current-question.md](../status/current-question.md) §6.4。
+同步更新：[deploy/sr-api.service](deploy/sr-api.service)（新增两项 env + 注释）、[deploy/README.md](../../deploy/README.md) §七（§7.1 改为并置装法 + 八项 env 表）、[docs/status/slurm-acceptance.md](../status/slurm-acceptance.md) §0.2/§0.3、[docs/sr_code/sr-pipeline-interface.md](../sr_code/sr-pipeline-interface.md) §7.1、[docs/status/real-machine-acceptance.md](../status/real-machine-acceptance.md) §D。
 
 ### E-B 空后缀归一（对应 B2）
 

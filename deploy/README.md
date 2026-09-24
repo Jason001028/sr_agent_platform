@@ -504,7 +504,7 @@ curl -s -o /dev/null -w '健康=%{http_code}\n' http://127.0.0.1:8000/api/health
 - **utif.js 为补丁版（cmpr 8/32946 走 pako inflate），绝不能被 npm 重装覆盖**——只能从 `src/vendor/utif.js` 本地引入。
 - **盘阵双层保险**：nginx `alias` 整块暴露 + 后端按 `SR_SCENES_ROOT` 白名单校验（拒绝 `../` 穿越、白名单外绝对路径、fake 占位）。URL 全用相对场景根的 `/disk-array/<rel>`。
 - **浏览器单次分配约 2GB、Canvas 面积上限 16384²**——盘阵场景因此由服务端烘焙 JPG（v3：各边 ÷2…÷32，默认 ÷4），浏览器只解码 JPG（远低于上限）。
-- 真实大图只在有盘阵的内网机（外网开发机读不到），解码回归用 `.e2e/` 本机资产 + `frontend/fixtures/` 入库小图；真机验收项见 docs/status/current-question.md。
+- 真实大图只在有盘阵的内网机（外网开发机读不到），解码回归用 `.e2e/` 本机资产 + `frontend/fixtures/` 入库小图；真机验收项见 `docs/status/real-machine-acceptance.md`。
 
 ## 七、Slurm 接入（SR 作业提交链路）
 
@@ -542,7 +542,7 @@ ls -l code_0817_prod.py                                          # ✓= 生产�
 ```
 
 > ⚠️ `verify_sr_run.py` 的仓库副本 **2026-09-15 起为 17164 B / `5fa627d8…`**（退出码文件的
-> 编码锁定，见 `docs/status/current-question.md` §4）。机上若还是 09-11 拷的 16419 B 旧版，
+> 编码锁定，见 `docs/status/timeline-archive.md`）。机上若还是 09-11 拷的 16419 B 旧版，
 > A/B/C 不受影响，**走 D 之前重新拷一次**。
 
 > **为什么可以不顶替**：批脚本里那两个程序名是 `SR_SR_SCRIPT` / `SR_VERIFY_SCRIPT` 两个 env
