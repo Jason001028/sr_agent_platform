@@ -12,6 +12,8 @@
 > **挂起项九（2026-09-21 第五轮 → 2026-09-22 收口，真机反馈）**：预览文件名**全平台统一成一条规则** `<源栅格 stem>_preview.jpg`（`paths.preview_jpg_name`），三条烘焙链（急烤 / 惰性打开 / 拖入）落同一个名字，差别只剩目录。09-21 那版是「点号那份不动、再 `copyfile` 一份下划线同名件」（`app.py::_mirror_preview_name`）—— 那份镜像同日被删：它把「一份栅格两个文件」从缓存层搬到了每一份产物上，用户要的是**只有一个名字**。读判据同步搬过去（`hasPreview`/`previewDiv`/静态 `jpgUrl` 从同一份落点算；前端 `isBakedPreviewUrl` 认结尾 `[_\.]preview\.jpe?g`），旧的点号文件由 `_sweep_legacy_preview` 在每条链处理到那份栅格时顺手删掉，没有全盘清扫（平台不列目录）。详见 §4.5 与 [preview-bake-pipeline §4.8/§4.9/§4.10](../knowledge/preview-bake-pipeline.md)。
 > **挂起项八（2026-09-21 第四轮，真机口径）**：§4.5 的急烤队列**顺带**多烤一份未超分的预览 —— 同一轮 tick 在产物之后把 `<场景目录>/PAN_NOSR.tif` 按**全局档位**下采样成 `<场景目录>/PAN_NOSR_preview.jpg`（落点复用拖入链的 `<源 stem>_preview.jpg` 规则）。**不是新的烘焙入口、不动任何响应字段、不动产物的状态机**：源是固定名字，不判沙箱（那份栅格是盘阵上的既有文件），结局只写盘 + 一行 stdout（`[nosr-preview] task=<id> <状态>`）。名字按用户口径钉死；仓库 `SR_code/util.py::writeTiff` 推出来的 `<产物 stem>_NOSR.tif` 与它对不上，属**待核**（记在 current-question）。
 > **挂起项十（2026-09-24 用户口径，订正上面的挂起项八）**：① **NOSR 那一份的名字口径订正** —— 未超分那份 = **输入影像的 stem + `_NOSR`**（SC 场景 `<目录名>_NOSR.tif`，RC 场景 `PAN_NOSR.tif`）；`SR_code/util.py::writeTiff` 推出来的 `<产物 stem>_NOSR.tif` **退为次选**，留在候选清单最后。候选由 `scene_search.nosr_candidates()` **一处**产出，`/siblings` 与急烤那条链读同一份 —— 挂起项八那版把名字**硬编码成 RC 的名字** `PAN_NOSR.tif`，SC 场景因此永远走 `skipped:`，而 `/siblings` 又只认次选那条，两处彼此对不上。② `/api/scenes/{id}/siblings` 响应**新增 `nosrCandidates`**（与 `productCandidates` 同形制、顺序即优先级），`nosr` 项**不再依赖 `suffix`**（名字由输入影像的 stem 拼，有测试钉着）。③ §3.5 `{name}` 分支**再认两种名字**：裸 `<目录名>_NOSR.jpg` 判 `('nosr','')`；`de_suffixed_stems` 的 `_NOSR` 尾段改在切段循环**内**剥（原先在循环外预剥，`<目录名>_NOSR` 的**真名**反而一条候选都进不去）。④ 前端在**拖入显示件**时对同景那一份多做一次静默预热（`stores/viewer.ts::warmNosrPreview`，命中才记账）—— 拖入不再只烤「自己那份」。详见 [preview-bake-pipeline §4.11](../knowledge/preview-bake-pipeline.md)。
+> **挂起项十一（2026-09-27，真机反馈的缺陷修复）**：§3.5 `{name}` 分支新增**可选字段 `product`** —— 《待修复清单》第一列**约定俗成省掉产品段**（`…_101_0020_001_L1`，盘阵上是 `…_101_0020_001_L1_PAN`），少了它按名字反推的**景级与段级目录名一起少一段**，两个日期候选全落空，用户报的「一批图都无法打开」就是它。补哪一段由那一行第二列的「影像类型:pan」定（`backend/pathguard.scene_name_products`：追加产品段后重推，**原样那条恒排第一**；提示没给/认不出则 `_PAN` 在先）。**只加一个可选字段，`{path}` 分支与库内检索一字未动**；名字自带产品段、带栅格扩展名的调用（拖拽指纹那条）行为不变，探测量上限也不变。同批修掉 `stores/scenes.ts::openByName` 的一个返回缺陷：成功后仍兜底返回错误串，面板「打开」点下去图开了、红条却说失败（详见 §3.5 那段与 [timeline-archive](../status/timeline-archive.md)）。
+> **挂起项十二（2026-09-27，「一键解析」批量烘焙）**：同批前端功能，**后端零新增端点、响应字段一字未改**（同挂起项四的形状）。每景就是既有三条链按序各走一遍：§3.5 `POST /api/scenes/resolve`（吃那一行的 `product` 补产品段）→ §3.6 的 `GET /api/scenes/{id}/preview`（本体那份）→ §3.8 `GET /api/scenes/{id}/siblings`（取 `nosr` 那一类）→ 再 `/preview` 一次（未超分那份）。驱动循环在 `stores/qclist.ts::bakeAll` + `lib/qcbatch.ts::runSceneBake`，**并发恒为 1**（服务端读盘不该并发，先例是 `viewer.maybePrefetchCompare`）。**刻意不做批量端点**：`/preview` 是 sync def、进 anyio 线程池，掐响应停不了服务端已经在烤的那一份；而「试过哪些候选、各自为什么不行」的真源只在 `scene_search` / `resolve_scene`，批量端点重写一遍就是新增一个「静默换路径」的入口。落点走 `/preview` 而**不是** `/preview-drop`：要与所有打开路径一致（保证「批量烤过 → 点开即出图」），走 drop 会让每张卡第一次打开再烤一遍。详见 [current-question §6.4](../status/current-question.md)。
 > **须说明的流程偏差**：上述改动**已与本文档同批落到代码**（不是"先评审后写码"）。理由是它同时修一个现存缺陷（两入口指纹不一致），拆开会让仓库停在一个已知会重复投作业的中间态；09-17、09-20 两批同理，前端要用的字段与端点不一起落地就没法验收（09-20 那批还带着 §4.5 那个后台循环，文档与循环必须同批，否则运维会照着一份没写急烤的契约去配 env）。请复核，通过后把状态改回「已定」。此前其余条款自 2026-09-02 起均未变（评审通过时的交付基线：后端 190 unittest + 前端 Vitest 114 + vue-tsc 零错误 + `.e2e/test-platform.js` 11 断言全绿）。
 > 目标读者：阶段5 实现会话（后端 FastAPI + 前端 Vue3）。范围：把既有后端（agent loop + 4 工具 + `sr_tasks` + slurm）暴露成网页可调 REST/SSE，交付 聊天 / 共享任务队列 / 查看器画完掩码提交 SR。
 > 前置：阶段4 已完成（FastAPI 骨架 `backend/api/app.py`：`/api/scenes` + `/api/scenes/{id}/preview` + 路径白名单；前端 `/scenes` 页 + route='jpg' rec + `/chat` `/queue` 占位路由）。
@@ -456,6 +458,27 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
     （记原因），不 stat。接受单个字符串或字符串数组，数组只取前 4 条。
   - **锚定命中后 `resolved.dir` = 那个锚定目录**，其余收尾与反推那条路共用同一段代码
     （`kind`/`suffix`/`row` 描述该环节自己那份栅格、`lq_path` 在产物上置空等照旧）。
+- **`{name}` 还可带 `product`（2026-09-27 增，《待修复清单》面板用）：那一行写着的
+  影像类型**（`PAN` / `MSS`，大小写不限，取值见 `pathguard._PRODUCT_CODES`）。
+  质检部门的《待修复清单》第一列**约定俗成省掉产品段**（写 `…_101_0020_001_L1`，而盘阵
+  上的景级目录叫 `…_101_0020_001_L1_PAN`），第二列的描述里有「影像类型:pan」。
+  - **为什么这会整批打不开**：产品段是**生产名的最后一段**，按名字反推的目录名有两级
+    都是拿它拼的 —— 景级目录名 = 名字本身、段级目录名 = 名字去掉景号那一段
+    （`pathguard.scene_name_layers`）。少一段，两级目录名一起少一段，两个日期候选全落空，
+    404 报的是「目录不存在」而名字看着「是对的」，用户无从下手。
+  - 补哪一段由 `product` 定（**名字里已经有产品段时它一个字都不影响**）。补法是**把产品段
+    追加到名字后面**再反推，而不是事后拼目录名 —— 这样段级目录名自动跟着对。分隔符沿用
+    原名最后一段分隔符（`_` 与空格都认，同上面的段分隔符口径）。
+  - **没给或认不出（`PMS`、`全色`…）→ `_PAN` 在先、`_MSS` 在后**（用户口径「默认按照
+    `_PAN` 打开即可」）：两条都试，**只是顺序**。所以「不递 product」不是「打不开」，
+    而是「多一次 stat，且 404 时按这个顺序解释」。
+  - **原样那个名字恒在最先试**（`scene_name_products` 的第一个候选），盘阵上的真形态
+    （名字自带产品段）行为一个字节没变；只有名字缺产品段时才会多出候选目录，404 的
+    `detail` 因此补一句「名字里没有产品段，按 _PAN、_MSS 依次各试了一遍」。
+  - **带栅格扩展名的名字不生成变体**（`.tif/.tiff/.img/.jpg/.jpeg` 等，见 `_RASTER_EXT_RE`）：
+    那是**拖进来的文件名**，要走 `size_bytes` 双指纹，而 `…_preview.jpg_PAN` 这种把产品段
+    加在扩展名后面的名字盘上不可能存在。钉探测量上限的那几条用例正是靠这一条不破。
+  - `product` 不是字符串 → **400**。`{path}` 分支不收：精确路径没有反推，也就没有可补的段。
 
 ### 3.6 拖拽入口的预览（`GET /api/scenes/{id}/preview-drop`，2026-09-19 定名）
 

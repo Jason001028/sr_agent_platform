@@ -2472,6 +2472,191 @@ RC 即 `PAN_NOSR.tif`）；writeTiff 那个名字**退为次选**，仍在候选
 
 ---
 
+### 2026-09-27 · 《待修复清单》第一列缺产品段 → 那一批图整行打不开（用户报的缺陷）
+
+**现象（用户原话）**：导入清单后，**有些行的场景打不开**。用户同时给了线索：清单上的目录
+「是约定俗成缺少 `_PAN` / `_MSS` 后缀的，而在后边会提及 PAN」，并要求「这种情况下默认按照
+`_PAN` 打开即可」。他说的是「**一批图**都无法打开」——不是个别行。
+
+**根因**：产品段是生产名的**最后一段**，而按名字反推的两级目录名**都拿它拼**：景级目录名
+= 名字本身，段级目录名 = 名字去掉景号那一段（`pathguard.scene_name_layers`）。清单第一列写
+`…_101_0005_001_L1`、盘阵上却是 `…_101_0005_001_L1_PAN`，于是**景级与段级一起少一段**，
+「成像日 + 次日」两个候选目录全部落空 → 404「目录不存在」。名字看着是对的、盘上确实有这一景，
+用户从报错里看不出差在哪 —— 这正是「一批图都打不开」的形状：清单里凡是省了产品段的行全中。
+
+**修法（用户拍的两条口径）**：① 补哪一段**看那一行的影像类型**（`影像类型:pan` → `_PAN`），
+那一列没写就 `_PAN`；② 只在**后端按名字解析这一条路**上统一生效 —— 所有按名字打开的入口
+（清单面板 / 拖拽 / 按名打开）共用同一段代码，前端不自拼名字。
+`scene_name_products(stem, hinted)` 产出有序候选：**原样那条恒排第一**，其后按提示（缺省
+`_PAN` 在先）把产品段追加到名字后面再反推 —— 段级目录名因此自动跟着对。
+
+| 层 | 文件 | 改了什么 |
+|---|---|---|
+| 后端 | `pathguard.py` | 新增 `_PRODUCT_CODES` + `scene_name_products`（带栅格扩展名的名字**不生成变体**：那是拖进来的文件，走 `size_bytes` 双指纹，`…_preview.jpg_PAN` 盘上不可能存在） |
+| 后端 | `api/app.py` | §3.5 `{name}` 分支接可选 `product`（非字符串 → 400）；候选由它展开；404 的 `detail` 补一句「名字里没有产品段，按 _PAN、_MSS 依次各试了一遍」；`day_note` 的判据改看**基准候选**条数（不再看展开后的总数） |
+| 前端 | `stores/scenes.ts` | `openByName(name, product?)`；**顺带修掉第二个 bug**：成功后仍兜底返回错误串（见下） |
+| 前端 | `components/QcListPanel.vue` | 行内「打开」把 `it.imgType` 一起递过去 |
+| 前端 | `lib/api.ts` | 请求体联合类型加 `product`；`viewer/e2eHooks.ts` 的 `qcOpenByName` 加第二参（真机验收用） |
+| 测试 | `backend/tests/test_paths.py`、`test_scene_resolve.py`、`frontend/src/lib/__tests__/api.test.ts`、`.e2e/test-manual-scene.js` | 见下 |
+
+**顺带发现并修掉的第二个 bug**：`openByName` 成功时也会返回 `打开「…」失败` —— 它末尾是
+`return error.value || ('打开「…」失败')`，而 `open()` 成功时 `error` 恰好是空串，于是**面板
+「打开」点下去图开了、红条却说失败**。`open()` 的每条失败路都会写 `error`，所以兜底那一支
+只会在成功时触发，改成就看 `error`。（这条与产品段那个 bug 同一天暴露：用户点的正是这些行。）
+
+**验证（开发机，全绿）**：后端 **734 passed / 5 skipped**（基线 720/5，新增 14：`scene_name_
+products` 的 7 条（原样恒第一 / 提示换序 / 认不出的提示退 `_PAN` / 自带产品段 / 带栅格扩展名
+/ 空格分隔符 / 空名字）+ resolve 的 7 条（缺段名字开 `_PAN` / 影像类型定段 / 两条都在时 `_PAN`
+赢 / 认不出的类型退 `_PAN` / 自带段的名字一字不动 / `product` 非字符串 400 / 404 列出补过哪
+几段并按天解释））；前端 **395 passed** + `vue-tsc` 零错误 + `npm run build`；
+`.e2e/test-manual-scene.js` **225 断言**（基线 214，新增 H2 段：造两景（`…_L1_PAN` / `…_L1_MSS`）
++ 一份第一列**省掉产品段的 GBK 清单**，从面板上那颗「打开」按钮走完整链，断言各自开进对的
+场景目录、前端只发一次 resolve、**开出来了就不许弹「打开失败」红条**、不递提示也开得出来、
+两条补法都没有时 404 点明补过哪几段）。全程无错的口径随之更新：404 从「恰好四次」改成
+「恰好五次」（H2 那次是刻意打的）。
+
+**待真机 / 未收口**：① 真机清单第二列的实际写法待确认 —— 若写的是 `全色` / `PMS` 这类
+认不出的词，走的是「默认 `_PAN` 在先」那条（两条都试，不会打不开，只是多一次 stat）；
+② 需随包更新 dist + backend。
+
+---
+
+### 2026-09-27 · 一键解析：清单批量烘焙 + 点亮联动（开发机）
+
+**需求（用户原话）**：「拖入 .txt 后多一颗醒目橘色『一键解析』→ 自动清空左侧暂存区 → 一次性
+烘焙、按每景顺序依次存放它的烘焙 jpg 与 NOSR_jpg → 按序号归纳依次展示，**严格按 .txt 内部
+顺序** → 之后每次点亮右侧工具，左侧有联动的高亮 + 上下滑动动画（配色醒目）」。三条口径由
+用户当场拍定：联动触发源 = **点清单里的一行**；入列形态 = **每景两张、共用同一序号**；
+失败与进度 = **记账跳过 + 可中途停止**。
+
+**为什么值得单独做一条链**：此前只能一行一行点「打开」——每点一次才 resolve 一次、烤一次、
+落一张卡。一批几十条要重复几十次，且**看不到这一批到底有哪些景、顺序是什么**。批量这条链
+要回答的正是「这一批整整齐齐摆在这儿」。
+
+| 层 | 文件 | 改了什么 |
+|---|---|---|
+| 前端 | `lib/qcbatch.ts`（新） | `PRODUCT_CODES` + `sceneNameCandidates`（`pathguard.scene_name_products` 的**镜像，只用于匹配**）+ `matchesScene` + `progressText`/`fmtElapsed` + `runSceneBake`（**注入式串行驱动器**：按行序、单景失败不中断、`'missing'` 进 notes 不进 fails、每个 await 之后看一次 `signal.aborted`） |
+| 前端 | `stores/scenes.ts` | 新增 `resolveByName(name, product?, {signal})` —— **只解析不打开**（不激活、不烤、不写 `scenes.error`），失败抛，让批量拿到后端 detail 原文 |
+| 前端 | `stores/viewer.ts` | `clearRecs` / `insertSceneCard`（**非激活**入列一张只有身份的空卡）/ `bakeCardPixels`（只烤盘、**不碰 busy / 不弹遮罩**）/ `loadCardPixels`（点开才取图，取完清 `rec.card`）/ `lightCards` / `clearLights` + `litIds`/`litTick`；`activate` 加懒取图分支 |
+| 前端 | `stores/qclist.ts` | 新段落「一键解析」：`bakeState`（idle/running/stopping/done/stopped）、`bakeFails`（标红+原因）、`bakeNotes`（盘上的事实）、`bakeAll`/`stopBake`、进度行与收尾汇总；**顺手修 `selectForScene` 的产品段缺口**（改走 `rowForScene`） |
+| 前端 | `components/QcListPanel.vue` / `FileList.vue` | `.qc-h` 下面单独一行那颗橘色 `.qc-go`（三态：一键解析 / 停止 / 正在停止）+ 失败账区块 `.qc-fails`；`FileList` 收 `Map<id, el>`，`watch(litTick)` 里 `scrollIntoView({block:'center', behavior:'smooth'})` |
+| 前端 | `style.css` | `.file-item.lit` 只用 **`outline`**（橘色令牌 `--notice-job`，与 `.active` 的 box-shadow 正交）；动画重放靠奇偶两个同名 keyframes 交替挂 |
+| 前端 | `viewer/e2eHooks.ts` | `qcBakeState`/`qcBakeAll`/`qcBakeStop`/`litIds`/`litTick`/`clearRecs`；`summarize()` 加 `hasCard`/`lit` |
+| 后端 | `api/app.py` | **零新增端点、响应字段一字未改**（只在 `preview`/`preview-drop`/`siblings` 三处 docstring 写下「批量走这三条、别顺手加 batch」的理由） |
+| 文档 | `api-contract.md` | 挂起项十二：批量烘焙**不新增端点**的契约说明 |
+
+**六处「换个写法也能跑、但会慢慢烂掉」的选择**（完整理由见 [gui-experience §9.8](../experience/gui-experience.md)）：
+
+1. **联动键用候选集合而不是规范名** —— 清单行写 `…_L1`、卡片目录叫 `…_L1_PAN`，逐字比恒不
+   成立。方向单向（目录末段 ∈ 候选），最坏是「点了行没亮卡」，**绝不会亮错一张**。这里不能
+   「点一行就发一次 resolve 去问」：联动必须瞬时，且那等于把「盘上有没有」搬进交互路径。
+2. **前端镜像 `_PRODUCT_CODES` 只用于匹配、绝不参与拼路径**，靠两处金丝雀防静默漂
+   （后端 `test_paths.py::TestSceneNameProducts::test_product_codes_mirror` + 前端
+   `qcbatch.test.ts`，各钉一次 `('PAN','MSS')` 字面量，同时红即有人改了一头）。
+3. **卡片生下来不带像素**：批量只把 jpg 烤到盘上，点开才取图（此时命中服务端缓存，秒出）。
+   算式：÷4 的 4 万² 景烤出 10000²，`applySceneJpgToRec` 同时留下缩略图画布与解码位图
+   **≈800MB/卡**，一批十几景 ×2 张必爆（浏览器单次分配 ~2GB）。
+4. **取消 = AbortController，且如实告知**：取图的两个 API 都不收 signal，在飞的那一景让它烤完
+   （落盘正是要的缓存），文案写「正在停止（等这一景烤完…）」。被掐掉的 resolve 是**取消**、
+   不是失败，不许记进失败账。
+5. **失败账与「缺失」分两张表，且都不写 `statuses`** —— 那份会被 `buildQcDoc` 写回盘阵上的
+   .txt、还驱动 `counts.done`，而烤图失败是平台自己的事。
+6. **清空暂存区不弹二次确认** —— 分界线是「数据丢没丢」：`clearRecs` 只清视图，盘上一个字节
+   没动，卡随时能重建。给可重建的东西加确认弹窗只会训练用户闭眼点确定。
+
+**验证（开发机，全绿）**：后端 **735 passed / 5 skipped / 130 subtests**（基线 734，新增的就是
+上面那条跨语言金丝雀）；前端 **424 passed** + `vue-tsc` 零错误 + `npm run build` +
+`.e2e/check-frontend-build.js`（基线 395，新增 `qcbatch.test.ts` 29 条：候选镜像逐字断言 /
+`matchesScene` 四种边界 / 进度文案 / `runSceneBake` 的四条规矩与取消点）；
+`.e2e/test-manual-scene.js` **296 断言**（基线 225，新增 **M 段 71 条**）。M 段刻意**另造三景**
+（不复用 H2 那两景：它们的预览字节已在浏览器本地 blob LRU 里，批量再取就是本地命中、一个
+HTTP 都不发，那条路上「每个 id 恰好烤一次」根本验不到）——四行清单摆出四种情形：①②有 NOSR
+→ 每景两张卡；③ 没有 NOSR → 一张卡 + 一条中性提示；④ 盘上没有这一景 → 标红记账、后面的照跑。
+四行第一列**都缺产品段**，所以批量也顺带走通「按影像类型补段」。M 段断言：按钮是那颗橘色令牌
+（`rgb(194,116,58)` 渲染值）/ 点下去先把暂存区清空（18 → 0）/ 五张卡的名字与顺序**严格按行序**
+且 DOM 上 `.ord` 是 `1,1,2,2,3` / 五张卡全是空卡（有身份没像素）且**不激活任何一张** /
+盘上五份 jpg 尺寸逐一核对（600×300 / 200×100 / 500×250 / 160×80 / 400×200）/
+**每个场景 id 恰好烤一次**（`/preview` 5 次、`/siblings` 3 次）/ 失败只记一行且原因是后端原话、
+点明补过哪几段候选 / 失败账**没漏进 .txt**（`statuses` 仍空、`done` 仍 0）/ 点行 → 两张卡点亮
+且**不动活动图**、侧栏真的滚下去再滚回来 / 点开空卡才补像素（600×300、200×100）/
+NOSR 卡 `lqPath` = 场景目录且三处修复入口全灰 / 跑到第一张卡落地就点「停止」→ 收手、
+已落地的卡留着、**不记假失败**。全程无错的 404 口径从「恰好五次」改成「恰好六次」
+（M 段少一次被刻意掐掉的请求：那是 ERR_ABORTED，不是 404）。
+
+**两处与计划书的偏差（如实记）**：① NOSR 卡的 `lqPath` 取**场景目录**而不是计划里写的 `null`
+—— 与「场景芯片」那条入口（`openSceneSibling`）逐字对齐，否则同一种图两条入口进来会长得不一样；
+「不能修复」由 `stageKind` 那道门管（`isIntermediateStage` 三处），不看 `lqPath`。
+② 计划里的 `stores/__tests__/qclist.test.ts` **没写**：`stores/viewer.ts` → `router/index.ts`
+的 `createWebHistory()` 需要 `window`，而离线仓库里没装 jsdom/happy-dom，store 级覆盖改由
+e2e 的 M 段承担。
+
+**e2e 现场踩到的两个坑（都已修，留作经验）**：① `e2eHooks.qcBakeState` 里 `{ ...qc.bakeFails }`
+这样的**浅拷贝交出去的仍是响应式代理**，而代理过 CDP 的 `returnByValue` 会掉成**空壳** →
+e2e 读到 `{ 行名: {} }`、`.reason` undefined，断言以一条 `TypeError` 而不是「断言失败」炸掉
+（实测：`{...外层}` 得 `{"gone":{}}`，`{...那个代理}` 才拿得到字段）。hook 要把数据摊到最里面
+一层再交出去。② 点开空卡那条路要等的是**像素到位**（`thumbW > 0`）而不是「它成了活动图」——
+`activate` 是同步挂 `activeId` 的，取图在后面几拍才回来。
+
+**顺带把 e2e 的后端日志从黑洞改成可用**：`child.stderr.on('data', () => {})` 原来把后端日志直接
+丢掉，而「`GET /api/queue` 报 CORS」这种浏览器报错的正身常常是**后端 500**（Starlette 的 500 由
+`ServerErrorMiddleware` 发出，在 `CORSMiddleware` **外面**，那份响应天然不带 CORS 头）。现在
+保留末尾 40 行、**失败时打出来**，不刷屏。
+
+**未收口**：① 真机**单景均耗时 = ___ 秒**待填（[current-question §6.4](current-question.md) 里
+那个空）—— 它决定「几十景要不要分批」；② 上面那条 CORS 报错**只出现过一次、未复现**：它出现在
+`GET /api/queue` 上，而该请求由 `RoiToolsTab.vue` 的 watch（`activeRec.sceneId` 一变就
+`queue.list()`）发出 —— M 段多点开几张卡就多给几次机会，怀疑是既有链路上的低频抖动（500 或连接
+被重置），**未定性**；后端日志保留已就位，下次复现即可定案；③ 场景库页的「一键解析」入口只有
+清单面板那一处（用户口径如此）。
+
+### 2026-09-28 · 队列页 SSE 泄漏把浏览器连接池占满（开发机）
+
+**症状**：`test-platform.js` **稳定**卡在「等耗时列在场」（4 次以上复现，确定性），页面停在
+`SSE 断开` + 「加载中…」。**后端日志干净得像没事**，浏览器控制台**一条错都没有**。
+
+**根因**：Chrome 每源 6 条连接，而 `lib/api.ts::subscribeQueueEvents` 是 `fetch` + `ReadableStream`
+拼的**文档级** SSE，一条占一个位。整页导航时 Vue 的 `onUnmounted` **不跑**（只有同文档的客户端
+路由才跑），没人 `abort` 那条 fetch → 连接留在池子里；导航 6 次之后，最后一次加载的
+`GET /api/queue` 在渲染进程里排队等空位，**永远发不出去**（请求对象建好了但没上线），于是没有
+响应、没有失败事件、没有报错 —— 页面就这么静止着。
+
+**为什么它没被 bfcache 拒绝**：`EventSource` 浏览器认得并因此**拒绝**把页面放进 bfcache，而
+`fetch` 拼的流它**不认**，于是连着活流的文档照样被冻进 bfcache，堆里的 fetch 跟着活着、socket
+也不放手。实测连续 8 次整页导航，**每次 `pagehide` 都带 `persisted === true`**。
+
+**改动**（`frontend/src/stores/queue.ts`，唯一的产品代码改动）：新增 `_onPageHide` /
+`_onPageShow` —— `pagehide` **不看 `persisted`**，一律收流（清重连定时器 + `_closeStream()` +
+`connected=false` + `_wasDown=true`）；`pageshow` 且 `persisted === true` 时按「重新连上」把流
+接回去（`_wasDown=true` 会让 `_onOpen` 补拉一次列表 —— 离开期间队列可能已经跑完，回来还显示旧
+快照就是谎报）。**第一版按 `persisted` 分流（`if (e.persisted) return;`）是错的**：这条链上
+`persisted` 恒为 true，于是恒不收 —— 往 localStorage 记了一发 `pagehide` 序列才看见
+（「PPPPPPPP」）。
+
+**诊断手法**（机制与三个坑写进 [gui-experience §9.9](../experience/gui-experience.md)）：
+浏览器之外 `netstat -ano -p tcp | findstr :<apiPort>` 数 ESTABLISHED 客户端连接（修前钉在 6 条、
+修后在 1–3 条之间起落）+ 页面内 `fetch('/api/health')` 加 3 秒 `Promise.race`（3 秒不回 = 同一个
+源、页面自己都发不出去 ⇒ 范围锁死在渲染进程，不必再查后端）。`page.on('request')` 是请求**被创建**
+时触发而不是被发出时，排队的请求既不回也不失败，所以「在飞请求」表只能当参考（且对 bfcache 冻住的
+文档会多报）；`main().catch` 跑在 `finally` 关浏览器之后，数 socket 必须在关浏览器**之前**取。
+顺带把 `test-platform.js` 的后端日志（上一条已保留的末尾 40 行）在失败时打出来，并永久保留
+「失败快照」（页面 url/正文/API 记录 + 未跑完请求 + 浏览器控制台 + 非 2xx + 后端尾部）。
+
+**验证**：`test-platform.js` ✅ **26 项断言**（连跑 6 次，5 次全绿；连接数不再钉在 6）；前端
+`vitest` **424 passed**（`queue.test.ts` 40 条含新增的 window 监听）；`test-manual-scene.js`
+✅ **296 项断言**（重建 dist 后跑）；`vue-tsc --noEmit` 干净 + `npm run build` 通过。
+
+**未收口**：① 修后另有一次**不同断言**的失败、**只出现一次未复现** ——
+`未自动提交：此时队列仍只有上一任务 (0)`（[test-platform.js:496](../../.e2e/test-platform.js)）：
+快照显示队列页处于**空态**（`暂无 SR 任务`、`rows: 1`、`SSE 已连接`、无 `.qp-err`、API 记录
+`200 scenes / 200 queue / 200 queue`），即 `list()` 已落地且服务端回了空列表。已排除本轮的改动
+（它只动收流，改不出「服务端回空列表」）；`提交 SR` 走的是 `router.push` 客户端路由、共用同一个
+Pinia store，理论上此时 store 里已有上一任务。**未定性**，下次复现时失败快照会给出更多线索。
+② `.e2e/` 下有 **14 个**脚本把仓库路径写死成搬家前的 `D:/BaiduNetdiskDownload/sr_agent_platform/…`
+（`grep -l "BaiduNetdiskDownload/sr_agent_platform" .e2e/*.js` 可数），**当前跑不起来，不是回归**；
+活着的四套是 `test-scenes` / `test-vue-viewer` / `test-manual-scene` / `test-platform`。
+
+---
+
 ## 附录：原 §3「背景决策」全文（2026-08-30 / 08-31 定调，逐字保留）
 
 > 本节随《平台现状》重构自 `current-question.md` 迁出。其中仍然生效的决策已按主题并入

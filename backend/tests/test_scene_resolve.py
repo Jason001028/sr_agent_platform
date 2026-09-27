@@ -48,6 +48,12 @@ PROD_MID = "A_B_20260917124710_200536960_101_001_L1_PAN"
 MID_OTHER = "A_B_20260917124710_200536960_102_001_L1_PAN"
 #: 卫星型号层（生产名的第 0 段）。
 SAT_NAME = "A"
+#: 《待修复清单》第一列的形态：**省掉产品段**（盘阵上的景级目录带 `_PAN`）。
+#: 那一行的第二列写着「影像类型:pan」，平台据此把产品段补回去。
+NAME_NOPROD = "A_B_20260917124710_200536960_101_0005_001_L1"
+#: 同一个景（段号/景号相同）的多光谱目录，用来验「按影像类型补哪一段」。
+SCENE_NAME_MSS = NAME_NOPROD + "_MSS"
+PROD_MID_MSS = "A_B_20260917124710_200536960_101_001_L1_MSS"
 
 
 def make_scene(dirp, name, w=320, h=640, meta=True, tif=True):
@@ -262,6 +268,84 @@ class TestResolveOk(ResolveBase):
         self.assertEqual(res["input_name"], "PAN.tif")
         self.assertEqual(res["mask_path"], (d / "PAN_mask.tif").as_posix())
         self.assertEqual(r.json()["row"]["name"], "PAN")
+
+
+class TestResolveProductlessName(ResolveBase):
+    """《待修复清单》第一列的名字**省掉产品段**（2026-09-27 用户报的 bug）。
+
+    清单上写 `…_101_0005_001_L1`，盘阵上的景级目录却是 `…_101_0005_001_L1_PAN`
+    （那一行的第二列写着「影像类型:pan」）。少这一段，反推出来的**景级与段级两层**
+    目录名各少一段 —— 段级名正是由完整名字切出来的 —— 两条日期候选一起落空，
+    一批图整批打不开。补哪一段由请求体的 `product` 定，没给/认不出就 `_PAN` 在先。
+    """
+
+    @property
+    def mss_dir(self) -> Path:
+        return self.sat_dir / PROD_MID_MSS / SCENE_NAME_MSS
+
+    def test_productless_name_opens_pan_dir(self):
+        """不给 product：默认按 _PAN 补 —— **两层目录名都要跟着补对**（景级 + 段级）。"""
+        d = self.make_scene()
+        r = self.client().post("/api/scenes/resolve", json={"name": NAME_NOPROD})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["row"]["lq_path"], d.as_posix())
+
+    def test_manifest_image_type_decides_product(self):
+        """那一行写着「影像类型:mss」→ 补 _MSS（大小写不限）。PAN 那份同时在，
+        证明命中的是提示那条而不是默认那条。"""
+        make_scene(self.mss_dir, SCENE_NAME_MSS)
+        self.make_scene()
+        for hint in ("mss", "MSS", " mSs "):
+            with self.subTest(hint=hint):
+                r = self.client().post("/api/scenes/resolve",
+                                       json={"name": NAME_NOPROD, "product": hint})
+                self.assertEqual(r.status_code, 200, r.text)
+                self.assertEqual(r.json()["row"]["lq_path"],
+                                 self.mss_dir.as_posix())
+
+    def test_pan_wins_when_both_products_exist(self):
+        """两个产品目录都在（同一段号景号）时，默认那条是 _PAN —— 顺序即优先级。"""
+        self.make_scene()
+        make_scene(self.mss_dir, SCENE_NAME_MSS)
+        r = self.client().post("/api/scenes/resolve", json={"name": NAME_NOPROD})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["row"]["lq_path"], self.scene_dir.as_posix())
+
+    def test_unusable_image_type_falls_back_to_pan(self):
+        """`PMS` 这类认不出的影像类型当没给（它是传感器，不是产品）→ 仍默认 _PAN。"""
+        d = self.make_scene()
+        for hint in ("PMS", "全色", ""):
+            with self.subTest(hint=hint):
+                r = self.client().post("/api/scenes/resolve",
+                                       json={"name": NAME_NOPROD, "product": hint})
+                self.assertEqual(r.status_code, 200, r.text)
+                self.assertEqual(r.json()["row"]["lq_path"], d.as_posix())
+
+    def test_name_with_product_segment_is_untouched(self):
+        """名字自带产品段（真机形态）：不补任何段，行为与以往逐字相同。"""
+        d = self.make_scene()
+        r = self.client().post("/api/scenes/resolve",
+                               json={"name": SCENE_NAME, "product": "mss"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["row"]["lq_path"], d.as_posix())
+
+    def test_product_must_be_a_string(self):
+        r = self.client().post("/api/scenes/resolve",
+                               json={"name": NAME_NOPROD, "product": 7})
+        self.assertEqual(r.status_code, 400, r.text)
+        self.assertIn("product", r.json()["detail"])
+
+    def test_404_lists_product_variants_and_explains(self):
+        """两天都落空时 404 要说明「补过哪几段」：候选里凭空多出两条自己拼的
+        目录名，不说清用户只会更懵。"""
+        other = "A_B_20260917124710_200536960_101_0009_001_L1"   # 盘上没有这一景
+        r = self.client().post("/api/scenes/resolve", json={"name": other})
+        self.assertEqual(r.status_code, 404, r.text)
+        detail = r.json()["detail"]
+        self.assertIn("没有产品段", detail)
+        self.assertIn("成像日与次日都找过", detail)
+        self.assertIn(other + "_PAN", detail)
+        self.assertIn(other + "_MSS", detail)
 
 
 class TestResolveErrors(ResolveBase):

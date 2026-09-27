@@ -296,6 +296,38 @@ export const useQueueStore = defineStore('queue', () => {
     _dispose = subscribeQueueEvents(cfg, _onEvent, _onError, _onOpen, _onClose);
   }
 
+  /* 整页导航离开（F5 / 关标签 / 点外链）时 Vue 的 onUnmounted **不会跑** —— 没人去
+     abort 那条 SSE 的 fetch，于是连接留在浏览器的连接池里占位，后端那个 subscriber
+     也一直留着。
+
+     2026-09-28 实测（.e2e/test-platform.js）：连续 8 次整页导航，**每一次 `pagehide`
+     都带 `persisted === true`**（全都进了 bfcache）。bfcache 里的文档整个 JS 堆都还
+     活着，那条 fetch（ReadableStream）拼的 SSE 也跟着活着 —— 每导航一次占住一条连接，
+     Chrome 对每个源只给 6 条，占满之后最后一次加载的 `GET /api/queue` 在浏览器队列里
+     等了十几秒都没发出去（后端日志干净得像没事，它压根没收到），页面就停在
+     「SSE 断开 / 加载中…」。所以这里**不看 `persisted`**：文档要走就收流。
+
+     为什么 Chrome 会把连着流的页面放进 bfcache：`EventSource` 它认得、会因此拒绝
+     bfcache，而 `fetch` + ReadableStream 拼的流它不认（api.ts 的 subscribeQueueEvents
+     正是后者）。这也意味着「进 bfcache 就不收」的那版写法在这条链上是**恒不收**。 */
+  function _onPageHide(): void {
+    if (_retry !== null) { clearTimeout(_retry); _retry = null; }
+    _closeStream();
+    connected.value = false;
+    // 置上：被 bfcache 带回来时按「重新连上」处理，_onOpen 会补拉一次列表 ——
+    // 离开期间队列可能已经跑完了，回来还显示旧快照就是谎报。
+    _wasDown = true;
+  }
+  /** 从 bfcache 回来（只有 `persisted === true` 才是还原，正常加载不用管）：
+   *  引用计数还在，把流接回去。 */
+  function _onPageShow(e: PageTransitionEvent): void {
+    if (e.persisted && _refs > 0) _openStream();
+  }
+  if (typeof window !== 'undefined') {
+    window.addEventListener('pagehide', _onPageHide);
+    window.addEventListener('pageshow', _onPageShow);
+  }
+
   function _scheduleRetry(): void {
     if (_refs <= 0 || _retry !== null) return;
     const wait = _backoff;

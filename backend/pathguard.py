@@ -239,6 +239,52 @@ def scene_path_template() -> str:
 #: 口径里也有空格形态（`JXGF07D03 PMS 20260622052600 … MSS`）—— 两种都认。
 _FIELD_SEP_RE = re.compile(r"[_\s]+")
 
+#: 产品段（生产名的**最后一段**）的已知取值。质检部门的《待修复清单》里，
+#: 名字**约定俗成省掉这一段**（第一列写 `…_101_0020_001_L1`，而盘阵上的景级目录
+#: 叫 `…_101_0020_001_L1_PAN`）—— 那一行的第二列写着「影像类型:pan」。
+_PRODUCT_CODES = ("PAN", "MSS")
+
+
+def scene_name_products(stem: str,
+                        hinted: str | None = None) -> list[tuple[str, str]]:
+    """名字该试的「完整生产名 + 产品段」候选（有序）；**原样那条恒排第一**。
+
+    清单上的名字可以没有产品段（见 `_PRODUCT_CODES`），拿它去反推会同时拼错
+    **两层**目录名 —— 景级少一段、段级（`scene_name_layers` 去掉景号那段）也跟着
+    少一段 —— 于是两条日期候选一起落空，一批图整批打不开（2026-09-27 用户报的
+    bug）。这里把该补的段补回去，补在**反推之前**（段级名由完整名字重新切出来，
+    补完自然就对上了）。
+
+    `hinted` = 清单那一行写着的**影像类型**（`PAN` / `pan` / `MSS`，大小写不限）：
+    认得出就把它排在其他产品之前；没给、或认不出（`PMS`、`全色`、空串）就按
+    `_PRODUCT_CODES` 的次序 —— 用户口径：「默认按照 _PAN 打开即可」。
+
+    名字**自己就带产品段**时（`…_L1_PAN`）只回原样一条 —— 真机形态一个候选都不
+    多花，行为与以往逐字相同。**带影像后缀的名字也一条都不补**：那种名字是拖进来的
+    **文件**名，能不能认下来由双指纹（`_fingerprint_mismatch`）说了算，而盘阵上的
+    文件名必然带产品段 —— 补出来的名字永远过不了它，只会多花几次 stat、再往 404 的
+    候选清单里塞一条 `…_preview.jpg_PAN` 这种四不像（后缀后面接产品段，盘阵上从没有
+    这种名字）。补出来的段沿用**原文的分隔符**（真机是下划线，空格形态只在用户口径里
+    出现过，同 `scene_name_layers`）。返回的第二个值是**补出来的产品段**（原样那条是
+    空串），调用方拿它写「试过哪些」的说明。
+    """
+    raw = str(stem).strip()
+    if not raw:
+        return []
+    if _RASTER_EXT_RE.search(raw):
+        return [(raw, "")]           # 拖进来的文件名：见上一段，只试原样那一条
+    tokens = [t for t in _FIELD_SEP_RE.split(raw) if t]
+    if tokens and tokens[-1].upper() in _PRODUCT_CODES:
+        return [(raw, "")]
+    order = list(_PRODUCT_CODES)
+    h = str(hinted or "").strip().upper()
+    if h in order:
+        order.remove(h)
+        order.insert(0, h)
+    seps = _FIELD_SEP_RE.findall(raw)
+    sep = seps[-1] if seps else "_"
+    return [(raw, "")] + [(raw + sep + c, c) for c in order]
+
 
 def scene_name_layers(name: str) -> tuple[str, str] | None:
     """按生产命名规则拆出「卫星型号」与「段级产品目录名」；不合规则返回 None。

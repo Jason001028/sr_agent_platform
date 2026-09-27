@@ -47,13 +47,13 @@ import {
 } from '../lib/api.js';
 import type { SceneResolveResult, SceneSibling, SceneSiblings } from '../lib/api.js';
 import { classifyImages, imageKindOf } from '../lib/imageFiles.js';
-import type { SceneOpenMeta } from '../lib/scene.js';
+import type { SceneOpenMeta, SceneRow } from '../lib/scene.js';
 import { isIntermediateStage, stageLabel, stageRefusal } from '../lib/stage.js';
 import type { StageKind } from '../lib/stage.js';
 import { buildStats, luma, STAT_HI } from '../lib/roiStats.js';
 import type { RoiStats } from '../lib/roiStats.js';
 import { downloadBlob } from '../lib/saver.js';
-import { useQueueStore } from './queue.js';
+import { useQueueStore, pathLeafOf } from './queue.js';
 import router from '../router/index.js';
 
 export type DrawTool = 'rect' | 'polygon' | 'wand' | 'del';
@@ -97,6 +97,15 @@ export interface ViewerRec {
    *  但它仍属于某个场景目录 —— 卡片上那颗「同一景共用一个序号」的小标按这一项
    *  分组。裸 .tif / 场景库之外的单张图没有场景目录，这里与 `lqPath` 同为 null。 */
   sceneDir?: string | null;
+  /** 「一键解析」批量入列的卡片：**只有身份、没有像素**，附上「第一次点开时去哪儿取图」
+   *  的两样东西 —— 取图认的库行 + 装回像素要的元数据。
+   *
+   *  为什么不在入列时就把像素装上：批量一次几十景，而一份 ÷4 的 4 万² 预览在
+   *  `applySceneJpgToRec` 之后会同时留下 thumb（canvas，RGBA 约 400MB）与 src
+   *  （Float32Array），**一景两张卡 ≈ 1.6GB** —— 浏览器单次分配上限约 2GB，批量必爆。
+   *  所以批量只负责把 jpg 烤到盘上，点开时再取（那时命中服务端缓存，秒回）。
+   *  拖入链与场景库链的卡片创建时像素就在手，这个字段恒为 undefined。 */
+  card?: { row: SceneRow; meta: SceneOpenMeta };
   /** 已经预热过缩放的那份**显示画布**（`=== thumb` 即热过）。存引用而不是布尔：
    *  换过像素（重新解码 / 换预览档位）就是新画布，缩放缓存不作数，得重新热。 */
   warmed?: KitCanvas | null;
@@ -866,6 +875,43 @@ export const useViewerStore = defineStore('viewer', () => {
     return n;
   }
 
+  /* ---------------- 点亮（右侧清单行 → 左侧卡片） ---------------- */
+
+  /** 被「点亮」的卡片 id（《待修复清单》里点中某一行时落下来的那一景）。
+   *
+   *  **刻意与 `qclist.selName` 分开**，不做成它的 computed：`selName` 另有写者
+   *  （`selectForScene` 的自动选中、导入/关闭时的复位），那些都不该让左侧列表滚一下；
+   *  匹配基数也不同 —— `selName` 是「行名 1:1 相等」，点亮是「场景目录 1:N」（一景
+   *  落两张卡：本体 + NOSR）。 */
+  const litIds = ref<number[]>([]);
+  /** 点亮代数：每次点亮 +1，FileList watch 它来滚动（**不 watch `litIds`**：同一批
+   *  卡片被连着点亮两次时数组内容一样，watch 不会触发，用户按了第二次却什么都没发生）。 */
+  const litTick = ref(0);
+
+  /** 点亮场景目录末段落在 `cands` 里的**全部**卡片，返回被点亮的 id。
+   *
+   *  排在最前的那张是滚动的目标：**当前活动的那张**优先（用户此刻就在看它），
+   *  其次是本体（可修复的那张），最后按列表顺序。 */
+  function lightCards(cands: readonly string[]): number[] {
+    const want = new Set(cands.filter(Boolean));
+    if (!want.size) { clearLights(); return []; }
+    const hit = recs.value.filter((r) => {
+      const leaf = r.sceneDir ? pathLeafOf(r.sceneDir) : '';
+      return !!leaf && want.has(leaf);
+    });
+    const first = hit.find((r) => r.id === activeId.value)
+      ?? hit.find((r) => (r.stageKind ?? 'input') === 'input')
+      ?? hit[0];
+    const ids = first ? [first.id, ...hit.filter((r) => r.id !== first.id).map((r) => r.id)] : [];
+    litIds.value = ids;
+    if (ids.length) litTick.value++;
+    return ids;
+  }
+
+  function clearLights(): void {
+    if (litIds.value.length) litIds.value = [];
+  }
+
   /* ---------------- 点选清单 ---------------- */
 
   /** 新拖入的图自动加入清单（幂等）。 */
@@ -1062,6 +1108,12 @@ export const useViewerStore = defineStore('viewer', () => {
       renderTick.value++;
       return;
     }
+    // 「一键解析」批量入列的盘阵卡片：只有身份、没有像素（见 insertSceneCard）。
+    // 第一次点它才去取图 —— 取法与拖入链同源（applySceneJpgToRec），所以点开之后
+    // 这张卡与拖进来那张完全同类（含掩码坐标与提交 SR）。
+    // **必须排在下面两条路之前**：这条路没有本地文件可解码，掉进 decodeRec 就会拿着
+    // 那个 0 字节的 File 去 probeImage，报一句莫名其妙的「无法读取文件属性」。
+    if (rec.card) { await loadCardPixels(rec); return; }
     // 未解码：先试着反推盘阵目录。**命中就直接用服务端烘焙 JPG，不做本地解码** ——
     // 真机上一次全图解码要几十秒、几百 MB，而盘阵那份 1/2 预览已经在手边上；
     // 顺带也避开了「本地图先画出来、几百毫秒后又被 JPG 换掉」的闪烁。
@@ -1270,6 +1322,136 @@ export const useViewerStore = defineStore('viewer', () => {
     return true;
   }
 
+  /* ---------------- 一键解析：批量入列的「空卡」 ----------------
+     批量一次几十景（每景两张卡），而 `applySceneJpgToRec` 装一次像素会留下
+     thumb（canvas，RGBA 约 400MB）+ src（Float32Array）——一景两张卡 ≈1.6GB，
+     浏览器单次分配上限约 2GB，装到第三四张就爆。所以批量只负责**把 jpg 烤到盘上**，
+     卡片生下来只有身份；第一次点开时 `activate` 的懒分支才去取图（那时命中服务端
+     缓存，秒回）。「没打开过的图没有像素」本来就是这套代码的既有状态，见
+     FileThumb.vue 顶部那段注释。 */
+
+  /** 入列一张只有身份、没有像素的盘阵场景卡，返回 rec id。
+   *
+   *  **不 activate、不弹遮罩、不 warmZoom、不碰 busy** —— 批量几十张，任何一样都会
+   *  把界面锁住或把用户的视野抢走。其余字段按「打开过」的口径一次填足（尺寸、字节数、
+   *  环节标签都在），列表里看着是一张齐了的卡，只有小图横幅是占位。 */
+  function insertSceneCard(meta: SceneOpenMeta, row: SceneRow): number {
+    const dup = findRecByMeta(meta);
+    if (dup) return dup.id;        // 同一景已在列表里（批量前会清空，这里只是兜底）
+    const rec: ViewerRec = {
+      id: nextId++,
+      // 空 File：这条路的像素永远从服务端取（见 card），它只为满足类型存在，绝不被读。
+      file: markRaw(new File([], meta.name)),
+      probe: null, name: meta.name, size: row.size_bytes || 0,
+      W: meta.W, H: meta.H,
+      thumb: null, src: null, srcw: 0, srch: 0, nbands: 0, invert: false,
+      stats: null, route: 'jpg', sceneId: meta.sceneId,
+      lqPath: meta.lqPath, sceneDir: meta.sceneDir ?? null,
+      layout: '', status: '待打开（已烘焙）', statusCls: '',
+      paintedMode: null, maskRois: null, token: 0,
+      // markRaw：里面是行对象与元数据，不需要（也不该）被深代理
+      card: markRaw({ row, meta }),
+    };
+    rec.stageKind = meta.stageKind ?? 'input';
+    rec.stageLabel = stageLabel(rec.stageKind, meta.stageSuffix, rec.name);
+    rec.serverMaskPath = meta.serverMaskPath ?? null;
+    recs.value.push(rec);
+    noteSceneDir(rec);
+    return rec.id;
+  }
+
+  /** 同一张卡正在取图的那些。**按场景 id 去重** —— 一个场景 id 只对应一张 rec
+   *  （`insertSceneCard` 用 `findRecByMeta` 去重），所以「这个 id 已经在取」就等于
+   *  「这张卡已经在取」：用户对着同一张空卡连点两下不会起两个请求去读同一个大文件。
+   *  （它挡的是**整条取图+装像素**；跨「批量烤」与「点开取图」两条路的那层合流见
+   *  `fetchSceneJpgShared`。） */
+  const cardFetchInflight = new Set<string>();
+
+  /** 同一个场景、同一档位正在取的图。键是 `场景 id|档位` —— **档位不同就是两张不同的
+   *  图**，不能合。
+   *
+   *  为什么两条路都要走它：用户完全可能正好在批量烤到第 5 景时点开第 5 景那张空卡，
+   *  于是「批量烤」与「点开取图」同时要这一份。`fetchSceneJpg` 只缓存**结果**、不合并
+   *  **在飞**的请求，而服务端的幂等判据是「落盘那份的 mtime ≥ 源」，第二次请求发出去时
+   *  第一份还没写完 —— 结果就是同一景读两遍大图、烤两遍。合流之后第二个调用等第一个。
+   *
+   *  失败也要摘掉表项：留一个已 reject 的 promise 在表里，后续每次调用都会立刻炸同一个错。 */
+  const sceneJpgInflight = new Map<string, Promise<Blob>>();
+
+  function fetchSceneJpgShared(row: SceneRow, div: number): Promise<Blob> {
+    const key = row.id + '|' + div;
+    const flying = sceneJpgInflight.get(key);
+    if (flying) return flying;
+    const tracked = fetchSceneJpg(loadSrConfig(), row, div).finally(() => {
+      if (sceneJpgInflight.get(key) === tracked) sceneJpgInflight.delete(key);
+    });
+    sceneJpgInflight.set(key, tracked);
+    return tracked;
+  }
+
+  /** 取这张卡的像素并装回去（`insertSceneCard` 与 `activate` 的懒分支共用）。
+   *
+   *  装回失败（`applySceneJpgToRec` 返回 false）= 「期间有更新的写者接手 / 这张卡已经
+   *  被移除了」，**那是被取消，不是失败** —— 静默返回，绝不写成取图失败。 */
+  async function fetchCardPixels(rec: ViewerRec): Promise<void> {
+    const card = rec.card;
+    if (!card) return;
+    const key = card.meta.sceneId;
+    if (cardFetchInflight.has(key)) return;    // 这张卡已经在取了（连点两下）
+    cardFetchInflight.add(key);
+    try {
+      const div = previewDiv.value;
+      const blob = await fetchSceneJpgShared(card.row, div);
+      await applySceneJpgToRec(rec, card.meta, blob,
+        `盘阵 JPG（${previewDivLabel(div)} 尺度 + 直方图均衡，服务端已烘焙）`);
+      // **成败都摘掉 card**：成功 = 像素已在 rec 里；返回 false = 这一笔落空了（被取消 /
+      // 已被更新的写者接手），但那份新像素也不是这份空卡能再取出来的 —— 留着它只会让
+      // 下次点开再走一遍「取图」而不是直接用；而 rec 若已被移除，改它也无人在意。
+      rec.card = undefined;
+    } finally {
+      cardFetchInflight.delete(key);
+    }
+  }
+
+  /** 批量路：把这一张卡的 jpg 烤到盘上（服务端那份 + 本地 LRU），**不装像素**。
+   *
+   *  抛错 = 这一景这一步失败了（由批量那边记账）；正常返回 = 成功、或这张卡已经不在了。 */
+  async function bakeCardPixels(id: number): Promise<void> {
+    const rec = recs.value.find((r) => r.id === id);
+    if (!rec || !rec.card) return;             // 已经被移除 / 已经装上了
+    rec.status = '正在烘焙…';
+    try {
+      // 取到手就扔掉：服务端那份已落盘，本地 LRU 也留了一份（api.ts 的 previewBlobs），
+      // 所以点开这张卡时是一次命中、直接出图，不会重烤。
+      await fetchSceneJpgShared(rec.card.row, previewDiv.value);
+      rec.status = '待打开（已烘焙）';
+      rec.statusCls = '';
+    } catch (e) {
+      rec.status = '烘焙失败';
+      rec.statusCls = 'err';
+      rec.linkNote = e instanceof Error ? e.message : String(e);
+      throw e;                                 // 交给批量记进失败账
+    }
+  }
+
+  /** 点击路：取像素 + 上屏 + 预热缩放（遮罩盖着，把首次缩放那笔一次性付掉）。 */
+  async function loadCardPixels(rec: ViewerRec): Promise<void> {
+    busy.value = true;
+    showMask('正在取盘阵场景的图…', rec.name + '（已烘焙的预览，'
+      + previewDivLabel(previewDiv.value) + ' 尺度）', false);
+    try {
+      await fetchCardPixels(rec);
+      await warmZoom(rec);
+    } catch (e) {
+      const t = e instanceof Error ? e.message : String(e);
+      rec.status = '取图失败'; rec.statusCls = 'err'; rec.linkNote = t;
+      showErr('「' + rec.name + '」取图失败：' + t);
+    } finally {
+      hideMask(); busy.value = false;
+      void maybePrefetchCompare();             // 对比模式里换了图 → 可能换了场景
+    }
+  }
+
   /** `side` 只在分屏下由调用方（场景快捷入口按活动侧 / 拖放落点）给出。 */
   async function openSceneJpg(meta: SceneOpenMeta, blob: Blob, side?: 'A' | 'B') {
     const dup = findRecByMeta(meta);
@@ -1337,6 +1519,40 @@ export const useViewerStore = defineStore('viewer', () => {
       // 关掉的是**非活动侧**那张：那一格当场空出来，得重画（活动侧什么都没变）
       renderTick.value++;
     }
+  }
+
+  /** 清空左侧暂存区（「一键解析」按键的第一件事：先清空，再看着它长出来）。
+   *
+   *  与逐张 removeRec 的差别有三处，都是刻意的：
+   *  * **只清视图，不动盘上任何文件** —— 所以这颗按钮不弹二次确认：卡片随时能由
+   *    那份 .txt 再跑一次长回来，它不是数据丢失；
+   *  * 顺手 `stopPrefetch()`：在飞的对比预取还指着已经不在列表里的 rec；
+   *  * 顺手清 `sceneOrdinals` —— 暂存区整个空了之后，序号该从 1 重新数（序号是
+   *    「本次会话内按出现顺序发号」，一批新卡片从第 7 号起头就说不通了）。只删一张
+   *    不等于清空，`removeRec` 仍然不清序号。
+   *
+   *  返回清掉几张（调用方报给用户）。 */
+  function clearRecs(): number {
+    const n = recs.value.length;
+    stopPrefetch();                      // 在飞的预取自己发现代次变了就收手
+    if (markerTimer !== null) { clearTimeout(markerTimer); markerTimer = null; }
+    recs.value = [];
+    compareList.value = [];
+    paneA.value = null;
+    paneB.value = null;
+    viewFor.A = null;
+    viewFor.B = null;
+    activeId.value = null;
+    activeSide.value = 'A';              // 两格都空了 → 活动侧回左，view 写回 viewA
+    view.value = { scale: 1, ox: 0, oy: 0 };
+    marker.value = null;
+    exitDraw();                          // 画了一半的框/多边形跟着这张图一起作废
+    clearRoiSel();
+    clearCloud();
+    clearLights();
+    sceneOrdinals.clear();
+    renderTick.value++;
+    return n;
   }
 
   /* ---------------- 拉伸 / 视图 ---------------- */
@@ -2412,6 +2628,8 @@ export const useViewerStore = defineStore('viewer', () => {
     sidebarCollapsed, busy, srBusy,
     // 文件 / 解码
     addFiles, removeRec, activate, openSceneJpg, openLocalImage,
+    // 一键解析：清空暂存区 + 批量入列的「空卡」 + 点亮联动
+    clearRecs, insertSceneCard, bakeCardPixels, litIds, litTick, lightCards, clearLights,
     // 拉伸 / 视图
     setStretch, setPreviewDiv, setCanvasSize, fit, onWheel, onPan, locatePixel,
     // 掩码

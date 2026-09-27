@@ -7,18 +7,22 @@
  *
  * 三条要点：
  * - 面板随清单存在与否两种形态：没导入只有一行「导入 .txt」；导入后是列表 + 编辑区。
- * - 「当前打开的图」自动选中对应行（按 lqPath 末段 = 生产全名匹配，见 store.selectForScene）。
+ * - 「当前打开的图」自动选中对应行（按场景目录末段 = 生产全名匹配，口径见
+ *   store.selectForScene —— 清单那列多半缺产品段，所以要按候选集合对，不能逐字比）。
  *   点该行会把画布跳到清单上的坐标 —— 注意清单写的是 **(行, 列)**，而 locatePixel(x, y)
  *   是 **(列, 行)**，传参顺序见 onRow。
  * - 「同步」（写回盘阵）写在页脚而不是每行：它写的是整份文档，不是某一行的状态。
+ * - 「一键解析」（橘色那颗）按清单顺序逐景烘焙并往左侧暂存区落卡；点某一行会把左侧
+ *   对应的卡点亮并滚到眼前（火候全在 viewer.lightCards / FileList 的 .lit）。
  */
 import { computed, ref, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import { useQcListStore } from '../stores/qclist';
 import { useScenesStore } from '../stores/scenes';
-import { useQueueStore, pathLeafOf } from '../stores/queue';
+import { useQueueStore } from '../stores/queue';
 import { QC_STAGES, QC_FINALS, QC_STATUS_LABEL, isTerminal } from '../lib/qclist';
 import type { QcIssue, QcStatus } from '../lib/qclist';
+import { BAKE_STAGE_LABEL, sceneNameCandidates } from '../lib/qcbatch';
 
 const viewer = useViewerStore();
 const qc = useQcListStore();
@@ -30,10 +34,15 @@ const fileInput = ref<HTMLInputElement | null>(null);
 const onlyOpen = ref(false);
 const opening = ref(false);
 
-/** 当前打开的图对应的清单行名（没有 / 本地图 → 空串）。 */
+/** 当前打开的图对应的清单行名（没有 / 本地图 → 空串）。
+ *
+ *  取**场景目录**而不是 lqPath 的末段：中间产物（SR 产物 / NOSR）的 lqPath 可能为空，
+ *  而场景目录一定有 —— 批量入列后左右两侧的联动全靠它对上。对上与否交给 store 的
+ *  `rowForScene`（它才认「清单缺产品段」这件事，逐字比在这条路上恒不成立）。 */
 const activeName = computed(() => {
-  const lp = viewer.activeRec?.lqPath;
-  return lp ? pathLeafOf(lp) : '';
+  const rec = viewer.activeRec;
+  const dir = rec?.sceneDir ?? rec?.lqPath;
+  return qc.rowForScene(dir)?.name ?? '';
 });
 
 const shown = computed(() => {
@@ -77,13 +86,32 @@ async function sync() {
   }
 }
 
-/** 点行：选中；若这行就是当前打开的图，顺手把视图跳过去。 */
+/** 点行：选中；左侧对应的卡点亮并滚到眼前；若这行就是当前打开的图，顺手把视图跳过去。
+ *
+ *  点亮用**候选集合**（这一行的名字补上产品段后的几种形态）去对卡片的场景目录名，
+ *  命中的是同一景的**全部**卡（本体 + NOSR 两张）。它与 `qc.select` 的 1:1 名字相等
+ *  互不干扰：前者只给左栏上色 + 滚动，后者驱动这一行的选中态与「打开 / 当前」。
+ *  没点亮任何一张时只出一声 toast —— 假阴性最坏是多说一句话，绝不会点亮错的一张。 */
 function onRow(it: QcIssue) {
   qc.select(it.name);
+  const ids = viewer.lightCards(sceneNameCandidates(it.name, it.imgType));
+  if (!ids.length) viewer.showToast('左侧还没有这一景的卡片');
   if (it.name === activeName.value && it.row !== null && it.col !== null) {
     // 清单是「行列号」(行, 列)，locatePixel(x, y) 要的是 (列, 行) —— 别照抄顺序
     viewer.locatePixel(it.col, it.row);
   }
+}
+
+/* ---------------- 一键解析 ---------------- */
+
+const GO_TITLE = '按清单顺序逐景解析并烘焙两份 jpg（本体 + NOSR），每景在左侧落两张卡；'
+  + '失败逐条记账并继续下一景，随时可停。几十景要十几分钟。';
+
+/** 按钮只有两种动作：待命时开跑、跑着时收手。正在收手（stopping）时再点没有意义
+ *  —— 那一景的取图请求停不下来，得等它烤完。 */
+function onBake() {
+  if (qc.bakeState === 'running') qc.stopBake();
+  else if (qc.bakeState !== 'stopping') void qc.bakeAll();
 }
 
 /** 去盘阵把这一行对应的场景开出来（不是当前图的行才显示这个入口）。 */
@@ -91,9 +119,12 @@ async function onOpen(it: QcIssue) {
   if (opening.value) return;
   opening.value = true;
   try {
+    // 名字里**没有产品段**（清单第一列的常态：`…_001_L1`，盘阵上叫 `…_001_L1_PAN`），
+    // 补哪一段由后端按这一行的影像类型定 —— 把它一起递过去（`imgType` 是 desc 里那格
+    // 「影像类型:pan」，没写就是空串，后端见空串默认 _PAN）。
     // openByName 按「错误串」返回（'' = 成功）：本面板在 /viewer，scenes.error
     // 在那里没人渲染，得把原因接过来喂 viewer 的错误条，否则点了像没反应。
-    const err = await scenes.openByName(it.name);
+    const err = await scenes.openByName(it.name, it.imgType);
     if (err) viewer.showErr(err);
   } finally {
     opening.value = false;
@@ -115,8 +146,15 @@ function toneCls(name: string): string {
   return 'st-none';
 }
 
-// 当前打开的图变了 → 自动选中对应的行（切图时不用再自己找一遍）
-watch(() => viewer.activeRec?.lqPath, (lp) => qc.selectForScene(lp), { immediate: true });
+// 当前打开的图变了 → 自动选中对应的行（切图时不用再自己找一遍）。
+// watch 的键与 activeName 同源（场景目录优先），否则两边会在中间产物上分歧。
+// 这里**只**选中、不点亮：点亮是「人点了一行」的动作，自动选中跟着闪一下反而分不清
+// 是「我点的」还是「它自己跳的」。
+watch(
+  () => viewer.activeRec?.sceneDir ?? viewer.activeRec?.lqPath,
+  (dir) => qc.selectForScene(dir),
+  { immediate: true },
+);
 
 // 提交 SR 后把该行推进到「已提交任务」。tasks 每次都是**整个数组换掉**
 // （queue.ts 的 list() 与 SSE 的 mergeJobUpdate 都赋值 tasks.value），所以浅 watch 够。
@@ -166,6 +204,21 @@ watch(
       />
     </h4>
 
+    <!-- 一键解析：单占一行，不挤进 .qc-h（那一行 400px 里已有标题/计数/换一份/未完成/✕，
+         再塞一颗要抢戏的橘色按钮，标题会被压成省略号）。
+         **不做二次确认弹窗**：清空只清视图、盘上什么都没动，卡片重跑一遍就回来了。 -->
+    <div v-if="qc.loaded" class="qc-go-row">
+      <button
+        type="button"
+        class="qc-go"
+        :class="qc.bakeState"
+        :disabled="qc.bakeState === 'stopping'"
+        :title="GO_TITLE"
+        @click="onBake"
+      >{{ qc.bakeHead }}</button>
+      <span class="qc-go-txt">{{ qc.bakeLine }}</span>
+    </div>
+
     <p v-if="!qc.loaded" class="qc-empty">
       导入质检部门的《待修复清单.txt》：逐条看伪影坐标与责任人，标记进度，
       修完一键把结果写回同一份文档。
@@ -178,7 +231,7 @@ watch(
           v-for="it in shown"
           :key="it.name"
           class="qc-row"
-          :class="{ on: qc.selName === it.name }"
+          :class="{ on: qc.selName === it.name, 'bake-fail': !!qc.bakeFails[it.name] }"
           @click="onRow(it)"
         >
           <div class="qc-l1">
@@ -207,6 +260,21 @@ watch(
       <p v-else class="qc-empty">
         {{ onlyOpen ? '没有未完成的行了。' : '这份清单里没有解析出问题行。' }}
       </p>
+
+      <!-- 一键解析的账：失败逐条给「第几步 + 后端原话」（原话里含试过哪些候选、各自
+           为什么不行），「缺 NOSR」是盘上的事实、用中性色与红的失败分开。
+           **不能把原因塞进 .qc-l2**：那是每行既有的一格，e2e 逐字断言它的内容与顺序。 -->
+      <div v-if="qc.bakeFailList.length || qc.bakeNoteList.length" class="qc-fails">
+        <p v-for="f in qc.bakeFailList" :key="'f' + f.name" class="qc-fail">
+          <span class="qc-fail-n" :title="f.name">{{ f.name }}</span>
+          <span class="qc-fail-s">{{ BAKE_STAGE_LABEL[f.stage] }}</span>
+          <span class="qc-fail-r" :title="f.reason">{{ f.reason }}</span>
+        </p>
+        <p v-for="n in qc.bakeNoteList" :key="'n' + n.name" class="qc-note">
+          <span class="qc-fail-n" :title="n.name">{{ n.name }}</span>
+          <span class="qc-fail-r">{{ n.why }}</span>
+        </p>
+      </div>
 
       <p v-if="opening" class="qc-busy">{{ scenes.phase || '正在打开场景…' }}</p>
 
@@ -315,6 +383,69 @@ watch(
 
 .qc-empty { margin: 0; font-size: 11px; line-height: 1.7; color: var(--ink-sub); }
 .qc-busy { margin: 6px 0 0; font-size: 11px; color: var(--accent-deep); }
+
+/* 一键解析：醒目橘色，用 --notice-job 那族令牌（**刻意非主题色** —— 主题的青绿已经被
+   .file-item.active 与「盘阵」芯片占用，再借它就没有「这是一颗特别的按钮」的意思了）。 */
+.qc-go-row { display: flex; align-items: center; gap: 6px; margin: 0 0 6px; }
+.qc-go {
+  flex: none;
+  height: 24px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  color: #fff;
+  background: var(--notice-job);
+  border: 1px solid var(--notice-job-ink);
+  border-radius: var(--r-ctrl);
+  cursor: pointer;
+  box-shadow: 0 2px 5px rgba(194, 116, 58, 0.28);
+  transition: filter 0.15s ease, background 0.15s ease;
+}
+.qc-go:hover:not(:disabled) { filter: brightness(1.06); }
+/* 跑着时这颗按钮是「停止」：底色压深一档，与待命态一眼分得开 */
+.qc-go.running { background: var(--notice-job-ink); }
+.qc-go.stopping {
+  background: var(--surface-3);
+  border-color: var(--line);
+  color: var(--ink-faint);
+  box-shadow: none;
+}
+.qc-go:disabled { cursor: default; }
+.qc-go-txt {
+  flex: 1;
+  min-width: 0;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--notice-job-ink);
+}
+
+/* 跑批失败的行：一行红底 + 列表下方那份逐条原因（原因绝不放 .qc-l2） */
+.qc-row.bake-fail { border-color: var(--err-line); background: var(--err-bg); }
+.qc-fails {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+.qc-fail, .qc-note { margin: 0; display: flex; align-items: baseline; gap: 5px; font-size: 10px; line-height: 1.5; }
+.qc-fail { color: var(--err); }
+.qc-note { color: var(--ink-faint); }
+.qc-fail-n {
+  flex: none;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+.qc-fail-s { flex: none; }
+.qc-fail-s::after { content: '——'; margin-left: 5px; color: var(--line); }
+.qc-fail-r { flex: 1; min-width: 0; opacity: 0.85; }
 
 /* 行列表：一批几十条时不能把下面的卡全顶出屏幕 */
 .qc-list {

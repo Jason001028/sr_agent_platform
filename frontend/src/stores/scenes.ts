@@ -331,23 +331,57 @@ export const useScenesStore = defineStore('scenes', () => {
    *  与 resolvePath 的差别只在请求体：那条给 `{path}`，这条给 `{name}` —— 日期由
    *  后端从名字里的成像时间戳自己取，所以清单里那串产品名（含时间戳）直接就能用。
    *
+   *  `product`（可选）= 那一行写着的**影像类型**（`it.imgType`：`PAN` / `pan` / `MSS`）。
+   *  清单第一列的名字**约定俗成省掉产品段**（`…_101_0020_001_L1`，而盘阵上的景级目录叫
+   *  `…_101_0020_001_L1_PAN`），少了它后端连段级目录名一起拼错、**整批图都打不开**
+   *  （2026-09-27 用户报的 bug）。补哪一段由后端按这个提示决定，没给/认不出就 `_PAN`
+   *  在先（用户口径「默认按照 _PAN 打开即可」）—— 前端不自拼名字，只把清单上的事实
+   *  递过去。
+   *
    *  返回值是**错误串而不是布尔**：本函数的调用方在 /viewer，而 `open()` 按老规矩
    *  把失败写进 `scenes.error`，那个 ref 只在 ScenesPage 渲染 —— 在查看器上写它
    *  等于没写，用户只会看到「点了没反应」。所以由调用方拿去喂 viewer.showErr。
    *  返回 '' 表示成功。 */
-  async function openByName(name: string): Promise<string> {
+  async function openByName(name: string, product?: string): Promise<string> {
     const trimmed = String(name ?? '').trim();
     if (!trimmed) return '名字为空';
+    const prod = String(product ?? '').trim();
     error.value = '';
     try {
-      const res = await apiResolveScene(loadSrConfig(), { name: trimmed });
+      const res = await apiResolveScene(loadSrConfig(),
+        { name: trimmed, ...(prod ? { product: prod } : {}) });
       await open(res.row, res.resolved);
     } catch (e) {
       return '打开「' + trimmed + '」失败：' + (e instanceof Error ? e.message : String(e));
     }
     // open() 内部也会失败（fake 行 / 缺 W,H / 拉 JPG 出错），原因已经写在 error 里，
     // 原样带出去 —— 后端 resolve 的 detail 里有「试过哪些候选、各自为什么不行」。
-    return error.value || ('打开「' + trimmed + '」失败');
+    // **一律以 error 为准**：open() 的每条失败路都会写它（两个早退分支 + catch），
+    // 所以这里为空 == 真的开出来了。早先这里还 `|| '打开「…」失败'` 兜了底，结果是
+    // **成功也返回错误串** —— 面板拿到非空就弹错误条，「打开」点下去图开了、红条
+    // 却说失败（2026-09-27 与产品段那个 bug 一起发现的）。
+    return error.value;
+  }
+
+  /** 按名字**只解析、不打开**：拿回后端的权威结果给「一键解析」批量用。
+   *
+   *  与 openByName 的差别只有一个：这条路**不 open()** —— 不激活、不弹遮罩、不烤图、
+   *  不写 `scenes.error`（批量几十景，一路弹遮罩等于把界面锁死；错误由批量那边记账）。
+   *  请求体口径与 openByName 逐字相同（`product` 只在非空时带）。
+   *
+   *  失败**抛**（不是返回错误串）：批量的调用方要的是「这一景为什么不行」这句话本身，
+   *  后端 detail 里带着试过哪些候选、各自为什么不行，原样进失败账。
+   *
+   *  不复用 openByName：那条路是 2026-09-27 两个 bug 的落点（「成功也返回错误串」），
+   *  为了共用几行请求体去动它，风险大于这几行的重复。 */
+  async function resolveByName(
+    name: string, product?: string, opts?: { signal?: AbortSignal },
+  ): Promise<SceneResolveResult> {
+    const trimmed = String(name ?? '').trim();
+    if (!trimmed) throw new Error('名字为空');
+    const prod = String(product ?? '').trim();
+    return await apiResolveScene(loadSrConfig(),
+      { name: trimmed, ...(prod ? { product: prod } : {}) }, { signal: opts?.signal });
   }
 
   return {
@@ -355,7 +389,7 @@ export const useScenesStore = defineStore('scenes', () => {
     searched, searchedAt,
     query, satellite, sensor, dateFrom, dateTo,
     satellites, sensors, dates,
-    list, ensureSearched, resetFilters, open, resolvePath, openByName,
+    list, ensureSearched, resetFilters, open, resolvePath, openByName, resolveByName,
     // 清除预览缓存（SceneCacheBar 用）
     selected, clearing, clearResult, clearRemoved, clearError, clearSummary,
     selectableRows, selectedCount, allSelected,

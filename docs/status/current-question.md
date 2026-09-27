@@ -19,12 +19,23 @@
 
 - **`/viewer` 查看器** —— 两种数据源（本地 TIF 文件 / 盘阵场景 JPG）。功能：亮度拉伸、像素定位、
   ROI 统计、掩码绘制（矩形 / 多边形 / 魔棒 / 合并重叠 / 删除）、图像对比（点选 / 分屏）、
-  《待修复清单》导入与写回、提交 SR。拖入盘阵场景的显示件时会自动预热同景的**未超分那份**
+  《待修复清单》导入与写回、提交 SR —— 行内「打开」按**那一行的影像类型**补出清单上惯例省掉的
+  产品段（`…_001_L1` → `…_001_L1_PAN`，没写就 `_PAN`，见
+  [api-contract](../planning/api-contract.md) §3.5 的 `product`）。拖入盘阵场景的显示件时会自动预热同景的**未超分那份**
   （NOSR），它出现在列表里时带 `NOSR` 标（与本体标区分、可点开进当前活动格）。
+  清单导入后多一颗橘色「**一键解析**」：按行序逐景把本体 jpg 与 NOSR jpg 一次性烤到盘上，
+  每景两张卡**共用同一个序号**依次入列（生下来不带像素、点开才取图），失败逐条记账标红、
+  可随时停；点清单里任意一行，左侧那两张卡橘色点亮并滚过去（见 §6.4）。
   右侧「上下文侧舱」含 `[ROI/工具]` 与 `[Agent]` 两个页签。
 - **`/scenes` 场景库** —— 盘阵场景检索（卫星 / 传感器 / 日期 / 关键词）、行内显示 W/H、
   打开（首次访问懒生成预览）、清除预览缓存（选定 / 全部）。
 - **`/queue` 共享队列** —— 提交 SR、状态随 SSE 推进、取消作业、耗时与产物目录。
+  ⚠️ 这条 SSE 是 `fetch` + `ReadableStream` 拼的**文档级长连接**，所以
+  `stores/queue.ts` 在 `window` 上挂了 `pagehide`/`pageshow`：**整页导航时 Vue 的
+  `onUnmounted` 不跑**，不在 `pagehide` 里显式收流的话，每导航一次就漏一条连接，占满
+  Chrome 每源 6 条之后页面会卡在「加载中…」而**后端日志全干净**（2026-09-28 的事故，
+  机制见 [gui-experience §9.9](../experience/gui-experience.md)）。改这个 store 时别把
+  那两个监听摘掉。
 - **`/chat` 对话** —— agent 循环 + 工具调用（`search_scenes` / `run_sr` / `sr_job_status` /
   `fix_bad_lines` / 掩码栅格化），SSE 推送 `tool_call` / `tool_result` / `assistant`。
 
@@ -87,7 +98,9 @@
 3. [.e2e/qa-theme.js](../../.e2e/qa-theme.js) 有 6 条陈旧失败断言（期望值是 2026-09-09 改版前的
    白色 chrome 与渐变主按钮）。已确认非当轮引入，未改动；改脚本期望值还是改主题需人定。
 4. `test-platform.js` 的 `[D]`「耗时列」存在**间歇性**失败（09-22 两轮复跑，一次红一次绿，
-    与当轮改动无关），未定位。
+    与当轮改动无关），未定位。09-27 复跑 4 次**全红**（含 `git stash` 掉当轮前端改动、重建
+    dist 的对照组同样红）—— 至少在本机它更像稳定红：`waitFor` 等的是 `.qp-tbl tbody td.elapsed`，
+    即队列表里得有一行。诊断时先看 `/queue` 那次 `page.goto` 之后 `queue.tasks` 是不是空的。
 5. 预览内存不释放：每个文件的预览 `Float32Array` 常驻，各边 ÷4 约 145MB/张、÷2 约 600MB/张；
     分屏按设计同时保留两张，点选清单鼓励多开。当前只记录，无 LRU 释放。
 6. 同一场景的 `<目录名>.jpg` 与 `<目录名>.tif` 两行预览相同（工作流 B 使两行落到同一份落点），
@@ -178,17 +191,56 @@
 - **队列耗时口径**：纯算力时长（`started_at` → `finished_at`），不含排队；重启后基准回落库中状态。
 - **任务表唯一键**：`sr_tasks.task_fingerprint`（参数内容 sha256），同参数重交复用同一行。
 
+### 6.4 一键解析（《待修复清单》批量烘焙，2026-09-27）
+
+- **不新增后端端点**：每景就是既有三条链按序走一遍 —— `POST /api/scenes/resolve`
+  （吃那一行的影像类型补产品段）→ `GET /api/scenes/{id}/preview` → `GET /api/scenes/{id}/siblings`
+  （取未超分那份的名字与尺寸）→ 再 `/preview` 一次。**刻意不做 batch 端点**：`preview` 是
+  sync def、进了 anyio 线程池，掐响应停不下服务端已经在烤的那一份；而「试过哪些候选、
+  各自为什么不行」的唯一真源在 `scene_search` / `resolve_scene`，批量端点重写一遍就是
+  多一个「静默换路径」的入口。驱动的循环在 [stores/qclist.ts](../../frontend/src/stores/qclist.ts)
+  （`bakeAll`）+ [lib/qcbatch.ts](../../frontend/src/lib/qcbatch.ts)（`runSceneBake`，**并发恒为 1**）。
+- **每景两张卡、共用同一个序号**：本体卡的 `sceneDir = resolved.dir`，NOSR 卡的
+  `sceneDir = siblings.lqPath`（两者都是同一个场景目录的 `as_posix()`），序号由
+  `viewer.sceneOrdinalOf` 按 `sceneDir` 分组发号 —— 先清空再按行序入列，序号天然是 1,1,2,2,…
+- **NOSR 卡的 `lqPath` 取场景目录、不是 `null`**：与「场景芯片」那条入口（`openSceneSibling`）
+  逐字对齐，否则同一种图两条入口进来会长得不一样。「不能修复」由 `stageKind` 那道门管
+  （`isIntermediateStage` 三处），不看 `lqPath`。
+- **卡片「生下来不带像素」**：批量只把 jpg 烤到盘上，入列的卡 `thumb/src = null`，第一次点开
+  才 `fetchSceneJpg` + `applySceneJpgToRec`（此时命中服务端缓存，秒出）。算式：各边 ÷4 的
+  4 万² 景烤出 10000²，`applySceneJpgToRec` 同时留下 `thumb`（canvas RGBA ≈400MB）与
+  `src`（Float32Array），**≈800MB/卡** —— 一批十几景 ×2 张装不下（浏览器单次分配 ~2GB）。
+- **取消 = AbortController，且如实告知**：`resolve` 能掐（`apiResolveScene` 收 signal），
+  烤图那两条 HTTP **掐不掉** —— 所以在飞的那一景让它烤完（落盘正是要的缓存），文案写
+  「正在停止（等这一景烤完…）」。被掐掉的 resolve 是**取消**、不是这一景失败，不记进失败账。
+- **失败与「缺失」分两张表**：`bakeFails`（标红 + 记「第几步 + 后端原话」）与 `bakeNotes`
+  （「盘上没有未超分那份」这类盘上的事实）。**两张都不写 `statuses`** —— 那份会被
+  `buildQcDoc` 写回盘阵上的 .txt、还驱动 `counts.done`，烤图失败不是质检结论。
+- **进度不弹遮罩、不动 `busy`**：遮罩是模态的，会把用户正在看的图挡住、工具栏锁几十景。
+  进度只走面板上那一行字 + 按钮三态（待命 / 停止 / 停止中）。
+- **真机单景均耗时 = ___ 秒**（待填；含一次 resolve + 两次烘焙读盘，÷4 的 4 万² 景按
+  §3.2 / preview-bake-pipeline 的量级预估是几十秒）。几十景一批就是十几分钟起 ——
+  按钮的提示语里已经写明，不等同于「卡住了」。
+
 ### 6.3 测试基线
 
-- 后端：**720 passed / 5 skipped**（`python -m pytest backend/`，2026-09-24；09-22 基线 696 ——
-  本轮 NOSR 名字口径相关的命名 / 候选清单 / 解析 / `/siblings` / 烘焙用例净增 24 条）。
-- 前端：**393 passed** + `vue-tsc` 零错误 + `npm run build`（Vitest，2026-09-24；09-22 为 394 ——
-  按年龄推定的 10 条用例随该口径删除、新增 6 条 URL/响应体判据用例；09-24 再加 3 条 `nosrItemOf`）。
+**2026-09-28 全套重跑（全部绿）**：
+
+- 后端：**735 passed / 5 skipped / 130 subtests**（`python -m pytest backend/`，21.7s；09-24 为
+  720 —— 本轮「一键解析」相关的路径/命名/候选清单用例净增 15 条）。
+- 前端：**424 passed** + `vue-tsc --noEmit` 零错误 + `npm run build`（Vitest，17 个文件；09-24
+  为 393 —— 新增 `qcbatch.test.ts` 29 条纯逻辑，`queue.test.ts` 40 条含本轮新增的
+  `pagehide`/`pageshow` 收流用例）。
 - 浏览器回归（`.e2e/`，先 `cd frontend && npm run build`）：
-  `test-scenes.js` **132** 断言 · `test-manual-scene.js` **214**（2026-09-24；09-22 为 202 ——
-  新增 L6/L7 两段：拖入显示件顺带烤「未超分那份」以及对它的环节判定）· `test-platform.js` **26** ·
-  `test-vue-viewer.js` **190**（后三项沿用 09-22 记录，本轮未重跑）。
-  更旧的值（58 / 65 / 22 / 197 等）已过期，不要据此判断回归。
+  `test-scenes.js` **132** · `test-vue-viewer.js` **190** · `test-manual-scene.js` **296**
+  （09-24 为 214 —— 新增 M 段「一键解析」整段：按序入列 / 两卡同序号 / 懒卡不带像素 /
+  点亮联动 / 失败账 / 中途停止）· `test-platform.js` **26**。
+- ⚠️ **有一族脚本当前跑不起来，不是回归**：`.e2e/` 下 **14 个**脚本把仓库路径写死成搬家前的
+  `D:/BaiduNetdiskDownload/sr_agent_platform/…`（判据：`grep -l "BaiduNetdiskDownload/sr_agent_platform" .e2e/*.js`
+  命中 14 个，含 `test-regress.js`、`test-locator.js`、`test-norm.js`、`test-u16.js`、
+  `test-stretch*.js` 与 `debug-*`/`probe-fd*` 那批探针）。**活着的四套就是上面列的这四个**
+  （都按 `__dirname` 定位，搬家不影响）。历史经验里若引用了那一族当金丝雀，按这条订正。
+- 更旧的值（58 / 65 / 22 / 197 / 720 / 393 / 214 等）已过期，不要据此判断回归。
 
 ## 7. 去哪查什么
 

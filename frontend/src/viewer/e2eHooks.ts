@@ -66,6 +66,11 @@ export interface ViewerRecSummary {
   /** 缩放预热是否已经做过这份显示画布（见 stores/viewer.warmZoom）。
    *  探针/回归要能分辨「预热没做」与「预热做了但不灵」。 */
   warmed: boolean;
+  /** 这是「一键解析」批量入列的空卡（只有身份、没有像素，第一次点开才取图）。
+   *  **只暴露布尔**，不把 `rec.card` 整个拷进来（它驮着整行 + 元数据）。 */
+  hasCard: boolean;
+  /** 这张卡正被右侧清单里点中的那一行点亮着（`.lit` 橘色描边）。 */
+  lit: boolean;
 }
 
 export interface ViewerHook {
@@ -140,8 +145,31 @@ export interface ViewerHook {
     selName: string | null;
     statuses: Record<string, QcStatus>;
   };
-  /** 按生产全名去盘阵开场景（真机验收用；外网开发机没有盘阵，必然报错）。 */
-  qcOpenByName: (name: string) => Promise<string>;
+  /** 按生产全名去盘阵开场景（真机验收用；外网开发机没有盘阵，必然报错）。
+   *  `product` = 那一行的影像类型，名字缺产品段时后端按它补 `_PAN` / `_MSS`。 */
+  qcOpenByName: (name: string, product?: string) => Promise<string>;
+  // 一键解析（批量烘焙 + 每景两张卡 + 点亮联动）
+  /** 跑批现状：状态机 + 进度 + 失败账（键是行名）+ 「缺 NOSR」那些行。 */
+  qcBakeState: () => {
+    state: string;
+    total: number;
+    done: number;
+    elapsed: number;
+    head: string;
+    line: string;
+    fails: Record<string, { stage: string; reason: string }>;
+    notes: Record<string, string>;
+  };
+  /** 等价点那颗橘色按钮（跑着时它等效「停止」）。 */
+  qcBakeAll: () => Promise<void>;
+  /** 等价在跑批中点「停止」。 */
+  qcBakeStop: () => void;
+  /** 当前被点亮的 rec id（空 = 没点亮任何一张）。 */
+  litIds: () => number[];
+  /** 点亮次数（每次点行 +1）。**看它才知道「又点了一次同一行」也重放了动画**。 */
+  litTick: () => number;
+  /** 清空左侧暂存区（等价一键解析开跑前那一下；返回清掉几张）。 */
+  clearRecs: () => number;
   // 图像对比（关闭 / 点选对比 / 分屏对比，2026-09-20）
   /** 当前模式。 */
   cmpMode: () => import('../lib/compare.js').CompareMode;
@@ -210,7 +238,7 @@ declare global {
   }
 }
 
-function summarize(rec: ViewerRec): ViewerRecSummary {
+function summarize(rec: ViewerRec, litIds: readonly number[] = []): ViewerRecSummary {
   return {
     id: rec.id,
     name: rec.name,
@@ -232,6 +260,8 @@ function summarize(rec: ViewerRec): ViewerRecSummary {
     stageLabel: rec.stageLabel ?? null,
     linkNote: rec.linkNote,
     warmed: !!rec.thumb && rec.warmed === rec.thumb,
+    hasCard: !!rec.card,
+    lit: litIds.includes(rec.id),
   };
 }
 
@@ -268,10 +298,17 @@ export function mountE2EHooks(): ViewerHook {
     modal: () => useViewerStore().modal,
     hideModal: () => useViewerStore().hideModal(),
     overlayVisible: () => !!useViewerStore().overlay.visible,
-    recs: () => useViewerStore().recs.map(summarize),
+    // 读一次 litIds 传进去：每张卡都 `includes` 一遍自己的 id（几十张卡 × 两张的成本
+    // 可以忽略），但**不要**在这里每张卡都调一次 useViewerStore()。
+    recs: () => {
+      const store = useViewerStore();
+      const lit = store.litIds;
+      return store.recs.map((r) => summarize(r, lit));
+    },
     activeRec: () => {
-      const rec = useViewerStore().activeRec;
-      return rec ? summarize(rec) : null;
+      const store = useViewerStore();
+      const rec = store.activeRec;
+      return rec ? summarize(rec, store.litIds) : null;
     },
     activeStretch: () => useViewerStore().activeStretch,
     setStretch: (m) => useViewerStore().setStretch(m),
@@ -296,7 +333,32 @@ export function mountE2EHooks(): ViewerHook {
         statuses: { ...qc.statuses },
       };
     },
-    qcOpenByName: (name) => useScenesStore().openByName(name),
+    qcOpenByName: (name, product) => useScenesStore().openByName(name, product),
+    qcBakeState: () => {
+      const qc = useQcListStore();
+      return {
+        state: qc.bakeState,
+        total: qc.bakeTotal,
+        done: qc.bakeDone,
+        elapsed: qc.bakeElapsed,
+        head: qc.bakeHead,
+        line: qc.bakeLine,
+        // 两张账要**摊到最里面一层**再交出去。只做浅拷贝（`{ ...qc.bakeFails }`）时
+        // 外层虽是普通对象，**值仍是响应式代理** —— 而代理过 CDP 的 returnByValue 会
+        // 掉成空壳：e2e 读到的是 `{ gone: {} }`，`.reason` 直接 undefined（2026-09-27
+        // 实测：`{...外层}` 得 `{"gone":{}}`，`{...那个代理}` 才拿得到 stage/reason）。
+        // 同 `litIds` 那条 `[...spread]` 的道理：hook 交出去的是数据，不是 store 的内部。
+        fails: Object.fromEntries(Object.entries(qc.bakeFails)
+          .map(([k, v]) => [k, { stage: v.stage, reason: v.reason }])),
+        notes: Object.fromEntries(Object.entries(qc.bakeNotes)
+          .map(([k, v]) => [k, String(v)])),
+      };
+    },
+    qcBakeAll: () => useQcListStore().bakeAll(),
+    qcBakeStop: () => useQcListStore().stopBake(),
+    litIds: () => [...useViewerStore().litIds],
+    litTick: () => useViewerStore().litTick,
+    clearRecs: () => useViewerStore().clearRecs(),
     cmpMode: () => useViewerStore().compareMode,
     setCmpMode: (m) => useViewerStore().setCompareMode(m),
     cmpStripOpen: () => useViewerStore().cmpStripOpen,
