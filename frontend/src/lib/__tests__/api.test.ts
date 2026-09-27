@@ -581,6 +581,32 @@ describe('apiResolveScene 双指纹透传', () => {
   });
 });
 
+/* ---------------- 《待修复清单》那一行的影像类型（POST resolve 的 product） ---------------- */
+describe('apiResolveScene 产品段提示透传', () => {
+  let bodies: string[];
+  beforeEach(() => {
+    bodies = [];
+    vi.stubGlobal('fetch', (_u: string, init: RequestInit) => {
+      bodies.push(String(init.body));
+      return Promise.resolve(new Response(JSON.stringify({ source: 'manual' }),
+        { status: 200 }));
+    });
+  });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  // 清单第一列约定俗成省掉产品段（`…_101` 而盘阵上是 `…_101_PAN`），补哪一段由后端
+  // 按这里递过去的影像类型定；前端只负责原样透传，不做任何猜测（补段要重算两级目录名）。
+  it('product 原样进 body（大小写不动：归一化是服务端的事）', async () => {
+    await apiResolveScene(CFG, { name: 'SC', product: 'MSS' });
+    expect(JSON.parse(bodies[0])).toEqual({ name: 'SC', product: 'MSS' });
+  });
+
+  it('不给 product 就不出现在 body 里（后端见不到它 → 默认 _PAN）', async () => {
+    await apiResolveScene(CFG, { name: 'SC' });
+    expect(JSON.parse(bodies[0])).toEqual({ name: 'SC' });
+  });
+});
+
 /* ---------------- 清除预览缓存（POST /api/scenes/clear-preview） ---------------- */
 describe('apiClearScenePreviews', () => {
   const CLEAR_URL = '/api/scenes/clear-preview';

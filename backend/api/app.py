@@ -50,7 +50,7 @@ from backend.config import load_config
 from backend.pathguard import (
     ensure_allowed, flat_scene_layout, infer_scene_paths, is_within,
     looks_like_scene_name, parse_scene_date, production_tree_depth,
-    strip_raster_ext, to_posix_array_path)
+    scene_name_products, strip_raster_ext, to_posix_array_path)
 from backend.services import preview_cache
 from backend.services import preview_clear
 from backend.services import run_sr as run_sr_svc
@@ -1162,6 +1162,13 @@ def create_app() -> FastAPI:
         也没有成像时刻）：反推无从下手，而在用户正开着的那一景里 stat 一下
         `<stem>.tif` 是不猜的。名字自己能反推时它连 stat 都不花；给了坏值一律
         跳过（只有白名单是硬的：名单外的路径不读、也不说存在性）。
+
+        `{name}` 还可带 `product`（可选，《待修复清单》面板用）：那一行写着的
+        **影像类型**（`PAN` / `MSS`，大小写不限）。清单上的名字**约定俗成省掉产品段**
+        （写 `…_001_L1`，盘阵上却是 `…_001_L1_PAN`），补哪一段就按它；没给或认不出
+        （`PMS`、`全色`…）则 `_PAN` 在先、`_MSS` 在后 —— 用户口径「默认按照 _PAN 打开
+        即可」。原样那个名字**恒在最先**试，所以真机形态（名字自带产品段）行为不变。
+        只有 `{path}` 分支不收：精确路径没有反推，也就没有可补的段。
         """
         body = await _json_body(request)
         # 拖拽入口的可选双指纹（{name} 分支才用得上，见 _fingerprint_mismatch）：
@@ -1181,6 +1188,9 @@ def create_app() -> FastAPI:
         # 404 的补充说明：反推按「成像日 + 次日」找了**两天**时，得让用户知道
         # 这件事，否则他看见两条只差一天的路径只会更懵（见 infer_scene_paths）。
         day_note = ""
+        # 同理，名字缺产品段（清单的常态）时 404 里会多出几条自己补的目录名，
+        # 得说明它们是怎么来的（见 scene_name_products）。
+        product_note = ""
 
         def finish(hit) -> dict:
             """命中 → 200 的响应体（`row` 描述的是**这一环节自己的栅格**）。
@@ -1332,8 +1342,27 @@ def create_app() -> FastAPI:
                     detail=f"反推路径失败：文件名里没有 14/8 位成像时间戳"
                            f"（{name}）—— 请把该场景目录粘进「盘阵场景」栏打开"
                            + anchor_note)
+            # 名字可以**缺产品段**（《待修复清单》第一列的约定：写 `…_101_0020_001_L1`，
+            # 而盘阵上的景级目录叫 `…_101_0020_001_L1_PAN`；那一行的第二列写着
+            # 「影像类型:pan」）。缺了它反推出来的**景级与段级两层目录名都少一段**，
+            # 两条日期候选一起落空 —— 整批清单因此一行也打不开（2026-09-27 用户报的
+            # bug）。补法：`product` 给了 PAN/MSS 就按它，没给或认不出就 PAN 在先
+            # （用户口径「默认按照 _PAN 打开即可」）。**只在这里补**：`{path}` 分支是
+            # 精确路径，用户指哪打哪。
+            product_hint = body.get("product")
+            if product_hint is not None and not isinstance(product_hint, str):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"product 须为字符串（收到 {product_hint!r}）")
+            products = scene_name_products(name, product_hint)
             try:
-                tried = [(c, name) for c in infer_scene_paths(name, date)]
+                # 第一个候选组（**原样那个名字**）单独留着：下面「反推不出来」的 400
+                # 与 day_note 的判据都只看它 —— 补产品段是给能反推的名字多几条候选，
+                # 不该改动这两条既有措辞的判据（自定模板只有一天时尤其明显）。
+                base_cands = infer_scene_paths(products[0][0], date)
+                tried = [(c, name) for c in base_cands]
+                for stem, _code in products[1:]:
+                    tried += [(c, name) for c in infer_scene_paths(stem, date)]
             except PathDeniedError as e:
                 raise HTTPException(status_code=400,
                                     detail=f"反推路径失败：{e}") from e
@@ -1343,9 +1372,14 @@ def create_app() -> FastAPI:
                     detail=f"反推路径失败：{name} 不符合生产命名规则"
                            "（缺段号/景号段，拆不出卫星型号与段级目录）—— "
                            "请把场景目录粘进「盘阵场景」栏打开" + anchor_note)
-            if len(tried) > 1:
+            if len(base_cands) > 1:
                 day_note = ("（成像日与次日都找过 —— 盘阵按生产日建目录，"
                             "深夜成像的景常记在次日）")
+            if len(products) > 1:
+                # 404 的候选清单里会多出几条自己拼的目录名，得先说清它们是哪儿来的
+                # （顺序即优先级：清单写了影像类型就它在先，否则 _PAN 在先）。
+                product_note = ("（名字里没有产品段，按 " + "、".join(
+                    "_" + code for _stem, code in products[1:]) + " 依次各试了一遍）")
             # 第二阶段的候选（**只在第一阶段全落空时才展开**，见下面 scan 的两处调用）：
             # 拖进来的 jpg 若是中间产物（`<目录名>_sr.jpg` / `<目录名>_sr_NOSR.jpg`），
             # 多出来的尾段会让反推出的目录名带上尾巴（`…/<目录名>_sr`）—— 盘阵上
@@ -1441,7 +1475,7 @@ def create_app() -> FastAPI:
         if hit is None:
             raise HTTPException(status_code=404,
                                 detail="没找到合法场景目录 —— "
-                                       + "；".join(reasons) + day_note)
+                                       + "；".join(reasons) + day_note + product_note)
         return finish(hit)
 
     @app.get("/api/scenes/{scene_id}/preview")
@@ -1450,6 +1484,12 @@ def create_app() -> FastAPI:
 
         落点：源同目录（或 `SR_PREVIEWS_ROOT` 镜像树）的 `<stem>_preview.jpg`，
         **与档位无关** —— 换档位是原地覆盖同一份，靠戳里的 div 判废重烤。
+
+        前端「一键解析」（《待修复清单》批量烘焙，2026-09-27）每景就是打这一个端点
+        两次（本体 + 未超分那份），**不要为它加批量端点**：这里是 sync def、进了 anyio
+        线程池，掐响应停不了已经在烤的那一份（取消只能「假装取消」）；而「试过哪些
+        候选、各自为什么不行」的真源在 `scene_search` / `resolve_scene`，批量端点
+        重写一遍就是新增一个「静默换路径」的入口。串行由前端保证（并发恒为 1）。
         """
         div = _check_div(div)
         try:
@@ -1491,6 +1531,9 @@ def create_app() -> FastAPI:
         兜底：场景目录不可写（服务账号没有写权限）时退回
         `SR_TEMP_PREVIEWS_ROOT/<今天>/`，并回 `X-SR-Preview-Fallback: tmp`
         让界面如实说明「这次没落盘阵」。两条都失败才 422。
+
+        「一键解析」批量烘焙**不**走这一条（它要的是「平台自己的缓存」，与所有打开路径
+        一致，于是「批量烤过 → 点开即出图」成立）；走这里会让每张卡第一次打开再烤一遍。
 
         `Cache-Control: no-store`：URL 按 scene id 稳定、内容随档位变，不加这句
         浏览器会按启发式缓存端上旧档位的字节。
@@ -1620,7 +1663,10 @@ def create_app() -> FastAPI:
 
         每一类都直接拿它自己的 id 调 `GET /api/scenes/{id}/preview?div=N` 就能看图
         （三类各有自己的 `<stem>_preview.jpg` 落点，天然不撞名），所以这个端点
-        **不新增任何烘焙入口**。
+        **不新增任何烘焙入口**。前端「一键解析」的 NOSR 那一步也走这里：由
+        `api.nosrItemOf` 挑出 `kind == 'nosr'` 且 `exists` 的那条（**没有那份就
+        什么都不显示**，是既定的用户口径），名字的真源始终只有本端点的
+        `nosr_candidates` 一处 —— 批量那条路不另外拼名字。
 
         `suffix` 取值顺序：`?suffix=`（用户断言）→ 该 `lq_path` 最近一条 COMPLETED
         任务的 `params.suffix`（权威：跑的就是它）→ `run_sr.default_suffix()`

@@ -731,11 +731,18 @@ export async function fetchDropSceneJpg(
  * 后端一个字都不用它，给了坏值也只是跳过。分屏时按「离落点近的那一景在前」排序 ——
  * 后端取第一个成立的（见 backend/api/app.py 的 `_anchor_stage_hit`）。
  *
+ * `product` 只在《待修复清单》面板给：那一行写着的**影像类型**（`PAN` / `pan` /
+ * `MSS`）。清单第一列的名字**约定俗成省掉产品段**（写 `…_001_L1`，盘阵上却是
+ * `…_001_L1_PAN`），少一段会连段级目录名一起拼错、整批打不开；后端按这个提示补
+ * `_PAN` / `_MSS`，没给或认不出就 `_PAN` 在先。补出来的名字**排在原样那个之后**，
+ * 所以名字自带产品段时（真机形态）行为一个字不变。
+ *
  * 首次调用可能要解压采样整幅大图（生成预览缓存），界面应提示「首次较慢」。 */
 export async function apiResolveScene(
   cfg: SrConfig,
   body: { path: string }
-      | { name: string; date?: string; size_bytes?: number; anchor?: string[] },
+      | { name: string; date?: string; size_bytes?: number; anchor?: string[];
+          product?: string },
   opts?: { signal?: AbortSignal },
 ): Promise<SceneResolveResult> {
   const r = await http(sceneResolveUrl(cfg), {

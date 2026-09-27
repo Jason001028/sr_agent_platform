@@ -5,8 +5,14 @@
  * 每项：小图预览 / 名称 / 大小·W×H·布局 / 状态标签行（绿红）/ × 移除 / active 高亮。
  * 收起 toggle 秒出无动画（HTML sideToggle）。
  * （HTML 的「JPG 导出状态 + 重新导出」一栏随浏览器 JPG 导出链路一并删去。）
+ *
+ * 「点亮」（.lit）：点右侧《待修复清单》里的一行时，同一景的卡片加橘色描边并滚到眼前
+ * （`viewer.lightCards` → 这里的 `litTick` 看守）。**只用 outline** —— 它不占布局，
+ * 与 `.active` 的 box-shadow 正交，所以一张卡可以同时是「正在编辑」和「刚被点亮」。
+ * 模板里**没有**新增任何节点：`.name` 那一行的 textContent 有 e2e 逐字断言。
  */
-import { computed } from 'vue';
+import { computed, watch } from 'vue';
+import type { ComponentPublicInstance } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import { isIntermediateStage } from '../lib/stage.js';
 import FileThumb from './FileThumb.vue';
@@ -15,6 +21,43 @@ const store = useViewerStore();
 
 const collapseBtn = computed(() => (store.sidebarCollapsed ? '»' : '«'));
 const collapseTitle = computed(() => (store.sidebarCollapsed ? '展开文件列表' : '收起文件列表'));
+
+/* ---------------- 点亮：上色（模板 class）+ 滚到眼前（这里） ---------------- */
+
+/** 卡片 id → 根元素。函数 ref 收（`:ref` 的写法见模板），卸载时 Vue 会拿 null 回调。 */
+const itemEls = new Map<number, HTMLElement>();
+
+function setItemEl(id: number, el: Element | ComponentPublicInstance | null): void {
+  if (el instanceof HTMLElement) itemEls.set(id, el);
+  else itemEls.delete(id);
+}
+
+/** 点亮的两套动画类**奇偶交替挂**：同名 keyframes 反复挂同一个类不会重放，换一个名字
+ *  才重放 —— 这样既不用重建元素，也不必强制 reflow。只有命中的卡才有类。 */
+function litCls(id: number): string {
+  if (!store.litIds.includes(id)) return '';
+  return store.litTick % 2 ? 'lit lit-b' : 'lit lit-a';
+}
+
+/** 滚动行为：用户关了动画就别平滑滚（与系统偏好一致是本项目的既有口径）。 */
+function scrollBehavior(): ScrollBehavior {
+  try {
+    if (typeof matchMedia === 'function'
+        && matchMedia('(prefers-reduced-motion: reduce)').matches) return 'auto';
+  } catch { /* 老浏览器没有 matchMedia：按默认平滑滚 */ }
+  return 'smooth';
+}
+
+/** 每次点亮滚一次：目标是**排在最前的那张**（`lightCards` 把活动卡排在最前，
+ *  用户最可能想看的就是它）。
+ *
+ *  **收起时不滚**：`.sidebar.collapsed` 是 `width: 0; overflow: hidden`，
+ *  `scrollIntoView` 会把整个页面横向推一下 —— 而收起是用户的显式动作，不该被一次
+ *  点行改写。这种情况下只上色（类照样挂，展开后一眼看见）。 */
+watch(() => store.litTick, () => {
+  if (!store.litIds.length || store.sidebarCollapsed) return;
+  itemEls.get(store.litIds[0])?.scrollIntoView({ block: 'center', behavior: scrollBehavior() });
+});
 
 /* 三颗小标各说一件事，用法（尤其「序号」是会话内编号而不是盘阵上的编号）写进
    title —— 不然用户会以为那颗数字是盘阵给景编的号，回头去别处找同一个号。 */
@@ -47,8 +90,9 @@ function linkTag(note: string): string {
     <div
       v-for="rec in store.recs"
       :key="rec.id"
+      :ref="(el) => setItemEl(rec.id, el)"
       class="file-item"
-      :class="{ active: rec.id === store.activeId }"
+      :class="[{ active: rec.id === store.activeId }, litCls(rec.id)]"
       draggable="true"
       @click="store.activate(rec.id)"
       @dragstart="store.startRecDrag(rec, $event)"
@@ -143,6 +187,21 @@ function linkTag(note: string): string {
   border-color: var(--accent-2);
   background: var(--accent-soft);
   box-shadow: 0 0 0 1px rgba(61, 169, 164, 0.15);
+}
+/* 点亮（点清单里的一行 → 同一景的卡）：橘色描边，与「一键解析」那颗按钮同一族令牌。
+   **只用 outline**：不占布局、与 .active 的 box-shadow 正交 —— 一张卡可以同时是
+   「正在编辑」和「刚被点亮」，两个状态谁也不盖谁。
+   `lit-a` / `lit-b` 是两套**逐字相同**的动画，奇偶交替挂，只为让同名动画重放。 */
+.file-item.lit { outline: 2px solid var(--notice-job); outline-offset: 1px; }
+.file-item.lit-a { animation: sr-lit-a 0.5s ease-out; }
+.file-item.lit-b { animation: sr-lit-b 0.5s ease-out; }
+@keyframes sr-lit-a {
+  from { outline-color: rgba(194, 116, 58, 0.15); outline-offset: 8px; }
+  to { outline-color: var(--notice-job); outline-offset: 1px; }
+}
+@keyframes sr-lit-b {
+  from { outline-color: rgba(194, 116, 58, 0.15); outline-offset: 8px; }
+  to { outline-color: var(--notice-job); outline-offset: 1px; }
 }
 .file-item .name { font-weight: 600; color: var(--ink); word-break: break-all; }
 /* 名字行里的小标（盘阵 / 序号 / 环节）：同一条基线、同样的圆角与内距，

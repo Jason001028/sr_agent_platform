@@ -11,10 +11,11 @@ import unittest
 from pathlib import Path
 
 from backend.pathguard import (
-    PathDeniedError, allowed_roots, drive_map, ensure_allowed,
+    PathDeniedError, _PRODUCT_CODES, allowed_roots, drive_map, ensure_allowed,
     flat_scene_layout, infer_scene_paths, is_allowed, is_within,
     looks_like_scene_name, parse_scene_date, production_tree_depth,
-    scene_name_layers, strip_raster_ext, to_posix_array_path,
+    scene_name_layers, scene_name_products, strip_raster_ext,
+    to_posix_array_path,
 )
 
 _ENV_KEYS = ("SR_DRIVE_MAP", "SR_ALLOWED_ROOTS", "SR_SCENE_PATH_TEMPLATE")
@@ -279,6 +280,83 @@ class TestSceneNameLayers(EnvMixin):
         for bad in ("_A_B_C_D_E_0006_F", "A_B_C_D_E_0006_F_"):
             with self.subTest(bad=bad):
                 self.assertIsNone(scene_name_layers(bad))
+
+
+class TestSceneNameProducts(EnvMixin):
+    """名字缺产品段时的补齐候选（《待修复清单》第一列的常态，2026-09-27）。"""
+
+    #: 清单上的名字：真机景级目录名**去掉末尾那段产品**。
+    NOPROD = "JL1KF02B03_PMS09_20260902120156_200535158_102_0025_001_L1"
+    PROD = TestSceneNameLayers.PROD
+
+    def test_productless_name_tries_bare_then_pan_then_mss(self):
+        """原样那条**恒在最先**（真机形态一个候选都不多花），补出来的按 PAN 在先。"""
+        self.assertEqual(scene_name_products(self.NOPROD), [
+            (self.NOPROD, ""),
+            (self.NOPROD + "_PAN", "PAN"),
+            (self.NOPROD + "_MSS", "MSS"),
+        ])
+
+    def test_hint_moves_that_product_first(self):
+        """清单那行写着什么产品（大小写不限），它就排在前面 —— 顺序即优先级。"""
+        for hint in ("MSS", "mss", " mSs "):
+            with self.subTest(hint=hint):
+                self.assertEqual(scene_name_products(self.NOPROD, hint)[1:], [
+                    (self.NOPROD + "_MSS", "MSS"),
+                    (self.NOPROD + "_PAN", "PAN"),
+                ])
+
+    def test_unusable_hint_falls_back_to_pan(self):
+        """认不出的影像类型（`PMS`、`全色`、空串）当没给 —— 用户口径「默认 _PAN」。"""
+        for hint in ("PMS", "全色", "", None, "   "):
+            with self.subTest(hint=hint):
+                self.assertEqual(
+                    [c for _s, c in scene_name_products(self.NOPROD, hint)[1:]],
+                    ["PAN", "MSS"])
+
+    def test_name_with_product_has_no_variant(self):
+        """名字自带产品段（真机形态）→ 只有原样一条，多余 stat 一次都不花。"""
+        for name in (self.PROD, self.NOPROD + "_PAN", self.NOPROD + "_mss"):
+            with self.subTest(name=name):
+                self.assertEqual(scene_name_products(name, "MSS"), [(name, "")])
+
+    def test_names_with_raster_ext_get_no_variant(self):
+        """带影像后缀的名字是**拖进来的文件名**，不补产品段。
+
+        那种名字能不能认下来由双指纹说了算（名字 + 字节数都要与盘阵上那份一致），
+        而盘阵上的文件名必然带产品段 —— 补出来的名字永远过不了指纹，只会多花几次
+        stat，再往 404 的候选清单里塞一条 `…_preview.jpg_PAN` 这种四不像
+        （2026-09-27 由「探测量上限」那两条用例顶出来的）。
+        """
+        for name in (self.NOPROD + ".tif", self.NOPROD + ".JPG",
+                     "SC_sr_preview.jpg"):
+            with self.subTest(name=name):
+                self.assertEqual(scene_name_products(name, "MSS"), [(name, "")])
+
+    def test_space_separated_name_keeps_its_separator(self):
+        """空格形态的名字补出来也得是空格（见 scene_name_layers：分隔符不许换）。"""
+        self.assertEqual(scene_name_products("A B 20260902120156 101 0006 001 L1"),
+                         [("A B 20260902120156 101 0006 001 L1", ""),
+                          ("A B 20260902120156 101 0006 001 L1 PAN", "PAN"),
+                          ("A B 20260902120156 101 0006 001 L1 MSS", "MSS")])
+
+    def test_empty_name_has_no_candidate(self):
+        self.assertEqual(scene_name_products("   "), [])
+
+    def test_product_codes_mirror(self):
+        """金丝雀：`_PRODUCT_CODES` 的词面量是**跨语言契约**。
+
+        前端 `frontend/src/lib/qcbatch.ts` 里有一份**镜像**
+        （`PRODUCT_CODES` + `sceneNameCandidates`），用来把《待修复清单》第一列的名字
+        对上左侧卡片的场景目录名 —— 那一列约定俗成省掉产品段，逐字比恒不成立。
+        镜像**只用于匹配**，绝不参与拼路径（拼路径只在后端）。
+
+        改这里的取值就必须同步改前端那处；两边各有一条测试盯着同一个词面量，同时红
+        就说明有人改了一头而漏了另一头 —— 那正是这条用例存在的意义，别顺手把断言
+        改成「读前端源码」。"""
+        self.assertEqual(_PRODUCT_CODES, ("PAN", "MSS"))
+        self.assertEqual([c for _s, c in scene_name_products(self.NOPROD)[1:]],
+                         list(_PRODUCT_CODES))
 
 
 class TestProductionTreeDepth(EnvMixin):

@@ -109,6 +109,24 @@ function freePort() {
   });
 }
 
+/** 后端子进程的输出尾巴 —— **失败时打出来**。
+ *
+ *  原来这里是 `() => {}`，后端的日志直接进黑洞。而 `GET /api/queue` 上一条
+ *  「CORS policy: No 'Access-Control-Allow-Origin'」的浏览器报错，正是一个**后端 500
+ *  的形状**：Starlette 的 500 由 `ServerErrorMiddleware` 发出，而它在 `CORSMiddleware`
+ *  **外面**，于是那份响应天然不带 CORS 头，浏览器只报 CORS、不报 500。
+ *  见不到 traceback 就只能靠猜 —— 猜一次就是整轮重跑（几分钟）。
+ *  只留尾部若干行：跑通时一行都不打，不刷屏。 */
+const backendLog = [];
+const BACKEND_LOG_KEEP = 40;
+function noteBackend(chunk) {
+  for (const line of String(chunk).split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    backendLog.push(line);
+    if (backendLog.length > BACKEND_LOG_KEEP) backendLog.shift();
+  }
+}
+
 async function waitFor(page, fn, timeoutMs = 15000, label = 'waitFor', ...args) {
   const t0 = Date.now();
   for (;;) {
@@ -533,8 +551,8 @@ async function main() {
       SR_ALLOWED_ROOTS: ['W:\\', posixTmp].join(';'),
     },
   });
-  child.stdout.on('data', () => {});
-  child.stderr.on('data', () => {});
+  child.stdout.on('data', noteBackend);
+  child.stderr.on('data', noteBackend);
 
   try {
     await waitHealth(apiBase + '/api/health');
@@ -1219,8 +1237,130 @@ async function main() {
       assert(fs.readFileSync(QC).equals(qcBytes1), '失败的那次没有碰任何文件');
       await page.evaluate(() => window.__viewer.qcClose());
 
+      /* ---------- H2. 清单上的名字**缺产品段** → 按那行的影像类型补回来再打开 ---------- */
+      // 2026-09-27 用户报的 bug：质检部门的清单第一列**约定俗成省掉产品段**（写
+      // `…_101_0005_001_L1`，而盘阵上景级目录叫 `…_101_0005_001_L1_PAN`，第二列里
+      // 写着「影像类型:pan」）。名字少这一段，反推出来的**景级与段级目录名会一起**
+      // 少一段（段级名就是从景级名去掉景号得来的），两个日期候选全落空 → 404，整批
+      // 图一行都打不开。补哪一段由那一行的影像类型定，这一列没写就 `_PAN`（用户口径）。
+      //
+      // 这条从**面板上那颗「打开」按钮**走：cleanName → imgType → openByName →
+      // POST /api/scenes/resolve {name, product} → 后端补段反推。验的是用户报的那条路
+      // 本身，而不是某一段的中间产物。
+      console.log('\n[H2] 清单名字缺产品段：按影像类型补 _PAN / _MSS 再打开盘阵场景');
+      // 盘阵上**只有带产品段的那两个目录名**。两行的影像类型故意一个 pan 一个 MSS：
+      // 「一律补 _PAN」的实现能过第一条、过不了第二条（MSS 那条补 _PAN 必然 404）。
+      const PD_PAN = 'A_B_' + ymd + '142500_200536960_101_0005_001_L1_PAN';
+      const PD_MSS = 'A_B_' + ymd + '142600_200536960_101_0007_001_L1_MSS';
+      const pdPanDir = path.join(ARRAY, ...treeOf(PD_PAN));
+      const pdMssDir = path.join(ARRAY, ...treeOf(PD_MSS));
+      const PD_META = '<?xml version="1.0" encoding="UTF-8"?>'
+        + '<SolarAzimuth>181.79</SolarAzimuth>';
+      for (const [dir, nm] of [[pdPanDir, PD_PAN], [pdMssDir, PD_MSS]]) {
+        makeTif(path.join(dir, nm + '.tif'), 800, 400);
+        fs.writeFileSync(path.join(dir, nm + '_meta.xml'), PD_META);
+      }
+      // 清单第一列 = 去掉产品段的那份原文（约定俗成的写法）
+      const pdPanBare = PD_PAN.slice(0, -'_PAN'.length);
+      const pdMssBare = PD_MSS.slice(0, -'_MSS'.length);
+      const QC2 = path.join(tmp, '待修复清单_缺产品段.txt');
+      writeGbk(
+        pdPanBare + ',\t产品存在伪影 (问题类型:产品存在伪影 行列号:7300.26,1737.98 影像类型:pan )\t李佳峻\n'
+        + pdMssBare + ',\t产品存在伪影 (问题类型:产品存在伪影 行列号:120.5,88.25 影像类型:MSS )\t李佳峻\n',
+        QC2);
+      await (await page.$('.qc-h input[type=file]')).uploadFile(QC2);
+      await waitFor(page, () => window.__viewer.qcState().loaded, 10000, '缺产品段清单导入');
+      const qs3 = await page.evaluate(() => window.__viewer.qcState());
+      assert(qs3.total === 2,
+        `这一份清单解析出 2 行（${qs3.total} —— 与 H 那份不是同一份）`);
+      // 行上的影像类型是补哪一段的**唯一**依据，它得真的从描述里抽出来了（点下去
+      // 之后传什么全看它），所以先在这儿钉一下，别让后面的断言替它背锅。
+      const qcRowText = await page.evaluate(
+        () => [...document.querySelectorAll('.qc-row')]
+          .map((li) => li.textContent.replace(/\s+/g, ' ').trim()));
+      assert(qcRowText.length === 2
+        && qcRowText[0].indexOf('pan') >= 0 && qcRowText[1].indexOf('MSS') >= 0,
+        `两行都从描述里抽出了影像类型（${qcRowText.join(' | ')}）`);
+
+      /** 点清单里某一行（按第一列的名字找）的「打开」按钮 —— 真实 DOM 点击，不走钩子。 */
+      const clickRowOpen = (bare) => page.evaluate((n) => {
+        const row = [...document.querySelectorAll('.qc-row')].find((li) => {
+          const el = li.querySelector('.qc-name');
+          return el && el.textContent.trim() === n;
+        });
+        if (!row) return { ok: false, why: '清单里没有这一行' };
+        const btn = row.querySelector('button.qc-mini');
+        if (!btn) return { ok: false, why: '这一行没有「打开」按钮' };
+        if (btn.disabled) return { ok: false, why: '「打开」按钮还是灰的' };
+        btn.click();
+        return { ok: true };
+      }, bare);
+
+      /** 点开这一行，等查看器真的装上**那一景**（看 lqPath + rec 名，不看条数）。 */
+      const openQcRow = async (bare, dir, nm, label) => {
+        const hit = await clickRowOpen(bare);
+        assert(hit.ok, `${label}：行上有可点的「打开」按钮（${JSON.stringify(hit)}）`);
+        let rec;
+        try {
+          rec = await waitFor(page, (want) => {
+            const a = window.__viewer.activeRec();
+            return a && a.lqPath === want.dir && a.name === want.name
+              ? { name: a.name, lqPath: a.lqPath, route: a.route, W: a.W, H: a.H }
+              : null;
+          }, 30000, label, { dir: dir.replace(/\\/g, '/'), name: nm });
+        } catch (e) {
+          const dbg = await page.evaluate(() => {
+            const a = window.__viewer.activeRec();
+            const err = document.querySelector('.err-box');
+            return {
+              active: a ? { name: a.name, lqPath: a.lqPath } : null,
+              err: err ? err.textContent.replace(/\s+/g, ' ').trim() : null,
+            };
+          });
+          throw new Error(`${label} 诊断：${JSON.stringify(dbg)}`);
+        }
+        // 开出来了就不许再弹「打开失败」：面板拿 openByName 的返回值当判据，
+        // 返回值非空即喂给 viewer 的错误条。这一条是回归那半个 bug —— 图开了、
+        // 红条却说失败（早先 openByName 成功后还兜底返回了个错误串）。
+        const errTxt = await page.evaluate(
+          () => document.querySelector('.err-box')?.textContent.replace(/\s+/g, ' ').trim() ?? '');
+        assert(errTxt.indexOf('打开「') < 0,
+          `${label}：开出来了就没弹「打开失败」的红条（${errTxt ? errTxt.slice(0, 50) : '错误条为空'}）`);
+        return rec;
+      };
+
+      // ① 影像类型 pan：盘阵上只有 `…_PAN`，名字原样试必然 404 —— 能开出来就说明产品
+      //    段真的补上去了。顺带钉住「补段是后端的事」：前端一次 resolve 都没多花。
+      const h2ResBefore = countUrl(resolveRe);
+      const panRec2 = await openQcRow(pdPanBare, pdPanDir, PD_PAN, 'pan 那行开 _PAN 场景');
+      assert(countUrl(resolveRe) - h2ResBefore === 1,
+        `前端按名字只发一次 resolve，补哪几段由后端定（${countUrl(resolveRe) - h2ResBefore} 次）`);
+      assert(panRec2.route === 'jpg' && panRec2.W === 800 && panRec2.H === 400,
+        `开出来的是盘阵那一景的栅格，尺寸取影像头（route=${panRec2.route} / ${panRec2.W}×${panRec2.H}）`);
+
+      // ② 影像类型 MSS：这一条**只有真按那行补 _MSS 才开得出来**（默认补 _PAN 会 404）。
+      const mssRec2 = await openQcRow(pdMssBare, pdMssDir, PD_MSS, 'MSS 那行开 _MSS 场景');
+      assert(mssRec2.lqPath !== panRec2.lqPath,
+        `两行落在两个不同的场景目录（${mssRec2.lqPath} / ${panRec2.lqPath}）`);
+
+      // ③ 影像类型只定**顺序**，不是「不递就打不开」：MSS 那行不递提示照样开得出来
+      //    （后端两条补法都试），区别在谁排前面、以及 404 时怎么解释。返回值必须是
+      //    空的 —— 非空就会被面板当成失败弹红条（上面那条断言的反面）。
+      const mssNoHint = await page.evaluate((n) => window.__viewer.qcOpenByName(n), pdMssBare);
+      assert(mssNoHint === '',
+        `不递影像类型也开得出来（后端两条补法都试）：返回 ${
+          mssNoHint === '' ? "''（成功）" : JSON.stringify(mssNoHint)}`);
+
+      // ④ 反推全落空时，404 要自己说清「补过哪几段」：候选里凭空多出两条自己拼的
+      //    目录名，不说清用户只会更懵 —— 这正是用户看到的那句话。
+      const pdGone = 'A_B_' + ymd + '143500_200536960_101_9999_001_L1';
+      const goneErr = await page.evaluate((n) => window.__viewer.qcOpenByName(n), pdGone);
+      assert(typeof goneErr === 'string' && goneErr.indexOf('没有产品段') >= 0
+        && goneErr.indexOf(pdGone + '_PAN') >= 0 && goneErr.indexOf(pdGone + '_MSS') >= 0,
+        `盘上两条补法都没有时，404 点明补过哪几段（…${goneErr.slice(-70)}）`);
+
       /* ---------- J. 分屏对比：窗口拖放落右半 ---------- */
-      // A–H 走的都是 `input.uploadFile`（文件选择框那条路）。真实用户是把图**拖**进
+      // A–H2 走的都是 `input.uploadFile`（文件选择框那条路）。真实用户是把图**拖**进
       // 画布的：那条链挂在 window 上，落点决定进哪一格（TifCanvas 的 onDrop →
       // store.addFiles(files, side)）。用真 DragEvent 把整条链跑通，钉住三件只在这条
       // 路上才会发生的事：
@@ -1929,18 +2069,448 @@ async function main() {
       assert(nosrCls && nosrCls.cls.includes('nosr'),
         `那颗标的类是 nosr（${JSON.stringify(nosrCls)}）`);
 
+      /* ---------- M. 一键解析：清单 → 逐景烤两份 jpg → 按序号入列 → 点亮联动 ---------- */
+      // 用户口径（2026-09-27）：拖入 .txt 之后，面板上多一颗**醒目橘色**「一键解析」；
+      // 点一下先清空左侧暂存区，再**严格按清单行序**逐景把「本体 jpg + NOSR jpg」两份
+      // 都烤到盘上、每景两张卡按同一个序号依次入列；此后点右侧清单里任意一行，左侧
+      // 对应的卡要橘色高亮 + 上下滚过去。
+      //
+      // 这一节刻意**另造新景**，不复用 H2 那两景：那两景在 H2 已经被打开过，它们的
+      // 预览字节已经躺在浏览器的本地 blob 缓存里（键 = `场景 id|档位|jpg`），批量再取
+      // 就是本地命中、一个 HTTP 都不发 —— 那条路上「每个 id 恰好烤一次」根本没被验到。
+      //
+      // 四行清单一次把四种情形都摆出来：
+      //   ①② 盘上有这一景、也有 NOSR → 每景两张卡（共用序号）；
+      //   ③  盘上有这一景、**没有** NOSR → 只落一张卡 + 一条中性的「缺 NOSR」提示；
+      //   ④  盘上压根没有这一景 → 标红记账，**后面的景照跑**（前三行都已跑完）。
+      // 四行的第一列都**缺产品段**（写 `…_L1`，盘阵上叫 `…_L1_PAN`），desc 里写影像
+      // 类型 —— 批量这条路吃的正是 H2 那条「按影像类型补段」的解析，不能只认全名。
+      console.log('\n[M] 一键解析：按清单行序逐景烤两份 jpg、共用序号入列、点亮联动');
+      const MB_META = '<?xml version="1.0" encoding="UTF-8"?>'
+        + '<SolarAzimuth>181.79</SolarAzimuth>';
+      // 尺寸各不相同：落在盘上的那五份 jpg 各是 ÷2 档（1200×600→600×300 等），
+      // 数字对不上就说明端上来的不是这一景的图。
+      const mbScenes = [
+        { name: 'A_B_' + ymd + '151000_200536960_101_0021_001_L1_PAN', w: 1200, h: 600,
+          nosr: { w: 400, h: 200 } },
+        { name: 'A_B_' + ymd + '151100_200536960_101_0023_001_L1_MSS', w: 1000, h: 500,
+          nosr: { w: 320, h: 160 } },
+        // 有本体、**没有**那份未超分 —— 三条候选名一条都不在盘上
+        { name: 'A_B_' + ymd + '151200_200536960_101_0025_001_L1_PAN', w: 800, h: 400,
+          nosr: null },
+      ];
+      // 盘上不存在的那个名字（第 ④ 行）：有完整的成像时刻与日期，两条产品段候选全落空
+      const MB_GONE = 'A_B_' + ymd + '151300_200536960_101_0099_001_L1';
+      for (const s of mbScenes) {
+        s.bare = s.name.slice(0, -4);            // 清单第一列的写法：去掉末段产品段
+        s.dir = path.join(ARRAY, ...treeOf(s.name));
+        makeTif(path.join(s.dir, s.name + '.tif'), s.w, s.h);
+        fs.writeFileSync(path.join(s.dir, s.name + '_meta.xml'), MB_META);
+        if (s.nosr) makeTif(path.join(s.dir, s.name + '_NOSR.tif'), s.nosr.w, s.nosr.h);
+        assert(!fs.existsSync(path.join(s.dir, s.name + '_preview.jpg')),
+          `${s.name} 开跑前盘上还没有预览（对照）`);
+      }
+      const QC3 = path.join(tmp, '待修复清单_一键解析.txt');
+      const mbRow = (bare, type) => bare
+        + ',\t产品存在伪影 (问题类型:产品存在伪影 行列号:120.5,88.25 影像类型:'
+        + type + ' )\t李佳峻\n';
+      writeGbk(
+        mbRow(mbScenes[0].bare, 'pan') + mbRow(mbScenes[1].bare, 'MSS')
+        + mbRow(mbScenes[2].bare, 'pan') + mbRow(MB_GONE, 'pan'),
+        QC3);
+      await (await page.$('.qc-h input[type=file]')).uploadFile(QC3);
+      await waitFor(page, () => window.__viewer.qcState().loaded, 10000, '一键解析清单导入');
+      const qsM = await page.evaluate(() => window.__viewer.qcState());
+      assert(qsM.total === 4, `这一份清单解析出 4 行（${qsM.total} —— 与 H2 那份不是同一份）`);
+      // 换了一份清单：上一份的跑批账（键是行名）必须跟着作废，不能带着上一份的名字
+      // 显示在当前这一份上。
+      assert(Object.keys(qsM.statuses).length === 0 && qsM.done === 0,
+        `刚导入时零终态、零跑批账（statuses=${JSON.stringify(qsM.statuses)}）`);
+
+      /* M1. 那颗橘色按钮 */
+      const mGo = await page.evaluate(() => {
+        const b = document.querySelector('.qc-go');
+        if (!b) return null;
+        const cs = getComputedStyle(b);
+        const txt = document.querySelector('.qc-go-txt');
+        return { tag: b.tagName, text: b.textContent.trim(), cls: b.className,
+          disabled: b.disabled, title: b.title, bg: cs.backgroundColor, fg: cs.color,
+          line: txt ? txt.textContent.trim() : null };
+      });
+      // class 里除了 qc-go 还挂着状态名（`:class="qc.bakeState"`）：待命态是 idle，
+      // 跑着是 running。**独立一个类**是给 e2e 按类找按钮用的（.qc-ob 是隔壁那颗）。
+      assert(mGo && mGo.tag === 'BUTTON' && mGo.text === '一键解析'
+        && mGo.cls.split(/\s+/).includes('qc-go') && mGo.cls.includes('idle'),
+        `导入之后面板上多一颗「一键解析」按钮（${JSON.stringify(mGo)}）`);
+      // 「醒目橘色」是用户那条要求本身，就按**渲染出来的颜色**验：.qc-go 用的是
+      // --notice-job（#C2743A），**刻意不是主题色** —— 主题的青绿已经被
+      // .file-item.active 与「盘阵」那颗小标占了，再借它就没有「这是一颗特别的
+      // 按钮」的意思了。
+      assert(mGo.bg === 'rgb(194, 116, 58)',
+        `按钮底色是那颗橘色令牌（bg=${mGo.bg}）`);
+      assert(mGo.disabled === false, '待命态可点（不是跑到一半留下的禁用态）');
+      assert(mGo.title.includes('逐景') && mGo.title.includes('随时可停'),
+        `提示把丑话说全（${mGo.title.slice(0, 32)}…）`);
+      assert(mGo.line && mGo.line.indexOf('两份 jpg') >= 0,
+        `旁边那行字说清它要干什么（${mGo.line}）`);
+
+      /* M2. 点一下：先清空，再逐景入列；全程不盖遮罩 */
+      const mRecsBefore = await recCount(page);
+      assert(mRecsBefore > 0,
+        `点之前左侧是有内容的（${mRecsBefore} 张）—— 否则「先清空」验不出什么`);
+      // 请求计数的起点：这一趟批量该发几个 /preview、几个 /siblings（见 M4）
+      const mPrevBefore = countUrl(previewRe);
+      const mSibBefore = countUrl(sibRe);
+      // 全程盯着遮罩：批量在真机上是几十景 × 每景几十秒，**绝不能**盖 modal 遮罩把
+      // 用户正在看的图挡住、把工具栏锁死。
+      //
+      // 采样间隔取 5ms 而不是「看上去够快」的 40ms：这里的 fixture 是 1200×600 的小图、
+      // 盘阵就在本机 temp，**整批只跑一百多毫秒**（12 个 HTTP 往返），40ms 那档一共才采
+      // 到 4 个点 —— 而下面那条 `samples >= 8` 是**非空转的底**（防「采样器压根没跑起来
+      // 于是 covered 恒为 0」这种假绿），不是时长目标。5ms 一采，整批至少落十几个点，
+      // 任何持续 ≥5ms 的遮罩都躲不掉。
+      await page.evaluate(() => {
+        window.__mOverlay = [];
+        window.__mTimer = setInterval(
+          () => window.__mOverlay.push(window.__viewer.overlayVisible() ? 1 : 0), 5);
+      });
+      // 真实 DOM 点击（el.click() 派发的就是真的 MouseEvent）。**必须与读结果同一个
+      // evaluate**：bakeAll 的同步前缀（清空 + 置 running）在 click 返回之前就跑完了，
+      // 分成两次 evaluate 再读就成了赌「第一个 resolve 还没回来」—— 那是时序不是断言。
+      // （按钮上的字这里**不读**：同步读到的还是 click 之前那次渲染的 DOM，Vue 的
+      // 刷新在微任务里。字面那半条留给 M8 —— 那里读之前先 await 过一个宏任务。）
+      const mKick = await page.evaluate(() => {
+        const b = document.querySelector('.qc-go');
+        const before = window.__viewer.recs().length;
+        b.click();
+        return { before, after: window.__viewer.recs().length,
+          st: window.__viewer.qcBakeState().state };
+      });
+      assert(mKick.before > 0 && mKick.after === 0,
+        `点下去先把暂存区清空（${mKick.before} → ${mKick.after} 张）`);
+      assert(mKick.st === 'running', `按钮一点就跑起来（state=${mKick.st}）`);
+      try {
+        await waitFor(page,
+          () => ['done', 'stopped'].includes(window.__viewer.qcBakeState().state),
+          180000, '跑批结束');
+      } catch (e) {
+        const dbg = await page.evaluate(() => window.__viewer.qcBakeState());
+        throw new Error(`跑批没结束：${JSON.stringify(dbg)}`);
+      }
+      const mBake = await page.evaluate(() => {
+        clearInterval(window.__mTimer);
+        const st = window.__viewer.qcBakeState();
+        return { ...st, samples: window.__mOverlay.length,
+          covered: window.__mOverlay.reduce((a, b) => a + b, 0) };
+      });
+      assert(mBake.state === 'done', `四行跑完、没被停（state=${mBake.state}）`);
+      assert(mBake.covered === 0 && mBake.samples >= 8,
+        `全程 ${mBake.samples} 次采样里遮罩一次都没盖（批量不弹 modal）`);
+
+      /* M3. 入列顺序 = .txt 行序，每景两张卡共用一个序号 */
+      const mCards = await page.evaluate(() => window.__viewer.recs().map((r) => ({
+        id: r.id, name: r.name, sceneId: r.sceneId, sceneDir: r.sceneDir,
+        stageKind: r.stageKind, stageLabel: r.stageLabel, route: r.route,
+        W: r.W, H: r.H, thumbW: r.thumbW, thumbH: r.thumbH,
+        hasCard: r.hasCard, thumb: r.thumb, lqPath: r.lqPath,
+      })));
+      const mWantNames = [mbScenes[0].name, mbScenes[0].name + '_NOSR',
+        mbScenes[1].name, mbScenes[1].name + '_NOSR', mbScenes[2].name];
+      assert(mCards.length === 5 && mCards.map((r) => r.name).join('|') === mWantNames.join('|'),
+        `五张卡、名字与顺序严格按清单行序（${mCards.map((r) => r.name.slice(-9)).join(' / ')}）`);
+      // 「生下来不带像素」：入列时 thumb 是 null，烤完（jpg 已落盘）**仍然**没有像素
+      // —— 像素是点开那一张时才取的。÷2 档一张 1200×600 的场景卡装着约 8MB 位图，
+      // 几十景一次装进内存必爆（浏览器单次分配 ~2GB），所以批量只负责把 jpg 烤到盘上。
+      assert(mCards.every((r) => r.hasCard && r.thumb === null),
+        `五张卡都还是空卡（有身份、没像素：${mCards.filter((r) => r.hasCard && r.thumb === null).length}/5）`);
+      assert(mCards.every((r) => r.route === 'jpg' && !!r.sceneDir && !!r.sceneId),
+        '五张卡都走盘阵 JPG 路由、都带场景目录与场景 id');
+      // 序号是**按场景目录分组**发的（sceneOrdinalOf），先清空再按序入列 ⇒ 天然就是
+      // 1,1,2,2,3。DOM 上那颗「盘阵 / 序号 / 环节」也一并验，别只在 store 里对。
+      const mChips = await page.evaluate(() => [...document.querySelectorAll('.file-item')]
+        .map((el) => ({
+          scn: el.querySelector('.name .scn') ? el.querySelector('.name .scn').textContent.trim() : null,
+          ord: el.querySelector('.name .ord') ? el.querySelector('.name .ord').textContent.trim() : null,
+          stage: el.querySelector('.name .stage') ? el.querySelector('.name .stage').textContent.trim() : null,
+        })));
+      assert(mChips.map((c) => c.ord).join(',') === '1,1,2,2,3',
+        `DOM 上按序号归纳依次展示（${mChips.map((c) => c.ord).join(',')}）`);
+      assert(mChips.map((c) => c.stage).join(',') === '本体,NOSR,本体,NOSR,本体'
+        && mChips.every((c) => c.scn === '盘阵'),
+        `每景本体在前、NOSR 紧挨着在后（${mChips.map((c) => c.stage).join(',')}）`);
+      assert(!await page.evaluate(() => !!window.__viewer.activeRec()),
+        '批量入列不激活任何一张、不抢焦点（点开另有其路）');
+
+      /* M4. 五份 jpg 真落盘，且每个场景 id 恰好烤一次 */
+      const mJpgs = [
+        [mbScenes[0].dir, mbScenes[0].name + '_preview.jpg', 600, 300],
+        [mbScenes[0].dir, mbScenes[0].name + '_NOSR_preview.jpg', 200, 100],
+        [mbScenes[1].dir, mbScenes[1].name + '_preview.jpg', 500, 250],
+        [mbScenes[1].dir, mbScenes[1].name + '_NOSR_preview.jpg', 160, 80],
+        [mbScenes[2].dir, mbScenes[2].name + '_preview.jpg', 400, 200],
+      ];
+      for (const [dir, f, w, h] of mJpgs) {
+        const sz = jpegSize(path.join(dir, f));
+        assert(sz && sz.w === w && sz.h === h,
+          `${f} 落盘且是 ÷2 那一档（${sz ? sz.w + '×' + sz.h : '没生成'}，期望 ${w}×${h}）`);
+      }
+      const mPrevSeen = seen.filter((u) => previewRe.test(u)).slice(mPrevBefore);
+      const mSibSeen = seen.filter((u) => sibRe.test(u)).slice(mSibBefore);
+      const mCountOf = (id) => mPrevSeen.filter(
+        (u) => u === `${apiBase}/api/scenes/${encodeURIComponent(id)}/preview?div=2`).length;
+      const mPerId = mCards.map((r) => mCountOf(r.sceneId));
+      const mDupIds = mCards.map((r) => r.sceneId).filter((id, i, a) => a.indexOf(id) !== i);
+      assert(mDupIds.length === 0,
+        `五张卡对应五个不同的场景 id（重复 ${mDupIds.length} 个 —— 一景不该出现两张本体）`);
+      assert(mPerId.every((n) => n === 1),
+        `每个场景 id 恰好烤一次、没有重复读盘（${mPerId.join(',')}）`);
+      assert(mPrevSeen.length === 5,
+        `这一趟总共只发 5 次 /preview（本体 3 + NOSR 2，实发 ${mPrevSeen.length} 次）`);
+      assert(mSibSeen.length === 3,
+        `每景问一次 /siblings（含没有那份的那一景，实发 ${mSibSeen.length} 次）`);
+
+      /* M5. 失败账：盘上没有的那行标红记原因，且**不污染写回文档** */
+      const mState = await page.evaluate(() => window.__viewer.qcBakeState());
+      // 两张账的**键都是清单行名**（= .txt 第一列那个缺产品段的裸名），不是盘上的场景名
+      // —— 驱动器 `runSceneBake` 拿 `it.name` 记账，而 `it` 是清单行。第 ③ 行也
+      // 只有用它的裸名才找得到那条「缺 NOSR」。
+      assert(Object.keys(mState.fails).length === 1 && !!mState.fails[MB_GONE],
+        `只有盘上没有的那一行记了失败（${Object.keys(mState.fails).join(',') || '一条都没有'}）`);
+      // 先摊平成字符串再断言：`.reason` 是后端 detail 原文（含「试过哪些候选」），
+      // 直接对它取字段/切片会把「没记上原因」变成一条 TypeError 而不是一条断言失败。
+      const mFail = JSON.stringify(mState.fails[MB_GONE] || {});
+      assert(mFail.indexOf('resolve') >= 0
+        && mFail.indexOf(MB_GONE + '_PAN') >= 0 && mFail.indexOf(MB_GONE + '_MSS') >= 0,
+        `原因是后端原话、点明补过哪几段候选、且记在「解析场景」这一步（${mFail.slice(0, 120)}）`);
+      const mNoteName = mbScenes[2].bare;
+      assert(Object.keys(mState.notes).length === 1 && !!mState.notes[mNoteName],
+        `「盘上没有未超分那份」进 notes 不进 fails（${JSON.stringify(Object.keys(mState.notes))}）`);
+      assert(String(mState.notes[mNoteName] || '').indexOf('NOSR') >= 0,
+        `中性提示如实说清缺的是哪一份（${mState.notes[mNoteName]}）`);
+      assert(mState.line.includes('共 4 景') && mState.line.includes('成功 3')
+        && mState.line.includes('失败 1') && mState.line.includes('缺 NOSR 1'),
+        `收尾汇总把成败与缺失分开数（${mState.line}）`);
+      assert(mState.head === '一键解析', `跑完按钮变回「一键解析」（${mState.head}）`);
+      // 失败账**绝不能漏进 .txt**：statuses 是质检结论（会被 buildQcDoc 写回盘阵、
+      // 还驱动 counts.done 那颗计数），烤图失败是平台自己的事，两码事。
+      const mQcAfter = await page.evaluate(() => window.__viewer.qcState());
+      assert(Object.keys(mQcAfter.statuses).length === 0 && mQcAfter.done === 0,
+        `失败账没漏进清单（statuses=${JSON.stringify(mQcAfter.statuses)} / 终态 ${mQcAfter.done} 行）`);
+      const mRowDom = await page.evaluate((n) => {
+        const nameOf = (li) => {
+          const el = li.querySelector('.qc-name');
+          return el ? el.textContent.trim() : '';
+        };
+        const row = [...document.querySelectorAll('.qc-row')].find((li) => nameOf(li) === n);
+        const fails = document.querySelector('.qc-fails');
+        return { red: row ? row.className.includes('bake-fail') : null,
+          reds: document.querySelectorAll('.qc-row.bake-fail').length,
+          txt: fails ? fails.textContent.replace(/\s+/g, ' ').trim() : null };
+      }, MB_GONE);
+      assert(mRowDom.red === true && mRowDom.reds === 1,
+        `盘上没有的那一行是唯一标红的一行（${mRowDom.reds} 行标红）`);
+      assert(mRowDom.txt && mRowDom.txt.includes(MB_GONE)
+        && mRowDom.txt.includes('解析场景') && mRowDom.txt.includes(MB_GONE + '_MSS'),
+        `面板下方逐条摊开「名字 + 第几步 + 后端原话」（${(mRowDom.txt || '').slice(0, 46)}…）`);
+
+      /* M6. 点清单一行 → 左侧两张卡橘色点亮 + 上下滚过去（活动图毫发无损） */
+      const mRowClick = (n) => page.evaluate((name) => {
+        const row = [...document.querySelectorAll('.qc-row')].find((li) => {
+          const el = li.querySelector('.qc-name');
+          return el && el.textContent.trim() === name;
+        });
+        if (!row) return false;
+        row.click();
+        return true;
+      }, n);
+      // 先把第 1 景那张**本体**点开（真 DOM 点击）：既把活动图定住好验「点亮不改它」，
+      // 又顺手把「空卡点开才取图」这条懒路走通。
+      await page.evaluate(() => document.querySelectorAll('.file-item')[0].click());
+      // 等的是**像素真到位**（thumbW > 0），不是「它成了活动图」：`activate` 是同步把
+      // activeId 挂上的，取图在后面几拍才回来 —— 只等 id 会在像素到之前就返回，
+      // 读出来就是 0×0。同 §E/§K 那两处 waiting 的判据。
+      await waitFor(page, (want) => {
+        const a = window.__viewer.activeRec();
+        return a && a.id === want && a.thumbW > 0 ? { id: a.id, thumbW: a.thumbW,
+          thumbH: a.thumbH, route: a.route, hasCard: a.hasCard } : null;
+      }, 30000, '第 1 景本体那张空卡点开', mCards[0].id);
+      const mOpened = await page.evaluate(() => window.__viewer.activeRec());
+      assert(mOpened.thumbW === 600 && mOpened.thumbH === 300,
+        `点开空卡才去取图，补的是这一景的 ÷2 预览（缩略图 ${mOpened.thumbW}×${mOpened.thumbH}）`);
+      assert(mOpened.hasCard === false,
+        '取过像素之后就不再是「待取图」的空卡了（再点不会重取）');
+      // 视口压矮：5 张卡在 600px 高的侧栏里未必溢得出来，溢不出来 scrollIntoView 就
+      // 无从观察 —— 「上下滑动」这条要求就变成了空断言。
+      const mViewport = page.viewport() || { width: 800, height: 600 };
+      await page.setViewport({ width: mViewport.width, height: 300 });
+      // 侧栏滚动位置：顶部是几，**读出来**，不假设它是 0。基线取错的话下面那条
+      // 「滚下去了」随时可能是「它本来就在那儿」。
+      const mSideTop = () => page.evaluate(() => document.querySelector('.sidebar').scrollTop);
+      // 平滑滚动（behavior: 'smooth'）没有「完成事件」，只能靠**连续两次采样同值**
+      // 判断它停住了。等「小于某个中途值」那种写法是自证的同义反复（waitFor 的条件
+      // 就是断言本身），所以两条方向都等停稳再判。
+      const mSettle = async () => {
+        // 先等一小会儿再开始采：点击到 scrollIntoView 之间隔着 Vue 的一次刷新，
+        // 一上来就连采到两个相等的「还没动」会当成停稳，等于用旧值去判「滚回去了」。
+        await sleep(120);
+        let prev = null;
+        for (let i = 0; i < 40; i++) {
+          const t = await mSideTop();
+          if (prev !== null && t === prev) return t;
+          prev = t;
+          await sleep(60);
+        }
+        return prev;
+      };
+      const mScroll0 = await mSideTop();
+      assert(await mRowClick(mbScenes[1].bare), '清单里有第 2 景那一行（点得到）');
+      const mDown = await waitFor(page, (prev) => {
+        const t = document.querySelector('.sidebar').scrollTop;
+        return t > prev ? { top: t } : null;
+      }, 8000, '侧栏滚到第 2 景', mScroll0);
+      const mLit = await page.evaluate(() => ({
+        ids: window.__viewer.litIds(), tick: window.__viewer.litTick(),
+        domLit: document.querySelectorAll('.file-item.lit').length,
+        activeId: window.__viewer.activeRec() ? window.__viewer.activeRec().id : null,
+        cls: [...document.querySelectorAll('.file-item.lit')].map((el) => el.className),
+      }));
+      const mWant2 = [mCards[2].id, mCards[3].id].sort().join(',');
+      assert(mLit.ids.slice().sort().join(',') === mWant2,
+        `点亮的是第 2 景那两张卡（${mLit.ids.join(',')}）`);
+      assert(mLit.domLit === 2, `DOM 上恰好两张卡带 .lit（${mLit.domLit} 张）`);
+      assert(mLit.activeId === mCards[0].id,
+        `点亮**不动**活动图（active 还是 ${mLit.activeId}，起手的 ${mCards[0].id}）`);
+      assert(mDown.top > mScroll0, `第 2 景在下面 → 侧栏真的滚下去了（${mScroll0} → ${mDown.top}）`);
+      // 描边颜色要等动画走完再读：那 0.5s 里 outline-color 从半透明橘补间到实色。
+      // 这一觉顺带让上面那次平滑滚动走完，于是下面那个「回来了」的基线是**停稳值**。
+      await sleep(600);
+      const mDownEnd = await mSideTop();
+      assert(mDownEnd > mScroll0, `滚停在第 2 景那儿（scrollTop=${mDownEnd}）`);
+      const mOutline = await page.evaluate(() => {
+        const el = document.querySelector('.file-item.lit');
+        const cs = getComputedStyle(el);
+        return { color: cs.outlineColor, style: cs.outlineStyle, width: cs.outlineWidth };
+      });
+      assert(mOutline.style === 'solid' && mOutline.color === 'rgb(194, 116, 58)',
+        `点亮就是那颗橘色描边（${mOutline.width} ${mOutline.style} ${mOutline.color}）`);
+      assert(mLit.cls.length === 2 && mLit.cls.every((c) => /(^|\s)lit(\s|$)/.test(c)),
+        `两张卡都带 lit 这个持久的类（${mLit.cls.join(' | ')}）`);
+      // 往回点第 1 景那行：滚回上面去（用户要的是「上下」两个方向都跟得上）
+      assert(await mRowClick(mbScenes[0].bare), '清单里有第 1 景那一行（点得到）');
+      const mUpTop = await mSettle();
+      const mLit2 = await page.evaluate(() => ({
+        ids: window.__viewer.litIds(), tick: window.__viewer.litTick(),
+        domLit: document.querySelectorAll('.file-item.lit').length,
+        cls: [...document.querySelectorAll('.file-item.lit')].map((el) => el.className),
+      }));
+      assert(mLit2.tick === mLit.tick + 1,
+        `再点一次（哪怕点回同一景）点亮次数也 +1（${mLit.tick} → ${mLit2.tick}）`);
+      assert(mLit2.ids.slice().sort().join(',') === [mCards[0].id, mCards[1].id].sort().join(',')
+        && mLit2.domLit === 2, `换成第 1 景那两张（${mLit2.ids.join(',')}）`);
+      assert(mUpTop < mDownEnd, `往回滚回上面（${mDownEnd} → ${mUpTop}）`);
+      // 动画是**奇偶两个同名 keyframes 交替挂**：同一批卡连着被点亮两次时，只有类名
+      // 真的换了一个才会重放（不重建元素、不强制 reflow）。
+      const mAnim = await page.evaluate(() => [...document.querySelectorAll('.file-item.lit')]
+        .map((el) => (el.className.match(/lit-[ab]/) || [''])[0]));
+      assert(mAnim.length === 2 && mAnim.every((c) => /^lit-[ab]$/.test(c)),
+        `点亮类在两套动画之间交替，连着点也会重放（${mAnim.join(',')}）`);
+      await page.setViewport(mViewport);
+
+      /* M7. 点开 NOSR 那张空卡：像素按需补齐，修复入口三处全堵 */
+      const mNosrIdx = mCards.findIndex((r) => r.stageKind === 'nosr');
+      assert(mNosrIdx === 1, `第 1 景的 NOSR 卡在列表第 2 位（${mNosrIdx}）`);
+      await page.evaluate((i) => document.querySelectorAll('.file-item')[i].click(), mNosrIdx);
+      await waitFor(page, (want) => {
+        const a = window.__viewer.activeRec();
+        return a && a.id === want && a.thumbW > 0 ? { id: a.id } : null;
+      }, 30000, 'NOSR 那张空卡点开', mCards[mNosrIdx].id);
+      const mNosrRec = await page.evaluate(() => window.__viewer.activeRec());
+      assert(mNosrRec.thumbW === 200 && mNosrRec.thumbH === 100,
+        `NOSR 那份的像素也是点开才取（缩略图 ${mNosrRec.thumbW}×${mNosrRec.thumbH} = ÷2 的 400×200）`);
+      assert(mNosrRec.stageKind === 'nosr' && mNosrRec.stageLabel === 'NOSR',
+        `环节还是 NOSR（${mNosrRec.stageKind} / ${mNosrRec.stageLabel}）`);
+      // lqPath 取**场景目录**而不是 null —— 与「场景芯片」那条入口（openSceneSibling）
+      // 逐字对齐，否则同一种图两条入口进来会长得不一样。「不能修复」由 stageKind 管
+      // （isIntermediateStage 那三处门），不看 lqPath。
+      assert(mNosrRec.lqPath === mCards[mNosrIdx].sceneDir,
+        `NOSR 卡的 lqPath 就是这一景的场景目录（${mNosrRec.lqPath}）`);
+      const mNosrChips = await cardChips(mCards[mNosrIdx].name);
+      assert(mNosrChips && mNosrChips.ro === '仅对比，不作修复',
+        `卡片上那颗只读小标在（${mNosrChips && mNosrChips.ro}）`);
+      const mNosrBtns = await toolbarState(page);
+      assert(mNosrBtns.sr === false && mNosrBtns.bake === false,
+        `「提交 SR」「保存掩码到盘阵」都置灰（sr=${mNosrBtns.sr} / bake=${mNosrBtns.bake}）`);
+      const mDrawBtn = await page.evaluate(() => {
+        const b = [...document.querySelectorAll('.toolbar button')]
+          .find((x) => x.textContent.trim() === '绘制掩码');
+        return b ? { disabled: b.disabled } : null;
+      });
+      assert(mDrawBtn && mDrawBtn.disabled === true, '「绘制掩码」也置灰（三处门都关着）');
+
+      /* M8. 跑到一半按「停止」：收手、已烤的卡留下、且不记一堆假失败 */
+      // 「停止」最容易写错的地方：在飞的 resolve 会以 AbortError 被拒，若把它当成
+      // 「这一景解析失败」，用户一按停止就凭空多出一条红账。这条断言盯的就是它。
+      const mStop = await page.evaluate(async () => {
+        const b = document.querySelector('.qc-go');
+        b.click();                                   // 再跑一次（前面的卡会被清掉）
+        const t0 = Date.now();
+        while (Date.now() - t0 < 60000 && !window.__viewer.recs().length) {
+          // 循环体里 await 一次宏任务：既让批量往前走，也让 Vue 的刷新跑完 ——
+          // 于是下面读到的 head 已经是「跑起来了」之后的那一份 DOM。
+          await new Promise((r) => setTimeout(r, 5));
+        }
+        const n = window.__viewer.recs().length;
+        const st = window.__viewer.qcBakeState().state;
+        const head = b.textContent.trim();
+        const disabled = b.disabled;
+        b.click();                                   // 这颗按钮此时等效「停止」
+        return { n, st, head, disabled, after: window.__viewer.qcBakeState().state };
+      });
+      assert(mStop.n > 0 && mStop.st === 'running' && mStop.head === '停止',
+        `第一张卡一落地就按停止（此刻 ${mStop.n} 张、state=${mStop.st}、按钮「${mStop.head}」）`);
+      assert(mStop.disabled === false, '跑着的时候这颗按钮可点（点它就是停止）');
+      assert(mStop.after === 'stopping',
+        `按下去先进「正在停止」（那一景的取图停不下来，如实置灰，${mStop.after}）`);
+      await waitFor(page, () => ['stopped', 'done'].includes(window.__viewer.qcBakeState().state),
+        60000, '收手完成');
+      const mStopEnd = await page.evaluate(() => {
+        const st = window.__viewer.qcBakeState();
+        return { ...st, recs: window.__viewer.recs().map((r) => ({ name: r.name, hasCard: r.hasCard })) };
+      });
+      assert(mStopEnd.state === 'stopped', `停下来了（state=${mStopEnd.state}）`);
+      // done 是**竞态**的，所以只钉住「跑了一部分就收手」这件事，不钉死那个 1：
+      // 点「停止」那一下至少第 1 景的解析已经成了（第一张卡刚落地），所以 done ≥ 1；
+      // 而掐断只能再放行**在飞的那一景**一步，所以 done ≤ 2 < 4 —— 两边都是可证的。
+      // 钉 `done === 1` 就成了赌「第 2 景的 resolve 还没回来」，那是时序不是断言。
+      assert(mStopEnd.done >= 1 && mStopEnd.done < mStopEnd.total,
+        `跑了一部分就收手（done=${mStopEnd.done}/${mStopEnd.total}）`);
+      assert(mStopEnd.total === 4, `总数仍是清单那 4 行（${mStopEnd.total}）`);
+      assert(Object.keys(mStopEnd.fails).length === 0 && Object.keys(mStopEnd.notes).length === 0,
+        `取消不当失败记（fails=${JSON.stringify(mStopEnd.fails)}）`);
+      // 收尾那行也按 done 现算，不写死数字（同上）。
+      assert(mStopEnd.line.indexOf('已停止：跑完 ' + mStopEnd.done + '/' + mStopEnd.total + ' 景') >= 0
+        && mStopEnd.line.indexOf('失败') < 0,
+        `收尾如实报「已停止」，不编一条失败出来（${mStopEnd.line}）`);
+      assert(mStopEnd.recs.length >= 1 && mStopEnd.recs.length <= 2
+        && mStopEnd.recs.every((r) => r.hasCard),
+        `已经落地的卡原样留下（${mStopEnd.recs.map((r) => r.name.slice(-9)).join(' / ')}）`);
+      assert(mStopEnd.head === '一键解析', `按钮变回「一键解析」（${mStopEnd.head}）`);
+
       /* ---------- I. 全程无错 ---------- */
       console.log('\n[I] 全程无错');
-      // D / E / E2 里**刻意**打出来的 404：D 一次（盘阵上没有那个目录）、E 两次
-      // （同名不同字节；有日期但目录不存在）、E2 一次（同上，换成 .jpg 拖入）。
+      // D / E / E2 / H2 / M 里**刻意**打出来的 404：D 一次（盘阵上没有那个目录）、E 两次
+      // （同名不同字节；有日期但目录不存在）、E2 一次（同上，换成 .jpg 拖入）、
+      // H2 一次（清单上那一景盘阵是没有的，且两种产品段补法都试过）、
+      // M 一次（清单第 ④ 行同一个情形，只是这次是**一键解析**批量打出来的 ——
+      // 按「停止」收手的那次不算：被掐掉的请求是 ERR_ABORTED，不是 404）。
       // 刻意打的 400 有两次：E 一次（文件名没有时间戳，后端据此拒绝反推）、
       // H 一次（往盘阵上不存在的清单路径写回）。浏览器对任何非 2xx 响应都会往
       // 控制台写一条，这不算程序缺陷，但也不能睁一只眼闭一只眼：数目必须恰好
       // 等于刻意的那几次，多一条就是有别的资源没取到。
       const deliberate = /status of (404|400)/;
       const notFound = errors.filter((e) => /status of 404/.test(e));
-      assert(notFound.length === 4,
-        `控制台里的 404 恰好是刻意的那四次（${notFound.length}）`);
+      assert(notFound.length === 6,
+        `控制台里的 404 恰好是刻意的那六次（${notFound.length}）`);
       const badRequest = errors.filter((e) => /status of 400/.test(e));
       assert(badRequest.length === 2,
         `控制台里的 400 恰好是刻意的那两次（无时间戳反推 + 不存在的清单，${badRequest.length}）`);
@@ -1966,5 +2536,11 @@ async function main() {
 
 main().catch((err) => {
   console.error('\n[test-manual-scene] ❌ 失败:', err.message);
+  // 失败时把后端最后几十行摊出来：页面里看到的「CORS / 500 / 一条怪报错」常常只有
+  // 后端这边说得清（上面 noteBackend 的注释写了为什么）。
+  if (backendLog.length) {
+    console.error(`[test-manual-scene] —— 后端最后 ${backendLog.length} 行 ——`);
+    for (const line of backendLog) console.error('  | ' + line);
+  }
   process.exit(1);
 });

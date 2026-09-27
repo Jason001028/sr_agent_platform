@@ -42,6 +42,90 @@ function assert(cond, msg) {
   pass++;
 }
 
+/* 后端最后 N 行（stdout+stderr 合流）。失败时把它打出来：uvicorn 的 500 堆栈只
+   出现在这里，而浏览器那一侧只会看到「CORS 头缺失」那种误导性的表象
+   （Starlette 的 ServerErrorMiddleware 在 CORSMiddleware **外层**，500 响应不带
+   跨源头）。丢弃后端输出 = 现场只剩表象，这条是 2026-09-28 加上的。 */
+const backendLog = [];
+const BACKEND_LOG_KEEP = 40;
+function noteBackend(chunk) {
+  for (const line of String(chunk).split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    backendLog.push(line);
+    if (backendLog.length > BACKEND_LOG_KEEP) backendLog.shift();
+  }
+}
+
+/* 非 2xx 响应（含 4xx）：断言失败时连着后端日志一起打。 */
+const badResponses = [];
+
+/* 出了浏览器、还没跑完的请求（**全部**请求，不只 /api/）。按请求对象索引而不是 URL：
+   同一 URL 会来好几次，按 URL 索引分不清是哪一次。
+
+   读的时候注意：**它会多报**。进 bfcache 的文档被冻住，它那条流式请求既不会
+   finish 也不会 fail，puppeteer 也就不报——可连接其实早还回池子了。所以判断
+   「是不是被连接池卡住」要看下面 netstat 数出来的套接字条数，这个只是给人看
+   「当时有哪些流开着」。 */
+const openRequests = new Map();
+
+/* 失败现场：断言失败时把「当时页面上是什么」也打出来。这一步和后端日志是互补的 ——
+   后端 200 + 前端没渲染，只有看 DOM 才知道卡在哪一层。
+   快照必须在 **浏览器被关掉之前** 取（下面两个 finally 会先 close），所以是
+   `snapshotFailure` 在 catch 里主动取、存进 `failureScope`，再由外层打印。 */
+let failureScope = null;
+let errorsRef = null;
+
+/* 失败时数一下**浏览器这一侧**连到后端的 TCP 连接：没被关掉的 SSE 流会占住同源
+   连接池（Chrome 对每个源只给 6 条），占满之后新的 fetch 与 EventSource 只会排队，
+   后端根本收不到 —— 表象是「页面停在加载中」，而后端日志干净得像没事。
+   2026-09-28 就是靠这个数字定位的（当时 6 条满）。 */
+let apiPortRef = null;
+function countApiConns(port) {
+  const lines = connsTo(port);
+  console.error(`[test-platform] —— 浏览器持后端 ${port} 的连接：${lines.length} 条 ——`);
+  for (const l of lines.slice(0, 12)) console.error('  ' + l.trim());
+}
+
+/** 连到后端 port 的**客户端侧** ESTABLISHED 套接字（本地端口不是 port 的那些）。
+ *  netstat 的两侧都带该端口，所以按状态 + 本地端口排除服务端那一侧。 */
+function connsTo(port) {
+  try {
+    const out = require('child_process')
+      .execSync(`netstat -ano -p tcp | findstr :${port}`, { encoding: 'utf8' });
+    return out.split(/\r?\n/).filter((l) => {
+      const c = l.trim().split(/\s+/);
+      return c[3] === 'ESTABLISHED' && !c[1].endsWith(':' + port);
+    });
+  } catch (e) { return []; }   // findstr 无匹配即退出码 1，属正常
+}
+
+async function snapshotFailure(page, apiBase) {
+  // 先问一句「这个源现在还通不通」：通了说明是页面自己的状态机卡住，不通就是连接池
+  // 被占满。3 秒上限 —— 就是要看它到底会不会回。
+  try {
+    failureScope = {
+      health: await page.evaluate((base) => Promise.race([
+        fetch(base + '/api/health').then((r) => '通 ' + r.status)
+          .catch((e) => '错 ' + e.message),
+        new Promise((r) => setTimeout(() => r('不通：3 秒没回'), 3000)),
+      ]), apiBase),
+    };
+  } catch (e) { /* 见下 */ }
+  try {
+    failureScope = Object.assign(failureScope || {}, await page.evaluate(() => ({
+      url: location.href,
+      rows: document.querySelectorAll('.qp-tbl tbody tr').length,
+      body: (document.body ? document.body.textContent : '')
+        .replace(/\s+/g, ' ').trim().slice(0, 400),
+      // 浏览器侧实际发生了什么：请求是没出去、出去了没回，还是回了但没被消费。
+      api: performance.getEntriesByType('resource')
+        .filter((e) => e.name.indexOf('/api/') >= 0 && e.name.indexOf('/events') < 0)
+        .map((e) => `${e.responseStatus || '未回'} ${Math.round(e.duration)}ms ${e.name.split('/api/')[1]}`),
+    })));
+  } catch (e) { /* 见下 */ }
+  if (apiPortRef) countApiConns(apiPortRef);   // 必须在关浏览器之前数
+}
+
 function freePort() {
   return new Promise((resolve, reject) => {
     const s = net.createServer();
@@ -159,6 +243,7 @@ async function main() {
   fs.mkdirSync(workDir, { recursive: true });
 
   const apiPort = await freePort();
+  apiPortRef = apiPort;
   const apiBase = `http://127.0.0.1:${apiPort}`;
 
   console.log(`[test-platform] 临时: db=${path.join(tmp, 'db.sqlite')} scenes=${scenesRoot}`);
@@ -186,8 +271,8 @@ async function main() {
       })(),
     },
   });
-  child.stdout.on('data', () => {});
-  child.stderr.on('data', () => {});
+  child.stdout.on('data', noteBackend);
+  child.stderr.on('data', noteBackend);
   try {
     await waitHealth(apiBase + '/api/health');
 
@@ -196,12 +281,27 @@ async function main() {
     console.log(`[test-platform] 静态 ${base} ← dist；API ${apiBase}`);
 
     const { browser, page, errors } = await launchPage();
+    pageRef = page;
+    errorsRef = errors;
     const external = [];
     page.on('request', (req) => {
       const u = req.url();
       if (!u.startsWith(base) && !u.startsWith(apiBase) && !u.startsWith('data:')) {
         external.push(u);
       }
+    });
+    // 每一次非 2xx / 无响应的 API 请求都留痕：队列页「没有行」这种表象可能是
+    // GET /api/queue 挂了，也可能是页面自己没渲染 —— 不留痕只能靠猜。
+    page.on('response', (res) => {
+      if (res.status() >= 400) badResponses.push(`${res.status()} ${res.url()}`);
+    });
+    page.on('request', (req) => {
+      openRequests.set(req, `${req.method()} ${req.url()}`);
+    });
+    page.on('requestfinished', (req) => { openRequests.delete(req); });
+    page.on('requestfailed', (req) => {
+      openRequests.delete(req);
+      badResponses.push(`FAILED ${req.failure() && req.failure().errorText} ${req.url()}`);
     });
     await page.evaluateOnNewDocument((cfg) => { window.__SR_CFG__ = cfg; },
       { apiBase, staticBase: '' });
@@ -462,6 +562,9 @@ async function main() {
       assert(external.length === 0, `无外部网络请求 (${external.slice(0, 3).join(', ')})`);
 
       console.log(`\n[test-platform] ✅ 全部通过 (${pass} 项断言)`);
+    } catch (e) {
+      await snapshotFailure(page, apiBase);
+      throw e;
     } finally {
       await browser.close();
       server.close();
@@ -479,5 +582,32 @@ async function main() {
 
 main().catch((err) => {
   console.error('\n[test-platform] ❌ 失败:', err.message);
+  if (failureScope) {
+    console.error('[test-platform] —— 失败时的页面 ——');
+    console.error('  现取一次 /api/health：' + failureScope.health);
+    console.error('  url: ' + failureScope.url);
+    console.error('  .qp-tbl tbody tr 行数: ' + failureScope.rows);
+    console.error('  正文: ' + failureScope.body);
+    if (failureScope.api && failureScope.api.length) {
+      console.error('  API 记录（响应码 耗时 路径）:');
+      for (const r of failureScope.api) console.error('    ' + r);
+    }
+  }
+  if (openRequests.size) {
+    console.error('[test-platform] —— 还没跑完的请求（占着连接池的就是这些）——');
+    for (const v of openRequests.values()) console.error('  ' + v);
+  }
+  if (errorsRef && errorsRef.length) {
+    console.error('[test-platform] —— 浏览器控制台 ——');
+    for (const e of errorsRef.slice(0, 8)) console.error('  ' + e);
+  }
+  if (badResponses.length) {
+    console.error('[test-platform] —— 非 2xx / 失败请求 ——');
+    for (const r of badResponses.slice(-10)) console.error('  ' + r);
+  }
+  if (backendLog.length) {
+    console.error('[test-platform] —— 后端最后 ' + backendLog.length + ' 行 ——');
+    for (const line of backendLog) console.error('  ' + line);
+  }
   process.exit(1);
 });

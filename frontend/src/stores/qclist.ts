@@ -14,9 +14,16 @@ import {
 } from '../lib/qclist.js';
 import type { QcIssue, QcList, QcStatus, QcEncoding } from '../lib/qclist.js';
 import { loadSrConfig } from '../lib/scene.js';
-import { apiWriteQcList } from '../lib/api.js';
+import type { SceneOpenMeta } from '../lib/scene.js';
+import {
+  apiWriteQcList, apiSceneSiblings, nosrItemOf, siblingRow,
+} from '../lib/api.js';
+import type { SceneResolveResult, SceneSiblings, SceneSibling } from '../lib/api.js';
+import { matchesScene, runSceneBake, progressText, fmtElapsed } from '../lib/qcbatch.js';
+import type { BakeFail } from '../lib/qcbatch.js';
 import { pathLeafOf } from './queue.js';
 import { useViewerStore } from './viewer.js';
+import { useScenesStore } from './scenes.js';
 
 const LS_KEY = 'sr.viewer.qcList';
 
@@ -119,6 +126,9 @@ export const useQcListStore = defineStore('qclist', () => {
       sourceMtime.value = typeof p.mtime === 'number' ? p.mtime : null;
       // 状态以缓存为准（它含还没同步出去的改动），文件下半部分只作首次导入的起点。
       statuses.value = { ...(p.statuses ?? {}) };
+      // 烘焙账**不进缓存**：它记的是「这次会话里烤过什么」，刷新后要重烤就重跑一键解析，
+      // 而不是让一份上次会话的旧账挂在新清单上。
+      clearBakeLedger();
     } catch {
       dropPersisted();
     }
@@ -143,6 +153,7 @@ export const useQcListStore = defineStore('qclist', () => {
     sourceEncoding.value = enc;
     sourceMtime.value = null;          // 粘文本进来的，没有「源文件时间」可言
     selName.value = null;
+    clearBakeLedger();                 // 键是行名，换一份清单即作废
     persist();
     return true;
   }
@@ -163,8 +174,11 @@ export const useQcListStore = defineStore('qclist', () => {
   }
 
   function close(): void {
+    // 还跑着就先收手：清单都没了，再往里插卡片就是往一份不存在的清单里写账。
+    bakeAbort?.abort();
     list.value = null;
     statuses.value = {};
+    clearBakeLedger();
     sourceName.value = '';
     sourceText.value = '';
     sourceMtime.value = null;
@@ -197,9 +211,13 @@ export const useQcListStore = defineStore('qclist', () => {
     }
   }
 
-  /** 批量版：直接吃队列任务行的 lq_path（末段就是生产全名）。 */
+  /** 批量版：直接吃队列任务行的 lq_path（末段就是场景目录名 —— 它带产品段，而清单
+   *  第一列多半不带，所以照旧走 `rowForScene` 那把补段的键，不能逐字比）。 */
   function noteSubmittedDirs(dirs: (string | null | undefined)[]): void {
-    for (const d of dirs) if (d) noteSubmitted(pathLeafOf(d));
+    for (const d of dirs) {
+      const hit = rowForScene(d);
+      if (hit) noteSubmitted(hit.name);
+    }
   }
 
   /** 选中某一行；传 null 清空。 */
@@ -207,17 +225,214 @@ export const useQcListStore = defineStore('qclist', () => {
     selName.value = name;
   }
 
+  /** 场景目录（或它的末段）→ 清单里对应的那一行（**文档顺序第一行**命中）。
+   *
+   *  匹配**绝不能逐字相等**：清单第一列约定俗成省掉产品段（`…_101_0020_001_L1`），
+   *  而盘阵上的景级目录叫 `…_101_0020_001_L1_PAN` —— 逐字比就恒不成立，症状是
+   *  「图开出来了，那一行却不选中、还一直显示『打开』而不是『当前』」（2026-09-27
+   *  补产品段那条改动漏改这里留下的缺口）。补段口径是 `lib/qcbatch.ts` 里那份
+   *  后端镜像；假阴性最坏是「没选中」，绝不会选中错的一行。
+   *
+   *  1:N 的口径：同一份清单里若同时列了 `…_L1` 与 `…_L1_PAN` 两行，两行都会命中同一
+   *  个目录 —— 这里取文档顺序第一行（谁先写谁是那一景的代表）。 */
+  function rowForScene(dirOrLeaf: string | null | undefined): QcIssue | null {
+    if (!loaded.value) return null;
+    const leaf = dirOrLeaf ? pathLeafOf(dirOrLeaf) : '';
+    if (!leaf) return null;
+    return issues.value.find((i) => matchesScene(i.name, i.imgType, leaf)) ?? null;
+  }
+
   /** 当前打开的图 → 自动选中清单里对应的那一行。
    *
-   *  匹配**必须走 lqPath 的末段**而不是 rec.name：RC 场景的输入影像是 PAN.tif，
-   *  那条路的 rec.name 是个没用的 "PAN"，只有场景目录名才是清单里的生产全名。
-   *  本地随便打开的图没有 lqPath → 匹配不上，面板只当列表看。 */
-  function selectForScene(lqPath: string | null | undefined): void {
-    if (!loaded.value) return;
-    const name = lqPath ? pathLeafOf(lqPath) : '';
-    if (!name) return;
-    if (issues.value.some((i) => i.name === name)) selName.value = name;
+   *  用**场景目录**而不是 `lqPath` 当输入：中间产物（SR / NOSR）的 `lqPath` 可能为空
+   *  而 `sceneDir` 一定有（见 viewer 的 ViewerRec.sceneDir）。两者都取不到（本地随便
+   *  打开的图）→ 匹配不上，面板只当列表看。 */
+  function selectForScene(dirOrLeaf: string | null | undefined): void {
+    const hit = rowForScene(dirOrLeaf);
+    if (hit) selName.value = hit.name;
   }
+
+  /* ---------------- 一键解析：按 .txt 顺序批量烘焙 + 入列 ----------------
+     一景两步：本体 jpg + NOSR jpg（盘上没有那份就只烤本体，如实记一笔「缺失」）。
+     每一步都**只把 jpg 烤到盘上**，卡片入列时只有身份、没有像素 —— 几十景一次装进
+     内存必爆（算式见 viewer 的 ViewerRec.card）。点开某张卡时命中服务端缓存，秒出。
+
+     全程走既有端点（resolve / preview / siblings），**没有新后端接口**：批量端点既
+     停不下服务端已经在烤的那一份，又要把「试过哪些候选、各自为什么不行」重写一遍
+     （那就成了新的「静默换路径」入口）。服务端读盘本就该并发 1（后台急烤 ticker 就是
+     单消费者），省下的只有毫秒级往返。 */
+
+  type BakeState = 'idle' | 'running' | 'stopping' | 'done' | 'stopped';
+
+  const bakeState = ref<BakeState>('idle');
+  const bakeTotal = ref(0);
+  const bakeDone = ref(0);
+  /** 进度行主文案（`第 3/12 景 · 名字 · ÷4`）。 */
+  const bakeNow = ref('');
+  /** 跑批已用的秒数（跑着时每秒刷一次，定格在结束那一刻）。 */
+  const bakeElapsed = ref(0);
+  /** 失败账：**单独一张表，绝不写 `statuses`** —— 那份会被 `buildQcDoc` 写回盘阵上
+   *  的 .txt、还驱动 `counts.done`。烤图失败不是质检结论，不能污染文档。 */
+  const bakeFails = ref<Record<string, BakeFail>>({});
+  /** 盘上的事实（不是错误）：「没有未超分那份」。 */
+  const bakeNotes = ref<Record<string, string>>({});
+
+  let bakeAbort: AbortController | null = null;
+  let bakeTimer: ReturnType<typeof setInterval> | null = null;
+
+  function stopBakeTimer(): void {
+    if (bakeTimer !== null) { clearInterval(bakeTimer); bakeTimer = null; }
+  }
+
+  /** 换清单 / 关清单时把三张账一起清掉（键是行名，上一份的行名在这份里没有意义）。 */
+  function clearBakeLedger(): void {
+    bakeState.value = 'idle';
+    bakeTotal.value = 0;
+    bakeDone.value = 0;
+    bakeNow.value = '';
+    bakeElapsed.value = 0;
+    bakeFails.value = {};
+    bakeNotes.value = {};
+  }
+
+  /** 本体卡的元数据 —— 与 `scenes.open` 建 meta 的口径逐字对齐（少一个字段就是
+   *  「同一种入口两张卡长得不一样」）。
+   *
+   *  尺寸缺了**抛**（与 `scenes.open` 同一句口径：掩码按 rec.W/H 换算，0 会让落点全错）：
+   *  批量这条路上「拒绝入列」比「留一张点了必炸的空卡」好，抛出去由驱动器记进失败账。 */
+  function bodyMeta(r: SceneResolveResult): SceneOpenMeta {
+    if (!r.row.W || !r.row.H) {
+      throw new Error('「' + r.row.name + '」尺寸未知（元数据缺 W/H），无法换算掩码，拒绝打开');
+    }
+    return {
+      name: r.row.name, W: r.row.W, H: r.row.H, sceneId: r.row.id,
+      lqPath: r.row.lq_path, sceneDir: r.resolved.dir,
+      serverMaskPath: r.resolved.mask_path,
+      stageKind: r.resolved.kind, stageSuffix: r.resolved.suffix,
+    };
+  }
+
+  /** NOSR 卡的元数据 —— 与 `viewer.openSceneSibling` 的口径**逐字对齐**（那张卡是同一种
+   *  图的另一条入口，两边字段不一样就会出现「芯片打开说 A、批量入列说 B」）。
+   *
+   *  `lqPath` 取场景目录而**不是 null**：后端确实把 `row.lq_path` 对中间产物置了空，但
+   *  `openSceneSibling` 传的是 `res.lqPath`（= 场景目录，任务区靠它关联队列行），批量
+   *  这条入口照抄 —— 只读与否由 `stageKind` 决定（`isIntermediateStage` 那三处门），
+   *  不看 lqPath。 */
+  function nosrMeta(sib: SceneSiblings, item: SceneSibling): SceneOpenMeta {
+    const stem = (item.name ?? 'NOSR').replace(/\.(tif|tiff|jpg|jpeg)$/i, '');
+    return {
+      name: stem, W: item.W ?? 0, H: item.H ?? 0,
+      sceneId: item.id ?? '', lqPath: sib.lqPath, sceneDir: sib.lqPath,
+      serverMaskPath: null,
+      stageKind: 'nosr', stageSuffix: sib.suffix,
+    };
+  }
+
+  /** 按 .txt 顺序把整份清单跑一遍：清空暂存区 → 逐景 resolve + 烤两份 jpg + 入列。
+   *
+   *  跑的过程中**不弹遮罩、不动 busy**（那是模态的，会把用户正在看的图挡住、工具栏
+   *  锁住几十景 × 每景几十秒）；进度只走面板上那一行字。 */
+  async function bakeAll(): Promise<void> {
+    if (!list.value || bakeState.value === 'running' || bakeState.value === 'stopping') return;
+    const rows = issues.value;
+    if (!rows.length) return;
+    const viewer = useViewerStore();
+    const scenes = useScenesStore();
+    // ① 先清空：用户先看见空的暂存区，再看它一景一景长出来。
+    viewer.clearRecs();
+    viewer.clearLights();
+    clearBakeLedger();
+    bakeTotal.value = rows.length;
+    const div = viewer.previewDiv;         // 抓一次，整批沿用（中途拖滑块只影响后面那些景）
+    const startedAt = Date.now();
+    const ac = new AbortController();
+    bakeAbort = ac;
+    bakeState.value = 'running';
+    stopBakeTimer();
+    bakeTimer = setInterval(() => {
+      bakeElapsed.value = Math.round((Date.now() - startedAt) / 1000);
+    }, 1000);
+    try {
+      const report = await runSceneBake(rows, {
+        resolve: (it, signal) => scenes.resolveByName(it.name, it.imgType, { signal }),
+        body: async (it, res) => {
+          // ① 入列一张空卡（带身份、带「第一次点开去哪儿取图」）② 把 jpg 烤到盘上。
+          // 顺序不能反：烤成功才入列的话，用户跑到一半看到的是「进度在走、左边还是空的」。
+          const r = res as SceneResolveResult;
+          await viewer.bakeCardPixels(viewer.insertSceneCard(bodyMeta(r), r.row));
+        },
+        nosr: async (it, res) => {
+          const r = res as SceneResolveResult;
+          const sib = await apiSceneSiblings(loadSrConfig(), r.row.id);
+          const item = nosrItemOf(sib);
+          // 「没有这一份」是盘上的事实，不是失败（口径见 api.ts::nosrItemOf）。
+          // 尺寸读不出来同上：打不开就不入列，免得留一张点了必炸的空卡。
+          if (!item || !item.id || item.W == null || item.H == null) return 'missing';
+          await viewer.bakeCardPixels(
+            viewer.insertSceneCard(nosrMeta(sib, item), siblingRow(sib, item)));
+          return 'ok';
+        },
+        onProgress: (i, n, it) => {
+          bakeDone.value = i - 1;
+          bakeNow.value = progressText(i, n, it.name, div);
+        },
+      }, ac.signal);
+      bakeDone.value = report.done;
+      bakeFails.value = report.fails;
+      bakeNotes.value = report.notes;
+      bakeState.value = report.stopped ? 'stopped' : 'done';
+    } finally {
+      stopBakeTimer();
+      bakeElapsed.value = Math.round((Date.now() - startedAt) / 1000);
+      bakeNow.value = '';
+      bakeAbort = null;
+    }
+  }
+
+  /** 中途停：掐掉在飞的 resolve，并在下一景开跑之前收手。
+   *  **正在烤的那一景停不下来** —— 取图的两个 API 都不收 AbortSignal，所以让它烤完
+   *  （落盘正是用户要的缓存），文案如实写「正在停止（等这一景烤完…）」。 */
+  function stopBake(): void {
+    if (bakeState.value !== 'running') return;
+    bakeState.value = 'stopping';
+    bakeAbort?.abort();
+  }
+
+  /** 按钮上的字。跑着（含正在停止）时它是「停止」，其余时候是「一键解析」。 */
+  const bakeHead = computed(() => (
+    bakeState.value === 'running' || bakeState.value === 'stopping' ? '停止' : '一键解析'
+  ));
+
+  /** 按钮旁边那行小字：待命说清要干什么 → 跑着报进度与已用时长 → 收尾如实报账。
+   *  **失败与「缺 NOSR」分开数**：前者是要处理的，后者是盘上的事实。 */
+  const bakeLine = computed(() => {
+    const st = bakeState.value;
+    if (st === 'idle') return '按清单顺序逐景烘焙本体 + NOSR 两份 jpg，每景左侧落两张卡';
+    if (st === 'stopping') return '正在停止（等这一景烤完…）';
+    if (st === 'running') {
+      return (bakeNow.value || '正在准备…') + ' · 已用 ' + fmtElapsed(bakeElapsed.value * 1000);
+    }
+    const nFail = Object.keys(bakeFails.value).length;
+    const nNote = Object.keys(bakeNotes.value).length;
+    let s = st === 'stopped'
+      ? '已停止：跑完 ' + bakeDone.value + '/' + bakeTotal.value + ' 景'
+      : '共 ' + bakeTotal.value + ' 景';
+    s += ' · 成功 ' + Math.max(0, bakeDone.value - nFail);
+    if (nFail) s += ' · 失败 ' + nFail;
+    if (nNote) s += ' · 缺 NOSR ' + nNote;
+    return s + ' · 用了 ' + fmtElapsed(bakeElapsed.value * 1000);
+  });
+
+  /** 失败账逐条摊开（名字 → 第几步 + 后端原话），给面板下面那块用。 */
+  const bakeFailList = computed(() => (
+    Object.entries(bakeFails.value).map(([name, f]) => ({ name, ...f }))
+  ));
+
+  /** 「缺 NOSR」那些行（中性提示，不是错误）。 */
+  const bakeNoteList = computed(() => (
+    Object.entries(bakeNotes.value).map(([name, why]) => ({ name, why }))
+  ));
 
   /* ---------------- 写回 ---------------- */
 
@@ -287,5 +502,9 @@ export const useQcListStore = defineStore('qclist', () => {
     setStatus, statusOf, labelOf,
     noteSubmitted, noteSubmittedDirs, select, selectForScene,
     output, syncToTarget, setTarget,
+    // 一键解析
+    bakeState, bakeTotal, bakeDone, bakeElapsed,
+    bakeFails, bakeNotes, bakeFailList, bakeNoteList, bakeHead, bakeLine,
+    rowForScene, bakeAll, stopBake,
   };
 });
