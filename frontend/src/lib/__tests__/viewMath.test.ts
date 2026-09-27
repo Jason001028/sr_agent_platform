@@ -7,7 +7,9 @@
 import { describe, it, expect } from 'vitest';
 import {
   fitView, thumbToScreen, mouseToThumb, thumbToOrig, origToThumb, locateView, wheelZoom,
-  pointInPoly, hitRoi, visibleThumbRect,
+  pointInPoly, hitRoi, visibleThumbRect, parseLocPair,
+  clampSplitRatio, splitRects, paneAtX, ratioFromPointer, normAnchor, anchorAtLocal,
+  wheelZoomBoth, panBoth, remapViewForImage, SPLIT_MIN_HALF_PX,
 } from '../viewMath.js';
 import type { Poly } from '../maskgen.js';
 
@@ -83,6 +85,35 @@ describe('origToThumb / locateView（像素定位）', () => {
   });
 });
 
+describe('parseLocPair（输入框里的「X,Y」文本）', () => {
+  it('掩膜中心点坐标那种形态：半角逗号 + 小数', () => {
+    expect(parseLocPair('30766.11,21862.51')).toEqual(['30766.11', '21862.51']);
+  });
+  it('全角逗号 / 空格 / 制表符分隔、首尾空白都收', () => {
+    expect(parseLocPair(' 30766.11，21862.51 ')).toEqual(['30766.11', '21862.51']);
+    expect(parseLocPair('30766 21862')).toEqual(['30766', '21862']);
+    expect(parseLocPair('30766.11\t21862.51')).toEqual(['30766.11', '21862.51']);
+    expect(parseLocPair('30766.11,21862.51,')).toEqual(['30766.11', '21862.51']);  // 尾随分隔符不算第三个数
+  });
+  it('整数、带符号、省略整数位的小数都认', () => {
+    expect(parseLocPair('0,0')).toEqual(['0', '0']);
+    expect(parseLocPair('-1.5,+2')).toEqual(['-1.5', '+2']);
+    expect(parseLocPair('.5,2.')).toEqual(['.5', '2.']);
+  });
+  it('单个数不是坐标对（调用方据此报错，不拿它跳）', () => {
+    expect(parseLocPair('30766.11')).toBeNull();
+    expect(parseLocPair('')).toBeNull();
+    expect(parseLocPair('   ')).toBeNull();
+  });
+  it('**三个数一律不认**（拷了整行掩膜记录）：截前两个会把标记跳到别处', () => {
+    expect(parseLocPair('1,30766.11,21862.51')).toBeNull();
+  });
+  it('不是数的内容不认', () => {
+    expect(parseLocPair('X,Y')).toBeNull();
+    expect(parseLocPair('30766.11,abc')).toBeNull();
+  });
+});
+
 describe('wheelZoom（以鼠标为锚点）', () => {
   it('放大后锚点像素不移动', () => {
     const view = { scale: 1, ox: 0, oy: 0 };
@@ -148,5 +179,260 @@ describe('pointInPoly / hitRoi（射线法命中）', () => {
     expect(hitRoi(5, 5, rois)).toBe(1);      // 命中第二个
     expect(hitRoi(25, 25, rois)).toBe(0);    // 命中第一个
     expect(hitRoi(99, 99, rois)).toBe(-1);   // 无命中
+  });
+});
+
+/* ==================== 图像对比：分屏两格（2026-09-20） ==================== */
+
+describe('clampSplitRatio（分隔比例夹取）', () => {
+  it('常规画布下夹到 [0.15, 0.85]', () => {
+    expect(clampSplitRatio(0.5, 1366)).toBeCloseTo(0.5);
+    expect(clampSplitRatio(0.01, 1366)).toBeCloseTo(0.15);
+    expect(clampSplitRatio(0.99, 1366)).toBeCloseTo(0.85);
+  });
+  it('非有限值 → 0.5（localStorage 里可能是脏数据）', () => {
+    expect(clampSplitRatio(NaN, 1366)).toBe(0.5);
+    expect(clampSplitRatio(Infinity, 1366)).toBe(0.5);
+  });
+  it('窄画布下界抬到 SPLIT_MIN_HALF_PX/w，两格都还看得见', () => {
+    // 300px 宽 → 120/300 = 0.4 > 0.15，下界抬到 0.4
+    expect(clampSplitRatio(0.2, 300)).toBeCloseTo(0.4);
+    expect(clampSplitRatio(0.1, 300)).toBeCloseTo(0.4);
+    // 上界对称抬到 0.6
+    expect(clampSplitRatio(0.9, 300)).toBeCloseTo(0.6);
+    // 抬完后每格仍不小于 SPLIT_MIN_HALF_PX
+    const r = clampSplitRatio(0.01, 300);
+    expect(300 * r).toBeGreaterThanOrEqual(SPLIT_MIN_HALF_PX);
+  });
+  it('画布窄到两格都放不下时退回 [0.15, 0.85]，不抛', () => {
+    expect(clampSplitRatio(0.5, 100)).toBeCloseTo(0.5);
+    expect(clampSplitRatio(0.01, 100)).toBeCloseTo(0.15);
+  });
+});
+
+describe('splitRects（切两格：无缝隙无重叠）', () => {
+  it('a.w + b.w 精确等于画布宽，a 从 0 起、b 紧接 a', () => {
+    for (const cw of [1, 2, 3, 1366, 4096]) {
+      const { a, b } = splitRects(0.5, cw, 800);
+      expect(a.x).toBe(0);
+      expect(b.x).toBe(a.w);
+      expect(a.w + b.w).toBe(Math.max(0, Math.round(cw)));
+      expect(a.h).toBe(800);
+      expect(b.h).toBe(800);
+      expect(b.y).toBe(0);
+    }
+  });
+  it('比例 0.7 → 左格占七成', () => {
+    const { a, b } = splitRects(0.7, 1000, 500);
+    expect(a.w).toBe(700);
+    expect(b.w).toBe(300);
+  });
+  it('极端比例也留得住两格（各至少 1px）', () => {
+    const { a, b } = splitRects(0.99, 1000, 500);
+    expect(a.w).toBeLessThanOrEqual(999);
+    expect(b.w).toBeGreaterThanOrEqual(1);
+  });
+  it('cw <= 1 退化：整幅给左格，右格宽 0，不抛', () => {
+    const { a, b } = splitRects(0.5, 1, 10);
+    expect(a.w).toBe(1);
+    expect(b.w).toBe(0);
+    expect(splitRects(0.5, 0, 10).a.w).toBe(0);
+  });
+});
+
+describe('paneAtX / ratioFromPointer', () => {
+  it('正好压在分隔线上算右格', () => {
+    expect(paneAtX(499, 500)).toBe('A');
+    expect(paneAtX(500, 500)).toBe('B');
+    expect(paneAtX(501, 500)).toBe('B');
+  });
+  it('负值与越界仍能定侧（不抛）', () => {
+    expect(paneAtX(-10, 500)).toBe('A');
+    expect(paneAtX(9999, 500)).toBe('B');
+  });
+  it('指针 clientX → 比例（未夹）', () => {
+    expect(ratioFromPointer(1600, 1000, 1000)).toBeCloseTo(0.6);
+    expect(ratioFromPointer(400, 1000, 1000)).toBeCloseTo(-0.6);   // 越界交给 clamp
+    expect(ratioFromPointer(400, 0, 0)).toBe(0.5);                 // 零宽兜底
+  });
+});
+
+describe('normAnchor / anchorAtLocal（归一化锚点往返）', () => {
+  it('去掉 rect 原点后往返稳定在 1e-9', () => {
+    const rect = { x: 683, y: 0, w: 683, h: 800 };
+    const n = normAnchor(rect, 900, 400);
+    const [lx, ly] = anchorAtLocal(rect, n.u, n.v);   // 该格自己的局部坐标
+    expect(Math.abs(lx - (900 - rect.x))).toBeLessThan(1e-9);
+    expect(Math.abs(ly - 400)).toBeLessThan(1e-9);
+  });
+  it('格内点的 u,v 落在 [0,1]', () => {
+    const rect = { x: 100, y: 50, w: 200, h: 100 };
+    const n = normAnchor(rect, 150, 100);
+    expect(n.u).toBeCloseTo(0.25);
+    expect(n.v).toBeCloseTo(0.5);
+  });
+  it('零宽/零高的格退回中心，不产生 NaN', () => {
+    const n = normAnchor({ x: 0, y: 0, w: 0, h: 0 }, 10, 10);
+    expect(n.u).toBe(0.5);
+    expect(n.v).toBe(0.5);
+  });
+});
+
+describe('wheelZoomBoth（同步缩放）', () => {
+  const ra = { x: 0, y: 0, w: 683, h: 800 };
+  const rb = { x: 683, y: 0, w: 683, h: 800 };
+  const va = fitView(256, 256, ra.w, ra.h);
+  const vb = fitView(256, 256, rb.w, rb.h);
+
+  it('等格等视图 → 两侧 scale 恒等，且被指针那格与单侧 wheelZoom 逐位相同', () => {
+    let a = va, b = vb;
+    let solo = va;                                  // 单侧对照：只对 va 反复滚轮
+    for (const f of [1.2, 1.2, 1 / 1.2, 1.2]) {
+      const r = wheelZoomBoth(a, b, ra, rb, 'A', 300, 400, f);
+      a = r.a; b = r.b;
+      solo = wheelZoom(solo, 300, 400, f);
+      expect(a.scale).toBeCloseTo(b.scale, 12);
+    }
+    // 指针所在格的变换与单侧路径完全一致（另一格的差异只在锚点位置）
+    expect(a).toEqual(solo);
+    expect(b.scale).toBeCloseTo(solo.scale, 12);
+  });
+
+  it('指针所在格的锚点缩略图坐标守恒', () => {
+    const before = (300 - va.ox) / va.scale;        // 指针处对应的缩略图 x
+    const r = wheelZoomBoth(va, vb, ra, rb, 'A', 300, 400, 1.2);
+    expect((300 - r.a.ox) / r.a.scale).toBeCloseTo(before, 9);
+  });
+
+  it('另一格锚在同归一化位置（不是同一绝对偏移）—— 这一条是防回归的', () => {
+    // 指针在左格的 u = 300/683；右格里的同一相对位置是它**自己局部坐标**里的
+    // u*rb.w，**不是** rb.x + u*rb.w。后者（本函数最早那版）把右格锚点整体挪了
+    // 一个左格宽（983 而不是 300），一滚轮右格就飞出去 —— 下面这个守恒式当时过不了。
+    const u = 300 / ra.w;
+    const bxLocal = u * rb.w;
+    const before = (bxLocal - vb.ox) / vb.scale;
+    const r = wheelZoomBoth(va, vb, ra, rb, 'A', 300, 400, 1.2);
+    expect((bxLocal - r.b.ox) / r.b.scale).toBeCloseTo(before, 9);
+    // 顺带把「错法确实不同」也钉住，免得哪天两条算式意外重合、这条测试变成空声明
+    const buggy = wheelZoom(vb, rb.x + u * rb.w, 400, 1.2);
+    expect(Math.abs(r.b.ox - buggy.ox)).toBeGreaterThan(1);
+  });
+
+  it('指针在右格时同样：两格各锚在自己的局部坐标系里', () => {
+    const u = (1000 - rb.x) / rb.w;                 // 指针在右格里的相对位置
+    const bxLocal = u * rb.w;                       // = 指针自己的格局部坐标
+    const axLocal = u * ra.w;                       // 左格里的同一相对位置
+    const beforeB = (bxLocal - vb.ox) / vb.scale;
+    const beforeA = (axLocal - va.ox) / va.scale;
+    const r = wheelZoomBoth(va, vb, rb, ra, 'B', 1000, 400, 1.2);
+    expect((bxLocal - r.b.ox) / r.b.scale).toBeCloseTo(beforeB, 9);
+    expect((axLocal - r.a.ox) / r.a.scale).toBeCloseTo(beforeA, 9);
+  });
+
+  it('clamp 每侧独立，两侧 scale 不会发散', () => {
+    let a = va, b = vb;
+    for (let i = 0; i < 80; i++) {
+      const r = wheelZoomBoth(a, b, ra, rb, 'A', 100, 100, 1.2);
+      a = r.a; b = r.b;
+    }
+    expect(a.scale).toBeLessThanOrEqual(64);
+    expect(b.scale).toBeLessThanOrEqual(64);
+    expect(a.scale).toBeCloseTo(b.scale, 9);
+  });
+});
+
+describe('panBoth（同步平移）', () => {
+  it('两格加同一个屏幕位移，入参不改', () => {
+    const va = { scale: 2, ox: 10, oy: 20 };
+    const vb = { scale: 3, ox: -5, oy: 7 };
+    const r = panBoth(va, vb, 40, -15);
+    expect(r.a).toEqual({ scale: 2, ox: 50, oy: 5 });
+    expect(r.b).toEqual({ scale: 3, ox: 35, oy: -8 });
+    expect(va).toEqual({ scale: 2, ox: 10, oy: 20 });   // 未改
+    expect(vb).toEqual({ scale: 3, ox: -5, oy: 7 });
+  });
+});
+
+describe('remapViewForImage（换图保持视图）', () => {
+  /** 归一化可视宽度：屏幕宽度 cw 里能看见整幅图的几分之几。 */
+  const normW = (v: { scale: number; ox: number }, tw: number, cw: number) => cw / (v.scale * tw);
+  /** 视野左上角在整幅图里的归一化位置。 */
+  const normL = (v: { scale: number; ox: number }, tw: number) => -v.ox / (v.scale * tw);
+  const normT = (v: { scale: number; oy: number }, th: number) => -v.oy / (v.scale * th);
+
+  it('两张尺寸逐字相同 → 原样返回（同一个对象，一个数都没动）', () => {
+    const v = { scale: 0.7, ox: -33.25, oy: 12.5 };
+    const r = remapViewForImage(v, { w: 1314, h: 1314 }, { w: 1314, h: 1314 }, 900, 600);
+    expect(r).toBe(v);
+    expect(Object.is(r.scale, v.scale)).toBe(true);
+    expect(Object.is(r.ox, v.ox)).toBe(true);
+    expect(Object.is(r.oy, v.oy)).toBe(true);
+  });
+
+  it('尺寸不同 → 归一化可视宽度与归一化左上角守恒', () => {
+    const cw = 600, ch = 400;
+    const from = { w: 256, h: 256 }, to = { w: 500, h: 250 };
+    const v0 = fitView(from.w, from.h, cw, ch);
+    // 先真的缩放/平移到非默认形态，免得断言落在「恰好的默认值」上
+    const v = { scale: v0.scale * 2.5, ox: -120, oy: 40 };
+    const r = remapViewForImage(v, from, to, cw, ch);
+    expect(normW(r, to.w, cw)).toBeCloseTo(normW(v, from.w, cw), 9);
+    expect(normL(r, to.w)).toBeCloseTo(normL(v, from.w), 9);
+    expect(normT(r, to.h)).toBeCloseTo(normT(v, from.h), 9);
+    // 纵向按新图的比例自然延伸，不额外约束：高度比不同 → oy 不守恒
+    expect(r.scale).not.toBeCloseTo(v.scale, 6);
+  });
+
+  it('来回 remap 回到原值（A→B→A）', () => {
+    const cw = 800, ch = 500;
+    const a = { w: 256, h: 256 }, b = { w: 500, h: 250 };
+    const v = { scale: 1.7, ox: -95.5, oy: 18.25 };
+    const once = remapViewForImage(v, a, b, cw, ch);
+    const back = remapViewForImage(once, b, a, cw, ch);
+    expect(back.scale).toBeCloseTo(v.scale, 9);
+    expect(back.ox).toBeCloseTo(v.ox, 9);
+    expect(back.oy).toBeCloseTo(v.oy, 9);
+  });
+
+  it('长宽比相同、只是分辨率不同 → 偏移不变、scale 按像素比走（画面内容一模一样）', () => {
+    // 512 的缩略图换成 256 的（同一片地面、像素少一半）：要盖住同一片地面，
+    // 「缩略图像素 → 屏幕像素」的倍数就得翻倍；而 `scale × 图宽` 不变，
+    // 于是 ox/oy 一个数都不用动。
+    const v = { scale: 1.4, ox: -30, oy: -12 };
+    const r = remapViewForImage(v, { w: 512, h: 512 }, { w: 256, h: 256 }, 600, 400);
+    expect(r.scale).toBeCloseTo(2.8, 9);
+    expect(r.ox).toBeCloseTo(-30, 9);
+    expect(r.oy).toBeCloseTo(-12, 9);
+    // 反过来：缩略图像素翻倍 → scale 减半
+    const back = remapViewForImage(v, { w: 256, h: 256 }, { w: 512, h: 512 }, 600, 400);
+    expect(back.scale).toBeCloseTo(0.7, 9);
+    expect(back.ox).toBeCloseTo(-30, 9);
+  });
+
+  it('退化输入一律原样返回（不动比乱动好）', () => {
+    const v = { scale: 2, ox: 10, oy: 20 };
+    const cases: [Parameters<typeof remapViewForImage>[0], number, number, number, number][] = [
+      [{ scale: 0, ox: 0, oy: 0 }, 0, 1, 600, 400],       // view.scale<=0
+      [{ scale: -1, ox: 0, oy: 0 }, 0, 1, 600, 400],
+      [{ scale: 2, ox: 10, oy: 20 }, 0, 256, 600, 400],    // from.w<=0
+      [{ scale: 2, ox: 10, oy: 20 }, 256, 0, 600, 400],    // to.h<=0
+      [{ scale: 2, ox: 10, oy: 20 }, 256, 256, 0, 400],    // cw<=0
+      [{ scale: 2, ox: 10, oy: 20 }, 256, 256, 600, 0],    // ch<=0
+    ];
+    for (const [view, fw, tw, cw, ch] of cases) {
+      const r = remapViewForImage(view, { w: fw, h: fw }, { w: tw, h: tw }, cw, ch);
+      expect(r).toBe(view);
+    }
+    // 尺度和目标尺寸都正，但彼此只有一边相同 → 仍然照常换算（不是退化）
+    const r = remapViewForImage(v, { w: 256, h: 256 }, { w: 256, h: 128 }, 600, 400);
+    expect(r).not.toBe(v);
+  });
+
+  it('fit 出来的默认形态换到同比例的另一档：可视范围守恒，scale 按像素比走', () => {
+    const v = fitView(256, 256, 600, 400);          // scale=1（fit 封顶 1）、居中
+    const r = remapViewForImage(v, { w: 256, h: 256 }, { w: 1024, h: 1024 }, 600, 400);
+    expect(normW(r, 1024, 600)).toBeCloseTo(normW(v, 256, 600), 9);
+    expect(r.scale).toBeCloseTo(0.25, 9);           // 1024 的图要比 256 的缩小 4 倍才盖住同一片地面
+    expect(normL(r, 1024)).toBeCloseTo(normL(v, 256), 9);
   });
 });

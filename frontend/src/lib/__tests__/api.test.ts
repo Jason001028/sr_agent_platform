@@ -2,15 +2,18 @@
  * api.test.ts — 阶段5 API 客户端纯函数（SSE 帧切分/解析 + URL + 类型守卫）
  * ------------------------------------------------------------------
  * 以纯函数为主（stepSse 残片处理 / parseSseEvents 坏帧丢弃 / apiUrl joinBase 行为）；
- * fetchSceneJpg 那组把全局 fetch 打桩，钉的是「走哪条 URL、onPhase 何时响」——
- * 不碰真实网络。聊天流式 fetch 走浏览器 .e2e 回归覆盖。
+ * fetchSceneJpg 那组把全局 fetch 打桩，钉的是「走哪条 URL、顺序如何、onPhase 何时响」
+ * —— 不碰真实网络。聊天流式 fetch 走浏览器 .e2e 回归覆盖。
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import {
   stepSse, parseSseEvents, apiUrl, sessionsUrl, sessionMessagesUrl,
-  queueEventsUrl, fetchSceneJpg, fetchTempSceneJpg, apiResolveScene,
+  queueEventsUrl, fetchSceneJpg, fetchDropSceneJpg, apiResolveScene,
+  resetPreviewCache, previewCacheStats, clearPreviewCache, PREVIEW_BLOB_CACHE_MAX,
+  apiClearScenePreviews, watchPreviewCache, nosrItemOf,
+  HttpError, isSceneGone, isProxyMiss,
 } from '../api.js';
-import type { PlatformSseEvent, ChatSseEvent } from '../api.js';
+import type { PlatformSseEvent, ChatSseEvent, SceneSiblings, SceneSibling } from '../api.js';
 import type { SceneRow } from '../scene.js';
 
 const CFG = { apiBase: '', staticBase: '' };
@@ -127,6 +130,8 @@ describe('fetchSceneJpg', () => {
     size_bytes: 0, fake: false, W: 200, H: 100, rel: null,
     jpgUrl: null, hasPreview: false, lq_path: null, ...over,
   });
+  /** 平台烤出来的那份预览（`_preview.jpg` 是判据，见 isBakedPreviewUrl）。 */
+  const BAKED = '/disk-array/a/b_preview.jpg';
 
   let urls: string[];
   /** 打桩 fetch：记下每个 URL，按 URL 返回对应字节；非 2xx 交给 http() 抛。 */
@@ -140,62 +145,362 @@ describe('fetchSceneJpg', () => {
   }
 
   afterEach(() => { vi.unstubAllGlobals(); });
+  // 预览 blob 缓存是**模块级单例**（store 与设置浮层共用一份），用例之间会串味：
+  // 上一条把 `~YWJj|4|jpg` 烤出来，下一条同名同档位就变成缓存命中、请求数归零。
+  // 每条用例从空缓存起跑，「走哪条 URL」才是它在钉的东西。
+  beforeEach(() => { resetPreviewCache(); });
 
   it('库外场景（jpgUrl 为 null）：/preview 的响应体就是图，不再打静态 URL', async () => {
-    stubFetch({ '/api/scenes/~YWJj/preview': 'PREVIEW' });
+    stubFetch({ '/api/scenes/~YWJj/preview?div=2': 'PREVIEW' });
     const r = row({ jpgUrl: null, hasPreview: false });
-    expect(await (await fetchSceneJpg(CFG, r)).text()).toBe('PREVIEW');
-    expect(urls).toEqual(['/api/scenes/~YWJj/preview']);
+    expect(await (await fetchSceneJpg(CFG, r, 2)).text()).toBe('PREVIEW');
+    expect(urls).toEqual(['/api/scenes/~YWJj/preview?div=2']);
     expect(r.hasPreview).toBe(true);          // 取到手就记上，下次不再当首次
   });
 
-  it('库行未生成：先 POST 懒生成再取静态 jpgUrl（两次请求，顺序固定）', async () => {
+  it('库行未生成：先打 /preview?div=N 懒生成，再静态取图（两次请求，顺序固定）', async () => {
+    // 那张图由 nginx 直出（几 MB 起，不该占 API 进程的内存/带宽），所以烘焙那一下
+    // 是「白打」的 —— 稳态下只有一次（档位对得上那条走上面的分支）。
     stubFetch({
-      'http://127.0.0.1:8000/api/scenes/~YWJj/preview': 'ok',
-      'http://static:9000/disk-array/a/b.jpg': 'STATIC',
+      'http://127.0.0.1:8000/api/scenes/~YWJj/preview?div=8': 'ok',
+      'http://static:9000/disk-array/a/b_preview.jpg?div=8': 'STATIC',
     });
-    const r = row({ jpgUrl: '/disk-array/a/b.jpg', hasPreview: false });
-    expect(await (await fetchSceneJpg(CFG_BASE, r)).text()).toBe('STATIC');
+    const r = row({ jpgUrl: BAKED, hasPreview: false, previewDiv: null });
+    expect(await (await fetchSceneJpg(CFG_BASE, r, 8)).text()).toBe('STATIC');
     expect(urls).toEqual([
-      'http://127.0.0.1:8000/api/scenes/~YWJj/preview',
-      'http://static:9000/disk-array/a/b.jpg',
+      'http://127.0.0.1:8000/api/scenes/~YWJj/preview?div=8',
+      'http://static:9000/disk-array/a/b_preview.jpg?div=8',
+    ]);
+    expect(r.hasPreview).toBe(true);
+    expect(r.previewDiv).toBe(8);             // 记上实际档位，同一会话内不再重烤
+  });
+
+  it('库行档位对得上：只取静态 jpgUrl（带 ?div= 击穿 nginx 的 max-age）', async () => {
+    stubFetch({ 'http://static:9000/disk-array/a/b_preview.jpg?div=4': 'STATIC' });
+    const r = row({ jpgUrl: BAKED, hasPreview: true, previewDiv: 4 });
+    expect(await (await fetchSceneJpg(CFG_BASE, r, 4)).text()).toBe('STATIC');
+    expect(urls).toEqual([
+      'http://static:9000/disk-array/a/b_preview.jpg?div=4',
     ]);
   });
 
-  it('库行已有缓存：只取静态 jpgUrl，不再打 /preview', async () => {
-    stubFetch({ 'http://static:9000/disk-array/a/b.jpg': 'STATIC' });
-    const r = row({ jpgUrl: '/disk-array/a/b.jpg', hasPreview: true });
-    expect(await (await fetchSceneJpg(CFG_BASE, r)).text()).toBe('STATIC');
+  it('**换档位后必须重烤**：盘上那份仍在（hasPreview 为真）但档位不符', async () => {
+    // 只看 hasPreview 的话这里会跳过重烤、直接取静态 URL —— 界面滑了，盘上那张图
+    // 一个字节都不变，用户看到的还是旧档位。这是这条子逻辑的核心。
+    stubFetch({
+      'http://127.0.0.1:8000/api/scenes/~YWJj/preview?div=16': 'ok',
+      'http://static:9000/disk-array/a/b_preview.jpg?div=16': 'REBAKED',
+    });
+    const r = row({ jpgUrl: BAKED, hasPreview: true, previewDiv: 4 });
+    expect(await (await fetchSceneJpg(CFG_BASE, r, 16)).text()).toBe('REBAKED');
+    expect(urls).toEqual([
+      'http://127.0.0.1:8000/api/scenes/~YWJj/preview?div=16',
+      // `?div=16` 就是这里的要害：不带它，nginx 的 max-age=3600 会把旧档位那张
+      // 端上来，重烤了也看不见。
+      'http://static:9000/disk-array/a/b_preview.jpg?div=16',
+    ]);
+    expect(r.previewDiv).toBe(16);
+  });
+
+  it('旧格式戳（previewDiv 为 null）也算「档位不符」→ 重烤一轮', async () => {
+    stubFetch({
+      '/api/scenes/~YWJj/preview?div=4': 'ok',
+      '/disk-array/a/b_preview.jpg?div=4': 'REBAKED',
+    });
+    const r = row({ jpgUrl: BAKED, hasPreview: true, previewDiv: null });
+    expect(await (await fetchSceneJpg(CFG, r, 4)).text()).toBe('REBAKED');
+    expect(urls).toEqual(['/api/scenes/~YWJj/preview?div=4',
+      '/disk-array/a/b_preview.jpg?div=4']);
+  });
+
+  it('**源本身就是显示件**（jpgUrl 不是 _preview.jpg）：档位对它无意义，永不重烤', async () => {
+    // 这类行 hasPreview 恒 true、previewDiv 恒 null —— 若一并按「档位不符」判，
+    // 每次打开都会白打一次 /preview，而它只会把源文件原样回一遍。
+    stubFetch({ 'http://static:9000/disk-array/a/b.jpg': 'SOURCE' });
+    const r = row({ jpgUrl: '/disk-array/a/b.jpg', hasPreview: true,
+      previewDiv: null });
+    expect(await (await fetchSceneJpg(CFG_BASE, r, 8)).text()).toBe('SOURCE');
     expect(urls).toEqual(['http://static:9000/disk-array/a/b.jpg']);
   });
 
   it('onPhase 只在「本次会触发服务端烘焙」时响一次', async () => {
     const phase = vi.fn();
     stubFetch({
-      '/api/scenes/~YWJj/preview': 'ok',
-      '/disk-array/a/b.jpg': 'STATIC',
+      '/api/scenes/~YWJj/preview?div=4': 'ok',
+      '/disk-array/a/b_preview.jpg?div=4': 'STATIC',
     });
-    // hasPreview=false → 一定会先打 /preview（懒生成），提示用户等
-    await fetchSceneJpg(CFG, row({ jpgUrl: '/disk-array/a/b.jpg',
-      hasPreview: false }), phase);
+    // 档位不符 → 一定会先打 /preview（重烤），提示用户等
+    await fetchSceneJpg(CFG, row({ jpgUrl: BAKED, hasPreview: true,
+      previewDiv: 2 }), 4, phase);
     expect(phase).toHaveBeenCalledTimes(1);
     expect(phase.mock.calls[0][0]).toContain('首次打开');
+    expect(phase.mock.calls[0][0]).toContain('1/4');
 
-    // 缓存已在（hasPreview=true）→ 响都不该响，否则每次打开都吓人一跳
+    // 档位对得上 → 响都不该响，否则每次打开都吓人一跳
     phase.mockClear();
-    await fetchSceneJpg(CFG, row({ jpgUrl: '/disk-array/a/b.jpg',
-      hasPreview: true }), phase);
+    await fetchSceneJpg(CFG, row({ jpgUrl: BAKED, hasPreview: true,
+      previewDiv: 4 }), 4, phase);
     expect(phase).not.toHaveBeenCalled();
   });
 
+  it('onPhase 对库外那条只在**缓存不在**时响（命中不该说「正在烘焙」）', async () => {
+    stubFetch({ '/api/scenes/~YWJj/preview?div=4': 'HIT' });
+    const phase = vi.fn();
+    const r = row({ jpgUrl: null, hasPreview: true });
+    expect(await (await fetchSceneJpg(CFG, r, 4, phase)).text()).toBe('HIT');
+    expect(phase).not.toHaveBeenCalled();
+
+    phase.mockClear();
+    // 本地 blob 缓存也得清：不清的话第二次直接命中本地那份，onPhase 照样不响。
+    // 这条钉的是**服务端**那层缓存（hasPreview）决定的 onPhase，两层要分开看。
+    resetPreviewCache();
+    await fetchSceneJpg(CFG, row({ jpgUrl: null, hasPreview: false }), 4, phase);
+    expect(phase).toHaveBeenCalledTimes(1);
+  });
+
+  it('**同一档位重烤后取静态图必须绕开浏览器缓存**（清除缓存 / 规则换代那条）', async () => {
+    // `?div=N` 只击穿「档位变了」这种情况。档位没变而服务端把同一个 URL 下的文件
+    // 重写了一遍（场景库「清除缓存」、规则戳 v2→v3 原地重烤）时，URL 逐字相同，
+    // nginx 的 max-age=3600 会让浏览器把旧字节端上来 —— 用户以为清了个寂寞。
+    // 判据是 needBake：只有它成立时才**知道**服务端刚重写过。
+    const inits: (RequestInit | undefined)[] = [];
+    vi.stubGlobal('fetch', (u: string, init?: RequestInit) => {
+      inits.push(init);
+      const bodies: Record<string, string> = {
+        '/api/scenes/~YWJj/preview?div=4': 'ok',
+        '/disk-array/a/b_preview.jpg?div=4': 'REBAKED',
+      };
+      if (!(u in bodies)) return Promise.resolve(new Response('nope', { status: 404 }));
+      return Promise.resolve(new Response(bodies[u], { status: 200 }));
+    });
+    // 行是服务端刚回的（清完缓存 → hasPreview false、previewDiv null）
+    const r = row({ jpgUrl: BAKED, hasPreview: false, previewDiv: null });
+    expect(await (await fetchSceneJpg(CFG, r, 4)).text()).toBe('REBAKED');
+    expect(inits[1]?.cache).toBe('no-store');   // 第二次 = 静态取图那一下
+
+    // 没重烤（档位已对上）时不要多这一道 —— 常态下白绕缓存等于每次打开都重下一遍
+    inits.length = 0;
+    resetPreviewCache();
+    await fetchSceneJpg(CFG, row({ jpgUrl: BAKED, hasPreview: true, previewDiv: 4 }), 4);
+    expect(inits.length).toBe(1);
+    expect(inits[0]?.cache).toBeUndefined();
+  });
+
   it('onPhase 是可选的（旧调用方不传也不炸）', async () => {
-    stubFetch({ '/api/scenes/~YWJj/preview': 'PREVIEW' });
-    expect(await (await fetchSceneJpg(CFG, row({}))).text()).toBe('PREVIEW');
+    stubFetch({ '/api/scenes/~YWJj/preview?div=4': 'PREVIEW' });
+    expect(await (await fetchSceneJpg(CFG, row({}), 4)).text()).toBe('PREVIEW');
+  });
+
+  /* ---------------- 本地 blob 缓存（对比模式来回切图靠它） ---------------- */
+
+  it('同一行 + 同一档位取第二次：零请求，拿到同一份字节', async () => {
+    stubFetch({ '/api/scenes/~YWJj/preview?div=4': 'PREVIEW' });
+    const r = row({ jpgUrl: null });
+    expect(await (await fetchSceneJpg(CFG, r, 4)).text()).toBe('PREVIEW');
+    expect(urls.length).toBe(1);
+
+    expect(await (await fetchSceneJpg(CFG, r, 4)).text()).toBe('PREVIEW');
+    expect(urls.length).toBe(1);          // 第二次一个请求都没发
+  });
+
+  it('命中缓存时照旧做那两行记账（hasPreview / previewDiv），语义不漂移', async () => {
+    // 库行这条支路是「先 /preview 烤、再静态取图」两次请求
+    stubFetch({
+      '/api/scenes/~YWJj/preview?div=4': 'PREVIEW',
+      '/disk-array/a/b_preview.jpg?div=4': 'STATIC',
+    });
+    expect(await (await fetchSceneJpg(CFG, row({ jpgUrl: BAKED }), 4)).text())
+      .toBe('STATIC');
+    expect(urls.length).toBe(2);
+
+    // 第二次：**同 id、记账字段是旧值**的行（等价于刷新后重进场景库）
+    const again = row({ jpgUrl: BAKED, hasPreview: false, previewDiv: null });
+    expect(await (await fetchSceneJpg(CFG, again, 4)).text()).toBe('STATIC');
+    expect(again.hasPreview).toBe(true);       // 命中缓存也照旧记上
+    expect(again.previewDiv).toBe(4);
+    expect(urls.length).toBe(2);               // 一个请求都没多发
+  });
+
+  it('档位进键：换了档位就不是命中，得重新取（并触发烘焙）', async () => {
+    stubFetch({
+      '/disk-array/a/b_preview.jpg?div=2': 'D2',       // 档位对得上 → 只取静态
+      '/api/scenes/~YWJj/preview?div=8': 'ok',         // 档位不符 → 先重烤
+      '/disk-array/a/b_preview.jpg?div=8': 'D8',
+    });
+    const r = row({ jpgUrl: BAKED, hasPreview: true, previewDiv: 2 });
+    expect(await (await fetchSceneJpg(CFG, r, 2)).text()).toBe('D2');
+    expect(await (await fetchSceneJpg(CFG, r, 8)).text()).toBe('D8');
+    expect(urls.length).toBe(3);
+  });
+
+  it('栅格那份与源 jpg 那份是两个键：档位翻到「栅格赢」时不会命中源 jpg 的缓存', async () => {
+    // ÷4 栅格赢（400 > 320）、÷32 栅格输（50 < 320）→ 同一行同一时刻会走两条不同的支路，
+    // 端上来的是**两张不同的图**。只按 id+div 存键的话这里会串味。
+    stubFetch({
+      '/api/scenes/~YWJj/preview?div=4': 'RASTER',
+      '/disk-array/a/PAN_preview.jpg?div=4': 'RASTER',
+      '/disk-array/a/PAN.jpg': 'SOURCE',
+    });
+    const r = rasterRow();
+    expect(await (await fetchSceneJpg(CFG, r, 4)).text()).toBe('RASTER');
+    expect(await (await fetchSceneJpg(CFG, r, 32)).text()).toBe('SOURCE');
+    expect(urls.length).toBe(3);
+    // 再切回 ÷4：这次才是真的命中（此前那份栅格还在缓存里）
+    expect(await (await fetchSceneJpg(CFG, r, 4)).text()).toBe('RASTER');
+    expect(urls.length).toBe(3);
+  });
+
+  it('缓存上限是从 api 层能读到的（设置浮层要用它报「N 项 / X MB」）', async () => {
+    stubFetch({});
+    expect(previewCacheStats()).toEqual({ count: 0, bytes: 0, maxBytes: PREVIEW_BLOB_CACHE_MAX });
+    clearPreviewCache();
+    expect(previewCacheStats().count).toBe(0);
+  });
+
+  it('缓存内容变化会通知订阅者（设置浮层那一行靠它保持实时）', async () => {
+    // 触发一次真正的写入：库外行 → 响应体本身就是那张 JPEG
+    const row: SceneRow = {
+      id: '~YWJj', name: 'SC', satellite: null, sensor: null, date: null,
+      size_bytes: 0, fake: false, W: 200, H: 100, rel: null,
+      jpgUrl: null, hasPreview: false, lq_path: null,
+    };
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response('PREVIEW', { status: 200 })));
+
+    let n = 0;
+    const off = watchPreviewCache(() => { n++; });
+    expect(n).toBe(0);
+
+    await fetchSceneJpg(CFG, row, 2);
+    expect(previewCacheStats().count).toBe(1);
+    expect(n).toBe(1);
+
+    // 退订之后不再响（模块级单例会跨用例活着，别让订阅堆在这儿）
+    off();
+    clearPreviewCache();
+    expect(n).toBe(1);
+  });
+
+  /* ---------------- 显示源比较规则：同名栅格赢的那一支 ---------------- */
+
+  /** 一条「源是显示件 jpg、但同名栅格更清晰」的行。
+   *
+   * 尺寸取 e2e 夹具那组：栅格 1600×800 ÷4 = 400 > 显示件长边 320 → 栅格赢。
+   * 换成 24000/8192 的真机量级则 ÷4 输（6000 < 8192）—— 那正是默认档位下
+   * 这条规则基本不触发的原因，见 scene.test.ts 的 rasterPreviewWins 一组。 */
+  const rasterRow = (over: Partial<SceneRow> = {}): SceneRow => row({
+    jpgUrl: '/disk-array/a/PAN.jpg', hasPreview: true, previewDiv: null,
+    rasterPreview: {
+      id: 'raster-id', name: 'PAN.tif', rel: 'a/PAN.tif',
+      jpgUrl: '/disk-array/a/PAN_preview.jpg',
+      rasterW: 1600, rasterH: 800, jpgW: 320, jpgH: 160,
+      hasPreview: false, previewDiv: null,
+    },
+    ...over,
+  });
+
+  it('栅格赢：先 /preview 烤栅格那份，再静态取图；**源 jpg 的三个字段一字不动**', async () => {
+    // 请求用的是**这条行自己的 id** —— 后端在 /preview 那一层把 jpg 换成同名栅格，
+    // 前端不必先取一次栅格的 id、更不必多一次往返。
+    stubFetch({
+      '/api/scenes/~YWJj/preview?div=4': 'ok',
+      '/disk-array/a/PAN_preview.jpg?div=4': 'RASTER',
+    });
+    const r = rasterRow();
+    expect(await (await fetchSceneJpg(CFG, r, 4)).text()).toBe('RASTER');
+    expect(urls).toEqual(['/api/scenes/~YWJj/preview?div=4',
+      '/disk-array/a/PAN_preview.jpg?div=4']);
+    // 栅格那份预览的记账：就地改，语义与栅格行一致
+    expect(r.rasterPreview!.hasPreview).toBe(true);
+    expect(r.rasterPreview!.previewDiv).toBe(4);
+    // 源 jpg 自己那三个字段必须原封不动：碰了会让「源是显示件」这一判定漂移，
+    // 用户下次从场景库打开就会跳过懒生成、去打一个 404 的静态 URL。
+    expect(r.hasPreview).toBe(true);
+    expect(r.jpgUrl).toBe('/disk-array/a/PAN.jpg');
+    expect(r.previewDiv).toBeNull();
+  });
+
+  it('栅格赢但那份预览已在且档位对得上：只取静态 URL，一次请求', async () => {
+    stubFetch({ '/disk-array/a/PAN_preview.jpg?div=4': 'RASTER' });
+    const r = rasterRow();
+    r.rasterPreview!.hasPreview = true;
+    r.rasterPreview!.previewDiv = 4;
+    expect(await (await fetchSceneJpg(CFG, r, 4)).text()).toBe('RASTER');
+    expect(urls).toEqual(['/disk-array/a/PAN_preview.jpg?div=4']);
+  });
+
+  it('栅格赢且档位不符：重烤（同「换档位必须重烤」那条，只是换成栅格那份记账）', async () => {
+    // 尺寸得挑成「÷4 与 ÷8 都赢」：**谁赢本身就跟档位有关**（24000 源对 320 的
+    // 显示件，÷4 赢、÷32 输），所以换档位有可能直接翻到源 jpg 那一支去。
+    // 判据每个档位各算一次，不缓存、不跨档位沿用。
+    stubFetch({
+      '/api/scenes/~YWJj/preview?div=8': 'ok',
+      '/disk-array/a/PAN_preview.jpg?div=8': 'REBAKED',
+    });
+    const r = rasterRow();
+    Object.assign(r.rasterPreview!, { rasterW: 24000, rasterH: 24000,
+      jpgW: 2000, jpgH: 1000 });
+    r.rasterPreview!.hasPreview = true;
+    r.rasterPreview!.previewDiv = 4;
+    expect(await (await fetchSceneJpg(CFG, r, 8)).text()).toBe('REBAKED');
+    expect(urls).toEqual(['/api/scenes/~YWJj/preview?div=8',
+      '/disk-array/a/PAN_preview.jpg?div=8']);
+    expect(r.rasterPreview!.previewDiv).toBe(8);
+
+    // 同一行滑到 ÷32：round(24000/32)=750 < 1000 → 栅格输，落回源 jpg（行为同今天）
+    stubFetch({ '/disk-array/a/PAN.jpg': 'SOURCE' });
+    expect(await (await fetchSceneJpg(CFG, r, 32)).text()).toBe('SOURCE');
+    expect(urls).toEqual(['/disk-array/a/PAN.jpg']);
+  });
+
+  it('库外栅格（rp.jpgUrl 为 null）：/preview 的响应体就是图，不再打静态 URL', async () => {
+    stubFetch({ '/api/scenes/~YWJj/preview?div=4': 'RASTER' });
+    const r = rasterRow();
+    r.rasterPreview!.jpgUrl = null;
+    r.rasterPreview!.rel = null;
+    expect(await (await fetchSceneJpg(CFG, r, 4)).text()).toBe('RASTER');
+    expect(urls).toEqual(['/api/scenes/~YWJj/preview?div=4']);
+    expect(r.rasterPreview!.hasPreview).toBe(true);
+  });
+
+  it('栅格**输**（÷4：6000 < 8192）→ 调用序列与今天逐字节一致', async () => {
+    // 真机量级那一组：规则不触发时才谈得上「行为不变」。这条是回归钉子 ——
+    // 现有 e2e 夹具在 ÷4 下全判 jpg 赢，所以它们的断言一个字都不用改。
+    stubFetch({ '/disk-array/a/PAN.jpg': 'SOURCE' });
+    const r = rasterRow({
+      rasterPreview: {
+        id: 'raster-id', name: 'PAN.tif', rel: 'a/PAN.tif',
+        jpgUrl: '/disk-array/a/PAN_preview.jpg',
+        rasterW: 6000, rasterH: 6000, jpgW: 8192, jpgH: 8192,
+        hasPreview: false, previewDiv: null,
+      },
+    });
+    expect(await (await fetchSceneJpg(CFG, r, 4)).text()).toBe('SOURCE');
+    expect(urls).toEqual(['/disk-array/a/PAN.jpg']);
+    expect(r.rasterPreview!.hasPreview).toBe(false);   // 碰都没碰
+  });
+
+  it('栅格赢时的 onPhase 说清「从哪张栅格烤」，且只在真要烤时响', async () => {
+    const phase = vi.fn();
+    stubFetch({
+      '/api/scenes/~YWJj/preview?div=4': 'ok',
+      '/disk-array/a/PAN_preview.jpg?div=4': 'RASTER',
+    });
+    await fetchSceneJpg(CFG, rasterRow(), 4, phase);
+    expect(phase).toHaveBeenCalledTimes(1);
+    expect(phase.mock.calls[0][0]).toContain('PAN.tif');
+    expect(phase.mock.calls[0][0]).toContain('1/4');
+
+    phase.mockClear();
+    const hit = rasterRow();
+    hit.rasterPreview!.hasPreview = true;
+    hit.rasterPreview!.previewDiv = 4;
+    await fetchSceneJpg(CFG, hit, 4, phase);
+    expect(phase).not.toHaveBeenCalled();
   });
 });
 
-/* ---------------- 拖拽入口：临时预览 + resolve 双指纹 ---------------- */
-describe('fetchTempSceneJpg', () => {
+/* ---------------- 拖入入口：落盘阵的预览 + resolve 双指纹 ---------------- */
+describe('fetchDropSceneJpg', () => {
   const row = (over: Partial<SceneRow>): SceneRow => ({
     id: '~YWJj', name: 'SC', satellite: null, sensor: null, date: null,
     size_bytes: 0, fake: false, W: 200, H: 100, rel: null,
@@ -203,39 +508,53 @@ describe('fetchTempSceneJpg', () => {
   });
 
   let urls: string[];
-  function stubFetch(bodies: Record<string, string>): void {
+  function stubFetch(bodies: Record<string, string>,
+                     headers: Record<string, string> = {}): void {
     urls = [];
     vi.stubGlobal('fetch', (u: string) => {
       urls.push(u);
       if (!(u in bodies)) return Promise.resolve(new Response('nope', { status: 404 }));
-      return Promise.resolve(new Response(bodies[u], { status: 200 }));
+      return Promise.resolve(new Response(bodies[u], { status: 200,
+        headers }));
     });
   }
 
   afterEach(() => { vi.unstubAllGlobals(); });
 
-  it('打的是 /preview-tmp，不是生产那条 /preview', async () => {
-    stubFetch({ '/api/scenes/~YWJj/preview-tmp': 'TMP' });
-    expect(await (await fetchTempSceneJpg(CFG, '~YWJj')).text()).toBe('TMP');
-    expect(urls).toEqual(['/api/scenes/~YWJj/preview-tmp']);
+  it('打的是 /preview-drop（不是生产那条 /preview），并带上档位', async () => {
+    stubFetch({ '/api/scenes/~YWJj/preview-drop?div=16': 'DROP' });
+    expect(await (await fetchDropSceneJpg(CFG, '~YWJj', 16)).text()).toBe('DROP');
+    expect(urls).toEqual(['/api/scenes/~YWJj/preview-drop?div=16']);
   });
 
-  it('**绝不**改写 row.hasPreview（那是生产缓存在不在的真值）', async () => {
-    // 被临时路径置真之后，用户再从场景库打开同一场景就会跳过懒生成、直接打一个
-    // 404 的静态 URL，图再也出不来 —— 所以这条是硬约束。
-    stubFetch({ '/api/scenes/~YWJj/preview-tmp': 'TMP' });
-    const r = row({ jpgUrl: '/disk-array/a/b.jpg', hasPreview: false });
-    await fetchTempSceneJpg(CFG, r.id);
+  it('**绝不**改写 row 的 hasPreview / previewDiv（那两个字段锚在生产那份缓存上）', async () => {
+    // 被这条链的产物置真之后，用户再从场景库打开同一场景就会跳过懒生成、直接打
+    // 一个 404 的静态 URL，图再也出不来 —— 所以这条是硬约束。
+    stubFetch({ '/api/scenes/~YWJj/preview-drop?div=2': 'DROP' });
+    const r = row({ jpgUrl: '/disk-array/a/b_preview.jpg', hasPreview: false,
+      previewDiv: 8 });
+    await fetchDropSceneJpg(CFG, r.id, 2);
     expect(r.hasPreview).toBe(false);
-    expect(r.jpgUrl).toBe('/disk-array/a/b.jpg');
+    expect(r.previewDiv).toBe(8);
+    expect(r.jpgUrl).toBe('/disk-array/a/b_preview.jpg');
   });
 
-  it('onPhase 每次都提示要等服务端烘焙（临时缓存不保证在）', async () => {
-    stubFetch({ '/api/scenes/~YWJj/preview-tmp': 'TMP' });
+  it('onPhase 每次都提示要等服务端烘焙（这条链不保证缓存命中）', async () => {
+    stubFetch({ '/api/scenes/~YWJj/preview-drop?div=2': 'DROP' });
     const phase = vi.fn();
-    await fetchTempSceneJpg(CFG, '~YWJj', phase);
+    await fetchDropSceneJpg(CFG, '~YWJj', 2, phase);
     expect(phase).toHaveBeenCalledTimes(1);
     expect(phase.mock.calls[0][0]).toContain('烘焙');
+  });
+
+  it('认兜底响应头：场景目录不可写时如实说明走的是临时缓存', async () => {
+    stubFetch({ '/api/scenes/~YWJj/preview-drop?div=2': 'DROP' },
+      { 'X-SR-Preview-Fallback': 'tmp' });
+    const phase = vi.fn();
+    expect(await (await fetchDropSceneJpg(CFG, '~YWJj', 2, phase)).text())
+      .toBe('DROP');
+    expect(phase).toHaveBeenCalledTimes(2);          // 烘焙提示 + 兜底说明
+    expect(phase.mock.calls[1][0]).toContain('不可写');
   });
 });
 
@@ -259,5 +578,205 @@ describe('apiResolveScene 双指纹透传', () => {
   it('不给 size_bytes 就不出现在 body 里（粘路径那条老调用不受影响）', async () => {
     await apiResolveScene(CFG, { path: 'W:\\a\\b' });
     expect(JSON.parse(bodies[0])).toEqual({ path: 'W:\\a\\b' });
+  });
+});
+
+/* ---------------- 清除预览缓存（POST /api/scenes/clear-preview） ---------------- */
+describe('apiClearScenePreviews', () => {
+  const CLEAR_URL = '/api/scenes/clear-preview';
+  const OK_BODY = {
+    results: [{ id: '~YWJj', status: 'cleared', reason: null, dir: '/d',
+      removed: [{ name: 'a_preview.jpg' }], skipped: [], failed: [], marked: 1 }],
+    summary: { cleared: 1, nothing: 0, skipped: 0, failed: 0,
+      dirs: 1, files: 1, marked: 1 },
+  };
+  let calls: { url: string; body: string }[];
+
+  function stub(handler: (url: string) => Response): void {
+    calls = [];
+    vi.stubGlobal('fetch', (u: string, init: RequestInit) => {
+      calls.push({ url: u, body: String(init?.body ?? '') });
+      return Promise.resolve(handler(u));
+    });
+  }
+
+  // 模块级单例，用例之间会串味（同上）：每条从空缓存起跑。
+  beforeEach(() => { resetPreviewCache(); vi.unstubAllGlobals(); });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('POST ids + 解析响应（200 只表示受理，逐条结论在 body 里）', async () => {
+    stub(() => new Response(JSON.stringify(OK_BODY), { status: 200 }));
+
+    const body = await apiClearScenePreviews(CFG, ['~YWJj', '~YWJk']);
+
+    expect(calls[0].url).toBe(CLEAR_URL);
+    expect(JSON.parse(calls[0].body)).toEqual({ ids: ['~YWJj', '~YWJk'] });
+    expect(body.results[0].status).toBe('cleared');
+    expect(body.summary.files).toBe(1);
+  });
+
+  it('成功之后丢掉这些场景在本地的那一份（不丢就等于没清，见函数注释）', async () => {
+    // 先让本地缓存真的存下一份：stub 一次 fetchSceneJpg
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response('PREVIEW', { status: 200 })));
+    await fetchSceneJpg(CFG, {
+      id: '~YWJj', name: 'SC', satellite: null, sensor: null, date: null,
+      size_bytes: 0, fake: false, W: 200, H: 100, rel: null,
+      jpgUrl: null, hasPreview: false, lq_path: null,
+    }, 2);
+    expect(previewCacheStats().count).toBe(1);
+
+    stub(() => new Response(JSON.stringify(OK_BODY), { status: 200 }));
+    await apiClearScenePreviews(CFG, ['~YWJj']);
+
+    expect(previewCacheStats().count).toBe(0);
+    expect(previewCacheStats().bytes).toBe(0);
+  });
+
+  it('请求失败时**不丢**本地那份：盘上什么都没变，丢了下次还得重新烘焙', async () => {
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response('PREVIEW', { status: 200 })));
+    await fetchSceneJpg(CFG, {
+      id: '~YWJj', name: 'SC', satellite: null, sensor: null, date: null,
+      size_bytes: 0, fake: false, W: 200, H: 100, rel: null,
+      jpgUrl: null, hasPreview: false, lq_path: null,
+    }, 2);
+
+    stub(() => new Response(JSON.stringify({ detail: '盘阵根未配置' }),
+      { status: 400 }));
+
+    await expect(apiClearScenePreviews(CFG, ['~YWJj'])).rejects.toThrow('盘阵根未配置');
+    expect(previewCacheStats().count).toBe(1);
+  });
+
+  it('只丢命中的那些 id —— 别的场景本地那份留着', async () => {
+    const mk = (id: string): SceneRow => ({
+      id, name: 'SC', satellite: null, sensor: null, date: null,
+      size_bytes: 0, fake: false, W: 200, H: 100, rel: null,
+      jpgUrl: null, hasPreview: false, lq_path: null,
+    });
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response('P', { status: 200 })));
+    await fetchSceneJpg(CFG, mk('~YWJj'), 2);
+    await fetchSceneJpg(CFG, mk('~YWJk'), 2);
+    expect(previewCacheStats().count).toBe(2);
+
+    stub(() => new Response(JSON.stringify(OK_BODY), { status: 200 }));
+    await apiClearScenePreviews(CFG, ['~YWJj']);
+
+    expect(previewCacheStats().count).toBe(1);
+  });
+});
+
+/* ---------------- 打开失败的分派：两个 404 不是一回事（静态链 / 后端 / 没到后端） ----------------
+ * ScenesPage 那一格灰色「已自动清除」的判据全在这里：store 的 open() 拿 catch 到的
+ * 东西问 isSceneGone / isProxyMiss。三条边界都要钉住：
+ *   * 静态链（`/disk-array/…`）上的 404 → 「盘阵上已没有这个文件」；
+ *   * 后端给的 404（`/api/…` + JSON detail）→ **不算**，它说明不了盘上的文件在不在；
+ *   * 打 `/api/` 却拿到非 JSON 的 404 → 请求根本没走到后端（isProxyMiss），更不算。
+ * 2026-09-23 那次「老景打不开」正是第三条被当成了第一条：nginx 在 `location /api/`
+ * 下漏了同一层的 proxy_pass，`/preview` 回 404 HTML，于是**能打开的场景**被标成
+ * 「盘阵上已没有这个文件」。 */
+describe('isSceneGone / isProxyMiss / HttpError', () => {
+  const row = (over: Partial<SceneRow>): SceneRow => ({
+    id: '~YWJj', name: 'GF07A03', satellite: null, sensor: null, date: null,
+    size_bytes: 0, fake: false, W: 200, H: 100, rel: null,
+    jpgUrl: null, hasPreview: false, lq_path: null, ...over,
+  });
+  const BAKED = '/disk-array/a/b_preview.jpg';
+
+  beforeEach(() => { resetPreviewCache(); });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('静态链非 JSON 404 = 文件不在：认出来，message 只有裸「HTTP 404」', async () => {
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response('nope', { status: 404 })));
+    const e = await fetchSceneJpg(CFG, row({ jpgUrl: BAKED, hasPreview: true,
+      previewDiv: 2 }), 2).catch((err: unknown) => err);
+    expect(e).toBeInstanceOf(HttpError);
+    expect((e as HttpError).status).toBe(404);
+    expect((e as HttpError).url).toBe('/disk-array/a/b_preview.jpg?div=2');
+    expect((e as HttpError).jsonBody).toBe(false);
+    expect((e as Error).message).toBe('HTTP 404');   // 用户报的那句原文
+    expect(isSceneGone(e)).toBe(true);
+    expect(isProxyMiss(e)).toBe(false);
+  });
+
+  it('静态链是绝对源（异源部署注入 staticBase）时同样认出来', async () => {
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response('nope', { status: 404 })));
+    const e = await fetchSceneJpg(CFG_BASE, row({ jpgUrl: BAKED, hasPreview: true,
+      previewDiv: 2 }), 2).catch((err: unknown) => err);
+    expect((e as HttpError).url)
+      .toBe('http://static:9000/disk-array/a/b_preview.jpg?div=2');
+    expect(isSceneGone(e)).toBe(true);
+  });
+
+  it('**后端回的 404 不算「文件没了」**：detail 仍是给人看的 message，但不置 purged', async () => {
+    vi.stubGlobal('fetch', () => Promise.resolve(
+      new Response(JSON.stringify({ detail: '场景不可访问：不在授权根之内' }),
+        { status: 404 })));
+    const e = await fetchSceneJpg(CFG, row({}), 2).catch((err: unknown) => err);
+    expect((e as Error).message).toBe('场景不可访问：不在授权根之内');
+    expect((e as HttpError).status).toBe(404);
+    expect((e as HttpError).jsonBody).toBe(true);
+    expect(isSceneGone(e)).toBe(false);
+    expect(isProxyMiss(e)).toBe(false);
+  });
+
+  it('**打 /api/ 却拿到非 JSON 的 404 = 请求没走到后端**（nginx 漏 proxy_pass 那次）', async () => {
+    vi.stubGlobal('fetch', () => Promise.resolve(
+      new Response('<html><head><title>404 Not Found</title></head></html>',
+        { status: 404 })));
+    const e = await fetchSceneJpg(CFG, row({}), 2).catch((err: unknown) => err);
+    expect(e).toBeInstanceOf(HttpError);
+    expect((e as HttpError).url).toBe('/api/scenes/~YWJj/preview?div=2');
+    expect((e as HttpError).jsonBody).toBe(false);
+    expect(isSceneGone(e)).toBe(false);   // 不能标成「盘阵上已没有这个文件」
+    expect(isProxyMiss(e)).toBe(true);    // 是配置问题，得如实报出来
+  });
+
+  it('**422 不算「已自动清除」**：源还在、只是烤不出来（那是真故障，不能拿猜的原因盖住）', async () => {
+    vi.stubGlobal('fetch', () => Promise.resolve(
+      new Response(JSON.stringify({ detail: '预览生成失败：仅支持单波段（spp=3）' }),
+        { status: 422 })));
+    const e = await fetchSceneJpg(CFG, row({}), 2).catch((err: unknown) => err);
+    expect(e).toBeInstanceOf(HttpError);
+    expect((e as HttpError).status).toBe(422);
+    expect(isSceneGone(e)).toBe(false);
+    expect(isProxyMiss(e)).toBe(false);
+  });
+
+  it('网络层失败（fetch 自己抛）不算：没拿到任何状态码，就不知道盘上有没有', async () => {
+    vi.stubGlobal('fetch', () => Promise.reject(new TypeError('Failed to fetch')));
+    const e = await fetchSceneJpg(CFG, row({}), 2).catch((err: unknown) => err);
+    expect(e).toBeInstanceOf(TypeError);
+    expect(isSceneGone(e)).toBe(false);
+    expect(isProxyMiss(e)).toBe(false);
+    expect(isSceneGone(new Error('HTTP 404'))).toBe(false);   // 只有 HttpError 认
+  });
+});
+
+describe('nosrItemOf（未超分那份能不能用）', () => {
+  const item = (kind: SceneSibling['kind'], exists: boolean): SceneSibling => ({
+    kind, id: exists ? '~' + kind : null, name: kind + '.tif', rel: null,
+    exists, sizeBytes: null, mtime: null, W: exists ? 100 : null, H: exists ? 50 : null,
+    hasPreview: false, previewDiv: null, jpgUrl: null,
+  });
+  const res = (items: SceneSibling[]): SceneSiblings => ({
+    sceneId: '~abc', lqPath: 'W:\\a\\b', suffix: '260318', suffixFrom: 'default',
+    div: 4, items,
+    productCandidates: ['a_260318.tif'], nosrCandidates: ['a_NOSR.tif'],
+  });
+
+  it('盘上有那份 → 给出来（这一段就是背景预热要烤的东西）', () => {
+    const got = nosrItemOf(res([item('input', true), item('product', true),
+                               item('nosr', true)]));
+    expect(got?.kind).toBe('nosr');
+    expect(got?.id).toBe('~nosr');
+  });
+
+  it('这一类在、但盘上没有 → null（用户口径：什么都不显示）', () => {
+    expect(nosrItemOf(res([item('input', true), item('nosr', false)]))).toBeNull();
+  });
+
+  it('压根没有这一类（拼不出名字）→ null，不抛', () => {
+    expect(nosrItemOf(res([item('input', true), item('product', false)]))).toBeNull();
+    expect(nosrItemOf(res([]))).toBeNull();
   });
 });

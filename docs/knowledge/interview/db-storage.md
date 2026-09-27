@@ -280,7 +280,7 @@
 
 ### 26. 为什么选 SQLite 单库放 sessions / messages / sr_tasks 三张表？★
 
-- **答（要点）**：决策背景见 [current-question.md](docs/status/current-question.md) §2.5 与架构决策表。四点理由：
+- **答（要点）**：决策背景见 [platform-tutorial.md](docs/knowledge/platform-tutorial.md) 附录 A 的架构决策表。四点理由：
   - **并发形态匹配**：Agent 主循环是**单进程顺序驱动**，写是低频串行（回合前落一条消息、提交时写一条任务行），恰在 SQLite"单写者 + 整库锁"的**舒适区**——写并发不是瓶颈，**根本用不上行级锁/重型 DB**。
   - **嵌入式单文件**：这三张表是"会话元数据 + 消息日志 + 任务账本"，量级远小于图片等资产，**一个 `.db` 文件随项目走、拷走即备份**，零运维零端口。
   - **关系简单、访问模式单一**：消息按 session_id 顺序回放、任务按 fingerprint 幂等查询，都是**单表顺序/按键访问**，没有复杂 Join 或跨表事务——**没有引入 MySQL/Redis 的充分理由**。

@@ -784,6 +784,55 @@ run_all.sh   [runs]                 — 依次跑 PRESETS 数组中的所有配�
 
 ---
 
+## 13. 部署形态与版本定论（2026-08-31 定调 · 09-10 修订）
+
+> 平台侧对接 SR 时形成的部署结论，记录在此以便与算法实现对照。
+
+### 13.1 目标机与打包方式
+
+- 目标机为现成的 CentOS7 盘阵机。程序包（`mmsr_bundle`）、模型权重、`ImgHistMatch.so`、TRT 引擎文件
+  全部位于 `/DiskArray`（Windows 与 Linux 均可访问，Linux 本地读写更快）。
+- 因此打包方式为**挂载复用**，代码路径零改动。
+
+### 13.2 生产模型与依赖
+
+- 生产环境运行 `realesrgan_trt`，依赖 `torch_tensorrt` 与 TRT 引擎文件
+  （位于 `/DiskArray/.../trt/t2trt_fp16_realESRGAN_1640.trt`，**版本锁定**）。
+- `ImgHistMatch.so` 仅 restormer 模型使用，生产环境可忽略。
+
+### 13.3 部署形态
+
+- SR 采用**裸机 + Slurm，不加 Docker 容器**：TRT 版本锁定、机器固定、Slurm 本身运行在裸机上，
+  容器只增加耦合。平台服务（FastAPI / Nginx）可选容器或裸机 venv + systemd 两种方式。
+
+### 13.4 两版本对比与选型
+
+| 版本 | 特征 |
+|---|---|
+| `code_0817_prod.py`（Linux 生产版） | 校验 GPU 数量（`gpu_count != 4` 则停掉 `slurmd`）；路径硬编码 `/DiskArray`；无进度条 |
+| `code_0820_prod_windows.py`（Windows 开发分支） | 库加载容错、进度条 + 五段耗时剖析、无 Slurm 联动、只要 GPU ≥ 1 张 |
+
+两版核心处理流程逐行一致。
+
+### 13.5 Slurm 接入定论（2026-09-10，取代早期的「两版合并」方案）
+
+- **两版合并取消**：`code_0817_prod.py` 作为唯一真源逐字节不动；Slurm 上运行的可运行版本由锚点替换
+  生成器机械产出为 `variants/code_0817_prod_slurm.py`（差异 E1–E9 见
+  [sr-slurm-deploy-variant.md](sr-slurm-deploy-variant.md)）。不上机手改副本 —— 手改无法审计，
+  真源更新后也无法可靠重构。
+- **选卡交给 `--gres`**：批脚本 `#SBATCH --gres=gpu:1` 申请，Slurm 注入 `CUDA_VISIBLE_DEVICES`
+  （真机实测注入整数，如 `0`）。变体已删除全部 `CUDA_VISIBLE_DEVICES` 赋值与 `<GPUIDS>` 选卡逻辑，
+  `<GPUIDS>` 降级为审计字段。
+- **GPU 数量守卫由变体删除**：判据由 `!= 4` 改为 `< 1`，计数改用 `torch.cuda.device_count()`，
+  且不再执行 `systemctl stop slurmd.service`（原脚本在单卡作业下必然 `exit(3)`，服务以 root 运行时
+  会把节点从调度池摘除）。
+- **终态不看 `sacct`**：真机 `AccountingStorageType=none`，`sacct` 永久不可用。改由作业内契约校验器
+  `verify_sr_run.py` 写退出码文件 `<DatarootLQ>/Debug/_SREXIT_<job_id>.txt`，平台读盘判终态。
+  退出码 0 不等于成功；契约不满足时校验器以退出码 90 结束。
+
+> 2026-09-14：Slurm 路线中止，改为在本机用生产 conda 解释器直接起进程（`SR_EXECUTOR=local`）。
+> 上述判据（退出码文件定终态、契约校验器）对本地执行器同样适用；部署变体与校验器保留为存量。
+
 ## 附录：常见问题 FAQ
 
 ### 终端运行报 `no module named cv2`，但 PyCharm 正常

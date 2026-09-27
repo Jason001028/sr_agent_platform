@@ -34,10 +34,17 @@ const store = useViewerStore();
 </template>
 
 <style scoped>
-/* 解码遮罩：浅色毛玻璃，浮于浅色画布之上；内容为白色卡片 */
+/* 解码遮罩：浅色毛玻璃，浮于浅色画布之上；内容为白色卡片。
+   **`user-select: none` 是必须的**：遮罩盖住整块画布，且是画布区里唯一带可选文字的一层。
+   没有它时，在遮罩上按住拖动会先给标题/进度文字拉出一个文本选择（画布那边收不到 mousedown，
+   平移一动不动）；此后**每次**在选中文字上按下拖动，Chrome 都按「拖选中内容」走原生
+   drag-and-drop，页面收到 dragover → 分屏下落位提示「放在左侧 / 放在右侧」立刻亮起。
+   看起来就是「在画面里拖一下就冒出换格提示」，与画布平移彻底撞在一起（2026-09-21 用户报）。
+   注意这里只禁选中、**不放开点击**：生成掩码 / 合并期间画布不该收到 mousedown。 */
 .decode-mask {
   position: absolute;
   inset: 0;
+  user-select: none;
   display: flex;
   align-items: center;
   justify-content: center;

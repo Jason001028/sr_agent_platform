@@ -1,8 +1,8 @@
 # 阶段4/5 提示词（新窗口粘贴用）→ **已归档：阶段4/5 均已实现完成**
 
 > 日期：2026-09-02（阶段4 技术方向变更定案）· **2026-09-03 归档**：阶段4（盘阵读 JPG）与阶段5（平台 API + 聊天/队列）**均已完成离机实现并通过门禁**。
-> 状态：已完成（2026-09-02）——仅剩**真机验收**，见 `docs/status/current-question.md` §5.2 / §6 一页纸（CentOS7/Win11 内网机）。
-> 用途：（**归档**，供追溯）当初给新窗口执行阶段4/5 的提示词。新窗口**勿照抄重做**——已定决策/契约草案/验收清单在此留档，实现现状与计数以 `current-question.md` §1 与 `frontend-migration.md` §2/§6 为准。
+> 状态：已完成（2026-09-02）——仅剩**真机验收**，见 `docs/status/real-machine-acceptance.md` 一页纸（CentOS7/Win11 内网机）。
+> 用途：（**归档**，供追溯）当初给新窗口执行阶段4/5 的提示词。新窗口**勿照抄重做**——已定决策/契约草案/验收清单在此留档，实现现状以 `frontend-migration.md` §2/§6 为准，测试计数以 `current-question.md` §6.3 测试基线为准。
 > 归档前原文记录：阶段4 技术方向变更定案见下【阶段4】已定决策（09-02 晚：盘阵改读**服务器预生成 JPG**，废弃"HttpSource + nginx Range 读 TIF 字节"）；阶段5 见【阶段5】头部完成注记。
 
 ---
@@ -10,8 +10,8 @@
 ## 【阶段4 · 查看器数据路径（盘阵读 JPG）】
 
 > 状态：**已完成（2026-09-02）**——盘阵读 JPG 已落地：后端 `/api/scenes` 检索补 W/H + `/api/scenes/{id}/preview` 懒生成 + `services/preview_jpg.py`（稀疏采样镜像）+ 路径白名单；前端 `/scenes` 页 + `route='jpg'` 同构 rec。
-> 门禁：backend pytest 148 + 前端 Vitest 85（75 基线 + 10 scene）+ `.e2e/test-scenes.js` 45 断言全绿（实现与计数以 `docs/status/current-question.md` §1 / `docs/planning/frontend-migration.md` §2 行4 为准）。
-> 以下为历史提示词，仅剩**真机验收**项（current-question §6.3 清单），新窗口勿重复离机实现。
+> 门禁：backend pytest 148 + 前端 Vitest 85（75 基线 + 10 scene）+ `.e2e/test-scenes.js` 45 断言全绿（实现以 `docs/planning/frontend-migration.md` §2 行4 为准，计数以 `docs/status/current-question.md` §6.3 为准）。
+> 以下为历史提示词，仅剩**真机验收**项（`docs/status/real-machine-acceptance.md` 清单），新窗口勿重复离机实现。
 
 （归档前原文）你是本项目续接会话。先读 `CLAUDE.md` → `docs/status/current-question.md` → `docs/experience/gui-experience.md` → `docs/planning/frontend-migration.md`（§2 阶段表）。阶段1-3 已完成。
 
@@ -71,7 +71,7 @@
 ## 【阶段5 · 平台 API 层 + 聊天/共享队列】
 
 > 状态：**已完成（2026-09-02）**——契约定稿 `api-contract.md`（已定），实现与门禁见
-> `docs/status/current-question.md` §1（后端 190 + Vitest 114 + `.e2e/test-platform.js` 11 断言）。
+> 当轮计数：后端 190 + Vitest 114 + `.e2e/test-platform.js` 11 断言（现值为 `docs/status/current-question.md` §6.3）。
 > 以下为历史提示词，仅剩**真机验收**项（§5.2 清单），新窗口勿重复离机实现。
 
 你是本项目续接会话。先读 `CLAUDE.md` → `docs/status/current-question.md` → `docs/experience/gui-experience.md` → `docs/planning/frontend-migration.md` → `docs/planning/frontend-phase4-phase5-prompts.md`（本文件）。阶段1-4 已完成（含盘阵场景检索 + 读 JPG 查看 + 掩码；本地文件路径仍是稀疏 TIF 读法）。

@@ -16,6 +16,7 @@ import { computeStats } from './tifDecode.js';
 import type { BandStats, StretchMode } from './tifDecode.js';
 import { thumbToOrig } from './viewMath.js';
 import type { Poly } from './maskgen.js';
+import type { StageKind } from './stage.js';
 
 /* ---------------- 运行期配置（前后端 / e2e 注入） ---------------- */
 export interface SrConfig {
@@ -61,12 +62,41 @@ export interface SceneRow {
   rel: string | null;       // scenes 根下相对路径（仅调试用）
   jpgUrl: string | null;    // 相对 /disk-array/…（JPG 已生成才非空）
   hasPreview: boolean;      // 服务器缓存 JPG 是否已生成
+  /** 盘上那份预览是按哪一档（各边 ÷N）烤的；null = 没有 / 旧格式戳 /
+   *  读不出 / 源本身就是显示就绪图（不参与档位）。
+   *
+   *  `hasPreview` **不认档位** —— 换档位后盘上那份旧图仍在，只看它就会跳过
+   *  重烤、把旧档位的图端上来。所以判定「要不要重烤」必须连这个字段一起看
+   *  （见 lib/api.ts 的 fetchSceneJpg）。 */
+  previewDiv?: number | null;
   /** 阶段6 viewer 上下文侧舱：scene 文件父目录绝对路径（= run_sr 目录语义，
    *  与 /api/queue params.lq_path 同值关联）；disk 行非空、fake 恒 null。 */
   lq_path: string | null;
   /** 手工打开的盘阵场景（POST /api/scenes/resolve，不在 SR_SCENES_ROOT 之下）。
    *  这类行不进场景库表格，只进查看器；库行的 id 语义不受影响。 */
   manual?: boolean;
+  /** 源是显示件 jpg、且同目录配着同名栅格时才有（其余行恒 null / 缺席）。
+   *
+   *  **它是「要不要改从栅格烤」的依据，不是这一行自己的预览** —— 行自己的
+   *  `hasPreview/jpgUrl/previewDiv` 三个字段的语义不受它影响（那张 jpg 仍是这一行的
+   *  显示源声明）。见 rasterPreviewWins。 */
+  rasterPreview?: RasterPreview | null;
+  /** **只活在前端这一次会话**：试过打开这一行，而盘阵静态那份文件取不到了
+   *  （nginx 直出的 `/disk-array/…` 回 404，见 lib/api.ts 的 isSceneGone）。
+   *  列表是「上次检索」那一刻的快照，盘阵上的数据却会被自动清理，于是行还在、
+   *  文件已经没了 —— 撞过一次就记下来，那一行的「打开」改成不可点的灰色
+   *  「已自动清除」（ScenesPage）。
+   *
+   *  判据只有这一条（2026-09-24 起）。此前还有一条渲染期的**推定**：老景 + 盘上
+   *  一份预览都没有 + 年龄超过 3 天，也按已清除画灰块。那条已删 —— 推定是拿一个
+   *  猜的原因盖住本来能打开的行（没有预览恰恰是还没被打开过的新景，而 09-23 报的
+   *  「老景打不开」真因在 nginx 反代，与年龄无关，见 deploy/nginx.conf 的 /api/）。
+   *  同理，**后端给的 404 也不算**：那说明不了盘上的文件在不在（见 isProxyMiss）。
+   *
+   *  后端列表不带这个字段：它是「试过一次、撞上了」的观测，不是盘上的事实
+   *  （盘上只剩「取不到」）。重新检索会连行一起换掉，那时这个标记自然消失 ——
+   *  文件真没了，它不会再出现在列表里。 */
+  purged?: boolean;
 }
 
 export interface SceneListResponse {
@@ -79,7 +109,7 @@ export interface SceneListResponse {
 /** 该行是不是「显示就绪图」源（盘阵 .jpg/.jpeg，最小原型 §4.7）。
  *
  * 这类行的 jpgUrl 指向源文件本身、hasPreview 恒 true —— 没有「生成预览」这一步，
- * 后端也确实不为它们落 <basename>.preview.jpg 缓存。仅用于列表文案（「已生成」
+ * 后端也确实不为它们落 `<basename>_preview.jpg` 缓存。仅用于列表文案（「已生成」
  * 对一张本来就是 JPG 的场景是误导）；**是否列出**由后端
  * scene_search.is_scene_file 决定，前端不参与筛选。
  */
@@ -149,27 +179,227 @@ export function sceneResolveUrl(cfg: SrConfig): string {
   return joinBase(cfg.apiBase, '/api/scenes/resolve');
 }
 
-/** 懒生成预览端点 URL：GET /api/scenes/{id}/preview → JPEG 字节。
+/** 懒生成预览端点 URL：GET /api/scenes/{id}/preview?div=N → JPEG 字节。
  *
  * 这是**长期**缓存那条链（写源同目录或 SR_PREVIEWS_ROOT 镜像树）。只有场景库
- * 与粘路径的入口该用它；拖拽入口走 `tmpPreviewUrl`，别混。 */
-export function scenePreviewUrl(cfg: SrConfig, id: string): string {
-  return joinBase(cfg.apiBase, `/api/scenes/${encodeURIComponent(id)}/preview`);
+ * 与粘路径的入口该用它；拖入入口走 `dropPreviewUrl`，别混。 */
+export function scenePreviewUrl(cfg: SrConfig, id: string,
+                               div: number = DEFAULT_PREVIEW_DIV): string {
+  return joinBase(cfg.apiBase,
+                  `/api/scenes/${encodeURIComponent(id)}/preview?div=${div}`);
 }
 
-/** 拖拽入口的**临时**预览端点 URL：GET /api/scenes/{id}/preview-tmp。
+/** 场景内三类图端点 URL：GET /api/scenes/{id}/siblings[?suffix=…]。
  *
- * 与 `scenePreviewUrl` 是两个端点（不是同一个 URL 的参数）：这条落在
- * `SR_TEMP_PREVIEWS_ROOT/<今天>/` 下，第二天 0 点整桶清除；生产目录一个字节
- * 都不写。烘焙规则与长期那条完全相同，所以字节一致。响应带 `no-store`
- * （URL 稳定、内容跨天变），浏览器不会拿隔夜的缓存糊弄。 */
-export function tmpPreviewUrl(cfg: SrConfig, id: string): string {
-  return joinBase(cfg.apiBase, `/api/scenes/${encodeURIComponent(id)}/preview-tmp`);
+ * 纯只读：回答「输入影像 / 本轮超分产物 / NOSR 各叫什么、在不在、各自的 id 是什么」。
+ * 每类拿它自己的 `id` 调 `scenePreviewUrl` 就能看图 —— **三类各有自己的
+ * `<stem>_preview.jpg` 落点**，所以这条端点不新增任何烘焙入口。
+ * `suffix` 只在用户手动断言时给；不给由后端按「最近一条 COMPLETED 任务 → 配置缺省」
+ * 的顺序定，并用响应里的 `suffixFrom` 回报用的是哪一个。 */
+export function sceneSiblingsUrl(cfg: SrConfig, id: string, suffix?: string): string {
+  const q = suffix ? `?suffix=${encodeURIComponent(suffix)}` : '';
+  return joinBase(cfg.apiBase, `/api/scenes/${encodeURIComponent(id)}/siblings${q}`);
 }
 
-/** 已生成 JPG 的静态 URL（cfg.staticBase 前缀 + 后端相对 /disk-array/…）。 */
-export function sceneImageUrl(cfg: SrConfig, jpgUrl: string | null): string {
-  return jpgUrl ? joinBase(cfg.staticBase, jpgUrl) : '';
+/** 拖入链的预览端点 URL：GET /api/scenes/{id}/preview-drop?div=N。
+ *
+ * 与 `scenePreviewUrl` 是两个端点（不是同一个 URL 的参数）：这条把产物写进**源
+ * 所在的盘阵场景目录**（`<stem>_preview.jpg`），烤一次长期可用；场景目录不可写时
+ * 才退回 `SR_TEMP_PREVIEWS_ROOT/<今天>/`，并回 `X-SR-Preview-Fallback: tmp`。
+ * 响应带 `no-store`（URL 按 id 稳定、内容随档位变），浏览器不会拿旧档位的缓存糊弄。 */
+export function dropPreviewUrl(cfg: SrConfig, id: string,
+                              div: number = DEFAULT_PREVIEW_DIV): string {
+  return joinBase(cfg.apiBase,
+                  `/api/scenes/${encodeURIComponent(id)}/preview-drop?div=${div}`);
+}
+
+/** 这条 jpgUrl 指的是不是**平台烤出来的预览**（而不是源本身就是显示件）。
+ *
+ * 决定两件事，都是必须的：静态 URL 要不要拼 `?div=`；换档位后要不要重烤。
+ * `<stem>_preview.jpg` 是 `paths.preview_jpg_name` 的产物名，盘阵里显示就绪的源
+ * `.jpg` 不含它 —— 档位对后者毫无意义（后端也确实不为它们烤）。
+ *
+ * 点号那代（`<stem>.preview.jpg`，2026-09-22 改名前的产物名）一并认下：名字虽换了，
+ * 「这是平台烤的」这条语义两代相同，而静态 URL 是后端给的，两边版本错开一档时
+ * 认得出比认不出安全（认不出就会把 `?div=` 吞掉，换档位后最长一小时看到旧图）。 */
+export function isBakedPreviewUrl(jpgUrl: string | null): boolean {
+  return !!jpgUrl && /[_\.]preview\.jpe?g$/i.test(jpgUrl);
+}
+
+/** 已生成 JPG 的静态 URL（cfg.staticBase 前缀 + 后端相对 /disk-array/…）。
+ *
+ * `div` 只对**烤出来的**预览拼（见 `isBakedPreviewUrl`）：它在这里的作用是击穿
+ * nginx 那条 `max-age=3600`（deploy/nginx.conf §场景静态），否则换完档位最长一小时
+ * 还会看到旧图。源本身就是 JPEG 的行拼了没意义，反而会打红 e2e 里逐字断言的 URL。 */
+export function sceneImageUrl(cfg: SrConfig, jpgUrl: string | null,
+                             div?: number): string {
+  if (!jpgUrl) return '';
+  const base = joinBase(cfg.staticBase, jpgUrl);
+  if (div === undefined || !isBakedPreviewUrl(jpgUrl)) return base;
+  return `${base}${base.includes('?') ? '&' : '?'}div=${div}`;
+}
+
+/** 这条 URL 打的是不是 nginx 直出的盘阵静态链（`/disk-array/…`）。
+ *
+ *  用来分派 404 的两种含义（见 lib/api.ts 的 isSceneGone / isProxyMiss）：
+ *  静态链上的 404 是「这棵树里没有这个文件」（nginx 在 root/alias 下真找过），
+ *  `/api/…` 上的 404 是别人给的答复 —— 两者能得出的结论完全不同。
+ *
+ *  staticBase 可能是空（同源，URL 就是 `/disk-array/…`），也可能是绝对源
+ *  （e2e / 异源部署注入 `http://host[:port]`），所以先剥掉查询串与协议+主机，
+ *  再比路径前缀。 */
+export function isDiskArrayUrl(url: string): boolean {
+  const s = String(url ?? '');
+  const q = s.search(/[?#]/);
+  const p = q >= 0 ? s.slice(0, q) : s;
+  const proto = p.indexOf('//');
+  const rest = proto >= 0 ? p.slice(proto + 2) : p;
+  const slash = rest.indexOf('/');
+  return slash >= 0 && rest.slice(slash).startsWith('/disk-array/');
+}
+
+/* ---------------- 预览下采样档位（全局） ----------------
+ * 一个**平台级**设置：拖入 / 场景库 / 粘盘阵路径三条入口都按当前档位烤。
+ * 档位值必须与后端 `preview_jpg.PREVIEW_DIVISORS` 一致 —— 那边是唯一真源，
+ * 传了别的值是 400。
+ */
+
+/** 可选档位：预览长宽各为源图的 1/N。与后端 PREVIEW_DIVISORS 同序同值。 */
+export const SCENE_PREVIEW_DIVS = [2, 4, 8, 16, 32] as const;
+
+/** 产品默认档位。**只活在前端** —— 后端缺参数时是 2（旧行为，逐字节不变），
+ *  那是给「旧 dist 配新 backend」留的兼容口子，不是 UI 默认值。 */
+export const DEFAULT_PREVIEW_DIV = 4;
+
+const PREVIEW_DIV_KEY = 'sr.previewDiv';
+
+/** 读当前档位（localStorage）。读不出 / 存的值不合法 → 默认档。
+ *
+ * **刻意写成不依赖 Pinia 的纯函数**：调用点（如 stores/scenes.ts 的取图）
+ * 会在 `useViewerStore()` 还没建过的时候用到它，放在 store 里就得先建实例。
+ * `localStorage` 本身也可能不可用（隐私模式、opaque origin），一律兜住。 */
+export function loadPreviewDiv(): number {
+  try {
+    const raw = localStorage.getItem(PREVIEW_DIV_KEY);
+    const n = Number(raw);
+    return (SCENE_PREVIEW_DIVS as readonly number[]).includes(n)
+      ? n : DEFAULT_PREVIEW_DIV;
+  } catch {
+    return DEFAULT_PREVIEW_DIV;
+  }
+}
+
+/** 写当前档位。写不进去（不可用）就算了 —— 只是下次回到默认档，不该抛。 */
+export function savePreviewDiv(div: number): void {
+  try {
+    localStorage.setItem(PREVIEW_DIV_KEY, String(div));
+  } catch {
+    /* 忽略：档位是偏好，存不下不影响本次会话 */
+  }
+}
+
+/** 档位的显示文案（工具栏读数、遮罩提示共用一处，免得两处各写各的）。 */
+export function previewDivLabel(div: number): string {
+  return `1/${div}`;
+}
+
+/** 预览 blob 缓存的键（见 lib/blobCache.ts 与 api.fetchSceneJpg）。
+ *
+ * **必须把「取的是哪一份」编进去**：同一条行 id + 同一个档位，在「同名栅格赢」成立时
+ * 端上来的是**栅格**那份预览（另一张图、另一串字节），与源 jpg 那份不是一回事。
+ * 只按 id+div 存，用户把档位调到栅格赢的那一档再调回去，就会拿到上一档的图 ——
+ * 而且看不出来（两张都是这张场景的预览，只是清晰度不同）。
+ */
+export function previewCacheKey(
+  row: { id: string }, div: number, raster?: { name: string } | null,
+): string {
+  return raster ? `${row.id}|${div}|ras:${raster.name}` : `${row.id}|${div}|jpg`;
+}
+
+/* ---------------- 显示源比较规则：谁清晰用谁 ----------------
+ * 盘阵里预生成的显示件（`PAN.jpg` / `<编号>.jpg`，长边约 8192）配着一张**同名栅格**
+ * （`PAN.tif` / `<编号>.tif`）。服务端从那张栅格烤出来的图**在档位够浅时**比这张 jpg
+ * 更清晰，那就该用服务端那份；否则保持显示这张 jpg 本身（它就是为显示生成的）。
+ *
+ * 落点与栅格行**同一份**（`<源 stem>_preview.jpg`，名字只由源 stem 拼，对 jpg 与 tif
+ * 是同一个文件名），所以「打开这条 jpg 行」与「打开同目录的栅格行」命中同一份缓存。
+ *
+ * 为什么要比较而不是一律走服务端：24000 的源配 8192 的显示件时，÷2 烤出 12000（赢）、
+ * ÷4 烤出 6000（**输**）、÷8 烤出 3000（输）—— 一律走服务端会在默认档位下把图换成
+ * 更糊的一张，还白等一次几十秒的解压采样。所以判据只能是这一条比较式。
+ */
+
+/** 后端 `_raster_preview` 给的「同名栅格」信息。 */
+export interface RasterPreview {
+  /** 栅格自己的场景 id：可直接调 `/api/scenes/{id}/preview`。 */
+  id: string;
+  /** 栅格文件名（如 `PAN.tif`）。 */
+  name: string;
+  /** 栅格在场景库根下的相对路径；库外为 null（那时没有静态 URL）。 */
+  rel: string | null;
+  /** 栅格那份预览的静态 URL；库内才有（库外只能吃 /preview 的响应体）。 */
+  jpgUrl: string | null;
+  rasterW: number;
+  rasterH: number;
+  /** **盘阵那张 jpg** 的尺寸（不是用户本地拖进来那份的）——见 rasterPreviewWins。 */
+  jpgW: number;
+  jpgH: number;
+  /** 栅格那份 `<stem>_preview.jpg` 在不在盘上。 */
+  hasPreview: boolean;
+  /** 栅格那份预览是按哪一档烤的；null = 没有 / 旧格式戳 / 读不出。 */
+  previewDiv: number | null;
+}
+
+/** 服务端从同名栅格烤出来的图，是否比**这张显示件 jpg 本身**更清晰。
+ *
+ * 唯一判据（服务端 `?div=` 就是按它烤的，与后端 `preview_jpg.preview_max_edge` 同式）：
+ *
+ *     round(max(rasterW, rasterH) / div)  >  max(jpgW, jpgH)
+ *
+ * 严格大于：相等时不换 —— 换过去要付一次烘焙（真机几十秒），换来的清晰度一样，
+ * 那就没有理由动它。
+ *
+ * 保守兜底：没有栅格 / 尺寸任一读不出 / div 不在 `SCENE_PREVIEW_DIVS` 里 → false，
+ * 也就是继续显示那张 jpg。**绝不因为「找不到更好的」把图弄没了**。
+ *
+ * 判据用**盘阵那张 jpg** 的尺寸（后端读的），不是用户拖进来那份本地文件的尺寸：
+ * 拖入的指纹对 jpg 行只比名字（`_fingerprint_mismatch`），用户本地那份可能是另存过的，
+ * 而平台的口径是「盘阵上的才是基准」。
+ */
+export function rasterPreviewWins(
+  rp: RasterPreview | null | undefined, div: number,
+): boolean {
+  if (!rp) return false;
+  if (!(SCENE_PREVIEW_DIVS as readonly number[]).includes(div)) return false;
+  const { rasterW, rasterH, jpgW, jpgH } = rp;
+  if (!rasterW || !rasterH || !jpgW || !jpgH) return false;
+  const served = Math.max(1, Math.round(Math.max(rasterW, rasterH) / div));
+  return served > Math.max(jpgW, jpgH);
+}
+
+/** 取这条场景行的显示 JPG，会不会触发服务端烘焙。
+
+**唯一判据**（`lib/api.ts` 的取图与 `pages/ScenesPage` 的列表文案共用它，免得
+两处各判各的、列表说「已生成」而打开时又烤一轮）：
+  * 源是显示件 jpg 但**同名栅格赢**（见 rasterPreviewWins）→ 按**栅格那份预览**判：
+    它不在、或档位不符就会烤。注意这一支看的是 `row.rasterPreview` 的字段，
+    不是行自己的 `hasPreview/previewDiv` —— 那三个说的是源 jpg。
+  * 没有静态 URL（库外的手工行）→ 一定走 `/preview`，会烤；
+  * `hasPreview` 为假 → 缓存不在，会烤；
+  * 是**烤出来的**预览、但盘上那份的档位 ≠ 当前档位 → 会烤。
+    `previewDiv` 为 null 属于这一类（旧格式戳 / 读不出）：换包后首次打开每个
+    场景都要重烤一轮，这是**惰性**的、预期内的。
+  * 源本身就是显示件（`.jpg`/`.jpeg`，`isBakedPreviewUrl` 为假）→ 永远不烤，
+    档位对它没有意义。 */
+export function previewNeedsBake(row: SceneRow, div: number): boolean {
+  const rp = row.rasterPreview;
+  if (rp && rasterPreviewWins(rp, div)) {
+    // 栅格分支的判据与栅格行**完全一样**（别在这里抄第二套）。
+    return !rp.hasPreview || rp.previewDiv !== div;
+  }
+  if (!row.jpgUrl) return true;
+  if (!row.hasPreview) return true;
+  return isBakedPreviewUrl(row.jpgUrl) && row.previewDiv !== div;
 }
 
 /** 场景 → 查看器 openSceneJpg 的最小元数据（掩码换算用 W/H；sceneId 供掩码烘焙）。 */
@@ -181,10 +411,20 @@ export interface SceneOpenMeta {
   sceneId: string;
   /** 阶段6 scene 文件父目录（= run_sr 目录语义，任务区关联 queue 行用）。 */
   lqPath: string | null;
+  /** 这一行所属的场景目录（**与 lqPath 正交**：中间产物的 lqPath 为空 —— 它不可
+   *  提交 —— 但仍属于本景的目录，卡片上那颗「同一景共用一个序号」的小标按它分组）。
+   *  裸 .tif / 库外单张图没有场景目录，传 null。 */
+  sceneDir?: string | null;
   /** 后端推导的掩码路径（手工场景才拿得到：POST /api/scenes/resolve 的
    *  resolved.mask_path）。库行没有这个字段 —— 那时前端不该猜，写掩码时后端
    *  会回权威值。 */
   serverMaskPath?: string | null;
+  /** 这是场景里的哪个环节（resolve 的 resolved.kind / siblings 的 item.kind）。
+   *  缺省按 `'input'` 算 —— 场景库列出的行只可能是本体（`is_scene_file` 只认
+   *  目录名同名的输入件与 PAN），中间产物只能从拖拽 / 快捷芯片这两条路进来。 */
+  stageKind?: StageKind;
+  /** 本轮超分产物的 suffix（标签用；后端给什么写什么，前端不猜）。 */
+  stageSuffix?: string | null;
 }
 
 /* ---------------- JPG 像素 → 查看器 rec 的同构数据 ---------------- */
@@ -241,4 +481,133 @@ export function thumbPolysToOrig(
 ): Poly[] {
   return polys.map((pts) =>
     pts.map((p) => thumbToOrig(p[0], p[1], W, H, tw, th)));
+}
+
+/* ---------------- 拖 jpg 时给后端的「当前打开的这一景」 ---------------- */
+/** `anchor` 的上限。它是**提示不是断言**：一个够用，多给几个只是让分屏下多一条
+ *  可试的（后端逐个试、取第一个成立的，自己的上限是 4）。 */
+export const ANCHOR_MAX = 3;
+
+/** 拖进来的 jpg 名字里没有场景身份时递给后端的锚定目录（`POST /api/scenes/resolve`
+ *  的 `anchor`）。RC 场景的产物 `PAN_<suffix>.jpg` 是典型：产物名按输入影像名拼，
+ *  里面没有卫星段也没有成像时刻，反推不出它在哪一天哪一景的目录下 —— 唯一不猜的
+ *  线索是「用户当时正开着哪一景」。
+ *
+ *  **顺序就是优先级**：后端取第一个「这一环节的栅格躺在同级」成立的。所以调用方按
+ *  「离落点近的那一景在前」传进来。空值丢掉、重复只留一份、最多 `ANCHOR_MAX` 个。
+ *
+ *  返回空数组 = 没有可锚的景，后端照旧按名字反推（这条提示对能反推的名字从来不起
+ *  作用，见 backend/api/app.py 的 `_anchor_stage_hit`）。 */
+export function sceneAnchors(dirs: (string | null | undefined)[]): string[] {
+  const out: string[] = [];
+  for (const d of dirs) {
+    if (d && !out.includes(d)) out.push(d);
+    if (out.length >= ANCHOR_MAX) break;
+  }
+  return out;
+}
+
+/* ---------------- 清除预览缓存（场景库「清除选定 / 全部清除」） ----------------
+ * 服务端删盘阵上那批 `<stem>_preview.jpg`（判据见 backend/services/preview_clear.py）；
+ * 前端这边只有两件事要做，都在本文件与 lib/api.ts 里：
+ *
+ *   1. 把清掉的行从列表里摘掉（`rowsAfterClear`）—— 行还在列表里显示「已生成」就是
+ *      谎话，而这些行本来也要重新检索才会回来；
+ *   2. 丢掉这些场景在**本地 blob 缓存**里的那一份（lib/api.ts 的
+ *      `forgetScenePreviewBlobs`）—— 不丢的话同一会话里再打开会直接命中本地旧字节，
+ *      既不重新烘焙也看不到新图，用户会以为清除没生效。
+ */
+
+/** 清除端点 URL：POST /api/scenes/clear-preview（请求体 `{ids: [...]}`）。
+ *
+ *  **POST 而不是 DELETE**：一批 id（几十上百个）得放请求体，而 DELETE 带 body
+ *  是被允许但很容易在代理链上被吃掉的形式；这本来也是「批量动作」，不是「删某一条
+ *  资源」。返回 200 只表示**请求被受理** —— 逐条结论在响应体里（见 ClearResult）。 */
+export function sceneClearPreviewUrl(cfg: SrConfig): string {
+  return joinBase(cfg.apiBase, '/api/scenes/clear-preview');
+}
+
+/** 明细里的一条（文件名 + 原因 + 它在哪个目录）。 */
+export interface ClearDetail {
+  name: string;
+  /** 为什么跳过 / 失败；`removed` 里的条目没有这一项。 */
+  reason?: string | null;
+  /** 场景目录或镜像树目录 —— 同一个文件名两处都有时靠它分清。 */
+  dir?: string;
+}
+
+/** 服务端对**一个 id** 的结论。四种 status 都是正常结局，不是错误码：
+ *
+ *  * `cleared`  确实清了（文件删掉、或库里那条急烤状态被标掉，或两者都有）；
+ *  * `nothing`  盘上本来就没有这一景的缓存；
+ *  * `skipped`  不能清：后台正在烘焙 / 是场景源 / 没有规则戳 / id 本身不合法；
+ *  * `failed`   该清但没清成（权限、被占用）。
+ *
+ *  `cleared` 与 `nothing` 的行从列表摘掉，`skipped` / `failed` 留着 —— 用户得看见它们
+ *  以及为什么（尤其是「正在烘焙，稍后再清」这种等一下就能成的）。 */
+export interface ClearResult {
+  id: string;
+  status: 'cleared' | 'nothing' | 'skipped' | 'failed';
+  /** 一句话结论（skipped / failed 时必有；cleared / nothing 可能为 null）。 */
+  reason: string | null;
+  /** 这一条实际处理的是哪个场景目录（同景两行会是同一个值）。 */
+  dir: string | null;
+  removed: ClearDetail[];
+  skipped: ClearDetail[];
+  failed: ClearDetail[];
+  /** 库里被标成 `cleared` 的急烤状态行数（0 = 这一景没跑过超分）。 */
+  marked: number;
+}
+
+/** 汇总。前四项按**请求里的 id** 数，后三项按**去重后的场景目录**数 ——
+ *  一景两行时 `cleared` 是 2 而 `dirs/files` 是 1 与实际文件数，不重复计数。 */
+export interface ClearSummary {
+  cleared: number;
+  nothing: number;
+  skipped: number;
+  failed: number;
+  dirs: number;
+  files: number;
+  marked: number;
+}
+
+export interface ClearResponse {
+  results: ClearResult[];
+  summary: ClearSummary;
+}
+
+/** 清除后哪些行该从列表摘掉：`cleared` 与 `nothing` 两种。
+ *
+ *  `nothing` 也要摘 —— 它说的是「盘上本来就没有这一景的缓存」，也就是说「已生成」
+ *  那一列早就该显示「未生成」，留着这一行等于继续挂着一个错的显示。
+ *
+ *  纯函数、返回新数组（不就地改）：store 那层只负责把它贴回 rows。`skipped` /
+ *  `failed` 的行留在列表里，用户要看得到失败与原因。 */
+export function rowsAfterClear<T extends { id: string }>(
+  rows: T[], results: ClearResult[],
+): T[] {
+  const gone = new Set<string>();
+  for (const r of results) {
+    if (r.status === 'cleared' || r.status === 'nothing') gone.add(r.id);
+  }
+  return gone.size ? rows.filter((r) => !gone.has(r.id)) : rows;
+}
+
+/** 表上方那一行汇总文案（纯函数，便于单测）。
+ *
+ *  「已从列表移除」的尾注只在真的有移除时给：它是这个功能最容易让人误会的一点
+ *  —— 行消失了不等于场景被删了，重新检索就回来。 */
+export function clearSummaryText(s: ClearSummary, removed: number): string {
+  const bits: string[] = [];
+  if (s.cleared) {
+    bits.push(`已清除 ${s.cleared} 项（${s.dirs} 个场景目录，`
+      + `${s.files} 份预览缓存）`);
+  }
+  if (s.nothing) bits.push(`无需清除 ${s.nothing} 项`);
+  if (s.skipped) bits.push(`跳过 ${s.skipped} 项`);
+  if (s.failed) bits.push(`失败 ${s.failed} 项`);
+  const head = bits.length ? bits.join('，') : '没有可清除的场景';
+  return removed
+    ? `${head}；已从列表移除 ${removed} 行，重新检索可回来`
+    : head;
 }

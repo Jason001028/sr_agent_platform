@@ -220,7 +220,7 @@ P2 起这些值就是 `deploy/sr-api.service` 与 `backend/config.SR_DEFAULT_*` 
      §7.1 改为「部署变体已删除该守卫」并指向变体路径；§9 记录 --gres 决议、<GPUIDS> 降级为审计字段；
      补 §2.4 三条（空 suffix 覆盖、sacct 解析、对已超分场景会再超分）作为已知语义
    - deploy/README.md 增「Slurm 接入」小节，串起探针 / 变体 / 校验器 / service env
-   - docs/status/current-question.md §3.2、§6.4 与 docs/status/real-machine-bringup.md §5 症状表同步
+   - docs/status/real-machine-acceptance.md §D 与 docs/status/real-machine-bringup.md §5 症状表同步
    - docs/README.md 索引登记本文件
 
 不要做：不要把探针里 --deep 的提交动作写成默认开启；不要在文档里留 <<CONFIRM>> 占位。
@@ -253,7 +253,7 @@ P2 起这些值就是 `deploy/sr-api.service` 与 `backend/config.SR_DEFAULT_*` 
 - 上一批（部署变体 E1–E9 + 作业内校验器 + 平台 Slurm 层 + 探针 + 文档）已提交为 e06921d。
 - E-A（SR_SR_SCRIPT 开关）已在开发机完成：run_sr.py 四处 + test_run_sr.py 四例，
   后端 287 项测试全过、变体 --check 通过；deploy/README.md §7.1、slurm-acceptance.md §0.2/§0.3、
-  sr-pipeline-interface.md §7.1、current-question.md §6.4 已改成「变体并置 + env 指定」的装法。
+  sr-pipeline-interface.md §7.1、real-machine-acceptance.md §D 已改成「变体并置 + env 指定」的装法。
   **不要退回「改名顶替 code_0817_prod.py」的旧写法。**
 
 本轮要做的，按顺序：

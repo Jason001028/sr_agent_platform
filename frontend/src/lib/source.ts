@@ -1,5 +1,5 @@
 /**
- * 双数据源统一抽象（前端迁移决策：current-question §3.1「前端实现约束」）
+ * 双数据源统一抽象（前端迁移决策：platform-tutorial.md 附录 A.3「前端实现约束」）
  * ---------------------------------------------------------------
  * 查看器数据源：本地 File + 盘阵 HTTP 两条并存。
  * 解码层全部逻辑只依赖 `source.read(offset, len) → Promise<ArrayBuffer>`，

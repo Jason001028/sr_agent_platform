@@ -9,6 +9,8 @@
  * - 任务状态：当前盘阵场景的最近 SR 队列任务（关联 lqPath + <stem>_mask.tif），
  *   queue store 实时 SSE；无 sceneId / 离开页面 → 整块隐藏/断开。
  * - 空态：无图 / 无 ROI 时给操作提示；无 sceneId 时任务块隐藏。
+ * - 置顶「待修复清单」（QcListPanel）：质检部门给的 .txt 的导入/标记/写回，自成一块，
+ *   与本 tab 其余部分没有数据往来（它只借这里的显隐位置）。
  */
 import { computed, onUnmounted, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
@@ -18,6 +20,8 @@ import {
 import type { QueueTask } from '../lib/api.js';
 import type { RoiStats } from '../lib/roiStats.js';
 import { roiOrigGeom, STAT_HI, STAT_CLIP } from '../lib/roiStats.js';
+import QcListPanel from './QcListPanel.vue';
+import CompareListPanel from './CompareListPanel.vue';
 
 const viewer = useViewerStore();
 const queue = useQueueStore();
@@ -150,7 +154,12 @@ function fmtTime(ts: number): string {
 
 <template>
   <div class="rt">
-    <p class="rt-intro">统计作用于当前显示层（stretch 后 8bit 显示像元）；画 ROI 后在此查看/点选。</p>
+    <!-- 点选清单（仅对比模式）：在《待修复清单》**上方** —— 两者都是「一列可以点的图/条目」，
+         但点选清单是本次对比的临时成员，位置在待办之上才符合「先选图、再对着清单干活」。 -->
+    <CompareListPanel />
+
+    <!-- 置顶：待修复清单（质检 .txt 的导入 / 标记 / 写回） -->
+    <QcListPanel />
 
     <!-- 云量估算（阶段6 启发：无真云掩膜时 = 显示层高亮占比估算 + 疑似云区红叠） -->
     <section class="rt-sec">
@@ -287,8 +296,6 @@ function fmtTime(ts: number): string {
   box-sizing: border-box;
   background: var(--surface);
 }
-.rt-intro { margin: 0; font-size: 11px; color: var(--ink-faint); line-height: 1.6; }
-
 .rt-sec { background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-ctrl); padding: 8px 10px; }
 .rt-h { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--ink); }
 .rt-h.hrow { display: flex; align-items: center; justify-content: space-between; }

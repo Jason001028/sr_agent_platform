@@ -10,10 +10,26 @@ import { useViewerStore } from '../stores/viewer';
 
 const store = useViewerStore();
 const roiCount = computed(() => store.getRois().length);
+
+/** 这次画的掩码落在哪张图上。**只在对比模式下显示** —— 单屏模式只有一个格子，
+ *  「画在哪张」没有第二种答案。分屏里却真的会看错：两张图并排，人容易以为「画在我
+ *  正在看的那半」。掩码只认活动侧（与掩码/云量/统计同一条规则），所以把活动侧与
+ *  文件名直接写在面板上。 */
+const target = computed(() => {
+  if (!store.compareOn) return '';
+  const side = store.split ? (store.activeSide === 'B' ? '右' : '左') + ' · ' : '';
+  return side + (store.activeRec ? store.activeRec.name : '空');
+});
 </script>
 
 <template>
   <div v-if="store.drawMode" class="draw-panel">
+    <span
+      v-if="target"
+      class="target"
+      data-e2e="draw-target"
+      title="掩码画在活动侧那张影像上（分屏里点哪半哪半就是活动侧）"
+    >画在：{{ target }}</span>
     <button
       type="button"
       :class="{ on: store.drawTool === 'rect' }"
@@ -87,6 +103,22 @@ const roiCount = computed(() => store.getRois().length);
 .draw-panel button.on { background: var(--accent-soft); color: var(--accent-deep); border-color: var(--accent-2); }
 .draw-panel button:disabled { opacity: 0.5; cursor: wait; }
 .draw-panel .lbl { color: var(--ink-sub); font-size: 11px; margin: 0 2px; }
+/* 「画在：左 · <文件名>」：文件名可能很长，截断而不是把面板撑开。
+   中性配色（不涂左右两侧的蓝/杏）—— 它在两个活动侧下是同一枚芯片，涂了侧色就成了
+   「这半是左边」的标识，而它说的是「这次的落笔在活动侧」。 */
+.draw-panel .target {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  color: var(--ink-body);
+  font-size: 11px;
+  font-weight: 600;
+}
 .draw-panel .sep { width: 1px; height: 18px; background: var(--line); margin: 0 2px; }
 .draw-panel input[type=number] {
   width: 54px;

@@ -12,7 +12,8 @@ from pathlib import Path
 
 from backend.pathguard import (
     PathDeniedError, allowed_roots, drive_map, ensure_allowed,
-    infer_scene_paths, is_allowed, is_within, parse_scene_date,
+    flat_scene_layout, infer_scene_paths, is_allowed, is_within,
+    looks_like_scene_name, parse_scene_date, production_tree_depth,
     scene_name_layers, strip_raster_ext, to_posix_array_path,
 )
 
@@ -247,29 +248,139 @@ class TestSceneNameLayers(EnvMixin):
             with self.subTest(bad=bad):
                 self.assertIsNone(scene_name_layers(bad))
 
+    def test_exactly_six_segments_returns_none(self):
+        """**恰好六段**是最窄的边界：段号与景号都在（第 4、5 段），但读分隔符时
+        越界过 —— 早先那道门槛只挡到 `_SCENE_IDX`，六段的名字走进
+        `seps[_SCENE_IDX]` 抛 IndexError，本该 400 的输入变成 500（拖中间产物 jpg
+        时被去尾切短的候选名字正好是这个段数，2026-09-21 实测）。"""
+        six = "JL1KF02B03_PMS09_20260902120156_200535158_102_0025"
+        self.assertEqual(len(six.split("_")), 6)
+        self.assertIsNone(scene_name_layers(six))
+        # 七段就能拆了（多出来的那一段是景号之后的生产次数）
+        self.assertEqual(
+            scene_name_layers(six + "_001"),
+            ("JL1KF02B03",
+             "JL1KF02B03_PMS09_20260902120156_200535158_102_001"))
+
+    def test_space_separated_name(self):
+        """用户口径里的空格形态（`JXGF07D03 PMS … MSS`）也要拆得出来。
+
+        段级目录名必须**沿用原文的分隔符** —— 空格名拼出下划线的段级目录必然
+        在盘阵上 stat 不到。
+        """
+        self.assertEqual(
+            scene_name_layers(
+                "JXGF07D03 PMS 20260622052600 200516571 101 0006 001 L1 MSS"),
+            ("JXGF07D03",
+             "JXGF07D03 PMS 20260622052600 200516571 101 001 L1 MSS"))
+
+    def test_leading_or_trailing_separator_returns_none(self):
+        # 首尾带分隔符 → 段下标整体错位，宁可判不合规则也不猜
+        for bad in ("_A_B_C_D_E_0006_F", "A_B_C_D_E_0006_F_"):
+            with self.subTest(bad=bad):
+                self.assertIsNone(scene_name_layers(bad))
+
+
+class TestProductionTreeDepth(EnvMixin):
+    """目录在生产树的第几层 —— 只给 404 的措辞用（纯词法，不 stat）。"""
+
+    def test_levels_of_six_layer_tree(self):
+        base = "/DiskArray/GSHC2IMPS/PRODUCT/2026/09/18"
+        self.assertEqual(production_tree_depth(base), 0)                 # 日期目录
+        self.assertEqual(production_tree_depth(base + "/JL1KF02B03"), 1)  # 卫星型号
+        self.assertEqual(production_tree_depth(base + "/JL1KF02B03/MID"), 2)   # 段级
+        self.assertEqual(production_tree_depth(base + "/JL1KF02B03/MID/SC"), 3)  # 景级
+        self.assertEqual(
+            production_tree_depth(base + "/JL1KF02B03/MID/SC/Debug"), 4)  # 场景目录里的子目录
+
+    def test_windows_form_and_trailing_slash(self):
+        self.assertEqual(
+            production_tree_depth("W:\\GSHC2IMPS\\PRODUCT\\2026\\09\\18"), 0)
+        self.assertEqual(
+            production_tree_depth("/DiskArray/GSHC2IMPS/PRODUCT/2026/09/18/"), 0)
+
+    def test_no_date_segment_returns_none(self):
+        for path in ("/DiskArray/GSHC2IMPS/PRODUCT", "/DiskArray/GSHC2IMPS/PRODUCT/scratch",
+                     "/DiskArray/2026/13/40", "/DiskArray/2026/09"):
+            with self.subTest(path=path):
+                self.assertIsNone(production_tree_depth(path))
+
+    def test_takes_rightmost_date_run(self):
+        # 路径里出现两段日期形态时取最靠右的那段（离被粘的目录最近）
+        self.assertEqual(
+            production_tree_depth("/x/2020/01/02/2026/09/18/JL1KF02B03"), 1)
+
+
+class TestFlatSceneLayout(EnvMixin):
+    """两种拓扑都支持，且**日期目录下面那段含义不同** —— 这是 404 措辞的分水岭。"""
+
+    PROD = TestSceneNameLayers.PROD
+
+    def test_six_layer_tree_is_not_flat(self):
+        base = f"/DiskArray/GSHC2IMPS/PRODUCT/2026/09/18/JL1KF02B03/{self.PROD}"
+        self.assertFalse(flat_scene_layout(base))
+        self.assertFalse(flat_scene_layout("/DiskArray/GSHC2IMPS/PRODUCT/2026/09/18"))
+        self.assertFalse(
+            flat_scene_layout("/DiskArray/GSHC2IMPS/PRODUCT/2026/09/18/JL1KF02B03"))
+
+    def test_flat_layout_recognised(self):
+        self.assertTrue(flat_scene_layout(
+            f"/DiskArray/GSHC2IMPS/PRODUCT/2026/09/18/{self.PROD}"))
+        # 扁平形态下再深一层是场景目录**内部**，仍然算扁平拓扑
+        self.assertTrue(flat_scene_layout(
+            f"/DiskArray/GSHC2IMPS/PRODUCT/2026/09/18/{self.PROD}/Debug"))
+
+    def test_no_date_run_is_not_flat(self):
+        self.assertFalse(flat_scene_layout("/DiskArray/GSHC2IMPS/PRODUCT/scratch"))
+
+
+class TestLooksLikeSceneName(EnvMixin):
+    def test_recognises_full_production_name(self):
+        for name in (TestSceneNameLayers.PROD,
+                     "JXGF07D03_PMS_20260622052600_200516571_101_0006_001_L1_MSS",
+                     "GF07A03_20260722"):
+            with self.subTest(name=name):
+                self.assertTrue(looks_like_scene_name(name))
+
+    def test_rejects_truncated_names(self):
+        # 日期目录的 `18`、卫星型号层的 `JXGF07D03`：拿不出 14/8 位成像时刻
+        for name in ("18", "JXGF07D03", "JL1KF02B03", "scratch", "PAN", "2026"):
+            with self.subTest(name=name):
+                self.assertFalse(looks_like_scene_name(name))
+
 
 class TestInferScenePaths(EnvMixin):
     PROD = TestSceneNameLayers.PROD
 
-    def test_default_two_candidates(self):
-        """默认两条：生产树（卫星/段级两层）在前，旧扁平形态兜底在后。"""
+    def test_default_two_days(self):
+        """默认按生产树渲染**两条**：成像日在前，次日在后。
+
+        盘阵按生产日建目录，深夜成像的景记在第二天 —— 名字里的 14 位只当
+        下界用（用户 2026-09-18 报的 bug：名含 0917 的图大半在 0918 目录下）。
+        """
         self.setenv(SR_SCENE_PATH_TEMPLATE=None, SR_DRIVE_MAP=None)
         got = infer_scene_paths(self.PROD, "2026-09-02")
         self.assertEqual(got, [
             "/DiskArray/GSHC2IMPS/PRODUCT/2026/09/02/JL1KF02B03/"
             "JL1KF02B03_PMS09_20260902120156_200535158_102_001_L1_PAN/"
-            "JL1KF02B03_PMS09_20260902120156_200535158_102_0025_001_L1_PAN",
-            "/DiskArray/GSHC2IMPS/PRODUCT/2026/09/02/" + self.PROD,
+            + self.PROD,
+            "/DiskArray/GSHC2IMPS/PRODUCT/2026/09/03/JL1KF02B03/"
+            "JL1KF02B03_PMS09_20260902120156_200535158_102_001_L1_PAN/"
+            + self.PROD,
         ])
 
-    def test_default_non_production_name_flat_only(self):
-        """名字拆不出那两层 → 不硬拼，只剩旧扁平形态一条。"""
+    def test_default_non_production_name_no_candidate(self):
+        """名字拆不出那两层 → 不硬拼，一条候选也不构造。"""
         self.setenv(SR_SCENE_PATH_TEMPLATE=None, SR_DRIVE_MAP=None)
         got = infer_scene_paths("JL1KF02B03_PMS02_20260910124710_L1_PAN",
                                 "2026-09-10")
-        self.assertEqual(
-            got, ["/DiskArray/GSHC2IMPS/PRODUCT/2026/09/10/"
-                  "JL1KF02B03_PMS02_20260910124710_L1_PAN"])
+        self.assertEqual(got, [])
+
+    def test_next_day_rolls_over_month(self):
+        """次日跨月靠 timedelta 算，不字符串加一。"""
+        self.setenv(SR_SCENE_PATH_TEMPLATE="/prod/{y}/{m}/{d}/{name}")
+        self.assertEqual(infer_scene_paths("SC1", "2026-09-30"),
+                         ["/prod/2026/09/30/SC1", "/prod/2026/10/01/SC1"])
 
     def test_strips_raster_ext(self):
         """前端发来的是**用户拖进来的文件名**（带后缀）；目录名从不带后缀。"""
@@ -284,10 +395,14 @@ class TestInferScenePaths(EnvMixin):
         self.assertEqual(strip_raster_ext("A.tif.bak"), "A.tif.bak")
 
     def test_env_template_with_layers(self):
+        """自定模板同样给两天：模板里的 {d} 也按成像日/次日各渲染一遍。"""
         self.setenv(SR_SCENE_PATH_TEMPLATE="/prod/{y}/{m}/{d}/{sat}/{mid}/{name}")
         got = infer_scene_paths(self.PROD, "2026-09-02")
         self.assertEqual(got, [
             "/prod/2026/09/02/JL1KF02B03/"
+            "JL1KF02B03_PMS09_20260902120156_200535158_102_001_L1_PAN/"
+            + self.PROD,
+            "/prod/2026/09/03/JL1KF02B03/"
             "JL1KF02B03_PMS09_20260902120156_200535158_102_001_L1_PAN/"
             + self.PROD])
 
@@ -296,21 +411,43 @@ class TestInferScenePaths(EnvMixin):
         self.setenv(SR_SCENE_PATH_TEMPLATE="/prod/{y}/{m}/{d}/{sat}/{name}")
         self.assertEqual(infer_scene_paths("SC1", "2026-01-02"), [])
 
+    def test_env_template_without_date_placeholder(self):
+        """模板不含日期占位符 → 两天渲染出同一条，去重后仍只有一条。"""
+        self.setenv(SR_SCENE_PATH_TEMPLATE="/prod/scenes/{name}")
+        self.assertEqual(infer_scene_paths("SC1", "2026-01-02"),
+                         ["/prod/scenes/SC1"])
+
     def test_custom_template(self):
         self.setenv(SR_SCENE_PATH_TEMPLATE="/prod/{y}/{m}/{d}/{name}")
         got = infer_scene_paths("SC1", "2026-01-02")
-        self.assertEqual(got, ["/prod/2026/01/02/SC1"])
+        self.assertEqual(got, ["/prod/2026/01/02/SC1", "/prod/2026/01/03/SC1"])
 
     def test_pure_lexical_no_stat(self):
         # 反推只拼字符串：目录根本不存在也要照样返回
         self.setenv(SR_SCENE_PATH_TEMPLATE="/prod/{y}/{m}/{d}/{name}")
         got = infer_scene_paths("NOT_EXIST_AT_ALL", "2026-01-02")
-        self.assertEqual(got, ["/prod/2026/01/02/NOT_EXIST_AT_ALL"])
+        self.assertEqual(got, ["/prod/2026/01/02/NOT_EXIST_AT_ALL",
+                              "/prod/2026/01/03/NOT_EXIST_AT_ALL"])
 
     def test_rejects_stem_with_separator(self):
-        for bad in ("a/b", "a\\b", "..", "a\x00b", ""):
+        for bad in ("a/b", "a\\b", "a\x00b", ""):
             with self.subTest(bad=bad), self.assertRaises(PathDeniedError):
                 infer_scene_paths(bad, "2026-09-10")
+
+    def test_bare_dotdot_yields_no_candidate(self):
+        """`..` 单独当名字：拆不出六段形态 → 一条候选都构造不出（空列表），不抛。
+
+        空列表与 PathDeniedError 都是拒绝（调用方一律回 400），只是文案不同。
+        """
+        self.setenv(SR_SCENE_PATH_TEMPLATE=None, SR_DRIVE_MAP=None)
+        self.assertEqual(infer_scene_paths("..", "2026-09-10"), [])
+
+    def test_rejects_traversal_rendered_into_path(self):
+        """`..` 混在名字里被拼进路径（卫星型号段）→ 渲染后按穿越段拒掉。"""
+        self.setenv(SR_SCENE_PATH_TEMPLATE="/prod/{y}/{m}/{d}/{sat}/{mid}/{name}")
+        name = ".._PMS02_20260910124710_200536960_101_0005_001_L1_PAN"
+        with self.assertRaises(PathDeniedError):
+            infer_scene_paths(name, "2026-09-10")
 
     def test_rejects_bad_date(self):
         for bad in ("2026/09/10", "2026-9-10", "today", "20260910"):

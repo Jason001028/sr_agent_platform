@@ -274,7 +274,7 @@ sh $APP/deploy/slurm/probe_slurm.sh --deep     # ⚠️ 默认不跑
 ```
 
 > ⚠️ **2026-09-15：`verify_sr_run.py` 仓库副本已变**（退出码文件的编码锁定，见
-> [current-question.md](current-question.md) §4 时间线 2026-09-15）：新值 **17164 B /
+> [timeline-archive.md](timeline-archive.md) 2026-09-15 条目）：新值 **17164 B /
 > `5fa627d8…`**。机上那份 16419 B 的**行为仍正确**（`A/B/C` 不受影响），但少了两处
 > `-export=NONE` + 非 UTF-8 locale 下才暴露的编码保护 → 重启 Slurm 走 **D** 之前必须重新拷一次。
 > 变体 `code_0817_prod_slurm.py` 未改动，§0.2 的变体比对（含 `provenance.json`）继续有效。

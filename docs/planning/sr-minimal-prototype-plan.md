@@ -236,7 +236,7 @@ SRLOG。校验器随后判定 `Debug/_SRLOG.txt`（9/12 的）是上次残留、
 > 的行来自 `/api/scenes`，查看器的「提交 SR」按钮只对 `route='jpg' && lqPath` 的记录可用，
 > 而 `lqPath` 只由 disk 场景行提供——**场景列表是那个按钮的唯一入口**。
 > **本阶段不维护场景检索**：根暂指 `/DiskArray/tmp/wangrz/datahub/`，接受同一景被列成多行
-> （收件规则只有后缀白名单、派生件也计入，缺口与后续修法见 `current-question.md §6.0` 下一步①）。
+> （收件规则只有后缀白名单、派生件也计入，缺口见 `docs/status/current-question.md` §3.3「场景检索白名单」条）。
 
 1. 构建 `frontend/dist` 并按 §3.3 确认的通道送到机器，刷新页面。
 2. 盘阵场景页打开锁定目录的场景 → 点「提交 SR」→ 队列页确认 → 提交。

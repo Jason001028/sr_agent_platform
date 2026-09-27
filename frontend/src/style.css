@@ -43,6 +43,32 @@
   --warn: #B98A3A; --warn-bg: #F8F1E4; --warn-line: #ECE0C5;
   --err: #C25E5C;  --err-bg: #F9ECEC;  --err-line: #EED4D3;
 
+  /* ---- 图像对比（2026-09-20）：左右两侧各一套浅色调 ----
+     取蓝 / 琥珀这一对（对红绿色盲安全），刻意避开 --accent-* 青绿族与 ok/warn/err
+     三个语义色 —— 对比的左右是**位置标识**，不该让人读成「哪边更好」。 */
+  --cmp-a: #3F6DA8;          --cmp-a-bg: #EDF3FB;    --cmp-a-line: #C6D9EF;
+  --cmp-b: #96631A;          --cmp-b-bg: #FBF3E4;    --cmp-b-line: #EBD9B6;
+  --cmp-hint-a: rgba(63, 109, 168, 0.10);            /* 落位提示：左半 */
+  --cmp-hint-b: rgba(150, 99, 26, 0.10);             /* 落位提示：右半 */
+  --cmp-veil: rgba(255, 255, 255, 0.72);             /* 提示白纱：压住影像，字仍可读 */
+  --cmp-empty-bg: #F1F4F6;   --cmp-empty-line: #C9D2DA;
+  --cmp-divider: #FFFFFF;                            /* 分隔线：白线 + 深色发丝描边，
+                                                       亮图暗图上都看得见 */
+  --cmp-divider-edge: rgba(18, 14, 38, 0.35);
+  --cmp-active: #3F6DA8;                             /* 活动侧外框 */
+
+  /* ---- 任务提醒（2026-09-22）：右下角那条「超分跑完了 / 跑失败了」----
+     刻意用**非主题色**的琥珀橙：青绿族（--accent-*）与深带绿是应用内一切常规元素的
+     语言，而这条提醒的价值恰恰在于它「不是一个常规元素」——它在别的页面上替用户盯着
+     一件他没在等的事。与 --cmp-b（对比右半的褐金）同族但更亮一档（#C2743A vs
+     #96631A），形制也完全不同（右下角浮卡 vs 半幅标签），不会看混。
+     成功与失败**共用**这一套：这条提醒的身份是「任务有结果了」，成败由标题文字说 ——
+     失败改涂 --err 会让同一件事看起来像两种东西。 */
+  --notice-job: #C2743A;
+  --notice-job-bg: #FDF3E7;
+  --notice-job-ink: #8A4A18;
+  --notice-job-line: #EBD3B4;
+
   /* ---- 形状 / 阴影 / 间距 ---- */
   --r-card: 16px;    /* 大卡片 */
   --r-panel: 14px;   /* 面板/表容器 */
@@ -100,9 +126,12 @@ body {
   border-bottom: 1px solid rgba(255, 255, 255, 0.14);
 }
 
+/* 品牌区：一颗 logo（见 .brand-mark）+ 平台名。
+   名字比四个导航项大一号（18px 对 14px）—— 它是「这是哪个平台」的锚点，导航项是
+   「去哪儿」，两者不该同级；`.nav-links a` 的字号因此一个字不动。 */
 .app-nav .brand {
   font-weight: 700;
-  font-size: 16px;
+  font-size: 18px;
   letter-spacing: 0.2px;
   color: var(--on-band);
   text-decoration: none;
@@ -110,13 +139,39 @@ body {
   align-items: center;
   gap: 10px;
 }
-.app-nav .brand::before {
+
+/* logo 预留区：min-width 兜住 28×28，所以「服务器上还没放 logo」时也占着这块地方，
+   平台名不会左右跳；方形 mark 正好填满它，横长的字标（公司全称那种）向右自然撑开，
+   不裁不挤。（宽度只由 png 自己的宽高比决定 —— 素材不在手上，预不成一个死宽。） */
+.app-nav .brand-mark {
+  min-width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+/* 占位小方块：原先是 .brand 的 ::before，现在搬进预留区居中；有真 logo 时让位 */
+.app-nav .brand-mark::before {
   content: '';
   width: 10px;
   height: 10px;
   border-radius: 3px;
   background: #fff;
   box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.22);
+}
+.app-nav .brand.has-logo .brand-mark::before {
+  display: none;
+}
+
+/* 真 logo：高度吃满 28px 那条带，宽度按 png 比例（160px 上限挡异常素材把名字顶出屏）。
+   不设 object-fit —— 没有强制的框，就按原比例摆。 */
+.app-nav .brand-logo {
+  max-height: 28px;
+  max-width: 160px;
+  width: auto;
+  height: auto;
+  display: block;
 }
 
 .nav-links {

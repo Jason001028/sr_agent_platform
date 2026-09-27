@@ -8,26 +8,76 @@
 「稀疏采样 + 直方图均衡拉伸」的灰度 JPG，nginx 整块静态直出；检索走 FastAPI。
 本地文件路径（选择 TIF…）保持原有稀疏 TIF 读法，零回归。
 
-> **烘焙规则 v2（09-17）**：尺寸从「长边 8192 封顶」改为**各边严格 1/2、不封顶**，拉伸
-> 从 2% Linear 改为**直方图均衡**；规则签名写进 JPEG 注释，旧缓存在首次打开时会被判定
-> 失效并原地重烤（覆盖同名 `<stem>.preview.jpg`，不产生第二份文件）。详见
-> [experience/gui-experience.md](../docs/experience/gui-experience.md) §9.1。
+> **预览文件名统一成下划线一条（09-22）**：全平台的预览 JPG 现在只有一个名字
+> `<源栅格 stem>_preview.jpg`（此前分两套：缓存那份叫 `<stem>.preview.jpg`，拖入链那份叫
+> `<stem>_preview.jpg`，同一场景目录里躺着两个几乎同名的文件）。三条链（惰性打开 / 急烤 /
+> 拖入）都落这个名字，差别只剩目录（配了 `SR_PREVIEWS_ROOT` 时缓存那份进镜像树）。
+> **换包须知**：① `frontend/dist` 与 `backend` **必须同包更新** —— 认「这是烤出来的预览」
+> 的那条正则两边各有一份，只换一个会让 `?div=` 拼不上（换档位后最长一小时看到旧图）；
+> ② 旧的点号文件由服务端**顺手删**（每条链处理到那份栅格时，烤之前一次、命中缓存一次），
+> **没有全盘清扫** —— 平台不列目录，所以没被任何链碰过的场景目录里那份会一直留着，
+> 它不再被任何代码读写，只是占地方，可以人工删。
+> 详见 [knowledge/preview-bake-pipeline.md](../docs/knowledge/preview-bake-pipeline.md) §4.8/§4.10。
 
-> **拖拽入口改走服务端烘焙 JPG（09-18）**：把盘阵上的 `.tif` 拖进查看器，现在也走
-> 服务端烘焙的 1/2 预览 JPG（与场景库同一条渲染路径），不再在浏览器里重新解码整幅
-> 原图。这份 JPG 是**临时缓存**：落 `SR_TEMP_PREVIEWS_ROOT`，按 `YYYY-MM-DD` 分桶，
-> 每天 0 点整桶删除（服务启动时也先清一次）。命中判据是**文件名 + 字节数**双指纹
-> （后端 `_fingerprint_mismatch`），对不上就退回浏览器本地解码 —— 绝不静默关联到
-> 一张不是用户拖进来的影像上。**上线前必须显式配 `SR_TEMP_PREVIEWS_ROOT`**：
-> 默认值是系统临时目录，CentOS7 的 `/tmp` 常是 tmpfs，而 1/2 尺度不封顶、单张可能
-> 上百 MB；要放在 User=nginx 可写的大盘上，且**不要**放在 `SR_SCENES_ROOT` 之下。
+> **烘焙规则 v3：档位可调（09-19）**：尺寸从「各边严格 1/2」改为**各边 ÷2 · ÷4 · ÷8 ·
+> ÷16 · ÷32 五档可选，默认 ÷4**，由查看器工具栏定位组件右侧那条拖动条定（全局：拖入 /
+> 场景库 / 粘路径三条入口同档，存浏览器 localStorage）。拉伸仍为直方图均衡；规则签名写进
+> JPEG 注释（`srprev:v3:div<N>+equal:q<Q>`），**档位进了签名**。旧缓存（`v2` 戳）在首次
+> 打开时会被判定失效并原地重烤（覆盖同名文件，不产生第二份）。
+> **换包须知**：这一轮盘上所有预览都必然重烤一次（惰性，逐个场景首次
+> 打开时触发；把滑块停在 ÷2 也一样）；`frontend/dist` 与 `backend` **必须同包更新** ——
+> 端点改了名（`/preview-tmp` → `/preview-drop`），只换一个会 404。
+> 详见 [knowledge/preview-bake-pipeline.md](../docs/knowledge/preview-bake-pipeline.md) §4.4/§4.6。
+
+> **拖拽入口改落盘阵（09-18 起走服务端烘焙，09-19 改落点）**：把盘阵上的 `.tif` 拖进查看器
+> 不落盘阵时，走服务端烘焙的下采样预览 JPG（与场景库同一条渲染路径），不在浏览器里重新
+> 解码整幅原图。产物落**源文件同目录的 `<stem>_preview.jpg`**（09-19 起；此前落
+> `SR_TEMP_PREVIEWS_ROOT` 的当天桶里，次日 0 点整桶删 —— 等于每天第一次拖入都要重烤）。
+> 命中判据是**文件名 + 字节数**双指纹（后端 `_fingerprint_mismatch`），对不上就退回浏览器
+> 本地解码 —— 绝不静默关联到一张不是用户拖进来的影像上。
+> `SR_TEMP_PREVIEWS_ROOT` **降级为兜底**：场景目录不可写时（服务账号对盘阵目录的写权限在
+> 真机上仍是待确认项）才落到那里，按 `YYYY-MM-DD` 分桶、每天 0 点整桶删，并在响应头
+> `X-SR-Preview-Fallback: tmp` 里如实告诉前端。仍建议显式配这个变量：默认值是系统临时目录，
+> CentOS7 的 `/tmp` 常是 tmpfs，而单张可能上百 MB；要放在 `User=nginx` 可写的大盘上，
+> 且**不要**放在 `SR_SCENES_ROOT` 之下。
 > 场景库 / 粘路径的长期预览缓存（源同目录或 `SR_PREVIEWS_ROOT` 镜像树）不受影响。
+> **磁盘预算注意**：新落点的 `<stem>_preview.jpg` **没有任何清理者**（原地覆盖，不堆积，
+> 它与缓存那份**同一个名字**，差别只在目录），且它**不吃 `SR_PREVIEWS_ROOT`**，恒在场景目录里。
+
+> **产物预览急烤 + 显示件 jpg 改从同名栅格烤（09-20）**：两件事，都在服务端。
+> ① **急烤**：作业转 COMPLETED 后，后台循环顺手把**产物那一份**预览烤掉（只烤产物；
+> 输入影像与 `_NOSR` 两份仍按打开时惰性烤），用户跑完立刻打开就不必等一次读盘 + 采样。
+> 两个新 env 都有默认值、不配即生效：`SR_PRODUCT_PREVIEW_DIV`（默认 4，**0 = 关**，
+> 取值非法当 0 处理并在启动日志写一行）与 `SR_PRODUCT_PREVIEW_MAX_AGE_SEC`（默认 86400）。
+> 结局随 `GET /api/queue` 的 `preview_state` / `preview_note` 两列带出（另有 SSE 帧
+> `preview_update`）。**升级当天建议先置 `SR_PRODUCT_PREVIEW_DIV=0` 起一次确认无异常再打开**：
+> 那两列是 ALTER TABLE 加的、**不回填**，老行的值全是 `NULL`，挡历史行全量重烤的唯一屏障
+> 就是那道年龄窗口。沙箱**实际生效**时（作业跑在私有副本上）急烤自动 `skipped: sandbox`
+> —— 判据是沙箱有没有真生效，**不是** `SR_SANDBOX_ROOT` 在不在，详见 §7.5 末条。
+> ② **显示件 jpg**：拖入/打开的 `.jpg` 若同目录配着一位更清晰的栅格、且当前档位下服务端
+> 从它烤出来的比它更清晰，显示源就换成服务端那份（`/preview` 与 `/preview-drop` 都改，
+> 落点与 `?div=` 照旧）；否则行为**一个字节都不变**。默认档位 ÷4 下基本不触发（24000 源 +
+> 8192 显示件时只有 ÷2 才赢）—— 这是算术，不是没生效。
+> **nginx 不用改**（没有新 URL 形态：静态那条仍是 `/disk-array/…/*_preview.jpg`）。
+> 详见 [knowledge/preview-bake-pipeline.md](../docs/knowledge/preview-bake-pipeline.md) §4.1/§4.8/§4.9。
 
 阶段5 平台 API（09-02 定稿，契约 = `docs/planning/api-contract.md`）：FastAPI 在既有场景
 端点上新增 `/api/chat/*`（会话 REST + 单回合 SSE）、`/api/queue*`（共享 SR 队列 REST + SSE
-状态广播）、`/api/tools`（工具直调）、`/api/masks`（掩码烘焙到原图目录）；前端新增 `/chat`
+状态广播）、`/api/tools`（工具直调）、`/api/masks`（掩码烘焙到原图目录）、
+`/api/qclist/write`（《待修复清单》原地写回盘阵，09-18）；前端新增 `/chat`
 聊天页、`/queue` 共享队列页，查看器点「提交 SR」→ 带入当前场景目录 → 跳 `/queue` 预填
 （不自动提交）。离机验收走 mock LLM + 假调度器；**真机必须显式关 fake**（见下方 systemd env）。
+
+> **《待修复清单》写回（09-18）**：查看器的清单面板把标记结果原地写回盘阵上那份 `.txt`。
+> 原先走浏览器 File System Access API，可那个 API 在规范里是 `[SecureContext]` 标的，
+> 而本机页面是 `http://内网IP`（nginx `listen 80`）—— 在真机上永远点不通，不是偶发；
+> 现改由后端写（`User=nginx`，与掩码/SR 产物/烘焙 JPG 同一条路），顺带把 GBK 清单
+> 真按 GBK 写回（浏览器编不出 GBK）。契约见 `docs/planning/api-contract.md` §3.7。
+> **两条部署注意**：① 写回目标由操作员在面板里**粘完整路径**（不再弹本机文件选择器），
+> 所以清单必须落在 `SR_ALLOWED_ROOTS` 之内；② 写回是「同目录临时文件 + `os.replace`
+> 原子替换」，**替换后文件属主变成 nginx**（nginx 无权 chown 回去，权限位保留）。
+> 质检部门若还要直接编辑这份 txt，清单所在目录得给组写权限。
+> 幂等排查见 §四的 `POST /api/qclist/write` 一条。
 
 > **SR 最小原型（09-14）改了三处**，详见 `docs/planning/sr-minimal-prototype-plan.md` 与 §7.6：
 > ① 掩码不再由浏览器烘焙——`POST /api/masks` 保留但前端已不调用，改为用场景目录里**已有的**
@@ -39,20 +89,24 @@
 ```bash
 cd frontend
 npm run build            # 产出 dist/（全离线，含 vue/router/pinia/vendor 三库）
-npm run package:offline  # 产出 release/sr-agent-platform-<日期>-<版本>.tar.gz
+npm run package:offline  # 产出仓库根 release/ 下两个包（也可 -- build 先构建再打包）
 ```
 
-产物结构：
+**前后端各一个包**，都产出到仓库根 `release/`，顶层**不带** `sr-agent-platform/` 前缀
+——真机是 `tar -xzf <包> -C $APP` 直接解进应用目录，多一层目录会解出 `$APP/dist-<日期>/`
+而不是覆盖 `$APP/dist/`：
 
 ```
-sr-agent-platform/
-├── dist/                  # ← 前端产物（Vite base:'./'，相对路径引用，随便放哪都行）
-├── backend/               # ← FastAPI 场景 API（含 api/ + services/，已去 pycache/测试）
-├── nginx.conf             # → /etc/nginx/conf.d/
-├── sr-api.service         # → /etc/systemd/system/
-├── requirements-api.txt   # 后端运行依赖清单
-└── README.md              # 本说明
+release/
+├── dist-<日期>-<时分>-<版本>.tar.gz       # 顶层 dist/    ← 前端产物（Vite base:'./'，相对路径，随便放哪）
+└── backend-<日期>-<时分>-<版本>.tar.gz    # 顶层 backend/ ← FastAPI 场景 API（含 api/ + services/，已去 pycache/测试）
 ```
+
+> **首次安装件不进包**（`nginx.conf` / `sr-api.service` / `requirements-api.txt` / 本 README）：
+> 它们是机器配置模板，真机上已被手工 `sed` 成真实路径，进包解压会把真路径盖回出厂示例
+> （正是 §5.6 那类事故）。首次部署时这四份从仓库 `deploy/` 直接拷，见 §二；这两个包只用于
+> 「已装好的机器换新版本」。打包脚本每次还会清掉 `release/` 里同族的旧包（`dist-*` /
+> `backend-*` / 历史 `sr-agent-platform-*`），无关文件不碰；清掉的清单会逐条打印。
 
 ## 二、内网机部署：前端 + 盘阵静态（nginx，CentOS7）
 
@@ -73,9 +127,11 @@ sr-agent-platform/
 2. **拷包并解压**（U 盘 / scp 均可）：
 
    ```bash
-   mkdir -p /data/www
-   tar xzf sr-agent-platform-*.tar.gz -C /data/www
-   # 得到 /data/www/sr-agent-platform/{dist,backend,nginx.conf,...}
+   mkdir -p /data/www/sr-agent-platform
+   tar xzf dist-*.tar.gz    -C /data/www/sr-agent-platform     # → /data/www/sr-agent-platform/dist
+   tar xzf backend-*.tar.gz -C /data/www/sr-agent-platform     # → /data/www/sr-agent-platform/backend
+   # 首次安装还要把仓库 deploy/ 里的 nginx.conf / sr-api.service / requirements-api.txt 拷进来
+   # （这四份**不在包里**，理由见 §一）；换版本时只解上面两个包。
    ```
 
 3. **放 nginx 配置并生效**：
@@ -95,6 +151,22 @@ sr-agent-platform/
    ```bash
    firewall-cmd --permanent --add-service=http && firewall-cmd --reload
    ```
+
+5. **放顶栏 logo**（可选，与后面几节都无关的独立一步）：
+
+   ```bash
+   cp /tmp/logo.png /data/www/sr-agent-platform/dist/logo.png
+   chown nginx:nginx /data/www/sr-agent-platform/dist/logo.png
+   ```
+
+   > 平台名（顶栏左上角「长光卫星-修图智能体平台」）左边预留了 28×28 的 logo 区。
+   > **文件名固定 `logo.png`、位置固定 `<APP>/dist/` 根**（`index.html` 边上）—— 前端按
+   > `base:'./'` 的相对路径取它，写死别的路径或换文件名都不会被认出来。
+   > 高度缩到 28px、宽度按 png 自己的宽高比走（上限 160px），方形 mark 与横长字标都放得下。
+   > **没有这个文件就是正常的部署态**：预留区留空、显示那颗占位小方块，不会出现破图。
+   > 素材最好是**透明底**的；带白底的 png 会在孔雀石深带上显出一个白方块。
+   > 放上去之后浏览器 **Ctrl+F5 硬刷一次** —— 前端对缺失的 logo 不再重试（省掉每次刷新
+   > 一个白跑的请求），所以补文件不会自动生效。
 
 ## 三、内网机部署：FastAPI 场景 API（阶段4）
 
@@ -142,7 +214,7 @@ sr-agent-platform/
    - `ExecStart=` 的 venv 路径若不同则改；用 conda 环境则填 `<conda>/envs/web-sr-agent/bin/uvicorn backend.api.app:create_app --factory --host 127.0.0.1 --port 8000`。
 
    > 权限：systemd 默认以 `nginx` 用户跑（`User=` 已设）。该用户需能**读**盘阵 TIF、
-   > **写**预览 JPG 缓存（默认写源同目录 `<源>.preview.jpg`）、**写** `SR_AGENT_DB` 库。
+   > **写**预览 JPG 缓存（默认写源同目录 `<源 stem>_preview.jpg`）、**写** `SR_AGENT_DB` 库。
    > 盘阵目录可写、所有组即可：`chgrp -R nginx <SR_SCENES_ROOT> && chmod -R g+rwX <SR_SCENES_ROOT>`；
    > 库目录单独给写权（**只给这一个目录，别 chown 整棵应用树**）：
    > `mkdir -p <SR_AGENT_DB 父目录> && chown nginx:nginx <SR_AGENT_DB 父目录> && chmod 750 <SR_AGENT_DB 父目录>`。
@@ -166,7 +238,22 @@ curl -s 'http://127.0.0.1/api/scenes?limit=5' | head -c 400    # 场景 JSON（�
 
 # 盘阵静态直出（取列表里第一行 rel 拼 /disk-array/<rel>）
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1/disk-array/<某个rel>  # 200
+
+# 反代自查（2026-09-24 起每次动过 nginx.conf 都跑一遍）：拿一个不存在的场景 id 打 /preview
+curl -s -o /dev/null -w '反代=%{http_code} ct=%{content_type}\n' \
+     'http://127.0.0.1/api/scenes/__none__/preview?div=4'
+     # ✓= 反代=404 ct=application/json  ← 请求走到了后端（后端如实说没有这个场景）
+     # ✗= 反代=404 ct=text/html        ← nginx 自己回的，这个 location 少了 proxy_pass
 ```
+
+> **这一条为什么必做**：nginx 只选**一个** location，嵌套的 location 不继承外层同名的
+> `proxy_pass`（它是 final-location-handling 指令），但**继承** `proxy_set_header` /
+> `proxy_buffering` / `proxy_read_timeout` 这些普通指令。所以 `/api/` 里那个只为了让
+> `/preview` 带 `Cache-Control` 而套的子 location，光写 `add_header` 是不够的——子块里少了
+> `proxy_pass`，请求就落回 `root` 下的静态查找、由 nginx 自己回 404 HTML。
+> 2026-09-23 线上正是这么坏的：页面上「老景打开失败」，前端拿到非 JSON 的 404，误判成
+> 「盘阵上文件已被自动清除」（前端自 2026-09-24 起已收紧判据，只认 `/disk-array/…` 静态链
+> 上的 404，并把这种「没走到后端」的情况单独报出来）。跑上面的自查即可区分。
 
 浏览器打开 `http://<内网机IP>/scenes` → 过滤/点「打开」→ 场景图出在查看器，文件列表项带
 「盘阵」标记、拉伸下拉禁用（提示"盘阵 JPG 已按直方图均衡烘焙"）。首次打开会懒生成预览
@@ -176,7 +263,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1/disk-array/<某个rel>
 
 盘阵目录里**本来就是 JPG** 的影像（09-14 起）也作为场景行列出，行内标签显示「JPG 源」：
 `hasPreview` 恒真、`jpgUrl` 指向源文件本身，点「打开」不经过懒生成（列表里 `W/H` 由 Pillow
-读头得到）。后端自己烘焙的 `<basename>.preview.jpg` 缓存不会被当成场景列进去。
+读头得到）。后端自己烘焙的 `<basename>_preview.jpg` 缓存不会被当成场景列进去。
 
 ### 阶段5 平台 API（聊天 / 队列 / 掩码）
 
@@ -196,6 +283,15 @@ curl -s -N -X POST http://127.0.0.1/api/chat/sessions/<id>/messages \
 
 # 队列 SSE：挂起看 job_update（后台校准器广播）
 curl -s -N http://127.0.0.1/api/queue/events
+
+# 《待修复清单》写回（先备份那份 txt 再试）：路径形态与面板里粘的一致（W:\ 或 /DiskArray/）
+curl -s -X POST http://127.0.0.1/api/qclist/write \
+     -H 'content-type: application/json' \
+     -d '{"path":"W:\\GSHC2IMPS\\PRODUCT\\<y>\\<m>\\<d>\\<卫星型号>\\<段级>\\<景级>\\待修复清单.txt",
+          "text":"<整份文档>","encoding":"gbk"}'
+     # {"path":"/DiskArray/…/待修复清单.txt","bytes":1234,"encoding":"gbk"}
+     # 400 = 请求侧被拒（路径不在白名单 / 不存在 / 非 .txt / 编码写不出 / mtime 冲突），detail 是原因；
+     # 422 = 写盘本身失败（多为目录不可写或文件被占用）
 ```
 
 浏览器：`http://<内网机IP>/chat` 发一条 → 工具行 ✓ + 最终回复（SSE 逐帧渲染），刷新可恢复
@@ -270,6 +366,9 @@ systemctl reload nginx             # 前端热更：只 reload，别 restart sr-
 
 浏览器 **Ctrl+F5 强刷**一次（去掉浏览器缓存的旧页面）。带 hash 的资源名每次变化，
 immutable 缓存不卡旧版。判定：刷新后页面出现本次改动。
+
+> 顶栏那颗 `logo.png`（§二 第 5 步放的）**不受升级影响** —— `scp -r dist/*` 是覆盖式拷贝，
+> 不删多余文件，所以换版本不用重放 logo；但手工 `rm -rf dist` 重建会连它一起清掉，那就得重放一次。
 
 > 只覆盖 conf `root` 指着的那个 `<APP>/dist`，**别新建/挪目录**——root 与文件一错位就是
 > 上面那个静态 500。真机 node81-135 的应用根在移动盘 `/run/media/root/SSD/...`：机器重启/
@@ -354,6 +453,8 @@ systemctl cat sr-api | grep -n Environment=                     # 文本（可�
 ```bash
 nginx -t                          # 语法不过会拒绝 reload，先过这关
 systemctl reload nginx
+curl -s -o /dev/null -w '反代=%{http_code} ct=%{content_type}\n' \
+     'http://127.0.0.1/api/scenes/__none__/preview?div=4'   # 判定：ct=application/json（见 §四）
 ```
 
 ### 5.4 回滚
@@ -362,14 +463,18 @@ systemctl reload nginx
 - **后端**：恢复上一版 `backend/`（git 检出旧提交再拷）→ `systemctl restart sr-api`。
 - 预览 JPG 缓存随源图目录存、跨回滚保留，一般无需重生成。**例外：烘焙规则变更**（如 09-17 v2：各边
   1/2 + 直方图均衡）——旧图缺新规则签名，回滚/升级后首次打开会被判定失效并**原地重烤一次**（覆盖同名
-  `<stem>.preview.jpg`），属预期行为，见 [docs/experience/gui-experience.md](../docs/experience/gui-experience.md) §9.1。另注意 nginx 给
-  `.preview.jpg` 的 `max-age=3600`：升级后浏览器可能还在用旧图，硬刷新一次即可。
+  `<stem>_preview.jpg`），属预期行为，见 [docs/experience/gui-experience.md](../docs/experience/gui-experience.md) §9.1。另注意 nginx 给
+  预览 JPG 的 `max-age=3600`：升级后浏览器可能还在用旧图，硬刷新一次即可。
 
 ### 5.5 走完整离线包发布时的等价动作
 
-上面是日常迭代（开发机直连 scp）。若按 §一 `npm run package:offline` 打 tar.gz 发布，
-则升级 = 拷新包解压覆盖 `<APP>/` 下对应目录，前端 `systemctl reload nginx`、后端
-`systemctl restart sr-api`，动作同 §5.1/5.2，只是传输介质从 scp 换成整包。
+上面是日常迭代（开发机直连 scp）。若按 §一 `npm run package:offline` 打 tar.gz 发布：
+两个包拷到 `<机器>:/tmp`（只换前端就只拷 `dist-*`，只换后端就只拷 `backend-*`），分别
+`tar -xzf <包> -C <APP>` 覆盖对应目录，前端 `systemctl reload nginx`、后端
+`systemctl restart sr-api`，动作同 §5.1/5.2，只是传输介质从 scp 换成整包。回滚 = 把改之前的
+那一版包再解一次（真机上现有的做法是留 `dist.bak.<日期>` / `backend.bak.<日期>.tar.gz`）。
+解压是**覆盖**而不是替换：旧版本留下的 `assets/<旧哈希>.js` 会一直躺在目录里（没人引用，
+无害），要清就手工清。
 
 ### 5.6 整包拷贝时代的操作纪律（2026-09-09 实测教训）
 
@@ -415,8 +520,8 @@ curl -s -o /dev/null -w '健康=%{http_code}\n' http://127.0.0.1:8000/api/health
 - **vendor 已打进 dist，全离线**：pako/utif(补丁版)/geotiff 均来自 `frontend/src/vendor/`，Vite 构建打进产物。
 - **utif.js 为补丁版（cmpr 8/32946 走 pako inflate），绝不能被 npm 重装覆盖**——只能从 `src/vendor/utif.js` 本地引入。
 - **盘阵双层保险**：nginx `alias` 整块暴露 + 后端按 `SR_SCENES_ROOT` 白名单校验（拒绝 `../` 穿越、白名单外绝对路径、fake 占位）。URL 全用相对场景根的 `/disk-array/<rel>`。
-- **浏览器单次分配约 2GB、Canvas 面积上限 16384²**——盘阵场景因此由服务端烘焙 JPG（v2：各边 1/2），浏览器只解码 JPG（远低于上限）。
-- 真实大图只在有盘阵的内网机（外网开发机读不到），解码回归用 `.e2e/` 本机资产 + `frontend/fixtures/` 入库小图；真机验收项见 docs/status/current-question.md。
+- **浏览器单次分配约 2GB、Canvas 面积上限 16384²**——盘阵场景因此由服务端烘焙 JPG（v3：各边 ÷2…÷32，默认 ÷4），浏览器只解码 JPG（远低于上限）。
+- 真实大图只在有盘阵的内网机（外网开发机读不到），解码回归用 `.e2e/` 本机资产 + `frontend/fixtures/` 入库小图；真机验收项见 `docs/status/real-machine-acceptance.md`。
 
 ## 七、Slurm 接入（SR 作业提交链路）
 
@@ -454,7 +559,7 @@ ls -l code_0817_prod.py                                          # ✓= 生产�
 ```
 
 > ⚠️ `verify_sr_run.py` 的仓库副本 **2026-09-15 起为 17164 B / `5fa627d8…`**（退出码文件的
-> 编码锁定，见 `docs/status/current-question.md` §4）。机上若还是 09-11 拷的 16419 B 旧版，
+> 编码锁定，见 `docs/status/timeline-archive.md`）。机上若还是 09-11 拷的 16419 B 旧版，
 > A/B/C 不受影响，**走 D 之前重新拷一次**。
 
 > **为什么可以不顶替**：批脚本里那两个程序名是 `SR_SR_SCRIPT` / `SR_VERIFY_SCRIPT` 两个 env
@@ -583,6 +688,13 @@ os.rename(path + tiftype, path + "_NOSR" + tiftype)   # 首跑时该文件不存
   非空 `Suffix`，源图不改名也不删除。上游生产管线用空 `Suffix` 就地写时才会把原图改名为
   `*_NOSR.tif`（契约 §2.4 第 1 条），平台不走那条路。所以阶段 6 之后关掉沙箱是正常的，
   只是那一刻起，前端填什么路径就写什么路径。
+- **与产物预览急烤的关系（2026-09-20）**：作业转 COMPLETED 后，后端会顺手把**产物那一份**
+  预览烤掉（见 `deploy/sr-api.service` 里 `SR_PRODUCT_PREVIEW_DIV` 那段）。沙箱**实际生效**时
+  产物落在私有副本上、盘阵里根本没有产物，这项会自动跳过并在队列行上写
+  `skipped: sandbox`（如实跳过，不是故障，也不会往临时盘撒文件）。
+  **判据是沙箱有没有真生效，不是这个 env 在不在**：`run_sr.sandbox_scene_paths` 在
+  `SR_EXECUTOR=local`（§7.6 那条最小原型路线）时恒返回 `None` —— 所以真机上现在配着
+  `SR_SANDBOX_ROOT` 但跑 local，**急烤照烤**，别照「配了沙箱就不会烤」去理解。
 
 ### 7.6 最小原型：不走 Slurm，本机 conda 直接跑（`SR_EXECUTOR=local`）
 

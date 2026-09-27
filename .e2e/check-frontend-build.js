@@ -4,6 +4,7 @@
 //   2. 路由 /viewer 可达（SPA fallback 生效）
 //   3. 上传 fixture → probe→chunked→拉伸→canvas 真实渲染（取像素断言非全黑且有渐变）
 //   4. 切换拉伸模式 → 重绘（像素变化）
+//   5. 顶栏品牌区：平台名 + logo 预留区（部署态没有 logo 文件，退占位小方块）、只有名字变大
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -11,6 +12,11 @@ const { launchPage } = require('./launchBrowser');
 
 const DIST = path.resolve(__dirname, '..', 'frontend', 'dist');
 const FIXTURE = path.resolve(__dirname, '..', 'frontend', 'fixtures', 'u16_whitezero.tif');
+// 故意写死字面量（不从 src/lib/brand.ts import）：测试要独立地钉住这个名字，
+// 跟着常量走的话，常量改错就一起错了。
+const APP_NAME = '长光卫星-修图智能体平台';
+// 顶栏 logo 的高度带（style.css 的 .brand-mark）—— 预留区的判据
+const MARK_H = 28;
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -67,9 +73,47 @@ async function main() {
     await page.goto(base + '/', { waitUntil: 'networkidle0', timeout: 30000 });
     await page.waitForSelector('.app-nav', { timeout: 10000 });
     const title = await page.title();
-    assert(title.includes('sr_agent_platform'), `页面标题=${title}`);
-    const brand = await page.$eval('.brand', (el) => el.textContent);
-    assert(brand.includes('sr_agent_platform'), `brand=${brand}`);
+    assert(title.includes(APP_NAME), `页面标题=${title}`);
+    const brand = await page.$eval('.brand-name', (el) => el.textContent.trim());
+    assert(brand === APP_NAME, `平台名=${brand}`);
+
+    // 5. 品牌区：logo 素材不在仓库里（正式素材在内网机上），所以**部署态就只有「没有 logo」这一种**。
+    // 等它定形再断言：img 拿到的东西解不出来时由 @error 自摘（本文件的静态服务对不存在的文件
+    // 回退 index.html 而非 404，img 一样报 error，与 nginx 的 404 同路），摘掉后才轮到占位小方块。
+    await page.waitForFunction(
+      () => {
+        const el = document.querySelector('.brand-mark');
+        if (!el) return false;
+        const img = el.querySelector('img');
+        // 无 img（已摘掉）或 img 已解码出像素（真的放了 logo）才算定形 —— 都排除掉「正在加载」
+        return !img || img.naturalWidth > 0;
+      },
+      { timeout: 5000 },
+    );
+    const mark = await page.$eval('.brand-mark', (el) => {
+      const r = el.getBoundingClientRect();
+      return {
+        w: r.width,
+        h: r.height,
+        imgs: el.querySelectorAll('img').length,
+        dot: getComputedStyle(el, '::before').width,
+      };
+    });
+    assert(mark.imgs === 0, `没有 logo 文件时不留破图（img=${mark.imgs}）`);
+    assert(mark.dot === '10px', `占位小方块顶上（::before width=${mark.dot}）`);
+    assert(mark.w === MARK_H && mark.h === MARK_H,
+      `logo 预留区占住 ${MARK_H}×${MARK_H}（实测 ${mark.w}×${mark.h}）— 放了 logo 也不挤名字`);
+
+    // 平台名比四个导航项大一号，且**只有**名字变
+    const font = await page.evaluate(() => ({
+      brand: getComputedStyle(document.querySelector('.brand-name')).fontSize,
+      nav: Array.from(document.querySelectorAll('.nav-links a'))
+        .map((a) => getComputedStyle(a).fontSize),
+    }));
+    assert(font.brand === '18px', `平台名字号=${font.brand}`);
+    assert(font.nav.length === 4 && font.nav.every((s) => s === '14px'),
+      `四个导航项仍是 14px（${font.nav.join('/')}）`);
+
     assert(externalRequests.length === 0, `无外部网络请求 (external=${JSON.stringify(externalRequests)})`);
 
     // 2. 路由：/viewer 直接可达（SPA fallback）
@@ -77,7 +121,9 @@ async function main() {
     await page.goto(base + '/viewer', { waitUntil: 'networkidle0', timeout: 30000 });
     await page.waitForSelector('button', { timeout: 10000 });
     const btnText = await page.$eval('button', (el) => el.textContent);
-    assert(btnText.includes('选择 TIF'), `查看器按钮存在 (${btnText})`);
+    // 只认「有选择入口」这件事：这个按钮从 ba8e61d 起叫「选择影像…」（含拖入），
+    // 本文件是 Phase 2 的验收脚本，没人随改动重跑，于是钉着更早的「选择 TIF」空跑至今。
+    assert(btnText.includes('选择'), `查看器按钮存在 (${btnText})`);
 
     // 3. 上传 fixture → 解码 → canvas 渲染
     console.log('--- 3. 解码渲染 ---');

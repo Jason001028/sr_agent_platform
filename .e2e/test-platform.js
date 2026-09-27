@@ -7,7 +7,9 @@
 // 覆盖 api-contract.md §5.3：
 //   A. 聊天：/chat 新建会话 → 发一条 → SSE 全事件归并 → 工具行 + 最终回复渲染；
 //      切走再回来 → GET messages 恢复历史（刷新可恢复）。
-//   B. 队列：/queue 手填 lq_path 提交 → 假调度器推进 → SSE job_update 推到 COMPLETED。
+//   B. 队列：/queue 手填 lq_path 提交 → 假调度器推进 → SSE job_update 推到 COMPLETED
+//      → 同一帧在右下角弹出「超分完成」提醒（2026-09-22 增：真 SSE → 提醒 这条链
+//      只有这里跑得通）。
 //   C. 掩码→SR：/viewer 打开盘阵场景（合成 JPG + 画 ROI）→ 点「提交 SR」→
 //      POST /api/masks 落盘 → 自动跳 /queue 表单预填（不自动提交）→ 用户确认提交。
 //   D. 布局：三页同宽 —— 1600 视口下实测正文盒宽（不是只比 max-width 字符串）+
@@ -245,6 +247,26 @@ async function main() {
       const tags = await firstRowTags(page);
       assert(tags[0] === '完成', `提交后假调度器跑完 → 首行徽标「完成」 (${tags.join(',')})`);
 
+      // 同一帧还要在右下角弹一条提醒。这是「真后端 → SSE job_update → jobNotice → 提醒
+      // 栈」**唯一**跑得通的链路回归（test-vue-viewer 的 K 段没有后端，只能拿 pushNotice
+      // 直接塞；两边合起来才覆盖整条）。文案口径一并钉住：标题只报 task_id —— 帧里没有
+      // 产物文件名，第二行取**列表行**的 lq_path 末段 + 倍率，所以它必须与提交时的目录同名。
+      const notice = await waitFor(page, () => {
+        const el = document.querySelector('[data-e2e="job-notice-ok"]');
+        return el ? el.textContent.replace(/\s+/g, ' ').trim() : null;
+      }, 10000, '完成提醒');
+      assert(notice.indexOf('超分完成') === 0 && /#\d+/.test(notice),
+        `完成帧弹出右下角提醒（"${notice.slice(0, 34)}…"）`);
+      assert(notice.indexOf(path.basename(lqPath)) >= 0 && notice.indexOf('×') >= 0,
+        `提醒第二行取列表行的目录名 + 倍率（"${notice}"）`);
+      // 点整条 = 去队列页（已经在这页上，是幂等的）并把这条收掉；顺手把屏面清干净，
+      // 免得后面那些真实点击被右下角这张卡挡住。
+      await page.click('[data-e2e="job-notice-ok"] .jn-body');
+      await sleep(300);
+      assert(await page.evaluate(() => location.pathname) === '/queue'
+        && await page.evaluate(() => !document.querySelector('[data-e2e="job-notice-ok"]')),
+        '点整条提醒：仍在队列页且这条已收掉');
+
       // 行级信息 + 「以这行参数再提交」：耗时列 / 目录下拉候选 / 只填不提交
       const rowInfo = await page.evaluate(() => {
         const tr = document.querySelector('.qp-tbl tbody tr');
@@ -267,12 +289,14 @@ async function main() {
         };
       });
       assert(/^\d+ 秒$/.test(rowInfo.elapsed), `耗时列给出终态耗时（${rowInfo.elapsed}）`);
-      // 终态耗时的真值 = 后端 updated_at − created_at（假调度器下恒 < 60 秒，所以
-      // 只会是「N 秒」，不会走到「N 分 N 秒」分支）。页内那份 updated_at 若停在上
-      // 一次 GET 的快照 —— 提交刚落库时 updated_at == created_at —— 任务一完成耗
-      // 时就掉成「0 秒」，点一下刷新才露出真值。这里直接与接口读数对齐。
+      // 终态耗时的真值 = 后端 finished_at − started_at（本次运行的时长；假调度器下
+      // 恒 < 60 秒，所以只会是「N 秒」，不会走到「N 分 N 秒」分支）。两列都由后端
+      // 在观测到 RUNNING / 终态时钉下并随 SSE 帧下发 —— 页内那份若停在上一次 GET
+      // 的快照（提交刚落库时两列都还是 NULL），任务一完成耗时列就变「—」。这里直接
+      // 与接口读数对齐。**不是** updated_at − created_at：那是行的年龄，同一指纹
+      // 重交复用同一行时会量出几十个小时（2026-09-18 真机）。
       const apiTasks = (await (await fetch(apiBase + '/api/queue')).json()).tasks;
-      const truth = Math.round(apiTasks[0].updated_at - apiTasks[0].created_at) + ' 秒';
+      const truth = Math.round(apiTasks[0].finished_at - apiTasks[0].started_at) + ' 秒';
       assert(rowInfo.elapsed === truth,
         `耗时列 = 接口真值（页内 ${rowInfo.elapsed} / 接口 ${truth}）`);
       assert(rowInfo.ops.indexOf('再提交') >= 0, `每行给出「再提交」（${rowInfo.ops.join('/')}）`);
@@ -281,6 +305,28 @@ async function main() {
         `lq_path 可手改且挂了历史候选 datalist（list=${rowInfo.lqList && rowInfo.lqList.list}）`);
       assert(rowInfo.cands.length === 1 && path.resolve(rowInfo.cands[0]) === path.resolve(lqPath),
         `目录下拉候选 = 队列里出现过的目录（${rowInfo.cands.join(',')}）`);
+
+      // 产物预览急烤：作业转 COMPLETED 之后，后端**从库里派生**出一件待烤的活
+      // （不挂在状态转换上，那个竞态见 api-contract §3.3），队列行随之多两个字段。
+      // 急烤是后台循环（每 SR_QUEUE_POLL_SEC 一轮、每轮至多一件），所以这里等到它
+      // 落定再断 —— 提交完立刻读会读到 `preview_state` 还是 null 的那一刻。
+      const pk = await waitFor(page, async (ab) => {
+        const r = await fetch(ab + '/api/queue');
+        const t = (await r.json()).tasks[0];
+        return t && t.preview_state ? t : null;
+      }, 20000, '急烤落定', apiBase);
+      // 事实（跑出来的，不是猜的）：假调度器只推状态机、**不写任何产物 tif**，
+      // 于是急烤拿到的是「完成但没有产物」—— 记 skipped + product_missing，
+      // **不是 failed**：云限额跳过的作业同样是合法 COMPLETED，运维看到「跳过」
+      // 得能从 note 里立刻分清是哪一种，所以 note 必须列出试过的候选名。
+      // 断到「有两个候选、都按输入名派生」为止，**不钉后缀字面量**：那个后缀来自
+      // SR 团队的配置文件（这里是缺省 `sr`），换台机器/换个包就变，钉死会把环境
+      // 差异报成回归。要钉的是「试过哪些名字都说出来了」这件事。
+      const note = String(pk.preview_note ?? '');
+      assert(pk.preview_state === 'skipped' && note.startsWith('product_missing:')
+        && note.includes(SCENE + '_') && note.split('/').length === 2
+        && note.trim().endsWith('.tiff，都不存在'),
+        `没有产物 → skipped/product_missing 并列出两个候选名 (${note})`);
 
       await clickByText(page, '再提交');
       await waitFor(page, () => {

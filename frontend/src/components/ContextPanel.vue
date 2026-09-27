@@ -2,37 +2,27 @@
 /**
  * ContextPanel.vue — viewer 右侧上下文侧舱（阶段6 v1.0 需求）
  * ------------------------------------------------------------------
- * 可折叠固定右栏（宽 ≤ 左 FileList 的 268，默认收起、展开状态 localStorage 持久化；
+ * 可折叠固定右栏（宽 400 = 左 FileList 的 400，默认收起、展开状态 localStorage 持久化；
  * 掩码绘制模式不自动收起）。顶部 [ROI / 工具]（默认）| [Agent] 两个 tab，子内容分别由
  * RoiToolsTab / AgentChatTab 承载（v-show 常驻，切换 tab 不打断队列 SSE / Agent 会话）。
  * DOM = 两个兄弟根节点（ctx-toggle + ctx-rail），与左侧 [sidebar, side-toggle] 镜像。
+ *
+ * **展开状态 2026-09-20 提升到 store**（原先在组件里）：分屏对比要能自动收起它、退出时
+ * 再恢复用户此前的手动状态。localStorage 的 key 与默认值一字未改（见
+ * stores/viewer.ts 的 readCtxRailOpen），老用户体验不变。
  */
-import { onMounted, ref, watch } from 'vue';
+import { computed, ref } from 'vue';
+import { useViewerStore } from '../stores/viewer';
 import RoiToolsTab from './RoiToolsTab.vue';
 import AgentChatTab from './AgentChatTab.vue';
 
-const OPEN_KEY = 'sr.viewer.ctxRailOpen';   // '1'=展开（默认收起）
-
-function readOpen(): boolean {
-  try {
-    if (typeof localStorage === 'undefined') return false;
-    return localStorage.getItem(OPEN_KEY) === '1';
-  } catch {
-    return false;
-  }
-}
-
-const collapsed = ref(!readOpen());
+const store = useViewerStore();
 const tab = ref<'roi' | 'agent'>('roi');
 
-onMounted(() => {
-  // 路由离开 /viewer 时组件卸载即自然收起位；展开状态跨页持久化由 watch 负责
-});
-
-watch(collapsed, (v) => {
-  try {
-    if (typeof localStorage !== 'undefined') localStorage.setItem(OPEN_KEY, v ? '0' : '1');
-  } catch { /* 隐私模式等写入失败忽略 */ }
+/** store 里存的是「展开」，组件里用「收起」更顺手（CSS 也是 .collapsed）。 */
+const collapsed = computed({
+  get: () => !store.ctxRailOpen,
+  set: (v: boolean) => store.setCtxRailOpen(!v),
 });
 
 const toggleGlyph = () => (collapsed.value ? '«' : '»');
@@ -69,7 +59,10 @@ const toggleTitle = () => (collapsed.value ? '展开上下文侧舱' : '收起�
 </template>
 
 <style scoped>
-/* 右栏 = 左 [sidebar(268) + toggle(26)] 的镜像：同宽、同 chrome 底、同 toggle 样式 */
+/* 右栏 = 左 [sidebar(400) + toggle(26)] 的同族（同 chrome 底、同 toggle 样式），宽度也与
+   左栏对齐：置顶的「待修复清单」里要排得下三段式进度条 + 驳回/非模糊通过两个按钮一行，
+   再窄就得换行。两栏同时展开时 chrome 占 852px，1366 宽屏上画布只剩约 510px ——
+   两边都能收起（各自栏边的 « / »），窄屏上收掉一边即可。 */
 .ctx-toggle {
   flex: none;
   width: 26px;
@@ -91,7 +84,7 @@ const toggleTitle = () => (collapsed.value ? '展开上下文侧舱' : '收起�
 }
 
 .ctx-rail {
-  width: 268px;
+  width: 400px;
   flex: none;
   background: var(--chrome);
   border-left: 1px solid var(--line);

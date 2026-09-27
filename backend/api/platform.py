@@ -15,6 +15,11 @@
   sr_tasks.status 列语义升级为展示状态（幂等层只读 job_id，无回归）。
   GET /api/queue 对每个 job_id 非空任务当场校准一次（假调度器下每次可见推进），
   变化写回 DB + 广播；lifespan 轮询（SR_QUEUE_POLL_SEC）同理驱动广播。
+  校准只写**真的变了**的状态：比较基准是内存缓存，缺失时回落到库里存的状态，
+  所以重启后的第一轮不会把整表已终态的老行重新写一遍。
+* 队列「耗时」= 本次运行的时间窗（sr_tasks.started_at → finished_at，见
+  _task_state 的两个锚点），不是行的年龄 —— 一行 = 一个指纹，重复提交复用同一行，
+  行的 created_at 停在第一次提交（2026-09-18 修的正是把它当耗时用）。
 * 广播 = 进程内 set[subscriber]，每订阅者持 (注册时运行 loop, asyncio.Queue)；
   `_broadcast` 从任意线程用 call_soon_threadsafe 入队，断开的订阅者被丢弃。
 
@@ -26,9 +31,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import stat
+import tempfile
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -105,6 +114,10 @@ def _broadcast(state, event: dict) -> None:
 #: not be answered with a bare "cancelled: false" (see cancel_queue).
 _TERMINAL_STATES = ("COMPLETED", "FAILED", "CANCELLED")
 
+#: 会写 finished_at 的显示态。UNKNOWN 不算：调度器一时没有记录、判定文件还没落盘
+#: 都可能是**假的**「已结束」，之后还会翻成 COMPLETED/FAILED（§一 "C 方案"）。
+_RUN_ENDED_STATES = ("COMPLETED", "FAILED")
+
 
 def _queue_state(st: dict) -> str:
     """Map a slurm.job_status dict onto the queue display state machine (§3.3).
@@ -121,33 +134,50 @@ def _queue_state(st: dict) -> str:
     return "COMPLETED" if raw == "COMPLETED" else "FAILED"
 
 
-def _task_state(state, task: dict) -> tuple[str, bool]:
-    """Calibrate one sr_task row against the scheduler; returns (state, changed).
+def _task_state(state, task: dict) -> tuple[str, bool, dict | None]:
+    """Calibrate one sr_task row against the scheduler.
+
+    Returns (state, changed, fresh_row) — `fresh_row` 是这次**写回后**从库里读回的
+    那一行（没写就是 None）。调用方必须拿它去答：传进来的 `task` 是写之前的快照，
+    用它算/回显时间戳，第一次 GET 会给出写之前的值，与随后的 SSE 帧、下一次 GET
+    都对不上。
 
     Caches the queue display state in state.task_cache and writes it back to
     sr_tasks.status on change, broadcasting a job_update frame. A task with no
     job_id (interrupted submit) has no scheduler record — surface its stored
     status verbatim and never invent a terminal state for it.
+
+    比较基准是内存缓存，缓存缺失（sr-api 刚重启）回落到**库里存的状态**：不回落的
+    话重启后每一行都被判成「状态变了」，于是每个已跑完的老行都被写回一次、updated_at
+    被抬到「现在」，耗时列集体变成行龄（2026-09-18 实测：30 小时前跑完的行显示
+    「30 时 00 分」）。回落之后，重启只补发真正变了的那些行。
     """
     task_id = task["task_id"]
     cache = state.task_cache
     if task["job_id"] is None:
-        return (task.get("status") or "UNKNOWN").upper(), False
-    prev = cache.get(task_id)
+        return (task.get("status") or "UNKNOWN").upper(), False, None
+    prev = cache.get(task_id) or ((task.get("status") or "").upper() or None)
     try:
         # Terminal states come from the job's own verdict file, which lives in
         # the task's <DatarootLQ>/Debug/ — hence query_job_status(task=…)
         # rather than a bare slurm.job_status (§一 "C 方案").
         st = run_sr_svc.query_job_status(task["job_id"], task=task)
     except Exception:  # noqa: BLE001 — scheduler hiccup → keep last known
-        return prev or "UNKNOWN", False
+        return prev or "UNKNOWN", False, None
     state_name = _queue_state(st)
     if state_name == prev:
-        return state_name, False
+        return state_name, False, None
     cache[task_id] = state_name
-    updated_at = None
+    fresh = None
     try:
-        updated_at = state.store.set_sr_task_state(task_id, state_name)
+        # 本次运行的时间窗就钉在这两个转换点上：首次看到 RUNNING = 排队结束、真开始
+        # 跑；看到终态 = 跑完。`prev != "RUNNING"` 让重排队（Slurm requeue）只以
+        # 后一次 RUNNING 为起点，而重启后 prev 来自库里存的状态 —— 库已经是 RUNNING
+        # 的（重启前就观测到过）不会被重新计时。
+        fresh = state.store.set_sr_task_state(
+            task_id, state_name,
+            mark_started=state_name == "RUNNING" and prev != "RUNNING",
+            mark_finished=state_name in _RUN_ENDED_STATES)
     except Exception:  # noqa: BLE001 — DB write must not break the list
         pass
     frame = {"type": "job_update", "task_id": task_id,
@@ -157,14 +187,15 @@ def _task_state(state, task: dict) -> tuple[str, bool]:
              "error": None
              if state_name not in ("FAILED", "UNKNOWN")
              else f"state={state_name}"}
-    # 终态行的耗时 = updated_at − created_at。只推 state 的话，客户端手上那份
-    # updated_at 还停在上一次 GET 的快照（提交刚落库时 updated_at == created_at），
-    # 运行中靠本地现算看不出问题，一进终态就退化成「0 秒」。写库成功才带上这个值：
-    # 写失败时 DB 里没变，凭本地时钟发一个只会让界面与库对不上。
-    if updated_at is not None:
-        frame["updated_at"] = updated_at
+    # 帧必须带上这次写库的时间戳（updated_at + 耗时用的 started_at/finished_at）。
+    # 只推 state 的话，客户端手上的还是上一次 GET 的快照，耗时列要么退化成「0 秒」
+    # （2026-09-17 真机），要么停在上一次运行的数字上。写库成功才带：写失败时库里
+    # 没变，凭本地时钟发一个只会让界面与库对不上。
+    if fresh is not None:
+        for col in ("updated_at", "started_at", "finished_at"):
+            frame[col] = fresh.get(col)
     _broadcast(state, frame)
-    return state_name, True
+    return state_name, True, fresh
 
 
 def _run_dataroot(task: dict) -> str | None:
@@ -187,8 +218,10 @@ def _run_dataroot(task: dict) -> str | None:
 
 def _task_view(state, task: dict) -> dict:
     """Project an sr_task row onto the /api/queue response shape (params subset)."""
+    state_name, _, fresh = _task_state(state, task)
+    if fresh is not None:
+        task = fresh          # 刚写回的行：传进来那份是写之前的快照
     p = task.get("params") or {}
-    state_name, _ = _task_state(state, task)
     return {
         "task_id": task["task_id"], "fingerprint": task["fingerprint"],
         "session_id": task["session_id"], "job_id": task["job_id"],
@@ -207,6 +240,15 @@ def _task_view(state, task: dict) -> dict:
         "config_xml": task["config_xml"], "batch_script": task["batch_script"],
         "log_dir": task["log_dir"],
         "created_at": task["created_at"], "updated_at": task["updated_at"],
+        # 本次运行的时间窗（首次观测到 RUNNING → 终态落库）。NULL = 没观测到开始
+        # （整段运行期间 sr-api 不在场，或这一行是加这两列之前建的）—— 客户端显示
+        # 「—」，不拿 created_at 顶替：那个值是**行**的生日，复用行会退化成行龄。
+        "started_at": task["started_at"], "finished_at": task["finished_at"],
+        # 产物预览的服务端急烤进度（api-contract §4.x）。null = 没烤过；
+        # running / done / skipped / failed 见 `preview_note` 里那句人话。
+        # 与 `state` 无关：作业跑完了、预览也可能因为沙箱/产物缺失/目录不可写而没烤。
+        "preview_state": task.get("preview_state"),
+        "preview_note": task.get("preview_note"),
     }
 
 
@@ -588,7 +630,7 @@ async def submit_queue(request: Request):
         state.store.set_sr_task_state(task["task_id"], "SUBMITTING")
         state.task_cache[task["task_id"]] = "SUBMITTING"
     else:                                       # RESUMED_ACTIVE / RESUMED_COMPLETED
-        state_name, _ = _task_state(state, task)
+        state_name, *_ = _task_state(state, task)
     out = {"task_id": task["task_id"], "job_id": data["job_id"],
            "status": data.get("status"), "state": state_name,
            "config_xml": data.get("config_xml"), "log_dir": data.get("log_dir")}
@@ -625,7 +667,7 @@ def cancel_queue(task_id: int, request: Request):
         cancelled = local_exec.cancel(task["job_id"])
     else:
         cancelled = slurm.cancel(task["job_id"])
-    state_name, _ = _task_state(state, task)
+    state_name, *_ = _task_state(state, task)
     if not cancelled and state_name not in _TERMINAL_STATES:
         # 200 + cancelled=false 会被当成"已经停下了"。走到这里说明本进程没有该 job
         # 的记录（sr-api 重启过），而子进程可能还在就地写 lq_path —— 操作员据此重新
@@ -720,3 +762,130 @@ async def bake_mask(request: Request):
              "cloud_limit": 80, "delete_ori": False, "grid_align": True}
     return {"mask_path": mask_path, "mask_txt": txt_path.as_posix(),
             "lq_path": lq_path, "task_draft": draft}
+
+
+# --------------------------------------------------------------------------
+# 3.7 《待修复清单》写回
+# --------------------------------------------------------------------------
+#: 允许写回的后缀。本端点的语义是**覆盖** —— 不设后缀门就等于「盘阵上任何存在的
+#: 文件都能被它改写」，一颗写错的 bug 足以盖掉 .tif 或 meta.xml。
+_QC_SUFFIXES = (".txt",)
+#: mtime 护栏容差（秒）：网络盘与 FAT 的时间戳粒度能到两秒。
+_QC_MTIME_TOL = 2.0
+
+
+def _fmt_mtime(ts) -> str:
+    """护栏拒绝时给用户看的时间（拿不到就退化成原值）。"""
+    try:
+        return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError, OSError, OverflowError):
+        return str(ts)
+
+
+def _write_atomic(dst: Path, data: bytes) -> None:
+    """原子替换写：临时文件落在**同目录**（同文件系统才 replace 得动）→ 把原文件的
+    权限位搬过来 → os.replace。
+
+    不直接 `open(dst, "wb")` 就地写：这份 txt 是操作员一下午的标记，写到一半失败
+    （磁盘满、进程被杀）会留下一个被截断的清单，那比写不进去严重得多。
+    照 services/preview_jpg.py 那套（后端唯一的原子写先例）。
+
+    ⚠️ 权限位能保留，**属主不能** —— 替换后文件归跑 API 的 nginx，nginx 无权 chown
+    回去。质检那边还要直接改这份 txt 的话，清单所在目录得给组写权限（见 deploy/README.md）。
+    """
+    fd, tmp = tempfile.mkstemp(dir=str(dst.parent),
+                               prefix=dst.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        # mkstemp 出来的是 0600，直接 replace 会把原文件的权限一起换掉
+        os.chmod(tmp, stat.S_IMODE(os.stat(str(dst)).st_mode))
+        os.replace(tmp, str(dst))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+@router.post("/api/qclist/write")
+async def write_qclist(request: Request):
+    """把《待修复清单》整份原地写回盘阵（契约见 docs/planning/api-contract.md §3.7）。
+
+    为什么不让浏览器写：File System Access API 在规范里是 `[SecureContext]` 标的，
+    Chrome 只在 https / localhost 的页面上暴露它，而真机是 nginx `listen 80` 的
+    `http://内网IP` —— 那条路在真机上永远走不通。后端本来就以 nginx 身份写盘阵
+    （掩码、SR 产物、烘焙 JPG），改走它既能在 http 下工作，也顺带把 GBK 清单写回
+    GBK 做对了（浏览器编不出 GBK，旧前端只能降级成 UTF-8+BOM）。
+
+    请求侧被拒一律 400（detail 说清是哪一种），只有写盘本身的 OSError 是 422 ——
+    前端只把 detail 原样显示，分类没有消费者，不照搬 §3.5 那套 400/403/404。
+    """
+    body = await _json_body(request)
+
+    raw_path = body.get("path")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise HTTPException(status_code=400, detail="path 必填")
+    try:
+        target = ensure_allowed(to_posix_array_path(raw_path), kind="file")
+    except PathDeniedError as e:
+        raise HTTPException(status_code=400,
+                            detail=f"写回目标不可用：{e}") from e
+    if target.suffix.lower() not in _QC_SUFFIXES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"只能写回 {'、'.join(_QC_SUFFIXES)} 文件：{target}")
+
+    text = body.get("text")
+    if not isinstance(text, str):
+        raise HTTPException(status_code=400, detail="text 必填且为字符串")
+    enc = body.get("encoding", "utf-8")
+    if enc not in ("utf-8", "gbk"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"encoding 只支持 utf-8 / gbk（收到 {enc!r}）")
+
+    # —— 护栏：清单在**导入之后**被别人改过就不写 ——
+    # 质检那边一天里会更新好几版，照写会把他们的新行整段盖掉。前端传的是导入那个
+    # File 的 lastModified；不带这个字段（curl / e2e）护栏自动跳过。
+    mtime = body.get("mtime")
+    if mtime is not None:
+        if isinstance(mtime, bool) or not isinstance(mtime, (int, float)):
+            raise HTTPException(status_code=400, detail="mtime 须为数字（秒）")
+        try:
+            disk_mtime = target.stat().st_mtime
+        except OSError as e:
+            raise HTTPException(status_code=422,
+                                detail=f"读目标文件状态失败：{e}") from e
+        if abs(disk_mtime - float(mtime)) > _QC_MTIME_TOL:
+            raise HTTPException(
+                status_code=400,
+                detail=f"这份清单在导入之后被改过（盘阵上 {_fmt_mtime(disk_mtime)}，"
+                       f"你导入的是 {_fmt_mtime(mtime)}）—— 可能质检那边又更新了一版，"
+                       f"重新导入再同步")
+
+    # —— 写前查权限 ——
+    # 原子替换**只需要目录可写**（文件自己的 mode 拦不住 os.replace），所以两个都得
+    # 显式查一遍；不查的话用户拿到的是 EACCES 原文，看不出是目录还是文件的问题。
+    if not os.access(str(target.parent), os.W_OK):
+        raise HTTPException(status_code=400,
+                            detail=f"目录不可写：{target.parent}")
+    if not os.access(str(target), os.W_OK):
+        raise HTTPException(status_code=400, detail=f"文件不可写：{target}")
+
+    try:
+        data = text.encode(enc)
+    except UnicodeEncodeError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"正文里有 {enc} 编不出来的字符（第 {e.start} 个字符起）—— "
+                   f"要按 {enc} 写回就得先把那些字改掉") from e
+
+    try:
+        _write_atomic(target, data)
+    except OSError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"写盘失败：{type(e).__name__}: {e} —— "
+                   f"多为目录不可写或文件被占用") from e
+
+    return {"path": target.as_posix(), "bytes": len(data), "encoding": enc}

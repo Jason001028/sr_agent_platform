@@ -18,9 +18,9 @@
 * SR_ALLOWED_ROOTS 允许访问的盘阵前缀，`;` 分隔，默认 `/DiskArray`。
 * SR_SCENE_PATH_TEMPLATE 反推模板（含盘符，便于沿用用户侧写法）。可用占位符
                    `{y} {m} {d} {name} {sat} {mid}`；**配了只按它一条走**，未配
-                   则按默认的生产树模板 + 旧扁平形态两条候选。后两个占位符由
-                   生产命名规则从文件名拆出（见 docs/sr_code/
-                   production-scene-naming.md），拆不出就跳过该条。
+                   则按默认的生产树模板。后两个占位符由生产命名规则从文件名拆出
+                   （见 docs/sr_code/production-scene-naming.md），拆不出就跳过
+                   该条。**日期给两天**（成像日与次日），见 `infer_scene_paths`。
 * 白名单是**词法**策略，不做 `is_dir()` 检查（路径可能还没 stat，开发机也
   没有 /DiskArray）；与 `api/paths.py::scenes_root()` 的"必须存在"不同。
 """
@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import date, timedelta
 from pathlib import Path
 
 _DEFAULT_DRIVE_MAP = "W:=/DiskArray"
@@ -206,10 +207,9 @@ def normalize_submit_path(raw: str | Path) -> str:
 _DEFAULT_SCENE_TEMPLATE = (
     "W:\\GSHC2IMPS\\PRODUCT\\{y}\\{m}\\{d}\\{sat}\\{mid}\\{name}")
 
-#: 旧扁平形态。默认（未配 SR_SCENE_PATH_TEMPLATE）时作为**第二条候选**保留：
-#: 非生产树部署（平铺的盘阵根、e2e 假拓扑）仍然在这一条上命中。生产环境里它
-#: 必然落空，只会让 404 的候选清单多一行，代价是一次 stat。
-_LEGACY_SCENE_TEMPLATE = "W:\\GSHC2IMPS\\PRODUCT\\{y}\\{m}\\{d}\\{name}"
+#: 日期偏移：名字里的日期只当**下界**用 —— 盘阵按生产日建目录，深夜成像的景记在
+#: 第二天，所以每个模板按「成像日、次日」各渲染一条（`0, 1` 天）。
+_DAY_OFFSETS = (0, 1)
 
 #: 文件名里可解析出的日期：优先 14 位（YYYYMMDDHHMMSS），其次 8 位。
 _TS_RE = re.compile(r"(?<!\d)(\d{14}|\d{8})(?!\d)")
@@ -235,25 +235,101 @@ def scene_path_template() -> str:
     return os.environ.get("SR_SCENE_PATH_TEMPLATE") or _DEFAULT_SCENE_TEMPLATE
 
 
+#: 生产名各段之间的分隔符。真机是下划线（`…_102_0025_001_L1_PAN`），但用户
+#: 口径里也有空格形态（`JXGF07D03 PMS 20260622052600 … MSS`）—— 两种都认。
+_FIELD_SEP_RE = re.compile(r"[_\s]+")
+
+
 def scene_name_layers(name: str) -> tuple[str, str] | None:
     """按生产命名规则拆出「卫星型号」与「段级产品目录名」；不合规则返回 None。
 
-    分段（`_` 分隔，`JXGF07D03_PMS_20260622052600_200516571_101_0006_001_L1_MSS`）：
+    分段（`JXGF07D03_PMS_20260622052600_200516571_101_0006_001_L1_MSS`）：
     卫星型号 · 传感器 · 成像时刻(14 位) · 任务计划号 · 段号(3 位) · 景号(4 位) ·
     生产次数 · 级别 · 产品。
 
     卫星型号就是第 0 段；段级目录名 = **去掉景号那一段**（真机实测：景级目录
-    `…_102_0025_001_L1_PAN` 的父目录是 `…_102_001_L1_PAN`）。
+    `…_102_0025_001_L1_PAN` 的父目录是 `…_102_001_L1_PAN`），并**沿用原文的
+    分隔符**重建 —— 空格形态的名字拼出带下划线的段级目录必然 stat 不到。
     """
-    tokens = str(name).strip().split("_")
-    if len(tokens) <= _SCENE_IDX:
+    raw = str(name).strip()
+    tokens = _FIELD_SEP_RE.split(raw)
+    # 至少 `_SCENE_IDX + 2` 段：段号那段（tokens[_SEG_IDX]）与景号那段
+    # （tokens[_SCENE_IDX]）都要在**名字里**，而且下面还要读分隔符 seps[_SCENE_IDX]
+    # —— 分隔符比段少一个，所以门槛比「够读到景号」再高一段。少了就判不合规则
+    # （调用方按 400 处理）；早先只挡到 `_SCENE_IDX`，六段的名字会走进
+    # `seps[_SCENE_IDX]` 越界，一个本该 400 的输入变成 500。
+    if len(tokens) <= _SCENE_IDX + 1:
+        return None
+    seps = _FIELD_SEP_RE.findall(raw)
+    if len(seps) != len(tokens) - 1:         # 首尾有分隔符：形态不整，不猜
         return None
     seg, scene = tokens[_SEG_IDX], tokens[_SCENE_IDX]
     if not (len(seg) == 3 and seg.isdigit()
             and len(scene) == 4 and scene.isdigit()):
         return None
-    mid = "_".join(tokens[:_SCENE_IDX] + tokens[_SCENE_IDX + 1:])
+    sep = seps[_SCENE_IDX] if len(set(seps)) == 1 else "_"
+    mid = sep.join(tokens[:_SCENE_IDX] + tokens[_SCENE_IDX + 1:])
     return tokens[0], mid
+
+
+#: 日期目录的三段形态 `<年>/<月>/<日>`（生产树的前三层）。
+_YEAR_SEG_RE = re.compile(r"(?:19|20|21)\d{2}")
+_MONTH_SEG_RE = re.compile(r"0[1-9]|1[0-2]")
+_MDAY_SEG_RE = re.compile(r"0[1-9]|[12]\d|3[01]")
+
+
+def _segments(path: str | Path) -> list[str]:
+    return [seg for seg in Path(str(path)).as_posix().split("/") if seg]
+
+
+def _rightmost_day_index(parts: list[str]) -> int | None:
+    """`<年>/<月>/<日>` 那一段里**最靠右**的起始下标；没有返回 None。"""
+    for i in range(len(parts) - 3, -1, -1):
+        if (_YEAR_SEG_RE.fullmatch(parts[i])
+                and _MONTH_SEG_RE.fullmatch(parts[i + 1])
+                and _MDAY_SEG_RE.fullmatch(parts[i + 2])):
+            return i
+    return None
+
+
+def production_tree_depth(path: str | Path) -> int | None:
+    """目录落在日期目录之下第几层：日期目录 0、卫星型号 1、段级 2、景级 3；认不出 None。
+
+    **纯词法**（只看路径末尾有没有 `<年>/<月>/<日>` 这一段、它后面还剩几段），
+    不 stat 任何东西 —— 它服务的是「404 时告诉用户粘到了哪一层」，不是准入判定。
+    旧扁平形态（`<年>/<月>/<日>/<生产编号>`）会得到 1，与六层树的卫星型号层同值；
+    调用方要用 `flat_scene_layout` 区分这两种拓扑，再定措辞。
+    """
+    parts = _segments(path)
+    i = _rightmost_day_index(parts)
+    return None if i is None else len(parts) - (i + 3)
+
+
+def flat_scene_layout(path: str | Path) -> bool:
+    """路径是不是**旧扁平形态**：日期目录紧接着的那个目录名就是生产名。
+
+    六层生产树里日期目录下面那一段是**卫星型号**（`JL1KF02B03`：不含 14 位成像
+    时刻），扁平形态（`<年>/<月>/<日>/<生产名>`，平铺部署与 e2e 假拓扑）里就是
+    场景目录本身。判它只为一件事：同一段路径在两种拓扑里含义不同 —— 扁平形态下
+    再深一层是场景目录**内部**，生产树下才是段级层。纯词法，不 stat。
+    """
+    parts = _segments(path)
+    i = _rightmost_day_index(parts)
+    return i is not None and i + 3 < len(parts) and looks_like_scene_name(parts[i + 3])
+
+
+def looks_like_scene_name(name: str) -> bool:
+    """名字像不像一个**完整生产名**（即 `<名>_meta.xml` 的前缀）。
+
+    判据只有一条：名字里认不认得出 14/8 位成像时刻。生产名至少是
+    `卫星型号_传感器_<14 位北京时间>_任务计划号_…_产品`，被截掉一段的名字
+    （日期目录的 `18`、卫星型号层的 `JXGF07D03`、随手建的 `scenes`）都拿不出它。
+
+    **只决定诊断措辞，不参与「是不是场景目录」的判定** —— 判定始终是
+    `<目录名>_meta.xml` 在不在（与 SR 的 `osp.basename(lq_path) + "_meta.xml"`
+    同一口径），非生产树部署里存在短名场景目录。
+    """
+    return parse_scene_date(name) is not None
 
 
 def parse_scene_date(name: str) -> str | None:
@@ -282,8 +358,12 @@ def infer_scene_paths(name: str, iso_date: str) -> list[str]:
 
     候选来源：
     * 配了 ``SR_SCENE_PATH_TEMPLATE`` → **只按它一条**渲染；
-    * 未配 → 生产树模板（``{sat}/{mid}`` 两层）在前、旧扁平形态兜底在后，
-      共两条。
+    * 未配 → 生产树模板（``{sat}/{mid}`` 两层）。
+
+    每个模板**渲染两条**：成像日与次日（``_DAY_OFFSETS``）。名字里的 14 位是
+    **成像**时刻，而盘阵按**生产日**建目录 —— 深夜成像的景落进第二天，
+    `…_20260917124710_…` 常躺在 ``…/09/18/…``，只按名字里的日子拼必然找不到。
+    模板若不含日期占位符，两天渲染出同一条，去重后仍只有一条。
 
     名字不符合生产命名规则（拆不出卫星型号/段级目录名）时跳过用到
     ``{sat}``/``{mid}`` 的模板 —— **不拿空串硬拼一条注定不存在的路径**；
@@ -302,21 +382,28 @@ def infer_scene_paths(name: str, iso_date: str) -> list[str]:
     if not (len(y) == 4 and len(mo) == 2 and len(d) == 2 and
             y.isdigit() and mo.isdigit() and d.isdigit()):
         raise PathDeniedError(f"日期须为 YYYY-MM-DD：{iso_date!r}")
+    try:
+        first = date(int(y), int(mo), int(d))
+    except ValueError as e:                  # 形如 2026-09-31：位数对、日子不存在
+        raise PathDeniedError(f"日期须为 YYYY-MM-DD：{iso_date!r}") from e
 
     layers = scene_name_layers(stem)
     sat, mid = layers if layers else ("", "")
-    fields = {"y": y, "m": mo, "d": d, "name": stem, "sat": sat, "mid": mid}
     templates = ([scene_path_template()] if os.environ.get("SR_SCENE_PATH_TEMPLATE")
-                 else [_DEFAULT_SCENE_TEMPLATE, _LEGACY_SCENE_TEMPLATE])
+                 else [_DEFAULT_SCENE_TEMPLATE])
     out: list[str] = []
     for tpl in templates:
         if layers is None and ("{sat}" in tpl or "{mid}" in tpl):
             continue
-        try:
-            rendered = tpl.format(**fields)
-        except (KeyError, IndexError, ValueError) as e:
-            raise PathDeniedError(f"反推模板无法渲染（{tpl}）：{e}") from e
-        posix = to_posix_array_path(rendered)
-        if posix not in out:
-            out.append(posix)
+        for offset in _DAY_OFFSETS:
+            day = first + timedelta(days=offset)
+            fields = {"y": f"{day.year:04d}", "m": f"{day.month:02d}",
+                      "d": f"{day.day:02d}", "name": stem, "sat": sat, "mid": mid}
+            try:
+                rendered = tpl.format(**fields)
+            except (KeyError, IndexError, ValueError) as e:
+                raise PathDeniedError(f"反推模板无法渲染（{tpl}）：{e}") from e
+            posix = to_posix_array_path(rendered)
+            if posix not in out:
+                out.append(posix)
     return out

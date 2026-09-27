@@ -10,9 +10,11 @@ import numpy as np
 import tifffile
 from PIL import Image
 
-from backend.services.preview_jpg import (PreviewError, build_preview_pixels,
+from backend.services.preview_jpg import (PREVIEW_JPG_QUALITY, PreviewError,
+                                          build_preview_pixels, cache_hit,
                                           ensure_preview_jpg, probe_tiff,
-                                          rule_stamp, scene_dims)
+                                          rule_stamp, scene_dims,
+                                          write_preview_jpg)
 
 
 def make_strip_tif(dirp, name, w, h, bits=16, dtype=None, **kw):
@@ -213,7 +215,7 @@ class TestStretchEqual(unittest.TestCase):
 
 class TestBigPreviewNotMistakenForBomb(unittest.TestCase):
     """1/2 尺度会把「2.4 万像素级的源」烤成 1.5 亿像素，超过 Pillow 默认像素
-    上限（8948 万）的 2 倍就会抛 DecompressionBombError —— 那会让 _cache_hit
+    上限（8948 万）的 2 倍就会抛 DecompressionBombError —— 那会让 cache_hit
     的 Image.open 失败、缓存永远判不中，于是每次打开都重烤一遍，本次的优化
     全部抵消。这里不造 1.5 亿像素的真图（太慢），而是造一张**头里声明**了
     巨大尺寸的 JPEG：Pillow 的炸弹检查只看头，足够复现该失败。"""
@@ -347,6 +349,87 @@ class TestEnsurePreviewJpg(unittest.TestCase):
             with self.assertRaises(PreviewError):
                 ensure_preview_jpg(str(Path(d) / "nope.tif"),
                                    str(Path(d) / "nope.preview.jpg"))
+
+
+class TestSplitHelpers(unittest.TestCase):
+    """`ensure_preview_jpg` 拆出来的两个半成品（`cache_hit` / `write_preview_jpg`）。
+
+    拆的理由只有一个：产物急烤要在「像素已读出」与「落盘」之间插一次 stat 复核
+    （同 suffix 重跑会覆盖同一个产物路径，不复核会把半截图永久留在盘上）。
+    所以这里要钉的是**拆出来之后两边规则仍然一致** —— 缓存判据不能变，落盘的
+    规则戳不能变。整条 `ensure_preview_jpg` 的行为由上面 `TestEnsurePreviewJpg`
+    那一组钉着（这次重构一个用例都没改就全绿，就是它守住了）。
+    """
+
+    def test_write_preview_jpg_stamps_and_publishes(self):
+        with tempfile.TemporaryDirectory() as d:
+            jpg = Path(d) / "sub" / "out.preview.jpg"    # 父目录不存在也要能落
+            pixels = np.zeros((8, 16), dtype=np.uint8)
+            out = write_preview_jpg(jpg, pixels, div=8)
+
+            self.assertEqual((out["w"], out["h"]), (16, 8))
+            self.assertEqual(out["path"], str(jpg))
+            self.assertTrue(jpg.is_file())
+            with Image.open(jpg) as im:
+                self.assertEqual(im.info.get("comment"), rule_stamp(div=8))
+
+    def test_write_preview_jpg_leaves_no_temp_file(self):
+        """写盘走 mkstemp + os.replace（原子替换），临时件不能留在产出目录里。
+
+        产物目录是**生产场景目录**，多出一个 `.tmp` 就是脏数据；而且这里原地覆盖
+        同一份落点，留下半截临时件会让下一次读取拿到坏图。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            jpg = Path(d, "out.preview.jpg")
+            write_preview_jpg(jpg, np.zeros((8, 16), dtype=np.uint8), div=4)
+            self.assertEqual([p.name for p in Path(d).iterdir()], ["out.preview.jpg"])
+
+    def test_write_preview_jpg_overwrites_in_place(self):
+        with tempfile.TemporaryDirectory() as d:
+            jpg = Path(d, "out.preview.jpg")
+            write_preview_jpg(jpg, np.zeros((8, 16), dtype=np.uint8), div=4)
+            write_preview_jpg(jpg, np.zeros((4, 8), dtype=np.uint8), div=16)
+            with Image.open(jpg) as im:
+                self.assertEqual(im.size, (8, 4), "旧的那份被换掉了")
+                self.assertEqual(im.info.get("comment"), rule_stamp(div=16))
+
+    def test_cache_hit_answers_the_rule_only(self):
+        """**`cache_hit` 只管规则，不管新鲜度** —— 这一点必须钉住，因为拆出来的两个
+        调用方各自补那一半：
+
+        * `ensure_preview_jpg`：`dst.is_file() and dst.mtime >= src.mtime` 再问它；
+        * 产物急烤（`_eager_bake_tick`）：同样的 mtime 判据，但**在读像素之前**问，
+          省掉重读一遍 GB 级文件。
+
+        谁要是以为 `cache_hit` 已经包含了新鲜度，就会漏掉自己那一半 —— 于是换过源
+        之后缓存永远命中，界面滑了盘上不动。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            p, _ = make_strip_tif(d, "s.tif", 64, 64)
+            jpg = Path(d, "s.preview.jpg")
+            ensure_preview_jpg(str(p), str(jpg), div=4)
+
+            hit = cache_hit(jpg, PREVIEW_JPG_QUALITY, 4)
+            self.assertIsNotNone(hit)
+            self.assertEqual((hit["w"], hit["h"]), (16, 16))
+
+            self.assertIsNone(cache_hit(jpg, PREVIEW_JPG_QUALITY, 8),
+                              "档位不同 → 落空（落点里那份是 ÷4）")
+            self.assertIsNone(cache_hit(jpg, 90, 4), "质量不同 → 落空")
+
+            # 源改新：cache_hit **照样命中**（它看不出来），新鲜度是调用方那一半。
+            # 而 ensure 补上自己那一半之后确实重烤 —— 两句话合起来才是完整判据。
+            fresh = p.stat().st_mtime + 100
+            os.utime(p, (fresh, fresh))
+            self.assertIsNotNone(cache_hit(jpg, PREVIEW_JPG_QUALITY, 4),
+                                 "它只看戳，不看源")
+            self.assertEqual(ensure_preview_jpg(str(p), str(jpg), div=4)["status"],
+                             "generated", "ensure 补上了 mtime 那一半")
+
+    def test_cache_hit_on_a_missing_file_is_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(
+                cache_hit(Path(d) / "nope.preview.jpg", PREVIEW_JPG_QUALITY, 4))
 
 
 if __name__ == "__main__":

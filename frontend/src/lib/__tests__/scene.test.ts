@@ -4,14 +4,20 @@
  * Node 环境（无 DOM）：只测纯函数 —— query 拼装 / RGBA→1band src（线性=恒等）/
  * 元数据 W/H 的 thumbToOrig 换算分支。JPG 加载/画布在浏览器 .e2e 回归覆盖。
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   loadSrConfig, joinBase, scenesQuery, scenesListUrl, scenePreviewUrl,
-  tmpPreviewUrl,
+  dropPreviewUrl,
   sceneImageUrl, graySrcFromRgba, sceneDecodePixels, thumbPolysToOrig,
   todayScenePrefix, sceneResolveUrl,
   isImageSource, startStretch, SCENE_START_STRETCH,
+  isBakedPreviewUrl, previewNeedsBake, previewDivLabel, loadPreviewDiv,
+  savePreviewDiv, SCENE_PREVIEW_DIVS, DEFAULT_PREVIEW_DIV,
+  rasterPreviewWins, previewCacheKey, sceneAnchors, ANCHOR_MAX,
+  isDiskArrayUrl,
+  sceneClearPreviewUrl, rowsAfterClear, clearSummaryText,
 } from '../scene.js';
+import type { SceneRow, RasterPreview, ClearResult, ClearSummary } from '../scene.js';
 import { stretchRgba } from '../tifDecode.js';
 import { thumbToOrig } from '../viewMath.js';
 
@@ -47,17 +53,188 @@ describe('scenesQuery / 列表 URL', () => {
   });
 
   it('id 含特殊字符安全进 URL', () => {
-    expect(scenePreviewUrl({ apiBase: '', staticBase: '' }, 'a/b+c=='))
-      .toBe('/api/scenes/a%2Fb%2Bc%3D%3D/preview');
-    // 临时那条是**另一个端点**，不是同 URL 带参数：落点与生命周期都不同
-    expect(tmpPreviewUrl({ apiBase: '', staticBase: '' }, 'a/b+c=='))
-      .toBe('/api/scenes/a%2Fb%2Bc%3D%3D/preview-tmp');
-    expect(tmpPreviewUrl({ apiBase: 'http://127.0.0.1:8000/', staticBase: '' }, 'x'))
-      .toBe('http://127.0.0.1:8000/api/scenes/x/preview-tmp');
+    expect(scenePreviewUrl({ apiBase: '', staticBase: '' }, 'a/b+c==', 4))
+      .toBe('/api/scenes/a%2Fb%2Bc%3D%3D/preview?div=4');
+    // 拖入那条是**另一个端点**，不是同 URL 带参数：落点与生命周期都不同
+    expect(dropPreviewUrl({ apiBase: '', staticBase: '' }, 'a/b+c==', 8))
+      .toBe('/api/scenes/a%2Fb%2Bc%3D%3D/preview-drop?div=8');
+    expect(dropPreviewUrl({ apiBase: 'http://127.0.0.1:8000/', staticBase: '' }, 'x'))
+      .toBe(`http://127.0.0.1:8000/api/scenes/x/preview-drop`
+        + `?div=${DEFAULT_PREVIEW_DIV}`);
     expect(sceneImageUrl({ apiBase: '', staticBase: '' }, '/disk-array/x/y.jpg'))
       .toBe('/disk-array/x/y.jpg');
     expect(sceneImageUrl({ apiBase: '', staticBase: 'http://static:9000' }, '/disk-array/a b.jpg'))
       .toBe('http://static:9000/disk-array/a b.jpg');
+  });
+});
+
+describe('预览档位（全局下采样）', () => {
+  const CFG = { apiBase: '', staticBase: 'http://static:9000' };
+
+  it('静态 URL 只对**烤出来的**预览拼 ?div=（源本身就是 JPG 的行不拼）', () => {
+    expect(sceneImageUrl(CFG, '/disk-array/a/b_preview.jpg', 8))
+      .toBe('http://static:9000/disk-array/a/b_preview.jpg?div=8');
+    // 源即显示件：档位对它无意义，拼了反而打红逐字断言的 e2e
+    expect(sceneImageUrl(CFG, '/disk-array/a/b.jpg', 8))
+      .toBe('http://static:9000/disk-array/a/b.jpg');
+    expect(sceneImageUrl(CFG, '/disk-array/a/b_preview.jpg'))
+      .toBe('http://static:9000/disk-array/a/b_preview.jpg');
+    expect(sceneImageUrl(CFG, null, 8)).toBe('');
+  });
+
+  it('isBakedPreviewUrl 认的是产物名，不是「后缀是 jpg」', () => {
+    expect(isBakedPreviewUrl('/disk-array/a/b_preview.jpg')).toBe(true);
+    expect(isBakedPreviewUrl('/disk-array/a/b_preview.jpeg')).toBe(true);
+    expect(isBakedPreviewUrl('/disk-array/a/b.jpg')).toBe(false);
+    // 改名（2026-09-22）前的点号那份：两代都认 —— 静态 URL 是后端给的，
+    // 两边版本错开一档时必须认得出，认不出换档位后最长一小时看到旧图
+    expect(isBakedPreviewUrl('/disk-array/a/b.preview.jpg')).toBe(true);
+    expect(isBakedPreviewUrl('/disk-array/a/bjpeg.jpg')).toBe(false);
+    expect(isBakedPreviewUrl('/disk-array/a/preview.jpg')).toBe(false);
+    expect(isBakedPreviewUrl(null)).toBe(false);
+  });
+
+  const row = (over: Partial<SceneRow>): SceneRow => ({
+    id: 'x', name: 'n', satellite: null, sensor: null, date: null,
+    size_bytes: 0, fake: false, W: 1, H: 1, rel: null,
+    jpgUrl: null, hasPreview: false, lq_path: null, ...over,
+  });
+
+  it('previewNeedsBake：四条分支', () => {
+    // 库外（无静态 URL）→ 打 /preview，会烤
+    expect(previewNeedsBake(row({ jpgUrl: null }), 4)).toBe(true);
+    // 缓存不在 → 烤
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a_preview.jpg',
+      hasPreview: false }), 4)).toBe(true);
+    // 在，但档位不符（含旧格式戳 null）→ 烤
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a_preview.jpg', hasPreview: true,
+      previewDiv: 8 }), 4)).toBe(true);
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a_preview.jpg', hasPreview: true,
+      previewDiv: null }), 4)).toBe(true);
+    // 在且档位对得上 → 不烤
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a_preview.jpg', hasPreview: true,
+      previewDiv: 4 }), 4)).toBe(false);
+    // 源即显示件 → 永不烤
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a.jpg', hasPreview: true,
+      previewDiv: null }), 4)).toBe(false);
+  });
+
+  it('档位表与后端 PREVIEW_DIVISORS 同序同值，默认 ÷4', () => {
+    expect([...SCENE_PREVIEW_DIVS]).toEqual([2, 4, 8, 16, 32]);
+    expect(DEFAULT_PREVIEW_DIV).toBe(4);
+    expect(previewDivLabel(16)).toBe('1/16');
+  });
+
+  it('loadPreviewDiv / savePreviewDiv：读回存的值，脏值退回默认', () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
+      setItem: (k: string, v: string) => { store.set(k, v); },
+    });
+    expect(loadPreviewDiv()).toBe(DEFAULT_PREVIEW_DIV);   // 没存过
+    savePreviewDiv(16);
+    expect(loadPreviewDiv()).toBe(16);
+    store.set('sr.previewDiv', '3');                      // 不是合法档位
+    expect(loadPreviewDiv()).toBe(DEFAULT_PREVIEW_DIV);
+    store.set('sr.previewDiv', 'abc');
+    expect(loadPreviewDiv()).toBe(DEFAULT_PREVIEW_DIV);
+    vi.unstubAllGlobals();
+  });
+
+  it('localStorage 不可用（opaque origin / 隐私模式）不抛，一律回默认档', () => {
+    vi.stubGlobal('localStorage', {
+      getItem: () => { throw new Error('SecurityError'); },
+      setItem: () => { throw new Error('SecurityError'); },
+    });
+    expect(loadPreviewDiv()).toBe(DEFAULT_PREVIEW_DIV);
+    expect(() => savePreviewDiv(8)).not.toThrow();
+    vi.unstubAllGlobals();
+  });
+});
+
+describe('显示源比较规则：谁清晰用谁（rasterPreviewWins）', () => {
+  const rp = (over: Partial<RasterPreview>): RasterPreview => ({
+    id: 'raster-id', name: 'PAN.tif', rel: 'a/PAN.tif',
+    jpgUrl: '/disk-array/a/PAN_preview.jpg',
+    rasterW: 24000, rasterH: 24000, jpgW: 8192, jpgH: 8192,
+    hasPreview: false, previewDiv: null, ...over,
+  });
+
+  it('判据就是 round(长边/div) > 显示件长边（与后端 preview_max_edge 同式）', () => {
+    // 真机量级：24000 源 + 8192 显示件。÷2 烤出 12000 → 赢
+    expect(rasterPreviewWins(rp({}), 2)).toBe(true);
+    // ÷4 烤出 6000 → 输。**默认档位下这条规则基本不触发**，这正是要如实告诉用户的
+    expect(rasterPreviewWins(rp({}), 4)).toBe(false);
+    expect(rasterPreviewWins(rp({}), 8)).toBe(false);
+  });
+
+  it('相等不换（严格大于）：换过去要付一次烘焙，换来一样清晰就没理由动', () => {
+    // 1600 源 ÷4 = 400，显示件长边正好 400 → 平手，保持现状
+    expect(rasterPreviewWins(rp({ rasterW: 1600, rasterH: 800,
+      jpgW: 400, jpgH: 200 }), 4)).toBe(false);
+    // 显示件长边 399 → 400 > 399，差一像素也换：判据是算出来的数，不是「差不多」
+    expect(rasterPreviewWins(rp({ rasterW: 1600, rasterH: 800,
+      jpgW: 399, jpgH: 200 }), 4)).toBe(true);
+    // 除数是**四舍五入**不是向上取整：round(1601/4)=400，仍与显示件平手
+    expect(rasterPreviewWins(rp({ rasterW: 1601, rasterH: 800,
+      jpgW: 400, jpgH: 200 }), 4)).toBe(false);
+    expect(rasterPreviewWins(rp({ rasterW: 1602, rasterH: 800,
+      jpgW: 400, jpgH: 200 }), 4)).toBe(true);   // round(1602/4)=401
+  });
+
+  it('两侧都取长边比（不是宽比宽）', () => {
+    // 栅格长边 640 ÷4 = 160；显示件长边 600 → 输，尽管栅格在题目里比显示件「高」
+    expect(rasterPreviewWins(rp({ rasterW: 320, rasterH: 640,
+      jpgW: 600, jpgH: 10 }), 4)).toBe(false);
+    // 反过来：栅格是横长条，长边 1600 ÷4 = 400 > 显示件长边 399 → 赢
+    expect(rasterPreviewWins(rp({ rasterW: 1600, rasterH: 100,
+      jpgW: 399, jpgH: 20 }), 4)).toBe(true);
+  });
+
+  it('保守兜底一律 false（继续显示那张 jpg，绝不因为找不到更好的把图弄没了）', () => {
+    expect(rasterPreviewWins(null, 4)).toBe(false);
+    expect(rasterPreviewWins(undefined, 4)).toBe(false);
+    expect(rasterPreviewWins(rp({ jpgW: 0 }), 4)).toBe(false);
+    expect(rasterPreviewWins(rp({ jpgH: 0 }), 4)).toBe(false);
+    expect(rasterPreviewWins(rp({ rasterW: 0 }), 2)).toBe(false);
+    // div 不是合法档位 → 不认（否则「除以 3」这种前端到处没实现的档位会算出个假答案）
+    expect(rasterPreviewWins(rp({}), 3)).toBe(false);
+    expect(rasterPreviewWins(rp({ rasterW: 24000, jpgW: 1 }), 0)).toBe(false);
+  });
+
+  const row = (over: Partial<SceneRow>): SceneRow => ({
+    id: 'x', name: 'n', satellite: null, sensor: null, date: null,
+    size_bytes: 0, fake: false, W: 1, H: 1, rel: null,
+    jpgUrl: null, hasPreview: false, lq_path: null, ...over,
+  });
+
+  it('previewNeedsBake 的栅格分支：按**栅格那份预览**判，不看源 jpg 的三个字段', () => {
+    const win = rp({ rasterW: 24000, rasterH: 24000, jpgW: 8192, jpgH: 8192 });
+    // 栅格赢且栅格那份预览还没烤过 → 要烤
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a.jpg', hasPreview: true,
+      previewDiv: null, rasterPreview: win }), 2)).toBe(true);
+    // 烤过但不是这一档 → 要烤
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a.jpg', hasPreview: true,
+      previewDiv: null, rasterPreview: { ...win, hasPreview: true, previewDiv: 4 } }),
+      2)).toBe(true);
+    // 烤过且档位对得上 → 不烤
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a.jpg', hasPreview: true,
+      previewDiv: null, rasterPreview: { ...win, hasPreview: true, previewDiv: 2 } }),
+      2)).toBe(false);
+    // 栅格**输**（÷4）→ 落回源 jpg 那套：源即显示件，永不烤
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a.jpg', hasPreview: true,
+      previewDiv: null, rasterPreview: win }), 4)).toBe(false);
+  });
+
+  it('不给 rasterPreview（旧后端 / 无同名栅格）→ 行为与今天逐字节一致', () => {
+    expect(previewNeedsBake(row({ jpgUrl: '/d/a.jpg', hasPreview: true }), 4)).toBe(false);
+    expect(previewNeedsBake(row({ jpgUrl: null }), 4)).toBe(true);
+  });
+
+  it('sceneImageUrl 对 rasterPreview.jpgUrl 自动附 ?div=（它就是 _preview.jpg）', () => {
+    const CFG = { apiBase: '', staticBase: 'http://static:9000' };
+    expect(sceneImageUrl(CFG, rp({}).jpgUrl, 8))
+      .toBe('http://static:9000/disk-array/a/PAN_preview.jpg?div=8');
   });
 });
 
@@ -152,8 +329,8 @@ describe('列表 URL 样例', () => {
     const cfg = { apiBase: '', staticBase: '' };
     expect(scenesListUrl(cfg, { satellite: 'GF07A03', limit: 20 }))
       .toBe('/api/scenes?satellite=GF07A03&limit=20');
-    expect(sceneImageUrl(cfg, '/disk-array/GF07A03_PMS01_20260722125045.preview.jpg'))
-      .toBe('/disk-array/GF07A03_PMS01_20260722125045.preview.jpg');
+    expect(sceneImageUrl(cfg, '/disk-array/GF07A03_PMS01_20260722125045_preview.jpg'))
+      .toBe('/disk-array/GF07A03_PMS01_20260722125045_preview.jpg');
   });
 });
 
@@ -199,5 +376,171 @@ describe('手工场景路径（盘阵任意合法场景目录）', () => {
       .toBe('/api/scenes/resolve');
     expect(sceneResolveUrl({ apiBase: 'http://127.0.0.1:8000', staticBase: '' }))
       .toBe('http://127.0.0.1:8000/api/scenes/resolve');
+  });
+});
+
+describe('previewCacheKey（预览 blob 的缓存键）', () => {
+  it('同一条行 + 同档位 → 稳定（同参数两次调用逐字相同）', () => {
+    const row = { id: 'abc123' };
+    expect(previewCacheKey(row, 4)).toBe(previewCacheKey({ id: 'abc123' }, 4));
+    expect(previewCacheKey(row, 4)).toBe('abc123|4|jpg');
+  });
+
+  it('档位进键：同一张图的不同档位互不覆盖', () => {
+    const row = { id: 'abc123' };
+    expect(previewCacheKey(row, 4)).not.toBe(previewCacheKey(row, 8));
+  });
+
+  it('不同的行互不覆盖', () => {
+    expect(previewCacheKey({ id: 'a' }, 4)).not.toBe(previewCacheKey({ id: 'b' }, 4));
+  });
+
+  it('栅格那份与源 jpg 那份是两个键（栅格赢的档位端上来的不是同一张图）', () => {
+    const row = { id: 'abc123' };
+    const rp = { name: 'PAN.tif' };
+    expect(previewCacheKey(row, 4, rp)).toBe('abc123|4|ras:PAN.tif');
+    expect(previewCacheKey(row, 4, rp)).not.toBe(previewCacheKey(row, 4));
+    // 同名栅格换了张图（不同 name）也要分开
+    expect(previewCacheKey(row, 4, { name: 'PAN.tif' }))
+      .not.toBe(previewCacheKey(row, 4, { name: 'GF07A03.tif' }));
+  });
+
+  it('raster 传 null / undefined 等同于「源 jpg 那份」', () => {
+    const row = { id: 'abc123' };
+    expect(previewCacheKey(row, 4, null)).toBe(previewCacheKey(row, 4));
+    expect(previewCacheKey(row, 4, undefined)).toBe(previewCacheKey(row, 4));
+  });
+
+  it('键里没有裸的下划线/空格歧义：行 id 与栅格名之间不会撞车', () => {
+    // 'a|4|jpg' 与栅格名恰好叫 'jpg' 的情形：前缀不同，撞不上
+    expect(previewCacheKey({ id: 'a' }, 4, { name: 'jpg' }))
+      .not.toBe(previewCacheKey({ id: 'a' }, 4));
+  });
+});
+
+describe('sceneAnchors —— 拖 jpg 时递给后端的锚定目录', () => {
+  it('按给进来的顺序保留（顺序就是优先级，后端取第一个成立的）', () => {
+    expect(sceneAnchors(['/d/近', '/d/远'])).toEqual(['/d/近', '/d/远']);
+  });
+
+  it('空值丢掉、重复只留一份', () => {
+    expect(sceneAnchors([null, '/d/a', undefined, '', '/d/a', '/d/b']))
+      .toEqual(['/d/a', '/d/b']);
+  });
+
+  it('最多 ANCHOR_MAX 个 —— 它是提示不是断言，不该被拿来灌请求', () => {
+    const many = ['/d/1', '/d/2', '/d/3', '/d/4', '/d/5'];
+    expect(sceneAnchors(many)).toHaveLength(ANCHOR_MAX);
+    expect(sceneAnchors(many)[0]).toBe('/d/1');
+  });
+
+  it('一个都没有 → 空数组（后端照旧按名字反推）', () => {
+    expect(sceneAnchors([null, undefined, ''])).toEqual([]);
+  });
+});
+
+describe('清除预览缓存 —— URL / 去留 / 汇总文案', () => {
+  it('端点 URL 走 apiBase，路径是 /api/scenes/clear-preview', () => {
+    expect(sceneClearPreviewUrl(loadSrConfig()))
+      .toBe('/api/scenes/clear-preview');
+    expect(sceneClearPreviewUrl({ apiBase: 'http://127.0.0.1:8000/', staticBase: '' }))
+      .toBe('http://127.0.0.1:8000/api/scenes/clear-preview');
+  });
+
+  describe('rowsAfterClear —— 哪些行从列表摘掉', () => {
+    const rows = [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }];
+    const res = (id: string, status: ClearResult['status']) => ({
+      id, status, reason: null, dir: null,
+      removed: [], skipped: [], failed: [], marked: 0,
+    });
+
+    it('cleared 与 nothing 摘掉；skipped / failed 留下（用户要看得见原因）', () => {
+      const out = rowsAfterClear(rows, [
+        res('a', 'cleared'), res('b', 'failed'),
+        res('c', 'nothing'), res('d', 'skipped'),
+      ]);
+      expect(out.map((r) => r.id)).toEqual(['b', 'd']);
+    });
+
+    it('nothing 也要摘：盘上没有缓存，留着就是继续显示「已生成」这个谎', () => {
+      expect(rowsAfterClear(rows, [res('a', 'nothing')]).map((r) => r.id))
+        .toEqual(['b', 'c', 'd']);
+    });
+
+    it('一条命中都没有时原样返回（同一个数组引用，不做无谓的重建）', () => {
+      expect(rowsAfterClear(rows, [res('a', 'failed')])).toBe(rows);
+      expect(rowsAfterClear(rows, [])).toBe(rows);
+    });
+
+    it('结论里有列表里没有的 id（别的会话/别的筛选留下来的）也不炸', () => {
+      const out = rowsAfterClear(rows, [res('zzz', 'cleared')]);
+      expect(out.map((r) => r.id)).toEqual(['a', 'b', 'c', 'd']);
+    });
+  });
+
+  describe('clearSummaryText —— 表上方那一行', () => {
+    const s = (over: Partial<ClearSummary> = {}): ClearSummary => ({
+      cleared: 0, nothing: 0, skipped: 0, failed: 0,
+      dirs: 0, files: 0, marked: 0, ...over,
+    });
+
+    it('全清干净：报目录数 / 文件数，并说明行只是从列表移除', () => {
+      const text = clearSummaryText(
+        s({ cleared: 1, dirs: 1, files: 3, marked: 2 }), 1);
+      expect(text).toContain('已清除 1 项');
+      expect(text).toContain('1 个场景目录');
+      expect(text).toContain('3 份预览缓存');
+      expect(text).toContain('已从列表移除 1 行，重新检索可回来');
+    });
+
+    it('一景两行：项数按 id 报、目录与文件数不重复计数', () => {
+      const text = clearSummaryText(s({ cleared: 2, dirs: 1, files: 2 }), 2);
+      expect(text).toContain('已清除 2 项');
+      expect(text).toContain('1 个场景目录');
+      expect(text).toContain('2 份预览缓存');
+    });
+
+    it('混合结局：四类各报各的，没有的类别不出现', () => {
+      const text = clearSummaryText(
+        s({ cleared: 2, dirs: 2, files: 4, nothing: 1, failed: 1 }), 3);
+      expect(text).toContain('已清除 2 项');
+      expect(text).toContain('无需清除 1 项');
+      expect(text).toContain('失败 1 项');
+      expect(text).not.toContain('跳过');
+    });
+
+    it('一项都没动（全 skipped）时不说「已从列表移除」', () => {
+      const text = clearSummaryText(s({ skipped: 2 }), 0);
+      expect(text).toBe('跳过 2 项');
+    });
+
+    it('空汇总不报成「已清除 0 项」', () => {
+      expect(clearSummaryText(s(), 0)).toBe('没有可清除的场景');
+    });
+  });
+});
+
+describe('isDiskArrayUrl —— 404 是「文件不在」还是「没走到后端」的分水岭', () => {
+  it('同源相对 URL（staticBase 为空）：静态链认出来', () => {
+    expect(isDiskArrayUrl('/disk-array/a/b_preview.jpg')).toBe(true);
+    expect(isDiskArrayUrl('/disk-array/a/b_preview.jpg?div=4')).toBe(true);
+  });
+
+  it('绝对源（异源部署注入 staticBase）与协议相对形式同样认出来', () => {
+    expect(isDiskArrayUrl('http://10.0.0.2:9000/disk-array/a/b.jpg')).toBe(true);
+    expect(isDiskArrayUrl('//10.0.0.2/disk-array/a/b.jpg')).toBe(true);
+  });
+
+  it('/api/ 上的 URL 一律不是 —— 那种 404 是别人给的答复，说明不了盘上的文件', () => {
+    expect(isDiskArrayUrl('/api/scenes/zzz/preview?div=4')).toBe(false);
+    expect(isDiskArrayUrl('http://10.0.0.2:8000/api/scenes/zzz/preview')).toBe(false);
+    // 路径里带这个串但不是那棵树：前缀匹配不能写松
+    expect(isDiskArrayUrl('/api/disk-array/x.jpg')).toBe(false);
+  });
+
+  it('空值 / 缺尾斜杠 / 只有主机都不给假阳性', () => {
+    expect(isDiskArrayUrl('')).toBe(false);
+    expect(isDiskArrayUrl('/disk-array')).toBe(false);
+    expect(isDiskArrayUrl('http://host')).toBe(false);
   });
 });
