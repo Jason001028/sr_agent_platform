@@ -6,14 +6,16 @@
  * 预览下采样档位拖动条 / 绘制掩码 toggle / 生成掩码 / 提交 SR。
  * 最小原型删去了 HTML 的「输出目录」三态按钮与「自动JPG」勾选（前端不再导出 JPG）。
  */
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
+import { useQcListStore } from '../stores/qclist';
 import { parseLocPair } from '../lib/viewMath';
 import { SCENE_PREVIEW_DIVS, previewDivLabel } from '../lib/scene';
 import { isIntermediateStage } from '../lib/stage';
 import type { StretchMode } from '../lib/tifDecode';
 
 const store = useViewerStore();
+const qc = useQcListStore();
 const fileInput = ref<HTMLInputElement | null>(null);
 /** 定位框：一个框装「X,Y」两个数（原先是 X、Y 两个框，拆开填反而要用户自己数着填）。 */
 const locText = ref('');
@@ -97,6 +99,21 @@ function doLocate() {
   locText.value = pair[0] + ',' + pair[1];
   store.locatePixel(pair[0], pair[1]);
 }
+
+/** 切图时把清单里这一行的坐标**预填**进定位框（只填、不跳 —— 跳不跳由人按「定位」）。
+    键取场景目录优先（与 QcListPanel 的自动选中同源）：本体与产物卡落在同一个 sceneDir，
+    于是同景各卡预填同一个坐标。这一行没有行列号就清空，免得留着上一张图的坐标；
+    没导入清单时一律不动框。 */
+watch(
+  () => store.activeRec?.sceneDir ?? store.activeRec?.lqPath,
+  (dir) => {
+    if (!qc.loaded) return;
+    const it = qc.rowForScene(dir);
+    // 清单写的是「行列号」(行, 列)，定位框要的是「X,Y」= (列, 行) —— 别照抄顺序
+    locText.value = it && it.row !== null && it.col !== null ? it.col + ',' + it.row : '';
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
