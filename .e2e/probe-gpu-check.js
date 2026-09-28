@@ -1,5 +1,5 @@
 // 一次性探查：headless Chrome 到底跑在真显卡还是 SwiftShader 上。
-// 顺带做「读回是否让下一帧变贵」的对照（GPU 路径上才有意义）。
+// 同时做「读回是否让下一帧变贵」的对照（GPU 路径上才有意义）。
 //   node probe-gpu-check.js [extraArg...]
 const { launchPage } = require('./launchBrowser');
 

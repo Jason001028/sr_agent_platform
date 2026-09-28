@@ -122,7 +122,7 @@ describe('apiUrl 拼接', () => {
   });
 });
 
-/* ---------------- fetchSceneJpg 取字节 + 首次烘焙回调 ---------------- */
+/* ---------------- fetchSceneJpg 取字节 + 首次生成预览回调 ---------------- */
 describe('fetchSceneJpg', () => {
   /** 一条最小可用的场景行；W/H 是元数据尺寸，与 JPG 像素尺寸无关。 */
   const row = (over: Partial<SceneRow>): SceneRow => ({
@@ -130,7 +130,7 @@ describe('fetchSceneJpg', () => {
     size_bytes: 0, fake: false, W: 200, H: 100, rel: null,
     jpgUrl: null, hasPreview: false, lq_path: null, ...over,
   });
-  /** 平台烤出来的那份预览（`_preview.jpg` 是判据，见 isBakedPreviewUrl）。 */
+  /** 平台生成的的那份预览（`_preview.jpg` 是判据，见 isBakedPreviewUrl）。 */
   const BAKED = '/disk-array/a/b_preview.jpg';
 
   let urls: string[];
@@ -146,7 +146,7 @@ describe('fetchSceneJpg', () => {
 
   afterEach(() => { vi.unstubAllGlobals(); });
   // 预览 blob 缓存是**模块级单例**（store 与设置浮层共用一份），用例之间会串味：
-  // 上一条把 `~YWJj|4|jpg` 烤出来，下一条同名同档位就变成缓存命中、请求数归零。
+  // 上一条把 `~YWJj|4|jpg` 生成的，下一条同名同档位就变成缓存命中、请求数归零。
   // 每条用例从空缓存起跑，「走哪条 URL」才是它在钉的东西。
   beforeEach(() => { resetPreviewCache(); });
 
@@ -159,7 +159,7 @@ describe('fetchSceneJpg', () => {
   });
 
   it('库行未生成：先打 /preview?div=N 懒生成，再静态取图（两次请求，顺序固定）', async () => {
-    // 那张图由 nginx 直出（几 MB 起，不该占 API 进程的内存/带宽），所以烘焙那一下
+    // 那张图由 nginx 直出（几 MB 起，不该占 API 进程的内存/带宽），所以生成预览那一下
     // 是「白打」的 —— 稳态下只有一次（档位对得上那条走上面的分支）。
     stubFetch({
       'http://127.0.0.1:8000/api/scenes/~YWJj/preview?div=8': 'ok',
@@ -172,7 +172,7 @@ describe('fetchSceneJpg', () => {
       'http://static:9000/disk-array/a/b_preview.jpg?div=8',
     ]);
     expect(r.hasPreview).toBe(true);
-    expect(r.previewDiv).toBe(8);             // 记上实际档位，同一会话内不再重烤
+    expect(r.previewDiv).toBe(8);             // 记上实际档位，同一会话内不再重新生成
   });
 
   it('库行档位对得上：只取静态 jpgUrl（带 ?div= 击穿 nginx 的 max-age）', async () => {
@@ -184,8 +184,8 @@ describe('fetchSceneJpg', () => {
     ]);
   });
 
-  it('**换档位后必须重烤**：盘上那份仍在（hasPreview 为真）但档位不符', async () => {
-    // 只看 hasPreview 的话这里会跳过重烤、直接取静态 URL —— 界面滑了，盘上那张图
+  it('**换档位后必须重新生成**：盘上那份仍在（hasPreview 为真）但档位不符', async () => {
+    // 只看 hasPreview 的话这里会跳过重新生成、直接取静态 URL —— 界面滑了，盘上那张图
     // 一个字节都不变，用户看到的还是旧档位。这是这条子逻辑的核心。
     stubFetch({
       'http://127.0.0.1:8000/api/scenes/~YWJj/preview?div=16': 'ok',
@@ -196,13 +196,13 @@ describe('fetchSceneJpg', () => {
     expect(urls).toEqual([
       'http://127.0.0.1:8000/api/scenes/~YWJj/preview?div=16',
       // `?div=16` 就是这里的要害：不带它，nginx 的 max-age=3600 会把旧档位那张
-      // 端上来，重烤了也看不见。
+      // 端上来，重新生成了也看不见。
       'http://static:9000/disk-array/a/b_preview.jpg?div=16',
     ]);
     expect(r.previewDiv).toBe(16);
   });
 
-  it('旧格式戳（previewDiv 为 null）也算「档位不符」→ 重烤一轮', async () => {
+  it('旧格式戳（previewDiv 为 null）也算「档位不符」→ 重新生成一轮', async () => {
     stubFetch({
       '/api/scenes/~YWJj/preview?div=4': 'ok',
       '/disk-array/a/b_preview.jpg?div=4': 'REBAKED',
@@ -213,7 +213,7 @@ describe('fetchSceneJpg', () => {
       '/disk-array/a/b_preview.jpg?div=4']);
   });
 
-  it('**源本身就是显示件**（jpgUrl 不是 _preview.jpg）：档位对它无意义，永不重烤', async () => {
+  it('**源本身就是显示件**（jpgUrl 不是 _preview.jpg）：档位对它无意义，永不重新生成', async () => {
     // 这类行 hasPreview 恒 true、previewDiv 恒 null —— 若一并按「档位不符」判，
     // 每次打开都会白打一次 /preview，而它只会把源文件原样回一遍。
     stubFetch({ 'http://static:9000/disk-array/a/b.jpg': 'SOURCE' });
@@ -223,13 +223,13 @@ describe('fetchSceneJpg', () => {
     expect(urls).toEqual(['http://static:9000/disk-array/a/b.jpg']);
   });
 
-  it('onPhase 只在「本次会触发服务端烘焙」时响一次', async () => {
+  it('onPhase 只在「本次会触发服务端生成」时响一次', async () => {
     const phase = vi.fn();
     stubFetch({
       '/api/scenes/~YWJj/preview?div=4': 'ok',
       '/disk-array/a/b_preview.jpg?div=4': 'STATIC',
     });
-    // 档位不符 → 一定会先打 /preview（重烤），提示用户等
+    // 档位不符 → 一定会先打 /preview（重新生成），提示用户等
     await fetchSceneJpg(CFG, row({ jpgUrl: BAKED, hasPreview: true,
       previewDiv: 2 }), 4, phase);
     expect(phase).toHaveBeenCalledTimes(1);
@@ -243,7 +243,7 @@ describe('fetchSceneJpg', () => {
     expect(phase).not.toHaveBeenCalled();
   });
 
-  it('onPhase 对库外那条只在**缓存不在**时响（命中不该说「正在烘焙」）', async () => {
+  it('onPhase 对库外那条只在**缓存不在**时响（命中不该说「正在生成预览」）', async () => {
     stubFetch({ '/api/scenes/~YWJj/preview?div=4': 'HIT' });
     const phase = vi.fn();
     const r = row({ jpgUrl: null, hasPreview: true });
@@ -258,9 +258,9 @@ describe('fetchSceneJpg', () => {
     expect(phase).toHaveBeenCalledTimes(1);
   });
 
-  it('**同一档位重烤后取静态图必须绕开浏览器缓存**（清除缓存 / 规则换代那条）', async () => {
+  it('**同一档位重新生成后取静态图必须绕开浏览器缓存**（清除缓存 / 规则换代那条）', async () => {
     // `?div=N` 只击穿「档位变了」这种情况。档位没变而服务端把同一个 URL 下的文件
-    // 重写了一遍（场景库「清除缓存」、规则戳 v2→v3 原地重烤）时，URL 逐字相同，
+    // 重写了一遍（场景库「清除缓存」、规则签名 v2→v3 原地重新生成）时，URL 逐字相同，
     // nginx 的 max-age=3600 会让浏览器把旧字节端上来 —— 用户以为清了个寂寞。
     // 判据是 needBake：只有它成立时才**知道**服务端刚重写过。
     const inits: (RequestInit | undefined)[] = [];
@@ -278,7 +278,7 @@ describe('fetchSceneJpg', () => {
     expect(await (await fetchSceneJpg(CFG, r, 4)).text()).toBe('REBAKED');
     expect(inits[1]?.cache).toBe('no-store');   // 第二次 = 静态取图那一下
 
-    // 没重烤（档位已对上）时不要多这一道 —— 常态下白绕缓存等于每次打开都重下一遍
+    // 没重新生成（档位已对上）时不要多这一道 —— 常态下白绕缓存等于每次打开都重下一遍
     inits.length = 0;
     resetPreviewCache();
     await fetchSceneJpg(CFG, row({ jpgUrl: BAKED, hasPreview: true, previewDiv: 4 }), 4);
@@ -304,7 +304,7 @@ describe('fetchSceneJpg', () => {
   });
 
   it('命中缓存时照旧做那两行记账（hasPreview / previewDiv），语义不漂移', async () => {
-    // 库行这条支路是「先 /preview 烤、再静态取图」两次请求
+    // 库行这条支路是「先 /preview 生成、再静态取图」两次请求
     stubFetch({
       '/api/scenes/~YWJj/preview?div=4': 'PREVIEW',
       '/disk-array/a/b_preview.jpg?div=4': 'STATIC',
@@ -321,10 +321,10 @@ describe('fetchSceneJpg', () => {
     expect(urls.length).toBe(2);               // 一个请求都没多发
   });
 
-  it('档位进键：换了档位就不是命中，得重新取（并触发烘焙）', async () => {
+  it('档位进键：换了档位就不是命中，得重新取（并触发生成预览）', async () => {
     stubFetch({
       '/disk-array/a/b_preview.jpg?div=2': 'D2',       // 档位对得上 → 只取静态
-      '/api/scenes/~YWJj/preview?div=8': 'ok',         // 档位不符 → 先重烤
+      '/api/scenes/~YWJj/preview?div=8': 'ok',         // 档位不符 → 先重新生成
       '/disk-array/a/b_preview.jpg?div=8': 'D8',
     });
     const r = row({ jpgUrl: BAKED, hasPreview: true, previewDiv: 2 });
@@ -398,7 +398,7 @@ describe('fetchSceneJpg', () => {
     ...over,
   });
 
-  it('栅格赢：先 /preview 烤栅格那份，再静态取图；**源 jpg 的三个字段一字不动**', async () => {
+  it('栅格赢：先 /preview 生成栅格那份，再静态取图；**源 jpg 的三个字段一字不动**', async () => {
     // 请求用的是**这条行自己的 id** —— 后端在 /preview 那一层把 jpg 换成同名栅格，
     // 前端不必先取一次栅格的 id、更不必多一次往返。
     stubFetch({
@@ -428,7 +428,7 @@ describe('fetchSceneJpg', () => {
     expect(urls).toEqual(['/disk-array/a/PAN_preview.jpg?div=4']);
   });
 
-  it('栅格赢且档位不符：重烤（同「换档位必须重烤」那条，只是换成栅格那份记账）', async () => {
+  it('栅格赢且档位不符：重新生成（同「换档位必须重新生成」那条，只是换成栅格那份记账）', async () => {
     // 尺寸得挑成「÷4 与 ÷8 都赢」：**谁赢本身就跟档位有关**（24000 源对 320 的
     // 显示件，÷4 赢、÷32 输），所以换档位有可能直接翻到源 jpg 那一支去。
     // 判据每个档位各算一次，不缓存、不跨档位沿用。
@@ -479,7 +479,7 @@ describe('fetchSceneJpg', () => {
     expect(r.rasterPreview!.hasPreview).toBe(false);   // 碰都没碰
   });
 
-  it('栅格赢时的 onPhase 说清「从哪张栅格烤」，且只在真要烤时响', async () => {
+  it('栅格赢时的 onPhase 说清「从哪张栅格生成」，且只在真要生成时响', async () => {
     const phase = vi.fn();
     stubFetch({
       '/api/scenes/~YWJj/preview?div=4': 'ok',
@@ -539,12 +539,12 @@ describe('fetchDropSceneJpg', () => {
     expect(r.jpgUrl).toBe('/disk-array/a/b_preview.jpg');
   });
 
-  it('onPhase 每次都提示要等服务端烘焙（这条链不保证缓存命中）', async () => {
+  it('onPhase 每次都提示要等服务端生成（这条链不保证缓存命中）', async () => {
     stubFetch({ '/api/scenes/~YWJj/preview-drop?div=2': 'DROP' });
     const phase = vi.fn();
     await fetchDropSceneJpg(CFG, '~YWJj', 2, phase);
     expect(phase).toHaveBeenCalledTimes(1);
-    expect(phase.mock.calls[0][0]).toContain('烘焙');
+    expect(phase.mock.calls[0][0]).toContain('生成预览');
   });
 
   it('认兜底响应头：场景目录不可写时如实说明走的是临时缓存', async () => {
@@ -553,7 +553,7 @@ describe('fetchDropSceneJpg', () => {
     const phase = vi.fn();
     expect(await (await fetchDropSceneJpg(CFG, '~YWJj', 2, phase)).text())
       .toBe('DROP');
-    expect(phase).toHaveBeenCalledTimes(2);          // 烘焙提示 + 兜底说明
+    expect(phase).toHaveBeenCalledTimes(2);          // 生成预览提示 + 兜底说明
     expect(phase.mock.calls[1][0]).toContain('不可写');
   });
 });
@@ -658,7 +658,7 @@ describe('apiClearScenePreviews', () => {
     expect(previewCacheStats().bytes).toBe(0);
   });
 
-  it('请求失败时**不丢**本地那份：盘上什么都没变，丢了下次还得重新烘焙', async () => {
+  it('请求失败时**不丢**本地那份：盘上什么都没变，丢了下次还得重新生成预览', async () => {
     vi.stubGlobal('fetch', () => Promise.resolve(new Response('PREVIEW', { status: 200 })));
     await fetchSceneJpg(CFG, {
       id: '~YWJj', name: 'SC', satellite: null, sensor: null, date: null,
@@ -757,7 +757,7 @@ describe('isSceneGone / isProxyMiss / HttpError', () => {
     expect(isProxyMiss(e)).toBe(true);    // 是配置问题，得如实报出来
   });
 
-  it('**422 不算「已自动清除」**：源还在、只是烤不出来（那是真故障，不能拿猜的原因盖住）', async () => {
+  it('**422 不算「已自动清除」**：源还在、只是生成不出来（那是真故障，不能拿猜的原因盖住）', async () => {
     vi.stubGlobal('fetch', () => Promise.resolve(
       new Response(JSON.stringify({ detail: '预览生成失败：仅支持单波段（spp=3）' }),
         { status: 422 })));
@@ -790,7 +790,7 @@ describe('nosrItemOf（未超分那份能不能用）', () => {
     productCandidates: ['a_260318.tif'], nosrCandidates: ['a_NOSR.tif'],
   });
 
-  it('盘上有那份 → 给出来（这一段就是背景预热要烤的东西）', () => {
+  it('盘上有那份 → 给出来（这一段就是背景预热要生成的东西）', () => {
     const got = nosrItemOf(res([item('input', true), item('product', true),
                                item('nosr', true)]));
     expect(got?.kind).toBe('nosr');

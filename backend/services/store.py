@@ -15,7 +15,7 @@ Three tables behind one Store:
               有两组时间戳，别混：created_at/updated_at 属于**行**（队列排序、每次
               写回），started_at/finished_at 属于**本次运行**（首次看到 RUNNING →
               终态；队列页「耗时」的唯一来源，2026-09-18 增）。
-              preview_state/preview_note 是**产物预览急烤**的进度（2026-09-20 增）：
+              preview_state/preview_note 是**产物预览主动生成**的进度（2026-09-20 增）：
               NULL → running → done/skipped/failed，同样属于「本次运行」，重交即归零。
 
 Shape borrowed from langgraph checkpoint-sqlite (state snapshot + pending
@@ -75,10 +75,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_sr_tasks_fingerprint
 #: sr_tasks 里发布后新增的列。`CREATE TABLE IF NOT EXISTS` 对**已存在**的表一个字
 #: 都不改，所以升级前建的库（生产上就有）只能靠 ALTER TABLE 补 —— 见 _ensure_columns。
 #:
-#: preview_state / preview_note（2026-09-20）：产物预览的服务端急烤状态。见
+#: preview_state / preview_note（2026-09-20）：产物预览的服务端主动生成状态。见
 #: `list_preview_candidates` 那一段。补出来的列在老行里是 NULL，**这正是想要的**
-#: —— NULL 的含义是「没烤过」，急烤循环只认这个值，所以升级当天的历史 COMPLETED
-#: 行会被认领；挡它的是**年龄窗口**（`finished_at` 超出窗口就不烤），不是回填。
+#: —— NULL 的含义是「没生成过」，主动生成循环只认这个值，所以升级当天的历史 COMPLETED
+#: 行会被认领；挡它的是**年龄窗口**（`finished_at` 超出窗口就不生成），不是回填。
 _SR_TASK_ADDED_COLUMNS = (("started_at", "REAL"), ("finished_at", "REAL"),
                           ("preview_state", "TEXT"), ("preview_note", "TEXT"))
 
@@ -273,23 +273,23 @@ class Store:
                     "finished_at": now if mark_finished else None}
         return row
 
-    # ---- 产物预览急烤（api/app.py::_eager_bake_tick 的队列） ---------------
+    # ---- 产物预览主动生成（api/app.py::_eager_bake_tick 的队列） ---------------
     #
     # 为什么队列是**从库派生**的，而不是在状态转换点上入队：写终态的
     # `platform._task_state` 有**两个**调用者 —— 后台 `_poll_once` 与请求路径
     # `_task_view`（GET /api/queue）。谁先观测到 RUNNING→COMPLETED 谁把「变了」
-    # 这个信号拿走，另一个看到的是「没变化」，挂在转换点上的入队钩子必然偶发漏烤。
+    # 这个信号拿走，另一个看到的是「没变化」，挂在转换点上的入队钩子必然偶发漏生成。
     # 派生 + `claim_preview_bake` 的原子 CAS 之后，这个竞态在结构上不存在：
-    # 急烤循环不关心「谁先看到」，它只关心「这行还没被认领」。
+    # 主动生成循环不关心「谁先看到」，它只关心「这行还没被认领」。
     #
-    # preview_state 取值：NULL（没烤）→ running → done | skipped | failed | cleared。
+    # preview_state 取值：NULL（没生成）→ running → done | skipped | failed | cleared。
     # 粒度是**行**（= 一个 task_fingerprint），所以同一 suffix 重跑必须重新武装，
     # 由 put_sr_task 的 UPDATE 分支负责（见那里的注释）。
-    # `cleared` 是**人工**结局、不由烘焙流程写：场景库的「清除缓存」把文件删掉后
-    # 标上它，让这行不再是候选（否则下一轮急烤会把文件重新烤回来，用户以为白清了）。
+    # `cleared` 是**人工**结局、不由生成预览流程写：场景库的「清除缓存」把文件删掉后
+    # 标上它，让这行不再是候选（否则下一轮主动生成会把文件重新被写回，用户以为白清了）。
     # 写它的入口只有一个 —— `mark_preview_cleared`（CAS，见那里的注释）。
 
-    #: 每轮最多看一眼多少行 COMPLETED 候选（不是每轮烤多少 —— 那恒为 1）。
+    #: 每轮最多看一眼多少行 COMPLETED 候选（不是每轮生成多少 —— 那恒为 1）。
     _PREVIEW_SCAN_LIMIT = 20
 
     def list_preview_candidates(self, *, max_age_sec: float,
@@ -297,13 +297,13 @@ class Store:
         """等着做产物预览的 COMPLETED 行，最新跑完的在前。
 
         三条判据都是必须的：
-          * `status='COMPLETED'` —— **FAILED 绝不烤**。`writeTiff` 先 rename 再写，
-            失败的运行会在产物路径上留下半截文件，烤出来是坏图。
+          * `status='COMPLETED'` —— **FAILED 绝不生成**。`writeTiff` 先 rename 再写，
+            失败的运行会在产物路径上留下半截文件，生成的是坏图。
           * `preview_state IS NULL` —— 还没被认领过（认领即写 'running'）。
           * `finished_at >= ?` —— 年龄窗口。`finished_at IS NULL` 的行（加这两列之前
             建的、或整段运行期间 sr-api 不在场没观测到开始的）**一律排除**：那个值是
             NOT NULL 比较，NULL 天然不在窗口内，所以不用额外写条件，但这条判据是
-            升级当天不把历史 COMPLETED 行全烤一遍的**唯一**屏障。
+            升级当天不把历史 COMPLETED 行全生成一遍的**唯一**屏障。
         """
         cutoff = time.time() - float(max_age_sec)
         rows = self._db().execute(
@@ -315,13 +315,13 @@ class Store:
         return [self._sr_task_row(r) for r in rows]
 
     def claim_preview_bake(self, task_id: int) -> dict | None:
-        """认领一行的产物预览烘焙。抢到返回该行，被人抢在前面则 None。
+        """认领一行的产物预览生成。认领返回该行，被人抢在前面则 None。
 
         这是并发与重复认领的**唯一裁决点**：CAS 写 `preview_state='running'`，
-        只有 `rowcount == 1` 才算抢到。`status='COMPLETED'` 一并写进 WHERE，是为了
-        挡住「认领与重跑赛跑」—— 用户在这一行刚跑完、急烤还没动手时又交了同一个
+        只有 `rowcount == 1` 才算认领。`status='COMPLETED'` 一并写进 WHERE，是为了
+        挡住「认领与重跑赛跑」—— 用户在这一行刚跑完、主动生成还没动手时又交了同一个
         suffix，`put_sr_task` 会把 status 打回 submitted 并清 preview_state，
-        此时这份认领必须失效（否则会去烤一个正在被重写的产物）。
+        此时这份认领必须失效（否则会去生成一个正在被重写的产物）。
         """
         db = self._db()
         cur = db.execute(
@@ -335,10 +335,10 @@ class Store:
 
     def set_preview_state(self, task_id: int, state: str,
                           note: str | None = None) -> dict | None:
-        """写回急烤结局（done / skipped / failed）+ 人话说明。
+        """写回主动生成结局（done / skipped / failed）+ 人话说明。
 
         **不碰 updated_at**：那个列是「这行最近一次写回」的时刻，队列按它排序、
-        界面上也有对应读数。预览烤没烤成与作业本身无关，抬它会让人以为作业动了。
+        界面上也有对应读数。预览生成没降采样到与作业本身无关，抬它会让人以为作业动了。
         """
         db = self._db()
         db.execute("UPDATE sr_tasks SET preview_state = ?, preview_note = ? "
@@ -347,22 +347,22 @@ class Store:
         return self.get_sr_task_by_id(task_id)
 
     def mark_preview_cleared(self, task_id: int, note: str | None = None) -> bool:
-        """把一行的预览状态标成 `cleared`（人工清了缓存），挡掉后续急烤认领。
+        """把一行的预览状态标成 `cleared`（人工清了缓存），挡掉后续主动生成认领。
 
         **这是 CAS，不能用 `set_preview_state` 顶替。** 后者是无条件 UPDATE，会把
         别人写下的 `'running'` 一起盖掉 —— 那个 running 属于一个**正在跑**的
         `_bake_product_preview`，它跑完还会调 `set_preview_state(..., 'done')` 把值
         写回来。于是库里说 done、盘上文件已被我们删掉，两边都以为自己是对的。
-        抢不到就返回 False，由调用方如实报成「后台正在烘焙这一景」。
+        抢不到就返回 False，由调用方如实报成「后台正在生成预览这一景」。
 
         WHERE 里的 `preview_state IS NULL OR preview_state != 'running'`：
-        SQL 中 `NULL != 'running'` 求值为 NULL 而非 TRUE，只写后半句会把「从没烤过」
-        的行整个漏掉 —— 而它们恰恰最需要被挡住（急烤下一轮就会认领，几秒后文件
+        SQL 中 `NULL != 'running'` 求值为 NULL 而非 TRUE，只写后半句会把「从没生成过」
+        的行整个漏掉 —— 而它们恰恰最需要被挡住（主动生成下一轮就会认领，几秒后文件
         复活，用户以为清除没生效）。
 
         `status = 'COMPLETED'` 也是判据：正在排队/运行的同一 fingerprint 不该被标，
         否则那次运行跑完后不会再有自动预览（该行 preview_state 已被我们钉成非
-        NULL）。用户清的是**旧缓存**，新的一次运行理应照常烤 —— 而重新提交会经
+        NULL）。用户清的是**旧缓存**，新的一次运行理应照常生成 —— 而重新提交会经
         `put_sr_task` 把 preview_state 归 NULL 重新武装，这条不冲突。
 
         不碰 updated_at，理由同 `set_preview_state`。
@@ -394,7 +394,7 @@ class Store:
         与「创建时间」列都靠它，而耗时已不再派生自它。
 
         `preview_state / preview_note` 一并归 NULL：**同一 suffix 重跑必须重新武装
-        急烤**，否则第二次跑完永远停在旧的 `done` 上、盘上那份预览还是上一次的产物。
+        主动生成**，否则第二次跑完永远停在旧的 `done` 上、盘上那份预览还是上一次的产物。
         这个重置依赖「提交发生在轮询观测到终态之前」—— 顺序天然成立（提交是同步的
         请求路径，终态要等调度器回话），但它是**隐含依赖**，所以写在这里。
         """

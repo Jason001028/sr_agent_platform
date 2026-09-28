@@ -203,16 +203,16 @@ describe('runSceneBake —— 单景失败不中断整批', () => {
     ]);
   });
 
-  it('本体烤失败 → 同一景的 NOSR 仍然继续（两份是独立的两步）', async () => {
+  it('本体生成失败 → 同一景的 NOSR 仍然继续（两份是独立的两步）', async () => {
     const { calls, deps } = harness({
       body: async (it) => {
         calls.push('body:' + it.name);
-        if (it.name === 'a') throw new Error('烘焙超时');
+        if (it.name === 'a') throw new Error('生成预览超时');
       },
     });
     const r = await runSceneBake([ROWS[0]], deps, never.signal);
     expect(calls).toEqual(['resolve:a', 'body:a', 'nosr:a']);
-    expect(r.fails).toEqual({ a: { stage: 'body', reason: '烘焙超时' } });
+    expect(r.fails).toEqual({ a: { stage: 'body', reason: '生成预览超时' } });
   });
 
   it('NOSR 自己失败（本体成功）→ 记 nosr 失败', async () => {
@@ -226,19 +226,19 @@ describe('runSceneBake —— 单景失败不中断整批', () => {
 
   it('本体已失败、NOSR 也失败 → 保留本体那条（更严重且先发生），NOSR 落进 notes', async () => {
     const { deps } = harness({
-      body: async () => { throw new Error('烘焙超时'); },
+      body: async () => { throw new Error('生成预览超时'); },
       nosr: async () => { throw new Error('siblings 502'); },
     });
     const r = await runSceneBake([ROWS[0]], deps, never.signal);
-    expect(r.fails).toEqual({ a: { stage: 'body', reason: '烘焙超时' } });
-    expect(r.notes).toEqual({ a: 'NOSR 那份没烤成：siblings 502' });
+    expect(r.fails).toEqual({ a: { stage: 'body', reason: '生成预览超时' } });
+    expect(r.notes).toEqual({ a: 'NOSR 那份没降采样到：siblings 502' });
   });
 
   it("NOSR 返回 'missing' → 进 notes 不进 fails（盘上没有那份是事实）", async () => {
     const { deps } = harness({ nosr: async () => 'missing' });
     const r = await runSceneBake([ROWS[0]], deps, never.signal);
     expect(r.fails).toEqual({});
-    expect(r.notes).toEqual({ a: '盘上没有未超分那份（NOSR），只烤了本体' });
+    expect(r.notes).toEqual({ a: '盘上没有未超分那份（NOSR），只生成了本体' });
     expect(r.done).toBe(1);
   });
 
@@ -283,7 +283,7 @@ describe('runSceneBake —— 取消点', () => {
     expect(r.fails).toEqual({});
   });
 
-  it('本体那步中途被 abort：NOSR 不再发，也不算失败（在烤的那一份停不下来，就是让它烤完）', async () => {
+  it('本体那步中途被 abort：NOSR 不再发，也不算失败（在生成的那一份停不下来，就是让它生成完）', async () => {
     const ac = new AbortController();
     const { calls, deps } = harness({
       body: async (it) => { calls.push('body:' + it.name); ac.abort(); },
@@ -291,7 +291,7 @@ describe('runSceneBake —— 取消点', () => {
     const r = await runSceneBake(ROWS, deps, ac.signal);
     expect(calls).toEqual(['resolve:a', 'body:a']);
     expect(r.stopped).toBe(true);
-    expect(r.done).toBe(1);             // 本体烤成了，这张卡留着
+    expect(r.done).toBe(1);             // 本体降采样到了，这张卡留着
     expect(r.fails).toEqual({});
   });
 

@@ -99,10 +99,10 @@
 
 ### 2026-09-02 · 阶段4 盘阵场景读 JPG（废弃 HttpSource/Range，改服务器预生成 JPG）
 
-- **决策改向**：盘阵数据路径从「前端 HttpSource + nginx Range 读 TIF 字节」改为「**服务器预生成 JPG**」——`source.ts` 的 HttpSource 桩废弃不实现，浏览器对盘阵场景只 `<img>`/canvas 加载服务器烘焙的 8192 长边 JPG。理由 = 与 09-01「预览=JPG 中间产物」原意对齐 + 首次生成懒加载几十秒后 nginx 静态直出 + 不占浏览器 2GB/16384² 预算。
+- **决策改向**：盘阵数据路径从「前端 HttpSource + nginx Range 读 TIF 字节」改为「**服务器预生成 JPG**」——`source.ts` 的 HttpSource 桩废弃不实现，浏览器对盘阵场景只 `<img>`/canvas 加载服务器生成预览的 8192 长边 JPG。理由 = 与 09-01「预览=JPG 中间产物」原意对齐 + 首次生成懒加载几十秒后 nginx 静态直出 + 不占浏览器 2GB/16384² 预算。
 - ✅ **后端 FastAPI**（`backend/api/`）：`GET /api/scenes` 包 `search_scenes`（新增 sensor 过滤），每行补 `W/H`（优先伴生 `.hdr` ENVI 头，缺则纯结构探测 TIF 头，`(path,mtime)` LRU 缓存）+ `jpgUrl`（nginx 静态地址，未生成 null）+ opaque base64 scene id（`scene_id(rel)`）；`GET /api/scenes/{id}/preview` 懒生成 → `FileResponse`。路径白名单 `paths.py`：`ensure_within` realpath 含于根 + 拒 `../`/白名单外/fake/非文件，`scene_id_to_abs` 拒坏 id。CORS `*`。`python -m backend.api` 直启 / systemd 走 `uvicorn backend.api.app:create_app --factory`。
 - ✅ **预览 JPG 服务**（`backend/services/preview_jpg.py`）：sparse 采样 = 前端语义 Python 镜像（ps=`min(1,8192/max(W,H))`、映射 `round(j*(W-1)/(pw-1))` 端点对齐，逐条带读行字节跨距、只留采样列，绝不整图载入）；拉伸 = 2% Linear + WhiteIsZero 先反色 + const 图规则（全 0→黑、其他 const→128）→ Pillow 灰 JPEG(q90)；缓存 = 幂等，落源同目录 `<basename>.preview.jpg`（或 SR_PREVIEWS_ROOT，须在 scenes root 内）；压缩/tiled/多波段小文件兜底 Pillow（`PILLOW_FALLBACK_MAX_PX=1<<26`），大文件不支持则明确报错。
-- ✅ **前端**：`lib/scene.ts`（`__SR_CFG__` 配置 + URL/解码 helper：JPG rgba→1-band src + stats 固定 0..255 → 交互拉伸恒等，`thumbPolysToOrig` 元数据 W/H 换算）+ `stores/scenes.ts` + `pages/ScenesPage.vue`（新路由 `/scenes`）+ viewer store `openSceneJpg`（route='jpg' 同构 rec：layout 显示「盘阵 JPG（已烘焙 2% 线性拉伸）」、thumb=canvas、掩码复用；`paintStretch` 对 jpg 早退、导出禁用）+ Toolbar 拉伸下拉场景禁用（固定显示「2% 线性」+ tooltip）+ FileList 盘阵 chip。
+- ✅ **前端**：`lib/scene.ts`（`__SR_CFG__` 配置 + URL/解码 helper：JPG rgba→1-band src + stats 固定 0..255 → 交互拉伸恒等，`thumbPolysToOrig` 元数据 W/H 换算）+ `stores/scenes.ts` + `pages/ScenesPage.vue`（新路由 `/scenes`）+ viewer store `openSceneJpg`（route='jpg' 同构 rec：layout 显示「盘阵 JPG（已生成预览 2% 线性拉伸）」、thumb=canvas、掩码复用；`paintStretch` 对 jpg 早退、导出禁用）+ Toolbar 拉伸下拉场景禁用（固定显示「2% 线性」+ tooltip）+ FileList 盘阵 chip。
 - ✅ **测试**：backend pytest 148 全过（新增 `test_api.py` 16 + `test_preview_jpg.py` 12 + sensor 过滤；fake 回退/白名单穿越/预览幂等/hdr 优先）；前端 Vitest 85 全过（scene.test.ts 10：config/query/预览 id 转义/1-band 提取/route-jpg 同构 rec/掩码换算端点）+ `vue-tsc --noEmit` 零错误；`.e2e` 全绿——`test-scenes.js` **45 断言**（本地静态服务顶替 nginx 的 /disk-array + 真 FastAPI uvicorn：打开→懒生成→静态读 JPG→/viewer rec→掩码按元数据换算）+ `test-vue-viewer.js` **42 断言**（本地文件路径回归，零 pageerror）。
 - ✅ **部署**：`deploy/nginx.conf`（`location /disk-array/ { alias <root>/; }` 静态托管 + `.preview.jpg` 缓存头 + `location /api/` 反代 127.0.0.1:8000 `proxy_read_timeout 600s` + SPA 尾斜杠规则含 /scenes）；`deploy/sr-api.service`（systemd：uvicorn + SR_SCENES_ROOT/SR_PREVIEWS_ROOT env）；`deploy/requirements-api.txt`（fastapi/uvicorn/numpy/pillow）；`deploy/README.md` 重写为阶段2/4 双段部署文档；`package-offline.sh` 增补 backend + 后端部署件进离线包。
 - ⚠️ **待真机（内网 CentOS7 + Win11）验收**：首次 JPG 生成的耗时/内存（1.1GB/1.78GB 真实图）、二次秒开、显示占用、掩码按元数据 W/H 的换算精度；清单见 §5.2。
@@ -202,10 +202,10 @@
   - `.e2e/test-platform.js` **12 断言** —— 8c197fc 改了产品行为，修三处前置：提交需自带 `<目录名>_mask.tif`（§4.3 起掩码按约定推导、缺文件直接 400）、按钮文案 `提交到 Slurm`→`提交 SR`（改成两步式）、[C] 段打开场景必须带 `lqPath`（否则 `srReady` 为假、按钮禁用）。末尾那条「掩码任务 COMPLETED」的失败**不是回归**：同参重提被幂等层命中 `RESUMED_COMPLETED`（§4.3 起前端恒传 `mask_path: null` → 指纹必然相同），已改为「先断言不产生第二行，再改倍率→真新建任务」。
   - `.e2e/test-vue-viewer.js` **35 断言** —— 删掉针对**已取消功能**的整段导出/降档重试断言（`setSaver`/`reExportJpg`/`scanPendingExports`/`jpgStatus` 已随 §4.5 从 `e2eHooks.ts` 移除），钩子清单同步为现役 22 个。留着的旧断言只会长期报红。
 - ⚠️ **本机浏览器回归必须用 Chrome**：Edge 与用户正在运行的 Edge 实例握手会 `Failed to launch the browser process: Code: 0`（临时 profile 挡不住）。已把 `launchBrowser.js` 候选顺序改为 **Chrome 优先**（`SR_E2E_BROWSER` 仍排最前可覆盖）。
-- 🐛 **发现并修掉一个产品缺陷：`<目录名>_mask.tif` 被当成场景列出**。`scene_search.is_scene_file` 原先只排除 `.preview.jpg`；真机形态是掩膜与场景**同名同目录**，于是每个已带掩膜的目录都会在 `/scenes` 多出一行——卫星/传感器由掩膜文件名解析（`satellite=<父目录名>`、`sensor='mask'`）、尺寸取掩膜 TIFF 头、「提交 SR」还可点（同目录 → 同指纹 → 幂等命中，不至于重复跑，但列表是脏的）。修：`is_scene_file` 增加 `_DERIVED_STEM_SUFFIX = "_mask"` 判定（只认**结尾**标记，`GF07A03_mask_PMS01_….tif` 仍是场景），后端 +3 例、`test-scenes.js` 的【已知问题】**镜像断言**改为「掩膜未出现在列表」（5 行 → 3 行）。**（2026-09-16 已被白名单收件规则取代，见 §4 时间线同名条目——那条 `_DERIVED_STEM_SUFFIX` 常量已删。）**
+- 🐛 **发现并修掉一个产品缺陷：`<目录名>_mask.tif` 被当成场景列出**。`scene_search.is_scene_file` 原先只排除 `.preview.jpg`；真机形态是掩码与场景**同名同目录**，于是每个已带掩码的目录都会在 `/scenes` 多出一行——卫星/传感器由掩码文件名解析（`satellite=<父目录名>`、`sensor='mask'`）、尺寸取掩码 TIFF 头、「提交 SR」还可点（同目录 → 同指纹 → 幂等命中，不至于重复跑，但列表是脏的）。修：`is_scene_file` 增加 `_DERIVED_STEM_SUFFIX = "_mask"` 判定（只认**结尾**标记，`GF07A03_mask_PMS01_….tif` 仍是场景），后端 +3 例、`test-scenes.js` 的【已知问题】**镜像断言**改为「掩码未出现在列表」（5 行 → 3 行）。**（2026-09-16 已被白名单收件规则取代，见 §4 时间线同名条目——那条 `_DERIVED_STEM_SUFFIX` 常量已删。）**
 - 🗂 **`.e2e/` 从「整目录忽略」改为「只忽略依赖/大图」**：`test-scenes.js` 就是这么丢的。现在 `*.js` / `lib/` / `package.json` / `package-lock.json` / `*.py` 入库，`node_modules/`、`fixtures/`、`*.tif`、`*.jpg` 仍忽略。**后果**：以后清理工作区不会再丢掉可复跑的回归资产。
-- 全绿实测：后端 **354 passed / 1 skipped**（348 + 4 链路 + 2 掩膜）、前端 Vitest **160 passed**、浏览器 **58 + 12 + 35 断言**。
-- 📝 **文档债（已修一部分，剩下的下次）**：本次顺手改了 `current-question.md`、`api-contract.md`、`frontend-migration.md`、`platform-tutorial.md`、`project-deep-dive.md`（对外摘要里「用 Slurm 提交」已改为本机直跑）与 `CLAUDE.md`。**未改**：`docs/knowledge/interview/` 下的专题篇（`http-sse.md` Q24 / `db-storage.md` / `fastapi-rest.md` / `python-concurrency.md`）仍以 `sbatch` 讲幂等与「先记意图后记结果」。机制本身没变（执行器接口对齐、`slurm.py` 作为存量保留且仍是 `SR_EXECUTOR=slurm` 的代码路径），但叙述该补一句"提交动作经可切换执行器、默认 bash"。另有历史条目里的旧计数（`frontend-migration.md` §阶段5、`frontend-phase4-phase5-prompts.md` 门禁）按"当时实测"保留不改。
+- 全绿实测：后端 **354 passed / 1 skipped**（348 + 4 链路 + 2 掩码）、前端 Vitest **160 passed**、浏览器 **58 + 12 + 35 断言**。
+- 📝 **文档债（已修一部分，剩下的下次）**：本次同时改了 `current-question.md`、`api-contract.md`、`frontend-migration.md`、`platform-tutorial.md`、`project-deep-dive.md`（对外摘要里「用 Slurm 提交」已改为本机直跑）与 `CLAUDE.md`。**未改**：`docs/knowledge/interview/` 下的专题篇（`http-sse.md` Q24 / `db-storage.md` / `fastapi-rest.md` / `python-concurrency.md`）仍以 `sbatch` 讲幂等与「先记意图后记结果」。机制本身没变（执行器接口对齐、`slurm.py` 作为存量保留且仍是 `SR_EXECUTOR=slurm` 的代码路径），但叙述该补一句"提交动作经可切换执行器、默认 bash"。另有历史条目里的旧计数（`frontend-migration.md` §阶段5、`frontend-phase4-phase5-prompts.md` 门禁）按"当时实测"保留不改。
 
 ### 2026-09-09 · 阶段6 查看器上下文侧舱（右侧 [ROI/工具] + [Agent]）
 
@@ -317,7 +317,7 @@
    - 把本目录的 `<目录名>_NOSR.tif`（= 9/12 超分**之前**的原始输入）改名还原回 `<目录名>.tif`
      ——**必须先备份现存的超分产物**（POSIX rename 会覆盖同名文件）。
 
-   顺带：`SR_SCENES_ROOT` 是**单根**（`paths.py:34-39` 只读一个值，无多根写法）；符号链接**只有建在根
+   同时：`SR_SCENES_ROOT` 是**单根**（`paths.py:34-39` 只读一个值，无多根写法）；符号链接**只有建在根
    本身**（或祖先）才通得过 `paths._is_within` 的两边 `.resolve()` 比较，**建在根内会被判越权**——
    这条把「建符号链接」这个选项收窄成了一句话。
 
@@ -334,7 +334,7 @@
    （指纹含 suffix 文本，缓存会让指纹变成进程启动时刻的函数 → 同一逻辑提交重复投作业）。
 2. `SR_SUFFIX_DEFAULT` 环境变量**作废**（设了不读）。**真机 systemd 里如果加过这一行，删掉**；
    要改后缀改那份 XML。
-3. 顺带修一个现存缺陷：agent 工具 `run_sr` 此前不做 strip / 不给默认值 / 不校验，而 REST 入口
+3. 同时修一个现存缺陷：agent 工具 `run_sr` 此前不做 strip / 不给默认值 / 不校验，而 REST 入口
    三样都做——同一个"不传 suffix"的提交，两入口算出**不同指纹 → 幂等失效 → 重复投作业**。
    现由 `services/run_sr.py::normalize_suffix` 单点收口，两入口共用。有测试钉住两入口指纹相等。
 4. 前端不再预填 `'sr'`（预填值会作为显式参数压过配置文件），后缀输入框留空 + 占位文案说明来源。
@@ -368,7 +368,7 @@
 2. 文件名 = `<目录名>.<ext>`（SC 步骤的输入）或 `PAN.<ext>`（RC 步骤的输入，`util.get_l1_pan_tif_rcsc`
    的 RC 分支读的就是 `PAN.tif`）。
 
-**顺带纠正的语义**：`_scene_row` 的 `lq_path` 从「场景文件父目录」= 盘阵根，变成真正的场景目录，
+**同时纠正的语义**：`_scene_row` 的 `lq_path` 从「场景文件父目录」= 盘阵根，变成真正的场景目录，
 与真机 `/DiskArray/GSHC2IMPS/年/月/日/生产编号` 一致；`/queue` 表单带出的 `lq_path` 也随之改变
 （`.e2e/test-scenes.js`、`test-platform.js` 的断言已同步）。
 
@@ -553,18 +553,18 @@ PAN 场景掩码名取输入名不取目录名，含队列表单显示的那一�
 ### 2026-09-17 · 盘阵场景拉伸下拉被禁用：一个模式都用不了（开发机）
 
 **现象（真机，客户端）**：打开盘阵场景后，工具栏的拉伸下拉是灰的、固定停在「2% 线性」，
-悬停提示「盘阵 JPG 已烘焙 2% 线性拉伸」，换不了任何别的模式。
+悬停提示「盘阵 JPG 已生成预览 2% 线性拉伸」，换不了任何别的模式。
 
 **根因（读代码可判定，已用 e2e 反证）**：不是崩溃，是一条**刻意的闸门**，但它给的理由在
 数据形态上不成立。`Toolbar.vue` 用 `sceneActive`（`route === 'jpg'`）同时禁掉下拉并强制显示
 `linear2`；`viewer.paintStretch` 又在开头对 `route === 'jpg'` 直接 `return`（只记
-`paintedMode`、不重画）。理由是「别对已烘焙图做二次拉伸」—— 可是本地拖入的 JPG
+`paintedMode`、不重画）。理由是「别对已生成预览图做二次拉伸」—— 可是本地拖入的 JPG
 （`route === 'img'`，走同一个 `sceneDecodePixels`、同一份 stats）从来就可以随便拉：数据形态
 完全一样，能力一边有一边没有。
 
 另有一条被忽略的事实：`sceneDecodePixels` 用 `computeStats(..., 0, 255)`，所以 `linear` 在
-这张图上恒等。也就是说**即使放开闸门、起手值仍取线性，画面与服务器烤的也逐像素一致** ——
-放开本身不会毁掉烘焙值，真正的取舍只在「起手值取哪个模式」。
+这张图上恒等。也就是说**即使放开闸门、起手值仍取线性，画面与服务器生成的也逐像素一致** ——
+放开本身不会毁掉生成预览值，真正的取舍只在「起手值取哪个模式」。
 
 **改动**（用户决策：场景起手值取**直方图均衡**）：
 
@@ -575,16 +575,16 @@ PAN 场景掩码名取输入名不取目录名，含队列表单显示的那一�
   `setStretch` 改的是当前这张图（记在 `rec.paintedMode` 上）且**场景不写回全局**；新增
   `activeStretch` 计算属性 = 下拉显示的真值（`paintedMode ?? 起手值`）。
 - `frontend/src/components/Toolbar.vue`：去掉 `:disabled` 与 `'linear2'` 强制值，改显示
-  `store.activeStretch`；title 改为说明「服务器烤的 2% 线性是底图，这里改的是二次拉伸，
+  `store.activeStretch`；title 改为说明「服务器生成的 2% 线性是底图，这里改的是二次拉伸，
   两端已被裁掉，拉不回来」。
 - `frontend/src/components/AgentChatTab.vue`：送 Agent 的上下文如实报**当前显示层**模式
-  （原先 `route==='jpg'` 时写死「2% 线性（盘阵烘焙）」）。
+  （原先 `route==='jpg'` 时写死「2% 线性（盘阵生成预览）」）。
 - `frontend/src/pages/ScenesPage.vue`：页脚提示由「交互式拉伸/导出 JPG 在场景路径不可用」
-  改为「显示层拉伸可改（起手值直方图均衡），烘焙时裁掉的两端拉不回来」；顺带删掉已不存在的
+  改为「显示层拉伸可改（起手值直方图均衡），生成预览时裁掉的两端拉不回来」；同时删掉已不存在的
   「导出 JPG」半句（导出链路 09-14 已整体删除）。
 - `frontend/src/viewer/e2eHooks.ts`：`__viewer` 补 `activeStretch()` / `setStretch()`，rec 摘要
   补 `paintedMode`（浏览器回归要用）。
-- 不改：`rec.layout` 文案「盘阵 JPG（已烘焙 2% 线性拉伸）」—— 它描述的是**文件本身**，仍成立。
+- 不改：`rec.layout` 文案「盘阵 JPG（已生成预览 2% 线性拉伸）」—— 它描述的是**文件本身**，仍成立。
 
 **验证**（开发机，全绿）：后端 `pytest backend/` → **466 passed / 1 skipped**（本轮未动后端，
 基线复核）；前端 `npx vitest run` → **178 passed**（基线 175，新增 3 例：场景起手值恒为均衡 /
@@ -606,7 +606,7 @@ PAN 场景掩码名取输入名不取目录名，含队列表单显示的那一�
 也可以直接告诉我要换成哪个模式。③ 在同一张场景图上改过模式后，切到别的图再切回来应保持
 （每图独立），且本地 TIF 的起手值不应被场景上的操作改掉。
 
-### 2026-09-17 · 页宽断言加严：旧断言抓不到「三页一起漂」，顺带发现 dist 停在 09-15（开发机）
+### 2026-09-17 · 页宽断言加严：旧断言抓不到「三页一起漂」，同时发现 dist 停在 09-15（开发机）
 
 **现象（复核上一日「队列页三处缺陷」的收尾项 ③「三页正文是否确实同宽」）**：源码里三页确实
 已统一到 `--page-w`，但盘上 `frontend/dist` 构建于 **09-15**，产物里仍是旧值 ——
@@ -652,17 +652,17 @@ PAN 场景掩码名取输入名不取目录名，含队列表单显示的那一�
 **交付提醒**：本次交付必须带上**这一版重建的 `dist`**（盘上旧包就是 1180/1240/1240）；
 且按前一条记录的提醒，`frontend/dist` 与 `backend/` 两个包要一起更新。
 
-### 2026-09-17 · 烘焙规则 v2：各边 1/2 + 直方图均衡，并接受「单张 .tif」入口（开发机）
+### 2026-09-17 · 预览生成规则 v2：各边 1/2 + 直方图均衡，并接受「单张 .tif」入口（开发机）
 
 **需求（用户原话）**：「当前查看器打开一个 tif 时，不直接阅读该 tif，而是在其目录将 tif "阅读"并生成
-一个质量约为（长宽各为原先 1/2 质量）的 .jpg，然后读取 .jpg」；「烘焙速度越快越好」。
+一个质量约为（长宽各为原先 1/2 质量）的 .jpg，然后读取 .jpg」；「生成预览速度越快越好」。
 
 **六条已拍板的决策**（两轮问答 + 计划批准，实现中不再改）：
 
 1. **入口**：只做「服务端路径」那条（盘阵场景目录 / 场景库），**外加**支持粘单个 `.tif` 文件路径。
 2. **尺寸**：严格各 1/2，**不封顶**（24739×24199 → 12370×12100）。小图同样走 1/2。
 3. **产物**：**覆盖**现有 `<stem>.preview.jpg`，不新建第二份；拉伸由「2% 线性」改「**直方图均衡**」。
-4. **首次等待**：等烘焙完再显示（不退回「先读 TIF 顶着」）。
+4. **首次等待**：等生成预览完再显示（不退回「先读 TIF 顶着」）。
 5. **显示层起手拉伸**：盘阵场景仍取 `equal`（`SCENE_START_STRETCH` 不动）。
 6. **加速**：并行读 **8 线程**；JPEG **q85**。
 
@@ -679,25 +679,25 @@ PAN 场景掩码名取输入名不取目录名，含队列表单显示的那一�
 - 读取按行分段并行（`READ_THREADS = 8`，`PARALLEL_MIN_ROWS = 512` 以下串行）。**Windows 没有
   `os.pread`**，所以每线程开自己的句柄。`ex.map(...)` 的结果必须 `list()` 消费掉 —— 异常在线程里
   抛出，不迭代就不会转交给调用方，会变成静默漏读。
-- 规则戳写进 JPEG 注释（`srprev:v2:half+equal:q85`），命中时比对 —— 光看 mtime 不行：真机上换包后
-  旧的 8192+2% 图 mtime 比源新，会被判有效而**永不重烤**。改尺寸/拉伸/质量任一都要 bump
+- 规则签名写进 JPEG 注释（`srprev:v2:half+equal:q85`），命中时比对 —— 光看 mtime 不行：真机上换包后
+  旧的 8192+2% 图 mtime 比源新，会被判有效而**永不重新生成**。改尺寸/拉伸/质量任一都要 bump
   `PREVIEW_RULE_VERSION`。
-- `Image.MAX_IMAGE_PIXELS = 1 << 30`：**这是一个真 bug**，不是保险。1/2 尺度把 2.4 万像素级的源烤成
+- `Image.MAX_IMAGE_PIXELS = 1 << 30`：**这是一个真 bug**，不是保险。1/2 尺度把 2.4 万像素级的源降采样到
   1.5 亿像素，超过 Pillow 默认上限（8948 万）的 2 倍就抛 `DecompressionBombError` → `_cache_hit` 的
-  `Image.open` 失败 → 缓存永远判不中 → **每次打开都重烤一遍**，整条优化全部抵消。
+  `Image.open` 失败 → 缓存永远判不中 → **每次打开都重新生成一遍**，整条优化全部抵消。
 
-**后端 `backend/api/app.py`（裸 .tif 入口）**：`resolve_scene` 的 `{path}` 分支加一个文件判定 ——
+**后端 `backend/api/app.py`（无伴随件的 .tif 入口）**：`resolve_scene` 的 `{path}` 分支加一个文件判定 ——
 `.tif/.tiff` 走 `_resolve_bare_tif`，别的后缀 400 说清（不是掉进目录逻辑报「目录不存在」）。
 响应新增 `sr_capable`：裸 TIF 的父目录**确实是**合法场景目录时才是 true，否则 `mask_path` 与
 `row.lq_path` 一起为 null。另修一处 `_same_file`：原用 `Path.__eq__` 比路径，它在 Windows 上
 大小写敏感，用户把盘符写成小写就会把可提交的场景误判成不可提交。
 
-**前端**：`fetchSceneJpg` 新增可选 `onPhase`（只在「本次会触发烘焙」时响一次，接 `row.hasPreview`）；
+**前端**：`fetchSceneJpg` 新增可选 `onPhase`（只在「本次会触发生成预览」时响一次，接 `row.hasPreview`）；
 `viewer.openScenePath` 按 `sr_capable` 决定写不写 `lqPath`（`lqPath` 是能否提交 SR 的唯一判据）；
 场景库页加一行 `scenes.phase` 文案（遮罩 `viewer.showMask` 只挂在 `/viewer`，本页调了看不见）；
 `ScenePathBar` 文案补「也可以粘单个 .tif 文件路径」；五处「2% 线性」文案改「直方图均衡」。
 
-**顺带修掉一个自己的改动引出的缺陷**：`activate()` 会为「没有 lqPath 的 rec」调 `tryLinkScenes`
+**同时修掉一个自己的改动引出的缺陷**：`activate()` 会为「没有 lqPath 的 rec」调 `tryLinkScenes`
 反推目录。裸 TIF 恰好是 `route='jpg'` 且 `lqPath=null`，于是它拿**裸文件名**去反推 —— 这是**错的**：
 那张图的目录已经由 resolve 按**绝对路径**定过，反推按名字猜的可能是另一个目录，用户点「提交 SR」
 就会拿着错的 `lq_path` 去跑。现在 `tryLinkScenes` 对 `route==='jpg'` 一律不试（e2e 的 404 计数抓住了它：
@@ -723,8 +723,8 @@ PAN 场景掩码名取输入名不取目录名，含队列表单显示的那一�
 G 段 9 条）/ `test-scenes.js` **65**（无回归，只改注释）/ `test-platform.js` **22** /
 `test-vue-viewer.js` **35**，四个套件全绿。
 
-开发机端到端实测（24739×24199 16bit，源 1.198GB，页缓存命中）：首次烘焙 **2.87s** → 12370×12100、
-**100.7 MB**（q85）；二次烘焙 0.0003s；戳 = `b'srprev:v2:half+equal:q85'`。
+开发机端到端实测（24739×24199 16bit，源 1.198GB，页缓存命中）：首次生成预览 **2.87s** → 12370×12100、
+**100.7 MB**（q85）；二次生成预览 0.0003s；戳 = `b'srprev:v2:half+equal:q85'`。
 Python 的 `stretch_equal` 与真实前端 TS 用 `vite-node` 跨语言逐像素核对，**7 个用例 0 差异**。
 
 #### 反证（三条，都实测过）
@@ -734,7 +734,7 @@ Python 的 `stretch_equal` 与真实前端 TS 用 `vite-node` 跨语言逐像素
    唯一真能区分新旧规则的：`test-scenes.js` 的 fixture 靠 `.hdr` 谎报尺寸，1/2 恰好落在 tif 真实
    尺寸上，两边同值 —— 已在该文件注释里写明，别再指望它钉规则。）
 2. **前端 `onPhase`**：把 `if (!row.hasPreview)` 临时改成 `if (true)` → 红在
-   `onPhase 只在「本次会触发服务端烘焙」时响一次`；还原转绿。
+   `onPhase 只在「本次会触发服务端生成」时响一次`；还原转绿。
 3. **后端并行读**：`test_parallel_path_matches_serial` 用 `mock.patch` 把阈值顶到天上强制串行，
    两边逐像素比。已反证（丢掉最后一段即红）。**注意它钉的是分块覆盖**，读行逻辑本身由斜坡/常量/
    WhiteIsZero 等内容测试钉 —— 两个分支共用同一个 `read_rows` 闭包，那里的 bug 会互相抵消。
@@ -749,21 +749,21 @@ Python 的 `stretch_equal` 与真实前端 TS 用 `vite-node` 跨语言逐像素
    fixture 只有 1600×800，看不出来。真机若卡顿/崩，退路是调小 `PREVIEW_SCALE` 或加一个长边上限
    （改一个常量）。
 2. **下载体积**：q85 下这块 JPG 是 **100.7MB**，比旧的 8192 封顶产物（约 52MB）大一倍。慢内网里
-   「下载」可能比「烘焙」还久 —— 请回传体感。
+   「下载」可能比「生成预览」还久 —— 请回传体感。
 3. **盘阵是单块 HDD 时 8 线程可能更慢**（磁头竞争）。这个数只能真机量。
 4. **nginx 缓存**：`deploy/nginx.conf` 给 `.preview.jpg` 设了 `max-age=3600`，升级后浏览器可能继续
    用同名的旧图一小时（后端戳已能识别，但浏览器拿的是缓存）。交付说明里要写硬刷新。
-5. **首次打开会变慢一次**（旧缓存无戳 → 判失效 → 重烤），属预期。
+5. **首次打开会变慢一次**（旧缓存无戳 → 判失效 → 重新生成），属预期。
 
 **交付提醒**：`backend/` 与重建的 `frontend/dist` 两个包要一起更新（同前两条）。
 
-### 2026-09-18 · 拖拽盘阵 `.tif` 改走服务端烘焙 JPG（临时缓存 1 天 TTL，开发机）
+### 2026-09-18 · 拖拽盘阵 `.tif` 改走服务端生成 JPG（临时缓存 1 天 TTL，开发机）
 
 #### 起因
 
 用户问的是这条链路能不能整条走通：「拖进一个盘阵中未超分的 `.tif` → 预览它的 `.jpg` →
 在上面画掩码 → 保存 → 点『提交 SR』」。逐段核对后：能力都在，但**拖拽那一段走的是浏览器
-本地解码**（route ∈ `utif/chunked/sparse`），而场景库/粘路径走的是服务端烘焙 JPG —— 同一个
+本地解码**（route ∈ `utif/chunked/sparse`），而场景库/粘路径走的是服务端生成 JPG —— 同一个
 文件、同一个人，两条入口的观感与成本完全不同（真机 1.1GB 的图每拖一次要重解一遍，吃几百 MB）。
 用户拍板：**拖拽也走 JPG，但那份 JPG 是临时缓存，有效期一天，第二天 0 点清除**。
 
@@ -774,11 +774,11 @@ Python 的 `stretch_equal` 与真实前端 TS 用 `vite-node` 跨语言逐像素
 - 新增 `backend/services/preview_cache.py`：`tmp_preview_path()` = `SR_TEMP_PREVIEWS_ROOT/<YYYY-MM-DD>/<sha256(源绝对路径)[:16]>.jpg`，**每次调用读 env**（测试要能按请求换根），只 `mkdir` + `stat`，**绝不列举目录**（「禁止扫盘」是硬约束）。`purge_temp_previews()` 只删「桶名是 ISO 日期、名 < 今天、且带 `.sr-tmp-preview` 标记文件」的目录，符号链接与非目录一律跳过，根是符号链接/指向文件系统根时拒绝清理，任何异常都吞掉（清理失败不该让服务起不来）。
 - `backend/api/app.py`：新增后台任务 `_tmp_preview_purge_loop`（**启动先清一次** → 睡到下一个本地 0 点 → 清 → 重复），`lifespan` 从单个 `app.state.poller` 改成**任务列表**逐个 cancel。清理**不进请求路径**（`iterdir` 会踩「禁止扫盘」的测试钉子）。
 - `POST /api/scenes/resolve` 的 `{name}` 分支新增可选 `size_bytes`，命中候选后过 `_fingerprint_mismatch`：**文件名（去光栅后缀）与字节数都吻合**才认，不符则记原因后继续试下一条候选（最终仍是 404 并列出候选与原因，不新增错误码）；非正整数 400。
-- 新增 `GET /api/scenes/{id}/preview-tmp`：与 `/preview` 同一条烘焙链、同样的规则戳，只差落点（临时根 + 当天桶）与响应头（`Cache-Control: no-store`）。
+- 新增 `GET /api/scenes/{id}/preview-tmp`：与 `/preview` 同一条生成预览链、同样的规则签名，只差落点（临时根 + 当天桶）与响应头（`Cache-Control: no-store`）。
 
 前端：
 
-- `viewer.activate` 改成 `if (!rec.route && await tryLinkScenes(rec)) return;` —— **命中就不做本地解码**，顺带避开「本地图先画出来又被 JPG 换掉」的闪烁。`tryLinkScenes` 返回 `Promise<boolean>`，body 带 `size_bytes: r.file.size`，`AbortSignal.timeout(4000)`；服务端 4xx 写 `rec.linkNote`（**不再 `showErr`**，那不是错误而是「这张图不在盘阵上」），网络失败/超时**清掉 `linkTried`**（那不是服务端的答案，下回还能再试），烘焙失败则报错 + 回落本地解码。
+- `viewer.activate` 改成 `if (!rec.route && await tryLinkScenes(rec)) return;` —— **命中就不做本地解码**，同时避开「本地图先画出来又被 JPG 换掉」的闪烁。`tryLinkScenes` 返回 `Promise<boolean>`，body 带 `size_bytes: r.file.size`，`AbortSignal.timeout(4000)`；服务端 4xx 写 `rec.linkNote`（**不再 `showErr`**，那不是错误而是「这张图不在盘阵上」），网络失败/超时**清掉 `linkTried`**（那不是服务端的答案，下回还能再试），生成预览失败则报错 + 回落本地解码。
 - 抽出 `applySceneJpgToRec`（新建 rec 与就地升级共用）：`openSceneJpg` 原来那一串收尾动作（`sceneDecodePixels` → `markRaw` → `layout` → `startStretch` → `fit` → `refreshCloudStats`）一个都不能漏，漏一个就是云量卡不刷/拉伸下拉显示错/画面不重画。
 - 查重加上 `sceneId`（`findRecByMeta`）：升级过的 rec 名字还是用户拖进来的 `SC.tif`，库行给的名字是 `SC` —— 只按名字找会开出两条 rec、两份 maskRois。
 - 三处异步写加 `rec.token` 令牌守卫（本地解码 `applyDecoded`、JPG 升级 `applySceneJpgToRec`、`openOne` 的帧头 `layout` 写入）。
@@ -803,7 +803,7 @@ e2e 四套全绿：`test-manual-scene.js` **61**（基线 48，E 段重写并新
 
 E 段的改造要点：原来那两处「命中」用例上传的是 fixture 里那张凑数的小图（名字对、字节数不对），
 双指纹一上**必红**；现在改成从盘阵侧 `fs.copyFileSync` 真那份再上传，并断言 `route==='jpg'` +
-`thumbW===400`（= 元数据 800 的一半，证明像素来自服务端烘焙而非本地解码）+ 只打
+`thumbW===400`（= 元数据 800 的一半，证明像素来自服务端生成而非本地解码）+ 只打
 `/preview-tmp` 不打生产 `/preview` + 临时 JPG 落在 `SR_TEMP_PREVIEWS_ROOT/<今天>/` 且桶里有标记
 文件 + **生产场景目录里没有多出 `.preview.jpg`**。另新增两例：同名不同字节 → 404 + `linkNote`
 带「字节数」+ 退回本地解码（`route` ∈ `utif/chunked/sparse`）+ 提交按钮保持禁用；以及
@@ -816,12 +816,12 @@ E 段的改造要点：原来那两处「命中」用例上传的是 fixture 里
    内存盘，而 1/2 尺度不封顶、单张可能上百 MB）。配到 nginx 可写的大盘上，**不要**放在
    `SR_SCENES_ROOT` 之下。上线前用同款 `touch` 探针确认写权限。
 2. **磁盘预算**：只保留当天那一桶，桶内不设上限 —— 一天的拖拽量要能放得下。嫌大就给
-   临时路径单独设 `max_edge`（需要**独立的规则戳**，别和生产那份混用 `rule_stamp()`）。
+   临时路径单独设 `max_edge`（需要**独立的规则签名**，别和生产那份混用 `rule_stamp()`）。
 3. **双指纹在真机上的表现**：真机上 `<目录名>.tif` 与 `PAN.tif` 并存是常态（RC 场景），
    拖 `PAN.tif` 那条路本来就到不了指纹这一步（名字里没有 14 位成像时刻，反推先报 400）——
    真正生效的是「用户拖的确实是输入影像本身」这条正向判定。请回传一次真机拖拽的体感
    （首次等待时长、是否退回本地解码）。
-4. **`ensure_preview_jpg` 没有单飞**：同一场景并发两次会各烤一遍（既有风险，拖拽路径会放大）。
+4. **`ensure_preview_jpg` 没有单飞**：同一场景并发两次会各生成一遍（既有风险，拖拽路径会放大）。
    本次不修。
 
 ### 2026-09-18 · 交付打包统一：**前后端各一个包**（开发机）
@@ -909,17 +909,17 @@ E 段的改造要点：原来那两处「命中」用例上传的是 fixture 里
 - `frontend/src/stores/viewer.ts::openLocalImage`：`activate` 之后补 `void tryLinkScenes(live)`。
 - `tryLinkScenes` 命中分支：拖进来的就是 jpg 时 `blob = r.file`（**不调 `/preview-tmp`**）——
   用户要看的就是自己拖的那张，拿服务端 1/2 缩图顶掉反而降清，还白等一次解压采样。（**2026-09-20 批注**：
-  这条仍是**默认**行为，但不再是一律 —— 同目录配着一位更清晰的栅格、且当前档位下服务端从它烤出来的比这张 jpg
+  这条仍是**默认**行为，但不再是一律 —— 同目录配着一位更清晰的栅格、且当前档位下服务端从它生成的的比这张 jpg
   更清晰时，jpg 那一路也改走服务端，见 api-contract §4.6 与本文 §1 的 09-20 条目。保留原句是因为它解释的是
-  「为什么默认不烤」，删掉会让后来人以为被推翻了。）裸 `.tif`
+  「为什么默认不生成」，删掉会让后来人以为被推翻了。）裸 `.tif`
   反推命中仍走阶段4 那条老路。`applySceneJpgToRec` 加可选第四参 `layout`，本地 jpg 那条路
-  自报来源（否则会显示「1/2 尺度 + 直方图均衡，服务端已烘焙」这句假话）。
+  自报来源（否则会显示「1/2 尺度 + 直方图均衡，服务端已生成」这句假话）。
 - 新增 `frontend/src/components/NoticeModal.vue` + store 的 `modal` 状态（`showModal/hideModal`）：
   关联失败时 **jpg 走弹窗**（后端那句 detail 常常是「试过哪几个目录、各缺什么」，toast 六秒
   既看不完也留不住），tif 维持原 toast。**不新增错误码** —— 现有 404 的 detail 已是能直接给人
   看的话。挂在 `ViewerPage.vue` 页面根（不放 `TifCanvas` 的 slot：`.stage` 的 transform 祖先会
   困住 `fixed`），并 `onUnmounted(() => viewer.hideModal())`（store 是全局单例，不关就换页会跟着走）。
-- 顺带修 `backend/tests/test_scene_resolve.py:407-409` 的跨行 f-string（PEP 701，只有 3.12+ 能解析，
+- 同时修 `backend/tests/test_scene_resolve.py:407-409` 的跨行 f-string（PEP 701，只有 3.12+ 能解析，
   本机 3.11.3 收集阶段就 SyntaxError）。
 
 **实测踩出来的一个坑（值得记住）**：`openLocalImage` 里 `recs.value.push(rec)` 之后，局部变量
@@ -933,8 +933,8 @@ E 段的改造要点：原来那两处「命中」用例上传的是 fixture 里
 字节数不等 → 仍 404）。前端 `npx vitest run` 188 passed、`vue-tsc --noEmit` 零错误、`npm run build`
 通过。e2e 四套：`test-manual-scene.js` **75**（新增 E2 段）、`test-scenes.js` 65 / `test-platform.js`
 22 / `test-vue-viewer.js` 35（无回归）。E2 段断言：`route==='jpg'` + `lqPath` = 场景目录 +
-`W/H` 取影像头 1600×800 + **`/preview-tmp` 与 `/preview` 请求计数都不变**（证明没走服务端烘焙）+
-缩略图 = 拖进来那张 jpg 的像素（800×400）+ 布局文案不谎称服务端已烘焙 + 两颗按钮由灰转亮 +
+`W/H` 取影像头 1600×800 + **`/preview-tmp` 与 `/preview` 请求计数都不变**（证明没走服务端生成）+
+缩略图 = 拖进来那张 jpg 的像素（800×400）+ 布局文案不谎称服务端已生成 + 两颗按钮由灰转亮 +
 掩码真落进场景目录；失败那条断言弹窗给后端原因、状态栏不卡在「正在关联盘阵目录…」、按钮保持禁用。
 §H 的刻意 404 计数 3 → 4。
 
@@ -1128,7 +1128,7 @@ e2e `test-platform.js` **22** / `test-scenes.js` **65** / `test-vue-viewer.js` *
 新提交的任务才有时长；④ 随便挑一条重交过的场景看一眼：耗时应当是**这一次**的秒数，
 不再是两次提交之间的间隔。
 
-**顺带修掉的一处测试脆弱**（与本次改动无关，但会咬人）：`test-scenes.js` 那条
+**同时修掉的一处测试脆弱**（与本次改动无关，但会咬人）：`test-scenes.js` 那条
 「列表行就地翻牌为『已生成』+『打开』」偶发红 —— `fetchSceneJpg` 在**去取静态 JPG 之前**
 就把 `row.hasPreview` 置真，标签先翻、按钮要等解码完才从「打开中…」变回来，而断言在
 等标签后**立刻**读按钮。改成等按钮也落定（新增 `waitRowBtn`），机器忙时不再假红。
@@ -1143,7 +1143,7 @@ e2e `test-platform.js` **22** / `test-scenes.js` **65** / `test-vue-viewer.js` *
 
 - `lib/viewMath.parseLocPair`（新，纯函数）：半角/全角逗号与空白都作分隔符、首尾空白忽略，
   **恰好两个数**才认；认不出来返回 null，调用方**必须出声** —— 截前两个会把标记跳到别处
-  （「1,30766.11,21862.51」是整行掩膜记录，不是一对坐标）。不做千分位等额外容忍。
+  （「1,30766.11,21862.51」是整行掩码记录，不是一对坐标）。不做千分位等额外容忍。
 - `Toolbar.vue`：两个框改 `type="text"` + `inputmode="decimal"`（number 框吞整串，非改不可），
   `@input` 里拆串填进两框（粘到哪个框都行，文本都按「X,Y」顺序读）；单个数 = 正在手输，放行；
   带分隔符却认不出来时出错误条并**原样留着**。拆完不自动跳，仍按「定位」/回车（与手输两个数
@@ -1160,18 +1160,18 @@ e2e `test-platform.js` **22** / `test-scenes.js` **65** / `test-vue-viewer.js` *
 
 **改动**（四处文字 + 一处宽度，按用户逐项确认的取舍）：
 
-- 场景库：表格下方那段「场景 JPG 为服务器烘焙（稀疏采样 + 直方图均衡…）」**整段删**（含其中动态的
+- 场景库：表格下方那段「场景 JPG 为服务器生成预览（稀疏采样 + 直方图均衡…）」**整段删**（含其中动态的
   「掩码按元数据 W×H 换算」一句，用户确认不再显示）。随删 `useViewerStore` 与 `.sp-hint` 样式。
 - 队列页：标题里的「SR 作业（slurm / 假调度器）」删（口径已过时 —— 现在 `SR_EXECUTOR=local` 本机直跑），
   提交按钮旁那段「提交是真实副作用…（_NOSR.tif 覆盖 / delete_ori 已禁用）」一并删。两条样式规则随删。
 - 查看器右栏：`RoiToolsTab` 开头那行「统计作用于当前显示层…」删。云量卡片底部那条「Y≥200 高亮占比
-  估算；PAN 无真云掩膜…」**保留** —— 它是「这数字不是真云掩膜」的免责说明，删掉容易把估算看成实测。
+  估算；PAN 无真云掩码…」**保留** —— 它是「这数字不是真云掩码」的免责说明，删掉容易把估算看成实测。
 - 盘阵场景栏（`ScenePathBar.vue`）：长提示压成两句 —— 预填的只是当天日期前缀、还要往下补三层；
   「支持 W:\ 形态（服务端自动映射到 /DiskArray）」改写成「路径认两种写法：**W:\…（盘阵）**与
-  /DiskArray/…」。删去不扫盘之外的细节（生产名样例、meta.xml、单 .tif 入口、首次烘焙耗时）。
+  /DiskArray/…」。删去不扫盘之外的细节（生产名样例、meta.xml、单 .tif 入口、首次生成预览耗时）。
 - 查看器左栏（`FileList.vue`）：宽由 268 加宽，**最终与右栏一起定在 400**（见下一条《待修复清单》——
   两处宽度是同一次改的，理由写进样式注释：268 里长生产名与「盘阵 JPG（1/2 尺度 + 直方图均衡，服务端
-  已烘焙）」那行说明挤在一起，只能靠 `word-break: break-all` 从词中间断开）。
+  已生成预览）」那行说明挤在一起，只能靠 `word-break: break-all` 从词中间断开）。
 
 **验证**：vitest **196 passed**、`vue-tsc --noEmit` 零错误 + `npm run build`；e2e `test-scenes.js` **65** /
 `test-platform.js` **22** / `test-vue-viewer.js` **38** / `test-manual-scene.js` **83** 全绿（先 grep 过
@@ -1200,7 +1200,7 @@ e2e 里没有断言依赖被删的那几句文案）；`.e2e/shot-theme.js` 重�
   ⚠️ **写盘那条路 2026-09-18 当天就整条换掉了**（原为 File System Access API 原地覆盖，真机 http 下
   不可用）—— 详见本节末的「清单写回改走后端」条目，这里保留的是当时的形态。
 - **数据丢失护栏**：一份问题行都解不出来的文本**一律拒收**。拖拽入口就在画布上（拖 `.txt` 即导入清单），
-  顺手把「掩膜中心点坐标.txt」这类文件丢进来是很容易发生的事，照单全收会把已经标了一下午的清单无声冲掉。
+  同时把「掩膜中心点坐标.txt」这类文件丢进来是很容易发生的事，照单全收会把已经标了一下午的清单无声冲掉。
 - `QcListPanel.vue`（新）挂在 `RoiToolsTab` 置顶：行列表（状态点 + 生产全名 + 行/列 · 影像类型 · 责任人）、
   选中行的三段式进度条（已绘制掩码 / 已提交任务 / 已修复，点选，再点当前项 = 取消）+ 两个人工终态（驳回 /
   非模糊通过，五个状态互斥）、页脚「同步至指定文档」。`✕` 随时收起换一份新清单。
@@ -1320,7 +1320,7 @@ e2e `test-scenes.js` **65 断言**、`test-manual-scene.js` **83 断言**全绿�
 规范里是 **`[SecureContext]` 标的** —— Chrome 只在 `https://`、`http://localhost`、`http://127.0.0.1`
 的页面上把它挂到 `window` 上。真机是 http + 内网 IP，所以这条路**在真机上永远点不通**：功能从一开始
 就选错了对象（清单在盘阵上，而浏览器的文件选择器只能选到操作员**本机**的文件）。而后端本来就写得到
-盘阵 —— 掩码、SR 产物、烘焙 JPG 全是它（`User=nginx`）写的。
+盘阵 —— 掩码、SR 产物、预览 JPG 全是它（`User=nginx`）写的。
 
 **改动**（契约先落：`docs/planning/api-contract.md` §2 表 + §3.7，再写代码）：
 
@@ -1334,7 +1334,7 @@ e2e `test-scenes.js` **65 断言**、`test-manual-scene.js` **83 断言**全绿�
   `lib/qclist.ts` 的 `encodeQcText`（连同它的 2 条 vitest）删掉 —— 留着只会让人以为「前端也能编 GBK」。
   目标从「文件选择器选出来的句柄」换成**操作员粘的盘阵路径**（`targetPath`，进 localStorage），页脚是
   一行「路径输入框 + 同步（空路径时禁用）」。
-- **顺带修好的两件事**：① GBK 清单以前只能降级成 UTF-8+BOM 写回（浏览器只有 UTF-8 编码器），现在由
+- **同时修好的两件事**：① GBK 清单以前只能降级成 UTF-8+BOM 写回（浏览器只有 UTF-8 编码器），现在由
   后端编码，**GBK 进 GBK 出**；② 写盘这一步**第一次进了自动化回归**（原先是系统弹窗，点不了）。
 
 **已知副作用（必须知道）**：原子替换后文件的**属主变成跑 API 的 nginx**（nginx 无权 chown 回去，
@@ -1352,41 +1352,41 @@ Python 转码造一份 **GBK** 清单 → 导入认成 gbk → 粘 `W:\…\待�
 **另**：真机首测只剩两件人工事 —— 粘一次真实路径看是否写进去、确认那份 txt 的目录对 nginx 可写
 （`deploy/README.md` 里那两条注意事项）。
 
-### 2026-09-19 · 预览烘焙档位改成用户可调（全局 5 档），拖入链的产物改落盘阵（开发机）
+### 2026-09-19 · 预览缩放档位改成用户可调（全局 5 档），拖入链的产物改落盘阵（开发机）
 
 **需求**：用户提「拖入 `.tif` 时通过下采样获取同名 `_preview.jpg` 至盘阵，下采样精度可用户调节，
 放在定位组件右侧做成分档拖动条」，随后改口径为**全局**（三条入口同档）。
 
 **定了什么**（用户拍板）：档位 = 各边 ÷2 · ÷4 · ÷8 · ÷16 · ÷32，**默认 ÷4**；作用域 = **全局**
-（拖入 / 场景库 / 粘盘阵路径三条入口都按滑块当前档位烤）；拖入链落点 = **盘阵场景目录
+（拖入 / 场景库 / 粘盘阵路径三条入口都按滑块当前档位生成）；拖入链落点 = **盘阵场景目录
 `<源同目录>/<stem>_preview.jpg`**（新）；其余两条落点不变（`<stem>.preview.jpg`）；
 临时缓存**保留但降级为兜底**（场景目录写不进去时才用）。
 
 **为什么改**：尺度和拉伸原先写死在各处（`PREVIEW_SCALE = 0.5` + 前端两句硬编码「1/2」）。
-真机上一张 2.4 万像素级的源，1/2 烤出来是 1.5 亿像素、q85 下上百 MB，首次打开要读一遍整幅大图
+真机上一张 2.4 万像素级的源，1/2 生成的是 1.5 亿像素、q85 下上百 MB，首次打开要读一遍整幅大图
 （几十秒）+ 传输 + 浏览器解码，用户没有回旋余地。拖入链那份落临时缓存、次日 0 点删，等于
-**每天第一次拖入都要重烤一遍**。
+**每天第一次拖入都要重新生成一遍**。
 
 **改了什么**：
 - 后端：`PREVIEW_DIVISORS = (2,4,8,16,32)` 为唯一档位真源；`preview_max_edge(src, div)` 取代
-  `PREVIEW_SCALE`；`ensure_preview_jpg(..., div=)`（尺寸与规则戳同一个入参推导，结构上不可能不同步）；
-  规则戳 bump `v2` → **`v3`**、档位进戳 `srprev:v3:div<N>+equal:q<Q>`；端点改名
+  `PREVIEW_SCALE`；`ensure_preview_jpg(..., div=)`（尺寸与规则签名同一个入参推导，结构上不可能不同步）；
+  规则签名 bump `v2` → **`v3`**、档位进戳 `srprev:v3:div<N>+equal:q<Q>`；端点改名
   `preview-tmp` → **`preview-drop`**、落点换 `paths.drop_preview_path`、两条端点都接 `div`
   （非法 400）；先 `os.access(dir, W_OK)` 预判，不可写/写失败 → 退回临时缓存 + 响应头
   `X-SR-Preview-Fallback: tmp`（已加进 CORS `expose_headers`），两条都失败才 422。
 - 行上新增 **`previewDiv`**（`_scene_row` / `_manual_row`）：从盘上那份 JPEG 的注释戳解出它是在
-  哪一档烤的，按 `(path, mtime)` 缓存，读不出 → `null`；`hasPreview` / `jpgUrl` 语义一字不动。
+  哪一档生成的，按 `(path, mtime)` 缓存，读不出 → `null`；`hasPreview` / `jpgUrl` 语义一字不动。
 - 前端：`lib/scene.ts` 加 `SCENE_PREVIEW_DIVS` / `DEFAULT_PREVIEW_DIV = 4` / 档位直读 localStorage
   的纯函数（**不依赖 Pinia 创建顺序** —— `stores/scenes.ts` 会用到它，那时 viewer store 未必建过）；
   `sceneImageUrl` **只对 `.preview.jpg` 结尾的 URL 拼 `?div=N`**（击穿 nginx `max-age=3600` 的唯一手段，
   且无条件拼会打红「源本身就是 JPG」那条行）；`Toolbar.vue` 在定位组件右侧插 5 档 range。
-- **本轮唯一的真陷阱**：前端那次「先打 `/preview` 重烤、再取静态 URL」是**带条件**的（只在
+- **本轮唯一的真陷阱**：前端那次「先打 `/preview` 重新生成、再取静态 URL」是**带条件**的（只在
   `!row.hasPreview` 时才打），而 `hasPreview = jpg.is_file()` **不认档位** → 滑了滑块之后盘上那份
-  仍在 → `hasPreview` 仍为真 → 跳过重烤 → **看到的还是旧档位那张图**，磁盘上一个字节都没变。
+  仍在 → `hasPreview` 仍为真 → 跳过重新生成 → **看到的还是旧档位那张图**，磁盘上一个字节都没变。
   红的是凡有静态 URL 的行；库外手工行每次走 `/preview` 回字节，不受影响。这就是 `previewDiv` 的来由。
 - **试过又退回来**：把 `/preview` 的响应体直接当 blob（一次下载、不补静态 URL）。被
   `.e2e/test-scenes.js` 打红 —— 那条断言要求「静态读图走 nginx 的 `/disk-array/` alias 位」，
-  几 MB 的 JPEG 不该占 API 进程的内存与带宽。改回「先打 `/preview` 触发烘焙（字节丢掉）+ 再取静态 URL」：
+  几 MB 的 JPEG 不该占 API 进程的内存与带宽。改回「先打 `/preview` 触发生成预览（字节丢掉）+ 再取静态 URL」：
   稳态下只有一次下载（换档后的正确性已由 `?div=N` 保证 —— 缓存键变了，第二次取的一定是新图）。
 
 **验证**：后端 **567 passed / 4 skipped**、前端 **238 passed** + `vue-tsc --noEmit` 零错误 +
@@ -1406,15 +1406,15 @@ Python 转码造一份 **GBK** 清单 → 导入认成 gbk → 粘 `W:\…\待�
   修法是一行（把 `SR_QUEUE_POLL_SEC` 调到明显小于档位宽，例如 `'0.05'`），但那是 09-18 那条改动的地盘，
   本次不越界去改。
 
-**换包须知**：① **必然重烤一轮** —— 盘上所有 `<stem>.preview.jpg` 的戳是 `v2`，新代码认 `v3`，
-逐个场景首次打开时重烤（**惰性**，不是一次性全量；把滑块停在 ÷2 也一样）；② `frontend/dist` 与
+**换包须知**：① **必然重新生成一轮** —— 盘上所有 `<stem>.preview.jpg` 的戳是 `v2`，新代码认 `v3`，
+逐个场景首次打开时重新生成（**惰性**，不是一次性全量；把滑块停在 ÷2 也一样）；② `frontend/dist` 与
 `backend` **必须同包更新** —— 端点改了名，只换一个会 404。
 
 **真机待确认**：① 服务账号（`User=nginx`）对场景目录有没有写权限 —— 这决定拖入链走主落点还是兜底；
 ② 新落点 `<stem>_preview.jpg` **没有任何清理者**且**不吃 `SR_PREVIEWS_ROOT`**（配了镜像树的部署下
 同一场景会有两份缓存），磁盘预算要把它算进去。
 
-**并更正一条旧约定**：本文件 2026-09-17 那条「临时路径要单独设 `max_edge` 就得独立一套规则戳」
+**并更正一条旧约定**：本文件 2026-09-17 那条「临时路径要单独设 `max_edge` 就得独立一套规则签名」
 **已被「档位进同一个戳」取代**，别再按那条旧字面实现两套戳（见
 [knowledge/preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md) §4.6）。
 
@@ -1482,7 +1482,7 @@ e2e 侧随之把分隔线位置暴露成 `splitX()`（画布局部坐标里的�
 ### 2026-09-20 · 对比模式换图保持视图 + 取图路径提速（开发机）
 
 **需求（用户原话）**：「现在的点选对比有个问题，每次切换图，图的缩放和位置都会回到初始化默认形态，
-我认为两个参数应该保持现状」；附带「烘焙 1/2 切换延迟略高」。语义由用户选定为**按相对视野换算**。
+我认为两个参数应该保持现状」；附带「生成预览 1/2 切换延迟略高」。语义由用户选定为**按相对视野换算**。
 
 **四条改动**（后端零改动、零新增端点）：
 
@@ -1505,7 +1505,7 @@ e2e 侧随之把分隔线位置暴露成 `splitX()`（画布局部坐标里的�
    命中时**照做网络路径那两行副作用**（`hasPreview` / `previewDiv`）但**不调 `onPhase`**。
    预取三道门（`compareOn && cmpPrefetchOn && activeSceneId()`），合格项判据
    `exists && id && name && W/H 非空 && hasPreview && previewDiv === div && 未开 rec` ——
-   这条判据本身就是「服务端已有一份现成预览」的定义，于是**结构性地保证预取永不触发烘焙**
+   这条判据本身就是「服务端已有一份现成预览」的定义，于是**结构性地保证预取永不触发生成预览**
    （真机上不允许「我什么都没点，盘阵却在读大图」）。取消用**代数计数**而不是 `AbortController`：
    取图那两个 API 不收 `AbortSignal`（要兼容静态 URL 那条支路），掐不断在飞的请求，只能「不开始下一项」。
 
@@ -1533,7 +1533,7 @@ e2e 侧随之把分隔线位置暴露成 `splitX()`（画布局部坐标里的�
 
 **K 段的夹具要点（下轮别重踩）**：夹具里**没有 SR 产物**（真机才有），而 K 段要验的正是「盘上已有一份
 现成的预览时预取会去取它」—— 于是测试自己在运行期造两份 `<输入名>_<suffix>.tif`（名字取 `/siblings`
-回报的 `productCandidates[0]`，**不重复实现命名规则**）、并用 Node 侧 `fetch` 调 `/preview` 把其中一份烤上。
+回报的 `productCandidates[0]`，**不重复实现命名规则**）、并用 Node 侧 `fetch` 调 `/preview` 把其中一份生成上。
 Node 侧的请求**不经过页面**，所以不污染 `page.on('request')` 那套增量计数（`countUrl`）。
 另外「已开着的那张」会被预取的过滤条件排除：J 段收尾时活动图是拖进来的 `WIN.jpg`，而 resolve 给这一行
 的 id 是**栅格输入影像**的（`_manual_row(inp,…)`），所以它的 `sceneId` 与「输入影像」那一类相同 ——
@@ -1541,7 +1541,7 @@ Node 侧的请求**不经过页面**，所以不污染 `page.on('request')` 那�
 
 **未动（仍留着）**：① 「攒图吃内存」——rec 的 `thumb` 画布 + `src` Float32Array **永不释放**（8 B/px），
 本轮新增的缓存是按字节封顶的压缩 blob，不加剧它，但「对比模式 + 预取」会让这张图更容易被撑大，仍只记录；
-② 服务端**按档位分文件落盘**（现在一份文件一个档位、换档原地重烤，是「切换 1/2 略有延迟」的另一半原因）；
+② 服务端**按档位分文件落盘**（现在一份文件一个档位、换档原地重新生成，是「切换 1/2 略有延迟」的另一半原因）；
 ③ `fetchDropSceneJpg`（拖入链 `/preview-drop`）**不进** blob 缓存 —— 它在写盘阵，语义不同；
 ④ 把预览档位滑块搬进设置浮层（能腾出约 170px 宽度预算，但既有 e2e 引用 `data-e2e="preview-div"`）。
 
@@ -1551,7 +1551,7 @@ Node 侧的请求**不经过页面**，所以不污染 `page.on('request')` 那�
 09-09 restyle 前的深色文字）。改脚本期望值还是改主题，仍得由人定。② 计划 §四 里那两条
 （`exists:false` 时芯片**预先禁用**、行尾标 `suffixFrom`）本轮没做，仍待定。
 
-**顺带记一个既有 flake（不是本轮引入）**：`test-platform.js` 等「急烤落定」的条件是
+**同时记一个既有 flake（不是本轮引入）**：`test-platform.js` 等「主动生成落定」的条件是
 `t.preview_state` 非空，而服务端认领任务时先 CAS 写 `preview_state='running'`、`preview_note` 还是 `NULL`，
 所以可能正好读到「running 且 note 为空」→ 断言消息里那句候选名成了空括号 `()`。本轮撞上一次、重跑即过。
 要根治得把等待条件改成「**非 running** 的终态」，属另一个模块的测试，未擅自改。
@@ -1601,7 +1601,7 @@ Node 侧的请求**不经过页面**，所以不污染 `page.on('request')` 那�
 （新 11 条：真鼠标 40px 拖动分别起于 `cmp-tag-b` 与 `.cmp-empty-text` → `getSelection()` 为空且只看 A 的 `ox`
 精确 +40；`dragOverText` 三条；分隔线阈值两条 + 位移增量一条）、`test-manual-scene.js` **160** 全绿。
 
-**顺带记一个既有 flake（不是本轮引入，也没擅自改）**：`test-manual-scene.js:964/969` 连发两次
+**同时记一个既有 flake（不是本轮引入，也没擅自改）**：`test-manual-scene.js:964/969` 连发两次
 `uploadFile(upWinJpg)` 之间没有任何等待，而 `uploadFile` 在 CDP 应答时就返回、页面的 `change` 处理器要晚一
 拍才跑；第 969 行那次上传的「同名同字节去重」于是有机会还没看到第 964 行建出的那条 rec → 建出第二条 rec →
 E4 末尾那条严格等于 +1 的计数断言读到 `drop +2`。本轮撞上一次、原地重跑即过（160 全绿），并另用一段临时探针
@@ -1614,7 +1614,7 @@ E4 末尾那条严格等于 +1 的计数断言读到 `drop +2`。本轮撞上一
 文件夹不会生成 `NOSR_preview.jpg`，而且 preview 无法关联至盘阵」。开工前用两轮提问钉住口径：
 拖的是**场景目录里的显示件** `<目录名>.jpg`；**真正要超分的永远是本体**（RC 场景的 `PAN.tif`、SC 场景的
 `<目录名>.tif`），中间产物的 preview 只需要「关联到盘阵 + 明确提示不参与修复」；左栏卡片要能用
-「盘阵 + 序号 + 环节标（`PAN`/`SR`/`NOSR`）」区分同一景的不同环节；拖 jpg 之后**后台静默烤**
+「盘阵 + 序号 + 环节标（`PAN`/`SR`/`NOSR`）」区分同一景的不同环节；拖 jpg 之后**后台静默生成**
 一份 `<源名>_preview.jpg`（不阻塞、不弹遮罩、不报进度，展示像素仍用用户拖进来那张）。
 
 **Bug 1 是双重的、且这条链根本不存在**：`FileList.vue` 的 `.file-item` 没带 `draggable`（浏览器压根
@@ -1641,7 +1641,7 @@ POST `/api/masks` 的，产物尺寸的 W/H 配上本体的 lq_path，后端会�
 `mask_path=null`（第一道），前端 `stageKind` 门（`lib/stage.ts`）+ 工具栏置灰（第二道）。
 `row` 同时改为描述**该环节自己**那份栅格 —— 产物的 W/H 是本体的倍数，拿本体的尺寸建画布整张比例都是错的。
 
-**顺带修掉一个既有缺陷（本次新候选把它顶了出来）**：`backend/pathguard.scene_name_layers` 的段数
+**同时修掉一个既有缺陷（本次新候选把它顶了出来）**：`backend/pathguard.scene_name_layers` 的段数
 守卫只挡到 `_SCENE_IDX`，六段的名字会走进 `seps[_SCENE_IDX]` 越界 —— 本该 400 的输入变成 500，
 uvicorn 直接断连，浏览器侧表现为 `TypeError: Failed to fetch`（第一次 e2e 跑就是死在这里）。
 修法是补齐门槛（段数不足即判不合规则），不是加 try/except：改完 `infer_scene_paths` 对它返回 `[]`，
@@ -1659,7 +1659,7 @@ uvicorn 直接断连，浏览器侧表现为 `TypeError: Failed to fetch`（第�
 且模板里刻意不留换行 —— 换行会被 Vue 编成空白文本节点，`textContent` 就多一个空格）。
 `test-manual-scene.js` → **194 项断言**（新增 L 段 L1–L5：卡片自己带票拖进
 画布 / 分屏按落点进 B 格 / 对比模式画布外沿用那句 toast；拖产物 jpg → 卡片上「盘阵+序号+SR」三标齐全
-且序号与本体**同号**、三颗修复按钮置灰、`<编号>_sr_preview.jpg` 落盘且**烤的是产物自己的栅格**
+且序号与本体**同号**、三颗修复按钮置灰、`<编号>_sr_preview.jpg` 落盘且**生成的是产物自己的栅格**
 （1600×800，与本体那份 800×400 差一倍）；三道修复入口逐条打一遍 —— 绘制掩码被拒且不进绘制态、
 保存掩码返回 false 且**本体那份掩码的 mtime 一个字节没动**、提交 SR 不跳队列页且队列一条不多）。
 
@@ -1667,7 +1667,7 @@ uvicorn 直接断连，浏览器侧表现为 `TypeError: Failed to fetch`（第�
 「耗时列给出终态耗时（—）」会偶发失败（页内那行已显示「完成」，但耗时列还是「—」—— 页内那份
 停在上一次 GET 的快照上、SSE 帧还没到）。做法是 `git stash` 掉本轮全部改动 → 重新 `npm run build`
 → 同一台机器上连跑对照：**基线 2/4 通过、带本轮改动 2/3 通过**，两边一样地偶发，与本轮无关。
-另有一条同类的（产物急烤那条：`waitFor` 的判据 `t.preview_state` 会把中间态 `'running'` 也算命中，
+另有一条同类的（产物主动生成那条：`waitFor` 的判据 `t.preview_state` 会把中间态 `'running'` 也算命中，
 于是偶发读到 `running` 而非 `skipped`，note 为空）。两条都属「测试自己的等待条件不够严」，
 要根治得改等待判据（前者等耗时列 != '—'、后者排除 `'running'`），留待下一轮。
 
@@ -1704,7 +1704,7 @@ uvicorn 直接断连，浏览器侧表现为 `TypeError: Failed to fetch`（第�
 **字号只动一个**：平台名 16 → 18px；`.nav-links a` 的 14px 一个字不动（前者的角色是
 「这是哪个平台」，后者是「去哪儿」，两者不该同级），e2e 把四项逐个量了一遍钉住。
 
-**顺带修掉一条一直在空跑的断言**：`.e2e/check-frontend-build.js` 是 Phase 2 的验收脚本，
+**同时修掉一条一直在空跑的断言**：`.e2e/check-frontend-build.js` 是 Phase 2 的验收脚本，
 不在 `.e2e/package.json` 的任何 `test*` 里，没人随改动重跑 —— 它第 2 步钉着按钮文案
 「选择 TIF」，而按钮从 `ba8e61d` 起就叫「选择影像…」，于是从那天起脚本每次都死在第 2 步。
 放松成认「选择」二字（测的是「有选择入口」这个意图，不是文案），全脚本这才第一次跑到尾。
@@ -1722,7 +1722,7 @@ uvicorn 直接断连，浏览器侧表现为 `TypeError: Failed to fetch`（第�
 （不是透明的），孔雀石深带上的观感要用户看一眼 —— 预留区没有加白底/圆角托板，是按「素材
 自带透明或白色元素」设计的，反过来再补。
 
-### 2026-09-21 · 平台自烤的那份 preview 拖回来不认（开发机）
+### 2026-09-21 · 平台自生成的那份 preview 拖回来不认（开发机）
 
 **用户原话**：「所以当前的 preview 关联原始盘阵逻辑还是有问题对吗？导致已经关联的 jpg 拖入后，
 再拖入它的 preview.jpg 反而会出现：『这张 JPG 没有关联到盘阵目录』…」，并贴来了真机上那一屏
@@ -1737,7 +1737,7 @@ uvicorn 直接断连，浏览器侧表现为 `TypeError: Failed to fetch`（第�
 2. 第二阶段（去尾段再反推）本该兜住这种名字，但 `preview` 在 `scene_search._NON_STAGE_TAILS`
    里，`de_suffixed_stems` 撞上它**当场返回空** —— 平台连「把 `_preview` 去掉再试一次」都没做过。
 3. 那份文件是**平台自己写下的**：`GET /preview-drop` 由 scene id 解出**栅格**、落
-   `paths.drop_preview_path`（`<栅格 stem>_preview.jpg`），用户拖本体显示件那一次就烤出来了。
+   `paths.drop_preview_path`（`<栅格 stem>_preview.jpg`），用户拖本体显示件那一次就生成的了。
 
 **改法（用户决策：认它）**：`preview` 成为 `_NON_STAGE_TAILS` 里**唯一可以剥**的尾段。判据不是
 「名字好不好切」，而是「剥掉之后会不会落到一个真实存在的目录上」：`cloud`/`thumb`/`mask`/`ori`
@@ -1857,16 +1857,16 @@ SC 场景的产物」（`jpg_stage_name` 要求目录名前缀，RC 产物对不
 然后拖 —— 预期 200 且卡片上出「盘阵 + 序号 + SR」三标；不先打开就拖，预期仍是 400，且 detail 末尾
 多一句「另外，当前打开的场景：…」。④ 完全没打开过任何场景时拖它 → 400 文案与上一轮一字不差。
 
-### 2026-09-21 · 超分跑完顺带烤未超分那一份 → `PAN_NOSR_preview.jpg`（开发机）
+### 2026-09-21 · 超分跑完同时生成未超分那一份 → `PAN_NOSR_preview.jpg`（开发机）
 
-**用户原话**：「我希望增加一条烘焙链路，就是在超分后，顺带会产生 `NOSR_preview.jpg`，你实现的越简单
+**用户原话**：「我希望增加一条生成预览链路，就是在超分后，同时会产生 `NOSR_preview.jpg`，你实现的越简单
 越好，可以向我提问」。问过两件事，用户口径：
 
-1. 烤哪一份 —— 「将 **`PAN_NOSR.tif`** 按照全局采样率进行下采样，**不考虑其他分支**，一般后端走超分，
+1. 生成哪一份 —— 「将 **`PAN_NOSR.tif`** 按照全局采样率进行下采样，**不考虑其他分支**，一般后端走超分，
    tif 产物名称也是 `PAN_NOSR.tif`」；
 2. 落哪个名 —— **`PAN_NOSR_preview.jpg`**。
 
-**实现（只动急烤那一条链）**：`app.py::_bake_nosr_preview(task, div)`，在 `_eager_bake_tick` 里紧跟
+**实现（只动主动生成那一条链）**：`app.py::_bake_nosr_preview(task, div)`，在 `_eager_bake_tick` 里紧跟
 产物那一份调用。源 = `<lq_path>/PAN_NOSR.tif`（`.tiff` 也认，最多两次 `is_file()`）；落点直接用
 `paths.drop_preview_path(source)`，于是文件名天然是 `PAN_NOSR_preview.jpg`（与拖入链同一条
 `<源 stem>_preview.jpg` 规则，不是另立名字）；档位 = 同一个全局 `div`；命中判定 = 同一个 `cache_hit`
@@ -1876,15 +1876,15 @@ SC 场景的产物」（`jpg_stage_name` 要求目录名前缀，RC 产物对不
   因为它刚被写出来）；
 - **不动 `preview_state`/`preview_note`** —— 那一列描述的是产物预览，一个字段说不出两份文件的结局；
   这一份只写盘 + 打一行 stdout `[nosr-preview] task=<id> <状态>`（`baked:`/`cached:`/`skipped:`/`failed:`）；
-- **名字钉死**，不把仓库规则推出来的 `<产物 stem>_NOSR.tif` 也顺手试一遍（见下「待确认 ⑤」）。
+- **名字钉死**，不把仓库规则推出来的 `<产物 stem>_NOSR.tif` 也同时试一遍（见下「待确认 ⑤」）。
 
 **没改的东西**：不新增端点、不动任何响应字段、不动产物那一份的结论与广播、`/siblings` 的「上一次
 产物」那一项找的仍是点号落点 `…_NOSR.preview.jpg`（所以**这份新文件今天没有任何服务端消费方**，
 它的用途是人看 / 拖回查看器 —— 拖回时 `stage_of_jpg` 剥掉 `preview` 尾段后按 `PAN_NOSR.tif` 判环节）。
 
 **验证（开发机）**：后端 **659 passed / 4 skipped**（+4 例，`TestProductPreviewBake` 里新增：同一次
-tick 烤出来且 ÷4 尺寸对、没有那份栅格时什么都不写但状态报得出「没这份」、**产物烤跳过时它也照烤**、
-同档位命中 `cached` 而换档位重烤）。前端一行未动，故未重跑。
+tick 生成的且 ÷4 尺寸对、没有那份栅格时什么都不写但状态报得出「没这份」、**产物生成跳过时它也照生成**、
+同档位命中 `cached` 而换档位重新生成）。前端一行未动，故未重跑。
 
 **待确认（真机）**：
 
@@ -1901,9 +1901,9 @@ tick 烤出来且 ÷4 尺寸对、没有那份栅格时什么都不写但状态�
   `/siblings` 的「输入影像」与对比视图的「本体」都会指错。这一条要靠真机的 `ls` + 一次实际提交才能定，
   先记着，**不要据此改 `input_scene_path`**。
 
-### 2026-09-21 · 「烘焙的预览名把 `preview` 前那个 `_` 输出成 `.`」的定位与修法（开发机）
+### 2026-09-21 · 「生成预览的预览名把 `preview` 前那个 `_` 输出成 `.`」的定位与修法（开发机）
 
-**用户原话**：「坏，现在烘焙的 `<suffix>_preview.jpg` 好像会把 `preview` 前的 `_` 输出为 `"."`，请你
+**用户原话**：「坏，现在生成预览的 `<suffix>_preview.jpg` 好像会把 `preview` 前的 `_` 输出为 `"."`，请你
 精准定位并修复，很简单」。
 
 **定位（结论：没有任何代码把 `_` 改写成 `.`，是两个命名族在同一份栅格上各落各的）**。全仓库只有两处
@@ -1911,20 +1911,20 @@ tick 烤出来且 ÷4 尺寸对、没有那份栅格时什么都不写但状态�
 
 | 构造器 | 名字 | 写它的链 |
 |---|---|---|
-| `preview_jpg_for` / `preview_jpg_path` | `<stem>.preview.jpg`（**点号**） | 急烤产物（`app.py::_bake_product_preview`）、惰性 `GET /api/scenes/{id}/preview` |
+| `preview_jpg_for` / `preview_jpg_path` | `<stem>.preview.jpg`（**点号**） | 主动生成产物（`app.py::_bake_product_preview`）、惰性 `GET /api/scenes/{id}/preview` |
 | `drop_preview_path` | `<stem>_preview.jpg`（**下划线**） | 拖入链 `GET /api/scenes/{id}/preview-drop`、本轮之前刚加的未超分那一份 |
 
-`grep -rn with_suffix` 的每一处入参都是**源栅格**（不是已烤好的预览名），`replace(.*preview` 为空 ——
+`grep -rn with_suffix` 的每一处入参都是**源栅格**（不是已生成好的预览名），`replace(.*preview` 为空 ——
 「把名字里的 `_` 换成 `.`」这种改写在全仓库不存在。用临时探针（一次 tick + 两个端点，跑完已删）实测
 同一个 RC 场景目录，四条链的落盘名如下：
 
 ```
-急烤 tick 之后新增：PAN_260318.preview.jpg / PAN_NOSR_preview.jpg
+主动生成 tick 之后新增：PAN_260318.preview.jpg / PAN_NOSR_preview.jpg
 （修后）            PAN_260318.preview.jpg / PAN_260318_preview.jpg / PAN_NOSR_preview.jpg
 ```
 
-所以用户看到的带点那份，只可能是**急烤产物那一份**（或打开产物时惰性路径写的那份）—— 它与拖入链、
-与未超分那份烤的是同一份像素，却差一个字符。这就是「两族名字」这个设计在真机上显出来的样子
+所以用户看到的带点那份，只可能是**主动生成产物那一份**（或打开产物时惰性路径写的那份）—— 它与拖入链、
+与未超分那份生成的是同一份像素，却差一个字符。这就是「两族名字」这个设计在真机上显出来的样子
 （§4.10 那张表早写着两族并存，但没人会喜欢在自己的场景目录里看到它）。
 
 **当轮修法（**已被下面 09-22 那条取代**，留在这里只为说明当时的约束）**：`app.py::_mirror_preview_name`
@@ -1932,11 +1932,11 @@ tick 烤出来且 ÷4 尺寸对、没有那份栅格时什么都不写但状态�
 `hasPreview`/`previewDiv`、静态 `jpgUrl`，以及前端 `lib/scene.ts::isBakedPreviewUrl`）。这份镜像
 在同日被删：它把「一份栅格两个文件」从缓存层搬到了每一份产物上，用户要的是**只有一个名字**。
 
-### 2026-09-22 · 预览名收口：三条链统一 `<源 stem>_preview.jpg`，旧点号件顺手删（开发机）
+### 2026-09-22 · 预览名收口：三条链统一 `<源 stem>_preview.jpg`，旧点号件同时删（开发机）
 
 **用户原话**：「一起改成下划线，然后点的产物尽可能删掉，请你尽快实现，方法越简单越好」。
 
-**做法（一条规则 + 一次顺手删）**：
+**做法（一条规则 + 一次同时删）**：
 
 - `paths.preview_jpg_name(source)` 成为**唯一**的名字规则，`preview_jpg_path` / `preview_jpg_for` /
   `drop_preview_path` 都调它 —— 三个构造器现在只差目录（库内可进 `SR_PREVIEWS_ROOT` 镜像树，
@@ -1946,21 +1946,21 @@ tick 烤出来且 ÷4 尺寸对、没有那份栅格时什么都不写但状态�
   **点号那代一并认下** —— 静态 URL 是后端给的，两边版本错开一档时认得出比认不出安全
   （认不出会把 `?div=` 吞掉，换档位后最长一小时看到旧图）。
 - `paths.legacy_preview_path(jpg)` 由**新落点反推**旧落点（同目录、同源 stem，只差一个字符），
-  `app.py::_sweep_legacy_preview` 在**每条链处理到那份栅格时**顺手删：两个烘焙函数各一次
-  （烤之前）、`/preview` 与 `/preview-drop` 各一次（命中缓存也要删，否则老目录永远清不掉）。
+  `app.py::_sweep_legacy_preview` 在**每条链处理到那份栅格时**同时删：两个生成预览函数各一次
+  （生成之前）、`/preview` 与 `/preview-drop` 各一次（命中缓存也要删，否则老目录永远清不掉）。
   失败只吞 `OSError`，一句提示都不给。
 - **没有全盘清扫，也不可能有**：平台不列目录是硬约束，所以没被任何链碰过的场景目录里那份点号
   文件会一直留着 —— 它不再被任何代码读写，只是占地方（人工可删）。
 
 **为什么不做「改名前先迁移/改名」**：那要枚举目录（越线），或者在新落点上先读一次旧落点再
 `os.replace`（每条链多一次 `is_file()` + 一次改动语义的 rename）。本轮口径是「尽量简单」，
-接受「只有点号那份的栅格会重烤一次」这个代价 —— 换包本来就要重烤一轮（戳是 `v2`）。
+接受「只有点号那份的栅格会重新生成一次」这个代价 —— 换包本来就要重新生成一轮（戳是 `v2`）。
 镜像方案（09-21 那条）同日删掉，含 `import shutil`。
 
 **验证（开发机）**：后端 **664 passed / 4 skipped**（机械改名的期望值若干；新增两例：
 `test_api.py::TestPreview::test_legacy_dot_preview_is_swept_on_open`、
 `test_api_platform.py::TestProductPreviewBake::test_the_eager_bake_and_a_lazy_open_are_the_same_file`
-—— 后者钉「急烤那份与打开时那份字节不差」+「一个场景目录里只有一份预览名」，正是用户要的不变式）。
+—— 后者钉「主动生成那份与打开时那份字节不差」+「一个场景目录里只有一份预览名」，正是用户要的不变式）。
 前端 **329 passed**（`isBakedPreviewUrl` 新增点号/下划线两代的用例）+ `vue-tsc` 零错误。
 `.e2e/` 两个脚本的名字期望同步改；`test-manual-scene.js` 里「拖入链不碰平台那份」那条断言**按新
 语义重写**（两者现在是同一个文件）：改为「场景目录里只有一份预览名」。
@@ -2009,10 +2009,10 @@ if (otherId === id && cur !== null) { …互换… }
 你可以向我多轮提问」。三轮提问钉死十条口径，其中要紧的四条：清的是**服务端那份预览 JPG**
 （不是浏览器本地 blob 缓存）；「全部清除」的范围 = **当前检索结果**（受筛选影响，到 `limit`
 截断线为止）；清掉的行**从列表移除**（局部移除、不重新检索、命中计数递减）；
-库里的急烤状态记成 `cleared`、**不自动重烤**，下次打开惰性重烤。
+库里的主动生成状态记成 `cleared`、**不自动重新生成**，下次打开惰性重新生成。
 
 **这是本平台第一条删盘阵文件的端点**（`POST /api/scenes/clear-preview`），所以判据与范围都按
-「宁可不删，也不删错」写：名字匹配 + **JPEG 注释带 `srprev:` 规则戳**（防「盘阵上别人手放的
+「宁可不删，也不删错」写：名字匹配 + **JPEG 注释带 `srprev:` 规则签名**（防「盘阵上别人手放的
 同名图」与「万一后缀叫 `preview` 的产物」）+ `is_scene_file` 不是场景源（防「目录名以 `_preview`
 结尾时删掉场景源自己」）+ 非符号链接；只列**用户点名的那一个场景目录**这一层（配了
 `SR_PREVIEWS_ROOT` 时含镜像树对应层），不递归、不扫根、不删空目录。场景源 `.tif` /
@@ -2020,24 +2020,24 @@ if (otherId === id && cur !== null) { …互换… }
 
 **三条链的残留风险都处理了，逐条记下来因为每一处都能单独造成「看起来没生效」或「删了又回来」**：
 
-1. **删了又被烤回来**：急烤循环只认领 `status='COMPLETED' AND preview_state IS NULL` 的行，
+1. **删了又被被写回**：主动生成循环只认领 `status='COMPLETED' AND preview_state IS NULL` 的行，
    所以删文件前要把该目录**所有** COMPLETED 行写成 `cleared`。这个写必须是 **CAS**
    （`store.mark_preview_cleared`，`WHERE … AND (preview_state IS NULL OR preview_state != 'running')`）
    —— 拿无条件的 `set_preview_state` 顶替会把别人写下的 `running` 一起盖掉，两边都以为自己是对的。
    该景若**此刻**就有 `running` 的行，整景计「跳过」并写明原因。
 2. **本地 blob 缓存**：前端有个模块级预览 blob 单例（`fetchSceneJpg` 先查它再走网络），不清它的话
    同一会话内点开还是旧字节。清除成功后按 scene id 前缀失效（`forgetScenePreviewBlobs`）。
-3. **浏览器 HTTP 缓存**（这条是顺手修好的既有洞）：`?div=N` 那条击穿只对**换档位**有效，而清除缓存是
-   **同档位重烤**、URL 逐字不变 → nginx 的 `max-age=3600` 会把旧字节端上来，用户以为清了个寂寞。
-   现改成：本次真的触发过烘焙时，取静态图带 `cache: 'no-store'`。同一个洞原来也让「规则戳 v2→v3
-   原地重烤」在最长一小时内看不到新图。
+3. **浏览器 HTTP 缓存**（这条是同时修好的既有洞）：`?div=N` 那条击穿只对**换档位**有效，而清除缓存是
+   **同档位重新生成**、URL 逐字不变 → nginx 的 `max-age=3600` 会把旧字节端上来，用户以为清了个寂寞。
+   现改成：本次真的触发过生成预览时，取静态图带 `cache: 'no-store'`。同一个洞原来也让「规则签名 v2→v3
+   原地重新生成」在最长一小时内看不到新图。
 
 **e2e 里又逼出一处口径错**（`nothing` 顶替了 `skipped`）：目录里躺着同名件、但一个都不是我们的
-缓存（没规则戳 / 是场景源）时，原来的结论是 `nothing`（「盘上本来就没有这一景的缓存」）—— 这是
+缓存（没规则签名 / 是场景源）时，原来的结论是 `nothing`（「盘上本来就没有这一景的缓存」）—— 这是
 假话，而且前端按结论决定行去留，报 `nothing` 会把这一行摘掉；可盘上那份文件明明还在，重新检索
 又出现「已生成」，用户会判成「清除没生效」。现在只有「一个同名件都没有」才叫 `nothing`，其余
 整条计 `skipped` 并写明原因；`cleared` 同目录里还有跳过件时也在 `reason` 里点名（明细同样列它，
-成功的才不列）。e2e `[J]` 节补了一条专门钉这个：往场景目录写一份没有规则戳的
+成功的才不列）。e2e `[J]` 节补了一条专门钉这个：往场景目录写一份没有规则签名的
 `MANUAL_preview.jpg` → 清这一行 → 断言那份文件**字节都没动**、行**留在列表里**、明细里逐条
 写出它和原因。
 
@@ -2053,9 +2053,9 @@ e2e 里 `tr.querySelector('button')` 取的是「打开」那颗按钮）。空�
 而不是 `nothing`」）；前端 **308 passed**（`src/lib` 13 份用例，其中 `api.test.ts` 41 /
 `scene.test.ts` 51）+ `vue-tsc` 零错误 + `npm run build`；e2e `test-scenes.js` **112 断言**
 （新增 `[J]` 节 33 条：确认前不动盘 → 取消真的取消 → 清完行消失+命中递减 → 源文件逐个数着断 →
-外来件一个字节不动且明细点名 → 重新检索回到「未生成」→ 点开重烤 → 全部清除不做确认词就不放行 →
+外来件一个字节不动且明细点名 → 重新检索回到「未生成」→ 点开重新生成 → 全部清除不做确认词就不放行 →
 跳过的行留下 → 再清一次（盘上真没缓存了）才走空态文案），
-`test-platform.js` 23（三页同宽仍绿）、`test-manual-scene.js` 197 全绿。**顺带把 `rows()` 的
+`test-platform.js` 23（三页同宽仍绿）、`test-manual-scene.js` 197 全绿。**同时把 `rows()` 的
 「按 td 下标取列」改成按 CSS 类（`.c-sat`/`.c-dims`/…）** —— 加一列时下标写法会整体错位一位
 却照样「通过」，失败信息与真因差一整列。`qa-theme.js` 仍是 **9 条 FAIL**（陈旧期望，与本轮无关：
 与上一轮记录过的 FAIL 集合同名同类）。
@@ -2069,7 +2069,7 @@ e2e 里 `tr.querySelector('button')` 取的是「打开」那颗按钮）。空�
 读一次 `previewCacheStats()`（外加清空之后重读一次），而**唯一能改这份缓存的开关（预取）就挂在
 同一浮层的上一行**。于是用户点开开关、眼睛盯着紧挨着的那个数字，看到的永远是打开浮层那一刻的值；
 走拖入链进来时那份缓存本来就是空的，所以**永远停在「0 项」**，只能得出「预取没生效」这个结论。
-按用户的动作在开发机上复现（造一份盘上已烤好的产物预览 → 进对比模式 → 开预取 → **面板不关**）：
+按用户的动作在开发机上复现（造一份盘上已生成好的产物预览 → 进对比模式 → 开预取 → **面板不关**）：
 缓存实际 1 项 → 2 项，行里始终写着打开时那一次的数字。**同一浮层里一个控件的结果显示在另一个控件
 旁边，读数就必须订阅而不是快照** —— 这条是本轮留下的一般教训（已进 `gui-experience.md` §10.7）。
 
@@ -2084,9 +2084,9 @@ e2e 里 `tr.querySelector('button')` 取的是「打开」那颗按钮）。空�
 3. `stores/viewer.ts` + `SettingsPanel.vue`：store 里落一个 `previewCacheRev` 计数器，浮层的
    `watch` 从「只看 `settingsOpen`」改成 `[settingsOpen, previewCacheRev]`，**面板开着也跟着涨**。
 
-**顺带把预取的结果说出来**（同一浮层新增备注行 `data-e2e="set-prefetch-note"`）：预取原先静默跑，
+**同时把预取的结果说出来**（同一浮层新增备注行 `data-e2e="set-prefetch-note"`）：预取原先静默跑，
 于是「没可预取的」和「预取坏了」在界面上长得一模一样，正与这次的误判同源。现在四种收场都有话说：
-`siblings` 查不到 / **这次没有可预取的**（另两类在盘上还没有现成预览，写明**预取不触发烘焙**、
+`siblings` 查不到 / **这次没有可预取的**（另两类在盘上还没有现成预览，写明**预取不触发生成预览**、
 打开过一次之后就有了）/ **正在预取 i/n** / **已预取 N 项**（有没取到的则记 `N/总数`）；
 `setCmpPrefetch` 关掉时连备注一起擦掉（关了就收手）。
 
@@ -2135,7 +2135,7 @@ e2e 里 `tr.querySelector('button')` 取的是「打开」那颗按钮）。空�
 只有把 ROI 坐标读出来比才现形。留下的唯一一道门是 `canDrawOn`（有显示像素 **且** 是本体影像，
 产物尺寸的掩码配本体 lq_path 会静默盖掉本体那份），三处共用：`enterDraw`、绘制期间 `setActiveSide`
 （**出声说明**，不静默忽略）、`onCanvasDownDraw` 兜底；`setCompareMode` 不再 `exitDraw`（切模式不该
-把画了一半的框丢掉，pendingRect 存的是缩略图坐标，换视口仍指着同一片影像）。绘制面板顺带多一枚
+把画了一半的框丢掉，pendingRect 存的是缩略图坐标，换视口仍指着同一片影像）。绘制面板同时多一枚
 `画在：右 · <文件名>` 芯片（只在对比模式下显示）。
 
 **改动清单（前端 11 处）**：新增 `lib/notices.ts`（纯函数：终态判定 + 文案）、`stores/notices.ts`
@@ -2184,11 +2184,11 @@ task_id**（订阅常驻，这次会话可能还没拉过队列），失败原�
 `searched` 在**发起**那一刻置位（不等返回）：失败也算，错误文案已经写在页面上，再进本页不该自动
 重来一遍全树扫描。
 
-**代价与补偿（如实记）**：列表会旧 —— 新落盘到盘阵的场景、别处（查看器侧舱 / 拖入链）刚烤出来的
+**代价与补偿（如实记）**：列表会旧 —— 新落盘到盘阵的场景、别处（查看器侧舱 / 拖入链）刚生成的的
 预览都不反映。所以 `.sp-head` 上来源 chip 旁新增一行「上次检索 HH:MM」（跨天带 `MM-DD`，
 `stampText` 与页面既有的 `fmtBytes`/`dimsText` 同为页面局部函数），并挂了 title 指向「要拿盘阵上
 最新的数据请按检索」。单行的标签不受影响：从列表点开某一行时 `fetchSceneJpg` 就地把该行的
-`hasPreview`/`previewDiv` 翻牌（列表行就是 store 里那些对象），只有**别的入口**烤出来的预览要等
+`hasPreview`/`previewDiv` 翻牌（列表行就是 store 里那些对象），只有**别的入口**生成的的预览要等
 下一次检索才显示。
 
 **验证（开发机）**：前端 **380 passed** + `vue-tsc` 零错误 + `npm run build`；
@@ -2211,7 +2211,7 @@ chip 上有「上次检索 HH:MM」读数）。**反向对照做了一次**：�
 （后端只在 id 解不到授权根之内时回 404，正常列表行不会），拿到静态 URL 后打的是 nginx 直出的
 `/disk-array/...`；**那底下没有这个文件时回的就是 404，而且是非 JSON 体** —— 所以前端 `http()` 拼出来的
 message 只有裸的「HTTP 404」，正是用户报的那句（后端那条 404 会带中文 detail「场景不可访问：…」，
-烘焙失败是 422「预览生成失败：…」）。行还在、文件没了，是因为列表是「上次检索」那一刻的快照，
+生成预览失败是 422「预览生成失败：…」）。行还在、文件没了，是因为列表是「上次检索」那一刻的快照，
 而盘阵上的数据会被自动清理 —— 上一条改动让列表在页面上留得更久，这个组合只会更常见。
 
 **改了什么（纯前端，实际只需拷 `frontend/dist`）**：
@@ -2223,7 +2223,7 @@ message 只有裸的「HTTP 404」，正是用户报的那句（后端那条 404
 | `stores/scenes.ts` | `open()` 的 catch 里：`isSceneGone` → `row.purged = true`，错误行改写成「盘阵上已没有这个文件（HTTP 404）…按『检索』刷新即知它还在不在」 |
 | `pages/ScenesPage.vue` | 那一格的「打开」换成 `<button class="btn mini gone" disabled>已自动清理</button>`；预览列同口径加「已清理」态 |
 
-**判据为什么只有 404（这一条是刻意的）**：422 是「源还在、只是烤不出来」（档位非法 / 多波段 /
+**判据为什么只有 404（这一条是刻意的）**：422 是「源还在、只是生成不出来」（档位非法 / 多波段 /
 条带读失败 / Pillow 兜底失败），把它也说成「已自动清理」就是拿一个**猜的原因**盖住真实故障 ——
 用户会照着一个假结论去等它自己好。同理不写死「10 天自动清理」这个原因（那是用户的口径，
 平台没在盘上看到过清理这件事）：文案只陈述「取不到」。标记是**前端的观测**（试过一次、撞上了），
@@ -2233,24 +2233,24 @@ message 只有裸的「HTTP 404」，正是用户报的那句（后端那条 404
 JSON detail 仍是 message、**422 不认**、`fetch` 自己抛的 TypeError 不认）+ `vue-tsc` 零错误 +
 `npm run build`；`.e2e/test-scenes.js` **123 断言**（新增 `[K]` 节 6 条：删掉那一景的 .jpg 源后点「打开」
 → 行内按钮变「已自动清理」、预览列变「已清理」、按钮 disabled、**再点被 e2e 的点击助手拒绝**、
-打开失败**不顺手重新检索**、重新检索后该行不再出现；`[H]` 段把刻意那一次 404 从「无浏览器错误」里
+打开失败**不同时重新检索**、重新检索后该行不再出现；`[H]` 段把刻意那一次 404 从「无浏览器错误」里
 放行**并断条数恰好为 1**，免得别的失败混进来）。**反向对照做了一次**：把 `isSceneGone` 短路成 `false`
 → build → 重跑，`[K]` 当场红在「超时等待 行「GF04_…」按钮=已自动清理」，恢复后 123 条全绿 ——
 用例确实钉住了用户报的那一下。`test-manual-scene.js` **202 全绿**、`test-platform.js` **26 全绿**
 （后者上一轮记录的 `[D]` 失败本轮没再复现 —— 间歇性，见上一条）。
 
-**顺手修掉 e2e 里的一处竞态**：`[J]` 段重烤后立刻点「全部清除」时撞上一次「按钮未找到或已禁用」。
+**同时修掉 e2e 里的一处竞态**：`[J]` 段重新生成后立刻点「全部清除」时撞上一次「按钮未找到或已禁用」。
 原因是工具行的 `busy = clearing ‖ loading ‖ openingId`，而「已生成」标签**比 `open()` 收尾早翻牌**
 （`fetchSceneJpg` 在取静态图之前就置了 `hasPreview`）。已改成先等按钮从「打开中…」回到「打开」再往下走
 （该文件 `waitRowBtn` 的注释早就写过这个先后关系，只是 J3→J4 那一处没照做）。判为**既有竞态、
 非本轮引入**：判据在代码里（busy 含 openingId + 标签先翻），本轮没碰过这条路径。
 
-**留作下一轮（未覆盖的一路，用户在真机上可能碰到）**：库行里**还没烤过预览**（按钮「生成并打开」）
+**留作下一轮（未覆盖的一路，用户在真机上可能碰到）**：库行里**还没生成过预览**（按钮「生成并打开」）
 而源文件已被清掉时，前端先打 `/preview`，后端 `ensure_preview_jpg` → `preview_max_edge` 见
 `src.is_file()` 为假 → `PreviewError("场景文件不存在")` → **422**，这条路**不会**亮灰块（错误行是
 「打开「X」失败：预览生成失败：场景文件不存在」）。本轮没动后端：用户报的是 404，后端一处改动要重新
 部署一次后端包。要覆盖它，最小改法是让 `app.py::preview` 在 `abs_path.is_file()` 为假时回
-**404**（顺带堵住「jpg 源不存在时 `FileResponse` 抛 500」那个洞），之后前端这条判据一行不用改。
+**404**（同时堵住「jpg 源不存在时 `FileResponse` 抛 500」那个洞），之后前端这条判据一行不用改。
 
 > ⚠️ **本节的口径已于 2026-09-24 撤销**（按年龄推定的那一半整条删掉，灰块只留给「真撞过 404」的行），
 > 起因与修法见下方 09-24 那一条。本节保留原文以便追溯当时为什么这么定。
@@ -2266,7 +2266,7 @@ JSON detail 仍是 message、**422 不认**、`fetch` 自己抛的 TypeError 不
 1. **列表里的每一行，在检索那一刻源文件都在盘上**。`scene_search.is_scene_file` 要求 `p.is_file()`
    为真，后端列的是一份**已经 stat 过**的结果 —— 所以「已自动清除」永远是**推定**（列表是「上次检索」
    的快照，盘阵上的数据后来被清掉），不是能从列表读出来的事实。
-2. **平台只为产物急烤，从不预烤输入影像**。`_bake_product_preview` 的注释写得很直白：用户到底要不要
+2. **平台只为产物主动生成，从不漏生成输入影像**。`_bake_product_preview` 的注释写得很直白：用户到底要不要
    看，打开之前无法知道。于是「盘上没有预览」这一条恰恰是**还没被打开过的新景**的常态 —— 一律变灰
    会把「选景 → 打开 → 画掩码 → 提交 SR」这条主链路当场挡掉。
 
@@ -2286,12 +2286,12 @@ presumedPurged(row) = row.purged
 
 | 排除 | 判据 | 一旦不排除会怎样 |
 |---|---|---|
-| 档位不同不算 | 只认「盘上一份预览都没有」，**不看** `previewNeedsBake` | 换一次档位整张表都变灰，而盘上那份预览就是刚烤的 |
+| 档位不同不算 | 只认「盘上一份预览都没有」，**不看** `previewNeedsBake` | 换一次档位整张表都变灰，而盘上那份预览就是刚生成的 |
 | 新景不算 | 年龄 ≤ 3 天 | 挡住上面第 2 条主链路 |
-| jpg 源行不算 | `isImageSource` | 它被列出来本身就证明盘上那份 jpg 在，打开根本不需要烘焙 |
+| jpg 源行不算 | `isImageSource` | 它被列出来本身就证明盘上那份 jpg 在，打开根本不需要生成预览 |
 
-**呈现随之收成两种**：能点的按钮**一律写「打开」**（「生成并打开」这个文案整条消失 —— 烤不烤是点下去
-之后的事，按钮不再是「要不要先烤」的读法），不可点的是灰块「已自动清除」（`.btn.mini.gone`，`disabled`，
+**呈现随之收成两种**：能点的按钮**一律写「打开」**（「生成并打开」这个文案整条消失 —— 生成不生成是点下去
+之后的事，按钮不再是「要不要先生成」的读法），不可点的是灰块「已自动清除」（`.btn.mini.gone`，`disabled`，
 `cursor: not-allowed`，title 里写清推定依据与退路）；预览列同口径改「已清除」（与「已生成 / JPG 源」
 摆在一起是自相矛盾）。`scenes.open()` 的 404 分支保持上一轮的实测标记，文案里的「已自动清理」统一
 改成「已自动清除」。
@@ -2315,8 +2315,8 @@ presumedPurged(row) = row.purged
   不是「点了没反应」）、一次 `/preview` 都没发、盘上没多出文件；**C2** 当天新景照旧可点，走完
   「懒生成 → 静态 `?div=2` 直读 → 行内翻牌」，另外两张没动过的老景仍是灰块。
 - `[F]` 与 `[J3]` 从「点行按钮」改成**走路径栏**（灰块的退路），`[J3]` 另加一条「那一行当场翻回来」。
-- `[B2]` 的按钮断言改成「可点的『打开』」：按钮文案不再透露「打开前会不会先烤」，那条链改由
-  `/preview` 计数 + 烤出来的像素尺寸 + 布局文案三条实证钉住（顺带补掉一处竞态：等按钮「打开」现在
+- `[B2]` 的按钮断言改成「可点的『打开』」：按钮文案不再透露「打开前会不会先生成」，那条链改由
+  `/preview` 计数 + 生成的的像素尺寸 + 布局文案三条实证钉住（同时补掉一处竞态：等按钮「打开」现在
   不再是收尾信号，先等 node 侧看到预览落盘）。
 - `[K]`（真实 404 那条路）与 `[D]`/`[J5]` 的文案同步；`test-scenes.js` 的 uvicorn 子进程补
   `SR_DRIVE_MAP`/`SR_ALLOWED_ROOTS`，路径栏粘的是 Windows 形态 `W:\…`（同 `test-manual-scene.js`）。
@@ -2334,7 +2334,7 @@ presumedPurged(row) = row.purged
 的形态，需要看一批真实目录名才能定。② 这条口径下**新景永远不灰**，所以「3 天以内、文件已被清掉」的行
 点下去仍会是后端那条 422（上一轮记的缺口），改造 `/preview`（源文件不存在回 404）仍然值得做。
 
-### 2026-09-24 · 「已自动清除」取消按年龄推定；顺带定位一次 nginx 反代回归（真机 + 开发机）
+### 2026-09-24 · 「已自动清除」取消按年龄推定；同时定位一次 nginx 反代回归（真机 + 开发机）
 
 **现象（用户报）**：一批日期较早的行点不动了（灰块），但那些场景目录在盘阵上还在、粘路径能打开。
 
@@ -2366,7 +2366,7 @@ presumedPurged(row) = row.purged
 「改了也没用」。后续落到机器上的脚本一律纯 ASCII + py2 兼容，写完先自查再 reload。
 
 **二、按年龄推定这条口径撤销。** 理由是 09-22 自己记下的那两条事实：列表里的每一行在**检索那一刻**
-源文件都在盘上；平台**从不为输入影像预烤**。「盘上没预览」因此是**还没打开过的新景的常态**，
+源文件都在盘上；平台**从不为输入影像漏生成**。「盘上没预览」因此是**还没打开过的新景的常态**，
 拿它加上年龄去挡「打开」，等于用一个猜的结论封掉一条本来走得通的路。用户的口径回到最初那句：
 **取消按年龄推定，只认真撞过 404。**
 
@@ -2383,7 +2383,7 @@ presumedPurged(row) = row.purged
    反代配置：`/api/` 下的 location 少了同一层的 `proxy_pass`，见 `deploy/nginx.conf`）……这个状态码
    说明不了盘阵上还有没有这一景」；其余原样。
 
-呈现随之回到「四种标签 + 两种按钮」：能点的行一律「打开」（含「未生成」—— 要烤就点下去再烤），
+呈现随之回到「四种标签 + 两种按钮」：能点的行一律「打开」（含「未生成」—— 要生成就点下去再生成），
 灰块只留给**真的撞过 404** 的行。09-22 那条「退路」（粘路径）不再是灰块的唯一出口 ——
 灰块现在只出现在盘上真没了的时候，路径栏入口本身照旧保留（库外场景仍走它）。
 
@@ -2397,7 +2397,7 @@ curl -s -o /dev/null -w '反代=%{http_code} ct=%{content_type}\n' \
 
 **验证（开发机，全绿）**：前端 **390 passed**（删掉 09-22 那 10 条年龄用例、新增 `isDiskArrayUrl` 4 条
 与 `HttpError`/`isProxyMiss` 6 条）+ `vue-tsc` 零错误 + `npm run build`；
-`.e2e/test-scenes.js` **132 断言**全绿（老景那几条从「不可交互」改回「可点、点下去才烤」，
+`.e2e/test-scenes.js` **132 断言**全绿（老景那几条从「不可交互」改回「可点、点下去才生成」，
 灰块仍由 `[K]` 的真实 404 那条路覆盖）。
 
 **待核 / 未收口（两条，均未动）**：
@@ -2412,7 +2412,7 @@ curl -s -o /dev/null -w '反代=%{http_code} ct=%{content_type}\n' \
 ### 2026-09-24 · 未超分那份（NOSR）：名字口径统一 + 拖入显示件时预热（开发机）
 
 **需求（用户口径）**：拖入关联盘阵场景的 `<目录名>.jpg`（本体显示件）或产物显示件 → 平台**自动**
-去该场景目录找「未超分那份」（NOSR）并烤成 jpg → 之后这份 NOSR 显示件出现在界面上时，名字后面
+去该场景目录找「未超分那份」（NOSR）并降采样到 jpg → 之后这份 NOSR 显示件出现在界面上时，名字后面
 带一颗 `NOSR` 标（与「本体」标区分）。标可点 → 开进当前活动格。
 
 口径由用户分三轮定死：**触发只有拖入**（从场景库打开、从路径栏打开都不触发）；盘上没有那份栅格时
@@ -2445,18 +2445,18 @@ RC 即 `PAN_NOSR.tif`）；writeTiff 那个名字**退为次选**，仍在候选
 | 后端 | `services/scene_search.py` | 新增 `nosr_candidates`；`jpg_stage_name` 补「裸 `_NOSR` 尾 = `('nosr','')`」；`de_suffixed_stems` 修掉预剥 `_NOSR` 的写法（见 §9.6 坑二） |
 | 后端 | `api/app.py` | `/siblings` 的 nosr 项改读候选清单、**不再依赖 suffix**，响应新增 `nosrCandidates`；`_bake_nosr_preview` 的源名同源，`skipped:` 报出试过哪些名字 |
 | 前端 | `lib/api.ts` | `SceneSiblings.nosrCandidates` + 纯函数 `nosrItemOf`（取 `kind==='nosr'` 且 `exists` 的项） |
-| 前端 | `stores/viewer.ts` | 新增 `warmNosrPreview(rec)`：拖入**显示件**时静默预热同景那一份（`/siblings` → `fetchSceneJpg`），按 `sceneDir`（缺则 `sceneId`）去重、**烤上了才记账**；`openSceneSibling` 的失败提示按 kind 列对应的候选清单 |
+| 前端 | `stores/viewer.ts` | 新增 `warmNosrPreview(rec)`：拖入**显示件**时静默预热同景那一份（`/siblings` → `fetchSceneJpg`），按 `sceneDir`（缺则 `sceneId`）去重、**生成上了才记账**；`openSceneSibling` 的失败提示按 kind 列对应的候选清单 |
 | 前端 | `components/FileList.vue` | 环节标的工具提示改成两义都说（输入 stem 那份 / writeTiff 那份），原先只写了后者 |
 
-**两个触发点（都是既有语义的延伸，没有新入口）**：① 超分跑完顺带烤（09-21 那条，源名换成候选
-清单）；② 拖入显示件时前端预热（本轮新增）—— 后者与 09-21 那条 `bakeDropPreview` 并列，烤的是
+**两个触发点（都是既有语义的延伸，没有新入口）**：① 超分跑完同时生成（09-21 那条，源名换成候选
+清单）；② 拖入显示件时前端预热（本轮新增）—— 后者与 09-21 那条 `bakeDropPreview` 并列，生成的是
 **同景的另一份**而不是拖进来那份自己。两条都静默、都不 `await`、失败都不报错。
 见 [preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md) §4.11。
 
 **验证（开发机，全绿）**：后端 **720 passed / 5 skipped**（基线 696/5；新增 NOSR 命名、
-候选清单、解析、`/siblings`、烘焙共 22 条）；前端 **393 passed** + `vue-tsc` 零错误 + `npm run build`；
+候选清单、解析、`/siblings`、生成预览共 22 条）；前端 **393 passed** + `vue-tsc` 零错误 + `npm run build`；
 `.e2e/test-manual-scene.js` **214 断言**（基线 202，新增 L6/L7 两段：新造一个 SC 场景 + 一份
-`<目录名>_NOSR.tif`，断言拖入显示件后确实对那一份发了 `/preview`、烤出的 jpg 落盘尺寸对得上，
+`<目录名>_NOSR.tif`，断言拖入显示件后确实对那一份发了 `/preview`、生成的 jpg 落盘尺寸对得上，
 再把它拖回来断言环节 `nosr`、标签 `NOSR`、**与本体卡共用同一个序号**、只读小标只在它上面、
 两颗修复按钮都置灰、标类是 `stage nosr`）。全程无错的口径不变：404 恰好四次、400 恰好两次。
 
@@ -2494,12 +2494,12 @@ RC 即 `PAN_NOSR.tif`）；writeTiff 那个名字**退为次选**，仍在候选
 |---|---|---|
 | 后端 | `pathguard.py` | 新增 `_PRODUCT_CODES` + `scene_name_products`（带栅格扩展名的名字**不生成变体**：那是拖进来的文件，走 `size_bytes` 双指纹，`…_preview.jpg_PAN` 盘上不可能存在） |
 | 后端 | `api/app.py` | §3.5 `{name}` 分支接可选 `product`（非字符串 → 400）；候选由它展开；404 的 `detail` 补一句「名字里没有产品段，按 _PAN、_MSS 依次各试了一遍」；`day_note` 的判据改看**基准候选**条数（不再看展开后的总数） |
-| 前端 | `stores/scenes.ts` | `openByName(name, product?)`；**顺带修掉第二个 bug**：成功后仍兜底返回错误串（见下） |
+| 前端 | `stores/scenes.ts` | `openByName(name, product?)`；**同时修掉第二个 bug**：成功后仍兜底返回错误串（见下） |
 | 前端 | `components/QcListPanel.vue` | 行内「打开」把 `it.imgType` 一起递过去 |
 | 前端 | `lib/api.ts` | 请求体联合类型加 `product`；`viewer/e2eHooks.ts` 的 `qcOpenByName` 加第二参（真机验收用） |
 | 测试 | `backend/tests/test_paths.py`、`test_scene_resolve.py`、`frontend/src/lib/__tests__/api.test.ts`、`.e2e/test-manual-scene.js` | 见下 |
 
-**顺带发现并修掉的第二个 bug**：`openByName` 成功时也会返回 `打开「…」失败` —— 它末尾是
+**同时发现并修掉的第二个 bug**：`openByName` 成功时也会返回 `打开「…」失败` —— 它末尾是
 `return error.value || ('打开「…」失败')`，而 `open()` 成功时 `error` 恰好是空串，于是**面板
 「打开」点下去图开了、红条却说失败**。`open()` 的每条失败路都会写 `error`，所以兜底那一支
 只会在成功时触发，改成就看 `error`。（这条与产品段那个 bug 同一天暴露：用户点的正是这些行。）
@@ -2521,29 +2521,29 @@ products` 的 7 条（原样恒第一 / 提示换序 / 认不出的提示退 `_P
 
 ---
 
-### 2026-09-27 · 一键解析：清单批量烘焙 + 点亮联动（开发机）
+### 2026-09-27 · 一键解析：清单批量生成预览 + 点亮联动（开发机）
 
 **需求（用户原话）**：「拖入 .txt 后多一颗醒目橘色『一键解析』→ 自动清空左侧暂存区 → 一次性
-烘焙、按每景顺序依次存放它的烘焙 jpg 与 NOSR_jpg → 按序号归纳依次展示，**严格按 .txt 内部
+生成预览、按每景顺序依次存放它的预览 JPG 与 NOSR_jpg → 按序号归纳依次展示，**严格按 .txt 内部
 顺序** → 之后每次点亮右侧工具，左侧有联动的高亮 + 上下滑动动画（配色醒目）」。三条口径由
 用户当场拍定：联动触发源 = **点清单里的一行**；入列形态 = **每景两张、共用同一序号**；
 失败与进度 = **记账跳过 + 可中途停止**。
 
-**为什么值得单独做一条链**：此前只能一行一行点「打开」——每点一次才 resolve 一次、烤一次、
+**为什么值得单独做一条链**：此前只能一行一行点「打开」——每点一次才 resolve 一次、生成一次、
 落一张卡。一批几十条要重复几十次，且**看不到这一批到底有哪些景、顺序是什么**。批量这条链
 要回答的正是「这一批整整齐齐摆在这儿」。
 
 | 层 | 文件 | 改了什么 |
 |---|---|---|
 | 前端 | `lib/qcbatch.ts`（新） | `PRODUCT_CODES` + `sceneNameCandidates`（`pathguard.scene_name_products` 的**镜像，只用于匹配**）+ `matchesScene` + `progressText`/`fmtElapsed` + `runSceneBake`（**注入式串行驱动器**：按行序、单景失败不中断、`'missing'` 进 notes 不进 fails、每个 await 之后看一次 `signal.aborted`） |
-| 前端 | `stores/scenes.ts` | 新增 `resolveByName(name, product?, {signal})` —— **只解析不打开**（不激活、不烤、不写 `scenes.error`），失败抛，让批量拿到后端 detail 原文 |
-| 前端 | `stores/viewer.ts` | `clearRecs` / `insertSceneCard`（**非激活**入列一张只有身份的空卡）/ `bakeCardPixels`（只烤盘、**不碰 busy / 不弹遮罩**）/ `loadCardPixels`（点开才取图，取完清 `rec.card`）/ `lightCards` / `clearLights` + `litIds`/`litTick`；`activate` 加懒取图分支 |
-| 前端 | `stores/qclist.ts` | 新段落「一键解析」：`bakeState`（idle/running/stopping/done/stopped）、`bakeFails`（标红+原因）、`bakeNotes`（盘上的事实）、`bakeAll`/`stopBake`、进度行与收尾汇总；**顺手修 `selectForScene` 的产品段缺口**（改走 `rowForScene`） |
+| 前端 | `stores/scenes.ts` | 新增 `resolveByName(name, product?, {signal})` —— **只解析不打开**（不激活、不生成、不写 `scenes.error`），失败抛，让批量拿到后端 detail 原文 |
+| 前端 | `stores/viewer.ts` | `clearRecs` / `insertSceneCard`（**非激活**入列一张只有身份的空卡）/ `bakeCardPixels`（只生成盘、**不碰 busy / 不弹遮罩**）/ `loadCardPixels`（点开才取图，取完清 `rec.card`）/ `lightCards` / `clearLights` + `litIds`/`litTick`；`activate` 加懒取图分支 |
+| 前端 | `stores/qclist.ts` | 新段落「一键解析」：`bakeState`（idle/running/stopping/done/stopped）、`bakeFails`（标红+原因）、`bakeNotes`（盘上的事实）、`bakeAll`/`stopBake`、进度行与收尾汇总；**同时修 `selectForScene` 的产品段缺口**（改走 `rowForScene`） |
 | 前端 | `components/QcListPanel.vue` / `FileList.vue` | `.qc-h` 下面单独一行那颗橘色 `.qc-go`（三态：一键解析 / 停止 / 正在停止）+ 失败账区块 `.qc-fails`；`FileList` 收 `Map<id, el>`，`watch(litTick)` 里 `scrollIntoView({block:'center', behavior:'smooth'})` |
 | 前端 | `style.css` | `.file-item.lit` 只用 **`outline`**（橘色令牌 `--notice-job`，与 `.active` 的 box-shadow 正交）；动画重放靠奇偶两个同名 keyframes 交替挂 |
 | 前端 | `viewer/e2eHooks.ts` | `qcBakeState`/`qcBakeAll`/`qcBakeStop`/`litIds`/`litTick`/`clearRecs`；`summarize()` 加 `hasCard`/`lit` |
-| 后端 | `api/app.py` | **零新增端点、响应字段一字未改**（只在 `preview`/`preview-drop`/`siblings` 三处 docstring 写下「批量走这三条、别顺手加 batch」的理由） |
-| 文档 | `api-contract.md` | 挂起项十二：批量烘焙**不新增端点**的契约说明 |
+| 后端 | `api/app.py` | **零新增端点、响应字段一字未改**（只在 `preview`/`preview-drop`/`siblings` 三处 docstring 写下「批量走这三条、别同时加 batch」的理由） |
+| 文档 | `api-contract.md` | 挂起项十二：批量生成预览**不新增端点**的契约说明 |
 
 **六处「换个写法也能跑、但会慢慢烂掉」的选择**（完整理由见 [gui-experience §9.8](../experience/gui-experience.md)）：
 
@@ -2553,14 +2553,14 @@ products` 的 7 条（原样恒第一 / 提示换序 / 认不出的提示退 `_P
 2. **前端镜像 `_PRODUCT_CODES` 只用于匹配、绝不参与拼路径**，靠两处金丝雀防静默漂
    （后端 `test_paths.py::TestSceneNameProducts::test_product_codes_mirror` + 前端
    `qcbatch.test.ts`，各钉一次 `('PAN','MSS')` 字面量，同时红即有人改了一头）。
-3. **卡片生下来不带像素**：批量只把 jpg 烤到盘上，点开才取图（此时命中服务端缓存，秒出）。
-   算式：÷4 的 4 万² 景烤出 10000²，`applySceneJpgToRec` 同时留下缩略图画布与解码位图
+3. **卡片生下来不带像素**：批量只把 jpg 生成到盘上，点开才取图（此时命中服务端缓存，秒出）。
+   算式：÷4 的 4 万² 景生成出 10000²，`applySceneJpgToRec` 同时留下缩略图画布与解码位图
    **≈800MB/卡**，一批十几景 ×2 张必爆（浏览器单次分配 ~2GB）。
-4. **取消 = AbortController，且如实告知**：取图的两个 API 都不收 signal，在飞的那一景让它烤完
-   （落盘正是要的缓存），文案写「正在停止（等这一景烤完…）」。被掐掉的 resolve 是**取消**、
+4. **取消 = AbortController，且如实告知**：取图的两个 API 都不收 signal，在飞的那一景让它生成完
+   （落盘正是要的缓存），文案写「正在停止（等这一景生成完…）」。被掐掉的 resolve 是**取消**、
    不是失败，不许记进失败账。
 5. **失败账与「缺失」分两张表，且都不写 `statuses`** —— 那份会被 `buildQcDoc` 写回盘阵上的
-   .txt、还驱动 `counts.done`，而烤图失败是平台自己的事。
+   .txt、还驱动 `counts.done`，而生成图失败是平台自己的事。
 6. **清空暂存区不弹二次确认** —— 分界线是「数据丢没丢」：`clearRecs` 只清视图，盘上一个字节
    没动，卡随时能重建。给可重建的东西加确认弹窗只会训练用户闭眼点确定。
 
@@ -2570,13 +2570,13 @@ products` 的 7 条（原样恒第一 / 提示换序 / 认不出的提示退 `_P
 `matchesScene` 四种边界 / 进度文案 / `runSceneBake` 的四条规矩与取消点）；
 `.e2e/test-manual-scene.js` **296 断言**（基线 225，新增 **M 段 71 条**）。M 段刻意**另造三景**
 （不复用 H2 那两景：它们的预览字节已在浏览器本地 blob LRU 里，批量再取就是本地命中、一个
-HTTP 都不发，那条路上「每个 id 恰好烤一次」根本验不到）——四行清单摆出四种情形：①②有 NOSR
+HTTP 都不发，那条路上「每个 id 恰好生成一次」根本验不到）——四行清单摆出四种情形：①②有 NOSR
 → 每景两张卡；③ 没有 NOSR → 一张卡 + 一条中性提示；④ 盘上没有这一景 → 标红记账、后面的照跑。
-四行第一列**都缺产品段**，所以批量也顺带走通「按影像类型补段」。M 段断言：按钮是那颗橘色令牌
+四行第一列**都缺产品段**，所以批量也同时走通「按影像类型补段」。M 段断言：按钮是那颗橘色令牌
 （`rgb(194,116,58)` 渲染值）/ 点下去先把暂存区清空（18 → 0）/ 五张卡的名字与顺序**严格按行序**
 且 DOM 上 `.ord` 是 `1,1,2,2,3` / 五张卡全是空卡（有身份没像素）且**不激活任何一张** /
 盘上五份 jpg 尺寸逐一核对（600×300 / 200×100 / 500×250 / 160×80 / 400×200）/
-**每个场景 id 恰好烤一次**（`/preview` 5 次、`/siblings` 3 次）/ 失败只记一行且原因是后端原话、
+**每个场景 id 恰好生成一次**（`/preview` 5 次、`/siblings` 3 次）/ 失败只记一行且原因是后端原话、
 点明补过哪几段候选 / 失败账**没漏进 .txt**（`statuses` 仍空、`done` 仍 0）/ 点行 → 两张卡点亮
 且**不动活动图**、侧栏真的滚下去再滚回来 / 点开空卡才补像素（600×300、200×100）/
 NOSR 卡 `lqPath` = 场景目录且三处修复入口全灰 / 跑到第一张卡落地就点「停止」→ 收手、
@@ -2597,7 +2597,7 @@ e2e 读到 `{ 行名: {} }`、`.reason` undefined，断言以一条 `TypeError` 
 一层再交出去。② 点开空卡那条路要等的是**像素到位**（`thumbW > 0`）而不是「它成了活动图」——
 `activate` 是同步挂 `activeId` 的，取图在后面几拍才回来。
 
-**顺带把 e2e 的后端日志从黑洞改成可用**：`child.stderr.on('data', () => {})` 原来把后端日志直接
+**同时把 e2e 的后端日志从黑洞改成可用**：`child.stderr.on('data', () => {})` 原来把后端日志直接
 丢掉，而「`GET /api/queue` 报 CORS」这种浏览器报错的正身常常是**后端 500**（Starlette 的 500 由
 `ServerErrorMiddleware` 发出，在 `CORSMiddleware` **外面**，那份响应天然不带 CORS 头）。现在
 保留末尾 40 行、**失败时打出来**，不刷屏。
@@ -2638,7 +2638,7 @@ e2e 读到 `{ 行名: {} }`、`.reason` undefined，断言以一条 `TypeError` 
 源、页面自己都发不出去 ⇒ 范围锁死在渲染进程，不必再查后端）。`page.on('request')` 是请求**被创建**
 时触发而不是被发出时，排队的请求既不回也不失败，所以「在飞请求」表只能当参考（且对 bfcache 冻住的
 文档会多报）；`main().catch` 跑在 `finally` 关浏览器之后，数 socket 必须在关浏览器**之前**取。
-顺带把 `test-platform.js` 的后端日志（上一条已保留的末尾 40 行）在失败时打出来，并永久保留
+同时把 `test-platform.js` 的后端日志（上一条已保留的末尾 40 行）在失败时打出来，并永久保留
 「失败快照」（页面 url/正文/API 记录 + 未跑完请求 + 浏览器控制台 + 非 2xx + 后端尾部）。
 
 **验证**：`test-platform.js` ✅ **26 项断言**（连跑 6 次，5 次全绿；连接数不再钉在 6）；前端
@@ -2659,7 +2659,7 @@ Pinia store，理论上此时 store 里已有上一任务。**未定性**，下�
 
 **需求（用户确认三条口径）**：切到某张图时，把《待修复清单》里对应那一行的坐标**预填**进工具栏
 定位框 —— ① 只填、**不跳**（跳不跳由人按「定位」）；② 这一行没有行列号就**清空**（不然框里
-留着上一张图的坐标，顺手一个回车就跳到错地方）；③ 产物卡保持一致性，同景（同一个 `sceneDir`）
+留着上一张图的坐标，同时一个回车就跳到错地方）；③ 产物卡保持一致性，同景（同一个 `sceneDir`）
 各卡预填同一个坐标。
 
 **改动只有一个 watch**（`frontend/src/components/Toolbar.vue`）：键 =
@@ -2675,6 +2675,89 @@ Pinia store，理论上此时 store 里已有上一任务。**未定性**，下�
 
 **待真机**：这条预填要 `sceneDir` 非空才走得通（本地随手打开的图没有），开发机 e2e 到不了 ——
 验收动作：导入清单 → 一键解析 → 点开某张卡，看定位框里是不是那一行的「列,行」。
+
+### 2026-09-28 · 《待修复清单》坐标口径订正：那对数是 (X=列, Y=行)，不是「行,列」（真机实测）
+
+**用户报的缺陷**：一键导入 .txt 后切到某一景，定位框里预填的 XY「跟原文反过来了」。
+
+**真机判定（用户实测，两步）**：在定位框里手动输原文那一串 `7300.26,1737.98` → 点「定位」，红叉落在
+伪影上；输反序的 `1737.98,7300.26` → 落到对角去。**结论：清单那对数第一个数就是 X（列）**，质检部门
+写的虽然叫「行列号」，落笔却是 X,Y 序。
+
+**这条推翻了 09-18 起一直沿用的假设**（当时按中文习惯认定「行列号 = 行,列」，见上文 09-18 条与 09-27
+前后的代码注释）。后果不止预填一处：`lib/qclist.ts` 的 row/col 拆分反了 → 面板显示的「行/列」标签
+跟着反、点行跳转 `locatePixel(col, row)` 也跳到对角 —— 三处一个病根，只是预填这次被用户一眼看出来了。
+
+**改动**：`lib/qclist.ts` 的 `parseIssueLine` 里把两个捕获组对调（`col = loc[1]`、`row = loc[2]`），
+连同文件头那条「坐标约定」注释整段重写成实测口径与复验方法。**下游三处一行代码都不用改** ——
+它们本来就按 `(col, row)` 取值，只是此前喂进去的是反的：面板显示（`QcListPanel.locText`）、点行跳转
+（`onRow` → `locatePixel(it.col, it.row)`）、工具条预填（`Toolbar.vue` 的 watch → `col + ',' + row`）
+现在三者与原文同序，也与定位框的「X,Y」语义一致。
+
+**测试**：`lib/__tests__/qclist.test.ts` 那条「按 (行, 列) 拆」的用例改名并调换期望值（另有一条用
+`col` 认「保留首次出现那条」）；`.e2e/test-vue-viewer.js` G 段那条面板显示断言跟着改（辅助函数形参
+`row, col` 改名 `x, y`，断言改成「行 1737.98」在「列 7300.26」之前）。`.e2e/test-manual-scene.js` 里
+那些 `行列号:…` 只是夹具输入、没有对顺序的断言，无需改动。
+
+**验证**：前端 **424 passed** + `vue-tsc --noEmit` 零错误。
+
+**教训（写给下一个改这里的人）**：这类「名字这么叫、实际那么写」的约定，文档与注释都不可信 ——
+09-18 那条注释把方向写反之后，一路被下游当成事实抄了三处。判定只有一种办法：真机上把那串数字
+填进定位框，看红叉落在哪。
+
+### 2026-09-28 · 场景库「清除后又冒出来」的第二个病根：列表状态不跨刷新（快照方案）
+
+**用户报的缺陷**：场景库表头那两颗「清除选定 / 全部清除」点下去**看着像毫无反应**，而且每次
+进 `/scenes` 都自动列出几景老数据 —— 正是刚清掉的那几景。
+
+**定位（多轮提问逐步收窄，每条都由用户实测回答）**：
+
+1. 清除**本体是好的**：汇总行给出「已清除 N 项（…目录，…份缓存）」，盘阵上那份
+   `<源 stem>_preview.jpg` 确实没了，行也当场从列表消失。这一半在 09-24 起就有 e2e 钉着（J 段）。
+2. 重进后那几行的标签是「未生成」与「JPG 源」混着 —— 「未生成」说明这一行的预览缓存已经不在了，
+   也就是**列表是按盘阵当前事实重新查出来的**，不是旧的残留。行会回来是因为场景与源文件本来
+   就还在（清除清的是缓存，不是数据）。
+3. 页内导航（切走再切回）**不复现**，只有整页刷新才复现。
+
+由 3 定到病根：`stores/scenes.ts` 的 `ensureSearched()` 靠一个**纯内存**的 `searched` ref 兜底，
+它随整页重载一起复位；而清除只改了内存里那份 `rows`（`rowsAfterClear` 摘行）。于是「清完刷新 →
+守卫复位 → `onMounted` 又检索一次 → 行全回来」，用户看到的就是「清除没生效」。
+
+**用户选定的口径**：快照跨刷新保留 —— 刷新后列表原样不动（含「已从列表移除 N 行」的状态），
+要盘阵的当前事实按「检索」。
+
+**改动**：
+
+- `frontend/src/lib/scene.ts`：新增 `SCENES_SNAPSHOT_KEY`（`sr.scenes.snapshot`）/ `SCENES_SNAPSHOT_V`
+  与 `scenesSnapshotOf` / `parseScenesSnapshot`。用 `sessionStorage` 而**不是** localStorage：后者
+  跨天留存，一份隔夜的旧列表会冒充刚扫过的盘阵；sessionStorage 随标签页关闭即失效。
+  解析走严格判据（版本号、来源、行数组每行的 id/name、计数字段是否有限、清除结论的形状），
+  任何一项不合就整份当没有快照 —— 宁可回到「自动检索一次」，也不拿一份来路不明的列表糊在页面上。
+- `frontend/src/stores/scenes.ts`：建店时 `restoreSnapshot()` 并置 `searched = true`（`ensureSearched`
+  因此不再发请求）；`watch` 一份深监听把状态写回 sessionStorage。另立 `committedFilters`（**出这批
+  行时**的筛选条件，`list()` 成功那一刻定格）—— 否则用户改了筛选框但没点检索、一刷新，列表还是
+  旧的那批、筛选框却写着新条件，两边对不上。检索失败（catch 那支）时快照**整份作废**。
+- `frontend/src/pages/ScenesPage.vue`：只改注释（说明「整页刷新也算没检索过」）；页面本身早就
+  有「上次检索 HH:MM」读数与两种空表文案，正好承接这个口径。
+
+**测试**：`lib/__tests__/scene.test.ts` 新增快照组装/解析 10 条（含坏 JSON、版本不符、字段类型
+不对、行数组脏、清除结论形状不对等）；`.e2e/test-scenes.js` 新增 J6b 段 4 条 —— 整页刷新后
+**新增 0 次** `/api/scenes`、被摘掉的行没回来、上一轮的汇总行还在、仍写着那份列表的检索时刻。
+
+**同时修掉一处 e2e 竞态（与本次改动无关，是被它牵出来的）**：`openViaPathBar` 的两个收尾判据
+都可能**当场成立** —— `done`（预览落盘）在盘上早有这份预览时为真，`openingId` 又是等 resolve
+往返回来才置上的，点完立刻查按钮还是解禁态。F 段因此可能在 open 还在飞的时候就去读
+`activeRec()`，读到上一个场景（`断言失败: 激活的是最后打开的场景`）。改成在 F 段等激活位落地
+再读，并在该辅助函数的注释里写明它**不保证打开已完成**。
+
+**同时发现、未改（待用户定）**：`isImageSource(row)` 的行（显示件即盘阵上那份 `.jpg` 源，标
+「JPG 源」）**清除后没有任何可见变化** —— 按 `preview_clear` 的判据，源文件不是缓存、删不得，
+整批清除对它只能回 `nothing`，行被摘、重检索回来还是「JPG 源」。候选改法是把这类纯显示源的行
+排除出「可清」集合（或在那行上说明「源即显示，无缓存可清」）。**未定**：这属于行为口径的取舍，
+等用户拍板。列在选择列表里的意义只是「这一景在库内」。
+
+**验证**：前端 **434 passed** + `vue-tsc --noEmit` 零错误 + `npm run build`；`.e2e/test-scenes.js`
+**136 项断言全绿**（含新增 J6b）。
 
 ---
 
@@ -2750,10 +2833,10 @@ Pinia store，理论上此时 store 里已有上一任务。**未定性**，下�
 - **魔棒**（2026-08-31 新增）：以点击点为种子，取周围 `WAND_WIN=4096` 的窗口 → `floodSelect`（以颜色容差 + 边缘亮度变化做边界阻挡，从种子向外生长选区）→ 填充内部空洞 + 追踪外轮廓 → `simplifyPoly(0.5)` 简化轮廓 → 转成缩略图坐标的 ROI。适合常见地物（相同颜色的连通区域一键圈选）。
 - **魔棒自适应区域生长**（2026-09-01，修复「总选出一块默认大小椭圆」）：旧的 `floodSelect` 用「固定容差对比种子像素」判定，遇到有纹理/颜色渐变的地物会被切碎成很多小区域。改成**自适应区域生长**：用种子点周围 7×7 窗口初始化统计量（均值/平方和）→ 生长窗口取 `max(tol, 2.5*spread)`，其中 spread 是逐个像素的 RGB 颜色距离的均方根（分母用 `√cnt`，**不是 `√(3cnt)`**——修掉了一个 √3 维度不匹配的 bug；对灰色像素，RGB 距离恰好等于亮度差×√3）→ 生长过程中增量重算（每 256 个像素算一次，窗口只增不减）。边缘屏障：相邻像素亮度差 > `WAND_EDGE` 就强制停止（阈值从 32 调到 64，避免纹理内部被切碎）；`WAND_MAX_PX=8e6` 防止选区无限膨胀失控。验证：默认容差 tol=20 时，±15/±30/±40 的纹理、颜色漂移、边界种子都能 100% 覆盖，背景 150 零泄漏；4096² 全窗口约 1.2s。**已知局限**：接近背景色的纹理（区域内 ±30 的纹理 vs 背景只差 10-20）用任何单一容差都分不开（色差 < 2.5×spread，降低 tol 也没用）。
 - **区域重叠与「合并重叠」按钮**（2026-09-01）：`掩码.tif` 本来就是所有 0/1 像素的**并集**（`rowIntervals` 会把相接/重叠的区间跨多边形合并）→ 所以重叠/相接的多边形天然会合成一个连通区域，像素层面不会重复。用户选择**手动合并**而不是生成时自动合并（这样不改变输出区域的数量）：`maskgen.js` 新增 `rasterMask`（栅格化并集）+ `connectedComponents`（用 BFS 广度优先遍历给连通区域编号）+ `mergeConnected`（把多边形向外扩 1px → 并集栅格化 → 填洞 → 逐个连通区重新追踪轮廓 → 再缩回 1px）；tif-viewer 的「合并重叠」按钮调用它，完成后弹出「X 个区域 → Y 个连通区」的小提示。
-- **合并改成分批执行 + 进度条**（2026-09-01）：真实图的缩略图约 8192×8013（6500 万像素），原来 `mergeConnected` 在主线程同步执行会卡住界面好几秒。重构为：生成器 `mergeConnectedGen`（每处理一批就 `yield {phase, progress}`，把控制权还给主线程，界面保持响应）+ 同步版本 `mergeConnected`（供 Node/测试一次性跑到完成，结果不变）+ 协程版本 `mergeConnectedAsync`（用 setTimeout 驱动，带 `onPhase`/`onProgress` 回调）。浏览器端 `mergeRois` 接上四阶段遮罩进度条（栅格化 → 洞填充 → 连通域 → 轮廓提取）+ 合并期间禁用按钮 + **归属校验**（合并期间如果切换了图片，就丢弃这次结果，避免写错图）。顺带的优化：每个连通区域只在它自己的**最小外接矩形子图（外加 1px 背景）**里重新追踪轮廓，不再整图重扫/整图分配内存（原来每个区域都会新建一张 65MB 的整图数组）。
+- **合并改成分批执行 + 进度条**（2026-09-01）：真实图的缩略图约 8192×8013（6500 万像素），原来 `mergeConnected` 在主线程同步执行会卡住界面好几秒。重构为：生成器 `mergeConnectedGen`（每处理一批就 `yield {phase, progress}`，把控制权还给主线程，界面保持响应）+ 同步版本 `mergeConnected`（供 Node/测试一次性跑到完成，结果不变）+ 协程版本 `mergeConnectedAsync`（用 setTimeout 驱动，带 `onPhase`/`onProgress` 回调）。浏览器端 `mergeRois` 接上四阶段遮罩进度条（栅格化 → 洞填充 → 连通域 → 轮廓提取）+ 合并期间禁用按钮 + **归属校验**（合并期间如果切换了图片，就丢弃这次结果，避免写错图）。同时的优化：每个连通区域只在它自己的**最小外接矩形子图（外加 1px 背景）**里重新追踪轮廓，不再整图重扫/整图分配内存（原来每个区域都会新建一张 65MB 的整图数组）。
 - **删除工具**（2026-09-01）：`drawTool='del'` 模式下，点击做**命中检测**（用 `pointInPoly` 射线法判断点在不在多边形内），悬停高亮，命中后先 200ms 柔和红色（#d8605a）闪烁再移除。异步移除是为了防误删：`delClick` 记录当时的 `owner=activeRec`，`setTimeout` 回调里只有 `activeRec===owner` 才真正删除（闪烁期间如果切图/清空就跳过不删）。
 - **浏览器直接生成掩码**（2026-08-31，不需要 Python）：「生成掩码」按钮 → ROI 用 `thumbToOrig` 换算回原图像素坐标 → `MaskGen.buildTiff`（`rasterRows` 逐行栅格化 + pako 做 Deflate 压缩 → 输出 classic TIFF：小端字节序、8bit、压缩方法 8）→ 下载 `掩码.tif`（**0/255**）+ `掩膜中心点坐标.txt`（各区域的质心坐标列表，2 位小数，CRLF 换行）。E2E 测试钩子已挂在 `window.__viewer.{enterDraw,exitDraw,buildMaskJson,exportMaskJson,thumbToOrig,getRois,genMask,wandSelect,maskGen}`。
-- **产物格式**（2026-08-31 对照参考文件定稿）：txt 文件参考 `SR_code/JL1KF02B03_..._mask.txt`——开头是 `＃掩膜中心点坐标（X，Y）\r\n＃掩膜编号，X坐标，Y坐标\r\n`，后面每行是 `序号,质心X,质心Y`（2 位小数、CRLF 换行、UTF-8 编码）；`掩码.tif` 前后端统一用 **0/255**（`run_sr` 用 OpenCV 的 `cv2.threshold(>0)` 读取，0/1 表达效果等价）。原来「01点阵.txt」（W×H 的字符阵列，24k² 的图约 600MB）的方案**废弃**。
+- **产物格式**（2026-08-31 对照参考文件定稿）：txt 文件参考 `SR_code/JL1KF02B03_..._mask.txt`——开头是 `＃掩膜中心点坐标（X，Y）\r\n＃掩码编号，X坐标，Y坐标\r\n`，后面每行是 `序号,质心X,质心Y`（2 位小数、CRLF 换行、UTF-8 编码）；`掩码.tif` 前后端统一用 **0/255**（`run_sr` 用 OpenCV 的 `cv2.threshold(>0)` 读取，0/1 表达效果等价）。原来「01点阵.txt」（W×H 的字符阵列，24k² 的图约 600MB）的方案**废弃**。
 - **端到端已验证**：maskgen 的 Node 单元测试 **12 项全过**（包括与 Pillow 逐像素对比、随机多边形只有边界 ≤1px 的离散化差异、纹理整块点选、三组 merge：重叠→1 区 / 相接→合并 / 包含→吞噬）；后端 `test_mask.py` **12 项全过**（txt 与参考文件逐字节对齐、tif 0/255 读写往返）；jsdom 冒烟测试 **5 项全过**（页面加载 + genMask 直接生成并下载两次 + wandSelect 添加 ROI + 合并按钮接线 + 删除命中/闪烁/移除）。
 - **剩余事项**：① 放大精画路径**已砍**（09-01 预览方案定为 JPG 中间产物，不做浏览器内全分辨率读取；保持 8192 预览粗画 → `thumbToOrig` 换算回全分辨率，符合已定的混合精度）；② 真机浏览器实测（内网盘阵：真实的 2.4 万像素级大图）。开发机浏览器 e2e 已恢复（`launchBrowser.js` 用临时配置目录），Vue3 查看器的浏览器回归 38 条断言已覆盖接线与行为，但真实大图的内存/耗时仍需真机确认。
 

@@ -34,7 +34,7 @@ const CMP_RATIO_KEY = 'sr.viewer.cmpSplitRatio';
  * 打开查看器时分隔线跳到最左。这两个语义要分开。
  *
  * 夹取交给 `viewMath.clampSplitRatio`（它要知道画布宽才能算窄画布下界），这里只保证
- * 返回一个**有限数**，且顺带按静态上下限粗夹一道，免得脏 localStorage 值传到别处。 */
+ * 返回一个**有限数**，且同时按静态上下限粗夹一道，免得脏 localStorage 值传到别处。 */
 export function parseSplitRatio(v: unknown): number {
   if (v === null || v === undefined || v === '') return DEFAULT_SPLIT_RATIO;
   const n = Number(v);

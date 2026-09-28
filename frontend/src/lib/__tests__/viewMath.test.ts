@@ -105,7 +105,7 @@ describe('parseLocPair（输入框里的「X,Y」文本）', () => {
     expect(parseLocPair('')).toBeNull();
     expect(parseLocPair('   ')).toBeNull();
   });
-  it('**三个数一律不认**（拷了整行掩膜记录）：截前两个会把标记跳到别处', () => {
+  it('**三个数一律不认**（拷了整行掩码记录）：截前两个会把标记跳到别处', () => {
     expect(parseLocPair('1,30766.11,21862.51')).toBeNull();
   });
   it('不是数的内容不认', () => {
@@ -313,7 +313,7 @@ describe('wheelZoomBoth（同步缩放）', () => {
     const before = (bxLocal - vb.ox) / vb.scale;
     const r = wheelZoomBoth(va, vb, ra, rb, 'A', 300, 400, 1.2);
     expect((bxLocal - r.b.ox) / r.b.scale).toBeCloseTo(before, 9);
-    // 顺带把「错法确实不同」也钉住，免得哪天两条算式意外重合、这条测试变成空声明
+    // 同时把「错法确实不同」也钉住，免得哪天两条算式意外重合、这条测试变成空声明
     const buggy = wheelZoom(vb, rb.x + u * rb.w, 400, 1.2);
     expect(Math.abs(r.b.ox - buggy.ox)).toBeGreaterThan(1);
   });

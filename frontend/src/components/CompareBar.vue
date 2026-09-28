@@ -87,7 +87,7 @@ function pick(kind: 'input' | 'product' | 'nosr') {
         :disabled="!sceneId || store.busy"
         :title="sceneId
           ? '打开这个场景的' + c.label + '，显示在活动侧'
-            + '（服务端烘焙的下采样 JPG，不必本地解码）'
+            + '（服务端生成的下采样 JPG，不必本地解码）'
           : '先打开一张带盘阵关联的图（场景目录打开的场景图，或反推关联上的本地图）'"
         :data-e2e="'cmp-sib-' + c.kind"
         @click="pick(c.kind)"

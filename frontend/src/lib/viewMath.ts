@@ -63,7 +63,7 @@ export function origToThumb(x: number, y: number, tw: number, th: number, W: num
    分隔符认半角/全角逗号与空白（从表格、日志里拷出来常常是制表符或空格），首尾空白忽略；
    带符号与小数都收。
 
-   **认不出来一律返回 null，不做任何截断**：把「1,30766.11,21862.51」（整行掩膜记录）
+   **认不出来一律返回 null，不做任何截断**：把「1,30766.11,21862.51」（整行掩码记录）
    当成「1,30766.11」会把标记跳到别的地方去 —— 那比不跳更糟，调用方必须出声。 */
 export function parseLocPair(raw: string): [string, string] | null {
   const parts = String(raw).trim().split(/[,，\s]+/).filter(Boolean);

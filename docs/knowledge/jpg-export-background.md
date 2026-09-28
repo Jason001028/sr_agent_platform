@@ -8,7 +8,7 @@
 ## 1. 一句话总结这次改动做了什么
 
 > 每次成功读取一张 `.tif` 后，**自动**把当前"拉伸"显示效果下的画面，**重新用高分辨率解码一遍**，
-> 烘焙成一张高质量 JPG（长边默认 8192，≈原始 1/3），**写到本地你选好的一个目录里**，
+> 生成预览成一张高质量 JPG（长边默认 8192，≈原始 1/3），**写到本地你选好的一个目录里**，
 > 按**读取当天**建子文件夹（`输出目录/YYYY-MM-DD/`），并在当天一个 `读取记录.json` 里追写一条读取记录。
 
 输出结构：
@@ -165,7 +165,7 @@ flowchart TD
     D -- 小8bit --> E[UTIF 重解 → 画布 / buildThumb]
     D -- 稀疏条带 --> F[sparseSample 抽行<br/>目标长边=plan.longEdge]
     D -- 其余 --> G[chunkedExport<br/>全量累加 或 带通累加]
-    E --> H[stretchRgba 拉伸烘焙 RGBA]
+    E --> H[stretchRgba 拉伸生成预览 RGBA]
     F --> H
     G --> H
     H --> I[canvas.toBlob jpeg q0.95]
@@ -180,7 +180,7 @@ flowchart TD
 2. **导出 ≠ 预览**：预览是 2048 长边的；导出单独按 8192（≈1/3）重解一遍（`collectForExport()` 与预览同路由，只是目标长边不同）。
 3. **带通累加器**：8192² 单波段若用全量 Float64 累加器 = 536MB > `BAND_ACC_LIMIT` 4e8 → 仍用**按输出行带分段累加**（`bandPassCollect`），一段 256 行只占约 16MB；若把 `JPG_MAX` 改回 16384，全量累加器会到 2.1GB > 2GB 上限，更必须走带通。
 4. **失败自动降档**：若 Edge 在画布面积/内存上限上拒绝（`RangeError/allocation` 等），自动把导出上限降到 **4096** 再试一次（`doExportJob` 的 catch 分支）。
-5. **重新导出**：点侧栏 `（重新导出）`，用**当前拉伸模式**重烘焙一次（`reExportJpg`），适合"先 linear 导出，后来想看 2% 线性效果"。
+5. **重新导出**：点侧栏 `（重新导出）`，用**当前拉伸模式**重生成预览一次（`reExportJpg`），适合"先 linear 导出，后来想看 2% 线性效果"。
 6. **E2E 钩子**：`window.__viewer` 暴露子流程，可注入假 saver，方便无头测试（`showDirectoryPicker` 无法被脚本驱动，只能注入替身）。
 
 ---
@@ -193,7 +193,7 @@ flowchart TD
 |---|---|---|
 | 像素数 px | 268,435,456（= 画布面积上限） | 67,108,864 |
 | src 自然值 Float32 | px×nb×4 = **1.07 GB** | px×3×4 = 0.8 GB |
-| RGBA 烘焙 | px×4 = **1.07 GB** | px×4 = 0.27 GB |
+| RGBA 生成预览 | px×4 = **1.07 GB** | px×4 = 0.27 GB |
 | JS 可见总分配（≈px×(nb×4+4)） | 2.15 GB ≤ **预算 2.4e9** ✓ | 1.07 GB ✓ |
 | 若用全量 Float64 累加器 | px×8 = 2.1 GB **>2GB 上限 ✗** | — |
 | 带通累加器（256 行×宽） | 256×16384×8 ≈ **33 MB** ✓ | — |
@@ -220,7 +220,7 @@ flowchart TD
 | 解码分派 | `activate()` | 决定走 UTIF / 稀疏 / 分块 |
 | 内存预算 | `planExport()` | 导出分辨率规划 |
 | 导出收集 | `collectForExport()` | 复用预览路由重解 |
-| 烘焙+写盘 | `exportToJpg()` | 拉伸→canvas→blob→写文件→写日志 |
+| 生成预览+写盘 | `exportToJpg()` | 拉伸→canvas→blob→写文件→写日志 |
 | 落盘层 | `fsIO` / `downloadSaver` / `getSaver()` | FS API + IndexedDB 持久化 + 降级 |
 | 导出编排 | `kickExport` / `exportQueue` / `doExportJob` | 串行 + 失败降档 + 重新导出 |
 | 挂钩点 | 三处 `kickExport(rec)`（稀疏/分块/UTIF 完成处） | 解码成功即自动触发 |

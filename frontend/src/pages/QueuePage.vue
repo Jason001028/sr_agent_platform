@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * QueuePage.vue — 共享 SR 任务队列（阶段5，api-contract.md §3.3）
- * 顶部 = 提交 SR 作业表单：lq_path 由查看器场景带入，也可以从历史任务里选；掩膜由
+ * 顶部 = 提交 SR 作业表单：lq_path 由查看器场景带入，也可以从历史任务里选；掩码由
  * 后端按 `<lq_path>/<输入影像 stem>_mask.tif` 推导（只读，前端不提交），其余为
  * run_sr 参数。
  * 用户确认才提交（运行 SR 是真副作用，不自动提交）。
@@ -66,7 +66,7 @@ const ELAPSED_TITLE =
   + '后端首次看到「运行中」到落终态之间的时间，纯算力、不含排队；运行中的行每秒刷新。'
   + '「—」= 这次运行没被观测到（整段期间后端不在），或这一行建于加这两列之前。';
 
-/** 将读的掩膜（后端 §4.3 推导；仅展示，不随 body 提交 —— formToSubmit 恒发
+/** 将读的掩码（后端 §4.3 推导；仅展示，不随 body 提交 —— formToSubmit 恒发
     mask_path: null，让后端按同一规则重推一遍）。
 
     优先用**后端给过的权威值**（查看器带入 / 该任务行自己的 params），只有在拿不到
@@ -109,7 +109,7 @@ async function openSubmit(): Promise<void> {
     formErr.value = 'lq_path 须为绝对路径（盘阵挂载点，如 /DiskArray/…）';
     return;
   }
-  if (!maskHint.value) { formErr.value = '无法从该目录推出掩膜路径'; return; }
+  if (!maskHint.value) { formErr.value = '无法从该目录推出掩码路径'; return; }
   try {
     const body = formToSubmit(f);
     const res = await queue.submit(body);
@@ -194,7 +194,7 @@ onUnmounted(() => {
           </datalist>
         </label>
         <label class="qp-cell wide">
-          <span>mask_path（掩膜 · 以服务端推导为准）</span>
+          <span>mask_path（掩码 · 以服务端推导为准）</span>
           <input :value="maskHint" type="text" spellcheck="false" readonly
                  placeholder="…_mask.tif（须与影像同目录，命名为 &lt;输入影像名&gt;_mask.tif）" />
         </label>
@@ -246,7 +246,7 @@ onUnmounted(() => {
             <td class="left params" :title="t.params.lq_path">
               {{ pathLeaf(t.params.lq_path) }}
               <span v-if="t.params.mask_path" class="qp-mask" :title="t.params.mask_path">
-                掩膜 {{ pathLeaf(t.params.mask_path) }}
+                掩码 {{ pathLeaf(t.params.mask_path) }}
               </span>
               <span class="qp-sub2">×{{ t.params.sr_scale }} · {{ t.params.suffix || '无后缀' }}</span>
             </td>

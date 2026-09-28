@@ -55,7 +55,7 @@
 8. **Q：JSONResponse / FileResponse / StreamingResponse 各何时用？（★）**
    **A：**
    - `JSONResponse`：普通 JSON（FastAPI 默认替你包）；
-   - `FileResponse`：直接把一个文件当响应体——🖼 阶段 4 `/preview` 返回盘阵烤好的 JPG 就用它（带 `media_type="image/jpeg"`，顺带让 nginx 静态托管同路径 JPG 时也能原生缓存）；
+   - `FileResponse`：直接把一个文件当响应体——🖼 阶段 4 `/preview` 返回盘阵生成好的 JPG 就用它（带 `media_type="image/jpeg"`，同时让 nginx 静态托管同路径 JPG 时也能原生缓存）；
    - `StreamingResponse`：响应体是流（逐块 yield）——SSE、大文件代理、流式下载都靠它；必须手动设 `Content-Type`。
 
 9. **Q：SSE 在 FastAPI 里怎么落地？帧格式长什么样？（★）**
@@ -98,7 +98,7 @@
     **🗂 仓库取舍：** 阶段 5 规划"uvicorn 单 worker + 进程内广播"，多 worker 留到有真实并发需求再接外部队列——**能力边界写清楚本身就是加分项**。
 
 17. **Q：为什么要"先写契约文档再写代码"？（★）**
-    **A：** REST/SSE 是**前后端共享的接口面**：前端渲染和后端推送各按同一 schema 写 parser/emitter。契约文档先落盘 = 先把字段/事件/错误码/状态机说死，避免"后端顺手加个字段、前端就崩"。改契约先改文档再改代码，两端各留单测锁字段。
+    **A：** REST/SSE 是**前后端共享的接口面**：前端渲染和后端推送各按同一 schema 写 parser/emitter。契约文档先落盘 = 先把字段/事件/错误码/状态机说死，避免"后端同时加个字段、前端就崩"。改契约先改文档再改代码，两端各留单测锁字段。
 
 18. **Q：FastAPI 项目你一般怎么组织目录？（★）**
     **A：** 按"薄壳分层"：`api/`（端点，薄）→ `services/`（流程编排，可注入假依赖）→ 更底层（算法/DB/外部客户端）。端点不该有业务逻辑，service 不该是 HTTP 的形状。

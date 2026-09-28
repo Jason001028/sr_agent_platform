@@ -59,7 +59,7 @@ class TestWriters(unittest.TestCase):
             with p.open(encoding="utf-8", newline="") as f:
                 text = f.read()
             self.assertTrue(text.startswith(
-                "＃掩膜中心点坐标（X，Y）\r\n＃掩膜编号，X坐标，Y坐标\r\n"))
+                "＃掩膜中心点坐标（X，Y）\r\n＃掩码编号，X坐标，Y坐标\r\n"))
             self.assertTrue(text.endswith("1,4.50,4.50\r\n"), repr(text[-30:]))
             # 无裸 \n（换行必须是 \r\n）
             self.assertIsNone(__import__("re").search(r"[^\r]\n", text))

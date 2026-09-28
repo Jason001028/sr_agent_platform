@@ -50,7 +50,7 @@ from pathlib import Path
 _RASTER_EXT_ORDER = (".tif", ".tiff", ".img")
 _RASTER_EXTS = set(_RASTER_EXT_ORDER)
 # 最小原型 §4.7：盘阵目录里预生成的 JPG 也要能列出并直接打开（8bit 显示就绪，
-# 不需要后端再烘焙预览）。真值见 docs/status/phase4 —— 盘阵读 JPG 是既有做法。
+# 不需要后端再生成预览）。真值见 docs/status/phase4 —— 盘阵读 JPG 是既有做法。
 _IMAGE_EXTS = {".jpg", ".jpeg"}
 _SCENE_EXTS = _RASTER_EXTS | _IMAGE_EXTS
 #: 场景目录的判据：目录里躺着一份 <目录名>_meta.xml。SR 脚本靠它判 RC/SC
@@ -77,7 +77,7 @@ def is_scene_file(path) -> bool:
     （SC 步骤的输入 `<目录名>.<ext>`），要么是 `PAN.<ext>`（RC 步骤的输入）。
 
     这样一次挡住全部「别的东西的输入/产物」：SR 产物与输入备份（_sr/_NOSR/_ori）、
-    云量图（_cloud）、缩略图（_thumb）、提交 SR 的输入掩膜（_mask）、后端自己烘焙的
+    云量图（_cloud）、缩略图（_thumb）、提交 SR 的输入掩码（_mask）、后端自己生成预览的
     `<stem>_preview.jpg` 缓存，以及 Debug/ 下十几张调试图。此前用的是黑名单，每冒出
     一类新派生件就得补一条 —— 2026-09-15 真机接上盘阵时，18 行里有 16 行是这种脏数据。
     """
@@ -173,7 +173,7 @@ def sibling_raster_path(image_path) -> Path | None:
     `<目录名>.tif`，RC 场景里 `PAN.jpg` 配 `PAN.tif`。按 `_RASTER_EXT_ORDER` 拼
     候选名逐个 `is_file()`，**只拼名字、不列举目录**（与 input_candidates 同一纪律）。
 
-    `.hdr` 之类伴随文件不参与：调用方要的是能拿去烘焙像素的栅格。
+    `.hdr` 之类伴随文件不参与：调用方要的是能拿去生成预览像素的栅格。
     """
     p = Path(image_path)
     for ext in _RASTER_EXT_ORDER:
@@ -194,7 +194,7 @@ def product_candidates(input_path, suffix: str) -> list[Path]:
     output_path_for` 用的也是 `img_name[:-4]`，而输入名是 `a.tiff` 时
     `with_suffix("")` 得 `a`、字面切片得 `a.ti` —— 两者不等，用 with_suffix 会在
     `.tiff` 场景下永远算出「产物不存在」。这里的字符串运算与 SR 侧同源，不要
-    「顺手改漂亮」。
+    「同时改漂亮」。
 
     只拼名字，**不 stat**：调用方自己挑第一个存在的，或把整串拿去做「试过哪些」的
     诊断信息（`GET /api/scenes/{id}/siblings` 就是这么用的）。
@@ -242,7 +242,7 @@ _SUFFIX_RE = re.compile(r"^[A-Za-z0-9_-]{1,16}$")
 _NOSR_SEG = "NOSR"
 _NOSR_TAIL = "_" + _NOSR_SEG
 
-#: 平台自烤的预览缓存尾标记（`api/paths.drop_preview_path` 产出的
+#: 平台自生成的预览缓存尾标记（`api/paths.drop_preview_path` 产出的
 #: `<栅格 stem>_preview.jpg`）。它在 `_NON_STAGE_TAILS` 里也有一份，但**是唯一
 #: 能剥掉的那一个** —— 剥掉它就是那份栅格的 stem：
 #: * `<目录名>_preview` 剥出来正好等于场景目录名（本体显示件的预览）；
@@ -259,7 +259,7 @@ _PREVIEW_TAIL = "_" + _PREVIEW_SEG
 def strip_preview_tail(stem: str) -> str:
     """`<栅格 stem>_preview` → `<栅格 stem>`；不带这个尾巴的原样返回。
 
-    拖入链烤的那份（后台静默烤、长期落盘在场景目录里）名字长这样，用户把它再拖
+    拖入链生成的那份（后台静默生成、长期落盘在场景目录里）名字长这样，用户把它再拖
     回来时按它代表的那份栅格认：本体那份等价于拖场景显示件，产物那份等价于拖
     `<目录名>_sr.jpg`。**只剥一层** —— 盘阵上不存在 `..._preview_preview`。
     """
@@ -284,14 +284,14 @@ def de_suffixed_stems(name: str, max_segments: int = 2) -> list[str]:
     `_NOSR` 尾段**照常走这一轮切**（它像 `preview` 一样是「必须剥掉才回到真名」的
     尾段，目录名里从不含它），别在循环外先剥：先剥掉再切的话，`<目录名>_NOSR` 剥完
     剩下的正好是目录名，而循环恒要切至少一段 —— 那个真名反而一条候选都进不去，
-    于是拖平台烤的那份裸 NOSR jpg 会报「目录不存在」，理由列的还是两个被多切一段的
+    于是拖平台生成的那份裸 NOSR jpg 会报「目录不存在」，理由列的还是两个被多切一段的
     假目录（2026-09-24 实测；带 `_preview` 尾巴的那份走的是另一条路，一直是对的）。
 
     每一条都要求切出来的尾巴是**干净的 suffix 形态**（与 `jpg_stage_name` 同一套
     字符约束）：不干净（` - 副本`、`.preview` 那种）就不再往下切，一条也不生成 ——
     免得拿一个明明是别的名字的东西去反推目录，把 404 的原因写得莫名其妙。
 
-    平台自己烤的那份（`<栅格 stem>_preview.jpg`）也走这条路：`preview` 是
+    平台自己生成的那份（`<栅格 stem>_preview.jpg`）也走这条路：`preview` 是
     `_NON_STAGE_TAILS` 里唯一能剥的尾巴，剥掉就回到了那份栅格的真名 ——
     `<目录名>_preview` 剥出 `<目录名>`（本体），`<目录名>_sr_preview` 剥出
     `<目录名>_sr` 再切一段才得到 `<目录名>`（产物，见 `_PREVIEW_TAIL`）。
@@ -312,7 +312,7 @@ def de_suffixed_stems(name: str, max_segments: int = 2) -> list[str]:
         if not _SUFFIX_RE.match(tail):
             break
         # `_NON_STAGE_TAILS` 里只有 `preview` 能剥（见 `_PREVIEW_TAIL`）：它是平台自己
-        # 烤的那份，剥掉才是真名字。剥完**接着往下切**而不是就地停 —— `<目录名>_sr_preview`
+        # 生成的那份，剥掉才是真名字。剥完**接着往下切**而不是就地停 —— `<目录名>_sr_preview`
         # 要先剥 preview 才切得出 `<目录名>`。另四个照旧当场停：它们剥掉会落到真实场景
         # 目录上。`_NOSR` 不在这份名单里（它在 `jpg_stage_name` 那是一段真的环节尾段），
         # 于是这一轮切到它时不会停 —— 剥掉它得的那条候选正是 `<目录名>_NOSR` 的目录名，
@@ -447,7 +447,7 @@ def stage_of_jpg(dir_path, input_path, stem: str) -> tuple[str, str, Path] | Non
     本体那两种形态**不花任何额外 stat**（不试同级栅格）：它们是既有的关联对象，
     判据在 `is_scene_file` 与 `_fingerprint_mismatch` 里已经写过一遍了。
 
-    `stem` 先过一遍 `strip_preview_tail`：平台自己烤的 `<栅格 stem>_preview.jpg`
+    `stem` 先过一遍 `strip_preview_tail`：平台自己生成的 `<栅格 stem>_preview.jpg`
     被拖回来时，判的是**它代表的那份栅格**（`_PREVIEW_TAIL`）。这一步不改本体的
     零 stat 性质 —— 剥完照样先与目录名比。
     """

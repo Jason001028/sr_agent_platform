@@ -2,12 +2,12 @@
 
 这是**唯一会主动删生产数据目录里文件**的模块，所以判据每一条都要有正反用例：
 
-* 该删的：带规则戳的 `<stem>_preview.jpg` 与改名前的 `<stem>.preview.jpg`；
+* 该删的：带规则签名的 `<stem>_preview.jpg` 与改名前的 `<stem>.preview.jpg`；
 * 不该删的：没有戳的同名件（别人手放的）、场景源自己（目录名以 `_preview` 结尾
   时 `is_scene_file` 与缓存件同名）、符号链接、子目录里的东西（不递归）；
 * 删不掉的：权限 / 被占用 → 计入 failed，**其余文件照删**（逐条尽力）。
 
-顺带钉 `preview_jpg.has_rule_stamp` —— 判据的基石，只认前缀不认完整戳形态。
+同时钉 `preview_jpg.has_rule_stamp` —— 判据的基石，只认前缀不认完整戳形态。
 """
 
 import os
@@ -25,13 +25,13 @@ from backend.services.preview_jpg import (has_rule_stamp, preview_div_of,
 
 
 def make_preview(path: Path, div: int = 2) -> Path:
-    """造一份**带规则戳**的预览（= 本平台烤出来的）。"""
+    """造一份**带规则签名**的预览（= 本平台生成的的）。"""
     write_preview_jpg(path, np.zeros((8, 8), dtype=np.uint8), div=div)
     return path
 
 
 def make_foreign_jpg(path: Path) -> Path:
-    """造一份**没有规则戳**的同名 JPG（= 盘阵上别人手放的显示件）。"""
+    """造一份**没有规则签名**的同名 JPG（= 盘阵上别人手放的显示件）。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("L", (8, 8)).save(path, format="JPEG")
     return path
@@ -70,7 +70,7 @@ class TestHasRuleStamp(ClearBase):
         self.assertIsNone(preview_div_of(foreign))
 
     def test_accepts_v1_era_stamp(self):
-        """v1 的戳给不出档位（`preview_div_of` 返回 None），但它确实是烤出来的，
+        """v1 的戳给不出档位（`preview_div_of` 返回 None），但它确实是生成的的，
         清缓存时要认 —— 判前缀而不是判完整形态的理由就在这。"""
         p = self.dir / "OLD_preview.jpg"
         Image.new("L", (8, 8)).save(p, format="JPEG",
@@ -100,11 +100,11 @@ class TestClearDirPreviews(ClearBase):
         self.assertEqual(sorted(r["removed"]), sorted([new.name, legacy.name]))
         self.assertFalse(new.exists())
         self.assertFalse(legacy.exists())
-        self.assertTrue(foreign.is_file(), "没有规则戳的同名件不该删")
+        self.assertTrue(foreign.is_file(), "没有规则签名的同名件不该删")
         self.assertTrue(src.is_file())
         self.assertTrue(meta.is_file())
         self.assertEqual([n for n, _ in r["skipped"]], [foreign.name])
-        self.assertIn("规则戳", r["skipped"][0][1])
+        self.assertIn("规则签名", r["skipped"][0][1])
         self.assertEqual(r["failed"], [])
 
     def test_non_preview_files_are_not_even_reported(self):
@@ -119,7 +119,7 @@ class TestClearDirPreviews(ClearBase):
 
     def test_scene_source_is_never_deleted(self):
         """目录名以 `_preview` 结尾时，场景源 `<目录名>.jpg` 的名字**恰好**
-        也是 `*_preview.jpg`。给它也写上规则戳（模拟「有人烤过这个文件」），
+        也是 `*_preview.jpg`。给它也写上规则签名（模拟「有人生成过这个文件」），
         此时只剩 is_scene_file 一道锁 —— 这道锁必须结实。"""
         d = Path(self._tmp.name).resolve() / "SITE_preview"
         d.mkdir()

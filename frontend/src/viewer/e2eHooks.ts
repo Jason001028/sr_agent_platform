@@ -118,7 +118,7 @@ export interface ViewerHook {
   activeStretch: () => StretchMode;
   /** 直接切拉伸（等效工具栏下拉 change）。 */
   setStretch: (m: StretchMode) => void;
-  /** 预览烘焙档位（各边 ÷N，工具栏拖动条那个值）。 */
+  /** 预览缩放档位（各边 ÷N，工具栏拖动条那个值）。 */
   previewDiv: () => number;
   /** 直接切档位（等效工具栏拖动条 input）。 */
   setPreviewDiv: (div: number) => void;
@@ -148,7 +148,7 @@ export interface ViewerHook {
   /** 按生产全名去盘阵开场景（真机验收用；外网开发机没有盘阵，必然报错）。
    *  `product` = 那一行的影像类型，名字缺产品段时后端按它补 `_PAN` / `_MSS`。 */
   qcOpenByName: (name: string, product?: string) => Promise<string>;
-  // 一键解析（批量烘焙 + 每景两张卡 + 点亮联动）
+  // 一键解析（批量生成预览 + 每景两张卡 + 点亮联动）
   /** 跑批现状：状态机 + 进度 + 失败账（键是行名）+ 「缺 NOSR」那些行。 */
   qcBakeState: () => {
     state: string;

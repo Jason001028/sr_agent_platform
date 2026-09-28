@@ -263,8 +263,8 @@ class TestSrTasksQueueApi(unittest.TestCase):
         self.assertIsNone(legacy["started_at"], "老行不回填：那会把错的数固化成历史")
         self.assertIsNone(legacy["finished_at"])
         # 产物预览那两列同为「补列、不回填」。老 COMPLETED 行落到 preview_state=NULL，
-        # 而 NULL 的含义正是「没烤过」—— 所以年龄窗口（finished_at 在窗口内）是升级
-        # 当天不把历史行全烤一遍的**唯一**屏障，这里的老行 finished_at 也是 NULL，
+        # 而 NULL 的含义正是「没生成过」—— 所以年龄窗口（finished_at 在窗口内）是升级
+        # 当天不把历史行全生成一遍的**唯一**屏障，这里的老行 finished_at 也是 NULL，
         # 天然落在窗口外。
         self.assertIsNone(legacy["preview_state"])
         self.assertIsNone(legacy["preview_note"])
@@ -276,7 +276,7 @@ class TestSrTasksQueueApi(unittest.TestCase):
 
 
 class TestPreviewBakeQueue(unittest.TestCase):
-    """产物预览急烤的库侧（app.py::_eager_bake_tick 的唯一事实源）。
+    """产物预览主动生成的库侧（app.py::_eager_bake_tick 的唯一事实源）。
 
     这一层的每个方法都对应 `_eager_bake_tick` 里的一步，所以断言的重点是**边界**
     而不是happy path：谁能被认领、谁被挡在门外、重复认领谁赢。
@@ -305,8 +305,8 @@ class TestPreviewBakeQueue(unittest.TestCase):
         self.assertIsNone(cands[0]["preview_state"], "候选 = 还没被认领过")
 
     def test_failed_row_is_never_a_candidate(self):
-        """FAILED 绝不烤：writeTiff 先 rename 再写，失败的运行会在产物路径上留下
-        半截文件，烤出来是坏图 —— 比没图更糟，用户会以为这就是结果。"""
+        """FAILED 绝不生成：writeTiff 先 rename 再写，失败的运行会在产物路径上留下
+        半截文件，生成的是坏图 —— 比没图更糟，用户会以为这就是结果。"""
         self.store.put_sr_task("p2", {"lq_path": "/a", "suffix": "s"},
                                status="new", job_id=None)
         self.store.update_sr_task_job("p2", job_id=2, status="submitted")
@@ -315,7 +315,7 @@ class TestPreviewBakeQueue(unittest.TestCase):
         self.assertEqual(self.store.list_preview_candidates(max_age_sec=3600), [])
 
     def test_unfinished_row_is_not_a_candidate(self):
-        """没有 finished_at 的行一律不烤，两条理由各自都够：
+        """没有 finished_at 的行一律不生成，两条理由各自都够：
 
         * 正在跑的（RUNNING）—— 产物还在被写。
         * 整段运行期间 sr-api 不在场、只观测到终态的老行 —— finished_at 是 NULL，
@@ -329,7 +329,7 @@ class TestPreviewBakeQueue(unittest.TestCase):
         self.assertEqual(self.store.list_preview_candidates(max_age_sec=3600), [])
 
     def test_row_outside_the_age_window_is_skipped(self):
-        """年龄窗口就是「升级当天不把历史 COMPLETED 行全烤一遍」的那道闸。"""
+        """年龄窗口就是「升级当天不把历史 COMPLETED 行全生成一遍」的那道闸。"""
         tid = self._completed("p4")
         db = self.store._db()
         db.execute("UPDATE sr_tasks SET finished_at = ? WHERE id = ?",
@@ -337,7 +337,7 @@ class TestPreviewBakeQueue(unittest.TestCase):
         db.commit()
         self.assertEqual(
             self.store.list_preview_candidates(max_age_sec=3600), [],
-            "老行不能因为 preview_state 是 NULL 就被当成待烤")
+            "老行不能因为 preview_state 是 NULL 就被当成待生成")
 
     def test_newest_finished_first(self):
         a = self._completed("p5a", job_id=51)
@@ -348,10 +348,10 @@ class TestPreviewBakeQueue(unittest.TestCase):
         db.execute("UPDATE sr_tasks SET finished_at = ? WHERE id = ?", (now - 10, b))
         db.commit()
         got = [c["task_id"] for c in self.store.list_preview_candidates(max_age_sec=1e9)]
-        self.assertEqual(got, [b, a], "最近跑完的排前面（急烤先烤刚跑完的）")
+        self.assertEqual(got, [b, a], "最近跑完的排前面（主动生成先生成刚跑完的）")
 
     def test_limit_caps_the_scan(self):
-        """limit 限的是**每轮扫描量**，不是每轮烤多少（那恒为 1）。"""
+        """limit 限的是**每轮扫描量**，不是每轮生成多少（那恒为 1）。"""
         for i in range(5):
             self._completed(f"p6{i}", job_id=60 + i)
         self.assertEqual(
@@ -363,14 +363,14 @@ class TestPreviewBakeQueue(unittest.TestCase):
         first = self.store.claim_preview_bake(tid)
         self.assertIsNotNone(first)
         self.assertEqual(first["preview_state"], "running",
-                         "抢到的行立刻是 running，别人再扫就看不见它了")
+                         "认领的行立刻是 running，别人再扫就看不见它了")
         self.assertIsNone(self.store.claim_preview_bake(tid), "第二次认领必须落空")
         self.assertEqual(self.store.list_preview_candidates(max_age_sec=3600), [],
                          "已被认领的行不再出现在候选里")
 
     def test_claim_refuses_a_row_that_is_not_completed(self):
-        """认领与重跑赛跑：用户刚跑完、急烤还没动手就又交了同一个 suffix，
-        put_sr_task 会把 status 打回 submitted —— 这份认领必须失效，否则会去烤一个
+        """认领与重跑赛跑：用户刚跑完、主动生成还没动手就又交了同一个 suffix，
+        put_sr_task 会把 status 打回 submitted —— 这份认领必须失效，否则会去生成一个
         正在被重写的产物。"""
         tid = self._completed("p8")
         db = self.store._db()
@@ -382,7 +382,7 @@ class TestPreviewBakeQueue(unittest.TestCase):
         self.assertIsNone(self.store.claim_preview_bake(99999))
 
     def test_resubmit_rearms_the_bake(self):
-        """同一 suffix 重跑必须重新武装急烤。
+        """同一 suffix 重跑必须重新武装主动生成。
 
         不重置的话第二次跑完永远停在旧的 `done` 上，而盘上那份预览还是**上一次**的
         产物 —— 用户打开看的是旧结果，且没有任何迹象提示他。
@@ -398,7 +398,7 @@ class TestPreviewBakeQueue(unittest.TestCase):
         self.assertIsNone(again["preview_note"])
 
     def test_set_preview_state_does_not_bump_updated_at(self):
-        """烤预览不是「这行最近一次写回」，不能把队列的 updated_at 抬起来。
+        """生成预览不是「这行最近一次写回」，不能把队列的 updated_at 抬起来。
 
         updated_at 抬了会让一行早就跑完的任务在队列里排到最新（真机上表现为
         「30 时 00 分」那次事故同一个病根）。

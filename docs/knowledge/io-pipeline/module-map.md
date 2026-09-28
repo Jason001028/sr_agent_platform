@@ -16,7 +16,7 @@ flowchart TD
     CFG["config.py<br/>环境变量唯一真源"]
     PG["pathguard.py<br/>路径归一与白名单"]
     SS["services/scene_search.py<br/>场景检索与命名"]
-    PJ["services/preview_jpg.py<br/>预览烘焙"]
+    PJ["services/preview_jpg.py<br/>预览生成预览"]
   end
 
   subgraph SVC["服务层"]
@@ -147,7 +147,7 @@ flowchart LR
 | 触发 | 端点 | 前端随后做什么 |
 |---|---|---|
 | 进场景库 / 检索 | `GET /api/scenes` | 填表格；失败写本页错误 |
-| 行「打开」 | `GET /api/scenes/{id}/preview` → 静态 URL | 档位不符时才重烤；取字节后画到画布 |
+| 行「打开」 | `GET /api/scenes/{id}/preview` → 静态 URL | 档位不符时才重新生成；取字节后画到画布 |
 | 粘路径 / 拖文件 | `POST /api/scenes/resolve` | 命中则就地升级记录；失败把后端原因原样展示 |
 | 拖入链取图 | `GET /api/scenes/{id}/preview-drop` | 读回退响应头，如实说明落在临时缓存 |
 | 保存掩码 | `POST /api/masks` | 记下服务端掩码路径 |
@@ -170,7 +170,7 @@ flowchart LR
 | 纪律 | 为什么 |
 |---|---|
 | 掩码坐标一律用**源影像元数据尺寸** | 预览是降采样的，用 JPEG 尺寸会让掩码整体错位 |
-| 预览缓存的档位**读盘上那份的注释**，不信前端记忆 | 换机器、别人先烤过，前端记忆就是错的 |
+| 预览缓存的档位**读盘上那份的注释**，不信前端记忆 | 换机器、别人先生成过，前端记忆就是错的 |
 | 解码结果落笔前**比对代号** | 本地解码可能耗时几十秒，期间记录已被升级成服务端 JPG，过期结果不能覆盖新图 |
 | **环境变量是唯一的配置入口** | 内网离线，配置文件分发成本高于改 systemd |
 | **两个包同版本更新** | 前后端之间没有版本协商 |

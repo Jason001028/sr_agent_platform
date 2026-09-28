@@ -25,7 +25,7 @@
 
 | 想查什么 | 去哪 |
 |---|---|
-| 某一行的烘焙尺寸、拉伸公式、缓存签名的逐字节口径 | [preview-bake-pipeline.md](../preview-bake-pipeline.md) |
+| 某一行的生成预览尺寸、拉伸公式、缓存签名的逐字节口径 | [preview-bake-pipeline.md](../preview-bake-pipeline.md) |
 | 每个端点的入参、返回、错误码 | [api-contract.md](../../planning/api-contract.md) |
 | 部署步骤、升级判定表、Slurm 装什么 | [deploy/README.md](../../../deploy/README.md) |
 | SR 算法、调用契约、Windows 移植 | [docs/sr_code/](../../sr_code/) |
@@ -99,7 +99,7 @@ flowchart TB
   只保护 `/api/` 那一路。这是「双层保险」的第一层与第二层（见 [topology.md](topology.md) §4）。
 - **两个 Python 解释器平行存在、互不污染**。平台 venv 是 py3.9，SR 生产环境是 py3.6 带
   torch/GDAL。后端不 import SR 的任何模块，只把解释器路径写进批脚本。
-- **服务端烘焙与浏览器本地解码是两条独立的路**。盘阵场景一律走服务端烤好的 JPG；
+- **服务端生成与浏览器本地解码是两条独立的路**。盘阵场景一律走服务端生成好的 JPG；
   只有用户从本机选的 TIF 才在浏览器里解码。两条路的常量不共用。
 
 ---
@@ -114,7 +114,7 @@ flowchart TB
 | D | 对话 → 工具调用 | 聊天页或查看器侧舱的一条消息 | 工具副作用 + SSE 帧 | [agent-io.md](agent-io.md) |
 
 链路 A 与 B 的终点相同，区别在**像素从哪来**：A 的像素由浏览器自己解码源 TIF，
-B 的像素来自服务端烤好的 JPEG。二者的掩码坐标都换算到**源影像的元数据尺寸**上，
+B 的像素来自服务端生成好的 JPEG。二者的掩码坐标都换算到**源影像的元数据尺寸**上，
 所以两条路画的掩码可以落在同一套坐标里。
 
 ```mermaid
@@ -122,7 +122,7 @@ flowchart LR
   U["用户操作"]
 
   U -->|"选/拖本机文件"| A["链路 A<br/>浏览器解码"]
-  U -->|"检索 / 粘路径 / 拖盘阵文件"| B["链路 B<br/>服务端烘焙 JPG"]
+  U -->|"检索 / 粘路径 / 拖盘阵文件"| B["链路 B<br/>服务端生成 JPG"]
   U -->|"画掩码后提交"| C["链路 C<br/>后端 + SR 作业"]
   U -->|"发消息"| D["链路 D<br/>agent 循环"]
 
@@ -180,8 +180,8 @@ flowchart TB
 | 场景行 | `/api/scenes` 返回的一行，含 `id` / `W` / `H` / `hasPreview` / `previewDiv` / `jpgUrl` / `lq_path` | preview-bake-pipeline.md §4.1 |
 | 库内 / 库外 | 源在 `SR_SCENES_ROOT` 之下 / 之下之外（粘路径、裸 `.tif`） | 同上 §4.3 |
 | 手工行 | 由 `POST /api/scenes/resolve` 产生、id 带 `~` 前缀的场景行 | 同上 |
-| 烘焙 | 服务端把源影像降采样 + 拉伸后写成预览 JPG | 同上 §1 |
-| 规则戳 | 写进预览 JPG 注释段的 ASCII 串 `srprev:v3:divN+equal:qQ`，用于判缓存是否还符合当前规则 | 同上 §2.5 |
+| 生成预览 | 服务端把源影像降采样 + 拉伸后写成预览 JPG | 同上 §1 |
+| 规则签名 | 写进预览 JPG 注释段的 ASCII 串 `srprev:v3:divN+equal:qQ`，用于判缓存是否还符合当前规则 | 同上 §2.5 |
 | 档位 | 预览的各边缩放比 `div`，取值 2 / 4 / 8 / 16 / 32 | 同上 §4.4 |
 | 落点 | 一份产物写在盘上的确切路径 | 同上 §4.8 |
 | 环节 | 一个场景目录里的一份影像是本体 / 本轮产物 / NOSR 哪一种 | 前端 `lib/stage.ts` |

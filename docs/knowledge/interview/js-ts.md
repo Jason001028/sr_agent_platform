@@ -77,7 +77,7 @@
      `constructor` + 原型方法 + `static` 字段/方法（挂类本身）+ `extends` 继承（子类 prototype 的原型指向父类 prototype）。
      class 字段每实例一份，原型方法共享。
    - 派生类构造必须先 `super()` 才能用 this（this 由父构造初始化）；class 声明本身也在 TDZ（见第 10 题），先调用后声明会报错。
-   - 显式造链：`Object.create(proto)`（顺带实现 `Object.create(null)` 的无原型纯字典，见第 14 题）、`Object.setPrototypeOf`。
+   - 显式造链：`Object.create(proto)`（同时实现 `Object.create(null)` 的无原型纯字典，见第 14 题）、`Object.setPrototypeOf`。
    **追问：** 静态成员怎么继承的（子类构造函数自身的 `[[Prototype]]` 指向父类构造函数，所以能直接调父类 static）？
       为什么 `obj.hasOwnProperty` 在 `Object.create(null)` 上会炸、要用 `Object.prototype.hasOwnProperty.call(obj, k)`（没有原型就没有该方法）？
 
@@ -229,7 +229,7 @@
       如 `type Loading = 'idle' | 'loading' | 'done' | 'error'`）> 少量工具类型。前两类是业务收益大头。
     - 别为炫技写深嵌套条件/映射/递归/模板字面量：**编译慢**（类型实例化在编译器里是"真跑"，有深度与数量上限，
       超了报 `Type instantiation is excessively deep`）、同事读不懂、出错信息像天书。
-    - 演进式写法：先显式标注/靠字面量推导，出现**重复**再抽类型，不要一步到位叠体操；复杂表达式宁可拆几步、给中间类型命名（顺带做窄化、可读）。
+    - 演进式写法：先显式标注/靠字面量推导，出现**重复**再抽类型，不要一步到位叠体操；复杂表达式宁可拆几步、给中间类型命名（同时做窄化、可读）。
     - 取舍标尺：三行联合/工具类型能解决的事不上 `infer` 十行；复杂"类型编程"要解决的运行时问题，优先用普通代码 + 少量类型锁边界。
     - 验收反问：删掉这个中间类型，代码是否还读得懂、编译是否还快？两个"否"就是在过度设计。
     **追问：** 为什么递归类型/大联合会让编辑器和 CI 变慢（每个使用点都可能触发一次完整实例化，多文件共享时还要反复推）？"写给别人维护的类型"上，完备性和可读性你押哪边（押可读，

@@ -19,7 +19,7 @@ import AgentChatTab from './AgentChatTab.vue';
 const store = useViewerStore();
 const tab = ref<'roi' | 'agent'>('roi');
 
-/** store 里存的是「展开」，组件里用「收起」更顺手（CSS 也是 .collapsed）。 */
+/** store 里存的是「展开」，组件里用「收起」更同时（CSS 也是 .collapsed）。 */
 const collapsed = computed({
   get: () => !store.ctxRailOpen,
   set: (v: boolean) => store.setCtxRailOpen(!v),

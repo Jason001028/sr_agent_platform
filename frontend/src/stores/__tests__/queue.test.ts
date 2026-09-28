@@ -280,7 +280,7 @@ describe('mergeJobUpdate（SSE 归并）', () => {
   });
 });
 
-describe('mergePreviewUpdate（SSE 归并：产物急烤）', () => {
+describe('mergePreviewUpdate（SSE 归并：产物主动生成）', () => {
   it('task_id 匹配 → 覆盖两个预览字段，其余行不动', () => {
     const rows = [task({ task_id: 1, state: 'COMPLETED' }),
                   task({ task_id: 2, state: 'COMPLETED', preview_state: 'done',
@@ -296,7 +296,7 @@ describe('mergePreviewUpdate（SSE 归并：产物急烤）', () => {
   });
 
   it('无匹配 task → 原数组引用不变（权威始终在 list()）', () => {
-    // 急烤的认领与广播都在后端，前端可能还没把这个 task 拉进列表 —— 这时既不该
+    // 主动生成的认领与广播都在后端，前端可能还没把这个 task 拉进列表 —— 这时既不该
     // 凭空补一行，也不该让上游误以为「变了」而重渲染。
     const rows = [task({ task_id: 1 })];
     expect(mergePreviewUpdate(rows, {

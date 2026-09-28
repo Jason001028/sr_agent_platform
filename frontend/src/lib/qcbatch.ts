@@ -11,7 +11,7 @@
  *    两处钉子盯着它别漂：`backend/tests/test_paths.py` 钉 `_PRODUCT_CODES`、
  *    `lib/__tests__/qcbatch.test.ts` 钉同两个字面量。
  *
- * 2. `runSceneBake` 是**注入式**的串行驱动器 —— 三个动作（resolve / 烤本体 / 烤 NOSR）
+ * 2. `runSceneBake` 是**注入式**的串行驱动器 —— 三个动作（resolve / 生成本体 / 生成 NOSR）
  *    由调用方注入，循环体自己只负责「按序、跳过失败、计数、每个 await 之后看一次是否
  *    被取消」。注入是为了让这四条规矩能在 Vitest 里用假函数全量测到；真正的 HTTP 与
  *    store 操作留在 stores/qclist.ts 的接线里。
@@ -94,15 +94,15 @@ export type BakeStage = 'resolve' | 'body' | 'nosr';
 
 export const BAKE_STAGE_LABEL: Record<BakeStage, string> = {
   resolve: '解析场景',
-  body: '烘焙本体 jpg',
-  nosr: '烘焙 NOSR jpg',
+  body: '生成预览本体 jpg',
+  nosr: '生成预览 NOSR jpg',
 };
 
 export interface BakeFail { stage: BakeStage; reason: string }
 
 export interface BakeReport {
   total: number;
-  /** **解析成功、这一景的账已经算上**的行数（含本体烤失败了的那种：那也是一条账）。
+  /** **解析成功、这一景的账已经算上**的行数（含本体生成失败了的那种：那也是一条账）。
    *  解析就没成的、以及取消时还没轮到的，都不计 —— 所以「成功 = done - fails 条数」
    *  报出来的是「左侧真长出卡来的景数」。 */
   done: number;
@@ -117,9 +117,9 @@ export interface BakeReport {
 export interface BakeDeps<T extends BakeRow = BakeRow> {
   /** 解析一景（拿回后端的权威结果）。失败抛。 */
   resolve(it: T, signal: AbortSignal): Promise<unknown>;
-  /** 本体 jpg：入列一张卡 + 烤一份。失败抛。 */
+  /** 本体 jpg：入列一张卡 + 生成一份。失败抛。 */
   body(it: T, res: unknown): Promise<void>;
-  /** NOSR：问 /siblings，有那份就入列一张卡 + 烤一份；返回 'missing' = 盘上没有。失败抛。 */
+  /** NOSR：问 /siblings，有那份就入列一张卡 + 生成一份；返回 'missing' = 盘上没有。失败抛。 */
   nosr(it: T, res: unknown): Promise<'ok' | 'missing'>;
   onProgress?(i: number, n: number, it: T, phase: BakeStage): void;
 }
@@ -131,19 +131,19 @@ export interface BakeRow { name: string }
 /**
  * 按行序**串行**跑完一批：一景走完才开下一景（并发恒为 1）。
  *
- * 为什么必须串行：服务端烤一份 ÷4 的 4 万² 产物峰值内存约 400MB、要把整个文件读一遍，
- * 而后端**没有任何烘焙并发闸门**（`preview` 是 sync def，会进 anyio 线程池）；并发发出去
+ * 为什么必须串行：服务端生成一份 ÷4 的 4 万² 产物峰值内存约 400MB、要把整个文件读一遍，
+ * 而后端**没有任何生成预览并发闸门**（`preview` 是 sync def，会进 anyio 线程池）；并发发出去
  * 就是内存 ×N 并把盘阵带宽占满。项目里已有的串行先例是 `viewer.maybePrefetchCompare`。
  *
  * 四条规矩（单测逐条钉住）：
  * 1. **严格按行序**，`rows` 的顺序就是展示顺序；
  * 2. **单景失败不中断整批**：记进 `fails[行名]` 再接着跑下一景；
  * 3. **取消点只看 `signal.aborted`**，且在**每一个 await 之后**都看一次 —— `resolve`
- *    可被 abort，而烤图那两条 HTTP **中断不了**，所以在飞的那一景让它烤完：下一轮循环
+ *    可被 abort，而生成图那两条 HTTP **中断不了**，所以在飞的那一景让它生成完：下一轮循环
  *    开头才发现 abort，`stopped = true`，没轮到的景一个字都不记（不算失败）；
  * 4. `nosr` 返回 `'missing'` 进 `notes` 不进 `fails` —— 盘上没有那份是事实，不是错误。
  *
- * `done` 的加账点定在**解析成功那一刻**，不是循环末尾：这样「本体烤到一半用户按了停止」
+ * `done` 的加账点定在**解析成功那一刻**，不是循环末尾：这样「本体生成到一半用户按了停止」
  * 也算这一景一笔（那张卡确实已经在左侧列表里了），否则汇总会报「成功 0」而屏幕上明明
  * 摆着卡 —— 那是谎报。反过来，解析就失败/被取消的那些不计，它们一张卡都没落。
  */
@@ -155,8 +155,8 @@ export async function runSceneBake<T extends BakeRow>(
   const notes: Record<string, string> = {};
   let done = 0;
   let stopped = false;
-  // 烘焙档位（÷N）由调用方在 deps 闭包里抓成常量、整批沿用，驱动器不碰它 ——
-  // 用户跑到一半拖滑块，只影响后面那些景，已烤好的卡文案仍如实标它自己那一档。
+  // 缩放档位（÷N）由调用方在 deps 闭包里抓成常量、整批沿用，驱动器不碰它 ——
+  // 用户跑到一半拖滑块，只影响后面那些景，已生成好的卡文案仍如实标它自己那一档。
   for (let i = 0; i < total; i++) {
     if (signal.aborted) { stopped = true; break; }
     const it = rows[i];
@@ -184,14 +184,14 @@ export async function runSceneBake<T extends BakeRow>(
     deps.onProgress?.(i + 1, total, it, 'nosr');
     try {
       if (await deps.nosr(it, res) === 'missing') {
-        notes[it.name] = '盘上没有未超分那份（NOSR），只烤了本体';
+        notes[it.name] = '盘上没有未超分那份（NOSR），只生成了本体';
       }
     } catch (e) {
-      // 本体烤成了、NOSR 没成：**不覆盖**本体那条失败记录（两条记的是不同的事，
+      // 本体降采样到了、NOSR 没成：**不覆盖**本体那条失败记录（两条记的是不同的事，
       // 而卡片上只有一个名字）。本体已成的状态下这条只进 notes 更准确 —— 但
       // 名字只有一个键，所以本体失败时保留本体那条（更严重、且先发生）。
       if (!fails[it.name]) fails[it.name] = { stage: 'nosr', reason: errText(e) };
-      else notes[it.name] = 'NOSR 那份没烤成：' + errText(e);
+      else notes[it.name] = 'NOSR 那份没降采样到：' + errText(e);
     }
   }
   return { total, done, stopped, fails, notes };

@@ -12,10 +12,12 @@
  * 之外的每一行原样吐回去。解析只用来「显示 + 认名字」，认不出来的行也照样留在
  * 上半部分 —— 质检部门的原始记录不允许因为我们读不懂就少一行。
  *
- * 坐标约定有一处**与项目其余部分相反**，改代码前务必看清：
- *   清单里的「行列号:30766.11,21862.51」按中文习惯是 **(行, 列)**；
- *   而 lib/viewMath.ts 与 store.locatePixel(x, y) 是 **x=列、y=行**。
- *   所以从清单跳转必须写 `locatePixel(col, row)`，顺序反了会跳到画面另一头。
+ * 坐标约定（2026-09-28 真机落点实测订正 —— 此前一直按「行,列」理解，是错的）：
+ *   清单里的「行列号:7300.26,1737.98」**第一个数是列(X)、第二个才是行(Y)**。名字叫
+ *   「行列号」，写出来的却是 X,Y 序。这与 lib/viewMath.ts / store.locatePixel(x, y)
+ *   的 x=列、y=行 **同序**，所以从清单跳转照抄即可：`locatePixel(col, row)`。
+ *   订正依据：真机上把 `7300.26,1737.98` 原样填进定位框，红叉落在伪影上；反序的那一串
+ *   落到对角去了。改这条之前请先照这个办法再验一次，别照文档想当然。
  */
 
 /* ---------------- 状态 ---------------- */
@@ -68,9 +70,9 @@ export interface QcIssue {
   owner: string;
   /** 从 desc 里抽出的「问题类型」；没写就是空串。 */
   kind: string;
-  /** 「行列号」里的**行**（与 locatePixel 的 y 同义）。缺失为 null。 */
+  /** 「行列号」里的**行** = 那一对的**第二个数**（与 locatePixel 的 y 同义）。缺失为 null。 */
   row: number | null;
-  /** 「行列号」里的**列**（与 locatePixel 的 x 同义）。缺失为 null。 */
+  /** 「行列号」里的**列** = 那一对的**第一个数**（与 locatePixel 的 x 同义）。缺失为 null。 */
   col: number | null;
   /** 「影像类型」（PAN / pan / PMS…）；没写就是空串。 */
   imgType: string;
@@ -134,8 +136,9 @@ function parseIssueLine(raw: string): QcIssue | null {
 
   return {
     name, desc, owner, kind, imgType,
-    row: loc ? Number(loc[1]) : null,
-    col: loc ? Number(loc[2]) : null,
+    // 第一个数是列(X)、第二个是行(Y) —— 与 locatePixel(x=列, y=行) 同序（文件头那条订正）
+    col: loc ? Number(loc[1]) : null,
+    row: loc ? Number(loc[2]) : null,
   };
 }
 

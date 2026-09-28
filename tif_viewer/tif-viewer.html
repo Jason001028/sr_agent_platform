@@ -150,7 +150,7 @@
         <option value="equal">Equalize</option>
     </select>
     <button id="outBtn" class="outbtn" title="选择 JPG 中间产物输出目录：首次点选一次目录（授权后自动按读取日期建子目录写入），之后每读一张 tif 自动生成 jpg + 当日读取记录">输出目录: 未授权</button>
-    <label class="chk" title="读取成功后自动生成 JPG 中间产物（当前拉伸模式烘焙，长边上限可改 JPG_MAX）"><input type="checkbox" id="autoChk" checked>自动JPG</label>
+    <label class="chk" title="读取成功后自动生成 JPG 中间产物（当前拉伸模式生成预览，长边上限可改 JPG_MAX）"><input type="checkbox" id="autoChk" checked>自动JPG</label>
     <span class="loc" title="输入原始图像像素坐标（X=列，Y=行），跳转并红叉标记约 7 秒">
         <input id="locX" type="number" placeholder="X" min="0" step="1">
         <input id="locY" type="number" placeholder="Y" min="0" step="1">
@@ -910,7 +910,7 @@ function buildThumb(rgba, W, H, maxT, maxI) {
 }
 
 /* ================ JPG 中间产物导出 ================
-   读取成功 → 以长边 JPG_MAX(默认 8192≈1/3) 复用解码机制重建自然值 → 当前拉伸烘焙 RGBA
+   读取成功 → 以长边 JPG_MAX(默认 8192≈1/3) 复用解码机制重建自然值 → 当前拉伸生成预览 RGBA
    → canvas.toBlob('image/jpeg', 0.95) → 写入 输出目录/YYYY-MM-DD/<名字>.jpg
    并在当日 读取记录.json 追加一条（{文件名,大小,尺寸,读取时间,jpg,导出长边,拉伸,质量,实际尺寸}）。
    导出串行执行（多图同时高分辨率解码会撑爆内存）；不弹遮罩、不阻塞浏览交互。 */

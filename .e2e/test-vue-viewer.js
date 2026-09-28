@@ -19,7 +19,7 @@
 //   输出目录一条链路（sr-minimal-prototype-plan.md §4.5），setSaver / reExportJpg /
 //   scanPendingExports / jpgStatus 等钩子随之从 e2eHooks.ts 移除。针对已取消功能的
 //   断言留着只会长期报红，故整段删除；导出链路的等价回归见 .e2e/test-scenes.js 的
-//   「C. 懒烘焙」段 —— 现在是服务端烘焙，前端不再写文件。）
+//   「C. 懒生成预览」段 —— 现在是服务端生成，前端不再写文件。）
 // 用法: cd .e2e && node test-vue-viewer.js
 const http = require('http');
 const fs = require('fs');
@@ -200,6 +200,15 @@ async function main() {
       let rec = await uploadAndWait(page, F('rgb8.tif'), 30000);
       assert(rec.route === 'utif', `rgb8 → utif (实际 ${rec.route})`);
       assert(rec.W === 64 && rec.H === 64, `rgb8 尺寸 64×64 (${rec.W}×${rec.H})`);
+      // 底栏（2026-09-28 起）：常驻的只有图名；尺寸、探针、路由、预览尺度、布局都在悬停
+      // title 里（左侧那张卡上已经有尺寸与布局）。这条钉的是「别再把字段堆回这条」。
+      const bar = await page.evaluate(() => {
+        const el = document.querySelector('.rec-bar');
+        return el ? { text: el.textContent.trim(), title: el.title } : null;
+      });
+      assert(bar && bar.text === 'rgb8.tif', `底栏只显示图名（${bar && bar.text}）`);
+      assert(bar && bar.title.indexOf('路由=utif') >= 0 && bar.title.indexOf('64×64') >= 0,
+        `尺寸与路由在悬停 title 里（${bar && bar.title}）`);
       const px = await page.evaluate(() => {
         const t = window.__viewer.activeRec().thumb;
         const d = t.getContext('2d').getImageData(5, 7, 1, 1).data;
@@ -430,8 +439,9 @@ async function main() {
       const N20 = 'JL1KF02B04_PMS03_20260917120612_200538728_101_0020_001_L1';
       const N21 = 'JL1KF02B04_PMS03_20260917120612_200538728_101_0021_001_L1';
       const N22 = 'JL1KF02B04_PMS03_20260917120612_200538728_101_0022_001_L1';
-      const issue = (n, row, col, ty, who) => n + ',' + T
-        + '产品存在伪影 (问题类型:产品存在伪影 行列号:' + row + ',' + col + ' 影像类型:' + ty + ' )' + T + who;
+      // 坐标对是 (X=列, Y=行)：真机落点实测过，第一个数才是列（lib/qclist.ts 文件头那条订正）
+      const issue = (n, x, y, ty, who) => n + ',' + T
+        + '产品存在伪影 (问题类型:产品存在伪影 行列号:' + x + ',' + y + ' 影像类型:' + ty + ' )' + T + who;
       const TOP = [
         issue(N6, '30766.11', '21862.51', 'PAN', '李鹏飞'),
         issue(N20, '7300.26', '1737.98', 'pan', '李佳峻'),
@@ -470,11 +480,12 @@ async function main() {
       assert(dom.count === '1/4' && dom.rows === 4, `面板渲染 4 行、计数 ${dom.count}`);
       assert(dom.badges.length === 1 && dom.badges[0].indexOf('已修复') >= 0,
         `只有 0006 带状态徽标 (${dom.badges.join(',')})`);
-      // 行列号是 (行, 列)：0020 行必须「行 7300.26」在「列 1737.98」**之前**。
+      // 坐标对是 (X=列, Y=行)：0020 行的「7300.26,1737.98」= 列 7300.26、行 1737.98 ——
+      // 面板按「行 … · 列 …」的固定次序渲染，所以「行 1737.98」在前、「列 7300.26」在后。
       // 不比整串：.qc-l2 是 flex，分隔符两侧的空白文本节点编译期就被压掉了，
       // 逐字比对会假红；顺序 + 三个字段在场才是真正要守的东西。
       const l2 = dom.l2[1] || '';
-      assert(l2.indexOf('行 7300.26') >= 0 && l2.indexOf('列 1737.98') > l2.indexOf('行 7300.26')
+      assert(l2.indexOf('行 1737.98') >= 0 && l2.indexOf('列 7300.26') > l2.indexOf('行 1737.98')
         && l2.indexOf('pan') > 0 && l2.indexOf('李佳峻') > 0,
         `0020 行按「行,列」显示坐标与影像类型/责任人「${l2}」`);
 
@@ -529,7 +540,7 @@ async function main() {
 
     /* ============ H. 图像对比（关闭 / 点选对比 / 分屏对比） ============ */
     // 这一段不经后端：两张 fixture 都是 256×256（gray16_grad / bigtiff_strips），同尺寸，
-    // 于是两格里看到的差异只来自拉伸，不掺几何 —— 顺带避开「产物是输入 2 倍」那条待核事实。
+    // 于是两格里看到的差异只来自拉伸，不掺几何 —— 同时避开「产物是输入 2 倍」那条待核事实。
     console.log('--- H. 图像对比 ---');
     {
       // 默认视口 800×600 放不下「左栏 400 + 右栏 400 + 画布」，而这一段要验的就是
@@ -1371,7 +1382,7 @@ async function main() {
         && toastAfter.indexOf('先点「完成」再切') >= 0,
         `并给出说明（"${toastAfter.slice(0, 44)}…"）`);
       assert(await roiCount() === 1,
-        `那一下也没顺手在活动侧落一个框（ROI 仍是 ${await roiCount()} 个）`);
+        `那一下也没同时在活动侧落一个框（ROI 仍是 ${await roiCount()} 个）`);
 
       // 「完成」之后照样能切活动侧；切到产物那半，绘制入口随之置灰（判据跟着活动侧走）
       await page.evaluate(() => window.__viewer.exitDraw());

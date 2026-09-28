@@ -4,7 +4,7 @@
  * 服务端唯一事实源：list/submit/cancel 走 REST；状态推进靠后台校准器广播
  * job_update（GET /api/queue/events SSE），前端仅按 task_id 归并覆盖 state。
  * 任务行状态机 = 进度（§3.3）：SUBMITTING → PENDING → RUNNING → COMPLETED/FAILED。
- * 掩码烘焙（查看器）→ setDraft() 预填队列表单（不自动提交，提交是真副作用）。
+ * 掩码生成（查看器）→ setDraft() 预填队列表单（不自动提交，提交是真副作用）。
  *
  * **订阅改成应用级常驻 + 引用计数（2026-09-22）**：原来是「任务队列页挂载时连、离开
  * 即断」，于是提交完切去查看器干活的人**收不到任何完成提示**（后端这条流没有历史回放，
@@ -81,7 +81,7 @@ export function draftToForm(d: QueueDraft): QueueForm {
   return { ...defaultForm(), lq_path: d.lq_path, ...(d.tunables ?? {}) };
 }
 
-/** 掩码推导规则的**无 stat 镜像**，只在拿不到权威值时兜底显示「将读哪个掩膜」。
+/** 掩码推导规则的**无 stat 镜像**，只在拿不到权威值时兜底显示「将读哪个掩码」。
     权威实现是 backend/services/scene_search.derived_mask_path（掩码名取**输入
     影像**的 stem），前端这里没有 stat 只能拿目录名顶替 —— `<目录名>.tif`（SC）
     场景两者相同，`PAN.tif`（RC）场景不同名。所以表单优先用后端给的
@@ -179,9 +179,9 @@ export function mergeJobUpdate(tasks: QueueTask[], ev: JobUpdateEvent): QueueTas
 
 /** SSE preview_update → 覆盖匹配 task 的产物预览字段；无匹配不动（权威在 list()）。
 
-    与 mergeJobUpdate 分开是**刻意的**：预览烤没烤成与作业状态无关（COMPLETED 的作业
-    也可能因为沙箱/产物缺失/目录不可写而没烤），合成一个函数就得同时处理两套字段，
-    调用点也得判「这一帧到底带没带 state」。无匹配不动这一条同样重要 —— 急烤的认领
+    与 mergeJobUpdate 分开是**刻意的**：预览生成没降采样到与作业状态无关（COMPLETED 的作业
+    也可能因为沙箱/产物缺失/目录不可写而没生成），合成一个函数就得同时处理两套字段，
+    调用点也得判「这一帧到底带没带 state」。无匹配不动这一条同样重要 —— 主动生成的认领
     与广播都在后端，前端可能还没把这个 task 拉进列表。 */
 export function mergePreviewUpdate(
   tasks: QueueTask[], ev: PreviewUpdateEvent,

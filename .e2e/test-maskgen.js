@@ -36,7 +36,7 @@ test('buildMaskTxt 格式（全角头/CRLF/2dp）', () => {
   const txt = MaskGen.buildMaskTxt(10, 10, [[[0, 0], [4, 0], [0, 4]]]);
   const lines = txt.split('\r\n');
   assert(lines[0] === '＃掩膜中心点坐标（X，Y）', '头1: ' + JSON.stringify(lines[0]));
-  assert(lines[1] === '＃掩膜编号，X坐标，Y坐标', '头2: ' + JSON.stringify(lines[1]));
+  assert(lines[1] === '＃掩码编号，X坐标，Y坐标', '头2: ' + JSON.stringify(lines[1]));
   assert(lines[2] === '1,1.33,1.33', '数据行: ' + JSON.stringify(lines[2]));
   assert(lines[3] === '', '应以 \r\n 结尾且无多余行');
 });

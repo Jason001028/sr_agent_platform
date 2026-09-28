@@ -22,7 +22,7 @@ const PAGE_FN = function () {
     }
     return c;
   }
-  // 金字塔：一次预烤出各级（= 用户说的「预先加载缓存」），每级边长减半
+  // 金字塔：一次漏生成出各级（= 用户说的「预先加载缓存」），每级边长减半
   function makeLevels(src, n, min) {
     const lv = [src];
     let cur = src, size = n;

@@ -59,10 +59,10 @@ async function confirm(): Promise<void> {
 /** 明细行：逐文件的跳过与失败，成功的不列。
  *
  *  判据是**「有没有逐文件条目」**，不是「整条结论是不是 cleared」—— 一个目录完全
- *  可能「删掉了两份、跳过了第三份（没有规则戳 / 是场景源）」，那时结论是 cleared，
+ *  可能「删掉了两份、跳过了第三份（没有规则签名 / 是场景源）」，那时结论是 cleared，
  *  而那份没删的恰恰是用户该看见的（他不会为了查「有没有漏」再去展开明细）。
  *  没有逐文件条目的那两种才看结论：`skipped` / `failed` 带上整条的原因
- *  （id 不可访问 / 后台正在烘焙这一景）。 */
+ *  （id 不可访问 / 后台正在生成预览这一景）。 */
 interface Problem { key: string; dir: string | null; text: string }
 const problems = computed<Problem[]>(() => {
   const out: Problem[] = [];
@@ -114,7 +114,7 @@ const failedCount = computed(() =>
         <span class="scb-ask-text">
           清除选定的 <strong>{{ scenes.selectedCount }}</strong> 项？
           删掉的是盘阵上的预览 JPG（<strong>不进回收站</strong>），
-          下次打开会重新烘焙（要读一遍大图，可能要等几十秒）。
+          下次打开会重新生成预览（要读一遍大图，可能要等几十秒）。
         </span>
         <button type="button" class="btn mini danger" :disabled="busy"
                 @click="confirm">确认清除</button>
@@ -124,7 +124,7 @@ const failedCount = computed(() =>
         <span class="scb-ask-text">
           将清除<strong>当前列表里的 {{ scenes.selectableRows.length }} 项</strong>
           （受筛选影响，不是盘阵上所有场景）。删掉的是盘阵上的预览 JPG，
-          <strong>不进回收站</strong>，下次打开会重新烘焙。<template
+          <strong>不进回收站</strong>，下次打开会重新生成预览。<template
             v-if="hiddenCount">另有 {{ hiddenCount }} 项命中不在这份列表里（列表最多显示
             {{ scenes.rows.length }} 条），这次清不到，要一并清请缩小筛选后再来。</template>
         </span>

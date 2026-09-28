@@ -352,7 +352,7 @@ class TestSceneNameProducts(EnvMixin):
         镜像**只用于匹配**，绝不参与拼路径（拼路径只在后端）。
 
         改这里的取值就必须同步改前端那处；两边各有一条测试盯着同一个词面量，同时红
-        就说明有人改了一头而漏了另一头 —— 那正是这条用例存在的意义，别顺手把断言
+        就说明有人改了一头而漏了另一头 —— 那正是这条用例存在的意义，别同时把断言
         改成「读前端源码」。"""
         self.assertEqual(_PRODUCT_CODES, ("PAN", "MSS"))
         self.assertEqual([c for _s, c in scene_name_products(self.NOPROD)[1:]],

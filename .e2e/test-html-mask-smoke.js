@@ -109,7 +109,7 @@ function buildDom() {
         assert.strictEqual(buf.readUInt16LE(2), 42, '非 classic TIFF');
         // txt 内容对齐参考格式
         const txtText = await txt.blob.text();
-        assert.ok(txtText.startsWith('＃掩膜中心点坐标（X，Y）\r\n＃掩膜编号，X坐标，Y坐标\r\n'), txtText.slice(0, 60));
+        assert.ok(txtText.startsWith('＃掩膜中心点坐标（X，Y）\r\n＃掩码编号，X坐标，Y坐标\r\n'), txtText.slice(0, 60));
         assert.ok(/^\d+,\d+\.\d{2},\d+\.\d{2}$/.test(txtText.split('\r\n')[2]), '数据行格式错误: ' + txtText.split('\r\n')[2]);
         assert.ok(txtText.endsWith('\r\n'), 'txt 应 CRLF 结尾');
     });

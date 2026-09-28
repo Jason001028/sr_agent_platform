@@ -214,9 +214,9 @@ class TestStretchEqual(unittest.TestCase):
 
 
 class TestBigPreviewNotMistakenForBomb(unittest.TestCase):
-    """1/2 尺度会把「2.4 万像素级的源」烤成 1.5 亿像素，超过 Pillow 默认像素
+    """1/2 尺度会把「2.4 万像素级的源」降采样到 1.5 亿像素，超过 Pillow 默认像素
     上限（8948 万）的 2 倍就会抛 DecompressionBombError —— 那会让 cache_hit
-    的 Image.open 失败、缓存永远判不中，于是每次打开都重烤一遍，本次的优化
+    的 Image.open 失败、缓存永远判不中，于是每次打开都重新生成一遍，本次的优化
     全部抵消。这里不造 1.5 亿像素的真图（太慢），而是造一张**头里声明**了
     巨大尺寸的 JPEG：Pillow 的炸弹检查只看头，足够复现该失败。"""
 
@@ -242,7 +242,7 @@ class TestBigPreviewNotMistakenForBomb(unittest.TestCase):
                 self.assertEqual(im.size, (self.HUGE, self.HUGE))
 
     def test_huge_preview_cache_still_hits(self):
-        """端到端：巨大的旧缓存 + mtime 比源新 → 必须判为命中，而不是重烤。"""
+        """端到端：巨大的旧缓存 + mtime 比源新 → 必须判为命中，而不是重新生成。"""
         with tempfile.TemporaryDirectory() as d:
             p, _ = make_strip_tif(d, "s.tif", 64, 64)
             jpg = Path(d, "s.preview.jpg")
@@ -295,7 +295,7 @@ class TestEnsurePreviewJpg(unittest.TestCase):
                 self.assertEqual(im.info.get("comment"), rule_stamp())
 
     def _old_cache(self, p: Path, jpg: Path, comment: bytes | None) -> None:
-        """造一张「旧规则产物」：mtime 明确比源新，可选带某个旧规则戳。"""
+        """造一张「旧规则产物」：mtime 明确比源新，可选带某个旧规则签名。"""
         kw = {"comment": comment} if comment else {}
         Image.fromarray(np.zeros((64, 32), dtype=np.uint8)).save(
             jpg, format="JPEG", **kw)
@@ -303,7 +303,7 @@ class TestEnsurePreviewJpg(unittest.TestCase):
         os.utime(jpg, (future, future))
 
     def test_stampless_old_cache_regenerates(self):
-        """升级前烤的图没有规则戳、mtime 还比源新 —— 必须重烤。
+        """升级前生成的图没有规则签名、mtime 还比源新 —— 必须重新生成。
 
         这是改规则最容易踩的坑：只看 mtime 的话，真机上换包后旧图原地不动。"""
         with tempfile.TemporaryDirectory() as d:
@@ -323,7 +323,7 @@ class TestEnsurePreviewJpg(unittest.TestCase):
                              "generated")
 
     def test_other_quality_regenerates(self):
-        """质量也是规则的一部分：改了 quality，旧图同样要重烤。"""
+        """质量也是规则的一部分：改了 quality，旧图同样要重新生成。"""
         with tempfile.TemporaryDirectory() as d:
             p, _ = make_strip_tif(d, "s.tif", 64, 64)
             jpg = Path(d, "s.preview.jpg")
@@ -354,10 +354,10 @@ class TestEnsurePreviewJpg(unittest.TestCase):
 class TestSplitHelpers(unittest.TestCase):
     """`ensure_preview_jpg` 拆出来的两个半成品（`cache_hit` / `write_preview_jpg`）。
 
-    拆的理由只有一个：产物急烤要在「像素已读出」与「落盘」之间插一次 stat 复核
+    拆的理由只有一个：产物主动生成要在「像素已读出」与「落盘」之间插一次 stat 复核
     （同 suffix 重跑会覆盖同一个产物路径，不复核会把半截图永久留在盘上）。
     所以这里要钉的是**拆出来之后两边规则仍然一致** —— 缓存判据不能变，落盘的
-    规则戳不能变。整条 `ensure_preview_jpg` 的行为由上面 `TestEnsurePreviewJpg`
+    规则签名不能变。整条 `ensure_preview_jpg` 的行为由上面 `TestEnsurePreviewJpg`
     那一组钉着（这次重构一个用例都没改就全绿，就是它守住了）。
     """
 
@@ -398,7 +398,7 @@ class TestSplitHelpers(unittest.TestCase):
         调用方各自补那一半：
 
         * `ensure_preview_jpg`：`dst.is_file() and dst.mtime >= src.mtime` 再问它；
-        * 产物急烤（`_eager_bake_tick`）：同样的 mtime 判据，但**在读像素之前**问，
+        * 产物主动生成（`_eager_bake_tick`）：同样的 mtime 判据，但**在读像素之前**问，
           省掉重读一遍 GB 级文件。
 
         谁要是以为 `cache_hit` 已经包含了新鲜度，就会漏掉自己那一半 —— 于是换过源
@@ -418,7 +418,7 @@ class TestSplitHelpers(unittest.TestCase):
             self.assertIsNone(cache_hit(jpg, 90, 4), "质量不同 → 落空")
 
             # 源改新：cache_hit **照样命中**（它看不出来），新鲜度是调用方那一半。
-            # 而 ensure 补上自己那一半之后确实重烤 —— 两句话合起来才是完整判据。
+            # 而 ensure 补上自己那一半之后确实重新生成 —— 两句话合起来才是完整判据。
             fresh = p.stat().st_mtime + 100
             os.utime(p, (fresh, fresh))
             self.assertIsNotNone(cache_hit(jpg, PREVIEW_JPG_QUALITY, 4),

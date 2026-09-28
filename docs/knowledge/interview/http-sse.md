@@ -14,7 +14,7 @@
 - PUT：整资源覆盖式更新（「给这个 URI 赋值这个完整表示」），语义幂等——重复 PUT 最终状态一致。
 - PATCH：部分字段更新（增量描述），按实现未必幂等（例如 `{"op":"append",…}` 重复执行会叠加）。
 - DELETE：删资源，语义幂等——再删一次只是 404，不改变最终状态。
-- 补充常被顺带问的：HEAD = GET 只要头不要 body（探活/拿元信息）；OPTIONS = 问服务端能力 / CORS 预检。
+- 补充常被同时问的：HEAD = GET 只要头不要 body（探活/拿元信息）；OPTIONS = 问服务端能力 / CORS 预检。
 
 ```http
 POST /api/chat/sessions/{id}/messages HTTP/1.1      ← 请求行：方法 目标 版本
@@ -151,7 +151,7 @@ Content-Type: application/json
 - Cookie：客户端小存储（约 4KB），`Set-Cookie` 由服务器下发、浏览器按域/路径自动带上。关键属性：`HttpOnly`（JS 读不到，抗 XSS 窃取）、`Secure`（仅 https）、`SameSite=Lax/Strict`（防 CSRF）、`Domain/Path` 作用域。本身是**载体**，里面装 session id 或 token 都行。
 - Session：**状态存在服务端**（内存/Redis/DB），客户端只拿 session_id（常放 cookie）。优点：可随时吊销、服务端可控；缺点：有状态 → 水平扩展要共享存储（Redis）、每次请求查一次。
 - Token/JWT：**状态打进自包含令牌**，服务端验签即认（`HMAC/RSA` 签名 + 过期时间），无共享存储、天然水平扩展。缺点：签发后**难提前吊销**（只能等过期，或加黑名单/短 TTL+refresh）；JWT 有点大；若放 localStorage，被 XSS 读走即失守。
-- 一句话选型：要「可即时吊销、服务端权威」→ Session+共享存储；要「无状态扩展、跨域/移动端顺手」→ JWT，用短生命周期 + refresh 缓解吊销难。Chrome 三方 Cookie 限制还进一步挤压 cookie 方案的跨站场景。
+- 一句话选型：要「可即时吊销、服务端权威」→ Session+共享存储；要「无状态扩展、跨域/移动端同时」→ JWT，用短生命周期 + refresh 缓解吊销难。Chrome 三方 Cookie 限制还进一步挤压 cookie 方案的跨站场景。
 - Cookie 其余属性和坑：`Expires`/`Max-Age`（会话 vs 持久）、`Domain`/`Path` 决定发给谁、单域名 ~几十个/单条 ~4KB 上限、`SameSite=None` 需要 Secure。面试爱问的辩证点：**Session 也可把 id 放 token、JWT 也可装 cookie**——关键区别不是存放位置而是「状态在谁手里、能不能吊销」。
 
 **追问**：JWT 放 cookie 还是 localStorage 哪个安全？—— cookie+HttpOnly 抗 XSS 但怕 CSRF（用 SameSite 挡），localStorage 抗 CSRF 但怕 XSS；务实组合是 HttpOnly+Secure+SameSite cookie。另注意 refresh token 与 access token 分开、refresh 可吊销。
@@ -161,7 +161,7 @@ Content-Type: application/json
 ### Q14 ★ 服务端要主动推数据给前端，有哪几种实现？各自的机制与坑？
 **答（要点）**：四种主流：
 
-- **轮询（polling）**：前端定时 GET。实现最简，但延迟 = 间隔、请求大量浪费、无事件时空转，负载随连接数线性涨。
+- **轮询（polling）**：前端定时 GET。实现最简，但延迟 = 间隔、请求大量浪费、无事件时无进展，负载随连接数线性涨。
 - **长轮询（long polling）**：请求挂着不发响应，服务端有事件才回（或超时兜底），前端收到再立刻续一根。把「推送」在 HTTP/1.1 上模拟出来；坑是服务端得**一直占着连接和 worker**，超时/断线/乱序都要自己处理，连接风暴下容易雪崩。
 - **SSE（Server-Sent Events）**：一条**只读、单向（服务端→客户端）**的 HTTP 长连接，格式就是普通 HTTP + `Content-Type: text/event-stream`，文本逐事件下发。
 - **WebSocket**：**双向全双工**的独立协议（101 升级），二进制/文本都能传，开销低。

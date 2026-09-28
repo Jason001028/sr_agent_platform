@@ -1,8 +1,8 @@
 """人工清除预览缓存 —— 场景库「清除选定 / 全部清除」的服务端一半。
 
-背景：预览 JPG 由三条链写入（打开时的惰性烘焙 / 拖入链 / 超分跑完后的急烤），
-**只增不减**。换档位或换烘焙规则之后想立刻看新效果、或者单纯想回收盘阵空间，
-此前都没有任何入口 —— 只能逐个场景点开等它惰性重烤。本模块提供「按场景目录清掉
+背景：预览 JPG 由三条链写入（打开时的惰性生成预览 / 拖入链 / 超分跑完后的主动生成），
+**只增不减**。换档位或换预览生成规则之后想立刻看新效果、或者单纯想回收盘阵空间，
+此前都没有任何入口 —— 只能逐个场景点开等它惰性重新生成。本模块提供「按场景目录清掉
 预览」这一步，由 `api/app.py::clear_scene_previews` 端点调用。
 
 **判据（宁可不删，也不删错）** —— 一个文件要被删，必须同时满足：
@@ -11,7 +11,7 @@
 2. 名字是 `<stem>_preview.jpg`，或是改名前的点号件 `<stem>.preview.jpg`
    （2026-09-22 起预览只有一个名字，点号那份是同一份缓存的旧名，与三条链上
    `app._sweep_legacy_preview` 的口径一致）；
-3. **JPEG 注释带本平台的规则戳**（`preview_jpg.has_rule_stamp`，只判 `srprev:`
+3. **JPEG 注释带本平台的规则签名**（`preview_jpg.has_rule_stamp`，只判 `srprev:`
    前缀，v1/v2/v3 三代都认）。读不出戳的一律不碰 —— 盘阵上别人手放的同名图、
    以及万一后缀恰好叫 `preview` 的**产物**，都没有这个戳；
 4. 不是符号链接、是普通文件、且 `scene_search.is_scene_file` 不认它是场景源。
@@ -26,9 +26,9 @@ TestNeverListsDirectories` 把 `os.listdir/scandir/walk` 与 `Path.glob/rglob/it
 `iterdir` —— 但只列**用户点名的那一个场景目录**这一层（外加镜像树里对应的那一层），
 不递归、不扫 `SR_SCENES_ROOT`。两条链的取舍不同，别把这条纪律推广到解析链上。
 
-**并发**：本模块不看数据库，也不知道急烤循环正在做什么。与急烤的竞态由调用方处理
+**并发**：本模块不看数据库，也不知道主动生成循环正在做什么。与主动生成的竞态由调用方处理
 （先把 `preview_state` 标成 `cleared` 挡住后续认领，再删）—— 但那只挡住**后续**认领：
-恰好在我们列举与删除之间抢到认领的那一件，仍可能把文件再写回来一次。这个残余窗口
+恰好在我们列举与删除之间认领认领的那一件，仍可能把文件再写回来一次。这个残余窗口
 无法在此模块内消除，调用方在响应里如实呈现「删了之后文件又出现」的可能。
 
 约定
@@ -36,7 +36,7 @@ TestNeverListsDirectories` 把 `os.listdir/scandir/walk` 与 `Path.glob/rglob/it
 * 只依赖标准库、`backend.pathguard`、`backend.services.scene_search` 与
   `preview_jpg`（后两个都不 import `api/`，不成环）。**不 import `api/paths.py`**。
 * 镜像树（`SR_PREVIEWS_ROOT`）的目录由调用方算好传进来，本模块不认识那个 env。
-* 空目录**不删**：镜像树骨架留着，下次烘焙直接落进去。
+* 空目录**不删**：镜像树骨架留着，下次生成预览直接落进去。
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ def refusal_reason(entry: Path) -> str | None:
     if scene_search.is_scene_file(entry):
         return "是场景源文件（is_scene_file），不是缓存"
     if not has_rule_stamp(entry):
-        return "没有本平台的规则戳（srprev:），不是这里烤出来的"
+        return "没有本平台的规则签名（srprev:），不是这里生成的的"
     return None
 
 

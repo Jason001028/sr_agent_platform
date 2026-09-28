@@ -14,11 +14,12 @@
  * 同时暴露 /api 与 /disk-array）；e2e/异源注入 window.__SR_CFG__。
  */
 import { defineStore } from 'pinia';
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
 import { useViewerStore } from './viewer.js';
-import type { ClearResponse, SceneRow, SceneQueryParams } from '../lib/scene.js';
-import { clearSummaryText, loadSrConfig, rowsAfterClear,
-         scenesListUrl } from '../lib/scene.js';
+import type { ClearResponse, SceneRow, SceneQueryParams,
+              SceneFilters } from '../lib/scene.js';
+import { clearSummaryText, loadSrConfig, parseScenesSnapshot, rowsAfterClear,
+         SCENES_SNAPSHOT_KEY, scenesListUrl, scenesSnapshotOf } from '../lib/scene.js';
 import { apiClearScenePreviews, apiResolveScene, fetchSceneJpg,
          isSceneGone, isProxyMiss } from '../lib/api.js';
 import type { SceneResolveResult } from '../lib/api.js';
@@ -34,7 +35,7 @@ export const useScenesStore = defineStore('scenes', () => {
   const searched = ref(false);
   /** 上一次检索的**发起**时刻；页面那行「上次检索 HH:MM」用它。 */
   const searchedAt = ref<Date | null>(null);
-  /** 打开中的阶段文案（首次烘焙很慢，本页没有遮罩，就靠这一行说明在忙什么）。
+  /** 打开中的阶段文案（首次生成预览很慢，本页没有遮罩，就靠这一行说明在忙什么）。
    *  只在打开期间非空，见 open()。 */
   const phase = ref('');
   const error = ref('');
@@ -46,6 +47,18 @@ export const useScenesStore = defineStore('scenes', () => {
   const sensor = ref('');
   const dateFrom = ref('');
   const dateTo = ref('');
+
+  /** **出了现在这批行的**筛选条件（list() 成功时定格）。
+   *
+   *  与上面那几个输入框不是一回事：输入框是「用户正在打的字」，这里是「上次检索用的
+   *  条件」。快照要存的是后者 —— 否则用户改完筛选框没按检索就刷新，恢复出来的会是
+   *  「一批按旧条件查出来的行 + 一份新条件的输入框」，两边对不上。 */
+  const committedFilters = ref<SceneFilters>(
+    { query: '', satellite: '', sensor: '', dateFrom: '', dateTo: '' });
+
+  /** 上一次检索**有没有结论**。失败时（catch 那一支）快照必须作废：一份「0 行」的
+   *  快照会在刷新后冒充「上次检索」，而那次检索其实是失败的（错误文案不随快照走）。 */
+  let listFailed = false;
 
   const satellites = computed(() => distinct((r) => r.satellite));
   const sensors = computed(() => distinct((r) => r.sensor));
@@ -77,6 +90,13 @@ export const useScenesStore = defineStore('scenes', () => {
     searched.value = true;
     searchedAt.value = new Date();
     const cfg = loadSrConfig();
+    // 这一批行的筛选画像：**发起时就定格**（用户接下来可能在输入框里继续打字，那些字
+    // 还没被检索过，不属于这批行）。
+    const asked = params();
+    const shot: SceneFilters = {
+      query: query.value, satellite: satellite.value, sensor: sensor.value,
+      dateFrom: dateFrom.value, dateTo: dateTo.value,
+    };
     // 新一次检索 = 全新的一批行：旧的选中集与上一次清除结论都作废（否则「已选 3 项」
     // 会指向一批已经不在列表里的 id，下次「清除选定」发出去的就是死 id）。
     clearSelection();
@@ -84,7 +104,7 @@ export const useScenesStore = defineStore('scenes', () => {
     clearRemoved.value = 0;
     clearError.value = '';
     try {
-      const resp = await fetch(scenesListUrl(cfg, params()));
+      const resp = await fetch(scenesListUrl(cfg, asked));
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       const body = await resp.json() as {
         source: 'disk' | 'fake'; scanned: number; count: number; results: SceneRow[];
@@ -93,22 +113,31 @@ export const useScenesStore = defineStore('scenes', () => {
       source.value = body.source;
       scanned.value = body.scanned;
       count.value = body.count;
+      committedFilters.value = shot;
+      listFailed = false;
     } catch (e) {
       error.value = '场景检索失败：' + (e instanceof Error ? e.message : String(e));
+      // 先记失败标志再清行：watch（见文件尾部）随后会把 sessionStorage 里那份快照
+      // 删掉 —— 一次失败的检索不该在刷新后冒充「上次检索」。
+      listFailed = true;
       rows.value = [];
     } finally {
       loading.value = false;
     }
   }
 
-  /** 进入场景库页面时调它：**只在本次会话还没检索过时**发一次检索。
+  /** 进入场景库页面时调它：**还没检索过才**发一次检索。
    *
    *  以前是每次进入都 `list()`。那条路会把上一轮「清除缓存」的结果当场抹掉 —— 摘掉的
    *  行全回来、结果汇总行消失，用户看到的就是「清除没生效」（清除删的是盘阵上的文件，
    *  那一刻其实没有任何东西被撤销）。现在列表留在页面上，直到用户**自己**按「检索」/
    *  「重置」：与清除那套「摘掉的行要回来得重新检索」（clearSummaryText）同一个口径。
    *
-   *  代价是列表可以是旧的（新落盘的场景、别处刚烤出来的预览都不反映），所以状态 chip
+   *  **「还没检索过」包含刷新**：`searched` 由 sessionStorage 里那份快照恢复（见文件
+   *  尾部），所以整页重载也不会自动重检索 —— 2026-09-28 用户报的「清除之后每次进页面
+   *  那几景又冒出来」正是漏了这一半（守卫纯内存，刷新即复位）。
+   *
+   *  代价是列表可以是旧的（新落盘的场景、别处刚生成的的预览都不反映），所以状态 chip
    *  旁边带一行「上次检索 HH:MM」，让用户看得出这份数据是什么时候的。单个 `.jpg`/`.tif`
    *  的标签由取图那一侧就地翻牌（lib/api.ts 的 fetchSceneJpg 写回本行），不靠重检索。 */
   function ensureSearched(): void {
@@ -222,7 +251,7 @@ export const useScenesStore = defineStore('scenes', () => {
       （见 api.ts 的 isProxyMiss）。
 
       反过来，**打开成功**也是一条实证：那一景还在盘上（而且这趟之后盘上有了它当前
-      档位的预览）。所以成功路径顺带把列表里同一景的那一行翻回来，见 try 末尾。 */
+      档位的预览）。所以成功路径同时把列表里同一景的那一行翻回来，见 try 末尾。 */
   async function open(row: SceneRow, resolved?: SceneResolveResult['resolved']): Promise<void> {
     const viewer = useViewerStore();
     const cfg = loadSrConfig();
@@ -238,7 +267,7 @@ export const useScenesStore = defineStore('scenes', () => {
     openingId.value = row.id;
     error.value = '';
     try {
-      // 首次要服务端烘焙（读一遍大图，几十秒）。遮罩（viewer.showMask）只挂在
+      // 首次要服务端生成（读一遍大图，几十秒）。遮罩（viewer.showMask）只挂在
       // /viewer 上，本页调了也看不见，所以这里走自己的 phase 文案行。
       // 档位取 viewer store 里的那份（工具栏拖动条写的就是它）—— 这样用户拖完
       // 滑块不必刷新页面就生效；loadPreviewDiv() 只负责冷启动时的初值。
@@ -246,7 +275,7 @@ export const useScenesStore = defineStore('scenes', () => {
                                        (text) => { phase.value = text; });
       await viewer.openSceneJpg({
         name: row.name, W: row.W, H: row.H, sceneId: row.id,
-        // 裸 .tif 且父目录不是场景目录时后端把它置 null（= 不能提交 SR），
+        // 无伴随件的 .tif 且父目录不是场景目录时后端把它置 null（= 不能提交 SR），
         // 这里不用再判 sr_capable —— 与 resolved.sr_capable 同源同真假。
         lqPath: row.lq_path,
         // 场景目录（同上，与能不能提交无关）：卡片上那颗「同一景共用一个序号」
@@ -365,7 +394,7 @@ export const useScenesStore = defineStore('scenes', () => {
 
   /** 按名字**只解析、不打开**：拿回后端的权威结果给「一键解析」批量用。
    *
-   *  与 openByName 的差别只有一个：这条路**不 open()** —— 不激活、不弹遮罩、不烤图、
+   *  与 openByName 的差别只有一个：这条路**不 open()** —— 不激活、不弹遮罩、不生成图、
    *  不写 `scenes.error`（批量几十景，一路弹遮罩等于把界面锁死；错误由批量那边记账）。
    *  请求体口径与 openByName 逐字相同（`product` 只在非空时带）。
    *
@@ -383,6 +412,73 @@ export const useScenesStore = defineStore('scenes', () => {
     return await apiResolveScene(loadSrConfig(),
       { name: trimmed, ...(prod ? { product: prod } : {}) }, { signal: opts?.signal });
   }
+
+  /* ---------------- 快照：让「上次检索」活过整页重载 ----------------
+   * 形状、键名、判据与「为什么是 sessionStorage」全在 lib/scene.ts 那一节。这里只管
+   * 三件事：什么时候写、什么时候删、建店时怎么读回来。 */
+
+  /** 写快照。任何写不进去的情况都不算错 —— 最坏只是刷新后退回「进页自动检索」。 */
+  function saveSnapshot(): void {
+    try {
+      if (typeof sessionStorage === 'undefined') return;
+      if (listFailed) { sessionStorage.removeItem(SCENES_SNAPSHOT_KEY); return; }
+      const snap = scenesSnapshotOf({
+        at: searchedAt.value, source: source.value, scanned: scanned.value,
+        count: count.value, rows: rows.value, filters: committedFilters.value,
+        clearRemoved: clearRemoved.value, clearResult: clearResult.value,
+      });
+      // 没检索过（source 为空）→ 没有快照可存，同时把上一份删掉，免得它冒充新的。
+      if (!snap) { sessionStorage.removeItem(SCENES_SNAPSHOT_KEY); return; }
+      sessionStorage.setItem(SCENES_SNAPSHOT_KEY, JSON.stringify(snap));
+    } catch { /* 配额满 / 隐私模式 / sessionStorage 不可用：放弃快照，不影响本次会话 */ }
+  }
+
+  /** 建店时读回快照。**成功即 `searched = true`** —— 这是这一整块的全部意义：
+   *  ScenesPage.onMounted 的 ensureSearched 不再发检索，上一轮的清除结论（摘掉的行、
+   *  汇总行）也就不会被一次自动检索当场抹掉。 */
+  function restoreSnapshot(): void {
+    try {
+      if (typeof sessionStorage === 'undefined') return;
+      const snap = parseScenesSnapshot(sessionStorage.getItem(SCENES_SNAPSHOT_KEY));
+      if (!snap) return;
+      rows.value = snap.rows;
+      source.value = snap.source;
+      scanned.value = snap.scanned;
+      count.value = snap.count;
+      searchedAt.value = new Date(snap.at);
+      committedFilters.value = { ...snap.filters };
+      // 输入框也跟着回到那次检索的条件：否则恢复出来的行是「一批按筛选查出来的」，
+      // 而框里空着，用户没法解释为什么只有这几条。
+      query.value = snap.filters.query;
+      satellite.value = snap.filters.satellite;
+      sensor.value = snap.filters.sensor;
+      dateFrom.value = snap.filters.dateFrom;
+      dateTo.value = snap.filters.dateTo;
+      clearRemoved.value = snap.clearRemoved;
+      clearResult.value = snap.clearResult;
+      // 选中态**不恢复**（见 lib/scene.ts 那一节）：刷新后还勾着几行，下一次
+      // 「清除选定」就是在清一批用户没看见勾选过程的 id。
+      selected.value = new Set();
+      searched.value = true;
+    } catch { /* 读不出 / 写坏：当没有快照，照旧自动检索 */ }
+  }
+
+  /** 上面七个量里任何一个变了就落一次快照。
+   *
+   *  用 watch 而不是在每个改动点手写一句：改这些量的地方有五六处（检索成功 / 失败、
+   *  清除成功、打开成功后按场景目录翻牌、撞 404 标 purged、用户「知道了」收起汇总），
+   *  漏一处就是一类「刷新后又对不上」。
+   *
+   *  `deep` 是必要的：打开成功那条路是**就地改行里的字段**（row.hasPreview / purged），
+   *  数组引用没变。行数最多 limit（200）条，深度遍历的成本可以忽略。 */
+  watch(
+    [rows, source, scanned, count, searchedAt, committedFilters,
+     clearRemoved, clearResult],
+    saveSnapshot,
+    { deep: true },
+  );
+
+  restoreSnapshot();
 
   return {
     rows, source, scanned, count, loading, openingId, phase, error,

@@ -514,7 +514,7 @@ class TestResolveErrors(ResolveBase):
 
 
 class TestBareTifPath(ResolveBase):
-    """`{path}` 也可以是一张**裸 .tif**：用户只想看张图，不关心它是不是场景。
+    """`{path}` 也可以是一张**无伴随件的 .tif**：用户只想看张图，不关心它是不是场景。
 
     这条入口最大的风险是**把裸 tif 误当成可提交场景** —— 能不能提交 SR 只看
     lqPath / sr_capable，判错就会让用户提交出一个在盘阵上根本跑不起来的作业。
@@ -580,7 +580,7 @@ class TestBareTifPath(ResolveBase):
     def test_hasPreview_becomes_true_after_baking(self):
         """hasPreview 是「缓存到底在不在」的真值（库外同样要准）。
 
-        前端靠它决定要不要提示「首次烘焙较慢」；库外一律 False 的话，第二次
+        前端靠它决定要不要提示「首次生成预览较慢」；库外一律 False 的话，第二次
         打开（其实命中缓存、秒开）还会吓唬用户说第一次很慢。"""
         p = self.scratch_tif()
         c = self.client()
@@ -795,7 +795,7 @@ class TestResolveFingerprint(ResolveBase):
     def test_derived_and_renamed_jpg_404_never_link(self):
         """派生件 / 副本 / 别处导出的 jpg：一个都不许关联上。
 
-        `_cloud.jpg`（云量图）、`.preview.jpg`（平台自己烤的缓存）、` - 副本.jpg`
+        `_cloud.jpg`（云量图）、`.preview.jpg`（平台自己生成的缓存）、` - 副本.jpg`
         这些名字**带着时间戳**，所以能走到候选判定这一层；但它们手里的「生产名」
         是残的（后缀粘在最后一段上，或整个目录名对不上），反推出来的目录在盘阵上
         不存在 → 404，一条候选都命中不了。
@@ -1160,9 +1160,9 @@ class TestResolveStages(ResolveBase):
         self.assertEqual(body["resolved"]["input_name"], f"{SCENE_NAME}.tif")
 
     def test_baked_nosr_preview_jpg_links_as_the_un_sred_copy(self):
-        """平台烤出来那份（`<目录名>_NOSR_preview.jpg`）拖回来 ≡ 拖 `<目录名>_NOSR.jpg`。
+        """平台生成的那份（`<目录名>_NOSR_preview.jpg`）拖回来 ≡ 拖 `<目录名>_NOSR.jpg`。
 
-        这是用户手上真正会拖的那一份：拖入本体显示件时后台把未超分那份烤成
+        这是用户手上真正会拖的那一份：拖入本体显示件时后台把未超分那份降采样到
         `<场景目录>/<目录名>_NOSR_preview.jpg`（见 `paths.drop_preview_path`）。
         它的名字里带着完整的生产名（含 14 位时间戳），所以**不需要锚定目录**也认得出
         —— 与拖产物的预览同一口径。
@@ -1243,12 +1243,12 @@ class TestResolveStages(ResolveBase):
         self.assertEqual(r.status_code, 404, r.text)
 
     def test_own_preview_jpg_links_as_the_input(self):
-        """平台自己烤的 `<目录名>_preview.jpg` 拖回来 ≡ 拖本体的显示件。
+        """平台自己生成的 `<目录名>_preview.jpg` 拖回来 ≡ 拖本体的显示件。
 
         `paths.drop_preview_path` 把这份预览落在**场景目录里**，于是它长得跟一份
         「场景里的 jpg」一样。剥掉 `_preview` 得到的正好是场景目录名，所以这一行
         与拖 `<目录名>.jpg` 同解：可提交 SR、掩码写本体。此前它恒 404，报错还列了
-        两条自己拼出来的假路径（`…_preview/…_preview`）—— 平台烤的文件平台自己不认。
+        两条自己拼出来的假路径（`…_preview/…_preview`）—— 平台生成的文件平台自己不认。
         """
         d = self.make_scene()                                  # 含 `<目录名>.tif` + meta
         preview = self._write_jpg(d / f"{SCENE_NAME}_preview.jpg")
@@ -1465,7 +1465,7 @@ class TestDropPreview(ResolveBase):
         self.assertFalse(self.tmp_bucket().exists())
 
     def test_second_request_hits_cache(self):
-        """第二次不再重烤：mtime 不变（烘焙一次大图很贵，别每次都来）。"""
+        """第二次不再重新生成：mtime 不变（生成预览一次大图很贵，别每次都来）。"""
         c = self.client()
         sid = self.scene_id_of_manual(c)
         c.get(f"/api/scenes/{sid}/preview-drop")
@@ -1474,7 +1474,7 @@ class TestDropPreview(ResolveBase):
         self.assertEqual(self.drop_jpg.stat().st_mtime_ns, first)
 
     def test_div_change_rebakes_in_place(self):
-        """换档位 → **同一个落点原地重烤**（尺寸变了，文件数不变）。
+        """换档位 → **同一个落点原地重新生成**（尺寸变了，文件数不变）。
 
         这是「div 进戳」的直接验收：只按落点判缓存的话，这里第二次会命中、
         盘上那张图一个字节都不变。
@@ -1544,7 +1544,7 @@ class TestDropPreview(ResolveBase):
         self.assertIn("预览生成失败", r.json()["detail"])
 
     def test_jpeg_source_short_circuits(self):
-        """源本身就是 JPG（显示就绪图）：回源文件，不尝试烘焙 ——
+        """源本身就是 JPG（显示就绪图）：回源文件，不尝试生成预览 ——
         `build_preview_pixels` 只认 TIFF，不给这行短路就会 422。"""
         jpg_scene = self.d / "display.jpg"
         Image.new("L", (32, 32), 7).save(jpg_scene)
@@ -1649,13 +1649,13 @@ class TestResolveRasterPreview(ResolveBase):
         self.assertEqual(rp["name"], f"{SCENE_NAME}.tif")
         self.assertEqual((rp["rasterW"], rp["rasterH"]), (320, 640))
         self.assertEqual((rp["jpgW"], rp["jpgH"]), (64, 32))
-        self.assertFalse(rp["hasPreview"], "还没人烤过，前端据此提示首次较慢")
+        self.assertFalse(rp["hasPreview"], "还没人生成过，前端据此提示首次较慢")
 
     def test_library_jpg_row_keeps_its_own_display_source(self):
         """**红线**：加了 rasterPreview 之后，这一行自己的三个字段语义不变。
 
         jpg 行的显示源就是那张 jpg（`hasPreview=True` / `jpgUrl` 直指源文件 /
-        `previewDiv` 留 None —— 它不是烤出来的预览）。`rasterPreview` 是**另加**的
+        `previewDiv` 留 None —— 它不是生成的的预览）。`rasterPreview` 是**另加**的
         一路参考，不是把这三个字段改指向栅格。
         """
         d = self.make_scene()
@@ -1681,11 +1681,11 @@ class TestResolveRasterPreview(ResolveBase):
         self.assertTrue(row["hasPreview"], "退化了也还是能直接看那张 jpg")
 
     def test_library_raster_row_has_no_raster_preview(self):
-        """栅格行不需要它 —— 它自己就是那条「从栅格烤」的路。"""
+        """栅格行不需要它 —— 它自己就是那条「从栅格生成」的路。"""
         self.make_scene()
         row = self._library_row(SCENE_NAME, ".tif")
         self.assertIsNone(row["rasterPreview"])
-        # 栅格行的 jpgUrl 指的是烤出来的预览（与上面 jpg 行正好相反）
+        # 栅格行的 jpgUrl 指的是生成的的预览（与上面 jpg 行正好相反）
         self.assertTrue(row["jpgUrl"].endswith(f"{SCENE_NAME}_preview.jpg"))
 
     # ---- 拖拽入口 ---------------------------------------------------------
@@ -1825,12 +1825,12 @@ class TestResolveRasterPreview(ResolveBase):
         self.assertLessEqual(len(calls), 35, calls)
 
     def test_preview_div_is_read_from_the_existing_bake(self):
-        """盘上那份预览按哪一档烤的也要报出来 —— 前端据此判断要不要重烤。
+        """盘上那份预览按哪一档生成的也要报出来 —— 前端据此判断要不要重新生成。
 
-        「从栅格烤」的落点与栅格行**同一份** `<stem>_preview.jpg`（名字只由源 stem
-        拼，对 jpg 与 tif 是同一个文件名），所以这里烤过一次之后，jpg 行的
+        「从栅格生成」的落点与栅格行**同一份** `<stem>_preview.jpg`（名字只由源 stem
+        拼，对 jpg 与 tif 是同一个文件名），所以这里生成过一次之后，jpg 行的
         `rasterPreview.hasPreview/previewDiv` 就该跟着变 —— 两行共用一个缓存，
-        不会各烤一份。
+        不会各生成一份。
         """
         d = self.make_scene()
         self._write_jpg(d / f"{SCENE_NAME}.jpg", 64, 32)

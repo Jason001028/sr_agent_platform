@@ -4,8 +4,8 @@
 // 拓扑：真 uvicorn（SR_SCENES_ROOT = 临时盘阵根）+ 本地静态服务**同时**顶替 nginx 的
 //      两个 location：`/disk-array/` → 场景根（alias）、其余 → dist。
 //      页面经 evaluateOnNewDocument 注入 window.__SR_CFG__ = { apiBase, staticBase }。
-// 覆盖：列表/检索 → 盘阵 .jpg 源行（最小原型 §4.7：不烘焙直接开）→ 没预览的景仍是可点的
-//      「打开」（不点不烤；2026-09-24 起**取消**了「老景一律按已清除处理」的年龄推定）+
+// 覆盖：列表/检索 → 盘阵 .jpg 源行（最小原型 §4.7：不生成预览直接开）→ 没预览的景仍是可点的
+//      「打开」（不点不生成；2026-09-24 起**取消**了「老景一律按已清除处理」的年龄推定）+
 //      当天新景的懒生成 + 静态读 JPG + 同构 rec → 派生件（_preview.jpg 缓存 /
 //      <名字>_mask.tif）不入列表 → 「去查看器」保状态跳转 → 掩码按**元数据** W/H 换算 →
 //      「提交 SR」带出目录 → /queue 预填表单（§4.3）→ 打开失败必须落在 .sp-err
@@ -108,9 +108,9 @@ function startStaticServer(scenesRoot) {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
 }
 
-/* ---------------- 盘阵 fixture（真 TIFF + 真 JPEG + 掩膜） ---------------- */
+/* ---------------- 盘阵 fixture（真 TIFF + 真 JPEG + 掩码） ---------------- */
 // GF07A03：.hdr 报 3200×2000 而 tif 实际 1600×800 —— 等价于盘阵上「显示 JPG 比源图小」
-// 的真实比例（烘焙规则 v2 是各边 1/2，降采样后的图就是比源图小）。掩码按 JPG 尺寸换算
+// 的真实比例（预览生成规则 v2 是各边 1/2，降采样后的图就是比源图小）。掩码按 JPG 尺寸换算
 // 就会错、按元数据换算才对 —— 这是本文件里唯一能被证伪的错误路径，所以 fixture 尺寸必须
 // 不一致。
 // 注意这条 .hdr 谎报恰好让 1/2 规则**落在 tif 的真实尺寸上**：max_edge 由元数据算出 =
@@ -161,10 +161,10 @@ scene("", "GF07A03_PMS01_20260722125045", "tif", 1600, 800,
       hdr="samples = 3200\\nlines = 2000\\nbands = 1\\n")
 scene("sub", "KF02B04_PMS05_20260723083000", "tif", 900, 450)
 scene("", "GF04_PMS02_20260801120000", "jpg", 400, 200)
-# 「<目录名>_mask.tif」：后端 §4.3 的掩膜推导读的就是这个名（<lq_path>/<leaf>_mask.tif），
+# 「<目录名>_mask.tif」：后端 §4.3 的掩码推导读的就是这个名（<lq_path>/<leaf>_mask.tif），
 # 真机上它和场景同名同目录。故意留在 fixture 里：is_scene_file 的白名单把它挡在列表外，
-# 3 个场景必须仍是 3 行 —— 一旦失效，页面上每个场景都会多出一行（卫星/传感器从掩膜
-# 文件名解析、尺寸取掩膜 TIFF 头）。
+# 3 个场景必须仍是 3 行 —— 一旦失效，页面上每个场景都会多出一行（卫星/传感器从掩码
+# 文件名解析、尺寸取掩码 TIFF 头）。
 tif("GF07A03_PMS01_20260722125045/GF07A03_PMS01_20260722125045_mask.tif", 8, 8)
 tif("sub/KF02B04_PMS05_20260723083000/KF02B04_PMS05_20260723083000_mask.tif", 8, 8)
 `;
@@ -197,7 +197,7 @@ function makeTif(file, w, h) {
  * 日期取**跑测当天**只是让它读起来像「新景」（场景库按日期倒序排，这一景会排在头
  * 一行）。它**不再是任何判据**：2026-09-24 起取消了「老景 + 没预览 → 灰块」的年龄
  * 推定，日期不参与「能不能点」的判断（那条推定当年就是为了绕开「没预览的老景点下去
- * 要等烘焙」，真因在 nginx 反代，见 deploy/nginx.conf 的 /api/）。 */
+ * 要等生成预览」，真因在 nginx 反代，见 deploy/nginx.conf 的 /api/）。 */
 const FRESH_ROW = (() => {
   const d = new Date();
   const p = (n) => String(n).padStart(2, '0');
@@ -213,7 +213,7 @@ function addFreshScene(root) {
     '<?xml version="1.0" encoding="UTF-8"?>');
 }
 
-/** 拆掉它（连同这一景里烤出来的预览缓存）—— 行数得回到 3，后面的断言都按 3 写。 */
+/** 拆掉它（连同这一景里生成的的预览缓存）—— 行数得回到 3，后面的断言都按 3 写。 */
 function dropFreshScene(root) {
   fs.rmSync(path.join(root, FRESH_ROW), { recursive: true, force: true });
 }
@@ -339,8 +339,8 @@ async function clickRowButtonByDims(page, name, dims) {
 /** 等「行名 + 尺寸列」那一行的**按钮**变成 want（B2 段专用，理由同上）。
  *
  * 这里等按钮而不是等「已生成」标签：JPG 源行的 tag 由 `isImageSource` 决定，
- * 恒为「JPG 源」、烤完也不翻（B 段打开后那一行仍是「JPG 源」）。
- * 注意按钮文案不再是「要不要先烤」的读法（2026-09-22 起只有「打开」/灰块两种），
+ * 恒为「JPG 源」、生成完也不翻（B 段打开后那一行仍是「JPG 源」）。
+ * 注意按钮文案不再是「要不要先生成」的读法（2026-09-22 起只有「打开」/灰块两种），
  * 所以它单独用**不是**收尾信号：必须先在 node 侧看到这一趟的产物（预览落盘）
  * 才能断定点击已被处理，再用它确认 open() 收尾（`openingId` 清掉）。 */
 const waitRowBtnByDims = (page, name, dims, want, timeoutMs = 30000) =>
@@ -370,7 +370,12 @@ async function clickByText(page, text) {
  *
  *  它是**列表点不动时的退路**：灰块「已自动清除」的行（K 段那种真撞过 404 的）只能
  *  从这儿开，库外的场景目录也只走这条 —— 所以它得有人钉着。`.spb-in` 是 v-model，
- *  必须补一次 input 事件（同 setFilter），只写 el.value 组件里还是空的。 */
+ *  必须补一次 input 事件（同 setFilter），只写 el.value 组件里还是空的。
+ *
+ *  **它不保证「打开已完成」**：两个收尾判据都可能当场成立 —— `done`（预览落盘）在
+ *  盘上早有这份预览时立刻为真，`openingId` 又是**等 resolve 往返回来才置上**的，
+ *  点完立刻查，按钮还是解禁态。调用方要接着读 viewer 那侧的结果（激活场景 / rec），
+ *  就得自己再等一次（F 段 2026-09-28 实测栽在这里）。 */
 async function openViaPathBar(page, dir, done, timeoutMs = 30000) {
   await page.evaluate((p) => {
     const el = document.querySelector('.spb .spb-in');
@@ -520,7 +525,7 @@ async function main() {
 
   // 列表按 (date, id) 倒序：2026-08-01 → 07-23 → 07-22
   const JPG_ROW = 'GF04_PMS02_20260801120000';       // 盘阵 .jpg 源（§4.7）
-  const SUB_ROW = 'KF02B04_PMS05_20260723083000';    // 嵌套目录里的未烘焙 TIFF
+  const SUB_ROW = 'KF02B04_PMS05_20260723083000';    // 嵌套目录里的未生成预览 TIFF
   const HDR_ROW = 'GF07A03_PMS01_20260722125045';    // .hdr 3200×2000 / tif 1600×800
 
   try {
@@ -551,6 +556,18 @@ async function main() {
       await waitNode(() => countUrl(listRe) > before, 15000, `${label} 的列表往返`);
       await sleep(250);
     };
+    // store 把上次检索的结果写进 sessionStorage（键见 lib/scene.ts 的
+    // SCENES_SNAPSHOT_KEY），刷新页面时原样恢复 —— 这是 J6b 要验的口径，但也意味着
+    // 「改了夹具 → 刷新页面」**不再等于**重新检索：页面会接着显示旧列表。所以凡是
+    // 改完盘上文件、靠整页重载看新列表的小节，都得走这个函数。
+    const SNAP_KEY = 'sr.scenes.snapshot';
+    const freshLoad = async () => {
+      const had = await page.evaluate((k) => {
+        try { return !!sessionStorage.getItem(k); } catch (e) { return false; }
+      }, SNAP_KEY);
+      await page.goto(base + '/scenes', { waitUntil: 'networkidle2', timeout: 30000 });
+      if (had) await relist('检索');   // 有快照就恢复的是旧列表：补一次检索
+    };
 
     await page.evaluateOnNewDocument((cfg) => { window.__SR_CFG__ = cfg; },
       { apiBase, staticBase: base });
@@ -567,20 +584,20 @@ async function main() {
     try {
       /* ---------- A. 列表 ---------- */
       console.log('\n[A] 盘阵场景列表');
-      await page.goto(base + '/scenes', { waitUntil: 'networkidle2', timeout: 30000 });
+      await freshLoad();   // 全新会话：没有快照，这一次就是自动检索（后面的小节才有快照）
       await waitRows(page, 3);
       const srcText = await page.evaluate(() => document.querySelector('.sp-src').textContent.trim());
       assert(srcText.includes('盘阵') && !srcText.includes('fake 回退'), `来源 chip = 盘阵（${srcText}）`);
       assert(/扫\s*3\b/.test(srcText) && /命中\s*3\b/.test(srcText),
-        '扫描 3 / 命中 3（三个影像；两个 _mask.tif 与烘焙出的 .preview.jpg 都不算场景）');
+        '扫描 3 / 命中 3（三个影像；两个 _mask.tif 与生成预览出的 .preview.jpg 都不算场景）');
 
       let rs = await rows(page);
-      // 掩膜不是场景：`<目录名>_mask.tif` 是「提交 SR」的*输入*（§4.3）。真机目录里它和
+      // 掩码不是场景：`<目录名>_mask.tif` 是「提交 SR」的*输入*（§4.3）。真机目录里它和
       // 场景同名同目录，一旦 is_scene_file 漏掉这条规则，页面上每个场景都会多出一行
-      // （卫星/传感器从掩膜文件名解析、尺寸取掩膜 TIFF 头）。下面两条是镜像断言。
-      assert(rs.length === 3, `列表 3 行（多出来的一定是掩膜/派生件）(${rs.length})`);
+      // （卫星/传感器从掩码文件名解析、尺寸取掩码 TIFF 头）。下面两条是镜像断言。
+      assert(rs.length === 3, `列表 3 行（多出来的一定是掩码/派生件）(${rs.length})`);
       assert(rs.every((r) => !/_mask$/i.test(r.name)),
-        `掩膜未出现在列表（${rs.map((r) => r.name).join(',')}）`);
+        `掩码未出现在列表（${rs.map((r) => r.name).join(',')}）`);
       assert(rs.map((r) => r.name).join(',') === [JPG_ROW, SUB_ROW, HDR_ROW].join(','),
         `按 (日期,id) 倒序：${rs.map((r) => r.name).join(' | ')}`);
       assert(rs[0].sat === 'GF04' && rs[0].sensor === 'PMS02' && rs[0].date === '2026-08-01',
@@ -597,14 +614,14 @@ async function main() {
       assert(rs[2].tag === '未生成' && rs[2].btn === '打开',
         `带 .hdr 的 TIFF 同样只是「未生成」，不是灰块（${rs[2].tag}/${rs[2].btn}）`);
       assert(rs[0].tag === 'JPG 源' && rs[0].btn === '打开',
-        `盘阵 .jpg 源行 = 「JPG 源」+「打开」（§4.7 不烘焙）(${rs[0].tag}/${rs[0].btn})`);
+        `盘阵 .jpg 源行 = 「JPG 源」+「打开」（§4.7 不生成预览）(${rs[0].tag}/${rs[0].btn})`);
 
-      /* ---------- B. 盘阵 .jpg 源行：不烘焙，直接开 ---------- */
+      /* ---------- B. 盘阵 .jpg 源行：不生成预览，直接开 ---------- */
       console.log('\n[B] 盘阵 .jpg 源行：跳过懒生成');
       await clickRowButton(page, JPG_ROW);
       await sleep(600);
       assert(countUrl(previewRe) === 0,
-        `没有为 JPG 源发 /preview 请求（后端不为它烘焙）(${countUrl(previewRe)})`);
+        `没有为 JPG 源发 /preview 请求（后端不为它生成预览）(${countUrl(previewRe)})`);
       assert(!fs.existsSync(path.join(scenesRoot, JPG_ROW, JPG_ROW + '_preview.jpg')),
         '盘上确实没有生成它的预览缓存');
       assert(countUrl(new RegExp(`^${base}${DISK_PREFIX}${JPG_ROW}/${JPG_ROW}\\.jpg$`)) >= 1,
@@ -617,13 +634,13 @@ async function main() {
 
       /* ---------- C. 没预览的老景：仍是可点的「打开」，点下去才懒生成 ---------- */
       // 2026-09-24 起这一格不再按年龄推定成灰块（当时的真因在 nginx 反代，见
-      // deploy/nginx.conf 的 /api/）。这里钉两条：列表本身**不烘焙**（不点不烤），
+      // deploy/nginx.conf 的 /api/）。这里钉两条：列表本身**不生成预览**（不点不生成），
       // 点一下才发 /preview、才落盘 —— 也就是用户报的那条链现在是通的。
-      console.log('\n[C] 没预览的老景 → 「未生成」+ 可点的「打开」（点下去才烤）');
+      console.log('\n[C] 没预览的老景 → 「未生成」+ 可点的「打开」（点下去才生成）');
       const previewJpg = path.join(scenesRoot, HDR_ROW, HDR_ROW + '_preview.jpg');
       assert(!fs.existsSync(previewJpg), '点之前盘上没有这张图的预览缓存');
       const beforeC = countUrl(previewRe);
-      assert(beforeC === 0, `列表本身不烘焙：此前一次 /preview 都没发过（${beforeC}）`);
+      assert(beforeC === 0, `列表本身不生成预览：此前一次 /preview 都没发过（${beforeC}）`);
       await clickRowButton(page, HDR_ROW);
       await waitRowTag(page, HDR_ROW, '已生成');
       assert(countUrl(previewRe) === beforeC + 1,
@@ -637,16 +654,16 @@ async function main() {
       assert(rs[2].tag === '已生成' && rs[2].btn === '打开',
         `那一行就地翻牌为「已生成」（${rs[2].tag}/${rs[2].btn}）`);
 
-      // 新景（当天产出、同样没有预览）与老景走的是同一条路：平台只为**产物**急烤，
-      // 从不预烤输入影像（`_bake_product_preview` 的注释：用户到底要不要看，在打开
+      // 新景（当天产出、同样没有预览）与老景走的是同一条路：平台只为**产物**主动生成，
+      // 从不漏生成输入影像（`_bake_product_preview` 的注释：用户到底要不要看，在打开
       // 之前无法知道）——「没有预览」只说明还没被打开过。这里把这条链走完。
       console.log('\n[C2] 当天产出的新景：懒生成 + 静态直读（主链路仍在）');
       addFreshScene(scenesRoot);
       await relist('检索');
       await waitRows(page, 4);
       const freshRow = (await rows(page)).find((r) => r.name === FRESH_ROW);
-      // 按钮文案只剩「打开」两种取值（能点 / 灰块），不再按「要不要先烤」分文案：
-      // 烤不烤是点下去之后的事。
+      // 按钮文案只剩「打开」两种取值（能点 / 灰块），不再按「要不要先生成」分文案：
+      // 生成不生成是点下去之后的事。
       assert(freshRow && freshRow.tag === '未生成' && freshRow.btn === '打开',
         `新景 = 「未生成」+ 可点的「打开」（${freshRow && freshRow.tag}/`
         + `${freshRow && freshRow.btn}）`);
@@ -675,14 +692,14 @@ async function main() {
       await waitRows(page, 3);
 
       /* ---------- D. 派生件不入列表 ---------- */
-      console.log('\n[D] 烘焙出的 _preview.jpg 不算新场景');
+      console.log('\n[D] 生成预览出的 _preview.jpg 不算新场景');
       await relist('检索');
       await waitRows(page, 3);
       rs = await rows(page);
       assert(rs.length === 3, `重检索仍是 3 行（is_scene_file 排除派生的 _preview.jpg）(${rs.length})`);
       assert(rs.every((r) => !r.name.endsWith('_preview')), '没有一行是 _preview.jpg 缓存');
       assert(rs.every((r) => r.tag === '已生成' || r.tag === '未生成' || r.tag === 'JPG 源'),
-        `重检索按盘上事实读：烤过的「已生成」、没烤的「未生成」，没有一行是灰块`
+        `重检索按盘上事实读：生成过的「已生成」、没生成的「未生成」，没有一行是灰块`
         + `(${rs.map((r) => r.tag).join(',')})`);
 
       /* ---------- E. 检索过滤 ---------- */
@@ -727,7 +744,7 @@ async function main() {
 
       /* ---------- F. 页内跳转 /viewer：rec 同构 + 掩码按元数据换算 ---------- */
       // 走的还是**路径栏**（粘场景目录）：它与列表点击是两条独立入口，库外场景与灰块行
-      // 都只有它可用，所以每次都得有人钉着。此刻 HDR 那一景在 C 段已经烤过，这一趟是
+      // 都只有它可用，所以每次都得有人钉着。此刻 HDR 那一景在 C 段已经生成过，这一趟是
       // 命中缓存、不再发 /preview（J 段清掉的正是同一份）。掩码断言仍针对 3200×2000。
       console.log('\n[F] 路径栏粘场景目录打开老景 → 「去查看器」页内跳转 → rec 与掩码换算');
       await openViaPathBar(page, winPath(path.join(scenesRoot, HDR_ROW)),
@@ -741,6 +758,12 @@ async function main() {
         `页内跳转保留 3 个 rec（未整页重载）：JPG 源 + C2 的新景 + 这一景 (${recs.length})`);
       assert(recs.every((r) => r.route === 'jpg'), '三个 rec 都是 route=jpg');
 
+      // 路径栏那一趟是异步的：`openViaPathBar` 返回时 open() 可能还在飞（它的两个
+      // 收尾判据在「盘上早有预览」时都会当场成立），所以先等它落到激活位再读。
+      await waitFor(page, (n) => {
+        const r = window.__viewer.activeRec();
+        return !!r && r.name === n;
+      }, 15000, `激活场景=${HDR_ROW}`, HDR_ROW);
       const rec = await page.evaluate(() => window.__viewer.activeRec());
       assert(rec.name === HDR_ROW, `激活的是最后打开的场景（${rec.name}）`);
       assert(rec.W === 3200 && rec.H === 2000,
@@ -781,13 +804,13 @@ async function main() {
       });
       assert(toolbar.stretch === 'equal' && toolbar.stretchDisabled === false,
         `场景路径拉伸可改，起手直方图均衡（${toolbar.stretch}/disabled=${toolbar.stretchDisabled}）`);
-      assert(toolbar.stretchTitle.includes('烘焙'),
-        `拉伸控件说明服务器烘焙与二次拉伸的关系（${toolbar.stretchTitle.slice(0, 40)}…）`);
+      assert(toolbar.stretchTitle.includes('生成预览'),
+        `拉伸控件说明服务器生成预览与二次拉伸的关系（${toolbar.stretchTitle.slice(0, 40)}…）`);
       assert(toolbar.srDisabled === false,
         '「提交 SR」可用（sceneId + lqPath 都已带上）');
 
       // 起手值不是只写在下拉框上：这张图**确实**按直方图均衡重画过。
-      // 修复前 route==='jpg' 会跳过绘制，画面永远停在服务器烤的那份底图上。
+      // 修复前 route==='jpg' 会跳过绘制，画面永远停在服务器生成的那份底图上。
       const paintedAtOpen = await page.evaluate(() => window.__viewer.activeRec().paintedMode);
       assert(paintedAtOpen === 'equal',
         `场景 rec 的 paintedMode = 起手值（${paintedAtOpen}）`);
@@ -866,13 +889,13 @@ async function main() {
       // 同名**（`<编号>.tif` 与 `<编号>.jpg` 都过 is_scene_file 的白名单，只有 rel
       // 能分辨），行数 / 行序 / rec 指纹的断言全在前面（A/D/E/F）。所以补栅格只能
       // 在它们之后做，做完再删掉 —— 后面的 I 段要把这份 jpg 换成非图字节验失败
-      // 路径，留着栅格的话那次打开会走服务端烘焙、反倒成功了。
+      // 路径，留着栅格的话那次打开会走服务端生成、反倒成功了。
       console.log('\n[B2] .jpg 源配上同名栅格 → 预览改用服务端从栅格下采样');
       const jpgRowDir = path.join(scenesRoot, JPG_ROW);
       const rowTif = path.join(jpgRowDir, JPG_ROW + '.tif');
       assert(!fs.existsSync(rowTif), '补之前该目录里没有同名栅格（B 段「JPG 源」的前提）');
       makeTif(rowTif, 1600, 800);
-      await page.goto(base + '/scenes', { waitUntil: 'networkidle2', timeout: 30000 });
+      await freshLoad();   // 补完同名栅格要重检索（刷新只会恢复上次那份列表）
       await waitRows(page, 4);
       rs = await rows(page);
       // 两行同名，只有尺寸列分得开：一个还是那份 jpg 的 400×200，一个是栅格的 1600×800。
@@ -884,10 +907,10 @@ async function main() {
       // 两列在这里**故意不同步**，各自说的不是一件事：
       //   * tag「JPG 源」说的是**这一行是什么**（§4.7：源即显示件的行），判据是
       //     `isImageSource`，本轮一个字没动 —— 它没变成「未生成」是对的；
-      //   * 按钮现在**不再**透露「打开前会不会先烤一下」（2026-09-22 起按钮只有
+      //   * 按钮现在**不再**透露「打开前会不会先生成一下」（2026-09-22 起按钮只有
       //     「打开」与灰块「已自动清除」两种取值，见 ScenesPage）。所以这一支
-      //     （栅格赢 → 打开时改烤栅格那份）不能靠按钮文案钉了，由下面那次点击的
-      //     `/preview` 计数 + 烤出来的像素尺寸 + 布局文案三条实证钉住。
+      //     （栅格赢 → 打开时改生成栅格那份）不能靠按钮文案钉了，由下面那次点击的
+      //     `/preview` 计数 + 生成的的像素尺寸 + 布局文案三条实证钉住。
       // 把两列绑在一起判（"有更清晰的栅格 ⇒ tag 也该翻"）会逼着去改那个 tag 判据，
       // 而那正是本轮划在界外的事（§六.3）。
       const jpgRow = rs.find((r) => r.name === JPG_ROW && r.dims === '400×200');
@@ -921,7 +944,7 @@ async function main() {
       await clickRowButtonByDims(page, JPG_ROW, '400×200');
       // 先等**这一趟的产物**落到盘上（node 侧看得见，点击确实被处理了），再等按钮
       // 从「打开中…」回到「打开」（open() 收尾、rec 已经建好）。按钮文案本身现在
-      // 烘焙前后都是「打开」，单独等它会读到点击之前的稳态。
+      // 生成预览前后都是「打开」，单独等它会读到点击之前的稳态。
       const b2Jpg = path.join(jpgRowDir, JPG_ROW + '_preview.jpg');
       await waitNode(() => fs.existsSync(b2Jpg), 30000, 'B2 那份预览落盘');
       await waitRowBtnByDims(page, JPG_ROW, '400×200', '打开');
@@ -938,11 +961,13 @@ async function main() {
       await waitFor(page, () => !!window.__viewer, 15000, '__viewer 钩子');
       const b2rec = await page.evaluate(() => window.__viewer.activeRec());
       assert(b2rec && b2rec.name === JPG_ROW, `激活的是刚打开那条（${b2rec && b2rec.name}）`);
-      // 像素是**服务端从 1600×800 栅格烤的** 800×400，不是那份 400×200 的 jpg。
+      // 像素是**服务端从 1600×800 栅格生成的** 800×400，不是那份 400×200 的 jpg。
       assert(b2rec.thumbW === 800 && b2rec.thumbH === 400,
-        `像素取服务端烤的 800×400（${b2rec.thumbW}×${b2rec.thumbH}）`);
-      assert(b2rec.layout.includes('服务端已烘焙'),
-        `布局文案如实写服务端烤的（${b2rec.layout}）`);
+        `像素取服务端生成的 800×400（${b2rec.thumbW}×${b2rec.thumbH}）`);
+      // 布局文案只说「这是什么像素」（盘阵 JPG + 尺度 + 直方图均衡），不写「谁生成的」：
+      // 它显示在左栏那张卡的布局行上，底栏 2026-09-28 起只显示图名（见 StatusBar.vue）。
+      assert(b2rec.layout.includes('盘阵 JPG') && !b2rec.layout.includes('服务端已生成'),
+        `布局文案如实写像素来源、不赘述生成预览方（${b2rec.layout}）`);
       // 行声明的 W/H 仍是那份 jpg 的 400×200 —— 显示源换了，**行的身份没换**：
       // 掩码仍按 400×200 换算（这条行是 jpg 自己的场景，与栅格那行是两个场景）。
       assert(b2rec.W === 400 && b2rec.H === 200,
@@ -958,7 +983,7 @@ async function main() {
       // → scenes.error → .sp-err。用 setCacheEnabled(false) 绕开 §B 已缓存的旧字节。
       console.log('\n[I] 打开失败 → .sp-err（不写 viewer 的错误条）');
       await page.setCacheEnabled(false);
-      await page.goto(base + '/scenes', { waitUntil: 'networkidle2', timeout: 30000 });
+      await freshLoad();   // 上一步刚删掉同名栅格：同样得重检索才看得到 3 行
       await waitRows(page, 3);
       const jpgFile = path.join(scenesRoot, JPG_ROW, JPG_ROW + '.jpg');
       const jpgKeep = fs.readFileSync(jpgFile);
@@ -977,25 +1002,25 @@ async function main() {
       fs.writeFileSync(jpgFile, jpgKeep);
 
       /* ---------- J. 清除预览缓存（勾选 → 清除选定 / 全部清除） ---------- */
-      // 清的是**盘阵上**那份 `<源 stem>_preview.jpg`（缓存），判据里带 `srprev:` 规则戳。
+      // 清的是**盘阵上**那份 `<源 stem>_preview.jpg`（缓存），判据里带 `srprev:` 规则签名。
       // 本节的断言分两半，后一半才是这个功能真正的风险所在：
       //   删掉的必须是缓存；
       //   留下的必须是**生产数据**（场景源 .tif/.jpg 与 `<编号>_mask.tif`）——
       //   所以逐个数着断，不是「没报错就算过」。
       console.log('\n[J] 清除预览缓存：勾选 → 清除选定 → 全部清除（要确认词）');
-      await page.goto(base + '/scenes', { waitUntil: 'networkidle2', timeout: 30000 });
+      await freshLoad();
       await waitRows(page, 3);
       const subDir = path.join(scenesRoot, 'sub', SUB_ROW);   // 嵌套目录那一景
       const srcFiles = [
         path.join(scenesRoot, JPG_ROW, JPG_ROW + '.jpg'),      // 源即显示件（§4.7）
         path.join(subDir, SUB_ROW + '.tif'),
         path.join(scenesRoot, HDR_ROW, HDR_ROW + '.tif'),
-        path.join(scenesRoot, HDR_ROW, HDR_ROW + '_mask.tif'),  // 掩膜：SR 的输入
+        path.join(scenesRoot, HDR_ROW, HDR_ROW + '_mask.tif'),  // 掩码：SR 的输入
         path.join(subDir, SUB_ROW + '_mask.tif'),
       ];
       const srcSizes = srcFiles.map((p) => fs.statSync(p).size);
       assert(srcSizes.every((n) => n > 0), `清之前 5 份生产数据都在（${srcSizes.join(',')} 字节）`);
-      const jpgPreview = path.join(jpgRowDir, JPG_ROW + '_preview.jpg');   // B2 段烤的那份
+      const jpgPreview = path.join(jpgRowDir, JPG_ROW + '_preview.jpg');   // B2 段生成的那份
 
       rs = await rows(page);
       assert(rs.length === 3 && rs.every((r) => r.pick),
@@ -1045,10 +1070,10 @@ async function main() {
         () => document.querySelector('.sp-src').textContent.replace(/\s+/g, ' '));
       assert(/命中 2\b/.test(chipAfter), `命中计数随移除递减（${chipAfter}）`);
       assert(srcFiles.every((p) => fs.existsSync(p)),
-        '场景源与掩膜一个都没少（清的是缓存，不是数据）');
+        '场景源与掩码一个都没少（清的是缓存，不是数据）');
 
-      // J2b. **不是本平台烤的同名件一个字节都不动**，且必须出现在明细里。
-      // 这是整个功能最该被钉住的一条：删除判据里「有 srprev: 规则戳」那一把锁
+      // J2b. **不是本平台生成的同名件一个字节都不动**，且必须出现在明细里。
+      // 这是整个功能最该被钉住的一条：删除判据里「有 srprev: 规则签名」那一把锁
       // 如果在浏览器里没生效，误删的就是生产数据目录里别人的文件。
       const foreign = path.join(subDir, 'MANUAL_preview.jpg');
       fs.writeFileSync(foreign, 'not our preview');
@@ -1060,15 +1085,15 @@ async function main() {
       await clickByText(page, '确认清除');
       await waitFor(page, () => !!document.querySelector('.scb-det'), 15000, '明细区');
       assert(fs.readFileSync(foreign, 'utf8') === 'not our preview',
-        '没有规则戳的同名件没被删（判据生效，字节都没动）');
+        '没有规则签名的同名件没被删（判据生效，字节都没动）');
       rs = await rows(page);
       assert(rs.some((r) => r.name === SUB_ROW), '结论是「跳过」的行留在列表里（要让人看见）');
       const det = await barText(page, '.scb-det');
-      assert(det.includes('MANUAL_preview.jpg') && det.includes('规则戳'),
+      assert(det.includes('MANUAL_preview.jpg') && det.includes('规则签名'),
         `明细逐条给出没删的那份与原因（${det.slice(0, 56)}…）`);
 
-      // J3. 清了就真的没了 → 重新检索回来是「未生成」+ 可点的「打开」（不会自动重烤）。
-      //     重烤这一趟走**路径栏**：它与列表点击是两条独立入口，库外场景与灰块行都只有
+      // J3. 清了就真的没了 → 重新检索回来是「未生成」+ 可点的「打开」（不会自动重新生成）。
+      //     重新生成这一趟走**路径栏**：它与列表点击是两条独立入口，库外场景与灰块行都只有
       //     它可用，所以固定拿它当这条链的入口。
       await relist('检索');
       await waitRows(page, 3);
@@ -1076,12 +1101,12 @@ async function main() {
       assert(hdrBack && hdrBack.tag === '未生成' && hdrBack.btn === '打开',
         `清掉缓存后重检索：这一行回到「未生成」+ 可点（${hdrBack && hdrBack.tag}/`
         + `${hdrBack && hdrBack.btn}）`);
-      assert(!fs.existsSync(previewJpg), '检索本身不会顺手把缓存烤回来');
+      assert(!fs.existsSync(previewJpg), '检索本身不会同时把缓存被写回');
       const beforeReopen = countUrl(previewRe);
       await openViaPathBar(page, winPath(path.join(scenesRoot, HDR_ROW)),
         () => fs.existsSync(previewJpg));
       assert(countUrl(previewRe) === beforeReopen + 1,
-        `路径栏打开重新烘焙（/preview 又发一次：本地 blob 缓存也随清除失效了）`
+        `路径栏打开重新生成预览（/preview 又发一次：本地 blob 缓存也随清除失效了）`
         + `(${countUrl(previewRe) - beforeReopen})`);
       assert(fs.existsSync(previewJpg), '盘上重新落了这份缓存');
       // 打开成功也是「这一景还在盘上、而且现在有预览了」的实证：列表里同一景的那一行
@@ -1109,7 +1134,7 @@ async function main() {
       await clickByText(page, '确认清除');
       await waitRows(page, 1);   // 3 → 1：SUB 那一景有同名外来件，结论是「跳过」，行留下
       assert(!fs.existsSync(previewJpg) && !fs.existsSync(jpgPreview),
-        '两份缓存（本景 re-baked 的 + B2 段烤的）都清了');
+        '两份缓存（本景 re-baked 的 + B2 段生成的）都清了');
       rs = await rows(page);
       assert(rs.length === 1 && rs[0].name === SUB_ROW,
         `跳过的行不跟着消失（剩 ${rs.map((r) => r.name).join(',')}）——`
@@ -1162,22 +1187,49 @@ async function main() {
         return !!el && /上次检索 \d{2}:\d{2}/.test(el.textContent.replace(/\s+/g, ' '));
       }), '列表头写明这份数据是「上次检索」的（没有它就无法解释新场景为何不出现）');
 
-      // J5. 回得来：重新检索 → 3 行，且不会自动重烤。
+      // J6b. **整页刷新**（不是页内导航）：清除的结果照样在。
+      //      这一条与 J6 是一对 —— J6 的守卫 `searched` 此前只活在内存里，刷新即复位，
+      //      于是「进页面自动检索」把刚摘掉的行全捞回来（那几景本来就在盘上，只少了一份
+      //      预览 JPG）。用户 2026-09-28 报的就是这个形态：「清除之后每次进页面那几景又
+      //      都冒出来」。修法是把整份「上次检索」存进 sessionStorage（见 stores/scenes.ts
+      //      尾部的 saveSnapshot/restoreSnapshot），所以这里必须**真刷一次页**：
+      //      页内导航不重建 JS 上下文，断不出这条。
+      const listBeforeReload = countUrl(listRe);
+      await page.reload({ waitUntil: 'networkidle2', timeout: 30000 });
+      await waitFor(page, () => location.pathname.endsWith('/scenes'), 15000, '刷新后仍在场景库');
+      await sleep(500);   // 同 J6：给「万一还在发的检索」留出落网的时间
+      assert(countUrl(listRe) === listBeforeReload,
+        `刷新后没有再自动检索（新增 ${countUrl(listRe) - listBeforeReload} 次 /api/scenes）`);
+      const emptyReload = await page.evaluate(() => {
+        const td = document.querySelector('.sp-tbl td.empty');
+        return td ? td.textContent.replace(/\s+/g, ' ').trim() : '';
+      });
+      assert(emptyReload.includes('已从列表移除'),
+        `刷新后被摘掉的行没有回来（${emptyReload || '（空态行都没有）'}）`);
+      const sumReload = await barText(page, '.scb-sum');
+      assert(sumReload.includes('已从列表移除'),
+        `刷新后上一轮的汇总行还在（${sumReload.slice(0, 40)}…）`);
+      assert(await page.evaluate(() => {
+        const el = document.querySelector('.sp-when');
+        return !!el && /上次检索 \d{2}:\d{2}/.test(el.textContent.replace(/\s+/g, ' '));
+      }), '刷新后仍写着那份列表是「上次检索」的（快照带着检索时刻）');
+
+      // J5. 回得来：重新检索 → 3 行，且不会自动重新生成。
       await relist('检索');
       await waitRows(page, 3);
       rs = await rows(page);
       const hdrAgain = rs.find((r) => r.name === HDR_ROW);
       assert(hdrAgain && hdrAgain.tag === '未生成' && hdrAgain.btn === '打开',
-        `清完全部后没有自动重烤：这一景回到「未生成」+ 可点`
+        `清完全部后没有自动重新生成：这一景回到「未生成」+ 可点`
         + `（${hdrAgain && hdrAgain.tag}/${hdrAgain && hdrAgain.btn}）`);
       assert(!fs.existsSync(previewJpg) && !fs.existsSync(jpgPreview),
-        '检索本身不会顺手把缓存烤回来');
+        '检索本身不会同时把缓存被写回');
 
       /* ---------- K. 盘阵上文件已经没了：打开撞 404 → 那一格变「已自动清除」 ---------- */
       // 现实里的形态就是「列表比盘阵旧」：列表是「上次检索」那一刻的快照，盘阵上的生产
       // 数据却会被自动清理。于是行还在、文件已经没了 —— 点「打开」只能撞 404，而且
       // 点几次都是同一个 404（用户报的就是这个：功能「鸡肋」）。这里按同一顺序造：
-      // 先在列好表之后删掉那一景的 .jpg 源（JPG 源行不烘焙、直接打静态 URL，正是那条
+      // 先在列好表之后删掉那一景的 .jpg 源（JPG 源行不生成预览、直接打静态 URL，正是那条
       // 路），再点「打开」。
       //
       // **这是灰块唯一的来源**（2026-09-24 起）：判据是「打开时撞了**静态链**上真
@@ -1191,7 +1243,7 @@ async function main() {
       await clickRowButton(page, JPG_ROW);
       await waitRowBtn(page, JPG_ROW, '已自动清除');
       assert(countUrl(listRe) === listBefore404,
-        `打开失败不顺手重新检索（新增 ${countUrl(listRe) - listBefore404} 次 /api/scenes）`);
+        `打开失败不同时重新检索（新增 ${countUrl(listRe) - listBefore404} 次 /api/scenes）`);
       const err404 = await page.evaluate(() => {
         const el = document.querySelector('.sp-err');
         return el ? el.textContent.replace(/\s+/g, ' ').trim() : '';

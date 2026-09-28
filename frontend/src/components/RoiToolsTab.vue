@@ -161,7 +161,7 @@ function fmtTime(ts: number): string {
     <!-- 置顶：待修复清单（质检 .txt 的导入 / 标记 / 写回） -->
     <QcListPanel />
 
-    <!-- 云量估算（阶段6 启发：无真云掩膜时 = 显示层高亮占比估算 + 疑似云区红叠） -->
+    <!-- 云量估算（阶段6 启发：无真云掩码时 = 显示层高亮占比估算 + 疑似云区红叠） -->
     <section class="rt-sec">
       <h4 class="rt-h hrow">
         <span>云量估算<template v-if="routeLabel"> · {{ routeLabel }}</template></span>
@@ -189,7 +189,7 @@ function fmtTime(ts: number): string {
           整景 {{ pxText(cloudScene) }} 像元 · 视野 {{ pxText(cloudView) }} 像元（阈值与 ROI 统计同源）
         </p>
         <p class="st-note caveat">
-          当前显示层 Y≥{{ STAT_HI }} 高亮占比估算；PAN 无真云掩膜，亮雪 / 亮建筑会同样计入，「叠加」红区为疑似云区而非真云掩膜。
+          当前显示层 Y≥{{ STAT_HI }} 高亮占比估算；PAN 无真云掩码，亮雪 / 亮建筑会同样计入，「叠加」红区为疑似云区而非真云掩码。
           <template v-if="!cloudScene && !cloudView">（整幅读取失败——超大图受浏览器内存限制，整景/视野暂不可用）</template>
           <template v-else-if="viewer.cloudShow && !viewer.cloudOverlay">（红叠生成失败，仅数字可见）</template>
         </p>
@@ -265,7 +265,7 @@ function fmtTime(ts: number): string {
             <span class="qt-scale">×{{ t.params.sr_scale }}</span>
           </div>
           <div class="qt-l2" :title="t.params.mask_path ?? ''">
-            掩膜 {{ pathLeafOf(t.params.mask_path ?? '') }}
+            掩码 {{ pathLeafOf(t.params.mask_path ?? '') }}
             <span class="qt-time">{{ fmtTime(t.updated_at) }}</span>
           </div>
           <p v-if="t.state === 'FAILED'" class="qt-reason">{{ failReason(t) }}</p>

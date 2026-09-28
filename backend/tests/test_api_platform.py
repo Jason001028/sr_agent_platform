@@ -36,8 +36,8 @@ _ENVS = ("SR_AGENT_DB", "SR_SCENES_ROOT", "SR_PREVIEWS_ROOT", "SR_LLM_MOCK",
          "SR_QUEUE_POLL_SEC", "SR_SANDBOX_ROOT", "SR_EXECUTOR",
          "SR_LOCKED_DIR", "SR_LOCAL_GPU", "SR_BUNDLE_DIR",
          "SR_ALLOWED_ROOTS", "SR_DRIVE_MAP",
-         # 产物急烤的两个开关。用例会按需改它们，不还原就会漏到后面的用例上
-         # （急烤是「按 env 现读」的，泄漏的效果正是随机烤/随机不烤）。
+         # 产物主动生成的两个开关。用例会按需改它们，不还原就会漏到后面的用例上
+         # （主动生成是「按 env 现读」的，泄漏的效果正是随机生成/随机不生成）。
          "SR_PRODUCT_PREVIEW_DIV", "SR_PRODUCT_PREVIEW_MAX_AGE_SEC")
 
 
@@ -731,7 +731,7 @@ class TestQueue(PlatformBase):
 
 
 class TestProductPreviewBake(PlatformBase):
-    """产物预览急烤（app.py::_eager_bake_tick）。
+    """产物预览主动生成（app.py::_eager_bake_tick）。
 
     **直接调 tick，不等后台循环**：循环的间隔就是 `SR_QUEUE_POLL_SEC`，本仓库的
     惯例是把它设成 60 秒来关掉轮询干扰，等它等于让每个用例睡一分钟。tick 是纯同步
@@ -740,7 +740,7 @@ class TestProductPreviewBake(PlatformBase):
 
     夹具造的是一个**真场景目录**（`<目录名>_meta.xml` + `<目录名>.tif`）加一份真
     strip tif 产物 —— `input_scene_path` / `build_preview_pixels` 的实际判据都在
-    这条链上，用空文件顶替会让「产物缺失」「读不出尺寸」这类断言变成假绿。
+    这条链上，用空文件顶替会让「产物缺失」「读不出尺寸」这类断言变成误报通过。
     """
 
     SCENE = "JL1KF02B03_xxx_L1_PAN"
@@ -789,7 +789,7 @@ class TestProductPreviewBake(PlatformBase):
     def _rearm(self, app, tid):
         """把 preview_state 打回 NULL（等价于 put_sr_task 的 UPDATE 分支），
         但**保留 finished_at** —— 直接走提交会连 finished_at 一起清掉，那一行就
-        不再落在急烤的年龄窗口里了。"""
+        不再落在主动生成的年龄窗口里了。"""
         db = app.state.store._db()
         db.execute("UPDATE sr_tasks SET preview_state = NULL, preview_note = NULL "
                    "WHERE id = ?", (tid,))
@@ -818,7 +818,7 @@ class TestProductPreviewBake(PlatformBase):
         self.assertNotEqual(jpg, self._jpg(self.inp))
 
     def test_input_image_is_not_baked(self):
-        """急烤只烤产物。输入影像那份是惰性的：用户看不看它，打开之前无从知道。"""
+        """主动生成只生成产物。输入影像那份是惰性的：用户看不看它，打开之前无从知道。"""
         app, _ = self.app_client()
         self._row(app)
         self._product()
@@ -847,12 +847,12 @@ class TestProductPreviewBake(PlatformBase):
         _eager_bake_tick(app.state)
 
         self.assertEqual(self._dims(self._jpg(product)), (8, 4),
-                         "换档位后重烤，不是留着上一档那份")
+                         "换档位后重新生成，不是留着上一档那份")
         self.assertIn("÷8", self._row_state(app, tid)[1])
 
     def test_already_baked_at_this_div_is_a_cache_hit(self):
-        """用户先打开过、盘上那份已是当前档位 → 不重烤（省掉读遍大图那几十秒）。
-        判据与惰性路径是**同一个** cache_hit，所以这里命中的正是用户刚烤的那份。"""
+        """用户先打开过、盘上那份已是当前档位 → 不重新生成（省掉读遍大图那几十秒）。
+        判据与惰性路径是**同一个** cache_hit，所以这里命中的正是用户刚生成的那份。"""
         app, _ = self.app_client()
         tid = self._row(app)
         product = self._product()
@@ -865,7 +865,7 @@ class TestProductPreviewBake(PlatformBase):
         self.assertEqual(self._dims(self._jpg(product)), (16, 8))
 
     def test_one_tick_bakes_at_most_one_item(self):
-        """单消费者、并发 1：÷4 烤一份 40000² 产物峰值内存约 400MB，并发会把内存
+        """单消费者、并发 1：÷4 生成一份 40000² 产物峰值内存约 400MB，并发会把内存
         乘上去。代价是「同时完成 20 个作业时最后一件要等」——那是可解释的。"""
         app, _ = self.app_client()
         a = self._row(app, suffix="s1", lq_path=self.LQ)
@@ -877,15 +877,15 @@ class TestProductPreviewBake(PlatformBase):
 
         states = [self._row_state(app, t)[0] for t in (a, b)]
         # 不写死是哪一条：两行的 finished_at 是同一个瞬间，排序不该被断言
-        self.assertEqual(states.count("done"), 1, "本轮只烤一条")
+        self.assertEqual(states.count("done"), 1, "本轮只生成一条")
         self.assertEqual(states.count(None), 1, "另一件留到下一轮")
 
     def test_request_path_observing_completed_first_does_not_lose_the_bake(self):
         """`GET /api/queue` 会走 `_task_state`（与后台轮询是**同一**个写终态的函数）。
 
-        把急烤挂在「状态转换」上的话，谁先观测到 COMPLETED 谁把这次转换拿走，另一个
-        就看到「没变化」—— 请求路径抢先看一眼队列，这份预览就永远不烤了。改成从库
-        派生之后这个竞态在结构上不存在：这里先打几次队列再跑 tick，照样烤。
+        把主动生成挂在「状态转换」上的话，谁先观测到 COMPLETED 谁把这次转换拿走，另一个
+        就看到「没变化」—— 请求路径抢先看一眼队列，这份预览就永远不生成了。改成从库
+        派生之后这个竞态在结构上不存在：这里先打几次队列再跑 tick，照样生成。
         """
         app, c = self.app_client()
         tid = self._row(app)
@@ -914,7 +914,7 @@ class TestProductPreviewBake(PlatformBase):
         self.assertFalse(self._jpg(product).exists())
 
     def test_invalid_div_is_treated_as_off_not_as_a_crash(self):
-        """配置写错不该让服务起不来（也不会让轮询炸掉），代价只是「这轮不烤」。"""
+        """配置写错不该让服务起不来（也不会让轮询炸掉），代价只是「这轮不生成」。"""
         app, _ = self.app_client()
         os.environ["SR_PRODUCT_PREVIEW_DIV"] = "3"       # 不在 PREVIEW_DIVISORS 里
         tid = self._row(app)
@@ -927,8 +927,8 @@ class TestProductPreviewBake(PlatformBase):
         self.assertIsNone(self._row_state(app, tid)[0])
 
     def test_max_age_window_keeps_history_out(self):
-        """升级当天不把历史 COMPLETED 行全烤一遍 —— 补列之后老行的 preview_state
-        全是 NULL，而 NULL 的含义正是「没烤过」。"""
+        """升级当天不把历史 COMPLETED 行全生成一遍 —— 补列之后老行的 preview_state
+        全是 NULL，而 NULL 的含义正是「没生成过」。"""
         app, _ = self.app_client()
         tid = self._row(app)
         product = self._product()
@@ -942,7 +942,7 @@ class TestProductPreviewBake(PlatformBase):
         self.assertIsNone(self._row_state(app, tid)[0])
         self.assertFalse(self._jpg(product).exists())
 
-    # ---- 各条「不烤」的分支 -----------------------------------------------
+    # ---- 各条「不生成」的分支 -----------------------------------------------
 
     def test_failed_row_is_never_touched(self):
         app, _ = self.app_client()
@@ -975,7 +975,7 @@ class TestProductPreviewBake(PlatformBase):
         self.assertIn("no_suffix", note)
 
     def test_sandboxed_run_is_skipped(self):
-        """跑在沙箱私有副本上时产物落在副本里，盘阵那份是**上一次**的 —— 烤了用户
+        """跑在沙箱私有副本上时产物落在副本里，盘阵那份是**上一次**的 —— 生成了用户
         也看不到，还往临时盘撒文件。"""
         app, _ = self.app_client()
         os.environ["SR_EXECUTOR"] = "slurm"
@@ -993,8 +993,8 @@ class TestProductPreviewBake(PlatformBase):
         """**真机当前就是这条路线**：配了 `SR_SANDBOX_ROOT`，但 `SR_EXECUTOR=local`。
 
         `SR_EXECUTOR=local` 的意义就是「就地跑、产物落在盘阵里」（run_sr
-        .sandbox_scene_paths 对 local 恒返回 None），所以这里必须照烤。判据若写成
-        「直接看 SR_SANDBOX_ROOT 在不在」，真机上会**永远不烤**，而且是静默的。
+        .sandbox_scene_paths 对 local 恒返回 None），所以这里必须照生成。判据若写成
+        「直接看 SR_SANDBOX_ROOT 在不在」，真机上会**永远不生成**，而且是静默的。
         """
         app, _ = self.app_client()
         os.environ["SR_EXECUTOR"] = "local"
@@ -1022,8 +1022,8 @@ class TestProductPreviewBake(PlatformBase):
         self.assertIn("sandbox", note)
 
     def test_unwritable_directory_is_skipped_not_fallen_back(self):
-        """目录不可写就如实跳过，**不退回 SR_TEMP_PREVIEWS_ROOT**：那份按天清，而急烤
-        的意义是长期命中；更要命的是急烤没有 HTTP 响应头能告诉用户「这次退化了」，
+        """目录不可写就如实跳过，**不退回 SR_TEMP_PREVIEWS_ROOT**：那份按天清，而主动生成
+        的意义是长期命中；更要命的是主动生成没有 HTTP 响应头能告诉用户「这次退化了」，
         静默退化等于骗人。"""
         app, _ = self.app_client()
         tid = self._row(app)
@@ -1080,7 +1080,7 @@ class TestProductPreviewBake(PlatformBase):
 
         before = next(t for t in c.get("/api/queue").json()["tasks"]
                       if t["task_id"] == tid)
-        self.assertIn("preview_state", before, "字段恒在，没烤过时是 null")
+        self.assertIn("preview_state", before, "字段恒在，没生成过时是 null")
         self.assertIsNone(before["preview_state"])
         self.assertIsNone(before["preview_note"])
 
@@ -1091,13 +1091,13 @@ class TestProductPreviewBake(PlatformBase):
         self.assertEqual(after["preview_state"], "done")
         self.assertIn("baked", after["preview_note"])
         self.assertEqual(after["state"], "COMPLETED",
-                         "急烤写回不该动作业状态")
+                         "主动生成写回不该动作业状态")
 
     # ---- 改名遗留：老点号那份要被清掉（2026-09-22）-------------------------
 
     def test_the_eager_bake_and_a_lazy_open_are_the_same_file(self):
-        """改名后的核心不变式：**急烤烤的那份与打开时烤的那份是同一个文件**。
-        改名之前两条链各落一份（只差一个字符），急烤那份命中不了打开路径。"""
+        """改名后的核心不变式：**主动生成的那份与打开时生成的那份是同一个文件**。
+        改名之前两条链各落一份（只差一个字符），主动生成那份命中不了打开路径。"""
         app, c = self.app_client()
         self._row(app)
         product = self._product()
@@ -1110,7 +1110,7 @@ class TestProductPreviewBake(PlatformBase):
         r = c.get(f"/api/scenes/{sid}/preview?div=4")
 
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.content, baked, "打开时命中的就是急烤那份，字节不差")
+        self.assertEqual(r.content, baked, "打开时命中的就是主动生成那份，字节不差")
         self.assertEqual([p.name for p in sorted(self.scene_dir.glob("*preview*"))],
                          [jpg.name], "一个场景目录里只有一份预览名")
 
@@ -1119,7 +1119,7 @@ class TestProductPreviewBake(PlatformBase):
         return product.with_suffix(".preview.jpg")
 
     def test_legacy_dot_name_is_removed_when_baking(self):
-        """改名后点号那份没有任何读者了 —— 重烤这一份栅格时就顺手删掉，
+        """改名后点号那份没有任何读者了 —— 重新生成这一份栅格时就同时删掉，
         免得场景目录里躺着两个几乎同名的文件。"""
         app, _ = self.app_client()
         self._row(app)
@@ -1133,8 +1133,8 @@ class TestProductPreviewBake(PlatformBase):
         self.assertTrue(self._jpg(product).is_file(), "新名字那份照落")
 
     def test_legacy_dot_name_is_removed_even_on_a_cache_hit(self):
-        """盘上那份已是当前档位（本轮不重烤）时也得删 —— 「谁看谁清」，
-        不靠重烤那一次机会。"""
+        """盘上那份已是当前档位（本轮不重新生成）时也得删 —— 「谁看谁清」，
+        不靠重新生成那一次机会。"""
         app, _ = self.app_client()
         tid = self._row(app)
         product = self._product()
@@ -1162,7 +1162,7 @@ class TestProductPreviewBake(PlatformBase):
         self.assertEqual(self._row_state(app, tid)[0], "done")
         self.assertTrue(self._jpg(product).is_file())
 
-    # ---- 顺带那一份：未超分（`<输入 stem>_NOSR.tif`，2026-09-24 用户口径）----
+    # ---- 同时那一份：未超分（`<输入 stem>_NOSR.tif`，2026-09-24 用户口径）----
     #
     # 名字只由 `scene_search.nosr_candidates` 给出：先试输入 stem 那条（这个夹具的
     # 场景里是 `<SCENE>_NOSR.tif`），`PAN_NOSR.tif` 是同一串里的另一个候选（混合
@@ -1185,7 +1185,7 @@ class TestProductPreviewBake(PlatformBase):
                 "params": {"lq_path": self.LQ, "suffix": self.SUFFIX}}
 
     def test_nosr_preview_is_baked_by_the_same_tick(self):
-        """超分跑完那一轮里顺带把它烤了：源是 `<输入 stem>_NOSR.tif`，档位取全局。"""
+        """超分跑完那一轮里同时把它生成了：源是 `<输入 stem>_NOSR.tif`，档位取全局。"""
         app, _ = self.app_client()
         self._row(app)
         product = self._product()
@@ -1212,7 +1212,7 @@ class TestProductPreviewBake(PlatformBase):
         self.assertTrue(self._nosr_jpg("PAN_NOSR_preview.jpg").is_file())
 
     def test_input_stem_name_wins_when_both_are_on_disk(self):
-        """两条名字同时在盘上时先认输入 stem 那条：**只烤一份**、落点只有一个。
+        """两条名字同时在盘上时先认输入 stem 那条：**只生成一份**、落点只有一个。
 
         另一条（`writeTiff` 改名留下的上一次产物）不是同一份东西，抢在前面就会
         把「未超分那份」显示成上一轮的产物图。
@@ -1246,7 +1246,7 @@ class TestProductPreviewBake(PlatformBase):
 
     def test_nosr_preview_is_baked_even_when_the_product_bake_skips(self):
         """两份互不牵连：产物没产出（云限额跳过是合法 COMPLETED）时，
-        未超分那份照样烤 —— 它跟这次跑得成不成功本来就无关。"""
+        未超分那份照样生成 —— 它跟这次跑得成不成功本来就无关。"""
         app, _ = self.app_client()
         tid = self._row(app)
         self._nosr()
@@ -1257,7 +1257,7 @@ class TestProductPreviewBake(PlatformBase):
         self.assertTrue(self._nosr_jpg().is_file())
 
     def test_nosr_preview_at_the_same_div_is_a_cache_hit(self):
-        """同 suffix 反复迭代不该每次重读一遍 GB 级文件：盘上那份是当前档位就不重烤，
+        """同 suffix 反复迭代不该每次重读一遍 GB 级文件：盘上那份是当前档位就不重新生成，
         判据与产物那份**同一个** cache_hit。"""
         app, _ = self.app_client()
         tid = self._row(app)
@@ -1268,7 +1268,7 @@ class TestProductPreviewBake(PlatformBase):
         self.assertEqual(self._dims(self._nosr_jpg()), (16, 8))
         self.assertIn("cached", _bake_nosr_preview(task, 4))
 
-        self.assertIn("baked", _bake_nosr_preview(task, 8), "换档位就该重烤")
+        self.assertIn("baked", _bake_nosr_preview(task, 8), "换档位就该重新生成")
         self.assertEqual(self._dims(self._nosr_jpg()), (8, 4))
 
 
@@ -1324,7 +1324,7 @@ class TestMasks(PlatformBase):
         self.assertEqual(arr.dtype, np.uint8)
         self.assertEqual(sorted(np.unique(arr).tolist()), [0, 255])
         raw = Path(body["mask_txt"]).read_bytes()
-        self.assertIn("掩膜".encode("utf-8"), raw)   # 参考格式全角表头
+        self.assertIn("掩码".encode("utf-8"), raw)   # 参考格式全角表头
         self.assertIn(b"\r\n", raw)                  # CRLF（read_text 会吞掉）
 
     def test_bake_mask_draft_carries_the_bundle_suffix(self):

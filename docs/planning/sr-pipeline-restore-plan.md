@@ -12,7 +12,7 @@
 | # | 断点 | 证据 | 本计划对应 |
 |---|---|---|---|
 | B1 | 提交的作业跑的是**生产原版** `code_0817_prod.py`，不是部署变体（无 E1–E9：GPU 数守卫 `!= 4` 直接判失败、`CUDA_VISIBLE_DEVICES` 被覆写） | [run_sr.py:180](backend/services/run_sr.py#L180) 硬编码脚本名，无 env 开关；对比 [run_sr.py:131-132](backend/services/run_sr.py#L131-L132) 的 `SR_VERIFY_SCRIPT` **有**开关 | 阶段 1 E-A、阶段 2 |
-| B2 | 空后缀直通到 config.xml，落到 SR 就变成"就地覆盖"语义（输入被改名 `<stem>_NOSR.tif`，输出占原名），且掩码烘焙预填的 draft 就是 `suffix: ""` | [platform.py:529](backend/api/platform.py#L529)（draft `""`）、[platform.py:356](backend/api/platform.py#L356)、[tools/run_sr.py:100](backend/tools/run_sr.py#L100)、[queue.ts:46](frontend/src/stores/queue.ts#L46) 一路不挡 | 阶段 1 E-B |
+| B2 | 空后缀直通到 config.xml，落到 SR 就变成"就地覆盖"语义（输入被改名 `<stem>_NOSR.tif`，输出占原名），且掩码生成预填的 draft 就是 `suffix: ""` | [platform.py:529](backend/api/platform.py#L529)（draft `""`）、[platform.py:356](backend/api/platform.py#L356)、[tools/run_sr.py:100](backend/tools/run_sr.py#L100)、[queue.ts:46](frontend/src/stores/queue.ts#L46) 一路不挡 | 阶段 1 E-B |
 | B3 | 检索按 `.tif/.tiff/.img` 后缀收文件，在 `/DiskArray/GSHC2IMPS/<年>/<月>/<日>/<生产编号>/` 深树下会把 `_NOSR`/`_mask`/SR 输出**当成场景**，且每次请求全树 `rglob` + 逐文件 `stat`，不缓存 | [scene_search.py:26](backend/services/scene_search.py#L26)、[:54-58](backend/services/scene_search.py#L54-L58) | 阶段 1 E-D |
 | B4 | 云量字段解析不具容错：`int(CloudPercent)` 一个非数字就抛，作业无 SRLOG 退出，平台侧看到的是"静默失败" | [code_0817_prod.py:157-160](SR_code/code_0817_prod.py#L157-L160) | 阶段 1 E-C |
 | B5 | 服务环境未落盘（六项 env 只写在文档里）、变体未上机 | [deploy/README.md](../../deploy/README.md) §七只给了命令 | 阶段 2 |

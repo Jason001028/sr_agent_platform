@@ -15,25 +15,25 @@
 //   C. 「提交 SR」→ /queue 预填（不自动提交）→ 确认提交 → 假调度器跑到「完成」；
 //   D. 猜错必须报错：粘不存在的编号 → `.sp-err` 带候选路径与原因，查看器不新增 rec；
 //   E. 拖本地文件进查看器 → 按**文件名 + 字节数**双指纹反推盘阵目录：
-//      命中（同名同字节）→ 不做本地解码，直接换成服务端烘焙 JPG（拖入那条端点
+//      命中（同名同字节）→ 不做本地解码，直接换成服务端生成 JPG（拖入那条端点
 //      /preview-drop；产物落**生产场景目录** `<编号>_preview.jpg`，不落临时缓存），
 //      rec 升级成 route='jpg' + lqPath + sceneId，提交按钮转可用；
 //      同名但字节数不同 / 目录不存在 → 报错（写进 rec.linkNote）且按钮仍禁用，
 //      退回本地解码；文件名里没有日期 → 只提示手填，一个 resolve 请求都不发；
 //   E2. 拖盘阵上的 `<编号>.jpg`（与同名 .tif 同目录）：名字对得上就关联成同一场景，
-//      **像素用拖进来那张原图**（不调 /preview）；另外后台静默烤一跳 /preview-drop
+//      **像素用拖进来那张原图**（不调 /preview）；另外后台静默生成一跳 /preview-drop
 //      （落 `<编号>_preview.jpg` 进场景目录，不遮罩、不改像素）；
 //      关联不上 → 弹窗给后端原因（`.notice-modal`），状态栏不卡在「正在关联…」；
 //   E3. 拖**纯 RC** 目录（里面只有 `PAN.tif`）那份 `<编号>.jpg`：也要关联上。
 //      jpg 名比的是**场景目录名**，不是栅格输入的 stem —— 比后者的话，纯 RC
 //      场景恒 404，而它恰恰是 SR 真要跑的场景（真机「极少出现盘阵小标」的根因）；
 //   E4. 盘阵上那份显示件**不够清晰**时（栅格 1600×800 vs 同名 jpg 320×160，
-//      ÷2 烤出 800 > 320）→ 改用服务端从栅格烤的那份：走 /preview-drop、面板文案
+//      ÷2 生成出 800 > 320）→ 改用服务端从栅格生成的那份：走 /preview-drop、面板文案
 //      回到默认那句。E2 是它的对照组（盘阵上没有同名 jpg；就算有，800×400 在 ÷2
 //      下也判 jpg 赢 —— 判据是**严格大于**）。
 //   F. PAN.tif（RC）场景：掩码名取**输入名的 stem**（`PAN_mask.tif`），不取目录名 ——
 //      这正是"写出去的掩码与提交时去找的那份不一致"的陷阱（§6）。
-//   G. 粘**单个 .tif 文件路径**（不在场景目录里）：照样能看，且预览按 1/2 烤进源图
+//   G. 粘**单个 .tif 文件路径**（不在场景目录里）：照样能看，且预览按 1/2 生成进源图
 //      自己的目录；但它不能提交 SR（lqPath 为 null → 按钮禁用）；
 //   H. 《待修复清单》写回盘阵（POST /api/qclist/write）：导入一份 **GBK** 清单
 //      （Node 编不出 GBK，用 Python 转码落盘）→ 粘 `W:\…\待修复清单.txt` → 同步 →
@@ -53,18 +53,18 @@
 //      L4    拖中间产物 `<编号>_sr.jpg`（同级有 `<编号>_sr.tif`）：认出 kind=product、
 //            卡片上「盘阵+序号+SR」三标齐全（序号与本体那张**同号**）、只读小标、
 //            三颗修复按钮置灰；W/H 取产物自己的栅格（3200×1600）而像素仍是拖进来的
-//            原图（1600×800）；后台静默烤 `<编号>_sr_preview.jpg`（1600×800 —— 与
-//            本体那份 800×400 差一倍，据此分清烤的是哪一份栅格）。
+//            原图（1600×800）；后台静默生成 `<编号>_sr_preview.jpg`（1600×800 —— 与
+//            本体那份 800×400 差一倍，据此分清生成的是哪一份栅格）。
 //      L5    产物上三道修复入口逐条打一遍：绘制掩码被拒且不进绘制态、保存掩码返回
 //            false 且**本体那份掩码的 mtime 一个字节没动**（本次唯一的破坏性风险）、
 //            提交 SR 不跳队列页且队列一条不多。
 //      L6–L7 本轮（2026-09-24）新增的「未超分那份」：L6 拖入一景的**本体显示件** →
-//            平台去同一场景目录找 `<目录名>_NOSR.tif` 并顺手烤成 jpg（只对那一份发
-//            一次 /preview，落点尺寸按当前档位）；L7 把烤出来那份 jpg 拖回来 → 卡片上
+//            平台去同一场景目录找 `<目录名>_NOSR.tif` 并同时降采样到 jpg（只对那一份发
+//            一次 /preview，落点尺寸按当前档位）；L7 把生成的那份 jpg 拖回来 → 卡片上
 //            「盘阵 + 同序号 + NOSR」三标齐全（缺它时那颗标只是文案侥幸对、配色属于
 //            产物那族）、只读小标在、修复入口同样堵死。
 //            现造一景（SC2）而不是复用前面的：预热按**场景目录**记账，同一景这一会话
-//            里只做一次，复用前面那景只能验到「第二次不再烤」。
+//            里只做一次，复用前面那景只能验到「第二次不再生成」。
 // 用法：cd .e2e && node test-manual-scene.js
 const http = require('http');
 const fs = require('fs');
@@ -236,7 +236,7 @@ scene(os.path.join(base, sat_w, mid_w, win_name),
 
 # 裸 TIF（G 段）：**不在任何场景目录里**（没有 _meta.xml、父目录也不是场景名），
 # 用来验「粘单个 .tif 文件路径」。400×200 是特意选的：旧规则（长边 8192 封顶）
-# 会把它整幅留下（400×200），新规则（各边 1/2）烤出 200×100 —— 尺寸断言因此
+# 会把它整幅留下（400×200），新规则（各边 1/2）生成出 200×100 —— 尺寸断言因此
 # 能区分两套规则，而不是两边都给同一个值。
 tif(os.path.join(root, "loose", "LOOSE_" + ymd + "120000.tif"), 400, 200)
 `;
@@ -514,7 +514,7 @@ async function main() {
   makeJpg(upJpgMiss, 800, 400);                                   // 有日期、盘阵上没有
   // E4：盘阵上**真有**那份显示件（320×160，比同名栅格差得远），另外再复制一份
   // **尺寸不同**的到本地拖进来。两份尺寸必须不一样，断言才分得清像素来自哪边：
-  // 640×320 是本地那份，「服务端从栅格烤的」是 1600×800 ÷2 = 800×400。
+  // 640×320 是本地那份，「服务端从栅格生成的」是 1600×800 ÷2 = 800×400。
   const winJpg = path.join(WIN_DIR, WIN + '.jpg');
   const upWinJpg = path.join(upDir, WIN + '.jpg');
   makeJpg(winJpg, 320, 160);
@@ -538,7 +538,7 @@ async function main() {
       SR_AGENT_DB: path.join(tmp, 'db.sqlite'),
       SR_SCENES_ROOT: datahub,
       // 拖拽入口的临时预览缓存：指向临时目录（不是系统 /tmp），E 段要靠它断言
-      // 「拖进来的图烤在了临时缓存里，没往生产数据目录撒文件」。
+      // 「拖进来的图生成在了临时缓存里，没往生产数据目录撒文件」。
       SR_TEMP_PREVIEWS_ROOT: tmpPreviews,
       SR_SLURM_WORK_DIR: workDir,
       SR_LLM_MOCK: '1',
@@ -628,7 +628,7 @@ async function main() {
       await waitFor(page, () => location.pathname.endsWith('/viewer'), 15000, '跳 /viewer');
       await waitFor(page, () => !!window.__viewer, 15000, '__viewer 钩子');
       // 等 activeRec 而不是 recs().length：openSceneJpg 现在**先**把 rec 推进列表
-      // 再去解码烘焙字节，只看条数会撞进「推了但还没装好」那一瞬（route 还是 null）。
+      // 再去解码生成预览字节，只看条数会撞进「推了但还没装好」那一瞬（route 还是 null）。
       await waitFor(page, () => {
         const r = window.__viewer.activeRec();
         return !!r && r.route === 'jpg';
@@ -728,8 +728,8 @@ async function main() {
         return { tag: tds[0] ? tds[0].textContent.trim() : '', mask: m ? m.textContent.trim() : '' };
       });
       assert(row.tag === '完成', `手工场景的作业跑完（首行徽标「${row.tag}」）`);
-      assert(row.mask === '掩膜 ' + SC + '_mask.tif',
-        `任务行显示实际用的掩膜（「${row.mask}」）`);
+      assert(row.mask === '掩码 ' + SC + '_mask.tif',
+        `任务行显示实际用的掩码（「${row.mask}」）`);
 
       /* ---------- D. 猜错必须报错 ---------- */
       console.log('\n[D] 粘一个不存在的编号 → 报错带候选与原因，不新增 rec');
@@ -751,7 +751,7 @@ async function main() {
       assert(await recCount(page) === beforeRecs,
         '打开失败不留任何可提交的东西（rec 数不变）');
 
-      /* ---------- E. 拖本地文件 → 双指纹反推 → 走服务端烘焙 JPG ---------- */
+      /* ---------- E. 拖本地文件 → 双指纹反推 → 走服务端生成 JPG ---------- */
       console.log('\n[E] 查看器拖本地 tif → 同名同字节才关联，命中即换服务端 JPG');
       await clickLink(page, '查看器');
       await waitFor(page, () => location.pathname.endsWith('/viewer'), 15000, '回 /viewer');
@@ -770,7 +770,7 @@ async function main() {
       const previewBefore = countUrl(previewRe);
       const dropBefore = countUrl(dropPreviewRe);
       // 2026-09-22 起预览只有一个名字 `<栅格 stem>_preview.jpg`：平台那份（A 段粘路径
-      // 打开时走 /preview 烤的）与拖入链的落点**是同一个文件**。这条钉「打开时就已经
+      // 打开时走 /preview 生成的）与拖入链的落点**是同一个文件**。这条钉「打开时就已经
       // 有一份」，也是下面「场景目录里只有一份预览」的前提。
       const platJpg = path.join(SC_DIR, SC + '_preview.jpg');
       assert(fs.existsSync(platJpg),
@@ -786,7 +786,7 @@ async function main() {
         `rec 还是用户拖进来的那个文件（${linked.name}）`);
       assert(linked.lqPath === SC_DIR.replace(/\\/g, '/'),
         `命中即关联上盘阵目录（${linked.lqPath}）`);
-      // 命中之后**不再做本地解码**：像素来自服务端烘焙 JPG（各边 1/2），
+      // 命中之后**不再做本地解码**：像素来自服务端生成 JPG（各边 1/2），
       // 尺寸是元数据的 1600×800、缩略图 800×400 —— 本地解码这张 2.5MB 的
       // uint16 也出得来缩略图，所以判据取 route 与字节来源。
       assert(linked.route === 'jpg',
@@ -794,14 +794,14 @@ async function main() {
       assert(linked.W === 1600 && linked.H === 800,
         `尺寸取影像头 1600×800（${linked.W}×${linked.H}）`);
       assert(linked.thumbW === 800 && linked.thumbH === 400,
-        `像素来自服务端 1/2 烘焙 JPG（缩略图 ${linked.thumbW}×${linked.thumbH}）`);
+        `像素来自服务端 1/2 预览 JPG（缩略图 ${linked.thumbW}×${linked.thumbH}）`);
       assert(!!linked.sceneId, `升级后带上场景 id（${String(linked.sceneId).slice(0, 12)}…）`);
       assert(await srEnabled(), '关联成功后「提交 SR」由灰转可用');
       assert(countUrl(dropPreviewRe) === dropBefore + 1
         && countUrl(previewRe) === previewBefore,
         '取的是拖入专用端点 /preview-drop，没碰生产那条 /preview');
-      // 产物落在**生产场景目录**里（`<编号>_preview.jpg`）：烤一次长期可用，
-      // 而不是每天第一次拖入都重烤一遍 —— 这是这次改动的要点。落点与打开时那份
+      // 产物落在**生产场景目录**里（`<编号>_preview.jpg`）：生成一次长期可用，
+      // 而不是每天第一次拖入都重新生成一遍 —— 这是这次改动的要点。落点与打开时那份
       // 同名，所以场景目录里不会躺着两个几乎同名的文件（用户报的就是这个）。
       const dropJpg = path.join(SC_DIR, SC + '_preview.jpg');
       assert(fs.existsSync(dropJpg),
@@ -832,7 +832,7 @@ async function main() {
       const prodJpg = path.join(PROD_DIR, PROD + '_preview.jpg');
       assert(fs.existsSync(prodJpg),
         `生产树命中的预览落它自己的场景目录（${path.basename(prodJpg)}）`);
-      // 改名前的点号那份不再产出（旧名只会在各条链处理到那份栅格时被顺手删掉）
+      // 改名前的点号那份不再产出（旧名只会在各条链处理到那份栅格时被同时删掉）
       assert(!fs.existsSync(path.join(PROD_DIR, PROD + '.preview.jpg')),
         '点号那份不再产出');
 
@@ -916,22 +916,22 @@ async function main() {
       assert(!!jpgRec.sceneId, `升级后带上场景 id（${String(jpgRec.sceneId).slice(0, 12)}…）`);
       assert(jpgRec.W === 1600 && jpgRec.H === 800,
         `W/H 取影像头 1600×800（${jpgRec.W}×${jpgRec.H}）—— 掩码换算回原图就靠它`);
-      // 本次改动的要点：像素用**拖进来那张 jpg 自己**的，不去服务端烤一份预览。
+      // 本次改动的要点：像素用**拖进来那张 jpg 自己**的，不去服务端生成一份预览。
       // 早先只有 .tif 才试关联，jpg 一律 route='img'；改成两条路合并后，若照搬
       // tif 那条（调 /preview-drop）就会拿服务端缩图顶掉用户自己拖的图。
       //
       // 像素不走服务端，但**请求仍要发一次**（2026-09-21 起）：拖 jpg 进来之后后台
-      // 静默烤一份 `<这份影像的 stem>_preview.jpg` 进场景目录 —— 用户口径是「盘阵上
+      // 静默生成一份 `<这份影像的 stem>_preview.jpg` 进场景目录 —— 用户口径是「盘阵上
       // 得留下这一份」，而像素仍用他拖进来的原图。所以要钉的是两件事分开：像素
-      // 没被顶掉（上面两条），以及那一跳**恰好烤的是这一环节自己的栅格**
+      // 没被顶掉（上面两条），以及那一跳**恰好生成的是这一环节自己的栅格**
       // （rec.sceneId = 本体那份 `<编号>.tif` 的场景 id，不是别的目录）。
       const dropPreviewUrl = (sid) =>
         `${apiBase}/api/scenes/${encodeURIComponent(sid)}/preview-drop?div=2`;
       await waitNode(() => countUrl(dropPreviewRe) >= dropBakeBefore + 1, 15000,
-        '拖 jpg 之后的后台静默烤');
+        '拖 jpg 之后的后台静默生成');
       const bakeUrls = seen.filter((u) => dropPreviewRe.test(u)).slice(dropBakeBefore);
       assert(bakeUrls.length === 1 && bakeUrls[0] === dropPreviewUrl(jpgRec.sceneId),
-        `后台静默烤烤的是这一环节自己的栅格（${bakeUrls[0]}）`);
+        `后台静默生成的是这一环节自己的栅格（${bakeUrls[0]}）`);
       assert(countUrl(previewRe) === bakeBefore,
         `生产那条 /preview 一次没碰（+${countUrl(previewRe) - bakeBefore}）`);
       assert(jpegSize(path.join(SC_DIR, SC + '_preview.jpg')) !== null,
@@ -939,7 +939,7 @@ async function main() {
       assert(jpgRec.thumbW === 800 && jpgRec.thumbH === 400,
         `缩略图就是拖进来那张 jpg 的像素（${jpgRec.thumbW}×${jpgRec.thumbH}）`);
       assert(jpgRec.layout.includes('拖入的原图'),
-        `布局按实际来源写，不谎称「服务端已烘焙」（${jpgRec.layout}）`);
+        `布局按实际来源写，不谎称是盘阵生成的那份（${jpgRec.layout}）`);
       // 用户看得见的那一件事：侧栏文件卡上那颗「盘阵」小标。它由 route 决定，
       // 但**必须落到 DOM 上**才算数（store 对、页面不更新是踩过的坑）。
       const jpgBadge = await badgeOf(page, SC + '.jpg');
@@ -1020,13 +1020,13 @@ async function main() {
       assert(panJpgBadge === '盘阵',
         `纯 RC 场景的 jpg 也出「盘阵」小标（${panJpgBadge}）`);
 
-      /* ---------- E4. 盘阵那份显示件不够清晰 → 改用服务端从栅格烤的那份 ---------- */
+      /* ---------- E4. 盘阵那份显示件不够清晰 → 改用服务端从栅格生成的那份 ---------- */
       // 真机上这件事就是用户报的那句话：目录里那份预生成的显示件（PAN.jpg 之类）
       // 分辨率不够，实际预览得改成服务端从配套 .tif 下采样。判据只有一条：
       //   round(max(栅格长边)/div) > max(显示件长边)
       // 这边栅格 1600×800、显示件 320×160、档位钉在 ÷2（本脚本开头）→ 800 > 320
       // 成立，于是像素改用服务端那份。E2 是**对照组**：那边盘阵上没有同名 jpg，
-      // 就算补一个 800×400 的，÷2 烤出 800 也不严格大于 800 → 判 jpg 赢，一字不动。
+      // 就算补一个 800×400 的，÷2 生成出 800 也不严格大于 800 → 判 jpg 赢，一字不动。
       console.log('\n[E4] 同名栅格更清晰 → 预览改用服务端下采样（工作流 B）');
       const winBakeBefore = countUrl(previewRe);
       const winDropBefore = countUrl(dropPreviewRe);
@@ -1069,15 +1069,16 @@ async function main() {
       // 回到 Node），加载已完成而计数还没涨是常态、不是缺陷。所以先等它涨上来。
       await waitNode(() => countUrl(dropPreviewRe) >= winDropBefore + 1, 15000,
         '拖入预览这一跳的请求计数');
-      // 面板文案回到默认那句：走服务端时前端不传 layout，由 openSceneJpg 自己写。
-      assert(winRec.layout.includes('服务端已烘焙'),
-        `面板如实说是服务端烤的（${winRec.layout}）`);
+      // 面板文案回到默认那句：走服务端时前端不传 layout，由 openSceneJpg 自己写
+      // （默认那句 = 「盘阵 JPG（N 尺度 + 直方图均衡）」，不再带「服务端已生成」）。
+      assert(winRec.layout.includes('盘阵 JPG') && !winRec.layout.includes('服务端已生成'),
+        `面板文案回到默认那句、不赘述生成预览方（${winRec.layout}）`);
       assert(winRec.layout.includes('1/2'),
         `并写明是哪一档（${winRec.layout}）`);
-      // 像素来自**服务端从栅格烤的** 800×400，不是本地那份 640×320：
+      // 像素来自**服务端从栅格生成的** 800×400，不是本地那份 640×320：
       // 两边的尺寸是特意错开的，这一条就是「谁赢」的可执行判据。
       assert(winRec.thumbW === 800 && winRec.thumbH === 400,
-        `像素取服务端从 1600×800 栅格烤的 800×400（${winRec.thumbW}×${winRec.thumbH}）`);
+        `像素取服务端从 1600×800 栅格生成的 800×400（${winRec.thumbW}×${winRec.thumbH}）`);
       assert(winRec.W === 1600 && winRec.H === 800,
         `W/H 仍是影像头尺寸 1600×800（${winRec.W}×${winRec.H}）`);
       assert(!winRec.layout.includes('拖入的原图'),
@@ -1172,7 +1173,7 @@ async function main() {
         `预览 JPG 各边为源图 1/2（400×200 → ${sz.w}×${sz.h}）`);
       assert(fs.existsSync(looseJpg)
         && path.dirname(looseJpg) === LOOSE_DIR,
-        `预览烤在源图**自己的目录**里（${path.basename(looseJpg)}）`);
+        `预览生成在源图**自己的目录**里（${path.basename(looseJpg)}）`);
 
       /* ---------- H. 《待修复清单》写回盘阵（POST /api/qclist/write） ---------- */
       console.log('\n[H] 导入 GBK 清单 → 粘盘阵路径 → 同步 → 从磁盘按字节读回');
@@ -1330,7 +1331,7 @@ async function main() {
       };
 
       // ① 影像类型 pan：盘阵上只有 `…_PAN`，名字原样试必然 404 —— 能开出来就说明产品
-      //    段真的补上去了。顺带钉住「补段是后端的事」：前端一次 resolve 都没多花。
+      //    段真的补上去了。同时钉住「补段是后端的事」：前端一次 resolve 都没多花。
       const h2ResBefore = countUrl(resolveRe);
       const panRec2 = await openQcRow(pdPanBare, pdPanDir, PD_PAN, 'pan 那行开 _PAN 场景');
       assert(countUrl(resolveRe) - h2ResBefore === 1,
@@ -1441,11 +1442,11 @@ async function main() {
       assert(jrec.name === WIN + '.jpg', `rec 是拖进来那个文件（${jrec.name}）`);
       assert(jrec.lqPath === WIN_DIR.replace(/\\/g, '/'),
         `关联到盘阵那个场景目录（${jrec.lqPath}）`);
-      // 500×250 是本地那份、800×400 是服务端从 1600×800 栅格烤的 ÷2 —— 两边尺寸
+      // 500×250 是本地那份、800×400 是服务端从 1600×800 栅格生成的 ÷2 —— 两边尺寸
       // 特意错开，这一条就是「像素来自哪边」的可执行判据（与 E4 同一套判据，
       // 换到拖放这条路上再验一次）。
       assert(jrec.thumbW === 800 && jrec.thumbH === 400,
-        `像素取服务端烤的 800×400，不是拖进来那张 500×250（${jrec.thumbW}×${jrec.thumbH}）`);
+        `像素取服务端生成的 800×400，不是拖进来那张 500×250（${jrec.thumbW}×${jrec.thumbH}）`);
       await waitNode(() => countUrl(dropPreviewRe) >= jDropBefore + 1, 15000,
         '落右半这一跳的请求计数');
       const panes1 = await page.evaluate(() => window.__viewer.cmpPanes());
@@ -1459,7 +1460,7 @@ async function main() {
       assert(hint1.active === false && hint1.side === null,
         `落图之后落位提示已经收掉（${JSON.stringify(hint1)}）`);
       // 计数在这里才断：中间过了几拍页面往返，该到的请求都到了。写成 +N 而不是不断言，
-      // 是为了让「重复拖入 / 拖入顺带又取了一次图」这类回归在这里露头。
+      // 是为了让「重复拖入 / 拖入同时又取了一次图」这类回归在这里露头。
       assert(countUrl(resolveRe) === jResBefore + 1
         && countUrl(dropPreviewRe) === jDropBefore + 1
         && countUrl(previewRe) === jBakeBefore,
@@ -1481,7 +1482,7 @@ async function main() {
       //   ② 对比模式下的后台预取（用户开关，**默认关**）只取「服务端已有一份现成
       //      预览、且档位对得上」的那几类。真机上「我什么都没点，盘阵却在读大图」
       //      是这条最该钉住的边界，所以同一个场景验两遍：先把那份现成预览**按住
-      //      不给**（预取必须一个字节都不取），再把它烤上（预取必须恰好取它一份）。
+      //      不给**（预取必须一个字节都不取），再把它生成上（预取必须恰好取它一份）。
       console.log('\n[K] 场景芯片：已开的图不再要像素；预取只取现成预览');
       const sibRe = new RegExp(`^${apiBase}/api/scenes/[^/]+/siblings(\\?|$)`);
       // Node 侧直接问后端。**不经过页面** —— page.on('request') 看不到它，所以
@@ -1524,10 +1525,10 @@ async function main() {
         + `${nosr1.W}×${nosr1.H}）`);
       assert(!prod1.hasPreview && !nosr1.hasPreview,
         '两份都还没有预览 —— 也就是说，此刻盘上没有任何"现成的那份"');
-      // 只烤「本轮超分产物」那一份（K1 要点的芯片）。「NOSR」先按住不烤：K2 前半
+      // 只生成「本轮超分产物」那一份（K1 要点的芯片）。「NOSR」先按住不生成：K2 前半
       // 段断言的就是「盘上没有现成预览 → 预取一个字节都不取」。
       const bakeProd = await fetch(prevUrlOf(prod1.id));
-      assert(bakeProd.ok, `服务端烤「本轮超分产物」的 ÷2 预览（HTTP ${bakeProd.status}）`);
+      assert(bakeProd.ok, `服务端生成「本轮超分产物」的 ÷2 预览（HTTP ${bakeProd.status}）`);
       await bakeProd.arrayBuffer();          // 必须读完：不读会吊着这条连接
       const prod2 = byKind(await sibOf(kSid), 'product');
       assert(prod2.hasPreview === true && prod2.previewDiv === 2,
@@ -1614,9 +1615,9 @@ async function main() {
         `开关关着进对比模式：一个请求都不发（/siblings +${countUrl(sibRe) - sibMark}`
         + ` / /preview +${countUrl(previewRe) - prevMark}）`);
 
-      // K2b：开关开着 —— 但盘上那份「NOSR」还没烤过，合格项是**空集**。
+      // K2b：开关开着 —— 但盘上那份「NOSR」还没生成过，合格项是**空集**。
       // 空集也要如实判一次：接下来「一个字节都不取」才有可解释的理由（钉的是
-      // 「预取绝不触发烘焙」）。
+      // 「预取绝不触发生成预览」）。
       await page.evaluate(() => window.__viewer.setCmpMode('off'));
       await page.evaluate(() => window.__viewer.setCmpPrefetch(true));
       await sleep(500);
@@ -1633,7 +1634,7 @@ async function main() {
         '开关开时进对比模式的那次 /siblings');
       await sleep(900);            // 预取是顺序 await 的；给"多发一次"留够露头的时间
       assert(countUrl(previewRe) === prevMark,
-        `盘上没有现成预览 → 预取一个字节都不取，绝不触发烘焙`
+        `盘上没有现成预览 → 预取一个字节都不取，绝不触发生成预览`
         + `（/preview +${countUrl(previewRe) - prevMark}）`);
       assert(await page.evaluate(() => window.__viewer.recs().length) === recsB,
         '预取不建 rec');
@@ -1650,11 +1651,11 @@ async function main() {
       await page.keyboard.press('Escape');
       await sleep(200);
 
-      // K2c：把那份「NOSR」的预览烤上（**在页面之外**烤的，不算页面发的
+      // K2c：把那份「NOSR」的预览生成上（**在页面之外**生成的，不算页面发的
       // 请求），再进一次对比模式：这次合格项恰好是它一项。
       const nosr2 = byKind(await sibOf(kSid2), 'nosr');
       const bakeNosr = await fetch(prevUrlOf(nosr2.id));
-      assert(bakeNosr.ok, `服务端烤「NOSR」的 ÷2 预览（HTTP ${bakeNosr.status}）`);
+      assert(bakeNosr.ok, `服务端生成「NOSR」的 ÷2 预览（HTTP ${bakeNosr.status}）`);
       await bakeNosr.arrayBuffer();
       const nosrN = byKind(await sibOf(kSid2), 'nosr');
       assert(nosrN.hasPreview === true && nosrN.previewDiv === 2,
@@ -1827,8 +1828,8 @@ async function main() {
 
       // L4：拖**中间产物** jpg 进来。产物在真机上由 SR 跑出来（各边 2×），显示件
       // `<编号>_sr.jpg` 是它自己那份。夹具里没有现成的，两条都现造：栅格 3200×1600
-      // （÷2 烤出 1600×800，与本体 1600×800 ÷2 = 800×400 差着一倍，断言因此能分清
-      // 「烤的是哪一份栅格」），本地那份拖进来的 jpg 1600×800（盘阵上没有同名 jpg
+      // （÷2 生成出 1600×800，与本体 1600×800 ÷2 = 800×400 差着一倍，断言因此能分清
+      // 「生成的是哪一份栅格」），本地那份拖进来的 jpg 1600×800（盘阵上没有同名 jpg
       // → 判本地赢，像素用拖进来那张）。
       const SR = SC + '_sr';
       const srRaster = path.join(SC_DIR, SR + '.tif');
@@ -1915,13 +1916,13 @@ async function main() {
       assert(lDrawBtn && lDrawBtn.disabled === true
         && lDrawBtn.title.includes('中间产物'),
         `「绘制掩码」也置灰并写明理由（${lDrawBtn && lDrawBtn.title}）`);
-      // 落盘：后台静默烤的那一份是**产物自己**的栅格（3200×1600 ÷2 = 1600×800）。
-      // 本体那份是 800×400，差一倍 —— 这一条就是「烤的是哪一份」的可执行判据。
+      // 落盘：后台静默生成的那一份是**产物自己**的栅格（3200×1600 ÷2 = 1600×800）。
+      // 本体那份是 800×400，差一倍 —— 这一条就是「生成的是哪一份」的可执行判据。
       const srDropJpg = path.join(SC_DIR, SR + '_preview.jpg');
       await waitNode(() => jpegSize(srDropJpg) !== null, 30000, '产物的 _preview.jpg 落盘');
       const srSz = jpegSize(srDropJpg);
       assert(srSz.w === 1600 && srSz.h === 800,
-        `场景目录里落下 ${SR}_preview.jpg，烤的是产物自己的栅格（${srSz.w}×${srSz.h}）`);
+        `场景目录里落下 ${SR}_preview.jpg，生成的是产物自己的栅格（${srSz.w}×${srSz.h}）`);
       // 这一跳走的是拖入链那条端点，产物**不回**生产过程那条 /preview（两条落点不同）。
       assert(countUrl(resolveRe) === lResBefore + 1
         && countUrl(dropPreviewRe) === lDropBefore + 1,
@@ -1971,19 +1972,19 @@ async function main() {
       assert(lTasksAfter === lTasksBefore,
         `队列里一条都没多（${lTasksBefore} → ${lTasksAfter}）`);
 
-      /* ---------- L6–L7. 「未超分那份」：拖显示件时顺手烤；烤出来那份拖回来带 NOSR 标 ---------- */
+      /* ---------- L6–L7. 「未超分那份」：拖显示件时同时生成；生成的那份拖回来带 NOSR 标 ---------- */
       // 2026-09-24 用户口径：拖入 `<目录名>.jpg`（本体显示件）或产物显示件时，平台去
-      // **同一个场景目录**里找 `<输入影像 stem>_NOSR.tif`（未超分那份）并烤成它自己的
+      // **同一个场景目录**里找 `<输入影像 stem>_NOSR.tif`（未超分那份）并降采样到它自己的
       // `<stem>_preview.jpg`；把这份 jpg 拖回来时，卡片上要带「NOSR」标。
       //
       // 为什么要现造一景：这份预热按**场景目录**记账（同一景这一会话只做一次），前面
       // 那些景在 K 段造出 NOSR 栅格**之前**就已经被拖过一次了 —— 复用它们只能验到
-      // 「第二次不再烤」，验不到「拖一下就烤」。
-      console.log('\n[L6] 拖入显示件顺手烤「未超分那份」');
+      // 「第二次不再生成」，验不到「拖一下就生成」。
+      console.log('\n[L6] 拖入显示件同时生成「未超分那份」');
       const SC2 = 'A_B_' + ymd + '141200_200536960_101_0005_001';
       const sc2Dir = path.join(ARRAY, ...treeOf(SC2));
       const sc2Nosr = SC2 + '_NOSR.tif';           // 用户口径的名字：输入 stem + _NOSR
-      const sc2Baked = SC2 + '_NOSR_preview.jpg';  // 烤出来的落点
+      const sc2Baked = SC2 + '_NOSR_preview.jpg';  // 生成的的落点
       makeTif(path.join(sc2Dir, SC2 + '.tif'), 1600, 800);
       makeTif(path.join(sc2Dir, sc2Nosr), 640, 320);
       fs.writeFileSync(path.join(sc2Dir, SC2 + '_meta.xml'),
@@ -1992,7 +1993,7 @@ async function main() {
       const upSc2Jpg = path.join(upDir, SC2 + '.jpg');
       makeJpg(upSc2Jpg, 800, 400);
       assert(!fs.existsSync(path.join(sc2Dir, sc2Baked)),
-        '开跑时场景目录里还没有那份烤出来的 jpg（对照）');
+        '开跑时场景目录里还没有那份生成的的 jpg（对照）');
 
       const l6PrevBefore = countUrl(previewRe);
       const l6RecsBefore = await page.evaluate(() => window.__viewer.recs().length);
@@ -2005,19 +2006,19 @@ async function main() {
       }, 30000, '本体显示件关联上盘阵场景', l6RecsBefore);
       assert(l6Rec.lqPath === sc2Dir.replace(/\\/g, '/'),
         `命中这一景（lqPath=${l6Rec.lqPath}）`);
-      // 后台那次「顺手烤」：文件落盘要等它读完那张栅格，所以等文件而不是等计数。
+      // 后台那次「同时生成」：文件落盘要等它读完那张栅格，所以等文件而不是等计数。
       await waitNode(() => jpegSize(path.join(sc2Dir, sc2Baked)) !== null, 30000,
         '未超分那份的 _preview.jpg 落盘');
       const l6Sz = jpegSize(path.join(sc2Dir, sc2Baked));
       assert(l6Sz.w === 320 && l6Sz.h === 160,
-        `${sc2Baked} 落盘，烤的是那一份栅格（÷2：640×320 → ${l6Sz.w}×${l6Sz.h}）`);
+        `${sc2Baked} 落盘，生成的是那一份栅格（÷2：640×320 → ${l6Sz.w}×${l6Sz.h}）`);
       // 只该对**那一份**发一次 /preview：请求的 URL 就是它的场景 id。
       const l6Seen = seen.filter((u) => previewRe.test(u)).slice(l6PrevBefore);
       const nosrL6 = byKind(await sibOf(l6Rec.sceneId), 'nosr');
       assert(l6Seen.length === 1 && l6Seen[0] === prevUrlOf(nosrL6.id),
         `这一次拖入只对「未超分那份」发了 /preview（${l6Seen.join(' ') || '一个都没发'}）`);
 
-      console.log('\n[L7] 把烤出来那份 jpg 拖回来：带 NOSR 标、同序号、不可修复');
+      console.log('\n[L7] 把生成的那份 jpg 拖回来：带 NOSR 标、同序号、不可修复');
       const l7RecsBefore = await page.evaluate(() => window.__viewer.recs().length);
       await input.uploadFile(path.join(sc2Dir, sc2Baked));
       try {
@@ -2069,15 +2070,15 @@ async function main() {
       assert(nosrCls && nosrCls.cls.includes('nosr'),
         `那颗标的类是 nosr（${JSON.stringify(nosrCls)}）`);
 
-      /* ---------- M. 一键解析：清单 → 逐景烤两份 jpg → 按序号入列 → 点亮联动 ---------- */
+      /* ---------- M. 一键解析：清单 → 逐景生成两份 jpg → 按序号入列 → 点亮联动 ---------- */
       // 用户口径（2026-09-27）：拖入 .txt 之后，面板上多一颗**醒目橘色**「一键解析」；
       // 点一下先清空左侧暂存区，再**严格按清单行序**逐景把「本体 jpg + NOSR jpg」两份
-      // 都烤到盘上、每景两张卡按同一个序号依次入列；此后点右侧清单里任意一行，左侧
+      // 都生成到盘上、每景两张卡按同一个序号依次入列；此后点右侧清单里任意一行，左侧
       // 对应的卡要橘色高亮 + 上下滚过去。
       //
       // 这一节刻意**另造新景**，不复用 H2 那两景：那两景在 H2 已经被打开过，它们的
       // 预览字节已经躺在浏览器的本地 blob 缓存里（键 = `场景 id|档位|jpg`），批量再取
-      // 就是本地命中、一个 HTTP 都不发 —— 那条路上「每个 id 恰好烤一次」根本没被验到。
+      // 就是本地命中、一个 HTTP 都不发 —— 那条路上「每个 id 恰好生成一次」根本没被验到。
       //
       // 四行清单一次把四种情形都摆出来：
       //   ①② 盘上有这一景、也有 NOSR → 每景两张卡（共用序号）；
@@ -2085,7 +2086,7 @@ async function main() {
       //   ④  盘上压根没有这一景 → 标红记账，**后面的景照跑**（前三行都已跑完）。
       // 四行的第一列都**缺产品段**（写 `…_L1`，盘阵上叫 `…_L1_PAN`），desc 里写影像
       // 类型 —— 批量这条路吃的正是 H2 那条「按影像类型补段」的解析，不能只认全名。
-      console.log('\n[M] 一键解析：按清单行序逐景烤两份 jpg、共用序号入列、点亮联动');
+      console.log('\n[M] 一键解析：按清单行序逐景生成两份 jpg、共用序号入列、点亮联动');
       const MB_META = '<?xml version="1.0" encoding="UTF-8"?>'
         + '<SolarAzimuth>181.79</SolarAzimuth>';
       // 尺寸各不相同：落在盘上的那五份 jpg 各是 ÷2 档（1200×600→600×300 等），
@@ -2166,8 +2167,8 @@ async function main() {
       //
       // 采样间隔取 5ms 而不是「看上去够快」的 40ms：这里的 fixture 是 1200×600 的小图、
       // 盘阵就在本机 temp，**整批只跑一百多毫秒**（12 个 HTTP 往返），40ms 那档一共才采
-      // 到 4 个点 —— 而下面那条 `samples >= 8` 是**非空转的底**（防「采样器压根没跑起来
-      // 于是 covered 恒为 0」这种假绿），不是时长目标。5ms 一采，整批至少落十几个点，
+      // 到 4 个点 —— 而下面那条 `samples >= 8` 是**非无进展的底**（防「采样器压根没跑起来
+      // 于是 covered 恒为 0」这种误报通过），不是时长目标。5ms 一采，整批至少落十几个点，
       // 任何持续 ≥5ms 的遮罩都躲不掉。
       await page.evaluate(() => {
         window.__mOverlay = [];
@@ -2218,9 +2219,9 @@ async function main() {
         mbScenes[1].name, mbScenes[1].name + '_NOSR', mbScenes[2].name];
       assert(mCards.length === 5 && mCards.map((r) => r.name).join('|') === mWantNames.join('|'),
         `五张卡、名字与顺序严格按清单行序（${mCards.map((r) => r.name.slice(-9)).join(' / ')}）`);
-      // 「生下来不带像素」：入列时 thumb 是 null，烤完（jpg 已落盘）**仍然**没有像素
+      // 「生下来不带像素」：入列时 thumb 是 null，生成完（jpg 已落盘）**仍然**没有像素
       // —— 像素是点开那一张时才取的。÷2 档一张 1200×600 的场景卡装着约 8MB 位图，
-      // 几十景一次装进内存必爆（浏览器单次分配 ~2GB），所以批量只负责把 jpg 烤到盘上。
+      // 几十景一次装进内存必爆（浏览器单次分配 ~2GB），所以批量只负责把 jpg 生成到盘上。
       assert(mCards.every((r) => r.hasCard && r.thumb === null),
         `五张卡都还是空卡（有身份、没像素：${mCards.filter((r) => r.hasCard && r.thumb === null).length}/5）`);
       assert(mCards.every((r) => r.route === 'jpg' && !!r.sceneDir && !!r.sceneId),
@@ -2241,7 +2242,7 @@ async function main() {
       assert(!await page.evaluate(() => !!window.__viewer.activeRec()),
         '批量入列不激活任何一张、不抢焦点（点开另有其路）');
 
-      /* M4. 五份 jpg 真落盘，且每个场景 id 恰好烤一次 */
+      /* M4. 五份 jpg 真落盘，且每个场景 id 恰好生成一次 */
       const mJpgs = [
         [mbScenes[0].dir, mbScenes[0].name + '_preview.jpg', 600, 300],
         [mbScenes[0].dir, mbScenes[0].name + '_NOSR_preview.jpg', 200, 100],
@@ -2263,7 +2264,7 @@ async function main() {
       assert(mDupIds.length === 0,
         `五张卡对应五个不同的场景 id（重复 ${mDupIds.length} 个 —— 一景不该出现两张本体）`);
       assert(mPerId.every((n) => n === 1),
-        `每个场景 id 恰好烤一次、没有重复读盘（${mPerId.join(',')}）`);
+        `每个场景 id 恰好生成一次、没有重复读盘（${mPerId.join(',')}）`);
       assert(mPrevSeen.length === 5,
         `这一趟总共只发 5 次 /preview（本体 3 + NOSR 2，实发 ${mPrevSeen.length} 次）`);
       assert(mSibSeen.length === 3,
@@ -2292,7 +2293,7 @@ async function main() {
         `收尾汇总把成败与缺失分开数（${mState.line}）`);
       assert(mState.head === '一键解析', `跑完按钮变回「一键解析」（${mState.head}）`);
       // 失败账**绝不能漏进 .txt**：statuses 是质检结论（会被 buildQcDoc 写回盘阵、
-      // 还驱动 counts.done 那颗计数），烤图失败是平台自己的事，两码事。
+      // 还驱动 counts.done 那颗计数），生成图失败是平台自己的事，两码事。
       const mQcAfter = await page.evaluate(() => window.__viewer.qcState());
       assert(Object.keys(mQcAfter.statuses).length === 0 && mQcAfter.done === 0,
         `失败账没漏进清单（statuses=${JSON.stringify(mQcAfter.statuses)} / 终态 ${mQcAfter.done} 行）`);
@@ -2324,7 +2325,7 @@ async function main() {
         return true;
       }, n);
       // 先把第 1 景那张**本体**点开（真 DOM 点击）：既把活动图定住好验「点亮不改它」，
-      // 又顺手把「空卡点开才取图」这条懒路走通。
+      // 又同时把「空卡点开才取图」这条懒路走通。
       await page.evaluate(() => document.querySelectorAll('.file-item')[0].click());
       // 等的是**像素真到位**（thumbW > 0），不是「它成了活动图」：`activate` 是同步把
       // activeId 挂上的，取图在后面几拍才回来 —— 只等 id 会在像素到之前就返回，
@@ -2382,7 +2383,7 @@ async function main() {
         `点亮**不动**活动图（active 还是 ${mLit.activeId}，起手的 ${mCards[0].id}）`);
       assert(mDown.top > mScroll0, `第 2 景在下面 → 侧栏真的滚下去了（${mScroll0} → ${mDown.top}）`);
       // 描边颜色要等动画走完再读：那 0.5s 里 outline-color 从半透明橘补间到实色。
-      // 这一觉顺带让上面那次平滑滚动走完，于是下面那个「回来了」的基线是**停稳值**。
+      // 这一觉同时让上面那次平滑滚动走完，于是下面那个「回来了」的基线是**停稳值**。
       await sleep(600);
       const mDownEnd = await mSideTop();
       assert(mDownEnd > mScroll0, `滚停在第 2 景那儿（scrollTop=${mDownEnd}）`);
@@ -2447,7 +2448,7 @@ async function main() {
       });
       assert(mDrawBtn && mDrawBtn.disabled === true, '「绘制掩码」也置灰（三处门都关着）');
 
-      /* M8. 跑到一半按「停止」：收手、已烤的卡留下、且不记一堆假失败 */
+      /* M8. 跑到一半按「停止」：收手、已生成的卡留下、且不记一堆假失败 */
       // 「停止」最容易写错的地方：在飞的 resolve 会以 AbortError 被拒，若把它当成
       // 「这一景解析失败」，用户一按停止就凭空多出一条红账。这条断言盯的就是它。
       const mStop = await page.evaluate(async () => {

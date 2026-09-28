@@ -97,7 +97,7 @@ class TestImageScenes(unittest.TestCase):
             self.assertEqual(r["results"][0]["date"], "2026-08-10")
 
     def test_preview_cache_is_not_a_scene(self):
-        """后端自己烘焙的 <stem>.preview.jpg 躺在场景目录里，不能被列成第二行。"""
+        """后端自己生成预览的 <stem>.preview.jpg 躺在场景目录里，不能被列成第二行。"""
         with tempfile.TemporaryDirectory() as d:
             p = write_scene(d, "GF07A03_PMS01_20260722125045")
             write_jpg(p.parent, p.stem + ".preview.jpg")
@@ -109,9 +109,9 @@ class TestImageScenes(unittest.TestCase):
     def test_mask_is_not_a_scene(self):
         """§4.3：<名字>_mask.tif 是「提交 SR」的输入，不该和它的场景并列成第二行。
 
-        真机形态：场景与掩膜同名同目录（`<目录名>.tif` + `<目录名>_mask.tif`），所以
-        排除一旦失效，页面上每个场景都会多出一行 — 卫星/传感器由掩膜文件名解析得到
-        （satellite=<父目录名>、sensor='mask'），尺寸取掩膜 TIFF 头。
+        真机形态：场景与掩码同名同目录（`<目录名>.tif` + `<目录名>_mask.tif`），所以
+        排除一旦失效，页面上每个场景都会多出一行 — 卫星/传感器由掩码文件名解析得到
+        （satellite=<父目录名>、sensor='mask'），尺寸取掩码 TIFF 头。
         """
         with tempfile.TemporaryDirectory() as d:
             p = write_scene(d, "GF07A03_PMS01_20260722125045")
@@ -199,7 +199,7 @@ class TestImageScenes(unittest.TestCase):
             self.assertFalse(svc.is_scene_file(sub))
 
     def test_drop_preview_beside_source_is_not_a_scene(self):
-        """拖入链烤出来的 `<stem>_preview.jpg` 不得被列成一行场景。
+        """拖入链生成的的 `<stem>_preview.jpg` 不得被列成一行场景。
 
         它跟源同目录、后缀也是 .jpg，只有「stem 必须等于目录名」这条能挡住它 ——
         白名单一旦放宽，用户拖入一次就会在场景库里多出一行假场景。
@@ -345,7 +345,7 @@ class TestNosrCandidates(unittest.TestCase):
             product = inp.parent / (self.SCENE + "_260318.tif")
             cands = svc.nosr_candidates(inp.parent, inp, product)
             self.assertEqual(cands[0], inp.parent / (self.SCENE + "_NOSR.tif"),
-                             "次选不得抢到前面")
+                             "次选不得认领前面")
             self.assertEqual(cands[-1],
                              inp.parent / (self.SCENE + "_260318_NOSR.tif"))
 

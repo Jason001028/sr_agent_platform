@@ -46,12 +46,13 @@ describe('parseQcList（真实样例）', () => {
     for (const i of list.issues) expect(i.name).not.toMatch(/[,，]$/);
   });
 
-  it('行列号按 (行, 列) 拆 —— 与 locatePixel 的 (x=列, y=行) 相反', () => {
-    // 0006 是「行列号:30766.11,21862.51」→ 行 30766.11、列 21862.51
-    expect(list.issues[0].row).toBe(30766.11);
-    expect(list.issues[0].col).toBe(21862.51);
-    expect(list.issues[3].row).toBe(20931.93);
-    expect(list.issues[3].col).toBe(4841.22);
+  it('行列号按 (列, 行) 拆 —— 与 locatePixel 的 (x=列, y=行) 同序，照抄原文', () => {
+    // 0006 是「行列号:30766.11,21862.51」→ 列 30766.11、行 21862.51
+    // （名字里的「行列号」是质检部门的叫法，实测写出来的是 X,Y 序，见 lib/qclist.ts 文件头）
+    expect(list.issues[0].col).toBe(30766.11);
+    expect(list.issues[0].row).toBe(21862.51);
+    expect(list.issues[3].col).toBe(20931.93);
+    expect(list.issues[3].row).toBe(4841.22);
   });
 
   it('问题类型 / 影像类型 / 责任人 逐列抽出（大小写原样保留）', () => {
@@ -140,7 +141,7 @@ describe('parseQcList（边界）', () => {
     ].join('\n');
     const list = parseQcList(src);
     expect(list.issues).toHaveLength(1);
-    expect(list.issues[0].row).toBe(1);          // 保留首次出现那条
+    expect(list.issues[0].col).toBe(1);          // 保留首次出现那条（第一个数 = 列）
     expect(list.issues[0].owner).toBe('甲');
   });
 

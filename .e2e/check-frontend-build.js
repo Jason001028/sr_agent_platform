@@ -131,10 +131,13 @@ async function main() {
     assert(!!input, '文件 input 存在');
     await input.uploadFile(FIXTURE);
     await page.waitForSelector('canvas.tif-canvas[width]', { timeout: 20000 });
-    await page.waitForFunction(() => {
+    // 底栏 2026-09-28 起只显示图名（尺寸/路由/预览尺度挪进 title，见 StatusBar.vue），
+    // 所以这里等的是**名字**：它出现 = rec 建好、解码走到上屏这一步，与过去等
+    // 「256×128」判的是同一件事，只是判据换成了那条上唯一还在的字段。
+    await page.waitForFunction((n) => {
       const el = document.querySelector('.rec-bar');
-      return el && el.textContent.includes('256×128');
-    }, { timeout: 20000 });
+      return el && el.textContent.includes(n);
+    }, { timeout: 20000 }, path.basename(FIXTURE));
     const stats1 = await page.evaluate(() => {
       const c = document.querySelector('canvas.tif-canvas');
       const ctx = c.getContext('2d');

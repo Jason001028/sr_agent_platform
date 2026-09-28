@@ -20,10 +20,10 @@
 **目标**：让查看器能浏览内网盘阵的遥感大图，并加盘阵检索/查看。显示 = **服务器预生成的 8192 JPG**，浏览器**不再对原始 TIF 做任何字节读取**。2026-09-02 已拍板改向（原 "HttpSource + nginx Range 稀疏读 TIF" 方案废弃），与 09-01"预览=JPG 中间产物"的原意对齐。
 
 ### 已定决策（不重议）
-- **显示 = 服务器预生成 JPG**：CentOS7 盘阵机把 TIF **稀疏采样 + 2% Linear 拉伸**烤成 8192 长边 JPEG，落缓存；浏览器 `<img>`/canvas 加载。首次生成约几十秒（后台/懒生成），之后 nginx 静态直出（原生缓存）。
+- **显示 = 服务器预生成 JPG**：CentOS7 盘阵机把 TIF **稀疏采样 + 2% Linear 拉伸**降采样到 8192 长边 JPEG，落缓存；浏览器 `<img>`/canvas 加载。首次生成约几十秒（后台/懒生成），之后 nginx 静态直出（原生缓存）。
 - **浏览器内不再读 TIF 字节**：`HttpSource` / Range 路径**砍掉，本阶段不实现**（`source.ts` 的 HttpSource 桩保留不动或删除均可，不被调用）。本地解码库（tifDecode/maskgen/sparse）**一律不动**。
 - **本地文件路径保持现状**：仍走稀疏 TIF 读法 + 全交互拉伸 + exportToJpg，这是阶段1-3 已交付行为，零改动、无回归。
-- 盘阵 JPG **只烤一种拉伸（2% Linear 默认）**：交互式拉伸下拉在盘阵场景**禁用**（tooltip 注明"盘阵 JPG 已烘焙 2% 线性拉伸"）；本地文件路径保留全部拉伸模式。
+- 盘阵 JPG **只生成一种拉伸（2% Linear 默认）**：交互式拉伸下拉在盘阵场景**禁用**（tooltip 注明"盘阵 JPG 已生成预览 2% 线性拉伸"）；本地文件路径保留全部拉伸模式。
 - **掩码**：在 JPG 画布上绘制 → 坐标按**场景元数据 W/H** 换算回全分辨率（thumbToOrig 逻辑不变，scale 来自元数据而非 probe）。阶段4 掩码仍前端直出 `掩码.tif` 下载；阶段5 才改为后端栅格化写盘阵。
 - 导出 JPG：盘阵场景**不提供**（服务器已有即为交付物）；本地文件路径保留。
 - 连通 = 直连 IP:端口设计；部署文档注明走端口转发时只改 URL。
@@ -31,7 +31,7 @@
 - 硬约束照旧：本地文件路径仍受 2GB/16384 约束；第三方库本地 vendor；补丁版 utif.js 绝不重装。
 
 ### 现有代码状态
-- 前端 Vue3 查看器（阶段3 完成）：六组件 + `stores/viewer.ts`（718 行，`decodeRec` 填充 DecodedRec{W/H/thumb/src/stats/route} + `paintStretch`）。本阶段新增**场景来源模式**：加载 JPG → 构造 route='jpg' 的同构 rec（src 取 JPG 画布像素，已烘焙拉伸）→ 掩码/平移/缩放/删除/合并全部复用。
+- 前端 Vue3 查看器（阶段3 完成）：六组件 + `stores/viewer.ts`（718 行，`decodeRec` 填充 DecodedRec{W/H/thumb/src/stats/route} + `paintStretch`）。本阶段新增**场景来源模式**：加载 JPG → 构造 route='jpg' 的同构 rec（src 取 JPG 画布像素，已生成预览拉伸）→ 掩码/平移/缩放/删除/合并全部复用。
 - `frontend/src/lib/source.ts`：HttpSource 是桩 → **本阶段不需要**。
 - `backend/services/scene_search.py`：已有 `search_scenes(...)`（递归扫 + fake 回退 + 文件名解析卫星/传感器/日期），120 行。backend 目前**无任何 FastAPI/REST**。
 - 后端有 `services/mask.py`（Pillow，栅格化掩码）可参考 Pillow 用法；无 TIF 稀疏读取的 Python 实现（需新写，镜像前端 `parseStrips`/`sparseSample`/`stretch` 语义）。

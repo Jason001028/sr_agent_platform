@@ -68,11 +68,11 @@ function bboxCenter(pts: Poly): Pt {
   return [(minx + maxx) / 2, (miny + maxy) / 2];
 }
 
-/* ---------------- 掩膜中心点 txt（对齐参考格式） ----------------
+/* ---------------- 掩码中心点 txt（对齐参考格式） ----------------
    UTF-8、无 BOM、\r\n；头两行全角字符照抄参考文件；
-   数据行：掩膜编号,X坐标,Y坐标（质心，保留 2 位小数）。
+   数据行：掩码编号,X坐标,Y坐标（质心，保留 2 位小数）。
    polygons 各顶点为原图像素坐标（x=列、y=行）。 */
-const MASK_TXT_HEADER = '＃掩膜中心点坐标（X，Y）\r\n＃掩膜编号，X坐标，Y坐标\r\n';
+const MASK_TXT_HEADER = '＃掩膜中心点坐标（X，Y）\r\n＃掩码编号，X坐标，Y坐标\r\n';
 export function buildMaskTxt(width: number, height: number, polygons: Poly[]): string {
   const out = [MASK_TXT_HEADER];
   for (let i = 0; i < polygons.length; i++) {

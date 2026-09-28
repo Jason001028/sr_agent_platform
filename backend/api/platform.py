@@ -244,9 +244,9 @@ def _task_view(state, task: dict) -> dict:
         # （整段运行期间 sr-api 不在场，或这一行是加这两列之前建的）—— 客户端显示
         # 「—」，不拿 created_at 顶替：那个值是**行**的生日，复用行会退化成行龄。
         "started_at": task["started_at"], "finished_at": task["finished_at"],
-        # 产物预览的服务端急烤进度（api-contract §4.x）。null = 没烤过；
+        # 产物预览的服务端主动生成进度（api-contract §4.x）。null = 没生成过；
         # running / done / skipped / failed 见 `preview_note` 里那句人话。
-        # 与 `state` 无关：作业跑完了、预览也可能因为沙箱/产物缺失/目录不可写而没烤。
+        # 与 `state` 无关：作业跑完了、预览也可能因为沙箱/产物缺失/目录不可写而没生成。
         "preview_state": task.get("preview_state"),
         "preview_note": task.get("preview_note"),
     }
@@ -814,7 +814,7 @@ async def write_qclist(request: Request):
     为什么不让浏览器写：File System Access API 在规范里是 `[SecureContext]` 标的，
     Chrome 只在 https / localhost 的页面上暴露它，而真机是 nginx `listen 80` 的
     `http://内网IP` —— 那条路在真机上永远走不通。后端本来就以 nginx 身份写盘阵
-    （掩码、SR 产物、烘焙 JPG），改走它既能在 http 下工作，也顺带把 GBK 清单写回
+    （掩码、SR 产物、预览 JPG），改走它既能在 http 下工作，也同时把 GBK 清单写回
     GBK 做对了（浏览器编不出 GBK，旧前端只能降级成 UTF-8+BOM）。
 
     请求侧被拒一律 400（detail 说清是哪一种），只有写盘本身的 OSError 是 422 ——

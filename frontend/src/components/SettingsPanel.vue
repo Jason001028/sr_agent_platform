@@ -61,10 +61,10 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
         >对比模式后台预取{{ store.cmpPrefetchOn ? ' · 开' : ' · 关' }}</button>
         <div class="set-note">
           进对比模式时提前把同场景另两类图的预览取到本地，切图不必现取。
-          只取服务端已有现成的那份，不会触发烘焙。
+          只取服务端已有现成的那份，不会触发生成预览。
         </div>
         <!-- 上一次预取干了什么。**为「缓存行停在 0 项」提供解释**：
-             第一次打开某个场景时合格项本来就是空的（另两类还没人烤过），
+             第一次打开某个场景时合格项本来就是空的（另两类还没人生成过），
              不写出来，用户分不清「没东西可预取」与「预取坏了」。 -->
         <div v-if="store.prefetchNote" class="set-out" data-e2e="set-prefetch-note">
           {{ store.prefetchNote }}

@@ -164,7 +164,7 @@ SR 生产环境锁在 py3.6，装不了 fastapi；平台侧也不需要 torch。
 | `SR_SCENES_ROOT` | 无 | 不设则场景检索回退到假数据，`source: fake` |
 | `SR_AGENT_DB` | `sr_agent.db` | 父目录必须 `nginx` 可写（SQLite 要落 journal） |
 | `SR_API_HOST` / `SR_API_PORT` | `127.0.0.1` / `8000` | 仅 `python -m backend.api` 直启时用 |
-| `SR_QUEUE_POLL_SEC` | `2.0` | 队列状态校准周期；急烤循环复用它当间隔 |
+| `SR_QUEUE_POLL_SEC` | `2.0` | 队列状态校准周期；主动生成循环复用它当间隔 |
 
 ### 7.2 路径与白名单
 
@@ -181,11 +181,11 @@ SR 生产环境锁在 py3.6，装不了 fastapi；平台侧也不需要 torch。
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `SR_PRODUCT_PREVIEW_DIV` | `4` | SR 产物预览**后台急烤**用哪一档，`0` = 关 |
-| `SR_PRODUCT_PREVIEW_MAX_AGE_SEC` | `86400` | 急烤只针对这个年龄窗口内的作业行 |
+| `SR_PRODUCT_PREVIEW_DIV` | `4` | SR 产物预览**后台主动生成**用哪一档，`0` = 关 |
+| `SR_PRODUCT_PREVIEW_MAX_AGE_SEC` | `86400` | 主动生成只针对这个年龄窗口内的作业行 |
 
 注意：`SR_PRODUCT_PREVIEW_DIV` 与**前端工具栏的档位是两回事**。前端档位是 UI 默认值，
-随请求带上；这个 env 只管后台急烤。两者默认值都是 4，但互不联动。
+随请求带上；这个 env 只管后台主动生成。两者默认值都是 4，但互不联动。
 
 ### 7.4 SR 提交
 

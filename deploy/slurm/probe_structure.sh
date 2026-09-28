@@ -143,7 +143,7 @@ if [ -n "$EX1" ]; then
   META_DEPTH="PROD 之下第 $(printf '%s' "${EX1#$PROD/}" | awk -F/ '{print NF}') 层"
   # 只留文件名（相对 D）：完整相对路径动辄 130+ 字符，一屏截不下、OCR 也易错。
   # ⚠️ 顺序必须是 strip_d 在前：sh_paths 会把 PROD 换成 @PROD@，那之后字符串里
-  #    就再也找不到 $D 的前缀，strip_d 的 sed 会空转（踩过）。
+  #    就再也找不到 $D 的前缀，strip_d 的 sed 会无进展（踩过）。
   META_EXAMPLE=$(printf '%s' "$EX1" | strip_d | sh_paths)
 else
   META_DEPTH="（PROD 之下 8 层内没扫到 *meta.xml）"

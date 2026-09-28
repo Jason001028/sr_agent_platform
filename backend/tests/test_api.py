@@ -163,7 +163,7 @@ class TestScenesDisk(SceneListMixin):
 
 
 class TestScenesImageSource(SceneListMixin):
-    """§4.7：盘阵 .jpg/.jpeg 行 = 显示就绪图本身（无烘焙、jpgUrl 指源文件）。"""
+    """§4.7：盘阵 .jpg/.jpeg 行 = 显示就绪图本身（无生成预览、jpgUrl 指源文件）。"""
 
     def make_jpg(self, name, w=40, h=30, dirp=None):
         """场景目录里的显示就绪 JPG（真机 <目录名>_meta.xml + <目录名>.jpg）。"""
@@ -184,7 +184,7 @@ class TestScenesImageSource(SceneListMixin):
         self.assertEqual(body["scanned"], 1)
         row = body["results"][0]
         self.assertEqual((row["W"], row["H"]), (40, 30))       # Pillow 头
-        self.assertTrue(row["hasPreview"])                     # 无需烘焙
+        self.assertTrue(row["hasPreview"])                     # 无需生成预览
         self.assertTrue(row["jpgUrl"].endswith(".jpg"))
         self.assertNotIn("_preview.jpg", row["jpgUrl"])
         self.assertEqual(
@@ -254,7 +254,7 @@ class TestPreview(SceneListMixin):
         self.assertEqual(jpg.stat().st_mtime, mtime1)
 
     def test_legacy_dot_preview_is_swept_on_open(self):
-        """改名（2026-09-22）前烤的那份点号文件已无任何读者：打开这一景时顺手删掉，
+        """改名（2026-09-22）前生成的那份点号文件已无任何读者：打开这一景时同时删掉，
         免得场景目录里躺着两个几乎同名的文件。"""
         c = self._disk_client_with_scene()
         d = Path(self._root.name, "GF07A03_PMS01_20260722125045")
@@ -313,7 +313,7 @@ class TestPreview(SceneListMixin):
 class TestPreviewDiv(SceneListMixin):
     """下采样档位：`?div=` 参数 + 行上的 `previewDiv` 回填。
 
-    前端据 `previewDiv` 与当前档位比对来决定要不要重烤 —— 只看 `hasPreview`
+    前端据 `previewDiv` 与当前档位比对来决定要不要重新生成 —— 只看 `hasPreview`
     不够（它不认档位），这是「滑了滑块盘上却不动」那个哑火的根因。
     """
 
@@ -342,12 +342,12 @@ class TestPreviewDiv(SceneListMixin):
         row = self._row(c)
         self.assertTrue(row["hasPreview"])
         self.assertEqual(row["previewDiv"], 8)
-        # 换档位、原地重烤 → 行字段跟着变
+        # 换档位、原地重新生成 → 行字段跟着变
         c.get(f"/api/scenes/{sid}/preview?div=2")
         self.assertEqual(self._row(c)["previewDiv"], 2)
 
     def test_legacy_stamp_reads_as_none(self):
-        """v2 那代戳解不出 div → None → 前端按当前档位重烤一轮（惰性，预期内）。"""
+        """v2 那代戳解不出 div → None → 前端按当前档位重新生成一轮（惰性，预期内）。"""
         c = self._client()
         sid = self._row(c)["id"]
         self.jpg.parent.mkdir(parents=True, exist_ok=True)

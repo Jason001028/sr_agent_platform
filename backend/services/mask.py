@@ -25,7 +25,7 @@ The 掩膜中心点坐标 txt follows the reference file
 SR_code/JL1KF02B03_..._mask.txt (UTF-8, CRLF, full-width header):
 
     ＃掩膜中心点坐标（X，Y）
-    ＃掩膜编号，X坐标，Y坐标
+    ＃掩码编号，X坐标，Y坐标
     1,25413.59,10197.36
     ...
 
@@ -44,7 +44,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 # 参考格式头两行（全角字符、CRLF）——与 tif_viewer/maskgen.js MASK_TXT_HEADER 一致。
-MASK_TXT_HEADER = "＃掩膜中心点坐标（X，Y）\r\n＃掩膜编号，X坐标，Y坐标\r\n"
+MASK_TXT_HEADER = "＃掩膜中心点坐标（X，Y）\r\n＃掩码编号，X坐标，Y坐标\r\n"
 
 
 def rasterize_polygons(width, height, polygons):

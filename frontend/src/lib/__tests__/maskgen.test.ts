@@ -47,7 +47,7 @@ describe('buildMaskTxt 格式（全角头/CRLF/2dp）', () => {
     const txt = MaskGen.buildMaskTxt(10, 10, [[[0, 0], [4, 0], [0, 4]]]);
     const lines = txt.split('\r\n');
     expect(lines[0]).toBe('＃掩膜中心点坐标（X，Y）');
-    expect(lines[1]).toBe('＃掩膜编号，X坐标，Y坐标');
+    expect(lines[1]).toBe('＃掩码编号，X坐标，Y坐标');
     expect(lines[2]).toBe('1,1.33,1.33');
     expect(lines[3]).toBe('');   // 应以 \r\n 结尾且无多余行
   });

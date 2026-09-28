@@ -9,6 +9,7 @@
 - **分类速查**：需求/计划 → [docs/planning/](docs/planning/)；经验 → [docs/experience/](docs/experience/)；规范 → [docs/conventions/](docs/conventions/)；背景知识 → [docs/knowledge/](docs/knowledge/)。
 - **SR_CODE 生产管线**（局部超分算法 / 调用契约 / Windows 移植环境 / 生产场景命名）：问算法、对接契约、移植/环境踩坑、盘阵目录名怎么反推 → [docs/sr_code/](docs/sr_code/)（主题域类目，见 docs/README §二）。
 - **新增文档**：先看 [docs/README.md](docs/README.md) §三分类规则，再落盘对应类目。
+- **术语用词**：写文档、代码注释、测试断言文案前先读 [docs/conventions/terminology-conventions.md](docs/conventions/terminology-conventions.md)。要点：「烘焙」已废止，改用**生成预览**（产物称「预览 JPG」，规则称「预览生成规则」，倍率称「缩放档位」）；黑话替换表见该文 §5；`docs/agent-book/`、`deepseek-harness-master/`、`frontend/dist/` 禁止替换。
 
 ## 代码主产物
 

@@ -16,8 +16,10 @@ import {
   rasterPreviewWins, previewCacheKey, sceneAnchors, ANCHOR_MAX,
   isDiskArrayUrl,
   sceneClearPreviewUrl, rowsAfterClear, clearSummaryText,
+  scenesSnapshotOf, parseScenesSnapshot, SCENES_SNAPSHOT_V,
 } from '../scene.js';
-import type { SceneRow, RasterPreview, ClearResult, ClearSummary } from '../scene.js';
+import type { SceneRow, RasterPreview, ClearResult, ClearSummary, ClearResponse,
+              ScenesSnapshot, SceneFilters } from '../scene.js';
 import { stretchRgba } from '../tifDecode.js';
 import { thumbToOrig } from '../viewMath.js';
 
@@ -71,7 +73,7 @@ describe('scenesQuery / 列表 URL', () => {
 describe('预览档位（全局下采样）', () => {
   const CFG = { apiBase: '', staticBase: 'http://static:9000' };
 
-  it('静态 URL 只对**烤出来的**预览拼 ?div=（源本身就是 JPG 的行不拼）', () => {
+  it('静态 URL 只对**生成的的**预览拼 ?div=（源本身就是 JPG 的行不拼）', () => {
     expect(sceneImageUrl(CFG, '/disk-array/a/b_preview.jpg', 8))
       .toBe('http://static:9000/disk-array/a/b_preview.jpg?div=8');
     // 源即显示件：档位对它无意义，拼了反而打红逐字断言的 e2e
@@ -101,20 +103,20 @@ describe('预览档位（全局下采样）', () => {
   });
 
   it('previewNeedsBake：四条分支', () => {
-    // 库外（无静态 URL）→ 打 /preview，会烤
+    // 库外（无静态 URL）→ 打 /preview，会生成
     expect(previewNeedsBake(row({ jpgUrl: null }), 4)).toBe(true);
-    // 缓存不在 → 烤
+    // 缓存不在 → 生成
     expect(previewNeedsBake(row({ jpgUrl: '/d/a_preview.jpg',
       hasPreview: false }), 4)).toBe(true);
-    // 在，但档位不符（含旧格式戳 null）→ 烤
+    // 在，但档位不符（含旧格式戳 null）→ 生成
     expect(previewNeedsBake(row({ jpgUrl: '/d/a_preview.jpg', hasPreview: true,
       previewDiv: 8 }), 4)).toBe(true);
     expect(previewNeedsBake(row({ jpgUrl: '/d/a_preview.jpg', hasPreview: true,
       previewDiv: null }), 4)).toBe(true);
-    // 在且档位对得上 → 不烤
+    // 在且档位对得上 → 不生成
     expect(previewNeedsBake(row({ jpgUrl: '/d/a_preview.jpg', hasPreview: true,
       previewDiv: 4 }), 4)).toBe(false);
-    // 源即显示件 → 永不烤
+    // 源即显示件 → 永不生成
     expect(previewNeedsBake(row({ jpgUrl: '/d/a.jpg', hasPreview: true,
       previewDiv: null }), 4)).toBe(false);
   });
@@ -161,14 +163,14 @@ describe('显示源比较规则：谁清晰用谁（rasterPreviewWins）', () =>
   });
 
   it('判据就是 round(长边/div) > 显示件长边（与后端 preview_max_edge 同式）', () => {
-    // 真机量级：24000 源 + 8192 显示件。÷2 烤出 12000 → 赢
+    // 真机量级：24000 源 + 8192 显示件。÷2 生成出 12000 → 赢
     expect(rasterPreviewWins(rp({}), 2)).toBe(true);
-    // ÷4 烤出 6000 → 输。**默认档位下这条规则基本不触发**，这正是要如实告诉用户的
+    // ÷4 生成出 6000 → 输。**默认档位下这条规则基本不触发**，这正是要如实告诉用户的
     expect(rasterPreviewWins(rp({}), 4)).toBe(false);
     expect(rasterPreviewWins(rp({}), 8)).toBe(false);
   });
 
-  it('相等不换（严格大于）：换过去要付一次烘焙，换来一样清晰就没理由动', () => {
+  it('相等不换（严格大于）：换过去要付一次生成预览，换来一样清晰就没理由动', () => {
     // 1600 源 ÷4 = 400，显示件长边正好 400 → 平手，保持现状
     expect(rasterPreviewWins(rp({ rasterW: 1600, rasterH: 800,
       jpgW: 400, jpgH: 200 }), 4)).toBe(false);
@@ -210,18 +212,18 @@ describe('显示源比较规则：谁清晰用谁（rasterPreviewWins）', () =>
 
   it('previewNeedsBake 的栅格分支：按**栅格那份预览**判，不看源 jpg 的三个字段', () => {
     const win = rp({ rasterW: 24000, rasterH: 24000, jpgW: 8192, jpgH: 8192 });
-    // 栅格赢且栅格那份预览还没烤过 → 要烤
+    // 栅格赢且栅格那份预览还没生成过 → 要生成
     expect(previewNeedsBake(row({ jpgUrl: '/d/a.jpg', hasPreview: true,
       previewDiv: null, rasterPreview: win }), 2)).toBe(true);
-    // 烤过但不是这一档 → 要烤
+    // 生成过但不是这一档 → 要生成
     expect(previewNeedsBake(row({ jpgUrl: '/d/a.jpg', hasPreview: true,
       previewDiv: null, rasterPreview: { ...win, hasPreview: true, previewDiv: 4 } }),
       2)).toBe(true);
-    // 烤过且档位对得上 → 不烤
+    // 生成过且档位对得上 → 不生成
     expect(previewNeedsBake(row({ jpgUrl: '/d/a.jpg', hasPreview: true,
       previewDiv: null, rasterPreview: { ...win, hasPreview: true, previewDiv: 2 } }),
       2)).toBe(false);
-    // 栅格**输**（÷4）→ 落回源 jpg 那套：源即显示件，永不烤
+    // 栅格**输**（÷4）→ 落回源 jpg 那套：源即显示件，永不生成
     expect(previewNeedsBake(row({ jpgUrl: '/d/a.jpg', hasPreview: true,
       previewDiv: null, rasterPreview: win }), 4)).toBe(false);
   });
@@ -245,7 +247,7 @@ describe('graySrcFromRgba / sceneDecodePixels（route=JPG 同构数据）', () =
     expect(Array.from(g)).toEqual([10, 200]);
   });
 
-  it('stats 固定 0..255 → linear 拉伸为恒等（烘焙值原样上屏）', () => {
+  it('stats 固定 0..255 → linear 拉伸为恒等（生成预览值原样上屏）', () => {
     // 灰度 16 像素，值故意非单调铺满：模拟已 2% 拉伸的浅/中/深灰
     const vals = [0, 51, 102, 128, 153, 200, 230, 255, 40, 90, 180, 210, 12, 66, 120, 240];
     const rgba = new Uint8Array(vals.length * 4);
@@ -516,6 +518,143 @@ describe('清除预览缓存 —— URL / 去留 / 汇总文案', () => {
 
     it('空汇总不报成「已清除 0 项」', () => {
       expect(clearSummaryText(s(), 0)).toBe('没有可清除的场景');
+    });
+  });
+});
+
+/* ---------------- 场景库快照（跨刷新的「上次检索」） ----------------
+ * 缺陷来源：清除预览缓存把行摘掉之后，用户刷新页面那几景又都在列表里（2026-09-28）。
+ * 快照负责让这份列表活过整页重载；这一组钉的是它的组装与解析判据。 */
+describe('场景库快照 —— 组装 / 解析', () => {
+  const row = (over: Partial<SceneRow> = {}): SceneRow => ({
+    id: 'a', name: 'A', satellite: null, sensor: null, date: null,
+    size_bytes: 0, fake: false, W: 1, H: 1, rel: null,
+    jpgUrl: null, hasPreview: false, lq_path: null, ...over,
+  });
+  const NO_FILTERS: SceneFilters = {
+    query: '', satellite: '', sensor: '', dateFrom: '', dateTo: '',
+  };
+  const clearRes = (over: Partial<ClearResponse> = {}): ClearResponse => ({
+    results: [],
+    summary: { cleared: 0, nothing: 0, skipped: 0, failed: 0, dirs: 0, files: 0, marked: 0 },
+    ...over,
+  });
+  const snapshot = (over: Partial<ScenesSnapshot> = {}): ScenesSnapshot => ({
+    v: SCENES_SNAPSHOT_V,
+    at: '2026-09-28T02:30:00.000Z',
+    source: 'disk', scanned: 9, count: 3,
+    rows: [row(), row({ id: 'b', name: 'B' })],
+    filters: NO_FILTERS, clearRemoved: 0, clearResult: null,
+    ...over,
+  });
+
+  describe('scenesSnapshotOf —— 什么时候该存', () => {
+    it('检索过（有 source + 时刻）才组装，字段原样带上', () => {
+      const s = scenesSnapshotOf({
+        at: new Date('2026-09-28T02:30:00.000Z'), source: 'disk',
+        scanned: 9, count: 2, rows: [row()],
+        filters: { ...NO_FILTERS, query: 'PMS' },
+        clearRemoved: 1, clearResult: clearRes(),
+      });
+      expect(s).not.toBeNull();
+      expect(s!.at).toBe('2026-09-28T02:30:00.000Z');
+      expect(s!.source).toBe('disk');
+      expect(s!.filters.query).toBe('PMS');
+      expect(s!.clearRemoved).toBe(1);
+      expect(s!.v).toBe(SCENES_SNAPSHOT_V);
+    });
+
+    it('没检索过（source 为空 / 没有时刻）→ null：不许拿一份空列表冒充「上次检索」', () => {
+      const base = { at: new Date(), source: 'disk' as const, scanned: 0,
+        count: 0, rows: [], filters: NO_FILTERS, clearRemoved: 0, clearResult: null };
+      expect(scenesSnapshotOf({ ...base, source: '' })).toBeNull();
+      expect(scenesSnapshotOf({ ...base, at: null })).toBeNull();
+    });
+
+    it('筛选是**按值**留存的（之后改输入框不会透过快照改到这份记录）', () => {
+      const f: SceneFilters = { ...NO_FILTERS, satellite: 'GF07A03' };
+      const s = scenesSnapshotOf({
+        at: new Date(), source: 'disk', scanned: 1, count: 1, rows: [row()],
+        filters: f, clearRemoved: 0, clearResult: null,
+      })!;
+      f.satellite = '改过了';
+      expect(s.filters.satellite).toBe('GF07A03');
+    });
+  });
+
+  describe('parseScenesSnapshot —— 读回（坏值一律不认）', () => {
+    it('正常快照原样读回（行数组、时刻、清除结论、筛选都还在）', () => {
+      const raw = JSON.stringify(snapshot({
+        filters: { ...NO_FILTERS, sensor: 'PMS01' },
+        clearRemoved: 2, clearResult: clearRes(),
+      }));
+      const s = parseScenesSnapshot(raw);
+      expect(s).not.toBeNull();
+      expect(s!.rows.map((r) => r.id)).toEqual(['a', 'b']);
+      expect(new Date(s!.at).toISOString()).toBe('2026-09-28T02:30:00.000Z');
+      expect(s!.filters.sensor).toBe('PMS01');
+      expect(s!.clearRemoved).toBe(2);
+      expect(s!.clearResult).not.toBeNull();
+    });
+
+    it('null / 空串 / 坏 JSON / 非对象 → null', () => {
+      expect(parseScenesSnapshot(null)).toBeNull();
+      expect(parseScenesSnapshot('')).toBeNull();
+      expect(parseScenesSnapshot('{不是 json')).toBeNull();
+      expect(parseScenesSnapshot('"字符串"')).toBeNull();
+      expect(parseScenesSnapshot('null')).toBeNull();
+    });
+
+    it('版本不符 → null（SceneRow 形状变了就靠这条退化成自动检索）', () => {
+      expect(parseScenesSnapshot(JSON.stringify(snapshot({ v: 99 })))).toBeNull();
+      expect(parseScenesSnapshot(JSON.stringify({ ...snapshot(), v: undefined })))
+        .toBeNull();
+    });
+
+    it('来源不认识 / 时刻读不出 / 计数不是有限数 → null', () => {
+      expect(parseScenesSnapshot(JSON.stringify({ ...snapshot(), source: 'x' })))
+        .toBeNull();
+      expect(parseScenesSnapshot(JSON.stringify(snapshot({ at: '不是时间' }))))
+        .toBeNull();
+      for (const k of ['scanned', 'count', 'clearRemoved']) {
+        expect(parseScenesSnapshot(JSON.stringify({ ...snapshot(), [k]: '3' })))
+          .toBeNull();
+        expect(parseScenesSnapshot(JSON.stringify({ ...snapshot(), [k]: Number.NaN })))
+          .toBeNull();
+      }
+    });
+
+    it('行数组里混进认不出身份的东西 → 整份不认（宁可重检索，也不渲染半份脏行）', () => {
+      expect(parseScenesSnapshot(JSON.stringify(snapshot({ rows: [row(), {} as SceneRow] }))))
+        .toBeNull();
+      expect(parseScenesSnapshot(JSON.stringify(snapshot({ rows: [row(), { id: '', name: 'x' } as SceneRow] }))))
+        .toBeNull();
+      expect(parseScenesSnapshot(JSON.stringify({ ...snapshot(), rows: 'abc' })))
+        .toBeNull();
+      // 认得出身份的额外字段（purged / rasterPreview / manual）不影响读回
+      const ok = parseScenesSnapshot(JSON.stringify(snapshot({
+        rows: [row({ purged: true, manual: true })],
+      })));
+      expect(ok!.rows[0].purged).toBe(true);
+    });
+
+    it('清除结论形状不对 → 整份不认（明细要靠它渲染）', () => {
+      const bad = (clearResult: unknown) => parseScenesSnapshot(
+        JSON.stringify(snapshot({ clearResult: clearResult as ClearResponse })));
+      expect(bad({ results: 'x' })).toBeNull();
+      expect(bad({ results: [] })).toBeNull();            // 没有 summary
+      expect(bad({ summary: {} })).toBeNull();            // 没有 results 数组
+      expect(bad([])).toBeNull();
+      // null 是合法值（还没清过）
+      expect(parseScenesSnapshot(JSON.stringify(snapshot({ clearResult: null }))))
+        .not.toBeNull();
+    });
+
+    it('老快照没有 filters 字段 → 当空筛选读回（不因为少一个可选块丢掉整份列表）', () => {
+      const { filters: _drop, ...withoutFilters } = snapshot();
+      const s = parseScenesSnapshot(JSON.stringify(withoutFilters));
+      expect(s).not.toBeNull();
+      expect(s!.filters).toEqual(NO_FILTERS);
     });
   });
 });

@@ -221,7 +221,7 @@ SRLOG。校验器随后判定 `Debug/_SRLOG.txt`（9/12 的）是上次残留、
 `local_exec.status()`（`backend/services/local_exec.py:257-271`）只在本地子进程仍存活时返回 RUNNING，
 且此时不读退出码文件——需先分清进程是否真的还在。
 
-**顺带被证实（审计段）**：`SR_SR_SCRIPT=code_0817_prod_slurm.py`（变体在用，`CUDA_VISIBLE_DEVICES`
+**同时被证实（审计段）**：`SR_SR_SCRIPT=code_0817_prod_slurm.py`（变体在用，`CUDA_VISIBLE_DEVICES`
 没被原脚本覆盖）、`CUDA_VISIBLE_DEVICES=0` 且绑到真实 GPU UUID、conda 解释器确实启动
 （跑到 SC 分支判断 + nvml + SolarAzimuth）。**「前端提交 → 后端用 conda 解释器跑 SR」这条链已验证，
 缺的只是让 SR 干活的输入。**

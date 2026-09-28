@@ -149,10 +149,10 @@ def preview_jpg_name(source_abs: Path) -> str:
     """预览 JPG 的文件名 —— **全平台唯一一条**：`<源 stem>_preview.jpg`。
 
     2026-09-22 起由 `<stem>.preview.jpg` 改名而来。理由不是好看：同一份栅格被三条链
-    各烤一份（急烤 / 打开时的惰性 / 拖入链），点号那份与下划线那份只差一个字符，
+    各生成一份（主动生成 / 打开时的惰性 / 拖入链），点号那份与下划线那份只差一个字符，
     真机上就是一个场景目录里躺着两个几乎同名、内容相同的文件，谁也说不清该看哪个。
     现在三条链落同一个名字，点号那份**没有任何读者**了 —— 旧文件由
-    `legacy_preview_path` 在每条链处理到那份栅格时顺手删掉。
+    `legacy_preview_path` 在每条链处理到那份栅格时同时删掉。
     """
     return Path(source_abs).stem + "_preview.jpg"
 
@@ -163,7 +163,7 @@ def preview_jpg_path(source_abs: Path, root: Path) -> Path:
     Default = `<源同目录>/<源 stem>_preview.jpg`；若配了 SR_PREVIEWS_ROOT（必须仍在
     scenes root 内）则放 `<previews_root>/<rel 目录>/<源 stem>_preview.jpg`，nginx
     单根 alias 下 URL 不变。**名字与档位无关**：换档位是原地覆盖同一份、靠戳里的 div
-    判废重烤（见 `preview_jpg.rule_stamp`）。
+    判废重新生成（见 `preview_jpg.rule_stamp`）。
     """
     if not _is_within(source_abs, root):
         raise PathDeniedError("源路径在白名单之外")
@@ -195,7 +195,7 @@ def drop_preview_path(source_abs: Path) -> Path:
 
     与 `preview_jpg_for` 现在**同名**（2026-09-22 起），差别只剩目录：
 
-    1. **不吃 `SR_PREVIEWS_ROOT`** —— 拖入链要的是「烤一次长期可用」，落进生产场景目录
+    1. **不吃 `SR_PREVIEWS_ROOT`** —— 拖入链要的是「生成一次长期可用」，落进生产场景目录
        才成立；搬去缓存根就又变成缓存了。
     2. **恒落源同目录**，不区分库内库外 —— 拖入的生产场景本来就在盘阵里，而库外路径
        （手工粘贴的任意绝对路径）也没有第二个合理的落点。
