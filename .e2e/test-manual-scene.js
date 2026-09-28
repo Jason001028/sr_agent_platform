@@ -574,7 +574,14 @@ async function main() {
     const countUrl = (re) => seen.filter((u) => re.test(u)).length;
     const resolveRe = new RegExp(`^${apiBase}/api/scenes/resolve$`);
     // `?div=` 是必须吃的：档位进了 URL（换档位要击穿 nginx 的 max-age）。
-    const previewRe = new RegExp(`^${apiBase}/api/scenes/[^/]+/preview\\?div=\\d+$`);
+    // 尾上那段 `&force=1` 可选：**一键解析**那批每次都按盘上最新源重新生成（`force`），
+    // 别的入口一个都不带。这里放宽成两者都算 `/preview`，否则 M 段那五条 URL 一条都
+    // 匹配不上 —— 计数归零，M 里十几条「增量基线」断言会**静默放水**（比红更糟）。
+    // 哪一条是带 force 的由下面的 forceRe 单独数，不靠这条正则区分。
+    const previewRe =
+      new RegExp(`^${apiBase}/api/scenes/[^/]+/preview\\?div=\\d+(?:&force=1)?$`);
+    const forceRe =
+      new RegExp(`^${apiBase}/api/scenes/[^/]+/preview\\?div=\\d+&force=1$`);
     // 拖入那道入口是**另一个端点**：产物落生产场景目录，只写一次、长期可用
     const dropPreviewRe =
       new RegExp(`^${apiBase}/api/scenes/[^/]+/preview-drop\\?div=\\d+$`);
@@ -2120,7 +2127,14 @@ async function main() {
         + mbRow(mbScenes[2].bare, 'pan') + mbRow(MB_GONE, 'pan'),
         QC3);
       await (await page.$('.qc-h input[type=file]')).uploadFile(QC3);
-      await waitFor(page, () => window.__viewer.qcState().loaded, 10000, '一键解析清单导入');
+      // 等到**这份新清单真的换上了**，不是等 `loaded`：上一节那份（H2，2 行）此刻
+      // 还挂在面板上，`loaded` 早就是 true —— 拿它当条件会立刻返回，下面读到的
+      // 是上一份的 total，断言报的却像「这份清单解析不出东西」。
+      // `sourceName` 只在**新的那份解析完**之后才会变成新文件名，且它是同步写进
+      // store 的（`importFile` 里 await 完 arrayBuffer 就 assign），与 total 同一拍。
+      await waitFor(page,
+        () => window.__viewer.qcState().sourceName === '待修复清单_一键解析.txt',
+        10000, '一键解析清单导入');
       const qsM = await page.evaluate(() => window.__viewer.qcState());
       assert(qsM.total === 4, `这一份清单解析出 4 行（${qsM.total} —— 与 H2 那份不是同一份）`);
       // 换了一份清单：上一份的跑批账（键是行名）必须跟着作废，不能带着上一份的名字
@@ -2250,15 +2264,27 @@ async function main() {
         [mbScenes[1].dir, mbScenes[1].name + '_NOSR_preview.jpg', 160, 80],
         [mbScenes[2].dir, mbScenes[2].name + '_preview.jpg', 400, 200],
       ];
+      const mBakedMtime = {};
       for (const [dir, f, w, h] of mJpgs) {
-        const sz = jpegSize(path.join(dir, f));
+        const full = path.join(dir, f);
+        const sz = jpegSize(full);
         assert(sz && sz.w === w && sz.h === h,
           `${f} 落盘且是 ÷2 那一档（${sz ? sz.w + '×' + sz.h : '没生成'}，期望 ${w}×${h}）`);
+        // 记下这一轮的 mtime：M8 会**再跑一遍同一份清单**（档位没变，仍是 ÷2），
+        // 那一次必须重新生成 —— 见 M8 末尾那条断言。
+        mBakedMtime[full] = fs.statSync(full).mtimeMs;
       }
       const mPrevSeen = seen.filter((u) => previewRe.test(u)).slice(mPrevBefore);
       const mSibSeen = seen.filter((u) => sibRe.test(u)).slice(mSibBefore);
+      // 一键解析那批**每次都带 force**（按盘上最新源重新生成）：URL 多一段 `&force=1`。
+      // 这段是**硬**断言而不是「可选的另一种形态」：不带 force 就说明批量那条链上的
+      // force 没穿到底，而它恰恰是本次改动的全部内容 —— 只看 previewRe 的话，
+      // 不带 force 的旧行为会照样全绿。
+      const mForced = mPrevSeen.filter((u) => forceRe.test(u));
+      assert(mForced.length === mPrevSeen.length,
+        `一键解析那 5 次 /preview 全带 force=1（实带 ${mForced.length}/${mPrevSeen.length}）`);
       const mCountOf = (id) => mPrevSeen.filter(
-        (u) => u === `${apiBase}/api/scenes/${encodeURIComponent(id)}/preview?div=2`).length;
+        (u) => u === `${apiBase}/api/scenes/${encodeURIComponent(id)}/preview?div=2&force=1`).length;
       const mPerId = mCards.map((r) => mCountOf(r.sceneId));
       const mDupIds = mCards.map((r) => r.sceneId).filter((id, i, a) => a.indexOf(id) !== i);
       assert(mDupIds.length === 0,
@@ -2496,6 +2522,24 @@ async function main() {
         && mStopEnd.recs.every((r) => r.hasCard),
         `已经落地的卡原样留下（${mStopEnd.recs.map((r) => r.name.slice(-9)).join(' / ')}）`);
       assert(mStopEnd.head === '一键解析', `按钮变回「一键解析」（${mStopEnd.head}）`);
+
+      /* M9. 第二遍（就是 M8 这一趟）**真的把 jpg 重写了一遍** */
+      // 这是本次改动（一键解析每次都按盘上最新源重新生成）的现场验收，也是这条链上
+      // 三个静默失效点的联合验收：本地 LRU 命中（force 必须让开）、浏览器 HTTP 缓存
+      // （nginx 给这条 location 挂了 max-age=300，而 location 匹配不看查询串 ——
+      //  `.e2e` 里没有 nginx，这一层抓不到，靠 `cache: 'no-store'` 那条单测钉）、
+      // 以及 force 有没有真的穿到服务端。三者任一生效，第二遍就是**秒回**、
+      // 盘上文件一个字节都不动，这条立刻红。
+      //
+      // 只钉第 1 景的本体那一份：M8 是「第一张卡刚落地就按停止」，而卡是在取图**之前**
+      // 入列的（`insertSceneCard` 先于 `bakeCardPixels`），所以读到的 rec 数不能推出
+      // 「第 1 景已经生成完」。能这么钉的理由是**那一次 /preview 已经发出去了**：
+      // 生成图这两条 HTTP 中断不了（收手的语义就是「在飞的那一景让它生成完」）——
+      // 请求既已发出，服务端一定会把文件重写一遍。
+      const mBody1 = path.join(mbScenes[0].dir, mbScenes[0].name + '_preview.jpg');
+      const mBody1Mtime = fs.statSync(mBody1).mtimeMs;
+      assert(mBody1Mtime > mBakedMtime[mBody1],
+        `第二遍按盘上最新的源重写了第 1 景的本体预览（mtime ${mBakedMtime[mBody1]} → ${mBody1Mtime}）`);
 
       /* ---------- I. 全程无错 ---------- */
       console.log('\n[I] 全程无错');

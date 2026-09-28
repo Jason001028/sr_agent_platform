@@ -32,7 +32,8 @@ fully — a 1.1 GB scene would blow memory) and raise otherwise.
 
 Cache policy lives at the call site (api layer): the caller derives jpg_path;
 ensure_preview_jpg() skips generation when an existing file is not older than
-the source *and* carries the current rule stamp.
+the source *and* carries the current rule stamp. `force=True` skips both of
+those checks — only 「一键解析」 passes it (see `ensure_preview_jpg` docstring).
 """
 
 from __future__ import annotations
@@ -666,7 +667,8 @@ def write_preview_jpg(jpg_path, pixels, *,
 
 
 def ensure_preview_jpg(source_path, jpg_path, div: int = LEGACY_PREVIEW_DIV,
-                       quality: int = PREVIEW_JPG_QUALITY) -> dict:
+                       quality: int = PREVIEW_JPG_QUALITY,
+                       force: bool = False) -> dict:
     """Generate preview JPEG if missing/stale; idempotent (cache by caller).
 
     命中要求两条同时成立：**不比源旧**，且**规则签名等于当前规则**（含档位）。只看
@@ -676,12 +678,20 @@ def ensure_preview_jpg(source_path, jpg_path, div: int = LEGACY_PREVIEW_DIV,
     就会出现「尺寸换了但戳没换 → 缓存永远命中 → 界面滑了盘上不动」这种哑火，所以
     干脆不给它们分开的机会。
 
+    `force=True` **两条判据一起跳过**，无条件重读源图重生成一遍（原地覆盖同一份）。
+    唯一调用方是「一键解析」（`GET /api/scenes/{id}/preview?force=1`，见 `api/app.py`）：
+    盘上那份预览可能相对最新源是旧的，而现有判据**判不出来** —— 最典型的是 NOSR 那份，
+    SR 作业重跑时旧产物是被**改名**成 `<同名>_NOSR.tif` 的，改名不改 mtime，于是
+    「不比源旧」+「戳是当前规则」两条全过，盘上留着上上轮输出的预览。这不是「缓存坏了」，
+    是缓存判据的粒度只能到时间戳，而用户要的是「这一批卡一定是刚按盘上最新源生成的」。
+    其它入口（打开 / 预取 / 拖入链）不传它，代价（读一遍大图）只落在批量那一条链上。
+
     Returns {"status": "generated"|"cached", "path", "w", "h", "error": None}.
     Raises PreviewError on generation failure.
     """
     src, dst = Path(source_path), Path(jpg_path)
     max_edge = preview_max_edge(src, div)      # 同时校验 div 合法
-    if dst.is_file() and os.path.getmtime(dst) >= os.path.getmtime(src):
+    if not force and dst.is_file() and os.path.getmtime(dst) >= os.path.getmtime(src):
         hit = cache_hit(dst, quality, div)
         if hit is not None:
             return {"status": "cached", "path": str(dst),

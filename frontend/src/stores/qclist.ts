@@ -408,7 +408,13 @@ export const useQcListStore = defineStore('qclist', () => {
    *  **失败与「缺 NOSR」分开数**：前者是要处理的，后者是盘上的事实。 */
   const bakeLine = computed(() => {
     const st = bakeState.value;
-    if (st === 'idle') return '按清单顺序逐景生成预览本体 + NOSR 两份 jpg，每景左侧落两张卡';
+    // 「每次按盘上最新源重新生成」这句是**必须的**：本轮的 force 让批量不再复用旧预览，
+    // 于是同一份清单连跑两次的耗时不再是一次快一次慢，而是两次一样长。不说清楚，用户
+    // 只会把「第二次怎么还这么慢」读成卡住了。
+    if (st === 'idle') {
+      return '按清单顺序逐景生成预览本体 + NOSR 两份 jpg（每次按盘上最新源重新生成），'
+        + '每景左侧落两张卡';
+    }
     if (st === 'stopping') return '正在停止（等这一景生成完…）';
     if (st === 'running') {
       return (bakeNow.value || '正在准备…') + ' · 已用 ' + fmtElapsed(bakeElapsed.value * 1000);

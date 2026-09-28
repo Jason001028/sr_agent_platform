@@ -350,6 +350,50 @@ class TestEnsurePreviewJpg(unittest.TestCase):
                 ensure_preview_jpg(str(Path(d) / "nope.tif"),
                                    str(Path(d) / "nope.preview.jpg"))
 
+    def test_force_regenerates_even_when_cache_is_fresh(self):
+        """force=True 跳过全部缓存判据：mtime 与规则戳都命中，照样重写一遍。
+
+        这是「一键解析」每次都要拿到「刚按盘上最新源生成的」那两份 jpg 所依赖的唯一
+        手段。要真有用，得是两个都成立的场合都失效 —— 只让 mtime 那一半松动不够：
+        NOSR 那份是**改名**过来的（重跑时旧产物改名成 `<同名>_NOSR.tif`），改名不改
+        mtime，内容换了而时间戳与规则戳全都对得上。"""
+        with tempfile.TemporaryDirectory() as d:
+            p, _ = make_strip_tif(d, "GF07A03_PMS01_20260722.tif", 64, 64)
+            jpg = Path(d, "GF07A03_PMS01_20260722.preview.jpg")
+            ensure_preview_jpg(str(p), str(jpg), div=4)
+            mtime1 = jpg.stat().st_mtime_ns
+            # 产物比源新、戳是当前规则的 ÷4 —— 常规判据下这一次必须是 cached
+            self.assertGreaterEqual(jpg.stat().st_mtime, p.stat().st_mtime)
+            self.assertEqual(ensure_preview_jpg(str(p), str(jpg), div=4)["status"],
+                             "cached")
+
+            r = ensure_preview_jpg(str(p), str(jpg), div=4, force=True)
+            self.assertEqual(r["status"], "generated")
+            self.assertEqual((r["w"], r["h"]), (16, 16))
+            self.assertNotEqual(jpg.stat().st_mtime_ns, mtime1, "文件确实被重写了")
+
+    def test_force_still_writes_the_current_rule_stamp(self):
+        """force 走的还是同一条生成路径：落盘的戳必须仍是当前规则（含档位）。
+
+        force 的作用是「跳过读取缓存判据」，不是「换一套写入口」—— 戳要是没写或者
+        写错了，下一次不 force 的入口（点开卡片、场景库打开）会永远判成要重新生成。"""
+        with tempfile.TemporaryDirectory() as d:
+            p, _ = make_strip_tif(d, "s.tif", 64, 64)
+            jpg = Path(d, "s.preview.jpg")
+            ensure_preview_jpg(str(p), str(jpg), div=8, force=True)
+            with Image.open(jpg) as im:
+                self.assertEqual(im.info.get("comment"), rule_stamp(div=8))
+            # 紧接着不 force 的那一次：判据全成立 → 命中（force 没在盘上留下后遗症）
+            self.assertEqual(ensure_preview_jpg(str(p), str(jpg), div=8)["status"],
+                             "cached")
+
+    def test_force_with_missing_source_still_raises(self):
+        """force 不绕过「源不在」：没得可读就是没得可读，不能悄悄返回上一张产物。"""
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(PreviewError):
+                ensure_preview_jpg(str(Path(d) / "nope.tif"),
+                                   str(Path(d) / "nope.preview.jpg"), force=True)
+
 
 class TestSplitHelpers(unittest.TestCase):
     """`ensure_preview_jpg` 拆出来的两个半成品（`cache_hit` / `write_preview_jpg`）。

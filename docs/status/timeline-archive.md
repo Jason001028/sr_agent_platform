@@ -2759,6 +2759,64 @@ Pinia store，理论上此时 store 里已有上一任务。**未定性**，下�
 **验证**：前端 **434 passed** + `vue-tsc --noEmit` 零错误 + `npm run build`；`.e2e/test-scenes.js`
 **136 项断言全绿**（含新增 J6b）。
 
+### 2026-09-28 · 一键解析改为每次强制重新生成预览（`?force=1`）
+
+**起因是一句提问**：档位没变时再点一次一键解析，盘上那份预览 JPG 会重新生成吗？答案是不会 ——
+`ensure_preview_jpg` 的两条判据「产物不比源旧」与「JPEG 注释里的规则签名逐字等于当前规则」
+都会通过，直接返回 `cached`，一个字节都不重写。用户当场定了口径：**每次一键解析都要基于盘上
+最新的 PAN.tif 重新生成**，本体与 NOSR **两份都强制**。
+
+**为什么原来那两条判据不够**：两条都是**推断**，推不出「内容换了而时间戳与规则都没换」。
+SR 重跑把旧产物改名成 `<同名>_NOSR.tif` 再覆盖本体 —— **改名不改 mtime**，于是内容换了、
+时间戳没换、规则戳还是当前那一个，三条判据全过，盘上留着一张上上游输出的预览。
+本体那一份只在「新文件 mtime 不晚于产物」（拷贝、搬迁保留原 mtime）时才漏判，NOSR 那一份则是
+**必然**漏判，这正是用户选「两份都强制」的理由。
+
+**改动**（一条参数从按钮一路穿到服务端，只在「一键解析」这条链上置真）：
+
+- 后端 `services/preview_jpg.py`：`ensure_preview_jpg(..., force: bool = False)`，`force` 为真时
+  **整块跳过**那两条判据，直接走同一套生成与原子落盘路径，返回 `generated`。
+- 后端 `api/app.py`：`GET /api/scenes/{id}/preview` 加 `force` 查询参数（全仓第一个 bool 型查询
+  参数）。「源本身就是 .jpg」那条早退与换栅格那一步都不改 —— 后者换的只是源，force 照旧作用在
+  换完之后的栅格上。`preview-drop`（拖入链）**不加** force，不给它多开一个「每次重生成」的口子。
+- 前端：`scenePreviewUrl` 追加 `&force=1`；`fetchSceneJpg` / `fetchRasterPreview` 收 `force`，
+  为真时**跳过本地 blob 缓存**（否则同一会话里第二次点按钮零请求、盘上根本不重生成）且
+  `needBake` 取或；`fetchSceneJpgShared` 的合流键加 `force` 维度（`${id}|${div}|force`），
+  否则用户正好点开正在生成的那张卡时，批量那条强制请求会被在飞的「点开取图」合流掉；
+  `bakeCardPixels` 整批传 `force = true`。
+- 面板文案两处跟着改（`qclist.ts` 的待命行、`QcListPanel.vue` 的按钮 title），说明每次都会
+  重读一遍源图，让人能预期变慢。
+
+**一处只看代码看不出来的坑**：`deploy/nginx.conf` 那条嵌套 location
+`~* /api/scenes/[^/]+/preview$` 给响应加了 `Cache-Control: public, max-age=300`，而 location
+匹配**不看查询串** —— force 那种情形 URL 每次逐字相同，5 分钟内再点一次会被浏览器直接端出
+上一次的字节、请求根本到不了服务端，症状恰好是「按钮跑得飞快、盘上文件没动」。
+所以挡它的是**前端**：force 的请求显式带 `cache: 'no-store'`，nginx 一个字不改。
+e2e 抓不到这一条（`.e2e` 里没有 nginx），改由单测钉住 `init.cache === 'no-store'`。
+
+**代价说清楚**：批量从「第二次几乎全命中、秒级」变成「每景读两遍大图（本体 + NOSR）」。
+
+**测试**：后端 **743 passed / 5 skipped**（基线 735，新增 8 条：`test_preview_jpg.py` 3、
+`test_api.py` 3、`test_scene_resolve.py` 2）；前端 **444 passed**（基线 434，新增 10 条）+
+`vue-tsc --noEmit` 零错误 + `npm run build`；e2e `.e2e/test-manual-scene.js` **298 项**全绿
+（基线 296 —— 新增 M4 的 force 硬计数与 M9 的「第二遍 mtime 变了」，后者同时是上面那个
+浏览器缓存坑的验收：全程同一个浏览器会话，第二遍若被 `max-age=300` 吃掉，mtime 就不会变）；
+`test-vue-viewer.js` 192、`test-scenes.js` 136、`test-platform.js` 26（前一份脚本未改动，
+文档旧值 190 已在 current-question.md 订正）。
+
+**同时修掉一处 e2e 既有竞态（与本次改动无关）**：M 段导入清单后等的是 `qcState().loaded`，
+而上一份清单的 `loaded` 早已为真 —— 这个谓词当场成立，`importFile` 还在等 `file.arrayBuffer()`
+就去读行数，读到上一份的 2 行。改成等 `qcState().sourceName === '待修复清单_一键解析.txt'`
+（只有新文件解析完才会变），并在注释里写明 `loaded` 为什么不能用。
+
+**同时发现、未改（待用户定）**：批量正在强制生成某一景时若用户点开**同一张**卡，点开走的是
+非 force 路径，可能显示重新生成前的字节，且这一条记录在本会话内不会重新取图。候选改法是
+在那个场景的本地 blob 上做失效，或生成完成后重新应用像素（后者一张卡几百 MB，逼近浏览器
+单次分配上限）。**未定**：属于行为口径取舍。
+
+**验证**：以上测试与 e2e 均已在开发机跑通；真机口径（对同一份清单连点两次，`ls --full-time`
+看两份 jpg 的 mtime 都变）待在 [real-machine-acceptance.md](real-machine-acceptance.md) 勾选。
+
 ---
 
 ## 附录：原 §3「背景决策」全文（2026-08-30 / 08-31 定调，逐字保留）

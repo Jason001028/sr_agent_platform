@@ -1479,11 +1479,24 @@ def create_app() -> FastAPI:
         return finish(hit)
 
     @app.get("/api/scenes/{scene_id}/preview")
-    def preview(scene_id: str, div: int = Query(2)):
+    def preview(scene_id: str, div: int = Query(2),
+                force: bool = Query(default=False)):
         """场景预览 JPG（响应体即字节）。`?div=` 选下采样档位（各边 ÷div）。
 
         落点：源同目录（或 `SR_PREVIEWS_ROOT` 镜像树）的 `<stem>_preview.jpg`，
         **与档位无关** —— 换档位是原地覆盖同一份，靠戳里的 div 判废重新生成。
+
+        `?force=1` **跳过缓存的全部判据**（不比源旧 + 规则戳等于当前规则），无条件重读
+        源图重生成一遍。**唯一的调用方是「一键解析」**（见下），其它入口一律不带 —— 它
+        要的是「这一批卡一定是刚按盘上最新源生成的」，而现有判据对「内容变了、时间戳
+        没变」这种情况判不出来（NOSR 那份就是：重跑时旧产物是被**改名**过来的）。
+        代价是每景重读一遍大图，只有用户主动按那颗按钮时才付。
+
+        **两处 `force` 不生效的地方，都是「没有可生成的东西」的早退**，不是漏做：
+        ① 源本身就是显示件（`.jpg`/`.jpeg`，下面那条早退）——直接回源字节，没有产物
+        可重生成；② 同名栅格赢时改从栅格生成，force 作用在**换完之后的栅格**上，与不带
+        它时是同一个源。除此之外 force 一律生效（含盘阵上的库外手工行，一键解析走的正是
+        那一条）。
 
         前端「一键解析」（《待修复清单》批量生成预览，2026-09-27）每景就是打这一个端点
         两次（本体 + 未超分那份），**不要为它加批量端点**：这里是 sync def、进了 anyio
@@ -1511,8 +1524,12 @@ def create_app() -> FastAPI:
             # 这是契约兜底：/preview 对任何场景行都返回可显示的 JPEG。
             return FileResponse(str(abs_path), media_type="image/jpeg")
         jpg = paths.preview_jpg_for(abs_path, root)
+        if force:
+            # 一行 stdout 供事后排查（同 `[nosr-preview]` 的口径）：force 是「本该秒回的
+            # 一次请求却读了几十秒大图」的唯一解释来源，真机上对时间线时只有它帮得上忙。
+            print(f"[preview-force] scene={scene_id} div={div} src={abs_path}")
         try:
-            ensure_preview_jpg(str(abs_path), str(jpg), div=div)
+            ensure_preview_jpg(str(abs_path), str(jpg), div=div, force=force)
         except PreviewError as e:
             raise HTTPException(status_code=422,
                                 detail=f"预览生成失败：{e}") from e

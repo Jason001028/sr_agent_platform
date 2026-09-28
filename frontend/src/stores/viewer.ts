@@ -39,7 +39,7 @@ import type { DecodedRec } from '../lib/decode.js';
 import {
   sceneDecodePixels, loadSrConfig, startStretch, loadPreviewDiv,
   savePreviewDiv, SCENE_PREVIEW_DIVS, previewDivLabel, rasterPreviewWins,
-  sceneAnchors,
+  sceneAnchors, sceneJpgInflightKey,
 } from '../lib/scene.js';
 import {
   apiResolveScene, apiBakeMask, apiSceneSiblings, fetchSceneJpg, fetchDropSceneJpg,
@@ -1380,13 +1380,16 @@ export const useViewerStore = defineStore('viewer', () => {
    *  失败也要摘掉表项：留一个已 reject 的 promise 在表里，后续每次调用都会立刻炸同一个错。 */
   const sceneJpgInflight = new Map<string, Promise<Blob>>();
 
-  function fetchSceneJpgShared(row: SceneRow, div: number): Promise<Blob> {
-    const key = row.id + '|' + div;
+  function fetchSceneJpgShared(row: SceneRow, div: number,
+                               force = false): Promise<Blob> {
+    // 键的构成与「force 为什么也进键」全在 sceneJpgInflightKey 的文档里
+    const key = sceneJpgInflightKey(row, div, force);
     const flying = sceneJpgInflight.get(key);
     if (flying) return flying;
-    const tracked = fetchSceneJpg(loadSrConfig(), row, div).finally(() => {
-      if (sceneJpgInflight.get(key) === tracked) sceneJpgInflight.delete(key);
-    });
+    const tracked = fetchSceneJpg(loadSrConfig(), row, div, undefined, force)
+      .finally(() => {
+        if (sceneJpgInflight.get(key) === tracked) sceneJpgInflight.delete(key);
+      });
     sceneJpgInflight.set(key, tracked);
     return tracked;
   }
@@ -1417,7 +1420,14 @@ export const useViewerStore = defineStore('viewer', () => {
     }
   }
 
-  /** 批量路：把这一张卡的 jpg 生成到盘上（服务端那份 + 本地 LRU），**不装像素**。
+  /** 批量路：把这一张卡的 jpg **按盘上最新的源重新生成**（服务端那份 + 本地 LRU），
+   *  **不装像素**。
+   *
+   *  `force = true` 是这条路与其它所有取图入口的唯一差别（用户口径 2026-09-28）：
+   *  「一键解析」这一批卡要的是「一定是刚按盘上最新源生成的」，而服务端那套判据对
+   *  「内容变了、时间戳没变」判不出来（NOSR 那份就是 —— SR 重跑时旧产物是被**改名**
+   *  过来的，改名不改 mtime）。代价是每景重读一遍大图，用户按按钮时就已经知道。
+   *  别的入口（点开卡片、场景库、预取、粘路径）一律不 force，盘上那份够用就直接复用。
    *
    *  抛错 = 这一景这一步失败了（由批量那边记账）；正常返回 = 成功、或这张卡已经不在了。 */
   async function bakeCardPixels(id: number): Promise<void> {
@@ -1427,7 +1437,7 @@ export const useViewerStore = defineStore('viewer', () => {
     try {
       // 取到手就扔掉：服务端那份已落盘，本地 LRU 也留了一份（api.ts 的 previewBlobs），
       // 所以点开这张卡时是一次命中、直接出图，不会重新生成。
-      await fetchSceneJpgShared(rec.card.row, previewDiv.value);
+      await fetchSceneJpgShared(rec.card.row, previewDiv.value, true);
       rec.status = '待打开（已加载）';
       rec.statusCls = '';
     } catch (e) {

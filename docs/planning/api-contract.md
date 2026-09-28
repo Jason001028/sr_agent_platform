@@ -14,6 +14,7 @@
 > **挂起项十（2026-09-24 用户口径，订正上面的挂起项八）**：① **NOSR 那一份的名字口径订正** —— 未超分那份 = **输入影像的 stem + `_NOSR`**（SC 场景 `<目录名>_NOSR.tif`，RC 场景 `PAN_NOSR.tif`）；`SR_code/util.py::writeTiff` 推出来的 `<产物 stem>_NOSR.tif` **退为次选**，留在候选清单最后。候选由 `scene_search.nosr_candidates()` **一处**产出，`/siblings` 与主动生成那条链读同一份 —— 挂起项八那版把名字**硬编码成 RC 的名字** `PAN_NOSR.tif`，SC 场景因此永远走 `skipped:`，而 `/siblings` 又只认次选那条，两处彼此对不上。② `/api/scenes/{id}/siblings` 响应**新增 `nosrCandidates`**（与 `productCandidates` 同形制、顺序即优先级），`nosr` 项**不再依赖 `suffix`**（名字由输入影像的 stem 拼，有测试钉着）。③ §3.5 `{name}` 分支**再认两种名字**：裸 `<目录名>_NOSR.jpg` 判 `('nosr','')`；`de_suffixed_stems` 的 `_NOSR` 尾段改在切段循环**内**剥（原先在循环外预剥，`<目录名>_NOSR` 的**真名**反而一条候选都进不去）。④ 前端在**拖入显示件**时对同景那一份多做一次静默预热（`stores/viewer.ts::warmNosrPreview`，命中才记账）—— 拖入不再只生成「自己那份」。详见 [preview-bake-pipeline §4.11](../knowledge/preview-bake-pipeline.md)。
 > **挂起项十一（2026-09-27，真机反馈的缺陷修复）**：§3.5 `{name}` 分支新增**可选字段 `product`** —— 《待修复清单》第一列**约定俗成省掉产品段**（`…_101_0020_001_L1`，盘阵上是 `…_101_0020_001_L1_PAN`），少了它按名字反推的**景级与段级目录名一起少一段**，两个日期候选全落空，用户报的「一批图都无法打开」就是它。补哪一段由那一行第二列的「影像类型:pan」定（`backend/pathguard.scene_name_products`：追加产品段后重推，**原样那条恒排第一**；提示没给/认不出则 `_PAN` 在先）。**只加一个可选字段，`{path}` 分支与库内检索一字未动**；名字自带产品段、带栅格扩展名的调用（拖拽指纹那条）行为不变，探测量上限也不变。同批修掉 `stores/scenes.ts::openByName` 的一个返回缺陷：成功后仍兜底返回错误串，面板「打开」点下去图开了、红条却说失败（详见 §3.5 那段与 [timeline-archive](../status/timeline-archive.md)）。
 > **挂起项十二（2026-09-27，「一键解析」批量生成预览）**：同批前端功能，**后端零新增端点、响应字段一字未改**（同挂起项四的形状）。每景就是既有三条链按序各走一遍：§3.5 `POST /api/scenes/resolve`（吃那一行的 `product` 补产品段）→ §3.6 的 `GET /api/scenes/{id}/preview`（本体那份）→ §3.8 `GET /api/scenes/{id}/siblings`（取 `nosr` 那一类）→ 再 `/preview` 一次（未超分那份）。驱动循环在 `stores/qclist.ts::bakeAll` + `lib/qcbatch.ts::runSceneBake`，**并发恒为 1**（服务端读盘不该并发，先例是 `viewer.maybePrefetchCompare`）。**刻意不做批量端点**：`/preview` 是 sync def、进 anyio 线程池，掐响应停不了服务端已经在生成的那一份；而「试过哪些候选、各自为什么不行」的真源只在 `scene_search` / `resolve_scene`，批量端点重写一遍就是新增一个「静默换路径」的入口。落点走 `/preview` 而**不是** `/preview-drop`：要与所有打开路径一致（保证「批量生成过 → 点开即出图」），走 drop 会让每张卡第一次打开再生成一遍。详见 [current-question §6.4](../status/current-question.md)。
+> **挂起项十三（2026-09-28，一键解析改为每次强制重新生成）**：挂起项十二那条链上**只加一个查询参数**：`GET /api/scenes/{id}/preview?div=N&force=1`。响应、字段、落点、签名一字未改。用户口径：一键解析**每次**都要基于盘上最新源重新生成，保证细节同步，本体与 NOSR **两份都强制** —— 因为十二那版走的是正常缓存判据，而判据对「内容换了、时间戳没换」判不出来，NOSR 那份尤其（重跑时旧产物是被**改名**过来的，改名不改 mtime）。其它入口（点开卡片、场景库打开、预取、粘路径、拖入链 `/preview-drop`）的缓存语义**保持不变**。代价说清楚：批量耗时从「第二次几乎全命中、秒级」变成「每景读两遍大图」。前端随之有三处一起让开（本地 blob 缓存、浏览器 HTTP 缓存 `cache:'no-store'`、在飞请求的合流键 `|force`），只改 URL 挡不住 nginx 那条 `max-age=300` —— 详尽理由与三个坑见 [preview-bake-pipeline §4.6](../knowledge/preview-bake-pipeline.md)。
 > **须说明的流程偏差**：上述改动**已与本文档同批落到代码**（不是"先评审后写码"）。理由是它同时修一个现存缺陷（两入口指纹不一致），拆开会让仓库停在一个已知会重复投作业的中间态；09-17、09-20 两批同理，前端要用的字段与端点不一起落地就没法验收（09-20 那批还带着 §4.5 那个后台循环，文档与循环必须同批，否则运维会照着一份没写主动生成的契约去配 env）。请复核，通过后把状态改回「已定」。此前其余条款自 2026-09-02 起均未变（评审通过时的交付基线：后端 190 unittest + 前端 Vitest 114 + vue-tsc 零错误 + `.e2e/test-platform.js` 11 断言全绿）。
 > 目标读者：阶段5 实现会话（后端 FastAPI + 前端 Vue3）。范围：把既有后端（agent loop + 4 工具 + `sr_tasks` + slurm）暴露成网页可调 REST/SSE，交付 聊天 / 共享任务队列 / 查看器画完掩码提交 SR。
 > 前置：阶段4 已完成（FastAPI 骨架 `backend/api/app.py`：`/api/scenes` + `/api/scenes/{id}/preview` + 路径白名单；前端 `/scenes` 页 + route='jpg' rec + `/chat` `/queue` 占位路由）。
@@ -56,7 +57,7 @@
 | 方法 路径 | 用途 | 章节 |
 |---|---|---|
 | `GET /api/health` | 存活 + 数据源（已有，返回 `{ok,source}`） | — |
-| `GET /api/scenes` · `GET /api/scenes/{id}/preview` | 场景检索/懒生成（阶段4 已有；**2026-09-19 起接 `div` 档位参数**、行上多 `previewDiv`；**2026-09-20 起 jpg 行多只读字段 `rasterPreview`**，见 §4.6） | — |
+| `GET /api/scenes` · `GET /api/scenes/{id}/preview` | 场景检索/懒生成（阶段4 已有；**2026-09-19 起接 `div` 档位参数**、行上多 `previewDiv`；**2026-09-20 起 jpg 行多只读字段 `rasterPreview`**，见 §4.6；**2026-09-28 起接 `force` 参数**——跳过全部缓存判据强制重新生成，只有「一键解析」带，见 §3.6） | — |
 | `POST /api/scenes/resolve` | 手填/反推一个盘阵场景目录 → 与库行同形的 `{source,row,resolved}`（2026-09-20 起 `row` 也带 `rasterPreview`） | 3.5 |
 | `GET /api/scenes/{id}/preview-drop` | **拖拽入口专用**的预览 JPG（落盘阵场景目录 `<stem>_preview.jpg`；目录不可写时兜底到临时缓存并回 `X-SR-Preview-Fallback: tmp`；不进库行，URL 不可静态映射） | 3.6 |
 | `GET /api/scenes/{id}/siblings` | **只读**诊断：一个场景的三类图（输入 / 本轮超分产物 / NOSR `_NOSR`）各叫什么、在不在、各是什么 id —— 供下一轮对比视图消费；NOSR 那份的候选清单（`nosrCandidates`）也从这里出 | 3.8 |
@@ -537,6 +538,17 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
   = `(2, 4, 8, 16, 32)`，含义是**各边除以 N**（`preview_max_edge = round(long_edge / div)`），
   缺省 **2**。非法值 → **400**。缺省是 2 而不是 4，是因为这一层是**生成预览契约**、要与
   `LEGACY_PREVIEW_DIV` 逐字节对齐；前端那个「默认 ÷4」只是 UI 默认值，活在前端常量里。
+- **`force` 查询参数（只有 `/preview` 有，2026-09-28）**：`?force=1` 跳过缓存的**全部**判据
+  （「产物不比源旧」+「JPEG 注释戳等于当前规则」），无条件按盘上当前的源重新生成一遍；
+  落点与 `?div=` 照旧 —— 还是原地覆盖同一份 `<stem>_preview.jpg`，只是这次不省那次读盘。
+  缺省 false，**唯一的调用方是「一键解析」**（见挂起项十三）；其它入口一个都不带。
+  `/preview-drop` 上**没有**这个参数，`preview_drop` 也不认它 —— 拖入是即时交互，不该每次
+  重读大图。唯一不吃 force 的早退是**源本身就是 `.jpg/.jpeg`**（回源字节，没有可生成的产物）；
+  同名栅格那一跳不在此列，force 作用在换完之后的栅格上（与不带它时是同一个源）。
+  为什么要这个参数而不是「让 `?div=` 变一变」：`div` 只在档位真的变了时才换 URL，而这里要治
+  的是**档位没变、盘上内容变了**（SR 重跑把旧产物改名成 `<同名>_NOSR.tif` 再覆盖本体，改名
+  不改 mtime），判据推不出来，只能由调用方声明。详见
+  [preview-bake-pipeline §4.6](../knowledge/preview-bake-pipeline.md)。
 - **档位是全局的**：工具栏定位组件右侧那条 5 档拖动条（默认 ÷4，存 `localStorage` 的
   `sr.previewDiv`）是平台级的「预览生成精度」，**拖入 / 场景库打开 / 粘盘阵路径打开**
   三条入口都按当前档位生成，由前端在请求里带上 `div`。后端自己不认识"当前档位"。

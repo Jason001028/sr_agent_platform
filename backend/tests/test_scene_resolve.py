@@ -15,6 +15,7 @@ listdir/scandir/walk 全部打桩成抛错，resolve 仍须 200）。
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from contextlib import ExitStack
 from datetime import date
@@ -1473,6 +1474,23 @@ class TestDropPreview(ResolveBase):
         self.assertEqual(c.get(f"/api/scenes/{sid}/preview-drop").status_code, 200)
         self.assertEqual(self.drop_jpg.stat().st_mtime_ns, first)
 
+    def test_force_param_is_ignored_here(self):
+        """`?force=1` 在拖入这条链上**不是一个参数**：行为逐字节不变（照旧命中缓存）。
+
+        一键解析的强制口径只走 `/preview` —— `app.py` 的 `preview_drop` 上写明了一键解析
+        不走它。这条钉的是「别顺手给拖入链也开一个每次重生成的口子」：拖入是即时交互，
+        开成每次重读大图，拖一张图要等几十秒。
+        """
+        c = self.client()
+        sid = self.scene_id_of_manual(c)
+        c.get(f"/api/scenes/{sid}/preview-drop?div=2")
+        first = self.drop_jpg.stat().st_mtime_ns
+        r = c.get(f"/api/scenes/{sid}/preview-drop?div=2&force=1")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.drop_jpg.stat().st_mtime_ns, first)
+        with Image.open(self.drop_jpg) as im:
+            self.assertEqual(im.size, (160, 320))   # 仍是 ÷2：档位没被这个参数带跑
+
     def test_div_change_rebakes_in_place(self):
         """换档位 → **同一个落点原地重新生成**（尺寸变了，文件数不变）。
 
@@ -1859,6 +1877,32 @@ class TestManualSceneId(ResolveBase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.headers["content-type"], "image/jpeg")
         self.assertTrue((d / f"{SCENE_NAME}_preview.jpg").is_file())
+
+    def test_force_regenerates_the_manual_row_too(self):
+        """库外手工行（`~` 开头的绝对路径 id）的 force：这是**一键解析在真机上走的那一支**。
+
+        `SR_SCENES_ROOT` 指向 `datahub`，而生产树在 `/DiskArray/GSHC2IMPS/...`，所以
+        拖入清单里那些场景全是库外行 —— 强制口径要真有用，先得在这一支上成立。
+        """
+        d = self.make_scene()
+        c = self.client()
+        row = c.post("/api/scenes/resolve",
+                     json={"path": self.win_path(d)}).json()["row"]
+        self.assertIsNone(row["jpgUrl"], "库外行没有静态 URL")
+        sid = row["id"]
+        self.assertEqual(c.get(f"/api/scenes/{sid}/preview?div=4").status_code, 200)
+        jpg = d / f"{SCENE_NAME}_preview.jpg"
+        first = jpg.stat().st_mtime_ns
+
+        time.sleep(0.02)
+        r = c.get(f"/api/scenes/{sid}/preview?div=4&force=1")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertNotEqual(jpg.stat().st_mtime_ns, first, "档位没变也重写了一遍")
+
+        # 不带 force 的第三次：判据全成立 → 命中，盘上不再动（其它入口的常态）
+        again = jpg.stat().st_mtime_ns
+        self.assertEqual(c.get(f"/api/scenes/{sid}/preview?div=4").status_code, 200)
+        self.assertEqual(jpg.stat().st_mtime_ns, again)
 
     def test_abs_id_outside_whitelist_404(self):
         # 手工 id 也不许越白名单（解码后仍过 ensure_allowed）

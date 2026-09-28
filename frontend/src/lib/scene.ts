@@ -179,14 +179,19 @@ export function sceneResolveUrl(cfg: SrConfig): string {
   return joinBase(cfg.apiBase, '/api/scenes/resolve');
 }
 
-/** 懒生成预览端点 URL：GET /api/scenes/{id}/preview?div=N → JPEG 字节。
+/** 懒生成预览端点 URL：GET /api/scenes/{id}/preview?div=N[&force=1] → JPEG 字节。
  *
  * 这是**长期**缓存那条链（写源同目录或 SR_PREVIEWS_ROOT 镜像树）。只有场景库
- * 与粘路径的入口该用它；拖入入口走 `dropPreviewUrl`，别混。 */
+ * 与粘路径的入口该用它；拖入入口走 `dropPreviewUrl`，别混。
+ *
+ * `force` = 服务端**跳过缓存的全部判据**、无条件重读源图重生成一遍（原地覆盖同一份）。
+ * 只有「一键解析」传它，理由见 `fetchSceneJpg` 的 force 参数。 */
 export function scenePreviewUrl(cfg: SrConfig, id: string,
-                               div: number = DEFAULT_PREVIEW_DIV): string {
+                               div: number = DEFAULT_PREVIEW_DIV,
+                               force = false): string {
+  const q = `?div=${div}` + (force ? '&force=1' : '');
   return joinBase(cfg.apiBase,
-                  `/api/scenes/${encodeURIComponent(id)}/preview?div=${div}`);
+                  `/api/scenes/${encodeURIComponent(id)}/preview${q}`);
 }
 
 /** 场景内三类图端点 URL：GET /api/scenes/{id}/siblings[?suffix=…]。
@@ -314,6 +319,21 @@ export function previewCacheKey(
   row: { id: string }, div: number, raster?: { name: string } | null,
 ): string {
   return raster ? `${row.id}|${div}|ras:${raster.name}` : `${row.id}|${div}|jpg`;
+}
+
+/** 「同一个场景、同一个档位**正在取**的那张图」的合流键（见 viewer.fetchSceneJpgShared）。
+ *
+ *  与 `previewCacheKey` 那条「哪一份」的道理同源：合流的前提是两边要的是同一件事。
+ *  「点开取图」不介意吃缓存、也不是非重生成不可，而「一键解析」的整条链**非要服务端
+ *  重写那个文件**不可 —— 合成一条，批量那次会被在飞的「点开」顶掉，症状是用户拿到旧
+ *  像素、盘上一个字节没动，而这一景在账上记的是成功。
+ *
+ *  抽成纯函数是为了能被单测钉住：那张在飞表在 store 里，没有测试台。
+ */
+export function sceneJpgInflightKey(
+  row: { id: string }, div: number, force = false,
+): string {
+  return `${row.id}|${div}` + (force ? '|force' : '');
 }
 
 /* ---------------- 显示源比较规则：谁清晰用谁 ----------------

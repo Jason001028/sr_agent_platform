@@ -575,6 +575,11 @@ function cacheBlob(key: string, blob: Blob): Blob {
  *  所以还要用 `isBakedPreviewUrl` 把「源本身就是 JPG」那一类摘出去（见
  *  `previewNeedsBake`）。
  *
+ *  `force` = **这次必须按盘上最新的源重新生成**，服务端会跳过缓存的全部判据（`?force=1`）。
+ *  只有「一键解析」传它（`viewer.bakeCardPixels`）：那一批卡要的是「一定是刚生成的」，
+ *  而现有判据对「内容变了、时间戳没变」判不出来（NOSR 那份就是 —— 重跑时旧产物是被
+ *  改名过来的，改名不改 mtime）。代价是每景重读一遍大图，所以别的入口一个都不传。
+ *
  *  `onPhase` 在「本次会触发服务端生成」时被调用一次（只有这一次，没有百分比）：
  *  首次生成预览要读一遍源图，2.4 万像素级的场景在盘阵上要几秒到几十秒，调用方拿它
  *  更新遮罩文案，别让界面看起来像卡死了。 */
@@ -583,17 +588,22 @@ export async function fetchSceneJpg(
   row: SceneRow,
   div: number = loadPreviewDiv(),
   onPhase?: (text: string) => void,
+  force = false,
 ): Promise<Blob> {
   const rp = row.rasterPreview;
   if (rp && rasterPreviewWins(rp, div)) {
-    return await fetchRasterPreview(cfg, row, rp, div, onPhase);
+    return await fetchRasterPreview(cfg, row, rp, div, onPhase, force);
   }
   const baked = isBakedPreviewUrl(row.jpgUrl);
-  const needBake = previewNeedsBake(row, div);
+  const needBake = force || previewNeedsBake(row, div);
   // 本地已有一份（同一场景 + 同一档位，见 previewCacheKey）→ 直接用。
   // **命中也要照做网络路径那两行副作用**：下一同会话语义（previewNeedsBake）靠它们，
   // 少了就会出现「盘上明明有这一档的预览，却每次都判成要重新生成」。
-  const cached = previewBlobs.get(previewCacheKey(row, div));
+  //
+  // **force 时这一支必须让开**：那份本地字节正是这次要作废的东西 —— 吃它就成了
+  // 「第二次一键解析零请求、盘上一个字节都不动」，而按钮看起来跑完了。让开不等于丢弃，
+  // 走完网络后 `cacheBlob` 会覆盖同一个键，之后点开这张卡拿到的就是刚生成的那份。
+  const cached = force ? undefined : previewBlobs.get(previewCacheKey(row, div));
   if (cached) {
     row.hasPreview = true;
     if (row.jpgUrl) row.previewDiv = div;
@@ -601,20 +611,32 @@ export async function fetchSceneJpg(
   }
   // 会不会**真的**触发服务端生成（onPhase 的判据）。与 previewNeedsBake 的差别只在
   // 库外那一支：库外每次都走 /preview，但缓存已在时它是命中、不是生成预览，别吓人。
-  const willBake = !row.jpgUrl ? !row.hasPreview
-    : (!row.hasPreview || (baked && row.previewDiv !== div));
+  // force 是一律会生成（服务端无条件重生成），文案另起一句 —— 那不是「首次打开」。
+  const willBake = force || (!row.jpgUrl ? !row.hasPreview
+    : (!row.hasPreview || (baked && row.previewDiv !== div)));
   if (willBake) {
-    onPhase?.(`首次打开：正在服务器生成预览 ${previewDivLabel(div)} 预览图`
-      + '（直方图均衡），要读一遍大图，可能要等几十秒…');
+    onPhase?.(force
+      ? `正在按盘上最新的源重新生成 ${previewDivLabel(div)} 预览图`
+        + '（直方图均衡），要读一遍大图…'
+      : `首次打开：正在服务器生成预览 ${previewDivLabel(div)} 预览图`
+        + '（直方图均衡），要读一遍大图，可能要等几十秒…');
   }
+  // force 时下面这两个请求**本身**也要绕浏览器缓存：`deploy/nginx.conf` 给
+  // `/api/scenes/*/preview` 那条 location 加了 `Cache-Control: public, max-age=300`，
+  // 而 location 匹配**不看查询串** —— 同一个 id + 同一档位 + force 的 URL 每次逐字
+  // 相同，5 分钟内再点一次一键解析会被浏览器直接端出上一次的响应，请求根本到不了
+  // 服务端，盘上什么都不动、按钮却跑完了。`?div=N` 那套击穿只对「URL 变了」有效，
+  // 这里 URL 没变，只能显式 no-store。
+  const noStore = force ? { cache: 'no-store' as const } : undefined;
   if (!row.jpgUrl) {
     // 库外：没有静态 URL，这次请求的**响应体本身**就是那张 JPEG。
-    const p = await http(scenePreviewUrl(cfg, row.id, div));
+    const p = await http(scenePreviewUrl(cfg, row.id, div, force), noStore);
     row.hasPreview = true;
     return cacheBlob(previewCacheKey(row, div), await p.blob());
   }
   if (needBake) {
-    await http(scenePreviewUrl(cfg, row.id, div));   // 只触发生成预览，字节丢掉
+    // 只触发生成预览，字节丢掉
+    await http(scenePreviewUrl(cfg, row.id, div, force), noStore);
     row.hasPreview = true;
     row.previewDiv = div;      // 记上实际档位：同一会话内再打开不必重新生成
   }
@@ -648,31 +670,41 @@ async function fetchRasterPreview(
   rp: RasterPreview,
   div: number,
   onPhase?: (text: string) => void,
+  force = false,
 ): Promise<Blob> {
-  const needBake = !rp.hasPreview || rp.previewDiv !== div;
+  // force 的语义与 fetchSceneJpg 那条逐字相同（跳过缓存判据 + 绕开本地与浏览器缓存）。
+  // 「一键解析」走不到这一支（它要求解析出来的源是 `.jpg` 且同名栅格赢），但留一个
+  // 静默失效的分支不如让它如实生效。
+  const needBake = force || !rp.hasPreview || rp.previewDiv !== div;
   // 键里带 `rp.name`：这一支端上来的是**栅格**那份预览，与源 jpg 那份不是同一串字节
   // （见 previewCacheKey）。
   const key = previewCacheKey(row, div, rp);
-  const cached = previewBlobs.get(key);
+  const cached = force ? undefined : previewBlobs.get(key);
   if (cached) {
     rp.hasPreview = true;
     rp.previewDiv = div;
     return cached;
   }
   if (needBake) {
-    onPhase?.(`首次打开：正在服务器从同名栅格 ${rp.name} 生成预览 `
-      + `${previewDivLabel(div)} 预览图（直方图均衡），要读一遍大图，`
-      + '可能要等几十秒…');
+    onPhase?.(force
+      ? `正在按盘上最新的同名栅格 ${rp.name} 重新生成 `
+        + `${previewDivLabel(div)} 预览图（直方图均衡），要读一遍大图…`
+      : `首次打开：正在服务器从同名栅格 ${rp.name} 生成预览 `
+        + `${previewDivLabel(div)} 预览图（直方图均衡），要读一遍大图，`
+        + '可能要等几十秒…');
   }
+  // 绕浏览器缓存的理由与 noStore 那处逐字相同（nginx 那条 location 不看查询串）
+  const noStore = force ? { cache: 'no-store' as const } : undefined;
   if (!rp.jpgUrl) {
     // 库外栅格：没有静态 URL，这次请求的**响应体本身**就是那张 JPEG。
-    const p = await http(scenePreviewUrl(cfg, row.id, div));
+    const p = await http(scenePreviewUrl(cfg, row.id, div, force), noStore);
     rp.hasPreview = true;
     rp.previewDiv = div;
     return cacheBlob(key, await p.blob());
   }
   if (needBake) {
-    await http(scenePreviewUrl(cfg, row.id, div));   // 只触发生成预览，字节丢掉
+    // 只触发生成预览，字节丢掉
+    await http(scenePreviewUrl(cfg, row.id, div, force), noStore);
     rp.hasPreview = true;
     rp.previewDiv = div;
   }

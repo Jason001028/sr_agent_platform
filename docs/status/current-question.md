@@ -215,6 +215,16 @@
   各自为什么不行」的唯一真源在 `scene_search` / `resolve_scene`，批量端点重写一遍就是
   多一个「静默换路径」的入口。驱动的循环在 [stores/qclist.ts](../../frontend/src/stores/qclist.ts)
   （`bakeAll`）+ [lib/qcbatch.ts](../../frontend/src/lib/qcbatch.ts)（`runSceneBake`，**并发恒为 1**）。
+- **每次强制重新生成**（2026-09-28 用户口径）：这条链上的两次 `/preview` 都带 `?force=1`
+  —— 本体与 NOSR **两份都强制**，服务端跳过缓存的**全部**判据、无条件按盘上当前的源重新生成
+  一遍（落点与档位照旧，原地覆盖）。理由是判据只能推断，推不出「内容换了、时间戳没换」：
+  SR 重跑时旧产物是被**改名**成 `<同名>_NOSR.tif` 的，改名不改 mtime。
+  **别的入口一个都不带**（点开卡片、场景库、预取、粘路径、拖入链 —— 盘上那份够用就复用），
+  `/preview-drop` 上根本没有这个参数。代价说清楚：批量耗时从「第二次几乎全命中、秒级」变成
+  「每景读两遍大图」；前端三处必须一起让开（本地 blob 缓存 / 浏览器 HTTP 缓存
+  `cache:'no-store'` / 在飞请求的合流键 `|force`），只改 URL 挡不住 nginx 那条 `max-age=300`。
+  详见 [gui-experience §9.8](../experience/gui-experience.md) 与
+  [preview-bake-pipeline §4.6](../knowledge/preview-bake-pipeline.md)。
 - **每景两张卡、共用同一个序号**：本体卡的 `sceneDir = resolved.dir`，NOSR 卡的
   `sceneDir = siblings.lqPath`（两者都是同一个场景目录的 `as_posix()`），序号由
   `viewer.sceneOrdinalOf` 按 `sceneDir` 分组发号 —— 先清空再按行序入列，序号天然是 1,1,2,2,…
@@ -248,7 +258,24 @@
 
 ### 6.3 测试基线
 
-**2026-09-28 全套重跑（全部绿）**：
+**2026-09-28 第二轮重跑（一键解析改为每次强制重新生成，全部绿）**：
+
+- 后端：**743 passed / 5 skipped**（09-28 第一轮为 735 —— 本轮净增 8：`force` 的服务层 3 条、
+  端点层「不带 force 是命中 / 带 force 原地重写 / 显式 force=0 也是命中」3 条、
+  拖入链「`?force=1` 不是参数、行为逐字节不变」与库外手工行「force 照样生效」各 1 条）。
+- 前端：**444 passed** + `vue-tsc --noEmit` 零错误 + `npm run build`（第一轮为 434 —— 本轮净增
+  10：`api.test.ts` 5 条 force 用例、`scene.test.ts` 的 `scenePreviewUrl`/`sceneJpgInflightKey`
+  各若干）。其中「force 的请求带 `cache: 'no-store'`」那条是**唯一**能钉住浏览器缓存那个坑的
+  测试 —— `.e2e` 里没有 nginx，浏览器 HTTP 缓存那一层 e2e 构造不出来。
+- 浏览器回归（`.e2e/`，先 `cd frontend && npm run build`）：
+  `test-manual-scene.js` **298**（第一轮 296 —— 本轮 +2：M4 那条「五次 /preview 全带 force=1」
+  的硬计数，与 M9「第二遍按盘上最新的源重写了第 1 景的本体预览」）·
+  `test-vue-viewer.js` **192** · `test-scenes.js` **136**（后两套的脚本本轮一个字未改，
+  数出来的就是实测值；第一轮那行记的 190 与实测差 2，以实测为准）—— 三套全绿，无回归。
+  M9 那条同时是那三个静默失效点（本地 blob / 浏览器缓存 / 合流键）的**现场**验收：任一生效，
+  第二遍就是秒回、盘上文件一个字节不动，它立刻红。
+
+**2026-09-28 第一轮（一键解析上线时，全部绿）**：
 
 - 后端：**735 passed / 5 skipped / 130 subtests**（`python -m pytest backend/`，21.7s；09-24 为
   720 —— 本轮「一键解析」相关的路径/命名/候选清单用例净增 15 条）。

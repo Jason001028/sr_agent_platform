@@ -497,6 +497,97 @@ describe('fetchSceneJpg', () => {
     await fetchSceneJpg(CFG, hit, 4, phase);
     expect(phase).not.toHaveBeenCalled();
   });
+
+  /* ---------------- force：一键解析专用的「每次重读盘上最新源」 ----------------
+   *
+   * force 的调用方**只有** `viewer.bakeCardPixels`（一键解析那一批）。下面四条钉的是
+   * 「档位没变、缓存全命中」时它照样把请求打到服务端，且这两个请求本身绕开了浏览器 HTTP
+   * 缓存 —— 后者是 .e2e 抓不到的坑（e2e 里没有 nginx），只能在这一层钉住。 */
+
+  /** 记下每次 fetch 的 init：`stubFetch` 那条只收 URL，看不见 `cache` 选项。 */
+  function stubFetchWithInit(bodies: Record<string, string>): {
+    urls: string[]; inits: (RequestInit | undefined)[];
+  } {
+    const urls: string[] = [];
+    const inits: (RequestInit | undefined)[] = [];
+    vi.stubGlobal('fetch', (u: string, init?: RequestInit) => {
+      urls.push(u); inits.push(init);
+      if (!(u in bodies)) return Promise.resolve(new Response('nope', { status: 404 }));
+      return Promise.resolve(new Response(bodies[u], { status: 200 }));
+    });
+    return { urls, inits };
+  }
+
+  it('库外 + force：URL 带 &force=1，且请求本身绕开浏览器缓存', async () => {
+    const s = stubFetchWithInit({
+      '/api/scenes/~YWJj/preview?div=4&force=1': 'PREVIEW',
+    });
+    const r = row({ jpgUrl: null, hasPreview: true });   // 记账字段说「已生成」
+    expect(await (await fetchSceneJpg(CFG, r, 4, undefined, true)).text())
+      .toBe('PREVIEW');
+    expect(s.urls).toEqual(['/api/scenes/~YWJj/preview?div=4&force=1']);
+    // `deploy/nginx.conf` 给这条 location 挂了 max-age=300，而 location 匹配不看查询串：
+    // 不带 no-store 的话 5 分钟内第二次一键解析会被浏览器端出上一次的字节。
+    expect(s.inits[0]?.cache).toBe('no-store');
+  });
+
+  it('库外 + force 连取两次：两次请求（对照「同一行同档位第二次零请求」那条）', async () => {
+    const s = stubFetchWithInit({
+      '/api/scenes/~YWJj/preview?div=4&force=1': 'PREVIEW',
+    });
+    const r = row({ jpgUrl: null, hasPreview: true });
+    await fetchSceneJpg(CFG, r, 4, undefined, true);
+    await fetchSceneJpg(CFG, r, 4, undefined, true);
+    // 本地 previewBlobs 那一层在 force 时让开（让开了才能重生成），走完照旧覆盖同一键。
+    expect(s.urls.length).toBe(2);
+
+    // 对照：不传 force 时第二次仍是零请求（其它入口的缓存语义没被改坏）
+    s.urls.length = 0;
+    await fetchSceneJpg(CFG, r, 4);
+    await fetchSceneJpg(CFG, r, 4);
+    expect(s.urls.length).toBe(0);
+  });
+
+  it('库行 + force：先 /preview?div=N&force=1（丢字节），再静态取图，两次都 no-store', async () => {
+    const s = stubFetchWithInit({
+      '/api/scenes/~YWJj/preview?div=4&force=1': 'ok',
+      '/disk-array/a/b_preview.jpg?div=4': 'FRESH',
+    });
+    // 行是「档位已对上、盘上有预览」——常规判据下这是一次零请求的命中
+    const r = row({ jpgUrl: BAKED, hasPreview: true, previewDiv: 4 });
+    expect(await (await fetchSceneJpg(CFG, r, 4, undefined, true)).text())
+      .toBe('FRESH');
+    expect(s.urls).toEqual(['/api/scenes/~YWJj/preview?div=4&force=1',
+      '/disk-array/a/b_preview.jpg?div=4']);
+    // 静态那趟同样要 no-store：服务端刚在同名 URL 下重写了文件，吃浏览器那份就是旧图
+    expect(s.inits[0]?.cache).toBe('no-store');
+    expect(s.inits[1]?.cache).toBe('no-store');
+  });
+
+  it('栅格赢那一支的 force：换的是请求的源，行为与上面一致', async () => {
+    const s = stubFetchWithInit({
+      '/api/scenes/~YWJj/preview?div=4&force=1': 'ok',
+      '/disk-array/a/PAN_preview.jpg?div=4': 'FRESH',
+    });
+    const r = rasterRow();                  // hasPreview/previewDiv 由 rasterRow 造
+    r.rasterPreview!.hasPreview = true;
+    r.rasterPreview!.previewDiv = 4;
+    expect(await (await fetchSceneJpg(CFG, r, 4, undefined, true)).text())
+      .toBe('FRESH');
+    expect(s.urls).toEqual(['/api/scenes/~YWJj/preview?div=4&force=1',
+      '/disk-array/a/PAN_preview.jpg?div=4']);
+    expect(s.inits[1]?.cache).toBe('no-store');
+  });
+
+  it('force 的 onPhase 说的是「重新生成」而不是「首次打开」', async () => {
+    stubFetchWithInit({ '/api/scenes/~YWJj/preview?div=4&force=1': 'PREVIEW' });
+    const phase = vi.fn();
+    // hasPreview=true：常规判据下这条**不该**响，force 才让它响
+    await fetchSceneJpg(CFG, row({ jpgUrl: null, hasPreview: true }), 4, phase, true);
+    expect(phase).toHaveBeenCalledTimes(1);
+    expect(phase.mock.calls[0][0]).toContain('重新生成');
+    expect(phase.mock.calls[0][0]).not.toContain('首次打开');
+  });
 });
 
 /* ---------------- 拖入入口：落盘阵的预览 + resolve 双指纹 ---------------- */

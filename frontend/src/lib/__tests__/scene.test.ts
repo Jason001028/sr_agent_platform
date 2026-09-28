@@ -13,7 +13,7 @@ import {
   isImageSource, startStretch, SCENE_START_STRETCH,
   isBakedPreviewUrl, previewNeedsBake, previewDivLabel, loadPreviewDiv,
   savePreviewDiv, SCENE_PREVIEW_DIVS, DEFAULT_PREVIEW_DIV,
-  rasterPreviewWins, previewCacheKey, sceneAnchors, ANCHOR_MAX,
+  rasterPreviewWins, previewCacheKey, sceneJpgInflightKey, sceneAnchors, ANCHOR_MAX,
   isDiskArrayUrl,
   sceneClearPreviewUrl, rowsAfterClear, clearSummaryText,
   scenesSnapshotOf, parseScenesSnapshot, SCENES_SNAPSHOT_V,
@@ -67,6 +67,17 @@ describe('scenesQuery / 列表 URL', () => {
       .toBe('/disk-array/x/y.jpg');
     expect(sceneImageUrl({ apiBase: '', staticBase: 'http://static:9000' }, '/disk-array/a b.jpg'))
       .toBe('http://static:9000/disk-array/a b.jpg');
+  });
+
+  it('force 追加 &force=1；不传时 URL 逐字不变（其它入口的主路径）', () => {
+    const CFG = { apiBase: '', staticBase: '' };
+    expect(scenePreviewUrl(CFG, 'x', 4))
+      .toBe('/api/scenes/x/preview?div=4');
+    expect(scenePreviewUrl(CFG, 'x', 4, true))
+      .toBe('/api/scenes/x/preview?div=4&force=1');
+    // false 与不传等价：调用方写 `force` 变量直接传进来时也不会漂
+    expect(scenePreviewUrl(CFG, 'x', 4, false))
+      .toBe(scenePreviewUrl(CFG, 'x', 4));
   });
 });
 
@@ -417,6 +428,32 @@ describe('previewCacheKey（预览 blob 的缓存键）', () => {
     // 'a|4|jpg' 与栅格名恰好叫 'jpg' 的情形：前缀不同，撞不上
     expect(previewCacheKey({ id: 'a' }, 4, { name: 'jpg' }))
       .not.toBe(previewCacheKey({ id: 'a' }, 4));
+  });
+});
+
+describe('sceneJpgInflightKey（在飞请求的合流键）', () => {
+  it('同行同档位 → 稳定', () => {
+    expect(sceneJpgInflightKey({ id: 'abc123' }, 4))
+      .toBe(sceneJpgInflightKey({ id: 'abc123' }, 4));
+    expect(sceneJpgInflightKey({ id: 'abc123' }, 4)).toBe('abc123|4');
+  });
+
+  it('档位进键：同一行不同档位是在飞的两件事', () => {
+    expect(sceneJpgInflightKey({ id: 'a' }, 4))
+      .not.toBe(sceneJpgInflightKey({ id: 'a' }, 8));
+  });
+
+  it('**force 进键**：批量那次强制取图不能被并进「点开卡片」那一次', () => {
+    // 否则用户正好点开正在生成的那张卡时，批量那条请求会被合流掉 ——
+    // 用户拿到旧像素，盘上也没重生成（一键解析的全部意义没了）。
+    expect(sceneJpgInflightKey({ id: 'a' }, 4, true))
+      .not.toBe(sceneJpgInflightKey({ id: 'a' }, 4));
+    expect(sceneJpgInflightKey({ id: 'a' }, 4, true)).toBe('a|4|force');
+  });
+
+  it('force 为 false 与不传等价（调用方直接传变量时不漂）', () => {
+    expect(sceneJpgInflightKey({ id: 'a' }, 4, false))
+      .toBe(sceneJpgInflightKey({ id: 'a' }, 4));
   });
 });
 

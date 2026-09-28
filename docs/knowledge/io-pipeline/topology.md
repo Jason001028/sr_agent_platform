@@ -97,6 +97,9 @@ flowchart LR
   拿不到 `max-age=300`，因为它自带 `Cache-Control: no-store`。
 - 档位变化靠前端在 URL 上拼 `?div=N` 击穿 `max-age=3600`——location 匹配不看查询串，
   所以加参数不需要动 nginx。
+- 这条「加参数就行」对**一键解析的 `?force=1` 不成立**：它要的是「挡位没变而内容重新生成」，
+  而那种情况下 URL 每次逐字相同，`max-age=300` 会把上一次的字节端回来、请求根本到不了服务端。
+  所以 force 的请求在前端显式带 `cache: 'no-store'`，nginx 这边一个字不动。
 
 ---
 

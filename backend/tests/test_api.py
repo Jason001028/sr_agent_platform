@@ -7,6 +7,7 @@ memory. Fixtures are uncompressed strip TIFFs under a temp SR_SCENES_ROOT.
 import io
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -387,6 +388,56 @@ class TestPreviewDiv(SceneListMixin):
         with Image.open(io.BytesIO(r.content)) as im:
             self.assertEqual(im.size, (160, 320))
             self.assertEqual(im.info.get("comment"), rule_stamp(85, 2))
+
+    def test_repeat_without_force_is_a_cache_hit(self):
+        """不带 force 连打两次 `?div=4`：盘上那份一个字节都不动。
+
+        这是**其它入口**（点开卡片、场景库打开、预取）的行为基线，也是「force 只给
+        一键解析」这句话的对照面 —— 加 force 时不能顺手把常态也变成每次重生成。
+        """
+        c = self._client()
+        sid = self._row(c)["id"]
+        c.get(f"/api/scenes/{sid}/preview?div=4")
+        first = self.jpg.stat().st_mtime_ns
+        r = c.get(f"/api/scenes/{sid}/preview?div=4")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.jpg.stat().st_mtime_ns, first)
+        with Image.open(io.BytesIO(r.content)) as im:
+            self.assertEqual(stamp_div(im.info.get("comment")), 4)
+
+    def test_force_regenerates_while_the_div_stays_the_same(self):
+        """`?div=4&force=1`（档位一致、戳一致、mtime 也不旧）→ 仍原地重写一遍。
+
+        一键解析要的就是这个：档位没变也按盘上最新的源重生成。断言分三面：
+        文件确实被重写（mtime 变）、档位与戳没被带跑（仍是 ÷4）、行字段语义不变。
+        """
+        c = self._client()
+        sid = self._row(c)["id"]
+        c.get(f"/api/scenes/{sid}/preview?div=4")
+        first = self.jpg.stat().st_mtime_ns
+        size_before = self.jpg.stat().st_size
+
+        time.sleep(0.02)      # 让两次写入的 mtime 明确可辨（不吃文件系统的时间戳粒度）
+        r = c.get(f"/api/scenes/{sid}/preview?div=4&force=1")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertNotEqual(self.jpg.stat().st_mtime_ns, first)
+        # 内容同规则同档位 → 字节数一致（重写不等于换尺寸）
+        self.assertEqual(self.jpg.stat().st_size, size_before)
+        with Image.open(io.BytesIO(r.content)) as im:
+            self.assertEqual(im.size, (80, 160))
+            self.assertEqual(stamp_div(im.info.get("comment")), 4)
+        self.assertEqual(self._row(c)["previewDiv"], 4)
+
+    def test_force_is_false_by_default(self):
+        """`force` 缺省为假：URL 上一字不加时逐字节等于加参数之前的行为。"""
+        c = self._client()
+        sid = self._row(c)["id"]
+        c.get(f"/api/scenes/{sid}/preview?div=4")
+        first = self.jpg.stat().st_mtime_ns
+        # force=0 显式传假，同样是命中（不是「非空即真」）
+        self.assertEqual(
+            c.get(f"/api/scenes/{sid}/preview?div=4&force=0").status_code, 200)
+        self.assertEqual(self.jpg.stat().st_mtime_ns, first)
 
 
 if __name__ == "__main__":
