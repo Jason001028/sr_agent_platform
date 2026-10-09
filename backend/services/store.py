@@ -14,8 +14,8 @@ Three tables behind one Store:
               submitting a duplicate. 一行 = 一个**指纹**（不是一次运行），所以行上
               有两组时间戳，别混：created_at/updated_at 属于**行**（队列排序、每次
               写回），started_at/finished_at 属于**本次运行**（首次看到 RUNNING →
-              终态；队列页「耗时」的唯一来源，2026-09-18 增）。
-              preview_state/preview_note 是**产物预览主动生成**的进度（2026-09-20 增）：
+              终态；队列页「耗时」的唯一来源）。
+              preview_state/preview_note 是**产物预览主动生成**的进度：
               NULL → running → done/skipped/failed，同样属于「本次运行」，重交即归零。
 
 Shape borrowed from langgraph checkpoint-sqlite (state snapshot + pending
@@ -75,9 +75,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_sr_tasks_fingerprint
 #: sr_tasks 里发布后新增的列。`CREATE TABLE IF NOT EXISTS` 对**已存在**的表一个字
 #: 都不改，所以升级前建的库（生产上就有）只能靠 ALTER TABLE 补 —— 见 _ensure_columns。
 #:
-#: preview_state / preview_note（2026-09-20）：产物预览的服务端主动生成状态。见
+#: preview_state / preview_note：产物预览的服务端主动生成状态。见
 #: `list_preview_candidates` 那一段。补出来的列在老行里是 NULL，**这正是想要的**
-#: —— NULL 的含义是「没生成过」，主动生成循环只认这个值，所以升级当天的历史 COMPLETED
+#: —— NULL 的含义是「没生成过」，主动生成循环只认这个值，所以历史 COMPLETED
 #: 行会被认领；挡它的是**年龄窗口**（`finished_at` 超出窗口就不生成），不是回填。
 _SR_TASK_ADDED_COLUMNS = (("started_at", "REAL"), ("finished_at", "REAL"),
                           ("preview_state", "TEXT"), ("preview_note", "TEXT"))
@@ -250,8 +250,7 @@ class Store:
         Returns the row **as read back after the write**, which is what callers must
         hand to clients: a caller that only forwards the new `state` leaves the
         client holding its own older snapshot of the row, and the elapsed column
-        renders that snapshot's numbers (2026-09-17 的「0 秒」与 2026-09-18 的
-        「几十小时」是同一个坑的两面：值要么缺席，要么是上一个快照的)。
+        renders that snapshot's numbers (值要么缺席，要么是上一个快照的)。
         """
         db = self._db()
         now = time.time()
@@ -303,7 +302,7 @@ class Store:
           * `finished_at >= ?` —— 年龄窗口。`finished_at IS NULL` 的行（加这两列之前
             建的、或整段运行期间 sr-api 不在场没观测到开始的）**一律排除**：那个值是
             NOT NULL 比较，NULL 天然不在窗口内，所以不用额外写条件，但这条判据是
-            升级当天不把历史 COMPLETED 行全生成一遍的**唯一**屏障。
+            不把窗口外的历史 COMPLETED 行全生成一遍的**唯一**屏障。
         """
         cutoff = time.time() - float(max_age_sec)
         rows = self._db().execute(
@@ -391,7 +390,7 @@ class Store:
         RESUMED_COMPLETED）在走到这里之前就返回了（submit_run_sr），所以能把本次运行
         的时间窗在这里清零 —— started_at / finished_at 归 NULL，等校准器首次看到
         RUNNING / 终态再钉。created_at 不动：它是这一行**第一次**提交的时刻，队列排序
-        与「创建时间」列都靠它，而耗时已不再派生自它。
+        与「创建时间」列都靠它；耗时来自 started_at/finished_at，不用它。
 
         `preview_state / preview_note` 一并归 NULL：**同一 suffix 重跑必须重新武装
         主动生成**，否则第二次跑完永远停在旧的 `done` 上、盘上那份预览还是上一次的产物。

@@ -216,6 +216,36 @@ class TestScenesImageSource(SceneListMixin):
         self.assertEqual(body["results"][0]["name"],
                          "GF07A03_PMS01_20260722125045")
 
+    def test_jpg_row_reports_the_raster_it_displays(self):
+        """显示件 jpg 的行：W/H 取**它显示的那份栅格**的尺寸，不是 jpg 自己的。
+
+        前端把行上这个 W/H 当「全分辨率」：掩码坐标按它换回去（thumbToOrig），
+        `POST /api/masks` 再按它建栅格化画布。而 SR 只在「掩码分辨率 == 输入影像
+        分辨率」时才真做局部超分，不同就**静默跳过**（sr-pipeline-interface）。
+        所以行上报 8192 显示件的尺寸，等于让用户交上去一份永不生效的掩码。
+        """
+        make_scene(self._root.name, "ZY302_MUX_20260805120000.tif", 320, 640)
+        self.make_jpg("ZY302_MUX_20260805120000.jpg", 40, 30)
+        rows = self.client(self._root.name).get("/api/scenes").json()["results"]
+        jpg_row = next(r for r in rows if r["rel"].endswith(".jpg"))
+        tif_row = next(r for r in rows if r["rel"].endswith(".tif"))
+        self.assertEqual((jpg_row["W"], jpg_row["H"]), (320, 640))
+        # 同一景的两行（盘上确实是两份文件）报同一个尺寸 —— 掩码落点是**一个**。
+        self.assertEqual((jpg_row["W"], jpg_row["H"]),
+                         (tif_row["W"], tif_row["H"]))
+        # rasterPreview 仍如实报两份各自的尺寸：那是「谁更清晰」的比较依据，
+        # 与行上的 W/H 不是一回事，别把它一起改了。
+        rp = jpg_row["rasterPreview"]
+        self.assertEqual((rp["jpgW"], rp["jpgH"]), (40, 30))
+        self.assertEqual((rp["rasterW"], rp["rasterH"]), (320, 640))
+
+    def test_jpg_row_without_sibling_raster_keeps_own_dims(self):
+        """同级没有栅格 → 退回 jpg 自己的尺寸（平台不知道它代表多大一张图）。"""
+        self.make_jpg("KF02B04_PMS05_20260810120000.jpg", 40, 30)
+        row = self.client(self._root.name).get("/api/scenes").json()["results"][0]
+        self.assertIsNone(row["rasterPreview"])
+        self.assertEqual((row["W"], row["H"]), (40, 30))
+
     def test_tif_and_jpg_same_stem_are_two_rows(self):
         make_scene(self._root.name, "ZY302_MUX_20260805120000.tif")
         self.make_jpg("ZY302_MUX_20260805120000.jpg")
@@ -255,7 +285,7 @@ class TestPreview(SceneListMixin):
         self.assertEqual(jpg.stat().st_mtime, mtime1)
 
     def test_legacy_dot_preview_is_swept_on_open(self):
-        """改名（2026-09-22）前生成的那份点号文件已无任何读者：打开这一景时同时删掉，
+        """点号命名的那份（`<stem>.preview.jpg`）无任何读者：打开这一景时同时删掉，
         免得场景目录里躺着两个几乎同名的文件。"""
         c = self._disk_client_with_scene()
         d = Path(self._root.name, "GF07A03_PMS01_20260722125045")
@@ -381,7 +411,7 @@ class TestPreviewDiv(SceneListMixin):
         self.assertFalse(self.jpg.exists())
 
     def test_default_div_is_legacy_two(self):
-        """缺 `div` 参数 = 逐字节等于换档位之前的行为（旧 dist 配新 backend 不乱套）。"""
+        """缺 `div` 参数时按默认档位 ÷2 生成（旧 dist 配新 backend 不乱套）。"""
         c = self._client()
         sid = self._row(c)["id"]
         r = c.get(f"/api/scenes/{sid}/preview")
@@ -393,7 +423,7 @@ class TestPreviewDiv(SceneListMixin):
         """不带 force 连打两次 `?div=4`：盘上那份一个字节都不动。
 
         这是**其它入口**（点开卡片、场景库打开、预取）的行为基线，也是「force 只给
-        一键解析」这句话的对照面 —— 加 force 时不能顺手把常态也变成每次重生成。
+        一键解析」这句话的对照面：常态不得变成每次重生成。
         """
         c = self._client()
         sid = self._row(c)["id"]
@@ -429,7 +459,7 @@ class TestPreviewDiv(SceneListMixin):
         self.assertEqual(self._row(c)["previewDiv"], 4)
 
     def test_force_is_false_by_default(self):
-        """`force` 缺省为假：URL 上一字不加时逐字节等于加参数之前的行为。"""
+        """`force` 缺省为假：URL 上不加它时不重写盘上那份。"""
         c = self._client()
         sid = self._row(c)["id"]
         c.get(f"/api/scenes/{sid}/preview?div=4")

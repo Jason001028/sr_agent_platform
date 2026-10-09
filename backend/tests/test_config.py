@@ -2,10 +2,10 @@
 
 Two things are pinned:
 
-  * the defaults equal the values that used to be hard-coded across
-    run_sr.py / store.py / app.py, so centralising them cannot silently move a
-    real-machine path (the bundle path in particular must keep agreeing with
-    the load_library() call at code_0817_prod.py:27);
+  * the defaults are the single source for the values run_sr.py / store.py /
+    app.py all read, so a change here cannot silently move a real-machine path
+    (the bundle path in particular must keep agreeing with the load_library()
+    call at code_0817_prod.py:27);
   * sr_runtime() reads the environment **at call time**. The systemd unit and
     the tests both configure the SR layer by setting env vars around the call,
     so a cached snapshot would leak one case's settings into the next.
@@ -65,13 +65,11 @@ class SrRuntimeDefaultsTest(unittest.TestCase):
         self.assertEqual(svc.DEFAULT_WORK_DIR, config.sr_runtime().slurm_work_dir)
 
     def test_suffix_default_is_not_an_env_knob_any_more(self):
-        """SR_SUFFIX_DEFAULT was retired 2026-09-16.
-
-        The default <Suffix> now comes from the SR team's own config file inside
-        SR_BUNDLE_DIR (services/run_sr.py::default_suffix), so setting the old
-        env var must change nothing. Pinned because "the unit file still exports
-        a variable nobody reads" is a silent misconfiguration: an operator would
-        set it and believe it took effect.
+        """The default <Suffix> comes from the SR team's own config file inside
+        SR_BUNDLE_DIR (services/run_sr.py::default_suffix), not from an env var:
+        setting `SR_SUFFIX_DEFAULT` must change nothing. Pinned because "the unit
+        file exports a variable nobody reads" is a silent misconfiguration: an
+        operator would set it and believe it took effect.
         """
         tmp = tempfile.TemporaryDirectory()       # empty bundle → no config file
         self.addCleanup(tmp.cleanup)
@@ -81,8 +79,8 @@ class SrRuntimeDefaultsTest(unittest.TestCase):
 
     def test_scenes_root_has_a_single_source(self):
         # 场景根只由 paths.scenes_root() 读（每次读环境 + 要求目录存在）。
-        # SrRuntime 曾经镜像过一份，是第二处真源 —— 2026-09-17 删掉了，这里
-        # 钉住"没人再镜像"，避免它悄悄长回来。
+        # SrRuntime 不镜像一份 —— 否则就是第二处真源，这里钉住"没人镜像"，
+        # 避免它悄悄长回来。
         from backend.api import paths
         self.assertIsNone(paths.scenes_root())
         os.environ["SR_SCENES_ROOT"] = "/data/scenes"

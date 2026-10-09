@@ -213,7 +213,7 @@ SR 生产环境锁在 py3.6，装不了 fastapi；平台侧也不需要 torch。
 | `SR_SLURM_TIME` / `_CPUS` / `_GRES` / `_MEM` / `_NODELIST` | `02:00:00` / `4` / `1` / 空 / 空 | 批脚本资源指令 |
 | `SR_SLURM_FAKE` | 关 | `1` = 内存假调度器 |
 
-> **仓库默认 `SR_EXECUTOR` 仍是 `slurm`**，而当前路线是本机直跑。真机靠 drop-in 覆盖成 `local`；
+> **仓库默认 `SR_EXECUTOR` 是 `slurm`，当前路线是本机直跑**。真机靠 drop-in 覆盖成 `local`；
 > 换机器重建 drop-in 时漏了这一项，行为会退回投递 Slurm。
 
 ### 7.6 LLM

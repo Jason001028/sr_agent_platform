@@ -2,10 +2,10 @@
 /**
  * StatusBar.vue — 底部当前文件身份条（rec-bar）
  * ------------------------------------------------------------------
- * **只显示图名**（分屏时前面挂 [左]/[右]）—— 2026-09-28 起这里不再复读元信息：
+ * **只显示图名**（分屏时前面挂 [左]/[右]）—— 这里不复读元信息：
  * 尺寸/布局左栏那张卡上就有（FileList.vue 的 meta 行），路由与预览像素尺寸是
  * 「这张图是怎么来的」的排障项，常驻一整行对看图的人是噪音。
- * 要看时把鼠标停在这条上：title 里仍旧拼全（`barTitle`，字段与旧版逐条相同）。
+ * 要看时把鼠标停在这条上：title 里拼全（`barTitle`）。
  * 数据来自 store.activeRec（解码完成前 probe/route 可能为空，容错显示）。
  */
 import { computed } from 'vue';
@@ -13,7 +13,7 @@ import { useViewerStore } from '../stores/viewer';
 
 const store = useViewerStore();
 
-/** 悬停全文：身份 + 元信息，字段与「只显示图名」之前那版逐条相同，只是不再常驻。 */
+/** 悬停全文：身份 + 元信息（常驻条上不显示，只在这里出现）。 */
 const barTitle = computed(() => {
   const r = store.activeRec;
   if (!r) return '';

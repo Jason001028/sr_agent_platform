@@ -4,7 +4,7 @@
  * ------------------------------------------------------------------
  * 选影像（multiple，tif/tiff/jpg/jpeg）/ 拉伸下拉 / 像素定位 X/Y + 按钮 /
  * 预览下采样档位拖动条 / 绘制掩码 toggle / 生成掩码 / 提交 SR。
- * 最小原型删去了 HTML 的「输出目录」三态按钮与「自动JPG」勾选（前端不再导出 JPG）。
+ * `.tif-viewer.html` 的「输出目录」三态按钮与「自动JPG」勾选不带过来 —— 前端不导出 JPG。
  */
 import { computed, ref, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
@@ -17,11 +17,11 @@ import type { StretchMode } from '../lib/tifDecode';
 const store = useViewerStore();
 const qc = useQcListStore();
 const fileInput = ref<HTMLInputElement | null>(null);
-/** 定位框：一个框装「X,Y」两个数（原先是 X、Y 两个框，拆开填反而要用户自己数着填）。 */
+/** 定位框：一个框装「X,Y」两个数（拆成两个框反而要用户自己数着填）。 */
 const locText = ref('');
 
 /** 盘阵场景激活：只用来决定 title 文案（服务器生成的直方图均衡是二次拉伸的底图，
-    均衡不可逆）。**不再**禁用下拉 —— 场景图照样可在显示层换模式，
+    均衡不可逆）。**不禁用**下拉 —— 场景图照样可在显示层换模式，
     默认起手值也同样是直方图均衡（见 lib/scene.startStretch）。
     注意判据是 route==='jpg'：反推关联**命中**的本地 TIF 也会被就地升级成
     route='jpg'（拿的是服务端生成 JPG，见 stores/viewer.tryLinkScenes），
@@ -110,7 +110,7 @@ watch(
     if (!qc.loaded) return;
     const it = qc.rowForScene(dir);
     // 清单那对数是 (X=列, Y=行)，与定位框的「X,Y」**同序** —— 照抄原文顺序
-    // （2026-09-28 真机落点实测订正：此前按「行,列」翻过一次，框里与原文互为对角镜像）
+    // （真机落点实测：按「行,列」翻会让框里与原文互为对角镜像）
     locText.value = it && it.row !== null && it.col !== null ? it.col + ',' + it.row : '';
   },
   { immediate: true },
@@ -147,7 +147,7 @@ watch(
 
     <!-- 单框 text 而不是 number：number 框会把「1000.23,3000.27」这种整串判为非法、
          值直接变空，粘进来等于什么都没发生（拆法见 doLocate / parseLocPair）。
-         不再另挂「坐标」标签：占位文本自己就以「输入坐标」开头，两句话说的是同一件事，
+         不另挂「坐标」标签：占位文本自己就以「输入坐标」开头，两句话说的是同一件事，
          框一填上字标签又成了唯一线索 —— 不如把这份宽度给占位文本。 -->
     <span class="loc" title="填「X,Y」两个数，例如 1000.23,3000.27（逗号、空格分隔都收）">
       <input
@@ -200,10 +200,10 @@ watch(
 
     <span class="spacer"></span>
 
-    <!-- 对比模式下**也能画**（2026-09-22 改，原来置灰）：掩码只画到活动侧那张 rec 上
-         （分屏点哪半哪半就是活动侧，与掩码/云量/统计跟随活动侧同一条规则），所以不再是
-         「画到哪一格不明确」。仍置灰的只有一件事：活动侧是本轮超分产物 / NOSR
-         （掩码建在本体影像网格上，在产物上画，坐标写进掩码文件整片都是错的）。 -->
+    <!-- 对比模式下**也能画**：掩码只画到活动侧那张 rec 上（分屏点哪半哪半就是活动侧，
+         与掩码/云量/统计跟随活动侧同一条规则），不存在「画到哪一格不明确」。置灰的只有
+         一件事：活动侧是本轮超分产物 / NOSR（掩码建在本体影像网格上，在产物上画，
+         坐标写进掩码文件整片都是错的）。 -->
     <button
       type="button"
       class="outbtn"

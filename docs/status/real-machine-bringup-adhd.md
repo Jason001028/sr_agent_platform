@@ -203,7 +203,7 @@ firewall-cmd --permanent --add-service=http && firewall-cmd --reload
 
 不用慌，只把 3 个路径前面加 `deploy/`。替换规则：
 
-| 原来（包目录版） | git 拷贝版 |
+| 包目录版 | git 拷贝版 |
 |---|---|
 | `包目录/sr-api.service` | `包目录/deploy/sr-api.service` |
 | `包目录/nginx.conf` | `包目录/deploy/nginx.conf` |

@@ -1,5 +1,5 @@
 /**
- * 平台名（2026-09-21 定名）：顶栏品牌区与路由 document.title 共用这一份。
+ * 平台名：顶栏品牌区与路由 document.title 共用这一份。
  *
  * 改名时要一并改 `frontend/index.html` 的 <title> —— 那是 JS 起来之前的字面量，
  * import 不进去，改不到（只影响首屏那一瞬与禁用 JS 时）。

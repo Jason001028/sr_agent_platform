@@ -4,85 +4,83 @@
 > + `backend/`（FastAPI 平台 API）+ `sr-api.service`（systemd）+ `requirements-api.txt`
 > + 本说明。开发机（Windows，外网）打包 → 拷到内网机（CentOS7）解压 → nginx + FastAPI 托管。
 
-阶段4 数据路径（09-02 决策）：浏览器**不再读盘阵原始 TIF**。盘阵场景由后端懒生成
+阶段4 数据路径：浏览器读后端生成的 JPG，**不读盘阵原始 TIF**。盘阵场景由后端懒生成
 「稀疏采样 + 直方图均衡拉伸」的灰度 JPG，nginx 整块静态直出；检索走 FastAPI。
-本地文件路径（选择 TIF…）保持原有稀疏 TIF 读法，零回归。
+本地文件路径（选择 TIF…）走稀疏 TIF 读法。
 
-> **预览文件名统一成下划线一条（09-22）**：全平台的预览 JPG 现在只有一个名字
-> `<源栅格 stem>_preview.jpg`（此前分两套：缓存那份叫 `<stem>.preview.jpg`，拖入链那份叫
-> `<stem>_preview.jpg`，同一场景目录里躺着两个几乎同名的文件）。三条链（惰性打开 / 主动生成 /
+> **预览文件名**：全平台的预览 JPG 只有一个名字
+> `<源栅格 stem>_preview.jpg`；三条链（惰性打开 / 主动生成 /
 > 拖入）都落这个名字，差别只剩目录（配了 `SR_PREVIEWS_ROOT` 时缓存那份进镜像树）。
 > **换包须知**：① `frontend/dist` 与 `backend` **必须同包更新** —— 认「这是生成的的预览」
 > 的那条正则两边各有一份，只换一个会让 `?div=` 拼不上（换档位后最长一小时看到旧图）；
-> ② 旧的点号文件由服务端**同时删**（每条链处理到那份栅格时，生成之前一次、命中缓存一次），
-> **没有全盘清扫** —— 平台不列目录，所以没被任何链碰过的场景目录里那份会一直留着，
-> 它不再被任何代码读写，只是占地方，可以人工删。
+> ② 早前的点号文件（`<stem>.preview.jpg`）由服务端**同时删**（每条链处理到那份栅格时，
+> 生成之前一次、命中缓存一次），**没有全盘清扫** —— 平台不列目录，所以没被任何链碰过的
+> 场景目录里那份会一直留着，它不再被任何代码读写，只是占地方，可以人工删。
 > 详见 [knowledge/preview-bake-pipeline.md](../docs/knowledge/preview-bake-pipeline.md) §4.8/§4.10。
 
-> **预览生成规则 v3：档位可调（09-19）**：尺寸从「各边严格 1/2」改为**各边 ÷2 · ÷4 · ÷8 ·
+> **预览生成规则 v3：档位可调**：尺寸为**各边 ÷2 · ÷4 · ÷8 ·
 > ÷16 · ÷32 五档可选，默认 ÷4**，由查看器工具栏定位组件右侧那条拖动条定（全局：拖入 /
-> 场景库 / 粘路径三条入口同档，存浏览器 localStorage）。拉伸仍为直方图均衡；规则签名写进
-> JPEG 注释（`srprev:v3:div<N>+equal:q<Q>`），**档位进了签名**。旧缓存（`v2` 戳）在首次
-> 打开时会被判定失效并原地重新生成（覆盖同名文件，不产生第二份）。
-> **换包须知**：这一轮盘上所有预览都必然重新生成一次（惰性，逐个场景首次
+> 场景库 / 粘路径三条入口同档，存浏览器 localStorage）。拉伸为直方图均衡；规则签名写进
+> JPEG 注释（`srprev:v3:div<N>+equal:q<Q>`），**档位进了签名**。签名对不上的缓存（如旧 `v2` 戳）
+> 在首次打开时被判失效并原地重新生成（覆盖同名文件，不产生第二份）。
+> **换包须知**：换成 v3 后盘上所有预览都会惰性重新生成一次（逐个场景首次
 > 打开时触发；把滑块停在 ÷2 也一样）；`frontend/dist` 与 `backend` **必须同包更新** ——
-> 端点改了名（`/preview-tmp` → `/preview-drop`），只换一个会 404。
+> 端点名（`/preview-drop`）两边须一致，只换一个会 404。
 > 详见 [knowledge/preview-bake-pipeline.md](../docs/knowledge/preview-bake-pipeline.md) §4.4/§4.6。
 
-> **拖拽入口改落盘阵（09-18 起走服务端生成，09-19 改落点）**：把盘阵上的 `.tif` 拖进查看器
+> **拖拽入口**：把盘阵上的 `.tif` 拖进查看器
 > 不落盘阵时，走服务端生成的下采样预览 JPG（与场景库同一条渲染路径），不在浏览器里重新
-> 解码整幅原图。产物落**源文件同目录的 `<stem>_preview.jpg`**（09-19 起；此前落
-> `SR_TEMP_PREVIEWS_ROOT` 的当天桶里，次日 0 点整桶删 —— 等于每天第一次拖入都要重新生成）。
+> 解码整幅原图。产物落**源文件同目录的 `<stem>_preview.jpg`**。
 > 命中判据是**文件名 + 字节数**双指纹（后端 `_fingerprint_mismatch`），对不上就退回浏览器
 > 本地解码 —— 绝不静默关联到一张不是用户拖进来的影像上。
-> `SR_TEMP_PREVIEWS_ROOT` **降级为兜底**：场景目录不可写时（服务账号对盘阵目录的写权限在
+> `SR_TEMP_PREVIEWS_ROOT` **是兜底**：场景目录不可写时（服务账号对盘阵目录的写权限在
 > 真机上仍是待确认项）才落到那里，按 `YYYY-MM-DD` 分桶、每天 0 点整桶删，并在响应头
 > `X-SR-Preview-Fallback: tmp` 里如实告诉前端。仍建议显式配这个变量：默认值是系统临时目录，
 > CentOS7 的 `/tmp` 常是 tmpfs，而单张可能上百 MB；要放在 `User=nginx` 可写的大盘上，
 > 且**不要**放在 `SR_SCENES_ROOT` 之下。
 > 场景库 / 粘路径的长期预览缓存（源同目录或 `SR_PREVIEWS_ROOT` 镜像树）不受影响。
-> **磁盘预算注意**：新落点的 `<stem>_preview.jpg` **没有任何清理者**（原地覆盖，不堆积，
+> **磁盘预算注意**：产物 `<stem>_preview.jpg` **没有任何清理者**（原地覆盖，不堆积，
 > 它与缓存那份**同一个名字**，差别只在目录），且它**不吃 `SR_PREVIEWS_ROOT`**，恒在场景目录里。
 
-> **产物预览主动生成 + 显示件 jpg 改从同名栅格生成（09-20）**：两件事，都在服务端。
+> **产物预览主动生成 + 显示件 jpg 改从同名栅格生成**：两件事，都在服务端。
 > ① **主动生成**：作业转 COMPLETED 后，后台循环同时把**产物那一份**预览生成掉（只生成产物；
 > 输入影像与 `_NOSR` 两份仍按打开时惰性生成），用户跑完立刻打开就不必等一次读盘 + 采样。
 > 两个新 env 都有默认值、不配即生效：`SR_PRODUCT_PREVIEW_DIV`（默认 4，**0 = 关**，
 > 取值非法当 0 处理并在启动日志写一行）与 `SR_PRODUCT_PREVIEW_MAX_AGE_SEC`（默认 86400）。
 > 结局随 `GET /api/queue` 的 `preview_state` / `preview_note` 两列带出（另有 SSE 帧
-> `preview_update`）。**升级当天建议先置 `SR_PRODUCT_PREVIEW_DIV=0` 起一次确认无异常再打开**：
-> 那两列是 ALTER TABLE 加的、**不回填**，老行的值全是 `NULL`，挡历史行全量重新生成的唯一屏障
+> `preview_update`）。**首次启用前建议先置 `SR_PRODUCT_PREVIEW_DIV=0` 起一次确认无异常再打开**：
+> 那两列对**老行**是 `NULL`（**不回填**），挡历史行全量重新生成的唯一屏障
 > 就是那道年龄窗口。沙箱**实际生效**时（作业跑在私有副本上）主动生成自动 `skipped: sandbox`
 > —— 判据是沙箱有没有真生效，**不是** `SR_SANDBOX_ROOT` 在不在，详见 §7.5 末条。
 > ② **显示件 jpg**：拖入/打开的 `.jpg` 若同目录配着一位更清晰的栅格、且当前档位下服务端
-> 从它生成的的比它更清晰，显示源就换成服务端那份（`/preview` 与 `/preview-drop` 都改，
+> 从它生成的的比它更清晰，显示源就换成服务端那份（`/preview` 与 `/preview-drop` 两处都这么做，
 > 落点与 `?div=` 照旧）；否则行为**一个字节都不变**。默认档位 ÷4 下基本不触发（24000 源 +
 > 8192 显示件时只有 ÷2 才赢）—— 这是算术，不是没生效。
 > **nginx 不用改**（没有新 URL 形态：静态那条仍是 `/disk-array/…/*_preview.jpg`）。
 > 详见 [knowledge/preview-bake-pipeline.md](../docs/knowledge/preview-bake-pipeline.md) §4.1/§4.8/§4.9。
 
-阶段5 平台 API（09-02 定稿，契约 = `docs/planning/api-contract.md`）：FastAPI 在既有场景
-端点上新增 `/api/chat/*`（会话 REST + 单回合 SSE）、`/api/queue*`（共享 SR 队列 REST + SSE
+阶段5 平台 API（契约 = `docs/planning/api-contract.md`）：FastAPI 在既有场景
+端点上提供 `/api/chat/*`（会话 REST + 单回合 SSE）、`/api/queue*`（共享 SR 队列 REST + SSE
 状态广播）、`/api/tools`（工具直调）、`/api/masks`（掩码生成到原图目录）、
-`/api/qclist/write`（《待修复清单》原地写回盘阵，09-18）；前端新增 `/chat`
+`/api/qclist/write`（《待修复清单》原地写回盘阵）；前端有 `/chat`
 聊天页、`/queue` 共享队列页，查看器点「提交 SR」→ 带入当前场景目录 → 跳 `/queue` 预填
 （不自动提交）。离机验收走 mock LLM + 假调度器；**真机必须显式关 fake**（见下方 systemd env）。
 
-> **《待修复清单》写回（09-18）**：查看器的清单面板把标记结果原地写回盘阵上那份 `.txt`。
-> 原先走浏览器 File System Access API，可那个 API 在规范里是 `[SecureContext]` 标的，
-> 而本机页面是 `http://内网IP`（nginx `listen 80`）—— 在真机上永远点不通，不是偶发；
-> 现改由后端写（`User=nginx`，与掩码/SR 产物/预览 JPG 同一条路），同时把 GBK 清单
-> 真按 GBK 写回（浏览器编不出 GBK）。契约见 `docs/planning/api-contract.md` §3.7。
-> **两条部署注意**：① 写回目标由操作员在面板里**粘完整路径**（不再弹本机文件选择器），
+> **《待修复清单》写回**：查看器的清单面板把标记结果原地写回盘阵上那份 `.txt`，由后端写
+> （`User=nginx`，与掩码/SR 产物/预览 JPG 同一条路），GBK 真按 GBK 写回（浏览器编不出 GBK）。
+> **不走浏览器 File System Access API** —— 那个 API 在规范里是 `[SecureContext]` 标的，
+> 本机页面是 `http://内网IP`（nginx `listen 80`），在真机上永远点不通。契约见
+> `docs/planning/api-contract.md` §3.7。
+> **两条部署注意**：① 写回目标由操作员在面板里**粘完整路径**（不弹本机文件选择器），
 > 所以清单必须落在 `SR_ALLOWED_ROOTS` 之内；② 写回是「同目录临时文件 + `os.replace`
 > 原子替换」，**替换后文件属主变成 nginx**（nginx 无权 chown 回去，权限位保留）。
 > 质检部门若还要直接编辑这份 txt，清单所在目录得给组写权限。
 > 幂等排查见 §四的 `POST /api/qclist/write` 一条。
 
-> **SR 最小原型（09-14）改了三处**，详见 `docs/planning/sr-minimal-prototype-plan.md` 与 §7.6：
-> ① 掩码不再由浏览器生成预览——`POST /api/masks` 保留但前端已不调用，改为用场景目录里**已有的**
-> `<目录名>_mask.tif`；② 作业可**不经过 Slurm**（`SR_EXECUTOR=local`，sr-api 本机 `bash` 直跑，
-> 单槽串行）；③ 浏览器端 JPG 导出 / FS Access「输出目录」授权整条链路已删除（掩码下载还在）。
+> **SR 最小原型**（详见 `docs/planning/sr-minimal-prototype-plan.md` 与 §7.6）：
+> ① 掩码用场景目录里**已有的** `<目录名>_mask.tif`（`POST /api/masks` 保留但前端不调用）；
+> ② 作业可**不经过 Slurm**（`SR_EXECUTOR=local`，sr-api 本机 `bash` 直跑，单槽串行）；
+> ③ 浏览器端 JPG 导出 / FS Access「输出目录」授权不提供（掩码下载还在）。
 
 ## 一、开发机打包
 
@@ -118,7 +116,7 @@ release/
    ```
 
    > ⚠️ 部分内网机**没有任何启用的 yum 源**——`yum install` 报 `There are no enabled repos`
-   > （09-05 node81-135 实测），EPEL 装不了，**nginx 用户也不存在**（连带 `sr-api.service` 的
+   > （node81-135 实测），EPEL 装不了，**nginx 用户也不存在**（连带 `sr-api.service` 的
    > `User=nginx` 起不来）。此时先找内网 yum 镜像：`ls /etc/yum.repos.d/` + 探 nexus 仓库
    > `curl -s http://nexus.jl1.cn/service/rest/v1/repositories | grep -o '"name":"[^"]*"'`
    > （看有无 centos/epel 代理仓库）配好 repo；或外网机下 EPEL `nginx-1.20.x.el7.x86_64.rpm`
@@ -176,7 +174,7 @@ release/
    镜像本身有新版（实测 py3.10 从同一 nexus 源装到过 numpy 1.26.4），pip 显示旧版是**按解释器
    版本过滤**，别据此降代码。
 
-   **落地方案（09-05 真机实测）**：`sr-api.service` 的 `ExecStart` 默认就是 `/opt/sr-venv/bin/uvicorn`，
+   **落地方案（真机实测）**：`sr-api.service` 的 `ExecStart` 默认就是 `/opt/sr-venv/bin/uvicorn`，
    所以拿一个**现成的 py3.8+ 解释器**建出这个 venv 即可，依赖全走 cgwx-pypi（pip 代理）。先认清本机
    conda 现状，别在死频道上耗——内网 nexus 的 **conda 频道 `cgwx-anaconda` 404 已废**、`defaults` 断网
    （`conda create` 触网报 HTTP 000；`--clone` 报 HTTPError；加 `--offline` 报 remote error）；若包缓存也
@@ -205,9 +203,9 @@ release/
 
    - `WorkingDirectory=` → 解压根（默认 `/data/www/sr-agent-platform`，保证能 import `backend` 包）；
    - `Environment=SR_SCENES_ROOT=` → 盘阵根（**必填**，须与 nginx `alias` 同值）；
-   - `Environment=SR_AGENT_DB=` → SQLite 库（阶段5 起 chat 会话 + sr_tasks 同库；**父目录**须 `nginx` 可写）。
+   - `Environment=SR_AGENT_DB=` → SQLite 库（chat 会话 + sr_tasks 同库；**父目录**须 `nginx` 可写）。
      ⚠️ 指向**应用解压根之外**的专用目录（模板已给 `/DiskArray/tmp/wangrz/sr_agent_db/`）——
-     塞在解压根里时 nginx 写不动，库一被碰就 `unable to open database file`（2026-09-11 实机实测）；
+     塞在解压根里时 nginx 写不动，库一被碰就 `unable to open database file`（实机实测）；
    - `Environment=SR_LLM_MOCK=0` / `SR_SLURM_FAKE=0` → **真机显式关假实现**（service 已带默认，勿改成 1）；
    - Slurm 六项 env（`SR_PYTHON` / `SR_BUNDLE_DIR` / `SR_SLURM_WORK_DIR` / `SR_SLURM_PARTITION` / `SR_SLURM_TIME` / `SR_SLURM_CPUS`）→ 见 **§七 Slurm 接入**；缺任一项 SR 作业提交必失败；
    - 真 LLM 再配 `SR_LLM_BASE_URL/API_KEY/MODEL`（内网端点，见 service 注释）；不配则 loop 默认连外网端点（离机/MVP 用 mock，见 §四）；
@@ -239,7 +237,7 @@ curl -s 'http://127.0.0.1/api/scenes?limit=5' | head -c 400    # 场景 JSON（�
 # 盘阵静态直出（取列表里第一行 rel 拼 /disk-array/<rel>）
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1/disk-array/<某个rel>  # 200
 
-# 反代自查（2026-09-24 起每次动过 nginx.conf 都跑一遍）：拿一个不存在的场景 id 打 /preview
+# 反代自查（每次动过 nginx.conf 都跑一遍）：拿一个不存在的场景 id 打 /preview
 curl -s -o /dev/null -w '反代=%{http_code} ct=%{content_type}\n' \
      'http://127.0.0.1/api/scenes/__none__/preview?div=4'
      # ✓= 反代=404 ct=application/json  ← 请求走到了后端（后端如实说没有这个场景）
@@ -251,15 +249,14 @@ curl -s -o /dev/null -w '反代=%{http_code} ct=%{content_type}\n' \
 > `proxy_buffering` / `proxy_read_timeout` 这些普通指令。所以 `/api/` 里那个只为了让
 > `/preview` 带 `Cache-Control` 而套的子 location，光写 `add_header` 是不够的——子块里少了
 > `proxy_pass`，请求就落回 `root` 下的静态查找、由 nginx 自己回 404 HTML。
-> 2026-09-23 线上正是这么坏的：页面上「老景打开失败」，前端拿到非 JSON 的 404，误判成
-> 「盘阵上文件已被自动清除」（前端自 2026-09-24 起已收紧判据，只认 `/disk-array/…` 静态链
-> 上的 404，并把这种「没走到后端」的情况单独报出来）。跑上面的自查即可区分。
+> 前端只认 `/disk-array/…` 静态链上的 404，会把它误判成「盘阵上文件已被自动清除」，
+> 并把这种「没走到后端」的情况单独报出来。跑上面的自查即可区分。
 >
-> **这条 location 的 `max-age=300` 有个已知边界（2026-09-28 起）**：一键解析那批每次都带
+> **这条 location 的 `max-age=300` 有个已知边界**：一键解析那批每次都带
 > `?force=1`，要的是「档位没变也按盘上最新的源重新生成」。那种情形 URL 每次逐字相同 ——
 > `?div=N` 那套「换个查询串就击穿」在这里不成立（location 匹配不看查询串，换档位才是唯一有效
 > 的变化，而这里档位没变）。挡它的是**前端**：force 的那两个请求带 `cache: 'no-store'`。
-> **如果哪天真机上出现「点了两次一键解析，第二次秒回、盘上 `_preview.jpg` 的 `ls --full-time`
+> **真机上若出现「点了两次一键解析，第二次秒回、盘上 `_preview.jpg` 的 `ls --full-time`
 > 一点没变」，先查前端那处 no-store 还在不在，再去怀疑后端** —— 现象与「后端没重新生成」一模一样，
 > 但请求根本没到后端（nginx access log 里那两次会有、而上游日志里没有）。
 
@@ -269,7 +266,7 @@ curl -s -o /dev/null -w '反代=%{http_code} ct=%{content_type}\n' \
 浏览器缓存）。F12 Network 里应只有本站请求（`./assets/*`、`/api/*`、`/disk-array/*`），
 **没有任何外网域名**。
 
-盘阵目录里**本来就是 JPG** 的影像（09-14 起）也作为场景行列出，行内标签显示「JPG 源」：
+盘阵目录里**本来就是 JPG** 的影像也作为场景行列出，行内标签显示「JPG 源」：
 `hasPreview` 恒真、`jpgUrl` 指向源文件本身，点「打开」不经过懒生成（列表里 `W/H` 由 Pillow
 读头得到）。后端自己生成预览的 `<basename>_preview.jpg` 缓存不会被当成场景列进去。
 
@@ -318,7 +315,7 @@ curl -s -X POST http://127.0.0.1/api/qclist/write \
 >
 > ⚠️ **真机路径 ≠ 仓库示例路径——拷配置先换路径，否则静态页全 500**。`nginx.conf` / `sr-api.service`
 > 里写的 `/data/www/...` 是**示例**；真机实际值见 `docs/status/real-machine-bringup.md` 开头速查表
-> （node81-135 = `/run/media/root/SSD/workspace/wangrz/...`）。**照拷不换的病征**（2026-09-08 实测踩中）：
+> （node81-135 = `/run/media/root/SSD/workspace/wangrz/...`）。**照拷不换的病征**（实测踩中）：
 > 后端 `/api/*` 全 200、前端首页/各路由**全 500**（错误页带 `nginx/x.y.z`），`/var/log/nginx/error.log`
 > 刷 `rewrite or internal redirection cycle while internally redirecting to "/index.html"`——这是 SPA
 > `try_files` **死循环**，根源 = conf 的 `root` 还指着不存在的示例目录、读不到 `index.html`，**不是后端坏**。
@@ -373,7 +370,7 @@ systemctl reload nginx             # 前端热更：只 reload，别 restart sr-
 ```
 
 浏览器 **Ctrl+F5 强刷**一次（去掉浏览器缓存的旧页面）。带 hash 的资源名每次变化，
-immutable 缓存不卡旧版。判定：刷新后页面出现本次改动。
+immutable 缓存不卡旧版。判定：刷新后页面出现新版本内容。
 
 > 顶栏那颗 `logo.png`（§二 第 5 步放的）**不受升级影响** —— `scp -r dist/*` 是覆盖式拷贝，
 > 不删多余文件，所以换版本不用重放 logo；但手工 `rm -rf dist` 重建会连它一起清掉，那就得重放一次。
@@ -401,7 +398,7 @@ curl -s http://127.0.0.1:8000/api/health   # 判定： {"status":"ok",...}
 > 改了后端但没加新依赖时，只用这一节。若 `requirements-api.txt` 也变（新增/升版本包），
 > 需先在服务器按 §三.2 重新 `pip install -r` 再 restart，否则 import 阶段就崩。
 >
-> **漏了 `chown` 的病征**（2026-09-15 实测踩中）：scp / 网盘拖拽进来的文件属主是 **root**
+> **漏了 `chown` 的病征**（实测踩中）：scp / 网盘拖拽进来的文件属主是 **root**
 > （且常见 600），而服务以 `User=nginx` 跑（`sr-api.service:28`），nginx 连 import 都读不到。
 > 表现是重启后 `curl :8000/api/health` 返回 **`000`**（连接被拒 = 没人监听）、
 > `ss -ltnp | grep :8000` 空，`journalctl -u sr-api -n 25` 末尾：
@@ -444,9 +441,8 @@ systemctl daemon-reload && systemctl restart sr-api
 
 > ⚠️ **第一行必须是 `[Service]`**（或其它合法段头）。漏了它 systemd **不报错、不警告，
 > 整个文件被静默忽略**：`systemctl cat sr-api` 照常把那几行打印出来，看着像生效了，实际
-> 一条都没进进程环境。2026-09-15 实测踩中——机上遗留的 `override.conf` 只有三行
-> `Environment=`、没有段头，`SR_EXECUTOR=local` 因此从未生效，后端一直退回默认的 `slurm`，
-> 一提交就会去 `sbatch` 而不是本机直跑。
+> 一条都没进进程环境（实测：漏段头的 `override.conf` 会让 `SR_EXECUTOR=local` 进不了进程环境，
+> 后端退回默认的 `slurm`，一提交就去 `sbatch` 而不是本机直跑）。
 >
 > **判定是否生效只能看 `systemctl show`，不能看 `systemctl cat`**（前者是合并后进程真正拿到的
 > 值，后者只是文件文本的拼接，含被忽略的死行）：
@@ -469,8 +465,8 @@ curl -s -o /dev/null -w '反代=%{http_code} ct=%{content_type}\n' \
 
 - **前端**：把上一版 `dist` 覆盖回来（或保留旧目录、把站点 `root` 指回旧 dist）→ `systemctl reload nginx`。
 - **后端**：恢复上一版 `backend/`（git 检出旧提交再拷）→ `systemctl restart sr-api`。
-- 预览 JPG 缓存随源图目录存、跨回滚保留，一般无需重生成。**例外：预览生成规则变更**（如 09-17 v2：各边
-  1/2 + 直方图均衡）——旧图缺新规则签名，回滚/升级后首次打开会被判定失效并**原地重新生成一次**（覆盖同名
+- 预览 JPG 缓存随源图目录存、跨回滚保留，一般无需重生成。**例外：预览生成规则变更**（缓存缺当前
+  规则签名时）——回滚/升级后首次打开会被判定失效并**原地重新生成一次**（覆盖同名
   `<stem>_preview.jpg`），属预期行为，见 [docs/experience/gui-experience.md](../docs/experience/gui-experience.md) §9.1。另注意 nginx 给
   预览 JPG 的 `max-age=3600`：升级后浏览器可能还在用旧图，硬刷新一次即可。
 
@@ -484,7 +480,7 @@ curl -s -o /dev/null -w '反代=%{http_code} ct=%{content_type}\n' \
 解压是**覆盖**而不是替换：旧版本留下的 `assets/<旧哈希>.js` 会一直躺在目录里（没人引用，
 无害），要清就手工清。
 
-### 5.6 整包拷贝时代的操作纪律（2026-09-09 实测教训）
+### 5.6 整包拷贝时代的操作纪律
 
 如果你每次更新是**整份拷贝 `sr-agent-platform/` 文件夹**（U 盘/rsync 整包），先分清包里的两类文件，
 处置完全不同：
@@ -528,14 +524,13 @@ curl -s -o /dev/null -w '健康=%{http_code}\n' http://127.0.0.1:8000/api/health
 - **vendor 已打进 dist，全离线**：pako/utif(补丁版)/geotiff 均来自 `frontend/src/vendor/`，Vite 构建打进产物。
 - **utif.js 为补丁版（cmpr 8/32946 走 pako inflate），绝不能被 npm 重装覆盖**——只能从 `src/vendor/utif.js` 本地引入。
 - **盘阵双层保险**：nginx `alias` 整块暴露 + 后端按 `SR_SCENES_ROOT` 白名单校验（拒绝 `../` 穿越、白名单外绝对路径、fake 占位）。URL 全用相对场景根的 `/disk-array/<rel>`。
-- **浏览器单次分配约 2GB、Canvas 面积上限 16384²**——盘阵场景因此由服务端生成 JPG（v3：各边 ÷2…÷32，默认 ÷4），浏览器只解码 JPG（远低于上限）。
+- **浏览器单次分配约 2GB、Canvas 面积上限 16384²**——盘阵场景因此由服务端生成 JPG（各边 ÷2…÷32，默认 ÷4），浏览器只解码 JPG（远低于上限）。
 - 真实大图只在有盘阵的内网机（外网开发机读不到），解码回归用 `.e2e/` 本机资产 + `frontend/fixtures/` 入库小图；真机验收项见 `docs/status/real-machine-acceptance.md`。
 
 ## 七、Slurm 接入（SR 作业提交链路）
 
-> ⚠️ **2026-09-14 起本节整体中止**：当前路线是 **§7.6「本机 conda 直跑」（`SR_EXECUTOR=local`）**，
-> 不经过调度器（判据见 `docs/planning/sr-minimal-prototype-plan.md` §1.3）。本节与
-> `docs/status/slurm-acceptance.md` 一并保留为**重启 Slurm 时的存量**，内容未失效。
+> ⚠️ 当前路线是 **§7.6「本机 conda 直跑」（`SR_EXECUTOR=local`）**，不经过调度器（判据见
+> `docs/planning/sr-minimal-prototype-plan.md` §1.3）。本节是 Slurm 接入的存量说明，内容未失效。
 >
 > 链路：`/queue` 提交 → 后端写 config.xml + 批脚本 → `sbatch` → 作业在计算节点上跑 SR →
 > 作业内校验器写退出码文件 → 后端读盘判终态 → SSE 推前端。
@@ -566,9 +561,8 @@ head -3 code_0817_prod_slurm.py                                  # ✓= "GENERAT
 ls -l code_0817_prod.py                                          # ✓= 生产原脚本仍在，未被改动
 ```
 
-> ⚠️ `verify_sr_run.py` 的仓库副本 **2026-09-15 起为 17164 B / `5fa627d8…`**（退出码文件的
-> 编码锁定，见 `docs/status/timeline-archive.md`）。机上若还是 09-11 拷的 16419 B 旧版，
-> A/B/C 不受影响，**走 D 之前重新拷一次**。
+> ⚠️ `verify_sr_run.py` 的仓库当前版本含退出码文件的编码锁定（17164 B）。机上若还是旧版
+> （16419 B，行为正确但少这层保护），A/B/C 不受影响，**走 D 之前重新拷一次**。
 
 > **为什么可以不顶替**：批脚本里那两个程序名是 `SR_SR_SCRIPT` / `SR_VERIFY_SCRIPT` 两个 env
 > 决定的（`run_sr.py`），后端在生成批脚本时把名字写进文本。所以变体只要跟原脚本放在同一目录、
@@ -584,13 +578,13 @@ env——`sr-api.service` 里**前八项**全部必填、第九项强烈建议�
 
 | env | node81-135 实测值 | 说明 |
 | --- | --- | --- |
-| `SR_PYTHON` | `/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python` | **SR 生产解释器**（py3.6 + torch + GDAL + ImgHistMatch.so），与平台 venv `/opt/sr-venv`（py3.9）平行、互不污染——后端不 import SR/torch/GDAL，只在批脚本里写一行解释器路径，该行在**计算节点**上解析。2026-09-14 实测：**torch 1.10.2+cu113 / GDAL 2.4.0**（目录名里的 1.9.1 ≠ 实际版本）。2026-09-15 `ls -d` 复核：该前缀存在，可直接照抄（备选的 `/media/node81-135/SSD` 不存在） |
+| `SR_PYTHON` | `/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python` | **SR 生产解释器**（py3.6 + torch + GDAL + ImgHistMatch.so），与平台 venv `/opt/sr-venv`（py3.9）平行、互不污染——后端不 import SR/torch/GDAL，只在批脚本里写一行解释器路径，该行在**计算节点**上解析。实测：**torch 1.10.2+cu113 / GDAL 2.4.0**（目录名里的 1.9.1 ≠ 实际版本）。该前缀存在，可直接照抄（备选的 `/media/node81-135/SSD` 不存在） |
 | `SR_BUNDLE_DIR` | `/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes` | `code_0817_prod.py` / `models` / `utils` / `options` 所在目录；拼写以 `code_0817_prod.py:27` 的 `load_library()` 为准 |
-| `SR_SLURM_WORK_DIR` | `/DiskArray/tmp/wangrz/sr_agent_work` | config.xml 与批脚本落盘处。**必须是共享盘**——`gpu` 分区横跨 **76** 个节点（`node81-*` 与 `node104-*` 两族，2026-09-11 探针实测），作业落在哪台由调度器决定，每一台都要能读它；默认值 `/tmp/sr_agent_work` 是本机路径，多节点下作业秒挂 |
-| `SR_SLURM_PARTITION` | `gpu` | `sinfo -h -o "%P"` 实测（`centos7` / `deicc` / `gpu` / `gpu*` / `test`，星号=默认分区）。**没有 `gpup`** —— 早先文档那个值是转述错误；不配则走默认分区，多分区集群下不可控 |
+| `SR_SLURM_WORK_DIR` | `/DiskArray/tmp/wangrz/sr_agent_work` | config.xml 与批脚本落盘处。**必须是共享盘**——`gpu` 分区横跨 **76** 个节点（`node81-*` 与 `node104-*` 两族，探针实测），作业落在哪台由调度器决定，每一台都要能读它；默认值 `/tmp/sr_agent_work` 是本机路径，多节点下作业秒挂 |
+| `SR_SLURM_PARTITION` | `gpu` | `sinfo -h -o "%P"` 实测（`centos7` / `deicc` / `gpu` / `gpu*` / `test`，星号=默认分区）。**没有 `gpup`**；不配则走默认分区，多分区集群下不可控 |
 | `SR_SLURM_TIME` | `02:00:00` | 作业时限（`#SBATCH --time`） |
 | `SR_SLURM_CPUS` | `4` | `#SBATCH --cpus-per-task` |
-| `SR_SLURM_NODELIST` | **待定（那一台 4 卡机的主机名）** | 白名单 → `#SBATCH --nodelist=`。2026-09-14 需求：**所有作业只跑在同一台 4×3090 物理机内、不调度到其他服务器**，Slurm 只做本机排队 + 单卡分配 —— 所以值是**单台**主机名，由 `docs/status/slurm-acceptance.md §B0` 的三条只读命令定出（`sinfo -N -o "%N %G %t"` 找 `gpu:4` 且非 `down` 的那台）。值是 Slurm host list，只允许字母/数字/`-`/`,`/`[`/`]`（非法值提交时报错）；不配 = 不加此行 = 调度器自选。**别填族白名单**（会把作业散到几十台机器上）。它是**硬**白名单：该机全忙时作业排队等待，不会溢出。若走「本机单节点 Slurm」方向则整项不需要 |
+| `SR_SLURM_NODELIST` | **待定（那一台 4 卡机的主机名）** | 白名单 → `#SBATCH --nodelist=`。需求：**所有作业只跑在同一台 4×3090 物理机内、不调度到其他服务器**，Slurm 只做本机排队 + 单卡分配 —— 所以值是**单台**主机名，由 `docs/status/slurm-acceptance.md §B0` 的三条只读命令定出（`sinfo -N -o "%N %G %t"` 找 `gpu:4` 且非 `down` 的那台）。值是 Slurm host list，只允许字母/数字/`-`/`,`/`[`/`]`（非法值提交时报错）；不配 = 不加此行 = 调度器自选。**别填族白名单**（会把作业散到几十台机器上）。它是**硬**白名单：该机全忙时作业排队等待，不会溢出。若走「本机单节点 Slurm」方向则整项不需要 |
 | `SR_SR_SCRIPT` | `code_0817_prod_slurm.py` | 作业跑哪个超分脚本（相对 `SR_BUNDLE_DIR`）。**不配 = 跑生产原脚本**，见上面的警告 |
 | `SR_VERIFY_SCRIPT` | `verify_sr_run.py` | 作业内契约校验器（相对 `SR_BUNDLE_DIR`）。不配也会跑这个名字，显式写出来是为了可审计 |
 | `SR_SANDBOX_ROOT` | `/DiskArray/tmp/wangrz/sr_sandbox` | **强烈建议配**：每个作业先在 `<根>/<任务指纹前12位>/` 下 `cp -a` 一份 `lq_path` 的私有副本，SR 全程只碰副本。不配 = SR 直接写 `lq_path`（阶段6 的生产形态）。详见 §7.5 |
@@ -692,11 +686,11 @@ os.rename(path + tiftype, path + "_NOSR" + tiftype)   # 首跑时该文件不存
 - **值的格式**：必须是不含空格 / 引号 / `` ` `` / `..` 的绝对路径——它会拼进作业脚本里一行
   `rm -rf "<根>/<指纹>"`。非法值在**提交时**报 `ValueError`，不会静默降级；
 - **时间**：复制发生在作业内，算进 `--time`（默认 2h）。大场景 + 慢盘时留意；
-- **不配就是阶段 6 的生产形态**：SR 直接写 `lq_path`（产物 + `Debug/` + meta 更新），平台恒定
+- **不配就是生产形态**：SR 直接写 `lq_path`（产物 + `Debug/` + meta 更新），平台恒定
   非空 `Suffix`，源图不改名也不删除。上游生产管线用空 `Suffix` 就地写时才会把原图改名为
-  `*_NOSR.tif`（契约 §2.4 第 1 条），平台不走那条路。所以阶段 6 之后关掉沙箱是正常的，
+  `*_NOSR.tif`（契约 §2.4 第 1 条），平台不走那条路。所以生产环境关掉沙箱是正常的，
   只是那一刻起，前端填什么路径就写什么路径。
-- **与产物预览主动生成的关系（2026-09-20）**：作业转 COMPLETED 后，后端会同时把**产物那一份**
+- **与产物预览主动生成的关系**：作业转 COMPLETED 后，后端会同时把**产物那一份**
   预览生成掉（见 `deploy/sr-api.service` 里 `SR_PRODUCT_PREVIEW_DIV` 那段）。沙箱**实际生效**时
   产物落在私有副本上、盘阵里根本没有产物，这项会自动跳过并在队列行上写
   `skipped: sandbox`（如实跳过，不是故障，也不会往临时盘撒文件）。
@@ -706,7 +700,7 @@ os.rename(path + tiftype, path + "_NOSR" + tiftype)   # 首跑时该文件不存
 
 ### 7.6 最小原型：不走 Slurm，本机 conda 直接跑（`SR_EXECUTOR=local`）
 
-最小原型（09-14，工作单 `docs/planning/sr-minimal-prototype-plan.md`）要的是「前端点一下 →
+最小原型（工作单 `docs/planning/sr-minimal-prototype-plan.md`）要的是「前端点一下 →
 本机直接跑对应目录的掩码和 `.tif`」，不经过调度器。实现方式是把 `sbatch` 换成 `bash`：
 `run_sr.build_batch_script()` 生成的批脚本本身是合法 bash（`#SBATCH` 行在 bash 眼里就是注释），
 所以整条链路（config.xml → 作业内校验器 → 退出码文件 → 读盘定终态）一行不改地复用。
@@ -723,10 +717,10 @@ Environment=SR_LOCKED_DIR=<试验目录>
 Environment=SR_LOCAL_GPU=0
 ```
 
-**产物后缀的来源（2026-09-16 改）**：请求不带 `suffix` 时，平台读 `$SR_BUNDLE_DIR` 下
+**产物后缀的来源**：请求不带 `suffix` 时，平台读 `$SR_BUNDLE_DIR` 下
 SR 团队自己的配置文件（`sfsr_confgig_test_espan2_cuda1.xml`，同时兼容另一种拼写
 `sfsr_config_...`）里的 `<Suffix>` 作为默认值，读不到或不合法才回落到内置的 `sr`。
-原 `SR_SUFFIX_DEFAULT` 环境变量同日**作废**，设了也不会被读（`tests/test_config.py`
+`SR_SUFFIX_DEFAULT` 环境变量设了也不会被读（`tests/test_config.py`
 有回归测试钉住）。改后缀请改那份 XML，不要再往 systemd 单元里加变量。
 
 与 Slurm 模式的差异（`backend/services/local_exec.py`）：

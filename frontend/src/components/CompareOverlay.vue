@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * CompareOverlay.vue — 分屏/落位提示的 DOM 叠加层（2026-09-20）
+ * CompareOverlay.vue — 分屏/落位提示的 DOM 叠加层
  * ------------------------------------------------------------------
  * slot 进 TifCanvas 的 `.stage`，与 DrawPanel / DecodeOverlay 并列。整层
  * `pointer-events: none`，**只有分隔线那条抓取带**恢复 `auto` —— 它要能拖。

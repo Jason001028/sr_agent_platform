@@ -208,7 +208,7 @@ class TestSiblingsOk(SiblingsBase):
 
 
 class TestSiblingsNosr(SiblingsBase):
-    """未超分那份的**候选与优先**（2026-09-24 用户口径）。
+    """未超分那份的**候选与优先**（用户口径）。
 
     盘上有两套 NOSR 名字，优先级不同：
 
@@ -263,8 +263,8 @@ class TestSiblingsNosr(SiblingsBase):
     def test_nosr_item_does_not_need_a_suffix(self):
         """NOSR 的名字由**输入 stem** 拼，与 suffix 无关：没有可用的 suffix 时它照旧在。
 
-        产物那一类才是「拼不出名字就不编」——此前 nosr 项被写在同一个 `if suffix`
-        里，跟着一起消失了。
+        产物那一类才是「拼不出名字就不编」：nosr 项不搭那个 `if suffix` 的车，
+        否则没有 suffix 时它会跟着一起消失。
         """
         d = self.make_scene()
         mine = make_strip_tif(d, f"{SCENE_NAME}_NOSR.tif", 80, 40)[0]

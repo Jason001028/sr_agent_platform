@@ -76,7 +76,7 @@ class TestProbe(unittest.TestCase):
 
 class TestBuildPreview(unittest.TestCase):
     def test_half_scale(self):
-        """规则 v2：各边严格取源图的 1/2（旧规则是长边封顶 8192）。"""
+        """规则 v2：各边严格取源图的 1/2，长边不封顶。"""
         with tempfile.TemporaryDirectory() as d:
             p, _ = make_strip_tif(d, "s.tif", 320, 640)
             px = build_preview_pixels(str(p))
@@ -84,7 +84,7 @@ class TestBuildPreview(unittest.TestCase):
             self.assertEqual(px.shape, (320, 160))  # h, w
 
     def test_half_scale_wide_not_capped(self):
-        # 12000 宽 → 6000（旧规则会封到 8192）；采样只读几行，fixture 很小
+        # 12000 宽 → 6000（长边不封顶）；采样只读几行，fixture 很小
         with tempfile.TemporaryDirectory() as d:
             p, _ = make_strip_tif(d, "big.tif", 12000, 60)
             px = build_preview_pixels(str(p))
@@ -93,7 +93,7 @@ class TestBuildPreview(unittest.TestCase):
             self.assertEqual(h, 30)
 
     def test_explicit_max_edge_still_honoured(self):
-        """显式传 max_edge 时不再按 1/2 推（测试与调用方都要能钉死尺寸）。"""
+        """显式传 max_edge 时以它为准，不走 1/2 的默认（测试与调用方都要能钉死尺寸）。"""
         with tempfile.TemporaryDirectory() as d:
             p, _ = make_strip_tif(d, "s.tif", 320, 640)
             px = build_preview_pixels(str(p), 160)
@@ -168,7 +168,7 @@ class TestBuildPreview(unittest.TestCase):
 class TestStretchEqual(unittest.TestCase):
     """直方图均衡（镜像前端 stretchMap mode='equal'）。
 
-    与前端的一致性已用真实 tifDecode 逐像素核过（2026-09-17，7 个用例 0 差异，
+    与前端的一致性已用真实 tifDecode 逐像素核过（7 个用例 0 差异，
     见 docs/status/current-question.md）；这里钉的是不依赖前端就能自查的语义。
     """
 
@@ -216,8 +216,8 @@ class TestStretchEqual(unittest.TestCase):
 class TestBigPreviewNotMistakenForBomb(unittest.TestCase):
     """1/2 尺度会把「2.4 万像素级的源」降采样到 1.5 亿像素，超过 Pillow 默认像素
     上限（8948 万）的 2 倍就会抛 DecompressionBombError —— 那会让 cache_hit
-    的 Image.open 失败、缓存永远判不中，于是每次打开都重新生成一遍，本次的优化
-    全部抵消。这里不造 1.5 亿像素的真图（太慢），而是造一张**头里声明**了
+    的 Image.open 失败、缓存永远判不中，于是每次打开都重新生成一遍。
+    这里不造 1.5 亿像素的真图（太慢），而是造一张**头里声明**了
     巨大尺寸的 JPEG：Pillow 的炸弹检查只看头，足够复现该失败。"""
 
     HUGE = 20000          # 20000² = 4 亿像素 > 2× 默认上限
@@ -323,7 +323,7 @@ class TestEnsurePreviewJpg(unittest.TestCase):
                              "generated")
 
     def test_other_quality_regenerates(self):
-        """质量也是规则的一部分：改了 quality，旧图同样要重新生成。"""
+        """质量也是规则的一部分：quality 不符时旧图同样要重新生成。"""
         with tempfile.TemporaryDirectory() as d:
             p, _ = make_strip_tif(d, "s.tif", 64, 64)
             jpg = Path(d, "s.preview.jpg")
@@ -402,7 +402,7 @@ class TestSplitHelpers(unittest.TestCase):
     （同 suffix 重跑会覆盖同一个产物路径，不复核会把半截图永久留在盘上）。
     所以这里要钉的是**拆出来之后两边规则仍然一致** —— 缓存判据不能变，落盘的
     规则签名不能变。整条 `ensure_preview_jpg` 的行为由上面 `TestEnsurePreviewJpg`
-    那一组钉着（这次重构一个用例都没改就全绿，就是它守住了）。
+    那一组钉着（拆出的两半任一跑偏，那一组就会红）。
     """
 
     def test_write_preview_jpg_stamps_and_publishes(self):

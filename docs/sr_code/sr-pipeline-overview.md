@@ -1,12 +1,12 @@
 # 局部超分管线 — 算法与实现全览
 
-> 日期：2026-08-17（内容迭代更新至 08-25）· 状态：草稿
+> 日期：2026-08-17 · 状态：草稿
 > 归档定位：docs/sr_code/ 类目（SR_CODE 生产管线文档簇）——算法实现全览，与调用契约 [sr-pipeline-interface.md](sr-pipeline-interface.md) 互补。
 
 > **阅读须知（重要，打开本文前先看）**：
 >
-> 1. **改进目标代码：`超分代码0803/code_0805.py`**——当前项目实际迭代/改进的源码（局部 SR：掩码引导 tile 跳过 + MTA-Grid 网格对齐 + 全管线计时；已移除膨胀与像素融合）。其余版本（0720/0723/0724/0725/0727/0803baseline）仅用于追溯版本演进与对照，常规阅读只会浪费 token，不必展开。
-> 2. **代码环境不完整**：仓库内的 `超分代码*.py` 只是内网环境的**部分导出**，`models/`、`options/` 等外部依赖源码不在仓库中（在服务器 mmsr_bundle）。**但 `util.py` 已还原入库**：`SR_code/util.py`（1763 行，2026-08-17 还原），文中 `util.*` 调用均可在该文件查源码（**8.25 最新**）。因此**不能因仓库缺文件就断言某环节不存在**——遇到 `model.*` 等仍未包含的实现细节，应**主动向作者提问**或手动查询 `.py` 未导出的代码细节，可参考 §4.5 的外部依赖契约表。
+> 1. **源码：`超分代码0803/code_0805.py`**——当前管线源码（局部 SR：掩码引导 tile 跳过 + MTA-Grid 网格对齐 + 全管线计时；无膨胀与像素融合）。
+> 2. **代码环境不完整**：仓库内的 `超分代码*.py` 是内网环境的**部分导出**，`models/`、`options/` 等外部依赖源码不在仓库中（在服务器 mmsr_bundle）。`util.py` 在仓库：`SR_code/util.py`（1763 行），文中 `util.*` 调用均可在该文件查源码。因此**不能因仓库缺文件就断言某环节不存在**——遇到 `model.*` 等未包含的实现细节，应**主动向作者提问**或手动查询 `.py` 未导出的代码细节，可参考 §4.5 的外部依赖契约表。
 
 ## 1. 问题定义
 
@@ -26,37 +26,18 @@
   实验验证：tile=500 ✅ | 625 ❌ | 1250 ✅ | 2500 ✅ | 5000 ❌ (OOM)
 - 内网环境，运行时无互联网访问；代码以日期命名迭代（无 git）
 
-**背景八卦（2026-08-24 上午听来，非技术结论）**：KF02 卫星此前将数据出售给对应的 B 端客户，被客户吐槽纹理不行。可作为局部超分对纹理质量提升诉求的侧面背景参考。
-
-> **部署现状（2026-08-25 补充）**：当前方向是**鼓励把超分部署在内网机上本地跑**。数据侧的关键事实：**主要遥感影像都存放在盘阵（磁盘阵列）里**——`run_all_folders.py`（内网存档，本仓库无） 的 `SR_ROOT = /DiskArray/tmp/wangrz/sr_utils/sr_data` 正是盘阵挂载点。**服务器访问盘阵的读写远比本地电脑快**（盘阵的存储与带宽都在服务器侧，本地跨网读写慢），所以"计算靠近数据侧"能省大量 I/O 时间。目前代码已在**服务器与内网办公电脑两处都完成部署**。讨论路径与 I/O 时默认：**数据在盘阵、首选服务器侧运行，本地是第二顺位**。
+> **部署现状**：方向是**把超分部署在内网机上本地跑**。数据侧的关键事实：**主要遥感影像都存放在盘阵（磁盘阵列）里**——`run_all_folders.py`（内网存档，本仓库无） 的 `SR_ROOT = /DiskArray/tmp/wangrz/sr_utils/sr_data` 正是盘阵挂载点。**服务器访问盘阵的读写远比本地电脑快**（盘阵的存储与带宽都在服务器侧，本地跨网读写慢），所以"计算靠近数据侧"能省大量 I/O 时间。代码在**服务器与内网办公电脑两处均有部署**。讨论路径与 I/O 时默认：**数据在盘阵、首选服务器侧运行，本地是第二顺位**。
 
 ---
 
-## 2. 版本演进
+## 2. 代码命名约定
 
-内网环境无 git，代码以日期命名迭代（`code_MMDD.py`）。每个版本在前一版基础上增量修改，
-通过注释标记作者归属（`# huai core` 为原作者，`# wrz` 为局部超分改进）。
-
-| 版本 | 文件 | 核心变更 | 关键特征 |
-|------|------|---------|---------|
-| 0720 | `超分代码0720/code_0720.py` | 原始全图 SR | 无掩码、逐 tile 串行 TRT、reflect-padding |
-| 0724 | `超分代码0723/code_0724.py` | 掩码 tile 跳过 | 膨胀预判（dilate=2）、bicubic 回退、像素级掩码融合（7 处修改） |
-| 0727 | `超分代码0723/code_0727.py` | 多上下文 GPU 并行 | block_reduce 向量化预扫描、CUDA Stream 双副本、ThreadPoolExecutor 双三次批量 |
-| 0803 | `超分代码0803/code_0803baseline.py` | 去膨胀 + VRAM 门控 + 全管线计时 | 移除膨胀和像素融合、GPU warmup、NUM_CTX=1 默认 + VRAM 前置校验、多模型并行 worker、终端直出各段耗时占比表 |
-| 0805 | `超分代码0803/code_0805.py` | MTA-Grid 网格原点对齐 + mini-batch | 掩码拓扑感知网格对齐、批处理（实测无加速）、MaskPath 缺省保护、全管线分阶段计时 |
-
-### 关键架构转折
-
-- **0720 → 0724**：引入掩码概念和 tile 级跳过策略，将全图 SR 改造为按需超分。
-- **0724 → 0727**：GPU 推理并行化（多上下文 CUDA Stream）和预扫描向量化（block_reduce）。
-- **0727 → 0803**：默认 NUM_CTX=1 + VRAM 前置校验；GPU warmup；全管线分阶段计时；多模型推理分支统一。
-- **0803 → 0805**：引入 MTA-Grid 掩码拓扑感知的网格原点对齐（§5.8）；mini-batch 批处理（实测 compute-bound 下无加速，§5.6/§5.7）；MaskPath 缺省保护。
-
-### 命名约定
+内网环境无 git，代码以日期命名迭代（`code_MMDD.py`），通过注释标记作者归属
+（`# huai core` 为原作者，`# wrz` 为局部超分改进）。
 
 - `code_MMDD.py`：按日期迭代，内网无 git 的替代方案
 - `*_re.py`：修订版（revised），如 `code_0724baseline_re.py`
-- `*baseline.py`：当前稳定基线版本
+- `*baseline.py`：稳定基线版本
 
 ---
 
@@ -195,7 +176,7 @@ mask_binary           mask_wrapped
 
 **升轨为何改变 GSD**：卫星轨道抬升后，星下点像元覆盖地面范围变大 → GSD 从 ~0.49–0.495 变到 ~0.55。同一颗星按成像日期选择系数，日期从**文件名**里由 `get_img_date` 正则解析（`JL\d+\w+_PMSxx_<日期>_..._PAN.tif`）——这也是 SC 步要求输入用完整产品名 `<文件夹名>.tif` 的原因之一：日期字段就藏在里面；而裸 `PAN.tif`（RC / GF04A）没有日期、也不进这条逐日期分支。
 
-**生产版简化**：`resize_by_sat_rcsc_2` 不再逐星判断，仅按 `resize_scale`（= 配置 `<SRScale>`，`code_0817.py:129`（内网存档，本仓库无））统一处理：`==2` 时不重采样，否则 `fx = resize_scale/2`。逐星表退化为函数内注释保留的 dead code（供追溯）——当前生产数据（JXGF07A03，SRScale=2）走 `resize_scale == 2` 分支，即不重采样。
+**生产版处理**：`resize_by_sat_rcsc_2` 不逐星判断，仅按 `resize_scale`（= 配置 `<SRScale>`，`code_0817.py:129`（内网存档，本仓库无））统一处理：`==2` 时不重采样，否则 `fx = resize_scale/2`。逐星表为函数内注释保留的 dead code——当前生产数据（JXGF07A03，SRScale=2）走 `resize_scale == 2` 分支，即不重采样。
 
 ### 4.4 I/O 瓶颈：原图与掩码的加载
 
@@ -204,10 +185,9 @@ mask_binary           mask_wrapped
 1. **内存压力**：同时持有 `ori_img` 和 `mask_raw` 两份完整数组，在办公级硬件上可能突破可用 RAM 上限。
 2. **启动延迟**：GDAL 在第一个 tile 被处理前必须读完整个 tif。对于 4 GB 级别的图像，这部分耗时占固定开销的显著比例。
 
-**潜在改进方向**：
+**GDAL 多线程解码（当前启用）**：`GDAL_NUM_THREADS=ALL_CPUS` + `GDAL_CACHEMAX=200` 显式限制，启用 GDAL 内部并行解码，压缩 TIFF 预期加速 30%–80%。本管线为单进程调用，无 PyTorch DataLoader Worker 冲突风险。`GDAL_CACHEMAX` 需显式限制，否则默认值（物理内存 5%）在分块读取循环中会持续膨胀，造成"伪内存泄漏"。
 
-- **GDAL 多线程解码（P0，一行代码）**：当前 `ReadAsArray` 为单线程解码。设置 `GDAL_NUM_THREADS=ALL_CPUS` + `GDAL_CACHEMAX=200` 即可启用 GDAL 内部并行解码，压缩 TIFF 预期加速 30%–80%。本管线为单进程调用，无 PyTorch DataLoader Worker 冲突风险。`GDAL_CACHEMAX` 需显式限制，否则默认值（物理内存 5%）在分块读取循环中会持续膨胀，造成"伪内存泄漏"。
-  > **注（已落地）**：当前环境已应用 GDAL 多线程解码（`GDAL_NUM_THREADS=ALL_CPUS` + `GDAL_CACHEMAX` 显式限制），此条**不再属于待办改进**。§4.4 仍有效的待办仅剩掩码窗口读取、掩码存储格式选择等。
+**潜在改进方向**：
 
 - **按需窗口读取掩码**：掩码仅在 tile 分类预扫描阶段逐 tile 被查询，可通过 GDAL 窗口读取按需加载对应区域，而非一次性读入整个数组。同时也消除了 `mask_wrapped` 的内存重复问题。
 - **掩码存储格式的重新选择**：二值掩码以未压缩 tif 存储，空间开销与原始图像相当。替代方案：
@@ -217,7 +197,7 @@ mask_binary           mask_wrapped
 
 ### 4.5 外部依赖速查
 
-> **（2026-08-25 更新，8.25 最新）**：`util.py` 已还原入库——[util.py](./util.py)（1763 行，2026-08-17 按扫描件逐函数还原）。本表 `util.*` 系列函数均可在该文件直接查看源码；`models/`、`options/` 等其余外部依赖（服务器 mmsr_bundle）仍不在仓库，仅列契约。
+> `util.py` 在仓库——[util.py](./util.py)（1763 行）。本表 `util.*` 系列函数均可在该文件直接查看源码；`models/`、`options/` 等其余外部依赖（服务器 mmsr_bundle）不在仓库，仅列契约。
 
 以下函数来自 `utils/util.py`（现已在仓库，见上）、`options/options.py` 与 `models/`（后两者仍在服务器 mmsr_bundle，仓库无源码）。本表保留为**契约速查**：一眼看签名与行为要点；深挖实现可直接跳 `util.py` 对应行号。
 
@@ -245,7 +225,7 @@ mask_binary           mask_wrapped
 
 ### 4.6 中间产物命名规则（SR 环节与 MTFC 环节）
 
-> **经验（2026-08-26 问到）**：遥感影像处理管线里，SR 与 MTFC 两个环节对「处理结果 / 原图（中间产物）」的命名规则**相反**，容易混淆。最基础的遥感命名规则不在此列，这里只记两条中间产物约定。
+> **经验**：遥感影像处理管线里，SR 与 MTFC 两个环节对「处理结果 / 原图（中间产物）」的命名规则**相反**，容易混淆。最基础的遥感命名规则不在此列，这里只记两条中间产物约定。
 
 **SR 环节**：输入 `PAN.tif`，超分后产生两个文件（六位数为两文件共享的后缀）：
 
@@ -276,7 +256,7 @@ mask_binary           mask_wrapped
 - 都作用于 PAN 全色影像，都影响观感"清晰度/纹理"，最终都提升图像质量；
 - 成像模型上是一件事的两端：输入图像 ≈ 理想场景 ⊗ PSF + 噪声（⊗ 为卷积，PSF 即点扩散函数）。
   **MTFC 做逆卷积**，把被 PSF 压扁的高频恢复回原始分辨率下的样子；**SR 再上采样重建**，补出采样率以下的细节。两者串起来 = 先复原、再重建。
-- 客户抱怨"纹理不行"时，两个环节都可能负责：MTFC 决定基础清晰度，SR 决定能否再往上提（见 §1 背景八卦的 KF02 案例）。
+- 客户抱怨"纹理不行"时，两个环节都可能负责：MTFC 决定基础清晰度，SR 决定能否再往上提。
 
 **区别**
 
@@ -323,20 +303,21 @@ SR tile 的数量由 ROI 真实覆盖范围决定，分类精确且不引入额�
 ```python
 # 向量化 numpy 预扫描 — 单条表达式完成所有 tile 的分类，替代逐 tile 的 Python 循环
 needs_sr_grid = mask_wrapped[:mask_h, :mask_w].reshape(
-    tile_rows, t_ht, tile_cols, t_wd).any(axis=(1, 3))  # 0803: .any() 替代 .sum()
+    tile_rows, t_ht, tile_cols, t_wd).any(axis=(1, 3))  # .any()：任一像素为 1 则该 tile 需要 SR
 ```
 
 原理：将 mask_wrapped 重新排列为四维张量 `(行数, t_ht, 列数, t_wd)`，沿 tile 内部的高和宽两个空间轴取 any 判断。如果某个 tile 区域内掩码有任何一个白色像素，标记为需要 SR。
 
-与 0724 版本的逐 tile Python 循环相比，该操作完全在 numpy 的 C 底层完成。0803 将 0727 的 `.sum() > 0` 简化为 `.any()`，语义更直接且微幅更快。
+该操作完全在 numpy 的 C 底层完成，无逐 tile 的 Python 循环。
 
 ### 5.3 SR 路径：多上下文 GPU 并行
 
 #### 默认行为
 
-**0803 默认 `NUM_CTX = 1`（单上下文）**。部署目标为 RTX 3060（12 GB），单模型副本约需 ~4.5 GB
-（tile=500，实测）至 8–12 GB（tile=2500），默认单上下文确保 3060 上不 OOM。
-开发服务器 RTX 3090（24 GB）上可手动解锁为 2：
+**`NUM_CTX = 1`（单上下文）**。部署目标为 RTX 3060（12 GB），单模型副本约需 ~4.5 GB
+（tile=500，实测）至 8–12 GB（tile=2500），单上下文确保 3060 上不 OOM。
+
+源码中的 VRAM 门控如下：
 
 ```python
 VRAM_PER_REPLICA_MB = 2048      # 每个模型副本的保守显存估算
@@ -347,9 +328,9 @@ if free_mb < VRAM_PER_REPLICA_MB * NUM_CTX + VRAM_SAFETY_MARGIN_MB:
     NUM_CTX = 1  # 降级为单模型推理，避免 OOM
 ```
 
-> **注（0803 实测）：以上 VRAM 门控是死代码。** 非 TRT 分支中 `NUM_CTX` 在门控判定前已恒为 1（源码注释 `bump to 2 when torch>=2.0`），判定时阈值恒为 2048×1+2048=4096 MB，分支只能把 1 赋成 1 并打印 `degraded to single-context`——脚本内**不存在任何将 `NUM_CTX` 设为 2 的路径**。根因是内网机 torch 版本 <2.0，多流并发不可用，**GPU 多实例并行推理名存实亡，`NUM_CTX` 恒 1**。因此：
+> **注（实测）：以上 VRAM 门控是死代码。** 非 TRT 分支中 `NUM_CTX` 在门控判定前已恒为 1（源码注释 `bump to 2 when torch>=2.0`），判定时阈值恒为 2048×1+2048=4096 MB，分支只能把 1 赋成 1 并打印 `degraded to single-context`——脚本内**不存在任何将 `NUM_CTX` 设为 2 的路径**。根因是内网机 torch 版本 <2.0，多流并发不可用，**GPU 多实例并行推理名存实亡，`NUM_CTX` 恒 1**。因此：
 > - `logger.info("VRAM low ... degraded to single-context")` 是冗余且误导的打印，可适当删减；
-> - 上文"开发服务器 RTX 3090 上可手动解锁为 2"在当前 torch 版本下不可行，仅代表设计意图（待 torch>=2.0 后落实）。
+> - 源码中的多副本分支仅代表设计意图，待 torch>=2.0 后才能落实。
 
 #### GPU warmup
 
@@ -388,7 +369,7 @@ worker 按 yml 关键字分发到四个推理分支：
 | `lock_t` | acc 字典（计时累加器） | 计时值累加 | 极低（单次浮点加法） |
 | `lock_log` | SRLOG.txt 文件句柄 | 文件写入 | 低 |
 
-关键设计决策：`lock_m` 仅持有 feed+test 的调用权（微秒级），释放后 GPU 推理在各自的 CUDA stream 上异步执行，worker 之间真正并行。这是 0803 相对于 0727（`stream.synchronize()` 在锁内）的核心优化。
+关键设计决策：`lock_m` 仅持有 feed+test 的调用权（微秒级），释放后 GPU 推理在各自的 CUDA stream 上异步执行，worker 之间真正并行（`stream.synchronize()` 不在锁内）。
 
 ### 5.4 双三次路径：CPU 线程池并行
 
@@ -400,7 +381,7 @@ with ThreadPoolExecutor(max_workers=max_w) as executor:
     futures = [executor.submit(_bicubic_worker, key, grid) for ...]
 ```
 
-每个 tile 独立做 `cv2.resize(..., INTER_CUBIC)` 放大 2 倍并裁剪值域。与 0727 不同，0803 的 `max_workers` 从硬编码 4 改为自适应 `min(4, cpu_count)`，避免在低核心数机器上过度订阅。
+每个 tile 独立做 `cv2.resize(..., INTER_CUBIC)` 放大 2 倍并裁剪值域。`max_workers` 取自适应 `min(4, cpu_count)`，避免在低核心数机器上过度订阅。
 
 所有 tile 的 resize 完成后，`fill_sr_grid` 串行执行（避免对共享输出数组的竞态条件）。
 
@@ -408,39 +389,31 @@ with ThreadPoolExecutor(max_workers=max_w) as executor:
 
 当 `MaskPath` 未配置或为空时（`do_local_sr = False`），管线整体退化为全图 SR 模式，但仍复用同一套多上下文 GPU 并行 worker 架构。这保证了向后兼容——不配掩码的旧 XML 配置文件无需任何修改即可正常运行。
 
-### 5.6 批处理优化方向（mini-batch 已落地；实测无加速，见 §5.7）
+### 5.6 批处理（mini-batch；实测无加速，见 §5.7）
 
 将 N 块同尺寸 tile 沿 batch 维拼接为 `(N, 1, H, W)` 送入模型，可减少 kernel launch 次数（N 次 → 1 次）
 并摊薄每次前向的固定开销（Python 调度、同步点）。
 
-**实测结论（2026-08-11，tile=500 ESPAN / RTX 3090）**：GPU utilization 已达 ~100%、显存仅
+**实测结论（tile=500 ESPAN / RTX 3090）**：GPU utilization 已达 ~100%、显存仅
 ~4.5GB/24GB。GPU 计算已饱和（compute-bound），扩 batch 只增加显存、不增加速度——`BATCH=4`
-实测无显著加速。早期"GPU 计算单元利用率受限于单 tile 像素量、batch 可提升 CUDA core 占用率"
-的前提在本次测量中不成立，收益预期作废。
+实测无显著加速。
 
 约束：当前所有 SR tile 尺寸一致（同一次 dvd_2_grid 切分保证）；额外显存开销为中间张量 × N。
-另需模型侧 `get_current_visuals` 支持 batch（`[0]` 折叠点已修复，见 §5.7）。
+另需模型侧 `get_current_visuals` 支持 batch（见 §5.7）。
 
-### 5.7 mini-batch 落地记录（2026-08-11，含回退指引）
+### 5.7 mini-batch 支持
 
-> 状态：模型侧 3 个 `SR_model*.py` 已同步修改；`BATCH=4` 可运行但实测无显著加速，瓶颈定位中（GPU 占用 / CPU 转换 / 网络 batch 友好性）。
+> 模型侧 3 个 `SR_model*.py` 支持 batch；`BATCH=4` 可运行但实测无显著加速（瓶颈为 compute-bound，见 §5.6）。
 
-#### ① 管线侧（`超分代码0803/code_0805.py` / 服务器 `0807.py`）
+#### 管线侧（`超分代码0803/code_0805.py` / 服务器 `0807.py`）
 
-- `_worker` 改为 mini-batch：每次从队列抓 `BATCH` 块同尺寸 tile → `torch.cat(dim=0)` 拼成 `(N,1,H,W)` → 单次 `feed_data_grid`+`test()` → 结果按 `vis['rlt'][i:i+1]` 拆分逐块 `fill_sr_grid`/`pt_process`。
+- `_worker` 走 mini-batch：每次从队列抓 `BATCH` 块同尺寸 tile → `torch.cat(dim=0)` 拼成 `(N,1,H,W)` → 单次 `feed_data_grid`+`test()` → 结果按 `vis['rlt'][i:i+1]` 拆分逐块 `fill_sr_grid`/`pt_process`。
 - TRT 引擎分支强制 batch=1（引擎固定输入尺寸）。
-- 开关：`BATCH = N`（本地 0805 约 L285；服务器搜 `BATCH =`）。`1` = 原串行行为。
+- 开关：`BATCH = N`（本地 0805 约 L285；服务器搜 `BATCH =`）。`1` = 串行行为。
 
-#### ② 模型侧（服务器 `codes/models/` 下 3 个 `SR_model*.py` 包装文件）
+#### 模型侧（服务器 `codes/models/` 下 3 个 `SR_model*.py` 包装文件）
 
-**修改点**（三个文件内均为 `get_current_visuals` 方法中的同一行）：
-
-```python
-# 改前
-out_dict['rlt'] = self.fake_H.detach()[0].float().cpu()
-# 改后
-out_dict['rlt'] = self.fake_H.detach().float().cpu()
-```
+3 个文件的 `get_current_visuals` 均以 `out_dict['rlt'] = self.fake_H.detach().float().cpu()` 返回整批结果（不带 `[0]` 整数索引）：
 
 | 文件 | `get_current_visuals` 所在行 |
 | --- | --- |
@@ -448,46 +421,16 @@ out_dict['rlt'] = self.fake_H.detach().float().cpu()
 | `SR_model_0616tmp.py` | L153 |
 | `SR_model_0616nvidiasmilog.py` | L163 |
 
-**修改原因**：
-
-- `test()` 内 `self.fake_H = self.netG(self.var_L)` 对整批输入执行前向，网络输出为 `(N,1,H,W)`。
-- `get_current_visuals` 中 `[0]` 为整数索引，将 batch 维固定取第 0 个样本，batch>1 时仅返回第一个 tile 的结果。
+- 若该处用整数索引 `[0]`，batch 维被固定取第 0 个样本，batch>1 时仅返回第一个 tile 的结果。
 - 管线侧按 `vis['rlt'][i:i+1]` 切片逐块取结果，第 2..N 块取到空张量 `(0,1,H,W)`；经 `tensor2img_fast_trt` 转为 `(0,1000,1200)`，`fill_sr_grid` 回填时广播失败（`could not broadcast input array from shape (0,1000,1200) into shape (1000,1000)`）。
+- 三个文件写法一致：`create_model` 依据配置选择实际加载的包装文件，无法静态确定，故三个候选文件保持一致。
 
-**三个文件全部修改的原因**：`create_model` 依据配置选择实际加载的包装文件，无法静态确定；对三个候选文件施加相同修改以保证生效，且修改语义一致。
-
-**影响说明**：
+**影响**：
 
 - batch=1 时像素值不变，仅 `rlt` 返回形状由 `(C,H,W)` 变为 `(1,C,H,W)`。
 - `tensor2img_fast_trt` 兼容 4D 输入（`realesrgan_trt` 分支输入即为 4D）。
 - `get_current_visuals` 中 `LQ`、`GT` 两行的 `[0]` 未修改，不影响 SR 输出路径。
-- 潜在影响：restormer 分支与基线版本（0720/0724baseline）将 `vis['rlt']` 整体传入 `tensor2img_fast`（非 trt 版），原接收 3D；运行这些路径需另行验证 4D 兼容性。
-
-#### ③ 回退条件
-
-- `BATCH=4` 实测无加速（GPU 已 compute-bound）→ 恢复 `BATCH=1`。
-- 换模型、运行基线或 restormer 分支出现形状类报错 → 恢复模型侧 `[0]`。
-- 不再需要并发推理时。
-
-#### ④ 回退命令（服务器，`mmsr_bundle_240617` 目录下）
-
-```bash
-# 模型侧：为三个文件加回 [0]
-sed -i 's/self\.fake_H\.detach()/self.fake_H.detach()[0]/' \
-  codes/models/SR_model.py \
-  codes/models/SR_model_0616tmp.py \
-  codes/models/SR_model_0616nvidiasmilog.py
-# 管线侧：把 BATCH 改回 1
-```
-
-#### ⑤ 改动文件清单
-
-| 文件 | 位置 | 改动 |
-| --- | --- | --- |
-| `codes/models/SR_model.py`（服务器） | `get_current_visuals` | `self.fake_H.detach()[0]` → `self.fake_H.detach()` |
-| `codes/models/SR_model_0616tmp.py`（服务器） | `get_current_visuals` | 同上 |
-| `codes/models/SR_model_0616nvidiasmilog.py`（服务器） | `get_current_visuals` | 同上 |
-| `超分代码0803/code_0805.py` | `_worker` + `BATCH` 常量 | 逐 tile 前向 → mini-batch；默认 `BATCH=1` |
+- restormer 分支与基线版本将 `vis['rlt']` 整体传入 `tensor2img_fast`（非 trt 版），运行这些路径需另行验证 4D 兼容性。
 
 ### 5.8 MTA-Grid：掩码拓扑感知的网格原点对齐
 
@@ -530,11 +473,11 @@ ROI 边界像素质量由两方面共同保证：reflect-padding 为 SR tile 提
 > 耗时数据高度依赖图像尺寸、ROI 面积和 tile 配置，以下为 10000×10000 全景上的参考量级，
 > 不同场景需以 `tm` dict 终端输出为准，不宜直接外推。
 >
-> **实测基准（2026-08-11，tile=500 ESPAN / RTX 3090）**：GPU utilization ~100%（compute-bound）、
+> **实测基准（tile=500 ESPAN / RTX 3090）**：GPU utilization ~100%（compute-bound）、
 > 显存仅 ~4.5GB / 24GB（≈1/6，显存非瓶颈）。全文档瓶颈判断以此为准：提速方向在算力侧
 > （TRT、减少 tile；多卡判定为伪需求，见 §12），而非填充显存或并发复制模型。
 
-### 8.1 参考耗时量级（0803 版本，tile=500）
+### 8.1 参考耗时量级（tile=500）
 
 | 场景 | 参考耗时 | SR tile 占比 | 主导瓶颈 |
 |------|---------|-------------|---------|
@@ -542,7 +485,7 @@ ROI 边界像素质量由两方面共同保证：reflect-padding 为 SR tile 提
 | 1/4 图区域超分 | ~40s+ | ~25% | SR 推理 + 冷启动 |
 | 全图超分 | ~147–164s（tile=1000/500 实测） | 100% | SR 推理 |
 
-> **本地 3060 全管线实测（2026-08-24，图幅 30833×30954，真实生产掩码）**：加速前（`code_0724baseline_re.py`，全局超分）约 **4458s（≈74 分钟）**；加速后（`code_0817_prod.py`）仅 **242s（≈4 分钟）**，提速约 **18×**。
+> **本地 3060 全管线实测（图幅 30833×30954，真实生产掩码）**：全局超分（`code_0724baseline_re.py`）约 **4458s（≈74 分钟）**；掩码引导局部超分（`code_0817_prod.py`）仅 **242s（≈4 分钟）**，提速约 **18×**。
 > 与上表服务器 3090 的量级不同：这是部署目标机（RTX 3060）上的整管线实测，掩码为真实生产 ROI 掩码（非合成掩码）；且 baseline 为全局超分、加速版走掩码引导局部超分路径。
 
 ### 8.2 瓶颈拆解
@@ -603,10 +546,10 @@ Local SR: 9 tiles SR, 432 tiles skipped (bicubic)
 这是 workers=2（手动解锁双上下文）的结果，单上下文（NUM_CTX=1）时 SR 推理约占 40%+。
 ROI 面积增大时 SR 推理占比会上升，ROI 更小时模型加载占比会更高。
 
-> **注**：该示例为双上下文（NUM_CTX=2）旧配置；当前代码受 torch<2.0 限制 `NUM_CTX` 恒为 1（§5.3），
-> 此样本仅作历史参考，无法复现。
+> **注**：该示例为双上下文（NUM_CTX=2）输出；当前代码受 torch<2.0 限制 `NUM_CTX` 恒为 1（§5.3），
+> 该样本不可复现。
 
-**MTA-Grid 中等 ROI 实测补充（2026-08-11，tile≈500，ROI=18.49%）**：`SR tiles 94 → 93`
+**MTA-Grid 中等 ROI 实测补充（tile≈500，ROI=18.49%）**：`SR tiles 94 → 93`
 （仅省 1 块）、halo 0.27 → 0.26、规划耗时 658ms。与理论"紧凑 1% ROI 4→1"相比，中等/大 ROI 场景
 网格对齐收益显著收窄——其价值主要集中在极小 ROI。
 
@@ -615,14 +558,14 @@ ROI 面积增大时 SR 推理占比会上升，ROI 更小时模型加载占比�
 | tile | 优势 | 风险 | 建议 |
 |------|------|------|------|
 | 500 | 跳过率最高，总耗时最短 | **过小**：模型感受野受限，SR 质量可能劣化 | 仅限性能压测，不建议生产 |
-| 1000–1250 | 跳过率良好，质量有保障 | 全图实测 SR tile 400→100（较 500 少 4 倍，非原"多 2–4 块"） | **推荐生产区间** |
+| 1000–1250 | 跳过率良好，质量有保障 | 全图实测 SR tile 400→100（较 500 少 4 倍） | **推荐生产区间** |
 | 2500 | 质量最稳定 | 跳过率低，小 ROI 场景浪费明显 | 大 ROI / 全图 SR 时使用 |
 
 > tile=500 虽有最佳性能数据，但 mentor 评估认为对 ESPAN 模型（23 残差块，有效感受野
 > 100–200px）而言过小，存在边界质量隐患。生产环境建议以 1000 或 1250 为起点，
 > 在具体场景下做 A/B 对比后再决定。
 
-**实测（2026-08-11，全图 SR，ESPAN / RTX 3090，workers=1）**：
+**实测（全图 SR，ESPAN / RTX 3090，workers=1）**：
 
 | 指标 | tile=500 | tile=1000 |
 | --- | --- | --- |
@@ -704,7 +647,7 @@ T_post       ≈ cut + clamp + writeTiff + meta 更新，基本固定
 <MaskPath>/absolute/path/to/mask.tif</MaskPath>
 ```
 
-`MaskPath` 为可选字段，不配置则退化为全图 SR。`MaskDilateFactor` 在 0803 中已移除。
+`MaskPath` 为可选字段，不配置则退化为全图 SR。脚本不读取 `MaskDilateFactor`。
 
 ### YAML tile 配置
 
@@ -727,22 +670,6 @@ run_all.sh   [runs]                 — 依次跑 PRESETS 数组中的所有配�
 
 ---
 
-## 11. 修改对照表（三版本）
-
-| 编号 | 功能 | 0724 | 0727 | 0803 |
-|------|------|------|------|------|
-| 1 | XML 配置 | 新增 MaskPath + MaskDilateFactor | 不变 | 移除 MaskDilateFactor |
-| 2 | Debug 目录 | os.makedirs | 不变 | 不变 |
-| 3 | 掩码加载 | 读→校验→二值化 | 不变 | 不变 |
-| 4 | ori_img 生命周期 | 局部 SR 保留（用于最终融合） | 不变 | 统一释放（不再需要融合步骤） |
-| 5 | 掩码 warp | dilation + zero-pad | 不变 | 仅 zero-pad |
-| 6 | tile 循环 | 逐 tile if/else 判断 | block_reduce + multi-ctx(2) | +VRAM gate(1) + warmup + lock_m + 多模型 worker |
-| 7 | 像素融合 | mask blend (SR×mask + bicubic×(1−mask)) | 不变 | 已移除 |
-| — | 全管线计时 | 无 | 无 | 新增 tm dict + 终端耗时占比表 |
-| — | GPU warmup | 无 | 无 | 新增 dummy tensor 预分配 |
-
----
-
 ## 12. 局限性与后续方向
 
 - **TRT 固定输入尺寸**：引擎在编译时绑定特定 tile 尺寸。重新导出支持动态 shape 的 TRT engine 可将处理粒度从 tile 级进一步下推到 ROI 裁剪级，彻底消除 SR tile 内非 ROI 像素的浪费。
@@ -754,21 +681,19 @@ run_all.sh   [runs]                 — 依次跑 PRESETS 数组中的所有配�
 - **冷启动模型加载**：极小 ROI（<2%）场景下冷启动为第一瓶颈（占比与量级见 §8.1/§8.2，实测 ~9s）。
   在多图连续处理时，可通过进程级模型缓存复用已加载的实例，避免每张图重新走 `create_model` +
   warmup 流程。短期待评估方案：将模型实例提升为模块级单例，按 `ymlpath` 做 key 缓存。
-- **单 tile 推理（batch_size=1，加速预期已实测证伪）**：早期假设"GPU 计算单元利用率受限于单 tile
-  像素量、mini-batch 可提升 CUDA core 占用率"，据此预期 tile≤500 场景有额外 20–40% 的 T_SR 加速。
-  实测（2026-08-11，tile=500 ESPAN / RTX 3090）：GPU utilization 已 ~100%、显存仅 ~4.5GB，
-  `BATCH=4` 无显著加速——GPU 为 compute-bound，扩 batch 只增显存不增速度。该方向不再作为性能抓手；
-  提升吞吐应减少算力需求（ESPAN 导 TRT、减少 tile 数）；多 GPU 分发判定为伪需求（见 §12）。
+- **单 tile 推理（batch_size=1）**：实测（tile=500 ESPAN / RTX 3090）GPU utilization 已 ~100%、显存仅
+  ~4.5GB，`BATCH=4` 无显著加速——GPU 为 compute-bound，扩 batch 只增显存不增速度。提升吞吐
+  应减少算力需求（ESPAN 导 TRT、减少 tile 数）；多 GPU 分发判定为伪需求（见 §12）。
 - **推理调用方式**：当前采用进程内本地函数调用（`model.test()`），延迟最低、部署最简单——
   内网单机场景下此为最优选。若后续出现多客户端共享 GPU、多模型版本 A/B 测试或跨语言调用需求，
   可考虑将 SR 推理封装为 HTTP/gRPC 微服务（Flask + PyTorch 或 Triton Inference Server）。
   取舍：服务化引入网络往返延迟（ms 级），换取 GPU 资源池化和模型热更新能力。当前阶段维持
   本地直调，待多用户场景出现时再评估迁移成本。
-- **NUM_CTX 自适应**：当前默认单上下文是保守策略。实测（2026-08-11）tile=500 ESPAN 单副本全进程仅
-  ~4.5GB，两副本约 ~9GB（早期估计的 16–18GB 偏高；显存远未到瓶颈）。建议将 VRAM 门控改为自动计算
-  `free_mb / VRAM_PER_REPLICA` 动态设置最优副本数，而非当前硬编码开关。（注：0803 实测 `NUM_CTX`
+- **NUM_CTX 自适应**：当前默认单上下文是保守策略。实测（tile=500 ESPAN）单副本全进程仅
+  ~4.5GB，两副本约 ~9GB（显存远未到瓶颈）。可将 VRAM 门控改为自动计算
+  `free_mb / VRAM_PER_REPLICA` 动态设置副本数，而非当前硬编码开关。（注：`NUM_CTX`
   恒为 1——内网机 torch 版本 <2.0 导致多实例并行推理不可用，VRAM 门控为死代码，见 §5.3。上述
-  "可手动解锁 / 自动计算"属 torch>=2.0 之后的待办方向。）
+  "自动计算"属 torch>=2.0 之后的待办方向。）
 - **多 GPU 支持（判定为伪需求，暂缓）**：当前代码硬编码 `CUDA_VISIBLE_DEVICES=0`，仅使用单卡。
   理论上多卡分发可实现近似线性加速，但**办公台式机普遍具备 RTX 3060 级显存，可本地部署本套模型**——
   实际部署目标是有限算力的桌面端单卡，多卡（4×3090 开发服务器）不进入生产方向。优先保证模型在
@@ -784,7 +709,7 @@ run_all.sh   [runs]                 — 依次跑 PRESETS 数组中的所有配�
 
 ---
 
-## 13. 部署形态与版本定论（2026-08-31 定调 · 09-10 修订）
+## 13. 部署形态
 
 > 平台侧对接 SR 时形成的部署结论，记录在此以便与算法实现对照。
 
@@ -792,7 +717,7 @@ run_all.sh   [runs]                 — 依次跑 PRESETS 数组中的所有配�
 
 - 目标机为现成的 CentOS7 盘阵机。程序包（`mmsr_bundle`）、模型权重、`ImgHistMatch.so`、TRT 引擎文件
   全部位于 `/DiskArray`（Windows 与 Linux 均可访问，Linux 本地读写更快）。
-- 因此打包方式为**挂载复用**，代码路径零改动。
+- 打包方式为**挂载复用**，代码路径零改动。
 
 ### 13.2 生产模型与依赖
 
@@ -802,10 +727,11 @@ run_all.sh   [runs]                 — 依次跑 PRESETS 数组中的所有配�
 
 ### 13.3 部署形态
 
-- SR 采用**裸机 + Slurm，不加 Docker 容器**：TRT 版本锁定、机器固定、Slurm 本身运行在裸机上，
-  容器只增加耦合。平台服务（FastAPI / Nginx）可选容器或裸机 venv + systemd 两种方式。
+- SR 以**裸机进程**运行，不加 Docker 容器：TRT 版本锁定、机器固定，容器只增加耦合。执行器为
+  `SR_EXECUTOR=local`，用生产 conda 解释器直接起进程；平台服务（FastAPI / Nginx）可选容器或
+  裸机 venv + systemd 两种方式。
 
-### 13.4 两版本对比与选型
+### 13.4 两版本
 
 | 版本 | 特征 |
 |---|---|
@@ -814,24 +740,11 @@ run_all.sh   [runs]                 — 依次跑 PRESETS 数组中的所有配�
 
 两版核心处理流程逐行一致。
 
-### 13.5 Slurm 接入定论（2026-09-10，取代早期的「两版合并」方案）
+### 13.5 作业终态判据
 
-- **两版合并取消**：`code_0817_prod.py` 作为唯一真源逐字节不动；Slurm 上运行的可运行版本由锚点替换
-  生成器机械产出为 `variants/code_0817_prod_slurm.py`（差异 E1–E9 见
-  [sr-slurm-deploy-variant.md](sr-slurm-deploy-variant.md)）。不上机手改副本 —— 手改无法审计，
-  真源更新后也无法可靠重构。
-- **选卡交给 `--gres`**：批脚本 `#SBATCH --gres=gpu:1` 申请，Slurm 注入 `CUDA_VISIBLE_DEVICES`
-  （真机实测注入整数，如 `0`）。变体已删除全部 `CUDA_VISIBLE_DEVICES` 赋值与 `<GPUIDS>` 选卡逻辑，
-  `<GPUIDS>` 降级为审计字段。
-- **GPU 数量守卫由变体删除**：判据由 `!= 4` 改为 `< 1`，计数改用 `torch.cuda.device_count()`，
-  且不再执行 `systemctl stop slurmd.service`（原脚本在单卡作业下必然 `exit(3)`，服务以 root 运行时
-  会把节点从调度池摘除）。
-- **终态不看 `sacct`**：真机 `AccountingStorageType=none`，`sacct` 永久不可用。改由作业内契约校验器
-  `verify_sr_run.py` 写退出码文件 `<DatarootLQ>/Debug/_SREXIT_<job_id>.txt`，平台读盘判终态。
+- 真机 `AccountingStorageType=none`，`sacct` 不可用。作业终态由作业内契约校验器
+  `verify_sr_run.py` 写退出码文件 `<DatarootLQ>/Debug/_SREXIT_<job_id>.txt`，平台读盘判定。
   退出码 0 不等于成功；契约不满足时校验器以退出码 90 结束。
-
-> 2026-09-14：Slurm 路线中止，改为在本机用生产 conda 解释器直接起进程（`SR_EXECUTOR=local`）。
-> 上述判据（退出码文件定终态、契约校验器）对本地执行器同样适用；部署变体与校验器保留为存量。
 
 ## 附录：常见问题 FAQ
 
@@ -854,7 +767,7 @@ except:
     mask_path = None
 ```
 
-> **已落地（0805）**：该保护已内置到 `code_0805.py` 的 MaskPath 读取处，无需手动加；本条保留作原理说明。
+> 该保护已内置到 `code_0805.py` 的 MaskPath 读取处，无需手动加；本条保留作原理说明。
 
 `mismatched tag` 通常是 XML 标签大小写不一致或嵌套错误——检查开闭标签拼写是否严格匹配。
 

@@ -36,8 +36,7 @@
 | `frontend/src/stores/` | `viewer` / `scenes` / `queue` / `chat` |
 
 详细地图与当前路线见 [handoff-prompt.md](handoff-prompt.md)；项目背景见
-[docs/status/current-question.md](current-question.md) §1（平台现状）与
-[docs/status/timeline-archive.md](timeline-archive.md)（时间线，按日期倒着看）。
+[docs/status/current-question.md](current-question.md) §1（平台现状）。
 
 ## 干活流程
 
@@ -46,8 +45,8 @@
 3. **说方案**：改哪几个文件、为什么这么改、有没有更小的改法。等我点头。
 4. **改 + 加测试**：新行为要有测试钉住；改掉的行为要同步改掉对应测试，不要留红。
 5. **验证**：跑下面全套，基线不许退化。
-6. **文档**：`docs/status/timeline-archive.md` 加一条当日条目（现象 / 根因 / 改法 / 验证 / 真机待确认），
-   `current-question.md` 如果状态变了就同步。相关契约文档若受影响一并改。
+6. **文档**：只更新描述当前状态的文件（`current-question.md` 等），不写任何历史/变更经过
+   —— 改动过程归 git commit。相关契约文档若受影响一并改。
 
 ## 验证命令
 

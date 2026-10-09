@@ -2,7 +2,7 @@
 
 > 日期：2026-09-09 · 状态：**草稿**（评审中；结论未拍板，待补硬件与规模参数后回填）
 > 目标读者：后续 Agent 会话 / 前后端接缝实现。范围：Agent 对话 LLM 的**本地化部署决策**——它决定 agent 页调试、接口标准、工具集成标准与框架生态的走向。
-> 前置：阶段 5 REST/SSE 已交付（`backend/api` + 前端 `/chat`）；阶段 6 viewer 右侧上下文侧舱已落地（`ContextPanel`/`RoiToolsTab`/`AgentChatTab`，Agent 侧已实现"同 session + 自动附上下文快照"，但**没有真模型只能跑 mock**）。
+> 前置：REST/SSE 已交付（`backend/api` + 前端 `/chat`）；viewer 右侧上下文侧舱已落地（`ContextPanel`/`RoiToolsTab`/`AgentChatTab`，Agent 侧已实现"同 session + 自动附上下文快照"，但**没有真模型只能跑 mock**）。
 
 ## 0. 一句话总结
 
@@ -50,7 +50,7 @@ python -m backend.agent --max-turns 8 "在盘阵里找一张…"   # 真端点�
 SR_LLM_MOCK=1 python -m backend.agent --tools            # 先确认 manifest 可出
 ```
 
-端到端（本地模型起后再做）：起后端 FastAPI → 前端 `/chat` 与 viewer Agent 侧舱真会话 → SSE 工具回合可视化（对齐阶段 5/6 的验收口径）。
+端到端（本地模型起后再做）：起后端 FastAPI → 前端 `/chat` 与 viewer Agent 侧舱真会话 → SSE 工具回合可视化（对齐既有验收口径）。
 
 ## 5. 决策的连锁影响（为什么说它"决定后续标准"）
 
@@ -78,8 +78,8 @@ SR_LLM_MOCK=1 python -m backend.agent --tools            # 先确认 manifest �
 ## 8. 关联文档
 
 - 接口契约：`docs/planning/api-contract.md`（§3.2 聊天 / §5.1 mock）
-- 前端阶段线：`docs/planning/frontend-migration.md`（阶段 6 侧舱已落地）
+- 前端线：`docs/planning/frontend-migration.md`（侧舱已落地）
 - Agent 架构取舍：`docs/knowledge/agent-orchestration-research.md`（M1 / 不引 langchain）
 - 边界约定：`docs/conventions/langchain-boundary.md`
-- 生态名词科普 + 选型对照（§3/§7 开放项的 2026-09-09 方向：3090+CentOS7 → GGUF Q4_K_M + llama.cpp）：`docs/knowledge/llm-serving-gguf-glossary.md`
+- 生态名词科普 + 选型对照（§3/§7 开放项方向：3090+CentOS7 → GGUF Q4_K_M + llama.cpp）：`docs/knowledge/llm-serving-gguf-glossary.md`
 - 代码：`backend/config.py` · `backend/agent/loop.py` · `backend/tools/contract.py` · `frontend/src/components/AgentChatTab.vue`

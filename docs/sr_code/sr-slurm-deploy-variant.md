@@ -1,6 +1,6 @@
 # SR 生产脚本 · Slurm 部署变体差异表
 
-> 日期：2026-09-10 · 状态：**已定**（随生成器 v1.0.0 发布）· 读者：接手 Agent 窗口 + 运维
+> 日期：2026-09-10 · 状态：**已定** · 读者：接手 Agent 窗口 + 运维
 > 前置：[docs/status/slurm-integration.md](../status/slurm-integration.md) §2.2（E1–E9 逐条行锚点）、[sr-pipeline-interface.md](sr-pipeline-interface.md) v1.4（唯一调用契约）
 > 本文档为静态映射表：**不含生成时间戳**，变体的可复现性由 `provenance.json` + `--check` 保证。
 
@@ -82,20 +82,20 @@ if cloudpercent > cloudlimit:
 - 算法、tile 循环、MTA-Grid、`writeTiff`、meta 回写逻辑一律不动；
 - `exit(3)` 的 GPU 守卫仍在（只把判据从 `!= 4` 改成 `< 1`），退出码语义不变；
 - `SlurmStopLog.txt` 仍会在 GPU 异常时追加一行（只改措辞，不改行为）；
-- 空 `Suffix` 的破坏性语义（`util.py:1300-1315`：输出名 == 输入名 ⇒ 把输入改名）**本批不改**，真机验收一律用非空 suffix；
-- `pynvml` 的 import 保留（E5 后本文件不再调用它，但 `util.py` 内部仍用）。
+- 空 `Suffix` 的破坏性语义（`util.py:1300-1315`：输出名 == 输入名 ⇒ 把输入改名）**变体不改这条**，真机验收一律用非空 suffix；
+- `pynvml` 的 import 保留（本文件不调用它，但 `util.py` 内部仍用）。
 
-## 5. 本批未覆盖、已登记的风险
+## 5. 未覆盖、已登记的风险
 
-以下三条在 [slurm-integration.md](../status/slurm-integration.md) §2.4 已核实，**三条均不在变体范围内、本轮不修**。
-2026-09-10（P3）已把它们作为「已知语义」回填进调用契约 [sr-pipeline-interface.md](sr-pipeline-interface.md) **§2.4**，
+以下三条在 [slurm-integration.md](../status/slurm-integration.md) §2.4 已核实，**三条均不在变体范围内**。
+它们已作为「已知语义」写进调用契约 [sr-pipeline-interface.md](sr-pipeline-interface.md) **§2.4**，
 调用方按契约「规避方式」一列自行处理：
 
 | 项 | 现象 | 归属 / 处置 |
 |---|---|---|
 | 空 `suffix` 覆盖语义 | `suffix=""` ⇒ 输出名 == 输入名 ⇒ 输出路径上的那个文件就是输入 ⇒ 输入被 `rename` 成 `*_NOSR.tif` | 平台 REST 入口 `_norm_sr_params` 空值回落到默认 `sr`、非法值 400，走不到这条；**agent 工具 `backend/tools/run_sr.py` 不校验 suffix、默认恰是 `""`**，能走到。契约 §2.4 第 1 条；**验收与生产一律传非空 suffix** |
-| `sacct` 解析不可用 | 真机 `AccountingStorageType=accounting_storage/none` ⇒ `sacct` 恒返回非 0 且无输出；即便账务开启，`--format=State%20,ExitCode%10` 在状态串含空格时（如 `CANCELLED by 1000`）`split()` 也会错位 | 契约 §2.4 第 2 条；**终态改由退出码文件判定**（本文件 §6.3），`backend/services/slurm.py` 的 `sacct_status` 在真机路径上不再使用（仅假调度器/离线测试保留） |
-| 对已超分场景会再超分一遍 | `util.py:1009-1011` 的 `exit()` 被注释掉，函数只打印 `already SRed before` 后返回原路径，不是幂等跳过 | 契约 §2.4 第 3 条；真重跑，非本次修复范围；调用方提交前自行判重 |
+| `sacct` 解析不可用 | 真机 `AccountingStorageType=accounting_storage/none` ⇒ `sacct` 恒返回非 0 且无输出；即便账务开启，`--format=State%20,ExitCode%10` 在状态串含空格时（如 `CANCELLED by 1000`）`split()` 也会错位 | 契约 §2.4 第 2 条；**终态由退出码文件判定**（本文件 §6.3）；`backend/services/slurm.py` 的 `sacct_status` 只在假调度器/离线测试里用，真机路径不走它 |
+| 对已超分场景会再超分一遍 | `util.py:1009-1011` 的 `exit()` 被注释掉，函数只打印 `already SRed before` 后返回原路径，不是幂等跳过 | 契约 §2.4 第 3 条；真重跑；调用方提交前自行判重 |
 
 ## 6. 运行期（P2）：批脚本 + 契约校验器 + 上机必验项
 

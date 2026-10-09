@@ -167,7 +167,7 @@ class TestWhitelist(EnvMixin):
         self.assertEqual(ensure_allowed(missing), missing)   # 不要求存在
 
     def test_ensure_allowed_dir_does_not_require_file(self):
-        # 回归：老 ensure_within 最后一条 is_file() 会把目录挡在门外
+        # 回归：kind="dir" 不得再要求目标是文件（目录得放行）
         self.allow_tmp()
         d = self.tmp / "scene"
         d.mkdir()
@@ -250,10 +250,10 @@ class TestSceneNameLayers(EnvMixin):
                 self.assertIsNone(scene_name_layers(bad))
 
     def test_exactly_six_segments_returns_none(self):
-        """**恰好六段**是最窄的边界：段号与景号都在（第 4、5 段），但读分隔符时
-        越界过 —— 早先那道门槛只挡到 `_SCENE_IDX`，六段的名字走进
+        """**恰好六段**是最窄的边界：段号与景号都在（第 4、5 段），门槛要挡到这里
+        —— 只挡到 `_SCENE_IDX` 的话，六段的名字走进
         `seps[_SCENE_IDX]` 抛 IndexError，本该 400 的输入变成 500（拖中间产物 jpg
-        时被去尾切短的候选名字正好是这个段数，2026-09-21 实测）。"""
+        时被去尾切短的候选名字正好是这个段数，实测）。"""
         six = "JL1KF02B03_PMS09_20260902120156_200535158_102_0025"
         self.assertEqual(len(six.split("_")), 6)
         self.assertIsNone(scene_name_layers(six))
@@ -283,7 +283,7 @@ class TestSceneNameLayers(EnvMixin):
 
 
 class TestSceneNameProducts(EnvMixin):
-    """名字缺产品段时的补齐候选（《待修复清单》第一列的常态，2026-09-27）。"""
+    """名字缺产品段时的补齐候选（《待修复清单》第一列的常态）。"""
 
     #: 清单上的名字：真机景级目录名**去掉末尾那段产品**。
     NOPROD = "JL1KF02B03_PMS09_20260902120156_200535158_102_0025_001_L1"
@@ -326,7 +326,7 @@ class TestSceneNameProducts(EnvMixin):
         那种名字能不能认下来由双指纹说了算（名字 + 字节数都要与盘阵上那份一致），
         而盘阵上的文件名必然带产品段 —— 补出来的名字永远过不了指纹，只会多花几次
         stat，再往 404 的候选清单里塞一条 `…_preview.jpg_PAN` 这种四不像
-        （2026-09-27 由「探测量上限」那两条用例顶出来的）。
+        （由「探测量上限」那两条用例顶出来的）。
         """
         for name in (self.NOPROD + ".tif", self.NOPROD + ".JPG",
                      "SC_sr_preview.jpg"):
@@ -434,7 +434,7 @@ class TestInferScenePaths(EnvMixin):
         """默认按生产树渲染**两条**：成像日在前，次日在后。
 
         盘阵按生产日建目录，深夜成像的景记在第二天 —— 名字里的 14 位只当
-        下界用（用户 2026-09-18 报的 bug：名含 0917 的图大半在 0918 目录下）。
+        下界用（用户报的 bug：名含 0917 的图大半在 0918 目录下）。
         """
         self.setenv(SR_SCENE_PATH_TEMPLATE=None, SR_DRIVE_MAP=None)
         got = infer_scene_paths(self.PROD, "2026-09-02")

@@ -8,10 +8,10 @@
 > 图例：`⏱` 参考耗时 · `✓=` 本步成功标准 · 所有命令在 CentOS7 上**逐条贴**（别一次粘多行，会碎）。
 > **ADHD 友好版**（一次一步、少讲为什么、带即时反馈）：`docs/status/real-machine-bringup-adhd.md`。
 >
-> **部署进度（2026-09-07/08 实测）**：§2 后端 + §3 nginx 均已跑通——Windows 浏览器开 `http://10.10.81.135` 可访问各页面（/viewer /scenes /chat /queue）。**遗留**：`SR_SCENES_ROOT` 默认值 `/data/scenes` 在本机**不存在** → `/api/scenes` 返回 `source:fake`（12 条 0B 占位），真实盘阵根未定位、提交 SR 端到端未验。真实根定位后按 §2.1 改 env、同步 §3.1 的 nginx `alias`（两处须同值）并重启，详见 §5 症状表「/api/scenes 返回空+fake」行；验收勾选见
+> **部署现状**：§2 后端 + §3 nginx 均已跑通——Windows 浏览器开 `http://10.10.81.135` 可访问各页面（/viewer /scenes /chat /queue）。**遗留**：`SR_SCENES_ROOT` 默认值 `/data/scenes` 在本机**不存在** → `/api/scenes` 返回 `source:fake`（12 条 0B 占位），真实盘阵根未定位、提交 SR 端到端未验。真实根定位后按 §2.1 改 env、同步 §3.1 的 nginx `alias`（两处须同值）并重启，详见 §5 症状表「/api/scenes 返回空+fake」行；验收勾选见
 [real-machine-acceptance.md](real-machine-acceptance.md) §B。
 >
-> **Slurm 侧（09-10 第三批）**：部署变体 + 作业内校验器 + 退出码文件定终态已备齐，**上机尚未执行**——
+> **Slurm 侧**：部署变体 + 作业内校验器 + 退出码文件定终态已备齐，**上机尚未执行**——
 > 按 `docs/status/slurm-acceptance.md` 的 A→B→C→D 逐条跑，命令逐条贴、输出回传判读。注意两条与本文
 > 其余部分不同的前提：① 作业以 **nginx** 身份在计算节点上跑（`User=nginx`）；② **终态不看 `sacct`**
 > （本机账务关闭），看 `<lq_path>/Debug/_SREXIT_<job_id>.txt`。
@@ -62,7 +62,7 @@ sr-agent-platform/
 
 ## 1. 前置：平台 python 环境（已就绪，留档备查）
 
-`/opt/sr-venv` 已由 py3.9 解释器建好、依赖已装（09-05 实测）：fastapi 0.128.8 / openai 1.109.1 /
+`/opt/sr-venv` 已由 py3.9 解释器建好、依赖已装（实测）：fastapi 0.128.8 / openai 1.109.1 /
 numpy 2.0.2 / pillow 11.3.0 —— 全部满足 requirements-api.txt 下限。重建/核对方法：
 
 ```bash
@@ -98,12 +98,12 @@ grep -nE 'WorkingDirectory|SR_AGENT_DB' /etc/systemd/system/sr-api.service   # �
 > --host 127.0.0.1 --port 8000`）、`SR_LLM_MOCK=0`、`SR_SLURM_FAKE=0`（真机必须保持 0，勿改成 1）。
 > `SR_SCENES_ROOT=/data/scenes` 先保持默认，真机数据就位后按 §5 核对。
 
-> **2026-09-11 修正（`SR_AGENT_DB` 这一处上面那条 sed 是错的）**：这条 sed 会把库一起指到
-> `<APP>` 里，而 `<APP>` 属 root、`nginx` 写不动 —— 实机探针 `write-db FAIL`。库要单独放一个
-> nginx 可写的目录，且**不要**为此把整棵应用树 `chown` 给 nginx。真机改法（drop-in，不动已部署
-> 的单元正文）：`/etc/systemd/system/sr-api.service.d/20-agentdb.conf` 里
+> ⚠️ `SR_AGENT_DB` **不要**随上面那条 sed 一起指到 `<APP>` 里：`<APP>` 属 root、`nginx` 写不动
+> —— 实机探针 `write-db FAIL`。库要单独放一个 nginx 可写的目录，且**不要**为此把整棵应用树
+> `chown` 给 nginx。真机做法（drop-in，不动已部署的单元正文）：
+> `/etc/systemd/system/sr-api.service.d/20-agentdb.conf` 里
 > `Environment=SR_AGENT_DB=/DiskArray/tmp/wangrz/sr_agent_db/sr_agent.db`，详见
-> `slurm-acceptance.md §0.6`。本次部署**后补**上了这个 drop-in。
+> `slurm-acceptance.md §0.6`。
 
 ### 2.2 目录属主（nginx 用户要读 backend/dist；库父目录单独给写权）
 
@@ -113,8 +113,8 @@ chown -R nginx:nginx /run/media/root/SSD/workspace/wangrz/sr-agent-platform
 
 > 会整棵树归 nginx；root 仍可读写、不影响 git。**更稳的做法是只给库目录写权**
 > （`mkdir -p <库父目录> && chown nginx:nginx <库父目录> && chmod 750 <库父目录>`），
-> backend/dist 保持默认即可读 —— 2026-09-11 教训：库塞在应用树里、又指望 nginx 写得动，
-> 结果是第一笔队列提交就报 `unable to open database file`。
+> backend/dist 保持默认即可读 —— 库塞在应用树里、又指望 nginx 写得动，第一笔队列提交
+> 就报 `unable to open database file`。
 
 ### 2.3 启动 + 探活
 
@@ -142,7 +142,7 @@ journalctl -u sr-api -n 50
 nginx 是 Windows 侧唯一入口：静态 dist 直出、`/disk-array/` alias 盘阵、`/api/` 反代
 `127.0.0.1:8000`（SSE 已禁缓冲）。uvicorn 只绑 127.0.0.1，**不要**暴露 8000。
 
-> ⚠️ 前提：nginx 已装（`which nginx` 有输出）。09-05 实测本机**未装且无任何 yum 源**
+> ⚠️ 前提：nginx 已装（`which nginx` 有输出）。实测本机**未装且无任何 yum 源**
 > （`yum install` 报 `There are no enabled repos`）→ 先解决 nginx 安装（装法见 deploy/README
 > §二 ⚠️；内网 yum 镜像或 U 盘 rpm）。没装前 `/etc/nginx` 不存在，下面 cp 会失败。
 
@@ -202,25 +202,25 @@ ssh -N -L 18080:127.0.0.1:80 root@<node81-135 IP>
 | 症状 | 原因 / 处理 |
 |---|---|
 | `yum install` 报 `There are no enabled repos`（或 `/etc/nginx` 不存在） | 本机无任何 yum 源 → 内网 yum 镜像或 U 盘 rpm，见 deploy/README §二 ⚠️；别反复试 yum |
-| `sr-api` 一直 `217/USER`，但 `sudo -u nginx /opt/sr-venv/bin/uvicorn --version` 却能跑 | unit 里 `User=` 值后带了**同行 `#` 注释**（systemd 不支持行尾注释，用户名被读成脏名）→ `sed -i '/^User=/s/#.*//' /etc/systemd/system/sr-api.service` 后 `daemon-reload && restart`（源文件已修，deploy/sr-api.service） |
+| `sr-api` 一直 `217/USER`，但 `sudo -u nginx /opt/sr-venv/bin/uvicorn --version` 却能跑 | unit 里 `User=` 值后带了**同行 `#` 注释**（systemd 不支持行尾注释，用户名被读成脏名）→ `sed -i '/^User=/s/#.*//' /etc/systemd/system/sr-api.service` 后 `daemon-reload && restart`（deploy/sr-api.service 的 `User=` 行已是 `User=nginx`） |
 | `sr-api` `status=1/FAILURE`，journal 报 `Unable to evaluate type annotation 'str \| None'` | venv 是 py3.9，fastapi/pydantic 解析不了 PEP604 `X \| None` 注解 → `/opt/sr-venv/bin/pip install eval-type-backport` 后 `systemctl restart sr-api`（py<3.10 必需，已进 requirements-api.txt） |
-| `sr-api` 起来又立刻挂（`activating (auto-restart)`），`curl :8000/api/health` → `000`，`ss -ltnp \| grep :8000` 空 | 新拷进 `<APP>/backend` 的文件属主是 **root**，而服务以 `User=nginx` 跑 → import 阶段就挂：`journalctl -u sr-api -n 25` 末尾是 `PermissionError: [Errno 13] Permission denied: '<APP>/backend/api/app.py'`。处置 `chown -R nginx:nginx <APP>/backend` → `systemctl restart sr-api`；**别回滚代码**，也别被 `is-active` 恰好打印的 `active` 骗了，判定看 `health=200`（2026-09-15 实测） |
-| `systemctl cat` 里有某条 `Environment=SR_*`，但 `systemctl show -p Environment` 里没有 | drop-in 文件缺 `[Service]` 段头 → systemd **静默忽略整个文件**（不报错、不警告，`cat` 照样打印那几行）。补上段头 → `daemon-reload && restart`；判定只看 `systemctl show`。2026-09-15 实测机上遗留的 `override.conf` 就是这样，`SR_EXECUTOR=local` 从未生效（本该本机直跑，实际会去 `sbatch`）→ 详见 deploy/README §5.3.1 |
+| `sr-api` 起来又立刻挂（`activating (auto-restart)`），`curl :8000/api/health` → `000`，`ss -ltnp \| grep :8000` 空 | 新拷进 `<APP>/backend` 的文件属主是 **root**，而服务以 `User=nginx` 跑 → import 阶段就挂：`journalctl -u sr-api -n 25` 末尾是 `PermissionError: [Errno 13] Permission denied: '<APP>/backend/api/app.py'`。处置 `chown -R nginx:nginx <APP>/backend` → `systemctl restart sr-api`；**别回滚代码**，也别被 `is-active` 恰好打印的 `active` 骗了，判定看 `health=200`（实测） |
+| `systemctl cat` 里有某条 `Environment=SR_*`，但 `systemctl show -p Environment` 里没有 | drop-in 文件缺 `[Service]` 段头 → systemd **静默忽略整个文件**（不报错、不警告，`cat` 照样打印那几行）。补上段头 → `daemon-reload && restart`；判定只看 `systemctl show`（文件被整份忽略时 `SR_EXECUTOR=local` 这类值压根不进进程环境）→ 详见 deploy/README §5.3.1 |
 | `/api/scenes` 返回空 + fake 提示 | `SR_SCENES_ROOT` 没指到真实盘阵根 → 改 service 该 env 并同步 nginx `alias`（必须同值）→ `systemctl daemon-reload && systemctl restart sr-api` |
 | 首页 404 / 无页面 | dist 缺失或 `root` 没改对 → 3.1 的 grep 复查；`ls <APP>/dist/index.html` |
 | `/api/*` 返回 502 | 后端没起或崩了 → `systemctl status sr-api` + `journalctl -u sr-api -n 50` |
 | 静态文件 403 / Failed to open file | CentOS7 SELinux 拦 nginx 读 `/run/media` → `chcon -Rt httpd_sys_content_t <APP>/dist`；反代连不上再 `setsebool -P httpd_can_network_connect 1` |
 | 80 打不开 | 防火墙未放行 → `firewall-cmd --permanent --add-service=http && firewall-cmd --reload`；或 nginx 没 reload |
-| 首次开大图很慢 | 属正常：后端懒生成 JPG（v3 起各边 ÷2…÷32、默认 ÷4，档位在查看器工具栏调；直方图均衡，读一遍大图），几十秒到数分钟，Network 里能看到 `/api/scenes/<id>/preview`；此后秒开（已落盘 + 浏览器缓存）。**换包后第一次打开也会重新生成一次**（旧图缺 v3 规则签名，见 gui-experience §9.2）；若同名 JPG 被 nginx `max-age=3600` 缓存住，硬刷新一次 |
+| 首次开大图很慢 | 属正常：后端懒生成 JPG（各边 ÷2…÷32、默认 ÷4，档位在查看器工具栏调；直方图均衡，读一遍大图），几十秒到数分钟，Network 里能看到 `/api/scenes/<id>/preview`；此后秒开（已落盘 + 浏览器缓存）。**换包后第一次打开也会重新生成一次**（旧图缺 v3 规则签名，见 gui-experience §9.2）；若同名 JPG 被 nginx `max-age=3600` 缓存住，硬刷新一次 |
 | 探针输出里 `sacct` / `sacct-parse` 两行 **FAIL** | **预期结果，不是故障**：本机 `AccountingStorageType=accounting_storage/none`（账务关闭），`sacct` 恒返回非 0 且无输出 → 作业终态改读**退出码文件**，见 `deploy/README.md` §7.3 与 [sr-pipeline-overview.md](../sr_code/sr-pipeline-overview.md) §13.5 |
-| 队列任务**永远 UNKNOWN**（作业明明跑完了） | 平台反推的退出码文件路径与作业写的对不上，或校验器根本写不出文件。逐层查：① `ls <lq_path>/Debug/_SREXIT_<job_id>.txt` 存不存在——不存在看作业 `.err` 有没有 `verify_sr_run: 无法写退出码文件`（作业以 **nginx** 身份跑，`<lq_path>/Debug/` 要 nginx 可写，`sudo -u nginx touch <lq_path>/Debug/w` 直接验）；② 存在但平台仍 UNKNOWN → 核对 config.xml 的 `DatarootLQ` 与作业实际工作目录是否同值（开沙箱时 `DatarootLQ` 是副本路径，`/api/queue` 的 `run_dataroot` 字段就是它）；③ 配置文件名带任务指纹，同 suffix 的不同任务已不会互相覆盖（2026-09-10 前是手写 `run_sr_<suffix>.xml`，会串；老任务若仍 UNKNOWN 请重提） |
+| 队列任务**永远 UNKNOWN**（作业明明跑完了） | 平台反推的退出码文件路径与作业写的对不上，或校验器根本写不出文件。逐层查：① `ls <lq_path>/Debug/_SREXIT_<job_id>.txt` 存不存在——不存在看作业 `.err` 有没有 `verify_sr_run: 无法写退出码文件`（作业以 **nginx** 身份跑，`<lq_path>/Debug/` 要 nginx 可写，`sudo -u nginx touch <lq_path>/Debug/w` 直接验）；② 存在但平台仍 UNKNOWN → 核对 config.xml 的 `DatarootLQ` 与作业实际工作目录是否同值（开沙箱时 `DatarootLQ` 是副本路径，`/api/queue` 的 `run_dataroot` 字段就是它）；③ 配置文件名带任务指纹（`run_sr_<suffix>_<指纹前12位>.xml`），同 suffix 的不同任务不会互相覆盖 |
 | 作业秒挂 / 立刻失败 | `SR_SLURM_WORK_DIR` 不是**共享盘**：config.xml 与批脚本由 API 写在这个目录，作业却落到 gpu 分区的 76 个节点之一上读它。默认 `/tmp/sr_agent_work` 是本机路径 → 改到 `/DiskArray/...` 这类共享挂载（`srun -w node81-140 ls -d <WORK>` 直接验） |
 | 作业 `exit(3)`（GPU 守卫） | 两种可能：① `$SR_BUNDLE_DIR/code_0817_prod.py` **还是原脚本**（没装部署变体）——`head -3` 应见 `GENERATED FILE — DO NOT EDIT` 横幅，装法见 `deploy/README.md` §7.1；② 变体已装但 `--gres` 没给到卡——查作业 `.out` 审计段的 `CUDA_VISIBLE_DEVICES=` 是否为空 |
 | 作业 `.err` 报 `ImportError: libXXX.so` / `OSError` | 批脚本的 `#SBATCH --export=NONE` 把提交端环境（含 `LD_LIBRARY_PATH`）一起丢了，torch1.9.1 / GDAL 链不上系统库 → `backend/services/run_sr.py` 里把它改成 `#SBATCH --export=ALL`（唯一一处），重跑 `pytest backend/tests/test_run_sr.py` 后拷 `backend/` 到 `<APP>` 并 `systemctl restart sr-api`（上机必验项 V1） |
-| 平台显示 **FAILED** 但作业退出码是 0 | 这是**预期的新行为**：契约不满足（缺 SRLOG 或末行不是 `Run finished.` 或缺输出 tif）时校验器以**退出码 90** 结束。看退出码文件的 `reason` 字段点名缺哪条——这正是以前被固化成「成功」的那批静默失败 |
+| 平台显示 **FAILED** 但作业退出码是 0 | 这是**预期行为**：契约不满足（缺 SRLOG 或末行不是 `Run finished.` 或缺输出 tif）时校验器以**退出码 90** 结束。看退出码文件的 `reason` 字段点名缺哪条 |
 | 跑完 SR 后，填的那个盘阵目录里多出产物 tif、`Debug/` 目录与 meta.xml 更新 | **不开沙箱时的预期行为**，不是 bug：SR 把产物、`Debug/` 日志与 meta 更新写进 `DatarootLQ`（平台恒定非空 `Suffix`，所以源图不改名也不删除；只有同名的旧产物会被改名为 `*_NOSR.tif` 再覆盖）。要生产目录只读就配 `SR_SANDBOX_ROOT`（deploy/README §7.5）：每个作业先 `cp -a` 一份副本，产物落在 `<根>/<task_fingerprint 前12位>/<目录名>/`，`/api/queue` 的 `run_dataroot` 字段指出确切位置 |
 | 提交报 `SR_SANDBOX_ROOT ... rejected` | 沙箱根含空格 / 引号 / `` ` `` / `..` —— 它会拼进作业脚本里的 `rm -rf`，被白名单挡下。改成纯 `/A-Za-z0-9._-/` 的绝对路径再重启 sr-api |
-| 云量超阈值的任务显示 COMPLETED 且没有输出 tif | **不是 bug**：合法跳过（`Run skipped:` 终态行 + 退出码文件 `skip=1`），契约只要求 SRLOG 存在，不要求输出 tif。若它显示 FAILED，说明 `$SR_BUNDLE_DIR/verify_sr_run.py` 不是本批版本 |
+| 云量超阈值的任务显示 COMPLETED 且没有输出 tif | **不是 bug**：合法跳过（`Run skipped:` 终态行 + 退出码文件 `skip=1`），契约只要求 SRLOG 存在，不要求输出 tif。若它显示 FAILED，说明 `$SR_BUNDLE_DIR/verify_sr_run.py` 不是当前版本 |
 
 浏览器侧闭环：`/scenes` 打开场景出图 · 画掩码点「提交 SR」跳 `/queue` 预填 · 提交后状态徽标随
 SSE 推进。详细验收项以 [real-machine-acceptance.md](real-machine-acceptance.md) 为准，跑完把每项记录誊回并勾掉。

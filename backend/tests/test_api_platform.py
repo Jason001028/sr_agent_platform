@@ -269,13 +269,12 @@ class TestQueue(PlatformBase):
         # 每 stage 的停留时间。**不能太小**：`_poll_state` 每 30ms 采一次样，而
         # `test_submit_progresses_to_completed` 断言它**亲眼看到过** PENDING 与
         # RUNNING —— stage 若短到两次采样之间就整个走完，采样会直接从 SUBMITTING
-        # 跳到 COMPLETED，断言随机失败。原先 120ms 在整包 300+ 用例的负载下就会漏采
-        # （2026-09-14 全量跑复现两次、单跑通过），抬到 500ms 给足采样裕度；本类
+        # 跳到 COMPLETED，断言随机失败。抬到 500ms 给足采样裕度；本类
         # 因此慢约 1s，换来的是不再随机红。
         os.environ["SR_SLURM_FAKE_T_MS"] = "500"
         os.environ["SR_QUEUE_POLL_SEC"] = "60"       # 关闭 lifespan 轮询干扰
-        # 真实场景目录 + 目录里已有的掩码：POST /api/queue 现在要求
-        # <lq_path>/<目录名>_mask.tif 在场（plan §4.3），不再接受「不给掩码」。
+        # 真实场景目录 + 目录里已有的掩码：POST /api/queue 要求
+        # <lq_path>/<目录名>_mask.tif 在场（plan §4.3），缺掩码不放过。
         self.scene_dir = Path(self._tmp.name) / self.SCENE
         self.scene_dir.mkdir(parents=True, exist_ok=True)
         self.mask_file = touch_tif(
@@ -537,7 +536,7 @@ class TestQueue(PlatformBase):
                 self.assertEqual(t["params"]["suffix"], "sr")
 
     def test_sr_suffix_default_env_var_is_retired(self):
-        # 2026-09-16：环境变量已删，文件是唯一权威 —— 设了它不应有任何作用。
+        # 文件是唯一权威：设 `SR_SUFFIX_DEFAULT` 不应有任何作用。
         os.environ["SR_SUFFIX_DEFAULT"] = "zzz"
         self.addCleanup(os.environ.pop, "SR_SUFFIX_DEFAULT", None)
         write_bundle_suffix(os.environ["SR_BUNDLE_DIR"], "260318")
@@ -590,7 +589,7 @@ class TestQueue(PlatformBase):
         界面上的耗时 = finished_at − started_at，而客户端本地那份是上一次
         GET /api/queue 的快照（通常就在提交刚落库之后，两列都还是 NULL）。
         只广播 state 的话，任务一完成耗时列就从运行中的正常值掉成「0 秒」
-        （2026-09-17 实测），或者干脆停在上一次运行/上一个快照的数字上。
+        （实测），或者干脆停在上一次运行/上一个快照的数字上。
         """
         app, c = self.app_client()
         tid = self._submit(c).json()["task_id"]
@@ -651,10 +650,10 @@ class TestQueue(PlatformBase):
     def test_elapsed_counts_this_run_not_the_row_age(self):
         """重交复用的行：耗时必须是**这一次**跑的时长，不是这一行的年龄。
 
-        现场（2026-09-18 真机）：一行 = 一个指纹。第一次交上去挂了/被取消，第二天
+        现场（真机）：一行 = 一个指纹。第一次交上去挂了/被取消，第二天
         修好再交 —— 幂等层复用同一行，而 created_at 是**第一次**提交的时刻。耗时列
-        原来量 updated_at − created_at，于是新跑的这一遍显示成「30 时 00 分」，实际
-        只跑了 200 多秒。这里把复现钉死：行确实旧 30 小时，耗时仍然只是这一次的。
+        若量 updated_at − created_at，新跑的这一遍就显示成「30 时 00 分」，实际
+        只跑了 200 多秒。这里把这一条钉死：行确实旧 30 小时，耗时仍然只是这一次的。
         """
         app, c = self.app_client()
         os.environ["SR_SLURM_FAKE_T_MS"] = "600000"     # 停在 PENDING，等被取消
@@ -685,7 +684,7 @@ class TestQueue(PlatformBase):
         """没观测到「开始跑」就不编一个耗时：两列都是 NULL，界面显示「—」。
 
         现场是整段运行期间 sr-api 不在（停机/重启跨过去了）。退回 created_at 顶替
-        是不行的 —— 那是行的生日，复用行会退化成行龄，正是这一轮要修的错。
+        是不行的 —— 那是行的生日，复用行会退化成行龄。
         """
         c = self.client()
         tid = self._submit(c).json()["task_id"]
@@ -700,10 +699,10 @@ class TestQueue(PlatformBase):
     def test_restart_does_not_age_a_finished_row(self):
         """sr-api 重启不重算耗时：已终态的行不该被写回、updated_at 不该被抬到「现在」。
 
-        第二个触发点（2026-09-18 实测）：`state.task_cache` 是内存态，重启后是空的。
-        校准器原来只拿它当比较基准，空缓存 → 每一行都被判成「状态变了」→ 写回 + 刷新
+        第二个触发点（实测）：`state.task_cache` 是内存态，重启后是空的。
+        缓存里没有基准时每一行都被判成「状态变了」→ 写回 + 刷新
         updated_at，于是一行几天前就跑完的任务，重启后显示成行龄（实测第 2 次 GET
-        起「30 时 00 分」）。现在基准缺失时回落到**库里存的状态**。
+        起「30 时 00 分」）。基准缺失时回落到**库里存的状态**。
         """
         app, c = self.app_client()
         tid = self._submit(c).json()["task_id"]
@@ -779,7 +778,7 @@ class TestProductPreviewBake(PlatformBase):
                               w, h)[0]
 
     def _jpg(self, product):
-        """落点：`<源 stem>_preview.jpg`（2026-09-22 起全平台唯一一条命名规则）。"""
+        """落点：`<源 stem>_preview.jpg`（全平台唯一一条命名规则）。"""
         return product.with_name(product.stem + "_preview.jpg")
 
     def _row_state(self, app, tid):
@@ -884,8 +883,8 @@ class TestProductPreviewBake(PlatformBase):
         """`GET /api/queue` 会走 `_task_state`（与后台轮询是**同一**个写终态的函数）。
 
         把主动生成挂在「状态转换」上的话，谁先观测到 COMPLETED 谁把这次转换拿走，另一个
-        就看到「没变化」—— 请求路径抢先看一眼队列，这份预览就永远不生成了。改成从库
-        派生之后这个竞态在结构上不存在：这里先打几次队列再跑 tick，照样生成。
+        就看到「没变化」—— 请求路径抢先看一眼队列，这份预览就永远不生成了。判据从库
+        派生，这个竞态在结构上不存在：这里先打几次队列再跑 tick，照样生成。
         """
         app, c = self.app_client()
         tid = self._row(app)
@@ -1093,11 +1092,11 @@ class TestProductPreviewBake(PlatformBase):
         self.assertEqual(after["state"], "COMPLETED",
                          "主动生成写回不该动作业状态")
 
-    # ---- 改名遗留：老点号那份要被清掉（2026-09-22）-------------------------
+    # ---- 老点号那份（无读者）要被清掉 --------------------------------------
 
     def test_the_eager_bake_and_a_lazy_open_are_the_same_file(self):
-        """改名后的核心不变式：**主动生成的那份与打开时生成的那份是同一个文件**。
-        改名之前两条链各落一份（只差一个字符），主动生成那份命中不了打开路径。"""
+        """核心不变式：**主动生成的那份与打开时生成的那份是同一个文件**。
+        两条链各落一份（只差一个字符）的话，主动生成那份就命中不了打开路径。"""
         app, c = self.app_client()
         self._row(app)
         product = self._product()
@@ -1115,11 +1114,11 @@ class TestProductPreviewBake(PlatformBase):
                          [jpg.name], "一个场景目录里只有一份预览名")
 
     def _legacy(self, product):
-        """改名前的点号落点：`<产物 stem>.preview.jpg`（真机升级后只剩老目录里有）。"""
+        """点号落点：`<产物 stem>.preview.jpg`（真机上只剩老目录里还有）。"""
         return product.with_suffix(".preview.jpg")
 
     def test_legacy_dot_name_is_removed_when_baking(self):
-        """改名后点号那份没有任何读者了 —— 重新生成这一份栅格时就同时删掉，
+        """点号那份没有任何读者 —— 重新生成这一份栅格时就同时删掉，
         免得场景目录里躺着两个几乎同名的文件。"""
         app, _ = self.app_client()
         self._row(app)
@@ -1162,12 +1161,12 @@ class TestProductPreviewBake(PlatformBase):
         self.assertEqual(self._row_state(app, tid)[0], "done")
         self.assertTrue(self._jpg(product).is_file())
 
-    # ---- 同时那一份：未超分（`<输入 stem>_NOSR.tif`，2026-09-24 用户口径）----
+    # ---- 同时那一份：未超分（`<输入 stem>_NOSR.tif`，用户口径）--------------
     #
     # 名字只由 `scene_search.nosr_candidates` 给出：先试输入 stem 那条（这个夹具的
     # 场景里是 `<SCENE>_NOSR.tif`），`PAN_NOSR.tif` 是同一串里的另一个候选（混合
     # 目录里两条都试），最后才试 `writeTiff` 改名那套 `<产物 stem>_NOSR.tif`。
-    # 以前这里硬编码成 `PAN_NOSR.tif`：SC 场景（输入件 = `<目录名>.tif`）于是永远
+    # 硬编码成 `PAN_NOSR.tif` 的话，SC 场景（输入件 = `<目录名>.tif`）会永远
     # 走 skipped —— 而那正是用户天天开的那些景。
 
     def _nosr(self, w=64, h=32, name=None):
@@ -1409,9 +1408,9 @@ class TestMasks(PlatformBase):
     def test_pan_scene_writes_the_mask_the_submit_side_will_look_for(self):
         """RC 场景（输入 PAN.tif）：写出去的名字 == 提交时去找的名字。
 
-        以前 bake_mask 取输入文件名、derived_mask_path 取目录名，这里会一个
-        写 PAN_mask.tif、一个找 260318_mask.tif —— 提交必 400。这条用例钉住
-        两者同源。
+        bake_mask 与 derived_mask_path 各取一头的话（一个取输入文件名、一个取
+        目录名），就会一个写 PAN_mask.tif、一个找 260318_mask.tif —— 提交必 400。
+        这条用例钉住两者同源。
         """
         from backend.api.platform import derived_mask_path
         d = self._manual_scene(pan=True, tif=False)
@@ -1507,7 +1506,7 @@ class TestQcListWrite(PlatformBase):
     """`POST /api/qclist/write` —— 《待修复清单》原地写回（api-contract.md §3.7）。
 
     真机 http 下浏览器写不了盘阵文件（File System Access API 在规范里是
-    `[SecureContext]` 标的，Chrome 只在 https/localhost 页面暴露它），所以改走后端。
+    `[SecureContext]` 标的，Chrome 只在 https/localhost 页面暴露它），所以走后端。
     这里钉的是：写进去的字节对不对、编码（GBK）对不对、护栏拦不拦得住「导入之后
     别人又改了一版」、以及各条拒绝路径下**原文件一个字节都不动**。
     """
@@ -1557,7 +1556,7 @@ class TestQcListWrite(PlatformBase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json()["encoding"], "gbk")
         self.assertEqual(p.read_bytes().decode("gbk"), doc)
-        # 真写成 GBK 了 —— 浏览器写盘那条路只能降级成 UTF-8+BOM，这条是修好的部分
+        # 真写成 GBK 了 —— 浏览器写盘那条路只能降级成 UTF-8+BOM
         self.assertNotEqual(p.read_bytes(), doc.encode("utf-8"))
 
     @unittest.skipIf(os.name == "nt", "Windows 的 chmod 只切只读位，测不出权限位")

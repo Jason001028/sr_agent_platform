@@ -71,7 +71,7 @@ function resize() {
 /** 分屏时把绘制上下文限制在活动格内，并把原点挪到该格左上角。
  *
  *  每格的 `ViewState` 就是**该格自己的局部屏幕坐标**，`store.view` 又是活动侧那一套，
- *  所以 translate 之后原先所有 `store.view.*` 的表达式逐字可用 —— 掩码/ROI/云叠/红叉
+ *  所以 translate 之后所有 `store.view.*` 的表达式逐字可用 —— 掩码/ROI/云叠/红叉
  *  一行都不用改，也不必给 `strokePoly` 加 view 参数。
  *
  *  单屏返回 false 且**什么都不做**：那是刻意保留的快速路径（`test-vue-viewer.js`
@@ -263,11 +263,11 @@ function renderDrawBody(ctx: CanvasRenderingContext2D) {
 /* ---------------- 交互事件 ---------------- */
 /** 指针 → 活动侧的缩略图坐标。
  *
- *  **必须先减去活动格的左上角**（2026-09-22 修）：分屏下每格的 `ViewState` 用的是
+ *  **必须先减去活动格的左上角**：分屏下每格的 `ViewState` 用的是
  *  该格**自己的**局部坐标（渲染时 `translate(rect.x, rect.y)`），而 `mouseToThumb`
  *  拿的是画布原点。右格的 `rect.x` 是左格宽 —— 不减的话在右格画掩码，坐标会整体偏
  *  一个左格宽（除以缩放比之后更明显），而框会照常画出来、看着还挺正常。
- *  单屏时 `activePaneRect()` 是 `{x:0,y:0}`，与改前逐字节相同。 */
+ *  单屏时 `activePaneRect()` 是 `{x:0,y:0}`，减去它等于没减。 */
 function mousePos(e: MouseEvent): Pt {
   const vc = viewCanvasRef.value!;
   const rect = vc.getBoundingClientRect();
@@ -343,7 +343,7 @@ function dropSide(e: DragEvent): 'A' | 'B' | null {
  *
     页面内拖放（拖一段选中的文字、拖个链接）同样会发 dragover，但它两种都不带 ——
     什么都放不进来，onDrop 里也是空的。这种拖放不该亮落位提示：分屏下用户只是在画面里
-    拖动/选字，提示一亮就像马上要换格（2026-09-21 用户报）。
+    拖动/选字，提示一亮就像马上要换格（用户报）。
     判 `types` 而不是等 drop，是因为提示要在 dragover 阶段就决定亮不亮 —— 浏览器在
     dragover 阶段不让读值，但类型名给读。 */
 function dragHasPayload(e: DragEvent): boolean {

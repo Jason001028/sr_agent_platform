@@ -55,9 +55,9 @@ export function origToThumb(x: number, y: number, tw: number, th: number, W: num
   return [x * (tw / W), y * (th / H)];
 }
 
-/* 「X,Y」文本 → 两个坐标串（Vue 版新增，HTML 版没有这一条）。
+/* 「X,Y」文本 → 两个坐标串。
 
-   给工具栏那一个定位框用（原先是 X、Y 两个框，见 Toolbar.doLocate）：从别处拷来的坐标是
+   给工具栏那一个定位框用（见 Toolbar.doLocate）：从别处拷来的坐标是
    **一对数一句话**的形态（掩码的「掩膜中心点坐标」txt 里就是 `30766.11,21862.51`），
    而 `type=number` 的框会把整串直接吞成空值。
    分隔符认半角/全角逗号与空白（从表格、日志里拷出来常常是制表符或空格），首尾空白忽略；
@@ -125,7 +125,7 @@ export function visibleThumbRect(
   return { x0, y0, x1, y1 };
 }
 
-/* ---------------- 图像对比：分屏两格（2026-09-20 新增） ----------------
+/* ---------------- 图像对比：分屏两格 ----------------
 
    `PaneRect` 与上面的 `Rect` **刻意不同名不同义**：`Rect` 是**缩略图像素**的整数闭区间
    （`visibleThumbRect` 用，语义是像素），这里是**屏幕坐标**的浮点矩形（语义是视口）。
@@ -220,8 +220,8 @@ export function anchorAtLocal(rect: PaneRect, u: number, v: number): [number, nu
  *
  * `pPane`/`oPane` 是**指针所在格 / 另一格**，不是 A 格 / B 格 —— 光看两个 `PaneRect`
  * 分不出哪个是 A，所以 `pointerSide` 必须由调用方给；返回的 `a`/`b` 才是 A 格 / B 格。
- * 两个参数按「是不是 A」命名过一次，结果指针在右格时整体错位（`normAnchor` 拿了另一格
- * 的矩形），名字改成按角色命名就是为了不再犯。
+ * 两个参数按角色（指针所在格 / 另一格）命名，不能按「是不是 A」——后者在指针位于右格
+ * 时会把两格拿反（`normAnchor` 拿了另一格的矩形）。
  */
 export function wheelZoomBoth(
   va: ViewState, vb: ViewState, pPane: PaneRect, oPane: PaneRect,
@@ -242,7 +242,7 @@ export function wheelZoomBoth(
 }
 
 /**
- * 换图时把视图按**相对视野**搬到另一张图上（对比模式专用，2026-09-20）。
+ * 换图时把视图按**相对视野**搬到另一张图上（对比模式专用）。
  *
  * 对比场景要的是「同一片地面来回看」，所以换图不该 fit（一 fit 就把用户的位置抹了）。
  * 归一化坐标 = 缩略图像素 / 该图自己的缩略图尺寸，于是这里的「归一化」等价于

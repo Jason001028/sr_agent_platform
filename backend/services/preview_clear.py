@@ -2,15 +2,14 @@
 
 背景：预览 JPG 由三条链写入（打开时的惰性生成预览 / 拖入链 / 超分跑完后的主动生成），
 **只增不减**。换档位或换预览生成规则之后想立刻看新效果、或者单纯想回收盘阵空间，
-此前都没有任何入口 —— 只能逐个场景点开等它惰性重新生成。本模块提供「按场景目录清掉
+都需要一个入口 —— 逐个场景点开等它惰性重新生成太慢。本模块提供「按场景目录清掉
 预览」这一步，由 `api/app.py::clear_scene_previews` 端点调用。
 
 **判据（宁可不删，也不删错）** —— 一个文件要被删，必须同时满足：
 
 1. 就在传进来的这个目录**这一层**（不递归、不扫根）；
-2. 名字是 `<stem>_preview.jpg`，或是改名前的点号件 `<stem>.preview.jpg`
-   （2026-09-22 起预览只有一个名字，点号那份是同一份缓存的旧名，与三条链上
-   `app._sweep_legacy_preview` 的口径一致）；
+2. 名字是 `<stem>_preview.jpg`，或是点号形态 `<stem>.preview.jpg` —— 两种都算
+   本平台的预览件（与三条链上 `app._sweep_legacy_preview` 的口径一致）；
 3. **JPEG 注释带本平台的规则签名**（`preview_jpg.has_rule_stamp`，只判 `srprev:`
    前缀，v1/v2/v3 三代都认）。读不出戳的一律不碰 —— 盘阵上别人手放的同名图、
    以及万一后缀恰好叫 `preview` 的**产物**，都没有这个戳；
@@ -47,7 +46,7 @@ from backend.pathguard import is_within
 from backend.services import scene_search
 from backend.services.preview_jpg import has_rule_stamp
 
-#: 预览文件名的两种形态（新名 / 改名前的点号名）。判据用 `lower()`：
+#: 预览文件名的两种形态（下划线形态 / 点号形态）。判据用 `lower()`：
 #: 盘上真名是小写，但大小写混写的同名件同样是缓存，没有理由放过。
 _NAME_NEW = "_preview.jpg"
 _NAME_LEGACY = ".preview.jpg"

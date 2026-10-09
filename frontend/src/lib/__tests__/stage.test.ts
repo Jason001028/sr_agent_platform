@@ -1,12 +1,12 @@
 /**
  * lib/stage.ts —— 环节标签与修复拒绝语。
  *
- * 这里钉的是**用户口径**（2026-09-21 那条需求）：同一景的不同环节产物要用简短标志
+ * 这里钉的是**用户口径**：同一景的不同环节产物要用简短标志
  * 区分开，取值 `PAN` / `SR` / `NOSR`。三处拒绝入口（`enterDraw` /
  * `bakeMaskToServer` / `submitSr`）共用同一句话，所以只在这里验一次文案。
  */
 import { describe, expect, it } from 'vitest';
-import { isIntermediateStage, stageLabel, stageRefusal } from '../stage.js';
+import { isIntermediateStage, stageLabel, stageRefusal, stemOf } from '../stage.js';
 
 const SC = 'A_B_20260921_124710_200536960_101_0005_001';
 
@@ -46,6 +46,25 @@ describe('stageLabel', () => {
   it('缺省 kind 按本体算（与 isIntermediateStage 同一口径）', () => {
     expect(stageLabel(undefined, undefined, 'PAN.tif')).toBe('PAN');
     expect(stageLabel(null, null, SC + '.jpg')).toBe('本体');
+  });
+});
+
+describe('stemOf', () => {
+  it('tif 与 jpg 同一条口径 —— 显示件不是另一份影像', () => {
+    expect(stemOf('PAN.tif')).toBe('PAN');
+    expect(stemOf('PAN.jpg')).toBe('PAN');
+    expect(stemOf(SC + '.jpg')).toBe(SC);
+  });
+
+  it('大小写与多段扩展名都认', () => {
+    expect(stemOf(SC + '.TIFF')).toBe(SC);
+    expect(stemOf(SC + '.JPEG')).toBe(SC);
+    expect(stemOf(SC + '_sr.img')).toBe(SC + '_sr');
+  });
+
+  it('没有受支持的扩展名时原样返回（本地别的文件不该被切）', () => {
+    expect(stemOf(SC)).toBe(SC);
+    expect(stemOf('mask.txt')).toBe('mask.txt');
   });
 });
 

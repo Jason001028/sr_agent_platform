@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * CompareListPanel.vue — 点选清单（2026-09-20）
+ * CompareListPanel.vue — 点选清单
  * ------------------------------------------------------------------
  * 挂在 RoiToolsTab 里 **《待修复清单》上方**，`v-if="viewer.compareOn"`。
  *

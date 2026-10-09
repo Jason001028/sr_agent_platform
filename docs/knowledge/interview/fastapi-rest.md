@@ -1,7 +1,7 @@
 # FastAPI + REST/SSE 面试八股（interview · 高频精简版）
 
 > 定位：跳槽高频 FastAPI 与后端接口设计自测与背诵。★=高频。每题给「答（要点）+ 追问」。
-> 仓库真例标注 🗂：答完八股，能用 [backend/api/app.py](backend/api/app.py) 等真实文件讲成"项目实践"——这比只会背理论多一层区分度。阶段 5（聊天 SSE/队列）处于**规划/评审中**，引用处均标注，不当作已实现事实。
+> 仓库真例标注 🗂：答完八股，能用 [backend/api/app.py](backend/api/app.py) 等真实文件讲成"项目实践"——这比只会背理论多一层区分度。
 
 ---
 
@@ -36,7 +36,7 @@
    - **普通 `def`**：FastAPI 把调用丢进**线程池**（不会卡事件循环）——适合内部是同步阻塞库的函数；
    - **`async def`**：直接在事件循环里跑——适合 IO 密集且本身 async 的函数（如 async 请求、读流）；
    - 常见坑：async 函数里**调用同步阻塞库**（requests、同步 OpenAI client、`sleep`）会卡住整个事件循环。
-   **追问：** 你这项目里既有同步工具又有 SSE，怎么处理？→ 同步阻塞的 `run_loop` 用 `asyncio.to_thread` 丢线程池，事件经 `asyncio.Queue` 桥回主协程再逐帧下发（🗂 规划，见契约 [api-contract.md](docs/planning/api-contract.md) §4.1）。
+   **追问：** 你这项目里既有同步工具又有 SSE，怎么处理？→ 同步阻塞的 `run_loop` 用 `asyncio.to_thread` 丢线程池，事件经 `asyncio.Queue` 桥回主协程再逐帧下发（见契约 [api-contract.md](docs/planning/api-contract.md) §4.1）。
 
 6. **Q：依赖注入 `Depends` 用来干嘛？你项目用不用？（★）**
    **A：**
@@ -55,7 +55,7 @@
 8. **Q：JSONResponse / FileResponse / StreamingResponse 各何时用？（★）**
    **A：**
    - `JSONResponse`：普通 JSON（FastAPI 默认替你包）；
-   - `FileResponse`：直接把一个文件当响应体——🖼 阶段 4 `/preview` 返回盘阵生成好的 JPG 就用它（带 `media_type="image/jpeg"`，同时让 nginx 静态托管同路径 JPG 时也能原生缓存）；
+   - `FileResponse`：直接把一个文件当响应体——🖼 `/preview` 返回盘阵生成好的 JPG 就用它（带 `media_type="image/jpeg"`，同时让 nginx 静态托管同路径 JPG 时也能原生缓存）；
    - `StreamingResponse`：响应体是流（逐块 yield）——SSE、大文件代理、流式下载都靠它；必须手动设 `Content-Type`。
 
 9. **Q：SSE 在 FastAPI 里怎么落地？帧格式长什么样？（★）**
@@ -63,7 +63,7 @@
    - 返回 `StreamingResponse(generator(), media_type="text/event-stream")`，generator 里 `yield "data: {json}\n\n"` 逐帧吐；
    - 配合响应头 `Cache-Control: no-cache`、`X-Accel-Buffering: no`（提醒 nginx 别缓冲）；
    - 每帧是一行 `data:{json}\n\n`；前端 fetch 读 `response.body` 手工按空行切帧（EventSource 只 GET，POST 即流用不了它）。
-   **🗂 规划契约示例帧：** `{"type":"tool_call","name":"run_sr","args":{...}}`、`{"type":"tool_result",...}`、`{"type":"turn_done","content":"..."}`，预留 `{"type":"token","delta":"..."}`。
+   **🗂 契约示例帧：** `{"type":"tool_call","name":"run_sr","args":{...}}`、`{"type":"tool_result",...}`、`{"type":"turn_done","content":"..."}`，预留 `{"type":"token","delta":"..."}`。
 
 10. **Q：HTTPException 与"业务失败返回 200 + {ok:false}"两种风格，怎么取舍？（★）**
     **A：**
@@ -95,7 +95,7 @@
 
 16. **Q：SSE + 多 worker 有什么坑？为什么要单 worker？（★）**
     **A：** 进程内广播（一组 asyncio.Queue 存"在线的 SSE 连接"）**只在单进程内有效**；多 worker = 多个进程，job 状态变化发生在 worker A，订阅者挂在 worker B 就收不到 → 需要外部队列（Redis pub/sub）做跨进程广播。
-    **🗂 仓库取舍：** 阶段 5 规划"uvicorn 单 worker + 进程内广播"，多 worker 留到有真实并发需求再接外部队列——**能力边界写清楚本身就是加分项**。
+    **🗂 仓库取舍：** "uvicorn 单 worker + 进程内广播"，多 worker 留到有真实并发需求再接外部队列——**能力边界写清楚本身就是加分项**。
 
 17. **Q：为什么要"先写契约文档再写代码"？（★）**
     **A：** REST/SSE 是**前后端共享的接口面**：前端渲染和后端推送各按同一 schema 写 parser/emitter。契约文档先落盘 = 先把字段/事件/错误码/状态机说死，避免"后端同时加个字段、前端就崩"。改契约先改文档再改代码，两端各留单测锁字段。

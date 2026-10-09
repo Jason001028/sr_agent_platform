@@ -1,31 +1,16 @@
-# 平台 API 契约（阶段5 · REST / SSE）
+# 平台 API 契约（REST / SSE）
 
-> 日期：2026-09-02 · 状态：**评审**（2026-09-16 按 §7 红线置回，待复核后改回「已定」）
->
-> **挂起项一**：§3.3 新增「`suffix` 默认值来源」条款——省略/留空不再固定为内置 `"sr"`，改为读 `$SR_BUNDLE_DIR` 下 SR 团队配置文件里的 `<Suffix>`，`SR_SUFFIX_DEFAULT` 环境变量作废；同批把 agent 工具 `run_sr` 的归一化与 REST 入口对齐（此前工具既不 strip 也不给默认值，同一逻辑提交两入口指纹不同 → 幂等失效、重复投作业，属修缺陷）。
-> **挂起项二（2026-09-17）**：新增 §3.5 `POST /api/scenes/resolve`（打开盘阵上 `SR_SCENES_ROOT` 之外的任意合法场景目录），并改 §3.4 `POST /api/masks` 的 body（新增 `lq_path`，legacy `scene_id` 保留）。同时约定 `lq_path` / `dir` / `input` / `mask_path` 一律回**盘阵 POSIX 形态**、提交侧两入口共用 `pathguard.normalize_submit_path`——这两条不改行为口径，只是把"同一场景两种写法算出两个指纹"的隐患收口。
-> **挂起项三（2026-09-20）**：① 新增 §3.8 `GET /api/scenes/{id}/siblings`（一个场景的三类图：输入影像 / 本轮超分产物 / NOSR），纯只读、永不生成预览；② 新增 §4.5 **产物预览主动生成队列**（作业转 COMPLETED 后服务端同时生成产物那一份，从库派生而非挂在状态转换上），`/api/queue` 每行随之多出 `preview_state` / `preview_note` 两列与新的 SSE 帧 `preview_update`（§3.3）；③ 新增 §4.6 **显示源比较规则**：拖入/打开的 `.jpg` 显示件在同目录有位更清晰的栅格、且当前档位下服务端从它生成的的比它更清晰时，显示源换成服务端那份（`/preview` 与 `/preview-drop` 各插一次同名栅格探测，落点与 `?div=` 全部照旧），jpg 行上因此多出只读的 `rasterPreview` 字段（§3.5）。**`hasPreview` / `jpgUrl` / `previewDiv` 三个字段的语义一个字未动**。同时记两个 env（§1）。
-> **挂起项四（2026-09-20 第二轮）**：后端**零改动、零新增端点**。这一轮只把前端的取图纪律写进契约：① 新增 §3.8.2 —— 预览 blob 的**本地缓存键**（`{id}|{div}|jpg`，源是显示件且同名栅格胜出时另一支用 `{id}|{div}|ras:{栅格名}`，两支不能串味）与**预取边界**（只取 `/siblings` 里 `exists && hasPreview && previewDiv === div` 且没有已开 rec 的那几项，**绝不触发服务端生成**；开关默认关、持久化在 `sr.viewer.cmpPrefetch`）；② 同一节记下 `openSceneSibling` 的**去重**口径（命中已开的 rec → 一次 `/siblings` + 零次 `/preview`）。`/preview` 与 `/siblings` 的**请求与响应一字未改**。
-> **挂起项五（2026-09-21）**：① §3.5 `POST /api/scenes/resolve` 的 `{name}` 分支**也认中间产物**（`<目录名>_<suffix>.jpg` / `<目录名>_<suffix>_NOSR.jpg`）——新增 jpg 专属的第二阶段候选（去尾段反推，仅前一阶段全落空时展开），`resolved` 新增 `kind` / `suffix`，且 `kind != 'input'` 时 `row.lq_path = null`、`sr_capable = false`、`mask_path = null`（`row` 同时改为描述**该环节自己**那份栅格）；② `suffix` 的 400 文案改为实话（可拖的不止显示件）；③ 新增 `backend/pathguard.scene_name_layers` 的段数下界修正（六段名走进 `seps[_SCENE_IDX]` 越界 → 本该 400 的输入变 500，是这条新候选暴露出的既有缺陷）。**`/siblings` 一个字段都没加** —— 计划里提过给每项补 `suffix`，落地时发现响应顶层本来就有 `suffix` / `suffixFrom`，前端 `openSceneSibling` 用的就是它，再加一份是重复。
-> **挂起项六（2026-09-21 第二轮，真机反馈）**：§3.5 `{name}` 分支**再认一种名字** —— 平台自己生成的那份预览 `<栅格 stem>_preview.jpg`（拖入链写进场景目录的，`preview-drop` 的产物）。`preview` 一直在 `scene_search._NON_STAGE_TAILS` 里，于是「平台写下的文件、平台自己不认」，真机上拖它回来得到的是一屏「目录不存在 + 两条自己拼出来的假路径」（`…_preview/…_preview`）。现在 `preview` 是那份名单里**唯一可以剥**的尾巴（`scene_search.strip_preview_tail`，`de_suffixed_stems` 与 `stage_of_jpg` 各剥一次），剥一层为止：`<目录名>_preview` → 本体、`<目录名>_sr_preview` → 那份产物；剥完仍在名单里（`<目录名>_cloud_preview`）照旧 404。另四个尾段（cloud/thumb/mask/ori）剥不得 —— 它们剥掉会正好落到真实场景目录上。前端只改一句失败弹窗的文案。
-> **挂起项七（2026-09-21 第三轮，真机反馈）**：§3.5 `{name}` 分支新增**可选字段 `anchor`** —— 拖拽入口把「用户当前打开着的场景目录」一并发过来（前端 `sceneAnchors`：最近显示过的那一景 → A 格 → B 格，上限 3 条），后端按序在这些目录里认这份 jpg（判据与 `scan` 段完全相同，只是不过 `_fingerprint_mismatch`，真门仍是「这一环节自己的栅格躺在同级」）。**只给名字里没有场景身份的那一类用**：RC 场景的产物叫 `PAN_<suffix>.jpg`（产物名按输入影像名拼，RC 的输入是 `PAN.tif`），既无卫星段也无成像时刻，反推那一步就 400 —— 用户真机上拖它进来正是这个现象。名字自己能反推时 anchor 连一次 stat 都不花；坏值一律跳过并把原因追加进 400 的 `detail`（只有白名单是硬的），不新增错误码、不改 `/siblings`。**这不是「平台猜目录」**：目录来自用户自己打开的上下文，不是从文件名推的。另有前端一句弹窗文案同步改写（原文说「能关联的 jpg 只有名字与场景目录名一致的那份」，对 RC 产物是假话）。
-> **挂起项九（2026-09-21 第五轮 → 2026-09-22 收口，真机反馈）**：预览文件名**全平台统一成一条规则** `<源栅格 stem>_preview.jpg`（`paths.preview_jpg_name`），三条生成预览链（主动生成 / 惰性打开 / 拖入）落同一个名字，差别只剩目录。09-21 那版是「点号那份不动、再 `copyfile` 一份下划线同名件」（`app.py::_mirror_preview_name`）—— 那份镜像同日被删：它把「一份栅格两个文件」从缓存层搬到了每一份产物上，用户要的是**只有一个名字**。读判据同步搬过去（`hasPreview`/`previewDiv`/静态 `jpgUrl` 从同一份落点算；前端 `isBakedPreviewUrl` 认结尾 `[_\.]preview\.jpe?g`），旧的点号文件由 `_sweep_legacy_preview` 在每条链处理到那份栅格时同时删掉，没有全盘清扫（平台不列目录）。详见 §4.5 与 [preview-bake-pipeline §4.8/§4.9/§4.10](../knowledge/preview-bake-pipeline.md)。
-> **挂起项八（2026-09-21 第四轮，真机口径）**：§4.5 的主动生成队列**同时**多生成一份未超分的预览 —— 同一轮 tick 在产物之后把 `<场景目录>/PAN_NOSR.tif` 按**全局档位**下采样成 `<场景目录>/PAN_NOSR_preview.jpg`（落点复用拖入链的 `<源 stem>_preview.jpg` 规则）。**不是新的生成预览入口、不动任何响应字段、不动产物的状态机**：源是固定名字，不判沙箱（那份栅格是盘阵上的既有文件），结局只写盘 + 一行 stdout（`[nosr-preview] task=<id> <状态>`）。名字按用户口径钉死；仓库 `SR_code/util.py::writeTiff` 推出来的 `<产物 stem>_NOSR.tif` 与它对不上，属**待核**（记在 current-question）。
-> **挂起项十（2026-09-24 用户口径，订正上面的挂起项八）**：① **NOSR 那一份的名字口径订正** —— 未超分那份 = **输入影像的 stem + `_NOSR`**（SC 场景 `<目录名>_NOSR.tif`，RC 场景 `PAN_NOSR.tif`）；`SR_code/util.py::writeTiff` 推出来的 `<产物 stem>_NOSR.tif` **退为次选**，留在候选清单最后。候选由 `scene_search.nosr_candidates()` **一处**产出，`/siblings` 与主动生成那条链读同一份 —— 挂起项八那版把名字**硬编码成 RC 的名字** `PAN_NOSR.tif`，SC 场景因此永远走 `skipped:`，而 `/siblings` 又只认次选那条，两处彼此对不上。② `/api/scenes/{id}/siblings` 响应**新增 `nosrCandidates`**（与 `productCandidates` 同形制、顺序即优先级），`nosr` 项**不再依赖 `suffix`**（名字由输入影像的 stem 拼，有测试钉着）。③ §3.5 `{name}` 分支**再认两种名字**：裸 `<目录名>_NOSR.jpg` 判 `('nosr','')`；`de_suffixed_stems` 的 `_NOSR` 尾段改在切段循环**内**剥（原先在循环外预剥，`<目录名>_NOSR` 的**真名**反而一条候选都进不去）。④ 前端在**拖入显示件**时对同景那一份多做一次静默预热（`stores/viewer.ts::warmNosrPreview`，命中才记账）—— 拖入不再只生成「自己那份」。详见 [preview-bake-pipeline §4.11](../knowledge/preview-bake-pipeline.md)。
-> **挂起项十一（2026-09-27，真机反馈的缺陷修复）**：§3.5 `{name}` 分支新增**可选字段 `product`** —— 《待修复清单》第一列**约定俗成省掉产品段**（`…_101_0020_001_L1`，盘阵上是 `…_101_0020_001_L1_PAN`），少了它按名字反推的**景级与段级目录名一起少一段**，两个日期候选全落空，用户报的「一批图都无法打开」就是它。补哪一段由那一行第二列的「影像类型:pan」定（`backend/pathguard.scene_name_products`：追加产品段后重推，**原样那条恒排第一**；提示没给/认不出则 `_PAN` 在先）。**只加一个可选字段，`{path}` 分支与库内检索一字未动**；名字自带产品段、带栅格扩展名的调用（拖拽指纹那条）行为不变，探测量上限也不变。同批修掉 `stores/scenes.ts::openByName` 的一个返回缺陷：成功后仍兜底返回错误串，面板「打开」点下去图开了、红条却说失败（详见 §3.5 那段与 [timeline-archive](../status/timeline-archive.md)）。
-> **挂起项十二（2026-09-27，「一键解析」批量生成预览）**：同批前端功能，**后端零新增端点、响应字段一字未改**（同挂起项四的形状）。每景就是既有三条链按序各走一遍：§3.5 `POST /api/scenes/resolve`（吃那一行的 `product` 补产品段）→ §3.6 的 `GET /api/scenes/{id}/preview`（本体那份）→ §3.8 `GET /api/scenes/{id}/siblings`（取 `nosr` 那一类）→ 再 `/preview` 一次（未超分那份）。驱动循环在 `stores/qclist.ts::bakeAll` + `lib/qcbatch.ts::runSceneBake`，**并发恒为 1**（服务端读盘不该并发，先例是 `viewer.maybePrefetchCompare`）。**刻意不做批量端点**：`/preview` 是 sync def、进 anyio 线程池，掐响应停不了服务端已经在生成的那一份；而「试过哪些候选、各自为什么不行」的真源只在 `scene_search` / `resolve_scene`，批量端点重写一遍就是新增一个「静默换路径」的入口。落点走 `/preview` 而**不是** `/preview-drop`：要与所有打开路径一致（保证「批量生成过 → 点开即出图」），走 drop 会让每张卡第一次打开再生成一遍。详见 [current-question §6.4](../status/current-question.md)。
-> **挂起项十三（2026-09-28，一键解析改为每次强制重新生成）**：挂起项十二那条链上**只加一个查询参数**：`GET /api/scenes/{id}/preview?div=N&force=1`。响应、字段、落点、签名一字未改。用户口径：一键解析**每次**都要基于盘上最新源重新生成，保证细节同步，本体与 NOSR **两份都强制** —— 因为十二那版走的是正常缓存判据，而判据对「内容换了、时间戳没换」判不出来，NOSR 那份尤其（重跑时旧产物是被**改名**过来的，改名不改 mtime）。其它入口（点开卡片、场景库打开、预取、粘路径、拖入链 `/preview-drop`）的缓存语义**保持不变**。代价说清楚：批量耗时从「第二次几乎全命中、秒级」变成「每景读两遍大图」。前端随之有三处一起让开（本地 blob 缓存、浏览器 HTTP 缓存 `cache:'no-store'`、在飞请求的合流键 `|force`），只改 URL 挡不住 nginx 那条 `max-age=300` —— 详尽理由与三个坑见 [preview-bake-pipeline §4.6](../knowledge/preview-bake-pipeline.md)。
-> **须说明的流程偏差**：上述改动**已与本文档同批落到代码**（不是"先评审后写码"）。理由是它同时修一个现存缺陷（两入口指纹不一致），拆开会让仓库停在一个已知会重复投作业的中间态；09-17、09-20 两批同理，前端要用的字段与端点不一起落地就没法验收（09-20 那批还带着 §4.5 那个后台循环，文档与循环必须同批，否则运维会照着一份没写主动生成的契约去配 env）。请复核，通过后把状态改回「已定」。此前其余条款自 2026-09-02 起均未变（评审通过时的交付基线：后端 190 unittest + 前端 Vitest 114 + vue-tsc 零错误 + `.e2e/test-platform.js` 11 断言全绿）。
-> 目标读者：阶段5 实现会话（后端 FastAPI + 前端 Vue3）。范围：把既有后端（agent loop + 4 工具 + `sr_tasks` + slurm）暴露成网页可调 REST/SSE，交付 聊天 / 共享任务队列 / 查看器画完掩码提交 SR。
-> 前置：阶段4 已完成（FastAPI 骨架 `backend/api/app.py`：`/api/scenes` + `/api/scenes/{id}/preview` + 路径白名单；前端 `/scenes` 页 + route='jpg' rec + `/chat` `/queue` 占位路由）。
+> 日期：2026-09-02 · 状态：评审
+> 目标读者：后端 FastAPI + 前端 Vue3 实现会话。范围：把既有后端（agent loop + 4 工具 + `sr_tasks` + slurm）暴露成网页可调 REST/SSE，交付 聊天 / 共享任务队列 / 查看器画完掩码提交 SR。
+> 前置：既有 FastAPI 骨架 `backend/api/app.py`（`/api/scenes` + `/api/scenes/{id}/preview` + 路径白名单）；前端 `/scenes` 页 + route='jpg' rec + `/chat` `/queue` 路由。
 
 ## 0. 一句话总结
 
-后端 FastAPI 新增四组端点——**聊天**（会话 REST + 单回合 SSE）、**工具直调**、**共享任务队列**（REST 提交/取消 + SSE 状态广播）、**掩码落盘**；前端三个页面（聊天/队列/查看器掩码提交按钮）。离机可全测：mock LLM（`SR_LLM_MOCK=1`）+ 假调度器（`SR_SLURM_FAKE=1`）+ fake 场景回退，真模型/真 Slurm 项另排。
+后端 FastAPI 四组端点——**聊天**（会话 REST + 单回合 SSE）、**工具直调**、**共享任务队列**（REST 提交/取消 + SSE 状态广播）、**掩码落盘**；前端三个页面（聊天/队列/查看器掩码提交按钮）。离机可全测：mock LLM（`SR_LLM_MOCK=1`）+ 假调度器（`SR_SLURM_FAKE=1`）+ fake 场景回退，真模型/真 Slurm 项另排。
 
 ## 1. 通用约定
 
-- **Base**：所有端点挂在既有 FastAPI app 上（`backend/api/app.py::create_app`，前缀 `/api`）。CORS 全放（内网直连 IP:端口；端口转发只改前端 `__SR_CFG__.apiBase`，同阶段4）。
+- **Base**：所有端点挂在既有 FastAPI app 上（`backend/api/app.py::create_app`，前缀 `/api`）。CORS 全放（内网直连 IP:端口；端口转发只改前端 `__SR_CFG__.apiBase`）。
 - **鉴权**：内网无鉴权；`run_sr`/掩码的副作用由**幂等表 + 路径白名单**兜底，不做用户门控（M2 再议）。
 - **请求/响应**：JSON（UTF-8）。错误统一 `{"detail": "<人话>"}` + HTTP 状态码；工具/命令层结果遵循 `{"ok": bool, "data": …, "error": str|null}`（复用 tools.contract 约定）。
 - **错误码表**：
@@ -47,20 +32,20 @@
 | `SR_AGENT_DB` | `sr_agent.db` | SQLite 路径（chat 会话 + sr_tasks 同一库） |
 | `SR_LLM_MOCK` | 未设 | `=1` 时聊天走假 LLM（§5.1），不连任何端点 |
 | `SR_SLURM_FAKE` | 未设 | `=1` 时提交走内存假调度器（§5.2），无 sbatch 也能跑通 submit→status→cancel |
-| `SR_SCENES_ROOT` | 未设 | 盘阵场景根；未设 → fake 回退（阶段4 已有） |
+| `SR_SCENES_ROOT` | 未设 | 盘阵场景根；未设 → fake 回退 |
 | `SR_PRODUCT_PREVIEW_DIV` | `4` | **产物预览主动生成**用哪一档（见 §4.5）；取值不在 `PREVIEW_DIVISORS = (2,4,8,16,32)` 里 → 当 `0` 处理并写一行启动日志，**不抛异常**；`0` = 关掉主动生成（只剩惰性路径）。与前端 `DEFAULT_PREVIEW_DIV`（同为 4）**互不联动**——浏览器档位存在 localStorage，服务端看不见，这正是必须有服务端默认档的原因 |
-| `SR_PRODUCT_PREVIEW_MAX_AGE_SEC` | `86400` | 只生成 `finished_at` 落在这个窗口内的行；挡掉升级当天把历史 COMPLETED 行全生成一遍。`finished_at IS NULL` 的一律不生成 |
+| `SR_PRODUCT_PREVIEW_MAX_AGE_SEC` | `86400` | 只生成 `finished_at` 落在这个窗口内的行；挡掉把历史 COMPLETED 行全生成一遍。`finished_at IS NULL` 的一律不生成 |
 | `SR_LLM_BASE_URL/API_KEY/MODEL/…` | 见 config.py | 真模型时沿用既有 loop 配置 |
 
 ## 2. 端点清单总览
 
 | 方法 路径 | 用途 | 章节 |
 |---|---|---|
-| `GET /api/health` | 存活 + 数据源（已有，返回 `{ok,source}`） | — |
-| `GET /api/scenes` · `GET /api/scenes/{id}/preview` | 场景检索/懒生成（阶段4 已有；**2026-09-19 起接 `div` 档位参数**、行上多 `previewDiv`；**2026-09-20 起 jpg 行多只读字段 `rasterPreview`**，见 §4.6；**2026-09-28 起接 `force` 参数**——跳过全部缓存判据强制重新生成，只有「一键解析」带，见 §3.6） | — |
-| `POST /api/scenes/resolve` | 手填/反推一个盘阵场景目录 → 与库行同形的 `{source,row,resolved}`（2026-09-20 起 `row` 也带 `rasterPreview`） | 3.5 |
+| `GET /api/health` | 存活 + 数据源（返回 `{ok,source}`） | — |
+| `GET /api/scenes` · `GET /api/scenes/{id}/preview` | 场景检索/懒生成（**接 `div` 档位参数**，行上带 `previewDiv`；jpg 行另带只读字段 `rasterPreview`，见 §4.6；**接 `force` 参数**——跳过全部缓存判据强制重新生成，只有「一键解析」带，见 §3.6） | — |
+| `POST /api/scenes/resolve` | 手填/反推一个盘阵场景目录 → 与库行同形的 `{source,row,resolved}`（`row` 也带 `rasterPreview`） | 3.5 |
 | `GET /api/scenes/{id}/preview-drop` | **拖拽入口专用**的预览 JPG（落盘阵场景目录 `<stem>_preview.jpg`；目录不可写时兜底到临时缓存并回 `X-SR-Preview-Fallback: tmp`；不进库行，URL 不可静态映射） | 3.6 |
-| `GET /api/scenes/{id}/siblings` | **只读**诊断：一个场景的三类图（输入 / 本轮超分产物 / NOSR `_NOSR`）各叫什么、在不在、各是什么 id —— 供下一轮对比视图消费；NOSR 那份的候选清单（`nosrCandidates`）也从这里出 | 3.8 |
+| `GET /api/scenes/{id}/siblings` | **只读**诊断：一个场景的三类图（输入 / 本轮超分产物 / NOSR `_NOSR`）各叫什么、在不在、各是什么 id —— 供对比视图消费；NOSR 那份的候选清单（`nosrCandidates`）也从这里出 | 3.8 |
 | `POST /api/scenes/clear-preview` | **删盘阵文件**（本契约里唯一一条）：场景库「清除选定 / 全部清除」按场景目录清掉预览 JPG 缓存，逐条回报；判据与边界见章节 | 3.9 |
 | `GET /api/tools` | 工具清单（manifest 机械生成，供 UI/文档） | 3.1 |
 | `POST /api/tools/{name}` | 直调单个工具（绕过 LLM；validate + 白名单照常） | 3.1 |
@@ -72,37 +57,35 @@
 | `POST /api/queue` | 提交 SR 作业（表单=run_sr 参数，幂等） | 3.3 |
 | `POST /api/queue/{task_id}/cancel` | scancel 取消 | 3.3 |
 | `GET /api/queue/events` | SSE：队列状态变化广播 | 3.3 |
-| `POST /api/masks` | 多边形 JSON + W/H → 栅格化写盘阵（原图目录）→ `{mask_path, lq_path, task_draft}`（body 现收 `lq_path`，legacy `scene_id` 保留） | 3.4 |
+| `POST /api/masks` | 多边形 JSON + W/H → 栅格化写盘阵（原图目录）→ `{mask_path, lq_path, task_draft}`（body 收 `lq_path`，legacy `scene_id` 保留） | 3.4 |
 | `POST /api/qclist/write` | 《待修复清单》原地写回盘阵（真机 http 下浏览器写不了盘阵文件） | 3.7 |
 
-> **SR 最小原型（09-14）**：掩码来源改为「目录里已有的 `<输入影像名>_mask.tif`」，
+> **SR 最小原型**：掩码来源是「目录里已有的 `<输入影像名>_mask.tif`」，
 > 提交时只带 `lq_path`，由后端推导并校验存在性
-> （`services/scene_search.derived_mask_path`）；`POST /api/masks` 退居补充出口。
-> **2026-09-17 恢复调用**：90% 的生产场景本来就没有掩码，查看器里现场画完要能直接
-> 写回服务端场景目录，所以 `apiBakeMask` / `MaskBakeResult` 重新进 `lib/api.ts`
-> （body 见 3.4），随后提交仍走同一条推导 —— 两条路写出去/找回来的是同一个文件名，
-> 由后端 `scene_search.mask_stem` 单点保证。
-> `POST /api/queue` 的响应另加两个**只读提示字段**（没有沙箱时出现，否则整个字段缺省）：
+> （`services/scene_search.derived_mask_path`）；`POST /api/masks` 是补充出口
+> （查看器里现场画完也能直接写回服务端场景目录，`apiBakeMask` / `MaskBakeResult` 在
+> `lib/api.ts`，body 见 3.4），随后提交仍走同一条推导 —— 两条路写出去/找回来的是同一个
+> 文件名，由后端 `scene_search.mask_stem` 单点保证。
+> `POST /api/queue` 的响应另有两个**只读提示字段**（没有沙箱时出现，否则整个字段缺省）：
 > `in_place: true` + `notice`（人话：「输出目录 = 输入目录（…）：SR 就地把结果写成
 > `<输入名>_<suffix>.tif`，输入 tif 不改名也不删除；该目录里已存在同名输出时，旧输出先被改名为
 > `<同名>_NOSR.tif` 再覆盖」）。
 > 同一层意思也以 WARNING 写进作业日志的 audit 段（`build_batch_script`），两处都不能省——日志是
 > 事后追责时唯一会去看的东西。
-> 同时 `GET /api/scenes` 的扫描后缀扩到 `.jpg/.jpeg`（`scene_search._IMAGE_EXTS`）：
+> 同时 `GET /api/scenes` 的扫描后缀含 `.jpg/.jpeg`（`scene_search._IMAGE_EXTS`）：
 > 盘阵里本就是显示就绪图的 JPG 也作为场景行列出，行内 `hasPreview` 恒 `true`、
 > `jpgUrl` **指向源文件本身**（前端因此跳过 `/api/scenes/{id}/preview` 懒生成），
 > W/H 由 Pillow 读头得到；`GET …/preview` 对这种行直接回源字节。
-> **收件规则是白名单（2026-09-16 改，取代此前逐条排除派生件的黑名单）**：
+> **收件规则是白名单**：
 > `scene_search.is_scene_file()` 收一个文件，当且仅当两条同时成立——
 > ① 所在目录是**场景目录**（内有 `<目录名>_meta.xml`，`is_scene_dir()`；SR 脚本本来就靠
 > 它判 RC/SC，没有它的目录提交也跑不起来）；② 文件名 = `<目录名>.<ext>`（SC 步骤的输入）
-> 或 `PAN.<ext>`（RC 步骤的输入）。于是这些一律不再入列表：SR 产物与输入备份
+> 或 `PAN.<ext>`（RC 步骤的输入）。于是这些一律不入列表：SR 产物与输入备份
 > （`_sr` / `_NOSR` / `_ori`）、云量图（`_cloud`）、缩略图（`_thumb`）、提交 SR 的输入掩码
-> （`_mask`）、后端自己生成预览的 `<basename>_preview.jpg` 缓存、`Debug/` 下的调试图。
-> 旧规则每冒出一类派生件就得补一条：真机接上盘阵后 18 行里 16 行是脏数据。
+> （`_mask`）、后端生成预览的 `<basename>_preview.jpg` 缓存、`Debug/` 下的调试图。
 > **代价**：没有 `<目录名>_meta.xml` 的目录整个不显示。
 >
-> **阶段6 增补（查看器上下文侧舱）**：`GET /api/scenes` 的 disk 行新增只读字段
+> **查看器上下文侧舱增补**：`GET /api/scenes` 的 disk 行只读字段
 > `lq_path` = 该 scene 文件**父目录**的绝对路径（= 场景目录，`run_sr` 的目录语义 lq_path；
 > fake 行恒 `null`）。作用：前端把 `/api/queue` 行按 `params.lq_path` 相等 +
 > `params.mask_path` 以 `<stem>_mask.tif` 结尾关联回当前 scene，做「当前场景最近任务」
@@ -147,7 +130,7 @@
 
 ### 3.3 共享任务队列（仅 SR 作业 · 服务端唯一事实源）
 
-**数据模型**：`store.sr_tasks`（阶段4 幂等表，既有列 id/fingerprint/job_id/status/params/config_xml/batch_script/log_dir/时间，2026-09-18 增 `started_at`/`finished_at` 本次运行时间窗 —— 老库打开时 `store._ensure_columns` 用 ALTER TABLE 补列、不回填）。`status` 列**语义升级**为"队列展示状态"（阶段5 后台校准器写入，见下）；幂等层不读它（只读 job_id），无回归风险。需给 store 补 `list_sr_tasks()`。
+**数据模型**：`store.sr_tasks`（幂等表，既有列 id/fingerprint/job_id/status/params/config_xml/batch_script/log_dir/时间，另有 `started_at`/`finished_at` 本次运行时间窗 —— 老库打开时 `store._ensure_columns` 用 ALTER TABLE 补列、不回填）。`status` 列 = "队列展示状态"（后台校准器写入，见下）；幂等层不读它（只读 job_id）。`store` 另有 `list_sr_tasks()`。
 
 **队列状态机**（Slurm 无百分比 → 状态机即进度）：
 
@@ -163,67 +146,61 @@ submit_run_sr 返回 → 队列状态：
 ```
 
 - `GET /api/queue` → `200 {"tasks":[{task_id, fingerprint, session_id, job_id, state, params:{lq_path,mask_path,sr_scale,suffix,gpu,cloud_limit,delete_ori,grid_align}, config_xml, batch_script, log_dir, created_at, updated_at, started_at, finished_at, preview_state, preview_note}, …]}`，按 created_at 倒序。`state` 取内存最近校准结果（缓存），无缓存则当场校准一次（squeue/sacct，镜像 `slurm.job_status`）。
-  **`preview_state` / `preview_note`（2026-09-20 增）**：产物预览主动生成的结局，见 §4.5。
+  **`preview_state` / `preview_note`**：产物预览主动生成的结局，见 §4.5。
   `preview_state ∈ {null, "running", "done", "skipped", "failed", "cleared"}`（null = 从没生成过；
-  `cleared`（2026-09-22 增）= 场景库「清除缓存」把它人工清了，**只由那条端点写**，见 §3.9），
+  `cleared` = 场景库「清除缓存」把它人工清了，**只由那条端点写**，见 §3.9），
   `preview_note` 形如 `"<slug>: <人话>"`，slug 固定为 `sandbox` / `product_missing` /
   `unwritable` / `source_changed` / `no_suffix` / `failed`（`cleared` 的 note 是
   `cleared: <时间> 场景库人工清除缓存，下次打开会重新生成预览`，不属于上面这组 slug）。
   两列与作业状态**无关**
   （COMPLETED 也可能没降采样到），客户端别把两者耦合成一个状态机。
-  **两组时间戳别混**（2026-09-18 增 `started_at`/`finished_at`，见下「耗时」）：`created_at` = 这一行**第一次**提交的时刻（同一指纹重交复用同一行，不刷新）、`updated_at` = 最近一次写回，两者属**行**；`started_at` = 校准器首次观测到 RUNNING 的时刻（排队结束）、`finished_at` = 终态落库时刻，两者属**本次运行**。本次运行的起点/终点都没观测到就是 `null`（界面「—」），**不**退回 `created_at` 顶替。
+  **两组时间戳别混**（见下「耗时」）：`created_at` = 这一行**第一次**提交的时刻（同一指纹重交复用同一行，不刷新）、`updated_at` = 最近一次写回，两者属**行**；`started_at` = 校准器首次观测到 RUNNING 的时刻（排队结束）、`finished_at` = 终态落库时刻，两者属**本次运行**。本次运行的起点/终点都没观测到就是 `null`（界面「—」），**不**退回 `created_at` 顶替。
 - `POST /api/queue` — body（run_sr 参数，`lq_path` 必填，其余带默认）：
   `{lq_path, mask_path?, sr_scale?=2, suffix?="", gpu?=0, cloud_limit?=80, delete_ori?=false, grid_align?=true, options_yml?}`。
   直接调 `services.run_sr.submit_run_sr(params, store=default_store())`（幂等层既在：重复同参 → RESUMED_ACTIVE/COMPLETED 复用，失败才重跑，中断无 job_id → 409 报"勿盲重试"）。返回：
   `201 {"task_id", "job_id", "status":"SUBMITTED"|"RESUMED_ACTIVE"|"RESUMED_COMPLETED"|…, "state":…, "previous_state"?, "config_xml", "log_dir"}`。
   校验：`lq_path` 必填 + 绝对路径 + 不含 `<fake>`（复用 tools/run_sr `_bad_path` 语义）；mask_path 同规则；sbatch 不可用且未开 fake → 422「slurm not available … 需在盘阵机配置」。
-  **`suffix` 的默认值来源（2026-09-16 改，见 §7 评审挂起）**：body 省略或留空 → 平台读 `$SR_BUNDLE_DIR` 下 SR 团队自己的配置文件（`sfsr_confgig_test_espan2_cuda1.xml`，兼容另一种拼写 `sfsr_config_…`）里的 `<Suffix>` 作默认值；文件缺失 / 坏 XML / 标签缺失或为空 / 值不合白名单 → 回落到内置 `"sr"`。**每次提交现读**，不缓存（`task_fingerprint` 把 `suffix` 文本哈希在内，缓存会让指纹变成进程启动时刻的函数 → 重启或双 worker 对同一逻辑提交得出不同指纹，正是幂等层要防的重复投作业）。显式传值仍走白名单 `^[A-Za-z0-9_-]{1,16}$`，不合法 400（`detail` 含「suffix 非法」）。**agent 工具 `run_sr` 共用同一套归一化**（`services/run_sr.py::normalize_suffix`），同一逻辑提交在两入口得到同一 `task_fingerprint`。原 `SR_SUFFIX_DEFAULT` 环境变量同日作废，设了不读。
+  **`suffix` 的默认值来源**：body 省略或留空 → 平台读 `$SR_BUNDLE_DIR` 下 SR 团队自己的配置文件（`sfsr_confgig_test_espan2_cuda1.xml`，兼容另一种拼写 `sfsr_config_…`）里的 `<Suffix>` 作默认值；文件缺失 / 坏 XML / 标签缺失或为空 / 值不合白名单 → 回落到内置 `"sr"`。**每次提交现读**，不缓存（`task_fingerprint` 把 `suffix` 文本哈希在内，缓存会让指纹变成进程启动时刻的函数 → 重启或双 worker 对同一逻辑提交得出不同指纹）。显式传值仍走白名单 `^[A-Za-z0-9_-]{1,16}$`，不合法 400（`detail` 含「suffix 非法」）。**agent 工具 `run_sr` 共用同一套归一化**（`services/run_sr.py::normalize_suffix`），同一逻辑提交在两入口得到同一 `task_fingerprint`。`SR_SUFFIX_DEFAULT` 环境变量不读。
 - `POST /api/queue/{task_id}/cancel` → 查 task（404 无），`job_id` 非空则 `slurm.cancel` → `200 {"task_id","cancelled":bool,"state":…}`；无 job_id（中断遗留）→ 400。
 - `GET /api/queue/events` — SSE：订阅所有任务的 `state` 变化。**驱动** = app 生命周期后台 asyncio 任务（§4.3）：周期（`SR_QUEUE_POLL_SEC`，缺省 2s）对每个 `job_id` 非空 task 调 `slurm.job_status`，状态与前值不同 → 更新内存缓存 + 写回 `sr_tasks.status` + 广播一帧。事件 schema：
 
 ```json
 {"type":"job_update","task_id":3,"job_id":12345,"state":"RUNNING","prev_state":"PENDING","ok":true,"error":null,"updated_at":1789000000.12,"started_at":1789000000.12,"finished_at":null}
 {"type":"job_update","task_id":3,"job_id":12345,"state":"FAILED","prev_state":"RUNNING","ok":false,"error":"exit 1","updated_at":1789000060.5,"started_at":1789000000.12,"finished_at":1789000060.5}
-// 产物预览主动生成（2026-09-20 增，§4.5）：**独立帧类型**，不与 job_update 混
+// 产物预览主动生成（§4.5）：**独立帧类型**，不与 job_update 混
 {"type":"preview_update","task_id":3,"state":"done","note":null}
 {"type":"preview_update","task_id":4,"state":"skipped","note":"product_missing: 试过 xxx_260318.tif / xxx_260318.tiff，都不存在"}
 // 心跳（可选，防代理断链）：{"type":"ping"}
 ```
 
-`preview_update`（2026-09-20 增）与 `job_update` **分开是刻意的**：预览生成没降采样到与作业状态
+`preview_update` 与 `job_update` **分开是刻意的**：预览生成没降采样到与作业状态
 无关（COMPLETED 的作业也可能因沙箱 / 产物缺失 / 目录不可写而没生成），合成一个事件就得同时
 处理两套字段、调用点也得判"这一帧到底带没带 state"。`state` 取 `sr_tasks.preview_state`
 的值（`running` 只在重新 GET 时才可能看到），`note` 与 `GET` 的 `preview_note` 同源。
 前端按 `task_id` 归并；**无匹配 task 就不动**（主动生成的认领与广播都在后端，前端可能还没把
 这个任务拉进列表，权威始终在 `GET /api/queue`）。
 
-`updated_at`（2026-09-17 增）、`started_at`/`finished_at`（2026-09-18 增）= 这次写回 `sr_tasks`
+`updated_at`、`started_at`/`finished_at` = 这次写回 `sr_tasks`
 的值，与 `GET /api/queue` 同名字段同源。它们必须随帧下发：客户端手上那份只来自 `GET`，而那次
 GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—— 只推 `state` 的话，任务一完成耗时列
-就从运行中的正常值掉成「0 秒」（2026-09-17 真机）。写库失败时这些字段**缺席**（不发本地时钟值），
+就从运行中的正常值掉成「0 秒」。写库失败时这些字段**缺席**（不发本地时钟值），
 客户端保留旧快照，与 GET 的读数保持一致；因此客户端须按「字段可能不存在」实现。
 
 **耗时（队列页那一列）**：`finished_at − started_at`，运行中的行用浏览器时钟现算。两个锚点都钉在
 **真实转换点**上（首次看到 RUNNING / 看到 COMPLETED·FAILED），所以量的是**本次运行**、不含排队。
-两个坑各自对应一次真机现象，改的时候别退回去：
+两个坑：**不能拿 `created_at` 当起点**（一行 = 一个指纹，同一场景同一参数重交时幂等层复用同一行
+（`run_sr._resolve_existing`），`created_at` 停在**第一次**提交的时刻 —— 于是「耗时」量的是行龄）；
+**重启（校准缓存为空）不能重算**（`state.task_cache` 是内存态，基准缺失时回落到 `sr_tasks.status`
+（库里存的状态），只补发真正变了的行）。本次运行的起点没观测到（整段运行期间 sr-api 不在）→
+`started_at` 为 `null`，界面显示「—」；概率低（校准时距 2s），且**不猜**：退回 `created_at`
+就是上面第一个坑。更早建的行不回填，其耗时也显示「—」（`store._ensure_columns` 只补列不改数据）。
 
-- **不能拿 `created_at` 当起点**。一行 = 一个指纹，同一场景同一参数重交时幂等层复用同一行
-  （`run_sr._resolve_existing`），`created_at` 停在**第一次**提交的时刻 —— 于是「耗时」量的是行龄。
-  真机表现：昨天失败的那次重交后跑完，「耗时」显示「30 时 00 分」，实际只跑了 200 多秒
-  （2026-09-18）。
-- **重启（校准缓存为空）不能重算**。`state.task_cache` 是内存态，校准器原来只拿它当比较基准：
-  sr-api 一重启，每行都被判成「状态变了」→ 全部写回 + 刷新时间戳，几天前跑完的行集体变行龄。
-  现在基准缺失时回落到 `sr_tasks.status`（库里存的状态），只补发真正变了的行（2026-09-18）。
-- 本次运行的起点没观测到（整段运行期间 sr-api 不在）→ `started_at` 为 `null`，界面显示「—」。
-  概率低（校准时距 2s），且**不猜**：退回 `created_at` 就是把上面第一个坑请回来。
-- 加这两列前建的行不回填，其耗时也显示「—」（`store._ensure_columns` 只补列不改数据）。
+**SSE 消费端契约（服务端一字未改）** —— 客户端怎么用这条流：
 
-**SSE 消费端契约（2026-09-22 订正，服务端一字未改）** —— 改的是前端怎么用这条流：
-
-- **订阅常驻在应用外壳上**（`App.vue` 挂载时 `queue.connect()`），不再由队列页 / 查看器侧舱
+- **订阅常驻在应用外壳上**（`App.vue` 挂载时 `queue.connect()`），不由队列页 / 查看器侧舱
   各自的挂载生命周期决定。理由：右下角「任务跑完了」的提醒要在用户**不在**队列页时也能到
-  （提交完切去查看器看影像是常态，此前那种状态下这条流根本没人订阅）。队列页与侧舱那两个
-  调用点**原样保留**，`stores/queue` 里按引用计数收（归零才真的断）—— 它们卸载时不会把外壳
+  （提交完切去查看器看影像是常态，否则那种状态下这条流根本没人订阅）。队列页与侧舱那两个
+  调用点**保留**，`stores/queue` 里按引用计数收（归零才真的断）—— 它们卸载时不会把外壳
   那一份带走，重复调用也不会叠加出第二条连接。
 - **这条流没有心跳帧**：上面 schema 里那行 `{"type":"ping"}` 服务端**不发**（`platform.py` 的
   `_broadcast` 只广播业务帧，没有定时心跳）。因此「连接还活着」在客户端**只能由 fetch 拿到
@@ -240,7 +217,7 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
   `sr_scale`；**行还没 GET 回来时只报 task_id**（订阅是常驻的，这次会话可能还没拉过队列），
   失败原因优先用帧里的 `error`，没有才回落到 `log_dir` 末段 / 「原因见队列页」。
 - **提醒去重键 `<task_id>:<state>`，一次会话内有效**。刷新页面即清空：刷新期间跑完的任务
-  **不补弹**（不引入跨会话状态，回到队列页看列表即可 —— 用户口径 2026-09-22）。
+  **不补弹**（不引入跨会话状态，回到队列页看列表即可）。
 
 ### 3.4 掩码（查看器 → SR 提交）
 
@@ -250,7 +227,7 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
  "polygons":[{"label":"roi_1","points":[[x,y],…]}, …],
  "W": 24739, "H": 24199}
 ```
-或 legacy 形态 `{"scene_id":"<阶段4 不透明 scene id>", "polygons":…, "W":…, "H":…}`。
+或 legacy 形态 `{"scene_id":"<不透明 scene id>", "polygons":…, "W":…, "H":…}`。
 
 - **路径语义（已与用户确认）**：`lq_path` 走 `pathguard.to_posix_array_path` +
   `ensure_allowed(kind="dir")`（Windows 形态 `W:\…` 也吃；白名单外 → 403，不是场景目录
@@ -268,7 +245,7 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
 - 返回 `200 {"mask_path": "<绝对路径>", "mask_txt": "<绝对路径>", "lq_path": "<原图所在目录>", "task_draft": {lq_path, mask_path, …默认 sr 参数}}`。`task_draft` 供前端**预填**队列表单（不自动提交，Slurm 是真副作用；用户点提交才发 POST /api/queue）。
 - 幂等：同 scene_id 重复提交 → 覆盖同名掩码（掩码生成无副作用风险，允许重复）。
 
-### 3.5 盘阵任意场景目录（`POST /api/scenes/resolve`，2026-09-17）
+### 3.5 盘阵任意场景目录（`POST /api/scenes/resolve`）
 
 用途：让 `SR_SCENES_ROOT`（datahub）之外的生产场景目录（真机在
 `/DiskArray/GSHC2IMPS/PRODUCT/<年>/<月>/<日>/<卫星型号>/<段级目录>/<景级目录>`）
@@ -284,7 +261,7 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
 ```
 
 - `path`：`W:\…`（经 `SR_DRIVE_MAP` 映射）或 `/DiskArray/…` 都吃，要写到**景级目录**这一层。
-  **也可以直接给单个 `.tif` 文件路径**（2026-09-17 增补）——随手贴一张图也能看。此时走
+  **也可以直接给单个 `.tif` 文件路径** ——随手贴一张图也能看。此时走
   「裸 TIF」分支：`resolved.dir` = 该文件的父目录、`input` = 该文件；**父目录确实是合法场景
   目录**（`input_scene_path` 命中）时与目录形态完全等价，否则 `row.lq_path` 与 `mask_path`
   一起为 `null`、`sr_capable=false`（能看，但提交 SR 在盘阵上跑不起来）。给的文件后缀不是
@@ -292,33 +269,30 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
 - `{name}`（`date` 可省）：查看器里选了本地影像后的反推路径。浏览器拿不到本地文件的
   绝对路径（`File` 只有 name/size/type），只能把**裸文件名**交给后端，由
   `backend/pathguard.infer_scene_paths` 反推候选目录 —— 命名规则与模板的唯一真源就在
-  那里，**前端不自拼路径**（2026-09-17 前前端自己写死过一份，导致 `SR_SCENE_PATH_TEMPLATE`
-  从未生效）。日期不给就由后端从文件名里的 14/8 位时间戳取，**取不到就报错让用户手粘**。
+  那里，**前端不自拼路径**。日期不给就由后端从文件名里的 14/8 位时间戳取，**取不到就报错让用户手粘**。
   候选按序（**两天 × 一条模板**，依次 stat）：
   1. `W:\GSHC2IMPS\PRODUCT\{y}\{m}\{d}\{sat}\{mid}\{name}` —— 生产树六层真形态，**成像日**；
   2. 同上，日期换成**次日**。
   名字里的 14 位是成像时刻，而盘阵按生产日建目录（夜里成像的景记在第二天），所以
-  `{d}` 要试两天；模板不含日期占位符时两天渲染出同一条，去重后仍只有一条。旧扁平形态
-  （`PRODUCT\{y}\{m}\{d}\{name}`，四段）那条兜底候选 2026-09-18 已删 —— 生产树上永远落空，
-  只会让 404 的候选清单里多一条不符合六段格式的目录。
+  `{d}` 要试两天；模板不含日期占位符时两天渲染出同一条，去重后仍只有一条。
   配了 `SR_SCENE_PATH_TEMPLATE` 则只按配置的那一条走（同样给两天）。名字不符合生产命名规则
-  （拆不出 `{sat}`/`{mid}`）时跳过第 1 条，不硬拼空段。各段的分隔符**下划线与空格都认**
-  （2026-09-18 起）：盘阵上的真形态是下划线，而用户口径里出现过空格写法；段级目录名按
+  （拆不出 `{sat}`/`{mid}`）时跳过第 1 条，不硬拼空段。各段的分隔符**下划线与空格都认**：
+  盘阵上的真形态是下划线，而用户口径里出现过空格写法；段级目录名按
   **原文的分隔符**重建，拿空格名拼出下划线的段级目录必然 stat 不到。规则见
   [docs/sr_code/production-scene-naming.md](../sr_code/production-scene-naming.md)。
-  - **第二阶段候选（2026-09-21，仅 jpg）**：中间产物的文件名是**在生产全名后面再粘一段**
+  - **第二阶段候选（仅 jpg）**：中间产物的文件名是**在生产全名后面再粘一段**
     （`<目录名>_sr.jpg`），按原名反推出的目录名会带上那条尾巴（`…/<目录名>_sr`），盘阵上
     没有那个目录。所以 jpg 还会按「去掉尾段」的名字再反推一遍 —— 逐段切最多**两段**，
     每切一段给一条候选（切一段与切两段两种读法都成立：`<目录名>_sr_2.jpg` 可能是
     `<目录名>` 的 `sr_2` 产物，也可能是 `<目录名>_sr` 的 `2` 产物；`sr_2` 这类**带下划线的
     suffix** 因此也能整段切掉，按段数猜会切错，见 `scene_search.de_suffixed_stems`）。
     尾段过不了 `SUFFIX_RE` 的字符约束（`- 副本` 这类带空格的、`.preview`）就停止下切。
-    **`_NOSR` 与 `preview` 由这一轮的切负责剥**（2026-09-24 订正）：两者都是「剥掉才回到
-    真名」的环节尾段，所以都在切段循环**内**处理，不在循环外预剥 —— 预剥会让
+    **`_NOSR` 与 `preview` 由这一段的切负责剥**：两者都是「剥掉才回到
+    真名」的环节尾段，所以都在切段循环**内**处理，不在循环外预剥 —— 放在循环外用预剥会让
     `<目录名>_NOSR` 剩下的真名一条候选都进不去（`de_suffixed_stems` 的文档记了这个坑）。
     **只在前一阶段全落空时才展开**：常见情形（本体显示件、`.tif` 反推、粘路径）一个 stat
     都不多花 —— 钉住探测量上限的那几条用例正走在上面。
-  - **平台自生成的那份预览也认（2026-09-21 晚）**：`<栅格 stem>_preview.jpg` 是拖入链
+  - **平台自生成的那份预览也认**：`<栅格 stem>_preview.jpg` 是拖入链
     自己写进场景目录的（`GET /api/scenes/{id}/preview-drop`，见
     [preview-bake-pipeline §4.8](../knowledge/preview-bake-pipeline.md)），它末尾的
     `preview` 同样在 `_NON_STAGE_TAILS` 名单里。那份名单是防**盘阵侧**派生件的
@@ -329,24 +303,24 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
     `scene_search.stage_of_jpg` 判。**只剥一层**，剥完仍在名单里（`<目录名>_cloud_preview`）
     照旧不认。（`_NOSR` 不在这份名单里 —— 它是一段真的环节尾段，由上一段的切段逻辑剥掉。）
 - 响应 `200 {"source":"manual", "row": <与 /api/scenes 行同形>, "resolved": {...}}`：
-  `row.id` 是 `~` + base64url(绝对路径)（手工行形态，见 `api/paths.py`；库行 id 一字未变），
+  `row.id` 是 `~` + base64url(绝对路径)（手工行形态，见 `api/paths.py`；库行 id 不变），
   `row.manual=true`、`jpgUrl` 在**库外**为 `null`（预览走 `GET /api/scenes/{id}/preview` 回
   JPEG 字节）、`row.W/H` 由 `preview_jpg.scene_dims` 回填。
   **`row.hasPreview` 一律填缓存到底在不在的真值**（库外没有静态 URL，但前端要靠它判断
   「这次会不会触发首次生成预览」并提示用户等待），`row.lq_path` 与 `resolved.sr_capable` 同源同真假。
-  **`row.previewDiv`**（2026-09-19）填盘上那份 `<stem>_preview.jpg` **是在哪一档生成的**，
+  **`row.previewDiv`** 填盘上那份 `<stem>_preview.jpg` **是在哪一档生成的**，
   读不出戳 → `null` —— 前端拿它 + 全局档位一起判「要不要重新生成」，只看 `hasPreview` 会在
   改档位后端着旧档位那张图上桌（见 3.6）。
-  **`row.rasterPreview`（2026-09-20 增）**：源是显示件 jpg、且同目录有位更清晰的栅格时，
+  **`row.rasterPreview`**：源是显示件 jpg、且同目录有位更清晰的栅格时，
   附上供前端判「谁清晰」的尺寸对照（字段与判据见 §4.6）；`{path}` 分支给的是单个文件、
   不附带。**注意这一条在 `{path}` 与 `{name}` 两个分支里算的是不同的东西**：`{path}` 打开
   一个目录时，`row` 描述的是**栅格输入影像**（`input_scene_path` 命中的那份 tif），它的
   `rasterPreview` 恒为 `null`（那份 tif 自己就是源）；只有拖 jpg（`{name}` 以 `.jpg` 结尾）
   那一路才会非空 —— 而它比的是**盘阵上那份同名 jpg**（`<场景目录>/<name>`）的尺寸，不是
-  用户本地拖进来那份的：指纹对 jpg 行只比名字（见上），本地那份可能另存过、缩过，平台口径
+  用户本地拖进来那份的：指纹对 jpg 行只比名字（见下），本地那份可能另存过、缩过，平台口径
   是「盘阵上的才是基准」。盘阵上那份 jpg 被删/改名而只剩本地副本时读不出尺寸 → `null` →
   前端老实显示本地那份（保守方向是对的）。
-  **`row` 描述的是「用户拖进来的那一个环节」自己那份栅格**（2026-09-21）：本体的显示件
+  **`row` 描述的是「用户拖进来的那一个环节」自己那份栅格**：本体的显示件
   指向本体输入影像，中间产物指向 `<目录名>_<suffix>.tif`（见下面「中间产物也能关联」）。
   `W`/`H` 因此是那一份的尺寸 —— 产物的各边是本体的倍数，拿本体的尺寸建画布整张比例都是错的。
   `resolved` = `{dir, input, input_name, mask_path, mask_exists, writable, sr_capable,
@@ -358,7 +332,7 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
   「能否提交 SR」的唯一判据）。
   `resolved.input` / `input_name` **恒指本体输入影像**，即便这次拖进来的是产物 —— 它的语义
   是「SR 跑的是哪份文件」，不是「这一行描述哪张图」（后者看 `row`）。
-  - **`kind`**（2026-09-21 增）= 这次拖进来的影像是场景里的哪个环节，取值
+  - **`kind`** = 这次拖进来的影像是场景里的哪个环节，取值
     `input` / `product` / `nosr`；`{path}` 分支与 `.tif` 反推恒为 `input`。
   - **`suffix`** = 中间产物那一段后缀（`product` / `nosr` 时非空，本体为空串），**从文件名
     本身切**，不查任务库也不查配置：SR 常在平台外跑，库里没有记录时照样得认得出。
@@ -388,18 +362,18 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
   404 的 `detail` 必须列出试过哪些候选、各自为什么不行（前端原样渲染）——「猜错必须报错」
   的落地。`detail` 只能是**字符串**：`api.ts::http()` 把它直接塞进 `Error`，给对象
   用户看到的是 `[object Object]`。反推按两天找过（候选 > 1 条）时，`detail` 末尾补一句
-  「成像日与次日都找过 —— 盘阵按生产日建目录，深夜成像的景常记在次日」（2026-09-18 增），
+  「成像日与次日都找过 —— 盘阵按生产日建目录，深夜成像的景常记在次日」，
   否则用户看见两条只差一天的路径只会更懵。
-  「为什么不行」按**粘错了哪一层**分派（2026-09-18 修）：`<目录名>_meta.xml` 的前缀是
+  「为什么不行」按**粘错了哪一层**分派：`<目录名>_meta.xml` 的前缀是
   **完整生产名**（含 14 位成像时刻），所以粘日期目录（`…/PRODUCT/2026/09/18`，正是场景栏
-  预填的那一层）得到的「缺 `18_meta.xml`」是句没有任何信息量的话。现在分层报：日期目录报
+  预填的那一层）得到的「缺 `18_meta.xml`」是句没有任何信息量的话。按层报：日期目录报
   「这是日期目录，场景目录在它下面 3 层 `<卫星型号>/<段级目录>/<景级目录>`」，卫星型号层
   报「还差 2 层」、段级目录报「还差 1 层」（段级名同样带 14 位成像时刻，光看名字会误报
   「缺 `<段级名>_meta.xml`」，所以按层数先认）、场景目录内部的子目录报「比场景目录还深」、
   名字压根不是生产名的报「不是完整生产名」。层与名字全部由 `pathguard` 的三个**纯词法**
   原语判（`production_tree_depth` / `flat_scene_layout` / `looks_like_scene_name`），
   **不参与准入** —— 准入始终只有一条：`<目录名>_meta.xml` 在不在。
-- **`{name}` 可再带 `size_bytes`（2026-09-18，拖拽入口用）：把本地文件的字节数一起发过来，
+- **`{name}` 可再带 `size_bytes`（拖拽入口用）：把本地文件的字节数一起发过来，
   后端要求名字与字节数都对得上才认**（`_fingerprint_mismatch`）。**比的对象按拖入的是栅格
   还是 jpg 分岔**：栅格比「输入影像 stem + 字节数」，jpg 只比「场景目录名」。
   不传 `size_bytes` 则只看目录/影像存不存在（粘路径、第三方调用一切照旧）。
@@ -409,23 +383,23 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
     另一张图；那之后画的掩码坐标会整片落在别的影像上。
   - 不符时**按这条候选不合格处理**（记进 `reasons` 后继续试下一条候选），最终仍是 404 且
     `detail` 里列出盘阵侧那个文件的名字与字节数，**不新增错误码**。
-  - **`name` 以 `.jpg/.jpeg` 结尾时：名字比 `<场景目录名>`，字节数不比**（2026-09-18 订正）。
+  - **`name` 以 `.jpg/.jpeg` 结尾时：名字比 `<场景目录名>`，字节数不比**。
     盘阵那份 jpg 是**显示件**（8bit 就绪预览，见 `scene_search._IMAGE_EXTS`），SR 从不在
     它上面跑，与输入的 TIF 是两份产物、不可能同字节 —— 所以字节数那一半对它无意义。名字
     这一半**不能拿栅格输入的 stem 去比**：纯 RC 场景（目录里只有 `PAN.tif`）`inp.stem` 是
-    `PAN`，而显示件叫 `<编号>.jpg`（生产全名），永远比不过 —— 那会让「拖 jpg」这条入口
-    恰好在 SR 真要跑的场景上恒 404（初版实现如此，真机表现为「极少出现盘阵小标」）。
+    `PAN`，而显示件叫 `<编号>.jpg`（生产全名），永远比不过 —— 拿栅格输入的 stem 去比会恒 404
+    （真机现象：该入口极少出现盘阵小标）。
     判据只有一条：jpg 名（去后缀）== 场景目录名。默认模板下候选目录名就是由这个名字拼出来
     的，所以这条通常直接成立 —— 它挡的是「换了 `SR_SCENE_PATH_TEMPLATE`、场景目录改了命名」
     的部署；真正挡住派生件（`_cloud.jpg`、`_preview.jpg`）的是候选目录根本不存在。
     也**不泛化成「后缀不同就放行」**：那会连 `SC.tiff` 与 `SC.tif` 一起放过。
-    名字比的是**场景目录名**，不是栅格输入的 stem（见上一条）—— 目录由**名字**锁死，
+    名字比的是**场景目录名**，不是栅格输入的 stem —— 目录由**名字**锁死，
     环节由 `stage_of_jpg` 判（见下）。
-  - **中间产物名（2026-09-21 增）**：拖 `2026-09-21` 起不止认显示件，也认它的中间产物
-    —— 用户想「把跑出来的产物拖进来看一眼」是自然动作。可拖的四类名字：
+  - **中间产物名**：拖入不止认显示件，也认它的中间产物 ——
+    用户想「把跑出来的产物拖进来看一眼」是自然动作。可拖的四类名字：
     `<目录名>.jpg`（本体显示件）、`<目录名>_<suffix>.jpg`（本轮超分产物）、
-    `<目录名>_NOSR.jpg`（未超分那份，2026-09-24 用户口径）、
-    `<目录名>_<suffix>_NOSR.jpg`（writeTiff 改名留下的上一次产物，标同一个 `NOSR` 标；
+    `<目录名>_NOSR.jpg`（未超分那份）、
+    `<目录名>_<suffix>_NOSR.jpg`（`writeTiff` 改名留下的上一次产物，标同一个 `NOSR` 标；
     两义与候选次序见 [preview-bake-pipeline §4.11](../knowledge/preview-bake-pipeline.md)）。
     **真门是「同级栅格真的在」**（`<目录>/<名>.tif|.tiff`，按 `_PRODUCT_EXT_ORDER` 试）：
     「名字切得干净」只说明它长得像产物名，而一个场景目录里躺着十几样东西，
@@ -437,7 +411,7 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
     说清「平台不猜目录」以及该改拖哪一份。反推路径的唯一依据是文件名，没有日期就不知道该去
     `<年>/<月>/<日>` 哪一天找，猜一个就是拿别景的 `lq_path` 去提交。
   - `size_bytes` 非正整数 → **400**。`{path}` 分支是精确路径，不收这个字段。
-- **`{name}` 还可带 `anchor`（2026-09-21 增，拖拽入口用）：一个或几个盘阵目录**，
+- **`{name}` 还可带 `anchor`（拖拽入口用）：一个或几个盘阵目录**，
   即**用户当前打开着的场景**（前端 `sceneAnchors([最近显示过的 sceneDir, A 格, B 格])`，
   上限 3 条）。它不是新的一类反推，而是给「名字里没有场景身份」的那类 jpg 留的唯一出口：
   **RC 场景的产物叫 `PAN_<suffix>.jpg`**（产物名按**输入影像名**拼，RC 的输入是 `PAN.tif`，
@@ -452,14 +426,14 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
     「这一环节自己的栅格躺在同级」（`<锚定目录>/PAN_260318.tif` 在）。目录由**用户自己
     打开的**那一景给定，所以这不是「猜目录」：盘的哪个目录来自前端上下文，不是从名字推的。
   - **按序取第一个成立的**（顺序＝优先级：最近显示过的那一景 → A 格 → B 格）。
-    一个都不成立 → 退回原来的 400，**并把每个锚定目录各自为什么不行追加进 `detail`**
+    一个都不成立 → 退回 400，**并把每个锚定目录各自为什么不行追加进 `detail`**
     （「目录不存在」/「不是可提交的场景目录」/「这一景里没有 `PAN_260318.tif/.tiff`」）。
   - 坏值一律**跳过并记原因，不 400 也不 403**：它不是断言而是提示，不该因为前端多塞了一个
     陈旧目录就把整次拖拽打回。唯一不松的是白名单 —— 越 `SR_ALLOWED_ROOTS` 的目录直接丢弃
     （记原因），不 stat。接受单个字符串或字符串数组，数组只取前 4 条。
   - **锚定命中后 `resolved.dir` = 那个锚定目录**，其余收尾与反推那条路共用同一段代码
     （`kind`/`suffix`/`row` 描述该环节自己那份栅格、`lq_path` 在产物上置空等照旧）。
-- **`{name}` 还可带 `product`（2026-09-27 增，《待修复清单》面板用）：那一行写着的
+- **`{name}` 还可带 `product`（《待修复清单》面板用）：那一行写着的
   影像类型**（`PAN` / `MSS`，大小写不限，取值见 `pathguard._PRODUCT_CODES`）。
   质检部门的《待修复清单》第一列**约定俗成省掉产品段**（写 `…_101_0020_001_L1`，而盘阵
   上的景级目录叫 `…_101_0020_001_L1_PAN`），第二列的描述里有「影像类型:pan」。
@@ -473,28 +447,28 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
   - **没给或认不出（`PMS`、`全色`…）→ `_PAN` 在先、`_MSS` 在后**（用户口径「默认按照
     `_PAN` 打开即可」）：两条都试，**只是顺序**。所以「不递 product」不是「打不开」，
     而是「多一次 stat，且 404 时按这个顺序解释」。
-  - **原样那个名字恒在最先试**（`scene_name_products` 的第一个候选），盘阵上的真形态
-    （名字自带产品段）行为一个字节没变；只有名字缺产品段时才会多出候选目录，404 的
+  - **那个名字本身恒在最先试**（`scene_name_products` 的第一个候选），盘阵上的真形态
+    （名字自带产品段）行为不变；只有名字缺产品段时才会多出候选目录，404 的
     `detail` 因此补一句「名字里没有产品段，按 _PAN、_MSS 依次各试了一遍」。
   - **带栅格扩展名的名字不生成变体**（`.tif/.tiff/.img/.jpg/.jpeg` 等，见 `_RASTER_EXT_RE`）：
     那是**拖进来的文件名**，要走 `size_bytes` 双指纹，而 `…_preview.jpg_PAN` 这种把产品段
     加在扩展名后面的名字盘上不可能存在。钉探测量上限的那几条用例正是靠这一条不破。
   - `product` 不是字符串 → **400**。`{path}` 分支不收：精确路径没有反推，也就没有可补的段。
 
-### 3.6 拖拽入口的预览（`GET /api/scenes/{id}/preview-drop`，2026-09-19 定名）
+### 3.6 拖拽入口的预览（`GET /api/scenes/{id}/preview-drop`）
 
 用途：用户把盘阵上的 `.tif` **拖进查看器**时，不再让浏览器重新解码整幅原图（真机上一次
 几十秒、几百 MB），改用服务端生成的下采样预览 JPG —— 与场景库打开同一张图的渲染路径、
 同一套预览生成规则（`rule_stamp` 相同），所以两条链出来的字节一致。
 
-**拖进来的是 `.jpg` 时这条端点默认不参与**（2026-09-18）：用户拖的那张就是他自己要看的那张，
+**拖进来的是 `.jpg` 时这条端点默认不参与**：用户拖的那张就是他自己要看的那张，
 再拿服务端缩图顶掉反而降清，还白等一次解压采样 —— 关联成功后前端直接 `blob = file`
 本地解码，像素与字节都来自用户那份。这条端点只服务「拖裸 `.tif` 反推命中」那条路。
-**例外（2026-09-20，见 §4.6）**：同目录有位更清晰的栅格、且当前档位下服务端从它生成的的
+**例外（见 §4.6）**：同目录有位更清晰的栅格、且当前档位下服务端从它生成的
 比这张 jpg 更清晰时，jpg 那一路也走这条端点 —— 用户报的「盘阵那份预生成显示件分辨率不够」
 说的就是这种情况，而它是**按尺寸算出来的**、不是「jpg 就一律」。
 
-**两条端点同款的一处前置（2026-09-20）**：请求里的源是 `.jpg/.jpeg` 时，先
+**两条端点同款的一处前置**：请求里的源是 `.jpg/.jpeg` 时，先
 `scene_search.sibling_raster_path(源)` 探一次同名栅格，命中就把源换成那份栅格再往下走。
 `/preview` 与 `/preview-drop` 各插三行、逻辑相同。**其余一切照旧**：落点规则不变
 （`preview_jpg_name` 只由源 stem 拼，对 jpg 与 tif 是同一个文件名，栅格行与 jpg 行因此
@@ -504,15 +478,14 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
 探不到栅格就**逐字节维持原行为**（回源字节）。也就是说：换不换只有后端知道，前端只管
 按 `?div=` 取图。
 
-**2026-09-19 两处改动**：落点从临时缓存改成**盘阵场景目录**（`<源同目录>/<stem>_preview.jpg`），
-端点随之从 `preview-tmp` **改名 `preview-drop`**（再叫 tmp 就是撒谎，它写的是永久文件）；
-同时两条端点都开始接 `div` 查询参数（见下）。
+**落点与命名**：落点是**盘阵场景目录**（`<源同目录>/<stem>_preview.jpg`），因此端点叫
+`preview-drop`（它写的是永久文件）；两条端点都接 `div` 查询参数（见下）。
 
 与 `GET /api/scenes/{id}/preview` 的差别：
 
 | | `/preview`（生产缓存） | `/preview-drop`（拖入） |
 |---|---|---|
-| 落点 | 源同目录 `<stem>.preview.jpg`，或 `SR_PREVIEWS_ROOT` 镜像树 | **恒为**源同目录 `<stem>_preview.jpg` |
+| 落点 | 源同目录 `<stem>_preview.jpg`，或 `SR_PREVIEWS_ROOT` 镜像树 | **恒为**源同目录 `<stem>_preview.jpg` |
 | `SR_PREVIEWS_ROOT` | 吃（配了就落镜像树） | **不吃**（恒落源同目录） |
 | 生命周期 | 跟场景数据长期存在 | 跟场景数据长期存在（**原地覆盖，不堆积**） |
 | 清理者 | 无（同上，靠覆盖） | **无任何清理者** |
@@ -524,40 +497,39 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
   源文件自带的那份同名 `.jpg`（`<stem>.jpg`）区分开，不会被当成"源本身就是显示件"。
   已有测试钉住它**不会**被列成一行场景。
 - **代价（明知故犯）**：它不吃 `SR_PREVIEWS_ROOT`，所以同一个场景在配了 `SR_PREVIEWS_ROOT`
-  的部署下会有**两份缓存**（镜像树里一份 `.preview.jpg`、场景目录里一份 `_preview.jpg`），
-  且盘上多出的这一份**没有任何清理者**（原地覆盖不堆积，但要知道它在）。换名成
-  `<stem>.preview.jpg` 能省掉这两条，2026-09-19 讨论后仍选了 `_preview.jpg`。
+  的部署下会有**两份缓存**（镜像树里一份 `<stem>_preview.jpg`、场景目录里一份），
+  且盘上多出的这一份**没有任何清理者**（原地覆盖不堆积，但要知道它在）。
 - **落盘阵失败时兜底到临时缓存**：落盘阵要求服务账号（`User=nginx`）对场景目录有写权限，
   这一条在真机上仍是待确认项。所以先 `os.access(dir, W_OK)` 预判，不可写或写失败 →
-  退回 `SR_TEMP_PREVIEWS_ROOT/<YYYY-MM-DD>/<sha256(源绝对路径)[:16]>.jpg`（旧的 tmp 落点，
-  1 天 TTL、每天 0 点整桶删除），并回响应头 **`X-SR-Preview-Fallback: tmp`**。
+  退回 `SR_TEMP_PREVIEWS_ROOT/<YYYY-MM-DD>/<sha256(源绝对路径)[:16]>.jpg`（1 天 TTL、
+  每天 0 点整桶删除），并回响应头 **`X-SR-Preview-Fallback: tmp`**。
   前端认到这个头就在提示文案里如实说明「该场景目录不可写，预览暂时落在服务器临时缓存」。
   **两条都失败才 422**。`X-SR-Preview-Fallback` 已加进 CORSMiddleware 的 `expose_headers`
   —— 不补这个头，异源部署与 e2e 里前端恒读到 `null`，这条设计就是死的。
-- **`div` 查询参数（两条端点都有，2026-09-19）**：下采样档位，取值 ∈ `preview_jpg.PREVIEW_DIVISORS`
+- **`div` 查询参数（两条端点都有）**：下采样档位，取值 ∈ `preview_jpg.PREVIEW_DIVISORS`
   = `(2, 4, 8, 16, 32)`，含义是**各边除以 N**（`preview_max_edge = round(long_edge / div)`），
   缺省 **2**。非法值 → **400**。缺省是 2 而不是 4，是因为这一层是**生成预览契约**、要与
   `LEGACY_PREVIEW_DIV` 逐字节对齐；前端那个「默认 ÷4」只是 UI 默认值，活在前端常量里。
-- **`force` 查询参数（只有 `/preview` 有，2026-09-28）**：`?force=1` 跳过缓存的**全部**判据
+- **`force` 查询参数（只有 `/preview` 有）**：`?force=1` 跳过缓存的**全部**判据
   （「产物不比源旧」+「JPEG 注释戳等于当前规则」），无条件按盘上当前的源重新生成一遍；
   落点与 `?div=` 照旧 —— 还是原地覆盖同一份 `<stem>_preview.jpg`，只是这次不省那次读盘。
-  缺省 false，**唯一的调用方是「一键解析」**（见挂起项十三）；其它入口一个都不带。
+  缺省 false，**唯一的调用方是「一键解析」**；其它入口一个都不带。
   `/preview-drop` 上**没有**这个参数，`preview_drop` 也不认它 —— 拖入是即时交互，不该每次
   重读大图。唯一不吃 force 的早退是**源本身就是 `.jpg/.jpeg`**（回源字节，没有可生成的产物）；
   同名栅格那一跳不在此列，force 作用在换完之后的栅格上（与不带它时是同一个源）。
-  为什么要这个参数而不是「让 `?div=` 变一变」：`div` 只在档位真的变了时才换 URL，而这里要治
+  用这个参数而不是「让 `?div=` 变一变」：`div` 只在档位真的变了时才换 URL，而这里要治
   的是**档位没变、盘上内容变了**（SR 重跑把旧产物改名成 `<同名>_NOSR.tif` 再覆盖本体，改名
   不改 mtime），判据推不出来，只能由调用方声明。详见
   [preview-bake-pipeline §4.6](../knowledge/preview-bake-pipeline.md)。
 - **档位是全局的**：工具栏定位组件右侧那条 5 档拖动条（默认 ÷4，存 `localStorage` 的
   `sr.previewDiv`）是平台级的「预览生成精度」，**拖入 / 场景库打开 / 粘盘阵路径打开**
   三条入口都按当前档位生成，由前端在请求里带上 `div`。后端自己不认识"当前档位"。
-- **规则签名随之 bump 到 v3**：`srprev:v3:div<N>+equal:q<Q>`（旧的是 `srprev:v2:equal:q<Q>`）。
-  档位进戳，是「同源同落点、div 不同 → 必须重新生成」的判据；**不加 `div==2` 的特例拼法**。
-- **行上新增 `previewDiv`**：`GET /api/scenes` 与 `POST /api/scenes/resolve` 的每行多一个
+- **规则签名是 v3**：`srprev:v3:div<N>+equal:q<Q>`。档位进戳，是「同源同落点、div 不同 →
+  必须重新生成」的判据；**不加 `div==2` 的特例拼法**。
+- **行上的 `previewDiv`**：`GET /api/scenes` 与 `POST /api/scenes/resolve` 的每行带一个
   `previewDiv`，值是**盘上那份预览 JPG 是在哪一档生成的**（读 JPEG 注释戳，只读头不解像素），
   读不出/无戳 → `null`；源本身就是 `.jpg/.jpeg` 的行恒 `null`（档位对显示件无意义）。
-  按 `(path, mtime)` 缓存。**`hasPreview` / `jpgUrl` 的语义一个字不动**。
+  按 `(path, mtime)` 缓存。**`hasPreview` / `jpgUrl` 的语义不变**。
 - **为什么必须有 `previewDiv`**：`hasPreview` 只答「盘上那份在不在」，不认档位；而前端那次
   「重新生成再取图」是带条件的。缺了它，改档位后盘上文件仍在 → `hasPreview` 仍为真 → 前端
   跳过重新生成 → 用户看到的还是旧档位那张图。**库外手工行**（`jpgUrl` 为 `null`，每次走
@@ -574,21 +546,20 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
 - **清理不在请求路径里**：`purge_temp_previews` 要列举缓存根，而「不扫盘」是硬约束（见 3.5），
   所以它只出现在 `api/app.py` 的后台任务 `_tmp_preview_purge_loop` 里，且只管**兜底**那一份。
 
-### 3.7 《待修复清单》写回（`POST /api/qclist/write`，2026-09-18）
+### 3.7 《待修复清单》写回（`POST /api/qclist/write`）
 
-> **状态：已定**（同日按上面这份评审稿落地）。后端 `backend/api/platform.py` +
-> `backend/tests/test_api_platform.py::TestQcListWrite`；前端同步删掉 FSA 那条路
-> （`stores/qclist.ts` 的文件选择器/句柄、`lib/qclist.ts::encodeQcText`）；写盘第一次进
-> 回归：`.e2e/test-manual-scene.js` §H 走「导入 GBK 清单 → 粘路径 → 同步 → 从磁盘读回」。
+> 实现：后端 `backend/api/platform.py` + `backend/tests/test_api_platform.py::TestQcListWrite`；
+> 前端走 HTTP（不用 FSA）。回归：`.e2e/test-manual-scene.js` §H 走「导入 GBK 清单 → 粘路径 →
+> 同步 → 从磁盘读回」。
 
 用途：查看器的《待修复清单》面板把操作员标好的处置结果**原地写回**盘阵上那份 txt。
 
-初版走浏览器 File System Access API（`showOpenFilePicker` + `createWritable`），2026-09-18
-在真机上直接不可用：那个 API 在规范里是 `[SecureContext]` 标的，Chrome 只在 `https://`、
-`http://localhost`、`http://127.0.0.1` 的页面上把它挂到 `window` 上，而真机是 nginx
-`listen 80` 的 `http://内网IP`。清单本来就在盘阵上，而后端 `User=nginx` 本来就写得进去
-（掩码、SR 产物、预览 JPG 全是它写的），所以改成后端写盘：http 下也能用，还同时把
-「GBK 清单写回 GBK」做对了（浏览器编不出 GBK，旧代码只能降级成 UTF-8+BOM）。
+写盘由后端做：浏览器 File System Access API 在真机不可用 —— 那个 API 在规范里是
+`[SecureContext]` 标的，Chrome 只在 `https://`、`http://localhost`、`http://127.0.0.1` 的
+页面上把它挂到 `window` 上，而真机是 nginx `listen 80` 的 `http://内网IP`。清单本来就在盘阵
+上，而后端 `User=nginx` 本来就写得进去（掩码、SR 产物、预览 JPG 全是它写的），所以写盘走
+后端：http 下也能用，还同时把「GBK 清单写回 GBK」做对了（浏览器编不出 GBK，只能降级成
+UTF-8+BOM）。
 
 body：
 ```json
@@ -605,8 +576,9 @@ body：
 - **只收 `.txt`**（大小写不敏感）：本端点的语义是「覆盖」，不设后缀门就等于「盘阵上任何存在的
   文件都能被它改写」—— 一颗写错的 bug 足以盖掉 `.tif` 或 `meta.xml`。
 - **`mtime` 护栏（可选）**：带了就与 `os.stat(target).st_mtime` 比，差超过 2 秒（网络盘/FAT 的
-  时间戳粒度）一律拒。挡的是「操作员导入之后，质检那边又更新了一版清单」—— 照写会把他们的新行
-  整段盖掉。前端传的是导入那个 `File` 的 `lastModified`；不带这个字段（curl、e2e）护栏自动跳过。
+  时间戳粒度）一律拒。挡的是「操作员导入之后，质检那边又更新了一版清单」—— 照写会把他们的
+  新行整段盖掉。前端传的是导入那个 `File` 的 `lastModified`；不带这个字段（curl、e2e）护栏
+  自动跳过。
 - **写前查权限**：目标目录与目标文件各做一次 `os.access(…, os.W_OK)`，不可写就直接拒并说清是
   哪一个，别让用户拿到 EACCES 原文。注意**原子替换只需要目录可写**（文件自己的 mode 拦不住
   `os.replace`），所以这两道检查不是冗余。
@@ -616,21 +588,21 @@ body：
 - **已知副作用**：替换后文件的**属主变成跑 API 的 nginx**（nginx 无权 chown 回去），权限位保留。
   质检部门若还要直接改这份 txt，清单所在目录要给组写权限 —— 见 `deploy/README.md`。
 - **编码**：`encoding ∈ {"utf-8","gbk"}`（缺省 `utf-8`），由**后端**编码。正文里有 GBK 表示不了
-  的字符 → 400。前端不再插手编码，只把导入时认出来的编码原样传过来（`lib/qclist.ts::decodeQcBytes`）。
+  的字符 → 400。前端不插手编码，只把导入时认出来的编码原样传过来（`lib/qclist.ts::decodeQcBytes`）。
 - **`text` 不设大小上限**：清单是文本、且由本平台自己生成，人造上限只会误伤长清单。
 - **错误码不分类**：请求侧被拒一律 **400**（detail 说清是路径形态、白名单、不存在、非 `.txt`、
   编码还是 mtime 冲突）；写盘 `OSError` → **422**。与 §3.5 那套 400/403/404 分门别类不同 ——
   前端只把 detail 原样显示，分类没有消费者。`PathDeniedError` 一律转 400。
 - 返回 `200 {"path":"<posix 绝对路径>","bytes":1234,"encoding":"gbk"}`。
-- **回归**：写盘这一步以前进不了自动化（`showOpenFilePicker` 是系统弹窗，见 §4 那条注记），
-  改成 HTTP 之后 `.e2e/test-manual-scene.js` 整条能走通：导入 → 设路径 → 同步 → 从磁盘读回比对。
+- **回归**：`.e2e/test-manual-scene.js` 整条能走通（导入 → 设路径 → 同步 → 从磁盘读回比对）；
+  写盘走 HTTP，可自动化（系统弹窗那条路不可自动化）。
 
-### 3.8 一个场景的三类图（`GET /api/scenes/{id}/siblings`，2026-09-20）
+### 3.8 一个场景的三类图（`GET /api/scenes/{id}/siblings`）
 
 用途：把「这个场景的**输入影像**、**本轮超分产物**、**NOSR**各叫什么、在不在、各自的
-场景 id 是什么」一次交代清楚。翻看器对比功能（下轮）要同时取这三张图，这个端点就是它的
-取名与存在性来源；也是 NOSR 那份候选清单（`nosrCandidates`）的出口 —— 真机上命中的是哪个
-名字，看这里。
+场景 id 是什么」一次交代清楚。对比功能要同时取这三张图，这个端点就是它的
+取名与存在性来源；也是 NOSR 那份候选清单（`nosrCandidates`）的出口 —— 真机上
+命中的是哪个名字，看这里。
 
 **纯只读，四条永不**：永不生成预览、永不写盘、永不列举目录、永不改任何状态。全部探测都是
 **固定候选名**的 `is_file()` / `stat()` —— 与 §3.5 的「不扫盘」是同一条纪律，实现里没有
@@ -683,8 +655,8 @@ body：
   「试过哪些」。拼法必须字面切片 `输入名[:-4]`，**不能用 `Path.with_suffix`** —— SR 侧
   `variants/verify_sr_run.py::output_path_for` 用的就是 `img_name[:-4]`，输入名是 `.tiff`
   时两者不等。
-- `nosrCandidates` = `scene_search.nosr_candidates()` 拼出的**全部候选名**，**顺序即优先级**
-  （2026-09-24 用户口径）：先试 `<输入 stem>_NOSR.tif/.tiff`（SC 场景即 `<目录名>_NOSR.tif`，
+- `nosrCandidates` = `scene_search.nosr_candidates()` 拼出的**全部候选名**，**顺序即优先级**：
+  先试 `<输入 stem>_NOSR.tif/.tiff`（SC 场景即 `<目录名>_NOSR.tif`，
   RC 场景即 `PAN_NOSR.tif`）—— 用户口径里「未超分那份」就是它；最后才试
   `<产物 stem>_NOSR.tif/.tiff`（`SR_code/util.py::writeTiff` 的改名规则推出来的**上一次产物**，
   只在同一 suffix 跑过两次以上时才存在）。两者同时存在时先认输入 stem 那条，命中哪个由该项的
@@ -700,12 +672,12 @@ body：
 - **回归钉子**：`.e2e/` 与 `backend/tests/test_scene_siblings.py` 跑完要断言目录里
   **没多出** `_preview.jpg`、`stat` 次数没涨 —— 这个端点一个字都不许写盘。
 
-#### 3.8.1 前端怎么用它（2026-09-20 接上）
+#### 3.8.1 前端怎么用它
 
 客户端在 `frontend/src/lib/api.ts`：`apiSceneSiblings(cfg, sceneId, suffix?)`，URL 由
 `lib/scene.ts::sceneSiblingsUrl` 拼。**它自己不取图**：拿到 item 之后走
 `GET /api/scenes/{item.id}/preview?div=N`（§3.5）—— 三类图各有自己的 id，所以
-**这次接入没有新增任何取图路径，也没有新增任何生成预览入口**。
+**这条接入没有新增任何取图路径，也没有新增任何生成预览入口**。
 
 - `siblingRow(res, item)` 把一类图装成 `fetchSceneJpg` 认的**库行**。它只读
   `id / name / W / H / hasPreview / previewDiv / jpgUrl / rasterPreview` 八个字段，
@@ -730,7 +702,7 @@ body：
   （不是那一类图自己的路径）—— 产物的 rec 因此也拿到盘阵关联，掩码写回才有落点。
 - **`div` 字段前端不看**：它是服务端主动生成的档位，仅供标注；前端认的是用户滑块那个档位。
 
-#### 3.8.2 前端侧的取图纪律：blob 缓存、去重与预取边界（2026-09-20）
+#### 3.8.2 前端侧的取图纪律：blob 缓存、去重与预取边界
 
 这一节写的全是**客户端行为**（`lib/api.ts` / `lib/blobCache.ts` / `stores/viewer.ts`），
 服务端那两条端点一个字节都没改。列出来是因为它们决定了「什么样的请求会打到服务端」，
@@ -743,7 +715,7 @@ body：
   而收益只覆盖「关掉再打开」这一种情形。**单条就超过上限的不进缓存**（放了也会立刻被自己
   挤出去）。暴露 `previewCacheStats()` / `clearPreviewCache()`（设置浮层那行读数与「清空」）
   与 `watchPreviewCache(cb)`（内容一变就通知，返回退订）——设置浮层那行读数必须是**实时**的，
-  理由见本文末那条订正（2026-09-22）。
+  理由见本节末。
 - **缓存键**：`previewCacheKey(row, div[, raster])` = `${id}|${div}|jpg` 或
   `${id}|${div}|ras:${栅格名}`。**必须把「取的是哪一份」编进键**：同一条行 id + 同档位，
   在「同名栅格胜出」（§4.6）时端上来的是栅格那份、另一张图的字节流，与源 jpg 那份不是
@@ -756,8 +728,8 @@ body：
   目标项若已有 rec 开着（判据与 `openSceneJpg` 的 `findRecByMeta` 同源：认 `sceneId`）
   就直接切过去，**不发 `/preview`**。于是「同一枚芯片连点两次」= 一次 `/siblings` +
   零次 `/preview`；`test-manual-scene.js` K 段钉着这个增量。
-  **芯片打开也要带环节**（2026-09-21）：产物项用 `item.kind` 当 `stageKind`、响应顶层的
-  `suffix` 当后缀（不额外加字段，见挂起项五）。不这么做的话，同一份产物会变成「拖进来
+  **芯片打开也要带环节**：产物项用 `item.kind` 当 `stageKind`、响应顶层的
+  `suffix` 当后缀（不额外加字段）。不这么做的话，同一份产物会变成「拖进来
   不能改、芯片打开能改」两个说法 —— 前后端各一道锁的前提是同一份图在哪条路口走进来都
   被认成同一类。
 - **对比模式后台预取**：用户开关（**默认关**，持久化在 `localStorage['sr.viewer.cmpPrefetch']`），
@@ -768,26 +740,26 @@ body：
   真机上不允许出现「我什么都没点，盘阵却在读大图」；`test-manual-scene.js` K2b/K2c 用
   同一个场景把这条边界的两侧各钉一次（盘上没有现成预览 → `/preview` 增量 0；补一份现成的
   → 恰好 +1 且就是那一份的 URL）。
-- **预取要把结果说出来**（2026-09-22 订正）：设置浮层里那颗开关下面多一行回执，
+- **预取要把结果说出来**：设置浮层里那颗开关下面多一行回执，
   四种结局各一句话 —— `siblings` 没查到、没有合格项（「另两类在盘上还没有现成预览」）、
   正在取第 i/N 项、取完（「已预取 N 项」，有没取到的记 `N/总数`）。理由：合格项是
   「盘上已有一份现成预览」，**第一次打开某个场景时这个集合本来就是空的**，缓存行会如实
-  停在原处；不写出来，用户分不清「没东西可预取」与「预取坏了」（这正是那天用户报的那一条）。
+  停在原处；不写出来，用户分不清「没东西可预取」与「预取坏了」。
   同一颗开关关掉时 `stopPrefetch()` 把回执擦掉。
 - **离开对比模式即作废**：`stopPrefetch()` 清掉去重表、擦掉回执行并推进代数计数
   （`prefetchGen`），在飞的预取发现代数变了就不再开始下一项。**不用 `AbortController`**：
   取图那两个 API 不收 `AbortSignal`（要兼容静态 URL 那条支路），掐不断在飞的那个请求。
-- **缓存读数必须是实时的**（2026-09-22 订正，与上面那条同源）：设置浮层那行
-  「本地预览缓存 N 项 / X MB」原来只在**打开浮层时**读一次快照。可改这份缓存的按钮
+- **缓存读数必须是实时的**（与上面那条同源）：设置浮层那行
+  「本地预览缓存 N 项 / X MB」若只在**打开浮层时**读一次快照就会失真 —— 可改这份缓存的按钮
   （预取开关）就在那一行上面：用户点开开关、盯着紧挨着的数字，数字永远停在打开时那一次
-  （走拖入链进来时那份缓存本来就是空的 → **永远是「0 项」**），只能得出「预取没生效」——
-  用户 2026-09-22 报的就是这一条。现在缓存内容一变就通知（`watchPreviewCache`），
+  （走拖入链进来时那份缓存本来就是空的 → **永远是「0 项」**），只能得出「预取没生效」。
+  所以缓存内容一变就通知（`watchPreviewCache`），
   浮层在一开一关之外**跟着涨**。做法上刻意没有把 `stats()` 挂成响应式：那样每次取图都要
   重算一次渲染；改成「内容变了才响一次」的回调，事件数与缓存的实际出入同阶。
-  开发机上已实测复现并验证：面板开着不动，预取落地那一刻行里的项数 +1，
+  实测：面板开着不动，预取落地那一刻行里的项数 +1，
   且与 `previewCacheStats()` 的真值逐字一致（`test-manual-scene.js` K2b/K2c）。
 
-### 3.9 人工清除预览缓存（`POST /api/scenes/clear-preview`，2026-09-22）
+### 3.9 人工清除预览缓存（`POST /api/scenes/clear-preview`）
 
 场景库表格卡片头部那条工具行（「清除选定」/「全部清除」）的服务端一半。**这是本契约里
 唯一一条会删除盘阵上文件的端点**，判据与回报都按「宁可不删，也不删错」写，机制细节见
@@ -822,7 +794,7 @@ POST /api/scenes/clear-preview
   不覆盖。**不自动重新生成** —— 下次打开走惰性路径重新生成。
 - **`ids` 非空数组且 ≤ 500**（超出 400，不静默截断）：一次动几十上百个生产目录的请求，
   宁可让调用方分批，也不替它决定砍掉哪一半。
-- 删除动作在客户端也有对应记账：命中的 scene id 前缀丢本地 blob 缓存，且**本次真的重新生成过**
+- 删除动作在客户端也有对应记账：命中的 scene id 前缀丢本地 blob 缓存，且**真的重新生成过**
   时取静态图带 `cache:'no-store'` 绕开浏览器 HTTP 缓存（§3.8.2 那条 `?div=N` 只击穿换档位，
   击穿不了同档位重新生成）。
 
@@ -832,17 +804,17 @@ POST /api/scenes/clear-preview
 - 进程内 `dict[session_id → asyncio.Lock]`；锁占用期间再 POST → 409。
 - `run_loop` 是同步阻塞函数 → `asyncio.to_thread` 跑；内部事件经回调推 `asyncio.Queue`，主协程 `while` 逐帧 `yield` 成 SSE（`StreamingResponse`）。
 
-### 4.2 loop 观察缝（新增 `on_step`，**不改变行为**）
-`run_loop(…, on_step: Callable[[dict], None] | None = None)`：在既有各 return/commit 点**同步调用** `on_step({"type":…, …})`，事件与 SSE schema 对齐（turn_start 在循环首轮前、tool_call/tool_result 在 call_tool 前后、assistant 在纯文本答复时、turn_done/error 在返回前）。默认 `None` → 与现状逐字节一致，**18 个既有 loop 测试不因本改动变更**。mock LLM 只替换 `_default_chat`，不动状态机。
+### 4.2 loop 观察缝（`on_step`，**不改变行为**）
+`run_loop(…, on_step: Callable[[dict], None] | None = None)`：在既有各 return/commit 点**同步调用** `on_step({"type":…, …})`，事件与 SSE schema 对齐（turn_start 在循环首轮前、tool_call/tool_result 在 call_tool 前后、assistant 在纯文本答复时、turn_done/error 在返回前）。默认 `None` → 与现状逐字节一致，**18 个既有 loop 测试不受影响**。mock LLM 只替换 `_default_chat`，不动状态机。
 
 ### 4.3 队列后台校准广播
 - app lifespan 启动一个 asyncio 任务：`while` sleep `SR_QUEUE_POLL_SEC`，扫 `sr_tasks` 中 `job_id IS NOT NULL` 的行 → `slurm.job_status` → 状态变化时更新 `sr_tasks.status` + 内存缓存 + 广播。
 - 广播 = 进程内 `set[asyncio.Queue]`（每 `/api/queue/events` 连接一个）；写入失败（连接断开）→ 丢弃该连接。**单进程部署**（uvicorn 单 worker），多 worker 需外部队列——文档注明（M2 再议）。
 
 ### 4.4 测试隔离
-- 测试里 `create_app()` 前设 env（`SR_AGENT_DB=临时文件`、`SR_SCENES_ROOT=临时目录`、`SR_LLM_MOCK=1`、`SR_SLURM_FAKE=1`），与阶段4 test_api.py 同款模式。
+- 测试里 `create_app()` 前设 env（`SR_AGENT_DB=临时文件`、`SR_SCENES_ROOT=临时目录`、`SR_LLM_MOCK=1`、`SR_SLURM_FAKE=1`），与 `test_api.py` 同款模式。
 
-### 4.5 产物预览主动生成队列（2026-09-20）
+### 4.5 产物预览主动生成队列
 
 用途：作业转 COMPLETED 之后，**产物那一份**的预览由服务端同时生成掉 —— 用户跑完立刻打开
 时不必等一次几十秒的读盘 + 采样，同档位下直接命中盘上那份。
@@ -850,7 +822,7 @@ POST /api/scenes/clear-preview
 **只生成产物**，输入影像与 `_NOSR` 两份不生成：那两份「用户到底要不要看」在打开之前无法知道
 （对比 UI 还没做），而产物是刚跑完的、几乎一定会被打开。三类落点天然独立，各生成各的。
 
-**关键结构选择：不挂在状态转换上，改成从库派生。** `platform._task_state` 是唯二写终态的
+**关键结构选择：不挂在状态转换上，改成从库派生。** `platform._task_state` 是写终态的
 地方，但它的调用者有两个 —— 后台 `_poll_once` 与**请求路径** `_task_view`（`GET /api/queue`）。
 谁先观测到 RUNNING→COMPLETED 谁把 `changed` 拿走，另一个看到的是「没变化」，在那里挂入队
 钩子必然偶发漏生成；而它又有请求路径调用者，也不能在那里做重活。改成「`sr_tasks` 里有
@@ -870,7 +842,7 @@ COMPLETED 且 `preview_state IS NULL` 的行」之后，这个竞态**在结构�
   而它们本来就是等用户打开的。每轮**扫描上限** 20 是 `app.py` 模块常量，不开 env
   （它只影响积压时每轮多花几次 SQL，配错没有意义）。
 - **不占任何全局 semaphore**：主动生成与惰性路径不共享锁。同档位时主动生成的 `cache_hit` 通常
-  命中用户刚生成的那份，不同档位就两份都留（那就是 §六.5 点明的 div 抖动，今天已有）。
+  命中用户刚生成的那份，不同档位就两份都留（那就是 §六.5 点明的 div 抖动）。
 
 状态机（`preview_state` / `preview_note` 两列，`GET /api/queue` 每行带出，见 §3.3）：
 
@@ -891,7 +863,7 @@ NULL ──claim──> running ──> done
 
 - **沙箱判据必须是 `_run_dataroot(task)`，不能直接比 `SR_SANDBOX_ROOT`**：`_run_dataroot`
   内部走 `run_sr.sandbox_scene_paths`，而那条在 `SR_EXECUTOR=local` 时恒返回 `None` ——
-  真机当前正是「配了 `SR_SANDBOX_ROOT` + local executor」这条路线，直接比 env 会把本可以
+  「配了 `SR_SANDBOX_ROOT` + local executor」这条路线直接比 env 会把本可以
   生成的产物判成「沙箱内」而永不生成。反过来真在沙箱里跑时，产物落在私有副本上，生成了用户
   也看不到，还往临时盘撒文件。这条有专门的回归钉子（`SR_SANDBOX_ROOT` 在 + `SR_EXECUTOR=local`
   → **照生成**）。
@@ -918,10 +890,9 @@ NULL ──claim──> running ──> done
 - **落盘前复核 `(mtime, size)`**：同一 suffix 重跑会覆盖同一个产物路径。不复核的话，一次
   「读的时候是旧产物、写的时候新产物已经在写」会把一张半截图永久留在盘上，而缓存判据是
   「不比源旧」—— 新的 mtime 可能仍晚于我们刚写的 jpg，它**不会自愈**。为此
-  `preview_jpg.py` 把 `cache_hit`（原 `_cache_hit`）与 `write_preview_jpg` 从 `ensure_preview_jpg` 里抽了出来
-  （**纯重构**：缓存规则、`rule_stamp()` 一字未动，现有 `test_preview_jpg.py` 是这次的
-  回归钉子）。
-- **迁移不回填**：`preview_state`/`preview_note` 走既有 `_ensure_columns`（PRAGMA → ALTER
+  `preview_jpg.py` 把 `cache_hit` 与 `write_preview_jpg` 从 `ensure_preview_jpg` 里抽了出来
+  （缓存规则、`rule_stamp()` 未动，现有 `test_preview_jpg.py` 是回归钉子）。
+- **不回填**：`preview_state`/`preview_note` 走既有 `_ensure_columns`（PRAGMA → ALTER
   TABLE，幂等），与 `started_at`/`finished_at` 同款，**故意不给老行补值**。加上
   `finished_at >= now - SR_PRODUCT_PREVIEW_MAX_AGE_SEC` 这道年龄窗口，升级当天不会把历史
   COMPLETED 行全生成一遍 —— 这是唯一的屏障。
@@ -929,7 +900,7 @@ NULL ──claim──> running ──> done
   `SR_PRODUCT_PREVIEW_MAX_AGE_SEC`（缺省 86400）。主动生成的 4 与前端 `DEFAULT_PREVIEW_DIV = 4`
   是**两个独立的 4，互不联动**。
 
-**同时生成未超分那一份（2026-09-21 增 / 名字口径 2026-09-24 订正，用户口径，不算新的生成预览入口）**：
+**同时生成未超分那一份（用户口径，不算新的生成预览入口）**：
 同一轮 tick 在产物之后多生成一份 `<场景目录>/<那一份栅格 stem>_preview.jpg`（源 = 候选清单里
 第一个存在的 `…_NOSR.tif`，档位取同一个全局值，命中判定同一个 `cache_hit`）。
 三处与产物那一份**故意不同**：源是一份**候选清单**（`scene_search.nosr_candidates`，只拼名字）；
@@ -937,23 +908,23 @@ NULL ──claim──> running ──> done
 **不动 `preview_state`/`preview_note`**（那一列描述的是产物预览，一个字段说不出两份文件的
 结局），只写盘 + 往 stdout 打一行 `[nosr-preview] task=<id> <状态>`，**`skipped:` 要报出试过哪些
 名字**（一个名字都不在盘上时，只有把清单打出来才看得出是名字不对还是那份本就不存在）。
-候选清单与次序见 §3.8 的 `nosrCandidates`（2026-09-24 前这里是硬编码的 RC 名字
-`PAN_NOSR.tif`，SC 场景因此永远生成不出来）。**没有任何响应字段为它变化**：`/siblings` 的
-「NOSR」那一项找的仍是同一份 `<栅格 stem>_preview.jpg` 落点（2026-09-22 起与其余落点同一规则）。
+候选清单与次序见 §3.8 的 `nosrCandidates`。
+**没有任何响应字段为它变化**：`/siblings` 的
+「NOSR」那一项找的仍是同一份 `<栅格 stem>_preview.jpg` 落点（与其余落点同一规则）。
 
-前端**拖入显示件**时也会对同一份做一次静默预热（2026-09-24 增，`stores/viewer.ts::warmNosrPreview`，
+前端**拖入显示件**时也会对同一份做一次静默预热（`stores/viewer.ts::warmNosrPreview`，
 命中才记账），见 [preview-bake-pipeline §4.11](../knowledge/preview-bake-pipeline.md)。
 
-**预览文件名统一（2026-09-22，用户口径）**：三条生成预览链（惰性打开 / 主动生成 / 拖入）落同一个名字
-`<源栅格 stem>_preview.jpg`（`paths.preview_jpg_name`），改名前的点号那份
-（`<stem>.preview.jpg`）不再由任何链产出。改名不是改个字符串：读判据跟着走才是同一件事 ——
+**预览文件名统一（用户口径）**：三条生成预览链（惰性打开 / 主动生成 / 拖入）落同一个名字
+`<源栅格 stem>_preview.jpg`（`paths.preview_jpg_name`），点号那份
+（`<stem>.preview.jpg`）不由任何链产出。改名不是改个字符串：读判据跟着走才是同一件事 ——
 服务端的 `hasPreview`/`previewDiv`/静态 `jpgUrl` 都从同一份落点算（自动一致），前端
 `isBakedPreviewUrl` 认结尾 `[_\.]preview\.jpe?g`（点号那代一并认下：静态 URL 是后端给的，
 版本错开一档时认得出比认不出安全），决定拼不拼 `?div=` 与换档后要不要重新生成。旧文件由
 `_sweep_legacy_preview` 在每条链处理到那份栅格时同时删掉（生成之前一次、命中缓存一次），
 失败不报错；**没有全盘清扫**（平台不列目录），没被任何链碰过的目录里那份会留着。
 
-### 4.6 显示源比较规则：谁清晰用谁（2026-09-20）
+### 4.6 显示源比较规则：谁清晰用谁
 
 背景：拖进查看器的 `.jpg`（真机上盘阵场景目录里那份预生成的显示件，如 `PAN.jpg`，长边约
 8192）有时**不够清** —— 同目录配着的栅格（`PAN.tif`）比它大得多。用户拍板：**取两者中更
@@ -964,8 +935,8 @@ NULL ──claim──> running ──> done
 ```
 同目录存在同名 .tif/.tiff/.img
   且 round(max(rasterW, rasterH) / div) > max(jpgW, jpgH)
-      → 显示源改用服务端从栅格生成的的那份（落点与栅格行同一份 `<stem>_preview.jpg`）
-  否则 → 保持显示源 jpg（现状）
+      → 显示源改用服务端从栅格生成的那份（落点与栅格行同一份 `<stem>_preview.jpg`）
+  否则 → 保持显示源 jpg
 不存在同名栅格 / 任一侧尺寸读不出 / div 不在 PREVIEW_DIVISORS 里
       → 保持显示源 jpg（保守）
 ```
@@ -975,13 +946,13 @@ NULL ──claim──> running ──> done
   才是基准」，用户本地那份可能另存过（测试夹具就故意让两份尺寸不同，好分清像素来源）。
 - **预期要如实告知：默认档位 ÷4 下这条规则基本不触发。** 24000 源 + 8192 显示件时，
   ÷2 → 12000 赢、÷4 → 6000 输、÷8 → 3000 输。所以验收口径**不能**写「jpg 行一律走服务端」，
-  只能写这条比较规则本身，并且**现有 e2e 夹具在 ÷4 下全部判 jpg 赢、断言一字不改地继续绿**
-  —— 那就是这次改动的回归钉子。
+  只能写这条比较规则本身，并且**现有 e2e 夹具在 ÷4 下全部判 jpg 赢** —— 那就是这条规则的
+  回归钉子。
 - 后端 `_raster_preview(abs_path, root)` 产出的 `rasterPreview` 对象挂在 jpg 行上
   （见 §3.5）：`{rel, id, name, rasterW, rasterH, jpgW, jpgH, hasPreview, previewDiv, jpgUrl}`。
   两侧尺寸都走现有的 `_cached_dims` 缓存（不新开探测）；`jpgUrl` **只在栅格落在
-  `SR_SCENES_ROOT` 之下才给**（库外没有静态 URL，与今天库外行完全一致）。
-- **`row.hasPreview` / `row.jpgUrl` / `row.previewDiv` 的语义一个字不动**：那三个字段锚在
+  `SR_SCENES_ROOT` 之下才给**（库外没有静态 URL，与库外行完全一致）。
+- **`row.hasPreview` / `row.jpgUrl` / `row.previewDiv` 的语义不变**：那三个字段锚在
   **显示件 jpg 自己**身上（`gui-experience.md` §9.2 的红线）。栅格的状态单独放在
   `rasterPreview` 里。前端的「重新生成再取图」只写 `row.rasterPreview.hasPreview/.previewDiv`。
 - 前端判定所需的两个尺寸**全在 resolve 响应里**，不需要第二次往返。`previewNeedsBake`
@@ -989,10 +960,10 @@ NULL ──claim──> running ──> done
   于是 `ScenesPage.vue` 的按钮文案、`fetchSceneJpg` 的预判、`openScenePath` 三处自动同步。
 - **`?div=` 抖动**（明知故犯，§六.5）：栅格行与 jpg 行走的是**同一份落点**
   （`preview_jpg_name` 只由源 stem 拼，对 jpg 与 tif 是同一个文件名），所以两个档位的客户端会
-  互相顶掉同一份文件 —— 这个病今天就在，工作流 B 只是把它拖进更多行。本轮在文档里点明，
+  互相顶掉同一份文件 —— 这个病今天就在，工作流 B 只是把它拖进更多行。本文档点明，
   不装作没有。
 
-### 4.7 拖放门的模式差异（图像对比，2026-09-20）
+### 4.7 拖放门的模式差异（图像对比）
 
 拖放（把图从文件管理器拖进查看器）不是端点，但**它的门开在哪儿是与模式有关的契约**，
 而且只在前端，后端看不见 —— 所以写在这里，免得改的时候只看后端。
@@ -1020,7 +991,7 @@ NULL ──claim──> running ──> done
   **先**把 `.txt` 交给待修复清单，**再**判影像的落点门 —— 顺序反了，画布外拖一份
   `.txt` 会被那道门连坐吞掉。
 
-- **关闭模式下全窗口拖放行为一个字不改**：这是既有能力（拖到侧栏也能打开），
+- **关闭模式下全窗口拖放行为不变**：这是既有能力（拖到侧栏也能打开），
   对比模式的门是**加法**，不是把门改窄。e2e 两侧都钉了（关闭模式拖侧栏仍打开文件）。
 - **正好压在分隔线上算右格**（`paneAtX`: `localX < splitX ? 'A' : 'B'`）：与渲染侧的
   命中判定同一个口径，两处不一致会让「提示说右边、图却进了左边」。
@@ -1034,9 +1005,9 @@ NULL ──claim──> running ──> done
 确定性 → SSE 每回合固定产出 `turn_start/tool_call/tool_result/turn_done` 全套事件，e2e 可断言。**不替换状态机**（loop.py 行为由既有测试锁住）。
 
 ### 5.2 假调度器（`SR_SLURM_FAKE=1`）
-`services/slurm.py` 顶层加一个假实现门：无 sbatch（或 env 强制）时 `sbatch_submit` 返回自增 job_id 并登记，`squeue_status`/`sacct_status` 按**可配延时推进状态**（`SR_SLURM_FAKE_T_MS`，缺省 ~1200ms 后 PENDING→RUNNING→COMPLETED，exit 0），`scancel` 置 CANCELLED/FAILED。`config.xml`/batch 脚本/sr_tasks 表照常落盘（校验路径、幂等、写表全走真实逻辑）——只替换"调度器"那一层。镜像阶段4 场景 fake 的既有风格（env 门 + 注释明示 fake）。
+`services/slurm.py` 顶层加一个假实现门：无 sbatch（或 env 强制）时 `sbatch_submit` 返回自增 job_id 并登记，`squeue_status`/`sacct_status` 按**可配延时推进状态**（`SR_SLURM_FAKE_T_MS`，缺省 ~1200ms 后 PENDING→RUNNING→COMPLETED，exit 0），`scancel` 置 CANCELLED/FAILED。`config.xml`/batch 脚本/sr_tasks 表照常落盘（校验路径、幂等、写表全走真实逻辑）——只替换"调度器"那一层。镜像场景 fake 的既有风格（env 门 + 注释明示 fake）。
 
-### 5.3 契约测试（本轮验收）
+### 5.3 契约测试
 - 后端 pytest：chat 新建/历史/SSE 事件序列（mock LLM）/会话并发 409/不存在 404；tools manifest + 直调 run_sr（fake slurm）幂等；queue list/submit(SUBMITTED)/重复提交(RESUMED_*)/cancel/events 广播状态推进；masks 落原图目录 + 白名单越界 404 + fake 场景 404。
 - 前端 Vitest：SSE 帧解析器；chat/queue store 的乐观更新与事件归并。
 - `.e2e`：真 uvicorn（`SR_LLM_MOCK=1 SR_SLURM_FAKE=1` + 临时 db + 临时 scenes root）驱动前端——聊天发一条 → SSE 全事件 → 消息渲染；队列提交一张假任务 → events 推到 COMPLETED；查看器掩码提交按钮 → POST /api/masks → 表单预填。本地文件路径回归（route 非 jpg）零改动仍绿。
@@ -1045,9 +1016,9 @@ NULL ──claim──> running ──> done
 ## 6. 部署注意（nginx 反向代理 SSE）
 
 - `/api/` 反代需对 SSE 端点禁用缓冲 + 放宽读超时：
-  `location /api/ { proxy_pass …; proxy_buffering off; proxy_cache off; proxy_read_timeout 3600s; proxy_set_header Connection ''; }`（阶段4 nginx.conf 已 `proxy_read_timeout 600s`，需加 buffering off；仅对 `StreamingResponse` 生效，普通 JSON 不受影响）。
+  `location /api/ { proxy_pass …; proxy_buffering off; proxy_cache off; proxy_read_timeout 3600s; proxy_set_header Connection ''; }`（仅对 `StreamingResponse` 生效，普通 JSON 不受影响）。
 - systemd `sr-api.service` 增补 env：`SR_AGENT_DB=/DiskArray/…/sr_agent.db`、`SR_LLM_MOCK=0`、`SR_SLURM_FAKE=0`（真机显式关 fake，防误开）。
-- `requirements-api.txt` 增补 `openai>=1.40,<2`（阶段5 起 API 进程直接 import loop → openai；**版本锁死**，aiohttp 3.8.3 不兼容 3.x）。
+- `requirements-api.txt` 增补 `openai>=1.40,<2`（API 进程直接 import loop → openai；**版本锁死**，aiohttp 3.8.3 不兼容 3.x）。
 
 ## 7. 变更流程（红线）
 

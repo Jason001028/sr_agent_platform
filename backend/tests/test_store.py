@@ -217,7 +217,7 @@ class TestSrTasksQueueApi(unittest.TestCase):
         """重交（同一指纹复用同一行）时必须把运行窗清零。
 
         否则新一次跑会带着**上一次**的起点/终点进队列页：起点是上次的，终点是这次
-        的，差值就是行龄 —— 用户看到的「大几十个小时」（2026-09-18）。
+        的，差值就是行龄 —— 用户看到的「大几十个小时」。
         created_at 不动：它是这一行第一次提交的时刻，队列排序靠它。
         """
         self.store.put_sr_task("q6", {"lq_path": "/f"}, status="new", job_id=None)
@@ -401,7 +401,7 @@ class TestPreviewBakeQueue(unittest.TestCase):
         """生成预览不是「这行最近一次写回」，不能把队列的 updated_at 抬起来。
 
         updated_at 抬了会让一行早就跑完的任务在队列里排到最新（真机上表现为
-        「30 时 00 分」那次事故同一个病根）。
+        耗时列显示成「30 时 00 分」）。
         """
         tid = self._completed("p10")
         before = self.store.get_sr_task_by_id(tid)

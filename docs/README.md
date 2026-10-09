@@ -3,30 +3,30 @@
 > 项目所有 `.md` 文档统一归档于本目录，按类目分目录管理。
 > **路径约定**：文档内引用一律用**项目根目录相对路径**（如 `tif_viewer/tif-viewer.html`）；跨文档引用写 `docs/<类目>/<文件>.md`。
 > 命名与归档规则依据：[naming-conventions.md](conventions/naming-conventions.md) §2。
+> **写作口径**：所有文档只描述**当前状态**，不记录改动史 —— 见 [current-state-conventions.md](conventions/current-state-conventions.md)。
 
 ## 一、文档间导航速查
 
 - **SR_CODE 生产管线**（问算法 / 调用契约 / Windows 移植环境）：[docs/sr_code/sr-pipeline-overview.md](sr_code/sr-pipeline-overview.md)（算法全览）、[docs/sr_code/sr-pipeline-interface.md](sr_code/sr-pipeline-interface.md)（调用契约）、[docs/sr_code/sr-windows-porting-pitfalls.md](sr_code/sr-windows-porting-pitfalls.md)（移植踩坑 + 环境总结）、[docs/sr_code/production-scene-naming.md](sr_code/production-scene-naming.md)（生产场景命名规则与目录层级 —— 反推盘阵路径的依据）
-- **交接入口**：[docs/status/current-question.md](status/current-question.md) —— 新窗口先读（平台现状 / 当前路线 / 未收口 / 下一步 / 现值速查）；开新窗口时可直接把 [docs/status/handoff-prompt.md](status/handoff-prompt.md) 整篇粘过去。配套两份：[docs/status/timeline-archive.md](status/timeline-archive.md)（**历史时间线**，追溯决定与事故经过时按日期检索）、[docs/status/real-machine-acceptance.md](status/real-machine-acceptance.md)（**真机验收单**，判据与勾选）
+- **交接入口**：[docs/status/current-question.md](status/current-question.md) —— 新窗口先读（平台现状 / 当前路线 / 未收口 / 下一步 / 现值速查）；开新窗口时可直接把 [docs/status/handoff-prompt.md](status/handoff-prompt.md) 整篇粘过去。配套：[docs/status/real-machine-acceptance.md](status/real-machine-acceptance.md)（**真机验收单**，判据与勾选）
 - **新手指南**（有 Web 基础想系统理解前后端与设计取舍）：[docs/knowledge/platform-tutorial.md](knowledge/platform-tutorial.md) —— 读代码前的首选教程
-- **盘阵场景预览生成预览管线**（改 `/preview` 生成预览、缓存规则、场景行字段、裸 `.tif` 入口前先读）：[docs/knowledge/preview-bake-pipeline.md](knowledge/preview-bake-pipeline.md) —— 端到端链路 + 三张流程图 + 易判错点
+- **盘阵场景预览生成管线**（改 `/preview` 生成预览、缓存规则、场景行字段、裸 `.tif` 入口前先读）：[docs/knowledge/preview-bake-pipeline.md](knowledge/preview-bake-pipeline.md) —— 端到端链路 + 三张流程图 + 易判错点
 - **IO 管线与模块交互**（要部署/排障、要讲清系统怎么跑起来、改跨模块改动前先读）：[docs/knowledge/io-pipeline/README.md](knowledge/io-pipeline/README.md) —— 部署拓扑 + 四条链路 + 模块交互总表 + 跨层纪律
-- **面试八股**（功利向跳槽复习，教程的互补）：[docs/knowledge/interview/README.md](knowledge/interview/README.md) —— 项目已到阶段 5 的窗口可同时更新
+- **面试八股**（功利向跳槽复习，教程的互补）：[docs/knowledge/interview/README.md](knowledge/interview/README.md)
 - **踩坑索引**：[docs/experience/gui-experience.md](experience/gui-experience.md)
-- **「提交 SR」当前路线（2026-09-14 起）= 本机 conda 直跑**：[docs/planning/sr-minimal-prototype-plan.md](planning/sr-minimal-prototype-plan.md) —— 前端点「提交 SR」→ 后端在 node81-135 直接起进程（`SR_EXECUTOR=local`）+ 锁定目录 + 用目录里已有的掩码；代码已落地（commit `8c197fc`），**待跑**真机三项只读确认与 A/B 段验收。部署侧见 [deploy/README.md](deploy/README.md) §7.6
-- **Slurm 真机接入**（**2026-09-14 已中止**，保留为重启时的存量）：[docs/status/slurm-acceptance.md](status/slurm-acceptance.md)（分阶段验收清单）、[docs/status/slurm-integration.md](status/slurm-integration.md)（决策与实测值）、[docs/sr_code/sr-slurm-deploy-variant.md](sr_code/sr-slurm-deploy-variant.md)（变体差异 E1–E9 + 校验器 + 上机必验项 V1–V6）、[deploy/README.md](deploy/README.md) §七（部署侧：变体安装 + 六项 env + 终态判定）
-- **打通「提交 SR」全链路**（缺口在哪、按什么顺序补）：[docs/planning/sr-pipeline-restore-plan.md](planning/sr-pipeline-restore-plan.md) —— 断点盘点 + 沙箱地基 + 五项代码改动 + 阶段 3–5 验收 + 切生产与回滚
-- **命名 / 归档规则**：[docs/conventions/naming-conventions.md](conventions/naming-conventions.md)
+- **「提交 SR」当前路线 = 本机 conda 直跑**：[docs/planning/sr-minimal-prototype-plan.md](planning/sr-minimal-prototype-plan.md) —— 前端点「提交 SR」→ 后端在 node81-135 直接起进程（`SR_EXECUTOR=local`）+ 锁定目录 + 用目录里已有的掩码；待跑真机三项只读确认与 A/B 段验收。部署侧见 [deploy/README.md](deploy/README.md) §7.6
+- **打通「提交 SR」全链路**（缺口在哪、按什么顺序补）：[docs/planning/sr-pipeline-restore-plan.md](planning/sr-pipeline-restore-plan.md) —— 断点盘点 + 沙箱地基 + 五项代码改动 + 验收 + 切生产与回滚
+- **命名 / 归档 / 写作规则**：[docs/conventions/naming-conventions.md](conventions/naming-conventions.md) · [docs/conventions/terminology-conventions.md](conventions/terminology-conventions.md) · [docs/conventions/current-state-conventions.md](conventions/current-state-conventions.md)
 
 ## 二、分类总览
 
 | 类目 | 目录 | 职责 | 现有文档 |
 |---|---|---|---|
-| 背景知识 | `docs/knowledge/` | 原理 / 学科背景 / 技术实现说明 | [platform-tutorial.md](knowledge/platform-tutorial.md)（从 0 开发教程）、[preview-bake-pipeline.md](knowledge/preview-bake-pipeline.md)（**盘阵场景预览生成预览管线**：resolve → 生成预览 → 缓存判定 → 显示的完整链路 + 三张 mermaid 流程图）、[jpg-export-background.md](knowledge/jpg-export-background.md)、[agent-orchestration-research.md](knowledge/agent-orchestration-research.md)、[llm-serving-gguf-glossary.md](knowledge/llm-serving-gguf-glossary.md)（llama.cpp/GGUF 生态名词 + 本地部署选型）、[io-pipeline/](knowledge/io-pipeline/README.md)（**IO 管线与模块交互**：部署拓扑 + 四条链路 + 模块交互总表，总览 + 6 篇）、[interview/](knowledge/interview/README.md)（面试八股 · 8 篇） |
-| 需求与规划 | `docs/planning/` | 需求规格、实施计划 | [sr-minimal-prototype-plan.md](planning/sr-minimal-prototype-plan.md)（**当前路线**：前端提交 → 本机 conda 直跑的最小原型，含三项上机前确认 + 8 项改动清单 + A/B 验收）、[sr-pipeline-restore-plan.md](planning/sr-pipeline-restore-plan.md)（「提交 SR」→ Slurm + conda 超分的分阶段恢复清单，**路线已中止**）、[api-contract.md](planning/api-contract.md)（平台 API 契约）、[gui-requirements.md](planning/gui-requirements.md)、[web-plan.md](planning/web-plan.md)（gitignore） |
+| 背景知识 | `docs/knowledge/` | 原理 / 学科背景 / 技术实现说明 | [platform-tutorial.md](knowledge/platform-tutorial.md)（从 0 开发教程）、[preview-bake-pipeline.md](knowledge/preview-bake-pipeline.md)（**盘阵场景预览生成管线**：resolve → 生成预览 → 缓存判定 → 显示的完整链路 + 三张 mermaid 流程图）、[jpg-export-background.md](knowledge/jpg-export-background.md)、[agent-orchestration-research.md](knowledge/agent-orchestration-research.md)、[llm-serving-gguf-glossary.md](knowledge/llm-serving-gguf-glossary.md)（llama.cpp/GGUF 生态名词 + 本地部署选型）、[io-pipeline/](knowledge/io-pipeline/README.md)（**IO 管线与模块交互**：部署拓扑 + 四条链路 + 模块交互总表，总览 + 6 篇）、[interview/](knowledge/interview/README.md)（面试八股 · 8 篇） |
+| 需求与规划 | `docs/planning/` | 需求规格、实施计划 | [sr-minimal-prototype-plan.md](planning/sr-minimal-prototype-plan.md)（**当前路线**：前端提交 → 本机 conda 直跑的最小原型）、[sr-pipeline-restore-plan.md](planning/sr-pipeline-restore-plan.md)（「提交 SR」→ 超分的分阶段恢复清单）、[api-contract.md](planning/api-contract.md)（平台 API 契约）、[gui-requirements.md](planning/gui-requirements.md)、[web-plan.md](planning/web-plan.md)（gitignore） |
 | 经验与复盘 | `docs/experience/` | 踩坑记录、已验证方案 | [gui-experience.md](experience/gui-experience.md) |
-| 规范与约定 | `docs/conventions/` | 命名 / 用词 / 流程等约束 | [naming-conventions.md](conventions/naming-conventions.md)、[terminology-conventions.md](conventions/terminology-conventions.md)（**术语用词**：已废止「烘焙」，改用「生成预览」）、[langchain-boundary.md](conventions/langchain-boundary.md) |
-| 交接与状态 | `docs/status/` | 当前问题、窗口交接 | [current-question.md](status/current-question.md)（**平台现状与交接入口**）、[timeline-archive.md](status/timeline-archive.md)（**历史时间线**：原 current-question §4，逐字搬运）、[real-machine-acceptance.md](status/real-machine-acceptance.md)（**真机验收单**：判据与勾选）、[handoff-prompt.md](status/handoff-prompt.md)（新窗口开工提示词：梳理框架用）、[bugfix-prompt.md](status/bugfix-prompt.md)（新窗口开工提示词：修 bug 用）、[real-machine-bringup.md](status/real-machine-bringup.md)（真机部署现状 + 症状表）、[real-machine-bringup-adhd.md](status/real-machine-bringup-adhd.md)（一次一步的动作版）、[slurm-integration.md](status/slurm-integration.md)（Slurm 接入决策快照 + 分批开工 prompt）、[slurm-acceptance.md](status/slurm-acceptance.md)（Slurm 真机分阶段验收清单：A 探针 → B 裸 Slurm 冒烟 → C 单场景真 SR → D 平台四条链路结论；**2026-09-14 已中止，保留为存量**） |
+| 规范与约定 | `docs/conventions/` | 命名 / 用词 / 叙述口径 / 流程等约束 | [naming-conventions.md](conventions/naming-conventions.md)、[terminology-conventions.md](conventions/terminology-conventions.md)（**术语用词**：写「生成预览」，不写「烘焙」）、[current-state-conventions.md](conventions/current-state-conventions.md)（**叙述口径**：文档与注释只写当前状态，不留 AI 改动史）、[langchain-boundary.md](conventions/langchain-boundary.md) |
+| 交接与状态 | `docs/status/` | 当前问题、窗口交接 | [current-question.md](status/current-question.md)（**平台现状与交接入口**）、[real-machine-acceptance.md](status/real-machine-acceptance.md)（**真机验收单**：判据与勾选）、[handoff-prompt.md](status/handoff-prompt.md)（新窗口开工提示词：梳理框架用）、[bugfix-prompt.md](status/bugfix-prompt.md)（新窗口开工提示词：修 bug 用）、[real-machine-bringup.md](status/real-machine-bringup.md)（真机部署现状 + 症状表）、[real-machine-bringup-adhd.md](status/real-machine-bringup-adhd.md)（一次一步的动作版）、[slurm-integration.md](status/slurm-integration.md)（Slurm 接入决策快照 + 分批开工 prompt）、[slurm-acceptance.md](status/slurm-acceptance.md)（Slurm 真机分阶段验收清单：A 探针 → B 裸 Slurm 冒烟 → C 单场景真 SR → D 平台四条链路结论） |
 | SR_CODE 生产管线 | `docs/sr_code/` | SR 超分算法 / 调用契约 / Windows 移植环境（**主题域类目**，见 [naming-conventions.md §2](conventions/naming-conventions.md)） | [sr-pipeline-overview.md](sr_code/sr-pipeline-overview.md)、[sr-pipeline-interface.md](sr_code/sr-pipeline-interface.md)、[sr-windows-porting-pitfalls.md](sr_code/sr-windows-porting-pitfalls.md)、[sr-slurm-deploy-variant.md](sr_code/sr-slurm-deploy-variant.md)（Slurm 部署变体差异表 E1–E9）、[production-scene-naming.md](sr_code/production-scene-naming.md)（生产场景命名 9 段 + 六层目录 + 由文件名反推场景目录的规则） |
 
 ## 三、怎么新增一个 .md（分类规则）
@@ -34,7 +34,7 @@
 写新文档前先判断类别，放入对应目录。**判断顺序**：
 
 1. **交接/状态**：记录"当前做到哪、下一步交给谁"？→ `docs/status/`
-2. **规范**：约束"新增文件/代码怎么命名、流程怎么走"？→ `docs/conventions/`
+2. **规范**：约束"新增文件/代码怎么命名、流程怎么走、内容怎么写"？→ `docs/conventions/`
 3. **需求/规划**：回答"要做什么、按什么里程碑做"？→ `docs/planning/`
 4. **经验**：记录"踩过的坑、已验证的方案"？→ `docs/experience/`
 5. **其余**（原理 / 背景 / 技术实现说明）→ `docs/knowledge/`
@@ -43,6 +43,7 @@
 
 **命名**：`<类目>-<主题>.md`，英文 snake_case，避免中文名与裸日期。
 **头部元信息**：首行固定 `标题 / 日期 / 状态（草稿·评审·已定）`。
+**内容口径**：只写当前状态，不写「本次改了什么、原来是怎样、什么时候改的」—— 详见 [current-state-conventions.md](conventions/current-state-conventions.md)。
 
 ### 背景知识文档模板（以 [jpg-export-background.md](knowledge/jpg-export-background.md) 为范本）
 
@@ -57,18 +58,3 @@
 ## 4. 关键实现与设计取舍
 ## 5. 常见问题
 ```
-
-## 四、历史迁移对照（2026-08-29）
-
-原有 6 个文档从根目录 / tif_viewer 迁入本结构（git mv 保留历史；web-plan 用普通 mv，gitignore 不入库）：
-
-| 原名 | 新路径 |
-|---|---|
-| `current_question.md` | `docs/status/current-question.md` |
-| `sr_agent_gui_requirements.md` | `docs/planning/gui-requirements.md` |
-| `sr_agent_web_plan.md` | `docs/planning/web-plan.md`（gitignore） |
-| `sr_agent_gui_experience.md` | `docs/experience/gui-experience.md` |
-| `命名规范.md` | `docs/conventions/naming-conventions.md` |
-| `tif_viewer/JPG导出背景知识.md` | `docs/knowledge/jpg-export-background.md` |
-
-> 若在代码 / 脚本 / 其他文档中见到旧文件名，按上表改；`.gitignore` 中的 web-plan 规则已同步为新路径。

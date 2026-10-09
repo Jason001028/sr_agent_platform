@@ -30,7 +30,6 @@
 | 部署步骤、升级判定表、Slurm 装什么 | [deploy/README.md](../../../deploy/README.md) |
 | SR 算法、调用契约、Windows 移植 | [docs/sr_code/](../../sr_code/) |
 | 真机现在是什么状态、下一步做什么 | [current-question.md](../../status/current-question.md) |
-| 某个决定或事故的经过 | [timeline-archive.md](../../status/timeline-archive.md) |
 | 系统理解前后端（教程口吻，从 0 讲起） | [platform-tutorial.md](../platform-tutorial.md) |
 
 **事实口径**：本系列描述的是**当前仓库代码的行为**，不区分该行为是否已在真机验证过。
@@ -201,32 +200,3 @@ flowchart TB
   「解码结果落笔前比对代号，防止过期结果覆盖新图」。
 - 「扫盘」——不是所有列举都禁止。见 [scene-io.md](scene-io.md) §2 的准确口径。
 - 「三层测试」「金字塔」——仓库按运行位置分：后端 pytest、前端 Vitest、浏览器回归 `.e2e/`。
-
----
-
-## 6. 事实核对与已知未收口
-
-本系列写作时逐条对照过代码，过程中发现三处与既有文档不一致，记录在此供核对
-（不擅自改动原文档）：
-
-1. [current-question.md](../../status/current-question.md) §1 说 `/chat` 有 5 个工具，含「掩码栅格化」。
-   实际 `backend/tools/__init__.py` 只注册 4 个：`search_scenes`、`run_sr`、
-   `sr_job_status`、`fix_bad_lines`。掩码栅格化是 `POST /api/masks` 端点，未注册为工具。
-2. [current-question.md](../../status/current-question.md) §5 把「后端禁止扫盘」写成全局约束。
-   准确口径是：**只有 `GET /api/scenes` 会列举目录**（它本就是检索端点），
-   `resolve` / `preview` / `siblings` 等请求路径由测试钉住禁止列举。
-3. `backend/tools/sr_job_status.py` 调 `slurm.job_status` 时**未传**退出码文件路径，
-   与 `services/run_sr.query_job_status` 那条带退出码文件的路径不同。工具路径下的终态
-   可能退化为 UNKNOWN。未确认为有意设计还是待修。
-
-另有一处陈旧的模块注释：`backend/tools/__init__.py` 的 docstring 仍写
-「No tools registered yet」，而该文件下方就 import 了 4 个工具。
-
-已废弃但仍在仓库里的路径（不要当现行方案抄）：
-
-| 已废弃 | 何时 | 现在是什么 |
-|---|---|---|
-| 浏览器按 nginx Range 读盘阵 TIF | 2026-09-02 | 改为读服务端预生成的 JPG |
-| 浏览器侧 JPG 导出与输出目录授权 | 2026-09-15 | 整条链路删除，`e2eHooks` 相应钩子一并删去 |
-| Slurm 调度接入 | 2026-09-14 中止 | 改本机 conda 直跑；代码与验收清单保留为存量 |
-| `HttpSource` | 未启用 | `lib/source.ts` 里的契约占位，全仓无调用点 |

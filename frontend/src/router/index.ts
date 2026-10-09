@@ -16,7 +16,7 @@ const router = createRouter({
       path: '/viewer',
       name: 'viewer',
       component: () => import('../pages/ViewerPage.vue'),
-      // flush：该路由的页面贴边填满 app-main（去 12px 内衬），查看器不再出现浅色空框
+      // flush：该路由的页面贴边填满 app-main（去 12px 内衬），查看器不出现浅色空框
       meta: { title: '查看器', flush: true },
     },
     {

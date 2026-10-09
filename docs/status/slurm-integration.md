@@ -9,12 +9,12 @@
 | 事项 | 决议 |
 |---|---|
 | GPU 分配 | **交给 Slurm `--gres=gpu:1`**。生产脚本内所有 `CUDA_VISIBLE_DEVICES` 赋值必须删除；config.xml 的 `<GPUIDS>` 降级为审计字段，不再决定选卡 |
-| **运行范围（2026-09-14 新需求，优先于本表其余各行）** | **所有作业只跑在「同一台 4×3090 物理机」内，不调度到其他服务器**；Slurm 的角色收窄为**本机排队 + 按单卡分配 GPU**。部署方向二选一：**①** 复用现有集群，`--nodelist` 锁定那台机器；**②** 本机自建**单节点 Slurm**（无跨节点依赖，同时规避跨主机解析问题）。**①已排除**：2026-09-14 实测本机 node81-135 是 `gpu:4` 且状态 `down`（`sinfo -N`），DOWN 节点永不被分配，要用 ① 得让管理员把它恢复进池 —— 等于动集群、且此后别人也能往这台机提交 | **已定** |
-| **最小原型（2026-09-14 定）** | 目标收窄为：**前端点一下 → 后端用 conda 解释器在指定目录上跑掩码 + `.tif` → 产物落地**。① 不做前后端 `.tif` 传输（现状本来就是传路径）；② 规则式写死、不做场景检索；③ 输入与产物锁死在**一个目录**下，不关心文件数。**执行器：先试 ②（本机单节点 Slurm），一旦出现「性价比低」的苗头立刻退到「不起 Slurm，后端直接 subprocess 起 `$SR_PYTHON`」** —— 退路成本极低，因为平台生成的批脚本本身就是合法 bash 脚本（`#SBATCH` 那几行在 bash 眼里只是注释），换掉的只有 `sbatch` 那一跳。掩码来源：**目录里已有的掩码文件**（规则式，不存在就不传 `MaskPath`） | 已定（用户 2026-09-14 选） |
+| **运行范围（优先于本表其余各行）** | **所有作业只跑在「同一台 4×3090 物理机」内，不调度到其他服务器**；Slurm 的角色收窄为**本机排队 + 按单卡分配 GPU**。部署方向二选一：**①** 复用现有集群，`--nodelist` 锁定那台机器；**②** 本机自建**单节点 Slurm**（无跨节点依赖，同时规避跨主机解析问题）。**①不通**：实测本机 node81-135 是 `gpu:4` 且状态 `down`（`sinfo -N`），DOWN 节点永不被分配，要用 ① 得让管理员把它恢复进池 —— 等于动集群、且此后别人也能往这台机提交。已定 |
+| **最小原型** | 目标：**前端点一下 → 后端用 conda 解释器在指定目录上跑掩码 + `.tif` → 产物落地**。① 不做前后端 `.tif` 传输（现状本来就是传路径）；② 规则式写死、不做场景检索；③ 输入与产物锁死在**一个目录**下，不关心文件数。**执行器：先试 ②（本机单节点 Slurm），一旦出现「性价比低」的苗头立刻退到「不起 Slurm，后端直接 subprocess 起 `$SR_PYTHON`」** —— 退路成本极低，因为平台生成的批脚本本身就是合法 bash 脚本（`#SBATCH` 那几行在 bash 眼里只是注释），换掉的只有 `sbatch` 那一跳。掩码来源：**目录里已有的掩码文件**（规则式，不存在就不传 `MaskPath`）。已定 |
 | 生产脚本 | **保留原文件 + 生成器产出部署变体**。`SR_code/code_0817_prod.py` 逐字节不动；变体由脚本按锚点替换表机械产出，附 `.diff` + provenance，锚点找不到即报错退出 |
-| 契约三条件判定 | **落在作业内，用退出码表达**（`0` 契约满足 / `90` 契约不满足）。原定「平台调度层零改动」因账务关闭作废，见下一行 |
-| 作业终态判定 | **C 方案**：`squeue` 判活跃态 + 作业把退出码写进盘阵、平台读文件判终态。真机实测 `AccountingStorageType=accounting_storage/none`（§2.4-2），`sacct` **永久不可用** —— 平台不得依赖 sacct；`backend/services/slurm.py` 的 `sacct_status` / `job_status` 须在 P2 一并改（2026-09-10 拍板） |
-| 空 `suffix` 破坏性语义 | **本批不改**，只在契约文档标注风险；真机验收用非空 suffix 跑 |
+| 契约三条件判定 | **落在作业内，用退出码表达**（`0` 契约满足 / `90` 契约不满足）。账务关闭，平台调度层不做终态判定，见下一行 |
+| 作业终态判定 | **C 方案**：`squeue` 判活跃态 + 作业把退出码写进盘阵、平台读文件判终态。真机实测 `AccountingStorageType=accounting_storage/none`（§2.4-2），`sacct` **永久不可用** —— 平台不得依赖 sacct；`backend/services/slurm.py` 的 `sacct_status` / `job_status` 须一并改 |
+| 空 `suffix` 破坏性语义 | **不改**，只在契约文档标注风险；真机验收用非空 suffix 跑 |
 | `backend/config.py` env 收敛 | 做，但**只新增 `SrRuntime`**，不复用/污染现有 `Config`（它只服务 agent loop） |
 | `SR_SCENES_ROOT` 真根定位 | **范围外**。它是「提交 SR」按钮解灰的前置，与 Slurm 实现彼此独立；未解时用 curl 直接打 `/api/queue` 验收 |
 | 平台调度层成功路径 | **不改** `_queue_state` 的签名与语义（`test_api_platform.py` 直接调它） |
@@ -36,7 +36,7 @@
 | E5 | `:646-648` | `pynvml.nvmlInit(); nvmlDeviceGetCount()` | **nvml 数物理卡、无视 `CUDA_VISIBLE_DEVICES`**。4 卡节点上恒为 4，今天"看起来能过"纯属巧合 |
 | E6 | `:653` | `if gpu_available is False or gpu_count != 4:` | 单卡分配下 `!= 4` 恒真 → **作业必失败**。对照 `code_0820_prod_windows.py:717`（`< 1`） |
 | E7 | `:655-656` | `cmd = "systemctl stop slurmd.service"; os.system(cmd)` | 作业里停节点调度器。`User=nginx` 下是权限拒绝（作业白挂）；若将来服务改 root 则**真的把节点从池里摘掉** |
-| E8 | `:660` | 写 `SlurmStopLog.txt` 时用 `"stop"` 措辞 | 不再停服务后，写 stop 会让运维误判节点已下线 |
+| E8 | `:660` | 写 `SlurmStopLog.txt` 时用 `"stop"` 措辞 | 写 stop 会让运维误判节点离线 |
 | E9 | `:159-160` | `if cloudpercent > cloudlimit: exit(0)` | 合法「按策略跳过」，但在创建 SRLOG（`:165`）**之前** exit(0) → 与静默失败无法区分 |
 
 ### 2.3 闭环毒药：静默失败会被永久固化成成功
@@ -58,17 +58,17 @@
 
 **连锁**：静默失败的作业 → sacct `COMPLETED` → `_resolve_existing` 判复用 → 闭环静默烂掉。这是本方案要解的核心问题。
 
-### 2.4 本次新核实的三条（Plan agent 报出，已逐条查证）
+### 2.4 三条已核实的关键语义
 
-1. **空 `suffix` 有破坏性语义**（`util.py:1300-1315`）：`DeleteOriTifNeeded=False` 时 `writeTiff` 会先 `os.rename(现有文件 → *_NOSR.tif)` 再在**同一路径**新建。`suffix` 为空 ⇒ 输出名 == 输入名 ⇒ **把输入产品改名**。而平台 `_norm_sr_params`（`platform.py:353`）默认 `suffix=""` —— 这条现在就在线上路径上。
-2. ~~**`sacct` 解析在真机会错**~~ → **2026-09-10 真机定稿：`sacct` 根本没有输出可解析。** 真机 `AccountingStorageType=accounting_storage/none`，`sacct -a -X -o JobID,State -n` 打印 `Slurm accounting storage is disabled` 且 **rc=1**。所以原定的「改用 `--parsable2` 按 `|` 切」是**无效修法**（没有行可切）。
-   真实影响链：`slurm.py:126-127` 在 rc≠0 时 `raise RuntimeError`，而 `job_status` 调它的那行（`:148`）**不在 try/except 内**（只有上面 squeue 那行包了）→ 作业一离开 `squeue`，`job_status` 必然抛错穿到 `sr_job_status`（`:39` catch 后返回 `err()`）与 `_resolve_existing`（`run_sr.py:111`，同参数重投**直接报错**，既不复用也不重跑）。不是「降级成 UNKNOWN」，是硬报错。
+1. **空 `suffix` 有破坏性语义**（`util.py:1300-1315`）：`DeleteOriTifNeeded=False` 时 `writeTiff` 会先 `os.rename(现有文件 → *_NOSR.tif)` 再在**同一路径**新建。`suffix` 为空 ⇒ 输出名 == 输入名 ⇒ **把输入产品改名**。而平台 `_norm_sr_params`（`platform.py:353`）默认 `suffix=""` —— 这条就在线上路径上。
+2. **`sacct` 没有输出可解析**：真机 `AccountingStorageType=accounting_storage/none`，`sacct -a -X -o JobID,State -n` 打印 `Slurm accounting storage is disabled` 且 **rc=1**。所以「改用 `--parsable2` 按 `|` 切」这种按行解析的修法无效（没有行可切）。
+   影响链：`slurm.py:126-127` 在 rc≠0 时 `raise RuntimeError`，而 `job_status` 调它的那行（`:148`）**不在 try/except 内**（只有上面 squeue 那行包了）→ 作业一离开 `squeue`，`job_status` 必然抛错穿到 `sr_job_status`（`:39` catch 后返回 `err()`）与 `_resolve_existing`（`run_sr.py:111`，同参数重投**直接报错**，既不复用也不重跑）。不是「降级成 UNKNOWN」，是硬报错。
    **结论：平台不得依赖 sacct，按 §一「作业终态判定」的 C 方案改。**
 3. **对已超分的场景会再超分一遍**（`util.py:1009-1011`）：SC 分支尺寸闸门不过时打印 `"already SRed before"` 然后 `return sc_file_abs_path` —— 后面的 `exit()` **被注释掉了**。重跑不是幂等跳过，是真重跑。
 
 ### 2.5 两个未经验证的关键假设（必须真机探针一票否决）
 
-- ~~**`sacct` 依赖 SlurmDBD**~~ → **2026-09-10 真机否决，且比假设更糟**：不是「恒空 → `UNKNOWN` → `reuse: False` → 重复重投」，而是 `sacct` rc=1 → **`job_status` 直接抛异常**，`_resolve_existing` 与 `sr_job_status` 都拿不到任何结论。详见 §2.4-2 与 §一「作业终态判定」。
+- **`sacct` 在真机上的实际行为**：`sacct` rc=1 → **`job_status` 直接抛异常**，`_resolve_existing` 与 `sr_job_status` 都拿不到任何结论。详见 §2.4-2 与 §一「作业终态判定」。
 - **`nginx` 在 Slurm 侧有没有账户/关联**：`sr-api` 以 `User=nginx` 运行；无 association 会被拒或挂起。
 
 ### 2.6 其它已确认的坑
@@ -78,22 +78,22 @@
 - **两套权限都要核**：`nginx` 要能写 `SR_SLURM_WORK_DIR`（config.xml/脚本落这）与 `SR_AGENT_DB` 目录；**作业用户**要能写 `<lq_path>` 与 `<lq_path>/Debug/`。
 - 仓库里**没有** `sr_pipeline_mock.py`（契约 §10 引用了它，但未入库）——别指望它。
 
-### 2.7 P1 上机实测值（用户回传，2026-09-10 回填）
+### 2.7 上机实测值
 
-P2 起这些值就是 `deploy/sr-api.service` 与 `backend/config.SR_DEFAULT_*` 的依据。
-标「**待核**」的行、以及下表中两处「P3 复核」**未经探针直接确认**——上机时逐条核，三条命令见
+这些值就是 `deploy/sr-api.service` 与 `backend/config.SR_DEFAULT_*` 的依据。
+标「**待核**」的行未直接确认——上机时逐条核，三条命令见
 [slurm-acceptance.md](slurm-acceptance.md) §0.4；核完把本表状态改成「已核」。
 
 | 项 | 实测值 | 来源 | 状态 |
 |---|---|---|---|
-| 主分区 | `gpu` | 2026-09-11 `sinfo -h -o "%P"` 实测：`centos7` / `deicc` / `gpu` / `gpu*` / `test`（`*`=默认分区）。**无 `gpup`** —— 早先那条「用户回传 `gpup`」是转述错误，已订正 | 已确认（订正） |
-| 计算节点 | **76 个**（`gpu` 分区）：`node81-[129-162,165-183,185-189]` + `node104-[27-39,41-45]`；整个集群 `sinfo -N` 计 **96** 行；控制器 `Slurmctld(primary) at node81-190`。2026-09-11 探针实测 `node81-133/134/135/136` 为 `down`（**本机 node81-135 是 `down*`** —— 从本机提交的作业不会落回本机） | 探针 §A（`scontrol show partition -o` + `sinfo -N`） | 已核（2026-09-11 订正：原记「12 个：node81-129…140」是当时的局部读数，⇒ §2.6 共享盘那条**更加适用**；另见 slurm-acceptance §0.4 新增的「两族节点都要探」） |
-| bundle 目录 | `/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes` | 用户回传写作 `exe/CentOS7`+`msnr_bundle`；**采用 `code_0817_prod.py:27` 的拼写**（源码优先于转述） | 已确认（P3 用 `ls` 复核一次拼写） |
-| `SR_PYTHON` | `/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python` | 用户 2026-09-10 明确：**沿用文档旧值，不用本机 base 环境 python**（`(base) [root@node81-135 ...]` 只是登录 shell 所在环境）。2026-09-14 实测该解释器：**torch 1.10.2+cu113 / GDAL 2.4.0**（目录名里的 1.9.1 ≠ 实际版本）。**2026-09-15 `ls -d` 复核**：`/run/media/root/SSD` 与 `/run/media/root/SSD/workspace/wangrz/sr-agent-platform` 均存在；`/media/node81-135/SSD` 及其下同名路径均报「没有那个文件或目录」 | 已确认（2026-09-15 复核挂载前缀） |
-| `SR_SLURM_WORK_DIR` | `/DiskArray/tmp/wangrz/sr_agent_work` | 本窗口选定（必须在共享盘上，默认 `/tmp` 不满足） | **待核**：目录是否已存在、nginx 与作业用户是否都有写权限 |
+| 主分区 | `gpu` | `sinfo -h -o "%P"` 实测：`centos7` / `deicc` / `gpu` / `gpu*` / `test`（`*`=默认分区）。**无 `gpup`** | 已确认 |
+| 计算节点 | **76 个**（`gpu` 分区）：`node81-[129-162,165-183,185-189]` + `node104-[27-39,41-45]`；整个集群 `sinfo -N` 计 **96** 行；控制器 `Slurmctld(primary) at node81-190`。探针实测 `node81-133/134/135/136` 为 `down`（**本机 node81-135 是 `down*`** —— 从本机提交的作业不会落回本机） | 探针 §A（`scontrol show partition -o` + `sinfo -N`） | 已核（⇒ §2.6 共享盘那条**适用**；另见 slurm-acceptance §0.4「两族节点都要探」） |
+| bundle 目录 | `/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes` | 采用 `code_0817_prod.py:27` 的拼写（源码优先于转述） | 已确认（用 `ls` 复核一次拼写） |
+| `SR_PYTHON` | `/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python` | **SR 生产解释器，不用本机 base 环境 python**（`(base) [root@node81-135 ...]` 只是登录 shell 所在环境）。实测：**torch 1.10.2+cu113 / GDAL 2.4.0**（目录名里的 1.9.1 ≠ 实际版本）。`ls -d` 复核：`/run/media/root/SSD` 与 `/run/media/root/SSD/workspace/wangrz/sr-agent-platform` 均存在；`/media/node81-135/SSD` 及其下同名路径均报「没有那个文件或目录」 | 已确认 |
+| `SR_SLURM_WORK_DIR` | `/DiskArray/tmp/wangrz/sr_agent_work` | 必须在共享盘上，默认 `/tmp` 不满足 | **待核**：目录是否已存在、nginx 与作业用户是否都有写权限 |
 | 记账 | `AccountingStorageType=accounting_storage/none`，`sacct` 恒 rc=1 | 探针 | 已确认（§2.4-2） |
 | GRES 注入形态 | `--gres=gpu:1` 给整数 `CUDA_VISIBLE_DEVICES`，但 `SLURM_JOB_GPUS` 未设、作业内仍见 4 卡 | 探针 `--deep` | 已确认（E3 兜底够用；并发可能都挤卡 0，见 §2.5） |
-| 节点白名单 | `SR_SLURM_NODELIST` → 批脚本多一行 `#SBATCH --nodelist=`。**值必须是「那一台」主机名**（2026-09-14 新需求：作业只跑同一台 4×3090 机）；先前记的族口径 `node81-[129-162,165-183,185-189]` **已作废** —— 它会让作业散到几十台机器上，正是新需求要禁止的 | 起先（09-14 早）是为了规避 node104 族解析不了：`gpu` 分区的 **node104 族在提交机 node81-135 上解析不了**（idle 前 5 台 `getent hosts` 全空） | 实现已就位（`run_sr.build_batch_script` 的 `nodelist=` 与 `SR_SLURM_NODELIST`，非法值提交时报错）；**值待填** —— 由 `slurm-acceptance.md §B0` 定出机器名后再写进 `deploy/sr-api.service` 与真机 drop-in |
+| 节点白名单 | `SR_SLURM_NODELIST` → 批脚本多一行 `#SBATCH --nodelist=`。**值必须是「那一台」主机名**（作业只跑同一台 4×3090 机）；族口径 `node81-[129-162,165-183,185-189]` 会让作业散到几十台机器上，不合需求 —— 该口径的初衷是规避 node104 族解析问题：`gpu` 分区的 **node104 族在提交机 node81-135 上解析不了**（idle 前 5 台 `getent hosts` 全空） | `run_sr.build_batch_script` 的 `nodelist=` 与 `SR_SLURM_NODELIST`，非法值提交时报错 | 实现已就位；**值待填** —— 由 `slurm-acceptance.md §B0` 定出机器名后再写进 `deploy/sr-api.service` 与真机 drop-in |
 
 ## 三、分批计划与开工 prompt
 
@@ -109,7 +109,7 @@ P2 起这些值就是 `deploy/sr-api.service` 与 `backend/config.SR_DEFAULT_*` 
 再读 SR_code/code_0817_prod.py、SR_code/code_0820_prod_windows.py、docs/sr_code/sr-pipeline-interface.md。
 
 已拍板、勿再讨论：GPU 分配交给 --gres=gpu:1；原文件逐字节不动、变体由生成器产出；
-契约判定走作业内退出码（本批不做校验器）；空 suffix 语义本批不改。
+契约判定走作业内退出码（不做校验器）；空 suffix 语义不改。
 
 交付物：
 1. deploy/slurm/probe_slurm.sh —— 只读探针，纯 POSIX sh，不需要 root、不需要 jq。
@@ -250,11 +250,11 @@ P2 起这些值就是 `deploy/sr-api.service` 与 `backend/config.SR_DEFAULT_*` 
   不要自己拍板。反复问没关系，问错了重做更贵。
 
 已完成，不要重做：
-- 上一批（部署变体 E1–E9 + 作业内校验器 + 平台 Slurm 层 + 探针 + 文档）已提交为 e06921d。
+- 部署变体 E1–E9 + 作业内校验器 + 平台 Slurm 层 + 探针 + 文档均已就位。
 - E-A（SR_SR_SCRIPT 开关）已在开发机完成：run_sr.py 四处 + test_run_sr.py 四例，
-  后端 287 项测试全过、变体 --check 通过；deploy/README.md §7.1、slurm-acceptance.md §0.2/§0.3、
-  sr-pipeline-interface.md §7.1、real-machine-acceptance.md §D 已改成「变体并置 + env 指定」的装法。
-  **不要退回「改名顶替 code_0817_prod.py」的旧写法。**
+  后端 287 项测试全过、变体 --check 通过。装法是「变体并置 + env 指定」
+  （`deploy/README.md` §7.1、`slurm-acceptance.md` §0.2/§0.3、`sr-pipeline-interface.md` §7.1、
+  `real-machine-acceptance.md` §D），**不用「改名顶替 code_0817_prod.py」的写法。**
 
 本轮要做的，按顺序：
 

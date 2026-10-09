@@ -3,8 +3,8 @@
  * ------------------------------------------------------------------
  * 「移植不重写」：HTML 全局状态（recs/activeRec/view/curStretch/drawMode/...）平移到
  * Pinia store；动作逐函数直译（activate/decode/paintStretch/掩码），仅把「直接操作 DOM」
- * 改为「状态变更 + renderTick 驱动 TifCanvas 重绘」。
- * 最小原型删去了 HTML 的 browser JPG 导出/输出目录授权一条链路（前端不再落盘）。
+ * 归到「状态变更 + renderTick 驱动 TifCanvas 重绘」一条链上。
+ * 前端不落盘：HTML 版的 browser JPG 导出 / 输出目录授权一条链路不在本移植范围内。
  *
  * 重字段（Float32Array src / canvas thumb / BandStats stats）用 markRaw 存放，避免深代理。
  * renderTick 计数器是 TifCanvas 的重绘信号：任何影响视图的状态变更后 ++，TifCanvas watch 后重绘
@@ -48,7 +48,7 @@ import {
 import type { SceneResolveResult, SceneSibling, SceneSiblings } from '../lib/api.js';
 import { classifyImages, imageKindOf } from '../lib/imageFiles.js';
 import type { SceneOpenMeta, SceneRow } from '../lib/scene.js';
-import { isIntermediateStage, stageLabel, stageRefusal } from '../lib/stage.js';
+import { isIntermediateStage, stageLabel, stageRefusal, stemOf } from '../lib/stage.js';
 import type { StageKind } from '../lib/stage.js';
 import { buildStats, luma, STAT_HI } from '../lib/roiStats.js';
 import type { RoiStats } from '../lib/roiStats.js';
@@ -129,11 +129,11 @@ export interface ViewerRec {
   maskRois: Poly[] | null;     // 缩略图坐标 ROI
 }
 
-/** 渲染器的一格（图像对比，2026-09-20）。
+/** 渲染器的一格（图像对比）。
  *
  * `rect` 是画布内的屏幕矩形，`view` 是**这一格自己的局部坐标**（原点 = 该格左上角）——
  * 于是 fitView/locateView/visibleThumbRect/mouseToThumb 全部原样可用。
- * 单屏时 `panes` 只含一个铺满全画布的格子，渲染走与今天逐字相同的快速路径。 */
+ * 单屏时 `panes` 只含一个铺满全画布的格子，渲染走单格快速路径。 */
 export interface Pane {
   side: 'A' | 'B';
   rect: PaneRect;
@@ -277,9 +277,9 @@ let errTimer: ReturnType<typeof setTimeout> | null = null;
 /** 落位提示的续期定时器（每次 dragover 重置，见 setDragHint）。 */
 let dragHintTimer: ReturnType<typeof setTimeout> | null = null;
 
-/* ---------------- 右侧栏展开状态（从 ContextPanel 提升，2026-09-20） ----------------
-   分屏要能自动收起它、退出时再恢复，所以这份状态不能再留在组件里。
-   **key 与默认值一字不改**：老用户的「上次收起来了」继续生效。 */
+/* ---------------- 右侧栏展开状态 ----------------
+   分屏要能自动收起它、退出时再恢复，所以这份状态放在 store 里、组件只读它。
+   **key 与默认值保持不变**：用户「上次收起来了」的状态继续生效。 */
 const CTX_RAIL_KEY = 'sr.viewer.ctxRailOpen';
 function readCtxRailOpen(): boolean {
   try {
@@ -339,7 +339,7 @@ export const useViewerStore = defineStore('viewer', () => {
   const busy = ref(false);
   const srBusy = ref(false);       // 「提交 SR」进行中（掩码服务端生成）
 
-  /* ---------------- 图像对比（2026-09-20） ----------------
+  /* ---------------- 图像对比 ----------------
 
      分屏 = **一个画布、两个裁剪矩形**：每格一套 ViewState（viewA/viewB），下面那个
      `view` 是**可写 computed**，代理到活动侧那一套。于是全仓读 `view.value` 的地方
@@ -575,12 +575,12 @@ export const useViewerStore = defineStore('viewer', () => {
     viewFor[side] = size;
   }
 
-  /** 解码/取图完成后的收尾。旧写法是 `if (activeId === rec.id) { fit(); … }`——
-     分屏下这张可能在**非活动侧**解码完成，那样那一格的 ViewState 会停在 {1,0,0}
-     （图缩在左上角）。所以改成「显示着这张 rec 的格子各适配一次」。
+  /** 解码/取图完成后的收尾：把「显示着这张 rec 的格子」各适配一次 —— 分屏下这张
+     可能在**非活动侧**解码完成，只适配活动侧会让那一格的 ViewState 停在 {1,0,0}
+     （图缩在左上角）。
 
-     2026-09-20：两块都改走 `fitAfterImageChange` —— 对比模式下换图不再把用户的
-     缩放与位置抹掉（按相对视野搬过去）。关闭模式 `compareOn` 为假，仍然走 `fit()`。 */
+     两块都走 `fitAfterImageChange`：对比模式下换图按相对视野搬过去，不把用户的
+     缩放与位置抹掉。关闭模式 `compareOn` 为假，走 `fit()`。 */
   function afterPixels(rec: ViewerRec) {
     if (split.value) {
       if (paneA.value === rec.id) fitAfterImageChange('A', rec);
@@ -619,7 +619,7 @@ export const useViewerStore = defineStore('viewer', () => {
     if (next === compareMode.value) return;
     const wasSplit = split.value;
     const wasOff = compareMode.value === 'off';
-    // **刻意不再 exitDraw()**（2026-09-22）：对比模式下可以继续画掩码（活动侧那张），
+    // **刻意不 exitDraw()**：对比模式下可以继续画掩码（活动侧那张），
     // 切模式不该把用户画了一半的框丢掉。pendingRect/pendingPts 存的是缩略图坐标，
     // 换了视口也仍然指着同一片影像区域，所以留着是对的。
 
@@ -824,7 +824,7 @@ export const useViewerStore = defineStore('viewer', () => {
     }, DRAG_HINT_TTL);
   }
 
-  /* ---------------- 侧栏卡片拖进画布（2026-09-21） ---------------- */
+  /* ---------------- 侧栏卡片拖进画布 ---------------- */
 
   /** 页面内拖放的载荷类型：侧栏文件卡（值为 `rec.id`）。
    *
@@ -1218,8 +1218,8 @@ export const useViewerStore = defineStore('viewer', () => {
         invert: false, stats: d.stats ? markRaw(d.stats) : null,
         route: 'img', sceneId: null, lqPath: null,
         layout: '本地 JPG（8bit 显示就绪，' + tw + '×' + th + '）',
-        // 状态只留短词：文件名是卡片标题那一行，尺寸在上一行的图属性里 —— 三行里
-        // 三处同名同数，2026-09-18 收掉。
+        // 状态只留短词：文件名是卡片标题那一行，尺寸在上一行的图属性里 —— 状态
+        // 再复读一遍是冗余。
         status: '已读取',
         statusCls: 'ok', paintedMode: null, maskRois: null, token: 0,
       };
@@ -1252,7 +1252,7 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   /* ---------------- 盘阵场景（阶段4：读服务器预览 JPG，route='jpg'） ----------------
-     JPG 即显示产物（各边 ÷2…÷32、当前档位见 viewer.previewDiv 的稀疏采样 + 直方图均衡已在服务器生成好）：不再读原始
+     JPG 即显示产物（各边 ÷2…÷32、当前档位见 viewer.previewDiv 的稀疏采样 + 直方图均衡已在服务器生成好）：不读原始
      TIF 字节、不做二次拉伸、不本地导出 JPG（服务器 JPG 即交付物）。掩码仍照旧 ——
      缩略图坐标按元数据 W/H 换算回全分辨率（thumbToOrig scale 来自 rec.W/H 而非
      probe，所以 JPG 尺寸变了也不影响掩码落点）。 */
@@ -1304,8 +1304,8 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.stageLabel = stageLabel(rec.stageKind, meta.stageSuffix, rec.name);
     // 默认是服务端生成那份的口径；拖本地 jpg 升级进来的那条路自报来源
     // （它的像素是用户拖进来的原图，写成「盘阵服务端生成的」就是假话）。
-    // 这条文案只落在左栏那张卡的布局行上（底栏 2026-09-28 起只显示图名），
-    // 所以它说的是**这张图的像素是什么**，不再赘述「谁生成的」——见 fetchCardPixels。
+    // 这条文案只落在左栏那张卡的布局行上（底栏只显示图名），
+    // 所以它说的是**这张图的像素是什么**，不复述「谁生成的」——见 fetchCardPixels。
     // 尺度报当前档位 —— 取图的两处调用点都用 `previewDiv.value` 生成，所以
     // 「刚拿到手的这张是按哪一档生成的」就是它（用户若在取图途中又拖了滑块，
     // 文案最多早一拍，下次打开即对齐）。
@@ -1423,7 +1423,7 @@ export const useViewerStore = defineStore('viewer', () => {
   /** 批量路：把这一张卡的 jpg **按盘上最新的源重新生成**（服务端那份 + 本地 LRU），
    *  **不装像素**。
    *
-   *  `force = true` 是这条路与其它所有取图入口的唯一差别（用户口径 2026-09-28）：
+   *  `force = true` 是这条路与其它所有取图入口的唯一差别（用户口径）：
    *  「一键解析」这一批卡要的是「一定是刚按盘上最新源生成的」，而服务端那套判据对
    *  「内容变了、时间戳没变」判不出来（NOSR 那份就是 —— SR 重跑时旧产物是被**改名**
    *  过来的，改名不改 mtime）。代价是每景重读一遍大图，用户按按钮时就已经知道。
@@ -1659,7 +1659,7 @@ export const useViewerStore = defineStore('viewer', () => {
     viewFor[activeSide.value] = { w: rec.thumb.width, h: rec.thumb.height };
   }
 
-  /* ---------------- 大图缩放预热（2026-09-21） ----------------
+  /* ---------------- 大图缩放预热 ----------------
 
      现象（真机实测：RTX 3060 + 16012×15422 显示画布）：一张图**头两次**滚轮手势里
      各有一两帧 ~600ms，而那一帧的 drawImage/clearRect/getImageData 耗时全都≈0；
@@ -1947,17 +1947,16 @@ export const useViewerStore = defineStore('viewer', () => {
     return Boolean(rec && rec.thumb && !isIntermediateStage(rec.stageKind));
   }
 
-  /** 进入绘制模式。**对比模式下也可以画（2026-09-22 改）**。
+  /** 进入绘制模式。**对比模式下也可以画**。
    *
-   *  原来这里挡着「对比模式只读」，理由是「分屏里画掩码会画到哪一格、写进哪一张 rec
-   *  都不明确」。那条理由已经不成立了：活动侧（`activeId`/`activeSide`）本来就是
-   *  「掩码/ROI 统计/云量/任务状态跟随的那一张」，分屏里点哪半哪半就是活动侧 ——
-   *  掩码画到活动侧那张 rec 上是**唯一**的结果，与其它几块数据同一条规则。
-   *  剩下真正含糊的那件事（在本体影像上画、却在产物上落笔）由 canDrawOn 挡住：
-   *  活动侧是产物时这里照旧拒绝，绘制期间也不让活动侧切到产物（setActiveSide）。
+   *  分屏里点哪半哪半就是活动侧（`activeId`/`activeSide` 本来就是「掩码/ROI 统计/
+   *  云量/任务状态跟随的那一张」）—— 掩码画到活动侧那张 rec 上是**唯一**的结果，
+   *  与其它几块数据同一条规则。真正含糊的那件事（在本体影像上画、却在产物上落笔）
+   *  由 canDrawOn 挡住：活动侧是产物时这里拒绝，绘制期间也不让活动侧切到产物
+   *  （setActiveSide）。
    *
-   *  画布的坐标也要跟着改：分屏下每格的 ViewState 是**该格自己的局部坐标**，
-   *  指针要先减去活动格左上角（TifCanvas.mousePos）。
+   *  分屏下每格的 ViewState 是**该格自己的局部坐标**，指针要先减去活动格左上角
+   *  （TifCanvas.mousePos）。
    */
   function enterDraw() {
     const rec = activeRec.value;
@@ -2129,7 +2128,7 @@ export const useViewerStore = defineStore('viewer', () => {
     const json = buildMaskJson();
     if (!json) return;
     const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' });
-    downloadBlob(blob, rec.name.replace(/\.tiff?$/i, '') + '.mask.json');
+    downloadBlob(blob, stemOf(rec.name) + '.mask.json');
     showToast('已导出掩码 JSON（' + polys.length + ' 个区域）。运行：python -m backend.services.mask <json文件> 掩码.tif 掩膜中心点坐标.txt；或直接点工具栏「生成掩码」在浏览器直出');
   }
 
@@ -2142,7 +2141,10 @@ export const useViewerStore = defineStore('viewer', () => {
     const W = rec.W, H = rec.H;
     const tw = rec.thumb.width, th = rec.thumb.height;
     const polys = rois.map((pts) => pts.map((p) => thumbToOrig(p[0], p[1], W, H, tw, th)));
-    const base = rec.name.replace(/\.tiff?$/i, '');
+    // 名字取**栅格 stem**，不是文件名原样：拖进来的可能是显示件 jpg（`PAN.jpg`），
+    // 掩码只能叫 `<栅格 stem>_mask.tif` —— 带上 `.jpg` 就落成 `PAN.jpg_mask.tif`，
+    // 与后端 `derived_mask_path` 那条口径（`<输入名>_mask.tif`）对不上。
+    const base = stemOf(rec.name);
     showMask('正在生成掩码（全分辨率 ' + W + '×' + H + '，' + polys.length + ' 区域）…', '', true);
     try {
       const tif = await buildTiff(W, H, polys, {
@@ -2164,7 +2166,7 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   /**
-   * 场景 → SR 提交（最小原型 §4.3）：不再生成预览掩码，也不再要求先画掩码。
+   * 场景 → SR 提交（最小原型 §4.3）：不生成预览掩码，也不要求先画掩码。
    * 只把「这张图所在的原图目录」填进队列表单，掩码由后端按
    * `<lq_path>/<输入影像 stem>_mask.tif` 推导并校验存在性 —— 前端不猜掩码
    * 文件名，那条规则只有一处实现（services/scene_search.derived_mask_path）。
@@ -2199,7 +2201,7 @@ export const useViewerStore = defineStore('viewer', () => {
 
   /** 关联成功后**后台静默**把 `<这份影像的 stem>_preview.jpg` 生成进场景目录。
    *
-   *  用户口径（2026-09-21）：「后台静默生成」—— 不阻塞、不弹遮罩、不报进度，用户
+   *  用户口径：「后台静默生成」—— 不阻塞、不弹遮罩、不报进度，用户
    *  继续看他拖进来的原图（那张更清晰，不该被服务端缩图顶掉）。这条请求只为了
    *  **在盘阵上留下一个中间产物预览**，像素谁都不用。
    *
@@ -2222,7 +2224,7 @@ export const useViewerStore = defineStore('viewer', () => {
   /** 拖进显示件时**同时把「未超分那份」降采样到 jpg**（后台静默，与 `bakeDropPreview`
    *  同口径：不阻塞、不弹遮罩、不看结果，失败一声不吭）。
    *
-   *  用户口径（2026-09-24）：拖入本体的显示件（`<目录名>.jpg`）或产物的显示件时，
+   *  用户口径：拖入本体的显示件（`<目录名>.jpg`）或产物的显示件时，
    *  平台去**同一个场景目录**里找 `<输入 stem>_NOSR.tif`（用户说的「未超分那份」）
    *  并降采样到它自己的 `<stem>_preview.jpg`。这样随后把那份 jpg 拖进来、或者在对比条上
    *  点「NOSR」都是现成的，不必等一次生成预览。盘上没有那份时什么都不做 —— 界面上也
@@ -2230,7 +2232,7 @@ export const useViewerStore = defineStore('viewer', () => {
    *
    *  为什么先问 `/siblings` 再取图，而不是自己拼一个 URL 去打 `/preview`：名字的
    *  口径只在后端一处（`scene_search.nosr_candidates`），前端再拼一遍就是第二份口径，
-   *  而这份口径恰恰刚刚改过（`PAN_NOSR` → 输入 stem 优先）。
+   *  两边一旦不一致就会取错文件。
    *
    *  与 `maybePrefetchCompare` 的预取**不是**一回事：那个只在对比模式下、且已有
    *  现成预览时才取（不触发生成预览），这条无论界面形态都触发一次生成预览。
@@ -2387,7 +2389,7 @@ export const useViewerStore = defineStore('viewer', () => {
       // 那份更清晰时上面那次 fetchDropSceneJpg 已经把同一份生成好了，再发一次是
       // 无效生成一张图。它不碰 rec 的像素，所以不 await 也不会跟画面抢。
       if (localJpg && !useServer && r.sceneId) void bakeDropPreview(r);
-      // 同时把「未超分那份」也降采样到 jpg 放在场景目录里（用户口径 2026-09-24）。
+      // 同时把「未超分那份」也降采样到 jpg 放在场景目录里（用户口径）。
       // 触发点**只有拖入显示件**这一处（场景库、路径栏打开都不触发），而它由
       // `localJpg` 精确圈定：能走到这里的 jpg 都是显示件，本体与产物各是一次。
       // 拖进来的若本来就是那份 NOSR，别再往回生成一次（stageKind 挡掉）。

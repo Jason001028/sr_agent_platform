@@ -19,13 +19,13 @@
   所以重启后的第一轮不会把整表已终态的老行重新写一遍。
 * 队列「耗时」= 本次运行的时间窗（sr_tasks.started_at → finished_at，见
   _task_state 的两个锚点），不是行的年龄 —— 一行 = 一个指纹，重复提交复用同一行，
-  行的 created_at 停在第一次提交（2026-09-18 修的正是把它当耗时用）。
+  行的 created_at 停在第一次提交。
 * 广播 = 进程内 set[subscriber]，每订阅者持 (注册时运行 loop, asyncio.Queue)；
   `_broadcast` 从任意线程用 call_soon_threadsafe 入队，断开的订阅者被丢弃。
 
 说明：为保持单个请求内清晰，各同步端点的参数统一命名 `request: Request`，
 运行时状态解包成局部 `state = request.app.state`（Starlette State）；helper
-一律收 `state`，不再出现 app/Request/State 混用。
+一律收 `state`，不混用 app/Request/State。
 """
 
 from __future__ import annotations
@@ -149,8 +149,8 @@ def _task_state(state, task: dict) -> tuple[str, bool, dict | None]:
 
     比较基准是内存缓存，缓存缺失（sr-api 刚重启）回落到**库里存的状态**：不回落的
     话重启后每一行都被判成「状态变了」，于是每个已跑完的老行都被写回一次、updated_at
-    被抬到「现在」，耗时列集体变成行龄（2026-09-18 实测：30 小时前跑完的行显示
-    「30 时 00 分」）。回落之后，重启只补发真正变了的那些行。
+    被抬到「现在」，耗时列集体变成行龄（实测：30 小时前跑完的行显示
+    「30 时 00 分」）。有了回落后，重启只补发真正变了的那些行。
     """
     task_id = task["task_id"]
     cache = state.task_cache
@@ -189,7 +189,7 @@ def _task_state(state, task: dict) -> tuple[str, bool, dict | None]:
              else f"state={state_name}"}
     # 帧必须带上这次写库的时间戳（updated_at + 耗时用的 started_at/finished_at）。
     # 只推 state 的话，客户端手上的还是上一次 GET 的快照，耗时列要么退化成「0 秒」
-    # （2026-09-17 真机），要么停在上一次运行的数字上。写库成功才带：写失败时库里
+    # （真机），要么停在上一次运行的数字上。写库成功才带：写失败时库里
     # 没变，凭本地时钟发一个只会让界面与库对不上。
     if fresh is not None:
         for col in ("updated_at", "started_at", "finished_at"):
@@ -456,7 +456,7 @@ def _mask_target_dir(body: dict) -> Path:
     * `lq_path`：盘阵上任意一个合法场景目录（手工行用；Windows 形态 `W:\\...`
       也吃）。**不要求 SR_SCENES_ROOT**，这正是"打开任意场景目录"的前提。
       路径本身要存在（kind="dir"）。
-    * `scene_id`：库行的不透明 id，沿用旧语义（需要 SR_SCENES_ROOT）。
+    * `scene_id`：库行的不透明 id（需要 SR_SCENES_ROOT）。
 
     两条路都收敛到 `scene_search.input_scene_path`，掩码文件名再由
     `mask_stem` 取 —— 目录是不是场景目录，判断只此一处。
@@ -815,7 +815,7 @@ async def write_qclist(request: Request):
     Chrome 只在 https / localhost 的页面上暴露它，而真机是 nginx `listen 80` 的
     `http://内网IP` —— 那条路在真机上永远走不通。后端本来就以 nginx 身份写盘阵
     （掩码、SR 产物、预览 JPG），改走它既能在 http 下工作，也同时把 GBK 清单写回
-    GBK 做对了（浏览器编不出 GBK，旧前端只能降级成 UTF-8+BOM）。
+    GBK 做对了（浏览器编不出 GBK）。
 
     请求侧被拒一律 400（detail 说清是哪一种），只有写盘本身的 OSError 是 422 ——
     前端只把 detail 原样显示，分类没有消费者，不照搬 §3.5 那套 400/403/404。

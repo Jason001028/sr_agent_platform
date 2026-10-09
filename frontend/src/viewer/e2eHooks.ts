@@ -123,7 +123,7 @@ export interface ViewerHook {
   /** 直接切档位（等效工具栏拖动条 input）。 */
   setPreviewDiv: (div: number) => void;
   // 待修复清单（ROI/工具 置顶面板）：导入 / 标记 / 生成写回文本 / 真的写回。
-  // 写盘改走后端之后这步进得了回归了（原先走 FSA 系统弹窗，只能验到 output() 为止）；
+  // 写盘走后端，这步进得了回归（FSA 系统弹窗那条路只能验到 output() 为止）；
   // qcSync 要真跑通得有后端 + 盘阵根，所以只在 test-manual-scene 那套里调。
   qcImport: (name: string, text: string) => boolean;
   qcClose: () => void;
@@ -170,7 +170,7 @@ export interface ViewerHook {
   litTick: () => number;
   /** 清空左侧暂存区（等价一键解析开跑前那一下；返回清掉几张）。 */
   clearRecs: () => number;
-  // 图像对比（关闭 / 点选对比 / 分屏对比，2026-09-20）
+  // 图像对比（关闭 / 点选对比 / 分屏对比）
   /** 当前模式。 */
   cmpMode: () => import('../lib/compare.js').CompareMode;
   /** 切模式（等效对比条三选一）。 */
@@ -345,8 +345,8 @@ export function mountE2EHooks(): ViewerHook {
         line: qc.bakeLine,
         // 两张账要**摊到最里面一层**再交出去。只做浅拷贝（`{ ...qc.bakeFails }`）时
         // 外层虽是普通对象，**值仍是响应式代理** —— 而代理过 CDP 的 returnByValue 会
-        // 掉成空壳：e2e 读到的是 `{ gone: {} }`，`.reason` 直接 undefined（2026-09-27
-        // 实测：`{...外层}` 得 `{"gone":{}}`，`{...那个代理}` 才拿得到 stage/reason）。
+        // 掉成空壳：e2e 读到的是 `{ gone: {} }`，`.reason` 直接 undefined（实测：
+        // `{...外层}` 得 `{"gone":{}}`，`{...那个代理}` 才拿得到 stage/reason）。
         // 同 `litIds` 那条 `[...spread]` 的道理：hook 交出去的是数据，不是 store 的内部。
         fails: Object.fromEntries(Object.entries(qc.bakeFails)
           .map(([k, v]) => [k, { stage: v.stage, reason: v.reason }])),

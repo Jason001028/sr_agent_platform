@@ -88,7 +88,7 @@ SANDBOX_KEY_LEN = 12
 #: Slurm host list (`node81-132`, or the bracketed form `node81-[132-134]`),
 #: written verbatim after `#SBATCH --nodelist=`; anything else (spaces, quotes,
 #: newlines) would either break the directive or inject a second one. Empty
-#: string means "no line". 2026-09-14: the real value is a **single** host — the
+#: string means "no line". The real value is a **single** host — the
 #: one 4×3090 machine every job must stay on (docs/status/slurm-acceptance.md §B0).
 _SAFE_NODELIST = re.compile(r"^[A-Za-z0-9_,\[\]-]+$")
 
@@ -103,7 +103,7 @@ RUN_FINISHED_MARKER = "Run finished."
 #: name the interface doc records disagree: SR_code/ holds
 #: `sfsr_confgig_test_espan2_cuda1.xml` (the SR team's own typo), while
 #: docs/sr_code/sr-pipeline-interface.md §5 records `sfsr_config_...` as the real
-#: one (2026-08-17 核对). Which spelling a given deployment has is unverified, so
+#: one (已核对). Which spelling a given deployment has is unverified, so
 #: both are probed; flip the order here once someone checks the array machine.
 BUNDLE_SUFFIX_CONFIG_NAMES = (
     "sfsr_confgig_test_espan2_cuda1.xml",
@@ -243,7 +243,7 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
          ⚠️ --export=NONE is an on-machine must-verify item: it also drops
          LD_LIBRARY_PATH that a real CentOS7 SR env may rely on (the SR env's
          torch + GDAL are built against system libs — node81-135 实测
-         torch 1.10.2+cu113 / GDAL 2.4.0，2026-09-14). If the job fails to
+         torch 1.10.2+cu113 / GDAL 2.4.0). If the job fails to
          import torch/GDAL, the fallback is a ONE-LINE change here:
          `--export=NONE` → `--export=ALL`. See
          docs/sr_code/sr-slurm-deploy-variant.md §5.1.
@@ -498,8 +498,8 @@ def normalize_suffix(value) -> str:
     The single choke point both submit entries share (api/platform.py and
     tools/run_sr.py), so an identical logical submit from REST and from the
     agent tool normalizes to the same params dict — and therefore to the same
-    task_fingerprint. They used to diverge (REST defaulted and whitelisted,
-    the tool did neither), which meant a duplicate job rather than a reuse.
+    task_fingerprint. Both entries must default and whitelist identically here,
+    otherwise an identical submit produces a duplicate job rather than a reuse.
     """
     raw = str(value).strip() if value is not None else ""
     if not raw:

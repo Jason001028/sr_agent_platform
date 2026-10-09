@@ -189,7 +189,7 @@ export interface SceneResolveResult {
      *  **拖进来的中间产物（`kind != 'input'`）也是 false**：那一类的 `row.lq_path`
      *  被服务端置空，前端别指望能提交（见 kind）。 */
     sr_capable: boolean;
-    /** 拖进来的这份影像属于场景里的哪个环节（2026-09-21 起中间产物也能关联）。
+    /** 拖进来的这份影像属于场景里的哪个环节（中间产物也能关联）。
      *  `'input'` = 本体（显示件 / 输入影像，可修复可提交）；`'product'` = 本次
      *  SR 产物；`'nosr'` = 上一次的产物。**只有 kind='input' 才是可修复对象** ——
      *  掩码与 SR 建在本体影像的网格上，产物的尺寸是它的倍数。 */
@@ -319,7 +319,7 @@ export class HttpError extends Error {
 
 /** 这次失败是不是「盘阵上已经没有这个文件」——**静态链**上撞的 404。
  *
- *  两个条件缺一不可，2026-09-24 起第二条是新增的：
+ *  两个条件缺一不可：
  *
  *  1. **404**。刻意不认 422：那是「源还在、但生成不出预览」（档位非法 / 不是单波段 /
  *     条带读失败 / 文件过小…），把它也说成「已自动清除」就是拿一个猜的原因盖住真实
@@ -329,10 +329,9 @@ export class HttpError extends Error {
  *     上的 404 是别人给的答复（后端对解不到授权根之内的 id 回 404，路径不对也会），
  *     它说明不了盘上的文件在不在。
  *
- *  第二条件是 09-23「老景打不开」那次事故的直接产物：当时 nginx 在 `location /api/`
- *  下套了一个只有 `add_header` 的嵌套 location，`/preview` 被当静态文件在 root 下找，
- *  回的是 nginx 自己的 404 HTML —— 只看状态码就把**能打开的场景**标成了「盘阵上已没有
- *  这个文件」。见 deploy/nginx.conf 与 isProxyMiss。 */
+ *  第二条件排除了「打后端的 404」：nginx 若在 `location /api/` 下配了嵌套 location，
+ *  `/preview` 会被当静态文件在 root 下找，回 nginx 自己的 404 HTML —— 只看状态码就会
+ *  把**能打开的场景**误判成「盘阵上已没有这个文件」。见 deploy/nginx.conf 与 isProxyMiss。 */
 export function isSceneGone(e: unknown): boolean {
   return e instanceof HttpError && e.status === 404 && isDiskArrayUrl(e.url);
 }
@@ -468,7 +467,7 @@ export function subscribeQueueEvents(
   return () => ctrl.abort();
 }
 
-/* ---------------- 预览 JPG 的本地 blob 缓存（2026-09-20 新增） ----------------
+/* ---------------- 预览 JPG 的本地 blob 缓存 ----------------
 
    同一张图来回切（对比模式）不该每次都走一遍网络与读盘：磁盘上那份服务端早就生成好
    了，前端再取就是纯重复。缓存的是**压缩 blob** 而不是解码后的位图 —— 理由见
@@ -746,7 +745,7 @@ export async function fetchDropSceneJpg(
  *
  * 二选一：`{path}`（`W:\...` 或 `/DiskArray/...`，服务端归一）或
  * `{name}`（裸文件名，+ 可选 `date`；不给日期就由后端从文件名里的成像时间戳
- * 取，前端不再自解析 —— 命名规则与模板的唯一真源在 backend/pathguard.py）。
+ * 取，前端不自解析 —— 命名规则与模板的唯一真源在 backend/pathguard.py）。
  * **没找到就抛**（4xx），`Error.message` 是后端给的候选与原因清单，调用方原样
  * 展示即可 —— 反推不准时必须让用户看见为什么、然后手粘目录，绝不静默换一条
  * 路径。
@@ -864,7 +863,7 @@ export function siblingRow(res: SceneSiblings, item: SceneSibling): SceneRow {
 
 /** 「未超分那份」能不能用：`nosr` 那一类**且盘上真有**时给出它，否则 null。
  *
- *  两种落空都返回 null，且**调用方一律什么都不显示**（用户口径 2026-09-24）：
+ *  两种落空都返回 null，且**调用方一律什么都不显示**（用户口径）：
  *  盘上没有那份栅格、或这一类压根拼不出名字 —— 「找不到」不是要展示的答案，
  *  它只是这条背景预热不必再往下走。
  *
@@ -893,10 +892,9 @@ export async function apiBakeMask(
 
 /** 把《待修复清单》整份原地写回盘阵：POST /api/qclist/write。
  *
- * 写盘**走后端**（契约见 docs/planning/api-contract.md §3.7）。原先走浏览器的
- * File System Access API，可那个 API 在规范里是 `[SecureContext]` 标的，而真机页面
- * 是 `http://内网IP` —— 在真机上这功能永远点不通，不是偶发。同时修好编码：
- * 浏览器只有 UTF-8 编码器，GBK 清单以前只能降级成 UTF-8+BOM 写回，现在由后端编。
+ * 写盘**走后端**（契约见 docs/planning/api-contract.md §3.7）：浏览器的 File System
+ * Access API 在规范里标了 `[SecureContext]`，而真机页面是 `http://内网IP`，那条路在
+ * 真机上恒不可用。编码也由后端处理 —— 浏览器只有 UTF-8 编码器，编不了 GBK 清单。
  *
  * `mtime` 是导入那一刻的 `File.lastModified / 1000`。路径是用户粘的、文件是盘子上的，
  * 两者只有这一处能对上；后端拿它对护栏，盘阵上的清单在导入之后被人改过就拒写。 */

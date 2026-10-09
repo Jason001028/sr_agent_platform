@@ -18,9 +18,9 @@ about *live* jobs. So:
                (SR_code/variants/verify_sr_run.py; path from run_sr.py)
 
 `sacct_status` is kept for the fake scheduler and for any future cluster that
-does enable accounting, but the real path no longer calls it: a query that
-raises here used to escape into run_sr._resolve_existing and make a same-params
-re-submit fail outright, neither reusing nor rerunning (§2.4-2).
+does enable accounting; the real path does not call it — a query that raises
+would escape into run_sr._resolve_existing and make a same-params re-submit
+fail outright, neither reusing nor rerunning (§2.4-2).
 
 `job_status` never raises once a scheduler is present: an unreadable, stale or
 missing verdict file is a definite "UNKNOWN", never an exception.

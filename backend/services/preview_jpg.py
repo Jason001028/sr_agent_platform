@@ -1,6 +1,6 @@
 """Disk-array scene preview JPEG generation (server-side).
 
-规则 v3（2026-09-20 起）：**长宽各为源图的 1/div**，显示值用**直方图均衡**。
+规则 v3：**长宽各为源图的 1/div**，显示值用**直方图均衡**。
 div 由调用方按用户的滑块档位传入（`div ∈ PREVIEW_DIVISORS`，缺省 `LEGACY_PREVIEW_DIV`）。
 
     ps   = min(1, max_edge / max(W, H))，max_edge = round(max(W,H) / div)
@@ -60,8 +60,8 @@ PREVIEW_JPG_QUALITY = 85         # 服务端预览质量（显示用；1/2 尺�
 PILLOW_FALLBACK_MAX_PX = 1 << 26  # 67M px：Pillow 兜底只敢接小文件（整图解码）
 
 #: 规则版本戳：改动「尺寸 / 档位 / 拉伸 / 质量」任一规则都必须 bump，否则旧缓存不会失效。
-#: v3（2026-09-20）：尺度从写死的 1/2 变成可调档位，戳里必须带上 div，
-#: 否则同一落点上换个档位会被判成缓存命中 —— 界面滑了、盘上的图一个字节都不变。
+#: 戳里带 div（档位）：否则同一落点上换个档位会被判成缓存命中 ——
+#: 界面滑了、盘上的图一个字节都不变。
 PREVIEW_RULE_VERSION = "v3"
 #: 并行读的行数阈值：小图线程开销盖过收益，保持串行（也让小 fixture 的测试确定）。
 PARALLEL_MIN_ROWS = 512
@@ -533,7 +533,7 @@ def rule_stamp(quality: int = PREVIEW_JPG_QUALITY,
                div: int = LEGACY_PREVIEW_DIV) -> bytes:
     """当前预览生成规则的签名（写进 JPEG 注释，用来判缓存是否还符合现规则）。
 
-    **div 进戳**（v3 起）：同一个落点上换个档位必须判废重新生成 —— 只按落点判的话，
+    **div 进戳**（v3）：同一个落点上换个档位必须判废重新生成 —— 只按落点判的话，
     界面上的滑块动了、盘上那张图一个字节都不会变。v2 那代戳是 `…:half+equal:…`，
     与这里的 `…:div2+equal:…` 字符串本就不同，所以 v2 产物一律重新生成一轮（预期内）。
     """

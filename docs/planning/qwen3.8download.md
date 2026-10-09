@@ -1,7 +1,7 @@
 # Qwen3.8-27B UD GGUF 文件清单（unsloth/Qwen3.8-27B-GGUF · 独立文档，可直接喂LLM）
 
-> ⚠️ **已核实修订（2026-09-09）**：
-> - **真仓库 = `unsloth/Qwen3.8-27B-GGUF`**；原标题/下文里的 `danielhanchen/imatrix` 是抓取时的错误归属（danielhanchen = Unsloth 创始人在 HN/社区的账号）。
+> **要点**：
+> - **仓库 = `unsloth/Qwen3.8-27B-GGUF`**（Unsloth 官方）。
 > - **`UD` = Unsloth Dynamic 3.0 量化**（纯 PTQ + 刷新版 imatrix 校准 + 逐层动态选量化档），**不是 Uncensored**。本清单是官方**基础版**（原生 function calling），可作 agent 底座。
 > - **24GB 单卡 4bit 首选 = `UD-Q4_K_XL`**（unsloth 官方推荐口径）；`mmproj-F16/BF16` 两个视觉投影都在本仓内。
 > - 「下载/带到公司选哪几个」见文末 **§下载与带到公司决策**；系统名词对照见 `docs/knowledge/llm-serving-gguf-glossary.md`。
@@ -71,7 +71,7 @@
 5. **高显存，近乎原生精度**：Q6_K / Q8_K_XL
 6. **图文多模态场景**：必须搭配 `mmproj-*.gguf` 图像投影文件一起使用；纯文本推理不需要mmproj。
 
-## 下载与带到公司决策（2026-09-09 已核实）
+## 下载与带到公司决策
 
 > 目标环境：4× RTX 3090（24GB/卡）内网 CentOS7，固定 1 张卡给 Agent LLM（llama.cpp llama-server），
 > 剩余给 Slurm/SR。Qwen3.8 为 tied embeddings → llama.cpp 必须把 embedding 也载入显存，

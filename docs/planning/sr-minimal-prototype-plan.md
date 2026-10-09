@@ -1,9 +1,9 @@
 # SR 最小原型实施计划（前端提交 → 本机 conda 环境直接执行）
 
 日期：2026-09-14
-状态：已定（决策见 §1.2，来源为 2026-09-14 与用户的问答）
+状态：已定（决策见 §1.2）
 
-> 读者：接手实现的新会话。本文不假设你有前几轮对话的上下文，所有前提在 §2 给出并标注核实方式。
+> 读者：接手实现的新会话。所有前提在 §2 给出并标注核实方式。
 > 工作方式见 §0，动手前必须先做 §3。
 
 ## 0. 工作方式（硬性）
@@ -25,22 +25,22 @@
 
 > 「当前实现一个最小原型即可，只需要前端点击提交SR，这边打通conda环境跑对应目录下的掩码和.tif即可，不需要前后端传输完整的.tif，这些都可以写成规则式的，而且所生产的文件夹目录锁死在一个路径文件夹下，不需要考虑文件数的问题」
 
-### 1.2 已定决策（2026-09-14 用户明确选择）
+### 1.2 已定决策
 
 | 决策点 | 结论 |
 | --- | --- |
 | 执行器 | 不使用 Slurm，后端直接启动进程 |
-| 掩码来源 | 用目录里已有的 `<目录名>_mask.tif`；前端不需要画掩码，「提交 SR」不再要求先画 |
+| 掩码来源 | 用目录里已有的 `<目录名>_mask.tif`；前端不需要画掩码，「提交 SR」不要求先画 |
 | 提交步数 | 保留队列页确认：点「提交 SR」→ 跳转 `/queue` 预填 → 用户点提交才真正执行 |
 | 浏览器端 JPG 导出 | 整条链路删除（含「输出目录：未授权」按钮与授权概念） |
 | `.jpg` 预览 | 两项都要：「选择文件」能开本地 `.jpg`；盘阵目录里的 `.jpg` 能列出并直接打开 |
 
-### 1.3 为什么不用 Slurm（2026-09-14 已在真机核实，不必重新论证）
+### 1.3 为什么不用 Slurm
 
 + node81-135 在集群里是 `gpu:4 down`，DOWN 节点不会被分配作业；要让它可调度就得改集群。
 + 自建单节点 Slurm 需要再起一份 slurmd：6818 端口已被集群的 slurmd 占用（`ss -lntp` 实测 `LISTEN 0 4096 *:6818 users:(("slurmd",pid=21147,fd=5))`），只能换端口并配独立 state/spool 目录与整份 conf。
 + 单卡分配不需要 Slurm：在执行进程的环境变量里设 `CUDA_VISIBLE_DEVICES` 即可。
-+ 现有 `build_batch_script()` 生成的脚本本身就是合法 bash（`#SBATCH` 行对 bash 是注释）。把 `sbatch <script>` 换成 `bash <script>`，配置 XML 组装、审计段、契约校验器、退出码文件这一整套都能原样复用。
++ `build_batch_script()` 生成的脚本本身就是合法 bash（`#SBATCH` 行对 bash 是注释），本地执行器用 `bash <script>` 直接运行，配置 XML 组装、审计段、契约校验器、退出码文件这一整套原样复用。
 
 ## 2. 事实基础（已核实）
 
@@ -48,13 +48,11 @@
 + 掩码落盘位置：`backend/api/platform.py:536-546`，`out_dir / f"{stem}_mask.tif"`，即场景文件同目录。
 + 预览 JPG 位置：`backend/api/paths.py:118-135`，默认 `<源文件同目录>/<源文件 stem>.preview.jpg`。也就是说「JPG 与原图同目录」这条，后端本来就是对的。
 + SR 会写入入参目录：产物 tif（`SR_code/code_0817_prod.py:582`，名 = `<输入名>_<Suffix>.tif`）、`Debug/` 日志与 meta.xml 更新都落在那里。另有 `SR_code/util.py:1312`、`:1355`、`:1424` 的 `os.rename(path + tiftype, path + "_NOSR" + tiftype)` —— `path` 是**输出路径**，非空 suffix 下首跑该文件不存在（异常被吞），重跑时被改名并覆盖的是上一次的产物；只有 suffix 为空（输出名 == 输入名）时被改名的才是输入。`DeleteOriTifNeeded` 同理只作用于输出路径上的文件。
-  （**2026-09-16 订正**：本行原文写「用 `os.rename(…)` 把**输入**改名」，与实现不符；结论「入参目录会被写入」不变。见契约 §2.4 第 1 条与 §6。）
 + SR 自己创建 `Debug/`：`SR_code/code_0817_prod.py:166` 有 `os.makedirs(..., exist_ok=True)`，不需要预先建目录。
 + 终态判定：`<DatarootLQ>/Debug/_SREXIT_<job_id>.txt`，由 `SR_code/variants/verify_sr_run.py` 写。`job_id` 取自命令行 `--job-id`，没有该参数时取 `$SLURM_JOB_ID`（`verify_sr_run.py:40`、`:394-418`）。集群账务未启用，`sacct` 永远不可用（恒 rc=1）。
 + 显卡：生产脚本 `SR_code/code_0817_prod.py:146` 与 `:644` 直接把 `CUDA_VISIBLE_DEVICES` 写成 `"0"` / `"1"`；变体 `SR_code/variants/code_0817_prod_slurm.py:161-166`、`:677` 改成读取环境变量。**所以本地执行必须把 `SR_SR_SCRIPT` 指向变体**，否则外部指定的显卡被覆盖。
-+ 机器上 `$APP` 目前是旧版代码：`grep -c nodelist $APP/backend/services/run_sr.py` 返回 0，而开发机上该文件已有 `nodelist` 特性，说明开发机的 `backend/config.py` 与 `backend/services/run_sr.py` 还没拷过去。
 + 当前没有任何 suffix 校验：`backend/api/platform.py:375` 只做了 `str(body.get("suffix") or "")`。suffix 会拼进输出文件名，必须补字符白名单。
-+ 锁定目录实测内容（2026-09-14，用户回贴的 `ls -l`）：`<目录名>.tif` 590MB、`<目录名>_meta.xml` 2722B、`<目录名>_mask.tif` 89MB、`<目录名>_mask.txt`、旧产物 `_NOSR.tif` 4.9GB、小写 `debug/`。
++ 锁定目录实测内容：`<目录名>.tif` 590MB、`<目录名>_meta.xml` 2722B、`<目录名>_mask.tif` 89MB、`<目录名>_mask.txt`、旧产物 `_NOSR.tif` 4.9GB、小写 `debug/`。
 
 ## 3. 动手前必须先确认的事
 
@@ -85,17 +83,17 @@
 | 序号 | 任务 | 对应章节 | 完成判据 |
 | --- | --- | --- | --- |
 | 1 | 读完后端执行 / 状态链路（`run_sr.py` 提交段、`store.py`、`platform.py` 队列端点） | §2 | 能说清 `submit_run_sr` → `sbatch` → `job_status` 的三段数据流，以及 `sr_tasks` 表怎么保证不重复提交 |
-| 2 | 执行器切换：后端用 `$SR_PYTHON` 直接起进程，不再 `sbatch` | §4.1、§4.2 | 本地模式下 `POST /api/queue` 能起进程，状态走 PENDING → RUNNING → 终态 |
+| 2 | 执行器切换：后端用 `$SR_PYTHON` 直接起进程（不经 `sbatch`） | §4.1、§4.2 | 本地模式下 `POST /api/queue` 能起进程，状态走 PENDING → RUNNING → 终态 |
 | 3 | 路径锁死：提交 SR 的 `lq_path` / `mask_path` 由场景目录推导，不接受手填 | §4.3、§4.7 | `SR_LOCKED_DIR` 不匹配返回 400；前端两个输入框只读 |
 | 4 | 掩码来源改为目录里已有的 `<名字>_mask.tif`，取消「必须先画掩码」门禁 | §4.3、§4.7 | 未画掩码也能点「提交 SR」；缺掩码文件时返回 400 |
-| 5 | 前端：删「输出目录」按钮 + 自动JPG + 浏览器 JPG 导出链路（`saver` / `exportJpg`） | §4.5 | 页面上不再出现「授权」相关字样；`npm run typecheck` 通过 |
+| 5 | 前端：删「输出目录」按钮 + 自动JPG + 浏览器 JPG 导出链路（`saver` / `exportJpg`） | §4.5 | 页面上不出现「授权」相关字样；`npm run typecheck` 通过 |
 | 6 | 前端：放宽文件过滤，支持本地 `.jpg` 打开预览 | §4.6 | 「选择文件」能选 `.jpg` 并正常显示 |
 | 7 | 盘阵目录里的 `.jpg` 能列出并直接打开（后端 scenes + 前端） | §4.4 | 场景列表出现 jpg 行且点「打开」能显示 |
 | 8 | 跑测试：backend pytest + frontend vitest 保持全绿 | §5.1 | `python -m pytest backend/tests -q` 全绿；`npm test` 全绿 |
 
 顺序说明：
 
-+ 第 2、3、4 项是本次的核心，做完就已经满足「前端点击提交 SR → 本机 conda 环境跑对应目录的掩码和 .tif」。真机验收可以在第 4 项之后单独做（§5.2 的 A 段），不必等前端三项。
++ 第 2、3、4 项是核心，做完即满足「前端点击提交 SR → 本机 conda 环境跑对应目录的掩码和 .tif」。真机验收可以在第 4 项之后单独做（§5.2 的 A 段），不必等前端三项。
 + 第 5、6、7 项互不依赖，可以并行。
 + 第 8 项是收尾，不是最后才开始跑——每完成一项都要跑一次。
 
@@ -168,7 +166,7 @@ def cancel(job_id) -> bool
 
 ### 4.7 前端：提交 SR 改造
 
-+ `frontend/src/stores/viewer.ts` 的 `submitSr()`（`:847-883`）：不再调用 `apiBakeMask`，直接根据当前场景推导草稿并跳转队列页：
++ `frontend/src/stores/viewer.ts` 的 `submitSr()`（`:847-883`）：直接根据当前场景推导草稿并跳转队列页（不调用 `apiBakeMask`）：
   + `lq_path = rec.lqPath`（为空则报错：「此图无盘阵目录，无法提交 SR」）；
   + `mask_path = <lqPath>/<rec.name>_mask.tif`；
   + `suffix` 用非空默认值；
@@ -176,13 +174,13 @@ def cancel(job_id) -> bool
 + `frontend/src/components/Toolbar.vue` 的 `srReady`（`:19-24`）：条件从「已打开盘阵场景 + 已画掩码」改为「已打开盘阵场景且 `lqPath` 非空」，去掉掩码要求。
 + `frontend/src/pages/QueuePage.vue` 的提交表单（`:109-153`）：`lq_path` 与 `mask_path` 两个输入框改为只读展示（不可编辑），并标注「由场景目录推导」。其余参数保持可编辑。
 + `frontend/src/stores/queue.ts` 的 `defaultForm()` / `draftToForm()`（`:44-58`）：默认 suffix 改为非空值，与后端默认一致。
-+ 若 `apiBakeMask`（`frontend/src/lib/api.ts:302-311`）在改动后不再有调用方，连同 `BakeMaskBody` / `MaskBakeResult` / `MaskDraft` 类型一起删除；后端 `POST /api/masks`（`backend/api/platform.py:493-551`）本轮**不删**（有测试覆盖，且未来可能回到「前端画掩码」），但在文档里记一句「当前前端已不再调用」。
++ 若 `apiBakeMask`（`frontend/src/lib/api.ts:302-311`）没有调用方，连同 `BakeMaskBody` / `MaskBakeResult` / `MaskDraft` 类型一起删除；后端 `POST /api/masks`（`backend/api/platform.py:493-551`）保留（有测试覆盖）；当前前端不调用该端点。
 
 ## 5. 验证
 
 ### 5.1 开发机（先跑）
 
-+ `python -m pytest backend/tests -q` 保持全绿（当前基线 309 passed，2026-09-14 实测）。
++ `python -m pytest backend/tests -q` 保持全绿（当前基线 309 passed）。
 + 新增测试至少覆盖：`SR_LOCKED_DIR` 不匹配时 400；`mask_path` 自动推导命中与缺失两种情况；`suffix` 白名单拒绝与接受；`local_exec` 的 PENDING → RUNNING → 终态（用短脚本 + 退出码文件模拟，不依赖真机）；`build_batch_script(job_id=...)` 生成文本里出现 `--job-id`。
 + 前端：先 `export PATH="/c/Users/lenovo/AppData/Local/nvm/v20.19.5:$PATH"`，再 `npm run typecheck` 与 `npm test`。
 
@@ -201,41 +199,12 @@ def cancel(job_id) -> bool
    + `cat <锁定目录>/Debug/_SREXIT_<job_id>.txt`（应 `verdict=0`）
 6. 确认输出确实落在锁定目录（需求「输出与原图同目录」）。
 
-**A 段执行结果（2026-09-15）**
-
-| 步 | 结果 |
-| --- | --- |
-| 1–2 部署 + env | 通过：三项 env（`SR_EXECUTOR`/`SR_LOCAL_GPU`/`SR_LOCKED_DIR`）生效 |
-| 3 提交 | 通过：`201`，`task_id=1` / `job_id=1` / `in_place:true`；`mask_path` 按目录推导正确 |
-| 4 状态推进 | 通过：真的推进了（提交 → RUNNING → 终态），不是假调度器；但平台侧未收敛到 FAILED（见第 5 步） |
-| 5 终态 | 契约判 FAILED：`_SREXIT_1.txt` 写出非 0 verdict，理由 `SRLOG 早于 config.xml, 是上次残留` |
-| 6 产物落盘 | 未产出——SR 未执行超分（见下） |
-
-**根因**：场景 `JL1KF02B03_PMS09_…_L1_PAN` 在 **9/12 就已超分过**，
-`util.py:1003-1011` 的 SC 分支发现 `<目录名>.tif` 体积不在三个接受区间内 → 打印
-`already SRed before` → **`return`（`exit()` 被注释掉，源码标 `# huai`）**，既不做处理、也不建新
-SRLOG。校验器随后判定 `Debug/_SRLOG.txt`（9/12 的）是上次残留、不计入本次成果 → 契约不满足。
-若沿用 sacct 判据，这次会被标成 COMPLETED 并固化。
-
-**待核**：作业终态已由 `_SREXIT_1.txt` 判为 FAILED，但 `GET /api/queue` 两次复核均报 `RUNNING`。
-`local_exec.status()`（`backend/services/local_exec.py:257-271`）只在本地子进程仍存活时返回 RUNNING，
-且此时不读退出码文件——需先分清进程是否真的还在。
-
-**同时被证实（审计段）**：`SR_SR_SCRIPT=code_0817_prod_slurm.py`（变体在用，`CUDA_VISIBLE_DEVICES`
-没被原脚本覆盖）、`CUDA_VISIBLE_DEVICES=0` 且绑到真实 GPU UUID、conda 解释器确实启动
-（跑到 SC 分支判断 + nvml + SolarAzimuth）。**「前端提交 → 后端用 conda 解释器跑 SR」这条链已验证，
-缺的只是让 SR 干活的输入。**
-
-**下一步**：造一个未超分过的场景。二选一——① 换一个 `<目录名>.tif` 体积落在
-`0–1.1` / `1.5–1.7` / `3.8–4.1` GB 区间内的场景目录；② 把本目录的 `<目录名>_NOSR.tif`
-（= 9/12 超分前的原始输入）改名还原回 `<目录名>.tif` ——**必须先备份现存的超分产物**（rename 会覆盖）。
-
 #### B 段：前端点击验收
 
-> **前置（09-15 定）**：`SR_SCENES_ROOT` 必须配，且与 nginx `alias` 同值。原因：`/scenes` 盘阵场景页
+> **前置**：`SR_SCENES_ROOT` 必须配，且与 nginx `alias` 同值。原因：`/scenes` 盘阵场景页
 > 的行来自 `/api/scenes`，查看器的「提交 SR」按钮只对 `route='jpg' && lqPath` 的记录可用，
 > 而 `lqPath` 只由 disk 场景行提供——**场景列表是那个按钮的唯一入口**。
-> **本阶段不维护场景检索**：根暂指 `/DiskArray/tmp/wangrz/datahub/`，接受同一景被列成多行
+> **场景检索当前不完善**：根暂指 `/DiskArray/tmp/wangrz/datahub/`，接受同一景被列成多行
 > （收件规则只有后缀白名单、派生件也计入，缺口见 `docs/status/current-question.md` §3.3「场景检索白名单」条）。
 
 1. 构建 `frontend/dist` 并按 §3.3 确认的通道送到机器，刷新页面。
@@ -254,9 +223,7 @@ Environment=SR_SR_SCRIPT=code_0817_prod_slurm.py
 Environment=SR_PYTHON=<conda 环境的 python 绝对路径>
 ```
 
-> **2026-09-16 订正**：上面这份块里的 `Environment=SR_SUFFIX_DEFAULT=sr` 已删除。该变量同日作废
-> （设了也不读）：产物后缀的默认值改由平台读 `$SR_BUNDLE_DIR` 下 SR 团队配置文件里的 `<Suffix>`
-> 得出，读不到或值非法才回落到内置 `sr`。见 [deploy/README.md §7.6](deploy/README.md)。
+> 产物后缀的默认值由平台读 `$SR_BUNDLE_DIR` 下 SR 团队配置文件里的 `<Suffix>` 得出，读不到或值非法才回落到内置 `sr`（见 [deploy/README.md §7.6](deploy/README.md)）。
 
 要点：
 

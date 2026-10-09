@@ -1,7 +1,7 @@
 # Python/并发 面试八股（interview · 高频精简版）
 
 > 定位：跳槽高频 Python 语言 + 并发/异步自测与背诵。★=高频。每题「答（要点）+ 追问」。
-> 仓库真例标注 🗂：答完八股，能用 [backend/services/store.py](backend/services/store.py)、[backend/services/slurm.py](backend/services/slurm.py) 等真实文件讲成"项目实践"。阶段 5（聊天 SSE 的 `run_loop` → to_thread → asyncio.Queue）处于**规划/评审中**（契约 [docs/planning/api-contract.md](docs/planning/api-contract.md) §4.1），引用处均标注，不当作已实现事实。
+> 仓库真例标注 🗂：答完八股，能用 [backend/services/store.py](backend/services/store.py)、[backend/services/slurm.py](backend/services/slurm.py) 等真实文件讲成"项目实践"。
 
 ---
 
@@ -291,7 +291,7 @@
 
 ## 八、本仓库实践注记
 
-> 把上面的八股落回真实代码，在"追问/讲项目"环节当钩子。路径相对仓库根目录；阶段 5 部分是**契约规划（评审中）**，答时按"设计如此"讲。
+> 把上面的八股落回真实代码，在"追问/讲项目"环节当钩子。路径相对仓库根目录；答时按"设计如此"讲。
 
 29. **Q：为什么 run_cmd/sbatch 执行器能注入"假命令"做离机测试？（★ / 🗂）**
     **A：**
@@ -309,10 +309,10 @@
 
     **追问：** 注入 vs monkeypatch 谁更优？→ 注入的缝在**函数签名里可见**：契约自明、测试传参、无全局状态、跨文件复用同一 fake；monkeypatch 快但"被测代码内部藏着依赖"的耦合高。规律：函数体内硬写 subprocess/open/网络又要可测 → 加一个可注入执行器参数。
 
-30. **Q：为什么同步阻塞的 run_loop 要丢 to_thread、再经 asyncio.Queue 转 SSE？（★ / 🗂 规划）**
+30. **Q：为什么同步阻塞的 run_loop 要丢 to_thread、再经 asyncio.Queue 转 SSE？（★ / 🗂）**
     **A：**
     - 背景：[backend/agent/loop.py](backend/agent/loop.py) 的 `run_loop` 是**同步阻塞**的 agent 循环（串行调 LLM/工具，一轮几秒~几十秒），直接当协程跑会**卡死事件循环**（Q16）。
-    - 契约（[docs/planning/api-contract.md](docs/planning/api-contract.md) §4.1，阶段5 = 评审中、**尚未实现**）给的桥：`asyncio.to_thread(run_loop, cfg, …, on_event=bridge)` 让循环在**线程池**跑；内部每个产出点**同步回调** `on_event({"type": ...})`；回调经 `asyncio.Queue` 入队，主协程 `while await get()` **逐帧** yield 成 SSE —— 即 Q17+Q19+Q22 的合体。
+    - 契约（[docs/planning/api-contract.md](docs/planning/api-contract.md) §4.1）给的桥：`asyncio.to_thread(run_loop, cfg, …, on_event=bridge)` 让循环在**线程池**跑；内部每个产出点**同步回调** `on_event({"type": ...})`；回调经 `asyncio.Queue` 入队，主协程 `while await get()` **逐帧** yield 成 SSE —— 即 Q17+Q19+Q22 的合体。
     - 会话并发：进程内 `dict[session_id → asyncio.Lock]`，锁被占再 POST 同会话 → **409**（串行，防同会话并发回合）。
     - 兼容红线：`on_event` 默认 `None` → `run_loop` 行为与现状逐字节一致，既有 loop 测试不因加钩子变更——"异步外壳 + 不改核心状态机"的演进策略。
 

@@ -1,8 +1,8 @@
 # Slurm 真机接入 · 分阶段验收清单（node81-135）
 
-> 日期：2026-09-10 · 状态：**已中止（2026-09-14）** —— 路线改走「后端本机 conda 直跑」，见 [sr-minimal-prototype-plan.md](../planning/sr-minimal-prototype-plan.md)（判据：node81-135 在集群里是 `gpu:4 down`，DOWN 节点不会被分配作业；自建单节点 Slurm 的 6818 端口已被 `slurmd` 占用；单卡分配用 `CUDA_VISIBLE_DEVICES` 即可）。**本清单保留为重启 Slurm 时的执行页**，B/C/D 的判据与命令未失效。读者：运维本人 + 接手 Agent 窗口
-> 前置：[docs/status/slurm-integration.md](slurm-integration.md) §一 决策快照 / §二 已核实事实 / §2.7 P1 实测值；[sr-pipeline-interface.md](../sr_code/sr-pipeline-interface.md) v1.5（调用契约）
-> 定位：本文件是 P3 的**执行页**——A 探针 → B 裸 Slurm 冒烟 → C 单场景真 SR → D 平台链路。
+> 日期：2026-09-10 · 状态：Slurm 接入路线的验收清单；当前路线是「后端本机 conda 直跑」，见 [sr-minimal-prototype-plan.md](../planning/sr-minimal-prototype-plan.md)（node81-135 在集群里是 `gpu:4 down`，DOWN 节点不会被分配作业；自建单节点 Slurm 的 6818 端口已被 `slurmd` 占用；单卡分配用 `CUDA_VISIBLE_DEVICES` 即可）。本清单为重启 Slurm 时的执行页，B/C/D 的判据与命令未失效。读者：运维本人 + 接手 Agent 窗口
+> 前置：[docs/status/slurm-integration.md](slurm-integration.md) §一 决策快照 / §二 已核实事实 / §2.7 实测值；[sr-pipeline-interface.md](../sr_code/sr-pipeline-interface.md) v1.5（调用契约）
+> 定位：本文件是**执行页**——A 探针 → B 裸 Slurm 冒烟 → C 单场景真 SR → D 平台链路。
 > 图例：`⏱` 参考耗时 · `✓=` 成功判据 · `record:` 要记下来回贴的值 · `✗` 失败怎么办。
 > 命令在 node81-135 上**逐条贴**（别一次粘多行）。D 阶段四条结论必须有真实输出为证才算验收通过。
 
@@ -20,8 +20,8 @@ WORK=/DiskArray/tmp/wangrz/sr_agent_work
 OPT=/DiskArray/tmp/wangrz/sr_utils/espan3_2026_gf04_tile500.yml
 TEST=/DiskArray/tmp/wangrz/sr_test          # 手工验证用的场景副本根（§C）
 SANDBOX=/DiskArray/tmp/wangrz/sr_sandbox    # 平台沙箱：每个作业的私有副本（§D）
-PART=gpu                                   # 2026-09-11 sinfo 实测：centos7/deicc/gpu/gpu*/test（无 gpup）
-NODELIST='node81-[129-162,165-183,185-189]'   # ⚠️ 旧口径（族白名单）。新需求=单机，§B0 定出机器名后改成那一台
+PART=gpu                                   # sinfo 实测：centos7/deicc/gpu/gpu*/test（无 gpup）
+NODELIST='node81-[129-162,165-183,185-189]'   # ⚠️ 族白名单（非单机口径）。需求=单机，§B0 定出机器名后改成那一台
 export APP BUNDLE SR_PYTHON WORK OPT TEST PART NODELIST
 
 echo "$APP"; echo "$SR_PYTHON"    # ✓= 两个空变量说明没贴全
@@ -87,7 +87,7 @@ systemctl cat sr-api | grep -nE '^Environment=(SR_BUNDLE_DIR|SR_PYTHON|SR_SLURM_
 
 > ⚠️ **别用 `systemctl show -p Environment | tr ' ' '\n' | grep '^Environment='` 数条数。**
 > `show` 只在**第一个**值前打印 `Environment=`，其余是裸的 `KEY=VAL` 空格分隔 —— 那个管道恒得 1 条，
-> 会让人误判成「env 没生效」白查半天（2026-09-10 实际踩过）。要看合并结果就 `systemctl show -p Environment`
+> 会让人误判成「env 没生效」白查半天（实际踩过）。要看合并结果就 `systemctl show -p Environment`
 > 看**原始**输出（一行列全），或用上面的 `systemctl cat`。
 
 判据最终以**运行中进程**的环境为准 —— `daemon-reload` 只重读 unit 配置，**不改已跑进程的 env**：
@@ -106,7 +106,7 @@ systemctl status sr-api --no-pager | head -5      # ✓= active (running)
 ```
 
 ✗ 少 env → 按 `deploy/sr-api.service` 注释补；改了 unit 没 `daemon-reload` 则不生效。
-✗ `SR_SLURM_FAKE=1` → D 阶段全程走内存假调度器，**四条结论全部作废**——先确认它是 0。
+✗ `SR_SLURM_FAKE=1` → D 阶段全程走内存假调度器，**四条结论都不成立**——先确认它是 0。
 
 ### 0.4 待核项（`slurm-integration.md §2.7` 的「待核」行 + 两处上机复核）
 
@@ -118,7 +118,7 @@ ls -d $BUNDLE && ls $BUNDLE/code_0817_prod.py $BUNDLE/models $BUNDLE/options $BU
 
 # (2) SR_PYTHON 里 torch / GDAL 齐不齐（是 torch1.9.1py36，不是登录 shell 的 base 环境）
 #     ⚠️ GDAL 用 VersionInfo()：py3.6 时代的 osgeo 绑定**没有** gdal.__version__，
-#     上一版这条命令因此抛 AttributeError（2026-09-11 实测），会被误读成「环境坏了」。
+#     用错会抛 AttributeError（实测），会被误读成「环境坏了」。
 $SR_PYTHON -c "import torch; from osgeo import gdal; print('torch', torch.__version__, '| gdal', gdal.VersionInfo())"
 
 # (3) 共享盘在**每一类**计算节点上都可见（gpu 分区横跨 node81-* 与 node104-* 两族，
@@ -137,11 +137,10 @@ done
 ✗ (2) import 失败 → 换解释器前**先确认**新环境里 torch/GDAL/`ImgHistMatch.so` 齐（见 service 注释）。
 ✗ (3) 某节点看不到 `$WORK` → `SR_SLURM_WORK_DIR` 不是共享盘，作业会秒挂。
 
-> **2026-09-11 修正**：原文的 (1) 要求 `$BUNDLE/util.py`、(3) 钉死 `node81-129/140`，两处都与实测不符。
-> (1) 是 `probe_slurm.sh` 的检查清单写错了（它照抄了仓库 `SR_code/util.py` 的**扁平**布局，而真机 bundle 是
-> `mmsr_bundle/codes/utils/util.py` 的**包**布局）——`bundle FAIL missing util.py` 是假 FAIL；
-> (3) 当时以为集群是 12 节点，实测 `gpu` 分区有 **76** 个节点、横跨 `node81-*` 与 `node104-*` 两族（见 §2.7）。
-> 探针已改，但**不在本轮上机**（改的是我们自己的工具，不值得为它单独跑一趟 U 盘），先按上面的 (1) 用 `ls` 直接核。
+> **两点注意**：(1) 真机 bundle 是 `mmsr_bundle/codes/utils/util.py` 的**包**布局，不是仓库 `SR_code/util.py` 那种
+> **扁平**布局；`probe_slurm.sh` 的检查清单按扁平写的，它报的 `bundle FAIL missing util.py` 是假 FAIL。
+> (3) `gpu` 分区有 **76** 个节点、横跨 `node81-*` 与 `node104-*` 两族（见 §2.7），命名里钉死具体节点名没有意义。
+> 核 bundle 用上面的 (1) 直接 `ls`。
 
 ### 0.5 沙箱目录
 
@@ -155,7 +154,7 @@ sudo -u nginx touch $TEST/w && echo "nginx-can-write-OK"
 
 ### 0.6 库目录（`write-db FAIL` 的修法，D 阶段前必做）
 
-2026-09-11 探针实测：`PROBE: write-db FAIL nginx CANNOT write /run/media/root/SSD/workspace/wangrz/sr-agent-platform`。
+探针实测：`PROBE: write-db FAIL nginx CANNOT write /run/media/root/SSD/workspace/wangrz/sr-agent-platform`。
 **这是真问题**（同一次运行里 `write-work OK` 走的是同一条 `sudo -n -u nginx test -w` 分支，说明前者的
 FAIL 不是 `sudo` 假阴性）：平台的 `SR_AGENT_DB` 落在应用解压根里，而解压根属 root，nginx 写不动。
 [`store.py:88-99`](../../backend/services/store.py#L88-L99) 是懒打开——首次用到就 `makedirs(parent)` →
@@ -198,7 +197,7 @@ tr '\0' '\n' < /proc/$PID/environ | grep '^SR_AGENT_DB'
 ✗ `nginx` 建库仍失败 → 该目录所在文件系统的 SELinux 语境或挂载不允许写；换本地盘目录（如 `/var/lib/sr-agent-platform`）。
 
 > 两处**故意不做**的事：不把库留在应用树里（那是 root 的树，给 nginx 写权等于把代码目录交给服务进程）；
-> 不为了绕过权限而 `chown -R nginx` 整棵应用树（`real-machine-bringup.md §2.2` 的老建议，已被本节取代）。
+> 不为了绕过权限而 `chown -R nginx` 整棵应用树。
 > NFS 上的 SQLite 只允许单主机单进程写：本平台只有 node81-135 跑 `sr-api`，成立；日后多机要换存储。
 
 ---
@@ -218,7 +217,7 @@ sh $APP/deploy/slurm/probe_slurm.sh
 ✗ `scontrol-ping FAIL` / `munge-auth FAIL` → 集群本身不通，先修 H-PING / H-MUNGE。
 ✗ `write-work FAIL`（nginx 不能写 `$WORK`）→ `chown nginx:nginx $WORK`；这是 D 阶段必踩的坑。
 ✗ `write-db FAIL`（nginx 不能写库父目录）→ 按 **§0.6** 把库移出应用树；不改则 D 阶段队列/会话全废。
-✗ `bundle FAIL missing util.py` → **假 FAIL**（探针检查清单写错，见 §0.4 的 2026-09-11 修正），
+✗ `bundle FAIL missing util.py` → **假 FAIL**（探针检查清单写错，见 §0.4 的说明），
 改用 §0.4(1) 的 `ls $BUNDLE/utils/util.py` 直接核。
 
 **GPU 分配形态（可选项，默认不跑）**——`--deep` 会**真的提交一个 2 分钟作业**，只在复核 E3 兜底或 B2 有疑问时才跑：
@@ -229,13 +228,13 @@ sh $APP/deploy/slurm/probe_slurm.sh --deep     # ⚠️ 默认不跑
 
 `record:` 两种模式的完整输出都贴回（SUMMARY + HINTS 段必须有）
 
-### A 记录（2026-09-11 探针 + 09-14 env/节点/提交三查）
+### A 记录（探针 + env/节点/提交三查）
 
-**探针**（`probe_slurm.sh` @ `fb1cce1e…`，真机）：`OK=19 WARN=3 FAIL=5`。逐条判读：
+**探针**（`probe_slurm.sh`，真机）：`OK=19 WARN=3 FAIL=5`。逐条判读：
 
 - **预期非 OK**（不算故障）：`sacct` / `sacct-parse` FAIL（账务关闭）、`assoc` / `assoc-nginx` WARN（同因）、
   `write-lq` FAIL + `write-lq-debug` WARN（`SR_SCENES_ROOT=/data/scenes` 在本机不存在 = 遗留一）。
-- `bundle FAIL missing util.py` → **假 FAIL**，探针自己的检查清单写错（§0.4 修正）。
+- `bundle FAIL missing util.py` → **假 FAIL**，探针自己的检查清单写错（§0.4）。
 - `write-db FAIL` → **真问题**，修法见 §0.6。
 - 集群：`gpu` 分区 76 节点、`sinfo -N` 96 行、控制器 node81-190、`node81-133/134/135/136` 为 `down`（本机 `down*`）。
 
@@ -270,14 +269,13 @@ sh $APP/deploy/slurm/probe_slurm.sh --deep     # ⚠️ 默认不跑
 
 ```
 041bea73…474a9  30695 B  code_0817_prod_slurm.py   ← 与 provenance.json 的 variant.sha256 一致
-92e400a7…3505d  16419 B  verify_sr_run.py           ← ⚠️ 已过期：机上那份是旧版
+92e400a7…3505d  verify_sr_run.py                   ← ⚠️ 机上那份是旧版
 ```
 
-> ⚠️ **2026-09-15：`verify_sr_run.py` 仓库副本已变**（退出码文件的编码锁定，见
-> [timeline-archive.md](timeline-archive.md) 2026-09-15 条目）：新值 **17164 B /
-> `5fa627d8…`**。机上那份 16419 B 的**行为仍正确**（`A/B/C` 不受影响），但少了两处
-> `-export=NONE` + 非 UTF-8 locale 下才暴露的编码保护 → 重启 Slurm 走 **D** 之前必须重新拷一次。
-> 变体 `code_0817_prod_slurm.py` 未改动，§0.2 的变体比对（含 `provenance.json`）继续有效。
+> ⚠️ `verify_sr_run.py` 仓库副本的当前值是 **17164 B / `5fa627d8…`**（退出码文件的编码锁定）。
+> 机上那份 16419 B 的**行为仍正确**（`A/B/C` 不受影响），但少了两处 `-export=NONE` + 非 UTF-8 locale
+> 下才暴露的编码保护 → 重启 Slurm 走 **D** 之前必须重新拷一次。
+> §0.2 的变体比对（含 `provenance.json`）继续有效。
 
 **其他实测**：
 
@@ -289,18 +287,17 @@ sh $APP/deploy/slurm/probe_slurm.sh --deep     # ⚠️ 默认不跑
   但两次探测都撞上它（它是该族里第一个 idle 节点）。已知影响面：`srun`（客户端直连）必失败；
   `sbatch` 作业由控制器→slurmd 拉起，方向不同、**未验证**是否受影响。待办：向集群管理员报；B/C 里作业若莫名失败，
   先 `scontrol show job <id>` 看落在哪台。
-- **未验完的一项**：`node104` 族只验到 `$BUNDLE` 可见（09-11 node104-04，`$WORK` 那行输出被截断）。
+- **未验完的一项**：`node104` 族只验到 `$BUNDLE` 可见（node104-04，`$WORK` 那行输出被截断）。
 
 `✓= A 通过` 的判据：补齐 ①、删掉 ②、§0.6 库目录修完，且**至少一个** `node81-*` 节点报
 `WORK_OK` + `BUNDLE_OK`（`node104-*` 那一族的验证改由 **B0** 承担，原因见下段）。
 
-**A 收尾确认（2026-09-14 第二轮）**：
+**A 收尾确认**：
 
 - `systemctl cat`/两个 unit 文件里 `SR_SCRIPT_PATH` **已搜不到**（`grep -rn` 空输出），
-  `/DiskArray/prod_slurm.py` 也不存在 → ② 闭合。（注：上一轮 `systemctl cat` 的输出里出现过这一行，
-  本轮两个文件里都没有 —— 要么两轮之间被移走了，要么上一轮那行是转写误差；**两种情况下现状都已确认为干净**。）
+  `/DiskArray/prod_slurm.py` 也不存在 → ② 闭合。现状已确认干净。
 - 变体自检：`sha256sum -c` 对 `code_0817_prod_slurm.py` 与 `verify_sr_run.py` 均 **OK**
-  → `$BUNDLE` 里这两个文件与仓库 `SR_code/variants/` 逐字节相同（A 阶段冻结合同仍然成立）。
+  → `$BUNDLE` 里这两个文件与仓库 `SR_code/variants/` 逐字节相同（冻结合同仍然成立）。
 - drop-in 生效（以 `/proc/<pid>/environ` 为证）：`SR_SR_SCRIPT=code_0817_prod_slurm.py`、
   `SR_AGENT_DB=/DiskArray/tmp/wangrz/sr_agent_db/sr_agent.db`、`SR_VERIFY_SCRIPT=verify_sr_run.py` → ① 闭合。
 - 老库存在并已 `cp -p` 到新目录（打印 `migrated`）。
@@ -319,17 +316,17 @@ D 阶段出事时就能立刻排除掉这三层。
 
 > **B1–B3 与部署方向无关，可以先跑**：它们验的是 `--export=NONE` 下的解释器 import、`--gres` 的分配形态、
 > 退出码文件落盘 —— 方向①（集群 + 锁单机）与方向②（本机单节点 Slurm）**都要这三条结论**。
-> 这里用 §0.0 的 `$NODELIST`（暂时仍是族口径）只是让作业有个落点；真正的单机锁定等方向定了再说（见 §B0）。
+> 这里用 §0.0 的 `$NODELIST`（族口径）只是让作业有个落点；单机锁定见 §B0。
 
 ### B0 · 先定方向：那台 4 卡机在集群里能不能被调度（**只读，不提交作业**，⏱ 30 秒）
 
-> **需求（用户 2026-09-14 定，优先于本清单此前所有口径）**：所有作业**只跑在同一台 4×3090 物理机内**，
+> **需求**：所有作业**只跑在同一台 4×3090 物理机内**，
 > **不调度到其他服务器**；Slurm 的角色收窄为**本机排队 + 按单卡分配 GPU**。部署方向二选一：
 > **①** 复用现有集群，用 `#SBATCH --nodelist=` 锁定那台机器；**②** 在**本机自建单节点 Slurm**
-> （无跨节点依赖，同时规避跨主机域名解析问题）。**方向还没定** —— 由下面三条命令定。
+> （无跨节点依赖，同时规避跨主机域名解析问题）。**方向由下面三条命令定。**
 
 **为什么先跑这三条、再跑 B1–B3**：B1–B3 要么把作业钉在 `--nodelist` 上、要么依赖「作业能落到某台机器」，
-而**把作业钉在一台 `down` 的节点上 = 一直排队**（不是失败，是白等）。A 记录里已经有半条坏消息：
+而**把作业钉在一台 `down` 的节点上 = 一直排队**（不是失败，是白等）。A 记录里的相关事实：
 `node81-133/134/135/136` 是 `down`，**本机 node81-135 是 `down*`**。所以先花 30 秒把三件事问清楚：
 
 ```bash
@@ -356,11 +353,7 @@ which slurmctld slurmd munge 2>&1; systemctl is-active slurmd 2>&1; ss -lntp 2>/
 
 ✓= 三条输出到手 → 才谈方向①/② 的取舍（那是一个需要拍板的岔路，不是判读能自动得出的结论）。
 
-> **旧 B0 已退役**（备查，不再跑）：它用 `sbatch -w node104-27 … --wrap 'hostname'` 验 node104 族
-> 能不能跑作业，是**为「node81 族白名单」口径服务的**。新需求是单机，作业根本不落在 node104 族，
-> 结论不再影响任何决策。真想上报集群侧解析问题时再翻出来用。
-
-### B1 · `--export=NONE` 会不会切断 `LD_LIBRARY_PATH`（P2 遗留必验项 V1）
+### B1 · `--export=NONE` 会不会切断 `LD_LIBRARY_PATH`（必验项 V1）
 
 ```bash
 sudo -u nginx sbatch --parsable --job-name=acc_b1 -p $PART --gres=gpu:1 --nodelist=$NODELIST \
@@ -390,7 +383,7 @@ sudo -u nginx sbatch --parsable --job-name=acc_b2 -p $PART --gres=gpu:1 --nodeli
   --wrap 'echo "JOB=${SLURM_JOB_ID} GPUS=${SLURM_JOB_GPUS:-<unset>} CVD=${CUDA_VISIBLE_DEVICES:-<unset>} HOST=$(hostname)"; nvidia-smi --query-gpu=index,uuid --format=csv,noheader'
 ```
 
-✓= `CVD` 非空（P1 探针实测注入的是**整数**，如 `0`）；`nvidia-smi` 至少一行
+✓= `CVD` 非空（探针实测注入的是**整数**，如 `0`）；`nvidia-smi` 至少一行
 
 ✗ `CVD=<unset>` → 分配没落地，回 A 的 `gres-gpu` / `config` 行。
 ✗ `GPUS=<unset>` 是**已知形态**（探针实测），不影响运行——`<GPUIDS>` 在变体里只作审计字段，不选卡。
@@ -493,9 +486,9 @@ sudo -u nginx srun -N1 -n1 -p $PART --gres=gpu:1 --time=01:00:00 sh -c "
   $SR_PYTHON verify_sr_run.py --config $CFG --sr-exit-code \$_rc ; echo \"verifier_rc=\$?\""
 ```
 
-> `<Suffix>acc</Suffix>` 是**非空**后缀，本轮一律如此——空 `<Suffix/>` 是已知破坏性语义
-> （输出名 == 输入名 ⇒ 被改名/删除的是输入本身），见契约 §2.4 第 1 条，本批不修。
-> 本轮期望的目录变化只有三处新增：`<目录名>_acc.tif`、`Debug/` 下的日志与退出码文件、
+> `<Suffix>acc</Suffix>` 是**非空**后缀，一律如此——空 `<Suffix/>` 是已知破坏性语义
+> （输出名 == 输入名 ⇒ 被改名/删除的是输入本身），见契约 §2.4 第 1 条。
+> 期望的目录变化只有三处新增：`<目录名>_acc.tif`、`Debug/` 下的日志与退出码文件、
 > meta.xml 更新；输入 `<目录名>.tif` 的 mtime 不变。
 
 ✓= 四条同时成立：
@@ -533,8 +526,8 @@ print(build_batch_script('/w/c.xml','/w'))" | sed -n '1,22p'
 **D 阶段通例**（每条都要遵守，否则测出来的不是我们想测的东西）
 
 1. **`suffix` 必须非空**（`acc-d1` / `acc-d2` / `acc-d3` / `acc-d4`）。空 suffix 会把**输入改名**，
-   这是破坏性的（契约 §2.4 第 1 条）。逐条不同不再是硬要求（09-10 起配置文件按
-   `run_sr_<suffix>_<任务指纹前12位>.xml` 命名，同 suffix 的不同任务不再互相覆盖），
+   这是破坏性的（契约 §2.4 第 1 条）。逐条不同不是硬要求（配置文件按
+   `run_sr_<suffix>_<任务指纹前12位>.xml` 命名，同 suffix 的不同任务不互相覆盖），
    但逐条不同能让日志好读。
 2. `lq_path`：配了 `SR_SANDBOX_ROOT` 就**可以指生产目录**（平台在作业第一步自建副本，生产只读）；
    D1/D3 这类要造故障的用例仍指 `$TEST` 下手工弄坏的副本 —— 拿好数据去制造坏结果没有意义。
@@ -607,8 +600,8 @@ curl -s -X POST http://127.0.0.1:8000/api/queue -H 'content-type: application/js
   `Debug/` 是否 nginx 可写（B3）。**沙箱开着时 `Debug/` 在副本里**——那说明沙箱没建成，
   看作业 `.err` 有没有 `sandbox copy failed` / `sandbox copy incomplete`。
 ✗ (b) `COMPLETED` → 校验器没被执行。按 D0 复核批脚本里的两行调用，并确认 `$BUNDLE/verify_sr_run.py` 存在。
-✗ (c) 回 `RESUMED_COMPLETED` → 平台把「退出码 0」当成了成功（正是本轮要消灭的行为），说明跑的还是旧
-  `backend/services/slurm.py`：确认 `$APP/backend` 已更新到本批版本后 `systemctl restart sr-api`。
+✗ (c) 回 `RESUMED_COMPLETED` → 平台把「退出码 0」当成了成功（正是校验器要消灭的行为），说明跑的还是旧
+  `backend/services/slurm.py`：确认 `$APP/backend` 已更新到当前版本后 `systemctl restart sr-api`。
 
 ### D2 · 幂等回归（活跃态 RESUMED_ACTIVE / 终态 RESUMED_COMPLETED，且不产生第二个 job_id）
 
@@ -699,7 +692,7 @@ curl -s -X POST http://127.0.0.1:8000/api/queue -H 'content-type: application/js
 
 `record:` SRLOG 末两行；退出码文件全文；两次 POST 的 status/job_id
 
-✗ 队列显示 `FAILED` → 校验器把跳过判成了不满足：确认 `$BUNDLE/verify_sr_run.py` 是本批版本
+✗ 队列显示 `FAILED` → 校验器把跳过判成了不满足：确认 `$BUNDLE/verify_sr_run.py` 是当前版本
   （`RUN_SKIPPED_PREFIX` 分支），且 SRLOG 末行确实是 `Run skipped:`。
 ✗ SRLOG 末行不是 `Run skipped:` → 跑的还是原脚本（原脚本在这里是**无 SRLOG 的 exit(0)**，会落进 D1 的失败路径）。
   复核 §0.2 的横幅。

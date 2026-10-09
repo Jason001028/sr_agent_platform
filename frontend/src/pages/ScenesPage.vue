@@ -38,7 +38,7 @@ function dimsText(row: { W: number | null; H: number | null }): string {
 }
 
 /** 「上次检索」读数的时刻：当天只给 HH:MM，跨天带上 MM-DD。
- *  列表不再每次进入都刷新（见 store.ensureSearched），所以得让用户看得出这份数据
+ *  列表不每次进入都刷新（见 store.ensureSearched），所以得让用户看得出这份数据
  *  是什么时候的 —— 别把它当成刚扫过的盘阵。 */
 function stampText(d: Date): string {
   const p = (n: number) => String(n).padStart(2, '0');
@@ -49,11 +49,10 @@ function stampText(d: Date): string {
   return sameDay ? hm : `${p(d.getMonth() + 1)}-${p(d.getDate())} ${hm}`;
 }
 
-// **只在还没检索过时**发一次检索：每次进入都重检索会把上一轮「清除缓存」的结果当场
+// **只在还没检索过时**发一次检索：每次进入都重检索会把上一次「清除缓存」的结果当场
 // 抹掉（摘掉的行全回来、汇总行消失），用户看到的就是「清除没生效」（见 store 里
 // ensureSearched 的注释）。「还没检索过」由 sessionStorage 里那份快照判（store 的
-// restoreSnapshot），所以**整页刷新也算没检索过**：2026-09-28 用户报的「清完一刷新
-// 那几景又冒出来」正是漏了刷新这一半。要拿最新的盘阵数据按「检索」。
+// restoreSnapshot），所以**整页刷新也算没检索过**。要拿最新的盘阵数据按「检索」。
 onMounted(() => { scenes.ensureSearched(); });
 </script>
 

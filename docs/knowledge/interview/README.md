@@ -5,16 +5,16 @@
 
 ## 本系列文档一览
 
-| 文档 | 主题 | 覆盖 | 状态 |
-|---|---|---|---|
-| [js-ts.md](docs/knowledge/interview/js-ts.md) | JavaScript + TypeScript | 事件循环/Promise/闭包/原型/类型系统/TypedArray | 子任务产出 |
-| [vue.md](docs/knowledge/interview/vue.md) | Vue3 | 响应式 Proxy/render/ref vs reactive/computed/Pinia/组合式 | 子任务产出 |
-| [browser-canvas.md](docs/knowledge/interview/browser-canvas.md) | 浏览器 + 渲染 + 内存 + Canvas | URL→渲染/重排重绘/内存与超大数组/Canvas 上限/离线/SSE | 子任务产出 |
-| [http-sse.md](docs/knowledge/interview/http-sse.md) | HTTP + REST + SSE/WebSocket | 方法/状态码/幂等/缓存/CORS/HTTPS/推送选型/nginx 反代 | 子任务产出 |
-| [python-concurrency.md](docs/knowledge/interview/python-concurrency.md) | Python + 并发/异步 | GIL/线程进程协程/asyncio/FastAPI 两种 def/注入缝 | 子任务产出 |
-| [db-storage.md](docs/knowledge/interview/db-storage.md) | 存储 + 数据库 + Redis | ACID/隔离/索引/SQLite/幂等表/Redis 数据结构与缓存 | 子任务产出 |
-| [fastapi-rest.md](docs/knowledge/interview/fastapi-rest.md) | FastAPI + REST/SSE 实现 | 路径操作/Pydantic/def vs async def/StreamingResponse/SSE 线程桥/幂等端点 | 自写（含仓库真例） |
-| [project-deep-dive.md](docs/knowledge/interview/project-deep-dive.md) | 用本仓库讲项目 | 30 秒稿/难点问答/追问防守/薄弱点/反问 | 自写（含仓库真例） |
+| 文档 | 主题 | 覆盖 |
+|---|---|---|
+| [js-ts.md](docs/knowledge/interview/js-ts.md) | JavaScript + TypeScript | 事件循环/Promise/闭包/原型/类型系统/TypedArray |
+| [vue.md](docs/knowledge/interview/vue.md) | Vue3 | 响应式 Proxy/render/ref vs reactive/computed/Pinia/组合式 |
+| [browser-canvas.md](docs/knowledge/interview/browser-canvas.md) | 浏览器 + 渲染 + 内存 + Canvas | URL→渲染/重排重绘/内存与超大数组/Canvas 上限/离线/SSE |
+| [http-sse.md](docs/knowledge/interview/http-sse.md) | HTTP + REST + SSE/WebSocket | 方法/状态码/幂等/缓存/CORS/HTTPS/推送选型/nginx 反代 |
+| [python-concurrency.md](docs/knowledge/interview/python-concurrency.md) | Python + 并发/异步 | GIL/线程进程协程/asyncio/FastAPI 两种 def/注入缝 |
+| [db-storage.md](docs/knowledge/interview/db-storage.md) | 存储 + 数据库 + Redis | ACID/隔离/索引/SQLite/幂等表/Redis 数据结构与缓存 |
+| [fastapi-rest.md](docs/knowledge/interview/fastapi-rest.md) | FastAPI + REST/SSE 实现 | 路径操作/Pydantic/def vs async def/StreamingResponse/SSE 线程桥/幂等端点 |
+| [project-deep-dive.md](docs/knowledge/interview/project-deep-dive.md) | 用本仓库讲项目 | 30 秒稿/难点问答/追问防守/薄弱点/反问 |
 
 ## 复习路径（建议顺序）
 
@@ -29,7 +29,7 @@
 
 - 教程（因果全貌）：[platform-tutorial.md](docs/knowledge/platform-tutorial.md)
 - 踩坑档案（真实 bug 细节）：[gui-experience.md](docs/experience/gui-experience.md)
-- 平台决策与阶段：状态 [current-question.md](docs/status/current-question.md)、阶段需求 [frontend-phase4-phase5-prompts.md](docs/planning/frontend-phase4-phase5-prompts.md)
-- API 契约（阶段5 评审中）：[api-contract.md](docs/planning/api-contract.md)
+- 平台状态与决策：[current-question.md](docs/status/current-question.md)；需求：[frontend-phase4-phase5-prompts.md](docs/planning/frontend-phase4-phase5-prompts.md)
+- API 契约：[api-contract.md](docs/planning/api-contract.md)
 
 > 用法提醒：面试题本质是**沟通题**——每题的"答"按 30~60 秒讲完练习；讲项目的"数字/取舍"背到脱口而出。题库覆盖不了的地方，随时可让 Claude 扮演面试官出题、你作答、它点评。

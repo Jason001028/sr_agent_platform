@@ -12,7 +12,7 @@ SR_TEMP_PREVIEWS_ROOT 拖拽入口的**兜底**预览缓存根（1 天 TTL，每
                   （见 services/preview_cache.py 的约定）
 
 预览下采样档位：三条入口（拖入 / 场景库 / 粘盘阵路径）都由查询参数 `div` 指定，
-取值限 `preview_jpg.PREVIEW_DIVISORS`（各边 ÷2…÷32），缺省 2（= 旧行为，逐字节不变）。
+取值限 `preview_jpg.PREVIEW_DIVISORS`（各边 ÷2…÷32），缺省 2（= 各边 1/2 那一档，逐字节不变）。
 「默认 ÷4」只是**前端**的 UI 默认值，不是本层的契约。
 SR_AGENT_DB       SQLite 路径（chat 会话 + sr_tasks 同一库）
 SR_LLM_MOCK       =1 → 聊天走固定脚本假 LLM（api-contract.md §5.1）
@@ -25,7 +25,7 @@ SR_PRODUCT_PREVIEW_DIV
                   的档位在 localStorage，服务端看不见，所以主动生成必须有服务端默认档。
 SR_PRODUCT_PREVIEW_MAX_AGE_SEC
                   只生成 `finished_at` 在这个窗口内的 COMPLETED 行，缺省 86400。
-                  这是升级当天不把历史 COMPLETED 行全生成一遍的唯一屏障。
+                  这是不把窗口外的历史 COMPLETED 行全生成一遍的唯一屏障。
 SR_API_HOST/PORT  仅 `python -m backend.api` 直启用
 """
 
@@ -74,8 +74,7 @@ def _cached_dims(abs_path: Path) -> dict | None:
 
     None 而不是抛异常，是和 `scene_dims` 对齐的：这个函数的语义是「能读就读，
     读不出就不知道」，而「不知道」在调用方那里都有明确且正确的去向（行不带 W/H、
-    比较判不出就不换图）。以前这里是直接 stat，调用方全都先验证过文件存在所以
-    从没撞上；`_raster_preview` 是第一个可能拿到不存在路径的调用方
+    比较判不出就不换图）。`_raster_preview` 可能拿到不存在的路径
     （盘阵那份显示件 jpg 被删/改名，用户手上只有本地副本）—— 那种情况该退化成
     「不换图」，不该把整个 resolve 打成 500。
     """
@@ -225,7 +224,25 @@ def _scene_row(scene: dict, root: Path | None) -> dict:
 
     # disk 行：路径必须过白名单（扫描本身已保证在根内，双保险再拦一次）
     abs_path = paths.ensure_within(scene["path"], root)
-    dims = _cached_dims(abs_path)
+    # 显示件 jpg 的行：W/H 取**它显示的那份栅格**的尺寸，不取 jpg 自己的。
+    #
+    # 这不是显示口径，是掩码口径。前端把行上这个 W/H 当「全分辨率」：画在预览上的
+    # 坐标由 `viewMath.thumbToOrig` 按它换回去（`rec.W/H`），`POST /api/masks` 又
+    # 按它建栅格化画布。真机那份显示件长边 8192，栅格是两万多 —— 拿 8192 当全
+    # 分辨率，写进场景目录的掩码就只有显示件那么大，而 SR 侧是「分辨率须与输入
+    # 图像一致，否则局部超分被静默跳过」（docs/sr_code/sr-pipeline-interface.md）：
+    # 那一趟看起来跑完了，实际上什么都没做。
+    #
+    # 口径与**拖入链**同源：那条路的 W/H 取自 `stage_of_jpg` 交出来的那份栅格
+    # （见 `_resolve` 的 finish）——同一景的同一张图，两条入口必须给出同一个尺寸，
+    # 否则「场景库打开的」与「拖进来的」掩码落点不同，用户还以为平台在飘。
+    #
+    # 同级没有栅格（盘阵上不该有：那份栅格正是「这条 jpg 是某个环节的显示件」的
+    # 判据）时退回 jpg 自己的尺寸：平台不知道它代表多大的一张图，就不编。
+    src = abs_path
+    if abs_path.suffix.lower() in (".jpg", ".jpeg"):
+        src = scene_search.sibling_raster_path(abs_path) or abs_path
+    dims = _cached_dims(src)
     if dims:
         row["W"], row["H"] = dims["W"], dims["H"]
     rel = paths.rel_of_scene(abs_path, root)
@@ -237,7 +254,7 @@ def _scene_row(scene: dict, root: Path | None) -> dict:
     row["lq_path"] = abs_path.parent.as_posix()
     if abs_path.suffix.lower() in (".jpg", ".jpeg"):
         # 盘阵里的 JPG 就是显示就绪图本身（§4.7）：不需要生成预览，
-        # jpgUrl 直接指向源文件，前端拿到即开（不再走 /preview 生成端点）。
+        # jpgUrl 直接指向源文件，前端拿到即开（不走 /preview 生成端点）。
         row["hasPreview"] = True
         row["jpgUrl"] = paths.rel_url(abs_path, root)
         # previewDiv 留 None：这不是生成的的预览，不参与档位（前端靠 jpgUrl
@@ -364,7 +381,7 @@ def _product_preview_div() -> int:
 def _product_preview_max_age() -> float:
     """主动生成的年龄窗口（秒）。读不出 / 负数 → 默认值。
 
-    这是升级当天不把历史 COMPLETED 行全生成一遍的**唯一**屏障：`preview_state` 补列
+    这是不把窗口外的历史 COMPLETED 行全生成一遍的**唯一**屏障：`preview_state` 补列
     后老行全是 NULL，而 NULL 的含义就是「没生成过」。
     """
     raw = (os.environ.get("SR_PRODUCT_PREVIEW_MAX_AGE_SEC") or "").strip()
@@ -403,7 +420,7 @@ async def _eager_preview_loop(state) -> None:
 
 def _eager_bake_tick(state) -> None:
     """生成**一件**产物的预览（同步函数，由 `to_thread` 调用），外加该场景未超分那
-    一份（`_bake_nosr_preview`，2026-09-21 用户口径：超分跑完就同时把它生成的）。
+    一份（`_bake_nosr_preview`，用户口径：超分跑完就同时把它生成的）。
 
     每轮只生成一件是**有意选的**：÷4 生成一份 40000² 产物的峰值内存约 400MB、要把整个
     文件读一遍，并发会把内存乘上去、把盘阵的带宽占满。单消费者 + 并发 1 的代价只是
@@ -422,7 +439,7 @@ def _eager_bake_tick(state) -> None:
         if task is None:
             continue        # 被别处抢先认领，或这行在认领的空隙里被重交了
         _bake_product_preview(state, task, div)
-        # 同时生成**未超分**那一份（用户 2026-09-21 口径）。它与本行的结论无关，
+        # 同时生成**未超分**那一份（用户口径）。它与本行的结论无关，
         # 所以不碰 preview_state / 不广播，只写盘 + 打一行 stdout 供排查。
         print(f"[nosr-preview] task={task.get('task_id')} "
               f"{_bake_nosr_preview(task, div)}")
@@ -446,10 +463,10 @@ def _finish_preview(state, task: dict, state_name: str, note: str) -> None:
 
 
 def _sweep_legacy_preview(jpg: Path, source: Path) -> None:
-    """把改名前的点号那份删掉（2026-09-22 起预览只有一个名字）。
+    """把点号那份（`paths.legacy_preview_path`）删掉 —— 预览只用下划线那一个名字。
 
     只在**这次真的处理到这份栅格**时调用（算出落点之后 / 写盘或命中缓存之后），
-    不列目录、不做全盘扫描 —— 「后端不列目录」那条红线照旧。删不掉（权限、被占用）
+    不列目录、不做全盘扫描 —— 「后端不列目录」那条红线不变。删不掉（权限、被占用）
     就算了：这是纯清理，不是任何结论的前提。源自己就叫那个点号名时跳过。
     """
     legacy = paths.legacy_preview_path(jpg)
@@ -468,12 +485,11 @@ def _bake_product_preview(state, task: dict, div: int) -> None:
     而产物是刚刚跑完的、几乎一定会被打开。三份落点天然独立
     （输入影像 `<stem>_preview.jpg`、产物 `<产物 stem>_preview.jpg`、
     NOSR `…_NOSR_preview.jpg`），
-    各生成各的，互不覆盖。**未超分那一份由 `_bake_nosr_preview` 另生成**（2026-09-21
-    用户口径），本函数的结论一个字都不为它改 —— 两份的结局各自独立。
+    各生成各的，互不覆盖。**未超分那一份由 `_bake_nosr_preview` 另生成**（用户口径），
+    本函数的结论一个字都不为它改 —— 两份的结局各自独立。
 
     落点与拖入链、未超分那两份**同一个名字**（`<产物 stem>_preview.jpg`）——
-    2026-09-22 起点号那份（`<产物 stem>.preview.jpg`）不再产出，由
-    `_sweep_legacy_preview` 同时删掉。
+    点号那份（`<产物 stem>.preview.jpg`）不产出，由 `_sweep_legacy_preview` 顺手删掉。
     """
     params = task.get("params") or {}
     lq_path = params.get("lq_path")
@@ -530,7 +546,7 @@ def _bake_product_preview(state, task: dict, div: int) -> None:
         return
 
     jpg = paths.preview_jpg_for(product, state.scenes_root)
-    # 老点号那份在这里就该消失（本次要么覆盖它、要么它本来就没人读了）
+    # 点号那份在这里就该消失（本次要么覆盖它、要么它本来就没人读了）
     _sweep_legacy_preview(jpg, product)
     # 用户在主动生成动手之前先打开过这份产物：盘上那份已是当前档位，重新生成纯属白干
     # （几十秒 + 读遍 GB 级文件）。判据与惰性路径**同一个函数**，没有第二套。
@@ -568,11 +584,10 @@ def _bake_product_preview(state, task: dict, div: int) -> None:
 def _bake_nosr_preview(task: dict, div: int) -> str:
     """同时生成一份**未超分**那份栅格的预览 → `<场景目录>/<输入 stem>_NOSR_preview.jpg`。
 
-    用户口径（2026-09-21 提出，2026-09-24 定名）：没超分的那份 tif 叫
+    用户口径：没超分的那份 tif 叫
     `<输入影像的 stem>_NOSR.tif` —— SC 场景是 `<目录名>_NOSR.tif`，RC 场景是
     `PAN_NOSR.tif`。名字**只由 `scene_search.nosr_candidates` 一处给出**（候选
-    有序，次选是 `writeTiff` 改名留下的上一次产物），本函数不再自己拼名字 ——
-    以前这里硬编码成 `PAN_NOSR.tif`，SC 场景于是永远走 `skipped`。
+    有序，次选是 `writeTiff` 改名留下的上一次产物），本函数不自己拼名字。
     按**全局档位**下采样即可，不分支。落点直接复用拖入链那条规则
     （`paths.drop_preview_path`：`<源同目录>/<源 stem>_preview.jpg`），所以文件名
     天然是 `<输入 stem>_NOSR_preview.jpg` —— 与「一份栅格一份预览、名字由源 stem
@@ -602,7 +617,7 @@ def _bake_nosr_preview(task: dict, div: int) -> str:
     if not os.access(str(scene_dir), os.W_OK):
         return f"skipped: {scene_dir} 对服务账号不可写"
     out = paths.drop_preview_path(source)
-    _sweep_legacy_preview(out, source)      # 老点号那份（打开过这张图才有）同时删掉
+    _sweep_legacy_preview(out, source)      # 点号那份（打开过这张图才有）同时删掉
     # 盘上那份已是当前档位就不重新生成（同 suffix 反复迭代时省掉每次读遍 GB 级文件）。
     # 判据与打开链/产物那份**同一个** cache_hit，没有第二套。
     try:
@@ -650,7 +665,7 @@ def _latest_completed_suffix(store, lq_path: str) -> str | None:
 
 
 # --------------------------------------------------------------------------
-# 人工清除预览缓存（场景库「清除选定 / 全部清除」，2026-09-22）
+# 人工清除预览缓存（场景库「清除选定 / 全部清除」）
 # --------------------------------------------------------------------------
 #: 一次最多清多少个场景 id（前端「全部清除」按当前检索结果发，limit 上限 500）。
 _CLEAR_MAX_IDS = 500
@@ -920,8 +935,8 @@ def _fingerprint_mismatch(inp: Path, name: str, size_bytes: int) -> str | None:
       所以拿它的名字去比栅格输入的 stem 是比错了对象 —— 纯 RC 场景（目录里只有
       `PAN.tif`）下 `inp.stem` 是 `PAN`，而显示件叫 `<目录名>.jpg`（生产全名），
       永远比不过，于是「拖 jpg」这条入口恰恰在 SR 真要跑的那些场景上恒 404
-      （2026-09-18 复现确认）。字节数那一半对 JPG 本就无意义（两份不同产物），
-      照旧不比。
+      （复现确认）。字节数那一半对 JPG 本就无意义（两份不同产物），
+      一律不比。
     """
     want = strip_raster_ext(name)
     if Path(name).suffix.lower() in (".jpg", ".jpeg"):
@@ -962,7 +977,7 @@ _LEVEL_SAT = "sat"      # 卫星型号层
 _LEVEL_MID = "mid"      # 段级产品目录（景级目录名去掉景号那段）
 _LEVEL_SCENE = "scene"  # 景级 = 场景目录
 _LEVEL_BELOW = "below"  # 场景目录内部的子目录
-_LEVEL_FLAT = "flat"    # 旧扁平形态里的场景目录（`<年>/<月>/<日>/<生产名>`）
+_LEVEL_FLAT = "flat"    # 扁平形态里的场景目录（`<年>/<月>/<日>/<生产名>`）
 
 _LEVEL_DESC = {
     _LEVEL_DAY: "这是日期目录（<年>/<月>/<日>）",
@@ -991,10 +1006,9 @@ def _dir_level(d: Path) -> str | None:
 def _why_not_scene_dir(d: Path) -> str:
     """目录在、却不是场景目录时，说清**差在哪一层**（并进 404 的原因清单）。
 
-    这里以前一律报「缺 <目录名>_meta.xml」，于是粘日期目录
-    （`…/PRODUCT/2026/09/18`）得到的是「缺 18_meta.xml」：`<目录名>_meta.xml`
-    的前缀是**完整生产名**（含 14 位成像时刻），`18` 这类前缀根本不可能构成它，
-    用户读完也仍不知道该怎么办。
+    只报「缺 <目录名>_meta.xml」的话，粘日期目录（`…/PRODUCT/2026/09/18`）得到的
+    会是「缺 18_meta.xml」：`<目录名>_meta.xml` 的前缀是**完整生产名**（含 14 位成
+    像时刻），`18` 这类前缀根本不可能构成它，用户读完也仍不知道该怎么办。
 
     层数由 `production_tree_depth` + `flat_scene_layout`（纯词法）判、名字由
     `looks_like_scene_name` 判，**两者都不参与准入** —— 准入仍是
@@ -1172,7 +1186,7 @@ def create_app() -> FastAPI:
         """
         body = await _json_body(request)
         # 拖拽入口的可选双指纹（{name} 分支才用得上，见 _fingerprint_mismatch）：
-        # 给了就必须是正整数；不给则一切照旧（粘路径 / 场景库不走这里）。
+        # 给了就必须是正整数；不给则不启用双指纹（粘路径 / 场景库不走这里）。
         size_bytes = body.get("size_bytes")
         if size_bytes is not None and (
                 isinstance(size_bytes, bool) or not isinstance(size_bytes, int)
@@ -1256,7 +1270,7 @@ def create_app() -> FastAPI:
                     # **例外**：拖进来的中间产物（kind != 'input'）恒为 False —— 那一类
                     # 不是可修复对象，前端据此不给提交/写掩码的入口。
                     "sr_capable": kind == "input",
-                    # 这一次拖进来的影像是场景里的哪个环节（2026-09-21 起中间产物也能
+                    # 这一次拖进来的影像是场景里的哪个环节（中间产物也能
                     # 关联）。三种取值，只有 `input` 是可修复对象 —— 掩码与 SR 都建在
                     # 本体影像的网格上，产物的尺寸是它的倍数（见 lib/stage.ts）。
                     "kind": kind,
@@ -1345,8 +1359,8 @@ def create_app() -> FastAPI:
             # 名字可以**缺产品段**（《待修复清单》第一列的约定：写 `…_101_0020_001_L1`，
             # 而盘阵上的景级目录叫 `…_101_0020_001_L1_PAN`；那一行的第二列写着
             # 「影像类型:pan」）。缺了它反推出来的**景级与段级两层目录名都少一段**，
-            # 两条日期候选一起落空 —— 整批清单因此一行也打不开（2026-09-27 用户报的
-            # bug）。补法：`product` 给了 PAN/MSS 就按它，没给或认不出就 PAN 在先
+            # 两条日期候选一起落空 —— 整批清单因此一行也打不开。补法：`product`
+            # 给了 PAN/MSS 就按它，没给或认不出就 PAN 在先
             # （用户口径「默认按照 _PAN 打开即可」）。**只在这里补**：`{path}` 分支是
             # 精确路径，用户指哪打哪。
             product_hint = body.get("product")
@@ -1387,11 +1401,11 @@ def create_app() -> FastAPI:
             # 候选：去掉末尾一段、以及先去 `_NOSR` 再去末尾一段（`sr_2` 这类带下划线的
             # suffix 也能整段切掉 —— 按段数猜会切错）。
             #
-            # 名字仍由 pathguard 同一套模板渲染（日期 / 卫星型号 / 段级目录照旧反推），
+            # 名字仍由 pathguard 同一套模板渲染（日期 / 卫星型号 / 段级目录由它反推），
             # 前端与这里都不自拼路径；尾巴先过 `jpg_stage_name` 那套字符约束，切不出
             # 干净尾段（` - 副本`、`.preview` 那种）就一条候选都不生成。
             #
-            # 为什么分两阶段而不是一开始就一起试：第一阶段（今天的全部行为）命中的
+            # 为什么分两阶段而不是一开始就一起试：第一阶段命中的
             # 常见情形**一个 stat 都不多花** —— 钉住探测量上限的那几条用例正走在上面。
             if Path(name).suffix.lower() in (".jpg", ".jpeg"):
                 for stem in scene_search.de_suffixed_stems(name):
@@ -1498,7 +1512,7 @@ def create_app() -> FastAPI:
         它时是同一个源。除此之外 force 一律生效（含盘阵上的库外手工行，一键解析走的正是
         那一条）。
 
-        前端「一键解析」（《待修复清单》批量生成预览，2026-09-27）每景就是打这一个端点
+        前端「一键解析」（《待修复清单》批量生成预览）每景就是打这一个端点
         两次（本体 + 未超分那份），**不要为它加批量端点**：这里是 sync def、进了 anyio
         线程池，掐响应停不了已经在生成的那一份（取消只能「假装取消」）；而「试过哪些
         候选、各自为什么不行」的真源在 `scene_search` / `resolve_scene`，批量端点
@@ -1510,7 +1524,7 @@ def create_app() -> FastAPI:
         except PathDeniedError as e:
             raise HTTPException(status_code=404,
                                 detail=f"场景不可访问：{e}") from e
-        # 源是显示件 jpg、但同目录配着同名栅格：改从**栅格**生成。落点不需要变 ——
+        # 源是显示件 jpg、但同目录配着同名栅格：从**栅格**生成。落点不需要变 ——
         # 名字只由源 stem 拼，对 `PAN.jpg` 与 `PAN.tif` 是同一个文件名，
         # 也就是栅格行用的那一份，所以「前端调 jpg 行的 id」与「栅格行自己打开」
         # 命中同一份缓存，不会生成两次。换不换由后端在这一层决定，前端不必知道。
@@ -1533,14 +1547,14 @@ def create_app() -> FastAPI:
         except PreviewError as e:
             raise HTTPException(status_code=422,
                                 detail=f"预览生成失败：{e}") from e
-        _sweep_legacy_preview(jpg, abs_path)     # 老点号那份没有任何读者了
+        _sweep_legacy_preview(jpg, abs_path)     # 点号那份没有任何读者
         return FileResponse(str(jpg), media_type="image/jpeg")
 
     @app.get("/api/scenes/{scene_id}/preview-drop")
     def preview_drop(scene_id: str, div: int = Query(2)):
         """拖入链的预览图：**写回源所在的盘阵场景目录**，`<stem>_preview.jpg`。
 
-        **名字与 `/preview` 那条完全一样**（2026-09-22 起点号那份不再产出），差别只剩
+        **名字与 `/preview` 那条完全一样**，差别只剩
         目录：那份是「平台自己的缓存」（源同目录，配了 `SR_PREVIEWS_ROOT` 就搬进镜像
         树），这份**恒落生产场景目录**、跟着场景数据长期活 —— 拖入的场景就该生成一次长期
         可用，而不是每天第一次拖入重新生成一遍。
@@ -1690,9 +1704,9 @@ def create_app() -> FastAPI:
         （配置缺省）。**`suffixFrom` 如实回报用到的是哪一个** —— 「按配置猜的名字」
         与「真跑过的名字」看起来一样，不标出来就分不清。没有可用的 suffix 时
         **只有产物那一类**不出现（拼不出名字就不编）；NOSR 那一类与 suffix 无关
-        （它的名字由输入影像的 stem 拼，见 `scene_search.nosr_candidates`），照旧回报。
+        （它的名字由输入影像的 stem 拼，见 `scene_search.nosr_candidates`），照样回报。
 
-        NOSR 两类名字的来源不同，**候选顺序即优先级**（2026-09-24 用户口径）：
+        NOSR 两类名字的来源不同，**候选顺序即优先级**（用户口径）：
         先试 `<输入 stem>_NOSR.tif/.tiff`（SC 场景是 `<目录名>_NOSR.tif`，RC 场景是
         `PAN_NOSR.tif` —— 用户口径里「未超分那份」就是它），最后才试
         `<产物 stem>_NOSR.tif/.tiff`（`SR_code/util.py::writeTiff` 的改名规则推出来的

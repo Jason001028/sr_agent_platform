@@ -48,7 +48,12 @@ export function stageRefusal(label: string): string {
     + 'SR 与掩码都建在本体影像的网格上，请先打开本体再修复与提交';
 }
 
-function stemOf(name: string): string {
+/** 文件名的 stem（去掉影像扩展名，不区分 tif 与 jpg）。
+ *
+ *  本模块自己要它来认 `PAN.tif` 与 `PAN.jpg` 是同一份影像；**掩码导出名也用它**
+ *  —— 拖进来的可能是显示件 jpg（`PAN.jpg`），而掩码只能叫 `<栅格 stem>_mask.tif`，
+ *  把 `.jpg` 带进去就成了 `PAN.jpg_mask.tif`（后端 `derived_mask_path` 认不出）。 */
+export function stemOf(name: string): string {
   return name.replace(/\.(tif|tiff|img|jpg|jpeg)$/i, '');
 }
 

@@ -144,7 +144,7 @@ export function rowIntervals(polygons: Poly[], r: number): [number, number][] {
    可选 opts.feed(chunk, rowCount)：以批次喂给下游；返回 Promise 时每批让出主线程。
    opts.batch 默认 128 行/批；opts.onProgress(f) 每批回调。 */
 export function rasterRows(W: number, H: number, polygons: Poly[], opts?: RasterRowsOpts): Promise<void> {
-  // 捕获为 const，闭包内不再引用可变参数（TS18048 规避）；行为不变
+  // 捕获为 const，闭包内引用它而非可变参数（TS18048 规避）
   const o = opts || {};
   const batch = o.batch || 128;
   const feed = o.feed || null;
@@ -537,7 +537,7 @@ function connectedComponents(mask: Uint8Array, w: number, h: number): number[][]
    重追踪轮廓 + RDP 简化 → 返回合并后的多边形（原坐标空间）。
    重循环按批让出主线程（gen 每批 yield {phase, progress}）：浏览器用
    mergeConnectedAsync 驱动可实时刷进度、UI 不冻结；Node/测试用 mergeConnected
-   同步驱动到完成。每连通域只在自身 bbox 子图（+1px 背景）追踪，不再整图重扫/整图分配。 */
+   同步驱动到完成。每连通域只在自身 bbox 子图（+1px 背景）追踪，不整图重扫/整图分配。 */
 export interface MergeYield { phase: string; progress: number; }
 
 export function* mergeConnectedGen(polys: Poly[], w: number, h: number): Generator<MergeYield, Poly[], void> {

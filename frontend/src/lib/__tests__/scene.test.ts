@@ -99,7 +99,7 @@ describe('预览档位（全局下采样）', () => {
     expect(isBakedPreviewUrl('/disk-array/a/b_preview.jpg')).toBe(true);
     expect(isBakedPreviewUrl('/disk-array/a/b_preview.jpeg')).toBe(true);
     expect(isBakedPreviewUrl('/disk-array/a/b.jpg')).toBe(false);
-    // 改名（2026-09-22）前的点号那份：两代都认 —— 静态 URL 是后端给的，
+    // 点号那份：与下划线那代都认 —— 静态 URL 是后端给的，
     // 两边版本错开一档时必须认得出，认不出换档位后最长一小时看到旧图
     expect(isBakedPreviewUrl('/disk-array/a/b.preview.jpg')).toBe(true);
     expect(isBakedPreviewUrl('/disk-array/a/bjpeg.jpg')).toBe(false);
@@ -380,7 +380,7 @@ describe('手工场景路径（盘阵任意合法场景目录）', () => {
   });
 
   // 文件名 → 场景路径的反推**已整体收到后端**（backend/pathguard.py）：
-  // 前端不再自解析日期、不再自拼模板，所以这里没有对应单测 —— 规则与候选
+  // 前端不自解析日期、不自拼模板，所以这里没有对应单测 —— 规则与候选
   // 由 backend/tests/test_paths.py 与 test_scene_resolve.py 钉住，前端行为
   // 由 .e2e/test-manual-scene.js 覆盖。
 
@@ -560,8 +560,7 @@ describe('清除预览缓存 —— URL / 去留 / 汇总文案', () => {
 });
 
 /* ---------------- 场景库快照（跨刷新的「上次检索」） ----------------
- * 缺陷来源：清除预览缓存把行摘掉之后，用户刷新页面那几景又都在列表里（2026-09-28）。
- * 快照负责让这份列表活过整页重载；这一组钉的是它的组装与解析判据。 */
+ * 快照负责让这份列表（含清除缓存摘掉的行）活过整页重载；这一组钉的是它的组装与解析判据。 */
 describe('场景库快照 —— 组装 / 解析', () => {
   const row = (over: Partial<SceneRow> = {}): SceneRow => ({
     id: 'a', name: 'A', satellite: null, sensor: null, date: null,

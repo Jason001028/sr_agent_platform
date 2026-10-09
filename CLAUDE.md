@@ -2,14 +2,23 @@
 
 > 本文件帮 Claude 会话快速定位文档与代码。文档全部归档于 `docs/`，分类索引见 [docs/README.md](docs/README.md)。
 
+## 写作硬约束（最高优先级）
+
+**所有文档与代码注释只描述当前状态，不得记录任何 AI 历史修改记录。** 完整规则见 [docs/conventions/current-state-conventions.md](docs/conventions/current-state-conventions.md)。
+
+- 不写「本次 / 原来 / 已改为 / 已废止 / 不再使用」——**改动的过程归 git，文档只写现状**。
+- 任何文档不得保留临时规划的过程状态（如某次开发规划了 phase1–phase5，文档里就不许出现 phase 相关字段描述），只按代码与项目现状更新内容。
+- 作废决策不留痕：旧决策 A 被新决策 B 取代且 A 作废时，文档只写 B，不写「A 已作废」。
+- **更新现状描述时，不得把尚未确认的实现偏差写成新的业务规则**；未验证的差异只能标「待核」。
+
 ## 文档（先读哪个）
 
 - **新手指南**：新接触本项目、想系统理解前后端结构/设计取舍，先读 [docs/knowledge/platform-tutorial.md](docs/knowledge/platform-tutorial.md)（从 0 开发教程），再进窗口交接。
-- **窗口交接**：新会话先读 [docs/status/current-question.md](docs/status/current-question.md)（平台现状与交接入口），再读 [docs/experience/gui-experience.md](docs/experience/gui-experience.md)（经验），即可无断点继续。追溯某个决定的来历查 [docs/status/timeline-archive.md](docs/status/timeline-archive.md)（历史时间线），真机勾选查 [docs/status/real-machine-acceptance.md](docs/status/real-machine-acceptance.md)。
+- **窗口交接**：新会话先读 [docs/status/current-question.md](docs/status/current-question.md)（平台现状与交接入口），再读 [docs/experience/gui-experience.md](docs/experience/gui-experience.md)（经验），即可无断点继续。真机勾选查 [docs/status/real-machine-acceptance.md](docs/status/real-machine-acceptance.md)。
 - **分类速查**：需求/计划 → [docs/planning/](docs/planning/)；经验 → [docs/experience/](docs/experience/)；规范 → [docs/conventions/](docs/conventions/)；背景知识 → [docs/knowledge/](docs/knowledge/)。
 - **SR_CODE 生产管线**（局部超分算法 / 调用契约 / Windows 移植环境 / 生产场景命名）：问算法、对接契约、移植/环境踩坑、盘阵目录名怎么反推 → [docs/sr_code/](docs/sr_code/)（主题域类目，见 docs/README §二）。
 - **新增文档**：先看 [docs/README.md](docs/README.md) §三分类规则，再落盘对应类目。
-- **术语用词**：写文档、代码注释、测试断言文案前先读 [docs/conventions/terminology-conventions.md](docs/conventions/terminology-conventions.md)。要点：「烘焙」已废止，改用**生成预览**（产物称「预览 JPG」，规则称「预览生成规则」，倍率称「缩放档位」）；黑话替换表见该文 §5；`docs/agent-book/`、`deepseek-harness-master/`、`frontend/dist/` 禁止替换。
+- **术语用词**：写文档、代码注释、测试断言文案前先读 [docs/conventions/terminology-conventions.md](docs/conventions/terminology-conventions.md)。要点：写**生成预览**（产物称「预览 JPG」，规则称「预览生成规则」，倍率称「缩放档位」），不写「烘焙」「烤」；黑话替换表见该文 §5；`docs/agent-book/`、`deepseek-harness-master/`、`frontend/dist/` 禁止替换。
 
 ## 代码主产物
 

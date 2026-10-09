@@ -1,11 +1,10 @@
 # 移植 Windows 本地踩过的坑
 
-> 日期：2026-08-21（由《移植windows本地踩过的坑》与《sr_windows_env_tryout_log》合并建档）· 状态：草稿
+> 日期：2026-08-21 · 状态：草稿
 > 归档定位：docs/sr_code/ 类目（SR_CODE 生产管线文档簇）——内网 Windows 移植 SR_CODE 的**环境基线（含环境总结）+ 踩坑记录**，与算法全览 [sr-pipeline-overview.md](sr-pipeline-overview.md)、调用契约 [sr-pipeline-interface.md](sr-pipeline-interface.md) 互补。
 
 > 背景：内网 Win10 机（RTX 3060 单卡）尝试把 Linux/CUDA 超分管线跑起来。
 > 核心结论：真管线的"最后一公里"全是 Linux 专属（ELF .so、CUDA torch、4 卡假设），Windows 本地定位为平台侧替身。下列坑按推进顺序排。
-> 说明：本文档由《移植windows本地踩过的坑》与《sr_windows_env_tryout_log》合并而来（2026-08-21）；后者记录的探索过程与排除证据归档在文末附录。
 
 ---
 
@@ -36,7 +35,6 @@
 - 现象：`[WinError 1114] DLL 初始化例程失败`
 - 原因：torch 2.13.x 的 c10.dll 自身损坏/不兼容
 - 解法：降级 `torch==2.4.1` + `torchvision==0.19.1`
-- 定位手段：`probe_torch_dlls.py` 逐个 `ctypes.WinDLL` 加载 torch/lib 下 DLL，锁定 c10.dll
 
 **3. torch 1.9.1+cu111 装不上**
 - 原因：内网镜像 cgwx-pypi 只代理 PyPI，PyPI 无 +cu111 后缀 wheel
@@ -45,9 +43,7 @@
 **4. GDAL pip 装不了**
 - 现象：`could not build wheel for gdal`
 - 原因：镜像只有 sdist 没 wheel；源码编译缺系统 libgdal → Windows 必失败
-- 验证：`pip install --only-binary :all: GDAL` → "from versions:none" 证实无 wheel
 - 解法：**换 conda 环境 py310pan**（预装 gdal ✅）
-- 已排除：桌面 GDAL 2.0.1 裸 DLL（无 py3.11 绑定）、copy Linux gdal 包（ELF 不兼容）——详见附录 A
 
 **5. conda 命令"失效"**
 - 原因①：真实 conda 在 `D:\ProgramData\anaconda3`，不是 `D:\Anaconda`（后者是假壳）
@@ -111,7 +107,7 @@
 **14. Docker/WSL2 是唯一能让 .so 活的本地路线**
 - Win10 Home 只能用 WSL2 后端（无 Hyper-V）；WSL 两个功能当前 Disabled，需管理员开启
 - RTX 3060 + 驱动 572.70（≥471.41）→ WSL2 CUDA 透传就绪
-- 待办：
+- 启用命令（管理员）：
   ```
   dism /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart
   dism /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
@@ -127,30 +123,12 @@
 
 ---
 
-## 附录 A：已排除路线及证据（为什么不能走）
+## 最终判断（Windows 本机定位）
 
-**tar.gz Linux 打包环境（torch1.9.1py36.tar.gz）——死路**
-- 命令级证据：`tar -tzf` 是列清单不是解压（`-C` 报错）；`tar -xzf` 解压成功但大量 `Can't Create XXX.so.0`
-- 选 Linux 环境的 `bin/python` 直接报 `CreateProcess error＝193,81 不是有效的 win32 应用程序`
-- 根因：`.so`/`bin/python` 全为 Linux ELF（文件头 `7F 45 4C 46`），Windows 的 LoadLibrary 只认 PE（`.dll`，文件头 `4D 5A`）；错误 193 = ERROR_BAD_EXE_FORMAT，系统级不兼容，与配置无关
-- 附带：符号链接权限问题（需开发者模式）、0x80070422（Windows Update 服务被禁用）
+真管线（py3.6 + torch1.9.1+cu111 + GDAL + ImgHistMatch.so + mmsr_bundle）的"最后一公里"全是服务器专属：`.so` / `bin/python` 为 Linux ELF，GDAL 无 Windows wheel，torch 无 `+cu111` wheel。Windows 本机定位为平台侧（sr_agent_web + adapter），本地开发用 min_sr 当接口替身。
 
-**GDAL pip 安装——死路**
-- 证据：`pip install --only-binary :all: GDAL` → `from versions:none`，镜像无任何 wheel；源码编译需系统 libgdal → Windows 必失败
-- 已排除的全部路线：conda（本机 conda 曾不可用）、桌面 GDAL 2.0.1 裸 DLL（仅 C 库 gdal201.dll/geos.dll/proj.dll，无 py3.11 绑定 .pyd，版本过老）、copy Linux gdal 包（Linux 产物 + 服务器 Python ABI，二进制不兼容）、外部 wheel 源（conda-forge / Gohlke，内网机无法访问外网）
-- 为什么不能占位/替身：GDAL 在热路径上——`util.read_img` 用 `gdal.Open` 读 GeoTIFF（util.py 182/192 行）、`util.writeTiff` 用 `GetDriverByName("GTiff")` 写（util.py 581/584 行），占位模块过不了运行层
-
-**torch 1.9.1+cu111——死路**
-- 证据：内网镜像 cgwx-pypi 只代理 PyPI，PyPI 无 `+cu111` 后缀 wheel → 只能装到 CPU 2.4.1
-
-**Windows 原生路线的最终判断（py3.11 venv）**
-- 失败点叠加：.so 平台墙 + GDAL 无 wheel + torch cu111 缺失；换 py3.6 只解决版本墙，.so 与 GDAL 墙依旧
-- 结论：真管线（py3.6 + torch1.9.1+cu111 + GDAL + ImgHistMatch.so + mmsr_bundle）的"最后一公里"全是服务器专属；Windows 本机定位为平台侧（sr_agent_web + adapter），本地开发用 min_sr 当接口替身
+- GDAL 在热路径上——`util.read_img` 用 `gdal.Open` 读 GeoTIFF（util.py 182/192 行）、`util.writeTiff` 用 `GetDriverByName("GTiff")` 写（util.py 581/584 行），占位模块过不了运行层。
 - min_sr 产物位置：`D:\sr_min\`（对齐契约接口的最小超分管线：读 config.xml、cv2 双三次 2x、输出 `*_sr.tif` + 源图 `*_NOSR.tif` + `Debug/SRLOG` 尾行 `Run finished.`）
-
-## 附录 B：向 mentor 汇报的压缩版（50 字内）
-
-> 内网Win py3.11缺GDAL：镜像仅源码无wheel，无conda，仅2.0.1裸DLL，import osgeo失败
 
 ---
 

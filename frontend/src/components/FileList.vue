@@ -113,8 +113,8 @@ function linkTag(note: string): string {
         <template v-if="rec.W"> · {{ rec.W }}×{{ rec.H }}</template>
         <template v-if="rec.layout"> · {{ rec.layout }}</template>
       </div>
-      <!-- 状态与关联结果同排一行、都做成短标签（2026-09-18）：原先两者各占一行，
-           且各自又把文件名抄了一遍 —— 一张卡三行里三处同名。
+      <!-- 状态与关联结果同排一行、都做成短标签：两者别各占一行、也别再各自抄一遍
+           文件名（否则一张卡三行里三处同名）。
            关联原因仍然单独一个字段：rec.status 会被解码进度/结果覆盖，写在那里
            等于没写（用户只看得到「完成，解码耗时…」）。整句理由进 title。 -->
       <div class="tags">
@@ -227,7 +227,7 @@ function linkTag(note: string): string {
   min-width: 8px;
   text-align: center;
 }
-/* 环节：三色区分。取 --cmp-a/--cmp-b 这一对（2026-09-20 挑的蓝/琥珀，对红绿色盲
+/* 环节：三色区分。取 --cmp-a/--cmp-b 这一对（蓝/琥珀，对红绿色盲
    安全，且刻意避开了青绿族与 ok/warn/err 三个语义色 —— 环节是**位置标识**，
    不该让人读成「哪个更好」）；本体另用青绿软底，与「盘阵」那颗呼应。 */
 .file-item .name .stage { color: var(--ink-sub); background: var(--surface-2); border: 1px solid var(--line); }

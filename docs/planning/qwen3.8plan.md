@@ -1,7 +1,7 @@
 # Qwen3.8-27B 社区量化模型汇总（LLM读取专用 + 部署方案选型）
 
-> ⚠️ **选型修订（2026-09-09）**：下表 §三 的「部署选型指南」是一般性指引，落到本项目
-> **4× RTX 3090（Ampere）+ CentOS7** 需要修正——NVFP4（Blackwell/RTX50 专属）、FP8（无 Ampere 加速）、
+> **本机选型口径**：目标机是 **4× RTX 3090（Ampere）+ CentOS7**；下表 §三 的「部署选型指南」是一般性指引，
+> 落到本机需按此口径收窄——NVFP4（Blackwell/RTX50 专属）、FP8（无 Ampere 加速）、
 > EXL3（不支持 `qwen35` 混合架构）、MLX（Apple 专属）均不可用；AWQ 虽可跑但要 vLLM，而 vLLM 装不上 CentOS7。
 > **本机唯一可行且够用的组合 = GGUF Q4_K_M + llama.cpp**；且应选基础版（原生 function calling），
 > 不选本表里的 Uncensored/Abliterated 去对齐变体。对照与名词科普见

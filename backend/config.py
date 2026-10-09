@@ -31,9 +31,8 @@ import os
 from dataclasses import dataclass
 
 # --------------------------------------------------------------------------
-# SR pipeline defaults — the values the code used before they were centralised.
-# Kept as module constants so run_sr.py can re-export them under its historical
-# DEFAULT_* names (test_run_sr.py and callers import those).
+# SR pipeline defaults — kept as module constants so run_sr.py can re-export
+# them under the DEFAULT_* names (test_run_sr.py and callers import those).
 # --------------------------------------------------------------------------
 
 #: mmsr_bundle/codes on the CentOS7 array server — holds code_0817_prod.py,
@@ -53,17 +52,17 @@ SR_DEFAULT_OPTIONS_YML = "/DiskArray/tmp/wangrz/sr_utils/espan3_2026_gf04_tile50
 
 #: Interpreter that runs code_0817_prod.py *inside the job* — the SR production
 #: env, a different world from the API's own /opt/sr-venv (py3.9).
-#: 2026-09-14 node81-135 实测：torch 1.10.2+cu113 / GDAL 2.4.0（版本号用
+#: node81-135 实测：torch 1.10.2+cu113 / GDAL 2.4.0（版本号用
 #: `gdal.VersionInfo()` 取——py3.6 时代的 osgeo 绑定没有 `gdal.__version__`）。
 #: ⚠️ 目录名叫 `torch1.9.1py36`，但里面装的**不是** 1.9.1 —— 别拿目录名当版本号。
 #: See docs/status/real-machine-bringup.md §1.
 SR_DEFAULT_PYTHON = "python"
 
 #: Slurm job limits/limits applied by run_sr.build_batch_script.
-#: No default node list: unset means "let the scheduler decide" (the behaviour
-#: every cluster had before 2026-09-14). SR_SLURM_NODELIST exists because the
-#: `gpu` partition spans two node families and one of them (node104-*) cannot be
-#: resolved from the submitting host — see docs/status/slurm-acceptance.md §B0.
+#: No default node list: unset means "let the scheduler decide". SR_SLURM_NODELIST
+#: exists because the `gpu` partition spans two node families and one of them
+#: (node104-*) cannot be resolved from the submitting host — see
+#: docs/status/slurm-acceptance.md §B0.
 SR_DEFAULT_SLURM_TIME = "02:00:00"
 SR_DEFAULT_SLURM_CPUS = 4
 SR_DEFAULT_SLURM_GRES = 1
@@ -88,9 +87,8 @@ SR_DEFAULT_LOCAL_GPU = "0"
 #: LAST-RESORT <Suffix>, not a knob. The default a submit actually gets is read
 #: from the SR team's own config inside SR_BUNDLE_DIR (services/run_sr.py::
 #: default_suffix); this literal is only what's left when that file is missing,
-#: unparseable or carries an unusable value. It used to be overridable through
-#: SR_SUFFIX_DEFAULT — that env var was retired 2026-09-16, the file is the
-#: authority. Non-empty on purpose: an empty suffix makes the output name equal
+#: unparseable or carries an unusable value. The file is the authority, not any
+#: env var. Non-empty on purpose: an empty suffix makes the output name equal
 #: the input name, which SR turns into a rename of the input
 #: (sr-pipeline-interface.md §2.4-1).
 SR_DEFAULT_SUFFIX = "sr"
@@ -164,7 +162,7 @@ class SrRuntime:
     agent_db: str
     # 注：**没有** scenes_root。场景根的唯一读取处是 backend/api/paths.py::
     # scenes_root()（每次读环境、且要求目录存在）—— 在这里再镜像一份就等于
-    # 制造第二处真源，SR/Slurm 层也没人消费它（2026-09-17 删除）。
+    # 制造第二处真源，SR/Slurm 层也没人消费它。
     sandbox_root: str | None  # None → SR runs in place, writing to lq_path
     executor: str             # "slurm" | "local" — who launches the job
     locked_dir: str | None    # None → /api/queue accepts any absolute lq_path

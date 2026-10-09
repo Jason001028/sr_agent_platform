@@ -10,7 +10,7 @@
 
 三个参考项目对本平台的定位：**langchain 是参考书，langgraph 是断点恢复时的替换薄层，deepseek-harness 是设计蓝本（不移植）**。
 
-- **Agent 编排内核维持自研**（现有 `backend/tools/contract.py` 工具契约 + 自写状态机），运行时**不引入 langchain / langchain-core / langgraph 依赖**（延续 langchain-boundary.md 决策）。
+- **Agent 编排内核维持自研**（现有 `backend/tools/contract.py` 工具契约 + 自写状态机），运行时**不引入 langchain / langchain-core / langgraph 依赖**（与 langchain-boundary.md 一致）。
 - **断点恢复（跨小时 + 人审）**是三个需求中唯一需要现成轮子的维度。若确认需要，评估对象是 **LangGraph**：`checkpoint-sqlite` + `interrupt`/`Command`，唯一开箱即用且 FastAPI in-process 友好（`AsyncSqliteSaver`）的库级方案。langchain 本体无断点能力。
 - **无论如何必自研**：外部副作用（Slurm GPU job）的**幂等层**。checkpoint 只存图内状态，不感知外部 job；崩溃重放会重复提交任务。这层是所有方案（langgraph / 自研 / harness）的共同缺口，且与选型无关。
 - deepseek-harness **不移植**（Node+TS+Cordis 生态与 FastAPI + Python 工具组合不匹配），但其"事件溯源日志做断点"与"崩溃时未闭合 turn 补合成错误"两个设计可直接对标。
@@ -63,7 +63,7 @@
 
 | 项目 | 强适配点 | 硬伤 |
 |---|---|---|
-| langchain | 工具契约思想已被 `contract.py` 吸收 | 断点=0；依赖重（langgraph≥1.2.11 + pydantic≥2.7.4，与现状冲突已记录） |
+| langchain | 工具契约思想已被 `contract.py` 吸收 | 断点=0；依赖重（langgraph≥1.2.11 + pydantic≥2.7.4，与现状冲突） |
 | langgraph | checkpoint-sqlite + interrupt 是"跨小时断点+人审"的现成答案；FastAPI in-process 直接调 | 强制 langchain-core + pydantic 版本；sqlite-vec 原生扩展需内网备轮子；prebuilt API 迁移中（create_agent 正搬去 langchain 包）版本碎片化 |
 | deepseek-harness | 断点/工具抽象的设计蓝本；Python SDK 可带单文件 Node exe 做黑盒 POC | Node+Cordis+TS 与 FastAPI+Python 工具+单人维护不匹配；移植=引入 Node 子进程+工具 TS 化+重写 LLM 适配器 |
 
@@ -84,9 +84,9 @@ invoke(...) → 节点执行 → put_writes(中间写) → _put_checkpoint(每su
 
 ## 5. 落地建议
 
-1. **M1（秒级验证闭环）**：维持现状决策——不引任何库。自写状态机 + `contract.py` 工具契约。工具串行阻塞 + 退出码判定，无需图路由。断点恢复用 SQLite 消息持久化（任务表本就计划 SQLite）。
-2. **M3（生产端到端 / 跨小时断点确认后）**：上 LangGraph，仅作编排薄层替换（非重写）。`AsyncSqliteSaver` 嵌 FastAPI，`interrupt` 做人审，`Command` 恢复。省掉"每步自动 checkpoint（含 pending writes）+ interrupt/恢复原语 + time-travel"，这些自写最难做对。
-3. **必写层（现在就该设计）**：Slurm job 外部副作用幂等层。`job_id` 写入任务表，恢复时先查 squeue/sacct。建议 `backend/services/runner.py`（或对应任务表）按可幂等恢复设计。
+1. **编排内核**：不引任何库。自写状态机 + `contract.py` 工具契约；工具串行阻塞 + 退出码判定，无需图路由。断点恢复用 SQLite 消息持久化（任务表即 SQLite）。
+2. **跨小时断点 / 人审**：出现该需求时上 LangGraph，仅作编排薄层替换（非重写）。`AsyncSqliteSaver` 嵌 FastAPI，`interrupt` 做人审，`Command` 恢复。省掉"每步自动 checkpoint（含 pending writes）+ interrupt/恢复原语 + time-travel"，这些自写最难做对。
+3. **外部副作用幂等层**：Slurm job 的幂等层是必写项。`job_id` 写入任务表，恢复时先查 squeue/sacct。按可幂等恢复设计（`backend/services/run_sr.py` / `sr_tasks` 表）。
 4. **deepseek-harness**：不移植。仅借鉴设计（见 §6）。
 
 ---
@@ -116,7 +116,7 @@ invoke(...) → 节点执行 → put_writes(中间写) → _put_checkpoint(每su
 | 来源 | 代码 | 借鉴内容 | 落点 |
 |---|---|---|---|
 | langgraph-checkpoint | [sqlite/__init__.py:142](langgraph-main/libs/checkpoint-sqlite/langgraph/checkpoint/sqlite/__init__.py#L142) | `checkpoints`+`writes` 两表：一表存每步图状态快照，一表存未完成中间写 | 若自研，任务表可仿此结构（状态快照表 + pending writes 表） |
-| langgraph | [types.py:851](langgraph-main/libs/langgraph/langgraph/types.py#L851) | `interrupt()` + `Command(resume=...)` 人审原语 | M3 评估；自研时可用"等待外部确认"状态模拟 |
+| langgraph | [types.py:851](langgraph-main/libs/langgraph/langgraph/types.py#L851) | `interrupt()` + `Command(resume=...)` 人审原语 | 跨小时断点需求时评估；当前可用"等待外部确认"状态模拟 |
 | deepseek-harness | [checkpoint-policy/src/index.ts:63](deepseek-harness-master/packages/session/session-checkpoint-policy/src/index.ts#L63) | 强一致 checkpoint 时机：每次模型请求前 / 每个工具副作用前 / agent 每步前 | **最值得借鉴**：断点粒度 = 副作用前 |
 | deepseek-harness | [repair.ts:28](deepseek-harness-master/packages/core/session/src/repair.ts#L28) | 崩溃修复：未闭合 turn 补合成"结果未知、勿盲目重试"错误，不截断 | 自研恢复逻辑按此处理中断的工具调用 |
 | deepseek-harness | [session/src/index.ts:724](deepseek-harness-master/packages/core/session/src/index.ts#L724) | LLM 历史不单独存，由事件日志投影重建 | 自研持久化可参考（存事件，不存消息数组） |
@@ -125,7 +125,7 @@ invoke(...) → 节点执行 → put_writes(中间写) → _put_checkpoint(每su
 
 | 来源 | 代码 | 借鉴内容 | 落点 |
 |---|---|---|---|
-| langgraph | [state.py:131](langgraph-main/libs/langgraph/langgraph/graph/state.py#L131) | `TypedDict + Annotated[key, reducer]` 状态建模 + 条件路由 | M3 评估；自研阶段仅需顺序状态机 |
+| langgraph | [state.py:131](langgraph-main/libs/langgraph/langgraph/graph/state.py#L131) | `TypedDict + Annotated[key, reducer]` 状态建模 + 条件路由 | 跨小时断点需求时评估；当前仅需顺序状态机 |
 | deepseek-harness | [tools/src/index.ts:780](deepseek-harness-master/packages/core/tools/src/index.ts#L780) | 工具注册表 + 模型侧白名单投影（只暴露 name/description/parameters） | 与 `contract.py` manifest 思路一致，已实现 |
 | deepseek-harness | 执行前门控瀑布（allow/deny/ask） | 工具执行前可审计/可拦截 | 平台多人共享队列场景下，可做人审门控 |
 
@@ -134,6 +134,6 @@ invoke(...) → 节点执行 → put_writes(中间写) → _put_checkpoint(每su
 ## 7. 关键文件索引
 
 - 工具契约：`backend/tools/contract.py`（自研，langchain `@tool` 同源）
-- 任务表 / runner：`backend/services/runner.py`（幂等恢复层落点）
-- Agent 循环：`backend/agent/loop.py`（待建，自研状态机；异常分支借鉴 §6.2）
+- 任务表 / 幂等恢复层：`backend/services/run_sr.py`（`sr_tasks` 幂等表）
+- Agent 循环：`backend/agent/loop.py`（自研状态机；异常分支借鉴 §6.2）
 - SR 子进程管线：`SR_code/code_0820_prod_windows.py`（`run_sr` 工具的 `run()` 内部实现，非 Agent 编排层）

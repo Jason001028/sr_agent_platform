@@ -358,7 +358,7 @@ export function bandPassCollect(
 }
 
 /* ---------------- 稀疏条带预览（无压缩+条带+单波段大图快路径） ----------------
-   不再全读文件：按条带偏移/长度直接对 source 做字节切片，只抽读 ph 行 × 抽样列。
+   不全读文件：按条带偏移/长度直接对 source 做字节切片，只抽读 ph 行 × 抽样列。
    对 1.1GB 级「无压缩·条带1行」文件从 ~2 分钟降到秒级（读量约为文件的 1/几十）。 */
 export function stripPxVal(u8: Uint8Array, dv: DataView, le: boolean, bpp: number, sf: number, bo: number): number {
   switch (bpp) {
@@ -451,7 +451,7 @@ export function isSparseCandidate(probe: ProbeInfo | null): boolean {
   return probe.W * probe.H * (b / 8) > SPARSE_MIN;
 }
 
-// 稀疏条带采样：直接按条带字节切片把抽样行写入目标数组（不再留 rows[] 整行副本，省 ~1GB）。
+// 稀疏条带采样：直接按条带字节切片把抽样行写入目标数组（不留 rows[] 整行副本，省 ~1GB）。
 // 导出复用同一机制（targetMax 可调大），返回 {src, sw, sh, bytesRead, stripsTouched}。
 export function sparseSample(source: Source, sp: SparseLayoutOk, targetMax?: number, onProgress?: (f: number) => void): Promise<SparseSampleResult> {
   const W = sp.W, H = sp.H, bpp = sp.bpp, sf = sp.sf, le = sp.le, rps = sp.rps;

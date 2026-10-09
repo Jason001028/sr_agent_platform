@@ -131,9 +131,9 @@ def run_run_sr(**params) -> dict:
         mask_path = normalize_submit_path(mask_path)
     else:
         # 不传就按同一份规则推导（`<输入名>_mask.tif` 落在影像旁边），与 REST
-        # 入口 _norm_sr_params 完全一致。以前这里留 None → 配置 XML 里没有
-        # <MaskPath>，而同一次提交走 REST 却带着推导出来的路径：两边指纹不同，
-        # 幂等层认不出这是同一个作业。
+        # 入口 _norm_sr_params 完全一致 —— 留 None 会让配置 XML 里没有 <MaskPath>，
+        # 而同一次提交走 REST 却带着推导出来的路径，两边指纹不同，幂等层认不出
+        # 这是同一个作业。
         mask_path = derived_mask_path(lq_path)
     if sr_scale < 1:
         return err("sr_scale must be >= 1")

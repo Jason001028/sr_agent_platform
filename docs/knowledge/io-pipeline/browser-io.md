@@ -61,7 +61,7 @@ needGeo = !small8 || 解码字节数 > SAFE(1.3e9) || RGBA 字节数 > SAFE
 ```
 
 **有意保留的一处偏差**：BigTIFF 即使满足 8bit 也强制走分块。仓库内置的 UTIF 解不了
-BigTIFF（解码后宽高缺失），原实现会产出 0×0 缩略图。
+BigTIFF（解码后宽高缺失，会产出 0×0 缩略图）。
 
 | 路 | 读多少 | 输出长边 | 内存特征 |
 |---|---|---|---|
@@ -83,8 +83,8 @@ BigTIFF（解码后宽高缺失），原实现会产出 0×0 缩略图。
 `lib/source.ts` 定义一个最小接口：`Source { size, read(offset, length) }`。
 
 - `FileSource` 用 `Blob.slice` 实现，是本地文件链路的实现。
-- `HttpSource` 只有契约占位，`read` 直接 reject，**全仓无调用点**——盘阵那条链路已改为
-  读服务端生成好的 JPG，不再让浏览器按区间读 TIF。
+- `HttpSource` 只有契约占位，`read` 直接 reject，**全仓无调用点**——盘阵那条链路读
+  服务端生成好的 JPG，浏览器不按区间读 TIF。
 
 保留这个抽象的价值在单测：解码算法只依赖 `Source`，可以在没有 `File` 对象的
 Node 环境里跑（Vitest 的 environment 是 `node`）。
@@ -115,8 +115,8 @@ flowchart LR
   文件卡的小图直接复用 `thumb`，不另拉网络图。
 
 `DecodedRec` 里的 `route` 记录这次走的是哪条路（`utif` / `sparse` / `chunked` /
-`jpg` / `img`），排障时先看这一项。它落在底栏（`StatusBar.vue`）的悬停 title 里 ——
-2026-09-28 起底栏常驻的只有图名，把鼠标停在那条上即可看到 `路由=…` 那一串。
+`jpg` / `img`），排障时先看这一项。它落在底栏（`StatusBar.vue`）的悬停 title 里——
+底栏常驻的只有图名，把鼠标停在那条上即可看到 `路由=…` 那一串。
 
 ### 拉伸
 
@@ -160,8 +160,7 @@ flowchart LR
 | 分块窗口 | 4096×4096 | geotiff 分块读取的窗口尺寸 |
 
 **内存账**：一条记录的像素常驻内存约 `8 字节/像素`（`thumb` 画布 4 + `src` Float32 4），
-尺寸取预览尺寸、不封顶。所以档位越低（÷ 得越多）常驻越小。当前没有 LRU 释放，
-这是 [current-question.md](../../status/current-question.md) §3.3 已记录未处理的一项。
+尺寸取预览尺寸、不封顶。所以档位越低（÷ 得越多）常驻越小。当前没有 LRU 释放。
 
 ---
 
@@ -170,6 +169,6 @@ flowchart LR
 - **`SAFE` 是 1.3e9 而不是 2GB**：留了余量给同一时刻的其它分配，不是精确上限。
 - **BigTIFF 强制走分块**是有意的偏差，不是遗漏。
 - **`HttpSource` 是死代码**，看到它不要以为浏览器会按区间读盘阵 TIF。
-- **`tifDecode.ts` 里仍留着 `JPG_MAX` / `JPG_QUALITY` / `planExport`**，属浏览器侧 JPG
-  导出链路的遗留；该链路 2026-09-15 已整体删除，这些常量不再被生产路径使用。
+- **`tifDecode.ts` 里还有 `JPG_MAX` / `JPG_QUALITY` / `planExport` 三个常量，不在生产
+  路径上使用**——看到它们不要以为浏览器侧会做 JPG 导出。
 - **本地链路的 2048 / 8192 与服务端生成的档位无关**，两套常量不共用。

@@ -32,7 +32,7 @@ def write_scene(root, name, ext=".tif"):
     """造一个真机形态的场景目录，返回场景文件的路径。
 
     真机的场景判据是「目录里有 <目录名>_meta.xml」（SR 脚本靠它判 RC/SC，
-    scene_search.is_scene_dir），所以夹具必须照此造：平铺的裸文件现在会被
+    scene_search.is_scene_dir），所以夹具必须照此造：平铺的裸文件会被
     is_scene_file 整批挡掉。返回值是场景文件，派生件往 .parent 里塞。
     """
     d = Path(root) / name
@@ -125,7 +125,7 @@ class TestImageScenes(unittest.TestCase):
                               "KF02B04_PMS05_20260810120000"])
 
     def test_derived_products_are_not_scenes(self):
-        """一瓶装下真机看到的所有脏数据（2026-09-15：18 行里 16 行是这种）。
+        """一瓶装下真机看到的脏数据（18 行里 16 行是这种）。
 
         SR 产物与输入备份（_sr/_NOSR/_ori）、云量图（_cloud）、缩略图（_thumb）
         都躺在同一个场景目录里 —— 白名单下它们连判据都不用各写一条。
@@ -215,7 +215,7 @@ class TestImageScenes(unittest.TestCase):
 
 
 class TestNosrNaming(unittest.TestCase):
-    """未超分那份（NOSR）的**名字**判据（2026-09-24 口径）。
+    """未超分那份（NOSR）的**名字**判据（用户口径）。
 
     盘阵上叫 NOSR 的东西其实有两份，名字只差中间一段 suffix：
 
@@ -298,7 +298,7 @@ class TestNosrNaming(unittest.TestCase):
     def test_reverse_inference_keeps_the_bare_nosr_stem(self):
         """反推目录名时 `_NOSR` 是**在切段那一轮里**剥的 → 剥得的真名自己进候选。
 
-        曾经的写法是在循环外先把 `_NOSR` 剥掉、再进切段循环，而切段恒切至少一段：
+        若在循环外先把 `_NOSR` 剥掉、再进切段循环，而切段恒切至少一段：
         `<目录名>_NOSR` 剥完剩下的**正好就是目录名**，那个真名于是一条候选都进不去，
         报出来的理由是「…_L1 目录不存在」这类被多切一段的假目录。带 `_preview` 尾巴
         的那份走的是另一条路（剥 preview 那一步本身就顶掉了一次切段），一直是对的 ——
