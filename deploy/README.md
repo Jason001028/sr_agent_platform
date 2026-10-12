@@ -43,8 +43,9 @@
 > 它与缓存那份**同一个名字**，差别只在目录），且它**不吃 `SR_PREVIEWS_ROOT`**，恒在场景目录里。
 
 > **产物预览主动生成 + 显示件 jpg 改从同名栅格生成**：两件事，都在服务端。
-> ① **主动生成**：作业转 COMPLETED 后，后台循环同时把**产物那一份**预览生成掉（只生成产物；
-> 输入影像与 `_NOSR` 两份仍按打开时惰性生成），用户跑完立刻打开就不必等一次读盘 + 采样。
+> ① **主动生成**：作业转 COMPLETED 后，后台循环把**产物那一份**预览生成掉，同一轮接着生成
+> **未超分那一份**（`<输入 stem>_NOSR_preview.jpg`；这一份与任务行的结论无关，结局只打一行
+> stdout）；输入影像那份仍按打开时惰性生成。用户跑完立刻打开就不必等一次读盘 + 采样。
 > 两个新 env 都有默认值、不配即生效：`SR_PRODUCT_PREVIEW_DIV`（默认 4，**0 = 关**，
 > 取值非法当 0 处理并在启动日志写一行）与 `SR_PRODUCT_PREVIEW_MAX_AGE_SEC`（默认 86400）。
 > 结局随 `GET /api/queue` 的 `preview_state` / `preview_note` 两列带出（另有 SSE 帧
@@ -52,6 +53,9 @@
 > 那两列对**老行**是 `NULL`（**不回填**），挡历史行全量重新生成的唯一屏障
 > 就是那道年龄窗口。沙箱**实际生效**时（作业跑在私有副本上）主动生成自动 `skipped: sandbox`
 > —— 判据是沙箱有没有真生效，**不是** `SR_SANDBOX_ROOT` 在不在，详见 §7.5 末条。
+> ⚠️ 有源头替换的那一跑结束时，产物名 `<stem>_<suffix>.tif` 已经不存在（归位到了本体名），
+> 所以产物那一份会按 `product_missing` 如实跳过（`preview_note` 里写出试过的候选名）；
+> 要看超分后的预览就打开本体那份（它这时就是超分产物）。未超分那份的预览照旧生成。
 > ② **显示件 jpg**：拖入/打开的 `.jpg` 若同目录配着一位更清晰的栅格、且当前档位下服务端
 > 从它生成的的比它更清晰，显示源就换成服务端那份（`/preview` 与 `/preview-drop` 两处都这么做，
 > 落点与 `?div=` 照旧）；否则行为**一个字节都不变**。默认档位 ÷4 下基本不触发（24000 源 +
@@ -78,7 +82,7 @@
 > 幂等排查见 §四的 `POST /api/qclist/write` 一条。
 
 > **SR 最小原型**（详见 `docs/planning/sr-minimal-prototype-plan.md` 与 §7.6）：
-> ① 掩码用场景目录里**已有的** `<目录名>_mask.tif`（`POST /api/masks` 保留但前端不调用）；
+> ① 掩码用场景目录里**已有的** `<输入影像 stem>_mask.tif`（`POST /api/masks` 保留但前端不调用）；
 > ② 作业可**不经过 Slurm**（`SR_EXECUTOR=local`，sr-api 本机 `bash` 直跑，单槽串行）；
 > ③ 浏览器端 JPG 导出 / FS Access「输出目录」授权不提供（掩码下载还在）。
 
@@ -545,11 +549,11 @@ curl -s -o /dev/null -w '健康=%{http_code}\n' http://127.0.0.1:8000/api/health
 | 部件 | 位置 | 作用 |
 | --- | --- | --- |
 | 只读探针 | `deploy/slurm/probe_slurm.sh` | 上机第一步：核对分区 / GRES / 记账 / 路径 / 权限，**只读不改**。`--deep` 会真提交一个 2 分钟作业，**默认不开** |
-| 部署变体 | `SR_code/variants/code_0817_prod_slurm.py` | 与生产脚本**并置**在 `$SR_BUNDLE_DIR` 下，由 `SR_SR_SCRIPT` 指定作业跑它（不必改名顶替，生产原文件保持字节不动）。重新生成：`python SR_code/tools/gen_slurm_variant.py`（`--check` 验新鲜度）；逐条差异见 `docs/sr_code/sr-slurm-deploy-variant.md` 的 E1–E9 |
+| 部署变体 | `SR_code/variants/code_0817_prod_slurm.py` | 与生产脚本**并置**在 `$SR_BUNDLE_DIR` 下，由 `SR_SR_SCRIPT` 指定作业跑它（不必改名顶替，生产原文件保持字节不动）。重新生成：`python SR_code/tools/gen_slurm_variant.py`（`--check` 验新鲜度）；逐条差异见 `docs/sr_code/sr-slurm-deploy-variant.md` 的 E1–E10 |
 | 契约校验器 | `SR_code/variants/verify_sr_run.py` | 作业内第二个进程：判「退出码 0 + SRLOG 末行 `Run finished.` + 输出 tif」三条件，写退出码文件，**契约不满足时以退出码 90 结束**（纯标准库、py3.6 兼容） |
 | 平台侧代码 | `backend/services/run_sr.py`（生成批脚本 / 幂等指纹）+ `backend/services/slurm.py`（读退出码文件定终态） | 随 `backend/` 一起升（§5.2） |
 
-### 7.1 装什么（两份脚本 + 九个 env）
+### 7.1 装什么（三份脚本 + 十一个 env）
 
 脚本——`$BUNDLE` 即 `SR_BUNDLE_DIR`。**并置即可，不覆盖生产脚本**：
 
@@ -557,24 +561,28 @@ curl -s -o /dev/null -w '健康=%{http_code}\n' http://127.0.0.1:8000/api/health
 cd $BUNDLE
 cp <上车目录>/code_0817_prod_slurm.py ./code_0817_prod_slurm.py   # 变体：与原脚本并排
 cp <上车目录>/verify_sr_run.py        ./verify_sr_run.py
+cp <上车目录>/sr_prep_scene.py        ./sr_prep_scene.py
 head -3 code_0817_prod_slurm.py                                  # ✓= "GENERATED FILE — DO NOT EDIT" 横幅
 ls -l code_0817_prod.py                                          # ✓= 生产原脚本仍在，未被改动
 ```
 
-> ⚠️ `verify_sr_run.py` 的仓库当前版本含退出码文件的编码锁定（17164 B）。机上若还是旧版
-> （16419 B，行为正确但少这层保护），A/B/C 不受影响，**走 D 之前重新拷一次**。
+> ⚠️ 这三个文件名都是**批脚本按名调用**的，缺一个作业就跑不起来（`sr_prep_scene.py` 缺 → 跑前
+> 就位失败 → 作业不跑 SR、校验器报 90；`verify_sr_run.py` 是旧版 → 不认 `--land-on-body` 等参数
+> → argparse 直接退 2、**不写退出码文件**，平台永远读 UNKNOWN，本体停在 1×。所以每次更新都三份
+> 一起拷）。`verify_sr_run.py` 与 `sr_prep_scene.py` 都不由生成器产出，仓库里改了就要重拷。
 
-> **为什么可以不顶替**：批脚本里那两个程序名是 `SR_SR_SCRIPT` / `SR_VERIFY_SCRIPT` 两个 env
-> 决定的（`run_sr.py`），后端在生成批脚本时把名字写进文本。所以变体只要跟原脚本放在同一目录、
-> 名字与 `SR_SR_SCRIPT` 对上就会被执行。好处是 `gen_slurm_variant.py` 的对照物（生产原文件）
-> 始终字节不变，回滚只是把 `SR_SR_SCRIPT` 改回 `code_0817_prod.py` + restart。
+> **为什么可以不顶替**：批脚本里那三个程序名是 `SR_SR_SCRIPT` / `SR_VERIFY_SCRIPT` /
+> `SR_PREP_SCRIPT` 三个 env 决定的（`run_sr.py`），后端在生成批脚本时把名字写进文本。所以变体
+> 只要跟原脚本放在同一目录、名字与 `SR_SR_SCRIPT` 对上就会被执行。好处是 `gen_slurm_variant.py`
+> 的对照物（生产原文件）始终字节不变，回滚只是把 `SR_SR_SCRIPT` 改回 `code_0817_prod.py` + restart。
 >
 > ⚠️ **没配 `SR_SR_SCRIPT` 就等于跑原脚本**，而原脚本有三处会咬人：`gpu_count != 4` 守卫在
 > 单卡分配下恒真 ⇒ 作业 `exit(3)`；强行把 `CUDA_VISIBLE_DEVICES` 写成 `0` ⇒ 并发作业全挤 0 号
 > 卡；失败时执行 `systemctl stop slurmd.service`（作业以 `User=nginx` 跑是权限拒绝，服务以 root
 > 跑则**真把节点从调度池里摘掉**）。
 
-env——`sr-api.service` 里**前八项**全部必填、第九项强烈建议配，node81-135 实测值（详见 service 内注释）：
+env——`sr-api.service` 里**前八项必填**（漏配的症状写在各自说明里），第九、十项是作业内脚本名、
+不配也有默认值，第十一项强烈建议配；node81-135 实测值（详见 service 内注释）：
 
 | env | node81-135 实测值 | 说明 |
 | --- | --- | --- |
@@ -586,11 +594,12 @@ env——`sr-api.service` 里**前八项**全部必填、第九项强烈建议�
 | `SR_SLURM_CPUS` | `4` | `#SBATCH --cpus-per-task` |
 | `SR_SLURM_NODELIST` | **待定（那一台 4 卡机的主机名）** | 白名单 → `#SBATCH --nodelist=`。需求：**所有作业只跑在同一台 4×3090 物理机内、不调度到其他服务器**，Slurm 只做本机排队 + 单卡分配 —— 所以值是**单台**主机名，由 `docs/status/slurm-acceptance.md §B0` 的三条只读命令定出（`sinfo -N -o "%N %G %t"` 找 `gpu:4` 且非 `down` 的那台）。值是 Slurm host list，只允许字母/数字/`-`/`,`/`[`/`]`（非法值提交时报错）；不配 = 不加此行 = 调度器自选。**别填族白名单**（会把作业散到几十台机器上）。它是**硬**白名单：该机全忙时作业排队等待，不会溢出。若走「本机单节点 Slurm」方向则整项不需要 |
 | `SR_SR_SCRIPT` | `code_0817_prod_slurm.py` | 作业跑哪个超分脚本（相对 `SR_BUNDLE_DIR`）。**不配 = 跑生产原脚本**，见上面的警告 |
-| `SR_VERIFY_SCRIPT` | `verify_sr_run.py` | 作业内契约校验器（相对 `SR_BUNDLE_DIR`）。不配也会跑这个名字，显式写出来是为了可审计 |
+| `SR_VERIFY_SCRIPT` | `verify_sr_run.py` | 作业内契约校验器（相对 `SR_BUNDLE_DIR`）。这一跑有源头替换时，判定与**归位**都在它这里：契约过了把产物换到本体名、没过/跳过则从备份恢复本体，两种结局**都写进退出码文件**。不配也会跑这个名字，显式写出来是为了可审计 |
+| `SR_PREP_SCRIPT` | `sr_prep_scene.py` | 作业内跑前脚本（相对 `SR_BUNDLE_DIR`）：**只在这一跑解析出源头替换时才跑**——留备份、把未超分那份拷成本体名、把掩码降到源头尺寸。不配也会跑这个名字，显式写出来是为了可审计 |
 | `SR_SANDBOX_ROOT` | `/DiskArray/tmp/wangrz/sr_sandbox` | **强烈建议配**：每个作业先在 `<根>/<任务指纹前12位>/` 下 `cp -a` 一份 `lq_path` 的私有副本，SR 全程只碰副本。不配 = SR 直接写 `lq_path`（阶段6 的生产形态）。详见 §7.5 |
 
-改完 `systemctl daemon-reload && systemctl restart sr-api`（前六项由 `backend/config.sr_runtime()`、
-后两项由 `run_sr.py` 在**调用时**读 env，不 restart 不生效；已经生成并提交的作业不受影响——
+改完 `systemctl daemon-reload && systemctl restart sr-api`（env 由 `backend/config.sr_runtime()` 与
+`run_sr.py` 在**调用时**读，不 restart 不生效；已经生成并提交的作业不受影响——
 脚本名是**生成时**写进批脚本文本的，批脚本本身带 `--export=NONE`，进程环境不会传进作业）。
 
 ### 7.2 两个权限坑（都用 `sudo -u nginx` 验）
@@ -605,8 +614,9 @@ env——`sr-api.service` 里**前八项**全部必填、第九项强烈建议�
   写不了 `SR_SLURM_WORK_DIR` 的直接后果：API 自己就写不出 config.xml/批脚本，提交必失败。
 - **`lq_path` 只需 nginx 可读**（开沙箱时）——`Debug/` 与产物都落在副本里，校验器写退出码文件
   也写在副本。这正是沙箱的一个附带好处：不必为了让平台能跑，去给生产目录开写权限。
-  ⚠️ 不开沙箱（`SR_SANDBOX_ROOT` 空）时反过来：`lq_path/<目录>/Debug/` **必须 nginx 可写**，
-  否则校验器写不出退出码文件 → 该任务永远 `UNKNOWN`。
+  ⚠️ 不开沙箱（`SR_SANDBOX_ROOT` 空）时反过来：`lq_path/<目录>/`（连同 `Debug/`）**必须 nginx
+  可写**，否则校验器写不出退出码文件 → 该任务永远 `UNKNOWN`；有源头替换的那一跑还要覆盖本体名、
+  写 `Debug/<本体名>.srbak`，父目录同样要在写权限内。
 
 ### 7.3 终态怎么判（**不要看 sacct**）
 
@@ -618,6 +628,7 @@ env——`sr-api.service` 里**前八项**全部必填、第九项强烈建议�
 ```
 
 映射：`verdict=0` → **COMPLETED**（含 `skip=1` 的云量跳过——合法跳过不是失败）；`verdict!=0` → **FAILED**。
+这一跑有源头替换时，**归位**也在同一个 verdict 里：产物没能换到本体名 = `90` → FAILED，不会被报成 COMPLETED。
 
 关键点：**进程退出码 0 不代表成功**。有一批静默失败（输入 PAN 缺失、RC 步尺寸不符、config 缺失等）
 同样是 `exit(0)`，且都发生在 SRLOG 建立之前——过去会被固化成 COMPLETED。退出码 90 就是为此引入的
@@ -658,17 +669,23 @@ os.rename(path + tiftype, path + "_NOSR" + tiftype)   # 首跑时该文件不存
 <SR_SANDBOX_ROOT>/<任务指纹前12位>/
 └── <场景目录名>/      ← cp -a 自 lq_path，**目录名必须原样**
     ├── <目录名>.tif          ← SC 步的输入名由目录名推导：osp.basename(lq_path) + file_type
-    ├── <目录名>_<suffix>.tif   ← SR 写的产物（输入 <目录名>.tif 原样不动）
-    └── Debug/               ← SRLOG + 退出码文件
+    ├── <目录名>_NOSR.tif     ← 未超分那一份（这一跑的源头，全程不改）
+    ├── <目录名>_<suffix>.tif   ← SR 写的产物；归位后它换到 <目录名>.tif 名下，这个名字不再存在
+    └── Debug/               ← SRLOG + 退出码文件 + 跑前备份 <目录名>.tif.srbak（成功后删掉）
 ```
+
+跑前脚本与校验器在作业内按这个顺序动这些文件：留备份（本体 → `Debug/<本体名>.srbak`）→
+把未超分那一份**拷贝**成本体名（拷贝，不是改名，归档那份原地留着）→ 掩码降到源头尺寸 →
+SR 照常读本体名 → 契约过了把产物 `os.replace` 到本体名、删备份。所以这一跑结束后，
+本体名上是**超分后**那份；流程中途失败或云量跳过，则由校验器从备份把本体恢复回跑前那份。
 
 **每次作业都重新复制**（先 `rm -rf` 再 `cp -a`），不做「已存在就跳过」的优化：同一组参数
 失败后重跑时，源可能已经修好，跳过复制会让人对着旧副本排查——省几分钟，赔一下午。
 
-三件事因此成立：**生产目录只读**；`exit_code_file_for()` 从 config.xml 的 `DatarootLQ`
-（已指向副本）反推出同一个退出码文件路径，平台照旧能读到终态；`/api/queue` 每行多一个
-`run_dataroot` 字段，说明产物到底落在哪儿（`params.lq_path` 是用户填的原路径，两者在开启沙箱时
-不同）。
+三件事因此成立：**沙箱生效期间生产目录只读**——源头替换与归位也全落在副本里，盘阵那份本体不会
+被超分产物盖住；`exit_code_file_for()` 从 config.xml 的 `DatarootLQ`（已指向副本）反推出同一个
+退出码文件路径，平台照旧能读到终态；`/api/queue` 每行多一个 `run_dataroot` 字段，说明产物到底
+落在哪儿（`params.lq_path` 是用户填的原路径，两者在开启沙箱时不同）。
 
 注意事项：
 
@@ -686,17 +703,22 @@ os.rename(path + tiftype, path + "_NOSR" + tiftype)   # 首跑时该文件不存
 - **值的格式**：必须是不含空格 / 引号 / `` ` `` / `..` 的绝对路径——它会拼进作业脚本里一行
   `rm -rf "<根>/<指纹>"`。非法值在**提交时**报 `ValueError`，不会静默降级；
 - **时间**：复制发生在作业内，算进 `--time`（默认 2h）。大场景 + 慢盘时留意；
-- **不配就是生产形态**：SR 直接写 `lq_path`（产物 + `Debug/` + meta 更新），平台恒定
-  非空 `Suffix`，源图不改名也不删除。上游生产管线用空 `Suffix` 就地写时才会把原图改名为
-  `*_NOSR.tif`（契约 §2.4 第 1 条），平台不走那条路。所以生产环境关掉沙箱是正常的，
-  只是那一刻起，前端填什么路径就写什么路径。
+- **不配就是生产形态**：SR 直接写 `lq_path`（产物 + `Debug/` + meta 更新）。平台恒定非空
+  `Suffix`，所以不会把原图改名成 `*_NOSR.tif`（上游生产管线用空 `Suffix` 就地写时才会这样，
+  契约 §2.4 第 1 条，平台不走那条路）；但这一跑会**覆盖本体名**——本体
+  `<目录名>.tif` / `PAN.tif` 先被换成未超分那份、跑完再被换成超分产物（中间那份在
+  `Debug/<本体名>.srbak`，成功后删掉），未超分的归档 `<…>_NOSR.tif` 全程不动。所以生产环境
+  关掉沙箱是正常的，只是那一刻起，前端填什么路径就写什么路径——包括本体名那一份。
 - **与产物预览主动生成的关系**：作业转 COMPLETED 后，后端会同时把**产物那一份**
   预览生成掉（见 `deploy/sr-api.service` 里 `SR_PRODUCT_PREVIEW_DIV` 那段）。沙箱**实际生效**时
   产物落在私有副本上、盘阵里根本没有产物，这项会自动跳过并在队列行上写
   `skipped: sandbox`（如实跳过，不是故障，也不会往临时盘撒文件）。
   **判据是沙箱有没有真生效，不是这个 env 在不在**：`run_sr.sandbox_scene_paths` 在
   `SR_EXECUTOR=local`（§7.6 那条最小原型路线）时恒返回 `None` —— 所以真机上现在配着
-  `SR_SANDBOX_ROOT` 但跑 local，**主动生成照生成**，别照「配了沙箱就不会生成」去理解。
+  `SR_SANDBOX_ROOT` 但跑 local，这一项**照跑**，别照「配了沙箱就不会生成」去理解。
+  但跑起来的结论是 `product_missing`：产物已被归位到本体名，`<输入 stem>_<suffix>.tif`
+  这一跑结束后不再存在（见上面那段），note 里会列出试过的候选名。用户打开的是**本体**那份，
+  它的预览走打开时的惰性链（`<本体 stem>_preview.jpg`）。未超分那份照旧生成。
 
 ### 7.6 最小原型：不走 Slurm，本机 conda 直接跑（`SR_EXECUTOR=local`）
 
@@ -741,14 +763,17 @@ SR 团队自己的配置文件（`sfsr_confgig_test_espan2_cuda1.xml`，同时�
 
 两条环境要求与 Slurm 模式不同：
 
-1. **`SR_SANDBOX_ROOT` 必须不设**。沙箱会把 `DatarootLQ` 指到副本目录，产物就落在那儿，
-   直接违背「输出与原图同目录」这条需求。本地模式的写入目标就是 `SR_LOCKED_DIR`，
-   所以锁定目录本身应当是 `/DiskArray/tmp/wangrz/` 下的试验目录；
-2. **`lq_path` 必须 nginx 可写**（没有沙箱这层缓冲了）：SR 在同目录写产物
-   `<目录名>_<suffix>.tif` 与 `Debug/`（输入 tif 不改名也不删除）。**每次真跑都要知道一次：
-   同名旧产物会被改名为 `<同名>_NOSR.tif`，然后被新产物覆盖。**
+1. **`SR_SANDBOX_ROOT` 必须不设**。沙箱会把 `DatarootLQ` 指到副本目录，产物与归位都只发生在
+   副本里，盘阵那份本体永远等不到超分产物，直接违背「输出与原图同目录」这条需求。本地模式的
+   写入目标就是 `SR_LOCKED_DIR`，所以锁定目录本身应当是 `/DiskArray/tmp/wangrz/` 下的试验目录；
+2. **`lq_path` 必须 nginx 可写**（没有沙箱这层缓冲了）：作业在同目录写 SRLOG / 退出码文件、
+   写 SR 产物 `<目录名>_<suffix>.tif`，而且**动本体名那一份**——跑前把它换成未超分那份
+   （备份在 `Debug/<本体名>.srbak`），跑完把产物换到它名下。**每次真跑都要知道一次：
+   同名旧产物会被改名为 `<同名>_NOSR.tif`，然后被新产物覆盖**（SR 写产物时的既有行为，
+   紧接着产物又被归位到本体名下）。
 
-掩码规则：请求里不传 `mask_path` 时，后端取 `<lq_path>/<目录名>_mask.tif`；文件不存在直接 400
+掩码规则：请求里不传 `mask_path` 时，后端取 `<lq_path>/<输入影像 stem>_mask.tif`
+（SC 场景即 `<目录名>_mask.tif`，RC 场景即 `PAN_mask.tif`）；文件不存在直接 400
 （不静默退化成全图超分）。前端「提交 SR」按钮只对**盘阵场景**（有 `lq_path` 的行）可用，
 本地打开的文件没有目录语义，按钮禁用。
 

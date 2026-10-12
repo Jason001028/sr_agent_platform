@@ -17,6 +17,9 @@ sbatch is absent → clean error) and the array server:
     SR_SLURM_CPUS       sbatch --cpus-per-task (default 4)
     SR_VERIFY_SCRIPT    contract verifier run after the SR script
                         (default verify_sr_run.py, resolved after the cd)
+    SR_PREP_SCRIPT      scene-prep script run before the SR script, only on a
+                        submit that resolved a source swap
+                        (default sr_prep_scene.py, resolved after the cd)
     SR_SR_SCRIPT        SR script the job runs (default code_0817_prod.py).
                         Point it at the Slurm deployment variant to run that
                         instead, leaving the production script untouched.
@@ -58,6 +61,7 @@ from backend.config import SR_DEFAULT_BUNDLE_DIR, SR_DEFAULT_OPTIONS_YML
 from backend.config import SR_DEFAULT_SUFFIX, SR_DEFAULT_WORK_DIR, sr_runtime
 
 from . import local_exec
+from . import scene_search
 from . import slurm
 from . import store as store_mod
 
@@ -192,7 +196,69 @@ def _reject_delete_ori(params: dict) -> None:
         raise ValueError(DELETE_ORI_MSG)
 
 
-def build_config_xml(params: dict, dataroot=None) -> str:
+def nosr_swap_plan(lq_path, mask_path, suffix, dataroot=None) -> dict:
+    """这一跑读哪份、跑完落到哪个名字、两个临时件放哪（五条绝对路径）。
+
+    平台的超分提交只把**场景目录**交给 SR，输入文件由 SR 脚本自己定位（RC 场景硬编码
+    `PAN.tif`，见 util.get_l1_pan_tif_rcsc）。而真机上 `PAN.tif` 是**已经超过分**的那份
+    本体：严格判据 `1.0 < size < 1.8 GiB` 只放行超分后的尺寸，未超分的那份一进去就被判成
+    「已超分」直接退出。所以这一跑要先把**未超分那一份**拷到本体名上，跑完再把产物落回
+    本体名 —— 本函数算的就是这套位置。
+
+    两个消费方各取所需，同一份计划不各推一遍：
+
+      * `source` / `backup` / `mask` / `mask_1x` —— 跑前脚本 sr_prep_scene.py；
+      * `body` / `backup` / `mask_1x` —— 跑后契约校验的归位段（verify_sr_run.py）。
+
+    本体与来源那一份都按 `scene_search` 的既有推导取（场景判定只有那一处）。来源取
+    **输入 stem** 那几条候选里第一个存在的（`<输入 stem>_NOSR`，RC 场景即
+    `PAN_NOSR.tif`）；**不传 `product_path`**：`<产物 stem>_NOSR` 是上一次同一 suffix 的
+    超分结果，语义不同，不能当选源头。
+
+    路径都按**作业看到的那个目录**给：`dataroot` 是沙箱副本目录时本体、备份、掩码临时件
+    都落在副本里（沙箱开着时 SR 只碰副本，见 sandbox_scene_paths）。来源那一份的**存在性**
+    始终按真实场景目录判 —— 副本此刻还没建出来。两个临时件落在 `<场景>/Debug/`：`Debug/`
+    本来就是这个链路的临时区，且扩展名/主干都过不了 `is_scene_file` 的白名单，不会污染
+    场景列表。
+
+    `mask_path` 是操作员那份掩码（`<输入影像 stem>_mask.tif`），`mask_1x` 是它降到源头
+    尺寸之后的临时件 —— 配置 XML 的 `<MaskPath>` 指向后者，前者的路径仍进 params 与
+    `task_fingerprint`（指纹语义不变：同一次提交还是同一次提交）。
+
+    缺本体、缺未超分那一份、缺掩码一律 `ValueError` 拦下，不拿别的文件顶替。
+    """
+    if not str(suffix or "").strip():
+        # 空 suffix 时输出名 == 输入名，SR 的 writeTiff 会把输入改名为 _ori 后就地覆盖；
+        # 两个入口的 normalize_suffix 都保证非空，这里是这一条链自己的兜底。
+        raise ValueError("超分提交需要一个非空 suffix（输出名等于输入名时 SR 会就地覆盖输入）")
+    scene = str(lq_path).replace("\\", "/").rstrip("/")
+    inp = scene_search.input_scene_path(scene)
+    if inp is None:
+        cands = "、".join(c.name for c in scene_search.input_candidates(scene))
+        raise ValueError(f"不是合法场景目录：{scene}"
+                         f"（需含 <目录名>_meta.xml，且含 {cands} 之一）")
+    candidates = scene_search.nosr_candidates(scene, inp)
+    source = next((c for c in candidates if c.is_file()), None)
+    if source is None:
+        tried = "、".join(c.name for c in candidates)
+        raise ValueError(f"场景里没有未超分那一份（试过 {tried}）："
+                         "这一跑要读的就是它，缺了不拿别的顶替")
+    mask = str(mask_path or "").replace("\\", "/")
+    if not mask or not Path(mask).is_file():
+        raise ValueError(f"掩码文件不存在：{mask or '<未给>'}")
+
+    base = str(dataroot).replace("\\", "/").rstrip("/") if dataroot else scene
+    mask_name = _posix_basename(mask)
+    return {
+        "body": f"{base}/{inp.name}",
+        "source": f"{base}/{source.name}",
+        "backup": f"{base}/Debug/{inp.name}.srbak",
+        "mask": mask,
+        "mask_1x": f"{base}/Debug/{mask_name}.sr1x",
+    }
+
+
+def build_config_xml(params: dict, dataroot=None, mask_path=None) -> str:
     """Serialize run_sr params into an <SFSR_Config> XML string.
 
     DatarootLQ is required. MaskPath is emitted only when given (absent → the
@@ -203,6 +269,11 @@ def build_config_xml(params: dict, dataroot=None) -> str:
     `dataroot` overrides params["lq_path"] as <DatarootLQ> — the sandbox uses
     this to point the job at its private copy while the task keeps recording the
     path the user actually asked for.
+
+    `mask_path` overrides params["mask_path"] as <MaskPath> — the submit entries
+    point the job at the mask resampled to the source's pixel size
+    (nosr_swap_plan) while params keeps recording the operator's own mask path,
+    which is what the fingerprint is taken over.
     """
     root = ET.Element("SFSR_Config")
 
@@ -220,7 +291,7 @@ def build_config_xml(params: dict, dataroot=None) -> str:
     add("SRScale", params.get("sr_scale", 2))
     add("Suffix", params.get("suffix") or "")
     add("OPT", params.get("options_yml") or DEFAULT_OPTIONS_YML)
-    add("MaskPath", params.get("mask_path"))
+    add("MaskPath", params.get("mask_path") if mask_path is None else mask_path)
     if params.get("grid_align") is False:
         add("GridAlign", "false")
 
@@ -231,9 +302,9 @@ def build_config_xml(params: dict, dataroot=None) -> str:
 
 def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
                        partition=None, gres=1, job_name=None,
-                       verify_script=None, sr_script=None,
+                       verify_script=None, sr_script=None, prep_script=None,
                        sandbox_src=None, sandbox_parent=None,
-                       nodelist=None, job_id=None) -> str:
+                       nodelist=None, job_id=None, swap=None) -> str:
     """Slurm batch script: audit the allocation, run the SR script, verify it.
 
     Shape (P2):
@@ -257,6 +328,22 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
          (SR_SR_SCRIPT, default the production one), then the contract verifier,
          whose exit code is passed straight out (0 = contract satisfied, 90 =
          not).
+
+    `swap` (a nosr_swap_plan dict) is the "this run reads the un-superresolved
+    copy" wiring, and is absent on a submit that did not resolve one:
+
+      * before the SR script, `prep_script` (SR_PREP_SCRIPT, default
+        sr_prep_scene.py) lands that copy on the body name and resamples the
+        mask to its pixel size. A prep failure does NOT abort the job — it is
+        carried into `_sr_rc` and the SR step is skipped, so the verifier still
+        runs and still writes its verdict (and restores the body from the
+        backup). Exiting here instead would leave no verdict file at all, which
+        the platform reads as UNKNOWN and can never clear.
+      * the verifier is additionally asked to move the product onto the body
+        name afterwards (`--land-on-body` / `--backup` / `--mask-1x`). That
+        landing lives in verify_sr_run.py rather than here because the terminal
+        state the platform reads is the verdict file, not this script's exit
+        code: a landing that failed in bash could only print.
 
     Optional sandbox step (both args given): the job first copies `sandbox_src`
     into `sandbox_parent`, and the config's DatarootLQ already points at the
@@ -289,6 +376,10 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
     partition = partition if partition is not None else rt.partition
     verify_script = verify_script or os.environ.get("SR_VERIFY_SCRIPT",
                                                     "verify_sr_run.py")
+    # Same shape and same reason as SR_VERIFY_SCRIPT: the job carries
+    # --export=NONE, so the name has to be baked into the generated text here.
+    prep_script = prep_script or os.environ.get("SR_PREP_SCRIPT",
+                                                "sr_prep_scene.py")
     # Which SR script the job runs (same shape as SR_VERIFY_SCRIPT above).  Both
     # names are resolved HERE, not in the job: the batch script carries
     # --export=NONE, so nothing set in this process survives into it — the name
@@ -400,6 +491,10 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
         ]
     verify_line = (f'{python} {verify_script} --config {config_xml_path} '
                    '--sr-exit-code "$_sr_rc"')
+    if swap:
+        verify_line += (f' --land-on-body {swap["body"]}'
+                        f' --backup {swap["backup"]}'
+                        f' --mask-1x {swap["mask_1x"]}')
     if job_id is not None:
         # No scheduler to name the verdict file after (local executor), so the
         # id is written in: verify_sr_run.py prefers --job-id over $SLURM_JOB_ID.
@@ -408,12 +503,39 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
         "",
         f"cd {bundle_dir} || {{ echo \"cd {bundle_dir} failed\" >&2; exit 1; }}",
         "",
-        f"{python} {sr_script} -f {config_xml_path}",
-        "_sr_rc=$?",
-        "",
-        verify_line,
-        "exit $?",
     ]
+    if swap:
+        lines += [
+            "# ---- prep: this run reads the un-superresolved copy ----",
+            "# A prep failure is carried into _sr_rc instead of exiting: the",
+            "# verifier still has to run and write its verdict (it restores the",
+            "# body from the backup), otherwise the platform reads UNKNOWN.",
+            "_prep_rc=0",
+            f'{python} {prep_script} --body {swap["body"]}'
+            f' --nosr {swap["source"]} --backup {swap["backup"]}'
+            f' --mask {swap["mask"]} --mask-1x {swap["mask_1x"]} || _prep_rc=$?',
+            'if [ "$_prep_rc" -ne 0 ]; then',
+            '    echo "sr_prep_scene failed (exit $_prep_rc);'
+            ' skipping the SR run, the verifier restores the body" >&2',
+            '    _sr_rc=$_prep_rc',
+            "else",
+            f"    {python} {sr_script} -f {config_xml_path}",
+            "    _sr_rc=$?",
+            "fi",
+            "",
+            verify_line,
+            "_v_rc=$?",
+            "exit $_v_rc",
+        ]
+    else:
+        lines += [
+            f"{python} {sr_script} -f {config_xml_path}",
+            "_sr_rc=$?",
+            "",
+            verify_line,
+            "_v_rc=$?",
+            "exit $_v_rc",
+        ]
     return "\n".join(lines) + "\n"
 
 
@@ -594,7 +716,7 @@ def _resolve_existing(task: dict, run_cmd=None) -> dict:
             "previous_exit_code": st["exit_code"], "previous_job_id": job_id}
 
 
-def submit_run_sr(params: dict, run_cmd=None, store=None) -> dict:
+def submit_run_sr(params: dict, run_cmd=None, store=None, swap=None) -> dict:
     """Assemble config + batch script and hand the job to the executor.
 
     Which executor is SR_EXECUTOR: "slurm" sbatch-submits on the cluster,
@@ -602,6 +724,16 @@ def submit_run_sr(params: dict, run_cmd=None, store=None) -> dict:
     child process on this host. Everything else — the config XML, the
     fingerprint, the store rows, the verdict-file terminal state — is identical
     on both paths, which is the point of reusing the batch script verbatim.
+
+    `swap` is the nosr_swap_plan dict of *this* submit — the source→body
+    positions, which the two submit entries resolve (they are the ones that can
+    say 400/err when the scene has no un-superresolved copy). Absent → the job
+    runs the plain script: it reads whatever the SR script resolves on its own
+    and nothing lands on the body name. The plan is deliberately NOT part of
+    `params`: it is derived from the scene on disk, so folding it into the
+    fingerprint would make the same logical submit hash differently on a scene
+    that gained its un-superresolved copy in between.
+
 
     Idempotent via the store's sr_tasks table (default store unless one is
     passed): before submitting, the task table is consulted and a stored
@@ -655,8 +787,9 @@ def submit_run_sr(params: dict, run_cmd=None, store=None) -> dict:
     # the first task's polling at the wrong scene.
     stem = f"run_sr_{params.get('suffix') or DEFAULT_SUFFIX}_{fp[:SANDBOX_KEY_LEN]}"
     cfg_path = work / f"{stem}.xml"
-    cfg_path.write_text(build_config_xml(params, dataroot=(sandbox or {}).get("scene")),
-                        encoding="utf-8")
+    cfg_path.write_text(build_config_xml(
+        params, dataroot=(sandbox or {}).get("scene"),
+        mask_path=(swap or {}).get("mask_1x")), encoding="utf-8")
 
     # The local executor's id must exist before the script text is written: the
     # verifier is told `--job-id <id>` so it names its verdict file after this
@@ -669,7 +802,7 @@ def submit_run_sr(params: dict, run_cmd=None, store=None) -> dict:
         build_batch_script(cfg_path, work,
                            sandbox_src=(lq_path if sandbox else None),
                            sandbox_parent=(sandbox or {}).get("parent"),
-                           job_id=job_id),
+                           job_id=job_id, swap=swap),
         encoding="utf-8")
 
     # checkpoint the intent BEFORE the external side effect: a crash between

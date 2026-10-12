@@ -160,6 +160,9 @@ submit_run_sr 返回 → 队列状态：
   直接调 `services.run_sr.submit_run_sr(params, store=default_store())`（幂等层既在：重复同参 → RESUMED_ACTIVE/COMPLETED 复用，失败才重跑，中断无 job_id → 409 报"勿盲重试"）。返回：
   `201 {"task_id", "job_id", "status":"SUBMITTED"|"RESUMED_ACTIVE"|"RESUMED_COMPLETED"|…, "state":…, "previous_state"?, "config_xml", "log_dir"}`。
   校验：`lq_path` 必填 + 绝对路径 + 不含 `<fake>`（复用 tools/run_sr `_bad_path` 语义）；mask_path 同规则；sbatch 不可用且未开 fake → 422「slurm not available … 需在盘阵机配置」。
+  **还要解析「这一跑读哪份、跑完落到哪个名字」**（`run_sr.nosr_swap_plan`）：不是合法场景目录、
+  缺未超分那一份（`<输入 stem>_NOSR.tif`，RC 场景即 `PAN_NOSR.tif`）、操作员掩码不在 —— 三者任一 → **400**，
+  `detail` 写出缺的是哪一个（缺源头时连试过的候选名一起列出），**不拿别的文件顶替**。
   **`suffix` 的默认值来源**：body 省略或留空 → 平台读 `$SR_BUNDLE_DIR` 下 SR 团队自己的配置文件（`sfsr_confgig_test_espan2_cuda1.xml`，兼容另一种拼写 `sfsr_config_…`）里的 `<Suffix>` 作默认值；文件缺失 / 坏 XML / 标签缺失或为空 / 值不合白名单 → 回落到内置 `"sr"`。**每次提交现读**，不缓存（`task_fingerprint` 把 `suffix` 文本哈希在内，缓存会让指纹变成进程启动时刻的函数 → 重启或双 worker 对同一逻辑提交得出不同指纹）。显式传值仍走白名单 `^[A-Za-z0-9_-]{1,16}$`，不合法 400（`detail` 含「suffix 非法」）。**agent 工具 `run_sr` 共用同一套归一化**（`services/run_sr.py::normalize_suffix`），同一逻辑提交在两入口得到同一 `task_fingerprint`。`SR_SUFFIX_DEFAULT` 环境变量不读。
 - `POST /api/queue/{task_id}/cancel` → 查 task（404 无），`job_id` 非空则 `slurm.cancel` → `200 {"task_id","cancelled":bool,"state":…}`；无 job_id（中断遗留）→ 400。
 - `GET /api/queue/events` — SSE：订阅所有任务的 `state` 变化。**驱动** = app 生命周期后台 asyncio 任务（§4.3）：周期（`SR_QUEUE_POLL_SEC`，缺省 2s）对每个 `job_id` 非空 task 调 `slurm.job_status`，状态与前值不同 → 更新内存缓存 + 写回 `sr_tasks.status` + 广播一帧。事件 schema：
@@ -664,6 +667,9 @@ body：
   suffix 时它照旧出现，只有 `product` 那一类消失。**真机上实际命中哪个名字尚无实证** ——
   候选两条都试、命中即如实回报，拿到真机 `ls -l` 后按这份清单校准**顺序**即可，不影响能否命中。
   两义都标 `NOSR` 标，见 [preview-bake-pipeline §4.11](../knowledge/preview-bake-pipeline.md)。
+  **提交侧的源头只取输入 stem 那几条**（`run_sr.nosr_swap_plan` 不传 `product_path`）——
+  `<产物 stem>_NOSR` 是上一次的超分结果，语义不同，永不作为源头；这份清单里它排最后一条只为说明
+  「试过哪些」。
 - `div` = 服务端**主动生成**档位（§4.5），**仅供界面标注**，不参与任何前端决策 —— 前端认的
   是用户滑块那个档位，服务端看不见它（这正是必须有服务端默认档的原因）。
 - **拼完的名字再过一道 `pathguard.ensure_allowed`**：`SUFFIX_RE` 挡得住分隔符，挡不住

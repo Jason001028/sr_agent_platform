@@ -160,8 +160,19 @@ def run_run_sr(**params) -> dict:
         "grid_align": bool(params.get("grid_align", True)),
         "options_yml": params.get("options_yml"),
     }
+    # 这一跑读哪份、跑完落到哪个名字（run_sr.nosr_swap_plan）。缺未超分那一份是
+    # err（模型能读着原因改参数重试），与 REST 入口同一条规则、同一个函数。沙箱
+    # 开着时本体的位置在副本目录里，所以 dataroot 一起算出来。
     try:
-        data = svc.submit_run_sr(params, store=store_mod.default_store())
+        sandbox = svc.sandbox_scene_paths(
+            lq_path, svc.task_fingerprint(params))
+        swap = svc.nosr_swap_plan(lq_path, mask_path, suffix,
+                                  dataroot=(sandbox or {}).get("scene"))
+    except ValueError as e:
+        return err(str(e))
+    try:
+        data = svc.submit_run_sr(params, store=store_mod.default_store(),
+                                 swap=swap)
     except Exception as e:  # noqa: BLE001 — contract boundary
         return err(f"{type(e).__name__}: {e}")
     return ok(data)

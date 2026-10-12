@@ -19,13 +19,21 @@ from unittest import mock
 from backend.services import run_sr as svc
 from backend.services import slurm
 from backend.services import store as store_mod
-from backend.tests import allowed_roots_env
+from backend.tests import allowed_roots_env, make_scene_dir
 from backend.tools.run_sr import run_run_sr
 
 # full param dict shaped like the tool's, for fingerprint-stable submits
 PARAMS = {"lq_path": "/data", "mask_path": None, "sr_scale": 2, "suffix": "t1",
           "gpu": 0, "cloud_limit": 80, "delete_ori": False, "grid_align": True,
           "options_yml": None}
+
+#: A resolved nosr_swap_plan (run_sr.nosr_swap_plan) as the batch script sees
+#: it: absolute paths, the two scratch files under the scene's Debug/.
+SWAP = {"body": "/D/scene/PAN.tif",
+        "source": "/D/scene/PAN_NOSR.tif",
+        "backup": "/D/scene/Debug/PAN.tif.srbak",
+        "mask": "/D/scene/PAN_mask.tif",
+        "mask_1x": "/D/scene/Debug/PAN_mask.tif.sr1x"}
 
 
 def gradient_tif(path):
@@ -113,6 +121,105 @@ class TestBuildConfigXml(unittest.TestCase):
         xml = svc.build_config_xml({"lq_path": "/s"})
         ET.fromstring(xml)                          # must not raise
 
+    def test_mask_path_override_wins(self):
+        # The submit entries point <MaskPath> at the mask resampled to the
+        # source's pixel size; params keeps the operator's own path.
+        xml = svc.build_config_xml({"lq_path": "/s", "mask_path": "/s/PAN_mask.tif"},
+                                   mask_path="/s/Debug/PAN_mask.tif.sr1x")
+        tags = {e.tag: e.text for e in ET.fromstring(xml)}
+        self.assertEqual(tags["MaskPath"], "/s/Debug/PAN_mask.tif.sr1x")
+
+
+class TestNosrSwapPlan(unittest.TestCase):
+    """这一跑读哪份、跑完落到哪个名字（run_sr.nosr_swap_plan）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.scene = self.root / "SCENE_L1_PAN"
+        self.scene.mkdir()
+        # RC 场景：<SolarAzimuth> 空 ⇒ 输入是 PAN.tif（util.check_sr_previous_step）
+        (self.scene / "SCENE_L1_PAN_meta.xml").write_text(
+            "<meta><SolarAzimuth></SolarAzimuth></meta>", encoding="utf-8")
+        (self.scene / "PAN.tif").write_bytes(b"body\n")
+        (self.scene / "PAN_NOSR.tif").write_bytes(b"un-superresolved\n")
+        (self.scene / "PAN_mask.tif").write_bytes(b"mask\n")
+        self.mask = str(self.scene / "PAN_mask.tif")
+
+    def plan(self, **kw):
+        return svc.nosr_swap_plan(str(self.scene), self.mask, "260318", **kw)
+
+    def test_body_and_source_come_from_the_scene(self):
+        p = self.plan()
+        self.assertEqual(p["body"], self.scene.as_posix() + "/PAN.tif")
+        self.assertEqual(p["source"], self.scene.as_posix() + "/PAN_NOSR.tif")
+        self.assertEqual(p["mask"], self.mask.replace("\\", "/"))
+
+    def test_scratch_files_sit_in_debug(self):
+        p = self.plan()
+        self.assertEqual(p["backup"],
+                         self.scene.as_posix() + "/Debug/PAN.tif.srbak")
+        self.assertEqual(p["mask_1x"],
+                         self.scene.as_posix() + "/Debug/PAN_mask.tif.sr1x")
+
+    def test_product_stem_never_wins_over_the_input_stem(self):
+        # <产物 stem>_NOSR 是上一次同一 suffix 的超分结果，不是未超分那份。
+        # 两条名字同时在盘上时必须取输入 stem 那条。
+        (self.scene / "PAN_260318_NOSR.tif").write_bytes(b"previous product\n")
+        p = self.plan()
+        self.assertEqual(p["source"], self.scene.as_posix() + "/PAN_NOSR.tif")
+
+    def test_dataroot_reroots_the_in_scene_paths_only(self):
+        # 沙箱开着时 SR 只碰副本，本体与临时件都得落在副本目录里；掩码是操作员那份，
+        # 不在场景里，照原样给。
+        p = self.plan(dataroot="/DiskArray/tmp/sbx/abc/SCENE_L1_PAN")
+        self.assertEqual(p["body"], "/DiskArray/tmp/sbx/abc/SCENE_L1_PAN/PAN.tif")
+        self.assertEqual(p["backup"],
+                         "/DiskArray/tmp/sbx/abc/SCENE_L1_PAN/Debug/PAN.tif.srbak")
+        self.assertEqual(p["mask"], self.mask.replace("\\", "/"))
+
+    def test_missing_un_superresolved_copy_is_refused_by_name(self):
+        (self.scene / "PAN_NOSR.tif").unlink()
+        with self.assertRaises(ValueError) as ctx:
+            self.plan()
+        self.assertIn("没有未超分那一份", str(ctx.exception))
+        self.assertIn("PAN_NOSR.tif", str(ctx.exception))
+
+    def test_missing_mask_is_refused(self):
+        with self.assertRaises(ValueError) as ctx:
+            svc.nosr_swap_plan(str(self.scene), str(self.scene / "none.tif"),
+                               "260318")
+        self.assertIn("掩码文件不存在", str(ctx.exception))
+
+    def test_a_directory_that_is_not_a_scene_is_refused(self):
+        d = self.root / "not_a_scene"
+        d.mkdir()
+        with self.assertRaises(ValueError) as ctx:
+            svc.nosr_swap_plan(str(d), self.mask, "260318")
+        self.assertIn("不是合法场景目录", str(ctx.exception))
+
+    def test_empty_suffix_is_refused(self):
+        # 空 suffix 时输出名 == 输入名，SR 的 writeTiff 会就地覆盖输入。
+        for empty in ("", "   ", None):
+            with self.subTest(value=empty):
+                with self.assertRaises(ValueError):
+                    svc.nosr_swap_plan(str(self.scene), self.mask, empty)
+
+    def test_sc_scene_uses_the_directory_name(self):
+        # SC 场景：<SolarAzimuth> 非空 ⇒ 输入是 <目录名>.tif
+        (self.scene / "SCENE_L1_PAN_meta.xml").write_text(
+            "<meta><SolarAzimuth>123.4</SolarAzimuth></meta>", encoding="utf-8")
+        (self.scene / "SCENE_L1_PAN.tif").write_bytes(b"body\n")
+        (self.scene / "SCENE_L1_PAN_NOSR.tif").write_bytes(b"un-superresolved\n")
+        (self.scene / "PAN_NOSR.tif").unlink()
+        mask = self.scene / "SCENE_L1_PAN_mask.tif"
+        mask.write_bytes(b"mask\n")
+        p = svc.nosr_swap_plan(str(self.scene), str(mask), "260318")
+        self.assertEqual(p["body"], self.scene.as_posix() + "/SCENE_L1_PAN.tif")
+        self.assertEqual(p["source"],
+                         self.scene.as_posix() + "/SCENE_L1_PAN_NOSR.tif")
+
 
 class TestBuildBatchScript(unittest.TestCase):
     """The batch script is asserted by string: it is a shell artefact, and the
@@ -123,7 +230,8 @@ class TestBuildBatchScript(unittest.TestCase):
         self._env = {}
         for name in ("SR_SLURM_TIME", "SR_SLURM_CPUS", "SR_SLURM_PARTITION",
                      "SR_SLURM_MEM", "SR_SLURM_NODELIST", "SR_VERIFY_SCRIPT",
-                     "SR_PYTHON", "SR_BUNDLE_DIR", "SR_SR_SCRIPT"):
+                     "SR_PREP_SCRIPT", "SR_PYTHON", "SR_BUNDLE_DIR",
+                     "SR_SR_SCRIPT"):
             if name in os.environ:
                 self._env[name] = os.environ.pop(name)
         self.addCleanup(self._restore_env)
@@ -131,7 +239,8 @@ class TestBuildBatchScript(unittest.TestCase):
     def _restore_env(self):
         for name in ("SR_SLURM_TIME", "SR_SLURM_CPUS", "SR_SLURM_PARTITION",
                      "SR_SLURM_MEM", "SR_SLURM_NODELIST", "SR_VERIFY_SCRIPT",
-                     "SR_PYTHON", "SR_BUNDLE_DIR", "SR_SR_SCRIPT"):
+                     "SR_PREP_SCRIPT", "SR_PYTHON", "SR_BUNDLE_DIR",
+                     "SR_SR_SCRIPT"):
             os.environ.pop(name, None)
         os.environ.update(self._env)
 
@@ -266,7 +375,64 @@ class TestBuildBatchScript(unittest.TestCase):
         self.assertEqual(lines[run_i + 1], "_sr_rc=$?")
         self.assertIn("verify_sr_run.py --config /w/c.xml --sr-exit-code \"$_sr_rc\"",
                       lines[run_i + 3])
-        self.assertEqual(lines[-1], "exit $?")
+        # The verifier's own code is what the job exits with (90 = contract not
+        # satisfied); taking it into a variable first keeps that explicit.
+        self.assertEqual(lines[-2:], ["_v_rc=$?", "exit $_v_rc"])
+
+    def test_no_swap_means_no_prep_and_no_landing(self):
+        # submit_run_sr without a resolved plan produces the plain script: the
+        # SR script reads whatever it resolves itself and nothing lands on the
+        # body name.
+        script = svc.build_batch_script("/w/c.xml", "/w")
+        self.assertNotIn("sr_prep_scene.py", script)
+        self.assertNotIn("--land-on-body", script)
+
+    def test_swap_runs_the_prep_between_cd_and_the_sr_script(self):
+        script = svc.build_batch_script("/w/c.xml", "/w", swap=SWAP)
+        lines = script.splitlines()
+        cd_i = [i for i, ln in enumerate(lines) if ln.startswith("cd ")][0]
+        prep_i = [i for i, ln in enumerate(lines)
+                  if "sr_prep_scene.py" in ln and "--body" in ln][0]
+        run_i = [i for i, ln in enumerate(lines)
+                 if "code_0817_prod.py -f /w/c.xml" in ln][0]
+        self.assertLess(cd_i, prep_i)          # prep resolves after the cd
+        self.assertLess(prep_i, run_i)         # and before the SR script
+        self.assertEqual(
+            lines[prep_i],
+            "python sr_prep_scene.py --body %(body)s --nosr %(source)s"
+            " --backup %(backup)s --mask %(mask)s --mask-1x %(mask_1x)s"
+            " || _prep_rc=$?" % SWAP)
+
+    def test_a_prep_failure_does_not_exit_before_the_verifier(self):
+        # Exiting here would leave no verdict file at all — the platform reads
+        # that as UNKNOWN and can never clear it. The prep's code goes into
+        # _sr_rc and the verifier (which restores the body) still runs.
+        script = svc.build_batch_script("/w/c.xml", "/w", swap=SWAP)
+        lines = script.splitlines()
+        prep_i = [i for i, ln in enumerate(lines) if "sr_prep_scene.py" in ln][0]
+        self.assertFalse(lines[prep_i].endswith("exit 1; }"))
+        self.assertIn("_prep_rc=$?", lines[prep_i])
+        self.assertIn('    _sr_rc=$_prep_rc', lines)
+        ver_i = [i for i, ln in enumerate(lines) if "verify_sr_run.py" in ln][0]
+        self.assertLess(prep_i, ver_i)
+
+    def test_swap_is_skipped_from_the_sr_step_when_the_prep_failed(self):
+        script = svc.build_batch_script("/w/c.xml", "/w", swap=SWAP)
+        lines = script.splitlines()
+        self.assertIn("    python code_0817_prod.py -f /w/c.xml", lines)
+        self.assertNotIn("python code_0817_prod.py -f /w/c.xml", lines)
+
+    def test_swap_asks_the_verifier_to_land_the_product_on_the_body(self):
+        script = svc.build_batch_script("/w/c.xml", "/w", swap=SWAP, job_id=7)
+        self.assertIn(
+            "verify_sr_run.py --config /w/c.xml --sr-exit-code \"$_sr_rc\""
+            " --land-on-body %(body)s --backup %(backup)s"
+            " --mask-1x %(mask_1x)s --job-id 7" % SWAP, script)
+
+    def test_prep_script_can_be_overridden(self):
+        os.environ["SR_PREP_SCRIPT"] = "/opt/sr/bin/my_prep.py"
+        script = svc.build_batch_script("/w/c.xml", "/w", swap=SWAP)
+        self.assertIn("/opt/sr/bin/my_prep.py --body", script)
 
     def test_verify_script_can_be_overridden(self):
         os.environ["SR_VERIFY_SCRIPT"] = "/opt/sr/bin/my_verify.py"
@@ -769,26 +935,49 @@ class TestSlurmStatus(unittest.TestCase):
 SCENE = "/DiskArray/GSHC2IMPS/PRODUCT/2026/09/17/260318"
 
 
-class TestToolRunSr(unittest.TestCase):
+class ToolEntrySceneCase(unittest.TestCase):
+    """工具入口的基类：一个本机上的真场景 + 把它放进白名单的环境。
+
+    走到服务层的用例必须有个真场景目录 —— 提交侧会去 stat 它，确认这一跑要读的
+    未超分那一份在场（见 services/run_sr.nosr_swap_plan）。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.scene = make_scene_dir(self._tmp.name, "SCENE_L1_PAN", rc=True)
+        env = {"SR_BUNDLE_DIR": os.path.join(self._tmp.name, "bundle"),
+               "SR_LOCKED_DIR": "",
+               **allowed_roots_env(self._tmp.name)}
+        patcher = mock.patch.dict(os.environ, env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    @property
+    def lq(self) -> str:
+        return str(self.scene)
+
+
+class TestToolRunSr(ToolEntrySceneCase):
     def test_missing_lq_path(self):
         r = run_run_sr()
         self.assertFalse(r["ok"])
         self.assertIn("lq_path", r["error"])
 
     def test_bad_sr_scale(self):
-        r = run_run_sr(lq_path=SCENE, sr_scale=0)
+        r = run_run_sr(lq_path=self.lq, sr_scale=0)
         self.assertFalse(r["ok"])
         self.assertIn("sr_scale", r["error"])
 
     def test_valid_but_slurm_unavailable(self):
         # dev machine: real slurm_available() is False → clean err
-        r = run_run_sr(lq_path=SCENE)
+        r = run_run_sr(lq_path=self.lq)
         self.assertFalse(r["ok"])
         self.assertIn("slurm", r["error"])
 
     def test_delete_ori_is_rejected(self):
         # 参数校验先于调度器可用性：dev 机没有 sbatch，但这里必须先报 delete_ori
-        r = run_run_sr(lq_path=SCENE, delete_ori=True)
+        r = run_run_sr(lq_path=self.lq, delete_ori=True)
         self.assertFalse(r["ok"])
         self.assertIn("delete_ori", r["error"])
 
@@ -796,19 +985,27 @@ class TestToolRunSr(unittest.TestCase):
         # 工具侧过去完全不校验 suffix —— 一个 `a/b` 会一路拼进输出文件名。
         for bad in ("a/b", "a b", "x" * 17, "掩码"):
             with self.subTest(suffix=bad):
-                r = run_run_sr(lq_path=SCENE, suffix=bad)
+                r = run_run_sr(lq_path=self.lq, suffix=bad)
                 self.assertFalse(r["ok"])
                 self.assertIn("suffix 非法", r["error"])
 
     def test_empty_suffix_is_defaulted_not_rejected(self):
         # 留空 = 取 SR 配置里的 <Suffix>，与 REST 入口同规矩：走到服务层，
         # 于是 err 只能是 dev 机没有 slurm 的那条。
-        r = run_run_sr(lq_path=SCENE, suffix="   ")
+        r = run_run_sr(lq_path=self.lq, suffix="   ")
         self.assertFalse(r["ok"])
         self.assertIn("slurm", r["error"])
 
+    def test_missing_un_superresolved_copy_is_refused(self):
+        # 缺未超分那一份 → err 指名缺的那份，不拿别的顶替（与 REST 入口同一条规则）。
+        (self.scene / "PAN_NOSR.tif").unlink()
+        r = run_run_sr(lq_path=self.lq)
+        self.assertFalse(r["ok"])
+        self.assertIn("没有未超分那一份", r["error"])
+        self.assertIn("PAN_NOSR.tif", r["error"])
 
-class TestToolRunSrPathGuard(unittest.TestCase):
+
+class TestToolRunSrPathGuard(ToolEntrySceneCase):
     """P0③ — run_sr must reject search_scenes fake / non-absolute paths."""
 
     def test_fake_lq_path_rejected(self):
@@ -823,14 +1020,13 @@ class TestToolRunSrPathGuard(unittest.TestCase):
         self.assertIn("absolute", r["error"])
 
     def test_fake_mask_path_rejected(self):
-        r = run_run_sr(lq_path="/DiskArray/real/scene",
-                       mask_path="<fake>/mask.tif")
+        r = run_run_sr(lq_path=self.lq, mask_path="<fake>/mask.tif")
         self.assertFalse(r["ok"])
         self.assertIn("mask_path", r["error"])
         self.assertIn("fake", r["error"])
 
     def test_relative_mask_path_rejected(self):
-        r = run_run_sr(lq_path="/DiskArray/real/scene", mask_path="mask.tif")
+        r = run_run_sr(lq_path=self.lq, mask_path="mask.tif")
         self.assertFalse(r["ok"])
         self.assertIn("mask_path", r["error"])
         self.assertIn("absolute", r["error"])
@@ -838,8 +1034,8 @@ class TestToolRunSrPathGuard(unittest.TestCase):
     def test_valid_paths_reach_the_service(self):
         # valid absolute paths pass validation → the err is the host's "no
         # slurm" (dev machine), proving the path guard did not reject.
-        r = run_run_sr(lq_path="/DiskArray/real/scene",
-                       mask_path="/DiskArray/real/mask.tif")
+        r = run_run_sr(lq_path=self.lq,
+                       mask_path=str(self.scene / "PAN_mask.tif"))
         self.assertFalse(r["ok"])
         self.assertIn("slurm", r["error"])
 
@@ -956,11 +1152,10 @@ class TestEntryPointParity(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.bundle = os.path.join(self._tmp.name, "bundle")
         write_bundle_cfg(self.bundle, SUFFIX_CFG)
-        # 场景目录：REST 入口会推导 <目录名>_mask.tif，没有就 400
-        self.scene = os.path.join(self._tmp.name, "SCENE_L1_PAN")
-        os.makedirs(self.scene)
+        # 场景目录：REST 入口会推导 <目录名>_mask.tif，没有就 400；两个入口还要
+        # 在那里找到未超分那一份（run_sr.nosr_swap_plan），没有就拦下。
+        self.scene = str(make_scene_dir(self._tmp.name, "SCENE_L1_PAN"))
         self.mask = os.path.join(self.scene, "SCENE_L1_PAN_mask.tif")
-        Path(self.mask).write_bytes(b"")
         env = {"SR_BUNDLE_DIR": self.bundle, "SR_LOCKED_DIR": "",
                "SR_AGENT_DB": os.path.join(self._tmp.name, "db.sqlite"),
                **allowed_roots_env(self._tmp.name)}   # 提交侧白名单：临时目录
@@ -1007,13 +1202,10 @@ class TestSubmitPathNormalization(unittest.TestCase):
         self.root = Path(self._tmp.name).resolve()
         self.bundle = os.path.join(self._tmp.name, "bundle")
         write_bundle_cfg(self.bundle, SUFFIX_CFG)
-        self.scene = (self.root / "GSHC2IMPS" / "PRODUCT" / "2026" / "09"
-                      / "17" / self.SCENE_NAME)
-        self.scene.mkdir(parents=True)
-        (self.scene / f"{self.SCENE_NAME}_meta.xml").write_text(
-            "<?xml version='1.0'?><x/>", encoding="utf-8")
+        self.scene = make_scene_dir(
+            self.root / "GSHC2IMPS" / "PRODUCT" / "2026" / "09" / "17",
+            self.SCENE_NAME)
         self.mask = self.scene / f"{self.SCENE_NAME}_mask.tif"
-        self.mask.write_bytes(b"")
         # 白名单同时收 W: 形态与「本机绝对路径」形态：真机上后者就是
         # /DiskArray/...（与默认白名单同源），开发机上是临时目录本身。两种写法
         # 等价这条用例必须两边都表达得出来，否则测的只是映射的一半。

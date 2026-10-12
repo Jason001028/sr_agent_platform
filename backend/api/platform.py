@@ -611,8 +611,20 @@ async def submit_queue(request: Request):
     state = request.app.state
     body = await _json_body(request)
     params = _norm_sr_params(body)
+    # 这一跑读哪份、跑完落到哪个名字（run_sr.nosr_swap_plan）。解析放在这里而不是
+    # submit_run_sr 里：缺未超分那一份是提交侧的错，要给 400 + 缺了哪个名字，而不是
+    # 落到 submit 里变成 422 的裸异常。沙箱开着时本体的位置在副本目录里，所以
+    # dataroot 先算出来（submit_run_sr 自己也会再算一次同一个副本目录）。
     try:
-        data = run_sr_svc.submit_run_sr(params, store=state.store)
+        sandbox = run_sr_svc.sandbox_scene_paths(
+            params["lq_path"], run_sr_svc.task_fingerprint(params))
+        swap = run_sr_svc.nosr_swap_plan(
+            params["lq_path"], params["mask_path"], params["suffix"],
+            dataroot=(sandbox or {}).get("scene"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    try:
+        data = run_sr_svc.submit_run_sr(params, store=state.store, swap=swap)
     except RuntimeError as e:
         msg = str(e)
         if "interrupted" in msg:

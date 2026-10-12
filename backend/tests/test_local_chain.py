@@ -86,6 +86,40 @@ if __name__ == "__main__":
     sys.exit(main(sys.argv))
 '''
 
+#: Stand-in for sr_prep_scene.py. That script needs GDAL (it resamples the
+#: mask), which the dev machine does not have — so this rehearsal swaps in the
+#: two file operations the landing actually depends on, and keeps the argv
+#: contract (same flags, same meaning) so the generated command line is real.
+STUB_PREP = r'''#!/usr/bin/env python
+"""Stub scene prep: what sr_prep_scene.py leaves on disk, minus the raster work."""
+
+import os
+import shutil
+import sys
+
+
+def main(argv):
+    opts = dict(zip(argv[1::2], argv[2::2]))
+    debug = os.path.dirname(opts["--backup"])
+    if debug:
+        os.makedirs(debug, exist_ok=True)
+    if not os.path.exists(opts["--backup"]):
+        shutil.copy2(opts["--body"], opts["--backup"])
+    shutil.copy2(opts["--nosr"], opts["--body"])
+    with open(opts["--mask-1x"], "w") as f:
+        f.write("stub mask at the input size\n")
+    sys.stderr.write("stub prep: landed %s on %s\n"
+                     % (opts["--nosr"], opts["--body"]))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
+'''
+
+#: Name the batch script runs in place of sr_prep_scene.py.
+STUB_PREP_NAME = "stub_prep.py"
+
 _REAL_BUILD_SCRIPT = svc.build_batch_script
 
 
@@ -118,11 +152,14 @@ class LocalChainTests(unittest.TestCase):
         # The job's two programs: the real verifier + the stub SR.
         shutil.copy(str(VERIFIER), str(self.bundle / "verify_sr_run.py"))
         (self.bundle / STUB_NAME).write_text(STUB_SR, encoding="utf-8")
+        (self.bundle / STUB_PREP_NAME).write_text(STUB_PREP, encoding="utf-8")
         # A scene shaped like the pipeline's: input, meta (non-empty azimuth →
-        # SC step), the mask the minimal prototype reads from the directory.
+        # SC step), the mask the minimal prototype reads from the directory,
+        # and the un-superresolved copy this entry reads instead of the body.
         (self.scene / "SCENE_L1_PAN_meta.xml").write_text(
             "<meta><SolarAzimuth>123.4</SolarAzimuth></meta>", encoding="utf-8")
         (self.scene / "SCENE_L1_PAN.tif").write_bytes(b"input\n")
+        (self.scene / "SCENE_L1_PAN_NOSR.tif").write_bytes(b"un-superresolved\n")
         (self.scene / "SCENE_L1_PAN_mask.tif").write_bytes(b"mask\n")
         self.opt_yml = root / "opt.yml"
         self.opt_yml.write_text("name: test\ntiftype: .tif\n", encoding="utf-8")
@@ -138,6 +175,7 @@ class LocalChainTests(unittest.TestCase):
             "SR_PYTHON": sys.executable,
             "SR_SR_SCRIPT": STUB_NAME,
             "SR_VERIFY_SCRIPT": "verify_sr_run.py",
+            "SR_PREP_SCRIPT": STUB_PREP_NAME,
             "SR_SLURM_WORK_DIR": str(self.work),
         })
         # Neither of these belongs on the local path: the sandbox would move the
@@ -149,9 +187,9 @@ class LocalChainTests(unittest.TestCase):
         self.addCleanup(self._restore)
 
     _ENV = ("SR_EXECUTOR", "SR_BUNDLE_DIR", "SR_PYTHON", "SR_SR_SCRIPT",
-            "SR_VERIFY_SCRIPT", "SR_SLURM_WORK_DIR", "SR_SANDBOX_ROOT",
-            "SR_LOCKED_DIR", "SR_SLURM_NODELIST", "SR_STUB_SILENT",
-            "SR_STUB_SLEEP")
+            "SR_VERIFY_SCRIPT", "SR_PREP_SCRIPT", "SR_SLURM_WORK_DIR",
+            "SR_SANDBOX_ROOT", "SR_LOCKED_DIR", "SR_SLURM_NODELIST",
+            "SR_STUB_SILENT", "SR_STUB_SLEEP")
 
     def _restore(self):
         for jid in list(local_exec._JOBS):
@@ -179,10 +217,15 @@ class LocalChainTests(unittest.TestCase):
                 "delete_ori": False, "grid_align": True,
                 "options_yml": str(self.opt_yml)}
 
-    def submit(self, params: dict | None = None) -> dict:
+    def submit(self, params: dict | None = None, swap: dict | None = None) -> dict:
         with mock.patch.object(svc, "build_batch_script", _host_script):
             return svc.submit_run_sr(params if params is not None else self.params(),
-                                     store=self.store)
+                                     store=self.store, swap=swap)
+
+    def swap_plan(self, params: dict | None = None) -> dict:
+        """The plan the submit entries resolve for this scene."""
+        p = params if params is not None else self.params()
+        return svc.nosr_swap_plan(p["lq_path"], p["mask_path"], p["suffix"])
 
     def verdict_path(self, job_id) -> Path:
         return self.scene / "Debug" / ("_SREXIT_%s.txt" % job_id)
@@ -279,6 +322,70 @@ class LocalChainTests(unittest.TestCase):
         self.assertFalse((self.scene / "SCENE_L1_PAN_sr.tif").exists())
         self.assertIn("<Suffix>260318</Suffix>",
                       Path(res["config_xml"]).read_text(encoding="utf-8"))
+
+    def test_the_run_reads_the_un_superresolved_copy_and_lands_on_the_body(self):
+        """The whole swap, through bash: prep → SR → verifier → landing.
+
+        The scene comes out with the product *at the body name* — that name is
+        what the downstream MTFC step reads — the un-superresolved archive
+        still where it was, and both scratch files gone.
+        """
+        params = self.params()
+        res = self.submit(params, swap=self.swap_plan(params))
+        st = self.wait_terminal(res["job_id"], res)
+        self.assertEqual(st["state"], "COMPLETED", st)
+
+        # prep landed the source on the body name, so that is what SR read.
+        self.assertIn("stub prep: landed", Path(
+            local_exec._JOBS[res["job_id"]]["log"]).read_text(
+                encoding="utf-8", errors="replace"))
+        # the product was moved onto the body name...
+        self.assertEqual((self.scene / "SCENE_L1_PAN.tif").read_bytes(),
+                         b"stub-output\n")
+        self.assertFalse((self.scene / "SCENE_L1_PAN_sr.tif").exists())
+        # ...the archive copy stayed put (a copy, not a rename)...
+        self.assertEqual((self.scene / "SCENE_L1_PAN_NOSR.tif").read_bytes(),
+                         b"un-superresolved\n")
+        # ...and neither scratch file survived.
+        self.assertFalse((self.scene / "Debug" / "SCENE_L1_PAN.tif.srbak").exists())
+        self.assertFalse(
+            (self.scene / "Debug" / "SCENE_L1_PAN_mask.tif.sr1x").exists())
+        self.assertIn("verdict=0",
+                      self.verdict_path(res["job_id"]).read_text(encoding="utf-8"))
+
+    def test_the_body_is_restored_when_the_run_fails(self):
+        """A failed run leaves the scene exactly as it was (so it can be redone)."""
+        os.environ["SR_STUB_SILENT"] = "1"
+        params = self.params()
+        res = self.submit(params, swap=self.swap_plan(params))
+        st = self.wait_terminal(res["job_id"], res)
+        self.assertEqual(st["state"], "FAILED", st)
+        self.assertEqual((self.scene / "SCENE_L1_PAN.tif").read_bytes(),
+                         b"input\n")                 # prep's copy was undone
+        self.assertEqual((self.scene / "SCENE_L1_PAN_NOSR.tif").read_bytes(),
+                         b"un-superresolved\n")
+        self.assertFalse((self.scene / "Debug" / "SCENE_L1_PAN.tif.srbak").exists())
+        self.assertIn("verdict=90",
+                      self.verdict_path(res["job_id"]).read_text(encoding="utf-8"))
+
+    def test_prep_failure_still_leaves_a_verdict_and_restores_the_body(self):
+        """A prep that dies must not take the verdict file with it.
+
+        The batch script carries the prep's code into the verifier instead of
+        exiting: no verdict file would read as UNKNOWN forever, and the body
+        would be left holding the un-superresolved copy.
+        """
+        (self.bundle / STUB_PREP_NAME).write_text(
+            "import sys\nsys.exit(91)\n", encoding="utf-8")
+        params = self.params()
+        res = self.submit(params, swap=self.swap_plan(params))
+        st = self.wait_terminal(res["job_id"], res)
+        self.assertEqual(st["state"], "FAILED", st)
+        self.assertEqual((self.scene / "SCENE_L1_PAN.tif").read_bytes(),
+                         b"input\n")
+        text = self.verdict_path(res["job_id"]).read_text(encoding="utf-8")
+        self.assertIn("verdict=90", text)
+        self.assertIn("sr_exit_code=91", text)      # the prep's own code
 
     def test_config_and_script_land_where_the_queue_view_looks(self):
         """The paths the platform re-derives later must exist up front."""

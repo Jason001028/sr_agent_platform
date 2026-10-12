@@ -108,14 +108,15 @@ Environment=SR_PYTHON=/run/media/root/SSD/program/anaconda/installed/envs/torch1
 # 拼写以 code_0817_prod.py:27 的 load_library() 为准，两者必须完全一致。
 Environment=SR_BUNDLE_DIR=/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes
 #
-# 批脚本要跑的两个程序名（都在 SR_BUNDLE_DIR 里，作业 cd 进去后按名调用）。
-# ⚠️ 两个名字都是**部署时**由后端读 env 写死进批脚本文本的：批脚本带
+# 批脚本要跑的三个程序名（都在 SR_BUNDLE_DIR 里，作业 cd 进去后按名调用）。
+# ⚠️ 三个名字都是**部署时**由后端读 env 写死进批脚本文本的：批脚本带
 #    --export=NONE，本进程的环境变量不会传进作业，所以改完必须 restart。
 # 变体与生产脚本**并置**即可，不必改名顶替 code_0817_prod.py ——
 # 生产原文件因此保持字节不动，回滚 = 把 SR_SR_SCRIPT 改回 code_0817_prod.py。
-# 不配这两项时默认就是 code_0817_prod.py / verify_sr_run.py（行为同旧版）。
+# 不配这三项时默认就是 code_0817_prod.py / verify_sr_run.py / sr_prep_scene.py。
 Environment=SR_SR_SCRIPT=code_0817_prod_slurm.py
 Environment=SR_VERIFY_SCRIPT=verify_sr_run.py
+Environment=SR_PREP_SCRIPT=sr_prep_scene.py
 #
 # ⚠️ SR_SLURM_WORK_DIR 必须是**共享盘**：config.xml 与批脚本由 API 写在这里，
 #    而作业在 gpu 分区的 76 个节点（node81-* 与 node104-* 两族）之一上读它。默认值

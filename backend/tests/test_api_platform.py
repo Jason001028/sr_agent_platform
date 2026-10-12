@@ -24,7 +24,7 @@ from backend.api import paths
 from backend.api.app import create_app, _bake_nosr_preview, _eager_bake_tick
 from backend.api.platform import (_Subscriber, _broadcast, _queue_state,
                                   _task_state, chat_send)
-from backend.tests import allowed_roots_env
+from backend.tests import allowed_roots_env, make_scene_dir
 from backend.tests.test_preview_jpg import make_strip_tif
 from backend.services import run_sr as svc
 from backend.services import slurm
@@ -274,11 +274,10 @@ class TestQueue(PlatformBase):
         os.environ["SR_SLURM_FAKE_T_MS"] = "500"
         os.environ["SR_QUEUE_POLL_SEC"] = "60"       # 关闭 lifespan 轮询干扰
         # 真实场景目录 + 目录里已有的掩码：POST /api/queue 要求
-        # <lq_path>/<目录名>_mask.tif 在场（plan §4.3），缺掩码不放过。
-        self.scene_dir = Path(self._tmp.name) / self.SCENE
-        self.scene_dir.mkdir(parents=True, exist_ok=True)
-        self.mask_file = touch_tif(
-            self.scene_dir / f"{self.SCENE}_mask.tif")
+        # <lq_path>/<目录名>_mask.tif 在场（plan §4.3），缺掩码不放过；另外
+        # 未超分那一份也必须在场（services/run_sr.nosr_swap_plan），缺了拦下。
+        self.scene_dir = make_scene_dir(self._tmp.name, self.SCENE)
+        self.mask_file = self.scene_dir / f"{self.SCENE}_mask.tif"
         self.LQ = str(self.scene_dir)
         # 提交侧会把 lq_path 归一成盘阵 POSIX 形态（`W:\...` 与 `/DiskArray/...`
         # 必须落到同一个字符串，幂等才成立）。真机上是 Linux，两种写法本来就
@@ -478,6 +477,15 @@ class TestQueue(PlatformBase):
         r = self._submit(self.client())
         self.assertEqual(r.status_code, 400)
         self.assertIn("缺少掩码文件", r.json()["detail"])
+
+    def test_missing_un_superresolved_copy_is_400_and_names_it(self):
+        # 这一跑要读的是未超分那一份；缺了必须拦下，不能拿已超分的本体顶替
+        # （严格尺寸判据会把 1× 的本体当成"已超分"直接退出作业）。
+        (self.scene_dir / f"{self.SCENE}_NOSR.tif").unlink()
+        r = self._submit(self.client())
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("没有未超分那一份", r.json()["detail"])
+        self.assertIn(f"{self.SCENE}_NOSR.tif", r.json()["detail"])
 
     def test_explicit_mask_path_still_wins(self):
         c = self.client()

@@ -65,10 +65,35 @@
 
 ### 3.1 阻塞 A 段收尾
 
-1. **需要一个未超分过的场景**。提交链路 + conda 环境 + 变体 + 单卡绑定已跑通，
-   但现场景属于已超分状态，SR 脚本判定 `already SRed before` 后提前返回，未产出新产物，
-   校验器据契约判 FAILED。二选一：换一个体积落在 `util.py` 三个区间内的场景目录；
-   或把该目录的 `<目录名>_NOSR.tif` 改名还原为 `<目录名>.tif`（**先备份现有超分产物**）。
+1. **验收要求场景里带未超分留档**。这一跑读的是**未超分那一份**
+   （`<输入 stem>_NOSR.tif`，RC 场景即 `PAN_NOSR.tif`），要与本体同目录。真机 RC 场景两份就是
+   `PAN.tif` + `PAN_NOSR.tif`（§3.2 第 1 条）。缺这一份，提交时直接 400 拦下、`detail` 指名缺的
+   那份，不拿本体顶替。
+2. **超分入口读哪份、产物落哪个名字**（现状）：
+   1. 平台按场景目录算出五条绝对路径（`run_sr.nosr_swap_plan`）：本体 `<场景>/<本体名>`、
+      源头 `<场景>/<未超分那份名>`、备份 `<场景>/Debug/<本体名>.srbak`、操作员掩码
+      `<场景>/<输入影像 stem>_mask.tif`、掩码临时件 `<场景>/Debug/<掩码名>.sr1x`。
+      缺本体 / 缺源头 / 缺掩码一律 400，文案写清缺哪一个；配置 XML 的 `<MaskPath>` 指向掩码临时件，
+      参数里的 `mask_path`（含 `task_fingerprint`）仍是操作员那份。
+   2. 作业先跑 `sr_prep_scene.py`：备份**只在不存在时**留（= 跑前那份本体）→ 把源头**拷贝**成
+      本体名（拷贝不是改名，留档那份还在）→ 用 GDAL 按源头尺寸把掩码降采样写出临时件
+      （缩小按块内取最大、放大用最近邻，geotransform / projection 抄源头，dtype 原样保留）。
+   3. SR 脚本读**本体名**：RC 由 `get_l1_pan_tif_rcsc_nosr` 定位（单边判据 `size < 1.8` GiB；
+      本体此时是 1× 内容，严格的 `1.0 < size < 1.8` 会把它判成 already SRed 后退出）；SC 由同一
+      函数读 `<目录名>_NOSR.tif`。产物落 `<输入 stem>_<suffix>.tif`，suffix 用平台自己的值。
+   4. 校验器判完契约后**归位**：产物 `os.replace` 到本体名，复核大小一致后删备份与掩码临时件、
+      verdict 的 `output` 改成本体名；契约不过或合法跳过则从备份恢复本体。归位成败写进**同一条
+      verdict**，所以没归位的跑平台读到 FAILED 而不是 COMPLETED。之后 MTFC 由「生产调度系统」
+      提交，输入就是这个本体名（= 经过 SR、未 MTFC 的那份）。
+
+   仍然挂着、写在这里只作提醒的（均无实证）：
+   - **掩码外会不会被降级**：产物是**整幅**覆盖，掩码外是源头那份的双三次放大；若现本体掩码外
+     不是这样来的（例如上一轮全图超分），这次覆盖会把掩码外换成双三次结果。**已定：可接受，照做**。
+   - **覆盖后的显示件**：客户端预览 blob 缓存按「场景 id + 档位」为键，覆盖本体后不会自动失效；
+     nginx 那条给预览 JPG 加 `max-age=3600` 的 location 匹配 `.preview.jpg`、与现行 `_preview.jpg`
+     命名不符（§3.3 第 9 条）。归位后重新生成的那份预览能否拿到新 `max-age`，**待核**。
+   - **产物预览**：跑完产物名已不存在（归位到本体名），产物那一份预览按 `product_missing` 如实跳过；
+     未超分那份的预览照旧生成。
 
 ### 3.2 待真机确认（尚无实证）
 
@@ -79,6 +104,17 @@
    `/api/scenes/{id}/siblings` 的 `nosrCandidates` 就是这份清单，拿到真机 `ls -l` 可据此校准
    **顺序**（不影响能否命中）。详见 [preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md) §4.11；
    验收动作见 [real-machine-acceptance.md](real-machine-acceptance.md) §C 末条。
+   **2026-10-09 用户回报的证据**：真机上一景的两份是 `PAN.tif` 与 `PAN_NOSR.tif`（RC 场景），
+   与「输入 stem + `_NOSR`」这条候选一致。仍未看过 `nosrCandidates` 的实际返回，候选顺序未校准。
+   **同一批回报（续）**：一个景里可以**同时**出现带六位数的产物与 `PAN_NOSR.tif`。六位数即该次
+   提交的 `<Suffix>`，是**模型编号**（「生产调度系统」内通常为 `250123`，见
+   [sr-pipeline-overview.md §4.6](../sr_code/sr-pipeline-overview.md)）。平台提交用的 suffix 与它
+   不一致（默认取 `SR_BUNDLE_DIR` 内那份 SR 配置的 `<Suffix>`，兜底字面量 `sr`；**真机实际读到 `260318`**），
+   故盘上生产命名与平台产物命名不是同一家。据此，`_NOSR` 有**两个来源、两种含义**：
+   `<输入 stem>_NOSR`（未超分原图留档）与 `<产物 stem>_NOSR`（被覆盖的上一次产物，
+   `SR_code/util.py::writeTiff` 的改名所产生）—— 只看「目录里有没有 `_NOSR`」不足以判定本体是否已超分。
+   平台这一跑的源头**只认前者**：`run_sr.nosr_swap_plan` 取 `nosr_candidates(scene, inp)` 里第一个
+   存在的（不传 `product_path`），`<产物 stem>_NOSR` 永不当源头。
 2. 产物 tif 尺寸为输入影像的 **2 倍**（`code_0817_prod.py` 的 `scale: 2`），无真机实证。
    若成立，分屏对比两侧是「同一地面区域、不同像素网格」，对齐只能按百分比，±1 像素级比对做不到。
 3. 生产树目录日期取「成像日 / 次日」中命中者，现按较年轻者推定，需一批真实目录名验证。
@@ -172,9 +208,10 @@
 - **掩码**：值域 0/255（0 = 不处理，255 = 处理）；`run_sr` 用 `cv2.threshold(>0)` 读取。
   矢量格式 `{"width":W,"height":H,"polygons":[{"label":"roi","points":[[x,y],...]}]}`，
   x 为列、y 为行，均为原图像素坐标。
-- **SR 产物命名**：`<源 stem>_<suffix>.tif`；未超分那份为 **`<输入 stem>_NOSR.tif`**
+- **SR 产物命名**：`<输入 stem>_<suffix>.tif`；未超分那份为 **`<输入 stem>_NOSR.tif`**
   （SC 即 `<目录名>_NOSR.tif`），`<产物 stem>_NOSR.tif` 为次选。两义都标 `NOSR`，见 §3.2 与
-  [preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md)。
+  [preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md)。平台提交这一跑还会把产物
+  归位到本体名（§3.1 第 2 条），所以跑完盘上留下的本体就是这份产物。
 - **场景判据**：目录须含 `<目录名>_meta.xml`；场景文件为 `<目录名>.<ext>`（SC 步输入）或
   `PAN.<ext>`（RC 步输入）。派生件按 `p.stem == p.parent.name` 排除。
 - **路径映射**：`SR_DRIVE_MAP` 默认 `W:=/DiskArray`；`SR_ALLOWED_ROOTS` 默认 `/DiskArray`。
@@ -244,13 +281,17 @@
   才是行(Y)（名字叫「行列号」，写出来却是 X,Y 序）。所以面板显示、点行跳转（`locatePixel(it.col, it.row)`）、
   工具条预填（`col,row`）三处都**照抄原文顺序**，谁也别自己翻。判定办法只有真机落点：把原文那串
   填进定位框点「定位」，看红叉落哪 —— 别照注释想当然。
-- **真机单景均耗时 = ___ 秒**（待填；含一次 resolve + 两次生成预览读盘，÷4 的 4 万² 景按
-  §3.2 / preview-bake-pipeline 的量级预估是几十秒）。几十景一批就是十几分钟起 ——
-  按钮的提示语里已经写明，不等同于「卡住了」。
+- **单景耗时实测（2026-10-09 用户回报）**：浏览器在内网 Windows 办公机、服务与数据在真机
+  **node81-135** 与盘阵；1.84 GiB / 32028×30946 的景，÷4 档位下「解析 + 生成预览 + 打开」
+  两张图（本体 `PAN.tif` 与未超分那份 `PAN_NOSR.tif`）合计约 **16 秒**。
+  对照：另一景（分辨率量级相近）用「卫星图像掩码生成工具」在办公机本地「读 + 显示/渲染」
+  **完整** TIF 约 **42 秒** —— 两者看到的像素不同（÷4 降采样预览 对 全分辨率原图），
+  只作量级对照。几十景一批按此量级仍是十几分钟起 —— 按钮的提示语里已经写明，
+  不等同于「卡住了」。详见 [gui-requirements.md §1.4](../planning/gui-requirements.md)。
 
 ### 6.4 测试基线
 
-- **后端**：`python -m pytest backend/` → **743 passed / 5 skipped**。
+- **后端**：`python -m pytest backend/` → **787 passed / 9 skipped**。
 - **前端**：Vitest **444 passed** + `vue-tsc --noEmit` 零错误 + `npm run build`。
 - **浏览器回归**（`.e2e/`，先 `cd frontend && npm run build`）：
   `test-manual-scene.js` **298** · `test-vue-viewer.js` **192** · `test-scenes.js` **136** ·

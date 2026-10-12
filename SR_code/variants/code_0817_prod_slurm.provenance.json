@@ -1,6 +1,6 @@
 {
   "generator": "SR_code/tools/gen_slurm_variant.py",
-  "generator_version": "1.0.0",
+  "generator_version": "1.1.0",
   "source": {
     "path": "SR_code/code_0817_prod.py",
     "sha256": "03c9b4fc3f64cfd5e3b331128be5a09477d5ebe0362b0e9e4927fcdd356d40af",
@@ -8,11 +8,11 @@
   },
   "variant": {
     "path": "SR_code/variants/code_0817_prod_slurm.py",
-    "sha256": "041bea73b36f6e3c8289d4e4c029c5fe492cbd09502a178c5f1d9798287474a9"
+    "sha256": "512d84e1c4ed00a75ecf963c7805dfe166e9880deecc077a475e137394e3e037"
   },
   "diff": {
     "path": "SR_code/variants/code_0817_prod_slurm.diff",
-    "sha256": "f7756e7839ff888f2aa3ba16ce8b3e4c4cce472c70b61f18ff3f044f12f25256"
+    "sha256": "cc994a043bc1d4052003caed9c4b10fe391acd10f4115bea9ede4a9fa0a4ccf3"
   },
   "edits": [
     {
@@ -67,6 +67,12 @@
       "id": "E9",
       "note": "cloud-limit skip writes SRLOG + 'Run skipped:' before exit(0)",
       "anchor_sha256": "0ff4bda6194b0350c7aeabf8ac61c2752c3e9eed236f8f329f1d285458351f39",
+      "occurrences": 1
+    },
+    {
+      "id": "E10",
+      "note": "read the un-superresolved copy (one-sided size gate)",
+      "anchor_sha256": "a825673654053806e20b5a2a90b25149e8e49242d6bf708291d0ebfe1e3e3942",
       "occurrences": 1
     }
   ]

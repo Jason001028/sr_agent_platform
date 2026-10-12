@@ -3,7 +3,7 @@
 > **版本**：v1.0 · **日期**：2026-09-10 · **状态**：待评审
 > **目标**：把「10.10.81.135 查看器 → 画掩码 → 提交 SR → Slurm 分配 GPU → conda 环境跑超分 → 结果与状态回前端」这一条链**从当前断裂状态恢复到端到端可跑**。
 > **执行分工**：代码改动（阶段 1）由我改 + 本地测试；真机命令由你在 10.10.81.135 上执行、输出贴回我判读。
-> **上位文档**：[slurm-integration.md](../status/slurm-integration.md)（决策快照）、[slurm-acceptance.md](../status/slurm-acceptance.md)（真机验收 A–D，本清单的阶段 3–5 是它的执行版）、[sr-slurm-deploy-variant.md](../sr_code/sr-slurm-deploy-variant.md)（变体差异 E1–E9）。
+> **上位文档**：[slurm-integration.md](../status/slurm-integration.md)（决策快照）、[slurm-acceptance.md](../status/slurm-acceptance.md)（真机验收 A–D，本清单的阶段 3–5 是它的执行版）、[sr-slurm-deploy-variant.md](../sr_code/sr-slurm-deploy-variant.md)（变体差异 E1–E10）。
 
 ---
 
@@ -11,7 +11,7 @@
 
 | # | 断点 | 证据 | 本计划对应 |
 |---|---|---|---|
-| B1 | 提交的作业跑的是**生产原版** `code_0817_prod.py`，不是部署变体（无 E1–E9：GPU 数守卫 `!= 4` 直接判失败、`CUDA_VISIBLE_DEVICES` 被覆写） | [run_sr.py:180](backend/services/run_sr.py#L180) 硬编码脚本名，无 env 开关；对比 [run_sr.py:131-132](backend/services/run_sr.py#L131-L132) 的 `SR_VERIFY_SCRIPT` **有**开关 | 阶段 1 E-A、阶段 2 |
+| B1 | 提交的作业跑的是**生产原版** `code_0817_prod.py`，不是部署变体（无 E1–E10：GPU 数守卫 `!= 4` 直接判失败、`CUDA_VISIBLE_DEVICES` 被覆写） | [run_sr.py:180](backend/services/run_sr.py#L180) 硬编码脚本名，无 env 开关；对比 [run_sr.py:131-132](backend/services/run_sr.py#L131-L132) 的 `SR_VERIFY_SCRIPT` **有**开关 | 阶段 1 E-A、阶段 2 |
 | B2 | 空后缀直通到 config.xml，落到 SR 就变成"就地覆盖"语义（输入被改名 `<stem>_NOSR.tif`，输出占原名），且掩码生成预填的 draft 就是 `suffix: ""` | [platform.py:529](backend/api/platform.py#L529)（draft `""`）、[platform.py:356](backend/api/platform.py#L356)、[tools/run_sr.py:100](backend/tools/run_sr.py#L100)、[queue.ts:46](frontend/src/stores/queue.ts#L46) 一路不挡 | 阶段 1 E-B |
 | B3 | 检索按 `.tif/.tiff/.img` 后缀收文件，在 `/DiskArray/GSHC2IMPS/<年>/<月>/<日>/<生产编号>/` 深树下会把 `_NOSR`/`_mask`/SR 输出**当成场景**，且每次请求全树 `rglob` + 逐文件 `stat`，不缓存 | [scene_search.py:26](backend/services/scene_search.py#L26)、[:54-58](backend/services/scene_search.py#L54-L58) | 阶段 1 E-D |
 | B4 | 云量字段解析不具容错：`int(CloudPercent)` 一个非数字就抛，作业无 SRLOG 退出，平台侧看到的是"静默失败" | [code_0817_prod.py:157-160](SR_code/code_0817_prod.py#L157-L160) | 阶段 1 E-C |

@@ -27,43 +27,66 @@ export APP BUNDLE SR_PYTHON WORK OPT TEST PART NODELIST
 echo "$APP"; echo "$SR_PYTHON"    # ✓= 两个空变量说明没贴全
 ```
 
+D 阶段造场景时要写「真的 TIFF」——跑前脚本与 SR 都用 GDAL 打开它们，`truncate` 出来的空文件不行。
+这一段也贴一次，后面直接调 `make_tif`：
+
+```bash
+make_tif () {                       # make_tif <路径> <边长像素>（灰度 uint16 全 0）
+  $SR_PYTHON -c "
+import sys
+from osgeo import gdal
+ds = gdal.GetDriverByName('GTiff').Create(sys.argv[1], int(sys.argv[2]),
+                                          int(sys.argv[2]), 1, gdal.GDT_UInt16)
+ds.GetRasterBand(1).Fill(0); ds = None" "$1" "$2"
+}
+```
+
 出处：`$BUNDLE/$SR_PYTHON/$WORK/$PART` 见 `deploy/sr-api.service` 的 `Environment=`；
 `$OPT` 见 `backend/config.SR_DEFAULT_OPTIONS_YML`；`$TEST` 是本清单新建的验收沙箱（**不碰生产数据**）。
 
-### 0.1 上车：两个文件从开发机拷到内网
+### 0.1 上车：三个文件从开发机拷到内网
 
 ```text
 SR_code/variants/code_0817_prod_slurm.py   部署变体
-SR_code/variants/verify_sr_run.py          作业内契约校验器
+SR_code/variants/verify_sr_run.py          作业内契约校验器（判定 + 归位）
+SR_code/variants/sr_prep_scene.py          作业内跑前脚本（源头替换 + 掩码降尺寸）
 ```
 
 U 盘或 scp 均可；本清单文件本身不用上车。
 
 ### 0.2 安装位置与命名（**关键**，装错这一步后面全错）
 
-平台生成的批脚本（`backend/services/run_sr.build_batch_script`）在 `$BUNDLE` 里按**固定文件名**调用两个程序：
+平台生成的批脚本（`backend/services/run_sr.build_batch_script`）在 `$BUNDLE` 里按**固定文件名**调用三个程序：
 
 ```bash
 cd $BUNDLE || exit 1
-$SR_PYTHON code_0817_prod.py -f <cfg.xml>                                  # ← 名字写死
-$SR_PYTHON verify_sr_run.py --config <cfg.xml> --sr-exit-code "$_sr_rc"    # ← 名字写死
+$SR_PYTHON sr_prep_scene.py  --body … --nosr … --backup … --mask … --mask-1x …    # ← 名字写死
+$SR_PYTHON code_0817_prod_slurm.py -f <cfg.xml>                                   # ← 名字写死
+$SR_PYTHON verify_sr_run.py  --config <cfg.xml> --sr-exit-code "$_sr_rc" \
+                             --land-on-body … --backup … --mask-1x …              # ← 名字写死
 ```
 
-所以部署动作 = 把这两个文件拷进 `$BUNDLE`、名字保持原样（**生产原脚本一字不动**）：
+（`…` 是后端生成时填进去的绝对路径。跑前那一行与 `--land-on-body` 那三个参数只在这次解析出
+源头替换时才出现——这一跑读未超分那份、跑完把产物换到本体名上。）
+
+所以部署动作 = 把这三个文件拷进 `$BUNDLE`、名字保持原样（**生产原脚本一字不动**）：
 
 ```bash
 cd $BUNDLE
 cp /path/to/code_0817_prod_slurm.py ./code_0817_prod_slurm.py   # 变体：与生产脚本并排，不覆盖
 cp /path/to/verify_sr_run.py        ./verify_sr_run.py
+cp /path/to/sr_prep_scene.py        ./sr_prep_scene.py
 head -12 code_0817_prod_slurm.py                                # ✓= "GENERATED FILE — DO NOT EDIT" 横幅
 ls -l code_0817_prod.py                                         # ✓= 生产原脚本仍在、未被改动
 ```
 
 `record:` `ls -l $BUNDLE/code_0817_prod*` 与变体首行横幅
 
-> **不必改名顶替**：批脚本里那两个程序名由 `SR_SR_SCRIPT` / `SR_VERIFY_SCRIPT` 决定（`run_sr.py`），
-> 后端生成批脚本时把名字写进文本。所以变体只要与生产脚本同目录、名字与 `SR_SR_SCRIPT` 对上就会被执行，
-> 而 `gen_slurm_variant.py` 的对照物（生产原文件）始终保持字节不变，回滚 = 改回 env + restart。
+> **不必改名顶替**：批脚本里那三个程序名由 `SR_SR_SCRIPT` / `SR_VERIFY_SCRIPT` / `SR_PREP_SCRIPT`
+> 决定（`run_sr.py`），后端生成批脚本时把名字写进文本。所以变体只要与生产脚本同目录、名字与
+> `SR_SR_SCRIPT` 对上就会被执行，而 `gen_slurm_variant.py` 的对照物（生产原文件）始终保持字节
+> 不变，回滚 = 改回 env + restart。三个名字都不配时默认是 `code_0817_prod.py` /
+> `verify_sr_run.py` / `sr_prep_scene.py`。
 >
 > ⚠️ **`SR_SR_SCRIPT` 不配就等于跑原脚本**，后果：`gpu_count != 4` 守卫在单卡分配下恒真 → 作业
 > `exit(3)`；强行把 `CUDA_VISIBLE_DEVICES` 写成 `0` → 并发作业全挤 0 号卡；失败时执行
@@ -73,15 +96,16 @@ ls -l code_0817_prod.py                                         # ✓= 生产原
 ### 0.3 service env 与重启
 
 env 分三处：主文件（`SR_SCENES_ROOT` / `SR_LLM_MOCK` / `SR_SLURM_FAKE`）
-+ drop-in `/etc/systemd/system/sr-api.service.d/10-slurm.conf`（Slurm/沙箱九项）
++ drop-in `/etc/systemd/system/sr-api.service.d/10-slurm.conf`（Slurm/沙箱十项）
 + drop-in `20-agentdb.conf`（`SR_AGENT_DB`，库移出应用树；见 §0.6）。
 查 **systemd 实际读到的合并文本**（`systemctl cat` 按加载顺序拼接，`# 路径` 标明来源）：
 
 ```bash
-systemctl cat sr-api | grep -nE '^Environment=(SR_BUNDLE_DIR|SR_PYTHON|SR_SLURM_WORK_DIR|SR_SLURM_PARTITION|SR_SLURM_TIME|SR_SLURM_CPUS|SR_SR_SCRIPT|SR_VERIFY_SCRIPT|SR_SANDBOX_ROOT|SR_SLURM_FAKE)'
+systemctl cat sr-api | grep -nE '^Environment=(SR_BUNDLE_DIR|SR_PYTHON|SR_SLURM_WORK_DIR|SR_SLURM_PARTITION|SR_SLURM_TIME|SR_SLURM_CPUS|SR_SR_SCRIPT|SR_VERIFY_SCRIPT|SR_PREP_SCRIPT|SR_SANDBOX_ROOT|SR_SLURM_FAKE)'
 ```
 
-✓= 九项都在（`SR_SLURM_FAKE=0` 也确认一下）；`SR_SLURM_WORK_DIR` 指向共享盘；
+✓= 十项都在（`SR_SLURM_FAKE=0` 也确认一下；三个作业内脚本名不配也有默认值，写出来是为了可审计）；
+`SR_SLURM_WORK_DIR` 指向共享盘；
 `SR_SR_SCRIPT` 指向 `code_0817_prod_slurm.py`（不配就会跑原脚本，见 §0.2）；
 `SR_SANDBOX_ROOT` 指向大盘（不配 = SR 直接写 `lq_path`，见 `deploy/README.md` §7.5）
 
@@ -238,13 +262,14 @@ sh $APP/deploy/slurm/probe_slurm.sh --deep     # ⚠️ 默认不跑
 - `write-db FAIL` → **真问题**，修法见 §0.6。
 - 集群：`gpu` 分区 76 节点、`sinfo -N` 96 行、控制器 node81-190、`node81-133/134/135/136` 为 `down`（本机 `down*`）。
 
-**env**（`systemctl cat sr-api`，13 行 `Environment=`，逐项对 §0.1 的九项）：
+**env**（`systemctl cat sr-api`，逐项对 §0.3 的十项）：
 
 | env | 机器值 | 判 |
 |---|---|---|
 | `SR_BUNDLE_DIR` | `/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes` | ✓ `ls` 见 `code_0817_prod.py` / `models/` / `options/` / `utils/util.py` |
 | `SR_PYTHON` | `…/envs/torch1.9.1py36/bin/python` | ✓ 路径在，实测 **torch 1.10.2+cu113 / GDAL 2.4.0** |
-| `SR_VERIFY_SCRIPT` | `verify_sr_run.py` | ✓ |
+| `SR_VERIFY_SCRIPT` | `verify_sr_run.py` | ✓（但机上那份的内容是旧版，见下 ⚠️） |
+| `SR_PREP_SCRIPT` | **未设置** | ⚠️ 不配默认跑 `sr_prep_scene.py` —— 那个文件必须拷进 `$BUNDLE`（§0.1 第三个），显式写上便于审计 |
 | `SR_SR_SCRIPT` | **未设置** | ✗ **必须补，见下 ①** |
 | `SR_SLURM_WORK_DIR` | `/DiskArray/tmp/wangrz/sr_agent_work` | ✓ node81-129 上 `test -d` = `WORK_OK` |
 | `SR_SLURM_PARTITION` / `_TIME` / `_CPUS` | `gpu` / `02:00:00` / `4` | ✓ |
@@ -265,16 +290,18 @@ sh $APP/deploy/slurm/probe_slurm.sh --deep     # ⚠️ 默认不跑
 （`grep -r` 无命中），且指向 `$BUNDLE` 之外的路径。像是当初本意要设 `SR_SR_SCRIPT` 却写错了名字。
 应删掉，否则下次读 unit 的人会以为入口脚本已经配好了。
 
-**变体落位**（`sha256sum -c` 对仓库 `SR_code/variants/`）：
+**变体落位**（`sha256sum` 对仓库 `SR_code/variants/`）：
 
 ```
-041bea73…474a9  30695 B  code_0817_prod_slurm.py   ← 与 provenance.json 的 variant.sha256 一致
-92e400a7…3505d  verify_sr_run.py                   ← ⚠️ 机上那份是旧版
+512d84e1…3e037  30990 B  code_0817_prod_slurm.py   ← 与 provenance.json 的 variant.sha256 一致
+0d9c7a1c…6293ec  22393 B  verify_sr_run.py          ← ⚠️ 机上那份是旧版
+d9b898bd…b09cee   7717 B  sr_prep_scene.py          ← ⚠️ 机上那份还没有
 ```
 
-> ⚠️ `verify_sr_run.py` 仓库副本的当前值是 **17164 B / `5fa627d8…`**（退出码文件的编码锁定）。
-> 机上那份 16419 B 的**行为仍正确**（`A/B/C` 不受影响），但少了两处 `-export=NONE` + 非 UTF-8 locale
-> 下才暴露的编码保护 → 重启 Slurm 走 **D** 之前必须重新拷一次。
+> ⚠️ 三个文件（§0.1）一次性重新拷。`verify_sr_run.py` 机上那份 16419 B 不认
+> `--land-on-body` / `--backup` / `--mask-1x`：批脚本会传这几个参数，argparse 直接退 2、
+> **不写退出码文件** → 平台永远读 `UNKNOWN`，本体还会停在 1×（没有恢复那一步）。
+> `sr_prep_scene.py` 缺失则是跑前就位失败 → 作业不跑 SR、校验器报 `verdict=90`。
 > §0.2 的变体比对（含 `provenance.json`）继续有效。
 
 **其他实测**：
@@ -296,10 +323,11 @@ sh $APP/deploy/slurm/probe_slurm.sh --deep     # ⚠️ 默认不跑
 
 - `systemctl cat`/两个 unit 文件里 `SR_SCRIPT_PATH` **已搜不到**（`grep -rn` 空输出），
   `/DiskArray/prod_slurm.py` 也不存在 → ② 闭合。现状已确认干净。
-- 变体自检：`sha256sum -c` 对 `code_0817_prod_slurm.py` 与 `verify_sr_run.py` 均 **OK**
-  → `$BUNDLE` 里这两个文件与仓库 `SR_code/variants/` 逐字节相同（冻结合同仍然成立）。
+- 变体自检：`sha256sum` 对 `code_0817_prod_slurm.py`、`verify_sr_run.py`、`sr_prep_scene.py`
+  三者与仓库 `SR_code/variants/` 逐字节相同（冻结合同仍然成立）。
 - drop-in 生效（以 `/proc/<pid>/environ` 为证）：`SR_SR_SCRIPT=code_0817_prod_slurm.py`、
-  `SR_AGENT_DB=/DiskArray/tmp/wangrz/sr_agent_db/sr_agent.db`、`SR_VERIFY_SCRIPT=verify_sr_run.py` → ① 闭合。
+  `SR_AGENT_DB=/DiskArray/tmp/wangrz/sr_agent_db/sr_agent.db`、`SR_VERIFY_SCRIPT=verify_sr_run.py`、
+  `SR_PREP_SCRIPT=sr_prep_scene.py` → ① 闭合。
 - 老库存在并已 `cp -p` 到新目录（打印 `migrated`）。
 - `node81-132`：`WORK_OK` + `BUNDLE_OK` ✓。
 - ⚠️ **`node104-*` 一族不是「有一台坏」，是整族在本机解析不了**：idle 里前 5 台
@@ -457,8 +485,14 @@ echo "meta=$META"; grep -E 'CloudPercent|DataBits|SolarAzimuth' "$META"
 
 > ⚠️ `cp -a` 整个目录在真机上约 **10 GB+**：一个 `_L1_PAN` 场景里除 `<目录名>.tif`（~5 GB）
 > 还有 `<目录名>_ori.tif`（~5 GB）、`<目录名>.tif.ori`、`.jpg` 与若干 `_000X_` 子目录。
-> 只想验证链路的话，可以只拷 `<目录名>.tif` + `<目录名>{_,.}meta.xml` + 建空的 `Debug/`
-> —— SR 不读 `_ori.tif`（`grep -n '_ori' code_0817_prod.py` 命中的都是 numpy 变量名，不是文件）。
+> 只想验证链路的话，可以只拷 `<目录名>.tif` + `<目录名>_NOSR.tif` + `<目录名>_mask.tif`
+> + `<目录名>{_,.}meta.xml` + 建空的 `Debug/` —— SR 不读 `_ori.tif`
+> （`grep -n '_ori' code_0817_prod.py` 命中的都是 numpy 变量名，不是文件）。
+>
+> 变体（§0.2 的 E10）读的是**未超分那一份**：SC 场景读 `<目录名>_NOSR.tif`，RC 场景读
+> `PAN.tif`（尺寸判据放宽到 `< 1.8 GiB`，未超分那份本身也过）。SC 场景缺了那份 `_NOSR.tif`
+> 会在输入定位处 `exit()` —— 平台链路上这是提交时 400 拦下的事（缺哪份报哪份），手工旁路只有
+> 这里能拦。
 
 ✓= `CloudPercent` 是**数字**（0 / 1 / 3…）；`SolarAzimuth` 有值（走 SC 步）
 
@@ -490,6 +524,10 @@ sudo -u nginx srun -N1 -n1 -p $PART --gres=gpu:1 --time=01:00:00 sh -c "
 > （输出名 == 输入名 ⇒ 被改名/删除的是输入本身），见契约 §2.4 第 1 条。
 > 期望的目录变化只有三处新增：`<目录名>_acc.tif`、`Debug/` 下的日志与退出码文件、
 > meta.xml 更新；输入 `<目录名>.tif` 的 mtime 不变。
+>
+> 手工旁路**不走平台的跑前脚本与归位那一步**（那两步由 `build_batch_script` 生成的行负责），
+> 所以这里产物停在 `<目录名>_acc.tif`、本体 `<目录名>.tif` 不动。平台链路上跑完是产物换到
+> 本体名下、`<目录名>_acc.tif` 不再存在（见 §D）。
 
 ✓= 四条同时成立：
 
@@ -522,6 +560,8 @@ print(build_batch_script('/w/c.xml','/w'))" | sed -n '1,22p'
 ```
 
 ✓= 生成物里能看到 `#SBATCH --gres=gpu:1`、`--export=NONE`、`cd $BUNDLE`、以及两行 python 调用
+（上面这条不带 swap 的手工调用就是这个形态；平台真提交时还会插进跑前脚本那一行、verify 行多带
+`--land-on-body …` 三个参数，见 §0.2）
 
 **D 阶段通例**（每条都要遵守，否则测出来的不是我们想测的东西）
 
@@ -532,6 +572,9 @@ print(build_batch_script('/w/c.xml','/w'))" | sed -n '1,22p'
 2. `lq_path`：配了 `SR_SANDBOX_ROOT` 就**可以指生产目录**（平台在作业第一步自建副本，生产只读）；
    D1/D3 这类要造故障的用例仍指 `$TEST` 下手工弄坏的副本 —— 拿好数据去制造坏结果没有意义。
 3. POST 走 `http://127.0.0.1:8000`（后端直连）；SSE 走 `http://127.0.0.1`（经 nginx，真实链路）。
+4. **投上去的场景必须齐备**：本体（`<目录名>.tif` / RC 是 `PAN.tif`）+ 未超分那一份
+   （`<目录名>_NOSR.tif` / `PAN_NOSR.tif`）+ `<目录名>_mask.tif` + `<目录名>_meta.xml`。
+   缺任何一份，`POST /api/queue` 直接 400、`detail` 点名缺的那份 —— 提交侧不再「拿别的顶替」。
 
 查队列的一行过滤器（下面反复用到）——`run_dataroot` 是**作业实际工作的目录**（开沙箱时 = 副本，
 产物和 `Debug/` 都在它下面，不是 `lq_path`）：
@@ -546,12 +589,19 @@ for t in json.load(sys.stdin)["tasks"]:
 
 ### D1 · 静默失败不再被标成成功（§2.3 毒药的正面验证）
 
-**构造**：一个「SC 步、meta 齐全、但输入 tif 不存在」的场景 ⇒ `util.get_l1_pan_tif_rcsc` 打印
-`not existed` 后 `exit(0)`，**发生在 SRLOG 创建之前** ⇒ 退出码 0 且完全没有 SRLOG。
+**构造**：一个「SC 步、meta 齐全、场景**齐备**（本体 + 未超分那份 + 掩码 + meta），但未超分那份
+**尺寸落在变体判据之外**」的场景 ⇒ 变体（E10）在输入定位处打印 `already SRed before` 后 `exit(0)`，
+**发生在 SRLOG 创建之前** ⇒ 退出码 0 且完全没有 SRLOG。
+
+> 为什么不用「故意不建输入 tif」：提交侧会先解析源头（`run_sr.nosr_swap_plan`），场景不齐备直接
+> 400，根本拿不到作业行。要走到 SR 内部，就得让场景齐备、由尺寸判据在作业里失败。
 
 ```bash
 SC=$TEST/d1_silent
 mkdir -p $SC/Debug
+make_tif $SC/d1_silent.tif       128    # 本体：故意与源头不同尺寸，好验证失败后被恢复
+make_tif $SC/d1_silent_NOSR.tif   64    # 未超分那份：64×64 ⇒ 落在 SC 尺寸判据之外 ⇒ 静默 exit(0)
+make_tif $SC/d1_silent_mask.tif  128
 cat > $SC/d1_silent_meta.xml <<'EOF'
 <Meta>
   <DataBits>12</DataBits>
@@ -559,14 +609,13 @@ cat > $SC/d1_silent_meta.xml <<'EOF'
   <SolarAzimuth>90</SolarAzimuth>
 </Meta>
 EOF
-# 故意不建 d1_silent.tif
 chown -R nginx:nginx $SC
 
 curl -s -X POST http://127.0.0.1:8000/api/queue -H 'content-type: application/json' \
   -d '{"lq_path":"'$SC'","suffix":"acc-d1","sr_scale":2,"cloud_limit":80}'
 ```
 
-等 10–30 秒（作业要排到节点上跑完），然后三看：
+等 10–30 秒（作业要排到节点上跑完），然后四看：
 
 ```bash
 # (a) 作业内判定：校验器写下的结论
@@ -581,25 +630,35 @@ for t in json.load(sys.stdin)["tasks"]:
     if t["params"]["suffix"]=="acc-d1": print("job", t["job_id"], "state", t["state"])'
 #     ✓= state 是 FAILED
 
-# (c) 同参数重投：必须真的重跑，而不是回 RESUMED_COMPLETED
+# (c) 本体恢复：跑前脚本把它换成了未超分那份（64×64），失败后校验器要从备份恢复回 128×128
+ls -l $SC/Debug/d1_silent.tif.srbak 2>/dev/null ; echo "bak_rc=$?"      # ✓= 不存在（恢复后删掉）
+$SR_PYTHON -c '
+from osgeo import gdal; print(gdal.Open("'$SC'/d1_silent.tif").RasterXSize)'   # ✓= 128
+
+# (d) 同参数重投：必须真的重跑，而不是回 RESUMED_COMPLETED
 curl -s -X POST http://127.0.0.1:8000/api/queue -H 'content-type: application/json' \
   -d '{"lq_path":"'$SC'","suffix":"acc-d1","sr_scale":2,"cloud_limit":80}'
 ```
 
-✓= 三份证据齐全：
+✓= 四份证据齐全：
 
 - (a) 退出码文件存在、`verdict=90`、reason 点名缺 SRLOG；且该场景**没有 SRLOG**（证明是静默失败被抓住，不是误判）。
 - (b) `/api/queue` 该任务 `FAILED`。
-- (c) 第二次 POST 返回 `"status":"SUBMITTED"`（**不是** `RESUMED_COMPLETED`）+ `"previous_state":"FAILED"`，
+- (c) 备份已删、本体回到 128×128 —— 这一跑**没有**把本体留在 1× 的 64×64 上。
+- (d) 第二次 POST 返回 `"status":"SUBMITTED"`（**不是** `RESUMED_COMPLETED`）+ `"previous_state":"FAILED"`，
       `job_id` 是**新的**；随后 `$SC/Debug/` 出现**第二个** `_SREXIT_<新job_id>.txt`。
 
-`record:` (a) 退出码文件全文 + 两次 `ls` 输出；(b) 队列行；(c) 两次 POST 的完整响应 JSON
+`record:` (a) 退出码文件全文 + 两次 `ls` 输出；(b) 队列行；(c) 备份 `ls` + 本体尺寸；(d) 两次 POST 的完整响应 JSON
 
+✗ 第一次 POST 直接 400 → 场景不齐备（本体 / 未超分那份 / `<目录名>_mask.tif` / meta 缺一），
+  `detail` 会点名缺哪一份 —— 这一跑根本没提交，不是校验器的结论。
 ✗ (b) `UNKNOWN` → 平台反推的路径与作业写的对不上：核对 config.xml 的 `DatarootLQ` 与
   `run_sr.exit_code_file_for` 的推导是否同值（用队列行的 `run_dataroot` 一眼比对），以及该目录下
   `Debug/` 是否 nginx 可写（B3）。**沙箱开着时 `Debug/` 在副本里**——那说明沙箱没建成，
   看作业 `.err` 有没有 `sandbox copy failed` / `sandbox copy incomplete`。
-✗ (b) `COMPLETED` → 校验器没被执行。按 D0 复核批脚本里的两行调用，并确认 `$BUNDLE/verify_sr_run.py` 存在。
+✗ (b) `COMPLETED` → 校验器没被执行。按 D0 复核批脚本里的调用行，并确认 `$BUNDLE/verify_sr_run.py` 存在。
+✗ (c) 本体停在 64×64（= 未超分那份的尺寸）→ 归位/恢复没跑：多半是 `$BUNDLE/verify_sr_run.py`
+  还是旧版（不认 `--land-on-body` 那组参数，见 §A 的 ⚠️），或 `$BUNDLE/sr_prep_scene.py` 缺失。
 ✗ (c) 回 `RESUMED_COMPLETED` → 平台把「退出码 0」当成了成功（正是校验器要消灭的行为），说明跑的还是旧
   `backend/services/slurm.py`：确认 `$APP/backend` 已更新到当前版本后 `systemctl restart sr-api`。
 
@@ -644,13 +703,16 @@ print("tasks:", len(ts), "job_ids:", {t["job_id"] for t in ts}, "states:", {t["s
 
 ### D3 · 云量跳过：合法跳过 ≠ 失败，也**不被反复重投**
 
-**构造**：输入 tif 存在（内容不会被读，1MB 占位足够——云量闸门在读图之前触发），meta 的
-`CloudPercent=50`，提交时 `cloud_limit=10` ⇒ `50 > 10` ⇒ 变体 E9 分支：**先建 SRLOG 写
-`Run skipped:` 终态行，再 exit(0)**。
+**构造**：场景齐备、内容不会被读（云量闸门在读图之前触发），meta 的 `CloudPercent=50`，
+提交时 `cloud_limit=10` ⇒ `50 > 10` ⇒ 变体 E9 分支：**先建 SRLOG 写 `Run skipped:` 终态行，
+再 exit(0)**。
 
 ```bash
 SC=$TEST/d3_cloud
 mkdir -p $SC/Debug
+make_tif $SC/d3_cloud.tif       64        # 三份都只要是真 TIFF：跑前脚本要打开它们
+make_tif $SC/d3_cloud_NOSR.tif  64
+make_tif $SC/d3_cloud_mask.tif  64
 cat > $SC/d3_cloud_meta.xml <<'EOF'
 <Meta>
   <DataBits>12</DataBits>
@@ -658,7 +720,6 @@ cat > $SC/d3_cloud_meta.xml <<'EOF'
   <SolarAzimuth>90</SolarAzimuth>
 </Meta>
 EOF
-truncate -s 1048576 $SC/d3_cloud.tif      # 1MB 占位；跳过路径不会读它的内容
 chown -R nginx:nginx $SC
 
 curl -s -X POST http://127.0.0.1:8000/api/queue -H 'content-type: application/json' \
@@ -674,6 +735,8 @@ cat $SC/Debug/_SREXIT_*.txt
 #   ✓= verdict=0 / skip=1 / sr_exit_code=0
 ls $SC/d3_cloud_acc-d3.tif 2>/dev/null ; echo "out_ls_rc=$?"
 #   ✓= 不存在（rc 非 0）—— 跳过不产 tif，契约 §2 明确允许
+ls -l $SC/Debug/d3_cloud.tif.srbak 2>/dev/null ; echo "bak_rc=$?"
+#   ✓= 不存在（跳过也走恢复：本体回到跑前那份、备份删掉）
 
 curl -s http://127.0.0.1:8000/api/queue | /opt/sr-venv/bin/python -c '
 import json,sys
@@ -736,7 +799,7 @@ curl -s -X POST http://127.0.0.1:8000/api/queue -H 'content-type: application/js
 3. **B0**：三条只读命令的完整输出（4 卡机是谁 + 我在哪台 + slurmd/端口状态）。
 4. **B**：B1 的 `.out`（版本号那行）+ B2 的审计行 + B3 的 `verifier_rc` 与退出码文件内容。
 5. **C**：`sr_rc` / `verifier_rc` / 退出码文件名 / 输出 tif 大小 / 端到端耗时 / SRLOG 末三行。
-6. **D1**：退出码文件全文 + 两次 `ls` 输出 + 队列行 + 两次 POST 的响应 JSON。
+6. **D1**：退出码文件全文 + 两次 `ls` 输出 + 本体尺寸（恢复后 128）+ 队列行 + 两次 POST 的响应 JSON。
 7. **D2 / D3**：POST 的 `status`+`job_id`（D2 三次、D3 两次）+ 队列统计行；D3 的 SRLOG 末两行。
 8. **D4**：SSE 收到的前三帧原文（含 `type` / `state`）+ 浏览器徽标行为。
 
@@ -749,7 +812,7 @@ D3 看 `skip=1 → COMPLETED → 复用`；D4 看 `job_update` 帧。四条都�
 
 - 决策与分批计划：[slurm-integration.md](slurm-integration.md)（§一 决策 / §二 已核实事实 / §2.7 真机实测值）
 - 调用契约 v1.5：[sr-pipeline-interface.md](../sr_code/sr-pipeline-interface.md)（§2 退出码 90 与云量跳过终态 / §2.4 三条已知语义）
-- 变体差异表：[sr-slurm-deploy-variant.md](../sr_code/sr-slurm-deploy-variant.md)（E1–E9 / 校验器 / 上机必验项 V1–V6）
+- 变体差异表：[sr-slurm-deploy-variant.md](../sr_code/sr-slurm-deploy-variant.md)（E1–E10 / 校验器 / 上机必验项 V1–V6）
 - 只读探针：[deploy/slurm/probe_slurm.sh](../../deploy/slurm/probe_slurm.sh)
 - 真机部署现状：[real-machine-bringup.md](real-machine-bringup.md)（§5 症状表）
 - 部署总览：[deploy/README.md](../../deploy/README.md)（「Slurm 接入」小节）

@@ -32,7 +32,7 @@ import json
 import os
 import sys
 
-GENERATOR_VERSION = "1.0.0"
+GENERATOR_VERSION = "1.1.0"
 GENERATOR_REL = "SR_code/tools/gen_slurm_variant.py"
 
 SOURCE_REL = "SR_code/code_0817_prod.py"
@@ -46,9 +46,12 @@ GITATTRIBUTES_TEXT = "* text eol=lf\n"
 BANNER_RULE = "# " + "=" * 75
 
 # ---------------------------------------------------------------------------
-# The edit table.  One entry per finding in docs/status/slurm-integration.md
-# sec 2.2 (E1-E9).  Order matches the numbering, not the file position; the
-# anchors are disjoint so the order does not affect the result.
+# The edit table.  E1-E9 are one entry per finding in
+# docs/status/slurm-integration.md sec 2.2; E10 belongs to the platform's SR
+# submission entry (the un-superresolved copy is landed on the body name before
+# the job starts, so the input the job must read is that copy).  Order matches
+# the numbering, not the file position; the anchors are disjoint so the order
+# does not affect the result.
 # ---------------------------------------------------------------------------
 
 EDITS = [
@@ -162,6 +165,24 @@ EDITS = [
         "        exit(0)",
         1,
     ),
+    # E10 -- the platform's SR entry reads the *un-superresolved* copy: the job
+    # script lands it on the body name before this runs, so the body holds 1x
+    # content and the strict gate ("1.0 < size < 1.8 GB") would reject it as
+    # "already SRed".  get_l1_pan_tif_rcsc_nosr gates on the one-sided
+    # "size < 1.8 GB" instead.  Both functions resolve the same RC path
+    # (PAN.tif); only the gate differs.
+    (
+        "E10",
+        "    img_abs_path = util.get_l1_pan_tif_rcsc(lq_path, tiftype, "
+        "sr_previous_step)",
+        "    # The body holds the un-superresolved copy by the time this runs (the\n"
+        "    # job script lands it there before invoking this file), so the input\n"
+        "    # is 1x and the strict \"1.0 < size < 1.8 GB\" gate would reject it.\n"
+        "    # get_l1_pan_tif_rcsc_nosr uses the one-sided \"size < 1.8 GB\" gate.\n"
+        "    img_abs_path = util.get_l1_pan_tif_rcsc_nosr(lq_path, tiftype, "
+        "sr_previous_step)",
+        1,
+    ),
 ]
 
 # One-line rationale per edit id, copied into provenance.json for review.
@@ -175,6 +196,7 @@ EDIT_NOTES = {
     "E7": "never systemctl stop slurmd from inside a job",
     "E8": "GPU-error log wording no longer claims the node was stopped",
     "E9": "cloud-limit skip writes SRLOG + 'Run skipped:' before exit(0)",
+    "E10": "read the un-superresolved copy (one-sided size gate)",
 }
 
 

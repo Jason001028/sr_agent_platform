@@ -25,7 +25,7 @@
 
 平台的 Slurm 调度层**已经完整且有测试**：`backend/services/slurm.py`（sbatch/squeue/sacct/scancel + `SR_SLURM_FAKE` 假调度器）、`backend/services/run_sr.py`（config.xml 组装 + 批脚本生成 + sha256 指纹幂等）、`backend/api/platform.py`（`/api/queue` REST + SSE）、前端 `/queue` 页。**真正空的是真机侧。**
 
-### 2.2 生产脚本在 Slurm 作业里跑不通：三处硬伤 + 五处需改
+### 2.2 生产脚本在 Slurm 作业里的逐条改动（行锚点）
 
 | # | 行锚点 | 现状 | 问题 |
 |---|---|---|---|
@@ -38,6 +38,7 @@
 | E7 | `:655-656` | `cmd = "systemctl stop slurmd.service"; os.system(cmd)` | 作业里停节点调度器。`User=nginx` 下是权限拒绝（作业白挂）；若将来服务改 root 则**真的把节点从池里摘掉** |
 | E8 | `:660` | 写 `SlurmStopLog.txt` 时用 `"stop"` 措辞 | 写 stop 会让运维误判节点离线 |
 | E9 | `:159-160` | `if cloudpercent > cloudlimit: exit(0)` | 合法「按策略跳过」，但在创建 SRLOG（`:165`）**之前** exit(0) → 与静默失败无法区分 |
+| E10 | `:151` | `img_abs_path = util.get_l1_pan_tif_rcsc(lq_path, tiftype, sr_previous_step)` | 严格判据 `1.0 < size < 1.8` GiB 只放行**已超分**的本体；这一跑要读的是未超分那份（跑前脚本已把它拷到本体名），1× 内容落在下界之外 → 判成 already SRed 后 `exit()`。改调 `get_l1_pan_tif_rcsc_nosr`（单边 `size < 1.8` GiB） |
 
 ### 2.3 闭环毒药：静默失败会被永久固化成成功
 
@@ -127,7 +128,7 @@
    变体首部插入不可手改横幅：源路径 + 源 sha256 + 生成器版本 + "GENERATED FILE — DO NOT EDIT"。
    支持 --check（只比对，过期 exit 1）。provenance.json 不含时间戳，保证 --check 逐字节确定。
    落 SR_code/variants/：变体 .py + .diff（difflib.unified_diff）+ .provenance.json + .gitattributes（eol=lf）。
-3. 变体的 EDIT 表按 §2.2 E1–E9 逐条落地。E3 是从 env 取 gpuid 并 int() 兜底；
+3. 变体的 EDIT 表按 §2.2 E1–E10 逐条落地。E3 是从 env 取 gpuid 并 int() 兜底；
    E9 是把云量跳过改成「先建 SRLOG 并写显式终态行，再 exit(0)」，让合法跳过与静默失败可区分。
 4. backend/tests/test_sr_variant.py —— 用 importlib.util.spec_from_file_location 按路径加载生成器
    （SR_code/ 不是包，不要用 import 语句）。断言：--check 通过；每条锚点在真源中恰好命中 1 次；
@@ -250,7 +251,7 @@
   不要自己拍板。反复问没关系，问错了重做更贵。
 
 已完成，不要重做：
-- 部署变体 E1–E9 + 作业内校验器 + 平台 Slurm 层 + 探针 + 文档均已就位。
+- 部署变体 E1–E10 + 作业内校验器 + 平台 Slurm 层 + 探针 + 文档均已就位。
 - E-A（SR_SR_SCRIPT 开关）已在开发机完成：run_sr.py 四处 + test_run_sr.py 四例，
   后端 287 项测试全过、变体 --check 通过。装法是「变体并置 + env 指定」
   （`deploy/README.md` §7.1、`slurm-acceptance.md` §0.2/§0.3、`sr-pipeline-interface.md` §7.1、
@@ -274,7 +275,7 @@
 - E-B 空后缀归一：后端白名单归一（platform.py 的 _norm_sr_params 与 tools/run_sr.py 共用同一个函数，
   两条入口必须同结果，否则幂等指纹会分叉）+ 掩码 draft 与前端默认值一起改。
   **必须做字符白名单**：suffix 会拼进输出文件名，`../` 之类就是路径穿越。
-- E-C 变体 E10：云量字段解析容错，写进 gen_slurm_variant.py 的 EDITS，重新生成 + --check。
+- E-C 变体：云量字段解析容错，写进 gen_slurm_variant.py 的 EDITS，重新生成 + --check。
 - E-D 检索：收件规则改为 p.stem == p.parent.name 且同目录存在 <目录名>_meta.xml（一条规则即排除
   _NOSR / _mask / _<suffix> 全部派生件）；再把它改成读服务器本地索引（索引落在 SR_SCENES_ROOT 之外）。
 - E-E 预览缓存迁出盘阵（仅当决策点 ① 选本地盘；选盘阵内则跳过本项）。

@@ -4,7 +4,7 @@
 # Slurm deployment variant of the SR production script.  Edit the
 # source and regenerate; hand edits here are lost and fail --check.
 #
-# Generator : SR_code/tools/gen_slurm_variant.py v1.0.0
+# Generator : SR_code/tools/gen_slurm_variant.py v1.1.0
 # Source    : SR_code/code_0817_prod.py
 # Source sha256 (CRLF->LF normalised) : 03c9b4fc3f64cfd5e3b331128be5a09477d5ebe0362b0e9e4927fcdd356d40af
 # Regenerate: python SR_code/tools/gen_slurm_variant.py
@@ -170,7 +170,11 @@ def main():
 
     # ---- input discovery + meta ----
     sr_previous_step = util.check_sr_previous_step(lq_path)
-    img_abs_path = util.get_l1_pan_tif_rcsc(lq_path, tiftype, sr_previous_step)
+    # The body holds the un-superresolved copy by the time this runs (the
+    # job script lands it there before invoking this file), so the input
+    # is 1x and the strict "1.0 < size < 1.8 GB" gate would reject it.
+    # get_l1_pan_tif_rcsc_nosr uses the one-sided "size < 1.8 GB" gate.
+    img_abs_path = util.get_l1_pan_tif_rcsc_nosr(lq_path, tiftype, sr_previous_step)
     meta_abs_path = osp.join(lq_path, osp.basename(lq_path) + "_meta.xml")
 
     assert img_abs_path is not None, "L1 PAN.tif file not found."

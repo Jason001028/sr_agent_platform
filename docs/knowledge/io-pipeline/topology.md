@@ -198,6 +198,7 @@ SR 生产环境锁在 py3.6，装不了 fastapi；平台侧也不需要 torch。
 | `SR_PYTHON` | `python` | SR 侧解释器 |
 | `SR_SR_SCRIPT` | `code_0817_prod.py` | SR 入口脚本；**生成时写死进批脚本**，改完必须 restart |
 | `SR_VERIFY_SCRIPT` | `verify_sr_run.py` | 契约校验器；同上 |
+| `SR_PREP_SCRIPT` | `sr_prep_scene.py` | 跑前脚本（留备份、把未超分那份拷到本体名、掩码降到源头尺寸）；同上 |
 | `SR_SLURM_WORK_DIR` | `/tmp/sr_agent_work` | 存放生成的 config.xml 与批脚本 |
 | `SR_DEFAULT_SUFFIX` | `sr` | 仅兜底；实际默认读 SR 团队配置里的 `Suffix` |
 | `SR_SANDBOX_ROOT` | 无 | 作业私有副本根；**本机直跑路线必须不设** |
@@ -252,7 +253,7 @@ SR 生产环境锁在 py3.6，装不了 fastapi；平台侧也不需要 torch。
 | 后端 `backend/` | 重打 `backend` 包 → 解压 → `systemctl restart sr-api` |
 | systemd 单元或 drop-in | 改文件 → `systemctl daemon-reload` → `restart sr-api` |
 | nginx 站点配置 | 改文件 → `nginx -t` → `reload nginx` |
-| 环境变量 | 同 systemd 那一行；`SR_SR_SCRIPT` / `SR_VERIFY_SCRIPT` 因写死在批脚本里，必须 restart |
+| 环境变量 | 同 systemd 那一行；`SR_SR_SCRIPT` / `SR_VERIFY_SCRIPT` / `SR_PREP_SCRIPT` 因写死在批脚本里，必须 restart |
 
 两个包**必须同版本更新**：前端与后端之间没有版本协商。
 

@@ -112,7 +112,7 @@ config.xml 是任务级配置，经 `-f` 传入。下表列出脚本读取的全
 | `DeleteOriTifNeeded` | 是 | 字符串 | 是否删除原图。判定规则：仅当取值为 `TRUE`（不区分大小写）时进入删除分支；其余取值（含 `False` / `false`）保留源图像。**删除分支作用于输出路径上的同名文件，不是源图**（见 §6）：`Suffix` 为空、输出名 == 输入名时才等同删除源图；`Suffix` 非空时删掉的是上一次的同名输出，源图仍留在原位。建议平台统一填写 `false` |
 | `SRScale` | 是 | 字符串 | 超分倍率，**按字符串比较**。`"2"` 走通用直通路径（推荐，普通图像安全）；其他取值走卫星地理校正路径（依赖卫星元数据，普通图像不可用） |
 | `Suffix` | 是 | 字符串 | 输出文件后缀。**传非空值**：标签存在但为空时脚本读到 None（见下），输出直接以输入名命名——数据不会真被覆盖，但**输入文件会被改名**，属破坏性副作用，见 §2.4 第 1 条。平台的做法：请求不带 `suffix` 时，直接读本文件里的 `<Suffix>` 当默认值（当前样例即 `260318`），读不到或值不合法才回落到内置的 `sr`——所以「平台用哪个后缀」这件事以本文件为唯一权威 |
-| `MaskPath` | 否 | 路径 | ROI 掩码。缺失时做全图超分；必须指向 `.tif` 文件（指向目录会导致异常）；分辨率须与输入图像一致，否则局部超分被静默跳过 |
+| `MaskPath` | 否 | 路径 | ROI 掩码。缺失时做全图超分；必须指向 `.tif` 文件（指向目录会导致异常）；分辨率须与输入图像一致，否则局部超分被静默跳过。平台的提交把操作员掩码降采样到这一跑输入那份的像素尺寸、写进 `Debug/` 临时件后指过来，就是为了满足这一条 |
 | `GridAlign` | 否 | 字符串 | 取 `false` / `0` 时关闭 MTA-Grid，缺省启用。旧配置无此标签，脚本已有保护（不会因缺标签而崩溃） |
 
 模板样例（真实文件 `sfsr_config_test_espan2_cuda1.xml`）：
@@ -226,8 +226,9 @@ if gpu_available is False or gpu_count != 4:
   - 判据为 `gpu_count < 1`（可见卡数为 0 才失败），**退出码 3 的语义不变**；
   - 计数用 `torch.cuda.device_count()`——数"本作业看得见的卡"，而非 nvml 的物理卡数（4 卡节点恒为 4）；
   - 不赋值 `CUDA_VISIBLE_DEVICES`（选卡唯一来源是 `--gres`，见 §9）；
-  - 不执行 `systemctl stop slurmd.service`，GPU 异常时只向 `SlurmStopLog.txt` 追加一行（措辞 `gpu-error`，不写 `stop` 以免运维误判节点已下线）。
-- **上机安装**：把变体与生产脚本**并置**在 `$SR_BUNDLE_DIR` 下，再用 `SR_SR_SCRIPT=code_0817_prod_slurm.py` 指定作业跑它——**不必改名顶替 `code_0817_prod.py`**，生产原文件因此保持字节不动（也就始终是生成器的对照物）。作业跑哪个脚本、以及校验器 `verify_sr_run.py`，都由 `SR_SR_SCRIPT` / `SR_VERIFY_SCRIPT` 两个 env 决定（不配则用默认脚本名）。完整步骤见 [docs/status/slurm-acceptance.md §0.2](../status/slurm-acceptance.md) 与 [deploy/README.md §7.1](../../deploy/README.md)。
+  - 不执行 `systemctl stop slurmd.service`，GPU 异常时只向 `SlurmStopLog.txt` 追加一行（措辞 `gpu-error`，不写 `stop` 以免运维误判节点已下线）；
+  - 输入定位改用 `util.get_l1_pan_tif_rcsc_nosr`（E10）：这一跑读的是**未超分那一份** —— 跑前脚本先把 `<输入 stem>_NOSR.tif` 拷到本体名，1× 内容过不了严格判据 `1.0 < size < 1.8 GiB`（会被判成 already SRed 后退出），单边判据 `size < 1.8 GiB` 才放行。
+- **上机安装**：把变体与生产脚本**并置**在 `$SR_BUNDLE_DIR` 下，再用 `SR_SR_SCRIPT=code_0817_prod_slurm.py` 指定作业跑它——**不必改名顶替 `code_0817_prod.py`**，生产原文件因此保持字节不动（也就始终是生成器的对照物）。作业跑哪个脚本、以及跑前脚本 `sr_prep_scene.py`、校验器 `verify_sr_run.py`，都由 `SR_SR_SCRIPT` / `SR_PREP_SCRIPT` / `SR_VERIFY_SCRIPT` 三个 env 决定（不配则用默认脚本名，三个脚本都拷在 bundle 根、`cd` 后按相对名解析）。完整步骤见 [docs/status/slurm-acceptance.md §0.2](../status/slurm-acceptance.md) 与 [deploy/README.md §7.1](../../deploy/README.md)。
 - **新鲜度校验**：`python SR_code/tools/gen_slurm_variant.py --check`（逐字节比对，手改即报 STALE）。
 - **本地版与部署脚本不一致**：真源硬编码使用 GPU 0（模块级为 `"1"`，`main()` 内覆盖为 `"0"`）；模板 config.xml 里的 `<GPUIDS>`（实测模板值 3）不参与选卡，为审计字段（见 §9）。
 

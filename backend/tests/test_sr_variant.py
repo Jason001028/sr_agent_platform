@@ -67,9 +67,9 @@ class EditTableTests(unittest.TestCase):
                     (edit_id, expected, gen.SOURCE_REL))
                 self.assertNotEqual(replacement, anchor)
 
-    def test_edit_ids_are_e1_through_e9_in_order(self):
+    def test_edit_ids_are_e1_through_e10_in_order(self):
         self.assertEqual([e[0] for e in gen.EDITS],
-                         ["E%d" % n for n in range(1, 10)])
+                         ["E%d" % n for n in range(1, 11)])
 
     def test_check_anchors_reports_mismatch(self):
         bad = list(gen.EDITS) + [("E99", "no such line in the source\n", "x", 1)]
@@ -112,6 +112,15 @@ class VariantContentTests(unittest.TestCase):
         self.assertIn("Run skipped:", self.variant)
         self.assertIn("exit(0)", self.variant)
 
+    def test_reads_the_un_superresolved_copy(self):
+        # E10: the body holds the landed un-superresolved copy by the time the
+        # job reads it, so the strict "1.0 < size < 1.8 GB" gate would reject
+        # it.  The variant must call the one-sided-gate resolver instead.
+        self.assertEqual(self.code.count("util.get_l1_pan_tif_rcsc("), 0)
+        self.assertIn(
+            "img_abs_path = util.get_l1_pan_tif_rcsc_nosr("
+            "lq_path, tiftype, sr_previous_step)", self.variant)
+
     def test_module_level_library_load_is_guarded(self):
         self.assertIn("except Exception:\n    lib = None", self.variant)
 
@@ -141,7 +150,7 @@ class ArtifactTests(unittest.TestCase):
                          ["diff", "edits", "generator", "generator_version",
                           "source", "variant"])
         self.assertEqual([e["id"] for e in data["edits"]],
-                         ["E%d" % n for n in range(1, 10)])
+                         ["E%d" % n for n in range(1, 11)])
         for entry in data["edits"]:
             self.assertEqual(entry["occurrences"], 1)
 

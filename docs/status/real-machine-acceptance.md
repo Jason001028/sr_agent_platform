@@ -88,14 +88,17 @@
 > （`verdict=0` → COMPLETED；其中 `skip=1` 的云量跳过也是 COMPLETED；`verdict!=0` → FAILED）。
 > **进程退出码 0 不等于成功。** 该判据对本地执行器同样适用。
 
-- [ ] **前置：装变体 + 九项 env**（⏱30′）· 按 [deploy/README.md](../../deploy/README.md) §7.1：变体与
-  `verify_sr_run.py` **并置**在 `$SR_BUNDLE_DIR`（**不覆盖** `code_0817_prod.py`，靠 `SR_SR_SCRIPT` 指过去），
-  核对九项 env。✓= `head -3 code_0817_prod_slurm.py` 见 `GENERATED FILE` 横幅、`code_0817_prod.py`
-  未被改动；`probe_slurm.sh` 除 sacct 两行外无 FAIL · 记录:
+- [ ] **前置：装变体 + 十项 env**（⏱30′）· 按 [deploy/README.md](../../deploy/README.md) §7.1：变体、
+  `sr_prep_scene.py` 与 `verify_sr_run.py` 三份**并置**在 `$SR_BUNDLE_DIR`（**不覆盖**
+  `code_0817_prod.py`，靠 `SR_SR_SCRIPT` 指过去），核对十项 env。✓= `head -3 code_0817_prod_slurm.py`
+  见 `GENERATED FILE` 横幅、`code_0817_prod.py` 未被改动；`probe_slurm.sh` 除 sacct 两行外无 FAIL · 记录:
 - [ ] **真实提交 + 推进**（⏱20′）· `/queue` 手填 `lq_path` + 非空 `suffix` 提交。配了 `SR_SANDBOX_ROOT`
   可直接填生产路径（平台在作业第一步自建副本，生产目录只读）。✓= sbatch 起真实作业，徽标按
   提交中 → 排队/运行中 → 完成 推进；`/api/queue` 的 `run_dataroot` 指出产物位置，其状态与退出码文件一致；
   提交前后 `lq_path` 目录 `ls` 一致 · 记录 job_id / 耗时:
+  - 注意：**沙箱开着时源头替换与归位也全落在副本里**，生产目录全程只读（产物不会回到生产本体）。
+    要看归位效果就关掉 `SR_SANDBOX_ROOT`（见 [deploy/README.md](../../deploy/README.md) §7.6 第 1 条与
+    下面「源头 → 本体归位」那条）。
 - [ ] **静默失败不再被标成成功**（⏱15′）· 构造一个必然缺 SRLOG 的任务（如 SC 步目录里没有 `<目录名>.tif`）。
   ✓= 退出码文件 `verdict=90`、平台显示 **FAILED**、同参数重投返回 `SUBMITTED`（**不是** `RESUMED_COMPLETED`）· 记录:
 - [ ] **幂等回归**（⏱10′）· 同参数连投两次。✓= 活跃期 `RESUMED_ACTIVE`、终态 `RESUMED_COMPLETED`，
@@ -111,6 +114,20 @@
 - [ ] **掩码落盘 + ENVI 核对**（⏱30′）· 真实场景画矩形掩码 →「提交 SR」→ 落盘原图目录。
   ✓= ENVI 打开 `<stem>_mask.tif` 区域位置正确（在 JPG 上画 → 全分辨率落点）+ `<stem>_mask.txt` 质心可读；
   并用带 `MaskPath` 的真作业确认 0817 消费链一致 · 记录:
+- [ ] **这一跑读的是未超分那份、产物归位到本体**（⏱20′）· **关掉 `SR_SANDBOX_ROOT`**
+  （沙箱开着时源头替换与归位都只落在副本里，生产目录全程只读）。挑一个**带未超分留档**的场景
+  （RC 场景目录里有 `PAN.tif` 与 `PAN_NOSR.tif`，外加 `<输入影像 stem>_mask.tif`），先 `ls -l` 记下
+  本体 / `_NOSR` / 掩码三样的尺寸与 mtime；在 JPG 上画一小块掩码 →「提交 SR」。
+  ✓= 作业 `.out` 里 `sr_prep_scene.py` 那一行有输出；跑完（`verdict=0`）：本体尺寸 = **源头那份 × `SRScale`**
+  （配置里是 2；该倍数尚无真机实证，以本项实测为准），`_NOSR` 那份的尺寸与 mtime **未变**，
+  `Debug/` 里**没有** `<本体名>.srbak` 与 `<掩码名>.sr1x` 残留，产物原名 `<输入 stem>_<suffix>.tif` 已不存在。
+  ✗= 本体停在 1× 尺寸 → 读 verdict 文件的 `reason`，并看 `Debug/<本体名>.srbak` 在不在（在 = 备份留了但没归位）· 记录:
+- [ ] **缺未超分那份 → 提交就被 400 拦下**（⏱10′）· 挑一个场景把 `<输入 stem>_NOSR.tif` **临时 `mv`** 到
+  相邻目录（**别删**），再「提交 SR」。✓= 前端红条、后端 400，`detail` 写出试过哪些名字
+  （`…_NOSR.tif` 等）与「缺了不拿别的顶替」；验完把文件 `mv` 回来 · 记录:
+- [ ] **失败 → 本体回到跑前那份**（⏱15′）· 让 SR 必然失败（例如把 `<OPT>` 指的 yml 临时改名）再提交同参数。
+  ✓= `Debug/_SREXIT_<job_id>.txt` 写 `verdict=90`、平台显示 FAILED，而**本体尺寸回到跑前那份**
+  （从备份恢复），`Debug/` 里 `.srbak` 与 `.sr1x` 都已删；改回 yml 名字再投一次应正常完成并归位 · 记录:
 - [ ] **《待修复清单》写回**（⏱20′）· 盘阵上放一份**真实清单**（GBK，先备份）→ `/viewer` 导入 →
   页脚粘完整路径（`W:\…\待修复清单.txt`）→「同步」。
   ✓= 文件真被改写：上半部分逐字未动、下半部分只剩终态行、编码仍是 GBK（`file -i` 或记事本「另存为」看编码）；
@@ -128,8 +145,11 @@
   本体在前、NOSR 紧挨着，两张**共用一个序号**）；盘上每个场景目录多出本体的
   `<stem>_preview.jpg` 与未超分那份的 `_preview.jpg`；点开任意一张卡**即出图**（第二次点开
   不重新生成，服务端缓存命中）；全程**不弹遮罩**（用户当时正在看的那张图不该被挡住）。
-  ⚠️ **记下单景均耗时 = ___ 秒** —— [current-question §6.4](current-question.md) 里留的就是
-  这个空（§3.2 的量级预估是几十秒 × 每景两次生成预览）。这个数字决定「几十景要不要分批」· 记录:
+  ⚠️ **记下单景均耗时 = ___ 秒** —— [current-question §6.3](current-question.md) 里留的就是
+  这个空（§3.2 的量级预估是几十秒 × 每景两次生成预览）。这个数字决定「几十景要不要分批」。
+  已有一次**近似**回报（2026-10-09）：真机 node81-135 上、÷4 档、两张图（`PAN.tif` + `PAN_NOSR.tif`）
+  的「解析 + 生成预览 + 打开」约 16 秒，口径与本项不同（本项走一键解析那条强制重新生成的链），
+  **以本项实测为准** · 记录:
   ⚠️ **同一份清单连点两次**（⏱10′）：✓= 第二遍**照样逐景读盘**
   （不是秒回 —— 一键解析每次都按盘上最新的源重新生成，不复用旧预览），
   `ls --full-time <场景目录>/*_preview.jpg` 看本体与 NOSR 两份的 mtime **都变了**；

@@ -1,14 +1,14 @@
 # SR 生产脚本 · Slurm 部署变体差异表
 
 > 日期：2026-09-10 · 状态：**已定** · 读者：接手 Agent 窗口 + 运维
-> 前置：[docs/status/slurm-integration.md](../status/slurm-integration.md) §2.2（E1–E9 逐条行锚点）、[sr-pipeline-interface.md](sr-pipeline-interface.md) v1.4（唯一调用契约）
+> 前置：[docs/status/slurm-integration.md](../status/slurm-integration.md) §2.2（E1–E10 逐条行锚点）、[sr-pipeline-interface.md](sr-pipeline-interface.md) v1.4（唯一调用契约）
 > 本文档为静态映射表：**不含生成时间戳**，变体的可复现性由 `provenance.json` + `--check` 保证。
 
 ## 1. 一句话总结
 
 `SR_code/code_0817_prod.py` 逐字节不动，作为唯一真源；Slurm 部署用的可运行版本由 [SR_code/tools/gen_slurm_variant.py](../../SR_code/tools/gen_slurm_variant.py) 按锚点替换表**机械产出**到 `SR_code/variants/`。本文档是那张替换表的可读版本。
 
-为什么不是「复制一份改改」：原脚本里有 4 处会直接让 Slurm 作业失败或污染集群的代码（硬编码选卡、数物理卡、停 slurmd、静默退出）。手改副本无法审计，也无法在真源更新后被可靠地重构。锚点替换把「改了什么、为什么改」变成可 diff、可校验、可复现的产物。
+为什么不是「复制一份改改」：原脚本里有 5 处会直接让 Slurm 作业失败、污染集群或读错输入那一份的代码（硬编码选卡、数物理卡、停 slurmd、静默退出、输入定位只认已超分的那一份）。手改副本无法审计，也无法在真源更新后被可靠地重构。锚点替换把「改了什么、为什么改」变成可 diff、可校验、可复现的产物。
 
 ## 2. 产物与复现
 
@@ -28,7 +28,7 @@ python SR_code/tools/gen_slurm_variant.py --check  # 只比对；过期 exit 1
 
 生成器读入时做 CRLF→LF 归一、写出统一 `\n`，因此换行风格不影响产物字节；`--check` 是逐字节比较，任何手改（包括加一行注释）都会报 `STALE`。
 
-## 3. 差异表（E1–E9）
+## 3. 差异表（E1–E10）
 
 真源基线 sha256（CRLF→LF 归一后）：
 `03c9b4fc3f64cfd5e3b331128be5a09477d5ebe0362b0e9e4927fcdd356d40af`
@@ -44,6 +44,7 @@ python SR_code/tools/gen_slurm_variant.py --check  # 只比对；过期 exit 1
 | **E7** | `:655-656` | `cmd = "systemctl stop slurmd.service"` + `os.system(cmd)` | 删除，改为注释说明不得停节点守护进程 | 作业里停节点调度器：`User=nginx` 下权限拒绝（作业白挂）；若服务是 root 则**真把节点从池里摘掉** |
 | **E8** | `:660` | 写 `SlurmStopLog.txt` 时措辞 `"{:s} stop {:s}"` | 改为 `"{:s} gpu-error {:s}"` | 不再停服务后，写 `stop` 会让运维误判节点已下线 |
 | **E9** | `:159-160` | `if cloudpercent > cloudlimit: exit(0)` | 先建 SRLOG 并写 `Run skipped:` 终态行，再 `exit(0)` | 合法「按策略跳过」发生在创建 SRLOG（`:165`）**之前** → 与静默失败无法区分，会被闭环固化成成功 |
+| **E10** | `:151` | `img_abs_path = util.get_l1_pan_tif_rcsc(lq_path, tiftype, sr_previous_step)` | 改调 `util.get_l1_pan_tif_rcsc_nosr(...)` | 这一跑读的是未超分那一份：跑前脚本已把 `<输入 stem>_NOSR.tif` 拷到本体名，于是本体是 1× 内容，严格判据 `1.0 < size < 1.8 GiB` 会把它当成 already SRed 而 `exit(0)`（无 SRLOG、无产物）；单边 `size < 1.8 GiB` 才放行 |
 
 ### 3.1 E3 的兜底形状
 
@@ -77,6 +78,31 @@ if cloudpercent > cloudlimit:
 - 退出码仍是 `0`（跳过不是失败），**不产生输出 tif** 这一点与契约一致；
 - 消费方（P2 的作业内校验器）应把 `Run skipped:` 判为合法跳过：只要求 SRLOG 存在，不要求输出 tif。末行判定须**尾读字节取最后一个非空行**，不能用 `readlines()[-1]`（`:630` 写的 `"\nRun finished."` 无尾换行，且 `:624-626` 的 nvidia-smi 输出可能带尾换行）。
 
+### 3.3 E10 的输入来源
+
+```python
+    # The body holds the un-superresolved copy by the time this runs (the
+    # job script lands it there before invoking this file), so the input
+    # is 1x and the strict "1.0 < size < 1.8 GB" gate would reject it.
+    # get_l1_pan_tif_rcsc_nosr uses the one-sided "size < 1.8 GB" gate.
+    img_abs_path = util.get_l1_pan_tif_rcsc_nosr(lq_path, tiftype, sr_previous_step)
+```
+
+两个定位函数的分支对照（`util.py`，只列尺寸放行的那一侧）：
+
+| 分支 | `get_l1_pan_tif_rcsc`（严格） | `get_l1_pan_tif_rcsc_nosr`（E10 改用的） |
+|---|---|---|
+| `previous_step == "RC"` | 读 `<lq_path>/PAN.tif`，`1.0 < s < 1.8` GiB | 读 `<lq_path>/PAN.tif`，`s < 1.8` GiB |
+| 否则（SC） | 读 `<lq_path>/<目录名>.tif`，`0.0 < s < 1.1` / `1.5 < s < 1.7` / `3.8 < s < 4.1` | 读 `<lq_path>/<目录名>_NOSR.tif`，`0.2 < s < 1.1` / `1.5 < s < 1.7` / `3.8 < s < 4.3` |
+
+- RC 两个函数读的是**同一个路径**，差别只在判据；本体被跑前脚本换成 1× 内容后，尺寸落在
+  `1.0` 之下，严格判据拒收、单边判据放行。所以「读未超分那一份」在 RC 场景由**两处合力**：
+  跑前脚本把源头拷到本体名，E10 放宽判据。
+- SC 两个函数读的是**不同的路径**，`_nosr` 自己就指向 `<目录名>_NOSR.tif`，判据下限也从
+  `0.0` 抬到 `0.2`（排除空壳/占位文件）。
+- 两个函数的 `previous_step` 都由 `util.check_sr_previous_step` 定：`<lq_path>/<basename>_meta.xml`
+  的 `<SolarAzimuth>` 为空 ⇒ `"RC"`，非空 ⇒ `"SC"`。
+
 ## 4. 变体**没有**改动的（边界）
 
 - 算法、tile 循环、MTA-Grid、`writeTiff`、meta 回写逻辑一律不动；
@@ -104,14 +130,16 @@ if cloudpercent > cloudlimit:
 
 ### 6.1 契约校验器 `verify_sr_run.py`
 
-作业内、`code_0817_prod.py` 之后运行的第二个进程（纯标准库、Python 3.6 兼容——
+作业内、`code_0817_prod.py` 之后运行的那个进程（纯标准库、Python 3.6 兼容——
 它跑在 SR 作业解释器里，不是平台 venv）：
 
 ```bash
+<python> sr_prep_scene.py --body … --nosr … --backup … --mask … --mask-1x …   # 有源头替换的那一跑才有
 <python> code_0817_prod.py -f <cfg.xml>
 _sr_rc=$?
-<python> verify_sr_run.py --config <cfg.xml> --sr-exit-code "$_sr_rc"
-exit $?                      # 0=契约满足 / 90=契约不满足
+<python> verify_sr_run.py --config <cfg.xml> --sr-exit-code "$_sr_rc" \
+                          --land-on-body … --backup … --mask-1x …
+exit $_v_rc                  # 0=契约满足 / 90=契约不满足
 ```
 
 判三条件（契约 §2），并额外用 `config.xml` 的 mtime 过滤上次残留：
@@ -132,9 +160,24 @@ exit $?                      # 0=契约满足 / 90=契约不满足
 运行判成成功）；RC/SC 由 `<lq_path>/<basename>_meta.xml` 的 `<SolarAzimuth>` 是否为空决定，
 tiftype 从 `<OPT>` 指的 yml 顶层 `tiftype`/`tif_type` 读，缺省 `.tif`。
 
-**绝不抛异常**：config 不可读、meta 不可读、yml 缺、目录不存在、SRLOG 开不了……
-一律收敛成「契约不满足 + stderr 说明缺哪条」，绝不半路死掉——校验器死掉等于没有退出码文件，
-而「没有退出码文件」与「作业根本没跑」无法区分。
+**归位（`--land-on-body` / `--backup` / `--mask-1x`，三个都可选，成组传）**：判完契约、
+写 verdict 之前调一次 `land_product`。**都不传 ⇒ 行为与不带归位逐字一致**（校验器只读，
+既有用例的基线分支）。传了则按契约结论分四种结局：
+
+| 结局 | 触发 | 动作 |
+|---|---|---|
+| `landed` | 契约过、产物在 | 记下 `os.stat(产物).st_size` → `os.replace(产物, 本体)` → 复核本体大小一致；通过则删备份与掩码临时件，verdict 的 `output` 改成本体名（产物已不在原名下，免得读者去原名找） |
+| `restored` | 契约不过，**或** 合法跳过（`skip`） | 删掩码临时件、从备份把本体恢复成跑前那份；契约不过的 verdict 仍是 90，跳过的仍是 0 |
+| `missing` | 契约过、但产物名不存在 | 恢复本体，并记一条「产物不在，无法归位」→ 90 |
+| `failed` | `replace` 或归位后复核抛异常/大小不符 | 恢复本体，记下异常类型与说明 → 90 |
+
+- 备份不存在时只删备份、不报错：备份是 `sr_prep_scene.py` **拷之前先留**的，不存在说明本体从没被换过。
+- 归位这一环的成败**写进同一条 verdict**：没人归位的跑平台读到 90（FAILED），不会被报成
+  COMPLETED——这是「落点失败必须进 verdict」的落法。
+
+**绝不抛异常**：config 不可读、meta 不可读、yml 缺、目录不存在、SRLOG 开不了、
+归位失败……一律收敛成「契约不满足 + stderr 说明缺哪条」，绝不半路死掉——校验器死掉等于
+没有退出码文件，而「没有退出码文件」与「作业根本没跑」无法区分。
 
 ### 6.2 批脚本（`run_sr.build_batch_script`）
 
@@ -149,9 +192,26 @@ export PYTHONUNBUFFERED=1
         解释器 / config 路径 + nvidia-smi --query-gpu=index,uuid 按
         $CUDA_VISIBLE_DEVICES 过滤后的 GPU UUID
 cd <SR_BUNDLE_DIR> || { …; exit 1; }
-<python> code_0817_prod.py -f <cfg> ; _sr_rc=$?
-<python> verify_sr_run.py --config <cfg> --sr-exit-code "$_sr_rc" ; exit $?
+_prep_rc=0                                          # 仅「这一跑要换源头」时才有这五行
+<python> sr_prep_scene.py --body … --nosr … --backup … --mask … --mask-1x … || _prep_rc=$?
+if [ "$_prep_rc" -ne 0 ]; then
+    echo "sr_prep_scene failed (exit $_prep_rc); skipping the SR run, the verifier restores the body" >&2
+    _sr_rc=$_prep_rc
+else
+    <python> code_0817_prod.py -f <cfg> ; _sr_rc=$?
+fi
+<python> verify_sr_run.py --config <cfg> --sr-exit-code "$_sr_rc" \
+                         [--land-on-body … --backup … --mask-1x …]          # 仅「要换源头」
+_v_rc=$?
+exit $_v_rc
 ```
+
+三段程序名都由 env 定、缺省即 `sr_prep_scene.py` / `code_0817_prod_slurm.py` / `verify_sr_run.py`，
+`cd` 之后按相对名解析（三者都拷在 bundle 根）。local 执行器没有调度器给 verdict 文件命名，
+verify 行还会多一个 `--job-id <id>`（校验器优先用它、其次 `$SLURM_JOB_ID`）。
+
+跑前脚本失败**不 `exit 1`**：它的码被带进 `_sr_rc` 并跳过 SR 那一步，让校验器照常跑完、写
+verdict（同时从备份恢复本体）。否则这一跑没有退出码文件，平台只能读 UNKNOWN。
 
 刻意不做的两件事：**不加 `set -e`**（与中段的 `||`、管道交互微妙，会在真正需要
 「失败也继续跑校验器」时提前退出）；**脚本内不出现任何 `CUDA_VISIBLE_DEVICES` 赋值**
@@ -187,10 +247,14 @@ cd <SR_BUNDLE_DIR> || { …; exit 1; }
 ## 7. 怎么校验这份变体
 
 ```bash
-python -m pytest backend/tests/test_sr_variant.py -q   # 23 项：锚点命中 / 禁用形态 / 确定性 / 坏锚点 exit 2
-python -m pytest backend/tests/test_sr_verify.py -q    # 39 项：契约三条件全分支 + 命名约定
-python SR_code/tools/gen_slurm_variant.py --check      # 逐字节新鲜度
+python -m pytest backend/tests/test_sr_variant.py -q      # 24 项：锚点命中 / 禁用形态 / 确定性 / 坏锚点 exit 2
+python -m pytest backend/tests/test_sr_verify.py -q       # 50 项：契约三条件全分支 + 归位四种结局 + 命名约定
+python -m pytest backend/tests/test_sr_prep_scene.py -q   # 16 项：备份「只在不存在时留」/ 覆盖本体 / 缩放方向 / 退出码
+python SR_code/tools/gen_slurm_variant.py --check         # 逐字节新鲜度
 ```
+
+`sr_prep_scene.py` 与 `verify_sr_run.py` 都是**手写**的作业内脚本，不由生成器产出；生成器只管
+`code_0817_prod_slurm.py`（+ `.diff` / `.provenance.json`）。三份脚本一起上车，见 §6.2。
 
 测试钉住的四类不变量：
 
