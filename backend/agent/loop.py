@@ -95,13 +95,24 @@ def _parse_args(arguments) -> dict:
 
 
 def parse_response(resp) -> dict:
-    """Normalize an OpenAI chat-completions response to plain data."""
+    """Normalize OpenAI-compatible responses, including Qwen reasoning output.
+
+    Some llama.cpp/Qwen builds put thinking in ``reasoning_content`` and leave
+    ``content`` empty when the completion cap is exhausted. Reasoning is kept as
+    metadata and is never sent back as assistant content (it may contain hidden
+    chain-of-thought); callers can distinguish an incomplete final answer.
+    """
     msg = resp.choices[0].message
     tool_calls = []
     for tc in msg.tool_calls or []:
         tool_calls.append({"id": tc.id, "name": tc.function.name,
                            "arguments": tc.function.arguments})
-    return {"content": msg.content, "tool_calls": tool_calls}
+    return {
+        "content": msg.content or "",
+        "tool_calls": tool_calls,
+        "reasoning_content": getattr(msg, "reasoning_content", None) or "",
+        "finish_reason": getattr(resp.choices[0], "finish_reason", None),
+    }
 
 
 def call_tool(name, arguments_json) -> dict:
@@ -271,6 +282,17 @@ def run_loop(cfg, prompt, *, max_turns=8, system_prompt=DEFAULT_SYSTEM_PROMPT,
                   f"tool_calls={len(tool_calls)}")
 
         if not tool_calls:
+            if not content:
+                reason = out.get("reasoning_content") or ""
+                finish = out.get("finish_reason")
+                detail = ("LLM 未返回最终回答：思考内容占满了生成上限"
+                          if reason and finish == "length"
+                          else "LLM 未返回最终回答")
+                if store is not None:
+                    store.set_session_status(session_id, "error")
+                return {"ok": False, "turns": turn, "messages": transcript,
+                        "answer": None, "error": detail,
+                        "session_id": session_id}
             commit({"role": "assistant", "content": content})
             transcript.append({"role": "assistant", "content": content})
             if on_step is not None and content:

@@ -8,7 +8,7 @@
 ## 一、文档间导航速查
 
 - **SR_CODE 生产管线**（问算法 / 调用契约 / Windows 移植环境）：[docs/sr_code/sr-pipeline-overview.md](sr_code/sr-pipeline-overview.md)（算法全览）、[docs/sr_code/sr-pipeline-interface.md](sr_code/sr-pipeline-interface.md)（调用契约）、[docs/sr_code/sr-windows-porting-pitfalls.md](sr_code/sr-windows-porting-pitfalls.md)（移植踩坑 + 环境总结）、[docs/sr_code/production-scene-naming.md](sr_code/production-scene-naming.md)（生产场景命名规则与目录层级 —— 反推盘阵路径的依据）
-- **交接入口**：[docs/status/current-question.md](status/current-question.md) —— 新窗口先读（平台现状 / 当前路线 / 未收口 / 下一步 / 现值速查）；开新窗口时可直接把 [docs/status/handoff-prompt.md](status/handoff-prompt.md) 整篇粘过去。配套：[docs/status/real-machine-acceptance.md](status/real-machine-acceptance.md)（**真机验收单**，判据与勾选）
+- **调试背景与结论**：[docs/status/debugging-background.md](status/debugging-background.md) —— 当前架构、Slurm 收口、本地执行可靠性、llama.cpp 版本结论与插件化边界`r`n- **交接入口**：[docs/status/current-question.md](status/current-question.md) —— 新窗口先读（平台现状 / 当前路线 / 未收口 / 下一步 / 现值速查）；开新窗口时可直接把 [docs/status/handoff-prompt.md](status/handoff-prompt.md) 整篇粘过去。配套：[docs/status/real-machine-acceptance.md](status/real-machine-acceptance.md)（**真机验收单**，判据与勾选）
 - **新手指南**（有 Web 基础想系统理解前后端与设计取舍）：[docs/knowledge/platform-tutorial.md](knowledge/platform-tutorial.md) —— 读代码前的首选教程
 - **盘阵场景预览生成管线**（改 `/preview` 生成预览、缓存规则、场景行字段、裸 `.tif` 入口前先读）：[docs/knowledge/preview-bake-pipeline.md](knowledge/preview-bake-pipeline.md) —— 端到端链路 + 三张流程图 + 易判错点
 - **IO 管线与模块交互**（要部署/排障、要讲清系统怎么跑起来、改跨模块改动前先读）：[docs/knowledge/io-pipeline/README.md](knowledge/io-pipeline/README.md) —— 部署拓扑 + 四条链路 + 模块交互总表 + 跨层纪律
@@ -58,3 +58,4 @@
 ## 4. 关键实现与设计取舍
 ## 5. 常见问题
 ```
+
