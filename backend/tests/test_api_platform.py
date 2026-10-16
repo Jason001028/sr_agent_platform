@@ -1,7 +1,9 @@
 """阶段5 API 契约测试（api-contract.md §5.3 验收清单）。
 
-Env 在 create_app() 前注入（SR_AGENT_DB / SR_LLM_MOCK / SR_SLURM_FAKE / …），
-TestClient 内存驱动。覆盖：
+Env 在 create_app() 前注入（SR_AGENT_DB / SR_LLM_MOCK / SR_WORK_DIR / …），
+TestClient 内存驱动。执行器换成内存替身（backend/tests/exec_double.py）：
+这里问的是「任务服务拿到一个状态之后做什么」，不是「bash 起没起来」——真跑本机
+执行的链在 test_local_chain.py。覆盖：
   工具 manifest + 直调；chat 新建/历史/SSE 事件序列/并发 409/404；
   queue list/submit/幂等复用/cancel/events 广播；masks 落原图目录 + 白名单。
 """
@@ -25,15 +27,15 @@ from backend.api.app import create_app, _bake_nosr_preview, _eager_bake_tick
 from backend.api.platform import (_Subscriber, _broadcast, _queue_state,
                                   _task_state, chat_send)
 from backend.tests import allowed_roots_env, make_scene_dir
+from backend.tests.exec_double import fake_exec
 from backend.tests.test_preview_jpg import make_strip_tif
 from backend.services import run_sr as svc
-from backend.services import slurm
 from backend.services.run_sr import task_fingerprint
 from backend.api import app as app_mod
 
 _ENVS = ("SR_AGENT_DB", "SR_SCENES_ROOT", "SR_PREVIEWS_ROOT", "SR_LLM_MOCK",
-         "SR_SLURM_FAKE", "SR_SLURM_FAKE_T_MS", "SR_SLURM_WORK_DIR",
-         "SR_QUEUE_POLL_SEC", "SR_SANDBOX_ROOT", "SR_EXECUTOR",
+         "SR_WORK_DIR", "SR_SLURM_WORK_DIR", "SR_TEST_EXEC_STAGE_MS",
+         "SR_QUEUE_POLL_SEC", "SR_EXECUTOR",
          "SR_LOCKED_DIR", "SR_LOCAL_GPU", "SR_BUNDLE_DIR",
          "SR_ALLOWED_ROOTS", "SR_DRIVE_MAP",
          # 产物主动生成的两个开关。用例会按需改它们，不还原就会漏到后面的用例上
@@ -78,7 +80,9 @@ class PlatformBase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self._apps: list = []
         self._saved = {k: os.environ.get(k) for k in _ENVS}
-        slurm._fake_reset()
+        self._exec = fake_exec()                 # 执行器替身，全类共用一份
+        self.exec = self._exec.start()
+        self.addCleanup(self._exec.stop)
         self._set_env()
 
     def _make_app(self):
@@ -93,7 +97,6 @@ class PlatformBase(unittest.TestCase):
             except Exception:  # noqa: BLE001
                 pass
         self._tmp.cleanup()
-        slurm._fake_reset()
         for k, v in self._saved.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -102,7 +105,7 @@ class PlatformBase(unittest.TestCase):
 
     def _set_env(self):
         os.environ["SR_AGENT_DB"] = os.path.join(self._tmp.name, "db.sqlite")
-        os.environ["SR_SLURM_WORK_DIR"] = os.path.join(self._tmp.name, "work")
+        os.environ["SR_WORK_DIR"] = os.path.join(self._tmp.name, "work")
         # Point the bundle at an empty dir: the suffix default reads <Suffix> out
         # of the SR team's config there, so without this the suite would quietly
         # follow whatever SR_BUNDLE_DIR the developer's shell happens to export
@@ -265,13 +268,11 @@ class TestQueue(PlatformBase):
 
     def _set_env(self):
         super()._set_env()
-        os.environ["SR_SLURM_FAKE"] = "1"
-        # 每 stage 的停留时间。**不能太小**：`_poll_state` 每 30ms 采一次样，而
-        # `test_submit_progresses_to_completed` 断言它**亲眼看到过** PENDING 与
-        # RUNNING —— stage 若短到两次采样之间就整个走完，采样会直接从 SUBMITTING
-        # 跳到 COMPLETED，断言随机失败。抬到 500ms 给足采样裕度；本类
-        # 因此慢约 1s，换来的是不再随机红。
-        os.environ["SR_SLURM_FAKE_T_MS"] = "500"
+        # 替身每格停留 500ms（exec_double.DEFAULT_STAGE_MS）。**不能太小**：
+        # `_poll_state` 每 30ms 采一次样，而 `test_submit_progresses_to_completed`
+        # 断言它**亲眼看到过** PENDING 与 RUNNING —— 一格若短到两次采样之间就整个
+        # 走完，采样会直接从 SUBMITTING 跳到 COMPLETED，断言随机失败。500ms 给足
+        # 采样裕度；本类因此慢约 1s，换来的是不再随机红。
         os.environ["SR_QUEUE_POLL_SEC"] = "60"       # 关闭 lifespan 轮询干扰
         # 真实场景目录 + 目录里已有的掩码：POST /api/queue 要求
         # <lq_path>/<目录名>_mask.tif 在场（plan §4.3），缺掩码不放过；另外
@@ -338,7 +339,7 @@ class TestQueue(PlatformBase):
         self.assertEqual(len(c.get("/api/queue").json()["tasks"]), 1)
 
     def test_submit_says_the_run_writes_in_place(self):
-        # 无沙箱 = SR 就地写场景目录：输出按管线命名为 <输入名>_<suffix>.tif，输入 tif
+        # SR 就地写场景目录：输出按管线命名为 <输入名>_<suffix>.tif，输入 tif
         # 不改名也不删除（Suffix 恒非空），只有同名旧输出会被改名 *_NOSR.tif。提交响应
         # 必须自己说清楚，别让操作者从别处推断（工作单 §4.2 最后一条）。
         body = self._submit(self.client()).json()
@@ -347,13 +348,6 @@ class TestQueue(PlatformBase):
         self.assertIn("<输入名>_t.tif", body["notice"])   # 输出名按管线拼接
         self.assertIn("不改名也不删除", body["notice"])     # 输入不动
         self.assertIn("_NOSR.tif", body["notice"])        # 同名旧输出的去向
-
-    def test_no_in_place_notice_when_sandboxed(self):
-        os.environ["SR_SANDBOX_ROOT"] = "/DiskArray/tmp/sbx"
-        self.addCleanup(os.environ.pop, "SR_SANDBOX_ROOT", None)
-        body = self._submit(self.client()).json()
-        self.assertNotIn("in_place", body)
-        self.assertNotIn("notice", body)
 
     def test_list_queue_shows_params_subset(self):
         c = self.client()
@@ -367,31 +361,16 @@ class TestQueue(PlatformBase):
         self.assertEqual(t["params"]["suffix"], "t")
         self.assertIn("config_xml", t)
 
-    def test_run_dataroot_is_the_sandbox_copy_when_configured(self):
-        # the product lands in the copy, not in the path the user typed — the
-        # row has to say where the job actually ran.
-        os.environ["SR_SANDBOX_ROOT"] = "/DiskArray/tmp/sbx"
-        self.addCleanup(os.environ.pop, "SR_SANDBOX_ROOT", None)
-        c = self.client()
-        self._submit(c)
-        t = c.get("/api/queue").json()["tasks"][0]
-        self.assertEqual(t["params"]["lq_path"], self.LQ_POSIX)      # what was asked for
-        self.assertTrue(t["run_dataroot"].startswith("/DiskArray/tmp/sbx/"))
-        # only the basename survives the copy — the SC step derives its input
-        # name (`<目录名>.tif`) from the directory's own name. (The sandbox path
-        # is built POSIX-style: it is a path on the array server, not on this
-        # Windows box the test happens to run on.)
-        self.assertEqual(t["run_dataroot"].replace("\\", "/").split("/")[-1],
-                         self.LQ.replace("\\", "/").split("/")[-1])
-
-    def test_run_dataroot_defaults_to_lq_path(self):
+    def test_run_dataroot_is_the_lq_path(self):
+        # 作业在场景目录原地跑，所以这一行报的就是用户填的那个路径 —— 界面上
+        # 「产物落在哪」不能与提交时填的目录出现第二个答案。
         c = self.client()
         self._submit(c)
         t = c.get("/api/queue").json()["tasks"][0]
         self.assertEqual(t["run_dataroot"], self.LQ_POSIX)
 
     def test_cancel_pending_job(self):
-        os.environ["SR_SLURM_FAKE_T_MS"] = "600000"    # 停在 PENDING/RUNNING
+        self.exec.stage_sec = 600          # 停在 PENDING，等被取消
         c = self.client()
         r = self._submit(c)
         tid = r.json()["task_id"]
@@ -437,7 +416,7 @@ class TestQueue(PlatformBase):
         self.assertIn("ps -ef", r.json()["detail"])
 
     def test_delete_ori_rejected_400(self):
-        # 原型期禁用：SR 会删原图/就地覆盖且本机模式无沙箱，误开不可恢复。
+        # 原型期禁用：SR 就地跑，会删原图/就地覆盖，误开不可恢复。
         r = self._submit(self.client(), delete_ori=True)
         self.assertEqual(r.status_code, 400)
         self.assertIn("delete_ori", r.json()["detail"])
@@ -450,12 +429,14 @@ class TestQueue(PlatformBase):
             self._submit(c, lq_path="<fake>/x.tif").status_code, 400)
         self.assertEqual(self._submit(c, lq_path="").status_code, 400)
 
-    def test_slurm_unavailable_422(self):
-        os.environ.pop("SR_SLURM_FAKE", None)         # 无 sbatch + 未开 fake
-        c = self.client()
-        r = self._submit(c)
+    def test_no_usable_bash_422(self):
+        # 这台机器上没有可用的 bash（Windows 上 System32\bash.exe 是 WSL 启动器，
+        # 不算）：什么都启动不了，所以拦在写任务行之前。
+        self.exec.bash_available = False
+        r = self._submit(self.client())
         self.assertEqual(r.status_code, 422)
-        self.assertIn("slurm not available", r.json()["detail"])
+        self.assertIn("本机执行不可用", r.json()["detail"])
+        self.assertIn("bash", r.json()["detail"])
 
     # ---- plan §4.3: locked directory / derived mask / non-empty suffix ------
 
@@ -664,7 +645,7 @@ class TestQueue(PlatformBase):
         只跑了 200 多秒。这里把这一条钉死：行确实旧 30 小时，耗时仍然只是这一次的。
         """
         app, c = self.app_client()
-        os.environ["SR_SLURM_FAKE_T_MS"] = "600000"     # 停在 PENDING，等被取消
+        self.exec.stage_sec = 600                       # 停在 PENDING，等被取消
         tid = self._submit(c).json()["task_id"]
         c.post(f"/api/queue/{tid}/cancel")
 
@@ -676,7 +657,7 @@ class TestQueue(PlatformBase):
                    (old, old, tid))
         db.commit()
 
-        os.environ["SR_SLURM_FAKE_T_MS"] = "500"
+        self.exec.stage_sec = 0.5
         r2 = self._submit(c)                            # 同参数 → 复用同一行、真重跑
         self.assertEqual(r2.json()["task_id"], tid, "幂等层复用的是同一行")
         self.assertEqual(self._poll_state(c, tid)[-1], "COMPLETED")
@@ -980,53 +961,6 @@ class TestProductPreviewBake(PlatformBase):
         state_name, note = self._row_state(app, tid)
         self.assertEqual(state_name, "skipped")
         self.assertIn("no_suffix", note)
-
-    def test_sandboxed_run_is_skipped(self):
-        """跑在沙箱私有副本上时产物落在副本里，盘阵那份是**上一次**的 —— 生成了用户
-        也看不到，还往临时盘撒文件。"""
-        app, _ = self.app_client()
-        os.environ["SR_EXECUTOR"] = "slurm"
-        os.environ["SR_SANDBOX_ROOT"] = "/DiskArray/tmp/sbx"
-        tid = self._row(app)
-        self._product()
-
-        _eager_bake_tick(app.state)
-
-        state_name, note = self._row_state(app, tid)
-        self.assertEqual(state_name, "skipped")
-        self.assertIn("sandbox", note)
-
-    def test_sandbox_root_with_local_executor_still_bakes(self):
-        """**真机当前就是这条路线**：配了 `SR_SANDBOX_ROOT`，但 `SR_EXECUTOR=local`。
-
-        `SR_EXECUTOR=local` 的意义就是「就地跑、产物落在盘阵里」（run_sr
-        .sandbox_scene_paths 对 local 恒返回 None），所以这里必须照生成。判据若写成
-        「直接看 SR_SANDBOX_ROOT 在不在」，真机上会**永远不生成**，而且是静默的。
-        """
-        app, _ = self.app_client()
-        os.environ["SR_EXECUTOR"] = "local"
-        os.environ["SR_SANDBOX_ROOT"] = "/DiskArray/tmp/sbx"
-        tid = self._row(app)
-        product = self._product()
-
-        _eager_bake_tick(app.state)
-
-        self.assertEqual(self._row_state(app, tid)[0], "done")
-        self.assertTrue(self._jpg(product).is_file())
-
-    def test_malformed_sandbox_root_is_skipped_not_guessed(self):
-        """`_run_dataroot` 回 None = 「产物落在哪不可知」。宁可如实跳过也不猜。"""
-        app, _ = self.app_client()
-        os.environ["SR_EXECUTOR"] = "slurm"
-        os.environ["SR_SANDBOX_ROOT"] = "relative/not/absolute"
-        tid = self._row(app)
-        self._product()
-
-        _eager_bake_tick(app.state)
-
-        state_name, note = self._row_state(app, tid)
-        self.assertEqual(state_name, "skipped")
-        self.assertIn("sandbox", note)
 
     def test_unwritable_directory_is_skipped_not_fallen_back(self):
         """目录不可写就如实跳过，**不退回 SR_TEMP_PREVIEWS_ROOT**：那份按天清，而主动生成

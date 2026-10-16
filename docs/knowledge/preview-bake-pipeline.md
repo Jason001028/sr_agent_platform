@@ -432,8 +432,8 @@ NULL ──claim──> running ──> done
                      └──> failed （note = "failed: <异常原文>"）
 ```
 
-slug 六个：`no_suffix`（任务行里拼不出产物名）、`sandbox`（跑在沙箱私有副本上，或沙箱根
-配置不可用）、`product_missing`（产物候选名逐个 `is_file()` 都不在 —— 云限额跳过那种
+slug 五个：`no_suffix`（任务行里拼不出产物名）、
+`product_missing`（产物候选名逐个 `is_file()` 都不在 —— 云限额跳过那种
 「合法 COMPLETED 但没产物」走的也是这条，所以 note **必须列出试过的候选名**）、
 `unwritable`（产物目录对服务账号不可写）、`source_changed`（像素已读出、落盘前复核发现
 产物被改写 → 一个字节都不写）、`failed`。
@@ -458,12 +458,8 @@ RUNNING→COMPLETED 谁把 `changed` 拿走，在那里挂入队钩子必然偶�
 晚几分钟生成好，而它们本来就是等用户打开的。主动生成**不占任何 semaphore**（不与惰性路径共享锁）：
 同档位时它的 `cache_hit` 通常命中用户刚生成的那份，不同档位就两份都留（§4.8 那条 div 抖动）。
 
-四个容易写错的地方：
+三个容易写错的地方：
 
-- **沙箱判据必须是 `_run_dataroot(task)`，不能直接比 `SR_SANDBOX_ROOT`**：前者内部走
-  `run_sr.sandbox_scene_paths`，那条在 `SR_EXECUTOR=local` 时恒返回 `None` —— 真机当前正是
-  「配了 `SR_SANDBOX_ROOT` + local executor」这条路线，直接比 env 会把本可以生成的产物判成
-  「沙箱内」而**永不生成**。有专门的回归钉子（`SR_SANDBOX_ROOT` 在 + `SR_EXECUTOR=local` → 照生成）。
 - **只生成 COMPLETED，FAILED 绝不生成**：`writeTiff` 先改名再写，失败的运行会在产物路径上留下
   半截文件，生成的是坏图。这条同时进候选查询与 `claim` 的 `WHERE`。
 - **落盘前复核 `(mtime, size)`**：同一 suffix 重跑会覆盖同一个产物路径，不复核就可能把一张
@@ -565,10 +561,8 @@ RUNNING→COMPLETED 谁把 `changed` 拿走，在那里挂入队钩子必然偶�
 | 档位 | **全局**那一档（`SR_PRODUCT_PREVIEW_DIV`，与产物同一次 tick 读的同一个值；`0` = 关） |
 | 命中判定 | 与惰性路径/产物那份**同一个** `cache_hit`：盘上那份已是当前档位就不重读 |
 
-两条边界，都是有意的：
+一条边界，是有意的：
 
-- **不看沙箱**：这份栅格是盘阵上的既有文件，与这次跑在盘阵还是私有副本上无关 —— 沙箱跑时它
-  照样在、照样该生成。产物那一份必须判沙箱，因为它才刚被写出来。
 - **不动行的结论**：`preview_state` / `preview_note` 那一列描述的是**产物**预览，一个字段说不出
   两份文件的结局。这一份只写盘 + 往 stdout 打一行 `[nosr-preview] task=<id> <状态>`，
   状态四种（`baked:` / `cached:` / `skipped:` / `failed:`）。**`skipped:` 要报出试过哪些名字** ——
@@ -703,8 +697,7 @@ RUNNING→COMPLETED 谁把 `changed` 拿走，在那里挂入队钩子必然偶�
 盘阵若是单块 HDD，磁头竞争可能让更高并发反而更慢，因此取了保守值。这个数字同时受「盘阵实际存储形态」影响，属于需要在真机上确认的项。
 
 **Q：作业跑完了，为什么产物预览还是没生成（`preview_state` 是 `skipped`）？**
-照 `preview_note` 的 slug 对号入座，见 §4.9：`sandbox` = 这次跑在沙箱私有副本上，盘阵里根本没有
-产物（切回 slurm 提交时这是**正常结局**，不是故障）；`product_missing` = note 里列的那几个候选名
+照 `preview_note` 的 slug 对号入座，见 §4.9：`product_missing` = note 里列的那几个候选名
 一个都不在 —— 先分辨是「名字猜错了」还是「作业本身没产出」（云限额跳过是合法 COMPLETED，
 本来就不会有产物）；`unwritable` = 产物目录对服务账号不可写，兜底留给打开时那条
 `X-SR-Preview-Fallback` 路径；`source_changed` = 产物在生成预览途中被改写，本次一个字节都没写。

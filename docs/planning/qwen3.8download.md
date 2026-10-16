@@ -74,7 +74,7 @@
 ## 下载与带到公司决策
 
 > 目标环境：4× RTX 3090（24GB/卡）内网 CentOS7，固定 1 张卡给 Agent LLM（llama.cpp llama-server），
-> 剩余给 Slurm/SR。Qwen3.8 为 tied embeddings → llama.cpp 必须把 embedding 也载入显存，
+> 剩余给 SR（本机执行占用）。Qwen3.8 为 tied embeddings → llama.cpp 必须把 embedding 也载入显存，
 > **文件体积 ≈ 实际显存占用**，选档别贴 24GB 上限太近。
 
 | 档 | 文件 | 体积 | 理由 |

@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""In-job contract verifier for the Slurm SR pipeline (P2 deliverable).
+"""In-job contract verifier for the SR pipeline.
 
-Runs *inside the batch job*, right after `code_0817_prod.py -f <config.xml>`,
-and turns "did this job actually super-resolve anything?" into a single exit
-code the platform can read back from disk:
+Runs *inside the run*, right after `code_0817_prod.py -f <config.xml>`, and
+turns "did this run actually super-resolve anything?" into a single exit code
+the platform can read back from disk:
 
     exit 0   contract satisfied
     exit 90  contract not satisfied (every failing condition on stderr)
@@ -12,17 +12,16 @@ code the platform can read back from disk:
 Why this exists
 ---------------
 `code_0817_prod.py` has five reachable `exit(0)` paths that all fire *before*
-the SRLOG is created (docs/status/slurm-integration.md 2.3, "闭环毒药"). Slurm
-then reports the step as COMPLETED, the platform's idempotency layer caches
-that as a permanent success, and the scene silently never gets super-resolved.
-The contract (docs/sr_code/sr-pipeline-interface.md 2) is therefore three
-conditions, checked here rather than taken on trust:
+the SRLOG is created ("闭环毒药", docs/sr_code/sr-pipeline-interface.md 2.3). A
+launcher that trusts the exit code then records that as a permanent success,
+and the scene silently never gets super-resolved. The contract is therefore
+three conditions, checked here rather than taken on trust:
 
     1. the SR process exited 0                    (--sr-exit-code)
     2. the SRLOG's last non-empty line says so    ("Run finished.")
     3. the output tif exists and is non-empty
 
-A `Run skipped:` last line is the *legal* policy skip introduced by the deploy
+A `Run skipped:` last line is the *legal* policy skip introduced by the platform
 variant's E9 edit (cloud cover over the limit): condition 1 and 2 hold, and no
 output tif is expected, so the contract is satisfied without condition 3.
 
@@ -32,12 +31,15 @@ The verdict is also written to
 
     <DatarootLQ>/Debug/_SREXIT_<job_id>.txt        (EXIT_FILE_FMT)
 
-next to the SRLOG. That file is how `backend/services/slurm.py` resolves a
-job's *terminal* state: the array server has `AccountingStorageType=none`, so
-`sacct` is permanently unusable and `squeue` only knows about live jobs. The
-name/format is a cross-language contract -- backend/services/run_sr.py derives
-the same path from config.xml, and backend/tests/test_sr_verify.py asserts the
-two agree. `job_id` comes from `--job-id`, else `$SLURM_JOB_ID`.
+next to the SRLOG. That file is how the platform resolves a run's *terminal*
+state (backend/services/sr_result.py): it is the run's own recorded outcome,
+whereas the child's exit code says nothing about whether the run did its job.
+The name/format is a cross-language contract -- backend/services/run_sr.py
+derives the same path from config.xml, and backend/tests/test_sr_verify.py
+asserts the two agree. `job_id` is the run number, passed explicitly as
+`--job-id`: the same config.xml is reused by every retry of a task, so a run
+number read from anywhere else could not be trusted to name the right run (and
+on a host with no scheduler there is no environment to read it from at all).
 
 Landing the product on the body name
 ------------------------------------
@@ -406,11 +408,11 @@ def write_exit_code_file(v, job_id, sr_exit_code):
         if debug_dir and not os.path.isdir(debug_dir):
             os.makedirs(debug_dir)
         # encoding pinned on purpose: `reason` carries Chinese text, and this
-        # runs under the job env, where Slurm's --export=NONE has dropped LANG —
-        # py3.6 then defaults to ASCII and a locale-encoded write would raise
+        # runs in the SR env (py3.6), where LANG may be unset — py3.6 then
+        # defaults to ASCII and a locale-encoded write would raise
         # UnicodeEncodeError, which the except below swallows into "no file".
         # The platform reads that as UNKNOWN instead of FAILED, which is exactly
-        # the silent failure this file exists to rule out.
+        # the failure this file exists to rule out.
         with open(path, "w", encoding="utf-8") as f:
             f.write(body)
     except Exception as exc:
@@ -508,26 +510,17 @@ def land_product(v, body, backup, mask_1x=None):
     return "landed"
 
 
-def _env_job_id():
-    raw = os.environ.get("SLURM_JOB_ID") or os.environ.get("SLURM_JOBID")
-    if not raw:
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        return raw
-
-
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="verify_sr_run.py",
-        description="Check the SR job contract and record the verdict on disk.")
+        description="Check the SR run contract and record the verdict on disk.")
     ap.add_argument("--config", required=True,
                     help="the same config.xml the SR script was given (-f)")
     ap.add_argument("--sr-exit-code", type=int, default=None,
                     help="exit code of code_0817_prod.py (the $? right after it)")
-    ap.add_argument("--job-id", default=None,
-                    help="Slurm job id (default: $SLURM_JOB_ID)")
+    ap.add_argument("--job-id", required=True,
+                    help="run number this verdict belongs to; names the verdict "
+                         "file (default: none — it is always passed in)")
     ap.add_argument("--quiet", action="store_true",
                     help="only print the verdict line")
     # Landing (module docstring "Landing the product on the body name").
@@ -541,7 +534,7 @@ def main(argv=None):
                     help="the input-sized mask sr_prep_scene.py wrote")
     args = ap.parse_args(argv)
 
-    job_id = args.job_id if args.job_id is not None else _env_job_id()
+    job_id = args.job_id
     v = check_contract(args.config, args.sr_exit_code, job_id=job_id)
     # Before the verdict is written: a landing failure has to reach the
     # platform through this file (see the module docstring).

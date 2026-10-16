@@ -1,7 +1,7 @@
 # Python/并发 面试八股（interview · 高频精简版）
 
 > 定位：跳槽高频 Python 语言 + 并发/异步自测与背诵。★=高频。每题「答（要点）+ 追问」。
-> 仓库真例标注 🗂：答完八股，能用 [backend/services/store.py](backend/services/store.py)、[backend/services/slurm.py](backend/services/slurm.py) 等真实文件讲成"项目实践"。
+> 仓库真例标注 🗂：答完八股，能用 [backend/services/store.py](backend/services/store.py)、[backend/services/local_exec.py](backend/services/local_exec.py) 等真实文件讲成"项目实践"。
 
 ---
 
@@ -266,7 +266,7 @@
     - 包 = 目录 + `__init__.py`（3.3+ 命名空间包可省，显式加才能控导出、放公共面）。`__init__.py` 做**重导出**（`from .store import Store`，让 `from pkg import X` 直通）、设 `__all__` 约束 `from pkg import *`。
     - **绝对导入**（`import pkg.mod`）最稳、可整目录搬动，默认推荐；包内互引可用**相对导入**（`.` 本包、`..` 父包），但**脚本作为 `__main__` 直接运行时相对导入会挂**（顶层查找只认 `sys.path`）。
     - **循环导入**解法：import 下移进函数体（延迟到调用时）；类型注解处用 `from __future__ import annotations` + `if TYPE_CHECKING:` 只在静态期导入。
-    - 🗂 本仓库分层：`services/`（store/slurm/mask…）、`tools/`、`api/` 各成包，用 `__init__.py` 收口公共面，REST/CLI/Agent 复用同一批 service。
+    - 🗂 本仓库分层：`services/`（store/local_exec/mask…）、`tools/`、`api/` 各成包，用 `__init__.py` 收口公共面，REST/CLI/Agent 复用同一批 service。
 
     **追问：** `if __name__ == "__main__":` 干什么？→ 同一文件既被 import 又可直接运行的分界，入口放它下面；**Windows spawn/多进程会重 import 主模块**（Q13），顶层裸代码会重复执行。`__all__` 只影响 `from x import *`，不拦显式导入。
 
@@ -276,9 +276,9 @@
     **A：**
     - unittest 是内置 xUnit（`setUp/tearDown`、`assertEqual`/`assertRaises`）；pytest 更流行：裸 `assert`、`@pytest.mark.parametrize`、**fixture 依赖注入**（`tmp_path` 临时目录、`monkeypatch` 现场替换并自动还原、`capsys` 抓输出）、`conftest.py` 共享目录级 fixture。
     - **替身原则**：只替**外部副作用边界**——网络/子进程/时钟/随机/磁盘写；别 mock 被测逻辑本身，否则测试永远绿、测了个寂寞。
-    - **monkeypatch 背后的思想是"给外部副作用留注入缝"**：把副作用做成可注入参数/依赖，测试传 fake 实现，比全局 monkeypatch 更确定、可离机（本仓库 `slurm.py` 的 `run_cmd=` 即此缝，见 Q29）。
+    - **monkeypatch 背后的思想是"给外部副作用留注入缝"**：把副作用做成可注入参数/依赖，测试传 fake 实现，比全局 monkeypatch 更确定、可离机（本仓库 `local_exec` 的入口即此缝，见 Q29）。
 
-    **追问：** mock 和 fake 区别？→ mock = 记录调用并返回预设的替身（断言"被调了没/带什么参"）；fake = 有真实行为的轻量实现（内存假存储/假调度器）。想断言抛异常？→ `with pytest.raises(ValueError)`。为何注入优于到处 monkeypatch？→ 缝在签名里可见、不依赖内部实现、改名重构不破测。
+    **追问：** mock 和 fake 区别？→ mock = 记录调用并返回预设的替身（断言"被调了没/带什么参"）；fake = 有真实行为的轻量实现（内存假存储/假执行器）。想断言抛异常？→ `with pytest.raises(ValueError)`。为何注入优于到处 monkeypatch？→ 缝在签名里可见、不依赖内部实现、改名重构不破测。
 
 28. **Q：Python 3.10/3.11/3.12 各有什么要点？（match、ExceptionGroup、TaskGroup…）（★）**
     **A：**
@@ -293,21 +293,21 @@
 
 > 把上面的八股落回真实代码，在"追问/讲项目"环节当钩子。路径相对仓库根目录；答时按"设计如此"讲。
 
-29. **Q：为什么 run_cmd/sbatch 执行器能注入"假命令"做离机测试？（★ / 🗂）**
+29. **Q：为什么本机执行器能注入"假实现"做离机测试？（★ / 🗂）**
     **A：**
-    - 这是**依赖注入留缝**的经典设计（呼应 Q27）：把"执行外部命令"这一副作用做成**可注入的函数参数**，测试传假实现即可离机全测。
-    - [backend/services/slurm.py](backend/services/slurm.py) 里 `sbatch_submit/squeue_status/sacct_status/job_status/cancel` 都带末参 `run_cmd: Callable = _run`；默认 `_run` 调 `subprocess.run` 真执行，正常路径不受影响。
-    - 测试传**假 run_cmd**：收命令列表、返回预置 stdout（如 `"Submitted batch job 123"`）→ 没 Slurm 的开发机也跑通 submit→status→cancel 全链路、断言解析逻辑。
-    - 离机性还有更上一层：`SR_SLURM_FAKE=1` 换内存假调度器、`SR_SCENES_ROOT` 未设时 scene_search 自动回退 fake 场景——同一"可替换后端"思路。
+    - 这是**依赖注入留缝**的经典设计（呼应 Q27）：把"起外部进程"这一副作用收成一小组**可替换的模块级函数**，测试把它们换成 fake 实现即可离机全测。
+    - [backend/services/local_exec.py](backend/services/local_exec.py) 的六个入口（`available/reserve_job_id/submit/status/cancel/release_unknown`）都是普通模块函数；默认实现起真 bash 子进程跑运行脚本，正常路径不受影响。
+    - 测试换成**内存假执行器**（[backend/tests/exec_double.py](backend/tests/exec_double.py)）：`submit` 立即发 job_id，`status` 按时钟推进 `PENDING → RUNNING → COMPLETED` → 没 GPU 的开发机也跑通 submit→status→cancel 全链路、断言状态机与 SSE 广播。
+    - 离机性还有更上一层：`SR_SCENES_ROOT` 未设时 scene_search 自动回退 fake 场景、`SR_LLM_MOCK=1` 换固定脚本假 LLM——同一"可替换后端"思路。
 
     ```python
-    def fake_run(cmd, timeout=30):
-        return SimpleNamespace(returncode=0,
-                               stdout="Submitted batch job 123\n", stderr="")
-    assert slurm.sbatch_submit("s.sh", run_cmd=fake_run) == 123
+    exec_fake = FakeExecutor(stage_sec=0.1)     # 时钟推进 PENDING → RUNNING → COMPLETED
+    with mock.patch.object(local_exec, "submit", exec_fake.submit):
+        job_id = submit_run_sr(...)             # 起了"作业"，没真跑 bash
+    assert exec_fake.submitted(job_id)["script"].endswith(".sh")
     ```
 
-    **追问：** 注入 vs monkeypatch 谁更优？→ 注入的缝在**函数签名里可见**：契约自明、测试传参、无全局状态、跨文件复用同一 fake；monkeypatch 快但"被测代码内部藏着依赖"的耦合高。规律：函数体内硬写 subprocess/open/网络又要可测 → 加一个可注入执行器参数。
+    **追问：** 注入 vs monkeypatch 谁更优？→ 注入的缝在**函数签名/模块入口里可见**：契约自明、测试传参、无全局状态、跨文件复用同一 fake；monkeypatch 快但"被测代码内部藏着依赖"的耦合高。规律：函数体内硬写 subprocess/open/网络又要可测 → 把这一层收成可替换的入口。
 
 30. **Q：为什么同步阻塞的 run_loop 要丢 to_thread、再经 asyncio.Queue 转 SSE？（★ / 🗂）**
     **A：**
@@ -322,6 +322,6 @@
     **A：**
     - **懒创建**：[backend/services/store.py](backend/services/store.py) 的 `Store.__init__` 只记路径、**不碰磁盘**；真正首次读写才走 `_db()`：`sqlite3.connect` + `CREATE TABLE IF NOT EXISTS`。收益：构造 Store **零副作用、近乎零成本**——工具包装器想建就建（`default_store()` 很便宜），不会"new 一个就偷偷建库"；测试/只读路径不写就不产生文件。
     - **每次写提交**：每条写（`create_session/append_message/put_sr_task` 等）末尾都 `db.commit()`——**一次写 = 一个 autocommit 事务**，落盘成功才返回。
-    - 与 agent 的 **checkpoint 策略**咬合（store 注释引 agent-orchestration-research §6.3）：**外部副作用前先落 checkpoint**——`run_sr` 对 sbatch 下手前先把"提交意图"写进 `sr_tasks`（job_id=None），sbatch 成功后再补 job_id；进程崩溃重放可从库找到 intent，去 squeue/sacct **对账**而非重复提交（幂等表/防盲重试）。
+    - 与 agent 的 **checkpoint 策略**咬合（store 注释引 agent-orchestration-research §6.3）：**外部副作用前先落 checkpoint**——`run_sr` 起子进程前先把"提交意图"写进 `sr_tasks`（job_id=None），起进程成功后再补 job_id；进程崩溃重放可从库找到 intent，读运行记录/退出码文件**对账**而非重复提交（幂等表/防盲重试）。
 
-    **追问：** 懒连接复用单连接有并发问题吗？→ 进程内单线程/串行写、连接同一实例、写各自 commit 不交叠；将来多线程/多进程要 `check_same_thread=False` + 写锁或每次短连接。为什么 messages 每条都 commit 不攒批？→ commit 边界 = "**检查点已持久**"的承诺；攒批吞吐高但丢了"上一步 durable 再走下一步"的恢复语义。一句话：**外部副作用（sbatch/文件）之前，状态先落库**。
+    **追问：** 懒连接复用单连接有并发问题吗？→ 进程内单线程/串行写、连接同一实例、写各自 commit 不交叠；将来多线程/多进程要 `check_same_thread=False` + 写锁或每次短连接。为什么 messages 每条都 commit 不攒批？→ commit 边界 = "**检查点已持久**"的承诺；攒批吞吐高但丢了"上一步 durable 再走下一步"的恢复语义。一句话：**外部副作用（起子进程/文件）之前，状态先落库**。

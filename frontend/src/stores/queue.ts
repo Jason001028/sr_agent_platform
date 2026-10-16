@@ -93,7 +93,12 @@ export function derivedMaskPath(lqPath: string): string {
 }
 
 /** 队列表单 → POST /api/queue body（数值夹取；mask_path 恒 null 交后端推导）。
-    后缀留空即由后端按 SR 配置文件里的 `<Suffix>` 决定，前端不替它决定。 */
+    后缀留空即由后端按 SR 配置文件里的 `<Suffix>` 决定，前端不替它决定。
+
+    `gpu` 照发（表单里已无「GPU 数」输入，恒取 defaultForm 的 0）：它是提交参数的
+    一部分、进幂等指纹，去掉它会让同一目录同一组参数算成另一个指纹，已提交过的任务
+    会被当成新任务重跑一遍。卡由服务端选（`SR_LOCAL_GPU` → 子进程的
+    `CUDA_VISIBLE_DEVICES`），这个字段对本机执行只是随参数落库。 */
 export function formToSubmit(f: QueueForm): QueueSubmitBody {
   const body: QueueSubmitBody = {
     lq_path: f.lq_path.trim(),

@@ -3,8 +3,8 @@
 > 日期：2026-09-23 · 状态：草稿（对照当日 `backend/api/platform.py`、`services/run_sr.py`、`services/local_exec.py`、`SR_code/`）
 >
 > **目标读者**：要改提交链路、终态判定、队列状态的人；需要向别人解释「这作业到底成没成」的人。
-> **一句话摘要**：掩码先落到盘阵，提交时后端生成 config.xml 与一份批脚本，
-> 用 SR 生产解释器起进程；作业自己写一个退出码文件，后端读它定终态——**不看调度器账务**。
+> **一句话摘要**：掩码先落到盘阵，提交时后端生成 config.xml 与一份运行脚本，
+> 用 SR 生产解释器在本机起进程；作业自己写一个退出码文件，后端读它定终态。
 >
 > **算法侧不自研**：超分算法调用 SR 生产脚本，平台只负责参数、路径、执行与状态。
 > 算法与调用契约见 [docs/sr_code/](../../sr_code/)。
@@ -19,14 +19,11 @@ flowchart TD
   BM --> MF["盘阵：输入影像名_mask.tif<br/>加 _mask.txt 质心"]
   MF --> Q["POST /api/queue"]
   Q --> NORM["参数归一 + 任务指纹"]
-  NORM --> GEN["生成 config.xml 与批脚本"]
-  GEN --> EXEC{"SR_EXECUTOR"}
-  EXEC -->|"local"| LOC["本机起子进程<br/>conda py3.6"]
-  EXEC -->|"slurm"| SLU["sbatch 投递"]
-  LOC --> JOB["SR 作业"]
-  SLU --> JOB
+  NORM --> GEN["生成 config.xml 与运行脚本"]
+  GEN --> EXEC["本机起子进程<br/>conda py3.6"]
+  EXEC --> JOB["SR 作业"]
   JOB --> PROD["盘阵：产物 tif 与 Debug 日志"]
-  JOB --> EXF["盘阵：Debug/_SREXIT_jobid.txt"]
+  JOB --> EXF["盘阵：Debug/_SREXIT_<job_id>.txt"]
   EXF --> POLL["后台轮询读终态"]
   POLL --> SQL["SQLite：sr_tasks.status"]
   POLL --> SSE["SSE job_update"]
@@ -79,7 +76,7 @@ POST /api/queue  { lq_path, mask_path?, sr_scale?, suffix?, gpu?, cloud_limit?, 
 stateDiagram-v2
   [*] --> 已入库: 记录提交意图，job_id 为空
   已入库 --> PENDING: 拿到 job_id
-  PENDING --> RUNNING: 调度器报运行中
+  PENDING --> RUNNING: 子进程已起、运行记录里记着它
   RUNNING --> COMPLETED: 退出码文件判成功
   RUNNING --> FAILED: 退出码文件判契约不满足
   PENDING --> FAILED: 同上
@@ -89,7 +86,7 @@ stateDiagram-v2
   FAILED --> [*]
 ```
 
-提交顺序是**先记意图再记 job_id**：中途崩溃重放时，靠调度器活跃状态或退出码文件
+提交顺序是**先记意图再记 job_id**：中途崩溃重放时，靠运行记录或退出码文件
 去解析，而不是盲目再投一次。中断遗留（有行、无 job_id）的行重交时返回 409。
 
 ---
@@ -98,29 +95,23 @@ stateDiagram-v2
 
 | 文件 | 位置 | 内容 |
 |---|---|---|
-| `run_sr_<后缀>_<指纹前 12 位>.xml` | `SR_SLURM_WORK_DIR` | config.xml：`DatarootLQ` / `SRScale` / `Suffix` / `MaskPath` / `CloudLimit` / `GridAlign` |
-| 同名 `.sh` | 同上 | 批脚本：`#SBATCH` 指令 + 审计段 + 跑 SR 脚本 + 跑校验器 |
+| `run_sr_<后缀>_<指纹前 12 位>_<运行编号>.xml` | `SR_WORK_DIR` | config.xml：`DatarootLQ` / `SRScale` / `Suffix` / `MaskPath` / `CloudLimit` / `GridAlign` |
+| 同名 `.sh` | 同上 | 运行脚本：审计段 + 跑 SR 脚本 + 跑校验器 |
 
-批脚本的三段：
+运行脚本的三段：
 
 ```mermaid
 flowchart LR
-  A["SBATCH 指令段<br/>分区 时间 CPU GRES"] --> B["审计段<br/>回显作业号 可见 GPU 主机名 解释器名"]
-  B --> C["cd 到 SR 生产包目录"]
-  C --> D["解释器 + SR 入口脚本 -f config.xml"]
-  D --> E["契约校验器 --config ... --sr-exit-code"]
+  A["审计段<br/>回显作业号 可见 GPU 主机名 解释器名"] --> B["cd 到 SR 生产包目录"]
+  B --> C["解释器 + SR 入口脚本 -f config.xml"]
+  C --> D["契约校验器 --config ... --sr-exit-code"]
 ```
 
-四条设计约束：
+两条设计约束：
 
-- **`--export=NONE`**：批脚本不继承提交进程的环境。因此 `SR_SR_SCRIPT` 与
-  `SR_VERIFY_SCRIPT` 在**生成时**就解析并写死进脚本文本——改这两个值必须重启服务。
-- **不写 `CUDA_VISIBLE_DEVICES`**：选卡交给调度器的 `--gres`。本机直跑路线没有调度器，
-  由 `SR_LOCAL_GPU` 透传。
+- **不写 `CUDA_VISIBLE_DEVICES`**：选卡由部署决定（`SR_LOCAL_GPU`），`local_exec`
+  只把它设进子进程**环境**，脚本里不出现任何赋值。
 - **省略 `set -e`**：要让校验器有机会在 SR 脚本失败后仍然跑起来并写下判词。
-- **沙箱段每次重新复制**，不做「已存在就跳过」。作业对工作目录不是只读的，
-  复用副本会让上一次的产物混进来。**本机直跑路线必须不配沙箱**，
-  它会把产物指到副本，违背「输出与原图同目录」。
 
 ---
 
@@ -128,24 +119,21 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-  SUB["submit_run_sr"] --> AV{"执行器可用"}
-  AV -->|"local"| R1["取 job_id 序列号<br/>写 .local_job_seq"]
-  AV -->|"slurm"| R2["sbatch"]
-  R1 --> P["Popen bash + 批脚本<br/>单槽串行"]
-  R2 --> Q["调度器分配节点与 GPU"]
+  SUB["submit_run_sr"] --> R1["取 job_id 序列号<br/>写 .local_job_seq"]
+  R1 --> P["Popen bash + 运行脚本<br/>单槽串行"]
   P --> G["子进程环境：删 VIRTUAL_ENV / PYTHONHOME / PYTHONPATH<br/>前置解释器目录进 PATH<br/>设 CUDA_VISIBLE_DEVICES"]
 ```
 
-| | `local` | `slurm` |
-|---|---|---|
-| 并发 | 单槽串行（模块级锁） | 由调度器决定 |
-| job_id | 自增，持久化在 `.local_job_seq` | 调度器给 |
-| 选卡 | `SR_LOCAL_GPU` 透传 | `--gres` |
-| 取消 | 对进程组发信号（Windows 用 `taskkill /T`） | `scancel` |
-| 终态判据 | **同一条：退出码文件** | 同左 |
+| | 本机执行（`local_exec`） |
+|---|---|
+| 并发 | 单槽串行（跨进程文件锁 `<SR_WORK_DIR>/.exec.lock`） |
+| job_id | 自增，持久化在 `.local_job_seq` |
+| 选卡 | `SR_LOCAL_GPU` 透传为 `CUDA_VISIBLE_DEVICES` |
+| 取消 | 停止完整进程树（POSIX 下先 TERM 后 KILL） |
+| 终态判据 | 作业内校验器写的退出码文件 |
 
-两种执行器返回同一种状态字典，所以上层代码不需要分支。**终态判据完全一致**：
-批脚本本身是合法 bash，`#SBATCH` 那些行在 bash 眼里就是注释。
+执行器返回状态字典，上层代码据此渲染。**终态判据只有一条**：
+作业内校验器写的退出码文件（见 §6）。
 
 ---
 
@@ -186,8 +174,7 @@ job_id=…  sr_exit_code=…  verdict=0|90  skip=0|1  reason=…
 
 ## 7. 终态与回流
 
-后端**不读调度器账务**（真机 `AccountingStorageType=none`，账务命令永久不可用）。
-终态一律来自退出码文件：
+终态一律来自作业内校验器写的退出码文件：
 
 ```mermaid
 sequenceDiagram
@@ -226,12 +213,9 @@ sequenceDiagram
 ## 8. 易判错点
 
 - **退出码 0、`Run finished.`、产物存在，三者缺一不可**。任何单独一项都不足以判成功。
-- **终态不看 `sacct`**。那台机器上账务没启用，任何依赖它的判据都会永久失效。
 - **`verdict=90` 是「契约不满足」，不是「SR 算法失败」**。两者要分开报，否则排障方向会错。
 - **掩码必须落在本体影像的网格上**。产物是它的放大结果，拿产物的尺寸写掩码会
   把一张产物尺寸的掩码盖到本体的掩码文件上。前端用「环节」这个概念把这件事一路带住。
-- **`SR_SANDBOX_ROOT` 与本机直跑互斥**。配了沙箱，产物会落在副本而不是原目录。
-- **平台默认执行器是 `slurm`，当前路线是 `local`**。换机器重建配置时漏了这项会退回投递 Slurm。
 - **已超分过的场景会被再超分一遍**。生产脚本里那段「已超分则跳过」的分支现在是
   打印一行就返回，不是幂等跳过；场景落在这种状态时作业会提前结束、不产出新产物，
   校验器据此判失败。

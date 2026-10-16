@@ -27,7 +27,7 @@
 |---|---|
 | 某一行的生成预览尺寸、拉伸公式、缓存签名的逐字节口径 | [preview-bake-pipeline.md](../preview-bake-pipeline.md) |
 | 每个端点的入参、返回、错误码 | [api-contract.md](../../planning/api-contract.md) |
-| 部署步骤、升级判定表、Slurm 装什么 | [deploy/README.md](../../../deploy/README.md) |
+| 部署步骤、升级判定表、SR 执行怎么装 | [deploy/README.md](../../../deploy/README.md) |
 | SR 算法、调用契约、Windows 移植 | [docs/sr_code/](../../sr_code/) |
 | 真机现在是什么状态、下一步做什么 | [current-question.md](../../status/current-question.md) |
 | 系统理解前后端（教程口吻，从 0 讲起） | [platform-tutorial.md](../platform-tutorial.md) |
@@ -58,14 +58,13 @@ flowchart TB
   subgraph A["sr-api · systemd · User=nginx · /opt/sr-venv py3.9"]
     A1["api/app.py<br/>场景检索 / resolve / 预览"]
     A2["api/platform.py<br/>工具 / 对话 / 队列 / 掩码 / 清单"]
-    A3["services/*<br/>scene_search preview_jpg run_sr slurm local_exec mask store"]
+    A3["services/*<br/>scene_search preview_jpg run_sr local_exec mask store"]
     A4["pathguard.py<br/>路径归一 + 前缀白名单<br/>双层保险第 2 层"]
     A5["agent/loop.py + tools/*<br/>自写状态机 + 工具注册表"]
   end
 
   subgraph E["SR 作业 · 独立解释器"]
-    E1["SR_EXECUTOR=local<br/>本机 conda py3.6 起进程"]
-    E2["SR_EXECUTOR=slurm<br/>sbatch 投 Slurm（当前冻结）"]
+    E1["本机 conda py3.6<br/>local_exec 起子进程"]
   end
 
   subgraph DB["盘阵 / 本地磁盘"]
@@ -82,13 +81,11 @@ flowchart TB
   N2 -.->|"JPG 字节直出，不过后端"| B
   A2 --> A5
   A3 --> E1
-  A3 --> E2
   A1 --> D1
   A3 --> D2
   A3 --> D3
   A3 --> D5
   E1 --> D4
-  E2 --> D4
   D4 -.->|"后台轮询读终态"| A3
 ```
 
@@ -97,7 +94,7 @@ flowchart TB
 - **`/disk-array/` 不经过后端**。盘阵的静态字节由 nginx 直接返回；后端的路径白名单
   只保护 `/api/` 那一路。这是「双层保险」的第一层与第二层（见 [topology.md](topology.md) §4）。
 - **两个 Python 解释器平行存在、互不污染**。平台 venv 是 py3.9，SR 生产环境是 py3.6 带
-  torch/GDAL。后端不 import SR 的任何模块，只把解释器路径写进批脚本。
+  torch/GDAL。后端不 import SR 的任何模块，只把解释器路径写进运行脚本。
 - **服务端生成与浏览器本地解码是两条独立的路**。盘阵场景一律走服务端生成好的 JPG；
   只有用户从本机选的 TIF 才在浏览器里解码。两条路的常量不共用。
 
@@ -188,9 +185,8 @@ flowchart TB
 | 三路分派 | 浏览器本地解码在 UTIF / geotiff 分块 / 稀疏条带之间选路 | CLAUDE.md |
 | 上下文侧舱 | 查看器右侧可折叠面板，含 `[ROI/工具]` 与 `[Agent]` 两页签 | current-question.md §1 |
 | 待修复清单 | 导入的 `.txt` 缺陷清单，可在查看器里逐行标记并写回盘阵 | 同上 |
-| 假调度器 | `SR_SLURM_FAKE=1` 时的内存调度器，无真 Slurm 也能验终态 | api-contract.md §5.2 |
-| 契约校验器 | 作业内紧跟 SR 脚本跑的第二个进程，把成败落成退出码文件 | sr_code/sr-slurm-deploy-variant.md |
-| 退出码文件 | `Debug/_SREXIT_jobid.txt`，作业终态的**唯一**判据 | current-question.md §2 |
+| 契约校验器 | 作业内紧跟 SR 脚本跑的第二个进程，把成败落成退出码文件 | sr_code/sr-platform-variant.md |
+| 退出码文件 | `Debug/_SREXIT_<job_id>.txt`，作业终态的**唯一**判据 | sr-local-execution.md §2.3 |
 | 任务指纹 | 提交参数的 sha256，`sr_tasks` 表的唯一键，同参数复用同一行 | current-question.md §6.2 |
 
 **刻意不用的说法**（仓库里查不到，或与既有含义冲突，避免引入）：

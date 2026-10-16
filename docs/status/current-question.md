@@ -44,15 +44,20 @@
 
 ## 2. 当前路线
 
-- **SR 提交 = 本机 conda 直跑**（`SR_EXECUTOR=local`）：后端在 node81-135 上用 SR 生产
-  conda 解释器直接起进程，读锁定目录里已有的 `.tif` 与 `<目录名>_mask.tif`，产物写回同目录。
-  `sbatch` 换 `bash`，配置 XML / 审计段 / 契约校验器 / 退出码文件整套原样复用。
+- **SR 提交 = 本机直跑**（`SR_EXECUTOR=local`，也是仓库默认值）：后端在 sr-api 所在机器上用
+  SR 生产 conda 解释器（`SR_PYTHON`）直接起 bash 子进程，作业**就地**跑在用户填的 `lq_path`，
+  读该目录里已有的输入与 `<输入影像 stem>_mask.tif`。执行器
+  [local_exec.py](../../backend/services/local_exec.py) 负责单槽串行（跨进程锁
+  `<SR_WORK_DIR>/.exec.lock`）、日志、进程树管理；配置 XML / 审计段 / 契约校验器 / 判定文件
+  整套照用。运行脚本里没有 `#SBATCH` 行（生成器是 `run_sr.build_run_script`）。
+  选卡由 `SR_LOCAL_GPU` 决定，由执行器设进子进程的 `CUDA_VISIBLE_DEVICES`。
+  规则、切换与回滚见 [sr-local-execution.md](sr-local-execution.md)；
   工作单见 [sr-minimal-prototype-plan.md](../planning/sr-minimal-prototype-plan.md)。
-- **作业终态读退出码文件**，不读 `sacct`（真机 `AccountingStorageType=none`，`sacct` 永久不可用）。
-  退出码 0 不等于成功；契约不满足时校验器以退出码 90 结束。
-- **Slurm 分支在仓库里但当前不用**：单卡分配直接用 `CUDA_VISIBLE_DEVICES`，无需调度。
-  ⚠️ 仓库默认值 `SR_DEFAULT_EXECUTOR` 仍为 `"slurm"`（[config.py](../../backend/config.py)），
-  真机靠 env 覆盖。
+- **作业终态读判定文件** `<lq_path>/Debug/_SREXIT_<job_id>.txt`（校验器写，`--job-id` 由运行脚本
+  显式传入）：`verdict=0` → COMPLETED、`!=0` → FAILED、`skip=1`（云量跳过）→ COMPLETED 且不出产物。
+  **子进程退出码 0 不等于成功**；契约不满足时校验器以退出码 90 结束。
+- **仓库里没有调度器这条路线**：没有 Slurm/集群/共享盘要求，也没有 `SR_SLURM_*` / `SR_SANDBOX_ROOT`
+  这类 env；`SR_EXECUTOR` 只接受 `local`（留别的值等于配置错误，启动即报错）。
 - **LLM 走 OpenAI 兼容接口**（`SR_LLM_BASE_URL` / `_API_KEY` / `_MODEL`），底座未定，内网尚无可用端点。
   未配端点时用 `SR_LLM_MOCK=1` 的固定脚本跑通链路。
 - **数据来源两棵树**：
@@ -127,11 +132,15 @@
 1. `/preview` 在源文件不存在时回 422（而非 404）：这一路点下去拿到的是「预览生成失败：场景文件
    不存在」，前端只认**盘阵静态链**上的 404，所以不会亮灰块（也不会标 `purged`）。改造只需后端
    一行（`app.py::preview` 在 `abs_path.is_file()` 为假时回 404），但需重新部署，见 §4.1。
-2. 退出码文件已判 FAILED 时，`GET /api/queue` 是否仍报 RUNNING **未复核** —— 下次真机提交时确认。
-3. [.e2e/qa-theme.js](../../.e2e/qa-theme.js) 有 6 条失败断言，写的是白色 chrome 与渐变主按钮，
+2. [.e2e/qa-theme.js](../../.e2e/qa-theme.js) 有 6 条失败断言，写的是白色 chrome 与渐变主按钮，
    与当前主题不符。未改动；改脚本期望值还是改主题需人定。
-4. `test-platform.js` 的 `[D]`「耗时列」当前稳定红：`waitFor` 等的是 `.qp-tbl tbody td.elapsed`，
-   即队列表里得有一行。诊断时先看 `/queue` 那次 `page.goto` 之后 `queue.tasks` 是不是空的。
+3. `test-scenes.js` 的 `[B2]` 是红的：它按**尺寸列**分辨同名的两行（`<编号>.jpg` 与
+   `<编号>.tif`），期望 jpg 那行是 400×200。而 `app.py::_manual_row` 给 jpg 行的 W/H 取的是
+   **同级栅格**的尺寸（掩码口径，见该函数上方注释），两行实测都是 1600×800，断言因此不成立。
+   要么改断据（改用行上的其它列分辨两行），要么改期望值，需人定。
+4. `[D]`「耗时列」依赖队列表里已有一行：`/queue` 那次 `page.goto` 之后 `queue.tasks` 为空就等不到。
+   队列表为空的已知成因是浏览器连接池被自己的 SSE 占满（症状形状与诊断法见
+   [gui-experience.md §9.9](../experience/gui-experience.md)）。2026-10-15 开发机实测该段通过。
 5. 预览内存不释放：每个文件的预览 `Float32Array` 常驻，各边 ÷4 约 145MB/张、÷2 约 600MB/张；
    分屏按设计同时保留两张，点选清单鼓励多开。当前只记录，无 LRU 释放。
 6. 同一场景的 `<目录名>.jpg` 与 `<目录名>.tif` 两行预览相同（工作流 B 使两行落到同一份落点），
@@ -193,12 +202,16 @@
 | 项 | 仓库默认 | 真机值 | 载体 |
 |---|---|---|---|
 | `SR_BUNDLE_DIR` | `/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes` | `/DiskArray/tmp/wangrz/mmsr_bundle_240617/codes` | `/etc/systemd/system/sr-api.service.d/srscript.conf` |
-| `SR_SR_SCRIPT` | `code_0817_prod.py` | `code_0817_prod_slurm.py` | 同上 |
+| `SR_SR_SCRIPT` | `code_0817_prod.py` | `code_0817_prod_platform.py` | 同上 |
 | `SR_SCENES_ROOT` | 无（不设则 `source:fake`） | `/DiskArray/tmp/wangrz/datahub` | `/etc/systemd/system/sr-api.service.d/scenes.conf` |
 | nginx `alias` | `deploy/nginx.conf` 中为 `/data/scenes/` | `/DiskArray/tmp/wangrz/datahub`（与上一行同值） | `/etc/nginx/conf.d/sr-agent-platform.conf` |
 
 > 生产盘阵根为 `/DiskArray/GSHC2IMPS/`（层级 年/月/日/生产编号）；它与 `datahub` 的关系
 > （拷贝还是软链）本阶段不追。
+>
+> ⚠️ `srscript.conf` 里若还留着 `SR_EXECUTOR=slurm`、`SR_SLURM_*` 或 `SR_SANDBOX_ROOT`，
+> 一律删掉：本版本的 `SR_EXECUTOR` **只接受 `local`**（留别的值启动即报错），其余几个名字平台不读。
+> 选卡真机值 `SR_LOCAL_GPU`（默认 `0`）**待核**。
 
 ### 6.2 关键常量与口径
 
@@ -291,11 +304,17 @@
 
 ### 6.4 测试基线
 
-- **后端**：`python -m pytest backend/` → **787 passed / 9 skipped**。
-- **前端**：Vitest **444 passed** + `vue-tsc --noEmit` 零错误 + `npm run build`。
+- **后端**：`python -m pytest backend/` → **756 passed / 9 skipped**（2026-10-15 实测）。
+- **前端**：Vitest **447 passed** + `vue-tsc --noEmit` 零错误 + `npm run build`。
 - **浏览器回归**（`.e2e/`，先 `cd frontend && npm run build`）：
   `test-manual-scene.js` **298** · `test-vue-viewer.js` **192** · `test-scenes.js` **136** ·
-  `test-platform.js` **26**（其中 `[D]`「耗时列」当前红，见 §3.3）。
+  `test-platform.js` **26**（2026-10-15 开发机实测全绿；`test-scenes.js` 的 `[B2]` 是红的，
+  见 §3.3）。
+  这三个会提交作业的脚本用 `python -m backend.tests.e2e_server` 起后端：它与
+  `python -m backend.api` 同款，只是把执行器入口换成 `backend/tests/exec_double.py` 的内存替身
+  —— 开发机上没有真机的 bash + conda + SR bundle，真起子进程只会得到 launch_error。
+  真执行器与真 bash 那条链由 `backend/tests/test_local_exec.py` 与 `test_local_chain.py` 覆盖，
+  真机验收见 [real-machine-acceptance.md](real-machine-acceptance.md) §D。
   其中 `test-manual-scene.js` 的 M9「第二遍按盘上最新的源重写了第 1 景的本体预览」
   是那三个静默失效点（本地 blob / 浏览器缓存 / 合流键）的**现场**验收：任一生效，
   第二遍就是秒回、盘上文件一个字节不动，它立刻红。

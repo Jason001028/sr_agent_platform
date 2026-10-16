@@ -17,7 +17,7 @@ Python 生态装不上去；而 llama.cpp 是 **C++ 编译产物，只认显卡�
 选型定案（详见 [agent-llm-deployment.md](../planning/agent-llm-deployment.md)）：
 
 > 模型 = Qwen3.8-27B **基础版**（不是社区 Uncensored/Abliterated 变体）· 量化 = **GGUF Q4_K_M ≈ 16.8~17GB**
-> · 运行时 = **llama.cpp llama-server**（本机 CUDA 编译）· 资源 = 固定 1 张 3090（其余给 Slurm/SR）
+> · 运行时 = **llama.cpp llama-server**（本机 CUDA 编译）· 资源 = 固定 1 张 3090（其余给 SR）
 > · 接入 = OpenAI 兼容 `/v1`，后端 `SR_LLM_BASE_URL` 指过去即可，代码零改动。
 
 ---
@@ -82,7 +82,7 @@ LLM 部署工具分两大家族，**权重格式与引擎是互相绑定、不�
 | **`-ngl 999`** | 尽量把层全部放 GPU（999 是「能放都放」的惯用写法） |
 | **`--jinja`** | 强制用模型自带 Jinja 对话模板。Qwen3.8 模板特殊（thinking/工具轮衔接），不开会格式乱、多轮工具调用出错 |
 | **`-c 32768`** | 上下文窗口长度（token） |
-| **`CUDA_VISIBLE_DEVICES` + Slurm 剔除** | 让 llama-server 进程只见/只用指定一张卡；Slurm 配置把该卡从可分配集摘掉，SR 作业才不会排到它头上抢算力 |
+| **`CUDA_VISIBLE_DEVICES`** | 让 llama-server 进程只见/只用指定一张卡；SR 作业由 `SR_LOCAL_GPU` 选另一张，两者按部署配置隔开，不互相抢算力 |
 
 ---
 

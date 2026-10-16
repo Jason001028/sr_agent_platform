@@ -9,7 +9,7 @@
 
 ## 理由
 
-- Agent 层价值在工具侧（run_sr / mta_grid / 掩码 / Slurm），循环本身仅需约 200 行状态机。
+- Agent 层价值在工具侧（run_sr / mta_grid / 掩码），循环本身仅需约 200 行状态机。
 - langchain-core 依赖 pydantic≥2.7.4，与平台现状存在版本冲突，引入即连带依赖升级。
 - 所需模式均可用自有代码实现；循环自持，行为可控、可单测。
 
@@ -27,4 +27,4 @@
 - 例外：出现跨小时断点续跑 / 人审需求时，评估 LangGraph（替换薄层，非重写）。
 - **断点恢复的具体落点**（详见 docs/knowledge/agent-orchestration-research.md §3.3 / §5）：
   - 若上 LangGraph，用 `checkpoint-sqlite`（`AsyncSqliteSaver` 嵌 FastAPI）+ `interrupt`/`Command`，跨进程恢复不需 Server。
-  - **外部副作用（Slurm job）幂等层必须自研**：`job_id/状态` 幂等存入任务表，恢复时先查 squeue/sacct 再决定重跑或续查。这与选型无关，自研状态机同样要写。
+  - **外部副作用（本机 SR 作业）幂等层必须自研**：`job_id/状态` 幂等存入任务表，恢复时先查运行记录与判定文件再决定重跑或续查。这与选型无关，自研状态机同样要写。

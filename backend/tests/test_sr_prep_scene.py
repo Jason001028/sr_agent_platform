@@ -10,7 +10,7 @@ and tested in two halves:
     is on the Windows dev machine. Those cases exist for whoever runs this
     suite where the SR environment does.
 
-The argv contract is pinned too: backend/services/run_sr.build_batch_script
+The argv contract is pinned too: backend/services/run_sr.build_run_script
 writes that command line, and a rename here would only surface on the array.
 """
 

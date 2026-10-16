@@ -115,7 +115,7 @@ class TestSrTasks(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_intent_then_job(self):
-        # run_sr records intent (job_id None) before sbatch, then the job_id.
+        # run_sr records intent (job_id None) before launching, then the job_id.
         self.store.put_sr_task("fp1", {"lq_path": "/a"}, status="new", job_id=None)
         t = self.store.get_sr_task("fp1")
         self.assertIsNone(t["job_id"])

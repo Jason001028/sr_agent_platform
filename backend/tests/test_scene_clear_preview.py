@@ -22,16 +22,17 @@ from PIL import Image
 from backend.api import paths
 from backend.api.app import _eager_bake_tick, create_app
 from backend.api.platform import _Subscriber, _broadcast
-from backend.services import slurm
 from backend.services.preview_jpg import write_preview_jpg
 from backend.services.run_sr import task_fingerprint
 from backend.tests import allowed_roots_env
 from backend.tests.test_preview_jpg import make_strip_tif
 
+# 后端会读的 env 全列在这里：setUp 一律清空（见 test_scene_resolve 的同名说明）。
 _ENVS = ("SR_AGENT_DB", "SR_SCENES_ROOT", "SR_PREVIEWS_ROOT", "SR_QUEUE_POLL_SEC",
          "SR_PRODUCT_PREVIEW_DIV", "SR_PRODUCT_PREVIEW_MAX_AGE_SEC",
-         "SR_ALLOWED_ROOTS", "SR_DRIVE_MAP", "SR_SLURM_FAKE", "SR_BUNDLE_DIR",
-         "SR_SLURM_WORK_DIR", "SR_EXECUTOR", "SR_SANDBOX_ROOT")
+         "SR_ALLOWED_ROOTS", "SR_DRIVE_MAP", "SR_BUNDLE_DIR",
+         "SR_WORK_DIR", "SR_SLURM_WORK_DIR", "SR_EXECUTOR",
+         "SR_LOCAL_GPU", "SR_LOCKED_DIR")
 
 SCENE = "JL1KF02B03_20260917120000"
 SUFFIX = "260318"
@@ -60,12 +61,11 @@ class ClearBase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self._apps: list = []
         self._saved = {k: os.environ.get(k) for k in _ENVS}
-        slurm._fake_reset()
         for k in _ENVS:
             os.environ.pop(k, None)
         os.environ["SR_AGENT_DB"] = os.path.join(self._tmp.name, "db.sqlite")
         os.environ["SR_QUEUE_POLL_SEC"] = "60"      # 关掉后台轮询的时序干扰
-        os.environ["SR_SLURM_WORK_DIR"] = os.path.join(self._tmp.name, "work")
+        os.environ["SR_WORK_DIR"] = os.path.join(self._tmp.name, "work")
         os.environ["SR_BUNDLE_DIR"] = os.path.join(self._tmp.name, "bundle")
         os.environ.update(allowed_roots_env(self._tmp.name))
         self.root = Path(self._tmp.name).resolve()
@@ -85,7 +85,6 @@ class ClearBase(unittest.TestCase):
             except Exception:  # noqa: BLE001
                 pass
         self._tmp.cleanup()
-        slurm._fake_reset()
         for k, v in self._saved.items():
             if v is None:
                 os.environ.pop(k, None)

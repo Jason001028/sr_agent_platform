@@ -139,7 +139,7 @@ def _repair_unclosed_turn(messages: list[dict]) -> list[dict]:
 
     A crash mid-tool leaves the last assistant tool_calls without its tool
     results. Resume must not blindly re-run those tools — the side effect may
-    already be committed (run_sr may have submitted a Slurm job). Each missing
+    already be committed (run_sr may have started an SR job). Each missing
     call is closed with a synthesized "result unknown — do not blindly retry"
     tool message so the model decides next (poll sr_job_status / ask the user).
     """

@@ -1,7 +1,7 @@
-"""End-to-end rehearsal of the local (no-Slurm) submit chain.
+"""End-to-end rehearsal of the local submit chain.
 
 Everything in this file is real except the *SR half*: `submit_run_sr` writes a
-real config.xml and a real batch script with `build_batch_script`, `local_exec`
+real config.xml and a real run script with `build_run_script`, `local_exec`
 runs that script with a real bash, the real `SR_code/variants/verify_sr_run.py`
 evaluates the contract inside the job, and the terminal state is read back from
 the real verdict file. Only `code_0817_prod.py` is replaced by a stub that
@@ -32,7 +32,7 @@ from backend.services import store as store_mod
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VERIFIER = REPO_ROOT / "SR_code" / "variants" / "verify_sr_run.py"
 
-#: Name the batch script runs in place of the production SR script.
+#: Name the run script runs in place of the production SR script.
 STUB_NAME = "stub_sr.py"
 
 #: Stand-in for code_0817_prod.py — the SR half of the chain, artefacts only.
@@ -117,14 +117,14 @@ if __name__ == "__main__":
     sys.exit(main(sys.argv))
 '''
 
-#: Name the batch script runs in place of sr_prep_scene.py.
+#: Name the run script runs in place of sr_prep_scene.py.
 STUB_PREP_NAME = "stub_prep.py"
 
-_REAL_BUILD_SCRIPT = svc.build_batch_script
+_REAL_BUILD_SCRIPT = svc.build_run_script
 
 
 def _host_script(*args, **kwargs) -> str:
-    """`build_batch_script`, with separators made bash-safe for the dev host.
+    """`build_run_script`, with separators made bash-safe for the dev host.
 
     The generator embeds host-native paths (`str(Path)`); the interpreter is
     bash, where a backslash is an escape, so a Windows-written script needs
@@ -176,19 +176,17 @@ class LocalChainTests(unittest.TestCase):
             "SR_SR_SCRIPT": STUB_NAME,
             "SR_VERIFY_SCRIPT": "verify_sr_run.py",
             "SR_PREP_SCRIPT": STUB_PREP_NAME,
-            "SR_SLURM_WORK_DIR": str(self.work),
+            "SR_WORK_DIR": str(self.work),
         })
-        # Neither of these belongs on the local path: the sandbox would move the
-        # product away from the scene dir, and a locked dir would add a rule
-        # this rehearsal is not about.
-        for name in ("SR_SANDBOX_ROOT", "SR_LOCKED_DIR", "SR_SLURM_NODELIST"):
+        # A locked dir would only add a rule this rehearsal is not about.
+        for name in ("SR_LOCKED_DIR",):
             os.environ.pop(name, None)
         local_exec._reset()
         self.addCleanup(self._restore)
 
     _ENV = ("SR_EXECUTOR", "SR_BUNDLE_DIR", "SR_PYTHON", "SR_SR_SCRIPT",
-            "SR_VERIFY_SCRIPT", "SR_PREP_SCRIPT", "SR_SLURM_WORK_DIR",
-            "SR_SANDBOX_ROOT", "SR_LOCKED_DIR", "SR_SLURM_NODELIST",
+            "SR_VERIFY_SCRIPT", "SR_PREP_SCRIPT", "SR_WORK_DIR",
+            "SR_SLURM_WORK_DIR", "SR_LOCKED_DIR", "SR_LOCAL_GPU",
             "SR_STUB_SILENT", "SR_STUB_SLEEP")
 
     def _restore(self):
@@ -218,7 +216,7 @@ class LocalChainTests(unittest.TestCase):
                 "options_yml": str(self.opt_yml)}
 
     def submit(self, params: dict | None = None, swap: dict | None = None) -> dict:
-        with mock.patch.object(svc, "build_batch_script", _host_script):
+        with mock.patch.object(svc, "build_run_script", _host_script):
             return svc.submit_run_sr(params if params is not None else self.params(),
                                      store=self.store, swap=swap)
 
@@ -273,7 +271,9 @@ class LocalChainTests(unittest.TestCase):
         log = Path(local_exec._JOBS[job_id]["log"]).read_text(
             encoding="utf-8", errors="replace")
         self.assertIn("SR_SCRIPT=%s" % STUB_NAME, log)
-        self.assertIn("SR_EXECUTOR=local", log)
+        # The audit preamble names the run and the card it was given.
+        self.assertIn("JOB_ID=%s" % job_id, log)
+        self.assertIn("CUDA_VISIBLE_DEVICES=", log)
         self.assertIn("stub SR wrote SCENE_L1_PAN_sr.tif", log)
 
     def test_exit_0_without_artefacts_is_failed_not_completed(self):
@@ -371,7 +371,7 @@ class LocalChainTests(unittest.TestCase):
     def test_prep_failure_still_leaves_a_verdict_and_restores_the_body(self):
         """A prep that dies must not take the verdict file with it.
 
-        The batch script carries the prep's code into the verifier instead of
+        The run script carries the prep's code into the verifier instead of
         exiting: no verdict file would read as UNKNOWN forever, and the body
         would be left holding the un-superresolved copy.
         """

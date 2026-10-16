@@ -75,7 +75,7 @@ export interface JobUpdateEvent {
 
 /** 队列 SSE 事件（§4.x preview_update）：**服务端主动生成产物预览**的结局。
     刻意与 job_update 分开 —— 那是「作业状态变了」，这是「预览生成好了」，两者无关
-    （作业 COMPLETED 了预览也可能因为沙箱/产物缺失/目录不可写而没生成）。收到它只需
+    （作业 COMPLETED 了预览也可能因为产物缺失/目录不可写而没生成）。收到它只需
     改这一行的预览字段，不必重取整行。 */
 export interface PreviewUpdateEvent {
   type: 'preview_update';
@@ -119,10 +119,10 @@ export interface QueueTask {
   finished_at: number | null;
   /** **产物预览的服务端主动生成**进度（与 state 无关）：null = 没生成过，running = 正在生成，
    *  done = 盘上已有当前档位的产物预览，skipped / failed 见 preview_note 里那句人话。
-   *  作业跑完不一定降采样到 —— 沙箱私有副本、产物缺失（云限额跳过的作业是合法 COMPLETED
-   *  但没有产物）、场景目录不可写都会如实记为 skipped。 */
+   *  作业跑完不一定降采样到 —— 产物缺失（云限额跳过的作业是合法 COMPLETED 但没有产物，
+   *  有源头替换的那一跑产物还已归位到本体名）、场景目录不可写都会如实记为 skipped。 */
   preview_state?: 'running' | 'done' | 'skipped' | 'failed' | 'cleared' | null;
-  /** 主动生成结局的人话说明，形如 `<slug>: …`（slug 固定为 sandbox / product_missing /
+  /** 主动生成结局的人话说明，形如 `<slug>: …`（slug 固定为 product_missing /
    *  unwritable / source_changed / no_suffix / failed / cleared）。
    *
    *  `cleared` 那一条是**人工**结局：场景库的「清除缓存」把盘上那份删掉后标上它，
@@ -155,7 +155,7 @@ export interface QueueSubmitResult {
   previous_job_id?: number;
   config_xml: string | null;
   log_dir: string | null;
-  /** 无沙箱就地跑（本地执行器恒如此）：结果按 <输入名>_<suffix>.tif 落进场景目录，
+  /** 就地跑（本机执行器恒如此）：结果按 <输入名>_<suffix>.tif 落进场景目录，
    *  输入 tif 不改名也不删除；同名旧输出先被改名为 <同名>_NOSR.tif 再覆盖。 */
   in_place?: boolean;
   /** 上一条的人话版本，提交成功后原样展示给操作者。 */

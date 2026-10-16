@@ -29,12 +29,14 @@ from PIL import Image
 
 from backend.api.app import create_app
 from backend.api.paths import scene_id, scene_id_abs
-from backend.services import slurm
 from backend.tests import allowed_roots_env
 
+# 后端会读的 env 全列在这里：setUp 一律清空，用例之间不互相影响，也不会被开发机
+# 上遗留的值（例如 SR_EXECUTOR）绊倒。
 _ENVS = ("SR_AGENT_DB", "SR_SCENES_ROOT", "SR_PREVIEWS_ROOT", "SR_LLM_MOCK",
-         "SR_SLURM_FAKE", "SR_EXECUTOR", "SR_BUNDLE_DIR", "SR_TEMP_PREVIEWS_ROOT",
-         "SR_DRIVE_MAP", "SR_ALLOWED_ROOTS", "SR_SCENE_PATH_TEMPLATE")
+         "SR_EXECUTOR", "SR_BUNDLE_DIR", "SR_TEMP_PREVIEWS_ROOT",
+         "SR_DRIVE_MAP", "SR_ALLOWED_ROOTS", "SR_SCENE_PATH_TEMPLATE",
+         "SR_WORK_DIR", "SR_SLURM_WORK_DIR", "SR_LOCAL_GPU", "SR_LOCKED_DIR")
 
 #: 生产编号 —— 真机形态，14 位成像时间嵌在中间（反推靠它取日期）。
 #: **型号/传感器段刻意压成一个字母**：六层生产树要叠在临时目录前缀（~70 字符）
@@ -76,7 +78,6 @@ class ResolveBase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self._apps: list = []
         self._saved = {k: os.environ.get(k) for k in _ENVS}
-        slurm._fake_reset()
         for k in _ENVS:
             os.environ.pop(k, None)
         self.root = Path(self._tmp.name).resolve()
@@ -92,7 +93,6 @@ class ResolveBase(unittest.TestCase):
             maps += f";{extra}"
         os.environ["SR_DRIVE_MAP"] = maps
         os.environ["SR_ALLOWED_ROOTS"] = "W:\\"
-        os.environ["SR_SLURM_FAKE"] = "1"
 
     def tearDown(self):
         for a in self._apps:

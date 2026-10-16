@@ -503,15 +503,17 @@ async function main() {
   const apiBase = `http://127.0.0.1:${apiPort}`;
   console.log(`[test-scenes] 临时: scenes=${scenesRoot}`);
 
-  const child = spawn('python', ['-m', 'backend.api'], {
+  // 执行器入口由 backend/tests/e2e_server.py 换成内存替身：开发机上没有真机的
+  // bash + conda + SR bundle，真起子进程只会得到 launch_error。
+  const child = spawn('python', ['-m', 'backend.tests.e2e_server'], {
     cwd: REPO,
     env: {
       ...process.env,
       SR_AGENT_DB: path.join(tmp, 'db.sqlite'),
       SR_SCENES_ROOT: scenesRoot,
-      SR_SLURM_WORK_DIR: workDir,
+      SR_EXECUTOR: 'local',
+      SR_WORK_DIR: workDir,
       SR_LLM_MOCK: '1',
-      SR_SLURM_FAKE: '1',
       SR_QUEUE_POLL_SEC: '0.3',
       SR_API_HOST: '127.0.0.1',
       SR_API_PORT: String(apiPort),

@@ -12,7 +12,7 @@
 //      <卫星型号>\<段级目录>\<景级目录>` → 「打开」（不扫盘：只 resolve 这一次）
 //      → 页内跳查看器 → rec 带上盘阵目录；
 //   B. 画矩形 → 「保存掩码到盘阵」→ Node 侧断言 `<场景目录>/<编号>_mask.tif` 落盘；
-//   C. 「提交 SR」→ /queue 预填（不自动提交）→ 确认提交 → 假调度器跑到「完成」；
+//   C. 「提交 SR」→ /queue 预填（不自动提交）→ 确认提交 → 执行器替身跑到「完成」；
 //   D. 猜错必须报错：粘不存在的编号 → `.sp-err` 带候选路径与原因，查看器不新增 rec；
 //   E. 拖本地文件进查看器 → 按**文件名 + 字节数**双指纹反推盘阵目录：
 //      命中（同名同字节）→ 不做本地解码，直接换成服务端生成 JPG（拖入那条端点
@@ -214,9 +214,15 @@ def tree(scene_name):
 base = os.path.join(root, "GSHC2IMPS", "PRODUCT", ymd[:4], ymd[4:6], ymd[6:8])
 sat, mid = tree(sc_name)
 scene(os.path.join(base, sat, mid, sc_name), sc_name + ".tif", 1600, 800, sc_name)
+# 未超分那一份（run_sr.nosr_swap_plan）：提交时缺它直接 400，不拿别的顶替，
+# 所以每个会被提交的场景都得同时躺着它。尺寸取本体的一半 —— 它就是这一跑真正
+# 读进去的源头，比本体小是常态。sc_name 形态下它是**输入 stem** 那一条候选。
+tif(os.path.join(base, sat, mid, sc_name, sc_name + "_NOSR.tif"), 800, 400)
 sat_p, mid_p = tree(pan_name)
 # RC 形态：目录里只有 PAN.tif（名字里没有成像时刻，反推认不出它，只靠粘路径打开）。
 scene(os.path.join(base, sat_p, mid_p, pan_name), "PAN.tif", 640, 320, pan_name)
+# RC 形态的候选名是 PAN_NOSR.tif（scene_search.nosr_candidates）。
+tif(os.path.join(base, sat_p, mid_p, pan_name, "PAN_NOSR.tif"), 320, 160)
 
 # 输入影像叫 <景级目录名>.tif（不是 PAN.tif）：E 段拖的就是「这张图自己」，
 # 双指纹要求名字也对得上 —— PAN.tif 那种 RC 形态的名字拆不出成像时间戳，
@@ -531,7 +537,9 @@ async function main() {
   const apiBase = `http://127.0.0.1:${apiPort}`;
   console.log(`[test-manual-scene] 临时: 盘阵=${tmp}`);
 
-  const child = spawn('python', ['-m', 'backend.api'], {
+  // 执行器入口由 backend/tests/e2e_server.py 换成内存替身：开发机上没有真机的
+  // bash + conda + SR bundle，真起子进程只会得到 launch_error。
+  const child = spawn('python', ['-m', 'backend.tests.e2e_server'], {
     cwd: REPO,
     env: {
       ...process.env,
@@ -540,10 +548,9 @@ async function main() {
       // 拖拽入口的临时预览缓存：指向临时目录（不是系统 /tmp），E 段要靠它断言
       // 「拖进来的图生成在了临时缓存里，没往生产数据目录撒文件」。
       SR_TEMP_PREVIEWS_ROOT: tmpPreviews,
-      SR_SLURM_WORK_DIR: workDir,
+      SR_EXECUTOR: 'local',
+      SR_WORK_DIR: workDir,
       SR_LLM_MOCK: '1',
-      SR_SLURM_FAKE: '1',
-      SR_SLURM_FAKE_T_MS: '250',
       SR_QUEUE_POLL_SEC: '0.3',
       SR_API_HOST: '127.0.0.1',
       SR_API_PORT: String(apiPort),
@@ -705,7 +712,7 @@ async function main() {
         '写入后记录的是服务端权威路径（不是前端自己拼的）');
 
       /* ---------- C. 提交 SR → 队列 ---------- */
-      console.log('\n[C] 「提交 SR」→ /queue 预填 → 确认提交 → 假调度器跑完');
+      console.log('\n[C] 「提交 SR」→ /queue 预填 → 确认提交 → 执行器替身跑完');
       await clickByText(page, '提交 SR');
       await waitFor(page, () => location.pathname.endsWith('/queue'), 15000, '跳 /queue');
       await waitFor(page, () => !!document.querySelector('.qp-form .qp-draft-tip'),
@@ -813,8 +820,12 @@ async function main() {
       const dropJpg = path.join(SC_DIR, SC + '_preview.jpg');
       assert(fs.existsSync(dropJpg),
         `拖入的预览写进生产场景目录（${path.basename(dropJpg)}）`);
-      assert(fs.readdirSync(SC_DIR).filter((n) => /preview/i.test(n)).length === 1,
-        '场景目录里只有一份预览名（改名前的点号那份没有残留）');
+      // 「一份」指的是**这一份影像**的：改名前的点号形态（`<编号>.preview.jpg`）
+      // 不许有残留 —— 用户报的正是同图两个几乎同名的文件。跑完那一轮另会生成
+      // `<编号>_NOSR_preview.jpg`（未超分那份，另一个文件），不属于这条判据。
+      const previewNames = fs.readdirSync(SC_DIR).filter((n) => /preview/i.test(n));
+      assert(previewNames.filter((n) => !n.includes('_NOSR')).length === 1,
+        `场景目录里这份影像只有一个预览名（${previewNames.join(', ')}）`);
       // 场景目录可写 → **不该**走兜底：临时缓存桶里一个新文件都不该有
       const bucket = path.join(tmpPreviews, y + '-' + mo + '-' + d);
       assert(!fs.existsSync(bucket), '场景目录可写时不动临时缓存（兜底没被触发）');

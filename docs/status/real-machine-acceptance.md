@@ -7,7 +7,7 @@
 > [real-machine-bringup-adhd.md](real-machine-bringup-adhd.md)（动作版）、
 > [deploy/README.md](../../deploy/README.md)（部署手册）。
 > 真机配置与仓库默认值的偏差表在 [current-question.md](current-question.md) §6。
-> 阶段 5 调度验收的分步命令与四条链路结论，细节以 [slurm-acceptance.md](slurm-acceptance.md) §D 为准。
+> §D 本机执行验收的运行期规则（单槽、判定文件、重启与未知态）见 [sr-local-execution.md](sr-local-execution.md)。
 >
 > 图例：`[x]` 已完成（附实测记录）· `[ ]` 待勾 · `⏱` 参考耗时 · `✓=` 成功标准 · `记录:` 实测值。
 
@@ -78,44 +78,52 @@
   同时把**真机上那份的实际名字**记下来：看 `/api/scenes/<id>/siblings` 的 `nosrCandidates` 与命中的
   `name`，据此校准候选顺序（[preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md) §4.11）· 记录:
 
-## D 阶段 5 调度验收（真调度 · `SR_SLURM_FAKE=0`）
+## D 本机执行验收（无调度器）
 
-> **状态：未执行。** 本节是 Slurm 调度验收的执行页，分步命令与四条链路结论（静默失败不被标成成功 /
-> 幂等回归 / 云量跳过 / SSE）见 [slurm-acceptance.md](slurm-acceptance.md) §D。
+> **状态：未执行。** 执行者是 `sr-api` 自己：用 `SR_PYTHON` 在 `lq_path` 上**就地**起 bash 子进程，
+> 没有调度器、没有共享盘要求。单槽、判定文件、重启与未知态的运行期规则见
+> [sr-local-execution.md](sr-local-execution.md) §二。
 >
-> ⚠️ **终态判据**：真机 `AccountingStorageType=none`，`sacct` 永久不可用。
-> 终态一律读作业写的**退出码文件** `<DatarootLQ>/Debug/_SREXIT_<job_id>.txt`
-> （`verdict=0` → COMPLETED；其中 `skip=1` 的云量跳过也是 COMPLETED；`verdict!=0` → FAILED）。
-> **进程退出码 0 不等于成功。** 该判据对本地执行器同样适用。
+> ⚠️ **终态判据**：作业内的契约校验器写**判定文件** `<lq_path>/Debug/_SREXIT_<job_id>.txt`，
+> 平台读它（`verdict=0` → COMPLETED；其中 `skip=1` 的云量跳过也是 COMPLETED；`verdict!=0` → FAILED）。
+> **进程退出码 0 不等于成功。**
+> 验收期间用非空 suffix：空 suffix 的破坏性语义只靠两条提交入口的归一挡着，不必拿真影像去试。
 
-- [ ] **前置：装变体 + 十项 env**（⏱30′）· 按 [deploy/README.md](../../deploy/README.md) §7.1：变体、
-  `sr_prep_scene.py` 与 `verify_sr_run.py` 三份**并置**在 `$SR_BUNDLE_DIR`（**不覆盖**
-  `code_0817_prod.py`，靠 `SR_SR_SCRIPT` 指过去），核对十项 env。✓= `head -3 code_0817_prod_slurm.py`
-  见 `GENERATED FILE` 横幅、`code_0817_prod.py` 未被改动；`probe_slurm.sh` 除 sacct 两行外无 FAIL · 记录:
-- [ ] **真实提交 + 推进**（⏱20′）· `/queue` 手填 `lq_path` + 非空 `suffix` 提交。配了 `SR_SANDBOX_ROOT`
-  可直接填生产路径（平台在作业第一步自建副本，生产目录只读）。✓= sbatch 起真实作业，徽标按
-  提交中 → 排队/运行中 → 完成 推进；`/api/queue` 的 `run_dataroot` 指出产物位置，其状态与退出码文件一致；
-  提交前后 `lq_path` 目录 `ls` 一致 · 记录 job_id / 耗时:
-  - 注意：**沙箱开着时源头替换与归位也全落在副本里**，生产目录全程只读（产物不会回到生产本体）。
-    要看归位效果就关掉 `SR_SANDBOX_ROOT`（见 [deploy/README.md](../../deploy/README.md) §7.6 第 1 条与
-    下面「源头 → 本体归位」那条）。
+- [ ] **前置：三份脚本同批上车 + env**（⏱30′）· 按 [deploy/README.md](../../deploy/README.md) §7.1：
+  `code_0817_prod_platform.py`、`sr_prep_scene.py` 与 `verify_sr_run.py` 三份**并置**在 `$SR_BUNDLE_DIR`
+  （**不覆盖** `code_0817_prod.py`，靠 `SR_SR_SCRIPT` 指过去），逐项核对 env。
+  ✓= `head -3 code_0817_prod_platform.py` 见 `GENERATED FILE` 横幅、`code_0817_prod.py` 未被改动；
+  `SR_SR_SCRIPT` **确实指向变体**（不配就等于跑原脚本：单卡下 `gpu_count != 4` 守卫恒真 → 这一跑
+  `exit(3)`）· 记录:
+- [ ] **权限三项（`User=nginx`）**（⏱10′）· `sudo -u nginx touch <SR_WORK_DIR>/x` 与
+  `sudo -u nginx touch <场景目录>/x` 均成功；`sudo -u nginx <SR_PYTHON> -c "import torch, osgeo"` 成功。
+  ✓= 三条都过；`SR_WORK_DIR` 与 `SR_AGENT_DB` 同目录或同权限域 · 记录:
+- [ ] **真实提交 + 推进**（⏱20′）· `/queue` 手填 `lq_path` + 非空 `suffix` 提交。
+  ✓= 徽标按 提交中 → 排队/运行中 → 完成 推进；`/api/queue` 的 `run_dataroot` 指出产物位置，
+  其状态与判定文件一致；提交后 `lq_path` 目录里出现产物（有源头替换的那一跑产物归位到本体名），
+  `.out` 日志开头有 `JOB_ID=` 与 `IN PLACE:` 两行 · 记录 job_id / 耗时:
+- [ ] **选卡生效**（⏱5′）· ✓= `.out` 里 `CUDA_VISIBLE_DEVICES=` 与 `gpu <idx>, <uuid>` 行非空，
+  且与 `SR_LOCAL_GPU` 一致 · 记录:
 - [ ] **静默失败不再被标成成功**（⏱15′）· 构造一个必然缺 SRLOG 的任务（如 SC 步目录里没有 `<目录名>.tif`）。
-  ✓= 退出码文件 `verdict=90`、平台显示 **FAILED**、同参数重投返回 `SUBMITTED`（**不是** `RESUMED_COMPLETED`）· 记录:
-- [ ] **幂等回归**（⏱10′）· 同参数连投两次。✓= 活跃期 `RESUMED_ACTIVE`、终态 `RESUMED_COMPLETED`，
-  两次都不产生第二个 job_id · 记录:
+  ✓= 判定文件 `verdict=90`、平台显示 **FAILED**、同参数重投返回 `SUBMITTED`（**不是** `RESUMED_COMPLETED`）· 记录:
+- [ ] **幂等回归**（⏱10′）· 同参数连投两次。✓= 跑着的时候 `RESUMED_ACTIVE`、完成后 `RESUMED_COMPLETED`，
+  两次都不产生第二个 job_id、磁盘上只有一个 `runs/<job_id>.json` · 记录:
 - [ ] **云量跳过**（⏱10′）· 提交一个 `cloud_limit` 必然触发的任务。✓= COMPLETED、SRLOG 末行 `Run skipped:`、
-  再投为 `RESUMED_COMPLETED`（不被反复重投）· 记录:
-- [ ] **取消**（⏱10′）· 提交一个会排队的作业 → 点取消。✓= scancel 生效、状态变失败/取消 · 记录:
-- [ ] **重启校准**（⏱10′）· `systemctl restart sr-api` → 刷新 `/queue`。
-  ✓= 内存缓存丢失后 `GET /api/queue` 当场校准（读退出码文件），已完成作业仍显示「完成」 · 记录:
+  判定文件 `skip=1`、再投为 `RESUMED_COMPLETED`（不被反复重投）· 记录:
+- [ ] **取消**（⏱10′）· 提交一个会排队的任务 → 点取消。✓= 子进程树停止、状态转失败/取消，
+  `ps -ef | grep code_0817` 无残留 · 记录:
+- [ ] **单槽串行**（⏱10′）· 连投两个任务。✓= 第二个在第一个结束前一直是「排队中」，
+  日志文件各写各的；第一个结束后第二个自动起 · 记录:
+- [ ] **重启校准**（⏱10′）· 跑着的时候 `systemctl restart sr-api` → 刷新 `/queue`。
+  ✓= 该行按运行记录与判定文件给出终态（子进程被 cgroup 一起结束 → FAILED，可重投），
+  **不自动重投**、也不留下永远「运行中」的行 · 记录:
 
 ## E 掩码 → SR 真链 + SSE 长连
 
 - [ ] **掩码落盘 + ENVI 核对**（⏱30′）· 真实场景画矩形掩码 →「提交 SR」→ 落盘原图目录。
   ✓= ENVI 打开 `<stem>_mask.tif` 区域位置正确（在 JPG 上画 → 全分辨率落点）+ `<stem>_mask.txt` 质心可读；
   并用带 `MaskPath` 的真作业确认 0817 消费链一致 · 记录:
-- [ ] **这一跑读的是未超分那份、产物归位到本体**（⏱20′）· **关掉 `SR_SANDBOX_ROOT`**
-  （沙箱开着时源头替换与归位都只落在副本里，生产目录全程只读）。挑一个**带未超分留档**的场景
+- [ ] **这一跑读的是未超分那份、产物归位到本体**（⏱20′）· 挑一个**带未超分留档**的场景
   （RC 场景目录里有 `PAN.tif` 与 `PAN_NOSR.tif`，外加 `<输入影像 stem>_mask.tif`），先 `ls -l` 记下
   本体 / `_NOSR` / 掩码三样的尺寸与 mtime；在 JPG 上画一小块掩码 →「提交 SR」。
   ✓= 作业 `.out` 里 `sr_prep_scene.py` 那一行有输出；跑完（`verdict=0`）：本体尺寸 = **源头那份 × `SRScale`**

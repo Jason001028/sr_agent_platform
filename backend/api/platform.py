@@ -49,11 +49,9 @@ from backend.api.paths import PathDeniedError
 from backend.config import sr_runtime
 from backend.pathguard import (
     ensure_allowed, normalize_submit_path, to_posix_array_path)
-from backend.services import local_exec
 from backend.services import mask as mask_svc
 from backend.services import run_sr as run_sr_svc
 from backend.services import scene_search
-from backend.services import slurm
 #: 掩码命名的唯一实现搬到了 services（REST 与 agent 工具两个入口都要用同一份
 #: 推导，见 scene_search.derived_mask_path）；这里转出给既有调用方
 #: （本模块 bake_mask / _norm_sr_params、api/app.py::resolve）。
@@ -110,24 +108,23 @@ def _broadcast(state, event: dict) -> None:
 
 
 #: States a cancel can leave alone. Anything else — including UNKNOWN, which is
-#: what a restarted sr-api reports for a job it no longer has a record of — must
+#: what a restarted sr-api reports for a run it can no longer identify — must
 #: not be answered with a bare "cancelled: false" (see cancel_queue).
 _TERMINAL_STATES = ("COMPLETED", "FAILED", "CANCELLED")
 
-#: 会写 finished_at 的显示态。UNKNOWN 不算：调度器一时没有记录、判定文件还没落盘
-#: 都可能是**假的**「已结束」，之后还会翻成 COMPLETED/FAILED（§一 "C 方案"）。
+#: 会写 finished_at 的显示态。UNKNOWN 不算：那时进程是否还在跑都还没确认、判定文件
+#: 也可能还没落盘，都可能是**假的**「已结束」，之后还会翻成 COMPLETED/FAILED。
 _RUN_ENDED_STATES = ("COMPLETED", "FAILED")
 
 
 def _queue_state(st: dict) -> str:
-    """Map a slurm.job_status dict onto the queue display state machine (§3.3).
+    """Map a local_exec.status dict onto the queue display state machine (§3.3).
 
-    squeue PENDING → PENDING；其它 active → RUNNING；sacct COMPLETED →
-    COMPLETED；其它 terminal（FAILED/CANCELLED/TIMEOUT/OOM…）→ FAILED；
-    调度器无记录 → UNKNOWN。
+    PENDING → PENDING；其它 active → RUNNING；COMPLETED → COMPLETED；其它已结束
+    （FAILED/CANCELLED/…）→ FAILED；本机既没有进程记录也没有结果文件 → UNKNOWN。
     """
     raw = (st.get("state") or "").upper()
-    if raw == "UNKNOWN":
+    if raw == "UNKNOWN" or st.get("active") is None:
         return "UNKNOWN"
     if st.get("active"):
         return "PENDING" if raw == "PENDING" else "RUNNING"
@@ -135,7 +132,7 @@ def _queue_state(st: dict) -> str:
 
 
 def _task_state(state, task: dict) -> tuple[str, bool, dict | None]:
-    """Calibrate one sr_task row against the scheduler.
+    """Calibrate one sr_task row against the local executor.
 
     Returns (state, changed, fresh_row) — `fresh_row` 是这次**写回后**从库里读回的
     那一行（没写就是 None）。调用方必须拿它去答：传进来的 `task` 是写之前的快照，
@@ -144,8 +141,10 @@ def _task_state(state, task: dict) -> tuple[str, bool, dict | None]:
 
     Caches the queue display state in state.task_cache and writes it back to
     sr_tasks.status on change, broadcasting a job_update frame. A task with no
-    job_id (interrupted submit) has no scheduler record — surface its stored
-    status verbatim and never invent a terminal state for it.
+    job_id (interrupted submit) has no executor record — surface its stored
+    status verbatim and never invent a terminal state for it. A row the executor
+    has no trace of at all keeps a stored terminal status instead of being
+    re-judged UNKNOWN (see the branch below).
 
     比较基准是内存缓存，缓存缺失（sr-api 刚重启）回落到**库里存的状态**：不回落的
     话重启后每一行都被判成「状态变了」，于是每个已跑完的老行都被写回一次、updated_at
@@ -158,22 +157,30 @@ def _task_state(state, task: dict) -> tuple[str, bool, dict | None]:
         return (task.get("status") or "UNKNOWN").upper(), False, None
     prev = cache.get(task_id) or ((task.get("status") or "").upper() or None)
     try:
-        # Terminal states come from the job's own verdict file, which lives in
-        # the task's <DatarootLQ>/Debug/ — hence query_job_status(task=…)
-        # rather than a bare slurm.job_status (§一 "C 方案").
+        # Terminal states come from the run's own verdict file, which lives in
+        # the task's <DatarootLQ>/Debug/ — hence query_job_status(task=…).
         st = run_sr_svc.query_job_status(task["job_id"], task=task)
-    except Exception:  # noqa: BLE001 — scheduler hiccup → keep last known
+    except Exception:  # noqa: BLE001 — 查询出错 → 保留上一次的已知状态
         return prev or "UNKNOWN", False, None
     state_name = _queue_state(st)
+    if state_name == "UNKNOWN" and st.get("active") is None:
+        # 本机执行器对这个编号毫无痕迹：既没有运行记录，也没有结果文件。库里却记着
+        # 它已经结束 —— 那种行来自更早的调度器路线（或工作目录被清过），本机当然
+        # 找不到痕迹。按库里记的终态展示，不把它改写成 UNKNOWN：否则队列页上一批早就
+        # 跑完的作业会集体变成「结局不明」。只是展示口径 —— 重投仍被挡着，
+        # `_resolve_existing` 见到 UNKNOWN 一律 SubmitConflict，不看库里的状态。
+        stored = (task.get("status") or "").upper()
+        if stored in _RUN_ENDED_STATES:
+            return stored, False, None
     if state_name == prev:
         return state_name, False, None
     cache[task_id] = state_name
     fresh = None
     try:
         # 本次运行的时间窗就钉在这两个转换点上：首次看到 RUNNING = 排队结束、真开始
-        # 跑；看到终态 = 跑完。`prev != "RUNNING"` 让重排队（Slurm requeue）只以
-        # 后一次 RUNNING 为起点，而重启后 prev 来自库里存的状态 —— 库已经是 RUNNING
-        # 的（重启前就观测到过）不会被重新计时。
+        # 跑；看到终态 = 跑完。`prev != "RUNNING"` 保证只有「从非 RUNNING 变成
+        # RUNNING」这一次才算开始，而重启后 prev 来自库里存的状态 —— 库已经是
+        # RUNNING 的（重启前就观测到过）不会被重新计时。
         fresh = state.store.set_sr_task_state(
             task_id, state_name,
             mark_started=state_name == "RUNNING" and prev != "RUNNING",
@@ -198,24 +205,6 @@ def _task_state(state, task: dict) -> tuple[str, bool, dict | None]:
     return state_name, True, fresh
 
 
-def _run_dataroot(task: dict) -> str | None:
-    """The directory the job actually works in — its private copy when the
-    sandbox is on, otherwise lq_path itself.
-
-    Surfaced because the two differ: the queue row shows the path the user
-    typed, but with SR_SANDBOX_ROOT set the product lands in the copy, so
-    "where is my result" has to be answerable from the API. Never raises —
-    the sandbox env may have changed since the task was created.
-    """
-    p = task.get("params") or {}
-    try:
-        sandbox = run_sr_svc.sandbox_scene_paths(p.get("lq_path"),
-                                                 task.get("fingerprint"))
-    except ValueError:
-        return None
-    return (sandbox or {}).get("scene") or p.get("lq_path")
-
-
 def _task_view(state, task: dict) -> dict:
     """Project an sr_task row onto the /api/queue response shape (params subset)."""
     state_name, _, fresh = _task_state(state, task)
@@ -236,7 +225,9 @@ def _task_view(state, task: dict) -> dict:
             "delete_ori": p.get("delete_ori", False),
             "grid_align": p.get("grid_align", True),
         },
-        "run_dataroot": _run_dataroot(task),
+        # 作业就地跑，产物落在 lq_path 里 —— 与 params.lq_path 同一个值，
+        # 保留这个字段是为了既有消费者不用改。
+        "run_dataroot": p.get("lq_path"),
         "config_xml": task["config_xml"], "batch_script": task["batch_script"],
         "log_dir": task["log_dir"],
         "created_at": task["created_at"], "updated_at": task["updated_at"],
@@ -246,7 +237,7 @@ def _task_view(state, task: dict) -> dict:
         "started_at": task["started_at"], "finished_at": task["finished_at"],
         # 产物预览的服务端主动生成进度（api-contract §4.x）。null = 没生成过；
         # running / done / skipped / failed 见 `preview_note` 里那句人话。
-        # 与 `state` 无关：作业跑完了、预览也可能因为沙箱/产物缺失/目录不可写而没生成。
+        # 与 `state` 无关：作业跑完了、预览也可能因为产物缺失/目录不可写而没生成。
         "preview_state": task.get("preview_state"),
         "preview_note": task.get("preview_note"),
     }
@@ -613,25 +604,18 @@ async def submit_queue(request: Request):
     params = _norm_sr_params(body)
     # 这一跑读哪份、跑完落到哪个名字（run_sr.nosr_swap_plan）。解析放在这里而不是
     # submit_run_sr 里：缺未超分那一份是提交侧的错，要给 400 + 缺了哪个名字，而不是
-    # 落到 submit 里变成 422 的裸异常。沙箱开着时本体的位置在副本目录里，所以
-    # dataroot 先算出来（submit_run_sr 自己也会再算一次同一个副本目录）。
+    # 落到 submit 里变成 422 的裸异常。
     try:
-        sandbox = run_sr_svc.sandbox_scene_paths(
-            params["lq_path"], run_sr_svc.task_fingerprint(params))
         swap = run_sr_svc.nosr_swap_plan(
-            params["lq_path"], params["mask_path"], params["suffix"],
-            dataroot=(sandbox or {}).get("scene"))
+            params["lq_path"], params["mask_path"], params["suffix"])
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     try:
         data = run_sr_svc.submit_run_sr(params, store=state.store, swap=swap)
-    except RuntimeError as e:
-        msg = str(e)
-        if "interrupted" in msg:
-            raise HTTPException(
-                status_code=409,
-                detail="上次提交中断、job_id 未录——勿盲重试，请先核对调度器") from e
-        raise HTTPException(status_code=422, detail=msg) from e
+    except run_sr_svc.SubmitConflict as e:
+        # 上一次同参数提交还没法判明（中断或结局不可确认）：重投就可能两个 SR
+        # 进程同写一个场景目录，所以给 409 而不是替操作员猜。
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:  # noqa: BLE001 — 其余一律生成/提交失败
         raise HTTPException(status_code=422,
                             detail=f"{type(e).__name__}: {e}") from e
@@ -649,23 +633,32 @@ async def submit_queue(request: Request):
     for k in ("previous_state", "previous_exit_code", "previous_job_id"):
         if k in data:
             out[k] = data[k]
-    # 就地写入提示（工作单 §4.2 最后一条）：没有沙箱时 SR 直接写 lq_path——输出 tif
-    # 落在场景目录里，输入 tif 本身不改名也不删除（Suffix 恒非空、delete_ori 已禁用）；
-    # 只有该目录里已存在同名输出时，SR 才把旧输出改名为 <输出名>_NOSR.tif 再覆盖
+    # 就地写入提示（工作单 §4.2 最后一条）：SR 直接写 lq_path——输出 tif 落在场景
+    # 目录里，输入 tif 本身不改名也不删除（Suffix 恒非空、delete_ori 已禁用）；只有该
+    # 目录里已存在同名输出时，SR 才把旧输出改名为 <输出名>_NOSR.tif 再覆盖
     # （util.writeTiff 的改名对象是输出路径上的同名文件，不是输入）。同一句话也写进
-    # 作业日志（run_sr.build_batch_script 的 audit 段），两处都不能省。
-    if run_sr_svc.sandbox_scene_paths(params["lq_path"],
-                                      run_sr_svc.task_fingerprint(params)) is None:
-        out["in_place"] = True
-        out["notice"] = (
-            f"输出目录 = 输入目录（{params['lq_path']}）：SR 就地把结果写成 "
-            f"<输入名>_{params['suffix']}.tif，输入 tif 不改名也不删除；"
-            "该目录里已存在同名输出时，旧输出先被改名为 <同名>_NOSR.tif 再覆盖")
+    # 作业日志（run_sr.build_run_script 的 audit 段），两处都不能省。
+    out["in_place"] = True
+    out["notice"] = (
+        f"输出目录 = 输入目录（{params['lq_path']}）：SR 就地把结果写成 "
+        f"<输入名>_{params['suffix']}.tif，输入 tif 不改名也不删除；"
+        "该目录里已存在同名输出时，旧输出先被改名为 <同名>_NOSR.tif 再覆盖")
     return out
 
 
 @router.post("/api/queue/{task_id}/cancel")
-def cancel_queue(task_id: int, request: Request):
+async def cancel_queue(task_id: int, request: Request):
+    """取消一个任务；`{"confirmed_stopped": true}` 是操作员的兜底声明。
+
+    正常路径下取消由任务服务（run_sr.cancel_run_sr → local_exec.cancel）完成：排队中
+    的直接不启动，跑着的停掉整棵进程树，sr-api 重启过的按进程创建时间核对身份后再停。
+
+    只有在平台**无法证明**那次运行到底启没启动时（判定文件没有、进程记录也没有），
+    取消没有可依据的对象，这时它返回 409 而不是 200 + cancelled=false —— 后者会被当成
+    「已经停下了」，而子进程可能仍在就地写 lq_path，操作员据此重投就会有两个 SR 进程
+    同写一个目录。核实无残留进程后带 `confirmed_stopped` 再调一次，任务行转为已取消，
+    重投才解锁。
+    """
     state = request.app.state
     task = state.store.get_sr_task_by_id(task_id)
     if task is None:
@@ -673,23 +666,24 @@ def cancel_queue(task_id: int, request: Request):
     if task["job_id"] is None:
         raise HTTPException(status_code=400,
                             detail="该任务无 job_id（中断遗留），无法取消")
-    # Which "scheduler" owns the job follows SR_EXECUTOR — the local executor
-    # has its own process table; scancel knows nothing about it.
-    if sr_runtime().executor == "local":
-        cancelled = local_exec.cancel(task["job_id"])
-    else:
-        cancelled = slurm.cancel(task["job_id"])
+    body = await request.body()
+    try:
+        payload = json.loads(body or b"{}")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="请求体须为合法 JSON 对象")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="请求体须为 JSON 对象")
+    confirmed = bool(payload.get("confirmed_stopped"))
+    cancelled = run_sr_svc.cancel_run_sr(task, confirmed_stopped=confirmed)
     state_name, *_ = _task_state(state, task)
     if not cancelled and state_name not in _TERMINAL_STATES:
-        # 200 + cancelled=false 会被当成"已经停下了"。走到这里说明本进程没有该 job
-        # 的记录（sr-api 重启过），而子进程可能还在就地写 lq_path —— 操作员据此重新
-        # 提交就会有两个 SR 进程同写一个目录。宁可给 409 也不要这个 200。
         script = os.path.basename(task.get("batch_script") or "") or "run_sr"
         raise HTTPException(
             status_code=409,
-            detail=f"取消失败：本进程没有 job {task['job_id']} 的记录（sr-api 可能重启过），"
-                   f"子进程可能仍在运行。先 `ps -ef | grep {script}` 确认，再手工 kill；"
-                   "确认停止前不要重复提交同一目录")
+            detail=f"取消失败：无法确认运行编号 {task['job_id']} 是否还在跑 —— 本进程没有"
+                   f"它的进程记录（sr-api 可能重启过），也没有它的结果文件。"
+                   f"先 `ps -ef | grep {script}` 确认；确认已经没有残留进程后，"
+                   f"带 {{\"confirmed_stopped\": true}} 再调一次本接口，然后才可重投")
     return {"task_id": task_id, "cancelled": cancelled, "state": state_name}
 
 

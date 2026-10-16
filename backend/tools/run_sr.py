@@ -1,14 +1,14 @@
-"""run_sr — submit a super-resolution job to Slurm (thin wrapper).
+"""run_sr — submit a super-resolution job (thin wrapper).
 
 Business logic in backend/services/run_sr.py: high-level params → config.xml
-+ batch script → sbatch (idempotent via the sr_tasks table). Returns a job_id;
-the agent polls it with the sr_job_status tool. Async by design (the job runs
-on the CentOS7 array server).
++ run script → local executor (idempotent via the sr_tasks table). Returns a
+job_id; the agent polls it with the sr_job_status tool. Async by design (the job
+runs as a child process on the API host).
 
 Placeholder / non-absolute paths are rejected here as err() — search_scenes
-fake results carry `<fake>/...` paths that must never reach Slurm. The err is
-fed back to the model (contract boundary), so it can change the params and
-retry; it never raises.
+fake results carry `<fake>/...` paths that must never reach the executor. The
+err is fed back to the model (contract boundary), so it can change the params
+and retry; it never raises.
 """
 
 from __future__ import annotations
@@ -21,10 +21,10 @@ from backend.services.scene_search import derived_mask_path
 from .contract import err, ok, tool
 
 _DESC = (
-    "Submit a remote-sensing super-resolution (SR) job to Slurm. Assembles an "
-    "SFSR config from high-level params (L1 input dir, optional mask, SR "
-    "scale, output suffix) and returns a job_id — NOT the result. Poll the "
-    "result with sr_job_status. Requires the Slurm scheduler host (sbatch)."
+    "Submit a remote-sensing super-resolution (SR) job. Assembles an SFSR "
+    "config from high-level params (L1 input dir, optional mask, SR scale, "
+    "output suffix) and returns a job_id — NOT the result. The job runs on the "
+    "API host; poll the result with sr_job_status."
 )
 
 
@@ -32,11 +32,10 @@ def _bad_path(path: str) -> str | None:
     """Why a path cannot be handed to run_sr, or None if it is acceptable.
 
     Rejects search_scenes fake rows (`<fake>/...`), relative paths, and anything
-    outside `SR_ALLOWED_ROOTS` — Slurm jobs run on the array server where only
-    real-array absolute paths make sense, and the job writes its output *into*
-    lq_path. Uses the same `pathguard` rules as the REST entry point, so both
-    entries accept exactly the same set of paths. This is validation returning an
-    err (the loop self-heals), not an exception.
+    outside `SR_ALLOWED_ROOTS` — only real array absolute paths make sense, and
+    the job writes its output *into* lq_path. Uses the same `pathguard` rules as
+    the REST entry point, so both entries accept exactly the same set of paths.
+    This is validation returning an err (the loop self-heals), not an exception.
     """
     if not path:
         return None
@@ -161,13 +160,9 @@ def run_run_sr(**params) -> dict:
         "options_yml": params.get("options_yml"),
     }
     # 这一跑读哪份、跑完落到哪个名字（run_sr.nosr_swap_plan）。缺未超分那一份是
-    # err（模型能读着原因改参数重试），与 REST 入口同一条规则、同一个函数。沙箱
-    # 开着时本体的位置在副本目录里，所以 dataroot 一起算出来。
+    # err（模型能读着原因改参数重试），与 REST 入口同一条规则、同一个函数。
     try:
-        sandbox = svc.sandbox_scene_paths(
-            lq_path, svc.task_fingerprint(params))
-        swap = svc.nosr_swap_plan(lq_path, mask_path, suffix,
-                                  dataroot=(sandbox or {}).get("scene"))
+        swap = svc.nosr_swap_plan(lq_path, mask_path, suffix)
     except ValueError as e:
         return err(str(e))
     try:

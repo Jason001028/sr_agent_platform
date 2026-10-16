@@ -1,15 +1,17 @@
-"""Tests for run_sr (config XML, batch script, Slurm submit, status poll).
+"""Tests for run_sr (config XML, run script, submit, status query).
 
-The dev machine has no Slurm, so "unavailable" paths are tested against the
-real host; happy paths inject a fake command runner (run_cmd seam) and patch
-slurm_available.
+Nothing here starts an SR run: the executor's six entry points are replaced by
+the in-memory double in backend/tests/exec_double.py, so the cases are about the
+task service — what files a submit writes, which run a replay reuses, where the
+verdict file is looked for. The run script is a shell artefact and is asserted
+by string, since pinning its exact shape is the only way to check a CentOS7 run
+script from this machine.
 """
 
 import json
 import os
 import re
 import shutil
-import subprocess
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -17,9 +19,9 @@ from pathlib import Path
 from unittest import mock
 
 from backend.services import run_sr as svc
-from backend.services import slurm
 from backend.services import store as store_mod
 from backend.tests import allowed_roots_env, make_scene_dir
+from backend.tests.exec_double import fake_exec
 from backend.tools.run_sr import run_run_sr
 
 # full param dict shaped like the tool's, for fingerprint-stable submits
@@ -27,7 +29,7 @@ PARAMS = {"lq_path": "/data", "mask_path": None, "sr_scale": 2, "suffix": "t1",
           "gpu": 0, "cloud_limit": 80, "delete_ori": False, "grid_align": True,
           "options_yml": None}
 
-#: A resolved nosr_swap_plan (run_sr.nosr_swap_plan) as the batch script sees
+#: A resolved nosr_swap_plan (run_sr.nosr_swap_plan) as the run script sees
 #: it: absolute paths, the two scratch files under the scene's Debug/.
 SWAP = {"body": "/D/scene/PAN.tif",
         "source": "/D/scene/PAN_NOSR.tif",
@@ -43,38 +45,16 @@ def gradient_tif(path):
     Image.fromarray((y + x).astype(np.uint16)).save(path)
 
 
-def fake_run_script(*results):
-    """Command runner returning canned CompletedProcess in call order."""
-    it = iter(results)
+def temp_dir():
+    """Temp dir for a case that lets the tool wrapper open the default store.
 
-    def _run(cmd, timeout=30):
-        out, err, rc = next(it)
-        return subprocess.CompletedProcess(cmd, rc, stdout=out, stderr=err)
-
-    return _run
-
-
-def dispatch_runner(sbatch_outputs=("Submitted batch job 42\n",),
-                    squeue_out="", sacct_out=""):
-    """Runner that dispatches on the subcommand, records calls, and yields
-    sbatch outputs in order. squeue_out/sacct_out feed the status polls."""
-    calls = []
-    it = iter(sbatch_outputs)
-
-    def _run(cmd, timeout=30):
-        name = cmd[0]
-        calls.append(name)
-        if name == "sbatch":
-            out = next(it)
-            return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
-        if name == "squeue":
-            return subprocess.CompletedProcess(cmd, 0, stdout=squeue_out, stderr="")
-        if name == "sacct":
-            return subprocess.CompletedProcess(cmd, 0, stdout=sacct_out, stderr="")
-        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="unknown cmd")
-
-    _run.calls = calls
-    return _run
+    `run_run_sr` builds its own Store and never closes it, so on Windows the
+    SQLite file can still be open when the dir is removed.
+    """
+    try:
+        return tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+    except TypeError:                        # Python < 3.10
+        return tempfile.TemporaryDirectory()
 
 
 def temp_store():
@@ -170,15 +150,6 @@ class TestNosrSwapPlan(unittest.TestCase):
         p = self.plan()
         self.assertEqual(p["source"], self.scene.as_posix() + "/PAN_NOSR.tif")
 
-    def test_dataroot_reroots_the_in_scene_paths_only(self):
-        # 沙箱开着时 SR 只碰副本，本体与临时件都得落在副本目录里；掩码是操作员那份，
-        # 不在场景里，照原样给。
-        p = self.plan(dataroot="/DiskArray/tmp/sbx/abc/SCENE_L1_PAN")
-        self.assertEqual(p["body"], "/DiskArray/tmp/sbx/abc/SCENE_L1_PAN/PAN.tif")
-        self.assertEqual(p["backup"],
-                         "/DiskArray/tmp/sbx/abc/SCENE_L1_PAN/Debug/PAN.tif.srbak")
-        self.assertEqual(p["mask"], self.mask.replace("\\", "/"))
-
     def test_missing_un_superresolved_copy_is_refused_by_name(self):
         (self.scene / "PAN_NOSR.tif").unlink()
         with self.assertRaises(ValueError) as ctx:
@@ -221,174 +192,139 @@ class TestNosrSwapPlan(unittest.TestCase):
                          self.scene.as_posix() + "/SCENE_L1_PAN_NOSR.tif")
 
 
-class TestBuildBatchScript(unittest.TestCase):
-    """The batch script is asserted by string: it is a shell artefact, and the
-    only way to check a CentOS7 job script from this machine is to pin its
-    exact shape."""
+class TestBuildRunScript(unittest.TestCase):
+    """The run script is asserted by string: it is a shell artefact, and the only
+    way to check a CentOS7 run script from this machine is to pin its exact
+    shape."""
 
     def setUp(self):
         self._env = {}
-        for name in ("SR_SLURM_TIME", "SR_SLURM_CPUS", "SR_SLURM_PARTITION",
-                     "SR_SLURM_MEM", "SR_SLURM_NODELIST", "SR_VERIFY_SCRIPT",
-                     "SR_PREP_SCRIPT", "SR_PYTHON", "SR_BUNDLE_DIR",
-                     "SR_SR_SCRIPT"):
+        for name in ("SR_VERIFY_SCRIPT", "SR_PREP_SCRIPT", "SR_PYTHON",
+                     "SR_BUNDLE_DIR", "SR_SR_SCRIPT"):
             if name in os.environ:
                 self._env[name] = os.environ.pop(name)
         self.addCleanup(self._restore_env)
 
     def _restore_env(self):
-        for name in ("SR_SLURM_TIME", "SR_SLURM_CPUS", "SR_SLURM_PARTITION",
-                     "SR_SLURM_MEM", "SR_SLURM_NODELIST", "SR_VERIFY_SCRIPT",
-                     "SR_PREP_SCRIPT", "SR_PYTHON", "SR_BUNDLE_DIR",
-                     "SR_SR_SCRIPT"):
+        for name in ("SR_VERIFY_SCRIPT", "SR_PREP_SCRIPT", "SR_PYTHON",
+                     "SR_BUNDLE_DIR", "SR_SR_SCRIPT"):
             os.environ.pop(name, None)
         os.environ.update(self._env)
 
     def test_defaults(self):
-        script = svc.build_batch_script("/w/cfg.xml", "/w")
-        self.assertIn("--gres=gpu:1", script)
-        self.assertIn("cd /DiskArray/ProductionSchedule", script)
+        script = svc.build_run_script("/w/cfg.xml", job_id=1)
+        self.assertIn("cd /DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/"
+                      "mmsr_bundle/codes", script)
         self.assertIn("python code_0817_prod.py -f /w/cfg.xml", script)
-        self.assertNotIn("--partition", script)
+        # no scheduler in the picture: nothing in the text asks one for anything
+        self.assertNotIn("SBATCH", script)
 
-    def test_partition_and_python(self):
-        script = svc.build_batch_script("/w/cfg.xml", "/w", python="/opt/venv/bin/python",
-                                        partition="gpu", gres=4)
-        self.assertIn("--gres=gpu:4", script)
-        self.assertIn("--partition=gpu", script)
+    def test_python_and_bundle_dir_can_be_overridden(self):
+        script = svc.build_run_script("/w/cfg.xml", job_id=1,
+                                      python="/opt/venv/bin/python",
+                                      bundle_dir="/opt/sr/bundle")
         self.assertIn("/opt/venv/bin/python", script)
+        self.assertIn("cd /opt/sr/bundle", script)
+
+    def test_job_id_is_required(self):
+        # 校验器用它命名判定文件，而本机执行没有调度器环境变量可读：没有 job_id
+        # 就写不出判定文件，也就没有任何终态可言。
+        with self.assertRaises(ValueError) as ctx:
+            svc.build_run_script("/w/cfg.xml", "/w")
+        self.assertIn("job_id", str(ctx.exception))
 
     # ---- SR_SR_SCRIPT: run the deployment variant while the production
     # script stays untouched (docs/planning/sr-pipeline-restore-plan.md E-A) ---
     def test_sr_script_defaults_to_the_production_script(self):
-        script = svc.build_batch_script("/w/cfg.xml", "/w")
+        script = svc.build_run_script("/w/cfg.xml", job_id=1)
         self.assertIn("python code_0817_prod.py -f /w/cfg.xml", script)
-        self.assertIn('echo "SR_SCRIPT=code_0817_prod.py"', script)
+        self.assertIn("echo SR_SCRIPT=code_0817_prod.py", script)
 
     def test_sr_script_env_switches_to_the_variant(self):
-        os.environ["SR_SR_SCRIPT"] = "code_0817_prod_slurm.py"
-        script = svc.build_batch_script("/w/cfg.xml", "/w")
-        self.assertIn("python code_0817_prod_slurm.py -f /w/cfg.xml", script)
+        os.environ["SR_SR_SCRIPT"] = "code_0817_prod_platform.py"
+        script = svc.build_run_script("/w/cfg.xml", job_id=1)
+        self.assertIn("python code_0817_prod_platform.py -f /w/cfg.xml", script)
         # and nothing may still point at the production script
-        self.assertNotIn("code_0817_prod.py", script)
+        self.assertNotIn("code_0817_prod.py -f", script)
 
     def test_sr_script_argument_beats_the_env(self):
         os.environ["SR_SR_SCRIPT"] = "from-env.py"
-        script = svc.build_batch_script("/w/cfg.xml", "/w",
-                                        sr_script="from-arg.py")
+        script = svc.build_run_script("/w/cfg.xml", job_id=1,
+                                      sr_script="from-arg.py")
         self.assertIn("from-arg.py", script)
         self.assertNotIn("from-env.py", script)
 
-    # ---- P2 additions ----------------------------------------------------
-    def test_env_driven_limits_and_job_name(self):
-        os.environ["SR_SLURM_TIME"] = "04:30:00"
-        os.environ["SR_SLURM_CPUS"] = "8"
-        os.environ["SR_SLURM_PARTITION"] = "gpu"
-        script = svc.build_batch_script("/w/run_sr_t1.xml", "/w")
-        self.assertIn("#SBATCH --time=04:30:00", script)
-        self.assertIn("#SBATCH --cpus-per-task=8", script)
-        self.assertIn("#SBATCH --partition=gpu", script)
-        self.assertIn("#SBATCH --job-name=run_sr_t1", script)   # suffix in name
-
-    # ---- SR_SLURM_NODELIST: keep jobs off the node family the submitting host
-    # cannot resolve (docs/status/slurm-acceptance.md §B0, 2026-09-14) ---------
-    def test_nodelist_unset_emits_no_line(self):
-        script = svc.build_batch_script("/w/cfg.xml", "/w")
-        self.assertNotIn("--nodelist", script)
-
-    def test_nodelist_env_emits_the_directive(self):
-        os.environ["SR_SLURM_NODELIST"] = "node81-[129-162,165-183]"
-        script = svc.build_batch_script("/w/cfg.xml", "/w")
-        self.assertIn("#SBATCH --nodelist=node81-[129-162,165-183]", script)
-
-    def test_nodelist_argument_beats_the_env(self):
-        os.environ["SR_SLURM_NODELIST"] = "from-env"
-        script = svc.build_batch_script("/w/cfg.xml", "/w", nodelist="node81-132")
-        self.assertIn("#SBATCH --nodelist=node81-132", script)
-        self.assertNotIn("from-env", script)
-
-    def test_nodelist_blank_means_no_line(self):
-        script = svc.build_batch_script("/w/cfg.xml", "/w", nodelist="   ")
-        self.assertNotIn("--nodelist", script)
-
-    def test_nodelist_rejects_injection(self):
-        # the value is written verbatim, so anything that could end the
-        # directive or start a new one has to be refused, not sanitised
-        for bad in ("node81-132\n#SBATCH --gres=gpu:8", "node81 132",
-                    "node81;id", "node81-132'", 'node81-132"/x', "node81-132&"):
-            with self.assertRaises(ValueError):
-                svc.build_batch_script("/w/cfg.xml", "/w", nodelist=bad)
-
-    def test_limits_fall_back_to_defaults(self):
-        script = svc.build_batch_script("/w/cfg.xml", "/w")
-        self.assertIn("#SBATCH --time=02:00:00", script)
-        self.assertIn("#SBATCH --cpus-per-task=4", script)
-
-    def test_export_none_is_set(self):
-        self.assertIn("#SBATCH --export=NONE", svc.build_batch_script("/w/c.xml", "/w"))
-
-    def test_mem_only_when_configured(self):
-        script = svc.build_batch_script("/w/c.xml", "/w")
-        self.assertNotIn("--mem", script)
-        os.environ["SR_SLURM_MEM"] = "64G"
-        self.assertIn("#SBATCH --mem=64G", svc.build_batch_script("/w/c.xml", "/w"))
-
     def test_never_assigns_cuda_visible_devices(self):
-        # E2/E4: any assignment here would clobber what --gres allocated. The
-        # audit section only READS it, so match assignments, not mentions.
-        script = svc.build_batch_script("/w/c.xml", "/w")
+        # The card comes from the child's environment (SR_LOCAL_GPU, set by
+        # local_exec), so an assignment here would be a second, disagreeing
+        # source. The audit section only READS it — match assignments, not
+        # mentions.
+        script = svc.build_run_script("/w/c.xml", job_id=1)
         assignments = re.findall(r"^\s*(?:export\s+)?CUDA_VISIBLE_DEVICES\s*=",
                                  script, re.MULTILINE)
         self.assertEqual(assignments, [], "the script must not pick a GPU")
 
-    def test_audit_preamble_records_the_allocation(self):
-        script = svc.build_batch_script("/w/c.xml", "/w",
-                                        python="/opt/sr/bin/python")
-        self.assertIn("SLURM_JOB_ID=", script)
-        self.assertIn("SLURM_JOB_GPUS=", script)
+    def test_audit_preamble_records_the_run(self):
+        script = svc.build_run_script("/w/c.xml", job_id=41,
+                                      python="/opt/sr/bin/python")
+        self.assertIn("JOB_ID=41", script)
         self.assertIn("CUDA_VISIBLE_DEVICES=", script)
         self.assertIn("SR_SCRIPT=", script)          # which SR script ran
+        self.assertIn("SR_PYTHON=/opt/sr/bin/python", script)
         self.assertIn("$(hostname)", script)
-        self.assertIn("/opt/sr/bin/python", script)
         self.assertIn("/w/c.xml", script)
         self.assertIn("nvidia-smi --query-gpu=index,uuid", script)
 
+    def test_the_header_says_what_runs_this_script(self):
+        # 这段注释是"这个脚本在本机被谁拉起、拿哪张卡"的说明书：读日志的人先看到它。
+        script = svc.build_run_script("/w/c.xml", job_id=1)
+        self.assertIn("backend/services/local_exec.py", script)
+
     def test_pythonunbuffered_is_exported(self):
         self.assertIn("export PYTHONUNBUFFERED=1",
-                      svc.build_batch_script("/w/c.xml", "/w"))
+                      svc.build_run_script("/w/c.xml", job_id=1))
 
     def test_cd_failure_exits_nonzero(self):
-        script = svc.build_batch_script("/w/c.xml", "/w")
+        script = svc.build_run_script("/w/c.xml", job_id=1)
         cd_line = [ln for ln in script.splitlines() if ln.startswith("cd ")][0]
         self.assertIn("|| {", cd_line)
         self.assertIn("exit 1", cd_line)
 
     def test_no_set_e(self):
         # `set -e` would change the meaning of the `||`/pipeline lines below it.
-        script = svc.build_batch_script("/w/c.xml", "/w")
+        script = svc.build_run_script("/w/c.xml", job_id=1)
         self.assertNotIn("set -e", script)
 
     def test_verifier_runs_after_python_and_passes_its_exit_code_through(self):
-        script = svc.build_batch_script("/w/c.xml", "/w")
+        script = svc.build_run_script("/w/c.xml", job_id=1)
         lines = script.splitlines()
         run_i = lines.index("python code_0817_prod.py -f /w/c.xml")
         self.assertEqual(lines[run_i + 1], "_sr_rc=$?")
         self.assertIn("verify_sr_run.py --config /w/c.xml --sr-exit-code \"$_sr_rc\"",
                       lines[run_i + 3])
-        # The verifier's own code is what the job exits with (90 = contract not
-        # satisfied); taking it into a variable first keeps that explicit.
+        # The verifier's own code is what the script exits with (90 = contract
+        # not satisfied); taking it into a variable first keeps that explicit.
         self.assertEqual(lines[-2:], ["_v_rc=$?", "exit $_v_rc"])
+
+    def test_the_verifier_is_always_told_the_job_id(self):
+        # The verdict file is named after the run number, and with no scheduler
+        # there is no environment variable to read it from — the id in the script
+        # text is the only source, and it must be the same id
+        # exit_code_file_for re-derives.
+        script = svc.build_run_script("/w/c.xml", job_id=41)
+        self.assertIn("verify_sr_run.py --config /w/c.xml --sr-exit-code "
+                      '"$_sr_rc" --job-id 41', script)
 
     def test_no_swap_means_no_prep_and_no_landing(self):
         # submit_run_sr without a resolved plan produces the plain script: the
         # SR script reads whatever it resolves itself and nothing lands on the
         # body name.
-        script = svc.build_batch_script("/w/c.xml", "/w")
+        script = svc.build_run_script("/w/c.xml", job_id=1)
         self.assertNotIn("sr_prep_scene.py", script)
         self.assertNotIn("--land-on-body", script)
 
     def test_swap_runs_the_prep_between_cd_and_the_sr_script(self):
-        script = svc.build_batch_script("/w/c.xml", "/w", swap=SWAP)
+        script = svc.build_run_script("/w/c.xml", job_id=1, swap=SWAP)
         lines = script.splitlines()
         cd_i = [i for i, ln in enumerate(lines) if ln.startswith("cd ")][0]
         prep_i = [i for i, ln in enumerate(lines)
@@ -407,7 +343,7 @@ class TestBuildBatchScript(unittest.TestCase):
         # Exiting here would leave no verdict file at all — the platform reads
         # that as UNKNOWN and can never clear it. The prep's code goes into
         # _sr_rc and the verifier (which restores the body) still runs.
-        script = svc.build_batch_script("/w/c.xml", "/w", swap=SWAP)
+        script = svc.build_run_script("/w/c.xml", job_id=1, swap=SWAP)
         lines = script.splitlines()
         prep_i = [i for i, ln in enumerate(lines) if "sr_prep_scene.py" in ln][0]
         self.assertFalse(lines[prep_i].endswith("exit 1; }"))
@@ -417,13 +353,13 @@ class TestBuildBatchScript(unittest.TestCase):
         self.assertLess(prep_i, ver_i)
 
     def test_swap_is_skipped_from_the_sr_step_when_the_prep_failed(self):
-        script = svc.build_batch_script("/w/c.xml", "/w", swap=SWAP)
+        script = svc.build_run_script("/w/c.xml", job_id=1, swap=SWAP)
         lines = script.splitlines()
         self.assertIn("    python code_0817_prod.py -f /w/c.xml", lines)
         self.assertNotIn("python code_0817_prod.py -f /w/c.xml", lines)
 
     def test_swap_asks_the_verifier_to_land_the_product_on_the_body(self):
-        script = svc.build_batch_script("/w/c.xml", "/w", swap=SWAP, job_id=7)
+        script = svc.build_run_script("/w/c.xml", job_id=7, swap=SWAP)
         self.assertIn(
             "verify_sr_run.py --config /w/c.xml --sr-exit-code \"$_sr_rc\""
             " --land-on-body %(body)s --backup %(backup)s"
@@ -431,272 +367,138 @@ class TestBuildBatchScript(unittest.TestCase):
 
     def test_prep_script_can_be_overridden(self):
         os.environ["SR_PREP_SCRIPT"] = "/opt/sr/bin/my_prep.py"
-        script = svc.build_batch_script("/w/c.xml", "/w", swap=SWAP)
+        script = svc.build_run_script("/w/c.xml", job_id=1, swap=SWAP)
         self.assertIn("/opt/sr/bin/my_prep.py --body", script)
 
     def test_verify_script_can_be_overridden(self):
         os.environ["SR_VERIFY_SCRIPT"] = "/opt/sr/bin/my_verify.py"
-        script = svc.build_batch_script("/w/c.xml", "/w")
+        script = svc.build_run_script("/w/c.xml", job_id=1)
         self.assertIn("/opt/sr/bin/my_verify.py --config /w/c.xml", script)
 
-    def test_in_place_run_warns_about_the_nosr_rename_in_the_log(self):
-        # No sandbox → SR writes into the scene dir: the result tif lands next to
-        # the input, and a file already sitting at that output path is renamed to
+    def test_the_log_says_the_run_writes_in_place(self):
+        # The job writes into the scene dir: the result tif lands next to the
+        # input, and a file already sitting at that output path is renamed to
         # *_NOSR.tif before being overwritten (util.writeTiff renames the output
         # path, not the input), so the job log has to say so (plan §4.2, last
         # bullet). A 4.9 GB previous output is the file that gets renamed.
-        script = svc.build_batch_script("/w/c.xml", "/w")
-        self.assertIn("WARNING: no sandbox", script)
-        self.assertIn("leaves the input", script)
+        script = svc.build_run_script("/w/c.xml", job_id=1)
+        self.assertIn("IN PLACE", script)
+        self.assertIn("input tif is not renamed or deleted", script)
         self.assertIn("_NOSR.tif", script)
-
-    def test_sandboxed_script_has_no_in_place_warning(self):
-        script = svc.build_batch_script(
-            "/w/c.xml", "/w",
-            sandbox_src="/DiskArray/tmp/wangrz/SCENE",
-            sandbox_parent="/DiskArray/tmp/wangrz/sr_sandbox/abc123")
-        self.assertNotIn("WARNING: no sandbox", script)
-
-    def test_no_job_id_line_without_a_job_id(self):
-        # Under Slurm the verifier reads $SLURM_JOB_ID; passing --job-id too
-        # would make the two sources able to disagree.
-        script = svc.build_batch_script("/w/c.xml", "/w")
-        self.assertNotIn("--job-id", script)
-
-    def test_job_id_is_baked_into_the_verifier_call(self):
-        # Local execution has no $SLURM_JOB_ID, so the id carried in the script
-        # text is the only thing that names the verdict file — the verifier must
-        # be told it, and it must be the same id exit_code_file_for re-derives.
-        script = svc.build_batch_script("/w/c.xml", "/w", job_id=41)
-        self.assertIn("verify_sr_run.py --config /w/c.xml --sr-exit-code "
-                      '"$_sr_rc" --job-id 41', script)
-
-    def test_executor_is_echoed_for_the_log(self):
-        self.assertIn('echo "SR_EXECUTOR=${SR_EXECUTOR:-slurm}"',
-                      svc.build_batch_script("/w/c.xml", "/w"))
-
-    def test_job_name_is_slurm_safe(self):
-        script = svc.build_batch_script("/w/weird name/../x.xml", "/w",
-                                        job_name="run sr/../t1")
-        name = [ln for ln in script.splitlines()
-                if ln.startswith("#SBATCH --job-name=")][0].split("=", 1)[1]
-        self.assertNotIn(" ", name)
-        self.assertNotIn("/", name)
-        self.assertTrue(name)
 
 
 class TestSubmitRunSr(unittest.TestCase):
-    def test_unavailable_raises_clear_error(self):
-        # real host: no sbatch on the dev machine
-        with self.assertRaises(RuntimeError) as ctx:
-            svc.submit_run_sr({"lq_path": "/data"})
-        self.assertIn("slurm not available", str(ctx.exception))
-
-    def test_happy_path_with_fake_sbatch(self):
-        with mock.patch.object(slurm, "slurm_available", lambda: True):
-            with tempfile.TemporaryDirectory() as d:
-                os.environ["SR_SLURM_WORK_DIR"] = d
-                os.environ["SR_SLURM_PARTITION"] = "gpu"
-                store, tmp = temp_store()
-                try:
-                    fake = fake_run_script(("Submitted batch job 42\n", "", 0))
-                    data = svc.submit_run_sr(
-                        {"lq_path": "/data", "suffix": "t1"}, run_cmd=fake,
-                        store=store)
-                    self.assertEqual(data["job_id"], 42)
-                    self.assertEqual(data["status"], "SUBMITTED")
-                    self.assertTrue(Path(data["config_xml"]).exists())
-                    self.assertTrue(Path(data["batch_script"]).exists())
-                    script = Path(data["batch_script"]).read_text(encoding="utf-8")
-                    self.assertIn("--partition=gpu", script)
-                finally:
-                    del os.environ["SR_SLURM_WORK_DIR"]
-                    del os.environ["SR_SLURM_PARTITION"]
-                    store.close()
-                    tmp.cleanup()
-
-    def test_sbatch_failure_raises(self):
-        with mock.patch.object(slurm, "slurm_available", lambda: True):
-            with tempfile.TemporaryDirectory() as d:
-                os.environ["SR_SLURM_WORK_DIR"] = d
-                store, tmp = temp_store()
-                try:
-                    fake = fake_run_script(("", "invalid account", 1))
-                    with self.assertRaises(RuntimeError) as ctx:
-                        svc.submit_run_sr({"lq_path": "/data"}, run_cmd=fake,
-                                          store=store)
-                    self.assertIn("sbatch failed", str(ctx.exception))
-                finally:
-                    del os.environ["SR_SLURM_WORK_DIR"]
-                    store.close()
-                    tmp.cleanup()
-
-
-class TestSandboxPaths(unittest.TestCase):
-    """SR writes its result tif / Debug log / meta update into its DatarootLQ,
-    so a submit must be able to run against a copy instead of the directory the
-    user typed."""
+    """submit_run_sr: assemble config + script, then hand the script over."""
 
     def setUp(self):
-        self._old = os.environ.pop("SR_SANDBOX_ROOT", None)
-        self.addCleanup(self._restore)
-
-    def _restore(self):
-        os.environ.pop("SR_SANDBOX_ROOT", None)
-        if self._old is not None:
-            os.environ["SR_SANDBOX_ROOT"] = self._old
-
-    def test_off_by_default(self):
-        self.assertIsNone(svc.sandbox_scene_paths("/D/x/SCENE", "ab" * 32))
-
-    def test_scene_keeps_the_source_basename(self):
-        # the SC step reads <basename>.tif out of DatarootLQ — renaming the copy
-        # would change which file the job opens.
-        got = svc.sandbox_scene_paths("/D/x/JXGF07A03_101_001_L1_PAN", "c0ffee" * 8,
-                                      sandbox_root="/tmp/sbx/")
-        self.assertEqual(got["parent"], "/tmp/sbx/" + "c0ffee" * 2)
-        self.assertEqual(got["scene"],
-                         got["parent"] + "/JXGF07A03_101_001_L1_PAN")
-
-    def test_key_is_the_fingerprint_prefix(self):
-        a = svc.sandbox_scene_paths("/D/x/S", "a" * 64, sandbox_root="/tmp/s")
-        b = svc.sandbox_scene_paths("/D/x/S", "b" * 64, sandbox_root="/tmp/s")
-        self.assertNotEqual(a["parent"], b["parent"])
-
-    def test_env_supplies_the_root(self):
-        os.environ["SR_SANDBOX_ROOT"] = "/D/tmp/sbx"
-        got = svc.sandbox_scene_paths("/D/x/S", "a" * 64)
-        self.assertEqual(got["root"], "/D/tmp/sbx")
-
-    def test_relative_root_rejected(self):
-        with self.assertRaises(ValueError):
-            svc.sandbox_scene_paths("/D/x/S", "a" * 64, sandbox_root="tmp/sbx")
-
-    def test_shell_metacharacters_in_root_rejected(self):
-        # the root lands inside a generated `rm -rf "<root>/<key>"` line
-        for bad in ('/D/sbx"; rm -rf /', "/D/sbx`id`", "/D/sbx/../..", "/D/a b"):
-            with self.subTest(bad=bad):
-                with self.assertRaises(ValueError):
-                    svc.sandbox_scene_paths("/D/x/S", "a" * 64, sandbox_root=bad)
-
-    def test_non_hex_key_rejected(self):
-        with self.assertRaises(ValueError):
-            svc.sandbox_scene_paths("/D/x/S", 'a"; rm -rf /', sandbox_root="/D/s")
-
-
-class TestSandboxWiring(unittest.TestCase):
-    """config.xml and the job script must agree on where the copy lives — that
-    agreement is the whole mechanism (nothing is handed back at runtime)."""
-
-    def setUp(self):
-        self._old = os.environ.pop("SR_SANDBOX_ROOT", None)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
         self._work = tempfile.TemporaryDirectory()
-        os.environ["SR_SLURM_WORK_DIR"] = self._work.name
-        patcher = mock.patch.object(slurm, "slurm_available", lambda: True)
-        patcher.start()
-        self.addCleanup(patcher.stop)
         self.addCleanup(self._work.cleanup)
-        self.addCleanup(self._restore)
-        self.store, self._db = temp_store()
-        self.addCleanup(self._db.cleanup)
+        self._env = mock.patch.dict(os.environ, {
+            "SR_WORK_DIR": self._work.name,
+            "SR_BUNDLE_DIR": os.path.join(self._tmp.name, "bundle")})
+        self._env.start()
+        self.addCleanup(self._env.stop)
+        self.store = store_mod.Store(os.path.join(self._tmp.name, "db.sqlite"))
         self.addCleanup(self.store.close)
+        self._exec = fake_exec(first_id=42)
+        self.exec = self._exec.start()
+        self.addCleanup(self._exec.stop)
 
-    def _restore(self):
-        os.environ.pop("SR_SANDBOX_ROOT", None)
-        os.environ.pop("SR_SLURM_WORK_DIR", None)
-        if self._old is not None:
-            os.environ["SR_SANDBOX_ROOT"] = self._old
+    def test_no_usable_bash_is_refused_before_anything_happens(self):
+        # No bash on this host means nothing could be started at all — and the
+        # refusal comes before any side effect, so no task row is left behind
+        # for a job that never existed.
+        self.exec.bash_available = False
+        with self.assertRaises(RuntimeError) as ctx:
+            svc.submit_run_sr({"lq_path": "/data"}, store=self.store)
+        self.assertIn("本机执行不可用", str(ctx.exception))
+        self.assertEqual(self.exec.jobs, {})               # nothing was started
+        self.assertEqual(self.store.list_sr_tasks(), [])   # nothing was recorded
 
-    def _submit(self, params):
-        fake = fake_run_script(("Submitted batch job 42\n", "", 0))
-        return svc.submit_run_sr(params, run_cmd=fake, store=self.store)
+    def test_happy_path_writes_the_files_and_starts_the_run(self):
+        data = svc.submit_run_sr(PARAMS, store=self.store)
+        self.assertEqual(data["status"], "SUBMITTED")
+        self.assertEqual(data["job_id"], 42)
+        self.assertTrue(Path(data["config_xml"]).exists())
+        self.assertTrue(Path(data["batch_script"]).exists())
+        script = Path(data["batch_script"]).read_text(encoding="utf-8")
+        self.assertIn("JOB_ID=42", script)
+        # the path goes into the text bash-ified: the script is run by bash,
+        # which cannot take the Windows backslashes this test host produces
+        self.assertIn("-f " + data["config_xml"].replace("\\", "/"), script)
+        # the executor was handed exactly that script, under exactly that id
+        self.assertEqual(self.exec.submitted(42)["script"],
+                         data["batch_script"])
+        task = self.store.get_sr_task(svc.task_fingerprint(PARAMS))
+        self.assertEqual(task["job_id"], 42)
+        self.assertEqual(task["status"], "submitted")
+        self.assertEqual(task["batch_script"], data["batch_script"])
 
-    def test_config_dataroot_points_at_the_copy(self):
-        os.environ["SR_SANDBOX_ROOT"] = "/D/tmp/sbx"
-        out = self._submit({"lq_path": "/D/prod/SCENE_A", "suffix": "t1"})
-        self.assertEqual(svc.read_dataroot_lq(out["config_xml"]),
-                         "/D/tmp/sbx/" + svc.task_fingerprint(
-                             {"lq_path": "/D/prod/SCENE_A", "suffix": "t1"})[:12]
-                         + "/SCENE_A")
+    def test_file_names_carry_suffix_fingerprint_and_job_id(self):
+        """三样都得有，缺一样就会撞名。
 
-    def test_verdict_file_resolves_inside_the_sandbox(self):
-        # path is asserted by tail, not prefix: exit_code_file_for goes through
-        # Path(), which renders with the local separator on this Windows dev box
-        # and with `/` on the Linux target. The target is what has to be right.
-        os.environ["SR_SANDBOX_ROOT"] = "/D/tmp/sbx"
-        out = self._submit({"lq_path": "/D/prod/SCENE_A", "suffix": "t1"})
-        got = svc.exit_code_file_for(out["config_xml"], 42)
-        self.assertIn("sbx", got.split(os.sep))
-        self.assertTrue(got.endswith(os.sep.join(
-            ["SCENE_A", "Debug", "_SREXIT_42.txt"])), got)
+        只用 suffix：不同场景撞（同一个 work dir 里互相覆盖）；只用指纹：同一次
+        提交重跑撞（正在跑的那次的 config 被覆盖，而 exit_code_file_for 是从
+        config 里读 <DatarootLQ> 去找判定文件的）。
+        """
+        data = svc.submit_run_sr(PARAMS, store=self.store)
+        fp = svc.task_fingerprint(PARAMS)
+        for key in ("config_xml", "batch_script"):
+            name = Path(data[key]).name
+            self.assertIn("t1", name)                       # suffix
+            self.assertIn(fp[:svc.RUN_KEY_LEN], name)        # fingerprint
+            self.assertIn("42", name)                        # job id
+        # and the pair lives in the configured work dir, nothing else does
+        self.assertEqual(Path(data["config_xml"]).parent, Path(self._work.name))
 
-    def test_batch_script_copies_before_running_sr(self):
-        os.environ["SR_SANDBOX_ROOT"] = "/D/tmp/sbx"
-        out = self._submit({"lq_path": "/D/prod/SCENE_A", "suffix": "t1"})
-        script = Path(out["batch_script"]).read_text(encoding="utf-8")
-        self.assertIn('SBX_SRC="/D/prod/SCENE_A"', script)
-        self.assertIn('SBX_SCENE="$SBX_PARENT/$(basename "$SBX_SRC")"', script)
-        self.assertIn('cp -a "$SBX_SRC" "$SBX_PARENT/"', script)
-        self.assertIn('rm -rf "$SBX_PARENT"', script)
-        # the copy must happen before the SR script *runs* — the audit preamble
-        # also mentions the script name, so anchor on the invocation instead.
-        self.assertLess(script.index('cp -a "$SBX_SRC"'),
-                        script.index("-f " + out["config_xml"]))
-
-    def test_batch_script_never_reuses_a_stale_copy(self):
-        # a marker-file shortcut would make a re-run execute against the old
-        # copy of a source that has since been fixed.
-        os.environ["SR_SANDBOX_ROOT"] = "/D/tmp/sbx"
-        out = self._submit({"lq_path": "/D/prod/SCENE_A", "suffix": "t1"})
-        script = Path(out["batch_script"]).read_text(encoding="utf-8")
-        self.assertNotIn(".ready", script)
-        self.assertLess(script.index('rm -rf "$SBX_PARENT"'),
-                        script.index('cp -a "$SBX_SRC"'))
-
-    def test_half_copied_sandbox_is_refused(self):
-        os.environ["SR_SANDBOX_ROOT"] = "/D/tmp/sbx"
-        out = self._submit({"lq_path": "/D/prod/SCENE_A", "suffix": "t1"})
-        script = Path(out["batch_script"]).read_text(encoding="utf-8")
-        self.assertIn('if [ ! -d "$SBX_SCENE" ]; then', script)
-
-    def test_sandbox_off_runs_in_place(self):
-        out = self._submit({"lq_path": "/D/prod/SCENE_A", "suffix": "t1"})
-        self.assertEqual(svc.read_dataroot_lq(out["config_xml"]), "/D/prod/SCENE_A")
-        script = Path(out["batch_script"]).read_text(encoding="utf-8")
-        self.assertNotIn("cp -a ", script)
-        self.assertNotIn("SBX_PARENT", script)
-
-    def test_same_suffix_different_scenes_do_not_share_a_config(self):
-        # both jobs write config.xml into one work dir; sharing a path would make
-        # the second submit repoint the first task's verdict lookup.
-        a = self._submit({"lq_path": "/D/prod/SCENE_A", "suffix": "t1"})
-        b = self._submit({"lq_path": "/D/prod/SCENE_B", "suffix": "t1"})
-        self.assertNotEqual(a["config_xml"], b["config_xml"])
-        self.assertEqual(svc.read_dataroot_lq(a["config_xml"]), "/D/prod/SCENE_A")
-        self.assertEqual(svc.read_dataroot_lq(b["config_xml"]), "/D/prod/SCENE_B")
-
-    def test_bad_sandbox_root_stops_the_submit_before_sbatch(self):
-        os.environ["SR_SANDBOX_ROOT"] = "/D/sbx; rm -rf /"
-        runner = dispatch_runner()
-        with self.assertRaises(ValueError):
-            svc.submit_run_sr({"lq_path": "/D/prod/SCENE_A"}, run_cmd=runner,
-                              store=self.store)
-        self.assertEqual(runner.calls, [])       # nothing reached Slurm
+    def test_the_config_points_at_the_scene_it_will_write(self):
+        # 就地跑：config 里的 DatarootLQ 就是用户填的那个目录（产物落在那里，
+        # 判定文件的路径也从它推出来）。
+        data = svc.submit_run_sr(PARAMS, store=self.store)
+        self.assertEqual(svc.read_dataroot_lq(data["config_xml"]), PARAMS["lq_path"])
 
 
 class TestRunSrIdempotency(unittest.TestCase):
-    """P0② — the sr_tasks table prevents duplicate submission on replay."""
+    """P0② — the sr_tasks table prevents duplicate submission on replay.
+
+    "Is a run still going" is answered by the executor; these cases ask the task
+    service what it does with that answer, so the executor is the in-memory
+    double. A finished run is expressed the way a real one expresses it — a
+    verdict file in the scene's Debug/ — and that file is parsed by the real
+    parser (see exec_double).
+    """
 
     def setUp(self):
-        patcher = mock.patch.object(slurm, "slurm_available", lambda: True)
-        patcher.start()
-        self.addCleanup(patcher.stop)
         self._tmp = tempfile.TemporaryDirectory()
-        self.store = store_mod.Store(os.path.join(self._tmp.name, "db.sqlite"))
-        # addCleanup runs LIFO: register tmp.cleanup first so the SQLite handle
-        # (store.close) is released before the temp dir is removed (Windows).
+        self._work = tempfile.TemporaryDirectory()
+        self.scene = self._tmp.name
+        env = mock.patch.dict(os.environ, {"SR_WORK_DIR": self._work.name})
+        env.start()
+        self.addCleanup(env.stop)
         self.addCleanup(self._tmp.cleanup)
+        self.addCleanup(self._work.cleanup)
+        self.store = store_mod.Store(os.path.join(self._tmp.name, "db.sqlite"))
+        # addCleanup runs LIFO: register the temp dirs first so the SQLite handle
+        # (store.close) is released before they are removed (Windows).
         self.addCleanup(self.store.close)
+        self._exec = fake_exec(first_id=42)
+        self.exec = self._exec.start()
+        self.addCleanup(self._exec.stop)
+
+    @property
+    def params(self):
+        """The same logical submit, but its scene is this case's temp dir."""
+        return {**PARAMS, "lq_path": self.scene}
+
+    def write_verdict(self, job_id, verdict=0, sr_exit_code=0):
+        """Drop the job's own verdict file where the platform looks for it."""
+        debug = Path(self.scene) / "Debug"
+        debug.mkdir(parents=True, exist_ok=True)
+        (debug / svc.EXIT_FILE_FMT.format(job_id=job_id)).write_text(
+            "job_id=%s\nsr_exit_code=%s\nverdict=%s\nskip=0\n"
+            % (job_id, sr_exit_code, verdict), encoding="utf-8")
 
     def test_fingerprint_stable_under_key_order(self):
         a = svc.task_fingerprint({"x": 1, "y": [1, 2]})
@@ -704,230 +506,173 @@ class TestRunSrIdempotency(unittest.TestCase):
         self.assertEqual(a, b)
 
     def test_first_submit_creates_task_with_job_id(self):
-        runner = dispatch_runner()
-        data = svc.submit_run_sr(PARAMS, run_cmd=runner, store=self.store)
+        data = svc.submit_run_sr(self.params, store=self.store)
         self.assertEqual(data["status"], "SUBMITTED")
         self.assertEqual(data["job_id"], 42)
-        task = self.store.get_sr_task(svc.task_fingerprint(PARAMS))
+        task = self.store.get_sr_task(svc.task_fingerprint(self.params))
         self.assertIsNotNone(task)
         self.assertEqual(task["job_id"], 42)
         self.assertEqual(task["status"], "submitted")
 
     def test_replay_active_reuses_no_resubmit(self):
-        # first submit lands job 42; a replay finds it RUNNING → reuse.
-        first = dispatch_runner()
-        svc.submit_run_sr(PARAMS, run_cmd=first, store=self.store)
+        # first submit lands job 42; a replay while it is still going → reuse.
+        svc.submit_run_sr(self.params, store=self.store)
 
-        runner = dispatch_runner(squeue_out="RUNNING\n")
-        data = svc.submit_run_sr(PARAMS, run_cmd=runner, store=self.store)
+        data = svc.submit_run_sr(self.params, store=self.store)
         self.assertEqual(data["status"], "RESUMED_ACTIVE")
         self.assertEqual(data["job_id"], 42)
-        self.assertEqual(data["state"], "RUNNING")
+        self.assertIn(data["state"], ("PENDING", "RUNNING"))
         self.assertTrue(data["idempotent"])
-        self.assertEqual(runner.calls, ["squeue"])     # no sbatch, no sacct
-
-    def write_verdict(self, lq_path, job_id, verdict=0, sr_exit_code=0):
-        """Drop the job's own verdict file where the platform looks for it."""
-        debug = Path(lq_path) / "Debug"
-        debug.mkdir(parents=True, exist_ok=True)
-        (debug / svc.EXIT_FILE_FMT.format(job_id=job_id)).write_text(
-            "job_id=%s\nsr_exit_code=%s\nverdict=%s\nskip=0\n"
-            % (job_id, sr_exit_code, verdict), encoding="utf-8")
+        self.assertEqual(list(self.exec.jobs), [42])       # nothing new started
 
     def test_replay_contract_satisfied_reuses_no_resubmit(self):
-        params = {**PARAMS, "lq_path": self._tmp.name}
-        first = dispatch_runner()
-        svc.submit_run_sr(params, run_cmd=first, store=self.store)
-        self.write_verdict(self._tmp.name, 42)
+        svc.submit_run_sr(self.params, store=self.store)
+        self.write_verdict(42)
 
-        runner = dispatch_runner()
-        data = svc.submit_run_sr(params, run_cmd=runner, store=self.store)
+        data = svc.submit_run_sr(self.params, store=self.store)
         self.assertEqual(data["status"], "RESUMED_COMPLETED")
         self.assertEqual(data["job_id"], 42)
+        self.assertEqual(data["exit_code"], "0:0")
         self.assertTrue(data["idempotent"])
-        self.assertEqual(runner.calls, ["squeue"])       # no sacct, no sbatch
+        self.assertEqual(list(self.exec.jobs), [42])
 
     def test_replay_silent_failure_reruns_instead_of_caching_success(self):
         # §2.3 毒药: exit 0 but the contract was not met. This must NOT be
         # RESUMED_COMPLETED — the scene would stay un-super-resolved forever.
-        params = {**PARAMS, "lq_path": self._tmp.name}
-        first = dispatch_runner()
-        svc.submit_run_sr(params, run_cmd=first, store=self.store)
-        self.write_verdict(self._tmp.name, 42, verdict=90)
+        svc.submit_run_sr(self.params, store=self.store)
+        self.write_verdict(42, verdict=90, sr_exit_code=1)
 
-        runner = dispatch_runner(sbatch_outputs=("Submitted batch job 43\n",))
-        data = svc.submit_run_sr(params, run_cmd=runner, store=self.store)
-        self.assertEqual(data["status"], "SUBMITTED")
-        self.assertEqual(data["job_id"], 43)
-        self.assertEqual(data["previous_state"], "FAILED")
-        self.assertEqual(runner.calls, ["squeue", "sbatch"])
-
-    def test_replay_failed_reruns_with_new_job(self):
-        params = {**PARAMS, "lq_path": self._tmp.name}
-        first = dispatch_runner()
-        svc.submit_run_sr(params, run_cmd=first, store=self.store)
-        self.write_verdict(self._tmp.name, 42, verdict=90, sr_exit_code=1)
-
-        runner = dispatch_runner(sbatch_outputs=("Submitted batch job 43\n",))
-        data = svc.submit_run_sr(params, run_cmd=runner, store=self.store)
+        data = svc.submit_run_sr(self.params, store=self.store)
         self.assertEqual(data["status"], "SUBMITTED")
         self.assertEqual(data["job_id"], 43)          # a fresh job, not 42
         self.assertEqual(data["previous_state"], "FAILED")
         self.assertEqual(data["previous_exit_code"], "1:0")
         self.assertEqual(data["previous_job_id"], 42)
-        self.assertEqual(runner.calls, ["squeue", "sbatch"])
+        self.assertEqual(sorted(self.exec.jobs), [42, 43])
 
-    def test_replay_unknown_reruns(self):
-        # No verdict file and nothing in squeue: accounting is disabled, so
-        # there is no oracle left — rerun rather than claim success.
-        params = {**PARAMS, "lq_path": self._tmp.name}
-        first = dispatch_runner()
-        svc.submit_run_sr(params, run_cmd=first, store=self.store)
+    def test_replay_unknown_refuses_to_resubmit(self):
+        # No verdict file and no process this host can identify: nothing proves
+        # the first run is over, so a second one writing the same scene is
+        # exactly what must not happen. The operator decides, not the replay.
+        svc.submit_run_sr(self.params, store=self.store)
+        self.exec.jobs.clear()                       # as if this process restarted
 
-        runner = dispatch_runner(sbatch_outputs=("Submitted batch job 43\n",))
-        data = svc.submit_run_sr(params, run_cmd=runner, store=self.store)
-        self.assertEqual(data["status"], "SUBMITTED")
-        self.assertEqual(data["job_id"], 43)
-        self.assertEqual(data["previous_state"], "UNKNOWN")
-        self.assertEqual(runner.calls, ["squeue", "sbatch"])
-
-    def test_replay_with_unwritable_lq_path_is_unknown_not_an_error(self):
-        # lq_path on a host that cannot read it (the dev machine's case): the
-        # verdict file is unreachable, which must degrade to a rerun, never to
-        # an exception that leaves the task neither reused nor rerun.
-        first = dispatch_runner()
-        svc.submit_run_sr(PARAMS, run_cmd=first, store=self.store)  # lq_path=/data
-        runner = dispatch_runner(sbatch_outputs=("Submitted batch job 43\n",))
-        data = svc.submit_run_sr(PARAMS, run_cmd=runner, store=self.store)
-        self.assertEqual(data["status"], "SUBMITTED")
-        self.assertEqual(data["previous_state"], "UNKNOWN")
+        with self.assertRaises(svc.SubmitConflict) as ctx:
+            svc.submit_run_sr(self.params, store=self.store)
+        self.assertEqual(ctx.exception.kind, "unknown")
+        self.assertEqual(self.exec.jobs, {})
 
     def test_interrupted_submit_no_job_id_does_not_resubmit(self):
-        # intent recorded, sbatch outcome never persisted → outcome unknown.
-        self.store.put_sr_task(svc.task_fingerprint(PARAMS), PARAMS,
+        # intent recorded, the launch outcome never persisted → unknown.
+        self.store.put_sr_task(svc.task_fingerprint(self.params), self.params,
                                status="new", job_id=None)
-        runner = dispatch_runner()
-        with self.assertRaises(RuntimeError) as ctx:
-            svc.submit_run_sr(PARAMS, run_cmd=runner, store=self.store)
-        self.assertIn("interrupted", str(ctx.exception))
-        self.assertEqual(runner.calls, [])            # no scheduler call, no sbatch
+        with self.assertRaises(svc.SubmitConflict) as ctx:
+            svc.submit_run_sr(self.params, store=self.store)
+        self.assertEqual(ctx.exception.kind, "interrupted")
+        self.assertEqual(self.exec.jobs, {})          # nothing was started
 
     def test_different_params_are_distinct_jobs(self):
-        params_a = {**PARAMS, "suffix": "a"}
-        params_b = {**PARAMS, "suffix": "b"}
-        runner = dispatch_runner(sbatch_outputs=("Submitted batch job 42\n",
-                                                 "Submitted batch job 43\n"))
-        a = svc.submit_run_sr(params_a, run_cmd=runner, store=self.store)
-        b = svc.submit_run_sr(params_b, run_cmd=runner, store=self.store)
+        a = svc.submit_run_sr({**self.params, "suffix": "a"}, store=self.store)
+        b = svc.submit_run_sr({**self.params, "suffix": "b"}, store=self.store)
         self.assertEqual(a["job_id"], 42)
         self.assertEqual(b["job_id"], 43)
-        self.assertIsNotNone(
-            self.store.get_sr_task(svc.task_fingerprint(params_a)))
-        self.assertIsNotNone(
-            self.store.get_sr_task(svc.task_fingerprint(params_b)))
-        self.assertEqual(runner.calls.count("sbatch"), 2)
+        self.assertIsNotNone(self.store.get_sr_task(
+            svc.task_fingerprint({**self.params, "suffix": "a"})))
+        self.assertIsNotNone(self.store.get_sr_task(
+            svc.task_fingerprint({**self.params, "suffix": "b"})))
 
 
-class TestSlurmStatus(unittest.TestCase):
-    """Terminal state comes from the job's verdict file, not from sacct: the
-    array server runs with accounting disabled, so sacct has no output to give
-    (slurm-integration.md §2.4-2 / §一 "C 方案")."""
+class TestJobStatusQuery(unittest.TestCase):
+    """Terminal state comes from the run's own verdict file, not from a
+    scheduler: accounting is disabled, so there is no accounting oracle to ask
+    (sr-local-execution.md §2.4-2 / §一 "C 方案")."""
 
     def setUp(self):
-        patcher = mock.patch.object(slurm, "slurm_available", lambda: True)
-        patcher.start()
-        self.addCleanup(patcher.stop)
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
+        self.scene = self._tmp.name
+        self._exec = fake_exec()
+        self.exec = self._exec.start()
+        self.addCleanup(self._exec.stop)
+
+    def task(self, job_id=7, config_xml=None) -> dict:
+        """A task row as the store hands it back: the run id and, when it has
+        one, the config that this run's verdict path is derived from."""
+        return {"job_id": job_id, "config_xml": config_xml}
+
+    def config_for(self, scene=None) -> str:
+        path = Path(self._tmp.name) / "run.xml"
+        path.write_text(svc.build_config_xml({"lq_path": scene or self.scene}),
+                        encoding="utf-8")
+        return str(path)
 
     def verdict_file(self, job_id=7, verdict=0, sr_exit_code=0, skip=0):
-        path = Path(self._tmp.name) / svc.EXIT_FILE_FMT.format(job_id=job_id)
+        debug = Path(self.scene) / "Debug"
+        debug.mkdir(parents=True, exist_ok=True)
+        path = debug / svc.EXIT_FILE_FMT.format(job_id=job_id)
         path.write_text(
             "job_id=%s\nsr_exit_code=%s\nverdict=%s\nskip=%s\n"
             % (job_id, sr_exit_code, verdict, skip), encoding="utf-8")
         return str(path)
 
-    def test_active_from_squeue(self):
-        fake = fake_run_script(("PENDING\n", "", 0))
-        st = slurm.job_status(7, run_cmd=fake)
-        self.assertEqual(st, {"job_id": 7, "active": True,
-                              "state": "PENDING", "exit_code": None})
-
-    def test_terminal_satisfied_from_verdict_file(self):
-        fake = fake_run_script(("", "", 0))
-        st = slurm.job_status(7, run_cmd=fake, exit_code_file=self.verdict_file())
+    def test_completed_from_the_verdict_file(self):
+        self.verdict_file(job_id=7)
+        st = svc.query_job_status(7, self.task(config_xml=self.config_for()))
         self.assertEqual(st["active"], False)
         self.assertEqual(st["state"], "COMPLETED")
         self.assertEqual(st["exit_code"], "0:0")
 
-    def test_terminal_contract_not_satisfied_is_failed(self):
-        # The silent-failure shape: exit 0, but the job's own verifier says the
-        # contract was not met. Slurm would call this COMPLETED; we must not.
-        fake = fake_run_script(("", "", 0))
-        st = slurm.job_status(7, run_cmd=fake,
-                              exit_code_file=self.verdict_file(verdict=90))
+    def test_contract_not_satisfied_is_failed(self):
+        # The silent-failure shape: exit 0, but the run's own verifier says the
+        # contract was not met. An executor would call this COMPLETED; the
+        # platform must not.
+        self.verdict_file(job_id=7, verdict=90)
+        st = svc.query_job_status(7, self.task(config_xml=self.config_for()))
         self.assertEqual(st["state"], "FAILED")
         self.assertEqual(st["exit_code"], "0:0")
 
-    def test_terminal_nonzero_exit_is_failed(self):
-        fake = fake_run_script(("", "", 0))
-        st = slurm.job_status(7, run_cmd=fake,
-                              exit_code_file=self.verdict_file(sr_exit_code=3,
-                                                               verdict=90))
+    def test_nonzero_sr_exit_is_failed(self):
+        self.verdict_file(job_id=7, sr_exit_code=3, verdict=90)
+        st = svc.query_job_status(7, self.task(config_xml=self.config_for()))
         self.assertEqual(st["state"], "FAILED")
         self.assertEqual(st["exit_code"], "3:0")
 
-    def test_sacct_is_never_consulted(self):
-        runner = dispatch_runner()
-        slurm.job_status(7, run_cmd=runner, exit_code_file=self.verdict_file())
-        self.assertEqual(runner.calls, ["squeue"])
-
     def test_verdict_for_another_job_is_ignored(self):
         # Job ids get recycled; a stranger's verdict must not be inherited.
-        fake = fake_run_script(("", "", 0))
-        st = slurm.job_status(7, run_cmd=fake,
-                              exit_code_file=self.verdict_file(job_id=99))
-        self.assertEqual(st["state"], "UNKNOWN")
+        self.verdict_file(job_id=99)
+        self.assertEqual(
+            svc.query_job_status(7, self.task(config_xml=self.config_for()))
+            ["state"], "UNKNOWN")
 
     def test_unknown_without_a_verdict_file(self):
-        fake = fake_run_script(("", "", 0))
-        st = slurm.job_status(7, run_cmd=fake, exit_code_file=None)
+        st = svc.query_job_status(7, self.task(config_xml=self.config_for()))
         self.assertEqual(st["state"], "UNKNOWN")
-        self.assertIsNone(st["active"])
+        self.assertIsNone(st["active"])               # not False: cannot tell
 
-    def test_missing_verdict_file_is_unknown_not_an_exception(self):
-        fake = fake_run_script(("", "", 0))
-        st = slurm.job_status(7, run_cmd=fake,
-                              exit_code_file=str(Path(self._tmp.name) / "nope"))
-        self.assertEqual(st["state"], "UNKNOWN")
-
-    def test_truncated_verdict_file_is_unknown(self):
-        path = Path(self._tmp.name) / "trunc.txt"
-        path.write_text("job_id=7\nsr_exit", encoding="utf-8")
-        fake = fake_run_script(("", "", 0))
-        st = slurm.job_status(7, run_cmd=fake, exit_code_file=str(path))
+    def test_a_task_without_a_config_xml_does_not_raise(self):
+        # Every row written before this schema existed, and any row whose config
+        # cannot be read: no path to derive a verdict file from, so the answer is
+        # the executor's own — never an exception that turns a status poll into a
+        # 500.
+        st = svc.query_job_status(7, self.task())
         self.assertEqual(st["state"], "UNKNOWN")
 
-    def test_squeue_failure_degrades_to_the_verdict_file(self):
-        # squeue raising must not escape job_status (it used to reach
-        # run_sr._resolve_existing and turn a replay into a hard error).
-        def boom(cmd, timeout=30):
-            raise subprocess.TimeoutExpired(cmd, timeout)
+    def test_cancel_goes_to_the_executor(self):
+        self.exec.submit("/w/run.sh", job_id=7)
+        self.assertTrue(svc.cancel_run_sr({"job_id": 7}))
+        self.assertEqual(
+            svc.query_job_status(7, self.task())["state"], "CANCELLED")
 
-        st = slurm.job_status(7, run_cmd=boom,
-                              exit_code_file=self.verdict_file())
-        self.assertEqual(st["state"], "COMPLETED")
+    def test_confirmed_stopped_releases_an_unidentifiable_run(self):
+        # The operator says they checked by hand: that is what moves a run the
+        # platform itself cannot find any trace of.
+        self.assertTrue(svc.cancel_run_sr({"job_id": 7}, confirmed_stopped=True))
+        st = svc.query_job_status(7, self.task())
+        self.assertEqual(st["state"], "CANCELLED")
+        self.assertEqual(st["active"], False)
 
-    def test_job_status_never_raises_on_junk_input(self):
-        for bad in (None, "", str(Path(self._tmp.name)), "/dev/null"):
-            with self.subTest(path=bad):
-                fake = fake_run_script(("", "", 0))
-                st = slurm.job_status(7, run_cmd=fake, exit_code_file=bad)
-                self.assertEqual(st["state"], "UNKNOWN")
-
-    def test_cancel_ok(self):
-        fake = fake_run_script(("", "", 0))
-        self.assertTrue(slurm.cancel(7, run_cmd=fake))
+    def test_cancel_without_a_job_id_is_false(self):
+        self.assertFalse(svc.cancel_run_sr({"job_id": None}))
 
 
 #: 工具入口（`run_run_sr`）会过提交侧白名单 SR_ALLOWED_ROOTS —— 这些用例
@@ -940,22 +685,39 @@ class ToolEntrySceneCase(unittest.TestCase):
 
     走到服务层的用例必须有个真场景目录 —— 提交侧会去 stat 它，确认这一跑要读的
     未超分那一份在场（见 services/run_sr.nosr_swap_plan）。
+
+    执行器和幂等表都是本用例自己的：工作目录与 SR_AGENT_DB 各占一个临时目录，
+    执行器入口换成替身（backend/tests/exec_double.py）。于是"工具入口把参数送到了
+    服务层、作业真的起来了"这句话可以整串断言，而不用在研发机上跑 bash。
     """
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.scene = make_scene_dir(self._tmp.name, "SCENE_L1_PAN", rc=True)
+        self._work = temp_dir()
+        self.addCleanup(self._work.cleanup)
+        self._db = temp_dir()
+        self.addCleanup(self._db.cleanup)
         env = {"SR_BUNDLE_DIR": os.path.join(self._tmp.name, "bundle"),
                "SR_LOCKED_DIR": "",
+               "SR_WORK_DIR": self._work.name,
+               "SR_AGENT_DB": os.path.join(self._db.name, "db.sqlite"),
                **allowed_roots_env(self._tmp.name)}
         patcher = mock.patch.dict(os.environ, env)
         patcher.start()
         self.addCleanup(patcher.stop)
+        self._exec = fake_exec(first_id=42)
+        self.exec = self._exec.start()
+        self.addCleanup(self._exec.stop)
 
     @property
     def lq(self) -> str:
         return str(self.scene)
+
+    def tasks(self) -> list:
+        """这一跑留下的任务行（工具入口自己开的库，写完就丢）。"""
+        return store_mod.default_store().list_sr_tasks()
 
 
 class TestToolRunSr(ToolEntrySceneCase):
@@ -969,17 +731,19 @@ class TestToolRunSr(ToolEntrySceneCase):
         self.assertFalse(r["ok"])
         self.assertIn("sr_scale", r["error"])
 
-    def test_valid_but_slurm_unavailable(self):
-        # dev machine: real slurm_available() is False → clean err
+    def test_a_valid_submit_starts_one_run(self):
         r = run_run_sr(lq_path=self.lq)
-        self.assertFalse(r["ok"])
-        self.assertIn("slurm", r["error"])
+        self.assertTrue(r["ok"], r.get("error"))
+        self.assertEqual(r["data"]["job_id"], 42)
+        self.assertEqual(list(self.exec.jobs), [42])
+        self.assertIn("run_sr_", self.exec.submitted(42)["script"])
 
     def test_delete_ori_is_rejected(self):
-        # 参数校验先于调度器可用性：dev 机没有 sbatch，但这里必须先报 delete_ori
+        # 参数校验先于提交：delete_ori 在原型期禁用，拒绝发生在作业起来之前。
         r = run_run_sr(lq_path=self.lq, delete_ori=True)
         self.assertFalse(r["ok"])
         self.assertIn("delete_ori", r["error"])
+        self.assertEqual(self.exec.jobs, {})
 
     def test_bad_suffix_is_rejected_like_the_rest_entry_point(self):
         # 工具侧过去完全不校验 suffix —— 一个 `a/b` 会一路拼进输出文件名。
@@ -990,11 +754,12 @@ class TestToolRunSr(ToolEntrySceneCase):
                 self.assertIn("suffix 非法", r["error"])
 
     def test_empty_suffix_is_defaulted_not_rejected(self):
-        # 留空 = 取 SR 配置里的 <Suffix>，与 REST 入口同规矩：走到服务层，
-        # 于是 err 只能是 dev 机没有 slurm 的那条。
+        # 留空 = 取 SR 配置里的 <Suffix>，与 REST 入口同规矩。临时 bundle 里没有
+        # SR 团队那份配置，于是回落到内置值 —— 值本身不重要，重要的是它进了任务
+        # 参数：两个入口就是靠这个字符串算出同一个指纹的。
         r = run_run_sr(lq_path=self.lq, suffix="   ")
-        self.assertFalse(r["ok"])
-        self.assertIn("slurm", r["error"])
+        self.assertTrue(r["ok"], r.get("error"))
+        self.assertEqual(self.tasks()[0]["params"]["suffix"], "sr")
 
     def test_missing_un_superresolved_copy_is_refused(self):
         # 缺未超分那一份 → err 指名缺的那份，不拿别的顶替（与 REST 入口同一条规则）。
@@ -1003,6 +768,7 @@ class TestToolRunSr(ToolEntrySceneCase):
         self.assertFalse(r["ok"])
         self.assertIn("没有未超分那一份", r["error"])
         self.assertIn("PAN_NOSR.tif", r["error"])
+        self.assertEqual(self.exec.jobs, {})
 
 
 class TestToolRunSrPathGuard(ToolEntrySceneCase):
@@ -1032,12 +798,11 @@ class TestToolRunSrPathGuard(ToolEntrySceneCase):
         self.assertIn("absolute", r["error"])
 
     def test_valid_paths_reach_the_service(self):
-        # valid absolute paths pass validation → the err is the host's "no
-        # slurm" (dev machine), proving the path guard did not reject.
+        # 合法绝对路径必须过校验、真的起一个作业 —— 即路径守卫没误伤。
         r = run_run_sr(lq_path=self.lq,
                        mask_path=str(self.scene / "PAN_mask.tif"))
-        self.assertFalse(r["ok"])
-        self.assertIn("slurm", r["error"])
+        self.assertTrue(r["ok"], r.get("error"))
+        self.assertEqual(len(self.exec.jobs), 1)
 
     def test_registry_dispatch_is_the_guarded_tool(self):
         # the loop executes tools through the registry (call_tool → t.run),
@@ -1048,6 +813,7 @@ class TestToolRunSrPathGuard(ToolEntrySceneCase):
                       json.dumps({"lq_path": "<fake>/GF07A03_PMS01.tif"}))
         self.assertFalse(r["ok"])
         self.assertIn("fake", r["error"])
+        self.assertEqual(self.exec.jobs, {})
 
 
 def write_bundle_cfg(bundle_dir, body, name=None):
@@ -1170,7 +936,7 @@ class TestEntryPointParity(unittest.TestCase):
 
         def spy(params, **kw):
             captured["tool"] = params
-            raise RuntimeError("stop before the scheduler")   # 不需要真 sbatch
+            raise RuntimeError("stop before the executor")   # 不需要真起进程
 
         with mock.patch.object(svc, "submit_run_sr", side_effect=spy):
             r = run_run_sr(lq_path=self.scene, mask_path=self.mask, suffix="")
@@ -1233,7 +999,7 @@ class TestSubmitPathNormalization(unittest.TestCase):
 
         def spy(params, **k):
             captured.update(params)
-            raise RuntimeError("stop before the scheduler")   # 不需要真 sbatch
+            raise RuntimeError("stop before the executor")   # 不需要真起进程
 
         with mock.patch.object(svc, "submit_run_sr", side_effect=spy):
             r = run_run_sr(**kw)
@@ -1246,7 +1012,7 @@ class TestSubmitPathNormalization(unittest.TestCase):
         from backend.tools.run_sr import run_run_sr
 
         with mock.patch.object(svc, "submit_run_sr",
-                               side_effect=RuntimeError("no sbatch")):
+                               side_effect=RuntimeError("stop before the executor")):
             return run_run_sr(**kw)
 
     def test_windows_form_normalizes_to_array_posix(self):
@@ -1315,18 +1081,39 @@ class TestSubmitPathNormalization(unittest.TestCase):
             self.assertIn("SR_ALLOWED_ROOTS", ctx.exception.detail)
 
 
-class TestToolJobStatus(unittest.TestCase):
+class TestToolJobStatus(ToolEntrySceneCase):
+    """sr_job_status：拿运行编号去任务表里找那一行，再问统一查询。
+
+    编号本身说不清要读哪个场景的判定文件（那个路径是从任务自己的 config.xml
+    推出来的），所以这一步不是查一张表就够了的事。
+    """
+
     def test_missing_job_id(self):
         from backend.tools.sr_job_status import run_sr_job_status
         r = run_sr_job_status()
         self.assertFalse(r["ok"])
         self.assertIn("job_id", r["error"])
 
-    def test_slurm_unavailable(self):
+    def test_unknown_job_id(self):
+        # 空库：没有任何任务行带这个编号。这不是"查不到状态"，而是"根本不知道
+        # 你在说哪一次运行"，所以是 err，不会去问执行器。
         from backend.tools.sr_job_status import run_sr_job_status
         r = run_sr_job_status(job_id=1)
         self.assertFalse(r["ok"])
-        self.assertIn("slurm", r["error"])
+        self.assertIn("unknown job_id", r["error"])
+        self.assertEqual(self.exec.jobs, {})
+
+    def test_a_submitted_job_is_reported_with_its_scene(self):
+        from backend.tools.sr_job_status import run_sr_job_status
+        submitted = run_run_sr(lq_path=self.lq)
+        self.assertTrue(submitted["ok"], submitted.get("error"))
+
+        r = run_sr_job_status(job_id=submitted["data"]["job_id"])
+        self.assertTrue(r["ok"], r.get("error"))
+        self.assertIn(r["data"]["state"], ("PENDING", "RUNNING"))
+        # 存进去的是存储层的 POSIX 形态（提交侧归一化过），同一个目录
+        self.assertEqual(Path(r["data"]["lq_path"]), Path(self.lq))
+        self.assertEqual(r["data"]["job_id"], submitted["data"]["job_id"])
 
 
 if __name__ == "__main__":

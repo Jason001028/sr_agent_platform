@@ -371,15 +371,18 @@ class VerifyContractTests(unittest.TestCase):
         self.assertEqual(proc.returncode, verify.EXIT_CONTRACT_FAIL)
         self.assertIn("SRLOG", proc.stderr)
 
-    def test_cli_job_id_defaults_to_slurm_job_id(self):
+    def test_cli_requires_an_explicit_job_id(self):
+        """The run number is what names the verdict file. There is no
+        environment variable to fall back on, so a missing --job-id is a usage
+        error, not a run that writes its verdict under a guessed name."""
         self.write_srlog("x\nRun finished.")
         self.write_output()
         self.touch_newer_than_config(self.fx.srlog, self.fx.output)
-        env = dict(os.environ, SLURM_JOB_ID="777")
         proc = run_cli("--config", str(self.fx.config), "--sr-exit-code", "0",
-                       env=env)
-        self.assertEqual(proc.returncode, 0)
-        self.assertTrue((self.fx.lq / "Debug" / "_SREXIT_777.txt").is_file())
+                       env=dict(os.environ, SLURM_JOB_ID="777"))
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("--job-id", proc.stderr)
+        self.assertFalse((self.fx.lq / "Debug" / "_SREXIT_777.txt").exists())
 
 
 EXIT_MARK = "_SREXIT_"
@@ -576,8 +579,9 @@ sys.stderr.write("path=%%s\n" %% (path,))
 class VerdictFileEncodingTests(unittest.TestCase):
     """The verdict file must not depend on either side's locale.
 
-    The verifier runs *inside the job*: Slurm's --export=NONE has dropped LANG,
-    and the SR interpreter is py3.6, whose `open()` default is then plain ASCII.
+    The verifier runs *inside the job*: neither the run script nor a systemd
+    unit necessarily sets LANG, and the SR interpreter is py3.6, whose
+    `open()` default is then plain ASCII.
     `reason` carries Chinese text, so a locale-encoded write raises — and the
     `except` in write_exit_code_file turns that into "no file", which the
     platform reads as UNKNOWN for a job that actually failed the contract. That
@@ -630,7 +634,7 @@ class VerdictFileEncodingTests(unittest.TestCase):
         a failed job reported as "no verdict". Every field the platform acts on
         is ASCII, so only the free-text reason may lose bytes.
         """
-        from backend.services import slurm as svc
+        from backend.services import sr_result as svc
 
         path = self.verdict_path(9)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -642,7 +646,7 @@ class VerdictFileEncodingTests(unittest.TestCase):
 
     def test_reader_accepts_a_utf8_file_written_under_any_locale(self):
         """The counterpart: what the pinned verifier writes is what we read."""
-        from backend.services import slurm as svc
+        from backend.services import sr_result as svc
 
         path = self.verdict_path(7)
         path.parent.mkdir(parents=True, exist_ok=True)

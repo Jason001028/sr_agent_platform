@@ -18,8 +18,8 @@ Two independent groups live here:
 
 * ``Config`` / ``load_config()`` — the **agent loop** (LLM endpoint). Read once
   at startup, passed around as a snapshot.
-* ``SrRuntime`` / ``sr_runtime()`` — the **SR pipeline + Slurm layer** (bundle
-  path, job interpreter, work dir, partition, job limits). See §"SrRuntime".
+* ``SrRuntime`` / ``sr_runtime()`` — the **SR pipeline layer** (bundle path,
+  job interpreter, work dir, GPU). See §"SrRuntime".
 
 This module must never import from ``backend.services`` (or any other backend
 package): the services import *it*, so a back-import would close a cycle.
@@ -41,47 +41,40 @@ from dataclasses import dataclass
 #: a bundle dir that disagrees with it cannot run).
 SR_DEFAULT_BUNDLE_DIR = "/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes"
 
-#: Local scratch by default — fine on a single node, WRONG on a multi-node
-#: partition: a batch script/config.xml written here does not exist on the node
-#: that runs the job. Must point at shared storage whenever `sinfo -N` shows
-#: more than one node (docs/status/slurm-integration.md §2.6).
+#: Work dir for the generated config.xml / run script / job log, and for the
+#: executor's own bookkeeping (job-id counter, cross-process slot lock, run
+#: records). Local scratch by default; on the real host it points at a disk on
+#: the data array that the service account can write.
 SR_DEFAULT_WORK_DIR = "/tmp/sr_agent_work"
 
 #: Options yml passed as <OPT>; carries scale/tile size and tif_type.
 SR_DEFAULT_OPTIONS_YML = "/DiskArray/tmp/wangrz/sr_utils/espan3_2026_gf04_tile500.yml"
 
-#: Interpreter that runs code_0817_prod.py *inside the job* — the SR production
-#: env, a different world from the API's own /opt/sr-venv (py3.9).
+#: Interpreter that runs code_0817_prod.py — the SR production env, a different
+#: world from the API's own /opt/sr-venv (py3.9). The API launches it directly
+#: as a child process, so this must be an absolute path (or a name resolvable on
+#: the API host's PATH).
 #: node81-135 实测：torch 1.10.2+cu113 / GDAL 2.4.0（版本号用
 #: `gdal.VersionInfo()` 取——py3.6 时代的 osgeo 绑定没有 `gdal.__version__`）。
 #: ⚠️ 目录名叫 `torch1.9.1py36`，但里面装的**不是** 1.9.1 —— 别拿目录名当版本号。
 #: See docs/status/real-machine-bringup.md §1.
 SR_DEFAULT_PYTHON = "python"
 
-#: Slurm job limits/limits applied by run_sr.build_batch_script.
-#: No default node list: unset means "let the scheduler decide". SR_SLURM_NODELIST
-#: exists because the `gpu` partition spans two node families and one of them
-#: (node104-*) cannot be resolved from the submitting host — see
-#: docs/status/slurm-acceptance.md §B0.
-SR_DEFAULT_SLURM_TIME = "02:00:00"
-SR_DEFAULT_SLURM_CPUS = 4
-SR_DEFAULT_SLURM_GRES = 1
+#: The launcher. The platform runs the SR script as a child process on the API
+#: host (backend/services/local_exec.py); there is no other route. The variable
+#: is still read so a leftover `SR_EXECUTOR=slurm` in a unit file or a drop-in
+#: fails loudly instead of being silently ignored — see sr_runtime().
+SR_DEFAULT_EXECUTOR = "local"
 
-#: How the SR job is launched: "slurm" (sbatch on the cluster) or "local"
-#: (a plain child process on the API host, backend/services/local_exec.py).
-#: Local is the minimal-prototype mode — see
-#: docs/planning/sr-minimal-prototype-plan.md §1.2. Default stays "slurm" so an
-#: un-updated deployment keeps behaving exactly as before.
-SR_DEFAULT_EXECUTOR = "slurm"
-
-#: The one scene directory /api/queue accepts while the prototype is pinned to
-#: a single test directory (SR_LOCKED_DIR). Unset → the historical behaviour
-#: (any absolute path the caller sends). Local mode + a set value means every
-#: submit must name this directory and nothing else.
+#: The one scene directory /api/queue accepts while the deployment is pinned to
+#: a single test directory (SR_LOCKED_DIR). Unset → any absolute path the caller
+#: sends. A set value means every submit must name this directory and nothing
+#: else.
 SR_DEFAULT_LOCKED_DIR = None
 
-#: GPU handed to the local child via CUDA_VISIBLE_DEVICES (SR_LOCAL_GPU). Only
-#: meaningful with SR_EXECUTOR=local — under Slurm the card comes from --gres.
+#: GPU handed to the SR child via CUDA_VISIBLE_DEVICES (SR_LOCAL_GPU). The API
+#: launches the job itself, so this variable is the only thing that picks a
+#: card; the SR script reads the variable instead of hardcoding an index.
 SR_DEFAULT_LOCAL_GPU = "0"
 
 #: LAST-RESORT <Suffix>, not a knob. The default a submit actually gets is read
@@ -135,38 +128,36 @@ def load_config() -> Config:
 
 
 # --------------------------------------------------------------------------
-# SR pipeline / Slurm runtime
+# SR pipeline runtime
 # --------------------------------------------------------------------------
+
+#: Legacy spelling of SR_WORK_DIR. Read as a fallback so an existing unit file
+#: or drop-in keeps pointing the platform at the same directory it used before;
+#: nothing migrates or deletes files on its own.
+SR_LEGACY_WORK_DIR_ENV = "SR_SLURM_WORK_DIR"
+
 
 @dataclass(frozen=True)
 class SrRuntime:
     """Read-only snapshot of the SR-path environment.
 
     Deliberately NOT folded into ``Config``: that one is the agent loop's LLM
-    endpoint and is loaded once; these values belong to the SR/Slurm layer and
-    are read on every call (see ``sr_runtime``), because tests and the systemd
-    unit set them via the environment around the call.
+    endpoint and is loaded once; these values belong to the SR layer and are
+    read on every call (see ``sr_runtime``), because tests and the systemd unit
+    set them via the environment around the call.
     """
 
     bundle_dir: str
     python: str
-    slurm_work_dir: str
-    partition: str            # "" → no --partition line in the batch script
-    gres: int
-    time: str                 # Slurm --time, "HH:MM:SS"
-    cpus: int
-    mem: str                  # "" → no --mem line
-    nodelist: str             # "" → no --nodelist line (scheduler picks)
-    fake: bool
+    work_dir: str
     queue_poll_sec: float
     agent_db: str
     # 注：**没有** scenes_root。场景根的唯一读取处是 backend/api/paths.py::
     # scenes_root()（每次读环境、且要求目录存在）—— 在这里再镜像一份就等于
-    # 制造第二处真源，SR/Slurm 层也没人消费它。
-    sandbox_root: str | None  # None → SR runs in place, writing to lq_path
-    executor: str             # "slurm" | "local" — who launches the job
+    # 制造第二处真源，SR 层也没人消费它。
+    executor: str             # always "local"; any other value is a config error
     locked_dir: str | None    # None → /api/queue accepts any absolute lq_path
-    local_gpu: str            # CUDA_VISIBLE_DEVICES for the local child
+    local_gpu: str            # CUDA_VISIBLE_DEVICES for the SR child
 
 
 def sr_runtime() -> SrRuntime:
@@ -175,14 +166,21 @@ def sr_runtime() -> SrRuntime:
     Reading on each call is the contract: the systemd unit exports these once
     for a long-lived process, while tests set them in setUp/tearDown, so a
     cached snapshot would leak values across cases.
-    """
 
-    def env_int(name: str, default: int) -> int:
-        raw = os.environ.get(name)
-        try:
-            return int(raw) if raw is not None else default
-        except ValueError:
-            return default
+    Raises ``RuntimeError`` when the host is configured for a launcher this
+    build does not have. A leftover ``SR_EXECUTOR=slurm`` (unit file, drop-in,
+    exported shell) must not be quietly reinterpreted as "run it locally":
+    the two routes differ in where the job runs and which GPU it gets, so
+    guessing would silently change what a submit means. Fail at startup instead
+    — ``create_app`` calls this once for exactly that reason.
+    """
+    raw_executor = (os.environ.get("SR_EXECUTOR") or SR_DEFAULT_EXECUTOR)
+    executor = raw_executor.strip().lower()
+    if executor not in ("local", ""):
+        raise RuntimeError(
+            f"SR_EXECUTOR={raw_executor!r} 不被支持：本版本只有本机执行一条路线"
+            "（SR 脚本作为本机子进程运行）。请删除该变量的设置或改为 SR_EXECUTOR=local；"
+            "本平台不再向任何调度器提交作业")
 
     def env_float(name: str, default: float) -> float:
         raw = os.environ.get(name)
@@ -191,21 +189,18 @@ def sr_runtime() -> SrRuntime:
         except ValueError:
             return default
 
+    # SR_WORK_DIR wins, SR_SLURM_WORK_DIR is the legacy alias, then the default.
+    work_dir = (os.environ.get("SR_WORK_DIR")
+                or os.environ.get(SR_LEGACY_WORK_DIR_ENV)
+                or SR_DEFAULT_WORK_DIR)
+
     return SrRuntime(
         bundle_dir=os.environ.get("SR_BUNDLE_DIR") or SR_DEFAULT_BUNDLE_DIR,
         python=os.environ.get("SR_PYTHON") or SR_DEFAULT_PYTHON,
-        slurm_work_dir=os.environ.get("SR_SLURM_WORK_DIR") or SR_DEFAULT_WORK_DIR,
-        partition=os.environ.get("SR_SLURM_PARTITION") or "",
-        gres=env_int("SR_SLURM_GRES", SR_DEFAULT_SLURM_GRES),
-        time=os.environ.get("SR_SLURM_TIME") or SR_DEFAULT_SLURM_TIME,
-        cpus=env_int("SR_SLURM_CPUS", SR_DEFAULT_SLURM_CPUS),
-        mem=os.environ.get("SR_SLURM_MEM") or "",
-        nodelist=os.environ.get("SR_SLURM_NODELIST") or "",
-        fake=os.environ.get("SR_SLURM_FAKE") == "1",
+        work_dir=work_dir,
         queue_poll_sec=env_float("SR_QUEUE_POLL_SEC", SR_DEFAULT_QUEUE_POLL_SEC),
         agent_db=os.environ.get("SR_AGENT_DB") or SR_DEFAULT_DB,
-        sandbox_root=os.environ.get("SR_SANDBOX_ROOT") or None,
-        executor=(os.environ.get("SR_EXECUTOR") or SR_DEFAULT_EXECUTOR).strip().lower(),
+        executor="local",
         locked_dir=os.environ.get("SR_LOCKED_DIR") or None,
         local_gpu=os.environ.get("SR_LOCAL_GPU") or SR_DEFAULT_LOCAL_GPU,
     )

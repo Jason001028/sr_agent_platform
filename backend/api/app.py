@@ -16,7 +16,6 @@ SR_TEMP_PREVIEWS_ROOT 拖拽入口的**兜底**预览缓存根（1 天 TTL，每
 「默认 ÷4」只是**前端**的 UI 默认值，不是本层的契约。
 SR_AGENT_DB       SQLite 路径（chat 会话 + sr_tasks 同一库）
 SR_LLM_MOCK       =1 → 聊天走固定脚本假 LLM（api-contract.md §5.1）
-SR_SLURM_FAKE     =1 → 提交走内存假调度器（§5.2）
 SR_QUEUE_POLL_SEC 队列后台校准广播周期，缺省 2s
 SR_PRODUCT_PREVIEW_DIV
                   作业转 COMPLETED 后服务端主动生成**产物**预览用哪一档（÷N）；
@@ -44,7 +43,7 @@ from fastapi.responses import FileResponse
 from backend.api import paths
 from backend.api.paths import PathDeniedError
 from backend.api.platform import (
-    _broadcast, _json_body, _run_dataroot, _task_state, derived_mask_path,
+    _broadcast, _json_body, _task_state, derived_mask_path,
     router as platform_router)
 from backend.config import load_config
 from backend.pathguard import (
@@ -327,7 +326,7 @@ def _manual_row(abs_path: Path, dir_path: Path, root: Path | None) -> dict:
 
 async def _poll_loop(state) -> None:
     """队列后台校准广播（api-contract.md §4.3）：周期扫 job_id 非空任务，
-    slurm.job_status 状态变化 → 写回 sr_tasks.status + 广播 job_update."""
+    状态变化 → 写回 sr_tasks.status + 广播 job_update."""
     while True:
         await asyncio.sleep(state.poll_sec)
         try:
@@ -499,25 +498,9 @@ def _bake_product_preview(state, task: dict, div: int) -> None:
                         "no_suffix: 任务行里没有 lq_path/suffix，拼不出产物名")
         return
 
-    # 沙箱判据**必须是 `_run_dataroot`**，不能直接比 `SR_SANDBOX_ROOT`。
-    # `_run_dataroot` 内部走 run_sr.sandbox_scene_paths，而那条在 SR_EXECUTOR=local
-    # 时恒返回 None —— 真机当前正是「配了 SR_SANDBOX_ROOT + local executor」这条
-    # 路线，直接比 env 会把本可以生成的产物判成「沙箱内」而永不生成。反过来，真在沙箱
-    # 里跑时产物落在私有副本上，生成了用户也看不到，还往临时盘撒文件。
-    dataroot = _run_dataroot(task)
-    if dataroot is None:
-        # `_run_dataroot` 只在沙箱开着、且 SR_SANDBOX_ROOT / fingerprint 不合法时
-        # 返回 None。这时产物落在哪**不可知**，宁可如实跳过也不猜。
-        _finish_preview(state, task, "skipped",
-                        "sandbox: 沙箱根配置不可用，无法确定产物落在盘阵还是副本里，未生成")
-        return
-    if _norm_dir(dataroot) != _norm_dir(lq_path):
-        _finish_preview(state, task, "skipped",
-                        f"sandbox: 这次跑在沙箱私有副本上（{_norm_dir(dataroot)}），"
-                        "盘阵里没有产物，未生成")
-        return
-
-    scene_dir = Path(_norm_dir(dataroot))
+    # 产物就落在 lq_path 里：作业在场景目录原地跑，`<DatarootLQ>` 就是它，
+    # 没有别的落点要判。
+    scene_dir = Path(_norm_dir(lq_path))
     inp = scene_search.input_scene_path(scene_dir)
     if inp is None:
         _finish_preview(state, task, "skipped",
@@ -595,8 +578,8 @@ def _bake_nosr_preview(task: dict, div: int) -> str:
 
     与产物那一份（`_bake_product_preview`）的两点不同，都是有意为之：
 
-    * **不看沙箱**：这一份是盘阵上的既有文件，与这次跑在盘阵还是私有副本上无关
-      —— 沙箱跑时它照样在，照样该生成（产物那一份才需要判沙箱，因为它刚被写出来）。
+    * **不看这次的运行结论**：这一份是盘阵上的既有文件，不是这次跑出来的东西 ——
+      本次作业失败、或产物压根没产出（云限额跳过），它照样在，照样该生成。
     * **不动行的结论**：`preview_state` / `preview_note` 那一列描述的是**产物**预览，
       一个字段说不出两份文件的结局。这里只写盘，结局由调用方打一行 stdout。
 

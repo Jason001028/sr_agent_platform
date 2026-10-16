@@ -1,9 +1,9 @@
 # SR 提交链路恢复 · 分阶段计划清单
 
 > **版本**：v1.0 · **日期**：2026-09-10 · **状态**：待评审
-> **目标**：把「10.10.81.135 查看器 → 画掩码 → 提交 SR → Slurm 分配 GPU → conda 环境跑超分 → 结果与状态回前端」这一条链**从当前断裂状态恢复到端到端可跑**。
+> **目标**：把「10.10.81.135 查看器 → 画掩码 → 提交 SR → 后端本机起进程 → conda 环境跑超分 → 结果与状态回前端」这一条链**从当前断裂状态恢复到端到端可跑**。
 > **执行分工**：代码改动（阶段 1）由我改 + 本地测试；真机命令由你在 10.10.81.135 上执行、输出贴回我判读。
-> **上位文档**：[slurm-integration.md](../status/slurm-integration.md)（决策快照）、[slurm-acceptance.md](../status/slurm-acceptance.md)（真机验收 A–D，本清单的阶段 3–5 是它的执行版）、[sr-slurm-deploy-variant.md](../sr_code/sr-slurm-deploy-variant.md)（变体差异 E1–E10）。
+> **上位文档**：[sr-local-execution.md](../status/sr-local-execution.md)（本机执行现状、切换与回滚）、[real-machine-acceptance.md](../status/real-machine-acceptance.md) §D（本机执行验收，本清单的阶段 3–5 是它的执行版）、[sr-platform-variant.md](../sr_code/sr-platform-variant.md)（变体差异 E1–E10）。
 
 ---
 
@@ -28,22 +28,14 @@
 APP=/run/media/root/SSD/workspace/wangrz/sr-agent-platform
 BUNDLE=/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes
 SR_PYTHON=/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python
-TEST=/DiskArray/tmp/wangrz/sr_test          # 沙箱场景副本根（手工验证用；平台侧走 SR_SANDBOX_ROOT）
-SANDBOX=/DiskArray/tmp/wangrz/sr_sandbox    # 平台沙箱：每个作业的私有副本（2026-09-10 起平台自建）
-WORK=/DiskArray/tmp/wangrz/sr_agent_work    # Slurm 作业工作目录（多节点必须共享 → 留盘阵）
+TEST=/DiskArray/tmp/wangrz/sr_test          # 手工验证用的场景副本根（不碰平台）
+WORK=/DiskArray/tmp/wangrz/sr_agent_work    # 本机执行工作目录（SR_WORK_DIR）
 PREV=/var/lib/sr-agent/previews             # 预览 JPG 缓存（本地盘，见决策点 ①）
 OPT=/DiskArray/tmp/wangrz/sr_utils/espan3_2026_gf04_tile500.yml
 PROD=/DiskArray/GSHC2IMPS                   # 生产盘阵根（仅阶段 6 使用）
-PART=gpu                                   # 2026-09-11 sinfo 实测（无 gpup）
 ```
 
-沙箱副本是本计划的地基：**阶段 0–5 全部在副本上跑，生产盘阵只读**。这样排查期生产目录里不会出现预览/掩码/Debug 等新文件。
-
-> **2026-09-10 修订 · 副本由平台自己建**。原计划让阶段 0.2 手工 `cp -a` 到 `$TEST`、阶段 4-5 前端填 `$TEST` 里的路径。改成：平台加 `SR_SANDBOX_ROOT`，**每个作业在批脚本第一步**把 `lq_path` 复制到 `<SANDBOX>/<任务指纹前12位>/<目录名>`，config 的 `DatarootLQ` 直接指向副本（见 [deploy/README §7.5](deploy/README.md)）。
->
-> 动机有两条：① 每换一个场景就要手工拷一次，是**每次**的税，而不是**一次**的税；② SR 对 `DatarootLQ` 不是只读的（产物 tif、`Debug/` 日志、meta.xml 更新都写在那里，写产物前还会把输出路径上的同名旧文件 `os.rename(..., "_NOSR")`），"前端填路径"的字面含义就是"那个目录会被写入"——把只读保证交给人的记性，迟早会忘。
->
-> 影响：**阶段 0.2 的手工 `$TEST` 副本只用于阶段 C（不碰平台的手工验证）**；阶段 4-5 前端填的是**生产路径**，平台自己拷。`$TEST` 仍保留给手工命令用。
+作业在场景目录**就地**跑：本机执行器在 sr-api 所在机器上直接起进程，`DatarootLQ` 就是用户填的 `lq_path` —— 产物、`Debug/` 日志、meta.xml 更新都写在那里。手工验证若不想碰生产盘阵，先把场景拷一份到 `$TEST`、再让 `lq_path` 指过去即可。
 
 ---
 
@@ -59,7 +51,7 @@ PART=gpu                                   # 2026-09-11 sinfo 实测（无 gpup�
 
 ## 阶段 0 · 地基（真机，只读 + 建目录）
 
-**目标**：把"盘阵上一条真实场景长什么样"从推断变成实测，并备好沙箱。
+**目标**：把"盘阵上一条真实场景长什么样"从推断变成实测，并备好手工验证副本。
 
 ### 0.1 结构核查（只读，5 项）
 
@@ -92,7 +84,7 @@ print('CloudPercent =', [c.data for c in d.getElementsByTagName('CloudPercent')[
 **判据**：② 里应能找到 `<目录名>.tif`（SC 步）或 `PAN.tif`（RC 步），且 `<目录名>_meta.xml` 存在。
 **若不符**：说明实际层级或命名与 [util.py:989-991](SR_code/util.py#L989-L991) 的判据不一致 —— **停下贴给我**，阶段 1 的检索过滤规则要按实测改写。
 
-### 0.2 制备沙箱副本
+### 0.2 制备手工验证副本
 
 ```bash
 mkdir -p $TEST
@@ -111,19 +103,18 @@ chown -R nginx:nginx $PREV $WORK
 df -h $PREV $WORK
 ```
 
-**判据**：`$PREV` 在**本地盘**（非盘阵挂载点）；`$WORK` 在**共享存储**（分区 `gpu` 多节点，作业在计算节点上要读得到，见 [config.py:44-49](backend/config.py#L44-L49)）。
+**判据**：`$PREV`、`$WORK` 都在**本地盘**（非盘阵挂载点）—— 本机执行只有一个节点，`$WORK` 不需要共享存储。
 **若不符**：`$PREV` 若落在开机不自动挂载的移动介质上，nginx 起服时目录不存在会 500 —— 换 `/var/lib/sr-agent/previews`。
 
 ### 0.4 环境清账
 
 ```bash
-sinfo -p $PART -N -o "%N %G %t" | head
 $SR_PYTHON -c "import torch, gdal; print(torch.__version__, torch.cuda.is_available())"
 ls $BUNDLE/code_0817_prod.py $BUNDLE/tools/ImgHistMatch.so
 id nginx
 ```
 
-**判据**：分区有多节点（→ `$WORK` 必须共享）；conda 解释器能 import torch/gdal；bundle 两个关键文件在；`nginx` 用户存在。
+**判据**：conda 解释器能 import torch/gdal；bundle 两个关键文件在；`nginx` 用户存在。
 
 ### 0.5 备份
 
@@ -133,7 +124,7 @@ cp $APP/deploy/sr-api.service $APP/deploy/sr-api.service.bak.$(date +%Y%m%d)
 systemctl cat sr-api > /tmp/sr-api.service.snapshot
 ```
 
-**产物**：0.1 的五段输出（贴回）、沙箱目录就位、三个决策点的答复。
+**产物**：0.1 的五段输出（贴回）、手工验证副本就位、三个决策点的答复。
 
 ---
 
@@ -145,17 +136,17 @@ systemctl cat sr-api > /tmp/sr-api.service.snapshot
 
 ### E-A `SR_SR_SCRIPT` 开关（对应 B1）· ✅ 已完成
 
-**为什么必须要**：变体装法有二 —— ① 改名覆盖 `code_0817_prod.py`；② 变体以 `code_0817_prod_slurm.py` 之名并置，用 env 指过去。选 ②，**生产原文件保持字节不动**，回滚只是改一行 env。
+**为什么必须要**：变体装法有二 —— ① 改名覆盖 `code_0817_prod.py`；② 变体以 `code_0817_prod_platform.py` 之名并置，用 env 指过去。选 ②，**生产原文件保持字节不动**，回滚只是改一行 env。
 
 已落地：
 - [run_sr.py:100](backend/services/run_sr.py#L100) 函数签名加 `sr_script=None`；
-- [run_sr.py:131](backend/services/run_sr.py#L131) 旁加对称的一行（含"名字在生成期写进批脚本、不在作业里读 env"的说明）；
+- [run_sr.py:131](backend/services/run_sr.py#L131) 旁加对称的一行（含"名字在生成期写进运行脚本、不在作业里读 env"的说明）；
 - [run_sr.py:180](backend/services/run_sr.py#L180) 字面量 → `{sr_script}`；
 - audit 回显加 `echo "SR_SCRIPT=..."` —— 从 `%j.out` 就能看出跑的是原版还是变体。
 
 测试（`test_run_sr.py`）：默认仍输出 `code_0817_prod.py`；`SR_SR_SCRIPT` 生效且**整份脚本不再出现原脚本名**；显式参数压过 env；audit 含 `SR_SCRIPT=`。
 
-同步更新：[deploy/sr-api.service](deploy/sr-api.service)（新增两项 env + 注释）、[deploy/README.md](../../deploy/README.md) §七（§7.1 改为并置装法 + 八项 env 表）、[docs/status/slurm-acceptance.md](../status/slurm-acceptance.md) §0.2/§0.3、[docs/sr_code/sr-pipeline-interface.md](../sr_code/sr-pipeline-interface.md) §7.1、[docs/status/real-machine-acceptance.md](../status/real-machine-acceptance.md) §D。
+同步更新：[deploy/sr-api.service](deploy/sr-api.service)（新增两项 env + 注释）、[deploy/README.md](../../deploy/README.md) §七（§7.1 并置装法 + env 表）、[docs/status/sr-local-execution.md](../status/sr-local-execution.md) §三、[docs/sr_code/sr-platform-variant.md](../sr_code/sr-platform-variant.md)、[docs/sr_code/sr-pipeline-interface.md](../sr_code/sr-pipeline-interface.md) §7.1、[docs/status/real-machine-acceptance.md](../status/real-machine-acceptance.md) §D。
 
 ### E-B 空后缀归一（对应 B2）
 
@@ -169,7 +160,7 @@ systemctl cat sr-api > /tmp/sr-api.service.snapshot
 
 ### E-C 变体新增 E10：云量容错（对应 B4）
 
-在 [gen_slurm_variant.py](SR_code/tools/gen_slurm_variant.py) 的 `EDITS` 追加第 10 条，锚点即 [code_0817_prod.py:157-158](SR_code/code_0817_prod.py#L157-L158)：
+在 [gen_platform_variant.py](SR_code/tools/gen_platform_variant.py) 的 `EDITS` 追加第 10 条，锚点即 [code_0817_prod.py:157-158](SR_code/code_0817_prod.py#L157-L158)：
 
 ```python
 # 锚点（原文）
@@ -178,7 +169,7 @@ systemctl cat sr-api > /tmp/sr-api.service.snapshot
 # 替换：非数字 → 视为不跳过（fail-open，只影响策略跳过，不影响 SR 正确性）
 ```
 
-**判据**：`python SR_code/tools/gen_slurm_variant.py && python SR_code/tools/gen_slurm_variant.py --check` 退出 0；`provenance.json` 出现 `E10`。
+**判据**：`python SR_code/tools/gen_platform_variant.py && python SR_code/tools/gen_platform_variant.py --check` 退出 0；`provenance.json` 出现 `E10`。
 **注意**：`util.py` 内**还有一族 `exit()`**（[util.py:999](SR_code/util.py#L999)、[1002](SR_code/util.py#L1002)、[1014](SR_code/util.py#L1014) 等）也是退出码 0 的静默失败。**本轮不patch `util.py`** —— 理由见 E-C 备注，由 `verify_sr_run.py` 兜住（见下）。
 
 > **E-C 备注（重要）**：`verify_sr_run.py` 的三条契约（退出码 0 + SRLOG 末行 `Run finished.` + 输出 tif 存在）已经把这些 `exit(0)` 全部判成 **90 = 契约不满足 → FAILED**。所以平台不会被骗；代价只是失败原因只剩一句 `reason`，没有原始 `print` 文案。先接受，若排查期觉得不够再单开一轮 patch `util.py`。
@@ -219,7 +210,7 @@ systemctl cat sr-api > /tmp/sr-api.service.snapshot
 
 ```bash
 python -m pytest backend/tests -q                       # 期望：全绿
-python SR_code/tools/gen_slurm_variant.py --check       # 期望：OK
+python SR_code/tools/gen_platform_variant.py --check    # 期望：OK
 cd frontend && npm run test:unit -- --run && npm run build
 ```
 
@@ -232,30 +223,30 @@ cd frontend && npm run test:unit -- --run && npm run build
 ### 2.1 上传（**不覆盖生产原文件**）
 
 ```bash
-cp $APP/SR_code/variants/code_0817_prod_slurm.py $BUNDLE/
-cp $APP/SR_code/variants/verify_sr_run.py        $BUNDLE/
-chown nginx:nginx $BUNDLE/code_0817_prod_slurm.py $BUNDLE/verify_sr_run.py
-$SR_PYTHON -c "import ast;ast.parse(open('$BUNDLE/code_0817_prod_slurm.py').read());print('syntax ok')"
+cp $APP/SR_code/variants/code_0817_prod_platform.py $BUNDLE/
+cp $APP/SR_code/variants/verify_sr_run.py           $BUNDLE/
+cp $APP/SR_code/variants/sr_prep_scene.py           $BUNDLE/
+chown nginx:nginx $BUNDLE/code_0817_prod_platform.py $BUNDLE/verify_sr_run.py $BUNDLE/sr_prep_scene.py
+$SR_PYTHON -c "import ast;ast.parse(open('$BUNDLE/code_0817_prod_platform.py').read());print('syntax ok')"
 ```
 
-### 2.2 六项 env 写进 systemd unit
+### 2.2 env 写进 systemd unit
 
 编辑 [deploy/sr-api.service](deploy/sr-api.service)，`[Service]` 段加：
 
 ```ini
 Environment=SR_BUNDLE_DIR=/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes
 Environment=SR_PYTHON=/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python
-Environment=SR_SLURM_WORK_DIR=/DiskArray/tmp/wangrz/sr_agent_work
-Environment=SR_SLURM_PARTITION=gpu
-Environment=SR_SLURM_GRES=1
+Environment=SR_WORK_DIR=/DiskArray/tmp/wangrz/sr_agent_work
 Environment=SR_SCENES_ROOT=/DiskArray/tmp/wangrz/sr_test
-Environment=SR_SR_SCRIPT=code_0817_prod_slurm.py
+Environment=SR_SR_SCRIPT=code_0817_prod_platform.py
 Environment=SR_VERIFY_SCRIPT=verify_sr_run.py
+Environment=SR_PREP_SCRIPT=sr_prep_scene.py
 Environment=SR_PREVIEWS_ROOT=/var/lib/sr-agent/previews
 Environment=SR_SCENE_INDEX=/var/lib/sr-agent/scene_index.json
 ```
 
-> **阶段 2–5 的 `SR_SCENES_ROOT` 指沙箱 `$TEST`**；阶段 6 才切 `$PROD`。
+> **阶段 2–5 的 `SR_SCENES_ROOT` 指手工验证副本根 `$TEST`**；阶段 6 才切 `$PROD`。
 
 ### 2.3 重启与自检
 
@@ -266,11 +257,11 @@ curl -s localhost:8000/api/health          # {"ok":true,"source":"disk"}
 systemctl show sr-api -p Environment | tr ' ' '\n' | grep SR_   # env 真的进去了
 ```
 
-**判据**：`source":"disk"`（=沙箱根被认到，不是 fake 回退）。
+**判据**：`source":"disk"`（=扫描根被认到，不是 fake 回退）。
 
 ### 2.4 探针（**不带 `--deep`**，不提交作业）
 
-按 [slurm-acceptance.md](../status/slurm-acceptance.md) §A 执行 `deploy/slurm/probe_slurm.sh`。
+按 [real-machine-acceptance.md](../status/real-machine-acceptance.md) §D 执行 `deploy/probes/probe_structure.sh`（只读探针）。
 
 ### 2.5 nginx（仅决策点 ① 选"本地盘"时需要）
 
@@ -285,51 +276,50 @@ location /previews/ { alias /var/lib/sr-agent/previews/; }
 
 ---
 
-## 阶段 3 · 裸 Slurm 冒烟（绕开平台，确认地基）
+## 阶段 3 · 裸本机执行冒烟（绕开平台，确认地基）
 
-按 [slurm-acceptance.md](../status/slurm-acceptance.md) §B 执行 B1–B3：
+按 [real-machine-acceptance.md](../status/real-machine-acceptance.md) §D 执行 B1–B3：
 
 | 步骤 | 验什么 | 判据 |
 |---|---|---|
-| B1 `sudo -u nginx srun` 一行命令 | `--gres=gpu:1` 到底给没给卡 | 作业内 `torch.cuda.device_count() >= 1`；`CUDA_VISIBLE_DEVICES` 非空 |
-| B2 `sudo -u nginx sbatch` 手工跑一次 `$SR_PYTHON $BUNDLE/code_0817_prod_slurm.py -f <沙箱 config.xml>` | 变体在真机上能不能跑完 | 输出 tif 出现、SRLOG 末行 `Run finished.` |
+| B1 `sudo -u nginx <SR_PYTHON> -c "import torch; print(torch.cuda.device_count())"` | 单卡对本机进程可见 | 作业内 `torch.cuda.device_count() >= 1` |
+| B2 `sudo -u nginx <SR_PYTHON> $BUNDLE/code_0817_prod_platform.py -f <config.xml>` | 变体在真机上能不能跑完 | 输出 tif 出现、SRLOG 末行 `Run finished.` |
 | B3 读退出码文件 | 终态文件机制通不通 | `$TEST/<编号>/Debug/_SREXIT_<job_id>.txt` 存在且 `verdict=0` |
 
-> ⚠️ **不要看 `sacct`** —— 账务未启用，恒 rc=1。终态一律读 `_SREXIT_<job_id>.txt`（[slurm-acceptance.md](../status/slurm-acceptance.md) §0.3）。
-> ⚠️ B2 若在 import torch/gdal 阶段就挂，是 `--export=NONE` 把 `LD_LIBRARY_PATH` 丢了 —— 按 [run_sr.py:105-113](backend/services/run_sr.py#L105-L113) 的一条注释把 `--export=NONE` 改成 `--export=ALL`，重跑一次即可确认。
+> ⚠️ 终态一律读 `_SREXIT_<job_id>.txt`；**子进程退出码 0 不等于成功**（[sr-local-execution.md](../status/sr-local-execution.md) §2.3）。
 
 ---
 
-## 阶段 4 · 走平台提交一次真 SR（沙箱由平台自建）
+## 阶段 4 · 走平台提交一次真 SR（作业就地在场景目录跑）
 
 **目标**：用接口而非手工，把同一件事再跑一遍。
 
-**前置**：`SR_SANDBOX_ROOT` 已配且 nginx 可写（[deploy/README §7.5](deploy/README.md)）。
+**前置**：nginx 对场景目录可写（[deploy/README.md](../../deploy/README.md) §七）。
 
 ```bash
-# ① 从检索里拿到沙箱场景的 opaque id（验证 E-D 的过滤真的只收场景本身）
+# ① 从检索里拿到场景的 opaque id（验证 E-D 的过滤真的只收场景本身）
 curl -s 'localhost:8000/api/scenes?limit=5' | python -m json.tool
 
 # ② 掩码：登录前端画一个 ROI → /api/masks；或用 curl 直接造
 #    预期 draft 的 suffix 已是默认值（E-B 生效）
 
-# ③ 提交 —— lq_path 填**生产路径**（沙箱由平台自己建，不必手工拷贝）
+# ③ 提交 —— lq_path 填**场景目录**（作业就地在它里面跑）
 curl -s -XPOST localhost:8000/api/queue -H 'Content-Type: application/json' -d '{
   "lq_path":"/DiskArray/GSHC2IMPS/PRODUCT/<年>/<月>/<日>/<卫星>/<外层 …_L1_PAN>",
   "sr_scale":2,"suffix":"sr","gpu":0,"cloud_limit":80,
   "delete_ori":false,"grid_align":true}' | python -m json.tool
 
-# ④ 看状态推进；run_dataroot 就是产物所在（= 副本路径，不是 lq_path）
+# ④ 看状态推进；run_dataroot 就是 lq_path（产物落在这里）
 curl -s localhost:8000/api/queue | python -m json.tool
 ```
 
-**判据**：`201` 返回 `job_id` 非空；`/api/queue` 状态由 `SUBMITTING → PENDING → RUNNING → COMPLETED`；**`lq_path` 目录一字节没变**（`ls` 前后一致，没有 `*_NOSR.tif`）；输出 tif 与 `Debug/_SREXIT_<job_id>.txt` 都在 `run_dataroot` 下。
+**判据**：`201` 返回 `job_id` 非空；`/api/queue` 状态由 `SUBMITTING → PENDING → RUNNING → COMPLETED`；产物 tif 与 `Debug/_SREXIT_<job_id>.txt` 都落在 `lq_path`（`run_dataroot` 同值）。
 
 ---
 
 ## 阶段 5 · 平台链路四条结论（逐条留证）
 
-按 [slurm-acceptance.md](../status/slurm-acceptance.md) §D，四条各一条真实输出：
+按 [real-machine-acceptance.md](../status/real-machine-acceptance.md) §D，四条各一条真实输出：
 
 | # | 结论 | 造法 | 期望 |
 |---|---|---|---|
@@ -340,9 +330,9 @@ curl -s localhost:8000/api/queue | python -m json.tool
 
 > D1 是**反向验证**：它证明的是"退出码 0 但没干成活"能被识别。D2/D3 的判据里都写着"不产生第二个作业" —— 这正是幂等层要看的东西。
 >
-> ⚠️ D1/D3 用的是 `$TEST` 下**手工弄坏的副本**，不是生产目录 —— 弄坏生产数据来测故障路径是反的。平台沙箱保护的是"别把好的写坏"，它不阻止你拿一个本来就坏的目录去提交。
+> ⚠️ D1/D3 用的是 `$TEST` 下**手工弄坏的副本**，不是生产目录 —— 弄坏生产数据来测故障路径是反的。作业就地在 `lq_path` 里跑，提交前先确认那个目录本来就是坏的，别拿好的去试故障路径。
 >
-> D1/D3 与阶段 4 用**不同** `lq_path`，因此任务指纹不同、沙箱目录也不同，互不干扰；沙箱每次作业都重新复制，改了源再重跑一定生效。
+> D1/D3 与阶段 4 用**不同** `lq_path`，因此任务指纹不同，互不干扰。
 
 **产物**：D1–D4 四段原始输出 + 对应的 `_SREXIT_*.txt` 内容。
 
@@ -372,13 +362,13 @@ chmod g+w      "$PROD/<年>/<月>/<日>/<编号>"
 - 不 patch `SR_code/util.py`（那族 `exit(0)` 由契约校验器兜住，见 E-C 备注）。
 - 不做"浏览器写 Windows D 盘"（不可实现；用服务器本地盘 + 浏览器缓存替代）。
 - 不做目录 mtime 增量索引（深树下逐目录 `stat` 本身就是慢的一半）。
-- 不在阶段 1 之前动生产盘阵（全程沙箱）。
+- 不在阶段 1 之前动生产盘阵（手工验证全在 `$TEST` 副本上）。
 - 不把探针 `--deep` 的提交动作改成默认开启。
 
 ## 关联
 
-- 真机验收命令与判据：[slurm-acceptance.md](../status/slurm-acceptance.md)
-- 决策与实测值：[slurm-integration.md](../status/slurm-integration.md)
-- 变体差异与上机必验项：[sr-slurm-deploy-variant.md](../sr_code/sr-slurm-deploy-variant.md)
-- 部署侧（变体安装 + 六项 env + 终态判定）：[deploy/README.md](../../deploy/README.md) §七
+- 本机执行的现状/切换/回滚：[sr-local-execution.md](../status/sr-local-execution.md)
+- 真机验收命令与判据：[real-machine-acceptance.md](../status/real-machine-acceptance.md) §D
+- 变体差异与上机必验项：[sr-platform-variant.md](../sr_code/sr-platform-variant.md)
+- 部署侧（变体安装 + env + 终态判定）：[deploy/README.md](../../deploy/README.md) §七
 - SR 调用契约（退出码 0/90、`Run skipped:`）：[sr-pipeline-interface.md](../sr_code/sr-pipeline-interface.md) §2

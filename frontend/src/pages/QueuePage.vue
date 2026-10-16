@@ -3,7 +3,9 @@
  * QueuePage.vue — 共享 SR 任务队列（阶段5，api-contract.md §3.3）
  * 顶部 = 提交 SR 作业表单：lq_path 由查看器场景带入，也可以从历史任务里选；掩码由
  * 后端按 `<lq_path>/<输入影像 stem>_mask.tif` 推导（只读，前端不提交），其余为
- * run_sr 参数。
+ * run_sr 参数（SR 倍率 / 后缀 / 云量上限 / 网格对齐）。
+ * 卡由服务端选（SR_LOCAL_GPU），表单里没有「GPU 数」这一项；提交体里仍带着 gpu
+ * 字段（恒 0），见 stores/queue.ts formToSubmit 的说明。
  * 用户确认才提交（运行 SR 是真副作用，不自动提交）。
  * 下方 = 任务表：SSE job_update 实时刷 state 徽标（SUBMITTING→PENDING→RUNNING→
  * COMPLETED/FAILED）；每行可「以这行参数再提交」——同参数同目录会命中幂等复用旧作业，
@@ -206,10 +208,6 @@ onUnmounted(() => {
           <span>后缀</span>
           <input v-model="f.suffix" type="text" spellcheck="false"
                  placeholder="空=用 SR 配置里的 &lt;Suffix&gt;（如 260318）" />
-        </label>
-        <label class="qp-cell">
-          <span>GPU 数</span>
-          <input v-model.number="f.gpu" type="number" min="0" max="16" step="1" />
         </label>
         <label class="qp-cell">
           <span>云量上限 %</span>

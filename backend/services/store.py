@@ -8,10 +8,10 @@ Three tables behind one Store:
               next step runs — "checkpoint before side effect" (deepseek-harness
               checkpoint-policy). A resumed loop reconstructs the exact OpenAI
               conversation from this log (agent/loop.py).
-  sr_tasks  — idempotency table for external Slurm side effects (§5.3): run_sr
-              records its intent here before sbatch and its job_id after, so a
-              crashed-loop replay looks the job up in squeue/sacct instead of
-              submitting a duplicate. 一行 = 一个**指纹**（不是一次运行），所以行上
+  sr_tasks  — idempotency table for the SR side effect (§5.3): run_sr records
+              its intent here before launching the job and its job_id after, so
+              a crashed-loop replay resolves that job instead of starting a
+              duplicate. 一行 = 一个**指纹**（不是一次运行），所以行上
               有两组时间戳，别混：created_at/updated_at 属于**行**（队列排序、每次
               写回），started_at/finished_at 属于**本次运行**（首次看到 RUNNING →
               终态；队列页「耗时」的唯一来源）。
@@ -199,7 +199,7 @@ class Store:
             (session_id,)).fetchall()
         return [json.loads(r[0]) for r in rows]
 
-    # ---- sr_tasks (idempotency for external Slurm jobs) ------------------
+    # ---- sr_tasks (one row per logical SR submit, for idempotency) -------
 
     _SR_TASK_COLS = ("id, fingerprint, session_id, job_id, status, params, "
                      "config_xml, batch_script, log_dir, created_at, updated_at, "
@@ -383,8 +383,8 @@ class Store:
         """Insert a task row, or update the existing row for this fingerprint.
 
         Used by run_sr to record the submit *intent* (job_id=None) before the
-        sbatch side effect, then to record the resulting job_id. Returns the
-        task row as read back.
+        launch, then to record the resulting job_id. Returns the task row as
+        read back.
 
         **UPDATE 分支恰好等于「又是一次真提交」**：run_sr 的幂等复用（RESUMED_ACTIVE /
         RESUMED_COMPLETED）在走到这里之前就返回了（submit_run_sr），所以能把本次运行

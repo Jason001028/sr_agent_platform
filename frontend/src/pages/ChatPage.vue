@@ -88,7 +88,7 @@ onMounted(() => {
       <div ref="scrollEl" class="cp-scroll">
         <p v-if="chat.loading" class="cp-loading">加载会话…</p>
         <div v-else-if="!chat.messages.length" class="cp-empty">
-          <p>离线试跑提示：当前运行模式（SR_LLM_MOCK / SR_SLURM_FAKE / 盘阵）由服务端 env
+          <p>离线试跑提示：当前运行模式（SR_LLM_MOCK / 盘阵 / 本机执行）由服务端 env
             决定，聊天可发任意话术验证链路。</p>
         </div>
 

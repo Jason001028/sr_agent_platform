@@ -1,12 +1,12 @@
 # 平台 API 契约（REST / SSE）
 
 > 日期：2026-09-02 · 状态：评审
-> 目标读者：后端 FastAPI + 前端 Vue3 实现会话。范围：把既有后端（agent loop + 4 工具 + `sr_tasks` + slurm）暴露成网页可调 REST/SSE，交付 聊天 / 共享任务队列 / 查看器画完掩码提交 SR。
+> 目标读者：后端 FastAPI + 前端 Vue3 实现会话。范围：把既有后端（agent loop + 4 工具 + `sr_tasks`）暴露成网页可调 REST/SSE，交付 聊天 / 共享任务队列 / 查看器画完掩码提交 SR。
 > 前置：既有 FastAPI 骨架 `backend/api/app.py`（`/api/scenes` + `/api/scenes/{id}/preview` + 路径白名单）；前端 `/scenes` 页 + route='jpg' rec + `/chat` `/queue` 路由。
 
 ## 0. 一句话总结
 
-后端 FastAPI 四组端点——**聊天**（会话 REST + 单回合 SSE）、**工具直调**、**共享任务队列**（REST 提交/取消 + SSE 状态广播）、**掩码落盘**；前端三个页面（聊天/队列/查看器掩码提交按钮）。离机可全测：mock LLM（`SR_LLM_MOCK=1`）+ 假调度器（`SR_SLURM_FAKE=1`）+ fake 场景回退，真模型/真 Slurm 项另排。
+后端 FastAPI 四组端点——**聊天**（会话 REST + 单回合 SSE）、**工具直调**、**共享任务队列**（REST 提交/取消 + SSE 状态广播）、**掩码落盘**；前端三个页面（聊天/队列/查看器掩码提交按钮）。离机可全测：mock LLM（`SR_LLM_MOCK=1`）+ 执行器替身（`backend/tests/exec_double.py`）+ fake 场景回退，真模型/真机本机执行项另排。
 
 ## 1. 通用约定
 
@@ -22,7 +22,7 @@
 | 400 | 参数非法（缺字段、类型错、路径非绝对/含 `<fake>` 等） |
 | 404 | 资源不存在（会话 / 队列任务 / 场景不可访问） |
 | 409 | 会话正忙（同一会话已有回合在跑，串行拒绝）；或重复提交被幂等层判定"上次中断、勿盲重试" |
-| 422 | 生成/提交失败（预览生成失败 / sbatch 失败 / slurm 不可用） |
+| 422 | 生成/提交失败（预览生成失败 / 本机执行不可用） |
 
 - **SSE 帧**：每事件一行 `data: {json}\n\n`（UTF-8、`Cache-Control: no-cache`、`Content-Type: text/event-stream`、`X-Accel-Buffering: no`）。事件不含业务 id 后缀（MVP 无多路），前端按帧 JSON 的 `type` 分派。**所有事件共用首字段 `type`**，可向后扩展。
 - **运行模式 env**（延续 config.py env 风格，进程启动即读）：
@@ -31,7 +31,6 @@
 |---|---|---|
 | `SR_AGENT_DB` | `sr_agent.db` | SQLite 路径（chat 会话 + sr_tasks 同一库） |
 | `SR_LLM_MOCK` | 未设 | `=1` 时聊天走假 LLM（§5.1），不连任何端点 |
-| `SR_SLURM_FAKE` | 未设 | `=1` 时提交走内存假调度器（§5.2），无 sbatch 也能跑通 submit→status→cancel |
 | `SR_SCENES_ROOT` | 未设 | 盘阵场景根；未设 → fake 回退 |
 | `SR_PRODUCT_PREVIEW_DIV` | `4` | **产物预览主动生成**用哪一档（见 §4.5）；取值不在 `PREVIEW_DIVISORS = (2,4,8,16,32)` 里 → 当 `0` 处理并写一行启动日志，**不抛异常**；`0` = 关掉主动生成（只剩惰性路径）。与前端 `DEFAULT_PREVIEW_DIV`（同为 4）**互不联动**——浏览器档位存在 localStorage，服务端看不见，这正是必须有服务端默认档的原因 |
 | `SR_PRODUCT_PREVIEW_MAX_AGE_SEC` | `86400` | 只生成 `finished_at` 落在这个窗口内的行；挡掉把历史 COMPLETED 行全生成一遍。`finished_at IS NULL` 的一律不生成 |
@@ -55,7 +54,7 @@
 | `POST /api/chat/sessions/{id}/messages` | 发一条用户消息 → **SSE**（一请求一回合） | 3.2 |
 | `GET /api/queue` | 队列列表（sr_tasks 全量 + 实时状态） | 3.3 |
 | `POST /api/queue` | 提交 SR 作业（表单=run_sr 参数，幂等） | 3.3 |
-| `POST /api/queue/{task_id}/cancel` | scancel 取消 | 3.3 |
+| `POST /api/queue/{task_id}/cancel` | 取消本机作业 | 3.3 |
 | `GET /api/queue/events` | SSE：队列状态变化广播 | 3.3 |
 | `POST /api/masks` | 多边形 JSON + W/H → 栅格化写盘阵（原图目录）→ `{mask_path, lq_path, task_draft}`（body 收 `lq_path`，legacy `scene_id` 保留） | 3.4 |
 | `POST /api/qclist/write` | 《待修复清单》原地写回盘阵（真机 http 下浏览器写不了盘阵文件） | 3.7 |
@@ -66,11 +65,11 @@
 > （查看器里现场画完也能直接写回服务端场景目录，`apiBakeMask` / `MaskBakeResult` 在
 > `lib/api.ts`，body 见 3.4），随后提交仍走同一条推导 —— 两条路写出去/找回来的是同一个
 > 文件名，由后端 `scene_search.mask_stem` 单点保证。
-> `POST /api/queue` 的响应另有两个**只读提示字段**（没有沙箱时出现，否则整个字段缺省）：
+> `POST /api/queue` 的响应另有两个**只读提示字段**：
 > `in_place: true` + `notice`（人话：「输出目录 = 输入目录（…）：SR 就地把结果写成
 > `<输入名>_<suffix>.tif`，输入 tif 不改名也不删除；该目录里已存在同名输出时，旧输出先被改名为
 > `<同名>_NOSR.tif` 再覆盖」）。
-> 同一层意思也以 WARNING 写进作业日志的 audit 段（`build_batch_script`），两处都不能省——日志是
+> 同一层意思也以 WARNING 写进作业日志的 audit 段（`build_run_script`），两处都不能省——日志是
 > 事后追责时唯一会去看的东西。
 > 同时 `GET /api/scenes` 的扫描后缀含 `.jpg/.jpeg`（`scene_search._IMAGE_EXTS`）：
 > 盘阵里本就是显示就绪图的 JPG 也作为场景行列出，行内 `hasPreview` 恒 `true`、
@@ -132,24 +131,24 @@
 
 **数据模型**：`store.sr_tasks`（幂等表，既有列 id/fingerprint/job_id/status/params/config_xml/batch_script/log_dir/时间，另有 `started_at`/`finished_at` 本次运行时间窗 —— 老库打开时 `store._ensure_columns` 用 ALTER TABLE 补列、不回填）。`status` 列 = "队列展示状态"（后台校准器写入，见下）；幂等层不读它（只读 job_id）。`store` 另有 `list_sr_tasks()`。
 
-**队列状态机**（Slurm 无百分比 → 状态机即进度）：
+**队列状态机**（本机执行无百分比 → 状态机即进度）：
 
 ```
 submit_run_sr 返回 → 队列状态：
   SUBMITTING     刚提交（job_id 已录，尚未校准）
-  └─ 校准（slurm.job_status）：
-       squeue PENDING            → PENDING
-       squeue RUNNING/其它 active → RUNNING
-       sacct  COMPLETED          → COMPLETED
-       sacct  FAILED/CANCELLED/TIMEOUT/OOM… → FAILED
-       sacct 无记录              → UNKNOWN（保留，可重跑）
+  └─ 校准（local_exec.status，经 run_sr.query_job_status）：
+       排队中（尚无子进程）        → PENDING
+       子进程存活 / 其它 active    → RUNNING
+       判定文件 verdict=0          → COMPLETED
+       已结束但无有效产物 / verdict!=0 → FAILED
+       本机无痕迹（无运行记录、无判定文件）→ UNKNOWN（保留，挡重投）
 ```
 
-- `GET /api/queue` → `200 {"tasks":[{task_id, fingerprint, session_id, job_id, state, params:{lq_path,mask_path,sr_scale,suffix,gpu,cloud_limit,delete_ori,grid_align}, config_xml, batch_script, log_dir, created_at, updated_at, started_at, finished_at, preview_state, preview_note}, …]}`，按 created_at 倒序。`state` 取内存最近校准结果（缓存），无缓存则当场校准一次（squeue/sacct，镜像 `slurm.job_status`）。
+- `GET /api/queue` → `200 {"tasks":[{task_id, fingerprint, session_id, job_id, state, params:{lq_path,mask_path,sr_scale,suffix,gpu,cloud_limit,delete_ori,grid_align}, run_dataroot, config_xml, batch_script, log_dir, created_at, updated_at, started_at, finished_at, preview_state, preview_note}, …]}`，按 created_at 倒序。`state` 取内存最近校准结果（缓存），无缓存则当场校准一次（`local_exec.status`，经 `run_sr.query_job_status`）。`run_dataroot` = 作业就地写入的目录（= `params.lq_path`，保留该字段供既有消费者不改）。
   **`preview_state` / `preview_note`**：产物预览主动生成的结局，见 §4.5。
   `preview_state ∈ {null, "running", "done", "skipped", "failed", "cleared"}`（null = 从没生成过；
   `cleared` = 场景库「清除缓存」把它人工清了，**只由那条端点写**，见 §3.9），
-  `preview_note` 形如 `"<slug>: <人话>"`，slug 固定为 `sandbox` / `product_missing` /
+  `preview_note` 形如 `"<slug>: <人话>"`，slug 固定为 `product_missing` /
   `unwritable` / `source_changed` / `no_suffix` / `failed`（`cleared` 的 note 是
   `cleared: <时间> 场景库人工清除缓存，下次打开会重新生成预览`，不属于上面这组 slug）。
   两列与作业状态**无关**
@@ -159,13 +158,13 @@ submit_run_sr 返回 → 队列状态：
   `{lq_path, mask_path?, sr_scale?=2, suffix?="", gpu?=0, cloud_limit?=80, delete_ori?=false, grid_align?=true, options_yml?}`。
   直接调 `services.run_sr.submit_run_sr(params, store=default_store())`（幂等层既在：重复同参 → RESUMED_ACTIVE/COMPLETED 复用，失败才重跑，中断无 job_id → 409 报"勿盲重试"）。返回：
   `201 {"task_id", "job_id", "status":"SUBMITTED"|"RESUMED_ACTIVE"|"RESUMED_COMPLETED"|…, "state":…, "previous_state"?, "config_xml", "log_dir"}`。
-  校验：`lq_path` 必填 + 绝对路径 + 不含 `<fake>`（复用 tools/run_sr `_bad_path` 语义）；mask_path 同规则；sbatch 不可用且未开 fake → 422「slurm not available … 需在盘阵机配置」。
+  校验：`lq_path` 必填 + 绝对路径 + 不含 `<fake>`（复用 tools/run_sr `_bad_path` 语义）；mask_path 同规则；本机执行不可用（PATH 上没有可用 bash）→ 422（`submit_run_sr` 抛 RuntimeError，detail 说明缺的是 bash）。
   **还要解析「这一跑读哪份、跑完落到哪个名字」**（`run_sr.nosr_swap_plan`）：不是合法场景目录、
   缺未超分那一份（`<输入 stem>_NOSR.tif`，RC 场景即 `PAN_NOSR.tif`）、操作员掩码不在 —— 三者任一 → **400**，
   `detail` 写出缺的是哪一个（缺源头时连试过的候选名一起列出），**不拿别的文件顶替**。
   **`suffix` 的默认值来源**：body 省略或留空 → 平台读 `$SR_BUNDLE_DIR` 下 SR 团队自己的配置文件（`sfsr_confgig_test_espan2_cuda1.xml`，兼容另一种拼写 `sfsr_config_…`）里的 `<Suffix>` 作默认值；文件缺失 / 坏 XML / 标签缺失或为空 / 值不合白名单 → 回落到内置 `"sr"`。**每次提交现读**，不缓存（`task_fingerprint` 把 `suffix` 文本哈希在内，缓存会让指纹变成进程启动时刻的函数 → 重启或双 worker 对同一逻辑提交得出不同指纹）。显式传值仍走白名单 `^[A-Za-z0-9_-]{1,16}$`，不合法 400（`detail` 含「suffix 非法」）。**agent 工具 `run_sr` 共用同一套归一化**（`services/run_sr.py::normalize_suffix`），同一逻辑提交在两入口得到同一 `task_fingerprint`。`SR_SUFFIX_DEFAULT` 环境变量不读。
-- `POST /api/queue/{task_id}/cancel` → 查 task（404 无），`job_id` 非空则 `slurm.cancel` → `200 {"task_id","cancelled":bool,"state":…}`；无 job_id（中断遗留）→ 400。
-- `GET /api/queue/events` — SSE：订阅所有任务的 `state` 变化。**驱动** = app 生命周期后台 asyncio 任务（§4.3）：周期（`SR_QUEUE_POLL_SEC`，缺省 2s）对每个 `job_id` 非空 task 调 `slurm.job_status`，状态与前值不同 → 更新内存缓存 + 写回 `sr_tasks.status` + 广播一帧。事件 schema：
+- `POST /api/queue/{task_id}/cancel` → 查 task（404 无），`job_id` 非空则 `run_sr.cancel_run_sr` → `local_exec.cancel`（停整棵进程树：POSIX 先 TERM 后 KILL，Windows taskkill /T）→ `200 {"task_id","cancelled":bool,"state":…}`；无 job_id（中断遗留）→ 400。平台**无法证明**那次运行启没启动时（判定文件没有、进程记录也没有）返回 **409** 而不是 `200 cancelled=false`（后者会被当成「已经停下」）；body 带 `{"confirmed_stopped": true}` 是操作员核实无残留进程后的释放声明，任务行转 CANCELLED、重投才解锁。
+- `GET /api/queue/events` — SSE：订阅所有任务的 `state` 变化。**驱动** = app 生命周期后台 asyncio 任务（§4.3）：周期（`SR_QUEUE_POLL_SEC`，缺省 2s）对每个 `job_id` 非空 task 调 `local_exec.status`（经 `run_sr.query_job_status`），状态与前值不同 → 更新内存缓存 + 写回 `sr_tasks.status` + 广播一帧。事件 schema：
 
 ```json
 {"type":"job_update","task_id":3,"job_id":12345,"state":"RUNNING","prev_state":"PENDING","ok":true,"error":null,"updated_at":1789000000.12,"started_at":1789000000.12,"finished_at":null}
@@ -177,7 +176,7 @@ submit_run_sr 返回 → 队列状态：
 ```
 
 `preview_update` 与 `job_update` **分开是刻意的**：预览生成没降采样到与作业状态
-无关（COMPLETED 的作业也可能因沙箱 / 产物缺失 / 目录不可写而没生成），合成一个事件就得同时
+无关（COMPLETED 的作业也可能因产物缺失 / 目录不可写而没生成），合成一个事件就得同时
 处理两套字段、调用点也得判"这一帧到底带没带 state"。`state` 取 `sr_tasks.preview_state`
 的值（`running` 只在重新 GET 时才可能看到），`note` 与 `GET` 的 `preview_note` 同源。
 前端按 `task_id` 归并；**无匹配 task 就不动**（主动生成的认领与广播都在后端，前端可能还没把
@@ -245,7 +244,7 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
   `<stem>_mask.txt`（`write_mask_centroid_txt` 参考格式）。超分结果 `.tif` 也落同目录
   （run_sr/0817 脚本自身行为，本端点不处理）。
 - 复用 `services.mask`：`rasterize_polygons(W,H, polygons→points)`（全分辨率 Pillow；24739×24199 ≈ 580MB 位图，盘阵机内存可扛，**不落浏览器**）。W/H 以 body 为准（= 元数据 W/H，不探 TIF）。
-- 返回 `200 {"mask_path": "<绝对路径>", "mask_txt": "<绝对路径>", "lq_path": "<原图所在目录>", "task_draft": {lq_path, mask_path, …默认 sr 参数}}`。`task_draft` 供前端**预填**队列表单（不自动提交，Slurm 是真副作用；用户点提交才发 POST /api/queue）。
+- 返回 `200 {"mask_path": "<绝对路径>", "mask_txt": "<绝对路径>", "lq_path": "<原图所在目录>", "task_draft": {lq_path, mask_path, …默认 sr 参数}}`。`task_draft` 供前端**预填**队列表单（不自动提交，提交是真副作用；用户点提交才发 POST /api/queue）。
 - 幂等：同 scene_id 重复提交 → 覆盖同名掩码（掩码生成无副作用风险，允许重复）。
 
 ### 3.5 盘阵任意场景目录（`POST /api/scenes/resolve`）
@@ -814,11 +813,11 @@ POST /api/scenes/clear-preview
 `run_loop(…, on_step: Callable[[dict], None] | None = None)`：在既有各 return/commit 点**同步调用** `on_step({"type":…, …})`，事件与 SSE schema 对齐（turn_start 在循环首轮前、tool_call/tool_result 在 call_tool 前后、assistant 在纯文本答复时、turn_done/error 在返回前）。默认 `None` → 与现状逐字节一致，**18 个既有 loop 测试不受影响**。mock LLM 只替换 `_default_chat`，不动状态机。
 
 ### 4.3 队列后台校准广播
-- app lifespan 启动一个 asyncio 任务：`while` sleep `SR_QUEUE_POLL_SEC`，扫 `sr_tasks` 中 `job_id IS NOT NULL` 的行 → `slurm.job_status` → 状态变化时更新 `sr_tasks.status` + 内存缓存 + 广播。
+- app lifespan 启动一个 asyncio 任务：`while` sleep `SR_QUEUE_POLL_SEC`，扫 `sr_tasks` 中 `job_id IS NOT NULL` 的行 → `local_exec.status` → 状态变化时更新 `sr_tasks.status` + 内存缓存 + 广播。
 - 广播 = 进程内 `set[asyncio.Queue]`（每 `/api/queue/events` 连接一个）；写入失败（连接断开）→ 丢弃该连接。**单进程部署**（uvicorn 单 worker），多 worker 需外部队列——文档注明（M2 再议）。
 
 ### 4.4 测试隔离
-- 测试里 `create_app()` 前设 env（`SR_AGENT_DB=临时文件`、`SR_SCENES_ROOT=临时目录`、`SR_LLM_MOCK=1`、`SR_SLURM_FAKE=1`），与 `test_api.py` 同款模式。
+- 测试里 `create_app()` 前设 env（`SR_AGENT_DB=临时文件`、`SR_SCENES_ROOT=临时目录`、`SR_LLM_MOCK=1`），与 `test_api.py` 同款模式；执行器用 `backend/tests/exec_double.py` 的替身（§5.2）。
 
 ### 4.5 产物预览主动生成队列
 
@@ -861,18 +860,11 @@ NULL ──claim──> running ──> done
 | slug | 触发条件 |
 |---|---|
 | `no_suffix` | 任务行的 `params` 里没有 `lq_path`/`suffix`，拼不出产物名 |
-| `sandbox` | 这次跑在沙箱私有副本上（产物不在盘阵），或沙箱根配置不可用以致无法确定落在哪 |
 | `product_missing` | 输入影像找不到，或产物候选名**逐个 `is_file()` 都不在** |
 | `unwritable` | 产物所在目录对服务账号不可写 |
 | `source_changed` | 像素已读出、落盘之前复核发现产物被改写 → **一个字节都不写** |
 | `failed` | `PreviewError` / `OSError` / 其他异常原文（后台循环不被一行拖死） |
 
-- **沙箱判据必须是 `_run_dataroot(task)`，不能直接比 `SR_SANDBOX_ROOT`**：`_run_dataroot`
-  内部走 `run_sr.sandbox_scene_paths`，而那条在 `SR_EXECUTOR=local` 时恒返回 `None` ——
-  「配了 `SR_SANDBOX_ROOT` + local executor」这条路线直接比 env 会把本可以
-  生成的产物判成「沙箱内」而永不生成。反过来真在沙箱里跑时，产物落在私有副本上，生成了用户
-  也看不到，还往临时盘撒文件。这条有专门的回归钉子（`SR_SANDBOX_ROOT` 在 + `SR_EXECUTOR=local`
-  → **照生成**）。
 - `product_missing` 的 note **必须列出试过的候选名**：COMPLETED 但没有产物是**正常结局**
   （云限额的 `Run skipped:` 就判成合法 COMPLETED），运维看到「跳过」得能立刻分辨是
   「名字猜错了」还是「作业本身没产出」。
@@ -909,8 +901,8 @@ NULL ──claim──> running ──> done
 **同时生成未超分那一份（用户口径，不算新的生成预览入口）**：
 同一轮 tick 在产物之后多生成一份 `<场景目录>/<那一份栅格 stem>_preview.jpg`（源 = 候选清单里
 第一个存在的 `…_NOSR.tif`，档位取同一个全局值，命中判定同一个 `cache_hit`）。
-三处与产物那一份**故意不同**：源是一份**候选清单**（`scene_search.nosr_candidates`，只拼名字）；
-**不判沙箱**（这份栅格是盘阵上的既有文件，与这次跑在盘阵还是私有副本上无关）；
+两处与产物那一份**故意不同**：**不看这次的运行结论**（这份栅格是盘阵上的既有文件，
+本次作业失败或压根没产出时它照样在、照样该生成）；
 **不动 `preview_state`/`preview_note`**（那一列描述的是产物预览，一个字段说不出两份文件的
 结局），只写盘 + 往 stdout 打一行 `[nosr-preview] task=<id> <状态>`，**`skipped:` 要报出试过哪些
 名字**（一个名字都不在盘上时，只有把清单打出来才看得出是名字不对还是那份本就不存在）。
@@ -1010,20 +1002,20 @@ NULL ──claim──> running ──> done
 2. 收到工具结果后：回最终回复，内容 = 「已检索盘阵场景 N 个（mock 模型）。」+ 前几个场景 id 摘要。
 确定性 → SSE 每回合固定产出 `turn_start/tool_call/tool_result/turn_done` 全套事件，e2e 可断言。**不替换状态机**（loop.py 行为由既有测试锁住）。
 
-### 5.2 假调度器（`SR_SLURM_FAKE=1`）
-`services/slurm.py` 顶层加一个假实现门：无 sbatch（或 env 强制）时 `sbatch_submit` 返回自增 job_id 并登记，`squeue_status`/`sacct_status` 按**可配延时推进状态**（`SR_SLURM_FAKE_T_MS`，缺省 ~1200ms 后 PENDING→RUNNING→COMPLETED，exit 0），`scancel` 置 CANCELLED/FAILED。`config.xml`/batch 脚本/sr_tasks 表照常落盘（校验路径、幂等、写表全走真实逻辑）——只替换"调度器"那一层。镜像场景 fake 的既有风格（env 门 + 注释明示 fake）。
+### 5.2 执行器替身（离机全测）
+`backend/tests/exec_double.py::FakeExecutor` 把本地执行器（`services/local_exec.py` 的六个入口 `available`/`reserve_job_id`/`submit`/`status`/`cancel`/`release_unknown`）换成按真实时钟推进的状态机：`submit → PENDING → RUNNING → COMPLETED`（一格 `SR_TEST_EXEC_STAGE_MS`，缺省 500ms；要停住等取消就把那格调长）。它只答「有个进程在跑 / 它是这么结束的」——`status` 之后的显示状态机 `_queue_state`、`sr_tasks` 写回、SSE 帧、幂等复用跑的都是真代码。判定文件（`sr_result.terminal_from_exit_file`）不替身：真判定文件在就先按它答，与真执行器同一条顺序、同一个解析器。真执行器自己的单槽/取消/重启记录见 `backend/tests/test_local_exec.py`；真 bash + 真校验器 + 真判定文件见 `backend/tests/test_local_chain.py`。
 
 ### 5.3 契约测试
-- 后端 pytest：chat 新建/历史/SSE 事件序列（mock LLM）/会话并发 409/不存在 404；tools manifest + 直调 run_sr（fake slurm）幂等；queue list/submit(SUBMITTED)/重复提交(RESUMED_*)/cancel/events 广播状态推进；masks 落原图目录 + 白名单越界 404 + fake 场景 404。
+- 后端 pytest：chat 新建/历史/SSE 事件序列（mock LLM）/会话并发 409/不存在 404；tools manifest + 直调 run_sr（执行器替身）幂等；queue list/submit(SUBMITTED)/重复提交(RESUMED_*)/cancel/events 广播状态推进；masks 落原图目录 + 白名单越界 404 + fake 场景 404。
 - 前端 Vitest：SSE 帧解析器；chat/queue store 的乐观更新与事件归并。
-- `.e2e`：真 uvicorn（`SR_LLM_MOCK=1 SR_SLURM_FAKE=1` + 临时 db + 临时 scenes root）驱动前端——聊天发一条 → SSE 全事件 → 消息渲染；队列提交一张假任务 → events 推到 COMPLETED；查看器掩码提交按钮 → POST /api/masks → 表单预填。本地文件路径回归（route 非 jpg）零改动仍绿。
-- **真机另排清单**（不阻塞离机）：真 LLM `SR_LLM_*` 指向内网端点、真 Slurm 提交/取消、真实盘阵掩码落点核对（ENVI 打开确认掩码与 0817 消费路径一致）。
+- `.e2e`：真 uvicorn（`SR_LLM_MOCK=1` + 临时 db + 临时 scenes root）驱动前端——聊天发一条 → SSE 全事件 → 消息渲染；队列提交一张假任务 → events 推到 COMPLETED；查看器掩码提交按钮 → POST /api/masks → 表单预填。本地文件路径回归（route 非 jpg）零改动仍绿。
+- **真机另排清单**（不阻塞离机）：真 LLM `SR_LLM_*` 指向内网端点、真机本机执行提交/取消、真实盘阵掩码落点核对（ENVI 打开确认掩码与 0817 消费路径一致）。
 
 ## 6. 部署注意（nginx 反向代理 SSE）
 
 - `/api/` 反代需对 SSE 端点禁用缓冲 + 放宽读超时：
   `location /api/ { proxy_pass …; proxy_buffering off; proxy_cache off; proxy_read_timeout 3600s; proxy_set_header Connection ''; }`（仅对 `StreamingResponse` 生效，普通 JSON 不受影响）。
-- systemd `sr-api.service` 增补 env：`SR_AGENT_DB=/DiskArray/…/sr_agent.db`、`SR_LLM_MOCK=0`、`SR_SLURM_FAKE=0`（真机显式关 fake，防误开）。
+- systemd `sr-api.service` 增补 env：`SR_AGENT_DB=/DiskArray/…/sr_agent.db`、`SR_LLM_MOCK=0`（真机上显式关 mock，防误开）。
 - `requirements-api.txt` 增补 `openai>=1.40,<2`（API 进程直接 import loop → openai；**版本锁死**，aiohttp 3.8.3 不兼容 3.x）。
 
 ## 7. 变更流程（红线）

@@ -1,16 +1,19 @@
 """Tests for the local executor (backend/services/local_exec.py).
 
-No Slurm, no GPU, no real SR: every case runs a *short bash script* that stands
-in for the generated batch script, and the terminal state is always read back
-from a verdict file the script writes itself — which is exactly the contract
-the real job follows (docs/sr_code/sr-pipeline-interface.md §2.3).
+No GPU, no real SR: every case runs a *short bash script* that stands in for the
+generated run script, and the terminal state is always read back from a verdict
+file the script writes itself — which is exactly the contract the real run
+follows (docs/sr_code/sr-pipeline-interface.md §2.3).
 
 Covered: the single execution slot (a second submit reports PENDING, not
 RUNNING), the persisted job-id sequence, verdict-file-driven terminal states,
 `cancel` for both queued and running jobs, the restart case (no in-memory
-record), and the child environment the SR interpreter needs.
+record, so the run record on disk and the verdict file answer together),
+`release_unknown` as the operator's way out of an unconfirmable launch, a stale
+slot lock, and the child environment the SR interpreter needs.
 """
 
+import json
 import os
 import tempfile
 import time
@@ -23,12 +26,15 @@ from backend.services import local_exec
 #: Windows) — so "no bash here" skips instead of failing every case.
 BASH = local_exec._bash_path()
 
-_ENVS = ("SR_SLURM_WORK_DIR", "SR_PYTHON", "SR_LOCAL_GPU", "SR_BUNDLE_DIR")
+#: Everything the executor's config reads. setUp clears all of them, so a value
+#: left over on the developer's machine (SR_EXECUTOR, say) cannot steer a case.
+_ENVS = ("SR_WORK_DIR", "SR_SLURM_WORK_DIR", "SR_EXECUTOR", "SR_PYTHON",
+         "SR_LOCAL_GPU", "SR_BUNDLE_DIR", "SR_LOCKED_DIR")
 
 
 def verdict_script(scene: Path, job_id: int, *, sleep: float = 0,
                    verdict: int = 0) -> Path:
-    """A stand-in for the generated batch script: does nothing but sleep and
+    """A stand-in for the generated run script: does nothing but sleep and
     leave a verdict file, the way verify_sr_run.py does."""
     debug = scene / "Debug"
     path = scene / f"fake_{job_id}.sh"
@@ -57,10 +63,9 @@ class LocalExecBase(unittest.TestCase):
         self.work = self.root / "work"
         self.work.mkdir()
         self._saved = {k: os.environ.get(k) for k in _ENVS}
-        os.environ["SR_SLURM_WORK_DIR"] = str(self.work)
-        os.environ.pop("SR_LOCAL_GPU", None)
-        os.environ.pop("SR_BUNDLE_DIR", None)
-        os.environ.pop("SR_PYTHON", None)
+        for name in _ENVS:
+            os.environ.pop(name, None)
+        os.environ["SR_WORK_DIR"] = str(self.work)
         local_exec._reset()
         self.addCleanup(self._restore)
 
@@ -137,7 +142,7 @@ class TestJobIds(LocalExecBase):
 
         `_SREXIT_<job_id>.txt` 留在场景目录里，比计数器活得久；从 1 重号会让一个
         还没跑（或跑到一半就崩）的作业读到上一轮的 `verdict=0`，在队列里显示成
-        COMPLETED。`SR_SLURM_WORK_DIR` 默认在 `/tmp`，所以这不是角落情形。
+        COMPLETED。`SR_WORK_DIR` 默认在 `/tmp`，所以这不是角落情形。
         """
         local_exec.reserve_job_id()                          # 先正常发过号
         (self.work / local_exec.SEQ_FILE).unlink()            # 计数器随后丢了
@@ -197,12 +202,17 @@ class TestSingleSlot(LocalExecBase):
                                          timeout=10), "RUNNING")   # slot freed
         self.assertEqual(self.wait_state(jid_b, "COMPLETED"), "COMPLETED")
 
-    def test_log_file_per_job(self):
+    def test_the_run_record_names_the_log_file(self):
+        # One log per run, named after the script (which carries the job id), and
+        # the record is where the queue page finds it — a log the record does not
+        # name is a log nobody can open.
         jid = local_exec.reserve_job_id()
-        local_exec.submit(verdict_script(self.scene, jid), job_id=jid)
+        script = verdict_script(self.scene, jid)
+        local_exec.submit(script, job_id=jid)
         self.wait_state(jid, "COMPLETED")
-        logs = list(self.work.glob(f"*.{jid}.out"))
-        self.assertEqual(len(logs), 1)
+        log = self.work / f"{script.stem}.out"
+        self.assertTrue(log.exists())
+        self.assertEqual(local_exec.read_run_record(jid)["log"], str(log))
 
 
 class TestTerminalState(LocalExecBase):
@@ -214,14 +224,17 @@ class TestTerminalState(LocalExecBase):
         self.assertFalse(st["active"])
         self.assertEqual(st["exit_code"], "0:0")
 
-    def test_a_zero_exit_without_a_verdict_is_unknown_not_completed(self):
+    def test_a_zero_exit_without_a_verdict_is_failed_not_completed(self):
         # The silent-failure case the whole verdict-file design exists for:
-        # exit code 0 says nothing (§2.3). No verdict → UNKNOWN, never COMPLETED.
+        # exit code 0 says nothing (§2.3). The child is confirmed gone and left
+        # no verdict, so the run produced nothing usable — FAILED, never
+        # COMPLETED, and not UNKNOWN either: UNKNOWN is for "cannot tell", and
+        # here the run record says the process ended.
         jid = local_exec.reserve_job_id()
         script = self.scene / "noop.sh"
         script.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
         local_exec.submit(script, job_id=jid)
-        self.assertEqual(self.wait_terminal(jid), "UNKNOWN")
+        self.assertEqual(self.wait_terminal(jid), "FAILED")
 
     def test_verdict_90_is_failed(self):
         jid = local_exec.reserve_job_id()
@@ -237,13 +250,124 @@ class TestTerminalState(LocalExecBase):
         st = self.status(jid)
         self.assertEqual(st["state"], "COMPLETED")   # on-disk verdict still wins
 
-    def test_unlaunchable_script_is_unknown_not_pending(self):
+    def test_unlaunchable_script_is_failed_not_pending(self):
         jid = local_exec.reserve_job_id()
         local_exec.submit(self.scene / "ghost.sh", job_id=jid)   # never created
         # bash itself reports "No such file or directory" and exits 127, so the
-        # child *does* run and exit 0-ish: only the missing verdict file says
-        # this produced nothing (the contract's §2.3 silent-failure case).
-        self.assertEqual(self.wait_terminal(jid), "UNKNOWN")
+        # child *does* run and end: no verdict file follows, which is the
+        # contract's §2.3 silent-failure case, reported as FAILED (rerunnable).
+        self.assertEqual(self.wait_terminal(jid), "FAILED")
+
+
+class TestRunRecords(LocalExecBase):
+    """What a run record on disk answers once this process has no memory of it.
+
+    sr-api restarting mid-queue is the case these pin: a run that is over must
+    not stay blocked forever, and a run whose launch cannot be confirmed must
+    not be declared safe to rerun.
+    """
+
+    def record(self, job_id: int, **fields) -> None:
+        data = {"job_id": job_id}
+        data.update(fields)
+        local_exec._write_run_record(self.work, job_id, data)
+
+    def test_record_path_is_what_read_run_record_uses(self):
+        self.record(6, state=local_exec._ST_QUEUED)
+        self.assertIsNotNone(local_exec.read_run_record(6))
+
+    def test_a_queued_record_says_failed_and_is_rerunnable(self):
+        # The runner thread died with the API, so nothing will start this run.
+        # Showing PENDING forever would be a lie with no way out.
+        self.record(7, state=local_exec._ST_QUEUED)
+        st = self.status(7)
+        self.assertEqual(st["state"], "FAILED")
+        self.assertIs(st["active"], False)
+        self.assertIn("重投", st["note"])
+
+    def test_a_launching_record_without_a_pid_is_unknown(self):
+        # Popen may or may not have happened. FAILED here would be the platform
+        # claiming "safe to rerun" about a run that may be writing the scene
+        # right now, so the answer is UNKNOWN and `active` is not False.
+        self.record(8, state=local_exec._ST_LAUNCHING)
+        st = self.status(8)
+        self.assertEqual(st["state"], "UNKNOWN")
+        self.assertIsNone(st["active"])
+
+    def test_a_finished_record_without_a_verdict_is_failed(self):
+        self.record(9, state=local_exec._ST_DONE, outcome=local_exec._OUT_EXITED,
+                    child_pid=999999999)
+        st = self.status(9)
+        self.assertEqual(st["state"], "FAILED")
+        self.assertIs(st["active"], False)
+        self.assertIn("无有效产物", st["note"])
+
+    def test_a_running_child_from_a_previous_process_is_still_running(self):
+        jid = local_exec.reserve_job_id()
+        local_exec.submit(verdict_script(self.scene, jid, sleep=30), job_id=jid)
+        self.assertEqual(self.wait_state(jid, "RUNNING"), "RUNNING")
+        deadline = time.time() + 10.0
+        while time.time() < deadline:             # pid is published right after
+            child = (local_exec.read_run_record(jid) or {}).get("child_pid")
+            if child:
+                break
+            time.sleep(0.05)
+        self.assertTrue(child, "run record never named the child process")
+
+        local_exec._reset()                      # sr-api restarted mid-run
+        self.record(jid, state=local_exec._ST_RUNNING, child_pid=child,
+                    child_identity=local_exec._proc_identity(child))
+        st = self.status(jid)
+        self.assertEqual(st["state"], "RUNNING")
+        self.assertIs(st["active"], True)
+        local_exec.cancel(jid)
+
+    def test_release_unknown_clears_the_block(self):
+        self.record(10, state=local_exec._ST_LAUNCHING)
+        self.assertEqual(self.status(10)["state"], "UNKNOWN")
+
+        self.assertTrue(local_exec.release_unknown(10, note="操作员已核实"))
+        st = self.status(10)
+        self.assertEqual(st["state"], "CANCELLED")   # no longer answers UNKNOWN
+        self.assertIs(st["active"], False)
+        self.assertEqual(st["note"], "操作员已核实")
+
+    def test_release_unknown_writes_a_record_even_when_there_is_none(self):
+        # An id the platform has no record for is exactly the case the escape
+        # hatch exists for; refusing it would make UNKNOWN a dead end.
+        self.assertFalse(local_exec._run_record_path(self.work, 11).exists())
+        self.assertTrue(local_exec.release_unknown(11))
+        self.assertEqual(self.status(11)["state"], "CANCELLED")
+
+
+class TestSlotLock(LocalExecBase):
+    def test_a_lock_whose_holder_is_gone_is_reclaimed(self):
+        # A crash between taking the slot and launching leaves the lock file
+        # behind. The slot must come back on its own, or nothing ever runs
+        # again — but only once the holder is provably gone.
+        payload = {"job_id": 1, "api_pid": 999999999, "api_identity": None,
+                   "child_pid": 999999999, "child_identity": None}
+        self.assertFalse(local_exec._lock_holder_alive(payload))
+        (self.work / local_exec.LOCK_FILE).write_text(json.dumps(payload),
+                                                      encoding="utf-8")
+
+        jid = local_exec.reserve_job_id()
+        local_exec.submit(verdict_script(self.scene, jid), job_id=jid)
+        self.assertEqual(self.wait_state(jid, "COMPLETED"), "COMPLETED")
+
+    def test_a_live_lock_is_respected(self):
+        # The other direction: this process is alive and named in the lock, so
+        # a submit must NOT barge in — that is the whole point of the lock.
+        payload = {"job_id": 1, "api_pid": os.getpid(),
+                   "api_identity": local_exec._proc_identity(os.getpid()),
+                   "child_pid": None, "child_identity": None}
+        self.assertTrue(local_exec._lock_holder_alive(payload))
+        (self.work / local_exec.LOCK_FILE).write_text(json.dumps(payload),
+                                                      encoding="utf-8")
+
+        jid = local_exec.reserve_job_id()
+        local_exec.submit(verdict_script(self.scene, jid), job_id=jid)
+        self.assertEqual(self.wait_state(jid, "PENDING", timeout=3.0), "PENDING")
 
 
 class TestCancel(LocalExecBase):
