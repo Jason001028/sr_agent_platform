@@ -59,6 +59,7 @@ from pathlib import Path
 from backend.config import sr_runtime
 
 from . import sr_result
+from .file_mutex import file_mutex
 
 #: Job-id sequence file, under SR_WORK_DIR. Persisted so ids never repeat after
 #: a restart (a repeat would alias two runs onto one verdict file).
@@ -424,6 +425,12 @@ def _lock_holder_alive(payload: dict) -> bool:
 
 
 def _take_slot(work: Path, job_id: int, script: str, run: dict | None) -> bool:
+    """Acquire the stable slot record under a kernel mutex."""
+    with file_mutex(work / (LOCK_FILE + ".guard")):
+        return _take_slot_unlocked(work, job_id, script, run)
+
+
+def _take_slot_unlocked(work: Path, job_id: int, script: str, run: dict | None) -> bool:
     """Try once to acquire the execution slot. False = someone else holds it.
 
     The lock file is created with ``O_EXCL``: creation *is* the acquisition, so
@@ -576,13 +583,25 @@ def _terminate_proc(proc) -> None:
     _signal_tree(pgid)
     try:
         proc.wait(timeout=TERM_GRACE_SEC)
-        return
     except Exception:  # noqa: BLE001 — wedged; escalate rather than hang
         _kill_tree(pgid)
+    deadline = time.monotonic() + TERM_GRACE_SEC
+    while time.monotonic() < deadline:
+        if not _group_alive(pgid):
+            return True
+        time.sleep(0.05)
+    _kill_tree(pgid)
+    return not _group_alive(pgid)
+
+
+def _group_alive(pgid: int) -> bool:
+    if os.name != "posix":
+        return False
     try:
-        proc.wait(timeout=TERM_GRACE_SEC)
-    except Exception:  # noqa: BLE001
-        pass
+        os.killpg(int(pgid), 0)
+        return True
+    except OSError as exc:
+        return exc.errno not in (errno.ESRCH,)
 
 
 def _terminate_pid(pid, identity) -> bool:
@@ -855,6 +874,25 @@ def _mark_cancelled(work: Path, job_id: int, note: str) -> None:
                       note=note, finished_at=time.time())
 
 
+def _recover_run(job_id: int) -> bool:
+    record = read_run_record(job_id) or {}
+    recovery = record.get("recovery") or {}
+    body, backup = recovery.get("body"), recovery.get("backup")
+    if not body or not backup or not os.path.isfile(backup):
+        return True
+    try:
+        os.replace(backup, body)
+        mask = recovery.get("mask_1x")
+        if mask:
+            try:
+                os.unlink(mask)
+            except OSError:
+                pass
+        return True
+    except OSError:
+        return False
+
+
 def cancel(job_id) -> bool:
     """Cancel a queued or running run. False when it is not ours to cancel.
 
@@ -872,7 +910,11 @@ def cancel(job_id) -> bool:
             proc = rec["proc"]
     if rec is not None:
         if proc is not None and proc.poll() is None:
-            _terminate_proc(proc)     # the runner records the end on wait()
+            if not _terminate_proc(proc):
+                return False
+            if not _recover_run(job_id):
+                _patch_run_record(_work_dir(), job_id, note="取消后本体恢复失败")
+                return False
         return True
 
     work = _work_dir()
@@ -882,6 +924,9 @@ def cancel(job_id) -> bool:
     pid, ident = record.get("child_pid"), record.get("child_identity")
     if pid:
         if not _terminate_pid(pid, ident):
+            return False
+        if not _recover_run(job_id):
+            _patch_run_record(work, job_id, note="取消后本体恢复失败")
             return False
         _mark_cancelled(work, job_id, "已取消（子进程已停止）")
         return True

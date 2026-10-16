@@ -55,6 +55,7 @@ from backend.config import SR_DEFAULT_SUFFIX, SR_DEFAULT_WORK_DIR, sr_runtime
 from . import local_exec
 from . import scene_search
 from . import store as store_mod
+from .file_mutex import file_mutex
 
 # Re-exported under their historical names (callers import these); the values
 # live in backend/config.py so the systemd unit, the run script and the tests
@@ -603,6 +604,14 @@ def _resolve_existing(task: dict) -> dict:
 
 
 def submit_run_sr(params: dict, store=None, swap=None) -> dict:
+    """Serialize the full check/claim/launch transaction for one database."""
+    store = store or store_mod.default_store()
+    db = Path(store.path).resolve()
+    with file_mutex(db.with_name(db.name + ".submit.lock")):
+        return _submit_run_sr_locked(params, store=store, swap=swap)
+
+
+def _submit_run_sr_locked(params: dict, store=None, swap=None) -> dict:
     """Assemble config + run script and hand the job to the local executor.
 
     `swap` is the nosr_swap_plan dict of *this* submit — the source→body
@@ -675,7 +684,9 @@ def submit_run_sr(params: dict, store=None, swap=None) -> dict:
 
     job_id = local_exec.submit(
         script_path, job_id=job_id,
-        run={"scene": lq_path, "fingerprint": fp, "config_xml": str(cfg_path)})
+        run={"scene": lq_path, "fingerprint": fp, "config_xml": str(cfg_path),
+             "recovery": ({k: swap[k] for k in ("body", "backup", "mask_1x")}
+                          if swap else None)})
     store.update_sr_task_job(fp, job_id=job_id, status="submitted",
                              config_xml=str(cfg_path),
                              batch_script=str(script_path), log_dir=str(work))
