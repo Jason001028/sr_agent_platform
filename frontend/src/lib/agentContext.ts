@@ -24,6 +24,28 @@ export interface RoiCtxNote {
 }
 
 /** 当前查看器上下文输入（viewer store → buildContextNote 的纯数据桥）。 */
+/** 插件使用的版本化、只读上下文契约。 */
+export interface ViewerContextSnapshot {
+  schema_version: 1;
+  scene: { id: string | null; name: string };
+  source: { kind: 'scene' | 'local' };
+  image: {
+    name: string;
+    width: number;
+    height: number;
+    display_width: number;
+    display_height: number;
+    stretch: string;
+  };
+  roi: RoiCtxNote | null;
+  coordinates: {
+    image: 'pixel';
+    display: 'pixel';
+    origin: 'top_left';
+  };
+  capabilities: { read: true; write_original: false };
+}
+
 export interface ViewerContextSnap {
   name: string;
   /** 盘阵场景 id（route='jpg' 时非空；本地文件为 null —— Agent tab 本就禁用）。 */
@@ -91,4 +113,20 @@ export const CTX_DIVIDER = '——— 查看器上下文（自动附，只读，
 
 export function agentPayload(question: string, note: string): string {
   return question + '\n' + CTX_DIVIDER + '\n' + note;
+}
+
+/** 把兼容用的扁平快照投影成插件契约；不暴露路径、DOM 或 Canvas。 */
+export function buildViewerContextSnapshot(c: ViewerContextSnap): ViewerContextSnapshot {
+  return {
+    schema_version: 1,
+    scene: { id: c.sceneId, name: c.name },
+    source: { kind: c.sceneId ? 'scene' : 'local' },
+    image: {
+      name: c.name, width: c.W, height: c.H,
+      display_width: c.dispW, display_height: c.dispH, stretch: c.stretch,
+    },
+    roi: c.roi,
+    coordinates: { image: 'pixel', display: 'pixel', origin: 'top_left' },
+    capabilities: { read: true, write_original: false },
+  };
 }

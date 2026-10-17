@@ -7,6 +7,7 @@
  */
 import { createRouter, createWebHistory } from 'vue-router';
 import { APP_NAME } from '../lib/brand';
+import { enabledExtensionRoutes } from '../extensions/registry.js';
 
 const router = createRouter({
   history: createWebHistory(),
@@ -37,6 +38,7 @@ const router = createRouter({
       component: () => import('../pages/QueuePage.vue'),
       meta: { title: '任务队列' },
     },
+    ...enabledExtensionRoutes(),
   ],
 });
 

@@ -1,0 +1,1 @@
+{"id":"image_quality","name":"影像质量","version":"1.0.0","host_api_version":"1","enabled":true,"backend_entry":"backend.plugins.image_quality","frontend_entry":"frontend/src/extensions/imageQuality"}

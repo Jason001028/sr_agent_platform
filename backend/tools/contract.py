@@ -1,22 +1,10 @@
-"""Agent tool contract + registry.
-
-A tool is a thin, JSON-serializable function the agent (and later the REST
-layer) can call. Every tool must expose:
-
-  name          — unique snake_case identifier
-  description   — one-line "when to use" hint for the LLM
-  params_schema — JSON Schema describing the keyword arguments
-  run(**kwargs) — returns {"ok": bool, "data": ..., "error": str|None}
-
-The registry auto-collects every function decorated with @tool; manifest()
-emits the OpenAI-compatible function-calling schema (tools[].function), which
-is consumed verbatim by the agent loop and reused to generate REST endpoints.
-"""
+﻿"""Agent tool contract and registry."""
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 
 @dataclass
@@ -25,9 +13,13 @@ class Tool:
     description: str
     params_schema: dict
     run: Callable[..., dict]
+    version: str = "1"
+    visibility: str = "public"
+    timeout_sec: float | None = None
+    permissions: tuple[str, ...] = ()
 
     def openai_function(self) -> dict:
-        """OpenAI-compatible function-calling entry (tools[].function)."""
+        """OpenAI-compatible function-calling entry."""
         return {
             "type": "function",
             "function": {
@@ -38,12 +30,62 @@ class Tool:
         }
 
     def manifest_entry(self) -> dict:
-        """Flat manifest entry (for API docs / introspection)."""
+        """Flat manifest entry for API introspection."""
         return {
             "name": self.name,
             "description": self.description,
             "parameters": self.params_schema,
+            "version": self.version,
+            "visibility": self.visibility,
+            "permissions": list(self.permissions),
         }
+
+
+class ToolRegistry:
+    """独立的工具集合与统一执行边界。"""
+
+    def __init__(self, tools: Iterable[Tool] = ()):
+        self._tools: dict[str, Tool] = {}
+        for item in tools:
+            self.register(item)
+
+    def register(self, item: Tool) -> Tool:
+        if not isinstance(item, Tool):
+            raise TypeError("只能注册 Tool 实例")
+        if item.name in self._tools:
+            raise ValueError(f"工具已注册：{item.name}")
+        self._tools[item.name] = item
+        return item
+
+    def get(self, name: str) -> Tool | None:
+        return self._tools.get(name)
+
+    def list(self) -> list[Tool]:
+        return list(self._tools.values())
+
+    def manifest(self) -> list[dict]:
+        return [item.openai_function() for item in self._tools.values()]
+
+    def invoke(self, name: str, arguments=None, *, source: str = "unknown") -> dict:
+        """统一执行工具并返回稳定的 ok/data/error 结果。"""
+        item = self.get(name)
+        if item is None:
+            return err(f"unknown tool: {name}")
+        try:
+            if arguments is None or arguments == "":
+                payload = {}
+            elif isinstance(arguments, (str, bytes, bytearray)):
+                payload = json.loads(arguments)
+            else:
+                payload = arguments
+            if not isinstance(payload, dict):
+                return err("tool arguments must be a JSON object")
+            result = item.run(**payload)
+            if not isinstance(result, dict) or not {"ok", "data", "error"}.issubset(result):
+                return err(f"工具 {name} 返回了无效结果")
+            return result
+        except Exception as exc:  # noqa: BLE001 — contract boundary
+            return err(f"{type(exc).__name__}: {exc}")
 
 
 _REGISTRY: dict[str, Tool] = {}
@@ -67,6 +109,11 @@ def list_tools() -> list[Tool]:
 def manifest() -> list[dict]:
     """OpenAI-compatible tools array, ready to hand to the agent loop."""
     return [t.openai_function() for t in _REGISTRY.values()]
+
+
+def default_registry() -> ToolRegistry:
+    """构造当前内置工具的独立注册表快照。"""
+    return ToolRegistry(list(_REGISTRY.values()))
 
 
 def ok(data: Any) -> dict:

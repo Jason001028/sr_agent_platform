@@ -16,6 +16,7 @@ import type { SceneRow, SrConfig, RasterPreview } from './scene.js';
 import { createBlobCache } from './blobCache.js';
 import type { BlobCacheStats } from './blobCache.js';
 import type { ClearResponse } from './scene.js';
+import type { ViewerContextSnapshot } from './agentContext.js';
 
 export { loadSrConfig } from './scene.js';
 
@@ -912,3 +913,16 @@ export async function apiWriteQcList(
 
 /** 新会话随手一张（ChatPage 顶部用）。 */
 export const freshApi = () => loadSrConfig();
+
+
+/** 校验插件使用的只读查看器上下文契约。 */
+export async function apiValidateViewerContext(
+  cfg: SrConfig, context: ViewerContextSnapshot,
+): Promise<{ ok: boolean; schema_version: number; context: ViewerContextSnapshot }> {
+  const r = await http(apiUrl(cfg, '/api/context/validate'), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(context),
+  });
+  return (await r.json()) as { ok: boolean; schema_version: number; context: ViewerContextSnapshot };
+}

@@ -47,6 +47,7 @@ from backend.agent import loop as loop_mod
 from backend.api import paths
 from backend.api.paths import PathDeniedError
 from backend.config import sr_runtime
+from backend.contracts.viewer_context import normalize_viewer_context
 from backend.pathguard import (
     ensure_allowed, normalize_submit_path, to_posix_array_path)
 from backend.services import mask as mask_svc
@@ -56,8 +57,7 @@ from backend.services import scene_search
 #: 推导，见 scene_search.derived_mask_path）；这里转出给既有调用方
 #: （本模块 bake_mask / _norm_sr_params、api/app.py::resolve）。
 from backend.services.scene_search import derived_mask_path, mask_stem
-from backend.tools import run_sr as run_sr_tool
-from backend.tools.contract import list_tools
+from backend.tools import build_builtin_registry, run_sr as run_sr_tool
 
 router = APIRouter()
 
@@ -246,15 +246,30 @@ def _task_view(state, task: dict) -> dict:
 # --------------------------------------------------------------------------
 # 3.1 工具
 # --------------------------------------------------------------------------
+def _context(request: Request):
+    context = getattr(request.app.state, "context", None)
+    if context is not None:
+        return context
+    return None
+
+
+def _tool_registry(request: Request):
+    context = _context(request)
+    if context is not None:
+        return context.tool_registry
+    registry = getattr(request.app.state, "tool_registry", None)
+    return registry if registry is not None else build_builtin_registry()
+
+
 @router.get("/api/tools")
-def list_tools_endpoint():
-    return {"tools": [t.manifest_entry() for t in list_tools()]}
+def list_tools_endpoint(request: Request):
+    return {"tools": [t.manifest_entry() for t in _tool_registry(request).list()]}
 
 
 @router.post("/api/tools/{name}")
 async def call_tool_endpoint(name: str, request: Request):
-    tool = next((t for t in list_tools() if t.name == name), None)
-    if tool is None:
+    registry = _tool_registry(request)
+    if registry.get(name) is None:
         raise HTTPException(status_code=404, detail=f"未知工具：{name}")
     raw = await request.body()
     try:
@@ -263,11 +278,23 @@ async def call_tool_endpoint(name: str, request: Request):
         raise HTTPException(status_code=400, detail="请求体须为合法 JSON 对象")
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="请求体须为 JSON 对象")
+    # 工具业务错误仍作为 HTTP 200 的契约结果返回；只有 JSON 语法、未知工具
+    # 等传输层错误使用 HTTP 错误码。
+    return registry.invoke(name, body, source="rest")
+
+
+@router.post("/api/context/validate")
+async def validate_context_endpoint(request: Request):
+    raw = await request.body()
     try:
-        return tool.run(**body)
-    except Exception as e:  # noqa: BLE001 — 参数级错误
-        raise HTTPException(status_code=400,
-                            detail=f"参数错误：{type(e).__name__}: {e}") from e
+        body = json.loads(raw or b"{}")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="请求体须为合法 JSON 对象")
+    try:
+        context = normalize_viewer_context(body)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "schema_version": context["schema_version"], "context": context}
 
 
 # --------------------------------------------------------------------------
@@ -381,9 +408,13 @@ async def chat_send(session_id: str, request: Request):
 
         def thread_main() -> dict:
             try:
+                context = _context(request)
                 return loop_mod.run_loop(
-                    state.cfg, content, store=state.store,
-                    session_id=session_id, resume=True, on_step=bridge)
+                    None if context is not None else state.cfg, content,
+                    store=None if context is not None else state.store,
+                    session_id=session_id, resume=True, on_step=bridge,
+                    registry=None if context is not None else getattr(state, "tool_registry", None),
+                    context=context)
             except Exception as e:  # noqa: BLE001 — 流上收尾，不让线程挂死
                 bridge({"type": "error", "error": f"{type(e).__name__}: {e}"})
                 return {"ok": False, "error": f"{type(e).__name__}: {e}",

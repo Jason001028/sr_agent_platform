@@ -5,9 +5,11 @@ import { useRoute, RouterLink, RouterView } from 'vue-router';
 import { APP_NAME } from './lib/brand';
 import JobNoticeStack from './components/JobNoticeStack.vue';
 import { useQueueStore } from './stores/queue.js';
+import { enabledExtensionNavigation } from './extensions/registry.js';
 
 const route = useRoute();
 const queue = useQueueStore();
+const extensionNavigation = enabledExtensionNavigation();
 
 // 队列 SSE 的**常驻**订阅：持外壳这一份，切到任何页面都能收到「任务跑完了」
 // 的提醒。队列页与查看器侧舱各自还会 connect 一次，计数归零才真的断（stores/queue 里有
@@ -46,6 +48,9 @@ const logoOk = ref(true);
         <RouterLink to="/scenes">场景库</RouterLink>
         <RouterLink to="/chat">聊天</RouterLink>
         <RouterLink to="/queue">任务队列</RouterLink>
+        <RouterLink v-for="item in extensionNavigation" :key="item.to" :to="item.to">
+          {{ item.label }}
+        </RouterLink>
       </nav>
     </header>
     <!-- flush 路由（查看器）去掉 padding，页面贴边填满 -->

@@ -51,6 +51,8 @@ from backend.pathguard import (
     looks_like_scene_name, parse_scene_date, production_tree_depth,
     scene_name_products, strip_raster_ext, to_posix_array_path)
 from backend.services import preview_cache
+from backend.runtime_context import AppContext
+from backend.tools import build_builtin_registry
 from backend.services import preview_clear
 from backend.services import run_sr as run_sr_svc
 from backend.services import scene_search, store as store_mod
@@ -1053,6 +1055,7 @@ def create_app() -> FastAPI:
     # 阶段5 运行时状态：create_app 即建（env 已就绪）；lifespan 只额外启轮询。
     app.state.store = store_mod.Store()          # SR_AGENT_DB，懒打开
     app.state.cfg = load_config()
+    app.state.tool_registry = build_builtin_registry()
     app.state.chat_locks = {}                    # session_id → asyncio.Lock
     app.state.subscribers = set()                # /api/queue/events 订阅者
     app.state.task_cache = {}                    # task_id → queue display state
@@ -1060,6 +1063,13 @@ def create_app() -> FastAPI:
     # 场景根快照：`/api/scenes` 一直用的是 create_app 时的这个值，主动生成循环在模块级
     # 函数里跑、拿不到闭包，所以放到 state 上让两条路看同一个根。
     app.state.scenes_root = root
+    app.state.context = AppContext(
+        config=app.state.cfg,
+        store=app.state.store,
+        tool_registry=app.state.tool_registry,
+        scenes_root=root,
+        poll_sec=app.state.poll_sec,
+    )
     app.include_router(platform_router)
 
     @app.get("/api/health")

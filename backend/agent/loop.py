@@ -28,7 +28,7 @@ import json
 from openai import OpenAI
 
 from backend.config import Config
-from backend.tools.contract import list_tools
+from backend.tools.contract import ToolRegistry, default_registry
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are the SR (super-resolution) agent for a remote-sensing processing "
@@ -115,20 +115,10 @@ def parse_response(resp) -> dict:
     }
 
 
-def call_tool(name, arguments_json) -> dict:
-    """Execute a registered tool by name; never raises (contract boundary).
-
-    Returns the contract's ok/err dict verbatim — an err() result is fed back
-    to the model as ordinary tool output so it can correct course.
-    """
-    for t in list_tools():
-        if t.name == name:
-            try:
-                return t.run(**json.loads(arguments_json or "{}"))
-            except Exception as e:  # noqa: BLE001
-                return {"ok": False, "data": None,
-                        "error": f"{type(e).__name__}: {e}"}
-    return {"ok": False, "data": None, "error": f"unknown tool: {name}"}
+def call_tool(name, arguments_json, registry: ToolRegistry | None = None) -> dict:
+    """Execute a tool through the shared registry boundary."""
+    active = registry or default_registry()
+    return active.invoke(name, arguments_json, source="agent")
 
 
 def _default_chat(cfg: Config):
@@ -198,9 +188,10 @@ def _transcript_from(messages: list[dict]) -> list[dict]:
     return transcript
 
 
-def run_loop(cfg, prompt, *, max_turns=8, system_prompt=DEFAULT_SYSTEM_PROMPT,
+def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM_PROMPT,
              chat=None, verbose=False, store=None, session_id=None,
-             resume=False, on_step=None):
+             resume=False, on_step=None, registry: ToolRegistry | None = None,
+             context=None):
     """Run the loop; returns {"ok", "turns", "messages", "answer", "error",
     "session_id"}.
 
@@ -221,6 +212,16 @@ def run_loop(cfg, prompt, *, max_turns=8, system_prompt=DEFAULT_SYSTEM_PROMPT,
     unclosed turn (crash mid-tool) is closed with a synthetic "outcome unknown"
     result instead of blindly re-running the tool.
     """
+    if context is not None:
+        if cfg is None:
+            cfg = context.config
+        if store is None:
+            store = context.store
+        if registry is None:
+            registry = context.tool_registry
+    if cfg is None:
+        raise ValueError("run_loop requires cfg or context")
+
     if chat is None:
         chat = _default_chat(cfg)
 
@@ -251,7 +252,8 @@ def run_loop(cfg, prompt, *, max_turns=8, system_prompt=DEFAULT_SYSTEM_PROMPT,
             store.append_message(session_id, messages[0])
             store.append_message(session_id, messages[1])
 
-    tools = [t.openai_function() for t in list_tools()]
+    active_registry = registry or default_registry()
+    tools = active_registry.manifest()
 
     def commit(msg: dict):
         """Append to the wire list and checkpoint to the store immediately."""
@@ -322,7 +324,11 @@ def run_loop(cfg, prompt, *, max_turns=8, system_prompt=DEFAULT_SYSTEM_PROMPT,
             if on_step is not None:
                 on_step({"type": "tool_call", "name": tc["name"],
                          "args": _parse_args(tc["arguments"])})
-            result = call_tool(tc["name"], tc["arguments"])
+            if registry is None:
+                # Preserve the two-argument seam used by existing callers/tests.
+                result = call_tool(tc["name"], tc["arguments"])
+            else:
+                result = call_tool(tc["name"], tc["arguments"], registry=active_registry)
             if verbose:
                 status = "ok" if result["ok"] else "ERR: " + (result["error"] or "")
                 print(f"[turn {turn}] tool {tc['name']} → {status}")
