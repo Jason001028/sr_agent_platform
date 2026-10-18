@@ -46,6 +46,7 @@ const logoOk = ref(true);
         <RouterLink to="/scenes">场景库</RouterLink>
         <RouterLink to="/chat">聊天</RouterLink>
         <RouterLink to="/queue">任务队列</RouterLink>
+        <RouterLink to="/plugins">插件管理</RouterLink>
       </nav>
     </header>
     <!-- flush 路由（查看器）去掉 padding，页面贴边填满 -->

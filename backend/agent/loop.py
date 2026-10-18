@@ -28,6 +28,7 @@ import json
 from openai import OpenAI
 
 from backend.config import Config
+from backend.services import plugins as plugin_svc
 from backend.tools.contract import list_tools
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -94,6 +95,39 @@ def _parse_args(arguments) -> dict:
         return {"raw": arguments}
 
 
+def _normalize_usage(raw) -> dict | None:
+    """Normalize OpenAI-compatible usage, or return None when unavailable."""
+    if raw is None:
+        return None
+    def value(name: str) -> int:
+        if isinstance(raw, dict):
+            v = raw.get(name)
+        else:
+            v = getattr(raw, name, None)
+        try:
+            return max(0, int(v or 0))
+        except (TypeError, ValueError):
+            return 0
+    prompt = value("prompt_tokens")
+    completion = value("completion_tokens")
+    total = value("total_tokens") or prompt + completion
+    if not (prompt or completion or total):
+        return None
+    return {"prompt_tokens": prompt, "completion_tokens": completion,
+            "total_tokens": total, "source": "provider"}
+
+
+def _empty_usage() -> dict:
+    return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+            "calls": 0, "source": "unavailable", "events": []}
+
+
+def _usage_public(usage: dict) -> dict:
+    return {k: usage[k] for k in
+            ("prompt_tokens", "completion_tokens", "total_tokens",
+             "calls", "source")}
+
+
 def parse_response(resp) -> dict:
     """Normalize an OpenAI chat-completions response to plain data."""
     msg = resp.choices[0].message
@@ -101,16 +135,19 @@ def parse_response(resp) -> dict:
     for tc in msg.tool_calls or []:
         tool_calls.append({"id": tc.id, "name": tc.function.name,
                            "arguments": tc.function.arguments})
-    return {"content": msg.content, "tool_calls": tool_calls}
+    return {"content": msg.content, "tool_calls": tool_calls,
+            "usage": _normalize_usage(getattr(resp, "usage", None))}
 
 
-def call_tool(name, arguments_json) -> dict:
+def call_tool(name, arguments_json, allowed_names=None) -> dict:
     """Execute a registered tool by name; never raises (contract boundary).
 
     Returns the contract's ok/err dict verbatim — an err() result is fed back
     to the model as ordinary tool output so it can correct course.
     """
     for t in list_tools():
+        if allowed_names is not None and t.name not in allowed_names:
+            continue
         if t.name == name:
             try:
                 return t.run(**json.loads(arguments_json or "{}"))
@@ -189,7 +226,7 @@ def _transcript_from(messages: list[dict]) -> list[dict]:
 
 def run_loop(cfg, prompt, *, max_turns=8, system_prompt=DEFAULT_SYSTEM_PROMPT,
              chat=None, verbose=False, store=None, session_id=None,
-             resume=False, on_step=None):
+             resume=False, on_step=None, machine_id=None):
     """Run the loop; returns {"ok", "turns", "messages", "answer", "error",
     "session_id"}.
 
@@ -240,13 +277,20 @@ def run_loop(cfg, prompt, *, max_turns=8, system_prompt=DEFAULT_SYSTEM_PROMPT,
             store.append_message(session_id, messages[0])
             store.append_message(session_id, messages[1])
 
-    tools = [t.openai_function() for t in list_tools()]
+    allowed_names = None
+    if store is not None and machine_id:
+        allowed_names = plugin_svc.enabled_plugin_ids(store, machine_id)
+    tools = [t.openai_function() for t in list_tools()
+             if allowed_names is None or t.name in allowed_names]
 
     def commit(msg: dict):
         """Append to the wire list and checkpoint to the store immediately."""
         messages.append(msg)
         if store is not None:
             store.append_message(session_id, msg)
+
+    usage = _empty_usage()
+    call_index = 0
 
     for turn in range(1, max_turns + 1):
         try:
@@ -261,10 +305,29 @@ def run_loop(cfg, prompt, *, max_turns=8, system_prompt=DEFAULT_SYSTEM_PROMPT,
             if store is not None:
                 store.set_session_status(session_id, "error")
             return {"ok": False, "turns": turn, "messages": transcript,
-                    "answer": None, "error": error, "session_id": session_id}
+                    "answer": None, "error": error, "session_id": session_id,
+                    "usage": usage}
 
         content = out.get("content")
         tool_calls = out.get("tool_calls") or []
+        call_usage = _normalize_usage(out.get("usage"))
+        if call_usage is not None:
+            call_index += 1
+            event = {**call_usage, "turn": turn, "call_index": call_index}
+            usage["prompt_tokens"] += call_usage["prompt_tokens"]
+            usage["completion_tokens"] += call_usage["completion_tokens"]
+            usage["total_tokens"] += call_usage["total_tokens"]
+            usage["calls"] += 1
+            usage["source"] = call_usage["source"]
+            usage["events"].append(event)
+            if store is not None and session_id is not None:
+                try:
+                    store.append_llm_usage(session_id, **event)
+                except Exception:  # noqa: BLE001 — metrics must not break chat
+                    pass
+            if on_step is not None:
+                on_step({"type": "usage", "usage": event,
+                         "aggregate": _usage_public(usage)})
 
         if verbose:
             print(f"[turn {turn}] assistant: {content!r} "
@@ -279,7 +342,7 @@ def run_loop(cfg, prompt, *, max_turns=8, system_prompt=DEFAULT_SYSTEM_PROMPT,
                 store.set_session_status(session_id, "done")
             return {"ok": True, "turns": turn, "messages": transcript,
                     "answer": content or "", "error": None,
-                    "session_id": session_id}
+                    "session_id": session_id, "usage": usage}
 
         # Checkpoint BEFORE the tools run: the assistant's intent is durable
         # before any external side effect, so a crash mid-tool leaves a
@@ -300,7 +363,10 @@ def run_loop(cfg, prompt, *, max_turns=8, system_prompt=DEFAULT_SYSTEM_PROMPT,
             if on_step is not None:
                 on_step({"type": "tool_call", "name": tc["name"],
                          "args": _parse_args(tc["arguments"])})
-            result = call_tool(tc["name"], tc["arguments"])
+            if allowed_names is None:
+                result = call_tool(tc["name"], tc["arguments"])
+            else:
+                result = call_tool(tc["name"], tc["arguments"], allowed_names)
             if verbose:
                 status = "ok" if result["ok"] else "ERR: " + (result["error"] or "")
                 print(f"[turn {turn}] tool {tc['name']} → {status}")
@@ -322,4 +388,5 @@ def run_loop(cfg, prompt, *, max_turns=8, system_prompt=DEFAULT_SYSTEM_PROMPT,
     if store is not None:
         store.set_session_status(session_id, "error")
     return {"ok": False, "turns": max_turns, "messages": transcript,
-            "answer": None, "error": error, "session_id": session_id}
+            "answer": None, "error": error, "session_id": session_id,
+            "usage": usage}

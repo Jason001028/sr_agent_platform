@@ -53,6 +53,7 @@ from backend.pathguard import (
     scene_name_products, strip_raster_ext, to_posix_array_path)
 from backend.services import preview_cache
 from backend.services import preview_clear
+from backend.services import plugins as plugin_svc
 from backend.services import run_sr as run_sr_svc
 from backend.services import scene_search, store as store_mod
 from backend.services.preview_jpg import (PREVIEW_DIVISORS, PREVIEW_JPG_QUALITY,
@@ -1055,6 +1056,10 @@ def create_app() -> FastAPI:
 
     # 阶段5 运行时状态：create_app 即建（env 已就绪）；lifespan 只额外启轮询。
     app.state.store = store_mod.Store()          # SR_AGENT_DB，懒打开
+    plugin_svc.sync_catalog(app.state.store)
+    plugin_svc.ensure_machine(
+        app.state.store, plugin_svc.LOCAL_MACHINE_ID,
+        name="API 本机", status="online", default_state="enabled")
     app.state.cfg = load_config()
     app.state.chat_locks = {}                    # session_id → asyncio.Lock
     app.state.subscribers = set()                # /api/queue/events 订阅者

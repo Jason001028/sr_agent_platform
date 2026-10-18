@@ -9,9 +9,13 @@
 import { nextTick, onMounted, ref, watch } from 'vue';
 import { useChatStore } from '../stores/chat.js';
 import type { ChatMsg } from '../stores/chat.js';
+import TokenUsagePanel from '../components/TokenUsagePanel.vue';
+import { apiListPlugins } from '../lib/api.js';
+import { loadSrConfig } from '../lib/scene.js';
 
 const chat = useChatStore();
 const draft = ref('');
+const tokenPluginEnabled = ref(true);
 
 const scrollEl = ref<HTMLElement | null>(null);
 
@@ -48,6 +52,16 @@ async function scrollBottom(): Promise<void> {
 watch(() => chat.messages.length, () => void scrollBottom());
 onMounted(() => {
   void chat.init();
+  void (async () => {
+    try {
+      const list = await apiListPlugins(loadSrConfig(), 'local');
+      const plugin = list.find((p) => p.plugin_id === 'token_visualizer');
+      if (plugin) tokenPluginEnabled.value = plugin.actual_state === 'enabled'
+        && plugin.desired_state === 'enabled';
+    } catch {
+      // Keep the panel visible when an older backend has no plugin catalog yet.
+    }
+  })();
   void scrollBottom();
 });
 </script>
@@ -81,6 +95,7 @@ onMounted(() => {
         <span class="cp-title">Agent 聊天</span>
         <span v-if="chat.sessionId" class="cp-sessid">会话 {{ shortId(chat.sessionId) }}</span>
         <span v-else class="cp-sessid empty">未选择会话</span>
+        <TokenUsagePanel v-if="tokenPluginEnabled" :usage="chat.usage" />
       </div>
 
       <p v-if="chat.error" class="cp-err">{{ chat.error }}</p>
@@ -191,7 +206,7 @@ onMounted(() => {
   overflow: hidden;
 }
 .cp-head {
-  display: flex; align-items: baseline; gap: 10px;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
   padding: 12px 18px; border-bottom: 1px solid var(--line); flex: none;
   background: var(--surface);
 }

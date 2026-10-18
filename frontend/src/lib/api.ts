@@ -30,6 +30,72 @@ export interface ChatSession {
   status: string;
 }
 
+export interface TokenUsageEvent {
+  usage_id?: number;
+  session_id?: string;
+  turn: number;
+  call_index: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  source: 'provider' | 'estimate' | string;
+  created_at?: number;
+}
+
+export interface ChatUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  calls: number;
+  source: 'provider' | 'estimate' | 'unavailable' | string;
+  events: TokenUsageEvent[];
+}
+
+export interface ManagedMachine {
+  machine_id: string;
+  name: string;
+  status: string;
+  metadata: Record<string, unknown>;
+  last_seen: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface MachineDirectory {
+  current_machine_id: string;
+  machines: ManagedMachine[];
+}
+
+export type PluginDesiredState = 'enabled' | 'disabled' | 'uninstalled';
+export type PluginActualState = PluginDesiredState | 'unknown';
+
+export interface ManagedPlugin {
+  plugin_id: string;
+  name: string;
+  version: string;
+  description: string;
+  entrypoint: string;
+  machine_id: string;
+  desired_state: PluginDesiredState;
+  actual_state: PluginActualState;
+  last_error: string | null;
+  updated_at: number | null;
+}
+
+export interface PluginOperation {
+  operation_id: number;
+  machine_id: string;
+  plugin_id: string;
+  action: 'install' | 'enable' | 'disable' | 'uninstall';
+  target_state: PluginDesiredState;
+  status: 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED';
+  version: string | null;
+  error: string | null;
+  created_at: number;
+  updated_at: number;
+  finished_at: number | null;
+}
+
 /** GET /api/chat/sessions/{id}/messages 单条投影（role ∈ user/assistant/tool）。 */
 export interface HistoryMsg {
   seq: number;
@@ -53,7 +119,8 @@ export type ChatSseEvent =
   | { type: 'tool_call'; name: string; args: Record<string, unknown> }
   | { type: 'tool_result'; name: string; ok: boolean; data: unknown; error: string | null }
   | { type: 'assistant'; content: string }
-  | { type: 'turn_done'; content: string; error: string | null }
+  | { type: 'usage'; usage: TokenUsageEvent; aggregate: ChatUsage }
+  | { type: 'turn_done'; content: string; error: string | null; usage?: ChatUsage }
   | { type: 'error'; error: string };
 
 /** 队列 SSE 事件（§3.3 job_update）。
@@ -378,11 +445,67 @@ export async function apiListSessions(cfg: SrConfig): Promise<ChatSession[]> {
   return ((await r.json()) as { sessions: ChatSession[] }).sessions;
 }
 
+export async function apiListMachines(
+  cfg: SrConfig, developerMode = false,
+): Promise<MachineDirectory> {
+  // The header is a UI capability hint; production deployments should pair it
+  // with authenticated developer role checks on the server.
+  const url = apiUrl(cfg, '/api/machines');
+  const response = await http(url, {
+    headers: developerMode ? { 'X-Developer-Mode': '1' } : undefined,
+  });
+  return (await response.json()) as MachineDirectory;
+}
+
+export async function apiListPlugins(
+  cfg: SrConfig, machineId: string, developerMode = false,
+): Promise<ManagedPlugin[]> {
+  const url = apiUrl(cfg, `/api/plugins?machine_id=${encodeURIComponent(machineId)}`);
+  const r = await http(url, {
+    headers: developerMode ? { 'X-Developer-Mode': '1' } : undefined,
+  });
+  return ((await r.json()) as { plugins: ManagedPlugin[] }).plugins;
+}
+
+export async function apiPluginAction(
+  cfg: SrConfig, machineId: string, pluginId: string,
+  action: PluginOperation['action'], developerMode = false,
+): Promise<PluginOperation> {
+  const url = apiUrl(cfg,
+    `/api/machines/${encodeURIComponent(machineId)}/plugins/`
+    + `${encodeURIComponent(pluginId)}/actions`);
+  const r = await http(url, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(developerMode ? { 'X-Developer-Mode': '1' } : {}),
+    },
+    body: JSON.stringify({ action }),
+  });
+  return (await r.json()) as PluginOperation;
+}
+
+export async function apiListPluginOperations(
+  cfg: SrConfig, machineId?: string,
+): Promise<PluginOperation[]> {
+  const suffix = machineId ? `?machine_id=${encodeURIComponent(machineId)}` : '';
+  const r = await http(apiUrl(cfg, `/api/plugin-operations${suffix}`));
+  return ((await r.json()) as { operations: PluginOperation[] }).operations;
+}
+
 export async function apiSessionMessages(
   cfg: SrConfig, sid: string,
 ): Promise<HistoryResponse> {
   const r = await http(sessionMessagesUrl(cfg, sid));
   return (await r.json()) as HistoryResponse;
+}
+
+export async function apiSessionUsage(
+  cfg: SrConfig, sid: string,
+): Promise<ChatUsage> {
+  const r = await http(apiUrl(cfg,
+    `/api/chat/sessions/${encodeURIComponent(sid)}/usage`));
+  return ((await r.json()) as { usage: ChatUsage }).usage;
 }
 
 /** 发一条消息：POST 即流，SSE 逐事件回调；Promise 在流结束（turn_done/error）时完成。 */

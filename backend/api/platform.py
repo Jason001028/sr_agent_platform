@@ -51,6 +51,7 @@ from backend.pathguard import (
     ensure_allowed, normalize_submit_path, to_posix_array_path)
 from backend.services import local_exec
 from backend.services import mask as mask_svc
+from backend.services import plugins as plugin_svc
 from backend.services import run_sr as run_sr_svc
 from backend.services import scene_search
 from backend.services import slurm
@@ -255,16 +256,58 @@ def _task_view(state, task: dict) -> dict:
 # --------------------------------------------------------------------------
 # 3.1 工具
 # --------------------------------------------------------------------------
+def _machine_id(request: Request) -> str:
+    """Resolve the caller's machine identity for tool/plugin selection.
+
+    The header is intentionally explicit so a future machine Agent can use the
+    same API without changing the REST shape. Authentication of this identity
+    belongs to deployment middleware; this layer validates its syntax and keeps
+    state machine-scoped.
+    """
+    try:
+        headers = getattr(request, "headers", {})
+        value = plugin_svc.machine_id_from_header(headers.get("X-Machine-ID"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    plugin_svc.ensure_machine(request.app.state.store, value)
+    return value
+
+
+def _developer_mode(request: Request) -> bool:
+    return request.headers.get("X-Developer-Mode", "").strip() == "1"
+
+
+def _guard_machine_access(request: Request, machine_id: str) -> None:
+    """Normal users can only inspect/control the API host's machine."""
+    if machine_id != plugin_svc.LOCAL_MACHINE_ID and not _developer_mode(request):
+        raise HTTPException(status_code=403,
+                            detail="只有开发者模式可以查看或控制其他机器")
+
+
+def _visible_tools(request: Request):
+    machine_id = _machine_id(request)
+    allowed = plugin_svc.enabled_plugin_ids(request.app.state.store, machine_id)
+    return [t for t in list_tools() if t.name in allowed]
+
+
 @router.get("/api/tools")
-def list_tools_endpoint():
-    return {"tools": [t.manifest_entry() for t in list_tools()]}
+def list_tools_endpoint(request: Request):
+    return {"machine_id": _machine_id(request),
+            "tools": [t.manifest_entry() for t in _visible_tools(request)]}
+
+
+@router.get("/api/tools/by-machine")
+def list_machine_tools_endpoint(request: Request):
+    return {"machine_id": _machine_id(request),
+            "tools": [t.manifest_entry() for t in _visible_tools(request)]}
 
 
 @router.post("/api/tools/{name}")
 async def call_tool_endpoint(name: str, request: Request):
-    tool = next((t for t in list_tools() if t.name == name), None)
+    tool = next((t for t in _visible_tools(request) if t.name == name), None)
     if tool is None:
-        raise HTTPException(status_code=404, detail=f"未知工具：{name}")
+        raise HTTPException(status_code=404,
+                            detail=f"工具不存在或未在当前机器启用：{name}")
     raw = await request.body()
     try:
         body = json.loads(raw or b"{}")
@@ -277,6 +320,128 @@ async def call_tool_endpoint(name: str, request: Request):
     except Exception as e:  # noqa: BLE001 — 参数级错误
         raise HTTPException(status_code=400,
                             detail=f"参数错误：{type(e).__name__}: {e}") from e
+
+
+# --------------------------------------------------------------------------
+# 3.1a 插件控制面
+# --------------------------------------------------------------------------
+@router.get("/api/machines")
+def list_machines_endpoint(request: Request):
+    machines = request.app.state.store.list_machines()
+    if not _developer_mode(request):
+        machines = [m for m in machines
+                    if m["machine_id"] == plugin_svc.LOCAL_MACHINE_ID]
+    return {"current_machine_id": plugin_svc.LOCAL_MACHINE_ID,
+            "machines": machines}
+
+
+@router.post("/api/machines/register", status_code=201)
+async def register_machine_endpoint(request: Request):
+    body = await _json_body(request)
+    machine_id = body.get("machine_id")
+    if not isinstance(machine_id, str):
+        raise HTTPException(status_code=400, detail="machine_id 必填")
+    try:
+        machine = plugin_svc.ensure_machine(
+            request.app.state.store, machine_id,
+            name=body.get("name"), status="online",
+            metadata=body.get("metadata") if isinstance(body.get("metadata"), dict) else None)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return machine
+
+
+@router.post("/api/machines/{machine_id}/heartbeat")
+async def machine_heartbeat_endpoint(machine_id: str, request: Request):
+    body = await _json_body(request)
+    try:
+        machine = plugin_svc.ensure_machine(
+            request.app.state.store, machine_id,
+            name=body.get("name"), status="online",
+            metadata=body.get("metadata") if isinstance(body.get("metadata"), dict) else None)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return machine
+
+
+@router.get("/api/plugins")
+def list_plugins_endpoint(request: Request):
+    machine_id = request.query_params.get("machine_id") or _machine_id(request)
+    try:
+        machine_id = plugin_svc.validate_machine_id(machine_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    _guard_machine_access(request, machine_id)
+    return {"machine_id": machine_id,
+            "plugins": plugin_svc.catalog_with_machine_state(
+                request.app.state.store, machine_id)}
+
+
+@router.post("/api/machines/{machine_id}/plugins/{plugin_id}/actions")
+async def plugin_action_endpoint(machine_id: str, plugin_id: str,
+                                 request: Request):
+    try:
+        machine_id = plugin_svc.validate_machine_id(machine_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    _guard_machine_access(request, machine_id)
+    body = await _json_body(request)
+    action = body.get("action")
+    if not isinstance(action, str):
+        raise HTTPException(status_code=400,
+                            detail="action 必须是 install/enable/disable/uninstall")
+    try:
+        op = plugin_svc.request_operation(
+            request.app.state.store, machine_id, plugin_id,
+            action=action, version=body.get("version"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return op
+
+
+@router.get("/api/plugin-operations")
+def list_plugin_operations_endpoint(request: Request):
+    machine_id = request.query_params.get("machine_id")
+    status = request.query_params.get("status")
+    return {"operations": request.app.state.store.list_plugin_operations(
+        machine_id=machine_id, status=status)}
+
+
+@router.get("/api/machines/{machine_id}/plugin-operations")
+def pending_plugin_operations_endpoint(machine_id: str, request: Request):
+    """Queue consumed by a future machine Agent.
+
+    ``claim=true`` changes PENDING to RUNNING atomically so two Agent polls do
+    not execute the same installation twice.
+    """
+    try:
+        machine_id = plugin_svc.validate_machine_id(machine_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    claim = request.query_params.get("claim", "false").lower() == "true"
+    operations = (request.app.state.store.claim_plugin_operations(machine_id)
+                  if claim else request.app.state.store.list_plugin_operations(
+                      machine_id=machine_id, status="PENDING"))
+    return {"machine_id": machine_id, "operations": operations}
+
+
+@router.post("/api/plugin-operations/{operation_id}/result")
+async def plugin_operation_result_endpoint(operation_id: int,
+                                           request: Request):
+    body = await _json_body(request)
+    status = body.get("status")
+    actual_state = body.get("actual_state")
+    if status not in {"COMPLETED", "FAILED"}:
+        raise HTTPException(status_code=400, detail="status 必须为 COMPLETED 或 FAILED")
+    if actual_state not in {"enabled", "disabled", "uninstalled", "unknown"}:
+        raise HTTPException(status_code=400, detail="actual_state 无效")
+    op = request.app.state.store.finish_plugin_operation(
+        operation_id, status=status, actual_state=actual_state,
+        result=body.get("result") if isinstance(body.get("result"), dict) else {},
+        error=str(body.get("error")) if body.get("error") else None)
+    if op is None:
+        raise HTTPException(status_code=404, detail="插件操作不存在")
+    return op
 
 
 # --------------------------------------------------------------------------
@@ -342,6 +507,15 @@ def get_messages(session_id: str, request: Request):
             "messages": projected}
 
 
+@router.get("/api/chat/sessions/{session_id}/usage")
+def get_usage(session_id: str, request: Request):
+    """Return provider-reported token usage for the conversation."""
+    state = request.app.state
+    _session_or_404(state, session_id)
+    return {"session_id": session_id,
+            "usage": state.store.summarize_llm_usage(session_id)}
+
+
 @router.post("/api/chat/sessions/{session_id}/messages")
 async def chat_send(session_id: str, request: Request):
     """发一条用户消息，POST 即流：SSE 逐事件返回一个回合的全部产出。
@@ -351,6 +525,7 @@ async def chat_send(session_id: str, request: Request):
     """
     state = request.app.state
     _session_or_404(state, session_id)
+    machine_id = _machine_id(request)
     raw = await request.body()
     try:
         body = json.loads(raw or b"{}")
@@ -385,6 +560,9 @@ async def chat_send(session_id: str, request: Request):
                 out = {"type": "assistant", "content": ev.get("content")}
             elif t == "error":
                 out = {"type": "error", "error": ev.get("error")}
+            elif t == "usage":
+                out = {"type": "usage", "usage": ev.get("usage"),
+                       "aggregate": ev.get("aggregate")}
             if out:
                 loop.call_soon_threadsafe(q.put_nowait, out)
 
@@ -392,7 +570,8 @@ async def chat_send(session_id: str, request: Request):
             try:
                 return loop_mod.run_loop(
                     state.cfg, content, store=state.store,
-                    session_id=session_id, resume=True, on_step=bridge)
+                    session_id=session_id, resume=True, on_step=bridge,
+                    machine_id=machine_id)
             except Exception as e:  # noqa: BLE001 — 流上收尾，不让线程挂死
                 bridge({"type": "error", "error": f"{type(e).__name__}: {e}"})
                 return {"ok": False, "error": f"{type(e).__name__}: {e}",
@@ -415,7 +594,8 @@ async def chat_send(session_id: str, request: Request):
             r = result_box.get("r", {})
             if r.get("ok") and not r.get("error"):
                 yield _frame({"type": "turn_done",
-                              "content": r.get("answer"), "error": None})
+                              "content": r.get("answer"), "error": None,
+                              "usage": r.get("usage")})
             # 其它路径：run_loop 已通过 on_step 发过 error 帧，turn_done 不出现
         finally:
             lock.release()

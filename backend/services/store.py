@@ -70,6 +70,65 @@ CREATE TABLE IF NOT EXISTS sr_tasks (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sr_tasks_fingerprint
     ON sr_tasks(fingerprint);
+CREATE TABLE IF NOT EXISTS machines (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'offline',
+    metadata   TEXT NOT NULL DEFAULT '{}',
+    last_seen  REAL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS plugins (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    version     TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    entrypoint  TEXT NOT NULL DEFAULT '',
+    metadata    TEXT NOT NULL DEFAULT '{}',
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS machine_plugins (
+    machine_id    TEXT NOT NULL,
+    plugin_id     TEXT NOT NULL,
+    desired_state TEXT NOT NULL DEFAULT 'disabled',
+    actual_state  TEXT NOT NULL DEFAULT 'unknown',
+    version       TEXT,
+    last_error    TEXT,
+    updated_at    REAL NOT NULL,
+    PRIMARY KEY (machine_id, plugin_id)
+);
+CREATE TABLE IF NOT EXISTS plugin_operations (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    machine_id    TEXT NOT NULL,
+    plugin_id     TEXT NOT NULL,
+    action        TEXT NOT NULL,
+    target_state  TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'PENDING',
+    version       TEXT,
+    request_id    TEXT,
+    result        TEXT NOT NULL DEFAULT '{}',
+    error         TEXT,
+    created_at    REAL NOT NULL,
+    updated_at    REAL NOT NULL,
+    finished_at   REAL
+);
+CREATE INDEX IF NOT EXISTS idx_plugin_ops_machine_status
+    ON plugin_operations(machine_id, status, created_at);
+CREATE TABLE IF NOT EXISTS llm_usage (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id        TEXT NOT NULL,
+    turn              INTEGER NOT NULL,
+    call_index        INTEGER NOT NULL,
+    prompt_tokens     INTEGER NOT NULL,
+    completion_tokens INTEGER NOT NULL,
+    total_tokens      INTEGER NOT NULL,
+    source            TEXT NOT NULL DEFAULT 'provider',
+    created_at        REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_session
+    ON llm_usage(session_id, created_at, id);
 """
 
 #: sr_tasks 里发布后新增的列。`CREATE TABLE IF NOT EXISTS` 对**已存在**的表一个字
@@ -198,6 +257,267 @@ class Store:
             "SELECT payload FROM messages WHERE session_id = ? ORDER BY seq",
             (session_id,)).fetchall()
         return [json.loads(r[0]) for r in rows]
+
+    # ---- LLM token usage -------------------------------------------------
+
+    def append_llm_usage(self, session_id: str, *, turn: int,
+                         call_index: int, prompt_tokens: int,
+                         completion_tokens: int, total_tokens: int,
+                         source: str = "provider") -> dict:
+        now = time.time()
+        cur = self._db().execute(
+            "INSERT INTO llm_usage (session_id, turn, call_index, prompt_tokens, "
+            "completion_tokens, total_tokens, source, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (session_id, int(turn), int(call_index), int(prompt_tokens),
+             int(completion_tokens), int(total_tokens), str(source), now),
+        )
+        self._db().commit()
+        return {"usage_id": int(cur.lastrowid), "session_id": session_id,
+                "turn": int(turn), "call_index": int(call_index),
+                "prompt_tokens": int(prompt_tokens),
+                "completion_tokens": int(completion_tokens),
+                "total_tokens": int(total_tokens), "source": str(source),
+                "created_at": now}
+
+    def list_llm_usage(self, session_id: str) -> list[dict]:
+        rows = self._db().execute(
+            "SELECT id, session_id, turn, call_index, prompt_tokens, "
+            "completion_tokens, total_tokens, source, created_at "
+            "FROM llm_usage WHERE session_id = ? ORDER BY created_at, id",
+            (session_id,)).fetchall()
+        return [{"usage_id": r[0], "session_id": r[1], "turn": r[2],
+                 "call_index": r[3], "prompt_tokens": r[4],
+                 "completion_tokens": r[5], "total_tokens": r[6],
+                 "source": r[7], "created_at": r[8]} for r in rows]
+
+    def summarize_llm_usage(self, session_id: str) -> dict:
+        events = self.list_llm_usage(session_id)
+        prompt = sum(e["prompt_tokens"] for e in events)
+        completion = sum(e["completion_tokens"] for e in events)
+        total = sum(e["total_tokens"] for e in events)
+        return {"prompt_tokens": prompt, "completion_tokens": completion,
+                "total_tokens": total, "calls": len(events),
+                "source": (events[-1]["source"] if events else "unavailable"),
+                "events": events}
+
+    # ---- machines / plugins ---------------------------------------------
+
+    def upsert_machine(self, machine_id: str, *, name: str | None = None,
+                       status: str = "online", metadata: dict | None = None,
+                       touch: bool = True) -> dict:
+        """Create or update a machine registration."""
+        machine_id = str(machine_id).strip()
+        if not machine_id:
+            raise ValueError("machine_id is required")
+        now = time.time()
+        db = self._db()
+        old = db.execute("SELECT name, metadata FROM machines WHERE id = ?",
+                         (machine_id,)).fetchone()
+        machine_name = str(name or (old[0] if old else machine_id))
+        meta = metadata if metadata is not None else (
+            json.loads(old[1]) if old else {})
+        last_seen = now if touch else None
+        db.execute(
+            "INSERT INTO machines (id, name, status, metadata, last_seen, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET name=excluded.name, status=excluded.status, "
+            "metadata=excluded.metadata, last_seen=COALESCE(excluded.last_seen, machines.last_seen), "
+            "updated_at=excluded.updated_at",
+            (machine_id, machine_name, status, json.dumps(meta, ensure_ascii=False),
+             last_seen, now, now),
+        )
+        db.commit()
+        return self.get_machine(machine_id)  # type: ignore[return-value]
+
+    def get_machine(self, machine_id: str) -> dict | None:
+        row = self._db().execute(
+            "SELECT id, name, status, metadata, last_seen, created_at, updated_at "
+            "FROM machines WHERE id = ?", (machine_id,)).fetchone()
+        if row is None:
+            return None
+        return {"machine_id": row[0], "name": row[1], "status": row[2],
+                "metadata": json.loads(row[3] or "{}"), "last_seen": row[4],
+                "created_at": row[5], "updated_at": row[6]}
+
+    def list_machines(self) -> list[dict]:
+        rows = self._db().execute(
+            "SELECT id, name, status, metadata, last_seen, created_at, updated_at "
+            "FROM machines ORDER BY name, id").fetchall()
+        return [{"machine_id": r[0], "name": r[1], "status": r[2],
+                 "metadata": json.loads(r[3] or "{}"), "last_seen": r[4],
+                 "created_at": r[5], "updated_at": r[6]} for r in rows]
+
+    def upsert_plugin(self, plugin_id: str, *, name: str, version: str,
+                      description: str = "", entrypoint: str = "",
+                      metadata: dict | None = None) -> dict:
+        now = time.time()
+        db = self._db()
+        db.execute(
+            "INSERT INTO plugins (id, name, version, description, entrypoint, metadata, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET name=excluded.name, version=excluded.version, "
+            "description=excluded.description, entrypoint=excluded.entrypoint, "
+            "metadata=excluded.metadata, updated_at=excluded.updated_at",
+            (plugin_id, name, version, description, entrypoint,
+             json.dumps(metadata or {}, ensure_ascii=False), now, now),
+        )
+        db.commit()
+        return self.get_plugin(plugin_id)  # type: ignore[return-value]
+
+    def get_plugin(self, plugin_id: str) -> dict | None:
+        row = self._db().execute(
+            "SELECT id, name, version, description, entrypoint, metadata, created_at, updated_at "
+            "FROM plugins WHERE id = ?", (plugin_id,)).fetchone()
+        if row is None:
+            return None
+        return {"plugin_id": row[0], "name": row[1], "version": row[2],
+                "description": row[3], "entrypoint": row[4],
+                "metadata": json.loads(row[5] or "{}"),
+                "created_at": row[6], "updated_at": row[7]}
+
+    def list_plugins(self) -> list[dict]:
+        rows = self._db().execute(
+            "SELECT id, name, version, description, entrypoint, metadata, created_at, updated_at "
+            "FROM plugins ORDER BY name, id").fetchall()
+        return [{"plugin_id": r[0], "name": r[1], "version": r[2],
+                 "description": r[3], "entrypoint": r[4],
+                 "metadata": json.loads(r[5] or "{}"),
+                 "created_at": r[6], "updated_at": r[7]} for r in rows]
+
+    def set_machine_plugin(self, machine_id: str, plugin_id: str, *,
+                           desired_state: str, actual_state: str | None = None,
+                           version: str | None = None,
+                           last_error: str | None = None) -> dict:
+        if desired_state not in {"enabled", "disabled", "uninstalled"}:
+            raise ValueError("invalid desired plugin state")
+        now = time.time()
+        db = self._db()
+        if actual_state is None:
+            db.execute(
+                "INSERT INTO machine_plugins (machine_id, plugin_id, desired_state, actual_state, version, last_error, updated_at) "
+                "VALUES (?, ?, ?, 'unknown', ?, ?, ?) "
+                "ON CONFLICT(machine_id, plugin_id) DO UPDATE SET desired_state=excluded.desired_state, "
+                "version=COALESCE(excluded.version, machine_plugins.version), "
+                "last_error=excluded.last_error, updated_at=excluded.updated_at",
+                (machine_id, plugin_id, desired_state, version, last_error, now),
+            )
+            db.commit()
+            return self.get_machine_plugin(machine_id, plugin_id)  # type: ignore[return-value]
+        db.execute(
+            "INSERT INTO machine_plugins (machine_id, plugin_id, desired_state, actual_state, version, last_error, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(machine_id, plugin_id) DO UPDATE SET desired_state=excluded.desired_state, "
+            "actual_state=excluded.actual_state, "
+            "version=COALESCE(excluded.version, machine_plugins.version), "
+            "last_error=excluded.last_error, updated_at=excluded.updated_at",
+            (machine_id, plugin_id, desired_state, actual_state,
+             version, last_error, now),
+        )
+        db.commit()
+        return self.get_machine_plugin(machine_id, plugin_id)  # type: ignore[return-value]
+
+    def get_machine_plugin(self, machine_id: str, plugin_id: str) -> dict | None:
+        row = self._db().execute(
+            "SELECT machine_id, plugin_id, desired_state, actual_state, version, last_error, updated_at "
+            "FROM machine_plugins WHERE machine_id = ? AND plugin_id = ?",
+            (machine_id, plugin_id)).fetchone()
+        if row is None:
+            return None
+        return {"machine_id": row[0], "plugin_id": row[1],
+                "desired_state": row[2], "actual_state": row[3],
+                "version": row[4], "last_error": row[5], "updated_at": row[6]}
+
+    def list_machine_plugins(self, machine_id: str | None = None) -> list[dict]:
+        where = " WHERE machine_id = ?" if machine_id else ""
+        args = (machine_id,) if machine_id else ()
+        rows = self._db().execute(
+            "SELECT machine_id, plugin_id, desired_state, actual_state, version, last_error, updated_at "
+            f"FROM machine_plugins{where} ORDER BY machine_id, plugin_id", args).fetchall()
+        return [{"machine_id": r[0], "plugin_id": r[1],
+                 "desired_state": r[2], "actual_state": r[3],
+                 "version": r[4], "last_error": r[5], "updated_at": r[6]}
+                for r in rows]
+
+    def create_plugin_operation(self, machine_id: str, plugin_id: str, *,
+                                action: str, target_state: str,
+                                version: str | None = None,
+                                request_id: str | None = None) -> dict:
+        now = time.time()
+        cur = self._db().execute(
+            "INSERT INTO plugin_operations (machine_id, plugin_id, action, target_state, status, version, request_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)",
+            (machine_id, plugin_id, action, target_state, version, request_id, now, now))
+        self._db().commit()
+        return self.get_plugin_operation(int(cur.lastrowid))  # type: ignore[return-value]
+
+    def get_plugin_operation(self, operation_id: int) -> dict | None:
+        row = self._db().execute(
+            "SELECT id, machine_id, plugin_id, action, target_state, status, version, request_id, result, error, created_at, updated_at, finished_at "
+            "FROM plugin_operations WHERE id = ?", (operation_id,)).fetchone()
+        if row is None:
+            return None
+        return {"operation_id": row[0], "machine_id": row[1], "plugin_id": row[2],
+                "action": row[3], "target_state": row[4], "status": row[5],
+                "version": row[6], "request_id": row[7],
+                "result": json.loads(row[8] or "{}"), "error": row[9],
+                "created_at": row[10], "updated_at": row[11],
+                "finished_at": row[12]}
+
+    def list_plugin_operations(self, *, machine_id: str | None = None,
+                               status: str | None = None,
+                               limit: int = 100) -> list[dict]:
+        clauses, args = [], []
+        if machine_id:
+            clauses.append("machine_id = ?"); args.append(machine_id)
+        if status:
+            clauses.append("status = ?"); args.append(status)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        args.append(int(limit))
+        rows = self._db().execute(
+            "SELECT id FROM plugin_operations" + where +
+            " ORDER BY created_at DESC LIMIT ?", tuple(args)).fetchall()
+        return [self.get_plugin_operation(int(r[0])) for r in rows]
+
+    def claim_plugin_operations(self, machine_id: str, *,
+                                limit: int = 20) -> list[dict]:
+        """Atomically claim pending work for a machine Agent."""
+        db = self._db()
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            rows = db.execute(
+                "SELECT id FROM plugin_operations WHERE machine_id = ? AND status = 'PENDING' "
+                "ORDER BY created_at LIMIT ?", (machine_id, int(limit))).fetchall()
+            ids = [int(row[0]) for row in rows]
+            now = time.time()
+            for operation_id in ids:
+                db.execute(
+                    "UPDATE plugin_operations SET status='RUNNING', updated_at=? "
+                    "WHERE id=? AND status='PENDING'", (now, operation_id))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        return [self.get_plugin_operation(operation_id) for operation_id in ids]
+
+    def finish_plugin_operation(self, operation_id: int, *, status: str,
+                                actual_state: str, result: dict | None = None,
+                                error: str | None = None) -> dict | None:
+        if status not in {"COMPLETED", "FAILED"}:
+            raise ValueError("invalid plugin operation status")
+        op = self.get_plugin_operation(operation_id)
+        if op is None:
+            return None
+        now = time.time()
+        db = self._db()
+        db.execute(
+            "UPDATE plugin_operations SET status=?, result=?, error=?, updated_at=?, finished_at=? WHERE id=?",
+            (status, json.dumps(result or {}, ensure_ascii=False), error, now, now, operation_id))
+        db.execute(
+            "UPDATE machine_plugins SET actual_state=?, last_error=?, updated_at=? WHERE machine_id=? AND plugin_id=?",
+            (actual_state, error, now, op["machine_id"], op["plugin_id"]))
+        db.commit()
+        return self.get_plugin_operation(operation_id)
 
     # ---- sr_tasks (idempotency for external Slurm jobs) ------------------
 
