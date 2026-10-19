@@ -5,27 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def make_scene_dir(root, name, rc=False, source=True):
-    """一个真机上那样的场景目录：meta.xml + 输入影像 + 掩码（+ 未超分那一份）。
-
-    `rc=True` 用 RC 布局（输入叫 `PAN.tif`），默认 SC（输入 = `<目录名>.tif`）。
-    `source=False` 用来造出"没有未超分那一份"的场景 —— 提交侧要拦下的那种。
-    提交侧会去 stat 这个目录（services/run_sr.nosr_swap_plan），所以走到服务层的
-    用例必须有一个真的。
-    """
-    scene = Path(root) / name
-    scene.mkdir(parents=True, exist_ok=True)
-    azimuth = "" if rc else "123.4"
-    (scene / f"{name}_meta.xml").write_text(
-        f"<meta><SolarAzimuth>{azimuth}</SolarAzimuth></meta>", encoding="utf-8")
-    stem = "PAN" if rc else name
-    (scene / f"{stem}.tif").write_bytes(b"body\n")
-    (scene / f"{stem}_mask.tif").write_bytes(b"mask\n")
-    if source:
-        (scene / f"{stem}_NOSR.tif").write_bytes(b"un-superresolved\n")
-    return scene
-
-
 def allowed_roots_env(*roots) -> dict:
     """把给定目录配成盘阵前缀白名单，返回要注入的环境变量。
 

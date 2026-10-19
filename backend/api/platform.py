@@ -19,13 +19,13 @@
   所以重启后的第一轮不会把整表已终态的老行重新写一遍。
 * 队列「耗时」= 本次运行的时间窗（sr_tasks.started_at → finished_at，见
   _task_state 的两个锚点），不是行的年龄 —— 一行 = 一个指纹，重复提交复用同一行，
-  行的 created_at 停在第一次提交。
+  行的 created_at 停在第一次提交（2026-09-18 修的正是把它当耗时用）。
 * 广播 = 进程内 set[subscriber]，每订阅者持 (注册时运行 loop, asyncio.Queue)；
   `_broadcast` 从任意线程用 call_soon_threadsafe 入队，断开的订阅者被丢弃。
 
 说明：为保持单个请求内清晰，各同步端点的参数统一命名 `request: Request`，
 运行时状态解包成局部 `state = request.app.state`（Starlette State）；helper
-一律收 `state`，不混用 app/Request/State。
+一律收 `state`，不再出现 app/Request/State 混用。
 """
 
 from __future__ import annotations
@@ -50,14 +50,18 @@ from backend.config import sr_runtime
 from backend.contracts.viewer_context import normalize_viewer_context
 from backend.pathguard import (
     ensure_allowed, normalize_submit_path, to_posix_array_path)
+from backend.services import local_exec
 from backend.services import mask as mask_svc
+from backend.services import plugins as plugin_svc
 from backend.services import run_sr as run_sr_svc
 from backend.services import scene_search
+from backend.services import slurm
 #: 掩码命名的唯一实现搬到了 services（REST 与 agent 工具两个入口都要用同一份
 #: 推导，见 scene_search.derived_mask_path）；这里转出给既有调用方
 #: （本模块 bake_mask / _norm_sr_params、api/app.py::resolve）。
 from backend.services.scene_search import derived_mask_path, mask_stem
 from backend.tools import build_builtin_registry, run_sr as run_sr_tool
+from backend.tools.contract import list_tools
 
 router = APIRouter()
 
@@ -108,23 +112,24 @@ def _broadcast(state, event: dict) -> None:
 
 
 #: States a cancel can leave alone. Anything else — including UNKNOWN, which is
-#: what a restarted sr-api reports for a run it can no longer identify — must
+#: what a restarted sr-api reports for a job it no longer has a record of — must
 #: not be answered with a bare "cancelled: false" (see cancel_queue).
 _TERMINAL_STATES = ("COMPLETED", "FAILED", "CANCELLED")
 
-#: 会写 finished_at 的显示态。UNKNOWN 不算：那时进程是否还在跑都还没确认、判定文件
-#: 也可能还没落盘，都可能是**假的**「已结束」，之后还会翻成 COMPLETED/FAILED。
+#: 会写 finished_at 的显示态。UNKNOWN 不算：调度器一时没有记录、判定文件还没落盘
+#: 都可能是**假的**「已结束」，之后还会翻成 COMPLETED/FAILED（§一 "C 方案"）。
 _RUN_ENDED_STATES = ("COMPLETED", "FAILED")
 
 
 def _queue_state(st: dict) -> str:
-    """Map a local_exec.status dict onto the queue display state machine (§3.3).
+    """Map a slurm.job_status dict onto the queue display state machine (§3.3).
 
-    PENDING → PENDING；其它 active → RUNNING；COMPLETED → COMPLETED；其它已结束
-    （FAILED/CANCELLED/…）→ FAILED；本机既没有进程记录也没有结果文件 → UNKNOWN。
+    squeue PENDING → PENDING；其它 active → RUNNING；sacct COMPLETED →
+    COMPLETED；其它 terminal（FAILED/CANCELLED/TIMEOUT/OOM…）→ FAILED；
+    调度器无记录 → UNKNOWN。
     """
     raw = (st.get("state") or "").upper()
-    if raw == "UNKNOWN" or st.get("active") is None:
+    if raw == "UNKNOWN":
         return "UNKNOWN"
     if st.get("active"):
         return "PENDING" if raw == "PENDING" else "RUNNING"
@@ -132,7 +137,7 @@ def _queue_state(st: dict) -> str:
 
 
 def _task_state(state, task: dict) -> tuple[str, bool, dict | None]:
-    """Calibrate one sr_task row against the local executor.
+    """Calibrate one sr_task row against the scheduler.
 
     Returns (state, changed, fresh_row) — `fresh_row` 是这次**写回后**从库里读回的
     那一行（没写就是 None）。调用方必须拿它去答：传进来的 `task` 是写之前的快照，
@@ -141,15 +146,13 @@ def _task_state(state, task: dict) -> tuple[str, bool, dict | None]:
 
     Caches the queue display state in state.task_cache and writes it back to
     sr_tasks.status on change, broadcasting a job_update frame. A task with no
-    job_id (interrupted submit) has no executor record — surface its stored
-    status verbatim and never invent a terminal state for it. A row the executor
-    has no trace of at all keeps a stored terminal status instead of being
-    re-judged UNKNOWN (see the branch below).
+    job_id (interrupted submit) has no scheduler record — surface its stored
+    status verbatim and never invent a terminal state for it.
 
     比较基准是内存缓存，缓存缺失（sr-api 刚重启）回落到**库里存的状态**：不回落的
     话重启后每一行都被判成「状态变了」，于是每个已跑完的老行都被写回一次、updated_at
-    被抬到「现在」，耗时列集体变成行龄（实测：30 小时前跑完的行显示
-    「30 时 00 分」）。有了回落后，重启只补发真正变了的那些行。
+    被抬到「现在」，耗时列集体变成行龄（2026-09-18 实测：30 小时前跑完的行显示
+    「30 时 00 分」）。回落之后，重启只补发真正变了的那些行。
     """
     task_id = task["task_id"]
     cache = state.task_cache
@@ -157,30 +160,22 @@ def _task_state(state, task: dict) -> tuple[str, bool, dict | None]:
         return (task.get("status") or "UNKNOWN").upper(), False, None
     prev = cache.get(task_id) or ((task.get("status") or "").upper() or None)
     try:
-        # Terminal states come from the run's own verdict file, which lives in
-        # the task's <DatarootLQ>/Debug/ — hence query_job_status(task=…).
+        # Terminal states come from the job's own verdict file, which lives in
+        # the task's <DatarootLQ>/Debug/ — hence query_job_status(task=…)
+        # rather than a bare slurm.job_status (§一 "C 方案").
         st = run_sr_svc.query_job_status(task["job_id"], task=task)
-    except Exception:  # noqa: BLE001 — 查询出错 → 保留上一次的已知状态
+    except Exception:  # noqa: BLE001 — scheduler hiccup → keep last known
         return prev or "UNKNOWN", False, None
     state_name = _queue_state(st)
-    if state_name == "UNKNOWN" and st.get("active") is None:
-        # 本机执行器对这个编号毫无痕迹：既没有运行记录，也没有结果文件。库里却记着
-        # 它已经结束 —— 那种行来自更早的调度器路线（或工作目录被清过），本机当然
-        # 找不到痕迹。按库里记的终态展示，不把它改写成 UNKNOWN：否则队列页上一批早就
-        # 跑完的作业会集体变成「结局不明」。只是展示口径 —— 重投仍被挡着，
-        # `_resolve_existing` 见到 UNKNOWN 一律 SubmitConflict，不看库里的状态。
-        stored = (task.get("status") or "").upper()
-        if stored in _RUN_ENDED_STATES:
-            return stored, False, None
     if state_name == prev:
         return state_name, False, None
     cache[task_id] = state_name
     fresh = None
     try:
         # 本次运行的时间窗就钉在这两个转换点上：首次看到 RUNNING = 排队结束、真开始
-        # 跑；看到终态 = 跑完。`prev != "RUNNING"` 保证只有「从非 RUNNING 变成
-        # RUNNING」这一次才算开始，而重启后 prev 来自库里存的状态 —— 库已经是
-        # RUNNING 的（重启前就观测到过）不会被重新计时。
+        # 跑；看到终态 = 跑完。`prev != "RUNNING"` 让重排队（Slurm requeue）只以
+        # 后一次 RUNNING 为起点，而重启后 prev 来自库里存的状态 —— 库已经是 RUNNING
+        # 的（重启前就观测到过）不会被重新计时。
         fresh = state.store.set_sr_task_state(
             task_id, state_name,
             mark_started=state_name == "RUNNING" and prev != "RUNNING",
@@ -196,13 +191,31 @@ def _task_state(state, task: dict) -> tuple[str, bool, dict | None]:
              else f"state={state_name}"}
     # 帧必须带上这次写库的时间戳（updated_at + 耗时用的 started_at/finished_at）。
     # 只推 state 的话，客户端手上的还是上一次 GET 的快照，耗时列要么退化成「0 秒」
-    # （真机），要么停在上一次运行的数字上。写库成功才带：写失败时库里
+    # （2026-09-17 真机），要么停在上一次运行的数字上。写库成功才带：写失败时库里
     # 没变，凭本地时钟发一个只会让界面与库对不上。
     if fresh is not None:
         for col in ("updated_at", "started_at", "finished_at"):
             frame[col] = fresh.get(col)
     _broadcast(state, frame)
     return state_name, True, fresh
+
+
+def _run_dataroot(task: dict) -> str | None:
+    """The directory the job actually works in — its private copy when the
+    sandbox is on, otherwise lq_path itself.
+
+    Surfaced because the two differ: the queue row shows the path the user
+    typed, but with SR_SANDBOX_ROOT set the product lands in the copy, so
+    "where is my result" has to be answerable from the API. Never raises —
+    the sandbox env may have changed since the task was created.
+    """
+    p = task.get("params") or {}
+    try:
+        sandbox = run_sr_svc.sandbox_scene_paths(p.get("lq_path"),
+                                                 task.get("fingerprint"))
+    except ValueError:
+        return None
+    return (sandbox or {}).get("scene") or p.get("lq_path")
 
 
 def _task_view(state, task: dict) -> dict:
@@ -225,9 +238,7 @@ def _task_view(state, task: dict) -> dict:
             "delete_ori": p.get("delete_ori", False),
             "grid_align": p.get("grid_align", True),
         },
-        # 作业就地跑，产物落在 lq_path 里 —— 与 params.lq_path 同一个值，
-        # 保留这个字段是为了既有消费者不用改。
-        "run_dataroot": p.get("lq_path"),
+        "run_dataroot": _run_dataroot(task),
         "config_xml": task["config_xml"], "batch_script": task["batch_script"],
         "log_dir": task["log_dir"],
         "created_at": task["created_at"], "updated_at": task["updated_at"],
@@ -235,9 +246,9 @@ def _task_view(state, task: dict) -> dict:
         # （整段运行期间 sr-api 不在场，或这一行是加这两列之前建的）—— 客户端显示
         # 「—」，不拿 created_at 顶替：那个值是**行**的生日，复用行会退化成行龄。
         "started_at": task["started_at"], "finished_at": task["finished_at"],
-        # 产物预览的服务端主动生成进度（api-contract §4.x）。null = 没生成过；
+        # 产物预览的服务端急烤进度（api-contract §4.x）。null = 没烤过；
         # running / done / skipped / failed 见 `preview_note` 里那句人话。
-        # 与 `state` 无关：作业跑完了、预览也可能因为产物缺失/目录不可写而没生成。
+        # 与 `state` 无关：作业跑完了、预览也可能因为沙箱/产物缺失/目录不可写而没烤。
         "preview_state": task.get("preview_state"),
         "preview_note": task.get("preview_note"),
     }
@@ -259,18 +270,59 @@ def _tool_registry(request: Request):
         return context.tool_registry
     registry = getattr(request.app.state, "tool_registry", None)
     return registry if registry is not None else build_builtin_registry()
+def _machine_id(request: Request) -> str:
+    """Resolve the caller's machine identity for tool/plugin selection.
+
+    The header is intentionally explicit so a future machine Agent can use the
+    same API without changing the REST shape. Authentication of this identity
+    belongs to deployment middleware; this layer validates its syntax and keeps
+    state machine-scoped.
+    """
+    try:
+        headers = getattr(request, "headers", {})
+        value = plugin_svc.machine_id_from_header(headers.get("X-Machine-ID"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    plugin_svc.ensure_machine(request.app.state.store, value)
+    return value
+
+
+def _developer_mode(request: Request) -> bool:
+    return request.headers.get("X-Developer-Mode", "").strip() == "1"
+
+
+def _guard_machine_access(request: Request, machine_id: str) -> None:
+    """Normal users can only inspect/control the API host's machine."""
+    if machine_id != plugin_svc.LOCAL_MACHINE_ID and not _developer_mode(request):
+        raise HTTPException(status_code=403,
+                            detail="只有开发者模式可以查看或控制其他机器")
+
+
+def _visible_tools(request: Request):
+    machine_id = _machine_id(request)
+    allowed = plugin_svc.enabled_plugin_ids(request.app.state.store, machine_id)
+    return [t for t in _tool_registry(request).list() if t.name in allowed]
 
 
 @router.get("/api/tools")
 def list_tools_endpoint(request: Request):
-    return {"tools": [t.manifest_entry() for t in _tool_registry(request).list()]}
+    return {"machine_id": _machine_id(request),
+            "tools": [t.manifest_entry() for t in _visible_tools(request)]}
+
+
+@router.get("/api/tools/by-machine")
+def list_machine_tools_endpoint(request: Request):
+    return {"machine_id": _machine_id(request),
+            "tools": [t.manifest_entry() for t in _visible_tools(request)]}
 
 
 @router.post("/api/tools/{name}")
 async def call_tool_endpoint(name: str, request: Request):
     registry = _tool_registry(request)
-    if registry.get(name) is None:
-        raise HTTPException(status_code=404, detail=f"未知工具：{name}")
+    tool = next((t for t in _visible_tools(request) if t.name == name), None)
+    if tool is None:
+        raise HTTPException(status_code=404,
+                            detail=f"工具不存在或未在当前机器启用：{name}")
     raw = await request.body()
     try:
         body = json.loads(raw or b"{}")
@@ -295,6 +347,128 @@ async def validate_context_endpoint(request: Request):
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True, "schema_version": context["schema_version"], "context": context}
+
+
+# --------------------------------------------------------------------------
+# 3.1a 插件控制面
+# --------------------------------------------------------------------------
+@router.get("/api/machines")
+def list_machines_endpoint(request: Request):
+    machines = request.app.state.store.list_machines()
+    if not _developer_mode(request):
+        machines = [m for m in machines
+                    if m["machine_id"] == plugin_svc.LOCAL_MACHINE_ID]
+    return {"current_machine_id": plugin_svc.LOCAL_MACHINE_ID,
+            "machines": machines}
+
+
+@router.post("/api/machines/register", status_code=201)
+async def register_machine_endpoint(request: Request):
+    body = await _json_body(request)
+    machine_id = body.get("machine_id")
+    if not isinstance(machine_id, str):
+        raise HTTPException(status_code=400, detail="machine_id 必填")
+    try:
+        machine = plugin_svc.ensure_machine(
+            request.app.state.store, machine_id,
+            name=body.get("name"), status="online",
+            metadata=body.get("metadata") if isinstance(body.get("metadata"), dict) else None)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return machine
+
+
+@router.post("/api/machines/{machine_id}/heartbeat")
+async def machine_heartbeat_endpoint(machine_id: str, request: Request):
+    body = await _json_body(request)
+    try:
+        machine = plugin_svc.ensure_machine(
+            request.app.state.store, machine_id,
+            name=body.get("name"), status="online",
+            metadata=body.get("metadata") if isinstance(body.get("metadata"), dict) else None)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return machine
+
+
+@router.get("/api/plugins")
+def list_plugins_endpoint(request: Request):
+    machine_id = request.query_params.get("machine_id") or _machine_id(request)
+    try:
+        machine_id = plugin_svc.validate_machine_id(machine_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    _guard_machine_access(request, machine_id)
+    return {"machine_id": machine_id,
+            "plugins": plugin_svc.catalog_with_machine_state(
+                request.app.state.store, machine_id)}
+
+
+@router.post("/api/machines/{machine_id}/plugins/{plugin_id}/actions")
+async def plugin_action_endpoint(machine_id: str, plugin_id: str,
+                                 request: Request):
+    try:
+        machine_id = plugin_svc.validate_machine_id(machine_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    _guard_machine_access(request, machine_id)
+    body = await _json_body(request)
+    action = body.get("action")
+    if not isinstance(action, str):
+        raise HTTPException(status_code=400,
+                            detail="action 必须是 install/enable/disable/uninstall")
+    try:
+        op = plugin_svc.request_operation(
+            request.app.state.store, machine_id, plugin_id,
+            action=action, version=body.get("version"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return op
+
+
+@router.get("/api/plugin-operations")
+def list_plugin_operations_endpoint(request: Request):
+    machine_id = request.query_params.get("machine_id")
+    status = request.query_params.get("status")
+    return {"operations": request.app.state.store.list_plugin_operations(
+        machine_id=machine_id, status=status)}
+
+
+@router.get("/api/machines/{machine_id}/plugin-operations")
+def pending_plugin_operations_endpoint(machine_id: str, request: Request):
+    """Queue consumed by a future machine Agent.
+
+    ``claim=true`` changes PENDING to RUNNING atomically so two Agent polls do
+    not execute the same installation twice.
+    """
+    try:
+        machine_id = plugin_svc.validate_machine_id(machine_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    claim = request.query_params.get("claim", "false").lower() == "true"
+    operations = (request.app.state.store.claim_plugin_operations(machine_id)
+                  if claim else request.app.state.store.list_plugin_operations(
+                      machine_id=machine_id, status="PENDING"))
+    return {"machine_id": machine_id, "operations": operations}
+
+
+@router.post("/api/plugin-operations/{operation_id}/result")
+async def plugin_operation_result_endpoint(operation_id: int,
+                                           request: Request):
+    body = await _json_body(request)
+    status = body.get("status")
+    actual_state = body.get("actual_state")
+    if status not in {"COMPLETED", "FAILED"}:
+        raise HTTPException(status_code=400, detail="status 必须为 COMPLETED 或 FAILED")
+    if actual_state not in {"enabled", "disabled", "uninstalled", "unknown"}:
+        raise HTTPException(status_code=400, detail="actual_state 无效")
+    op = request.app.state.store.finish_plugin_operation(
+        operation_id, status=status, actual_state=actual_state,
+        result=body.get("result") if isinstance(body.get("result"), dict) else {},
+        error=str(body.get("error")) if body.get("error") else None)
+    if op is None:
+        raise HTTPException(status_code=404, detail="插件操作不存在")
+    return op
 
 
 # --------------------------------------------------------------------------
@@ -360,6 +534,15 @@ def get_messages(session_id: str, request: Request):
             "messages": projected}
 
 
+@router.get("/api/chat/sessions/{session_id}/usage")
+def get_usage(session_id: str, request: Request):
+    """Return provider-reported token usage for the conversation."""
+    state = request.app.state
+    _session_or_404(state, session_id)
+    return {"session_id": session_id,
+            "usage": state.store.summarize_llm_usage(session_id)}
+
+
 @router.post("/api/chat/sessions/{session_id}/messages")
 async def chat_send(session_id: str, request: Request):
     """发一条用户消息，POST 即流：SSE 逐事件返回一个回合的全部产出。
@@ -369,6 +552,7 @@ async def chat_send(session_id: str, request: Request):
     """
     state = request.app.state
     _session_or_404(state, session_id)
+    machine_id = _machine_id(request)
     raw = await request.body()
     try:
         body = json.loads(raw or b"{}")
@@ -403,6 +587,9 @@ async def chat_send(session_id: str, request: Request):
                 out = {"type": "assistant", "content": ev.get("content")}
             elif t == "error":
                 out = {"type": "error", "error": ev.get("error")}
+            elif t == "usage":
+                out = {"type": "usage", "usage": ev.get("usage"),
+                       "aggregate": ev.get("aggregate")}
             if out:
                 loop.call_soon_threadsafe(q.put_nowait, out)
 
@@ -414,7 +601,7 @@ async def chat_send(session_id: str, request: Request):
                     store=None if context is not None else state.store,
                     session_id=session_id, resume=True, on_step=bridge,
                     registry=None if context is not None else getattr(state, "tool_registry", None),
-                    context=context)
+                    context=context, machine_id=machine_id)
             except Exception as e:  # noqa: BLE001 — 流上收尾，不让线程挂死
                 bridge({"type": "error", "error": f"{type(e).__name__}: {e}"})
                 return {"ok": False, "error": f"{type(e).__name__}: {e}",
@@ -437,7 +624,8 @@ async def chat_send(session_id: str, request: Request):
             r = result_box.get("r", {})
             if r.get("ok") and not r.get("error"):
                 yield _frame({"type": "turn_done",
-                              "content": r.get("answer"), "error": None})
+                              "content": r.get("answer"), "error": None,
+                              "usage": r.get("usage")})
             # 其它路径：run_loop 已通过 on_step 发过 error 帧，turn_done 不出现
         finally:
             lock.release()
@@ -478,7 +666,7 @@ def _mask_target_dir(body: dict) -> Path:
     * `lq_path`：盘阵上任意一个合法场景目录（手工行用；Windows 形态 `W:\\...`
       也吃）。**不要求 SR_SCENES_ROOT**，这正是"打开任意场景目录"的前提。
       路径本身要存在（kind="dir"）。
-    * `scene_id`：库行的不透明 id（需要 SR_SCENES_ROOT）。
+    * `scene_id`：库行的不透明 id，沿用旧语义（需要 SR_SCENES_ROOT）。
 
     两条路都收敛到 `scene_search.input_scene_path`，掩码文件名再由
     `mask_stem` 取 —— 目录是不是场景目录，判断只此一处。
@@ -633,20 +821,15 @@ async def submit_queue(request: Request):
     state = request.app.state
     body = await _json_body(request)
     params = _norm_sr_params(body)
-    # 这一跑读哪份、跑完落到哪个名字（run_sr.nosr_swap_plan）。解析放在这里而不是
-    # submit_run_sr 里：缺未超分那一份是提交侧的错，要给 400 + 缺了哪个名字，而不是
-    # 落到 submit 里变成 422 的裸异常。
     try:
-        swap = run_sr_svc.nosr_swap_plan(
-            params["lq_path"], params["mask_path"], params["suffix"])
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    try:
-        data = run_sr_svc.submit_run_sr(params, store=state.store, swap=swap)
-    except run_sr_svc.SubmitConflict as e:
-        # 上一次同参数提交还没法判明（中断或结局不可确认）：重投就可能两个 SR
-        # 进程同写一个场景目录，所以给 409 而不是替操作员猜。
-        raise HTTPException(status_code=409, detail=str(e)) from e
+        data = run_sr_svc.submit_run_sr(params, store=state.store)
+    except RuntimeError as e:
+        msg = str(e)
+        if "interrupted" in msg:
+            raise HTTPException(
+                status_code=409,
+                detail="上次提交中断、job_id 未录——勿盲重试，请先核对调度器") from e
+        raise HTTPException(status_code=422, detail=msg) from e
     except Exception as e:  # noqa: BLE001 — 其余一律生成/提交失败
         raise HTTPException(status_code=422,
                             detail=f"{type(e).__name__}: {e}") from e
@@ -664,32 +847,23 @@ async def submit_queue(request: Request):
     for k in ("previous_state", "previous_exit_code", "previous_job_id"):
         if k in data:
             out[k] = data[k]
-    # 就地写入提示（工作单 §4.2 最后一条）：SR 直接写 lq_path——输出 tif 落在场景
-    # 目录里，输入 tif 本身不改名也不删除（Suffix 恒非空、delete_ori 已禁用）；只有该
-    # 目录里已存在同名输出时，SR 才把旧输出改名为 <输出名>_NOSR.tif 再覆盖
+    # 就地写入提示（工作单 §4.2 最后一条）：没有沙箱时 SR 直接写 lq_path——输出 tif
+    # 落在场景目录里，输入 tif 本身不改名也不删除（Suffix 恒非空、delete_ori 已禁用）；
+    # 只有该目录里已存在同名输出时，SR 才把旧输出改名为 <输出名>_NOSR.tif 再覆盖
     # （util.writeTiff 的改名对象是输出路径上的同名文件，不是输入）。同一句话也写进
-    # 作业日志（run_sr.build_run_script 的 audit 段），两处都不能省。
-    out["in_place"] = True
-    out["notice"] = (
-        f"输出目录 = 输入目录（{params['lq_path']}）：SR 就地把结果写成 "
-        f"<输入名>_{params['suffix']}.tif，输入 tif 不改名也不删除；"
-        "该目录里已存在同名输出时，旧输出先被改名为 <同名>_NOSR.tif 再覆盖")
+    # 作业日志（run_sr.build_batch_script 的 audit 段），两处都不能省。
+    if run_sr_svc.sandbox_scene_paths(params["lq_path"],
+                                      run_sr_svc.task_fingerprint(params)) is None:
+        out["in_place"] = True
+        out["notice"] = (
+            f"输出目录 = 输入目录（{params['lq_path']}）：SR 就地把结果写成 "
+            f"<输入名>_{params['suffix']}.tif，输入 tif 不改名也不删除；"
+            "该目录里已存在同名输出时，旧输出先被改名为 <同名>_NOSR.tif 再覆盖")
     return out
 
 
 @router.post("/api/queue/{task_id}/cancel")
-async def cancel_queue(task_id: int, request: Request):
-    """取消一个任务；`{"confirmed_stopped": true}` 是操作员的兜底声明。
-
-    正常路径下取消由任务服务（run_sr.cancel_run_sr → local_exec.cancel）完成：排队中
-    的直接不启动，跑着的停掉整棵进程树，sr-api 重启过的按进程创建时间核对身份后再停。
-
-    只有在平台**无法证明**那次运行到底启没启动时（判定文件没有、进程记录也没有），
-    取消没有可依据的对象，这时它返回 409 而不是 200 + cancelled=false —— 后者会被当成
-    「已经停下了」，而子进程可能仍在就地写 lq_path，操作员据此重投就会有两个 SR 进程
-    同写一个目录。核实无残留进程后带 `confirmed_stopped` 再调一次，任务行转为已取消，
-    重投才解锁。
-    """
+def cancel_queue(task_id: int, request: Request):
     state = request.app.state
     task = state.store.get_sr_task_by_id(task_id)
     if task is None:
@@ -697,24 +871,23 @@ async def cancel_queue(task_id: int, request: Request):
     if task["job_id"] is None:
         raise HTTPException(status_code=400,
                             detail="该任务无 job_id（中断遗留），无法取消")
-    body = await request.body()
-    try:
-        payload = json.loads(body or b"{}")
-    except ValueError:
-        raise HTTPException(status_code=400, detail="请求体须为合法 JSON 对象")
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="请求体须为 JSON 对象")
-    confirmed = bool(payload.get("confirmed_stopped"))
-    cancelled = run_sr_svc.cancel_run_sr(task, confirmed_stopped=confirmed)
+    # Which "scheduler" owns the job follows SR_EXECUTOR — the local executor
+    # has its own process table; scancel knows nothing about it.
+    if sr_runtime().executor == "local":
+        cancelled = local_exec.cancel(task["job_id"])
+    else:
+        cancelled = slurm.cancel(task["job_id"])
     state_name, *_ = _task_state(state, task)
     if not cancelled and state_name not in _TERMINAL_STATES:
+        # 200 + cancelled=false 会被当成"已经停下了"。走到这里说明本进程没有该 job
+        # 的记录（sr-api 重启过），而子进程可能还在就地写 lq_path —— 操作员据此重新
+        # 提交就会有两个 SR 进程同写一个目录。宁可给 409 也不要这个 200。
         script = os.path.basename(task.get("batch_script") or "") or "run_sr"
         raise HTTPException(
             status_code=409,
-            detail=f"取消失败：无法确认运行编号 {task['job_id']} 是否还在跑 —— 本进程没有"
-                   f"它的进程记录（sr-api 可能重启过），也没有它的结果文件。"
-                   f"先 `ps -ef | grep {script}` 确认；确认已经没有残留进程后，"
-                   f"带 {{\"confirmed_stopped\": true}} 再调一次本接口，然后才可重投")
+            detail=f"取消失败：本进程没有 job {task['job_id']} 的记录（sr-api 可能重启过），"
+                   f"子进程可能仍在运行。先 `ps -ef | grep {script}` 确认，再手工 kill；"
+                   "确认停止前不要重复提交同一目录")
     return {"task_id": task_id, "cancelled": cancelled, "state": state_name}
 
 
@@ -851,8 +1024,8 @@ async def write_qclist(request: Request):
     为什么不让浏览器写：File System Access API 在规范里是 `[SecureContext]` 标的，
     Chrome 只在 https / localhost 的页面上暴露它，而真机是 nginx `listen 80` 的
     `http://内网IP` —— 那条路在真机上永远走不通。后端本来就以 nginx 身份写盘阵
-    （掩码、SR 产物、预览 JPG），改走它既能在 http 下工作，也同时把 GBK 清单写回
-    GBK 做对了（浏览器编不出 GBK）。
+    （掩码、SR 产物、烘焙 JPG），改走它既能在 http 下工作，也顺带把 GBK 清单写回
+    GBK 做对了（浏览器编不出 GBK，旧前端只能降级成 UTF-8+BOM）。
 
     请求侧被拒一律 400（detail 说清是哪一种），只有写盘本身的 OSError 是 422 ——
     前端只把 detail 原样显示，分类没有消费者，不照搬 §3.5 那套 400/403/404。

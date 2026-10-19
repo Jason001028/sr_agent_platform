@@ -1,14 +1,14 @@
-"""run_sr — submit a super-resolution job (thin wrapper).
+"""run_sr — submit a super-resolution job to Slurm (thin wrapper).
 
 Business logic in backend/services/run_sr.py: high-level params → config.xml
-+ run script → local executor (idempotent via the sr_tasks table). Returns a
-job_id; the agent polls it with the sr_job_status tool. Async by design (the job
-runs as a child process on the API host).
++ batch script → sbatch (idempotent via the sr_tasks table). Returns a job_id;
+the agent polls it with the sr_job_status tool. Async by design (the job runs
+on the CentOS7 array server).
 
 Placeholder / non-absolute paths are rejected here as err() — search_scenes
-fake results carry `<fake>/...` paths that must never reach the executor. The
-err is fed back to the model (contract boundary), so it can change the params
-and retry; it never raises.
+fake results carry `<fake>/...` paths that must never reach Slurm. The err is
+fed back to the model (contract boundary), so it can change the params and
+retry; it never raises.
 """
 
 from __future__ import annotations
@@ -21,10 +21,10 @@ from backend.services.scene_search import derived_mask_path
 from .contract import err, ok, tool
 
 _DESC = (
-    "Submit a remote-sensing super-resolution (SR) job. Assembles an SFSR "
-    "config from high-level params (L1 input dir, optional mask, SR scale, "
-    "output suffix) and returns a job_id — NOT the result. The job runs on the "
-    "API host; poll the result with sr_job_status."
+    "Submit a remote-sensing super-resolution (SR) job to Slurm. Assembles an "
+    "SFSR config from high-level params (L1 input dir, optional mask, SR "
+    "scale, output suffix) and returns a job_id — NOT the result. Poll the "
+    "result with sr_job_status. Requires the Slurm scheduler host (sbatch)."
 )
 
 
@@ -32,10 +32,11 @@ def _bad_path(path: str) -> str | None:
     """Why a path cannot be handed to run_sr, or None if it is acceptable.
 
     Rejects search_scenes fake rows (`<fake>/...`), relative paths, and anything
-    outside `SR_ALLOWED_ROOTS` — only real array absolute paths make sense, and
-    the job writes its output *into* lq_path. Uses the same `pathguard` rules as
-    the REST entry point, so both entries accept exactly the same set of paths.
-    This is validation returning an err (the loop self-heals), not an exception.
+    outside `SR_ALLOWED_ROOTS` — Slurm jobs run on the array server where only
+    real-array absolute paths make sense, and the job writes its output *into*
+    lq_path. Uses the same `pathguard` rules as the REST entry point, so both
+    entries accept exactly the same set of paths. This is validation returning an
+    err (the loop self-heals), not an exception.
     """
     if not path:
         return None
@@ -130,9 +131,9 @@ def run_run_sr(**params) -> dict:
         mask_path = normalize_submit_path(mask_path)
     else:
         # 不传就按同一份规则推导（`<输入名>_mask.tif` 落在影像旁边），与 REST
-        # 入口 _norm_sr_params 完全一致 —— 留 None 会让配置 XML 里没有 <MaskPath>，
-        # 而同一次提交走 REST 却带着推导出来的路径，两边指纹不同，幂等层认不出
-        # 这是同一个作业。
+        # 入口 _norm_sr_params 完全一致。以前这里留 None → 配置 XML 里没有
+        # <MaskPath>，而同一次提交走 REST 却带着推导出来的路径：两边指纹不同，
+        # 幂等层认不出这是同一个作业。
         mask_path = derived_mask_path(lq_path)
     if sr_scale < 1:
         return err("sr_scale must be >= 1")
@@ -159,15 +160,8 @@ def run_run_sr(**params) -> dict:
         "grid_align": bool(params.get("grid_align", True)),
         "options_yml": params.get("options_yml"),
     }
-    # 这一跑读哪份、跑完落到哪个名字（run_sr.nosr_swap_plan）。缺未超分那一份是
-    # err（模型能读着原因改参数重试），与 REST 入口同一条规则、同一个函数。
     try:
-        swap = svc.nosr_swap_plan(lq_path, mask_path, suffix)
-    except ValueError as e:
-        return err(str(e))
-    try:
-        data = svc.submit_run_sr(params, store=store_mod.default_store(),
-                                 swap=swap)
+        data = svc.submit_run_sr(params, store=store_mod.default_store())
     except Exception as e:  # noqa: BLE001 — contract boundary
         return err(f"{type(e).__name__}: {e}")
     return ok(data)

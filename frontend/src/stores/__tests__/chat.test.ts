@@ -39,10 +39,10 @@ describe('msgFromHistory（GET messages 投影 → 展示）', () => {
 
     const bad = msgFromHistory({
       seq: 3, role: 'tool', tool_name: 'run_sr', ok: false,
-      content: '本机执行不可用：找不到可用的 bash',
+      content: 'slurm not available',
     } as HistoryMsg);
     expect(bad.ok).toBe(false);
-    expect(bad.detail).toBe('本机执行不可用：找不到可用的 bash');
+    expect(bad.detail).toBe('slurm not available');
   });
 });
 
@@ -84,10 +84,10 @@ describe('reduceChatSse（SSE 逐帧归并）', () => {
     msgs = reduceChatSse(msgs, { type: 'tool_call', name: 'run_sr', args: {} });
     msgs = reduceChatSse(msgs, {
       type: 'tool_result', name: 'run_sr', ok: false,
-      data: null, error: '本机执行不可用：找不到可用的 bash',
+      data: null, error: 'slurm not available',
     });
     expect(msgs[1].ok).toBe(false);
-    expect(msgs[1].detail).toBe('本机执行不可用：找不到可用的 bash');
+    expect(msgs[1].detail).toBe('slurm not available');
   });
 
   it('无 assistant 文本事件 → turn_done 回填占位气泡', () => {

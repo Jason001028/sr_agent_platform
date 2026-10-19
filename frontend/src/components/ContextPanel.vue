@@ -7,9 +7,9 @@
  * RoiToolsTab / AgentChatTab 承载（v-show 常驻，切换 tab 不打断队列 SSE / Agent 会话）。
  * DOM = 两个兄弟根节点（ctx-toggle + ctx-rail），与左侧 [sidebar, side-toggle] 镜像。
  *
- * **展开状态存在 store 里**：分屏对比要能自动收起它、退出时再恢复用户此前的手动状态。
- * localStorage 的 key 与默认值保持不变（见 stores/viewer.ts 的 readCtxRailOpen），
- * 用户此前的选择继续生效。
+ * **展开状态 2026-09-20 提升到 store**（原先在组件里）：分屏对比要能自动收起它、退出时
+ * 再恢复用户此前的手动状态。localStorage 的 key 与默认值一字未改（见
+ * stores/viewer.ts 的 readCtxRailOpen），老用户体验不变。
  */
 import { computed, ref } from 'vue';
 import { useViewerStore } from '../stores/viewer';
@@ -19,7 +19,7 @@ import AgentChatTab from './AgentChatTab.vue';
 const store = useViewerStore();
 const tab = ref<'roi' | 'agent'>('roi');
 
-/** store 里存的是「展开」，组件里用「收起」更同时（CSS 也是 .collapsed）。 */
+/** store 里存的是「展开」，组件里用「收起」更顺手（CSS 也是 .collapsed）。 */
 const collapsed = computed({
   get: () => !store.ctxRailOpen,
   set: (v: boolean) => store.setCtxRailOpen(!v),

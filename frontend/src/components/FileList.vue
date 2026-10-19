@@ -61,7 +61,7 @@ watch(() => store.litTick, () => {
 
 /* 三颗小标各说一件事，用法（尤其「序号」是会话内编号而不是盘阵上的编号）写进
    title —— 不然用户会以为那颗数字是盘阵给景编的号，回头去别处找同一个号。 */
-const SCENE_TITLE = '盘阵场景：服务器预览 JPG（这张图在盘阵上有对应场景目录）';
+const SCENE_TITLE = '盘阵场景：服务器烘焙 JPG（这张图在盘阵上有对应场景目录）';
 const ORD_TITLE = '同一景（同一个场景目录）的图共用这个序号 —— 本次会话内按出现顺序发号，不是盘阵上的编号';
 /* NOSR 一名两义，取决于盘上那份叫什么（后端按输入影像的 stem 先找，见
    app.py::scene_siblings）。第一义是用户的口径，第二义是 writeTiff 改名留下的
@@ -113,8 +113,8 @@ function linkTag(note: string): string {
         <template v-if="rec.W"> · {{ rec.W }}×{{ rec.H }}</template>
         <template v-if="rec.layout"> · {{ rec.layout }}</template>
       </div>
-      <!-- 状态与关联结果同排一行、都做成短标签：两者别各占一行、也别再各自抄一遍
-           文件名（否则一张卡三行里三处同名）。
+      <!-- 状态与关联结果同排一行、都做成短标签（2026-09-18）：原先两者各占一行，
+           且各自又把文件名抄了一遍 —— 一张卡三行里三处同名。
            关联原因仍然单独一个字段：rec.status 会被解码进度/结果覆盖，写在那里
            等于没写（用户只看得到「完成，解码耗时…」）。整句理由进 title。 -->
       <div class="tags">
@@ -227,7 +227,7 @@ function linkTag(note: string): string {
   min-width: 8px;
   text-align: center;
 }
-/* 环节：三色区分。取 --cmp-a/--cmp-b 这一对（蓝/琥珀，对红绿色盲
+/* 环节：三色区分。取 --cmp-a/--cmp-b 这一对（2026-09-20 挑的蓝/琥珀，对红绿色盲
    安全，且刻意避开了青绿族与 ok/warn/err 三个语义色 —— 环节是**位置标识**，
    不该让人读成「哪个更好」）；本体另用青绿软底，与「盘阵」那颗呼应。 */
 .file-item .name .stage { color: var(--ink-sub); background: var(--surface-2); border: 1px solid var(--line); }

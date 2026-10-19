@@ -3,8 +3,9 @@
 > 用途：交接文档。新会话先读本文件，再读 [gui-experience.md](../experience/gui-experience.md)（踩坑经验），
 > 即可无断点接着干。
 >
-> 本文件只写**现在是什么**；真机勾选项见 [real-machine-acceptance.md](real-machine-acceptance.md)（验收单）。
-> 日期：2026-10-09 · 状态：已定。
+> 本文件只写**现在是什么**。变更经过见 [timeline-archive.md](timeline-archive.md)（历史时间线），
+> 真机勾选项见 [real-machine-acceptance.md](real-machine-acceptance.md)（验收单）。
+> 日期：2026-09-24 · 状态：已定。
 
 ---
 
@@ -22,19 +23,18 @@
   产品段（`…_001_L1` → `…_001_L1_PAN`，没写就 `_PAN`，见
   [api-contract](../planning/api-contract.md) §3.5 的 `product`）。拖入盘阵场景的显示件时会自动预热同景的**未超分那份**
   （NOSR），它出现在列表里时带 `NOSR` 标（与本体标区分、可点开进当前活动格）。
-  清单导入后多一颗橘色「**一键解析**」：按行序逐景把本体 jpg 与 NOSR jpg 一次性生成到盘上，
+  清单导入后多一颗橘色「**一键解析**」：按行序逐景把本体 jpg 与 NOSR jpg 一次性烤到盘上，
   每景两张卡**共用同一个序号**依次入列（生下来不带像素、点开才取图），失败逐条记账标红、
   可随时停；点清单里任意一行，左侧那两张卡橘色点亮并滚过去（见 §6.4）。
   右侧「上下文侧舱」含 `[ROI/工具]` 与 `[Agent]` 两个页签。
 - **`/scenes` 场景库** —— 盘阵场景检索（卫星 / 传感器 / 日期 / 关键词）、行内显示 W/H、
-  打开（首次访问懒生成预览）、清除预览缓存（选定 / 全部）。列表是「上次检索」那一刻的
-  快照、**跨刷新保留**，按「检索」才读盘阵当前事实（口径见 §6.2）。
+  打开（首次访问懒生成预览）、清除预览缓存（选定 / 全部）。
 - **`/queue` 共享队列** —— 提交 SR、状态随 SSE 推进、取消作业、耗时与产物目录。
   ⚠️ 这条 SSE 是 `fetch` + `ReadableStream` 拼的**文档级长连接**，所以
   `stores/queue.ts` 在 `window` 上挂了 `pagehide`/`pageshow`：**整页导航时 Vue 的
   `onUnmounted` 不跑**，不在 `pagehide` 里显式收流的话，每导航一次就漏一条连接，占满
-  Chrome 每源 6 条之后页面会卡在「加载中…」而**后端日志全干净**（机制见
-  [gui-experience §9.9](../experience/gui-experience.md)）。改这个 store 时别把
+  Chrome 每源 6 条之后页面会卡在「加载中…」而**后端日志全干净**（2026-09-28 的事故，
+  机制见 [gui-experience §9.9](../experience/gui-experience.md)）。改这个 store 时别把
   那两个监听摘掉。
 - **`/chat` 对话** —— agent 循环 + 工具调用（`search_scenes` / `run_sr` / `sr_job_status` /
   `fix_bad_lines` / 掩码栅格化），SSE 推送 `tool_call` / `tool_result` / `assistant`。
@@ -44,20 +44,16 @@
 
 ## 2. 当前路线
 
-- **SR 提交 = 本机直跑**（`SR_EXECUTOR=local`，也是仓库默认值）：后端在 sr-api 所在机器上用
-  SR 生产 conda 解释器（`SR_PYTHON`）直接起 bash 子进程，作业**就地**跑在用户填的 `lq_path`，
-  读该目录里已有的输入与 `<输入影像 stem>_mask.tif`。执行器
-  [local_exec.py](../../backend/services/local_exec.py) 负责单槽串行（跨进程锁
-  `<SR_WORK_DIR>/.exec.lock`）、日志、进程树管理；配置 XML / 审计段 / 契约校验器 / 判定文件
-  整套照用。运行脚本里没有 `#SBATCH` 行（生成器是 `run_sr.build_run_script`）。
-  选卡由 `SR_LOCAL_GPU` 决定，由执行器设进子进程的 `CUDA_VISIBLE_DEVICES`。
-  规则、切换与回滚见 [sr-local-execution.md](sr-local-execution.md)；
+- **SR 提交 = 本机 conda 直跑**（2026-09-14 定，`SR_EXECUTOR=local`）：后端在 node81-135 上用 SR 生产
+  conda 解释器直接起进程，读锁定目录里已有的 `.tif` 与 `<目录名>_mask.tif`，产物写回同目录。
+  `sbatch` 换 `bash`，配置 XML / 审计段 / 契约校验器 / 退出码文件整套原样复用。
   工作单见 [sr-minimal-prototype-plan.md](../planning/sr-minimal-prototype-plan.md)。
-- **作业终态读判定文件** `<lq_path>/Debug/_SREXIT_<job_id>.txt`（校验器写，`--job-id` 由运行脚本
-  显式传入）：`verdict=0` → COMPLETED、`!=0` → FAILED、`skip=1`（云量跳过）→ COMPLETED 且不出产物。
-  **子进程退出码 0 不等于成功**；契约不满足时校验器以退出码 90 结束。
-- **仓库里没有调度器这条路线**：没有 Slurm/集群/共享盘要求，也没有 `SR_SLURM_*` / `SR_SANDBOX_ROOT`
-  这类 env；`SR_EXECUTOR` 只接受 `local`（留别的值等于配置错误，启动即报错）。
+- **作业终态读退出码文件**，不读 `sacct`（真机 `AccountingStorageType=none`，`sacct` 永久不可用）。
+  退出码 0 不等于成功；契约不满足时校验器以退出码 90 结束。
+- **Slurm 冻结**（2026-09-14 中止）：单卡分配改用 `CUDA_VISIBLE_DEVICES` 即可，无需调度。
+  代码分支、部署变体、校验器、验收清单保留为存量，重启时从
+  [slurm-acceptance.md](slurm-acceptance.md) 接着跑。⚠️ 仓库默认值 `SR_DEFAULT_EXECUTOR` 仍为 `"slurm"`
+  （[config.py](../../backend/config.py)），真机靠 env 覆盖。
 - **LLM 走 OpenAI 兼容接口**（`SR_LLM_BASE_URL` / `_API_KEY` / `_MODEL`），底座未定，内网尚无可用端点。
   未配端点时用 `SR_LLM_MOCK=1` 的固定脚本跑通链路。
 - **数据来源两棵树**：
@@ -70,88 +66,52 @@
 
 ### 3.1 阻塞 A 段收尾
 
-1. **验收要求场景里带未超分留档**。这一跑读的是**未超分那一份**
-   （`<输入 stem>_NOSR.tif`，RC 场景即 `PAN_NOSR.tif`），要与本体同目录。真机 RC 场景两份就是
-   `PAN.tif` + `PAN_NOSR.tif`（§3.2 第 1 条）。缺这一份，提交时直接 400 拦下、`detail` 指名缺的
-   那份，不拿本体顶替。
-2. **超分入口读哪份、产物落哪个名字**（现状）：
-   1. 平台按场景目录算出五条绝对路径（`run_sr.nosr_swap_plan`）：本体 `<场景>/<本体名>`、
-      源头 `<场景>/<未超分那份名>`、备份 `<场景>/Debug/<本体名>.srbak`、操作员掩码
-      `<场景>/<输入影像 stem>_mask.tif`、掩码临时件 `<场景>/Debug/<掩码名>.sr1x`。
-      缺本体 / 缺源头 / 缺掩码一律 400，文案写清缺哪一个；配置 XML 的 `<MaskPath>` 指向掩码临时件，
-      参数里的 `mask_path`（含 `task_fingerprint`）仍是操作员那份。
-   2. 作业先跑 `sr_prep_scene.py`：备份**只在不存在时**留（= 跑前那份本体）→ 把源头**拷贝**成
-      本体名（拷贝不是改名，留档那份还在）→ 用 GDAL 按源头尺寸把掩码降采样写出临时件
-      （缩小按块内取最大、放大用最近邻，geotransform / projection 抄源头，dtype 原样保留）。
-   3. SR 脚本读**本体名**：RC 由 `get_l1_pan_tif_rcsc_nosr` 定位（单边判据 `size < 1.8` GiB；
-      本体此时是 1× 内容，严格的 `1.0 < size < 1.8` 会把它判成 already SRed 后退出）；SC 由同一
-      函数读 `<目录名>_NOSR.tif`。产物落 `<输入 stem>_<suffix>.tif`，suffix 用平台自己的值。
-   4. 校验器判完契约后**归位**：产物 `os.replace` 到本体名，复核大小一致后删备份与掩码临时件、
-      verdict 的 `output` 改成本体名；契约不过或合法跳过则从备份恢复本体。归位成败写进**同一条
-      verdict**，所以没归位的跑平台读到 FAILED 而不是 COMPLETED。之后 MTFC 由「生产调度系统」
-      提交，输入就是这个本体名（= 经过 SR、未 MTFC 的那份）。
-
-   仍然挂着、写在这里只作提醒的（均无实证）：
-   - **掩码外会不会被降级**：产物是**整幅**覆盖，掩码外是源头那份的双三次放大；若现本体掩码外
-     不是这样来的（例如上一轮全图超分），这次覆盖会把掩码外换成双三次结果。**已定：可接受，照做**。
-   - **覆盖后的显示件**：客户端预览 blob 缓存按「场景 id + 档位」为键，覆盖本体后不会自动失效；
-     nginx 那条给预览 JPG 加 `max-age=3600` 的 location 匹配 `.preview.jpg`、与现行 `_preview.jpg`
-     命名不符（§3.3 第 9 条）。归位后重新生成的那份预览能否拿到新 `max-age`，**待核**。
-   - **产物预览**：跑完产物名已不存在（归位到本体名），产物那一份预览按 `product_missing` 如实跳过；
-     未超分那份的预览照旧生成。
+1. **需要一个未超分过的场景**。job 1 已证「提交链路 + conda 环境 + 变体 + 单卡绑定」全通，
+   但现场景属于已超分状态，SR 脚本判定 `already SRed before` 后提前返回，未产出新产物，
+   校验器据契约判 FAILED。二选一：换一个体积落在 `util.py` 三个区间内的场景目录；
+   或把该目录的 `<目录名>_NOSR.tif` 改名还原为 `<目录名>.tif`（**先备份现有超分产物**）。
 
 ### 3.2 待真机确认（尚无实证）
 
-1. **未超分那份在真机上实际叫什么名字**。
+1. **未超分那份在真机上实际叫什么名字**（⏱口径本身 2026-09-24 已定，不再是问题）。
    未超分那份 = **输入影像的 stem + `_NOSR`**（SC 即 `<目录名>_NOSR.tif`，RC 即 `PAN_NOSR.tif`）；
-   从 `SR_code/util.py::writeTiff` 推导出的 `<产物 stem>_NOSR.tif` 是**次选**候选，仍在清单里
+   从 `SR_code/util.py::writeTiff` 推导出的 `<产物 stem>_NOSR.tif` 退为**次选**候选，仍在清单里
    （那份也可能真在盘上）。候选有序、只拼名字不 stat，命中哪一个**如实报出名字**，不猜 ——
    `/api/scenes/{id}/siblings` 的 `nosrCandidates` 就是这份清单，拿到真机 `ls -l` 可据此校准
    **顺序**（不影响能否命中）。详见 [preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md) §4.11；
    验收动作见 [real-machine-acceptance.md](real-machine-acceptance.md) §C 末条。
-   **2026-10-09 用户回报的证据**：真机上一景的两份是 `PAN.tif` 与 `PAN_NOSR.tif`（RC 场景），
-   与「输入 stem + `_NOSR`」这条候选一致。仍未看过 `nosrCandidates` 的实际返回，候选顺序未校准。
-   **同一批回报（续）**：一个景里可以**同时**出现带六位数的产物与 `PAN_NOSR.tif`。六位数即该次
-   提交的 `<Suffix>`，是**模型编号**（「生产调度系统」内通常为 `250123`，见
-   [sr-pipeline-overview.md §4.6](../sr_code/sr-pipeline-overview.md)）。平台提交用的 suffix 与它
-   不一致（默认取 `SR_BUNDLE_DIR` 内那份 SR 配置的 `<Suffix>`，兜底字面量 `sr`；**真机实际读到 `260318`**），
-   故盘上生产命名与平台产物命名不是同一家。据此，`_NOSR` 有**两个来源、两种含义**：
-   `<输入 stem>_NOSR`（未超分原图留档）与 `<产物 stem>_NOSR`（被覆盖的上一次产物，
-   `SR_code/util.py::writeTiff` 的改名所产生）—— 只看「目录里有没有 `_NOSR`」不足以判定本体是否已超分。
-   平台这一跑的源头**只认前者**：`run_sr.nosr_swap_plan` 取 `nosr_candidates(scene, inp)` 里第一个
-   存在的（不传 `product_path`），`<产物 stem>_NOSR` 永不当源头。
 2. 产物 tif 尺寸为输入影像的 **2 倍**（`code_0817_prod.py` 的 `scale: 2`），无真机实证。
    若成立，分屏对比两侧是「同一地面区域、不同像素网格」，对齐只能按百分比，±1 像素级比对做不到。
 3. 生产树目录日期取「成像日 / 次日」中命中者，现按较年轻者推定，需一批真实目录名验证。
 4. 服务账号 `User=nginx` 对盘阵场景目录有无 `unlink` 权限未验证 —— 场景库「清除缓存」依赖它，
    无权时该功能只逐条报失败，不删任何文件。
-5. `$BUNDLE/code_0817_prod.py` 现为 **28703 字节**版本，无备份、不可恢复。待答：谁读这份文件？
+5. **2026-09-11 生产文件覆盖事故待善后**：`$BUNDLE/code_0817_prod.py` 被 28703 字节版本覆盖，
+   旧版（33477 字节）无备份、不可恢复。待答：谁读这份文件？
 
 ### 3.3 已记录，暂不处理
 
 1. `/preview` 在源文件不存在时回 422（而非 404）：这一路点下去拿到的是「预览生成失败：场景文件
    不存在」，前端只认**盘阵静态链**上的 404，所以不会亮灰块（也不会标 `purged`）。改造只需后端
    一行（`app.py::preview` 在 `abs_path.is_file()` 为假时回 404），但需重新部署，见 §4.1。
-2. [.e2e/qa-theme.js](../../.e2e/qa-theme.js) 有 6 条失败断言，写的是白色 chrome 与渐变主按钮，
-   与当前主题不符。未改动；改脚本期望值还是改主题需人定。
-3. `test-scenes.js` 的 `[B2]` 是红的：它按**尺寸列**分辨同名的两行（`<编号>.jpg` 与
-   `<编号>.tif`），期望 jpg 那行是 400×200。而 `app.py::_manual_row` 给 jpg 行的 W/H 取的是
-   **同级栅格**的尺寸（掩码口径，见该函数上方注释），两行实测都是 1600×800，断言因此不成立。
-   要么改断据（改用行上的其它列分辨两行），要么改期望值，需人定。
-4. `[D]`「耗时列」依赖队列表里已有一行：`/queue` 那次 `page.goto` 之后 `queue.tasks` 为空就等不到。
-   队列表为空的已知成因是浏览器连接池被自己的 SSE 占满（症状形状与诊断法见
-   [gui-experience.md §9.9](../experience/gui-experience.md)）。2026-10-15 开发机实测该段通过。
+2. 09-15 记录：退出码文件已判 FAILED，而 `GET /api/queue` 仍报 RUNNING。此后 `_task_state`
+   经 09-18、09-20 两轮改动，**未复核该现象是否仍存在** —— 下次真机提交时顺带确认。
+3. [.e2e/qa-theme.js](../../.e2e/qa-theme.js) 有 6 条陈旧失败断言（期望值是 2026-09-09 改版前的
+   白色 chrome 与渐变主按钮）。已确认非当轮引入，未改动；改脚本期望值还是改主题需人定。
+4. `test-platform.js` 的 `[D]`「耗时列」存在**间歇性**失败（09-22 两轮复跑，一次红一次绿，
+    与当轮改动无关），未定位。09-27 复跑 4 次**全红**（含 `git stash` 掉当轮前端改动、重建
+    dist 的对照组同样红）—— 至少在本机它更像稳定红：`waitFor` 等的是 `.qp-tbl tbody td.elapsed`，
+    即队列表里得有一行。诊断时先看 `/queue` 那次 `page.goto` 之后 `queue.tasks` 是不是空的。
 5. 预览内存不释放：每个文件的预览 `Float32Array` 常驻，各边 ÷4 约 145MB/张、÷2 约 600MB/张；
-   分屏按设计同时保留两张，点选清单鼓励多开。当前只记录，无 LRU 释放。
+    分屏按设计同时保留两张，点选清单鼓励多开。当前只记录，无 LRU 释放。
 6. 同一场景的 `<目录名>.jpg` 与 `<目录名>.tif` 两行预览相同（工作流 B 使两行落到同一份落点），
-   且该落点会被不同档位的客户端互相顶掉（div 抖动）。去重与带档位落点留待对比相关的一轮一并定。
+    且该落点会被不同档位的客户端互相顶掉（div 抖动）。去重与带档位落点留待对比相关的一轮一并定。
 7. `SR_SCENES_ROOT` 是**单根**，没有多根写法；符号链接只有建在根本身才能通过路径校验。
 8. 场景检索采用白名单：所在目录须含 `<目录名>_meta.xml`，且文件名为 `<目录名>.<ext>` 或 `PAN.<ext>`。
-   **代价**：没有该 xml 的目录整个不显示（已接受）。
+    **代价**：没有该 xml 的目录整个不显示（已接受）。
 9. `deploy/nginx.conf` 里 `location /disk-array/` 内那条 `location ~* \.preview\.jpg$`
-   （给预览 JPG 加 `max-age=3600`）匹配的是 `.preview.jpg`，与现行的 `_preview.jpg` 命名不符，
-   缓存策略事实上失效（现在预览 JPG 不带 `Cache-Control`，靠浏览器启发式缓存兜着）。
-   要么把正则改成匹配 `_preview.jpg`，要么删掉这条子 location，需人定。
+   （给预览 JPG 加 `max-age=3600`）**在 09-22 预览名收口成 `_preview.jpg` 之后就不再匹配**，
+   该缓存策略事实上失效（现在预览 JPG 不带 `Cache-Control`，靠浏览器启发式缓存兜着）。
+   要么把正则改回匹配 `_preview.jpg`，要么删掉这条子 location，需人定。
 
 ## 4. 下一步
 
@@ -171,8 +131,8 @@
 
 - 上传本轮的 `frontend/dist` 与 `backend` 两个包（**必须同包更新**）到 node81-135。
 - A 段收尾：造一个未超分过的场景，跑出真实产物（见 §3.1）。
-- 未超分那份（NOSR）的拖入预热 + 真机名字校准（判据见 §3.2 第 1 条与验收单 §C 末条）。
-- 场景库 / 掩码 → SR 真链 / SSE 长连的真机验收。
+- 未超分那份（NOSR）的拖入预热 + 真机名字校准（09-24 新增，判据见 §3.2 第 1 条与验收单 §C 末条）。
+- 阶段 4 场景验收、阶段 5 掩码 → SR 真链、SSE 长连。
 - 配置 LLM 端点后跑通真实 `/chat` 闭环。
 
 ## 5. 环境与硬约束
@@ -187,154 +147,117 @@
 - **真机页面是 http，不是 SecureContext**：`showOpenFilePicker`、剪贴板等 API 一律不存在。
   需要写盘阵的功能必须走后端（服务账号 `nginx`）。
 - **nginx：`/api/` 下再套 location 时，子块里必须重写一遍 `proxy_pass`**。nginx 只选一个 location，
-  嵌套块**不继承** `proxy_pass`（final-location-handling 指令），漏了就是 nginx 自己回 404 HTML。
-  落盘后按 [deploy/README.md](../../deploy/README.md) §四 的 `/preview` 一条自查（`ct` 必须是 `application/json`）。
+  嵌套块**不继承** `proxy_pass`（final-location-handling 指令），漏了就是 nginx 自己回 404 HTML
+  —— 2026-09-23 线上「老景打不开」正是这条（见 timeline-archive 09-24 条）。落盘后按
+  [deploy/README.md](../../deploy/README.md) §四 的 `/preview` 一条自查（`ct` 必须是 `application/json`）。
 - **浏览器 e2e 可用**：`.e2e/launchBrowser.js`（puppeteer-core + 无头浏览器，每次使用独立的临时配置目录）。
   候选顺序 **Chrome 优先** —— 本机 Edge 与正在运行的 Edge 实例握手会 `Code: 0` 闪退；
   换浏览器设 `SR_E2E_BROWSER`。
 
 ## 6. 现值速查
 
-### 6.1 真机配置与仓库默认值的偏差（经 `systemctl show` / `nginx -T` 核对）
+### 6.1 真机配置与仓库默认值的偏差（2026-09-16 经 `systemctl show` / `nginx -T` 核对）
 
 迁移代码后须照此表在真机重建 drop-in，否则会退回仓库默认值。
 
 | 项 | 仓库默认 | 真机值 | 载体 |
 |---|---|---|---|
 | `SR_BUNDLE_DIR` | `/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes` | `/DiskArray/tmp/wangrz/mmsr_bundle_240617/codes` | `/etc/systemd/system/sr-api.service.d/srscript.conf` |
-| `SR_SR_SCRIPT` | `code_0817_prod.py` | `code_0817_prod_platform.py` | 同上 |
+| `SR_SR_SCRIPT` | `code_0817_prod.py` | `code_0817_prod_slurm.py` | 同上 |
 | `SR_SCENES_ROOT` | 无（不设则 `source:fake`） | `/DiskArray/tmp/wangrz/datahub` | `/etc/systemd/system/sr-api.service.d/scenes.conf` |
 | nginx `alias` | `deploy/nginx.conf` 中为 `/data/scenes/` | `/DiskArray/tmp/wangrz/datahub`（与上一行同值） | `/etc/nginx/conf.d/sr-agent-platform.conf` |
 
-> 生产盘阵根为 `/DiskArray/GSHC2IMPS/`（层级 年/月/日/生产编号）；它与 `datahub` 的关系
+> 生产盘阵根确认为 `/DiskArray/GSHC2IMPS/`（层级 年/月/日/生产编号）；它与 `datahub` 的关系
 > （拷贝还是软链）本阶段不追。
->
-> ⚠️ `srscript.conf` 里若还留着 `SR_EXECUTOR=slurm`、`SR_SLURM_*` 或 `SR_SANDBOX_ROOT`，
-> 一律删掉：本版本的 `SR_EXECUTOR` **只接受 `local`**（留别的值启动即报错），其余几个名字平台不读。
-> 选卡真机值 `SR_LOCAL_GPU`（默认 `0`）**待核**。
 
 ### 6.2 关键常量与口径
 
-- **预览生成**：规则签名 `srprev:v3:div<N>+equal:q<Q>`；前端档位 各边 ÷2 · ÷4 · ÷8 · ÷16 · ÷32，
+- **预览烘焙**：规则戳 `srprev:v3:div<N>+equal:q<Q>`；前端档位 各边 ÷2 · ÷4 · ÷8 · ÷16 · ÷32，
   默认 ÷4（`SR_PRODUCT_PREVIEW_DIV` 默认 4，`0` = 关闭）——**前端档位与该 env 是两个独立的 4，互不联动**。
   预览落点统一为 `<源 stem>_preview.jpg`。
 - **掩码**：值域 0/255（0 = 不处理，255 = 处理）；`run_sr` 用 `cv2.threshold(>0)` 读取。
   矢量格式 `{"width":W,"height":H,"polygons":[{"label":"roi","points":[[x,y],...]}]}`，
   x 为列、y 为行，均为原图像素坐标。
-- **SR 产物命名**：`<输入 stem>_<suffix>.tif`；未超分那份为 **`<输入 stem>_NOSR.tif`**
+- **SR 产物命名**：`<源 stem>_<suffix>.tif`；未超分那份为 **`<输入 stem>_NOSR.tif`**
   （SC 即 `<目录名>_NOSR.tif`），`<产物 stem>_NOSR.tif` 为次选。两义都标 `NOSR`，见 §3.2 与
-  [preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md)。平台提交这一跑还会把产物
-  归位到本体名（§3.1 第 2 条），所以跑完盘上留下的本体就是这份产物。
+  [preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md)。
 - **场景判据**：目录须含 `<目录名>_meta.xml`；场景文件为 `<目录名>.<ext>`（SC 步输入）或
   `PAN.<ext>`（RC 步输入）。派生件按 `p.stem == p.parent.name` 排除。
 - **路径映射**：`SR_DRIVE_MAP` 默认 `W:=/DiskArray`；`SR_ALLOWED_ROOTS` 默认 `/DiskArray`。
-- **「已清除」灰块的判据只有一条**：打开这一行时在**盘阵静态链**
+- **「已清除」灰块的判据只有一条（2026-09-24 起）**：打开这一行时在**盘阵静态链**
   （`/disk-array/…`）上撞了 404（`lib/api.ts::isSceneGone` = 404 且 URL 落在 `/disk-array/`）。
-  打后端的 `/api/` 请求回 404 **不算**（那说明请求没走到后端，见 `isProxyMiss`）；不存在按年龄的推定。
-  该标记只活在前端单次会话，重新检索即消失。
-- **场景库列表 = 「上次检索」那一刻的快照，跨刷新保留**：整页刷新**不**自动重检索，页面回到
-  刷新前那一份列表（含「已从列表移除 N 行」的清除结果）；只有按「检索」才读盘阵的当前事实
-  （届时被清掉的行回来、预览列显示「未生成」）。快照活在 `sessionStorage`
-  （键 `sr.scenes.snapshot`，组装/解析见 `lib/scene.ts::scenesSnapshotOf` / `parseScenesSnapshot`）
-  —— **刻意不用 localStorage**：它跨天留存，一份隔夜的旧列表会冒充刚扫过的盘阵；sessionStorage
-  随标签页关闭即失效。判据是「上次检索 HH:MM」那一行读数 + 空表文案分两种。检索失败时快照整份
-  作废（下次进入照旧自动检索，宁可重来也不留一份来路不明的列表）。清缓存的**边界**：清的
-  始终是盘阵上那份 `<源 stem>_preview.jpg`，行去留只影响页面。
-- **底栏只显示图名**：`StatusBar.vue` 常驻的只有 `activeRec.name`
-  （分屏时前面挂 `[左]`/`[右]`）。尺寸、探针、路由、预览像素尺度、布局这几项挪进这条的**悬停
-  title** —— 尺寸与布局左栏那张文件卡上本来就有（[FileList.vue](../../frontend/src/components/FileList.vue)
-  的 meta 行），路由与预览尺度是排障项，不该常驻占一行。布局文案「盘阵 JPG（N 尺度 +
-  直方图均衡）」不带「服务端已生成」：它只落在左栏卡的布局行，说清像素是什么即可，生成预览方
-  是谁对看图的人没有信息量。
+  打后端的 `/api/` 请求回 404 **不算**（那说明请求没走到后端，见 `isProxyMiss`）；按年龄的推定
+  已于 09-24 整条删除。该标记只活在前端单次会话，重新检索即消失。
 - **队列耗时口径**：纯算力时长（`started_at` → `finished_at`），不含排队；重启后基准回落库中状态。
 - **任务表唯一键**：`sr_tasks.task_fingerprint`（参数内容 sha256），同参数重交复用同一行。
 
-### 6.3 一键解析（《待修复清单》批量生成预览）
+### 6.4 一键解析（《待修复清单》批量烘焙，2026-09-27）
 
 - **不新增后端端点**：每景就是既有三条链按序走一遍 —— `POST /api/scenes/resolve`
   （吃那一行的影像类型补产品段）→ `GET /api/scenes/{id}/preview` → `GET /api/scenes/{id}/siblings`
   （取未超分那份的名字与尺寸）→ 再 `/preview` 一次。**刻意不做 batch 端点**：`preview` 是
-  sync def、进了 anyio 线程池，掐响应停不下服务端已经在生成的那一份；而「试过哪些候选、
+  sync def、进了 anyio 线程池，掐响应停不下服务端已经在烤的那一份；而「试过哪些候选、
   各自为什么不行」的唯一真源在 `scene_search` / `resolve_scene`，批量端点重写一遍就是
   多一个「静默换路径」的入口。驱动的循环在 [stores/qclist.ts](../../frontend/src/stores/qclist.ts)
   （`bakeAll`）+ [lib/qcbatch.ts](../../frontend/src/lib/qcbatch.ts)（`runSceneBake`，**并发恒为 1**）。
-- **每次强制重新生成**：这条链上的两次 `/preview` 都带 `?force=1`
-  —— 本体与 NOSR **两份都强制**，服务端跳过缓存的**全部**判据、无条件按盘上当前的源重新生成
-  一遍（落点与档位照旧，原地覆盖）。理由是判据只能推断，推不出「内容换了、时间戳没换」：
-  SR 重跑时旧产物是被**改名**成 `<同名>_NOSR.tif` 的，改名不改 mtime。
-  **别的入口一个都不带**（点开卡片、场景库、预取、粘路径、拖入链 —— 盘上那份够用就复用），
-  `/preview-drop` 上根本没有这个参数。代价说清楚：批量耗时从「第二次几乎全命中、秒级」变成
-  「每景读两遍大图」；前端三处必须一起让开（本地 blob 缓存 / 浏览器 HTTP 缓存
-  `cache:'no-store'` / 在飞请求的合流键 `|force`），只改 URL 挡不住 nginx 那条 `max-age=300`。
-  详见 [gui-experience §9.8](../experience/gui-experience.md) 与
-  [preview-bake-pipeline §4.6](../knowledge/preview-bake-pipeline.md)。
 - **每景两张卡、共用同一个序号**：本体卡的 `sceneDir = resolved.dir`，NOSR 卡的
   `sceneDir = siblings.lqPath`（两者都是同一个场景目录的 `as_posix()`），序号由
   `viewer.sceneOrdinalOf` 按 `sceneDir` 分组发号 —— 先清空再按行序入列，序号天然是 1,1,2,2,…
 - **NOSR 卡的 `lqPath` 取场景目录、不是 `null`**：与「场景芯片」那条入口（`openSceneSibling`）
   逐字对齐，否则同一种图两条入口进来会长得不一样。「不能修复」由 `stageKind` 那道门管
   （`isIntermediateStage` 三处），不看 `lqPath`。
-- **卡片「生下来不带像素」**：批量只把 jpg 生成到盘上，入列的卡 `thumb/src = null`，第一次点开
+- **卡片「生下来不带像素」**：批量只把 jpg 烤到盘上，入列的卡 `thumb/src = null`，第一次点开
   才 `fetchSceneJpg` + `applySceneJpgToRec`（此时命中服务端缓存，秒出）。算式：各边 ÷4 的
-  4 万² 景生成出 10000²，`applySceneJpgToRec` 同时留下 `thumb`（canvas RGBA ≈400MB）与
+  4 万² 景烤出 10000²，`applySceneJpgToRec` 同时留下 `thumb`（canvas RGBA ≈400MB）与
   `src`（Float32Array），**≈800MB/卡** —— 一批十几景 ×2 张装不下（浏览器单次分配 ~2GB）。
 - **取消 = AbortController，且如实告知**：`resolve` 能掐（`apiResolveScene` 收 signal），
-  生成图那两条 HTTP **掐不掉** —— 所以在飞的那一景让它生成完（落盘正是要的缓存），文案写
-  「正在停止（等这一景生成完…）」。被掐掉的 resolve 是**取消**、不是这一景失败，不记进失败账。
+  烤图那两条 HTTP **掐不掉** —— 所以在飞的那一景让它烤完（落盘正是要的缓存），文案写
+  「正在停止（等这一景烤完…）」。被掐掉的 resolve 是**取消**、不是这一景失败，不记进失败账。
 - **失败与「缺失」分两张表**：`bakeFails`（标红 + 记「第几步 + 后端原话」）与 `bakeNotes`
   （「盘上没有未超分那份」这类盘上的事实）。**两张都不写 `statuses`** —— 那份会被
-  `buildQcDoc` 写回盘阵上的 .txt、还驱动 `counts.done`，生成图失败不是质检结论。
+  `buildQcDoc` 写回盘阵上的 .txt、还驱动 `counts.done`，烤图失败不是质检结论。
 - **进度不弹遮罩、不动 `busy`**：遮罩是模态的，会把用户正在看的图挡住、工具栏锁几十景。
   进度只走面板上那一行字 + 按钮三态（待命 / 停止 / 停止中）。
-- **切图预填坐标**：切到某张卡时，把清单里对应那一行的「行列号」**预填**进工具栏
+- **切图预填坐标**（2026-09-28）：切到某张卡时，把清单里对应那一行的「行列号」**预填**进工具栏
   定位框（`Toolbar.vue` 一个 watch，键 = `activeRec.sceneDir ?? lqPath`，与面板那条自动选中同源）
   —— 只填**不跳**；这一行没有行列号就清空。本体与产物卡同一个 `sceneDir`，所以同景各卡预填同一个
-  坐标。没导入清单时不动框。
-- **坐标口径 = (X=列, Y=行)，与原文同序**（真机实测）：清单那对数的**第一个数是列(X)**，第二个
-  才是行(Y)（名字叫「行列号」，写出来却是 X,Y 序）。所以面板显示、点行跳转（`locatePixel(it.col, it.row)`）、
-  工具条预填（`col,row`）三处都**照抄原文顺序**，谁也别自己翻。判定办法只有真机落点：把原文那串
-  填进定位框点「定位」，看红叉落哪 —— 别照注释想当然。
-- **单景耗时实测（2026-10-09 用户回报）**：浏览器在内网 Windows 办公机、服务与数据在真机
-  **node81-135** 与盘阵；1.84 GiB / 32028×30946 的景，÷4 档位下「解析 + 生成预览 + 打开」
-  两张图（本体 `PAN.tif` 与未超分那份 `PAN_NOSR.tif`）合计约 **16 秒**。
-  对照：另一景（分辨率量级相近）用「卫星图像掩码生成工具」在办公机本地「读 + 显示/渲染」
-  **完整** TIF 约 **42 秒** —— 两者看到的像素不同（÷4 降采样预览 对 全分辨率原图），
-  只作量级对照。几十景一批按此量级仍是十几分钟起 —— 按钮的提示语里已经写明，
-  不等同于「卡住了」。详见 [gui-requirements.md §1.4](../planning/gui-requirements.md)。
+  坐标。顺序照旧是「列,行」（同 `QcListPanel.onRow`）。没导入清单时不动框。
+- **真机单景均耗时 = ___ 秒**（待填；含一次 resolve + 两次烘焙读盘，÷4 的 4 万² 景按
+  §3.2 / preview-bake-pipeline 的量级预估是几十秒）。几十景一批就是十几分钟起 ——
+  按钮的提示语里已经写明，不等同于「卡住了」。
 
-### 6.4 测试基线
+### 6.3 测试基线
 
-- **后端**：`python -m pytest backend/` → **756 passed / 9 skipped**（2026-10-15 实测）。
-- **前端**：Vitest **447 passed** + `vue-tsc --noEmit` 零错误 + `npm run build`。
-- **浏览器回归**（`.e2e/`，先 `cd frontend && npm run build`）：
-  `test-manual-scene.js` **298** · `test-vue-viewer.js` **192** · `test-scenes.js` **136** ·
-  `test-platform.js` **26**（2026-10-15 开发机实测全绿；`test-scenes.js` 的 `[B2]` 是红的，
-  见 §3.3）。
-  这三个会提交作业的脚本用 `python -m backend.tests.e2e_server` 起后端：它与
-  `python -m backend.api` 同款，只是把执行器入口换成 `backend/tests/exec_double.py` 的内存替身
-  —— 开发机上没有真机的 bash + conda + SR bundle，真起子进程只会得到 launch_error。
-  真执行器与真 bash 那条链由 `backend/tests/test_local_exec.py` 与 `test_local_chain.py` 覆盖，
-  真机验收见 [real-machine-acceptance.md](real-machine-acceptance.md) §D。
-  其中 `test-manual-scene.js` 的 M9「第二遍按盘上最新的源重写了第 1 景的本体预览」
-  是那三个静默失效点（本地 blob / 浏览器缓存 / 合流键）的**现场**验收：任一生效，
-  第二遍就是秒回、盘上文件一个字节不动，它立刻红。
-- ⚠️ **有一族脚本当前跑不起来**：`.e2e/` 下 **14 个**脚本把仓库路径写死成搬家前的
+**2026-09-28 全套重跑（全部绿）**：
+
+- 后端：**735 passed / 5 skipped / 130 subtests**（`python -m pytest backend/`，21.7s；09-24 为
+  720 —— 本轮「一键解析」相关的路径/命名/候选清单用例净增 15 条）。
+- 前端：**424 passed** + `vue-tsc --noEmit` 零错误 + `npm run build`（Vitest，17 个文件；09-24
+  为 393 —— 新增 `qcbatch.test.ts` 29 条纯逻辑，`queue.test.ts` 40 条含本轮新增的
+  `pagehide`/`pageshow` 收流用例）。
+- 浏览器回归（`.e2e/`，先 `cd frontend && npm run build`）：
+  `test-scenes.js` **132** · `test-vue-viewer.js` **190** · `test-manual-scene.js` **296**
+  （09-24 为 214 —— 新增 M 段「一键解析」整段：按序入列 / 两卡同序号 / 懒卡不带像素 /
+  点亮联动 / 失败账 / 中途停止）· `test-platform.js` **26**。
+- ⚠️ **有一族脚本当前跑不起来，不是回归**：`.e2e/` 下 **14 个**脚本把仓库路径写死成搬家前的
   `D:/BaiduNetdiskDownload/sr_agent_platform/…`（判据：`grep -l "BaiduNetdiskDownload/sr_agent_platform" .e2e/*.js`
   命中 14 个，含 `test-regress.js`、`test-locator.js`、`test-norm.js`、`test-u16.js`、
   `test-stretch*.js` 与 `debug-*`/`probe-fd*` 那批探针）。**活着的四套就是上面列的这四个**
-  （都按 `__dirname` 定位，搬家不影响）。
+  （都按 `__dirname` 定位，搬家不影响）。历史经验里若引用了那一族当金丝雀，按这条订正。
+- 更旧的值（58 / 65 / 22 / 197 / 720 / 393 / 214 等）已过期，不要据此判断回归。
 
 ## 7. 去哪查什么
 
 | 查什么 | 去哪 |
 |---|---|
+| 某个决定 / 某次事故的经过 | [timeline-archive.md](timeline-archive.md) |
 | 真机验收怎么勾 | [real-machine-acceptance.md](real-machine-acceptance.md) |
 | 真机怎么部署、起不来怎么办 | [real-machine-bringup.md](real-machine-bringup.md) · [ADHD 动作版](real-machine-bringup-adhd.md) · [deploy/README.md](../../deploy/README.md) |
 | 踩坑与硬约束 | [gui-experience.md](../experience/gui-experience.md) |
 | 平台 API 契约 | [api-contract.md](../planning/api-contract.md) |
-| 预览生成端到端链路 | [preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md) |
+| 预览烘焙端到端链路 | [preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md) |
 | SR 算法 / 调用契约 / 移植环境 | [docs/sr_code/](../sr_code/) |
 | 生产场景命名与路径反推 | [production-scene-naming.md](../sr_code/production-scene-naming.md) |
 | 系统理解前后端设计取舍 | [platform-tutorial.md](../knowledge/platform-tutorial.md) |
-| 文档分类规则与写作口径 | [docs/README.md](../README.md) · [current-state-conventions.md](../conventions/current-state-conventions.md) |
+| 文档分类规则 | [docs/README.md](../README.md) |
 | 环境与真机事实（跨会话记忆） | `~/.claude/projects/…/memory/MEMORY.md` |

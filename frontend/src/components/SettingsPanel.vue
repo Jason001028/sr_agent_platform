@@ -12,6 +12,9 @@
  */
 import { onMounted, onUnmounted, ref, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
+import {
+  clearDeveloperMode, isDeveloperMode, verifyDeveloperPassword,
+} from '../lib/developerMode';
 
 const store = useViewerStore();
 
@@ -20,6 +23,9 @@ const store = useViewerStore();
     只读打开时那一次快照，用户点完开关盯着这行数字看，数字永远停在之前的值。 */
 const cache = ref({ count: 0, bytes: 0, maxBytes: 0 });
 const cacheText = ref('0 项 / 0.0 MB');
+const developerPassword = ref('');
+const developerError = ref('');
+const developerVerified = ref(isDeveloperMode());
 
 function refreshCache() {
   cache.value = store.previewCacheStats();
@@ -33,6 +39,21 @@ watch([() => store.settingsOpen, () => store.previewCacheRev],
 function clearCache() {
   store.clearPreviewCache();
   refreshCache();
+}
+
+function verifyDeveloperMode() {
+  developerError.value = '';
+  if (!verifyDeveloperPassword(developerPassword.value)) {
+    developerError.value = '密码错误';
+    return;
+  }
+  developerPassword.value = '';
+  developerVerified.value = true;
+}
+
+function revokeDeveloperMode() {
+  clearDeveloperMode();
+  developerVerified.value = false;
 }
 
 function onKey(e: KeyboardEvent) {
@@ -61,10 +82,10 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
         >对比模式后台预取{{ store.cmpPrefetchOn ? ' · 开' : ' · 关' }}</button>
         <div class="set-note">
           进对比模式时提前把同场景另两类图的预览取到本地，切图不必现取。
-          只取服务端已有现成的那份，不会触发生成预览。
+          只取服务端已有现成的那份，不会触发烘焙。
         </div>
         <!-- 上一次预取干了什么。**为「缓存行停在 0 项」提供解释**：
-             第一次打开某个场景时合格项本来就是空的（另两类还没人生成过），
+             第一次打开某个场景时合格项本来就是空的（另两类还没人烤过），
              不写出来，用户分不清「没东西可预取」与「预取坏了」。 -->
         <div v-if="store.prefetchNote" class="set-out" data-e2e="set-prefetch-note">
           {{ store.prefetchNote }}
@@ -83,6 +104,32 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
           title="丢掉本地留着的预览，下次打开重新取一遍"
           @click="clearCache"
         >清空</button>
+      </div>
+
+      <div class="set-row set-row-developer" data-e2e="set-developer">
+        <span class="set-line">开发者模式</span>
+        <template v-if="developerVerified">
+          <div class="set-dev-status">已验证，本机可查看其他机器插件</div>
+          <button type="button" class="set-clear" @click="revokeDeveloperMode">关闭</button>
+        </template>
+        <template v-else>
+          <div class="set-dev-form">
+            <input
+              v-model="developerPassword"
+              class="set-dev-input"
+              type="password"
+              autocomplete="off"
+              placeholder="输入开发者密码"
+              @keyup.enter="verifyDeveloperMode"
+            />
+            <button type="button" class="set-clear"
+                    :disabled="!developerPassword" @click="verifyDeveloperMode">
+              验证并开启
+            </button>
+          </div>
+          <div v-if="developerError" class="set-dev-error">{{ developerError }}</div>
+        </template>
+        <div class="set-note">每台机器只需验证一次，验证状态保存在当前机器浏览器中。</div>
       </div>
     </div>
   </template>
@@ -171,4 +218,10 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
 }
 .set-clear:hover:not(:disabled) { color: var(--accent-deep); background: var(--chrome); }
 .set-clear:disabled { opacity: 0.5; cursor: not-allowed; }
+.set-row-developer { border-top: 1px solid var(--line); padding-top: 10px; }
+.set-dev-form { display: flex; gap: 7px; align-items: center; }
+.set-dev-input { flex: 1; min-width: 0; height: 28px; padding: 0 9px; border: 1px solid var(--line); border-radius: var(--r-ctrl); background: var(--surface-2); color: var(--ink); font: inherit; font-size: 12px; }
+.set-dev-input:focus { border-color: var(--accent-2); outline: none; }
+.set-dev-status { color: var(--ok); font-size: 11px; line-height: 1.5; }
+.set-dev-error { color: var(--err); font-size: 11px; }
 </style>

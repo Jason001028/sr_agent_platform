@@ -28,7 +28,9 @@ import json
 from openai import OpenAI
 
 from backend.config import Config
+from backend.services import plugins as plugin_svc
 from backend.tools.contract import ToolRegistry, default_registry
+from backend.tools.contract import list_tools
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are the SR (super-resolution) agent for a remote-sensing processing "
@@ -94,25 +96,48 @@ def _parse_args(arguments) -> dict:
         return {"raw": arguments}
 
 
-def parse_response(resp) -> dict:
-    """Normalize OpenAI-compatible responses, including Qwen reasoning output.
+def _normalize_usage(raw) -> dict | None:
+    """Normalize OpenAI-compatible usage, or return None when unavailable."""
+    if raw is None:
+        return None
+    def value(name: str) -> int:
+        if isinstance(raw, dict):
+            v = raw.get(name)
+        else:
+            v = getattr(raw, name, None)
+        try:
+            return max(0, int(v or 0))
+        except (TypeError, ValueError):
+            return 0
+    prompt = value("prompt_tokens")
+    completion = value("completion_tokens")
+    total = value("total_tokens") or prompt + completion
+    if not (prompt or completion or total):
+        return None
+    return {"prompt_tokens": prompt, "completion_tokens": completion,
+            "total_tokens": total, "source": "provider"}
 
-    Some llama.cpp/Qwen builds put thinking in ``reasoning_content`` and leave
-    ``content`` empty when the completion cap is exhausted. Reasoning is kept as
-    metadata and is never sent back as assistant content (it may contain hidden
-    chain-of-thought); callers can distinguish an incomplete final answer.
-    """
+
+def _empty_usage() -> dict:
+    return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+            "calls": 0, "source": "unavailable", "events": []}
+
+
+def _usage_public(usage: dict) -> dict:
+    return {k: usage[k] for k in
+            ("prompt_tokens", "completion_tokens", "total_tokens",
+             "calls", "source")}
+
+
+def parse_response(resp) -> dict:
+    """Normalize an OpenAI chat-completions response to plain data."""
     msg = resp.choices[0].message
     tool_calls = []
     for tc in msg.tool_calls or []:
         tool_calls.append({"id": tc.id, "name": tc.function.name,
                            "arguments": tc.function.arguments})
-    return {
-        "content": msg.content or "",
-        "tool_calls": tool_calls,
-        "reasoning_content": getattr(msg, "reasoning_content", None) or "",
-        "finish_reason": getattr(resp.choices[0], "finish_reason", None),
-    }
+    return {"content": msg.content, "tool_calls": tool_calls,
+            "usage": _normalize_usage(getattr(resp, "usage", None))}
 
 
 def call_tool(name, arguments_json, registry: ToolRegistry | None = None) -> dict:
@@ -140,7 +165,7 @@ def _repair_unclosed_turn(messages: list[dict]) -> list[dict]:
 
     A crash mid-tool leaves the last assistant tool_calls without its tool
     results. Resume must not blindly re-run those tools — the side effect may
-    already be committed (run_sr may have started an SR job). Each missing
+    already be committed (run_sr may have submitted a Slurm job). Each missing
     call is closed with a synthesized "result unknown — do not blindly retry"
     tool message so the model decides next (poll sr_job_status / ask the user).
     """
@@ -191,7 +216,7 @@ def _transcript_from(messages: list[dict]) -> list[dict]:
 def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM_PROMPT,
              chat=None, verbose=False, store=None, session_id=None,
              resume=False, on_step=None, registry: ToolRegistry | None = None,
-             context=None):
+             context=None, machine_id=None):
     """Run the loop; returns {"ok", "turns", "messages", "answer", "error",
     "session_id"}.
 
@@ -252,14 +277,22 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
             store.append_message(session_id, messages[0])
             store.append_message(session_id, messages[1])
 
+    allowed_names = None
+    if store is not None and machine_id:
+        allowed_names = plugin_svc.enabled_plugin_ids(store, machine_id)
     active_registry = registry or default_registry()
     tools = active_registry.manifest()
+    if registry is None and allowed_names is not None:
+        tools = [t.openai_function() for t in list_tools() if t.name in allowed_names]
 
     def commit(msg: dict):
         """Append to the wire list and checkpoint to the store immediately."""
         messages.append(msg)
         if store is not None:
             store.append_message(session_id, msg)
+
+    usage = _empty_usage()
+    call_index = 0
 
     for turn in range(1, max_turns + 1):
         try:
@@ -274,27 +307,35 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
             if store is not None:
                 store.set_session_status(session_id, "error")
             return {"ok": False, "turns": turn, "messages": transcript,
-                    "answer": None, "error": error, "session_id": session_id}
+                    "answer": None, "error": error, "session_id": session_id,
+                    "usage": usage}
 
         content = out.get("content")
         tool_calls = out.get("tool_calls") or []
+        call_usage = _normalize_usage(out.get("usage"))
+        if call_usage is not None:
+            call_index += 1
+            event = {**call_usage, "turn": turn, "call_index": call_index}
+            usage["prompt_tokens"] += call_usage["prompt_tokens"]
+            usage["completion_tokens"] += call_usage["completion_tokens"]
+            usage["total_tokens"] += call_usage["total_tokens"]
+            usage["calls"] += 1
+            usage["source"] = call_usage["source"]
+            usage["events"].append(event)
+            if store is not None and session_id is not None:
+                try:
+                    store.append_llm_usage(session_id, **event)
+                except Exception:  # noqa: BLE001 — metrics must not break chat
+                    pass
+            if on_step is not None:
+                on_step({"type": "usage", "usage": event,
+                         "aggregate": _usage_public(usage)})
 
         if verbose:
             print(f"[turn {turn}] assistant: {content!r} "
                   f"tool_calls={len(tool_calls)}")
 
         if not tool_calls:
-            if not content:
-                reason = out.get("reasoning_content") or ""
-                finish = out.get("finish_reason")
-                detail = ("LLM 未返回最终回答：思考内容占满了生成上限"
-                          if reason and finish == "length"
-                          else "LLM 未返回最终回答")
-                if store is not None:
-                    store.set_session_status(session_id, "error")
-                return {"ok": False, "turns": turn, "messages": transcript,
-                        "answer": None, "error": detail,
-                        "session_id": session_id}
             commit({"role": "assistant", "content": content})
             transcript.append({"role": "assistant", "content": content})
             if on_step is not None and content:
@@ -303,7 +344,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                 store.set_session_status(session_id, "done")
             return {"ok": True, "turns": turn, "messages": transcript,
                     "answer": content or "", "error": None,
-                    "session_id": session_id}
+                    "session_id": session_id, "usage": usage}
 
         # Checkpoint BEFORE the tools run: the assistant's intent is durable
         # before any external side effect, so a crash mid-tool leaves a
@@ -350,4 +391,5 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
     if store is not None:
         store.set_session_status(session_id, "error")
     return {"ok": False, "turns": max_turns, "messages": transcript,
-            "answer": None, "error": error, "session_id": session_id}
+            "answer": None, "error": error, "session_id": session_id,
+            "usage": usage}

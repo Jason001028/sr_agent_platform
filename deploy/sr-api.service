@@ -1,33 +1,24 @@
-# sr_agent_platform FastAPI 单元（场景浏览 + 队列页 + Agent + SR 本机执行）
+# sr_agent_platform FastAPI 单元（阶段4 盘阵场景 + 阶段5 平台 API）
 # ------------------------------------------------------------------
-# 用途：/api/scenes 检索与懒生成预览；/api/chat/* + /api/queue*（REST+SSE）
+# 用途：/api/scenes 检索与懒生成预览；阶段5 /api/chat/* + /api/queue*（REST+SSE）
 # + /api/tools + /api/masks。由 nginx 反代到 127.0.0.1:8000（SSE 缓冲已关，见 nginx.conf）。
 # 路径白名单是双层保险的第二层 —— nginx 整块暴露场景根，后端再按 SR_SCENES_ROOT 校验。
-#
-# 本单元**同时是 SR 的执行者**：SR 作业由本进程 fork 出的子进程在**本机**直接跑
-# （backend/services/local_exec.py），不经过任何调度器。所以下面「本机执行」那一段
-# 的每一项都直接决定这台机器怎么跑 SR，缺一项提交就失败。
 #
 # 安装：
 #   cp deploy/sr-api.service /etc/systemd/system/
 #   ⚠️ 真机上**不要直接改部署后的这份正文**：真机差异用 drop-in 覆盖
 #      （/etc/systemd/system/sr-api.service.d/*.conf，回滚=删文件；node81-135 上
-#      有 20-agentdb.conf 一个）。同变量多处赋值时 drop-in 胜出。
-#      drop-in 里写 SR_SLURM_* / SR_SANDBOX_ROOT / SR_SLURM_FAKE 一律无效 ——
-#      平台不读这几个名字，留着只会让人以为配过了；发现即删。
-#   按真机改：SR_SCENES_ROOT（必填）、SR_AGENT_DB 的目录归属、SR_WORK_DIR 的归属、
-#   SR_PREVIEWS_ROOT 可选（配了必须在 SR_SCENES_ROOT 之下）；以及 SR_PYTHON /
-#   SR_BUNDLE_DIR（SR 生产环境与本机路径）；WorkingDirectory / ExecStart 的 venv 路径。
+#      已有 10-slurm.conf 与 20-agentdb.conf 两个）。同变量多处赋值时 drop-in 胜出。
+#   按真机改：SR_SCENES_ROOT（必填）、SR_AGENT_DB 的目录归属，SR_PREVIEWS_ROOT 可选
+#   （配了必须在 SR_SCENES_ROOT 之下）；以及 WorkingDirectory / ExecStart 的 venv 路径。
 #   systemctl daemon-reload && systemctl enable --now sr-api
 #   查日志：journalctl -u sr-api -f
 #
 # 依赖（内网机一次性离线装好，见 requirements-api.txt）：fastapi uvicorn numpy pillow openai
 #   例：<venv>/bin/pip install -r deploy/requirements-api.txt
-#   注意这是 API 自己的 venv（python 3.9），与 SR 生产环境（SR_PYTHON）是两个平行
-#   解释器：后端不 import SR/torch/GDAL，只在生成的运行脚本里写一行 SR_PYTHON 路径。
 
 [Unit]
-Description=sr_agent_platform FastAPI (scene browse + lazy preview JPG + local SR execution)
+Description=sr_agent_platform FastAPI (scene browse + lazy preview JPG)
 After=network.target
 
 [Service]
@@ -35,51 +26,37 @@ Type=simple
 # ⚠️ systemd 单元不支持「值后同行 # 注释」——会连注释一起当值读（User= 被读成脏名 → 217/USER）。
 #    注释必须独占一行。曾因此导致真机 217/USER 排查半天（2026-09-07）。
 User=nginx
-# 跑 nginx 同用户；需能读 SR_SCENES_ROOT 并写预览 JPG 缓存。
-# ⚠️ SR 作业也是这个用户跑的（子进程不换身份），所以「SR 能不能写场景目录」现在
-#    等同「nginx 能不能写场景目录」——上线前用 `sudo -u nginx` 实测一次（见文件末尾）。
+# 跑 nginx 同用户；需能读 SR_SCENES_ROOT 并写预览 JPG 缓存
 Group=nginx
 # WorkingDirectory=               # 仓库根（backend 包需在 import 路径上），真机填，例：
 WorkingDirectory=/data/www/sr-agent-platform
 # ExecStart=<venv>/bin/uvicorn backend.api.app:create_app --factory --host 127.0.0.1 --port 8000
 ExecStart=/opt/sr-venv/bin/uvicorn backend.api.app:create_app --factory --host 127.0.0.1 --port 8000
-# ⚠️ 必须**单进程**：不要加 --workers N，也不要另起一个 uvicorn 指向同一个库。
-#    每个 worker 都会各自起一份 lifespan 后台循环 —— 队列状态轮询、临时预览清理、
-#    产物预览主动生成各做一遍（重复生成预览白烧磁盘），而执行槽位是**跨进程**文件锁
-#    （<SR_WORK_DIR>/.exec.lock），第二个 worker 的作业只会一直排队拿不到槽。
 Restart=on-failure
 RestartSec=3
-# 进程退出策略：SR 子进程与 API 同属本单元的 cgroup（子进程自建 session，但不脱离
-# cgroup），所以 `systemctl stop sr-api` 会连正在跑的 SR 一起结束，不需要平台自己收尾。
-# 这是有意的：作业**不能**脱离 API 独自留在机器上 —— 那种局面平台观察不到，只能
-# 报「状态未知」。停止时先向整个 cgroup 发 SIGTERM，超时后 SIGKILL（control-group
-# 就是 systemd 默认值，这里写出来是为了别被误改成 process）。
-KillMode=control-group
-TimeoutStopSec=30
-# 同理：重启 API 会结束正在跑的作业。重启后平台读 <SR_WORK_DIR>/runs/<job_id>.json
-# 与判定文件得出这次作业的终态，不会当成「没跑过」，也不会自动重跑。
 
-# 场景根（nginx.conf 的 alias /data/scenes/ 须与此一致）
+# 阶段4 必填：盘阵场景根（nginx.conf 的 alias /data/scenes/ 须与此一致）
 Environment=SR_SCENES_ROOT=/data/scenes
-# SQLite 库路径（chat 会话消息 + sr_tasks 同库）。store 首次写自动建父目录，
+# 阶段5：SQLite 库路径（chat 会话消息 + sr_tasks 同库）。store 首次写自动建父目录，
 # 但 User=nginx 须能写**父目录**（SQLite 建表/日志要往父目录落 journal 文件）。
 # ⚠️ 别把库放在应用解压根里：解压根属 root、nginx 只读得动。2026-09-11 在 node81-135
 #    实测 nginx **写不了** <APP>（探针 `write-db FAIL`）——库第一次被碰就
 #    `unable to open database file`，于是 /api/queue 提交、chat 建会话全废，poller
-#    还会每 2 秒炸一次。改法：库单独放一个 nginx 可写的专用目录（与 SR_WORK_DIR
-#    同处大盘，不塞进代码树），示例为 node81-135 实测值：
+#    还会每 2 秒炸一次。改法：库单独放一个 nginx 可写的专用目录（与
+#    SR_SLURM_WORK_DIR 同处大盘，不塞进代码树），示例为 node81-135 实测值：
 #      mkdir -p /DiskArray/tmp/wangrz/sr_agent_db \
 #        && chown nginx:nginx /DiskArray/tmp/wangrz/sr_agent_db && chmod 750 /DiskArray/tmp/wangrz/sr_agent_db
-#    （SQLite 在 NFS 上只允许**单主机单进程**写——本平台只有 node81-135 跑 sr-api，
-#      且本单元要求单进程，成立。）
+#    （SQLite 在 NFS 上只允许**单主机单进程**写——本平台只有 node81-135 跑 sr-api，成立；
+#      若日后多机跑，这个库要换成本地盘或真数据库。）
 Environment=SR_AGENT_DB=/DiskArray/tmp/wangrz/sr_agent_db/sr_agent.db
-# 真机显式关假实现 —— mock LLM 必须 =0（离机验收 / .e2e 才置 =1）
+# 阶段5：真机显式关假实现 —— mock LLM / 假调度器都必须 =0（离机验收 / .e2e 才置 =1）
 Environment=SR_LLM_MOCK=0
+Environment=SR_SLURM_FAKE=0
 # 可选：预览 JPG 缓存根（默认落源同目录）。配了必须在 SR_SCENES_ROOT 之下。
 # Environment=SR_PREVIEWS_ROOT=/data/scenes/.previews
 #
 # 可选：**拖拽入口**的临时预览缓存根（2026-09-18）。用户把盘阵上的 .tif 拖进浏览器
-# 时走这条：预览生成规则与上面那份长期缓存完全相同，但落在**独立**目录、按
+# 时走这条：烘焙规则与上面那份长期缓存完全相同，但落在**独立**目录、按
 # YYYY-MM-DD 分桶，每天 0 点整桶删除（服务启动时也先清一次）。
 #   ⚠️ 生产**必须显式配**，别用默认值：默认是系统临时目录，而 CentOS7 的 /tmp
 #      常常是 tmpfs（内存盘）—— 1/2 尺度不封顶，一张 2.4 万像素级的场景预览
@@ -90,85 +67,108 @@ Environment=SR_LLM_MOCK=0
 #   容量：只保留当天那一桶，等于一天的拖拽量；桶内不设上限。要缩就到磁盘配额去限。
 #   Environment=SR_TEMP_PREVIEWS_ROOT=/DiskArray/tmp/wangrz/sr_tmp_previews
 #
-# 可选（2026-09-20）：**产物预览主动生成**——作业转 COMPLETED 后由后台循环同时把**产物那一份**
-# 预览生成掉（只生成产物；输入影像与 _NOSR 两份仍按打开时惰性生成）。两个都有默认值，不配即生效。
+# 可选（2026-09-20）：**产物预览急烤**——作业转 COMPLETED 后由后台循环顺手把**产物那一份**
+# 预览烤掉（只烤产物；输入影像与 _NOSR 两份仍按打开时惰性烤）。两个都有默认值，不配即生效。
 #   SR_PRODUCT_PREVIEW_DIV 用哪一档（÷N），**0 = 关**（只留惰性路径），缺省 4。
 #     取值不在 (2,4,8,16,32) 里 → 当 0 处理并在启动日志写一行，**不抛异常**。
 #     ⚠️ 它与前端工具栏那条拖动条的默认值（同为 ÷4）是**两个独立的 4**，互不联动 ——
-#        浏览器档位存在 localStorage，服务端看不见，所以主动生成必须有服务端自己的默认档。
+#        浏览器档位存在 localStorage，服务端看不见，所以急烤必须有服务端自己的默认档。
 #     ⚠️ 升级当天先置 0 起一次确认无异常再打开：两列是 ALTER TABLE 加的、**不回填**，
 #        老行的 preview_state 全是 NULL（挡历史行的唯一屏障是下面那道年龄窗口）。
-#   SR_PRODUCT_PREVIEW_MAX_AGE_SEC 只生成 finished_at 落在这个窗口内的行，缺省 86400；
-#     finished_at IS NULL 的一律不生成。调大 = 升级那天会把更多历史行翻出来生成。
-#   主动生成的结局随 GET /api/queue 的 preview_state / preview_note 两列带出（另有 SSE 帧
-#   preview_update）。跳过时的 slug：product_missing / unwritable / source_changed / no_suffix，
-#   外加正常结局 cached（场景目录里那份 JPG 已是当前档位，不重烤）。
-#   产物落点就是任务行里的 lq_path 本身（作业在场景目录原地跑），没有第二处要判。
+#   SR_PRODUCT_PREVIEW_MAX_AGE_SEC 只烤 finished_at 落在这个窗口内的行，缺省 86400；
+#     finished_at IS NULL 的一律不烤。调大 = 升级那天会把更多历史行翻出来烤。
+#   急烤的结局随 GET /api/queue 的 preview_state / preview_note 两列带出（另有 SSE 帧
+#   preview_update）。跳过时的 slug：sandbox / product_missing / unwritable / source_changed / no_suffix。
+#   ⚠️ 沙箱**实际生效**时（作业跑在私有副本上）产物不在盘阵，急烤自动 skipped: sandbox；
+#      但配了 SR_SANDBOX_ROOT 而 SR_EXECUTOR=local 时沙箱并不生效，急烤**照烤**（判据是
+#      run_sr.sandbox_scene_paths，不是这个 env 在不在）。
 #   Environment=SR_PRODUCT_PREVIEW_DIV=4
 #   Environment=SR_PRODUCT_PREVIEW_MAX_AGE_SEC=86400
 # 可选：队列状态轮询秒（/api/queue/events 广播刷新率，缺省 2）
 # Environment=SR_QUEUE_POLL_SEC=2
 #
 # ==========================================================================
-# 本机执行 SR（这几项连同上面的 SR_AGENT_DB 一起决定「谁跑、跑什么、写哪」）
+# Slurm 接入（6 项全部必填 —— 缺任一项 SR 作业提交必失败）
 # ==========================================================================
 # SR_PYTHON 是 **SR 生产环境**（conda env `torch1.9.1py36`，python 3.6 +
 # torch + GDAL + ImgHistMatch.so），不是 API 自己的 /opt/sr-venv（python 3.9）。
+# 两个解释器平行存在、互不污染：平台后端不 import SR/torch/GDAL，只在批脚本里
+# 写一行解释器路径，该行在**计算节点**上解析。
 # 2026-09-14 node81-135 实测：torch **1.10.2+cu113** / GDAL **2.4.0** ——
 # 目录名里的 1.9.1 不是实际版本，别再照抄成「torch 1.9.1」。
 # 核对方式（GDAL 用 VersionInfo()：老 osgeo 绑定没有 gdal.__version__）：
 #   <该 python> -c "import torch; from osgeo import gdal; print(torch.__version__, gdal.VersionInfo())"
 # 2026-09-10 用户确认：**沿用本行文档旧值，不用 base conda 的 python**
 # （node81-135 登录 shell 默认在 (base) 环境，那与 SR 的生产解释器无关）。
-# ⚠️ 现在这个解释器由 **nginx** 启动（以前是调度器在计算节点上起），所以 nginx 必须
-#    对这条路径**可读可执行**（含 conda env 的 bin 与 lib）。生产机上它常在
-#    /run/media/root/... 这类只给 root 的挂载点下，上线前实测一次（见文件末尾）。
+# 仅当 torch1.9.1py36 真的废弃时才换到 /root/miniconda3/envs/base/bin/python，
+# 且换前须确认该环境里 torch/GDAL/ImgHistMatch.so 齐。
 Environment=SR_PYTHON=/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python
 #
 # mmsr_bundle/codes：code_0817_prod.py / models / utils / options / tools 所在目录。
 # 拼写以 code_0817_prod.py:27 的 load_library() 为准，两者必须完全一致。
-# ⚠️ 同样要 nginx 可读；SR 的产物写不写这里取决于 SR 脚本自己，平台不写。
 Environment=SR_BUNDLE_DIR=/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes
 #
-# 运行脚本要跑的三个程序名：都在 SR_BUNDLE_DIR 里，脚本 `cd` 进去后按名调用。
-# ⚠️ 三个名字都是**提交时**由后端读 env 写死进运行脚本文本的，改完必须 restart
-#    sr-api 才生效（已生成的脚本不受影响）。
+# 批脚本要跑的两个程序名（都在 SR_BUNDLE_DIR 里，作业 cd 进去后按名调用）。
+# ⚠️ 两个名字都是**部署时**由后端读 env 写死进批脚本文本的：批脚本带
+#    --export=NONE，本进程的环境变量不会传进作业，所以改完必须 restart。
 # 变体与生产脚本**并置**即可，不必改名顶替 code_0817_prod.py ——
 # 生产原文件因此保持字节不动，回滚 = 把 SR_SR_SCRIPT 改回 code_0817_prod.py。
-# 不配这三项时默认就是 code_0817_prod.py / verify_sr_run.py / sr_prep_scene.py。
-# ⚠️ verify_sr_run.py 与 sr_prep_scene.py 由本仓库提供（SR_code/variants/），
-#    部署时要拷进 SR_BUNDLE_DIR；也可把这两项写成绝对路径，名字原样进脚本。
-#    变体的来源与差异见 docs/sr_code/sr-platform-variant.md。
-Environment=SR_SR_SCRIPT=code_0817_prod_platform.py
+# 不配这两项时默认就是 code_0817_prod.py / verify_sr_run.py（行为同旧版）。
+Environment=SR_SR_SCRIPT=code_0817_prod_slurm.py
 Environment=SR_VERIFY_SCRIPT=verify_sr_run.py
-Environment=SR_PREP_SCRIPT=sr_prep_scene.py
 #
-# 运行期工作目录：每次提交在这里生成 config.xml 与运行脚本，
-# 子进程的 stdout/stderr 落在 <work>/<脚本名>.out，作业记录在 <work>/runs/<job_id>.json。
-# 默认值 /tmp/sr_agent_work —— 本机执行不需要共享盘，但**默认值在生产上要显式覆盖**：
-# 一来 /tmp 常是 tmpfs（日志与 config 会吃掉内存），二来这个目录要长期留得住
-# 「上次到底跑了什么」，重建机器后还得能回答。
-# ⚠️ 归属与权限：nginx 需要**写**（建 config/脚本/日志/runs/.local_job_seq/.exec.lock）。
-#    权限不足不会在启动时报错，而是在用户点提交时才暴露 —— 上线前实测一次（见文件末尾）。
-Environment=SR_WORK_DIR=/DiskArray/tmp/wangrz/sr_agent_work
-#   同一件事的另一个可读名字是 SR_SLURM_WORK_DIR（SR_WORK_DIR 优先）。两者都配时
-#   以 SR_WORK_DIR 为准，别指望它们能各指一处。
+# ⚠️ SR_SLURM_WORK_DIR 必须是**共享盘**：config.xml 与批脚本由 API 写在这里，
+#    而作业在 gpu 分区的 76 个节点（node81-* 与 node104-* 两族）之一上读它。默认值
+#    /tmp/sr_agent_work 是本机路径，多节点下作业秒挂（slurm-integration.md §2.6）。
+#    SR_SLURM_WORK_DIR=/tmp/sr_agent_work
+#    权限两套都要有：nginx（写 config.xml/脚本）与作业用户（写 %j.out/%j.err）。
+Environment=SR_SLURM_WORK_DIR=/DiskArray/tmp/wangrz/sr_agent_work
 #
-# GPU 选择：本平台在这台机器上只用一张卡。值原样写进子进程的 CUDA_VISIBLE_DEVICES，
-# 缺省 "0"。SR 脚本读它决定可见设备 —— 但**生产基线脚本自己会把它写回固定值**
-# （main() 里赋 "0"、__main__ 里赋 "1"），所以本机执行用上面那个变体
-# code_0817_prod_platform.py（它删掉那两行赋值）；换回基线时这张卡就由脚本说了算。
-# ⚠️ 值里**不要**填「卡数」：这是可见设备列表（"0" / "0,1" / GPU UUID 皆可），
-#    不是数量；填卡数只会让 SR 见到一张不存在的卡。
-#   作业日志开头会把实际生效的 CUDA_VISIBLE_DEVICES 与可见卡的 index,uuid 打出来，
-#   对不上时按日志排查。
-# Environment=SR_LOCAL_GPU=0
+# 分区与作业限额。gpu = 真机默认分区（2026-09-11 `sinfo -h -o "%P"` 实测：
+# centos7 / deicc / gpu / gpu* / test —— 星号是默认分区，**没有** `gpup` 这个分区，
+# 早先文档写作 gpup 是转述错误，已订正）。
+# 不用 --partition 时 Slurm 走默认分区（现在是 gpu*，与显式配置一致），
+# 但多分区集群下默认分区可能被改，显式写上更稳。
+Environment=SR_SLURM_PARTITION=gpu
+Environment=SR_SLURM_TIME=02:00:00
+Environment=SR_SLURM_CPUS=4
 #
-# 本机执行**没有作业时限**：作业一直跑到自己结束，要停就在队列页取消（或停本单元）。
-# SR_EXECUTOR 只接受 local（本机执行是唯一执行路线），不需要配。
+# 节点白名单：只让作业调度到这些节点 → `#SBATCH --nodelist=`。
+# 2026-09-14 需求：**所有作业只跑在同一台 4×3090 物理机内，不调度到其他服务器**，
+# Slurm 只负责本机排队 + 按单卡分配 GPU。所以这里的值是**那一台机器的主机名**（单台）。
+#   ⚠️ 本行**故意留空**，机器名待定：由 `slurm-acceptance.md §B0` 的三条只读命令定出
+#      （`sinfo -N -o "%N %G %t"` 看哪台是 `gpu:4`、它是不是 `down`），定出后再加一行
+#      `Environment=SR_SLURM_NODELIST=` 接机器名（同步真机 drop-in）。
+#      **定出前不要填 node81 族白名单** —— 那会把作业散到几十台机器上，正是新需求禁止的。
+#   值 = Slurm host list，原样写进批脚本，只允许 字母/数字/`-`/`,`/`[`/`]`；
+#   非法值在提交时报错（不静默降级）。不配 = 不加这一行 = 调度器自己挑（旧行为）。
+#   ⚠️ 白名单是**硬**约束：该机全忙时作业一直排队，不会溢出到别的机器。
+#   若最终走「本机自建单节点 Slurm」（方向②）则整项不需要：只有一台机器，跨节点不存在。
+#
+# ── 沙箱（强烈建议配；不配 = 直接写 lq_path 指向的目录）─────────────────
+# SR 对她的 DatarootLQ **不是只读的**：util.writeTiff 把产物 tif、Debug/ 日志与
+# meta.xml 更新都写进那个目录（写产物前还会把**输出路径上已存在的同名文件**改名成
+# `*_NOSR.tif`，即上一次的产物）。所以「用户在前端填了一个路径」= 「那个目录会被写
+# 入」。配上本项，每个作业在跑之前先 `cp -a` 一份私有副本，SR 全程只碰副本，生产目录
+# 一字节不动。
+#   布局：<根>/<任务指纹前12位>/<场景目录名>/   （目录名必须原样 —— SC 步的输入
+#   名由它推导：<目录名>.tif。每次作业都重新复制 —— 不做「已存在就跳过」的
+#   优化：同一任务失败重跑时，源可能已经修好，跳过复制会让人对着旧副本排查。）
+#   ⚠️ 空间：每任务一份完整场景副本（该场景 ~5 GB，跑完 ~15 GB：副本 + 产物 + 源目录
+#      自带的 _NOSR/_ori 派生件）。
+#      根要放在大盘上，验收结束后手工清理：rm -rf <根>/<指纹前12位>
+#   ⚠️ 值必须是不含空格/引号/`..` 的绝对路径 —— 它会被拼进作业脚本的 `rm -rf`。
+#      非法值会在提交时报错，不会静默降级。
+#   不配本项时的行为（= 阶段6 生产形态）：SR 直接把产物与 Debug/ 写进 lq_path；
+#   平台恒定非空 Suffix，源图不改名也不删除。
+#   ⚠️ 与**产物预览急烤**的关系（2026-09-20）：沙箱**实际生效**时产物落在私有副本上、盘阵里
+#      没有产物，急烤判 `_run_dataroot` 后自动 skipped: sandbox（如实跳过，不往临时盘撒文件）。
+#      但沙箱只在 slurm 路线下生效（`run_sr.sandbox_scene_paths` 在 SR_EXECUTOR=local 时恒返回
+#      None）—— 所以本行配着、SR_EXECUTOR 是 local 时急烤照烤，别照「配了沙箱就不烤」去理解。
+Environment=SR_SANDBOX_ROOT=/DiskArray/tmp/wangrz/sr_sandbox
 #
 # ==========================================================================
-# 盘阵任意场景目录 —— 三项都**有默认值**，常见部署一项都不用配
+# 盘阵任意场景目录（2026-09-17）—— 三项都**有默认值**，常见部署一项都不用配
 # ==========================================================================
 # 用途：让 SR_SCENES_ROOT（datahub）之外的合法场景目录也能在查看器打开、画掩码、
 # 就地提交 SR。判据与库内场景相同（目录含 <目录名>_meta.xml，且含 <目录名>.tif
@@ -196,36 +196,32 @@ Environment=SR_WORK_DIR=/DiskArray/tmp/wangrz/sr_agent_work
 #   {mid}        段级目录名 = 景级名去掉「景号」那一段
 # 默认 W:\GSHC2IMPS\PRODUCT\{y}\{m}\{d}\{sat}\{mid}\{name} —— 即真机生产树的六层
 #   <年>\<月>\<日>\<卫星型号>\<段级目录>\<景级目录>（2026-09-17 真机确认）。
-# 配了就**只按这一条**走；**不配**则只按上面那条生产树模板。无论哪种，{d} 都**试两天**：
-# 成像日与次日 —— 盘阵按生产日建目录，夜里成像的景记在第二天
-# （名含 0917 的图大半在 0918 目录下，2026-09-18 修）。
+# 配了就**只按这一条**走；**不配**则只按上面那条生产树模板（旧扁平形态那条兜底候选
+# 2026-09-18 已删）。无论哪种，{d} 都**试两天**：成像日与次日 —— 盘阵按生产日建目录，
+# 夜里成像的景记在第二天（名含 0917 的图大半在 0918 目录下，2026-09-18 修）。
 # 名字不符合生产命名规则（拆不出 {sat}/{mid}）时跳过该候选，不硬拼空段。
 # 反推命中才允许提交；一条都命中不了就报错并列出试过的候选与原因，绝不静默提交。
-# ⚠️ 前端只把裸文件名发给后端，模板与命名规则**只有 pathguard.py 一处真源**。
+# ⚠️ 2026-09-17 前前端自己写死过一份同样的模板，这个 env 其实从未生效；现在前端
+#    只把裸文件名发给后端，模板与命名规则**只有 pathguard.py 一处真源**。
 # 命名规则与分段含义见 docs/sr_code/production-scene-naming.md。
 # Environment=SR_SCENE_PATH_TEMPLATE=W:\GSHC2IMPS\PRODUCT\{y}\{m}\{d}\{sat}\{mid}\{name}
 #
-# ⚠️ 写权限是两级，且都要满足（现在都落在 nginx 这一个身份上）：
-#   1) 运行期工作目录 <SR_WORK_DIR>：nginx 可写（config.xml / 脚本 / 日志 / runs/）。
-#   2) 生产场景目录：nginx 可写 —— 画好的掩码 <输入影像名>_mask.tif 写回该目录，
-#      SR 跑的产物 tif、Debug/ 日志、meta.xml 更新也落在同一目录；SR 在写产物前还会
-#      把该路径上已存在的同名文件改名为 `*_NOSR.tif`，**源图本身不改名也不删除**。
-#   上线前各测一次：
-#     sudo -u nginx touch /DiskArray/tmp/wangrz/sr_agent_work/.wtest && echo WORK-OK
-#     sudo -u nginx touch /DiskArray/GSHC2IMPS/PRODUCT/<年>/<月>/<日>/<生产编号>/.wtest \
-#       && echo WRITE-OK && rm -f .../.wtest
-#     sudo -u nginx <SR_PYTHON> -c "import torch, osgeo" && echo SRENV-OK
-#     sudo -u nginx test -r <SR_BUNDLE_DIR>/code_0817_prod.py && echo BUNDLE-OK
+# ⚠️ 写权限：User=nginx 需要对生产场景目录**可写** —— 画好的掩码 <输入影像名>_mask.tif
+#    写回该目录，SR 跑了之后产物 tif、Debug/ 日志、meta.xml 更新也落在同一个目录。
+#    上线前在该目录下试一次：
+#      sudo -u nginx touch /DiskArray/GSHC2IMPS/PRODUCT/<年>/<月>/<日>/<生产编号>/.wtest \
+#        && echo WRITE-OK && rm -f .../.wtest
 #    只读的话会在写掩码/提交时才暴露，用户看到的是 403/500，而不是"这个目录不能写"。
 #
-# 备注：以上各项由 backend/config.sr_runtime() 与 run_sr.py 在**调用时**读 env，
-# 改完 systemctl daemon-reload && systemctl restart sr-api 才生效——没有一项是进程
-# 启动时快照，但运行脚本按**提交当时的值**生成，改前生成的作业不受影响。
-# 可选：真 LLM 时配置（SR_LLM_MOCK=0 且未配这些则 loop 走默认 base/空 key）
+# 备注：以上各项由 backend/config.sr_runtime()（前 6 项）与 run_sr.py（后 2 项）
+# 在**调用时**读 env，改完 systemctl daemon-reload && systemctl restart sr-api
+# 才生效——没有一项是进程启动时快照，但批脚本按**当时的值**生成，改前生成的
+# 作业不受影响。
+# 可选：真 LLM 时配置（阶段5 默认 mock 已关，未配这些则 loop 走默认 base/空 key）
 # Environment=SR_LLM_BASE_URL=http://127.0.0.1:11434/v1
 # Environment=SR_LLM_API_KEY=
 # Environment=SR_LLM_MODEL=qwen2.5-7b
-# 可选：目录列表/磁盘行开关按需
+# 可选：目录列表/磁盘行开关按需（未配走 fake 回退时 /api/scenes 返回空 + fake 提示）
 # Environment=SR_API_HOST=127.0.0.1
 # Environment=SR_API_PORT=8000
 

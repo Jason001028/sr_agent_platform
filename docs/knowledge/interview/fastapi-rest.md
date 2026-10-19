@@ -1,7 +1,7 @@
 # FastAPI + REST/SSE 面试八股（interview · 高频精简版）
 
 > 定位：跳槽高频 FastAPI 与后端接口设计自测与背诵。★=高频。每题给「答（要点）+ 追问」。
-> 仓库真例标注 🗂：答完八股，能用 [backend/api/app.py](backend/api/app.py) 等真实文件讲成"项目实践"——这比只会背理论多一层区分度。
+> 仓库真例标注 🗂：答完八股，能用 [backend/api/app.py](backend/api/app.py) 等真实文件讲成"项目实践"——这比只会背理论多一层区分度。阶段 5（聊天 SSE/队列）处于**规划/评审中**，引用处均标注，不当作已实现事实。
 
 ---
 
@@ -36,7 +36,7 @@
    - **普通 `def`**：FastAPI 把调用丢进**线程池**（不会卡事件循环）——适合内部是同步阻塞库的函数；
    - **`async def`**：直接在事件循环里跑——适合 IO 密集且本身 async 的函数（如 async 请求、读流）；
    - 常见坑：async 函数里**调用同步阻塞库**（requests、同步 OpenAI client、`sleep`）会卡住整个事件循环。
-   **追问：** 你这项目里既有同步工具又有 SSE，怎么处理？→ 同步阻塞的 `run_loop` 用 `asyncio.to_thread` 丢线程池，事件经 `asyncio.Queue` 桥回主协程再逐帧下发（见契约 [api-contract.md](docs/planning/api-contract.md) §4.1）。
+   **追问：** 你这项目里既有同步工具又有 SSE，怎么处理？→ 同步阻塞的 `run_loop` 用 `asyncio.to_thread` 丢线程池，事件经 `asyncio.Queue` 桥回主协程再逐帧下发（🗂 规划，见契约 [api-contract.md](docs/planning/api-contract.md) §4.1）。
 
 6. **Q：依赖注入 `Depends` 用来干嘛？你项目用不用？（★）**
    **A：**
@@ -55,7 +55,7 @@
 8. **Q：JSONResponse / FileResponse / StreamingResponse 各何时用？（★）**
    **A：**
    - `JSONResponse`：普通 JSON（FastAPI 默认替你包）；
-   - `FileResponse`：直接把一个文件当响应体——🖼 `/preview` 返回盘阵生成好的 JPG 就用它（带 `media_type="image/jpeg"`，同时让 nginx 静态托管同路径 JPG 时也能原生缓存）；
+   - `FileResponse`：直接把一个文件当响应体——🖼 阶段 4 `/preview` 返回盘阵烤好的 JPG 就用它（带 `media_type="image/jpeg"`，顺带让 nginx 静态托管同路径 JPG 时也能原生缓存）；
    - `StreamingResponse`：响应体是流（逐块 yield）——SSE、大文件代理、流式下载都靠它；必须手动设 `Content-Type`。
 
 9. **Q：SSE 在 FastAPI 里怎么落地？帧格式长什么样？（★）**
@@ -63,7 +63,7 @@
    - 返回 `StreamingResponse(generator(), media_type="text/event-stream")`，generator 里 `yield "data: {json}\n\n"` 逐帧吐；
    - 配合响应头 `Cache-Control: no-cache`、`X-Accel-Buffering: no`（提醒 nginx 别缓冲）；
    - 每帧是一行 `data:{json}\n\n`；前端 fetch 读 `response.body` 手工按空行切帧（EventSource 只 GET，POST 即流用不了它）。
-   **🗂 契约示例帧：** `{"type":"tool_call","name":"run_sr","args":{...}}`、`{"type":"tool_result",...}`、`{"type":"turn_done","content":"..."}`，预留 `{"type":"token","delta":"..."}`。
+   **🗂 规划契约示例帧：** `{"type":"tool_call","name":"run_sr","args":{...}}`、`{"type":"tool_result",...}`、`{"type":"turn_done","content":"..."}`，预留 `{"type":"token","delta":"..."}`。
 
 10. **Q：HTTPException 与"业务失败返回 200 + {ok:false}"两种风格，怎么取舍？（★）**
     **A：**
@@ -72,20 +72,20 @@
     **🗂 仓库真例：** 工具契约统一 `{ok,data,error}`（[backend/tools/contract.py](backend/tools/contract.py)），所以直调工具端点 HTTP 恒 200；而"资源不存在/越权"这类传输层错误用 4xx。**分清"业务失败"和"传输/资源失败"是 REST 设计的核心。**
 
 11. **Q：错误码在本仓库怎么分？（★）**
-    **A：** 400 参数非法（缺字段/路径非绝对/含 `<fake>`）· 404 资源/会话/场景不存在 · 409 会话正忙或"上次提交被中断勿盲重试" · 422 生成/提交失败（预览失败 / 作业提交失败）。统一 `{"detail": "<人话>"}`。
+    **A：** 400 参数非法（缺字段/路径非绝对/含 `<fake>`）· 404 资源/会话/场景不存在 · 409 会话正忙或"上次提交被中断勿盲重试" · 422 生成/提交失败（预览失败/sbatch 失败/slurm 不可用）。统一 `{"detail": "<人话>"}`。
 
 ## C. 校验与安全（能看出你会不会被人打）
 
 12. **Q：为什么对外暴露"文件/命令"能力的第一件事是路径白名单？（★）**
-    **A：** 端点能读盘阵文件、能起子进程跑 SR 作业 = 面向外部的"武器"；不拦 `../` 穿越、白名单外绝对路径、伪文件路径，等于把机器交给调用者。
+    **A：** 端点能读盘阵文件、能 sbatch 提交作业 = 面向外部的"武器"；不拦 `../` 穿越、白名单外绝对路径、伪文件路径，等于把机器交给调用者。
     **🗂 仓库真例：** [backend/api/paths.py](backend/api/paths.py)：返回/生成路径必须 `realpath` 后落在场景根内；场景 id 用 base64url(相对路径) 做成**不透明 id**，前端不知盘阵绝对路径；fake 占位 `<fake>` 永不允许当真去生成预览。run_sr 侧同样拒 `<fake>` 与非绝对路径。
 
 13. **Q：为什么 run_sr 这种"提交外部作业"的接口必须幂等？（★）**
-    **A：** 网络/进程随时中断，用户/Agent 可能重试。若每次 POST 都真提交，一次崩溃重放 = **多跑一个重复作业、白烧 GPU**。所以要用稳定标识去重。
+    **A：** 网络/进程随时中断，用户/Agent 可能重试。若每次 POST 都真提交，一次崩溃重放 = **Slurm 上多一个重复作业、白烧 GPU**。所以要用稳定标识去重。
     **🗂 仓库真例：** `task_fingerprint(params)` = 参数 sha256；`submit_run_sr` **先查 `sr_tasks` 表**：已有 job_id 且还 active/COMPLETED → 直接复用返回 RESUMED_*（不重复提交）；FAILED/UNKNOWN 才重跑；**上次提交被中断（有意图无 job_id）→ 明确报"勿盲重试"**，绝不盲目补提交（[backend/services/run_sr.py](backend/services/run_sr.py)）。这就是"先记意图（checkpoint）→ 副作用 → 记结果"的持久化顺序（详见 [db-storage.md](docs/knowledge/interview/db-storage.md)）。
 
 14. **Q：表单/JSON 参数里有目录字段时，校验"是绝对路径、无假标记"有什么用？**
-    **A：** run_sr 的目标机是内网盘阵，作业只认盘阵绝对路径；假数据（开发机 fake 场景）路径必须被挡在提交之外，否则开发机上跑通的假流程会把占位路径当真提交。
+    **A：** run_sr 的目标机是内网盘阵，Slurm 作业只认盘阵绝对路径；假数据（开发机 fake 场景）路径必须被挡在 Slurm 门外，否则开发机上跑通的假流程会把占位路径当真提交。
 
 ## D. 部署与进程模型
 
@@ -95,17 +95,17 @@
 
 16. **Q：SSE + 多 worker 有什么坑？为什么要单 worker？（★）**
     **A：** 进程内广播（一组 asyncio.Queue 存"在线的 SSE 连接"）**只在单进程内有效**；多 worker = 多个进程，job 状态变化发生在 worker A，订阅者挂在 worker B 就收不到 → 需要外部队列（Redis pub/sub）做跨进程广播。
-    **🗂 仓库取舍：** "uvicorn 单 worker + 进程内广播"，多 worker 留到有真实并发需求再接外部队列——**能力边界写清楚本身就是加分项**。
+    **🗂 仓库取舍：** 阶段 5 规划"uvicorn 单 worker + 进程内广播"，多 worker 留到有真实并发需求再接外部队列——**能力边界写清楚本身就是加分项**。
 
 17. **Q：为什么要"先写契约文档再写代码"？（★）**
-    **A：** REST/SSE 是**前后端共享的接口面**：前端渲染和后端推送各按同一 schema 写 parser/emitter。契约文档先落盘 = 先把字段/事件/错误码/状态机说死，避免"后端同时加个字段、前端就崩"。改契约先改文档再改代码，两端各留单测锁字段。
+    **A：** REST/SSE 是**前后端共享的接口面**：前端渲染和后端推送各按同一 schema 写 parser/emitter。契约文档先落盘 = 先把字段/事件/错误码/状态机说死，避免"后端顺手加个字段、前端就崩"。改契约先改文档再改代码，两端各留单测锁字段。
 
 18. **Q：FastAPI 项目你一般怎么组织目录？（★）**
     **A：** 按"薄壳分层"：`api/`（端点，薄）→ `services/`（流程编排，可注入假依赖）→ 更底层（算法/DB/外部客户端）。端点不该有业务逻辑，service 不该是 HTTP 的形状。
-    **🗂 仓库布局：** `api/app.py + paths.py` → `services/{run_sr,local_exec,store,mask,scene_search,preview_jpg}.py` → `tools/`（Agent 的薄壳）→ `mta_grid/`（纯算法）。同一份 services 同时被 REST、CLI、Agent 复用。
+    **🗂 仓库布局：** `api/app.py + paths.py` → `services/{run_sr,slurm,store,mask,scene_search,preview_jpg}.py` → `tools/`（Agent 的薄壳）→ `mta_grid/`（纯算法）。同一份 services 同时被 REST、CLI、Agent 复用。
 
 19. **Q：env 配置怎么做才离线可测？（★）**
-    **A：** 所有可变配置从环境变量读，默认值给"开发/假"侧：没设 `SR_SCENES_ROOT` → fake 场景；`SR_LLM_MOCK=1` → 假 LLM。**同一份代码 dev(假) 与真机(真) 之间零改动**，只换 env。这是"真实系统进不来就造显式标记的替身"方法论（详见 [platform-tutorial.md](docs/knowledge/platform-tutorial.md) 第 2 章）。
+    **A：** 所有可变配置从环境变量读，默认值给"开发/假"侧：没设 `SR_SCENES_ROOT` → fake 场景；`SR_LLM_MOCK=1` → 假 LLM；`SR_SLURM_FAKE=1` → 假调度器。**同一份代码 dev(假) 与真机(真) 之间零改动**，只换 env。这是"真实系统进不来就造显式标记的替身"方法论（详见 [platform-tutorial.md](docs/knowledge/platform-tutorial.md) 第 2 章）。
 
 20. **Q：你踩过哪些 FastAPI/异步接口的坑？挑一个讲过程。（★）**
     **A（示范，可用你自己的版本替换）：**

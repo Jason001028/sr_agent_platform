@@ -11,7 +11,7 @@ const route = useRoute();
 const queue = useQueueStore();
 const extensionNavigation = enabledExtensionNavigation();
 
-// 队列 SSE 的**常驻**订阅：持外壳这一份，切到任何页面都能收到「任务跑完了」
+// 队列 SSE 的**常驻**订阅（2026-09-22）：持外壳这一份，切到任何页面都能收到「任务跑完了」
 // 的提醒。队列页与查看器侧舱各自还会 connect 一次，计数归零才真的断（stores/queue 里有
 // 引用计数）——所以它们 unmount 时的 disconnect 不会把这一份带走。
 // 放在外壳而不是某个页面里，正是因为提醒要在**用户不在**那个页面时也能到。
@@ -51,6 +51,7 @@ const logoOk = ref(true);
         <RouterLink v-for="item in extensionNavigation" :key="item.to" :to="item.to">
           {{ item.label }}
         </RouterLink>
+        <RouterLink to="/plugins">插件管理</RouterLink>
       </nav>
     </header>
     <!-- flush 路由（查看器）去掉 padding，页面贴边填满 -->

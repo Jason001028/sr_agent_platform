@@ -4,7 +4,7 @@
  * ------------------------------------------------------------------
  * 选影像（multiple，tif/tiff/jpg/jpeg）/ 拉伸下拉 / 像素定位 X/Y + 按钮 /
  * 预览下采样档位拖动条 / 绘制掩码 toggle / 生成掩码 / 提交 SR。
- * `.tif-viewer.html` 的「输出目录」三态按钮与「自动JPG」勾选不带过来 —— 前端不导出 JPG。
+ * 最小原型删去了 HTML 的「输出目录」三态按钮与「自动JPG」勾选（前端不再导出 JPG）。
  */
 import { computed, ref, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
@@ -17,14 +17,14 @@ import type { StretchMode } from '../lib/tifDecode';
 const store = useViewerStore();
 const qc = useQcListStore();
 const fileInput = ref<HTMLInputElement | null>(null);
-/** 定位框：一个框装「X,Y」两个数（拆成两个框反而要用户自己数着填）。 */
+/** 定位框：一个框装「X,Y」两个数（原先是 X、Y 两个框，拆开填反而要用户自己数着填）。 */
 const locText = ref('');
 
-/** 盘阵场景激活：只用来决定 title 文案（服务器生成的直方图均衡是二次拉伸的底图，
-    均衡不可逆）。**不禁用**下拉 —— 场景图照样可在显示层换模式，
+/** 盘阵场景激活：只用来决定 title 文案（服务器烤的直方图均衡是二次拉伸的底图，
+    均衡不可逆）。**不再**禁用下拉 —— 场景图照样可在显示层换模式，
     默认起手值也同样是直方图均衡（见 lib/scene.startStretch）。
     注意判据是 route==='jpg'：反推关联**命中**的本地 TIF 也会被就地升级成
-    route='jpg'（拿的是服务端生成 JPG，见 stores/viewer.tryLinkScenes），
+    route='jpg'（拿的是服务端烘焙 JPG，见 stores/viewer.tryLinkScenes），
     没命中的才保持本地 route。 */
 const sceneActive = computed(() => store.activeRec?.route === 'jpg');
 /** 「提交 SR」可用：这张图有盘阵目录（= 提交时 lq_path 的语义）。
@@ -45,13 +45,13 @@ const roTitle = computed(() =>
 const stretchValue = computed(() => store.activeStretch);
 const stretchTitle = computed(() =>
   sceneActive.value
-    ? '这张盘阵 JPG 在服务器端已按直方图均衡生成预览，这里改的是显示层的二次拉伸'
+    ? '这张盘阵 JPG 在服务器端已按直方图均衡烘焙，这里改的是显示层的二次拉伸'
       + '（均衡不可逆，拉不回来）'
     : '',
 );
 
-/** 预览缩放档位（各边 ÷N）：**平台级**设置，拖入 / 场景库 / 粘盘阵路径三条入口
-    都按它生成。拖动条按**下标**走（`SCENE_PREVIEW_DIVS` 的次序），不是按档位值本身 ——
+/** 预览烘焙档位（各边 ÷N）：**平台级**设置，拖入 / 场景库 / 粘盘阵路径三条入口
+    都按它烤。拖动条按**下标**走（`SCENE_PREVIEW_DIVS` 的次序），不是按档位值本身 ——
     ÷2…÷32 是等比数列，用下标每格等宽，用户按起来才是均匀的。 */
 const DIVS = SCENE_PREVIEW_DIVS;
 const divIndex = computed(() => {
@@ -109,8 +109,7 @@ watch(
   (dir) => {
     if (!qc.loaded) return;
     const it = qc.rowForScene(dir);
-    // 清单那对数是 (X=列, Y=行)，与定位框的「X,Y」**同序** —— 照抄原文顺序
-    // （真机落点实测：按「行,列」翻会让框里与原文互为对角镜像）
+    // 清单写的是「行列号」(行, 列)，定位框要的是「X,Y」= (列, 行) —— 别照抄顺序
     locText.value = it && it.row !== null && it.col !== null ? it.col + ',' + it.row : '';
   },
   { immediate: true },
@@ -147,7 +146,7 @@ watch(
 
     <!-- 单框 text 而不是 number：number 框会把「1000.23,3000.27」这种整串判为非法、
          值直接变空，粘进来等于什么都没发生（拆法见 doLocate / parseLocPair）。
-         不另挂「坐标」标签：占位文本自己就以「输入坐标」开头，两句话说的是同一件事，
+         不再另挂「坐标」标签：占位文本自己就以「输入坐标」开头，两句话说的是同一件事，
          框一填上字标签又成了唯一线索 —— 不如把这份宽度给占位文本。 -->
     <span class="loc" title="填「X,Y」两个数，例如 1000.23,3000.27（逗号、空格分隔都收）">
       <input
@@ -177,14 +176,14 @@ watch(
     </button>
 
     <!-- 预览下采样档位：紧邻定位组件，因为两者是同一类「看图前先定参数」的控件。
-         文案「预览 1/N」而不是「缩放」：它改的是**服务端生成的的那张 JPG**的分辨率，
+         文案「预览 1/N」而不是「缩放」：它改的是**服务端烤出来的那张 JPG**的分辨率，
          不是画布的显示缩放（那个在右下角，别混）。 -->
     <span
       class="divsel"
       data-e2e="preview-div"
       :title="'服务端预览档位：长宽各为源图的 ' + divLabel + '。'
         + '档位越小越清晰、首次打开越慢（要读一遍大图）；'
-        + '改档后已打开过的场景会在下次打开时按新档重新生成预览（原地覆盖，不堆积）。'"
+        + '改档后已打开过的场景会在下次打开时按新档重新烘焙（原地覆盖，不堆积）。'"
     >
       预览 {{ divLabel }}
       <input
@@ -200,10 +199,10 @@ watch(
 
     <span class="spacer"></span>
 
-    <!-- 对比模式下**也能画**：掩码只画到活动侧那张 rec 上（分屏点哪半哪半就是活动侧，
-         与掩码/云量/统计跟随活动侧同一条规则），不存在「画到哪一格不明确」。置灰的只有
-         一件事：活动侧是本轮超分产物 / NOSR（掩码建在本体影像网格上，在产物上画，
-         坐标写进掩码文件整片都是错的）。 -->
+    <!-- 对比模式下**也能画**（2026-09-22 改，原来置灰）：掩码只画到活动侧那张 rec 上
+         （分屏点哪半哪半就是活动侧，与掩码/云量/统计跟随活动侧同一条规则），所以不再是
+         「画到哪一格不明确」。仍置灰的只有一件事：活动侧是本轮超分产物 / NOSR
+         （掩码建在本体影像网格上，在产物上画，坐标写进掩码文件整片都是错的）。 -->
     <button
       type="button"
       class="outbtn"

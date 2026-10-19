@@ -4,13 +4,14 @@
  * 服务端唯一事实源：list/submit/cancel 走 REST；状态推进靠后台校准器广播
  * job_update（GET /api/queue/events SSE），前端仅按 task_id 归并覆盖 state。
  * 任务行状态机 = 进度（§3.3）：SUBMITTING → PENDING → RUNNING → COMPLETED/FAILED。
- * 掩码生成（查看器）→ setDraft() 预填队列表单（不自动提交，提交是真副作用）。
+ * 掩码烘焙（查看器）→ setDraft() 预填队列表单（不自动提交，提交是真副作用）。
  *
- * **应用级常驻 + 引用计数的订阅**：App 外壳常驻一份订阅，终端态一到就推一条提醒进
- * stores/notices（右下角弹条）。这份流没有历史回放，断着的那段时间发生的事不会补发，
- * 所以订阅必须常驻 —— 提交完切去查看器干活的人也能收到完成提示。引用计数保证队列页 /
- * 查看器侧舱各自的 connect/disconnect 不互相掐断，也保证外壳那一份不会被它们的
- * unmount 带走。掉线自动重连（指数退避，见 nextBackoff），重连成功后补拉一次 list 校准。
+ * **订阅改成应用级常驻 + 引用计数（2026-09-22）**：原来是「任务队列页挂载时连、离开
+ * 即断」，于是提交完切去查看器干活的人**收不到任何完成提示**（后端这条流没有历史回放，
+ * 断着的那段时间发生的事不会补发）。现在 App 外壳常驻一份订阅，终端态一到就推一条
+ * 提醒进 stores/notices（右下角弹条）。引用计数保证队列页 / 查看器侧舱各自的
+ * connect/disconnect 不再互相掐断，也保证外壳那一份不会被它们的 unmount 带走。
+ * 掉线自动重连（指数退避，见 nextBackoff），重连成功后补拉一次 list 校准。
  */
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
@@ -80,7 +81,7 @@ export function draftToForm(d: QueueDraft): QueueForm {
   return { ...defaultForm(), lq_path: d.lq_path, ...(d.tunables ?? {}) };
 }
 
-/** 掩码推导规则的**无 stat 镜像**，只在拿不到权威值时兜底显示「将读哪个掩码」。
+/** 掩码推导规则的**无 stat 镜像**，只在拿不到权威值时兜底显示「将读哪个掩膜」。
     权威实现是 backend/services/scene_search.derived_mask_path（掩码名取**输入
     影像**的 stem），前端这里没有 stat 只能拿目录名顶替 —— `<目录名>.tif`（SC）
     场景两者相同，`PAN.tif`（RC）场景不同名。所以表单优先用后端给的
@@ -93,12 +94,7 @@ export function derivedMaskPath(lqPath: string): string {
 }
 
 /** 队列表单 → POST /api/queue body（数值夹取；mask_path 恒 null 交后端推导）。
-    后缀留空即由后端按 SR 配置文件里的 `<Suffix>` 决定，前端不替它决定。
-
-    `gpu` 照发（表单里已无「GPU 数」输入，恒取 defaultForm 的 0）：它是提交参数的
-    一部分、进幂等指纹，去掉它会让同一目录同一组参数算成另一个指纹，已提交过的任务
-    会被当成新任务重跑一遍。卡由服务端选（`SR_LOCAL_GPU` → 子进程的
-    `CUDA_VISIBLE_DEVICES`），这个字段对本机执行只是随参数落库。 */
+    后缀留空即由后端按 SR 配置文件里的 `<Suffix>` 决定，前端不替它决定。 */
 export function formToSubmit(f: QueueForm): QueueSubmitBody {
   const body: QueueSubmitBody = {
     lq_path: f.lq_path.trim(),
@@ -124,7 +120,7 @@ function clampInt(v: number, lo: number, hi: number, def: number): number {
 
     为什么不拿 created_at 当起点：一行 = 一个指纹，同一场景同一参数重交时幂等层
     复用同一行，created_at 停在**第一次**提交的时刻 —— 那样算出来的「耗时」是行龄，
-    真机上表现为「30 时 00 分」。
+    真机上表现为「30 时 00 分」（2026-09-18）。
 
     started_at 缺失（整段运行期间后端不在）或终态行缺 finished_at（升级前的老行）
     → null，界面显示「—」：宁可空着，不回落到 created_at 编一个数。 */
@@ -163,7 +159,7 @@ export function formatDuration(seconds: number): string {
 
     时间戳必须跟着 state 一起落到本地，否则耗时会用上一次 GET 的快照算：本地那份
     通常就采于提交刚落库时（started_at/finished_at 还是 NULL），运行中靠 nowSec
-    现算看不出来，一进终态就成了「—」。
+    现算看不出来，一进终态就成了「—」（2026-09-17 的「0 秒」是同一个坑的前身）。
     后端只在自己**写库成功**时带这些字段 → 缺席即保留本地值，不回退成 undefined
     （时间戳丢掉整列变「—」，比旧值更糟）。 */
 export function mergeJobUpdate(tasks: QueueTask[], ev: JobUpdateEvent): QueueTask[] {
@@ -183,9 +179,9 @@ export function mergeJobUpdate(tasks: QueueTask[], ev: JobUpdateEvent): QueueTas
 
 /** SSE preview_update → 覆盖匹配 task 的产物预览字段；无匹配不动（权威在 list()）。
 
-    与 mergeJobUpdate 分开是**刻意的**：预览生成没降采样到与作业状态无关（COMPLETED 的作业
-    也可能因为沙箱/产物缺失/目录不可写而没生成），合成一个函数就得同时处理两套字段，
-    调用点也得判「这一帧到底带没带 state」。无匹配不动这一条同样重要 —— 主动生成的认领
+    与 mergeJobUpdate 分开是**刻意的**：预览烤没烤成与作业状态无关（COMPLETED 的作业
+    也可能因为沙箱/产物缺失/目录不可写而没烤），合成一个函数就得同时处理两套字段，
+    调用点也得判「这一帧到底带没带 state」。无匹配不动这一条同样重要 —— 急烤的认领
     与广播都在后端，前端可能还没把这个 task 拉进列表。 */
 export function mergePreviewUpdate(
   tasks: QueueTask[], ev: PreviewUpdateEvent,
@@ -304,7 +300,7 @@ export const useQueueStore = defineStore('queue', () => {
      abort 那条 SSE 的 fetch，于是连接留在浏览器的连接池里占位，后端那个 subscriber
      也一直留着。
 
-     实测（.e2e/test-platform.js）：连续 8 次整页导航，**每一次 `pagehide`
+     2026-09-28 实测（.e2e/test-platform.js）：连续 8 次整页导航，**每一次 `pagehide`
      都带 `persisted === true`**（全都进了 bfcache）。bfcache 里的文档整个 JS 堆都还
      活着，那条 fetch（ReadableStream）拼的 SSE 也跟着活着 —— 每导航一次占住一条连接，
      Chrome 对每个源只给 6 条，占满之后最后一次加载的 `GET /api/queue` 在浏览器队列里
@@ -313,7 +309,7 @@ export const useQueueStore = defineStore('queue', () => {
 
      为什么 Chrome 会把连着流的页面放进 bfcache：`EventSource` 它认得、会因此拒绝
      bfcache，而 `fetch` + ReadableStream 拼的流它不认（api.ts 的 subscribeQueueEvents
-     正是后者）——这类页面总是进 bfcache，收流判据不能建立在「没进 bfcache」上。 */
+     正是后者）。这也意味着「进 bfcache 就不收」的那版写法在这条链上是**恒不收**。 */
   function _onPageHide(): void {
     if (_retry !== null) { clearTimeout(_retry); _retry = null; }
     _closeStream();
@@ -464,9 +460,9 @@ export const useQueueStore = defineStore('queue', () => {
         掩码带该行自己的 params.mask_path 只为显示 —— 后端重提交时仍按
         `<lq_path>/<输入影像 stem>_mask.tif` 推导，同一目录会推导出同一个文件。
 
-        suffix 带回来的可能是空串：agent 工具写入的行不做归一化。重提交时空串按规则
-        解析成配置文件里的值，与那一行自己的指纹对不上，于是新建任务而不是复用——
-        只影响这类行，且产物名不同，属正确行为。 */
+        suffix 带回来的可能是空串：改动前的旧行由 agent 工具写入、当时不做归一化。
+        重提交时空串按新规则解析成配置文件里的值，与那一行自己的指纹对不上，
+        于是新建任务而不是复用——只影响旧行，且产物名不同，属正确行为。 */
     setDraftFromTask(t: QueueTask) {
       draft.value = {
         lq_path: t.params.lq_path,

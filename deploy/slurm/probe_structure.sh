@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================================
-# 盘阵结构核查（只读，不写任何数据文件）
+# 阶段 0 · 盘阵结构核查（只读，不写任何数据文件）
 #
 # 产物 = 若干**短** txt，落在**本脚本所在目录**，一屏一个，便于逐张截屏 / OCR：
 #     00-summary.txt     ← 最重要，判读要点全在这一张
@@ -20,7 +20,7 @@
 #     SR_CHECK_OUT=/tmp/xxx             产物目录（默认 = 本脚本所在目录）
 #
 # 输出里 @PROD@ 代指上面的 PROD 路径（缩短行宽，方便 OCR）。
-# 不依赖 jq / python / conda。
+# 不依赖 jq / python；缺 Slurm、缺 conda 也能跑完。
 # ============================================================================
 
 PROD=${SR_PROD:-/DiskArray/GSHC2IMPS}
@@ -143,7 +143,7 @@ if [ -n "$EX1" ]; then
   META_DEPTH="PROD 之下第 $(printf '%s' "${EX1#$PROD/}" | awk -F/ '{print NF}') 层"
   # 只留文件名（相对 D）：完整相对路径动辄 130+ 字符，一屏截不下、OCR 也易错。
   # ⚠️ 顺序必须是 strip_d 在前：sh_paths 会把 PROD 换成 @PROD@，那之后字符串里
-  #    就再也找不到 $D 的前缀，strip_d 的 sed 会无进展（踩过）。
+  #    就再也找不到 $D 的前缀，strip_d 的 sed 会空转（踩过）。
   META_EXAMPLE=$(printf '%s' "$EX1" | strip_d | sh_paths)
 else
   META_DEPTH="（PROD 之下 8 层内没扫到 *meta.xml）"

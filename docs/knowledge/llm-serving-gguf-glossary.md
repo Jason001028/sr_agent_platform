@@ -14,10 +14,10 @@
 本项目最终在 CentOS7 内网机上选它，是因为新版 vLLM / torch 的 Linux 安装包要求 **glibc ≥ 2.28** 而 CentOS7 只有 2.17，
 Python 生态装不上去；而 llama.cpp 是 **C++ 编译产物，只认显卡驱动**，所以这条路反而最干净——不是将就。
 
-选型定案（详见 [agent-llm-deployment.md](../planning/agent-llm-deployment.md)）：
+本次选型定案（2026-09-09，详见 [agent-llm-deployment.md](../planning/agent-llm-deployment.md)）：
 
 > 模型 = Qwen3.8-27B **基础版**（不是社区 Uncensored/Abliterated 变体）· 量化 = **GGUF Q4_K_M ≈ 16.8~17GB**
-> · 运行时 = **llama.cpp llama-server**（本机 CUDA 编译）· 资源 = 固定 1 张 3090（其余给 SR）
+> · 运行时 = **llama.cpp llama-server**（本机 CUDA 编译）· 资源 = 固定 1 张 3090（其余给 Slurm/SR）
 > · 接入 = OpenAI 兼容 `/v1`，后端 `SR_LLM_BASE_URL` 指过去即可，代码零改动。
 
 ---
@@ -76,13 +76,13 @@ LLM 部署工具分两大家族，**权重格式与引擎是互相绑定、不�
 | 名词 | 含义 |
 |---|---|
 | **arch = `qwen35`** | 模型在 llama.cpp 里的注册名。混合注意力：48 层线性（Gated DeltaNet）+ 16 层全注意力 → **KV 缓存只有普通 27B 的约 1/4**，单张 24GB 卡也能开 32K~64K 上下文 |
-| **b10360（版本号）** | llama.cpp 用 `b+数字` 定版本。Qwen3.8 太新，**必须 ≥ b10360 的版本才认识这个 arch**，旧版直接拒绝加载 |
+| **b10360（版本号）** | llama.cpp 用 `b+数字` 定版本。Qwen3.8 太新，**必须 ≥ b10360（2026-08 起）的版本才认识这个 arch**，旧版直接拒绝加载 |
 | **编译 CUDA 后端 / nvcc / cmake** | nvcc = NVIDIA 的 C++ 编译器（CUDA toolkit 自带）；cmake = 构建工具。`-DGGML_CUDA=ON` 让编出的 llama-server 带 3090 CUDA 加速——等于把 pip 替你做的「预编译」自己做一遍，一次即可、之后是普通进程 |
 | **`--parallel 4`（slot）** | 4 个并发槽位；权重在显存只常驻一份，槽位轮流吃它 → 匹配「≤3~4 路 agent 并发」 |
 | **`-ngl 999`** | 尽量把层全部放 GPU（999 是「能放都放」的惯用写法） |
 | **`--jinja`** | 强制用模型自带 Jinja 对话模板。Qwen3.8 模板特殊（thinking/工具轮衔接），不开会格式乱、多轮工具调用出错 |
 | **`-c 32768`** | 上下文窗口长度（token） |
-| **`CUDA_VISIBLE_DEVICES`** | 让 llama-server 进程只见/只用指定一张卡；SR 作业由 `SR_LOCAL_GPU` 选另一张，两者按部署配置隔开，不互相抢算力 |
+| **`CUDA_VISIBLE_DEVICES` + Slurm 剔除** | 让 llama-server 进程只见/只用指定一张卡；Slurm 配置把该卡从可分配集摘掉，SR 作业才不会排到它头上抢算力 |
 
 ---
 
@@ -164,7 +164,7 @@ llama.cpp 生态不发布 Python wheel；它给你引擎源码，要你在目标
 **Q5：工具调用（function calling）可靠性有风险吗？**
 有。Qwen3.8 太新，社区实测在部分 runtime 上**多轮工具调用、thinking 与工具轮衔接**还有坑。
 缓解手段（按顺序试）：`--jinja` 必开 → 必要时 `enable_thinking:false` / `reasoning_effort:low` 提速并简化解析 →
-本项目 agent loop 自带容错（工具参数错会回喂修正、不盲重试）能兜住一部分。最终以 §1 定案里的
+本项目 M1 loop 自带容错（工具参数错会回喂修正、不盲重试）能兜住一部分。最终以 §1 定案里的
 `python -m backend.agent` 工具剧本验收为准。
 
 **Q6：以后想升级到 vLLM / 多用户高吞吐怎么办？**

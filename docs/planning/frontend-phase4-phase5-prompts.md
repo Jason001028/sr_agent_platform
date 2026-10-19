@@ -20,10 +20,10 @@
 **目标**：让查看器能浏览内网盘阵的遥感大图，并加盘阵检索/查看。显示 = **服务器预生成的 8192 JPG**，浏览器**不再对原始 TIF 做任何字节读取**。2026-09-02 已拍板改向（原 "HttpSource + nginx Range 稀疏读 TIF" 方案废弃），与 09-01"预览=JPG 中间产物"的原意对齐。
 
 ### 已定决策（不重议）
-- **显示 = 服务器预生成 JPG**：CentOS7 盘阵机把 TIF **稀疏采样 + 2% Linear 拉伸**降采样到 8192 长边 JPEG，落缓存；浏览器 `<img>`/canvas 加载。首次生成约几十秒（后台/懒生成），之后 nginx 静态直出（原生缓存）。
+- **显示 = 服务器预生成 JPG**：CentOS7 盘阵机把 TIF **稀疏采样 + 2% Linear 拉伸**烤成 8192 长边 JPEG，落缓存；浏览器 `<img>`/canvas 加载。首次生成约几十秒（后台/懒生成），之后 nginx 静态直出（原生缓存）。
 - **浏览器内不再读 TIF 字节**：`HttpSource` / Range 路径**砍掉，本阶段不实现**（`source.ts` 的 HttpSource 桩保留不动或删除均可，不被调用）。本地解码库（tifDecode/maskgen/sparse）**一律不动**。
 - **本地文件路径保持现状**：仍走稀疏 TIF 读法 + 全交互拉伸 + exportToJpg，这是阶段1-3 已交付行为，零改动、无回归。
-- 盘阵 JPG **只生成一种拉伸（2% Linear 默认）**：交互式拉伸下拉在盘阵场景**禁用**（tooltip 注明"盘阵 JPG 已生成预览 2% 线性拉伸"）；本地文件路径保留全部拉伸模式。
+- 盘阵 JPG **只烤一种拉伸（2% Linear 默认）**：交互式拉伸下拉在盘阵场景**禁用**（tooltip 注明"盘阵 JPG 已烘焙 2% 线性拉伸"）；本地文件路径保留全部拉伸模式。
 - **掩码**：在 JPG 画布上绘制 → 坐标按**场景元数据 W/H** 换算回全分辨率（thumbToOrig 逻辑不变，scale 来自元数据而非 probe）。阶段4 掩码仍前端直出 `掩码.tif` 下载；阶段5 才改为后端栅格化写盘阵。
 - 导出 JPG：盘阵场景**不提供**（服务器已有即为交付物）；本地文件路径保留。
 - 连通 = 直连 IP:端口设计；部署文档注明走端口转发时只改 URL。
@@ -31,7 +31,7 @@
 - 硬约束照旧：本地文件路径仍受 2GB/16384 约束；第三方库本地 vendor；补丁版 utif.js 绝不重装。
 
 ### 现有代码状态
-- 前端 Vue3 查看器（阶段3 完成）：六组件 + `stores/viewer.ts`（718 行，`decodeRec` 填充 DecodedRec{W/H/thumb/src/stats/route} + `paintStretch`）。本阶段新增**场景来源模式**：加载 JPG → 构造 route='jpg' 的同构 rec（src 取 JPG 画布像素，已生成预览拉伸）→ 掩码/平移/缩放/删除/合并全部复用。
+- 前端 Vue3 查看器（阶段3 完成）：六组件 + `stores/viewer.ts`（718 行，`decodeRec` 填充 DecodedRec{W/H/thumb/src/stats/route} + `paintStretch`）。本阶段新增**场景来源模式**：加载 JPG → 构造 route='jpg' 的同构 rec（src 取 JPG 画布像素，已烘焙拉伸）→ 掩码/平移/缩放/删除/合并全部复用。
 - `frontend/src/lib/source.ts`：HttpSource 是桩 → **本阶段不需要**。
 - `backend/services/scene_search.py`：已有 `search_scenes(...)`（递归扫 + fake 回退 + 文件名解析卫星/传感器/日期），120 行。backend 目前**无任何 FastAPI/REST**。
 - 后端有 `services/mask.py`（Pillow，栅格化掩码）可参考 Pillow 用法；无 TIF 稀疏读取的 Python 实现（需新写，镜像前端 `parseStrips`/`sparseSample`/`stretch` 语义）。
@@ -76,15 +76,15 @@
 
 你是本项目续接会话。先读 `CLAUDE.md` → `docs/status/current-question.md` → `docs/experience/gui-experience.md` → `docs/planning/frontend-migration.md` → `docs/planning/frontend-phase4-phase5-prompts.md`（本文件）。阶段1-4 已完成（含盘阵场景检索 + 读 JPG 查看 + 掩码；本地文件路径仍是稀疏 TIF 读法）。
 
-**目标**：把已有后端（agent loop + 4 工具 + sr_tasks）暴露成网页可调的 REST/SSE，实现两个页面：**聊天**（Agent 对话，MVP 用 mock 模型）与**共享任务队列**（SR 作业），并支持查看器画完掩码一键提交 SR。
+**目标**：把已有后端（agent loop + 4 工具 + sr_tasks + slurm）暴露成网页可调的 REST/SSE，实现两个页面：**聊天**（Agent 对话，MVP 用 mock 模型）与**共享任务队列**（SR 作业），并支持查看器画完掩码一键提交 SR。
 
 ### 已定决策（不重议）
-- 队列 = **仅 SR 作业**（`run_sr` → 本机执行器），`sr_tasks` 表承载；服务端唯一事实源。
+- 队列 = **仅 SR 作业**（`run_sr` → Slurm），`sr_tasks` 表承载；服务端唯一事实源。
 - SR 提交**三入口**：① 队列页表单（字段 = run_sr 参数）② 聊天 Agent 调 `run_sr` 工具 ③ 查看器画完掩码一键提交（前端多边形 JSON → 后端 `services/mask.py` 栅格化掩码.tif → `run_sr`）。
 - 本地模型 MVP **用 mock**（`SR_LLM_MOCK=1` 注入假 LLM），真模型后配（`SR_LLM_BASE_URL` 指向内网本地 Ollama/vLLM 端点，内网不上外网）。
 - SSE **先事件级**（`tool_call`/`tool_result`/`assistant`/`turn_done`），接口预留 token 流式扩展。
 - 聊天会话 = **单会话 + 新建按钮**，持久化到 `sr_agent.db`，刷新可恢复（store 已支持 sessions + resume）。
-- 完成判定 = **离机全测**（mock + 执行器替身 + 契约文档）；真机（真模型/真机本机执行）另排。
+- 完成判定 = **离机全测**（mock + fake slurm + 契约文档）；真机（真模型/真 Slurm）另排。
 - 部署 = 脚本 + nginx + systemd + 文档（离线 CentOS7）。
 - 硬约束照旧。
 
@@ -92,7 +92,7 @@
 - `backend/agent/loop.py`：自写状态机（openai 客户端，`build_client(cfg)` + `_default_chat(cfg)` 返回 `chat(messages, tools)`），18 测试。**mock 注入点 = `_default_chat`**（`SR_LLM_MOCK=1` 返回假 chat，按固定脚本应答工具调用/最终回复）。
 - `backend/tools/`：`contract.py`（`@tool` 注册表 + `manifest()` 生成 OpenAI 兼容 schema）+ 4 工具：`search_scenes` / `run_sr` / `fix_bad_lines` / `sr_job_status`。
 - `backend/services/store.py`：`sr_tasks` 表（fingerprint/job_id/status/params/config_xml/batch_script/log_dir）。
-- `backend/services/local_exec.py`：本机执行器，`submit_run_sr` 起 bash 子进程、`status` 读结果文件、`cancel` 停止进程树；单槽串行。测试用 `backend/tests/exec_double.py::FakeExecutor` 注入。
+- `backend/services/slurm.py`：`sbatch_submit`/`squeue_status`/`sacct_status`/`job_status`/`cancel`（scancel）。`run_sr.submit_run_sr(params, run_cmd=...)` 支持 fake slurm 注入（现有 32 测试这么用）。
 - backend **无 FastAPI**。
 - frontend：`ChatPage.vue` / `QueuePage.vue` 是占位页；`stores/chat.ts` / `stores/queue.ts` 有设计约束注释。
 
@@ -120,16 +120,16 @@
    - **mock LLM**：`SR_LLM_MOCK=1` 时 `_default_chat` 返回假 chat（按固定脚本先调工具再回最终回复），端到端可测
    - 并发：同会话串行；同步 `run_loop` 用线程池跑（`asyncio.to_thread` / `ThreadPoolExecutor`），事件经 `asyncio.Queue` 转 SSE
 5. **队列**：
-   - `GET /api/queue`（`sr_tasks` 列表，含执行状态）
+   - `GET /api/queue`（`sr_tasks` 列表，含 Slurm 状态）
    - `POST /api/queue`（表单：`lq_path/mask_path/sr_scale/suffix/gpu/cloud_limit` → `submit_run_sr` 幂等）
-   - `POST /api/queue/{id}/cancel`（`local_exec.cancel`）
-   - SSE 推状态变化（PENDING/RUNNING/COMPLETED/FAILED；无百分比，进度=状态机）
+   - `POST /api/queue/{id}/cancel`（`slurm.cancel`）
+   - SSE 推状态变化（PENDING/RUNNING/COMPLETED/FAILED；Slurm 无百分比，进度=状态机）
 6. **掩码→SR**：
    - `POST /api/masks`（多边形 JSON + W/H → `services/mask.py` 栅格化 → 写盘阵路径，返回 `mask_path`）
    - 查看器"提交 SR"按钮（用当前 `rois` 画布坐标 → 后端全分辨率）
 7. **前端**：`ChatPage`（SSE 事件渲染 + 新建会话）、`QueuePage`（列表 + 表单 + 取消 + SSE 状态）、`ViewerPage` 掩码提交按钮
 8. **部署** + 文档（脚本 + nginx + systemd）
-9. **验收（离机）**：契约文档定稿 + 全部 pytest（含 mock LLM 的 loop 端到端 + 执行器替身）+ `.e2e`（假后端驱动前端）；真机项列清单（真模型配 `SR_LLM_*` 指向内网端点、真机本机执行提交）
+9. **验收（离机）**：契约文档定稿 + 全部 pytest（含 mock LLM 的 loop 端到端 + fake slurm）+ `.e2e`（假后端驱动前端）；真机项列清单（真模型配 `SR_LLM_*` 指向内网端点、真 Slurm 提交）
 
 ### 阶段5 红线
 - 契约文档先于代码；改动契约先改文档。

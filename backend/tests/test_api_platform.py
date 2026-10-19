@@ -1,9 +1,7 @@
 """阶段5 API 契约测试（api-contract.md §5.3 验收清单）。
 
-Env 在 create_app() 前注入（SR_AGENT_DB / SR_LLM_MOCK / SR_WORK_DIR / …），
-TestClient 内存驱动。执行器换成内存替身（backend/tests/exec_double.py）：
-这里问的是「任务服务拿到一个状态之后做什么」，不是「bash 起没起来」——真跑本机
-执行的链在 test_local_chain.py。覆盖：
+Env 在 create_app() 前注入（SR_AGENT_DB / SR_LLM_MOCK / SR_SLURM_FAKE / …），
+TestClient 内存驱动。覆盖：
   工具 manifest + 直调；chat 新建/历史/SSE 事件序列/并发 409/404；
   queue list/submit/幂等复用/cancel/events 广播；masks 落原图目录 + 白名单。
 """
@@ -26,20 +24,20 @@ from backend.api import paths
 from backend.api.app import create_app, _bake_nosr_preview, _eager_bake_tick
 from backend.api.platform import (_Subscriber, _broadcast, _queue_state,
                                   _task_state, chat_send)
-from backend.tests import allowed_roots_env, make_scene_dir
-from backend.tests.exec_double import fake_exec
+from backend.tests import allowed_roots_env
 from backend.tests.test_preview_jpg import make_strip_tif
 from backend.services import run_sr as svc
+from backend.services import slurm
 from backend.services.run_sr import task_fingerprint
 from backend.api import app as app_mod
 
 _ENVS = ("SR_AGENT_DB", "SR_SCENES_ROOT", "SR_PREVIEWS_ROOT", "SR_LLM_MOCK",
-         "SR_WORK_DIR", "SR_SLURM_WORK_DIR", "SR_TEST_EXEC_STAGE_MS",
-         "SR_QUEUE_POLL_SEC", "SR_EXECUTOR",
+         "SR_SLURM_FAKE", "SR_SLURM_FAKE_T_MS", "SR_SLURM_WORK_DIR",
+         "SR_QUEUE_POLL_SEC", "SR_SANDBOX_ROOT", "SR_EXECUTOR",
          "SR_LOCKED_DIR", "SR_LOCAL_GPU", "SR_BUNDLE_DIR",
          "SR_ALLOWED_ROOTS", "SR_DRIVE_MAP",
-         # 产物主动生成的两个开关。用例会按需改它们，不还原就会漏到后面的用例上
-         # （主动生成是「按 env 现读」的，泄漏的效果正是随机生成/随机不生成）。
+         # 产物急烤的两个开关。用例会按需改它们，不还原就会漏到后面的用例上
+         # （急烤是「按 env 现读」的，泄漏的效果正是随机烤/随机不烤）。
          "SR_PRODUCT_PREVIEW_DIV", "SR_PRODUCT_PREVIEW_MAX_AGE_SEC")
 
 
@@ -80,9 +78,7 @@ class PlatformBase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self._apps: list = []
         self._saved = {k: os.environ.get(k) for k in _ENVS}
-        self._exec = fake_exec()                 # 执行器替身，全类共用一份
-        self.exec = self._exec.start()
-        self.addCleanup(self._exec.stop)
+        slurm._fake_reset()
         self._set_env()
 
     def _make_app(self):
@@ -97,6 +93,7 @@ class PlatformBase(unittest.TestCase):
             except Exception:  # noqa: BLE001
                 pass
         self._tmp.cleanup()
+        slurm._fake_reset()
         for k, v in self._saved.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -105,7 +102,7 @@ class PlatformBase(unittest.TestCase):
 
     def _set_env(self):
         os.environ["SR_AGENT_DB"] = os.path.join(self._tmp.name, "db.sqlite")
-        os.environ["SR_WORK_DIR"] = os.path.join(self._tmp.name, "work")
+        os.environ["SR_SLURM_WORK_DIR"] = os.path.join(self._tmp.name, "work")
         # Point the bundle at an empty dir: the suffix default reads <Suffix> out
         # of the SR team's config there, so without this the suite would quietly
         # follow whatever SR_BUNDLE_DIR the developer's shell happens to export
@@ -268,17 +265,21 @@ class TestQueue(PlatformBase):
 
     def _set_env(self):
         super()._set_env()
-        # 替身每格停留 500ms（exec_double.DEFAULT_STAGE_MS）。**不能太小**：
-        # `_poll_state` 每 30ms 采一次样，而 `test_submit_progresses_to_completed`
-        # 断言它**亲眼看到过** PENDING 与 RUNNING —— 一格若短到两次采样之间就整个
-        # 走完，采样会直接从 SUBMITTING 跳到 COMPLETED，断言随机失败。500ms 给足
-        # 采样裕度；本类因此慢约 1s，换来的是不再随机红。
+        os.environ["SR_SLURM_FAKE"] = "1"
+        # 每 stage 的停留时间。**不能太小**：`_poll_state` 每 30ms 采一次样，而
+        # `test_submit_progresses_to_completed` 断言它**亲眼看到过** PENDING 与
+        # RUNNING —— stage 若短到两次采样之间就整个走完，采样会直接从 SUBMITTING
+        # 跳到 COMPLETED，断言随机失败。原先 120ms 在整包 300+ 用例的负载下就会漏采
+        # （2026-09-14 全量跑复现两次、单跑通过），抬到 500ms 给足采样裕度；本类
+        # 因此慢约 1s，换来的是不再随机红。
+        os.environ["SR_SLURM_FAKE_T_MS"] = "500"
         os.environ["SR_QUEUE_POLL_SEC"] = "60"       # 关闭 lifespan 轮询干扰
-        # 真实场景目录 + 目录里已有的掩码：POST /api/queue 要求
-        # <lq_path>/<目录名>_mask.tif 在场（plan §4.3），缺掩码不放过；另外
-        # 未超分那一份也必须在场（services/run_sr.nosr_swap_plan），缺了拦下。
-        self.scene_dir = make_scene_dir(self._tmp.name, self.SCENE)
-        self.mask_file = self.scene_dir / f"{self.SCENE}_mask.tif"
+        # 真实场景目录 + 目录里已有的掩码：POST /api/queue 现在要求
+        # <lq_path>/<目录名>_mask.tif 在场（plan §4.3），不再接受「不给掩码」。
+        self.scene_dir = Path(self._tmp.name) / self.SCENE
+        self.scene_dir.mkdir(parents=True, exist_ok=True)
+        self.mask_file = touch_tif(
+            self.scene_dir / f"{self.SCENE}_mask.tif")
         self.LQ = str(self.scene_dir)
         # 提交侧会把 lq_path 归一成盘阵 POSIX 形态（`W:\...` 与 `/DiskArray/...`
         # 必须落到同一个字符串，幂等才成立）。真机上是 Linux，两种写法本来就
@@ -339,7 +340,7 @@ class TestQueue(PlatformBase):
         self.assertEqual(len(c.get("/api/queue").json()["tasks"]), 1)
 
     def test_submit_says_the_run_writes_in_place(self):
-        # SR 就地写场景目录：输出按管线命名为 <输入名>_<suffix>.tif，输入 tif
+        # 无沙箱 = SR 就地写场景目录：输出按管线命名为 <输入名>_<suffix>.tif，输入 tif
         # 不改名也不删除（Suffix 恒非空），只有同名旧输出会被改名 *_NOSR.tif。提交响应
         # 必须自己说清楚，别让操作者从别处推断（工作单 §4.2 最后一条）。
         body = self._submit(self.client()).json()
@@ -348,6 +349,13 @@ class TestQueue(PlatformBase):
         self.assertIn("<输入名>_t.tif", body["notice"])   # 输出名按管线拼接
         self.assertIn("不改名也不删除", body["notice"])     # 输入不动
         self.assertIn("_NOSR.tif", body["notice"])        # 同名旧输出的去向
+
+    def test_no_in_place_notice_when_sandboxed(self):
+        os.environ["SR_SANDBOX_ROOT"] = "/DiskArray/tmp/sbx"
+        self.addCleanup(os.environ.pop, "SR_SANDBOX_ROOT", None)
+        body = self._submit(self.client()).json()
+        self.assertNotIn("in_place", body)
+        self.assertNotIn("notice", body)
 
     def test_list_queue_shows_params_subset(self):
         c = self.client()
@@ -361,16 +369,31 @@ class TestQueue(PlatformBase):
         self.assertEqual(t["params"]["suffix"], "t")
         self.assertIn("config_xml", t)
 
-    def test_run_dataroot_is_the_lq_path(self):
-        # 作业在场景目录原地跑，所以这一行报的就是用户填的那个路径 —— 界面上
-        # 「产物落在哪」不能与提交时填的目录出现第二个答案。
+    def test_run_dataroot_is_the_sandbox_copy_when_configured(self):
+        # the product lands in the copy, not in the path the user typed — the
+        # row has to say where the job actually ran.
+        os.environ["SR_SANDBOX_ROOT"] = "/DiskArray/tmp/sbx"
+        self.addCleanup(os.environ.pop, "SR_SANDBOX_ROOT", None)
+        c = self.client()
+        self._submit(c)
+        t = c.get("/api/queue").json()["tasks"][0]
+        self.assertEqual(t["params"]["lq_path"], self.LQ_POSIX)      # what was asked for
+        self.assertTrue(t["run_dataroot"].startswith("/DiskArray/tmp/sbx/"))
+        # only the basename survives the copy — the SC step derives its input
+        # name (`<目录名>.tif`) from the directory's own name. (The sandbox path
+        # is built POSIX-style: it is a path on the array server, not on this
+        # Windows box the test happens to run on.)
+        self.assertEqual(t["run_dataroot"].replace("\\", "/").split("/")[-1],
+                         self.LQ.replace("\\", "/").split("/")[-1])
+
+    def test_run_dataroot_defaults_to_lq_path(self):
         c = self.client()
         self._submit(c)
         t = c.get("/api/queue").json()["tasks"][0]
         self.assertEqual(t["run_dataroot"], self.LQ_POSIX)
 
     def test_cancel_pending_job(self):
-        self.exec.stage_sec = 600          # 停在 PENDING，等被取消
+        os.environ["SR_SLURM_FAKE_T_MS"] = "600000"    # 停在 PENDING/RUNNING
         c = self.client()
         r = self._submit(c)
         tid = r.json()["task_id"]
@@ -416,7 +439,7 @@ class TestQueue(PlatformBase):
         self.assertIn("ps -ef", r.json()["detail"])
 
     def test_delete_ori_rejected_400(self):
-        # 原型期禁用：SR 就地跑，会删原图/就地覆盖，误开不可恢复。
+        # 原型期禁用：SR 会删原图/就地覆盖且本机模式无沙箱，误开不可恢复。
         r = self._submit(self.client(), delete_ori=True)
         self.assertEqual(r.status_code, 400)
         self.assertIn("delete_ori", r.json()["detail"])
@@ -429,14 +452,12 @@ class TestQueue(PlatformBase):
             self._submit(c, lq_path="<fake>/x.tif").status_code, 400)
         self.assertEqual(self._submit(c, lq_path="").status_code, 400)
 
-    def test_no_usable_bash_422(self):
-        # 这台机器上没有可用的 bash（Windows 上 System32\bash.exe 是 WSL 启动器，
-        # 不算）：什么都启动不了，所以拦在写任务行之前。
-        self.exec.bash_available = False
-        r = self._submit(self.client())
+    def test_slurm_unavailable_422(self):
+        os.environ.pop("SR_SLURM_FAKE", None)         # 无 sbatch + 未开 fake
+        c = self.client()
+        r = self._submit(c)
         self.assertEqual(r.status_code, 422)
-        self.assertIn("本机执行不可用", r.json()["detail"])
-        self.assertIn("bash", r.json()["detail"])
+        self.assertIn("slurm not available", r.json()["detail"])
 
     # ---- plan §4.3: locked directory / derived mask / non-empty suffix ------
 
@@ -458,15 +479,6 @@ class TestQueue(PlatformBase):
         r = self._submit(self.client())
         self.assertEqual(r.status_code, 400)
         self.assertIn("缺少掩码文件", r.json()["detail"])
-
-    def test_missing_un_superresolved_copy_is_400_and_names_it(self):
-        # 这一跑要读的是未超分那一份；缺了必须拦下，不能拿已超分的本体顶替
-        # （严格尺寸判据会把 1× 的本体当成"已超分"直接退出作业）。
-        (self.scene_dir / f"{self.SCENE}_NOSR.tif").unlink()
-        r = self._submit(self.client())
-        self.assertEqual(r.status_code, 400)
-        self.assertIn("没有未超分那一份", r.json()["detail"])
-        self.assertIn(f"{self.SCENE}_NOSR.tif", r.json()["detail"])
 
     def test_explicit_mask_path_still_wins(self):
         c = self.client()
@@ -525,7 +537,7 @@ class TestQueue(PlatformBase):
                 self.assertEqual(t["params"]["suffix"], "sr")
 
     def test_sr_suffix_default_env_var_is_retired(self):
-        # 文件是唯一权威：设 `SR_SUFFIX_DEFAULT` 不应有任何作用。
+        # 2026-09-16：环境变量已删，文件是唯一权威 —— 设了它不应有任何作用。
         os.environ["SR_SUFFIX_DEFAULT"] = "zzz"
         self.addCleanup(os.environ.pop, "SR_SUFFIX_DEFAULT", None)
         write_bundle_suffix(os.environ["SR_BUNDLE_DIR"], "260318")
@@ -578,7 +590,7 @@ class TestQueue(PlatformBase):
         界面上的耗时 = finished_at − started_at，而客户端本地那份是上一次
         GET /api/queue 的快照（通常就在提交刚落库之后，两列都还是 NULL）。
         只广播 state 的话，任务一完成耗时列就从运行中的正常值掉成「0 秒」
-        （实测），或者干脆停在上一次运行/上一个快照的数字上。
+        （2026-09-17 实测），或者干脆停在上一次运行/上一个快照的数字上。
         """
         app, c = self.app_client()
         tid = self._submit(c).json()["task_id"]
@@ -639,13 +651,13 @@ class TestQueue(PlatformBase):
     def test_elapsed_counts_this_run_not_the_row_age(self):
         """重交复用的行：耗时必须是**这一次**跑的时长，不是这一行的年龄。
 
-        现场（真机）：一行 = 一个指纹。第一次交上去挂了/被取消，第二天
+        现场（2026-09-18 真机）：一行 = 一个指纹。第一次交上去挂了/被取消，第二天
         修好再交 —— 幂等层复用同一行，而 created_at 是**第一次**提交的时刻。耗时列
-        若量 updated_at − created_at，新跑的这一遍就显示成「30 时 00 分」，实际
-        只跑了 200 多秒。这里把这一条钉死：行确实旧 30 小时，耗时仍然只是这一次的。
+        原来量 updated_at − created_at，于是新跑的这一遍显示成「30 时 00 分」，实际
+        只跑了 200 多秒。这里把复现钉死：行确实旧 30 小时，耗时仍然只是这一次的。
         """
         app, c = self.app_client()
-        self.exec.stage_sec = 600                       # 停在 PENDING，等被取消
+        os.environ["SR_SLURM_FAKE_T_MS"] = "600000"     # 停在 PENDING，等被取消
         tid = self._submit(c).json()["task_id"]
         c.post(f"/api/queue/{tid}/cancel")
 
@@ -657,7 +669,7 @@ class TestQueue(PlatformBase):
                    (old, old, tid))
         db.commit()
 
-        self.exec.stage_sec = 0.5
+        os.environ["SR_SLURM_FAKE_T_MS"] = "500"
         r2 = self._submit(c)                            # 同参数 → 复用同一行、真重跑
         self.assertEqual(r2.json()["task_id"], tid, "幂等层复用的是同一行")
         self.assertEqual(self._poll_state(c, tid)[-1], "COMPLETED")
@@ -673,7 +685,7 @@ class TestQueue(PlatformBase):
         """没观测到「开始跑」就不编一个耗时：两列都是 NULL，界面显示「—」。
 
         现场是整段运行期间 sr-api 不在（停机/重启跨过去了）。退回 created_at 顶替
-        是不行的 —— 那是行的生日，复用行会退化成行龄。
+        是不行的 —— 那是行的生日，复用行会退化成行龄，正是这一轮要修的错。
         """
         c = self.client()
         tid = self._submit(c).json()["task_id"]
@@ -688,10 +700,10 @@ class TestQueue(PlatformBase):
     def test_restart_does_not_age_a_finished_row(self):
         """sr-api 重启不重算耗时：已终态的行不该被写回、updated_at 不该被抬到「现在」。
 
-        第二个触发点（实测）：`state.task_cache` 是内存态，重启后是空的。
-        缓存里没有基准时每一行都被判成「状态变了」→ 写回 + 刷新
+        第二个触发点（2026-09-18 实测）：`state.task_cache` 是内存态，重启后是空的。
+        校准器原来只拿它当比较基准，空缓存 → 每一行都被判成「状态变了」→ 写回 + 刷新
         updated_at，于是一行几天前就跑完的任务，重启后显示成行龄（实测第 2 次 GET
-        起「30 时 00 分」）。基准缺失时回落到**库里存的状态**。
+        起「30 时 00 分」）。现在基准缺失时回落到**库里存的状态**。
         """
         app, c = self.app_client()
         tid = self._submit(c).json()["task_id"]
@@ -719,7 +731,7 @@ class TestQueue(PlatformBase):
 
 
 class TestProductPreviewBake(PlatformBase):
-    """产物预览主动生成（app.py::_eager_bake_tick）。
+    """产物预览急烤（app.py::_eager_bake_tick）。
 
     **直接调 tick，不等后台循环**：循环的间隔就是 `SR_QUEUE_POLL_SEC`，本仓库的
     惯例是把它设成 60 秒来关掉轮询干扰，等它等于让每个用例睡一分钟。tick 是纯同步
@@ -728,7 +740,7 @@ class TestProductPreviewBake(PlatformBase):
 
     夹具造的是一个**真场景目录**（`<目录名>_meta.xml` + `<目录名>.tif`）加一份真
     strip tif 产物 —— `input_scene_path` / `build_preview_pixels` 的实际判据都在
-    这条链上，用空文件顶替会让「产物缺失」「读不出尺寸」这类断言变成误报通过。
+    这条链上，用空文件顶替会让「产物缺失」「读不出尺寸」这类断言变成假绿。
     """
 
     SCENE = "JL1KF02B03_xxx_L1_PAN"
@@ -767,7 +779,7 @@ class TestProductPreviewBake(PlatformBase):
                               w, h)[0]
 
     def _jpg(self, product):
-        """落点：`<源 stem>_preview.jpg`（全平台唯一一条命名规则）。"""
+        """落点：`<源 stem>_preview.jpg`（2026-09-22 起全平台唯一一条命名规则）。"""
         return product.with_name(product.stem + "_preview.jpg")
 
     def _row_state(self, app, tid):
@@ -777,7 +789,7 @@ class TestProductPreviewBake(PlatformBase):
     def _rearm(self, app, tid):
         """把 preview_state 打回 NULL（等价于 put_sr_task 的 UPDATE 分支），
         但**保留 finished_at** —— 直接走提交会连 finished_at 一起清掉，那一行就
-        不再落在主动生成的年龄窗口里了。"""
+        不再落在急烤的年龄窗口里了。"""
         db = app.state.store._db()
         db.execute("UPDATE sr_tasks SET preview_state = NULL, preview_note = NULL "
                    "WHERE id = ?", (tid,))
@@ -806,7 +818,7 @@ class TestProductPreviewBake(PlatformBase):
         self.assertNotEqual(jpg, self._jpg(self.inp))
 
     def test_input_image_is_not_baked(self):
-        """主动生成只生成产物。输入影像那份是惰性的：用户看不看它，打开之前无从知道。"""
+        """急烤只烤产物。输入影像那份是惰性的：用户看不看它，打开之前无从知道。"""
         app, _ = self.app_client()
         self._row(app)
         self._product()
@@ -835,12 +847,12 @@ class TestProductPreviewBake(PlatformBase):
         _eager_bake_tick(app.state)
 
         self.assertEqual(self._dims(self._jpg(product)), (8, 4),
-                         "换档位后重新生成，不是留着上一档那份")
+                         "换档位后重烤，不是留着上一档那份")
         self.assertIn("÷8", self._row_state(app, tid)[1])
 
     def test_already_baked_at_this_div_is_a_cache_hit(self):
-        """用户先打开过、盘上那份已是当前档位 → 不重新生成（省掉读遍大图那几十秒）。
-        判据与惰性路径是**同一个** cache_hit，所以这里命中的正是用户刚生成的那份。"""
+        """用户先打开过、盘上那份已是当前档位 → 不重烤（省掉读遍大图那几十秒）。
+        判据与惰性路径是**同一个** cache_hit，所以这里命中的正是用户刚烤的那份。"""
         app, _ = self.app_client()
         tid = self._row(app)
         product = self._product()
@@ -853,7 +865,7 @@ class TestProductPreviewBake(PlatformBase):
         self.assertEqual(self._dims(self._jpg(product)), (16, 8))
 
     def test_one_tick_bakes_at_most_one_item(self):
-        """单消费者、并发 1：÷4 生成一份 40000² 产物峰值内存约 400MB，并发会把内存
+        """单消费者、并发 1：÷4 烤一份 40000² 产物峰值内存约 400MB，并发会把内存
         乘上去。代价是「同时完成 20 个作业时最后一件要等」——那是可解释的。"""
         app, _ = self.app_client()
         a = self._row(app, suffix="s1", lq_path=self.LQ)
@@ -865,15 +877,15 @@ class TestProductPreviewBake(PlatformBase):
 
         states = [self._row_state(app, t)[0] for t in (a, b)]
         # 不写死是哪一条：两行的 finished_at 是同一个瞬间，排序不该被断言
-        self.assertEqual(states.count("done"), 1, "本轮只生成一条")
+        self.assertEqual(states.count("done"), 1, "本轮只烤一条")
         self.assertEqual(states.count(None), 1, "另一件留到下一轮")
 
     def test_request_path_observing_completed_first_does_not_lose_the_bake(self):
         """`GET /api/queue` 会走 `_task_state`（与后台轮询是**同一**个写终态的函数）。
 
-        把主动生成挂在「状态转换」上的话，谁先观测到 COMPLETED 谁把这次转换拿走，另一个
-        就看到「没变化」—— 请求路径抢先看一眼队列，这份预览就永远不生成了。判据从库
-        派生，这个竞态在结构上不存在：这里先打几次队列再跑 tick，照样生成。
+        把急烤挂在「状态转换」上的话，谁先观测到 COMPLETED 谁把这次转换拿走，另一个
+        就看到「没变化」—— 请求路径抢先看一眼队列，这份预览就永远不烤了。改成从库
+        派生之后这个竞态在结构上不存在：这里先打几次队列再跑 tick，照样烤。
         """
         app, c = self.app_client()
         tid = self._row(app)
@@ -902,7 +914,7 @@ class TestProductPreviewBake(PlatformBase):
         self.assertFalse(self._jpg(product).exists())
 
     def test_invalid_div_is_treated_as_off_not_as_a_crash(self):
-        """配置写错不该让服务起不来（也不会让轮询炸掉），代价只是「这轮不生成」。"""
+        """配置写错不该让服务起不来（也不会让轮询炸掉），代价只是「这轮不烤」。"""
         app, _ = self.app_client()
         os.environ["SR_PRODUCT_PREVIEW_DIV"] = "3"       # 不在 PREVIEW_DIVISORS 里
         tid = self._row(app)
@@ -915,8 +927,8 @@ class TestProductPreviewBake(PlatformBase):
         self.assertIsNone(self._row_state(app, tid)[0])
 
     def test_max_age_window_keeps_history_out(self):
-        """升级当天不把历史 COMPLETED 行全生成一遍 —— 补列之后老行的 preview_state
-        全是 NULL，而 NULL 的含义正是「没生成过」。"""
+        """升级当天不把历史 COMPLETED 行全烤一遍 —— 补列之后老行的 preview_state
+        全是 NULL，而 NULL 的含义正是「没烤过」。"""
         app, _ = self.app_client()
         tid = self._row(app)
         product = self._product()
@@ -930,7 +942,7 @@ class TestProductPreviewBake(PlatformBase):
         self.assertIsNone(self._row_state(app, tid)[0])
         self.assertFalse(self._jpg(product).exists())
 
-    # ---- 各条「不生成」的分支 -----------------------------------------------
+    # ---- 各条「不烤」的分支 -----------------------------------------------
 
     def test_failed_row_is_never_touched(self):
         app, _ = self.app_client()
@@ -962,9 +974,56 @@ class TestProductPreviewBake(PlatformBase):
         self.assertEqual(state_name, "skipped")
         self.assertIn("no_suffix", note)
 
+    def test_sandboxed_run_is_skipped(self):
+        """跑在沙箱私有副本上时产物落在副本里，盘阵那份是**上一次**的 —— 烤了用户
+        也看不到，还往临时盘撒文件。"""
+        app, _ = self.app_client()
+        os.environ["SR_EXECUTOR"] = "slurm"
+        os.environ["SR_SANDBOX_ROOT"] = "/DiskArray/tmp/sbx"
+        tid = self._row(app)
+        self._product()
+
+        _eager_bake_tick(app.state)
+
+        state_name, note = self._row_state(app, tid)
+        self.assertEqual(state_name, "skipped")
+        self.assertIn("sandbox", note)
+
+    def test_sandbox_root_with_local_executor_still_bakes(self):
+        """**真机当前就是这条路线**：配了 `SR_SANDBOX_ROOT`，但 `SR_EXECUTOR=local`。
+
+        `SR_EXECUTOR=local` 的意义就是「就地跑、产物落在盘阵里」（run_sr
+        .sandbox_scene_paths 对 local 恒返回 None），所以这里必须照烤。判据若写成
+        「直接看 SR_SANDBOX_ROOT 在不在」，真机上会**永远不烤**，而且是静默的。
+        """
+        app, _ = self.app_client()
+        os.environ["SR_EXECUTOR"] = "local"
+        os.environ["SR_SANDBOX_ROOT"] = "/DiskArray/tmp/sbx"
+        tid = self._row(app)
+        product = self._product()
+
+        _eager_bake_tick(app.state)
+
+        self.assertEqual(self._row_state(app, tid)[0], "done")
+        self.assertTrue(self._jpg(product).is_file())
+
+    def test_malformed_sandbox_root_is_skipped_not_guessed(self):
+        """`_run_dataroot` 回 None = 「产物落在哪不可知」。宁可如实跳过也不猜。"""
+        app, _ = self.app_client()
+        os.environ["SR_EXECUTOR"] = "slurm"
+        os.environ["SR_SANDBOX_ROOT"] = "relative/not/absolute"
+        tid = self._row(app)
+        self._product()
+
+        _eager_bake_tick(app.state)
+
+        state_name, note = self._row_state(app, tid)
+        self.assertEqual(state_name, "skipped")
+        self.assertIn("sandbox", note)
+
     def test_unwritable_directory_is_skipped_not_fallen_back(self):
-        """目录不可写就如实跳过，**不退回 SR_TEMP_PREVIEWS_ROOT**：那份按天清，而主动生成
-        的意义是长期命中；更要命的是主动生成没有 HTTP 响应头能告诉用户「这次退化了」，
+        """目录不可写就如实跳过，**不退回 SR_TEMP_PREVIEWS_ROOT**：那份按天清，而急烤
+        的意义是长期命中；更要命的是急烤没有 HTTP 响应头能告诉用户「这次退化了」，
         静默退化等于骗人。"""
         app, _ = self.app_client()
         tid = self._row(app)
@@ -1021,7 +1080,7 @@ class TestProductPreviewBake(PlatformBase):
 
         before = next(t for t in c.get("/api/queue").json()["tasks"]
                       if t["task_id"] == tid)
-        self.assertIn("preview_state", before, "字段恒在，没生成过时是 null")
+        self.assertIn("preview_state", before, "字段恒在，没烤过时是 null")
         self.assertIsNone(before["preview_state"])
         self.assertIsNone(before["preview_note"])
 
@@ -1032,13 +1091,13 @@ class TestProductPreviewBake(PlatformBase):
         self.assertEqual(after["preview_state"], "done")
         self.assertIn("baked", after["preview_note"])
         self.assertEqual(after["state"], "COMPLETED",
-                         "主动生成写回不该动作业状态")
+                         "急烤写回不该动作业状态")
 
-    # ---- 老点号那份（无读者）要被清掉 --------------------------------------
+    # ---- 改名遗留：老点号那份要被清掉（2026-09-22）-------------------------
 
     def test_the_eager_bake_and_a_lazy_open_are_the_same_file(self):
-        """核心不变式：**主动生成的那份与打开时生成的那份是同一个文件**。
-        两条链各落一份（只差一个字符）的话，主动生成那份就命中不了打开路径。"""
+        """改名后的核心不变式：**急烤烤的那份与打开时烤的那份是同一个文件**。
+        改名之前两条链各落一份（只差一个字符），急烤那份命中不了打开路径。"""
         app, c = self.app_client()
         self._row(app)
         product = self._product()
@@ -1051,16 +1110,16 @@ class TestProductPreviewBake(PlatformBase):
         r = c.get(f"/api/scenes/{sid}/preview?div=4")
 
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.content, baked, "打开时命中的就是主动生成那份，字节不差")
+        self.assertEqual(r.content, baked, "打开时命中的就是急烤那份，字节不差")
         self.assertEqual([p.name for p in sorted(self.scene_dir.glob("*preview*"))],
                          [jpg.name], "一个场景目录里只有一份预览名")
 
     def _legacy(self, product):
-        """点号落点：`<产物 stem>.preview.jpg`（真机上只剩老目录里还有）。"""
+        """改名前的点号落点：`<产物 stem>.preview.jpg`（真机升级后只剩老目录里有）。"""
         return product.with_suffix(".preview.jpg")
 
     def test_legacy_dot_name_is_removed_when_baking(self):
-        """点号那份没有任何读者 —— 重新生成这一份栅格时就同时删掉，
+        """改名后点号那份没有任何读者了 —— 重烤这一份栅格时就顺手删掉，
         免得场景目录里躺着两个几乎同名的文件。"""
         app, _ = self.app_client()
         self._row(app)
@@ -1074,8 +1133,8 @@ class TestProductPreviewBake(PlatformBase):
         self.assertTrue(self._jpg(product).is_file(), "新名字那份照落")
 
     def test_legacy_dot_name_is_removed_even_on_a_cache_hit(self):
-        """盘上那份已是当前档位（本轮不重新生成）时也得删 —— 「谁看谁清」，
-        不靠重新生成那一次机会。"""
+        """盘上那份已是当前档位（本轮不重烤）时也得删 —— 「谁看谁清」，
+        不靠重烤那一次机会。"""
         app, _ = self.app_client()
         tid = self._row(app)
         product = self._product()
@@ -1103,12 +1162,12 @@ class TestProductPreviewBake(PlatformBase):
         self.assertEqual(self._row_state(app, tid)[0], "done")
         self.assertTrue(self._jpg(product).is_file())
 
-    # ---- 同时那一份：未超分（`<输入 stem>_NOSR.tif`，用户口径）--------------
+    # ---- 顺带那一份：未超分（`<输入 stem>_NOSR.tif`，2026-09-24 用户口径）----
     #
     # 名字只由 `scene_search.nosr_candidates` 给出：先试输入 stem 那条（这个夹具的
     # 场景里是 `<SCENE>_NOSR.tif`），`PAN_NOSR.tif` 是同一串里的另一个候选（混合
     # 目录里两条都试），最后才试 `writeTiff` 改名那套 `<产物 stem>_NOSR.tif`。
-    # 硬编码成 `PAN_NOSR.tif` 的话，SC 场景（输入件 = `<目录名>.tif`）会永远
+    # 以前这里硬编码成 `PAN_NOSR.tif`：SC 场景（输入件 = `<目录名>.tif`）于是永远
     # 走 skipped —— 而那正是用户天天开的那些景。
 
     def _nosr(self, w=64, h=32, name=None):
@@ -1126,7 +1185,7 @@ class TestProductPreviewBake(PlatformBase):
                 "params": {"lq_path": self.LQ, "suffix": self.SUFFIX}}
 
     def test_nosr_preview_is_baked_by_the_same_tick(self):
-        """超分跑完那一轮里同时把它生成了：源是 `<输入 stem>_NOSR.tif`，档位取全局。"""
+        """超分跑完那一轮里顺带把它烤了：源是 `<输入 stem>_NOSR.tif`，档位取全局。"""
         app, _ = self.app_client()
         self._row(app)
         product = self._product()
@@ -1153,7 +1212,7 @@ class TestProductPreviewBake(PlatformBase):
         self.assertTrue(self._nosr_jpg("PAN_NOSR_preview.jpg").is_file())
 
     def test_input_stem_name_wins_when_both_are_on_disk(self):
-        """两条名字同时在盘上时先认输入 stem 那条：**只生成一份**、落点只有一个。
+        """两条名字同时在盘上时先认输入 stem 那条：**只烤一份**、落点只有一个。
 
         另一条（`writeTiff` 改名留下的上一次产物）不是同一份东西，抢在前面就会
         把「未超分那份」显示成上一轮的产物图。
@@ -1187,7 +1246,7 @@ class TestProductPreviewBake(PlatformBase):
 
     def test_nosr_preview_is_baked_even_when_the_product_bake_skips(self):
         """两份互不牵连：产物没产出（云限额跳过是合法 COMPLETED）时，
-        未超分那份照样生成 —— 它跟这次跑得成不成功本来就无关。"""
+        未超分那份照样烤 —— 它跟这次跑得成不成功本来就无关。"""
         app, _ = self.app_client()
         tid = self._row(app)
         self._nosr()
@@ -1198,7 +1257,7 @@ class TestProductPreviewBake(PlatformBase):
         self.assertTrue(self._nosr_jpg().is_file())
 
     def test_nosr_preview_at_the_same_div_is_a_cache_hit(self):
-        """同 suffix 反复迭代不该每次重读一遍 GB 级文件：盘上那份是当前档位就不重新生成，
+        """同 suffix 反复迭代不该每次重读一遍 GB 级文件：盘上那份是当前档位就不重烤，
         判据与产物那份**同一个** cache_hit。"""
         app, _ = self.app_client()
         tid = self._row(app)
@@ -1209,7 +1268,7 @@ class TestProductPreviewBake(PlatformBase):
         self.assertEqual(self._dims(self._nosr_jpg()), (16, 8))
         self.assertIn("cached", _bake_nosr_preview(task, 4))
 
-        self.assertIn("baked", _bake_nosr_preview(task, 8), "换档位就该重新生成")
+        self.assertIn("baked", _bake_nosr_preview(task, 8), "换档位就该重烤")
         self.assertEqual(self._dims(self._nosr_jpg()), (8, 4))
 
 
@@ -1265,7 +1324,7 @@ class TestMasks(PlatformBase):
         self.assertEqual(arr.dtype, np.uint8)
         self.assertEqual(sorted(np.unique(arr).tolist()), [0, 255])
         raw = Path(body["mask_txt"]).read_bytes()
-        self.assertIn("掩码".encode("utf-8"), raw)   # 参考格式全角表头
+        self.assertIn("掩膜".encode("utf-8"), raw)   # 参考格式全角表头
         self.assertIn(b"\r\n", raw)                  # CRLF（read_text 会吞掉）
 
     def test_bake_mask_draft_carries_the_bundle_suffix(self):
@@ -1350,9 +1409,9 @@ class TestMasks(PlatformBase):
     def test_pan_scene_writes_the_mask_the_submit_side_will_look_for(self):
         """RC 场景（输入 PAN.tif）：写出去的名字 == 提交时去找的名字。
 
-        bake_mask 与 derived_mask_path 各取一头的话（一个取输入文件名、一个取
-        目录名），就会一个写 PAN_mask.tif、一个找 260318_mask.tif —— 提交必 400。
-        这条用例钉住两者同源。
+        以前 bake_mask 取输入文件名、derived_mask_path 取目录名，这里会一个
+        写 PAN_mask.tif、一个找 260318_mask.tif —— 提交必 400。这条用例钉住
+        两者同源。
         """
         from backend.api.platform import derived_mask_path
         d = self._manual_scene(pan=True, tif=False)
@@ -1448,7 +1507,7 @@ class TestQcListWrite(PlatformBase):
     """`POST /api/qclist/write` —— 《待修复清单》原地写回（api-contract.md §3.7）。
 
     真机 http 下浏览器写不了盘阵文件（File System Access API 在规范里是
-    `[SecureContext]` 标的，Chrome 只在 https/localhost 页面暴露它），所以走后端。
+    `[SecureContext]` 标的，Chrome 只在 https/localhost 页面暴露它），所以改走后端。
     这里钉的是：写进去的字节对不对、编码（GBK）对不对、护栏拦不拦得住「导入之后
     别人又改了一版」、以及各条拒绝路径下**原文件一个字节都不动**。
     """
@@ -1498,7 +1557,7 @@ class TestQcListWrite(PlatformBase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json()["encoding"], "gbk")
         self.assertEqual(p.read_bytes().decode("gbk"), doc)
-        # 真写成 GBK 了 —— 浏览器写盘那条路只能降级成 UTF-8+BOM
+        # 真写成 GBK 了 —— 浏览器写盘那条路只能降级成 UTF-8+BOM，这条是修好的部分
         self.assertNotEqual(p.read_bytes(), doc.encode("utf-8"))
 
     @unittest.skipIf(os.name == "nt", "Windows 的 chmod 只切只读位，测不出权限位")

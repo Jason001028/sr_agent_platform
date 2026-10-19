@@ -11,9 +11,9 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { loadSrConfig } from '../lib/scene.js';
 import {
-  apiCreateSession, apiListSessions, apiSessionMessages, apiChatSend,
+  apiCreateSession, apiListSessions, apiSessionMessages, apiSessionUsage, apiChatSend,
 } from '../lib/api.js';
-import type { ChatSession, HistoryMsg, PlatformSseEvent } from '../lib/api.js';
+import type { ChatSession, ChatUsage, HistoryMsg, PlatformSseEvent } from '../lib/api.js';
 
 /** 单条工具声明（wire tool_calls[].function → {name, arguments}）。 */
 export interface ToolUse {
@@ -131,6 +131,7 @@ export const useChatStore = defineStore('chat', () => {
   const sending = ref(false);
   const error = ref('');
   const loading = ref(false);
+  const usage = ref<ChatUsage | null>(null);
 
   function hasSession(): boolean { return sessionId.value !== null; }
 
@@ -143,6 +144,7 @@ export const useChatStore = defineStore('chat', () => {
     const cfg = loadSrConfig();
     const body = await apiSessionMessages(cfg, sid);
     messages.value = body.messages.map(msgFromHistory);
+    usage.value = await apiSessionUsage(cfg, sid);
     error.value = '';
   }
 
@@ -178,6 +180,7 @@ export const useChatStore = defineStore('chat', () => {
                         ...sessions.value];
       sessionId.value = sid;
       messages.value = [];
+      usage.value = null;
       error.value = '';
     } catch (e) {
       error.value = '新建会话失败：' + (e instanceof Error ? e.message : String(e));
@@ -202,6 +205,8 @@ export const useChatStore = defineStore('chat', () => {
     try {
       const cfg = loadSrConfig();
       await apiChatSend(cfg, sid, text, (ev) => {
+        if (ev.type === 'usage') usage.value = ev.aggregate;
+        if (ev.type === 'turn_done' && ev.usage) usage.value = ev.usage;
         messages.value = reduceChatSse(messages.value, ev);
       });
     } catch (e) {
@@ -215,7 +220,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   return {
-    sessions, sessionId, messages, sending, error, loading,
+    sessions, sessionId, messages, sending, error, loading, usage,
     hasSession, init, refreshSessions, loadHistory, newSession, selectSession, send,
   };
 });

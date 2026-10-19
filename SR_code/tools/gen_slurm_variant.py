@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Generate the platform deployment variant of the SR production script.
+"""Generate the Slurm deployment variant of the SR production script.
 
 The production script ``SR_code/code_0817_prod.py`` is kept byte-for-byte
 untouched (it is the single source of truth).  This generator derives a
 deployment variant from it by mechanical anchor replacement, so every
 difference is reviewable, reproducible and machine-checkable.
-
-What the variant is for: the platform runs that script as a child process on the
-API host, against a scene directory whose body holds the un-superresolved copy.
-The production script assumes the opposite on both counts (a scheduler-assigned
-card, and a body that is already super-resolved), so it needs a handful of
-edits.  ``EDITS`` is that list, one entry per finding.
 
 Contract
 --------
@@ -25,8 +19,8 @@ Contract
 
 Usage
 -----
-    python SR_code/tools/gen_platform_variant.py            # write SR_code/variants/
-    python SR_code/tools/gen_platform_variant.py --check    # verify, exit 1 if stale
+    python SR_code/tools/gen_slurm_variant.py            # write SR_code/variants/
+    python SR_code/tools/gen_slurm_variant.py --check    # verify, exit 1 if stale
 
 Exit codes: 0 = ok, 1 = stale (only with ``--check``), 2 = anchor mismatch.
 """
@@ -38,26 +32,23 @@ import json
 import os
 import sys
 
-GENERATOR_VERSION = "1.2.0"
-GENERATOR_REL = "SR_code/tools/gen_platform_variant.py"
+GENERATOR_VERSION = "1.0.0"
+GENERATOR_REL = "SR_code/tools/gen_slurm_variant.py"
 
 SOURCE_REL = "SR_code/code_0817_prod.py"
 OUT_DIR_REL = "SR_code/variants"
-VARIANT_NAME = "code_0817_prod_platform.py"
-DIFF_NAME = "code_0817_prod_platform.diff"
-PROVENANCE_NAME = "code_0817_prod_platform.provenance.json"
+VARIANT_NAME = "code_0817_prod_slurm.py"
+DIFF_NAME = "code_0817_prod_slurm.diff"
+PROVENANCE_NAME = "code_0817_prod_slurm.provenance.json"
 GITATTRIBUTES_NAME = ".gitattributes"
 GITATTRIBUTES_TEXT = "* text eol=lf\n"
 
 BANNER_RULE = "# " + "=" * 75
 
 # ---------------------------------------------------------------------------
-# The edit table.  E1-E9 are one entry per finding in
-# docs/sr_code/sr-platform-variant.md; E10 belongs to the platform's SR
-# submission entry (the un-superresolved copy is landed on the body name before
-# the job starts, so the input the job must read is that copy).  Order matches
-# the numbering, not the file position; the anchors are disjoint so the order
-# does not affect the result.
+# The edit table.  One entry per finding in docs/status/slurm-integration.md
+# sec 2.2 (E1-E9).  Order matches the numbering, not the file position; the
+# anchors are disjoint so the order does not affect the result.
 # ---------------------------------------------------------------------------
 
 EDITS = [
@@ -75,25 +66,24 @@ EDITS = [
         '    lib = None',
         1,
     ),
-    # E2 -- unconditional CUDA_VISIBLE_DEVICES="0" overrides the card the
-    # platform selected (local_exec sets the variable from SR_LOCAL_GPU), so
-    # every run would land on physical card 0 whatever the deployment chose.
+    # E2 -- unconditional CUDA_VISIBLE_DEVICES="0" wipes the Slurm allocation
+    # and piles every --gres=gpu:1 job onto physical card 0.
     (
         "E2",
         '    os.environ[\'CUDA_VISIBLE_DEVICES\'] = "0"',
-        '    # CUDA_VISIBLE_DEVICES is set by the launcher (SR_LOCAL_GPU). '
+        '    # CUDA_VISIBLE_DEVICES is injected by Slurm (--gres=gpu:1). '
         'Never overwrite it.',
         1,
     ),
     # E3 -- gpuid feeds pynvml/log reporting (a *physical* index).  Read it from
-    # the environment with an int() fallback: the value may be a UUID or a MIG
+    # the environment with an int() fallback: Slurm may inject a UUID or a MIG
     # device form, and int(gpuid) later would raise ValueError.
     (
         "E3",
         "    gpuid = '0'",
         '    # gpuid is used only for pynvml/log reporting (physical index).\n'
-        '    # CUDA_VISIBLE_DEVICES may hold a UUID or MIG form; fall back to\n'
-        '    # \'0\' if it is not a plain integer so int(gpuid) below cannot raise.\n'
+        '    # Slurm may inject a UUID or MIG form; fall back to \'0\' if it is not\n'
+        '    # a plain integer so the int(gpuid) calls below cannot raise.\n'
         '    try:\n'
         '        _cvd = os.environ.get(\'CUDA_VISIBLE_DEVICES\', \'0\').split(\',\')[0]\n'
         '        gpuid = str(int(_cvd))\n'
@@ -105,57 +95,48 @@ EDITS = [
     (
         "E4",
         '    os.environ[\'CUDA_VISIBLE_DEVICES\'] = "1"',
-        '    # CUDA_VISIBLE_DEVICES is set by the launcher (SR_LOCAL_GPU). '
+        '    # CUDA_VISIBLE_DEVICES is injected by Slurm (--gres=gpu:1). '
         'Never overwrite it.',
         1,
     ),
     # E5 -- pynvml counts *physical* cards and ignores the injected device list;
-    # on a 4-card host it always reports 4.  Count what this run can see.
+    # on a 4-card node it always reports 4.  Count what this job can see.
     (
         "E5",
         "    pynvml.nvmlInit()\n"
         "    gpu_count = pynvml.nvmlDeviceGetCount()\n"
         "    pynvml.nvmlShutdown()",
-        "    # Count the devices this run can actually see.  nvml reports the\n"
-        "    # host's physical cards and ignores CUDA_VISIBLE_DEVICES.\n"
+        "    # Count the devices this job can actually see.  nvml reports the\n"
+        "    # host's physical cards and ignores the list Slurm injects.\n"
         "    gpu_count = torch.cuda.device_count()",
         1,
     ),
-    # E6 -- "!= 4" is always true unless the host has exactly four visible
-    # cards, so a run pinned to one card always fails.  Mirror
-    # code_0820_prod_windows.py:717 ("< 1").
+    # E6 -- "!= 4" is always true for a single-GPU allocation, so every job
+    # fails.  Mirror code_0820_prod_windows.py:717 ("< 1").
     (
         "E6",
         "    if gpu_available is False or gpu_count != 4:",
         "    if gpu_available is False or gpu_count < 1:",
         1,
     ),
-    # E7 -- a failed run must not reach out and stop a host service: on the
-    # cluster that evicts the node from the pool, and on the API host it would
-    # take down a service unrelated to this run.
+    # E7 -- stopping slurmd inside a job either fails on permissions (job hangs
+    # around dead) or, as root, really evicts the node from the pool.
     (
         "E7",
         '        cmd = "systemctl stop slurmd.service"\n'
         "        os.system(cmd)",
-        "        # Never stop a host service from inside a run.  A failed run must\n"
-        "        # not take anything else down with it; report it via the exit code.",
+        "        # Slurm job: never stop the node daemon.  A failed job must not\n"
+        "        # evict the node from the pool; report it via the exit code.",
         1,
     ),
-    # E8 -- the same failure path also appends to a shared stop log, whose lines
-    # are read as "this host was taken out of the product queue".  A run that
-    # failed on the API host must not make that claim about it: report through
-    # the exit code and the log line above instead of a shared production file.
+    # E8 -- the shared log used to mean "node offlined"; keep writing it, but
+    # with wording that does not imply the node was taken out of service.
     (
         "E8",
-        '        slurm_stop_log_file = "/DiskArray/ProductionSchedule/config/'
-        'SlurmStopLog.txt"\n'
-        "        if osp.exists(slurm_stop_log_file) is True:\n"
-        "            with open(slurm_stop_log_file, 'a') as srlog:\n"
         '                srlog.writelines("{:s} stop {:s}\\n".format('
         "util.get_timestamp(), hostname))",
-        "        # No write to the shared stop log: it is read as \"this host left\n"
-        "        # the product queue\", which a failed run must not claim.  The\n"
-        "        # failure is reported by the log line above and the exit code.\n",
+        '                srlog.writelines("{:s} gpu-error {:s}\\n".format('
+        "util.get_timestamp(), hostname))",
         1,
     ),
     # E9 -- the cloud-limit skip exits 0 before SRLOG is created, which is
@@ -181,38 +162,19 @@ EDITS = [
         "        exit(0)",
         1,
     ),
-    # E10 -- the platform's SR entry reads the *un-superresolved* copy: the job
-    # script lands it on the body name before this runs, so the body holds 1x
-    # content and the strict gate ("1.0 < size < 1.8 GB") would reject it as
-    # "already SRed".  get_l1_pan_tif_rcsc_nosr gates on the one-sided
-    # "size < 1.8 GB" instead.  Both functions resolve the same RC path
-    # (PAN.tif); only the gate differs.
-    (
-        "E10",
-        "    img_abs_path = util.get_l1_pan_tif_rcsc(lq_path, tiftype, "
-        "sr_previous_step)",
-        "    # The body holds the un-superresolved copy by the time this runs (the\n"
-        "    # job script lands it there before invoking this file), so the input\n"
-        "    # is 1x and the strict \"1.0 < size < 1.8 GB\" gate would reject it.\n"
-        "    # get_l1_pan_tif_rcsc_nosr uses the one-sided \"size < 1.8 GB\" gate.\n"
-        "    img_abs_path = util.get_l1_pan_tif_rcsc_nosr(lq_path, tiftype, "
-        "sr_previous_step)",
-        1,
-    ),
 ]
 
 # One-line rationale per edit id, copied into provenance.json for review.
 EDIT_NOTES = {
     "E1": "guard module-level load_library() so a missing .so cannot kill import",
-    "E2": "drop the hard-coded GPU selection in main() (the launcher selects)",
+    "E2": "drop the hard-coded GPU selection in main() (Slurm --gres decides)",
     "E3": "derive gpuid from the environment with an int() fallback",
     "E4": "drop the hard-coded GPU selection in __main__",
     "E5": "count visible devices instead of physical cards (nvml)",
     "E6": "GPU guard: '< 1' instead of '!= 4'",
-    "E7": "never stop a host service from inside a run",
-    "E8": "no shared stop-log write: a failed run must not claim the host left the queue",
+    "E7": "never systemctl stop slurmd from inside a job",
+    "E8": "GPU-error log wording no longer claims the node was stopped",
     "E9": "cloud-limit skip writes SRLOG + 'Run skipped:' before exit(0)",
-    "E10": "read the un-superresolved copy (one-sided size gate)",
 }
 
 
@@ -298,7 +260,7 @@ def render_banner(source_rel, source_sha256):
         BANNER_RULE + "\n"
         "# GENERATED FILE \u2014 DO NOT EDIT\n"
         "#\n"
-        "# Platform deployment variant of the SR production script.  Edit the\n"
+        "# Slurm deployment variant of the SR production script.  Edit the\n"
         "# source and regenerate; hand edits here are lost and fail --check.\n"
         "#\n"
         "# Generator : %s v%s\n"
@@ -405,7 +367,7 @@ def check_artifacts(out_dir, artifacts):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Generate / verify the platform deployment variant of %s" % SOURCE_REL)
+        description="Generate / verify the Slurm deployment variant of %s" % SOURCE_REL)
     parser.add_argument("--check", action="store_true",
                         help="compare on-disk artifacts, do not write; exit 1 if stale")
     parser.add_argument("--source", default=None,
