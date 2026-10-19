@@ -13,6 +13,7 @@ import { parseLocPair } from '../lib/viewMath';
 import { SCENE_PREVIEW_DIVS, previewDivLabel } from '../lib/scene';
 import { isIntermediateStage } from '../lib/stage';
 import type { StretchMode } from '../lib/tifDecode';
+import AppIcon from './AppIcon.vue';
 
 const store = useViewerStore();
 const qc = useQcListStore();
@@ -124,6 +125,7 @@ watch(
       :disabled="store.busy"
       @click="fileInput?.click()"
     >
+      <AppIcon name="image" :size="15" />
       选择影像…
     </button>
     <input
@@ -156,7 +158,9 @@ watch(
         placeholder="输入坐标（X,Y）:123.456,456.123"
         @keydown.enter="doLocate"
       />
-      <button type="button" class="loc-btn" @click="doLocate">定位</button>
+      <button type="button" class="loc-btn" @click="doLocate">
+        定位
+      </button>
     </span>
 
     <!-- 图像对比：开启位置在定位与预览档位之间（都是「看图方式」的控件）。
@@ -172,6 +176,7 @@ watch(
         : '图像对比：点选对比（拖入即覆盖当前这张）或分屏对比（左右各一张、缩放平移同步）'"
       @click="store.setCmpStripOpen(!store.cmpStripOpen)"
     >
+      <AppIcon name="layers" :size="15" />
       图像对比{{ store.compareOn ? ' · ' + cmpModeLabel : '' }}
     </button>
 
@@ -213,7 +218,9 @@ watch(
     >
       绘制掩码{{ store.drawMode ? ' ✓' : '' }}
     </button>
-    <button type="button" class="btn" :disabled="store.busy" @click="store.genMask()">生成掩码</button>
+    <button type="button" class="btn" :disabled="store.busy" @click="store.genMask()">
+      生成掩码
+    </button>
     <button
       type="button"
       class="outbtn"
@@ -224,6 +231,7 @@ watch(
           : '这张图没有盘阵目录，掩码无处可写'"
       @click="store.bakeMaskToServer()"
     >
+      <AppIcon name="upload" :size="15" />
       {{ store.srBusy ? '写入中…' : '保存掩码到盘阵' }}
     </button>
     <button
@@ -237,6 +245,7 @@ watch(
           : '提交 SR 需要盘阵目录：用上面的「盘阵场景」栏打开，或让本地文件按文件名关联'"
       @click="store.submitSr()"
     >
+      <AppIcon name="square-chart-gantt" :size="15" />
       提交 SR
     </button>
 
@@ -252,6 +261,7 @@ watch(
       title="设置：对比模式的后台预取、本地预览缓存"
       @click="store.setSettingsOpen(!store.settingsOpen)"
     >
+      <AppIcon name="settings" :size="15" />
       设置
     </button>
   </div>
@@ -290,6 +300,7 @@ watch(
   white-space: nowrap;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
   transition: filter 0.15s ease, box-shadow 0.15s ease;
+  gap: 6px;
 }
 .btn:hover { filter: brightness(0.97); box-shadow: 0 2px 5px rgba(0, 0, 0, 0.24); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; filter: none; }
@@ -346,6 +357,9 @@ watch(
   border-radius: 8px;
   cursor: pointer;
   transition: background 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
 }
 .loc-btn:hover { background: #fff; }
 
@@ -399,7 +413,9 @@ watch(
   user-select: none;
   white-space: nowrap;
   transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  gap: 6px;
 }
+.outbtn .app-icon, .set-btn .app-icon, .cmp-btn .app-icon { filter: invert(1); }
 .outbtn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.2); color: #fff; border-color: rgba(255, 255, 255, 0.6); }
 .outbtn:disabled { opacity: 0.5; cursor: not-allowed; }
 /* 激活态（绘制掩码 on / 提交SR grad.on）：白底深绿字 + 白环 = 高亮选中 */
@@ -409,6 +425,9 @@ watch(
   border-color: #fff;
   font-weight: 600;
   box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.25);
+}
+.outbtn.on .app-icon, .outbtn.grad.on .app-icon, .set-btn.on .app-icon, .cmp-btn.on .app-icon {
+  filter: none;
 }
 
 .spacer { flex: 1; }
@@ -431,6 +450,7 @@ watch(
   user-select: none;
   white-space: nowrap;
   transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  gap: 10px;
 }
 .cmp-btn:hover { background: rgba(255, 255, 255, 0.2); border-color: rgba(255, 255, 255, 0.6); }
 .cmp-btn.on {
@@ -458,6 +478,7 @@ watch(
   user-select: none;
   white-space: nowrap;
   transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  gap: 10px;
 }
 .set-btn:hover { background: rgba(255, 255, 255, 0.2); border-color: rgba(255, 255, 255, 0.6); }
 .set-btn.on {

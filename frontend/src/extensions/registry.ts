@@ -1,16 +1,7 @@
 import type { ExtensionManifest, ExtensionRoute } from './types.js';
 
-const builtins: ExtensionManifest[] = [
-  {
-    id: 'image_quality', name: '影像质量', version: '1.0.0',
-    host_api_version: '1', enabled: true,
-    routes: [{
-      path: '/extensions/image-quality', name: 'image-quality', title: '影像质量',
-      component: () => import('../pages/ImageQualityPage.vue'),
-    }],
-    nav: { label: '影像质量', to: '/extensions/image-quality' },
-  },
-];
+// 内置扩展按需在这里注册。当前不展示示范性的“影像质量”页面。
+const builtins: ExtensionManifest[] = [];
 
 export class ExtensionRegistry {
   private readonly items = new Map<string, ExtensionManifest>();

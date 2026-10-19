@@ -15,6 +15,7 @@ import { computed, ref } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import RoiToolsTab from './RoiToolsTab.vue';
 import AgentChatTab from './AgentChatTab.vue';
+import AppIcon from './AppIcon.vue';
 
 const store = useViewerStore();
 const tab = ref<'roi' | 'agent'>('roi');
@@ -43,13 +44,13 @@ const toggleTitle = () => (collapsed.value ? '展开上下文侧舱' : '收起�
         class="ctx-tab"
         :class="{ on: tab === 'roi' }"
         @click="tab = 'roi'"
-      >ROI / 工具</button>
+        ><AppIcon name="logs" :size="16" />ROI / 工具</button>
       <button
         type="button"
         class="ctx-tab"
         :class="{ on: tab === 'agent' }"
         @click="tab = 'agent'"
-      >Agent</button>
+        ><AppIcon name="bot" :size="16" />Agent</button>
     </div>
     <div class="ctx-body">
       <RoiToolsTab v-show="tab === 'roi'" />
@@ -108,6 +109,10 @@ const toggleTitle = () => (collapsed.value ? '展开上下文侧舱' : '收起�
 .ctx-tab {
   flex: 1;
   height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   border: 1px solid transparent;
   border-bottom: none;
   border-radius: var(--r-ctrl) var(--r-ctrl) 0 0;
