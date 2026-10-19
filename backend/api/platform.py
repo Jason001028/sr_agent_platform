@@ -563,6 +563,31 @@ def get_trajectory(session_id: str, request: Request):
     }
 
 
+@router.post("/api/chat/sessions/{session_id}/trajectory-feedback", status_code=201)
+async def add_trajectory_feedback(session_id: str, request: Request):
+    """Store one optional human rating for a completed Agent run."""
+    state = request.app.state
+    _session_or_404(state, session_id)
+    body = await _json_body(request)
+    run_id = body.get("run_id")
+    rating = body.get("rating")
+    reason = body.get("reason")
+    if not isinstance(run_id, str) or not run_id:
+        raise HTTPException(status_code=400, detail="run_id 必填")
+    if rating not in {"positive", "negative"}:
+        raise HTTPException(status_code=400, detail="rating 必须为 positive 或 negative")
+    if reason is not None and not isinstance(reason, str):
+        raise HTTPException(status_code=400, detail="reason 必须为字符串")
+    run = state.store.get_agent_run(run_id)
+    if run is None or run["session_id"] != session_id:
+        raise HTTPException(status_code=404, detail="run 不存在")
+    try:
+        return state.store.add_trajectory_feedback(
+            session_id, run_id, rating=rating, reason=reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.post("/api/chat/sessions/{session_id}/messages")
 async def chat_send(session_id: str, request: Request):
     """发一条用户消息，POST 即流：SSE 逐事件返回一个回合的全部产出。

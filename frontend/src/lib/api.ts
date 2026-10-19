@@ -121,7 +121,7 @@ export type ChatSseEvent =
   | { type: 'tool_result'; name: string; ok: boolean; data: unknown; error: string | null }
   | { type: 'assistant'; content: string }
   | { type: 'usage'; usage: TokenUsageEvent; aggregate: ChatUsage }
-  | { type: 'turn_done'; content: string; error: string | null; usage?: ChatUsage }
+  | { type: 'turn_done'; content: string; error: string | null; usage?: ChatUsage; run_id?: string }
   | { type: 'error'; error: string };
 
 /** 队列 SSE 事件（§3.3 job_update）。
@@ -507,6 +507,21 @@ export async function apiSessionUsage(
   const r = await http(apiUrl(cfg,
     `/api/chat/sessions/${encodeURIComponent(sid)}/usage`));
   return ((await r.json()) as { usage: ChatUsage }).usage;
+}
+
+export type TrajectoryFeedbackRating = 'positive' | 'negative';
+
+export async function apiSubmitTrajectoryFeedback(
+  cfg: SrConfig, sid: string, runId: string,
+  rating: TrajectoryFeedbackRating, reason?: string,
+): Promise<{ feedback_id: number; run_id: string; rating: TrajectoryFeedbackRating }> {
+  const r = await http(apiUrl(cfg,
+    `/api/chat/sessions/${encodeURIComponent(sid)}/trajectory-feedback`), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ run_id: runId, rating, ...(reason ? { reason } : {}) }),
+  });
+  return (await r.json()) as { feedback_id: number; run_id: string; rating: TrajectoryFeedbackRating };
 }
 
 /** 发一条消息：POST 即流，SSE 逐事件回调；Promise 在流结束（turn_done/error）时完成。 */

@@ -230,6 +230,20 @@ class TestChat(PlatformBase):
         self.assertIn("tool_execution_end", types)
         self.assertEqual(body["events"][-1]["event_type"], "run_end")
 
+    def test_trajectory_feedback_is_optional_and_idempotently_guarded(self):
+        c = self.client()
+        sid = c.post("/api/chat/sessions").json()["session_id"]
+        c.post(f"/api/chat/sessions/{sid}/messages", json={"content": "反馈"})
+        trajectory = c.get(f"/api/chat/sessions/{sid}/trajectory").json()
+        run_id = trajectory["runs"][0]["run_id"]
+        r = c.post(f"/api/chat/sessions/{sid}/trajectory-feedback",
+                   json={"run_id": run_id, "rating": "positive"})
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.json()["rating"], "positive")
+        duplicate = c.post(f"/api/chat/sessions/{sid}/trajectory-feedback",
+                           json={"run_id": run_id, "rating": "negative"})
+        self.assertEqual(duplicate.status_code, 409)
+
     def test_empty_content_400_and_bad_json_400(self):
         c = self.client()
         sid = c.post("/api/chat/sessions").json()["session_id"]

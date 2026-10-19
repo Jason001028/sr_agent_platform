@@ -11,9 +11,10 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { loadSrConfig } from '../lib/scene.js';
 import {
-  apiCreateSession, apiListSessions, apiSessionMessages, apiSessionUsage, apiChatSend,
+  apiCreateSession, apiListSessions, apiSessionMessages, apiSessionUsage,
+  apiChatSend, apiSubmitTrajectoryFeedback,
 } from '../lib/api.js';
-import type { ChatSession, ChatUsage, HistoryMsg, PlatformSseEvent } from '../lib/api.js';
+import type { ChatSession, ChatUsage, HistoryMsg, PlatformSseEvent, TrajectoryFeedbackRating } from '../lib/api.js';
 
 /** 单条工具声明（wire tool_calls[].function → {name, arguments}）。 */
 export interface ToolUse {
@@ -132,6 +133,8 @@ export const useChatStore = defineStore('chat', () => {
   const error = ref('');
   const loading = ref(false);
   const usage = ref<ChatUsage | null>(null);
+  const lastRunId = ref<string | null>(null);
+  const feedbackRating = ref<TrajectoryFeedbackRating | null>(null);
 
   function hasSession(): boolean { return sessionId.value !== null; }
 
@@ -145,6 +148,8 @@ export const useChatStore = defineStore('chat', () => {
     const body = await apiSessionMessages(cfg, sid);
     messages.value = body.messages.map(msgFromHistory);
     usage.value = await apiSessionUsage(cfg, sid);
+    lastRunId.value = null;
+    feedbackRating.value = null;
     error.value = '';
   }
 
@@ -181,6 +186,8 @@ export const useChatStore = defineStore('chat', () => {
       sessionId.value = sid;
       messages.value = [];
       usage.value = null;
+      lastRunId.value = null;
+      feedbackRating.value = null;
       error.value = '';
     } catch (e) {
       error.value = '新建会话失败：' + (e instanceof Error ? e.message : String(e));
@@ -207,6 +214,10 @@ export const useChatStore = defineStore('chat', () => {
       await apiChatSend(cfg, sid, text, (ev) => {
         if (ev.type === 'usage') usage.value = ev.aggregate;
         if (ev.type === 'turn_done' && ev.usage) usage.value = ev.usage;
+        if (ev.type === 'turn_done' && ev.run_id) {
+          lastRunId.value = ev.run_id;
+          feedbackRating.value = null;
+        }
         messages.value = reduceChatSse(messages.value, ev);
       });
     } catch (e) {
@@ -219,8 +230,21 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  async function submitFeedback(rating: TrajectoryFeedbackRating, reason?: string): Promise<void> {
+    const sid = sessionId.value;
+    const runId = lastRunId.value;
+    if (!sid || !runId || feedbackRating.value) return;
+    try {
+      await apiSubmitTrajectoryFeedback(loadSrConfig(), sid, runId, rating, reason);
+      feedbackRating.value = rating;
+    } catch (e) {
+      error.value = '反馈提交失败：' + (e instanceof Error ? e.message : String(e));
+    }
+  }
+
   return {
-    sessions, sessionId, messages, sending, error, loading, usage,
+    sessions, sessionId, messages, sending, error, loading, usage, lastRunId, feedbackRating,
     hasSession, init, refreshSessions, loadHistory, newSession, selectSession, send,
+    submitFeedback,
   };
 });

@@ -44,6 +44,10 @@ function onSend(): void {
   void chat.send(text);
 }
 
+function onFeedback(rating: 'positive' | 'negative'): void {
+  void chat.submitFeedback(rating);
+}
+
 async function scrollBottom(): Promise<void> {
   await nextTick();
   if (scrollEl.value) scrollEl.value.scrollTop = scrollEl.value.scrollHeight;
@@ -140,6 +144,17 @@ onMounted(() => {
         </div>
 
         <p v-if="chat.sending" class="cp-thinking">正在思考…</p>
+        <div v-if="chat.lastRunId && !chat.sending" class="cp-feedback">
+          <span>这次回答有帮助吗？</span>
+          <button type="button" class="cp-feedback-btn"
+                  :class="{ selected: chat.feedbackRating === 'positive' }"
+                  :disabled="Boolean(chat.feedbackRating)"
+                  @click="onFeedback('positive')">有帮助</button>
+          <button type="button" class="cp-feedback-btn"
+                  :class="{ selected: chat.feedbackRating === 'negative' }"
+                  :disabled="Boolean(chat.feedbackRating)"
+                  @click="onFeedback('negative')">需改进</button>
+        </div>
       </div>
 
       <div class="cp-inputbar">
@@ -220,6 +235,10 @@ onMounted(() => {
 
 .cp-scroll { flex: 1; overflow: auto; padding: 18px; display: flex; flex-direction: column; gap: 10px; background: var(--surface); }
 .cp-loading, .cp-empty, .cp-thinking { color: var(--ink-sub); font-size: 13px; text-align: center; }
+.cp-feedback { display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--ink-sub); font-size: 12px; }
+.cp-feedback-btn { border: 1px solid var(--line); border-radius: var(--r-pill); background: var(--surface); color: var(--ink-sub); padding: 3px 10px; cursor: pointer; }
+.cp-feedback-btn:hover:not(:disabled), .cp-feedback-btn.selected { border-color: var(--accent-3); color: var(--accent-deep); background: var(--accent-soft); }
+.cp-feedback-btn:disabled { cursor: default; opacity: .75; }
 .cp-empty p { max-width: 520px; margin: 30px auto 0; line-height: 1.7; }
 
 .cp-row { display: flex; flex-direction: column; }

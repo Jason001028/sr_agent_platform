@@ -167,6 +167,17 @@ CREATE INDEX IF NOT EXISTS idx_trajectory_events_run
     ON trajectory_events(run_id, seq);
 CREATE INDEX IF NOT EXISTS idx_trajectory_events_session
     ON trajectory_events(session_id, seq);
+CREATE TABLE IF NOT EXISTS trajectory_feedback (
+    feedback_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    TEXT NOT NULL,
+    run_id        TEXT NOT NULL,
+    rating        TEXT NOT NULL CHECK (rating IN ('positive', 'negative')),
+    reason        TEXT,
+    created_at    REAL NOT NULL,
+    UNIQUE(session_id, run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_trajectory_feedback_session
+    ON trajectory_feedback(session_id, created_at, feedback_id);
 """
 
 #: sr_tasks 里发布后新增的列。`CREATE TABLE IF NOT EXISTS` 对**已存在**的表一个字
@@ -479,6 +490,39 @@ class Store:
                         "payload": json.loads(row[13]) if row[13] else None,
                         "created_at": row[14]})
         return out
+
+    def add_trajectory_feedback(self, session_id: str, run_id: str, *,
+                                rating: str, reason: str | None = None) -> dict:
+        if rating not in {"positive", "negative"}:
+            raise ValueError("rating must be positive or negative")
+        run = self.get_agent_run(run_id)
+        if run is None:
+            raise ValueError("run not found")
+        if run["session_id"] != session_id:
+            raise ValueError("run does not belong to session")
+        now = time.time()
+        try:
+            cur = self._db().execute(
+                "INSERT INTO trajectory_feedback "
+                "(session_id, run_id, rating, reason, created_at) VALUES (?, ?, ?, ?, ?)",
+                (session_id, run_id, rating, reason, now),
+            )
+            self._db().commit()
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("feedback already submitted for this run") from exc
+        return {"feedback_id": int(cur.lastrowid), "session_id": session_id,
+                "run_id": run_id, "rating": rating, "reason": reason,
+                "created_at": now}
+
+    def list_trajectory_feedback(self, session_id: str) -> list[dict]:
+        rows = self._db().execute(
+            "SELECT feedback_id, session_id, run_id, rating, reason, created_at "
+            "FROM trajectory_feedback WHERE session_id = ? "
+            "ORDER BY created_at, feedback_id", (session_id,)
+        ).fetchall()
+        return [{"feedback_id": r[0], "session_id": r[1], "run_id": r[2],
+                 "rating": r[3], "reason": r[4], "created_at": r[5]}
+                for r in rows]
 
     # ---- machines / plugins ---------------------------------------------
 

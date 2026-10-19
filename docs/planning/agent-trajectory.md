@@ -21,6 +21,15 @@ GET /api/chat/sessions/{session_id}/trajectory?run_id=...&limit=...&offset=...
 
 现有聊天 SSE 和 `messages` 恢复协议不变。
 
+## 反馈采集
+
+每次 trajectory run 完成后，聊天页会显示一个可选的“有帮助/需改进”反馈入口。反馈按完整 run 关联，避免把单个工具步骤的局部结果误当成最终质量。
+
+- `trajectory_feedback`：保存 `session_id`、`run_id`、二值评分、可选原因和提交时间。
+- 同一个 run 只接受一次反馈，重复提交返回 `409`。
+- 写入接口：`POST /api/chat/sessions/{session_id}/trajectory-feedback`。
+- 反馈与 trajectory 通过 `run_id` 关联，可用于后续质量筛选、人工复核和 SFT 数据构建。
+
 ## 下一步
 
 1. 增加 trajectory → SFT JSONL 的投影器，明确 prompt、assistant、tool call 和 tool result 的训练格式。
