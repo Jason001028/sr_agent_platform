@@ -129,6 +129,44 @@ CREATE TABLE IF NOT EXISTS llm_usage (
 );
 CREATE INDEX IF NOT EXISTS idx_llm_usage_session
     ON llm_usage(session_id, created_at, id);
+CREATE TABLE IF NOT EXISTS agent_runs (
+    run_id              TEXT PRIMARY KEY,
+    session_id          TEXT NOT NULL,
+    machine_id          TEXT,
+    status              TEXT NOT NULL DEFAULT 'running',
+    model               TEXT,
+    prompt              TEXT,
+    system_prompt_hash  TEXT,
+    tool_manifest_hash  TEXT,
+    answer              TEXT,
+    error               TEXT,
+    started_at          REAL NOT NULL,
+    finished_at         REAL,
+    metadata            TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_session
+    ON agent_runs(session_id, started_at, run_id);
+CREATE TABLE IF NOT EXISTS trajectory_events (
+    seq               INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id          TEXT NOT NULL UNIQUE,
+    run_id            TEXT NOT NULL,
+    session_id        TEXT NOT NULL,
+    turn              INTEGER,
+    event_type        TEXT NOT NULL,
+    parent_event_id   TEXT,
+    tool_call_id      TEXT,
+    tool_name         TEXT,
+    status            TEXT,
+    started_at        REAL,
+    finished_at       REAL,
+    duration_ms       INTEGER,
+    payload           TEXT,
+    created_at        REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_trajectory_events_run
+    ON trajectory_events(run_id, seq);
+CREATE INDEX IF NOT EXISTS idx_trajectory_events_session
+    ON trajectory_events(session_id, seq);
 """
 
 #: sr_tasks 里发布后新增的列。`CREATE TABLE IF NOT EXISTS` 对**已存在**的表一个字
@@ -300,6 +338,147 @@ class Store:
                 "total_tokens": total, "calls": len(events),
                 "source": (events[-1]["source"] if events else "unavailable"),
                 "events": events}
+
+    # ---- Agent trajectory -----------------------------------------------
+
+    def create_agent_run(self, session_id: str, *, machine_id: str | None = None,
+                         model: str | None = None, prompt: str | None = None,
+                         system_prompt_hash: str | None = None,
+                         tool_manifest_hash: str | None = None,
+                         metadata: dict | None = None) -> str:
+        run_id = uuid.uuid4().hex
+        now = time.time()
+        self._db().execute(
+            "INSERT INTO agent_runs (run_id, session_id, machine_id, status, model, "
+            "prompt, system_prompt_hash, tool_manifest_hash, started_at, metadata) "
+            "VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)",
+            (run_id, session_id, machine_id, model, prompt,
+             system_prompt_hash, tool_manifest_hash, now,
+             json.dumps(metadata or {}, ensure_ascii=False)),
+        )
+        self._db().commit()
+        return run_id
+
+    def interrupt_open_agent_runs(self, session_id: str) -> list[str]:
+        """Close runs left RUNNING by a crashed process as interrupted."""
+        db = self._db()
+        rows = db.execute(
+            "SELECT run_id FROM agent_runs WHERE session_id = ? AND status = 'running'",
+            (session_id,),
+        ).fetchall()
+        if not rows:
+            return []
+        now = time.time()
+        message = "run interrupted before completion; outcome may be incomplete"
+        ids = [row[0] for row in rows]
+        db.executemany(
+            "UPDATE agent_runs SET status = 'interrupted', error = ?, finished_at = ? "
+            "WHERE run_id = ?",
+            [(message, now, run_id) for run_id in ids],
+        )
+        db.commit()
+        for run_id in ids:
+            self.append_trajectory_event(
+                run_id=run_id, session_id=session_id,
+                event_id=uuid.uuid4().hex, event_type="run_end",
+                status="interrupted", payload={"error": message},
+                finished_at=now,
+            )
+        return ids
+
+    def finish_agent_run(self, run_id: str, *, status: str,
+                         answer: str | None = None, error: str | None = None,
+                         finished_at: float | None = None) -> dict | None:
+        finished = float(finished_at or time.time())
+        db = self._db()
+        db.execute(
+            "UPDATE agent_runs SET status = ?, answer = ?, error = ?, finished_at = ? "
+            "WHERE run_id = ?",
+            (str(status), answer, error, finished, run_id),
+        )
+        db.commit()
+        return self.get_agent_run(run_id)
+
+    def get_agent_run(self, run_id: str) -> dict | None:
+        row = self._db().execute(
+            "SELECT run_id, session_id, machine_id, status, model, prompt, "
+            "system_prompt_hash, tool_manifest_hash, answer, error, started_at, "
+            "finished_at, metadata FROM agent_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return {"run_id": row[0], "session_id": row[1], "machine_id": row[2],
+                "status": row[3], "model": row[4], "prompt": row[5],
+                "system_prompt_hash": row[6], "tool_manifest_hash": row[7],
+                "answer": row[8], "error": row[9], "started_at": row[10],
+                "finished_at": row[11], "metadata": json.loads(row[12] or "{}")}
+
+    def list_agent_runs(self, session_id: str, *, limit: int = 50,
+                        offset: int = 0) -> list[dict]:
+        rows = self._db().execute(
+            "SELECT run_id FROM agent_runs WHERE session_id = ? "
+            "ORDER BY started_at, run_id LIMIT ? OFFSET ?",
+            (session_id, int(limit), int(offset)),
+        ).fetchall()
+        return [self.get_agent_run(row[0]) for row in rows]
+
+    def append_trajectory_event(self, *, run_id: str, session_id: str,
+                                event_id: str, event_type: str,
+                                turn: int | None = None,
+                                parent_event_id: str | None = None,
+                                tool_call_id: str | None = None,
+                                tool_name: str | None = None,
+                                status: str | None = None,
+                                payload: dict | None = None,
+                                started_at: float | None = None,
+                                finished_at: float | None = None,
+                                duration_ms: int | None = None) -> dict:
+        now = time.time()
+        cur = self._db().execute(
+            "INSERT INTO trajectory_events (event_id, run_id, session_id, turn, "
+            "event_type, parent_event_id, tool_call_id, tool_name, status, "
+            "started_at, finished_at, duration_ms, payload, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (event_id, run_id, session_id, turn, event_type, parent_event_id,
+             tool_call_id, tool_name, status,
+             started_at, finished_at, duration_ms,
+             json.dumps(payload, ensure_ascii=False) if payload is not None else None,
+             now),
+        )
+        self._db().commit()
+        return {"seq": int(cur.lastrowid), "event_id": event_id, "run_id": run_id,
+                "session_id": session_id, "turn": turn, "event_type": event_type,
+                "parent_event_id": parent_event_id, "tool_call_id": tool_call_id,
+                "tool_name": tool_name, "status": status,
+                "started_at": started_at, "finished_at": finished_at,
+                "duration_ms": duration_ms, "payload": payload, "created_at": now}
+
+    def list_trajectory_events(self, session_id: str, *, run_id: str | None = None,
+                               limit: int = 500, offset: int = 0) -> list[dict]:
+        where = "session_id = ?"
+        params: list = [session_id]
+        if run_id is not None:
+            where += " AND run_id = ?"
+            params.append(run_id)
+        params.extend([int(limit), int(offset)])
+        rows = self._db().execute(
+            "SELECT seq, event_id, run_id, session_id, turn, event_type, "
+            "parent_event_id, tool_call_id, tool_name, status, started_at, "
+            "finished_at, duration_ms, payload, created_at "
+            f"FROM trajectory_events WHERE {where} ORDER BY seq LIMIT ? OFFSET ?",
+            tuple(params),
+        ).fetchall()
+        out = []
+        for row in rows:
+            out.append({"seq": row[0], "event_id": row[1], "run_id": row[2],
+                        "session_id": row[3], "turn": row[4], "event_type": row[5],
+                        "parent_event_id": row[6], "tool_call_id": row[7],
+                        "tool_name": row[8], "status": row[9],
+                        "started_at": row[10], "finished_at": row[11],
+                        "duration_ms": row[12],
+                        "payload": json.loads(row[13]) if row[13] else None,
+                        "created_at": row[14]})
+        return out
 
     # ---- machines / plugins ---------------------------------------------
 

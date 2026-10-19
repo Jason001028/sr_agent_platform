@@ -215,6 +215,21 @@ class TestChat(PlatformBase):
         self.assertIn("mock 模型", final["content"])
         self.assertIsNone(final["tool_calls"])
 
+    def test_trajectory_endpoint_returns_run_and_events(self):
+        c = self.client()
+        sid = c.post("/api/chat/sessions").json()["session_id"]
+        response = c.post(f"/api/chat/sessions/{sid}/messages",
+                          json={"content": "记录轨迹"})
+        self.assertEqual(response.status_code, 200)
+        body = c.get(f"/api/chat/sessions/{sid}/trajectory").json()
+        self.assertEqual(body["session_id"], sid)
+        self.assertEqual(len(body["runs"]), 1)
+        self.assertEqual(body["runs"][0]["status"], "succeeded")
+        types = [event["event_type"] for event in body["events"]]
+        self.assertIn("tool_execution_start", types)
+        self.assertIn("tool_execution_end", types)
+        self.assertEqual(body["events"][-1]["event_type"], "run_end")
+
     def test_empty_content_400_and_bad_json_400(self):
         c = self.client()
         sid = c.post("/api/chat/sessions").json()["session_id"]

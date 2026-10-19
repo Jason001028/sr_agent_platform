@@ -543,6 +543,26 @@ def get_usage(session_id: str, request: Request):
             "usage": state.store.summarize_llm_usage(session_id)}
 
 
+@router.get("/api/chat/sessions/{session_id}/trajectory")
+def get_trajectory(session_id: str, request: Request):
+    """Return durable Agent runs and their append-only lifecycle events."""
+    state = request.app.state
+    _session_or_404(state, session_id)
+    run_id = request.query_params.get("run_id")
+    try:
+        limit = min(2000, max(1, int(request.query_params.get("limit", "500"))))
+        offset = max(0, int(request.query_params.get("offset", "0")))
+    except ValueError as exc:
+        raise HTTPException(status_code=400,
+                            detail="limit/offset 须为整数") from exc
+    return {
+        "session_id": session_id,
+        "runs": state.store.list_agent_runs(session_id),
+        "events": state.store.list_trajectory_events(
+            session_id, run_id=run_id, limit=limit, offset=offset),
+    }
+
+
 @router.post("/api/chat/sessions/{session_id}/messages")
 async def chat_send(session_id: str, request: Request):
     """发一条用户消息，POST 即流：SSE 逐事件返回一个回合的全部产出。
@@ -625,7 +645,8 @@ async def chat_send(session_id: str, request: Request):
             if r.get("ok") and not r.get("error"):
                 yield _frame({"type": "turn_done",
                               "content": r.get("answer"), "error": None,
-                              "usage": r.get("usage")})
+                              "usage": r.get("usage"),
+                              "run_id": r.get("run_id")})
             # 其它路径：run_loop 已通过 on_step 发过 error 帧，turn_done 不出现
         finally:
             lock.release()

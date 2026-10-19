@@ -239,6 +239,53 @@ class TestPersistence(unittest.TestCase):
         finally:
             self._cleanup(store)
 
+    def test_trajectory_records_run_and_tool_lifecycle(self):
+        store = self._store()
+        try:
+            calls = []
+
+            def chat(messages, tools):
+                calls.append(True)
+                if len(calls) == 1:
+                    return {"content": None, "tool_calls": [{
+                        "id": "call_traj", "name": "fix_bad_lines",
+                        "arguments": '{"input_path":"no_such.tif", "token":"secret"}',
+                    }]}
+                return {"content": "已处理", "tool_calls": []}
+
+            result = run_loop(cfg(), "记录轨迹", chat=chat, store=store)
+            self.assertTrue(result["run_id"])
+            runs = store.list_agent_runs(result["session_id"])
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0]["status"], "succeeded")
+            events = store.list_trajectory_events(result["session_id"])
+            kinds = [event["event_type"] for event in events]
+            self.assertIn("run_start", kinds)
+            self.assertIn("tool_execution_start", kinds)
+            self.assertIn("tool_execution_end", kinds)
+            self.assertIn("run_end", kinds)
+            start = next(e for e in events if e["event_type"] == "tool_execution_start")
+            self.assertEqual(start["tool_name"], "fix_bad_lines")
+            self.assertEqual(start["payload"]["value"]["arguments"]["token"], "[REDACTED]")
+        finally:
+            self._cleanup(store)
+
+    def test_open_trajectory_is_marked_interrupted_on_next_run(self):
+        store = self._store()
+        try:
+            sid = store.create_session()
+            old_run = store.create_agent_run(sid, prompt="旧回合")
+
+            def chat(messages, tools):
+                return {"content": "新回合", "tool_calls": []}
+
+            result = run_loop(cfg(), "新回合", chat=chat, store=store,
+                              session_id=sid, resume=True)
+            self.assertTrue(result["ok"])
+            self.assertEqual(store.get_agent_run(old_run)["status"], "interrupted")
+        finally:
+            self._cleanup(store)
+
     def test_resume_repairs_unclosed_turn(self):
         # simulate a crash mid-tool: assistant tool_calls durable, result lost.
         store = self._store()

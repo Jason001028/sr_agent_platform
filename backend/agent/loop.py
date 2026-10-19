@@ -24,11 +24,13 @@ and external-job idempotency (run_sr task table) are separate layers.
 from __future__ import annotations
 
 import json
+import time
 
 from openai import OpenAI
 
 from backend.config import Config
 from backend.services import plugins as plugin_svc
+from backend.services.trajectory import TrajectoryRecorder
 from backend.tools.contract import ToolRegistry, default_registry
 from backend.tools.contract import list_tools
 
@@ -289,6 +291,21 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
     if registry is None and allowed_names is not None:
         tools = [t.openai_function() for t in list_tools() if t.name in allowed_names]
 
+    trajectory = None
+    if store is not None and session_id is not None:
+        trajectory = TrajectoryRecorder(
+            store, session_id=session_id, prompt=prompt,
+            machine_id=machine_id, model=getattr(cfg, "llm_model", None),
+            system_prompt=system_prompt, tools=tools)
+
+    def finish_run(result: dict) -> dict:
+        if trajectory is not None:
+            status = "succeeded" if result.get("ok") else "failed"
+            trajectory.finish(status=status, answer=result.get("answer"),
+                              error=result.get("error"))
+            result["run_id"] = trajectory.run_id
+        return result
+
     def commit(msg: dict):
         """Append to the wire list and checkpoint to the store immediately."""
         messages.append(msg)
@@ -299,10 +316,28 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
     call_index = 0
 
     for turn in range(1, max_turns + 1):
+        if trajectory is not None:
+            trajectory.event("turn_start", turn=turn, status="running")
+        llm_started = time.time()
+        llm_event = None
+        if trajectory is not None:
+            llm_event = trajectory.event(
+                "llm_request_start", turn=turn, status="started",
+                payload={"message_count": len(messages), "tool_count": len(tools)},
+                started_at=llm_started)
         try:
             out = chat(messages, tools)
         except Exception as e:  # noqa: BLE001 — surface cleanly, no retry loop
             error = f"{type(e).__name__}: {e}"
+            if trajectory is not None:
+                ended = time.time()
+                trajectory.event("llm_request_end", turn=turn,
+                                 parent_event_id=llm_event["event_id"] if llm_event else None,
+                                 status="failed", payload={"error": error},
+                                 started_at=llm_started, finished_at=ended,
+                                 duration_ms=max(0, int((ended - llm_started) * 1000)))
+                trajectory.event("error", turn=turn, status="failed",
+                                 payload={"error": error})
             if verbose:
                 print(f"[turn {turn}] LLM call failed: {error}")
             transcript.append({"role": "error", "error": error, "turn": turn})
@@ -310,12 +345,20 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                 on_step({"type": "error", "error": error, "turn": turn})
             if store is not None:
                 store.set_session_status(session_id, "error")
-            return {"ok": False, "turns": turn, "messages": transcript,
-                    "answer": None, "error": error, "session_id": session_id,
-                    "usage": usage}
+            return finish_run({"ok": False, "turns": turn, "messages": transcript,
+                               "answer": None, "error": error,
+                               "session_id": session_id, "usage": usage})
 
         content = out.get("content")
         tool_calls = out.get("tool_calls") or []
+        llm_finished = time.time()
+        if trajectory is not None:
+            trajectory.event(
+                "llm_request_end", turn=turn,
+                parent_event_id=llm_event["event_id"] if llm_event else None,
+                status="succeeded", payload={"tool_call_count": len(tool_calls)},
+                started_at=llm_started, finished_at=llm_finished,
+                duration_ms=max(0, int((llm_finished - llm_started) * 1000)))
         call_usage = _normalize_usage(out.get("usage"))
         if call_usage is not None:
             call_index += 1
@@ -334,6 +377,10 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
             if on_step is not None:
                 on_step({"type": "usage", "usage": event,
                          "aggregate": _usage_public(usage)})
+            if trajectory is not None:
+                trajectory.event("usage", turn=turn,
+                                 parent_event_id=llm_event["event_id"] if llm_event else None,
+                                 status="recorded", payload=event)
 
         if verbose:
             print(f"[turn {turn}] assistant: {content!r} "
@@ -342,13 +389,18 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
         if not tool_calls:
             commit({"role": "assistant", "content": content})
             transcript.append({"role": "assistant", "content": content})
+            if trajectory is not None:
+                trajectory.event("assistant", turn=turn, status="completed",
+                                 payload={"content": content})
+                trajectory.event("turn_end", turn=turn, status="completed",
+                                 payload={"has_tool_calls": False})
             if on_step is not None and content:
                 on_step({"type": "assistant", "content": content})
             if store is not None:
                 store.set_session_status(session_id, "done")
-            return {"ok": True, "turns": turn, "messages": transcript,
-                    "answer": content or "", "error": None,
-                    "session_id": session_id, "usage": usage}
+            return finish_run({"ok": True, "turns": turn, "messages": transcript,
+                               "answer": content or "", "error": None,
+                               "session_id": session_id, "usage": usage})
 
         # Checkpoint BEFORE the tools run: the assistant's intent is durable
         # before any external side effect, so a crash mid-tool leaves a
@@ -362,10 +414,24 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
         })
         transcript.append({"role": "assistant", "content": content,
                            "tool_calls": tool_calls})
+        assistant_event = None
+        if trajectory is not None:
+            assistant_event = trajectory.event(
+                "assistant", turn=turn, status="tool_calls",
+                payload={"content": content, "tool_calls": tool_calls})
         if on_step is not None and content:
             on_step({"type": "assistant", "content": content})
 
         for tc in tool_calls:
+            tool_started = time.time()
+            tool_event = None
+            if trajectory is not None:
+                tool_event = trajectory.event(
+                    "tool_execution_start", turn=turn,
+                    parent_event_id=assistant_event["event_id"] if assistant_event else None,
+                    tool_call_id=tc.get("id"), tool_name=tc.get("name"),
+                    status="started", payload={"arguments": _parse_args(tc.get("arguments"))},
+                    started_at=tool_started)
             if on_step is not None:
                 on_step({"type": "tool_call", "name": tc["name"],
                          "args": _parse_args(tc["arguments"])})
@@ -380,6 +446,16 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                 result = call_tool(tc["name"], tc["arguments"],
                                    registry=active_registry,
                                    allowed_names=allowed_names)
+            if trajectory is not None:
+                tool_finished = time.time()
+                trajectory.event(
+                    "tool_execution_end", turn=turn,
+                    parent_event_id=tool_event["event_id"] if tool_event else None,
+                    tool_call_id=tc.get("id"), tool_name=tc.get("name"),
+                    status="succeeded" if result.get("ok") else "failed",
+                    payload={"result": result}, started_at=tool_started,
+                    finished_at=tool_finished,
+                    duration_ms=max(0, int((tool_finished - tool_started) * 1000)))
             if verbose:
                 status = "ok" if result["ok"] else "ERR: " + (result["error"] or "")
                 print(f"[turn {turn}] tool {tc['name']} → {status}")
@@ -391,6 +467,10 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                     "content": json.dumps(result, ensure_ascii=False)})
             transcript.append({"role": "tool", "name": tc["name"],
                                "tool_call_id": tc["id"], "content": result})
+        if trajectory is not None:
+            trajectory.event("turn_end", turn=turn, status="completed",
+                             payload={"has_tool_calls": True,
+                                      "tool_call_count": len(tool_calls)})
 
     error = f"max_turns={max_turns} reached"
     if verbose:
@@ -400,6 +480,9 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
         on_step({"type": "error", "error": error, "turn": max_turns})
     if store is not None:
         store.set_session_status(session_id, "error")
-    return {"ok": False, "turns": max_turns, "messages": transcript,
-            "answer": None, "error": error, "session_id": session_id,
-            "usage": usage}
+    if trajectory is not None:
+        trajectory.event("error", turn=max_turns, status="failed",
+                         payload={"error": error})
+    return finish_run({"ok": False, "turns": max_turns, "messages": transcript,
+                       "answer": None, "error": error,
+                       "session_id": session_id, "usage": usage})
