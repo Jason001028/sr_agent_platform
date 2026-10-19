@@ -64,7 +64,9 @@
 | `GET /api/tools` | 工具清单（manifest 机械生成，供 UI/文档） | 3.1 |
 | `POST /api/tools/{name}` | 直调单个工具（绕过 LLM；validate + 白名单照常） | 3.1 |
 | `POST /api/chat/sessions` | 新建会话 → `201 {session_id}` | 3.2 |
-| `GET /api/chat/sessions` | 会话列表（新建入口 + resume 用） | 3.2 |
+| `GET /api/chat/sessions` | 会话列表（新建入口 + resume 用；置顶在前） | 3.2 |
+| `PATCH /api/chat/sessions/{id}` | 置顶/取消置顶 `{pinned}` | 3.2 |
+| `DELETE /api/chat/sessions/{id}` | 删除会话及其消息/用量/轨迹 | 3.2 |
 | `GET /api/chat/sessions/{id}/messages` | 历史消息（刷新可恢复渲染） | 3.2 |
 | `POST /api/chat/sessions/{id}/messages` | 发一条用户消息 → **SSE**（一请求一回合） | 3.2 |
 | `GET /api/queue` | 队列列表（sr_tasks 全量 + 实时状态） | 3.3 |
@@ -121,7 +123,9 @@
 **会话模型**：单会话 + 「新建」按钮。会话 = `store.sessions` 一行；消息 = OpenAI wire 格式落 `store.messages`（与 `loop.run_loop` 持久化同一套，天然支持 resume）。前端刷新 → `GET messages` 恢复历史；切回旧会话 → `POST messages` 时服务端按 `resume=True` 续接（loop 既有语义：崩溃留下的未完成回合以"结果未知勿盲重试"修复）。
 
 - `POST /api/chat/sessions` → `201 {"session_id": "…hex"}`（`store.create_session()`）。
-- `GET /api/chat/sessions` → `200 {"sessions":[{session_id, created_at, updated_at, status}]}`（按 updated_at 倒序）。
+- `GET /api/chat/sessions` → `200 {"sessions":[{session_id, created_at, updated_at, status, pinned}]}`（置顶在前，其余按 updated_at 倒序）。
+- `PATCH /api/chat/sessions/{id}` — body `{"pinned": true|false}` → `200` 更新后的会话行。置顶**不改** `updated_at`（那是消息活动时间）；非布尔值 → 400，会话不存在 → 404。多选批量操作由前端逐条调用本端点。
+- `DELETE /api/chat/sessions/{id}` → `204`。同时删除该会话的 `messages` / `llm_usage` / `agent_runs` / `trajectory_events` / `trajectory_feedback`。回合进行中（会话锁被占用）→ `409`；会话不存在 → 404。队列任务 `sr_tasks` 不删（外部副作用的操作记录），其 `session_id` 保留为溯源线索。
 - `GET /api/chat/sessions/{id}/messages` → `200 {"session_id", "status", "messages":[…]}`；消息对前端投影为：
   `{seq, role, content?, tool_calls?:[{name,arguments}] | null, tool_name?, ok?}`（role ∈ user/assistant/tool；tool 消息带 `name`/`ok`）。404 = 会话不存在。
 - `POST /api/chat/sessions/{id}/messages` — body `{"content":"<用户话术>"}`，**`Content-Type: text/event-stream`，POST 即流**。行为：

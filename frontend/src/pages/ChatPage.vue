@@ -6,10 +6,13 @@
  *   工具回合渲染为 用户 ─ Assistant(声明工具) ─ 工具结果 ─ 最终回复。
  * mock LLM（SR_LLM_MOCK=1）每回合固定 search_scenes → 总结，可离线走通。
  */
-import { nextTick, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { useChatStore } from '../stores/chat.js';
 import type { ChatMsg } from '../stores/chat.js';
+import type { ChatSession } from '../lib/api.js';
 import TokenUsagePanel from '../components/TokenUsagePanel.vue';
+import MarkdownBody from '../components/MarkdownBody.vue';
+import ThinkingIndicator from '../components/ThinkingIndicator.vue';
 import { apiListPlugins } from '../lib/api.js';
 import { loadSrConfig } from '../lib/scene.js';
 
@@ -48,6 +51,69 @@ function onFeedback(rating: 'positive' | 'negative'): void {
   void chat.submitFeedback(rating);
 }
 
+/* ---------------- 会话多选 / 置顶 / 删除 ---------------- */
+const selectMode = ref(false);
+const selected = ref<string[]>([]);
+
+const pickedSessions = computed(() =>
+  chat.sessions.filter((s) => selected.value.includes(s.session_id)));
+/** 选中项全部已置顶时，批量按钮变成「取消置顶」。 */
+const allPickedPinned = computed(() =>
+  pickedSessions.value.length > 0 && pickedSessions.value.every((s) => s.pinned));
+const allPicked = computed(() =>
+  chat.sessions.length > 0 && selected.value.length === chat.sessions.length);
+
+function fmtTime(ts: number): string {
+  const d = new Date(ts * 1000);
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function toggleSelectMode(): void {
+  selectMode.value = !selectMode.value;
+  if (!selectMode.value) selected.value = [];
+}
+
+function togglePick(sid: string): void {
+  selected.value = selected.value.includes(sid)
+    ? selected.value.filter((id) => id !== sid)
+    : [...selected.value, sid];
+}
+
+function togglePickAll(): void {
+  selected.value = allPicked.value ? [] : chat.sessions.map((s) => s.session_id);
+}
+
+async function togglePin(s: ChatSession): Promise<void> {
+  await chat.pinSession(s.session_id, !s.pinned);
+}
+
+async function removeOne(s: ChatSession): Promise<void> {
+  if (chat.sending) return;
+  const ok = window.confirm(
+    `删除会话 ${shortId(s.session_id)}？\n消息、用量和轨迹记录会一并删除，且不可恢复。`);
+  if (!ok) return;
+  await chat.deleteSession(s.session_id);
+}
+
+async function batchPin(): Promise<void> {
+  const ids = selected.value.slice();
+  if (!ids.length) return;
+  await chat.pinSessions(ids, !allPickedPinned.value);
+}
+
+async function batchDelete(): Promise<void> {
+  const ids = selected.value.slice();
+  if (!ids.length || chat.sending) return;
+  const ok = window.confirm(
+    `删除选中的 ${ids.length} 个会话？\n消息、用量和轨迹记录会一并删除，且不可恢复。`);
+  if (!ok) return;
+  await chat.deleteSessions(ids);
+  // 失败的会话仍在列表里，保留其勾选；全部成功则退出多选。
+  selected.value = ids.filter((id) => chat.sessions.some((s) => s.session_id === id));
+  if (!selected.value.length) selectMode.value = false;
+}
+
 async function scrollBottom(): Promise<void> {
   await nextTick();
   if (scrollEl.value) scrollEl.value.scrollTop = scrollEl.value.scrollHeight;
@@ -77,17 +143,59 @@ onMounted(() => {
       <button type="button" class="btn" :disabled="chat.sending" @click="chat.newSession()">
         ＋ 新建会话
       </button>
+
+      <div class="cp-side-head">
+        <span class="cp-side-title">会话</span>
+        <div class="cp-side-tools">
+          <button v-if="selectMode" type="button" class="cp-link-btn"
+                  :disabled="!chat.sessions.length" @click="togglePickAll">
+            {{ allPicked ? '全不选' : '全选' }}
+          </button>
+          <button type="button" class="cp-link-btn"
+                  :disabled="chat.sending || !chat.sessions.length"
+                  @click="toggleSelectMode">
+            {{ selectMode ? '完成' : '多选' }}
+          </button>
+        </div>
+      </div>
+
       <ul class="cp-sessions">
         <li v-for="s in chat.sessions" :key="s.session_id"
-            :class="{ cur: s.session_id === chat.sessionId }">
+            class="cp-sess-item"
+            :class="{ cur: s.session_id === chat.sessionId,
+                      picked: selected.includes(s.session_id) }">
+          <input v-if="selectMode" type="checkbox" class="cp-check"
+                 :checked="selected.includes(s.session_id)"
+                 :aria-label="'选择会话 ' + shortId(s.session_id)"
+                 @change="togglePick(s.session_id)" />
           <button type="button" class="cp-sess-btn"
                   :disabled="chat.sending"
                   :title="'更新时间 ' + new Date(s.updated_at * 1000).toLocaleString()"
-                  @click="chat.selectSession(s.session_id)">
-            {{ shortId(s.session_id) }}
+                  @click="selectMode ? togglePick(s.session_id) : chat.selectSession(s.session_id)">
+            <span class="cp-sess-main">
+              <span v-if="s.pinned" class="cp-pin-tag" title="已置顶">置顶</span>
+              <span class="cp-sess-id">{{ shortId(s.session_id) }}</span>
+            </span>
+            <span class="cp-sess-time">{{ fmtTime(s.updated_at) }}</span>
           </button>
+          <span v-if="!selectMode" class="cp-sess-actions">
+            <button type="button" class="cp-act" :disabled="chat.sending"
+                    @click.stop="togglePin(s)">{{ s.pinned ? '取消置顶' : '置顶' }}</button>
+            <button type="button" class="cp-act danger" :disabled="chat.sending"
+                    @click.stop="removeOne(s)">删除</button>
+          </span>
         </li>
       </ul>
+
+      <div v-if="selectMode" class="cp-batchbar">
+        <span class="cp-batch-count">已选 {{ selected.length }}</span>
+        <button type="button" class="cp-batch-btn" :disabled="!selected.length"
+                @click="batchPin">{{ allPickedPinned ? '取消置顶' : '置顶' }}</button>
+        <button type="button" class="cp-batch-btn danger"
+                :disabled="!selected.length || chat.sending"
+                @click="batchDelete">删除</button>
+      </div>
+
       <p v-if="!chat.loading && !chat.sessions.length" class="cp-side-hint">
         暂无会话，点「新建会话」开始。
       </p>
@@ -105,7 +213,9 @@ onMounted(() => {
       <p v-if="chat.error" class="cp-err">{{ chat.error }}</p>
 
       <div ref="scrollEl" class="cp-scroll">
-        <p v-if="chat.loading" class="cp-loading">加载会话…</p>
+        <div v-if="chat.loading" class="cp-loading">
+          <ThinkingIndicator label="加载会话中" />
+        </div>
         <div v-else-if="!chat.messages.length" class="cp-empty">
           <p>离线试跑提示：当前运行模式（SR_LLM_MOCK / SR_SLURM_FAKE / 盘阵）由服务端 env
             决定，聊天可发任意话术验证链路。</p>
@@ -120,7 +230,9 @@ onMounted(() => {
           <!-- assistant -->
           <template v-else-if="m.role === 'assistant'">
             <div v-if="m.isError" class="bubble assistant err">{{ m.content }}</div>
-            <div v-else-if="m.content" class="bubble assistant">{{ m.content }}</div>
+            <div v-else-if="m.content" class="bubble assistant">
+              <MarkdownBody :source="m.content" />
+            </div>
             <div v-else-if="m.toolCalls && m.toolCalls.length" class="bubble assistant tools">
               <p class="tool-title">Agent 声明调用工具</p>
               <div v-for="tc in m.toolCalls" :key="tc.name" class="tool-decl">
@@ -129,7 +241,7 @@ onMounted(() => {
               </div>
             </div>
             <div v-else-if="chat.sending" class="bubble assistant tools">
-              <p class="tool-title">正在思考…</p>
+              <ThinkingIndicator label="模型推理中" />
             </div>
           </template>
 
@@ -143,7 +255,9 @@ onMounted(() => {
           </template>
         </div>
 
-        <p v-if="chat.sending" class="cp-thinking">正在思考…</p>
+        <div v-if="chat.sending" class="cp-thinking">
+          <ThinkingIndicator label="模型推理中" />
+        </div>
         <div v-if="chat.lastRunId && !chat.sending" class="cp-feedback">
           <span>这次回答有帮助吗？</span>
           <button type="button" class="cp-feedback-btn"
@@ -186,23 +300,46 @@ onMounted(() => {
   flex: none;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--r-panel);
   box-shadow: var(--shadow-card);
   padding: 12px;
-  overflow: auto;
+  overflow: hidden;
 }
-.cp-sessions { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.cp-side-head { display: flex; align-items: center; justify-content: space-between; padding: 0 2px; }
+.cp-side-title { font-size: 12px; font-weight: 600; color: var(--ink-sub); }
+.cp-side-tools { display: flex; align-items: center; gap: 2px; }
+.cp-link-btn {
+  border: none; background: transparent; color: var(--accent-ink);
+  font-size: 11.5px; font-family: inherit; padding: 2px 5px;
+  border-radius: 6px; cursor: pointer;
+}
+.cp-link-btn:hover:not(:disabled) { background: var(--accent-soft); color: var(--accent-deep); }
+.cp-link-btn:disabled { color: var(--ink-faint); cursor: not-allowed; }
+
+.cp-sessions {
+  list-style: none; margin: 0; padding: 0 2px 0 0;
+  flex: 1; min-height: 0; overflow: auto;
+  display: flex; flex-direction: column; gap: 3px;
+}
+.cp-sess-item { position: relative; display: flex; align-items: center; gap: 5px; }
+.cp-check { flex: none; accent-color: var(--accent-3); cursor: pointer; }
 .cp-sessions li.cur .cp-sess-btn {
   background: var(--accent-soft);
   color: var(--accent-deep);
   border-color: rgba(61, 169, 164, 0.35);
   font-weight: 600;
 }
+.cp-sess-item.picked .cp-sess-btn {
+  background: var(--accent-soft);
+  border-color: rgba(61, 169, 164, 0.35);
+}
 .cp-sess-btn {
-  width: 100%; text-align: left; padding: 8px 10px; font-size: 13px;
+  flex: 1; min-width: 0; display: flex; flex-direction: column;
+  align-items: flex-start; gap: 1px;
+  text-align: left; padding: 6px 9px; font-size: 13px;
   border: 1px solid transparent; border-radius: var(--r-ctrl);
   background: transparent;
   color: var(--ink-body); cursor: pointer; font-family: inherit;
@@ -210,7 +347,59 @@ onMounted(() => {
 }
 .cp-sess-btn:hover:not(:disabled) { background: var(--surface-2); }
 .cp-sess-btn:disabled { opacity: .6; cursor: not-allowed; }
-.cp-side-hint { color: var(--ink-sub); font-size: 12px; line-height: 1.7; }
+.cp-sess-main { display: flex; align-items: center; gap: 5px; max-width: 100%; }
+.cp-sess-id {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--font-mono); font-size: 12.5px;
+}
+.cp-sess-time { font-size: 10.5px; color: var(--ink-faint); font-weight: 400; }
+.cp-pin-tag {
+  flex: none; font-size: 10px; line-height: 1; font-weight: 500;
+  color: var(--accent-deep); background: var(--accent-soft);
+  border-radius: 4px; padding: 2px 4px;
+}
+/* 行内操作只在悬停/聚焦时露出，平时让位给会话名与时间 */
+.cp-sess-actions {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  display: flex; gap: 2px; padding-left: 14px;
+  background: linear-gradient(90deg, transparent, var(--surface) 22%);
+  opacity: 0; pointer-events: none; transition: opacity 0.12s ease;
+}
+.cp-sess-item.cur .cp-sess-actions {
+  background: linear-gradient(90deg, transparent, var(--accent-soft) 22%);
+}
+.cp-sess-item:hover .cp-sess-actions,
+.cp-sess-item:focus-within .cp-sess-actions { opacity: 1; pointer-events: auto; }
+.cp-act {
+  border: none; background: transparent; color: var(--ink-sub);
+  font-size: 11px; font-family: inherit; padding: 2px 5px;
+  border-radius: 5px; cursor: pointer; white-space: nowrap;
+}
+.cp-act:hover:not(:disabled) { background: var(--surface-2); color: var(--accent-deep); }
+.cp-act.danger:hover:not(:disabled) { background: var(--err-bg); color: var(--err); }
+.cp-act:disabled { opacity: .5; cursor: not-allowed; }
+
+.cp-batchbar {
+  flex: none; display: flex; align-items: center; gap: 6px;
+  padding: 7px 8px; border: 1px solid var(--line);
+  border-radius: var(--r-ctrl); background: var(--surface-2);
+}
+.cp-batch-count { flex: 1; font-size: 11.5px; color: var(--ink-sub); }
+.cp-batch-btn {
+  border: 1px solid var(--line); border-radius: var(--r-pill);
+  background: var(--surface); color: var(--ink-body);
+  font-size: 11.5px; font-family: inherit; padding: 3px 9px; cursor: pointer;
+}
+.cp-batch-btn:hover:not(:disabled) {
+  border-color: var(--accent-3); color: var(--accent-deep); background: var(--accent-soft);
+}
+.cp-batch-btn.danger { color: var(--err); }
+.cp-batch-btn.danger:hover:not(:disabled) {
+  border-color: var(--err-line); color: var(--err); background: var(--err-bg);
+}
+.cp-batch-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+.cp-side-hint { flex: none; color: var(--ink-sub); font-size: 12px; line-height: 1.7; }
 .cp-side .btn { width: 100%; }
 
 .cp-main {
@@ -234,7 +423,8 @@ onMounted(() => {
 }
 
 .cp-scroll { flex: 1; overflow: auto; padding: 18px; display: flex; flex-direction: column; gap: 10px; background: var(--surface); }
-.cp-loading, .cp-empty, .cp-thinking { color: var(--ink-sub); font-size: 13px; text-align: center; }
+.cp-empty { color: var(--ink-sub); font-size: 13px; text-align: center; }
+.cp-loading, .cp-thinking { display: flex; justify-content: center; padding: 12px 0; }
 .cp-feedback { display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--ink-sub); font-size: 12px; }
 .cp-feedback-btn { border: 1px solid var(--line); border-radius: var(--r-pill); background: var(--surface); color: var(--ink-sub); padding: 3px 10px; cursor: pointer; }
 .cp-feedback-btn:hover:not(:disabled), .cp-feedback-btn.selected { border-color: var(--accent-3); color: var(--accent-deep); background: var(--accent-soft); }
@@ -248,8 +438,13 @@ onMounted(() => {
   font-size: 13.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
 }
 .bubble.user { background: var(--accent-grad); color: #fff; border-bottom-right-radius: 4px; box-shadow: 0 2px 6px rgba(45,164,162,0.18); }
-.bubble.assistant { background: var(--surface-2); color: var(--ink-body); border-bottom-left-radius: 4px; }
-.bubble.assistant.err { background: var(--err-bg); color: var(--err); }
+/* assistant 内容由 MarkdownBody 渲染成块级元素，白空格预格式化会让段落间多出空行 */
+.bubble.assistant {
+  max-width: 86%; white-space: normal;
+  background: var(--surface-2); color: var(--ink-body);
+  border: 1px solid var(--line); border-bottom-left-radius: 4px;
+}
+.bubble.assistant.err { white-space: pre-wrap; background: var(--err-bg); color: var(--err); border-color: var(--err-line); }
 .bubble.tools { background: #fbfcfa; border: 1px dashed var(--line); border-radius: 12px; }
 .tool-title { margin: 0 0 4px; font-size: 12px; color: var(--ink-sub); }
 .tool-decl { display: flex; gap: 8px; align-items: baseline; font-size: 13px; }

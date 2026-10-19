@@ -15,6 +15,8 @@ import { computed, nextTick, ref, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import { useChatStore } from '../stores/chat.js';
 import type { ChatMsg } from '../stores/chat.js';
+import MarkdownBody from './MarkdownBody.vue';
+import ThinkingIndicator from './ThinkingIndicator.vue';
 import {
   CTX_DIVIDER, agentPayload, buildContextNote,
 } from '../lib/agentContext.js';
@@ -151,12 +153,14 @@ watch(() => chat.messages.length, () => void scrollBottom());
           <!-- assistant：内容气泡 / 工具声明占位（折单行） / 思考中 -->
           <template v-else-if="m.role === 'assistant'">
             <div v-if="m.isError" class="bubble assistant err">{{ m.content }}</div>
-            <div v-else-if="m.content" class="bubble assistant">{{ m.content }}</div>
+            <div v-else-if="m.content" class="bubble assistant">
+              <MarkdownBody :source="m.content" />
+            </div>
             <div v-else-if="m.toolCalls && m.toolCalls.length" class="bubble assistant tools">
               <span class="tc-line">🧩 Agent 调用：{{ toolNames(m) }}</span>
             </div>
             <div v-else-if="chat.sending" class="bubble assistant tools">
-              <span class="tc-line">正在思考…</span>
+              <ThinkingIndicator label="模型推理中" />
             </div>
           </template>
 
@@ -170,7 +174,9 @@ watch(() => chat.messages.length, () => void scrollBottom());
           </template>
         </div>
 
-        <p v-if="chat.sending" class="at-thinking">正在思考…</p>
+        <div v-if="chat.sending" class="at-thinking">
+          <ThinkingIndicator label="模型推理中" />
+        </div>
       </div>
 
       <div class="at-inputbar">
@@ -237,7 +243,7 @@ watch(() => chat.messages.length, () => void scrollBottom());
 .at-empty { color: var(--ink-sub); font-size: 12px; line-height: 1.7; text-align: left; }
 .at-empty p { margin: 4px 0; }
 .at-hint { color: var(--ink-faint); font-size: 11px; }
-.at-thinking { color: var(--ink-sub); font-size: 11px; text-align: center; }
+.at-thinking { display: flex; justify-content: center; padding: 6px 0; }
 
 .at-row { display: flex; flex-direction: column; }
 .at-row.user { align-items: flex-end; }
@@ -254,8 +260,14 @@ watch(() => chat.messages.length, () => void scrollBottom());
   padding-top: 5px;
   white-space: pre-wrap;
 }
-.bubble.assistant { background: var(--surface-2); color: var(--ink-body); border-bottom-left-radius: 3px; align-self: flex-start; }
-.bubble.assistant.err { background: var(--err-bg); color: var(--err); }
+/* assistant 内容由 MarkdownBody 渲染成块级元素，白空格预格式化会让段落间多出空行 */
+.bubble.assistant {
+  max-width: 96%; white-space: normal;
+  background: var(--surface-2); color: var(--ink-body);
+  border: 1px solid var(--line); border-bottom-left-radius: 3px;
+  align-self: flex-start;
+}
+.bubble.assistant.err { white-space: pre-wrap; background: var(--err-bg); color: var(--err); border-color: var(--err-line); }
 .bubble.assistant.tools {
   background: #fbfcfa; border: 1px dashed var(--line); border-radius: 10px;
   align-self: flex-start; padding: 5px 10px; max-width: 94%;

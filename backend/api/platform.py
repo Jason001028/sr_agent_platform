@@ -40,7 +40,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
 from backend.agent import loop as loop_mod
@@ -514,6 +514,35 @@ def create_session(request: Request):
 @router.get("/api/chat/sessions")
 def list_sessions(request: Request):
     return {"sessions": request.app.state.store.list_sessions()}
+
+
+@router.patch("/api/chat/sessions/{session_id}")
+async def patch_session(session_id: str, request: Request):
+    """会话属性更新（当前只有置顶 pinned）。"""
+    state = request.app.state
+    _session_or_404(state, session_id)
+    body = await _json_body(request)
+    pinned = body.get("pinned")
+    if not isinstance(pinned, bool):
+        raise HTTPException(status_code=400, detail="pinned 必须为布尔值")
+    updated = state.store.set_session_pinned(session_id, pinned)
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"会话不存在：{session_id}")
+    return updated
+
+
+@router.delete("/api/chat/sessions/{session_id}", status_code=204)
+def delete_session(session_id: str, request: Request):
+    """删除会话及其消息/用量/轨迹；回合进行中拒绝，避免删掉正在写的会话。"""
+    state = request.app.state
+    _session_or_404(state, session_id)
+    lock = state.chat_locks.get(session_id)
+    if lock is not None and lock.locked():
+        raise HTTPException(status_code=409, detail="会话正忙，回合结束后再删除")
+    if not state.store.delete_session(session_id):
+        raise HTTPException(status_code=404, detail=f"会话不存在：{session_id}")
+    state.chat_locks.pop(session_id, None)
+    return Response(status_code=204)
 
 
 @router.get("/api/chat/sessions/{session_id}/messages")

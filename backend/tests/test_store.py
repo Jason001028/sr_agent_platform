@@ -64,6 +64,70 @@ class TestSessions(unittest.TestCase):
         self.assertIn(b, ids)
         self.assertEqual(ids[0], b)  # most recently touched first
 
+    def test_pinned_defaults_false(self):
+        sid = self.store.create_session()
+        self.assertFalse(self.store.get_session(sid)["pinned"])
+        self.assertFalse(self.store.list_sessions()[0]["pinned"])
+
+    def test_pin_moves_session_first_and_unpin_restores(self):
+        a = self.store.create_session()
+        b = self.store.create_session()
+        self.assertEqual(self.store.list_sessions()[0]["session_id"], b)
+
+        updated = self.store.set_session_pinned(a, True)
+        self.assertTrue(updated["pinned"])
+        self.assertEqual(self.store.list_sessions()[0]["session_id"], a)
+
+        self.store.set_session_pinned(a, False)
+        self.assertEqual(self.store.list_sessions()[0]["session_id"], b)
+        self.assertFalse(self.store.get_session(a)["pinned"])
+
+    def test_pin_unknown_session_is_none(self):
+        self.assertIsNone(self.store.set_session_pinned("ghost", True))
+
+    def test_delete_removes_session_and_related_rows(self):
+        sid = self.store.create_session()
+        keep = self.store.create_session()
+        self.store.append_message(sid, {"role": "user", "content": "hi"})
+        self.store.append_message(keep, {"role": "user", "content": "keep"})
+        self.store.append_llm_usage(
+            sid, turn=1, call_index=1, prompt_tokens=1,
+            completion_tokens=2, total_tokens=3)
+
+        self.assertTrue(self.store.delete_session(sid))
+        self.assertIsNone(self.store.get_session(sid))
+        self.assertEqual(self.store.get_messages(sid), [])
+        self.assertEqual(self.store.summarize_llm_usage(sid)["source"], "unavailable")
+        self.assertEqual([s["session_id"] for s in self.store.list_sessions()], [keep])
+        # 其它会话不受影响
+        self.assertEqual(len(self.store.get_messages(keep)), 1)
+
+    def test_delete_unknown_session_false(self):
+        self.assertFalse(self.store.delete_session("ghost"))
+
+
+class TestSessionMigration(unittest.TestCase):
+    def test_existing_db_gets_pinned_column(self):
+        """升级前的 sessions 表没有 pinned，打开时补列且老会话默认未置顶。"""
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        path = os.path.join(d.name, "old.sqlite")
+        old = sqlite3.connect(path)
+        old.executescript(
+            "CREATE TABLE sessions ("
+            " id TEXT PRIMARY KEY, created_at REAL NOT NULL,"
+            " updated_at REAL NOT NULL,"
+            " status TEXT NOT NULL DEFAULT 'active',"
+            " metadata TEXT NOT NULL DEFAULT '{}');")
+        old.execute("INSERT INTO sessions VALUES ('old', 100, 101, 'active', '{}')")
+        old.commit()
+        old.close()
+
+        store = Store(path)
+        self.addCleanup(store.close)
+        self.assertFalse(store.get_session("old")["pinned"])
+        self.assertTrue(store.set_session_pinned("old", True)["pinned"])
+
 
 class TestMessages(unittest.TestCase):
     def setUp(self):

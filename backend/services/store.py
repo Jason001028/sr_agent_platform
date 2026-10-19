@@ -190,20 +190,31 @@ CREATE INDEX IF NOT EXISTS idx_trajectory_feedback_session
 _SR_TASK_ADDED_COLUMNS = (("started_at", "REAL"), ("finished_at", "REAL"),
                           ("preview_state", "TEXT"), ("preview_note", "TEXT"))
 
+#: sessions 里发布后新增的列。pinned（2026-10-19）：会话侧栏置顶。
+#: 老行补出来是 0（未置顶），列表顺序与升级前一致。
+_SESSION_ADDED_COLUMNS = (("pinned", "INTEGER NOT NULL DEFAULT 0"),)
+
+
+def _add_missing_columns(db: sqlite3.Connection, table: str, columns) -> bool:
+    have = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+    added = False
+    for name, decl in columns:
+        if name not in have:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+            added = True
+    return added
+
 
 def _ensure_columns(db: sqlite3.Connection) -> None:
-    """Add the post-release sr_tasks columns to an existing DB.
+    """Add post-release columns to an existing DB.
 
     幂等：先问 PRAGMA 有什么，缺哪列补哪列。补出来的列在老行里是 NULL，**不回填**
     —— 那些行的 created_at 语义已被「复用行」污染（同一行被重交过，created_at 还是
     第一次提交的时刻），回填等于把一个错数固化进历史。老行的耗时显示「—」。
+    sessions.pinned 是新列，DEFAULT 0 让老会话保持未置顶。
     """
-    have = {row[1] for row in db.execute("PRAGMA table_info(sr_tasks)")}
-    added = False
-    for name, decl in _SR_TASK_ADDED_COLUMNS:
-        if name not in have:
-            db.execute(f"ALTER TABLE sr_tasks ADD COLUMN {name} {decl}")
-            added = True
+    added = _add_missing_columns(db, "sr_tasks", _SR_TASK_ADDED_COLUMNS)
+    added = _add_missing_columns(db, "sessions", _SESSION_ADDED_COLUMNS) or added
     if added:
         db.commit()
 
@@ -262,20 +273,23 @@ class Store:
 
     def get_session(self, session_id: str) -> dict | None:
         row = self._db().execute(
-            "SELECT id, created_at, updated_at, status, metadata "
+            "SELECT id, created_at, updated_at, status, metadata, pinned "
             "FROM sessions WHERE id = ?", (session_id,)).fetchone()
         if row is None:
             return None
         return {"session_id": row[0], "created_at": row[1],
                 "updated_at": row[2], "status": row[3],
-                "metadata": json.loads(row[4] or "{}")}
+                "metadata": json.loads(row[4] or "{}"),
+                "pinned": bool(row[5])}
 
     def list_sessions(self, limit: int = 100) -> list[dict]:
+        """会话列表：置顶在前，其余按最近活动倒序。"""
         rows = self._db().execute(
-            "SELECT id, created_at, updated_at, status FROM sessions "
-            "ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
+            "SELECT id, created_at, updated_at, status, pinned FROM sessions "
+            "ORDER BY pinned DESC, updated_at DESC LIMIT ?", (limit,)).fetchall()
         return [{"session_id": r[0], "created_at": r[1],
-                 "updated_at": r[2], "status": r[3]} for r in rows]
+                 "updated_at": r[2], "status": r[3],
+                 "pinned": bool(r[4])} for r in rows]
 
     def set_session_status(self, session_id: str, status: str) -> None:
         db = self._db()
@@ -283,6 +297,31 @@ class Store:
             "UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?",
             (status, time.time(), session_id))
         db.commit()
+
+    def set_session_pinned(self, session_id: str, pinned: bool) -> dict | None:
+        """置顶/取消置顶；会话不存在返回 None。不动 updated_at（活动时间）。"""
+        db = self._db()
+        cur = db.execute("UPDATE sessions SET pinned = ? WHERE id = ?",
+                         (1 if pinned else 0, session_id))
+        db.commit()
+        return self.get_session(session_id) if cur.rowcount else None
+
+    def delete_session(self, session_id: str) -> bool:
+        """删除会话及其对话/轨迹数据；返回是否确实删到一行。
+
+        队列任务（sr_tasks）是外部副作用的操作记录，不随会话删除；它们的
+        session_id 只作溯源线索，指向已删会话时保持原值。
+        """
+        db = self._db()
+        cur = db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        if cur.rowcount == 0:
+            db.commit()
+            return False
+        for table in ("messages", "llm_usage", "agent_runs",
+                      "trajectory_events", "trajectory_feedback"):
+            db.execute(f"DELETE FROM {table} WHERE session_id = ?", (session_id,))
+        db.commit()
+        return True
 
     # ---- messages (append-only wire-format log) --------------------------
 

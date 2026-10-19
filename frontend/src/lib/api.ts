@@ -29,6 +29,8 @@ export interface ChatSession {
   created_at: number;
   updated_at: number;
   status: string;
+  /** 置顶（服务端持久化；老后端无此字段时按未置顶处理）。 */
+  pinned?: boolean;
 }
 
 export interface TokenUsageEvent {
@@ -444,6 +446,25 @@ export async function apiCreateSession(cfg: SrConfig): Promise<string> {
 export async function apiListSessions(cfg: SrConfig): Promise<ChatSession[]> {
   const r = await http(sessionsUrl(cfg));
   return ((await r.json()) as { sessions: ChatSession[] }).sessions;
+}
+
+/** 置顶/取消置顶，返回更新后的会话行。 */
+export async function apiSetSessionPinned(
+  cfg: SrConfig, sid: string, pinned: boolean,
+): Promise<ChatSession> {
+  const r = await http(apiUrl(cfg,
+    `/api/chat/sessions/${encodeURIComponent(sid)}`), {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ pinned }),
+  });
+  return (await r.json()) as ChatSession;
+}
+
+/** 删除会话（消息/用量/轨迹由服务端一并删除）。 */
+export async function apiDeleteSession(cfg: SrConfig, sid: string): Promise<void> {
+  await http(apiUrl(cfg,
+    `/api/chat/sessions/${encodeURIComponent(sid)}`), { method: 'DELETE' });
 }
 
 export async function apiListMachines(

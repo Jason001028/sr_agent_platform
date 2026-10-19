@@ -23,7 +23,7 @@ from PIL import Image
 from backend.api import paths
 from backend.api.app import create_app, _bake_nosr_preview, _eager_bake_tick
 from backend.api.platform import (_Subscriber, _broadcast, _queue_state,
-                                  _task_state, chat_send)
+                                  _task_state, chat_send, delete_session)
 from backend.tests import allowed_roots_env
 from backend.tests.test_preview_jpg import make_strip_tif
 from backend.services import run_sr as svc
@@ -179,6 +179,64 @@ class TestChat(PlatformBase):
     def test_messages_unknown_session_404(self):
         r = self.client().get("/api/chat/sessions/ghost/messages")
         self.assertEqual(r.status_code, 404)
+
+    def test_pin_session_moves_it_first(self):
+        c = self.client()
+        a = c.post("/api/chat/sessions").json()["session_id"]
+        b = c.post("/api/chat/sessions").json()["session_id"]
+        self.assertEqual(c.get("/api/chat/sessions").json()["sessions"][0]
+                         ["session_id"], b)
+
+        r = c.patch(f"/api/chat/sessions/{a}", json={"pinned": True})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["pinned"])
+        self.assertEqual(c.get("/api/chat/sessions").json()["sessions"][0]
+                         ["session_id"], a)
+
+        c.patch(f"/api/chat/sessions/{a}", json={"pinned": False})
+        self.assertEqual(c.get("/api/chat/sessions").json()["sessions"][0]
+                         ["session_id"], b)
+
+    def test_patch_session_requires_boolean(self):
+        c = self.client()
+        sid = c.post("/api/chat/sessions").json()["session_id"]
+        self.assertEqual(
+            c.patch(f"/api/chat/sessions/{sid}", json={"pinned": "yes"}).status_code,
+            400)
+        self.assertEqual(
+            c.patch("/api/chat/sessions/ghost", json={"pinned": True}).status_code,
+            404)
+
+    def test_delete_session_removes_history(self):
+        c = self.client()
+        sid = c.post("/api/chat/sessions").json()["session_id"]
+        c.post(f"/api/chat/sessions/{sid}/messages", json={"content": "hi"})
+        r = c.delete(f"/api/chat/sessions/{sid}")
+        self.assertEqual(r.status_code, 204)
+        self.assertEqual(c.get(f"/api/chat/sessions/{sid}/messages").status_code,
+                         404)
+        self.assertEqual(c.get("/api/chat/sessions").json()["sessions"], [])
+        self.assertEqual(c.delete("/api/chat/sessions/ghost").status_code, 404)
+
+    def test_delete_busy_session_returns_409(self):
+        app = self._make_app()
+        sid = app.state.store.create_session()
+
+        class _Req:
+            def __init__(self, app):
+                self.app = app
+
+        async def scenario():
+            lock = asyncio.Lock()
+            await lock.acquire()
+            app.state.chat_locks[sid] = lock
+            with self.assertRaises(HTTPException) as cm:
+                delete_session(sid, _Req(app))
+            self.assertEqual(cm.exception.status_code, 409)
+            self.assertIn("正忙", cm.exception.detail)
+
+        asyncio.run(scenario())
+        self.assertIsNotNone(app.state.store.get_session(sid))
 
     def test_send_streams_full_event_sequence(self):
         c = self.client()

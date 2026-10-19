@@ -6,9 +6,9 @@
  * assistant → turn_done；history 投影 role 序列 = user/assistant/tool/assistant。
  */
 import { describe, it, expect } from 'vitest';
-import { reduceChatSse, msgFromHistory } from '../chat.js';
+import { reduceChatSse, msgFromHistory, sortSessions } from '../chat.js';
 import type { ChatMsg } from '../chat.js';
-import type { HistoryMsg } from '../../lib/api.js';
+import type { ChatSession, HistoryMsg } from '../../lib/api.js';
 
 const roles = (msgs: ChatMsg[]): string[] => msgs.map((m) => m.role);
 
@@ -111,6 +111,23 @@ describe('reduceChatSse（SSE 逐帧归并）', () => {
     const msgs: ChatMsg[] = [{ seq: null, role: 'user', content: 'hi' }];
     expect(reduceChatSse(msgs, { type: 'job_update', task_id: 1, job_id: 2, state: 'R', prev_state: 'P', ok: true, error: null })).toBe(msgs);
     expect(reduceChatSse(msgs, { type: 'ping' })).toBe(msgs);
+  });
+});
+
+describe('sortSessions（置顶优先，其余按活动时间）', () => {
+  const row = (id: string, updated: number, pinned?: boolean): ChatSession => ({
+    session_id: id, created_at: updated, updated_at: updated,
+    status: 'active', pinned,
+  });
+
+  it('置顶排最前，未置顶按 updated_at 倒序', () => {
+    const sorted = sortSessions([row('a', 100), row('b', 300), row('c', 200, true)]);
+    expect(sorted.map((s) => s.session_id)).toEqual(['c', 'b', 'a']);
+  });
+
+  it('多个置顶项之间仍按活动时间倒序', () => {
+    const sorted = sortSessions([row('a', 100, true), row('b', 300, true), row('c', 500)]);
+    expect(sorted.map((s) => s.session_id)).toEqual(['b', 'a', 'c']);
   });
 });
 

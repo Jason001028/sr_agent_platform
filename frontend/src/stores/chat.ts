@@ -13,6 +13,7 @@ import { loadSrConfig } from '../lib/scene.js';
 import {
   apiCreateSession, apiListSessions, apiSessionMessages, apiSessionUsage,
   apiChatSend, apiSubmitTrajectoryFeedback,
+  apiDeleteSession, apiSetSessionPinned,
 } from '../lib/api.js';
 import type { ChatSession, ChatUsage, HistoryMsg, PlatformSseEvent, TrajectoryFeedbackRating } from '../lib/api.js';
 
@@ -111,6 +112,17 @@ export function reduceChatSse(
   }
 }
 
+/** 会话排序：置顶优先，其余按最近活动倒序（与服务端 list_sessions 一致）。 */
+export function sortSessions(list: ChatSession[]): ChatSession[] {
+  return [...list].sort((a, b) =>
+    Number(Boolean(b.pinned)) - Number(Boolean(a.pinned))
+    || b.updated_at - a.updated_at);
+}
+
+function errText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
 /** 工具结果 → 一行摘要（search_scenes 解包 source/count，其它截断原样）。 */
 function summarizeData(name: string, data: unknown): string {
   if (name === 'search_scenes' && data && typeof data === 'object') {
@@ -140,7 +152,7 @@ export const useChatStore = defineStore('chat', () => {
 
   async function refreshSessions(): Promise<void> {
     const cfg = loadSrConfig();
-    sessions.value = await apiListSessions(cfg);
+    sessions.value = sortSessions(await apiListSessions(cfg));
   }
 
   async function loadHistory(sid: string): Promise<void> {
@@ -181,8 +193,12 @@ export const useChatStore = defineStore('chat', () => {
     try {
       const cfg = loadSrConfig();
       const sid = await apiCreateSession(cfg);
-      sessions.value = [{ session_id: sid, created_at: 0, updated_at: 0, status: 'active' },
-                        ...sessions.value];
+      const now = Date.now() / 1000;
+      sessions.value = sortSessions([
+        { session_id: sid, created_at: now, updated_at: now,
+          status: 'active', pinned: false },
+        ...sessions.value,
+      ]);
       sessionId.value = sid;
       messages.value = [];
       usage.value = null;
@@ -242,9 +258,93 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  /** 删除后维持「总有当前会话」：优先切到列表第一个，列表空了就新建。 */
+  async function afterDelete(removed: string[]): Promise<void> {
+    sessions.value = sessions.value.filter((s) => !removed.includes(s.session_id));
+    if (!sessionId.value || !removed.includes(sessionId.value)) return;
+    const next = sessions.value[0];
+    if (next) {
+      sessionId.value = next.session_id;
+      await loadHistory(next.session_id);
+      return;
+    }
+    sessionId.value = null;
+    messages.value = [];
+    usage.value = null;
+    lastRunId.value = null;
+    feedbackRating.value = null;
+    await newSession();
+  }
+
+  async function deleteSession(sid: string): Promise<void> {
+    error.value = '';
+    try {
+      await apiDeleteSession(loadSrConfig(), sid);
+      await afterDelete([sid]);
+    } catch (e) {
+      error.value = '删除会话失败：' + errText(e);
+    }
+  }
+
+  /** 批量删除：逐个提交，失败的不从列表移除，并汇总提示。 */
+  async function deleteSessions(ids: string[]): Promise<void> {
+    if (!ids.length) return;
+    error.value = '';
+    const cfg = loadSrConfig();
+    const removed: string[] = [];
+    const failures: string[] = [];
+    for (const sid of ids) {
+      try {
+        await apiDeleteSession(cfg, sid);
+        removed.push(sid);
+      } catch (e) {
+        failures.push(errText(e));
+      }
+    }
+    await afterDelete(removed);
+    if (failures.length) {
+      error.value = `部分会话删除失败（${failures.length}/${ids.length}）：${failures[0]}`;
+    }
+  }
+
+  async function pinSession(sid: string, pinned: boolean): Promise<void> {
+    error.value = '';
+    try {
+      const updated = await apiSetSessionPinned(loadSrConfig(), sid, pinned);
+      sessions.value = sortSessions(sessions.value.map((s) =>
+        s.session_id === sid ? { ...s, ...updated } : s));
+    } catch (e) {
+      error.value = '置顶操作失败：' + errText(e);
+    }
+  }
+
+  /** 批量置顶：逐个提交，成功的合并回列表，失败汇总提示。 */
+  async function pinSessions(ids: string[], pinned: boolean): Promise<void> {
+    if (!ids.length) return;
+    error.value = '';
+    const cfg = loadSrConfig();
+    const updatedRows: ChatSession[] = [];
+    const failures: string[] = [];
+    for (const sid of ids) {
+      try {
+        updatedRows.push(await apiSetSessionPinned(cfg, sid, pinned));
+      } catch (e) {
+        failures.push(errText(e));
+      }
+    }
+    const byId = new Map(updatedRows.map((r) => [r.session_id, r]));
+    sessions.value = sortSessions(sessions.value.map((s) => {
+      const updated = byId.get(s.session_id);
+      return updated ? { ...s, ...updated } : s;
+    }));
+    if (failures.length) {
+      error.value = `部分会话置顶失败（${failures.length}/${ids.length}）：${failures[0]}`;
+    }
+  }
+
   return {
     sessions, sessionId, messages, sending, error, loading, usage, lastRunId, feedbackRating,
     hasSession, init, refreshSessions, loadHistory, newSession, selectSession, send,
-    submitFeedback,
+    submitFeedback, deleteSession, deleteSessions, pinSession, pinSessions,
   };
 });
