@@ -7,7 +7,6 @@ memory. Fixtures are uncompressed strip TIFFs under a temp SR_SCENES_ROOT.
 import io
 import os
 import tempfile
-import time
 import unittest
 from pathlib import Path
 
@@ -164,7 +163,7 @@ class TestScenesDisk(SceneListMixin):
 
 
 class TestScenesImageSource(SceneListMixin):
-    """§4.7：盘阵 .jpg/.jpeg 行 = 显示就绪图本身（无生成预览、jpgUrl 指源文件）。"""
+    """§4.7：盘阵 .jpg/.jpeg 行 = 显示就绪图本身（无烘焙、jpgUrl 指源文件）。"""
 
     def make_jpg(self, name, w=40, h=30, dirp=None):
         """场景目录里的显示就绪 JPG（真机 <目录名>_meta.xml + <目录名>.jpg）。"""
@@ -185,7 +184,7 @@ class TestScenesImageSource(SceneListMixin):
         self.assertEqual(body["scanned"], 1)
         row = body["results"][0]
         self.assertEqual((row["W"], row["H"]), (40, 30))       # Pillow 头
-        self.assertTrue(row["hasPreview"])                     # 无需生成预览
+        self.assertTrue(row["hasPreview"])                     # 无需烘焙
         self.assertTrue(row["jpgUrl"].endswith(".jpg"))
         self.assertNotIn("_preview.jpg", row["jpgUrl"])
         self.assertEqual(
@@ -215,36 +214,6 @@ class TestScenesImageSource(SceneListMixin):
         self.assertEqual(body["scanned"], 1)         # 缓存不新增行
         self.assertEqual(body["results"][0]["name"],
                          "GF07A03_PMS01_20260722125045")
-
-    def test_jpg_row_reports_the_raster_it_displays(self):
-        """显示件 jpg 的行：W/H 取**它显示的那份栅格**的尺寸，不是 jpg 自己的。
-
-        前端把行上这个 W/H 当「全分辨率」：掩码坐标按它换回去（thumbToOrig），
-        `POST /api/masks` 再按它建栅格化画布。而 SR 只在「掩码分辨率 == 输入影像
-        分辨率」时才真做局部超分，不同就**静默跳过**（sr-pipeline-interface）。
-        所以行上报 8192 显示件的尺寸，等于让用户交上去一份永不生效的掩码。
-        """
-        make_scene(self._root.name, "ZY302_MUX_20260805120000.tif", 320, 640)
-        self.make_jpg("ZY302_MUX_20260805120000.jpg", 40, 30)
-        rows = self.client(self._root.name).get("/api/scenes").json()["results"]
-        jpg_row = next(r for r in rows if r["rel"].endswith(".jpg"))
-        tif_row = next(r for r in rows if r["rel"].endswith(".tif"))
-        self.assertEqual((jpg_row["W"], jpg_row["H"]), (320, 640))
-        # 同一景的两行（盘上确实是两份文件）报同一个尺寸 —— 掩码落点是**一个**。
-        self.assertEqual((jpg_row["W"], jpg_row["H"]),
-                         (tif_row["W"], tif_row["H"]))
-        # rasterPreview 仍如实报两份各自的尺寸：那是「谁更清晰」的比较依据，
-        # 与行上的 W/H 不是一回事，别把它一起改了。
-        rp = jpg_row["rasterPreview"]
-        self.assertEqual((rp["jpgW"], rp["jpgH"]), (40, 30))
-        self.assertEqual((rp["rasterW"], rp["rasterH"]), (320, 640))
-
-    def test_jpg_row_without_sibling_raster_keeps_own_dims(self):
-        """同级没有栅格 → 退回 jpg 自己的尺寸（平台不知道它代表多大一张图）。"""
-        self.make_jpg("KF02B04_PMS05_20260810120000.jpg", 40, 30)
-        row = self.client(self._root.name).get("/api/scenes").json()["results"][0]
-        self.assertIsNone(row["rasterPreview"])
-        self.assertEqual((row["W"], row["H"]), (40, 30))
 
     def test_tif_and_jpg_same_stem_are_two_rows(self):
         make_scene(self._root.name, "ZY302_MUX_20260805120000.tif")
@@ -285,7 +254,7 @@ class TestPreview(SceneListMixin):
         self.assertEqual(jpg.stat().st_mtime, mtime1)
 
     def test_legacy_dot_preview_is_swept_on_open(self):
-        """点号命名的那份（`<stem>.preview.jpg`）无任何读者：打开这一景时同时删掉，
+        """改名（2026-09-22）前烤的那份点号文件已无任何读者：打开这一景时顺手删掉，
         免得场景目录里躺着两个几乎同名的文件。"""
         c = self._disk_client_with_scene()
         d = Path(self._root.name, "GF07A03_PMS01_20260722125045")
@@ -344,7 +313,7 @@ class TestPreview(SceneListMixin):
 class TestPreviewDiv(SceneListMixin):
     """下采样档位：`?div=` 参数 + 行上的 `previewDiv` 回填。
 
-    前端据 `previewDiv` 与当前档位比对来决定要不要重新生成 —— 只看 `hasPreview`
+    前端据 `previewDiv` 与当前档位比对来决定要不要重烤 —— 只看 `hasPreview`
     不够（它不认档位），这是「滑了滑块盘上却不动」那个哑火的根因。
     """
 
@@ -373,12 +342,12 @@ class TestPreviewDiv(SceneListMixin):
         row = self._row(c)
         self.assertTrue(row["hasPreview"])
         self.assertEqual(row["previewDiv"], 8)
-        # 换档位、原地重新生成 → 行字段跟着变
+        # 换档位、原地重烤 → 行字段跟着变
         c.get(f"/api/scenes/{sid}/preview?div=2")
         self.assertEqual(self._row(c)["previewDiv"], 2)
 
     def test_legacy_stamp_reads_as_none(self):
-        """v2 那代戳解不出 div → None → 前端按当前档位重新生成一轮（惰性，预期内）。"""
+        """v2 那代戳解不出 div → None → 前端按当前档位重烤一轮（惰性，预期内）。"""
         c = self._client()
         sid = self._row(c)["id"]
         self.jpg.parent.mkdir(parents=True, exist_ok=True)
@@ -411,63 +380,13 @@ class TestPreviewDiv(SceneListMixin):
         self.assertFalse(self.jpg.exists())
 
     def test_default_div_is_legacy_two(self):
-        """缺 `div` 参数时按默认档位 ÷2 生成（旧 dist 配新 backend 不乱套）。"""
+        """缺 `div` 参数 = 逐字节等于换档位之前的行为（旧 dist 配新 backend 不乱套）。"""
         c = self._client()
         sid = self._row(c)["id"]
         r = c.get(f"/api/scenes/{sid}/preview")
         with Image.open(io.BytesIO(r.content)) as im:
             self.assertEqual(im.size, (160, 320))
             self.assertEqual(im.info.get("comment"), rule_stamp(85, 2))
-
-    def test_repeat_without_force_is_a_cache_hit(self):
-        """不带 force 连打两次 `?div=4`：盘上那份一个字节都不动。
-
-        这是**其它入口**（点开卡片、场景库打开、预取）的行为基线，也是「force 只给
-        一键解析」这句话的对照面：常态不得变成每次重生成。
-        """
-        c = self._client()
-        sid = self._row(c)["id"]
-        c.get(f"/api/scenes/{sid}/preview?div=4")
-        first = self.jpg.stat().st_mtime_ns
-        r = c.get(f"/api/scenes/{sid}/preview?div=4")
-        self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(self.jpg.stat().st_mtime_ns, first)
-        with Image.open(io.BytesIO(r.content)) as im:
-            self.assertEqual(stamp_div(im.info.get("comment")), 4)
-
-    def test_force_regenerates_while_the_div_stays_the_same(self):
-        """`?div=4&force=1`（档位一致、戳一致、mtime 也不旧）→ 仍原地重写一遍。
-
-        一键解析要的就是这个：档位没变也按盘上最新的源重生成。断言分三面：
-        文件确实被重写（mtime 变）、档位与戳没被带跑（仍是 ÷4）、行字段语义不变。
-        """
-        c = self._client()
-        sid = self._row(c)["id"]
-        c.get(f"/api/scenes/{sid}/preview?div=4")
-        first = self.jpg.stat().st_mtime_ns
-        size_before = self.jpg.stat().st_size
-
-        time.sleep(0.02)      # 让两次写入的 mtime 明确可辨（不吃文件系统的时间戳粒度）
-        r = c.get(f"/api/scenes/{sid}/preview?div=4&force=1")
-        self.assertEqual(r.status_code, 200, r.text)
-        self.assertNotEqual(self.jpg.stat().st_mtime_ns, first)
-        # 内容同规则同档位 → 字节数一致（重写不等于换尺寸）
-        self.assertEqual(self.jpg.stat().st_size, size_before)
-        with Image.open(io.BytesIO(r.content)) as im:
-            self.assertEqual(im.size, (80, 160))
-            self.assertEqual(stamp_div(im.info.get("comment")), 4)
-        self.assertEqual(self._row(c)["previewDiv"], 4)
-
-    def test_force_is_false_by_default(self):
-        """`force` 缺省为假：URL 上不加它时不重写盘上那份。"""
-        c = self._client()
-        sid = self._row(c)["id"]
-        c.get(f"/api/scenes/{sid}/preview?div=4")
-        first = self.jpg.stat().st_mtime_ns
-        # force=0 显式传假，同样是命中（不是「非空即真」）
-        self.assertEqual(
-            c.get(f"/api/scenes/{sid}/preview?div=4&force=0").status_code, 200)
-        self.assertEqual(self.jpg.stat().st_mtime_ns, first)
 
 
 if __name__ == "__main__":

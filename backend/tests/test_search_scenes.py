@@ -32,7 +32,7 @@ def write_scene(root, name, ext=".tif"):
     """造一个真机形态的场景目录，返回场景文件的路径。
 
     真机的场景判据是「目录里有 <目录名>_meta.xml」（SR 脚本靠它判 RC/SC，
-    scene_search.is_scene_dir），所以夹具必须照此造：平铺的裸文件会被
+    scene_search.is_scene_dir），所以夹具必须照此造：平铺的裸文件现在会被
     is_scene_file 整批挡掉。返回值是场景文件，派生件往 .parent 里塞。
     """
     d = Path(root) / name
@@ -97,7 +97,7 @@ class TestImageScenes(unittest.TestCase):
             self.assertEqual(r["results"][0]["date"], "2026-08-10")
 
     def test_preview_cache_is_not_a_scene(self):
-        """后端自己生成预览的 <stem>.preview.jpg 躺在场景目录里，不能被列成第二行。"""
+        """后端自己烘焙的 <stem>.preview.jpg 躺在场景目录里，不能被列成第二行。"""
         with tempfile.TemporaryDirectory() as d:
             p = write_scene(d, "GF07A03_PMS01_20260722125045")
             write_jpg(p.parent, p.stem + ".preview.jpg")
@@ -109,9 +109,9 @@ class TestImageScenes(unittest.TestCase):
     def test_mask_is_not_a_scene(self):
         """§4.3：<名字>_mask.tif 是「提交 SR」的输入，不该和它的场景并列成第二行。
 
-        真机形态：场景与掩码同名同目录（`<目录名>.tif` + `<目录名>_mask.tif`），所以
-        排除一旦失效，页面上每个场景都会多出一行 — 卫星/传感器由掩码文件名解析得到
-        （satellite=<父目录名>、sensor='mask'），尺寸取掩码 TIFF 头。
+        真机形态：场景与掩膜同名同目录（`<目录名>.tif` + `<目录名>_mask.tif`），所以
+        排除一旦失效，页面上每个场景都会多出一行 — 卫星/传感器由掩膜文件名解析得到
+        （satellite=<父目录名>、sensor='mask'），尺寸取掩膜 TIFF 头。
         """
         with tempfile.TemporaryDirectory() as d:
             p = write_scene(d, "GF07A03_PMS01_20260722125045")
@@ -125,7 +125,7 @@ class TestImageScenes(unittest.TestCase):
                               "KF02B04_PMS05_20260810120000"])
 
     def test_derived_products_are_not_scenes(self):
-        """一瓶装下真机看到的脏数据（18 行里 16 行是这种）。
+        """一瓶装下真机看到的所有脏数据（2026-09-15：18 行里 16 行是这种）。
 
         SR 产物与输入备份（_sr/_NOSR/_ori）、云量图（_cloud）、缩略图（_thumb）
         都躺在同一个场景目录里 —— 白名单下它们连判据都不用各写一条。
@@ -199,7 +199,7 @@ class TestImageScenes(unittest.TestCase):
             self.assertFalse(svc.is_scene_file(sub))
 
     def test_drop_preview_beside_source_is_not_a_scene(self):
-        """拖入链生成的的 `<stem>_preview.jpg` 不得被列成一行场景。
+        """拖入链烤出来的 `<stem>_preview.jpg` 不得被列成一行场景。
 
         它跟源同目录、后缀也是 .jpg，只有「stem 必须等于目录名」这条能挡住它 ——
         白名单一旦放宽，用户拖入一次就会在场景库里多出一行假场景。
@@ -215,7 +215,7 @@ class TestImageScenes(unittest.TestCase):
 
 
 class TestNosrNaming(unittest.TestCase):
-    """未超分那份（NOSR）的**名字**判据（用户口径）。
+    """未超分那份（NOSR）的**名字**判据（2026-09-24 口径）。
 
     盘阵上叫 NOSR 的东西其实有两份，名字只差中间一段 suffix：
 
@@ -298,7 +298,7 @@ class TestNosrNaming(unittest.TestCase):
     def test_reverse_inference_keeps_the_bare_nosr_stem(self):
         """反推目录名时 `_NOSR` 是**在切段那一轮里**剥的 → 剥得的真名自己进候选。
 
-        若在循环外先把 `_NOSR` 剥掉、再进切段循环，而切段恒切至少一段：
+        曾经的写法是在循环外先把 `_NOSR` 剥掉、再进切段循环，而切段恒切至少一段：
         `<目录名>_NOSR` 剥完剩下的**正好就是目录名**，那个真名于是一条候选都进不去，
         报出来的理由是「…_L1 目录不存在」这类被多切一段的假目录。带 `_preview` 尾巴
         的那份走的是另一条路（剥 preview 那一步本身就顶掉了一次切段），一直是对的 ——
@@ -345,7 +345,7 @@ class TestNosrCandidates(unittest.TestCase):
             product = inp.parent / (self.SCENE + "_260318.tif")
             cands = svc.nosr_candidates(inp.parent, inp, product)
             self.assertEqual(cands[0], inp.parent / (self.SCENE + "_NOSR.tif"),
-                             "次选不得认领前面")
+                             "次选不得抢到前面")
             self.assertEqual(cands[-1],
                              inp.parent / (self.SCENE + "_260318_NOSR.tif"))
 

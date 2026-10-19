@@ -1,13 +1,13 @@
-// 平台 REST/SSE 全链路验收（dev-machine + 假 LLM + 执行器替身）
+// 阶段5 验收：平台 REST/SSE 全链路（dev-machine + 假 LLM + 假调度器）
 // ------------------------------------------------------------------
 // 前置：`cd frontend && npm run build`（本测试读 frontend/dist）。
-// 拓扑：uvicorn（SR_LLM_MOCK=1 SR_EXECUTOR=local + 执行器替身 + 临时 db + 临时盘阵根）+
+// 拓扑：uvicorn（SR_LLM_MOCK=1 SR_SLURM_FAKE=1 + 临时 db + 临时盘阵根）+
 //       dist 静态服务；页面经 evaluateOnNewDocument 注入 window.__SR_CFG__.apiBase
 //       （默认同源 nginx 反代 → 跨端口直连后端，验证异源 base 注入路径）。
 // 覆盖 api-contract.md §5.3：
 //   A. 聊天：/chat 新建会话 → 发一条 → SSE 全事件归并 → 工具行 + 最终回复渲染；
 //      切走再回来 → GET messages 恢复历史（刷新可恢复）。
-//   B. 队列：/queue 手填 lq_path 提交 → 执行器替身推进 → SSE job_update 推到 COMPLETED
+//   B. 队列：/queue 手填 lq_path 提交 → 假调度器推进 → SSE job_update 推到 COMPLETED
 //      → 同一帧在右下角弹出「超分完成」提醒（2026-09-22 增：真 SSE → 提醒 这条链
 //      只有这里跑得通）。
 //   C. 掩码→SR：/viewer 打开盘阵场景（合成 JPG + 画 ROI）→ 点「提交 SR」→
@@ -235,11 +235,8 @@ async function main() {
   fs.writeFileSync(path.join(sceneDir, SCENE + '.tif'), Buffer.alloc(0));
   fs.writeFileSync(path.join(sceneDir, SCENE + '_meta.xml'),
     '<?xml version="1.0" encoding="UTF-8"?><SolarAzimuth>181.79</SolarAzimuth>');
-  // 这一跑读的是「未超分那一份」（run_sr.nosr_swap_plan）：缺文件直接 400，不拿
-  // 别的顶替。提交场景因此也要自带它 —— 与掩码同理，后端只校验存在性。
-  fs.writeFileSync(path.join(sceneDir, SCENE + '_NOSR.tif'), Buffer.alloc(0));
   // §4.3 起：POST /api/queue 不带 mask_path 时按 <lq_path>/<目录名>_mask.tif 推导，
-  // 文件不存在直接 400（不许静默全图超分）。所以提交场景必须自带掩码 —— 后端只
+  // 文件不存在直接 400（不许静默全图超分）。所以提交场景必须自带掩膜 —— 后端只
   // 校验存在性，内容不读。
   fs.writeFileSync(path.join(sceneDir, SCENE + '_mask.tif'), Buffer.alloc(0));
   const workDir = path.join(tmp, 'work');
@@ -250,18 +247,16 @@ async function main() {
   const apiBase = `http://127.0.0.1:${apiPort}`;
 
   console.log(`[test-platform] 临时: db=${path.join(tmp, 'db.sqlite')} scenes=${scenesRoot}`);
-  // backend.tests.e2e_server：与 python -m backend.api 同款，只是执行器入口
-  // 换成 backend/tests/exec_double.py 的内存替身 —— 本机开发机上没有真机上的
-  // bash + conda + SR bundle，真起子进程只会得到 launch_error。
-  const child = spawn('python', ['-m', 'backend.tests.e2e_server'], {
+  const child = spawn('python', ['-m', 'backend.api'], {
     cwd: REPO,
     env: {
       ...process.env,
       SR_AGENT_DB: path.join(tmp, 'db.sqlite'),
       SR_SCENES_ROOT: scenesRoot,
-      SR_EXECUTOR: 'local',
-      SR_WORK_DIR: workDir,
+      SR_SLURM_WORK_DIR: workDir,
       SR_LLM_MOCK: '1',
+      SR_SLURM_FAKE: '1',
+      SR_SLURM_FAKE_T_MS: '250',
       SR_QUEUE_POLL_SEC: '0.3',
       SR_API_HOST: '127.0.0.1',
       SR_API_PORT: String(apiPort),
@@ -336,8 +331,8 @@ async function main() {
       await waitText(page, 'mock 模型', 15000);
       assert(true, '切走再回来：历史消息经 GET messages 恢复渲染');
 
-      /* ---------- B. 队列（执行器替身推到 COMPLETED） ---------- */
-      console.log('\n[B] 共享任务队列（执行器替身状态机）');
+      /* ---------- B. 队列（假调度器推到 COMPLETED） ---------- */
+      console.log('\n[B] 共享任务队列（SR_SLURM_FAKE 状态机）');
       await page.goto(base + '/queue', { waitUntil: 'networkidle2', timeout: 30000 });
       await waitText(page, 'SSE 已连接', 10000);
       await clickByText(page, '提交 SR 作业');
@@ -350,7 +345,7 @@ async function main() {
         return t && t.textContent.trim() === '完成';
       }, 25000, '队列 COMPLETED');
       const tags = await firstRowTags(page);
-      assert(tags[0] === '完成', `提交后替身跑完 → 首行徽标「完成」 (${tags.join(',')})`);
+      assert(tags[0] === '完成', `提交后假调度器跑完 → 首行徽标「完成」 (${tags.join(',')})`);
 
       // 同一帧还要在右下角弹一条提醒。这是「真后端 → SSE job_update → jobNotice → 提醒
       // 栈」**唯一**跑得通的链路回归（test-vue-viewer 的 K 段没有后端，只能拿 pushNotice
@@ -364,7 +359,7 @@ async function main() {
         `完成帧弹出右下角提醒（"${notice.slice(0, 34)}…"）`);
       assert(notice.indexOf(path.basename(lqPath)) >= 0 && notice.indexOf('×') >= 0,
         `提醒第二行取列表行的目录名 + 倍率（"${notice}"）`);
-      // 点整条 = 去队列页（已经在这页上，是幂等的）并把这条收掉；同时把屏面清干净，
+      // 点整条 = 去队列页（已经在这页上，是幂等的）并把这条收掉；顺手把屏面清干净，
       // 免得后面那些真实点击被右下角这张卡挡住。
       await page.click('[data-e2e="job-notice-ok"] .jn-body');
       await sleep(300);
@@ -394,7 +389,7 @@ async function main() {
         };
       });
       assert(/^\d+ 秒$/.test(rowInfo.elapsed), `耗时列给出终态耗时（${rowInfo.elapsed}）`);
-      // 终态耗时的真值 = 后端 finished_at − started_at（本次运行的时长；替身下
+      // 终态耗时的真值 = 后端 finished_at − started_at（本次运行的时长；假调度器下
       // 恒 < 60 秒，所以只会是「N 秒」，不会走到「N 分 N 秒」分支）。两列都由后端
       // 在观测到 RUNNING / 终态时钉下并随 SSE 帧下发 —— 页内那份若停在上一次 GET
       // 的快照（提交刚落库时两列都还是 NULL），任务一完成耗时列就变「—」。这里直接
@@ -411,17 +406,17 @@ async function main() {
       assert(rowInfo.cands.length === 1 && path.resolve(rowInfo.cands[0]) === path.resolve(lqPath),
         `目录下拉候选 = 队列里出现过的目录（${rowInfo.cands.join(',')}）`);
 
-      // 产物预览主动生成：作业转 COMPLETED 之后，后端**从库里派生**出一件待生成的活
+      // 产物预览急烤：作业转 COMPLETED 之后，后端**从库里派生**出一件待烤的活
       // （不挂在状态转换上，那个竞态见 api-contract §3.3），队列行随之多两个字段。
-      // 主动生成是后台循环（每 SR_QUEUE_POLL_SEC 一轮、每轮至多一件），所以这里等到它
+      // 急烤是后台循环（每 SR_QUEUE_POLL_SEC 一轮、每轮至多一件），所以这里等到它
       // 落定再断 —— 提交完立刻读会读到 `preview_state` 还是 null 的那一刻。
       const pk = await waitFor(page, async (ab) => {
         const r = await fetch(ab + '/api/queue');
         const t = (await r.json()).tasks[0];
         return t && t.preview_state ? t : null;
-      }, 20000, '主动生成落定', apiBase);
-      // 事实（跑出来的，不是猜的）：执行器替身只推状态机、**不写任何产物 tif**，
-      // 于是主动生成拿到的是「完成但没有产物」—— 记 skipped + product_missing，
+      }, 20000, '急烤落定', apiBase);
+      // 事实（跑出来的，不是猜的）：假调度器只推状态机、**不写任何产物 tif**，
+      // 于是急烤拿到的是「完成但没有产物」—— 记 skipped + product_missing，
       // **不是 failed**：云限额跳过的作业同样是合法 COMPLETED，运维看到「跳过」
       // 得能从 note 里立刻分清是哪一种，所以 note 必须列出试过的候选名。
       // 断到「有两个候选、都按输入名派生」为止，**不钉后缀字面量**：那个后缀来自
@@ -487,7 +482,7 @@ async function main() {
       const rois = await page.evaluate(() => window.__viewer.getRois().length);
       assert(rois === 1, `画了 1 个掩码区域 (getRois=${rois})`);
 
-      // 点工具栏「提交 SR」→ 服务端生成 → setDraft + 跳 /queue（不自动提交）
+      // 点工具栏「提交 SR」→ 服务端烘焙 → setDraft + 跳 /queue（不自动提交）
       await clickByText(page, '提交 SR');
       await waitFor(page, () => location.pathname.endsWith('/queue'), 15000, '跳转 /queue');
       await waitFor(page, () => !!document.querySelector('.qp-form .qp-draft-tip'), 10000, '表单预填提示');

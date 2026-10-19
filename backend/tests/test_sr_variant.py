@@ -1,14 +1,13 @@
-"""Tests for the platform deployment-variant generator.
+"""Tests for the Slurm deployment-variant generator.
 
 The generator lives outside the backend package (SR_code/ is not a package),
 so it is loaded by path via importlib rather than by an import statement.
 
 What is pinned here:
   * every anchor in the edit table hits the real source exactly once;
-  * the checked-in variant does not reintroduce the blockers the platform
-    route cannot live with (hard-coded CUDA_VISIBLE_DEVICES, stopping a host
-    service on failure, writing the shared stop log, `gpu_count != 4`) and
-    keeps the contract markers ("Run finished.", exit(3));
+  * the checked-in variant does not reintroduce the four Slurm blockers
+    (hard-coded CUDA_VISIBLE_DEVICES, `systemctl stop slurmd`, `gpu_count != 4`)
+    and keeps the contract markers ("Run finished.", exit(3));
   * generation is deterministic and --check is a byte comparison;
   * a bad anchor is a hard failure (exit 2), never a silent skip.
 """
@@ -23,16 +22,16 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-GENERATOR_PATH = REPO_ROOT / "SR_code" / "tools" / "gen_platform_variant.py"
+GENERATOR_PATH = REPO_ROOT / "SR_code" / "tools" / "gen_slurm_variant.py"
 SOURCE_PATH = REPO_ROOT / "SR_code" / "code_0817_prod.py"
 VARIANTS_DIR = REPO_ROOT / "SR_code" / "variants"
-VARIANT_PATH = VARIANTS_DIR / "code_0817_prod_platform.py"
-PROVENANCE_PATH = VARIANTS_DIR / "code_0817_prod_platform.provenance.json"
+VARIANT_PATH = VARIANTS_DIR / "code_0817_prod_slurm.py"
+PROVENANCE_PATH = VARIANTS_DIR / "code_0817_prod_slurm.provenance.json"
 GITATTRIBUTES_PATH = VARIANTS_DIR / ".gitattributes"
 
 
 def load_generator():
-    spec = importlib.util.spec_from_file_location("gen_platform_variant", GENERATOR_PATH)
+    spec = importlib.util.spec_from_file_location("gen_slurm_variant", GENERATOR_PATH)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -68,9 +67,9 @@ class EditTableTests(unittest.TestCase):
                     (edit_id, expected, gen.SOURCE_REL))
                 self.assertNotEqual(replacement, anchor)
 
-    def test_edit_ids_are_e1_through_e10_in_order(self):
+    def test_edit_ids_are_e1_through_e9_in_order(self):
         self.assertEqual([e[0] for e in gen.EDITS],
-                         ["E%d" % n for n in range(1, 11)])
+                         ["E%d" % n for n in range(1, 10)])
 
     def test_check_anchors_reports_mismatch(self):
         bad = list(gen.EDITS) + [("E99", "no such line in the source\n", "x", 1)]
@@ -90,22 +89,15 @@ class VariantContentTests(unittest.TestCase):
         self.code = code_only(self.variant)
 
     def test_no_cuda_visible_devices_assignment(self):
-        # Reading the variable (gpuid) is fine — that is how the code picks the
-        # card inside the process. Assigning it here would override the
-        # SR_LOCAL_GPU the executor set for the run.
+        # Reading the variable (gpuid) is fine; assigning it would defeat --gres.
         self.assertNotIn("os.environ['CUDA_VISIBLE_DEVICES'] =", self.variant)
         self.assertNotIn('os.environ["CUDA_VISIBLE_DEVICES"] =', self.variant)
         self.assertIsNone(re.search(r"CUDA_VISIBLE_DEVICES[^\n]*=", self.code),
                           "variant still assigns CUDA_VISIBLE_DEVICES")
 
-    def test_no_host_service_stop(self):
-        # E7: a failed run must not reach out and stop a host service.
+    def test_no_slurmd_stop(self):
+        self.assertEqual(self.variant.count("systemctl stop slurmd"), 0)
         self.assertEqual(self.code.count("systemctl"), 0)
-
-    def test_no_shared_stop_log_write(self):
-        # E8: that file's lines are read as "this host left the product queue",
-        # a claim a run that failed on the API host must not make.
-        self.assertEqual(self.code.count("SlurmStopLog"), 0)
 
     def test_no_gpu_count_not_equal_4(self):
         self.assertEqual(self.variant.count("gpu_count != 4"), 0)
@@ -119,15 +111,6 @@ class VariantContentTests(unittest.TestCase):
         # E9: a policy skip must be distinguishable from a silent failure.
         self.assertIn("Run skipped:", self.variant)
         self.assertIn("exit(0)", self.variant)
-
-    def test_reads_the_un_superresolved_copy(self):
-        # E10: the body holds the landed un-superresolved copy by the time the
-        # job reads it, so the strict "1.0 < size < 1.8 GB" gate would reject
-        # it.  The variant must call the one-sided-gate resolver instead.
-        self.assertEqual(self.code.count("util.get_l1_pan_tif_rcsc("), 0)
-        self.assertIn(
-            "img_abs_path = util.get_l1_pan_tif_rcsc_nosr("
-            "lq_path, tiftype, sr_previous_step)", self.variant)
 
     def test_module_level_library_load_is_guarded(self):
         self.assertIn("except Exception:\n    lib = None", self.variant)
@@ -158,7 +141,7 @@ class ArtifactTests(unittest.TestCase):
                          ["diff", "edits", "generator", "generator_version",
                           "source", "variant"])
         self.assertEqual([e["id"] for e in data["edits"]],
-                         ["E%d" % n for n in range(1, 11)])
+                         ["E%d" % n for n in range(1, 10)])
         for entry in data["edits"]:
             self.assertEqual(entry["occurrences"], 1)
 
@@ -173,12 +156,12 @@ class ArtifactTests(unittest.TestCase):
             data["source"]["sha256"])
 
     def test_diff_is_a_unified_diff_of_source_and_variant(self):
-        diff = (VARIANTS_DIR / "code_0817_prod_platform.diff").read_text(encoding="utf-8")
+        diff = (VARIANTS_DIR / "code_0817_prod_slurm.diff").read_text(encoding="utf-8")
         lines = diff.splitlines()
         self.assertTrue(lines[0].startswith("--- " + gen.SOURCE_REL), lines[0])
         self.assertTrue(lines[1].startswith("+++ "), lines[1])
         self.assertTrue(any(l.startswith("@@") for l in lines))
-        self.assertIn("SlurmStopLog", diff)          # the removal is visible
+        self.assertIn("systemctl stop slurmd", diff)  # the removal is visible
         self.assertNotIn("\r", diff)
 
 
@@ -207,7 +190,7 @@ class DeterminismTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "out"
             self.assertEqual(run_generator("--out-dir", str(out)).returncode, 0)
-            target = out / "code_0817_prod_platform.py"
+            target = out / "code_0817_prod_slurm.py"
             target.write_text(target.read_text(encoding="utf-8") + "# hand edit\n",
                               encoding="utf-8")
             result = run_generator("--check", "--out-dir", str(out))

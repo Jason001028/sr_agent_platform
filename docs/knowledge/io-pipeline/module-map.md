@@ -16,12 +16,13 @@ flowchart TD
     CFG["config.py<br/>环境变量唯一真源"]
     PG["pathguard.py<br/>路径归一与白名单"]
     SS["services/scene_search.py<br/>场景检索与命名"]
-    PJ["services/preview_jpg.py<br/>预览生成预览"]
+    PJ["services/preview_jpg.py<br/>预览烘焙"]
   end
 
   subgraph SVC["服务层"]
     ST["services/store.py<br/>SQLite"]
     LE["services/local_exec.py<br/>本机执行器"]
+    SL["services/slurm.py<br/>调度器客户端"]
     MS["services/mask.py<br/>掩码栅格化"]
     PC["services/preview_cache.py<br/>兜底缓存"]
     PCL["services/preview_clear.py<br/>清缓存"]
@@ -43,6 +44,7 @@ flowchart TD
   CFG --> AG
   ST --> RS
   LE --> RS
+  SL --> RS
   PA --> APP
   PA --> PL
   RS --> APP
@@ -52,6 +54,7 @@ flowchart TD
   RS --> PL
   MS --> PL
   LE --> PL
+  SL --> PL
   TL --> PL
   AG --> PL
   TL --> AG
@@ -88,9 +91,9 @@ flowchart TD
 | `GET /api/chat/sessions` | platform | store | SQLite |
 | `GET /api/chat/sessions/{id}/messages` | platform | store | SQLite |
 | `POST /api/chat/sessions/{id}/messages` | platform | agent/loop、tools | **调模型**；工具副作用 |
-| `GET /api/queue` | platform | store、run_sr、local_exec | **读退出码文件**；可能写库与广播 |
-| `POST /api/queue` | platform | run_sr、local_exec | 写 work 目录两份文件；**起进程** |
-| `POST /api/queue/{id}/cancel` | platform | local_exec | 停止进程树 |
+| `GET /api/queue` | platform | store、run_sr、local_exec/slurm | **读退出码文件**；可能写库与广播 |
+| `POST /api/queue` | platform | run_sr、local_exec/slurm | 写 work 目录两份文件；**起进程** |
+| `POST /api/queue/{id}/cancel` | platform | local_exec/slurm | 发信号 / 取消作业 |
 | `GET /api/queue/events` | platform | — | SSE 长连 |
 | `POST /api/masks` | platform | mask | **写盘阵掩码 tif 与 txt** |
 | `POST /api/qclist/write` | platform | pathguard | **原子写盘阵 txt** |
@@ -144,7 +147,7 @@ flowchart LR
 | 触发 | 端点 | 前端随后做什么 |
 |---|---|---|
 | 进场景库 / 检索 | `GET /api/scenes` | 填表格；失败写本页错误 |
-| 行「打开」 | `GET /api/scenes/{id}/preview` → 静态 URL | 档位不符时才重新生成；取字节后画到画布 |
+| 行「打开」 | `GET /api/scenes/{id}/preview` → 静态 URL | 档位不符时才重烤；取字节后画到画布 |
 | 粘路径 / 拖文件 | `POST /api/scenes/resolve` | 命中则就地升级记录；失败把后端原因原样展示 |
 | 拖入链取图 | `GET /api/scenes/{id}/preview-drop` | 读回退响应头，如实说明落在临时缓存 |
 | 保存掩码 | `POST /api/masks` | 记下服务端掩码路径 |
@@ -167,12 +170,12 @@ flowchart LR
 | 纪律 | 为什么 |
 |---|---|
 | 掩码坐标一律用**源影像元数据尺寸** | 预览是降采样的，用 JPEG 尺寸会让掩码整体错位 |
-| 预览缓存的档位**读盘上那份的注释**，不信前端记忆 | 换机器、别人先生成过，前端记忆就是错的 |
-| 解码结果落笔前**比对代号** | 本地解码可能耗时几十秒，期间记录可能已切到服务端 JPG，过期结果不能覆盖新图 |
+| 预览缓存的档位**读盘上那份的注释**，不信前端记忆 | 换机器、别人先烤过，前端记忆就是错的 |
+| 解码结果落笔前**比对代号** | 本地解码可能耗时几十秒，期间记录已被升级成服务端 JPG，过期结果不能覆盖新图 |
 | **环境变量是唯一的配置入口** | 内网离线，配置文件分发成本高于改 systemd |
 | **两个包同版本更新** | 前后端之间没有版本协商 |
 | **不 import SR 侧任何模块** | 两侧解释器与依赖完全不同，只通过批脚本文本交接 |
-| **终态只认退出码文件** | 退出码 0 有多种含义，退出码文件是唯一的终态判据 |
+| **终态只认退出码文件** | 退出码 0 有多种含义，账务命令在真机永久不可用 |
 | **服务层不返回 HTTP 概念** | 异常到状态码的翻译集中在路由层，便于单测服务 |
 
 ---
@@ -180,13 +183,14 @@ flowchart LR
 ## 6. 离机怎么验
 
 `.e2e/` 是这套拓扑的可执行替身：用无头浏览器 + 本地静态服务顶替 nginx 的两个 location，
-用真 uvicorn 跑后端，用假 LLM 顶替模型端点。
+用真 uvicorn 跑后端，用假 LLM 与假调度器顶替两个外部依赖。
 跑法见 [current-question.md](../../status/current-question.md) §6.3。
 
 | 替身 | 顶替谁 | 开关 |
 |---|---|---|
 | 本地静态服务 | nginx 的 `/disk-array/` 与 SPA fallback | 脚本内置 |
 | 假 LLM | 模型端点 | `SR_LLM_MOCK=1` |
+| 假调度器 | Slurm | `SR_SLURM_FAKE=1` |
 | 临时盘阵根 | 真实盘阵 | `SR_SCENES_ROOT` 指到临时目录 |
 
 因此**改 nginx 站点配置或 systemd 单元时，`.e2e/` 里对应的替身也要同步**——

@@ -14,7 +14,7 @@
 - PUT：整资源覆盖式更新（「给这个 URI 赋值这个完整表示」），语义幂等——重复 PUT 最终状态一致。
 - PATCH：部分字段更新（增量描述），按实现未必幂等（例如 `{"op":"append",…}` 重复执行会叠加）。
 - DELETE：删资源，语义幂等——再删一次只是 404，不改变最终状态。
-- 补充常被同时问的：HEAD = GET 只要头不要 body（探活/拿元信息）；OPTIONS = 问服务端能力 / CORS 预检。
+- 补充常被顺带问的：HEAD = GET 只要头不要 body（探活/拿元信息）；OPTIONS = 问服务端能力 / CORS 预检。
 
 ```http
 POST /api/chat/sessions/{id}/messages HTTP/1.1      ← 请求行：方法 目标 版本
@@ -151,7 +151,7 @@ Content-Type: application/json
 - Cookie：客户端小存储（约 4KB），`Set-Cookie` 由服务器下发、浏览器按域/路径自动带上。关键属性：`HttpOnly`（JS 读不到，抗 XSS 窃取）、`Secure`（仅 https）、`SameSite=Lax/Strict`（防 CSRF）、`Domain/Path` 作用域。本身是**载体**，里面装 session id 或 token 都行。
 - Session：**状态存在服务端**（内存/Redis/DB），客户端只拿 session_id（常放 cookie）。优点：可随时吊销、服务端可控；缺点：有状态 → 水平扩展要共享存储（Redis）、每次请求查一次。
 - Token/JWT：**状态打进自包含令牌**，服务端验签即认（`HMAC/RSA` 签名 + 过期时间），无共享存储、天然水平扩展。缺点：签发后**难提前吊销**（只能等过期，或加黑名单/短 TTL+refresh）；JWT 有点大；若放 localStorage，被 XSS 读走即失守。
-- 一句话选型：要「可即时吊销、服务端权威」→ Session+共享存储；要「无状态扩展、跨域/移动端同时」→ JWT，用短生命周期 + refresh 缓解吊销难。Chrome 三方 Cookie 限制还进一步挤压 cookie 方案的跨站场景。
+- 一句话选型：要「可即时吊销、服务端权威」→ Session+共享存储；要「无状态扩展、跨域/移动端顺手」→ JWT，用短生命周期 + refresh 缓解吊销难。Chrome 三方 Cookie 限制还进一步挤压 cookie 方案的跨站场景。
 - Cookie 其余属性和坑：`Expires`/`Max-Age`（会话 vs 持久）、`Domain`/`Path` 决定发给谁、单域名 ~几十个/单条 ~4KB 上限、`SameSite=None` 需要 Secure。面试爱问的辩证点：**Session 也可把 id 放 token、JWT 也可装 cookie**——关键区别不是存放位置而是「状态在谁手里、能不能吊销」。
 
 **追问**：JWT 放 cookie 还是 localStorage 哪个安全？—— cookie+HttpOnly 抗 XSS 但怕 CSRF（用 SameSite 挡），localStorage 抗 CSRF 但怕 XSS；务实组合是 HttpOnly+Secure+SameSite cookie。另注意 refresh token 与 access token 分开、refresh 可吊销。
@@ -161,7 +161,7 @@ Content-Type: application/json
 ### Q14 ★ 服务端要主动推数据给前端，有哪几种实现？各自的机制与坑？
 **答（要点）**：四种主流：
 
-- **轮询（polling）**：前端定时 GET。实现最简，但延迟 = 间隔、请求大量浪费、无事件时无进展，负载随连接数线性涨。
+- **轮询（polling）**：前端定时 GET。实现最简，但延迟 = 间隔、请求大量浪费、无事件时空转，负载随连接数线性涨。
 - **长轮询（long polling）**：请求挂着不发响应，服务端有事件才回（或超时兜底），前端收到再立刻续一根。把「推送」在 HTTP/1.1 上模拟出来；坑是服务端得**一直占着连接和 worker**，超时/断线/乱序都要自己处理，连接风暴下容易雪崩。
 - **SSE（Server-Sent Events）**：一条**只读、单向（服务端→客户端）**的 HTTP 长连接，格式就是普通 HTTP + `Content-Type: text/event-stream`，文本逐事件下发。
 - **WebSocket**：**双向全双工**的独立协议（101 升级），二进制/文本都能传，开销低。
@@ -247,7 +247,7 @@ location /api/ {
 ### Q20 ★ 超时/重试/退避怎么设计才不乱？什么时候重试是安全的？
 **答（要点）**：先分层定超时（连接超时 / 读超时 / 总超时，各层自设且要协调：客户端 < nginx read timeout < 上游自己别无限挂）。再谈重试：
 
-- **只对幂等请求自动重试**（GET/PUT/DELETE 或带幂等键的 POST）。非幂等 POST 重试前必须确认「上次到底执行没有」（结果未知 ≠ 失败）——仓库 run_sr 对「写了 intent 但没拿到 job_id」的崩溃重放就明确**拒绝盲重试**，先查执行器状态再决定。
+- **只对幂等请求自动重试**（GET/PUT/DELETE 或带幂等键的 POST）。非幂等 POST 重试前必须确认「上次到底执行没有」（结果未知 ≠ 失败）——仓库 run_sr 对「写了 intent 但没拿到 job_id」的崩溃重放就明确**拒绝盲重试**，先查调度器再决定。
 - 用**指数退避 + 抖动**（1s→2s→4s…加随机），别并发齐射把服务打崩；读 `Retry-After`（429/503）给出的时间。
 - 场景化：HTTP 客户端重试对 5xx/超时（可能还没执行或执行了没回执）；4xx 别重试（重试也错）。网络侧配合「失败快速失败 + 兜底提示」，别无限重试。
 - 客户端给非幂等 POST 加重试时主动补 `Idempotency-Key` 头（服务端记忆、同键同果）；服务端限流回 `429 + Retry-After`、过载维护回 `503 + Retry-After`，客户端读它而不是按自己节奏硬闯——服务端给的退避最权威。
@@ -273,7 +273,7 @@ location /api/ {
 **答（要点）**：JSON Schema 用 JSON 描述参数/响应的结构（类型、必填、嵌套、枚举、约束），一份描述多方复用：后端用来校验入参、生成 API 文档，前端用来生成类型（快）和做 mock，LLM 工具调用用它声明 function `parameters`——**同一份 schema 一个真相源**。
 
 - **先契约后代码（contract-first）**：动手写实现前，先定端点、请求/响应/事件字段，评审通过才写码；契约改了先改文档、标注状态、评审后再动代码——仓库的 API 契约文档就是这个流程的落点，SSE 各事件共用首字段 `type` 也是为向后加字段留的兼容缝。
-- **契约测试**：前后端各自拿同一份 schema/事件样例锁字段——后端单测断言产出的 JSON/SSE 帧符合 schema，前端单测锁 parser/渲染；再加 mock（假 LLM/假执行器）驱动的 e2e，离机把整条链跑绿，真机项另排。这样「两边各自改了字段」会在 CI 立刻炸，而不是上线才断。
+- **契约测试**：前后端各自拿同一份 schema/事件样例锁字段——后端单测断言产出的 JSON/SSE 帧符合 schema，前端单测锁 parser/渲染；再加 mock（假 LLM/假调度器）驱动的 e2e，离机把整条链跑绿，真机项另排。这样「两边各自改了字段」会在 CI 立刻炸，而不是上线才断。
 
 - 契约落地到栈：后端用 Pydantic/JSON Schema 在**运行时**校验入参（仓库 tools 的 params_schema 既喂 LLM function-calling、又被同一注册表拿去生成 REST 端点，一处 schema 两处消费）；前端用工具从 schema 生成 TS 类型、拿样例做 mock。改参数的流程 = 先改 schema + 文档 → 评审 → 后端测试 + 前端测试一起锁，谁漏改谁红。
 - 时序坑：**契约是同步问题**——前后端各自独立上线时，老前端打新后端或反之都会断；所以要兼容策略（新字段可选、老字段别删）或前后端同发版。接口文档自动生成（FastAPI `/docs`）只解决「说什么」，不解决「何时两端一起变」，后者靠评审节奏和契约测试兜住。
@@ -289,12 +289,12 @@ location /api/ {
 
 **追问**：SSE 中途出错 HTTP 状态码还能改吗？—— 不能，流已开、状态码已定，所以错误改成 `{"type":"error"}` 事件下发、前端按 type 渲染失败态；同理会话忙用 409 在开流前就把并发挡住（会话锁），一请求一回合串行。
 
-### Q24 ★ 为什么 run_sr 提交要做成幂等？「参数指纹 + 任务表」怎么防止重复提交作业？
-**答（要点）**：run_sr 的副作用是**起一个 GPU 作业跑遥感超分**——真副作用、贵、且 Agent 循环可能崩溃重放/网络重试。若盲目重发，同一次作业被提交两遍是灾难。做法（[run_sr.py](backend/services/run_sr.py)）：
+### Q24 ★ 为什么 run_sr 提交要做成幂等？「参数指纹 + 任务表」怎么防止重复上 Slurm？
+**答（要点）**：run_sr 的副作用是**提交 GPU/Slurm 作业跑遥感超分**——真副作用、贵、且 Agent 循环可能崩溃重放/网络重试。若盲目重发，同一次作业被 sbatch 两遍是灾难。做法（[run_sr.py](backend/services/run_sr.py)）：
 
 1. `task_fingerprint(params)` = 对参数排序后 JSON 做 sha256，**同参必同指纹**。
-2. 提交前先查 `sr_tasks` 表：有历史 job_id 就按运行记录/退出码文件校准——作业仍在跑或已 COMPLETED → 直接返回复用标记（RESUMED_ACTIVE/RESUMED_COMPLETED），**不再重复提交**；终态失败/查无记录 → 带上前次失败信息重跑。
-3. 关键纪律是「**先记意图、后记结果**」：写 intent 行（job_id 为空）在前，起子进程在后，拿到 job_id 再回写；崩溃正好卡在两行之间时，重放会看到「有 intent 无 job_id」，判定为**结果未知、不盲重试**（先查执行器状态再决定），从根上杜绝同一作业被双提交。
+2. 提交前先查 `sr_tasks` 表：有历史 job_id 就 `squeue/sacct` 校准——作业还 active 或已 COMPLETED → 直接返回复用标记（RESUMED_ACTIVE/RESUMED_COMPLETED），**不再 sbatch**；终态失败/查无记录 → 带上前次失败信息重跑。
+3. 关键纪律是「**先记意图、后记结果**」：写 intent 行（job_id 为空）在前，sbatch 在后，拿到 job_id 再回写；崩溃正好卡在两行之间时，重放会看到「有 intent 无 job_id」，判定为**结果未知、不盲重试**（先查调度器再决定），从根上杜绝同一作业被双提交。
 
 **追问**：这跟 HTTP 幂等键（Idempotency-Key）是同一件事吗？—— 是同一思想的两种落点：HTTP 幂等键把去重键放请求头、服务端记忆；这里是**服务端按参数内容自算指纹** + 任务表复用，客户端甚至不用传 key——相同参数天然碰撞去重，且复用还带来了「失败可重跑」的语义。两者的共同前提都是：副作用要可定位（job_id / 结果落库），不能只靠「重试 = 安全」。
 

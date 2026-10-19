@@ -110,7 +110,7 @@ def scene_id_to_abs(id_token: str, root: Path | None = None) -> Path:
     """Resolve an opaque scene id to a whitelisted absolute file path.
 
     两种形态都吃：`~` 前缀 = 绝对路径（走 pathguard 前缀白名单），其余 =
-    相对 `SR_SCENES_ROOT` 的 rel（base64url，即库行 id 的形态，语义保持一致）。
+    legacy 的"相对 SR_SCENES_ROOT 的 rel"（语义逐字未变，保证库行零回归）。
     """
     if id_token.startswith(_ABS_ID_PREFIX):
         body = id_token[len(_ABS_ID_PREFIX):]
@@ -148,9 +148,11 @@ def rel_url(path: Path, root: Path) -> str:
 def preview_jpg_name(source_abs: Path) -> str:
     """预览 JPG 的文件名 —— **全平台唯一一条**：`<源 stem>_preview.jpg`。
 
-    同一份栅格被三条链各生成一份（主动生成 / 打开时的惰性 / 拖入链），名字只留这一条，
-    否则一个场景目录里会躺着两个几乎同名、内容相同的文件，谁也说不清该看哪个。点号形态
-    `<stem>.preview.jpg` 没有读者，由 `legacy_preview_path` 在每条链处理到那份栅格时删掉。
+    2026-09-22 起由 `<stem>.preview.jpg` 改名而来。理由不是好看：同一份栅格被三条链
+    各烤一份（急烤 / 打开时的惰性 / 拖入链），点号那份与下划线那份只差一个字符，
+    真机上就是一个场景目录里躺着两个几乎同名、内容相同的文件，谁也说不清该看哪个。
+    现在三条链落同一个名字，点号那份**没有任何读者**了 —— 旧文件由
+    `legacy_preview_path` 在每条链处理到那份栅格时顺手删掉。
     """
     return Path(source_abs).stem + "_preview.jpg"
 
@@ -161,7 +163,7 @@ def preview_jpg_path(source_abs: Path, root: Path) -> Path:
     Default = `<源同目录>/<源 stem>_preview.jpg`；若配了 SR_PREVIEWS_ROOT（必须仍在
     scenes root 内）则放 `<previews_root>/<rel 目录>/<源 stem>_preview.jpg`，nginx
     单根 alias 下 URL 不变。**名字与档位无关**：换档位是原地覆盖同一份、靠戳里的 div
-    判废重新生成（见 `preview_jpg.rule_stamp`）。
+    判废重烤（见 `preview_jpg.rule_stamp`）。
     """
     if not _is_within(source_abs, root):
         raise PathDeniedError("源路径在白名单之外")
@@ -191,9 +193,9 @@ def preview_jpg_for(source_abs: Path, root: Path | None) -> Path:
 def drop_preview_path(source_abs: Path) -> Path:
     """拖入链的落点：**恒** `<源同目录>/<源 stem>_preview.jpg`。
 
-    与 `preview_jpg_for` **同名**，差别只剩目录：
+    与 `preview_jpg_for` 现在**同名**（2026-09-22 起），差别只剩目录：
 
-    1. **不吃 `SR_PREVIEWS_ROOT`** —— 拖入链要的是「生成一次长期可用」，落进生产场景目录
+    1. **不吃 `SR_PREVIEWS_ROOT`** —— 拖入链要的是「烤一次长期可用」，落进生产场景目录
        才成立；搬去缓存根就又变成缓存了。
     2. **恒落源同目录**，不区分库内库外 —— 拖入的生产场景本来就在盘阵里，而库外路径
        （手工粘贴的任意绝对路径）也没有第二个合理的落点。
@@ -206,9 +208,9 @@ def drop_preview_path(source_abs: Path) -> Path:
 
 
 def legacy_preview_path(jpg_path: Path) -> Path:
-    """点号落点（`<stem>.preview.jpg`）：**由新落点反推**。
+    """改名前的点号落点（`<stem>.preview.jpg`）：**由新落点反推**。
 
-    同一目录、同一源 stem，只差文件名里一个字符 —— 两条落点规则（源同目录与
+    同一目录、同一源 stem，只差文件名里一个字符 —— 两条老规则（`with_suffix` 与
     `SR_PREVIEWS_ROOT` 的镜像树）都把那份文件放在新落点同一个目录里，所以反推不需要
     root。传进来的不是本函数的落点（stem 不以 `_preview` 结尾）时**原样返回**，好让
     调用方能一眼跳过。

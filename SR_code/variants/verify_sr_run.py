@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""In-job contract verifier for the SR pipeline.
+"""In-job contract verifier for the Slurm SR pipeline (P2 deliverable).
 
-Runs *inside the run*, right after `code_0817_prod.py -f <config.xml>`, and
-turns "did this run actually super-resolve anything?" into a single exit code
-the platform can read back from disk:
+Runs *inside the batch job*, right after `code_0817_prod.py -f <config.xml>`,
+and turns "did this job actually super-resolve anything?" into a single exit
+code the platform can read back from disk:
 
     exit 0   contract satisfied
     exit 90  contract not satisfied (every failing condition on stderr)
@@ -12,16 +12,17 @@ the platform can read back from disk:
 Why this exists
 ---------------
 `code_0817_prod.py` has five reachable `exit(0)` paths that all fire *before*
-the SRLOG is created ("闭环毒药", docs/sr_code/sr-pipeline-interface.md 2.3). A
-launcher that trusts the exit code then records that as a permanent success,
-and the scene silently never gets super-resolved. The contract is therefore
-three conditions, checked here rather than taken on trust:
+the SRLOG is created (docs/status/slurm-integration.md 2.3, "闭环毒药"). Slurm
+then reports the step as COMPLETED, the platform's idempotency layer caches
+that as a permanent success, and the scene silently never gets super-resolved.
+The contract (docs/sr_code/sr-pipeline-interface.md 2) is therefore three
+conditions, checked here rather than taken on trust:
 
     1. the SR process exited 0                    (--sr-exit-code)
     2. the SRLOG's last non-empty line says so    ("Run finished.")
     3. the output tif exists and is non-empty
 
-A `Run skipped:` last line is the *legal* policy skip introduced by the platform
+A `Run skipped:` last line is the *legal* policy skip introduced by the deploy
 variant's E9 edit (cloud cover over the limit): condition 1 and 2 hold, and no
 output tif is expected, so the contract is satisfied without condition 3.
 
@@ -31,31 +32,12 @@ The verdict is also written to
 
     <DatarootLQ>/Debug/_SREXIT_<job_id>.txt        (EXIT_FILE_FMT)
 
-next to the SRLOG. That file is how the platform resolves a run's *terminal*
-state (backend/services/sr_result.py): it is the run's own recorded outcome,
-whereas the child's exit code says nothing about whether the run did its job.
-The name/format is a cross-language contract -- backend/services/run_sr.py
-derives the same path from config.xml, and backend/tests/test_sr_verify.py
-asserts the two agree. `job_id` is the run number, passed explicitly as
-`--job-id`: the same config.xml is reused by every retry of a task, so a run
-number read from anywhere else could not be trusted to name the right run (and
-on a host with no scheduler there is no environment to read it from at all).
-
-Landing the product on the body name
-------------------------------------
-With `--land-on-body <path>` the verifier is also the run's last step: once the
-three conditions hold and a product exists, the product is moved onto the body
-name (the input the SR script read) and the backup `sr_prep_scene.py` kept is
-dropped. A run that fails, or that is skipped by policy, restores the body from
-that backup instead, leaving the scene exactly as it was so the submit can be
-repeated.
-
-This belongs here rather than in the batch script because the terminal state
-the platform reads is *this* file, never the process exit code (see
-backend/services/local_exec.py): a landing that failed in bash could only
-print, and the platform would then call a run COMPLETED whose body was never
-replaced. A landing failure is an ordinary contract failure -- exit 90, reason
-on stderr.
+next to the SRLOG. That file is how `backend/services/slurm.py` resolves a
+job's *terminal* state: the array server has `AccountingStorageType=none`, so
+`sacct` is permanently unusable and `squeue` only knows about live jobs. The
+name/format is a cross-language contract -- backend/services/run_sr.py derives
+the same path from config.xml, and backend/tests/test_sr_verify.py asserts the
+two agree. `job_id` comes from `--job-id`, else `$SLURM_JOB_ID`.
 
 Semantics are copied from the production source, not from intuition
 ------------------------------------------------------------------
@@ -90,7 +72,7 @@ import sys
 import time
 from xml.dom import minidom
 
-__version__ = "1.1.0"
+__version__ = "1.0.0"
 
 EXIT_CONTRACT_OK = 0
 EXIT_CONTRACT_FAIL = 90
@@ -408,11 +390,11 @@ def write_exit_code_file(v, job_id, sr_exit_code):
         if debug_dir and not os.path.isdir(debug_dir):
             os.makedirs(debug_dir)
         # encoding pinned on purpose: `reason` carries Chinese text, and this
-        # runs in the SR env (py3.6), where LANG may be unset — py3.6 then
-        # defaults to ASCII and a locale-encoded write would raise
+        # runs under the job env, where Slurm's --export=NONE has dropped LANG —
+        # py3.6 then defaults to ASCII and a locale-encoded write would raise
         # UnicodeEncodeError, which the except below swallows into "no file".
         # The platform reads that as UNKNOWN instead of FAILED, which is exactly
-        # the failure this file exists to rule out.
+        # the silent failure this file exists to rule out.
         with open(path, "w", encoding="utf-8") as f:
             f.write(body)
     except Exception as exc:
@@ -421,130 +403,33 @@ def write_exit_code_file(v, job_id, sr_exit_code):
     return path
 
 
-# ---------------------------------------------------------------------------
-# landing the product on the body name (see the module docstring)
-# ---------------------------------------------------------------------------
-
-def _drop(path):
-    """Remove a scratch file.  Best effort: its absence is not a contract."""
-    if not path:
-        return
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
-
-
-def _restore_body(body, backup):
-    """Put the pre-run body back and drop the backup; None or a reason string.
-
-    No backup means the pre-run body was never replaced (`sr_prep_scene.py`
-    creates the backup before it copies), so there is nothing to restore.
-    """
-    if not (backup and os.path.isfile(backup)):
-        _drop(backup)
+def _env_job_id():
+    raw = os.environ.get("SLURM_JOB_ID") or os.environ.get("SLURM_JOBID")
+    if not raw:
         return None
     try:
-        os.replace(backup, body)
-    except OSError as exc:
-        return "本体未能从备份恢复 %s: %s" % (body, exc)
-    return None
-
-
-def _failed(v, reason):
-    """Record a landing failure and keep reason_text in step with reasons."""
-    v.fail(reason)
-    v.reason_text = "; ".join(v.reasons)
-
-
-def land_product(v, body, backup, mask_1x=None):
-    """Move the product onto the body name, or leave the scene as it was.
-
-    Returns one of "landed" / "restored" / "missing" / "failed" / "no-body" for
-    the caller's log line. Never raises: a landing problem is a contract
-    failure (v.ok -> False), which is what the platform reads.
-    """
-    if not body:
-        _failed(v, "未提供 --land-on-body，无法把产物归位到本体名")
-        return "no-body"
-
-    if not (v.ok and not v.skip):
-        # Failed, or skipped by policy (legally no product): undo the landing
-        # that sr_prep_scene.py did, so the scene is what it was before.
-        _drop(mask_1x)
-        reason = _restore_body(body, backup)
-        if reason:
-            _failed(v, reason)
-        return "restored"
-
-    product = v.output
-    if not product or not os.path.isfile(product):
-        _drop(mask_1x)
-        reason = _restore_body(body, backup)
-        if reason:
-            _failed(v, reason)
-        _failed(v, "产物不在，无法归位到 %s: %s" % (body, product))
-        return "missing"
-
-    try:
-        before = os.stat(product).st_size
-        os.replace(product, body)
-        # Re-read the landed file: the point of the check is that the bytes we
-        # measured are the bytes now sitting at the body name.
-        after = os.stat(body).st_size
-        if after != before:
-            raise IOError("归位后大小不符 %d != %d" % (after, before))
-    except Exception as exc:                 # noqa: BLE001 -- OSError, IOError
-        _drop(mask_1x)
-        reason = _restore_body(body, backup)
-        _failed(v, "产物归位失败 %s: %s" % (type(exc).__name__, exc))
-        if reason:
-            _failed(v, reason)
-        return "failed"
-
-    _drop(backup)
-    _drop(mask_1x)
-    # The result now lives at the body name; say so in the verdict, so a reader
-    # of that file does not go looking for a product path that no longer exists.
-    v.output = body
-    return "landed"
+        return int(raw)
+    except ValueError:
+        return raw
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="verify_sr_run.py",
-        description="Check the SR run contract and record the verdict on disk.")
+        description="Check the SR job contract and record the verdict on disk.")
     ap.add_argument("--config", required=True,
                     help="the same config.xml the SR script was given (-f)")
     ap.add_argument("--sr-exit-code", type=int, default=None,
                     help="exit code of code_0817_prod.py (the $? right after it)")
-    ap.add_argument("--job-id", required=True,
-                    help="run number this verdict belongs to; names the verdict "
-                         "file (default: none — it is always passed in)")
+    ap.add_argument("--job-id", default=None,
+                    help="Slurm job id (default: $SLURM_JOB_ID)")
     ap.add_argument("--quiet", action="store_true",
                     help="only print the verdict line")
-    # Landing (module docstring "Landing the product on the body name").
-    # Optional: without --land-on-body the verifier only reads.
-    ap.add_argument("--land-on-body", default=None, dest="land_on_body",
-                    help="move the product onto this path (the input the SR "
-                         "script read) once the contract holds")
-    ap.add_argument("--backup", default=None,
-                    help="the pre-run body kept by sr_prep_scene.py")
-    ap.add_argument("--mask-1x", default=None, dest="mask_1x",
-                    help="the input-sized mask sr_prep_scene.py wrote")
     args = ap.parse_args(argv)
 
-    job_id = args.job_id
+    job_id = args.job_id if args.job_id is not None else _env_job_id()
     v = check_contract(args.config, args.sr_exit_code, job_id=job_id)
-    # Before the verdict is written: a landing failure has to reach the
-    # platform through this file (see the module docstring).
-    landing = None
-    if args.land_on_body:
-        landing = land_product(v, args.land_on_body, args.backup, args.mask_1x)
     exit_path = write_exit_code_file(v, job_id, args.sr_exit_code)
-    if landing is not None:
-        sys.stderr.write("verify_sr_run: landing %s -> %s\n"
-                         % (landing, args.land_on_body))
 
     for reason in v.reasons:
         sys.stderr.write("verify_sr_run: %s\n" % (reason,))

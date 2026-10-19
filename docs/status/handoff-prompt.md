@@ -32,13 +32,13 @@
 
 1. `CLAUDE.md` —— 导航，文档分类与代码主产物
 2. `docs/status/current-question.md` —— 交接文档，只写现状：§1 平台是什么 / §2 当前路线 /
-   §3 已知未收口 / §4 下一步 / §5 硬约束 / §6 现值速查。真机勾选见
-   `docs/status/real-machine-acceptance.md`（验收单）
+   §3 已知未收口 / §4 下一步 / §5 硬约束 / §6 现值速查。变更经过另见
+   `docs/status/timeline-archive.md`（历史时间线）、真机勾选见 `docs/status/real-machine-acceptance.md`（验收单）
 3. `docs/experience/gui-experience.md` —— 踩坑与硬约束
 4. `docs/README.md` —— 文档分类索引
 5. `docs/knowledge/platform-tutorial.md` —— 想系统理解设计取舍时再读（从 0 开发教程）
 6. 记忆索引 `C:\Users\lenovo\.claude\projects\d--BaiduNetdiskDownload-sr-agent-platform\memory\MEMORY.md`
-   —— 一批环境与真机事实，例如"真实文件是无压缩 + 条带 1 行""盘阵 .tif 通常有配套同名 .jpg""内网机无 yum 源"
+   —— 一批环境与真机事实，例如"真实文件是无压缩 + 条带 1 行""Slurm 账务未启用""内网机无 yum 源"
 
 ## 仓库地图
 
@@ -48,7 +48,7 @@
 |---|---|
 | `api/` | HTTP 层。`app.py`：`/api/scenes` 检索、`/preview` 懒生成 JPG、`POST /api/scenes/resolve`；`platform.py`：`/api/tools`、`/api/chat/*`（REST + SSE）、`/api/queue*`（REST + SSE）、`/api/masks`；`paths.py`：路径白名单与 scene id 编解码 |
 | `pathguard.py` | 盘阵路径的唯一真源。盘符映射、前缀白名单、由文件名反推场景目录 |
-| `services/` | 流程编排。`scene_search`（场景目录判据）、`preview_jpg`（稀疏采样转 JPG）、`run_sr`（拼 XML 与运行脚本）、`local_exec`（本机执行器：单槽串行 + 进程树管理）、`sr_result`（读判定文件判终态）、`mask`（矢量转栅格掩码）、`store`（SQLite 会话与任务） |
+| `services/` | 流程编排。`scene_search`（场景目录判据）、`preview_jpg`（稀疏采样转 JPG）、`run_sr`（拼 XML 与批脚本）、`slurm`（Slurm 客户端，含假调度器）、`local_exec`（本机直跑执行器）、`mask`（矢量转栅格掩码）、`store`（SQLite 会话与任务） |
 | `tools/` | 流程级 agent 工具，只做薄封装、调用 services。`contract.py` 是接口约定与 `@tool` 注册表 |
 | `agent/loop.py` | 自写状态机，不引入 langchain / langgraph（见 `docs/conventions/langchain-boundary.md`） |
 | `mta_grid/` | 纯算法基础模块 |
@@ -68,8 +68,8 @@
 
 ## 当前路线
 
-「提交 SR」的实现方式是：后端在 node81-135 上用 SR 生产 conda 解释器直接起进程（本机执行，
-单槽串行），运行期规则见 `docs/status/sr-local-execution.md`。
+「提交 SR」的实现方式是：后端在 node81-135 上用 SR 生产 conda 解释器直接起进程，不走 Slurm。
+Slurm 那条线 2026-09-14 已中止，代码、文档、验收清单保留为存量。
 
 现状：提交链路、conda 环境、单卡绑定都已由真机实测打通。当前卡点是需要一个未超分过的场景，
 才能真跑出产物（现有场景已被 `already SRed before` 判定，提前返回）。
@@ -88,8 +88,7 @@
 - 实测、推测、待核三种措辞分开写，不把推断写成事实。
 - 不重复文档里已有的内容。该文件是交接文档，**只写「现在是什么」**：§1 平台是什么 / §2 当前路线 /
   §3 已知未收口（阻塞 / 待真机确认 / 已记录暂不处理）/ §4 下一步 / §5 环境与硬约束 / §6 现值速查。
-  变更**经过**不进文档 —— 改动过程归 git commit，只更新描述当前状态的文件，
-  不写任何历史/变更经过（不追加时间线条目，也不写回本文件）。
+  变更**经过**按日期追加进 `docs/status/timeline-archive.md`，不要写回本文件。
   你要做的是补进这一轮之后的状态，不是重写全书。
 - 改完告诉我改了哪几节、每节加了什么。
 

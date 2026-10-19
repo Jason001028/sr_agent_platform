@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * CompareBar.vue — 图像对比条
+ * CompareBar.vue — 图像对比条（2026-09-20）
  * ------------------------------------------------------------------
  * 由 ViewerPage 渲染在 `.toolbar` **之外**的第二行，展开/收起由 store.cmpStripOpen 管。
  *
@@ -8,7 +8,7 @@
  * 右边界越界」的守卫。放进工具栏就得把三个模式 + 图例 + 回正 + 三枚场景芯片一起塞进
  * 那一行 —— 那是必然溢出。**代价要如实记下**：多一行会改变舞台高度，而 `resize()` →
  * `setCanvasSize()` 的既有语义就是重新适配，所以展开/收起对比条会重置当前缩放
- * （分屏下两侧都重置）。这是既有行为（切路径栏同理）。
+ * （分屏下两侧都重置）。这是既有行为（切路径栏同理），本轮不改它。
  *
  * 三选一用 `<button>` + `.on`（全仓没有 `type="radio"`），抄 ContextPanel 的
  * `.ctx-tab` 形态；补 `role="radio"` + `aria-checked` 让读屏知道这是个单选组。
@@ -87,7 +87,7 @@ function pick(kind: 'input' | 'product' | 'nosr') {
         :disabled="!sceneId || store.busy"
         :title="sceneId
           ? '打开这个场景的' + c.label + '，显示在活动侧'
-            + '（服务端生成的下采样 JPG，不必本地解码）'
+            + '（服务端烘焙的下采样 JPG，不必本地解码）'
           : '先打开一张带盘阵关联的图（场景目录打开的场景图，或反推关联上的本地图）'"
         :data-e2e="'cmp-sib-' + c.kind"
         @click="pick(c.kind)"

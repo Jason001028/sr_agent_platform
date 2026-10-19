@@ -2,7 +2,7 @@
 
 判据本身（删什么、不删什么）在 `test_preview_clear.py` 里逐条钉过了；这里钉的是
 **编排**：id 解析与去重、按目录归并、库里标 `cleared`、广播、汇总形状，以及那条
-只有把 store 与端点合起来看才成立的结论 —— **清完之后主动生成不会把文件被写回**。
+只有把 store 与端点合起来看才成立的结论 —— **清完之后急烤不会把文件烤回来**。
 
 Env 在 `create_app()` 之前注入。默认**不设** `SR_SCENES_ROOT`：手工行 id
 （`~` + 绝对路径，查看器里手填盘阵路径进来的那些行）是这条功能不需要场景库根的
@@ -22,30 +22,29 @@ from PIL import Image
 from backend.api import paths
 from backend.api.app import _eager_bake_tick, create_app
 from backend.api.platform import _Subscriber, _broadcast
+from backend.services import slurm
 from backend.services.preview_jpg import write_preview_jpg
 from backend.services.run_sr import task_fingerprint
 from backend.tests import allowed_roots_env
 from backend.tests.test_preview_jpg import make_strip_tif
 
-# 后端会读的 env 全列在这里：setUp 一律清空（见 test_scene_resolve 的同名说明）。
 _ENVS = ("SR_AGENT_DB", "SR_SCENES_ROOT", "SR_PREVIEWS_ROOT", "SR_QUEUE_POLL_SEC",
          "SR_PRODUCT_PREVIEW_DIV", "SR_PRODUCT_PREVIEW_MAX_AGE_SEC",
-         "SR_ALLOWED_ROOTS", "SR_DRIVE_MAP", "SR_BUNDLE_DIR",
-         "SR_WORK_DIR", "SR_SLURM_WORK_DIR", "SR_EXECUTOR",
-         "SR_LOCAL_GPU", "SR_LOCKED_DIR")
+         "SR_ALLOWED_ROOTS", "SR_DRIVE_MAP", "SR_SLURM_FAKE", "SR_BUNDLE_DIR",
+         "SR_SLURM_WORK_DIR", "SR_EXECUTOR", "SR_SANDBOX_ROOT")
 
 SCENE = "JL1KF02B03_20260917120000"
 SUFFIX = "260318"
 
 
 def make_preview(path, div=4):
-    """造一份**带规则签名**的预览（= 本平台生成的的），返回路径。"""
+    """造一份**带规则戳**的预览（= 本平台烤出来的），返回路径。"""
     write_preview_jpg(path, np.zeros((8, 8), dtype=np.uint8), div=div)
     return Path(path)
 
 
 def make_foreign_jpg(path):
-    """造一份**没有规则签名**的同名 JPG（= 盘阵上别人手放的显示件）。"""
+    """造一份**没有规则戳**的同名 JPG（= 盘阵上别人手放的显示件）。"""
     Image.new("L", (8, 8)).save(path, format="JPEG")
     return Path(path)
 
@@ -54,18 +53,19 @@ class ClearBase(unittest.TestCase):
     """一个真形态的场景目录 + 临时库 + 白名单。
 
     目录里放**真 strip tif**（不是空文件）：`build_preview_pixels` 与
-    `scene_search` 的判据都在这条链上，空文件会让「被写回了没有」这类断言误报通过。
+    `scene_search` 的判据都在这条链上，空文件会让「烤回来了没有」这类断言假绿。
     """
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self._apps: list = []
         self._saved = {k: os.environ.get(k) for k in _ENVS}
+        slurm._fake_reset()
         for k in _ENVS:
             os.environ.pop(k, None)
         os.environ["SR_AGENT_DB"] = os.path.join(self._tmp.name, "db.sqlite")
         os.environ["SR_QUEUE_POLL_SEC"] = "60"      # 关掉后台轮询的时序干扰
-        os.environ["SR_WORK_DIR"] = os.path.join(self._tmp.name, "work")
+        os.environ["SR_SLURM_WORK_DIR"] = os.path.join(self._tmp.name, "work")
         os.environ["SR_BUNDLE_DIR"] = os.path.join(self._tmp.name, "bundle")
         os.environ.update(allowed_roots_env(self._tmp.name))
         self.root = Path(self._tmp.name).resolve()
@@ -85,6 +85,7 @@ class ClearBase(unittest.TestCase):
             except Exception:  # noqa: BLE001
                 pass
         self._tmp.cleanup()
+        slurm._fake_reset()
         for k, v in self._saved.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -123,7 +124,7 @@ class ClearBase(unittest.TestCase):
         return row["preview_state"], row["preview_note"]
 
     def add_row(self, app, *, suffix=SUFFIX, lq=None, status="COMPLETED") -> int:
-        """在库里造一行；默认已跑到 COMPLETED 且钉了 finished_at（主动生成的候选）。"""
+        """在库里造一行；默认已跑到 COMPLETED 且钉了 finished_at（急烤的候选）。"""
         params = {"lq_path": lq if lq is not None else self.LQ, "mask_path": None,
                   "sr_scale": 2, "suffix": suffix, "gpu": 0, "cloud_limit": 80,
                   "delete_ori": False, "grid_align": True, "options_yml": None}
@@ -154,9 +155,9 @@ class TestClearSelected(ClearBase):
                          sorted([src.name, nosr.name]))
         self.assertFalse(src.exists())
         self.assertFalse(nosr.exists())
-        self.assertTrue(foreign.is_file(), "没有规则签名的同名件不该删")
+        self.assertTrue(foreign.is_file(), "没有规则戳的同名件不该删")
         self.assertEqual([x["name"] for x in res["skipped"]], [foreign.name])
-        self.assertIn("规则签名", res["skipped"][0]["reason"])
+        self.assertIn("规则戳", res["skipped"][0]["reason"])
         self.assertEqual(res["failed"], [])
         # 结论仍是 cleared，但「有一份没删」必须写在 reason 里：用户看到「已清除」
         # 之后多半不会再展开明细，而没删掉的那份正是他该知道的事。
@@ -196,7 +197,7 @@ class TestClearSelected(ClearBase):
         self.assertIn("一个都没删", res["reason"])
 
     def test_only_foreign_files_reports_skipped_not_nothing(self):
-        """目录里只有「不是本平台生成的」同名件：既不删、也不谎称「本来就没有」。"""
+        """目录里只有「不是本平台烤的」同名件：既不删、也不谎称「本来就没有」。"""
         foreign = make_foreign_jpg(self.scene_dir / "别的工具_preview.jpg")
 
         r = self.clear([self.manual_id()])
@@ -274,7 +275,7 @@ class TestClearSelected(ClearBase):
 
 
 class TestClearTaskRows(ClearBase):
-    """库里的行怎么标 —— 这是「清了会不会被被写回」的答案所在。"""
+    """库里的行怎么标 —— 这是「清了会不会被烤回来」的答案所在。"""
 
     def test_marks_all_rows_of_the_dir_and_blocks_eager_bake(self):
         app, c = self.app_client()
@@ -288,17 +289,17 @@ class TestClearTaskRows(ClearBase):
 
         self.assertEqual(r.json()["results"][0]["status"], "cleared")
         self.assertFalse(jpg.exists())
-        # **该目录的每一行都要标**：只标一行的话，另一行下一轮就被主动生成认领回去。
+        # **该目录的每一行都要标**：只标一行的话，另一行下一轮就被急烤认领回去。
         for tid in (t1, t2):
             state, note = self.state_of(app, tid)
             self.assertEqual(state, "cleared")
             self.assertTrue(note.startswith("cleared:"), note)
 
         _eager_bake_tick(app.state)
-        self.assertFalse(jpg.exists(), "标了 cleared 之后主动生成不该再把文件被写回")
+        self.assertFalse(jpg.exists(), "标了 cleared 之后急烤不该再把文件烤回来")
 
     def test_running_row_leaves_the_whole_scene_alone(self):
-        """后台正在生成这一景 → 整景不动。删了也会被那次生成预览在几十秒后写回来。"""
+        """后台正在烤这一景 → 整景不动。删了也会被那次烘焙在几十秒后写回来。"""
         app, c = self.app_client()
         prod, _ = make_strip_tif(self.scene_dir,
                                  f"{SCENE}_{SUFFIX}.tif", 64, 32)
@@ -310,8 +311,8 @@ class TestClearTaskRows(ClearBase):
 
         res = r.json()["results"][0]
         self.assertEqual(res["status"], "skipped")
-        self.assertIn("正在生成预览", res["reason"])
-        self.assertTrue(jpg.is_file(), "正在生成的这一景一个文件都不该动")
+        self.assertIn("正在烘焙", res["reason"])
+        self.assertTrue(jpg.is_file(), "正在烤的这一景一个文件都不该动")
         self.assertEqual(self.state_of(app, tid)[0], "running",
                          "running 不能被盖成 cleared（盖了它就再也不写回了）")
 
@@ -377,7 +378,7 @@ class TestMarkPreviewCleared(ClearBase):
         self.assertEqual(self.state_of(app, tid)[0], "running")
 
     def test_unfinished_row_is_not_marked(self):
-        """排队 / 运行中的行不标：那一行跑完后仍该自动生成预览（用户清的是旧缓存）。"""
+        """排队 / 运行中的行不标：那一行跑完后仍该自动烤预览（用户清的是旧缓存）。"""
         app, _ = self.app_client()
         params = {"lq_path": self.LQ, "suffix": "sr3"}
         fp = task_fingerprint(params)

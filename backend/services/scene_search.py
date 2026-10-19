@@ -24,7 +24,7 @@ output: SR products and the input backup (_sr/_NOSR/_ori), the cloud map
 "submit SR", not a scene), the backend's own `<stem>_preview.jpg` cache, and the
 dozens of debug renders under `Debug/`. See is_scene_file.
 
-Dragging a jpg in is a separate, equally closed rule: its name must cut
+Dragging a jpg in is a separate, equally closed rule (2026-09-21): its name must cut
 cleanly to the scene directory name plus one of the three stage tails, *and* that
 stage's own raster must sit next to it — `<目录名>.jpg` / `<目录名>_<suffix>.jpg` /
 `<目录名>_<suffix>_NOSR.jpg`. See stage_of_jpg. Nothing here ever lists a directory.
@@ -50,7 +50,7 @@ from pathlib import Path
 _RASTER_EXT_ORDER = (".tif", ".tiff", ".img")
 _RASTER_EXTS = set(_RASTER_EXT_ORDER)
 # 最小原型 §4.7：盘阵目录里预生成的 JPG 也要能列出并直接打开（8bit 显示就绪，
-# 不需要后端再生成预览）。真值见 docs/status/phase4 —— 盘阵读 JPG 是既有做法。
+# 不需要后端再烘焙预览）。真值见 docs/status/phase4 —— 盘阵读 JPG 是既有做法。
 _IMAGE_EXTS = {".jpg", ".jpeg"}
 _SCENE_EXTS = _RASTER_EXTS | _IMAGE_EXTS
 #: 场景目录的判据：目录里躺着一份 <目录名>_meta.xml。SR 脚本靠它判 RC/SC
@@ -77,8 +77,9 @@ def is_scene_file(path) -> bool:
     （SC 步骤的输入 `<目录名>.<ext>`），要么是 `PAN.<ext>`（RC 步骤的输入）。
 
     这样一次挡住全部「别的东西的输入/产物」：SR 产物与输入备份（_sr/_NOSR/_ori）、
-    云量图（_cloud）、缩略图（_thumb）、提交 SR 的输入掩码（_mask）、后端自己生成预览的
-    `<stem>_preview.jpg` 缓存，以及 Debug/ 下十几张调试图。
+    云量图（_cloud）、缩略图（_thumb）、提交 SR 的输入掩膜（_mask）、后端自己烘焙的
+    `<stem>_preview.jpg` 缓存，以及 Debug/ 下十几张调试图。此前用的是黑名单，每冒出
+    一类新派生件就得补一条 —— 2026-09-15 真机接上盘阵时，18 行里有 16 行是这种脏数据。
     """
     p = Path(path)
     if not p.is_file():
@@ -127,9 +128,9 @@ def mask_stem(lq_path) -> str:
     """掩码文件名的主干：**输入影像的 stem**，不是目录名。
 
     SC 场景里两者相同（`<目录名>.tif` 躺在以目录名命名的目录里），RC 场景里
-    不同（输入叫 `PAN.tif`）。取**输入影像的 stem** 是为了让 `derived_mask_path`
-    与 `bake_mask` 同源：若取目录名，RC 场景下掩码会写成 `PAN_mask.tif`、提交时
-    却去找 `<目录名>_mask.tif`，必然 400。`<MaskPath>` 是平台自己写进配置 XML 的
+    不同（输入叫 `PAN.tif`）。以前 `derived_mask_path` 取目录名、`bake_mask`
+    取输入文件名，RC 场景下掩码写进去叫 `PAN_mask.tif`、提交时却去找
+    `<目录名>_mask.tif` → 必然 400。`<MaskPath>` 是平台自己写进配置 XML 的
     （services/run_sr.py），SR 脚本只照读，所以只要这两处同源即可。
 
     目录不构成场景目录（缺 meta.xml）时退回目录名：`derived_mask_path`
@@ -172,7 +173,7 @@ def sibling_raster_path(image_path) -> Path | None:
     `<目录名>.tif`，RC 场景里 `PAN.jpg` 配 `PAN.tif`。按 `_RASTER_EXT_ORDER` 拼
     候选名逐个 `is_file()`，**只拼名字、不列举目录**（与 input_candidates 同一纪律）。
 
-    `.hdr` 之类伴随文件不参与：调用方要的是能拿去生成预览像素的栅格。
+    `.hdr` 之类伴随文件不参与：调用方要的是能拿去烘焙像素的栅格。
     """
     p = Path(image_path)
     for ext in _RASTER_EXT_ORDER:
@@ -193,7 +194,7 @@ def product_candidates(input_path, suffix: str) -> list[Path]:
     output_path_for` 用的也是 `img_name[:-4]`，而输入名是 `a.tiff` 时
     `with_suffix("")` 得 `a`、字面切片得 `a.ti` —— 两者不等，用 with_suffix 会在
     `.tiff` 场景下永远算出「产物不存在」。这里的字符串运算与 SR 侧同源，不要
-    「同时改漂亮」。
+    「顺手改漂亮」。
 
     只拼名字，**不 stat**：调用方自己挑第一个存在的，或把整串拿去做「试过哪些」的
     诊断信息（`GET /api/scenes/{id}/siblings` 就是这么用的）。
@@ -222,7 +223,7 @@ def nosr_path_for(product_path) -> Path:
 
 
 # --------------------------------------------------------------------------
-# 拖进来的 jpg 属于哪个环节（中间产物也要能关联到盘阵）
+# 拖进来的 jpg 属于哪个环节（2026-09-21：中间产物也要能关联到盘阵）
 # --------------------------------------------------------------------------
 #: 平台已知的**非环节**派生件尾段：云量图、缩略图、掩码、上一次的输入备份。
 #: 真机上这些栅格可能真的存在，只靠下面的「同级栅格在」挡不住它们 —— 显式点名。
@@ -241,7 +242,7 @@ _SUFFIX_RE = re.compile(r"^[A-Za-z0-9_-]{1,16}$")
 _NOSR_SEG = "NOSR"
 _NOSR_TAIL = "_" + _NOSR_SEG
 
-#: 平台自生成的预览缓存尾标记（`api/paths.drop_preview_path` 产出的
+#: 平台自烤的预览缓存尾标记（`api/paths.drop_preview_path` 产出的
 #: `<栅格 stem>_preview.jpg`）。它在 `_NON_STAGE_TAILS` 里也有一份，但**是唯一
 #: 能剥掉的那一个** —— 剥掉它就是那份栅格的 stem：
 #: * `<目录名>_preview` 剥出来正好等于场景目录名（本体显示件的预览）；
@@ -258,7 +259,7 @@ _PREVIEW_TAIL = "_" + _PREVIEW_SEG
 def strip_preview_tail(stem: str) -> str:
     """`<栅格 stem>_preview` → `<栅格 stem>`；不带这个尾巴的原样返回。
 
-    拖入链生成的那份（后台静默生成、长期落盘在场景目录里）名字长这样，用户把它再拖
+    拖入链烤的那份（后台静默烤、长期落盘在场景目录里）名字长这样，用户把它再拖
     回来时按它代表的那份栅格认：本体那份等价于拖场景显示件，产物那份等价于拖
     `<目录名>_sr.jpg`。**只剥一层** —— 盘阵上不存在 `..._preview_preview`。
     """
@@ -283,14 +284,14 @@ def de_suffixed_stems(name: str, max_segments: int = 2) -> list[str]:
     `_NOSR` 尾段**照常走这一轮切**（它像 `preview` 一样是「必须剥掉才回到真名」的
     尾段，目录名里从不含它），别在循环外先剥：先剥掉再切的话，`<目录名>_NOSR` 剥完
     剩下的正好是目录名，而循环恒要切至少一段 —— 那个真名反而一条候选都进不去，
-    于是拖平台生成的那份裸 NOSR jpg 会报「目录不存在」，理由列的还是两个被多切一段的
-    假目录（实测；带 `_preview` 尾巴的那份走的是另一条路，是对的）。
+    于是拖平台烤的那份裸 NOSR jpg 会报「目录不存在」，理由列的还是两个被多切一段的
+    假目录（2026-09-24 实测；带 `_preview` 尾巴的那份走的是另一条路，一直是对的）。
 
     每一条都要求切出来的尾巴是**干净的 suffix 形态**（与 `jpg_stage_name` 同一套
     字符约束）：不干净（` - 副本`、`.preview` 那种）就不再往下切，一条也不生成 ——
     免得拿一个明明是别的名字的东西去反推目录，把 404 的原因写得莫名其妙。
 
-    平台自己生成的那份（`<栅格 stem>_preview.jpg`）也走这条路：`preview` 是
+    平台自己烤的那份（`<栅格 stem>_preview.jpg`）也走这条路：`preview` 是
     `_NON_STAGE_TAILS` 里唯一能剥的尾巴，剥掉就回到了那份栅格的真名 ——
     `<目录名>_preview` 剥出 `<目录名>`（本体），`<目录名>_sr_preview` 剥出
     `<目录名>_sr` 再切一段才得到 `<目录名>`（产物，见 `_PREVIEW_TAIL`）。
@@ -311,8 +312,8 @@ def de_suffixed_stems(name: str, max_segments: int = 2) -> list[str]:
         if not _SUFFIX_RE.match(tail):
             break
         # `_NON_STAGE_TAILS` 里只有 `preview` 能剥（见 `_PREVIEW_TAIL`）：它是平台自己
-        # 生成的那份，剥掉才是真名字。剥完**接着往下切**而不是就地停 —— `<目录名>_sr_preview`
-        # 要先剥 preview 才切得出 `<目录名>`。另四个当场停：它们剥掉会落到真实场景
+        # 烤的那份，剥掉才是真名字。剥完**接着往下切**而不是就地停 —— `<目录名>_sr_preview`
+        # 要先剥 preview 才切得出 `<目录名>`。另四个照旧当场停：它们剥掉会落到真实场景
         # 目录上。`_NOSR` 不在这份名单里（它在 `jpg_stage_name` 那是一段真的环节尾段），
         # 于是这一轮切到它时不会停 —— 剥掉它得的那条候选正是 `<目录名>_NOSR` 的目录名，
         # 见函数文档里那一节。
@@ -337,14 +338,14 @@ def jpg_stage_name(stem: str, base: str) -> tuple[str, str] | None:
 
     基准名（`base`）是**那份被超分的影像的 stem**，不是目录名 —— 产物名按输入影像名
     拼（模块头「产物名的规则」那段）：SC 场景输入是 `<目录名>.tif`，基准名与目录名
-    恰好相同（所以用「目录名 + 尾段」写这条判据也成立）；RC 场景输入是
+    恰好相同（所以这条判据以前写成「目录名 + 尾段」也一直对）；RC 场景输入是
     `PAN.tif`，基准名就是 `PAN`，产物叫 `PAN_<suffix>`。调用方把该场景**所有**输入
     影像候选的 stem 都试一遍（`input_candidates`，只拼名字不 stat），因为混合目录
     里「上游 SC 遗留的 `<目录名>.tif`」与「RC 真读的 `PAN.tif`」可能同时在。
 
     尾段三种形态，且 NOSR 只在末尾、只出现一次：
 
-    * `<基准名>_NOSR` —— **未超分那份**（用户口径：SC 场景叫
+    * `<基准名>_NOSR` —— **未超分那份**（2026-09-24 用户口径：SC 场景叫
       `<目录名>_NOSR.tif`，RC 场景叫 `PAN_NOSR.tif`）。整段就是标记本身，没有属于
       自己的 suffix，返回 `('nosr', '')`。它**不能**走下面那条 `ends_with(_NOSR_TAIL)`：
       `tail` 里已经不含分隔下划线（上面切掉了），`"nosr".endswith("_nosr")` 恒假，
@@ -356,7 +357,7 @@ def jpg_stage_name(stem: str, base: str) -> tuple[str, str] | None:
 
     残留歧义：`SUFFIX_RE` 允许用户把 suffix 起名叫 `NOSR`，那种情况下
     `<输入名>_NOSR.tif` 既是「未超分那份」也是「suffix = NOSR 的产物」。按用户口径
-    （`app.py::_bake_nosr_preview` 就是照这个读法写的）认前一种。
+    （`app.py::_bake_nosr_preview` 一开始就是照这个读法写的）认前一种。
     """
     if not stem.lower().startswith(base.lower() + "_"):
         return None
@@ -395,7 +396,7 @@ def stage_bases(dir_path, input_path) -> list[str]:
 def nosr_candidates(dir_path, input_path, product_path=None) -> list[Path]:
     """**未超分那份**的候选路径（有序，只拼名字，与 `product_candidates` 同形制）。
 
-    用户口径：未超分那份叫**输入影像的 stem + `_NOSR`** ——
+    用户口径（2026-09-24 当面确认）：未超分那份叫**输入影像的 stem + `_NOSR`** ——
     SC 场景即 `<目录名>_NOSR.tif`，RC 场景即 `PAN_NOSR.tif`。基准名取 `stage_bases`，
     于是 SC / RC / 混合目录（上游 SC 遗留件与 RC 真读的那份同在）全覆盖，与产物名的
     拼法同一套规则。扩展名沿用产物那一组（生产上 `.tif` 与 `.tiff` 两种拼写都出现过）。
@@ -446,7 +447,7 @@ def stage_of_jpg(dir_path, input_path, stem: str) -> tuple[str, str, Path] | Non
     本体那两种形态**不花任何额外 stat**（不试同级栅格）：它们是既有的关联对象，
     判据在 `is_scene_file` 与 `_fingerprint_mismatch` 里已经写过一遍了。
 
-    `stem` 先过一遍 `strip_preview_tail`：平台自己生成的 `<栅格 stem>_preview.jpg`
+    `stem` 先过一遍 `strip_preview_tail`：平台自己烤的 `<栅格 stem>_preview.jpg`
     被拖回来时，判的是**它代表的那份栅格**（`_PREVIEW_TAIL`）。这一步不改本体的
     零 stat 性质 —— 剥完照样先与目录名比。
     """

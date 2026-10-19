@@ -5,7 +5,7 @@
 回报试过哪些名字）。
 
 因此本文件有两条与别处不同的重点：
-  1. **永不生成预览、永不写盘** —— 断言跑完目录里没多出任何文件；
+  1. **永不烘焙、永不写盘** —— 断言跑完目录里没多出任何文件；
   2. **永不扫盘** —— 复用 `TestNeverListsDirectories` 那套打桩：新端点不能成为扫盘
      约束的空白区。
 
@@ -93,7 +93,7 @@ class TestSiblingsOk(SiblingsBase):
             self.assertTrue(i["id"], "库内/库外的行都该给出可用的 id")
 
     def test_preview_state_is_reported_per_item(self):
-        """三份各自有没有预览、是哪一档 —— 对比视图据此判断要不要等一次生成预览。"""
+        """三份各自有没有预览、是哪一档 —— 对比视图据此判断要不要等一次烘焙。"""
         d = self.make_scene()
         self._product(d, SUFFIX)
         c = self.client()
@@ -102,7 +102,7 @@ class TestSiblingsOk(SiblingsBase):
         body = self.q(c, row["id"], suffix=SUFFIX)
 
         for i in body["items"]:
-            self.assertFalse(i["hasPreview"], "还没人生成过")
+            self.assertFalse(i["hasPreview"], "还没人烤过")
             self.assertIsNone(i["previewDiv"])
 
     def test_missing_product_still_answered_with_the_names_tried(self):
@@ -175,7 +175,7 @@ class TestSiblingsOk(SiblingsBase):
         self.assertTrue(body["productCandidates"])
 
     def test_div_is_the_server_side_bake_tier(self):
-        """`div` = 服务端主动生成的档位，**仅供界面标注**，不参与任何前端决策
+        """`div` = 服务端急烤的档位，**仅供界面标注**，不参与任何前端决策
         （前端的档位是用户滑块那个，两个「4」互不联动）。"""
         d = self.make_scene()
         c = self.client()
@@ -208,7 +208,7 @@ class TestSiblingsOk(SiblingsBase):
 
 
 class TestSiblingsNosr(SiblingsBase):
-    """未超分那份的**候选与优先**（用户口径）。
+    """未超分那份的**候选与优先**（2026-09-24 用户口径）。
 
     盘上有两套 NOSR 名字，优先级不同：
 
@@ -263,8 +263,8 @@ class TestSiblingsNosr(SiblingsBase):
     def test_nosr_item_does_not_need_a_suffix(self):
         """NOSR 的名字由**输入 stem** 拼，与 suffix 无关：没有可用的 suffix 时它照旧在。
 
-        产物那一类才是「拼不出名字就不编」：nosr 项不搭那个 `if suffix` 的车，
-        否则没有 suffix 时它会跟着一起消失。
+        产物那一类才是「拼不出名字就不编」——此前 nosr 项被写在同一个 `if suffix`
+        里，跟着一起消失了。
         """
         d = self.make_scene()
         mine = make_strip_tif(d, f"{SCENE_NAME}_NOSR.tif", 80, 40)[0]
@@ -295,9 +295,9 @@ class TestSiblingsSuffixValidation(SiblingsBase):
 
 class TestSiblingsIsReadOnly(SiblingsBase):
     def test_never_bakes_and_never_writes(self):
-        """纯只读：不该因为问了一句就把大图生成一遍，也不该在场景目录里留下任何东西。
+        """纯只读：不该因为问了一句就把大图烤一遍，也不该在场景目录里留下任何东西。
 
-        这一条要真断言盘上没多文件 —— 只断 HTTP 状态的话，「同时生成一份」的实现
+        这一条要真断言盘上没多文件 —— 只断 HTTP 状态的话，「顺手烤一份」的实现
         照样全绿。
         """
         d = self.make_scene()
@@ -311,7 +311,7 @@ class TestSiblingsIsReadOnly(SiblingsBase):
         self.assertEqual(sorted(p.name for p in d.iterdir()), before)
 
     def test_preview_endpoint_still_bakes_but_siblings_does_not(self):
-        """对照组：证明上面那条不是因为「这里根本生成不了」，而是 siblings 不生成。"""
+        """对照组：证明上面那条不是因为「这里根本烤不了」，而是 siblings 不烤。"""
         d = self.make_scene()
         c = self.client()
         row = self.resolve(c, d)

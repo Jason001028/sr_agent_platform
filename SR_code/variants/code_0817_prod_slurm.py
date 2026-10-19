@@ -1,14 +1,14 @@
 # ===========================================================================
 # GENERATED FILE — DO NOT EDIT
 #
-# Platform deployment variant of the SR production script.  Edit the
+# Slurm deployment variant of the SR production script.  Edit the
 # source and regenerate; hand edits here are lost and fail --check.
 #
-# Generator : SR_code/tools/gen_platform_variant.py v1.2.0
+# Generator : SR_code/tools/gen_slurm_variant.py v1.0.0
 # Source    : SR_code/code_0817_prod.py
 # Source sha256 (CRLF->LF normalised) : 03c9b4fc3f64cfd5e3b331128be5a09477d5ebe0362b0e9e4927fcdd356d40af
-# Regenerate: python SR_code/tools/gen_platform_variant.py
-# Verify    : python SR_code/tools/gen_platform_variant.py --check
+# Regenerate: python SR_code/tools/gen_slurm_variant.py
+# Verify    : python SR_code/tools/gen_slurm_variant.py --check
 # ===========================================================================
 # =============================================================================
 # SFSR inference - code_0817_prod (production)
@@ -158,10 +158,10 @@ def main():
     tm['config'] = time.time() - _t0; _t0 = time.time()
 
     # ---- env / GPU ----
-    # CUDA_VISIBLE_DEVICES is set by the launcher (SR_LOCAL_GPU). Never overwrite it.
+    # CUDA_VISIBLE_DEVICES is injected by Slurm (--gres=gpu:1). Never overwrite it.
     # gpuid is used only for pynvml/log reporting (physical index).
-    # CUDA_VISIBLE_DEVICES may hold a UUID or MIG form; fall back to
-    # '0' if it is not a plain integer so int(gpuid) below cannot raise.
+    # Slurm may inject a UUID or MIG form; fall back to '0' if it is not
+    # a plain integer so the int(gpuid) calls below cannot raise.
     try:
         _cvd = os.environ.get('CUDA_VISIBLE_DEVICES', '0').split(',')[0]
         gpuid = str(int(_cvd))
@@ -170,11 +170,7 @@ def main():
 
     # ---- input discovery + meta ----
     sr_previous_step = util.check_sr_previous_step(lq_path)
-    # The body holds the un-superresolved copy by the time this runs (the
-    # job script lands it there before invoking this file), so the input
-    # is 1x and the strict "1.0 < size < 1.8 GB" gate would reject it.
-    # get_l1_pan_tif_rcsc_nosr uses the one-sided "size < 1.8 GB" gate.
-    img_abs_path = util.get_l1_pan_tif_rcsc_nosr(lq_path, tiftype, sr_previous_step)
+    img_abs_path = util.get_l1_pan_tif_rcsc(lq_path, tiftype, sr_previous_step)
     meta_abs_path = osp.join(lq_path, osp.basename(lq_path) + "_meta.xml")
 
     assert img_abs_path is not None, "L1 PAN.tif file not found."
@@ -678,10 +674,10 @@ if __name__ == "__main__":
 
     util.setup_logger('gpu', level=logging.INFO, screen=True)
     logger = logging.getLogger('gpu')
-    # CUDA_VISIBLE_DEVICES is set by the launcher (SR_LOCAL_GPU). Never overwrite it.
+    # CUDA_VISIBLE_DEVICES is injected by Slurm (--gres=gpu:1). Never overwrite it.
 
-    # Count the devices this run can actually see.  nvml reports the
-    # host's physical cards and ignores CUDA_VISIBLE_DEVICES.
+    # Count the devices this job can actually see.  nvml reports the
+    # host's physical cards and ignores the list Slurm injects.
     gpu_count = torch.cuda.device_count()
 
     gpu_available = torch.cuda.is_available()
@@ -689,12 +685,12 @@ if __name__ == "__main__":
 
     if gpu_available is False or gpu_count < 1:
         logger.info('Host {:s} gpu error, remove from product queue'.format(hostname))
-        # Never stop a host service from inside a run.  A failed run must
-        # not take anything else down with it; report it via the exit code.
-        # No write to the shared stop log: it is read as "this host left
-        # the product queue", which a failed run must not claim.  The
-        # failure is reported by the log line above and the exit code.
-
+        # Slurm job: never stop the node daemon.  A failed job must not
+        # evict the node from the pool; report it via the exit code.
+        slurm_stop_log_file = "/DiskArray/ProductionSchedule/config/SlurmStopLog.txt"
+        if osp.exists(slurm_stop_log_file) is True:
+            with open(slurm_stop_log_file, 'a') as srlog:
+                srlog.writelines("{:s} gpu-error {:s}\n".format(util.get_timestamp(), hostname))
 
         print('GPU Error, gpu_available={:s} GPU COUNT = {:s}\n'.format(str(gpu_available), str(gpu_count)))
         exit(3)

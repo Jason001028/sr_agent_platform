@@ -371,18 +371,15 @@ class VerifyContractTests(unittest.TestCase):
         self.assertEqual(proc.returncode, verify.EXIT_CONTRACT_FAIL)
         self.assertIn("SRLOG", proc.stderr)
 
-    def test_cli_requires_an_explicit_job_id(self):
-        """The run number is what names the verdict file. There is no
-        environment variable to fall back on, so a missing --job-id is a usage
-        error, not a run that writes its verdict under a guessed name."""
+    def test_cli_job_id_defaults_to_slurm_job_id(self):
         self.write_srlog("x\nRun finished.")
         self.write_output()
         self.touch_newer_than_config(self.fx.srlog, self.fx.output)
+        env = dict(os.environ, SLURM_JOB_ID="777")
         proc = run_cli("--config", str(self.fx.config), "--sr-exit-code", "0",
-                       env=dict(os.environ, SLURM_JOB_ID="777"))
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("--job-id", proc.stderr)
-        self.assertFalse((self.fx.lq / "Debug" / "_SREXIT_777.txt").exists())
+                       env=env)
+        self.assertEqual(proc.returncode, 0)
+        self.assertTrue((self.fx.lq / "Debug" / "_SREXIT_777.txt").is_file())
 
 
 EXIT_MARK = "_SREXIT_"
@@ -437,122 +434,6 @@ class VerdictFileTests(unittest.TestCase):
         self.assertTrue(Path(path).is_file())
 
 
-class LandingTests(unittest.TestCase):
-    """产物归位到本体名（--land-on-body）—— 跑失败/跳过则从备份恢复。"""
-
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.fx = ContractFixture(self._tmp.name)
-        self.body = self.fx.lq / self.fx.img_name          # 这一跑读的那份
-        self.body.write_bytes(b"pre-run body\n")
-        self.backup = self.fx.lq / "Debug" / (self.fx.img_name + ".srbak")
-        self.mask_1x = self.fx.lq / "Debug" / "mask.sr1x"
-
-    def satisfied(self):
-        self.fx.write_srlog("x\nRun finished.")
-        self.fx.write_output()
-        self.fx.touch_newer_than_config(self.fx.srlog, self.fx.output)
-        return self.fx.check(0, job_id=42)
-
-    def keep_backup(self):
-        self.backup.write_bytes(self.body.read_bytes())
-        return self.backup
-
-    def test_product_replaces_the_body_and_the_scratch_files_go(self):
-        self.keep_backup()
-        self.mask_1x.write_text("mask\n", encoding="utf-8")
-        v = self.satisfied()
-        product = self.fx.output
-        result = verify.land_product(v, str(self.body), str(self.backup),
-                                     str(self.mask_1x))
-        self.assertEqual(result, "landed")
-        self.assertTrue(v.ok, v.reasons)
-        self.assertEqual(self.body.read_bytes(), b"x" * 64)
-        self.assertFalse(product.exists())              # moved, not copied
-        self.assertFalse(self.backup.exists())
-        self.assertFalse(self.mask_1x.exists())
-        self.assertEqual(v.output, str(self.body))      # the verdict says where
-
-    def test_a_missing_product_fails_the_contract_and_restores_the_body(self):
-        self.keep_backup()
-        self.fx.write_srlog("x\nRun finished.")
-        self.fx.touch_newer_than_config(self.fx.srlog)   # no output tif at all
-        v = self.fx.check(0, job_id=42)
-        self.assertFalse(v.ok)                           # condition 3 already
-        result = verify.land_product(v, str(self.body), str(self.backup))
-        self.assertEqual(result, "restored")
-        self.assertEqual(self.body.read_bytes(), b"pre-run body\n")
-        self.assertFalse(self.backup.exists())
-
-    def test_a_landing_failure_is_a_contract_failure(self):
-        # 归位本身出错也必须进 verdict：平台只读 verdict 文件，不看进程退出码。
-        self.keep_backup()
-        v = self.satisfied()
-        with mock.patch.object(verify.os, "replace",
-                               side_effect=OSError("disk full")):
-            result = verify.land_product(v, str(self.body), str(self.backup))
-        self.assertEqual(result, "failed")
-        self.assertFalse(v.ok)
-        self.assertIn("归位失败", v.reason_text)
-        self.assertIn("disk full", v.reason_text)       # and the reason survives
-
-    def test_a_failed_run_restores_the_body_from_the_backup(self):
-        self.keep_backup()
-        self.body.write_bytes(b"un-superresolved copy\n")   # what prep landed
-        self.fx.write_srlog("x\nRun finished.")
-        self.fx.touch_newer_than_config(self.fx.srlog)
-        v = self.fx.check(3, job_id=42)                      # SR died
-        result = verify.land_product(v, str(self.body), str(self.backup))
-        self.assertEqual(result, "restored")
-        self.assertEqual(self.body.read_bytes(), b"pre-run body\n")
-
-    def test_a_policy_skip_restores_the_body(self):
-        # 云量超限：合法、无产物。本体必须回到跑前那份，这一景才能重做。
-        self.keep_backup()
-        self.body.write_bytes(b"un-superresolved copy\n")
-        self.fx.write_srlog("Run skipped: cloud limit exceeded\n")
-        self.fx.touch_newer_than_config(self.fx.srlog)
-        v = self.fx.check(0, job_id=42)
-        self.assertTrue(v.ok, v.reasons)
-        result = verify.land_product(v, str(self.body), str(self.backup))
-        self.assertEqual(result, "restored")
-        self.assertEqual(self.body.read_bytes(), b"pre-run body\n")
-
-    def test_no_backup_means_nothing_to_restore(self):
-        # 备份建之前就失败了：本体压根没被动过，恢复这一步就什么都不做。
-        self.fx.write_srlog("x\nRun finished.")
-        self.fx.touch_newer_than_config(self.fx.srlog)
-        v = self.fx.check(3, job_id=42)
-        self.assertEqual(
-            verify.land_product(v, str(self.body), str(self.backup)),
-            "restored")
-        self.assertEqual(self.body.read_bytes(), b"pre-run body\n")
-
-    def test_without_land_on_body_the_verifier_only_reads(self):
-        # 不传 --land-on-body 时行为与以前逐字一致：产物原地不动。
-        self.fx.write_srlog("x\nRun finished.")
-        self.fx.write_output()
-        self.fx.touch_newer_than_config(self.fx.srlog, self.fx.output)
-        proc = run_cli("--config", str(self.fx.config), "--sr-exit-code", "0",
-                       "--job-id", "42")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertTrue(self.fx.output.is_file())
-        self.assertEqual(self.body.read_bytes(), b"pre-run body\n")
-
-    def test_cli_lands_and_says_so_on_stderr(self):
-        self.keep_backup()
-        self.fx.write_srlog("x\nRun finished.")
-        self.fx.write_output()
-        self.fx.touch_newer_than_config(self.fx.srlog, self.fx.output)
-        proc = run_cli("--config", str(self.fx.config), "--sr-exit-code", "0",
-                       "--job-id", "42", "--land-on-body", str(self.body),
-                       "--backup", str(self.backup))
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("landing landed", proc.stderr)
-        self.assertEqual(self.body.read_bytes(), b"x" * 64)
-
-
 #: Child program for the C-locale case: write a verdict whose `reason` is
 #: non-ASCII, then report the encoding the platform default resolved to.
 #: Raw string on purpose — the escapes below belong to the *child's* source.
@@ -579,9 +460,8 @@ sys.stderr.write("path=%%s\n" %% (path,))
 class VerdictFileEncodingTests(unittest.TestCase):
     """The verdict file must not depend on either side's locale.
 
-    The verifier runs *inside the job*: neither the run script nor a systemd
-    unit necessarily sets LANG, and the SR interpreter is py3.6, whose
-    `open()` default is then plain ASCII.
+    The verifier runs *inside the job*: Slurm's --export=NONE has dropped LANG,
+    and the SR interpreter is py3.6, whose `open()` default is then plain ASCII.
     `reason` carries Chinese text, so a locale-encoded write raises — and the
     `except` in write_exit_code_file turns that into "no file", which the
     platform reads as UNKNOWN for a job that actually failed the contract. That
@@ -634,7 +514,7 @@ class VerdictFileEncodingTests(unittest.TestCase):
         a failed job reported as "no verdict". Every field the platform acts on
         is ASCII, so only the free-text reason may lose bytes.
         """
-        from backend.services import sr_result as svc
+        from backend.services import slurm as svc
 
         path = self.verdict_path(9)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -646,7 +526,7 @@ class VerdictFileEncodingTests(unittest.TestCase):
 
     def test_reader_accepts_a_utf8_file_written_under_any_locale(self):
         """The counterpart: what the pinned verifier writes is what we read."""
-        from backend.services import sr_result as svc
+        from backend.services import slurm as svc
 
         path = self.verdict_path(7)
         path.parent.mkdir(parents=True, exist_ok=True)

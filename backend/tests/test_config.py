@@ -2,10 +2,10 @@
 
 Two things are pinned:
 
-  * the defaults are the single source for the values run_sr.py / store.py /
-    app.py all read, so a change here cannot silently move a real-machine path
-    (the bundle path in particular must keep agreeing with the load_library()
-    call at code_0817_prod.py:27);
+  * the defaults equal the values that used to be hard-coded across
+    run_sr.py / store.py / app.py, so centralising them cannot silently move a
+    real-machine path (the bundle path in particular must keep agreeing with
+    the load_library() call at code_0817_prod.py:27);
   * sr_runtime() reads the environment **at call time**. The systemd unit and
     the tests both configure the SR layer by setting env vars around the call,
     so a cached snapshot would leak one case's settings into the next.
@@ -22,9 +22,10 @@ from backend import config
 from backend.services import run_sr as svc
 from backend.services import store as store_mod
 
-ENV_NAMES = ("SR_BUNDLE_DIR", "SR_PYTHON", "SR_WORK_DIR",
-             config.SR_LEGACY_WORK_DIR_ENV, "SR_EXECUTOR", "SR_LOCKED_DIR",
-             "SR_LOCAL_GPU", "SR_QUEUE_POLL_SEC", "SR_AGENT_DB",
+ENV_NAMES = ("SR_BUNDLE_DIR", "SR_PYTHON", "SR_SLURM_WORK_DIR",
+             "SR_SLURM_PARTITION", "SR_SLURM_GRES", "SR_SLURM_TIME",
+             "SR_SLURM_CPUS", "SR_SLURM_MEM", "SR_SLURM_NODELIST",
+             "SR_SLURM_FAKE", "SR_QUEUE_POLL_SEC", "SR_AGENT_DB",
              "SR_SCENES_ROOT")
 
 
@@ -36,35 +37,41 @@ class SrRuntimeDefaultsTest(unittest.TestCase):
         for name in ENV_NAMES:
             os.environ.pop(name, None)
 
-    def test_defaults_match_the_documented_values(self):
+    def test_defaults_match_the_old_hard_coded_values(self):
         rt = config.sr_runtime()
         self.assertEqual(
             rt.bundle_dir,
             "/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes")
         self.assertEqual(rt.python, "python")
-        self.assertEqual(rt.work_dir, "/tmp/sr_agent_work")
+        self.assertEqual(rt.slurm_work_dir, "/tmp/sr_agent_work")
+        self.assertEqual(rt.partition, "")            # no --partition line
+        self.assertEqual(rt.gres, 1)
+        self.assertEqual(rt.time, "02:00:00")
+        self.assertEqual(rt.cpus, 4)
+        self.assertEqual(rt.mem, "")
+        self.assertEqual(rt.nodelist, "")             # no --nodelist line
+        self.assertFalse(rt.fake)
         self.assertEqual(rt.queue_poll_sec, 2.0)
         self.assertEqual(rt.agent_db, store_mod.DEFAULT_DB)
-        self.assertEqual(rt.executor, "local")
-        self.assertIsNone(rt.locked_dir)
-        self.assertEqual(rt.local_gpu, config.SR_DEFAULT_LOCAL_GPU)
 
     def test_run_sr_constants_are_the_config_defaults(self):
         self.assertEqual(svc.DEFAULT_BUNDLE_DIR, config.SR_DEFAULT_BUNDLE_DIR)
         self.assertEqual(svc.DEFAULT_WORK_DIR, config.SR_DEFAULT_WORK_DIR)
         self.assertEqual(svc.DEFAULT_OPTIONS_YML, config.SR_DEFAULT_OPTIONS_YML)
         self.assertEqual(svc.DEFAULT_SUFFIX, config.SR_DEFAULT_SUFFIX)
-        # and the constants equal what the deploy docs promise
+        # and the constants equal what the verifier's deploy docs promise
         self.assertEqual(svc.DEFAULT_BUNDLE_DIR,
                          config.sr_runtime().bundle_dir)
-        self.assertEqual(svc.DEFAULT_WORK_DIR, config.sr_runtime().work_dir)
+        self.assertEqual(svc.DEFAULT_WORK_DIR, config.sr_runtime().slurm_work_dir)
 
     def test_suffix_default_is_not_an_env_knob_any_more(self):
-        """The default <Suffix> comes from the SR team's own config file inside
-        SR_BUNDLE_DIR (services/run_sr.py::default_suffix), not from an env var:
-        setting `SR_SUFFIX_DEFAULT` must change nothing. Pinned because "the unit
-        file exports a variable nobody reads" is a silent misconfiguration: an
-        operator would set it and believe it took effect.
+        """SR_SUFFIX_DEFAULT was retired 2026-09-16.
+
+        The default <Suffix> now comes from the SR team's own config file inside
+        SR_BUNDLE_DIR (services/run_sr.py::default_suffix), so setting the old
+        env var must change nothing. Pinned because "the unit file still exports
+        a variable nobody reads" is a silent misconfiguration: an operator would
+        set it and believe it took effect.
         """
         tmp = tempfile.TemporaryDirectory()       # empty bundle → no config file
         self.addCleanup(tmp.cleanup)
@@ -74,8 +81,8 @@ class SrRuntimeDefaultsTest(unittest.TestCase):
 
     def test_scenes_root_has_a_single_source(self):
         # 场景根只由 paths.scenes_root() 读（每次读环境 + 要求目录存在）。
-        # SrRuntime 不镜像一份 —— 否则就是第二处真源，这里钉住"没人镜像"，
-        # 避免它悄悄长回来。
+        # SrRuntime 曾经镜像过一份，是第二处真源 —— 2026-09-17 删掉了，这里
+        # 钉住"没人再镜像"，避免它悄悄长回来。
         from backend.api import paths
         self.assertIsNone(paths.scenes_root())
         os.environ["SR_SCENES_ROOT"] = "/data/scenes"
@@ -108,59 +115,53 @@ class SrRuntimeEnvTest(unittest.TestCase):
     def test_every_field_takes_its_env_var(self):
         os.environ.update({
             "SR_PYTHON": "/opt/conda/envs/torch1.9.1py36/bin/python",
-            "SR_WORK_DIR": "/DiskArray/tmp/sr_agent_work",
+            "SR_SLURM_WORK_DIR": "/DiskArray/tmp/sr_agent_work",
+            "SR_SLURM_PARTITION": "gpu",
+            "SR_SLURM_GRES": "2",
+            "SR_SLURM_TIME": "04:30:00",
+            "SR_SLURM_CPUS": "8",
+            "SR_SLURM_MEM": "64G",
+            "SR_SLURM_FAKE": "1",
             "SR_QUEUE_POLL_SEC": "5",
             "SR_AGENT_DB": "/var/lib/sr/agent.db",
             "SR_SCENES_ROOT": "/data/scenes",
-            "SR_LOCKED_DIR": "/DiskArray/tmp/wangrz/trial",
-            "SR_LOCAL_GPU": "1",
         })
         rt = config.sr_runtime()
         self.assertEqual(rt.python, "/opt/conda/envs/torch1.9.1py36/bin/python")
-        self.assertEqual(rt.work_dir, "/DiskArray/tmp/sr_agent_work")
+        self.assertEqual(rt.slurm_work_dir, "/DiskArray/tmp/sr_agent_work")
+        self.assertEqual(rt.partition, "gpu")
+        self.assertEqual(rt.gres, 2)
+        self.assertEqual(rt.time, "04:30:00")
+        self.assertEqual(rt.cpus, 8)
+        self.assertEqual(rt.mem, "64G")
+        self.assertTrue(rt.fake)
         self.assertEqual(rt.queue_poll_sec, 5.0)
         self.assertEqual(rt.agent_db, "/var/lib/sr/agent.db")
-        self.assertEqual(rt.locked_dir, "/DiskArray/tmp/wangrz/trial")
-        self.assertEqual(rt.local_gpu, "1")
-
-    def test_the_legacy_work_dir_name_is_still_read(self):
-        """A unit file or drop-in that still points at the work dir under the
-        older name keeps working; SR_WORK_DIR wins when both are set."""
-        os.environ[config.SR_LEGACY_WORK_DIR_ENV] = "/old/place/sr_agent_work"
-        self.assertEqual(config.sr_runtime().work_dir, "/old/place/sr_agent_work")
-        os.environ["SR_WORK_DIR"] = "/new/place/sr_agent_work"
-        self.assertEqual(config.sr_runtime().work_dir, "/new/place/sr_agent_work")
-
-    def test_any_executor_but_local_is_rejected(self):
-        """A leftover SR_EXECUTOR pointing at a launcher this build does not
-        have must fail loudly: the routes differ in where the job runs and
-        which card it gets, so reinterpreting it as a local run would silently
-        change what a submit means."""
-        for value in ("slurm", "scheduler", "remote"):
-            os.environ["SR_EXECUTOR"] = value
-            with self.assertRaises(RuntimeError) as ctx:
-                config.sr_runtime()
-            self.assertIn(value, str(ctx.exception))
-        for value in ("local", "LOCAL", " local ", ""):
-            os.environ["SR_EXECUTOR"] = value
-            self.assertEqual(config.sr_runtime().executor, "local")
 
     def test_empty_string_falls_back_to_the_default(self):
-        # `Environment=SR_WORK_DIR=` in a unit file yields "" — treat an empty
-        # value as unset rather than as "the directory named ''".
+        # `Environment=SR_SLURM_PARTITION=` in a unit file yields "" — treat an
+        # empty value as unset rather than as "partition named ''".
         os.environ["SR_BUNDLE_DIR"] = ""
         os.environ["SR_PYTHON"] = ""
-        os.environ["SR_WORK_DIR"] = ""
+        os.environ["SR_SLURM_WORK_DIR"] = ""
         rt = config.sr_runtime()
         self.assertEqual(rt.bundle_dir, config.SR_DEFAULT_BUNDLE_DIR)
         self.assertEqual(rt.python, config.SR_DEFAULT_PYTHON)
-        self.assertEqual(rt.work_dir, config.SR_DEFAULT_WORK_DIR)
+        self.assertEqual(rt.slurm_work_dir, config.SR_DEFAULT_WORK_DIR)
 
     def test_garbage_numbers_fall_back_instead_of_raising(self):
         # A typo in the unit file must not take the API down at first call.
+        os.environ["SR_SLURM_GRES"] = "gpu"
         os.environ["SR_QUEUE_POLL_SEC"] = "soon"
         rt = config.sr_runtime()
+        self.assertEqual(rt.gres, config.SR_DEFAULT_SLURM_GRES)
         self.assertEqual(rt.queue_poll_sec, config.SR_DEFAULT_QUEUE_POLL_SEC)
+
+    def test_fake_flag_is_exactly_one(self):
+        os.environ["SR_SLURM_FAKE"] = "true"
+        self.assertFalse(config.sr_runtime().fake)
+        os.environ["SR_SLURM_FAKE"] = "1"
+        self.assertTrue(config.sr_runtime().fake)
 
 
 class ConfigSeparationTest(unittest.TestCase):
