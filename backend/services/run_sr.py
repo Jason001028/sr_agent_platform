@@ -39,8 +39,8 @@ resolves the stored job_id through squeue (active) / the job's exit-code file
 (terminal) instead of re-submitting: an active or contract-satisfying job is
 reused, a failed / forgotten one is re-submitted.
 
-Terminal-state source (slurm-integration.md §一 "C 方案"): the array server runs
-with AccountingStorageType=none, so sacct is permanently unusable. The job
+Terminal-state source (docs/status/sr-local-execution.md §2.3): the array
+server runs with AccountingStorageType=none, so sacct is permanently unusable. The job
 itself records its verdict at `<DatarootLQ>/Debug/_SREXIT_<job_id>.txt` via
 SR_code/variants/verify_sr_run.py, and `exit_code_file_for()` below recomputes
 that same path here — the naming contract is locked by test_sr_verify.py.
@@ -89,12 +89,13 @@ SANDBOX_KEY_LEN = 12
 #: written verbatim after `#SBATCH --nodelist=`; anything else (spaces, quotes,
 #: newlines) would either break the directive or inject a second one. Empty
 #: string means "no line". 2026-09-14: the real value is a **single** host — the
-#: one 4×3090 machine every job must stay on (docs/status/slurm-acceptance.md §B0).
+#: one 4×3090 machine every job must stay on (docs/status/timeline-archive.md,
+#: 2026-09 node probe). Only affects the frozen scheduler branch.
 _SAFE_NODELIST = re.compile(r"^[A-Za-z0-9_,\[\]-]+$")
 
 #: Prefix on the SRLOG's last line for a legal policy skip (cloud cover over
 #: <CloudLimit>); the deploy variant writes it so a skip stops looking like a
-#: silent failure. See docs/sr_code/sr-slurm-deploy-variant.md §3.2 (E9).
+#: silent failure. See docs/sr_code/sr-platform-variant.md §3.2 (E9).
 RUN_SKIPPED_PREFIX = "Run skipped:"
 RUN_FINISHED_MARKER = "Run finished."
 
@@ -234,7 +235,11 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
                        verify_script=None, sr_script=None,
                        sandbox_src=None, sandbox_parent=None,
                        nodelist=None, job_id=None) -> str:
-    """Slurm batch script: audit the allocation, run the SR script, verify it.
+    """Job batch script: audit the allocation, run the SR script, verify it.
+
+    The script is Slurm-shaped but executor-agnostic: the scheduler branch
+    hands it to sbatch, the local branch (`SR_EXECUTOR=local`) runs it with
+    bash, where every `#SBATCH` line is just a comment.
 
     Shape (P2):
 
@@ -246,7 +251,10 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
          torch 1.10.2+cu113 / GDAL 2.4.0，2026-09-14). If the job fails to
          import torch/GDAL, the fallback is a ONE-LINE change here:
          `--export=NONE` → `--export=ALL`. See
-         docs/sr_code/sr-slurm-deploy-variant.md §5.1.
+         docs/sr_code/sr-platform-variant.md §6.2 and §6.4.
+         (Under SR_EXECUTOR=local this directive is inert: `#SBATCH` lines are
+         comments to bash, and local_exec narrows the child env itself while
+         keeping LD_LIBRARY_PATH — docs/status/sr-local-execution.md.)
       2. An audit preamble echoing SLURM_JOB_ID / SLURM_JOB_GPUS /
          CUDA_VISIBLE_DEVICES / hostname / interpreter / which SR script /
          config, plus the GPU UUIDs nvidia-smi reports for the devices Slurm
@@ -570,7 +578,7 @@ def _resolve_existing(task: dict, run_cmd=None) -> dict:
     to rerun). Only a verdict file saying "0 exit, contract satisfied" counts
     as COMPLETED — a job that exited 0 without producing SRLOG + tif is the
     silent-failure case this whole layer exists to stop caching (see the module
-    docstring and slurm-integration.md §2.3).
+    docstring and docs/status/sr-local-execution.md §2.3).
     """
     job_id = task["job_id"]
     if job_id is None:

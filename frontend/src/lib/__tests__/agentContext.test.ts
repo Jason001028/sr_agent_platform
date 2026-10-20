@@ -8,7 +8,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  CTX_DIVIDER, agentPayload, buildContextNote, roiStatLine,
+  CTX_DIVIDER, agentPayload, buildContextNote, roiStatLine, splitAgentPayload,
 } from '../agentContext.js';
 import type { RoiCtxNote, ViewerContextSnap } from '../agentContext.js';
 import type { RoiStats, RoiGeom } from '../roiStats.js';
@@ -37,6 +37,22 @@ describe('agentPayload / CTX_DIVIDER 拼接', () => {
   });
   it('分隔线文案提示只读（供气泡视觉分离）', () => {
     expect(CTX_DIVIDER).toContain('只读');
+  });
+});
+
+describe('splitAgentPayload 展示切分', () => {
+  it('还原原话与附文，互不串味', () => {
+    const p = agentPayload('这片云多吗？', '附文内容');
+    expect(splitAgentPayload(p)).toEqual({ question: '这片云多吗？', note: '附文内容' });
+  });
+  it('没有分隔线 → 整条都是用户原话（/chat 页直接发送的消息）', () => {
+    expect(splitAgentPayload('帮我看看这景')).toEqual({
+      question: '帮我看看这景', note: '',
+    });
+  });
+  it('原话末尾的换行不留在气泡里', () => {
+    const p = '问题\n' + CTX_DIVIDER + '\n附文';
+    expect(splitAgentPayload(p).question).toBe('问题');
   });
 });
 

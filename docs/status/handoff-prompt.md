@@ -38,7 +38,7 @@
 4. `docs/README.md` —— 文档分类索引
 5. `docs/knowledge/platform-tutorial.md` —— 想系统理解设计取舍时再读（从 0 开发教程）
 6. 记忆索引 `C:\Users\lenovo\.claude\projects\d--BaiduNetdiskDownload-sr-agent-platform\memory\MEMORY.md`
-   —— 一批环境与真机事实，例如"真实文件是无压缩 + 条带 1 行""Slurm 账务未启用""内网机无 yum 源"
+   —— 一批环境与真机事实，例如"真实文件是无压缩 + 条带 1 行""内网机无 yum 源""盘阵 .tif 通常有配套同名 .jpg"
 
 ## 仓库地图
 
@@ -48,7 +48,7 @@
 |---|---|
 | `api/` | HTTP 层。`app.py`：`/api/scenes` 检索、`/preview` 懒生成 JPG、`POST /api/scenes/resolve`；`platform.py`：`/api/tools`、`/api/chat/*`（REST + SSE）、`/api/queue*`（REST + SSE）、`/api/masks`；`paths.py`：路径白名单与 scene id 编解码 |
 | `pathguard.py` | 盘阵路径的唯一真源。盘符映射、前缀白名单、由文件名反推场景目录 |
-| `services/` | 流程编排。`scene_search`（场景目录判据）、`preview_jpg`（稀疏采样转 JPG）、`run_sr`（拼 XML 与批脚本）、`slurm`（Slurm 客户端，含假调度器）、`local_exec`（本机直跑执行器）、`mask`（矢量转栅格掩码）、`store`（SQLite 会话与任务） |
+| `services/` | 流程编排。`scene_search`（场景目录判据）、`preview_jpg`（稀疏采样转 JPG）、`run_sr`（拼 XML 与运行脚本、任务状态）、`local_exec`（本机直跑执行器）、`mask`（矢量转栅格掩码）、`store`（SQLite 会话与任务）。`slurm.py` 是已冻结的调度器存量，上线路线不读它 |
 | `tools/` | 流程级 agent 工具，只做薄封装、调用 services。`contract.py` 是接口约定与 `@tool` 注册表 |
 | `agent/loop.py` | 自写状态机，不引入 langchain / langgraph（见 `docs/conventions/langchain-boundary.md`） |
 | `mta_grid/` | 纯算法基础模块 |
@@ -68,8 +68,10 @@
 
 ## 当前路线
 
-「提交 SR」的实现方式是：后端在 node81-135 上用 SR 生产 conda 解释器直接起进程，不走 Slurm。
-Slurm 那条线 2026-09-14 已中止，代码、文档、验收清单保留为存量。
+「提交 SR」的实现方式只有一条：后端在 sr-api 所在机器上用 SR 生产 conda 解释器直接起 bash
+子进程（`SR_EXECUTOR=local`），作业就地跑在用户填的 `lq_path`。整条链与运行期规则见
+[sr-local-execution.md](sr-local-execution.md)。调度器路线 2026-09-14 已中止，代码保留为存量，
+交接时不必读。
 
 现状：提交链路、conda 环境、单卡绑定都已由真机实测打通。当前卡点是需要一个未超分过的场景，
 才能真跑出产物（现有场景已被 `already SRed before` 判定，提前返回）。

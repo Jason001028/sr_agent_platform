@@ -12,8 +12,8 @@ code the platform can read back from disk:
 Why this exists
 ---------------
 `code_0817_prod.py` has five reachable `exit(0)` paths that all fire *before*
-the SRLOG is created (docs/status/slurm-integration.md 2.3, "闭环毒药"). Slurm
-then reports the step as COMPLETED, the platform's idempotency layer caches
+the SRLOG is created (docs/status/sr-local-execution.md 2.3, "闭环毒药"). The
+executor then reports the step as completed, the platform's idempotency layer caches
 that as a permanent success, and the scene silently never gets super-resolved.
 The contract (docs/sr_code/sr-pipeline-interface.md 2) is therefore three
 conditions, checked here rather than taken on trust:

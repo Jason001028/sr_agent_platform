@@ -802,8 +802,9 @@ run_all.sh   [runs]                 — 依次跑 PRESETS 数组中的所有配�
 
 ### 13.3 部署形态
 
-- SR 采用**裸机 + Slurm，不加 Docker 容器**：TRT 版本锁定、机器固定、Slurm 本身运行在裸机上，
-  容器只增加耦合。平台服务（FastAPI / Nginx）可选容器或裸机 venv + systemd 两种方式。
+- SR 采用**裸机直跑，不加 Docker 容器，也不上调度器**：TRT 版本锁定、机器固定，后端在本机用生产
+  conda 解释器起进程即可（早期曾计划接 Slurm，2026-09-14 中止），容器只增加耦合。
+  平台服务（FastAPI / Nginx）可选容器或裸机 venv + systemd 两种方式。
 
 ### 13.4 两版本对比与选型
 
@@ -814,24 +815,25 @@ run_all.sh   [runs]                 — 依次跑 PRESETS 数组中的所有配�
 
 两版核心处理流程逐行一致。
 
-### 13.5 Slurm 接入定论（2026-09-10，取代早期的「两版合并」方案）
+### 13.5 平台部署变体定论（2026-09-10，取代早期的「两版合并」方案）
 
-- **两版合并取消**：`code_0817_prod.py` 作为唯一真源逐字节不动；Slurm 上运行的可运行版本由锚点替换
-  生成器机械产出为 `variants/code_0817_prod_slurm.py`（差异 E1–E9 见
-  [sr-slurm-deploy-variant.md](sr-slurm-deploy-variant.md)）。不上机手改副本 —— 手改无法审计，
+- **两版合并取消**：`code_0817_prod.py` 作为唯一真源逐字节不动；平台部署用的可运行版本由锚点替换
+  生成器机械产出为 `variants/code_0817_prod_slurm.py`（文件名是历史遗留，差异 E1–E9 见
+  [sr-platform-variant.md](sr-platform-variant.md)）。不上机手改副本 —— 手改无法审计，
   真源更新后也无法可靠重构。
-- **选卡交给 `--gres`**：批脚本 `#SBATCH --gres=gpu:1` 申请，Slurm 注入 `CUDA_VISIBLE_DEVICES`
-  （真机实测注入整数，如 `0`）。变体已删除全部 `CUDA_VISIBLE_DEVICES` 赋值与 `<GPUIDS>` 选卡逻辑，
-  `<GPUIDS>` 降级为审计字段。
+- **选卡由执行器注入**：当前本机直跑（`SR_EXECUTOR=local`）时由 `SR_LOCAL_GPU` 经
+  `CUDA_VISIBLE_DEVICES` 传下去；调度器路线上曾由 `#SBATCH --gres=gpu:1` 申请。变体已删除全部
+  `CUDA_VISIBLE_DEVICES` 赋值与 `<GPUIDS>` 选卡逻辑，`<GPUIDS>` 降级为审计字段。
 - **GPU 数量守卫由变体删除**：判据由 `!= 4` 改为 `< 1`，计数改用 `torch.cuda.device_count()`，
   且不再执行 `systemctl stop slurmd.service`（原脚本在单卡作业下必然 `exit(3)`，服务以 root 运行时
   会把节点从调度池摘除）。
-- **终态不看 `sacct`**：真机 `AccountingStorageType=none`，`sacct` 永久不可用。改由作业内契约校验器
-  `verify_sr_run.py` 写退出码文件 `<DatarootLQ>/Debug/_SREXIT_<job_id>.txt`，平台读盘判终态。
-  退出码 0 不等于成功；契约不满足时校验器以退出码 90 结束。
+- **终态只看判定文件**：调度器账务（`sacct`）在真机永久不可用（`AccountingStorageType=none`），
+  改由作业内契约校验器 `verify_sr_run.py` 写 `<DatarootLQ>/Debug/_SREXIT_<job_id>.txt`，
+  平台读盘判终态。退出码 0 不等于成功；契约不满足时校验器以退出码 90 结束。
 
-> 2026-09-14：Slurm 路线中止，改为在本机用生产 conda 解释器直接起进程（`SR_EXECUTOR=local`）。
-> 上述判据（退出码文件定终态、契约校验器）对本地执行器同样适用；部署变体与校验器保留为存量。
+> 2026-09-14：调度器路线中止，改为在本机用生产 conda 解释器直接起进程（`SR_EXECUTOR=local`）。
+> 上述判据（判定文件定终态、契约校验器）对本地执行器同样适用。当前路线与运行期规则见
+> [sr-local-execution.md](../status/sr-local-execution.md)。
 
 ## 附录：常见问题 FAQ
 

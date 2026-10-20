@@ -1,7 +1,7 @@
 # Python/并发 面试八股（interview · 高频精简版）
 
 > 定位：跳槽高频 Python 语言 + 并发/异步自测与背诵。★=高频。每题「答（要点）+ 追问」。
-> 仓库真例标注 🗂：答完八股，能用 [backend/services/store.py](backend/services/store.py)、[backend/services/slurm.py](backend/services/slurm.py) 等真实文件讲成"项目实践"。阶段 5（聊天 SSE 的 `run_loop` → to_thread → asyncio.Queue）处于**规划/评审中**（契约 [docs/planning/api-contract.md](docs/planning/api-contract.md) §4.1），引用处均标注，不当作已实现事实。
+> 仓库真例标注 🗂：答完八股，能用 [backend/services/store.py](backend/services/store.py)、[backend/services/local_exec.py](backend/services/local_exec.py)、[backend/services/slurm.py](backend/services/slurm.py) 等真实文件讲成"项目实践"。阶段 5（聊天 SSE 的 `run_loop` → to_thread → asyncio.Queue）处于**规划/评审中**（契约 [docs/planning/api-contract.md](docs/planning/api-contract.md) §4.1），引用处均标注，不当作已实现事实。
 
 ---
 
@@ -266,7 +266,7 @@
     - 包 = 目录 + `__init__.py`（3.3+ 命名空间包可省，显式加才能控导出、放公共面）。`__init__.py` 做**重导出**（`from .store import Store`，让 `from pkg import X` 直通）、设 `__all__` 约束 `from pkg import *`。
     - **绝对导入**（`import pkg.mod`）最稳、可整目录搬动，默认推荐；包内互引可用**相对导入**（`.` 本包、`..` 父包），但**脚本作为 `__main__` 直接运行时相对导入会挂**（顶层查找只认 `sys.path`）。
     - **循环导入**解法：import 下移进函数体（延迟到调用时）；类型注解处用 `from __future__ import annotations` + `if TYPE_CHECKING:` 只在静态期导入。
-    - 🗂 本仓库分层：`services/`（store/slurm/mask…）、`tools/`、`api/` 各成包，用 `__init__.py` 收口公共面，REST/CLI/Agent 复用同一批 service。
+    - 🗂 本仓库分层：`services/`（store/local_exec/slurm/mask…）、`tools/`、`api/` 各成包，用 `__init__.py` 收口公共面，REST/CLI/Agent 复用同一批 service。
 
     **追问：** `if __name__ == "__main__":` 干什么？→ 同一文件既被 import 又可直接运行的分界，入口放它下面；**Windows spawn/多进程会重 import 主模块**（Q13），顶层裸代码会重复执行。`__all__` 只影响 `from x import *`，不拦显式导入。
 
@@ -276,7 +276,7 @@
     **A：**
     - unittest 是内置 xUnit（`setUp/tearDown`、`assertEqual`/`assertRaises`）；pytest 更流行：裸 `assert`、`@pytest.mark.parametrize`、**fixture 依赖注入**（`tmp_path` 临时目录、`monkeypatch` 现场替换并自动还原、`capsys` 抓输出）、`conftest.py` 共享目录级 fixture。
     - **替身原则**：只替**外部副作用边界**——网络/子进程/时钟/随机/磁盘写；别 mock 被测逻辑本身，否则测试永远绿、测了个寂寞。
-    - **monkeypatch 背后的思想是"给外部副作用留注入缝"**：把副作用做成可注入参数/依赖，测试传 fake 实现，比全局 monkeypatch 更确定、可离机（本仓库 `slurm.py` 的 `run_cmd=` 即此缝，见 Q29）。
+    - **monkeypatch 背后的思想是"给外部副作用留注入缝"**：把副作用做成可注入参数/依赖，测试传 fake 实现，比全局 monkeypatch 更确定、可离机（本仓库 `slurm.py` 的 `run_cmd=` 即此缝，见 Q29；本机执行器 `local_exec.py` 则是真起 `bash`，测试直接给假脚本）。
 
     **追问：** mock 和 fake 区别？→ mock = 记录调用并返回预设的替身（断言"被调了没/带什么参"）；fake = 有真实行为的轻量实现（内存假存储/假调度器）。想断言抛异常？→ `with pytest.raises(ValueError)`。为何注入优于到处 monkeypatch？→ 缝在签名里可见、不依赖内部实现、改名重构不破测。
 
@@ -293,9 +293,10 @@
 
 > 把上面的八股落回真实代码，在"追问/讲项目"环节当钩子。路径相对仓库根目录；阶段 5 部分是**契约规划（评审中）**，答时按"设计如此"讲。
 
-29. **Q：为什么 run_cmd/sbatch 执行器能注入"假命令"做离机测试？（★ / 🗂）**
+29. **Q：为什么执行外部命令要留可注入的缝，才能离机测试？（★ / 🗂）**
     **A：**
     - 这是**依赖注入留缝**的经典设计（呼应 Q27）：把"执行外部命令"这一副作用做成**可注入的函数参数**，测试传假实现即可离机全测。
+    - 下面以调度器存量分支（`slurm.py`，2026-09-14 冻结）为例；当前生产路线 `local_exec.py` 不需要这层替身——它本来就起真 `bash`，测试用一个写判定文件的假脚本即可。
     - [backend/services/slurm.py](backend/services/slurm.py) 里 `sbatch_submit/squeue_status/sacct_status/job_status/cancel` 都带末参 `run_cmd: Callable = _run`；默认 `_run` 调 `subprocess.run` 真执行，正常路径不受影响。
     - 测试传**假 run_cmd**：收命令列表、返回预置 stdout（如 `"Submitted batch job 123"`）→ 没 Slurm 的开发机也跑通 submit→status→cancel 全链路、断言解析逻辑。
     - 离机性还有更上一层：`SR_SLURM_FAKE=1` 换内存假调度器、`SR_SCENES_ROOT` 未设时 scene_search 自动回退 fake 场景——同一"可替换后端"思路。
@@ -322,6 +323,6 @@
     **A：**
     - **懒创建**：[backend/services/store.py](backend/services/store.py) 的 `Store.__init__` 只记路径、**不碰磁盘**；真正首次读写才走 `_db()`：`sqlite3.connect` + `CREATE TABLE IF NOT EXISTS`。收益：构造 Store **零副作用、近乎零成本**——工具包装器想建就建（`default_store()` 很便宜），不会"new 一个就偷偷建库"；测试/只读路径不写就不产生文件。
     - **每次写提交**：每条写（`create_session/append_message/put_sr_task` 等）末尾都 `db.commit()`——**一次写 = 一个 autocommit 事务**，落盘成功才返回。
-    - 与 agent 的 **checkpoint 策略**咬合（store 注释引 agent-orchestration-research §6.3）：**外部副作用前先落 checkpoint**——`run_sr` 对 sbatch 下手前先把"提交意图"写进 `sr_tasks`（job_id=None），sbatch 成功后再补 job_id；进程崩溃重放可从库找到 intent，去 squeue/sacct **对账**而非重复提交（幂等表/防盲重试）。
+    - 与 agent 的 **checkpoint 策略**咬合（store 注释引 agent-orchestration-research §6.3）：**外部副作用前先落 checkpoint**——`run_sr` 起进程前先把"提交意图"写进 `sr_tasks`（job_id=None），起进程成功后再补 job_id；进程崩溃重放可从库找到 intent，去执行器 **对账**（本机查进程与判定文件，调度存量查 squeue/sacct）而非重复提交（幂等表/防盲重试）。
 
-    **追问：** 懒连接复用单连接有并发问题吗？→ 进程内单线程/串行写、连接同一实例、写各自 commit 不交叠；将来多线程/多进程要 `check_same_thread=False` + 写锁或每次短连接。为什么 messages 每条都 commit 不攒批？→ commit 边界 = "**检查点已持久**"的承诺；攒批吞吐高但丢了"上一步 durable 再走下一步"的恢复语义。一句话：**外部副作用（sbatch/文件）之前，状态先落库**。
+    **追问：** 懒连接复用单连接有并发问题吗？→ 进程内单线程/串行写、连接同一实例、写各自 commit 不交叠；将来多线程/多进程要 `check_same_thread=False` + 写锁或每次短连接。为什么 messages 每条都 commit 不攒批？→ commit 边界 = "**检查点已持久**"的承诺；攒批吞吐高但丢了"上一步 durable 再走下一步"的恢复语义。一句话：**外部副作用（起进程/文件）之前，状态先落库**。

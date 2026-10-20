@@ -73,6 +73,11 @@
 > 状态：**已完成（2026-09-02）**——契约定稿 `api-contract.md`（已定），实现与门禁见
 > 当轮计数：后端 190 + Vitest 114 + `.e2e/test-platform.js` 11 断言（现值为 `docs/status/current-question.md` §6.3）。
 > 以下为历史提示词，仅剩**真机验收**项（§5.2 清单），新窗口勿重复离机实现。
+>
+> ⚠️ **本文的 Slurm 措辞是历史原文**：文中「`run_sr` → Slurm」「fake slurm」「真 Slurm 提交」
+> 描述的是 2026-09-02 的写法。2026-09-14 起 SR 执行路线改本机直跑（`SR_EXECUTOR=local`），
+> 调度分支冻结为存量；现行口径以 [current-question.md](../status/current-question.md) §2 与
+> [api-contract.md](api-contract.md) 为准。归档原文不改写。
 
 你是本项目续接会话。先读 `CLAUDE.md` → `docs/status/current-question.md` → `docs/experience/gui-experience.md` → `docs/planning/frontend-migration.md` → `docs/planning/frontend-phase4-phase5-prompts.md`（本文件）。阶段1-4 已完成（含盘阵场景检索 + 读 JPG 查看 + 掩码；本地文件路径仍是稀疏 TIF 读法）。
 

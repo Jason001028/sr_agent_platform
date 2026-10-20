@@ -1,7 +1,7 @@
-"""sr_job_status — poll a Slurm job's state (thin wrapper over services.slurm).
+"""sr_job_status — poll an SR job's state (thin wrapper over the job service).
 
-Companion to run_sr: the agent submits a job, then polls it here until
-terminal (COMPLETED/FAILED with exit code) before reporting the result.
+Companion to run_sr: the agent submits a job, then polls it here until terminal
+(COMPLETED/FAILED) before reporting the result.
 """
 
 from __future__ import annotations
@@ -13,10 +13,11 @@ from .contract import err, ok, tool
 @tool(
     name="sr_job_status",
     description=(
-        "Poll the status of a Slurm job (submit via run_sr). Returns "
-        "active/state/exit_code: active jobs show a Slurm state like PENDING "
-        "or RUNNING; terminal jobs show COMPLETED/FAILED plus the exit code. "
-        "State UNKNOWN means the scheduler has no record of the job."
+        "Poll the status of an SR job (submit via run_sr). Returns "
+        "active/state/exit_code: a queued job reports PENDING, a running one "
+        "RUNNING; a finished job reports COMPLETED or FAILED plus the exit "
+        "code. State UNKNOWN means the platform has no record of the job — "
+        "check before resubmitting; CANCELLED means it was stopped."
     ),
     params_schema={
         "type": "object",

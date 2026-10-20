@@ -81,7 +81,7 @@
 
 ### 2.3 退出码 90 与云量跳过的终态
 
-Slurm 部署路径上，SR 脚本之后还会跑一个**作业内契约校验器**（`SR_code/variants/verify_sr_run.py`），把 §2.2 三条件判成机器可读的一行结论：
+部署变体路径上（本机直跑与调度器存量共用同一份运行脚本），SR 脚本之后还会跑一个**作业内契约校验器**（`SR_code/variants/verify_sr_run.py`），把 §2.2 三条件判成机器可读的一行结论：
 
 | 结论 | 校验器退出码 | 退出码文件 | 平台侧 `job_status` |
 |---|---|---|---|
@@ -90,7 +90,7 @@ Slurm 部署路径上，SR 脚本之后还会跑一个**作业内契约校验器
 | 契约不满足 | 90 | `verdict=90 / reason=…` | **FAILED** |
 
 - 退出码文件固定写在 `<DatarootLQ>/Debug/_SREXIT_<job_id>.txt`，与 SRLOG 同目录，按 **job_id** 区分同一场景的多次提交（避免两次提交互相读错结论）；
-- **合法跳过**的判据是 SRLOG 末行以 `Run skipped:` 开头——云量过滤发生在正式日志建立**之前**，部署变体让它先落一条终态行再 `exit(0)`（`sr-slurm-deploy-variant.md §3.2`）。跳过时**不产生输出 tif**，第 3 条条件不适用，校验器只要求条件 1、2；
+- **合法跳过**的判据是 SRLOG 末行以 `Run skipped:` 开头——云量过滤发生在正式日志建立**之前**，部署变体让它先落一条终态行再 `exit(0)`（`sr-platform-variant.md §3.2`）。跳过时**不产生输出 tif**，第 3 条条件不适用，校验器只要求条件 1、2；
 - 校验器**绝不抛异常**：config 不可读、meta 不可读、yml 缺、目录不存在……一律收敛为「契约不满足 + stderr 说明缺哪条」。校验器自己死掉等于没有退出码文件，而「没有退出码文件」与「作业根本没跑」无法区分；
 - 因此调用方的判据是**退出码文件，而不是进程退出码 0**。退出码 90 的语义就是「退出码 0，但不能算成功」——它是 §2.1 那批静默失败（全部 `exit(0)` 且发生在 SRLOG 建立之前）的机器可读化。
 
@@ -112,7 +112,7 @@ config.xml 是任务级配置，经 `-f` 传入。下表列出脚本读取的全
 |---|---|---|---|
 | `DatarootLQ` | 是 | 路径 | 任务数据目录，包含输入图像与 meta.xml。路径中的反斜杠会被替换为 `/` |
 | `OPT` | 是 | 路径 | 指向模型与分块参数的 YAML 文件（含 t_ht / t_wd / pad / scale / network_G 等） |
-| `CloudLimit` | 是 | 整数 | 云量阈值（百分比）。图像云量超过该值时任务不执行：退出码 0、不产生输出 tif。Slurm 路径下这是**合法跳过**（退出码文件 `skip=1`，平台记 COMPLETED），见 §2.3 |
+| `CloudLimit` | 是 | 整数 | 云量阈值（百分比）。图像云量超过该值时任务不执行：退出码 0、不产生输出 tif。部署变体路径下这是**合法跳过**（退出码文件 `skip=1`，平台记 COMPLETED），见 §2.3 |
 | `DeleteOriTifNeeded` | 是 | 字符串 | 是否删除原图。判定规则：仅当取值为 `TRUE`（不区分大小写）时进入删除分支；其余取值（含 `False` / `false`）保留源图像。**删除分支作用于输出路径上的同名文件，不是源图**（见 §6）：`Suffix` 为空、输出名 == 输入名时才等同删除源图；`Suffix` 非空时删掉的是上一次的同名输出，源图仍留在原位。建议平台统一填写 `false` |
 | `SRScale` | 是 | 字符串 | 超分倍率，**按字符串比较**。`"2"` 走通用直通路径（推荐，普通图像安全）；其他取值走卫星地理校正路径（依赖卫星元数据，普通图像不可用） |
 | `Suffix` | 是 | 字符串 | 输出文件后缀。**传非空值**：标签存在但为空时脚本读到 None（见下），输出直接以输入名命名——数据不会真被覆盖，但**输入文件会被改名**，属破坏性副作用，见 §2.4 第 1 条。平台的做法（2026-09-16 起）：请求不带 `suffix` 时，直接读本文件里的 `<Suffix>` 当默认值（当前样例即 `260318`），读不到或值不合法才回落到内置的 `sr`——所以「平台用哪个后缀」这件事以本文件为唯一权威 |
@@ -143,7 +143,7 @@ config.xml 是任务级配置，经 `-f` 传入。下表列出脚本读取的全
 
 模板中有两个标签需要说明：
 
-- `GPUIDS`：历史部署脚本曾读取该标签按任务选卡（实测值 3），本地版 `code_0817_prod.py` 不读取、硬编码 GPU 0。**Slurm 接入后该标签已不参与选卡**，降级为审计字段（平台照写、作业不读，选卡由 `--gres` 完成）——见 §7.1、§9。
+- `GPUIDS`：历史部署脚本曾读取该标签按任务选卡（实测值 3），本地版 `code_0817_prod.py` 不读取、硬编码 GPU 0。**该标签已不参与选卡**，降级为审计字段（平台照写、作业不读）：调度器存量由 `--gres` 选卡，本机直跑由 `SR_LOCAL_GPU` 透传 `CUDA_VISIBLE_DEVICES`——见 §7.1、§9。
 - `MaskDilateFactor`（膨胀参数）：0803 起已移除，本地与部署脚本均不读取。
 
 **OPT 指向的 YAML**：存在多个版本（本例为 tile500，另有 `espan3_2026_gf04_tile1000.yml`），平台按模板原样传递即可。
@@ -227,12 +227,12 @@ if gpu_available is False or gpu_count != 4:
 ```
 
 - 该守卫对 Slurm 单卡作业是**致命**的：`--gres=gpu:1` 下可见 GPU 数为 1，`!= 4` 恒真 ⇒ 作业必然 `exit(3)`；更糟的是它会执行 `systemctl stop slurmd.service` —— 作业以 `User=nginx` 运行时是权限拒绝（作业白挂），服务以 root 运行时则**真把节点从调度池里摘掉**。
-- **本轮起不再要求平台侧手工改脚本**：Slurm 部署用的可运行版本由锚点替换生成器机械产出到 `SR_code/variants/code_0817_prod_slurm.py`，**已删除该守卫的相关行为**（逐条差异见 [sr-slurm-deploy-variant.md](sr-slurm-deploy-variant.md) 的 E2/E4/E5/E6/E7/E8）：
+- **本轮起不再要求平台侧手工改脚本**：平台部署用的可运行版本由锚点替换生成器机械产出到 `SR_code/variants/code_0817_prod_slurm.py`（文件名是历史遗留），**已删除该守卫的相关行为**（逐条差异见 [sr-platform-variant.md](sr-platform-variant.md) 的 E2/E4/E5/E6/E7/E8）：
   - 判据改为 `gpu_count < 1`（可见卡数为 0 才失败），**退出码 3 的语义不变**；
   - 计数改为 `torch.cuda.device_count()`——数"本作业看得见的卡"，而非 nvml 的物理卡数（4 卡节点恒为 4）；
-  - 不再赋值 `CUDA_VISIBLE_DEVICES`（选卡唯一来源是 `--gres`，见 §9）；
+  - 不再赋值 `CUDA_VISIBLE_DEVICES`（选卡来源交给执行器：调度器存量是 `--gres`，本机直跑是 `SR_LOCAL_GPU`，见 §9）；
   - 不再执行 `systemctl stop slurmd.service`，GPU 异常时只向 `SlurmStopLog.txt` 追加一行（措辞 `gpu-error`，不再写 `stop` 以免运维误判节点已下线）。
-- **上机安装**：把变体与生产脚本**并置**在 `$SR_BUNDLE_DIR` 下，再用 `SR_SR_SCRIPT=code_0817_prod_slurm.py` 指定作业跑它——**不必改名顶替 `code_0817_prod.py`**，生产原文件因此保持字节不动（也就始终是生成器的对照物）。作业跑哪个脚本、以及校验器 `verify_sr_run.py`，都由 `SR_SR_SCRIPT` / `SR_VERIFY_SCRIPT` 两个 env 决定（不配则退回原脚本名，行为同旧版）。完整步骤见 [docs/status/slurm-acceptance.md §0.2](../status/slurm-acceptance.md) 与 [deploy/README.md §7.1](../../deploy/README.md)。
+- **上机安装**：把变体与生产脚本**并置**在 `$SR_BUNDLE_DIR` 下，再用 `SR_SR_SCRIPT=code_0817_prod_slurm.py` 指定作业跑它——**不必改名顶替 `code_0817_prod.py`**，生产原文件因此保持字节不动（也就始终是生成器的对照物）。作业跑哪个脚本、以及校验器 `verify_sr_run.py`，都由 `SR_SR_SCRIPT` / `SR_VERIFY_SCRIPT` 两个 env 决定（不配则退回原脚本名，行为同旧版）。完整步骤见 [deploy/README.md §7.1](../../deploy/README.md)。
 - **新鲜度校验**：`python SR_code/tools/gen_slurm_variant.py --check`（逐字节比对，手改即报 STALE）。
 - **本地版与部署脚本不一致（已确认）**：真源硬编码使用 GPU 0（模块级曾设为 `"1"`，`main()` 内覆盖为 `"0"`）；模板 config.xml 里的 `<GPUIDS>` 原设计由部署脚本读取选卡（实测模板值 3）。**Slurm 接入后 `<GPUIDS>` 不再参与选卡**，降级为审计字段（见 §9）。
 
@@ -252,10 +252,11 @@ if gpu_available is False or gpu_count != 4:
 
 ## 9. 并发策略与调用方职责
 
-- **GPU 分配（`--gres` 决议，2026-09-10）**：Slurm 接入路径上选卡**不再由 `<GPUIDS>` 决定**，改由批脚本的 `#SBATCH --gres=gpu:1` 向 Slurm 申请、由 Slurm 注入 `CUDA_VISIBLE_DEVICES`（真机实测注入的是**整数**，如 `0`）。部署变体已删除全部 `CUDA_VISIBLE_DEVICES` 赋值（E2/E4）；模板里的 `<GPUIDS>` 从此只作**审计字段**——平台照写、作业只读打印、不据此选卡。`SLURM_JOB_GPUS` 在真机上未设置，同样只作审计。
-  - 并发策略不变：单任务内部是 compute-bound，同一 GPU 上的并发没有收益，因此仍是"任务间并行（一个作业一张卡）、任务内串行（任务队列）"；
-  - 76 个计算节点（`gpu` 分区，横跨 `node81-*`/`node104-*`）、每节点 4 卡，落到哪张卡由 Slurm 决定，平台不指定。注意 `--gres=gpu:1` 只给出整数型 CVD、**不做设备绑定**（`SLURM_JOB_GPUS` 未设置），同节点上的并发作业理论上仍可能都落物理卡 0；
-  - 桌面端（无 Slurm）路径不受影响，仍按本地脚本硬编码 GPU 0 运行。
+- **GPU 分配（现行口径，2026-09-14 修订）**：选卡**不再由 `<GPUIDS>` 决定**。部署变体已删除全部 `CUDA_VISIBLE_DEVICES` 赋值（E2/E4），模板里的 `<GPUIDS>` 只作**审计字段**——平台照写、作业只读打印、不据此选卡。
+  - 本机直跑（生产路线）：`SR_LOCAL_GPU` 透传成子进程的 `CUDA_VISIBLE_DEVICES`；后端单槽串行，同一时刻只有一个作业占卡；
+  - 调度器存量（已冻结）：由批脚本 `#SBATCH --gres=gpu:1` 申请，由 Slurm 注入 `CUDA_VISIBLE_DEVICES`（真机实测注入的是**整数**，如 `0`）。`--gres` 只给出整数型 CVD、**不做设备绑定**（`SLURM_JOB_GPUS` 未设置），同节点上的并发作业理论上仍可能都落物理卡 0——这也是当初放弃调度路线的原因之一；
+  - 并发策略不变：单任务内部是 compute-bound，同一 GPU 上的并发没有收益，因此仍是"任务间并行（一个作业一张卡）、任务内串行（任务队列）"。本机直跑把"任务间并行"收成单槽串行，因为只有一台机；
+  - 桌面端（无执行器）路径不受影响，仍按本地脚本硬编码 GPU 0 运行。
 - 模型每个进程加载一份（约 4.5GB 显存 + 8–9 秒冷启动）。任务小而多时，按目录批量处理（参考 `run_all_folders.py`）比逐个进程调用更节省资源。
 - 磁盘 IO 较慢（writeTiff 约 11 秒），应将"写结果"阶段计入任务时长，不要误判为进程停滞。
 - **普通外部图像不适用**：脚本的输入判定强依赖 `<文件夹名>_meta.xml`（含 `<SolarAzimuth>`）；普通图像没有该元数据，会在任务早期抛出异常。若平台需要接入普通图像，须前置生成 meta.xml，至少包含 `DataBits` 与 `SolarAzimuth`（`SolarAzimuth` 留空 → 走 RC 步、输入命名为 `PAN.tif`）。
@@ -271,7 +272,7 @@ python sr_pipeline_mock.py -f <config.xml> [--latency <秒>] [--fail <none|cloud
 | 行为 | 说明 |
 |---|---|
 | 默认（正常） | 读取 §3 的必填标签（缺标签时报错，行为同真实管线）；等待 `<latency>` 秒（默认 9，模拟冷启动）；生成 dummy 输出 tif 与 SRLOG（含 `Pipeline Timing Summary` 与 `Run finished.`）；以退出码 0 结束 |
-| `--fail cloud` | 以退出码 0 结束，但不产生输出 tif（模拟云量过滤）。注意：真实管线在跳过时会**先写一条 `Run skipped:` 终态行**（§2.3），Mock 不写——因此在 Slurm 契约校验路径下 `--fail cloud` 会被判为契约不满足（90）。Mock 只用于离线验证平台的成功判定逻辑 |
+| `--fail cloud` | 以退出码 0 结束，但不产生输出 tif（模拟云量过滤）。注意：真实管线在跳过时会**先写一条 `Run skipped:` 终态行**（§2.3），Mock 不写——因此在契约校验路径下 `--fail cloud` 会被判为契约不满足（90）。Mock 只用于离线验证平台的成功判定逻辑 |
 | `--fail pan` | 打印 `L1 PAN.tif file not found.` 后以退出码 1 结束 |
 | `--fail gpu` | 以退出码 3 结束（模拟 GPU 守卫） |
 
@@ -289,7 +290,7 @@ python sr_pipeline_mock.py -f <config.xml> [--latency <秒>] [--fail <none|cloud
 
 模板标签归属（2026-08-17 确认）如下：
 
-- `<GPUIDS>`：历史部署脚本曾读取（按任务选卡）；本地版 `code_0817_prod.py` 不读取（硬编码 GPU 0）。**Slurm 接入后降级为审计字段**，选卡由 `--gres=gpu:1` 完成（§9）。
+- `<GPUIDS>`：历史部署脚本曾读取（按任务选卡）；本地版 `code_0817_prod.py` 不读取（硬编码 GPU 0）。**已降级为审计字段**：选卡由执行器完成（本机直跑 `SR_LOCAL_GPU`，调度器存量 `--gres=gpu:1`，§9）。
 - `<MaskDilateFactor>`：膨胀参数，0803 起已移除，本地与部署脚本均不读取。
 
 **util.py 核对记录（2026-08-17，逐函数，对应 §2/§3/§4/§5/§6）**：`get_cfg_value`（配置文件缺失 → exit(0)；标签缺失 → IndexError；空标签 → None）、`check_sr_previous_step` + `get_l1_pan_tif_rcsc`（SolarAzimuth 空 → `PAN.tif`、非空 → `<文件夹名>.tif`，带文件大小闸门）、`is_true` / `writeTiff`（仅 `"TRUE"` 删除源图，否则重命名保源）、`update_meta_gsd` / `update_meta_integrationtime`（按卫星前缀条件化）。

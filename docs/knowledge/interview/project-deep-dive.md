@@ -105,14 +105,16 @@
     - 分层：`tools/`(薄壳) → `services/`(流程编排) → `mta_grid/`(纯算法)，同一份 services 被 REST/CLI/Agent 三处复用。
 
 12. **Q：run_sr 幂等是什么意思？为什么必须有？**
-    **A：** run_sr 是**提交 Slurm 外部作业**的副作用：网络/进程随时断，用户/Agent 会重试。若每次 POST 都真提交，重放 = Slurm 上**多一个重复作业、白烧 GPU**。
+    **A：** run_sr 是**提交外部 GPU 作业**的副作用：网络/进程随时断，用户/Agent 会重试。若每次 POST 都真提交，重放 = **多一个重复作业、白烧 GPU**。
     - `sr_tasks` 表存 `job_id` + 参数 **sha256 指纹**；`submit_run_sr` **先查表再提交**：已有 job_id 且 active/COMPLETED → 直接复用返回 RESUMED_*(不重复提交)；FAILED/UNKNOWN 才重跑；上次提交被中断(有意图无 job_id) → 明确报错**不盲目补提交**；
     - 落库时机 = **副作用前先记意图**(checkpoint)：崩溃也只留一个可修复的"未完成回合"，恢复时生成"上次结果未知、别盲重试"提示、不重执行工具(借鉴 deepseek-harness 语义)。
 
-13. **Q：Slurm 客户端怎么测试？本机没有 sbatch 怎么办？**
-    **A：** 命令执行器 `run_cmd` **可注入**：测试用假 `run_cmd` 断言"发了哪条 sbatch / squeue / sacct / scancel"，不真起作业；本机没 sbatch → 返回明确错误，绝不误以为 SR 跑起来了。
-    - 状态轮询：先 squeue 看在不在跑，结束后 sacct 拿最终状态 + 退出码；`slurm_available()` 探活。
-    **追问：** 真机怎么配？→ env：`SR_BUNDLE_DIR/SR_PYTHON/SR_SLURM_WORK_DIR/SR_SLURM_PARTITION`。
+13. **Q：执行器怎么测试？本机没有调度器 / 没有 GPU 怎么办？**
+    **A：** 执行器是可替换的一层，测试按层拆开：
+    - **本机直跑**（当前生产路线）：`local_exec` 起的是真 `bash` 子进程，测试直接跑一个写判定文件的假脚本，验证单槽串行、job_id 自增、取消、判定文件解析——不需要 GPU。
+    - **调度器存量**（`slurm.py`，2026-09-14 冻结）：命令执行器 `run_cmd` 可注入，测试用假 `run_cmd` 断言"发了哪条 sbatch / squeue / sacct / scancel"，不真起作业；本机没 sbatch → 返回明确错误，绝不误以为 SR 跑起来了。
+    - 终态一律读判定文件（`Debug/_SREXIT_jobid.txt`），真机上 `sacct` 因账务未启用永久不可用。
+    **追问：** 真机怎么配？→ env：`SR_EXECUTOR=local`、`SR_BUNDLE_DIR`、`SR_PYTHON`、`SR_LOCAL_GPU`、`SR_SLURM_WORK_DIR`（工作目录变量名历史遗留）。
 
 ### E. 前端架构与测试
 
@@ -138,7 +140,7 @@
 17. **Q：开发机读不到真实数据，你怎么保证"真机上能跑"？**
     **A：** 方法论 = **真实系统进不来，就造"显式标记"的替身，替身与真身同接口，env 开关切换，默认给假的**：
     - `SR_SCENES_ROOT` 没设/不存在 → 返回**带 `fake:true` 的假数据**，路径占位 `<fake>/...`；假路径被白名单/工具层拦截，**永远流不进真实消费端**；
-    - `SR_SLURM_FAKE=1` → 内存 fake 调度器；`SR_LLM_MOCK=1` → 固定脚本假 LLM(规划)；
+    - `SR_EXECUTOR` 选执行器（真机 `local`）；`SR_SLURM_FAKE=1` → 内存 fake 调度器（调度器存量分支）；`SR_LLM_MOCK=1` → 固定脚本假 LLM(规划)；
     - 真机接入 = 把 env 指到真挂载点/真端点，**代码零改动**。这叫"dev 侧闭环可测，prod 只换配置"。
     **追问：** 有没有照进真机才发现的问题？→ 诚实弱点，见 §4。
 
@@ -157,7 +159,7 @@
     **A：** REST/SSE 是前后端**共享接口面**：前端 parser 和后端 emitter 必须对同一 schema。契约文档先落盘 = 字段/事件/错误码/状态机先说死；改契约先改文档再改两端，各留测试锁字段。流程 = 我评审契约 → 后端 → 前端 → 双端测试。
 
 21. **Q：SSE 的队列状态怎么保证真实？进程内广播够吗？**
-    **A：** 后台 reconciler(asyncio 周期任务)轮询 Slurm 更新 `sr_tasks`，再通过**进程内 pub/sub**(一组 asyncio.Queue 存在线 SSE 连接)广播。
+    **A：** 后台 reconciler(asyncio 周期任务)轮询执行器（本机路线查子进程与判定文件；调度存量查调度器）更新 `sr_tasks`，再通过**进程内 pub/sub**(一组 asyncio.Queue 存在线 SSE 连接)广播。
     - 边界：这只在**单 worker**内成立；将来多 worker 需外部队列(Redis pub/sub)跨进程广播。**能力边界写清楚 = 加分不是减分**；
     - 部署注意：nginx 反代 SSE 要 `proxy_buffering off` + `proxy_read_timeout` 调大，否则逐帧被攒缓冲、长连接被掐。
 

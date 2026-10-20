@@ -15,6 +15,7 @@ import MarkdownBody from '../components/MarkdownBody.vue';
 import ThinkingIndicator from '../components/ThinkingIndicator.vue';
 import { apiListPlugins } from '../lib/api.js';
 import { loadSrConfig } from '../lib/scene.js';
+import { splitAgentPayload } from '../lib/agentContext.js';
 
 const chat = useChatStore();
 const draft = ref('');
@@ -34,6 +35,11 @@ function argsText(a: Record<string, unknown>): string {
 function toolIcon(ok?: boolean): string {
   if (ok === undefined) return '…';
   return ok ? '✓' : '✗';
+}
+
+/** 用户气泡只显示用户原话；查看器 Agent 页签自动附的上下文不算用户输入。 */
+function userText(content: string): string {
+  return splitAgentPayload(content).question;
 }
 
 function msgKey(m: ChatMsg, i: number): string {
@@ -224,7 +230,7 @@ onMounted(() => {
         <div v-for="(m, i) in chat.messages" :key="msgKey(m, i)" class="cp-row" :class="m.role">
           <!-- user -->
           <template v-if="m.role === 'user'">
-            <div class="bubble user">{{ m.content }}</div>
+            <div class="bubble user">{{ userText(m.content) }}</div>
           </template>
 
           <!-- assistant -->

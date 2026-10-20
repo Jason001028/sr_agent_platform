@@ -46,9 +46,9 @@ GITATTRIBUTES_TEXT = "* text eol=lf\n"
 BANNER_RULE = "# " + "=" * 75
 
 # ---------------------------------------------------------------------------
-# The edit table.  One entry per finding in docs/status/slurm-integration.md
-# sec 2.2 (E1-E9).  Order matches the numbering, not the file position; the
-# anchors are disjoint so the order does not affect the result.
+# The edit table.  One entry per finding (E1-E9), documented in
+# docs/sr_code/sr-platform-variant.md sec 3.  Order matches the numbering,
+# not the file position; the anchors are disjoint so order does not matter.
 # ---------------------------------------------------------------------------
 
 EDITS = [

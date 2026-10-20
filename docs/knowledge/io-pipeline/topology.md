@@ -145,7 +145,7 @@ Restart=on-failure    RestartSec=3
 |---|---|---|
 | 路径 | `/opt/sr-venv`（py3.9） | `SR_PYTHON`，真机为 conda py3.6 环境 |
 | 依赖 | fastapi / uvicorn / pydantic / Pillow / numpy | torch / GDAL / `ImgHistMatch.so` |
-| 谁启动 | systemd | sr-api 起子进程或 sbatch |
+| 谁启动 | systemd | sr-api 起子进程（`local`）或 `sbatch`（调度存量） |
 
 后端**不 import** SR 的任何模块，只把解释器路径写进批脚本文本。两侧互不污染是刻意的：
 SR 生产环境锁在 py3.6，装不了 fastapi；平台侧也不需要 torch。

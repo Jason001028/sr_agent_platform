@@ -182,7 +182,7 @@ class TestBuildBatchScript(unittest.TestCase):
         self.assertIn("#SBATCH --job-name=run_sr_t1", script)   # suffix in name
 
     # ---- SR_SLURM_NODELIST: keep jobs off the node family the submitting host
-    # cannot resolve (docs/status/slurm-acceptance.md §B0, 2026-09-14) ---------
+    # cannot resolve (docs/status/timeline-archive.md, 2026-09 node probe) -----
     def test_nodelist_unset_emits_no_line(self):
         script = svc.build_batch_script("/w/cfg.xml", "/w")
         self.assertNotIn("--nodelist", script)
@@ -665,7 +665,7 @@ class TestRunSrIdempotency(unittest.TestCase):
 class TestSlurmStatus(unittest.TestCase):
     """Terminal state comes from the job's verdict file, not from sacct: the
     array server runs with accounting disabled, so sacct has no output to give
-    (slurm-integration.md §2.4-2 / §一 "C 方案")."""
+    (docs/status/sr-local-execution.md §2.3)."""
 
     def setUp(self):
         patcher = mock.patch.object(slurm, "slurm_available", lambda: True)

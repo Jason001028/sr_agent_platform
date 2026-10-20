@@ -1,9 +1,16 @@
 # SR 提交链路恢复 · 分阶段计划清单
 
-> **版本**：v1.0 · **日期**：2026-09-10 · **状态**：待评审
-> **目标**：把「10.10.81.135 查看器 → 画掩码 → 提交 SR → Slurm 分配 GPU → conda 环境跑超分 → 结果与状态回前端」这一条链**从当前断裂状态恢复到端到端可跑**。
+> **版本**：v1.0 · **日期**：2026-09-10 · **状态**：阶段 1–2 已执行；阶段 3–5 随调度器路线冻结（2026-09-14）
+> **目标**：把「10.10.81.135 查看器 → 画掩码 → 提交 SR → conda 环境跑超分 → 结果与状态回前端」这一条链**从当前断裂状态恢复到端到端可跑**。
 > **执行分工**：代码改动（阶段 1）由我改 + 本地测试；真机命令由你在 10.10.81.135 上执行、输出贴回我判读。
-> **上位文档**：[slurm-integration.md](../status/slurm-integration.md)（决策快照）、[slurm-acceptance.md](../status/slurm-acceptance.md)（真机验收 A–D，本清单的阶段 3–5 是它的执行版）、[sr-slurm-deploy-variant.md](../sr_code/sr-slurm-deploy-variant.md)（变体差异 E1–E9）。
+> **上位文档**：当前路线见 [sr-local-execution.md](../status/sr-local-execution.md)（本机直跑）与
+> [real-machine-acceptance.md](../status/real-machine-acceptance.md) §D（验收）；
+> 变体差异见 [sr-platform-variant.md](../sr_code/sr-platform-variant.md)（E1–E9）；
+> 调度器路线的决策与实测经过归档在 [timeline-archive.md](../status/timeline-archive.md)。
+>
+> ⚠️ **阶段 3–5 已冻结**：它们描述的是 `sbatch` 调度路线，2026-09-14 中止。当前生产路线是
+> `SR_EXECUTOR=local`，保留本清单只为追溯阶段 1（契约/变体/校验器）的来历。跑真机作业不要按
+> 阶段 3–5 的命令走，改按 `real-machine-acceptance.md` §D。
 
 ---
 
@@ -155,7 +162,7 @@ systemctl cat sr-api > /tmp/sr-api.service.snapshot
 
 测试（`test_run_sr.py`）：默认仍输出 `code_0817_prod.py`；`SR_SR_SCRIPT` 生效且**整份脚本不再出现原脚本名**；显式参数压过 env；audit 含 `SR_SCRIPT=`。
 
-同步更新：[deploy/sr-api.service](deploy/sr-api.service)（新增两项 env + 注释）、[deploy/README.md](../../deploy/README.md) §七（§7.1 改为并置装法 + 八项 env 表）、[docs/status/slurm-acceptance.md](../status/slurm-acceptance.md) §0.2/§0.3、[docs/sr_code/sr-pipeline-interface.md](../sr_code/sr-pipeline-interface.md) §7.1、[docs/status/real-machine-acceptance.md](../status/real-machine-acceptance.md) §D。
+同步更新：[deploy/sr-api.service](deploy/sr-api.service)（新增两项 env + 注释）、[deploy/README.md](../../deploy/README.md) §7.1（并置装法 + env 表）、[docs/sr_code/sr-pipeline-interface.md](../sr_code/sr-pipeline-interface.md) §7.1、[docs/status/real-machine-acceptance.md](../status/real-machine-acceptance.md) §D。
 
 ### E-B 空后缀归一（对应 B2）
 
@@ -270,7 +277,8 @@ systemctl show sr-api -p Environment | tr ' ' '\n' | grep SR_   # env 真的进�
 
 ### 2.4 探针（**不带 `--deep`**，不提交作业）
 
-按 [slurm-acceptance.md](../status/slurm-acceptance.md) §A 执行 `deploy/slurm/probe_slurm.sh`。
+（已冻结）当时按旧验收单 §A 执行 `deploy/slurm/probe_slurm.sh`；该验收单已归档，
+探针脚本保留在 `deploy/slurm/`。
 
 ### 2.5 nginx（仅决策点 ① 选"本地盘"时需要）
 
@@ -287,7 +295,7 @@ location /previews/ { alias /var/lib/sr-agent/previews/; }
 
 ## 阶段 3 · 裸 Slurm 冒烟（绕开平台，确认地基）
 
-按 [slurm-acceptance.md](../status/slurm-acceptance.md) §B 执行 B1–B3：
+（已冻结）当时按旧验收单 §B 执行 B1–B3：
 
 | 步骤 | 验什么 | 判据 |
 |---|---|---|
@@ -295,7 +303,8 @@ location /previews/ { alias /var/lib/sr-agent/previews/; }
 | B2 `sudo -u nginx sbatch` 手工跑一次 `$SR_PYTHON $BUNDLE/code_0817_prod_slurm.py -f <沙箱 config.xml>` | 变体在真机上能不能跑完 | 输出 tif 出现、SRLOG 末行 `Run finished.` |
 | B3 读退出码文件 | 终态文件机制通不通 | `$TEST/<编号>/Debug/_SREXIT_<job_id>.txt` 存在且 `verdict=0` |
 
-> ⚠️ **不要看 `sacct`** —— 账务未启用，恒 rc=1。终态一律读 `_SREXIT_<job_id>.txt`（[slurm-acceptance.md](../status/slurm-acceptance.md) §0.3）。
+> ⚠️ **不要看 `sacct`** —— 账务未启用，恒 rc=1。终态一律读 `_SREXIT_<job_id>.txt`
+> （规则见 [sr-local-execution.md](../status/sr-local-execution.md) §2.3，对两种执行器都成立）。
 > ⚠️ B2 若在 import torch/gdal 阶段就挂，是 `--export=NONE` 把 `LD_LIBRARY_PATH` 丢了 —— 按 [run_sr.py:105-113](backend/services/run_sr.py#L105-L113) 的一条注释把 `--export=NONE` 改成 `--export=ALL`，重跑一次即可确认。
 
 ---
@@ -329,7 +338,8 @@ curl -s localhost:8000/api/queue | python -m json.tool
 
 ## 阶段 5 · 平台链路四条结论（逐条留证）
 
-按 [slurm-acceptance.md](../status/slurm-acceptance.md) §D，四条各一条真实输出：
+（已冻结）当时按旧验收单 §D，四条各一条真实输出；等效判据现由
+[real-machine-acceptance.md](../status/real-machine-acceptance.md) §D 承接：
 
 | # | 结论 | 造法 | 期望 |
 |---|---|---|---|
@@ -377,8 +387,9 @@ chmod g+w      "$PROD/<年>/<月>/<日>/<编号>"
 
 ## 关联
 
-- 真机验收命令与判据：[slurm-acceptance.md](../status/slurm-acceptance.md)
-- 决策与实测值：[slurm-integration.md](../status/slurm-integration.md)
-- 变体差异与上机必验项：[sr-slurm-deploy-variant.md](../sr_code/sr-slurm-deploy-variant.md)
+- 真机验收命令与判据：[real-machine-acceptance.md](../status/real-machine-acceptance.md) §D
+- 当前执行路线：[sr-local-execution.md](../status/sr-local-execution.md)
+- 决策与实测经过：[timeline-archive.md](../status/timeline-archive.md)
+- 变体差异与上机必验项：[sr-platform-variant.md](../sr_code/sr-platform-variant.md)
 - 部署侧（变体安装 + 六项 env + 终态判定）：[deploy/README.md](../../deploy/README.md) §七
 - SR 调用契约（退出码 0/90、`Run skipped:`）：[sr-pipeline-interface.md](../sr_code/sr-pipeline-interface.md) §2

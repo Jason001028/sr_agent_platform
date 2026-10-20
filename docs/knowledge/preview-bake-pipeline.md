@@ -702,7 +702,7 @@ RUNNING→COMPLETED 谁把 `changed` 拿走，在那里挂入队钩子必然偶�
 
 **Q：作业跑完了，为什么产物预览还是没烤（`preview_state` 是 `skipped`）？**
 照 `preview_note` 的 slug 对号入座，见 §4.9：`sandbox` = 这次跑在沙箱私有副本上，盘阵里根本没有
-产物（切回 slurm 提交时这是**正常结局**，不是故障）；`product_missing` = note 里列的那几个候选名
+产物（只有调度器存量分支会配沙箱，那里这是**正常结局**，不是故障；本机直跑强制不配沙箱，不该出现该 slug）；`product_missing` = note 里列的那几个候选名
 一个都不在 —— 先分辨是「名字猜错了」还是「作业本身没产出」（云限额跳过是合法 COMPLETED，
 本来就不会有产物）；`unwritable` = 产物目录对服务账号不可写，兜底留给打开时那条
 `X-SR-Preview-Fallback` 路径；`source_changed` = 产物在烘焙途中被改写，本次一个字节都没写。

@@ -115,6 +115,20 @@ export function agentPayload(question: string, note: string): string {
   return question + '\n' + CTX_DIVIDER + '\n' + note;
 }
 
+/** 把一条用户消息切回「原话 / 自动附文」两段。
+ *
+ *  消息本体（store / GET messages）保留完整 payload 供 Agent 读；展示层必须
+ *  切开，否则自动附的查看器上下文会被当成用户原话显示。没有分隔线（/chat 页
+ *  直接发送的消息）时，整条都是原话。 */
+export function splitAgentPayload(content: string): { question: string; note: string } {
+  const i = content.indexOf(CTX_DIVIDER);
+  if (i < 0) return { question: content, note: '' };
+  return {
+    question: content.slice(0, i).replace(/\s+$/, ''),
+    note: content.slice(i + CTX_DIVIDER.length).trim(),
+  };
+}
+
 /** 把兼容用的扁平快照投影成插件契约；不暴露路径、DOM 或 Canvas。 */
 export function buildViewerContextSnapshot(c: ViewerContextSnap): ViewerContextSnapshot {
   return {

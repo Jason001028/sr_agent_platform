@@ -22,7 +22,7 @@ flowchart TD
   subgraph SVC["服务层"]
     ST["services/store.py<br/>SQLite"]
     LE["services/local_exec.py<br/>本机执行器"]
-    SL["services/slurm.py<br/>调度器客户端"]
+    SL["services/slurm.py<br/>调度器客户端（冻结存量）"]
     MS["services/mask.py<br/>掩码栅格化"]
     PC["services/preview_cache.py<br/>兜底缓存"]
     PCL["services/preview_clear.py<br/>清缓存"]

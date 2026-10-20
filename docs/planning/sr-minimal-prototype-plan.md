@@ -1,10 +1,17 @@
 # SR 最小原型实施计划（前端提交 → 本机 conda 环境直接执行）
 
 日期：2026-09-14
-状态：已定（决策见 §1.2，来源为 2026-09-14 与用户的问答）
+状态：**已实现**（决策见 §1.2，来源为 2026-09-14 与用户的问答）
 
 > 读者：接手实现的新会话。本文不假设你有前几轮对话的上下文，所有前提在 §2 给出并标注核实方式。
 > 工作方式见 §0，动手前必须先做 §3。
+>
+> ⚠️ **本计划已落地**：`backend/services/local_exec.py` 与 `SR_EXECUTOR` 开关已在仓库里，
+> 运行期行为与真机规则以 [sr-local-execution.md](../status/sr-local-execution.md) 为准，
+> 验收勾选见 [real-machine-acceptance.md](../status/real-machine-acceptance.md) §D。
+> 本文保留为实现当时的工单原文，用于追溯「为什么这样改」；§4 的改动清单**不要照抄重做**。
+> 文中出现的 `slurm` 字样：或是历史文件名（`code_0817_prod_slurm.py`），或是被冻结的调度器存量分支，
+> 当前生产路线为 `SR_EXECUTOR=local`。
 
 ## 0. 工作方式（硬性）
 
@@ -12,7 +19,7 @@
 + node81-135（CentOS7 盘阵机）上的**任何操作都由用户执行**。你给出命令后停下等用户回贴输出，判读后再给下一条。
 + 一次只给一小段命令（1～3 行），不要一次给一大段探针。
 + 内网机传不出文件，所有需要看的输出要短到能截图后 OCR。
-+ 读文档顺序：`CLAUDE.md` → `docs/status/current-question.md` → `docs/status/slurm-acceptance.md` → `deploy/README.md` §七。
++ 读文档顺序：`CLAUDE.md` → `docs/status/current-question.md` → `docs/status/sr-local-execution.md` → `deploy/README.md` §七。
 + 每段汇报按三段写：做成了什么 / 证据是什么（命令 + 输出）/ 下一步等用户什么。
 
 ## 1. 目标与已定决策
@@ -84,7 +91,7 @@
 
 | 序号 | 任务 | 对应章节 | 完成判据 |
 | --- | --- | --- | --- |
-| 1 | 读完后端执行 / 状态链路（`run_sr.py` 提交段、`store.py`、`platform.py` 队列端点） | §2 | 能说清 `submit_run_sr` → `sbatch` → `job_status` 的三段数据流，以及 `sr_tasks` 表怎么保证不重复提交 |
+| 1 | 读完后端执行 / 状态链路（`run_sr.py` 提交段、`store.py`、`platform.py` 队列端点） | §2 | 能说清 `submit_run_sr` → 执行器（`local` 起进程 / `slurm` 才 `sbatch`）→ `job_status` 的三段数据流，以及 `sr_tasks` 表怎么保证不重复提交 |
 | 2 | 执行器切换：后端用 `$SR_PYTHON` 直接起进程，不再 `sbatch` | §4.1、§4.2 | 本地模式下 `POST /api/queue` 能起进程，状态走 PENDING → RUNNING → 终态 |
 | 3 | 路径锁死：提交 SR 的 `lq_path` / `mask_path` 由场景目录推导，不接受手填 | §4.3、§4.7 | `SR_LOCKED_DIR` 不匹配返回 400；前端两个输入框只读 |
 | 4 | 掩码来源改为目录里已有的 `<名字>_mask.tif`，取消「必须先画掩码」门禁 | §4.3、§4.7 | 未画掩码也能点「提交 SR」；缺掩码文件时返回 400 |

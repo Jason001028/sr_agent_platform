@@ -2676,6 +2676,39 @@ Pinia store，理论上此时 store 里已有上一任务。**未定性**，下�
 **待真机**：这条预填要 `sceneDir` 非空才走得通（本地随手打开的图没有），开发机 e2e 到不了 ——
 验收动作：导入清单 → 一键解析 → 点开某张卡，看定位框里是不是那一行的「列,行」。
 
+### 2026-10-20 · 聊天页己方气泡多显示一截；全仓 Slurm 措辞收口（开发机）
+
+**症状**：`/chat` 页里用户自己发的那条消息，气泡里除了原话还多出一段查看器上下文
+（`--- Agent 上下文 ---` 之后的内容）。同一条消息在查看器的 Agent 页签里显示正常。
+
+**根因**：查看器的 Agent 页签用 `agentPayload(question, note)` 把「原话 + 自动附文」拼成一条
+消息落库，这本身是对的（Agent 需要读附文）。`ChatPage.vue` 直接渲染 `m.content`，没有按
+分隔线切开，于是附文也被当成用户原话显示。
+
+**改动**（纯前端）：`lib/agentContext.ts` 新增 `splitAgentPayload()`，把一条消息切回
+`{question, note}`；`ChatPage.vue` 的己方气泡只渲染 `question`；`AgentChatTab.vue` 改为复用
+同一个切分函数，显示行为不变（原话 + 灰字附文）。消息本体、存储、发给 Agent 的 payload 都不动。
+新增 3 条 vitest。
+
+**验证**：vitest 444 passed；`vue-tsc --noEmit` 干净；`npm run build` 通过；
+backend 767 passed / 5 skipped。
+
+**同时做的文档收口**：2026-09-14 起 SR 执行路线改本机直跑（`SR_EXECUTOR=local`），但仓库里
+大量文档仍把 Slurm 写成现行路线。本轮按「生产路线 = 本机执行，调度 = 冻结存量」统一了
+status / deploy / knowledge / planning / interview 五类文档的措辞；历史记录
+（本文件、阶段4/5 提示词归档、`frontend-migration.md` 变更日志）**保持原文**，只加
+「这是历史措辞」的横幅。文中 `code_0817_prod_slurm.py` 等文件名保留——当前生成器
+`SR_code/tools/gen_slurm_variant.py` 产出的名字就是它。
+
+**发现但本轮未改**（按用户决定：这一轮只动文档与提示词）：
+
+- 合并 `bd1e5a3` 把 `241c4f6 精简冗余slurm部分，轻量化` 的代码改动整体回滚了：
+  `backend/services/slurm.py` 回到仓库，`services/sr_result.py`、`tests/exec_double.py` 消失，
+  `tools/sr_job_status.py` 退回直接调 `slurm.job_status`。
+- 因此生产路线上 `sr_job_status` 工具会去调 `squeue`，而本机没有调度器，Agent 查不到作业状态。
+  `241c4f6` 里已有一版正确实现（按 `job_id` 找到任务行 → `run_sr.query_job_status`），可直接取回。
+  `/queue` 页不受影响，它走的是 `run_sr.query_job_status`。
+
 ---
 
 ## 附录：原 §3「背景决策」全文（2026-08-30 / 08-31 定调，逐字保留）

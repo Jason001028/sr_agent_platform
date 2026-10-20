@@ -189,9 +189,9 @@ flowchart TB
 | 三路分派 | 浏览器本地解码在 UTIF / geotiff 分块 / 稀疏条带之间选路 | CLAUDE.md |
 | 上下文侧舱 | 查看器右侧可折叠面板，含 `[ROI/工具]` 与 `[Agent]` 两页签 | current-question.md §1 |
 | 待修复清单 | 导入的 `.txt` 缺陷清单，可在查看器里逐行标记并写回盘阵 | 同上 |
-| 假调度器 | `SR_SLURM_FAKE=1` 时的内存调度器，无真 Slurm 也能验终态 | api-contract.md §5.2 |
-| 契约校验器 | 作业内紧跟 SR 脚本跑的第二个进程，把成败落成退出码文件 | sr_code/sr-slurm-deploy-variant.md |
-| 退出码文件 | `Debug/_SREXIT_jobid.txt`，作业终态的**唯一**判据 | current-question.md §2 |
+| 假调度器 | `SR_SLURM_FAKE=1` 时的内存调度器，仅调度器存量分支使用 | api-contract.md §5.2 |
+| 契约校验器 | 作业内紧跟 SR 脚本跑的第二个进程，把成败落成判定文件 | sr_code/sr-platform-variant.md |
+| 判定文件 | `Debug/_SREXIT_jobid.txt`（历史叫退出码文件），作业终态的**唯一**判据 | status/sr-local-execution.md §2.3 |
 | 任务指纹 | 提交参数的 sha256，`sr_tasks` 表的唯一键，同参数复用同一行 | current-question.md §6.2 |
 
 **刻意不用的说法**（仓库里查不到，或与既有含义冲突，避免引入）：
@@ -215,9 +215,13 @@ flowchart TB
 2. [current-question.md](../../status/current-question.md) §5 把「后端禁止扫盘」写成全局约束。
    准确口径是：**只有 `GET /api/scenes` 会列举目录**（它本就是检索端点），
    `resolve` / `preview` / `siblings` 等请求路径由测试钉住禁止列举。
-3. `backend/tools/sr_job_status.py` 调 `slurm.job_status` 时**未传**退出码文件路径，
-   与 `services/run_sr.query_job_status` 那条带退出码文件的路径不同。工具路径下的终态
-   可能退化为 UNKNOWN。未确认为有意设计还是待修。
+3. `backend/tools/sr_job_status.py` 直接调 `slurm.job_status`，**没有走**
+   `services/run_sr.query_job_status` 的执行器分派，也**未传**退出码文件路径：
+   - 调度分支下终态退化为 UNKNOWN；
+   - 本机直跑（生产路线）下这行会去调 `squeue`，在真机上直接报错，Agent 查不到作业状态。
+
+   `backend/api/platform.py` 的队列轮询走的是 `query_job_status`，所以 `/queue` 页正常。
+   两处口径不一致，未确认为有意设计还是待修（截至 2026-10-20 未改代码）。
 
 另有一处陈旧的模块注释：`backend/tools/__init__.py` 的 docstring 仍写
 「No tools registered yet」，而该文件下方就 import 了 4 个工具。

@@ -12,7 +12,7 @@
 
 - **Agent 编排内核维持自研**（现有 `backend/tools/contract.py` 工具契约 + 自写状态机），运行时**不引入 langchain / langchain-core / langgraph 依赖**（延续 langchain-boundary.md 决策）。
 - **断点恢复（跨小时 + 人审）**是三个需求中唯一需要现成轮子的维度。若确认需要，评估对象是 **LangGraph**：`checkpoint-sqlite` + `interrupt`/`Command`，唯一开箱即用且 FastAPI in-process 友好（`AsyncSqliteSaver`）的库级方案。langchain 本体无断点能力。
-- **无论如何必自研**：外部副作用（Slurm GPU job）的**幂等层**。checkpoint 只存图内状态，不感知外部 job；崩溃重放会重复提交任务。这层是所有方案（langgraph / 自研 / harness）的共同缺口，且与选型无关。
+- **无论如何必自研**：外部副作用（GPU 超分作业）的**幂等层**。checkpoint 只存图内状态，不感知外部 job；崩溃重放会重复提交任务。这层是所有方案（langgraph / 自研 / harness）的共同缺口，且与选型无关。
 - deepseek-harness **不移植**（Node+TS+Cordis 生态与 FastAPI + Python 工具组合不匹配），但其"事件溯源日志做断点"与"崩溃时未闭合 turn 补合成错误"两个设计可直接对标。
 
 > **工具粒度边界**：`SR_code/code_0820_prod_windows.py` 的主流程（config → 输入发现 → 掩码读取 → MTA-Grid 规划 → pad → 逐 tile 超分 → 回填）是一条**固定顺序的子进程管线**，它只是 Agent 工具库中 `run_sr` 这一个工具的**内部实现**。工具库 = 流程级操作集合（run_sr / 批量 / 检索 / cv 修复），各工具的 `run()` 内部可有任意复杂流水线；Agent 编排层处理的是"选哪个工具、按什么顺序、失败怎么恢复"，两者是不同层级，后者不会因前者简单而变小。
@@ -57,7 +57,7 @@
 | langgraph | 高（图内） | 每 superstep `_put_checkpoint` 落盘（[pregel/_loop.py:1081](langgraph-main/libs/langgraph/langgraph/pregel/_loop.py#L1081)）；`put_writes` 存中间写（`checkpoints`+`writes` 两张表，[sqlite/__init__.py:142](langgraph-main/libs/checkpoint-sqlite/langgraph/checkpoint/sqlite/__init__.py#L142)）；`interrupt()` 抛 `GraphInterrupt`（[types.py:851](langgraph-main/libs/langgraph/langgraph/types.py#L851)），同 `thread_id` + `Command(resume=...)` 恢复、节点重放；time-travel 用 `get_state`/`update_state`。**跨进程恢复不需 Server**：任意进程 + 同一 sqlite + `thread_id`；`AsyncSqliteSaver`（[aio.py:38](langgraph-main/libs/checkpoint-sqlite/langgraph/checkpoint/sqlite/aio.py#L38)）嵌 FastAPI  |
 | deepseek-harness | 高（会话级） | append-only 事件日志（`session.jsonl.zstd`），存 `tool/call`、`tool/result`、`request/header`（配置+工具 schema 快照）；LLM 历史不单独存，`deriveMessages()` 从日志投影（[session/src/index.ts:724](deepseek-harness-master/packages/core/session/src/index.ts#L724)）；强一致 checkpoint 三个时机：每次模型请求前/每个工具副作用前/agent 每步前（[checkpoint-policy/src/index.ts:63](deepseek-harness-master/packages/session/session-checkpoint-policy/src/index.ts#L63)）；崩溃修复 `interruptedTurnClosers()` 把未闭合 turn 补合成错误 `tool/result`（[repair.ts:28](deepseek-harness-master/packages/core/session/src/repair.ts#L28)）。**局限**：`LocalJobRegistry` 纯内存，后台子进程重启即失 |
 
-**共同边界（决定成败）**：checkpoint 存的是图内/会话内状态，**不感知外部 Slurm job**。进程在 `run_sr` 工具执行中崩溃 → 重放会重跑该节点 = 重复提交 job。必须把 `job_id/状态` 幂等存入 state 或 SQLite 任务表，恢复时先查 squeue/sacct 再决定重跑或续查。这一层与选型无关，自研和 langgraph 都要写。
+**共同边界（决定成败）**：checkpoint 存的是图内/会话内状态，**不感知外部 job**。进程在 `run_sr` 工具执行中崩溃 → 重放会重跑该节点 = 重复提交 job。必须把 `job_id/状态` 幂等存入 state 或 SQLite 任务表，恢复时先向执行器查状态（本机直跑查进程与判定文件；调度存量查 squeue/sacct）再决定重跑或续查。这一层与选型无关，自研和 langgraph 都要写。
 
 ### 3.4 业务适配性
 
@@ -86,7 +86,7 @@ invoke(...) → 节点执行 → put_writes(中间写) → _put_checkpoint(每su
 
 1. **M1（秒级验证闭环）**：维持现状决策——不引任何库。自写状态机 + `contract.py` 工具契约。工具串行阻塞 + 退出码判定，无需图路由。断点恢复用 SQLite 消息持久化（任务表本就计划 SQLite）。
 2. **M3（生产端到端 / 跨小时断点确认后）**：上 LangGraph，仅作编排薄层替换（非重写）。`AsyncSqliteSaver` 嵌 FastAPI，`interrupt` 做人审，`Command` 恢复。省掉"每步自动 checkpoint（含 pending writes）+ interrupt/恢复原语 + time-travel"，这些自写最难做对。
-3. **必写层（现在就该设计）**：Slurm job 外部副作用幂等层。`job_id` 写入任务表，恢复时先查 squeue/sacct。建议 `backend/services/runner.py`（或对应任务表）按可幂等恢复设计。
+3. **必写层（现在就该设计）**：外部 job 副作用幂等层。`job_id` 写入任务表，恢复时先向执行器查状态。建议 `backend/services/runner.py`（或对应任务表）按可幂等恢复设计。
 4. **deepseek-harness**：不移植。仅借鉴设计（见 §6）。
 
 ---

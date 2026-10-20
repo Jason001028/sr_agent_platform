@@ -5,8 +5,12 @@ a crash — the tool wrapper turns it into err() and the agent reports it,
 never believing the job ran. The command runner is injectable (run_cmd=) so
 tests can feed canned sbatch/squeue output without a scheduler.
 
-How a job's state is resolved (slurm-integration.md §一, "C 方案")
-----------------------------------------------------------------
+⚠️ Frozen legacy since 2026-09-14: the production route is the local executor
+(services/local_exec.py, SR_EXECUTOR=local). Kept as a retained branch; see
+docs/status/current-question.md §2 and docs/status/sr-local-execution.md.
+
+How a job's state is resolved (docs/status/sr-local-execution.md §2.3)
+----------------------------------------------------------------------
 The array server runs with `AccountingStorageType=accounting_storage/none`.
 `sacct` therefore prints "Slurm accounting storage is disabled" and exits 1 —
 there is no output to parse, ever — while `squeue` works fine and only knows

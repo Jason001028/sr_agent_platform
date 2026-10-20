@@ -45,15 +45,16 @@
 ## 2. 当前路线
 
 - **SR 提交 = 本机 conda 直跑**（2026-09-14 定，`SR_EXECUTOR=local`）：后端在 node81-135 上用 SR 生产
-  conda 解释器直接起进程，读锁定目录里已有的 `.tif` 与 `<目录名>_mask.tif`，产物写回同目录。
-  `sbatch` 换 `bash`，配置 XML / 审计段 / 契约校验器 / 退出码文件整套原样复用。
-  工作单见 [sr-minimal-prototype-plan.md](../planning/sr-minimal-prototype-plan.md)。
-- **作业终态读退出码文件**，不读 `sacct`（真机 `AccountingStorageType=none`，`sacct` 永久不可用）。
+  conda 解释器直接起 bash 子进程，读锁定目录里已有的 `.tif` 与 `<目录名>_mask.tif`，产物写回同目录。
+  配置 XML / 审计段 / 契约校验器 / 退出码文件整套原样复用。整条链与运行期规则见
+  [sr-local-execution.md](sr-local-execution.md)，工作单见
+  [sr-minimal-prototype-plan.md](../planning/sr-minimal-prototype-plan.md)。
+- **作业终态读退出码文件**，不读调度器账务（真机 `AccountingStorageType=none`，`sacct` 永久不可用）。
   退出码 0 不等于成功；契约不满足时校验器以退出码 90 结束。
-- **Slurm 冻结**（2026-09-14 中止）：单卡分配改用 `CUDA_VISIBLE_DEVICES` 即可，无需调度。
-  代码分支、部署变体、校验器、验收清单保留为存量，重启时从
-  [slurm-acceptance.md](slurm-acceptance.md) 接着跑。⚠️ 仓库默认值 `SR_DEFAULT_EXECUTOR` 仍为 `"slurm"`
-  （[config.py](../../backend/config.py)），真机靠 env 覆盖。
+- **调度器路线冻结**（2026-09-14 中止）：单卡用 `CUDA_VISIBLE_DEVICES` 绑定即可，无需调度。
+  `backend/services/slurm.py`、`SR_SLURM_*` 环境变量与 `SR_EXECUTOR=slurm` 分支保留为存量，
+  上线路线不读。⚠️ 仓库默认值 `SR_DEFAULT_EXECUTOR` 仍为 `"slurm"`
+  （[config.py](../../backend/config.py)），真机靠 env 覆盖为 `local`。
 - **LLM 走 OpenAI 兼容接口**（`SR_LLM_BASE_URL` / `_API_KEY` / `_MODEL`），底座未定，内网尚无可用端点。
   未配端点时用 `SR_LLM_MOCK=1` 的固定脚本跑通链路。
 - **数据来源两棵树**：
@@ -228,13 +229,13 @@
 
 ### 6.3 测试基线
 
-**2026-09-28 全套重跑（全部绿）**：
+**2026-10-20 全套重跑（全部绿）**：
 
-- 后端：**735 passed / 5 skipped / 130 subtests**（`python -m pytest backend/`，21.7s；09-24 为
-  720 —— 本轮「一键解析」相关的路径/命名/候选清单用例净增 15 条）。
-- 前端：**424 passed** + `vue-tsc --noEmit` 零错误 + `npm run build`（Vitest，17 个文件；09-24
-  为 393 —— 新增 `qcbatch.test.ts` 29 条纯逻辑，`queue.test.ts` 40 条含本轮新增的
-  `pagehide`/`pageshow` 收流用例）。
+- 后端：**767 passed / 5 skipped**（`python -m pytest backend/`，94.8s；09-28 为
+  735 passed / 5 skipped / 130 subtests —— 差额（+32）来自本分支已合入的改动，未逐条归因）。
+- 前端：**444 passed**（Vitest，21 个文件）+ `vue-tsc --noEmit` 零错误 + `npm run build` 通过；
+  09-28 为 424 passed / 17 个文件。已确认的新增：`agentContext.test.ts` 的
+  `splitAgentPayload` 3 条（2026-10-20）。
 - 浏览器回归（`.e2e/`，先 `cd frontend && npm run build`）：
   `test-scenes.js` **132** · `test-vue-viewer.js` **190** · `test-manual-scene.js` **296**
   （09-24 为 214 —— 新增 M 段「一键解析」整段：按序入列 / 两卡同序号 / 懒卡不带像素 /

@@ -18,7 +18,7 @@ import type { ChatMsg } from '../stores/chat.js';
 import MarkdownBody from './MarkdownBody.vue';
 import ThinkingIndicator from './ThinkingIndicator.vue';
 import {
-  CTX_DIVIDER, agentPayload, buildContextNote,
+  agentPayload, buildContextNote, splitAgentPayload,
 } from '../lib/agentContext.js';
 import type { ViewerContextSnap } from '../lib/agentContext.js';
 import { roiOrigGeom } from '../lib/roiStats.js';
@@ -79,9 +79,8 @@ function msgKey(m: ChatMsg, i: number): string {
 }
 /** 用户消息按 CTX_DIVIDER 切：上面是原话，下面是自动附的只读上下文。 */
 function parts(content: string): { q: string; note: string } {
-  const i = content.indexOf(CTX_DIVIDER);
-  if (i < 0) return { q: content, note: '' };
-  return { q: content.slice(0, i).replace(/\s+$/, ''), note: content.slice(i + CTX_DIVIDER.length).trim() };
+  const { question, note } = splitAgentPayload(content);
+  return { q: question, note };
 }
 function toolNames(m: ChatMsg): string {
   return (m.toolCalls ?? []).map((t) => t.name).join(', ') || '未知工具';

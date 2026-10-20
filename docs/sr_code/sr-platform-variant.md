@@ -1,14 +1,16 @@
-# SR 生产脚本 · Slurm 部署变体差异表
+# SR 生产脚本 · 平台部署变体差异表
 
 > 日期：2026-09-10 · 状态：**已定**（随生成器 v1.0.0 发布）· 读者：接手 Agent 窗口 + 运维
-> 前置：[docs/status/slurm-integration.md](../status/slurm-integration.md) §2.2（E1–E9 逐条行锚点）、[sr-pipeline-interface.md](sr-pipeline-interface.md) v1.4（唯一调用契约）
+> 前置：[docs/status/sr-local-execution.md](../status/sr-local-execution.md)（当前执行路线）、[sr-pipeline-interface.md](sr-pipeline-interface.md) v1.4（唯一调用契约）
 > 本文档为静态映射表：**不含生成时间戳**，变体的可复现性由 `provenance.json` + `--check` 保证。
+> 变体文件名沿用历史命名 `code_0817_prod_slurm.py`；它解决的问题（硬编码选卡、数物理卡、停节点服务、静默退出）
+> 在本机直跑下同样存在，与是否使用调度器无关。
 
 ## 1. 一句话总结
 
-`SR_code/code_0817_prod.py` 逐字节不动，作为唯一真源；Slurm 部署用的可运行版本由 [SR_code/tools/gen_slurm_variant.py](../../SR_code/tools/gen_slurm_variant.py) 按锚点替换表**机械产出**到 `SR_code/variants/`。本文档是那张替换表的可读版本。
+`SR_code/code_0817_prod.py` 逐字节不动，作为唯一真源；平台部署用的可运行版本由 [SR_code/tools/gen_slurm_variant.py](../../SR_code/tools/gen_slurm_variant.py) 按锚点替换表**机械产出**到 `SR_code/variants/`。本文档是那张替换表的可读版本。
 
-为什么不是「复制一份改改」：原脚本里有 4 处会直接让 Slurm 作业失败或污染集群的代码（硬编码选卡、数物理卡、停 slurmd、静默退出）。手改副本无法审计，也无法在真源更新后被可靠地重构。锚点替换把「改了什么、为什么改」变成可 diff、可校验、可复现的产物。
+为什么不是「复制一份改改」：原脚本里有 4 处会直接让作业失败或污染节点的代码（硬编码选卡、数物理卡、停节点服务、静默退出）。手改副本无法审计，也无法在真源更新后被可靠地重构。锚点替换把「改了什么、为什么改」变成可 diff、可校验、可复现的产物。
 
 ## 2. 产物与复现
 
@@ -36,13 +38,13 @@ python SR_code/tools/gen_slurm_variant.py --check  # 只比对；过期 exit 1
 | # | 真源位置 | 原代码 | 变体改为 | 理由 |
 |---|---|---|---|---|
 | **E1** | `code_0817_prod.py:27` | 模块级 `lib = npct.load_library(...)`，无保护 | 包 `try/except Exception`，兜底 `lib = None` | 缺 `.so` 时进程在 **import 期**崩溃，且崩在任何日志写出之前，报错无法定位。对照 `code_0820_prod_windows.py:25-28` |
-| **E2** | `:146` | `os.environ['CUDA_VISIBLE_DEVICES'] = "0"` | 删除，改为注释说明由 Slurm 注入 | 无条件覆盖会抹掉 `--gres=gpu:1` 的分配结果，所有作业挤物理卡 0 |
-| **E3** | `:147` | `gpuid = '0'` | 从 env 取首个设备并 `int()`，失败兜底 `'0'` | `gpuid` 只用于日志与 `pynvml` 打印（**物理**索引）。Slurm 可能注入 UUID / MIG 形态，`:624`、`:178` 的 `int(gpuid)` 会 ValueError 崩掉 |
+| **E2** | `:146` | `os.environ['CUDA_VISIBLE_DEVICES'] = "0"` | 删除，改为注释说明由执行器注入 | 无条件覆盖会抹掉执行器（本机直跑是 `local_exec`）按 `SR_LOCAL_GPU` 注入的可见卡，所有作业挤物理卡 0 |
+| **E3** | `:147` | `gpuid = '0'` | 从 env 取首个设备并 `int()`，失败兜底 `'0'` | `gpuid` 只用于日志与 `pynvml` 打印（**物理**索引）。执行器可能注入 UUID / MIG 形态，`:624`、`:178` 的 `int(gpuid)` 会 ValueError 崩掉 |
 | **E4** | `:644` | `os.environ['CUDA_VISIBLE_DEVICES'] = "1"` | 同 E2 | 同 E2（在 `__main__` 的守卫里） |
 | **E5** | `:646-648` | `pynvml.nvmlInit()` + `nvmlDeviceGetCount()` | `gpu_count = torch.cuda.device_count()` | nvml 数**物理卡**、无视 `CUDA_VISIBLE_DEVICES`，4 卡节点恒为 4；要数的是「本作业看得见的卡」 |
 | **E6** | `:653` | `if gpu_available is False or gpu_count != 4:` | `if gpu_available is False or gpu_count < 1:` | 单卡分配下 `!= 4` 恒真 → **作业必失败**。对照 `code_0820_prod_windows.py:717` 的 `< 1` |
-| **E7** | `:655-656` | `cmd = "systemctl stop slurmd.service"` + `os.system(cmd)` | 删除，改为注释说明不得停节点守护进程 | 作业里停节点调度器：`User=nginx` 下权限拒绝（作业白挂）；若服务是 root 则**真把节点从池里摘掉** |
-| **E8** | `:660` | 写 `SlurmStopLog.txt` 时措辞 `"{:s} stop {:s}"` | 改为 `"{:s} gpu-error {:s}"` | 不再停服务后，写 `stop` 会让运维误判节点已下线 |
+| **E7** | `:655-656` | `cmd = "systemctl stop slurmd.service"` + `os.system(cmd)` | 删除，改为注释说明不得停节点守护进程 | 作业里停节点服务：`User=nginx` 下权限拒绝（作业白挂）；若是 root 则**真把节点从集群里摘掉**。本机直跑同样不允许作业动服务 |
+| **E8** | `:660` | 写 `SlurmStopLog.txt` 时措辞 `"{:s} stop {:s}"` | 改为 `"{:s} gpu-error {:s}"` | 不再停服务后，写 `stop` 会让运维误判节点已下线（文件名沿用历史） |
 | **E9** | `:159-160` | `if cloudpercent > cloudlimit: exit(0)` | 先建 SRLOG 并写 `Run skipped:` 终态行，再 `exit(0)` | 合法「按策略跳过」发生在创建 SRLOG（`:165`）**之前** → 与静默失败无法区分，会被闭环固化成成功 |
 
 ### 3.1 E3 的兜底形状
@@ -55,7 +57,7 @@ except (ValueError, TypeError):
     gpuid = '0'
 ```
 
-只读取、不赋值。形如 `"0"` / `"0,1"` 时取整数；形如 `GPU-xxxx`（UUID）或 `MIG-...` 时兜底为 `'0'`——`gpuid` 的消费方（`util.py` 的 `pt_process` / `write_print_gpu_mem_info` / `write_print_nvsmi`）只把它当**物理卡号**用于打印，赋 0 不影响推理（推理设备由 `CUDA_VISIBLE_DEVICES` 的可见集合决定）。`probe_slurm.sh --deep` 会把真机注入形态打出来，据此可复核这段兜底是否够用。
+只读取、不赋值。形如 `"0"` / `"0,1"` 时取整数；形如 `GPU-xxxx`（UUID）或 `MIG-...` 时兜底为 `'0'`——`gpuid` 的消费方（`util.py` 的 `pt_process` / `write_print_gpu_mem_info` / `write_print_nvsmi`）只把它当**物理卡号**用于打印，赋 0 不影响推理（推理设备由 `CUDA_VISIBLE_DEVICES` 的可见集合决定）。真机日志里的 `CUDA_VISIBLE_DEVICES=` 一行为实际注入形态，据此可复核这段兜底是否够用。
 
 ### 3.2 E9 的终态行
 
@@ -87,19 +89,19 @@ if cloudpercent > cloudlimit:
 
 ## 5. 本批未覆盖、已登记的风险
 
-以下三条在 [slurm-integration.md](../status/slurm-integration.md) §2.4 已核实，**三条均不在变体范围内、本轮不修**。
+以下三条在 [sr-pipeline-interface.md](sr-pipeline-interface.md) §2.4 已登记，**三条均不在变体范围内、本轮不修**。
 2026-09-10（P3）已把它们作为「已知语义」回填进调用契约 [sr-pipeline-interface.md](sr-pipeline-interface.md) **§2.4**，
 调用方按契约「规避方式」一列自行处理：
 
 | 项 | 现象 | 归属 / 处置 |
 |---|---|---|
 | 空 `suffix` 覆盖语义 | `suffix=""` ⇒ 输出名 == 输入名 ⇒ 输出路径上的那个文件就是输入 ⇒ 输入被 `rename` 成 `*_NOSR.tif` | 平台 REST 入口 `_norm_sr_params` 空值回落到默认 `sr`、非法值 400，走不到这条；**agent 工具 `backend/tools/run_sr.py` 不校验 suffix、默认恰是 `""`**，能走到。契约 §2.4 第 1 条；**验收与生产一律传非空 suffix** |
-| `sacct` 解析不可用 | 真机 `AccountingStorageType=accounting_storage/none` ⇒ `sacct` 恒返回非 0 且无输出；即便账务开启，`--format=State%20,ExitCode%10` 在状态串含空格时（如 `CANCELLED by 1000`）`split()` 也会错位 | 契约 §2.4 第 2 条；**终态改由退出码文件判定**（本文件 §6.3），`backend/services/slurm.py` 的 `sacct_status` 在真机路径上不再使用（仅假调度器/离线测试保留） |
+| 调度器账务不可用（历史） | 真机 `AccountingStorageType=accounting_storage/none` ⇒ `sacct` 恒返回非 0 且无输出；即便账务开启，状态串含空格时（如 `CANCELLED by 1000`）`split()` 也会错位 | 契约 §2.4 第 2 条；**终态一律由判定文件决定**（本文件 §6.3）。当前本机直跑不查 `sacct` |
 | 对已超分场景会再超分一遍 | `util.py:1009-1011` 的 `exit()` 被注释掉，函数只打印 `already SRed before` 后返回原路径，不是幂等跳过 | 契约 §2.4 第 3 条；真重跑，非本次修复范围；调用方提交前自行判重 |
 
 ## 6. 运行期（P2）：批脚本 + 契约校验器 + 上机必验项
 
-变体解决的是「脚本在 Slurm 作业里跑不跑得通」；这一节解决的是「跑完了算不算成功」。
+变体解决的是「脚本在作业环境里跑不跑得通」；这一节解决的是「跑完了算不算成功」。
 两者合起来才是 §1 说的闭环：变体不再静默 `exit(0)`，校验器不再让静默失败被固化成成功。
 
 ### 6.1 契约校验器 `verify_sr_run.py`
@@ -136,10 +138,13 @@ tiftype 从 `<OPT>` 指的 yml 顶层 `tiftype`/`tif_type` 读，缺省 `.tif`�
 一律收敛成「契约不满足 + stderr 说明缺哪条」，绝不半路死掉——校验器死掉等于没有退出码文件，
 而「没有退出码文件」与「作业根本没跑」无法区分。
 
-### 6.2 批脚本（`run_sr.build_batch_script`）
+### 6.2 运行脚本（`run_sr.build_batch_script`）
+
+脚本由 `local_exec` 用 `bash <script>` 直接执行；`#SBATCH` 行对 bash 只是注释，
+配置组装、审计段、校验器、判定文件整套照用。
 
 ```
-#SBATCH --gres=gpu:1            （E2/E4 之后选卡唯一来源）
+#SBATCH --gres=gpu:1            （历史调度器字段；本机直跑忽略）
 #SBATCH --job-name=run_sr_<suffix>
 #SBATCH --time / --cpus-per-task / --output / --error
 #SBATCH --export=NONE
@@ -155,12 +160,12 @@ cd <SR_BUNDLE_DIR> || { …; exit 1; }
 
 刻意不做的两件事：**不加 `set -e`**（与中段的 `||`、管道交互微妙，会在真正需要
 「失败也继续跑校验器」时提前退出）；**脚本内不出现任何 `CUDA_VISIBLE_DEVICES` 赋值**
-（只有审计段的只读取值）——E2/E4 的教训是任何赋值都会抹掉 `--gres` 的分配结果。
+（只有审计段的只读取值）——E2/E4 的教训是任何赋值都会抹掉执行器注入的可见卡。
+本机直跑时由 `local_exec` 按 `SR_LOCAL_GPU` 设置该变量；`SLURM_*` 行留空只作日志兼容。
 
-### 6.3 作业终态：退出码文件（C 方案）
+### 6.3 作业终态：判定文件
 
-真机 `AccountingStorageType=accounting_storage/none`，`sacct` 恒 rc=1、**永久不可用**，
-`squeue` 只认活跃作业。所以终态由校验器写盘、平台读盘：
+终态由校验器写盘、平台读盘，不依赖任何调度器账务：
 
 ```
 <DatarootLQ>/Debug/_SREXIT_<job_id>.txt
@@ -169,7 +174,7 @@ cd <SR_BUNDLE_DIR> || { …; exit 1; }
 
 与 SRLOG 同目录；文件名按 **job_id** 区分，避免同一场景的两次提交互相读错结论。
 路径由一个约定锁死：校验器写它、`run_sr.exit_code_file_for()` 从 config.xml 反推它、
-`slurm.job_status()` 读它，`backend/tests/test_sr_verify.py::NamingContractTests`
+`local_exec.status()` 读它，`backend/tests/test_sr_verify.py::NamingContractTests`
 断言两侧一致。平台侧的映射是 `verdict==0 → COMPLETED`、`verdict!=0 → FAILED`
 （**退出码 0 但契约不满足，算失败而不是成功** —— §2.3 毒药的正面修复）。
 
@@ -177,12 +182,12 @@ cd <SR_BUNDLE_DIR> || { …; exit 1; }
 
 | # | 项 | 判据 | 不过怎么办 |
 |---|---|---|---|
-| V1 | **`--export=NONE` 是否切断 `LD_LIBRARY_PATH`** | 作业 `.err` 里有没有 import torch / GDAL / cv2 的 `ImportError: libXXX.so` 或 `OSError`。torch1.9.1+cu111 与 GDAL 都链系统库，而 `--export=NONE` 会把提交端的整个环境**包括 `LD_LIBRARY_PATH`** 一起丢掉 | **一行改动**：`build_batch_script` 里 `"#SBATCH --export=NONE"` → `"#SBATCH --export=ALL"`（`run_sr.py` 内唯一那一处），重跑 `pytest backend/tests/test_run_sr.py` |
+| V1 | **SR 解释器能否导入依赖** | 日志里有没有 import torch / GDAL / cv2 的 `ImportError: libXXX.so` 或 `OSError`。本机直跑继承 `LD_LIBRARY_PATH`，但 `local_exec` 会清掉 `VIRTUAL_ENV` / `PYTHONHOME` / `PYTHONPATH`，改用 `SR_PYTHON` 自己的环境 | 先 `sudo -u nginx <SR_PYTHON> -c "import torch, osgeo"`；仍失败再查 conda 环境与系统库 |
 | V2 | 退出码文件真的落盘 | 作业跑完后 `ls <DatarootLQ>/Debug/_SREXIT_<job_id>.txt`；内容 `verdict=0` | 看 `.err` 里 `verify_sr_run: 无法写退出码文件` → 作业用户对 `<lq_path>/Debug/` 没有写权限 |
 | V3 | 平台没白等 | `/api/queue` 上该任务从 RUNNING → COMPLETED（**不是一直 UNKNOWN**） | UNKNOWN 表示平台反推的路径与作业写的对不上：核对 config.xml 的 `DatarootLQ` 与作业实际的 `lq_path` |
-| V4 | GPU 审计段有内容 | `.out` 里 `CUDA_VISIBLE_DEVICES=` 与 `gpu <idx>, <uuid>` 行非空 | 空 ⇒ `--gres` 没给卡或注入形态是 UUID/MIG，见探针 `--deep` |
-| V5 | 两套写权限 | nginx 能写 `SR_SLURM_WORK_DIR`（config.xml/脚本）；作业用户能写 `<lq_path>` 与 `<lq_path>/Debug/` | §2.6；用 `sudo -u nginx touch <dir>/x` 直接验 |
-| V6 | `SR_SLURM_WORK_DIR` 是共享盘 | `sinfo -N` 节点数 > 1 时，该目录在任意计算节点上都存在 | 默认 `/tmp/sr_agent_work` 是**本机**路径，多节点下作业秒挂 |
+| V4 | GPU 审计段有内容 | `.out` 里 `CUDA_VISIBLE_DEVICES=` 与 `gpu <idx>, <uuid>` 行非空 | 空 ⇒ `SR_LOCAL_GPU` 没生效或注入形态是 UUID/MIG，查 `local_exec._child_env` |
+| V5 | 写权限 | nginx 能写 `SR_SLURM_WORK_DIR`（config.xml/脚本）与 `<lq_path>`、`<lq_path>/Debug/` | 用 `sudo -u nginx touch <dir>/x` 直接验 |
+| V6 | 单槽单进程 | 同一时刻只有一个 SR 子进程；`ps -ef` 里没有并行的第二份 | 有并行 ⇒ sr-api 起了多个 worker，或有人手工起了一份 |
 
 ## 7. 怎么校验这份变体
 
@@ -201,9 +206,8 @@ python SR_code/tools/gen_slurm_variant.py --check      # 逐字节新鲜度
 
 ## 8. 关联
 
-- 决策与分批计划：[docs/status/slurm-integration.md](../status/slurm-integration.md)
-- 调用契约：[sr-pipeline-interface.md](sr-pipeline-interface.md) **v1.5**（退出码 90 与云量跳过终态已回填至 §2.3；三条已知语义见 §2.4；`--gres` 选卡决议见 §7.1/§9）
-- 真机分阶段验收：[docs/status/slurm-acceptance.md](../status/slurm-acceptance.md)（A 探针 → B 裸 Slurm 冒烟 → C 单场景真 SR → D 平台四条链路结论；§0.2 是变体的上机安装位置）
-- 部署侧总览：[deploy/README.md](../../deploy/README.md) §七「Slurm 接入」
-- 只读探针：[deploy/slurm/probe_slurm.sh](../../deploy/slurm/probe_slurm.sh)（上机确认分区 / GRES / 记账 / 路径 / 权限）
-- 生成器：[SR_code/tools/gen_slurm_variant.py](../../SR_code/tools/gen_slurm_variant.py)
+- 当前执行路线与运行期规则：[docs/status/sr-local-execution.md](../status/sr-local-execution.md)
+- 调用契约：[sr-pipeline-interface.md](sr-pipeline-interface.md) **v1.5**（退出码 90 与云量跳过终态已回填至 §2.3；三条已知语义见 §2.4）
+- 真机验收：[docs/status/real-machine-acceptance.md](../status/real-machine-acceptance.md)
+- 部署侧总览：[deploy/README.md](../../deploy/README.md) §七「本机执行 SR」
+- 生成器：[SR_code/tools/gen_slurm_variant.py](../../SR_code/tools/gen_slurm_variant.py)（文件名沿用历史）

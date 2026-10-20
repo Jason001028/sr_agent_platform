@@ -45,7 +45,7 @@ SR_DEFAULT_BUNDLE_DIR = "/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mms
 #: Local scratch by default — fine on a single node, WRONG on a multi-node
 #: partition: a batch script/config.xml written here does not exist on the node
 #: that runs the job. Must point at shared storage whenever `sinfo -N` shows
-#: more than one node (docs/status/slurm-integration.md §2.6).
+#: more than one node (docs/status/timeline-archive.md, 2026-09 scheduler probing).
 SR_DEFAULT_WORK_DIR = "/tmp/sr_agent_work"
 
 #: Options yml passed as <OPT>; carries scale/tile size and tif_type.
@@ -63,7 +63,8 @@ SR_DEFAULT_PYTHON = "python"
 #: No default node list: unset means "let the scheduler decide" (the behaviour
 #: every cluster had before 2026-09-14). SR_SLURM_NODELIST exists because the
 #: `gpu` partition spans two node families and one of them (node104-*) cannot be
-#: resolved from the submitting host — see docs/status/slurm-acceptance.md §B0.
+#: resolved from the submitting host — see docs/status/timeline-archive.md
+#: (2026-09 node probe). These knobs only affect the frozen scheduler branch.
 SR_DEFAULT_SLURM_TIME = "02:00:00"
 SR_DEFAULT_SLURM_CPUS = 4
 SR_DEFAULT_SLURM_GRES = 1

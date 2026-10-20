@@ -7,7 +7,7 @@
 > [real-machine-bringup-adhd.md](real-machine-bringup-adhd.md)（动作版）、
 > [deploy/README.md](../../deploy/README.md)（部署手册）。
 > 真机配置与仓库默认值的偏差表在 [current-question.md](current-question.md) §6。
-> 阶段 5 调度验收的分步命令与四条链路结论，细节以 [slurm-acceptance.md](slurm-acceptance.md) §D 为准。
+> 本机执行 SR 的链路与运行期规则见 [sr-local-execution.md](sr-local-execution.md)。
 >
 > 图例：`[x]` 已完成（附实测记录）· `[ ]` 待勾 · `⏱` 参考耗时 · `✓=` 成功标准 · `记录:` 实测值 · `~~作废~~` 判据已失效。
 
@@ -83,35 +83,35 @@
   顺带把**真机上那份的实际名字**记下来：看 `/api/scenes/<id>/siblings` 的 `nosrCandidates` 与命中的
   `name`，据此校准候选顺序（[preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md) §4.11）· 记录:
 
-## D 阶段 5 调度验收（真调度 · `SR_SLURM_FAKE=0`）
+## D 本机直跑 SR 验收（`SR_EXECUTOR=local`）
 
-> **状态：随 Slurm 冻结（2026-09-14 路线中止），未执行。** 本节保留为重启 Slurm 时的存量，
-> 重启后先读本节的 ⚠️ 判据与 [slurm-acceptance.md](slurm-acceptance.md) §D 再动手。
+> 执行器是 sr-api 自己起 bash 子进程，没有调度器；作业**就地**跑在用户填的 `lq_path`，目录会被写入。
+> 链路、单槽串行、重启与 UNKNOWN 的规则见 [sr-local-execution.md](sr-local-execution.md)。
 >
-> ⚠️ **判据已改（09-10，取代 squeue / sacct）**：真机 `AccountingStorageType=none`，`sacct` 永久不可用。
-> 终态一律读作业写的**退出码文件** `<DatarootLQ>/Debug/_SREXIT_<job_id>.txt`
-> （`verdict=0` → COMPLETED；其中 `skip=1` 的云量跳过也是 COMPLETED；`verdict!=0` → FAILED）。
-> **进程退出码 0 不等于成功。** 该判据对本地执行器同样适用。
-> 分步命令 + 四条链路结论（静默失败不被标成成功 / 幂等回归 / 云量跳过 / SSE）见
-> [slurm-acceptance.md](slurm-acceptance.md) §D。
+> ⚠️ **终态读判定文件** `<lq_path>/Debug/_SREXIT_<job_id>.txt`：`verdict=0` → COMPLETED
+> （其中 `skip=1` 的云量跳过也是 COMPLETED）；`verdict!=0` → FAILED。**进程退出码 0 不等于成功。**
 
-- [ ] **前置：装变体 + 九项 env**（⏱30′）· 按 [deploy/README.md](../../deploy/README.md) §7.1：变体与
+- [ ] **前置：装变体 + env**（⏱30′）· 按 [deploy/README.md](../../deploy/README.md) §7.1：变体与
   `verify_sr_run.py` **并置**在 `$SR_BUNDLE_DIR`（**不覆盖** `code_0817_prod.py`，靠 `SR_SR_SCRIPT` 指过去），
-  核对九项 env。✓= `head -3 code_0817_prod_slurm.py` 见 `GENERATED FILE` 横幅、`code_0817_prod.py`
-  未被改动；`probe_slurm.sh` 除 sacct 两行外无 FAIL · 记录:
-- [ ] **真实提交 + 推进**（⏱20′）· `/queue` 手填 `lq_path` + 非空 `suffix` 提交。配了 `SR_SANDBOX_ROOT`
-  可直接填生产路径（平台在作业第一步自建副本，生产目录只读）。✓= sbatch 起真实作业，徽标按
-  提交中 → 排队/运行中 → 完成 推进；`/api/queue` 的 `run_dataroot` 指出产物位置，其状态与退出码文件一致；
-  提交前后 `lq_path` 目录 `ls` 一致 · 记录 job_id / 耗时:
+  核对 drop-in 里的 env（`SR_EXECUTOR=local`、`SR_PYTHON`、`SR_BUNDLE_DIR`、`SR_LOCAL_GPU`，
+  清单见 [current-question.md](current-question.md) §6.1）。✓= `head -3 code_0817_prod_slurm.py` 见
+  `GENERATED FILE` 横幅、`code_0817_prod.py` 未被改动 · 记录:
+- [ ] **真实提交 + 推进**（⏱20′）· `/queue` 手填 `lq_path` + 非空 `suffix` 提交。作业直接写这个目录，
+  **没有沙箱副本**，别对着只读目录试。✓= 平台起 bash 子进程（`ps -ef` 可见 `SR_PYTHON` 起的
+  `code_0817_prod_slurm.py`），徽标按 提交中 → 排队/运行中 → 完成 推进；`/api/queue` 的
+  `run_dataroot` 指出产物位置，其状态与判定文件一致 · 记录 job_id / 耗时:
+- [ ] **单槽串行**（⏱10′）· 连投两个任务。✓= 第二个先显示 PENDING、不另起 SR 进程，
+  第一个结束后第二个才开始 · 记录:
 - [ ] **静默失败不再被标成成功**（⏱15′）· 构造一个必然缺 SRLOG 的任务（如 SC 步目录里没有 `<目录名>.tif`）。
-  ✓= 退出码文件 `verdict=90`、平台显示 **FAILED**、同参数重投返回 `SUBMITTED`（**不是** `RESUMED_COMPLETED`）· 记录:
+  ✓= 判定文件 `verdict=90`、平台显示 **FAILED**、同参数重投返回 `SUBMITTED`（**不是** `RESUMED_COMPLETED`）· 记录:
 - [ ] **幂等回归**（⏱10′）· 同参数连投两次。✓= 活跃期 `RESUMED_ACTIVE`、终态 `RESUMED_COMPLETED`，
   两次都不产生第二个 job_id · 记录:
 - [ ] **云量跳过**（⏱10′）· 提交一个 `cloud_limit` 必然触发的任务。✓= COMPLETED、SRLOG 末行 `Run skipped:`、
   再投为 `RESUMED_COMPLETED`（不被反复重投）· 记录:
-- [ ] **取消**（⏱10′）· 提交一个会排队的作业 → 点取消。✓= scancel 生效、状态变失败/取消 · 记录:
+- [ ] **取消**（⏱10′）· 提交一个运行中的作业 → 点取消。✓= 子进程停止、`ps -ef` 无残留、
+  状态变失败/取消 · 记录:
 - [ ] **重启校准**（⏱10′）· `systemctl restart sr-api` → 刷新 `/queue`。
-  ✓= 内存缓存丢失后 `GET /api/queue` 当场校准（读退出码文件），已完成作业仍显示「完成」 · 记录:
+  ✓= 内存缓存丢失后 `GET /api/queue` 当场校准（读判定文件），已完成作业仍显示「完成」 · 记录:
 
 ## E 掩码 → SR 真链 + SSE 长连
 

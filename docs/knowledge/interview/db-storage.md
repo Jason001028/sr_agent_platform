@@ -185,7 +185,7 @@
   - **异步解耦**：下单后发短信/更新搜索/通知**不阻塞主流程**；生产者不关心谁消费、消费者挂了也不影响下单。
   - **可靠投递/重试/死信/背压、事件广播（fan-out）**。
 - **别为了"高级感"上 MQ**：单机低频、无强顺序/送达需求时，MQ 引入的是**新故障面**——消息到底发没发成功、重复消费、丢消息、多一个要运维的组件。此时**一张任务表 + 状态机**更简单可靠。
-- **本仓库**：GPU 超分提交走 **SQLite 任务表 + Slurm 队列**而不是 MQ：Slurm 本身就是成熟 GPU **作业队列**（`sbatch` 排队/调度、健康检查闸门、GPU 数量不对就停），SQLite 只记任务元数据（fingerprint/job_id/status/参数），代码轮询 `squeue/sacct` 收结果；架构决策表里写得明白——"SQLite 记任务元数据，**Redis 以后需要再加**"。若将来真要事件化，再让 MQ 承载"任务完成/开始"这类事件，**先有明确需求再引组件**。
+- **本仓库**：GPU 超分提交走 **SQLite 任务表 + 执行器内的单槽串行队列**而不是 MQ：服务端按单卡、单槽串行跑，后端用一条串行队列（PENDING → RUNNING）加单槽锁就够了，调度器那一层不需要引入；SQLite 只记任务元数据（fingerprint/job_id/status/参数），代码轮询子进程与判定文件收结果；架构决策表里写得明白——"SQLite 记任务元数据，**Redis 以后需要再加**"。（早期曾走 Slurm 作业队列，2026-09-14 中止，代码留作存量。）若将来真要事件化，再让 MQ 承载"任务完成/开始"这类事件，**先有明确需求再引组件**。
 - **背熟一句**：MQ 治"峰值、解耦、广播"；任务表 + 状态机能覆盖大半异步场景且零新增运维。
 - **追问**：任务表方案的重试怎么做？——重试 = 查状态机决定"复用已有结果还是重提任务"，见第 24 题 sr_tasks 的实现；这正是"不引 MQ 也能拿到可靠语义"的实例。
 
@@ -263,12 +263,12 @@
 
 ### 24. sr_tasks 用"参数指纹 + 先查后提交 + 先记意图再执行副作用"防重复提交？★★
 
-- **答（要点）**：GPU 超分提交是**外部副作用**（`sbatch` 会真去排 GPU 跑几小时），重复提交代价极高，[run_sr.py](backend/services/run_sr.py) 里做三层防重：
+- **答（要点）**：GPU 超分提交是**外部副作用**（作业真去占卡跑几个小时），重复提交代价极高，[run_sr.py](backend/services/run_sr.py) 里做三层防重：
   - **参数指纹**：`task_fingerprint` 把参数 `json.dumps(sort_keys=True)` 规范化后做 **SHA-256**，相同参数必撞同一指纹；[store.py](backend/services/store.py) 中 `sr_tasks.fingerprint` 建了 **UNIQUE 唯一索引**，数据库层保证同指纹**只能有一行**——这就是第 6 题"唯一索引做幂等"的落地。
-  - **先查后提交**：`submit_run_sr` **在任何副作用之前**先 `get_sr_task(fp)`：若已有 job_id，就 `squeue/sacct` 查调度器——**active / COMPLETED 直接复用返回、绝不重提**；只有 FAILED/失联等终态才允许重提（`_resolve_existing`）。代码注释点明这是 **deepseek-harness repair.ts 语义："别假设副作用没发生"**。
-  - **checkpoint before side effect（先记意图、再执行副作用）**：写好 config.xml/batch 脚本后、`sbatch` 前先 `put_sr_task(status="new", job_id=None)` 提交落库，sbatch 成功后再 `update_sr_task_job(fp, job_id)` 补记。若两次写之间崩溃，留下的是 **job_id=None 的"意图行"**：恢复时 `_resolve_existing` **直接抛错"上次提交被中断、结果未知，去查 squeue，不要盲目重提"**——宁可让用户确认，也绝不重复提交 GPU 任务。
+  - **先查后提交**：`submit_run_sr` **在任何副作用之前**先 `get_sr_task(fp)`：若已有 job_id，就交给执行器查状态（本机直跑查内存进程表 + 判定文件；调度分支查 `squeue/sacct`）——**active / COMPLETED 直接复用返回、绝不重提**；只有 FAILED/失联等终态才允许重提（`_resolve_existing`）。代码注释点明这是 **deepseek-harness repair.ts 语义："别假设副作用没发生"**。
+  - **checkpoint before side effect（先记意图、再执行副作用）**：写好 config.xml/batch 脚本后、真正起进程前先 `put_sr_task(status="new", job_id=None)` 提交落库，起进程成功后再 `update_sr_task_job(fp, job_id)` 补记。若两次写之间崩溃，留下的是 **job_id=None 的"意图行"**：恢复时 `_resolve_existing` **直接抛错"上次提交被中断、结果未知，不要盲目重提"**——宁可让用户确认，也绝不重复提交 GPU 任务。（该错误文案目前仍写着 `squeue`，属调度器时代的遗留措辞，本机直跑下应改为查进程与判定文件。）
 - **背熟一句**：指纹做键、先查决定复用还是重提、意图先落库再碰外部世界——把"外部副作用"框进了可审计的状态机。
-- **追问**：为什么不能把"落库 + sbatch"包进一个 `BEGIN...COMMIT` 事务？——sbatch 是**外部系统调用**，本地 SQLite 事务**管不到外部**；所以"先写意图 → 执行外部动作 → 再补记结果"才是跨系统一致性的实现手段，失败恢复靠**状态机判断**而不是靠回滚。
+- **追问**：为什么不能把"落库 + 起进程"包进一个 `BEGIN...COMMIT` 事务？——起进程是**外部系统调用**，本地 SQLite 事务**管不到外部**；所以"先写意图 → 执行外部动作 → 再补记结果"才是跨系统一致性的实现手段，失败恢复靠**状态机判断**而不是靠回滚。
 
 ### 25. 消息按"回合前落库"，崩溃后如何恢复？★
 

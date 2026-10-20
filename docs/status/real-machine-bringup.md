@@ -11,10 +11,11 @@
 > **部署进度（2026-09-07/08 实测）**：§2 后端 + §3 nginx 均已跑通——Windows 浏览器开 `http://10.10.81.135` 可访问各页面（/viewer /scenes /chat /queue）。**遗留**：`SR_SCENES_ROOT` 默认值 `/data/scenes` 在本机**不存在** → `/api/scenes` 返回 `source:fake`（12 条 0B 占位），真实盘阵根未定位、提交 SR 端到端未验。真实根定位后按 §2.1 改 env、同步 §3.1 的 nginx `alias`（两处须同值）并重启，详见 §5 症状表「/api/scenes 返回空+fake」行；验收勾选见
 [real-machine-acceptance.md](real-machine-acceptance.md) §B。
 >
-> **Slurm 侧（09-10 第三批）**：部署变体 + 作业内校验器 + 退出码文件定终态已备齐，**上机尚未执行**——
-> 按 `docs/status/slurm-acceptance.md` 的 A→B→C→D 逐条跑，命令逐条贴、输出回传判读。注意两条与本文
-> 其余部分不同的前提：① 作业以 **nginx** 身份在计算节点上跑（`User=nginx`）；② **终态不看 `sacct`**
-> （本机账务关闭），看 `<lq_path>/Debug/_SREXIT_<job_id>.txt`。
+> **SR 执行侧（2026-09-14 起）**：部署变体 + 作业内契约校验器 + 判定文件定终态已备齐，执行方式是
+> **本机直跑**（`SR_EXECUTOR=local`）——sr-api 以自身身份起 bash 子进程，作业就地写 `lq_path`，
+> 不去计算节点、不经过调度器。链路与运行期规则见 [sr-local-execution.md](sr-local-execution.md)，
+> 勾选见 [real-machine-acceptance.md](real-machine-acceptance.md) §D。**终态不看 `sacct`**（本机账务关闭），
+> 看 `<lq_path>/Debug/_SREXIT_<job_id>.txt`。
 
 **本机固定值速查**
 
@@ -75,8 +76,8 @@ error）。venv 只借 `destriping_py39` 的解释器二进制、不共享/不�
 默认 `ExecStart` 就是 `/opt/sr-venv/bin/uvicorn`，零改动**。
 
 > 与 SR 作业环境 `torch1.9.1py36`（py3.6）是两个平行世界：平台后端不 import SR/torch/GDAL，
-> 只写批处理脚本 + `sbatch` 提交（批处理里那行解释器由 `SR_PYTHON` 决定，在作业节点侧解析，
-> 平台 python 不进作业脚本）。`torch1.9.1py36` 原样保留，别删别 clone。
+> 只写运行脚本 + 起 `bash` 子进程（脚本里那行解释器由 `SR_PYTHON` 决定，平台 python 不进作业脚本）。
+> `torch1.9.1py36` 原样保留，别删别 clone。
 
 ---
 
@@ -94,16 +95,17 @@ sed -i 's#/data/www/sr-agent-platform#/run/media/root/SSD/workspace/wangrz/sr-ag
 grep -nE 'WorkingDirectory|SR_AGENT_DB' /etc/systemd/system/sr-api.service   # 确认两行都指向 <APP>
 ```
 
-> 不用改的三样：`ExecStart`（已=`/opt/sr-venv/bin/uvicorn backend.api.app:create_app --factory
-> --host 127.0.0.1 --port 8000`）、`SR_LLM_MOCK=0`、`SR_SLURM_FAKE=0`（真机必须保持 0，勿改成 1）。
+> 不用改的两样：`ExecStart`（已=`/opt/sr-venv/bin/uvicorn backend.api.app:create_app --factory
+> --host 127.0.0.1 --port 8000`）、`SR_LLM_MOCK=0`。
 > `SR_SCENES_ROOT=/data/scenes` 先保持默认，真机数据就位后按 §5 核对。
+> ⚠️ `SR_EXECUTOR` 仓库默认值是 `slurm`，真机必须用 drop-in 覆盖成 `local`，否则会走已冻结的调度分支。
 
 > **2026-09-11 修正（`SR_AGENT_DB` 这一处上面那条 sed 是错的）**：这条 sed 会把库一起指到
 > `<APP>` 里，而 `<APP>` 属 root、`nginx` 写不动 —— 实机探针 `write-db FAIL`。库要单独放一个
 > nginx 可写的目录，且**不要**为此把整棵应用树 `chown` 给 nginx。真机改法（drop-in，不动已部署
 > 的单元正文）：`/etc/systemd/system/sr-api.service.d/20-agentdb.conf` 里
-> `Environment=SR_AGENT_DB=/DiskArray/tmp/wangrz/sr_agent_db/sr_agent.db`，详见
-> `slurm-acceptance.md §0.6`。本次部署**后补**上了这个 drop-in。
+> `Environment=SR_AGENT_DB=/DiskArray/tmp/wangrz/sr_agent_db/sr_agent.db`，同一批 drop-in 里也覆盖了
+> `SR_EXECUTOR=local`（见 [current-question.md](current-question.md) §6.1）。本次部署**后补**上了这两个 drop-in。
 
 ### 2.2 目录属主（nginx 用户要读 backend/dist；库父目录单独给写权）
 
@@ -205,29 +207,29 @@ ssh -N -L 18080:127.0.0.1:80 root@<node81-135 IP>
 | `sr-api` 一直 `217/USER`，但 `sudo -u nginx /opt/sr-venv/bin/uvicorn --version` 却能跑 | unit 里 `User=` 值后带了**同行 `#` 注释**（systemd 不支持行尾注释，用户名被读成脏名）→ `sed -i '/^User=/s/#.*//' /etc/systemd/system/sr-api.service` 后 `daemon-reload && restart`（源文件已修，deploy/sr-api.service） |
 | `sr-api` `status=1/FAILURE`，journal 报 `Unable to evaluate type annotation 'str \| None'` | venv 是 py3.9，fastapi/pydantic 解析不了 PEP604 `X \| None` 注解 → `/opt/sr-venv/bin/pip install eval-type-backport` 后 `systemctl restart sr-api`（py<3.10 必需，已进 requirements-api.txt） |
 | `sr-api` 起来又立刻挂（`activating (auto-restart)`），`curl :8000/api/health` → `000`，`ss -ltnp \| grep :8000` 空 | 新拷进 `<APP>/backend` 的文件属主是 **root**，而服务以 `User=nginx` 跑 → import 阶段就挂：`journalctl -u sr-api -n 25` 末尾是 `PermissionError: [Errno 13] Permission denied: '<APP>/backend/api/app.py'`。处置 `chown -R nginx:nginx <APP>/backend` → `systemctl restart sr-api`；**别回滚代码**，也别被 `is-active` 恰好打印的 `active` 骗了，判定看 `health=200`（2026-09-15 实测） |
-| `systemctl cat` 里有某条 `Environment=SR_*`，但 `systemctl show -p Environment` 里没有 | drop-in 文件缺 `[Service]` 段头 → systemd **静默忽略整个文件**（不报错、不警告，`cat` 照样打印那几行）。补上段头 → `daemon-reload && restart`；判定只看 `systemctl show`。2026-09-15 实测机上遗留的 `override.conf` 就是这样，`SR_EXECUTOR=local` 从未生效（本该本机直跑，实际会去 `sbatch`）→ 详见 deploy/README §5.3.1 |
+| `systemctl cat` 里有某条 `Environment=SR_*`，但 `systemctl show -p Environment` 里没有 | drop-in 文件缺 `[Service]` 段头 → systemd **静默忽略整个文件**（不报错、不警告，`cat` 照样打印那几行）。补上段头 → `daemon-reload && restart`；判定只看 `systemctl show`。2026-09-15 实测机上遗留的 `override.conf` 就是这样，`SR_EXECUTOR=local` 从未生效（本该本机直跑，实际按仓库默认走了调度分支）→ 详见 deploy/README §5.3.1 |
 | `/api/scenes` 返回空 + fake 提示 | `SR_SCENES_ROOT` 没指到真实盘阵根 → 改 service 该 env 并同步 nginx `alias`（必须同值）→ `systemctl daemon-reload && systemctl restart sr-api` |
 | 首页 404 / 无页面 | dist 缺失或 `root` 没改对 → 3.1 的 grep 复查；`ls <APP>/dist/index.html` |
 | `/api/*` 返回 502 | 后端没起或崩了 → `systemctl status sr-api` + `journalctl -u sr-api -n 50` |
 | 静态文件 403 / Failed to open file | CentOS7 SELinux 拦 nginx 读 `/run/media` → `chcon -Rt httpd_sys_content_t <APP>/dist`；反代连不上再 `setsebool -P httpd_can_network_connect 1` |
 | 80 打不开 | 防火墙未放行 → `firewall-cmd --permanent --add-service=http && firewall-cmd --reload`；或 nginx 没 reload |
 | 首次开大图很慢 | 属正常：后端懒生成 JPG（v3 起各边 ÷2…÷32、默认 ÷4，档位在查看器工具栏调；直方图均衡，读一遍大图），几十秒到数分钟，Network 里能看到 `/api/scenes/<id>/preview`；此后秒开（已落盘 + 浏览器缓存）。**换包后第一次打开也会重烤一次**（旧图缺 v3 规则签名，见 gui-experience §9.2）；若同名 JPG 被 nginx `max-age=3600` 缓存住，硬刷新一次 |
-| 探针输出里 `sacct` / `sacct-parse` 两行 **FAIL** | **预期结果，不是故障**：本机 `AccountingStorageType=accounting_storage/none`（账务关闭），`sacct` 恒返回非 0 且无输出 → 作业终态改读**退出码文件**，见 `deploy/README.md` §7.3 与 [sr-pipeline-overview.md](../sr_code/sr-pipeline-overview.md) §13.5 |
+| 探针输出里 `sacct` / `sacct-parse` 两行 **FAIL** | **预期结果，不是故障**：本机 `AccountingStorageType=accounting_storage/none`（账务关闭），`sacct` 恒返回非 0 且无输出。当前本机直跑路线**根本不查 sacct**，终态只读判定文件，见 [sr-local-execution.md](sr-local-execution.md) §2.3 |
 | 队列任务**永远 UNKNOWN**（作业明明跑完了） | 平台反推的退出码文件路径与作业写的对不上，或校验器根本写不出文件。逐层查：① `ls <lq_path>/Debug/_SREXIT_<job_id>.txt` 存不存在——不存在看作业 `.err` 有没有 `verify_sr_run: 无法写退出码文件`（作业以 **nginx** 身份跑，`<lq_path>/Debug/` 要 nginx 可写，`sudo -u nginx touch <lq_path>/Debug/w` 直接验）；② 存在但平台仍 UNKNOWN → 核对 config.xml 的 `DatarootLQ` 与作业实际工作目录是否同值（开沙箱时 `DatarootLQ` 是副本路径，`/api/queue` 的 `run_dataroot` 字段就是它）；③ 配置文件名带任务指纹，同 suffix 的不同任务已不会互相覆盖（2026-09-10 前是手写 `run_sr_<suffix>.xml`，会串；老任务若仍 UNKNOWN 请重提） |
-| 作业秒挂 / 立刻失败 | `SR_SLURM_WORK_DIR` 不是**共享盘**：config.xml 与批脚本由 API 写在这个目录，作业却落到 gpu 分区的 76 个节点之一上读它。默认 `/tmp/sr_agent_work` 是本机路径 → 改到 `/DiskArray/...` 这类共享挂载（`srun -w node81-140 ls -d <WORK>` 直接验） |
-| 作业 `exit(3)`（GPU 守卫） | 两种可能：① `$SR_BUNDLE_DIR/code_0817_prod.py` **还是原脚本**（没装部署变体）——`head -3` 应见 `GENERATED FILE — DO NOT EDIT` 横幅，装法见 `deploy/README.md` §7.1；② 变体已装但 `--gres` 没给到卡——查作业 `.out` 审计段的 `CUDA_VISIBLE_DEVICES=` 是否为空 |
-| 作业 `.err` 报 `ImportError: libXXX.so` / `OSError` | 批脚本的 `#SBATCH --export=NONE` 把提交端环境（含 `LD_LIBRARY_PATH`）一起丢了，torch1.9.1 / GDAL 链不上系统库 → `backend/services/run_sr.py` 里把它改成 `#SBATCH --export=ALL`（唯一一处），重跑 `pytest backend/tests/test_run_sr.py` 后拷 `backend/` 到 `<APP>` 并 `systemctl restart sr-api`（上机必验项 V1） |
+| 作业秒挂 / 立刻失败 | 本机直跑时先看 `<SR_SLURM_WORK_DIR>/` 下的运行脚本与子进程日志（默认 `/tmp/sr_agent_work`，该变量名是历史遗留）；作业以 sr-api 的身份跑，工作目录与 `lq_path` 都要该身份可读写。若有人把 `SR_EXECUTOR` 改回 `slurm`，才另外要求工作目录是共享盘 |
+| 作业 `exit(3)`（GPU 守卫） | 两种可能：① `$SR_BUNDLE_DIR/code_0817_prod.py` **还是原脚本**（没装部署变体）——`head -3` 应见 `GENERATED FILE — DO NOT EDIT` 横幅，装法见 `deploy/README.md` §7.1；② 变体已装但没拿到卡——查子进程日志开头的 `CUDA_VISIBLE_DEVICES=` 是否为空，以及 `SR_LOCAL_GPU` 是否填了真机上存在的卡号 |
+| 作业 `.err` 报 `ImportError: libXXX.so` / `OSError` | 本机直跑时子进程继承 sr-api 的环境（`#SBATCH` 行对 bash 只是注释，`LD_LIBRARY_PATH` 不会被丢掉），所以先怀疑解释器与环境本身：`sudo -u nginx $SR_PYTHON -c "import torch, osgeo"` 能否过、`SR_PYTHON` 是否指到 SR 生产 conda（见 [sr-local-execution.md](sr-local-execution.md) §四） |
 | 平台显示 **FAILED** 但作业退出码是 0 | 这是**预期的新行为**：契约不满足（缺 SRLOG 或末行不是 `Run finished.` 或缺输出 tif）时校验器以**退出码 90** 结束。看退出码文件的 `reason` 字段点名缺哪条——这正是以前被固化成「成功」的那批静默失败 |
-| 跑完 SR 后，填的那个盘阵目录里多出产物 tif、`Debug/` 目录与 meta.xml 更新 | **不开沙箱时的预期行为**，不是 bug：SR 把产物、`Debug/` 日志与 meta 更新写进 `DatarootLQ`（平台恒定非空 `Suffix`，所以源图不改名也不删除；只有同名的旧产物会被改名为 `*_NOSR.tif` 再覆盖）。要生产目录只读就配 `SR_SANDBOX_ROOT`（deploy/README §7.5）：每个作业先 `cp -a` 一份副本，产物落在 `<根>/<task_fingerprint 前12位>/<目录名>/`，`/api/queue` 的 `run_dataroot` 字段指出确切位置 |
-| 提交报 `SR_SANDBOX_ROOT ... rejected` | 沙箱根含空格 / 引号 / `` ` `` / `..` —— 它会拼进作业脚本里的 `rm -rf`，被白名单挡下。改成纯 `/A-Za-z0-9._-/` 的绝对路径再重启 sr-api |
+| 跑完 SR 后，填的那个盘阵目录里多出产物 tif、`Debug/` 目录与 meta.xml 更新 | **本机直跑下的预期行为，不是 bug**：SR 就地写 `DatarootLQ`（平台恒定非空 `Suffix`，所以源图不改名也不删除；只有同名的旧产物会被改名为 `*_NOSR.tif` 再覆盖）。`SR_EXECUTOR=local` 时沙箱被强制关掉（`run_sr.sandbox_scene_paths`），**配了 `SR_SANDBOX_ROOT` 也不生效** —— 「产物落在输入旁边」是这条路线的前提 |
 | 云量超阈值的任务显示 COMPLETED 且没有输出 tif | **不是 bug**：合法跳过（`Run skipped:` 终态行 + 退出码文件 `skip=1`），契约只要求 SRLOG 存在，不要求输出 tif。若它显示 FAILED，说明 `$SR_BUNDLE_DIR/verify_sr_run.py` 不是本批版本 |
 
 浏览器侧闭环：`/scenes` 打开场景出图 · 画掩码点「提交 SR」跳 `/queue` 预填 · 提交后状态徽标随
 SSE 推进。详细验收项以 [real-machine-acceptance.md](real-machine-acceptance.md) 为准，跑完把每项记录誊回并勾掉。
 
-**Slurm 作业链路**（提交 → 作业内契约校验器 → 退出码文件 → 平台判终态）的上机操作与分阶段验收
-（A 探针 / B 裸 Slurm 冒烟 / C 单场景真 SR / D 四条链路结论）见 **`docs/status/slurm-acceptance.md`**；
-部署侧（变体安装位置 + 六项 env + 两个权限坑 + 终态判定）见 **`deploy/README.md` §七「Slurm 接入」**。
+**SR 作业链路**（提交 → 本机起 bash 子进程 → 作业内契约校验器 → 判定文件 → 平台判终态）的规则见
+**[sr-local-execution.md](sr-local-execution.md)**；勾选见 [real-machine-acceptance.md](real-machine-acceptance.md) §D；
+部署侧（变体安装位置 + env + 权限 + 终态判定）见 **`deploy/README.md` §七「本机执行 SR」**。
+仓库里仍保留的调度器代码与探针是 2026-09-14 中止路线的存量，当前路线不读。
 
 ---
 
@@ -258,5 +260,5 @@ nginx（:80）─── 静态 dist 直出
                  uvicorn sr-api（User=nginx，/opt/sr-venv）
                           ├── SR_SCENES_ROOT 读盘阵 + 写预览 JPG
                           ├── SR_AGENT_DB 写 SQLite
-                          └── sbatch 提交 SR 作业 → torch1.9.1py36（独立，不碰平台 python）
+                          └── 起 bash 子进程跑 SR → torch1.9.1py36（独立，不碰平台 python）
 ```
