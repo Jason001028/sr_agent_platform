@@ -26,6 +26,8 @@ import { fitView, locateView, wheelZoom, hitRoi, thumbToOrig, visibleThumbRect,
   clampSplitRatio, splitRects, paneAtX, wheelZoomBoth, panBoth,
   remapViewForImage, easeOutCubic, lerpView } from '../lib/viewMath.js';
 import type { ViewState, Rect, PaneRect } from '../lib/viewMath.js';
+import { planShot, drawShot } from '../lib/chatShot.js';
+import type { ChatShot } from '../lib/chatShot.js';
 import {
   parseCompareMode, loadSplitRatio, saveSplitRatio, seedCompareList,
   addCompareEntry, removeCompareEntry, pruneCompareList, DEFAULT_SPLIT_RATIO,
@@ -303,6 +305,10 @@ export const useViewerStore = defineStore('viewer', () => {
   const recs = ref<ViewerRec[]>([]);
   const activeId = ref<number | null>(null);
   const canvasSize = ref({ w: 0, h: 0 });
+  /** 查看器画布此刻是否挂着（TifCanvas 挂载/卸载时写）。`canvasSize`/`view`
+   *  在 SPA 换页后**保留旧值**（store 比页面活得久），光看尺寸会把「/chat 页
+   *  点截图」误判成「还开着查看器」，于是拿上一个视口去裁。截图路径只看这个。 */
+  const canvasAttached = ref(false);
   const renderTick = ref(0);
   const marker = ref<{ tx: number; ty: number; until: number } | null>(null);
   const stretchMode = ref<StretchMode>('linear');
@@ -402,6 +408,55 @@ export const useViewerStore = defineStore('viewer', () => {
 
   function activePaneRect(): PaneRect {
     return rectForSide(activeSide.value);
+  }
+
+  function setCanvasAttached(v: boolean): void {
+    canvasAttached.value = v;
+  }
+
+  /* ---------------- 聊天截图（§3.2.1） ----------------
+     口径：**所见即所得**，且**不动用户视口**。所以这里不调 `activate` ——
+     它会把图 `placeRec` 到活动侧、把用户正在看的画面换掉，一次「加个附件」
+     不该有这种副作用。
+
+       - 图正显示在某一格（且画布挂着）→ 用**那一格自己的** view 与 rect 裁剪；
+       - 否则（在列表里但没上屏，或人在 /chat 页）→ 截整幅缩略图；
+       - 空卡（「一键解析」批量入列、只有身份没有像素）→ `loadCardPixels` 现取
+         像素（它只装像素、不换图，自带进度遮罩），再按整幅截。
+     返回 null = 截不出来（没这张图 / 取图失败），原因已由 `showErr` 说明。 */
+  async function captureForChat(recId: number): Promise<ChatShot | null> {
+    let rec = recs.value.find((r) => r.id === recId);
+    if (!rec) return null;
+
+    if (!rec.thumb && rec.card) await loadCardPixels(rec);
+    rec = recs.value.find((r) => r.id === recId);       // 取图期间可能被移除
+    if (!rec) return null;
+    if (!rec.thumb) {
+      showErr('「' + rec.name + '」还没有可截的画面');
+      return null;
+    }
+
+    const side = canvasAttached.value ? sideOfRec(recId) : null;
+    const rect = side ? rectForSide(side) : null;
+    const view = side === 'A' ? viewA.value : side === 'B' ? viewB.value : null;
+    const plan = planShot(view, rect?.w ?? 0, rect?.h ?? 0,
+                          rec.thumb.width, rec.thumb.height);
+    if (!plan) return null;
+    try {
+      return { dataUrl: drawShot(rec.thumb as unknown as HTMLCanvasElement, plan),
+               name: rec.name };
+    } catch (e) {
+      showErr('截图失败：' + (e instanceof Error ? e.message : String(e)));
+      return null;
+    }
+  }
+
+  /** 这张 rec 此刻摆在哪个格（单屏 = 活动那张；分屏 = 查两格）。 */
+  function sideOfRec(recId: number): 'A' | 'B' | null {
+    if (!split.value) return activeId.value === recId ? 'A' : null;
+    if (paneA.value === recId) return 'A';
+    if (paneB.value === recId) return 'B';
+    return null;
   }
 
   const activeRec = computed<ViewerRec | null>(() =>
@@ -2703,6 +2758,7 @@ export const useViewerStore = defineStore('viewer', () => {
   return {
     // 状态
     recs, activeId, activeRec, view, canvasSize, renderTick, marker,
+    canvasAttached, setCanvasAttached,
     stretchMode, activeStretch, drawMode, drawTool, pendingRect, pendingPts, hoverPt, hoverRoi, flashRoi,
     previewDiv,
     wandTol, merging, overlay, toast, error, modal,
@@ -2724,6 +2780,7 @@ export const useViewerStore = defineStore('viewer', () => {
     cmpStripOpen, setCmpStripOpen,
     panes, splitX, splitRatio, setSplitRatio, resetSplit,
     activeSide, setActiveSide, paneA, paneB, recForSide, rectForSide, activePaneRect,
+    captureForChat,
     fitBoth, fitSide,
     compareList, cmpListRecs, clearCompareEntry,
     dragHint, setDragHint,

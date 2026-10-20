@@ -69,7 +69,8 @@
 | `PATCH /api/chat/sessions/{id}` | 置顶/取消置顶 `{pinned}` | 3.2 |
 | `DELETE /api/chat/sessions/{id}` | 删除会话及其消息/用量/轨迹 | 3.2 |
 | `GET /api/chat/sessions/{id}/messages` | 历史消息（刷新可恢复渲染） | 3.2 |
-| `POST /api/chat/sessions/{id}/messages` | 发一条用户消息 → **SSE**（一请求一回合） | 3.2 |
+| `POST /api/chat/sessions/{id}/messages` | 发一条用户消息（可带 ≤2 张截图）→ **SSE**（一请求一回合） | 3.2 |
+| `GET /api/chat/sessions/{id}/images/{file}` | 该会话的聊天截图（`<img>` 用，JPEG） | 3.2 |
 | `GET /api/queue` | 队列列表（sr_tasks 全量 + 实时状态） | 3.3 |
 | `POST /api/queue` | 提交 SR 作业（表单=run_sr 参数，幂等） | 3.3 |
 | `POST /api/queue/{task_id}/cancel` | scancel 取消 | 3.3 |
@@ -126,16 +127,54 @@
 - `POST /api/chat/sessions` → `201 {"session_id": "…hex"}`（`store.create_session()`）。
 - `GET /api/chat/sessions` → `200 {"sessions":[{session_id, created_at, updated_at, status, pinned}]}`（置顶在前，其余按 updated_at 倒序）。
 - `PATCH /api/chat/sessions/{id}` — body `{"pinned": true|false}` → `200` 更新后的会话行。置顶**不改** `updated_at`（那是消息活动时间）；非布尔值 → 400，会话不存在 → 404。多选批量操作由前端逐条调用本端点。
-- `DELETE /api/chat/sessions/{id}` → `204`。同时删除该会话的 `messages` / `llm_usage` / `agent_runs` / `trajectory_events` / `trajectory_feedback`。回合进行中（会话锁被占用）→ `409`；会话不存在 → 404。队列任务 `sr_tasks` 不删（外部副作用的操作记录），其 `session_id` 保留为溯源线索。
+- `DELETE /api/chat/sessions/{id}` → `204`。同时删除该会话的 `messages` / `llm_usage` / `agent_runs` / `trajectory_events` / `trajectory_feedback`，以及聊天截图目录（见下）。回合进行中（会话锁被占用）→ `409`；会话不存在 → 404。队列任务 `sr_tasks` 不删（外部副作用的操作记录），其 `session_id` 保留为溯源线索。
 - `GET /api/chat/sessions/{id}/messages` → `200 {"session_id", "status", "messages":[…]}`；消息对前端投影为：
-  `{seq, role, content?, tool_calls?:[{name,arguments}] | null, tool_name?, ok?}`（role ∈ user/assistant/tool；tool 消息带 `name`/`ok`）。404 = 会话不存在。
-- `POST /api/chat/sessions/{id}/messages` — body `{"content":"<用户话术>"}`，**`Content-Type: text/event-stream`，POST 即流**。行为：
+  `{seq, role, content?, images?:[{url,name}] | null, tool_calls?:[{name,arguments}] | null, tool_name?, ok?}`（role ∈ user/assistant/tool；tool 消息带 `name`/`ok`）。`images` 只出现在带截图的历史 user 消息上；纯文字老消息不出现该字段（形状与本次改动前逐字一致）。404 = 会话不存在。
+- `POST /api/chat/sessions/{id}/messages` — body `{"content":"<用户话术>","images":[…]?}`，**`Content-Type: text/event-stream`，POST 即流**。行为：
   1. 会话存在且无并发回合 → 建占位（可复用 loop 的 `store.set_session_status(…,"active")`）→ 上锁；
   2. 线程池跑 `run_loop(cfg, content, store=…, session_id=…, resume=True, on_event=bridge)`，事件经 `asyncio.Queue` 转 SSE 帧逐条下发（`emit` 缝见 §4.2）；
   3. 结束：`turn_done`（带最终文本），**之后关流并释放会话锁**。LLM 调用/循环异常 → `error` 事件 + `HTTP` 结束后前端据 `type:"error"` 渲染失败态（SSE 已开不可改 HTTP 码）。
   - **并发**：同一 session 同时两个回合 → 立即 `409 {"detail":"会话正忙"}`（前端据此禁用发送按钮 + 显示"正在思考"）。
-  - 会话不存在 → 404。`content` 空 → 400。
+  - 会话不存在 → 404。`content` 与 `images` **至少一样非空**；两者都空 → 400。`images` 非数组或超过 2 张 → 400（都在开流前返回，见下）。
 - **前端注意**：`EventSource` 只支持 GET，故用 `fetch`（method POST）读 `response.body`（ReadableStream）手工切 SSE 帧。
+
+#### 3.2.1 聊天截图附件（2026-10-20 增 · 状态：**已定**）
+
+> 用途：把查看器里「当前可见画面」作为图片交给 Agent（OpenAI `image_url` content block）。
+> 来源是左侧影像卡片，不是文件上传；每回合至多 2 张。
+
+**请求字段**：`images: [{name, data}]`，`data` 为 base64 或完整 `data:image/jpeg;base64,…` 均可；
+`name` 只作显示与溯源，不参与任何路径。服务端**不信任**客户端给的 mime/尺寸，一律用 Pillow
+按实际字节识别并重编码。
+
+**限制与错误**：≤2 张；解码后 ≤12 MB；像素数 ≤4000 万；格式必须 Pillow 认得出。张数、形状不合法
+在拿锁前就 `400`；像素/格式类要解码才知道，在持锁期间判定，失败即释放锁再 `400`。无论哪种，
+**会话都不会被留在「正忙」**，后续重发不受影响。
+
+**落盘**：`SR_CHAT_IMAGE_DIR`（缺省 = `SR_AGENT_DB` 同目录下的 `chat_images/`）的
+`<session_id>/<uuid>.jpg`；统一转 RGB、`exif_transpose`、长边 ≤2048、JPEG q85。写盘用同目录
+临时文件 + `os.replace`，失败即清理。
+
+**落库形状**：user 消息的 `content` 变成 content block 列表；图片存**平台相对 URL**，
+`name` 挂在 block 同级（不塞进 `image_url` 对象）：
+
+```json
+{"role":"user","content":[
+  {"type":"text","text":"看看这片"},
+  {"type":"image_url","image_url":{"url":"/api/chat/sessions/<id>/images/<uuid>.jpg"},"name":"SC_xxx"}
+]}
+```
+
+纯图消息省略 `text` block；不带图的消息 `content` 仍是纯字符串（老形状、老行为）。
+
+**水合**：只有在真正调 LLM 前，`_default_chat` 才把相对 URL 换成 `data:image/jpeg;base64,…`
+并**剥掉 `name`**（兼容端只认 `type` / `image_url`）。因此 `GET messages`、SQLite、轨迹的
+`prompt` 都只有相对路径、没有 base64。文件丢失 → 该 block 降级为一条说明文字，不让整轮 500。
+`SR_LLM_MOCK=1` 的 mock 路不做水合（它不读图）。
+
+**`GET /api/chat/sessions/{id}/images/{file}`**：需会话存在（否则 404）；文件名必须是
+32 位 hex + `.jpg`，且解析后的父目录必须是本会话图片目录（否则 404）；返回 `image/jpeg`，
+`Cache-Control: private, max-age=3600`。
 
 **SSE 事件 schema（聊天）**——每帧一行 JSON：
 

@@ -13,9 +13,14 @@ import { loadSrConfig } from '../lib/scene.js';
 import {
   apiCreateSession, apiListSessions, apiSessionMessages, apiSessionUsage,
   apiChatSend, apiSubmitTrajectoryFeedback,
-  apiDeleteSession, apiSetSessionPinned,
+  apiDeleteSession, apiSetSessionPinned, chatImageUrl,
 } from '../lib/api.js';
-import type { ChatSession, ChatUsage, HistoryMsg, PlatformSseEvent, TrajectoryFeedbackRating } from '../lib/api.js';
+import type {
+  ChatImage, ChatSession, ChatUploadImage, ChatUsage, HistoryMsg,
+  PlatformSseEvent, TrajectoryFeedbackRating,
+} from '../lib/api.js';
+import { SHOT_MAX_COUNT } from '../lib/chatShot.js';
+import type { ChatShot } from '../lib/chatShot.js';
 
 /** 单条工具声明（wire tool_calls[].function → {name, arguments}）。 */
 export interface ToolUse {
@@ -33,6 +38,14 @@ export interface ChatMsg {
   ok?: boolean;                    // tool 行：成功/失败
   detail?: string;                 // tool 行：结果摘要 / 失败原因
   isError?: boolean;               // 回合级 error（LLM 失败/循环超限）
+  images?: ChatImage[] | null;     // user 行：截图附件（已带可用 src，渲染层不再换算）
+}
+
+/** 输入区里待发的截图。`dataUrl` 同时当预览源和上传体，发送后即从托盘移除。 */
+export interface PendingImage {
+  id: number;
+  dataUrl: string;
+  name: string;
 }
 
 /* ================= 纯函数（vitest 可测） ================= */
@@ -40,7 +53,10 @@ export interface ChatMsg {
 /** GET messages 一行 → 展示消息（tool 行含 detail，无则显 ok/失败）。 */
 export function msgFromHistory(h: HistoryMsg): ChatMsg {
   if (h.role === 'user') {
-    return { seq: h.seq, role: 'user', content: h.content ?? '' };
+    const images: ChatImage[] | null = h.images && h.images.length
+      ? h.images.map((im) => ({ url: im.url, name: im.name ?? null }))
+      : null;
+    return { seq: h.seq, role: 'user', content: h.content ?? '', images };
   }
   if (h.role === 'assistant') {
     const tcs = h.tool_calls
@@ -147,8 +163,29 @@ export const useChatStore = defineStore('chat', () => {
   const usage = ref<ChatUsage | null>(null);
   const lastRunId = ref<string | null>(null);
   const feedbackRating = ref<TrajectoryFeedbackRating | null>(null);
+  /** 待发截图（≤2）：从查看器加进来的，发送即清。 */
+  const pendingImages = ref<PendingImage[]>([]);
+  let pendingSeq = 0;
 
   function hasSession(): boolean { return sessionId.value !== null; }
+
+  /** 加一张待发截图；已满 → 返回 false（由调用方提示，不静默丢弃）。 */
+  function addPendingImage(shot: ChatShot): boolean {
+    if (pendingImages.value.length >= SHOT_MAX_COUNT) return false;
+    pendingImages.value = [
+      ...pendingImages.value,
+      { id: ++pendingSeq, dataUrl: shot.dataUrl, name: shot.name },
+    ];
+    return true;
+  }
+
+  function removePendingImage(id: number): void {
+    pendingImages.value = pendingImages.value.filter((p) => p.id !== id);
+  }
+
+  function clearPendingImages(): void {
+    pendingImages.value = [];
+  }
 
   async function refreshSessions(): Promise<void> {
     const cfg = loadSrConfig();
@@ -158,7 +195,14 @@ export const useChatStore = defineStore('chat', () => {
   async function loadHistory(sid: string): Promise<void> {
     const cfg = loadSrConfig();
     const body = await apiSessionMessages(cfg, sid);
-    messages.value = body.messages.map(msgFromHistory);
+    // 历史图存的是平台相对 URL，这里一次性换算成 <img> 能直接用的 src
+    messages.value = body.messages.map((h) => {
+      const msg = msgFromHistory(h);
+      if (msg.images) {
+        msg.images = msg.images.map((im) => ({ ...im, url: chatImageUrl(cfg, im.url) }));
+      }
+      return msg;
+    });
     usage.value = await apiSessionUsage(cfg, sid);
     lastRunId.value = null;
     feedbackRating.value = null;
@@ -212,6 +256,8 @@ export const useChatStore = defineStore('chat', () => {
 
   async function selectSession(sid: string): Promise<void> {
     if (sending.value) return;            // 流式回合中不切会话
+    // 只有真的换了会话才清待发图：登录后首次进页 / init 复用同一会话时不能误清
+    if (sid !== sessionId.value) clearPendingImages();
     sessionId.value = sid;
     await loadHistory(sid);
   }
@@ -219,12 +265,20 @@ export const useChatStore = defineStore('chat', () => {
   async function send(content: string): Promise<void> {
     const sid = sessionId.value;
     const text = content.trim();
-    if (!sid || !text) return;
+    if (!sid || (!text && !pendingImages.value.length)) return;
     if (sending.value) { error.value = '上一回合仍在进行，请稍候'; return; }
     error.value = '';
     sending.value = true;
+    // 发送即取走托盘：失败也不回填，避免重试时同一张图发两遍
+    const pending = pendingImages.value;
+    pendingImages.value = [];
+    const upload: ChatUploadImage[] = pending.map((p) => ({ data: p.dataUrl, name: p.name }));
+    const optimistic: ChatImage[] = pending.map((p) => ({ url: p.dataUrl, name: p.name }));
     // 乐观上屏用户消息；SSE 事件逐帧归并在其后
-    messages.value = [...messages.value, { seq: null, role: 'user', content: text }];
+    messages.value = [...messages.value, {
+      seq: null, role: 'user', content: text,
+      images: optimistic.length ? optimistic : null,
+    }];
     try {
       const cfg = loadSrConfig();
       await apiChatSend(cfg, sid, text, (ev) => {
@@ -235,7 +289,7 @@ export const useChatStore = defineStore('chat', () => {
           feedbackRating.value = null;
         }
         messages.value = reduceChatSse(messages.value, ev);
-      });
+      }, upload.length ? upload : undefined);
     } catch (e) {
       error.value = '发送失败：' + (e instanceof Error ? e.message : String(e));
       // 回合失败也补一个失败态气泡，保持 timeline 连续
@@ -262,6 +316,7 @@ export const useChatStore = defineStore('chat', () => {
   async function afterDelete(removed: string[]): Promise<void> {
     sessions.value = sessions.value.filter((s) => !removed.includes(s.session_id));
     if (!sessionId.value || !removed.includes(sessionId.value)) return;
+    clearPendingImages();                  // 当前会话没了，托盘里的图也没了归处
     const next = sessions.value[0];
     if (next) {
       sessionId.value = next.session_id;
@@ -344,6 +399,7 @@ export const useChatStore = defineStore('chat', () => {
 
   return {
     sessions, sessionId, messages, sending, error, loading, usage, lastRunId, feedbackRating,
+    pendingImages, addPendingImage, removePendingImage, clearPendingImages,
     hasSession, init, refreshSessions, loadHistory, newSession, selectSession, send,
     submitFeedback, deleteSession, deleteSessions, pinSession, pinSessions,
   };

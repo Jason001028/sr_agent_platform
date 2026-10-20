@@ -13,6 +13,10 @@ import type { ChatSession } from '../lib/api.js';
 import TokenUsagePanel from '../components/TokenUsagePanel.vue';
 import MarkdownBody from '../components/MarkdownBody.vue';
 import ThinkingIndicator from '../components/ThinkingIndicator.vue';
+import ChatAttachTray from '../components/ChatAttachTray.vue';
+import ChatImagePicker from '../components/ChatImagePicker.vue';
+import ChatBubbleImages from '../components/ChatBubbleImages.vue';
+import AppIcon from '../components/AppIcon.vue';
 import { apiListPlugins } from '../lib/api.js';
 import { loadSrConfig } from '../lib/scene.js';
 import { splitAgentPayload } from '../lib/agentContext.js';
@@ -20,6 +24,8 @@ import { splitAgentPayload } from '../lib/agentContext.js';
 const chat = useChatStore();
 const draft = ref('');
 const tokenPluginEnabled = ref(true);
+/** 截图选择器（从左侧影像列表挑一张）。 */
+const pickerOpen = ref(false);
 
 const scrollEl = ref<HTMLElement | null>(null);
 
@@ -46,11 +52,22 @@ function msgKey(m: ChatMsg, i: number): string {
   return m.seq !== null ? 's' + m.seq : 'x' + i;
 }
 
+/** 有截图时可以只发图（话术留空）：交给多模态模型看图，文字由它自己描述。 */
+function canSend(): boolean {
+  return !chat.sending && chat.hasSession()
+    && (Boolean(draft.value.trim()) || chat.pendingImages.length > 0);
+}
+
 function onSend(): void {
+  if (!canSend()) return;
   const text = draft.value.trim();
-  if (!text || chat.sending) return;
   draft.value = '';
   void chat.send(text);
+}
+
+/** 输入区相机键：打开影像选择器（截图来源是查看器的影像列表）。 */
+function openPicker(): void {
+  pickerOpen.value = true;
 }
 
 function onFeedback(rating: 'positive' | 'negative'): void {
@@ -228,9 +245,12 @@ onMounted(() => {
         </div>
 
         <div v-for="(m, i) in chat.messages" :key="msgKey(m, i)" class="cp-row" :class="m.role">
-          <!-- user -->
+          <!-- user：截图在上，原话在下；纯图消息不渲染空段落 -->
           <template v-if="m.role === 'user'">
-            <div class="bubble user">{{ userText(m.content) }}</div>
+            <div class="bubble user" :class="{ 'has-shots': Boolean(m.images?.length) }">
+              <ChatBubbleImages v-if="m.images?.length" :images="m.images" />
+              <p v-if="userText(m.content)" class="utext">{{ userText(m.content) }}</p>
+            </div>
           </template>
 
           <!-- assistant -->
@@ -277,17 +297,28 @@ onMounted(() => {
         </div>
       </div>
 
-      <div class="cp-inputbar">
-        <input v-model="draft" class="cp-input" type="text"
-               placeholder="给 Agent 下指令（离线 mock 每回合固定检索盘阵场景）…"
-               :disabled="chat.sending || !chat.hasSession()"
-               @keyup.enter="onSend()" />
-        <button type="button" class="btn" :disabled="chat.sending || !draft.trim()"
-                @click="onSend()">
-          {{ chat.sending ? '处理中…' : '发送' }}
-        </button>
+      <div class="cp-foot">
+        <ChatAttachTray :items="chat.pendingImages" @remove="chat.removePendingImage" />
+        <div class="cp-inputbar">
+          <button type="button" class="cp-shot" data-e2e="chat-shot-open"
+                  aria-label="添加截图" title="添加截图（截取查看器当前画面）"
+                  :disabled="chat.sending"
+                  @click="openPicker">
+            <AppIcon name="camera" :size="16" />
+          </button>
+          <input v-model="draft" class="cp-input" type="text"
+                 placeholder="给 Agent 下指令（离线 mock 每回合固定检索盘阵场景）…"
+                 :disabled="chat.sending || !chat.hasSession()"
+                 @keyup.enter="onSend()" />
+          <button type="button" class="btn" :disabled="!canSend()"
+                  @click="onSend()">
+            {{ chat.sending ? '处理中…' : '发送' }}
+          </button>
+        </div>
       </div>
     </section>
+
+    <ChatImagePicker v-if="pickerOpen" @close="pickerOpen = false" />
   </div>
 </template>
 
@@ -444,6 +475,10 @@ onMounted(() => {
   font-size: 13.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
 }
 .bubble.user { background: var(--accent-grad); color: #fff; border-bottom-right-radius: 4px; box-shadow: 0 2px 6px rgba(45,164,162,0.18); }
+/* 原话段落自己吃掉 margin：气泡内距已给足，浏览器默认的 p 间距会把它顶偏 */
+.bubble.user .utext { margin: 0; }
+/* 图在上、话在下，两者之间留一点缝 */
+.bubble.user.has-shots .utext { margin-top: 6px; }
 /* assistant 内容由 MarkdownBody 渲染成块级元素，白空格预格式化会让段落间多出空行 */
 .bubble.assistant {
   max-width: 86%; white-space: normal;
@@ -467,11 +502,28 @@ onMounted(() => {
 .tool-name { font-family: var(--font-mono); font-weight: 600; }
 .tool-detail { opacity: .85; }
 
+/* 输入区连托板一起做成一整块：分隔线画在整块顶部，待发缩略图才不像悬在消息区里 */
+.cp-foot { flex: none; border-top: 1px solid var(--line); background: var(--surface); }
 .cp-inputbar {
   display: flex; gap: 10px; padding: 12px 16px;
-  border-top: 1px solid var(--line); flex: none;
+  flex: none;
   background: var(--surface);
 }
+/* 相机键：与输入框同高、中性面，不抢「发送」那颗主按钮的视觉重量 */
+.cp-shot {
+  flex: none; width: 36px; height: 36px;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0;
+  border: 1px solid var(--line); border-radius: var(--r-ctrl);
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, opacity 0.15s ease;
+}
+.cp-shot:hover:not(:disabled) {
+  border-color: var(--accent-2); background: var(--accent-soft);
+}
+.cp-shot:disabled { opacity: .5; cursor: not-allowed; }
+.cp-shot:focus-visible { outline: 2px solid var(--accent-3); outline-offset: 1px; }
 .cp-input {
   flex: 1; height: 36px; padding: 0 12px; border: 1px solid var(--line);
   border-radius: var(--r-ctrl); background: var(--surface-2);

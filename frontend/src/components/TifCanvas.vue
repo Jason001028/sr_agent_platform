@@ -420,6 +420,9 @@ watch(
 
 onMounted(() => {
   resize();
+  // 画布「挂着」才说明 view/canvasSize 是这一页的真实视口；换页后 store 里
+  // 的旧值不能拿去裁聊天截图（见 viewer.captureForChat）。
+  store.setCanvasAttached(true);
   if (stageRef.value) {
     resizeObs = new ResizeObserver(() => resize());
     resizeObs.observe(stageRef.value);
@@ -434,6 +437,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  store.setCanvasAttached(false);
   if (resizeObs) resizeObs.disconnect();
   window.removeEventListener('keydown', store.onKeyDown);
   window.removeEventListener('dragover', onDragOver);

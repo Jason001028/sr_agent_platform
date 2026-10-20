@@ -33,7 +33,12 @@
 
 1. **硬件预算**（阻塞其它两项）：目标盘阵机 GPU 型号 / 显存；是否与 SR 超分管线（SR_code 生产管线）**同卡争抢** → 决定最大能跑多大体量、是否需 Ollama（省显存调度）还是 vLLM（吞吐/工具支持）。
 2. **serving 层**：vLLM（严格 OpenAI 兼容、tools 支持最好，推荐度最高）/ Ollama（省事）/ llama.cpp-server。
-3. **模型本体**：选型标准 = **function-calling 可靠性 + 中文 + SR 域**，不是通用榜单分。默认**不需要 vision**（Agent 是对话，不读图）。
+3. **模型本体**：选型标准 = **function-calling 可靠性 + 中文 + SR 域**，不是通用榜单分。
+   **2026-10-20 起需要 vision**：平台已支持把查看器截图作为 `image_url` 内容块发给 Agent
+   （见 [api-contract.md](api-contract.md) §3.2.1）。serving 侧必须能加载 mmproj（llama.cpp/Ollama
+   的 `--mmproj`）或原生多模态权重（vLLM 的 vision 模型），且 OpenAI 兼容接口接受
+   `{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,…"}}`。此前「默认不需要 vision」
+   的口径作废；不打算配 vision 时可继续只用文字对话，但带图的回合会整轮报错（不做静默降级）。
 
 ## 4. 选型验收法（用自己的 agent 当试金石，别用通用 benchmark）
 

@@ -58,10 +58,25 @@ def bounded_payload(value: Any, *, max_bytes: int = DEFAULT_MAX_BYTES) -> dict:
             "sha256": hashlib.sha256(encoded).hexdigest()}
 
 
+def _prompt_column(prompt: Any, max_bytes: int) -> str | None:
+    """`agent_runs.prompt` 是 TEXT 列，只能绑标量。
+
+    带截图的回合 prompt 是 OpenAI content block 列表（见 services/chat_images.py），
+    直接 bind 会抛 `sqlite3.InterfaceError`；这里统一把非字符串序列化成 JSON 文本。
+    字符串原样返回 —— 纯文字回合的 `prompt` 列与以往逐字一致。
+    """
+    if prompt is None:
+        return None
+    value = bounded_payload(prompt, max_bytes=max_bytes)["value"]
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
 class TrajectoryRecorder:
     """Small synchronous adapter around Store's append-only trajectory API."""
 
-    def __init__(self, store, *, session_id: str, prompt: str | None = None,
+    def __init__(self, store, *, session_id: str, prompt: Any = None,
                  machine_id: str | None = None, model: str | None = None,
                  system_prompt: str | None = None, tools: list | None = None,
                  max_payload_bytes: int = DEFAULT_MAX_BYTES):
@@ -73,8 +88,7 @@ class TrajectoryRecorder:
             session_id,
             machine_id=machine_id,
             model=model,
-            prompt=(bounded_payload(prompt, max_bytes=max_payload_bytes)["value"]
-                    if prompt is not None else None),
+            prompt=_prompt_column(prompt, max_payload_bytes),
             system_prompt_hash=stable_hash(system_prompt or ""),
             tool_manifest_hash=stable_hash(tools or []),
         )

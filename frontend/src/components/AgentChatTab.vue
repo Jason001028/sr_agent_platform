@@ -17,6 +17,10 @@ import { useChatStore } from '../stores/chat.js';
 import type { ChatMsg } from '../stores/chat.js';
 import MarkdownBody from './MarkdownBody.vue';
 import ThinkingIndicator from './ThinkingIndicator.vue';
+import ChatAttachTray from './ChatAttachTray.vue';
+import ChatImagePicker from './ChatImagePicker.vue';
+import ChatBubbleImages from './ChatBubbleImages.vue';
+import AppIcon from './AppIcon.vue';
 import {
   agentPayload, buildContextNote, splitAgentPayload,
 } from '../lib/agentContext.js';
@@ -27,6 +31,8 @@ const viewer = useViewerStore();
 const chat = useChatStore();
 const draft = ref('');
 const scrollEl = ref<HTMLElement | null>(null);
+/** 截图选择器（截查看器当前画面，来源是左侧影像列表）。 */
+const pickerOpen = ref(false);
 
 const rec = computed(() => viewer.activeRec);
 /** 仅盘阵场景可用；无图 / 本地(无 sceneId) → false 并给 reason。 */
@@ -87,10 +93,17 @@ function toolNames(m: ChatMsg): string {
 }
 
 const creating = ref(false);   // 防止双击并发 newSession 建出两个会话
+
+/** 有截图时可以不写字：上下文快照照样附上（Agent 仍能引用 W×H / 拉伸）。 */
+function canSend(): boolean {
+  return enabled.value && snap.value !== null && !chat.sending && !creating.value
+    && (Boolean(draft.value.trim()) || chat.pendingImages.length > 0);
+}
+
 async function onSend(): Promise<void> {
   const text = draft.value.trim();
   const s = snap.value;
-  if (!text || !enabled.value || !s || chat.sending || creating.value) return;
+  if (!canSend() || !s) return;
   if (!chat.sessionId) {
     // 首问自动建会话（与 /chat 同一 store；newSession 失败会在 error 区显示）
     creating.value = true;
@@ -140,11 +153,12 @@ watch(() => chat.messages.length, () => void scrollBottom());
         </div>
 
         <div v-for="(m, i) in chat.messages" :key="msgKey(m, i)" class="at-row" :class="m.role">
-          <!-- user -->
+          <!-- user：截图在上；原话为空（纯图消息）时不渲染空段 -->
           <template v-if="m.role === 'user'">
-            <div class="bubble user">
+            <div class="bubble user" :class="{ 'has-shots': Boolean(m.images?.length) }">
+              <ChatBubbleImages v-if="m.images?.length" :images="m.images" />
               <!-- 原话；有自动附文时在其下缩小显示（无分隔 = 历史 /chat 消息原样） -->
-              <p class="uq">{{ parts(m.content).q }}</p>
+              <p v-if="parts(m.content).q" class="uq">{{ parts(m.content).q }}</p>
               <p v-if="parts(m.content).note" class="ctx">{{ parts(m.content).note }}</p>
             </div>
           </template>
@@ -178,16 +192,27 @@ watch(() => chat.messages.length, () => void scrollBottom());
         </div>
       </div>
 
-      <div class="at-inputbar">
-        <input v-model="draft" class="at-input" type="text"
-               :placeholder="placeholder"
-               :disabled="chat.sending || creating"
-               @keyup.enter="onSend()" />
-        <button type="button" class="cbtn" :disabled="chat.sending || creating || !draft.trim()" @click="onSend()">
-          {{ chat.sending || creating ? '…' : '发送' }}
-        </button>
+      <div class="at-foot">
+        <ChatAttachTray :items="chat.pendingImages" @remove="chat.removePendingImage" />
+        <div class="at-inputbar">
+          <button type="button" class="at-shot" data-e2e="chat-shot-open"
+                  aria-label="添加截图" title="添加截图（截取当前视野）"
+                  :disabled="chat.sending || creating"
+                  @click="pickerOpen = true">
+            <AppIcon name="camera" :size="14" />
+          </button>
+          <input v-model="draft" class="at-input" type="text"
+                 :placeholder="placeholder"
+                 :disabled="chat.sending || creating"
+                 @keyup.enter="onSend()" />
+          <button type="button" class="cbtn" :disabled="!canSend()" @click="onSend()">
+            {{ chat.sending || creating ? '…' : '发送' }}
+          </button>
+        </div>
       </div>
     </template>
+
+    <ChatImagePicker v-if="pickerOpen" @close="pickerOpen = false" />
   </div>
 </template>
 
@@ -252,6 +277,7 @@ watch(() => chat.messages.length, () => void scrollBottom());
 }
 .bubble.user { background: var(--accent-grad); color: #fff; border-bottom-right-radius: 3px; }
 .uq { margin: 0; }
+.bubble.user.has-shots .uq { margin-top: 5px; }
 .ctx {
   margin: 5px 0 0; font-size: 10.5px; line-height: 1.55;
   color: rgba(255, 255, 255, 0.82);
@@ -284,13 +310,27 @@ watch(() => chat.messages.length, () => void scrollBottom());
 .tool-name { font-family: var(--font-mono); font-weight: 600; flex: none; }
 .tool-detail { opacity: .85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* 托板与输入行同属底部一块：分隔线画在块顶，缩略图不悬在消息区里 */
+.at-foot { flex: none; border-top: 1px solid var(--line); background: var(--surface); }
 .at-inputbar {
   flex: none;
   display: flex; gap: 6px;
   padding: 8px;
-  border-top: 1px solid var(--line);
   background: var(--surface);
 }
+.at-shot {
+  flex: none; width: 30px; height: 30px;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0;
+  border: 1px solid var(--line); border-radius: var(--r-ctrl);
+  background: var(--surface-2); cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, opacity 0.15s ease;
+}
+.at-shot:hover:not(:disabled) { border-color: var(--accent-2); background: var(--accent-soft); }
+.at-shot:disabled { opacity: .5; cursor: not-allowed; }
+.at-shot:focus-visible { outline: 2px solid var(--accent-3); outline-offset: 1px; }
+/* 托板在窄侧舱里收紧左右内距（默认是给主聊天区留的 16px） */
+.at-foot :deep(.tray) { padding: 8px 8px 0; }
 .at-input {
   flex: 1; min-width: 0; height: 30px; padding: 0 10px;
   border: 1px solid var(--line); border-radius: var(--r-ctrl);

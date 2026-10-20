@@ -514,6 +514,118 @@ async function main() {
       }, 25000, '改参后的任务 COMPLETED');
       assert(true, '确认提交后队列出现第 2 个任务并跑完');
 
+      /* ---------- E. 聊天截图（卡片相机键 → 托盘 → 发送 → 历史） ----------
+         口径：左侧「一键添加」的卡片相机键取**当前可见画面**，最多 2 张，缩略图
+         常驻输入区；发送时真作为 image_url 交给模型（mock 不碰图），刷新后由
+         GET messages 的 images 字段恢复。这里只走前端链路，后端落盘/投影由
+         backend/tests/test_chat_images.py 与 test_api_platform.py 覆盖。 */
+      console.log('\n[E] 聊天截图（≤2 张、发出去、刷新后仍在）');
+      await page.goto(base + '/viewer', { waitUntil: 'networkidle2', timeout: 30000 });
+      await waitFor(page, () => !!window.__viewer, 10000, '__viewer 钩子');
+      await page.evaluate(async (meta) => {
+        const cv = document.createElement('canvas');
+        cv.width = 640; cv.height = 480;
+        const ctx = cv.getContext('2d');
+        const g = ctx.createLinearGradient(0, 0, 640, 480);
+        g.addColorStop(0, '#203040'); g.addColorStop(1, '#c8b493');
+        ctx.fillStyle = g; ctx.fillRect(0, 0, 640, 480);
+        ctx.fillStyle = '#f2f2f2'; ctx.fillRect(80, 90, 160, 110);
+        const blob = await new Promise((res) => cv.toBlob(res, 'image/jpeg', 0.9));
+        await window.__viewer.openSceneJpg(meta, blob);
+      }, { name: scene.name, W: 1600, H: 800, sceneId: scene.id, lqPath: scene.lqPath });
+      await waitFor(page, () => {
+        const r = window.__viewer.activeRec();
+        return !!(r && r.thumb && r.thumb.width > 0);
+      }, 15000, '截图源（缩略图）就绪');
+
+      // 展开右侧上下文侧舱 → Agent 页签：托盘与输入区在那儿
+      await page.click('.ctx-toggle');
+      await waitFor(page, () => !!document.querySelector('.ctx-tab'), 10000, '上下文侧舱展开');
+      await page.evaluate(() => {
+        const b = [...document.querySelectorAll('.ctx-tab')]
+          .find((x) => x.textContent.indexOf('Agent') >= 0);
+        if (b) b.click();
+      });
+      await waitFor(page, () => !!document.querySelector('input.at-input'), 10000, 'Agent 输入区');
+
+      // 第 1 张：卡片相机键（截当前可见画面）
+      await page.click('[data-e2e="file-shot-add"]');
+      await waitFor(page, () => document.querySelectorAll('[data-e2e="chat-tray-item"]').length === 1,
+        15000, '托盘出现第 1 张');
+      await waitFor(page, () => {
+        const img = document.querySelector('[data-e2e="chat-tray-item"] img');
+        return !!(img && img.naturalWidth > 0);
+      }, 10000, '托盘缩略图解码完成');
+      const shot1 = await page.evaluate(() => {
+        const img = document.querySelector('[data-e2e="chat-tray-item"] img');
+        return { src: img.src.slice(0, 23), w: img.naturalWidth, h: img.naturalHeight };
+      });
+      assert(shot1.src === 'data:image/jpeg;base64,' && shot1.w > 0 && shot1.w <= 1280
+        && shot1.h <= 1280, `截图是 JPEG data URL 且长边 ≤1280（${shot1.w}×${shot1.h}）`);
+
+      // 第 2 张 + 上限：满 2 张后相机键禁用
+      await page.click('[data-e2e="file-shot-add"]');
+      await waitFor(page, () => document.querySelectorAll('[data-e2e="chat-tray-item"]').length === 2,
+        15000, '托盘出现第 2 张');
+      assert(await page.evaluate(() => document.querySelector('[data-e2e="file-shot-add"]').disabled),
+        '满 2 张后卡片相机键禁用（不再静默丢图）');
+
+      // 删一张 → 相机键恢复
+      await page.click('[data-e2e="chat-tray-item"] .tray-x');
+      await waitFor(page, () => document.querySelectorAll('[data-e2e="chat-tray-item"]').length === 1,
+        10000, '托盘删到 1 张');
+      assert(!(await page.evaluate(() => document.querySelector('[data-e2e="file-shot-add"]').disabled)),
+        '删掉一张后相机键恢复可用');
+
+      // 页内导航到 /chat（**不能 page.goto**：那会重建文档、丢掉 Pinia 里的待发图）
+      await page.click('.nav-links a[href="/chat"]');
+      await waitFor(page, () => location.pathname === '/chat'
+        && !!document.querySelector('input.cp-input'), 15000, '页内导航到 /chat');
+      await waitFor(page, () => document.querySelectorAll('[data-e2e="chat-tray-item"]').length === 1,
+        10000, '托盘跨页保留');
+      assert(true, '托盘经页内导航保留（ChatPage 挂载时的 init/loadHistory 不清空）');
+
+      // 带图发送：气泡里先显示本地 data URL
+      const q = '截图测试：画面里那块亮矩形是什么？';
+      await page.type('input.cp-input', q);
+      await page.click('.cp-inputbar .btn');
+      await waitFor(page, () => {
+        const b = document.querySelector('.cp-inputbar .btn');
+        return !!b && b.textContent.trim() === '发送';
+      }, 25000, '带图回合结束');
+      const bubble = await waitFor(page, () => {
+        const el = [...document.querySelectorAll('.bubble.user')]
+          .find((b) => b.textContent.indexOf('截图测试') >= 0);
+        const img = el && el.querySelector('img.shot-img');
+        return img && img.naturalWidth > 0
+          ? { src: img.src.slice(0, 23), w: img.naturalWidth } : null;
+      }, 10000, '用户气泡里的截图');
+      assert(bubble.src === 'data:image/jpeg;base64,' && bubble.w > 0,
+        '发送后用户气泡展示这张截图');
+
+      // 刷新 → 历史投影的图片走会话图片端点（不是 data URL）
+      await page.goto(base + '/chat', { waitUntil: 'networkidle2', timeout: 30000 });
+      const hist = await waitFor(page, () => {
+        const el = [...document.querySelectorAll('.bubble.user')]
+          .find((b) => b.textContent.indexOf('截图测试') >= 0);
+        const img = el && el.querySelector('img.shot-img');
+        return img && img.naturalWidth > 0 ? { src: img.src, w: img.naturalWidth } : null;
+      }, 20000, '刷新后的历史截图');
+      assert(/\/api\/chat\/sessions\/[^/]+\/images\/[0-9a-f]{32}\.jpg$/.test(hist.src),
+        `刷新后截图改走会话图片端点（…${hist.src.slice(-40)}）`);
+      assert(hist.w > 0, '会话图片端点回的是可解码的 JPEG');
+
+      // 刷新后 viewer.recs 已空：选择器给提示而不是报错
+      await page.click('[data-e2e="chat-shot-open"]');
+      await waitFor(page, () => {
+        const el = document.querySelector('[data-e2e="chat-shot-picker"]');
+        return !!(el && el.textContent.indexOf('影像列表是空的') >= 0);
+      }, 5000, '刷新后选择器提示先回查看器');
+      assert(true, '刷新后 /chat 打开选择器：提示先去查看器，不报错');
+      await page.keyboard.press('Escape');
+      await waitFor(page, () => !document.querySelector('[data-e2e="chat-shot-picker"]'),
+        5000, 'Esc 关闭选择器');
+
       /* ---------- D. 布局：三页同宽（--page-w）+ 耗时列不换行 ---------- */
       console.log('\n[D] 布局（页宽令牌 / 耗时列 nowrap）');
       // 视口必须先撑过 1360：puppeteer 默认 800px，那个宽度下三页都被视口压扁成一样宽，

@@ -1043,3 +1043,18 @@ JPG，`stageKind:'product'`）、右格拖进本体，进分屏 → 真鼠标在
 - **侧栏折叠保守**：`FileList` 的 `width`/`padding` 与 `ContextPanel` 的 `.ctx-rail` 都是 100ms linear —— 用 linear 是为了「按下即到位」，加缓动反而像慢半拍。`FileList` 显式 `overflow-x: hidden`：收起过程内容比栏宽，另一个轴按规范也是 auto，会闪出横向滚动条并挤动纵向布局。
 - **tab 内容**：两侧 pane 都用 `v-show` 常驻（状态与 SSE 不丢），`.ctx-pane` 绝对定位铺满 `.ctx-body`，只给进入方 100ms 淡入。两个 pane 同时在普通流里各占 100% 高度，会把进入方顶出可视区（已踩过）。
 - **减少动效**：`style.css` 里全局 `@media (prefers-reduced-motion: reduce)` 把动画/过渡压到 0.01ms；JS 侧 `animateViewsTo` 查同一个媒体查询后直接落终值。加载进度百分比、`loading` 状态这类信息性反馈保留，只停装饰性淡入/位移/缩放。
+
+## 12. 聊天截图附件（2026-10-20）
+
+给 Agent 对话加「把查看器当前画面带进对话」的能力：左侧影像卡片右上角的相机键，或聊天输入区的相机键（弹影像选择器），最多 2 张，缩略图常驻输入框上方、可随时删除；发送后图片随用户消息落库，并作为 OpenAI `image_url` 内容块真正交给多模态模型。契约见 [api-contract](../planning/api-contract.md) §3.2.1。
+
+- **口径 = 所见即所得**：截的是 `rec.thumb`（画在屏幕上的显示层，已按当前拉伸模式重画），按该格自己的 `ViewState` 用 `visibleThumbRect` 裁可见矩形。**不含 ROI / 掩码 / 比例尺这些 canvas 覆盖层** —— 那些是 `TifCanvas` 的上层画布，截图只取底图像素。ROI 的确定性数字仍由 Agent 页签的上下文附文给出，不靠截图里的标注。要「连标注一起截」得再合成一层 draw canvas，本次没做。
+- **不动用户视口**：`captureForChat` 刻意不调 `activate`（那会把图 `placeRec` 到活动侧，一次「加个附件」不该换掉用户正在看的画面）。图不在任何格子里（列表里有、未上屏，或人在 `/chat`）→ 截整幅缩略图；批量入列的空卡 → `loadCardPixels` 只取像素不换图，再截整幅。
+- **`canvasAttached` 是必须的**：`canvasSize` / `viewA` / `viewB` 是 Pinia 里的持久状态，SPA 换到 `/chat` 后仍是上次的值。只看「画布尺寸非 0」会把 `/chat` 里的截图错判成查看器还开着，用旧视口裁出一个莫名其妙的窗口。所以 `TifCanvas` 在 `onMounted` / `onBeforeUnmount` 里写一个布尔量，截图前先问它。
+- **发送即清托盘，失败不回填**：`pendingImages` 在 `send()` 一开始就取走并清空。回合失败时乐观气泡（带着图）留在 timeline 上，但不把图塞回托盘 —— 否则重试会同一张发两遍。
+- **清空时机要区分「换会话」与「重新加载」**：只有 `selectSession` 切到**不同** sid、当前会话被删除、发送开始这三处清空。`init` / `loadHistory` / `newSession` 都不清 —— 从查看器加好图再点顶栏去 `/chat` 时，ChatPage 挂载会走 `init()` → `loadHistory()`，在那里清就把刚加的图抹掉了。托盘只在内存里，整页刷新会丢未发送的截图（与草稿文字同待遇）。
+- **落库只存相对 URL，水合发生在 LLM 边界**：用户消息按 OpenAI wire 形状存 `[{type:'text'}, {type:'image_url', image_url:{url:'/api/chat/sessions/<sid>/images/<uuid>.jpg'}, name:'<原名>'}]`，`name` 挂在 block 同级（不塞进 `image_url` 对象，严格端点会报错）。`_default_chat.chat()` 调 `hydrate_images` 时才读文件换成 `data:image/jpeg;base64,…` 并剥掉 `name`。这样 SQLite、`GET messages`、`agent_runs.prompt` 都不出现 base64；mock 路完全不碰图。
+- **`agent_runs.prompt` 必须先转文本**：`TrajectoryRecorder` 把 prompt 直接 bind 成 SQLite 参数，list 会抛 `sqlite3.InterfaceError`（带图回合必现）。`trajectory.py` 的 `_prompt_column` 先 `json.dumps(ensure_ascii=False)` 再落库；轨迹面板/导出看到的是 JSON 文本，旧行的纯文本不受影响。
+- **图片端点与磁盘**：`GET /api/chat/sessions/{sid}/images/{file}` 只认 `[0-9a-f]{32}.jpg` 且校验解析后的父目录就是该会话目录（防穿越）；文件落在 `SR_CHAT_IMAGE_DIR`（缺省 = DB 同目录）的 `<sid>/` 下，统一重编码为 RGB JPEG（长边 ≤2048、q85、`exif_transpose`、alpha 铺白），写盘走临时文件 + `os.replace`。删除会话一并删图片目录。上限：2 张、解码后 ≤12 MB、≤4000 万像素，Pillow 认不出 → 开流前 400。
+- **多模态是硬前提**：模型端点必须接受 data URL 形式的 `image_url`（Qwen + mmproj 一类）。不支持就整轮报错，不做「悄悄丢掉图片」的降级；选型前提已写进 [agent-llm-deployment](../planning/agent-llm-deployment.md)。
+- **e2e 走页内导航**：`.e2e/test-platform.js` E 段验证「卡片相机 → 托盘 → 删一张 → 页内导航去 `/chat` 托盘还在 → 发送 → 刷新后图片改走会话图片端点」。从 `/viewer` 去 `/chat` 必须点顶栏 RouterLink，**不能 `page.goto`** —— 整页导航会重建文档、丢掉 Pinia 里的待发图，测出来的是另一条路径。

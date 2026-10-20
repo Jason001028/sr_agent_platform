@@ -41,7 +41,7 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from backend.agent import loop as loop_mod
 from backend.api import paths
@@ -50,6 +50,7 @@ from backend.config import sr_runtime
 from backend.contracts.viewer_context import normalize_viewer_context
 from backend.pathguard import (
     ensure_allowed, normalize_submit_path, to_posix_array_path)
+from backend.services import chat_images
 from backend.services import local_exec
 from backend.services import mask as mask_svc
 from backend.services import plugins as plugin_svc
@@ -485,7 +486,16 @@ def _project_message(seq: int, wire: dict, name_of_call: dict) -> dict:
     """Map one wire message onto the frontend GET /messages projection."""
     role = wire["role"]
     if role == "user":
-        return {"seq": seq, "role": "user", "content": wire.get("content", "")}
+        content = wire.get("content", "")
+        if not isinstance(content, list):
+            # 纯文字的老形状：投影逐字不变（老行/纯文字回合都不该多出字段）
+            return {"seq": seq, "role": "user", "content": content}
+        # 带截图：content 是 OpenAI block 列表，拆成文本 + 图片 URL（§3.2.1）
+        text, images = chat_images.split_content(content)
+        out = {"seq": seq, "role": "user", "content": text}
+        if images:
+            out["images"] = images
+        return out
     if role == "assistant":
         tcs = [{"name": tc["function"]["name"],
                 "arguments": loop_mod._parse_args(tc["function"]["arguments"])}
@@ -542,6 +552,9 @@ def delete_session(session_id: str, request: Request):
     if not state.store.delete_session(session_id):
         raise HTTPException(status_code=404, detail=f"会话不存在：{session_id}")
     state.chat_locks.pop(session_id, None)
+    # 截图目录随会话一起走（best-effort：删不掉也不能让 204 变成 500，
+    # 库里已经没有引用，留下的最多是孤儿文件）
+    chat_images.delete_session_images(session_id)
     return Response(status_code=204)
 
 
@@ -561,6 +574,18 @@ def get_messages(session_id: str, request: Request):
     sess = state.store.get_session(session_id)
     return {"session_id": session_id, "status": sess["status"],
             "messages": projected}
+
+
+@router.get("/api/chat/sessions/{session_id}/images/{filename}")
+def get_chat_image(session_id: str, filename: str, request: Request):
+    """聊天截图（§3.2.1）。文件名只有本平台生成的 uuid hex 形态能被取回。"""
+    state = request.app.state
+    _session_or_404(state, session_id)
+    path = chat_images.image_path(session_id, filename)
+    if path is None or not path.is_file():
+        raise HTTPException(status_code=404, detail="图片不存在")
+    return FileResponse(path, media_type="image/jpeg",
+                        headers={"Cache-Control": "private, max-age=3600"})
 
 
 @router.get("/api/chat/sessions/{session_id}/usage")
@@ -633,14 +658,38 @@ async def chat_send(session_id: str, request: Request):
     except ValueError:
         raise HTTPException(status_code=400, detail="请求体须为合法 JSON 对象")
     content = body.get("content") if isinstance(body, dict) else None
-    if not isinstance(content, str) or not content.strip():
-        raise HTTPException(status_code=400, detail="content 必填且非空")
+    images = body.get("images") if isinstance(body, dict) else None
+    content = content if isinstance(content, str) else ""
+    # 「话术」与「截图」至少一样非空（纯图提问是合法用法，见 §3.2.1）。参数校验
+    # 全部排在拿锁之前：400 不能把会话留在「正忙」状态上。先验类型再看非空 ——
+    # `images: {}` 这种坏形状该报「须为数组」，不该被当成「没给图」。
+    if images is not None and not isinstance(images, list):
+        raise HTTPException(status_code=400, detail="images 须为数组")
+    if not content.strip() and not images:
+        raise HTTPException(status_code=400, detail="content 与 images 至少一项非空")
+    if images and len(images) > chat_images.MAX_IMAGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"最多 {chat_images.MAX_IMAGES} 张截图")
 
     lock = state.chat_locks.setdefault(session_id, asyncio.Lock())
     if lock.locked():                    # 无 await 间隙 → 单事件循环内原子
         raise HTTPException(status_code=409,
                             detail="会话正忙（同一会话已有回合在跑）")
     await lock.acquire()
+
+    # 落盘在锁内做：同一会话的两个回合不该同时往同一个目录写；失败必须释放锁。
+    try:
+        saved = await asyncio.to_thread(
+            chat_images.save_images, session_id, images or [])
+    except chat_images.ChatImageError as exc:
+        lock.release()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception:
+        lock.release()
+        raise
+
+    prompt = chat_images.user_content(content, saved)
 
     async def gen():
         q: asyncio.Queue = asyncio.Queue()
@@ -671,7 +720,7 @@ async def chat_send(session_id: str, request: Request):
             try:
                 context = _context(request)
                 return loop_mod.run_loop(
-                    None if context is not None else state.cfg, content,
+                    None if context is not None else state.cfg, prompt,
                     store=None if context is not None else state.store,
                     session_id=session_id, resume=True, on_step=bridge,
                     registry=None if context is not None else getattr(state, "tool_registry", None),

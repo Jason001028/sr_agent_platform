@@ -38,6 +38,10 @@
   那两个监听摘掉。
 - **`/chat` 对话** —— agent 循环 + 工具调用（`search_scenes` / `run_sr` / `sr_job_status` /
   `fix_bad_lines` / 掩码栅格化），SSE 推送 `tool_call` / `tool_result` / `assistant`。
+  支持**截图附件**（2026-10-20）：左侧影像卡片右上角的相机键或输入区相机键，把查看器当前
+  可见画面（所见即所得）带进对话，每条最多 2 张；图片作为 `image_url` 内容块真正交给多模态
+  模型，契约见 [api-contract](../planning/api-contract.md) §3.2.1，取舍与边界见
+  [gui-experience §12](../experience/gui-experience.md)。
 
 掩码产物：浏览器直接生成 `掩码.tif`（值域 0/255）+ `掩膜中心点坐标.txt`，
 也可导出矢量 JSON 交后端栅格化（[mask.py](../../backend/services/mask.py)）。
@@ -231,15 +235,16 @@
 
 **2026-10-20 全套重跑（全部绿）**：
 
-- 后端：**767 passed / 5 skipped**（`python -m pytest backend/`，94.8s；09-28 为
-  735 passed / 5 skipped / 130 subtests —— 差额（+32）来自本分支已合入的改动，未逐条归因）。
-- 前端：**444 passed**（Vitest，21 个文件）+ `vue-tsc --noEmit` 零错误 + `npm run build` 通过；
-  09-28 为 424 passed / 17 个文件。已确认的新增：`agentContext.test.ts` 的
-  `splitAgentPayload` 3 条（2026-10-20）。
+- 后端：**797 passed / 5 skipped**（`python -m pytest backend/`，115.2s；同日上午加聊天截图
+  前为 767 / 5 —— 差额（+30）是 `test_chat_images.py` 20 条与 `test_api_platform.py` 的
+  10 条图片用例）。
+- 前端：**465 passed**（Vitest，24 个文件）+ `vue-tsc --noEmit` 零错误 + `npm run build` 通过；
+  截图功能新增 `chatShot.test.ts` 8 条、`chatImages.test.ts` 9 条、`chatImageUrl.test.ts` 4 条。
 - 浏览器回归（`.e2e/`，先 `cd frontend && npm run build`）：
   `test-scenes.js` **132** · `test-vue-viewer.js` **190** · `test-manual-scene.js` **296**
   （09-24 为 214 —— 新增 M 段「一键解析」整段：按序入列 / 两卡同序号 / 懒卡不带像素 /
-  点亮联动 / 失败账 / 中途停止）· `test-platform.js` **26**。
+  点亮联动 / 失败账 / 中途停止）· `test-platform.js` **34**（2026-10-20 新增 E 段「聊天截图」
+  8 条：相机键 → 托盘上限/删除 → 页内导航保留 → 发送 → 刷新后走会话图片端点）。
 - ⚠️ **有一族脚本当前跑不起来，不是回归**：`.e2e/` 下 **14 个**脚本把仓库路径写死成搬家前的
   `D:/BaiduNetdiskDownload/sr_agent_platform/…`（判据：`grep -l "BaiduNetdiskDownload/sr_agent_platform" .e2e/*.js`
   命中 14 个，含 `test-regress.js`、`test-locator.js`、`test-norm.js`、`test-u16.js`、

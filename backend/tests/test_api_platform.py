@@ -7,6 +7,8 @@ TestClient 内存驱动。覆盖：
 """
 
 import asyncio
+import base64
+import io
 import json
 import os
 import shutil
@@ -36,6 +38,8 @@ _ENVS = ("SR_AGENT_DB", "SR_SCENES_ROOT", "SR_PREVIEWS_ROOT", "SR_LLM_MOCK",
          "SR_QUEUE_POLL_SEC", "SR_SANDBOX_ROOT", "SR_EXECUTOR",
          "SR_LOCKED_DIR", "SR_LOCAL_GPU", "SR_BUNDLE_DIR",
          "SR_ALLOWED_ROOTS", "SR_DRIVE_MAP",
+         # 聊天截图的落盘根：不隔离的话用例会把图写进开发者真实的 sr_agent.db 旁边
+         "SR_CHAT_IMAGE_DIR",
          # 产物急烤的两个开关。用例会按需改它们，不还原就会漏到后面的用例上
          # （急烤是「按 env 现读」的，泄漏的效果正是随机烤/随机不烤）。
          "SR_PRODUCT_PREVIEW_DIV", "SR_PRODUCT_PREVIEW_MAX_AGE_SEC")
@@ -109,6 +113,7 @@ class PlatformBase(unittest.TestCase):
         # (and on the dev box the real one is absent anyway, so the tests would
         # pass for the wrong reason — see test_suffix_defaults_* below).
         os.environ["SR_BUNDLE_DIR"] = os.path.join(self._tmp.name, "bundle")
+        os.environ["SR_CHAT_IMAGE_DIR"] = os.path.join(self._tmp.name, "shots")
         # 临时目录就是这些用例的"盘阵"：提交侧的白名单（SR_ALLOWED_ROOTS）
         # 默认只放行 /DiskArray，不配的话每个提交都会被 400 挡下。
         os.environ.update(allowed_roots_env(self._tmp.name))
@@ -272,6 +277,137 @@ class TestChat(PlatformBase):
         final = body["messages"][3]
         self.assertIn("mock 模型", final["content"])
         self.assertIsNone(final["tool_calls"])
+
+    # ---------------- 截图附件（§3.2.1） ----------------
+
+    @staticmethod
+    def png_payload(size=(8, 6)):
+        buf = io.BytesIO()
+        Image.new("RGB", size, (30, 120, 200)).save(buf, format="PNG")
+        return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+    def test_send_with_image_persists_projects_and_serves_it(self):
+        app, c = self.app_client()
+        sid = c.post("/api/chat/sessions").json()["session_id"]
+        r = c.post(f"/api/chat/sessions/{sid}/messages",
+                   json={"content": "看这张",
+                         "images": [{"name": "SC_001.tif",
+                                     "data": self.png_payload()}]})
+        self.assertEqual(r.status_code, 200)
+        types = [e["type"] for e in sse_events(r.text)]
+        self.assertEqual(types, ["turn_start", "tool_call", "tool_result",
+                                 "assistant", "turn_done"])
+
+        user = c.get(f"/api/chat/sessions/{sid}/messages").json()["messages"][0]
+        self.assertEqual(user["content"], "看这张")
+        self.assertEqual(len(user["images"]), 1)
+        self.assertEqual(user["images"][0]["name"], "SC_001.tif")
+        url = user["images"][0]["url"]
+        self.assertTrue(url.startswith(f"/api/chat/sessions/{sid}/images/"))
+
+        img = c.get(url)
+        self.assertEqual(img.status_code, 200)
+        self.assertEqual(img.headers["content-type"], "image/jpeg")
+        self.assertTrue(img.content.startswith(b"\xff\xd8"))
+
+        # 库里存的是相对 URL，没有 base64（否则历史与轨迹都会被撑爆）
+        wire = app.state.store.get_messages(sid)
+        raw = json.dumps(wire, ensure_ascii=False)
+        self.assertIn(url, raw)
+        self.assertNotIn("base64", raw)
+
+    def test_image_only_message_is_allowed(self):
+        c = self.client()
+        sid = c.post("/api/chat/sessions").json()["session_id"]
+        r = c.post(f"/api/chat/sessions/{sid}/messages",
+                   json={"content": "", "images": [{"data": self.png_payload()}]})
+        self.assertEqual(r.status_code, 200)
+        user = c.get(f"/api/chat/sessions/{sid}/messages").json()["messages"][0]
+        self.assertEqual(user["content"], "")
+        self.assertEqual(len(user["images"]), 1)
+
+    def test_three_images_rejected_without_taking_the_lock(self):
+        c = self.client()
+        sid = c.post("/api/chat/sessions").json()["session_id"]
+        payload = [{"data": self.png_payload()}] * 3
+        r = c.post(f"/api/chat/sessions/{sid}/messages",
+                   json={"content": "三张", "images": payload})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("2", r.json()["detail"])
+        # 锁已释放：同一会话随后还能正常发文字回合
+        self.assertEqual(
+            c.post(f"/api/chat/sessions/{sid}/messages",
+                   json={"content": "还能发"}).status_code, 200)
+
+    def test_bad_image_payload_releases_the_lock(self):
+        c = self.client()
+        sid = c.post("/api/chat/sessions").json()["session_id"]
+        r = c.post(f"/api/chat/sessions/{sid}/messages",
+                   json={"content": "坏的",
+                         "images": [{"data": "data:image/png;base64,%%%%"}]})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(
+            c.post(f"/api/chat/sessions/{sid}/messages",
+                   json={"content": "还能发"}).status_code, 200)
+
+    def test_non_list_images_rejected(self):
+        c = self.client()
+        sid = c.post("/api/chat/sessions").json()["session_id"]
+        r = c.post(f"/api/chat/sessions/{sid}/messages",
+                   json={"content": "x", "images": {"data": "y"}})
+        self.assertEqual(r.status_code, 400)
+
+    def test_delete_session_removes_image_files(self):
+        app, c = self.app_client()
+        sid = c.post("/api/chat/sessions").json()["session_id"]
+        c.post(f"/api/chat/sessions/{sid}/messages",
+               json={"images": [{"data": self.png_payload()}]})
+        url = c.get(f"/api/chat/sessions/{sid}/messages").json()[
+            "messages"][0]["images"][0]["url"]
+        self.assertEqual(c.get(url).status_code, 200)
+
+        self.assertEqual(c.delete(f"/api/chat/sessions/{sid}").status_code, 204)
+        from backend.services import chat_images
+        self.assertFalse((chat_images.image_root() / sid).exists())
+
+    def test_image_endpoint_404s_for_missing_or_malformed_names(self):
+        c = self.client()
+        sid = c.post("/api/chat/sessions").json()["session_id"]
+        # 目录穿越（`..`）由客户端规范化，HTTP 层测不到；那条走 services 的单测。
+        for name in ("f" * 32 + ".jpg", "x.jpg", "a" * 31 + ".jpg",
+                     "a" * 32 + ".png", "A" * 32 + ".jpg"):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    c.get(f"/api/chat/sessions/{sid}/images/{name}").status_code,
+                    404)
+        # 会话不存在 → 404（先判会话）
+        self.assertEqual(
+            c.get(f"/api/chat/sessions/ghost/images/{'f' * 32}.jpg").status_code,
+            404)
+
+    def test_legacy_string_user_message_projection_is_unchanged(self):
+        app, c = self.app_client()
+        sid = c.post("/api/chat/sessions").json()["session_id"]
+        app.state.store.append_message(sid, {"role": "user", "content": "old"})
+        msg = c.get(f"/api/chat/sessions/{sid}/messages").json()["messages"][0]
+        self.assertEqual(msg, {"seq": 1, "role": "user", "content": "old"})
+
+    def test_trajectory_prompt_is_sqlite_text_for_image_turn(self):
+        c = self.client()
+        sid = c.post("/api/chat/sessions").json()["session_id"]
+        c.post(f"/api/chat/sessions/{sid}/messages",
+               json={"content": "看图", "images": [{"data": self.png_payload()}]})
+        run = c.get(f"/api/chat/sessions/{sid}/trajectory").json()["runs"][0]
+        self.assertIsInstance(run["prompt"], str)
+        self.assertIn("/api/chat/sessions/", run["prompt"])
+        self.assertNotIn("base64", run["prompt"])
+
+    def test_trajectory_prompt_for_text_turn_is_still_the_raw_prompt(self):
+        c = self.client()
+        sid = c.post("/api/chat/sessions").json()["session_id"]
+        c.post(f"/api/chat/sessions/{sid}/messages", json={"content": "纯文字"})
+        run = c.get(f"/api/chat/sessions/{sid}/trajectory").json()["runs"][0]
+        self.assertEqual(run["prompt"], "纯文字")
 
     def test_trajectory_endpoint_returns_run_and_events(self):
         c = self.client()

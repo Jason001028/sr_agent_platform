@@ -14,10 +14,25 @@
 import { computed, watch } from 'vue';
 import type { ComponentPublicInstance } from 'vue';
 import { useViewerStore } from '../stores/viewer';
+import { useChatStore } from '../stores/chat.js';
+import { useChatShot } from '../composables/useChatShot.js';
+import { SHOT_MAX_COUNT } from '../lib/chatShot.js';
 import { isIntermediateStage } from '../lib/stage.js';
 import FileThumb from './FileThumb.vue';
+import AppIcon from './AppIcon.vue';
 
 const store = useViewerStore();
+const chat = useChatStore();
+const { busy: shotBusy, add: addShotAction } = useChatShot();
+
+/** 待发截图已满：相机键置灰并说明原因（点下去也不该有反应）。 */
+const shotsFull = computed(() => chat.pendingImages.length >= SHOT_MAX_COUNT);
+
+/** 卡片相机键：截当前视野 → 聊天托板。不改视口（见 viewer.captureForChat）。 */
+async function addShot(recId: number): Promise<void> {
+  const r = await addShotAction(recId);
+  if (!r.ok) store.showErr(r.message);
+}
 
 const collapseBtn = computed(() => (store.sidebarCollapsed ? '»' : '«'));
 const collapseTitle = computed(() => (store.sidebarCollapsed ? '展开文件列表' : '收起文件列表'));
@@ -99,6 +114,19 @@ function linkTag(note: string): string {
       @dragend="store.endRecDrag()"
     >
       <FileThumb :rec="rec" />
+      <!-- 截图键：叠在缩略图右上角，悬停/聚焦/当前卡才显形（opacity 而非 display，
+           免得悬停时布局跳动）。@click.stop 不触发卡片激活。 -->
+      <button
+        type="button"
+        class="shot-add"
+        data-e2e="file-shot-add"
+        aria-label="加入对话（截取当前视野）"
+        :disabled="shotsFull || shotBusy"
+        :title="shotsFull ? `每条消息最多 ${SHOT_MAX_COUNT} 张截图，先在对话里删一张` : '加入对话（截取当前视野）'"
+        @click.stop="addShot(rec.id)"
+      >
+        <AppIcon name="camera" :size="14" />
+      </button>
       <!-- × 是 float:right，必须留在**名字行里面**：放到缩略图之前会让浮动框去挤
            横幅那个块（横幅是 BFC，会为了避开浮动而整体缩窄），视觉上就是缩略图缺一角。 -->
       <div class="name">
@@ -178,6 +206,7 @@ function linkTag(note: string): string {
 .side-toggle:hover { color: var(--accent-deep); background: var(--accent-soft); }
 
 .file-item {
+  position: relative;               /* 相机键的定位基准（叠在缩略图右上角） */
   padding: 10px 12px;
   margin-bottom: 8px;
   background: var(--surface);
@@ -207,6 +236,35 @@ function linkTag(note: string): string {
   from { outline-color: rgba(194, 116, 58, 0.15); outline-offset: 8px; }
   to { outline-color: var(--notice-job); outline-offset: 1px; }
 }
+/* 截图键：平时隐形，悬停/键盘聚焦/当前卡才露出来。用 opacity 不用 display ——
+   显示态切换会让按钮在悬停瞬间挤动周围内容。缩略图高 96px、卡片内距 10/12，
+   所以 top:14 right:16 正好落在小图右上角的留白里。 */
+.file-item .shot-add {
+  position: absolute;
+  top: 14px; right: 16px;
+  width: 24px; height: 24px;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.9);
+  cursor: pointer;
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+.file-item:hover .shot-add,
+.file-item:focus-within .shot-add,
+.file-item.active .shot-add { opacity: 1; pointer-events: auto; }
+.file-item .shot-add:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent-2);
+}
+.file-item .shot-add:disabled { opacity: .45; cursor: not-allowed; }
+.file-item .shot-add:focus-visible {
+  opacity: 1; pointer-events: auto;
+  outline: 2px solid var(--accent-3); outline-offset: 1px;
+}
+
 .file-item .name { font-weight: 600; color: var(--ink); word-break: break-all; }
 /* 名字行里的小标（盘阵 / 序号 / 环节）：同一条基线、同样的圆角与内距，
    `vertical-align: 1px` 把 10px 的小方块抬到与名字的视觉中线上。

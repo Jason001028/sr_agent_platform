@@ -99,11 +99,25 @@ export interface PluginOperation {
   finished_at: number | null;
 }
 
+/** 已落库的一张聊天截图（相对 URL；`name` 是原文件名）。 */
+export interface ChatImage {
+  url: string;
+  name?: string | null;
+}
+
+/** 上传用的一张截图：`data` 是 data URL（后端也接受裸 base64）。 */
+export interface ChatUploadImage {
+  data: string;
+  name: string;
+}
+
 /** GET /api/chat/sessions/{id}/messages 单条投影（role ∈ user/assistant/tool）。 */
 export interface HistoryMsg {
   seq: number;
   role: 'user' | 'assistant' | 'tool';
   content?: string | null;
+  /** 只有带截图的 user 消息才有；纯文字老消息不出现该字段。 */
+  images?: ChatImage[] | null;
   tool_calls?: { name: string; arguments: Record<string, unknown> }[] | null;
   tool_name?: string | null;
   tool_call_id?: string;
@@ -288,6 +302,16 @@ export const sessionMessagesUrl = (cfg: SrConfig, sid: string): string =>
   apiUrl(cfg, `/api/chat/sessions/${encodeURIComponent(sid)}/messages`);
 export const queueUrl = (cfg: SrConfig): string => apiUrl(cfg, '/api/queue');
 export const queueEventsUrl = (cfg: SrConfig): string => apiUrl(cfg, '/api/queue/events');
+
+/** 聊天截图 → `<img src>` 用的地址。
+ *
+ *  历史消息里存的是平台相对 URL（`/api/chat/...`），要按 `cfg.apiBase` 补前缀；
+ *  刚上屏的乐观消息是本地 data URL，原样用。绝对 URL 也原样（可能是另一台机器）。 */
+export function chatImageUrl(cfg: SrConfig, url: string): string {
+  if (!url) return '';
+  if (/^(?:data|blob|https?):/i.test(url)) return url;
+  return apiUrl(cfg, url);
+}
 
 /* ---------------- SSE 帧切分 / 解析（纯函数） ---------------- */
 /** 切一段 SSE 文本成完整帧的 data 行；残片（无收尾空行）留在 rest。 */
@@ -545,15 +569,18 @@ export async function apiSubmitTrajectoryFeedback(
   return (await r.json()) as { feedback_id: number; run_id: string; rating: TrajectoryFeedbackRating };
 }
 
-/** 发一条消息：POST 即流，SSE 逐事件回调；Promise 在流结束（turn_done/error）时完成。 */
+/** 发一条消息：POST 即流，SSE 逐事件回调；Promise 在流结束（turn_done/error）时完成。
+ *  `images` 非空时随消息一起发（≤2 张，§3.2.1）；无图时请求体仍是 `{content}`。 */
 export async function apiChatSend(
   cfg: SrConfig, sid: string, content: string,
   onEvent: (e: PlatformSseEvent) => void,
+  images?: ChatUploadImage[],
 ): Promise<void> {
+  const body = images && images.length ? { content, images } : { content };
   const r = await fetch(sessionMessagesUrl(cfg, sid), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ content }),
+    body: JSON.stringify(body),
   });
   if (!r.ok) {
     let detail = `HTTP ${r.status}`;

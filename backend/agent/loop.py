@@ -29,6 +29,7 @@ import time
 from openai import OpenAI
 
 from backend.config import Config
+from backend.services import chat_images
 from backend.services import plugins as plugin_svc
 from backend.services.trajectory import TrajectoryRecorder
 from backend.tools.contract import ToolRegistry, default_registry
@@ -156,10 +157,15 @@ def _default_chat(cfg: Config):
     if cfg.llm_mock:
         return _mock_chat(cfg)
     client = build_client(cfg)
+    # 一次回合内同一张截图的 data URL 只拼一次（每个 LLM 调用都会过一遍水合）。
+    image_cache: dict[str, str] = {}
 
     def chat(messages, tools):
+        # 截图在库里只有相对 URL，到这一步才现读盘换成 data URL（§3.2.1）。
+        # mock 路在上面的 return 就走掉了 —— 它不读图，也不该碰盘。
+        wire = chat_images.hydrate_images(messages, cache=image_cache)
         resp = client.chat.completions.create(
-            model=cfg.llm_model, messages=messages, tools=tools or None,
+            model=cfg.llm_model, messages=wire, tools=tools or None,
             max_tokens=cfg.llm_max_tokens, temperature=cfg.llm_temperature)
         return parse_response(resp)
 
@@ -225,6 +231,10 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
              context=None, machine_id=None):
     """Run the loop; returns {"ok", "turns", "messages", "answer", "error",
     "session_id"}.
+
+    `prompt` is either a plain string or an OpenAI content-block list (a user
+    turn with screenshots, see services/chat_images.py). Both shapes are stored
+    as the user message verbatim; only the wire call sees images.
 
     `chat(messages, tools)` → {"content", "tool_calls":[{id,name,arguments}]}
     is injectable for tests; the default builds an OpenAI client from cfg
