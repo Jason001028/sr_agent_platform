@@ -238,7 +238,7 @@ onUnmounted(() => {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="t in queue.tasks" :key="t.task_id">
+          <tr v-for="t in queue.tasks" :key="t.task_id" class="qp-row">
             <td><span class="tag" :class="stateCls(t)">{{ stateText(t) }}</span></td>
             <td>{{ t.task_id }}</td>
             <td>{{ t.job_id ?? '—' }}</td>
@@ -368,6 +368,12 @@ onUnmounted(() => {
 .qp-tbl td.params { overflow-wrap: anywhere; }
 .qp-tbl td.empty { color: var(--ink-sub); padding: 22px; text-align: center; }
 .qp-tbl tbody tr:hover td { background: #fafcfa; }
+/* 新插入的行淡入；移除立即生效（不改行的生命周期，按行读取的回归不会被残行干扰）。 */
+.qp-row { animation: qp-row-in 0.12s ease-out; }
+@keyframes qp-row-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
 .qp-tbl tbody tr:last-child td { border-bottom: none; }
 .qp-tbl .mono { font-family: var(--font-mono); font-size: 12px; }
 .tag {

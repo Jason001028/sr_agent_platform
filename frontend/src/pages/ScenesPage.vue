@@ -116,7 +116,7 @@ onMounted(() => { scenes.ensureSearched(); });
           </tr>
         </thead>
         <tbody>
-          <tr v-for="row in scenes.rows" :key="row.id">
+          <tr v-for="row in scenes.rows" :key="row.id" class="sp-row">
             <td class="c-pick">
               <!-- 必须是 input[type=checkbox]：e2e 里 `tr.querySelector('button')`
                    取的是「打开」那颗按钮，放个 button 形状的勾选框会把它顶掉。 -->
@@ -314,6 +314,12 @@ onMounted(() => { scenes.ensureSearched(); });
 .sp-tbl td.name { min-width: 300px; word-break: break-all; line-height: 1.45; }
 .sp-tbl td.empty { color: var(--ink-sub); text-align: center; padding: 22px; }
 .sp-tbl tbody tr { transition: background 0.12s ease; }
+/* 新插入的行淡入；移除立即生效（不改行的生命周期，按行读取的回归不会被残行干扰）。 */
+.sp-row { animation: sp-row-in 0.12s ease-out; }
+@keyframes sp-row-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
 .sp-tbl tbody tr:hover td { background: #fafcfa; }
 .sp-tbl tbody tr:last-child td { border-bottom: none; }
 

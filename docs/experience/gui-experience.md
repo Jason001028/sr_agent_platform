@@ -1031,3 +1031,15 @@ JPG，`stageKind:'product'`）、右格拖进本体，进分屏 → 真鼠标在
 > **顶栏品牌区（§10.10）：平台名在 `src/lib/brand.ts` 写一处，`index.html` 的 `<title>` 要一并改（import 不进去）；logo 素材不进仓库，**部署态就是「没有 logo」**——`<img>` 报 error 时自摘退回占位小方块，别留破图；预留的是**高度**不是宽度（`.brand-mark` 28×28 min-width：方形 logo 填进去名字不动、横长字标向右撑开）；路径走 `BASE_URL + 'logo.png'`（`base:'./'` 下是 `./logo.png`），写死根路径就只在根部署对；改名与换 logo 都改不到两处「顺手的地方」——`index.html` 的字面量与服务器上的那个文件。**
 > **预览名的两族与「再落一份」（阶段5，§4.9/§4.10）：同一份栅格有两条链各烤一份，名字只差一个字符 —— 缓存那份 `<stem>.preview.jpg`（点号，服务端自己读：行的 `hasPreview`/`previewDiv`、静态 `jpgUrl`，以及前端 `isBakedPreviewUrl` 的正则 `/\.preview\.jpe?g$/i`，它决定拼不拼 `?div=`、换档后要不要重烤）；给人看的那份 `<stem>_preview.jpg`（下划线，拖入链 / 未超分 / 急烤）。用户报「烘焙的名字把 `preview` 前的 `_` 输出成 `.`」时，全仓库**没有任何改写名字的代码**（`with_suffix` 的入参恒是源栅格）——那是两族名字在同一份栅格上各落各的。修法是**再落一份同字节件**（`copyfile`），不是把点号那份改名：改名等于服务端读不到自己刚烤的图、前端把烤出来的预览当成「源本身就是显示件」，档位与重烤两条逻辑同时失效。落之前比 `mtime`，别覆盖拖入链刚按别的档位烤的那份；镜像失败只加一句 note、不改行的结论。**（订正，2026-09-22：两族当天收口成一条 —— 全平台只有 `<源 stem>_preview.jpg` 一个名字（`paths.preview_jpg_name`），点号那份由 `paths.legacy_preview_path` 反推、被任何一条链碰到的场景目录顺手删；前端正则放宽成 `[_\.]preview\.jpe?g` 以认下还没被清掉的老目录。见 [preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md) §4.8。）**
 > **落格与互换（阶段5，§10.13）：分屏下「这一张进哪一格」是判据 `lib/compare.placeInSplit` —— 给了落点进那一格、没给进活动侧、另一格已经是同一张则两格互换，**但两格都占着才互换**：目标格空着时「互换」没有「原来那张」可接，等于把另一格挖空（2026-09-22 用户报「刚进分屏把左图那张拖到右格、左图变空」）。触发它不要求用户拖的就是那一张卡片 —— `addFiles` 按**名字+字节数**去重，拖文件也会落到某条已有 rec 的 id 上。空目标格按「照常落图、另一格不动」处理。**
+
+## 11. 动效策略（2026-10-20）
+
+用户口径：左右侧折叠保守一些、不能有延迟感，整体动画要干净。落下来的规则如下，改动画前先看这一节。
+
+- **连续操作不加缓动**：滚轮缩放、拖拽平移当场生效。`animateViewsTo` 只管一次性归位；`onWheel` / `onPan` / `setSplitRatio` / 换图 / 改画布尺寸 / 切模式都先 `stopViewAnim()` 再接管 —— 缓动循环和手势写同一份 `viewA`/`viewB`，不取消就会「松手后画面还在飘」。
+- **一次性归位才插值**：双击适配 160ms、分屏回正 140ms，`easeOutCubic` + `lerpView`，只改 `viewA`/`viewB`。渲染、ROI 描边、云掩膜、分屏裁剪读的是同一份 `ViewState`，叠加层因此自动对齐，不需要各层各写一套动画。回正时分隔线直接落位（`splitRatio` 不做插值），只让两格视图缓动。
+- **入场淡入、退场立即**：遮罩、Toast、错误条、侧舱 tab 只写 `*-enter-active` / `*-enter-from`，不写 leave。会挡交互的层（解码遮罩、模态框）关闭必须即时；`decode-fade-leave-active` 另加 `pointer-events: none`，离场那一瞬不能接住画布点击。
+- **列表行不做退场**：`QcListPanel`、`QueuePage`、`ScenesPage` 用普通 `v-for` + 插入动画（`qc-row-in` / `qp-row-in` / `sp-row-in`，120ms），不用 `TransitionGroup`。离场行会在 DOM 里多留一段时间，筛选、计数、按行读取的 e2e 都会读到旧行（实测：点「未完成」后 120ms 仍能数到 4 行）。表格行只动 opacity，不对 `<tr>` 做 transform。
+- **侧栏折叠保守**：`FileList` 的 `width`/`padding` 与 `ContextPanel` 的 `.ctx-rail` 都是 100ms linear —— 用 linear 是为了「按下即到位」，加缓动反而像慢半拍。`FileList` 显式 `overflow-x: hidden`：收起过程内容比栏宽，另一个轴按规范也是 auto，会闪出横向滚动条并挤动纵向布局。
+- **tab 内容**：两侧 pane 都用 `v-show` 常驻（状态与 SSE 不丢），`.ctx-pane` 绝对定位铺满 `.ctx-body`，只给进入方 100ms 淡入。两个 pane 同时在普通流里各占 100% 高度，会把进入方顶出可视区（已踩过）。
+- **减少动效**：`style.css` 里全局 `@media (prefers-reduced-motion: reduce)` 把动画/过渡压到 0.01ms；JS 侧 `animateViewsTo` 查同一个媒体查询后直接落终值。加载进度百分比、`loading` 状态这类信息性反馈保留，只停装饰性淡入/位移/缩放。

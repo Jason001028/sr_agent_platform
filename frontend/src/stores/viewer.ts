@@ -24,7 +24,7 @@ import {
 } from '../lib/maskgen.js';
 import { fitView, locateView, wheelZoom, hitRoi, thumbToOrig, visibleThumbRect,
   clampSplitRatio, splitRects, paneAtX, wheelZoomBoth, panBoth,
-  remapViewForImage } from '../lib/viewMath.js';
+  remapViewForImage, easeOutCubic, lerpView } from '../lib/viewMath.js';
 import type { ViewState, Rect, PaneRect } from '../lib/viewMath.js';
 import {
   parseCompareMode, loadSplitRatio, saveSplitRatio, seedCompareList,
@@ -540,15 +540,22 @@ export const useViewerStore = defineStore('viewer', () => {
     if (side === 'B') viewB.value = v; else viewA.value = v;
   }
 
-  /** 只适配某一格（按它自己的视口矩形）。空格（没图 / 没像素）直接返回，
-   *  **不记账** —— 「这格没适配过」正是「往空格里拖图该老实 fit」的判据。 */
-  function fitSide(side: 'A' | 'B') {
+  /** 这一格适配后的目标视图；同时记下 `viewFor`（记账与「是否立即落位」无关）。
+     空白格（没图 / 没像素）返回 null，**不记账** —— 「这格没适配过」正是
+     「往空格里拖图该老实 fit」的判据。 */
+  function fitTarget(side: 'A' | 'B'): ViewState | null {
     const rec = recForSide(side);
-    if (!rec || !rec.thumb) return;
+    if (!rec || !rec.thumb) return null;
     const rect = rectForSide(side);
-    const v = fitView(rec.thumb.width, rec.thumb.height, rect.w, rect.h);
-    setSideView(side, v);
     viewFor[side] = { w: rec.thumb.width, h: rec.thumb.height };
+    return fitView(rec.thumb.width, rec.thumb.height, rect.w, rect.h);
+  }
+
+  /** 只适配某一格（按它自己的视口矩形），立即落位。 */
+  function fitSide(side: 'A' | 'B') {
+    stopViewAnim();
+    const v = fitTarget(side);
+    if (v) setSideView(side, v);
   }
 
   /** 两格各自适配 —— 进分屏、回正、画布尺寸变化时用。半幅是新的视口，
@@ -556,6 +563,65 @@ export const useViewerStore = defineStore('viewer', () => {
   function fitBoth() {
     fitSide('A');
     fitSide('B');
+  }
+
+  /* ---------------- 视图缓动（双击适配 / 回正） ----------------
+
+     只对**一次性归位**插值；滚轮与拖动永远即时 —— 画 ROI、对像素时指针与影像必须
+     一一对应，缓动会把这段对应关系拖慢一拍。用户一动手就 stop（滚轮/平移/换图/
+     改比例都会调它），后续手势不会和动画抢 viewA/viewB。
+
+     动画只写 viewA/viewB；渲染、ROI 描边、云量红叠、分屏裁剪都读同一份状态，
+     中间帧天然对齐，不会出现「影像走了、标注没跟上」。
+     系统偏好减少动画时直接落位（与样式层的 prefers-reduced-motion 同口径）。 */
+  const VIEW_ANIM_MS = 160;
+  let viewAnimId = 0;
+  let viewAnimFrame: number | null = null;
+
+  function prefersReducedMotion(): boolean {
+    try {
+      return typeof matchMedia === 'function'
+        && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    } catch { return false; }
+  }
+
+  function stopViewAnim() {
+    viewAnimId++;
+    if (viewAnimFrame !== null) {
+      if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(viewAnimFrame);
+      viewAnimFrame = null;
+    }
+  }
+
+  function animateViewsTo(
+    targets: { A?: ViewState; B?: ViewState }, duration = VIEW_ANIM_MS,
+  ) {
+    stopViewAnim();
+    const toA = targets.A;
+    const toB = targets.B;
+    if (!toA && !toB) { renderTick.value++; return; }
+
+    if (typeof requestAnimationFrame !== 'function' || prefersReducedMotion()) {
+      if (toA) viewA.value = { ...toA };
+      if (toB) viewB.value = { ...toB };
+      renderTick.value++;
+      return;
+    }
+
+    const fromA = { ...viewA.value };
+    const fromB = { ...viewB.value };
+    const id = viewAnimId;
+    const t0 = performance.now();
+    const step = (now: number) => {
+      if (id !== viewAnimId) return;                 // 被新动画或手势接管
+      const p = Math.min(1, Math.max(0, (now - t0) / duration));
+      const e = easeOutCubic(p);
+      if (toA) viewA.value = lerpView(fromA, toA, e);
+      if (toB) viewB.value = lerpView(fromB, toB, e);
+      renderTick.value++;
+      viewAnimFrame = p < 1 ? requestAnimationFrame(step) : null;
+    };
+    viewAnimFrame = requestAnimationFrame(step);
   }
 
   /** **换图**之后那一格的适配：对比模式下按相对视野搬过去，其余情况老实 fit。
@@ -582,6 +648,7 @@ export const useViewerStore = defineStore('viewer', () => {
      2026-09-20：两块都改走 `fitAfterImageChange` —— 对比模式下换图不再把用户的
      缩放与位置抹掉（按相对视野搬过去）。关闭模式 `compareOn` 为假，仍然走 `fit()`。 */
   function afterPixels(rec: ViewerRec) {
+    stopViewAnim();
     if (split.value) {
       if (paneA.value === rec.id) fitAfterImageChange('A', rec);
       if (paneB.value === rec.id) fitAfterImageChange('B', rec);
@@ -617,6 +684,7 @@ export const useViewerStore = defineStore('viewer', () => {
   function setCompareMode(mode: CompareMode) {
     const next = parseCompareMode(mode);
     if (next === compareMode.value) return;
+    stopViewAnim();
     const wasSplit = split.value;
     const wasOff = compareMode.value === 'off';
     // **刻意不再 exitDraw()**（2026-09-22）：对比模式下可以继续画掩码（活动侧那张），
@@ -784,6 +852,7 @@ export const useViewerStore = defineStore('viewer', () => {
   /** 设比例。**顺手持久化**：一次 localStorage 写 20 字节，比这次改动触发的重绘
       便宜得多，不值得为它多开一个 commit 接口。 */
   function setSplitRatio(r: number) {
+    stopViewAnim();
     const next = clampSplitRatio(r, canvasSize.value.w);
     if (next === splitRatio.value) return;
     splitRatio.value = next;
@@ -792,12 +861,15 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   /** 回正：比例回 0.5 **且两侧重新适配**。只把线挪回中间而不重新适配，会让两侧
-      各留一半旧视口，看起来像「图被裁掉了」。 */
+      各留一半旧视口，看起来像「图被裁掉了」。
+      **分隔线即时归位**（线是指针的视觉参照，缓动会让人觉得没跟上手），只让两侧
+      影像用 140ms 缓动到新视口；e2e 在 150ms 后读状态，这个时长留得出余量。 */
   function resetSplit() {
     splitRatio.value = clampSplitRatio(DEFAULT_SPLIT_RATIO, canvasSize.value.w);
     saveSplitRatio(splitRatio.value);
-    fitBoth();
-    renderTick.value++;
+    const a = fitTarget('A');
+    const b = fitTarget('B');
+    animateViewsTo({ A: a ?? undefined, B: b ?? undefined }, 140);
   }
 
   /* ---------------- 落位提示 ---------------- */
@@ -1077,6 +1149,7 @@ export const useViewerStore = defineStore('viewer', () => {
   /** 激活一条 rec。`side` 只在分屏下有意义（拖放落点算出来的那一半）；不给就是
       「落活动侧」（文件列表点击 / 盘阵栏 / 待修复清单「打开」都不给）。 */
   async function activate(id: number, side?: 'A' | 'B') {
+    stopViewAnim();                       // 换图/切侧优先于缓动
     const rec = recs.value.find((r) => r.id === id);
     if (!rec) return;
     const already = activeId.value === id;
@@ -1623,6 +1696,7 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   function setCanvasSize(w: number, h: number) {
+    stopViewAnim();
     canvasSize.value = { w, h };
     if (split.value) {
       // 半幅宽度变了 → 比例先收进新界限，再两格各自适配
@@ -1638,6 +1712,7 @@ export const useViewerStore = defineStore('viewer', () => {
   /** 只适配**活动格**（看全幅）。单屏时活动格就是整块画布 → 与今天完全等价。
       **写 `viewFor`**：这就是「这格当前视图是按多大的一张图算的」这笔账。 */
   function fit() {
+    stopViewAnim();
     const rec = activeRec.value;
     if (!rec || !rec.thumb) return;
     const rect = activePaneRect();
@@ -1731,6 +1806,7 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   function onWheel(mx: number, my: number, factor: number) {
+    stopViewAnim();                       // 手势优先：缓动中的归位立即让位
     if (split.value) {
       // 指针落在哪一格，就以那一格里的归一化位置为锚点，同一个归一化位置施加到另一格。
       // 两格等宽且都 fit 时这条规则就是逐像素锁定。
@@ -1756,6 +1832,7 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   function onPan(dx: number, dy: number) {
+    stopViewAnim();
     if (split.value) {
       const out = panBoth(viewA.value, viewB.value, dx, dy);
       viewA.value = out.a;
@@ -1768,6 +1845,7 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   function locatePixel(x: number | string, y: number | string) {
+    stopViewAnim();
     const rec = activeRec.value;
     if (!rec || !rec.thumb) { showErr('请先打开一张图'); return; }
     const W = rec.W, H = rec.H;
@@ -2567,10 +2645,13 @@ export const useViewerStore = defineStore('viewer', () => {
     return false;
   }
 
+  /** 双击 = 适配活动格。缓动 160ms；绘制模式下双击是「闭合多边形」，不走这里。 */
   function onDblClick() {
     if (drawMode.value) { closePolygon(); return; }
-    fit();
-    renderTick.value++;
+    const side = activeSide.value;
+    const target = fitTarget(side);
+    if (!target) { renderTick.value++; return; }
+    animateViewsTo(side === 'B' ? { B: target } : { A: target });
   }
 
   function onKeyDown(e: KeyboardEvent) {

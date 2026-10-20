@@ -22,14 +22,17 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
 </script>
 
 <template>
-  <div v-if="store.modal.visible" class="notice-modal" @click.self="store.hideModal()">
-    <div class="nm-box" role="alertdialog" aria-modal="true">
-      <div class="nm-title">{{ store.modal.title }}</div>
-      <div class="nm-body">{{ store.modal.body }}</div>
-      <div v-if="store.modal.hint" class="nm-hint">{{ store.modal.hint }}</div>
-      <button class="nm-ok" type="button" @click="store.hideModal()">知道了</button>
+  <!-- 只做淡入：模态挡着整块界面，关闭必须是即时的（淡出期间还会拦住下一次点击）。 -->
+  <Transition name="modal-fade">
+    <div v-if="store.modal.visible" class="notice-modal" @click.self="store.hideModal()">
+      <div class="nm-box" role="alertdialog" aria-modal="true">
+        <div class="nm-title">{{ store.modal.title }}</div>
+        <div class="nm-body">{{ store.modal.body }}</div>
+        <div v-if="store.modal.hint" class="nm-hint">{{ store.modal.hint }}</div>
+        <button class="nm-ok" type="button" @click="store.hideModal()">知道了</button>
+      </div>
     </div>
-  </div>
+  </Transition>
 </template>
 
 <style scoped>
@@ -42,6 +45,8 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
   background: rgba(35, 42, 40, 0.28);
   z-index: 100;
 }
+.modal-fade-enter-active { transition: opacity 0.12s ease; }
+.modal-fade-enter-from { opacity: 0; }
 .nm-box {
   display: flex;
   flex-direction: column;

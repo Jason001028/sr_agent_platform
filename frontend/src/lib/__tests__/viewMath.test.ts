@@ -10,6 +10,7 @@ import {
   pointInPoly, hitRoi, visibleThumbRect, parseLocPair,
   clampSplitRatio, splitRects, paneAtX, ratioFromPointer, normAnchor, anchorAtLocal,
   wheelZoomBoth, panBoth, remapViewForImage, SPLIT_MIN_HALF_PX,
+  easeOutCubic, lerpView,
 } from '../viewMath.js';
 import type { Poly } from '../maskgen.js';
 
@@ -31,6 +32,37 @@ describe('fitView（适配 + 居中）', () => {
     expect(v.scale).toBe(1);
     expect(v.ox).toBe(100);
     expect(v.oy).toBe(100);
+  });
+});
+
+describe('lerpView / easeOutCubic（双击适配、回正的插值）', () => {
+  const from = { scale: 1, ox: 0, oy: 0 };
+  const to = { scale: 0.5, ox: 100, oy: -20 };
+
+  it('端点精确落位：t=0 原样，t=1 目标', () => {
+    expect(lerpView(from, to, 0)).toEqual(from);
+    expect(lerpView(from, to, 1)).toEqual(to);
+  });
+  it('中间帧线性插值（缓动由 easeOutCubic 提供）', () => {
+    expect(lerpView(from, to, 0.5)).toEqual({ scale: 0.75, ox: 50, oy: -10 });
+  });
+  it('easeOutCubic 端点 0/1、单调递增且先快后慢', () => {
+    expect(easeOutCubic(0)).toBe(0);
+    expect(easeOutCubic(1)).toBe(1);
+    expect(easeOutCubic(0.5)).toBeCloseTo(0.875, 6);
+    expect(easeOutCubic(0.25)).toBeLessThan(easeOutCubic(0.5));
+    expect(easeOutCubic(-1)).toBe(0);          // 越界输入夹住
+    expect(easeOutCubic(2)).toBe(1);
+  });
+  it('分屏两侧各按自己的目标插值，t=1 各归各位（互不串格）', () => {
+    const midA = lerpView(from, to, easeOutCubic(0.5));
+    const midB = lerpView(to, from, easeOutCubic(0.5));
+    expect(midA).not.toEqual(midB);
+    // 中间帧的 ROI 坐标只由该格 view 决定：渲染与描边读同一份状态，天然对齐。
+    expect(thumbToScreen(midA, 40, 40))
+      .toEqual([midA.ox + 40 * midA.scale, midA.oy + 40 * midA.scale]);
+    expect(lerpView(from, to, easeOutCubic(1))).toEqual(to);
+    expect(lerpView(to, from, easeOutCubic(1))).toEqual(from);
   });
 });
 

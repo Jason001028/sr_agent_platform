@@ -342,6 +342,13 @@ watch(
   border-radius: var(--r-ctrl);
   padding: 8px 10px;
 }
+/* 行是新建 DOM 时淡入（CSS 动画只在元素插入时跑一次，复用的行不会重放）。
+   **刻意不用 TransitionGroup**：它的离场行会多留在 DOM 里一两帧起步，筛选/计数
+   会读到已经该消失的行；而一次性插入动画不改变任何行的生命周期。 */
+@keyframes qc-row-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 .qc-h {
   margin: 0 0 6px;
   display: flex;
@@ -465,6 +472,7 @@ watch(
   padding: 4px 7px;
   cursor: pointer;
   transition: border-color 0.12s ease, background 0.12s ease;
+  animation: qc-row-in 0.12s ease-out;
 }
 .qc-row:hover { border-color: var(--accent-2); }
 .qc-row.on { border-color: var(--accent-2); background: var(--accent-soft); }

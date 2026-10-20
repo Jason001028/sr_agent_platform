@@ -53,8 +53,19 @@ const toggleTitle = () => (collapsed.value ? '展开上下文侧舱' : '收起�
         ><AppIcon name="bot" :size="16" />Agent</button>
     </div>
     <div class="ctx-body">
-      <RoiToolsTab v-show="tab === 'roi'" />
-      <AgentChatTab v-show="tab === 'agent'" />
+      <!-- 两块都常驻（v-show），切换不打断队列 SSE / Agent 会话；淡入只做新进来那块，
+           旧的立即让位。两个 pane 绝对定位叠在同一块区域 —— 否则 v-show 离场的那 100ms
+           里两块各占 100% 高度，正在进入的那块会被挤出可视区。 -->
+      <Transition name="ctx-content-fade">
+        <div v-show="tab === 'roi'" class="ctx-pane">
+          <RoiToolsTab />
+        </div>
+      </Transition>
+      <Transition name="ctx-content-fade">
+        <div v-show="tab === 'agent'" class="ctx-pane">
+          <AgentChatTab />
+        </div>
+      </Transition>
     </div>
   </aside>
 </template>
@@ -92,7 +103,7 @@ const toggleTitle = () => (collapsed.value ? '展开上下文侧舱' : '收起�
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  transition: width 0.12s ease;
+  transition: width 0.1s linear;
 }
 .ctx-rail.collapsed {
   width: 0;
@@ -133,6 +144,7 @@ const toggleTitle = () => (collapsed.value ? '展开上下文侧舱' : '收起�
 }
 
 .ctx-body {
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow: hidden;
@@ -140,4 +152,9 @@ const toggleTitle = () => (collapsed.value ? '展开上下文侧舱' : '收起�
   border: 1px solid var(--line);
   border-bottom: none;
 }
+.ctx-pane { position: absolute; inset: 0; }
+/* 只给**进入**的那块做淡入：离场留空反而干净（交叉淡化会让两段内容叠字）。
+   没有 leave 规则 = Vue 认为无过渡，切 tab 时旧内容立即隐藏。 */
+.ctx-content-fade-enter-active { transition: opacity 0.1s ease; }
+.ctx-content-fade-enter-from { opacity: 0; }
 </style>

@@ -109,53 +109,59 @@ const failedCount = computed(() =>
     </div>
 
     <!-- 内联确认条（不引模态框）：普通确认 / 输入确认词 -->
-    <div v-if="ask" class="scb-ask">
-      <template v-if="ask === 'selected'">
-        <span class="scb-ask-text">
-          清除选定的 <strong>{{ scenes.selectedCount }}</strong> 项？
-          删掉的是盘阵上的预览 JPG（<strong>不进回收站</strong>），
-          下次打开会重新烘焙（要读一遍大图，可能要等几十秒）。
-        </span>
-        <button type="button" class="btn mini danger" :disabled="busy"
-                @click="confirm">确认清除</button>
-        <button type="button" class="btn mini ghost" @click="cancel">取消</button>
-      </template>
-      <template v-else>
-        <span class="scb-ask-text">
-          将清除<strong>当前列表里的 {{ scenes.selectableRows.length }} 项</strong>
-          （受筛选影响，不是盘阵上所有场景）。删掉的是盘阵上的预览 JPG，
-          <strong>不进回收站</strong>，下次打开会重新烘焙。<template
-            v-if="hiddenCount">另有 {{ hiddenCount }} 项命中不在这份列表里（列表最多显示
-            {{ scenes.rows.length }} 条），这次清不到，要一并清请缩小筛选后再来。</template>
-        </span>
-        <label class="scb-word">
-          <span>输入确认词</span>
-          <input v-model="word" class="scb-in" type="text" spellcheck="false"
-                 :placeholder="CLEAR_ALL_WORD" :disabled="busy" />
-        </label>
-        <button type="button" class="btn mini danger" :disabled="busy || !wordOk"
-                @click="confirm">确认清除</button>
-        <button type="button" class="btn mini ghost" @click="cancel">取消</button>
-      </template>
-    </div>
+    <Transition name="inline-fade" mode="out-in">
+      <div v-if="ask" class="scb-ask">
+        <template v-if="ask === 'selected'">
+          <span class="scb-ask-text">
+            清除选定的 <strong>{{ scenes.selectedCount }}</strong> 项？
+            删掉的是盘阵上的预览 JPG（<strong>不进回收站</strong>），
+            下次打开会重新烘焙（要读一遍大图，可能要等几十秒）。
+          </span>
+          <button type="button" class="btn mini danger" :disabled="busy"
+                  @click="confirm">确认清除</button>
+          <button type="button" class="btn mini ghost" @click="cancel">取消</button>
+        </template>
+        <template v-else>
+          <span class="scb-ask-text">
+            将清除<strong>当前列表里的 {{ scenes.selectableRows.length }} 项</strong>
+            （受筛选影响，不是盘阵上所有场景）。删掉的是盘阵上的预览 JPG，
+            <strong>不进回收站</strong>，下次打开会重新烘焙。<template
+              v-if="hiddenCount">另有 {{ hiddenCount }} 项命中不在这份列表里（列表最多显示
+              {{ scenes.rows.length }} 条），这次清不到，要一并清请缩小筛选后再来。</template>
+          </span>
+          <label class="scb-word">
+            <span>输入确认词</span>
+            <input v-model="word" class="scb-in" type="text" spellcheck="false"
+                   :placeholder="CLEAR_ALL_WORD" :disabled="busy" />
+          </label>
+          <button type="button" class="btn mini danger" :disabled="busy || !wordOk"
+                  @click="confirm">确认清除</button>
+          <button type="button" class="btn mini ghost" @click="cancel">取消</button>
+        </template>
+      </div>
+    </Transition>
 
-    <p v-if="scenes.clearError" class="scb-err">{{ scenes.clearError }}</p>
+    <Transition name="inline-fade">
+      <p v-if="scenes.clearError" class="scb-err">{{ scenes.clearError }}</p>
+    </Transition>
 
     <!-- 结果：汇总一行 + 明细（失败自动展开） -->
-    <div v-if="scenes.clearResult" class="scb-res">
-      <span class="scb-sum">{{ scenes.clearSummary }}</span>
-      <details v-if="problems.length" class="scb-det" :open="failedCount > 0">
-        <summary>明细（{{ problems.length }} 条跳过 / 失败）</summary>
-        <ul class="scb-list">
-          <li v-for="p in problems" :key="p.key">
-            <span class="scb-where">{{ p.dir ?? '—' }}</span>
-            <span>{{ p.text }}</span>
-          </li>
-        </ul>
-      </details>
-      <button type="button" class="btn mini ghost" title="收起这一条结果"
-              @click="scenes.clearResult = null">知道了</button>
-    </div>
+    <Transition name="inline-fade">
+      <div v-if="scenes.clearResult" class="scb-res">
+        <span class="scb-sum">{{ scenes.clearSummary }}</span>
+        <details v-if="problems.length" class="scb-det" :open="failedCount > 0">
+          <summary>明细（{{ problems.length }} 条跳过 / 失败）</summary>
+          <ul class="scb-list">
+            <li v-for="p in problems" :key="p.key">
+              <span class="scb-where">{{ p.dir ?? '—' }}</span>
+              <span>{{ p.text }}</span>
+            </li>
+          </ul>
+        </details>
+        <button type="button" class="btn mini ghost" title="收起这一条结果"
+                @click="scenes.clearResult = null">知道了</button>
+      </div>
+    </Transition>
   </div>
 </template>
 
@@ -165,6 +171,10 @@ const failedCount = computed(() =>
   border-bottom: 1px solid var(--line);
   background: var(--surface);
 }
+.inline-fade-enter-active,
+.inline-fade-leave-active { transition: opacity 0.1s ease, transform 0.1s ease; }
+.inline-fade-enter-from,
+.inline-fade-leave-to { opacity: 0; transform: translateY(-3px); }
 .scb-row {
   display: flex;
   gap: 10px;

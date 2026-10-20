@@ -208,6 +208,19 @@ body {
   padding: 0;
 }
 
+/* 动效只服务于状态反馈；用户明确关闭动画时，布局和提示立即到位，
+   不影响进度数值或加载状态本身。 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 /* ---------- 全站共享的轻量工具类（供页面复用，scoped 不可及处使用） ---------- */
 /* 一级标题（页面大标题 24–28 / 700） */
 .page-title {

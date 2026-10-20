@@ -25,6 +25,25 @@ export function fitView(thumbW: number, thumbH: number, cw: number, ch: number):
   return { scale: s, ox: (cw - thumbW * s) / 2, oy: (ch - thumbH * s) / 2 };
 }
 
+/* ---------------- 视图缓动（双击适配 / 回正用；见 stores/viewer.ts） ----------------
+   只插值 ViewState 本身：渲染、ROI 描边、云量红叠、分屏裁剪都读同一份
+   viewA/viewB，所以中间帧天然对齐，不需要另外同步标注层。
+   插值输入是**已缓动**的进度（0–1）；调用方负责每帧 write + renderTick。 */
+export function easeOutCubic(t: number): number {
+  const p = Math.max(0, Math.min(1, t));
+  return 1 - (1 - p) ** 3;
+}
+
+export function lerpView(from: ViewState, to: ViewState, t: number): ViewState {
+  if (!(t > 0)) return { ...from };
+  if (t >= 1) return { ...to };
+  return {
+    scale: from.scale + (to.scale - from.scale) * t,
+    ox: from.ox + (to.ox - from.ox) * t,
+    oy: from.oy + (to.oy - from.oy) * t,
+  };
+}
+
 /* 缩略图坐标 → 屏幕坐标（HTML `thumbToScreen`） */
 export function thumbToScreen(view: ViewState, tx: number, ty: number): Pt {
   return [view.ox + tx * view.scale, view.oy + ty * view.scale];

@@ -12,25 +12,31 @@ const store = useViewerStore();
 
 <template>
   <!-- 解码/合并/生成遮罩 -->
-  <div v-if="store.overlay.visible" class="decode-mask">
-    <div class="decode-box">
-      <div class="spinner"></div>
-      <div class="mask-title">{{ store.overlay.title }}</div>
-      <div v-if="store.overlay.sub" class="mask-sub">{{ store.overlay.sub }}</div>
-      <div v-if="store.overlay.bar" class="progress-wrap">
-        <div class="progress-track">
-          <div class="progress-bar" :style="{ width: store.overlay.progress + '%' }"></div>
+  <Transition name="decode-fade">
+    <div v-if="store.overlay.visible" class="decode-mask">
+      <div class="decode-box">
+        <div class="spinner"></div>
+        <div class="mask-title">{{ store.overlay.title }}</div>
+        <div v-if="store.overlay.sub" class="mask-sub">{{ store.overlay.sub }}</div>
+        <div v-if="store.overlay.bar" class="progress-wrap">
+          <div class="progress-track">
+            <div class="progress-bar" :style="{ width: store.overlay.progress + '%' }"></div>
+          </div>
+          <div class="progress-pct">{{ store.overlay.progress }}%</div>
         </div>
-        <div class="progress-pct">{{ store.overlay.progress }}%</div>
       </div>
     </div>
-  </div>
+  </Transition>
 
   <!-- toast -->
-  <div v-if="store.toast" class="toast">{{ store.toast }}</div>
+  <Transition name="notice-fade">
+    <div v-if="store.toast" class="toast">{{ store.toast }}</div>
+  </Transition>
 
   <!-- 错误条 -->
-  <div v-if="store.error" class="err-box">{{ store.error }}</div>
+  <Transition name="notice-fade">
+    <div v-if="store.error" class="err-box">{{ store.error }}</div>
+  </Transition>
 </template>
 
 <style scoped>
@@ -52,6 +58,16 @@ const store = useViewerStore();
   backdrop-filter: blur(4px);
   z-index: 20;
   text-align: center;
+}
+.decode-fade-enter-active,
+.decode-fade-leave-active { transition: opacity 0.12s ease; }
+.decode-fade-leave-active { pointer-events: none; }   /* 淡出期间别继续挡画布 */
+.decode-fade-enter-from,
+.decode-fade-leave-to { opacity: 0; }
+.decode-fade-enter-active .decode-box { animation: decode-box-in 0.12s ease-out; }
+@keyframes decode-box-in {
+  from { opacity: 0; transform: translateY(4px) scale(0.99); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 .decode-box {
   display: flex;
@@ -130,4 +146,8 @@ const store = useViewerStore();
   text-align: center;
   word-break: break-all;
 }
+.notice-fade-enter-active,
+.notice-fade-leave-active { transition: opacity 0.12s ease, transform 0.12s ease; }
+.notice-fade-enter-from,
+.notice-fade-leave-to { opacity: 0; transform: translateX(-50%) translateY(4px); }
 </style>

@@ -145,8 +145,12 @@ function linkTag(note: string): string {
   flex: none;
   background: var(--chrome);
   border-right: 1px solid var(--line);
+  /* 横向必须显式 hidden：只写 overflow-y:auto 时另一轴按规范也是 auto，
+     收缩的 100ms 里内容比栏宽，会闪出一条横向滚动条并挤动纵向布局。 */
+  overflow-x: hidden;
   overflow-y: auto;
   padding: 10px;
+  transition: width 0.1s linear, padding 0.1s linear;
 }
 .sidebar.collapsed {
   width: 0;

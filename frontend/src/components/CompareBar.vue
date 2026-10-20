@@ -43,60 +43,62 @@ function pick(kind: 'input' | 'product' | 'nosr') {
 </script>
 
 <template>
-  <div v-if="store.cmpStripOpen" class="cmp-bar" data-e2e="cmp-bar">
-    <div class="cmp-modes" role="radiogroup" aria-label="图像对比模式">
-      <button
-        v-for="m in MODES"
-        :key="m.value"
-        type="button"
-        class="cmp-mode"
-        role="radio"
-        :aria-checked="store.compareMode === m.value"
-        :class="{ on: store.compareMode === m.value }"
-        :title="m.title"
-        :data-e2e="'cmp-mode-' + m.value"
-        @click="store.setCompareMode(m.value)"
-      >{{ m.label }}</button>
-    </div>
+  <Transition name="cmp-bar-fade">
+    <div v-if="store.cmpStripOpen" class="cmp-bar" data-e2e="cmp-bar">
+      <div class="cmp-modes" role="radiogroup" aria-label="图像对比模式">
+        <button
+          v-for="m in MODES"
+          :key="m.value"
+          type="button"
+          class="cmp-mode"
+          role="radio"
+          :aria-checked="store.compareMode === m.value"
+          :class="{ on: store.compareMode === m.value }"
+          :title="m.title"
+          :data-e2e="'cmp-mode-' + m.value"
+          @click="store.setCompareMode(m.value)"
+        >{{ m.label }}</button>
+      </div>
 
-    <template v-if="isSplit">
+      <template v-if="isSplit">
+        <span class="cmp-sep" aria-hidden="true"></span>
+        <span class="cmp-legend">
+          <span class="cmp-chip-a">左</span>
+          <span class="cmp-chip-b">右</span>
+          <span class="cmp-legend-text">
+            拖放落在哪半就进哪半；滚轮与拖动同步作用两侧
+          </span>
+        </span>
+        <button
+          type="button"
+          class="cmp-reset"
+          data-e2e="cmp-reset"
+          title="分隔线回到中间，两侧重新适配"
+          @click="store.resetSplit()"
+        >回正</button>
+      </template>
+
       <span class="cmp-sep" aria-hidden="true"></span>
-      <span class="cmp-legend">
-        <span class="cmp-chip-a">左</span>
-        <span class="cmp-chip-b">右</span>
-        <span class="cmp-legend-text">
-          拖放落在哪半就进哪半；滚轮与拖动同步作用两侧
+      <span class="cmp-scenes">
+        <button
+          v-for="c in CHIPS"
+          :key="c.kind"
+          type="button"
+          class="cmp-scene"
+          :disabled="!sceneId || store.busy"
+          :title="sceneId
+            ? '打开这个场景的' + c.label + '，显示在活动侧'
+              + '（服务端烘焙的下采样 JPG，不必本地解码）'
+            : '先打开一张带盘阵关联的图（场景目录打开的场景图，或反推关联上的本地图）'"
+          :data-e2e="'cmp-sib-' + c.kind"
+          @click="pick(c.kind)"
+        >{{ c.label }}</button>
+        <span v-if="!sceneId" class="cmp-note" data-e2e="cmp-sib-note">
+          先打开一张带盘阵关联的图
         </span>
       </span>
-      <button
-        type="button"
-        class="cmp-reset"
-        data-e2e="cmp-reset"
-        title="分隔线回到中间，两侧重新适配"
-        @click="store.resetSplit()"
-      >回正</button>
-    </template>
-
-    <span class="cmp-sep" aria-hidden="true"></span>
-    <span class="cmp-scenes">
-      <button
-        v-for="c in CHIPS"
-        :key="c.kind"
-        type="button"
-        class="cmp-scene"
-        :disabled="!sceneId || store.busy"
-        :title="sceneId
-          ? '打开这个场景的' + c.label + '，显示在活动侧'
-            + '（服务端烘焙的下采样 JPG，不必本地解码）'
-          : '先打开一张带盘阵关联的图（场景目录打开的场景图，或反推关联上的本地图）'"
-        :data-e2e="'cmp-sib-' + c.kind"
-        @click="pick(c.kind)"
-      >{{ c.label }}</button>
-      <span v-if="!sceneId" class="cmp-note" data-e2e="cmp-sib-note">
-        先打开一张带盘阵关联的图
-      </span>
-    </span>
-  </div>
+    </div>
+  </Transition>
 </template>
 
 <style scoped>
@@ -116,6 +118,10 @@ function pick(kind: 'input' | 'product' | 'nosr') {
   color: var(--ink-body);
   overflow: hidden;
 }
+.cmp-bar-fade-enter-active,
+.cmp-bar-fade-leave-active { transition: opacity 0.1s ease, transform 0.1s ease; }
+.cmp-bar-fade-enter-from,
+.cmp-bar-fade-leave-to { opacity: 0; transform: translateY(-3px); }
 
 .cmp-modes {
   display: flex;
