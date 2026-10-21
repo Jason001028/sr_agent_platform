@@ -259,6 +259,7 @@ export const useChatStore = defineStore('chat', () => {
   const sessionId = ref<string | null>(null);
   const messages = ref<ChatMsg[]>([]);
   const sending = ref(false);
+  const agentStatus = ref<'idle' | 'thinking' | 'responding'>('idle');
   /** 流式增量批次号：token/reasoning 批量合并后 +1，供滚动跟随用。 */
   const streamTick = ref(0);
   const error = ref('');
@@ -269,6 +270,7 @@ export const useChatStore = defineStore('chat', () => {
   /** 待发截图（≤2）：从查看器加进来的，发送即清。 */
   const pendingImages = ref<PendingImage[]>([]);
   let pendingSeq = 0;
+  let agentStatusTimer: ReturnType<typeof setTimeout> | null = null;
 
   function hasSession(): boolean { return sessionId.value !== null; }
 
@@ -372,6 +374,8 @@ export const useChatStore = defineStore('chat', () => {
     if (sending.value) { error.value = '上一回合仍在进行，请稍候'; return; }
     error.value = '';
     sending.value = true;
+    if (agentStatusTimer !== null) { clearTimeout(agentStatusTimer); agentStatusTimer = null; }
+    agentStatus.value = 'thinking';
     // 发送即取走托盘：失败也不回填，避免重试时同一张图发两遍
     const pending = pendingImages.value;
     pendingImages.value = [];
@@ -408,6 +412,10 @@ export const useChatStore = defineStore('chat', () => {
         streamTick.value += 1;
       };
       const onEvent = (ev: PlatformSseEvent): void => {
+        if (ev.type === 'token' && ev.delta) agentStatus.value = 'responding';
+        if ((ev.type === 'assistant' || ev.type === 'turn_done') && 'content' in ev && ev.content?.trim()) {
+          agentStatus.value = 'responding';
+        }
         if (ev.type === 'token' || ev.type === 'reasoning') {
           buf.push(ev);
           if (timer === null) timer = setTimeout(flush, 50);
@@ -432,6 +440,10 @@ export const useChatStore = defineStore('chat', () => {
     } finally {
       finalizeStreaming();                // 没有 turn_done 的异常路径也要熄灯
       sending.value = false;
+      agentStatusTimer = setTimeout(() => {
+        agentStatus.value = 'idle';
+        agentStatusTimer = null;
+      }, 320);
     }
   }
 
@@ -540,7 +552,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   return {
-    sessions, sessionId, messages, sending, streamTick, error, loading,
+    sessions, sessionId, messages, sending, agentStatus, streamTick, error, loading,
     usage, lastRunId, feedbackRating,
     pendingImages, addPendingImage, removePendingImage, clearPendingImages,
     hasSession, init, refreshSessions, loadHistory, newSession, selectSession, send,

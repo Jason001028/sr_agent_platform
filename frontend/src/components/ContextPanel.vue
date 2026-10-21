@@ -16,8 +16,11 @@ import { useViewerStore } from '../stores/viewer';
 import RoiToolsTab from './RoiToolsTab.vue';
 import AgentChatTab from './AgentChatTab.vue';
 import AppIcon from './AppIcon.vue';
+import AgentBotIcon from './AgentBotIcon.vue';
+import { useChatStore } from '../stores/chat.js';
 
 const store = useViewerStore();
+const chat = useChatStore();
 const tab = ref<'roi' | 'agent'>('roi');
 
 /** store 里存的是「展开」，组件里用「收起」更自然（CSS 也是 .collapsed）。 */
@@ -50,7 +53,7 @@ const toggleTitle = () => (collapsed.value ? '展开上下文侧舱' : '收起�
         class="ctx-tab"
         :class="{ on: tab === 'agent' }"
         @click="tab = 'agent'"
-        ><AppIcon name="bot" :size="16" />Agent</button>
+        ><AgentBotIcon :status="chat.agentStatus" :size="16" />Agent</button>
     </div>
     <div class="ctx-body">
       <!-- 两块都常驻（v-show），切换不打断队列 SSE / Agent 会话；淡入只做新进来那块，

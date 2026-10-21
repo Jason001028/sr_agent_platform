@@ -10,13 +10,15 @@
  * 「一键解析」跑批期间整排禁用：批量清理由列表结构驱动，跑着时移除卡片会让
  * 占位卡的原地补齐落空（见 stores/qclist.ts 的 bakeAll），不该从这个口子进。
  */
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import { useQcListStore } from '../stores/qclist';
 import AppIcon from './AppIcon.vue';
+import FavoriteStar from './FavoriteStar.vue';
 
 const store = useViewerStore();
 const qc = useQcListStore();
+const favPulseKey = ref(0);
 
 const baking = computed(
   () => qc.bakeState === 'running' || qc.bakeState === 'stopping',
@@ -74,6 +76,10 @@ const undoTitle = computed(() => {
   if (baking.value) return bakeHint;
   return store.canUndo ? `撤回上一次操作：${store.undoLabel}` : '没有可撤回的列表操作';
 });
+function toggleFavorite(): void {
+  store.toggleFavorite();
+  favPulseKey.value++;
+}
 </script>
 
 <template>
@@ -99,9 +105,9 @@ const undoTitle = computed(() => {
         :disabled="baking || !store.selectMode || !selCount"
         :aria-label="favTitle"
         :title="favTitle"
-        @click="store.toggleFavorite()"
+        @click="toggleFavorite"
       >
-        <AppIcon name="star" :size="16" />
+        <FavoriteStar :size="16" :filled="selAllFav" :pulse-key="favPulseKey" />
       </button>
       <button
         type="button"

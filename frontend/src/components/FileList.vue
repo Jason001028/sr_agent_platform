@@ -21,6 +21,7 @@ import { isIntermediateStage } from '../lib/stage.js';
 import FileListTools from './FileListTools.vue';
 import FileThumb from './FileThumb.vue';
 import AppIcon from './AppIcon.vue';
+import FavoriteStar from './FavoriteStar.vue';
 
 const store = useViewerStore();
 const chat = useChatStore();
@@ -185,7 +186,7 @@ function linkTag(note: string): string {
           aria-label="取消收藏"
           @click.stop="store.toggleFavorite([rec.id])"
         >
-          <AppIcon name="star" :size="12" />
+          <FavoriteStar :size="12" :filled="true" />
         </button>
         <!-- 截图键：叠在缩略图右上角，悬停/聚焦/当前卡才显形（opacity 而非 display，
              免得悬停时布局跳动）。@click.stop 不触发卡片激活。多选时让位给勾选。 -->

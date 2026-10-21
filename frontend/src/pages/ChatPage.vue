@@ -18,6 +18,7 @@ import ChatAttachTray from '../components/ChatAttachTray.vue';
 import ChatImagePicker from '../components/ChatImagePicker.vue';
 import ChatBubbleImages from '../components/ChatBubbleImages.vue';
 import AppIcon from '../components/AppIcon.vue';
+import AgentBotIcon from '../components/AgentBotIcon.vue';
 import { apiListPlugins } from '../lib/api.js';
 import { loadSrConfig } from '../lib/scene.js';
 import { splitAgentPayload } from '../lib/agentContext.js';
@@ -251,7 +252,7 @@ onMounted(() => {
     <!-- 对话区 -->
     <section class="cp-main">
       <div class="cp-head">
-        <span class="cp-title">Agent 聊天</span>
+        <span class="cp-title"><AgentBotIcon :status="chat.agentStatus" :size="16" />Agent 聊天</span>
         <span v-if="chat.sessionId" class="cp-sessid">会话 {{ shortId(chat.sessionId) }}</span>
         <span v-else class="cp-sessid empty">未选择会话</span>
         <TokenUsagePanel v-if="tokenPluginEnabled" :usage="chat.usage" />
@@ -483,7 +484,7 @@ onMounted(() => {
   padding: 12px 18px; border-bottom: 1px solid var(--line); flex: none;
   background: var(--surface);
 }
-.cp-title { font-size: 16px; font-weight: 600; color: var(--ink); }
+.cp-title { display: inline-flex; align-items: center; gap: 6px; font-size: 16px; font-weight: 600; color: var(--ink); }
 .cp-sessid { font-size: 12px; color: var(--ink-sub); font-family: var(--font-mono); }
 .cp-sessid.empty { color: var(--ink-faint); }
 .cp-err {
