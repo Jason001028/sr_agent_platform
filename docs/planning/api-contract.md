@@ -45,6 +45,7 @@
 |---|---|---|
 | `SR_AGENT_DB` | `sr_agent.db` | SQLite 路径（chat 会话 + sr_tasks 同一库） |
 | `SR_LLM_MOCK` | 未设 | `=1` 时聊天走假 LLM（§5.1），不连任何端点 |
+| `SR_LLM_STREAM` | `1` | 模型流式输出总开关；`0/false/no/off` → 关（退回一次性 create，请求里的 `stream:true` 不能强开） |
 | `SR_EXECUTOR` | `slurm`（仓库默认） | 生产部署写 `local`（本机直跑）；`slurm` 是已冻结的调度分支 |
 | `SR_SLURM_FAKE` | 未设 | `=1` 且执行器为 `slurm` 时提交走内存假调度器（§5.2），无 sbatch 也能跑通 submit→status→cancel |
 | `SR_SCENES_ROOT` | 未设 | 盘阵场景根；未设 → fake 回退（阶段4 已有） |
@@ -130,9 +131,9 @@
 - `DELETE /api/chat/sessions/{id}` → `204`。同时删除该会话的 `messages` / `llm_usage` / `agent_runs` / `trajectory_events` / `trajectory_feedback`，以及聊天截图目录（见下）。回合进行中（会话锁被占用）→ `409`；会话不存在 → 404。队列任务 `sr_tasks` 不删（外部副作用的操作记录），其 `session_id` 保留为溯源线索。
 - `GET /api/chat/sessions/{id}/messages` → `200 {"session_id", "status", "messages":[…]}`；消息对前端投影为：
   `{seq, role, content?, images?:[{url,name}] | null, tool_calls?:[{name,arguments}] | null, tool_name?, ok?}`（role ∈ user/assistant/tool；tool 消息带 `name`/`ok`）。`images` 只出现在带截图的历史 user 消息上；纯文字老消息不出现该字段（形状与本次改动前逐字一致）。404 = 会话不存在。
-- `POST /api/chat/sessions/{id}/messages` — body `{"content":"<用户话术>","images":[…]?}`，**`Content-Type: text/event-stream`，POST 即流**。行为：
+- `POST /api/chat/sessions/{id}/messages` — body `{"content":"<用户话术>","images":[…]?,"stream":true|false?}`，**`Content-Type: text/event-stream`，POST 即流**。`stream` 缺省跟随服务端 `SR_LLM_STREAM`（缺省 1）；出现时须为布尔（否则 400），且**只能再关、不能强开**。行为：
   1. 会话存在且无并发回合 → 建占位（可复用 loop 的 `store.set_session_status(…,"active")`）→ 上锁；
-  2. 线程池跑 `run_loop(cfg, content, store=…, session_id=…, resume=True, on_event=bridge)`，事件经 `asyncio.Queue` 转 SSE 帧逐条下发（`emit` 缝见 §4.2）；
+  2. 线程池跑 `run_loop(cfg, content, store=…, session_id=…, resume=True, on_event=bridge, stream=…)`，事件经 `asyncio.Queue` 转 SSE 帧逐条下发（`emit` / `on_delta` 缝见 §4.2）；
   3. 结束：`turn_done`（带最终文本），**之后关流并释放会话锁**。LLM 调用/循环异常 → `error` 事件 + `HTTP` 结束后前端据 `type:"error"` 渲染失败态（SSE 已开不可改 HTTP 码）。
   - **并发**：同一 session 同时两个回合 → 立即 `409 {"detail":"会话正忙"}`（前端据此禁用发送按钮 + 显示"正在思考"）。
   - 会话不存在 → 404。`content` 与 `images` **至少一样非空**；两者都空 → 400。`images` 非数组或超过 2 张 → 400（都在开流前返回，见下）。
@@ -180,13 +181,32 @@
 
 ```json
 {"type":"turn_start","run_id":"<uuid>","session_id":"<hex>"}
+{"type":"llm_phase","phase":"thinking"}                       // 模型进入推理阶段
+{"type":"llm_phase","phase":"answering"}                      // 模型开始写正文
+{"type":"llm_phase","phase":"tool_call","name":"search_scenes"} // 模型开始组织工具调用
+{"type":"reasoning","delta":"…"}                              // 推理增量（reasoning_content）
+{"type":"token","delta":"…"}                                  // 正文增量
 {"type":"tool_call","name":"search_scenes","args":{...}}     // assistant 回合声明调用工具
 {"type":"tool_result","name":"search_scenes","ok":true,"data":{...}}
-{"type":"assistant","content":"已检索到 N 个场景：…"}          // 纯文本中间回复（可选）
+{"type":"assistant","content":"已检索到 N 个场景：…"}          // 纯文本答复定稿（工具轮不发）
 {"type":"turn_done","content":"最终回复文本","error":null}
 {"type":"error","error":"<msg>"}                              // LLM 失败/循环超限，turn_done 不出现
-// 预留 token 流式：{"type":"token","delta":"…"} 加入后前端按 token 渲染（MVP 不实现）
 ```
+
+**流式输出（2026-10-21 增 · 状态：已实现）**
+
+- 开启时（缺省）`_default_chat` 以 `stream=True` + `stream_options.include_usage` 调模型，
+  逐块消费后仍按原 `parse_response` 形状交回 loop —— 工具状态机、落库、`assistant` 事件均未变。
+  兼容端拒绝 `stream_options`（400/422）时自动退回一次不带该字段的流式请求。
+- `llm_phase` / `reasoning` / `token` **每次 LLM 调用各走一遍**：工具回合会有多次
+  thinking → answering / tool_call，前端据此在队尾那条 assistant 消息上切换阶段指示。
+- `reasoning` 是**临时展示数据，不落库**：assistant 消息仍只存 `content` + `tool_calls`，
+  `GET messages` 形状不变，刷新 / 切会话后思考内容消失。
+- 前端把 `token` / `reasoning` 按 50 ms 批量合并后再渲染，避免逐 token 触发 Markdown 全量解析。
+- `stream:false` 或 `SR_LLM_STREAM=0` 时退回老序列（无 `token`，也不再有逐字 phase 切换）。
+  若端点仍在非流式响应的 `message` 里带回 `reasoning_content`，服务端会一次性补发
+  `llm_phase:thinking` + 一条完整 `reasoning`，前端照常折叠展示 —— 差别只是不逐字上屏。
+  mock LLM 在流式下同样产全套事件，e2e 可断言。
 
 ### 3.3 共享任务队列（仅 SR 作业 · 服务端唯一事实源）
 
@@ -867,8 +887,18 @@ POST /api/scenes/clear-preview
 - 进程内 `dict[session_id → asyncio.Lock]`；锁占用期间再 POST → 409。
 - `run_loop` 是同步阻塞函数 → `asyncio.to_thread` 跑；内部事件经回调推 `asyncio.Queue`，主协程 `while` 逐帧 `yield` 成 SSE（`StreamingResponse`）。
 
-### 4.2 loop 观察缝（新增 `on_step`，**不改变行为**）
-`run_loop(…, on_step: Callable[[dict], None] | None = None)`：在既有各 return/commit 点**同步调用** `on_step({"type":…, …})`，事件与 SSE schema 对齐（turn_start 在循环首轮前、tool_call/tool_result 在 call_tool 前后、assistant 在纯文本答复时、turn_done/error 在返回前）。默认 `None` → 与现状逐字节一致，**18 个既有 loop 测试不因本改动变更**。mock LLM 只替换 `_default_chat`，不动状态机。
+### 4.2 loop 观察缝（`on_step` + `on_delta`，**不改变行为**）
+
+`run_loop(…, on_step: Callable[[dict], None] | None = None, stream: bool | None = None)`：
+在既有各 return/commit 点**同步调用** `on_step({"type":…, …})`，事件与 SSE schema 对齐
+（turn_start 在循环首轮前、tool_call/tool_result 在 call_tool 前后、assistant 在纯文本答复时、
+turn_done/error 在返回前）。默认 `None` → 与现状逐字节一致，既有 loop 测试不因本改动变更。
+
+`on_delta` 是 2026-10-21 增的模型增量缝：`run_loop` 用 `inspect.signature` 判断注入的 `chat`
+是否接受 `on_delta`（或 `**kwargs`），只有接受时才传；两参数的测试替身仍按老形状调用。
+流式适配层把原始 chunk 转成 `llm_phase` / `reasoning` / `token`（阶段切换每次调用只发一次），
+再由 `_delta_sink` 转给 `on_step`。`stream` 缺省取 `cfg.llm_stream`，且仅在
+`on_step is not None` 且 chat 接受 `on_delta` 时生效。mock LLM 只替换 `_default_chat`，不动状态机。
 
 ### 4.3 队列后台校准广播
 - app lifespan 启动一个 asyncio 任务：`while` sleep `SR_QUEUE_POLL_SEC`，扫 `sr_tasks` 中 `job_id IS NOT NULL` 的行 → `run_sr.query_job_status`（按执行器分派）→ 状态变化时更新 `sr_tasks.status` + 内存缓存 + 广播。

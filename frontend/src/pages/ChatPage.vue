@@ -12,6 +12,7 @@ import type { ChatMsg } from '../stores/chat.js';
 import type { ChatSession } from '../lib/api.js';
 import TokenUsagePanel from '../components/TokenUsagePanel.vue';
 import MarkdownBody from '../components/MarkdownBody.vue';
+import ReasoningBlock from '../components/ReasoningBlock.vue';
 import ThinkingIndicator from '../components/ThinkingIndicator.vue';
 import ChatAttachTray from '../components/ChatAttachTray.vue';
 import ChatImagePicker from '../components/ChatImagePicker.vue';
@@ -41,6 +42,22 @@ function argsText(a: Record<string, unknown>): string {
 function toolIcon(ok?: boolean): string {
   if (ok === undefined) return '…';
   return ok ? '✓' : '✗';
+}
+
+function toolNames(m: ChatMsg): string {
+  return (m.toolCalls ?? []).map((t) => t.name).join(', ') || '未知工具';
+}
+
+/** 队尾仍在流式接收的 assistant 消息（思考/回答/工具声明阶段指示用）。 */
+const liveMsg = computed<ChatMsg | null>(() => {
+  const last = chat.messages[chat.messages.length - 1];
+  return last && last.role === 'assistant' && last.streaming ? last : null;
+});
+
+function waitLabel(m: ChatMsg): string {
+  if (m.phase === 'tool_call') return '正在组织工具调用';
+  if (m.phase === 'answering') return '正在生成回答';
+  return '模型推理中';
 }
 
 /** 用户气泡只显示用户原话；查看器 Agent 页签自动附的上下文不算用户输入。 */
@@ -137,12 +154,19 @@ async function batchDelete(): Promise<void> {
   if (!selected.value.length) selectMode.value = false;
 }
 
+function nearBottom(): boolean {
+  const el = scrollEl.value;
+  return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+}
+
 async function scrollBottom(): Promise<void> {
   await nextTick();
   if (scrollEl.value) scrollEl.value.scrollTop = scrollEl.value.scrollHeight;
 }
 
 watch(() => chat.messages.length, () => void scrollBottom());
+// 流式增量不新增消息，只改长度：已经贴着底部才跟随，用户翻上去就不拽回来。
+watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
 onMounted(() => {
   void chat.init();
   void (async () => {
@@ -253,22 +277,30 @@ onMounted(() => {
             </div>
           </template>
 
-          <!-- assistant -->
+          <!-- assistant：推理折叠块 + 正文；工具声明并入同一条消息（与 history 投影一致） -->
           <template v-else-if="m.role === 'assistant'">
             <div v-if="m.isError" class="bubble assistant err">{{ m.content }}</div>
-            <div v-else-if="m.content" class="bubble assistant">
-              <MarkdownBody :source="m.content" />
-            </div>
-            <div v-else-if="m.toolCalls && m.toolCalls.length" class="bubble assistant tools">
-              <p class="tool-title">Agent 声明调用工具</p>
-              <div v-for="tc in m.toolCalls" :key="tc.name" class="tool-decl">
-                <code>{{ tc.name }}</code>
-                <span class="tool-args">{{ argsText(tc.args) }}</span>
+            <template v-else>
+              <ReasoningBlock v-if="m.reasoning" :text="m.reasoning"
+                              :streaming="m.streaming" :phase="m.phase ?? null" />
+              <div v-if="m.content" class="bubble assistant">
+                <MarkdownBody :source="m.content" />
+                <div v-if="m.toolCalls && m.toolCalls.length" class="tc-inline">
+                  🧩 Agent 调用：{{ toolNames(m) }}
+                </div>
               </div>
-            </div>
-            <div v-else-if="chat.sending" class="bubble assistant tools">
-              <ThinkingIndicator label="模型推理中" />
-            </div>
+              <div v-else-if="m.toolCalls && m.toolCalls.length" class="bubble assistant tools">
+                <p class="tool-title">Agent 声明调用工具</p>
+                <div v-for="tc in m.toolCalls" :key="tc.name" class="tool-decl">
+                  <code>{{ tc.name }}</code>
+                  <span class="tool-args">{{ argsText(tc.args) }}</span>
+                </div>
+              </div>
+              <div v-else-if="(m.streaming && !m.reasoning) || m.phase === 'tool_call'"
+                   class="bubble assistant tools">
+                <ThinkingIndicator :label="waitLabel(m)" />
+              </div>
+            </template>
           </template>
 
           <!-- tool 结果行 -->
@@ -281,7 +313,7 @@ onMounted(() => {
           </template>
         </div>
 
-        <div v-if="chat.sending" class="cp-thinking">
+        <div v-if="chat.sending && !liveMsg" class="cp-thinking">
           <ThinkingIndicator label="模型推理中" />
         </div>
         <div v-if="chat.lastRunId && !chat.sending" class="cp-feedback">
@@ -491,6 +523,14 @@ onMounted(() => {
 .tool-decl { display: flex; gap: 8px; align-items: baseline; font-size: 13px; }
 .tool-decl code { color: var(--accent-deep); font-family: var(--font-mono); }
 .tool-args { color: var(--ink-sub); font-size: 12px; word-break: break-all; }
+/* 推理块与正文气泡同宽，避免同一回合出现两种右边距 */
+.cp-row :deep(.reason) { max-width: 86%; }
+/* 有正文时不再单独占一条「工具声明」气泡，缩成正文脚注（工具轮的主线仍是同一条 assistant） */
+.tc-inline {
+  margin-top: 7px; padding-top: 6px;
+  border-top: 1px dashed var(--line);
+  color: var(--ink-sub); font-size: 11.5px;
+}
 
 .tool-trace {
   align-self: flex-start; display: inline-flex; align-items: center; gap: 7px;

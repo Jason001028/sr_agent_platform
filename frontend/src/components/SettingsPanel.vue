@@ -2,7 +2,8 @@
 /**
  * SettingsPanel.vue — 右上角设置浮层
  * ------------------------------------------------------------------
- * 目前两行：对比模式的后台预取开关（默认关），与本地预览缓存的行 + 清空按钮。
+ * 目前几块：聊天流式输出（本机偏好，默认开）、对比模式后台预取（默认关）、
+ * 本地预览缓存行 + 清空按钮，以及开发者模式验证。
  *
  * 挂在**页面根**（ViewerPage.vue 里 `<NoticeModal />` 旁边），不要塞进工具栏 ——
  * `.toolbar` 是 `position: static`，fixed 浮层挂它里面会以初始包含块为参照，
@@ -15,6 +16,7 @@ import { useViewerStore } from '../stores/viewer';
 import {
   clearDeveloperMode, isDeveloperMode, verifyDeveloperPassword,
 } from '../lib/developerMode';
+import { isStreamingEnabled, setStreamingEnabled } from '../lib/streaming';
 
 const store = useViewerStore();
 
@@ -26,6 +28,13 @@ const cacheText = ref('0 项 / 0.0 MB');
 const developerPassword = ref('');
 const developerError = ref('');
 const developerVerified = ref(isDeveloperMode());
+/** 聊天流式输出（本机浏览器偏好，下一回合生效）。 */
+const streamingOn = ref(isStreamingEnabled());
+
+function toggleStreaming() {
+  streamingOn.value = !streamingOn.value;
+  setStreamingEnabled(streamingOn.value);
+}
 
 function refreshCache() {
   cache.value = store.previewCacheStats();
@@ -69,6 +78,23 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
     <div class="set-catch" @click="store.setSettingsOpen(false)"></div>
     <div class="set-panel" data-e2e="set-panel" role="dialog" aria-label="设置">
       <div class="set-title">设置</div>
+
+      <div class="set-row">
+        <button
+          type="button"
+          class="set-sw"
+          :class="{ on: streamingOn }"
+          role="switch"
+          :aria-checked="streamingOn"
+          data-e2e="set-stream"
+          @click="toggleStreaming"
+        >聊天流式输出{{ streamingOn ? ' · 开' : ' · 关' }}</button>
+        <div class="set-note">
+          Agent 回答逐字上屏，思考过程单独折叠。关闭后等服务端整段生成完再显示；
+          对已经开始的回合不生效。服务端 <code>SR_LLM_STREAM=0</code> 是总开关，
+          置 0 后本项不生效。
+        </div>
+      </div>
 
       <div class="set-row">
         <button
@@ -193,6 +219,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
   color: var(--accent-deep);
 }
 .set-note { color: var(--ink-sub); font-size: 11px; line-height: 1.6; opacity: 0.9; }
+.set-note code {
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+  background: var(--surface-2);
+  border-radius: 3px;
+  padding: 0 3px;
+}
 /* 预取结果行：与说明同字号，但**不透明度更低** —— 它是过程回执，不是说明。 */
 .set-out {
   color: var(--ink-sub);

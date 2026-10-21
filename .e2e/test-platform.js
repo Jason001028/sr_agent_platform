@@ -324,12 +324,21 @@ async function main() {
         return el ? el.textContent : '';
       });
       assert(toolLine.indexOf('search_scenes') >= 0, `工具行 search_scenes ✓ (${toolLine.trim().slice(0, 40)})`);
+      // 流式（2026-10-21）：mock 的两个 LLM 调用都带 reasoning，渲染成折叠块；
+      // 定稿后自动收起，但标题仍在 DOM 里（内容不落库，刷新后应消失）。
+      const reasoningHeads = await page.evaluate(() => Array.from(
+        document.querySelectorAll('.reason .reason-title')).map((el) => el.textContent));
+      assert(reasoningHeads.length >= 2 && reasoningHeads.every((t) => t.indexOf('思考过程') >= 0),
+             `流式：推理折叠块 ×${reasoningHeads.length}`);
 
       // 历史恢复：切 /queue 再回 /chat，GET messages 重建同一条最终回复
       await page.goto(base + '/queue', { waitUntil: 'networkidle2', timeout: 30000 });
       await page.goto(base + '/chat', { waitUntil: 'networkidle2', timeout: 30000 });
       await waitText(page, 'mock 模型', 15000);
       assert(true, '切走再回来：历史消息经 GET messages 恢复渲染');
+      const reasonsAfterReload = await page.evaluate(() =>
+        document.querySelectorAll('.reason').length);
+      assert(reasonsAfterReload === 0, '刷新后思考内容不恢复（reasoning 不落库）');
 
       /* ---------- B. 队列（假调度器推到 COMPLETED） ---------- */
       console.log('\n[B] 共享任务队列（SR_SLURM_FAKE 状态机）');

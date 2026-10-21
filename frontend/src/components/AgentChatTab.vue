@@ -17,6 +17,7 @@ import { useViewerStore } from '../stores/viewer';
 import { useChatStore } from '../stores/chat.js';
 import type { ChatMsg } from '../stores/chat.js';
 import MarkdownBody from './MarkdownBody.vue';
+import ReasoningBlock from './ReasoningBlock.vue';
 import ThinkingIndicator from './ThinkingIndicator.vue';
 import ChatAttachTray from './ChatAttachTray.vue';
 import ChatImagePicker from './ChatImagePicker.vue';
@@ -105,6 +106,18 @@ function toolNames(m: ChatMsg): string {
   return (m.toolCalls ?? []).map((t) => t.name).join(', ') || '未知工具';
 }
 
+/** 队尾仍在流式接收的 assistant 消息（思考/回答/工具声明阶段指示用）。 */
+const liveMsg = computed<ChatMsg | null>(() => {
+  const last = chat.messages[chat.messages.length - 1];
+  return last && last.role === 'assistant' && last.streaming ? last : null;
+});
+
+function waitLabel(m: ChatMsg): string {
+  if (m.phase === 'tool_call') return '正在组织工具调用';
+  if (m.phase === 'answering') return '正在生成回答';
+  return '模型推理中';
+}
+
 const creating = ref(false);   // 防止双击并发 newSession 建出两个会话
 
 /** 有截图时可以不写字：上下文快照照样附上（Agent 仍能引用 W×H / 拉伸）。 */
@@ -131,11 +144,17 @@ async function onSend(): Promise<void> {
   void chat.send(agentPayload(text, buildContextNote(s)));
 }
 
+function nearBottom(): boolean {
+  const el = scrollEl.value;
+  return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+}
 async function scrollBottom(): Promise<void> {
   await nextTick();
   if (scrollEl.value) scrollEl.value.scrollTop = scrollEl.value.scrollHeight;
 }
 watch(() => chat.messages.length, () => void scrollBottom());
+// 流式增量不新增消息，只改长度：已经贴着底部才跟随，用户翻上去就不拽回来。
+watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
 </script>
 
 <template>
@@ -181,18 +200,26 @@ watch(() => chat.messages.length, () => void scrollBottom());
             </details>
           </template>
 
-          <!-- assistant：内容气泡 / 工具声明占位（折单行） / 思考中 -->
+          <!-- assistant：推理折叠块 + 正文；工具声明并入同一条消息（与历史投影一致） -->
           <template v-else-if="m.role === 'assistant'">
             <div v-if="m.isError" class="bubble assistant err">{{ m.content }}</div>
-            <div v-else-if="m.content" class="bubble assistant">
-              <MarkdownBody :source="m.content" />
-            </div>
-            <div v-else-if="m.toolCalls && m.toolCalls.length" class="bubble assistant tools">
-              <span class="tc-line">🧩 Agent 调用：{{ toolNames(m) }}</span>
-            </div>
-            <div v-else-if="chat.sending" class="bubble assistant tools">
-              <ThinkingIndicator label="模型推理中" />
-            </div>
+            <template v-else>
+              <ReasoningBlock v-if="m.reasoning" :text="m.reasoning"
+                              :streaming="m.streaming" :phase="m.phase ?? null" />
+              <div v-if="m.content" class="bubble assistant">
+                <MarkdownBody :source="m.content" />
+                <div v-if="m.toolCalls && m.toolCalls.length" class="tc-inline">
+                  🧩 Agent 调用：{{ toolNames(m) }}
+                </div>
+              </div>
+              <div v-else-if="m.toolCalls && m.toolCalls.length" class="bubble assistant tools">
+                <span class="tc-line">🧩 Agent 调用：{{ toolNames(m) }}</span>
+              </div>
+              <div v-else-if="(m.streaming && !m.reasoning) || m.phase === 'tool_call'"
+                   class="bubble assistant tools">
+                <ThinkingIndicator :label="waitLabel(m)" />
+              </div>
+            </template>
           </template>
 
           <!-- tool 结果：单行摘要 pill -->
@@ -205,7 +232,7 @@ watch(() => chat.messages.length, () => void scrollBottom());
           </template>
         </div>
 
-        <div v-if="chat.sending" class="at-thinking">
+        <div v-if="chat.sending && !liveMsg" class="at-thinking">
           <ThinkingIndicator label="模型推理中" />
         </div>
       </div>
@@ -324,7 +351,14 @@ watch(() => chat.messages.length, () => void scrollBottom());
   background: #fbfcfa; border: 1px dashed var(--line); border-radius: 10px;
   align-self: flex-start; padding: 5px 10px; max-width: 94%;
 }
+.at-row :deep(.reason) { max-width: 96%; }
 .tc-line { font-size: 11px; color: var(--ink-sub); }
+/* 有正文时工具声明缩成正文脚注，不再单占一个虚线气泡 */
+.tc-inline {
+  margin-top: 6px; padding-top: 5px;
+  border-top: 1px dashed var(--line);
+  font-size: 11px; color: var(--ink-sub);
+}
 
 .tool-trace {
   align-self: flex-start; display: inline-flex; align-items: center; gap: 6px;

@@ -42,17 +42,15 @@ describe('cascadeDelay —— 批量入列的逐卡延迟', () => {
     }
   });
 
-  it('12 条以内逐条固定 100ms 累计', () => {
-    for (const n of [2, 4, 8, 11]) {
+  it('12 条以内逐条固定 150ms 累计（第 12 条也不被窗口压缩）', () => {
+    for (const n of [2, 4, 8, 11, 12]) {
       expect(cascadeDelay(0, n)).toBe(0);
       for (const g of gapsOf(n)) {
         expect(Math.abs(g - CARD_STEP_MS)).toBeLessThanOrEqual(1);
       }
     }
-    // 第 12 条：11 个间隔要连同淡入收进 1200ms，步长被窗口微压到 ≈98ms，仍等距。
-    const g12 = gapsOf(12);
-    expect(Math.max(...g12) - Math.min(...g12)).toBeLessThanOrEqual(1);
-    expect(g12[0]).toBeGreaterThanOrEqual(97);
+    // 12 条：11 × 150ms = 1650ms，连同 120ms 淡入仍在 1800ms 窗口内。
+    expect(cascadeDelay(11, 12) + CARD_ENTER_MS).toBeLessThanOrEqual(CARD_CASCADE_MS);
   });
 
   it('超过 12 条：等距压缩进同一窗口，末张连同淡入不超 1200ms', () => {

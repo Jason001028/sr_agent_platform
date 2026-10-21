@@ -253,15 +253,57 @@ class TestChat(PlatformBase):
                          "text/event-stream")
         events = sse_events(r.text)
         types = [e["type"] for e in events]
-        # mock LLM 固定脚本（§5.1）：先 tool_call search_scenes 再总结
+        # mock LLM 固定脚本（§5.1）走流式适配：先 reasoning → 工具声明，
+        # 工具结果后再 reasoning → 4 个 token → 最终 assistant。工具状态机不变。
+        self.assertEqual(types, [
+            "turn_start", "llm_phase", "reasoning", "llm_phase",
+            "tool_call", "tool_result",
+            "llm_phase", "reasoning", "llm_phase",
+            "token", "token", "token", "token",
+            "assistant", "turn_done",
+        ])
+        self.assertEqual([e["phase"] for e in events if e["type"] == "llm_phase"],
+                         ["thinking", "tool_call", "thinking", "answering"])
+        phase_tool = [e for e in events
+                      if e["type"] == "llm_phase" and e["phase"] == "tool_call"][0]
+        self.assertEqual(phase_tool["name"], "search_scenes")
+        self.assertEqual(events[4]["name"], "search_scenes")
+        self.assertEqual(events[4]["args"], {})
+        self.assertTrue(events[5]["ok"])
+        streamed = "".join(e["delta"] for e in events if e["type"] == "token")
+        self.assertIn("mock 模型", streamed)
+        self.assertEqual(streamed, events[-2]["content"])
+        self.assertIn("mock 模型", events[-2]["content"])
+        self.assertIn("mock 模型", events[-1]["content"])
+
+    def test_send_with_stream_false_keeps_legacy_event_sequence(self):
+        c = self.client()
+        sid = c.post("/api/chat/sessions").json()["session_id"]
+        r = c.post(f"/api/chat/sessions/{sid}/messages",
+                   json={"content": "看看盘阵上有什么场景", "stream": False})
+        self.assertEqual(r.status_code, 200)
+        types = [e["type"] for e in sse_events(r.text)]
         self.assertEqual(types,
                          ["turn_start", "tool_call", "tool_result",
                           "assistant", "turn_done"])
-        self.assertEqual(events[1]["name"], "search_scenes")
-        self.assertEqual(events[1]["args"], {})
-        self.assertTrue(events[2]["ok"])
-        self.assertIn("mock 模型", events[3]["content"])
-        self.assertIn("mock 模型", events[4]["content"])
+
+    def test_send_rejects_non_bool_stream(self):
+        c = self.client()
+        sid = c.post("/api/chat/sessions").json()["session_id"]
+        r = c.post(f"/api/chat/sessions/{sid}/messages",
+                   json={"content": "hi", "stream": "yes"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("stream", r.json()["detail"])
+
+    def test_streamed_reasoning_is_not_persisted(self):
+        c = self.client()
+        sid = c.post("/api/chat/sessions").json()["session_id"]
+        c.post(f"/api/chat/sessions/{sid}/messages", json={"content": "hi"})
+        rows = c.get(f"/api/chat/sessions/{sid}/messages").json()["messages"]
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertNotIn("reasoning", row)
+        self.assertIn("mock 模型", rows[-1]["content"])
 
     def test_history_projection_after_turn(self):
         c = self.client()
@@ -295,8 +337,13 @@ class TestChat(PlatformBase):
                                      "data": self.png_payload()}]})
         self.assertEqual(r.status_code, 200)
         types = [e["type"] for e in sse_events(r.text)]
-        self.assertEqual(types, ["turn_start", "tool_call", "tool_result",
-                                 "assistant", "turn_done"])
+        self.assertEqual(types, [
+            "turn_start", "llm_phase", "reasoning", "llm_phase",
+            "tool_call", "tool_result",
+            "llm_phase", "reasoning", "llm_phase",
+            "token", "token", "token", "token",
+            "assistant", "turn_done",
+        ])
 
         user = c.get(f"/api/chat/sessions/{sid}/messages").json()["messages"][0]
         self.assertEqual(user["content"], "看这张")

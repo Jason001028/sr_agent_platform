@@ -659,7 +659,10 @@ async def chat_send(session_id: str, request: Request):
         raise HTTPException(status_code=400, detail="请求体须为合法 JSON 对象")
     content = body.get("content") if isinstance(body, dict) else None
     images = body.get("images") if isinstance(body, dict) else None
+    stream_opt = body.get("stream") if isinstance(body, dict) else None
     content = content if isinstance(content, str) else ""
+    if stream_opt is not None and not isinstance(stream_opt, bool):
+        raise HTTPException(status_code=400, detail="stream 须为布尔值")
     # 「话术」与「截图」至少一样非空（纯图提问是合法用法，见 §3.2.1）。参数校验
     # 全部排在拿锁之前：400 不能把会话留在「正忙」状态上。先验类型再看非空 ——
     # `images: {}` 这种坏形状该报「须为数组」，不该被当成「没给图」。
@@ -708,29 +711,53 @@ async def chat_send(session_id: str, request: Request):
                        "error": ev.get("error")}
             elif t == "assistant":
                 out = {"type": "assistant", "content": ev.get("content")}
+            elif t == "llm_phase":
+                out = {"type": "llm_phase", "phase": ev.get("phase")}
+                if ev.get("name"):
+                    out["name"] = ev["name"]
+            elif t == "reasoning":
+                out = {"type": "reasoning", "delta": ev.get("delta", "")}
+            elif t == "token":
+                out = {"type": "token", "delta": ev.get("delta", "")}
             elif t == "error":
                 out = {"type": "error", "error": ev.get("error")}
             elif t == "usage":
                 out = {"type": "usage", "usage": ev.get("usage"),
                        "aggregate": ev.get("aggregate")}
             if out:
-                loop.call_soon_threadsafe(q.put_nowait, out)
+                try:
+                    loop.call_soon_threadsafe(q.put_nowait, out)
+                except RuntimeError:
+                    # Client disconnected and the stream loop is gone; the turn
+                    # still runs to completion (tools already started), but
+                    # there is no one left to receive observation events.
+                    pass
 
         def thread_main() -> dict:
             try:
                 context = _context(request)
+                cfg = state.cfg if context is None else context.config
+                # env SR_LLM_STREAM is the operator master switch; a request
+                # may only turn streaming off, never force it on when the
+                # endpoint was declared unable to stream.
+                stream_on = bool(getattr(cfg, "llm_stream", True))
+                if stream_opt is not None:
+                    stream_on = stream_on and stream_opt
                 return loop_mod.run_loop(
                     None if context is not None else state.cfg, prompt,
                     store=None if context is not None else state.store,
                     session_id=session_id, resume=True, on_step=bridge,
                     registry=None if context is not None else getattr(state, "tool_registry", None),
-                    context=context, machine_id=machine_id)
+                    context=context, machine_id=machine_id, stream=stream_on)
             except Exception as e:  # noqa: BLE001 — 流上收尾，不让线程挂死
                 bridge({"type": "error", "error": f"{type(e).__name__}: {e}"})
                 return {"ok": False, "error": f"{type(e).__name__}: {e}",
                         "answer": None}
             finally:
-                loop.call_soon_threadsafe(q.put_nowait, _SENTINEL)
+                try:
+                    loop.call_soon_threadsafe(q.put_nowait, _SENTINEL)
+                except RuntimeError:
+                    pass
 
         try:
             yield _frame({"type": "turn_start", "run_id": run_id,

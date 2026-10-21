@@ -141,3 +141,6 @@
 - mock 模型只替换 LLM 调用层，**不动状态机逻辑**（`loop.py` 行为仍被 18 测试锁住）。
 - `run_sr` 幂等层（`sr_tasks`）是既有实现，REST 层直接调 `submit_run_sr`，不另写提交逻辑。
 - SSE 事件 schema 是前端渲染与后端推送的共享契约，预留 `token` 类型但 MVP 不实现。
+  > 2026-10-21 追补：`llm_phase` / `reasoning` / `token` 已实现，以
+  > [api-contract §3.2](api-contract.md) 为准；上文与 §「SSE 事件 schema 草案」中的
+  > 「预留 / MVP 不实现」是阶段5当时的范围记录。

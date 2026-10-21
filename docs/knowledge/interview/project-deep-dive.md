@@ -154,7 +154,9 @@
     - 选型：EventSource 只支持 GET，POST 即流用不了 → **前端用 fetch 读 body 流**，后端 SSE `StreamingResponse` 逐帧 `data:{json}\n\n`；
     - **同步阻塞的 run_loop 用 `asyncio.to_thread` 丢线程池**，事件经 `asyncio.Queue` 桥回主协程逐帧下发——否则一个慢回合会卡死整个事件循环、拖死所有 SSE 连接(这是我会重点讲的坑)；
     - 同会话并发：会话级锁串行，忙则 409。
-    **追问：** 契约里事件 schema 有哪些？→ `tool_call/tool_result/turn_done`，预留 `token`(token 类型字段定了但 MVP 不实现)。
+    **追问：** 契约里事件 schema 有哪些？→ `tool_call/tool_result/assistant/turn_done`；
+    2026-10-21 又补了模型增量 `llm_phase` / `reasoning` / `token`（流式缺省开，
+    `SR_LLM_STREAM=0` 可关），其中 `reasoning` 只在前端展示、不落库。
 20. **Q：为什么阶段5 强调"契约先行"、单独一份 `api-contract.md`？**
     **A：** REST/SSE 是前后端**共享接口面**：前端 parser 和后端 emitter 必须对同一 schema。契约文档先落盘 = 字段/事件/错误码/状态机先说死；改契约先改文档再改两端，各留测试锁字段。流程 = 我评审契约 → 后端 → 前端 → 双端测试。
 

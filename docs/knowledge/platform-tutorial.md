@@ -389,11 +389,17 @@ Agent 执行一轮需数十秒，用户无法等待同步返回。采用 **SSE**
 POST /api/chat/sessions/{id}/messages     ← 前端发送一条消息
 响应为 text/event-stream，每帧一行 data:{json}\n\n：
   {"type":"turn_start",   ...}
+  {"type":"llm_phase",    "phase":"thinking"}          // 模型增量（2026-10-21 增）
+  {"type":"reasoning",    "delta":"…"}                 // Qwen 推理，不落库
+  {"type":"token",        "delta":"…"}                 // 正文逐 token
   {"type":"tool_call",    "name":"run_sr","args":{...}}
   {"type":"tool_result",  "name":"run_sr","ok":true,"data":{...}}
   {"type":"turn_done",    "content":"已提交作业 12345"}
-（预留 {"type":"token","delta":"…"} 供后续 token 流式渲染）
 ```
+
+流式缺省开启；`SR_LLM_STREAM=0`（或请求体 `stream:false`）退回无增量的老序列。
+模型边生成边推进事件，前端把 `reasoning` / `token` 按 50ms 批量合并后渲染；
+工具状态机与落库形状不变，assistant 消息仍只存 `content` + `tool_calls`。
 
 契约中的实现要点：
 

@@ -52,13 +52,13 @@
 |---|---|---|
 | `VIEW_FIT_MS` | 160 | 查看器双击适配 |
 | `VIEW_RESET_MS` | 140 | 查看器分屏回正 |
-| `CARD_CASCADE_MS` | 1200 | 批量入列的整段错峰窗口 |
-| `CARD_STEP_MS` | 100 | 逐条固定间隔（12 条以内生效） |
+| `CARD_CASCADE_MS` | 1800 | 批量入列的整段错峰窗口 |
+| `CARD_STEP_MS` | 150 | 逐条固定间隔（12 条以内生效） |
 | `CARD_ENTER_MS` | 120 | 单卡淡入（与 `--motion-fade` 同值） |
 
 CSS 变量无法在 `requestAnimationFrame` 循环里读取，故前两项以常量维护；曲线用 `viewMath.ts` 的 `easeOutCubic`，等价 `cubic-bezier(0.33, 1, 0.68, 1)`。
 
-`cascadeDelay(i, n)` 给批量插入的第 `i` 张卡算延迟：**12 条以内按 `CARD_STEP_MS`（100ms）逐条固定累计**，第 0 张不等；超过 12 条时等距压进同一个 1200ms 窗口 —— 步长按份数摊薄（`min(100ms, 1080ms/(n-1))`），末张连同 120ms 淡入仍收在窗口末尾。份数越多步长越小，整批时长不随份数线性增长；几十行时看上去接近同时出现。第 12 条本身被窗口微压到 ≈98ms（11 个间隔 + 淡入 = 1200ms），肉眼与 100ms 无差。延迟由组件内联到 `animation-delay`，CSS 只给 `--motion-fade` 与 `--ease-enter`；卡片从右侧 16px 滑入。`motion.test.ts` 会读 `style.css` 断言 `CARD_ENTER_MS === --motion-fade`，双写只许一起改。
+`cascadeDelay(i, n)` 给批量插入的第 `i` 张卡算延迟：**12 条以内按 `CARD_STEP_MS`（150ms）逐条固定累计**，第 0 张不等；超过 12 条时等距压进同一个 1800ms 窗口 —— 步长按份数摊薄（`min(150ms, 1680ms/(n-1))`），末张连同 120ms 淡入仍收在窗口末尾。份数越多步长越小，整批时长不随份数线性增长；几十行时看上去接近同时出现。12 条本身也在固定步长内（11 × 150ms + 120ms = 1770ms ≤ 1800ms），第 13 条起才被压缩（140ms）。延迟由组件内联到 `animation-delay`，CSS 只给 `--motion-fade` 与 `--ease-enter`；卡片从右侧 16px 滑入。`motion.test.ts` 会读 `style.css` 断言 `CARD_ENTER_MS === --motion-fade`，双写只许一起改。
 
 ## 3. 场景选型
 

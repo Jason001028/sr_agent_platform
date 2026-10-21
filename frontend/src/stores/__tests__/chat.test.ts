@@ -112,6 +112,87 @@ describe('reduceChatSse（SSE 逐帧归并）', () => {
     expect(reduceChatSse(msgs, { type: 'job_update', task_id: 1, job_id: 2, state: 'R', prev_state: 'P', ok: true, error: null })).toBe(msgs);
     expect(reduceChatSse(msgs, { type: 'ping' })).toBe(msgs);
   });
+
+  it('流式：llm_phase → reasoning → token → assistant 定稿，全程一条 assistant', () => {
+    let msgs: ChatMsg[] = [];
+    msgs = reduceChatSse(msgs, { type: 'turn_start', run_id: 'r1', session_id: 's' });
+    msgs = reduceChatSse(msgs, { type: 'llm_phase', phase: 'thinking' });
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toMatchObject({ streaming: true, phase: 'thinking', content: '' });
+
+    msgs = reduceChatSse(msgs, { type: 'reasoning', delta: '先看' });
+    msgs = reduceChatSse(msgs, { type: 'reasoning', delta: '场景' });
+    expect(msgs[0].reasoning).toBe('先看场景');
+
+    msgs = reduceChatSse(msgs, { type: 'llm_phase', phase: 'answering' });
+    msgs = reduceChatSse(msgs, { type: 'token', delta: '已检' });
+    msgs = reduceChatSse(msgs, { type: 'token', delta: '索' });
+    expect(msgs[0]).toMatchObject({ content: '已检索', phase: 'answering', streaming: true });
+
+    msgs = reduceChatSse(msgs, { type: 'assistant', content: '已检索' });
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toMatchObject({
+      content: '已检索', reasoning: '先看场景', streaming: false, phase: null,
+    });
+  });
+
+  it('流式工具回合：推理/工具声明并入同一条，最终回复另起一条（与历史投影一致）', () => {
+    let msgs: ChatMsg[] = [];
+    msgs = reduceChatSse(msgs, { type: 'llm_phase', phase: 'thinking' });
+    msgs = reduceChatSse(msgs, { type: 'reasoning', delta: '查一下场景' });
+    msgs = reduceChatSse(msgs, { type: 'llm_phase', phase: 'tool_call', name: 'search_scenes' });
+    msgs = reduceChatSse(msgs, { type: 'tool_call', name: 'search_scenes', args: { q: 'x' } });
+
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toMatchObject({
+      reasoning: '查一下场景', streaming: false, phase: null,
+      toolCalls: [{ name: 'search_scenes', args: { q: 'x' } }],
+    });
+
+    msgs = reduceChatSse(msgs, {
+      type: 'tool_result', name: 'search_scenes', ok: true,
+      data: { source: 'fake', count: 3, results: [] }, error: null,
+    });
+    msgs = reduceChatSse(msgs, { type: 'llm_phase', phase: 'thinking' });
+    msgs = reduceChatSse(msgs, { type: 'reasoning', delta: '整理结果' });
+    msgs = reduceChatSse(msgs, { type: 'token', delta: '找到 3 个' });
+    msgs = reduceChatSse(msgs, { type: 'turn_done', content: '找到 3 个场景', error: null });
+
+    expect(roles(msgs)).toEqual(['assistant', 'tool', 'assistant']);
+    expect(msgs[0].reasoning).toBe('查一下场景');
+    expect(msgs[0].toolCalls).toHaveLength(1);
+    expect(msgs[1].detail).toContain('3 个场景');
+    expect(msgs[2]).toMatchObject({
+      content: '找到 3 个场景', reasoning: '整理结果', streaming: false, phase: null,
+    });
+  });
+
+  it('流式：turn_done 收尾未收到 assistant 文本的半截消息', () => {
+    let msgs: ChatMsg[] = [];
+    msgs = reduceChatSse(msgs, { type: 'token', delta: '半截' });
+    msgs = reduceChatSse(msgs, { type: 'turn_done', content: '半截文本', error: null });
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toMatchObject({ content: '半截文本', streaming: false, phase: null });
+  });
+
+  it('流式：error 先收尾半截消息，再追加错误气泡', () => {
+    let msgs: ChatMsg[] = [];
+    msgs = reduceChatSse(msgs, { type: 'reasoning', delta: '想到一半' });
+    msgs = reduceChatSse(msgs, { type: 'error', error: 'LLM 调用失败' });
+    expect(roles(msgs)).toEqual(['assistant', 'assistant']);
+    expect(msgs[0]).toMatchObject({ reasoning: '想到一半', streaming: false });
+    expect(msgs[1].isError).toBe(true);
+    expect(msgs[1].content).toContain('LLM 调用失败');
+  });
+
+  it('流式：没有 llm_phase / reasoning 时 token 也能自建消息', () => {
+    let msgs: ChatMsg[] = [];
+    msgs = reduceChatSse(msgs, { type: 'token', delta: '直' });
+    expect(msgs[0]).toMatchObject({
+      content: '直', streaming: true, phase: 'answering',
+    });
+    expect(msgs[0].reasoning).toBeUndefined();
+  });
 });
 
 describe('sortSessions（置顶优先，其余按活动时间）', () => {

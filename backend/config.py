@@ -11,6 +11,8 @@ docs/knowledge/agent-orchestration-research.md §1).
     SR_LLM_MAX_TOKENS  per-turn completion cap, default 1024
     SR_LLM_TEMPERATURE sampling temperature, default 0.2
     SR_LLM_TIMEOUT     HTTP timeout seconds, default 60
+    SR_LLM_STREAM      =0 → 关闭模型流式输出（缺省 1：逐 token 推 SSE，前端可再按
+                       回合关闭）。端点不支持 stream 时置 0 退回一次性调用。
     SR_LLM_MOCK        =1 → _default_chat 返回假 chat（固定脚本，先调 search_scenes
                        再回最终回复，不连任何端点）—— 离机验收/前端 e2e 的 mock LLM。
 
@@ -113,6 +115,9 @@ class Config:
     llm_temperature: float
     llm_timeout: float
     llm_mock: bool = False
+    #: 缺省开启：有观察者（SSE）时逐 token 拉流；一次性的 CLI 调用不传观察者，
+    #: 自然走非流式，避免给无人消费的流做额外解析。
+    llm_stream: bool = True
 
 
 def load_config() -> Config:
@@ -134,6 +139,8 @@ def load_config() -> Config:
         llm_temperature=env_float("SR_LLM_TEMPERATURE", 0.2),
         llm_timeout=env_float("SR_LLM_TIMEOUT", 60),
         llm_mock=os.environ.get("SR_LLM_MOCK") == "1",
+        llm_stream=os.environ.get("SR_LLM_STREAM", "1").strip().lower()
+        not in ("0", "false", "no", "off"),
     )
 
 

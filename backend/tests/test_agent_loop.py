@@ -11,12 +11,14 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
 from PIL import Image
 
-from backend.agent.loop import _repair_unclosed_turn, run_loop
+from backend.agent.loop import (_consume_stream, _default_chat,
+                                _repair_unclosed_turn, run_loop)
 from backend.config import Config
 from backend.services.store import Store
 from backend.tools.contract import list_tools, manifest
@@ -470,6 +472,134 @@ class TestOnStepSeam(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertEqual(events[-1]["type"], "error")
         self.assertIn("max_turns", events[-1]["error"])
+
+    def test_streaming_chat_emits_phase_and_deltas(self):
+        events = []
+
+        def chat(messages, tools, on_delta=None):
+            if not any(m.get("role") == "tool" for m in messages):
+                on_delta({"type": "reasoning", "delta": "先想"})
+                on_delta({"type": "tool_call", "name": "fix_bad_lines"})
+                return {"content": None, "tool_calls": [{
+                    "id": "c1", "name": "fix_bad_lines",
+                    "arguments": '{"input_path": "no_such.tif"}'}]}
+            on_delta({"type": "reasoning", "delta": "再想"})
+            on_delta({"type": "token", "delta": "收"})
+            on_delta({"type": "token", "delta": "尾"})
+            return {"content": "收尾", "tool_calls": []}
+
+        r = run_loop(cfg(), "修复", chat=chat, on_step=events.append)
+        self.assertTrue(r["ok"])
+        self.assertEqual([e["type"] for e in events], [
+            "llm_phase", "reasoning", "llm_phase",
+            "tool_call", "tool_result",
+            "llm_phase", "reasoning", "llm_phase", "token", "token",
+            "assistant",
+        ])
+        self.assertEqual([e["phase"] for e in events if e["type"] == "llm_phase"],
+                         ["thinking", "tool_call", "thinking", "answering"])
+        self.assertEqual(events[-1], {"type": "assistant", "content": "收尾"})
+        # 状态机/落库仍只看到最终文本，不是 token 拼出来的另一条消息
+        self.assertEqual(r["messages"][-1]["content"], "收尾")
+
+    def test_streaming_ignored_for_two_arg_chat(self):
+        events = []
+
+        def chat(messages, tools):
+            return {"content": "好", "tool_calls": []}
+
+        r = run_loop(cfg(), "hi", chat=chat, on_step=events.append,
+                     stream=True)
+        self.assertTrue(r["ok"])
+        self.assertEqual(events, [{"type": "assistant", "content": "好"}])
+
+    def test_non_stream_response_reasoning_emitted_once(self):
+        events = []
+
+        def chat(messages, tools):
+            return {"content": "答案", "tool_calls": [],
+                    "reasoning": "完整思考"}
+
+        r = run_loop(cfg(), "hi", chat=chat, on_step=events.append,
+                     stream=False)
+        self.assertTrue(r["ok"])
+        self.assertEqual(events, [
+            {"type": "llm_phase", "phase": "thinking"},
+            {"type": "reasoning", "delta": "完整思考"},
+            {"type": "assistant", "content": "答案"},
+        ])
+
+
+def _chunk(*, content=None, reasoning=None, tool_calls=None, usage=None):
+    delta = SimpleNamespace(content=content, reasoning_content=reasoning,
+                            tool_calls=tool_calls)
+    return SimpleNamespace(choices=[SimpleNamespace(delta=delta)], usage=usage)
+
+
+def _tool_part(index, *, id=None, name=None, arguments=None):
+    return SimpleNamespace(index=index, id=id,
+                           function=SimpleNamespace(name=name,
+                                                    arguments=arguments))
+
+
+class TestStreamAdapter(unittest.TestCase):
+    """OpenAI-compatible chunk stream → the same dict shape parse_response gives."""
+
+    def test_assemble_content_reasoning_tool_calls_and_usage(self):
+        deltas = []
+        chunks = [
+            _chunk(reasoning="想一下"),
+            _chunk(content="你"),
+            _chunk(content="好"),
+            _chunk(tool_calls=[_tool_part(
+                0, id="c1", name="search_scenes", arguments='{"a"')]),
+            _chunk(tool_calls=[_tool_part(0, arguments=":1}")]),
+            SimpleNamespace(choices=[], usage=SimpleNamespace(
+                prompt_tokens=10, completion_tokens=5, total_tokens=15)),
+        ]
+        out = _consume_stream(iter(chunks), deltas.append)
+        self.assertEqual(out["content"], "你好")
+        self.assertEqual(out["reasoning"], "想一下")
+        self.assertEqual(out["tool_calls"], [{
+            "id": "c1", "name": "search_scenes", "arguments": '{"a":1}'}])
+        self.assertEqual(out["usage"]["total_tokens"], 15)
+        self.assertEqual([d["type"] for d in deltas],
+                         ["reasoning", "token", "token", "tool_call"])
+
+    def test_reasoning_spelling_fallback_and_missing_call_id(self):
+        deltas = []
+        delta = SimpleNamespace(content=None, reasoning="旧字段",
+                                tool_calls=[_tool_part(0, name="t")])
+        chunks = [SimpleNamespace(choices=[SimpleNamespace(delta=delta)],
+                                  usage=None)]
+        out = _consume_stream(iter(chunks), deltas.append)
+        self.assertEqual(out["reasoning"], "旧字段")
+        self.assertEqual(out["tool_calls"][0]["name"], "t")
+        self.assertTrue(out["tool_calls"][0]["id"].startswith("call_"))
+
+    def test_stream_options_rejected_falls_back_once(self):
+        calls = []
+
+        class _Completions:
+            def create(self, **kwargs):
+                calls.append(kwargs)
+                if "stream_options" in kwargs:
+                    err = Exception("unknown field stream_options")
+                    err.status_code = 400
+                    raise err
+                return iter([_chunk(content="ok")])
+
+        fake = SimpleNamespace(chat=SimpleNamespace(completions=_Completions()))
+        deltas = []
+        with mock.patch("backend.agent.loop.build_client", return_value=fake):
+            chat = _default_chat(cfg())
+            out = chat([{"role": "user", "content": "hi"}], [],
+                       on_delta=deltas.append)
+        self.assertEqual(out["content"], "ok")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("stream_options", calls[0])
+        self.assertNotIn("stream_options", calls[1])
+        self.assertEqual(deltas, [{"type": "token", "delta": "ok"}])
 
 
 if __name__ == "__main__":

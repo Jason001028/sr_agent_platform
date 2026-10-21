@@ -40,6 +40,9 @@
   那两个监听摘掉。
 - **`/chat` 对话** —— agent 循环 + 工具调用（`search_scenes` / `run_sr` / `sr_job_status` /
   `fix_bad_lines` / 掩码栅格化），SSE 推送 `tool_call` / `tool_result` / `assistant`。
+  **流式输出**（2026-10-21）：缺省开启，模型正文逐 token 上屏、Qwen 推理走可折叠的
+  「思考过程」块；`llm_phase` / `reasoning` / `token` 为独立事件，推理**不落库**。
+  服务端 `SR_LLM_STREAM=0` 是总开关，右上角设置浮层可按浏览器再关（下一回合生效）。
   支持**截图附件**（2026-10-20）：左侧影像卡片右上角的相机键或输入区相机键，把查看器当前
   可见画面（所见即所得）带进对话，每条最多 2 张；图片作为 `image_url` 内容块真正交给多模态
   模型，契约见 [api-contract](../planning/api-contract.md) §3.2.1，取舍与边界见
@@ -222,8 +225,8 @@
   补齐身份并改用权威名，NOSR 卡 `insertSceneCard(..., afterId)` 插在本体后面；解析失败
   原地标红、原因进 `pendingError`，停止时没轮到的写「未开始」（`finishPendingCards`）。
   占位卡在 `activate` / `startRecDrag` / `removeRec` 三个入口挡掉，卡片不渲染删除与截图键。
-  入场延迟由 `lib/motion.ts::cascadeDelay(i, n)` 计算：12 条以内按 100ms 逐条固定累计，
-  超过 12 条等距压进 1200ms 窗口（单卡淡入 120ms）。
+  入场延迟由 `lib/motion.ts::cascadeDelay(i, n)` 计算：12 条以内按 150ms 逐条固定累计，
+  超过 12 条等距压进 1800ms 窗口（单卡淡入 120ms）。
 - **取消 = AbortController，且如实告知**：`resolve` 能掐（`apiResolveScene` 收 signal），
   生成图那两条 HTTP **掐不掉** —— 所以在飞的那一景让它生成完（落盘正是要的缓存），文案写
   「正在停止（等这一景生成完…）」。被掐掉的 resolve 是**取消**、不是这一景失败，不记进失败账。
@@ -285,10 +288,10 @@
 **临时跳过**之后跑到的：当前工作区与 HEAD 都稳定报 `scrollW=1399 / clientW=1366`、
 溢出控件是 `set-btn`（暂未处理，与本轮改动无关）。
 
-**2026-10-21（一键解析入场：12 条以内逐条 100ms）**：`CARD_CASCADE_MS` 600 → 1200，新增
-`CARD_STEP_MS = 100`，`cascadeDelay` 由 `t²` 改为线性 —— 12 条以内每张比上一张固定晚
-100ms；超过 12 条时按份数摊薄步长、等距压进同一 1200ms 窗口（末张连同 120ms 淡入收在
-窗口末尾）。`motion.test.ts` 原「先快后慢」用例换成分段断言（≤12 条固定 100ms / >12 条
+**2026-10-21（一键解析入场：12 条以内逐条 150ms）**：`CARD_CASCADE_MS` 600 → 1800，新增
+`CARD_STEP_MS = 150`，`cascadeDelay` 由 `t²` 改为线性 —— 12 条以内每张比上一张固定晚
+150ms；超过 12 条时按份数摊薄步长、等距压进同一 1800ms 窗口（末张连同 120ms 淡入收在
+窗口末尾）。`motion.test.ts` 原「先快后慢」用例换成分段断言（≤12 条固定 150ms / >12 条
 等距压缩），该文件共 7 项 → 前端 **474 passed** + `vue-tsc --noEmit` 零错误 +
 `npm run build` 通过。
 
@@ -311,6 +314,14 @@ style.css 的 `--motion-fade`）→ 前端 **472 passed** + `vue-tsc --noEmit` �
 Ctrl+Z 撤回收藏 / 清理全部只留收藏 / clearRecs 保留收藏 / 取消收藏后才清得掉），整轮
 **322 项断言全绿** —— 同样是在临时跳过 §A 那两条 1366 宽度断言之后跑到的（同一条
 `set-btn` 溢出，与本轮无关；E4 偶发一次时序失败，重跑即绿）。
+
+**2026-10-21（聊天流式输出）**：后端 **806 passed / 5 skipped**；前端 **482 passed**（26 个文件，
+新增 `streaming.test.ts` 3 条与 `chat.test.ts` 5 条流式归并用例）+ `vue-tsc --noEmit` 零错误 +
+`npm run build` 通过。浏览器回归：`test-platform.js` **36 项全绿**（新增 2 条流式断言 ——
+推理折叠块 ×2、刷新后思考内容不恢复；其余三套本轮未重跑）。接口与事件表见
+[api-contract §3.2 / §4.2](../planning/api-contract.md)，取舍见
+[gui-experience §14](../experience/gui-experience.md)。**真机（内网 Qwen 端点）的
+流式观感与 `SR_LLM_STREAM=0` 退路仍待验收。**
 
 ## 7. 去哪查什么
 

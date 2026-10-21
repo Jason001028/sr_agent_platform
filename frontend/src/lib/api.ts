@@ -131,8 +131,13 @@ export interface HistoryResponse {
 }
 
 /** 聊天 SSE 事件（§3.2 schema；字段即事件字段，逐一对齐）。 */
+export type ChatPhase = 'thinking' | 'answering' | 'tool_call';
+
 export type ChatSseEvent =
   | { type: 'turn_start'; run_id: string; session_id: string }
+  | { type: 'llm_phase'; phase: ChatPhase; name?: string }
+  | { type: 'reasoning'; delta: string }
+  | { type: 'token'; delta: string }
   | { type: 'tool_call'; name: string; args: Record<string, unknown> }
   | { type: 'tool_result'; name: string; ok: boolean; data: unknown; error: string | null }
   | { type: 'assistant'; content: string }
@@ -570,13 +575,17 @@ export async function apiSubmitTrajectoryFeedback(
 }
 
 /** 发一条消息：POST 即流，SSE 逐事件回调；Promise 在流结束（turn_done/error）时完成。
- *  `images` 非空时随消息一起发（≤2 张，§3.2.1）；无图时请求体仍是 `{content}`。 */
+ *  `images` 非空时随消息一起发（≤2 张，§3.2.1）。`stream` 只在调用方明确要改
+ *  默认值时出现（服务端 SR_LLM_STREAM 是总开关，请求只能再关、不能强开）。 */
 export async function apiChatSend(
   cfg: SrConfig, sid: string, content: string,
   onEvent: (e: PlatformSseEvent) => void,
   images?: ChatUploadImage[],
+  stream?: boolean,
 ): Promise<void> {
-  const body = images && images.length ? { content, images } : { content };
+  const body: Record<string, unknown> = { content };
+  if (images && images.length) body.images = images;
+  if (stream !== undefined) body.stream = stream;
   const r = await fetch(sessionMessagesUrl(cfg, sid), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
