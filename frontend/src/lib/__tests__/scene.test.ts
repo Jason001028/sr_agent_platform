@@ -55,7 +55,7 @@ describe('scenesQuery / 列表 URL', () => {
   it('id 含特殊字符安全进 URL', () => {
     expect(scenePreviewUrl({ apiBase: '', staticBase: '' }, 'a/b+c==', 4))
       .toBe('/api/scenes/a%2Fb%2Bc%3D%3D/preview?div=4');
-    // 拖入那条是**另一个端点**，不是同 URL 带参数：落点与生命周期都不同
+    // 拖入那条是**另一个端点**，不是同 URL 带参数：写入位置与生命周期都不同
     expect(dropPreviewUrl({ apiBase: '', staticBase: '' }, 'a/b+c==', 8))
       .toBe('/api/scenes/a%2Fb%2Bc%3D%3D/preview-drop?div=8');
     expect(dropPreviewUrl({ apiBase: 'http://127.0.0.1:8000/', staticBase: '' }, 'x'))
@@ -71,7 +71,7 @@ describe('scenesQuery / 列表 URL', () => {
 describe('预览档位（全局下采样）', () => {
   const CFG = { apiBase: '', staticBase: 'http://static:9000' };
 
-  it('静态 URL 只对**烤出来的**预览拼 ?div=（源本身就是 JPG 的行不拼）', () => {
+  it('静态 URL 只对**生成出来的**预览拼 ?div=（源本身就是 JPG 的行不拼）', () => {
     expect(sceneImageUrl(CFG, '/disk-array/a/b_preview.jpg', 8))
       .toBe('http://static:9000/disk-array/a/b_preview.jpg?div=8');
     // 源即显示件：档位对它无意义，拼了反而打红逐字断言的 e2e
@@ -101,20 +101,20 @@ describe('预览档位（全局下采样）', () => {
   });
 
   it('previewNeedsBake：四条分支', () => {
-    // 库外（无静态 URL）→ 打 /preview，会烤
+    // 库外（无静态 URL）→ 打 /preview，会生成预览
     expect(previewNeedsBake(row({ jpgUrl: null }), 4)).toBe(true);
-    // 缓存不在 → 烤
+    // 缓存不在 → 生成预览
     expect(previewNeedsBake(row({ jpgUrl: '/d/a_preview.jpg',
       hasPreview: false }), 4)).toBe(true);
-    // 在，但档位不符（含旧格式戳 null）→ 烤
+    // 在，但档位不符（含旧格式规则签名 null）→ 生成预览
     expect(previewNeedsBake(row({ jpgUrl: '/d/a_preview.jpg', hasPreview: true,
       previewDiv: 8 }), 4)).toBe(true);
     expect(previewNeedsBake(row({ jpgUrl: '/d/a_preview.jpg', hasPreview: true,
       previewDiv: null }), 4)).toBe(true);
-    // 在且档位对得上 → 不烤
+    // 在且档位对得上 → 不生成预览
     expect(previewNeedsBake(row({ jpgUrl: '/d/a_preview.jpg', hasPreview: true,
       previewDiv: 4 }), 4)).toBe(false);
-    // 源即显示件 → 永不烤
+    // 源即显示件 → 永不生成预览
     expect(previewNeedsBake(row({ jpgUrl: '/d/a.jpg', hasPreview: true,
       previewDiv: null }), 4)).toBe(false);
   });
@@ -161,14 +161,14 @@ describe('显示源比较规则：谁清晰用谁（rasterPreviewWins）', () =>
   });
 
   it('判据就是 round(长边/div) > 显示件长边（与后端 preview_max_edge 同式）', () => {
-    // 真机量级：24000 源 + 8192 显示件。÷2 烤出 12000 → 赢
+    // 真机量级：24000 源 + 8192 显示件。÷2 生成 12000 → 更清晰
     expect(rasterPreviewWins(rp({}), 2)).toBe(true);
-    // ÷4 烤出 6000 → 输。**默认档位下这条规则基本不触发**，这正是要如实告诉用户的
+    // ÷4 生成 6000 → 更糊。**默认档位下这条规则基本不触发**，这正是要如实告诉用户的
     expect(rasterPreviewWins(rp({}), 4)).toBe(false);
     expect(rasterPreviewWins(rp({}), 8)).toBe(false);
   });
 
-  it('相等不换（严格大于）：换过去要付一次烘焙，换来一样清晰就没理由动', () => {
+  it('相等不换（严格大于）：换过去要付一次生成预览，换来一样清晰就没理由动', () => {
     // 1600 源 ÷4 = 400，显示件长边正好 400 → 平手，保持现状
     expect(rasterPreviewWins(rp({ rasterW: 1600, rasterH: 800,
       jpgW: 400, jpgH: 200 }), 4)).toBe(false);
@@ -183,10 +183,10 @@ describe('显示源比较规则：谁清晰用谁（rasterPreviewWins）', () =>
   });
 
   it('两侧都取长边比（不是宽比宽）', () => {
-    // 栅格长边 640 ÷4 = 160；显示件长边 600 → 输，尽管栅格在题目里比显示件「高」
+    // 栅格长边 640 ÷4 = 160；显示件长边 600 → 更糊，尽管栅格在题目里比显示件「高」
     expect(rasterPreviewWins(rp({ rasterW: 320, rasterH: 640,
       jpgW: 600, jpgH: 10 }), 4)).toBe(false);
-    // 反过来：栅格是横长条，长边 1600 ÷4 = 400 > 显示件长边 399 → 赢
+    // 反过来：栅格是横长条，长边 1600 ÷4 = 400 > 显示件长边 399 → 更清晰
     expect(rasterPreviewWins(rp({ rasterW: 1600, rasterH: 100,
       jpgW: 399, jpgH: 20 }), 4)).toBe(true);
   });
@@ -210,18 +210,18 @@ describe('显示源比较规则：谁清晰用谁（rasterPreviewWins）', () =>
 
   it('previewNeedsBake 的栅格分支：按**栅格那份预览**判，不看源 jpg 的三个字段', () => {
     const win = rp({ rasterW: 24000, rasterH: 24000, jpgW: 8192, jpgH: 8192 });
-    // 栅格赢且栅格那份预览还没烤过 → 要烤
+    // 栅格更清晰且栅格那份预览还没生成过 → 要生成
     expect(previewNeedsBake(row({ jpgUrl: '/d/a.jpg', hasPreview: true,
       previewDiv: null, rasterPreview: win }), 2)).toBe(true);
-    // 烤过但不是这一档 → 要烤
+    // 生成过但不是这一档 → 要生成
     expect(previewNeedsBake(row({ jpgUrl: '/d/a.jpg', hasPreview: true,
       previewDiv: null, rasterPreview: { ...win, hasPreview: true, previewDiv: 4 } }),
       2)).toBe(true);
-    // 烤过且档位对得上 → 不烤
+    // 生成过且档位对得上 → 不生成
     expect(previewNeedsBake(row({ jpgUrl: '/d/a.jpg', hasPreview: true,
       previewDiv: null, rasterPreview: { ...win, hasPreview: true, previewDiv: 2 } }),
       2)).toBe(false);
-    // 栅格**输**（÷4）→ 落回源 jpg 那套：源即显示件，永不烤
+    // 栅格**更糊**（÷4）→ 落回源 jpg 那套：源即显示件，永不生成预览
     expect(previewNeedsBake(row({ jpgUrl: '/d/a.jpg', hasPreview: true,
       previewDiv: null, rasterPreview: win }), 4)).toBe(false);
   });
@@ -245,7 +245,7 @@ describe('graySrcFromRgba / sceneDecodePixels（route=JPG 同构数据）', () =
     expect(Array.from(g)).toEqual([10, 200]);
   });
 
-  it('stats 固定 0..255 → linear 拉伸为恒等（烘焙值原样上屏）', () => {
+  it('stats 固定 0..255 → linear 拉伸为恒等（预览图里的值原样上屏）', () => {
     // 灰度 16 像素，值故意非单调铺满：模拟已 2% 拉伸的浅/中/深灰
     const vals = [0, 51, 102, 128, 153, 200, 230, 255, 40, 90, 180, 210, 12, 66, 120, 240];
     const rgba = new Uint8Array(vals.length * 4);
@@ -368,7 +368,7 @@ describe('手工场景路径（盘阵任意合法场景目录）', () => {
 
   // 文件名 → 场景路径的反推**已整体收到后端**（backend/pathguard.py）：
   // 前端不再自解析日期、不再自拼模板，所以这里没有对应单测 —— 规则与候选
-  // 由 backend/tests/test_paths.py 与 test_scene_resolve.py 钉住，前端行为
+  // 由 backend/tests/test_paths.py 与 test_scene_resolve.py 固定住，前端行为
   // 由 .e2e/test-manual-scene.js 覆盖。
 
   it('sceneResolveUrl 走 apiBase', () => {

@@ -34,7 +34,7 @@ function emptyText(rec: { thumb: unknown } | null): string {
 }
 
 /** 分隔线在画布内的像素位置。用 `Math.round(w * ratio)` —— 与 `viewMath.splitRects`
-     算左格宽是同一条表达式，所以分隔线、裁剪矩形、落点判据三者不会差一像素。 */
+     算左格宽是同一条表达式，所以分隔线、裁剪矩形、放置位置判据三者不会差一像素。 */
 const splitPx = computed(() => Math.round(store.canvasSize.w * store.splitRatio));
 
 /** 左半 / 右半的内联位置（分隔线一动就跟着动）。 */

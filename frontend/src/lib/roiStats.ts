@@ -178,7 +178,7 @@ function shoelaceArea(p: Poly): number {
   return Math.abs(a2) / 2;
 }
 
-/** 缩略图坐标 ROI → 原图像素尺度几何摘要（尺寸/估算面积，与掩码烘焙同一换算：
+/** 缩略图坐标 ROI → 原图像素尺度几何摘要（尺寸/估算面积，与掩码生成同一换算：
     每顶点 thumbToOrig round+clamp，bbox 含端点计数，面积 = 鞋带公式）。 */
 export function roiOrigGeom(
   poly: Poly, W: number, H: number, tw: number, th: number,

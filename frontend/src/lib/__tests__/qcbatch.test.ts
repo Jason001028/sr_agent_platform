@@ -5,7 +5,7 @@
  *
  * 1. `sceneNameCandidates` 是 `backend/pathguard.py::scene_name_products` 的**镜像**，
  *    所以这里逐字断言返回数组（它是契约，不是实现细节）。它与 `PRODUCT_CODES` 一起
- *    构成跨语言契约的**前端那一半钉子** —— 后端那一半在
+ *    构成跨语言契约的**前端那一半断言** —— 后端那一半在
  *    `backend/tests/test_paths.py::TestSceneNameProducts::test_product_codes_mirror`。两处同时红 = 有人
  *    改了产品段口径却没改另一头，这正是要的效果。
  *
@@ -25,7 +25,7 @@ const BARE = 'JXGF07D03_PMS_20260622052600_200516571_101_0020_001_L1';
 /* 盘阵上的景级目录名（= 上面那个 + 产品段） */
 const PAN = BARE + '_PAN';
 
-describe('PRODUCT_CODES —— 跨语言契约的前端那一半钉子', () => {
+describe('PRODUCT_CODES —— 跨语言契约的前端那一半断言', () => {
   it('与 backend/pathguard.py::_PRODUCT_CODES 逐字相同', () => {
     // 改这里必须同改后端那处；两边各有一条测试盯着这个词面量，同时红即不会静默漂。
     expect([...PRODUCT_CODES]).toEqual(['PAN', 'MSS']);
@@ -203,16 +203,16 @@ describe('runSceneBake —— 单景失败不中断整批', () => {
     ]);
   });
 
-  it('本体烤失败 → 同一景的 NOSR 仍然继续（两份是独立的两步）', async () => {
+  it('本体生成失败 → 同一景的 NOSR 仍然继续（两份是独立的两步）', async () => {
     const { calls, deps } = harness({
       body: async (it) => {
         calls.push('body:' + it.name);
-        if (it.name === 'a') throw new Error('烘焙超时');
+        if (it.name === 'a') throw new Error('生成预览超时');
       },
     });
     const r = await runSceneBake([ROWS[0]], deps, never.signal);
     expect(calls).toEqual(['resolve:a', 'body:a', 'nosr:a']);
-    expect(r.fails).toEqual({ a: { stage: 'body', reason: '烘焙超时' } });
+    expect(r.fails).toEqual({ a: { stage: 'body', reason: '生成预览超时' } });
   });
 
   it('NOSR 自己失败（本体成功）→ 记 nosr 失败', async () => {
@@ -226,19 +226,19 @@ describe('runSceneBake —— 单景失败不中断整批', () => {
 
   it('本体已失败、NOSR 也失败 → 保留本体那条（更严重且先发生），NOSR 落进 notes', async () => {
     const { deps } = harness({
-      body: async () => { throw new Error('烘焙超时'); },
+      body: async () => { throw new Error('生成预览超时'); },
       nosr: async () => { throw new Error('siblings 502'); },
     });
     const r = await runSceneBake([ROWS[0]], deps, never.signal);
-    expect(r.fails).toEqual({ a: { stage: 'body', reason: '烘焙超时' } });
-    expect(r.notes).toEqual({ a: 'NOSR 那份没烤成：siblings 502' });
+    expect(r.fails).toEqual({ a: { stage: 'body', reason: '生成预览超时' } });
+    expect(r.notes).toEqual({ a: 'NOSR 那份没生成成功：siblings 502' });
   });
 
   it("NOSR 返回 'missing' → 进 notes 不进 fails（盘上没有那份是事实）", async () => {
     const { deps } = harness({ nosr: async () => 'missing' });
     const r = await runSceneBake([ROWS[0]], deps, never.signal);
     expect(r.fails).toEqual({});
-    expect(r.notes).toEqual({ a: '盘上没有未超分那份（NOSR），只烤了本体' });
+    expect(r.notes).toEqual({ a: '盘上没有未超分那份（NOSR），只生成了本体' });
     expect(r.done).toBe(1);
   });
 
@@ -283,7 +283,7 @@ describe('runSceneBake —— 取消点', () => {
     expect(r.fails).toEqual({});
   });
 
-  it('本体那步中途被 abort：NOSR 不再发，也不算失败（在烤的那一份停不下来，就是让它烤完）', async () => {
+  it('本体那步中途被 abort：NOSR 不再发，也不算失败（在生成的那一份停不下来，就是让它生成完）', async () => {
     const ac = new AbortController();
     const { calls, deps } = harness({
       body: async (it) => { calls.push('body:' + it.name); ac.abort(); },
@@ -291,7 +291,7 @@ describe('runSceneBake —— 取消点', () => {
     const r = await runSceneBake(ROWS, deps, ac.signal);
     expect(calls).toEqual(['resolve:a', 'body:a']);
     expect(r.stopped).toBe(true);
-    expect(r.done).toBe(1);             // 本体烤成了，这张卡留着
+    expect(r.done).toBe(1);             // 本体生成成功了，这张卡留着
     expect(r.fails).toEqual({});
   });
 

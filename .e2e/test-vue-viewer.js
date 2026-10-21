@@ -19,7 +19,7 @@
 //   输出目录一条链路（sr-minimal-prototype-plan.md §4.5），setSaver / reExportJpg /
 //   scanPendingExports / jpgStatus 等钩子随之从 e2eHooks.ts 移除。针对已取消功能的
 //   断言留着只会长期报红，故整段删除；导出链路的等价回归见 .e2e/test-scenes.js 的
-//   「C. 懒烘焙」段 —— 现在是服务端烘焙，前端不再写文件。）
+//   「C. 懒预览生成」段 —— 现在是服务端预览生成，前端不再写文件。）
 // 用法: cd .e2e && node test-vue-viewer.js
 const http = require('http');
 const fs = require('fs');

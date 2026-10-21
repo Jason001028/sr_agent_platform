@@ -126,7 +126,7 @@ export const useQcListStore = defineStore('qclist', () => {
       sourceMtime.value = typeof p.mtime === 'number' ? p.mtime : null;
       // 状态以缓存为准（它含还没同步出去的改动），文件下半部分只作首次导入的起点。
       statuses.value = { ...(p.statuses ?? {}) };
-      // 烘焙账**不进缓存**：它记的是「这次会话里烤过什么」，刷新后要重烤就重跑一键解析，
+      // 生成预览账**不进缓存**：它记的是「这次会话里生成过什么」，刷新后要重新生成就重跑一键解析，
       // 而不是让一份上次会话的旧账挂在新清单上。
       clearBakeLedger();
     } catch {
@@ -252,14 +252,14 @@ export const useQcListStore = defineStore('qclist', () => {
     if (hit) selName.value = hit.name;
   }
 
-  /* ---------------- 一键解析：按 .txt 顺序批量烘焙 + 入列 ----------------
-     一景两步：本体 jpg + NOSR jpg（盘上没有那份就只烤本体，如实记一笔「缺失」）。
-     每一步都**只把 jpg 烤到盘上**，卡片入列时只有身份、没有像素 —— 几十景一次装进
+  /* ---------------- 一键解析：按 .txt 顺序批量生成预览 + 入列 ----------------
+     一景两步：本体 jpg + NOSR jpg（盘上没有那份就只生成本体，如实记一笔「缺失」）。
+     每一步都**只把 jpg 生成到盘上**，卡片入列时只有身份、没有像素 —— 几十景一次装进
      内存必爆（算式见 viewer 的 ViewerRec.card）。点开某张卡时命中服务端缓存，秒出。
 
      全程走既有端点（resolve / preview / siblings），**没有新后端接口**：批量端点既
-     停不下服务端已经在烤的那一份，又要把「试过哪些候选、各自为什么不行」重写一遍
-     （那就成了新的「静默换路径」入口）。服务端读盘本就该并发 1（后台急烤 ticker 就是
+     停不下服务端已经在生成的那一份，又要把「试过哪些候选、各自为什么不行」重写一遍
+     （那就成了新的「静默换路径」入口）。服务端读盘本就该并发 1（后台主动生成 ticker 就是
      单消费者），省下的只有毫秒级往返。 */
 
   type BakeState = 'idle' | 'running' | 'stopping' | 'done' | 'stopped';
@@ -272,7 +272,7 @@ export const useQcListStore = defineStore('qclist', () => {
   /** 跑批已用的秒数（跑着时每秒刷一次，定格在结束那一刻）。 */
   const bakeElapsed = ref(0);
   /** 失败账：**单独一张表，绝不写 `statuses`** —— 那份会被 `buildQcDoc` 写回盘阵上
-   *  的 .txt、还驱动 `counts.done`。烤图失败不是质检结论，不能污染文档。 */
+   *  的 .txt、还驱动 `counts.done`。预览生成失败不是质检结论，不能污染文档。 */
   const bakeFails = ref<Record<string, BakeFail>>({});
   /** 盘上的事实（不是错误）：「没有未超分那份」。 */
   const bakeNotes = ref<Record<string, string>>({});
@@ -329,7 +329,7 @@ export const useQcListStore = defineStore('qclist', () => {
     };
   }
 
-  /** 按 .txt 顺序把整份清单跑一遍：清空暂存区 → 逐景 resolve + 烤两份 jpg + 入列。
+  /** 按 .txt 顺序把整份清单跑一遍：清空暂存区 → 逐景 resolve + 生成两份 jpg + 入列。
    *
    *  跑的过程中**不弹遮罩、不动 busy**（那是模态的，会把用户正在看的图挡住、工具栏
    *  锁住几十景 × 每景几十秒）；进度只走面板上那一行字。 */
@@ -357,8 +357,8 @@ export const useQcListStore = defineStore('qclist', () => {
       const report = await runSceneBake(rows, {
         resolve: (it, signal) => scenes.resolveByName(it.name, it.imgType, { signal }),
         body: async (it, res) => {
-          // ① 入列一张空卡（带身份、带「第一次点开去哪儿取图」）② 把 jpg 烤到盘上。
-          // 顺序不能反：烤成功才入列的话，用户跑到一半看到的是「进度在走、左边还是空的」。
+          // ① 入列一张空卡（带身份、带「第一次点开去哪儿取图」）② 把 jpg 生成到盘上。
+          // 顺序不能反：生成成功才入列的话，用户跑到一半看到的是「进度在走、左边还是空的」。
           const r = res as SceneResolveResult;
           await viewer.bakeCardPixels(viewer.insertSceneCard(bodyMeta(r), r.row));
         },
@@ -391,8 +391,8 @@ export const useQcListStore = defineStore('qclist', () => {
   }
 
   /** 中途停：掐掉在飞的 resolve，并在下一景开跑之前收手。
-   *  **正在烤的那一景停不下来** —— 取图的两个 API 都不收 AbortSignal，所以让它烤完
-   *  （落盘正是用户要的缓存），文案如实写「正在停止（等这一景烤完…）」。 */
+   *  **正在生成的那一景停不下来** —— 取图的两个 API 都不收 AbortSignal，所以让它生成完
+   *  （落盘正是用户要的缓存），文案如实写「正在停止（等这一景生成完…）」。 */
   function stopBake(): void {
     if (bakeState.value !== 'running') return;
     bakeState.value = 'stopping';
@@ -408,8 +408,8 @@ export const useQcListStore = defineStore('qclist', () => {
    *  **失败与「缺 NOSR」分开数**：前者是要处理的，后者是盘上的事实。 */
   const bakeLine = computed(() => {
     const st = bakeState.value;
-    if (st === 'idle') return '按清单顺序逐景烘焙本体 + NOSR 两份 jpg，每景左侧落两张卡';
-    if (st === 'stopping') return '正在停止（等这一景烤完…）';
+    if (st === 'idle') return '按清单顺序逐景生成本体 + NOSR 两份 jpg，每景左侧落两张卡';
+    if (st === 'stopping') return '正在停止（等这一景生成完…）';
     if (st === 'running') {
       return (bakeNow.value || '正在准备…') + ' · 已用 ' + fmtElapsed(bakeElapsed.value * 1000);
     }

@@ -54,8 +54,69 @@ function selectedPalette() {
   return selPalette;
 }
 
-/* ---------------- 尺寸同步 ---------------- */
-function resize() {
+/* ---------------- 尺寸同步 ----------------
+ *
+ * 侧栏折叠/展开是 100ms 的 width 过渡：stage 每帧都会变宽一点。若照旧每帧
+ * 重设 `canvas.width/height`（会清空并重建绘制缓冲）再走一遍 `setCanvasSize → fit`，
+ * 大图会在**每个中间尺寸**上各付一次重采样 —— 盘阵 8192 显示件实测首次收/开侧栏
+ * 整页冻结 0.2–0.5s，第二次尺寸命中缓存才流畅。
+ *
+ * 所以过渡期间只记「待更新」，不动画布；过渡结束（transitionend，另配 140ms 兜底）
+ * 只落一次：一次重建 + 一次 fit，与未做宽度动画时的开销相同。测宽/窗口 resize
+ * 这类没有过渡的变化仍然立即生效。
+ *
+ * 过渡期间画布**按原像素尺寸固定住并居中**（不跟着 100% 拉宽）：否则收起 400px 的
+ * 侧栏时，画面会被横向拉伸最多 40% 再弹回来。固定住后多出来的空间由 stage 背景补，
+ * 指针换算仍用画布自己的 rect，不受居中偏移影响。 */
+let resizePending = false;
+let resizeTimer: number | null = null;
+let canvasPinned = false;
+
+/** 把两块画布按当前绘制缓冲尺寸固定住并居中；结束（applyResize）时撤掉。 */
+function pinCanvasSize() {
+  const vc = viewCanvasRef.value;
+  const dc = drawCanvasRef.value;
+  if (!vc || !dc || canvasPinned) return;
+  const w = vc.width, h = vc.height;
+  if (!w || !h) return;
+  canvasPinned = true;
+  vc.style.width = w + 'px';
+  vc.style.height = h + 'px';
+  vc.style.margin = '0 auto';
+  dc.style.width = w + 'px';
+  dc.style.height = h + 'px';
+  dc.style.left = '50%';
+  dc.style.transform = 'translateX(-50%)';
+}
+
+function unpinCanvasSize() {
+  if (!canvasPinned) return;
+  canvasPinned = false;
+  const vc = viewCanvasRef.value;
+  const dc = drawCanvasRef.value;
+  if (vc) { vc.style.width = ''; vc.style.height = ''; vc.style.margin = ''; }
+  if (dc) { dc.style.width = ''; dc.style.height = ''; dc.style.left = ''; dc.style.transform = ''; }
+}
+
+/** 是否正有一条 width 过渡在跑（两侧栏折叠）。用 getAnimations 而不是认类名：
+ *  以后再加别的宽度动画也不会漏；只认 `width`，进度条的 width 过渡不会挡画布。 */
+function widthTransitionRunning(): boolean {
+  if (typeof document === 'undefined' || typeof document.getAnimations !== 'function') return false;
+  try {
+    return document.getAnimations().some((a) => {
+      const t = a as CSSTransition;
+      return t.transitionProperty === 'width' && t.playState === 'running';
+    });
+  } catch { return false; }        // 老浏览器没有 transitionProperty：按无过渡处理
+}
+
+function applyResize() {
+  resizePending = false;
+  if (resizeTimer !== null) {
+    clearTimeout(resizeTimer);
+    resizeTimer = null;
+  }
+  unpinCanvasSize();
   const stage = stageRef.value;
   const vc = viewCanvasRef.value;
   const dc = drawCanvasRef.value;
@@ -65,6 +126,26 @@ function resize() {
   vc.width = w; vc.height = h;
   dc.width = w; dc.height = h;
   store.setCanvasSize(w, h);
+}
+
+function scheduleResize() {
+  if (!widthTransitionRunning()) { applyResize(); return; }
+  resizePending = true;
+  pinCanvasSize();
+  if (resizeTimer !== null) clearTimeout(resizeTimer);
+  // 兜底：过渡被中途打断、元素被隐藏时 transitionend 可能不来，界面不能停在旧画布上。
+  resizeTimer = window.setTimeout(() => {
+    resizeTimer = null;
+    if (widthTransitionRunning()) { scheduleResize(); return; }
+    applyResize();
+  }, 140);
+}
+
+/** 两条侧栏可能先后/同时动画：等所有 width 过渡都结束再落一次。 */
+function onLayoutTransitionEnd(e: TransitionEvent) {
+  if (e.propertyName !== 'width' || !resizePending) return;
+  if (widthTransitionRunning()) return;
+  applyResize();
 }
 
 /* ---------------- 渲染 ---------------- */
@@ -330,7 +411,7 @@ function onContextMenu(e: MouseEvent) {
   if (store.drawMode) { e.preventDefault(); store.closePolygon(); }
 }
 
-/** 拖放落点归哪一格。compare 关闭 → null（全窗口都是拖放目标，落点不参与决策）。 */
+/** 拖放位置归哪一格。compare 关闭 → null（全窗口都是拖放目标，位置不参与决策）。 */
 function dropSide(e: DragEvent): 'A' | 'B' | null {
   if (!store.compareOn) return null;
   const vc = viewCanvasRef.value;
@@ -371,7 +452,7 @@ function onDrop(e: DragEvent) {
   store.setDragHint(false, null);
   // 侧栏卡片（页面内拖放）：载荷是一张「票」（rec.id），没有文件。**先于 files 那道
   // 早退**判它，否则卡片拖放会掉进「没有文件」那条 return 里什么都不发生。
-  // 落点仍由 dropSide 决定（分屏下落在哪半就是哪半），落格/适配/重绘全在
+  // 落位仍由 dropSide 决定（分屏下落在哪半就是哪半），落格/适配/重绘全在
   // activate 里，这里不重复实现一套。
   const recId = Number(e.dataTransfer?.getData(store.REC_MIME) || '');
   if (Number.isInteger(recId) && recId > 0) {
@@ -419,14 +500,15 @@ watch(
 );
 
 onMounted(() => {
-  resize();
+  applyResize();
   // 画布「挂着」才说明 view/canvasSize 是这一页的真实视口；换页后 store 里
   // 的旧值不能拿去裁聊天截图（见 viewer.captureForChat）。
   store.setCanvasAttached(true);
   if (stageRef.value) {
-    resizeObs = new ResizeObserver(() => resize());
+    resizeObs = new ResizeObserver(() => scheduleResize());
     resizeObs.observe(stageRef.value);
   }
+  window.addEventListener('transitionend', onLayoutTransitionEnd, true);
   window.addEventListener('keydown', store.onKeyDown);
   window.addEventListener('dragover', onDragOver);
   window.addEventListener('drop', onDrop);
@@ -439,6 +521,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   store.setCanvasAttached(false);
   if (resizeObs) resizeObs.disconnect();
+  if (resizeTimer !== null) { clearTimeout(resizeTimer); resizeTimer = null; }
+  window.removeEventListener('transitionend', onLayoutTransitionEnd, true);
   window.removeEventListener('keydown', store.onKeyDown);
   window.removeEventListener('dragover', onDragOver);
   window.removeEventListener('drop', onDrop);

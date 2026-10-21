@@ -1,10 +1,10 @@
 /**
  * compare.test.ts — 图像对比的纯判据回归（2026-09-20）
  * ------------------------------------------------------------------
- * 三态解析、分隔比例解析、拖放落点归属、点选清单增删剪。这些都是**判据**：
+ * 三态解析、分隔比例解析、拖放位置归属、点选清单增删剪。这些都是**判据**：
  * 交互层（TifCanvas / CompareBar / CompareListPanel）只负责把它们接到事件上。
  *
- * 落点判据的边界是本文件的重点 —— 「画布外忽略」全靠它，错一格就是「拖到工具栏上
+ * 拖放位置判据的边界是本文件的重点 —— 「画布外忽略」全靠它，错一格就是「拖到工具栏上
  * 也能换图」或者「压在画布最外一像素上不认」。
  */
 import { describe, it, expect } from 'vitest';
@@ -45,11 +45,11 @@ describe('parseSplitRatio', () => {
   });
 });
 
-describe('dropSideAt（落点归哪一格）', () => {
+describe('dropSideAt（拖放位置归哪一格）', () => {
   const rect = { left: 100, top: 50, right: 900, bottom: 650 };   // 800×600 的画布
   const splitX = 400;                                            // 局部坐标的分隔线
 
-  it('off：不问落点，一律 null（关闭模式下全窗口都是拖放目标）', () => {
+  it('off：不问拖放位置，一律 null（关闭模式下全窗口都是拖放目标）', () => {
     expect(dropSideAt(300, 300, rect, 'off', splitX)).toBeNull();
     expect(dropSideAt(500, 300, rect, 'off', splitX)).toBeNull();
   });
@@ -83,21 +83,21 @@ describe('dropSideAt（落点归哪一格）', () => {
 });
 
 describe('placeInSplit（这一张进哪一格）', () => {
-  it('给了落点就进那一格，另一格不动', () => {
+  it('给了拖放位置就进那一格，另一格不动', () => {
     expect(placeInSplit(7, null, 9, 'B', 'A'))
       .toEqual({ paneA: 7, paneB: 9, side: 'B', moved: true });
     expect(placeInSplit(7, 8, 9, 'A', 'B'))
       .toEqual({ paneA: 9, paneB: 8, side: 'A', moved: true });
   });
 
-  it('没给落点（文件列表点击 / 场景入口）→ 进活动侧', () => {
+  it('没给拖放位置（文件列表点击 / 场景入口）→ 进活动侧', () => {
     expect(placeInSplit(7, 8, 9, null, 'B'))
       .toEqual({ paneA: 7, paneB: 9, side: 'B', moved: true });
     expect(placeInSplit(7, 8, 9, null, 'A'))
       .toEqual({ paneA: 9, paneB: 8, side: 'A', moved: true });
   });
 
-  it('两格都占着 + 另一格已经是同一张 → 反转：落点那半放它，另一格接住原来那张', () => {
+  it('两格都占着 + 另一格已经是同一张 → 反转：拖放位置那半放它，另一格接住原来那张', () => {
     expect(placeInSplit(7, 8, 7, 'B', 'A'))
       .toEqual({ paneA: 8, paneB: 7, side: 'B', moved: true });
     expect(placeInSplit(7, 8, 8, 'A', 'B'))
@@ -114,12 +114,12 @@ describe('placeInSplit（这一张进哪一格）', () => {
       .toEqual({ paneA: 8, paneB: 8, side: 'A', moved: true });
   });
 
-  it('落点那半本来就是它 → 什么都不变，moved 为假（不重适配，用户的缩放留着）', () => {
+  it('拖放位置那半本来就是它 → 什么都不变，moved 为假（不重适配，用户的缩放留着）', () => {
     expect(placeInSplit(7, 8, 7, 'A', 'A'))
       .toEqual({ paneA: 7, paneB: 8, side: 'A', moved: false });
   });
 
-  it('两格都空 → 落进落点那半', () => {
+  it('两格都空 → 落进拖放位置那半', () => {
     expect(placeInSplit(null, null, 9, 'B', 'B'))
       .toEqual({ paneA: null, paneB: 9, side: 'B', moved: true });
   });

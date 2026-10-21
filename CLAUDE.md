@@ -19,3 +19,7 @@
 ## 硬性约束（详见 gui-experience.md §1）
 
 浏览器单次分配 ~2GB、Canvas 面积上限 16384²、CDN 不可达（必须本地 vendor）、真实大图仅在内网机盘阵（外网开发机读不到，结构靠用户回传 ENVI 头信息推断）。
+
+**术语**：正文、注释与界面文案写「生成预览 / 预览 JPG / 预览生成规则 / 缩放档位」，不写「烘焙」「烤」；选区栅格写「掩码」（盘上真实文件名「掩膜中心点坐标.txt」除外）。代码标识符里的 `bake*` 保留不改。细则见 [docs/conventions/terminology-conventions.md](docs/conventions/terminology-conventions.md)。
+
+**提交前**：`cd frontend && npm run check:terms`（`npm test` 已自动执行这一道）。

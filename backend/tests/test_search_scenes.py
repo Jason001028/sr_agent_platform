@@ -97,7 +97,7 @@ class TestImageScenes(unittest.TestCase):
             self.assertEqual(r["results"][0]["date"], "2026-08-10")
 
     def test_preview_cache_is_not_a_scene(self):
-        """后端自己烘焙的 <stem>.preview.jpg 躺在场景目录里，不能被列成第二行。"""
+        """后端自己预览生成的 <stem>.preview.jpg 躺在场景目录里，不能被列成第二行。"""
         with tempfile.TemporaryDirectory() as d:
             p = write_scene(d, "GF07A03_PMS01_20260722125045")
             write_jpg(p.parent, p.stem + ".preview.jpg")
@@ -199,7 +199,7 @@ class TestImageScenes(unittest.TestCase):
             self.assertFalse(svc.is_scene_file(sub))
 
     def test_drop_preview_beside_source_is_not_a_scene(self):
-        """拖入链烤出来的 `<stem>_preview.jpg` 不得被列成一行场景。
+        """拖入链生成出来的 `<stem>_preview.jpg` 不得被列成一行场景。
 
         它跟源同目录、后缀也是 .jpg，只有「stem 必须等于目录名」这条能挡住它 ——
         白名单一旦放宽，用户拖入一次就会在场景库里多出一行假场景。

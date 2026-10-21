@@ -55,7 +55,7 @@
 8. **Q：JSONResponse / FileResponse / StreamingResponse 各何时用？（★）**
    **A：**
    - `JSONResponse`：普通 JSON（FastAPI 默认替你包）；
-   - `FileResponse`：直接把一个文件当响应体——🖼 阶段 4 `/preview` 返回盘阵烤好的 JPG 就用它（带 `media_type="image/jpeg"`，顺带让 nginx 静态托管同路径 JPG 时也能原生缓存）；
+   - `FileResponse`：直接把一个文件当响应体——🖼 阶段 4 `/preview` 返回盘阵生成好的 JPG 就用它（带 `media_type="image/jpeg"`，顺带让 nginx 静态托管同路径 JPG 时也能原生缓存）；
    - `StreamingResponse`：响应体是流（逐块 yield）——SSE、大文件代理、流式下载都靠它；必须手动设 `Content-Type`。
 
 9. **Q：SSE 在 FastAPI 里怎么落地？帧格式长什么样？（★）**

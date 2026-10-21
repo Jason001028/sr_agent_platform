@@ -34,7 +34,7 @@ export const useScenesStore = defineStore('scenes', () => {
   const searched = ref(false);
   /** 上一次检索的**发起**时刻；页面那行「上次检索 HH:MM」用它。 */
   const searchedAt = ref<Date | null>(null);
-  /** 打开中的阶段文案（首次烘焙很慢，本页没有遮罩，就靠这一行说明在忙什么）。
+  /** 打开中的阶段文案（首次生成预览很慢，本页没有遮罩，就靠这一行说明在忙什么）。
    *  只在打开期间非空，见 open()。 */
   const phase = ref('');
   const error = ref('');
@@ -108,7 +108,7 @@ export const useScenesStore = defineStore('scenes', () => {
    *  那一刻其实没有任何东西被撤销）。现在列表留在页面上，直到用户**自己**按「检索」/
    *  「重置」：与清除那套「摘掉的行要回来得重新检索」（clearSummaryText）同一个口径。
    *
-   *  代价是列表可以是旧的（新落盘的场景、别处刚烤出来的预览都不反映），所以状态 chip
+   *  代价是列表可以是旧的（新落盘的场景、别处刚生成的预览都不反映），所以状态 chip
    *  旁边带一行「上次检索 HH:MM」，让用户看得出这份数据是什么时候的。单个 `.jpg`/`.tif`
    *  的标签由取图那一侧就地翻牌（lib/api.ts 的 fetchSceneJpg 写回本行），不靠重检索。 */
   function ensureSearched(): void {
@@ -238,7 +238,7 @@ export const useScenesStore = defineStore('scenes', () => {
     openingId.value = row.id;
     error.value = '';
     try {
-      // 首次要服务端烘焙（读一遍大图，几十秒）。遮罩（viewer.showMask）只挂在
+      // 首次要服务端生成预览（读一遍大图，几十秒）。遮罩（viewer.showMask）只挂在
       // /viewer 上，本页调了也看不见，所以这里走自己的 phase 文案行。
       // 档位取 viewer store 里的那份（工具栏拖动条写的就是它）—— 这样用户拖完
       // 滑块不必刷新页面就生效；loadPreviewDiv() 只负责冷启动时的初值。
@@ -246,7 +246,7 @@ export const useScenesStore = defineStore('scenes', () => {
                                        (text) => { phase.value = text; });
       await viewer.openSceneJpg({
         name: row.name, W: row.W, H: row.H, sceneId: row.id,
-        // 裸 .tif 且父目录不是场景目录时后端把它置 null（= 不能提交 SR），
+        // 无伴随件的 .tif 且父目录不是场景目录时后端把它置 null（= 不能提交 SR），
         // 这里不用再判 sr_capable —— 与 resolved.sr_capable 同源同真假。
         lqPath: row.lq_path,
         // 场景目录（同上，与能不能提交无关）：卡片上那颗「同一景共用一个序号」
@@ -365,7 +365,7 @@ export const useScenesStore = defineStore('scenes', () => {
 
   /** 按名字**只解析、不打开**：拿回后端的权威结果给「一键解析」批量用。
    *
-   *  与 openByName 的差别只有一个：这条路**不 open()** —— 不激活、不弹遮罩、不烤图、
+   *  与 openByName 的差别只有一个：这条路**不 open()** —— 不激活、不弹遮罩、不生成预览、
    *  不写 `scenes.error`（批量几十景，一路弹遮罩等于把界面锁死；错误由批量那边记账）。
    *  请求体口径与 openByName 逐字相同（`product` 只在非空时带）。
    *

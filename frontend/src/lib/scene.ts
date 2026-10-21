@@ -1,8 +1,8 @@
 /**
- * scene.ts — 盘阵场景（阶段4：读服务器预生成 JPG）纯函数 + 类型
+ * scene.ts — 盘阵场景（阶段4：读服务端生成的预览 JPG）纯函数 + 类型
  * ------------------------------------------------------------------
- * 阶段4 数据路径：浏览器不再读盘阵原始 TIF 字节，显示 = 服务器烘焙的 JPG
- * （长宽各为源图的 1/2；稀疏采样 + 直方图均衡已烘焙）。本文件只放可单测的纯函数
+ * 阶段4 数据路径：浏览器不再读盘阵原始 TIF 字节，显示 = 服务端生成的预览 JPG
+ * （长宽各为源图的 1/2；稀疏采样 + 直方图均衡已生成）。本文件只放可单测的纯函数
  * 与前后端共享类型：
  *   - 运行期配置（apiBase/staticBase）：默认同源（nginx 同时暴露 /api 与 /disk-array），
  *     e2e/异源部署注入 window.__SR_CFG__。
@@ -61,12 +61,12 @@ export interface SceneRow {
   H: number | null;
   rel: string | null;       // scenes 根下相对路径（仅调试用）
   jpgUrl: string | null;    // 相对 /disk-array/…（JPG 已生成才非空）
-  hasPreview: boolean;      // 服务器缓存 JPG 是否已生成
-  /** 盘上那份预览是按哪一档（各边 ÷N）烤的；null = 没有 / 旧格式戳 /
+  hasPreview: boolean;      // 服务端缓存 JPG 是否已生成
+  /** 盘上那份预览是按哪一档（各边 ÷N）生成的；null = 没有 / 旧格式规则签名 /
    *  读不出 / 源本身就是显示就绪图（不参与档位）。
    *
    *  `hasPreview` **不认档位** —— 换档位后盘上那份旧图仍在，只看它就会跳过
-   *  重烤、把旧档位的图端上来。所以判定「要不要重烤」必须连这个字段一起看
+   *  重新生成、把旧档位的图端上来。所以判定「要不要重新生成」必须连这个字段一起看
    *  （见 lib/api.ts 的 fetchSceneJpg）。 */
   previewDiv?: number | null;
   /** 阶段6 viewer 上下文侧舱：scene 文件父目录绝对路径（= run_sr 目录语义，
@@ -77,7 +77,7 @@ export interface SceneRow {
   manual?: boolean;
   /** 源是显示件 jpg、且同目录配着同名栅格时才有（其余行恒 null / 缺席）。
    *
-   *  **它是「要不要改从栅格烤」的依据，不是这一行自己的预览** —— 行自己的
+   *  **它是「要不要改从栅格生成」的依据，不是这一行自己的预览** —— 行自己的
    *  `hasPreview/jpgUrl/previewDiv` 三个字段的语义不受它影响（那张 jpg 仍是这一行的
    *  显示源声明）。见 rasterPreviewWins。 */
   rasterPreview?: RasterPreview | null;
@@ -193,7 +193,7 @@ export function scenePreviewUrl(cfg: SrConfig, id: string,
  *
  * 纯只读：回答「输入影像 / 本轮超分产物 / NOSR 各叫什么、在不在、各自的 id 是什么」。
  * 每类拿它自己的 `id` 调 `scenePreviewUrl` 就能看图 —— **三类各有自己的
- * `<stem>_preview.jpg` 落点**，所以这条端点不新增任何烘焙入口。
+ * `<stem>_preview.jpg` 写入位置**，所以这条端点不新增任何预览生成入口。
  * `suffix` 只在用户手动断言时给；不给由后端按「最近一条 COMPLETED 任务 → 配置缺省」
  * 的顺序定，并用响应里的 `suffixFrom` 回报用的是哪一个。 */
 export function sceneSiblingsUrl(cfg: SrConfig, id: string, suffix?: string): string {
@@ -204,7 +204,7 @@ export function sceneSiblingsUrl(cfg: SrConfig, id: string, suffix?: string): st
 /** 拖入链的预览端点 URL：GET /api/scenes/{id}/preview-drop?div=N。
  *
  * 与 `scenePreviewUrl` 是两个端点（不是同一个 URL 的参数）：这条把产物写进**源
- * 所在的盘阵场景目录**（`<stem>_preview.jpg`），烤一次长期可用；场景目录不可写时
+ * 所在的盘阵场景目录**（`<stem>_preview.jpg`），生成一次长期可用；场景目录不可写时
  * 才退回 `SR_TEMP_PREVIEWS_ROOT/<今天>/`，并回 `X-SR-Preview-Fallback: tmp`。
  * 响应带 `no-store`（URL 按 id 稳定、内容随档位变），浏览器不会拿旧档位的缓存糊弄。 */
 export function dropPreviewUrl(cfg: SrConfig, id: string,
@@ -213,14 +213,14 @@ export function dropPreviewUrl(cfg: SrConfig, id: string,
                   `/api/scenes/${encodeURIComponent(id)}/preview-drop?div=${div}`);
 }
 
-/** 这条 jpgUrl 指的是不是**平台烤出来的预览**（而不是源本身就是显示件）。
+/** 这条 jpgUrl 指的是不是**平台生成的预览**（而不是源本身就是显示件）。
  *
- * 决定两件事，都是必须的：静态 URL 要不要拼 `?div=`；换档位后要不要重烤。
+ * 决定两件事，都是必须的：静态 URL 要不要拼 `?div=`；换档位后要不要重新生成。
  * `<stem>_preview.jpg` 是 `paths.preview_jpg_name` 的产物名，盘阵里显示就绪的源
- * `.jpg` 不含它 —— 档位对后者毫无意义（后端也确实不为它们烤）。
+ * `.jpg` 不含它 —— 档位对后者毫无意义（后端也确实不为它们生成预览）。
  *
  * 点号那代（`<stem>.preview.jpg`，2026-09-22 改名前的产物名）一并认下：名字虽换了，
- * 「这是平台烤的」这条语义两代相同，而静态 URL 是后端给的，两边版本错开一档时
+ * 「这是平台生成的」这条语义两代相同，而静态 URL 是后端给的，两边版本错开一档时
  * 认得出比认不出安全（认不出就会把 `?div=` 吞掉，换档位后最长一小时看到旧图）。 */
 export function isBakedPreviewUrl(jpgUrl: string | null): boolean {
   return !!jpgUrl && /[_\.]preview\.jpe?g$/i.test(jpgUrl);
@@ -228,7 +228,7 @@ export function isBakedPreviewUrl(jpgUrl: string | null): boolean {
 
 /** 已生成 JPG 的静态 URL（cfg.staticBase 前缀 + 后端相对 /disk-array/…）。
  *
- * `div` 只对**烤出来的**预览拼（见 `isBakedPreviewUrl`）：它在这里的作用是击穿
+ * `div` 只对**生成的**预览拼（见 `isBakedPreviewUrl`）：它在这里的作用是击穿
  * nginx 那条 `max-age=3600`（deploy/nginx.conf §场景静态），否则换完档位最长一小时
  * 还会看到旧图。源本身就是 JPEG 的行拼了没意义，反而会打红 e2e 里逐字断言的 URL。 */
 export function sceneImageUrl(cfg: SrConfig, jpgUrl: string | null,
@@ -259,7 +259,7 @@ export function isDiskArrayUrl(url: string): boolean {
 }
 
 /* ---------------- 预览下采样档位（全局） ----------------
- * 一个**平台级**设置：拖入 / 场景库 / 粘盘阵路径三条入口都按当前档位烤。
+ * 一个**平台级**设置：拖入 / 场景库 / 粘盘阵路径三条入口都按当前档位生成。
  * 档位值必须与后端 `preview_jpg.PREVIEW_DIVISORS` 一致 —— 那边是唯一真源，
  * 传了别的值是 400。
  */
@@ -305,9 +305,9 @@ export function previewDivLabel(div: number): string {
 
 /** 预览 blob 缓存的键（见 lib/blobCache.ts 与 api.fetchSceneJpg）。
  *
- * **必须把「取的是哪一份」编进去**：同一条行 id + 同一个档位，在「同名栅格赢」成立时
- * 端上来的是**栅格**那份预览（另一张图、另一串字节），与源 jpg 那份不是一回事。
- * 只按 id+div 存，用户把档位调到栅格赢的那一档再调回去，就会拿到上一档的图 ——
+ * **必须把「取的是哪一份」编进去**：同一条行 id + 同一个档位，在「同名栅格更清晰时优先」
+ * 成立时端上来的是**栅格**那份预览（另一张图、另一串字节），与源 jpg 那份不是一回事。
+ * 只按 id+div 存，用户把档位调到栅格更清晰的那一档再调回去，就会拿到上一档的图 ——
  * 而且看不出来（两张都是这张场景的预览，只是清晰度不同）。
  */
 export function previewCacheKey(
@@ -318,15 +318,15 @@ export function previewCacheKey(
 
 /* ---------------- 显示源比较规则：谁清晰用谁 ----------------
  * 盘阵里预生成的显示件（`PAN.jpg` / `<编号>.jpg`，长边约 8192）配着一张**同名栅格**
- * （`PAN.tif` / `<编号>.tif`）。服务端从那张栅格烤出来的图**在档位够浅时**比这张 jpg
+ * （`PAN.tif` / `<编号>.tif`）。服务端从那张栅格生成的图**在档位够浅时**比这张 jpg
  * 更清晰，那就该用服务端那份；否则保持显示这张 jpg 本身（它就是为显示生成的）。
  *
- * 落点与栅格行**同一份**（`<源 stem>_preview.jpg`，名字只由源 stem 拼，对 jpg 与 tif
+ * 写入位置与栅格行**同一份**（`<源 stem>_preview.jpg`，名字只由源 stem 拼，对 jpg 与 tif
  * 是同一个文件名），所以「打开这条 jpg 行」与「打开同目录的栅格行」命中同一份缓存。
  *
- * 为什么要比较而不是一律走服务端：24000 的源配 8192 的显示件时，÷2 烤出 12000（赢）、
- * ÷4 烤出 6000（**输**）、÷8 烤出 3000（输）—— 一律走服务端会在默认档位下把图换成
- * 更糊的一张，还白等一次几十秒的解压采样。所以判据只能是这一条比较式。
+ * 为什么要比较而不是一律走服务端：24000 的源配 8192 的显示件时，÷2 生成 12000（更清晰）、
+ * ÷4 生成 6000（**更糊**）、÷8 生成 3000（更糊）—— 一律走服务端会在默认档位下把图换成
+ * 更糊的一张，还多等一次几十秒的解压采样。所以判据只能是这一条比较式。
  */
 
 /** 后端 `_raster_preview` 给的「同名栅格」信息。 */
@@ -346,17 +346,17 @@ export interface RasterPreview {
   jpgH: number;
   /** 栅格那份 `<stem>_preview.jpg` 在不在盘上。 */
   hasPreview: boolean;
-  /** 栅格那份预览是按哪一档烤的；null = 没有 / 旧格式戳 / 读不出。 */
+  /** 栅格那份预览是按哪一档生成的；null = 没有 / 旧格式规则签名 / 读不出。 */
   previewDiv: number | null;
 }
 
-/** 服务端从同名栅格烤出来的图，是否比**这张显示件 jpg 本身**更清晰。
+/** 服务端从同名栅格生成的图，是否比**这张显示件 jpg 本身**更清晰。
  *
- * 唯一判据（服务端 `?div=` 就是按它烤的，与后端 `preview_jpg.preview_max_edge` 同式）：
+ * 唯一判据（服务端 `?div=` 就是按它生成的，与后端 `preview_jpg.preview_max_edge` 同式）：
  *
  *     round(max(rasterW, rasterH) / div)  >  max(jpgW, jpgH)
  *
- * 严格大于：相等时不换 —— 换过去要付一次烘焙（真机几十秒），换来的清晰度一样，
+ * 严格大于：相等时不换 —— 换过去要付一次生成预览（真机几十秒），换来的清晰度一样，
  * 那就没有理由动它。
  *
  * 保守兜底：没有栅格 / 尺寸任一读不出 / div 不在 `SCENE_PREVIEW_DIVS` 里 → false，
@@ -377,19 +377,19 @@ export function rasterPreviewWins(
   return served > Math.max(jpgW, jpgH);
 }
 
-/** 取这条场景行的显示 JPG，会不会触发服务端烘焙。
+/** 取这条场景行的显示 JPG，会不会触发服务端生成预览。
 
 **唯一判据**（`lib/api.ts` 的取图与 `pages/ScenesPage` 的列表文案共用它，免得
-两处各判各的、列表说「已生成」而打开时又烤一轮）：
-  * 源是显示件 jpg 但**同名栅格赢**（见 rasterPreviewWins）→ 按**栅格那份预览**判：
-    它不在、或档位不符就会烤。注意这一支看的是 `row.rasterPreview` 的字段，
+两处各判各的、列表说「已生成」而打开时又生成一轮）：
+  * 源是显示件 jpg 但**同名栅格更清晰时优先**（见 rasterPreviewWins）→ 按**栅格那份预览**判：
+    它不在、或档位不符就会生成。注意这一支看的是 `row.rasterPreview` 的字段，
     不是行自己的 `hasPreview/previewDiv` —— 那三个说的是源 jpg。
-  * 没有静态 URL（库外的手工行）→ 一定走 `/preview`，会烤；
-  * `hasPreview` 为假 → 缓存不在，会烤；
-  * 是**烤出来的**预览、但盘上那份的档位 ≠ 当前档位 → 会烤。
-    `previewDiv` 为 null 属于这一类（旧格式戳 / 读不出）：换包后首次打开每个
-    场景都要重烤一轮，这是**惰性**的、预期内的。
-  * 源本身就是显示件（`.jpg`/`.jpeg`，`isBakedPreviewUrl` 为假）→ 永远不烤，
+  * 没有静态 URL（库外的手工行）→ 一定走 `/preview`，会生成；
+  * `hasPreview` 为假 → 缓存不在，会生成；
+  * 是**生成的**预览、但盘上那份的档位 ≠ 当前档位 → 会生成。
+    `previewDiv` 为 null 属于这一类（旧格式规则签名 / 读不出）：换包后首次打开每个
+    场景都要重新生成一轮，这是**惰性**的、预期内的。
+  * 源本身就是显示件（`.jpg`/`.jpeg`，`isBakedPreviewUrl` 为假）→ 永远不生成，
     档位对它没有意义。 */
 export function previewNeedsBake(row: SceneRow, div: number): boolean {
   const rp = row.rasterPreview;
@@ -402,7 +402,7 @@ export function previewNeedsBake(row: SceneRow, div: number): boolean {
   return isBakedPreviewUrl(row.jpgUrl) && row.previewDiv !== div;
 }
 
-/** 场景 → 查看器 openSceneJpg 的最小元数据（掩码换算用 W/H；sceneId 供掩码烘焙）。 */
+/** 场景 → 查看器 openSceneJpg 的最小元数据（掩码换算用 W/H；sceneId 供掩码生成）。 */
 export interface SceneOpenMeta {
   name: string;
   W: number;
@@ -413,7 +413,7 @@ export interface SceneOpenMeta {
   lqPath: string | null;
   /** 这一行所属的场景目录（**与 lqPath 正交**：中间产物的 lqPath 为空 —— 它不可
    *  提交 —— 但仍属于本景的目录，卡片上那颗「同一景共用一个序号」的小标按它分组）。
-   *  裸 .tif / 库外单张图没有场景目录，传 null。 */
+   *  无伴随件的 .tif / 库外单张图没有场景目录，传 null。 */
   sceneDir?: string | null;
   /** 后端推导的掩码路径（手工场景才拿得到：POST /api/scenes/resolve 的
    *  resolved.mask_path）。库行没有这个字段 —— 那时前端不该猜，写掩码时后端
@@ -429,7 +429,7 @@ export interface SceneOpenMeta {
 
 /* ---------------- JPG 像素 → 查看器 rec 的同构数据 ---------------- */
 export interface SceneDecoded {
-  src: Float32Array;      // 单波段自然值（0..255，服务器已烘焙）
+  src: Float32Array;      // 单波段自然值（0..255，服务端已生成）
   tw: number;             // JPG 画布尺寸（= 预览缩略图尺寸）
   th: number;
   nbands: 1;
@@ -440,7 +440,7 @@ export interface SceneDecoded {
 /** 单个 JPG 画布 RGBA → 单波段 src + 固定 0..255 stats（n = tw*th 像素数）。 */
 export function graySrcFromRgba(rgba: Uint8Array | Uint8ClampedArray, n: number): Float32Array {
   const g = new Float32Array(n);
-  for (let i = 0; i < n; i++) g[i] = rgba[i * 4];   // 服务器灰 JPEG：R=G=B
+  for (let i = 0; i < n; i++) g[i] = rgba[i * 4];   // 服务端灰 JPEG：R=G=B
   return g;
 }
 
@@ -457,7 +457,7 @@ export function sceneDecodePixels(
 
 /* ---------------- 显示层拉伸的起手值 ---------------- */
 /** 盘阵场景（route='jpg'）打开时的默认拉伸 = 直方图均衡。
-    服务器烤的底图现在也是直方图均衡（改动前是 2% 线性），所以这是**再均衡一次**：
+    服务端生成的底图也是直方图均衡，所以这是**再均衡一次**：
     灰度分布已近似均匀，再均衡基本是恒等映射，等于「所见即底图」。留着它是因为
     SCENE_START_STRETCH 是场景图的固定起手值（与本地图的工具栏模式解耦），换规则
     时只需要改这里一处。用户可在工具栏改，改动记在该图自己身上。 */
@@ -494,7 +494,7 @@ export const ANCHOR_MAX = 3;
  *  线索是「用户当时正开着哪一景」。
  *
  *  **顺序就是优先级**：后端取第一个「这一环节的栅格躺在同级」成立的。所以调用方按
- *  「离落点近的那一景在前」传进来。空值丢掉、重复只留一份、最多 `ANCHOR_MAX` 个。
+ *  「离当前打开的那一景近的在前」传进来。空值丢掉、重复只留一份、最多 `ANCHOR_MAX` 个。
  *
  *  返回空数组 = 没有可锚的景，后端照旧按名字反推（这条提示对能反推的名字从来不起
  *  作用，见 backend/api/app.py 的 `_anchor_stage_hit`）。 */
@@ -515,7 +515,7 @@ export function sceneAnchors(dirs: (string | null | undefined)[]): string[] {
  *      谎话，而这些行本来也要重新检索才会回来；
  *   2. 丢掉这些场景在**本地 blob 缓存**里的那一份（lib/api.ts 的
  *      `forgetScenePreviewBlobs`）—— 不丢的话同一会话里再打开会直接命中本地旧字节，
- *      既不重新烘焙也看不到新图，用户会以为清除没生效。
+ *      既不重新生成预览也看不到新图，用户会以为清除没生效。
  */
 
 /** 清除端点 URL：POST /api/scenes/clear-preview（请求体 `{ids: [...]}`）。
@@ -538,13 +538,13 @@ export interface ClearDetail {
 
 /** 服务端对**一个 id** 的结论。四种 status 都是正常结局，不是错误码：
  *
- *  * `cleared`  确实清了（文件删掉、或库里那条急烤状态被标掉，或两者都有）；
+ *  * `cleared`  确实清了（文件删掉、或库里那条主动生成状态被标掉，或两者都有）；
  *  * `nothing`  盘上本来就没有这一景的缓存；
- *  * `skipped`  不能清：后台正在烘焙 / 是场景源 / 没有规则戳 / id 本身不合法；
+ *  * `skipped`  不能清：后台正在生成预览 / 是场景源 / 没有规则签名 / id 本身不合法；
  *  * `failed`   该清但没清成（权限、被占用）。
  *
  *  `cleared` 与 `nothing` 的行从列表摘掉，`skipped` / `failed` 留着 —— 用户得看见它们
- *  以及为什么（尤其是「正在烘焙，稍后再清」这种等一下就能成的）。 */
+ *  以及为什么（尤其是「正在生成预览，稍后再清」这种等一下就能成的）。 */
 export interface ClearResult {
   id: string;
   status: 'cleared' | 'nothing' | 'skipped' | 'failed';
@@ -555,7 +555,7 @@ export interface ClearResult {
   removed: ClearDetail[];
   skipped: ClearDetail[];
   failed: ClearDetail[];
-  /** 库里被标成 `cleared` 的急烤状态行数（0 = 这一景没跑过超分）。 */
+  /** 库里被标成 `cleared` 的主动生成状态行数（0 = 这一景没跑过超分）。 */
   marked: number;
 }
 

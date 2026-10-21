@@ -15,9 +15,9 @@ import SceneCacheBar from '../components/SceneCacheBar.vue';
 
 const scenes = useScenesStore();
 // 只为了读当前预览档位（工具栏那条拖动条写的就是它）——「已生成 / 未生成」得认档位：
-// 盘上有旧档位的图时 `hasPreview` 仍为真，只看它就会说「已生成」，点下去却要等一輪重烤。
+// 盘上有旧档位的图时 `hasPreview` 仍为真，只看它就会说「已生成」，点下去却要等一轮重新生成。
 // 注意「打开」那一格**不看档位**：它只分「撞过 404」（row.purged，见 stores/scenes.ts
-// 的 open）与「打开」两种，能点的行一律写「打开」—— 要烤的话按下去就烤。
+// 的 open）与「打开」两种，能点的行一律写「打开」—— 要生成的话按下去就生成。
 const viewer = useViewerStore();
 
 /** 手工路径：只把用户填的这一个目录交给后端 stat（不扫盘）。错误由本页
@@ -96,7 +96,7 @@ onMounted(() => { scenes.ensureSearched(); });
     <ScenePathBar class="sp-path" :busy="!!scenes.openingId" @open="openPastedPath" />
 
     <p v-if="scenes.error" class="sp-err">{{ scenes.error }}</p>
-    <!-- 首次打开要在服务端烘焙（读一遍大图，几十秒）。遮罩只挂在 /viewer 上，
+    <!-- 首次打开要在服务端生成预览（读一遍大图，几十秒）。遮罩只挂在 /viewer 上，
          本页没有遮罩，就用这一行说明在忙什么，别让按钮一直停在「打开中…」。 -->
     <p v-if="scenes.phase" class="sp-loading sp-phase">{{ scenes.phase }}</p>
 

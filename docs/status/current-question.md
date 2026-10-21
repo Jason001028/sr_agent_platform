@@ -23,7 +23,7 @@
   产品段（`…_001_L1` → `…_001_L1_PAN`，没写就 `_PAN`，见
   [api-contract](../planning/api-contract.md) §3.5 的 `product`）。拖入盘阵场景的显示件时会自动预热同景的**未超分那份**
   （NOSR），它出现在列表里时带 `NOSR` 标（与本体标区分、可点开进当前活动格）。
-  清单导入后多一颗橘色「**一键解析**」：按行序逐景把本体 jpg 与 NOSR jpg 一次性烤到盘上，
+  清单导入后多一颗橘色「**一键解析**」：按行序逐景把本体 jpg 与 NOSR jpg 一次性生成到盘上，
   每景两张卡**共用同一个序号**依次入列（生下来不带像素、点开才取图），失败逐条记账标红、
   可随时停；点清单里任意一行，左侧那两张卡橘色点亮并滚过去（见 §6.4）。
   右侧「上下文侧舱」含 `[ROI/工具]` 与 `[Agent]` 两个页签。
@@ -177,7 +177,7 @@
 
 ### 6.2 关键常量与口径
 
-- **预览烘焙**：规则戳 `srprev:v3:div<N>+equal:q<Q>`；前端档位 各边 ÷2 · ÷4 · ÷8 · ÷16 · ÷32，
+- **预览预览生成**：规则签名 `srprev:v3:div<N>+equal:q<Q>`；前端档位 各边 ÷2 · ÷4 · ÷8 · ÷16 · ÷32，
   默认 ÷4（`SR_PRODUCT_PREVIEW_DIV` 默认 4，`0` = 关闭）——**前端档位与该 env 是两个独立的 4，互不联动**。
   预览落点统一为 `<源 stem>_preview.jpg`。
 - **掩码**：值域 0/255（0 = 不处理，255 = 处理）；`run_sr` 用 `cv2.threshold(>0)` 读取。
@@ -196,12 +196,12 @@
 - **队列耗时口径**：纯算力时长（`started_at` → `finished_at`），不含排队；重启后基准回落库中状态。
 - **任务表唯一键**：`sr_tasks.task_fingerprint`（参数内容 sha256），同参数重交复用同一行。
 
-### 6.4 一键解析（《待修复清单》批量烘焙，2026-09-27）
+### 6.4 一键解析（《待修复清单》批量预览生成，2026-09-27）
 
 - **不新增后端端点**：每景就是既有三条链按序走一遍 —— `POST /api/scenes/resolve`
   （吃那一行的影像类型补产品段）→ `GET /api/scenes/{id}/preview` → `GET /api/scenes/{id}/siblings`
   （取未超分那份的名字与尺寸）→ 再 `/preview` 一次。**刻意不做 batch 端点**：`preview` 是
-  sync def、进了 anyio 线程池，掐响应停不下服务端已经在烤的那一份；而「试过哪些候选、
+  sync def、进了 anyio 线程池，掐响应停不下服务端已经在生成的那一份；而「试过哪些候选、
   各自为什么不行」的唯一真源在 `scene_search` / `resolve_scene`，批量端点重写一遍就是
   多一个「静默换路径」的入口。驱动的循环在 [stores/qclist.ts](../../frontend/src/stores/qclist.ts)
   （`bakeAll`）+ [lib/qcbatch.ts](../../frontend/src/lib/qcbatch.ts)（`runSceneBake`，**并发恒为 1**）。
@@ -211,23 +211,23 @@
 - **NOSR 卡的 `lqPath` 取场景目录、不是 `null`**：与「场景芯片」那条入口（`openSceneSibling`）
   逐字对齐，否则同一种图两条入口进来会长得不一样。「不能修复」由 `stageKind` 那道门管
   （`isIntermediateStage` 三处），不看 `lqPath`。
-- **卡片「生下来不带像素」**：批量只把 jpg 烤到盘上，入列的卡 `thumb/src = null`，第一次点开
+- **卡片「生下来不带像素」**：批量只把 jpg 生成到盘上，入列的卡 `thumb/src = null`，第一次点开
   才 `fetchSceneJpg` + `applySceneJpgToRec`（此时命中服务端缓存，秒出）。算式：各边 ÷4 的
-  4 万² 景烤出 10000²，`applySceneJpgToRec` 同时留下 `thumb`（canvas RGBA ≈400MB）与
+  4 万² 景生成出 10000²，`applySceneJpgToRec` 同时留下 `thumb`（canvas RGBA ≈400MB）与
   `src`（Float32Array），**≈800MB/卡** —— 一批十几景 ×2 张装不下（浏览器单次分配 ~2GB）。
 - **取消 = AbortController，且如实告知**：`resolve` 能掐（`apiResolveScene` 收 signal），
-  烤图那两条 HTTP **掐不掉** —— 所以在飞的那一景让它烤完（落盘正是要的缓存），文案写
-  「正在停止（等这一景烤完…）」。被掐掉的 resolve 是**取消**、不是这一景失败，不记进失败账。
+  生成图那两条 HTTP **掐不掉** —— 所以在飞的那一景让它生成完（落盘正是要的缓存），文案写
+  「正在停止（等这一景生成完…）」。被掐掉的 resolve 是**取消**、不是这一景失败，不记进失败账。
 - **失败与「缺失」分两张表**：`bakeFails`（标红 + 记「第几步 + 后端原话」）与 `bakeNotes`
   （「盘上没有未超分那份」这类盘上的事实）。**两张都不写 `statuses`** —— 那份会被
-  `buildQcDoc` 写回盘阵上的 .txt、还驱动 `counts.done`，烤图失败不是质检结论。
+  `buildQcDoc` 写回盘阵上的 .txt、还驱动 `counts.done`，生成图失败不是质检结论。
 - **进度不弹遮罩、不动 `busy`**：遮罩是模态的，会把用户正在看的图挡住、工具栏锁几十景。
   进度只走面板上那一行字 + 按钮三态（待命 / 停止 / 停止中）。
 - **切图预填坐标**（2026-09-28）：切到某张卡时，把清单里对应那一行的「行列号」**预填**进工具栏
   定位框（`Toolbar.vue` 一个 watch，键 = `activeRec.sceneDir ?? lqPath`，与面板那条自动选中同源）
   —— 只填**不跳**；这一行没有行列号就清空。本体与产物卡同一个 `sceneDir`，所以同景各卡预填同一个
   坐标。顺序照旧是「列,行」（同 `QcListPanel.onRow`）。没导入清单时不动框。
-- **真机单景均耗时 = ___ 秒**（待填；含一次 resolve + 两次烘焙读盘，÷4 的 4 万² 景按
+- **真机单景均耗时 = ___ 秒**（待填；含一次 resolve + 两次预览生成读盘，÷4 的 4 万² 景按
   §3.2 / preview-bake-pipeline 的量级预估是几十秒）。几十景一批就是十几分钟起 ——
   按钮的提示语里已经写明，不等同于「卡住了」。
 
@@ -261,7 +261,7 @@
 | 真机怎么部署、起不来怎么办 | [real-machine-bringup.md](real-machine-bringup.md) · [ADHD 动作版](real-machine-bringup-adhd.md) · [deploy/README.md](../../deploy/README.md) |
 | 踩坑与硬约束 | [gui-experience.md](../experience/gui-experience.md) |
 | 平台 API 契约 | [api-contract.md](../planning/api-contract.md) |
-| 预览烘焙端到端链路 | [preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md) |
+| 预览预览生成端到端链路 | [preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md) |
 | SR 算法 / 调用契约 / 移植环境 | [docs/sr_code/](../sr_code/) |
 | 生产场景命名与路径反推 | [production-scene-naming.md](../sr_code/production-scene-naming.md) |
 | 系统理解前后端设计取舍 | [platform-tutorial.md](../knowledge/platform-tutorial.md) |

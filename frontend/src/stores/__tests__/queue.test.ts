@@ -90,7 +90,7 @@ describe('isActiveState / taskElapsed（耗时列）', () => {
     expect(taskElapsed(t, 1042)).toEqual({ seconds: 42, running: true });
   });
 
-  it('回归钉：耗时不是行的年龄（复用行 created_at 是第一次提交的时刻）', () => {
+  it('回归断言：耗时不是行的年龄（复用行 created_at 是第一次提交的时刻）', () => {
     // 2026-09-18 真机现象：同一场景同一参数重交，幂等层复用同一行 —— created_at
     // 停在第一次提交（30 小时前），这一次运行只跑了 200 多秒。修复前耗时就取
     // updated_at − created_at，量出来是行龄「30 时 00 分」。
@@ -236,7 +236,7 @@ describe('mergeJobUpdate（SSE 归并）', () => {
     expect(taskElapsed(next[0], 99999)).toEqual({ seconds: 73, running: false });
   });
 
-  it('回归钉：任务跑完不退化成「—」（本地快照还是提交时那份）', () => {
+  it('回归断言：任务跑完不退化成「—」（本地快照还是提交时那份）', () => {
     // 本地快照取自提交刚落库那一次 GET（两列都还是 NULL），随后只有 SSE 在推
     // 状态。不带时间戳的话，一进终态就只能显示「—」（2026-09-17 是「0 秒」，
     // 同一个坑的前身）。
@@ -280,7 +280,7 @@ describe('mergeJobUpdate（SSE 归并）', () => {
   });
 });
 
-describe('mergePreviewUpdate（SSE 归并：产物急烤）', () => {
+describe('mergePreviewUpdate（SSE 归并：产物主动生成）', () => {
   it('task_id 匹配 → 覆盖两个预览字段，其余行不动', () => {
     const rows = [task({ task_id: 1, state: 'COMPLETED' }),
                   task({ task_id: 2, state: 'COMPLETED', preview_state: 'done',
@@ -296,7 +296,7 @@ describe('mergePreviewUpdate（SSE 归并：产物急烤）', () => {
   });
 
   it('无匹配 task → 原数组引用不变（权威始终在 list()）', () => {
-    // 急烤的认领与广播都在后端，前端可能还没把这个 task 拉进列表 —— 这时既不该
+    // 主动生成的认领与广播都在后端，前端可能还没把这个 task 拉进列表 —— 这时既不该
     // 凭空补一行，也不该让上游误以为「变了」而重渲染。
     const rows = [task({ task_id: 1 })];
     expect(mergePreviewUpdate(rows, {
