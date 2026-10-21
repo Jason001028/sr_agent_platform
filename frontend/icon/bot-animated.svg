@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-labelledby="bot-title">
+  <title id="bot-title">Agent 助手</title>
+  <style>
+    /* Two independent layers: gaze shifts both eyes, blink compresses their height. */
+    .bot-gaze {
+      transform-origin: 12px 14px;
+      animation: bot-look 11.7s ease-in-out infinite;
+    }
+    .bot-blink {
+      transform-origin: 12px 14px;
+      animation: bot-blink 8.9s linear infinite;
+    }
+    @keyframes bot-look {
+      0%, 21%, 34%, 54%, 66%, 88%, 100% { transform: translateX(0); }
+      26%, 29% { transform: translateX(-1px); }
+      59%, 62% { transform: translateX(1px); }
+    }
+    @keyframes bot-blink {
+      0%, 16%, 18%, 72%, 74%, 100% { transform: scaleY(1); }
+      17%, 73% { transform: scaleY(0.08); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .bot-gaze, .bot-blink { animation: none; }
+    }
+  </style>
+  <path d="M12 8V4H8"/>
+  <rect width="16" height="12" x="4" y="8" rx="2"/>
+  <path d="M2 14h2"/>
+  <path d="M20 14h2"/>
+  <g class="bot-gaze">
+    <g class="bot-blink">
+      <path d="M9 13v2"/>
+      <path d="M15 13v2"/>
+    </g>
+  </g>
+</svg>
