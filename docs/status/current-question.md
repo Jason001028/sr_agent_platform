@@ -225,8 +225,8 @@
   补齐身份并改用权威名，NOSR 卡 `insertSceneCard(..., afterId)` 插在本体后面；解析失败
   原地标红、原因进 `pendingError`，停止时没轮到的写「未开始」（`finishPendingCards`）。
   占位卡在 `activate` / `startRecDrag` / `removeRec` 三个入口挡掉，卡片不渲染删除与截图键。
-  入场延迟由 `lib/motion.ts::cascadeDelay(i, n)` 计算：12 条以内按 150ms 逐条固定累计，
-  超过 12 条等距压进 1800ms 窗口（单卡淡入 120ms）。
+  入场延迟由 `lib/motion.ts::cascadeDelay(i, n)` 计算：6 条以内按 300ms 逐条固定累计，
+  超过 6 条等距压进 1800ms 窗口（单卡淡入 120ms）。
 - **取消 = AbortController，且如实告知**：`resolve` 能掐（`apiResolveScene` 收 signal），
   生成图那两条 HTTP **掐不掉** —— 所以在飞的那一景让它生成完（落盘正是要的缓存），文案写
   「正在停止（等这一景生成完…）」。被掐掉的 resolve 是**取消**、不是这一景失败，不记进失败账。
@@ -288,12 +288,12 @@
 **临时跳过**之后跑到的：当前工作区与 HEAD 都稳定报 `scrollW=1399 / clientW=1366`、
 溢出控件是 `set-btn`（暂未处理，与本轮改动无关）。
 
-**2026-10-21（一键解析入场：12 条以内逐条 150ms）**：`CARD_CASCADE_MS` 600 → 1800，新增
-`CARD_STEP_MS = 150`，`cascadeDelay` 由 `t²` 改为线性 —— 12 条以内每张比上一张固定晚
-150ms；超过 12 条时按份数摊薄步长、等距压进同一 1800ms 窗口（末张连同 120ms 淡入收在
-窗口末尾）。`motion.test.ts` 原「先快后慢」用例换成分段断言（≤12 条固定 150ms / >12 条
-等距压缩），该文件共 7 项 → 前端 **474 passed** + `vue-tsc --noEmit` 零错误 +
-`npm run build` 通过。
+**2026-10-21（一键解析入场：6 条以内逐条 300ms）**：`CARD_CASCADE_MS` 600 → 1800，新增
+`CARD_STEP_MS = 300`，`cascadeDelay` 由 `t²` 改为线性 —— 6 条以内每张比上一张固定晚
+300ms；超过 6 条时按份数摊薄步长、等距压进同一 1800ms 窗口（末张连同 120ms 淡入收在
+窗口末尾）。`motion.test.ts` 原「先快后慢」用例换成分段断言（≤6 条固定 300ms / >6 条
+等距压缩），该文件共 7 项 → 前端 **482 passed**（含流式新增用例）+ `vue-tsc --noEmit`
+零错误 + `npm run build` 通过。
 
 **2026-10-21（Agent 附文默认不上屏）**：`AgentChatTab.vue` 的自动附文改为**仅开发者模式**
 渲染 —— 气泡下一块浅米色（`--warn-bg` / `--warn-line`）`<details>` 折叠面板，默认收起，

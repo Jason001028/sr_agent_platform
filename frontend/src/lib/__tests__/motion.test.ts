@@ -1,7 +1,7 @@
 /**
  * motion.test.ts — 动效令牌的 JS 侧（批量入列错峰）
  * ------------------------------------------------------------------
- * 钉五件事：整段窗口不超 `CARD_CASCADE_MS`、第一张不等、12 条以内逐条固定
+ * 钉五件事：整段窗口不超 `CARD_CASCADE_MS`、第一张不等、6 条以内逐条固定
  * `CARD_STEP_MS` 累计、超过后等距压进窗口、`CARD_ENTER_MS` 与 style.css 的
  * `--motion-fade` 同值（这层双写靠这条测试守住）。取整造成的 ±1ms 抖动不算破例。
  */
@@ -42,19 +42,19 @@ describe('cascadeDelay —— 批量入列的逐卡延迟', () => {
     }
   });
 
-  it('12 条以内逐条固定 150ms 累计（第 12 条也不被窗口压缩）', () => {
-    for (const n of [2, 4, 8, 11, 12]) {
+  it('6 条以内逐条固定 300ms 累计（第 6 条也不被窗口压缩）', () => {
+    for (const n of [2, 3, 4, 5, 6]) {
       expect(cascadeDelay(0, n)).toBe(0);
       for (const g of gapsOf(n)) {
         expect(Math.abs(g - CARD_STEP_MS)).toBeLessThanOrEqual(1);
       }
     }
-    // 12 条：11 × 150ms = 1650ms，连同 120ms 淡入仍在 1800ms 窗口内。
-    expect(cascadeDelay(11, 12) + CARD_ENTER_MS).toBeLessThanOrEqual(CARD_CASCADE_MS);
+    // 6 条：5 × 300ms = 1500ms，连同 120ms 淡入仍在 1800ms 窗口内。
+    expect(cascadeDelay(5, 6) + CARD_ENTER_MS).toBeLessThanOrEqual(CARD_CASCADE_MS);
   });
 
-  it('超过 12 条：等距压缩进同一窗口，末张连同淡入不超 1200ms', () => {
-    for (const n of [13, 40, 200]) {
+  it('超过 6 条：等距压缩进同一窗口，末张连同淡入不超 1800ms', () => {
+    for (const n of [7, 12, 40, 200]) {
       const want = (CARD_CASCADE_MS - CARD_ENTER_MS) / (n - 1);
       for (const g of gapsOf(n)) {
         expect(Math.abs(g - want)).toBeLessThanOrEqual(1);
@@ -67,9 +67,9 @@ describe('cascadeDelay —— 批量入列的逐卡延迟', () => {
 
   it('份数越多步长越小（整批不随份数线性拖长）', () => {
     const stepOf = (n: number) => cascadeDelay(1, n) - cascadeDelay(0, n);
-    expect(stepOf(40)).toBeLessThan(stepOf(13));
-    expect(stepOf(13)).toBeLessThan(stepOf(12));
-    expect(stepOf(12)).toBeLessThanOrEqual(CARD_STEP_MS);
+    expect(stepOf(40)).toBeLessThan(stepOf(7));
+    expect(stepOf(7)).toBeLessThan(stepOf(6));
+    expect(stepOf(6)).toBeLessThanOrEqual(CARD_STEP_MS);
   });
 });
 
