@@ -22,4 +22,6 @@
 
 **术语**：正文、注释与界面文案写「生成预览 / 预览 JPG / 预览生成规则 / 缩放档位」，不写「烘焙」「烤」；选区栅格写「掩码」（盘上真实文件名「掩膜中心点坐标.txt」除外）。代码标识符里的 `bake*` 保留不改。细则见 [docs/conventions/terminology-conventions.md](docs/conventions/terminology-conventions.md)。
 
+**动效**：`transition` / `animation` 一律用 [style.css](frontend/src/style.css) 的 `--motion-*` / `--ease-*` 令牌，不写裸时长与裸缓动；查看器归位用 `frontend/src/lib/motion.ts` 的常量。选型与边界见 [docs/conventions/motion-conventions.md](docs/conventions/motion-conventions.md)。
+
 **提交前**：`cd frontend && npm run check:terms`（`npm test` 已自动执行这一道）。

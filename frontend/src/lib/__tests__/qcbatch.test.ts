@@ -249,6 +249,34 @@ describe('runSceneBake —— 单景失败不中断整批', () => {
   });
 });
 
+describe('runSceneBake —— onFail 当场回调', () => {
+  it('解析与本体失败各回调一次（带阶段与原因）；NOSR 失败不回调', async () => {
+    const seen: string[] = [];
+    const { deps } = harness({
+      resolve: async (it) => {
+        if (it.name === 'b') throw new Error('没找到这一景');
+        return {};
+      },
+      body: async (it) => { if (it.name === 'a') throw new Error('生成超时'); },
+      nosr: async () => { throw new Error('siblings 502'); },
+      onFail: (it, stage, reason) => { seen.push(`${it.name} ${stage} ${reason}`); },
+    });
+    await runSceneBake(ROWS, deps, never.signal);
+    expect(seen).toEqual(['a body 生成超时', 'b resolve 没找到这一景']);
+  });
+
+  it('取消不是失败，不回调（否则按停止会标红一排）', async () => {
+    const ac = new AbortController();
+    const seen: string[] = [];
+    const { deps } = harness({
+      resolve: async () => { ac.abort(); throw new DOMException('Aborted', 'AbortError'); },
+      onFail: (it, stage) => { seen.push(`${it.name} ${stage}`); },
+    });
+    await runSceneBake(ROWS, deps, ac.signal);
+    expect(seen).toEqual([]);
+  });
+});
+
 describe('runSceneBake —— 取消点', () => {
   it('resolve 里被 abort：算停止、**不算这一景失败**（停止键一按就报一堆假失败是 bug）', async () => {
     const ac = new AbortController();

@@ -6,7 +6,7 @@
  * `question + '\n\n' + buildContextNote(snap)` 后走既有 chat store send（与 /chat
  * 同一会话、同一消息形状，不引入独立 system 层）。
  *
- * 纪律：快照里的每一个数字都来自确定性来源 —— scene_id/W/H/拉伸 = 当前 rec，
+ * 纪律：快照里的每一个数字都来自确定性来源 —— 图像名/W/H/显示尺寸/拉伸 = 当前 rec，
  * ROI 统计 = buildStats（显示层 8bit）；AI 只可引用/解读这些数，不得自行编造。
  * 因此注记文本把阈值语义（亮像元 ≥ hi / 过曝 ≥ clip）显式带上，并提示只读参考。
  */
@@ -96,8 +96,8 @@ export function buildContextNote(c: ViewerContextSnap): string {
   const head = '【查看器上下文 · 只读附文】以下为当前画面确定性状态，供解读参考，';
   const lines: string[] = [];
   lines.push(head + '所有数值不可自行推算或编造：');
+  // scene_id 不进附文：那是一长串盘阵路径，Agent 认场景靠工具查，不靠读这份文本。
   lines.push('图像: "' + c.name + '"'
-    + ' scene=' + (c.sceneId ?? '本地(无 sceneId)')
     + ' 原图=' + c.W + '×' + c.H
     + ' 显示=' + c.dispW + '×' + c.dispH
     + ' 拉伸=' + (c.stretch || '?'));

@@ -276,7 +276,7 @@ onUnmounted(() => {
 .qp-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; }
 .qp-head h2 { margin: 0; font-size: 24px; font-weight: 700; color: var(--ink); display: flex; align-items: baseline; gap: 10px; }
 .qp-actions { display: flex; align-items: center; gap: 10px; }
-.qp-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-faint); display: inline-block; transition: background 0.2s ease; }
+.qp-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-faint); display: inline-block; transition: background var(--motion-live) var(--ease-standard); }
 .qp-dot.on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
 .qp-conn { font-size: 12px; color: var(--ink-sub); }
 .qp-err { color: var(--err); font-size: 13px; margin: 0 0 12px; }
@@ -293,7 +293,7 @@ onUnmounted(() => {
   background: var(--accent-grad); color: #fff; cursor: pointer; font-size: 13px;
   font-weight: 500; font-family: inherit;
   box-shadow: 0 2px 6px rgba(45, 164, 162, 0.22);
-  transition: filter 0.15s ease;
+  transition: filter var(--motion-hover) var(--ease-standard);
 }
 .btn:hover { filter: brightness(1.05); }
 .btn:disabled { opacity: .55; cursor: not-allowed; box-shadow: none; }
@@ -324,7 +324,7 @@ onUnmounted(() => {
   border: 1px solid var(--line); border-radius: var(--r-ctrl);
   background: var(--surface-2); color: var(--ink); font-size: 13px; font-family: inherit;
   outline: none;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+  transition: border-color var(--motion-hover) var(--ease-standard), box-shadow var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard);
 }
 .qp-cell input::placeholder { color: var(--ink-faint); }
 .qp-cell input:focus { border-color: var(--accent-3); background: var(--surface); box-shadow: 0 0 0 3px rgba(45, 164, 162, 0.14); }
@@ -369,7 +369,7 @@ onUnmounted(() => {
 .qp-tbl td.empty { color: var(--ink-sub); padding: 22px; text-align: center; }
 .qp-tbl tbody tr:hover td { background: #fafcfa; }
 /* 新插入的行淡入；移除立即生效（不改行的生命周期，按行读取的回归不会被残行干扰）。 */
-.qp-row { animation: qp-row-in 0.12s ease-out; }
+.qp-row { animation: qp-row-in var(--motion-fade) var(--ease-enter); }
 @keyframes qp-row-in {
   from { opacity: 0; }
   to { opacity: 1; }

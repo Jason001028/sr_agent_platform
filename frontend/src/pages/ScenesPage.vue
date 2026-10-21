@@ -218,7 +218,7 @@ onMounted(() => { scenes.ensureSearched(); });
   background: var(--surface-2);
   min-width: 130px;
   outline: none;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+  transition: border-color var(--motion-hover) var(--ease-standard), box-shadow var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard);
   font-family: inherit;
 }
 .sp-in::placeholder { color: var(--ink-faint); }
@@ -239,7 +239,7 @@ onMounted(() => { scenes.ensureSearched(); });
   font-size: 13px;
   font-weight: 500;
   font-family: inherit;
-  transition: filter 0.15s ease, box-shadow 0.15s ease;
+  transition: filter var(--motion-hover) var(--ease-standard), box-shadow var(--motion-hover) var(--ease-standard);
   box-shadow: 0 2px 6px rgba(45, 164, 162, 0.22);
 }
 .btn:hover { filter: brightness(1.05); }
@@ -313,9 +313,9 @@ onMounted(() => { scenes.ensureSearched(); });
    并按字符断行（word-break），否则又被 ellipsis 截掉。 */
 .sp-tbl td.name { min-width: 300px; word-break: break-all; line-height: 1.45; }
 .sp-tbl td.empty { color: var(--ink-sub); text-align: center; padding: 22px; }
-.sp-tbl tbody tr { transition: background 0.12s ease; }
+.sp-tbl tbody tr { transition: background var(--motion-fade) var(--ease-standard); }
 /* 新插入的行淡入；移除立即生效（不改行的生命周期，按行读取的回归不会被残行干扰）。 */
-.sp-row { animation: sp-row-in 0.12s ease-out; }
+.sp-row { animation: sp-row-in var(--motion-fade) var(--ease-enter); }
 @keyframes sp-row-in {
   from { opacity: 0; }
   to { opacity: 1; }

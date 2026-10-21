@@ -11,7 +11,7 @@
  * （语义等价 HTML 各处直接调 render()/renderDraw()）。
  */
 import { defineStore } from 'pinia';
-import { ref, computed, markRaw, nextTick } from 'vue';
+import { ref, computed, markRaw, nextTick, shallowRef, toRaw } from 'vue';
 import {
   probeImage, tiffTags, layoutInfo, stretchRgba,
   setSparseMin as setSparseMinLib,
@@ -28,6 +28,7 @@ import { fitView, locateView, wheelZoom, hitRoi, thumbToOrig, visibleThumbRect,
 import type { ViewState, Rect, PaneRect } from '../lib/viewMath.js';
 import { planShot, drawShot } from '../lib/chatShot.js';
 import type { ChatShot } from '../lib/chatShot.js';
+import { VIEW_FIT_MS, VIEW_RESET_MS, cascadeDelay } from '../lib/motion.js';
 import {
   parseCompareMode, loadSplitRatio, saveSplitRatio, seedCompareList,
   addCompareEntry, removeCompareEntry, pruneCompareList, DEFAULT_SPLIT_RATIO,
@@ -108,6 +109,18 @@ export interface ViewerRec {
    *  所以批量只负责把 jpg 生成到盘上，点开时再取（那时命中服务端缓存，秒回）。
    *  拖入链与场景库链的卡片创建时像素就在手，这个字段恒为 undefined。 */
   card?: { row: SceneRow; meta: SceneOpenMeta };
+  /** 批量入列的占位卡：先按清单行排满，解析成功后原地补齐身份。占位期间不可点/拖/删。 */
+  pending?: boolean;
+  /** 占位卡对应的清单行名；补齐后清空。 */
+  pendingRow?: string;
+  /** 占位卡解析失败的原因（状态标签的 title）。 */
+  pendingError?: string;
+  /** 入场动画延迟（ms）：批量插入的卡才有。 */
+  enterDelay?: number;
+  /** 收藏：置顶，且「清理冗余 / 清理全部 / 一键解析前清空」都不动它。
+   *  `favAt` 只决定置顶组内的先后（同一批一起收藏的按 id 排）。 */
+  fav?: boolean;
+  favAt?: number;
   /** 已经预热过缩放的那份**显示画布**（`=== thumb` 即热过）。存引用而不是布尔：
    *  换过像素（重新解码 / 换预览档位）就是新画布，缩放缓存不作数，得重新热。 */
   warmed?: KitCanvas | null;
@@ -126,7 +139,7 @@ export interface ViewerRec {
   token: number;
   layout: string;              // 即探标签摘要
   status: string;
-  statusCls: '' | 'ok' | 'err';
+  statusCls: '' | 'ok' | 'err' | 'muted';
   paintedMode: StretchMode | null;
   maskRois: Poly[] | null;     // 缩略图坐标 ROI
 }
@@ -304,6 +317,66 @@ export const useViewerStore = defineStore('viewer', () => {
   /* ---------------- 状态 ---------------- */
   const recs = ref<ViewerRec[]>([]);
   const activeId = ref<number | null>(null);
+
+  /* ---------------- 左侧列表的工具条状态 ----------------
+     列表顺序与收藏分开存：`recs` 保持插入顺序（批量占位卡按清单行序追加），
+     收藏只在**渲染时**排到前面。于是「取消收藏」自然回到原位置，无需记原索引。 */
+  const recsOrdered = computed<ViewerRec[]>(() => {
+    const all = recs.value;
+    if (!all.some((r) => r.fav)) return all;
+    const favs = all.filter((r) => r.fav);
+    favs.sort((a, b) => (a.favAt ?? 0) - (b.favAt ?? 0) || a.id - b.id);
+    return [...favs, ...all.filter((r) => !r.fav)];
+  });
+  const favCount = computed(() => recs.value.reduce((n, r) => n + (r.fav ? 1 : 0), 0));
+
+  /** 多选模式：卡片点击改成勾选而不是激活 —— 勾一张 400MB 的图只为收藏太亏。 */
+  const selectMode = ref(false);
+  const selectedIds = ref<number[]>([]);
+  function isSelected(id: number): boolean {
+    return selectedIds.value.includes(id);
+  }
+  function toggleSelectMode(): void {
+    selectMode.value = !selectMode.value;
+    if (!selectMode.value) selectedIds.value = [];
+  }
+  function toggleSelected(id: number): void {
+    if (!selectMode.value) return;
+    const rec = recs.value.find((r) => r.id === id);
+    if (!rec || rec.pending) return;          // 占位卡还没身份，不给勾
+    const i = selectedIds.value.indexOf(id);
+    if (i >= 0) selectedIds.value.splice(i, 1);
+    else selectedIds.value.push(id);
+  }
+  function clearSelection(): void {
+    selectedIds.value = [];
+  }
+
+  /** 撤回栈里的一格：只记「列表是什么样」，不记像素。
+   *  快照里存的是 rec 对象本身 —— 撤回不重新解码，所以是瞬时的；代价是它只该
+   *  撤销**列表结构**（增删、顺序、收藏、哪张在屏上），不该拿来撤销拉伸/掩码。 */
+  interface ListSnapshot {
+    label: string;
+    recs: ViewerRec[];
+    /** id → favAt（null = 当时没收藏）。收藏是 rec 上的字段，得单独记才撤得回来。 */
+    fav: readonly (readonly [number, number | null])[];
+    ordinals: readonly (readonly [string, number])[];
+    activeId: number | null;
+    paneA: number | null;
+    paneB: number | null;
+    activeSide: 'A' | 'B';
+    compareList: number[];
+    viewA: ViewState;
+    viewB: ViewState;
+    viewFor: { A: { w: number; h: number } | null; B: { w: number; h: number } | null };
+  }
+  const UNDO_MAX = 10;
+  /** shallowRef：快照里的 rec 数组不该被 Vue 再代理一层（identity 会漂）。 */
+  const undoStack = shallowRef<ListSnapshot[]>([]);
+  const canUndo = computed(() => undoStack.value.length > 0);
+  const undoLabel = computed(
+    () => undoStack.value[undoStack.value.length - 1]?.label ?? '',
+  );
   const canvasSize = ref({ w: 0, h: 0 });
   /** 查看器画布此刻是否挂着（TifCanvas 挂载/卸载时写）。`canvasSize`/`view`
    *  在 SPA 换页后**保留旧值**（store 比页面活得久），光看尺寸会把「/chat 页
@@ -629,7 +702,6 @@ export const useViewerStore = defineStore('viewer', () => {
      动画只写 viewA/viewB；渲染、ROI 描边、云量红叠、分屏裁剪都读同一份状态，
      中间帧天然对齐，不会出现「影像走了、标注没跟上」。
      系统偏好减少动画时直接落位（与样式层的 prefers-reduced-motion 同口径）。 */
-  const VIEW_ANIM_MS = 160;
   let viewAnimId = 0;
   let viewAnimFrame: number | null = null;
 
@@ -649,7 +721,7 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   function animateViewsTo(
-    targets: { A?: ViewState; B?: ViewState }, duration = VIEW_ANIM_MS,
+    targets: { A?: ViewState; B?: ViewState }, duration = VIEW_FIT_MS,
   ) {
     stopViewAnim();
     const toA = targets.A;
@@ -924,7 +996,7 @@ export const useViewerStore = defineStore('viewer', () => {
     saveSplitRatio(splitRatio.value);
     const a = fitTarget('A');
     const b = fitTarget('B');
-    animateViewsTo({ A: a ?? undefined, B: b ?? undefined }, 140);
+    animateViewsTo({ A: a ?? undefined, B: b ?? undefined }, VIEW_RESET_MS);
   }
 
   /* ---------------- 落位提示 ---------------- */
@@ -965,7 +1037,7 @@ export const useViewerStore = defineStore('viewer', () => {
    *  落位由 TifCanvas 的 `dropSide` 算，最终还走 `activate(id, side)` 那条老路
    *  （换格 / 适配 / 重绘 / 进点选清单它都做齐了）。 */
   function startRecDrag(rec: ViewerRec, e: DragEvent): void {
-    if (!e.dataTransfer) return;
+    if (rec.pending || !e.dataTransfer) return;
     e.dataTransfer.setData(REC_MIME, String(rec.id));
     e.dataTransfer.effectAllowed = 'copy';
   }
@@ -1206,7 +1278,7 @@ export const useViewerStore = defineStore('viewer', () => {
   async function activate(id: number, side?: 'A' | 'B') {
     stopViewAnim();                       // 换图/切侧优先于缓动
     const rec = recs.value.find((r) => r.id === id);
-    if (!rec) return;
+    if (!rec || rec.pending) return;
     const already = activeId.value === id;
     const moved = placeRec(id, side);
     noteCompareEntry(id);                // 对比模式下露面的这张要进点选清单（幂等）
@@ -1463,7 +1535,7 @@ export const useViewerStore = defineStore('viewer', () => {
    *  **不 activate、不弹遮罩、不 warmZoom、不碰 busy** —— 批量几十张，任何一样都会
    *  把界面锁住或把用户的视野抢走。其余字段按「打开过」的口径一次填足（尺寸、字节数、
    *  环节标签都在），列表里看着是一张齐了的卡，只有小图横幅是占位。 */
-  function insertSceneCard(meta: SceneOpenMeta, row: SceneRow): number {
+  function insertSceneCard(meta: SceneOpenMeta, row: SceneRow, afterId?: number): number {
     const dup = findRecByMeta(meta);
     if (dup) return dup.id;        // 同一景已在列表里（批量前会清空，这里只是兜底）
     const rec: ViewerRec = {
@@ -1483,9 +1555,88 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.stageKind = meta.stageKind ?? 'input';
     rec.stageLabel = stageLabel(rec.stageKind, meta.stageSuffix, rec.name);
     rec.serverMaskPath = meta.serverMaskPath ?? null;
-    recs.value.push(rec);
+    // 一键解析：NOSR 卡紧跟本体卡；其余情况追加到末尾。不参与批量错峰（延迟 0），
+    // 只占一次淡入，免得凭空一跳。
+    const at = afterId == null ? -1 : recs.value.findIndex((r) => r.id === afterId);
+    if (at >= 0) { rec.enterDelay = 0; recs.value.splice(at + 1, 0, rec); }
+    else recs.value.push(rec);
     noteSceneDir(rec);
     return rec.id;
+  }
+
+  /* ---------------- 一键解析：占位卡 ----------------
+     先按清单行把「排队中」的卡片排满，再随着后端进度原地补齐身份与状态 —— 卡片
+     一张张冒出来会拖成几十秒的慢镜头，先排满则是一眼看到全貌，之后只有状态在动。
+     占位期间没有 file/probe/route，**不可点、不可拖、不可删**（见各入口的 pending 判断）。 */
+
+  /** 按清单行序排满占位卡（只有行名）；后续靠 `pendingRow` 找回它们。 */
+  function insertPendingCards(names: readonly string[]): void {
+    names.forEach((name, i) => {
+      const rec: ViewerRec = {
+        id: nextId++,
+        file: markRaw(new File([], name)),
+        probe: null, name, size: 0, W: 0, H: 0,
+        thumb: null, src: null, srcw: 0, srch: 0, nbands: 0, invert: false,
+        stats: null, route: null, sceneId: null, lqPath: null, sceneDir: null,
+        layout: '', status: '排队中', statusCls: 'muted',
+        paintedMode: null, maskRois: null, token: 0,
+        pending: true, pendingRow: name, enterDelay: cascadeDelay(i, names.length),
+      };
+      recs.value.push(rec);
+    });
+  }
+
+  /** 解析成功：占位卡原地补齐身份（名字改用权威解析结果），返回卡 id。 */
+  function fillPendingCard(rowName: string, meta: SceneOpenMeta, row: SceneRow): number | null {
+    const rec = recs.value.find((r) => r.pending && r.pendingRow === rowName);
+    if (!rec) return null;
+    rec.file = markRaw(new File([], meta.name));
+    rec.name = meta.name;
+    rec.size = row.size_bytes || 0;
+    rec.W = meta.W; rec.H = meta.H;
+    rec.route = 'jpg';
+    rec.sceneId = meta.sceneId;
+    rec.lqPath = meta.lqPath;
+    rec.sceneDir = meta.sceneDir ?? null;
+    rec.stageKind = meta.stageKind ?? 'input';
+    rec.stageLabel = stageLabel(rec.stageKind, meta.stageSuffix, rec.name);
+    rec.serverMaskPath = meta.serverMaskPath ?? null;
+    rec.status = '正在生成预览…';
+    rec.statusCls = '';
+    rec.pending = false;
+    rec.pendingRow = undefined;
+    rec.pendingError = undefined;
+    rec.card = markRaw({ row, meta });
+    noteSceneDir(rec);
+    return rec.id;
+  }
+
+  /** 占位卡的中间状态（解析中 / 生成预览中）。 */
+  function setPendingStatus(rowName: string, status: string): void {
+    const rec = recs.value.find((r) => r.pending && r.pendingRow === rowName);
+    if (!rec) return;
+    rec.status = status;
+    rec.statusCls = '';
+  }
+
+  /** 占位卡失败：原地标红并留下原因，不再等整批跑完。 */
+  function failPendingCard(rowName: string, stage: 'resolve' | 'body', reason: string): void {
+    const rec = recs.value.find((r) => r.pending && r.pendingRow === rowName);
+    if (!rec) return;
+    rec.status = stage === 'resolve' ? '解析失败' : '生成预览失败';
+    rec.statusCls = 'err';
+    rec.pendingError = reason;
+  }
+
+  /** 整批收尾：没轮到的占位卡落成「未开始」。 */
+  function finishPendingCards(): void {
+    for (const rec of recs.value) {
+      if (!rec.pending) continue;
+      if (rec.status === '排队中' || rec.status === '解析中…') {
+        rec.status = '未开始';
+        rec.statusCls = 'muted';
+      }
+    }
   }
 
   /** 同一张卡正在取图的那些。**按场景 id 去重** —— 一个场景 id 只对应一张 rec
@@ -1620,10 +1771,186 @@ export const useViewerStore = defineStore('viewer', () => {
     }
   }
 
+  /* ---------------- 左侧列表：收藏 / 多选 / 批量清理 / 撤回 ---------------- */
+
+  function snapshot(label: string): ListSnapshot {
+    const raw = toRaw(recs.value);
+    return {
+      label,
+      recs: raw.slice(),
+      fav: raw.map((r) => [r.id, r.fav ? (r.favAt ?? 0) : null] as const),
+      ordinals: [...sceneOrdinals],
+      activeId: activeId.value,
+      paneA: paneA.value,
+      paneB: paneB.value,
+      activeSide: activeSide.value,
+      compareList: [...compareList.value],
+      viewA: { ...viewA.value },
+      viewB: { ...viewB.value },
+      viewFor: {
+        A: viewFor.A ? { ...viewFor.A } : null,
+        B: viewFor.B ? { ...viewFor.B } : null,
+      },
+    };
+  }
+
+  /** 动列表之前压一格。只收**结构操作**（增删、收藏）；打开/切换/拉伸/掩码不进来。 */
+  function pushUndo(label: string): void {
+    const next = [...undoStack.value, snapshot(label)];
+    undoStack.value = next.length > UNDO_MAX ? next.slice(next.length - UNDO_MAX) : next;
+  }
+
+  /** 撤回一张：成员、顺序、收藏、活动侧与两格引用一起回退；像素不动。 */
+  function undo(): string | null {
+    const stack = undoStack.value;
+    const s = stack[stack.length - 1];
+    if (!s) return null;
+    undoStack.value = stack.slice(0, -1);
+
+    const fav = new Map(s.fav);
+    for (const rec of s.recs) {
+      const at = fav.get(rec.id);
+      if (at == null) { rec.fav = false; rec.favAt = undefined; }
+      else { rec.fav = true; rec.favAt = at; }
+    }
+    recs.value = s.recs.slice();
+    sceneOrdinals.clear();
+    for (const [k, n] of s.ordinals) sceneOrdinals.set(k, n);
+    activeId.value = s.activeId;
+    paneA.value = s.paneA;
+    paneB.value = s.paneB;
+    activeSide.value = s.activeSide;
+    compareList.value = s.compareList.slice();
+    viewA.value = { ...s.viewA };
+    viewB.value = { ...s.viewB };
+    viewFor.A = s.viewFor.A ? { ...s.viewFor.A } : null;
+    viewFor.B = s.viewFor.B ? { ...s.viewFor.B } : null;
+    selectedIds.value = selectedIds.value.filter((id) => recs.value.some((r) => r.id === id));
+    const a = activeRec.value;
+    if (a?.thumb) repaintOnActivate(a);
+    renderTick.value++;
+    return s.label;
+  }
+
+  /** 批量移除的共同底座：**不逐张走 removeRec** —— 那会在每次 splice 后激活「最后一张」，
+   *  清理 20 张就取 20 次图，其中 19 次是白取。这里只在最后处理一次活动侧。
+   *  活动图被清掉时也不自动打开下一张：批量清理不该顺手把一张没点过的卡拉起来取图。 */
+  function dropRecs(ids: Set<number>): number {
+    const before = recs.value.length;
+    recs.value = recs.value.filter((r) => !ids.has(r.id));
+    const n = before - recs.value.length;
+    if (!n) return 0;
+    selectedIds.value = selectedIds.value.filter((id) => !ids.has(id));
+
+    let paneCleared = false;
+    if (paneA.value !== null && ids.has(paneA.value)) {
+      paneA.value = null; viewFor.A = null; paneCleared = true;
+    }
+    if (paneB.value !== null && ids.has(paneB.value)) {
+      paneB.value = null; viewFor.B = null; paneCleared = true;
+    }
+    compareList.value = pruneCompareList(compareList.value, recs.value.map((r) => r.id));
+
+    if (activeId.value !== null && ids.has(activeId.value)) {
+      // 分屏里另一格还在的话，活动侧交给它；否则画布回空白态。
+      const otherSide = activeSide.value === 'A' ? 'B' : 'A';
+      const otherId = otherSide === 'A' ? paneA.value : paneB.value;
+      if (otherId !== null) {
+        activeSide.value = otherSide;
+        activeId.value = otherId;
+        clearRoiSel();
+        clearCloud();
+        renderTick.value++;
+      } else {
+        activeId.value = null;
+        blankCanvas();
+      }
+    } else if (paneCleared) {
+      renderTick.value++;
+    }
+    // 列表整个空了：序号从头数（与 clearRecs 同一条规矩）；只删一部分不清。
+    // 多选也一并退出 —— 没卡可勾时顶栏那颗键是禁用的，留着多选态就退不出去了。
+    if (!recs.value.length) {
+      sceneOrdinals.clear();
+      selectMode.value = false;
+    }
+    return n;
+  }
+
+  /** 列表清空后的画布空白态（与 removeRec 关掉最后一张时逐字同一套）。 */
+  function blankCanvas(): void {
+    activeSide.value = 'A';
+    view.value = { scale: 1, ox: 0, oy: 0 };
+    viewFor.A = null;
+    viewFor.B = null;
+    marker.value = null;
+    exitDraw();
+    clearRoiSel();
+    clearCloud();
+    renderTick.value++;
+  }
+
+  /** 收藏 / 取消收藏：全选中都收藏了 → 一起取消，否则把没收藏的都收上。
+   *  返回动了几个（0 = 没有可动的，工具条那颗键对得上）。 */
+  function toggleFavorite(ids: readonly number[] = selectedIds.value): number {
+    const targets = ids
+      .map((id) => recs.value.find((r) => r.id === id))
+      .filter((r): r is ViewerRec => !!r && !r.pending);
+    if (!targets.length) return 0;
+    const allFav = targets.every((r) => r.fav);
+    pushUndo(allFav ? '取消收藏' : '收藏');
+    if (allFav) {
+      for (const r of targets) { r.fav = false; r.favAt = undefined; }
+    } else {
+      // 同一批共用一个基准、按顺序 +1：置顶组内保持用户勾选的先后。
+      const base = Date.now();
+      targets.forEach((r, i) => {
+        if (r.fav) return;
+        r.fav = true;
+        r.favAt = base + i;
+      });
+    }
+    return targets.length;
+  }
+
+  /** 清理冗余 = 清掉所有失败的卡（含批量占位里标红那些）。
+   *  收藏的即使失败也留着 —— 收藏的意思就是「别自动动它」。 */
+  function removeRedundant(): number {
+    const ids = new Set(
+      recs.value.filter((r) => r.statusCls === 'err' && !r.fav).map((r) => r.id),
+    );
+    if (!ids.size) return 0;
+    pushUndo('清理冗余 ' + ids.size + ' 张');
+    return dropRecs(ids);
+  }
+
+  /** 清理全部 = 清掉所有**没收藏**的卡；收藏的一张不动。 */
+  function removeAll(): number {
+    const ids = new Set(recs.value.filter((r) => !r.fav).map((r) => r.id));
+    if (!ids.size) return 0;
+    pushUndo('清理全部 ' + ids.size + ' 张');
+    return dropRecs(ids);
+  }
+
+  /** 移除多选勾中的那些。 */
+  function removeSelected(): number {
+    const ids = new Set(
+      selectedIds.value.filter((id) => {
+        const r = recs.value.find((x) => x.id === id);
+        return !!r && !r.pending;
+      }),
+    );
+    if (!ids.size) return 0;
+    pushUndo('移除选中 ' + ids.size + ' 张');
+    return dropRecs(ids);
+  }
+
   function removeRec(id: number) {
     const i = recs.value.findIndex((r) => r.id === id);
-    if (i < 0) return;
+    if (i < 0 || recs.value[i].pending) return;
+    pushUndo('移除 1 张');
     recs.value.splice(i, 1);
+    selectedIds.value = selectedIds.value.filter((x) => x !== id);
     // 分屏的两格与点选清单都可能还指着它
     let paneCleared = false;
     if (paneA.value === id) { paneA.value = null; paneCleared = true; viewFor.A = null; }
@@ -1635,14 +1962,7 @@ export const useViewerStore = defineStore('viewer', () => {
       const next = recs.value[recs.value.length - 1];
       // 走 activate → placeRec：活动侧那张被关掉后，格子与 activeId 的不变量自动恢复
       if (next) void activate(next.id);
-      else {
-        activeSide.value = 'A';          // 两格都空了 → 活动侧回左，view 写回 viewA
-        view.value = { scale: 1, ox: 0, oy: 0 };
-        viewFor.A = null; viewFor.B = null;   // 没图了 = 没适配过
-        marker.value = null;
-        clearCloud();                    // 无图可显：云卡回空态，释放红叠画布
-        renderTick.value++;
-      }
+      else blankCanvas();
     } else if (paneCleared) {
       // 关掉的是**非活动侧**那张：那一格当场空出来，得重画（活动侧什么都没变）
       renderTick.value++;
@@ -1661,25 +1981,33 @@ export const useViewerStore = defineStore('viewer', () => {
    *
    *  返回清掉几张（调用方报给用户）。 */
   function clearRecs(): number {
-    const n = recs.value.length;
+    // 收藏的卡留下：一键解析是「换一批看」，而收藏是用户明确要留住的那几张。
+    const keep = recs.value.filter((r) => r.fav);
+    const n = recs.value.length - keep.length;
     stopPrefetch();                      // 在飞的预取自己发现代次变了就收手
     if (markerTimer !== null) { clearTimeout(markerTimer); markerTimer = null; }
-    recs.value = [];
-    compareList.value = [];
-    paneA.value = null;
-    paneB.value = null;
-    viewFor.A = null;
-    viewFor.B = null;
-    activeId.value = null;
-    activeSide.value = 'A';              // 两格都空了 → 活动侧回左，view 写回 viewA
-    view.value = { scale: 1, ox: 0, oy: 0 };
+    recs.value = keep;
+    // 批量开跑是新的一章：上一批的增删不再可撤（否则撤回会把半批卡与占位卡混回一起）。
+    undoStack.value = [];
+    selectMode.value = false;
+    selectedIds.value = [];
+    const keepIds = new Set(keep.map((r) => r.id));
+    if (paneA.value !== null && !keepIds.has(paneA.value)) { paneA.value = null; viewFor.A = null; }
+    if (paneB.value !== null && !keepIds.has(paneB.value)) { paneB.value = null; viewFor.B = null; }
+    compareList.value = pruneCompareList(compareList.value, [...keepIds]);
     marker.value = null;
     exitDraw();                          // 画了一半的框/多边形跟着这张图一起作废
     clearRoiSel();
     clearCloud();
     clearLights();
-    sceneOrdinals.clear();
-    renderTick.value++;
+    if (activeId.value !== null && !keepIds.has(activeId.value)) {
+      activeId.value = null;
+      blankCanvas();
+    } else {
+      renderTick.value++;
+    }
+    // 暂存区整个空了才重排序号（只留收藏时它没空，序号接着数）。
+    if (!keep.length) sceneOrdinals.clear();
     return n;
   }
 
@@ -2765,8 +3093,15 @@ export const useViewerStore = defineStore('viewer', () => {
     sidebarCollapsed, busy, srBusy,
     // 文件 / 解码
     addFiles, removeRec, activate, openSceneJpg, openLocalImage,
+    // 左侧列表工具条：收藏（置顶）/ 多选 / 批量清理 / 撤回
+    recsOrdered, favCount, selectMode, selectedIds, isSelected,
+    toggleSelectMode, toggleSelected, clearSelection,
+    toggleFavorite, removeRedundant, removeAll, removeSelected,
+    canUndo, undoLabel, undo,
     // 一键解析：清空暂存区 + 批量入列的「空卡」 + 点亮联动
     clearRecs, insertSceneCard, bakeCardPixels, litIds, litTick, lightCards, clearLights,
+    // 一键解析：先排满占位卡，再原地补齐 / 标红 / 收尾
+    insertPendingCards, fillPendingCard, setPendingStatus, failPendingCard, finishPendingCards,
     // 拉伸 / 视图
     setStretch, setPreviewDiv, setCanvasSize, fit, onWheel, onPan, locatePixel,
     // 掩码

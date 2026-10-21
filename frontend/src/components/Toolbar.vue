@@ -299,7 +299,7 @@ watch(
   user-select: none;
   white-space: nowrap;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
-  transition: filter 0.15s ease, box-shadow 0.15s ease;
+  transition: filter var(--motion-hover) var(--ease-standard), box-shadow var(--motion-hover) var(--ease-standard);
   gap: 6px;
 }
 .btn:hover { filter: brightness(0.97); box-shadow: 0 2px 5px rgba(0, 0, 0, 0.24); }
@@ -316,7 +316,7 @@ watch(
   border-radius: var(--r-ctrl);
   cursor: pointer;
   outline: none;
-  transition: border-color 0.15s ease, background 0.15s ease;
+  transition: border-color var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard);
 }
 .stretch-sel:hover { border-color: #fff; }
 .stretch-sel:focus-visible { border-color: #fff; box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.28); }
@@ -343,7 +343,7 @@ watch(
   border-radius: 8px;
   font-size: 13px;
   outline: none;
-  transition: border-color 0.15s ease;
+  transition: border-color var(--motion-hover) var(--ease-standard);
 }
 .loc input:hover, .loc input:focus { border-color: #fff; }
 .loc-btn {
@@ -356,7 +356,7 @@ watch(
   border: 1px solid rgba(255, 255, 255, 0.5);
   border-radius: 8px;
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: background var(--motion-hover) var(--ease-standard);
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -380,7 +380,7 @@ watch(
   border-radius: 8px;
   white-space: nowrap;
   user-select: none;
-  transition: border-color 0.15s ease;
+  transition: border-color var(--motion-hover) var(--ease-standard);
 }
 .divsel:hover { border-color: #fff; }
 .divsel input[type='range'] {
@@ -412,7 +412,7 @@ watch(
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
-  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  transition: background var(--motion-hover) var(--ease-standard), color var(--motion-hover) var(--ease-standard), border-color var(--motion-hover) var(--ease-standard);
   gap: 6px;
 }
 .outbtn .app-icon, .set-btn .app-icon, .cmp-btn .app-icon { filter: invert(1); }
@@ -449,7 +449,7 @@ watch(
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
-  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  transition: background var(--motion-hover) var(--ease-standard), color var(--motion-hover) var(--ease-standard), border-color var(--motion-hover) var(--ease-standard);
   gap: 10px;
 }
 .cmp-btn:hover { background: rgba(255, 255, 255, 0.2); border-color: rgba(255, 255, 255, 0.6); }
@@ -477,7 +477,7 @@ watch(
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
-  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  transition: background var(--motion-hover) var(--ease-standard), color var(--motion-hover) var(--ease-standard), border-color var(--motion-hover) var(--ease-standard);
   gap: 10px;
 }
 .set-btn:hover { background: rgba(255, 255, 255, 0.2); border-color: rgba(255, 255, 255, 0.6); }

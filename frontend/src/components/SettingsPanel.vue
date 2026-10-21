@@ -184,7 +184,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
-  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  transition: background var(--motion-hover) var(--ease-standard), color var(--motion-hover) var(--ease-standard), border-color var(--motion-hover) var(--ease-standard);
 }
 .set-sw:hover { color: var(--accent-deep); }
 .set-sw.on {
@@ -214,7 +214,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
   font-family: inherit;
   font-size: 12px;
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background var(--motion-hover) var(--ease-standard), color var(--motion-hover) var(--ease-standard);
 }
 .set-clear:hover:not(:disabled) { color: var(--accent-deep); background: var(--chrome); }
 .set-clear:disabled { opacity: 0.5; cursor: not-allowed; }

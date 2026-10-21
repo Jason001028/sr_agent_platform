@@ -29,7 +29,7 @@ const emit = defineEmits<{ (e: 'remove', id: number): void }>();
 .tray {
   display: flex; align-items: center; gap: 8px;
   padding: 8px 16px 0;
-  animation: tray-in 0.12s ease-out;
+  animation: tray-in var(--motion-fade) var(--ease-enter);
 }
 @keyframes tray-in {
   from { opacity: 0; transform: translateY(3px); }

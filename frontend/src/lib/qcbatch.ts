@@ -122,6 +122,8 @@ export interface BakeDeps<T extends BakeRow = BakeRow> {
   /** NOSR：问 /siblings，有那份就入列一张卡 + 生成一份；返回 'missing' = 盘上没有。失败抛。 */
   nosr(it: T, res: unknown): Promise<'ok' | 'missing'>;
   onProgress?(i: number, n: number, it: T, phase: BakeStage): void;
+  /** 某一步失败时立刻回调（在继续下一景之前）—— 占位卡要当场标红，不能等整批跑完。 */
+  onFail?(it: T, stage: BakeStage, reason: string): void;
 }
 
 /** 驱动器只要求行有名字 —— `QcIssue` 结构上满足它（免得 lib 反向 import store 的类型）。
@@ -169,6 +171,7 @@ export async function runSceneBake<T extends BakeRow>(
       // 不是这一景解析失败，不能记进 fails（否则停止键一按就报一堆假失败）。
       if (signal.aborted) { stopped = true; break; }
       fails[it.name] = { stage: 'resolve', reason: errText(e) };
+      deps.onFail?.(it, 'resolve', fails[it.name].reason);
       done += 1;             // 解析失败也是一条账（标红 + 记原因），要计入
       continue;
     }
@@ -179,6 +182,7 @@ export async function runSceneBake<T extends BakeRow>(
       await deps.body(it, res);
     } catch (e) {
       fails[it.name] = { stage: 'body', reason: errText(e) };
+      deps.onFail?.(it, 'body', fails[it.name].reason);
     }
     if (signal.aborted) { stopped = true; break; }
     deps.onProgress?.(i + 1, total, it, 'nosr');

@@ -119,7 +119,7 @@ function pick(kind: 'input' | 'product' | 'nosr') {
   overflow: hidden;
 }
 .cmp-bar-fade-enter-active,
-.cmp-bar-fade-leave-active { transition: opacity 0.1s ease, transform 0.1s ease; }
+.cmp-bar-fade-leave-active { transition: opacity var(--motion-fade) var(--ease-standard), transform var(--motion-fade) var(--ease-standard); }
 .cmp-bar-fade-enter-from,
 .cmp-bar-fade-leave-to { opacity: 0; transform: translateY(-3px); }
 
@@ -140,7 +140,7 @@ function pick(kind: 'input' | 'product' | 'nosr') {
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
-  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  transition: background var(--motion-hover) var(--ease-standard), color var(--motion-hover) var(--ease-standard), border-color var(--motion-hover) var(--ease-standard);
 }
 .cmp-mode:hover { color: var(--accent-deep); }
 .cmp-mode.on {

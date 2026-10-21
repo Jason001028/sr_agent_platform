@@ -97,7 +97,7 @@ const target = computed(() => {
   border-radius: 7px;
   cursor: pointer;
   white-space: nowrap;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background var(--motion-hover) var(--ease-standard), color var(--motion-hover) var(--ease-standard);
 }
 .draw-panel button:hover { background: #e9eeea; color: var(--ink); }
 .draw-panel button.on { background: var(--accent-soft); color: var(--accent-deep); border-color: var(--accent-2); }
@@ -129,7 +129,7 @@ const target = computed(() => {
   font-size: 12px;
   border: 1px solid var(--line);
   border-radius: 7px;
-  transition: border-color 0.15s ease;
+  transition: border-color var(--motion-hover) var(--ease-standard);
 }
 .draw-panel input[type=number]:focus { outline: none; border-color: var(--accent-3); }
 </style>

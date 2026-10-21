@@ -26,6 +26,8 @@
   清单导入后多一颗橘色「**一键解析**」：按行序逐景把本体 jpg 与 NOSR jpg 一次性生成到盘上，
   每景两张卡**共用同一个序号**依次入列（生下来不带像素、点开才取图），失败逐条记账标红、
   可随时停；点清单里任意一行，左侧那两张卡橘色点亮并滚过去（见 §6.4）。
+  左侧列表顶部有一排图标键：多选、收藏选中（置顶且活过批量清理）、移除选中、清理冗余、
+  清理全部、撤回（见 §6.5）。
   右侧「上下文侧舱」含 `[ROI/工具]` 与 `[Agent]` 两个页签。
 - **`/scenes` 场景库** —— 盘阵场景检索（卫星 / 传感器 / 日期 / 关键词）、行内显示 W/H、
   打开（首次访问懒生成预览）、清除预览缓存（选定 / 全部）。
@@ -215,6 +217,13 @@
   才 `fetchSceneJpg` + `applySceneJpgToRec`（此时命中服务端缓存，秒出）。算式：各边 ÷4 的
   4 万² 景生成出 10000²，`applySceneJpgToRec` 同时留下 `thumb`（canvas RGBA ≈400MB）与
   `src`（Float32Array），**≈800MB/卡** —— 一批十几景 ×2 张装不下（浏览器单次分配 ~2GB）。
+- **先排满占位卡、再原地补齐**（2026-10-21）：点击的同步前缀里按清单行一次插入「排队中」
+  的占位卡（每行一张本体，名字取行名，`pending` 标记），解析成功后 `fillPendingCard` 原地
+  补齐身份并改用权威名，NOSR 卡 `insertSceneCard(..., afterId)` 插在本体后面；解析失败
+  原地标红、原因进 `pendingError`，停止时没轮到的写「未开始」（`finishPendingCards`）。
+  占位卡在 `activate` / `startRecDrag` / `removeRec` 三个入口挡掉，卡片不渲染删除与截图键。
+  入场延迟由 `lib/motion.ts::cascadeDelay(i, n)` 计算：12 条以内按 100ms 逐条固定累计，
+  超过 12 条等距压进 1200ms 窗口（单卡淡入 120ms）。
 - **取消 = AbortController，且如实告知**：`resolve` 能掐（`apiResolveScene` 收 signal），
   生成图那两条 HTTP **掐不掉** —— 所以在飞的那一景让它生成完（落盘正是要的缓存），文案写
   「正在停止（等这一景生成完…）」。被掐掉的 resolve 是**取消**、不是这一景失败，不记进失败账。
@@ -230,6 +239,23 @@
 - **真机单景均耗时 = ___ 秒**（待填；含一次 resolve + 两次预览生成读盘，÷4 的 4 万² 景按
   §3.2 / preview-bake-pipeline 的量级预估是几十秒）。几十景一批就是十几分钟起 ——
   按钮的提示语里已经写明，不等同于「卡住了」。
+
+### 6.5 左侧列表工具条（2026-10-21）
+
+- **一颗内容宽的白色胶囊**（`FileListTools.vue`），里面六颗 26px 正圆图标键：多选 · 收藏选中 ·
+  移除选中 · 清理冗余 · 清理全部 · 撤回。可见文字为零，功能说明全在 `title` / `aria-label`；
+  跑批期间整排禁用，列表为空时全灰（多选键也不例外）。胶囊吸顶，外层铺 chrome 底色挡滚动卡片。
+- **图标 16px**：黑色 lucide 素材，源文件在 `frontend/icon/`，复制到 `frontend/public/icon/`
+  才能被 `AppIcon` 取到；`<img>` 里的 `currentColor` 取不到按钮的 `color`，状态只靠圆底与描边。
+- **界面叫「清理冗余」不叫「清理失败」**（用户 2026-10-21 定）；它清 `statusCls === 'err'`
+  的卡，含一键解析失败后留下的红占位卡。收藏的失败卡保留。
+- **收藏置顶且活过三处清理**：`clearRecs` / `removeRedundant` / `removeAll` 都跳过收藏；
+  收藏只在渲染时排序（`recsOrdered`），取消收藏回原位。序号 Map 仍按 `sceneDir` 粘着发号。
+- **多选点卡 = 勾选不激活**（避免为收藏触发 ≈800MB 的取图）；批量清理走 `dropRecs`，
+  不逐张 `removeRec`（那会反复激活取图），也不自动打开幸存卡。
+- **撤回只撤列表结构**（成员/顺序/收藏/活动侧/视图/序号），深度 10，一键解析开跑时清空；
+  快照共享 rec 对象，不重新解码。键盘：Esc 退出多选、Delete 移除选中、Ctrl/⌘+Z 撤回。
+- 设计取舍与踩坑见 [gui-experience.md §13](../experience/gui-experience.md)。
 
 ### 6.3 测试基线
 
@@ -251,6 +277,40 @@
   `test-stretch*.js` 与 `debug-*`/`probe-fd*` 那批探针）。**活着的四套就是上面列的这四个**
   （都按 `__dirname` 定位，搬家不影响）。历史经验里若引用了那一族当金丝雀，按这条订正。
 - 更旧的值（58 / 65 / 22 / 197 / 720 / 393 / 214 等）已过期，不要据此判断回归。
+
+**2026-10-21（动效令牌 + 一键解析占位卡）**：前端 **470 passed**（25 个文件；新增
+`motion.test.ts` 3 条、`qcbatch.test.ts` 的 `onFail` 2 条）+ `vue-tsc --noEmit` 零错误 +
+`npm run build` 通过 + `check:terms` 通过（101 个文件）。`test-manual-scene.js` 的 M 段已按
+占位卡口径改写，整轮 **299 项断言全绿** —— 但这是把 §A 末尾两条 1366 工具栏宽度断言
+**临时跳过**之后跑到的：当前工作区与 HEAD 都稳定报 `scrollW=1399 / clientW=1366`、
+溢出控件是 `set-btn`（暂未处理，与本轮改动无关）。
+
+**2026-10-21（一键解析入场：12 条以内逐条 100ms）**：`CARD_CASCADE_MS` 600 → 1200，新增
+`CARD_STEP_MS = 100`，`cascadeDelay` 由 `t²` 改为线性 —— 12 条以内每张比上一张固定晚
+100ms；超过 12 条时按份数摊薄步长、等距压进同一 1200ms 窗口（末张连同 120ms 淡入收在
+窗口末尾）。`motion.test.ts` 原「先快后慢」用例换成分段断言（≤12 条固定 100ms / >12 条
+等距压缩），该文件共 7 项 → 前端 **474 passed** + `vue-tsc --noEmit` 零错误 +
+`npm run build` 通过。
+
+**2026-10-21（Agent 附文默认不上屏）**：`AgentChatTab.vue` 的自动附文改为**仅开发者模式**
+渲染 —— 气泡下一块浅米色（`--warn-bg` / `--warn-line`）`<details>` 折叠面板，默认收起，
+普通模式完全不渲染；`ChatPage.vue` 保持只显示原话。发送给 Agent 的 payload 形状不变，但
+`buildContextNote` **不再带 `scene_id`**（长串盘阵路径对 Agent 无用，认场景靠工具）——
+图像名 / 原图尺寸 / 显示尺寸 / 拉伸 / ROI 统计照旧。`agentContext.test.ts` 把原「含
+scene=s-123」改成断言不含 `scene`。前端仍 **472 passed** + `vue-tsc --noEmit` 零错误 +
+`npm run build` 通过。
+
+**2026-10-21（工具条胶囊 + 一键解析入场曲线）**：列表工具条收进内容宽的白色胶囊（三层阴影，
+按钮 26px 正圆）；一键解析改为从右侧 16px 滑入，逐卡延迟由均分改为按 `t²` 分配（整批先快后慢，
+窗口 600ms）；`motion.test.ts` 新增 2 条（相邻间隔随时间拉开、`CARD_ENTER_MS` 等于
+style.css 的 `--motion-fade`）→ 前端 **472 passed** + `vue-tsc --noEmit` 零错误 +
+`npm run build` 通过 + `check:terms` 通过。
+
+**2026-10-21（左侧列表工具条）**：前端仍 **470 passed** + `vue-tsc --noEmit` 零错误 +
+`npm run build` 通过。`test-manual-scene.js` 新增 M9（工具条 6 键 / 多选不激活 / 收藏置顶 /
+Ctrl+Z 撤回收藏 / 清理全部只留收藏 / clearRecs 保留收藏 / 取消收藏后才清得掉），整轮
+**322 项断言全绿** —— 同样是在临时跳过 §A 那两条 1366 宽度断言之后跑到的（同一条
+`set-btn` 溢出，与本轮无关；E4 偶发一次时序失败，重跑即绿）。
 
 ## 7. 去哪查什么
 

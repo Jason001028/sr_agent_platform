@@ -2085,6 +2085,8 @@ async function main() {
       //   ④  盘上压根没有这一景 → 标红记账，**后面的景照跑**（前三行都已跑完）。
       // 四行的第一列都**缺产品段**（写 `…_L1`，盘阵上叫 `…_L1_PAN`），desc 里写影像
       // 类型 —— 批量这条路吃的正是 H2 那条「按影像类型补段」的解析，不能只认全名。
+      // M9 接在 M8 之后验左侧工具条：多选不激活、收藏置顶、Ctrl+Z 撤回收藏、清理全部
+      // 只留收藏、清空保留收藏、取消收藏后清理全部才动它。
       console.log('\n[M] 一键解析：按清单行序逐景生成两份 jpg、共用序号入列、点亮联动');
       const MB_META = '<?xml version="1.0" encoding="UTF-8"?>'
         + '<SolarAzimuth>181.79</SolarAzimuth>';
@@ -2183,11 +2185,19 @@ async function main() {
         const b = document.querySelector('.qc-go');
         const before = window.__viewer.recs().length;
         b.click();
-        return { before, after: window.__viewer.recs().length,
+        const after = window.__viewer.recs();
+        return { before, after: after.length,
+          pending: after.filter((r) => r.pending).length,
+          names: after.map((r) => r.name),
           st: window.__viewer.qcBakeState().state };
       });
-      assert(mKick.before > 0 && mKick.after === 0,
-        `点下去先把暂存区清空（${mKick.before} → ${mKick.after} 张）`);
+      // 旧暂存区清空后**立刻按清单行排满占位卡**（不再等一景跑完才长一张）：
+      // 四行清单 → 四张「排队中」，后面的解析/生成都在原地补。
+      const mWantBare = [...mbScenes.map((s) => s.bare), MB_GONE];
+      assert(mKick.before > 0 && mKick.after === 4 && mKick.pending === 4,
+        `点下去先清空、再排满占位卡（${mKick.before} → ${mKick.after} 张，其中排队中 ${mKick.pending}）`);
+      assert(mKick.names.join('|') === mWantBare.join('|'),
+        `占位卡按清单行序、写着行名（${mKick.names.map((n) => n.slice(-9)).join(' / ')}）`);
       assert(mKick.st === 'running', `按钮一点就跑起来（state=${mKick.st}）`);
       try {
         await waitFor(page,
@@ -2208,12 +2218,16 @@ async function main() {
         `全程 ${mBake.samples} 次采样里遮罩一次都没盖（批量不弹 modal）`);
 
       /* M3. 入列顺序 = .txt 行序，每景两张卡共用一个序号 */
-      const mCards = await page.evaluate(() => window.__viewer.recs().map((r) => ({
+      const mAllCards = await page.evaluate(() => window.__viewer.recs().map((r) => ({
         id: r.id, name: r.name, sceneId: r.sceneId, sceneDir: r.sceneDir,
         stageKind: r.stageKind, stageLabel: r.stageLabel, route: r.route,
         W: r.W, H: r.H, thumbW: r.thumbW, thumbH: r.thumbH,
         hasCard: r.hasCard, thumb: r.thumb, lqPath: r.lqPath,
+        pending: r.pending, status: r.status,
       })));
+      // 跑完时还剩一张占位卡：盘上没有的那一行（它从一开始就排在清单最末）。
+      const mCards = mAllCards.filter((r) => !r.pending);
+      const mPend = mAllCards.filter((r) => r.pending);
       const mWantNames = [mbScenes[0].name, mbScenes[0].name + '_NOSR',
         mbScenes[1].name, mbScenes[1].name + '_NOSR', mbScenes[2].name];
       assert(mCards.length === 5 && mCards.map((r) => r.name).join('|') === mWantNames.join('|'),
@@ -2225,9 +2239,13 @@ async function main() {
         `五张卡都还是空卡（有身份、没像素：${mCards.filter((r) => r.hasCard && r.thumb === null).length}/5）`);
       assert(mCards.every((r) => r.route === 'jpg' && !!r.sceneDir && !!r.sceneId),
         '五张卡都走盘阵 JPG 路由、都带场景目录与场景 id');
+      // 失败的那一行不新长一张卡，而是**留在原位标红** —— 名字仍是清单里那个名字
+      // （解析没成，没有权威名可换），状态说清是哪一步失败、原因在 title 里。
+      assert(mPend.length === 1 && mPend[0].name === MB_GONE && mPend[0].status === '解析失败',
+        `盘上没有的那一行留在原位标红（${mPend.map((r) => r.name.slice(-9) + ':' + r.status).join(' / ') || '没有占位卡'}）`);
       // 序号是**按场景目录分组**发的（sceneOrdinalOf），先清空再按序入列 ⇒ 天然就是
       // 1,1,2,2,3。DOM 上那颗「盘阵 / 序号 / 环节」也一并验，别只在 store 里对。
-      const mChips = await page.evaluate(() => [...document.querySelectorAll('.file-item')]
+      const mChips = await page.evaluate(() => [...document.querySelectorAll('.file-item:not(.pending)')]
         .map((el) => ({
           scn: el.querySelector('.name .scn') ? el.querySelector('.name .scn').textContent.trim() : null,
           ord: el.querySelector('.name .ord') ? el.querySelector('.name .ord').textContent.trim() : null,
@@ -2238,6 +2256,20 @@ async function main() {
       assert(mChips.map((c) => c.stage).join(',') === '本体,NOSR,本体,NOSR,本体'
         && mChips.every((c) => c.scn === '盘阵'),
         `每景本体在前、NOSR 紧挨着在后（${mChips.map((c) => c.stage).join(',')}）`);
+      // 占位卡不可拖、不可删：它还没有身份，任何操作都只会留下一张点了必炸的卡。
+      const mPendDom = await page.evaluate(() => {
+        const el = document.querySelector('.file-item.pending');
+        if (!el) return null;
+        const st = el.querySelector('.status');
+        return { draggable: el.draggable, close: !!el.querySelector('.close'),
+          shot: !!el.querySelector('.shot-add'),
+          status: st ? st.textContent.trim() : null,
+          title: st ? st.title : '' };
+      });
+      assert(mPendDom && !mPendDom.draggable && !mPendDom.close && !mPendDom.shot,
+        `占位卡没有删除/截图入口、也拖不动（${JSON.stringify(mPendDom)}）`);
+      assert(mPendDom && mPendDom.title.length > 0,
+        '失败原因挂在状态标签的 title 上（卡片上放不下整句）');
       assert(!await page.evaluate(() => !!window.__viewer.activeRec()),
         '批量入列不激活任何一张、不抢焦点（点开另有其路）');
 
@@ -2454,7 +2486,9 @@ async function main() {
         const b = document.querySelector('.qc-go');
         b.click();                                   // 再跑一次（前面的卡会被清掉）
         const t0 = Date.now();
-        while (Date.now() - t0 < 60000 && !window.__viewer.recs().length) {
+        // 等的是**第一景真解析完、占位卡补齐**（hasCard），不是「列表里有卡」——
+        // 占位卡在点击同步前缀里就排满了，按长度等会在跑批还没起步时就返回。
+        while (Date.now() - t0 < 60000 && !window.__viewer.recs().some((r) => r.hasCard)) {
           // 循环体里 await 一次宏任务：既让批量往前走，也让 Vue 的刷新跑完 ——
           // 于是下面读到的 head 已经是「跑起来了」之后的那一份 DOM。
           await new Promise((r) => setTimeout(r, 5));
@@ -2475,7 +2509,9 @@ async function main() {
         60000, '收手完成');
       const mStopEnd = await page.evaluate(() => {
         const st = window.__viewer.qcBakeState();
-        return { ...st, recs: window.__viewer.recs().map((r) => ({ name: r.name, hasCard: r.hasCard })) };
+        return { ...st, recs: window.__viewer.recs().map((r) => ({
+          name: r.name, hasCard: r.hasCard, pending: r.pending, status: r.status,
+        })) };
       });
       assert(mStopEnd.state === 'stopped', `停下来了（state=${mStopEnd.state}）`);
       // done 是**竞态**的，所以只钉住「跑了一部分就收手」这件事，不钉死那个 1：
@@ -2491,10 +2527,172 @@ async function main() {
       assert(mStopEnd.line.indexOf('已停止：跑完 ' + mStopEnd.done + '/' + mStopEnd.total + ' 景') >= 0
         && mStopEnd.line.indexOf('失败') < 0,
         `收尾如实报「已停止」，不编一条失败出来（${mStopEnd.line}）`);
-      assert(mStopEnd.recs.length >= 1 && mStopEnd.recs.length <= 2
-        && mStopEnd.recs.every((r) => r.hasCard),
-        `已经落地的卡原样留下（${mStopEnd.recs.map((r) => r.name.slice(-9)).join(' / ')}）`);
+      const mStopDone = mStopEnd.recs.filter((r) => !r.pending);
+      assert(mStopDone.length >= 1 && mStopDone.length <= 2 && mStopDone.every((r) => r.hasCard),
+        `已经落地的卡原样留下（${mStopDone.map((r) => r.name.slice(-9)).join(' / ')}）`);
+      assert(mStopEnd.recs.filter((r) => r.pending).every((r) => r.status === '未开始'),
+        `没轮到的占位卡如实写「未开始」，不留永远排队中（${mStopEnd.recs.filter((r) => r.pending).map((r) => r.status).join(',') || '没有剩余占位'}）`);
       assert(mStopEnd.head === '一键解析', `按钮变回「一键解析」（${mStopEnd.head}）`);
+
+      /* M9. 左侧列表工具条：多选 / 收藏置顶 / 批量清理 / 撤回（2026-10-21） */
+      const mToolbar = await page.evaluate(() => {
+        const box = document.querySelector('[data-e2e="file-tools"]');
+        const btns = [...document.querySelectorAll('.file-tools .ft-btn')];
+        return {
+          present: !!box,
+          count: btns.length,
+          texts: btns.map((b) => b.textContent.trim()),
+          titles: btns.map((b) => b.title),
+          disabled: btns.map((b) => b.disabled),
+          e2e: btns.map((b) => b.dataset.e2e),
+        };
+      });
+      assert(mToolbar.present && mToolbar.count === 6,
+        `侧栏顶部一排 6 颗图标键（${mToolbar.count}）`);
+      assert(mToolbar.texts.every((t) => t === ''),
+        `键上不写可见文字（${JSON.stringify(mToolbar.texts)}）`);
+      assert(mToolbar.titles.every((t) => t.length > 0),
+        '每颗键的说明都在 title 里（悬停才显示）');
+      assert(mToolbar.e2e.join(',')
+        === 'ft-select,ft-fav,ft-remove-selected,ft-redundant,ft-clear-all,ft-undo',
+        `六颗键的顺序固定（${mToolbar.e2e.join(',')}）`);
+      assert(mToolbar.disabled[1] && mToolbar.disabled[2],
+        '没进多选时「收藏选中 / 移除选中」是灰的（没有选中可操作）');
+
+      // 多选：点卡片只勾选、不激活。勾两张，再来收藏。
+      const mSel = await page.evaluate(async () => {
+        const v = window.__viewer;
+        const beforeActive = v.activeRec() ? v.activeRec().id : null;
+        document.querySelector('[data-e2e="ft-select"]').click();
+        const cards = [...document.querySelectorAll('.file-item:not(.pending)')].slice(0, 2);
+        cards.forEach((el) => el.click());
+        await new Promise((r) => setTimeout(r, 30));
+        return {
+          mode: v.selectMode(),
+          picked: v.selectedIds(),
+          active: v.activeRec() ? v.activeRec().id : null,
+          beforeActive,
+          domPicked: [...document.querySelectorAll('.file-item.picked')].map((el) => +el.dataset.recId),
+        };
+      });
+      assert(mSel.mode && mSel.picked.length >= 1 && mSel.picked.length <= 2,
+        `点「多选」后勾选卡片（${mSel.picked.length}）`);
+      assert(mSel.active === mSel.beforeActive,
+        `多选时点卡片不换当前图（active=${mSel.active}）`);
+      assert(mSel.domPicked.join(',') === mSel.picked.join(','),
+        `卡片上的勾选圈与 store 一致（${mSel.domPicked.join(',')}）`);
+
+      const mFav = await page.evaluate(async () => {
+        const v = window.__viewer;
+        const picked = v.selectedIds();
+        document.querySelector('[data-e2e="ft-fav"]').click();
+        await new Promise((r) => setTimeout(r, 30));
+        return {
+          picked,
+          favIds: v.favIds(),
+          domOrder: [...document.querySelectorAll('.file-item')].map((el) => +el.dataset.recId),
+          chips: document.querySelectorAll('.file-item .fav-chip').length,
+          undo: v.undoLabel(),
+        };
+      });
+      assert(mFav.favIds.length === mFav.picked.length
+        && mFav.picked.every((id) => mFav.favIds.includes(id)),
+        `勾中的卡都收上了（fav=${mFav.favIds.join(',')}）`);
+      assert(mFav.domOrder.slice(0, mFav.picked.length).join(',') === mFav.favIds.join(','),
+        `收藏的卡排在 DOM 最前（${mFav.domOrder.slice(0, mFav.picked.length).join(',')}）`);
+      assert(mFav.chips === 0,
+        `多选时星标让位给勾选圈（${mFav.chips} 颗）`);
+      assert(mFav.undo.indexOf('收藏') >= 0, `收藏也进了撤回栈（${mFav.undo}）`);
+
+      // Ctrl+Z：撤回收藏（键盘面）。收藏位是 rec 上的字段，快照里单独记了才撤得回来。
+      await page.keyboard.down('Control');
+      await page.keyboard.press('z');
+      await page.keyboard.up('Control');
+      await sleep(30);
+      const mUndoFav = await page.evaluate(() => ({
+        fav: window.__viewer.favIds().length,
+        chips: document.querySelectorAll('.file-item .fav-chip').length,
+        undo: window.__viewer.undoLabel(),
+      }));
+      assert(mUndoFav.fav === 0 && mUndoFav.chips === 0,
+        `Ctrl+Z 撤回收藏（fav=${mUndoFav.fav}）`);
+
+      // 再收一次，然后退出多选、清理全部：只留收藏。
+      const mReFav = await page.evaluate(async () => {
+        document.querySelector('[data-e2e="ft-fav"]').click();
+        await new Promise((r) => setTimeout(r, 20));
+        return { fav: window.__viewer.favIds().length };
+      });
+      assert(mReFav.fav === mSel.picked.length, `再次收藏（${mReFav.fav}）`);
+      await page.keyboard.press('Escape');
+      await sleep(30);
+      const mEsc = await page.evaluate(() => ({
+        mode: window.__viewer.selectMode(),
+        selected: window.__viewer.selectedIds().length,
+        chips: document.querySelectorAll('.file-item .fav-chip').length,
+      }));
+      assert(mEsc.mode === false && mEsc.selected === 0,
+        `Esc 退出多选并清空勾选（mode=${mEsc.mode} / 勾 ${mEsc.selected}）`);
+      assert(mEsc.chips === mSel.picked.length,
+        `退出多选后收藏星标显形（${mEsc.chips}）`);
+      const mClear = await page.evaluate(async () => {
+        const v = window.__viewer;
+        const before = v.recs().length;
+        const disabled = document.querySelector('[data-e2e="ft-clear-all"]').disabled;
+        document.querySelector('[data-e2e="ft-clear-all"]').click();
+        await new Promise((r) => setTimeout(r, 30));
+        return {
+          before, disabled,
+          after: v.recs().length,
+          fav: v.favIds().length,
+          allFav: v.recs().every((r) => !!r.fav),
+          undo: v.undoLabel(),
+        };
+      });
+      assert(mClear.disabled === false, '退出多选后「清理全部」可用');
+      assert(mClear.after === mSel.picked.length && mClear.fav === mSel.picked.length && mClear.allFav,
+        `清理全部只留收藏的 ${mSel.picked.length} 张（${mClear.before} → ${mClear.after}）`);
+      const mUndoClear = await page.evaluate(async () => {
+        document.querySelector('[data-e2e="ft-undo"]').click();
+        await new Promise((r) => setTimeout(r, 30));
+        return { n: window.__viewer.recs().length, undo: window.__viewer.undoLabel() };
+      });
+      assert(mUndoClear.n === mClear.before, `撤回恢复被清掉的卡（${mUndoClear.n}）`);
+
+      // 一键解析开跑前的 clearRecs 也保留收藏；同时撤回栈作废（新的一章）。
+      const mBatchReset = await page.evaluate(async () => {
+        const v = window.__viewer;
+        const fav = v.favIds();
+        const n = v.clearRecs();
+        await new Promise((r) => setTimeout(r, 20));
+        return {
+          fav, cleared: n,
+          recs: v.recs().map((r) => ({ id: r.id, fav: !!r.fav })),
+          undo: v.undoLabel(),
+          mode: v.selectMode(),
+        };
+      });
+      assert(mBatchReset.cleared === mUndoClear.n - mSel.picked.length
+        && mBatchReset.recs.length === mSel.picked.length
+        && mBatchReset.recs.every((r) => r.fav),
+        `批量前清空保留收藏、清掉其余（清 ${mBatchReset.cleared} 张，剩 ${mBatchReset.recs.length}）`);
+      assert(mBatchReset.undo === '' && mBatchReset.mode === false,
+        '清空同时作废撤回栈、退出多选（新的一批不混着撤）');
+
+      // 取消收藏之后，「清理全部」才可以动它。
+      const mUnfav = await page.evaluate(async () => {
+        const v = window.__viewer;
+        document.querySelector('.file-item .fav-chip').click();
+        await new Promise((r) => setTimeout(r, 20));
+        const favAfter = v.favIds().length;
+        const removed = v.removeAll();
+        await new Promise((r) => setTimeout(r, 20));
+        return { favAfter, removed, left: v.recs().length, undo: v.undoLabel() };
+      });
+      assert(mUnfav.favAfter === mSel.picked.length - 1 && mUnfav.removed === 1
+        && mUnfav.left === mSel.picked.length - 1,
+        `取消收藏后清理全部才动它（剩 ${mUnfav.left}）`);
+      assert(mUnfav.undo.indexOf('清理全部') >= 0, `撤回栈记的是清理全部（${mUnfav.undo}）`);
 
       /* ---------- I. 全程无错 ---------- */
       console.log('\n[I] 全程无错');

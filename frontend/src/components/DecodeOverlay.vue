@@ -60,11 +60,11 @@ const store = useViewerStore();
   text-align: center;
 }
 .decode-fade-enter-active,
-.decode-fade-leave-active { transition: opacity 0.12s ease; }
+.decode-fade-leave-active { transition: opacity var(--motion-fade) var(--ease-standard); }
 .decode-fade-leave-active { pointer-events: none; }   /* 淡出期间别继续挡画布 */
 .decode-fade-enter-from,
 .decode-fade-leave-to { opacity: 0; }
-.decode-fade-enter-active .decode-box { animation: decode-box-in 0.12s ease-out; }
+.decode-fade-enter-active .decode-box { animation: decode-box-in var(--motion-fade) var(--ease-enter); }
 @keyframes decode-box-in {
   from { opacity: 0; transform: translateY(4px) scale(0.99); }
   to { opacity: 1; transform: translateY(0) scale(1); }
@@ -87,7 +87,7 @@ const store = useViewerStore();
   border: 3px solid var(--surface-2);
   border-top-color: var(--accent-3);
   border-radius: 50%;
-  animation: spin 0.9s linear infinite;
+  animation: spin var(--motion-spin) var(--ease-linear) infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 .mask-title { color: var(--ink); font-size: 15px; font-weight: 600; }
@@ -109,7 +109,7 @@ const store = useViewerStore();
 .progress-bar {
   height: 100%;
   background: var(--accent-grad);
-  transition: width 0.2s;
+  transition: width var(--motion-live);
 }
 .progress-pct { color: var(--ink-sub); font-size: 12px; min-width: 40px; text-align: right; }
 
@@ -147,7 +147,7 @@ const store = useViewerStore();
   word-break: break-all;
 }
 .notice-fade-enter-active,
-.notice-fade-leave-active { transition: opacity 0.12s ease, transform 0.12s ease; }
+.notice-fade-leave-active { transition: opacity var(--motion-fade) var(--ease-standard), transform var(--motion-fade) var(--ease-standard); }
 .notice-fade-enter-from,
 .notice-fade-leave-to { opacity: 0; transform: translateX(-50%) translateY(4px); }
 </style>

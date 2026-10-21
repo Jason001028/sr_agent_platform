@@ -339,10 +339,11 @@ export const useQcListStore = defineStore('qclist', () => {
     if (!rows.length) return;
     const viewer = useViewerStore();
     const scenes = useScenesStore();
-    // ① 先清空：用户先看见空的暂存区，再看它一景一景长出来。
+    // ① 先清空，再按清单行序排满占位卡：一眼看到整批的全貌，之后只有状态在原地动。
     viewer.clearRecs();
     viewer.clearLights();
     clearBakeLedger();
+    viewer.insertPendingCards(rows.map((r) => r.name));
     bakeTotal.value = rows.length;
     const div = viewer.previewDiv;         // 抓一次，整批沿用（中途拖滑块只影响后面那些景）
     const startedAt = Date.now();
@@ -353,14 +354,20 @@ export const useQcListStore = defineStore('qclist', () => {
     bakeTimer = setInterval(() => {
       bakeElapsed.value = Math.round((Date.now() - startedAt) / 1000);
     }, 1000);
+    /** 行名 → 本体卡 id：NOSR 卡要插在它后面。 */
+    const bodyIds = new Map<string, number>();
     try {
       const report = await runSceneBake(rows, {
         resolve: (it, signal) => scenes.resolveByName(it.name, it.imgType, { signal }),
         body: async (it, res) => {
-          // ① 入列一张空卡（带身份、带「第一次点开去哪儿取图」）② 把 jpg 生成到盘上。
-          // 顺序不能反：生成成功才入列的话，用户跑到一半看到的是「进度在走、左边还是空的」。
+          // ① 占位卡原地补齐身份 ② 把 jpg 生成到盘上。顺序不能反：先拿到身份，
+          // 生成过程中卡片才能显示「正在生成预览…」而不是继续挂着「解析中」。
           const r = res as SceneResolveResult;
-          await viewer.bakeCardPixels(viewer.insertSceneCard(bodyMeta(r), r.row));
+          const meta = bodyMeta(r);
+          const id = viewer.fillPendingCard(it.name, meta, r.row)
+            ?? viewer.insertSceneCard(meta, r.row);
+          bodyIds.set(it.name, id);
+          await viewer.bakeCardPixels(id);
         },
         nosr: async (it, res) => {
           const r = res as SceneResolveResult;
@@ -370,12 +377,20 @@ export const useQcListStore = defineStore('qclist', () => {
           // 尺寸读不出来同上：打不开就不入列，免得留一张点了必炸的空卡。
           if (!item || !item.id || item.W == null || item.H == null) return 'missing';
           await viewer.bakeCardPixels(
-            viewer.insertSceneCard(nosrMeta(sib, item), siblingRow(sib, item)));
+            viewer.insertSceneCard(nosrMeta(sib, item), siblingRow(sib, item),
+              bodyIds.get(it.name)));
           return 'ok';
         },
-        onProgress: (i, n, it) => {
+        onProgress: (i, n, it, phase) => {
           bakeDone.value = i - 1;
           bakeNow.value = progressText(i, n, it.name, div);
+          // 还没轮到生成的那张占位卡，状态跟着这一步走。
+          if (phase === 'resolve') viewer.setPendingStatus(it.name, '解析中…');
+        },
+        onFail: (it, stage, reason) => {
+          // 解析失败，或本体在入列前就失败（元数据缺 W/H）：占位卡原地标红。
+          // 已经补齐的卡不归这里管 —— `bakeCardPixels` 自己会标红。
+          viewer.failPendingCard(it.name, stage === 'resolve' ? 'resolve' : 'body', reason);
         },
       }, ac.signal);
       bakeDone.value = report.done;
@@ -383,6 +398,8 @@ export const useQcListStore = defineStore('qclist', () => {
       bakeNotes.value = report.notes;
       bakeState.value = report.stopped ? 'stopped' : 'done';
     } finally {
+      // 取消 / 异常时没轮到的占位卡：如实写「未开始」，不留一张永远「排队中」的卡。
+      viewer.finishPendingCards();
       stopBakeTimer();
       bakeElapsed.value = Math.round((Date.now() - startedAt) / 1000);
       bakeNow.value = '';

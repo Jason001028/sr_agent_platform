@@ -312,7 +312,7 @@ function fmtTime(ts: number): string {
   background: var(--accent-grad); color: #fff; cursor: pointer; font-size: 12px;
   font-weight: 500; font-family: inherit;
   box-shadow: 0 2px 5px rgba(45, 164, 162, 0.22);
-  transition: filter 0.15s ease;
+  transition: filter var(--motion-hover) var(--ease-standard);
 }
 .cbtn:hover { filter: brightness(1.05); }
 
@@ -322,7 +322,7 @@ function fmtTime(ts: number): string {
   display: flex; align-items: center; gap: 6px;
   padding: 5px 8px; border: 1px solid var(--line); border-radius: var(--r-ctrl);
   background: var(--surface); cursor: pointer; font-size: 12px;
-  transition: border-color 0.12s ease, background 0.12s ease;
+  transition: border-color var(--motion-fade) var(--ease-standard), background var(--motion-fade) var(--ease-standard);
 }
 .roi-item:hover { border-color: var(--accent-2); }
 .roi-item.on {
@@ -382,7 +382,7 @@ function fmtTime(ts: number): string {
   border: 1px solid var(--line); border-radius: var(--r-ctrl);
   background: var(--surface); color: var(--ink-sub);
   cursor: pointer; font-family: inherit;
-  transition: border-color 0.12s ease, background 0.12s ease, color 0.12s ease;
+  transition: border-color var(--motion-fade) var(--ease-standard), background var(--motion-fade) var(--ease-standard), color var(--motion-fade) var(--ease-standard);
 }
 .ob:hover:not(:disabled) { border-color: var(--accent-2); }
 .ob:disabled { opacity: 0.5; cursor: default; }

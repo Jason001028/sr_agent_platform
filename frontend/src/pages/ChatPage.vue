@@ -380,7 +380,7 @@ onMounted(() => {
   border: 1px solid transparent; border-radius: var(--r-ctrl);
   background: transparent;
   color: var(--ink-body); cursor: pointer; font-family: inherit;
-  transition: background 0.15s ease;
+  transition: background var(--motion-hover) var(--ease-standard);
 }
 .cp-sess-btn:hover:not(:disabled) { background: var(--surface-2); }
 .cp-sess-btn:disabled { opacity: .6; cursor: not-allowed; }
@@ -400,7 +400,7 @@ onMounted(() => {
   position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
   display: flex; gap: 2px; padding-left: 14px;
   background: linear-gradient(90deg, transparent, var(--surface) 22%);
-  opacity: 0; pointer-events: none; transition: opacity 0.12s ease;
+  opacity: 0; pointer-events: none; transition: opacity var(--motion-fade) var(--ease-standard);
 }
 .cp-sess-item.cur .cp-sess-actions {
   background: linear-gradient(90deg, transparent, var(--accent-soft) 22%);
@@ -517,7 +517,7 @@ onMounted(() => {
   border: 1px solid var(--line); border-radius: var(--r-ctrl);
   background: var(--surface-2);
   cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease, opacity 0.15s ease;
+  transition: border-color var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard), opacity var(--motion-hover) var(--ease-standard);
 }
 .cp-shot:hover:not(:disabled) {
   border-color: var(--accent-2); background: var(--accent-soft);
@@ -529,7 +529,7 @@ onMounted(() => {
   border-radius: var(--r-ctrl); background: var(--surface-2);
   font-size: 14px; font-family: inherit; color: var(--ink);
   outline: none;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+  transition: border-color var(--motion-hover) var(--ease-standard), box-shadow var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard);
 }
 .cp-input::placeholder { color: var(--ink-faint); }
 .cp-input:focus { border-color: var(--accent-3); background: var(--surface); box-shadow: 0 0 0 3px rgba(45, 164, 162, 0.14); }
@@ -540,7 +540,7 @@ onMounted(() => {
   background: var(--accent-grad); color: #fff; cursor: pointer; font-size: 14px;
   font-weight: 500; font-family: inherit; flex: none;
   box-shadow: 0 2px 6px rgba(45, 164, 162, 0.22);
-  transition: filter 0.15s ease;
+  transition: filter var(--motion-hover) var(--ease-standard);
 }
 .btn:hover { filter: brightness(1.05); }
 .btn:disabled { opacity: .55; cursor: not-allowed; box-shadow: none; }

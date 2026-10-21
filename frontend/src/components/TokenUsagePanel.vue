@@ -78,7 +78,7 @@ function eventLabel(source: string): string {
 .token-summary strong { color: var(--ink); font-size: 16px; font-variant-numeric: tabular-nums; }
 .token-summary span, .token-legend { color: var(--ink-sub); font-size: 10px; }
 .token-bar { display: flex; overflow: hidden; height: 7px; margin-top: 7px; border-radius: var(--r-pill); background: var(--surface-2); }
-.token-bar span { display: block; height: 100%; transition: width .2s ease; }
+.token-bar span { display: block; height: 100%; transition: width var(--motion-live) var(--ease-standard); }
 .token-input { background: var(--accent-2); }
 .token-output { background: #8b5cf6; }
 .token-legend { gap: 9px; margin-top: 5px; flex-wrap: wrap; }

@@ -173,7 +173,7 @@ function onDividerDblClick(e: MouseEvent) {
   position: absolute;
   top: 0;
   bottom: 0;
-  transition: left 0.08s ease, width 0.08s ease;
+  transition: left var(--motion-follow) var(--ease-standard), width var(--motion-follow) var(--ease-standard);
 }
 /* 点选对比只有一块画布 → 落位区就是整块，用左色即可 */
 .cmp-hint-zone.zone-a { left: 0; right: 0; background: var(--cmp-hint-a); }

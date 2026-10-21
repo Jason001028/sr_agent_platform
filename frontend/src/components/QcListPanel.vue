@@ -382,7 +382,7 @@ watch(
   color: var(--ink-sub);
   cursor: pointer;
   font-family: inherit;
-  transition: border-color 0.12s ease, background 0.12s ease, color 0.12s ease;
+  transition: border-color var(--motion-fade) var(--ease-standard), background var(--motion-fade) var(--ease-standard), color var(--motion-fade) var(--ease-standard);
 }
 .qc-ob:hover { border-color: var(--accent-2); }
 .qc-ob.on { background: var(--accent-soft); border-color: var(--accent-2); color: var(--accent-deep); }
@@ -407,7 +407,7 @@ watch(
   border-radius: var(--r-ctrl);
   cursor: pointer;
   box-shadow: 0 2px 5px rgba(194, 116, 58, 0.28);
-  transition: filter 0.15s ease, background 0.15s ease;
+  transition: filter var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard);
 }
 .qc-go:hover:not(:disabled) { filter: brightness(1.06); }
 /* 跑着时这颗按钮是「停止」：底色压深一档，与待命态一眼分得开 */
@@ -471,8 +471,8 @@ watch(
   background: var(--surface);
   padding: 4px 7px;
   cursor: pointer;
-  transition: border-color 0.12s ease, background 0.12s ease;
-  animation: qc-row-in 0.12s ease-out;
+  transition: border-color var(--motion-fade) var(--ease-standard), background var(--motion-fade) var(--ease-standard);
+  animation: qc-row-in var(--motion-fade) var(--ease-enter);
 }
 .qc-row:hover { border-color: var(--accent-2); }
 .qc-row.on { border-color: var(--accent-2); background: var(--accent-soft); }
@@ -568,7 +568,7 @@ watch(
   height: 4px;
   border-radius: 2px;
   background: var(--line);
-  transition: background 0.12s ease;
+  transition: background var(--motion-fade) var(--ease-standard);
 }
 .stg.past .stg-bar { background: var(--accent-3); }
 .stg.on .stg-bar { background: var(--accent-2); box-shadow: 0 0 0 2px var(--accent-soft); }
@@ -594,7 +594,7 @@ watch(
   color: var(--ink-sub);
   cursor: pointer;
   font-family: inherit;
-  transition: border-color 0.12s ease, background 0.12s ease, color 0.12s ease;
+  transition: border-color var(--motion-fade) var(--ease-standard), background var(--motion-fade) var(--ease-standard), color var(--motion-fade) var(--ease-standard);
 }
 .fin:hover { border-color: var(--accent-2); }
 .fin.on.rejected { background: var(--err-bg); border-color: var(--err-line); color: var(--err); font-weight: 600; }
@@ -637,7 +637,7 @@ watch(
   font-weight: 500;
   font-family: inherit;
   box-shadow: 0 2px 5px rgba(45, 164, 162, 0.22);
-  transition: filter 0.15s ease;
+  transition: filter var(--motion-hover) var(--ease-standard);
 }
 .qc-sync:hover:not(:disabled) { filter: brightness(1.05); }
 .qc-sync:disabled {

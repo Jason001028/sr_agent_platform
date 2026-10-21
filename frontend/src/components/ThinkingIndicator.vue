@@ -31,10 +31,10 @@ withDefaults(defineProps<{ label?: string }>(), { label: '模型推理中' });
   height: 5px;
   border-radius: 50%;
   background: var(--accent-2);
-  animation: think-bounce 1.2s infinite ease-in-out;
+  animation: think-bounce var(--motion-think) infinite var(--ease-loop);
 }
-.dots i:nth-child(2) { animation-delay: 0.15s; }
-.dots i:nth-child(3) { animation-delay: 0.3s; }
+.dots i:nth-child(2) { animation-delay: var(--motion-think-step); }
+.dots i:nth-child(3) { animation-delay: calc(var(--motion-think-step) * 2); }
 
 .thinking-label { letter-spacing: 0.01em; }
 

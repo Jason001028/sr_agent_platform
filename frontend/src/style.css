@@ -83,6 +83,21 @@
   /* ---- 字体 ---- */
   --font-sans: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
   --font-mono: ui-monospace, "SF Mono", Consolas, "Courier New", monospace;
+
+  /* ---- 动效（按角色取用；选型见 docs/conventions/motion-conventions.md） ---- */
+  --motion-follow: 80ms;
+  --motion-fold: 100ms;
+  --motion-fade: 120ms;
+  --motion-hover: 150ms;
+  --motion-live: 200ms;
+  --motion-emphasis: 500ms;
+  --motion-spin: 900ms;
+  --motion-think: 1200ms;
+  --motion-think-step: 150ms;
+  --ease-standard: ease;
+  --ease-enter: ease-out;
+  --ease-linear: linear;
+  --ease-loop: ease-in-out;
 }
 
 * { box-sizing: border-box; }
@@ -186,7 +201,7 @@ body {
   font-weight: 500;
   padding: 7px 16px;
   border-radius: var(--r-pill);
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background var(--motion-hover) var(--ease-standard), color var(--motion-hover) var(--ease-standard);
 }
 .nav-links a:hover {
   color: #fff;

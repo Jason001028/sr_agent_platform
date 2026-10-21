@@ -11,13 +11,14 @@
  * 与 `.active` 的 box-shadow 正交，所以一张卡可以同时是「正在编辑」和「刚被点亮」。
  * 模板里**没有**新增任何节点：`.name` 那一行的 textContent 有 e2e 逐字断言。
  */
-import { computed, watch } from 'vue';
+import { computed, watch, onMounted, onUnmounted } from 'vue';
 import type { ComponentPublicInstance } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import { useChatStore } from '../stores/chat.js';
 import { useChatShot } from '../composables/useChatShot.js';
 import { SHOT_MAX_COUNT } from '../lib/chatShot.js';
 import { isIntermediateStage } from '../lib/stage.js';
+import FileListTools from './FileListTools.vue';
 import FileThumb from './FileThumb.vue';
 import AppIcon from './AppIcon.vue';
 
@@ -33,6 +34,42 @@ async function addShot(recId: number): Promise<void> {
   const r = await addShotAction(recId);
   if (!r.ok) store.showErr(r.message);
 }
+
+/** 多选开着时点卡片 = 勾选；否则照旧激活换图。 */
+function onCardClick(rec: { id: number; pending?: boolean }): void {
+  if (rec.pending) return;
+  if (store.selectMode) { store.toggleSelected(rec.id); return; }
+  void store.activate(rec.id);
+}
+
+/* 工具条的键盘面：Esc 退出多选、Delete 移除选中、Ctrl/⌘+Z 撤回。
+   在输入框 / 可编辑区里一律不接管（聊天框里按退格不能清掉影像卡）。 */
+function inTypingTarget(e: KeyboardEvent): boolean {
+  const t = e.target as HTMLElement | null;
+  if (!t) return false;
+  return t.isContentEditable || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT';
+}
+
+function onWindowKey(e: KeyboardEvent): void {
+  if (e.defaultPrevented || inTypingTarget(e)) return;
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') {
+    if (store.canUndo) { e.preventDefault(); store.undo(); }
+    return;
+  }
+  if (e.key === 'Escape' && store.selectMode) {
+    e.preventDefault();
+    store.toggleSelectMode();
+    return;
+  }
+  if ((e.key === 'Delete' || e.key === 'Backspace')
+      && store.selectMode && store.selectedIds.length) {
+    e.preventDefault();
+    store.removeSelected();
+  }
+}
+
+onMounted(() => window.addEventListener('keydown', onWindowKey));
+onUnmounted(() => window.removeEventListener('keydown', onWindowKey));
 
 const collapseBtn = computed(() => (store.sidebarCollapsed ? '»' : '«'));
 const collapseTitle = computed(() => (store.sidebarCollapsed ? '展开文件列表' : '收起文件列表'));
@@ -101,62 +138,109 @@ function linkTag(note: string): string {
 
 <template>
   <aside class="sidebar" :class="{ collapsed: store.sidebarCollapsed }">
-    <div v-if="!store.recs.length" class="tip">选择或拖入影像开始（.tif/.tiff/.jpg/.jpeg）</div>
-    <div
-      v-for="rec in store.recs"
-      :key="rec.id"
-      :ref="(el) => setItemEl(rec.id, el)"
-      class="file-item"
-      :class="[{ active: rec.id === store.activeId }, litCls(rec.id)]"
-      draggable="true"
-      @click="store.activate(rec.id)"
-      @dragstart="store.startRecDrag(rec, $event)"
-      @dragend="store.endRecDrag()"
-    >
-      <FileThumb :rec="rec" />
-      <!-- 截图键：叠在缩略图右上角，悬停/聚焦/当前卡才显形（opacity 而非 display，
-           免得悬停时布局跳动）。@click.stop 不触发卡片激活。 -->
-      <button
-        type="button"
-        class="shot-add"
-        data-e2e="file-shot-add"
-        aria-label="加入对话（截取当前视野）"
-        :disabled="shotsFull || shotBusy"
-        :title="shotsFull ? `每条消息最多 ${SHOT_MAX_COUNT} 张截图，先在对话里删一张` : '加入对话（截取当前视野）'"
-        @click.stop="addShot(rec.id)"
+    <FileListTools />
+    <div v-if="!store.recsOrdered.length" class="tip">选择或拖入影像至该区域</div>
+    <template v-for="(rec, idx) in store.recsOrdered" :key="rec.id">
+      <!-- 收藏组与普通组之间一条细线：置顶靠排序，这条线让人一眼看出「上面那几张不动」。 -->
+      <div
+        v-if="idx === store.favCount && store.favCount > 0 && store.favCount < store.recsOrdered.length"
+        class="fav-divider"
+        aria-hidden="true"
+      ></div>
+      <div
+        :ref="(el) => setItemEl(rec.id, el)"
+        :data-rec-id="rec.id"
+        class="file-item"
+        :class="[
+          {
+            active: rec.id === store.activeId,
+            pending: rec.pending,
+            picked: store.isSelected(rec.id),
+            entering: rec.enterDelay !== undefined,
+          },
+          litCls(rec.id),
+        ]"
+        :style="rec.enterDelay !== undefined ? { animationDelay: rec.enterDelay + 'ms' } : undefined"
+        :draggable="!rec.pending && !store.selectMode"
+        @click="onCardClick(rec)"
+        @dragstart="store.startRecDrag(rec, $event)"
+        @dragend="store.endRecDrag()"
       >
-        <AppIcon name="camera" :size="14" />
-      </button>
-      <!-- × 是 float:right，必须留在**名字行里面**：放到缩略图之前会让浮动框去挤
-           横幅那个块（横幅是 BFC，会为了避开浮动而整体缩窄），视觉上就是缩略图缺一角。 -->
-      <div class="name">
-        <span class="close" title="移除" @click.stop="store.removeRec(rec.id)">×</span>
-        <!-- 三颗小标挤在一行里、**不留换行**：换行会被 Vue 编成空白文本节点，
-             名字的 textContent 会多出空格（e2e 有整串比对名字的断言）。间距一律
-             由 CSS 的 margin-right 给。 -->
-        <template v-if="rec.route === 'jpg'"><span class="scn" :title="SCENE_TITLE">盘阵</span><span v-if="rec.sceneDir" class="ord" :title="ORD_TITLE">{{ store.sceneOrdinalOf(rec) }}</span><span class="stage" :class="rec.stageKind" :title="STAGE_TITLE">{{ rec.stageLabel }}</span></template>{{ rec.name }}
-      </div>
-      <div class="meta">
-        {{ fmtBytes(rec.size) }}
-        <template v-if="rec.W"> · {{ rec.W }}×{{ rec.H }}</template>
-        <template v-if="rec.layout"> · {{ rec.layout }}</template>
-      </div>
-      <!-- 状态与关联结果同排一行、都做成短标签（2026-09-18）：原先两者各占一行，
-           且各自又把文件名抄了一遍 —— 一张卡三行里三处同名。
-           关联原因仍然单独一个字段：rec.status 会被解码进度/结果覆盖，写在那里
-           等于没写（用户只看得到「完成，解码耗时…」）。整句理由进 title。 -->
-      <div class="tags">
-        <span class="status" :class="rec.statusCls">{{ rec.status }}</span>
-        <!-- 中间产物：说清它与本体的关系。卡片上那三颗小标只说「哪一景、哪个环节」，
-             这一条说的是「所以你不能对它做什么」。 -->
+        <FileThumb :rec="rec" />
+        <!-- 多选的眼睛：勾选态一眼可见。卡片整块可点，这颗只是指示器。 -->
         <span
-          v-if="isIntermediateStage(rec.stageKind)"
-          class="link-tag ro-tag"
-          :title="RO_TITLE"
-        >仅对比，不作修复</span>
-        <span v-if="rec.linkNote" class="link-tag" :title="rec.linkNote">{{ linkTag(rec.linkNote) }}</span>
+          v-if="store.selectMode && !rec.pending"
+          class="pick"
+          :class="{ on: store.isSelected(rec.id) }"
+          aria-hidden="true"
+        >
+          <AppIcon v-if="store.isSelected(rec.id)" name="check" :size="12" />
+        </span>
+        <!-- 收藏标：点一下取消收藏。收藏的卡置顶，且批量清理/一键解析都不会动它。 -->
+        <button
+          v-if="rec.fav && !store.selectMode"
+          type="button"
+          class="fav-chip"
+          :title="'已收藏（点一下取消收藏；收藏的卡不会被批量清理）'"
+          aria-label="取消收藏"
+          @click.stop="store.toggleFavorite([rec.id])"
+        >
+          <AppIcon name="star" :size="12" />
+        </button>
+        <!-- 截图键：叠在缩略图右上角，悬停/聚焦/当前卡才显形（opacity 而非 display，
+             免得悬停时布局跳动）。@click.stop 不触发卡片激活。多选时让位给勾选。 -->
+        <button
+          v-if="!rec.pending && !store.selectMode"
+          type="button"
+          class="shot-add"
+          data-e2e="file-shot-add"
+          aria-label="加入对话（截取当前视野）"
+          :disabled="shotsFull || shotBusy"
+          :title="shotsFull ? `每条消息最多 ${SHOT_MAX_COUNT} 张截图，先在对话里删一张` : '加入对话（截取当前视野）'"
+          @click.stop="addShot(rec.id)"
+        >
+          <AppIcon name="camera" :size="14" />
+        </button>
+        <!-- × 是 float:right，必须留在**名字行里面**：放到缩略图之前会让浮动框去挤
+             横幅那个块（横幅是 BFC，会为了避开浮动而整体缩窄），视觉上就是缩略图缺一角。 -->
+        <div class="name">
+          <span
+            v-if="!rec.pending && !store.selectMode"
+            class="close"
+            title="移除"
+            @click.stop="store.removeRec(rec.id)"
+          >×</span>
+          <!-- 三颗小标挤在一行里、**不留换行**：换行会被 Vue 编成空白文本节点，
+               名字的 textContent 会多出空格（e2e 有整串比对名字的断言）。间距一律
+               由 CSS 的 margin-right 给。 -->
+          <template v-if="rec.route === 'jpg'"><span class="scn" :title="SCENE_TITLE">盘阵</span><span v-if="rec.sceneDir" class="ord" :title="ORD_TITLE">{{ store.sceneOrdinalOf(rec) }}</span><span class="stage" :class="rec.stageKind" :title="STAGE_TITLE">{{ rec.stageLabel }}</span></template>{{ rec.name }}
+        </div>
+        <div class="meta">
+          <!-- 占位卡没有尺寸可言，但这一行**留在原地**：补齐时不至于整卡跳一下。 -->
+          <template v-if="rec.pending">—</template>
+          <template v-else>
+            {{ fmtBytes(rec.size) }}
+            <template v-if="rec.W"> · {{ rec.W }}×{{ rec.H }}</template>
+            <template v-if="rec.layout"> · {{ rec.layout }}</template>
+          </template>
+        </div>
+        <!-- 状态与关联结果同排一行、都做成短标签（2026-09-18）：原先两者各占一行，
+             且各自又把文件名抄了一遍 —— 一张卡三行里三处同名。
+             关联原因仍然单独一个字段：rec.status 会被解码进度/结果覆盖，写在那里
+             等于没写（用户只看得到「完成，解码耗时…」）。整句理由进 title。 -->
+        <div class="tags">
+          <span class="status" :class="rec.statusCls" :title="rec.pendingError">{{ rec.status }}</span>
+          <!-- 中间产物：说清它与本体的关系。卡片上那三颗小标只说「哪一景、哪个环节」，
+               这一条说的是「所以你不能对它做什么」。 -->
+          <span
+            v-if="isIntermediateStage(rec.stageKind)"
+            class="link-tag ro-tag"
+            :title="RO_TITLE"
+          >仅对比，不作修复</span>
+          <span v-if="rec.linkNote" class="link-tag" :title="rec.linkNote">{{ linkTag(rec.linkNote) }}</span>
+        </div>
       </div>
-    </div>
+    </template>
   </aside>
   <div class="side-toggle" :title="collapseTitle" @click="store.sidebarCollapsed = !store.sidebarCollapsed">
     {{ collapseBtn }}
@@ -178,7 +262,7 @@ function linkTag(note: string): string {
   overflow-x: hidden;
   overflow-y: auto;
   padding: 10px;
-  transition: width 0.1s linear, padding 0.1s linear;
+  transition: width var(--motion-fold) var(--ease-linear), padding var(--motion-fold) var(--ease-linear);
 }
 .sidebar.collapsed {
   width: 0;
@@ -186,7 +270,21 @@ function linkTag(note: string): string {
   border-right: none;
   overflow: hidden;
 }
-.tip { color: var(--ink-sub); font-size: 12px; padding: 12px 8px; }
+/* 空列表：提示在工具条以下的剩余空间里上下左右居中。只在空态把侧栏改成
+   flex 列（有卡时仍是普通块流，卡片高度与滚动不受影响）。 */
+.sidebar:has(> .tip) { display: flex; flex-direction: column; }
+.tip {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 0 28px;
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.7;
+}
 
 .side-toggle {
   flex: none;
@@ -201,7 +299,7 @@ function linkTag(note: string): string {
   color: var(--ink-sub);
   font-size: 13px;
   user-select: none;
-  transition: color 0.15s ease, background 0.15s ease;
+  transition: color var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard);
 }
 .side-toggle:hover { color: var(--accent-deep); background: var(--accent-soft); }
 
@@ -213,21 +311,80 @@ function linkTag(note: string): string {
   border: 1px solid var(--line);
   border-radius: var(--r-ctrl);
   cursor: pointer;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color var(--motion-hover) var(--ease-standard), box-shadow var(--motion-hover) var(--ease-standard);
 }
 .file-item:hover { border-color: #d6ddd9; }
+/* 一键解析的占位卡：清单行已排上、还没有身份。不可点/拖/删，所以不给悬停反馈。 */
+.file-item.pending { cursor: default; }
+.file-item.pending:hover { border-color: var(--line); }
+/* 批量入列：从右侧滑入的错峰淡入（延迟由 rec.enterDelay 内联给出，t² 分配 ——
+   整批先快后慢）。`both` 保证延迟期间不可见，否则卡片会先整块出现、再闪一次。 */
+.file-item.entering { animation: card-in var(--motion-fade) var(--ease-enter) both; }
+@keyframes card-in {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: none; }
+}
 .file-item.active {
   border-color: var(--accent-2);
   background: var(--accent-soft);
   box-shadow: 0 0 0 1px rgba(61, 169, 164, 0.15);
+}
+/* 多选勾中的卡：与 active 同一族青绿，但只描边不换底 —— 两者可能同时出现
+   （正在看的这张也被勾上），不必让它们抢同一块颜色。 */
+.file-item.picked {
+  border-color: var(--accent-3);
+  box-shadow: 0 0 0 1px rgba(61, 169, 164, 0.25);
+}
+/* 收藏组与普通组的分界：一条短横线，不占字。 */
+.fav-divider {
+  height: 1px;
+  margin: 2px 4px 10px;
+  background: var(--line);
+}
+
+/* 多选指示器：缩略图左上角。空心圈 = 未选，实心青绿 + 勾 = 已选。 */
+.file-item .pick {
+  position: absolute;
+  top: 14px; left: 16px;
+  width: 20px; height: 20px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1.5px solid var(--line-strong, #c9d2cd);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.92);
+  pointer-events: none;
+  transition: background var(--motion-hover) var(--ease-standard),
+              border-color var(--motion-hover) var(--ease-standard);
+}
+.file-item .pick.on {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+}
+/* 收藏标：缩略图左上角的小金星底座。点它取消收藏（多选时让位给勾选圈）。 */
+.file-item .fav-chip {
+  position: absolute;
+  top: 14px; left: 16px;
+  width: 20px; height: 20px;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0;
+  border: 1px solid var(--warn-line);
+  border-radius: 5px;
+  background: var(--warn-bg);
+  cursor: pointer;
+  /* 常显：这颗星是「为什么这张卡在上面」的唯一说明，不该等悬停才出现。 */
+  transition: background var(--motion-fade) var(--ease-standard);
+}
+.file-item .fav-chip:hover { background: var(--warn-bg-strong, #f6e3c8); }
+.file-item .fav-chip:focus-visible {
+  outline: 2px solid var(--accent-3);
+  outline-offset: 1px;
 }
 /* 点亮（点清单里的一行 → 同一景的卡）：橘色描边，与「一键解析」那颗按钮同一族令牌。
    **只用 outline**：不占布局、与 .active 的 box-shadow 正交 —— 一张卡可以同时是
    「正在编辑」和「刚被点亮」，两个状态谁也不盖谁。
    `lit-a` / `lit-b` 是两套**逐字相同**的动画，奇偶交替挂，只为让同名动画重放。 */
 .file-item.lit { outline: 2px solid var(--notice-job); outline-offset: 1px; }
-.file-item.lit-a { animation: sr-lit-a 0.5s ease-out; }
-.file-item.lit-b { animation: sr-lit-b 0.5s ease-out; }
+.file-item.lit-a { animation: sr-lit-a var(--motion-emphasis) var(--ease-enter); }
+.file-item.lit-b { animation: sr-lit-b var(--motion-emphasis) var(--ease-enter); }
 @keyframes sr-lit-a {
   from { outline-color: rgba(194, 116, 58, 0.15); outline-offset: 8px; }
   to { outline-color: var(--notice-job); outline-offset: 1px; }
@@ -250,7 +407,7 @@ function linkTag(note: string): string {
   background: rgba(255, 255, 255, 0.9);
   cursor: pointer;
   opacity: 0; pointer-events: none;
-  transition: opacity 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+  transition: opacity var(--motion-fade) var(--ease-standard), border-color var(--motion-fade) var(--ease-standard), background var(--motion-fade) var(--ease-standard);
 }
 .file-item:hover .shot-add,
 .file-item:focus-within .shot-add,
@@ -310,6 +467,8 @@ function linkTag(note: string): string {
 .file-item .status { color: var(--warn); }
 .file-item .status.err { color: var(--err); }
 .file-item .status.ok { color: var(--ok); }
+/* 排队中 / 解析中 / 未开始：还没结果，比 warn 更弱一档，别让满列黄字抢眼。 */
+.file-item .status.muted { color: var(--ink-faint); }
 /* 关联失败：比 status 弱一档（它不是错误，是「这张图不在盘阵上」）——
    完整原因（哪条候选、缺什么）在 title 里。 */
 .file-item .link-tag { color: var(--ink-faint); cursor: help; }

@@ -96,7 +96,7 @@ function openQueue(id: number): void {
   border-right: 1px solid var(--notice-job-line);
   border-bottom: 1px solid var(--notice-job-line);
   box-shadow: var(--shadow-pop);
-  animation: jn-in 0.16s ease-out;
+  animation: jn-in var(--motion-fade) var(--ease-enter);
 }
 
 @keyframes jn-in {

@@ -94,7 +94,7 @@ function resetToday(): void {
   background: var(--surface-2);
   outline: none;
   font-family: inherit;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+  transition: border-color var(--motion-hover) var(--ease-standard), box-shadow var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard);
 }
 .spb-in::placeholder { color: var(--ink-faint); }
 .spb-in:hover { border-color: #d8dfdc; }
@@ -116,7 +116,7 @@ function resetToday(): void {
   font-size: 13px;
   font-weight: 500;
   font-family: inherit;
-  transition: filter 0.15s ease, box-shadow 0.15s ease;
+  transition: filter var(--motion-hover) var(--ease-standard), box-shadow var(--motion-hover) var(--ease-standard);
   box-shadow: 0 2px 6px rgba(45, 164, 162, 0.22);
 }
 .btn:hover { filter: brightness(1.05); }

@@ -69,6 +69,10 @@ export interface ViewerRecSummary {
   /** 这是「一键解析」批量入列的空卡（只有身份、没有像素，第一次点开才取图）。
    *  **只暴露布尔**，不把 `rec.card` 整个拷进来（它驮着整行 + 元数据）。 */
   hasCard: boolean;
+  /** 占位卡：清单行已排上、还没有解析结果（不可点/拖/删）。 */
+  pending: boolean;
+  /** 收藏（置顶且不被批量清理）。 */
+  fav: boolean;
   /** 这张卡正被右侧清单里点中的那一行点亮着（`.lit` 橘色描边）。 */
   lit: boolean;
 }
@@ -168,8 +172,24 @@ export interface ViewerHook {
   litIds: () => number[];
   /** 点亮次数（每次点行 +1）。**看它才知道「又点了一次同一行」也重放了动画**。 */
   litTick: () => number;
-  /** 清空左侧暂存区（等价一键解析开跑前那一下；返回清掉几张）。 */
+  /** 清空左侧暂存区（等价一键解析开跑前那一下；返回清掉几张，收藏的保留）。 */
   clearRecs: () => number;
+  /** 收藏的 rec id（按**显示**顺序：置顶组在前）。 */
+  favIds: () => number[];
+  /** 多选模式开/关（等价点最左边那颗键）。 */
+  selectMode: () => boolean;
+  setSelectMode: (on: boolean) => void;
+  selectedIds: () => number[];
+  toggleSelect: (id: number) => void;
+  /** 等价点「收藏选中卡」那颗键；返回动了几个。 */
+  favoriteSelected: () => number;
+  /** 清理冗余 / 清理全部 / 移除选中（键是工具条上那三颗）；返回动了几张。 */
+  removeRedundant: () => number;
+  removeAll: () => number;
+  removeSelected: () => number;
+  /** 撤回栈顶的说明（空串 = 没有可撤回的）。 */
+  undoLabel: () => string;
+  undo: () => string | null;
   // 图像对比（关闭 / 点选对比 / 分屏对比，2026-09-20）
   /** 当前模式。 */
   cmpMode: () => import('../lib/compare.js').CompareMode;
@@ -261,6 +281,8 @@ function summarize(rec: ViewerRec, litIds: readonly number[] = []): ViewerRecSum
     linkNote: rec.linkNote,
     warmed: !!rec.thumb && rec.warmed === rec.thumb,
     hasCard: !!rec.card,
+    pending: !!rec.pending,
+    fav: !!rec.fav,
     lit: litIds.includes(rec.id),
   };
 }
@@ -359,6 +381,20 @@ export function mountE2EHooks(): ViewerHook {
     litIds: () => [...useViewerStore().litIds],
     litTick: () => useViewerStore().litTick,
     clearRecs: () => useViewerStore().clearRecs(),
+    favIds: () => useViewerStore().recsOrdered.filter((r) => r.fav).map((r) => r.id),
+    selectMode: () => useViewerStore().selectMode,
+    setSelectMode: (on) => {
+      const v = useViewerStore();
+      if (v.selectMode !== on) v.toggleSelectMode();
+    },
+    selectedIds: () => [...useViewerStore().selectedIds],
+    toggleSelect: (id) => useViewerStore().toggleSelected(id),
+    favoriteSelected: () => useViewerStore().toggleFavorite(),
+    removeRedundant: () => useViewerStore().removeRedundant(),
+    removeAll: () => useViewerStore().removeAll(),
+    removeSelected: () => useViewerStore().removeSelected(),
+    undoLabel: () => useViewerStore().undoLabel,
+    undo: () => useViewerStore().undo(),
     cmpMode: () => useViewerStore().compareMode,
     setCmpMode: (m) => useViewerStore().setCompareMode(m),
     cmpStripOpen: () => useViewerStore().cmpStripOpen,

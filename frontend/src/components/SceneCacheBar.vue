@@ -172,7 +172,7 @@ const failedCount = computed(() =>
   background: var(--surface);
 }
 .inline-fade-enter-active,
-.inline-fade-leave-active { transition: opacity 0.1s ease, transform 0.1s ease; }
+.inline-fade-leave-active { transition: opacity var(--motion-fade) var(--ease-standard), transform var(--motion-fade) var(--ease-standard); }
 .inline-fade-enter-from,
 .inline-fade-leave-to { opacity: 0; transform: translateY(-3px); }
 .scb-row {
@@ -252,7 +252,7 @@ const failedCount = computed(() =>
   font-size: 13px;
   font-weight: 500;
   font-family: inherit;
-  transition: filter 0.15s ease, box-shadow 0.15s ease;
+  transition: filter var(--motion-hover) var(--ease-standard), box-shadow var(--motion-hover) var(--ease-standard);
   box-shadow: 0 2px 6px rgba(45, 164, 162, 0.22);
 }
 .btn:hover { filter: brightness(1.05); }

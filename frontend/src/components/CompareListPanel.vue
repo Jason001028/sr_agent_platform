@@ -106,7 +106,7 @@ function isActive(id: number): boolean {
   border-radius: var(--r-ctrl);
   background: var(--surface);
   cursor: pointer;
-  transition: border-color 0.12s ease, background 0.12s ease;
+  transition: border-color var(--motion-fade) var(--ease-standard), background var(--motion-fade) var(--ease-standard);
 }
 .cmp-row:hover { border-color: var(--accent-2); }
 .cmp-row.on { border-color: var(--accent-2); background: var(--accent-soft); }

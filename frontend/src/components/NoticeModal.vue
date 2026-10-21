@@ -45,7 +45,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
   background: rgba(35, 42, 40, 0.28);
   z-index: 100;
 }
-.modal-fade-enter-active { transition: opacity 0.12s ease; }
+.modal-fade-enter-active { transition: opacity var(--motion-fade) var(--ease-standard); }
 .modal-fade-enter-from { opacity: 0; }
 .nm-box {
   display: flex;

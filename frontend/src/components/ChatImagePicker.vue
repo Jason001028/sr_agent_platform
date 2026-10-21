@@ -81,7 +81,7 @@ async function pick(recId: number): Promise<void> {
   display: flex; align-items: center; justify-content: center;
   padding: 24px;
   background: rgba(28, 34, 32, 0.32);
-  animation: pk-fade 0.12s ease-out;
+  animation: pk-fade var(--motion-fade) var(--ease-enter);
 }
 .pk {
   width: min(560px, 100%);
@@ -115,7 +115,7 @@ async function pick(recId: number): Promise<void> {
   padding: 6px; border: 1px solid var(--line); border-radius: var(--r-ctrl);
   background: var(--surface); text-align: left; font-family: inherit;
   cursor: pointer; overflow: hidden;
-  transition: border-color 0.15s ease, background 0.15s ease;
+  transition: border-color var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard);
 }
 .pk-item:hover:not(:disabled) { border-color: var(--accent-2); background: var(--accent-soft); }
 .pk-item:disabled { opacity: .5; cursor: not-allowed; }

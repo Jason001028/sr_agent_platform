@@ -6,12 +6,13 @@
  * - 与 /chat **同一** chat store / 会话 / 后端；完整会话管理只在 /chat（这里不 init、
  *   不建会话列表，首问才自动 apiCreateSession）。角落给「去 Chat 页继续 ↗」。
  * - 每个发送 = agentPayload(question, buildContextNote(snap)) —— question 原样 + CTX_DIVIDER
- *   + 自动上下文快照（scene_id / 原图 W×H / 显示尺寸 / 拉伸 + 选中 ROI 的确定性统计）。
+ *   + 自动上下文快照（图像名 / 原图 W×H / 显示尺寸 / 拉伸 + 选中 ROI 的确定性统计）。
  *   Agent 只解读/建议，数字一律来自 buildStats，不得编造（见 agentContext.ts 纪律）。
- * - 渲染形状与 /chat 一致（SSE 归并出的 ChatMsg）；工具回合折成单行摘要；消息气泡内把
- *   「用户原话」与「自动附上下文」用 CTX_DIVIDER 视觉分开（上下文部分缩小、半透明）。
+ * - 渲染形状与 /chat 一致（SSE 归并出的 ChatMsg）；工具回合折成单行摘要。用户气泡只显示
+ *   原话：CTX_DIVIDER 之后的自动附文默认不进渲染，只有开发者模式在气泡下给一块浅米色
+ *   折叠面板（`<details>`，默认收起）—— 排查「Agent 到底看到了什么」时才展开。
  */
-import { computed, nextTick, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import { useChatStore } from '../stores/chat.js';
 import type { ChatMsg } from '../stores/chat.js';
@@ -25,6 +26,7 @@ import {
   agentPayload, buildContextNote, splitAgentPayload,
 } from '../lib/agentContext.js';
 import type { ViewerContextSnap } from '../lib/agentContext.js';
+import { isDeveloperMode } from '../lib/developerMode.js';
 import { roiOrigGeom } from '../lib/roiStats.js';
 
 const viewer = useViewerStore();
@@ -83,11 +85,22 @@ function shortId(sid: string): string {
 function msgKey(m: ChatMsg, i: number): string {
   return m.seq !== null ? 's' + m.seq : 'x' + i;
 }
-/** 用户消息按 CTX_DIVIDER 切：上面是原话，下面是自动附的只读上下文。 */
-function parts(content: string): { q: string; note: string } {
-  const { question, note } = splitAgentPayload(content);
-  return { q: question, note };
+/** 用户气泡只显示原话：自动附的查看器上下文只发给 Agent，不上屏（与 ChatPage 同口径）。 */
+function userText(content: string): string {
+  return splitAgentPayload(content).question;
 }
+/** 自动附文（CTX_DIVIDER 之后）；历史 /chat 消息没有分隔线 → 空串，不给开发者面板。 */
+function ctxNote(content: string): string {
+  return splitAgentPayload(content).note;
+}
+/** 开发者模式（本机 localStorage，与设置浮层同源）。设置浮层关掉时重读一次：
+ *  在浮层里刚开/关完，回来这块面板要跟着变。 */
+const developerMode = ref(false);
+function readDeveloperMode(): void {
+  developerMode.value = isDeveloperMode();
+}
+onMounted(readDeveloperMode);
+watch(() => viewer.settingsOpen, (open) => { if (!open) readDeveloperMode(); });
 function toolNames(m: ChatMsg): string {
   return (m.toolCalls ?? []).map((t) => t.name).join(', ') || '未知工具';
 }
@@ -140,7 +153,7 @@ watch(() => chat.messages.length, () => void scrollBottom());
 
     <!-- 禁用原因（本地/离线/未开图） -->
     <div v-if="!enabled" class="at-disabled">
-      <p class="at-desc">Agent（LLM 解读 / 建议）仅对盘阵场景开放。</p>
+      <p class="at-desc">Agent服务仅对盘阵生产目录开放。</p>
       <p class="at-reason">{{ reason }}</p>
     </div>
 
@@ -157,10 +170,15 @@ watch(() => chat.messages.length, () => void scrollBottom());
           <template v-if="m.role === 'user'">
             <div class="bubble user" :class="{ 'has-shots': Boolean(m.images?.length) }">
               <ChatBubbleImages v-if="m.images?.length" :images="m.images" />
-              <!-- 原话；有自动附文时在其下缩小显示（无分隔 = 历史 /chat 消息原样） -->
-              <p v-if="parts(m.content).q" class="uq">{{ parts(m.content).q }}</p>
-              <p v-if="parts(m.content).note" class="ctx">{{ parts(m.content).note }}</p>
+              <!-- 原话。自动附的查看器上下文（CTX_DIVIDER 之后）默认不上屏，只在开发者
+                   模式下方折叠块里给；历史 /chat 消息没有分隔线，整条都是原话。 -->
+              <p v-if="userText(m.content)" class="uq">{{ userText(m.content) }}</p>
             </div>
+            <!-- 开发者模式才渲染自动附文：浅米色块，默认收起；普通模式完全不上屏。 -->
+            <details v-if="developerMode && ctxNote(m.content)" class="ctx-dev">
+              <summary>开发者模式 · 查看器附文</summary>
+              <pre class="ctx-body">{{ ctxNote(m.content) }}</pre>
+            </details>
           </template>
 
           <!-- assistant：内容气泡 / 工具声明占位（折单行） / 思考中 -->
@@ -278,12 +296,21 @@ watch(() => chat.messages.length, () => void scrollBottom());
 .bubble.user { background: var(--accent-grad); color: #fff; border-bottom-right-radius: 3px; }
 .uq { margin: 0; }
 .bubble.user.has-shots .uq { margin-top: 5px; }
-.ctx {
-  margin: 5px 0 0; font-size: 10.5px; line-height: 1.55;
-  color: rgba(255, 255, 255, 0.82);
-  border-top: 1px dashed rgba(255, 255, 255, 0.4);
-  padding-top: 5px;
-  white-space: pre-wrap;
+/* 开发者模式附文：浅米色（复用 --warn-bg/--warn-line），默认收起 */
+.ctx-dev {
+  max-width: 94%; margin-top: 4px;
+  background: var(--warn-bg); border: 1px solid var(--warn-line);
+  border-radius: 8px; padding: 4px 8px;
+}
+.ctx-dev > summary {
+  cursor: pointer; user-select: none;
+  font-size: 10.5px; font-weight: 600; color: var(--ink-sub);
+}
+.ctx-dev[open] > summary { margin-bottom: 4px; }
+.ctx-body {
+  margin: 0; white-space: pre-wrap; word-break: break-word;
+  font-family: var(--font-mono); font-size: 10px; line-height: 1.55;
+  color: var(--ink-sub);
 }
 /* assistant 内容由 MarkdownBody 渲染成块级元素，白空格预格式化会让段落间多出空行 */
 .bubble.assistant {
@@ -324,7 +351,7 @@ watch(() => chat.messages.length, () => void scrollBottom());
   padding: 0;
   border: 1px solid var(--line); border-radius: var(--r-ctrl);
   background: var(--surface-2); cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease, opacity 0.15s ease;
+  transition: border-color var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard), opacity var(--motion-hover) var(--ease-standard);
 }
 .at-shot:hover:not(:disabled) { border-color: var(--accent-2); background: var(--accent-soft); }
 .at-shot:disabled { opacity: .5; cursor: not-allowed; }
@@ -335,7 +362,7 @@ watch(() => chat.messages.length, () => void scrollBottom());
   flex: 1; min-width: 0; height: 30px; padding: 0 10px;
   border: 1px solid var(--line); border-radius: var(--r-ctrl);
   background: var(--surface-2); font-size: 12px; font-family: inherit; color: var(--ink);
-  outline: none; transition: border-color 0.15s ease, background 0.15s ease;
+  outline: none; transition: border-color var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard);
 }
 .at-input::placeholder { color: var(--ink-faint); }
 .at-input:focus { border-color: var(--accent-3); background: var(--surface); }
@@ -345,7 +372,7 @@ watch(() => chat.messages.length, () => void scrollBottom());
   border: none; border-radius: var(--r-ctrl);
   background: var(--accent-grad); color: #fff; cursor: pointer; font-size: 12px;
   font-weight: 500; font-family: inherit;
-  transition: filter 0.15s ease;
+  transition: filter var(--motion-hover) var(--ease-standard);
 }
 .cbtn:hover { filter: brightness(1.05); }
 .cbtn:disabled { opacity: .55; cursor: not-allowed; }

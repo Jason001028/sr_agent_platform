@@ -2,7 +2,7 @@
  * agentContext.test.ts — Agent 会话上下文附文纯函数（阶段6，Node 环境）
  * ------------------------------------------------------------------
  * 验证：CTX_DIVIDER 拼接形状（question / divider / 附文）、确定性数字逐项进文、
- * ROI 有/无选中两种注记、buildContextNote 携带 scene_id/W/H/显示尺寸/拉伸。
+ * ROI 有/无选中两种注记、buildContextNote 携带图像名/W/H/显示尺寸/拉伸（不含 scene_id）。
  * 纪律前提：附文数字全部来自确定性来源（buildStats / 几何），不允许 LLM 编造 ——
  * 这里断言的就是「发送内容里确实带上了这些数字」。
  */
@@ -60,7 +60,8 @@ describe('buildContextNote 数字附文', () => {
   it('无选中 ROI → 注记含图像确定性信息 + 未选中提示，无 ROI 行', () => {
     const n = buildContextNote(snap());
     expect(n).toContain('"GF07_A"');
-    expect(n).toContain('scene=s-123');
+    expect(n).not.toContain('scene');            // scene_id 不进附文（长串路径对 Agent 无用）
+    expect(n).not.toContain('s-123');
     expect(n).toContain('原图=1024×768');
     expect(n).toContain('显示=512×384');
     expect(n).toContain('拉伸=2% 线性');
@@ -68,9 +69,10 @@ describe('buildContextNote 数字附文', () => {
     expect(n).not.toContain('ROI#');
   });
 
-  it('无 sceneId（本地）→ 注记如实标本地', () => {
-    const n = buildContextNote(snap({ sceneId: null }));
-    expect(n).toContain('本地(无 sceneId)');
+  it('有无 sceneId 附文同形：只看图像名与尺寸，不分场景/本地', () => {
+    expect(buildContextNote(snap())).toBe(
+      buildContextNote(snap({ sceneId: null })),
+    );
   });
 
   it('有选中 ROI → 附确定性统计行（n/min/max/mean/std/亮像元/过曝）', () => {

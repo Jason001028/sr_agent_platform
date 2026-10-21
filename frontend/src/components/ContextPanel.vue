@@ -88,7 +88,7 @@ const toggleTitle = () => (collapsed.value ? '展开上下文侧舱' : '收起�
   color: var(--ink-sub);
   font-size: 13px;
   user-select: none;
-  transition: color 0.15s ease, background 0.15s ease;
+  transition: color var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard);
 }
 .ctx-toggle:hover {
   color: var(--accent-deep);
@@ -103,7 +103,7 @@ const toggleTitle = () => (collapsed.value ? '展开上下文侧舱' : '收起�
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  transition: width 0.1s linear;
+  transition: width var(--motion-fold) var(--ease-linear);
 }
 .ctx-rail.collapsed {
   width: 0;
@@ -133,7 +133,7 @@ const toggleTitle = () => (collapsed.value ? '展开上下文侧舱' : '收起�
   font-weight: 600;
   font-family: inherit;
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background var(--motion-hover) var(--ease-standard), color var(--motion-hover) var(--ease-standard);
 }
 .ctx-tab:hover { color: var(--accent-deep); }
 .ctx-tab.on {
@@ -155,6 +155,6 @@ const toggleTitle = () => (collapsed.value ? '展开上下文侧舱' : '收起�
 .ctx-pane { position: absolute; inset: 0; }
 /* 只给**进入**的那块做淡入：离场留空反而干净（交叉淡化会让两段内容叠字）。
    没有 leave 规则 = Vue 认为无过渡，切 tab 时旧内容立即隐藏。 */
-.ctx-content-fade-enter-active { transition: opacity 0.1s ease; }
+.ctx-content-fade-enter-active { transition: opacity var(--motion-fold) var(--ease-standard); }
 .ctx-content-fade-enter-from { opacity: 0; }
 </style>
