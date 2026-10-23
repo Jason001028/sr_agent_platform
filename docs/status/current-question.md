@@ -323,6 +323,66 @@ Ctrl+Z 撤回收藏 / 清理全部只留收藏 / clearRecs 保留收藏 / 取消
 [gui-experience §14](../experience/gui-experience.md)。**真机（内网 Qwen 端点）的
 流式观感与 `SR_LLM_STREAM=0` 退路仍待验收。**
 
+**2026-10-23（右侧 Agent 面板补会话操作）**：`AgentChatTab.vue` 头部去掉「会话 xxxxxxxx」
+（对操作没有帮助，当前会话在历史列表里高亮即可辨认），换成**三个 16px 图标键**
+（`circle-plus` / `clock` / `circle-x`，素材在 `frontend/icon/`，已复制到 `public/icon/` 随
+构建发布）：
+
+- **新建**（circle-plus）—— 直接 `chat.newSession()`，原会话保留在历史里；
+- **历史**（clock）—— 下拉菜单列出全部会话（置顶标、更新时间；当前会话高亮），点一行即
+  `chat.selectSession()` 切换；
+- **删除当前**（circle-x）—— `window.confirm` 二次确认，文案与 /chat 行内删除同一口径
+  （消息/用量/轨迹一并删除）；删完按 store 规则切到列表第一条，空了就新建。
+
+发送中三个键全禁用（与 /chat 一致）。与 /chat 共用同一个 chat store，两边的当前会话、
+列表、删除结果实时一致。仍然**不 init**：进查看器不自动挑会话、首问才 `apiCreateSession`；
+历史列表只在**打开菜单时** `refreshSessions()`（查看器不为一块常驻面板每次进页多打一趟
+`/api/chat/sessions`）。没有当前会话时历史照常可切，删除键置灰。三个键只在 Agent 可用
+（当前图有 `sceneId`）时出现 —— 本地 / 离线图上面建会话没有落点。`ChatPage` 未改动。
+
+验证：`vue-tsc --noEmit` 零错误、前端 **482 passed**、`npm run build` 通过、`check:terms` 通过；
+另用假后端（本地 http + `window.__SR_CFG__` 注入）跑了一轮临时探针：头部不再出现会话 id、
+历史菜单两行（置顶在前、当前高亮）、切会话后消息区换成该会话历史、新建后消息区清空并在
+菜单里高亮、删除当前会话发出 DELETE 并自动切到列表第一条。
+
+**2026-10-23（查看器底部状态栏极简化）**：`StatusBar.vue` 由原来那条罗列文件名 /
+W×H / probe（bits/spp/sf/ph/comp）/ 路由 / 预览尺寸 / layout 的元信息条，改成 **26px 单行三段**：
+左＝操作状态，中＝缩放比例，右＝光标像素坐标。被删的字段在左侧卡片与右侧侧舱各有出处，
+这条只回答「图现在怎么样、我看到的是哪一像素」。口径：
+
+- **缩放 100% = 原图 1 像素对屏幕 1 像素**。`view.scale` 是「屏幕 / 预览图像素」，
+  状态栏乘 `预览宽 ÷ 原图宽` 换算回原图基准；不足 10% 保留一位小数（fit 到全景时不会显示 0%）。
+- **像素坐标是原图全分辨率**，与工具栏定位、掩码文件同一套；指针不在这张图上（画布留白 /
+  分屏的另一侧 / 移出窗口）显示「—」。坐标由 `TifCanvas` 的 window mousemove 写进 store 新的
+  `cursor`/`setCursor`（同像素不重复赋值），切图 / 切活动侧 / 进出分屏、鼠标离开画布、卸载时清空。
+- 左段优先级：遮罩标题（取图 / 解码 / 合并 / 写掩码，带进度）＞ 绘制态（工具名，多边形附已点数）＞
+  rec 自身状态（`statusCls === 'ok'` 收敛成「已就绪」，完整耗时留在 `title` 里）。
+- 有空卡（排队 / 待打开，无像素）时照常显示，缩放与像素为「—」；**只有列表里一张活动图都没有时才整条不渲染**。
+- 分屏时状态段前加 `[左]/[右]`；缩放与像素**只报活动侧**，指针挪到另一格不改口径
+  （先点那半切活动侧）。
+
+e2e 同步：`check-frontend-build.js` 原来等 `.rec-bar` 出现 `256×128`，改为等「已就绪」；
+顺带修了它早已失效的「四个导航项」断言（现为五个，改成按**字号**断言，个数只要求 ≥4）。
+`.e2e/vue-lib.js` 的 `launchBrowser` 改为委托 `launchBrowser.js`（Chrome 优先 + 独立 profile）：
+原先写死 Edge 路径，本机复现 `Code: 0` 起不来，`qa-theme` / `shot-theme` 整条空转。
+本轮前端 **482 passed** + `vue-tsc --noEmit` 零错误 + `npm run build` 通过 + `check:terms` 通过；
+浏览器回归 `test-vue-viewer` **190 项全绿**、`check-frontend-build` **全绿**。
+`qa-theme` 已能启动，但整套主题断言还停在旧配色（藏青导航、白色工具栏等），**20/29 通过**；
+其中「状态栏白底」现在拿到 `null`，是因为它不传图、按新口径整条不渲染 —— 属于预期，不是回归。
+
+**2026-10-23（查看器移除「盘阵场景」栏）**：`ViewerPage` 去掉横贯整页的 `ScenePathBar`，
+打开盘阵场景统一走「场景库」页，或把本地 tif/jpg 拖进画布按文件名反推关联。只服务于这条栏的
+`viewer.openScenePath` 与 `window.__viewer.openScenePath` 钩子一并删除；`Toolbar` 与 viewer
+store 里「用上面的『盘阵场景』栏打开」「请在『盘阵场景』栏粘贴…」等文案改指「场景库」。
+顺带补了路径栏的一处忙态缺口：`scenes.resolvePath` 现在一进门就占 `openingId` 哨兵
+（`'__pathbar__'`），resolve 往返期间按钮即禁用 —— 原来要等 `open(row)` 才置位，连点会发
+两趟请求，`test-scenes` 的路径栏收尾判据也会把「刚点下去」误读成「已收尾」。
+前端 **482 passed** + `vue-tsc --noEmit` 零错误 + `npm run build` 通过 + `check:terms` 通过
+（107 个文件）；浏览器回归 `test-vue-viewer` **190**、`test-scenes` **132** 全绿。
+`test-manual-scene` 仍卡在既有的 1366 工具栏溢出（`scrollW=1399`，溢出控件 `set-btn`）；
+临时跳过那两条后跑到 M 段，止于橙描边颜色的既有 0.992 时序抖动（重跑会换到另一条时序失败，
+与本轮改动无关）。
+
 ## 7. 去哪查什么
 
 | 查什么 | 去哪 |

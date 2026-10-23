@@ -59,7 +59,7 @@
 |---|---|
 | `pages/` | `ViewerPage` 查看器、`ScenesPage` 场景库、`QueuePage` 共享队列、`ChatPage` Agent 对话 |
 | `stores/` | `viewer`（查看器总调度）、`scenes`、`queue`、`chat` |
-| `components/` | `TifCanvas`、`Toolbar`、`DrawPanel`、`FileList`、`StatusBar`、`ContextPanel`（上下文侧舱）、`ScenePathBar`（盘阵场景栏，两个入口共用） |
+| `components/` | `TifCanvas`、`Toolbar`、`DrawPanel`、`FileList`、`StatusBar`、`ContextPanel`（上下文侧舱）、`ScenePathBar`（场景库页的盘阵路径栏） |
 | `lib/` | `tifDecode`、`decode`、`source`、`maskgen`、`scene`、`viewMath`、`roiStats`、`agentContext`、`api` |
 | `vendor/` | 第三方库，本地内置 |
 

@@ -14,7 +14,7 @@ import { ref, onMounted, onBeforeUnmount, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import type { Pane } from '../stores/viewer';
 import { useQcListStore } from '../stores/qclist';
-import { mouseToThumb, thumbToScreen, paneAtX } from '../lib/viewMath';
+import { mouseToThumb, thumbToScreen, thumbToOrig, paneAtX } from '../lib/viewMath';
 import { dropSideAt } from '../lib/compare';
 import type { Pt } from '../lib/maskgen';
 
@@ -357,6 +357,26 @@ function mousePos(e: MouseEvent): Pt {
     { left: rect.left, top: rect.top });
 }
 
+/** 指针 → 原图全分辨率像素坐标（底部状态栏右段）。
+ *
+ *  不在活动格里（分屏时落在另一侧）、或落在画布留白上（缩略图之外）→ null。
+ *  分屏时**刻意不跟随指针所在格**：状态栏报的是活动侧那张图，坐标若偷偷换成另一侧，
+ *  同一行里的缩放与像素就指了两张图。指针挪过去时先点一下那半（onMouseDown 会切）即可。 */
+function cursorAt(e: MouseEvent): Pt | null {
+  const rec = store.activeRec;
+  const vc = viewCanvasRef.value;
+  if (!rec || !rec.thumb || !rec.W || !vc) return null;
+  const r = vc.getBoundingClientRect();
+  const pane = store.activePaneRect();
+  const x = e.clientX - r.left, y = e.clientY - r.top;
+  if (x < pane.x || x >= pane.x + pane.w || y < pane.y || y >= pane.y + pane.h) return null;
+  const t = mouseToThumb(store.view, e.clientX - pane.x, e.clientY - pane.y,
+    { left: r.left, top: r.top });
+  const tw = rec.thumb.width, th = rec.thumb.height;
+  if (t[0] < 0 || t[1] < 0 || t[0] > tw || t[1] > th) return null;
+  return thumbToOrig(t[0], t[1], rec.W, rec.H, tw, th);
+}
+
 function onWheel(e: WheelEvent) {
   const vc = viewCanvasRef.value;
   // 分屏下只要**任一侧**有图就该响应：活动侧恰好空着时也还能缩放另一侧。
@@ -388,6 +408,8 @@ function onMouseDown(e: MouseEvent) {
 }
 
 function onWindowMouseMove(e: MouseEvent) {
+  // 状态栏坐标与「在不在绘制」无关：平移、看像素、画框都要它
+  store.setCursor(cursorAt(e));
   if (store.drawMode) { store.onCanvasMove(mousePos(e)); return; }
   if (!dragging.value) return;
   store.onPan(e.clientX - lastX, e.clientY - lastY);
@@ -499,6 +521,10 @@ watch(
   () => render(),
 );
 
+// 切图 / 切活动侧 / 进出分屏：上一条图的像素坐标不能留在新图上（鼠标恰好没动时
+// 不会有 mousemove 来覆盖它，状态栏就会报一个不属于这张图的点）。
+watch(() => [store.activeId, store.activeSide, store.split], () => store.setCursor(null));
+
 onMounted(() => {
   applyResize();
   // 画布「挂着」才说明 view/canvasSize 是这一页的真实视口；换页后 store 里
@@ -520,6 +546,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   store.setCanvasAttached(false);
+  store.setCursor(null);
   if (resizeObs) resizeObs.disconnect();
   if (resizeTimer !== null) { clearTimeout(resizeTimer); resizeTimer = null; }
   window.removeEventListener('transitionend', onLayoutTransitionEnd, true);
@@ -539,6 +566,7 @@ onBeforeUnmount(() => {
     class="stage"
     @dblclick="onDblClick"
     @contextmenu="onContextMenu"
+    @mouseleave="store.setCursor(null)"
   >
     <canvas
       ref="viewCanvasRef"

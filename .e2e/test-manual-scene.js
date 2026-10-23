@@ -969,7 +969,7 @@ async function main() {
       });
       assert(modal.body.includes(MISSING) && modal.body.includes('目录不存在'),
         `弹窗给出后端的原因与候选（${modal.body.slice(0, 56)}…）`);
-      assert(modal.hint.includes('盘阵场景'),
+      assert(modal.hint.includes('场景库'),
         `弹窗给出下一步怎么办（${modal.hint.slice(0, 30)}…）`);
       // 关联失败后状态栏不能卡在「正在关联盘阵目录…」—— jpg 这条路后面没有解码
       // 会去覆盖它（tif 那条有），得由关联自己把文案放回去。
@@ -1099,7 +1099,13 @@ async function main() {
 
       /* ---------- F. PAN.tif（RC）场景的掩码命名 ---------- */
       console.log('\n[F] PAN.tif 场景：掩码名取输入名 stem，不取目录名');
+      // 查看器不再有路径栏（2026-10-23 移除）：按产品路径回「场景库」用路径栏打开，
+      // 再页内跳回查看器 —— 与真实用户的操作一致，也顺带钉住 store 跨页保留。
+      await clickLink(page, '场景库');
+      await waitFor(page, () => location.pathname.endsWith('/scenes'), 15000, '回 /scenes');
       await openPathBar(page, winPath(PAN_DIR));
+      await clickLink(page, '查看器');
+      await waitFor(page, () => location.pathname.endsWith('/viewer'), 15000, '回 /viewer');
       // 期望值必须当实参传进页面：page.evaluate 的函数体在页面里跑，够不到 Node 变量
       await waitFor(page, (want) => {
         const r = window.__viewer.activeRec();

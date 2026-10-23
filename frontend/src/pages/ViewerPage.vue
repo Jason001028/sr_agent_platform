@@ -7,6 +7,10 @@
  * 浮动面板（DrawPanel）与遮罩/toast/error（DecodeOverlay）。
  * 布局行 = [FileList(sidebar+side-toggle)] [TifCanvas stage] [ContextPanel(ctx-toggle+rail)]，
  * 右侧 rail 镜像左栏收起布局，默认收起且宽度持久化在 ContextPanel 内（见其组件注释）。
+ *
+ * 盘阵条目打开入口**不在本页**：统一走「场景库」页，或把本地 tif/jpg 拖进画布按
+ * 文件名反推关联（见 stores/viewer.tryLinkScenes）。此前工具栏下方那条横贯整页的
+ * 「盘阵场景」路径栏已移除（使用频率低、视觉冗余）。
  */
 import { onMounted, onUnmounted } from 'vue';
 import { mountE2EHooks } from '../viewer/e2eHooks';
@@ -21,17 +25,9 @@ import ContextPanel from '../components/ContextPanel.vue';
 import NoticeModal from '../components/NoticeModal.vue';
 import SettingsPanel from '../components/SettingsPanel.vue';
 import StatusBar from '../components/StatusBar.vue';
-import ScenePathBar from '../components/ScenePathBar.vue';
 import { useViewerStore } from '../stores/viewer.js';
 
 const viewer = useViewerStore();
-
-/** 手工打开盘阵场景目录（不扫盘：只把用户填的这个目录交给后端 stat 一次）。
- *  错误写进查看器的错误条（DecodeOverlay 那条）—— ScenesPage 写的是
- *  scenes.error，两处入口各自的错误面不同。 */
-function openPastedPath(path: string): void {
-  void viewer.openScenePath(path);
-}
 
 onMounted(() => {
   mountE2EHooks();      // window.__viewer（浏览器回归 + 真机验收）
@@ -49,7 +45,6 @@ onUnmounted(() => viewer.hideModal());
          代价记在 CompareBar 的文件头：多一行会改变舞台高度，而既有语义是尺寸一变就
          重新适配，所以展开/收起它会重置当前缩放。 -->
     <CompareBar />
-    <ScenePathBar class="vp-pathbar" :busy="viewer.busy" @open="openPastedPath" />
     <div class="viewer-body">
       <FileList />
       <TifCanvas>
@@ -74,13 +69,6 @@ onUnmounted(() => viewer.hideModal());
   height: 100%;
   background: var(--chrome);
   overflow: hidden;
-}
-
-/* 盘阵场景栏：深色工具栏与画布之间的一条白色工作带（不参与 .viewer-body 的
-   flex 计算，画布高度按剩余空间自适应） */
-.vp-pathbar {
-  flex: none;
-  margin: 8px 12px 0;
 }
 
 .viewer-body {

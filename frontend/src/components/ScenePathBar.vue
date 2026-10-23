@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * ScenePathBar.vue — 手工打开盘阵场景目录 / 单个 TIF（场景库页 / 查看器工具栏共用）
+ * ScenePathBar.vue — 手工打开盘阵场景目录 / 单个 TIF（仅场景库页使用）
  * ------------------------------------------------------------------
  * 输入框预填**当天日期前缀**（`W:\GSHC2IMPS\PRODUCT\<年>\<月>\<日>`）—— 注意它
  * 只是前缀，还得往下补**三层**到景级目录（真机六层树：
@@ -12,8 +12,8 @@
  * 两条纪律：
  *  1. **不扫盘**。组件只把用户填的这一个路径往外抛，由调用方交给后端
  *     POST /api/scenes/resolve stat 一次；铺「当天目录列表」是明确不做的。
- *  2. 错误由**调用方**决定展示位置（ScenesPage 只渲染 scenes.error，查看器的
- *     错误条挂在 /viewer），所以这里只 emit('open', path)，不自己弹提示。
+ *  2. 错误由**调用方**决定展示位置（ScenesPage 渲染 scenes.error），所以这里只
+ *     emit('open', path)，不自己弹提示。
  */
 import { ref } from 'vue';
 import { todayScenePrefix } from '../lib/scene.js';

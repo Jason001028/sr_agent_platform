@@ -180,7 +180,7 @@ async function main() {
       'thumbToOrig', 'getRois', 'genMask', 'wandSelect', 'maskGen', 'setSparseMin',
       'setDrawTool', 'commitRect', 'undoRoi', 'clearRois', 'mergeRois', 'delClick',
       'openSceneJpg', 'openLocalImage', 'submitSr',
-      'openScenePath', 'tryLinkScenes', 'bakeMaskToServer', 'modal', 'hideModal',
+      'tryLinkScenes', 'bakeMaskToServer', 'modal', 'hideModal',
       'recs', 'activeRec', 'activeStretch', 'setStretch', 'previewDiv', 'setPreviewDiv',
       'qcImport', 'qcClose', 'qcSetStatus', 'qcOutput', 'qcSetTarget', 'qcSync',
       'qcState', 'qcOpenByName',

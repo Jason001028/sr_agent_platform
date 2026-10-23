@@ -103,8 +103,7 @@ export interface ViewerHook {
   // 本地 .jpg/.jpeg 打开（route='img'，浏览器回归用小 JPG fixture 走同一像素管线）
   openLocalImage: (file: File) => Promise<void>;
   submitSr: () => void;
-  // 盘阵任意场景目录（手工路径）：打开 / 本地文件反推关联 / 掩码写进服务端
-  openScenePath: (path: string) => Promise<boolean>;
+  // 本地文件反推关联 / 掩码写进服务端（打开盘阵场景走「场景库」页，无对应钩子）
   /** 反推关联当前图；**返回是否命中并已升级成盘阵 JPG**（命中即不做本地解码）。 */
   tryLinkScenes: () => Promise<boolean>;
   bakeMaskToServer: () => Promise<boolean>;
@@ -314,7 +313,6 @@ export function mountE2EHooks(): ViewerHook {
     openSceneJpg: (meta, blob) => useViewerStore().openSceneJpg(meta, blob),
     openLocalImage: (file) => useViewerStore().openLocalImage(file),
     submitSr: () => useViewerStore().submitSr(),
-    openScenePath: (p) => useViewerStore().openScenePath(p),
     tryLinkScenes: () => useViewerStore().tryLinkScenes(),
     bakeMaskToServer: () => useViewerStore().bakeMaskToServer(),
     modal: () => useViewerStore().modal,

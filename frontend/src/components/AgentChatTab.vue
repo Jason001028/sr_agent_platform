@@ -3,8 +3,12 @@
  * AgentChatTab.vue — 上下文侧舱 [Agent] tab（阶段6 L2）
  * ------------------------------------------------------------------
  * - 仅盘阵场景可用（activeRec.sceneId 非空）；本地/离线 TIF 或未开图 → 禁用并给出原因。
- * - 与 /chat **同一** chat store / 会话 / 后端；完整会话管理只在 /chat（这里不 init、
- *   不建会话列表，首问才自动 apiCreateSession）。角落给「去 Chat 页继续 ↗」。
+ * - 与 /chat **同一** chat store / 会话 / 后端。这里**不 init**（进查看器不自动挑会话，
+ *   首问才 apiCreateSession），但头部给了会话三件事（三个 16px 图标键，2026-10-23）：
+ *   新建（circle-plus）/ 历史（clock，点开切换）/ 删除当前（circle-x）。历史列表
+ *   **打开菜单时才拉**（`refreshSessions`），不用会话管理就一个请求都不多发。
+ *   原先头部左侧那串「会话 xxxxxxxx」已去掉 —— 它对操作没有帮助，当前会话在历史列表里
+ *   高亮即已说明。角落保留「去 Chat 页继续 ↗」。
  * - 每个发送 = agentPayload(question, buildContextNote(snap)) —— question 原样 + CTX_DIVIDER
  *   + 自动上下文快照（图像名 / 原图 W×H / 显示尺寸 / 拉伸 + 选中 ROI 的确定性统计）。
  *   Agent 只解读/建议，数字一律来自 buildStats，不得编造（见 agentContext.ts 纪律）。
@@ -12,7 +16,7 @@
  *   原话：CTX_DIVIDER 之后的自动附文默认不进渲染，只有开发者模式在气泡下给一块浅米色
  *   折叠面板（`<details>`，默认收起）—— 排查「Agent 到底看到了什么」时才展开。
  */
-import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import { useChatStore } from '../stores/chat.js';
 import type { ChatMsg } from '../stores/chat.js';
@@ -83,6 +87,66 @@ const STRETCH_LABEL: Record<string, string> = {
 function shortId(sid: string): string {
   return sid.length > 10 ? sid.slice(0, 8) + '…' : sid;
 }
+function fmtTime(ts: number): string {
+  const d = new Date(ts * 1000);
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/* ---------------- 会话：新建 / 切换历史 / 删除当前 ----------------
+ * 与 /chat 是同一个 store，两边看到同一份会话与同一条当前会话。
+ * 历史列表**按需拉**（打开菜单那一刻 refreshSessions）：查看器不该因为右侧挂着一块
+ * Agent 面板就每次进页多打一趟 /api/chat/sessions；不用会话管理就一个请求都不发。 */
+const menuOpen = ref(false);
+const sessLoading = ref(false);
+// 菜单开着时换成了一张本地图（Agent 不可用）→ 收掉，别留一个悬空的下拉
+watch(enabled, (ok) => { if (!ok) menuOpen.value = false; });
+
+async function openMenu(): Promise<void> {
+  menuOpen.value = true;
+  sessLoading.value = true;
+  try {
+    await chat.refreshSessions();
+  } catch {
+    // 列表取不到不影响当前会话；发送/加载链路的错误照常显示在顶部
+  } finally {
+    sessLoading.value = false;
+  }
+}
+
+function toggleMenu(): void {
+  if (menuOpen.value) menuOpen.value = false;
+  else void openMenu();
+}
+
+async function startNew(): Promise<void> {
+  if (chat.sending || creating.value) return;
+  menuOpen.value = false;
+  await chat.newSession();
+}
+
+async function switchTo(sid: string): Promise<void> {
+  menuOpen.value = false;
+  if (chat.sending || sid === chat.sessionId) return;
+  await chat.selectSession(sid);
+}
+
+/** 删除**当前**会话；确认文案与 /chat 行内删除同一口径（消息/用量/轨迹一并删）。 */
+async function removeCurrent(): Promise<void> {
+  const sid = chat.sessionId;
+  if (!sid || chat.sending) return;
+  const ok = window.confirm(
+    `删除会话 ${shortId(sid)}？\n消息、用量和轨迹记录会一并删除，且不可恢复。`);
+  if (!ok) return;
+  menuOpen.value = false;
+  await chat.deleteSession(sid);
+}
+
+function onMenuKey(e: KeyboardEvent): void {
+  if (e.key === 'Escape' && menuOpen.value) menuOpen.value = false;
+}
+onMounted(() => window.addEventListener('keydown', onMenuKey));
+onBeforeUnmount(() => window.removeEventListener('keydown', onMenuKey));
 function msgKey(m: ChatMsg, i: number): string {
   return m.seq !== null ? 's' + m.seq : 'x' + i;
 }
@@ -159,14 +223,59 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
 
 <template>
   <div class="at">
-    <!-- 头部：当前会话 + 去 Chat 页 -->
+    <!-- 头部：会话操作 + 去 Chat 页。不再显示「会话 xxxxxxxx」：当前会话在
+         历史菜单里高亮，那串 id 对操作没有帮助。 -->
     <div class="at-head">
-      <span v-if="chat.sessionId" class="at-sess" :title="chat.sessionId">
-        会话 {{ shortId(chat.sessionId) }}
-      </span>
-      <span v-else class="at-sess empty">未开始会话</span>
+      <!-- Agent 不可用时（本地/离线图、未开图）不摆会话按钮：新会话、切/删会话在这里
+           都没有落点，留着只会点出一个空会话。历史管理回 /chat 做。 -->
+      <div v-if="enabled" class="at-sess-tools">
+        <button type="button" class="at-hbtn" data-e2e="agent-new"
+                :disabled="chat.sending || creating"
+                title="新建会话（当前会话保留在历史里）" aria-label="新建会话"
+                @click="startNew">
+          <AppIcon name="circle-plus" :size="16" />
+        </button>
+        <button type="button" class="at-hbtn" :class="{ on: menuOpen }"
+                data-e2e="agent-history" :disabled="chat.sending"
+                title="历史会话：点开切换" aria-label="历史会话"
+                @click="toggleMenu">
+          <AppIcon name="clock" :size="16" />
+        </button>
+        <button type="button" class="at-hbtn danger" data-e2e="agent-del"
+                :disabled="!chat.sessionId || chat.sending"
+                :title="chat.sessionId
+                  ? '删除当前会话（消息、用量和轨迹一并删除）'
+                  : '当前没有会话'"
+                aria-label="删除当前会话"
+                @click="removeCurrent">
+          <AppIcon name="circle-x" :size="16" />
+        </button>
+      </div>
       <router-link class="at-go" to="/chat">去 Chat 页继续 ↗</router-link>
     </div>
+
+    <!-- 会话菜单（下拉）+ 点外部关闭的透明捕手 -->
+    <template v-if="menuOpen && enabled">
+      <div class="at-menu-catch" @click="menuOpen = false"></div>
+      <div class="at-menu" role="menu" aria-label="历史会话">
+        <div class="at-menu-cap">历史会话</div>
+        <p v-if="sessLoading && !chat.sessions.length" class="at-menu-empty">载入中…</p>
+        <p v-else-if="!chat.sessions.length" class="at-menu-empty">暂无历史会话。</p>
+        <ul v-else class="at-sess-list">
+          <li v-for="s in chat.sessions" :key="s.session_id">
+            <button type="button" class="at-sess-item"
+                    :class="{ cur: s.session_id === chat.sessionId }"
+                    :title="'更新时间 ' + new Date(s.updated_at * 1000).toLocaleString()"
+                    @click="switchTo(s.session_id)">
+              <span class="at-sess-id">
+                <span v-if="s.pinned" class="at-pin">置顶</span>{{ shortId(s.session_id) }}
+              </span>
+              <span class="at-sess-time">{{ fmtTime(s.updated_at) }}</span>
+            </button>
+          </li>
+        </ul>
+      </div>
+    </template>
 
     <p v-if="chat.error" class="at-err">{{ chat.error }}</p>
 
@@ -263,26 +372,112 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
 
 <style scoped>
 .at {
+  position: relative;          /* 会话菜单的定位基准 */
   height: 100%;
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
   background: var(--surface);
 }
+/* 固定 30px：菜单的 `top` 按这个数落位（头部高度不随内容变） */
 .at-head {
   flex: none;
+  height: 30px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  padding: 7px 10px 6px;
+  padding: 0 8px;
   border-bottom: 1px solid var(--line);
   background: var(--surface);
 }
-.at-sess { font-size: 11px; color: var(--ink-sub); font-family: var(--font-mono); }
-.at-sess.empty { color: var(--ink-faint); }
+.at-sess-tools { display: flex; align-items: center; gap: 2px; }
+/* 三个图标键（新会话 / 历史 / 删除当前）：24px 方形，图标本体 16px。
+   图标是 `<img>` 里的 currentColor 单色 SVG，改不了颜色 —— 状态靠底色与描边表达。 */
+.at-hbtn {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-ctrl);
+  background: transparent;
+  cursor: pointer;
+  transition: border-color var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard), opacity var(--motion-hover) var(--ease-standard);
+}
+.at-hbtn:hover:not(:disabled) { border-color: var(--accent-2); background: var(--accent-soft); }
+.at-hbtn.on { border-color: var(--accent-2); background: var(--accent-soft); }
+.at-hbtn.danger:hover:not(:disabled) { border-color: var(--err-line); background: var(--err-bg); }
+.at-hbtn:disabled { opacity: .35; cursor: not-allowed; }
 .at-go { font-size: 11px; color: var(--accent-ink); text-decoration: none; font-weight: 500; }
 .at-go:hover { text-decoration: underline; }
+
+/* 透明捕手：点菜单之外的任何地方即关（与设置浮层同一手法） */
+.at-menu-catch { position: fixed; inset: 0; z-index: 40; }
+.at-menu {
+  position: absolute;
+  z-index: 41;
+  left: 8px;
+  top: 30px;
+  width: 238px;
+  max-height: calc(100% - 38px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctrl);
+  box-shadow: 0 6px 18px rgba(20, 30, 26, 0.14);
+}
+.at-menu-cap {
+  flex: none;
+  padding: 7px 10px 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--ink-faint);
+}
+.at-menu-empty { margin: 0; padding: 2px 10px 9px; font-size: 11px; color: var(--ink-faint); }
+.at-sess-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  list-style: none;
+  margin: 0;
+  padding: 0 4px 4px;
+}
+.at-sess-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 6px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--ink-sub);
+  font-size: 11.5px;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--motion-hover) var(--ease-standard), color var(--motion-hover) var(--ease-standard);
+}
+.at-sess-item:hover { background: var(--surface-2); }
+.at-sess-item.cur { background: var(--accent-soft); color: var(--accent-ink); font-weight: 600; }
+.at-sess-id { font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.at-pin {
+  margin-right: 4px;
+  padding: 0 4px;
+  border-radius: var(--r-pill);
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-family: inherit;
+  font-size: 9.5px;
+  font-weight: 600;
+}
+.at-sess-time { flex: none; font-size: 10.5px; color: var(--ink-faint); }
 
 .at-err {
   flex: none; margin: 0; padding: 6px 10px; font-size: 11px; color: var(--err);

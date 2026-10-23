@@ -1,13 +1,9 @@
-// vue-lib.js — 共享测试基建：无头 Edge + 临时 profile + 本地静态服务（顶替 nginx）
+// vue-lib.js — 共享测试基建：无头浏览器（见 launchBrowser.js）+ 本地静态服务（顶替 nginx）
 // + SPA fallback。每个测试自建服务器（多端口不冲突）；场景 http 测试另起 uvicorn。
 'use strict';
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const http = require('http');
-const puppeteer = require('puppeteer-core');
-
-const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -20,16 +16,13 @@ const MIME = {
   '.map': 'application/json',
 };
 
-async function launchBrowser() {
-  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'srv-e2e-'));
-  const browser = await puppeteer.launch({
-    executablePath: EDGE,
-    headless: 'new',
-    args: ['--no-sandbox', '--disable-gpu',
-      '--allow-file-access-from-files', '--disable-dev-shm-usage'],
-    userDataDir,
-  });
-  return browser;
+/** 统一走 launchBrowser.js：Chrome 优先、Edge 兜底 + 每次独立临时 profile。
+ *
+ *  这里原先自己写死 Edge 路径直接 launch，2026-10-23 本机复现了
+ *  `Failed to launch the browser process: Code: 0`（与已开着的 Edge 实例握手失败，
+ *  见 launchBrowser.js 顶部注释），qa-theme / shot-theme 因此整条跑不起来。 */
+async function launchBrowser(opts = {}) {
+  return require('./launchBrowser.js').launchBrowser(opts);
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -87,4 +80,4 @@ async function waitFor(page, fn, timeoutMs = 30000, step = 120) {
   }
 }
 
-module.exports = { EDGE, launchBrowser, startStaticServer, sleep, waitFor, MIME };
+module.exports = { launchBrowser, startStaticServer, sleep, waitFor, MIME };

@@ -111,8 +111,10 @@ async function main() {
         .map((a) => getComputedStyle(a).fontSize),
     }));
     assert(font.brand === '18px', `平台名字号=${font.brand}`);
-    assert(font.nav.length === 4 && font.nav.every((s) => s === '14px'),
-      `四个导航项仍是 14px（${font.nav.join('/')}）`);
+    // 导航项个数会随功能增删（「插件管理」、扩展注册的入口），那条约定管的是**字号**：
+    // 名字 18px、导航一律 14px。钉死 4 个会让这个 Phase 2 脚本在加一个页签后整体空跑。
+    assert(font.nav.length >= 4 && font.nav.every((s) => s === '14px'),
+      `导航项仍是 14px（${font.nav.join('/')}）`);
 
     assert(externalRequests.length === 0, `无外部网络请求 (external=${JSON.stringify(externalRequests)})`);
 
@@ -131,9 +133,10 @@ async function main() {
     assert(!!input, '文件 input 存在');
     await input.uploadFile(FIXTURE);
     await page.waitForSelector('canvas.tif-canvas[width]', { timeout: 20000 });
+    // 状态栏从 2026-10-23 起只报状态/缩放/像素，不再列尺寸 —— 用「已就绪」作解码完成的信号
     await page.waitForFunction(() => {
       const el = document.querySelector('.rec-bar');
-      return el && el.textContent.includes('256×128');
+      return el && el.textContent.includes('已就绪');
     }, { timeout: 20000 });
     const stats1 = await page.evaluate(() => {
       const c = document.querySelector('canvas.tif-canvas');

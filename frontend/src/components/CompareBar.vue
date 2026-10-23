@@ -102,7 +102,7 @@ function pick(kind: 'input' | 'product' | 'nosr') {
 </template>
 
 <style scoped>
-/* 浅色条：深色工具栏与画布之间（与 .vp-pathbar 同一族群，但更薄、铺满整宽）。
+/* 浅色条：深色工具栏与画布之间（白面浮层卡，铺满整宽）。
    高度由内容决定，不设固定值 —— 分屏时才出现的图例与「回正」不该把这条撑得忽高忽低。 */
 .cmp-bar {
   flex: none;

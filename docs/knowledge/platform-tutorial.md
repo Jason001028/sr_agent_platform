@@ -266,7 +266,7 @@ else if 无压缩 + 条带 + 单波段 + 大影像 → 稀疏条带预览（仅�
 | `components/FileList.vue` | 已打开文件列表 + 每文件的布局探测 / JPG 状态 / 移除 |
 | `components/DrawPanel.vue` | 掩码工具（矩形 / 多边形 / 魔棒 / 删除 / 容差）+ 合并重叠 + 撤销清空 + 导出 |
 | `components/DecodeOverlay.vue` | 解码遮罩 + 进度条 |
-| `components/StatusBar.vue` | 状态栏（当前图 W/H、拉伸、坐标等） |
+| `components/StatusBar.vue` | 底部状态栏：操作状态 / 原图基准缩放 / 光标原图像素坐标（单行 26px，无活动图时不渲染） |
 | `stores/viewer.ts` | **总调度**：文件列表、当前激活图、视图变换、解码、拉伸、掩码、导出等 |
 
 核心设计：**组件之间不互相调用逻辑，仅向 store 发起请求；画布重绘统一由 store 的 `renderTick` 计数器触发**。任何组件修改状态后，重绘仅有一个入口，避免多处修改导致渲染状态不一致。

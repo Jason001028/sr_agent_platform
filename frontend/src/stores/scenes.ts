@@ -29,7 +29,9 @@ export const useScenesStore = defineStore('scenes', () => {
   const scanned = ref(0);
   const count = ref(0);
   const loading = ref(false);
+  /** 正在打开的行 id；路径栏打开时占一个与行 id 不可能相同的哨兵（见 resolvePath）。 */
   const openingId = ref<string | null>(null);
+  const PATHBAR_OPENING = '__pathbar__';
   /** 本会话是否已经检索过（`ensureSearched` 的判据）。 */
   const searched = ref(false);
   /** 上一次检索的**发起**时刻；页面那行「上次检索 HH:MM」用它。 */
@@ -314,6 +316,10 @@ export const useScenesStore = defineStore('scenes', () => {
       error.value = '请填写场景目录路径';
       return false;
     }
+    // 路径栏按钮的 disabled 跟着 openingId 走，但 resolve 这一段原先没有占位 ——
+    // stat / 首次生成预览的往返里按钮一直亮着，连点会发两趟请求，e2e 也会把
+    // 「已经点下去了」误判成「这一趟已经收尾」。先占哨兵，finally 再清。
+    openingId.value = PATHBAR_OPENING;
     try {
       const res = await apiResolveScene(loadSrConfig(), { path: trimmed });
       await open(res.row, res.resolved);

@@ -338,8 +338,9 @@ GET 通常就发生在提交刚落库之后（两列时间窗还是 `NULL`）—
 
 用途：让 `SR_SCENES_ROOT`（datahub）之外的生产场景目录（真机在
 `/DiskArray/GSHC2IMPS/PRODUCT/<年>/<月>/<日>/<卫星型号>/<段级目录>/<景级目录>`）
-也能在查看器打开、画掩码、就地提交 SR，不必把数据搬进 datahub。前端两个入口
-（场景库页检索条下的输入框、查看器工具栏的「盘阵场景」栏）共用一个 `ScenePathBar`。
+也能在查看器打开、画掩码、就地提交 SR，不必把数据搬进 datahub。前端入口只有
+场景库页检索条下的路径栏（`ScenePathBar`）；查看器工具栏下方那条同名栏已于
+2026-10-23 移除，查看器侧改由拖入本地文件按文件名反推关联。
 
 请求体二选一：
 ```json
@@ -1051,7 +1052,7 @@ NULL ──claim──> running ──> done
   `rasterPreview` 里。前端的「重生成再取图」只写 `row.rasterPreview.hasPreview/.previewDiv`。
 - 前端判定所需的两个尺寸**全在 resolve 响应里**，不需要第二次往返。`previewNeedsBake`
   里前缀一个栅格分支（判据与栅格行相同：`!rp.hasPreview || rp.previewDiv !== div`），
-  于是 `ScenesPage.vue` 的按钮文案、`fetchSceneJpg` 的预判、`openScenePath` 三处自动同步。
+  于是 `ScenesPage.vue` 的按钮文案、`fetchSceneJpg` 的预判两处自动同步。
 - **`?div=` 抖动**（明知故犯，§六.5）：栅格行与 jpg 行走的是**同一份落点**
   （`preview_jpg_name` 只由源 stem 拼，对 jpg 与 tif 是同一个文件名），所以两个档位的客户端会
   互相顶掉同一份文件 —— 这个病今天就在，工作流 B 只是把它拖进更多行。本轮在文档里点明，

@@ -46,12 +46,12 @@ const roTitle = computed(() =>
 const stretchValue = computed(() => store.activeStretch);
 const stretchTitle = computed(() =>
   sceneActive.value
-    ? '这张盘阵 JPG 已在服务端按直方图均衡生成，这里改的是显示层的二次拉伸'
+    ? '这张盘阵 JPG 已由服务端按直方图均衡预览生成，这里改的是显示层的二次拉伸'
       + '（均衡不可逆，拉不回来）'
     : '',
 );
 
-/** 预览缩放档位（各边 ÷N）：**平台级**设置，拖入 / 场景库 / 粘盘阵路径三条入口
+/** 预览缩放档位（各边 ÷N）：**平台级**设置，拖入 / 场景库两条入口
     都按它生成。拖动条按**下标**走（`SCENE_PREVIEW_DIVS` 的次序），不是按档位值本身 ——
     ÷2…÷32 是等比数列，用下标每格等宽，用户按起来才是均匀的。 */
 const DIVS = SCENE_PREVIEW_DIVS;
@@ -242,7 +242,7 @@ watch(
       :title="intermediate ? roTitle
         : srReady
           ? '带出该场景的目录，跳转队列页确认后提交 SR'
-          : '提交 SR 需要盘阵目录：用上面的「盘阵场景」栏打开，或让本地文件按文件名关联'"
+          : '提交 SR 需要盘阵目录：到「场景库」页打开该场景，或让本地文件按文件名关联'"
       @click="store.submitSr()"
     >
       <AppIcon name="square-chart-gantt" :size="15" />

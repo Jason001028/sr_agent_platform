@@ -384,6 +384,17 @@ export const useViewerStore = defineStore('viewer', () => {
   const canvasAttached = ref(false);
   const renderTick = ref(0);
   const marker = ref<{ tx: number; ty: number; until: number } | null>(null);
+  /** 指针在**原图全分辨率**下的像素坐标（底部状态栏右段）。
+   *  由 TifCanvas 的 window mousemove 写；指针不在活动格影像上时为 null（显示「—」）。
+   *  切图 / 切活动侧 / 进出分屏时由 TifCanvas 清空，免得上一条图的坐标留在新图上。 */
+  const cursor = ref<Pt | null>(null);
+  /** 只在跨像素时才写：mousemove 每秒几十次，同一点反复赋新数组会白白触发重渲。 */
+  function setCursor(p: Pt | null): void {
+    const c = cursor.value;
+    if (!p) { if (c) cursor.value = null; return; }
+    if (c && c[0] === p[0] && c[1] === p[1]) return;
+    cursor.value = [p[0], p[1]];
+  }
   const stretchMode = ref<StretchMode>('linear');
   /** 预览缩放档位（各边 ÷N），平台级设置，初值从 localStorage 来。
    *  工具栏那条拖动条读写它；取图的两处调用点也读它。 */
@@ -2630,7 +2641,7 @@ export const useViewerStore = defineStore('viewer', () => {
     // 判据是「这张图有没有盘阵目录」，不是「它是怎么打开的」：盘阵 JPG 场景与
     // 反推关联上的本地 TIF 都能提交；纯本地文件（没有 lqPath）不行。
     if (!rec || !rec.lqPath) {
-      showErr('提交 SR 需要盘阵目录：请在「盘阵场景」栏填写该场景目录并打开，'
+      showErr('提交 SR 需要盘阵目录：请到「场景库」页打开该场景，'
         + '或让本地文件按文件名反推关联（文件名里要有成像时间戳）');
       return;
     }
@@ -2776,11 +2787,11 @@ export const useViewerStore = defineStore('viewer', () => {
           + '改过名、另存过、或叫 PAN.jpg 这类都不认，平台不猜目录。'
           + 'RC 场景（目录里的输入影像叫 PAN.tif）的产物叫 PAN_<suffix>.jpg，上次的产物'
           + '叫 <产物名>_NOSR —— 这两个名字里没有成像时刻，先打开那一景再拖进来才'
-          + '认得出（平台照当前场景目录点同级栅格）。把该场景目录粘进上方的「盘阵场景」'
-          + '栏打开，再拖一次即可；也可以直接用同场景芯片切到产物。');
+          + '认得出（平台照当前场景目录点同级栅格）。先到「场景库」页打开该场景，'
+          + '再拖一次即可；也可以直接用同场景芯片切到产物。');
       } else {
         showToast('「' + r.name + '」没有关联到盘阵场景，按本地文件查看'
-          + '（要提交 SR 请在「盘阵场景」栏粘贴该场景目录）');
+          + '（要提交 SR 请到「场景库」页打开该场景目录）');
       }
       return false;
     }
@@ -2864,55 +2875,6 @@ export const useViewerStore = defineStore('viewer', () => {
     }
   }
 
-  /** 查看器工具栏的「打开盘阵场景」：resolve → 取字节 → openSceneJpg。
-   *
-   *  与场景库页同一条后端链路（POST /api/scenes/resolve + /preview），只是错误
-   *  写进查看器的错误条（ScenesPage 写 scenes.error；写错地方就等于没报）。 */
-  async function openScenePath(path: string): Promise<boolean> {
-    const trimmed = String(path ?? '').trim();
-    if (!trimmed) { showErr('请填写场景目录路径'); return false; }
-    showMask('正在打开盘阵场景…', trimmed, false);
-    try {
-      const res = await apiResolveScene(loadSrConfig(), { path: trimmed });
-      if (!res.resolved.writable) {
-        // 不阻断：只读目录里已有掩码时仍能提交；写掩码/回写 meta.xml 会失败
-        showToast('提示：服务账号对 ' + res.resolved.dir + ' 没有写权限，'
-          + '保存掩码到盘阵会失败');
-      }
-      // 首次要服务端生成预览图（读一遍大图）——把遮罩文案换成这一句，
-      // 否则几十秒里界面看起来像卡死了。
-      const blob = await fetchSceneJpg(loadSrConfig(), res.row, previewDiv.value,
-                                       (text) => {
-        showMask('正在打开盘阵场景…', text, false);
-      });
-      hideMask();
-      // lqPath 是「能不能提交 SR」的唯一判据（见 submitSr）。粘单个 .tif 进来时
-      // 它可能不在场景目录里 —— 那种图能看，但 SR 在盘阵上跑不起来，所以不写
-      // lqPath（后端用 sr_capable 告诉你），让它走 submitSr 的「需要盘阵目录」分支。
-      await openSceneJpg({
-        name: res.row.name, W: res.row.W as number, H: res.row.H as number,
-        sceneId: res.row.id,
-        lqPath: res.resolved.sr_capable ? res.resolved.dir : null,
-        sceneDir: res.resolved.dir,
-      }, blob);
-      const rec = findRecByMeta({ sceneId: res.row.id, name: res.row.name });
-      if (rec) {
-        rec.serverMaskPath = res.resolved.mask_path;
-        if (!res.resolved.sr_capable) {
-          showToast('这张图不在场景目录里，只能查看，不能提交 SR');
-        } else if (!res.resolved.mask_exists) {
-          showToast('该场景目前没有掩码（' + res.resolved.mask_path
-            + '）—— 画完点「保存掩码到盘阵」再提交');
-        }
-      }
-      return true;
-    } catch (e) {
-      hideMask();
-      showErr('打开失败：' + (e instanceof Error ? e.message : String(e)));
-      return false;
-    }
-  }
-
   /** 把画好的掩码写进**服务端**场景目录（POST /api/masks）。
    *
    *  盘阵上大多数生产场景本来没有掩码，得现画。写出去的文件名由后端推导
@@ -2928,7 +2890,7 @@ export const useViewerStore = defineStore('viewer', () => {
       showErr(stageRefusal(rec.stageLabel ?? '产物')); return false;
     }
     if (!rec.lqPath) {
-      showErr('这张图没有盘阵目录，掩码无处可写 —— 请先在「盘阵场景」栏打开对应目录');
+      showErr('这张图没有盘阵目录，掩码无处可写 —— 请先到「场景库」页打开对应场景');
       return false;
     }
     const rois = getRois();
@@ -3086,6 +3048,7 @@ export const useViewerStore = defineStore('viewer', () => {
   return {
     // 状态
     recs, activeId, activeRec, view, canvasSize, renderTick, marker,
+    cursor, setCursor,
     canvasAttached, setCanvasAttached,
     stretchMode, activeStretch, drawMode, drawTool, pendingRect, pendingPts, hoverPt, hoverRoi, flashRoi,
     previewDiv,
@@ -3108,8 +3071,8 @@ export const useViewerStore = defineStore('viewer', () => {
     enterDraw, exitDraw, setDrawTool, commitRect, closePolygon, undoRoi, clearRois,
     mergeRois, delClick, wandSelect, buildMaskJson, exportMaskJson, genMask,
     getRois, submitSr, bakeMaskToServer,
-    // 手工盘阵场景：打开任意场景目录 / 本地图反推关联
-    openScenePath, tryLinkScenes,
+    // 本地图反推关联（打开盘阵场景统一走「场景库」页）
+    tryLinkScenes,
     // 图像对比（关闭 / 点选对比 / 分屏对比）
     compareMode, compareOn, split, setCompareMode,
     cmpStripOpen, setCmpStripOpen,
