@@ -8,7 +8,7 @@
 - **窗口交接**：新会话先读 [docs/status/current-question.md](docs/status/current-question.md)（平台现状与交接入口），再读 [docs/experience/gui-experience.md](docs/experience/gui-experience.md)（经验），即可无断点继续。追溯某个决定的来历查 [docs/status/timeline-archive.md](docs/status/timeline-archive.md)（历史时间线），真机勾选查 [docs/status/real-machine-acceptance.md](docs/status/real-machine-acceptance.md)。
 - **分类速查**：需求/计划 → [docs/planning/](docs/planning/)；经验 → [docs/experience/](docs/experience/)；规范 → [docs/conventions/](docs/conventions/)；背景知识 → [docs/knowledge/](docs/knowledge/)。
 - **SR_CODE 生产管线**（局部超分算法 / 调用契约 / Windows 移植环境 / 生产场景命名）：问算法、对接契约、移植/环境踩坑、盘阵目录名怎么反推 → [docs/sr_code/](docs/sr_code/)（主题域类目，见 docs/README §二）。
-- **新增文档**：先看 [docs/README.md](docs/README.md) §三分类规则，再落盘对应类目。
+- **新增文档**：先看 [docs/README.md](docs/README.md) §七分类规则，再落盘对应类目。
 
 ## 代码主产物
 
