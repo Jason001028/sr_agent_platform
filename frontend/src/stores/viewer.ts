@@ -316,6 +316,8 @@ function saveCtxRailOpen(open: boolean): void {
 export const useViewerStore = defineStore('viewer', () => {
   /* ---------------- 状态 ---------------- */
   const recs = ref<ViewerRec[]>([]);
+  /** 当前左侧临时工作区版本；清空/刷新后旧 Agent 上下文立即失效。 */
+  const workspaceVersion = ref(0);
   const activeId = ref<number | null>(null);
 
   /* ---------------- 左侧列表的工具条状态 ----------------
@@ -1992,6 +1994,7 @@ export const useViewerStore = defineStore('viewer', () => {
    *
    *  返回清掉几张（调用方报给用户）。 */
   function clearRecs(): number {
+    workspaceVersion.value++;
     // 收藏的卡留下：一键解析是「换一批看」，而收藏是用户明确要留住的那几张。
     const keep = recs.value.filter((r) => r.fav);
     const n = recs.value.length - keep.length;
@@ -3047,7 +3050,7 @@ export const useViewerStore = defineStore('viewer', () => {
 
   return {
     // 状态
-    recs, activeId, activeRec, view, canvasSize, renderTick, marker,
+    recs, workspaceVersion, activeId, activeRec, view, canvasSize, renderTick, marker,
     cursor, setCursor,
     canvasAttached, setCanvasAttached,
     stretchMode, activeStretch, drawMode, drawTool, pendingRect, pendingPts, hoverPt, hoverRoi, flashRoi,

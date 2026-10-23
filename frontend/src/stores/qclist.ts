@@ -397,6 +397,9 @@ export const useQcListStore = defineStore('qclist', () => {
       bakeFails.value = report.fails;
       bakeNotes.value = report.notes;
       bakeState.value = report.stopped ? 'stopped' : 'done';
+      // resolve 已确认这些场景在盘阵上存在；让场景库下一次进入时重新读取索引，
+      // 否则它会继续复用一键解析前的 searched=true 快照。
+      scenes.invalidateSearch();
     } finally {
       // 取消 / 异常时没轮到的占位卡：如实写「未开始」，不留一张永远「排队中」的卡。
       viewer.finishPendingCards();

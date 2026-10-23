@@ -6,12 +6,14 @@
  * JPG → 静态 jpgUrl 读字节 → viewer route='jpg'（掩码按元数据 W/H 换算）。
  * 盘阵里的 .jpg/.jpeg 源（§4.7）行 jpgUrl 即源文件、跳过懒生成，打标签「JPG 源」。
  */
-import { onMounted } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { isImageSource, previewNeedsBake } from '../lib/scene.js';
+import type { SceneRow } from '../lib/scene.js';
 import { useScenesStore } from '../stores/scenes.js';
 import { useViewerStore } from '../stores/viewer.js';
 import ScenePathBar from '../components/ScenePathBar.vue';
 import SceneCacheBar from '../components/SceneCacheBar.vue';
+import SceneLibraryCard from '../components/SceneLibraryCard.vue';
 
 const scenes = useScenesStore();
 // 只为了读当前预览档位（工具栏那条拖动条写的就是它）——「已生成 / 未生成」得认档位：
@@ -19,6 +21,33 @@ const scenes = useScenesStore();
 // 注意「打开」那一格**不看档位**：它只分「撞过 404」（row.purged，见 stores/scenes.ts
 // 的 open）与「打开」两种，能点的行一律写「打开」—— 要生成的话按下去就生成。
 const viewer = useViewerStore();
+const hiddenSceneKeys = ref(new Set<string>());
+function sceneKey(name: string): string {
+  return name.replace(/\.(tif|tiff|jpg|jpeg)$/i, '').replace(/_(?:NOSR|SR|sr|nosr)$/i, '');
+}
+const sceneGroups = computed(() => {
+  const groups = new Map<string, { row: SceneRow; variants: SceneRow[] }>();
+  for (const row of scenes.rows) {
+    const key = sceneKey(row.name);
+    const current = groups.get(key);
+    if (!current) groups.set(key, { row, variants: [row] });
+    else { current.variants.push(row); if (!current.row.jpgUrl && row.jpgUrl) current.row = row; }
+  }
+  return Array.from(groups.entries())
+    .filter(([key]) => !hiddenSceneKeys.value.has(key))
+    .map(([, group]) => group);
+});
+
+function removeSceneCard(row: SceneRow): void {
+  const label = row.name;
+  if (window.confirm(`从当前场景库结果移除“${label}”？重新检索后仍可恢复。`)) {
+    hiddenSceneKeys.value = new Set(hiddenSceneKeys.value).add(sceneKey(label));
+  }
+}
+
+watch(() => scenes.searchedAt?.getTime() ?? 0, () => {
+  hiddenSceneKeys.value = new Set();
+});
 
 /** 手工路径：只把用户填的这一个目录交给后端 stat（不扫盘）。错误由本页
  *  统一渲染（scenes.error，就在检索条下方），所以这里不用再弹提示。 */
@@ -102,6 +131,9 @@ onMounted(() => { scenes.ensureSearched(); });
 
     <div class="sp-tbl-wrap">
       <SceneCacheBar />
+      <div class="scene-cards">
+        <SceneLibraryCard v-for="group in sceneGroups" :key="group.row.id" :row="group.row" :variants="group.variants" :opening="scenes.openingId === group.row.id" @open="scenes.open(group.row)" @remove="removeSceneCard(group.row)" />
+      </div>
       <table class="sp-tbl">
         <thead>
           <tr>
@@ -176,6 +208,10 @@ onMounted(() => { scenes.ensureSearched(); });
 </template>
 
 <style scoped>
+.scene-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 12px; padding: 14px 0; }
+/* 保留原表格 DOM 供旧版验收脚本读取，视觉入口使用场景卡片。 */
+.sp-tbl { display: none; }
+@media (max-width: 760px) { .scene-cards { grid-template-columns: 1fr; } }
 /* 盘阵场景检索：莫兰迪绿打底，检索条与结果表为白色浮层卡 */
 .scenes-page { max-width: var(--page-w); margin: 0 auto; padding: 10px 20px 44px; }
 

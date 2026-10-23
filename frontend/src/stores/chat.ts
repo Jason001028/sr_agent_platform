@@ -40,6 +40,7 @@ export interface ChatMsg {
   toolName?: string | null;        // tool 行：工具名
   ok?: boolean;                    // tool 行：成功/失败
   detail?: string;                 // tool 行：结果摘要 / 失败原因
+  data?: unknown;                  // tool 原始结构化返回（实时 SSE）
   isError?: boolean;               // 回合级 error（LLM 失败/循环超限）
   images?: ChatImage[] | null;     // user 行：截图附件（已带可用 src，渲染层不再换算）
   /** 本回合的 Qwen 推理内容（reasoning_content）。**不入库**：刷新后不再出现。 */
@@ -73,10 +74,15 @@ export function msgFromHistory(h: HistoryMsg): ChatMsg {
       : null;
     return { seq: h.seq, role: 'assistant', content: h.content ?? '', toolCalls: tcs };
   }
+  let data: unknown;
+  if (h.content) {
+    try { data = JSON.parse(h.content); } catch { /* legacy summarized tool rows */ }
+  }
   return {
     seq: h.seq, role: 'tool', content: '',
     toolName: h.tool_name ?? null, ok: h.ok,
     detail: (h.ok === false && h.content) ? h.content : (h.content ?? ''),
+    data,
   };
 }
 
@@ -168,7 +174,7 @@ export function reduceChatSse(
         : (ev.error ?? '调用失败');
       return [...msgs, {
         seq: null, role: 'tool', content: '', toolName: ev.name,
-        ok, detail,
+        ok, detail, data: ev.data,
       }];
     }
 

@@ -1121,3 +1121,7 @@ NULL ──claim──> running ──> done
 ## 7. 变更流程（红线）
 
 契约改动（新增/删端点、改请求/响应/SSE 事件字段、改状态机映射）→ **先改本文档、标注状态=评审，评审通过再改代码**。前端 SSE 渲染与后端推送共用本 schema，两侧各写一份 parser/emitter 的单元测试锁字段。
+
+## Workspace 场景候选集契约
+
+Agent 交互采用两层数据范围：`library` 是盘阵通用场景库，`workspace` 是当前左侧查看列表的临时候选集。每次左侧列表刷新生成新的 workspace version；旧版本的检索结果和 SR 提交请求必须失效。`search_scenes` 默认使用 workspace 范围，`run_sr` 仅允许提交 workspace 中已确认的 scene_id / scene_dir。完整场景库仍由场景库页面负责排序、筛选、批量浏览和对比。

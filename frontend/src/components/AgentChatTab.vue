@@ -27,6 +27,8 @@ import ChatAttachTray from './ChatAttachTray.vue';
 import ChatImagePicker from './ChatImagePicker.vue';
 import ChatBubbleImages from './ChatBubbleImages.vue';
 import AppIcon from './AppIcon.vue';
+import SceneSearchResultCard from './SceneSearchResultCard.vue';
+import { useScenesStore } from '../stores/scenes.js';
 import {
   agentPayload, buildContextNote, splitAgentPayload,
 } from '../lib/agentContext.js';
@@ -36,10 +38,15 @@ import { roiOrigGeom } from '../lib/roiStats.js';
 
 const viewer = useViewerStore();
 const chat = useChatStore();
+const scenes = useScenesStore();
 const draft = ref('');
 const scrollEl = ref<HTMLElement | null>(null);
 /** 截图选择器（截查看器当前画面，来源是左侧影像列表）。 */
 const pickerOpen = ref(false);
+async function openSearchScene(row: Record<string, unknown>): Promise<void> {
+  const name = String(row.name ?? row.sceneId ?? row.id ?? '').trim();
+  if (name) await scenes.openByName(name);
+}
 
 const rec = computed(() => viewer.activeRec);
 /** 仅盘阵场景可用；无图 / 本地(无 sceneId) → false 并给 reason。 */
@@ -166,8 +173,21 @@ function readDeveloperMode(): void {
 }
 onMounted(readDeveloperMode);
 watch(() => viewer.settingsOpen, (open) => { if (!open) readDeveloperMode(); });
-function toolNames(m: ChatMsg): string {
-  return (m.toolCalls ?? []).map((t) => t.name).join(', ') || '未知工具';
+function toolIconName(name: string): string {
+  const icons: Record<string, string> = {
+    search_scenes: 'search',
+    run_sr: 'file-code',
+  };
+  return icons[name] ?? 'hammer';
+}
+function toolResultAt(index: number, name: string): ChatMsg | null {
+  const next = chat.messages[index + 1];
+  return next?.role === 'tool' && next.toolName === name ? next : null;
+}
+function toolResultsAt(index: number, name: string): ChatMsg[] {
+  const out: ChatMsg[] = [];
+  for (let j = index + 1; j < chat.messages.length && chat.messages[j].role === 'tool'; j++) if (chat.messages[j].toolName === name) out.push(chat.messages[j]);
+  return out;
 }
 
 /** 队尾仍在流式接收的 assistant 消息（思考/回答/工具声明阶段指示用）。 */
@@ -318,11 +338,15 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
               <div v-if="m.content" class="bubble assistant">
                 <MarkdownBody :source="m.content" />
                 <div v-if="m.toolCalls && m.toolCalls.length" class="tc-inline">
-                  🧩 Agent 调用：{{ toolNames(m) }}
+                  <span class="tc-label">Agent 调用：</span>
+                  <span v-for="tool in (m.toolCalls ?? [])" :key="tool.name" class="tc-tool">
+                    <AppIcon :name="toolIconName(tool.name)" :size="15" :label="tool.name" />{{ tool.name }}
+                  </span>
                 </div>
               </div>
               <div v-else-if="m.toolCalls && m.toolCalls.length" class="bubble assistant tools">
-                <span class="tc-line">🧩 Agent 调用：{{ toolNames(m) }}</span>
+                <div v-for="tool in m.toolCalls" :key="tool.name" class="tool-card"><div class="tool-card-head"><AppIcon :name="toolIconName(tool.name)" :size="17" /><strong>{{ tool.name === 'search_scenes' ? '检索目标场景' : tool.name }}</strong><code>{{ tool.name }}</code><span class="tool-state">{{ toolResultsAt(i, tool.name).length > 1 ? `共尝试 ${toolResultsAt(i, tool.name).length} 次` : (toolResultAt(i, tool.name)?.ok === true ? '✓ 已提交' : '⏳ 调用中') }}</span></div><details class="tool-query"><summary>查询条件</summary><pre>{{ JSON.stringify(tool.args) }}</pre></details><div v-if="toolResultsAt(i, tool.name).length" class="tool-summary">最终结果：{{ toolResultsAt(i, tool.name).at(-1)?.detail }}</div><details v-if="toolResultsAt(i, tool.name).length > 1" class="tool-history"><summary>查看调用记录</summary><div v-for="(result, n) in toolResultsAt(i, tool.name)" :key="n">第 {{ n + 1 }} 次：{{ result.detail }}</div></details></div>
+                <SceneSearchResultCard v-for="tool in (m.toolCalls ?? []).filter(t => t.name === 'search_scenes')" :key="'results-' + tool.name" :data="toolResultAt(i, tool.name)?.data" :status="toolResultAt(i, tool.name)?.ok === false ? 'failed' : toolResultAt(i, tool.name)?.ok === true ? 'completed' : 'running'" @open="openSearchScene" />
               </div>
               <div v-else-if="(m.streaming && !m.reasoning) || m.phase === 'tool_call'"
                    class="bubble assistant tools">
@@ -333,8 +357,8 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
 
           <!-- tool 结果：单行摘要 pill -->
           <template v-else>
-            <div class="tool-trace" :class="{ fail: m.ok === false }">
-              <span class="tool-ic" :class="{ fail: m.ok === false }">{{ m.ok === false ? '✗' : (m.ok === true ? '✓' : '…') }}</span>
+            <div v-if="!(chat.messages[i - 1]?.role === 'assistant' && chat.messages[i - 1]?.toolCalls?.some(t => t.name === m.toolName))" class="tool-trace" :class="{ fail: m.ok === false }">
+              <AppIcon class="tool-ic" :class="{ fail: m.ok === false }" :name="toolIconName(m.toolName ?? '')" :size="16" :label="m.toolName ?? '工具'" />
               <span class="tool-name">{{ m.toolName ?? '工具' }}</span>
               <span v-if="m.detail" class="tool-detail">{{ m.detail }}</span>
             </div>
@@ -543,11 +567,24 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
 }
 .bubble.assistant.err { white-space: pre-wrap; background: var(--err-bg); color: var(--err); border-color: var(--err-line); }
 .bubble.assistant.tools {
-  background: #fbfcfa; border: 1px dashed var(--line); border-radius: 10px;
-  align-self: flex-start; padding: 5px 10px; max-width: 94%;
+  width: 100%; max-width: 100%; box-sizing: border-box;
+  background: #fff; border: 1px solid #D8E3DF; border-radius: 9px;
+  box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 4px 12px rgba(0,0,0,.06), 0 12px 32px rgba(0,0,0,.08);
+  align-self: flex-start; padding: 12px;
 }
 .at-row :deep(.reason) { max-width: 96%; }
-.tc-line { font-size: 11px; color: var(--ink-sub); }
+.tc-line { font-size: 11px; color: var(--ink-sub); display: inline-flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.tc-label { margin-right: 2px; }
+.tc-tool { display: inline-flex; align-items: center; gap: 4px; font-family: var(--font-mono); font-weight: 600; color: var(--ink-body); }
+.tool-card-head { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+.tool-card { width: 100%; }
+.tool-card-head code { font-family: var(--font-mono); color: var(--ink-sub); }
+.tool-state { margin-left: auto; color: var(--ok); }
+.tool-query { margin-top: 7px; font-size: 11px; color: var(--ink-sub); }
+.tool-query pre { margin: 5px 0 0; white-space: pre-wrap; }
+.tool-summary { margin-top: 7px; font-size: 11px; color: var(--ink-sub); }
+.tool-summary { padding: 8px 10px; background: #F5F8F6; border-radius: 7px; }
+.tool-history { margin-top: 8px; font-size: 11px; color: var(--ink-sub); line-height: 1.7; }
 /* 有正文时工具声明缩成正文脚注，不再单占一个虚线气泡 */
 .tc-inline {
   margin-top: 6px; padding-top: 5px;
@@ -555,12 +592,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
   font-size: 11px; color: var(--ink-sub);
 }
 
-.tool-trace {
-  align-self: flex-start; display: inline-flex; align-items: center; gap: 6px;
-  font-size: 11px; color: var(--ok); background: var(--ok-bg);
-  border: 1px solid var(--ok-line); border-radius: var(--r-pill); padding: 2px 10px;
-  max-width: 96%; overflow: hidden;
-}
+.tool-trace { width: 100%; box-sizing: border-box; align-self: flex-start; display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-body); background: #F5F8F6; border: 1px solid #D8E3DF; border-radius: 9px; padding: 8px 12px; }
 .tool-trace.fail { color: var(--err); background: var(--err-bg); border-color: var(--err-line); }
 .tool-ic.fail { color: var(--err); }
 .tool-name { font-family: var(--font-mono); font-weight: 600; flex: none; }

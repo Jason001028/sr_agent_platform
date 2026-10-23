@@ -117,6 +117,11 @@ export const useScenesStore = defineStore('scenes', () => {
     if (!searched.value) void list();
   }
 
+  /** 一键解析会刚刚生成/确认一批场景预览，下一次进入场景库必须重新取盘阵索引。 */
+  function invalidateSearch(): void {
+    searched.value = false;
+  }
+
   function resetFilters(): void {
     query.value = ''; satellite.value = ''; sensor.value = '';
     dateFrom.value = ''; dateTo.value = '';
@@ -395,7 +400,7 @@ export const useScenesStore = defineStore('scenes', () => {
     searched, searchedAt,
     query, satellite, sensor, dateFrom, dateTo,
     satellites, sensors, dates,
-    list, ensureSearched, resetFilters, open, resolvePath, openByName, resolveByName,
+    list, ensureSearched, invalidateSearch, resetFilters, open, resolvePath, openByName, resolveByName,
     // 清除预览缓存（SceneCacheBar 用）
     selected, clearing, clearResult, clearRemoved, clearError, clearSummary,
     selectableRows, selectedCount, allSelected,

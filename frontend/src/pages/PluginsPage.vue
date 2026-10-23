@@ -2,6 +2,13 @@
 import { computed, onMounted } from 'vue';
 import { usePluginStore } from '../stores/plugins.js';
 import type { ManagedPlugin, PluginOperation } from '../lib/api.js';
+import plugin01 from '../../icon/plugin_01.png';
+import plugin02 from '../../icon/plugin_02.png';
+import plugin03 from '../../icon/plugin_03.png';
+import plugin04 from '../../icon/plugin_04.png';
+import plugin05 from '../../icon/plugin_05.png';
+const coverById: Record<string, string> = { search_scenes: plugin01, run_sr: plugin02, fix_bad_lines: plugin03, sr_job_status: plugin04, token_visualizer: plugin05 };
+const coverFor = (id: string): string => coverById[id] ?? plugin01;
 
 const plugins = usePluginStore();
 
@@ -106,9 +113,11 @@ onMounted(() => void plugins.refresh());
             <tbody>
               <tr v-for="p in plugins.plugins" :key="p.plugin_id">
                 <td class="plugin-info">
+                  <img class="plugin-cover" :src="coverFor(p.plugin_id)" :alt="p.name" />
                   <strong>{{ p.name }}</strong>
                   <code>{{ p.plugin_id }}</code>
                   <span>{{ p.description }}</span>
+                  <small class="plugin-author">作者：wrz</small>
                 </td>
                 <td class="mono">{{ p.version }}</td>
                 <td><span class="plugin-tag" :class="stateClass(p.desired_state)">
@@ -180,5 +189,21 @@ onMounted(() => void plugins.refresh());
 .plugin-error { display: block; max-width: 180px; margin-top: 4px; color: var(--err); font-size: 11px; }
 .plugin-actions { white-space: nowrap; }
 .plugins-empty { padding: 20px 12px; color: var(--ink-sub); text-align: center; font-size: 13px; }
+.plugins-table-wrap { overflow: visible; }
+.plugins-table { border-collapse: separate; border-spacing: 20px; margin: -10px; width: calc(100% + 20px); }
+.plugins-table thead { display: none; }
+.plugins-table tbody { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.plugins-table tr { display: flex; flex-direction: column; min-height: 180px; padding: 18px; background: #fff; border: 1px solid #DCE6E1; border-radius: 12px; box-shadow: 0 1px 2px rgba(16,55,48,.06), 0 6px 18px rgba(16,55,48,.05), 0 16px 36px rgba(16,55,48,.025); transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease; }
+.plugins-table tr:hover { transform: translateY(-2px); border-color: #b8cec5; }
+.plugins-table td { border: 0; padding: 0; }
+.plugins-table td:not(.plugin-info):not(.plugin-actions) { display: none; }
+.plugins-table td.mono { display: none; }
+.plugin-cover { width: 110px; height: 110px; object-fit: contain; float: left; margin: 0 16px 8px 0; }
+.plugin-info { min-height: 120px; }
+.plugin-info span { display: block; }
+.plugin-author { display: block; margin-top: 2px; color: var(--ink-sub); font-size: 12px; }
+.plugin-actions { display: flex; justify-content: flex-end; gap: 6px; border-top: 1px solid #E7EEEA; margin-top: 14px; padding-top: 12px; }
+@media (max-width: 900px) { .plugins-table tbody { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) { .plugins-table tr { transition: none; } .plugins-table tr:hover { transform: none; } }
 @media (max-width: 760px) { .plugins-layout { grid-template-columns: 1fr; } .plugins-head { align-items: stretch; flex-direction: column; } .plugins-head-actions { justify-content: flex-start; } }
 </style>

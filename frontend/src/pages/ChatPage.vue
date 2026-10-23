@@ -18,16 +18,23 @@ import ChatAttachTray from '../components/ChatAttachTray.vue';
 import ChatImagePicker from '../components/ChatImagePicker.vue';
 import ChatBubbleImages from '../components/ChatBubbleImages.vue';
 import AppIcon from '../components/AppIcon.vue';
+import SceneSearchResultCard from '../components/SceneSearchResultCard.vue';
+import { useScenesStore } from '../stores/scenes.js';
 import AgentBotIcon from '../components/AgentBotIcon.vue';
 import { apiListPlugins } from '../lib/api.js';
 import { loadSrConfig } from '../lib/scene.js';
 import { splitAgentPayload } from '../lib/agentContext.js';
 
 const chat = useChatStore();
+const scenes = useScenesStore();
 const draft = ref('');
 const tokenPluginEnabled = ref(true);
 /** 截图选择器（从左侧影像列表挑一张）。 */
 const pickerOpen = ref(false);
+async function openSearchScene(row: Record<string, unknown>): Promise<void> {
+  const name = String(row.name ?? row.sceneId ?? row.id ?? '').trim();
+  if (name) await scenes.openByName(name);
+}
 
 const scrollEl = ref<HTMLElement | null>(null);
 
@@ -40,13 +47,23 @@ function argsText(a: Record<string, unknown>): string {
   return s && s !== '{}' ? s : '（无参数）';
 }
 
-function toolIcon(ok?: boolean): string {
-  if (ok === undefined) return '…';
-  return ok ? '✓' : '✗';
+function toolIconName(name: string): string {
+  const icons: Record<string, string> = {
+    search_scenes: 'search',
+    run_sr: 'file-code',
+  };
+  return icons[name] ?? 'hammer';
 }
-
-function toolNames(m: ChatMsg): string {
-  return (m.toolCalls ?? []).map((t) => t.name).join(', ') || '未知工具';
+function toolResultAt(index: number, name: string): ChatMsg | null {
+  const next = chat.messages[index + 1];
+  return next?.role === 'tool' && next.toolName === name ? next : null;
+}
+function toolResultsAt(index: number, name: string): ChatMsg[] {
+  const out: ChatMsg[] = [];
+  for (let j = index + 1; j < chat.messages.length && chat.messages[j].role === 'tool'; j++) {
+    if (chat.messages[j].toolName === name) out.push(chat.messages[j]);
+  }
+  return out;
 }
 
 /** 队尾仍在流式接收的 assistant 消息（思考/回答/工具声明阶段指示用）。 */
@@ -287,14 +304,19 @@ onMounted(() => {
               <div v-if="m.content" class="bubble assistant">
                 <MarkdownBody :source="m.content" />
                 <div v-if="m.toolCalls && m.toolCalls.length" class="tc-inline">
-                  🧩 Agent 调用：{{ toolNames(m) }}
+                  <span class="tc-label">Agent 调用：</span>
+                  <span v-for="tool in (m.toolCalls ?? [])" :key="tool.name" class="tc-tool">
+                    <AppIcon :name="toolIconName(tool.name)" :size="15" :label="tool.name" />{{ tool.name }}
+                  </span>
                 </div>
               </div>
               <div v-else-if="m.toolCalls && m.toolCalls.length" class="bubble assistant tools">
-                <p class="tool-title">Agent 声明调用工具</p>
-                <div v-for="tc in m.toolCalls" :key="tc.name" class="tool-decl">
-                  <code>{{ tc.name }}</code>
-                  <span class="tool-args">{{ argsText(tc.args) }}</span>
+                <div v-for="tc in m.toolCalls" :key="tc.name" class="tool-card">
+                  <div class="tool-card-head"><AppIcon :name="toolIconName(tc.name)" :size="17" :label="tc.name" /><strong>{{ tc.name === 'search_scenes' ? '检索目标场景' : tc.name }}</strong><code>{{ tc.name }}</code><span v-if="toolResultsAt(i, tc.name).length > 1" class="tool-state">共尝试 {{ toolResultsAt(i, tc.name).length }} 次</span><span v-else class="tool-state">{{ toolResultAt(i, tc.name)?.ok === true ? '✓ 已提交' : '⏳ 调用中' }}</span></div>
+                  <details class="tool-query"><summary>查询条件</summary><pre>{{ argsText(tc.args) }}</pre></details>
+                  <div v-if="toolResultsAt(i, tc.name).length" class="tool-summary">最终结果：{{ toolResultsAt(i, tc.name).at(-1)?.detail }}</div>
+                  <SceneSearchResultCard v-if="tc.name === 'search_scenes'" :data="toolResultAt(i, tc.name)?.data" :args="tc.args" :status="toolResultAt(i, tc.name)?.ok === false ? 'failed' : toolResultAt(i, tc.name)?.ok === true ? 'completed' : 'running'" @open="openSearchScene" />
+                  <details v-if="toolResultsAt(i, tc.name).length > 1" class="tool-history"><summary>查看 {{ toolResultsAt(i, tc.name).length }} 次调用记录</summary><div v-for="(result, n) in toolResultsAt(i, tc.name)" :key="n">第 {{ n + 1 }} 次：{{ result.detail }}</div></details>
                 </div>
               </div>
               <div v-else-if="(m.streaming && !m.reasoning) || m.phase === 'tool_call'"
@@ -306,11 +328,7 @@ onMounted(() => {
 
           <!-- tool 结果行 -->
           <template v-else>
-            <div class="tool-trace" :class="{ fail: m.ok === false }">
-              <span class="tool-ic" :class="{ fail: m.ok === false }">{{ toolIcon(m.ok) }}</span>
-              <span class="tool-name">{{ m.toolName ?? '工具' }}</span>
-              <span v-if="m.detail" class="tool-detail">{{ m.detail }}</span>
-            </div>
+            <div v-if="!(chat.messages[i - 1]?.role === 'assistant' && chat.messages[i - 1]?.toolCalls?.some(t => t.name === m.toolName))" class="tool-trace" :class="{ fail: m.ok === false }"><AppIcon :name="toolIconName(m.toolName ?? '')" :size="16" /><span class="tool-name">{{ m.toolName ?? '工具' }}</span><span v-if="m.detail" class="tool-detail">{{ m.detail }}</span></div>
           </template>
         </div>
 
@@ -520,6 +538,7 @@ onMounted(() => {
 }
 .bubble.assistant.err { white-space: pre-wrap; background: var(--err-bg); color: var(--err); border-color: var(--err-line); }
 .bubble.tools { background: #fbfcfa; border: 1px dashed var(--line); border-radius: 12px; }
+.bubble.assistant.tools { width: 100%; max-width: 100%; box-sizing: border-box; padding: 12px; background: #fff; border: 1px solid #D8E3DF; border-radius: 9px; box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 4px 12px rgba(0,0,0,.06), 0 12px 32px rgba(0,0,0,.08); }
 .tool-title { margin: 0 0 4px; font-size: 12px; color: var(--ink-sub); }
 .tool-decl { display: flex; gap: 8px; align-items: baseline; font-size: 13px; }
 .tool-decl code { color: var(--accent-deep); font-family: var(--font-mono); }
@@ -532,11 +551,23 @@ onMounted(() => {
   border-top: 1px dashed var(--line);
   color: var(--ink-sub); font-size: 11.5px;
 }
+.tc-inline { display: inline-flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.tc-label { margin-right: 2px; }
+.tc-tool { display: inline-flex; align-items: center; gap: 4px; font-family: var(--font-mono); font-weight: 600; color: var(--ink-body); }
+.tool-card-head { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+.tool-card { width: 100%; }
+.tool-card-head code { font-family: var(--font-mono); color: var(--ink-sub); }
+.tool-state { margin-left: auto; color: var(--ok); }
+.tool-query { margin-top: 7px; font-size: 11px; color: var(--ink-sub); }
+.tool-query pre { margin: 5px 0 0; white-space: pre-wrap; }
+.tool-summary { margin-top: 7px; font-size: 11px; color: var(--ink-sub); }
+.tool-summary { padding: 8px 10px; background: #F5F8F6; border-radius: 7px; }
+.tool-history { margin-top: 8px; font-size: 11px; color: var(--ink-sub); line-height: 1.7; }
 
 .tool-trace {
-  align-self: flex-start; display: inline-flex; align-items: center; gap: 7px;
-  font-size: 12px; color: var(--ok); background: var(--ok-bg);
-  border: 1px solid var(--ok-line); border-radius: var(--r-pill); padding: 3px 12px;
+  width: 100%; box-sizing: border-box; align-self: flex-start; display: flex; align-items: center; gap: 7px;
+  font-size: 12px; color: var(--ink-body); background: #F5F8F6;
+  border: 1px solid #D8E3DF; border-radius: 9px; padding: 8px 12px;
 }
 .tool-trace.fail { color: var(--err); background: var(--err-bg); border-color: var(--err-line); }
 .tool-ic.fail { color: var(--err); }

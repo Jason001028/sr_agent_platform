@@ -15,9 +15,13 @@ const props = defineProps<{
   phase?: ChatPhase | null;
 }>();
 
-const open = ref(true);
+const open = ref(false);
 const bodyEl = ref<HTMLElement | null>(null);
-const count = computed(() => props.text.length);
+const summary = computed(() => {
+  if (props.streaming) return props.phase === 'tool_call' ? '正在组织工具调用' : '正在分析场景匹配结果';
+  const text = props.text.replace(/\s+/g, ' ').trim();
+  return text ? (text.length > 34 ? text.slice(0, 34) + '…' : text) : '分析过程';
+});
 /** 用户手动点过之后，定稿时不再自动收起。 */
 let userToggled = false;
 
@@ -47,12 +51,11 @@ function toggle(): void {
   <div class="reason">
     <button type="button" class="reason-head" :aria-expanded="open" @click="toggle">
       <span class="chev" :class="{ open }" aria-hidden="true">▸</span>
-      <span class="reason-title">思考过程</span>
-      <span v-if="streaming && phase === 'thinking'" class="reason-live">
+      <span class="reason-title">{{ summary }}</span>
+      <span v-if="streaming" class="reason-live">
         <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
         推理中
       </span>
-      <span class="reason-count">{{ count }} 字</span>
     </button>
     <pre v-if="open" ref="bodyEl" class="reason-body">{{ text }}</pre>
   </div>
@@ -62,9 +65,9 @@ function toggle(): void {
 .reason {
   max-width: 94%;
   margin-bottom: 6px;          /* 与同一回合的正文气泡留缝（同属一条 assistant 消息） */
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--surface-2);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   overflow: hidden;
 }
 .reason-head {
@@ -72,7 +75,7 @@ function toggle(): void {
   align-items: center;
   gap: 6px;
   width: 100%;
-  padding: 6px 9px;
+  padding: 4px 2px;
   border: 0;
   background: none;
   color: var(--ink-sub);
@@ -102,7 +105,7 @@ function toggle(): void {
 }
 .reason-body {
   margin: 0;
-  padding: 0 10px 8px 25px;
+  padding: 4px 10px 7px 18px;
   max-height: 200px;
   overflow: auto;
   white-space: pre-wrap;
