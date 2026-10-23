@@ -178,6 +178,72 @@ CREATE TABLE IF NOT EXISTS trajectory_feedback (
 );
 CREATE INDEX IF NOT EXISTS idx_trajectory_feedback_session
     ON trajectory_feedback(session_id, created_at, feedback_id);
+CREATE TABLE IF NOT EXISTS agent_goals (
+    goal_id TEXT PRIMARY KEY,
+    session_id TEXT,
+    request_key TEXT UNIQUE,
+    title TEXT NOT NULL,
+    status TEXT NOT NULL,
+    phase TEXT NOT NULL DEFAULT 'queued',
+    checkpoint TEXT NOT NULL DEFAULT '{}',
+    version INTEGER NOT NULL DEFAULT 0,
+    lease_owner TEXT,
+    lease_until REAL,
+    next_wake_at REAL,
+    max_rounds INTEGER NOT NULL DEFAULT 20,
+    rounds_used INTEGER NOT NULL DEFAULT 0,
+    max_model_calls INTEGER NOT NULL DEFAULT 100,
+    model_calls_used INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    finished_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_goals_schedule
+    ON agent_goals(status, next_wake_at, updated_at);
+CREATE TABLE IF NOT EXISTS agent_goal_steps (
+    step_id TEXT PRIMARY KEY,
+    goal_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    tool_name TEXT,
+    external_job_id INTEGER,
+    verification TEXT NOT NULL DEFAULT '{}',
+    error TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    UNIQUE(goal_id, ordinal)
+);
+CREATE TABLE IF NOT EXISTS agent_tool_intents (
+    intent_id TEXT PRIMARY KEY,
+    goal_id TEXT NOT NULL,
+    step_id TEXT,
+    tool_name TEXT NOT NULL,
+    args TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    side_effect_class TEXT NOT NULL,
+    replay_policy TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'INTENDED',
+    external_job_id INTEGER,
+    result TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    UNIQUE(goal_id, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_intents_reconcile
+    ON agent_tool_intents(status, goal_id);
+CREATE TABLE IF NOT EXISTS agent_goal_events (
+    goal_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    run_id TEXT,
+    step_id TEXT,
+    payload TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL,
+    PRIMARY KEY(goal_id, seq)
+);
 """
 
 #: sr_tasks 里发布后新增的列。`CREATE TABLE IF NOT EXISTS` 对**已存在**的表一个字
@@ -1019,3 +1085,132 @@ class Store:
             (job_id, status, config_xml, batch_script, log_dir, time.time(),
              fingerprint))
         db.commit()
+
+    # ---- durable goals ---------------------------------------------------
+    def _goal_row(self, row):
+        if row is None: return None
+        return {"goal_id": row[0], "session_id": row[1], "request_key": row[2],
+                "title": row[3], "status": row[4], "phase": row[5],
+                "checkpoint": json.loads(row[6] or "{}"), "version": row[7],
+                "lease_owner": row[8], "lease_until": row[9], "next_wake_at": row[10],
+                "max_rounds": row[11], "rounds_used": row[12],
+                "max_model_calls": row[13], "model_calls_used": row[14],
+                "error": row[15], "created_at": row[16], "updated_at": row[17],
+                "finished_at": row[18]}
+
+    _GOAL_COLS = ("goal_id, session_id, request_key, title, status, phase, checkpoint, "
+                  "version, lease_owner, lease_until, next_wake_at, max_rounds, "
+                  "rounds_used, max_model_calls, model_calls_used, error, created_at, "
+                  "updated_at, finished_at")
+
+    def get_goal(self, goal_id: str):
+        return self._goal_row(self._db().execute(
+            f"SELECT {self._GOAL_COLS} FROM agent_goals WHERE goal_id=?", (goal_id,)).fetchone())
+
+    def get_goal_by_request_key(self, key: str):
+        return self._goal_row(self._db().execute(
+            f"SELECT {self._GOAL_COLS} FROM agent_goals WHERE request_key=?", (key,)).fetchone())
+
+    def set_goal_session(self, goal_id: str, session_id: str) -> None:
+        self._db().execute("UPDATE agent_goals SET session_id=?,updated_at=? WHERE goal_id=?", (session_id,time.time(),goal_id)); self._db().commit()
+
+    def create_goal(self, *, title: str, session_id: str | None = None,
+                    request_key: str | None = None, checkpoint: dict | None = None,
+                    max_rounds: int = 20, max_model_calls: int = 100,
+                    status: str = "QUEUED", phase: str = "queued") -> dict:
+        now = time.time(); gid = uuid.uuid4().hex
+        db = self._db(); db.execute("BEGIN IMMEDIATE")
+        try:
+            if request_key:
+                old = self.get_goal_by_request_key(request_key)
+                if old: db.rollback(); return old
+            db.execute(f"INSERT INTO agent_goals ({self._GOAL_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (gid, session_id, request_key, title, status, phase,
+                        json.dumps(checkpoint or {}, ensure_ascii=False), 0, None, None, now,
+                        int(max_rounds), 0, int(max_model_calls), 0, None, now, now, None))
+            self._append_goal_event_tx(db, gid, "goal_created", {"status": status})
+            db.commit()
+        except Exception:
+            db.rollback(); raise
+        return self.get_goal(gid)
+
+    def list_goals(self, *, limit: int = 100, statuses=None):
+        q = f"SELECT {self._GOAL_COLS} FROM agent_goals"; args=[]
+        if statuses:
+            vals=list(statuses); q += " WHERE status IN (" + ",".join("?" for _ in vals) + ")"; args.extend(vals)
+        q += " ORDER BY updated_at DESC LIMIT ?"; args.append(int(limit))
+        return [self._goal_row(r) for r in self._db().execute(q, args).fetchall()]
+
+    def _append_goal_event_tx(self, db, goal_id, event_type, payload=None, *, step_id=None, run_id=None):
+        row = db.execute("SELECT COALESCE(MAX(seq),0)+1 FROM agent_goal_events WHERE goal_id=?", (goal_id,)).fetchone()
+        seq = int(row[0]); now=time.time()
+        db.execute("INSERT INTO agent_goal_events(goal_id,seq,event_type,run_id,step_id,payload,created_at) VALUES(?,?,?,?,?,?,?)",
+                   (goal_id, seq, event_type, run_id, step_id, json.dumps(payload or {}, ensure_ascii=False), now))
+        return seq
+
+    def append_goal_event(self, goal_id, event_type, payload=None, *, step_id=None, run_id=None):
+        db=self._db(); db.execute("BEGIN IMMEDIATE")
+        try: seq=self._append_goal_event_tx(db, goal_id, event_type, payload, step_id=step_id, run_id=run_id); db.commit(); return seq
+        except Exception: db.rollback(); raise
+
+    def list_goal_events(self, goal_id, *, after: int = 0, limit: int = 500):
+        rows=self._db().execute("SELECT seq,event_type,run_id,step_id,payload,created_at FROM agent_goal_events WHERE goal_id=? AND seq>? ORDER BY seq LIMIT ?", (goal_id,int(after),int(limit))).fetchall()
+        return [{"goal_id":goal_id,"seq":r[0],"event_type":r[1],"run_id":r[2],"step_id":r[3],"payload":json.loads(r[4] or "{}"),"created_at":r[5]} for r in rows]
+
+    def transition_goal(self, goal_id: str, status: str, *, phase: str | None=None,
+                        checkpoint: dict | None=None, error: str | None=None,
+                        next_wake_at: float | None=None, expected_version: int | None=None,
+                        event_type: str | None=None, event_payload: dict | None=None) -> dict | None:
+        valid = {"QUEUED","RUNNING","WAITING_EXTERNAL","VERIFYING","RETRY_WAIT","PAUSED","BLOCKED","COMPLETED","FAILED","CANCELLED"}
+        if status not in valid: raise ValueError(f"invalid goal status: {status}")
+        db=self._db(); db.execute("BEGIN IMMEDIATE")
+        try:
+            old=self.get_goal(goal_id)
+            if not old: db.rollback(); return None
+            if expected_version is not None and old["version"] != expected_version: db.rollback(); return None
+            now=time.time(); finished=now if status in {"COMPLETED","FAILED","CANCELLED","BLOCKED"} else None
+            sets=["status=?","version=version+1","updated_at=?"]; vals=[status,now]
+            for col,val in (("phase",phase),("checkpoint",json.dumps(checkpoint,ensure_ascii=False) if checkpoint is not None else None),("error",error), ("next_wake_at",next_wake_at)):
+                if val is not None: sets.append(col+"=?"); vals.append(val)
+            if finished is not None: sets.append("finished_at=?"); vals.append(finished)
+            vals.append(goal_id); db.execute("UPDATE agent_goals SET "+", ".join(sets)+" WHERE goal_id=?", vals)
+            self._append_goal_event_tx(db, goal_id, event_type or "goal_status", {"status":status, **(event_payload or {})})
+            db.commit()
+        except Exception: db.rollback(); raise
+        return self.get_goal(goal_id)
+
+    def claim_goal(self, goal_id: str, owner: str, *, lease_sec: float=60) -> dict | None:
+        db=self._db(); now=time.time(); until=now+lease_sec
+        cur=db.execute("UPDATE agent_goals SET lease_owner=?,lease_until=?,version=version+1,updated_at=? WHERE goal_id=? AND status IN ('QUEUED','RUNNING','RETRY_WAIT','WAITING_EXTERNAL','VERIFYING') AND (lease_until IS NULL OR lease_until<?)", (owner,until,now,goal_id,now)); db.commit()
+        return self.get_goal(goal_id) if cur.rowcount else None
+
+    def release_goal(self, goal_id, owner):
+        db=self._db(); db.execute("UPDATE agent_goals SET lease_owner=NULL,lease_until=NULL,updated_at=? WHERE goal_id=? AND lease_owner=?", (time.time(),goal_id,owner)); db.commit()
+
+    def create_tool_intent(self, *, goal_id, tool_name, args, idempotency_key, side_effect_class="READ_ONLY", replay_policy="REPLAY_READ", step_id=None):
+        iid=uuid.uuid4().hex; now=time.time(); db=self._db()
+        db.execute("INSERT OR IGNORE INTO agent_tool_intents(intent_id,goal_id,step_id,tool_name,args,idempotency_key,side_effect_class,replay_policy,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (iid,goal_id,step_id,tool_name,json.dumps(args,sort_keys=True,ensure_ascii=False),idempotency_key,side_effect_class,replay_policy,now,now)); db.commit()
+        return self.get_tool_intent(goal_id,idempotency_key)
+
+    def get_tool_intent(self, goal_id, key):
+        r=self._db().execute("SELECT intent_id,goal_id,step_id,tool_name,args,idempotency_key,side_effect_class,replay_policy,status,external_job_id,result,attempts,created_at,updated_at FROM agent_tool_intents WHERE goal_id=? AND idempotency_key=?",(goal_id,key)).fetchone()
+        if not r:return None
+        return {"intent_id":r[0],"goal_id":r[1],"step_id":r[2],"tool_name":r[3],"args":json.loads(r[4]),"idempotency_key":r[5],"side_effect_class":r[6],"replay_policy":r[7],"status":r[8],"external_job_id":r[9],"result":json.loads(r[10]) if r[10] else None,"attempts":r[11],"created_at":r[12],"updated_at":r[13]}
+
+    def update_tool_intent(self, intent_id, *, status=None, external_job_id=None, result=None, attempts_inc=False):
+        sets=[]; vals=[]
+        if status is not None: sets.append("status=?"); vals.append(status)
+        if external_job_id is not None: sets.append("external_job_id=?"); vals.append(external_job_id)
+        if result is not None: sets.append("result=?"); vals.append(json.dumps(result,ensure_ascii=False))
+        if attempts_inc: sets.append("attempts=attempts+1")
+        sets.append("updated_at=?"); vals.append(time.time()); vals.append(intent_id)
+        self._db().execute("UPDATE agent_tool_intents SET "+", ".join(sets)+" WHERE intent_id=?",vals); self._db().commit()
+
+    def list_goal_steps(self, goal_id):
+        rows=self._db().execute("SELECT step_id,goal_id,ordinal,name,status,tool_name,external_job_id,verification,error,created_at,updated_at FROM agent_goal_steps WHERE goal_id=? ORDER BY ordinal",(goal_id,)).fetchall()
+        return [{"step_id":r[0],"goal_id":r[1],"ordinal":r[2],"name":r[3],"status":r[4],"tool_name":r[5],"external_job_id":r[6],"verification":json.loads(r[7] or "{}"),"error":r[8],"created_at":r[9],"updated_at":r[10]} for r in rows]
+
+    def put_goal_step(self, goal_id, *, ordinal: int, name: str, status="PENDING", tool_name=None):
+        sid=uuid.uuid4().hex; now=time.time(); db=self._db()
+        db.execute("INSERT INTO agent_goal_steps(step_id,goal_id,ordinal,name,status,tool_name,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(goal_id,ordinal) DO UPDATE SET name=excluded.name,status=excluded.status,tool_name=excluded.tool_name,updated_at=excluded.updated_at",(sid,goal_id,int(ordinal),name,status,tool_name,now,now)); db.commit()
+        return next((x for x in self.list_goal_steps(goal_id) if x["ordinal"]==int(ordinal)),None)

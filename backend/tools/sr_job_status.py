@@ -6,7 +6,7 @@ Companion to run_sr: the agent submits a job, then polls it here until terminal
 
 from __future__ import annotations
 
-from backend.services import slurm
+from backend.services import slurm, run_sr, store as store_mod
 from .contract import err, ok, tool
 
 
@@ -36,7 +36,11 @@ def run_sr_job_status(**params) -> dict:
     except (KeyError, TypeError, ValueError) as e:
         return err(f"bad params: {e}")
     try:
-        data = slurm.job_status(job_id)
+        task = next((t for t in store_mod.default_store().list_sr_tasks(limit=10000)
+                     if t.get("job_id") == job_id), None)
+        # Keep one authoritative status implementation.  The fallback is for
+        # legacy callers that have a scheduler job without an sr_tasks row.
+        data = run_sr.query_job_status(job_id, task=task) if task else slurm.job_status(job_id)
     except Exception as e:  # noqa: BLE001 — contract boundary
         return err(f"{type(e).__name__}: {e}")
     return ok(data)

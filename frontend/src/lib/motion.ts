@@ -7,17 +7,19 @@ export const VIEW_RESET_MS = 140;
  *  `CARD_ENTER_MS` 与 style.css 的 `--motion-fade` 同值 —— 两边只许一起改，
  *  motion.test.ts 会读 style.css 把这条等式钉住。 */
 export const CARD_CASCADE_MS = 1800;
-/** 逐条固定间隔：6 条以内每张比上一张晚 300ms 入场（延迟按条数线性累计）。 */
+/** 逐条固定间隔：每张比上一张晚 300ms 入场，**不随份数摊薄**。 */
 export const CARD_STEP_MS = 300;
 export const CARD_ENTER_MS = 120;
 
-/** 第 `i` 张卡（共 `n` 张）的入场延迟：6 条以内按 `CARD_STEP_MS` 固定累计；
- *  超过 6 条时等距压进同一个 `CARD_CASCADE_MS` 窗口（步长按份数摊薄），
- *  末张连同淡入仍收在窗口末尾，不会随份数线性拖长。
- *  6 条 × 300ms = 1500ms + 120ms 淡入仍在 1800ms 内，所以边界条数也是严格 300ms。 */
-export function cascadeDelay(i: number, n: number): number {
+/** 窗口内能排满步长的卡数：6 张（5 × 300ms + 120ms 淡入 = 1620ms ≤ 1800ms）。
+ *  第 7 张若照排要到 1920ms 才落定，于是干脆省略它的入场动画。 */
+export const CARD_STAGGER_MAX = Math.floor((CARD_CASCADE_MS - CARD_ENTER_MS) / CARD_STEP_MS) + 1;
+
+/** 第 `i` 张卡（共 `n` 张）的入场延迟；`undefined` 表示这张不做入场动画。
+ *  前 `CARD_STAGGER_MAX` 张坚持 `CARD_STEP_MS` 固定累计（份数再多也不压缩步长）；
+ *  其后的卡片直接显示 —— 批次越大，省掉的是尾巴，不是节奏。 */
+export function cascadeDelay(i: number, n: number): number | undefined {
   if (n <= 1) return 0;
-  const span = CARD_CASCADE_MS - CARD_ENTER_MS;
-  const step = Math.min(CARD_STEP_MS, span / (n - 1));
-  return Math.round(step * i);
+  if (i >= CARD_STAGGER_MAX) return undefined;
+  return i * CARD_STEP_MS;
 }

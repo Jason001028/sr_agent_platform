@@ -596,8 +596,9 @@ def _resolve_existing(task: dict, run_cmd=None) -> dict:
         return {"reuse": True, "status": "RESUMED_COMPLETED",
                 "state": st["state"], "exit_code": st["exit_code"],
                 "idempotent": True, **base}
-    # terminal failure (FAILED/CANCELLED/TIMEOUT/...) or no scheduler record
-    # (UNKNOWN) → the prior job is not worth reusing; fall through to rerun.
+    if st["state"] == "UNKNOWN":
+        raise RuntimeError("run_sr: previous job state is UNKNOWN; reconcile the external scheduler before retrying")
+    # terminal failure (FAILED/CANCELLED/TIMEOUT...) may be explicitly retried.
     return {"reuse": False, "previous_state": st["state"],
             "previous_exit_code": st["exit_code"], "previous_job_id": job_id}
 
@@ -686,6 +687,11 @@ def submit_run_sr(params: dict, run_cmd=None, store=None) -> dict:
     store.put_sr_task(fp, params, status="new", job_id=None,
                       config_xml=str(cfg_path), batch_script=str(script_path),
                       log_dir=str(work))
+    intent_goal = str(params.get("goal_id") or ("sr:" + fp))
+    intent = store.create_tool_intent(goal_id=intent_goal, tool_name="run_sr",
+        args=params, idempotency_key=fp, side_effect_class="RECONCILE_REQUIRED",
+        replay_policy="RECONCILE_BEFORE_REPLAY")
+    store.update_tool_intent(intent["intent_id"], status="EXECUTING", attempts_inc=True)
 
     if local:
         # job_id reserved above → reuse it, do not draw a second one.
@@ -697,6 +703,8 @@ def submit_run_sr(params: dict, run_cmd=None, store=None) -> dict:
     store.update_sr_task_job(fp, job_id=job_id, status="submitted",
                              config_xml=str(cfg_path),
                              batch_script=str(script_path), log_dir=str(work))
+    store.update_tool_intent(intent["intent_id"], status="SUBMITTED",
+                             external_job_id=int(job_id), result={"job_id": int(job_id)})
 
     out = {"job_id": job_id, "status": "SUBMITTED",
            "config_xml": str(cfg_path), "batch_script": str(script_path),

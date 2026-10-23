@@ -162,8 +162,8 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
 </template>
 
 <style scoped>
-/* 与 NoticeModal 同一套 token（--surface / --line / --r-card / --shadow-pop），
-   但它不是模态：没有压暗背景，右上角一张卡片，点外面就关。 */
+/* 与工具栏同一套语义 token（--tb-*）：白底、灰绿细描边、10px 圆角、轻量投影。
+   它不是模态：没有压暗背景，右上角一张卡片，点外面就关。 */
 .set-catch {
   position: fixed;
   inset: 0;
@@ -171,7 +171,9 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
 }
 .set-panel {
   position: fixed;
-  top: 60px;          /* 工具栏 52px + 8px 缝 */
+  /* 品牌导航（--topbar-h 52px）+ 工具栏 48px + 8px 缝：浮层落在工具栏**下方**，
+     不压住右端的「提交 SR / 设置」两键。 */
+  top: calc(var(--topbar-h) + 56px);
   right: 16px;
   z-index: 100;
   display: flex;
@@ -179,14 +181,14 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
   gap: 12px;
   width: 320px;
   padding: 14px 16px;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--r-card);
+  background: var(--tb-surface);
+  border: 1px solid var(--tb-border);
+  border-radius: 10px;
   box-shadow: var(--shadow-pop);
   font-size: 12px;
-  color: var(--ink-body);
+  color: var(--tb-fg);
 }
-.set-title { color: var(--ink); font-size: 14px; font-weight: 600; }
+.set-title { color: var(--tb-fg); font-size: 14px; font-weight: 600; }
 
 .set-row { display: flex; flex-direction: column; gap: 6px; }
 .set-row-cache {
@@ -196,15 +198,16 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
   gap: 10px;
 }
 
-/* 开关：与 CompareBar 的 .cmp-mode 同一族（按钮 + .on，全仓没有 type=checkbox） */
+/* 开关：与 CompareBar 的 .cmp-mode 同一族（按钮 + .on，全仓没有 type=checkbox）。
+   选中面取工具栏的 --tb-active-*，浮层与工具栏是同一套视觉语言。 */
 .set-sw {
   align-self: flex-start;
   height: 26px;
   padding: 0 12px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--tb-border);
   border-radius: var(--r-pill);
-  background: var(--surface-2);
-  color: var(--ink-sub);
+  background: var(--tb-bg);
+  color: var(--tb-muted);
   font-family: inherit;
   font-size: 12px;
   font-weight: 600;
@@ -212,13 +215,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
   white-space: nowrap;
   transition: background var(--motion-hover) var(--ease-standard), color var(--motion-hover) var(--ease-standard), border-color var(--motion-hover) var(--ease-standard);
 }
-.set-sw:hover { color: var(--accent-deep); }
+.set-sw:hover { color: var(--tb-active-fg); }
 .set-sw.on {
-  background: var(--accent-soft);
-  border-color: var(--accent-2);
-  color: var(--accent-deep);
+  background: var(--tb-active-bg);
+  border-color: var(--tb-active-border);
+  color: var(--tb-active-fg);
 }
-.set-note { color: var(--ink-sub); font-size: 11px; line-height: 1.6; opacity: 0.9; }
+.set-note { color: var(--tb-muted); font-size: 11px; line-height: 1.6; opacity: 0.9; }
 .set-note code {
   font-family: var(--font-mono);
   font-size: 0.95em;
@@ -228,33 +231,33 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
 }
 /* 预取结果行：与说明同字号，但**不透明度更低** —— 它是过程回执，不是说明。 */
 .set-out {
-  color: var(--ink-sub);
+  color: var(--tb-muted);
   font-size: 11px;
   line-height: 1.6;
   opacity: 0.75;
 }
 
-.set-line { color: var(--ink-sub); }
-.set-num { color: var(--ink); font-variant-numeric: tabular-nums; }
+.set-line { color: var(--tb-muted); }
+.set-num { color: var(--tb-fg); font-variant-numeric: tabular-nums; }
 .set-clear {
   flex: none;
   height: 26px;
   padding: 0 12px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--tb-border);
   border-radius: var(--r-pill);
-  background: var(--surface-2);
-  color: var(--ink-sub);
+  background: var(--tb-bg);
+  color: var(--tb-muted);
   font-family: inherit;
   font-size: 12px;
   cursor: pointer;
   transition: background var(--motion-hover) var(--ease-standard), color var(--motion-hover) var(--ease-standard);
 }
-.set-clear:hover:not(:disabled) { color: var(--accent-deep); background: var(--chrome); }
+.set-clear:hover:not(:disabled) { color: var(--tb-active-fg); background: var(--tb-hover); }
 .set-clear:disabled { opacity: 0.5; cursor: not-allowed; }
-.set-row-developer { border-top: 1px solid var(--line); padding-top: 10px; }
+.set-row-developer { border-top: 1px solid var(--tb-divider); padding-top: 10px; }
 .set-dev-form { display: flex; gap: 7px; align-items: center; }
-.set-dev-input { flex: 1; min-width: 0; height: 28px; padding: 0 9px; border: 1px solid var(--line); border-radius: var(--r-ctrl); background: var(--surface-2); color: var(--ink); font: inherit; font-size: 12px; }
-.set-dev-input:focus { border-color: var(--accent-2); outline: none; }
+.set-dev-input { flex: 1; min-width: 0; height: 28px; padding: 0 9px; border: 1px solid var(--tb-border); border-radius: 8px; background: var(--tb-bg); color: var(--tb-fg); font: inherit; font-size: 12px; }
+.set-dev-input:focus { border-color: var(--tb-focus); outline: none; }
 .set-dev-status { color: var(--ok); font-size: 11px; line-height: 1.5; }
 .set-dev-error { color: var(--err); font-size: 11px; }
 </style>

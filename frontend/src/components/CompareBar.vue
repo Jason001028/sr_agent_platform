@@ -66,7 +66,7 @@ function pick(kind: 'input' | 'product' | 'nosr') {
           <span class="cmp-chip-a">左</span>
           <span class="cmp-chip-b">右</span>
           <span class="cmp-legend-text">
-            拖放落在哪半就进哪半；滚轮与拖动同步作用两侧
+            拖放至左右侧；左右同步预览
           </span>
         </span>
         <button
@@ -112,10 +112,10 @@ function pick(kind: 'input' | 'product' | 'nosr') {
   margin: 8px 12px 0;
   padding: 6px 10px;
   background: var(--surface);
-  border: 1px solid var(--line);
+  border: 1px solid var(--tb-divider);
   border-radius: var(--r-ctrl);
   font-size: 12px;
-  color: var(--ink-body);
+  color: var(--tb-fg);
   overflow: hidden;
 }
 .cmp-bar-fade-enter-active,
@@ -128,13 +128,15 @@ function pick(kind: 'input' | 'product' | 'nosr') {
   gap: 2px;
   flex: none;
 }
+/* 三选一的选中态与工具栏的模式激活同一套 token（--tb-active-*），
+   两者说的是同一件事：对比模式还开着。 */
 .cmp-mode {
   height: 26px;
   padding: 0 12px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--tb-border);
   border-radius: var(--r-pill);
-  background: var(--surface-2);
-  color: var(--ink-sub);
+  background: var(--tb-bg);
+  color: var(--tb-muted);
   font-family: inherit;
   font-size: 12px;
   font-weight: 600;
@@ -142,18 +144,18 @@ function pick(kind: 'input' | 'product' | 'nosr') {
   white-space: nowrap;
   transition: background var(--motion-hover) var(--ease-standard), color var(--motion-hover) var(--ease-standard), border-color var(--motion-hover) var(--ease-standard);
 }
-.cmp-mode:hover { color: var(--accent-deep); }
+.cmp-mode:hover { color: var(--tb-active-fg); }
 .cmp-mode.on {
-  background: var(--accent-soft);
-  border-color: var(--accent-2);
-  color: var(--accent-deep);
+  background: var(--tb-active-bg);
+  border-color: var(--tb-active-border);
+  color: var(--tb-active-fg);
 }
 
 .cmp-sep {
   flex: none;
   width: 1px;
   height: 18px;
-  background: var(--line);
+  background: var(--tb-divider);
 }
 
 .cmp-legend {
@@ -177,15 +179,15 @@ function pick(kind: 'input' | 'product' | 'nosr') {
   flex: none;
   height: 26px;
   padding: 0 12px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--tb-border);
   border-radius: var(--r-ctrl);
-  background: var(--surface-2);
-  color: var(--ink-body);
+  background: var(--tb-bg);
+  color: var(--tb-fg);
   font-family: inherit;
   font-size: 12px;
   cursor: pointer;
 }
-.cmp-reset:hover { color: var(--accent-deep); border-color: var(--accent-2); }
+.cmp-reset:hover { color: var(--tb-active-fg); border-color: var(--tb-active-border); }
 
 .cmp-scenes {
   display: flex;
@@ -196,16 +198,16 @@ function pick(kind: 'input' | 'product' | 'nosr') {
 .cmp-scene {
   height: 26px;
   padding: 0 10px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--tb-border);
   border-radius: var(--r-ctrl);
-  background: var(--surface-2);
-  color: var(--ink-body);
+  background: var(--tb-bg);
+  color: var(--tb-fg);
   font-family: inherit;
   font-size: 12px;
   cursor: pointer;
   white-space: nowrap;
 }
-.cmp-scene:hover:not(:disabled) { color: var(--accent-deep); border-color: var(--accent-2); }
+.cmp-scene:hover:not(:disabled) { color: var(--tb-active-fg); border-color: var(--tb-active-border); }
 .cmp-scene:disabled { opacity: 0.5; cursor: not-allowed; }
-.cmp-note { color: var(--ink-faint); white-space: nowrap; }
+.cmp-note { color: var(--tb-muted); white-space: nowrap; }
 </style>

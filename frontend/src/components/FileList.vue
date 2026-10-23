@@ -2,14 +2,16 @@
 /**
  * FileList.vue — 侧栏文件列表 + 收起/展开（tif-viewer.html #sidebar + addListItem 直译）
  * ------------------------------------------------------------------
- * 每项：小图预览 / 名称 / 大小·W×H·布局 / 状态标签行（绿红）/ × 移除 / active 高亮。
+ * 每项为横向紧凑布局：左侧 96×96 方形缩略图（contain，浅灰绿底），右侧自上而下
+ * 环节标签 / 两行省略的文件名 / W×H·大小·布局 / 状态标签行；× 移除浮在卡片右上角。
  * 收起 toggle 秒出无动画（HTML sideToggle）。
  * （HTML 的「JPG 导出状态 + 重新导出」一栏随浏览器 JPG 导出链路一并删去。）
  *
  * 「点亮」（.lit）：点右侧《待修复清单》里的一行时，同一景的卡片加橘色描边并滚到眼前
  * （`viewer.lightCards` → 这里的 `litTick` 看守）。**只用 outline** —— 它不占布局，
  * 与 `.active` 的 box-shadow 正交，所以一张卡可以同时是「正在编辑」和「刚被点亮」。
- * 模板里**没有**新增任何节点：`.name` 那一行的 textContent 有 e2e 逐字断言。
+ * `.name` 的 textContent 有 e2e 断言（按文件名找卡）：小标与文件名之间**不留空白文本
+ * 节点**，`.fname` 只负责两行截断。
  */
 import { computed, watch, onMounted, onUnmounted } from 'vue';
 import type { ComponentPublicInstance } from 'vue';
@@ -167,7 +169,7 @@ function linkTag(note: string): string {
         @dragstart="store.startRecDrag(rec, $event)"
         @dragend="store.endRecDrag()"
       >
-        <FileThumb :rec="rec" />
+        <FileThumb :rec="rec" :size="96" />
         <!-- 多选的眼睛：勾选态一眼可见。卡片整块可点，这颗只是指示器。 -->
         <span
           v-if="store.selectMode && !rec.pending"
@@ -202,43 +204,41 @@ function linkTag(note: string): string {
         >
           <AppIcon name="camera" :size="14" />
         </button>
-        <!-- × 是 float:right，必须留在**名字行里面**：放到缩略图之前会让浮动框去挤
-             横幅那个块（横幅是 BFC，会为了避开浮动而整体缩窄），视觉上就是缩略图缺一角。 -->
-        <div class="name">
-          <span
-            v-if="!rec.pending && !store.selectMode"
-            class="close"
-            title="移除"
-            @click.stop="store.removeRec(rec.id)"
-          >×</span>
-          <!-- 三颗小标挤在一行里、**不留换行**：换行会被 Vue 编成空白文本节点，
-               名字的 textContent 会多出空格（e2e 有整串比对名字的断言）。间距一律
-               由 CSS 的 margin-right 给。 -->
-          <template v-if="rec.route === 'jpg'"><span class="scn" :title="SCENE_TITLE">盘阵</span><span v-if="rec.sceneDir" class="ord" :title="ORD_TITLE">{{ store.sceneOrdinalOf(rec) }}</span><span class="stage" :class="rec.stageKind" :title="STAGE_TITLE">{{ rec.stageLabel }}</span></template>{{ rec.name }}
-        </div>
-        <div class="meta">
-          <!-- 占位卡没有尺寸可言，但这一行**留在原地**：补齐时不至于整卡跳一下。 -->
-          <template v-if="rec.pending">—</template>
-          <template v-else>
-            {{ fmtBytes(rec.size) }}
-            <template v-if="rec.W"> · {{ rec.W }}×{{ rec.H }}</template>
-            <template v-if="rec.layout"> · {{ rec.layout }}</template>
-          </template>
-        </div>
-        <!-- 状态与关联结果同排一行、都做成短标签（2026-09-18）：原先两者各占一行，
-             且各自又把文件名抄了一遍 —— 一张卡三行里三处同名。
-             关联原因仍然单独一个字段：rec.status 会被解码进度/结果覆盖，写在那里
-             等于没写（用户只看得到「完成，解码耗时…」）。整句理由进 title。 -->
-        <div class="tags">
-          <span class="status" :class="rec.statusCls" :title="rec.pendingError">{{ rec.status }}</span>
-          <!-- 中间产物：说清它与本体的关系。卡片上那三颗小标只说「哪一景、哪个环节」，
-               这一条说的是「所以你不能对它做什么」。 -->
-          <span
-            v-if="isIntermediateStage(rec.stageKind)"
-            class="link-tag ro-tag"
-            :title="RO_TITLE"
-          >仅对比，不作修复</span>
-          <span v-if="rec.linkNote" class="link-tag" :title="rec.linkNote">{{ linkTag(rec.linkNote) }}</span>
+        <!-- × 浮在卡片右上角（不占右侧文字列）；多选与占位卡不给删除入口。 -->
+        <span
+          v-if="!rec.pending && !store.selectMode"
+          class="close"
+          title="移除"
+          @click.stop="store.removeRec(rec.id)"
+        >×</span>
+        <div class="card-body">
+          <!-- title 挂整条文件名：两行省略后靠悬停仍能看全称。 -->
+          <div class="name" :title="rec.name">
+            <!-- 三颗小标挤在文件名上方、**不留换行**：换行会被 Vue 编成空白文本节点，
+                 名字的 textContent 会多出空格（e2e 有整串比对名字的断言）。间距一律
+                 由 CSS 的 margin-right 给。 -->
+            <template v-if="rec.route === 'jpg'"><span class="scn" :title="SCENE_TITLE">盘阵</span><span v-if="rec.sceneDir" class="ord" :title="ORD_TITLE">{{ store.sceneOrdinalOf(rec) }}</span><span class="stage" :class="rec.stageKind" :title="STAGE_TITLE">{{ rec.stageLabel }}</span></template><span class="fname">{{ rec.name }}</span>
+          </div>
+          <div class="meta">
+            <!-- 占位卡没有尺寸可言，但这一行**留在原地**：补齐时不至于整卡跳一下。 -->
+            <template v-if="rec.pending">—</template>
+            <template v-else><template v-if="rec.W">{{ rec.W }}×{{ rec.H }} · </template>{{ fmtBytes(rec.size) }}<template v-if="rec.layout"> · {{ rec.layout }}</template></template>
+          </div>
+          <!-- 状态与关联结果同排一行、都做成短标签（2026-09-18）：原先两者各占一行，
+               且各自又把文件名抄了一遍 —— 一张卡三行里三处同名。
+               关联原因仍然单独一个字段：rec.status 会被解码进度/结果覆盖，写在那里
+               等于没写（用户只看得到「完成，解码耗时…」）。整句理由进 title。 -->
+          <div class="tags">
+            <span class="status" :class="rec.statusCls" :title="rec.pendingError">{{ rec.status }}</span>
+            <!-- 中间产物：说清它与本体的关系。卡片上那三颗小标只说「哪一景、哪个环节」，
+                 这一条说的是「所以你不能对它做什么」。 -->
+            <span
+              v-if="isIntermediateStage(rec.stageKind)"
+              class="link-tag ro-tag"
+              :title="RO_TITLE"
+            >仅对比，不作修复</span>
+            <span v-if="rec.linkNote" class="link-tag" :title="rec.linkNote">{{ linkTag(rec.linkNote) }}</span>
+          </div>
         </div>
       </div>
     </template>
@@ -250,9 +250,8 @@ function linkTag(note: string): string {
 
 <style scoped>
 /* 侧栏：浅莫兰迪 chrome，白文件卡浮其上；选中青绿描边。
-   宽度 400：生产全名（约 40 字）与下面那行尺寸/布局说明在这个宽度里能排开，
-   再窄就得靠 break-all 从词中间断开，一行文件名看着像坏了；右侧栏同样是 400，
-   两栏对齐。小图预览横幅要的横向空间也在这里出（见 FileThumb.vue）。 */
+   宽度 400：左侧 96 方块之后仍留出约 270px 给文件名（两行截断）与元信息；
+   右侧栏同样是 400，两栏对齐。缩略图的方形尺寸见 FileThumb.vue 的 compact 形态。 */
 .sidebar {
   width: 400px;
   flex: none;
@@ -304,22 +303,36 @@ function linkTag(note: string): string {
 }
 .side-toggle:hover { color: var(--accent-deep); background: var(--accent-soft); }
 
+/* 横向紧凑布局：左 96 方块 + 右信息列。信息列在方块高度里垂直居中，
+   卡片高度由缩略图决定（96 + 上下内距 8×2 = 112 + 描边）。 */
 .file-item {
-  position: relative;               /* 相机键的定位基准（叠在缩略图右上角） */
-  padding: 10px 12px;
-  margin-bottom: 8px;
+  position: relative;               /* 勾选/收藏/相机/× 的定位基准 */
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  margin-bottom: 6px;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--r-ctrl);
   cursor: pointer;
-  transition: border-color var(--motion-hover) var(--ease-standard), box-shadow var(--motion-hover) var(--ease-standard);
+  transition: border-color var(--motion-hover) var(--ease-standard), box-shadow var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard);
+}
+.card-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  /* 右上角的 × 下面是空白区，文字列不必再让位。 */
 }
 .file-item:hover { border-color: #d6ddd9; }
 /* 一键解析的占位卡：清单行已排上、还没有身份。不可点/拖/删，所以不给悬停反馈。 */
 .file-item.pending { cursor: default; }
 .file-item.pending:hover { border-color: var(--line); }
-/* 批量入列：从右侧滑入的错峰淡入（延迟由 rec.enterDelay 内联给出，t² 分配 ——
-   整批先快后慢）。`both` 保证延迟期间不可见，否则卡片会先整块出现、再闪一次。 */
+/* 批量入列：从右侧滑入的错峰淡入（延迟由 rec.enterDelay 内联给出；前 6 张按 300ms
+   逐条入场，其后没有 enterDelay 的卡片直接显示）。`both` 保证延迟期间不可见，
+   否则卡片会先整块出现、再闪一次。 */
 .file-item.entering { animation: card-in var(--motion-fade) var(--ease-enter) both; }
 @keyframes card-in {
   from { opacity: 0; transform: translateX(16px); }
@@ -343,10 +356,11 @@ function linkTag(note: string): string {
   background: var(--line);
 }
 
-/* 多选指示器：缩略图左上角。空心圈 = 未选，实心青绿 + 勾 = 已选。 */
+/* 多选指示器：缩略图左上角（方块从 8px 处起，内缩 4px）。空心圈 = 未选，
+   实心青绿 + 勾 = 已选。 */
 .file-item .pick {
   position: absolute;
-  top: 14px; left: 16px;
+  top: 12px; left: 12px;
   width: 20px; height: 20px;
   display: flex; align-items: center; justify-content: center;
   border: 1.5px solid var(--line-strong, #c9d2cd);
@@ -363,7 +377,7 @@ function linkTag(note: string): string {
 /* 收藏标：缩略图左上角的小金星底座。点它取消收藏（多选时让位给勾选圈）。 */
 .file-item .fav-chip {
   position: absolute;
-  top: 14px; left: 16px;
+  top: 12px; left: 12px;
   width: 20px; height: 20px;
   display: flex; align-items: center; justify-content: center;
   padding: 0;
@@ -395,11 +409,11 @@ function linkTag(note: string): string {
   to { outline-color: var(--notice-job); outline-offset: 1px; }
 }
 /* 截图键：平时隐形，悬停/键盘聚焦/当前卡才露出来。用 opacity 不用 display ——
-   显示态切换会让按钮在悬停瞬间挤动周围内容。缩略图高 96px、卡片内距 10/12，
-   所以 top:14 right:16 正好落在小图右上角的留白里。 */
+   显示态切换会让按钮在悬停瞬间挤动周围内容。方块 96 从 (8,8) 起，
+   所以 left:76 top:12 正好落在小图右上角（内缩 4px）。 */
 .file-item .shot-add {
   position: absolute;
-  top: 14px; right: 16px;
+  top: 12px; left: 76px;
   width: 24px; height: 24px;
   display: flex; align-items: center; justify-content: center;
   padding: 0;
@@ -423,7 +437,21 @@ function linkTag(note: string): string {
   outline: 2px solid var(--accent-3); outline-offset: 1px;
 }
 
-.file-item .name { font-weight: 600; color: var(--ink); word-break: break-all; }
+.file-item .name {
+  min-width: 0;
+  font-weight: 600;
+  color: var(--ink);
+  font-size: 12.5px;
+  line-height: 1.45;
+  word-break: break-all;
+}
+/* 文件名最多两行，超出省略；完整名在 .name 的 title 里。 */
+.file-item .fname {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 /* 名字行里的小标（盘阵 / 序号 / 环节）：同一条基线、同样的圆角与内距，
    `vertical-align: 1px` 把 10px 的小方块抬到与名字的视觉中线上。
    间距只在每个小标自己的 margin-right 上 —— 模板里刻意没有换行。 */
@@ -454,9 +482,17 @@ function linkTag(note: string): string {
 .file-item .name .stage.input { color: var(--accent-deep); background: var(--accent-soft); border-color: var(--accent-1); }
 .file-item .name .stage.product { color: var(--cmp-a); background: var(--cmp-a-bg); border-color: var(--cmp-a-line); }
 .file-item .name .stage.nosr { color: var(--cmp-b); background: var(--cmp-b-bg); border-color: var(--cmp-b-line); }
-.file-item .meta { color: var(--ink-sub); font-size: 11px; margin-top: 3px; }
+/* 分辨率 · 大小 · 布局：一行到底，放不下就省略（密度优先）。 */
+.file-item .meta {
+  color: var(--ink-sub);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 /* 状态与关联结果同排一行，都是短标签（见模板注释）。 */
-.file-item .tags { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 4px; }
+.file-item .tags { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .file-item .status, .file-item .link-tag {
   font-size: 10px;
   line-height: 1.7;
@@ -476,14 +512,19 @@ function linkTag(note: string): string {
 /* 只读（中间产物）：比「未找到目录」重一档 —— 那条是「没关联上」，这条是
    「关联上了，但这份不是可修复对象」，得让眼睛停一下。 */
 .file-item .ro-tag { color: var(--warn); border-color: var(--warn-line); background: var(--warn-bg); }
+/* × 在卡片右上角，悬停才上色；absolute 不参与信息列的排布。 */
 .file-item .close {
-  float: right;
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  z-index: 1;
   color: var(--ink-faint);
   cursor: pointer;
   font-size: 15px;
   line-height: 1;
-  padding: 0 4px;
+  padding: 1px 4px;
   border-radius: 4px;
+  transition: color var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard);
 }
 .file-item .close:hover { color: var(--err); background: var(--err-bg); }
 </style>

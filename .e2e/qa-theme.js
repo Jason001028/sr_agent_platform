@@ -67,20 +67,25 @@ function startApiServer() {
     const brand = document.querySelector('.app-nav .brand');
     const act = document.querySelector('.nav-links a.router-link-exact-active');
     const cs = (el, p) => getComputedStyle(el).getPropertyValue(p).trim();
+    const ps = (el, pseudo, p) => getComputedStyle(el, pseudo).getPropertyValue(p).trim();
     return {
-      navBg: cs(bar, 'background-color'), navH: cs(bar, 'height'),
+      navBg: cs(bar, 'background-color'), navBgImage: cs(bar, 'background-image'), navH: cs(bar, 'height'),
       brandCol: cs(brand, 'color'),
       activeBg: cs(act, 'background-color'), activeCol: cs(act, 'color'), activeBold: cs(act, 'font-weight'),
+      activeIndH: ps(act, '::after', 'height'), activeIndBg: ps(act, '::after', 'background-color'),
       bodyBg: cs(document.body, 'background-color'),
     };
   });
   check('body 莫兰迪绿 #ACC7BE', nav.bodyBg, MINT);
-  check('nav 透明融入底色（非纯色块）', nav.navBg, 'rgba(0, 0, 0, 0)');
-  check('nav 高度', nav.navH, '56px');
-  check('brand 藏青近黑', nav.brandCol, 'rgb(21, 16, 47)');
-  check('激活页签白底胶囊高亮', nav.activeBg, 'rgba(255, 255, 255, 0.85)');
-  check('激活页签深色文字', nav.activeCol, 'rgb(21, 16, 47)');
+  // 2026-10-23 起品牌导航是深松绿纯色（Deep Forest），不再是透明带或绿色渐变
+  check('nav 深松绿纯色 #173F3B', nav.navBg, 'rgb(23, 63, 59)');
+  check('nav 无渐变', nav.navBgImage, 'none');
+  check('nav 高度', nav.navH, '52px');
+  check('brand 浅白', nav.brandCol, 'rgb(247, 251, 249)');
+  check('激活页签无胶囊底（改指示线）', nav.activeBg, 'rgba(0, 0, 0, 0)');
+  check('激活页签浅白文字', nav.activeCol, 'rgb(247, 251, 249)');
   check('激活页签加粗', nav.activeBold, '600');
+  check('激活页签底部 2px 指示线', nav.activeIndH + ' | ' + nav.activeIndBg, '2px | rgb(134, 208, 199)');
 
   // —— 盘阵场景 ——
   const sp = await page.evaluate(() => {
@@ -158,6 +163,8 @@ function startApiServer() {
 
   // —— 查看器浅色 ——
   await page.goto(base + '/viewer', { waitUntil: 'load' });
+  // 查看器是懒加载路由：load 事件之后 Vue 才把 .toolbar 挂上来，不等就会读到 null
+  await page.waitForSelector('.toolbar', { timeout: 10000 });
   const vp = await page.evaluate(() => {
     const tb = document.querySelector('.toolbar');
     const sb = document.querySelector('.sidebar');
@@ -170,13 +177,16 @@ function startApiServer() {
       stBg: cs(st, 'background-color'),
       barBg: cs(bar, 'background-color'), barCol: cs(bar, 'color'),
       chooseBg: cs(document.querySelector('.toolbar .btn'), 'background-image'),
+      chooseColor: cs(document.querySelector('.toolbar .btn'), 'background-color'),
     };
   });
-  check('工具栏白色', vp.tbBg, 'rgb(255, 255, 255)');
+  // 2026-10-23 起工具栏是雾白浅底（Mist White），打开影像不再是高权重主按钮
+  check('工具栏雾白 #F5F8F6', vp.tbBg, 'rgb(245, 248, 246)');
+  check('工具栏底分隔线 #D8E3DF', vp.tbBottom, 'rgb(216, 227, 223)');
   check('文件栏白色', vp.sbBg, 'rgb(255, 255, 255)');
   check('画布浅中性井位', vp.stBg, 'rgb(233, 237, 235)');
   check('状态栏白底', vp.barBg, 'rgb(255, 255, 255)');
-  check('选择TIF=渐变主按钮', vp.chooseBg && vp.chooseBg.indexOf('gradient') >= 0 ? 'gradient' : vp.chooseBg, 'gradient');
+  check('打开影像=白底描边普通按钮', vp.chooseBg + ' | ' + vp.chooseColor, 'none | rgb(255, 255, 255)');
 
   for (const line of out) console.log(line);
   const fails = out.filter(l => l.startsWith('FAIL'));

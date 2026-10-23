@@ -5,6 +5,8 @@
    - 背景：#ACC7BE 莫兰迪薄荷绿，占页面大半，所有内容模块承载于白色浮层；
    - 强调：#87CDCC→#3DA9A4→#2DA4A2 青绿渐变，仅用于主按钮/选中态/图表；
    - 结构：#ECECF0 极浅冷灰描边分隔，#F6F5FA 次级浅面。
+   - 顶部两层导航（2026-10-23）：品牌导航 --nav-*（深松绿纯色）/
+     影像工具栏 --tb-*（雾白浅底），与上面的页面配色各自独立。
    组件级 scoped 样式一律引用下方变量，勿写死色值。
    ========================================================================== */
 :root {
@@ -26,11 +28,33 @@
   --accent-deep: #1E7B78;             /* 青绿面上的深文字/可读青绿 */
   --accent-ink: #2C8F8B;              /* 强调文字（青绿里更沉的一档） */
 
-  /* ---- 孔雀石深带（结构带：导航 / 查看器工具栏）：主题色的高对比锚点 ---- */
-  --band-1: #26837F;                  /* 深带·亮端（其上白字对比 ≥4.5） */
-  --band-2: #15615F;                  /* 深带·暗端 */
-  --band-grad: linear-gradient(180deg, var(--band-1), var(--band-2));
-  --on-band: #ffffff;                 /* 深带上的文字/图标 */
+  /* ---- Deep Forest × Mist White（2026-10-23）：顶部两层导航各用一套语义 token ----
+     品牌主导航（深松绿纯色）与影像工具栏（雾白浅底）是**两层不同**的结构带，
+     原先共用一条 --band-grad 渐变，拆开后各自可独立调，互不牵连：
+     深色只留给品牌，浅色交给工具，影像工作区因此成为视觉中心。 */
+  --nav-bg: #173F3B;                  /* 品牌导航底（纯色，无渐变） */
+  --nav-fg: #F7FBF9;                  /* 品牌导航上的主文字 */
+  --nav-muted: #D4E4DF;               /* 默认导航项文字 */
+  --nav-hover: rgba(255, 255, 255, 0.09);
+  --nav-indicator: #86D0C7;           /* 当前路由的 2px 指示线 */
+
+  --tb-bg: #F5F8F6;                   /* 影像操作工具栏底（雾白） */
+  --tb-surface: #FFFFFF;              /* 控件面 */
+  --tb-border: #CCDAD5;               /* 控件描边 */
+  --tb-divider: #D8E3DF;              /* 工具栏底部分隔线 / 组间细线 */
+  --tb-fg: #213C38;                   /* 控件主文字 */
+  --tb-muted: #48615D;                /* 辅助文字 */
+  --tb-hover: #EBF3F0;                /* 普通按钮 hover 面 */
+  --tb-active-bg: #E3F2EF;            /* 模式激活面（对比 / 绘制） */
+  --tb-active-fg: #155C57;            /* 模式激活文字与图标 */
+  --tb-active-border: #9FCBC3;        /* 模式激活描边 */
+  --tb-primary: #166C67;              /* 主要业务动作（提交 SR）实心底 */
+  --tb-primary-hover: #135954;
+  --tb-primary-fg: #FFFFFF;
+  --tb-disabled-bg: #EFF3F1;
+  --tb-disabled-fg: #60736D;
+  --tb-disabled-border: #E1E8E4;
+  --tb-focus: #2D968F;                /* 键盘焦点 / 输入框聚焦描边 */
 
   /* ---- 文字色阶 ---- */
   --ink: #120E26;                     /* 标题/关键数值（近黑藏青） */
@@ -76,7 +100,7 @@
   --r-pill: 999px;   /* 标签/导航胶囊 */
   --shadow-card: 0 4px 16px rgba(46, 90, 78, 0.08);
   --shadow-pop: 0 10px 30px rgba(46, 90, 78, 0.14);
-  --topbar-h: 56px;
+  --topbar-h: 52px;   /* 品牌主导航高度（与 .app-nav 一致） */
   --page-pad: 24px;
   --page-w: 1360px;   /* 内容页统一最大宽度（场景库/任务队列/聊天同宽） */
 
@@ -128,31 +152,34 @@ body {
   height: 100%;
 }
 
-/* 顶栏：孔雀石绿深带（全站结构带/唯一强锚点，白字）；当前项 = 白字 + 半透明白圆角底高亮 */
+/* 顶栏：Deep Forest 深松绿纯色（品牌锚点，全站唯一深色带）。
+   与下方雾白工具栏形成「深品牌 → 浅工具 → 影像区」三层，影像成为视觉中心。
+   当前项 = 白字 + 底部 2px 青绿指示线（由 Vue Router 的 exact-active 决定，不另设页面状态）。 */
 .app-nav {
   display: flex;
   align-items: center;
   gap: 28px;
   padding: 0 24px;
   height: var(--topbar-h);
-  color: var(--on-band);
+  color: var(--nav-fg);
   flex: none;
-  background: var(--band-grad);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+  background: var(--nav-bg);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.10);
 }
 
 /* 品牌区：一颗 logo（见 .brand-mark）+ 平台名。
-   名字比四个导航项大一号（18px 对 14px）—— 它是「这是哪个平台」的锚点，导航项是
+   名字比导航项大一号（16px 对 14px）—— 它是「这是哪个平台」的锚点，导航项是
    「去哪儿」，两者不该同级；`.nav-links a` 的字号因此一个字不动。 */
 .app-nav .brand {
-  font-weight: 700;
-  font-size: 18px;
+  font-weight: 600;
+  font-size: 16px;
   letter-spacing: 0.2px;
-  color: var(--on-band);
+  color: var(--nav-fg);
   text-decoration: none;
   display: inline-flex;
   align-items: center;
   gap: 10px;
+  flex: none;
 }
 
 /* logo 预留区：min-width 兜住 28×28，所以「服务器上还没放 logo」时也占着这块地方，
@@ -166,14 +193,14 @@ body {
   justify-content: center;
   flex: none;
 }
-/* 占位小方块：原先是 .brand 的 ::before，现在搬进预留区居中；有真 logo 时让位 */
+/* 占位小方块：原先是 .brand 的 ::before，现在搬进预留区居中；有真 logo 时让位。
+   只保留一颗静态小方块 —— 深色底上已够看清，不再套外发光。 */
 .app-nav .brand-mark::before {
   content: '';
   width: 10px;
   height: 10px;
   border-radius: 3px;
-  background: #fff;
-  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.22);
+  background: var(--nav-fg);
 }
 .app-nav .brand.has-logo .brand-mark::before {
   display: none;
@@ -189,29 +216,48 @@ body {
   display: block;
 }
 
+/* 一级导航：透明底文字项，hover 才出现浅底；激活态不再用胶囊白底 + 阴影，
+   改为底部 2px 指示线（36px 高的链接在 52px 导航里竖向居中，线落在导航底边上）。 */
 .nav-links {
   display: flex;
-  gap: 6px;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex-wrap: nowrap;
 }
 
 .nav-links a {
-  color: rgba(255, 255, 255, 0.9);
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 36px;
+  padding: 0 14px;
+  color: var(--nav-muted);
   text-decoration: none;
   font-size: 14px;
   font-weight: 500;
-  padding: 7px 16px;
-  border-radius: var(--r-pill);
+  white-space: nowrap;
+  border-radius: 6px;
   transition: background var(--motion-hover) var(--ease-standard), color var(--motion-hover) var(--ease-standard);
 }
 .nav-links a:hover {
-  color: #fff;
-  background: rgba(255, 255, 255, 0.14);
+  color: var(--nav-fg);
+  background: var(--nav-hover);
 }
 .nav-links a.router-link-exact-active {
-  color: #fff;
+  color: var(--nav-fg);
   font-weight: 600;
-  background: rgba(255, 255, 255, 0.22);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+  background: transparent;
+}
+.nav-links a.router-link-exact-active::after {
+  content: '';
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: -8px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--nav-indicator);
 }
 
 .app-main {

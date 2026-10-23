@@ -105,14 +105,15 @@ async function main() {
       `logo 预留区占住 ${MARK_H}×${MARK_H}（实测 ${mark.w}×${mark.h}）— 放了 logo 也不挤名字`);
 
     // 平台名比四个导航项大一号，且**只有**名字变
+    // （2026-10-23 Deep Forest 改版：名字 18px → 16px，导航项仍 14px）
     const font = await page.evaluate(() => ({
       brand: getComputedStyle(document.querySelector('.brand-name')).fontSize,
       nav: Array.from(document.querySelectorAll('.nav-links a'))
         .map((a) => getComputedStyle(a).fontSize),
     }));
-    assert(font.brand === '18px', `平台名字号=${font.brand}`);
+    assert(font.brand === '16px', `平台名字号=${font.brand}`);
     // 导航项个数会随功能增删（「插件管理」、扩展注册的入口），那条约定管的是**字号**：
-    // 名字 18px、导航一律 14px。钉死 4 个会让这个 Phase 2 脚本在加一个页签后整体空跑。
+    // 名字 16px、导航一律 14px。钉死 4 个会让这个 Phase 2 脚本在加一个页签后整体空跑。
     assert(font.nav.length >= 4 && font.nav.every((s) => s === '14px'),
       `导航项仍是 14px（${font.nav.join('/')}）`);
 

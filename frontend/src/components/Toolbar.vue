@@ -125,7 +125,7 @@ watch(
       :disabled="store.busy"
       @click="fileInput?.click()"
     >
-      <AppIcon name="image" :size="15" />
+      <AppIcon name="image" :size="15" tint />
       选择影像…
     </button>
     <input
@@ -163,6 +163,10 @@ watch(
       </button>
     </span>
 
+    <!-- 组间分隔：左段「打开 / 拉伸 / 定位」与中段「对比 / 预览档位」都是看图前先定的参数，
+         但性质不同（对一张图动、对两张图动），用一条 1px 细线分开，不另加大面积容器。 -->
+    <span class="tb-sep" aria-hidden="true"></span>
+
     <!-- 图像对比：开启位置在定位与预览档位之间（都是「看图方式」的控件）。
          点它展开/收起工具栏下方那条 CompareBar（三选一 + 场景芯片）。
          注意本条只在**关闭态**才收起，正对比时再点它只是折叠那条区域、不改模式。 -->
@@ -176,7 +180,7 @@ watch(
         : '图像对比：点选对比（拖入即覆盖当前这张）或分屏对比（左右各一张、缩放平移同步）'"
       @click="store.setCmpStripOpen(!store.cmpStripOpen)"
     >
-      <AppIcon name="layers" :size="15" />
+      <AppIcon name="layers" :size="15" tint />
       图像对比{{ store.compareOn ? ' · ' + cmpModeLabel : '' }}
     </button>
 
@@ -231,13 +235,15 @@ watch(
           : '这张图没有盘阵目录，掩码无处可写'"
       @click="store.bakeMaskToServer()"
     >
-      <AppIcon name="upload" :size="15" />
+      <AppIcon name="upload" :size="15" tint />
       {{ store.srBusy ? '写入中…' : '保存掩码到盘阵' }}
     </button>
+    <span class="tb-sep" aria-hidden="true"></span>
+    <!-- 提交 SR：工具栏里**唯一**的实心主按钮，且只在真正可提交时才呈现这个权重
+         （`srReady` 是业务判据，不是 class 判出来的）；不可提交时落到禁用样式。 -->
     <button
       type="button"
-      class="outbtn grad"
-      :class="{ on: srReady }"
+      class="outbtn primary"
       :disabled="store.srBusy || !srReady"
       :title="intermediate ? roTitle
         : srReady
@@ -245,7 +251,7 @@ watch(
           : '提交 SR 需要盘阵目录：到「场景库」页打开该场景，或让本地文件按文件名关联'"
       @click="store.submitSr()"
     >
-      <AppIcon name="square-chart-gantt" :size="15" />
+      <AppIcon name="square-chart-gantt" :size="15" tint />
       提交 SR
     </button>
 
@@ -261,231 +267,222 @@ watch(
       title="设置：对比模式的后台预取、本地预览缓存"
       @click="store.setSettingsOpen(!store.settingsOpen)"
     >
-      <AppIcon name="settings" :size="15" />
+      <AppIcon name="settings" :size="15" tint />
       设置
     </button>
   </div>
 </template>
 
 <style scoped>
-/* 工具栏：孔雀石绿深带（与顶部导航同族的结构带）；控件 = 白/浅底 pill 浮其上，形成强对比 */
+/* ==========================================================================
+   影像操作工具栏：雾白浅底 + 白底细描边控件（2026-10-23，Deep Forest × Mist White）
+   --------------------------------------------------------------------------
+   层级：品牌导航（--nav-bg 深松绿纯色）→ 本条（--tb-bg 雾白）→ 影像工作区。
+   四种按钮视觉（token 见 style.css 的 --tb-*）：
+   - Default      .btn / .outbtn / .cmp-btn / .loc-btn      白底、1px 描边、无投影；
+   - Mode Active  .outbtn.on / .cmp-btn.on                  浅青绿底，持续可见（不靠 hover）；
+   - Primary      .outbtn.primary:not(:disabled)            深青绿实心，只有「提交 SR」；
+   - Disabled     :disabled                                 浅灰底灰绿字，不可点。
+   `.btn` 仍在（首颗「选择影像」按钮 = e2e 的 `.toolbar .btn` 锚点），只是不再有独立权重。
+   图标一律 `tint`（AppIcon 用遮罩按 currentColor 着色），颜色随上面四种状态走。
+   ========================================================================== */
 .toolbar {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   padding: 0 16px;
-  height: 52px;
-  background: var(--band-grad);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.14);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+  height: 48px;
+  color: var(--tb-fg);
+  background: var(--tb-bg);
+  border-bottom: 1px solid var(--tb-divider);
   z-index: 5;
 }
 
-/* 主按钮：深带上白底 pill + 深孔雀石字（最高对比）；hover 微沉 */
-.btn {
+/* ---- 控件共通骨架：高度 / 圆角 / 描边 / 字号 / 过渡只写这一处 ---- */
+.btn,
+.outbtn,
+.cmp-btn,
+.set-btn,
+.loc-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex: none;
+  gap: 6px;
   height: 32px;
-  padding: 0 16px;
-  background: #fff;
-  color: var(--band-2);
+  /* 10px 而不是 12px：1366 下「图像对比 · 分屏」带后缀时仍要放得下右端的设置键 */
+  padding: 0 10px;
+  font-family: inherit;
   font-size: 13px;
-  font-weight: 600;
-  border: none;
-  border-radius: var(--r-ctrl);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--tb-fg);
+  background: var(--tb-surface);
+  border: 1px solid var(--tb-border);
+  border-radius: 8px;
   cursor: pointer;
   user-select: none;
-  white-space: nowrap;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
-  transition: filter var(--motion-hover) var(--ease-standard), box-shadow var(--motion-hover) var(--ease-standard);
-  gap: 6px;
+  transition: background var(--motion-hover) var(--ease-standard),
+              color var(--motion-hover) var(--ease-standard),
+              border-color var(--motion-hover) var(--ease-standard);
 }
-.btn:hover { filter: brightness(0.97); box-shadow: 0 2px 5px rgba(0, 0, 0, 0.24); }
-.btn:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; filter: none; }
+.btn:hover:not(:disabled),
+.outbtn:hover:not(:disabled),
+.cmp-btn:hover,
+.loc-btn:hover {
+  background: var(--tb-hover);
+}
+.btn:focus-visible,
+.outbtn:focus-visible,
+.cmp-btn:focus-visible,
+.set-btn:focus-visible,
+.loc-btn:focus-visible {
+  outline: 2px solid var(--tb-focus);
+  outline-offset: 1px;
+}
+.btn:disabled,
+.outbtn:disabled {
+  background: var(--tb-disabled-bg);
+  color: var(--tb-disabled-fg);
+  border-color: var(--tb-disabled-border);
+  cursor: not-allowed;
+}
 
-/* 拉伸下拉：浅底 pill（白/浅面浮深带） */
+/* 组间分隔：1px 细线分组，不再靠大面积色块 */
+.tb-sep {
+  flex: none;
+  width: 1px;
+  height: 20px;
+  margin: 0 2px;
+  background: var(--tb-divider);
+}
+
+.spacer { flex: 1; }
+
+/* ---- 拉伸下拉 ---- */
 .stretch-sel {
+  flex: none;
   height: 32px;
   padding: 0 10px;
-  background: rgba(255, 255, 255, 0.95);
-  color: var(--ink-body);
+  background: var(--tb-surface);
+  color: var(--tb-fg);
+  font-family: inherit;
   font-size: 13px;
-  border: 1px solid rgba(255, 255, 255, 0.4);
-  border-radius: var(--r-ctrl);
+  border: 1px solid var(--tb-border);
+  border-radius: 8px;
   cursor: pointer;
-  outline: none;
-  transition: border-color var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard);
+  transition: background var(--motion-hover) var(--ease-standard),
+              border-color var(--motion-hover) var(--ease-standard);
 }
-.stretch-sel:hover { border-color: #fff; }
-.stretch-sel:focus-visible { border-color: #fff; box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.28); }
+.stretch-sel:hover { background: var(--tb-hover); }
+.stretch-sel:focus-visible { outline: 2px solid var(--tb-focus); outline-offset: 1px; }
 
+/* ---- 坐标定位：一个框装「X,Y」两个数，高度对齐其余控件 ---- */
 .loc {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   flex: none;
-  color: rgba(255, 255, 255, 0.85);
   font-size: 12px;
 }
 .loc input {
   /* 一个框装两串数，宽度按**占位文本**定：「输入坐标（X,Y）:123.456,456.123」
-     在 13px 下实测 200px，加左右 padding 16px 是 216px —— 取 240px 而不是贴着放，
-     换个字体/回退字体就可能多吃几个像素，提示截成半句话比多占 24px 难看得多。
-     1366 视口下工具栏要到输入框 ~470px 才横向溢出（实测），这点加宽不挤右端的按钮。 */
-  width: 240px;
-  height: 28px;
-  padding: 0 8px;
-  background: rgba(255, 255, 255, 0.95);
-  color: var(--ink);
-  border: 1px solid rgba(255, 255, 255, 0.4);
-  border-radius: 8px;
+     在 13px 下实测 202px，加左右 padding 18px 是 220px —— 取 224px，
+     让整句提示放得下（test-vue-viewer 有「可用宽 ≥ 文本宽」的断言）；
+     同时「图像对比 · 分屏」把右段撑宽时，1366 视口仍放得下右端的设置键
+     （溢出守卫见 .e2e/test-manual-scene.js）。 */
+  width: 224px;
+  height: 32px;
+  padding: 0 9px;
+  background: var(--tb-surface);
+  color: var(--tb-fg);
+  font-family: inherit;
   font-size: 13px;
+  border: 1px solid var(--tb-border);
+  border-radius: 8px;
   outline: none;
-  transition: border-color var(--motion-hover) var(--ease-standard);
+  transition: border-color var(--motion-hover) var(--ease-standard),
+              box-shadow var(--motion-hover) var(--ease-standard);
 }
-.loc input:hover, .loc input:focus { border-color: #fff; }
-.loc-btn {
-  height: 28px;
-  padding: 0 12px;
-  background: rgba(255, 255, 255, 0.95);
-  color: var(--band-2);
-  font-size: 13px;
-  font-weight: 500;
-  border: 1px solid rgba(255, 255, 255, 0.5);
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background var(--motion-hover) var(--ease-standard);
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
+.loc input::placeholder { color: var(--tb-muted); opacity: 0.85; }
+.loc input:hover { border-color: var(--tb-active-border); }
+.loc input:focus {
+  border-color: var(--tb-focus);
+  box-shadow: 0 0 0 3px rgba(45, 150, 143, 0.16);
 }
-.loc-btn:hover { background: #fff; }
+.loc-btn { padding: 0 12px; }
 
-/* 预览档位拖动条：与 .loc 同一族的浅底 pill（白面浮深带）。整块给一个 pill 底，
-   滑轨只占其中一段 —— 深带上一条裸滑轨的对比度不够，也跟右侧按钮不成系列。 */
+/* ---- 预览档位：不再是一颗白 pill，直接坐在雾白底上（组内已用间距分开） ---- */
 .divsel {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   flex: none;
-  height: 28px;
-  padding: 0 10px;
-  background: rgba(255, 255, 255, 0.95);
-  color: var(--band-2);
+  height: 32px;
+  padding: 0 8px 0 10px;
+  color: var(--tb-muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
-  border: 1px solid rgba(255, 255, 255, 0.4);
-  border-radius: 8px;
   white-space: nowrap;
   user-select: none;
-  transition: border-color var(--motion-hover) var(--ease-standard);
 }
-.divsel:hover { border-color: #fff; }
 .divsel input[type='range'] {
-  width: 84px;
+  width: 64px;
   height: 16px;
   margin: 0;
   background: transparent;
-  accent-color: var(--band-2);
+  accent-color: var(--tb-primary);   /* 灰绿滑轨 + 青绿滑块（浏览器原生配色） */
   cursor: pointer;
 }
 .divsel input[type='range']:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.18);
+  outline: 2px solid var(--tb-focus);
+  outline-offset: 2px;
   border-radius: 8px;
 }
 
-/* 次级按钮：透明 ghost（白描边白字）；状态色以浅底 pill 表达 */
-.outbtn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 32px;
-  padding: 0 12px;
-  background: rgba(255, 255, 255, 0.1);
-  color: #fff;
-  font-size: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.35);
-  border-radius: var(--r-ctrl);
-  cursor: pointer;
-  user-select: none;
-  white-space: nowrap;
-  transition: background var(--motion-hover) var(--ease-standard), color var(--motion-hover) var(--ease-standard), border-color var(--motion-hover) var(--ease-standard);
-  gap: 6px;
-}
-.outbtn .app-icon, .set-btn .app-icon, .cmp-btn .app-icon { filter: invert(1); }
-.outbtn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.2); color: #fff; border-color: rgba(255, 255, 255, 0.6); }
-.outbtn:disabled { opacity: 0.5; cursor: not-allowed; }
-/* 激活态（绘制掩码 on / 提交SR grad.on）：白底深绿字 + 白环 = 高亮选中 */
-.outbtn.on, .outbtn.grad.on {
-  color: var(--band-2);
-  background: #fff;
-  border-color: #fff;
-  font-weight: 600;
-  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.25);
-}
-.outbtn.on .app-icon, .outbtn.grad.on .app-icon, .set-btn.on .app-icon, .cmp-btn.on .app-icon {
-  filter: none;
-}
-
-.spacer { flex: 1; }
-
-/* 图像对比：与 .outbtn 同一套形态（深色工具栏上的描边按钮），单独一个类名是为了
-   在「已开启」时换一套更醒目的白底 —— 对比模式是个**模式**，得一眼看出还开着。
-   宽度预算：1366 下工具栏还有约 470px 余量（见下方注释），这颗约 92px / 带后缀约 140px。 */
-.cmp-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 32px;
-  padding: 0 12px;
-  background: rgba(255, 255, 255, 0.1);
-  color: #fff;
-  font-size: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.35);
-  border-radius: var(--r-ctrl);
-  cursor: pointer;
-  user-select: none;
-  white-space: nowrap;
-  transition: background var(--motion-hover) var(--ease-standard), color var(--motion-hover) var(--ease-standard), border-color var(--motion-hover) var(--ease-standard);
-  gap: 10px;
-}
-.cmp-btn:hover { background: rgba(255, 255, 255, 0.2); border-color: rgba(255, 255, 255, 0.6); }
+/* ---- 模式激活：图像对比开启 / 绘制掩码开启。持续可见，不依赖 hover；
+        hover 时保持同一底色，免得一碰就「掉激活」。 ---- */
+.outbtn.on,
 .cmp-btn.on {
-  color: var(--band-2);
-  background: #fff;
-  border-color: #fff;
+  background: var(--tb-active-bg);
+  border-color: var(--tb-active-border);
+  color: var(--tb-active-fg);
   font-weight: 600;
-  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.25);
+}
+.outbtn.on:hover:not(:disabled),
+.cmp-btn.on:hover {
+  background: var(--tb-active-bg);
 }
 
-/* 设置：与 .outbtn 同一形态（深带上描边按钮），最右端一枚。
-   宽度预算：1366 下右端这串还有百余像素余量，这颗「设置」约 56px。 */
-.set-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 32px;
-  padding: 0 12px;
-  background: rgba(255, 255, 255, 0.1);
-  color: #fff;
-  font-size: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.35);
-  border-radius: var(--r-ctrl);
-  cursor: pointer;
-  user-select: none;
-  white-space: nowrap;
-  transition: background var(--motion-hover) var(--ease-standard), color var(--motion-hover) var(--ease-standard), border-color var(--motion-hover) var(--ease-standard);
-  gap: 10px;
-}
-.set-btn:hover { background: rgba(255, 255, 255, 0.2); border-color: rgba(255, 255, 255, 0.6); }
-.set-btn.on {
-  color: var(--band-2);
-  background: #fff;
-  border-color: #fff;
+/* ---- 主要业务按钮：只有「提交 SR」且可提交时才是深青绿实心 ----
+   放在共通 hover 规则之后，同特异度下以本段为准。 */
+.outbtn.primary:not(:disabled) {
+  background: var(--tb-primary);
+  border-color: var(--tb-primary);
+  color: var(--tb-primary-fg);
   font-weight: 600;
-  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.25);
 }
+.outbtn.primary:not(:disabled):hover {
+  background: var(--tb-primary-hover);
+  border-color: var(--tb-primary-hover);
+}
+
+/* ---- 设置：Ghost 按钮（无底无框），打开浮层时给一层比模式激活更轻的浅青绿 ---- */
+.set-btn {
+  background: transparent;
+  border-color: transparent;
+  color: var(--tb-muted);
+}
+.set-btn:hover {
+  background: var(--tb-hover);
+  color: var(--tb-fg);
+}
+.set-btn.on {
+  background: var(--tb-active-bg);
+  border-color: transparent;
+  color: var(--tb-active-fg);
+}
+.set-btn.on:hover { background: var(--tb-active-bg); }
 </style>
