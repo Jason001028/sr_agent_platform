@@ -36,6 +36,8 @@ from backend.services import plugins as plugin_svc
 from backend.services.trajectory import TrajectoryRecorder
 from backend.tools.contract import ToolRegistry, default_registry
 from backend.tools.contract import list_tools
+from backend.agent.round_outcome import RoundOutcome
+from backend.services.goal_lease import current_lease
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are the SR (super-resolution) agent for a remote-sensing processing "
@@ -382,10 +384,14 @@ def call_tool(name, arguments_json, registry: ToolRegistry | None = None,
     return active.invoke(name, arguments_json, source="agent")
 
 
-def _default_chat(cfg: Config):
+def _default_chat(cfg: Config, *, round_seconds=None):
     if cfg.llm_mock:
         return _mock_chat(cfg)
     client = build_client(cfg)
+    if round_seconds is not None:
+        # Durable scheduling owns retry accounting. Bound a single request as
+        # well as the checks between turns; SDK retries must not bypass budget.
+        client = client.with_options(timeout=min(cfg.llm_timeout, round_seconds), max_retries=0)
     # 一次回合内同一张截图的 data URL 只拼一次（每个 LLM 调用都会过一遍水合）。
     image_cache: dict[str, str] = {}
 
@@ -459,7 +465,9 @@ def _transcript_from(messages: list[dict]) -> list[dict]:
 def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM_PROMPT,
              chat=None, verbose=False, store=None, session_id=None,
              resume=False, on_step=None, registry: ToolRegistry | None = None,
-             context=None, machine_id=None, stream=None):
+             context=None, machine_id=None, stream=None, durable=False,
+             max_model_calls=None, max_tool_calls=32, max_seconds=60,
+             tool_executor=None, result_hook=None, before_model=None):
     """Run the loop; returns {"ok", "turns", "messages", "answer", "error",
     "session_id"}.
 
@@ -503,7 +511,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
         raise ValueError("run_loop requires cfg or context")
 
     if chat is None:
-        chat = _default_chat(cfg)
+        chat = _default_chat(cfg, round_seconds=max_seconds if durable else None)
 
     if stream is None:
         stream = bool(getattr(cfg, "llm_stream", True))
@@ -520,8 +528,11 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
             # repair an unclosed turn first, then continue the conversation
             # with the caller's new prompt as the next user message.
             messages = _repair_unclosed_turn(persisted)
-            messages.append({"role": "user", "content": prompt})
-            store.append_message(session_id, messages[-1])
+            for repaired in messages[len(persisted):]:
+                store.append_message(session_id, repaired)
+            if prompt is not None:
+                messages.append({"role": "user", "content": prompt})
+                store.append_message(session_id, messages[-1])
             transcript = _transcript_from(messages)
         else:
             messages = None
@@ -531,6 +542,8 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
         transcript = []
 
     if messages is None:
+        if prompt is None:
+            raise ValueError("a new session requires a prompt")
         messages = [{"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt}]
         transcript = []
@@ -554,8 +567,13 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
             system_prompt=system_prompt, tools=tools)
 
     def finish_run(result: dict) -> dict:
+        result.setdefault("outcome", RoundOutcome.COMPLETED_CANDIDATE if result.get("ok") else RoundOutcome.FAILED)
+        result["checkpoint"] = {"session_id": session_id}
+        result["model_calls"] = model_calls
+        result["tool_calls"] = tool_count
+        result["elapsed_seconds"] = time.monotonic() - round_started
         if trajectory is not None:
-            status = "succeeded" if result.get("ok") else "failed"
+            status = "yielded" if result["outcome"] in {RoundOutcome.BUDGET_YIELD, RoundOutcome.WAITING_EXTERNAL, RoundOutcome.CONTINUE} else ("succeeded" if result.get("ok") else "failed")
             trajectory.finish(status=status, answer=result.get("answer"),
                               error=result.get("error"))
             result["run_id"] = trajectory.run_id
@@ -569,8 +587,24 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
 
     usage = _empty_usage()
     call_index = 0
+    model_calls = tool_count = 0
+    round_started = time.monotonic()
+
+    def yielded(outcome, turn, **extra):
+        return finish_run({"ok": True, "outcome": outcome, "turns": turn,
+                           "messages": transcript, "answer": None, "error": None,
+                           "session_id": session_id, "usage": usage, **extra})
+
+    def check_owner():
+        lease = current_lease.get()
+        if lease is not None:
+            lease.check(store)
 
     for turn in range(1, max_turns + 1):
+        check_owner()
+        if durable and ((max_model_calls is not None and model_calls >= max_model_calls)
+                        or time.monotonic() - round_started >= max_seconds):
+            return yielded(RoundOutcome.BUDGET_YIELD, turn - 1)
         if trajectory is not None:
             trajectory.event("turn_start", turn=turn, status="running")
         llm_started = time.time()
@@ -584,6 +618,9 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
         if stream:
             on_delta, delta_state = _delta_sink(on_step)
         try:
+            if before_model is not None:
+                before_model()
+            model_calls += 1
             if on_delta is not None:
                 out = chat(messages, tools, on_delta=on_delta)
             else:
@@ -608,8 +645,11 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                 store.set_session_status(session_id, "error")
             return finish_run({"ok": False, "turns": turn, "messages": transcript,
                                "answer": None, "error": error,
-                               "session_id": session_id, "usage": usage})
+                               "session_id": session_id, "usage": usage,
+                               "outcome": RoundOutcome.RETRYABLE_ERROR if isinstance(e, (TimeoutError, ConnectionError)) or getattr(e, "status_code", None) in (408,429,500,502,503,504) else RoundOutcome.FAILED,
+                               "error_class": "model_call"})
 
+        check_owner()
         content = out.get("content")
         tool_calls = out.get("tool_calls") or []
         llm_finished = time.time()
@@ -666,7 +706,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
             if on_step is not None and content:
                 on_step({"type": "assistant", "content": content})
             if store is not None:
-                store.set_session_status(session_id, "done")
+                store.set_session_status(session_id, "active" if durable else "done")
             return finish_run({"ok": True, "turns": turn, "messages": transcript,
                                "answer": content or "", "error": None,
                                "session_id": session_id, "usage": usage})
@@ -692,6 +732,13 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
             on_step({"type": "assistant", "content": content})
 
         for tc in tool_calls:
+            check_owner()
+            if durable and (tool_count >= max_tool_calls or time.monotonic() - round_started >= max_seconds):
+                # Defer the remaining declarations explicitly. They have never
+                # been executed; closing them keeps provider history valid.
+                for pending in tool_calls[tool_calls.index(tc):]:
+                    commit({"role":"tool", "tool_call_id":pending["id"], "content":json.dumps({"ok":False,"data":None,"error":"not executed: round budget; request again next round"})})
+                return yielded(RoundOutcome.BUDGET_YIELD, turn)
             tool_started = time.time()
             tool_event = None
             if trajectory is not None:
@@ -704,13 +751,16 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
             if on_step is not None:
                 on_step({"type": "tool_call", "name": tc["name"],
                          "args": _parse_args(tc["arguments"])})
-            if registry is None:
+            tool_count += 1
+            if tool_executor is not None:
+                result = tool_executor(tc, lambda: call_tool(tc["name"], tc["arguments"], registry=active_registry, allowed_names=allowed_names))
+            elif registry is None:
                 # Preserve the two-argument seam used by existing callers/tests.
-                    if allowed_names is None:
-                        result = call_tool(tc["name"], tc["arguments"])
-                    else:
-                        result = call_tool(tc["name"], tc["arguments"],
-                                           allowed_names=allowed_names)
+                if allowed_names is None:
+                    result = call_tool(tc["name"], tc["arguments"])
+                else:
+                    result = call_tool(tc["name"], tc["arguments"],
+                                       allowed_names=allowed_names)
             else:
                 result = call_tool(tc["name"], tc["arguments"],
                                    registry=active_registry,
@@ -736,11 +786,19 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                     "content": json.dumps(result, ensure_ascii=False)})
             transcript.append({"role": "tool", "name": tc["name"],
                                "tool_call_id": tc["id"], "content": result})
+            if result_hook is not None:
+                control = result_hook(tc, result)
+                if control:
+                    for pending in tool_calls[tool_calls.index(tc)+1:]:
+                        commit({"role":"tool", "tool_call_id":pending["id"], "content":json.dumps({"ok":False,"data":None,"error":"not executed: external wait; request again after wake"})})
+                    return yielded(control["outcome"], turn, **{k:v for k,v in control.items() if k != "outcome"})
         if trajectory is not None:
             trajectory.event("turn_end", turn=turn, status="completed",
                              payload={"has_tool_calls": True,
                                       "tool_call_count": len(tool_calls)})
 
+    if durable:
+        return yielded(RoundOutcome.BUDGET_YIELD, max_turns)
     error = f"max_turns={max_turns} reached"
     if verbose:
         print(f"[loop] {error}")

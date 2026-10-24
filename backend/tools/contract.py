@@ -80,11 +80,18 @@ class ToolRegistry:
                 payload = arguments
             if not isinstance(payload, dict):
                 return err("tool arguments must be a JSON object")
+            from backend.services.goal_lease import current_lease, current_tool, LeaseLost
+            lease, execution = current_lease.get(), current_tool.get()
+            if lease is not None and execution is not None:
+                lease.check(execution["store"])
             result = item.run(**payload)
             if not isinstance(result, dict) or not {"ok", "data", "error"}.issubset(result):
                 return err(f"工具 {name} 返回了无效结果")
             return result
         except Exception as exc:  # noqa: BLE001 — contract boundary
+            from backend.services.goal_lease import LeaseLost
+            if isinstance(exc, LeaseLost):
+                raise
             return err(f"{type(exc).__name__}: {exc}")
 
 

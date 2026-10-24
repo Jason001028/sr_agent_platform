@@ -33,6 +33,42 @@ import os
 import sqlite3
 import time
 import uuid
+import threading
+from contextlib import contextmanager, nullcontext
+from functools import wraps
+
+from backend.services.goal_lease import current_lease, LeaseLost
+
+
+class _Transaction:
+    """Legacy Store methods may commit; the outer fenced write owns commit."""
+    def __init__(self, connection):
+        self.connection = connection
+
+    def execute(self, sql, *args):
+        if sql.strip().upper().startswith("BEGIN"):
+            return self.connection.execute("SELECT 1")
+        return self.connection.execute(sql, *args)
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+
+def _fenced_write(method):
+    @wraps(method)
+    def write(self, *args, **kwargs):
+        lease = current_lease.get()
+        if lease is None:
+            return method(self, *args, **kwargs)
+        with lease.lock, self.worker_transaction():
+            return method(self, *args, **kwargs)
+    return write
 
 DEFAULT_DB = "sr_agent.db"
 
@@ -279,10 +315,15 @@ def _ensure_columns(db: sqlite3.Connection) -> None:
     第一次提交的时刻），回填等于把一个错数固化进历史。老行的耗时显示「—」。
     sessions.pinned 是新列，DEFAULT 0 让老会话保持未置顶。
     """
-    added = _add_missing_columns(db, "sr_tasks", _SR_TASK_ADDED_COLUMNS)
-    added = _add_missing_columns(db, "sessions", _SESSION_ADDED_COLUMNS) or added
-    if added:
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        _add_missing_columns(db, "sr_tasks", _SR_TASK_ADDED_COLUMNS)
+        _add_missing_columns(db, "sessions", _SESSION_ADDED_COLUMNS)
+        _add_missing_columns(db, "agent_goals", (("lease_token", "TEXT"),))
         db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
 
 def default_db_path() -> str:
@@ -302,26 +343,88 @@ class Store:
 
     def __init__(self, path=None):
         self.path = str(path or default_db_path())
-        self._conn: sqlite3.Connection | None = None
+        self._local = threading.local()
+        self._connections = set()
+        self._connections_lock = threading.Lock()
+        self._generation = 0
+
+    @property
+    def _conn(self):
+        if getattr(self._local, "generation", None) != self._generation:
+            return None
+        return getattr(self._local, "conn", None)
+
+    @_conn.setter
+    def _conn(self, value):
+        self._local.conn = value
+        self._local.generation = self._generation
+        if value is not None:
+            with self._connections_lock:
+                self._connections.add(value)
 
     def _db(self) -> sqlite3.Connection:
+        if getattr(self._local, "transaction", None) is not None:
+            return self._local.transaction
         if self._conn is None:
             parent = os.path.dirname(os.path.abspath(self.path))
             if parent:
                 os.makedirs(parent, exist_ok=True)
-            # check_same_thread=False: 阶段5 API 跨线程共用同一 Store
-            # （SSE chat 在 to_thread 里写、sync 端点在 threadpool、poller 在
-            # event loop），SQLite 自带行锁 + busy timeout 兜底并发写。
+            # One connection per thread: chat, REST and Goal workers must not
+            # interleave BEGIN/COMMIT on the same connection. SQLite serializes
+            # independent connections through BEGIN IMMEDIATE + busy timeout.
             self._conn = sqlite3.connect(self.path, timeout=10,
                                          check_same_thread=False)
             self._conn.executescript(_SCHEMA)
             _ensure_columns(self._conn)
         return self._conn
 
-    def close(self) -> None:
+    @contextmanager
+    def worker_transaction(self):
+        """Fence the complete write, including nested legacy commit calls."""
+        if getattr(self._local, "transaction", None) is not None:
+            yield self._db()
+            return
+        lease = current_lease.get()
+        with lease.lock if lease else nullcontext():
+            db = self._db()
+            db.execute("BEGIN IMMEDIATE")
+            self._local.transaction = _Transaction(db)
+            original_version = lease.version if lease else None
+            try:
+                deadline = None
+                if lease is not None:
+                    deadline = lease.check(self)["lease_until"]
+                yield self._local.transaction
+                # A long transaction can outlive the lease even while SQLite
+                # prevents takeover. Releasing our token inside this transaction
+                # is intentional, so check its admitted deadline at commit.
+                if lease is not None and (lease.stopped.is_set() or time.time() >= deadline):
+                    raise LeaseLost("goal lease expired before transaction commit")
+                db.commit()
+            except BaseException:
+                db.rollback()
+                if lease is not None:
+                    lease.version = original_version
+                raise
+            finally:
+                self._local.transaction = None
+
+    def close_thread(self) -> None:
+        """Release only this thread; a Goal round must not close HTTP handles."""
         if self._conn is not None:
+            with self._connections_lock:
+                self._connections.discard(self._conn)
             self._conn.close()
             self._conn = None
+
+    def close(self) -> None:
+        """Application/test teardown closes all per-thread connections."""
+        with self._connections_lock:
+            self._generation += 1
+            for connection in self._connections:
+                connection.close()
+            self._connections.clear()
+        self._conn = None
 
     # ---- sessions ---------------------------------------------------------
 
@@ -1096,12 +1199,12 @@ class Store:
                 "max_rounds": row[11], "rounds_used": row[12],
                 "max_model_calls": row[13], "model_calls_used": row[14],
                 "error": row[15], "created_at": row[16], "updated_at": row[17],
-                "finished_at": row[18]}
+                "finished_at": row[18], "lease_token": row[19]}
 
     _GOAL_COLS = ("goal_id, session_id, request_key, title, status, phase, checkpoint, "
                   "version, lease_owner, lease_until, next_wake_at, max_rounds, "
                   "rounds_used, max_model_calls, model_calls_used, error, created_at, "
-                  "updated_at, finished_at")
+                  "updated_at, finished_at, lease_token")
 
     def get_goal(self, goal_id: str):
         return self._goal_row(self._db().execute(
@@ -1124,10 +1227,11 @@ class Store:
             if request_key:
                 old = self.get_goal_by_request_key(request_key)
                 if old: db.rollback(); return old
-            db.execute(f"INSERT INTO agent_goals ({self._GOAL_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            safe_cp = {k: v for k, v in (checkpoint or {}).items() if k == "acceptance"}
+            db.execute(f"INSERT INTO agent_goals ({self._GOAL_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                        (gid, session_id, request_key, title, status, phase,
-                        json.dumps(checkpoint or {}, ensure_ascii=False), 0, None, None, now,
-                        int(max_rounds), 0, int(max_model_calls), 0, None, now, now, None))
+                        json.dumps(safe_cp, ensure_ascii=False), 0, None, None, now,
+                        max(1,int(max_rounds)), 0, max(1,int(max_model_calls)), 0, None, now, now, None, None))
             self._append_goal_event_tx(db, gid, "goal_created", {"status": status})
             db.commit()
         except Exception:
@@ -1160,16 +1264,26 @@ class Store:
     def transition_goal(self, goal_id: str, status: str, *, phase: str | None=None,
                         checkpoint: dict | None=None, error: str | None=None,
                         next_wake_at: float | None=None, expected_version: int | None=None,
-                        event_type: str | None=None, event_payload: dict | None=None) -> dict | None:
+                        event_type: str | None=None, event_payload: dict | None=None,
+                        lease_token=None, release=False, rounds_inc=0, model_calls_inc=0,
+                        _verification=False) -> dict | None:
         valid = {"QUEUED","RUNNING","WAITING_EXTERNAL","VERIFYING","RETRY_WAIT","PAUSED","BLOCKED","COMPLETED","FAILED","CANCELLED"}
         if status not in valid: raise ValueError(f"invalid goal status: {status}")
+        if status == "COMPLETED" and not _verification:
+            raise ValueError("COMPLETED requires the backend Goal verifier")
         db=self._db(); db.execute("BEGIN IMMEDIATE")
         try:
             old=self.get_goal(goal_id)
             if not old: db.rollback(); return None
             if expected_version is not None and old["version"] != expected_version: db.rollback(); return None
+            if lease_token is not None and (old["lease_token"] != lease_token or not old["lease_until"] or old["lease_until"] <= time.time()):
+                raise LeaseLost("goal lease expired or replaced")
             now=time.time(); finished=now if status in {"COMPLETED","FAILED","CANCELLED","BLOCKED"} else None
             sets=["status=?","version=version+1","updated_at=?"]; vals=[status,now]
+            sets += ["rounds_used=rounds_used+?", "model_calls_used=model_calls_used+?"]
+            vals += [rounds_inc, model_calls_inc]
+            if release or status in {"PAUSED", "CANCELLED", "BLOCKED", "COMPLETED", "FAILED"}:
+                sets += ["lease_owner=NULL", "lease_token=NULL", "lease_until=NULL"]
             for col,val in (("phase",phase),("checkpoint",json.dumps(checkpoint,ensure_ascii=False) if checkpoint is not None else None),("error",error), ("next_wake_at",next_wake_at)):
                 if val is not None: sets.append(col+"=?"); vals.append(val)
             if finished is not None: sets.append("finished_at=?"); vals.append(finished)
@@ -1177,15 +1291,44 @@ class Store:
             self._append_goal_event_tx(db, goal_id, event_type or "goal_status", {"status":status, **(event_payload or {})})
             db.commit()
         except Exception: db.rollback(); raise
-        return self.get_goal(goal_id)
+        result = self.get_goal(goal_id)
+        lease = current_lease.get()
+        if lease is not None and lease.goal_id == goal_id:
+            lease.version = result["version"]
+        return result
 
     def claim_goal(self, goal_id: str, owner: str, *, lease_sec: float=60) -> dict | None:
-        db=self._db(); now=time.time(); until=now+lease_sec
-        cur=db.execute("UPDATE agent_goals SET lease_owner=?,lease_until=?,version=version+1,updated_at=? WHERE goal_id=? AND status IN ('QUEUED','RUNNING','RETRY_WAIT','WAITING_EXTERNAL','VERIFYING') AND (lease_until IS NULL OR lease_until<?)", (owner,until,now,goal_id,now)); db.commit()
-        return self.get_goal(goal_id) if cur.rowcount else None
+        with self.worker_transaction() as db:
+            now=time.time()
+            cur=db.execute("UPDATE agent_goals SET lease_owner=?,lease_token=?,lease_until=?,version=version+1,updated_at=? WHERE goal_id=? AND status IN ('QUEUED','RUNNING','RETRY_WAIT','WAITING_EXTERNAL','VERIFYING') AND (next_wake_at IS NULL OR next_wake_at<=?) AND (lease_until IS NULL OR lease_until<=?)", (owner,uuid.uuid4().hex,now+lease_sec,now,goal_id,now,now))
+            if not cur.rowcount: return None
+            self._append_goal_event_tx(db, goal_id, "goal_claimed", {"owner":owner})
+            return self.get_goal(goal_id)
 
-    def release_goal(self, goal_id, owner):
-        db=self._db(); db.execute("UPDATE agent_goals SET lease_owner=NULL,lease_until=NULL,updated_at=? WHERE goal_id=? AND lease_owner=?", (time.time(),goal_id,owner)); db.commit()
+    def renew_goal(self, goal_id, token, expected_version, *, lease_sec=60):
+        with self.worker_transaction() as db:
+            now=time.time()
+            cur=db.execute("UPDATE agent_goals SET lease_until=? WHERE goal_id=? AND lease_token=? AND version=? AND lease_until>?", (now+lease_sec,goal_id,token,expected_version,now))
+            return bool(cur.rowcount)
+
+    def release_goal(self, goal_id, token, expected_version):
+        with self.worker_transaction() as db:
+            cur=db.execute("UPDATE agent_goals SET lease_owner=NULL,lease_token=NULL,lease_until=NULL WHERE goal_id=? AND lease_token=? AND version=? AND lease_until>?", (goal_id,token,expected_version,time.time()))
+            return bool(cur.rowcount)
+
+    def get_sr_task_by_job(self, job_id):
+        row=self._db().execute("SELECT fingerprint FROM sr_tasks WHERE job_id=?", (job_id,)).fetchone()
+        return self.get_sr_task(row[0]) if row else None
+
+    def list_tool_intents(self, goal_id):
+        keys=self._db().execute("SELECT idempotency_key FROM agent_tool_intents WHERE goal_id=? ORDER BY created_at,intent_id", (goal_id,)).fetchall()
+        return [self.get_tool_intent(goal_id, r[0]) for r in keys]
+
+    def complete_verified_goal(self, goal_id, verification, **kwargs):
+        if verification.get("ok") is not True:
+            raise ValueError("verification did not pass")
+        return self.transition_goal(goal_id, "COMPLETED", _verification=True,
+                                    event_type="goal_verified", event_payload=verification, **kwargs)
 
     def create_tool_intent(self, *, goal_id, tool_name, args, idempotency_key, side_effect_class="READ_ONLY", replay_policy="REPLAY_READ", step_id=None):
         iid=uuid.uuid4().hex; now=time.time(); db=self._db()
@@ -1204,7 +1347,11 @@ class Store:
         if result is not None: sets.append("result=?"); vals.append(json.dumps(result,ensure_ascii=False))
         if attempts_inc: sets.append("attempts=attempts+1")
         sets.append("updated_at=?"); vals.append(time.time()); vals.append(intent_id)
-        self._db().execute("UPDATE agent_tool_intents SET "+", ".join(sets)+" WHERE intent_id=?",vals); self._db().commit()
+        db = self._db()
+        db.execute("UPDATE agent_tool_intents SET "+", ".join(sets)+" WHERE intent_id=?",vals)
+        if external_job_id is not None:
+            db.execute("UPDATE agent_goal_steps SET external_job_id=?,updated_at=? WHERE step_id=(SELECT step_id FROM agent_tool_intents WHERE intent_id=?)", (external_job_id,time.time(),intent_id))
+        db.commit()
 
     def list_goal_steps(self, goal_id):
         rows=self._db().execute("SELECT step_id,goal_id,ordinal,name,status,tool_name,external_job_id,verification,error,created_at,updated_at FROM agent_goal_steps WHERE goal_id=? ORDER BY ordinal",(goal_id,)).fetchall()
@@ -1214,3 +1361,15 @@ class Store:
         sid=uuid.uuid4().hex; now=time.time(); db=self._db()
         db.execute("INSERT INTO agent_goal_steps(step_id,goal_id,ordinal,name,status,tool_name,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(goal_id,ordinal) DO UPDATE SET name=excluded.name,status=excluded.status,tool_name=excluded.tool_name,updated_at=excluded.updated_at",(sid,goal_id,int(ordinal),name,status,tool_name,now,now)); db.commit()
         return next((x for x in self.list_goal_steps(goal_id) if x["ordinal"]==int(ordinal)),None)
+
+
+# Cover the actual write boundary, including session/trajectory/SR writes made
+# indirectly by tools. Ordinary chat calls retain their existing API.
+for _name in (
+    "create_session", "set_session_status", "append_message", "append_llm_usage",
+    "create_agent_run", "interrupt_open_agent_runs", "finish_agent_run",
+    "append_trajectory_event", "set_goal_session", "append_goal_event",
+    "transition_goal", "create_tool_intent", "update_tool_intent", "put_goal_step",
+    "put_sr_task", "update_sr_task_job", "set_sr_task_state", "complete_verified_goal",
+):
+    setattr(Store, _name, _fenced_write(getattr(Store, _name)))

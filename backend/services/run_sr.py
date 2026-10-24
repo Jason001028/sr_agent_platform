@@ -565,6 +565,10 @@ def query_job_status(job_id, task: dict | None = None, run_cmd=None) -> dict:
     return slurm.job_status(job_id, exit_code_file=exit_file)
 
 
+class SubmissionUnknown(RuntimeError):
+    """An external effect cannot safely be replayed without reconciliation."""
+
+
 def _resolve_existing(task: dict, run_cmd=None) -> dict:
     """Decide reuse-vs-rerun for a task that already has a stored job_id.
 
@@ -574,15 +578,16 @@ def _resolve_existing(task: dict, run_cmd=None) -> dict:
     repair.ts semantics — never assume the side effect didn't happen).
 
     Returns reuse dicts for active / contract-satisfying jobs (do NOT
-    resubmit); a `reuse: False` dict for terminal-failure / unknown jobs (safe
-    to rerun). Only a verdict file saying "0 exit, contract satisfied" counts
+    resubmit); a `reuse: False` dict for known terminal failures. UNKNOWN
+    raises SubmissionUnknown and requires reconciliation. Only a verdict file
+    saying "0 exit, contract satisfied" counts
     as COMPLETED — a job that exited 0 without producing SRLOG + tif is the
     silent-failure case this whole layer exists to stop caching (see the module
     docstring and docs/status/sr-local-execution.md §2.3).
     """
     job_id = task["job_id"]
     if job_id is None:
-        raise RuntimeError(
+        raise SubmissionUnknown(
             "run_sr: a previous submit for these params was interrupted before "
             "a job id was recorded; the job may or may not have reached Slurm. "
             "Do not blindly re-submit — verify the scheduler (squeue), then retry")
@@ -597,7 +602,7 @@ def _resolve_existing(task: dict, run_cmd=None) -> dict:
                 "state": st["state"], "exit_code": st["exit_code"],
                 "idempotent": True, **base}
     if st["state"] == "UNKNOWN":
-        raise RuntimeError("run_sr: previous job state is UNKNOWN; reconcile the external scheduler before retrying")
+        raise SubmissionUnknown("run_sr: previous job state is UNKNOWN; reconcile the external scheduler before retrying")
     # terminal failure (FAILED/CANCELLED/TIMEOUT...) may be explicitly retried.
     return {"reuse": False, "previous_state": st["state"],
             "previous_exit_code": st["exit_code"], "previous_job_id": job_id}
@@ -684,14 +689,24 @@ def submit_run_sr(params: dict, run_cmd=None, store=None) -> dict:
     # checkpoint the intent BEFORE the external side effect: a crash between
     # here and recording job_id leaves a job_id-less task row, and replay
     # answers "outcome unknown" instead of re-submitting (no duplicate).
-    store.put_sr_task(fp, params, status="new", job_id=None,
-                      config_xml=str(cfg_path), batch_script=str(script_path),
-                      log_dir=str(work))
-    intent_goal = str(params.get("goal_id") or ("sr:" + fp))
-    intent = store.create_tool_intent(goal_id=intent_goal, tool_name="run_sr",
-        args=params, idempotency_key=fp, side_effect_class="RECONCILE_REQUIRED",
-        replay_policy="RECONCILE_BEFORE_REPLAY")
-    store.update_tool_intent(intent["intent_id"], status="EXECUTING", attempts_inc=True)
+    from backend.services.goal_lease import current_tool, current_lease
+    execution = current_tool.get()
+    with store.worker_transaction():
+        existing = store.get_sr_task(fp)
+        if existing and (previous is None or existing["job_id"] != previous["previous_job_id"]):
+            raise SubmissionUnknown("run_sr: concurrent or uncertain submission; reconcile before retry")
+        store.put_sr_task(fp, params, status="new", job_id=None,
+                          config_xml=str(cfg_path), batch_script=str(script_path),
+                          log_dir=str(work))
+        intent_goal = current_lease.get().goal_id if current_lease.get() else ("sr:" + fp)
+        intent = execution["intent"] if execution else store.create_tool_intent(
+            goal_id=intent_goal, tool_name="run_sr", args=params,
+            idempotency_key=fp, side_effect_class="RECONCILE_REQUIRED",
+            replay_policy="RECONCILE_BEFORE_REPLAY")
+        store.update_tool_intent(intent["intent_id"], status="EXECUTING", result={"fingerprint":fp}, attempts_inc=not bool(execution))
+
+    if current_lease.get():
+        current_lease.get().check(store)
 
     if local:
         # job_id reserved above → reuse it, do not draw a second one.
@@ -700,11 +715,12 @@ def submit_run_sr(params: dict, run_cmd=None, store=None) -> dict:
         # run_cmd=None → module default _run (see _resolve_existing).
         job_id = (slurm.sbatch_submit(script_path, run_cmd=run_cmd)
                   if run_cmd is not None else slurm.sbatch_submit(script_path))
-    store.update_sr_task_job(fp, job_id=job_id, status="submitted",
-                             config_xml=str(cfg_path),
-                             batch_script=str(script_path), log_dir=str(work))
-    store.update_tool_intent(intent["intent_id"], status="SUBMITTED",
-                             external_job_id=int(job_id), result={"job_id": int(job_id)})
+    with store.worker_transaction():
+        store.update_sr_task_job(fp, job_id=job_id, status="submitted",
+                                config_xml=str(cfg_path),
+                                batch_script=str(script_path), log_dir=str(work))
+        store.update_tool_intent(intent["intent_id"], status="SUBMITTED",
+                                external_job_id=int(job_id), result={"job_id": int(job_id)})
 
     out = {"job_id": job_id, "status": "SUBMITTED",
            "config_xml": str(cfg_path), "batch_script": str(script_path),

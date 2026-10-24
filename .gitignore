@@ -17,6 +17,7 @@ release/
 docs/planning/web-plan.md
 
 # Python
+.venv/
 __pycache__/
 *.pyc
 

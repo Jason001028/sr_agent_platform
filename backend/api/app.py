@@ -1047,6 +1047,7 @@ def create_app() -> FastAPI:
                 await t
             except asyncio.CancelledError:
                 pass
+        app.state.store.close()
 
     app = FastAPI(title="sr_agent_platform api", version="0.5.0",
                   lifespan=lifespan)

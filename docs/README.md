@@ -478,6 +478,7 @@ sr_agent_platform/
 | 文档 | 内容 |
 |---|---|
 | [current-question.md](status/current-question.md) | 平台现状、当前路线、未收口项、下一步、现值速查。新会话先读 |
+| [durable_goal_runtime.md](status/durable_goal_runtime.md) | Goal/Round 执行、SR 自动续跑、Lease Fencing、独立验收与自动化验证 |
 | [sr-local-execution.md](status/sr-local-execution.md) | 本机执行 SR 的链路与运行期规则：单槽串行、重启、UNKNOWN、判定文件 |
 | [real-machine-acceptance.md](status/real-machine-acceptance.md) | 真机验收判据与勾选 |
 | [real-machine-bringup.md](status/real-machine-bringup.md) | node81-135 的部署与启动运行手册 |

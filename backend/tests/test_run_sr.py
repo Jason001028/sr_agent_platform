@@ -611,30 +611,30 @@ class TestRunSrIdempotency(unittest.TestCase):
         self.assertEqual(data["previous_job_id"], 42)
         self.assertEqual(runner.calls, ["squeue", "sbatch"])
 
-    def test_replay_unknown_reruns(self):
+    def test_replay_unknown_blocks(self):
         # No verdict file and nothing in squeue: accounting is disabled, so
-        # there is no oracle left — rerun rather than claim success.
+        # there is no reliable receipt: block without resubmitting.
         params = {**PARAMS, "lq_path": self._tmp.name}
         first = dispatch_runner()
         svc.submit_run_sr(params, run_cmd=first, store=self.store)
 
         runner = dispatch_runner(sbatch_outputs=("Submitted batch job 43\n",))
-        data = svc.submit_run_sr(params, run_cmd=runner, store=self.store)
-        self.assertEqual(data["status"], "SUBMITTED")
-        self.assertEqual(data["job_id"], 43)
-        self.assertEqual(data["previous_state"], "UNKNOWN")
-        self.assertEqual(runner.calls, ["squeue", "sbatch"])
+        with self.assertRaises(svc.SubmissionUnknown):
+            svc.submit_run_sr(params, run_cmd=runner, store=self.store)
+        self.assertEqual(runner.calls, ["squeue"])
+        self.assertEqual(first.calls.count("sbatch"), 1)
+        self.assertEqual(self.store.get_sr_task(svc.task_fingerprint(params))["job_id"],42)
 
-    def test_replay_with_unwritable_lq_path_is_unknown_not_an_error(self):
+    def test_replay_with_unreadable_verdict_blocks(self):
         # lq_path on a host that cannot read it (the dev machine's case): the
-        # verdict file is unreachable, which must degrade to a rerun, never to
-        # an exception that leaves the task neither reused nor rerun.
+        # verdict file is unreachable, so the previous effect is unknown and
+        # must be reconciled before another physical submission.
         first = dispatch_runner()
         svc.submit_run_sr(PARAMS, run_cmd=first, store=self.store)  # lq_path=/data
         runner = dispatch_runner(sbatch_outputs=("Submitted batch job 43\n",))
-        data = svc.submit_run_sr(PARAMS, run_cmd=runner, store=self.store)
-        self.assertEqual(data["status"], "SUBMITTED")
-        self.assertEqual(data["previous_state"], "UNKNOWN")
+        with self.assertRaises(svc.SubmissionUnknown):
+            svc.submit_run_sr(PARAMS, run_cmd=runner, store=self.store)
+        self.assertNotIn("sbatch", runner.calls)
 
     def test_interrupted_submit_no_job_id_does_not_resubmit(self):
         # intent recorded, sbatch outcome never persisted → outcome unknown.

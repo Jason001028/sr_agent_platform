@@ -19,6 +19,7 @@ from backend.services import run_sr as svc
 from backend.services import store as store_mod
 from backend.services.scene_search import derived_mask_path
 from .contract import err, ok, tool
+from backend.services.goal_lease import current_tool
 
 _DESC = (
     "Submit a remote-sensing super-resolution (SR) job. Assembles an SFSR "
@@ -160,7 +161,10 @@ def run_run_sr(**params) -> dict:
         "options_yml": params.get("options_yml"),
     }
     try:
-        data = svc.submit_run_sr(params, store=store_mod.default_store())
+        execution = current_tool.get()
+        data = svc.submit_run_sr(params, store=execution["store"] if execution else store_mod.default_store())
+    except svc.SubmissionUnknown as e:
+        return {**err(str(e)), "error_class":"external_unknown"}
     except Exception as e:  # noqa: BLE001 — contract boundary
         return err(f"{type(e).__name__}: {e}")
     return ok(data)

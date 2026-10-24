@@ -9,6 +9,8 @@
 
 ---
 
+Durable Goal Runtime 的执行、恢复和验收说明见 [durable_goal_runtime.md](durable_goal_runtime.md)。Goal 使用有限 Round、Lease Token Fencing 和服务端独立验收；SR 终态回灌后继续模型决策。真实模型与内网 SR/GPU 验收待核。
+
 ## 1. 平台是什么，现在能做什么
 
 遥感影像超分（SR）处理平台。浏览器查看盘阵上的大 TIF、绘制掩码、提交 SR 作业、跟踪共享队列。
