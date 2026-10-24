@@ -499,6 +499,15 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
     `resume=True` continue a persisted session: history is reloaded and an
     unclosed turn (crash mid-tool) is closed with a synthetic "outcome unknown"
     result instead of blindly re-running the tool.
+
+    With ``resume=True, prompt=None``, continue the durable history without a
+    new user message. A non-None prompt appends one real user message.
+
+    ``durable=True`` returns structured RoundOutcome values and yields safely
+    when max_turns/max_model_calls/max_tool_calls/max_seconds is exhausted.
+    ``before_model`` reserves each request before execution, ``tool_executor``
+    wraps the actual invocation, and ``result_hook`` can yield after the tool
+    result has been persisted. Ordinary chat keeps its existing budget errors.
     """
     if context is not None:
         if cfg is None:

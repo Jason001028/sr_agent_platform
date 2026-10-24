@@ -57,7 +57,7 @@ from backend.tools import build_builtin_registry
 from backend.services import preview_clear
 from backend.services import plugins as plugin_svc
 from backend.services import run_sr as run_sr_svc
-from backend.services import goal_runtime
+from backend.services import goal_runtime, goal_worker
 from backend.services import scene_search, store as store_mod
 from backend.services.preview_jpg import (PREVIEW_DIVISORS, PREVIEW_JPG_QUALITY,
                                           PreviewError, build_preview_pixels,
@@ -1037,7 +1037,7 @@ def create_app() -> FastAPI:
             asyncio.create_task(_poll_loop(app.state)),
             asyncio.create_task(_tmp_preview_purge_loop()),
             asyncio.create_task(_eager_preview_loop(app.state)),
-            asyncio.create_task(goal_runtime.goal_loop(app.state)),
+            asyncio.create_task(goal_worker.goal_loop(app.state)),
         ]
         yield
         for t in app.state.tasks:

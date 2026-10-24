@@ -152,6 +152,107 @@ class LeaseTests(unittest.TestCase):
 
 
 class LoopContinuationTests(unittest.TestCase):
+    def test_model_budget_and_callbacks_resume_without_repeating_tool(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = Store(Path(td) / "db")
+            events = []
+            seen = []
+            registry = ToolRegistry(
+                [
+                    Tool(
+                        "read",
+                        "read",
+                        {},
+                        lambda: events.append("physical_tool") or ok({"value": 1}),
+                    )
+                ]
+            )
+
+            def chat(messages, tools):
+                seen.append(list(messages))
+                events.append("model")
+                if not any(m["role"] == "tool" for m in messages):
+                    return {
+                        "content": None,
+                        "tool_calls": [
+                            {"id": "read_1", "name": "read", "arguments": "{}"}
+                        ],
+                    }
+                return {"content": "complete", "tool_calls": []}
+
+            def execute(tc, invoke):
+                events.append("tool_executor")
+                return invoke()
+
+            def hook(tc, result):
+                events.append("result_hook")
+                persisted = store.get_messages(sid[0])
+                self.assertEqual(persisted[-1]["role"], "tool")
+                self.assertEqual(json.loads(persisted[-1]["content"]), result)
+
+            sid = [store.create_session()]
+            try:
+                first = run_loop(
+                    config(),
+                    "one request",
+                    store=store,
+                    session_id=sid[0],
+                    chat=chat,
+                    registry=registry,
+                    durable=True,
+                    max_turns=8,
+                    max_model_calls=1,
+                    max_tool_calls=2,
+                    max_seconds=10,
+                    before_model=lambda: events.append("before_model"),
+                    tool_executor=execute,
+                    result_hook=hook,
+                )
+                self.assertEqual(first["outcome"], "BUDGET_YIELD")
+                self.assertTrue(first["ok"])
+                self.assertIsNone(first["error"])
+                self.assertEqual(first["model_calls"], 1)
+                self.assertEqual(first["tool_calls"], 1)
+                self.assertEqual(first["checkpoint"]["session_id"], sid[0])
+                self.assertIn("usage", first)
+                self.assertEqual(store.get_session(sid[0])["status"], "active")
+                self.assertEqual(
+                    events,
+                    [
+                        "before_model",
+                        "model",
+                        "tool_executor",
+                        "physical_tool",
+                        "result_hook",
+                    ],
+                )
+
+                second = run_loop(
+                    config(),
+                    store=store,
+                    session_id=sid[0],
+                    resume=True,
+                    chat=chat,
+                    registry=registry,
+                    durable=True,
+                    max_turns=8,
+                    max_model_calls=1,
+                    max_tool_calls=2,
+                    max_seconds=10,
+                    before_model=lambda: events.append("before_model"),
+                    tool_executor=execute,
+                    result_hook=hook,
+                )
+                self.assertEqual(second["outcome"], "COMPLETED_CANDIDATE")
+                self.assertEqual(events.count("physical_tool"), 1)
+                self.assertEqual(
+                    [m["content"] for m in seen[-1] if m["role"] == "user"],
+                    ["one request"],
+                )
+                self.assertEqual(len(store.list_agent_runs(sid[0])), 2)
+            finally:
+                store.close()
+
     def test_durable_model_request_timeout_and_sdk_retries_obey_slice(self):
         client = mock.Mock()
         client.with_options.return_value = client
@@ -876,6 +977,39 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GoalApiIntegration(unittest.TestCase):
+    def test_lifespan_starts_single_worker_entry_and_cancels_it(self):
+        from backend.api.app import create_app
+        from fastapi.testclient import TestClient
+
+        started, stopped = threading.Event(), threading.Event()
+        calls = []
+
+        async def background(state):
+            calls.append(state)
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopped.set()
+
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(
+            os.environ,
+            {
+                "SR_AGENT_DB": str(Path(td) / "db"),
+                "SR_LLM_MOCK": "1",
+                "SR_SCENES_ROOT": "",
+            },
+        ), mock.patch.object(worker, "goal_loop", background):
+            app = create_app()
+            try:
+                with TestClient(app) as client:
+                    self.assertTrue(started.wait(2))
+                    self.assertEqual(calls, [app.state])
+                    self.assertEqual(client.get("/api/health").status_code, 200)
+                self.assertTrue(stopped.is_set())
+            finally:
+                app.state.store.close()
+
     def test_invalid_acceptance_never_proves_completion(self):
         for spec in (
             {"min_sr_jobs": -1},

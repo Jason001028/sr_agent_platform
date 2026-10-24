@@ -1,9 +1,4 @@
-"""Small durable Goal runtime.
-
-The runtime deliberately owns only durable scheduling and reconciliation.  The
-existing chat loop and SR executor remain the implementations of model/tool
-work; this layer keeps their lifecycle alive after an HTTP request ends.
-"""
+"""Durable Goal REST/SSE routes; execution lives in goal_worker."""
 from __future__ import annotations
 
 import asyncio
@@ -11,7 +6,7 @@ import time
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from backend.services.goal_worker import run_round, reconcile_goal, goal_tick, goal_loop, validate_acceptance
+from backend.services.goal_worker import validate_acceptance
 
 router = APIRouter(prefix="/api/goals", tags=["goals"])
 TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "BLOCKED"}

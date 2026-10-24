@@ -28,13 +28,13 @@
 | `backend/agent/round_outcome.py` | 八种 Round Outcome；调度控制独立于模型自然语言 |
 | `backend/agent/loop.py` | 无新 Prompt 续跑、恢复消息持久化、有限预算、安全工具结果 Hook；普通聊天保留原接口 |
 | `backend/services/goal_worker.py` | 既有 Runtime 的执行适配、意图恢复、SR 对账、业务验收、单线程有界执行与续租 |
-| `backend/services/goal_runtime.py` | Goal REST/SSE；接入 Worker；创建验收条件校验；用户状态操作使用 Version |
+| `backend/services/goal_runtime.py` | Goal REST/SSE 和创建验收条件校验；用户状态操作使用 Version；不定义或转导出调度函数 |
 | `backend/services/goal_lease.py` | 当前 Worker 的 Token/Version/停止信号；工具和 Store 共用同一所有权上下文 |
 | `backend/services/store.py` | 复用既有表；迁移补充 `lease_token`；领取、续租、事务保护、每线程连接与统一关闭 |
 | `backend/services/run_sr.py` | 提交预留的事务竞争检查；Job ID、Intent 与 Step 关联；外部事实未知的专用异常 |
 | `backend/tools/run_sr.py` | 使用当前执行上下文的 Store；返回结构化不确定错误 |
 | `backend/tools/contract.py` | 真正调用注册工具前复查 Lease；所有权异常保持可识别 |
-| `backend/api/app.py` | lifespan 退出时统一关闭 Store 连接 |
+| `backend/api/app.py` | lifespan 直接启动唯一的 `goal_worker.goal_loop`；退出时统一关闭 Store 连接 |
 | `backend/tests/test_goal_runtime.py` | Mock LLM / Fake SR 的持久化闭环、故障注入、并发及 API 集成 |
 | `backend/tests/test_run_sr.py` | 固定 UNKNOWN 不重投的现行契约 |
 | `.gitignore` | 本地 `.venv/` 不入库 |
@@ -164,9 +164,10 @@ git diff --check
 
 ## 10. 实测验收数据
 
-- 全量后端：`python -m unittest discover -s backend/tests -t . -q`，839 项，5 项平台条件跳过，其余通过；实测 44.701 秒。
-- Goal 专项：`python -m unittest backend.tests.test_goal_runtime -q`，28 项；被全量执行覆盖。
-- 聊天、SR 队列、Store、SR 提交与工具注册集中回归：315 项，1 项平台条件跳过，其余通过（该命令执行时 Goal 专项为 22 项；最终新增用例已纳入全量 839 项）。
+- 全量后端：`python -m unittest discover -s backend/tests -t . -q`，841 项，5 项平台条件跳过，其余通过；实测 58.554 秒。
+- Goal 专项 30 项，被全量执行覆盖。`python -m unittest backend.tests.test_goal_runtime backend.tests.test_agent_loop -q`，62 项通过。
+- Worker/Loop 边界实测：全部预算参数与 Hook 可调用；模型调用前计数、执行拦截、工具结果持久化后的 Hook 顺序正确；模型预算让出后无 Prompt 续跑，物理工具仅执行一次。
+- lifespan 实测：直接启动一次 `goal_worker.goal_loop`，应用退出取消该任务；`goal_runtime` 只提供 REST/SSE 与验收条件校验。
 - 本机 Bash 环境校准：`python -m unittest backend.tests.test_local_exec backend.tests.test_local_chain -q`，22 项通过。
 - `python -m compileall -q backend` 与 `git diff --check` 通过。
 - 三步骤与两作业测试检查：物理提交分别为 1 次与 2 次；首次 SR 完成不触发整体验收，只有最终候选通过服务端验收产生一次 `goal_verified`。
