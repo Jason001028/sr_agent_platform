@@ -12,6 +12,7 @@
  * 关法三种：再点一次工具栏那颗按钮、点浮层外的任意处（透明捕手）、Esc。
  */
 import { onMounted, onUnmounted, ref, watch } from 'vue';
+import { useQcListStore } from '../stores/qclist';
 import { useViewerStore } from '../stores/viewer';
 import {
   clearDeveloperMode, isDeveloperMode, verifyDeveloperPassword,
@@ -19,6 +20,7 @@ import {
 import { isStreamingEnabled, setStreamingEnabled } from '../lib/streaming';
 
 const store = useViewerStore();
+const qc = useQcListStore();
 
 /** 缓存的展示值。**跟着缓存的内容走**（打开浮层时读一次，之后每逢内容变化再读一次，
     见 store 的 previewCacheRev）—— 改这份缓存的按钮（预取开关）就在这一行上面，
@@ -77,6 +79,12 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
     <!-- 透明捕手：点浮层之外的任何地方即关（比只认「关」按钮省事，也不遮住画面） -->
     <div class="set-catch" @click="store.setSettingsOpen(false)"></div>
     <div class="set-panel" data-e2e="set-panel" role="dialog" aria-label="设置">
+      <div class="set-row">
+        <button type="button" class="set-sw" :class="{ on: qc.includeOld }"
+          role="switch" :aria-checked="qc.includeOld" data-e2e="set-qc-old"
+          @click="qc.includeOld = !qc.includeOld">一键解析包含 old{{ qc.includeOld ? ' ? ON' : ' ? OFF' }}</button>
+      </div>
+
       <div class="set-title">设置</div>
 
       <div class="set-row">

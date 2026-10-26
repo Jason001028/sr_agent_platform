@@ -8,7 +8,7 @@
  * 标记弄丢；存原文而不是只存解析结果，是为了刷新后重新走一遍 parse（规则改了也能自愈）。
  */
 import { defineStore } from 'pinia';
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import {
   parseQcList, buildQcDoc, decodeQcBytes, isTerminal, QC_STATUS_LABEL,
 } from '../lib/qclist.js';
@@ -45,6 +45,8 @@ function errMsg(e: unknown): string {
 export const useQcListStore = defineStore('qclist', () => {
   /** 当前清单（parse 结果；null = 没导入）。 */
   const list = ref<QcList | null>(null);
+  const includeOld = ref(localStorage.getItem('sr.viewer.qcOld') === '1');
+  watch(includeOld, (v) => localStorage.setItem('sr.viewer.qcOld', v ? '1' : '0'));
   /** 逐行状态，按生产全名索引（不在表里 = 还没动过）。 */
   const statuses = ref<Record<string, QcStatus>>({});
   /** 导入的文件名 / 原文 / 原编码（写回时要按原编码、原换行符还原）。 */
@@ -345,6 +347,7 @@ export const useQcListStore = defineStore('qclist', () => {
     clearBakeLedger();
     viewer.insertPendingCards(rows.map((r) => r.name));
     bakeTotal.value = rows.length;
+    const withOld = includeOld.value;
     const div = viewer.previewDiv;         // 抓一次，整批沿用（中途拖滑块只影响后面那些景）
     const startedAt = Date.now();
     const ac = new AbortController();
@@ -381,6 +384,14 @@ export const useQcListStore = defineStore('qclist', () => {
               bodyIds.get(it.name)));
           return 'ok';
         },
+        old: withOld ? async (it, res) => {
+          const r = res as SceneResolveResult;
+          const sib = await apiSceneSiblings(loadSrConfig(), r.row.id, 'old');
+          const item = sib.items.find((v) => v.kind === 'product' && v.exists);
+          if (!item?.id || item.W == null || item.H == null) return;
+          const meta = { ...nosrMeta(sib, item), stageKind: 'product' as const, stageSuffix: 'old' };
+          await viewer.bakeCardPixels(viewer.insertSceneCard(meta, siblingRow(sib, item), bodyIds.get(it.name)));
+        } : undefined,
         onProgress: (i, n, it, phase) => {
           bakeDone.value = i - 1;
           bakeNow.value = progressText(i, n, it.name, div);
@@ -525,6 +536,6 @@ export const useQcListStore = defineStore('qclist', () => {
     // 一键解析
     bakeState, bakeTotal, bakeDone, bakeElapsed,
     bakeFails, bakeNotes, bakeFailList, bakeNoteList, bakeHead, bakeLine,
-    rowForScene, bakeAll, stopBake,
+    rowForScene, bakeAll, stopBake, includeOld,
   };
 });

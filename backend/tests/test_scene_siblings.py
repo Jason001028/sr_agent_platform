@@ -389,3 +389,22 @@ class TestSiblingsNeverListsDirectories(SiblingsBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOldOptional(SiblingsBase):
+    def test_missing_old_is_success(self):
+        d = self.make_scene()
+        c = self.client()
+        row = self.resolve(c, d)
+        body = self.q(c, row['id'], suffix='old')
+        self.assertFalse(self.by_kind(body, 'product')['exists'])
+
+    def test_old_has_own_dimensions_and_id(self):
+        d = self.make_scene()
+        self._product(d, 'old')
+        c = self.client()
+        row = self.resolve(c, d)
+        old = self.by_kind(self.q(c, row['id'], suffix='old'), 'product')
+        self.assertTrue(old['exists'])
+        self.assertEqual((old['W'], old['H']), (80, 40))
+        self.assertNotEqual(old['id'], row['id'])

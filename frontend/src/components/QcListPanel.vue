@@ -9,8 +9,8 @@
  * - 面板随清单存在与否两种形态：没导入只有一行「导入 .txt」；导入后是列表 + 编辑区。
  * - 「当前打开的图」自动选中对应行（按场景目录末段 = 生产全名匹配，口径见
  *   store.selectForScene —— 清单那列多半缺产品段，所以要按候选集合对，不能逐字比）。
- *   点该行会把画布跳到清单上的坐标 —— 注意清单写的是 **(行, 列)**，而 locatePixel(x, y)
- *   是 **(列, 行)**，传参顺序见 onRow。
+ *   Source coordinates retain row,col order when passed to locatePixel(X,Y).
+ *   Keep this order consistent with Toolbar prefill.
  * - 「同步」（写回盘阵）写在页脚而不是每行：它写的是整份文档，不是某一行的状态。
  * - 「一键解析」（橘色那颗）按清单顺序逐景生成预览并往左侧暂存区落卡；点某一行会把左侧
  *   对应的卡点亮并滚到眼前（火候全在 viewer.lightCards / FileList 的 .lit）。
@@ -97,8 +97,8 @@ function onRow(it: QcIssue) {
   const ids = viewer.lightCards(sceneNameCandidates(it.name, it.imgType));
   if (!ids.length) viewer.showToast('左侧还没有这一景的卡片');
   if (it.name === activeName.value && it.row !== null && it.col !== null) {
-    // 清单是「行列号」(行, 列)，locatePixel(x, y) 要的是 (列, 行) —— 别照抄顺序
-    viewer.locatePixel(it.col, it.row);
+    // Preserve source order, consistent with Toolbar prefill.
+    viewer.locatePixel(it.row, it.col);
   }
 }
 

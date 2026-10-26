@@ -1414,6 +1414,10 @@ def create_app() -> FastAPI:
             #
             # 为什么分两阶段而不是一开始就一起试：第一阶段（今天的全部行为）命中的
             # 常见情形**一个 stat 都不多花** —— 钉住探测量上限的那几条用例正走在上面。
+            if Path(name).suffix.lower() in (".tif", ".tiff") and Path(name).stem.lower().endswith("_old"):
+                base = Path(name).stem[:-4]
+                for cand in infer_scene_paths(base + Path(name).suffix, date):
+                    late.append((cand, name))
             if Path(name).suffix.lower() in (".jpg", ".jpeg"):
                 for stem in scene_search.de_suffixed_stems(name):
                     for cand in infer_scene_paths(stem + Path(name).suffix, date):
@@ -1463,14 +1467,23 @@ def create_app() -> FastAPI:
                                           for c in scene_search.input_candidates(d))
                         reasons.append(f"{d}：目录里没有输入影像（找过 {names}）")
                     continue
+                old_raster = None
+                if (fp_name and Path(fp_name).suffix.lower() in (".tif", ".tiff")
+                        and Path(fp_name).stem.lower() == d.name.lower() + "_old"):
+                    old_raster = d / Path(fp_name).name
+                    if not old_raster.is_file():
+                        reasons.append(f"{d}: missing OLD raster {old_raster.name}")
+                        continue
                 if size_bytes is not None and fp_name:
-                    why = _fingerprint_mismatch(inp, fp_name, size_bytes)
+                    why = _fingerprint_mismatch(old_raster or inp, fp_name, size_bytes)
                     if why:
                         # 指纹不认就当作**这条候选**不合格，接着试下一条（次日那条），
                         # 不要立刻 404 —— 报错口径仍由下面统一出。
                         reasons.append(why)
                         continue
                 kind, suffix, raster = "input", "", inp
+                if old_raster is not None:
+                    kind, suffix, raster = "product", "old", old_raster
                 if fp_name and Path(fp_name).suffix.lower() in (".jpg", ".jpeg"):
                     # 拖 jpg：除了目录还得认**这份 jpg 是哪个环节**。目录名对不上
                     # 环节名（`_cloud` / `.preview` / `- 副本` 那些），或该环节自己
@@ -1772,7 +1785,10 @@ def create_app() -> FastAPI:
         cand_names: list[str] = []
         product: Path | None = None
         if inp is not None and suffix:
-            cands = scene_search.product_candidates(inp, suffix)
+            cands = ([scene_dir / (base + "_old" + ext)
+                      for base in dict.fromkeys([scene_dir.name, inp.stem])
+                      for ext in (".tif", ".tiff")] if suffix == "old"
+                     else scene_search.product_candidates(inp, suffix))
             cand_names = [c.name for c in cands]
             whitelist(cands, "产物")
             # 没有一个存在时回报第一个候选（`.tif`）并置 exists: false —— 报错口径

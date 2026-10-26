@@ -15,10 +15,10 @@
  * 坐标约定有一处**与项目其余部分相反**，改代码前务必看清：
  *   清单里的「行列号:30766.11,21862.51」按中文习惯是 **(行, 列)**；
  *   而 lib/viewMath.ts 与 store.locatePixel(x, y) 是 **x=列、y=行**。
- *   所以从清单跳转必须写 `locatePixel(col, row)`，顺序反了会跳到画面另一头。
- */
-
-/* ---------------- 状态 ---------------- */
+ * Coordinate contract: preserve source order; row -> X, col -> Y.
+ * row/col are historical field names; do not swap them for navigation.
+ * Use locatePixel(row, col), consistent with Toolbar prefill.
+ *
 
 /** 五个互斥状态：前三个是三段式进度（可点选推进），后两个是人工终态。 */
 export type QcStatus = 'drawn' | 'submitted' | 'fixed' | 'rejected' | 'no_blur';

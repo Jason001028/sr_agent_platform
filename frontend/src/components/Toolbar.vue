@@ -110,8 +110,8 @@ watch(
   (dir) => {
     if (!qc.loaded) return;
     const it = qc.rowForScene(dir);
-    // 清单写的是「行列号」(行, 列)，定位框要的是「X,Y」= (列, 行) —— 别照抄顺序
-    locText.value = it && it.row !== null && it.col !== null ? it.col + ',' + it.row : '';
+    // Preserve source order: row -> X, col -> Y.
+    locText.value = it && it.row !== null && it.col !== null ? it.row + ',' + it.col : '';
   },
   { immediate: true },
 );

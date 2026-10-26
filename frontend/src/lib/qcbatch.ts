@@ -90,9 +90,10 @@ export function fmtElapsed(ms: number): string {
 }
 
 /** 失败发生在哪一步（决定「第几步」的文案）。 */
-export type BakeStage = 'resolve' | 'body' | 'nosr';
+export type BakeStage = 'resolve' | 'body' | 'nosr' | 'old';
 
 export const BAKE_STAGE_LABEL: Record<BakeStage, string> = {
+  old: 'old JPG',
   resolve: '解析场景',
   body: '生成本体 jpg',
   nosr: '生成 NOSR jpg',
@@ -121,6 +122,7 @@ export interface BakeDeps<T extends BakeRow = BakeRow> {
   body(it: T, res: unknown): Promise<void>;
   /** NOSR：问 /siblings，有那份就入列一张卡 + 生成一份；返回 'missing' = 盘上没有。失败抛。 */
   nosr(it: T, res: unknown): Promise<'ok' | 'missing'>;
+  old?(it: T, res: unknown): Promise<void>;
   onProgress?(i: number, n: number, it: T, phase: BakeStage): void;
   /** 某一步失败时立刻回调（在继续下一景之前）—— 占位卡要当场标红，不能等整批跑完。 */
   onFail?(it: T, stage: BakeStage, reason: string): void;
@@ -196,6 +198,14 @@ export async function runSceneBake<T extends BakeRow>(
       // 名字只有一个键，所以本体失败时保留本体那条（更严重、且先发生）。
       if (!fails[it.name]) fails[it.name] = { stage: 'nosr', reason: errText(e) };
       else notes[it.name] = 'NOSR 那份没生成成功：' + errText(e);
+    }
+    if (signal.aborted) { stopped = true; break; }
+    if (deps.old) {
+      deps.onProgress?.(i + 1, total, it, 'old');
+      try { await deps.old(it, res); }
+      catch (e) {
+        if (!fails[it.name]) fails[it.name] = { stage: 'old', reason: errText(e) };
+      }
     }
   }
   return { total, done, stopped, fails, notes };

@@ -36,6 +36,7 @@ export function stageLabel(kind: StageKind | undefined | null,
   if (kind === 'nosr') return 'NOSR';
   if (kind === 'product') {
     const s = (suffix || tailOf(stemOf(fileName))).trim();
+    if (s.toLowerCase() === 'old') return 'old';
     return s ? s.toUpperCase() : '产物';
   }
   return /^pan$/i.test(stemOf(fileName)) ? 'PAN' : '本体';
