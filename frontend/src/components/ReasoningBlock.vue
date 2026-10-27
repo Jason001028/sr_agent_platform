@@ -3,25 +3,23 @@
  * ReasoningBlock.vue — Qwen 推理内容（reasoning_content）折叠块
  * ------------------------------------------------------------------
  * 只服务当前回合：思考内容不落库，刷新 / 切会话后自然消失（见 api-contract §3.2）。
- * 流式期间默认展开、逐字追加；收到回答定稿后自动收起，用户手动点开过的则不再强制关。
+ * 原始推理仅开发者模式可见，默认折叠；当前模型阶段在两种模式下都可见。
  * 没有回答时也能单独出现（工具回合的 assistant 消息常常只有推理 + 工具声明）。
  */
 import { computed, nextTick, ref, watch } from 'vue';
 import type { ChatPhase } from '../lib/api.js';
+import { phaseLabel } from '../lib/executionOverview.js';
 
 const props = defineProps<{
   text: string;
   streaming?: boolean;
   phase?: ChatPhase | null;
+  developerMode?: boolean;
 }>();
 
 const open = ref(false);
 const bodyEl = ref<HTMLElement | null>(null);
-const summary = computed(() => {
-  if (props.streaming) return props.phase === 'tool_call' ? '正在组织工具调用' : '正在分析场景匹配结果';
-  const text = props.text.replace(/\s+/g, ' ').trim();
-  return text ? (text.length > 34 ? text.slice(0, 34) + '…' : text) : '分析过程';
-});
+const currentPhase = computed(() => phaseLabel(props.phase));
 /** 用户手动点过之后，定稿时不再自动收起。 */
 let userToggled = false;
 
@@ -41,6 +39,10 @@ watch(() => props.streaming, (now, before) => {
   if (before && !now && !userToggled) open.value = false;
 });
 
+watch(() => props.developerMode, (enabled) => {
+  if (!enabled) open.value = false;
+});
+
 function toggle(): void {
   userToggled = true;
   open.value = !open.value;
@@ -48,16 +50,18 @@ function toggle(): void {
 </script>
 
 <template>
-  <div class="reason">
-    <button type="button" class="reason-head" :aria-expanded="open" @click="toggle">
-      <span class="chev" :class="{ open }" aria-hidden="true">▸</span>
-      <span class="reason-title">{{ summary }}</span>
-      <span v-if="streaming" class="reason-live">
+  <div v-if="streaming || developerMode" class="reason">
+    <div class="reason-head">
+      <button v-if="developerMode" type="button" class="reason-toggle" :aria-expanded="open" @click="toggle">
+        <span class="chev" :class="{ open }" aria-hidden="true">▸</span>
+        <span class="reason-title">深度思考中</span>
+      </button>
+      <span v-if="streaming" class="reason-live" role="status">
         <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
-        推理中
+        {{ currentPhase }}
       </span>
-    </button>
-    <pre v-if="open" ref="bodyEl" class="reason-body">{{ text }}</pre>
+    </div>
+    <pre v-if="developerMode && open" ref="bodyEl" class="reason-body">{{ text }}</pre>
   </div>
 </template>
 
@@ -82,16 +86,25 @@ function toggle(): void {
   font: inherit;
   font-size: 11.5px;
   text-align: left;
+}
+.reason-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
   cursor: pointer;
 }
-.reason-head:hover { color: var(--ink); }
+.reason-toggle:hover .reason-title { color: var(--ink-sub); }
 .chev {
   display: inline-block;
   color: var(--ink-faint);
   transition: transform var(--motion-hover) var(--ease-standard);
 }
 .chev.open { transform: rotate(90deg); }
-.reason-title { font-weight: 600; }
+.reason-title { color: var(--ink-faint); font-size: 10px; font-weight: 400; }
 .reason-live {
   display: inline-flex;
   align-items: center;

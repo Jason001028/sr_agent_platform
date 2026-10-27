@@ -106,11 +106,14 @@ release/
 └── backend-<日期>-<时分>-<版本>.tar.gz    # 顶层 backend/ ← FastAPI 场景 API（含 api/ + services/，已去 pycache/测试）
 ```
 
-> **首次安装件不进包**（`nginx.conf` / `sr-api.service` / `requirements-api.txt` / 本 README）：
+> **机器配置模板不进包**（`nginx.conf` / `sr-api.service` / 本 README）：
 > 它们是机器配置模板，真机上已被手工 `sed` 成真实路径，进包解压会把真路径盖回出厂示例
-> （正是 §5.6 那类事故）。首次部署时这四份从仓库 `deploy/` 直接拷，见 §二；这两个包只用于
+> （正是 §5.6 那类事故）。首次部署从仓库 `deploy/` 直接拷，见 §二；这两个包只用于
 > 「已装好的机器换新版本」。打包脚本每次还会清掉 `release/` 里同族的旧包（`dist-*` /
 > `backend-*` / 历史 `sr-agent-platform-*`），无关文件不碰；清掉的清单会逐条打印。
+>
+> 后端包包含 `backend/requirements-api.txt`，由 `deploy/requirements-api.txt` 原样生成。
+> 更新后先在 API 的 Python 环境安装该清单并预检，再重启；清单不会覆盖 nginx 或 systemd 的机器配置。
 
 ## 二、内网机部署：前端 + 盘阵静态（nginx，CentOS7）
 
@@ -391,13 +394,24 @@ scp -r backend/* root@<内网机IP>:<APP>/backend/
 ```bash
 # 服务器：
 chown -R nginx:nginx <APP>/backend
+# 必须使用 systemctl cat sr-api 中 ExecStart 对应的 Python；以下路径为默认 API venv。
+/opt/sr-venv/bin/python -m pip install -i http://nexus.jl1.cn/repository/cgwx-pypi/simple --trusted-host nexus.jl1.cn \
+    -r <APP>/backend/requirements-api.txt
+/opt/sr-venv/bin/python <APP>/backend/check_runtime.py
+/opt/sr-venv/bin/python -m pip check
+# 在应用根目录仅验证导入，不启动服务或提交 SR 作业。
+(cd <APP> && /opt/sr-venv/bin/python -c 'from backend.api.app import create_app; print("API import OK")')
+# 上述命令全部成功后再重启。
 systemctl restart sr-api           # 预览 JPG 缓存保留，重启不会触发重生成
 systemctl status sr-api            # 判定： active (running)
 curl -s http://127.0.0.1:8000/api/health   # 判定： {"status":"ok",...}
 ```
 
-> 改了后端但没加新依赖时，只用这一节。若 `requirements-api.txt` 也变（新增/升版本包），
-> 需先在服务器按 §三.2 重新 `pip install -r` 再 restart，否则 import 阶段就崩。
+> 只更新代码不会自动安装新增依赖。`jsonschema` 用于工具参数校验，`PyYAML` 用于 Skill 读取；
+> 缺少任一项都可能在 import 阶段退出。不要使用系统 Python 或 SR 的 torch/GDAL 环境安装平台依赖。
+> 无内网镜像时，按 §三.2 准备与目标 Linux / Python 版本匹配、包含全部传递依赖的 wheel 目录，再使用
+> `<API-Python> -m pip install --no-index --find-links=/tmp/sr-api-wheels -r <APP>/backend/requirements-api.txt`。
+> 源码方式部署、尚无包内清单时，改用仓库 `deploy/requirements-api.txt`。
 >
 > **漏了 `chown` 的病征**（2026-09-15 实测踩中）：scp / 网盘拖拽进来的文件属主是 **root**
 > （且常见 600），而服务以 `User=nginx` 跑（`sr-api.service:28`），nginx 连 import 都读不到。

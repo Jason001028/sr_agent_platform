@@ -128,3 +128,54 @@ def test_integrity_retry_exhaustion_is_diagnostic():
     assert result["error_class"] == "model_output_integrity"
     assert result["model_calls"] == 1
     effect.assert_not_called()
+
+
+def test_repeated_length_stops_with_friendly_error_and_accounts_usage(tmp_path):
+    from backend.services.store import Store
+    reg, effect = registry()
+    events = []
+    chat = Mock(return_value={
+        **response('length'), 'reasoning': 'unfinished reasoning',
+        'usage': {'prompt_tokens': 100, 'completion_tokens': 1024, 'total_tokens': 1124}})
+    intent, hook = Mock(), Mock()
+    store = Store(str(tmp_path / 'length.db'))
+    try:
+        result = run_loop(Config('http://mock', 'test', 'mock', 1024, 0.0, 5),
+                          'tag this image', chat=chat, registry=reg, store=store,
+                          on_step=events.append, max_turns=8,
+                          tool_executor=intent, result_hook=hook)
+        assert not result['ok']
+        assert chat.call_count == result['model_calls'] == result['turns'] == 2
+        assert result['diagnostic']['max_tokens'] == 1024
+        assert result['diagnostic']['retrying'] is False
+        assert result['usage']['completion_tokens'] == 2048
+        assert result['usage']['calls'] == 2
+        assert len(store.list_llm_usage(result['session_id'])) == 2
+        assert store.get_session(result['session_id'])['status'] == 'error'
+        errors = [event['error'] for event in events if event['type'] == 'error']
+        assert len(errors) == 2
+        assert all('max_tokens=1024' in text and not text.startswith('{') for text in errors)
+        assert 'SR_LLM_MAX_TOKENS' in result['error']
+        effect.assert_not_called()
+        intent.assert_not_called()
+        hook.assert_not_called()
+    finally:
+        store.close()
+
+
+def test_integrity_retries_can_be_disabled():
+    reg, effect = registry()
+    chat = Mock(return_value=response('length'))
+    result = run_loop(Config('http://mock', 'test', 'mock', 128, 0.0, 5,
+                             llm_integrity_retries=0), 'test', chat=chat, registry=reg)
+    assert result['model_calls'] == 1
+    effect.assert_not_called()
+
+
+def test_integrity_retry_configuration(monkeypatch):
+    from backend.config import load_config
+    monkeypatch.setenv('SR_LLM_INTEGRITY_RETRIES', '0')
+    assert load_config().llm_integrity_retries == 0
+    monkeypatch.setenv('SR_LLM_INTEGRITY_RETRIES', '-1')
+    with pytest.raises(ValueError):
+        load_config()

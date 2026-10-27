@@ -25,6 +25,7 @@ export type QueueState =
   | 'SUBMITTING' | 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'UNKNOWN';
 
 export interface ChatSession {
+  metadata?: { title?: string; title_source?: string; title_status?: string };
   session_id: string;
   created_at: number;
   updated_at: number;
@@ -118,7 +119,7 @@ export interface HistoryMsg {
   content?: string | null;
   /** 只有带截图的 user 消息才有；纯文字老消息不出现该字段。 */
   images?: ChatImage[] | null;
-  tool_calls?: { name: string; arguments: Record<string, unknown> }[] | null;
+  tool_calls?: { id?: string; name: string; arguments: Record<string, unknown> }[] | null;
   tool_name?: string | null;
   tool_call_id?: string;
   ok?: boolean;
@@ -134,12 +135,13 @@ export interface HistoryResponse {
 export type ChatPhase = 'thinking' | 'answering' | 'tool_call';
 
 export type ChatSseEvent =
+  | { type: 'session_update'; session: ChatSession }
   | { type: 'turn_start'; run_id: string; session_id: string }
   | { type: 'llm_phase'; phase: ChatPhase; name?: string }
   | { type: 'reasoning'; delta: string }
   | { type: 'token'; delta: string }
-  | { type: 'tool_call'; name: string; args: Record<string, unknown> }
-  | { type: 'tool_result'; name: string; ok: boolean; data: unknown; error: string | null }
+  | { type: 'tool_call'; id?: string; name: string; args: Record<string, unknown> }
+  | { type: 'tool_result'; id?: string; name: string; ok: boolean; data: unknown; error: string | null }
   | { type: 'assistant'; content: string }
   | { type: 'usage'; usage: TokenUsageEvent; aggregate: ChatUsage }
   | { type: 'turn_done'; content: string; error: string | null; usage?: ChatUsage; run_id?: string }
@@ -490,6 +492,14 @@ export async function apiSetSessionPinned(
   return (await r.json()) as ChatSession;
 }
 
+export async function apiRenameSession(cfg: SrConfig, sid: string, title: string): Promise<ChatSession> {
+  const r = await http(apiUrl(cfg, `/api/chat/sessions/${encodeURIComponent(sid)}`), {
+    method: 'PATCH', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title }),
+  });
+  return await r.json() as ChatSession;
+}
+
 /** 删除会话（消息/用量/轨迹由服务端一并删除）。 */
 export async function apiDeleteSession(cfg: SrConfig, sid: string): Promise<void> {
   await http(apiUrl(cfg,
@@ -582,10 +592,12 @@ export async function apiChatSend(
   onEvent: (e: PlatformSseEvent) => void,
   images?: ChatUploadImage[],
   stream?: boolean,
+  viewerContext?: unknown,
 ): Promise<void> {
   const body: Record<string, unknown> = { content };
   if (images && images.length) body.images = images;
   if (stream !== undefined) body.stream = stream;
+  if (viewerContext !== undefined) body.viewer_context = viewerContext;
   const r = await fetch(sessionMessagesUrl(cfg, sid), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -745,6 +757,23 @@ export async function apiClearScenePreviews(
 function cacheBlob(key: string, blob: Blob): Blob {
   previewBlobs.set(key, blob);
   return blob;
+}
+
+/** Result thumbnails reuse ready JPEGs only; never trigger TIFF preview baking. */
+export async function fetchExistingSceneJpg(cfg: SrConfig, row: SceneRow): Promise<Blob | null> {
+  const div = row.previewDiv ?? loadPreviewDiv();
+  const key = previewCacheKey(row, div);
+  const cached = previewBlobs.get(key);
+  if (cached) return cached;
+  if (!row.hasPreview || !row.jpgUrl) return null;
+  // An old preview with no known scale must not masquerade as the viewer's
+  // current-scale cache entry, which would suppress a later required rebake.
+  const readyKey = isBakedPreviewUrl(row.jpgUrl) && row.previewDiv == null
+    ? `${row.id}|thumbnail|${row.jpgUrl}` : key;
+  const ready = previewBlobs.get(readyKey);
+  if (ready) return ready;
+  const response = await http(sceneImageUrl(cfg, row.jpgUrl, div));
+  return cacheBlob(readyKey, await response.blob());
 }
 
 /** 取一条场景行的显示 JPG 字节。两条来源，调用方不必区分：

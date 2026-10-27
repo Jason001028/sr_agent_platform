@@ -8,11 +8,14 @@
  */
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { useChatStore } from '../stores/chat.js';
+import { useViewerStore } from '../stores/viewer.js';
+import { isDeveloperMode } from '../lib/developerMode.js';
 import type { ChatMsg } from '../stores/chat.js';
 import type { ChatSession } from '../lib/api.js';
 import TokenUsagePanel from '../components/TokenUsagePanel.vue';
 import MarkdownBody from '../components/MarkdownBody.vue';
 import ReasoningBlock from '../components/ReasoningBlock.vue';
+import { phaseLabel } from '../lib/executionOverview.js';
 import ThinkingIndicator from '../components/ThinkingIndicator.vue';
 import ChatAttachTray from '../components/ChatAttachTray.vue';
 import ChatImagePicker from '../components/ChatImagePicker.vue';
@@ -26,6 +29,16 @@ import { loadSrConfig } from '../lib/scene.js';
 import { splitAgentPayload } from '../lib/agentContext.js';
 
 const chat = useChatStore();
+const viewer = useViewerStore();
+const developerMode = ref(false);
+onMounted(() => { developerMode.value = isDeveloperMode(); });
+watch(() => viewer.settingsOpen, (open) => {
+  if (!open) developerMode.value = isDeveloperMode();
+});
+async function rename(s: ChatSession): Promise<void> {
+  const title = window.prompt('会话标题（1—30个字符）', s.metadata?.title ?? '');
+  if (title !== null) await chat.renameSession(s.session_id, title);
+}
 const scenes = useScenesStore();
 const draft = ref('');
 const tokenPluginEnabled = ref(true);
@@ -73,9 +86,7 @@ const liveMsg = computed<ChatMsg | null>(() => {
 });
 
 function waitLabel(m: ChatMsg): string {
-  if (m.phase === 'tool_call') return '正在组织工具调用';
-  if (m.phase === 'answering') return '正在生成回答';
-  return '模型推理中';
+  return phaseLabel(m.phase);
 }
 
 /** 用户气泡只显示用户原话；查看器 Agent 页签自动附的上下文不算用户输入。 */
@@ -239,11 +250,12 @@ onMounted(() => {
                   @click="selectMode ? togglePick(s.session_id) : chat.selectSession(s.session_id)">
             <span class="cp-sess-main">
               <span v-if="s.pinned" class="cp-pin-tag" title="已置顶">置顶</span>
-              <span class="cp-sess-id">{{ shortId(s.session_id) }}</span>
+              <span class="cp-sess-id" :title="s.session_id">{{ s.metadata?.title || shortId(s.session_id) }}</span>
             </span>
             <span class="cp-sess-time">{{ fmtTime(s.updated_at) }}</span>
           </button>
           <span v-if="!selectMode" class="cp-sess-actions">
+            <button type="button" class="cp-act" @click.stop="rename(s)">重命名</button>
             <button type="button" class="cp-act" :disabled="chat.sending"
                     @click.stop="togglePin(s)">{{ s.pinned ? '取消置顶' : '置顶' }}</button>
             <button type="button" class="cp-act danger" :disabled="chat.sending"
@@ -270,7 +282,7 @@ onMounted(() => {
     <section class="cp-main">
       <div class="cp-head">
         <span class="cp-title"><AgentBotIcon :status="chat.agentStatus" :size="16" />Agent 聊天</span>
-        <span v-if="chat.sessionId" class="cp-sessid">会话 {{ shortId(chat.sessionId) }}</span>
+        <span v-if="chat.sessionId" class="cp-sessid">{{ chat.sessions.find(s => s.session_id === chat.sessionId)?.metadata?.title || shortId(chat.sessionId) }}</span>
         <span v-else class="cp-sessid empty">未选择会话</span>
         <TokenUsagePanel v-if="tokenPluginEnabled" :usage="chat.usage" />
       </div>
@@ -300,19 +312,19 @@ onMounted(() => {
             <div v-if="m.isError" class="bubble assistant err">{{ m.content }}</div>
             <template v-else>
               <ReasoningBlock v-if="m.reasoning" :text="m.reasoning"
-                              :streaming="m.streaming" :phase="m.phase ?? null" />
+                              :streaming="m.streaming" :phase="m.phase ?? null" :developer-mode="developerMode" />
               <div v-if="m.content" class="bubble assistant">
                 <MarkdownBody :source="m.content" />
                 <div v-if="m.toolCalls && m.toolCalls.length" class="tc-inline">
                   <span class="tc-label">Agent 调用：</span>
-                  <span v-for="tool in (m.toolCalls ?? [])" :key="tool.name" class="tc-tool">
+                  <span v-for="tool in (m.toolCalls ?? [])" :key="tool.id || tool.name" class="tc-tool">
                     <AppIcon :name="toolIconName(tool.name)" :size="15" :label="tool.name" />{{ tool.name }}
                   </span>
                 </div>
               </div>
               <div v-else-if="m.toolCalls && m.toolCalls.length" class="bubble assistant tools">
-                <div v-for="tc in m.toolCalls" :key="tc.name" class="tool-card">
-                  <div class="tool-card-head"><AppIcon :name="toolIconName(tc.name)" :size="17" :label="tc.name" /><strong>{{ tc.name === 'search_scenes' ? '检索目标场景' : tc.name }}</strong><code>{{ tc.name }}</code><span v-if="toolResultsAt(i, tc.name).length > 1" class="tool-state">共尝试 {{ toolResultsAt(i, tc.name).length }} 次</span><span v-else class="tool-state">{{ toolResultAt(i, tc.name)?.ok === true ? '✓ 已提交' : '⏳ 调用中' }}</span></div>
+                <div v-for="tc in m.toolCalls" :key="tc.id || tc.name" class="tool-card">
+                  <div class="tool-card-head"><AppIcon :name="toolIconName(tc.name)" :size="17" :label="tc.name" /><strong>{{ tc.name === 'search_scenes' ? '检索目标场景' : tc.name }}</strong><code>{{ tc.name }}</code><span v-if="toolResultsAt(i, tc.name).length > 1" class="tool-state">共尝试 {{ toolResultsAt(i, tc.name).length }} 次</span><span v-else class="tool-state">{{ toolResultAt(i, tc.name)?.ok === true ? '✓ 完成' : toolResultAt(i, tc.name)?.ok === false ? '× 失败' : chat.sending ? '⏳ 调用中' : '结果未确认' }}</span></div>
                   <details class="tool-query"><summary>查询条件</summary><pre>{{ argsText(tc.args) }}</pre></details>
                   <div v-if="toolResultsAt(i, tc.name).length" class="tool-summary">最终结果：{{ toolResultsAt(i, tc.name).at(-1)?.detail }}</div>
                   <SceneSearchResultCard v-if="tc.name === 'search_scenes'" :data="toolResultAt(i, tc.name)?.data" :args="tc.args" :status="toolResultAt(i, tc.name)?.ok === false ? 'failed' : toolResultAt(i, tc.name)?.ok === true ? 'completed' : 'running'" @open="openSearchScene" />
@@ -333,7 +345,7 @@ onMounted(() => {
         </div>
 
         <div v-if="chat.sending && !liveMsg" class="cp-thinking">
-          <ThinkingIndicator label="模型推理中" />
+          <ThinkingIndicator label="正在分析任务" />
         </div>
         <div v-if="chat.lastRunId && !chat.sending" class="cp-feedback">
           <span>这次回答有帮助吗？</span>

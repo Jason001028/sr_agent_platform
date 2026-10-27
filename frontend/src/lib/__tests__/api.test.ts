@@ -8,7 +8,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import {
   stepSse, parseSseEvents, apiUrl, sessionsUrl, sessionMessagesUrl,
-  queueEventsUrl, fetchSceneJpg, fetchDropSceneJpg, apiResolveScene,
+  queueEventsUrl, fetchSceneJpg, fetchExistingSceneJpg, fetchDropSceneJpg, apiResolveScene,
   resetPreviewCache, previewCacheStats, clearPreviewCache, PREVIEW_BLOB_CACHE_MAX,
   apiClearScenePreviews, watchPreviewCache, nosrItemOf,
   HttpError, isSceneGone, isProxyMiss,
@@ -149,6 +149,33 @@ describe('fetchSceneJpg', () => {
   // 上一条把 `~YWJj|4|jpg` 生成出来，下一条同名同档位就变成缓存命中、请求数归零。
   // 每条用例从空缓存起跑，「走哪条 URL」才是它在断言的东西。
   beforeEach(() => { resetPreviewCache(); });
+
+  it('结果缩略图缺失时不触发预览生成或读取 TIF', async () => {
+    stubFetch({});
+    expect(await fetchExistingSceneJpg(CFG, row({ jpgUrl: BAKED, hasPreview: false }))).toBeNull();
+    expect(await fetchExistingSceneJpg(CFG, row({ hasPreview: true }))).toBeNull();
+    expect(urls).toEqual([]);
+  });
+
+  it('结果缩略图复用现成 JPEG 与查看器缓存，不改变预览档位', async () => {
+    stubFetch({ '/disk-array/a/b_preview.jpg?div=8': 'JPEG' });
+    const r = row({ jpgUrl: BAKED, hasPreview: true, previewDiv: 8 });
+    const blob = await fetchExistingSceneJpg(CFG, r);
+    expect(await blob?.text()).toBe('JPEG');
+    expect(await fetchSceneJpg(CFG, r, 8)).toBe(blob);
+    expect(await fetchExistingSceneJpg(CFG, r)).toBe(blob);
+    expect(urls).toEqual(['/disk-array/a/b_preview.jpg?div=8']);
+    expect(r.previewDiv).toBe(8);
+  });
+
+  it('未知档位的缩略图不会阻止查看器按需生成正确档位', async () => {
+    stubFetch({ '/disk-array/a/b_preview.jpg?div=4': 'JPEG', '/api/scenes/~YWJj/preview?div=4': 'BAKE' });
+    const r = row({ jpgUrl: BAKED, hasPreview: true, previewDiv: null });
+    await fetchExistingSceneJpg(CFG, r);
+    expect(urls.some(url => url.includes('/preview?'))).toBe(false);
+    await fetchSceneJpg(CFG, r, 4);
+    expect(urls).toContain('/api/scenes/~YWJj/preview?div=4');
+  });
 
   it('库外场景（jpgUrl 为 null）：/preview 的响应体就是图，不再打静态 URL', async () => {
     stubFetch({ '/api/scenes/~YWJj/preview?div=2': 'PREVIEW' });

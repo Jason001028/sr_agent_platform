@@ -22,6 +22,7 @@ import { useChatStore } from '../stores/chat.js';
 import type { ChatMsg } from '../stores/chat.js';
 import MarkdownBody from './MarkdownBody.vue';
 import ReasoningBlock from './ReasoningBlock.vue';
+import { phaseLabel } from '../lib/executionOverview.js';
 import ThinkingIndicator from './ThinkingIndicator.vue';
 import ChatAttachTray from './ChatAttachTray.vue';
 import ChatImagePicker from './ChatImagePicker.vue';
@@ -197,9 +198,7 @@ const liveMsg = computed<ChatMsg | null>(() => {
 });
 
 function waitLabel(m: ChatMsg): string {
-  if (m.phase === 'tool_call') return '正在组织工具调用';
-  if (m.phase === 'answering') return '正在生成回答';
-  return '模型推理中';
+  return phaseLabel(m.phase);
 }
 
 const creating = ref(false);   // 防止双击并发 newSession 建出两个会话
@@ -288,7 +287,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
                     :title="'更新时间 ' + new Date(s.updated_at * 1000).toLocaleString()"
                     @click="switchTo(s.session_id)">
               <span class="at-sess-id">
-                <span v-if="s.pinned" class="at-pin">置顶</span>{{ shortId(s.session_id) }}
+                <span v-if="s.pinned" class="at-pin">置顶</span>{{ s.metadata?.title || shortId(s.session_id) }}
               </span>
               <span class="at-sess-time">{{ fmtTime(s.updated_at) }}</span>
             </button>
@@ -334,19 +333,28 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
             <div v-if="m.isError" class="bubble assistant err">{{ m.content }}</div>
             <template v-else>
               <ReasoningBlock v-if="m.reasoning" :text="m.reasoning"
-                              :streaming="m.streaming" :phase="m.phase ?? null" />
+                              :streaming="m.streaming" :phase="m.phase ?? null" :developer-mode="developerMode" />
               <div v-if="m.content" class="bubble assistant">
                 <MarkdownBody :source="m.content" />
                 <div v-if="m.toolCalls && m.toolCalls.length" class="tc-inline">
                   <span class="tc-label">Agent 调用：</span>
-                  <span v-for="tool in (m.toolCalls ?? [])" :key="tool.name" class="tc-tool">
+                  <span v-for="tool in (m.toolCalls ?? [])" :key="tool.id || tool.name" class="tc-tool">
                     <AppIcon :name="toolIconName(tool.name)" :size="15" :label="tool.name" />{{ tool.name }}
                   </span>
                 </div>
               </div>
-              <div v-else-if="m.toolCalls && m.toolCalls.length" class="bubble assistant tools">
-                <div v-for="tool in m.toolCalls" :key="tool.name" class="tool-card"><div class="tool-card-head"><AppIcon :name="toolIconName(tool.name)" :size="17" /><strong>{{ tool.name === 'search_scenes' ? '检索目标场景' : tool.name }}</strong><code>{{ tool.name }}</code><span class="tool-state">{{ toolResultsAt(i, tool.name).length > 1 ? `共尝试 ${toolResultsAt(i, tool.name).length} 次` : (toolResultAt(i, tool.name)?.ok === true ? '✓ 已提交' : '⏳ 调用中') }}</span></div><details class="tool-query"><summary>查询条件</summary><pre>{{ JSON.stringify(tool.args) }}</pre></details><div v-if="toolResultsAt(i, tool.name).length" class="tool-summary">最终结果：{{ toolResultsAt(i, tool.name).at(-1)?.detail }}</div><details v-if="toolResultsAt(i, tool.name).length > 1" class="tool-history"><summary>查看调用记录</summary><div v-for="(result, n) in toolResultsAt(i, tool.name)" :key="n">第 {{ n + 1 }} 次：{{ result.detail }}</div></details></div>
-                <SceneSearchResultCard v-for="tool in (m.toolCalls ?? []).filter(t => t.name === 'search_scenes')" :key="'results-' + tool.name" :data="toolResultAt(i, tool.name)?.data" :status="toolResultAt(i, tool.name)?.ok === false ? 'failed' : toolResultAt(i, tool.name)?.ok === true ? 'completed' : 'running'" @open="openSearchScene" />
+              <div v-else-if="m.toolCalls && m.toolCalls.length" class="agent-tool-list">
+                <template v-for="tool in m.toolCalls" :key="tool.id || tool.name">
+                  <SceneSearchResultCard v-if="tool.name === 'search_scenes'"
+                    :args="tool.args" :data="toolResultAt(i, tool.name)?.data" :detail="toolResultAt(i, tool.name)?.detail"
+                    :status="toolResultAt(i, tool.name)?.ok === false ? 'failed' : toolResultAt(i, tool.name)?.ok === true ? 'completed' : chat.sending ? 'running' : 'unconfirmed'"
+                    @open="openSearchScene">
+                    <details v-if="toolResultsAt(i, tool.name).length > 1" class="tool-history"><summary>查看调用记录</summary><div v-for="(result, n) in toolResultsAt(i, tool.name)" :key="n">{{ n + 1 }}. {{ result.detail }}</div></details>
+                  </SceneSearchResultCard>
+                  <div v-else class="bubble assistant tools">
+                    <div class="tool-card"><div class="tool-card-head"><AppIcon :name="toolIconName(tool.name)" :size="17" /><strong>{{ tool.name === 'search_scenes' ? '检索目标场景' : tool.name }}</strong><code>{{ tool.name }}</code><span class="tool-state">{{ toolResultsAt(i, tool.name).length > 1 ? `共尝试 ${toolResultsAt(i, tool.name).length} 次` : (toolResultAt(i, tool.name)?.ok === true ? '✓ 完成' : toolResultAt(i, tool.name)?.ok === false ? '× 失败' : chat.sending ? '⏳ 调用中' : '结果未确认') }}</span></div><details class="tool-query"><summary>查询条件</summary><pre>{{ JSON.stringify(tool.args) }}</pre></details><div v-if="toolResultsAt(i, tool.name).length" class="tool-summary">最终结果：{{ toolResultsAt(i, tool.name).at(-1)?.detail }}</div><details v-if="toolResultsAt(i, tool.name).length > 1" class="tool-history"><summary>查看调用记录</summary><div v-for="(result, n) in toolResultsAt(i, tool.name)" :key="n">第 {{ n + 1 }} 次：{{ result.detail }}</div></details></div>
+                  </div>
+                </template>
               </div>
               <div v-else-if="(m.streaming && !m.reasoning) || m.phase === 'tool_call'"
                    class="bubble assistant tools">
@@ -366,7 +374,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
         </div>
 
         <div v-if="chat.sending && !liveMsg" class="at-thinking">
-          <ThinkingIndicator label="模型推理中" />
+          <ThinkingIndicator label="正在分析任务" />
         </div>
       </div>
 
@@ -572,6 +580,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
   box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 4px 12px rgba(0,0,0,.06), 0 12px 32px rgba(0,0,0,.08);
   align-self: flex-start; padding: 12px;
 }
+.agent-tool-list { display: grid; gap: 6px; width: 100%; min-width: 0; }
 .at-row :deep(.reason) { max-width: 96%; }
 .tc-line { font-size: 11px; color: var(--ink-sub); display: inline-flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 .tc-label { margin-right: 2px; }

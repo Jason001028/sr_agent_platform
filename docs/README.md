@@ -8,6 +8,8 @@
 
 Skill 加载与外部工具调用接口见 [skill_interface.md](planning/skill_interface.md)。
 
+Agent 中文交互、执行概览与自动会话标题见 [agent-interaction-titles.md](status/agent-interaction-titles.md)。
+
 PAN/NOSR 局部修复与产物发布见 [pan_repair_contract.md](sr_code/pan_repair_contract.md)。
 
 ---
@@ -400,6 +402,7 @@ curl -s -o /dev/null -w '反代=%{http_code} ct=%{content_type}\n' \
 完整部署步骤、环境变量全表与真机路径见 [deploy/README.md](../deploy/README.md)；
 真机部署现状与症状表见 [real-machine-bringup.md](status/real-machine-bringup.md)；
 真机配置与仓库默认值的偏差见 [current-question.md](status/current-question.md)。
+配置文件位置及已确认的 systemd 覆盖顺序见 [config_locations.md](status/config_locations.md)。
 
 ---
 

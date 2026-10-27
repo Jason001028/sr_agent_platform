@@ -525,7 +525,7 @@ def _project_message(seq: int, wire: dict, name_of_call: dict) -> dict:
             out["images"] = images
         return out
     if role == "assistant":
-        tcs = [{"name": tc["function"]["name"],
+        tcs = [{"id": tc.get('id'), "name": tc["function"]["name"],
                 "arguments": loop_mod._parse_args(tc["function"]["arguments"])}
                for tc in wire.get("tool_calls") or []]
         return {"seq": seq, "role": "assistant",
@@ -561,9 +561,17 @@ async def patch_session(session_id: str, request: Request):
     _session_or_404(state, session_id)
     body = await _json_body(request)
     pinned = body.get("pinned")
-    if not isinstance(pinned, bool):
+    if 'title' in body:
+        from backend.services.session_titles import validate_title
+        try:
+            title = validate_title(body['title'])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        updated = state.store.rename_session(session_id, title)
+    elif isinstance(pinned, bool):
+        updated = state.store.set_session_pinned(session_id, pinned)
+    else:
         raise HTTPException(status_code=400, detail="pinned 必须为布尔值")
-    updated = state.store.set_session_pinned(session_id, pinned)
     if updated is None:
         raise HTTPException(status_code=404, detail=f"会话不存在：{session_id}")
     return updated
@@ -687,6 +695,11 @@ async def chat_send(session_id: str, request: Request):
         raise HTTPException(status_code=400, detail="请求体须为合法 JSON 对象")
     content = body.get("content") if isinstance(body, dict) else None
     images = body.get("images") if isinstance(body, dict) else None
+    from backend.services.viewer_context import validate_snapshot
+    try:
+        viewer_snapshot = validate_snapshot(body.get("viewer_context"), len(images) if isinstance(images, list) else 0)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     stream_opt = body.get("stream") if isinstance(body, dict) else None
     content = content if isinstance(content, str) else ""
     if stream_opt is not None and not isinstance(stream_opt, bool):
@@ -726,15 +739,25 @@ async def chat_send(session_id: str, request: Request):
         q: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
         run_id = uuid.uuid4().hex
+        title_announced = False
 
         def bridge(ev: dict):
             """on_step → SSE 事件；剥掉 loop 内部多余字段（turn），对齐 §3.2."""
+            nonlocal title_announced
+            if not title_announced:
+                sess = state.store.get_session(session_id)
+                if sess and sess['metadata'].get('title'):
+                    title_announced = True
+                    try:
+                        loop.call_soon_threadsafe(q.put_nowait, {'type': 'session_update', 'session': sess})
+                    except RuntimeError:
+                        pass
             t = ev.get("type")
             out = {}
             if t == "tool_call":
-                out = {"type": "tool_call", "name": ev["name"], "args": ev["args"]}
+                out = {"type": "tool_call", "id": ev.get("id"), "name": ev["name"], "args": ev["args"]}
             elif t == "tool_result":
-                out = {"type": "tool_result", "name": ev["name"],
+                out = {"type": "tool_result", "id": ev.get("id"), "name": ev["name"],
                        "ok": ev.get("ok"), "data": ev.get("data"),
                        "error": ev.get("error")}
             elif t == "assistant":
@@ -776,7 +799,7 @@ async def chat_send(session_id: str, request: Request):
                     store=None if context is not None else state.store,
                     session_id=session_id, resume=True, on_step=bridge,
                     registry=None if context is not None else getattr(state, "tool_registry", None),
-                    context=context, machine_id=machine_id, stream=stream_on)
+                    context=context, machine_id=machine_id, stream=stream_on, viewer_snapshot=viewer_snapshot)
             except Exception as e:  # noqa: BLE001 — 流上收尾，不让线程挂死
                 bridge({"type": "error", "error": f"{type(e).__name__}: {e}"})
                 return {"ok": False, "error": f"{type(e).__name__}: {e}",
@@ -793,6 +816,8 @@ async def chat_send(session_id: str, request: Request):
             result_box: dict = {}
             worker = asyncio.create_task(asyncio.to_thread(
                 lambda: result_box.update({"r": thread_main()})))
+            state.chat_workers.add(worker)
+            worker.add_done_callback(state.chat_workers.discard)
             while True:
                 item = await q.get()
                 if item is _SENTINEL:
