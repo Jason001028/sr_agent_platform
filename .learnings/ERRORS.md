@@ -18,3 +18,5 @@ log paths rooted at the repository when commands use a frontend workdir.
 ## 2026-10-27 - Browser CLI on Windows
 For agent-browser eval use --base64 with UTF-8 encoded source: PowerShell launcher stdin and quoting can silently lose script content. Quote browser refs such as '@e3' to avoid PowerShell splatting. Use a dedicated writable temporary profile if automatic Chrome launch fails; run doctor first. apply_patch cannot delete and add the same path in one patch; use Update File or sequential patches.
 
+## 2026-10-27 Viewer context validation
+- Node/npm typecheck inside managed sandbox failed with EPERM reading the user installation directory. Retry outside sandbox; do not interpret this as a TypeScript error.

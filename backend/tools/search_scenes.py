@@ -16,6 +16,8 @@ from .contract import err, ok, tool
 
 _DESC = (
     "Search the satellite-scene archive (intranet disk array) for images. "
+    "Not for current Viewer image information; use get_current_image_info for that. "
+    "No archive matches does not mean the Viewer image is absent. "
     "Returns scene metadata (id, path, satellite, sensor, date). "
     "When source is 'fake' the paths are placeholders for local testing only "
     "and must not be passed to run_sr."

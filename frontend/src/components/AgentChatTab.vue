@@ -51,7 +51,7 @@ async function openSearchScene(row: Record<string, unknown>): Promise<void> {
 
 const rec = computed(() => viewer.activeRec);
 /** 仅盘阵场景可用；无图 / 本地(无 sceneId) → false 并给 reason。 */
-const enabled = computed(() => Boolean(rec.value?.sceneId));
+const enabled = computed(() => Boolean(rec.value));
 /** 无会话时首问会自动建会话 —— 输入框始终可输入；placeholder 提示差异。 */
 const placeholder = computed(() =>
   chat.sessionId
@@ -60,14 +60,13 @@ const placeholder = computed(() =>
 const reason = computed(() => {
   const r = rec.value;
   if (!r) return '当前未打开图像。先从左侧打开一个文件，或进「打开场景」选盘阵场景。';
-  if (!r.sceneId) return '本地 / 离线 TIF 无 sceneId —— Agent 只在盘阵场景（「打开场景」进入）可用，且与「任务状态」同源。';
   return '';
 });
 
 /** 当前查看器确定性上下文快照（禁用时 null；每次发送重新取，保证数字最新）。 */
 const snap = computed<ViewerContextSnap | null>(() => {
   const r = rec.value;
-  if (!r || !r.sceneId) return null;
+  if (!r) return null;
   const dispW = r.thumb ? r.thumb.width : 0;
   const dispH = r.thumb ? r.thumb.height : 0;
   // 报**这张图当前显示出来**的那个模式（viewer.activeStretch）。盘阵场景的底图
@@ -224,7 +223,8 @@ async function onSend(): Promise<void> {
     if (!chat.sessionId) return;
   }
   draft.value = '';
-  void chat.send(agentPayload(text, buildContextNote(s)));
+  const latest = snap.value;
+  if (latest) void chat.send(agentPayload(text, buildContextNote(latest)));
 }
 
 function nearBottom(): boolean {
