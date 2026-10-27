@@ -310,7 +310,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
       <div ref="scrollEl" class="at-scroll">
         <div v-if="!chat.messages.length" class="at-empty">
           <p>在下方提问。首问会自动新建会话，并附当前查看器上下文（图像 + 选中 ROI 统计）。</p>
-          <p class="at-hint">Agent 只解读画面上的确定性数字；涉及具体区域建议先在 ROI / 工具 tab 框选。</p>
+          <p class="at-hint">Agent 只解读画面上的确定性数字；涉及具体区域建议先在工具栏中框选。</p>
         </div>
 
         <div v-for="(m, i) in chat.messages" :key="msgKey(m, i)" class="at-row" :class="m.role">

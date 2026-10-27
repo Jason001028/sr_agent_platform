@@ -56,6 +56,7 @@ from backend.services import mask as mask_svc
 from backend.services import plugins as plugin_svc
 from backend.services import run_sr as run_sr_svc
 from backend.services import scene_search
+from backend.services.skills import load_catalog
 from backend.services import slurm
 #: 掩码命名的唯一实现搬到了 services（REST 与 agent 工具两个入口都要用同一份
 #: 推导，见 scene_search.derived_mask_path）；这里转出给既有调用方
@@ -334,6 +335,33 @@ async def call_tool_endpoint(name: str, request: Request):
     # 工具业务错误仍作为 HTTP 200 的契约结果返回；只有 JSON 语法、未知工具
     # 等传输层错误使用 HTTP 错误码。
     return registry.invoke(name, body, source="rest")
+
+
+@router.get('/api/skills')
+def list_skills_endpoint():
+    catalog = load_catalog()
+    return {'schema_version': 1, 'skills': [s.metadata() for s in catalog.skills.values()],
+            'diagnostics': catalog.diagnostics,
+            'tools_url': '/api/tools', 'invoke_url_template': '/api/tools/{name}'}
+
+
+@router.get('/api/skills/{name}')
+def read_skill_endpoint(name: str, resource: str = 'SKILL.md'):
+    catalog = load_catalog()
+    if name not in catalog.skills:
+        raise HTTPException(status_code=404, detail=f'unknown skill: {name}')
+    try:
+        return catalog.read(name, resource)
+    except (ValueError, OSError, UnicodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post('/api/skills/{skill_name}/tools/{name}')
+async def call_skill_tool_endpoint(skill_name: str, name: str, request: Request):
+    if skill_name not in load_catalog().skills:
+        raise HTTPException(status_code=404, detail=f'unknown skill: {skill_name}')
+    # Exactly the same machine/plugin visibility and execution boundary as REST.
+    return await call_tool_endpoint(name, request)
 
 
 @router.post("/api/context/validate")
@@ -938,7 +966,7 @@ def _norm_sr_params(body: dict) -> dict:
     # 而不是让它落到 submit 里变成 422 的 "ValueError: ..."。
     if body.get("delete_ori"):
         raise HTTPException(status_code=400, detail=run_sr_svc.DELETE_ORI_MSG)
-    return {
+    return run_sr_svc.repair_request({
         "lq_path": lq_path,
         "mask_path": mask_path,
         "sr_scale": sr_scale, "suffix": suffix, "gpu": gpu,
@@ -946,7 +974,8 @@ def _norm_sr_params(body: dict) -> dict:
         "delete_ori": bool(body.get("delete_ori", False)),
         "grid_align": bool(body.get("grid_align", True)),
         "options_yml": body.get("options_yml"),
-    }
+        "repair": True,
+    })
 
 
 async def _json_body(request: Request) -> dict:
@@ -1010,6 +1039,11 @@ async def submit_queue(request: Request):
             f"输出目录 = 输入目录（{params['lq_path']}）：SR 就地把结果写成 "
             f"<输入名>_{params['suffix']}.tif，输入 tif 不改名也不删除；"
             "该目录里已存在同名输出时，旧输出先被改名为 <同名>_NOSR.tif 再覆盖")
+        if params.get("repair"):
+            out["notice"] = (
+                f"场景目录 {params['lq_path']}：从同景完整生产名_NOSR.tif 计算，掩码内模型超分、掩码外插值，"
+                "保持当前 PAN 的尺寸与文件大小；校验后将旧 PAN.tif 备份为 "
+                "PAN_old_2.tif，新结果发布为 PAN.tif。备份已存在则停止。")
     return out
 
 

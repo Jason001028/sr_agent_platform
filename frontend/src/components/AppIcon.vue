@@ -37,6 +37,7 @@ const tintStyle = computed(() => ({
     class="app-icon"
     :src="iconSrc"
     :alt="props.label ?? ''"
+    :style="{ width: `${props.size}px`, height: `${props.size}px` }"
     :width="props.size"
     :height="props.size"
     :aria-hidden="props.label ? undefined : 'true'"

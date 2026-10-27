@@ -173,12 +173,12 @@ class LoopContinuationTests(unittest.TestCase):
                 events.append("model")
                 if not any(m["role"] == "tool" for m in messages):
                     return {
-                        "content": None,
+                        "finish_reason": "tool_calls", "content": None,
                         "tool_calls": [
                             {"id": "read_1", "name": "read", "arguments": "{}"}
                         ],
                     }
-                return {"content": "complete", "tool_calls": []}
+                return {"finish_reason": "stop", "content": "complete", "tool_calls": []}
 
             def execute(tc, invoke):
                 events.append("tool_executor")
@@ -258,7 +258,7 @@ class LoopContinuationTests(unittest.TestCase):
         client.with_options.return_value = client
         client.chat.completions.create.return_value = SimpleNamespace(
             choices=[
-                SimpleNamespace(message=SimpleNamespace(content="done", tool_calls=[]))
+                SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content="done", tool_calls=[]))
             ],
             usage=None,
         )
@@ -276,7 +276,7 @@ class LoopContinuationTests(unittest.TestCase):
                     config(),
                     "original",
                     store=store,
-                    chat=lambda m, t: {"content": "one", "tool_calls": []},
+                    chat=lambda m, t: {"finish_reason": "stop", "content": "one", "tool_calls": []},
                 )
                 sid = first["session_id"]
                 run_loop(
@@ -284,7 +284,7 @@ class LoopContinuationTests(unittest.TestCase):
                     store=store,
                     session_id=sid,
                     resume=True,
-                    chat=lambda m, t: {"content": "two", "tool_calls": []},
+                    chat=lambda m, t: {"finish_reason": "stop", "content": "two", "tool_calls": []},
                 )
                 self.assertEqual(
                     [
@@ -300,7 +300,7 @@ class LoopContinuationTests(unittest.TestCase):
                     store=store,
                     session_id=sid,
                     resume=True,
-                    chat=lambda m, t: {"content": "three", "tool_calls": []},
+                    chat=lambda m, t: {"finish_reason": "stop", "content": "three", "tool_calls": []},
                 )
                 self.assertEqual(
                     [
@@ -325,7 +325,7 @@ class LoopContinuationTests(unittest.TestCase):
             max_tool_calls=1,
             registry=registry,
             chat=lambda m, t: {
-                "content": None,
+                "finish_reason": "tool_calls", "content": None,
                 "tool_calls": [
                     {"id": str(i), "name": "read", "arguments": "{}"} for i in range(3)
                 ],
@@ -433,9 +433,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         elif not self.report.exists():
             name, args = "finish_report", {}
         else:
-            return {"content": "all steps complete", "tool_calls": []}
+            return {"finish_reason": "stop", "content": "all steps complete", "tool_calls": []}
         return {
-            "content": None,
+            "finish_reason": "tool_calls", "content": None,
             "tool_calls": [
                 {
                     "id": "call_" + str(len(messages)),
@@ -540,7 +540,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_verifier_failure_reaches_model_as_internal_context(self):
         goal = self.goal()
         gid = goal["goal_id"]
-        self.state.goal_chat = lambda m, t: {"content": "done", "tool_calls": []}
+        self.state.goal_chat = lambda m, t: {"finish_reason": "stop", "content": "done", "tool_calls": []}
         await self.tick(2)
         self.assertEqual(self.store.get_goal(gid)["status"], "RUNNING")
         sid = self.store.get_goal(gid)["session_id"]
@@ -559,7 +559,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             checkpoint={"verified": True, "verified_by": "sr_result_verifier"}
         )
         self.assertEqual(goal["checkpoint"], {})
-        self.state.goal_chat = lambda m, t: {"content": "done", "tool_calls": []}
+        self.state.goal_chat = lambda m, t: {"finish_reason": "stop", "content": "done", "tool_calls": []}
         await self.tick(2)
         self.assertEqual(self.store.get_goal(goal["goal_id"])["status"], "BLOCKED")
         with self.assertRaises(ValueError):
@@ -660,7 +660,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.store._db().commit()
             self.expected_events = before
             return {
-                "content": None,
+                "finish_reason": "tool_calls", "content": None,
                 "tool_calls": [
                     {
                         "id": "stale",
@@ -686,7 +686,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         def slow(messages, tools):
             time.sleep(0.3)
             return {
-                "content": None,
+                "finish_reason": "tool_calls", "content": None,
                 "tool_calls": [
                     {"id": "read", "name": "search_scenes", "arguments": "{}"}
                 ],
@@ -780,7 +780,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             release.wait(3)
             finished.set()
             return {
-                "content": None,
+                "finish_reason": "tool_calls", "content": None,
                 "tool_calls": [
                     {
                         "id": "late",
@@ -934,9 +934,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             elif not self.report.exists():
                 name, args = "finish_report", {}
             else:
-                return {"content": "both jobs and report complete", "tool_calls": []}
+                return {"finish_reason": "stop", "content": "both jobs and report complete", "tool_calls": []}
             return {
-                "content": None,
+                "finish_reason": "tool_calls", "content": None,
                 "tool_calls": [
                     {
                         "id": "call_" + str(len(messages)),

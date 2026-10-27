@@ -115,7 +115,7 @@ const failedCount = computed(() =>
           <span class="scb-ask-text">
             清除选定的 <strong>{{ scenes.selectedCount }}</strong> 项？
             删掉的是盘阵上的预览 JPG（<strong>不进回收站</strong>），
-            下次打开会重新生成预览（要读一遍大图，可能要等几十秒）。
+            成功项会从本机场景库隐藏，刷新及重新检索后保持隐藏，可通过“恢复已隐藏”找回。
           </span>
           <button type="button" class="btn mini danger" :disabled="busy"
                   @click="confirm">确认清除</button>
@@ -125,7 +125,7 @@ const failedCount = computed(() =>
           <span class="scb-ask-text">
             将清除<strong>当前列表里的 {{ scenes.selectableRows.length }} 项</strong>
             （受筛选影响，不是盘阵上所有场景）。删掉的是盘阵上的预览 JPG，
-            <strong>不进回收站</strong>，下次打开会重新生成预览。<template
+            <strong>不进回收站</strong>；成功项会从本机场景库隐藏，可通过“恢复已隐藏”找回。<template
               v-if="hiddenCount">另有 {{ hiddenCount }} 项命中不在这份列表里（列表最多显示
               {{ scenes.rows.length }} 条），这次清不到，要一并清请缩小筛选后再来。</template>
           </span>

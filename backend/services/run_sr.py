@@ -51,6 +51,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -193,6 +194,23 @@ def _reject_delete_ori(params: dict) -> None:
         raise ValueError(DELETE_ORI_MSG)
 
 
+def repair_request(params: dict) -> dict:
+    """Shared REST/tool repair semantics; a changed mask creates a new task."""
+    result = {**params, 'repair': True}
+    revision = {}
+    for key, path in (('mask', params.get('mask_path')),
+                      ('nosr', str(Path(params['lq_path']) / (Path(params['lq_path']).name + '_NOSR.tif')))):
+        if path:
+            try:
+                st = os.stat(path)
+                revision[key] = [st.st_size, st.st_mtime_ns, st.st_ino]
+            except OSError:
+                pass  # The SR-side preflight gives the authoritative failure.
+    if revision:
+        result['repair_revision'] = revision
+    return result
+
+
 def build_config_xml(params: dict, dataroot=None) -> str:
     """Serialize run_sr params into an <SFSR_Config> XML string.
 
@@ -222,6 +240,12 @@ def build_config_xml(params: dict, dataroot=None) -> str:
     add("Suffix", params.get("suffix") or "")
     add("OPT", params.get("options_yml") or DEFAULT_OPTIONS_YML)
     add("MaskPath", params.get("mask_path"))
+    if params.get("repair"):
+        scene = Path(dataroot or params["lq_path"])
+        add("RepairMode", "pan-nosr-v1")
+        add("RepairNOSR", (scene / (scene.name + "_NOSR.tif")).as_posix())
+        if params.get('repair_revision'):
+            add('RepairRevision', json.dumps(params['repair_revision'], sort_keys=True))
     if params.get("grid_align") is False:
         add("GridAlign", "false")
 
@@ -234,7 +258,7 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
                        partition=None, gres=1, job_name=None,
                        verify_script=None, sr_script=None,
                        sandbox_src=None, sandbox_parent=None,
-                       nodelist=None, job_id=None) -> str:
+                       nodelist=None, job_id=None, repair=False) -> str:
     """Job batch script: audit the allocation, run the SR script, verify it.
 
     The script is Slurm-shaped but executor-agnostic: the scheduler branch
@@ -297,6 +321,9 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
     partition = partition if partition is not None else rt.partition
     verify_script = verify_script or os.environ.get("SR_VERIFY_SCRIPT",
                                                     "verify_sr_run.py")
+    repair_script = Path(__file__).resolve().parents[2] / 'SR_code' / 'variants' / 'repair_sr.py'
+    if repair:
+        verify_script = str(repair_script.with_name('verify_sr_run.py'))
     # Which SR script the job runs (same shape as SR_VERIFY_SCRIPT above).  Both
     # names are resolved HERE, not in the job: the batch script carries
     # --export=NONE, so nothing set in this process survives into it — the name
@@ -361,7 +388,9 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
         # output path is renamed to `*_NOSR.tif` before being overwritten
         # (util.writeTiff). Say it in the log every single time (plan §4.2): the
         # log is what gets read when a run is being explained afterwards.
-        *([] if (sandbox_src and sandbox_parent) else [
+        *(['echo "PAN repair: NOSR input; ROI model SR, background cubic; '
+           'old PAN -> PAN_old_2.tif, verified result -> PAN.tif."'] if repair else []),
+        *([] if (sandbox_src and sandbox_parent) or repair else [
             'echo "WARNING: no sandbox — SR runs in place: it writes'
             ' <input>_<suffix>.tif into the scene directory and leaves the input'
             ' tif untouched; an existing file at that output path is renamed to'
@@ -406,7 +435,7 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
             '    echo "sandbox copy incomplete: $SBX_SCENE" >&2; exit 1',
             "fi",
         ]
-    verify_line = (f'{python} {verify_script} --config {config_xml_path} '
+    verify_line = (f'{shlex.quote(str(python))} {shlex.quote(str(verify_script))} --config {shlex.quote(str(config_xml_path))} '
                    '--sr-exit-code "$_sr_rc"')
     if job_id is not None:
         # No scheduler to name the verdict file after (local executor), so the
@@ -416,7 +445,8 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
         "",
         f"cd {bundle_dir} || {{ echo \"cd {bundle_dir} failed\" >&2; exit 1; }}",
         "",
-        f"{python} {sr_script} -f {config_xml_path}",
+        (f"{shlex.quote(str(python))} {shlex.quote(str(repair_script))} -f {shlex.quote(str(config_xml_path))} --sr-script {shlex.quote(str(sr_script))}" if repair
+         else f"{python} {sr_script} -f {config_xml_path}"),
         "_sr_rc=$?",
         "",
         verify_line,
@@ -683,7 +713,7 @@ def submit_run_sr(params: dict, run_cmd=None, store=None) -> dict:
         build_batch_script(cfg_path, work,
                            sandbox_src=(lq_path if sandbox else None),
                            sandbox_parent=(sandbox or {}).get("parent"),
-                           job_id=job_id),
+                           job_id=job_id, repair=bool(params.get("repair"))),
         encoding="utf-8")
 
     # checkpoint the intent BEFORE the external side effect: a crash between

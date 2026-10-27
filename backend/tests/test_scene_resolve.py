@@ -1891,3 +1891,25 @@ class TestManualSceneId(ResolveBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMssSameStemPreview(ResolveBase):
+    def test_mss_jpg_uses_original_tif_for_preview_div(self):
+        name = 'JL1KF02B01_PMS09_20261009120519_200544503_101_0017_001_L1_MSS'
+        # Short template avoids the Windows path length limit for this full name.
+        os.environ['SR_SCENE_PATH_TEMPLATE'] = self.root.as_posix() + '/{name}'
+        d = make_scene(self.root / name, name, w=320, h=640)
+        Image.new('RGB', (16, 32)).save(d / (name + '.jpg'))
+        c = self.client()
+        for requested in (name, name[:-4]):
+            r = c.post('/api/scenes/resolve', json={'name': requested, 'product': 'MSS'})
+            self.assertEqual(r.status_code, 200, r.text)
+            body = r.json()
+            self.assertEqual(body['resolved']['input_name'], name + '.tif')
+            self.assertEqual((body['row']['W'], body['row']['H']), (320, 640))
+            for div in (2, 4):
+                preview = c.get('/api/scenes/' + body['row']['id'] + '/preview', params={'div': div})
+                self.assertEqual(preview.status_code, 200, preview.text if preview.status_code != 200 else '')
+                import io
+                with Image.open(io.BytesIO(preview.content)) as image:
+                    self.assertEqual(image.size, (320 // div, 640 // div))

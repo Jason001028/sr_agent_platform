@@ -6,6 +6,10 @@
 > **路径约定**：正文引用一律用项目根目录相对路径；跨文档引用写 `docs/<类目>/<文件>.md`。
 > **事实口径**：描述当前仓库代码与当前部署路线。只有单元测试覆盖、尚未在真机验证的环节标注 **待核**。
 
+Skill 加载与外部工具调用接口见 [skill_interface.md](planning/skill_interface.md)。
+
+PAN/NOSR 局部修复与产物发布见 [pan_repair_contract.md](sr_code/pan_repair_contract.md)。
+
 ---
 
 ## 一、项目是什么
@@ -501,6 +505,7 @@ sr_agent_platform/
 | [io-pipeline/topology.md](knowledge/io-pipeline/topology.md) | 部署拓扑、进程边界、环境变量与权限 |
 | [io-pipeline/module-map.md](knowledge/io-pipeline/module-map.md) | 后端依赖方向、端点与 IO 对照表 |
 | [agent-orchestration-research.md](knowledge/agent-orchestration-research.md) | langchain、langgraph、deepseek-harness 对比与自写循环的决策依据 |
+| [tool_result_budget.md](knowledge/tool_result_budget.md) | 工具完整结果、模型视图、预算配置、会话隔离引用及恢复 |
 | [llm-serving-gguf-glossary.md](knowledge/llm-serving-gguf-glossary.md) | llama.cpp 与 GGUF 生态名词、本地部署选型 |
 | [jpg-export-background.md](knowledge/jpg-export-background.md) | 独立查看器导出 JPG 的背景知识与内存账本 |
 | [interview/README.md](knowledge/interview/README.md) | 面试复习索引；含 JS/TS、Vue、Canvas、SSE、FastAPI、并发、存储、项目深挖八篇 |

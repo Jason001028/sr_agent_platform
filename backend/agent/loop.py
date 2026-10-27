@@ -26,14 +26,16 @@ from __future__ import annotations
 import inspect
 import json
 import time
-import uuid
 
 from openai import OpenAI
 
 from backend.config import Config
 from backend.services import chat_images
 from backend.services import plugins as plugin_svc
+from backend.services.skills import load_catalog, prepare_agent
 from backend.services.trajectory import TrajectoryRecorder
+from backend.services.tool_results import ToolResults
+from backend.services.tool_result_formatter import encode as encode_tool_result
 from backend.tools.contract import ToolRegistry, default_registry
 from backend.tools.contract import list_tools
 from backend.agent.round_outcome import RoundOutcome
@@ -107,7 +109,7 @@ def _mock_chat(cfg: Config):
         if not tool_results:
             _mock_emit_reasoning(on_delta, "先检索盘阵场景。", reasoning)
             _mock_emit(on_delta, {"type": "tool_call", "name": "search_scenes"})
-            return {"content": None, "tool_calls": [{
+            return {"finish_reason": "tool_calls", "content": None, "tool_calls": [{
                 "id": "call_mock_search", "name": "search_scenes",
                 "arguments": "{}"}],
                 "reasoning": "".join(reasoning) or None}
@@ -127,7 +129,7 @@ def _mock_chat(cfg: Config):
                 + (f"：{', '.join(ids)}。" if ids else "。"))
         _mock_emit_reasoning(on_delta, "整理检索结果并生成答复。", reasoning)
         _mock_emit_text(on_delta, text)
-        return {"content": text, "tool_calls": [],
+        return {"finish_reason": "stop", "content": text, "tool_calls": [],
                 "reasoning": "".join(reasoning) or None}
     return chat
 
@@ -269,6 +271,8 @@ def _consume_stream(stream, on_delta) -> dict:
     reasoning_parts: list[str] = []
     calls: dict[int, dict] = {}
     usage = None
+    finish_reason = None
+    response_error = None
     try:
         for chunk in stream:
             chunk_usage = getattr(chunk, "usage", None)
@@ -277,6 +281,8 @@ def _consume_stream(stream, on_delta) -> dict:
             choices = getattr(chunk, "choices", None) or []
             if not choices:
                 continue                    # include_usage final chunk
+            if getattr(choices[0], "finish_reason", None) is not None:
+                finish_reason = choices[0].finish_reason
             delta = getattr(choices[0], "delta", None)
             if delta is None:
                 continue
@@ -315,6 +321,8 @@ def _consume_stream(stream, on_delta) -> dict:
                 args = getattr(fn, "arguments", None)
                 if args:
                     slot["arguments"] += args
+    except Exception as exc:
+        response_error = type(exc).__name__
     finally:
         close = getattr(stream, "close", None)
         if callable(close):
@@ -326,17 +334,17 @@ def _consume_stream(stream, on_delta) -> dict:
     tool_calls = []
     for index in sorted(calls):
         slot = calls[index]
-        if not slot["name"]:
-            continue
         tool_calls.append({
-            "id": slot["id"] or "call_" + uuid.uuid4().hex,
+            "id": slot["id"],
             "name": slot["name"],
-            "arguments": slot["arguments"] or "{}",
+            "arguments": slot["arguments"],
         })
     return {"content": "".join(content_parts) or None,
             "tool_calls": tool_calls,
             "reasoning": "".join(reasoning_parts) or None,
-            "usage": _normalize_usage(usage)}
+            "usage": _normalize_usage(usage),
+            "finish_reason": finish_reason, "response_error": response_error,
+            "response_complete": response_error is None}
 
 
 def _stream_chat(client, cfg: Config, wire, tools, on_delta) -> dict:
@@ -371,7 +379,31 @@ def parse_response(resp) -> dict:
                  or _text_field(msg, "reasoning"))
     return {"content": msg.content, "tool_calls": tool_calls,
             "reasoning": reasoning or None,
-            "usage": _normalize_usage(getattr(resp, "usage", None))}
+            "usage": _normalize_usage(getattr(resp, "usage", None)),
+            "finish_reason": getattr(resp.choices[0], "finish_reason", None),
+            "response_complete": True}
+
+
+def _integrity_error(out):
+    """Validate the entire batch before any tool intent or side effect."""
+    reason = out.get("finish_reason")
+    if out.get("response_error") or out.get("response_complete") is False:
+        return "response_interrupted"
+    if reason == "length":
+        return "output_length"
+    if reason not in {"stop", "tool_calls"}:
+        return "unconfirmed_finish_reason"
+    ids = set()
+    for tc in out.get("tool_calls") or []:
+        if not tc.get("id") or not tc.get("name") or tc["id"] in ids:
+            return "invalid_tool_identity"
+        ids.add(tc["id"])
+        try:
+            if not isinstance(json.loads(tc.get("arguments", "")), dict):
+                return "invalid_arguments_json"
+        except (TypeError, ValueError):
+            return "invalid_arguments_json"
+    return None
 
 
 def call_tool(name, arguments_json, registry: ToolRegistry | None = None,
@@ -528,6 +560,11 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
     # observer) keeps the one-shot call and avoids parsing a stream for nothing.
     stream = bool(stream and on_step is not None and _accepts_on_delta(chat))
 
+    skill_catalog = load_catalog()
+    if skill_catalog.skills or (isinstance(prompt, str) and prompt.startswith('/skill:')):
+        registry, system_prompt, prompt = prepare_agent(
+            skill_catalog, registry or default_registry(), system_prompt, prompt)
+
     if store is not None and session_id is None:
         session_id = store.create_session()
 
@@ -550,6 +587,12 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
         messages = None
         transcript = []
 
+    if messages is not None:
+        messages = [dict(m) for m in messages]
+        if (messages and messages[0].get('role') == 'system'
+                and (skill_catalog.skills or 'Available skills (metadata only):' in messages[0].get('content', ''))):
+            messages[0]['content'] = system_prompt
+
     if messages is None:
         if prompt is None:
             raise ValueError("a new session requires a prompt")
@@ -563,10 +606,16 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
     allowed_names = None
     if store is not None and machine_id:
         allowed_names = plugin_svc.enabled_plugin_ids(store, machine_id)
-    active_registry = registry or default_registry()
+        if skill_catalog.skills:
+            allowed_names = set(allowed_names) | {'read_skill', 'read_skill_resource'}
+    result_manager = ToolResults(store, session_id)
+    active_registry = result_manager.registry(registry or default_registry())
+    if allowed_names is not None:
+        allowed_names = set(allowed_names) | {"read_tool_result"}
+    messages = result_manager.project_history(messages, active_registry)
     tools = active_registry.manifest()
-    if registry is None and allowed_names is not None:
-        tools = [t.openai_function() for t in list_tools() if t.name in allowed_names]
+    if allowed_names is not None:
+        tools = [t.openai_function() for t in active_registry.list() if t.name in allowed_names]
 
     trajectory = None
     if store is not None and session_id is not None:
@@ -609,6 +658,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
         if lease is not None:
             lease.check(store)
 
+    last_integrity_error = None
     for turn in range(1, max_turns + 1):
         check_owner()
         if durable and ((max_model_calls is not None and model_calls >= max_model_calls)
@@ -661,6 +711,19 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
         check_owner()
         content = out.get("content")
         tool_calls = out.get("tool_calls") or []
+        integrity = _integrity_error(out)
+        if integrity:
+            diagnostic = {"category": "model_output_integrity", "constraint": integrity,
+                          "finish_reason": out.get("finish_reason"),
+                          "response_error": out.get("response_error"),
+                          "message": "No tools executed. Regenerate a complete response and tool arguments."}
+            last_integrity_error = diagnostic
+            transcript.append({"role": "error", "error": diagnostic, "turn": turn})
+            if on_step is not None:
+                on_step({"type": "error", "error": json.dumps(diagnostic), "turn": turn})
+            commit({"role": "user", "content": json.dumps(diagnostic)})
+            continue
+        last_integrity_error = None
         llm_finished = time.time()
         if trajectory is not None:
             trajectory.event(
@@ -761,9 +824,12 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                 on_step({"type": "tool_call", "name": tc["name"],
                          "args": _parse_args(tc["arguments"])})
             tool_count += 1
-            if tool_executor is not None:
+            validation_failure = active_registry.validate(tc["name"], tc["arguments"])
+            if validation_failure is not None:
+                result = validation_failure
+            elif tool_executor is not None:
                 result = tool_executor(tc, lambda: call_tool(tc["name"], tc["arguments"], registry=active_registry, allowed_names=allowed_names))
-            elif registry is None:
+            elif registry is None and tc["name"] != "read_tool_result":
                 # Preserve the two-argument seam used by existing callers/tests.
                 if allowed_names is None:
                     result = call_tool(tc["name"], tc["arguments"])
@@ -774,6 +840,10 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                 result = call_tool(tc["name"], tc["arguments"],
                                    registry=active_registry,
                                    allowed_names=allowed_names)
+            assistant_ordinal = sum(m["role"] == "assistant" for m in messages)
+            model_view = result_manager.model_view(
+                tc["name"], result, f'{session_id}:{assistant_ordinal}:{tc["id"]}',
+                arguments=_parse_args(tc["arguments"]), tool=active_registry.get(tc["name"]))
             if trajectory is not None:
                 tool_finished = time.time()
                 trajectory.event(
@@ -781,7 +851,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                     parent_event_id=tool_event["event_id"] if tool_event else None,
                     tool_call_id=tc.get("id"), tool_name=tc.get("name"),
                     status="succeeded" if result.get("ok") else "failed",
-                    payload={"result": result}, started_at=tool_started,
+                    payload={"result": model_view}, started_at=tool_started,
                     finished_at=tool_finished,
                     duration_ms=max(0, int((tool_finished - tool_started) * 1000)))
             if verbose:
@@ -792,7 +862,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                          "ok": bool(result["ok"]), "data": result["data"],
                          "error": result["error"]})
             commit({"role": "tool", "tool_call_id": tc["id"],
-                    "content": json.dumps(result, ensure_ascii=False)})
+                    "content": encode_tool_result(model_view)})
             transcript.append({"role": "tool", "name": tc["name"],
                                "tool_call_id": tc["id"], "content": result})
             if result_hook is not None:
@@ -806,6 +876,12 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                              payload={"has_tool_calls": True,
                                       "tool_call_count": len(tool_calls)})
 
+    if last_integrity_error is not None:
+        return finish_run({"ok": False, "turns": max_turns, "messages": transcript,
+                           "answer": None, "error": last_integrity_error["message"],
+                           "diagnostic": last_integrity_error, "error_class": "model_output_integrity",
+                           "session_id": session_id, "usage": usage,
+                           "outcome": RoundOutcome.RETRYABLE_ERROR})
     if durable:
         return yielded(RoundOutcome.BUDGET_YIELD, max_turns)
     error = f"max_turns={max_turns} reached"

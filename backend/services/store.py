@@ -73,6 +73,25 @@ def _fenced_write(method):
 DEFAULT_DB = "sr_agent.db"
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS tool_result_refs (
+    ref_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    execution_key TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    raw_bytes INTEGER NOT NULL,
+    body BLOB,
+    intent_id TEXT,
+    expires_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS tool_result_refs_session ON tool_result_refs(session_id);
+
+CREATE TABLE IF NOT EXISTS scene_library (
+    source_path TEXT PRIMARY KEY,
+    tags TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
     id         TEXT PRIMARY KEY,
     created_at REAL NOT NULL,
@@ -428,6 +447,76 @@ class Store:
 
     # ---- sessions ---------------------------------------------------------
 
+    def archive_tool_result(self, session_id, execution_key, tool_name, result, budget):
+        """Bounded archive; durable results reference the existing intent receipt."""
+        import hashlib
+        import zlib
+        from backend.services.tool_result_formatter import encode
+        raw = encode(result).encode("utf-8")
+        digest = hashlib.sha256(raw).hexdigest()
+        ref_id = hashlib.sha256((session_id + execution_key + digest).encode()).hexdigest()[:32]
+        with self.worker_transaction() as db:
+            db.execute("DELETE FROM tool_result_refs WHERE expires_at < ? AND session_id NOT IN "
+                       "(SELECT session_id FROM agent_goals WHERE session_id IS NOT NULL "
+                       "AND status NOT IN ('COMPLETED','FAILED','CANCELLED','BLOCKED'))", (time.time(),))
+            if db.execute("SELECT 1 FROM tool_result_refs WHERE ref_id=? AND session_id=?", (ref_id,session_id)).fetchone():
+                return {"available": True, "id": ref_id}
+            receipt = db.execute("SELECT i.intent_id, i.result FROM agent_tool_intents i "
+                                 "JOIN agent_goals g ON g.goal_id=i.goal_id "
+                                 "WHERE g.session_id=? AND i.idempotency_key=? AND i.external_job_id IS NULL "
+                                 "AND i.status IN ('SUCCEEDED','FAILED')", (session_id, execution_key)).fetchone()
+            intent_id = receipt[0] if receipt and receipt[1] and json.loads(receipt[1]) == result else None
+            if not intent_id:
+                used = db.execute("SELECT COALESCE(SUM(raw_bytes),0) FROM tool_result_refs WHERE body IS NOT NULL").fetchone()[0]
+                if len(raw) > budget.archive_bytes or used + len(raw) > budget.archive_total_bytes:
+                    return {"available": False, "reason": "archive_size_limit"}
+            db.execute("INSERT INTO tool_result_refs VALUES (?,?,?,?,?,?,?,?,?)",
+                       (ref_id, session_id, execution_key, tool_name, digest, len(raw),
+                        None if intent_id else zlib.compress(raw), intent_id,
+                        time.time() + budget.retention_days * 86400))
+        return {"available": True, "id": ref_id}
+
+    def read_tool_result(self, session_id, ref_id):
+        import hashlib
+        import zlib
+        from backend.services.tool_result_formatter import encode
+        db = self._db()
+        row = db.execute("SELECT body,intent_id,sha256,expires_at FROM tool_result_refs "
+                         "WHERE ref_id=? AND session_id=?", (ref_id,session_id)).fetchone()
+        if not row:
+            return None
+        pinned = db.execute("SELECT 1 FROM agent_goals WHERE session_id=? "
+                            "AND status NOT IN ('COMPLETED','FAILED','CANCELLED','BLOCKED')", (session_id,)).fetchone()
+        if row[3] < time.time() and not pinned:
+            return None
+        if row[1]:
+            receipt = db.execute("SELECT result FROM agent_tool_intents WHERE intent_id=?", (row[1],)).fetchone()
+            if not receipt or not receipt[0]:
+                return None
+            value = json.loads(receipt[0])
+            raw = encode(value).encode("utf-8")
+        else:
+            raw = zlib.decompress(row[0])
+            value = json.loads(raw)
+        return value if hashlib.sha256(raw).hexdigest() == row[2] else None
+
+    def add_library_entries(self, entries: list[dict]) -> None:
+        """Atomically merge batch tags; canonical source paths prevent duplicates."""
+        with self.worker_transaction() as db:
+            for entry in entries:
+                old = db.execute("SELECT tags FROM scene_library WHERE source_path = ?",
+                                 (entry["source_path"],)).fetchone()
+                tags = json.loads(old[0]) if old else {}
+                for category, values in entry["tags"].items():
+                    tags[category] = list(dict.fromkeys(tags.get(category, []) + values))
+                db.execute("INSERT INTO scene_library VALUES (?, ?, ?) "
+                           "ON CONFLICT(source_path) DO UPDATE SET tags=excluded.tags, updated_at=excluded.updated_at",
+                           (entry["source_path"], json.dumps(tags, ensure_ascii=False), time.time()))
+
+    def list_library_entries(self) -> list[dict]:
+        return [{"source_path": r[0], "tags": json.loads(r[1])} for r in
+                self._db().execute("SELECT source_path, tags FROM scene_library ORDER BY updated_at DESC").fetchall()]
+
     def create_session(self, metadata: dict | None = None) -> str:
         """Insert a session row and return its id."""
         sid = uuid.uuid4().hex
@@ -487,7 +576,7 @@ class Store:
             db.commit()
             return False
         for table in ("messages", "llm_usage", "agent_runs",
-                      "trajectory_events", "trajectory_feedback"):
+                      "trajectory_events", "trajectory_feedback", "tool_result_refs"):
             db.execute(f"DELETE FROM {table} WHERE session_id = ?", (session_id,))
         db.commit()
         return True

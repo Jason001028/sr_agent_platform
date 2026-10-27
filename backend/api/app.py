@@ -513,7 +513,8 @@ def _bake_product_preview(state, task: dict, div: int) -> None:
                         "（缺 <目录名>_meta.xml 或缺影像文件）")
         return
 
-    cands = scene_search.product_candidates(inp, suffix)
+    cands = ([scene_dir / 'PAN.tif'] if params.get('repair')
+             else scene_search.product_candidates(inp, suffix))
     product = next((c for c in cands if c.is_file()), None)
     if product is None:
         # COMPLETED 但没有产物是**正常结局**（云限额跳过就是一个合法 COMPLETED），
@@ -1089,6 +1090,9 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     def health():
         return {"ok": True, "source": "disk" if root else "fake"}
+
+    from backend.services.scene_library import install as install_scene_library
+    install_scene_library(app, root, _manual_row, _cached_dims)
 
     @app.get("/api/scenes")
     def list_scenes(
@@ -1784,11 +1788,14 @@ def create_app() -> FastAPI:
         items = [item("input", inp)]
         cand_names: list[str] = []
         product: Path | None = None
+        repaired = any((r.get('params') or {}).get('repair')
+                       for r in _completed_rows_for_dir(request.app.state.store, scene_dir.as_posix())[:1])
         if inp is not None and suffix:
-            cands = ([scene_dir / (base + "_old" + ext)
+            cands = ([scene_dir / 'PAN_old_2.tif'] + [scene_dir / (base + "_old" + ext)
                       for base in dict.fromkeys([scene_dir.name, inp.stem])
                       for ext in (".tif", ".tiff")] if suffix == "old"
-                     else scene_search.product_candidates(inp, suffix))
+                     else ([scene_dir / 'PAN.tif'] if repaired and suffix_from != 'query'
+                           else scene_search.product_candidates(inp, suffix)))
             cand_names = [c.name for c in cands]
             whitelist(cands, "产物")
             # 没有一个存在时回报第一个候选（`.tif`）并置 exists: false —— 报错口径

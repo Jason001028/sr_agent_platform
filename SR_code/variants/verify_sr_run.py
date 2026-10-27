@@ -67,6 +67,8 @@ job that never ran.
 """
 
 import argparse
+import hashlib
+import json
 import os
 import sys
 import time
@@ -286,6 +288,10 @@ def _check_contract_inner(v, config_path, sr_exit_code, job_id):
         v.fail("DatarootLQ 不是目录: %s" % (lq_path,))
         return
 
+    if _cfg_value(doc, "RepairMode") == "pan-nosr-v1":
+        _check_repair(v, config_path, doc, sr_exit_code)
+        return
+
     suffix = _cfg_value(doc, "Suffix")
     if suffix is _MISSING:
         # util.get_cfg_value would IndexError on a missing tag; degrade to
@@ -347,6 +353,75 @@ def _check_contract_inner(v, config_path, sr_exit_code, job_id):
                 v.fail("输出 tif 为 0 字节: %s" % (v.output,))
             elif _is_stale(v.output, config_mtime):
                 v.fail("输出 tif 早于 config.xml，是上次残留: %s" % (v.output,))
+
+
+def _signature(path):
+    st = os.stat(path)
+    return [st.st_size, st.st_mtime_ns, st.st_ino]
+
+
+def _tiff_dimensions(path):
+    """Read dimensions from classic/BigTIFF without importing GDAL."""
+    with open(path, 'rb') as stream:
+        head = stream.read(16)
+        if head[:2] not in (b'II', b'MM'):
+            raise ValueError('not TIFF')
+        endian = 'little' if head[:2] == b'II' else 'big'
+        number = lambda data: int.from_bytes(data, endian)
+        magic = number(head[2:4])
+        if magic not in (42, 43):
+            raise ValueError('invalid TIFF magic')
+        big = magic == 43
+        stream.seek(number(head[8:16] if big else head[4:8]))
+        count = number(stream.read(8 if big else 2))
+        if count > 4096:
+            raise ValueError('too many TIFF tags')
+        dimensions = {}
+        for _ in range(count):
+            entry = stream.read(20 if big else 12)
+            tag, kind = number(entry[:2]), number(entry[2:4])
+            n = number(entry[4:12] if big else entry[4:8])
+            if tag in (256, 257) and n == 1 and kind in (3, 4, 16):
+                width = {3: 2, 4: 4, 16: 8}[kind]
+                if not big and width > 4:
+                    raise ValueError('unsupported TIFF dimension type')
+                start = 12 if big else 8
+                dimensions[tag] = number(entry[start:start + width])
+        return dimensions[256], dimensions[257]
+
+
+def _check_repair(v, config_path, doc, sr_exit_code):
+    v.output = os.path.join(v.lq_path, 'PAN.tif')
+    v.srlog = os.path.join(v.lq_path, 'Debug', 'PAN_SRLOG.txt')
+    if sr_exit_code != 0:
+        v.fail('PAN repair process did not exit successfully')
+    try:
+        with open(config_path, 'rb') as stream:
+            digest = hashlib.sha256(stream.read()).hexdigest()
+        receipt = os.path.join(v.lq_path, 'Debug', '_SRREPAIR_' + digest + '.json')
+        with open(receipt, encoding='utf-8') as stream:
+            result = json.load(stream)
+        expected_nosr = _cfg_value(doc, 'RepairNOSR')
+        backup = os.path.join(v.lq_path, 'PAN_old_2.tif')
+        if (result['mode'] != 'pan-nosr-v1' or os.path.normpath(result['output']) != os.path.normpath(v.output)
+                or os.path.normpath(result['backup']) != os.path.normpath(backup)
+                or os.path.normpath(result['nosr']) != os.path.normpath(expected_nosr)):
+            raise ValueError('receipt paths do not match this repair')
+        for path, key in ((v.output, 'output_signature'), (backup, 'backup_signature'),
+                          (expected_nosr, 'nosr_signature')):
+            if _signature(path) != result[key]:
+                raise ValueError('artifact changed: ' + path)
+        if os.path.getsize(v.output) != os.path.getsize(backup) or os.path.getsize(v.output) <= 0:
+            raise ValueError('PAN byte size changed')
+        dimensions = _tiff_dimensions(v.output)
+        if dimensions != _tiff_dimensions(backup) or dimensions != (result['width'], result['height']):
+            raise ValueError('PAN dimensions changed')
+        if tail_last_line(v.srlog) != RUN_FINISHED_MARKER:
+            raise ValueError('repair success log is missing')
+        if _is_stale(receipt, _safe_mtime(config_path)) or _is_stale(v.srlog, _safe_mtime(config_path)):
+            raise ValueError('stale repair evidence')
+    except Exception as exc:
+        v.fail('PAN repair contract: %s' % exc)
 
 
 def _safe_mtime(path):

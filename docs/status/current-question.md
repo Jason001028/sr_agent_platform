@@ -7,9 +7,14 @@
 > 真机勾选项见 [real-machine-acceptance.md](real-machine-acceptance.md)（验收单）。
 > 日期：2026-09-24 · 状态：已定。
 
+“提交 SR”的 PAN/NOSR 输入、掩码映射、PAN_old_2 备份与 PAN 发布契约见
+[pan_repair_contract.md](../sr_code/pan_repair_contract.md)。REST 与 Agent 提交均使用修复适配层；真实 GDAL/GPU 验收待核。
+
 ---
 
 Durable Goal Runtime 的执行、恢复和验收说明见 [durable_goal_runtime.md](durable_goal_runtime.md)。Goal 使用有限 Round、Lease Token Fencing 和服务端独立验收；SR 终态回灌后继续模型决策。真实模型与内网 SR/GPU 验收待核。
+
+Skill 接口说明见 [skill_interface.md](../planning/skill_interface.md)：Agent 按需读取本地 `SKILL.md`，支持 `/skill:name`；外部 skill 通过 HTTP 查询与调用平台工具。默认目录 `.agents/skills/`，可用 `SR_SKILL_ROOTS` 覆盖。部署需 PyYAML，真实模型验收待核。
 
 ## 1. 平台是什么，现在能做什么
 

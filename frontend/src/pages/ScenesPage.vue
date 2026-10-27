@@ -21,14 +21,28 @@ const scenes = useScenesStore();
 // 注意「打开」那一格**不看档位**：它只分「撞过 404」（row.purged，见 stores/scenes.ts
 // 的 open）与「打开」两种，能点的行一律写「打开」—— 要生成的话按下去就生成。
 const viewer = useViewerStore();
-const hiddenSceneKeys = ref(new Set<string>());
+const HIDDEN_SCENES_KEY = 'sr.scenes.hidden.v1';
+function loadHiddenScenes(): Set<string> {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(HIDDEN_SCENES_KEY) ?? '[]');
+    return new Set(Array.isArray(saved) ? saved.filter((v): v is string => typeof v === 'string') : []);
+  } catch { return new Set(); }
+}
+const hiddenSceneKeys = ref(loadHiddenScenes());
+watch(hiddenSceneKeys, (keys) => {
+  try { localStorage.setItem(HIDDEN_SCENES_KEY, JSON.stringify([...keys])); } catch { /* storage unavailable */ }
+});
+function restoreHidden(): void {
+  hiddenSceneKeys.value = new Set();
+  void scenes.restoreRemoved();
+}
 function sceneKey(name: string): string {
   return name.replace(/\.(tif|tiff|jpg|jpeg)$/i, '').replace(/_(?:NOSR|SR|sr|nosr)$/i, '');
 }
 const sceneGroups = computed(() => {
   const groups = new Map<string, { row: SceneRow; variants: SceneRow[] }>();
   for (const row of scenes.rows) {
-    const key = sceneKey(row.name);
+    const key = scenes.libraryMode ? row.id : sceneKey(row.name);
     const current = groups.get(key);
     if (!current) groups.set(key, { row, variants: [row] });
     else { current.variants.push(row); if (!current.row.jpgUrl && row.jpgUrl) current.row = row; }
@@ -40,14 +54,12 @@ const sceneGroups = computed(() => {
 
 function removeSceneCard(row: SceneRow): void {
   const label = row.name;
-  if (window.confirm(`从当前场景库结果移除“${label}”？重新检索后仍可恢复。`)) {
+  if (window.confirm(`从本机场景库隐藏“${label}”？刷新后仍保持隐藏，可通过“恢复已隐藏”找回。`)) {
     hiddenSceneKeys.value = new Set(hiddenSceneKeys.value).add(sceneKey(label));
   }
 }
 
-watch(() => scenes.searchedAt?.getTime() ?? 0, () => {
-  hiddenSceneKeys.value = new Set();
-});
+
 
 /** 手工路径：只把用户填的这一个目录交给后端 stat（不扫盘）。错误由本页
  *  统一渲染（scenes.error，就在检索条下方），所以这里不用再弹提示。 */
@@ -88,8 +100,10 @@ onMounted(() => { scenes.ensureSearched(); });
   <div class="scenes-page">
     <div class="sp-head">
       <h2>场景库</h2>
+      <button class="btn ghost" :aria-pressed="!scenes.libraryMode" :disabled="scenes.loading" @click="scenes.setLibraryMode(false)">盘阵检索</button>
+      <button class="btn ghost" :aria-pressed="scenes.libraryMode" :disabled="scenes.loading" @click="scenes.setLibraryMode(true)">已入库</button>
       <span class="sp-src" :class="scenes.source === 'fake' ? 'fake' : 'disk'">
-        {{ scenes.source === 'fake' ? 'fake 回退（未配 SR_SCENES_ROOT）' : '盘阵' }}
+        {{ scenes.libraryMode ? '平台已入库' : scenes.source === 'fake' ? 'fake 回退（未配 SR_SCENES_ROOT）' : '盘阵' }}
         · 扫 {{ scenes.scanned }} · 命中 {{ scenes.count }}
       </span>
       <!-- 列表会留在页面上直到用户按「检索」（见 onMounted），所以带上这次检索的
@@ -102,7 +116,7 @@ onMounted(() => { scenes.ensureSearched(); });
 
     <div class="sp-filters">
       <input v-model="scenes.query" class="sp-in" type="text"
-             placeholder="关键词（文件名片段）" @keyup.enter="scenes.list()" />
+             :placeholder="scenes.libraryMode ? '检索名称或标签' : '关键词（文件名片段）'" @keyup.enter="scenes.list()" />
       <input v-model="scenes.satellite" class="sp-in" type="text" list="sp-sats"
              placeholder="卫星（如 GF07A03）" @keyup.enter="scenes.list()" />
       <datalist id="sp-sats">
@@ -122,9 +136,12 @@ onMounted(() => { scenes.ensureSearched(); });
               title="打开 /viewer 查看当前激活场景" @click="$router.push('/viewer')">去查看器</button>
     </div>
 
+    <button v-if="hiddenSceneKeys.size || scenes.removedIds.size" type="button" class="btn ghost" @click="restoreHidden">恢复已隐藏 ({{ hiddenSceneKeys.size + scenes.removedIds.size }})</button>
+
     <ScenePathBar class="sp-path" :busy="!!scenes.openingId" @open="openPastedPath" />
 
     <p v-if="scenes.error" class="sp-err">{{ scenes.error }}</p>
+    <p v-if="scenes.libraryMode && scenes.unavailable" class="sp-loading">{{ scenes.unavailable }} 项源文件暂不可访问或不在当前白名单内。</p>
     <!-- 首次打开要在服务端生成预览（读一遍大图，几十秒）。遮罩只挂在 /viewer 上，
          本页没有遮罩，就用这一行说明在忙什么，别让按钮一直停在「打开中…」。 -->
     <p v-if="scenes.phase" class="sp-loading sp-phase">{{ scenes.phase }}</p>
@@ -195,7 +212,7 @@ onMounted(() => { scenes.ensureSearched(); });
                  盘阵上这些场景明明还在，说「没有」是假话（重新检索就回来）。 -->
             <td colspan="9" class="empty">
               {{ scenes.clearRemoved
-                 ? '这批已从列表移除（场景与源文件都还在盘阵上），重新检索即回来'
+                 ? '这批已从本机场景库隐藏，可通过“恢复已隐藏”找回'
                  : '没有匹配场景（或未连接盘阵）' }}
             </td>
           </tr>

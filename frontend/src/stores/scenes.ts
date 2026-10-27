@@ -14,7 +14,7 @@
  * 同时暴露 /api 与 /disk-array）；e2e/异源注入 window.__SR_CFG__。
  */
 import { defineStore } from 'pinia';
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
 import { useViewerStore } from './viewer.js';
 import type { ClearResponse, SceneRow, SceneQueryParams } from '../lib/scene.js';
 import { clearSummaryText, loadSrConfig, rowsAfterClear,
@@ -22,9 +22,38 @@ import { clearSummaryText, loadSrConfig, rowsAfterClear,
 import { apiClearScenePreviews, apiResolveScene, fetchSceneJpg,
          isSceneGone, isProxyMiss } from '../lib/api.js';
 import type { SceneResolveResult } from '../lib/api.js';
+import { joinBase } from '../lib/scene.js';
 
 export const useScenesStore = defineStore('scenes', () => {
+  const REMOVED_KEY = 'sr.scenes.removed.v1';
+  function loadRemoved(): Set<string> {
+    try {
+      const saved: unknown = JSON.parse(localStorage.getItem(REMOVED_KEY) ?? '[]');
+      return new Set(Array.isArray(saved) ? saved.filter((v): v is string => typeof v === 'string') : []);
+    } catch { return new Set(); }
+  }
+  const removedIds = ref(loadRemoved());
+  function saveRemoved(): void {
+    try { localStorage.setItem(REMOVED_KEY, JSON.stringify([...removedIds.value])); }
+    catch { clearError.value = '无法保存本机场景库隐藏记录，刷新后可能重新出现。'; }
+  }
+  async function restoreRemoved(): Promise<void> {
+    removedIds.value = new Set();
+    saveRemoved();
+    await list();
+  }
   const rows = ref<SceneRow[]>([]);
+  let savedLibraryMode = false;
+  try { savedLibraryMode = localStorage.getItem('sr.scenes.library-view') === 'true'; } catch { /* optional preference */ }
+  const libraryMode = ref(savedLibraryMode);
+  watch(libraryMode, value => {
+    try { localStorage.setItem('sr.scenes.library-view', String(value)); } catch { /* optional preference */ }
+  });
+  const unavailable = ref(0);
+  async function setLibraryMode(value: boolean): Promise<void> {
+    libraryMode.value = value;
+    await list();
+  }
   const source = ref<'' | 'disk' | 'fake'>('');
   const scanned = ref(0);
   const count = ref(0);
@@ -86,15 +115,26 @@ export const useScenesStore = defineStore('scenes', () => {
     clearRemoved.value = 0;
     clearError.value = '';
     try {
-      const resp = await fetch(scenesListUrl(cfg, params()));
+      const resp = await fetch(libraryMode.value
+        ? joinBase(cfg.apiBase, '/api/scene-library') : scenesListUrl(cfg, params()));
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       const body = await resp.json() as {
-        source: 'disk' | 'fake'; scanned: number; count: number; results: SceneRow[];
+        source: 'disk' | 'fake'; scanned: number; count: number; results: SceneRow[]; unavailable?: number;
       };
-      rows.value = body.results;
+      unavailable.value = body.unavailable ?? 0;
+      if (libraryMode.value) {
+        body.results = body.results.filter(r =>
+          (!query.value || `${r.name} ${Object.values(r.tags ?? {}).flat().join(' ')}`.toLowerCase().includes(query.value.toLowerCase()))
+          && (!satellite.value || r.satellite === satellite.value)
+          && (!sensor.value || r.sensor === sensor.value)
+          && (!dateFrom.value || !!r.date && r.date >= dateFrom.value)
+          && (!dateTo.value || !!r.date && r.date <= dateTo.value));
+        body.source = 'disk'; body.scanned = body.results.length; body.count = body.results.length;
+      }
+      rows.value = body.results.filter((r) => !removedIds.value.has(r.id));
       source.value = body.source;
       scanned.value = body.scanned;
-      count.value = body.count;
+      count.value = Math.max(0, body.count - (body.results.length - rows.value.length));
     } catch (e) {
       error.value = '场景检索失败：' + (e instanceof Error ? e.message : String(e));
       rows.value = [];
@@ -184,7 +224,12 @@ export const useScenesStore = defineStore('scenes', () => {
       const body = await apiClearScenePreviews(loadSrConfig(), ids);
       clearResult.value = body;
       const before = rows.value.length;
-      rows.value = rowsAfterClear(rows.value, body.results);
+      const remaining = rowsAfterClear(rows.value, body.results);
+      const remainingIds = new Set(remaining.map((r) => r.id));
+      removedIds.value = new Set([...removedIds.value,
+        ...rows.value.filter((r) => !remainingIds.has(r.id)).map((r) => r.id)]);
+      saveRemoved();
+      rows.value = remaining;
       clearRemoved.value = before - rows.value.length;
       // 表头 chip 上的「命中 N」得跟着动，否则与可见行数对不上
       count.value = Math.max(0, count.value - clearRemoved.value);
@@ -397,6 +442,7 @@ export const useScenesStore = defineStore('scenes', () => {
 
   return {
     rows, source, scanned, count, loading, openingId, phase, error,
+    libraryMode, setLibraryMode, unavailable,
     searched, searchedAt,
     query, satellite, sensor, dateFrom, dateTo,
     satellites, sensors, dates,
@@ -405,6 +451,6 @@ export const useScenesStore = defineStore('scenes', () => {
     selected, clearing, clearResult, clearRemoved, clearError, clearSummary,
     selectableRows, selectedCount, allSelected,
     isSelectable, toggleSelect, setAllSelected, clearSelection,
-    clearSelected, clearAllRows,
+    clearSelected, clearAllRows, removedIds, restoreRemoved,
   };
 });

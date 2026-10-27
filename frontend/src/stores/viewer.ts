@@ -11,7 +11,7 @@
  * （语义等价 HTML 各处直接调 render()/renderDraw()）。
  */
 import { defineStore } from 'pinia';
-import { ref, computed, markRaw, nextTick, shallowRef, toRaw } from 'vue';
+import { ref, computed, markRaw, nextTick, shallowRef, toRaw, watch } from 'vue';
 import {
   probeImage, tiffTags, layoutInfo, stretchRgba,
   setSparseMin as setSparseMinLib,
@@ -162,14 +162,17 @@ const WAND_EDGE = 64;
 /** 云叠画布长边上限：整幅降到 ≤2048（RGBA ≤16MB），避免 8192² 全幅叠加再撞画布/内存上限。 */
 const CLOUD_OVERLAY_MAX = 2048;
 
-/** 盘阵 JPG Blob → 全尺寸缩略图画布（服务端已 2% 拉伸，尺寸即 JPG 原生尺寸）。 */
+/** 限制显示层尺寸：后续 RGBA 拷贝和 Float32 像素也按此尺寸分配。 */
 async function decodeJpgToCanvas(blob: Blob): Promise<HTMLCanvasElement> {
   const bmp = await createImageBitmap(blob);
   try {
-    const cv = browserKit.createCanvas(bmp.width, bmp.height) as unknown as HTMLCanvasElement;
+    const scale = Math.min(1, 4096 / Math.max(bmp.width, bmp.height));
+    const width = Math.max(1, Math.round(bmp.width * scale));
+    const height = Math.max(1, Math.round(bmp.height * scale));
+    const cv = browserKit.createCanvas(width, height) as unknown as HTMLCanvasElement;
     const ctx = cv.getContext('2d');
     if (!ctx) throw new Error('取不到 2d 上下文');
-    ctx.drawImage(bmp, 0, 0);
+    ctx.drawImage(bmp, 0, 0, width, height);
     return cv;
   } finally {
     bmp.close();
@@ -544,6 +547,52 @@ export const useViewerStore = defineStore('viewer', () => {
     if (paneB.value === recId) return 'B';
     return null;
   }
+
+  const previewMemoryOptions = [256, 512, 1024, 2048, 4096];
+  const previewMemoryMB = ref((() => {
+    try {
+      const saved = Number(localStorage.getItem('sr-preview-memory-mb'));
+      return previewMemoryOptions.includes(saved) ? saved : 1024;
+    } catch { return 1024; }
+  })());
+  function setPreviewMemoryMB(value: number) {
+    if (!previewMemoryOptions.includes(value)) return;
+    previewMemoryMB.value = value;
+    try { localStorage.setItem('sr-preview-memory-mb', String(value)); } catch { /* 本次仍生效 */ }
+  }
+  // 按用户预算淘汰最久未使用的预览；正在显示的两格永不淘汰。
+  const previewUse = new Map<number, number>();
+  let previewClock = 0;
+  watch(() => [previewMemoryMB.value, activeId.value, split.value, paneA.value, paneB.value,
+    ...recs.value.map((r) => r.thumb)], () => {
+    const resident = recs.value.filter((r) => r.thumb);
+    for (const r of resident) {
+      if (sideOfRec(r.id) !== null || !previewUse.has(r.id)) {
+        previewUse.set(r.id, ++previewClock);
+      }
+    }
+    const bytes = (r: ViewerRec) => (r.thumb ? r.thumb.width * r.thumb.height * 4 : 0)
+      + (r.src?.byteLength ?? 0);
+    let total = resident.reduce((sum, r) => sum + bytes(r), 0);
+    const idle = resident.filter((r) => sideOfRec(r.id) === null)
+      .sort((a, b) => (previewUse.get(a.id) ?? 0) - (previewUse.get(b.id) ?? 0));
+    while (idle.length && total > previewMemoryMB.value * 1024 * 1024) {
+      const r = idle.shift()!;
+      total -= bytes(r);
+      r.token++; // 已离屏的旧异步结果不能重新装回像素。
+      r.thumb!.width = 1;
+      r.thumb!.height = 1;
+      r.thumb = null;
+      r.src = null;
+      r.stats = null;
+      r.probe = null;
+      r.status = '预览已释放，点击重新加载';
+      previewUse.delete(r.id);
+    }
+    for (const id of previewUse.keys()) {
+      if (!recs.value.some((r) => r.id === id)) previewUse.delete(id);
+    }
+  }, { flush: 'post' });
 
   const activeRec = computed<ViewerRec | null>(() =>
     recs.value.find((r) => r.id === activeId.value) || null,
@@ -1327,6 +1376,23 @@ export const useViewerStore = defineStore('viewer', () => {
     // **必须排在下面两条路之前**：这条路没有本地文件可解码，掉进 decodeRec 就会拿着
     // 那个 0 字节的 File 去 probeImage，报一句莫名其妙的「无法读取文件属性」。
     if (rec.card) { await loadCardPixels(rec); return; }
+    if (rec.route === 'jpg' || rec.route === 'img') {
+      // 保留文件/场景身份和掩码，只重建显示像素。
+      const my = ++rec.token;
+      try {
+        const cv = await decodeJpgToCanvas(rec.file);
+        if (rec.token !== my || !recs.value.includes(rec)) return;
+        const d = sceneDecodePixels(cv.getContext('2d')!.getImageData(0, 0, cv.width, cv.height).data,
+          cv.width, cv.height);
+        rec.thumb = markRaw(cv as unknown as KitCanvas);
+        rec.src = markRaw(d.src); rec.srcw = d.tw; rec.srch = d.th;
+        rec.nbands = d.nbands; rec.stats = d.stats ? markRaw(d.stats) : null;
+        paintStretch(rec, rec.paintedMode ?? startStretch(rec.route, stretchMode.value));
+        rec.status = '已重新加载'; rec.statusCls = 'ok';
+        afterPixels(rec);
+      } catch (e) { if (rec.token === my) failRec(rec, e); }
+      return;
+    }
     // 未解码：先试着反推盘阵目录。**命中就直接用服务端生成的预览 JPG，不做本地解码** ——
     // 真机上一次全图解码要几十秒、几百 MB，而盘阵那份 1/2 预览已经在手边上；
     // 同时也避开了「本地图先画出来、几百毫秒后又被 JPG 换掉」的闪烁。
@@ -3049,6 +3115,7 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   return {
+    previewMemoryMB, previewMemoryOptions, setPreviewMemoryMB,
     // 状态
     recs, workspaceVersion, activeId, activeRec, view, canvasSize, renderTick, marker,
     cursor, setCursor,

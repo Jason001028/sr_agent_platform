@@ -1,5 +1,7 @@
 # 平台 API 契约（阶段5 · REST / SSE）
 
+`POST /api/queue` 与 Agent `run_sr` 的 PAN 修复语义见 [pan_repair_contract.md](../sr_code/pan_repair_contract.md)。提交参数由服务端附加 `repair` 与文件版本；计算源是完整生产名 `_NOSR.tif`，正式结果恒为 `PAN.tif`，旧 PAN 备份为 `PAN_old_2.tif`。`suffix` 只控制私有计算中间文件名。
+
 > 日期：2026-09-02 · 状态：**评审**（2026-09-16 按 §7 红线置回，待复核后改回「已定」）
 >
 > **挂起项一**：§3.3 新增「`suffix` 默认值来源」条款——省略/留空不再固定为内置 `"sr"`，改为读 `$SR_BUNDLE_DIR` 下 SR 团队配置文件里的 `<Suffix>`，`SR_SUFFIX_DEFAULT` 环境变量作废；同批把 agent 工具 `run_sr` 的归一化与 REST 入口对齐（此前工具既不 strip 也不给默认值，同一逻辑提交两入口指纹不同 → 幂等失效、重复投作业，属修缺陷）。

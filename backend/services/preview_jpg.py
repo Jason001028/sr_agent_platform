@@ -27,7 +27,7 @@ mtime 比源新，只看 mtime 会把它判为有效而永不重生成，真机�
 Pure-struct TIFF header/IFD parsing — no new runtime dependency, classic TIFF
 (42) and BigTIFF (43) both handled. The reader targets the confirmed real
 layout (compression=1, one strip per row, single band); compressed / tiled /
-multi-band scenes fall back to Pillow for *small* files only (Pillow decodes
+unsupported layouts fall back to Pillow for *small* files only (Pillow decodes
 fully — a 1.1 GB scene would blow memory) and raise otherwise.
 
 Cache policy lives at the call site (api layer): the caller derives jpg_path;
@@ -318,10 +318,10 @@ def _np_dtype(bits: int, sf: int, endian: str) -> np.dtype:
 
 
 def sample_strips(path, endian, scalars, arrays, max_edge: int):
-    """Sparse-sample an uncompressed single-band strip TIFF to ≤max_edge edge.
+    """Sparse-sample band 1 of an uncompressed strip TIFF to <=max_edge.
 
     Returns stretched uint8 grayscale (ph, pw). Raises PreviewError when the
-    layout is not uncompressed single-band strips.
+    layout is not supported uncompressed strips.
     """
     W = scalars.get(_TAG_W, 0)
     H = scalars.get(_TAG_H, 0)
@@ -335,13 +335,17 @@ def sample_strips(path, endian, scalars, arrays, max_edge: int):
     photo = scalars.get(_TAG_PHOTO)
     planar = scalars.get(_TAG_PLANAR, 1)
     tiled = (_TAG_TILE_W in scalars or _TAG_TILE_W in arrays)
-    if spp != 1:
-        raise PreviewError(f"仅支持单波段（spp={spp}）")
+    if spp < 1:
+        raise PreviewError(f"Invalid SamplesPerPixel: {spp}")
+    # The preview is grayscale: sample band 1 without decoding the full MSS.
+    for tag, expected in ((_TAG_BITS, bits), (_TAG_SF, sf)):
+        if tag in arrays and np.any(_read_array(path, arrays[tag], endian) != expected):
+            raise PreviewError("Mixed band sample types are unsupported")
     if comp != 1:
         raise PreviewError(f"仅支持无压缩（compression={comp}）")
     if tiled:
         raise PreviewError("不支持 tiled 布局")
-    if planar != 1:
+    if planar not in (1, 2):
         raise PreviewError(f"仅支持 chunky（planar={planar}）")
     bpp = bits // 8
     if bits % 8 or not (1 <= bpp <= 8):
@@ -366,7 +370,8 @@ def sample_strips(path, endian, scalars, arrays, max_edge: int):
     ps = min(1.0, max_edge / max(W, H))
     pw = max(1, int(round(W * ps)))
     ph = max(1, int(round(H * ps)))
-    row_bytes = W * bpp
+    stride = spp if planar == 1 else 1
+    row_bytes = W * bpp * stride
     dt = _np_dtype(bits, sf, endian)
 
     out = np.empty((ph, pw), dtype=dt)
@@ -394,9 +399,9 @@ def sample_strips(path, endian, scalars, arrays, max_edge: int):
                 if len(data) < row_bytes and len(data) < length:
                     raise PreviewError("读取条带失败（文件截断？）")
                 arr = np.frombuffer(data, dtype=dt, count=len(data) // bpp)
-                if arr.size < W:
+                if arr.size < W * stride:
                     raise PreviewError("条带宽度小于图像宽度")
-                out[i] = arr[col_idx]
+                out[i] = arr[col_idx * stride]
 
     n_rows = len(row_idx)
     if n_rows >= PARALLEL_MIN_ROWS:
@@ -505,7 +510,7 @@ def build_preview_pixels(path, max_edge: int | None = None) -> np.ndarray:
     调本函数的地方（测试）会走那个分支；`ensure_preview_jpg` 一定显式算好再传进来。
 
     Prefers the sparse strip sampler (real-array layout); falls back to Pillow
-    for anything the sampler can't handle (compressed / tiled / multi-band),
+    for anything the sampler cannot handle (compressed / tiled),
     as long as it is small enough. Structural errors (corrupt file, unsupported
     bit depth …) raise so the caller reports the real cause.
     """
@@ -524,7 +529,11 @@ def build_preview_pixels(path, max_edge: int | None = None) -> np.ndarray:
         return pixels
     except PreviewError as e:
         if is_uncompressed_strip_error(str(e)):
-            return _pillow_preview(path, max_edge)
+            try:
+                return _pillow_preview(path, max_edge)
+            except PreviewError as fallback:
+                info = probe_tiff(path)
+                raise PreviewError(f"{fallback}; TIFF layout={info}; sparse reader: {e}") from fallback
         raise
 
 

@@ -118,6 +118,9 @@ def input_scene_path(dir_path) -> Path | None:
     """
     if not is_scene_dir(dir_path):
         return None
+    d = Path(dir_path)
+    if (d / 'PAN.tif').is_file() and (d / (d.name + '_NOSR.tif')).is_file():
+        return d / 'PAN.tif'
     for cand in input_candidates(dir_path):
         if cand.is_file():
             return cand
@@ -410,7 +413,7 @@ def nosr_candidates(dir_path, input_path, product_path=None) -> list[Path]:
     回报）。只拼名字，**不 stat、不列举** —— 调用方自己挑第一个存在的。
     """
     d = Path(dir_path)
-    bases = stage_bases(d, input_path) if input_path else [d.name]
+    bases = list(dict.fromkeys([d.name] + (stage_bases(d, input_path) if input_path else [])))
     out = [d / f"{base}{_NOSR_TAIL}{ext}"
            for base in bases for ext in _PRODUCT_EXT_ORDER]
     if product_path is not None:

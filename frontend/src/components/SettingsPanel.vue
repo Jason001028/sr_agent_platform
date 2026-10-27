@@ -88,6 +88,21 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
       <div class="set-title">设置</div>
 
       <div class="set-row">
+        <label class="set-line" for="preview-memory">预览内存预算</label>
+        <select id="preview-memory" class="set-sw" :value="store.previewMemoryMB"
+          data-e2e="set-preview-memory"
+          @change="store.setPreviewMemoryMB(Number(($event.target as HTMLSelectElement).value))">
+          <option v-for="mb in store.previewMemoryOptions" :key="mb" :value="mb">
+            {{ mb < 1024 ? mb + ' MB' : (mb / 1024) + ' GB' }}{{ mb === 1024 ? '（默认）' : '' }}
+          </option>
+        </select>
+        <div class="set-note">
+          超出预算时释放最久未查看的图片，再次点击会重新加载。当前显示的图片始终保留，
+          因此可能超过预算。此值仅计算预览画布和像素数组，不代表浏览器总内存；选择会在本机保存。
+        </div>
+      </div>
+
+      <div class="set-row">
         <button
           type="button"
           class="set-sw"

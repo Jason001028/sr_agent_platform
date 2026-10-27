@@ -490,7 +490,7 @@ describe('清除预览缓存 —— URL / 去留 / 汇总文案', () => {
       expect(text).toContain('已清除 1 项');
       expect(text).toContain('1 个场景目录');
       expect(text).toContain('3 份预览缓存');
-      expect(text).toContain('已从列表移除 1 行，重新检索可回来');
+      expect(text).toContain('已从本机场景库隐藏 1 行，可通过“恢复已隐藏”找回');
     });
 
     it('一景两行：项数按 id 报、目录与文件数不重复计数', () => {

@@ -14,8 +14,11 @@ fastapi>=0.110
 uvicorn[standard]>=0.29
 numpy>=1.24
 pillow>=10.0
+PyYAML>=6.0,<7
 openai>=1.40,<2
 # ⚠️ Python<3.10 必需：后端注解用 PEP604 `X | None`，fastapi/pydantic 在 py3.9 上
 #    解析该注解需要它，缺则启动即崩 "Unable to evaluate type annotation 'str | None'"
 #    （2026-09-07 真机 node81-135 实测；venv 由 destriping_py39=py3.9 建出）。
 eval-type-backport; python_version < "3.10"
+
+jsonschema>=4.17,<4.18

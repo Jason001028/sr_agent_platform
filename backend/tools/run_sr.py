@@ -22,6 +22,9 @@ from .contract import err, ok, tool
 from backend.services.goal_lease import current_tool
 
 _DESC = (
+    "Repair the current PAN.tif from the same scene's <scene-name>_NOSR.tif: "
+    "model SR inside the mask, cubic interpolation outside. Preserve PAN dimensions "
+    "and byte size, back up old PAN as PAN_old_2.tif, then publish new PAN.tif. "
     "Submit a remote-sensing super-resolution (SR) job. Assembles an SFSR "
     "config from high-level params (L1 input dir, optional mask, SR scale, "
     "output suffix) and returns a job_id — NOT the result. The job runs on the "
@@ -152,14 +155,15 @@ def run_run_sr(**params) -> dict:
     except ValueError as e:
         return err(str(e))
 
-    params = {
+    params = svc.repair_request({
         "lq_path": lq_path, "mask_path": mask_path,
         "sr_scale": sr_scale, "suffix": suffix, "gpu": gpu,
         "cloud_limit": cloud_limit,
         "delete_ori": bool(params.get("delete_ori", False)),
         "grid_align": bool(params.get("grid_align", True)),
         "options_yml": params.get("options_yml"),
-    }
+        "repair": True,
+    })
     try:
         execution = current_tool.get()
         data = svc.submit_run_sr(params, store=execution["store"] if execution else store_mod.default_store())

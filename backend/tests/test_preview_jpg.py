@@ -434,3 +434,23 @@ class TestSplitHelpers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMssSparse(unittest.TestCase):
+    def test_multiband_16bit_chunky_and_planar(self):
+        import tifffile
+        from backend.services.preview_jpg import build_preview_pixels, stretch_equal
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as td:
+            first = np.arange(32 * 48, dtype=np.uint16).reshape(32, 48)
+            bands = np.stack([first, first + 100, first + 200, first + 300])
+            for planar in ('contig', 'separate'):
+                src = Path(td) / (planar + '.tif')
+                pixels = bands.transpose(1, 2, 0) if planar == 'contig' else bands
+                tifffile.imwrite(src, pixels, photometric='minisblack', planarconfig=planar, rowsperstrip=4)
+                for edge in (24, 12):
+                    with patch('backend.services.preview_jpg._pillow_preview', side_effect=AssertionError('full decode')):
+                        got = build_preview_pixels(src, edge)
+                    rows = np.round(np.linspace(0, 31, round(32 * edge / 48))).astype(int)
+                    cols = np.round(np.linspace(0, 47, edge)).astype(int)
+                    np.testing.assert_array_equal(got, stretch_equal(first[np.ix_(rows, cols)]))

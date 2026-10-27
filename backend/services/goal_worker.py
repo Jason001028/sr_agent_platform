@@ -38,6 +38,13 @@ def _transition(store, goal, target, **kwargs):
     )
 
 
+def _encoded_result_view(store, sid, name, call_id, result, ordinal=None):
+    from backend.services.tool_results import ToolResults
+    from backend.services.tool_result_formatter import encode
+    count = ordinal if ordinal is not None else sum(m["role"] == "assistant" for m in store.get_messages(sid))
+    return encode(ToolResults(store, sid).model_view(name, result, f"{sid}:{count}:{call_id}"))
+
+
 def _intent_key(store, sid, call_id):
     count = sum(m["role"] == "assistant" for m in store.get_messages(sid))
     return f"{sid}:{count}:{call_id}"
@@ -48,7 +55,7 @@ def _execute_tool(state, goal, tc, invoke):
     lease = current_lease.get()
     lease.check(store)
     args = agent_loop._parse_args(tc["arguments"])
-    readonly = tc["name"] in {"search_scenes", "sr_job_status"} or (
+    readonly = tc["name"] in {"search_scenes", "sr_job_status", "read_tool_result"} or (
         tc["name"] == "fix_bad_lines" and not args.get("output_path")
     )
     # Unknown extension tools are conservatively non-replayable.
@@ -248,6 +255,8 @@ def run_round(state, goal):
 def sr_contract(task, status):
     """Re-run the deployed pure-stdlib verifier against current files."""
     script = Path(os.getenv("SR_VERIFY_SCRIPT", "verify_sr_run.py"))
+    if (task.get('params') or {}).get('repair'):
+        script = Path(__file__).resolve().parents[2] / 'SR_code/variants/verify_sr_run.py'
     if not script.is_absolute():
         script = Path(sr_runtime().bundle_dir) / script
     if not script.is_file():
@@ -342,7 +351,7 @@ def reconcile_goal(state, goal):
             {
                 "role": "tool",
                 "tool_call_id": cid,
-                "content": json.dumps(result, ensure_ascii=False),
+                "content": _encoded_result_view(store, sid, "sr_job_status", cid, result),
             },
         )
         for intent in store.list_tool_intents(goal["goal_id"]):
@@ -523,7 +532,7 @@ def _recover(state, goal):
                     {
                         "role": "tool",
                         "tool_call_id": tc["id"],
-                        "content": json.dumps(result),
+                        "content": _encoded_result_view(store, sid, tc["function"]["name"], tc["id"], result, count),
                     },
                 )
         pending = [

@@ -46,7 +46,7 @@ class TestRegistry(unittest.TestCase):
 class TestLoop(unittest.TestCase):
     def test_final_answer_no_tools(self):
         def chat(messages, tools):
-            return {"content": "好", "tool_calls": []}
+            return {"finish_reason": "stop", "content": "好", "tool_calls": []}
         r = run_loop(cfg(), "hi", chat=chat)
         self.assertTrue(r["ok"])
         self.assertEqual(r["answer"], "好")
@@ -64,10 +64,10 @@ class TestLoop(unittest.TestCase):
             def chat(messages, tools):
                 calls.append(len(messages))
                 if len(calls) == 1:
-                    return {"content": None, "tool_calls": [{
+                    return {"finish_reason": "tool_calls", "content": None, "tool_calls": [{
                         "id": "call_1", "name": "fix_bad_lines",
                         "arguments": json.dumps({"input_path": str(p)})}]}
-                return {"content": "已修复", "tool_calls": []}
+                return {"finish_reason": "stop", "content": "已修复", "tool_calls": []}
 
             r = run_loop(cfg(), "修复坏行", chat=chat)
             self.assertTrue(r["ok"])
@@ -82,10 +82,10 @@ class TestLoop(unittest.TestCase):
         # Model calls a tool that errors (missing file) → loop continues → final.
         def chat(messages, tools):
             if not any(m.get("role") == "tool" for m in messages):
-                return {"content": None, "tool_calls": [{
+                return {"finish_reason": "tool_calls", "content": None, "tool_calls": [{
                     "id": "call_1", "name": "fix_bad_lines",
                     "arguments": '{"input_path": "no_such.tif"}'}]}
-            return {"content": "文件不存在，无法修复", "tool_calls": []}
+            return {"finish_reason": "stop", "content": "文件不存在，无法修复", "tool_calls": []}
 
         r = run_loop(cfg(), "修复", chat=chat)
         self.assertTrue(r["ok"])          # loop survived the tool error
@@ -97,9 +97,9 @@ class TestLoop(unittest.TestCase):
     def test_unknown_tool_fed_back(self):
         def chat(messages, tools):
             if not any(m.get("role") == "tool" for m in messages):
-                return {"content": None, "tool_calls": [{
+                return {"finish_reason": "tool_calls", "content": None, "tool_calls": [{
                     "id": "c1", "name": "ghost_tool", "arguments": "{}"}]}
-            return {"content": "用了不存在的工具", "tool_calls": []}
+            return {"finish_reason": "stop", "content": "用了不存在的工具", "tool_calls": []}
 
         r = run_loop(cfg(), "x", chat=chat)
         self.assertTrue(r["ok"])
@@ -108,7 +108,7 @@ class TestLoop(unittest.TestCase):
 
     def test_max_turns_caps_runaway(self):
         def chat(messages, tools):
-            return {"content": None, "tool_calls": [{
+            return {"finish_reason": "tool_calls", "content": None, "tool_calls": [{
                 "id": f"c{len(messages)}", "name": "fix_bad_lines",
                 "arguments": '{"input_path": "no_such.tif"}'}]}
 
@@ -195,7 +195,7 @@ class TestPersistence(unittest.TestCase):
         store = self._store()
         try:
             def chat(messages, tools):
-                return {"content": "好", "tool_calls": []}
+                return {"finish_reason": "stop", "content": "好", "tool_calls": []}
 
             r = run_loop(cfg(), "hi", chat=chat, store=store)
             self.assertTrue(r["ok"])
@@ -212,10 +212,10 @@ class TestPersistence(unittest.TestCase):
         try:
             def chat(messages, tools):
                 if not any(m.get("role") == "tool" for m in messages):
-                    return {"content": None, "tool_calls": [{
+                    return {"finish_reason": "tool_calls", "content": None, "tool_calls": [{
                         "id": "call_1", "name": "fix_bad_lines",
                         "arguments": '{"input_path": "no_such.tif"}'}]}
-                return {"content": "done", "tool_calls": []}
+                return {"finish_reason": "stop", "content": "done", "tool_calls": []}
 
             r = run_loop(cfg(), "x", chat=chat, store=store)
             self.assertTrue(r["ok"])
@@ -234,7 +234,7 @@ class TestPersistence(unittest.TestCase):
         store = self._store()
         try:
             def chat(messages, tools):
-                return {"content": "好", "tool_calls": []}
+                return {"finish_reason": "stop", "content": "好", "tool_calls": []}
 
             r = run_loop(cfg(), "hi", chat=chat, store=store)
             self.assertEqual(store.get_session(r["session_id"])["status"], "done")
@@ -249,11 +249,11 @@ class TestPersistence(unittest.TestCase):
             def chat(messages, tools):
                 calls.append(True)
                 if len(calls) == 1:
-                    return {"content": None, "tool_calls": [{
+                    return {"finish_reason": "tool_calls", "content": None, "tool_calls": [{
                         "id": "call_traj", "name": "fix_bad_lines",
                         "arguments": '{"input_path":"no_such.tif", "token":"secret"}',
                     }]}
-                return {"content": "已处理", "tool_calls": []}
+                return {"finish_reason": "stop", "content": "已处理", "tool_calls": []}
 
             result = run_loop(cfg(), "记录轨迹", chat=chat, store=store)
             self.assertTrue(result["run_id"])
@@ -279,7 +279,7 @@ class TestPersistence(unittest.TestCase):
             old_run = store.create_agent_run(sid, prompt="旧回合")
 
             def chat(messages, tools):
-                return {"content": "新回合", "tool_calls": []}
+                return {"finish_reason": "stop", "content": "新回合", "tool_calls": []}
 
             result = run_loop(cfg(), "新回合", chat=chat, store=store,
                               session_id=sid, resume=True)
@@ -304,7 +304,7 @@ class TestPersistence(unittest.TestCase):
 
             def chat(messages, tools):
                 seen["messages"] = list(messages)   # snapshot before the loop mutates it
-                return {"content": "已核实，继续", "tool_calls": []}
+                return {"finish_reason": "stop", "content": "已核实，继续", "tool_calls": []}
 
             with mock.patch("backend.agent.loop.call_tool") as mt:
                 r = run_loop(cfg(), "继续", chat=chat, store=store,
@@ -342,7 +342,7 @@ class TestPersistence(unittest.TestCase):
 
             def chat(messages, tools):
                 calls.append(list(messages))   # snapshot (the list is mutated later)
-                return {"content": "第二轮答复", "tool_calls": []}
+                return {"finish_reason": "stop", "content": "第二轮答复", "tool_calls": []}
 
             r = run_loop(cfg(), "第二轮", chat=chat, store=store,
                          session_id=sid, resume=True)
@@ -360,7 +360,7 @@ class TestPersistence(unittest.TestCase):
         store = self._store()
         try:
             def chat(messages, tools):
-                return {"content": "新对话", "tool_calls": []}
+                return {"finish_reason": "stop", "content": "新对话", "tool_calls": []}
 
             r = run_loop(cfg(), "hi", chat=chat, store=store,
                          session_id="ghost", resume=True)
@@ -421,7 +421,7 @@ class TestOnStepSeam(unittest.TestCase):
         events = []
 
         def chat(messages, tools):
-            return {"content": "直接答复", "tool_calls": []}
+            return {"finish_reason": "stop", "content": "直接答复", "tool_calls": []}
 
         r = run_loop(cfg(), "hi", chat=chat, on_step=events.append)
         self.assertTrue(r["ok"])
@@ -433,10 +433,10 @@ class TestOnStepSeam(unittest.TestCase):
 
         def chat(messages, tools):
             if not any(m.get("role") == "tool" for m in messages):
-                return {"content": None, "tool_calls": [{
+                return {"finish_reason": "tool_calls", "content": None, "tool_calls": [{
                     "id": "c1", "name": "fix_bad_lines",
                     "arguments": '{"input_path": "no_such.tif"}'}]}
-            return {"content": "收尾", "tool_calls": []}
+            return {"finish_reason": "stop", "content": "收尾", "tool_calls": []}
 
         r = run_loop(cfg(), "修复", chat=chat, on_step=events.append)
         self.assertTrue(r["ok"])
@@ -464,7 +464,7 @@ class TestOnStepSeam(unittest.TestCase):
         events = []
 
         def chat(messages, tools):
-            return {"content": None, "tool_calls": [{
+            return {"finish_reason": "tool_calls", "content": None, "tool_calls": [{
                 "id": f"c{len(messages)}", "name": "fix_bad_lines",
                 "arguments": '{"input_path": "no_such.tif"}'}]}
 
@@ -480,13 +480,13 @@ class TestOnStepSeam(unittest.TestCase):
             if not any(m.get("role") == "tool" for m in messages):
                 on_delta({"type": "reasoning", "delta": "先想"})
                 on_delta({"type": "tool_call", "name": "fix_bad_lines"})
-                return {"content": None, "tool_calls": [{
+                return {"finish_reason": "tool_calls", "content": None, "tool_calls": [{
                     "id": "c1", "name": "fix_bad_lines",
                     "arguments": '{"input_path": "no_such.tif"}'}]}
             on_delta({"type": "reasoning", "delta": "再想"})
             on_delta({"type": "token", "delta": "收"})
             on_delta({"type": "token", "delta": "尾"})
-            return {"content": "收尾", "tool_calls": []}
+            return {"finish_reason": "stop", "content": "收尾", "tool_calls": []}
 
         r = run_loop(cfg(), "修复", chat=chat, on_step=events.append)
         self.assertTrue(r["ok"])
@@ -506,7 +506,7 @@ class TestOnStepSeam(unittest.TestCase):
         events = []
 
         def chat(messages, tools):
-            return {"content": "好", "tool_calls": []}
+            return {"finish_reason": "stop", "content": "好", "tool_calls": []}
 
         r = run_loop(cfg(), "hi", chat=chat, on_step=events.append,
                      stream=True)
@@ -517,7 +517,7 @@ class TestOnStepSeam(unittest.TestCase):
         events = []
 
         def chat(messages, tools):
-            return {"content": "答案", "tool_calls": [],
+            return {"finish_reason": "stop", "content": "答案", "tool_calls": [],
                     "reasoning": "完整思考"}
 
         r = run_loop(cfg(), "hi", chat=chat, on_step=events.append,
@@ -575,7 +575,7 @@ class TestStreamAdapter(unittest.TestCase):
         out = _consume_stream(iter(chunks), deltas.append)
         self.assertEqual(out["reasoning"], "旧字段")
         self.assertEqual(out["tool_calls"][0]["name"], "t")
-        self.assertTrue(out["tool_calls"][0]["id"].startswith("call_"))
+        self.assertEqual(out["tool_calls"][0]["id"], "")
 
     def test_stream_options_rejected_falls_back_once(self):
         calls = []

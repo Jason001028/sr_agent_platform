@@ -175,6 +175,7 @@ onUnmounted(() => {
 
     <!-- 提交表单（目录由场景带入或从历史目录选；确认才提交） -->
     <section v-if="showForm" class="qp-form">
+      <p class="qp-draft-tip">使用同景 NOSR 修复：掩码内模型超分，其余区域插值；结果保持当前 PAN 尺寸。旧 PAN 保存为 PAN_old_2.tif，新结果命名为 PAN.tif。</p>
       <div v-if="queue.draft" class="qp-draft-tip">
         <template v-if="queue.draft.from === 'task'">
           已带入任务 #{{ queue.draft.taskId }} 的参数 —— 同目录同参数会命中幂等、复用旧作业，
@@ -199,11 +200,11 @@ onUnmounted(() => {
                  placeholder="…_mask.tif（须与影像同目录，命名为 &lt;输入影像名&gt;_mask.tif）" />
         </label>
         <label class="qp-cell">
-          <span>SR 倍率</span>
+          <span>NOSR 到 PAN 倍率</span>
           <input v-model.number="f.sr_scale" type="number" min="1" max="8" step="1" />
         </label>
         <label class="qp-cell">
-          <span>后缀</span>
+          <span>计算中间结果后缀</span>
           <input v-model="f.suffix" type="text" spellcheck="false"
                  placeholder="空=用 SR 配置里的 &lt;Suffix&gt;（如 260318）" />
         </label>

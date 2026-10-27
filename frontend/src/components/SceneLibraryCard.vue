@@ -2,6 +2,7 @@
 import { ref } from 'vue';
 import type { SceneRow } from '../lib/scene.js';
 import AppIcon from './AppIcon.vue';
+import { tagGroups } from '../lib/sceneLibrary.js';
 
 const props = defineProps<{ row: SceneRow; variants?: SceneRow[]; opening?: boolean }>();
 const emit = defineEmits<{ open: []; remove: []; }>();
@@ -40,9 +41,9 @@ function dims(r: SceneRow): string { return r.W && r.H ? `${r.W} × ${r.H}` : '�
       <div class="scene-info">
         <div class="scene-eyebrow"><span>{{ row.satellite || '未知卫星' }}</span><i>·</i><span>{{ row.sensor || '未知传感器' }}</span><span v-if="row.date" class="scene-date">{{ row.date }}</span></div>
         <div v-if="editing" class="scene-name-edit">
-          <input v-model="draftName" class="scene-name-input" aria-label="缂栬緫鍦烘櫙鏄剧ず鍚嶇О" @keyup.enter="saveEdit" @keyup.esc="cancelEdit" />
-          <button type="button" class="scene-name-save" @click="saveEdit">淇濆瓨</button>
-          <button type="button" class="scene-name-cancel" @click="cancelEdit">鍙栨秷</button>
+          <input v-model="draftName" class="scene-name-input" aria-label="编辑场景显示名称" @keyup.enter="saveEdit" @keyup.esc="cancelEdit" />
+          <button type="button" class="scene-name-save" @click="saveEdit">保存</button>
+          <button type="button" class="scene-name-cancel" @click="cancelEdit">取消</button>
         </div>
         <h3 v-else :title="displayName">{{ displayName }}</h3>
         <div class="scene-facts"><span>{{ dims(row) }}</span><span>{{ bytes(row.size_bytes) }}</span><span :class="['scene-preview', row.hasPreview ? 'ready' : 'pending']">{{ row.hasPreview ? '预览已就绪' : '预览待生成' }}</span></div>
@@ -53,23 +54,36 @@ function dims(r: SceneRow): string { return r.W && r.H ? `${r.W} × ${r.H}` : '�
       <span class="scene-id">场景详情</span>
       <div class="scene-card-actions">
         <button type="button" class="scene-action" aria-label="编辑场景显示名称" title="编辑场景显示名称" @click="beginEdit">
-          <AppIcon name="settings" :size="15" label="编辑场景显示名称" />
+          <AppIcon name="settings" :size="16" label="编辑场景显示名称" />
         </button>
-        <button type="button" class="scene-action scene-action-danger" aria-label="从当前结果移除卡片" title="从当前结果移除卡片" @click="emit('remove')">
-          <AppIcon name="trash" :size="15" label="从当前结果移除卡片" />
+        <button type="button" class="scene-action scene-action-danger" aria-label="从场景库隐藏（本机）" title="从场景库隐藏（本机）" @click="emit('remove')">
+          <AppIcon name="trash" :size="16" label="从场景库隐藏（本机）" />
         </button>
-        <button type="button" class="scene-expand" :aria-expanded="expanded" :aria-label="expanded ? '收起更多信息' : '展开更多信息'" :title="expanded ? '收起更多信息' : '展开更多信息'" @click="expanded = !expanded"><AppIcon name="list-ordered" :size="16" :label="expanded ? '收起详情' : '展开更多信息'" /></button>
+        <button type="button" class="scene-expand" :aria-expanded="expanded" :aria-label="expanded ? '收起更多信息' : '展开更多信息'" :title="expanded ? '收起更多信息' : '展开更多信息'" @click="expanded = !expanded"><AppIcon name="clipboard-list" :size="16" :label="expanded ? '收起详情' : '展开更多信息'" /></button>
       </div>
+    </div>
+    <div v-if="row.in_library" class="scene-tag-groups">
+      <template v-for="group in tagGroups" :key="group.key">
+        <div v-if="row.tags?.[group.key]?.length" class="scene-tag-row">
+          <span>{{ group.label }}</span><b v-for="tag in row.tags[group.key]" :key="tag" :class="group.key">{{ tag }}</b>
+        </div>
+      </template>
+      <span v-if="!tagGroups.some(g => row.tags?.[g.key]?.length)" class="no-tags">已入库 · 尚未设置标签</span>
     </div>
     <div v-if="expanded" class="scene-variants">
       <div class="scene-detail-grid"><span>完整场景 ID</span><strong>{{ row.name }}</strong><span>相对路径</span><strong>{{ row.rel || '未提供' }}</strong></div>
-      <div v-if="variants?.length" class="scene-variant-title">闃舵鏂囦欢</div>
+      <div v-if="variants?.length" class="scene-variant-title">阶段文件</div>
       <div v-for="variant in variants" :key="variant.id" class="scene-variant"><span class="variant-kind">{{ variant.id === row.id ? '输入本体' : '关联文件' }}</span><span>{{ dims(variant) }}</span><span>{{ bytes(variant.size_bytes) }}</span><span>{{ variant.hasPreview ? '预览就绪' : '未生成预览' }}</span></div>
     </div>
   </article>
 </template>
 
 <style scoped>
+.scene-tag-groups { display: grid; gap: 7px; padding: 10px 14px; border-top: 1px solid #edf2ef; }
+.scene-tag-row { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; font-size: 11px; }
+.scene-tag-row > span, .no-tags { color: #78908a; font-size: 11px; margin-right: 5px; }
+.scene-tag-row b { padding: 3px 8px; border-radius: 999px; font-weight: 500; background: #e5f1eb; color: #326b58; overflow-wrap: anywhere; }
+.scene-tag-row b.content { background: #e7eef9; color: #526f9b; }.scene-tag-row b.quality { background: #fbefe1; color: #9a7142; }.scene-tag-row b.custom { background: #eee9f6; color: #7a659b; }
 .scene-card { overflow: hidden; background: #fff; border: 1px solid #D8E3DF; border-radius: 12px; box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 4px 12px rgba(0,0,0,.06), 0 12px 32px rgba(0,0,0,.06); transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease; }
 .scene-card:hover { transform: translateY(-2px); border-color: #a7c8bf; box-shadow: 0 2px 4px rgba(0,0,0,.05), 0 8px 18px rgba(0,0,0,.08), 0 16px 36px rgba(0,0,0,.08); }
 .scene-card-main { display: flex; align-items: center; gap: 14px; padding: 12px 14px; }

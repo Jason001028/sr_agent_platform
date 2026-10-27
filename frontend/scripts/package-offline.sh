@@ -48,7 +48,7 @@ tar -czf "$DIST_PKG" -C "${REPO_ROOT}/frontend" dist
 # 所以 `__pycache__` / `.pytest_cache` 各层都排得掉（`backend/tests` 要锚到顶层才写全路径）。
 tar -czf "$BACK_PKG" -C "$REPO_ROOT" \
   --exclude='__pycache__' --exclude='.pytest_cache' --exclude='backend/tests' \
-  backend
+  backend SR_code/variants/repair_sr.py SR_code/variants/verify_sr_run.py
 
 # —— 清掉 release/ 里同族的旧包（只认这三个前缀，无关文件一律不碰）——
 shopt -s nullglob

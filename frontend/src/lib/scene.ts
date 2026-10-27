@@ -50,6 +50,8 @@ export function joinBase(base: string, path: string): string {
 
 /* ---------------- 与后端 /api/scenes 响应对齐的类型 ---------------- */
 export interface SceneRow {
+  tags?: import('./sceneLibrary.js').SceneTags;
+  in_library?: boolean;
   id: string;               // 不透明 id（供 /api/scenes/{id}/preview）
   name: string;             // 可读文件名（stem）
   satellite: string | null;
@@ -608,6 +610,6 @@ export function clearSummaryText(s: ClearSummary, removed: number): string {
   if (s.failed) bits.push(`失败 ${s.failed} 项`);
   const head = bits.length ? bits.join('，') : '没有可清除的场景';
   return removed
-    ? `${head}；已从列表移除 ${removed} 行，重新检索可回来`
+    ? `${head}；已从本机场景库隐藏 ${removed} 行，可通过“恢复已隐藏”找回`
     : head;
 }

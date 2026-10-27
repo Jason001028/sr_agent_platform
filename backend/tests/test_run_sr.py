@@ -526,6 +526,9 @@ class TestRunSrIdempotency(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self._tmp = tempfile.TemporaryDirectory()
+        work_env = mock.patch.dict(os.environ, {'SR_SLURM_WORK_DIR': self._tmp.name})
+        work_env.start()
+        self.addCleanup(work_env.stop)
         self.store = store_mod.Store(os.path.join(self._tmp.name, "db.sqlite"))
         # addCleanup runs LIFO: register tmp.cleanup first so the SQLite handle
         # (store.close) is released before the temp dir is removed (Windows).

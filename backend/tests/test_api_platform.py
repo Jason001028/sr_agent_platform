@@ -616,9 +616,9 @@ class TestQueue(PlatformBase):
         body = self._submit(self.client()).json()
         self.assertTrue(body["in_place"])
         self.assertIn(self.LQ_POSIX, body["notice"])
-        self.assertIn("<输入名>_t.tif", body["notice"])   # 输出名按管线拼接
-        self.assertIn("不改名也不删除", body["notice"])     # 输入不动
-        self.assertIn("_NOSR.tif", body["notice"])        # 同名旧输出的去向
+        self.assertIn("PAN.tif", body["notice"])
+        self.assertIn("PAN_old_2.tif", body["notice"])
+        self.assertIn("_NOSR.tif", body["notice"])
 
     def test_no_in_place_notice_when_sandboxed(self):
         os.environ["SR_SANDBOX_ROOT"] = "/DiskArray/tmp/sbx"

@@ -127,12 +127,12 @@ onMounted(() => void plugins.refresh());
                   <small v-if="p.last_error" class="plugin-error">{{ p.last_error }}</small>
                 </td>
                 <td class="plugin-actions">
-                  <button type="button" class="btn mini" :disabled="plugins.pending !== null"
+                  <button type="button" class="plugin-control" :disabled="plugins.pending !== null"
                           @click="apply(p)">
                     {{ plugins.pending === p.plugin_id ? '处理中…' : actionText(p) }}
                   </button>
                   <button v-if="p.actual_state !== 'uninstalled'" type="button"
-                          class="btn mini ghost" :disabled="plugins.pending !== null"
+                          class="plugin-control plugin-control-remove" :disabled="plugins.pending !== null"
                           @click="uninstall(p)">卸载</button>
                 </td>
               </tr>
@@ -158,7 +158,7 @@ onMounted(() => void plugins.refresh());
 .developer-status { padding: 6px 9px; border-radius: var(--r-ctrl); background: var(--surface-2); color: var(--ink-sub); font-size: 12px; white-space: nowrap; }
 .developer-status.on { background: var(--accent-soft); color: var(--accent-deep); }
 .plugins-error { margin: 0 0 12px; padding: 8px 12px; color: var(--err); background: var(--err-bg); border: 1px solid var(--err-line); border-radius: var(--r-ctrl); }
-.plugins-layout { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 14px; }
+.plugins-layout { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 14px; align-items: start; }
 .plugins-machines, .plugins-main { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-panel); box-shadow: var(--shadow-card); }
 .plugins-machines { padding: 12px; }
 .plugins-section-title { color: var(--ink); font-size: 14px; font-weight: 700; }
@@ -190,19 +190,25 @@ onMounted(() => void plugins.refresh());
 .plugin-actions { white-space: nowrap; }
 .plugins-empty { padding: 20px 12px; color: var(--ink-sub); text-align: center; font-size: 13px; }
 .plugins-table-wrap { overflow: visible; }
-.plugins-table { border-collapse: separate; border-spacing: 20px; margin: -10px; width: calc(100% + 20px); }
+.plugins-table { border-collapse: separate; border-spacing: 0; margin: 0; width: 100%; }
 .plugins-table thead { display: none; }
-.plugins-table tbody { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
-.plugins-table tr { display: flex; flex-direction: column; min-height: 180px; padding: 18px; background: #fff; border: 1px solid #DCE6E1; border-radius: 12px; box-shadow: 0 1px 2px rgba(16,55,48,.06), 0 6px 18px rgba(16,55,48,.05), 0 16px 36px rgba(16,55,48,.025); transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease; }
+.plugins-table tbody { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 12px; }
+.plugins-table tr { display: flex; flex-direction: column; min-height: 0; padding: 14px; background: #fff; border: 1px solid #DCE6E1; border-radius: 12px; box-shadow: 0 1px 2px rgba(16,55,48,.06), 0 6px 18px rgba(16,55,48,.05), 0 16px 36px rgba(16,55,48,.025); transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease; }
 .plugins-table tr:hover { transform: translateY(-2px); border-color: #b8cec5; }
 .plugins-table td { border: 0; padding: 0; }
 .plugins-table td:not(.plugin-info):not(.plugin-actions) { display: none; }
 .plugins-table td.mono { display: none; }
-.plugin-cover { width: 110px; height: 110px; object-fit: contain; float: left; margin: 0 16px 8px 0; }
-.plugin-info { min-height: 120px; }
+.plugin-cover { width: 76px; height: 76px; object-fit: contain; float: left; margin: 0 12px 0 0; }
+.plugin-info { min-height: 76px; display: flow-root; }
 .plugin-info span { display: block; }
 .plugin-author { display: block; margin-top: 2px; color: var(--ink-sub); font-size: 12px; }
-.plugin-actions { display: flex; justify-content: flex-end; gap: 6px; border-top: 1px solid #E7EEEA; margin-top: 14px; padding-top: 12px; }
+.plugin-actions { display: flex; justify-content: flex-end; align-items: center; gap: 4px; margin-top: 8px; padding-top: 0; }
+.plugin-control { display: inline-flex; align-items: center; justify-content: center; min-height: 28px; padding: 4px 10px; border: 1px solid transparent; border-radius: 6px; background: var(--surface-2); color: var(--ink-body); font: inherit; font-size: 12px; line-height: 18px; cursor: pointer; transition: background 150ms ease, color 150ms ease, border-color 150ms ease; }
+.plugin-control:hover:not(:disabled) { background: var(--accent-soft); color: var(--accent-deep); border-color: var(--line); }
+.plugin-control-remove { background: transparent; color: var(--ink-sub); }
+.plugin-control-remove:hover:not(:disabled) { color: var(--err); background: var(--err-bg); border-color: var(--err-line); }
+.plugin-control:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.plugin-control:disabled { opacity: .45; cursor: default; }
 @media (max-width: 900px) { .plugins-table tbody { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { .plugins-table tr { transition: none; } .plugins-table tr:hover { transform: none; } }
 @media (max-width: 760px) { .plugins-layout { grid-template-columns: 1fr; } .plugins-head { align-items: stretch; flex-direction: column; } .plugins-head-actions { justify-content: flex-start; } }

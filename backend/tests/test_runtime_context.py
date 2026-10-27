@@ -21,7 +21,7 @@ class TestRuntimeContext(unittest.TestCase):
             context = AppContext(cfg, store, registry, Path(td), 2.0)
 
             def chat(messages, tools):
-                return {"content": "完成", "tool_calls": []}
+                return {"finish_reason": "stop", "content": "完成", "tool_calls": []}
 
             result = run_loop(prompt="测试", context=context, chat=chat)
             self.assertTrue(result["ok"])

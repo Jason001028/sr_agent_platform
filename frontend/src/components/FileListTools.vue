@@ -15,10 +15,17 @@ import { useViewerStore } from '../stores/viewer';
 import { useQcListStore } from '../stores/qclist';
 import AppIcon from './AppIcon.vue';
 import FavoriteStar from './FavoriteStar.vue';
+import SceneLibrarySandbox from './SceneLibrarySandbox.vue';
+import type { ViewerRec } from '../stores/viewer';
 
 const store = useViewerStore();
 const qc = useQcListStore();
 const favPulseKey = ref(0);
+const libraryBatch = ref<ViewerRec[] | null>(null);
+function openLibrary(): void {
+  const ids = store.selectMode ? store.selectedIds : [store.activeId];
+  libraryBatch.value = store.recs.filter(r => ids.includes(r.id));
+}
 
 const baking = computed(
   () => qc.bakeState === 'running' || qc.bakeState === 'stopping',
@@ -109,6 +116,12 @@ function toggleFavorite(): void {
       >
         <FavoriteStar :size="16" :filled="selAllFav" :pulse-key="favPulseKey" />
       </button>
+      <button type="button" class="ft-btn" data-e2e="ft-add-library"
+              :disabled="baking || (store.selectMode ? !selCount : store.activeId === null)"
+              title="添加至场景库：多选可批量添加并设置标签，未多选时添加当前影像"
+              aria-label="添加至场景库" @click="openLibrary">
+        <AppIcon name="database-plus" :size="16" />
+      </button>
       <button
         type="button"
         class="ft-btn"
@@ -155,6 +168,7 @@ function toggleFavorite(): void {
       </button>
     </div>
   </div>
+  <SceneLibrarySandbox v-if="libraryBatch" :records="libraryBatch" @close="libraryBatch = null" />
 </template>
 
 <style scoped>
