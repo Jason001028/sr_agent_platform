@@ -1,3 +1,4 @@
+import { registerViewerContext, snapshotViewer } from '../lib/viewerContext.js';
 /**
  * stores/viewer.ts — 查看器状态 + 编排（tif-viewer.html 交互层 Vue 化）
  * ------------------------------------------------------------------
@@ -3113,6 +3114,9 @@ export const useViewerStore = defineStore('viewer', () => {
   function setSparseMin(n: number) {
     setSparseMinLib(n);
   }
+
+  registerViewerContext(count => snapshotViewer({ activeRec: activeRec.value,
+    selectedIds: selectedIds.value, panes: panes.value }, count));
 
   return {
     previewMemoryMB, previewMemoryOptions, setPreviewMemoryMB,
