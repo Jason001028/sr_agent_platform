@@ -72,6 +72,10 @@ def _fenced_write(method):
 
 DEFAULT_DB = "sr_agent.db"
 
+
+class ClarificationConflict(ValueError):
+    """A stale or competing answer must not schedule execution."""
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tool_result_refs (
     ref_id TEXT PRIMARY KEY,
@@ -256,6 +260,26 @@ CREATE TABLE IF NOT EXISTS agent_goals (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_goals_schedule
     ON agent_goals(status, next_wake_at, updated_at);
+CREATE TABLE IF NOT EXISTS agent_goal_clarifications (
+    clarification_id TEXT PRIMARY KEY,
+    goal_id TEXT NOT NULL REFERENCES agent_goals(goal_id),
+    run_id TEXT,
+    request_key TEXT NOT NULL,
+    question TEXT NOT NULL,
+    options_json TEXT NOT NULL,
+    allow_free_text INTEGER NOT NULL,
+    recommended_option TEXT,
+    status TEXT NOT NULL CHECK(status IN ('PENDING','ANSWERED','CANCELLED')),
+    answer_json TEXT,
+    answer_key TEXT,
+    message_seq INTEGER,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at REAL NOT NULL,
+    answered_at REAL,
+    UNIQUE(goal_id, request_key)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_goal_pending_clarification
+    ON agent_goal_clarifications(goal_id) WHERE status='PENDING';
 CREATE TABLE IF NOT EXISTS agent_goal_steps (
     step_id TEXT PRIMARY KEY,
     goal_id TEXT NOT NULL,
@@ -1366,6 +1390,8 @@ class Store:
                     request_key: str | None = None, checkpoint: dict | None = None,
                     max_rounds: int = 20, max_model_calls: int = 100,
                     status: str = "QUEUED", phase: str = "queued") -> dict:
+        if status == "WAITING_USER":
+            raise ValueError("WAITING_USER requires a durable clarification request")
         now = time.time(); gid = uuid.uuid4().hex
         db = self._db(); db.execute("BEGIN IMMEDIATE")
         try:
@@ -1383,10 +1409,13 @@ class Store:
             db.rollback(); raise
         return self.get_goal(gid)
 
-    def list_goals(self, *, limit: int = 100, statuses=None):
+    def list_goals(self, *, limit: int = 100, statuses=None, session_id=None):
         q = f"SELECT {self._GOAL_COLS} FROM agent_goals"; args=[]
         if statuses:
             vals=list(statuses); q += " WHERE status IN (" + ",".join("?" for _ in vals) + ")"; args.extend(vals)
+        if session_id is not None:
+            q += (" AND" if statuses else " WHERE") + " session_id=?"
+            args.append(session_id)
         q += " ORDER BY updated_at DESC LIMIT ?"; args.append(int(limit))
         return [self._goal_row(r) for r in self._db().execute(q, args).fetchall()]
 
@@ -1411,15 +1440,19 @@ class Store:
                         next_wake_at: float | None=None, expected_version: int | None=None,
                         event_type: str | None=None, event_payload: dict | None=None,
                         lease_token=None, release=False, rounds_inc=0, model_calls_inc=0,
-                        _verification=False) -> dict | None:
-        valid = {"QUEUED","RUNNING","WAITING_EXTERNAL","VERIFYING","RETRY_WAIT","PAUSED","BLOCKED","COMPLETED","FAILED","CANCELLED"}
+                        _verification=False, _clarification=False, _answer=False) -> dict | None:
+        valid = {"QUEUED","RUNNING","WAITING_EXTERNAL","WAITING_USER","VERIFYING","RETRY_WAIT","PAUSED","BLOCKED","COMPLETED","FAILED","CANCELLED"}
         if status not in valid: raise ValueError(f"invalid goal status: {status}")
+        if status == "WAITING_USER" and not _clarification:
+            raise ValueError("WAITING_USER requires a durable clarification request")
         if status == "COMPLETED" and not _verification:
             raise ValueError("COMPLETED requires the backend Goal verifier")
         db=self._db(); db.execute("BEGIN IMMEDIATE")
         try:
             old=self.get_goal(goal_id)
             if not old: db.rollback(); return None
+            if old["status"] == "WAITING_USER" and status != "CANCELLED" and not _answer:
+                raise ClarificationConflict("answer the pending clarification before resuming")
             if expected_version is not None and old["version"] != expected_version: db.rollback(); return None
             if lease_token is not None and (old["lease_token"] != lease_token or not old["lease_until"] or old["lease_until"] <= time.time()):
                 raise LeaseLost("goal lease expired or replaced")
@@ -1433,6 +1466,8 @@ class Store:
                 if val is not None: sets.append(col+"=?"); vals.append(val)
             if finished is not None: sets.append("finished_at=?"); vals.append(finished)
             vals.append(goal_id); db.execute("UPDATE agent_goals SET "+", ".join(sets)+" WHERE goal_id=?", vals)
+            if status in {"CANCELLED", "FAILED", "BLOCKED", "COMPLETED"}:
+                db.execute("UPDATE agent_goal_clarifications SET status='CANCELLED',version=version+1 WHERE goal_id=? AND status='PENDING'", (goal_id,))
             self._append_goal_event_tx(db, goal_id, event_type or "goal_status", {"status":status, **(event_payload or {})})
             db.commit()
         except Exception: db.rollback(); raise
@@ -1441,6 +1476,119 @@ class Store:
         if lease is not None and lease.goal_id == goal_id:
             lease.version = result["version"]
         return result
+
+    def list_goal_clarifications(self, goal_id):
+        rows = self._db().execute(
+            "SELECT clarification_id,goal_id,run_id,request_key,question,options_json,allow_free_text,"
+            "recommended_option,status,answer_json,answer_key,message_seq,version,created_at,answered_at "
+            "FROM agent_goal_clarifications WHERE goal_id=? ORDER BY created_at,clarification_id", (goal_id,)).fetchall()
+        keys = ("clarification_id", "goal_id", "run_id", "request_key", "question", "options", "allow_free_text",
+                "recommended_option", "status", "answer", "answer_key", "message_seq", "version", "created_at", "answered_at")
+        result = []
+        for row in rows:
+            item = dict(zip(keys, row))
+            item["options"] = json.loads(item["options"])
+            item["answer"] = json.loads(item["answer"]) if item["answer"] else None
+            item["allow_free_text"] = bool(item["allow_free_text"])
+            result.append(item)
+        return result
+
+    def request_goal_clarification(self, goal_id, *, run_id, request_key, clarification,
+                                   checkpoint=None, expected_version=None, lease_token=None):
+        """Request, state and event share one fenced commit; retries reuse identity."""
+        from backend.tools.clarification import control_tool
+        from backend.tools.contract import ToolRegistry
+        checked = ToolRegistry([control_tool()]).invoke("request_clarification", clarification)
+        if not checked["ok"]:
+            raise ValueError(checked["error"])
+        data = checked["data"]
+        with self.worker_transaction() as db:
+            goal = self.get_goal(goal_id)
+            if not goal:
+                raise KeyError("goal not found")
+            old = next((c for c in self.list_goal_clarifications(goal_id) if c["request_key"] == request_key), None)
+            if old:
+                return goal
+            if goal["status"] != "RUNNING" or (expected_version is not None and goal["version"] != expected_version):
+                raise ClarificationConflict("goal changed before clarification request")
+            if not goal["session_id"]:
+                raise ValueError("clarification requires a Goal session")
+            cid = uuid.uuid4().hex
+            db.execute("INSERT INTO agent_goal_clarifications "
+                       "(clarification_id,goal_id,run_id,request_key,question,options_json,allow_free_text,recommended_option,status,created_at) "
+                       "VALUES (?,?,?,?,?,?,?,?, 'PENDING',?)",
+                       (cid, goal_id, run_id, request_key, data["question"], json.dumps(data["options"], ensure_ascii=False),
+                        int(data["allow_free_text"]), data["recommended_option"], time.time()))
+            cp = dict(checkpoint if checkpoint is not None else goal["checkpoint"])
+            cp["clarification_id"] = cid
+            updated = self.transition_goal(goal_id, "WAITING_USER", checkpoint=cp, phase="waiting_user",
+                                          expected_version=expected_version, lease_token=lease_token, release=True,
+                                          event_type="clarification_requested",
+                                          event_payload={"clarification_id": cid, "run_id": run_id, **data}, _clarification=True)
+            if updated is None:
+                raise ClarificationConflict("goal changed before clarification commit")
+            # Event run_id is also queryable without decoding its payload.
+            db.execute("UPDATE agent_goal_events SET run_id=? WHERE goal_id=? AND seq=(SELECT MAX(seq) FROM agent_goal_events WHERE goal_id=?)",
+                       (run_id, goal_id, goal_id))
+            return updated
+
+    def respond_goal_clarification(self, goal_id, clarification_id, *, idempotency_key,
+                                   selected_option_id=None, answer_text=None):
+        """Admit exactly one real user input and queue the same Goal atomically."""
+        if not isinstance(idempotency_key, str) or not idempotency_key.strip() or len(idempotency_key) > 200:
+            raise ValueError("idempotency_key is required (max 200 characters)")
+        if selected_option_id is not None and not isinstance(selected_option_id, str):
+            raise ValueError("selected_option_id must be a string")
+        if answer_text is not None and (not isinstance(answer_text, str) or len(answer_text) > 8000):
+            raise ValueError("answer_text must be a string (max 8000 characters)")
+        answer = {"selected_option_id": selected_option_id, "answer_text": (answer_text or "").strip()}
+        with self.worker_transaction() as db:
+            goal = self.get_goal(goal_id)
+            if not goal:
+                raise KeyError("goal not found")
+            item = next((c for c in self.list_goal_clarifications(goal_id) if c["clarification_id"] == clarification_id), None)
+            if not item:
+                raise KeyError("clarification not found")
+            if item["status"] == "ANSWERED" and item["answer_key"] == idempotency_key and item["answer"] == answer:
+                return {"goal": goal, "clarification": item}
+            if item["status"] != "PENDING" or goal["status"] != "WAITING_USER":
+                raise ClarificationConflict("clarification is no longer pending or Goal is not waiting")
+            selected = next((o for o in item["options"] if o["id"] == selected_option_id), None)
+            if selected_option_id is not None and selected is None:
+                raise ValueError("selected_option_id does not exist")
+            if answer["answer_text"] and not item["allow_free_text"]:
+                raise ValueError("free text is not allowed")
+            if not selected and not answer["answer_text"]:
+                raise ValueError("answer must not be empty")
+            content = "针对澄清问题「" + item["question"] + "」的回答：\n"
+            content += ((selected["label"] + "\n") if selected else "") + answer["answer_text"]
+            # Bind the answer to the question's observation, even if ordinary
+            # chat has added newer messages while this Goal was waiting.
+            history = self.get_messages(goal["session_id"])
+            ordinal = 0
+            question_history = []
+            for index, message in enumerate(history):
+                if message["role"] != "assistant":
+                    continue
+                ordinal += 1
+                if any(f"{goal['session_id']}:{ordinal}:{tc['id']}" == item["request_key"]
+                       for tc in message.get("tool_calls") or []):
+                    question_history = history[:index]
+                    break
+            previous = next((m for m in reversed(question_history) if m["role"] == "user"), {})
+            seq = self.append_message(goal["session_id"], {"role": "user", "content": content,
+                "goal_id": goal_id, "clarification_id": clarification_id,
+                "viewer_snapshot": previous.get("viewer_snapshot")})
+            db.execute("UPDATE agent_goal_clarifications SET status='ANSWERED',answer_json=?,answer_key=?,message_seq=?,"
+                       "answered_at=?,version=version+1 WHERE clarification_id=? AND status='PENDING'",
+                       (json.dumps(answer, ensure_ascii=False), idempotency_key, seq, time.time(), clarification_id))
+            updated = self.transition_goal(goal_id, "QUEUED", phase="clarification_answered", release=True,
+                expected_version=goal["version"], checkpoint=goal["checkpoint"], next_wake_at=time.time(), _answer=True,
+                event_type="clarification_answered", event_payload={"clarification_id": clarification_id, "answer": answer, "message_seq": seq})
+            if updated is None:
+                raise ClarificationConflict("goal changed before answer commit")
+            item = next(c for c in self.list_goal_clarifications(goal_id) if c["clarification_id"] == clarification_id)
+            return {"goal": updated, "clarification": item}
 
     def claim_goal(self, goal_id: str, owner: str, *, lease_sec: float=60) -> dict | None:
         with self.worker_transaction() as db:

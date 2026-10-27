@@ -145,6 +145,28 @@ class TestPanRepair(unittest.TestCase):
             self.run_repair()
         self.assertEqual(self.pan.read_bytes(), old)
 
+    def test_missing_mask_fails_preflight_without_publishing(self):
+        old = self.pan.read_bytes()
+        self.mask.unlink()
+        with self.assertRaisesRegex(ValueError, 'Missing repair input'):
+            self.run_repair(lambda _: self.fail('inference must not run'))
+        self.assertEqual(self.pan.read_bytes(), old)
+        self.assertFalse((self.scene / 'PAN_old_2.tif').exists())
+
+    def test_skipped_inference_is_not_a_successful_pan_repair(self):
+        old = self.pan.read_bytes()
+
+        def skipped(argv):
+            root = ET.parse(argv[-1]).getroot()
+            debug = Path(root.findtext('DatarootLQ')) / 'Debug'
+            debug.mkdir()
+            (debug / 'PAN_SRLOG.txt').write_text('Run skipped: cloud limit\n')
+
+        with self.assertRaisesRegex(ValueError, 'no verified repair'):
+            self.run_repair(skipped)
+        self.assertEqual(self.pan.read_bytes(), old)
+        self.assertFalse((self.scene / 'PAN_old_2.tif').exists())
+
     def test_existing_backup_is_preserved_without_running_inference(self):
         backup = self.scene / 'PAN_old_2.tif'
         backup.write_bytes(b'keep existing backup')

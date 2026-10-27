@@ -7,12 +7,14 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from backend.services.goal_worker import validate_acceptance
+from backend.services.store import ClarificationConflict
 
 router = APIRouter(prefix="/api/goals", tags=["goals"])
 TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "BLOCKED"}
 ALLOWED = {
     "QUEUED": {"RUNNING", "CANCELLED", "PAUSED"},
-    "RUNNING": {"WAITING_EXTERNAL", "VERIFYING", "RETRY_WAIT", "COMPLETED", "FAILED", "BLOCKED", "PAUSED", "CANCELLED"},
+    "RUNNING": {"WAITING_EXTERNAL", "WAITING_USER", "VERIFYING", "RETRY_WAIT", "COMPLETED", "FAILED", "BLOCKED", "PAUSED", "CANCELLED"},
+    "WAITING_USER": {"CANCELLED"},
     "WAITING_EXTERNAL": {"RUNNING", "VERIFYING", "FAILED", "BLOCKED", "PAUSED", "CANCELLED"},
     "VERIFYING": {"RUNNING", "PAUSED", "CANCELLED", "COMPLETED", "FAILED", "BLOCKED", "RETRY_WAIT"},
     "RETRY_WAIT": {"RUNNING", "BLOCKED", "CANCELLED", "PAUSED"},
@@ -34,7 +36,37 @@ async def create_goal(request: Request):
     return request.app.state.store.create_goal(title=title, session_id=body.get("session_id"), request_key=key, checkpoint=body.get("checkpoint"), max_rounds=body.get("max_rounds",20), max_model_calls=body.get("max_model_calls",100))
 
 @router.get("")
-def list_goals(request: Request, limit: int=100): return request.app.state.store.list_goals(limit=max(1,min(limit,500)))
+def list_goals(request: Request, limit: int=100, session_id: str | None=None, include_clarifications: bool=False):
+    store = request.app.state.store
+    goals = store.list_goals(limit=max(1,min(limit,500)), session_id=session_id)
+    if include_clarifications:
+        return [{**g, "clarifications": store.list_goal_clarifications(g["goal_id"])} for g in goals]
+    return goals
+
+
+@router.get("/{goal_id}/clarifications")
+def clarifications(goal_id: str, request: Request):
+    store = request.app.state.store
+    if not store.get_goal(goal_id):
+        raise HTTPException(404, "goal not found")
+    return store.list_goal_clarifications(goal_id)
+
+
+@router.post("/{goal_id}/clarifications/{clarification_id}/respond")
+async def respond(goal_id: str, clarification_id: str, request: Request):
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "body must be an object")
+    try:
+        return request.app.state.store.respond_goal_clarification(goal_id, clarification_id,
+            idempotency_key=request.headers.get("Idempotency-Key") or body.get("idempotency_key"),
+            selected_option_id=body.get("selected_option_id"), answer_text=body.get("answer_text"))
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ClarificationConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 @router.get("/{goal_id}")
 def get_goal(goal_id: str, request: Request):
@@ -87,6 +119,7 @@ async def external_job(goal_id: str, request: Request):
     old=request.app.state.store.get_goal(goal_id)
     if not old: raise HTTPException(404,"goal not found")
     if old["status"] in TERMINAL: raise HTTPException(409,"goal is terminal")
+    if old["status"] == "WAITING_USER": raise HTTPException(409,"answer the pending clarification first")
     if not request.app.state.store.get_sr_task_by_job(int(job_id)):
         raise HTTPException(400,"job must have a durable sr_tasks record")
     cp={**(old.get("checkpoint") or {}),"external_job_id":int(job_id)}

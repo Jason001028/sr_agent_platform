@@ -108,11 +108,18 @@ class SkillCatalog:
                 'Never invent tools or claim to run bundled scripts.\n')
 
     def tools(self):
-        return [Tool('read_skill', 'Load full instructions for a named skill.',
-                     {'type': 'object', 'properties': {'name': {'type': 'string'}}, 'required': ['name'], 'additionalProperties': False},
+        return [Tool('read_skill', '只读加载已配置 Skill 的 SKILL.md 全文，适用于需要遵循该 Skill 工作流时。'
+                     '返回 name、resource 和 UTF-8 content（含前置元数据）；文件上限 256 KiB，模型输出另受结果预算限制。'
+                     '不执行脚本、不增加工具权限；未知名称、文件不可读或超限时返回错误，支持文件使用 read_skill_resource。',
+                     {'type': 'object', 'properties': {'name': {'type': 'string',
+                         'description': '已安装 Skill 的名称，来自可用 Skill 目录元数据或用户明确的 /skill:name；不是文件路径。'}}, 'required': ['name'], 'additionalProperties': False},
                      lambda name: ok(self.read(name))),
-                Tool('read_skill_resource', 'Read a supporting UTF-8 file relative to a skill directory.',
-                     {'type': 'object', 'properties': {'name': {'type': 'string'}, 'resource': {'type': 'string'}},
+                Tool('read_skill_resource', '只读加载已配置 Skill 目录内的 UTF-8 支持文件，通常按 SKILL.md 中的引用读取。'
+                     '返回 name、resource 和 content；单文件上限 256 KiB，模型输出另受结果预算限制。'
+                     '不执行文件或脚本，不读取目录外文件；未知 Skill、越界路径、非 UTF-8、文件不可读或超限时返回错误。',
+                     {'type': 'object', 'properties': {'name': {'type': 'string',
+                         'description': '支持文件所属的已安装 Skill 名称，与 read_skill 的 name 相同。'},
+                         'resource': {'type': 'string', 'description': '相对该 Skill 目录的非空 POSIX 文件路径，通常来自 SKILL.md 引用；不得用绝对路径、反斜杠或解析后越出目录的路径。'}},
                       'required': ['name', 'resource'], 'additionalProperties': False},
                      lambda name, resource: ok(self.read(name, resource)))]
 

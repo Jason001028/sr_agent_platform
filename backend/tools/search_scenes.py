@@ -15,12 +15,11 @@ from backend.services import scene_search as svc
 from .contract import err, ok, tool
 
 _DESC = (
-    "Search the satellite-scene archive (intranet disk array) for images. "
-    "Not for current Viewer image information; use get_current_image_info for that. "
-    "No archive matches does not mean the Viewer image is absent. "
-    "Returns scene metadata (id, path, satellite, sensor, date). "
-    "When source is 'fake' the paths are placeholders for local testing only "
-    "and must not be passed to run_sr."
+    "只读检索 SR_SCENES_ROOT 下的盘阵场景库，适用于明确的场景搜索请求。"
+    "当前 Viewer 本地或离线影像的信息应使用 get_current_image_info；检索零匹配不代表当前影像不存在。"
+    "各条件同时生效，按日期及 id 降序返回；scanned 是库中场景数，count 是匹配总数，results 最多 limit 条。"
+    "场景行含 id、path（影像文件路径）、satellite、sensor、date、size_bytes 和 fake，元数据解析不到时可为空。"
+    "未配置有效场景根目录时返回 source=fake 的测试数据；fake 路径仅供测试，不得传给 run_sr。"
 )
 
 
@@ -32,23 +31,23 @@ _DESC = (
         "properties": {
             "query": {
                 "type": "string",
-                "description": "Free-text substring on scene id/path, e.g. 'GF07'.",
+                "description": "对场景 id 或影像文件路径作不区分大小写的子串匹配，例如 GF07；省略或空串不限制。",
             },
             "satellite": {
                 "type": "string",
-                "description": "Satellite id substring, e.g. 'GF07A03'.",
+                "description": "对解析出的卫星标识作不区分大小写的子串匹配，例如 GF07A03；省略或空串不限制。",
             },
             "date_from": {
                 "type": "string",
-                "description": "Inclusive lower bound, 'YYYY-MM-DD'.",
+                "description": "日期下界（含当天），格式 YYYY-MM-DD；省略或空串不限制下界，指定后排除日期未知的场景。",
             },
             "date_to": {
                 "type": "string",
-                "description": "Inclusive upper bound, 'YYYY-MM-DD'.",
+                "description": "日期上界（含当天），格式 YYYY-MM-DD；省略或空串不限制上界，指定后排除日期未知的场景。",
             },
             "limit": {
                 "type": "integer", "minimum": 1, "maximum": 500, "default": 20,
-                "description": "Max results to return.",
+                "description": "results 的条数上限，1..500，省略为 20；count 仍是匹配总数，模型收到的结果还可能受结果预算截断。",
             },
         },
         "required": [],

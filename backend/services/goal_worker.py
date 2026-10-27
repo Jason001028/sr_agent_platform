@@ -247,6 +247,8 @@ def run_round(state, goal):
         registry=state.tool_registry,
         chat=getattr(state, "goal_chat", None),
         before_model=reserve_model,
+        goal_status_provider=lambda: current_lease.get().check(store),
+        goal_id=goal["goal_id"],
         tool_executor=lambda tc, invoke: _execute_tool(state, goal, tc, invoke),
         result_hook=_tool_control,
     )
@@ -469,9 +471,61 @@ def verify_goal(state, goal):
     return {"ok": not reasons, "reasons": reasons, "verified_sr_jobs": count}
 
 
+def _recover_clarification(store, goal):
+    """Replay a persisted control declaration, never a new model request."""
+    from backend.tools.clarification import NAME, control_tool
+    from backend.tools.contract import ToolRegistry
+    sid = goal.get("session_id")
+    if not sid:
+        return None
+    history = store.get_messages(sid)
+    known = {c["request_key"]: c for c in store.list_goal_clarifications(goal["goal_id"])}
+    ordinal = 0
+    for index, message in enumerate(history):
+        if message["role"] != "assistant":
+            continue
+        ordinal += 1
+        if message.get("goal_id") != goal["goal_id"]:
+            continue
+        calls = message.get("tool_calls") or []
+        if len(calls) != 1 or calls[0].get("function", {}).get("name") != NAME:
+            continue
+        call = calls[0]
+        key = f"{sid}:{ordinal}:{call['id']}"
+        if key in known:
+            continue
+        result = ToolRegistry([control_tool()]).invoke(NAME, call["function"].get("arguments"))
+        if not result["ok"]:
+            continue
+        receipt = None
+        for following in history[index + 1:]:
+            if following["role"] != "tool":
+                break
+            if following.get("tool_call_id") == call["id"]:
+                receipt = following
+                break
+        if receipt:
+            try:
+                if not json.loads(receipt["content"]).get("ok"):
+                    continue
+            except (ValueError, AttributeError):
+                continue
+        lease = current_lease.get()
+        with store.worker_transaction():
+            if receipt is None:
+                store.append_message(sid, {"role": "tool", "tool_call_id": call["id"],
+                    "content": _encoded_result_view(store, sid, NAME, call["id"], result, ordinal)})
+            return store.request_goal_clarification(goal["goal_id"], run_id=message.get("goal_run_id"),
+                request_key=key, clarification=result["data"], expected_version=lease.version, lease_token=lease.token)
+    return None
+
+
 def _recover(state, goal):
     """Restore receipts before repairing history; never replay unknown writes."""
     store = state.store
+    clarification = _recover_clarification(store, goal)
+    if clarification:
+        return clarification
     intents = store.list_tool_intents(goal["goal_id"])
     for intent in intents:
         if (
@@ -624,6 +678,7 @@ def _process(state, claimed, lease):
             Outcome.CONTINUE: "RUNNING",
             Outcome.BUDGET_YIELD: "RUNNING",
             Outcome.WAITING_EXTERNAL: "WAITING_EXTERNAL",
+            Outcome.NEEDS_CLARIFICATION: "WAITING_USER",
             Outcome.COMPLETED_CANDIDATE: "VERIFYING",
             Outcome.NEEDS_APPROVAL: "PAUSED",
             Outcome.RETRYABLE_ERROR: "RETRY_WAIT",
@@ -647,6 +702,10 @@ def _process(state, claimed, lease):
         }
         if result.get("external_job_id") is not None:
             cp["external_job_id"] = result["external_job_id"]
+        if outcome == Outcome.NEEDS_CLARIFICATION:
+            return store.request_goal_clarification(goal["goal_id"], run_id=result.get("run_id"),
+                request_key=result["request_key"], clarification=result["clarification"], checkpoint=cp,
+                expected_version=lease.version, lease_token=lease.token)
         return _transition(
             store,
             goal,

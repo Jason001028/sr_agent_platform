@@ -49,7 +49,10 @@ def bind_registry(registry, snapshot):
                    'source': 'message_viewer_snapshot', 'attachment_count': frozen['attachment_count']})
     result = ToolRegistry(t for t in registry.list() if t.name != 'get_current_image_info')
     result.register(Tool('get_current_image_info',
-        '只读查询本条消息绑定的本图/当前影像元数据。无需截图，不搜索场景库，不执行视觉分析。',
+        '零参数只读查询本条消息冻结的 Viewer current 影像快照，不读取实时 UI、全部 selected_ids 或所有 displayed 显示格。'
+        '返回 image、captured_at、source=message_viewer_snapshot 和 attachment_count；只报告快照已有属性，缺失属性未知。'
+        '无需截图即可查询元数据；不搜索场景库、不执行视觉分析，也不授予文件访问权限。'
+        '未绑定 current 时返回错误，不自行寻找替代影像。',
         {'type': 'object', 'properties': {}, 'additionalProperties': False}, current_info))
     return result
 

@@ -102,14 +102,21 @@ class ToolResults:
 
     def registry(self, registry):
         active = ToolRegistry(registry.list())
-        active.register(Tool("read_tool_result", "Read a bounded page of a saved tool result from this session. "
-                             "Use JSON pointer path (/data/results or /data/log); offset is array entries, object keys, or text characters. "
-                             "Large individual values require a deeper path. Never executes the original tool.",
+        active.register(Tool("read_tool_result", "只读读取当前会话已保存工具结果的有界页面，不重新执行原工具，也不读取任意服务端文件。"
+                             "使用截断结果中 full_result.available=true 的引用 id；无持久化会话时引用仅本次运行有效。"
+                             "路径基于完整的 ok/data/error 结果，读取前按既有策略脱敏。数组按元素、对象按键、字符串按字符分页；"
+                             "返回 value、shown、total、has_more、next_offset，标量仅返回 value 和引用信息。"
+                             "has_more=true 时沿 next_offset 继续；预算可缩小页面（page_reduced），单项超限时 shown=0、游标不前进，须改读更深路径。"
+                             "过期、跨会话、不可用引用或不存在的路径返回错误；不要因此盲目重调有副作用的原工具。",
             {"type":"object", "additionalProperties":False, "required":["result_id"], "properties":{
-                "result_id":{"type":"string","pattern":"^[a-f0-9]{32}$"},
-                "path":{"type":"string","maxLength":512},
-                "offset":{"type":"integer","minimum":0},
-                "limit":{"type":"integer","minimum":1,"maximum":20}}}, self.read))
+                "result_id":{"type":"string","pattern":"^[a-f0-9]{32}$",
+                    "description":"当前会话工具结果中 full_result.available=true 时提供的 id，32 位小写十六进制；不是 job_id 或文件路径。"},
+                "path":{"type":"string","maxLength":512,
+                    "description":"完整结果中的 JSON Pointer，最多 512 字符；省略或空串选根对象，例如 /data/results；~1 表示 /，~0 表示 ~，数组用从 0 起的索引。"},
+                "offset":{"type":"integer","minimum":0,
+                    "description":"从 0 起的非负偏移，省略为 0；单位是数组元素、对象键或字符串字符。下一页使用返回的 next_offset；标量不使用此参数。"},
+                "limit":{"type":"integer","minimum":1,"maximum":20,
+                    "description":"页大小，1..20，省略为 10；数组/对象最多取此数量的元素/键，字符串最多 min(limit×100,1000) 字符；还受字节预算限制，标量不使用此参数。"}}}, self.read))
         return active
 
     def project_history(self, messages, registry):

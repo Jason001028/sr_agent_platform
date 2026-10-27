@@ -18,6 +18,7 @@ import ReasoningBlock from '../components/ReasoningBlock.vue';
 import { phaseLabel } from '../lib/executionOverview.js';
 import ThinkingIndicator from '../components/ThinkingIndicator.vue';
 import ChatAttachTray from '../components/ChatAttachTray.vue';
+import GoalClarifications from '../components/GoalClarifications.vue';
 import ChatImagePicker from '../components/ChatImagePicker.vue';
 import ChatBubbleImages from '../components/ChatBubbleImages.vue';
 import AppIcon from '../components/AppIcon.vue';
@@ -298,7 +299,8 @@ onMounted(() => {
             决定，聊天可发任意话术验证链路。</p>
         </div>
 
-        <div v-for="(m, i) in chat.messages" :key="msgKey(m, i)" class="cp-row" :class="m.role">
+        <div v-for="(m, i) in chat.messages" :key="msgKey(m, i)" class="cp-row" :class="m.role"
+             v-show="m.toolName !== 'request_clarification' && !(m.role === 'assistant' && !m.content && m.toolCalls?.length === 1 && m.toolCalls[0].name === 'request_clarification')">
           <!-- user：截图在上，原话在下；纯图消息不渲染空段落 -->
           <template v-if="m.role === 'user'">
             <div class="bubble user" :class="{ 'has-shots': Boolean(m.images?.length) }">
@@ -344,6 +346,7 @@ onMounted(() => {
           </template>
         </div>
 
+        <GoalClarifications :session-id="chat.sessionId" @updated="!chat.sending && chat.sessionId && chat.loadHistory(chat.sessionId)" />
         <div v-if="chat.sending && !liveMsg" class="cp-thinking">
           <ThinkingIndicator label="正在分析任务" />
         </div>

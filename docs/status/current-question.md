@@ -16,6 +16,10 @@
 
 Durable Goal Runtime 的执行、恢复和验收说明见 [durable_goal_runtime.md](durable_goal_runtime.md)。Goal 使用有限 Round、Lease Token Fencing 和服务端独立验收；SR 终态回灌后继续模型决策。真实模型与内网 SR/GPU 验收待核。
 
+Goal 澄清已接入：`request_clarification → WAITING_USER → 回答入库 → 同一 Goal 重新入队`，请求与回答均有事务及故障恢复。接口、23 项专项测试、浏览器闭环与全量回归剩余失败见 [goal_clarification.md](goal_clarification.md)；真实模型效果待验收。
+
+每次模型请求的临时 Runtime Status、计数口径与验证见 [runtime_status.md](runtime_status.md)。状态由后端现有计数及实时 Goal 行构建，不写入聊天历史或 Checkpoint；真实模型效果待核。
+
 Skill 接口说明见 [skill_interface.md](../planning/skill_interface.md)：Agent 按需读取本地 `SKILL.md`，支持 `/skill:name`；外部 skill 通过 HTTP 查询与调用平台工具。默认目录 `.agents/skills/`，可用 `SR_SKILL_ROOTS` 覆盖。部署需 PyYAML，真实模型验收待核。
 
 Agent 中文交互、执行概览、自动中文标题与手动改名见 [agent-interaction-titles.md](agent-interaction-titles.md)。自动命名在首轮结束后独立执行，metadata 条件更新保护手动标题；真实模型和浏览器视觉验收待核。

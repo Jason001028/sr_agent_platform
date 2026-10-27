@@ -1124,6 +1124,19 @@ NULL ──claim──> running ──> done
 
 契约改动（新增/删端点、改请求/响应/SSE 事件字段、改状态机映射）→ **先改本文档、标注状态=评审，评审通过再改代码**。前端 SSE 渲染与后端推送共用本 schema，两侧各写一份 parser/emitter 的单元测试锁字段。
 
+## Durable Goal 任务澄清（2026-10-27，已实现；真实模型待验收）
+
+审计、数据库、恢复与实测见 [goal_clarification.md](../status/goal_clarification.md)。
+
+- Goal 模式独有 `request_clarification(question, options?, allow_free_text=true, recommended_option?)`。选项为 `{id,label}`，ID 唯一；推荐 ID 必须存在；禁止与其他工具同批。普通聊天不暴露。
+- 有效调用立即结束 Round，Outcome 为 `NEEDS_CLARIFICATION`，含 `goal_id/run_id/request_key/tool_call_id/question/options/allow_free_text`；事务内创建请求、进入 `WAITING_USER`、写事件并释放 Lease；Worker 不领取此状态。
+- `GET /api/goals?session_id=<sid>&include_clarifications=true&limit=500`：按会话过滤，可选附加每 Goal 的 `clarifications` 数组；省略新增参数时保持原形状。
+- `GET /api/goals/{goal_id}/clarifications`：返回持久化问题数组，含 `clarification_id/goal_id/run_id/request_key/question/options/allow_free_text/recommended_option/status/answer/version/created_at/answered_at` 及消息关联。状态为 `PENDING/ANSWERED/CANCELLED`。
+- `POST /api/goals/{goal_id}/clarifications/{clarification_id}/respond`：JSON `{selected_option_id?, answer_text?, idempotency_key}`，也可用 `Idempotency-Key` header。至少有有效选项或非空文本，禁止未许可的自由文本。返回 `{goal, clarification}`；事务内写真实用户消息、标记回答并重入原 QUEUED；HTTP 函数不执行 Agent。
+- 404：Goal/问题不存在；400：参数/选项/空回答非法；409：已失效、已取消、竞争回答或 Goal 不再等待。同键同答案重试返回保存结果，不重复唤醒。
+- 沿用 `/api/goals/{goal_id}/events` 与 `/events/stream`。`clarification_requested` payload 含 `status=WAITING_USER/clarification_id/run_id/question/options/allow_free_text/recommended_option`；`clarification_answered` 含 `status=QUEUED/clarification_id/answer/message_seq`；沿用每 Goal 单调 `seq`。
+- 等待时 resume/pause 不可替代回答，取消照常；澄清不能直接完成 Goal，也不能作为高风险授权或绕过 Intent、Lease、参数校验与 Verifier。
+
 ## Workspace 场景候选集契约
 
 Agent 交互采用两层数据范围：`library` 是盘阵通用场景库，`workspace` 是当前左侧查看列表的临时候选集。每次左侧列表刷新生成新的 workspace version；旧版本的检索结果和 SR 提交请求必须失效。`search_scenes` 默认使用 workspace 范围，`run_sr` 仅允许提交 workspace 中已确认的 scene_id / scene_dir。完整场景库仍由场景库页面负责排序、筛选、批量浏览和对比。

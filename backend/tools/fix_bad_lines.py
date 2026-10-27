@@ -15,33 +15,35 @@ from .contract import err, ok, tool
 @tool(
     name="fix_bad_lines",
     description=(
-        "Repair bad detector lines / striping in a satellite TIFF: detect rows or "
-        "columns whose intensity is a dead/stuck outlier vs their good neighbors "
-        "and replace each with the per-column median of neighboring good lines. "
-        "Returns the fixed line indices; writes output_path if given."
+        "检测并修复二维灰度影像中整行或整列亮度异常：以每行/列的中位数与邻域中位数比较，"
+        "偏差超过 threshold 倍稳健标准差（1.4826×MAD，下限 1e-6）时标记。"
+        "修复用邻域未标记行/列对应像素的中位数，邻域无参考时使用全图未标记行/列；结果取整并转回源 dtype。"
+        "返回 size、dtype、axis、bad_lines（从 0 起的检测索引）和 count，不代表所有异常均已消除；连续异常可能漏检。"
+        "省略 output_path 仅在内存计算并返回统计；指定后保存修复影像并可能覆盖文件，输出不保证保留地理参考等元数据。"
+        "Pillow 整图读入内存，不适合直接处理超大 TIF，也不能替代一般视觉分析或全面质量验收。"
     ),
     params_schema={
         "type": "object",
         "properties": {
             "input_path": {
                 "type": "string",
-                "description": "Path to the input TIFF/image.",
+                "description": "后端可读取、Pillow 可解码的二维灰度影像文件路径；不是 Viewer 本地文件名、影像 id 或场景目录。",
             },
             "output_path": {
                 "type": "string",
-                "description": "Optional output path; omitted → stats only, no file written.",
+                "description": "后端输出文件路径；省略或空串不写文件。指定后经 Pillow 保存，已有同名文件可被覆盖，与 input_path 相同会覆盖输入。",
             },
             "axis": {
                 "type": "string", "enum": ["row", "column"], "default": "row",
-                "description": "Orientation of the bad lines: row = horizontal (whole rows are bad).",
+                "description": "检测方向：row 为水平整行，column 为垂直整列；省略为 row，返回索引属于此方向。",
             },
             "window": {
                 "type": "integer", "minimum": 1, "default": 5,
-                "description": "Half-width of the good-neighbor window used for reference stats.",
+                "description": "邻域半宽，单位为行/列数，至少 1，省略为 5；检测时取两侧各至多 window 行/列（排除自身），修复时排除已标记异常。",
             },
             "threshold": {
                 "type": "number", "minimum": 0, "default": 3.0,
-                "description": "Robust z-score above which a line is flagged bad.",
+                "description": "非负稳健 z-score 阈值，省略为 3.0；绝对偏差除以稳健标准差严格大于此值才标记，越低通常越敏感。",
             },
         },
         "required": ["input_path"],

@@ -8,6 +8,8 @@
 
 Skill 加载与外部工具调用接口见 [skill_interface.md](planning/skill_interface.md)。
 
+工具实际暴露条件、描述契约与审计验收见 [tool_description_audit.md](status/tool_description_audit.md)。
+
 Agent 中文交互、执行概览与自动会话标题见 [agent-interaction-titles.md](status/agent-interaction-titles.md)。
 
 PAN/NOSR 局部修复与产物发布见 [pan_repair_contract.md](sr_code/pan_repair_contract.md)。
@@ -486,6 +488,8 @@ sr_agent_platform/
 |---|---|
 | [current-question.md](status/current-question.md) | 平台现状、当前路线、未收口项、下一步、现值速查。新会话先读 |
 | [durable_goal_runtime.md](status/durable_goal_runtime.md) | Goal/Round 执行、SR 自动续跑、Lease Fencing、独立验收与自动化验证 |
+| [goal_clarification.md](status/goal_clarification.md) | Goal 澄清、WAITING_USER、原子回答/恢复、崩溃窗口与实测验收 |
+| [runtime_status.md](status/runtime_status.md) | 每次模型请求的临时运行状态、计数口径、注入边界与测试 |
 | [sr-local-execution.md](status/sr-local-execution.md) | 本机执行 SR 的链路与运行期规则：单槽串行、重启、UNKNOWN、判定文件 |
 | [real-machine-acceptance.md](status/real-machine-acceptance.md) | 真机验收判据与勾选 |
 | [real-machine-bringup.md](status/real-machine-bringup.md) | node81-135 的部署与启动运行手册 |

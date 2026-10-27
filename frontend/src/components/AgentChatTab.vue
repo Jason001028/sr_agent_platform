@@ -25,6 +25,7 @@ import ReasoningBlock from './ReasoningBlock.vue';
 import { phaseLabel } from '../lib/executionOverview.js';
 import ThinkingIndicator from './ThinkingIndicator.vue';
 import ChatAttachTray from './ChatAttachTray.vue';
+import GoalClarifications from './GoalClarifications.vue';
 import ChatImagePicker from './ChatImagePicker.vue';
 import ChatBubbleImages from './ChatBubbleImages.vue';
 import AppIcon from './AppIcon.vue';
@@ -312,7 +313,8 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
           <p class="at-hint">Agent 只解读画面上的确定性数字；涉及具体区域建议先在工具栏中框选。</p>
         </div>
 
-        <div v-for="(m, i) in chat.messages" :key="msgKey(m, i)" class="at-row" :class="m.role">
+        <div v-for="(m, i) in chat.messages" :key="msgKey(m, i)" class="at-row" :class="m.role"
+             v-show="m.toolName !== 'request_clarification' && !(m.role === 'assistant' && !m.content && m.toolCalls?.length === 1 && m.toolCalls[0].name === 'request_clarification')">
           <!-- user：截图在上；原话为空（纯图消息）时不渲染空段 -->
           <template v-if="m.role === 'user'">
             <div class="bubble user" :class="{ 'has-shots': Boolean(m.images?.length) }">
@@ -373,6 +375,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
           </template>
         </div>
 
+        <GoalClarifications :session-id="chat.sessionId" @updated="!chat.sending && chat.sessionId && chat.loadHistory(chat.sessionId)" />
         <div v-if="chat.sending && !liveMsg" class="at-thinking">
           <ThinkingIndicator label="正在分析任务" />
         </div>

@@ -21,6 +21,43 @@ import type { ViewerContextSnapshot } from './agentContext.js';
 export { loadSrConfig } from './scene.js';
 
 /* ---------------- 类型（对齐 api-contract.md） ---------------- */
+export interface GoalClarification {
+  clarification_id: string;
+  goal_id: string;
+  question: string;
+  options: { id: string; label: string }[];
+  recommended_option: string | null;
+  allow_free_text: boolean;
+  status: 'PENDING' | 'ANSWERED' | 'CANCELLED';
+  answer: { selected_option_id: string | null; answer_text: string } | null;
+}
+
+export interface DurableGoal {
+  goal_id: string;
+  session_id: string | null;
+  status: string;
+  version: number;
+  clarifications?: GoalClarification[];
+}
+
+export async function apiSessionGoals(cfg: SrConfig, sid: string, signal?: AbortSignal): Promise<DurableGoal[]> {
+  const r = await http(apiUrl(cfg, `/api/goals?session_id=${encodeURIComponent(sid)}&limit=500&include_clarifications=true`), { signal });
+  return await r.json();
+}
+
+export async function apiGoalClarifications(cfg: SrConfig, goal: string, signal?: AbortSignal): Promise<GoalClarification[]> {
+  const r = await http(apiUrl(cfg, `/api/goals/${encodeURIComponent(goal)}/clarifications`), { signal });
+  return await r.json();
+}
+
+export async function apiRespondClarification(cfg: SrConfig, item: GoalClarification,
+  answer: { selected_option_id?: string; answer_text?: string; idempotency_key: string }): Promise<{ goal: DurableGoal; clarification: GoalClarification }> {
+  const r = await http(apiUrl(cfg, `/api/goals/${encodeURIComponent(item.goal_id)}/clarifications/${encodeURIComponent(item.clarification_id)}/respond`), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(answer),
+  });
+  return await r.json();
+}
+
 export type QueueState =
   | 'SUBMITTING' | 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'UNKNOWN';
 

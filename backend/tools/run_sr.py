@@ -22,13 +22,15 @@ from .contract import err, ok, tool
 from backend.services.goal_lease import current_tool
 
 _DESC = (
-    "Repair the current PAN.tif from the same scene's <scene-name>_NOSR.tif: "
-    "model SR inside the mask, cubic interpolation outside. Preserve PAN dimensions "
-    "and byte size, back up old PAN as PAN_old_2.tif, then publish new PAN.tif. "
-    "Submit a remote-sensing super-resolution (SR) job. Assembles an SFSR "
-    "config from high-level params (L1 input dir, optional mask, SR scale, "
-    "output suffix) and returns a job_id — NOT the result. The job runs on the "
-    "API host; poll the result with sr_job_status."
+    "异步提交 PAN 局部修复作业：以场景目录的 <目录名>_NOSR.tif 为低分输入，掩码内做模型 SR，"
+    "掩码外用 NOSR 三次插值；不是任意影像的整图超分工具。"
+    "适配器要求同景 PAN.tif、NOSR、掩码和 <目录名>_meta.xml，各栅格为单波段，PAN 与 NOSR 样本类型一致，PAN 为未压缩 TIFF，"
+    "NOSR 分辨率低于 PAN；校验候选尺寸和字节数与 PAN 一致后，将旧 PAN 备份为 PAN_old_2.tif 并发布新 PAN.tif，已有备份会拒绝执行。"
+    "lq_path 和显式 mask_path 经盘阵白名单及映射归一，拒绝 Fake 占位路径；掩码省略时推导路径，不退化成整图处理，缺文件可能在取得 job_id 后的作业内失败。"
+    "提交会写任务记录、Tool Intent、XML 和批脚本，由 SR_EXECUTOR 选择本机进程或 Slurm；作业另写暂存文件、日志、回执和 PAN 文件。"
+    "返回 job_id、status、idempotent、config_xml、batch_script、log_dir；SUBMITTED 是提交回执，RESUMED_ACTIVE/RESUMED_COMPLETED 表示复用。"
+    "相同有效参数及输入修订信息按指纹复用活动或已完成任务，已知失败可能重新提交；状态不确定或 external_unknown 时先查询/对账，不盲目重试。"
+    "用 sr_job_status 查询结果；工具 ok=true 不等于修复完成或 Goal 业务验收通过。"
 )
 
 
@@ -65,44 +67,39 @@ def _bad_path(path: str) -> str | None:
         "properties": {
             "lq_path": {
                 "type": "string",
-                "description": "L1 PAN image directory (DatarootLQ), e.g. a scene dir on the array.",
+                "description": "场景目录 DatarootLQ，含待修复 PAN.tif 与 <目录名>_NOSR.tif；不是影像文件路径。使用已确认的真实盘阵绝对目录或 SR_DRIVE_MAP 可映射的盘符目录，须在 SR_ALLOWED_ROOTS 内；search_scenes.path 是文件路径，不能原样作为目录。",
             },
             "mask_path": {
                 "type": "string",
-                "description": "Optional ROI mask TIFF; omitted → full-image SR.",
+                "description": "现有 ROI 掩码 TIFF 的盘阵绝对路径（同样受映射与白名单约束），非零像素参与修复，尺寸须匹配 PAN 或 NOSR。省略或空串时推导 <lq_path>/<输入影像 stem>_mask.tif，无法识别输入时以目录名为 stem；不自动整图处理，缺失或空掩码会使作业内校验失败。",
             },
             "sr_scale": {
                 "type": "integer", "minimum": 1, "default": 2,
-                "description": "Super-resolution scale factor.",
+                "description": "写入 XML SRScale 的正整数，省略为 2；实际推理还受 options_yml 控制，修复候选必须匹配现有 PAN 尺寸，不能据此承诺将当前 PAN 再放大此倍数。",
             },
             "suffix": {
                 "type": "string", "default": "",
-                "description": "Output filename suffix (letters/digits/_/-, "
-                               "1..16 chars). Empty or omitted → the <Suffix> "
-                               "configured in the SR team's own config file.",
+                "description": "内部推理产物及作业文件使用的后缀，1..16 个英文字母、数字、_ 或 -；去除首尾空白。省略或空串先读 SR_BUNDLE_DIR 配置的有效 Suffix，不可用时回退 sr；最终发布文件仍是 PAN.tif。",
             },
             "gpu": {
                 "type": "integer", "minimum": 0, "default": 0,
-                "description": "GPU id requested (GPUIDS).",
+                "description": "写入 XML GPUIDS 的非负整数，省略为 0；不保证选择同编号物理 GPU，实际选卡由执行器及生产脚本决定，本机执行器另读 SR_LOCAL_GPU。",
             },
             "cloud_limit": {
                 "type": "integer", "minimum": 0, "maximum": 100, "default": 80,
-                "description": "Max cloud percent; above this the job skips the scene.",
+                "description": "写入 CloudLimit 的云量百分比上限，0..100，省略为 80。生产推理可在云量超限时跳过，但 PAN 修复要求有效修复产物，跳过会被适配器判为失败，不能当作修复成功。",
             },
             "delete_ori": {
                 "type": "boolean", "default": False,
-                "description": "Disabled in this prototype: passing true is "
-                               "rejected (SR deletes or overwrites the file at "
-                               "the output path with no backup; with an empty "
-                               "suffix that file is the original itself).",
+                "description": "省略为 false；true 被服务拒绝。此开关不控制 PAN 修复发布，false 时成功修复仍会备份旧 PAN 并替换 PAN.tif。",
             },
             "grid_align": {
                 "type": "boolean", "default": True,
-                "description": "Enable MTA-grid offset alignment (default on).",
+                "description": "是否启用生产推理的 MTA-Grid 偏移对齐；省略为 true，false 时写入 XML GridAlign=false，不改变最终 PAN 尺寸校验。",
             },
             "options_yml": {
                 "type": "string",
-                "description": "Optional path to the SFSR options .yml (network config).",
+                "description": "SR 生产解释器可读取的网络配置 YAML 文件路径，写入 XML OPT；省略或空串使用服务的 DEFAULT_OPTIONS_YML。此路径不会按 lq_path 的盘符规则归一，文件可用性由作业验证。",
             },
         },
         "required": ["lq_path"],
