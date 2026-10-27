@@ -1032,9 +1032,11 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        from backend.services.session_titles import title_loop
         # 任务列表而不是单个 poller：漏 cancel 一个，它会在 app 关闭后继续跑
         # （测试里就是往下一个用例的 env 上写）。
         app.state.tasks = [
+            asyncio.create_task(title_loop(app.state)),
             asyncio.create_task(_poll_loop(app.state)),
             asyncio.create_task(_tmp_preview_purge_loop()),
             asyncio.create_task(_eager_preview_loop(app.state)),
@@ -1069,6 +1071,7 @@ def create_app() -> FastAPI:
     app.state.cfg = load_config()
     app.state.tool_registry = build_builtin_registry()
     app.state.chat_locks = {}                    # session_id → asyncio.Lock
+    app.state.chat_workers = set()               # rounds may outlive an SSE connection
     app.state.subscribers = set()                # /api/queue/events 订阅者
     app.state.task_cache = {}                    # task_id → queue display state
     app.state.poll_sec = float(os.environ.get("SR_QUEUE_POLL_SEC", "2"))

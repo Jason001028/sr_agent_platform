@@ -41,11 +41,20 @@ from backend.tools.contract import list_tools
 from backend.agent.round_outcome import RoundOutcome
 from backend.services.goal_lease import current_lease
 
-DEFAULT_SYSTEM_PROMPT = (
-    "You are the SR (super-resolution) agent for a remote-sensing processing "
-    "platform. Use the provided tools when a step of the user's request needs "
-    "one; when done, answer the user concisely in Chinese."
-)
+DEFAULT_SYSTEM_PROMPT = """# 角色定位
+你是遥感影像处理与超分辨率平台的智能 Agent，负责理解用户需求、分析遥感数据、调用平台工具，协助完成影像检索、影像处理、任务管理和结果分析。
+# 语言规范
+默认使用简体中文交流。最终回答、任务进度、执行摘要和错误解释均优先使用简体中文。
+公开的简短过程说明使用自然、简洁的中文；不要求输出完整内部推理，也不要重复推理内容。
+代码、API、JSON 字段、工具名称、路径、卫星与传感器型号、模型名称及必要术语保持原样。
+用户明确要求其他语言时遵从用户要求。
+# 任务执行规范
+理解实际任务目标，需要工具时使用平台工具。不虚构文件、工具结果、任务状态或外部结果。
+未经验证的结果应说明不确定性。长任务优先报告真实执行进度和关键状态变化。
+外部操作的提交、确认和完成必须遵循平台现有安全机制。
+# 回答规范
+简单问题直接回答；复杂任务分步骤说明；工具结果先给结论再补依据，避免重复冗长的过程描述。
+"""
 
 _REPAIR_ERROR = (
     "interrupted: the previous run crashed while this tool executed; outcome "
@@ -406,6 +415,16 @@ def _integrity_error(out):
     return None
 
 
+def _integrity_message(constraint, max_tokens, retrying):
+    if constraint == "output_length":
+        text = f"模型达到生成长度限制（请求 max_tokens={max_tokens}），输出被截断，本次响应未执行任何工具。"
+    else:
+        text = "模型响应不完整或结束状态无法确认，本次响应未执行任何工具。"
+    if retrying:
+        return text + "正在预算内重新生成。"
+    return text + "已停止本轮自动重试。请检查 SR_LLM_MAX_TOKENS 与模型服务的生成限制后再试。"
+
+
 def call_tool(name, arguments_json, registry: ToolRegistry | None = None,
               allowed_names: set[str] | None = None) -> dict:
     """Execute a tool through the shared registry boundary."""
@@ -499,7 +518,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
              resume=False, on_step=None, registry: ToolRegistry | None = None,
              context=None, machine_id=None, stream=None, durable=False,
              max_model_calls=None, max_tool_calls=32, max_seconds=60,
-             tool_executor=None, result_hook=None, before_model=None):
+             tool_executor=None, result_hook=None, before_model=None, viewer_snapshot=None):
     """Run the loop; returns {"ok", "turns", "messages", "answer", "error",
     "session_id"}.
 
@@ -577,7 +596,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
             for repaired in messages[len(persisted):]:
                 store.append_message(session_id, repaired)
             if prompt is not None:
-                messages.append({"role": "user", "content": prompt})
+                messages.append({"role": "user", "content": prompt, "viewer_snapshot": viewer_snapshot})
                 store.append_message(session_id, messages[-1])
             transcript = _transcript_from(messages)
         else:
@@ -597,11 +616,15 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
         if prompt is None:
             raise ValueError("a new session requires a prompt")
         messages = [{"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt}]
+                    {"role": "user", "content": prompt, "viewer_snapshot": viewer_snapshot}]
         transcript = []
         if store is not None:
             store.append_message(session_id, messages[0])
             store.append_message(session_id, messages[1])
+
+    from backend.services.viewer_context import bind_registry, project_messages
+    latest_user = next((m for m in reversed(messages) if m.get("role") == "user"), {})
+    messages = project_messages(messages)
 
     allowed_names = None
     if store is not None and machine_id:
@@ -609,9 +632,9 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
         if skill_catalog.skills:
             allowed_names = set(allowed_names) | {'read_skill', 'read_skill_resource'}
     result_manager = ToolResults(store, session_id)
-    active_registry = result_manager.registry(registry or default_registry())
+    active_registry = result_manager.registry(bind_registry(registry or default_registry(), latest_user.get("viewer_snapshot")))
     if allowed_names is not None:
-        allowed_names = set(allowed_names) | {"read_tool_result"}
+        allowed_names = set(allowed_names) | {"read_tool_result", "get_current_image_info"}
     messages = result_manager.project_history(messages, active_registry)
     tools = active_registry.manifest()
     if allowed_names is not None:
@@ -659,6 +682,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
             lease.check(store)
 
     last_integrity_error = None
+    consecutive_integrity_errors = 0
     for turn in range(1, max_turns + 1):
         check_owner()
         if durable and ((max_model_calls is not None and model_calls >= max_model_calls)
@@ -712,24 +736,14 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
         content = out.get("content")
         tool_calls = out.get("tool_calls") or []
         integrity = _integrity_error(out)
-        if integrity:
-            diagnostic = {"category": "model_output_integrity", "constraint": integrity,
-                          "finish_reason": out.get("finish_reason"),
-                          "response_error": out.get("response_error"),
-                          "message": "No tools executed. Regenerate a complete response and tool arguments."}
-            last_integrity_error = diagnostic
-            transcript.append({"role": "error", "error": diagnostic, "turn": turn})
-            if on_step is not None:
-                on_step({"type": "error", "error": json.dumps(diagnostic), "turn": turn})
-            commit({"role": "user", "content": json.dumps(diagnostic)})
-            continue
-        last_integrity_error = None
         llm_finished = time.time()
         if trajectory is not None:
             trajectory.event(
                 "llm_request_end", turn=turn,
                 parent_event_id=llm_event["event_id"] if llm_event else None,
-                status="succeeded", payload={"tool_call_count": len(tool_calls)},
+                status="failed" if integrity else "succeeded",
+                payload={"tool_call_count": len(tool_calls),
+                         "finish_reason": out.get("finish_reason"), "integrity_error": integrity},
                 started_at=llm_started, finished_at=llm_finished,
                 duration_ms=max(0, int((llm_finished - llm_started) * 1000)))
         # 非流式响应也可能带回 reasoning_content（llama.cpp / vLLM 的
@@ -762,6 +776,28 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                 trajectory.event("usage", turn=turn,
                                  parent_event_id=llm_event["event_id"] if llm_event else None,
                                  status="recorded", payload=event)
+
+        if integrity:
+            consecutive_integrity_errors += 1
+            retrying = (consecutive_integrity_errors <= getattr(cfg, "llm_integrity_retries", 1)
+                        and turn < max_turns)
+            diagnostic = {"category": "model_output_integrity", "constraint": integrity,
+                          "finish_reason": out.get("finish_reason"),
+                          "response_error": out.get("response_error"),
+                          "max_tokens": cfg.llm_max_tokens,
+                          "attempt": consecutive_integrity_errors, "retrying": retrying,
+                          "message": "No tools executed. Regenerate a complete response with concise reasoning and tool arguments."}
+            diagnostic["user_message"] = _integrity_message(integrity, cfg.llm_max_tokens, retrying)
+            last_integrity_error = diagnostic
+            transcript.append({"role": "error", "error": diagnostic, "turn": turn})
+            if on_step is not None:
+                on_step({"type": "error", "error": diagnostic["user_message"], "turn": turn})
+            commit({"role": "user", "content": json.dumps(diagnostic)})
+            if not retrying:
+                break
+            continue
+        last_integrity_error = None
+        consecutive_integrity_errors = 0
 
         if verbose:
             print(f"[turn {turn}] assistant: {content!r} "
@@ -821,7 +857,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                     status="started", payload={"arguments": _parse_args(tc.get("arguments"))},
                     started_at=tool_started)
             if on_step is not None:
-                on_step({"type": "tool_call", "name": tc["name"],
+                on_step({"type": "tool_call", "id": tc["id"], "name": tc["name"],
                          "args": _parse_args(tc["arguments"])})
             tool_count += 1
             validation_failure = active_registry.validate(tc["name"], tc["arguments"])
@@ -829,7 +865,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                 result = validation_failure
             elif tool_executor is not None:
                 result = tool_executor(tc, lambda: call_tool(tc["name"], tc["arguments"], registry=active_registry, allowed_names=allowed_names))
-            elif registry is None and tc["name"] != "read_tool_result":
+            elif registry is None and tc["name"] not in {"read_tool_result", "get_current_image_info"}:
                 # Preserve the two-argument seam used by existing callers/tests.
                 if allowed_names is None:
                     result = call_tool(tc["name"], tc["arguments"])
@@ -858,7 +894,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                 status = "ok" if result["ok"] else "ERR: " + (result["error"] or "")
                 print(f"[turn {turn}] tool {tc['name']} → {status}")
             if on_step is not None:
-                on_step({"type": "tool_result", "name": tc["name"],
+                on_step({"type": "tool_result", "id": tc["id"], "name": tc["name"],
                          "ok": bool(result["ok"]), "data": result["data"],
                          "error": result["error"]})
             commit({"role": "tool", "tool_call_id": tc["id"],
@@ -877,8 +913,10 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                                       "tool_call_count": len(tool_calls)})
 
     if last_integrity_error is not None:
-        return finish_run({"ok": False, "turns": max_turns, "messages": transcript,
-                           "answer": None, "error": last_integrity_error["message"],
+        if store is not None:
+            store.set_session_status(session_id, "active" if durable else "error")
+        return finish_run({"ok": False, "turns": turn, "messages": transcript,
+                           "answer": None, "error": last_integrity_error["user_message"],
                            "diagnostic": last_integrity_error, "error_class": "model_output_integrity",
                            "session_id": session_id, "usage": usage,
                            "outcome": RoundOutcome.RETRYABLE_ERROR})

@@ -15,8 +15,8 @@
 #   systemctl daemon-reload && systemctl enable --now sr-api
 #   查日志：journalctl -u sr-api -f
 #
-# 依赖（内网机一次性离线装好，见 requirements-api.txt）：fastapi uvicorn numpy pillow openai
-#   例：<venv>/bin/pip install -r deploy/requirements-api.txt
+# 依赖（首次安装与更新均检查，见 requirements-api.txt）：fastapi uvicorn numpy pillow openai PyYAML jsonschema
+#   例：<API-Python> -m pip install -r backend/requirements-api.txt
 
 [Unit]
 Description=sr_agent_platform FastAPI (scene browse + lazy preview JPG)
@@ -214,6 +214,10 @@ Environment=SR_SANDBOX_ROOT=/DiskArray/tmp/wangrz/sr_sandbox
 # Environment=SR_LLM_BASE_URL=http://127.0.0.1:11434/v1
 # Environment=SR_LLM_API_KEY=
 # Environment=SR_LLM_MODEL=qwen2.5-7b
+# 模型请求输出预算，缺省 1024；须与模型服务支持的窗口及生成限制匹配。
+# Environment=SR_LLM_MAX_TOKENS=4096
+# 不完整响应的连续重试次数，缺省 1；0 表示直接报告，任何值都不放行截断工具调用。
+# Environment=SR_LLM_INTEGRITY_RETRIES=1
 # 可选：目录列表/磁盘行开关按需（未配走 fake 回退时 /api/scenes 返回空 + fake 提示）
 # Environment=SR_API_HOST=127.0.0.1
 # Environment=SR_API_PORT=8000

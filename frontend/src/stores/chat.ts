@@ -9,13 +9,14 @@
  * reasoning 只在本回合展示、不落库，token/reasoning 按 50ms 批量 flush。
  * 并发回合由服务端 409 兜底；UI 发送中禁按钮。
  */
+import { captureViewerContext } from '../lib/viewerContext.js';
 import { defineStore } from 'pinia';
-import { ref } from 'vue';
+import { ref, onScopeDispose } from 'vue';
 import { loadSrConfig } from '../lib/scene.js';
 import {
   apiCreateSession, apiListSessions, apiSessionMessages, apiSessionUsage,
   apiChatSend, apiSubmitTrajectoryFeedback,
-  apiDeleteSession, apiSetSessionPinned, chatImageUrl,
+  apiDeleteSession, apiSetSessionPinned, apiRenameSession, chatImageUrl,
 } from '../lib/api.js';
 import type {
   ChatImage, ChatPhase, ChatSession, ChatUploadImage, ChatUsage, HistoryMsg,
@@ -27,12 +28,15 @@ import { isStreamingEnabled } from '../lib/streaming.js';
 
 /** 单条工具声明（wire tool_calls[].function → {name, arguments}）。 */
 export interface ToolUse {
+  id?: string;
   name: string;
   args: Record<string, unknown>;
 }
 
 /** 展示消息：SSE 与历史投影的统一形状。seq=null 表示仍在流（未落库）。 */
 export interface ChatMsg {
+  toolCallId?: string;
+  progress?: ChatPhase[];
   seq: number | null;
   role: 'user' | 'assistant' | 'tool';
   content: string;
@@ -70,7 +74,7 @@ export function msgFromHistory(h: HistoryMsg): ChatMsg {
   }
   if (h.role === 'assistant') {
     const tcs = h.tool_calls
-      ? h.tool_calls.map((tc) => ({ name: tc.name, args: tc.arguments ?? {} }))
+      ? h.tool_calls.map((tc) => ({ ...(tc.id ? { id: tc.id } : {}), name: tc.name, args: tc.arguments ?? {} }))
       : null;
     return { seq: h.seq, role: 'assistant', content: h.content ?? '', toolCalls: tcs };
   }
@@ -80,7 +84,7 @@ export function msgFromHistory(h: HistoryMsg): ChatMsg {
   }
   return {
     seq: h.seq, role: 'tool', content: '',
-    toolName: h.tool_name ?? null, ok: h.ok,
+    toolName: h.tool_name ?? null, toolCallId: h.tool_call_id, ok: h.ok,
     detail: (h.ok === false && h.content) ? h.content : (h.content ?? ''),
     data,
   };
@@ -105,11 +109,11 @@ export function reduceChatSse(
       const last = msgs[msgs.length - 1];
       if (last && last.role === 'assistant' && last.streaming) {
         if (last.phase === ev.phase) return msgs;
-        return [...msgs.slice(0, -1), { ...last, phase: ev.phase }];
+        return [...msgs.slice(0, -1), { ...last, phase: ev.phase, progress: [...new Set([...(last.progress ?? []), ev.phase])] }];
       }
       return [...msgs, {
         seq: null, role: 'assistant', content: '', reasoning: '', toolCalls: null,
-        streaming: true, phase: ev.phase,
+        streaming: true, phase: ev.phase, progress: [ev.phase],
       }];
     }
 
@@ -144,7 +148,8 @@ export function reduceChatSse(
     }
 
     case 'tool_call': {
-      const use: ToolUse = { name: ev.name, args: ev.args };
+      if (ev.id && msgs.some(m => m.toolCalls?.some(t => t.id === ev.id))) return msgs;
+      const use: ToolUse = { id: ev.id, name: ev.name, args: ev.args };
       const last = msgs[msgs.length - 1];
       if (last && last.role === 'assistant') {
         // 同回合连续多次工具声明 → 并入同一个 assistant 气泡
@@ -168,12 +173,13 @@ export function reduceChatSse(
     }
 
     case 'tool_result': {
+      if (ev.id && msgs.some(m => m.role === 'tool' && m.toolCallId === ev.id)) return msgs;
       const ok = Boolean(ev.ok);
       const detail = ok
         ? summarizeData(ev.name, ev.data)
         : (ev.error ?? '调用失败');
       return [...msgs, {
-        seq: null, role: 'tool', content: '', toolName: ev.name,
+        seq: null, role: 'tool', content: '', toolName: ev.name, toolCallId: ev.id,
         ok, detail, data: ev.data,
       }];
     }
@@ -277,6 +283,18 @@ export const useChatStore = defineStore('chat', () => {
   const pendingImages = ref<PendingImage[]>([]);
   let pendingSeq = 0;
   let agentStatusTimer: ReturnType<typeof setTimeout> | null = null;
+  let sessionTimer: ReturnType<typeof setInterval> | null = null;
+  let sessionEpoch = 0;
+  let refreshSerial = 0;
+  onScopeDispose(() => { if (sessionTimer) clearInterval(sessionTimer); });
+
+  async function renameSession(sid: string, title: string): Promise<void> {
+    try {
+      const updated = await apiRenameSession(loadSrConfig(), sid, title);
+      sessionEpoch++;
+      sessions.value = sessions.value.map(s => s.session_id === sid ? updated : s);
+    } catch (e) { error.value = '重命名失败：' + errText(e); }
+  }
 
   function hasSession(): boolean { return sessionId.value !== null; }
 
@@ -300,7 +318,10 @@ export const useChatStore = defineStore('chat', () => {
 
   async function refreshSessions(): Promise<void> {
     const cfg = loadSrConfig();
-    sessions.value = sortSessions(await apiListSessions(cfg));
+    const epoch = sessionEpoch;
+    const serial = ++refreshSerial;
+    const rows = await apiListSessions(cfg);
+    if (epoch === sessionEpoch && serial === refreshSerial) sessions.value = sortSessions(rows);
   }
 
   async function loadHistory(sid: string): Promise<void> {
@@ -322,6 +343,7 @@ export const useChatStore = defineStore('chat', () => {
 
   /** 首挂载：取最近会话；无则新建一个。 */
   async function init(): Promise<void> {
+    if (!sessionTimer) sessionTimer = setInterval(() => { void refreshSessions().catch(() => {}); }, 3000);
     loading.value = true;
     error.value = '';
     try {
@@ -384,6 +406,7 @@ export const useChatStore = defineStore('chat', () => {
     agentStatus.value = 'thinking';
     // 发送即取走托盘：失败也不回填，避免重试时同一张图发两遍
     const pending = pendingImages.value;
+    const viewerContext = captureViewerContext(pending.length);
     pendingImages.value = [];
     const upload: ChatUploadImage[] = pending.map((p) => ({ data: p.dataUrl, name: p.name }));
     const optimistic: ChatImage[] = pending.map((p) => ({ url: p.dataUrl, name: p.name }));
@@ -399,6 +422,11 @@ export const useChatStore = defineStore('chat', () => {
       let buf: PlatformSseEvent[] = [];
       let timer: ReturnType<typeof setTimeout> | null = null;
       const apply = (ev: PlatformSseEvent): void => {
+        if (ev.type === 'session_update') {
+          sessionEpoch++;
+          sessions.value = sortSessions(sessions.value.map(s => s.session_id === ev.session.session_id
+            && s.metadata?.title_source !== 'manual' ? ev.session : s));
+        }
         if (ev.type === 'usage') usage.value = ev.aggregate;
         if (ev.type === 'turn_done' && ev.usage) usage.value = ev.usage;
         if (ev.type === 'turn_done' && ev.run_id) {
@@ -434,7 +462,7 @@ export const useChatStore = defineStore('chat', () => {
         // 开（默认）就不带 stream 字段，请求体保持老形状；只有关掉时才显式发 false。
         await apiChatSend(cfg, sid, text, onEvent,
                           upload.length ? upload : undefined,
-                          isStreamingEnabled() ? undefined : false);
+                          isStreamingEnabled() ? undefined : false, viewerContext);
       } finally {
         flush();                          // 失败时也别丢掉已到的半截文本
       }
@@ -562,6 +590,6 @@ export const useChatStore = defineStore('chat', () => {
     usage, lastRunId, feedbackRating,
     pendingImages, addPendingImage, removePendingImage, clearPendingImages,
     hasSession, init, refreshSessions, loadHistory, newSession, selectSession, send,
-    submitFeedback, deleteSession, deleteSessions, pinSession, pinSessions,
+    submitFeedback, deleteSession, deleteSessions, pinSession, pinSessions, renameSession,
   };
 });

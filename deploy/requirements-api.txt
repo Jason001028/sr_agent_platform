@@ -1,5 +1,6 @@
 # sr_agent_platform 后端运行依赖（阶段4 场景 + 阶段5 平台 API）
-# 内网机离线一次性安装：<venv>/bin/pip install -r requirements-api.txt
+# 首次安装与后端更新均检查：<API-Python> -m pip install -r requirements-api.txt
+# 更新包中的清单位于 backend/requirements-api.txt；源文件以本清单为准。
 #   fastapi      /api 路由（uvicorn 由下方显式列出）
 #   uvicorn      服务进程（systemd 单元 ExecStart 调用）
 #   numpy        稀疏条带采样 + 2% 拉伸的像素搬运
@@ -21,4 +22,5 @@ openai>=1.40,<2
 #    （2026-09-07 真机 node81-135 实测；venv 由 destriping_py39=py3.9 建出）。
 eval-type-backport; python_version < "3.10"
 
+# 工具参数 Schema 校验与场景库入库校验；必须安装，不允许缺包时跳过校验。
 jsonschema>=4.17,<4.18

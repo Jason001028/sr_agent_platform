@@ -543,11 +543,11 @@ class Store:
     def list_sessions(self, limit: int = 100) -> list[dict]:
         """会话列表：置顶在前，其余按最近活动倒序。"""
         rows = self._db().execute(
-            "SELECT id, created_at, updated_at, status, pinned FROM sessions "
+            "SELECT id, created_at, updated_at, status, pinned, metadata FROM sessions "
             "ORDER BY pinned DESC, updated_at DESC LIMIT ?", (limit,)).fetchall()
         return [{"session_id": r[0], "created_at": r[1],
                  "updated_at": r[2], "status": r[3],
-                 "pinned": bool(r[4])} for r in rows]
+                 "pinned": bool(r[4]), "metadata": json.loads(r[5] or "{}")} for r in rows]
 
     def set_session_status(self, session_id: str, status: str) -> None:
         db = self._db()
@@ -581,6 +581,53 @@ class Store:
         db.commit()
         return True
 
+    def rename_session(self, sid, title):
+        db = self._db()
+        cur = db.execute("""UPDATE sessions SET metadata=json_remove(json_set(metadata,
+            '$.title', ?, '$.title_source', 'manual', '$.title_status', 'ready'),
+            '$.title_claim', '$.title_claim_until') WHERE id=?""", (title, sid))
+        db.commit()
+        return self.get_session(sid) if cur.rowcount else None
+
+    def claim_session_title(self, sid, ttl=60):
+        token = uuid.uuid4().hex
+        db = self._db()
+        cur = db.execute("""UPDATE sessions SET metadata=json_set(metadata,
+            '$.title_status','processing','$.title_claim',?,'$.title_claim_until',?)
+            WHERE id=? AND json_extract(metadata,'$.title_source')='fallback'
+            AND (json_extract(metadata,'$.title_status')='pending' OR
+              (json_extract(metadata,'$.title_status')='processing' AND
+               coalesce(json_extract(metadata,'$.title_claim_until'),0)<?))""",
+            (token, time.time()+ttl, sid, time.time()))
+        db.commit()
+        return token if cur.rowcount else None
+
+    def finish_session_title(self, sid, token, title, failed=False):
+        db = self._db()
+        cur = db.execute("""UPDATE sessions SET metadata=json_remove(json_set(metadata,
+            '$.title',?,'$.title_source',?,'$.title_status',?),
+            '$.title_claim','$.title_claim_until') WHERE id=?
+            AND json_extract(metadata,'$.title_source')='fallback'
+            AND json_extract(metadata,'$.title_status')='processing'
+            AND json_extract(metadata,'$.title_claim')=?
+            AND json_extract(metadata,'$.title_claim_until')>?""",
+            (title, 'fallback' if failed else 'auto', 'failed' if failed else 'ready',
+             sid, token, time.time()))
+        db.commit()
+        return bool(cur.rowcount)
+
+    def pending_session_titles(self, limit=20):
+        rows = self._db().execute("""SELECT id FROM sessions
+            WHERE json_extract(metadata,'$.title_status')='pending' OR
+            (json_extract(metadata,'$.title_status')='processing' AND
+             coalesce(json_extract(metadata,'$.title_claim_until'),0)<?)
+            ORDER BY created_at LIMIT ?""", (time.time(), limit)).fetchall()
+        return [r[0] for r in rows]
+
+    def first_user_content(self, sid):
+        row = self._db().execute("SELECT payload FROM messages WHERE session_id=? AND role='user' ORDER BY seq LIMIT 1", (sid,)).fetchone()
+        return json.loads(row[0]).get('content') if row else None
+
     # ---- messages (append-only wire-format log) --------------------------
 
     def append_message(self, session_id: str, message: dict) -> int:
@@ -594,6 +641,15 @@ class Store:
              json.dumps(message, ensure_ascii=False), now))
         db.execute("UPDATE sessions SET updated_at = ? WHERE id = ?",
                    (now, session_id))
+        if message.get("role") == "user":
+            from backend.services.session_titles import fallback_title
+            # The INSERT already owns SQLite's write lock. Initialize exactly
+            # once, in the same transaction as the first durable user message.
+            db.execute("""UPDATE sessions SET metadata=json_set(metadata,
+                '$.title', ?, '$.title_source', 'fallback', '$.title_status', 'pending')
+                WHERE id=? AND json_extract(metadata,'$.title') IS NULL
+                AND (SELECT count(*) FROM messages WHERE session_id=? AND role='user')=1""",
+                (fallback_title(message.get("content")), session_id, session_id))
         db.commit()
         return cur.lastrowid
 

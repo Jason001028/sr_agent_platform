@@ -256,7 +256,7 @@ class TestChat(PlatformBase):
         # mock LLM 固定脚本（§5.1）走流式适配：先 reasoning → 工具声明，
         # 工具结果后再 reasoning → 4 个 token → 最终 assistant。工具状态机不变。
         self.assertEqual(types, [
-            "turn_start", "llm_phase", "reasoning", "llm_phase",
+            "turn_start", "session_update", "llm_phase", "reasoning", "llm_phase",
             "tool_call", "tool_result",
             "llm_phase", "reasoning", "llm_phase",
             "token", "token", "token", "token",
@@ -267,9 +267,9 @@ class TestChat(PlatformBase):
         phase_tool = [e for e in events
                       if e["type"] == "llm_phase" and e["phase"] == "tool_call"][0]
         self.assertEqual(phase_tool["name"], "search_scenes")
-        self.assertEqual(events[4]["name"], "search_scenes")
-        self.assertEqual(events[4]["args"], {})
-        self.assertTrue(events[5]["ok"])
+        self.assertEqual(events[5]["name"], "search_scenes")
+        self.assertEqual(events[5]["args"], {})
+        self.assertTrue(events[6]["ok"])
         streamed = "".join(e["delta"] for e in events if e["type"] == "token")
         self.assertIn("mock 模型", streamed)
         self.assertEqual(streamed, events[-2]["content"])
@@ -284,7 +284,7 @@ class TestChat(PlatformBase):
         self.assertEqual(r.status_code, 200)
         types = [e["type"] for e in sse_events(r.text)]
         self.assertEqual(types,
-                         ["turn_start", "tool_call", "tool_result",
+                         ["turn_start", "session_update", "tool_call", "tool_result",
                           "assistant", "turn_done"])
 
     def test_send_rejects_non_bool_stream(self):
@@ -338,7 +338,7 @@ class TestChat(PlatformBase):
         self.assertEqual(r.status_code, 200)
         types = [e["type"] for e in sse_events(r.text)]
         self.assertEqual(types, [
-            "turn_start", "llm_phase", "reasoning", "llm_phase",
+            "turn_start", "session_update", "llm_phase", "reasoning", "llm_phase",
             "tool_call", "tool_result",
             "llm_phase", "reasoning", "llm_phase",
             "token", "token", "token", "token",

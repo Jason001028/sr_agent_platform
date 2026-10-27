@@ -7,10 +7,12 @@
 #   dist-<日期>-<时分>-<版本>.tar.gz      顶层 dist/
 #   backend-<日期>-<时分>-<版本>.tar.gz   顶层 backend/（去 __pycache__/ 与 tests/）
 #
-# 首次安装件（nginx.conf / sr-api.service / requirements-api.txt / deploy/README.md）
+# 首次安装件（nginx.conf / sr-api.service / deploy/README.md）
 # **不进包**（用户选定）：它们是机器配置模板，真机上已被手工 sed 成真实路径，进包解压
 # 会把真路径盖回出厂示例 —— 那是 deploy/README.md §5.6 那类事故。首次部署照
 # deploy/README.md 办，不走这两个包；这两个包只用于「已装好的机器上换新版本」。
+# 依赖清单随 backend 包放在 backend/requirements-api.txt，来源为 deploy/requirements-api.txt；
+# 它不含机器路径配置，更新时须用 API 的解释器安装后再重启。
 #
 # 用法（在 frontend/ 下，即 npm script）：
 #   npm run package:offline          # 用现有 dist（不存在则报错）
@@ -28,6 +30,7 @@ fi
 # —— 校验原料 ——
 [ -d dist ] || { echo "❌ 没有 dist/。先 npm run build，或 npm run package:offline -- build"; exit 1; }
 [ -d ../backend/api ] || { echo "❌ 缺 ../backend/api"; exit 1; }
+[ -f ../deploy/requirements-api.txt ] || { echo "❌ 缺 ../deploy/requirements-api.txt"; exit 1; }
 
 REPO_ROOT="$(cd .. && pwd)"
 OUT_DIR="${REPO_ROOT}/release"
@@ -48,7 +51,9 @@ tar -czf "$DIST_PKG" -C "${REPO_ROOT}/frontend" dist
 # 所以 `__pycache__` / `.pytest_cache` 各层都排得掉（`backend/tests` 要锚到顶层才写全路径）。
 tar -czf "$BACK_PKG" -C "$REPO_ROOT" \
   --exclude='__pycache__' --exclude='.pytest_cache' --exclude='backend/tests' \
-  backend SR_code/variants/repair_sr.py SR_code/variants/verify_sr_run.py
+  backend SR_code/variants/repair_sr.py SR_code/variants/verify_sr_run.py \
+  -C "${REPO_ROOT}/deploy" \
+  --transform='s|^requirements-api\.txt$|backend/requirements-api.txt|' requirements-api.txt
 
 # —— 清掉 release/ 里同族的旧包（只认这三个前缀，无关文件一律不碰）——
 shopt -s nullglob
@@ -62,4 +67,6 @@ done
 echo "✅ 离线包（${VERSION}，release/）："
 ls -l "$OUT_DIR/$DIST_PKG" "$OUT_DIR/$BACK_PKG" | awk '{printf "   %-46s %8.1f KB\n", $9, $5/1024}'
 echo "   部署/更新：两个包拷到内网机 /tmp，分别 tar -xzf <包> -C \$APP；"
+echo "   后端重启前：用 sr-api 的 Python 执行 -m pip install -r \$APP/backend/requirements-api.txt"
+echo "   再执行：<API-Python> \$APP/backend/check_runtime.py && <API-Python> -m pip check"
 echo "   前端 systemctl reload nginx、后端 systemctl restart sr-api。详见 deploy/README.md §一。"
