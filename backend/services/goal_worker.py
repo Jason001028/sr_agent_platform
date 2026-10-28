@@ -687,12 +687,17 @@ def _process(state, claimed, lease):
         }[outcome]
         latest_cp = store.get_goal(goal["goal_id"])["checkpoint"]
         totals = latest_cp.get("usage", {})
+        unknown_calls = totals.get("unknown_calls", 0) + result["usage"].get("unknown_calls", 0)
         cp = {
             **latest_cp,
             "last_round": {
                 k: v for k, v in result.items() if k not in {"messages", "answer"}
             },
             "usage": {
+                "unknown_calls": unknown_calls,
+                "usage_complete": (unknown_calls == 0
+                    and totals.get("usage_complete", True)
+                    and result["usage"].get("usage_complete", True)),
                 "tool_calls": totals.get("tool_calls", 0) + result["tool_calls"],
                 "elapsed_seconds": totals.get("elapsed_seconds", 0)
                 + result["elapsed_seconds"],

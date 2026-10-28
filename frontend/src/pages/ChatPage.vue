@@ -326,7 +326,7 @@ onMounted(() => {
               </div>
               <div v-else-if="m.toolCalls && m.toolCalls.length" class="bubble assistant tools">
                 <div v-for="tc in m.toolCalls" :key="tc.id || tc.name" class="tool-card">
-                  <div class="tool-card-head"><AppIcon :name="toolIconName(tc.name)" :size="17" :label="tc.name" /><strong>{{ tc.name === 'search_scenes' ? '检索目标场景' : tc.name }}</strong><code>{{ tc.name }}</code><span v-if="toolResultsAt(i, tc.name).length > 1" class="tool-state">共尝试 {{ toolResultsAt(i, tc.name).length }} 次</span><span v-else class="tool-state">{{ toolResultAt(i, tc.name)?.ok === true ? '✓ 完成' : toolResultAt(i, tc.name)?.ok === false ? '× 失败' : chat.sending ? '⏳ 调用中' : '结果未确认' }}</span></div>
+                  <div class="tool-card-head"><AppIcon :name="toolIconName(tc.name)" :size="17" :label="tc.name" /><strong>{{ tc.name === 'search_scenes' ? '检索目标场景' : tc.name }}</strong><code v-if="tc.name === 'search_scenes'">{{ tc.name }}</code><span v-if="toolResultsAt(i, tc.name).length > 1" class="tool-state">共尝试 {{ toolResultsAt(i, tc.name).length }} 次</span><span v-else class="tool-state">{{ toolResultAt(i, tc.name)?.ok === true ? '✓ 完成' : toolResultAt(i, tc.name)?.ok === false ? '× 失败' : chat.sending ? '⏳ 调用中' : '结果未确认' }}</span></div>
                   <details class="tool-query"><summary>查询条件</summary><pre>{{ argsText(tc.args) }}</pre></details>
                   <div v-if="toolResultsAt(i, tc.name).length" class="tool-summary">最终结果：{{ toolResultsAt(i, tc.name).at(-1)?.detail }}</div>
                   <SceneSearchResultCard v-if="tc.name === 'search_scenes'" :data="toolResultAt(i, tc.name)?.data" :args="tc.args" :status="toolResultAt(i, tc.name)?.ok === false ? 'failed' : toolResultAt(i, tc.name)?.ok === true ? 'completed' : 'running'" @open="openSearchScene" />
@@ -569,10 +569,11 @@ onMounted(() => {
 .tc-inline { display: inline-flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 .tc-label { margin-right: 2px; }
 .tc-tool { display: inline-flex; align-items: center; gap: 4px; font-family: var(--font-mono); font-weight: 600; color: var(--ink-body); }
-.tool-card-head { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+.tool-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; font-size: 12px; }
+.tool-card-head strong { flex: 0 0 auto; white-space: nowrap; }
 .tool-card { width: 100%; }
-.tool-card-head code { font-family: var(--font-mono); color: var(--ink-sub); }
-.tool-state { margin-left: auto; color: var(--ok); }
+.tool-card-head code { font-family: var(--font-mono); color: var(--ink-sub); white-space: nowrap; }
+.tool-state { margin-left: auto; color: var(--ok); white-space: nowrap; }
 .tool-query { margin-top: 7px; font-size: 11px; color: var(--ink-sub); }
 .tool-query pre { margin: 5px 0 0; white-space: pre-wrap; }
 .tool-summary { margin-top: 7px; font-size: 11px; color: var(--ink-sub); }

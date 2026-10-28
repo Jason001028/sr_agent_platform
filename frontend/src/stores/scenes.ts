@@ -19,30 +19,26 @@ import { useViewerStore } from './viewer.js';
 import type { ClearResponse, SceneRow, SceneQueryParams } from '../lib/scene.js';
 import { clearSummaryText, loadSrConfig, rowsAfterClear,
          scenesListUrl } from '../lib/scene.js';
-import { apiClearScenePreviews, apiResolveScene, fetchSceneJpg,
+import { apiClearScenePreviews, apiHideScenes, apiResolveScene,
+         apiRestoreHidden, fetchSceneJpg,
          isSceneGone, isProxyMiss } from '../lib/api.js';
 import type { SceneResolveResult } from '../lib/api.js';
 import { joinBase } from '../lib/scene.js';
 
 export const useScenesStore = defineStore('scenes', () => {
-  const REMOVED_KEY = 'sr.scenes.removed.v1';
-  function loadRemoved(): Set<string> {
-    try {
-      const saved: unknown = JSON.parse(localStorage.getItem(REMOVED_KEY) ?? '[]');
-      return new Set(Array.isArray(saved) ? saved.filter((v): v is string => typeof v === 'string') : []);
-    } catch { return new Set(); }
-  }
-  const removedIds = ref(loadRemoved());
-  function saveRemoved(): void {
-    try { localStorage.setItem(REMOVED_KEY, JSON.stringify([...removedIds.value])); }
-    catch { clearError.value = '无法保存本机场景库隐藏记录，刷新后可能重新出现。'; }
-  }
+  const rows = ref<SceneRow[]>([]);
+  /** 服务端隐藏集合的大小（「恢复已隐藏 (N)」）。隐藏是**服务端全局**的：
+   *  Agent 的 search_scenes 与场景库检索共用同一份集合，不再是本机 localStorage。 */
+  const hiddenCount = ref(0);
   async function restoreRemoved(): Promise<void> {
-    removedIds.value = new Set();
-    saveRemoved();
+    try {
+      await apiRestoreHidden(loadSrConfig());
+    } catch (e) {
+      error.value = '恢复已隐藏失败：' + (e instanceof Error ? e.message : String(e));
+      return;
+    }
     await list();
   }
-  const rows = ref<SceneRow[]>([]);
   let savedLibraryMode = false;
   try { savedLibraryMode = localStorage.getItem('sr.scenes.library-view') === 'true'; } catch { /* optional preference */ }
   const libraryMode = ref(savedLibraryMode);
@@ -119,9 +115,11 @@ export const useScenesStore = defineStore('scenes', () => {
         ? joinBase(cfg.apiBase, '/api/scene-library') : scenesListUrl(cfg, params()));
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       const body = await resp.json() as {
-        source: 'disk' | 'fake'; scanned: number; count: number; results: SceneRow[]; unavailable?: number;
+        source: 'disk' | 'fake'; scanned: number; count: number; results: SceneRow[];
+        unavailable?: number; hidden?: number;
       };
       unavailable.value = body.unavailable ?? 0;
+      hiddenCount.value = body.hidden ?? hiddenCount.value;
       if (libraryMode.value) {
         body.results = body.results.filter(r =>
           (!query.value || `${r.name} ${Object.values(r.tags ?? {}).flat().join(' ')}`.toLowerCase().includes(query.value.toLowerCase()))
@@ -131,10 +129,12 @@ export const useScenesStore = defineStore('scenes', () => {
           && (!dateTo.value || !!r.date && r.date <= dateTo.value));
         body.source = 'disk'; body.scanned = body.results.length; body.count = body.results.length;
       }
-      rows.value = body.results.filter((r) => !removedIds.value.has(r.id));
+      // 隐藏过滤在服务端（search_scenes 的 exclude_dirs）完成：这里拿到的
+      // 已经是可见行，count 也是排除隐藏后的真实命中数。
+      rows.value = body.results;
       source.value = body.source;
       scanned.value = body.scanned;
-      count.value = Math.max(0, body.count - (body.results.length - rows.value.length));
+      count.value = body.count;
     } catch (e) {
       error.value = '场景检索失败：' + (e instanceof Error ? e.message : String(e));
       rows.value = [];
@@ -224,11 +224,16 @@ export const useScenesStore = defineStore('scenes', () => {
       const body = await apiClearScenePreviews(loadSrConfig(), ids);
       clearResult.value = body;
       const before = rows.value.length;
-      const remaining = rowsAfterClear(rows.value, body.results);
-      const remainingIds = new Set(remaining.map((r) => r.id));
-      removedIds.value = new Set([...removedIds.value,
-        ...rows.value.filter((r) => !remainingIds.has(r.id)).map((r) => r.id)]);
-      saveRemoved();
+      // 服务端按**场景目录**清除并隐藏：同一景的两行只提交了一行时，另一行
+      // 也得从列表里摘掉，否则屏幕上留着一行「已生成」、检索却再也拿不到它。
+      const hiddenDirs = new Set(body.results
+        .filter((r) => r.status === 'cleared' || r.status === 'nothing')
+        .map((r) => r.dir).filter((d): d is string => !!d));
+      const remaining = rowsAfterClear(rows.value, body.results).filter((r) =>
+        !(r.lq_path && hiddenDirs.has(r.lq_path)));
+      // 服务端已把这次成功的场景写进隐藏集合（summary.hidden_total），
+      // 刷新、换浏览器、Agent 检索都不再返回它们。「恢复已隐藏」调服务端恢复。
+      hiddenCount.value = body.summary.hidden_total ?? hiddenCount.value;
       rows.value = remaining;
       clearRemoved.value = before - rows.value.length;
       // 表头 chip 上的「命中 N」得跟着动，否则与可见行数对不上
@@ -257,6 +262,37 @@ export const useScenesStore = defineStore('scenes', () => {
    *  SceneCacheBar 在确认文案里写明，用户不必猜自己清了多大范围。 */
   async function clearAllRows(): Promise<void> {
     await runClear(selectableRows.value.map((r) => r.id));
+  }
+
+  /** 只隐藏、不清预览缓存（场景库卡片垃圾篓）。隐藏是服务端集合，Agent 的
+   *  `search_scenes` 与场景库检索同时生效；`恢复已隐藏` 可找回。
+   *
+   *  `targets` 是这张卡覆盖的行：同一场景目录的输入/产物/NOSR 一起从当前列表
+   *  摘掉，避免隐藏后同一景还剩半行。 */
+  async function hideRows(targets: SceneRow[]): Promise<boolean> {
+    const ids = [...new Set(targets.map((r) => r.id).filter(Boolean))];
+    if (!ids.length || clearing.value) return false;
+    clearing.value = true;
+    error.value = '';
+    try {
+      const body = await apiHideScenes(loadSrConfig(), ids);
+      const dirs = new Set(targets.map((r) => r.lq_path).filter((p): p is string => !!p));
+      const idset = new Set(ids);
+      const before = rows.value.length;
+      rows.value = rows.value.filter((r) =>
+        !idset.has(r.id) && !(r.lq_path && dirs.has(r.lq_path)));
+      hiddenCount.value = body.hidden_total ?? hiddenCount.value;
+      count.value = Math.max(0, count.value - (before - rows.value.length));
+      // 摘掉的行不该还留在选中集里
+      const left = new Set(rows.value.map((r) => r.id));
+      selected.value = new Set([...selected.value].filter((id) => left.has(id)));
+      return true;
+    } catch (e) {
+      error.value = '隐藏场景失败：' + (e instanceof Error ? e.message : String(e));
+      return false;
+    } finally {
+      clearing.value = false;
+    }
   }
 
   /** 汇总一行文案（纯函数在 lib/scene.ts，便于单测）。 */
@@ -451,6 +487,6 @@ export const useScenesStore = defineStore('scenes', () => {
     selected, clearing, clearResult, clearRemoved, clearError, clearSummary,
     selectableRows, selectedCount, allSelected,
     isSelectable, toggleSelect, setAllSelected, clearSelection,
-    clearSelected, clearAllRows, removedIds, restoreRemoved,
+    clearSelected, clearAllRows, hideRows, hiddenCount, restoreRemoved,
   };
 });

@@ -4,12 +4,15 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 from PIL import Image
 
+from backend.api.paths import scene_id_abs
 from backend.services import scene_search as svc
-from backend.tools.search_scenes import run_search_scenes
+from backend.tests import allowed_roots_env
+from backend.tools.search_scenes import bound_tool, run_search_scenes
 
 
 def write_tif(path, name):
@@ -481,6 +484,102 @@ class TestTool(unittest.TestCase):
             self.assertTrue(r["ok"])
             self.assertEqual(r["data"]["source"], "disk")
             self.assertEqual(r["data"]["count"], 1)
+
+
+class TestScopeAndHidden(unittest.TestCase):
+    """2026-10-28：默认检索范围 = 消息里的 Viewer 工作区；两种范围都排除已隐藏场景。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.a = write_scene(self.root, "GF07A03_PMS01_20260722125045")
+        self.b = write_scene(self.root, "KF02B04_PMS05_20260810120000")
+        self.env = mock.patch.dict(os.environ, {
+            **allowed_roots_env(self.root),
+            "SR_SCENES_ROOT": str(self.root),
+            # 指向不存在的库：不被开发机上的真实隐藏集合干扰，也不会凭空建库
+            "SR_AGENT_DB": str(self.root / "no-such.db"),
+        })
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self._tmp.cleanup()
+
+    def ws(self, *paths):
+        return {"version": 3,
+                "items": [{"scene_id": scene_id_abs(p), "name": p.parent.name}
+                          for p in paths],
+                "total": len(paths), "local_only": 0, "truncated": False}
+
+    def run_bound(self, **kwargs):
+        params = kwargs.pop("params", {})
+        body = bound_tool(**kwargs).run(**params)
+        self.assertTrue(body["ok"], body.get("error"))
+        return body["data"]
+
+    def test_no_workspace_falls_back_to_library_and_says_so(self):
+        data = run_search_scenes()["data"]
+        self.assertEqual(data["scope"], "library")
+        self.assertEqual(data["scope_reason"], "no_workspace_snapshot")
+        self.assertEqual(data["count"], 2)
+
+    def test_workspace_is_the_default_scope(self):
+        data = self.run_bound(workspace=self.ws(self.a))
+        self.assertEqual(data["scope"], "workspace")
+        self.assertIsNone(data["scope_reason"])
+        self.assertEqual(data["workspace_version"], 3)
+        self.assertEqual(data["scanned"], 1)
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(data["results"][0]["id"], self.a.stem)
+
+    def test_workspace_filters_apply(self):
+        empty = self.run_bound(workspace=self.ws(self.a), params={"query": "KF02"})
+        self.assertEqual(empty["count"], 0)
+        hit = self.run_bound(workspace=self.ws(self.a), params={"query": "GF07"})
+        self.assertEqual(hit["count"], 1)
+
+    def test_unresolvable_workspace_item_is_reported_not_fatal(self):
+        ws = self.ws(self.a)
+        ws["items"].append({"scene_id": "not-a-scene-id", "name": "坏图"})
+        data = self.run_bound(workspace=ws)
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(data["unresolved_count"], 1)
+        self.assertEqual(data["unresolved"][0]["name"], "坏图")
+
+    def test_empty_workspace_falls_back_to_library(self):
+        """左侧列表空着时没有可限定的范围：按全库检索，但必须说明为什么。"""
+        empty = {"version": 0, "items": [], "total": 0,
+                 "local_only": 0, "truncated": False}
+        data = self.run_bound(workspace=empty)
+        self.assertEqual(data["scope"], "library")
+        self.assertEqual(data["scope_reason"], "empty_workspace")
+        self.assertEqual(data["count"], 2)
+
+    def test_explicit_library_scope_wins_over_workspace(self):
+        data = self.run_bound(workspace=self.ws(self.a), params={"scope": "library"})
+        self.assertEqual(data["scope"], "library")
+        self.assertEqual(data["scope_reason"], "user_requested_library")
+        self.assertEqual(data["count"], 2)
+
+    def test_hidden_scenes_are_excluded_from_both_scopes(self):
+        hidden = {svc.dir_key(self.a.parent)}
+        ws = self.ws(self.a)
+        in_ws = self.run_bound(workspace=ws, hidden_dirs=hidden)
+        self.assertEqual(in_ws["count"], 0)
+        self.assertEqual(in_ws["excluded_hidden"], 1)
+        in_lib = self.run_bound(workspace=ws, hidden_dirs=hidden,
+                                params={"scope": "library"})
+        self.assertEqual(in_lib["count"], 1)
+        self.assertEqual(in_lib["excluded_hidden"], 1)
+        self.assertEqual(in_lib["results"][0]["id"], self.b.stem)
+
+    def test_service_exclude_dirs_is_dir_keyed(self):
+        """服务层收的是场景目录键，与工具层共用同一个口径。"""
+        r = svc.search_scenes(self.root, exclude_dirs={svc.dir_key(self.a.parent)})
+        self.assertEqual(r["count"], 1)
+        self.assertEqual(r["excluded_hidden"], 1)
+        self.assertEqual(r["results"][0]["id"], self.b.stem)
 
 
 if __name__ == "__main__":

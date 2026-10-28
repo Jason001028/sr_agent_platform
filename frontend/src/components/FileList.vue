@@ -13,7 +13,7 @@
  * `.name` 的 textContent 有 e2e 断言（按文件名找卡）：小标与文件名之间**不留空白文本
  * 节点**，`.fname` 只负责两行截断。
  */
-import { computed, watch, onMounted, onUnmounted } from 'vue';
+import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
 import type { ComponentPublicInstance } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import { useChatStore } from '../stores/chat.js';
@@ -22,11 +22,36 @@ import { SHOT_MAX_COUNT } from '../lib/chatShot.js';
 import { isIntermediateStage } from '../lib/stage.js';
 import FileListTools from './FileListTools.vue';
 import FileThumb from './FileThumb.vue';
+import FileListCard from './FileListCard.vue';
 import AppIcon from './AppIcon.vue';
 import FavoriteStar from './FavoriteStar.vue';
 
 const store = useViewerStore();
 const chat = useChatStore();
+const demoPaused = ref(false);
+const demoHovered = ref(false);
+// The cards are inert; hit-test their bounds without enabling business actions.
+function hoverDemoCard(event: PointerEvent): void {
+  const root = event.currentTarget as HTMLElement;
+  demoHovered.value = [...root.querySelectorAll('.demo-card')].some(card => {
+    const r = card.getBoundingClientRect();
+    return event.clientX >= r.left && event.clientX <= r.right && event.clientY >= r.top && event.clientY <= r.bottom;
+  });
+}
+function syncDemoVisibility(): void { demoPaused.value = document.hidden; }
+onMounted(() => {
+  syncDemoVisibility();
+  document.addEventListener('visibilitychange', syncDemoVisibility);
+});
+onUnmounted(() => document.removeEventListener('visibilitychange', syncDemoVisibility));
+const showExamples = computed(() => !store.recsOrdered.length && !store.busy && !store.overlay.visible && store.panes.every(p => !p.rec));
+watch(showExamples, () => { demoHovered.value = false; });
+const demoPan = `${import.meta.env.BASE_URL}demo_pan.webp`;
+const demoNosr = `${import.meta.env.BASE_URL}demo_nosr.webp`;
+const examples = [
+  { name: 'demo_pan.webp', src: demoPan, size: 151740, stage: 'PAN' },
+  { name: 'demo_nosr.webp', src: demoNosr, size: 18570, stage: 'NOSR' },
+];
 const { busy: shotBusy, add: addShotAction } = useChatShot();
 
 /** 待发截图已满：相机键置灰并说明原因（点下去也不该有反应）。 */
@@ -83,7 +108,8 @@ const collapseTitle = computed(() => (store.sidebarCollapsed ? '展开文件列�
 const itemEls = new Map<number, HTMLElement>();
 
 function setItemEl(id: number, el: Element | ComponentPublicInstance | null): void {
-  if (el instanceof HTMLElement) itemEls.set(id, el);
+  const element = el && '$el' in el ? el.$el : el;
+  if (element instanceof HTMLElement) itemEls.set(id, element);
   else itemEls.delete(id);
 }
 
@@ -142,7 +168,18 @@ function linkTag(note: string): string {
 <template>
   <aside class="sidebar" :class="{ collapsed: store.sidebarCollapsed }">
     <FileListTools />
-    <div v-if="!store.recsOrdered.length" class="tip">选择或拖入影像至该区域</div>
+    <div v-if="showExamples" class="demo-list" :class="{ 'demo-paused': demoPaused || demoHovered || store.sidebarCollapsed }" aria-label="影像示例" @pointermove="hoverDemoCard" @pointerleave="demoHovered = false">
+      <FileListCard v-for="example in examples" :key="example.name" class="demo-card" :class="example.stage === 'PAN' ? 'demo-pan' : 'demo-nosr'" inert :draggable="false" aria-disabled="true">
+        <template #thumbnail><FileThumb :size="96" :preview-src="example.src" :detail-src="example.stage === 'NOSR' ? demoPan : undefined" /></template>
+        <template #body>
+          <div class="name"><span class="stage">{{ example.stage }}</span><span class="example-badge">示例</span><span class="fname">{{ example.name }}</span></div>
+          <div class="meta">512×512 · {{ fmtBytes(example.size) }} · WebP</div>
+          <div class="tags"><span class="status muted">{{ example.stage === 'PAN' ? '清晰纹理' : '未超分预览' }}</span></div>
+        </template>
+      </FileListCard>
+      <span class="demo-guide" aria-hidden="true"><span class="demo-dot"></span></span>
+      <p class="demo-tip">拖入影像开始工作</p>
+    </div>
     <template v-for="(rec, idx) in store.recsOrdered" :key="rec.id">
       <!-- 收藏组与普通组之间一条细线：置顶靠排序，这条线让人一眼看出「上面那几张不动」。 -->
       <div
@@ -150,7 +187,7 @@ function linkTag(note: string): string {
         class="fav-divider"
         aria-hidden="true"
       ></div>
-      <div
+      <FileListCard
         :ref="(el) => setItemEl(rec.id, el)"
         :data-rec-id="rec.id"
         class="file-item"
@@ -169,7 +206,7 @@ function linkTag(note: string): string {
         @dragstart="store.startRecDrag(rec, $event)"
         @dragend="store.endRecDrag()"
       >
-        <FileThumb :rec="rec" :size="96" />
+        <template #thumbnail><FileThumb :rec="rec" :size="96" /></template>
         <!-- 多选的眼睛：勾选态一眼可见。卡片整块可点，这颗只是指示器。 -->
         <span
           v-if="store.selectMode && !rec.pending"
@@ -211,7 +248,7 @@ function linkTag(note: string): string {
           title="移除"
           @click.stop="store.removeRec(rec.id)"
         >×</span>
-        <div class="card-body">
+        <template #body>
           <!-- title 挂整条文件名：两行省略后靠悬停仍能看全称。 -->
           <div class="name" :title="rec.name">
             <!-- 三颗小标挤在文件名上方、**不留换行**：换行会被 Vue 编成空白文本节点，
@@ -239,8 +276,8 @@ function linkTag(note: string): string {
             >仅对比，不作修复</span>
             <span v-if="rec.linkNote" class="link-tag" :title="rec.linkNote">{{ linkTag(rec.linkNote) }}</span>
           </div>
-        </div>
-      </div>
+        </template>
+      </FileListCard>
     </template>
   </aside>
   <div class="side-toggle" :title="collapseTitle" @click="store.sidebarCollapsed = !store.sidebarCollapsed">
@@ -272,7 +309,40 @@ function linkTag(note: string): string {
 }
 /* 空列表：提示在工具条以下的剩余空间里上下左右居中。只在空态把侧栏改成
    flex 列（有卡时仍是普通块流，卡片高度与滚动不受影响）。 */
-.sidebar:has(> .tip) { display: flex; flex-direction: column; }
+.demo-list { --demo-cycle: 12s; position: relative; margin-top: 16px; }
+.demo-card { opacity: .85; cursor: default; }
+/* Created together on the document timeline: identical duration, zero delay,
+   shared pause rules. Percentages below are seconds / 12 * 100. */
+.demo-card, .demo-dot { animation-duration: var(--demo-cycle); animation-delay: 0s; animation-iteration-count: infinite; animation-timing-function: ease-in-out; }
+.demo-pan { animation-name: demo-pan-focus; }
+.demo-nosr { animation-name: demo-nosr-focus; }
+/* Right gutter links the card midpoints without changing their 114px height / 6px gap. */
+.demo-guide { position: absolute; top: 56px; right: -4px; width: 1px; height: 120px; background: rgba(80, 155, 137, .42); pointer-events: none; }
+.demo-dot { position: absolute; top: 0; left: -2.5px; width: 6px; height: 6px; border-radius: 50%; background: #459d88; box-shadow: 0 0 6px rgba(69, 157, 136, .35); opacity: 0; animation-name: demo-flow; animation-timing-function: linear; }
+.demo-paused .demo-card, .demo-paused .demo-dot { animation-play-state: paused; }
+@keyframes demo-pan-focus {
+  /* Default 0–0.5s; enter 0.5–1s; hold 1–3.5s; leave 3.5–4s. */
+  0%, 4.166666667%, 33.333333333%, 100% { opacity: .85; border-color: var(--line); box-shadow: 0 0 0 2px transparent, 0 4px 12px transparent, 0 12px 32px transparent; }
+  8.333333333%, 29.166666667% { opacity: 1; border-color: #65b7a4; box-shadow: 0 0 0 2px rgba(61, 169, 144, .32), 0 4px 12px rgba(46, 90, 78, .20), 0 12px 32px rgba(46, 90, 78, .18); }
+}
+@keyframes demo-nosr-focus {
+  /* Enter 5–5.5s; hold 5.5–8s; leave 8–8.5s; rest until 12s. */
+  0%, 41.666666667%, 70.833333333%, 100% { opacity: .85; border-color: var(--line); box-shadow: 0 0 0 2px transparent, 0 4px 12px transparent, 0 12px 32px transparent; }
+  45.833333333%, 66.666666667% { opacity: 1; border-color: #65b7a4; box-shadow: 0 0 0 2px rgba(61, 169, 144, .32), 0 4px 12px rgba(46, 90, 78, .20), 0 12px 32px rgba(46, 90, 78, .18); }
+}
+@keyframes demo-flow {
+  /* Movement and short fades stay entirely within 4–5s. */
+  0%, 33.333333333% { opacity: 0; transform: translateY(0); }
+  34.166666667% { opacity: .8; transform: translateY(11.6px); }
+  40.833333333% { opacity: .8; transform: translateY(104.4px); }
+  41.666666667%, 100% { opacity: 0; transform: translateY(116px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .demo-card, .demo-dot { animation: none; }
+  .demo-guide { display: none; }
+}
+.example-badge { display: inline-block; margin-right: 4px; padding: 0 6px; font-size: 10px; border: 1px solid var(--line); border-radius: 4px; color: var(--ink-sub); background: var(--surface-2); }
+.demo-tip { margin: 20px 0; text-align: center; font-size: 12.5px; color: var(--ink-sub); }
 .tip {
   flex: 1;
   display: flex;
@@ -318,14 +388,7 @@ function linkTag(note: string): string {
   cursor: pointer;
   transition: border-color var(--motion-hover) var(--ease-standard), box-shadow var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard);
 }
-.card-body {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  /* 右上角的 × 下面是空白区，文字列不必再让位。 */
-}
+
 .file-item:hover { border-color: #d6ddd9; }
 /* 一键解析的占位卡：清单行已排上、还没有身份。不可点/拖/删，所以不给悬停反馈。 */
 .file-item.pending { cursor: default; }

@@ -298,14 +298,14 @@ let dragHintTimer: ReturnType<typeof setTimeout> | null = null;
 
 /* ---------------- 右侧栏展开状态（从 ContextPanel 提升，2026-09-20） ----------------
    分屏要能自动收起它、退出时再恢复，所以这份状态不能再留在组件里。
-   **key 与默认值一字不改**：老用户的「上次收起来了」继续生效。 */
+   保留原 key 与手动折叠记录；未保存偏好时默认展开 Agent。 */
 const CTX_RAIL_KEY = 'sr.viewer.ctxRailOpen';
 function readCtxRailOpen(): boolean {
   try {
-    if (typeof localStorage === 'undefined') return false;
-    return localStorage.getItem(CTX_RAIL_KEY) === '1';
+    if (typeof localStorage === 'undefined') return true;
+    return localStorage.getItem(CTX_RAIL_KEY) !== '0';
   } catch {
-    return false;
+    return true;
   }
 }
 function saveCtxRailOpen(open: boolean): void {
@@ -3116,7 +3116,10 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   registerViewerContext(count => snapshotViewer({ activeRec: activeRec.value,
-    selectedIds: selectedIds.value, panes: panes.value }, count));
+    selectedIds: selectedIds.value, panes: panes.value,
+    // 工作区候选集：左侧列表（视觉顺序）里有盘阵场景身份的那些影像，供
+    // search_scenes 默认限定检索范围；本地拖入图单列 local_only。
+    recs: recsOrdered.value, workspaceVersion: workspaceVersion.value }, count));
 
   return {
     previewMemoryMB, previewMemoryOptions, setPreviewMemoryMB,

@@ -20,3 +20,10 @@ For agent-browser eval use --base64 with UTF-8 encoded source: PowerShell launch
 
 ## 2026-10-27 Viewer context validation
 - Node/npm typecheck inside managed sandbox failed with EPERM reading the user installation directory. Retry outside sandbox; do not interpret this as a TypeScript error.
+
+## 2026-10-28: PowerShell inline Python text matching
+UTF-8 Chinese source sent through a shell pipe may not retain literal matching text. Use ASCII structural anchors or apply_patch; inspect failed edits before rerunning. No user changes were discarded.
+
+## SSE closure validation
+
+The regression command initially referenced nonexistent test_tool_result_budget.py; the module is test_tool_result_formatter.py. Restricted Windows process tests timed out in taskkill cleanup. A subprocess-permitted retry cleaned up successfully but retained startup and completion failures. Use UTF-8-safe patch tools for Chinese source text; the Windows shell Python pipe replaced non-ASCII text.

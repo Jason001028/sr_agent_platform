@@ -10,6 +10,7 @@ import {
   loadSrConfig, joinBase, sceneResolveUrl, scenePreviewUrl, sceneImageUrl,
   dropPreviewUrl, isBakedPreviewUrl, previewDivLabel, previewNeedsBake,
   loadPreviewDiv, rasterPreviewWins, sceneClearPreviewUrl, sceneSiblingsUrl,
+  sceneHideUrl, sceneRestoreHiddenUrl,
   previewCacheKey, isDiskArrayUrl,
 } from './scene.js';
 import type { SceneRow, SrConfig, RasterPreview } from './scene.js';
@@ -788,6 +789,36 @@ export async function apiClearScenePreviews(
   // 有效的，先丢等于浪费一次缓存（下次还得重新生成预览几十秒）。
   forgetScenePreviewBlobs(ids);
   return body;
+}
+
+/** 只把场景加入服务端隐藏集合（不删盘上任何文件）。
+ *
+ *  隐藏按**场景目录**记：同一目录的 `<目录名>.tif` 与 `PAN.tif` 一起隐藏。集合由
+ *  后端持久化，`/api/scenes`、`/api/scene-library` 与 Agent 的 `search_scenes`
+ *  共用，所以刷新页面、换浏览器都不会把它们找回来。 */
+export async function apiHideScenes(
+  cfg: SrConfig, ids: string[],
+): Promise<{ hidden: number; hidden_total: number;
+            skipped: { id: string; reason: string }[] }> {
+  const r = await http(sceneHideUrl(cfg), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ids }),
+  });
+  return (await r.json()) as { hidden: number; hidden_total: number;
+    skipped: { id: string; reason: string }[] };
+}
+
+/** 恢复服务端隐藏集合：省略 `keys` = 全部恢复。 */
+export async function apiRestoreHidden(
+  cfg: SrConfig, keys?: string[],
+): Promise<{ restored: number; hidden_total: number }> {
+  const r = await http(sceneRestoreHiddenUrl(cfg), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(keys ? { keys } : {}),
+  });
+  return (await r.json()) as { restored: number; hidden_total: number };
 }
 
 /** 存进缓存并原样返回（三处 return 都走它，免得漏存或存了不返）。 */

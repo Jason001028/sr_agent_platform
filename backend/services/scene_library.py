@@ -3,6 +3,7 @@ from fastapi import HTTPException, Request
 from jsonschema import Draft202012Validator
 
 from backend.api import paths
+from backend.services import scene_search
 
 TAG_GROUPS = ("purpose", "content", "quality", "custom")
 _TAGS = {"type": "object", "additionalProperties": False, "properties": {
@@ -44,12 +45,17 @@ def install(app, root, make_row, dimensions):
     def list_entries():
         results = []
         unavailable = 0
+        # 隐藏与检索共用同一份服务端集合：从场景库「清除/隐藏」过的场景，
+        # 「已入库」视图也不该再列出来，否则同一景在两个视图里一隐一现。
+        hidden = {e["scene_dir"] for e in app.state.store.list_hidden_scenes()}
         for entry in app.state.store.list_library_entries():
             try:
                 # Recheck the current whitelist rather than trusting persisted paths.
                 src = paths.scene_id_to_abs(paths.scene_id_abs(entry["source_path"]), root)
                 if not src.is_file():
                     raise ValueError()
+                if scene_search.dir_key(src.parent) in hidden:
+                    continue
                 row = make_row(src, src.parent, root)
                 dims = dimensions(src)
                 if dims:
@@ -59,4 +65,4 @@ def install(app, root, make_row, dimensions):
                 results.append(row)
             except (ValueError, OSError, paths.PathDeniedError):
                 unavailable += 1
-        return {"results": results, "unavailable": unavailable}
+        return {"results": results, "unavailable": unavailable, "hidden": len(hidden)}

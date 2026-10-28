@@ -111,7 +111,7 @@ describe('发送', () => {
     expect(fetchStub).not.toHaveBeenCalled();
   });
 
-  it('无图时请求体仍只有 content（老形状不变）', async () => {
+  it('无图时不带 images，viewer_context 是空观察（没有当前影像/工作区条目）', async () => {
     const chat = useChatStore();
     chat.sessionId = 's1';
     let body: Record<string, unknown> | null = null;
@@ -120,7 +120,15 @@ describe('发送', () => {
       return Promise.resolve(sseResponse(['{"type":"turn_done","content":"ok"}']));
     });
     await chat.send('你好');
-    expect(body).toEqual({ content: '你好' });
+    expect(body!.content).toBe('你好');
+    expect(body!.images).toBeUndefined();
+    expect(body!.stream).toBeUndefined();
+    const ctx = body!.viewer_context as Record<string, unknown>;
+    expect(ctx.current).toBeNull();
+    expect(ctx.displayed).toEqual([]);
+    expect(ctx.selected_ids).toEqual([]);
+    expect((ctx.workspace as Record<string, unknown>).items).toEqual([]);
+    expect(ctx.attachment_count).toBe(0);
   });
 });
 

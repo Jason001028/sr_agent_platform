@@ -1,5 +1,7 @@
 """Inspect actual model requests and SQLite boundaries, without a model endpoint."""
 
+from backend.tests.async_client_fixture import async_client
+
 import asyncio
 from copy import deepcopy
 import json
@@ -83,7 +85,8 @@ def test_chat_request_updates_counts_time_tools_and_leaves_history_clean(cfg, st
         if len(calls) == 1:
             assert status == {"execution_mode": "chat", "loop_turn": "1/3",
                               "model_calls_this_round": 0, "tool_calls_this_round": 0,
-                              "elapsed_seconds": 0.0, "recent_tools": []}
+                              "elapsed_seconds": 0.0, "recent_tools": [],
+                              "thinking_profile": "unavailable", "execution_priority": "minimal_necessary_action"}
             clock[0] += 0.5
             return tools_response("read", "fail")
         assert status["loop_turn"] == "2/3"
@@ -112,7 +115,7 @@ def test_chat_request_updates_counts_time_tools_and_leaves_history_clean(cfg, st
     assert [event["payload"]["value"]["runtime_status"] for event in requests] == [
         status_from(messages) for messages in calls]
     assert all(set(event["payload"]["value"]) ==
-               {"message_count", "tool_count", "runtime_status"} for event in requests)
+               {"message_count", "tool_count", "runtime_status", "model", "request_config"} for event in requests)
 
 
 @pytest.mark.parametrize("previous_model_calls", [2, 5])
@@ -381,7 +384,7 @@ def test_sdk_request_contains_status_and_original_generation_limit(cfg, store, m
                   message=NS(content="done", tool_calls=[]))])
 
     client = NS(chat=NS(completions=NS(create=create)))
-    monkeypatch.setattr(loop, "build_client", lambda config: client)
+    monkeypatch.setattr("backend.agent.async_transport.AsyncOpenAI", lambda **kwargs: async_client(client))
     result = loop.run_loop(cfg, "query", store=store, stream=stream, on_step=lambda ev: None)
     assert result["ok"] and len(requests) == 1
     assert status_from(requests[0]["messages"])["model_calls_this_round"] == 0

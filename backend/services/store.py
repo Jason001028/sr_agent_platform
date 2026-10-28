@@ -96,6 +96,12 @@ CREATE TABLE IF NOT EXISTS scene_library (
     updated_at REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS scene_hidden (
+    scene_dir  TEXT PRIMARY KEY,
+    name       TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
     id         TEXT PRIMARY KEY,
     created_at REAL NOT NULL,
@@ -541,6 +547,46 @@ class Store:
         return [{"source_path": r[0], "tags": json.loads(r[1])} for r in
                 self._db().execute("SELECT source_path, tags FROM scene_library ORDER BY updated_at DESC").fetchall()]
 
+    # ---- 场景隐藏（服务端持久化；场景库「清除/隐藏」与 Agent 检索共用） ----
+    # 键是**场景目录**（scene_search.dir_key 规范后的 POSIX 串），不是文件 id：
+    # 同一景的 `<目录名>.tif` 与 `PAN.tif` 是两行，隐藏必须一次生效。这里不认路径、
+    # 不碰盘 —— 调用方负责先用 paths.scene_id_to_abs 过白名单。
+
+    def hide_scenes(self, entries: list[dict]) -> int:
+        """把一批场景目录标记为隐藏（已存在则刷新时间与名字）。返回去重后的目录数。"""
+        now = time.time()
+        keys = {(e["scene_dir"], e.get("name") or "") for e in entries if e.get("scene_dir")}
+        if not keys:
+            return 0
+        with self.worker_transaction() as db:
+            for scene_dir, name in keys:
+                db.execute(
+                    "INSERT INTO scene_hidden VALUES (?, ?, ?) "
+                    "ON CONFLICT(scene_dir) DO UPDATE SET name=excluded.name, "
+                    "created_at=excluded.created_at",
+                    (scene_dir, name, now))
+        return len(keys)
+
+    def list_hidden_scenes(self) -> list[dict]:
+        return [{"scene_dir": r[0], "name": r[1], "created_at": r[2]} for r in
+                self._db().execute(
+                    "SELECT scene_dir, name, created_at FROM scene_hidden "
+                    "ORDER BY created_at DESC").fetchall()]
+
+    def restore_hidden_scenes(self, scene_dirs=None) -> int:
+        """恢复隐藏；`scene_dirs` 为空/None = 全部恢复。返回删掉的键数。"""
+        with self.worker_transaction() as db:
+            if scene_dirs:
+                keys = [d for d in dict.fromkeys(scene_dirs) if d]
+                if not keys:
+                    return 0
+                marks = ",".join("?" * len(keys))
+                cur = db.execute(
+                    f"DELETE FROM scene_hidden WHERE scene_dir IN ({marks})", keys)
+            else:
+                cur = db.execute("DELETE FROM scene_hidden")
+            return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+
     def create_session(self, metadata: dict | None = None) -> str:
         """Insert a session row and return its id."""
         sid = uuid.uuid4().hex
@@ -722,8 +768,19 @@ class Store:
         prompt = sum(e["prompt_tokens"] for e in events)
         completion = sum(e["completion_tokens"] for e in events)
         total = sum(e["total_tokens"] for e in events)
+        # Unknown observations already live in the durable trajectory; aggregate
+        # them without a second ledger or a paginated event-list limit.
+        unknown = 0
+        rows = self._db().execute(
+            "SELECT payload FROM trajectory_events WHERE session_id = ? "
+            "AND event_type = 'usage' AND status = 'unknown'", (session_id,))
+        for row in rows:
+            payload = json.loads(row[0] or "{}")
+            value = payload.get("value", payload)
+            unknown += int(value.get("unknown_calls", 1))
         return {"prompt_tokens": prompt, "completion_tokens": completion,
                 "total_tokens": total, "calls": len(events),
+                "unknown_calls": unknown, "usage_complete": unknown == 0,
                 "source": (events[-1]["source"] if events else "unavailable"),
                 "events": events}
 

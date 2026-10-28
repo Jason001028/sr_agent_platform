@@ -64,7 +64,8 @@
 | `POST /api/scenes/resolve` | 手填/反推一个盘阵场景目录 → 与库行同形的 `{source,row,resolved}`（2026-09-20 起 `row` 也带 `rasterPreview`） | 3.5 |
 | `GET /api/scenes/{id}/preview-drop` | **拖拽入口专用**的预览 JPG（落盘阵场景目录 `<stem>_preview.jpg`；目录不可写时兜底到临时缓存并回 `X-SR-Preview-Fallback: tmp`；不进库行，URL 不可静态映射） | 3.6 |
 | `GET /api/scenes/{id}/siblings` | **只读**诊断：一个场景的三类图（输入 / 本轮超分产物 / NOSR `_NOSR`）各叫什么、在不在、各是什么 id —— 供下一轮对比视图消费；NOSR 那份的候选清单（`nosrCandidates`）也从这里出 | 3.8 |
-| `POST /api/scenes/clear-preview` | **删盘阵文件**（本契约里唯一一条）：场景库「清除选定 / 全部清除」按场景目录清掉预览 JPG 缓存，逐条回报；判据与边界见章节 | 3.9 |
+| `POST /api/scenes/clear-preview` | **删盘阵文件**（本契约里唯一一条）：场景库「清除选定 / 全部清除」按场景目录清掉预览 JPG 缓存，逐条回报，并把成功项写进隐藏集合；判据与边界见章节 | 3.9 |
+| `POST /api/scenes/hide` · `GET /api/scenes/hidden` · `POST /api/scenes/restore-hidden` | **不删任何文件**：服务端持久化的场景隐藏集合（按场景目录）。`/api/scenes`、`/api/scene-library` 与 Agent `search_scenes` 共用 | 3.10 |
 | `GET /api/tools` | 工具清单（manifest 机械生成，供 UI/文档） | 3.1 |
 | `POST /api/tools/{name}` | 直调单个工具（绕过 LLM；validate + 白名单照常） | 3.1 |
 | `POST /api/chat/sessions` | 新建会话 → `201 {session_id}` | 3.2 |
@@ -883,6 +884,37 @@ POST /api/scenes/clear-preview
 - 删除动作在客户端也有对应记账：命中的 scene id 前缀丢本地 blob 缓存，且**本次真的重生成过**
   时取静态图带 `cache:'no-store'` 绕开浏览器 HTTP 缓存（§3.8.2 那条 `?div=N` 只击穿换档位，
   击穿不了同档位重生成）。
+- **`summary` 新增 `hidden` / `hidden_total`（2026-10-28）**：这次成功清除（`cleared` / `nothing`）
+  的场景目录数、以及服务端隐藏集合当前大小。清除成功即把该场景目录写进隐藏集合（§3.10）。
+
+### 3.10 场景隐藏集合（`/api/scenes/hide` · `/hidden` · `/restore-hidden`，2026-10-28）
+
+场景库「清除选定 / 全部清除 / 卡片垃圾篓」的**不删文件**那一半。隐藏按**场景目录的规范键**
+（POSIX 分隔符、去尾斜杠，`scene_search.dir_key`）持久化在 SQLite 的 `scene_hidden` 表：
+同一景的 `<目录名>.tif` / `PAN.tif` / 产物一起隐藏。
+
+```http
+POST /api/scenes/hide          { "ids": ["<scene id>", "…"] }   // ≤ 500；只写隐藏集合
+→ 200 {"hidden": 1, "hidden_total": 3, "skipped": [{"id": "…", "reason": "…"}]}
+
+GET /api/scenes/hidden
+→ 200 {"count": 3, "items": [{"scene_dir": "…/20260101", "name": "…", "created_at": 0.0}]}
+
+POST /api/scenes/restore-hidden { "keys": ["<scene_dir>", "…"] }  // 省略 keys / 空数组 = 全部恢复
+→ 200 {"restored": 1, "hidden_total": 2}
+```
+
+- **不改盘上任何文件**：隐藏只影响 `GET /api/scenes`、`GET /api/scene-library` 与 Agent
+  `search_scenes` 的返回；场景源、预览 JPG、盘阵目录都原样留着。恢复只是删掉记录。
+- **排除发生在过滤与 `limit` 之前**，`count` 是隐藏之后真实可见的命中数；
+  `GET /api/scenes` 与 `/api/scene-library` 的响应各多一个 `hidden`（集合大小）。
+- `ids` 里解析不了的条目进 `skipped`（带原因），不致 5xx；`hidden` 是本次实际写入的目录数。
+- **UI 侧不再有本机隐藏概念**：刷新页面、换浏览器、重新检索都不会把隐藏的景找回来；
+  「恢复已隐藏 (N)」的 N 就是 `hidden_total`。
+- Agent 侧：`search_scenes` 的两种 scope 都排除隐藏集合（`scope` 参数：默认 `workspace`
+  = 这条消息的 Viewer 工作区快照；`library` = 全库。没有快照或工作区为空时回退到 library，
+  `scope_reason` 分别给 `no_workspace_snapshot` / `empty_workspace`），结果里
+  `excluded_hidden` 是被排除掉的场景数。
 
 ## 4. 关键实现机制（契约约束）
 

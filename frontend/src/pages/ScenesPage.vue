@@ -6,7 +6,7 @@
  * JPG → 静态 jpgUrl 读字节 → viewer route='jpg'（掩码按元数据 W/H 换算）。
  * 盘阵里的 .jpg/.jpeg 源（§4.7）行 jpgUrl 即源文件、跳过懒生成，打标签「JPG 源」。
  */
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted } from 'vue';
 import { isImageSource, previewNeedsBake } from '../lib/scene.js';
 import type { SceneRow } from '../lib/scene.js';
 import { useScenesStore } from '../stores/scenes.js';
@@ -21,19 +21,10 @@ const scenes = useScenesStore();
 // 注意「打开」那一格**不看档位**：它只分「撞过 404」（row.purged，见 stores/scenes.ts
 // 的 open）与「打开」两种，能点的行一律写「打开」—— 要生成的话按下去就生成。
 const viewer = useViewerStore();
-const HIDDEN_SCENES_KEY = 'sr.scenes.hidden.v1';
-function loadHiddenScenes(): Set<string> {
-  try {
-    const saved: unknown = JSON.parse(localStorage.getItem(HIDDEN_SCENES_KEY) ?? '[]');
-    return new Set(Array.isArray(saved) ? saved.filter((v): v is string => typeof v === 'string') : []);
-  } catch { return new Set(); }
-}
-const hiddenSceneKeys = ref(loadHiddenScenes());
-watch(hiddenSceneKeys, (keys) => {
-  try { localStorage.setItem(HIDDEN_SCENES_KEY, JSON.stringify([...keys])); } catch { /* storage unavailable */ }
-});
+/** 隐藏是**服务端**的集合（backend store 的 scene_hidden 表），不再存本机
+ *  localStorage：Agent 的 search_scenes 与场景库检索共用同一份，刷新、换浏览器、
+ *  重新检索都不会把摘掉的景找回来。恢复走 scenes.restoreRemoved()。 */
 function restoreHidden(): void {
-  hiddenSceneKeys.value = new Set();
   void scenes.restoreRemoved();
 }
 function sceneKey(name: string): string {
@@ -47,15 +38,15 @@ const sceneGroups = computed(() => {
     if (!current) groups.set(key, { row, variants: [row] });
     else { current.variants.push(row); if (!current.row.jpgUrl && row.jpgUrl) current.row = row; }
   }
-  return Array.from(groups.entries())
-    .filter(([key]) => !hiddenSceneKeys.value.has(key))
-    .map(([, group]) => group);
+  return Array.from(groups.values());
 });
 
-function removeSceneCard(row: SceneRow): void {
-  const label = row.name;
-  if (window.confirm(`从本机场景库隐藏“${label}”？刷新后仍保持隐藏，可通过“恢复已隐藏”找回。`)) {
-    hiddenSceneKeys.value = new Set(hiddenSceneKeys.value).add(sceneKey(label));
+/** 卡片垃圾篓：只隐藏（不删盘上文件）。同一张卡覆盖的行一起递交 —— 服务端按
+ *  场景目录隐藏，同一目录的输入/产物/NOSR 会一并从场景库与 Agent 检索里消失。 */
+function removeSceneCard(group: { row: SceneRow; variants: SceneRow[] }): void {
+  const label = group.row.name;
+  if (window.confirm(`从场景库隐藏“${label}”？盘上的影像不删，场景库与 Agent 检索都不再返回，可通过“恢复已隐藏”找回。`)) {
+    void scenes.hideRows(group.variants);
   }
 }
 
@@ -136,7 +127,7 @@ onMounted(() => { scenes.ensureSearched(); });
               title="打开 /viewer 查看当前激活场景" @click="$router.push('/viewer')">去查看器</button>
     </div>
 
-    <button v-if="hiddenSceneKeys.size || scenes.removedIds.size" type="button" class="btn ghost" @click="restoreHidden">恢复已隐藏 ({{ hiddenSceneKeys.size + scenes.removedIds.size }})</button>
+    <button v-if="scenes.hiddenCount" type="button" class="btn ghost" @click="restoreHidden">恢复已隐藏 ({{ scenes.hiddenCount }})</button>
 
     <ScenePathBar class="sp-path" :busy="!!scenes.openingId" @open="openPastedPath" />
 
@@ -149,7 +140,7 @@ onMounted(() => { scenes.ensureSearched(); });
     <div class="sp-tbl-wrap">
       <SceneCacheBar />
       <div class="scene-cards">
-        <SceneLibraryCard v-for="group in sceneGroups" :key="group.row.id" :row="group.row" :variants="group.variants" :opening="scenes.openingId === group.row.id" @open="scenes.open(group.row)" @remove="removeSceneCard(group.row)" />
+        <SceneLibraryCard v-for="group in sceneGroups" :key="group.row.id" :row="group.row" :variants="group.variants" :opening="scenes.openingId === group.row.id" @open="scenes.open(group.row)" @remove="removeSceneCard(group)" />
       </div>
       <table class="sp-tbl">
         <thead>
@@ -212,7 +203,7 @@ onMounted(() => { scenes.ensureSearched(); });
                  盘阵上这些场景明明还在，说「没有」是假话（重新检索就回来）。 -->
             <td colspan="9" class="empty">
               {{ scenes.clearRemoved
-                 ? '这批已从本机场景库隐藏，可通过“恢复已隐藏”找回'
+                 ? '这批已在服务端隐藏，场景库与 Agent 检索都不再返回，可通过“恢复已隐藏”找回'
                  : '没有匹配场景（或未连接盘阵）' }}
             </td>
           </tr>

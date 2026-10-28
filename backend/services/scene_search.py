@@ -476,6 +476,16 @@ def stage_of_jpg(dir_path, input_path, stem: str) -> tuple[str, str, Path] | Non
     return None
 
 
+def dir_key(path) -> str:
+    """场景目录的**规范键**：POSIX 分隔符、去尾斜杠。
+
+    这个键只做字符串比对（隐藏集合、任务归并），不用于取文件。所有写键与读键的
+    地方都必须调它 —— `<目录名>.tif` 与 `PAN.tif` 同处一个场景目录，隐藏要按目录
+    生效，不能按文件生效。
+    """
+    return str(path).replace("\\", "/").rstrip("/")
+
+
 def parse_filename(path) -> dict:
     """Extract {satellite, sensor, date} from a scene filename; unknown → None."""
     parts = Path(path).stem.split("_")
@@ -528,8 +538,35 @@ def fake_scenes(n=12) -> list[dict]:
     return scenes
 
 
+def matches(scene, query="", satellite=None, sensor=None,
+            date_from=None, date_to=None) -> bool:
+    """一条场景是否满足检索条件（库检索与工作区检索共用同一套判据）。"""
+    q = (query or "").strip().lower()
+    sat = (satellite or "").strip().lower()
+    sen = (sensor or "").strip().lower()
+    if q and q not in scene["id"].lower() and q not in scene["path"].lower():
+        return False
+    if sat and sat not in (scene.get("satellite") or "").lower():
+        return False
+    if sen and sen not in (scene.get("sensor") or "").lower():
+        return False
+    if scene.get("date"):
+        if date_from and scene["date"] < date_from:
+            return False
+        if date_to and scene["date"] > date_to:
+            return False
+    elif date_from or date_to:
+        return False
+    return True
+
+
+def sort_key(scene) -> tuple:
+    """库检索的默认顺序：日期、id 双降序。"""
+    return (scene.get("date") or "", scene["id"])
+
+
 def search_scenes(root, query="", satellite=None, sensor=None, date_from=None,
-                  date_to=None, limit=20):
+                  date_to=None, limit=20, exclude_dirs=None):
     """Search the archive; returns {"source", "scanned", "count", "results"}.
 
     root — real directory (disk backend) or None/not-a-dir (falls back to fake).
@@ -538,6 +575,9 @@ def search_scenes(root, query="", satellite=None, sensor=None, date_from=None,
     sensor — case-insensitive substring on the parsed sensor id.
     date_from/date_to — inclusive "YYYY-MM-DD" bounds; scenes without a parsed
     date are excluded once a bound is given.
+    exclude_dirs — 场景目录键集合（`dir_key`），这些目录里的场景不参与命中。
+    过滤发生在**截断之前**，所以 count 是排除后的真实命中数，limit 不会把列表
+    填成一堆随后又被前端摘掉的行。
     """
     base = Path(root) if root else None
     if base and base.is_dir():
@@ -547,27 +587,12 @@ def search_scenes(root, query="", satellite=None, sensor=None, date_from=None,
         scenes = fake_scenes()
         source = "fake"
 
-    q = (query or "").strip().lower()
-    sat = (satellite or "").strip().lower()
-    sen = (sensor or "").strip().lower()
-
-    def keep(s):
-        if q and q not in s["id"].lower() and q not in s["path"].lower():
-            return False
-        if sat and sat not in (s.get("satellite") or "").lower():
-            return False
-        if sen and sen not in (s.get("sensor") or "").lower():
-            return False
-        if s.get("date"):
-            if date_from and s["date"] < date_from:
-                return False
-            if date_to and s["date"] > date_to:
-                return False
-        elif date_from or date_to:
-            return False
-        return True
-
-    matched = [s for s in scenes if keep(s)]
-    matched.sort(key=lambda s: (s.get("date") or "", s["id"]), reverse=True)
+    hidden = exclude_dirs or set()
+    matched, hidden_hits = [], []
+    for s in scenes:
+        if not matches(s, query, satellite, sensor, date_from, date_to):
+            continue
+        (hidden_hits if dir_key(Path(s["path"]).parent) in hidden else matched).append(s)
+    matched.sort(key=sort_key, reverse=True)
     return {"source": source, "scanned": len(scenes), "count": len(matched),
-            "results": matched[:limit]}
+            "excluded_hidden": len(hidden_hits), "results": matched[:limit]}

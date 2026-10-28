@@ -106,6 +106,8 @@ export interface SceneListResponse {
   scanned: number;
   count: number;
   results: SceneRow[];
+  /** 服务端隐藏集合大小（不是这份结果里的）——「恢复已隐藏 (N)」用。 */
+  hidden?: number;
 }
 
 /** 该行是不是「显示就绪图」源（盘阵 .jpg/.jpeg，最小原型 §4.7）。
@@ -529,6 +531,16 @@ export function sceneClearPreviewUrl(cfg: SrConfig): string {
   return joinBase(cfg.apiBase, '/api/scenes/clear-preview');
 }
 
+/** 隐藏端点：POST /api/scenes/hide（只写服务端隐藏集合，不删盘上文件）。 */
+export function sceneHideUrl(cfg: SrConfig): string {
+  return joinBase(cfg.apiBase, '/api/scenes/hide');
+}
+
+/** 恢复隐藏：POST /api/scenes/restore-hidden（省略 keys = 全部恢复）。 */
+export function sceneRestoreHiddenUrl(cfg: SrConfig): string {
+  return joinBase(cfg.apiBase, '/api/scenes/restore-hidden');
+}
+
 /** 明细里的一条（文件名 + 原因 + 它在哪个目录）。 */
 export interface ClearDetail {
   name: string;
@@ -571,6 +583,10 @@ export interface ClearSummary {
   dirs: number;
   files: number;
   marked: number;
+  /** 这次成功清除并隐藏的场景目录数。 */
+  hidden?: number;
+  /** 服务端当前隐藏总数（清除后「恢复已隐藏 (N)」的计数）。 */
+  hidden_total?: number;
 }
 
 export interface ClearResponse {
@@ -597,8 +613,9 @@ export function rowsAfterClear<T extends { id: string }>(
 
 /** 表上方那一行汇总文案（纯函数，便于单测）。
  *
- *  「已从列表移除」的尾注只在真的有移除时给：它是这个功能最容易让人误会的一点
- *  —— 行消失了不等于场景被删了，重新检索就回来。 */
+ *  「已隐藏」的尾注只在真的有移除时给：它是这个功能最容易让人误会的一点
+ *  —— 行消失了不等于场景被删了，盘上的影像与原图都在，只是把它从场景库
+ *  和 Agent 的检索范围里摘出去，按「恢复已隐藏」就回来。 */
 export function clearSummaryText(s: ClearSummary, removed: number): string {
   const bits: string[] = [];
   if (s.cleared) {
@@ -610,6 +627,7 @@ export function clearSummaryText(s: ClearSummary, removed: number): string {
   if (s.failed) bits.push(`失败 ${s.failed} 项`);
   const head = bits.length ? bits.join('，') : '没有可清除的场景';
   return removed
-    ? `${head}；已从本机场景库隐藏 ${removed} 行，可通过“恢复已隐藏”找回`
+    ? `${head}；相关场景已在服务端隐藏 ${removed} 行，场景库与 Agent 检索都不再返回，`
+      + '可通过“恢复已隐藏”找回'
     : head;
 }

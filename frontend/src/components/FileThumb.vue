@@ -20,7 +20,7 @@
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { ViewerRec } from '../stores/viewer';
 
-const props = defineProps<{ rec: ViewerRec; size?: number }>();
+const props = defineProps<{ rec?: ViewerRec; size?: number; previewSrc?: string; detailSrc?: string }>();
 
 const BOX_H = 96;                       // 横幅形态的高度（与 CSS 一致）
 
@@ -48,7 +48,7 @@ function draw(): void {
   if (!ctx) return;
   ctx.clearRect(0, 0, w, h);
 
-  const src = props.rec.thumb as unknown as HTMLCanvasElement | null;
+  const src = props.rec?.thumb as unknown as HTMLCanvasElement | null;
   if (!src || !src.width || !src.height) return;
 
   // contain：整幅装进框里，不裁切 —— 预览是给判读用的（比色调、看有没有云），
@@ -64,7 +64,7 @@ function draw(): void {
 // thumb 出现 = 解码完成；paintedMode 变 = 换了拉伸模式（画布是原地重画的，
 // 单看 thumb 的引用不会变）。两者之外这张图的像素不会再动。
 watch(
-  () => [props.rec.thumb, props.rec.paintedMode],
+  () => [props.rec?.thumb, props.rec?.paintedMode],
   () => draw(),
 );
 
@@ -87,8 +87,12 @@ onBeforeUnmount(() => {
     :class="{ compact: !!size }"
     :style="size ? { width: size + 'px', height: size + 'px' } : undefined"
   >
-    <canvas ref="cv" class="ft-cv"></canvas>
-    <span v-if="!rec.thumb" class="ft-ph">{{ rec.status || '未打开' }}</span>
+    <template v-if="previewSrc">
+      <img class="ft-preview" :src="previewSrc" alt="" draggable="false" />
+      <img v-if="detailSrc" class="ft-preview ft-detail" :src="detailSrc" alt="" draggable="false" />
+    </template>
+    <canvas v-else ref="cv" class="ft-cv"></canvas>
+    <span v-if="!previewSrc && !rec?.thumb" class="ft-ph">{{ rec?.status || '未打开' }}</span>
   </div>
 </template>
 
@@ -104,6 +108,9 @@ onBeforeUnmount(() => {
   background: var(--surface-3);
   border: 1px solid var(--line);
 }
+.ft-preview { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+/* Aligned same-crop sources: retain moderate blur while restoring fine detail. */
+.ft-detail { opacity: .55; }
 .ft-cv { display: block; width: 100%; height: 100%; }
 /* 方块形态（查看器左栏）：浅灰绿底把 contain 留出的边兜住；卡片是横向布局，
    它不能参与弹性收缩，否则栏宽不够时会被压窄。 */

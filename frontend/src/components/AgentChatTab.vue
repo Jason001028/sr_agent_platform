@@ -29,6 +29,7 @@ import GoalClarifications from './GoalClarifications.vue';
 import ChatImagePicker from './ChatImagePicker.vue';
 import ChatBubbleImages from './ChatBubbleImages.vue';
 import AppIcon from './AppIcon.vue';
+import AgentBotIcon from './AgentBotIcon.vue';
 import SceneSearchResultCard from './SceneSearchResultCard.vue';
 import { useScenesStore } from '../stores/scenes.js';
 import {
@@ -52,7 +53,7 @@ async function openSearchScene(row: Record<string, unknown>): Promise<void> {
 
 const rec = computed(() => viewer.activeRec);
 /** 仅盘阵场景可用；无图 / 本地(无 sceneId) → false 并给 reason。 */
-const enabled = computed(() => Boolean(rec.value));
+const enabled = computed(() => Boolean(rec.value?.sceneId && rec.value?.thumb));
 /** 无会话时首问会自动建会话 —— 输入框始终可输入；placeholder 提示差异。 */
 const placeholder = computed(() =>
   chat.sessionId
@@ -60,8 +61,9 @@ const placeholder = computed(() =>
     : '输入问题即自动新建会话并附上下文…');
 const reason = computed(() => {
   const r = rec.value;
-  if (!r) return '当前未打开图像。先从左侧打开一个文件，或进「打开场景」选盘阵场景。';
-  return '';
+  if (!r) return '当前未打开图像。请从左侧打开盘阵影像，或进入「打开场景」选择生产场景。';
+  if (!r.sceneId) return '当前图像未关联盘阵生产场景。请打开盘阵影像，或进入「打开场景」选择生产场景。';
+  return '盘阵影像正在加载，加载完成后即可使用 Agent。';
 });
 
 /** 当前查看器确定性上下文快照（禁用时 null；每次发送重新取，保证数字最新）。 */
@@ -108,7 +110,7 @@ function fmtTime(ts: number): string {
 const menuOpen = ref(false);
 const sessLoading = ref(false);
 // 菜单开着时换成了一张本地图（Agent 不可用）→ 收掉，别留一个悬空的下拉
-watch(enabled, (ok) => { if (!ok) menuOpen.value = false; });
+watch(enabled, (ok) => { if (!ok) pickerOpen.value = false; });
 
 async function openMenu(): Promise<void> {
   menuOpen.value = true;
@@ -223,6 +225,8 @@ async function onSend(): Promise<void> {
     }
     if (!chat.sessionId) return;
   }
+  // Opening a session may await the network; recheck access after image changes.
+  if (!canSend()) return;
   draft.value = '';
   const latest = snap.value;
   if (latest) void chat.send(agentPayload(text, buildContextNote(latest)));
@@ -246,9 +250,8 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
     <!-- 头部：会话操作 + 去 Chat 页。不再显示「会话 xxxxxxxx」：当前会话在
          历史菜单里高亮，那串 id 对操作没有帮助。 -->
     <div class="at-head">
-      <!-- Agent 不可用时（本地/离线图、未开图）不摆会话按钮：新会话、切/删会话在这里
-           都没有落点，留着只会点出一个空会话。历史管理回 /chat 做。 -->
-      <div v-if="enabled" class="at-sess-tools">
+      <!-- 锁定只影响输入；历史查看与会话管理始终可用。 -->
+      <div class="at-sess-tools">
         <button type="button" class="at-hbtn" data-e2e="agent-new"
                 :disabled="chat.sending || creating"
                 title="新建会话（当前会话保留在历史里）" aria-label="新建会话"
@@ -275,7 +278,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
     </div>
 
     <!-- 会话菜单（下拉）+ 点外部关闭的透明捕手 -->
-    <template v-if="menuOpen && enabled">
+    <template v-if="menuOpen">
       <div class="at-menu-catch" @click="menuOpen = false"></div>
       <div class="at-menu" role="menu" aria-label="历史会话">
         <div class="at-menu-cap">历史会话</div>
@@ -299,18 +302,11 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
 
     <p v-if="chat.error" class="at-err">{{ chat.error }}</p>
 
-    <!-- 禁用原因（本地/离线/未开图） -->
-    <div v-if="!enabled" class="at-disabled">
-      <p class="at-desc">Agent服务仅对盘阵生产目录开放。</p>
-      <p class="at-reason">{{ reason }}</p>
-    </div>
-
     <!-- 会话区 -->
-    <template v-else>
       <div ref="scrollEl" class="at-scroll">
-        <div v-if="!chat.messages.length" class="at-empty">
-          <p>在下方提问。首问会自动新建会话，并附当前查看器上下文（图像 + 选中 ROI 统计）。</p>
-          <p class="at-hint">Agent 只解读画面上的确定性数字；涉及具体区域建议先在工具栏中框选。</p>
+        <div v-if="!chat.messages.length && !chat.sending" class="at-welcome">
+          <AgentBotIcon :status="chat.agentStatus" :size="24" label="遥感影像助手" />
+          <div class="bubble assistant">你好，我是遥感影像助手。你可以让我检索场景、打开影像或规划处理任务。</div>
         </div>
 
         <div v-for="(m, i) in chat.messages" :key="msgKey(m, i)" class="at-row" :class="m.role"
@@ -354,7 +350,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
                     <details v-if="toolResultsAt(i, tool.name).length > 1" class="tool-history"><summary>查看调用记录</summary><div v-for="(result, n) in toolResultsAt(i, tool.name)" :key="n">{{ n + 1 }}. {{ result.detail }}</div></details>
                   </SceneSearchResultCard>
                   <div v-else class="bubble assistant tools">
-                    <div class="tool-card"><div class="tool-card-head"><AppIcon :name="toolIconName(tool.name)" :size="17" /><strong>{{ tool.name === 'search_scenes' ? '检索目标场景' : tool.name }}</strong><code>{{ tool.name }}</code><span class="tool-state">{{ toolResultsAt(i, tool.name).length > 1 ? `共尝试 ${toolResultsAt(i, tool.name).length} 次` : (toolResultAt(i, tool.name)?.ok === true ? '✓ 完成' : toolResultAt(i, tool.name)?.ok === false ? '× 失败' : chat.sending ? '⏳ 调用中' : '结果未确认') }}</span></div><details class="tool-query"><summary>查询条件</summary><pre>{{ JSON.stringify(tool.args) }}</pre></details><div v-if="toolResultsAt(i, tool.name).length" class="tool-summary">最终结果：{{ toolResultsAt(i, tool.name).at(-1)?.detail }}</div><details v-if="toolResultsAt(i, tool.name).length > 1" class="tool-history"><summary>查看调用记录</summary><div v-for="(result, n) in toolResultsAt(i, tool.name)" :key="n">第 {{ n + 1 }} 次：{{ result.detail }}</div></details></div>
+                    <div class="tool-card"><div class="tool-card-head"><AppIcon :name="toolIconName(tool.name)" :size="17" /><strong>{{ tool.name === 'search_scenes' ? '检索目标场景' : tool.name }}</strong><code v-if="tool.name === 'search_scenes'">{{ tool.name }}</code><span class="tool-state">{{ toolResultsAt(i, tool.name).length > 1 ? `共尝试 ${toolResultsAt(i, tool.name).length} 次` : (toolResultAt(i, tool.name)?.ok === true ? '✓ 完成' : toolResultAt(i, tool.name)?.ok === false ? '× 失败' : chat.sending ? '⏳ 调用中' : '结果未确认') }}</span></div><details class="tool-query"><summary>查询条件</summary><pre>{{ JSON.stringify(tool.args) }}</pre></details><div v-if="toolResultsAt(i, tool.name).length" class="tool-summary">最终结果：{{ toolResultsAt(i, tool.name).at(-1)?.detail }}</div><details v-if="toolResultsAt(i, tool.name).length > 1" class="tool-history"><summary>查看调用记录</summary><div v-for="(result, n) in toolResultsAt(i, tool.name)" :key="n">第 {{ n + 1 }} 次：{{ result.detail }}</div></details></div>
                   </div>
                 </template>
               </div>
@@ -381,26 +377,30 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
         </div>
       </div>
 
-      <div class="at-foot">
+      <div class="at-foot" :class="{ locked: !enabled }">
+        <div :inert="!enabled">
         <ChatAttachTray :items="chat.pendingImages" @remove="chat.removePendingImage" />
         <div class="at-inputbar">
           <button type="button" class="at-shot" data-e2e="chat-shot-open"
                   aria-label="添加截图" title="添加截图（截取当前视野）"
-                  :disabled="chat.sending || creating"
+                  :disabled="!enabled || chat.sending || creating"
                   @click="pickerOpen = true">
             <AppIcon name="camera" :size="14" />
           </button>
           <input v-model="draft" class="at-input" type="text"
                  :placeholder="placeholder"
-                 :disabled="chat.sending || creating"
+                 :disabled="!enabled || chat.sending || creating"
                  @keyup.enter="onSend()" />
           <button type="button" class="cbtn" :disabled="!canSend()" @click="onSend()">
             {{ chat.sending || creating ? '…' : '发送' }}
           </button>
         </div>
+        </div>
+        <div v-if="!enabled" class="at-input-lock" role="status" aria-live="polite">
+          <p class="at-desc">Agent 服务仅对盘阵生产目录开放</p>
+          <p class="at-reason">{{ reason }}</p>
+        </div>
       </div>
-    </template>
-
     <ChatImagePicker v-if="pickerOpen" @close="pickerOpen = false" />
   </div>
 </template>
@@ -519,18 +519,14 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
   background: var(--err-bg); border-bottom: 1px solid var(--err-line);
 }
 
-.at-disabled {
-  flex: 1;
-  overflow: auto;
-  padding: 14px 12px;
-  display: flex; flex-direction: column; gap: 8px;
-  background: var(--surface);
-}
+.at-input-lock { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; gap: 7px; padding: 16px; background: rgba(244, 248, 246, .25); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); border: 1px solid rgba(185, 204, 196, .28); border-radius: 10px 10px 0 0; }
+.at-foot { position: relative; }
+.at-foot.locked { min-height: 132px; display: grid; align-items: end; }
+.at-welcome { display: flex; align-items: flex-start; gap: 10px; padding: 10px 2px; }
+.at-welcome .bubble { flex: 1; min-width: 0; margin: 0; line-height: 1.8; font-size: 13px; }
 .at-desc { margin: 0; font-size: 12.5px; color: var(--ink); font-weight: 600; }
 .at-reason {
   margin: 0; font-size: 12px; color: var(--ink-sub); line-height: 1.7;
-  background: var(--surface-2); border: 1px solid var(--line);
-  border-radius: var(--r-ctrl); padding: 8px 10px;
 }
 
 .at-scroll {
@@ -575,12 +571,12 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
   background: var(--surface-2); color: var(--ink-body);
   border: 1px solid var(--line); border-bottom-left-radius: 3px;
   align-self: flex-start;
+  box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 4px 12px rgba(0,0,0,.06), 0 12px 32px rgba(0,0,0,.08);
 }
 .bubble.assistant.err { white-space: pre-wrap; background: var(--err-bg); color: var(--err); border-color: var(--err-line); }
 .bubble.assistant.tools {
   width: 100%; max-width: 100%; box-sizing: border-box;
   background: #fff; border: 1px solid #D8E3DF; border-radius: 9px;
-  box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 4px 12px rgba(0,0,0,.06), 0 12px 32px rgba(0,0,0,.08);
   align-self: flex-start; padding: 12px;
 }
 .agent-tool-list { display: grid; gap: 6px; width: 100%; min-width: 0; }
@@ -588,10 +584,11 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
 .tc-line { font-size: 11px; color: var(--ink-sub); display: inline-flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 .tc-label { margin-right: 2px; }
 .tc-tool { display: inline-flex; align-items: center; gap: 4px; font-family: var(--font-mono); font-weight: 600; color: var(--ink-body); }
-.tool-card-head { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+.tool-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; font-size: 12px; }
+.tool-card-head strong { flex: 0 0 auto; white-space: nowrap; }
 .tool-card { width: 100%; }
-.tool-card-head code { font-family: var(--font-mono); color: var(--ink-sub); }
-.tool-state { margin-left: auto; color: var(--ok); }
+.tool-card-head code { font-family: var(--font-mono); color: var(--ink-sub); white-space: nowrap; }
+.tool-state { margin-left: auto; color: var(--ok); white-space: nowrap; }
 .tool-query { margin-top: 7px; font-size: 11px; color: var(--ink-sub); }
 .tool-query pre { margin: 5px 0 0; white-space: pre-wrap; }
 .tool-summary { margin-top: 7px; font-size: 11px; color: var(--ink-sub); }

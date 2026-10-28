@@ -22,6 +22,7 @@ and external-job idempotency (run_sr task table) are separate layers.
 """
 
 from __future__ import annotations
+from backend.agent.request_budget import DeadlineExceeded, timeout_for, request_policy, error_class
 
 import inspect
 import json
@@ -45,7 +46,9 @@ from backend.agent.runtime_status import (
 )
 from backend.services.goal_lease import current_lease
 
-DEFAULT_SYSTEM_PROMPT = """角色与目标
+DEFAULT_SYSTEM_PROMPT = """Follow Runtime Status budgets and choose the minimal necessary action. Prefer direct answers or applicable read-only tools for simple queries. Never invent results when budget is low; durable tasks yield and resume under runtime control.
+
+角色与目标
 
 你是遥感影像处理与超分辨率平台的 Agent，负责理解用户目标、获取必要证据、调用平台工具并完成任务。以最少的必要操作可靠地解决问题，不以工具调用次数衡量任务进展。
 
@@ -95,7 +98,7 @@ _EVENT_TYPES = ("tool_call", "tool_result", "assistant", "error",
 def build_client(cfg: Config) -> OpenAI:
     """OpenAI SDK client pointed at any OpenAI-compatible endpoint."""
     return OpenAI(base_url=cfg.llm_base_url, api_key=cfg.llm_api_key,
-                  timeout=cfg.llm_timeout)
+                  timeout=cfg.llm_timeout, max_retries=0)
 
 
 def _mock_emit(on_delta, event: dict) -> None:
@@ -202,9 +205,11 @@ def _empty_usage() -> dict:
 
 
 def _usage_public(usage: dict) -> dict:
-    return {k: usage[k] for k in
-            ("prompt_tokens", "completion_tokens", "total_tokens",
-             "calls", "source")}
+    result = {k: usage[k] for k in
+            ("prompt_tokens", "completion_tokens", "total_tokens", "calls", "source")}
+    if usage.get("unknown_calls"):
+        result.update(unknown_calls=usage["unknown_calls"], usage_complete=False)
+    return result
 
 
 def _field(obj, name: str):
@@ -291,7 +296,7 @@ def _delta_sink(on_step):
     return sink, state
 
 
-def _consume_stream(stream, on_delta) -> dict:
+def _consume_stream(stream, on_delta, deadline=None, started=None) -> dict:
     """Accumulate an OpenAI-compatible chunk stream into one response dict.
 
     Content and reasoning are forwarded as deltas; tool-call fragments are
@@ -299,6 +304,8 @@ def _consume_stream(stream, on_delta) -> dict:
     shape matches ``parse_response`` so the loop state machine cannot tell the
     difference.
     """
+    stream_started = time.monotonic() if started is None else started
+    timings = {"first_event_seconds": None, "first_answer_seconds": None, "first_tool_seconds": None}
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
     calls: dict[int, dict] = {}
@@ -307,6 +314,10 @@ def _consume_stream(stream, on_delta) -> dict:
     response_error = None
     try:
         for chunk in stream:
+            if timings["first_event_seconds"] is None:
+                timings["first_event_seconds"] = time.monotonic() - stream_started
+            if deadline is not None and time.monotonic() >= deadline:
+                raise DeadlineExceeded("stream exceeded deadline")
             chunk_usage = getattr(chunk, "usage", None)
             if chunk_usage is not None:
                 usage = chunk_usage
@@ -327,10 +338,14 @@ def _consume_stream(stream, on_delta) -> dict:
 
             text = _text_field(delta, "content")
             if text:
+                if timings["first_answer_seconds"] is None:
+                    timings["first_answer_seconds"] = time.monotonic() - stream_started
                 content_parts.append(text)
                 _emit_delta(on_delta, {"type": "token", "delta": text})
 
             for part in getattr(delta, "tool_calls", None) or []:
+                if timings["first_tool_seconds"] is None:
+                    timings["first_tool_seconds"] = time.monotonic() - stream_started
                 index = getattr(part, "index", 0)
                 if not isinstance(index, int):
                     index = 0
@@ -354,7 +369,7 @@ def _consume_stream(stream, on_delta) -> dict:
                 if args:
                     slot["arguments"] += args
     except Exception as exc:
-        response_error = type(exc).__name__
+        response_error = error_class(exc)
     finally:
         close = getattr(stream, "close", None)
         if callable(close):
@@ -376,15 +391,118 @@ def _consume_stream(stream, on_delta) -> dict:
             "reasoning": "".join(reasoning_parts) or None,
             "usage": _normalize_usage(usage),
             "finish_reason": finish_reason, "response_error": response_error,
-            "response_complete": response_error is None}
+            "response_complete": response_error is None, "stream_timings": timings}
 
 
-def _stream_chat(client, cfg: Config, wire, tools, on_delta) -> dict:
+async def _consume_stream_async(stream, on_delta, deadline=None, started=None, observed=None) -> dict:
+    """Accumulate an OpenAI-compatible chunk stream into one response dict.
+
+    Content and reasoning are forwarded as deltas; tool-call fragments are
+    reassembled by ``index`` (name once, arguments concatenated). The returned
+    shape matches ``parse_response`` so the loop state machine cannot tell the
+    difference.
+    """
+    stream_started = time.monotonic() if started is None else started
+    timings = {"first_event_seconds": None, "first_answer_seconds": None, "first_tool_seconds": None}
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    calls: dict[int, dict] = {}
+    usage = None
+    finish_reason = None
+    response_error = None
+    try:
+        async for chunk in stream:
+            if timings["first_event_seconds"] is None:
+                timings["first_event_seconds"] = time.monotonic() - stream_started
+            if deadline is not None and time.monotonic() >= deadline:
+                raise DeadlineExceeded("stream exceeded deadline")
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage is not None:
+                usage = chunk_usage
+                if observed is not None:
+                    observed["usage"] = _normalize_usage(usage)
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue                    # include_usage final chunk
+            if getattr(choices[0], "finish_reason", None) is not None:
+                finish_reason = choices[0].finish_reason
+            delta = getattr(choices[0], "delta", None)
+            if delta is None:
+                continue
+
+            reasoning = (_text_field(delta, "reasoning_content")
+                         or _text_field(delta, "reasoning"))
+            if reasoning:
+                reasoning_parts.append(reasoning)
+                _emit_delta(on_delta, {"type": "reasoning", "delta": reasoning})
+
+            text = _text_field(delta, "content")
+            if text:
+                if timings["first_answer_seconds"] is None:
+                    timings["first_answer_seconds"] = time.monotonic() - stream_started
+                content_parts.append(text)
+                _emit_delta(on_delta, {"type": "token", "delta": text})
+
+            for part in getattr(delta, "tool_calls", None) or []:
+                if timings["first_tool_seconds"] is None:
+                    timings["first_tool_seconds"] = time.monotonic() - stream_started
+                index = getattr(part, "index", 0)
+                if not isinstance(index, int):
+                    index = 0
+                slot = calls.setdefault(
+                    index, {"id": "", "name": "", "arguments": ""})
+                call_id = getattr(part, "id", None)
+                if call_id:
+                    slot["id"] = call_id
+                fn = getattr(part, "function", None)
+                if fn is None:
+                    continue
+                name = getattr(fn, "name", None) or ""
+                if not slot["name"]:
+                    if name:
+                        slot["name"] = name
+                        _emit_delta(on_delta,
+                                    {"type": "tool_call", "name": name})
+                elif name and name != slot["name"]:
+                    slot["name"] += name       # fragmented name (rare)
+                args = getattr(fn, "arguments", None)
+                if args:
+                    slot["arguments"] += args
+    except Exception as exc:
+        response_error = error_class(exc)
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            try:
+                await close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    tool_calls = []
+    for index in sorted(calls):
+        slot = calls[index]
+        tool_calls.append({
+            "id": slot["id"],
+            "name": slot["name"],
+            "arguments": slot["arguments"],
+        })
+    return {"content": "".join(content_parts) or None,
+            "tool_calls": tool_calls,
+            "reasoning": "".join(reasoning_parts) or None,
+            "usage": _normalize_usage(usage),
+            "finish_reason": finish_reason, "response_error": response_error,
+            "response_complete": response_error is None, "stream_timings": timings}
+
+
+def _stream_chat(client, cfg: Config, wire, tools, on_delta, request_config=None, deadline=None, fallback_reserve=None) -> dict:
     """One streaming chat-completions call, aggregated for the loop."""
+    started = time.monotonic()
     params = dict(
         model=cfg.llm_model, messages=wire, tools=tools or None,
         max_tokens=cfg.llm_max_tokens, temperature=cfg.llm_temperature,
         stream=True)
+    params.update((request_config or request_policy(cfg, deadline, time.monotonic()))["thinking_parameters"])
+    params["timeout"] = timeout_for(cfg, deadline, time.monotonic())
     try:
         # include_usage is what makes the metrics row survive the switch to
         # streaming (usage only arrives in the final chunk when requested).
@@ -394,10 +512,13 @@ def _stream_chat(client, cfg: Config, wire, tools, on_delta) -> dict:
         # Some OpenAI-compatible servers reject stream_options. The request is
         # read-only and no token has been produced yet, so one retry without
         # the field is safe. Other errors surface unchanged.
-        if getattr(exc, "status_code", None) not in (400, 422):
+        if getattr(exc, "status_code", None) not in (400, 422) or "stream_options" not in str(exc):
             raise
+        if fallback_reserve is not None:
+            fallback_reserve()
+        params["timeout"] = timeout_for(cfg, deadline, time.monotonic())
         stream = client.chat.completions.create(**params)
-    return _consume_stream(stream, on_delta)
+    return _consume_stream(stream, on_delta, deadline, started)
 
 
 def parse_response(resp) -> dict:
@@ -466,24 +587,18 @@ def call_tool(name, arguments_json, registry: ToolRegistry | None = None,
 def _default_chat(cfg: Config, *, round_seconds=None):
     if cfg.llm_mock:
         return _mock_chat(cfg)
-    client = build_client(cfg)
-    if round_seconds is not None:
-        # Durable scheduling owns retry accounting. Bound a single request as
-        # well as the checks between turns; SDK retries must not bypass budget.
-        client = client.with_options(timeout=min(cfg.llm_timeout, round_seconds), max_retries=0)
-    # 一次回合内同一张截图的 data URL 只拼一次（每个 LLM 调用都会过一遍水合）。
     image_cache: dict[str, str] = {}
 
-    def chat(messages, tools, on_delta=None):
+    def chat(messages, tools, on_delta=None, request_config=None, deadline=None, fallback_reserve=None, diagnostics=None):
         # 截图在库里只有相对 URL，到这一步才现读盘换成 data URL（§3.2.1）。
         # mock 路在上面的 return 就走掉了 —— 它不读图，也不该碰盘。
         wire = chat_images.hydrate_images(messages, cache=image_cache)
-        if on_delta is not None:
-            return _stream_chat(client, cfg, wire, tools, on_delta)
-        resp = client.chat.completions.create(
-            model=cfg.llm_model, messages=wire, tools=tools or None,
-            max_tokens=cfg.llm_max_tokens, temperature=cfg.llm_temperature)
-        return parse_response(resp)
+        import asyncio
+        from backend.agent.async_transport import request
+        return asyncio.run(request(cfg, wire, tools, on_delta=on_delta,
+            request_config=request_config, deadline=deadline,
+            fallback_reserve=fallback_reserve, consume=_consume_stream_async,
+            parse=parse_response, diagnostics=diagnostics))
 
     return chat
 
@@ -671,7 +786,9 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
         if skill_catalog.skills:
             allowed_names = set(allowed_names) | {'read_skill', 'read_skill_resource'}
     result_manager = ToolResults(store, session_id)
-    active_registry = result_manager.registry(bind_registry(registry or default_registry(), latest_user.get("viewer_snapshot")))
+    active_registry = result_manager.registry(bind_registry(
+        registry or default_registry(), latest_user.get("viewer_snapshot"),
+        store=store))
     active_registry = ToolRegistry(t for t in active_registry.list() if t.name != CLARIFY)
     if durable:
         active_registry.register(control_tool())
@@ -714,6 +831,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
     call_index = 0
     model_calls = tool_count = 0
     round_started = time.monotonic()
+    deadline = round_started + max_seconds if durable else None
     recent_tools = deque(maxlen=RECENT_TOOL_LIMIT)
 
     def yielded(outcome, turn, **extra):
@@ -731,7 +849,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
     for turn in range(1, max_turns + 1):
         check_owner()
         if durable and ((max_model_calls is not None and model_calls >= max_model_calls)
-                        or time.monotonic() - round_started >= max_seconds):
+                        or deadline - time.monotonic() <= cfg.llm_deadline_margin):
             return yielded(RoundOutcome.BUDGET_YIELD, turn - 1)
         if trajectory is not None:
             trajectory.event("turn_start", turn=turn, status="running")
@@ -743,6 +861,15 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
             max_model_calls=max_model_calls, max_tool_calls=max_tool_calls,
             max_seconds=max_seconds, goal=goal_status, recent_tools=recent_tools,
         )
+        try:
+            policy = request_policy(cfg, deadline, time.monotonic())
+        except DeadlineExceeded:
+            if durable:
+                return yielded(RoundOutcome.BUDGET_YIELD, turn - 1, error_class="DEADLINE_EXCEEDED")
+            raise
+        runtime_status.update(thinking_profile=policy["thinking_profile"], execution_priority="minimal_necessary_action")
+        if durable:
+            runtime_status["remaining_round_seconds_at_request"] = round(policy["remaining_round_seconds_at_request"], 2)
         request_messages = project_runtime_status(messages, runtime_status)
         if durable and goal_status is not None and goal_status.get("checkpoint", {}).get("clarification_id"):
             # Continuation observes the latest durable checkpoint, without
@@ -751,33 +878,108 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                 "\nInternal Goal checkpoint (observations, not authorization):\n"
                 + json.dumps(goal_status["checkpoint"], ensure_ascii=False))
         llm_started = time.time()
+        llm_monotonic = time.monotonic()
         llm_event = None
         if trajectory is not None:
             llm_event = trajectory.event(
                 "llm_request_start", turn=turn, status="started",
                 payload={"message_count": len(request_messages), "tool_count": len(tools),
-                         "runtime_status": runtime_status},
+                         "runtime_status": runtime_status, "model": cfg.llm_model, "request_config": policy},
                 started_at=llm_started)
         on_delta, delta_state = (None, None)
         if stream:
             on_delta, delta_state = _delta_sink(on_step)
+        diagnostics = {}
+        out = {}
+        calls_before = model_calls
         try:
+            timeout_for(cfg, deadline, time.monotonic())
             if before_model is not None:
                 before_model()
             model_calls += 1
+            kwargs = {}
+            if "request_config" in inspect.signature(chat).parameters:
+                kwargs.update(request_config=policy, deadline=deadline)
+            if "fallback_reserve" in inspect.signature(chat).parameters:
+                def reserve_fallback():
+                    nonlocal model_calls
+                    timeout_for(cfg, deadline, time.monotonic())
+                    if durable and (model_calls >= min(max_turns, max_model_calls if max_model_calls is not None else max_turns)):
+                        raise DeadlineExceeded("model attempt budget prevents fallback")
+                    if before_model is not None:
+                        before_model()
+                    model_calls += 1
+                kwargs["fallback_reserve"] = reserve_fallback
             if on_delta is not None:
-                out = chat(request_messages, tools, on_delta=on_delta)
-            else:
-                out = chat(request_messages, tools)
+                kwargs["on_delta"] = on_delta
+            transport_observed = "diagnostics" in inspect.signature(chat).parameters
+            if transport_observed:
+                diagnostics["request_attempts"] = 0
+                kwargs["diagnostics"] = diagnostics
+            failure = None
+            try:
+                out = chat(request_messages, tools, **kwargs)
+            except Exception as exc:
+                failure = exc
+                out = {}
+            if not transport_observed:
+                diagnostics["request_attempts"] = model_calls - calls_before
+            diagnostics.update({k: out[k] for k in (
+                "request_attempts", "capability_rejections", "effective_thinking_parameters",
+                "thinking_applied", "stream_timings") if k in out})
+            call_usage = _normalize_usage(out.get("usage"))
+            if call_usage is not None:
+                call_index += 1
+                event = {**call_usage, "turn": turn, "call_index": call_index}
+                usage["prompt_tokens"] += call_usage["prompt_tokens"]
+                usage["completion_tokens"] += call_usage["completion_tokens"]
+                usage["total_tokens"] += call_usage["total_tokens"]
+                usage["calls"] += 1
+                usage["source"] = call_usage["source"]
+                usage["events"].append(event)
+                if store is not None and session_id is not None:
+                    try:
+                        store.append_llm_usage(session_id, **event)
+                    except Exception:  # noqa: BLE001 — metrics must not break chat
+                        pass
+                if on_step is not None:
+                    on_step({"type": "usage", "usage": event,
+                             "aggregate": _usage_public(usage)})
+                if trajectory is not None:
+                    trajectory.event("usage", turn=turn,
+                                     parent_event_id=llm_event["event_id"] if llm_event else None,
+                                     status="recorded", payload=event)
+            unknown = max(0, diagnostics.get("request_attempts", 0) - int(call_usage is not None))
+            if unknown:
+                usage["unknown_calls"] = usage.get("unknown_calls", 0) + unknown
+                if trajectory is not None:
+                    trajectory.event("usage", turn=turn, status="unknown",
+                        payload={"provider_usage": None, "unknown_calls": unknown, "observation": "send_attempted_usage_unknown", "reason": out.get("response_error") or (error_class(failure) if failure else None)})
+
+            if failure is not None:
+                raise failure
+            if deadline is not None and deadline-time.monotonic() <= cfg.llm_deadline_margin:
+                raise DeadlineExceeded("round budget exhausted during model request")
+            if out.get("response_error") in {"MODEL_TIMEOUT", "DEADLINE_EXCEEDED"}:
+                if out["response_error"] == "DEADLINE_EXCEEDED":
+                    raise DeadlineExceeded("stream deadline exceeded")
+                raise TimeoutError("model stream timed out")
         except Exception as e:  # noqa: BLE001 — surface cleanly, no retry loop
+            if isinstance(e, DeadlineExceeded) and durable:
+                if trajectory is not None:
+                    trajectory.event("llm_request_end", turn=turn,
+                        parent_event_id=llm_event["event_id"] if llm_event else None,
+                        status="failed", payload={**diagnostics, "request_config": policy, "error_class": "DEADLINE_EXCEEDED"},
+                        duration_ms=max(0, int((time.monotonic()-llm_monotonic)*1000)))
+                return yielded(RoundOutcome.BUDGET_YIELD, turn, error_class="DEADLINE_EXCEEDED")
             error = f"{type(e).__name__}: {e}"
             if trajectory is not None:
                 ended = time.time()
                 trajectory.event("llm_request_end", turn=turn,
                                  parent_event_id=llm_event["event_id"] if llm_event else None,
-                                 status="failed", payload={"error": error},
+                                 status="failed", payload={**diagnostics, "request_config": policy, "error": error, "error_class": error_class(e)},
                                  started_at=llm_started, finished_at=ended,
-                                 duration_ms=max(0, int((ended - llm_started) * 1000)))
+                                 duration_ms=max(0, int((time.monotonic() - llm_monotonic) * 1000)))
                 trajectory.event("error", turn=turn, status="failed",
                                  payload={"error": error})
             if verbose:
@@ -790,8 +992,8 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
             return finish_run({"ok": False, "turns": turn, "messages": transcript,
                                "answer": None, "error": error,
                                "session_id": session_id, "usage": usage,
-                               "outcome": RoundOutcome.RETRYABLE_ERROR if isinstance(e, (TimeoutError, ConnectionError)) or getattr(e, "status_code", None) in (408,429,500,502,503,504) else RoundOutcome.FAILED,
-                               "error_class": "model_call"})
+                               "outcome": RoundOutcome.RETRYABLE_ERROR if error_class(e) in {"MODEL_TIMEOUT", "CONNECTION_ERROR", "SERVICE_UNAVAILABLE", "RATE_LIMITED", "RESPONSE_INTERRUPTED"} or getattr(e, "status_code", None) in (408,429,500,502,503,504) else RoundOutcome.FAILED,
+                               "error_class": error_class(e)})
 
         check_owner()
         content = out.get("content")
@@ -803,10 +1005,15 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                 "llm_request_end", turn=turn,
                 parent_event_id=llm_event["event_id"] if llm_event else None,
                 status="failed" if integrity else "succeeded",
-                payload={"tool_call_count": len(tool_calls),
-                         "finish_reason": out.get("finish_reason"), "integrity_error": integrity},
+                payload={**diagnostics, "request_config": policy, "tool_call_count": len(tool_calls),
+                         "finish_reason": out.get("finish_reason"), "integrity_error": integrity,
+                         "error_category": ("OUTPUT_LENGTH" if integrity == "output_length" else "RESPONSE_INTERRUPTED" if integrity == "response_interrupted" else "INVALID_RESPONSE" if integrity else None),
+                         "stream_timings": out.get("stream_timings"),
+                         "capability_rejections": out.get("capability_rejections", []),
+                         "thinking_applied": out.get("thinking_applied", "unverified"),
+                         "integrity_retry_count": consecutive_integrity_errors},
                 started_at=llm_started, finished_at=llm_finished,
-                duration_ms=max(0, int((llm_finished - llm_started) * 1000)))
+                duration_ms=max(0, int((time.monotonic() - llm_monotonic) * 1000)))
         # 非流式响应也可能带回 reasoning_content（llama.cpp / vLLM 的
         # message.reasoning_content）。流式路已在 delta 里发过，这里只补没发过的。
         reasoning = out.get("reasoning")
@@ -815,28 +1022,6 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
             on_step({"type": "llm_phase", "phase": "thinking"})
             on_step({"type": "reasoning", "delta": reasoning})
 
-        call_usage = _normalize_usage(out.get("usage"))
-        if call_usage is not None:
-            call_index += 1
-            event = {**call_usage, "turn": turn, "call_index": call_index}
-            usage["prompt_tokens"] += call_usage["prompt_tokens"]
-            usage["completion_tokens"] += call_usage["completion_tokens"]
-            usage["total_tokens"] += call_usage["total_tokens"]
-            usage["calls"] += 1
-            usage["source"] = call_usage["source"]
-            usage["events"].append(event)
-            if store is not None and session_id is not None:
-                try:
-                    store.append_llm_usage(session_id, **event)
-                except Exception:  # noqa: BLE001 — metrics must not break chat
-                    pass
-            if on_step is not None:
-                on_step({"type": "usage", "usage": event,
-                         "aggregate": _usage_public(usage)})
-            if trajectory is not None:
-                trajectory.event("usage", turn=turn,
-                                 parent_event_id=llm_event["event_id"] if llm_event else None,
-                                 status="recorded", payload=event)
 
         if integrity:
             consecutive_integrity_errors += 1

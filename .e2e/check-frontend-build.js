@@ -61,6 +61,8 @@ async function main() {
   console.log(`[phase2-check] 静态服务 ${base}  (dist=${DIST})`);
 
   const { browser, page, errors } = await launchPage();
+  // Both 400px sidebars now open by default; give the raster canvas usable space.
+  await page.setViewport({ width: 1366, height: 900 });
   const externalRequests = [];
   page.on('request', (req) => {
     const u = req.url();

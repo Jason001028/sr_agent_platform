@@ -729,110 +729,170 @@ async def chat_send(session_id: str, request: Request):
     except chat_images.ChatImageError as exc:
         lock.release()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception:
+    except BaseException:
         lock.release()
         raise
 
     prompt = chat_images.user_content(content, saved)
 
-    async def gen():
-        q: asyncio.Queue = asyncio.Queue()
-        loop = asyncio.get_running_loop()
-        run_id = uuid.uuid4().hex
-        title_announced = False
+    import threading
+    q: asyncio.Queue = asyncio.Queue(maxsize=256)
+    detached = threading.Event()
+    pending = threading.BoundedSemaphore(256)
 
-        def bridge(ev: dict):
-            """on_step → SSE 事件；剥掉 loop 内部多余字段（turn），对齐 §3.2."""
-            nonlocal title_announced
-            if not title_announced:
-                sess = state.store.get_session(session_id)
-                if sess and sess['metadata'].get('title'):
-                    title_announced = True
-                    try:
-                        loop.call_soon_threadsafe(q.put_nowait, {'type': 'session_update', 'session': sess})
-                    except RuntimeError:
-                        pass
-            t = ev.get("type")
-            out = {}
-            if t == "tool_call":
-                out = {"type": "tool_call", "id": ev.get("id"), "name": ev["name"], "args": ev["args"]}
-            elif t == "tool_result":
-                out = {"type": "tool_result", "id": ev.get("id"), "name": ev["name"],
-                       "ok": ev.get("ok"), "data": ev.get("data"),
-                       "error": ev.get("error")}
-            elif t == "assistant":
-                out = {"type": "assistant", "content": ev.get("content")}
-            elif t == "llm_phase":
-                out = {"type": "llm_phase", "phase": ev.get("phase")}
-                if ev.get("name"):
-                    out["name"] = ev["name"]
-            elif t == "reasoning":
-                out = {"type": "reasoning", "delta": ev.get("delta", "")}
-            elif t == "token":
-                out = {"type": "token", "delta": ev.get("delta", "")}
-            elif t == "error":
-                out = {"type": "error", "error": ev.get("error")}
-            elif t == "usage":
-                out = {"type": "usage", "usage": ev.get("usage"),
-                       "aggregate": ev.get("aggregate")}
-            if out:
-                try:
-                    loop.call_soon_threadsafe(q.put_nowait, out)
-                except RuntimeError:
-                    # Client disconnected and the stream loop is gone; the turn
-                    # still runs to completion (tools already started), but
-                    # there is no one left to receive observation events.
-                    pass
+    def publish(item):
+        # Bound both queued events and scheduled cross-thread callbacks.
+        if detached.is_set() or not pending.acquire(blocking=False):
+            return
+        def deliver():
+            pending.release()
+            if not detached.is_set():
+                if q.full():
+                    q.get_nowait()
+                q.put_nowait(item)
+        try:
+            loop.call_soon_threadsafe(deliver)
+        except RuntimeError:
+            pending.release()
+    loop = asyncio.get_running_loop()
+    run_id = uuid.uuid4().hex
+    title_announced = False
+    terminal_error = None
 
-        def thread_main() -> dict:
+    def bridge(ev: dict):
+        """on_step → SSE 事件；剥掉 loop 内部多余字段（turn），对齐 §3.2."""
+        nonlocal title_announced, terminal_error
+        if detached.is_set():
+            return
+        if not title_announced:
             try:
-                context = _context(request)
-                cfg = state.cfg if context is None else context.config
-                # env SR_LLM_STREAM is the operator master switch; a request
-                # may only turn streaming off, never force it on when the
-                # endpoint was declared unable to stream.
-                stream_on = bool(getattr(cfg, "llm_stream", True))
-                if stream_opt is not None:
-                    stream_on = stream_on and stream_opt
-                return loop_mod.run_loop(
-                    None if context is not None else state.cfg, prompt,
-                    store=None if context is not None else state.store,
-                    session_id=session_id, resume=True, on_step=bridge,
-                    registry=None if context is not None else getattr(state, "tool_registry", None),
-                    context=context, machine_id=machine_id, stream=stream_on, viewer_snapshot=viewer_snapshot)
-            except Exception as e:  # noqa: BLE001 — 流上收尾，不让线程挂死
-                bridge({"type": "error", "error": f"{type(e).__name__}: {e}"})
-                return {"ok": False, "error": f"{type(e).__name__}: {e}",
-                        "answer": None}
-            finally:
+                sess = state.store.get_session(session_id)
+            except Exception:
+                sess = None  # Observation failure must not interrupt execution.
+            if sess and sess['metadata'].get('title'):
+                title_announced = True
                 try:
-                    loop.call_soon_threadsafe(q.put_nowait, _SENTINEL)
+                    publish({'type': 'session_update', 'session': sess})
                 except RuntimeError:
                     pass
+        t = ev.get("type")
+        out = {}
+        if t == "tool_call":
+            out = {"type": "tool_call", "id": ev.get("id"), "name": ev["name"], "args": ev["args"]}
+        elif t == "tool_result":
+            out = {"type": "tool_result", "id": ev.get("id"), "name": ev["name"],
+                   "ok": ev.get("ok"), "data": ev.get("data"),
+                   "error": ev.get("error")}
+        elif t == "assistant":
+            out = {"type": "assistant", "content": ev.get("content")}
+        elif t == "llm_phase":
+            out = {"type": "llm_phase", "phase": ev.get("phase")}
+            if ev.get("name"):
+                out["name"] = ev["name"]
+        elif t == "reasoning":
+            out = {"type": "reasoning", "delta": ev.get("delta", "")}
+        elif t == "token":
+            out = {"type": "token", "delta": ev.get("delta", "")}
+        elif t == "error":
+            terminal_error = ev.get("error")
+            # Final errors bypass the lossy observation queue.
+        elif t == "usage":
+            out = {"type": "usage", "usage": ev.get("usage"),
+                   "aggregate": ev.get("aggregate")}
+        if out:
+            try:
+                publish(out)
+            except RuntimeError:
+                # Client disconnected and the stream loop is gone; the turn
+                # still runs to completion (tools already started), but
+                # there is no one left to receive observation events.
+                pass
 
+    def thread_main() -> dict:
+        try:
+            context = _context(request)
+            cfg = state.cfg if context is None else context.config
+            # env SR_LLM_STREAM is the operator master switch; a request
+            # may only turn streaming off, never force it on when the
+            # endpoint was declared unable to stream.
+            stream_on = bool(getattr(cfg, "llm_stream", True))
+            if stream_opt is not None:
+                stream_on = stream_on and stream_opt
+            return loop_mod.run_loop(
+                None if context is not None else state.cfg, prompt,
+                store=None if context is not None else state.store,
+                session_id=session_id, resume=True, on_step=bridge,
+                registry=None if context is not None else getattr(state, "tool_registry", None),
+                context=context, machine_id=machine_id, stream=stream_on, viewer_snapshot=viewer_snapshot)
+        except Exception as e:  # noqa: BLE001 — 流上收尾，不让线程挂死
+            try:
+                state.store.set_session_status(session_id, "error")
+            except Exception:
+                pass
+            bridge({"type": "error", "error": f"{type(e).__name__}: {e}"})
+            return {"ok": False, "error": f"{type(e).__name__}: {e}",
+                    "answer": None}
+
+    result_box = {}
+    worker = loop.create_future()
+
+    completion_recorded = False
+
+    def completed():
+        nonlocal completion_recorded
+        # Only this Run's completion callback releases its execution right.
+        if completion_recorded:
+            return
+        completion_recorded = True
+        lock.release()
+        if not worker.done():
+            worker.set_result(None)
+        if not detached.is_set():
+            if q.full():
+                q.get_nowait()
+            q.put_nowait(_SENTINEL)
+
+    def execute():
+        try:
+            result_box['r'] = thread_main()
+        finally:
+            try:
+                loop.call_soon_threadsafe(completed)
+            except RuntimeError:
+                pass  # Process/event-loop shutdown: in-process ownership expires.
+
+    try:
+        thread = threading.Thread(target=execute, daemon=True)
+        thread.start()
+    except BaseException:
+        lock.release()
+        raise
+    state.chat_workers.add(worker)
+    worker.add_done_callback(state.chat_workers.discard)
+
+    async def gen():
         try:
             yield _frame({"type": "turn_start", "run_id": run_id,
                           "session_id": session_id})
-            result_box: dict = {}
-            worker = asyncio.create_task(asyncio.to_thread(
-                lambda: result_box.update({"r": thread_main()})))
-            state.chat_workers.add(worker)
-            worker.add_done_callback(state.chat_workers.discard)
             while True:
                 item = await q.get()
                 if item is _SENTINEL:
                     break
                 yield item if isinstance(item, str) else _frame(item)
-            await worker
+            await asyncio.shield(worker)
             r = result_box.get("r", {})
             if r.get("ok") and not r.get("error"):
-                yield _frame({"type": "turn_done",
-                              "content": r.get("answer"), "error": None,
-                              "usage": r.get("usage"),
+                yield _frame({"type": "turn_done", "content": r.get("answer"),
+                              "error": None, "usage": r.get("usage"),
                               "run_id": r.get("run_id")})
-            # 其它路径：run_loop 已通过 on_step 发过 error 帧，turn_done 不出现
+            else:
+                yield _frame({"type": "error",
+                              "error": r.get("error") or terminal_error or "Agent run failed",
+                              "run_id": r.get("run_id") or run_id})
         finally:
-            lock.release()
+            detached.set()
+            while not q.empty():
+                q.get_nowait()
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers=_sse_headers())

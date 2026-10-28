@@ -45,7 +45,8 @@ def full_registry(tmp_path):
 SCHEMAS = {
     'search_scenes': ({'query': {'type': 'string'}, 'satellite': {'type': 'string'},
         'date_from': {'type': 'string'}, 'date_to': {'type': 'string'},
-        'limit': {'type': 'integer', 'minimum': 1, 'maximum': 500, 'default': 20}}, []),
+        'limit': {'type': 'integer', 'minimum': 1, 'maximum': 500, 'default': 20},
+        'scope': {'type': 'string', 'enum': ['workspace', 'library'], 'default': 'workspace'}}, []),
     'run_sr': ({'lq_path': {'type': 'string'}, 'mask_path': {'type': 'string'},
         'sr_scale': {'type': 'integer', 'minimum': 1, 'default': 2},
         'suffix': {'type': 'string', 'default': ''},

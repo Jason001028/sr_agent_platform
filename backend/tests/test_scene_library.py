@@ -65,4 +65,4 @@ def test_changed_whitelist_and_missing_source_hidden(library):
     client, app, src = library
     client.post('/api/scene-library', json={'entries':[entry(scene_id_abs(src))]})
     src.unlink()
-    assert client.get('/api/scene-library').json() == {'results':[], 'unavailable':1}
+    assert client.get('/api/scene-library').json() == {'results':[], 'unavailable':1, 'hidden': 0}

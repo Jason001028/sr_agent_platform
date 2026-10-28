@@ -6,6 +6,8 @@ self-healing, iteration cap and clean error surfacing — plus P0① SQLite
 persistence (messages committed before each step), resume and crash repair.
 """
 
+from backend.tests.async_client_fixture import async_client
+
 import json
 import os
 import tempfile
@@ -591,7 +593,7 @@ class TestStreamAdapter(unittest.TestCase):
 
         fake = SimpleNamespace(chat=SimpleNamespace(completions=_Completions()))
         deltas = []
-        with mock.patch("backend.agent.loop.build_client", return_value=fake):
+        with mock.patch("backend.agent.async_transport.AsyncOpenAI", return_value=async_client(fake)):
             chat = _default_chat(cfg())
             out = chat([{"role": "user", "content": "hi"}], [],
                        on_delta=deltas.append)

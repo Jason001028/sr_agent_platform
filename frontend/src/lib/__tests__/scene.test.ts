@@ -15,7 +15,8 @@ import {
   savePreviewDiv, SCENE_PREVIEW_DIVS, DEFAULT_PREVIEW_DIV,
   rasterPreviewWins, previewCacheKey, sceneAnchors, ANCHOR_MAX,
   isDiskArrayUrl,
-  sceneClearPreviewUrl, rowsAfterClear, clearSummaryText,
+  sceneClearPreviewUrl, sceneHideUrl, sceneRestoreHiddenUrl,
+  rowsAfterClear, clearSummaryText,
 } from '../scene.js';
 import type { SceneRow, RasterPreview, ClearResult, ClearSummary } from '../scene.js';
 import { stretchRgba } from '../tifDecode.js';
@@ -447,6 +448,13 @@ describe('清除预览缓存 —— URL / 去留 / 汇总文案', () => {
       .toBe('http://127.0.0.1:8000/api/scenes/clear-preview');
   });
 
+  it('隐藏 / 恢复隐藏端点在 /api/scenes 下，同样走 apiBase', () => {
+    expect(sceneHideUrl(loadSrConfig())).toBe('/api/scenes/hide');
+    expect(sceneRestoreHiddenUrl(loadSrConfig())).toBe('/api/scenes/restore-hidden');
+    expect(sceneRestoreHiddenUrl({ apiBase: 'http://127.0.0.1:8000/', staticBase: '' }))
+      .toBe('http://127.0.0.1:8000/api/scenes/restore-hidden');
+  });
+
   describe('rowsAfterClear —— 哪些行从列表摘掉', () => {
     const rows = [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }];
     const res = (id: string, status: ClearResult['status']) => ({
@@ -484,13 +492,15 @@ describe('清除预览缓存 —— URL / 去留 / 汇总文案', () => {
       dirs: 0, files: 0, marked: 0, ...over,
     });
 
-    it('全清干净：报目录数 / 文件数，并说明行只是从列表移除', () => {
+    it('全清干净：报目录数 / 文件数，并说明场景在服务端隐藏（不是删了）', () => {
       const text = clearSummaryText(
         s({ cleared: 1, dirs: 1, files: 3, marked: 2 }), 1);
       expect(text).toContain('已清除 1 项');
       expect(text).toContain('1 个场景目录');
       expect(text).toContain('3 份预览缓存');
-      expect(text).toContain('已从本机场景库隐藏 1 行，可通过“恢复已隐藏”找回');
+      expect(text).toContain('相关场景已在服务端隐藏 1 行');
+      expect(text).toContain('可通过“恢复已隐藏”找回');
+      expect(text).not.toContain('本机');
     });
 
     it('一景两行：项数按 id 报、目录与文件数不重复计数', () => {

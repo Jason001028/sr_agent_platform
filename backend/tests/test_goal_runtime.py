@@ -1,5 +1,7 @@
 """Durable Goal acceptance: real SQLite/loop/SR submission + fake external work."""
 
+from backend.tests.async_client_fixture import async_client
+
 import asyncio
 import json
 import os
@@ -263,9 +265,10 @@ class LoopContinuationTests(unittest.TestCase):
             usage=None,
         )
         cfg = Config("http://unused/v1", "test", "fake", 32, 0, 10, False)
-        with mock.patch("backend.agent.loop.build_client", return_value=client):
+        with mock.patch("backend.agent.async_transport.AsyncOpenAI", return_value=async_client(client)):
             result = run_loop(cfg, "x", durable=True, max_seconds=0.25)
-        client.with_options.assert_called_once_with(timeout=0.25, max_retries=0)
+        self.assertLessEqual(client.chat.completions.create.call_args.kwargs["timeout"], 0.15)
+        self.assertGreater(client.chat.completions.create.call_args.kwargs["timeout"], 0)
         self.assertEqual(result["outcome"], "COMPLETED_CANDIDATE")
 
     def test_resume_without_prompt_and_chat_with_prompt(self):
@@ -683,8 +686,22 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             checkpoint={"acceptance": {"required_tools": ["search_scenes"]}}
         )
 
+        release = threading.Event()
+        renewed = asyncio.Event()
+        renewals = []
+        original_renew = self.store.renew_goal
+
+        def renew(*args, **kwargs):
+            result = original_renew(*args, **kwargs)
+            if result:
+                renewals.append(time.monotonic())
+                if len(renewals) >= 4:
+                    renewed.set()
+            return result
+
         def slow(messages, tools):
-            time.sleep(0.3)
+            if not release.wait(10):
+                raise TimeoutError("test did not release model")
             return {
                 "finish_reason": "tool_calls", "content": None,
                 "tool_calls": [
@@ -693,11 +710,18 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             }
 
         self.state.goal_chat = slow
-        with mock.patch.dict(os.environ, {"SR_GOAL_LEASE_SEC": "0.12"}):
+        # Wait for observed renewals across the original lease duration, instead
+        # of assuming a 120 ms lease survives Windows scheduling/SQLite jitter.
+        with mock.patch.dict(os.environ, {"SR_GOAL_LEASE_SEC": "1.5"}), mock.patch.object(
+            self.store, "renew_goal", side_effect=renew
+        ):
             task = asyncio.create_task(self.tick())
-            await asyncio.sleep(0.05)
-            self.assertFalse(task.done())
-            await task
+            try:
+                await asyncio.wait_for(renewed.wait(), 8)
+                self.assertFalse(task.done())
+            finally:
+                release.set()
+                await task
         self.assertEqual(self.store.get_goal(goal["goal_id"])["status"], "RUNNING")
         self.assertEqual(self.calls.count("search_scenes"), 1)
 
@@ -831,6 +855,26 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.get_goal(gid)["status"], "BLOCKED")
         self.assertEqual(self.submissions, 1)
 
+    async def test_unknown_usage_accumulates_in_persisted_goal(self):
+        goal = self.goal()
+        gid = goal['goal_id']
+        def result(unknown):
+            return {'outcome': worker.Outcome.BUDGET_YIELD, 'tool_calls': 0,
+                    'model_calls': 1, 'elapsed_seconds': .01,
+                    'usage': {'total_tokens': 5 if not unknown else 0,
+                              'unknown_calls': unknown}}
+        with mock.patch.object(worker, 'run_round', side_effect=[result(2), result(0)]):
+            await self.tick()
+            await self.tick()
+        reopened = Store(self.store.path)
+        try:
+            usage = reopened.get_goal(gid)['checkpoint']['usage']
+            self.assertEqual(usage['unknown_calls'], 2)
+            self.assertFalse(usage['usage_complete'])
+            self.assertEqual(usage['total_tokens'], 5)
+        finally:
+            reopened.close()
+
     async def test_model_error_is_bounded_retry_with_accounted_calls(self):
         goal = self.goal(max_model_calls=1)
 
@@ -842,6 +886,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         current = self.store.get_goal(goal["goal_id"])
         self.assertEqual(current["status"], "RETRY_WAIT")
         self.assertEqual(current["model_calls_used"], 1)
+        self.assertEqual(current['checkpoint']['usage']['unknown_calls'], 1)
+        self.assertFalse(current['checkpoint']['usage']['usage_complete'])
+        session_usage = self.store.summarize_llm_usage(current['session_id'])
+        self.assertEqual(session_usage['unknown_calls'], 1)
+        self.assertFalse(session_usage['usage_complete'])
         self.store._db().execute(
             "UPDATE agent_goals SET next_wake_at=0 WHERE goal_id=?", (goal["goal_id"],)
         )

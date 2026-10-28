@@ -199,7 +199,7 @@ sequenceDiagram
 
 | 工具 | 作用 | 副作用 |
 |---|---|---|
-| `search_scenes` | 检索盘阵场景，返回 id、路径、卫星、传感器、日期 | 只读 |
+| `search_scenes` | 检索盘阵场景，返回 id、路径、卫星、传感器、日期；默认范围是当前 Viewer 工作区（`scope=library` 才扫全库），两种范围都排除已隐藏场景 | 只读 |
 | `run_sr` | 归一参数并提交 SR 作业，返回 `job_id` | 写作业文件、写 `sr_tasks`、起子进程 |
 | `sr_job_status` | 查询作业状态与退出码 | 只读 |
 | `fix_bad_lines` | 检测并修复坏线；给定 `output_path` 时写文件 | 可选写文件 |

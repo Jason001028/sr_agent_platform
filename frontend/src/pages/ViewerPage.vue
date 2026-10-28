@@ -18,6 +18,7 @@ import Toolbar from '../components/Toolbar.vue';
 import CompareBar from '../components/CompareBar.vue';
 import FileList from '../components/FileList.vue';
 import TifCanvas from '../components/TifCanvas.vue';
+import ViewerEmptyState from '../components/ViewerEmptyState.vue';
 import DrawPanel from '../components/DrawPanel.vue';
 import CompareOverlay from '../components/CompareOverlay.vue';
 import DecodeOverlay from '../components/DecodeOverlay.vue';
@@ -48,6 +49,7 @@ onUnmounted(() => viewer.hideModal());
     <div class="viewer-body">
       <FileList />
       <TifCanvas>
+        <ViewerEmptyState />
         <DrawPanel />
         <CompareOverlay />
         <DecodeOverlay />

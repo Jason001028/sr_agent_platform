@@ -2,8 +2,8 @@
 /**
  * ContextPanel.vue — viewer 右侧上下文侧舱（阶段6 v1.0 需求）
  * ------------------------------------------------------------------
- * 可折叠固定右栏（宽 400 = 左 FileList 的 400，默认收起、展开状态 localStorage 持久化；
- * 掩码绘制模式不自动收起）。顶部 [ROI / 工具]（默认）| [Agent] 两个 tab，子内容分别由
+ * 可折叠固定右栏（宽 400 = 左 FileList 的 400，默认展开、展开状态 localStorage 持久化；
+ * 掩码绘制模式不自动收起）。顶部 [ROI / 工具] | [Agent]（默认）两个 tab，子内容分别由
  * RoiToolsTab / AgentChatTab 承载（v-show 常驻，切换 tab 不打断队列 SSE / Agent 会话）。
  * DOM = 两个兄弟根节点（ctx-toggle + ctx-rail），与左侧 [sidebar, side-toggle] 镜像。
  *
@@ -11,7 +11,7 @@
  * 再恢复用户此前的手动状态。localStorage 的 key 与默认值一字未改（见
  * stores/viewer.ts 的 readCtxRailOpen），老用户体验不变。
  */
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import RoiToolsTab from './RoiToolsTab.vue';
 import AgentChatTab from './AgentChatTab.vue';
@@ -20,7 +20,14 @@ import { useChatStore } from '../stores/chat.js';
 
 const store = useViewerStore();
 const chat = useChatStore();
-const tab = ref<'roi' | 'agent'>('roi');
+function readTab(): 'roi' | 'agent' {
+  try { return localStorage.getItem('sr.viewer.ctxTab') === 'roi' ? 'roi' : 'agent'; }
+  catch { return 'agent'; }
+}
+const tab = ref<'roi' | 'agent'>(readTab());
+watch(tab, value => {
+  try { localStorage.setItem('sr.viewer.ctxTab', value); } catch { /* Optional persistence. */ }
+});
 
 /** store 里存的是「展开」，组件里用「收起」更自然（CSS 也是 .collapsed）。 */
 const collapsed = computed({

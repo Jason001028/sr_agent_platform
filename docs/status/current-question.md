@@ -14,6 +14,8 @@
 
 ---
 
+普通聊天 SSE 的执行所有权、断线行为、异常用量与诊断边界见 [sse_execution_ownership.md](sse_execution_ownership.md)。Goal 进程级验收尚有未关闭失败，详见该文档。
+
 Durable Goal Runtime 的执行、恢复和验收说明见 [durable_goal_runtime.md](durable_goal_runtime.md)。Goal 使用有限 Round、Lease Token Fencing 和服务端独立验收；SR 终态回灌后继续模型决策。真实模型与内网 SR/GPU 验收待核。
 
 Goal 澄清已接入：`request_clarification → WAITING_USER → 回答入库 → 同一 Goal 重新入队`，请求与回答均有事务及故障恢复。接口、23 项专项测试、浏览器闭环与全量回归剩余失败见 [goal_clarification.md](goal_clarification.md)；真实模型效果待验收。
@@ -428,7 +430,23 @@ store 里「用上面的『盘阵场景』栏打开」「请在『盘阵场景�
 - 场景库继续承担完整数据集的排序、筛选、批量浏览和对比；它不是左侧临时列表的删除回收站。
 - 场景库的刷新缓存必须在一键解析确认新场景后失效，避免沿用旧的 `searched=true` 快照。
 
-当前已完成前端缓存失效：一键解析完成后调用 `scenes.invalidateSearch()`。Agent 检索范围和 SR 提交校验仍需沿 workspace 快照契约接入后端工具执行上下文。
+当前已完成前端缓存失效：一键解析完成后调用 `scenes.invalidateSearch()`。
+
+2026-10-28 已把 workspace 范围接到后端工具执行上下文（此前只在文档里）：
+
+- 前端每条用户消息的 `viewer_snapshot` 多一个 `workspace`（`version` + 去重后的场景 id/名字，最多 200 条，本地拖入的图只计数不发送）。它**不投影给模型**（`project_messages` 剥掉），只是工具的执行范围。
+- `backend/services/viewer_context.py` 校验并冻结它，`bind_registry` 把冻结快照绑进 `search_scenes`；工具对每个 id 重新走 `paths.scene_id_to_abs`（白名单 + 存在性）与场景目录判据，快照本身不授予路径权限。
+- `search_scenes` 新增 `scope=workspace|library`（默认 workspace）。没有快照时（CLI / REST / 旧消息）回退到 library，`scope_reason=no_workspace_snapshot`；工作区为空（左侧没有带场景身份的影像）时同样回退，`scope_reason=empty_workspace`；用户明确要全库时 `scope_reason=user_requested_library`。
+- 仍未做：`run_sr` 侧的场景确认校验（提交前核对 lq_path 是否属于当前 workspace）留待下一轮，见上一条约束。
+
+### 服务端隐藏集合（2026-10-28）
+
+场景库「清除选定 / 全部清除」与卡片垃圾篓不再只写本机 `localStorage`：后端 SQLite 新增 `scene_hidden` 表，按**场景目录的规范键**（POSIX 分隔符、无尾斜杠，`scene_search.dir_key`）记隐藏项，同一景的 `<目录名>.tif` / `PAN.tif` / 产物一起隐藏。
+
+- `GET /api/scenes`、`GET /api/scene-library` 与 Agent 的 `search_scenes` 共用这份集合，都按 `exclude_dirs` 排除；隐藏发生在过滤与 `limit` 之前，`count` 是真实可见总数。
+- 新增端点：`POST /api/scenes/hide`（只隐藏，不删盘上任何文件）、`GET /api/scenes/hidden`、`POST /api/scenes/restore-hidden`（省略 `keys` = 全部恢复）。`clear-preview` 的汇总里新增 `hidden` / `hidden_total`。
+- 清除预览缓存的判据不变（只删 `srprev:` 规则签名的预览 JPG，永不删场景源）；隐藏只影响检索与展示，盘阵数据不动。
+- 桌面端视角：刷新页面、换浏览器、Agent 重新检索都不会把隐藏的景找回来；「恢复已隐藏 (N)」的 N 来自服务端的隐藏总数。
 
 ### 场景库场景级卡片（2026-10-23）
 
@@ -436,6 +454,8 @@ store 里「用上面的『盘阵场景』栏打开」「请在『盘阵场景�
 
 ### 场景库卡片操作（2026-10-24）
 
-场景库卡片底部提供三个轻量操作入口：设置图标用于编辑当前卡片的显示名称（本地保存，不改动盘阵源文件），垃圾篓图标用于从当前检索结果移除整组卡片（重新检索后恢复，不删除盘阵文件），列表图标用于展开完整元数据与关联阶段文件。每张卡片继续独立使用查看器左侧胶囊的三层阴影。
+场景库卡片底部提供三个轻量操作入口：设置图标用于编辑当前卡片的显示名称（本地保存，不改动盘阵源文件），垃圾篓图标用于把整组卡片从场景库隐藏（写服务端隐藏集合，见上一节；刷新与重新检索后保持隐藏，不删除盘阵文件），列表图标用于展开完整元数据与关联阶段文件。每张卡片继续独立使用查看器左侧胶囊的三层阴影。
 
 Viewer 消息快照、当前影像只读工具及评测边界见 [viewer-context-evaluation.md](viewer-context-evaluation.md)。
+
+请求级 Deadline 与 Thinking 配置实现及内网待验收边界见 [reasoning-budget-deadline.md](reasoning-budget-deadline.md)。

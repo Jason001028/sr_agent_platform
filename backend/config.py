@@ -121,7 +121,17 @@ class Config:
     llm_stream: bool = True
     llm_integrity_retries: int = 1
 
+    llm_deadline_margin: float = 0.1
+    llm_thinking_profile: str = "balanced"
+    llm_thinking_adapter: str = "none"
+
     def __post_init__(self):
+        if self.llm_timeout <= 0 or self.llm_deadline_margin < 0:
+            raise ValueError("invalid request timeout/margin")
+        if self.llm_thinking_profile not in {"fast", "balanced", "deep"}:
+            raise ValueError("invalid thinking profile")
+        if self.llm_thinking_adapter not in {"none", "reasoning_effort", "chat_template"}:
+            raise ValueError("invalid thinking adapter")
         if self.llm_integrity_retries < 0:
             raise ValueError("SR_LLM_INTEGRITY_RETRIES must be >=0")
 
@@ -144,6 +154,9 @@ def load_config() -> Config:
         llm_max_tokens=env_int("SR_LLM_MAX_TOKENS", 1024),
         llm_temperature=env_float("SR_LLM_TEMPERATURE", 0.2),
         llm_timeout=env_float("SR_LLM_TIMEOUT", 60),
+        llm_deadline_margin=env_float("SR_LLM_DEADLINE_MARGIN", 0.1),
+        llm_thinking_profile=os.getenv("SR_LLM_THINKING_PROFILE", "balanced").lower(),
+        llm_thinking_adapter=os.getenv("SR_LLM_THINKING_ADAPTER", "none").lower(),
         llm_integrity_retries=env_int("SR_LLM_INTEGRITY_RETRIES", 1),
         llm_mock=os.environ.get("SR_LLM_MOCK") == "1",
         llm_stream=os.environ.get("SR_LLM_STREAM", "1").strip().lower()

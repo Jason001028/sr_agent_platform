@@ -144,7 +144,15 @@ def _fake_dims(sid: str) -> tuple[int, int]:
 
 def _norm_dir(path) -> str:
     """目录路径归一成 POSIX、去尾斜杠 —— 跨来源比对用（提交侧存的是 POSIX 形态）。"""
-    return str(path or "").replace("\\", "/").rstrip("/")
+    return scene_search.dir_key(path or "")
+
+
+def _hidden_dirs(store) -> set[str]:
+    """服务端持久化的隐藏场景目录键集合（场景库「清除/隐藏」与检索共用）。"""
+    try:
+        return {e["scene_dir"] for e in store.list_hidden_scenes()}
+    except Exception:  # noqa: BLE001 — 读不到隐藏集合不该让整页检索失败
+        return set()
 
 
 def _raster_preview(abs_path: Path, root: Path | None) -> dict | None:
@@ -1050,6 +1058,10 @@ def create_app() -> FastAPI:
                 await t
             except asyncio.CancelledError:
                 pass
+        # Stop accepting requests first (ASGI server shutdown), then let ordinary
+        # Runs finish persistence before closing their Store. No SSE owns them.
+        if app.state.chat_workers:
+            await asyncio.gather(*(asyncio.shield(w) for w in tuple(app.state.chat_workers)))
         app.state.store.close()
 
     app = FastAPI(title="sr_agent_platform api", version="0.5.0",
@@ -1106,12 +1118,16 @@ def create_app() -> FastAPI:
         date_to: str | None = Query(default=None, alias="dateTo"),
         limit: int = Query(default=20, ge=1, le=500),
     ):
+        hidden = _hidden_dirs(app.state.store)
         out = scene_search.search_scenes(
             str(root) if root else None, query=query, satellite=satellite,
-            sensor=sensor, date_from=date_from, date_to=date_to, limit=limit)
+            sensor=sensor, date_from=date_from, date_to=date_to, limit=limit,
+            exclude_dirs=hidden)
         rows = [_scene_row(s, root) for s in out["results"]]
         return {"source": out["source"], "scanned": out["scanned"],
-                "count": out["count"], "results": rows}
+                "count": out["count"], "results": rows,
+                # 服务端隐藏总数（不是这份结果里的）：场景库「恢复已隐藏 (N)」用。
+                "hidden": len(hidden)}
 
     def _resolve_bare_tif(src: Path) -> dict:
         """裸 `.tif` 文件路径的 resolve 结果（与目录分支同形的响应）。
@@ -1670,6 +1686,7 @@ def create_app() -> FastAPI:
         # 目录 → 结论。同一个目录被多个 id 指到只处理一次（`_clear_one_scene` 会
         # 真删文件，重复跑第二遍只会报「无需清除」，还会把明细里的跳过项重复一遍）。
         outcomes: dict[str, dict] = {}
+        hidden_entries: list[dict] = []
         for sid, abs_path in resolved:
             dirs = _clear_dirs_for(abs_path, root)
             key = os.path.normcase(str(dirs[0]))
@@ -1680,6 +1697,14 @@ def create_app() -> FastAPI:
                            "dir": dirs[0].as_posix(),
                            "removed": o["removed"], "skipped": o["skipped"],
                            "failed": o["failed"], "marked": o["marked"]}
+            # 「清除」= 清预览缓存 + 从场景库隐藏（服务端持久化）。与前端
+            # rowsAfterClear 同判据：cleared / nothing 算成功摘行，skipped /
+            # failed 留着让用户看见原因，不隐藏。
+            if o["status"] in ("cleared", "nothing"):
+                hidden_entries.append({"scene_dir": scene_search.dir_key(dirs[0]),
+                                       "name": dirs[0].name})
+        if hidden_entries:
+            app.state.store.hide_scenes(hidden_entries)
 
         results = [per_id[sid] for sid in order]
         summary = {"cleared": 0, "nothing": 0, "skipped": 0, "failed": 0}
@@ -1690,7 +1715,63 @@ def create_app() -> FastAPI:
         summary["dirs"] = len(outcomes)
         summary["files"] = sum(len(o["removed"]) for o in outcomes.values())
         summary["marked"] = sum(o["marked"] for o in outcomes.values())
+        # 这次新隐藏的场景目录数 + 服务端当前隐藏总数（恢复入口的计数用）。
+        summary["hidden"] = len({e["scene_dir"] for e in hidden_entries})
+        summary["hidden_total"] = len(_hidden_dirs(app.state.store))
         return {"results": results, "summary": summary}
+
+    @app.post("/api/scenes/hide")
+    async def hide_scenes(request: Request):
+        """从场景库隐藏若干场景（卡片垃圾篓；不删盘上任何文件）。
+
+        与 clear-preview 的区别只有一处：这里**不碰预览缓存**，只写服务端隐藏集合。
+        隐藏后 `/api/scenes`、`/api/scene-library` 与 Agent 的 `search_scenes` 都不再
+        返回这些场景；`POST /api/scenes/restore-hidden` 可恢复。
+        """
+        body = await _json_body(request)
+        raw = body.get("ids")
+        if not isinstance(raw, list) or not raw:
+            raise HTTPException(status_code=400, detail="ids 须为非空数组")
+        if len(raw) > _CLEAR_MAX_IDS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"一次最多隐藏 {_CLEAR_MAX_IDS} 个场景（收到 {len(raw)}）")
+        entries, skipped, seen = [], [], set()
+        for sid in raw:
+            if not isinstance(sid, str) or not sid or sid in seen:
+                continue
+            seen.add(sid)
+            try:
+                abs_path = paths.scene_id_to_abs(sid, root)
+            except PathDeniedError as e:
+                skipped.append({"id": sid, "reason": f"场景不可访问：{e}"})
+                continue
+            entries.append({"scene_dir": scene_search.dir_key(abs_path.parent),
+                            "name": abs_path.parent.name})
+        hidden = app.state.store.hide_scenes(entries)
+        return {"hidden": hidden, "hidden_total": len(_hidden_dirs(app.state.store)),
+                "skipped": skipped}
+
+    @app.get("/api/scenes/hidden")
+    def list_hidden_scenes():
+        """当前服务端隐藏集合（场景库「恢复已隐藏」与排查用）。"""
+        items = app.state.store.list_hidden_scenes()
+        return {"count": len(items), "items": items}
+
+    @app.post("/api/scenes/restore-hidden")
+    async def restore_hidden_scenes(request: Request):
+        """恢复隐藏场景；body 省略 `keys` 或传空数组 = 全部恢复。
+
+        `keys` 就是隐藏集合里的 `scene_dir` 键。恢复只删记录，不碰盘上文件。
+        """
+        body = await _json_body(request)
+        keys = body.get("keys")
+        if keys is not None and not isinstance(keys, list):
+            raise HTTPException(status_code=400, detail="keys 须为数组")
+        wanted = [k for k in (keys or []) if isinstance(k, str) and k] or None
+        restored = app.state.store.restore_hidden_scenes(wanted)
+        return {"restored": restored,
+                "hidden_total": len(_hidden_dirs(app.state.store))}
 
     @app.get("/api/scenes/{scene_id}/siblings")
     def scene_siblings(scene_id: str, request: Request,

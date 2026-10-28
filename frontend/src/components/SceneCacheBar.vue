@@ -34,8 +34,9 @@ const word = ref('');
 
 /** fake 行（未配 SR_SCENES_ROOT 的占位）在盘上没有文件，清不动也不该发过去。 */
 const fakeCount = computed(() => scenes.rows.filter((r) => r.fake).length);
-/** 命中数里没进列表的那部分：limit 截断 / 受筛选影响。它清不到，得说出来。 */
-const hiddenCount = computed(() =>
+/** 命中数里没进列表的那部分：limit 截断 / 受筛选影响。它清不到，得说出来。
+ *  与 store 的 `hiddenCount`（服务端隐藏集合大小）不是一回事，别混。 */
+const offListCount = computed(() =>
   Math.max(0, scenes.count - scenes.rows.length));
 
 const busy = computed(() =>
@@ -115,7 +116,7 @@ const failedCount = computed(() =>
           <span class="scb-ask-text">
             清除选定的 <strong>{{ scenes.selectedCount }}</strong> 项？
             删掉的是盘阵上的预览 JPG（<strong>不进回收站</strong>），
-            成功项会从本机场景库隐藏，刷新及重新检索后保持隐藏，可通过“恢复已隐藏”找回。
+            成功项同时在服务端隐藏：场景库与 Agent 检索都不再返回，可通过“恢复已隐藏”找回。
           </span>
           <button type="button" class="btn mini danger" :disabled="busy"
                   @click="confirm">确认清除</button>
@@ -125,8 +126,9 @@ const failedCount = computed(() =>
           <span class="scb-ask-text">
             将清除<strong>当前列表里的 {{ scenes.selectableRows.length }} 项</strong>
             （受筛选影响，不是盘阵上所有场景）。删掉的是盘阵上的预览 JPG，
-            <strong>不进回收站</strong>；成功项会从本机场景库隐藏，可通过“恢复已隐藏”找回。<template
-              v-if="hiddenCount">另有 {{ hiddenCount }} 项命中不在这份列表里（列表最多显示
+            <strong>不进回收站</strong>；成功项同时在服务端隐藏（场景库与 Agent 检索都不再
+            返回），可通过“恢复已隐藏”找回。<template
+              v-if="offListCount">另有 {{ offListCount }} 项命中不在这份列表里（列表最多显示
               {{ scenes.rows.length }} 条），这次清不到，要一并清请缩小筛选后再来。</template>
           </span>
           <label class="scb-word">
