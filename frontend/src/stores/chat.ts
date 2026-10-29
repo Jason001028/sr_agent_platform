@@ -57,6 +57,7 @@ export interface ChatMsg {
 
 /** 输入区里待发的截图。`dataUrl` 同时当预览源和上传体，发送后即从托盘移除。 */
 export interface PendingImage {
+  spatial?: import('../lib/spatial').VisualInput;
   id: number;
   dataUrl: string;
   name: string;
@@ -271,6 +272,8 @@ export const useChatStore = defineStore('chat', () => {
   const sessionId = ref<string | null>(null);
   const messages = ref<ChatMsg[]>([]);
   const sending = ref(false);
+  const thinkingStatus = ref('');
+  const thinkingProfile = ref<'fast' | 'low' | 'balanced' | 'deep'>('balanced');
   const agentStatus = ref<'idle' | 'thinking' | 'responding'>('idle');
   /** 流式增量批次号：token/reasoning 批量合并后 +1，供滚动跟随用。 */
   const streamTick = ref(0);
@@ -303,7 +306,7 @@ export const useChatStore = defineStore('chat', () => {
     if (pendingImages.value.length >= SHOT_MAX_COUNT) return false;
     pendingImages.value = [
       ...pendingImages.value,
-      { id: ++pendingSeq, dataUrl: shot.dataUrl, name: shot.name },
+      { id: ++pendingSeq, dataUrl: shot.dataUrl, name: shot.name, spatial: shot.spatial },
     ];
     return true;
   }
@@ -402,13 +405,15 @@ export const useChatStore = defineStore('chat', () => {
     if (sending.value) { error.value = '上一回合仍在进行，请稍候'; return; }
     error.value = '';
     sending.value = true;
+    const requestThinkingProfile = thinkingProfile.value;
+    thinkingStatus.value = '';
     if (agentStatusTimer !== null) { clearTimeout(agentStatusTimer); agentStatusTimer = null; }
     agentStatus.value = 'thinking';
     // 发送即取走托盘：失败也不回填，避免重试时同一张图发两遍
     const pending = pendingImages.value;
     const viewerContext = captureViewerContext(pending.length);
     pendingImages.value = [];
-    const upload: ChatUploadImage[] = pending.map((p) => ({ data: p.dataUrl, name: p.name }));
+    const upload: ChatUploadImage[] = pending.map((p) => ({ data: p.dataUrl, name: p.name, spatial: p.spatial }));
     const optimistic: ChatImage[] = pending.map((p) => ({ url: p.dataUrl, name: p.name }));
     // 乐观上屏用户消息；SSE 事件逐帧归并在其后
     messages.value = [...messages.value, {
@@ -427,6 +432,7 @@ export const useChatStore = defineStore('chat', () => {
           sessions.value = sortSessions(sessions.value.map(s => s.session_id === ev.session.session_id
             && s.metadata?.title_source !== 'manual' ? ev.session : s));
         }
+        if (ev.type === 'thinking_status') thinkingStatus.value = ev.status === 'unavailable' ? '推理控制不可用（未启用或已降级）' : '参数已发送，模型效果待验收';
         if (ev.type === 'usage') usage.value = ev.aggregate;
         if (ev.type === 'turn_done' && ev.usage) usage.value = ev.usage;
         if (ev.type === 'turn_done' && ev.run_id) {
@@ -462,7 +468,7 @@ export const useChatStore = defineStore('chat', () => {
         // 开（默认）就不带 stream 字段，请求体保持老形状；只有关掉时才显式发 false。
         await apiChatSend(cfg, sid, text, onEvent,
                           upload.length ? upload : undefined,
-                          isStreamingEnabled() ? undefined : false, viewerContext);
+                          isStreamingEnabled() ? undefined : false, viewerContext, requestThinkingProfile);
       } finally {
         flush();                          // 失败时也别丢掉已到的半截文本
       }
@@ -587,7 +593,7 @@ export const useChatStore = defineStore('chat', () => {
 
   return {
     sessions, sessionId, messages, sending, agentStatus, streamTick, error, loading,
-    usage, lastRunId, feedbackRating,
+    usage, lastRunId, feedbackRating, thinkingProfile, thinkingStatus,
     pendingImages, addPendingImage, removePendingImage, clearPendingImages,
     hasSession, init, refreshSessions, loadHistory, newSession, selectSession, send,
     submitFeedback, deleteSession, deleteSessions, pinSession, pinSessions, renameSession,

@@ -37,7 +37,7 @@ export function useChatShot() {
     try {
       const shot = await viewer.captureForChat(recId);
       // captureForChat 已把具体原因写进 viewer 的 toast；这里给的是同一件事的短句
-      if (!shot) return { ok: false, message: `「${name}」截不出画面，换一张试试` };
+      if (!shot) return { ok: false, message: `「${name}」截图未完成，请查看画布中的具体原因后重试` };
       if (!chat.addPendingImage(shot)) return full();
       return { ok: true, message: '' };
     } finally {

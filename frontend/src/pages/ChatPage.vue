@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import ThinkingSlider from "../components/ThinkingSlider.vue";
+import AgentAnnotationReference from '../components/AgentAnnotationReference.vue';
 /**
  * ChatPage.vue — Agent 聊天（阶段5，api-contract.md §3.2）
  * 布局：左侧会话列表（新建/切换），右侧消息 timeline + 发送框。
@@ -302,6 +304,7 @@ onMounted(() => {
         <div v-for="(m, i) in chat.messages" :key="msgKey(m, i)" class="cp-row" :class="m.role"
              v-show="m.toolName !== 'request_clarification' && !(m.role === 'assistant' && !m.content && m.toolCalls?.length === 1 && m.toolCalls[0].name === 'request_clarification')">
           <!-- user：截图在上，原话在下；纯图消息不渲染空段落 -->
+          <AgentAnnotationReference v-if="m.toolName==='present_spatial_annotations'" :data="m.data" />
           <template v-if="m.role === 'user'">
             <div class="bubble user" :class="{ 'has-shots': Boolean(m.images?.length) }">
               <ChatBubbleImages v-if="m.images?.length" :images="m.images" />
@@ -325,7 +328,7 @@ onMounted(() => {
                 </div>
               </div>
               <div v-else-if="m.toolCalls && m.toolCalls.length" class="bubble assistant tools">
-                <div v-for="tc in m.toolCalls" :key="tc.id || tc.name" class="tool-card">
+                <div v-for="tc in m.toolCalls?.filter(t=>t.name!=='present_spatial_annotations')" :key="tc.id || tc.name" class="tool-card">
                   <div class="tool-card-head"><AppIcon :name="toolIconName(tc.name)" :size="17" :label="tc.name" /><strong>{{ tc.name === 'search_scenes' ? '检索目标场景' : tc.name }}</strong><code v-if="tc.name === 'search_scenes'">{{ tc.name }}</code><span v-if="toolResultsAt(i, tc.name).length > 1" class="tool-state">共尝试 {{ toolResultsAt(i, tc.name).length }} 次</span><span v-else class="tool-state">{{ toolResultAt(i, tc.name)?.ok === true ? '✓ 完成' : toolResultAt(i, tc.name)?.ok === false ? '× 失败' : chat.sending ? '⏳ 调用中' : '结果未确认' }}</span></div>
                   <details class="tool-query"><summary>查询条件</summary><pre>{{ argsText(tc.args) }}</pre></details>
                   <div v-if="toolResultsAt(i, tc.name).length" class="tool-summary">最终结果：{{ toolResultsAt(i, tc.name).at(-1)?.detail }}</div>
@@ -342,7 +345,7 @@ onMounted(() => {
 
           <!-- tool 结果行 -->
           <template v-else>
-            <div v-if="!(chat.messages[i - 1]?.role === 'assistant' && chat.messages[i - 1]?.toolCalls?.some(t => t.name === m.toolName))" class="tool-trace" :class="{ fail: m.ok === false }"><AppIcon :name="toolIconName(m.toolName ?? '')" :size="16" /><span class="tool-name">{{ m.toolName ?? '工具' }}</span><span v-if="m.detail" class="tool-detail">{{ m.detail }}</span></div>
+            <div v-if="m.toolName!=='present_spatial_annotations' && !(chat.messages[i - 1]?.role === 'assistant' && chat.messages[i - 1]?.toolCalls?.some(t => t.name === m.toolName))" class="tool-trace" :class="{ fail: m.ok === false }"><AppIcon :name="toolIconName(m.toolName ?? '')" :size="16" /><span class="tool-name">{{ m.toolName ?? '工具' }}</span><span v-if="m.detail" class="tool-detail">{{ m.detail }}</span></div>
           </template>
         </div>
 
@@ -364,6 +367,8 @@ onMounted(() => {
       </div>
 
       <div class="cp-foot">
+
+        <div class="thinking-tools"><ThinkingSlider v-model="chat.thinkingProfile" :status="chat.thinkingStatus" /></div>
         <ChatAttachTray :items="chat.pendingImages" @remove="chat.removePendingImage" />
         <div class="cp-inputbar">
           <button type="button" class="cp-shot" data-e2e="chat-shot-open"
@@ -389,6 +394,7 @@ onMounted(() => {
 </template>
 
 <style scoped>
+.thinking-tools { display: flex; padding: 6px 8px 0; }
 .chat-page {
   height: calc(100vh - var(--topbar-h));
   display: flex;

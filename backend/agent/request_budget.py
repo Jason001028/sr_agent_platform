@@ -21,9 +21,12 @@ def request_policy(cfg, deadline=None, now=None):
     params = {}
     # Operator must verify this protocol on the deployed endpoint first.
     if cfg.llm_thinking_adapter == "reasoning_effort":
-        params["reasoning_effort"] = {"fast": "low", "balanced": "medium", "deep": "high"}[profile]
+        params["reasoning_effort"] = {"fast": "low", "low": "low", "balanced": "medium", "deep": "high"}[profile]
     elif cfg.llm_thinking_adapter == "chat_template":
-        params["extra_body"] = {"chat_template_kwargs": {"enable_thinking": profile != "fast"}}
+        template = {"enable_thinking": profile != "fast"}
+        if profile != "fast":
+            template["reasoning_effort"] = {"low": "low", "balanced": "medium", "deep": "xhigh"}[profile]
+        params["extra_body"] = {"chat_template_kwargs": template}
     return {"thinking_profile_requested": profile,
             "thinking_profile": profile if params else "unavailable",
             "thinking_parameters": params, "max_tokens": cfg.llm_max_tokens,

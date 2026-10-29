@@ -27,3 +27,10 @@ UTF-8 Chinese source sent through a shell pipe may not retain literal matching t
 ## SSE closure validation
 
 The regression command initially referenced nonexistent test_tool_result_budget.py; the module is test_tool_result_formatter.py. Restricted Windows process tests timed out in taskkill cleanup. A subprocess-permitted retry cleaned up successfully but retained startup and completion failures. Use UTF-8-safe patch tools for Chinese source text; the Windows shell Python pipe replaced non-ASCII text.
+
+2026-10-29: npm via nvm failed sandbox realpath C:/Users/lenovo (EPERM). Try direct node entry scripts or approved test execution.
+
+
+## 2026-10-29 P1 validation
+- npm launcher hit EPERM resolving C:/Users/lenovo; direct local Node entry with --preserve-symlinks --preserve-symlinks-main succeeded.
+- Goal timeout test (0.25 second slice) failed before model dispatch, including isolated rerun; do not claim full Goal regression passes.

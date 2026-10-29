@@ -11,7 +11,7 @@
  * 再恢复用户此前的手动状态。localStorage 的 key 与默认值一字未改（见
  * stores/viewer.ts 的 readCtxRailOpen），老用户体验不变。
  */
-import { computed, ref, watch } from 'vue';
+import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import RoiToolsTab from './RoiToolsTab.vue';
 import AgentChatTab from './AgentChatTab.vue';
@@ -25,6 +25,9 @@ function readTab(): 'roi' | 'agent' {
   catch { return 'agent'; }
 }
 const tab = ref<'roi' | 'agent'>(readTab());
+function openAnnotationConversation(){tab.value='agent';}
+onMounted(()=>window.addEventListener('annotation-conversation',openAnnotationConversation));
+onBeforeUnmount(()=>window.removeEventListener('annotation-conversation',openAnnotationConversation));
 watch(tab, value => {
   try { localStorage.setItem('sr.viewer.ctxTab', value); } catch { /* Optional persistence. */ }
 });

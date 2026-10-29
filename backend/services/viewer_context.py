@@ -10,6 +10,11 @@ workspace 是发送时的左侧工作区候选集，只用于限定 search_scene
 查询本图信息使用 get_current_image_info，不用 search_scenes；后者零匹配不代表当前影像不存在。
 元数据可在没有截图时查询；地物、质量、条带等视觉判断必须依据真实附件像素。pixels_loaded 不表示模型看到了像素。
 没有附件时请说明视觉证据不足；历史附件也不能自动归属于本轮影像。缺失属性如实报告未知，不猜测。
+空间坐标必须区分：经纬度/投影坐标需要地理参考；源图像素坐标与附件像素坐标不需要地理参考。
+visual_inputs 是本条消息附件的已校验映射。用户要求标注/指出位置/在影像上显示区域时，若有实际视觉定位依据，
+调用 present_spatial_annotations，使用该附件 input_ref 和附件像素坐标；由工具映射为源图像素并标为待核实。
+归一化坐标仅能针对明确附件换算为附件像素。禁止因缺少经纬度就拒绝像素批注；也禁止把看到了图像当成坐标准确的证明。
+没有可靠位置时正常文字回答，说明未获得可核实的位置，不编造坐标；工具不可用时如实说明本轮空间输出不可用。
 '''
 
 #: 工作区快照：条目上限与字节上限。前者对齐场景库批量入口（200 张/批），后者
@@ -118,12 +123,13 @@ def bind_registry(registry, snapshot, *, store=None):
     """
     frozen = deepcopy(snapshot)
     workspace = (frozen or {}).get('workspace')
-    hidden_dirs = None
+    hidden_provider = None
     if store is not None:
-        try:
-            hidden_dirs = {e['scene_dir'] for e in store.list_hidden_scenes()}
-        except Exception:  # noqa: BLE001 — 隐藏集合读不到不该让检索失效
-            hidden_dirs = set()
+        # 工作区随消息冻结（它是「这条消息看到的」），隐藏集合不冻结：用户可能在
+        # 对话进行中从场景库隐藏/恢复，检索必须按服务端**当前**集合过滤。读失败
+        # 由工具报错，而不是当成「没有隐藏」放行。
+        def hidden_provider():
+            return {e['scene_dir'] for e in store.list_hidden_scenes()}
 
     def current_info():
         if not frozen or not frozen.get('current'):
@@ -142,11 +148,15 @@ def bind_registry(registry, snapshot, *, store=None):
             # 换成内置那份会让它们静默失效（调用记账、假数据全落空）。
             if getattr(item.run, '__module__', None) == search_tool.__name__:
                 result.register(search_tool.bound_tool(
-                    workspace=workspace, hidden_dirs=hidden_dirs))
+                    workspace=workspace, hidden_provider=hidden_provider))
             else:
                 result.register(item)
             continue
         result.register(item)
+    import os
+    if (frozen or {}).get('visual_inputs') and os.environ.get('SR_SPATIAL_GROUNDING', '1').strip().lower() not in ('0', 'false', 'off', 'no'):
+        from backend.services.spatial_annotations import bound_tool
+        result.register(bound_tool(frozen['visual_inputs']))
     result.register(Tool('get_current_image_info',
         '零参数只读查询本条消息冻结的 Viewer current 影像快照，不读取实时 UI、全部 selected_ids 或所有 displayed 显示格。'
         '返回 image、captured_at、source=message_viewer_snapshot 和 attachment_count；只报告快照已有属性，缺失属性未知。'

@@ -1,4 +1,5 @@
 """Cancellable network boundary; synchronous Loop callers already run off the API loop."""
+from dataclasses import replace
 import asyncio
 import time
 import ssl
@@ -16,6 +17,12 @@ async def request(cfg, wire, tools, *, on_delta=None, request_config=None,
                   deadline=None, fallback_reserve=None, consume, parse, diagnostics=None):
     diagnostics = diagnostics if diagnostics is not None else {}
     diagnostics.update(request_attempts=0, capability_rejections=[])
+    has_images = any(isinstance(m.get('content'), list) and any(
+        isinstance(b, dict) and b.get('type') == 'image_url' for b in m['content']) for m in wire)
+    # Ordinary visual chat may spend much longer on prefill. Never extend a Goal slice.
+    if has_images and deadline is None:
+        cfg = replace(cfg, llm_timeout=max(cfg.llm_timeout, cfg.llm_vision_timeout))
+    diagnostics['model_timeout_seconds'] = cfg.llm_timeout
     started = time.monotonic()
     # Chat has a per-call wall-clock limit too. Durable uses the earlier limit.
     end = min(started + cfg.llm_timeout,
@@ -52,7 +59,7 @@ async def request(cfg, wire, tools, *, on_delta=None, request_config=None,
                         raise
                     text = str(exc)
                     rejected = next((field for field in ('reasoning_effort', 'chat_template_kwargs', 'stream_options')
-                                     if field in text and (field in params or field in params.get('extra_body', {}))), None)
+                                     if field in text and (field in params or field in params.get('extra_body', {}) or field in params.get('extra_body', {}).get('chat_template_kwargs', {}))), None)
                     if rejected is None:
                         raise
                     if not any(word in text.lower() for word in ("unsupported", "unknown", "unrecognized", "not supported", "unexpected", "extra_forbidden")):

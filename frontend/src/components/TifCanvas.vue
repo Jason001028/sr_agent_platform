@@ -10,6 +10,7 @@
  * dblclick（drawMode→closePolygon，否则 fit）、contextmenu（drawMode→closePolygon）、
  * window keydown（Esc/Enter）、window dragover/drop（文件拖入；.txt 走待修复清单）。
  */
+import AgentAnnotationOverlay from './AgentAnnotationOverlay.vue';
 import { ref, onMounted, onBeforeUnmount, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import type { Pane } from '../stores/viewer';
@@ -576,6 +577,7 @@ onBeforeUnmount(() => {
       @mousedown="onMouseDown"
     ></canvas>
     <canvas ref="drawCanvasRef" class="draw-canvas"></canvas>
+    <AgentAnnotationOverlay @wheel="onWheel" />
     <slot></slot>
   </div>
 </template>

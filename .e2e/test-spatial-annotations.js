@@ -1,0 +1,138 @@
+const assert=require('assert/strict'),http=require('http'),fs=require('fs'),path=require('path');
+const {launchBrowser}=require('./launchBrowser');
+(async()=>{
+ const dist=path.resolve(__dirname,'../frontend/dist');
+ const server=http.createServer((req,res)=>{
+  let u=new URL(req.url,'http://local').pathname;
+  if(u==='/api/scenes/fixture/spatial-identity'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({image_key:'scene-v1:'+'a'.repeat(64)+':'+'b'.repeat(64)}));return;}
+  if(u.startsWith('/api/')){res.writeHead(404,{'Content-Type':'application/json'});res.end('{}');return;}
+  let f=path.join(dist,u==='/'?'index.html':u);if(!fs.existsSync(f)||fs.statSync(f).isDirectory())f=path.join(dist,'index.html');
+  res.setHeader('Content-Type',({'.js':'application/javascript','.css':'text/css','.html':'text/html','.svg':'image/svg+xml'})[path.extname(f)]||'application/octet-stream');res.end(fs.readFileSync(f));
+ });
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));let browser;
+ try{
+  browser=await launchBrowser();const page=await browser.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.emulateMediaFeatures([{name:'prefers-reduced-motion',value:'reduce'}]);
+  await page.evaluateOnNewDocument(()=>Object.defineProperty(crypto,'randomUUID',{value:undefined,configurable:true}));
+  await page.setViewport({width:1366,height:900,deviceScaleFactor:2});await page.goto(`http://127.0.0.1:${server.address().port}/viewer`);
+  await page.waitForSelector('.stage');
+  await page.evaluate(async()=>{
+   const cv=document.createElement('canvas');cv.width=800;cv.height=600;cv.getContext('2d').fillRect(0,0,800,600);
+   const blob=await new Promise(r=>cv.toBlob(r,'image/jpeg'));const dt=new DataTransfer();dt.items.add(new File([blob],'JXGF07A03_PMS_20261026230251_200548890_105_0001_001_L1_PAN_preview.jpg',{type:'image/jpeg'}));
+   document.querySelector('.stage').dispatchEvent(new DragEvent('drop',{dataTransfer:dt,bubbles:true,cancelable:true}));
+  });
+  await page.waitForFunction(()=>{const p=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia;return p._s.get('viewer').activeRec?.thumb});
+  assert.equal(await page.$$('.annotation-marker').then(a=>a.length),0,'No invented annotations after drop');
+  await page.evaluate(()=>{const p=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia;p._s.get('viewer').hideModal();p._s.get('annotations').mock();p._s.get('annotations').demo[2].title='Mock suspected striping artifact';});
+  await page.evaluate(()=>{const p=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia,a=p._s.get('annotations');p._s.get('chat').messages=[{seq:1,role:'tool',toolName:'present_spatial_annotations',ok:true,data:{spatial_annotations:[...a.demo]}}];a.demo=[];});
+  await page.click('[data-e2e=file-shot-add]');
+  await page.waitForFunction(()=>document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('chat').pendingImages.length===1);
+  assert.equal(await page.evaluate(()=>typeof crypto.randomUUID),'undefined');
+  assert.ok(await page.evaluate(()=>document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('chat').pendingImages[0].spatial.input_ref));
+  await page.evaluate(()=>{window.originalRandomValues=crypto.getRandomValues;crypto.getRandomValues=()=>{throw Error('Metadata failure fixture')};});
+  await page.click('[data-e2e=file-shot-add]');
+  await page.waitForFunction(()=>document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('chat').pendingImages.length===2);
+  await page.evaluate(()=>{crypto.getRandomValues=window.originalRandomValues;});
+  assert.equal(await page.evaluate(()=>document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('chat').pendingImages[1].spatial),undefined);
+  await page.waitForSelector('.annotation-marker');assert.equal((await page.$$('.annotation-marker')).length,3);
+  assert.equal((await page.$$('.annotation-geometry polygon, .annotation-geometry .annotation-bbox')).length,0,'Only anchors visible by default');
+  assert.equal(await page.$eval('[data-e2e=ft-annotations]',e=>e.getAttribute('aria-pressed')),'true');
+  await page.click('.spatial-references button:nth-of-type(2)');
+  await page.waitForSelector('.annotation-bbox');
+  const originalState=await page.evaluate(()=>{const v=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('viewer');return JSON.stringify({rois:v.activeRec.maskRois,panes:v.panes.map(p=>({id:p.rec?.id,view:p.view,rect:p.rect}))});});
+  await page.click('[data-e2e=ft-annotations]');
+  await page.waitForFunction(()=>!document.querySelector('.annotation-overlay'));
+  assert.equal(await page.$eval('[data-e2e=ft-annotations]',e=>e.getAttribute('aria-pressed')),'false');
+  assert.ok(await page.$('[data-e2e=ft-annotations] img[src$="eye-closed.svg"]'));
+  await page.focus('[data-e2e=ft-annotations]');await page.keyboard.press('Enter');
+  await page.waitForFunction(()=>document.querySelectorAll('.annotation-marker').length===3);
+  assert.equal((await page.$$('.annotation-region,.annotation-popover')).length,0,'Re-enable restores anchors only');
+  assert.equal(await page.evaluate(()=>{const v=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('viewer');return JSON.stringify({rois:v.activeRec.maskRois,panes:v.panes.map(p=>({id:p.rec?.id,view:p.view,rect:p.rect}))});}),originalState);
+  await page.emulateMediaFeatures([{name:'prefers-reduced-motion',value:'no-preference'}]);
+  await page.click('.spatial-references button:nth-of-type(2)');
+  await page.waitForSelector('.annotation-bbox');
+  const animation=await page.$eval('.annotation-bbox',async e=>{
+   const a=e.getAnimations().find(a=>a.animationName?.startsWith('annotation-bbox-close'));await a.ready;a.pause();
+   const samples=[];for(const time of [0,225,450]){a.currentTime=time;samples.push(parseFloat(getComputedStyle(e).strokeDashoffset));}
+   return {duration:a.effect.getTiming().duration,samples,d:e.getAttribute('d')};
+  });
+  assert.equal(animation.duration,450);assert.deepEqual(animation.samples,[1,.5,0]);
+  assert.ok(/^M .* L .* L .* L .* Z$/.test(animation.d));
+  await page.click('.spatial-references button:nth-of-type(3)');
+  assert.ok((await page.$$('.annotation-region')).length<=1,'Outgoing and incoming never overlap');
+  await page.waitForFunction(()=>!document.querySelector('.annotation-bbox')&&document.querySelectorAll('.annotation-geometry polygon').length===1);
+  await page.click('.annotation-close');
+  await page.emulateMediaFeatures([{name:'prefers-reduced-motion',value:'reduce'}]);
+  await page.hover('.spatial-references button:nth-of-type(3)');
+  await page.waitForSelector('.annotation-marker.hovered');
+  assert.equal((await page.$$('.annotation-geometry polygon, .annotation-geometry .annotation-bbox')).length,0,'Hover never opens geometry');
+  assert.equal(await page.$eval('.annotation-marker:nth-of-type(3)',e=>getComputedStyle(e).getPropertyValue('--annotation-color').trim()),'#B65F55');
+  await page.click('.spatial-references button:nth-of-type(3)');
+  assert.equal((await page.$$('.annotation-geometry polygon, .annotation-geometry .annotation-bbox')).length,1,'Only focused region visible');
+  assert.equal(await page.$eval('.annotation-geometry polygon, .annotation-geometry .annotation-bbox',e=>getComputedStyle(e).stroke),'rgb(182, 95, 85)');
+  await page.click('.annotation-close');
+  assert.equal((await page.$$('.annotation-geometry polygon, .annotation-geometry .annotation-bbox')).length,0,'Closing restores anchors only');
+  await page.click('.annotation-marker');await page.waitForSelector('.annotation-popover',{timeout:5000});assert.equal((await page.$$('.annotation-popover')).length,1);
+  await page.click('.annotation-marker:nth-of-type(2)');assert.equal((await page.$$('.annotation-popover')).length,1);
+  await page.keyboard.press('Escape');assert.equal((await page.$$('.annotation-popover')).length,0);
+  await page.evaluate(()=>document.querySelector('.annotation-manager details').open=true);
+  await page.click('.at-scroll .spatial-references button');assert.equal((await page.$$('.annotation-marker.selected')).length,1);
+  const before=await page.$eval('.annotation-marker',e=>e.getBoundingClientRect().x);
+  await page.evaluate(()=>document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('viewer').onPan(25,0));
+  await page.waitForFunction(x=>Math.abs(document.querySelector('.annotation-marker').getBoundingClientRect().x-x-25)<1,{},before);
+  await page.setViewport({width:1600,height:900,deviceScaleFactor:1});
+  await page.evaluate(()=>{const p=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia;const v=p._s.get('viewer');v.setCompareMode('split');v.paneB=v.paneA;v.resetSplit();});
+  await page.waitForFunction(()=>document.querySelectorAll('.annotation-pane').length===2);
+  await page.waitForFunction(()=>document.querySelectorAll('.annotation-marker').length===6);
+  assert.equal((await page.$$('.annotation-marker')).length,6,'Both panes display the same image annotations');
+  await page.evaluate(()=>{const v=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('viewer');v.panes[0].view.ox+=7;v.panes[1].view.scale*=1.25;v.panes[1].view.oy-=12;});
+  await page.waitForFunction(()=>{
+   const v=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('viewer');
+   return [...document.querySelectorAll('.annotation-pane')].every((el,i)=>{const r=el.getBoundingClientRect(),m=el.querySelector('.annotation-marker').getBoundingClientRect(),p=v.panes[i];return Math.abs(m.x+18-r.x-(p.view.ox+p.rec.thumb.width*.25*p.view.scale))<.5&&Math.abs(m.y+18-r.y-(p.view.oy+p.rec.thumb.height*.3*p.view.scale))<.5;});
+  });
+  await page.click('.annotation-pane:nth-child(2) .annotation-marker');
+  assert.equal((await page.$$('.annotation-popover')).length,1,'One popover for the selected pane');
+  assert.equal((await page.$$('.annotation-pane:nth-child(2) .annotation-popover')).length,1);
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(()=>{const v=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('viewer');return v.canvasSize.w===document.querySelector('.stage').clientWidth&&!document.getAnimations().some(a=>a.transitionProperty==='width');});
+  const marker=await page.$('.annotation-pane:nth-child(2) .annotation-marker'),box=await marker.boundingBox();
+  const oldScale=await page.evaluate(()=>document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('viewer').panes[1].view.scale);
+  await page.mouse.move(box.x+18,box.y+18);await page.mouse.wheel({deltaY:-100});
+  await page.waitForFunction(old=>document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('viewer').panes[1].view.scale>old,{},oldScale);
+  await page.evaluate(()=>document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('viewer').drawMode=true);
+  await page.waitForFunction(()=>!document.querySelector('.annotation-overlay'));
+  await page.keyboard.press('Escape');
+  await page.evaluate(()=>document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('viewer').drawMode=false);
+
+  await page.evaluate(()=>{const p=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia;p._s.get('viewer').setCompareMode('off');});
+  await page.waitForFunction(()=>{const e=document.querySelector('.image-pill');return e && e.scrollWidth<=e.clientWidth;});
+  const pill=await page.$eval('.image-pill',e=>{const r=e.getBoundingClientRect();return {w:r.width,body:e.closest('.ctx-pane')?.getBoundingClientRect().width};});
+  assert.ok(await page.$eval('.image-pill-name',e=>e.scrollWidth>e.clientWidth),'Long source name is ellipsized');
+  assert.ok(pill.w<500,'Context pill stays within the Agent column');
+  const savedMessages=await page.evaluate(()=>JSON.parse(JSON.stringify(document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('chat').messages)));
+  await page.evaluate(()=>{const p=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia;p._s.get('chat').sessionId='spatial-browser-fixture';p._s.get('viewer').activeRec.sceneId='fixture';});
+  await page.waitForFunction(()=>document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('viewer').activeRec.spatialIdentity?.startsWith('scene-v1:'));
+  page.once('dialog',dialog=>dialog.accept());
+  await page.evaluate(()=>{const a=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('annotations');a.rebind(a.all[0]);});
+  await page.waitForFunction(()=>document.querySelectorAll('.annotation-marker').length===3);
+  await page.reload();await page.waitForSelector('.stage');
+  await page.evaluate(async(messages)=>{
+   const p=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia;
+   const cv=document.createElement('canvas');cv.width=800;cv.height=600;cv.getContext('2d').fillRect(0,0,800,600);
+   const blob=await new Promise(r=>cv.toBlob(r,'image/jpeg')),dt=new DataTransfer();dt.items.add(new File([blob],'JXGF07A03_PMS_20261026230251_200548890_105_0001_001_L1_PAN_preview.jpg',{type:'image/jpeg'}));
+   document.querySelector('.stage').dispatchEvent(new DragEvent('drop',{dataTransfer:dt,bubbles:true,cancelable:true}));
+  },savedMessages);
+  await page.waitForFunction(()=>document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('viewer').activeRec?.thumb);
+  assert.equal((await page.$$('.annotation-marker')).length,0,'Reopened local file is not silently matched');
+  await page.waitForNetworkIdle({idleTime:200});
+  await page.evaluate((messages)=>{const p=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia,v=p._s.get('viewer');p._s.get('chat').sessionId='spatial-browser-fixture';p._s.get('chat').messages=messages;v.hideModal();v.activeRec.sceneId='fixture';},savedMessages);
+  await page.waitForFunction(()=>document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('viewer').activeRec.spatialIdentity?.startsWith('scene-v1:'));
+  await page.waitForFunction(()=>document.querySelectorAll('.annotation-marker').length===3);
+  await page.screenshot({path:path.join(__dirname,'shots/spatial-annotations.png')});
+  await page.evaluate(()=>{const p=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia;p._s.get('annotations').hidden=true;});
+  await page.waitForFunction(()=>!document.querySelector('.annotation-overlay'));
+  await page.evaluate(()=>{const v=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('viewer');v.activeRec.spatialIdentity='scene-v1:'+'a'.repeat(64)+':'+'c'.repeat(64);document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('annotations').hidden=false;});
+  await page.waitForFunction(()=>document.querySelectorAll('.annotation-marker').length===0);
+  assert.deepEqual(errors,[]);console.log('Spatial browser checks passed: HTTP UUID fallback, left-card screenshots, optional metadata failure, long-name pill, both panes, independent transforms, pane popover, marker wheel, ROI, persisted binding after reload, revision mismatch, references, hide, DPR');
+ }finally{if(browser)await browser.close();server.close();}
+})().catch(e=>{console.error(e);process.exitCode=1;});

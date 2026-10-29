@@ -87,7 +87,8 @@ def test_stream_interruption_retains_partial_call_and_error():
             NS(index=0, id="c1", function=NS(name="run_sr", arguments='{"n":1}'))]))])
         raise ConnectionError("sensitive server detail")
     out = _consume_stream(chunks(), None)
-    assert out["response_error"] == "ConnectionError"
+    # 生产侧经 request_budget.error_class 归一成常量（这里断言原始异常名是旧预期）
+    assert out["response_error"] == "CONNECTION_ERROR"
     assert out["tool_calls"][0]["arguments"] == '{"n":1}'
     reg, effect = registry()
     execute(out, reg)

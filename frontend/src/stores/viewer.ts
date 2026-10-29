@@ -1,3 +1,4 @@
+import { imageRef, spatialId } from '../lib/spatial';
 import { registerViewerContext, snapshotViewer } from '../lib/viewerContext.js';
 /**
  * stores/viewer.ts — 查看器状态 + 编排（tif-viewer.html 交互层 Vue 化）
@@ -64,6 +65,8 @@ export type DrawTool = 'rect' | 'polygon' | 'wand' | 'del';
 
 /** 一条解码记录（HTML rec 直译；thumb/src/stats 为 markRaw 重字段） */
 export interface ViewerRec {
+  spatialIdentity?: string;
+  spatialIdentityToken?: number;
   id: number;
   file: File;
   probe: ProbeInfo | null;
@@ -383,6 +386,9 @@ export const useViewerStore = defineStore('viewer', () => {
   const undoLabel = computed(
     () => undoStack.value[undoStack.value.length - 1]?.label ?? '',
   );
+  const agentAnnotationsVisible = ref(true);
+  function setAgentAnnotationsVisible(visible: boolean) { agentAnnotationsVisible.value=visible; }
+  function toggleAgentAnnotations() { setAgentAnnotationsVisible(!agentAnnotationsVisible.value); }
   const canvasSize = ref({ w: 0, h: 0 });
   /** 查看器画布此刻是否挂着（TifCanvas 挂载/卸载时写）。`canvasSize`/`view`
    *  在 SPA 换页后**保留旧值**（store 比页面活得久），光看尺寸会把「/chat 页
@@ -533,8 +539,16 @@ export const useViewerStore = defineStore('viewer', () => {
                           rec.thumb.width, rec.thumb.height);
     if (!plan) return null;
     try {
-      return { dataUrl: drawShot(rec.thumb as unknown as HTMLCanvasElement, plan),
-               name: rec.name };
+      const dataUrl=drawShot(rec.thumb as unknown as HTMLCanvasElement, plan);
+      let spatial: ChatShot['spatial'];
+      try { spatial=(() => {
+                 const image = imageRef(rec); if (!image) return undefined;
+                 return { input_ref: spatialId(), image_ref: image, width: plan.dw, height: plan.dh,
+                   crop: [plan.sx * rec.W / rec.thumb!.width, plan.sy * rec.H / rec.thumb!.height,
+                     plan.sw * rec.W / rec.thumb!.width, plan.sh * rec.H / rec.thumb!.height] as [number,number,number,number] };
+               })(); } catch { /* Optional spatial metadata must not break image attachments. */ }
+      return { dataUrl, name:rec.name, spatial };
+
     } catch (e) {
       showErr('截图失败：' + (e instanceof Error ? e.message : String(e)));
       return null;
@@ -2308,6 +2322,19 @@ export const useViewerStore = defineStore('viewer', () => {
     renderTick.value++;
   }
 
+  /** Display-only annotation focus; preserve ROI and the opposite pane. */
+  function focusSourceBounds(side: 'A' | 'B', bounds: [number,number,number,number]) {
+    if (drawMode.value) return;
+    const pane=panes.value.find(p=>p.side===side), r=pane?.rec;
+    if (!pane || !r?.thumb) return;
+    const [x0,y0,x1,y1]=bounds;
+    const sx=r.thumb.width/r.W, sy=r.thumb.height/r.H;
+    const scale=Math.min(pane.view.scale, pane.rect.w*.8/Math.max(1,(x1-x0)*sx),pane.rect.h*.8/Math.max(1,(y1-y0)*sy));
+    const target={scale,ox:pane.rect.w/2-(x0+x1)*.5*sx*scale,oy:pane.rect.h/2-(y0+y1)*.5*sy*scale};
+    setActiveSide(side);
+    animateViewsTo(side==='A'?{A:target}:{B:target});
+  }
+
   function locatePixel(x: number | string, y: number | string) {
     stopViewAnim();
     const rec = activeRec.value;
@@ -3122,6 +3149,7 @@ export const useViewerStore = defineStore('viewer', () => {
     recs: recsOrdered.value, workspaceVersion: workspaceVersion.value }, count));
 
   return {
+    agentAnnotationsVisible, setAgentAnnotationsVisible, toggleAgentAnnotations,
     previewMemoryMB, previewMemoryOptions, setPreviewMemoryMB,
     // 状态
     recs, workspaceVersion, activeId, activeRec, view, canvasSize, renderTick, marker,
@@ -3143,7 +3171,7 @@ export const useViewerStore = defineStore('viewer', () => {
     // 一键解析：先排满占位卡，再原地补齐 / 标红 / 收尾
     insertPendingCards, fillPendingCard, setPendingStatus, failPendingCard, finishPendingCards,
     // 拉伸 / 视图
-    setStretch, setPreviewDiv, setCanvasSize, fit, onWheel, onPan, locatePixel,
+    setStretch, setPreviewDiv, setCanvasSize, fit, onWheel, onPan, locatePixel, focusSourceBounds,
     // 掩码
     enterDraw, exitDraw, setDrawTool, commitRect, closePolygon, undoRoi, clearRois,
     mergeRois, delClick, wandSelect, buildMaskJson, exportMaskJson, genMask,

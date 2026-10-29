@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import replace
 import json
 import os
 import stat
@@ -539,7 +540,7 @@ def _project_message(seq: int, wire: dict, name_of_call: dict) -> dict:
         return {"seq": seq, "role": "tool",
                 "tool_name": name_of_call.get(wire.get("tool_call_id")),
                 "tool_call_id": wire.get("tool_call_id"),
-                "content": payload.get("content") or payload.get("error"),
+                "content": (json.dumps(payload, ensure_ascii=False) if name_of_call.get(wire.get("tool_call_id")) == "present_spatial_annotations" else payload.get("content") or payload.get("error")),
                 "ok": bool(payload.get("ok"))}
     return {"seq": seq, "role": role}
 
@@ -693,6 +694,11 @@ async def chat_send(session_id: str, request: Request):
         body = json.loads(raw or b"{}")
     except ValueError:
         raise HTTPException(status_code=400, detail="请求体须为合法 JSON 对象")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    thinking_profile = body.get("thinking_profile")
+    if thinking_profile is not None and (not isinstance(thinking_profile, str) or thinking_profile not in {"fast", "low", "balanced", "deep"}):
+        raise HTTPException(status_code=400, detail="Invalid thinking_profile")
     content = body.get("content") if isinstance(body, dict) else None
     images = body.get("images") if isinstance(body, dict) else None
     from backend.services.viewer_context import validate_snapshot
@@ -733,6 +739,24 @@ async def chat_send(session_id: str, request: Request):
         lock.release()
         raise
 
+    # Only mappings paired with actual, decoded attachments enter the frozen snapshot.
+    from backend.services.spatial_annotations import validate_input
+    from PIL import Image
+    try:
+        visual_inputs = []
+        for attachment_index, (item, record) in enumerate(zip(images or [], saved)):
+            if item.get('spatial') is None:
+                continue
+            path = chat_images.image_path(session_id, record['url'].rsplit('/', 1)[-1])
+            with Image.open(path) as im:
+                visual_inputs.append(dict(validate_input(item['spatial'], im.size), attachment_index=attachment_index, attachment_url=record['url']))
+        if len({m['input_ref'] for m in visual_inputs}) != len(visual_inputs):
+            raise ValueError('duplicate input_ref')
+        if visual_inputs:
+            viewer_snapshot = dict(viewer_snapshot or {'version': 1}, visual_inputs=visual_inputs)
+    except (ValueError, TypeError, KeyError) as exc:
+        lock.release()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     prompt = chat_images.user_content(content, saved)
 
     import threading
@@ -812,6 +836,10 @@ async def chat_send(session_id: str, request: Request):
         try:
             context = _context(request)
             cfg = state.cfg if context is None else context.config
+            if thinking_profile is not None:
+                cfg = replace(cfg, llm_thinking_profile=thinking_profile)
+                if context is not None:
+                    context = replace(context, config=cfg)
             # env SR_LLM_STREAM is the operator master switch; a request
             # may only turn streaming off, never force it on when the
             # endpoint was declared unable to stream.
@@ -819,7 +847,7 @@ async def chat_send(session_id: str, request: Request):
             if stream_opt is not None:
                 stream_on = stream_on and stream_opt
             return loop_mod.run_loop(
-                None if context is not None else state.cfg, prompt,
+                None if context is not None else cfg, prompt,
                 store=None if context is not None else state.store,
                 session_id=session_id, resume=True, on_step=bridge,
                 registry=None if context is not None else getattr(state, "tool_registry", None),

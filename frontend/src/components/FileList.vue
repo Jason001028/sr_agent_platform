@@ -49,8 +49,8 @@ watch(showExamples, () => { demoHovered.value = false; });
 const demoPan = `${import.meta.env.BASE_URL}demo_pan.webp`;
 const demoNosr = `${import.meta.env.BASE_URL}demo_nosr.webp`;
 const examples = [
-  { name: 'demo_pan.webp', src: demoPan, size: 151740, stage: 'PAN' },
-  { name: 'demo_nosr.webp', src: demoNosr, size: 18570, stage: 'NOSR' },
+  { name: 'demo_pan.tif', src: demoPan, size: 151740, stage: 'PAN' },
+  { name: 'demo_nosr.tif', src: demoNosr, size: 18570, stage: 'NOSR' },
 ];
 const { busy: shotBusy, add: addShotAction } = useChatShot();
 
@@ -173,7 +173,7 @@ function linkTag(note: string): string {
         <template #thumbnail><FileThumb :size="96" :preview-src="example.src" :detail-src="example.stage === 'NOSR' ? demoPan : undefined" /></template>
         <template #body>
           <div class="name"><span class="stage">{{ example.stage }}</span><span class="example-badge">示例</span><span class="fname">{{ example.name }}</span></div>
-          <div class="meta">512×512 · {{ fmtBytes(example.size) }} · WebP</div>
+          <div class="meta">{{ example.stage === 'PAN' ? '1024×1024' : '512×512' }} · {{ fmtBytes(example.size) }} · TIF</div>
           <div class="tags"><span class="status muted">{{ example.stage === 'PAN' ? '清晰纹理' : '未超分预览' }}</span></div>
         </template>
       </FileListCard>

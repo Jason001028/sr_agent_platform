@@ -146,6 +146,7 @@ export interface ChatImage {
 
 /** 上传用的一张截图：`data` 是 data URL（后端也接受裸 base64）。 */
 export interface ChatUploadImage {
+  spatial?: import('./spatial').VisualInput;
   data: string;
   name: string;
 }
@@ -175,6 +176,7 @@ export type ChatPhase = 'thinking' | 'answering' | 'tool_call';
 export type ChatSseEvent =
   | { type: 'session_update'; session: ChatSession }
   | { type: 'turn_start'; run_id: string; session_id: string }
+  | { type: 'thinking_status'; profile: string; status: string; rejections: string[] }
   | { type: 'llm_phase'; phase: ChatPhase; name?: string }
   | { type: 'reasoning'; delta: string }
   | { type: 'token'; delta: string }
@@ -631,11 +633,13 @@ export async function apiChatSend(
   images?: ChatUploadImage[],
   stream?: boolean,
   viewerContext?: unknown,
+  thinkingProfile?: 'fast' | 'low' | 'balanced' | 'deep',
 ): Promise<void> {
   const body: Record<string, unknown> = { content };
   if (images && images.length) body.images = images;
   if (stream !== undefined) body.stream = stream;
   if (viewerContext !== undefined) body.viewer_context = viewerContext;
+  if (thinkingProfile !== undefined) body.thinking_profile = thinkingProfile;
   const r = await fetch(sessionMessagesUrl(cfg, sid), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -798,7 +802,7 @@ export async function apiClearScenePreviews(
  *  共用，所以刷新页面、换浏览器都不会把它们找回来。 */
 export async function apiHideScenes(
   cfg: SrConfig, ids: string[],
-): Promise<{ hidden: number; hidden_total: number;
+): Promise<{ hidden: number; hidden_total: number; hidden_ids: string[];
             skipped: { id: string; reason: string }[] }> {
   const r = await http(sceneHideUrl(cfg), {
     method: 'POST',
@@ -806,7 +810,7 @@ export async function apiHideScenes(
     body: JSON.stringify({ ids }),
   });
   return (await r.json()) as { hidden: number; hidden_total: number;
-    skipped: { id: string; reason: string }[] };
+    hidden_ids: string[]; skipped: { id: string; reason: string }[] };
 }
 
 /** 恢复服务端隐藏集合：省略 `keys` = 全部恢复。 */

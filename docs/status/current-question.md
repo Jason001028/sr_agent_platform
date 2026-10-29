@@ -436,7 +436,9 @@ store 里「用上面的『盘阵场景』栏打开」「请在『盘阵场景�
 
 - 前端每条用户消息的 `viewer_snapshot` 多一个 `workspace`（`version` + 去重后的场景 id/名字，最多 200 条，本地拖入的图只计数不发送）。它**不投影给模型**（`project_messages` 剥掉），只是工具的执行范围。
 - `backend/services/viewer_context.py` 校验并冻结它，`bind_registry` 把冻结快照绑进 `search_scenes`；工具对每个 id 重新走 `paths.scene_id_to_abs`（白名单 + 存在性）与场景目录判据，快照本身不授予路径权限。
-- `search_scenes` 新增 `scope=workspace|library`（默认 workspace）。没有快照时（CLI / REST / 旧消息）回退到 library，`scope_reason=no_workspace_snapshot`；工作区为空（左侧没有带场景身份的影像）时同样回退，`scope_reason=empty_workspace`；用户明确要全库时 `scope_reason=user_requested_library`。
+- `search_scenes` 新增 `scope=workspace|library`（默认 workspace）。没有快照时（CLI / REST / 旧消息）回退到 library，`scope_reason=no_workspace_snapshot`；工作区为空（左侧没有带场景身份的影像）时同样回退，`scope_reason=empty_workspace`；本次调用自己传了 `scope=library` 时给中性的 `explicit_library_scope`（模型传参不等于用户授权，不写成用户意图）。
+- 工作区快照随消息冻结，隐藏集合不冻结：每次检索现读服务端当前隐藏集合，对话进行中隐藏/恢复立刻生效；读不到隐藏集合时工具报错，不按「没有隐藏」放行。
+- 库行的工作区 id 是相对场景根的 rel，工具入口把 `SR_SCENES_ROOT` 统一转成 `Path` 再解析（此前直接传环境变量字符串，`root / rel` 抛 `TypeError`，从场景库打开影像后的默认检索主链会整条失败）。
 - 仍未做：`run_sr` 侧的场景确认校验（提交前核对 lq_path 是否属于当前 workspace）留待下一轮，见上一条约束。
 
 ### 服务端隐藏集合（2026-10-28）
@@ -444,7 +446,7 @@ store 里「用上面的『盘阵场景』栏打开」「请在『盘阵场景�
 场景库「清除选定 / 全部清除」与卡片垃圾篓不再只写本机 `localStorage`：后端 SQLite 新增 `scene_hidden` 表，按**场景目录的规范键**（POSIX 分隔符、无尾斜杠，`scene_search.dir_key`）记隐藏项，同一景的 `<目录名>.tif` / `PAN.tif` / 产物一起隐藏。
 
 - `GET /api/scenes`、`GET /api/scene-library` 与 Agent 的 `search_scenes` 共用这份集合，都按 `exclude_dirs` 排除；隐藏发生在过滤与 `limit` 之前，`count` 是真实可见总数。
-- 新增端点：`POST /api/scenes/hide`（只隐藏，不删盘上任何文件）、`GET /api/scenes/hidden`、`POST /api/scenes/restore-hidden`（省略 `keys` = 全部恢复）。`clear-preview` 的汇总里新增 `hidden` / `hidden_total`。
+- 新增端点：`POST /api/scenes/hide`（只隐藏，不删盘上任何文件）、`GET /api/scenes/hidden`、`POST /api/scenes/restore-hidden`（省略 `keys` = 全部恢复）。`clear-preview` 的汇总里新增 `hidden` / `hidden_total`。`/api/scenes/hide` 另回 `hidden_ids`：前端只摘真正写进集合的行，`skipped` 的行留在原处并提示原因。
 - 清除预览缓存的判据不变（只删 `srprev:` 规则签名的预览 JPG，永不删场景源）；隐藏只影响检索与展示，盘阵数据不动。
 - 桌面端视角：刷新页面、换浏览器、Agent 重新检索都不会把隐藏的景找回来；「恢复已隐藏 (N)」的 N 来自服务端的隐藏总数。
 
@@ -459,3 +461,5 @@ store 里「用上面的『盘阵场景』栏打开」「请在『盘阵场景�
 Viewer 消息快照、当前影像只读工具及评测边界见 [viewer-context-evaluation.md](viewer-context-evaluation.md)。
 
 请求级 Deadline 与 Thinking 配置实现及内网待验收边界见 [reasoning-budget-deadline.md](reasoning-budget-deadline.md)。
+
+P1 spatial annotations: [implementation and pending acceptance](spatial-annotations.md).

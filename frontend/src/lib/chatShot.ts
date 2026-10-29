@@ -86,6 +86,7 @@ export function drawShot(src: CanvasImageSource, plan: ShotPlan): string {
 
 /** 一张待发/已发的截图（`dataUrl` 同时用于预览与上传）。 */
 export interface ChatShot {
+  spatial?: import('./spatial').VisualInput;
   dataUrl: string;
   name: string;
 }

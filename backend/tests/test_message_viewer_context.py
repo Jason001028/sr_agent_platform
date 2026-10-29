@@ -125,6 +125,34 @@ def test_binding_scopes_search_scenes_to_the_workspace(monkeypatch, tmp_path):
     assert data['unresolved_count'] == 1
 
 
+def test_bound_hidden_set_is_read_live_not_frozen(monkeypatch, tmp_path):
+    """工作区随消息冻结，隐藏集合不冻结：对话进行中隐藏/恢复要立刻生效。"""
+    from backend.api.paths import scene_id_abs
+    from backend.services import scene_search as svc
+    from backend.tests import allowed_roots_env
+    from backend.tests.test_search_scenes import write_scene
+    from backend.tools import build_builtin_registry
+
+    root = tmp_path / 'scenes'
+    root.mkdir()
+    a = write_scene(root, 'GF07A03_PMS01_20260722125045')
+    for key, value in allowed_roots_env(root).items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv('SR_SCENES_ROOT', str(root))
+    store = Store(str(tmp_path / 'db.sqlite'))
+    try:
+        registry = bind_registry(
+            build_builtin_registry(),
+            validate_snapshot(workspace((scene_id_abs(a), 'A')), 0), store=store)
+        assert registry.invoke('search_scenes')['data']['count'] == 1
+        store.hide_scenes([{'scene_dir': svc.dir_key(a.parent), 'name': a.parent.name}])
+        assert registry.invoke('search_scenes')['data']['count'] == 0
+        store.restore_hidden_scenes()
+        assert registry.invoke('search_scenes')['data']['count'] == 1
+    finally:
+        store.close()
+
+
 def test_binding_leaves_foreign_tools_named_search_scenes_alone():
     """测试/插件注册的同名工具不认识工作区参数，绑定不该把它换成内置那份。"""
     from backend.tools.contract import Tool, ok

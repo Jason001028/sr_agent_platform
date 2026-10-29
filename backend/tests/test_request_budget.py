@@ -205,3 +205,63 @@ def test_unknown_summary_survives_reopen(tmp_path, known):
         assert usage['calls'] == int(known)
         assert usage['total_tokens'] == (5 if known else 0)
     finally: reopened.close()
+
+
+@pytest.mark.parametrize("profile,template", [
+    ("fast", {"enable_thinking": False}),
+    ("low", {"enable_thinking": True, "reasoning_effort": "low"}),
+    ("balanced", {"enable_thinking": True, "reasoning_effort": "medium"}),
+    ("deep", {"enable_thinking": True, "reasoning_effort": "xhigh"}),
+])
+def test_qwen_template_profiles(profile, template):
+    policy = request_policy(replace(CFG, llm_thinking_profile=profile, llm_thinking_adapter="chat_template"))
+    assert policy["thinking_parameters"] == {"extra_body": {"chat_template_kwargs": template}}
+    assert policy["max_tokens"] == CFG.llm_max_tokens
+
+
+def test_real_qwen_profiles_opt_in():
+    """Run only on the intended host: SR_QWEN_TEST_URL=http://127.0.0.1:9931/v1.
+
+    Prints comparable latency, usage, character counts and tool-call success.
+    Acceptance still requires inspecting server version and GGUF template.
+    No tools are executed. No service settings are changed.
+    """
+    import os, json, time
+    from openai import OpenAI
+    url = os.getenv("SR_QWEN_TEST_URL")
+    if not url:
+        pytest.skip("real endpoint not explicitly selected")
+    client = OpenAI(base_url=url, api_key=os.getenv("SR_QWEN_TEST_KEY", "unused"), max_retries=0, timeout=180)
+    model = os.getenv("SR_QWEN_TEST_MODEL") or client.models.list().data[0].id
+    tools = [{"type": "function", "function": {"name": "lookup", "description": "Look up a scene by ID", "parameters": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}}}]
+    for profile in ("fast", "low", "balanced", "deep"):
+        for stream in (False, True):
+            for use_tool in (False, True):
+                for repeat in range(3):
+                    params = request_policy(replace(CFG, llm_thinking_profile=profile, llm_thinking_adapter="chat_template"))["thinking_parameters"]
+                    started = time.monotonic()
+                    response = client.chat.completions.create(model=model, messages=[{"role": "user", "content": "Call lookup with id SCENE_42." if use_tool else "Calculate 17 * 23 and briefly explain."}], tools=tools if use_tool else None, max_tokens=4096, temperature=0, stream=stream, **({"stream_options": {"include_usage": True}} if stream else {}), **params)
+                    content, reasoning, calls, usage = "", "", {}, None
+                    if stream:
+                        for chunk in response:
+                            if chunk.usage: usage = chunk.usage.model_dump()
+                            if not chunk.choices: continue
+                            delta = chunk.choices[0].delta
+                            content += delta.content or ""
+                            reasoning += getattr(delta, "reasoning_content", "") or ""
+                            for call in delta.tool_calls or []:
+                                item = calls.setdefault(call.index, ["", ""])
+                                if call.function:
+                                    item[0] += call.function.name or ""
+                                    item[1] += call.function.arguments or ""
+                    else:
+                        msg = response.choices[0].message
+                        content = msg.content or ""
+                        reasoning = getattr(msg, "reasoning_content", "") or ""
+                        calls = {i: [c.function.name, c.function.arguments] for i, c in enumerate(msg.tool_calls or [])}
+                        usage = response.usage.model_dump() if response.usage else None
+                    try:
+                        correct = len(calls) == 1 and next(iter(calls.values()))[0] == "lookup" and json.loads(next(iter(calls.values()))[1]) == {"id": "SCENE_42"}
+                    except ValueError: correct = False
+                    print(json.dumps(dict(profile=profile, stream=stream, tool=use_tool, repeat=repeat, seconds=round(time.monotonic()-started, 3), content_chars=len(content), reasoning_chars=len(reasoning), usage=usage, tool_correct=correct if use_tool else None)))
+                    if use_tool: assert correct

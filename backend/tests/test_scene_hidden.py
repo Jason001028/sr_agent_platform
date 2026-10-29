@@ -56,6 +56,7 @@ class TestHiddenSet(ClearBase):
         body = r.json()
         self.assertEqual(body["hidden"], 1)
         self.assertEqual(body["hidden_total"], 1)
+        self.assertEqual(body["hidden_ids"], [self.manual_id()])
         self.assertEqual(body["skipped"], [])
         self.assertTrue(preview.is_file(), "隐藏不是清除：盘上的预览 JPG 不动")
         self.assertTrue(self.inp.is_file())
@@ -67,7 +68,17 @@ class TestHiddenSet(ClearBase):
         r = c.post("/api/scenes/hide", json={"ids": ["no-such-id"]})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["hidden_total"], 0)
+        self.assertEqual(r.json()["hidden_ids"], [], "跳过的 id 不算隐藏成功")
         self.assertTrue(r.json()["skipped"], "不可访问的 id 如实回报")
+
+    def test_hidden_ids_lists_only_what_was_written(self):
+        """前端按 hidden_ids 摘行：可访问的那条成功，坏 id 进 skipped 留在列表里。"""
+        c = self.client()
+        body = c.post("/api/scenes/hide",
+                      json={"ids": [self.manual_id(), "no-such-id"]}).json()
+        self.assertEqual(body["hidden_ids"], [self.manual_id()])
+        self.assertEqual([s["id"] for s in body["skipped"]], ["no-such-id"])
+        self.assertEqual(self.hidden(c)["count"], 1)
 
     def test_restore_brings_the_scene_back(self):
         c = self.client()

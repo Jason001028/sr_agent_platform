@@ -599,3 +599,5 @@ sr_agent_platform/
 
 第三方转录与外部导入的存档（`docs/agent-book/`、参考源码、`CloudReview_Update_*/`）保持原样，
 不按上述规则改写。
+
+P1 spatial annotations: [implementation and pending acceptance](status/spatial-annotations.md).

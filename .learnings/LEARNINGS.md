@@ -45,3 +45,9 @@ Category: best_practice. Execution ownership lasts until the actual Worker ends.
 ## SSE and usage review correction
 
 Category: correction. Bounded observation queues must not carry the only final failure notification; send terminal results from the Worker result after completion. Persisted token subtotals must retain unknown_calls and usage_complete across Session queries and Goal checkpoints. Heartbeat tests should synchronize on observed successful renewals rather than sub-scheduler lease timings.
+
+## 2026-10-29 spatial annotation corrections
+- Internal HTTP deployments may not expose crypto.randomUUID; use an HTTP-compatible display ID generator.
+- Optional grounding metadata must never break ordinary screenshot attachments.
+- Render geometry per pane, while selecting a single popover by annotation ID and pane side.
+- Persist confirmed bindings only to server resource revisions; local filenames and dimensions alone do not establish identity.

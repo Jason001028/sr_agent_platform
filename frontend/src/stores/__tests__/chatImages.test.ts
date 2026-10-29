@@ -153,3 +153,37 @@ describe('历史投影', () => {
     expect(chat.messages[0].images?.[0]).toEqual({ url, name: 'GF07' });
   });
 });
+
+
+it.each(['fast', 'low', 'balanced', 'deep'] as const)('sends thinking profile %s', async (profile) => {
+  const chat = useChatStore();
+  expect(chat.thinkingProfile).toBe('balanced');
+  chat.sessionId = 's1';
+  chat.thinkingProfile = profile;
+  let body: Record<string, unknown> = {};
+  vi.stubGlobal('fetch', (_url: string, init?: RequestInit) => {
+    body = JSON.parse(String(init?.body));
+    return Promise.resolve(sseResponse(['{"type":"turn_done","ok":true}']));
+  });
+  await chat.send('hello');
+  expect(body.thinking_profile).toBe(profile);
+  expect(chat.thinkingProfile).toBe(profile);
+});
+
+it('allows changing the next profile while preserving an in-flight request', async () => {
+  const chat = useChatStore();
+  chat.sessionId = 's1';
+  let finish!: (response: Response) => void;
+  let body: Record<string, unknown> = {};
+  vi.stubGlobal('fetch', (_url: string, init?: RequestInit) => {
+    body = JSON.parse(String(init?.body));
+    return new Promise<Response>(resolve => { finish = resolve; });
+  });
+  const request = chat.send('hello');
+  expect(chat.sending).toBe(true);
+  chat.thinkingProfile = 'deep';
+  expect(body.thinking_profile).toBe('balanced');
+  finish(sseResponse(['{"type":"turn_done","ok":true}']));
+  await request;
+  expect(chat.thinkingProfile).toBe('deep');
+});

@@ -124,11 +124,12 @@ class Config:
     llm_deadline_margin: float = 0.1
     llm_thinking_profile: str = "balanced"
     llm_thinking_adapter: str = "none"
+    llm_vision_timeout: float = 180.0
 
     def __post_init__(self):
-        if self.llm_timeout <= 0 or self.llm_deadline_margin < 0:
+        if self.llm_timeout <= 0 or self.llm_vision_timeout <= 0 or self.llm_deadline_margin < 0:
             raise ValueError("invalid request timeout/margin")
-        if self.llm_thinking_profile not in {"fast", "balanced", "deep"}:
+        if self.llm_thinking_profile not in {"fast", "low", "balanced", "deep"}:
             raise ValueError("invalid thinking profile")
         if self.llm_thinking_adapter not in {"none", "reasoning_effort", "chat_template"}:
             raise ValueError("invalid thinking adapter")
@@ -154,6 +155,7 @@ def load_config() -> Config:
         llm_max_tokens=env_int("SR_LLM_MAX_TOKENS", 1024),
         llm_temperature=env_float("SR_LLM_TEMPERATURE", 0.2),
         llm_timeout=env_float("SR_LLM_TIMEOUT", 60),
+        llm_vision_timeout=env_float("SR_LLM_VISION_TIMEOUT", 180),
         llm_deadline_margin=env_float("SR_LLM_DEADLINE_MARGIN", 0.1),
         llm_thinking_profile=os.getenv("SR_LLM_THINKING_PROFILE", "balanced").lower(),
         llm_thinking_adapter=os.getenv("SR_LLM_THINKING_ADAPTER", "none").lower(),

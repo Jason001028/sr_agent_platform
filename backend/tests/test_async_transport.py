@@ -69,7 +69,7 @@ def test_absolute_deadline_closes_tcp(mode):
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("adapter,field", [("reasoning_effort", "reasoning_effort"), ("chat_template", "chat_template_kwargs")])
+@pytest.mark.parametrize("adapter,field", [("reasoning_effort", "reasoning_effort"), ("chat_template", "chat_template_kwargs"), ("chat_template", "reasoning_effort")])
 def test_field_rejection_downgrades_with_reserved_attempt(adapter, field):
     async def scenario():
         bodies, reserves = [], []
@@ -77,7 +77,7 @@ def test_field_rejection_downgrades_with_reserved_attempt(adapter, field):
             h = await reader.readuntil(b"\r\n\r\n")
             n = next(int(x.split(b":")[1]) for x in h.split(b"\r\n") if x.lower().startswith(b"content-length:"))
             body = json.loads(await reader.readexactly(n)); bodies.append(body)
-            rejected = field in body
+            rejected = field in body or field in body.get("chat_template_kwargs", {})
             data = json.dumps({'error': {'message': f'unsupported {field}', 'type': 'invalid_request_error'}} if rejected else {'choices': [{'finish_reason': 'stop', 'message': {'content': 'done', 'tool_calls': []}}]}).encode()
             writer.write((f"HTTP/1.1 {'400 Bad Request' if rejected else '200 OK'}\r\nContent-Type: application/json\r\nContent-Length: {len(data)}\r\nConnection: close\r\n\r\n").encode()+data)
             await writer.drain(); writer.close(); await writer.wait_closed()
@@ -133,3 +133,28 @@ def test_tcp_fallback_failure_retains_observations(ending):
             await server.wait_closed()
             if handlers: await asyncio.gather(*handlers, return_exceptions=True)
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('visual,durable',[(True,False),(False,False),(True,True)])
+def test_visual_chat_budget_does_not_extend_text_or_goal(monkeypatch,visual,durable):
+ from types import SimpleNamespace
+ class Client:
+  def __init__(self,**kwargs):self.chat=SimpleNamespace(completions=self)
+  async def __aenter__(self):return self
+  async def __aexit__(self,*args):pass
+  async def create(self,**kwargs):
+   await asyncio.sleep(.06)
+   return {}
+ monkeypatch.setattr('backend.agent.async_transport.AsyncOpenAI',Client)
+ cfg=replace(CFG,llm_timeout=.02,llm_vision_timeout=.3,llm_deadline_margin=.001)
+ wire=[{'role':'user','content':[{'type':'image_url','image_url':{'url':'data:image/jpeg;base64,test'}}]}] if visual else []
+ async def scenario():
+  return await request(cfg,wire,[],deadline=time.monotonic()+1 if durable else None,
+   consume=_consume_stream_async,parse=lambda r:{'content':'done','tool_calls':[]})
+ out=asyncio.run(scenario())
+ if visual and not durable:
+  assert out['content']=='done'
+  assert out['model_timeout_seconds']==.3
+ else:
+  assert out['response_error']=='MODEL_TIMEOUT'
+  assert out['model_timeout_seconds']==.02

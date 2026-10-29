@@ -1118,7 +1118,10 @@ def create_app() -> FastAPI:
         date_to: str | None = Query(default=None, alias="dateTo"),
         limit: int = Query(default=20, ge=1, le=500),
     ):
-        hidden = _hidden_dirs(app.state.store)
+        # 这里不吞异常：读不到隐藏集合时宁可报错，也不能当成「没有隐藏」把
+        # 用户明确藏起来的场景放回列表（与工具层同一取舍；`/api/scene-library`
+        # 也是严格读）。
+        hidden = {e["scene_dir"] for e in app.state.store.list_hidden_scenes()}
         out = scene_search.search_scenes(
             str(root) if root else None, query=query, satellite=satellite,
             sensor=sensor, date_from=date_from, date_to=date_to, limit=limit,
@@ -1535,6 +1538,16 @@ def create_app() -> FastAPI:
                                        + "；".join(reasons) + day_note + product_note)
         return finish(hit)
 
+    @app.get("/api/scenes/{scene_id}/spatial-identity")
+    def spatial_identity(scene_id: str):
+        from backend.services.spatial_identity import resource_identity
+        try:
+            source = paths.scene_id_to_abs(scene_id, root)
+            source = scene_search.sibling_raster_path(source) or source
+            return resource_identity(source)
+        except (PathDeniedError, OSError) as exc:
+            raise HTTPException(status_code=404, detail="Scene resource unavailable") from exc
+
     @app.get("/api/scenes/{scene_id}/preview")
     def preview(scene_id: str, div: int = Query(2)):
         """场景预览 JPG（响应体即字节）。`?div=` 选下采样档位（各边 ÷div）。
@@ -1737,6 +1750,7 @@ def create_app() -> FastAPI:
                 status_code=400,
                 detail=f"一次最多隐藏 {_CLEAR_MAX_IDS} 个场景（收到 {len(raw)}）")
         entries, skipped, seen = [], [], set()
+        ok_ids: list[str] = []
         for sid in raw:
             if not isinstance(sid, str) or not sid or sid in seen:
                 continue
@@ -1748,9 +1762,12 @@ def create_app() -> FastAPI:
                 continue
             entries.append({"scene_dir": scene_search.dir_key(abs_path.parent),
                             "name": abs_path.parent.name})
+            ok_ids.append(sid)
         hidden = app.state.store.hide_scenes(entries)
+        # hidden_ids 是**真正写进隐藏集合**的 id：前端只摘这些行，跳过项留在
+        # 列表里并提示原因，否则界面显示已隐藏、服务端却没记录，刷新又回来了。
         return {"hidden": hidden, "hidden_total": len(_hidden_dirs(app.state.store)),
-                "skipped": skipped}
+                "hidden_ids": ok_ids, "skipped": skipped}
 
     @app.get("/api/scenes/hidden")
     def list_hidden_scenes():

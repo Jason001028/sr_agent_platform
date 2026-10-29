@@ -9,7 +9,7 @@ from unittest import mock
 import numpy as np
 from PIL import Image
 
-from backend.api.paths import scene_id_abs
+from backend.api.paths import scene_id, scene_id_abs
 from backend.services import scene_search as svc
 from backend.tests import allowed_roots_env
 from backend.tools.search_scenes import bound_tool, run_search_scenes
@@ -538,6 +538,8 @@ class TestScopeAndHidden(unittest.TestCase):
         self.assertEqual(empty["count"], 0)
         hit = self.run_bound(workspace=self.ws(self.a), params={"query": "GF07"})
         self.assertEqual(hit["count"], 1)
+        pms05 = self.run_bound(workspace=self.ws(self.a, self.b), params={"sensor": "PMS05"})
+        self.assertEqual([r["id"] for r in pms05["results"]], [self.b.stem])
 
     def test_unresolvable_workspace_item_is_reported_not_fatal(self):
         ws = self.ws(self.a)
@@ -559,8 +561,41 @@ class TestScopeAndHidden(unittest.TestCase):
     def test_explicit_library_scope_wins_over_workspace(self):
         data = self.run_bound(workspace=self.ws(self.a), params={"scope": "library"})
         self.assertEqual(data["scope"], "library")
-        self.assertEqual(data["scope_reason"], "user_requested_library")
+        # 中性表述：模型传参不等于用户授权，别把它写成用户意图。
+        self.assertEqual(data["scope_reason"], "explicit_library_scope")
         self.assertEqual(data["count"], 2)
+
+    def test_workspace_accepts_library_rel_ids(self):
+        """库里打开的场景用的是「相对场景根的 rel id」（不带 `~`），
+        必须能走 `root / rel` 解析（回归：root 曾是环境变量的 str → TypeError）。"""
+        rel = self.a.relative_to(self.root).as_posix()
+        ws = {"version": 1,
+              "items": [{"scene_id": scene_id(rel), "name": self.a.parent.name}],
+              "total": 1, "local_only": 0, "truncated": False}
+        data = self.run_bound(workspace=ws)
+        self.assertEqual(data["scope"], "workspace")
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(data["results"][0]["id"], self.a.stem)
+
+    def test_hidden_provider_is_read_on_each_call(self):
+        """隐藏集合不随消息冻结：对话进行中隐藏后，下一次检索立刻生效。"""
+        hidden = set()
+        provider = lambda: set(hidden)  # noqa: E731 — 闭包读当前值
+        ws = self.ws(self.a)
+        first = bound_tool(workspace=ws, hidden_provider=provider).run()
+        self.assertEqual(first["data"]["count"], 1)
+        hidden.add(svc.dir_key(self.a.parent))
+        second = bound_tool(workspace=ws, hidden_provider=provider).run()
+        self.assertEqual(second["data"]["count"], 0)
+        self.assertEqual(second["data"]["excluded_hidden"], 1)
+
+    def test_hidden_read_failure_is_reported_not_widened(self):
+        """读不到隐藏集合时宁可报错，也不能当作「没有隐藏」把场景放回来。"""
+        def boom():
+            raise RuntimeError("db locked")
+        body = bound_tool(workspace=self.ws(self.a), hidden_provider=boom).run()
+        self.assertFalse(body["ok"])
+        self.assertIn("隐藏", body["error"])
 
     def test_hidden_scenes_are_excluded_from_both_scopes(self):
         hidden = {svc.dir_key(self.a.parent)}

@@ -895,7 +895,7 @@ POST /api/scenes/clear-preview
 
 ```http
 POST /api/scenes/hide          { "ids": ["<scene id>", "…"] }   // ≤ 500；只写隐藏集合
-→ 200 {"hidden": 1, "hidden_total": 3, "skipped": [{"id": "…", "reason": "…"}]}
+→ 200 {"hidden": 1, "hidden_total": 3, "hidden_ids": ["…"], "skipped": [{"id": "…", "reason": "…"}]}
 
 GET /api/scenes/hidden
 → 200 {"count": 3, "items": [{"scene_dir": "…/20260101", "name": "…", "created_at": 0.0}]}
@@ -908,13 +908,19 @@ POST /api/scenes/restore-hidden { "keys": ["<scene_dir>", "…"] }  // 省略 ke
   `search_scenes` 的返回；场景源、预览 JPG、盘阵目录都原样留着。恢复只是删掉记录。
 - **排除发生在过滤与 `limit` 之前**，`count` 是隐藏之后真实可见的命中数；
   `GET /api/scenes` 与 `/api/scene-library` 的响应各多一个 `hidden`（集合大小）。
-- `ids` 里解析不了的条目进 `skipped`（带原因），不致 5xx；`hidden` 是本次实际写入的目录数。
+- `ids` 里解析不了的条目进 `skipped`（带原因），不致 5xx；`hidden_ids` 是**真正写进
+  集合**的本批 id，`hidden` 是本次实际写入的目录数。前端只摘 `hidden_ids` 对应的行，
+  `skipped` 的行留在列表里并提示原因——没隐藏成功却从界面消失，刷新后又会冒出来。
 - **UI 侧不再有本机隐藏概念**：刷新页面、换浏览器、重新检索都不会把隐藏的景找回来；
   「恢复已隐藏 (N)」的 N 就是 `hidden_total`。
 - Agent 侧：`search_scenes` 的两种 scope 都排除隐藏集合（`scope` 参数：默认 `workspace`
   = 这条消息的 Viewer 工作区快照；`library` = 全库。没有快照或工作区为空时回退到 library，
-  `scope_reason` 分别给 `no_workspace_snapshot` / `empty_workspace`），结果里
+  `scope_reason` 分别给 `no_workspace_snapshot` / `empty_workspace`；模型自己传
+  `scope=library` 时给中性的 `explicit_library_scope`——模型传参不算用户授权），结果里
   `excluded_hidden` 是被排除掉的场景数。
+- **隐藏集合每次检索现读，不随消息冻结**：工作区是「这条消息看到的」，隐藏是「服务端
+  此刻的」，对话进行中隐藏/恢复立刻生效。读不到隐藏集合时 `search_scenes` 返回错误，
+  不按「没有隐藏」放行（静默放宽可见性比检索失败更糟）。
 
 ## 4. 关键实现机制（契约约束）
 

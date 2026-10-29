@@ -166,6 +166,16 @@ function toggleFavorite(): void {
       >
         <AppIcon name="undo" :size="16" />
       </button>
+      <span class="ft-separator" aria-hidden="true"></span>
+      <button type="button" class="ft-btn ft-annotations"
+              :class="{ 'annotations-visible': store.agentAnnotationsVisible }"
+              data-e2e="ft-annotations"
+              :aria-pressed="store.agentAnnotationsVisible"
+              :aria-label="store.agentAnnotationsVisible ? '隐藏空间批注' : '显示空间批注'"
+              :title="store.agentAnnotationsVisible ? '隐藏空间批注' : '显示空间批注'"
+              @click="store.toggleAgentAnnotations()">
+        <AppIcon :name="store.agentAnnotationsVisible ? 'eye' : 'eye-closed'" :size="16" />
+      </button>
     </div>
   </div>
   <SceneLibrarySandbox v-if="libraryBatch" :records="libraryBatch" @close="libraryBatch = null" />
@@ -234,4 +244,9 @@ function toggleFavorite(): void {
   border-color: var(--accent-1);
 }
 .ft-btn:disabled { opacity: .4; cursor: default; }
+.ft-separator{flex:none;width:1px;height:16px;margin:0 3px;background:var(--line,#d8e4df)}
+.ft-btn.ft-annotations{width:32px;height:32px;flex:none;background:#eef0ef;transition:background-color 150ms,border-color 150ms}
+.ft-btn.ft-annotations.annotations-visible{background:#e5f2ee;border-color:#d0e5dd}
+.ft-btn.ft-annotations:hover{background:#e0e6e3;border-color:#c6d5ce}
+.ft-btn.ft-annotations.annotations-visible:hover{background:#d9ece5;border-color:#b5d4c7}
 </style>

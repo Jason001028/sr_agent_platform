@@ -91,7 +91,7 @@ it('清除按场景目录隐藏：只提交了一行时，同目录的另一行�
 
 it('卡片垃圾篓只隐藏、不删预览缓存：按场景目录摘掉同一景的所有变体', async () => {
   vi.mocked(apiHideScenes).mockResolvedValue({
-    hidden: 1, hidden_total: 1, skipped: [],
+    hidden: 1, hidden_total: 1, hidden_ids: ['a', 'a2'], skipped: [],
   });
   const store = useScenesStore();
   await store.list();
@@ -106,4 +106,19 @@ it('卡片垃圾篓只隐藏、不删预览缓存：按场景目录摘掉同一�
   expect(store.hiddenCount).toBe(1);
   expect(store.count).toBe(1);
   expect(apiHideScenes).toHaveBeenCalledWith(expect.anything(), ['a', 'a2']);
+});
+
+it('隐藏时被服务端跳过的行留在列表里，并提示原因', async () => {
+  vi.mocked(apiHideScenes).mockResolvedValue({
+    hidden: 1, hidden_total: 1, hidden_ids: ['a'],
+    skipped: [{ id: 'b', reason: '场景不可访问：文件不存在' }],
+  });
+  const store = useScenesStore();
+  await store.list();
+  const ok = await store.hideRows(store.rows);
+  expect(ok).toBe(true);
+  // 只摘真正隐藏成功的 a；b 没生效就留在原地
+  expect(store.rows.map(r => r.id)).toEqual(['b']);
+  expect(store.error).toContain('1 个未能隐藏');
+  expect(store.error).toContain('文件不存在');
 });

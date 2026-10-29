@@ -109,6 +109,8 @@
   --font-mono: ui-monospace, "SF Mono", Consolas, "Courier New", monospace;
 
   /* ---- 动效（按角色取用；选型见 docs/conventions/motion-conventions.md） ---- */
+  --motion-gear-snap: 320ms;
+  --ease-gear-snap: cubic-bezier(0.22, 1, 0.36, 1);
   --motion-follow: 80ms;
   --motion-fold: 100ms;
   --motion-fade: 120ms;

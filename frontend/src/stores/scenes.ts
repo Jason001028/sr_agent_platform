@@ -276,17 +276,25 @@ export const useScenesStore = defineStore('scenes', () => {
     error.value = '';
     try {
       const body = await apiHideScenes(loadSrConfig(), ids);
-      const dirs = new Set(targets.map((r) => r.lq_path).filter((p): p is string => !!p));
-      const idset = new Set(ids);
+      const done = new Set(body.hidden_ids ?? []);
+      const failed = body.skipped ?? [];
+      // 只摘服务端**真正写进隐藏集合**的行（连同目录下的兄弟行）。被跳过的几行
+      // 留在列表里并提示原因：它们没隐藏成功，摘掉只会让人以为已经生效。
+      const dirs = new Set(targets.filter((r) => done.has(r.id))
+        .map((r) => r.lq_path).filter((p): p is string => !!p));
       const before = rows.value.length;
       rows.value = rows.value.filter((r) =>
-        !idset.has(r.id) && !(r.lq_path && dirs.has(r.lq_path)));
+        !done.has(r.id) && !(r.lq_path && dirs.has(r.lq_path)));
       hiddenCount.value = body.hidden_total ?? hiddenCount.value;
       count.value = Math.max(0, count.value - (before - rows.value.length));
       // 摘掉的行不该还留在选中集里
       const left = new Set(rows.value.map((r) => r.id));
       selected.value = new Set([...selected.value].filter((id) => left.has(id)));
-      return true;
+      if (failed.length) {
+        error.value = `已隐藏 ${done.size} 个场景；${failed.length} 个未能隐藏：`
+          + failed.map((s) => s.reason).join('；');
+      }
+      return done.size > 0;
     } catch (e) {
       error.value = '隐藏场景失败：' + (e instanceof Error ? e.message : String(e));
       return false;

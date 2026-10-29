@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ThinkingSlider from "./ThinkingSlider.vue";
 /**
  * AgentChatTab.vue — 上下文侧舱 [Agent] tab（阶段6 L2）
  * ------------------------------------------------------------------
@@ -20,6 +21,9 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useViewerStore } from '../stores/viewer';
 import { useChatStore } from '../stores/chat.js';
 import type { ChatMsg } from '../stores/chat.js';
+import AnnotationManager from './AnnotationManager.vue';
+import CurrentImagePill from './CurrentImagePill.vue';
+import AgentAnnotationReference from './AgentAnnotationReference.vue';
 import MarkdownBody from './MarkdownBody.vue';
 import ReasoningBlock from './ReasoningBlock.vue';
 import { phaseLabel } from '../lib/executionOverview.js';
@@ -53,7 +57,7 @@ async function openSearchScene(row: Record<string, unknown>): Promise<void> {
 
 const rec = computed(() => viewer.activeRec);
 /** 仅盘阵场景可用；无图 / 本地(无 sceneId) → false 并给 reason。 */
-const enabled = computed(() => Boolean(rec.value?.sceneId && rec.value?.thumb));
+const enabled = computed(() => Boolean(rec.value?.thumb && rec.value.W > 0 && rec.value.H > 0));
 /** 无会话时首问会自动建会话 —— 输入框始终可输入；placeholder 提示差异。 */
 const placeholder = computed(() =>
   chat.sessionId
@@ -62,7 +66,6 @@ const placeholder = computed(() =>
 const reason = computed(() => {
   const r = rec.value;
   if (!r) return '当前未打开图像。请从左侧打开盘阵影像，或进入「打开场景」选择生产场景。';
-  if (!r.sceneId) return '当前图像未关联盘阵生产场景。请打开盘阵影像，或进入「打开场景」选择生产场景。';
   return '盘阵影像正在加载，加载完成后即可使用 Agent。';
 });
 
@@ -232,6 +235,20 @@ async function onSend(): Promise<void> {
   if (latest) void chat.send(agentPayload(text, buildContextNote(latest)));
 }
 
+async function analyzeCurrent() {
+  if (!rec.value || chat.sending) return;
+  const recId=rec.value.id;
+  const shot=await viewer.captureForChat(recId);
+  if (!shot || rec.value?.id!==recId || !chat.addPendingImage(shot)) return;
+  if (!draft.value.trim()) draft.value='请分析附件中的地貌特征，并在有视觉定位依据时调用空间批注工具，在影像上标出对应位置。使用实际附件像素坐标，不需要经纬度或投影；所有候选均待核实。若无法可靠定位，只返回文字并说明未获得可验证空间批注，不虚构坐标。';
+  await onSend();
+}
+function annotationConversation(event: Event) {
+  const id=(event as CustomEvent<string>).detail;
+  void nextTick(()=>scrollEl.value?.querySelector<HTMLElement>('[data-annotation-id="'+CSS.escape(id)+'"]')?.scrollIntoView({block:'nearest'}));
+}
+onMounted(()=>window.addEventListener('annotation-conversation',annotationConversation));
+onBeforeUnmount(()=>window.removeEventListener('annotation-conversation',annotationConversation));
 function nearBottom(): boolean {
   const el = scrollEl.value;
   return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 60;
@@ -300,6 +317,8 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
       </div>
     </template>
 
+    <CurrentImagePill v-if="enabled && rec" :name="rec.name" :busy="chat.sending || creating" @analyze="analyzeCurrent" />
+    <AnnotationManager />
     <p v-if="chat.error" class="at-err">{{ chat.error }}</p>
 
     <!-- 会话区 -->
@@ -312,6 +331,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
         <div v-for="(m, i) in chat.messages" :key="msgKey(m, i)" class="at-row" :class="m.role"
              v-show="m.toolName !== 'request_clarification' && !(m.role === 'assistant' && !m.content && m.toolCalls?.length === 1 && m.toolCalls[0].name === 'request_clarification')">
           <!-- user：截图在上；原话为空（纯图消息）时不渲染空段 -->
+          <AgentAnnotationReference v-if="m.toolName==='present_spatial_annotations'" :data="m.data" />
           <template v-if="m.role === 'user'">
             <div class="bubble user" :class="{ 'has-shots': Boolean(m.images?.length) }">
               <ChatBubbleImages v-if="m.images?.length" :images="m.images" />
@@ -363,7 +383,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
 
           <!-- tool 结果：单行摘要 pill -->
           <template v-else>
-            <div v-if="!(chat.messages[i - 1]?.role === 'assistant' && chat.messages[i - 1]?.toolCalls?.some(t => t.name === m.toolName))" class="tool-trace" :class="{ fail: m.ok === false }">
+            <div v-if="m.toolName!=='present_spatial_annotations' && !(chat.messages[i - 1]?.role === 'assistant' && chat.messages[i - 1]?.toolCalls?.some(t => t.name === m.toolName))" class="tool-trace" :class="{ fail: m.ok === false }">
               <AppIcon class="tool-ic" :class="{ fail: m.ok === false }" :name="toolIconName(m.toolName ?? '')" :size="16" :label="m.toolName ?? '工具'" />
               <span class="tool-name">{{ m.toolName ?? '工具' }}</span>
               <span v-if="m.detail" class="tool-detail">{{ m.detail }}</span>
@@ -379,6 +399,8 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
 
       <div class="at-foot" :class="{ locked: !enabled }">
         <div :inert="!enabled">
+
+        <div class="thinking-tools"><ThinkingSlider v-model="chat.thinkingProfile" :status="chat.thinkingStatus" :disabled="!enabled" /></div>
         <ChatAttachTray :items="chat.pendingImages" @remove="chat.removePendingImage" />
         <div class="at-inputbar">
           <button type="button" class="at-shot" data-e2e="chat-shot-open"
@@ -406,6 +428,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
 </template>
 
 <style scoped>
+.thinking-tools { display: flex; padding: 6px 8px 0; }
 .at {
   position: relative;          /* 会话菜单的定位基准 */
   height: 100%;

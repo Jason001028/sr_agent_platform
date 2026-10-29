@@ -172,6 +172,25 @@ class TestChat(PlatformBase):
         os.environ["SR_LLM_MOCK"] = "1"
         os.environ.pop("SR_SCENES_ROOT", None)     # fake 场景（确定性 12 个）
 
+    def test_request_thinking_profiles_are_isolated(self):
+        c = self.client()
+        sid = c.post("/api/chat/sessions").json()["session_id"]
+        seen = []
+        def run(cfg, prompt, **kwargs):
+            effective = kwargs["context"].config if kwargs.get("context") else cfg
+            seen.append(effective.llm_thinking_profile)
+            return {"ok": True, "answer": "ok"}
+        with mock.patch("backend.agent.loop.run_loop", side_effect=run):
+            for profile in ("fast", "low", "balanced", "deep"):
+                for stream in (False, True):
+                    r = c.post(f"/api/chat/sessions/{sid}/messages", json={"content": "hello", "thinking_profile": profile, "stream": stream})
+                    self.assertEqual(r.status_code, 200)
+                    self.assertEqual(seen[-1], profile)
+            r = c.post(f"/api/chat/sessions/{sid}/messages", json={"content": "hello", "thinking_profile": []})
+            self.assertEqual(r.status_code, 400)
+            c.post(f"/api/chat/sessions/{sid}/messages", json={"content": "hello"})
+            self.assertEqual(seen[-1], "balanced")
+
     def test_create_and_list_session(self):
         c = self.client()
         r = c.post("/api/chat/sessions")

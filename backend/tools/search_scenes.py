@@ -19,6 +19,12 @@ Two scopes (2026-10-28):
 Both scopes exclude scenes the user hid from the scene library (persisted in
 SQLite, see Store.hide_scenes). The exclusion is applied before filtering and
 limiting, so `count` is the real visible total.
+
+The hidden set is read live (once per call), not frozen with the message: the
+workspace is an observation from the message, but "what is hidden" is a
+server-side setting that may change while the conversation runs. If the set
+cannot be read the tool fails instead of searching as if nothing were hidden —
+a silent empty set would quietly widen visibility.
 """
 
 from __future__ import annotations
@@ -42,7 +48,9 @@ _DESC = (
     "应使用 get_current_image_info；检索零匹配不代表当前影像不存在。"
     "各条件同时生效；workspace 按工作区顺序返回，library 按日期及 id 降序返回。"
     "scanned 是参与检索的场景数，count 是匹配总数，results 最多 limit 条。"
-    "结果带 scope（实际使用的范围）、scope_reason（为何回退）、workspace_version、"
+    "结果带 scope（实际使用的范围）、scope_reason（为何没用工作区："
+    "no_workspace_snapshot 无快照、empty_workspace 工作区为空、"
+    "explicit_library_scope 本次调用写了 scope=library）、workspace_version、"
     "excluded_hidden（被隐藏排除的数量）。场景行含 id、path（影像文件路径）、"
     "satellite、sensor、date、size_bytes 和 fake，元数据解析不到时可为空。"
     "未配置有效场景根目录时返回 source=fake 的测试数据；fake 路径仅供测试，"
@@ -59,6 +67,10 @@ _PARAMS = {
         "satellite": {
             "type": "string",
             "description": "对解析出的卫星标识作不区分大小写的子串匹配，例如 GF07A03；省略或空串不限制。",
+        },
+        "sensor": {
+            "type": "string",
+            "description": "对解析出的传感器标识作不区分大小写的子串匹配，例如 PMS01；省略或空串不限制。",
         },
         "date_from": {
             "type": "string",
@@ -88,21 +100,27 @@ def _row_from_path(abs_path: Path) -> dict:
             "size_bytes": abs_path.stat().st_size, "fake": False}
 
 
+class _HiddenReadError(RuntimeError):
+    """隐藏集合读不出来。宁可让检索失败，也不能当作「没有隐藏」放行。"""
+
+
 def _hidden_from_default_store() -> set[str]:
     """未显式注入隐藏集合时（REST / CLI）从同一个平台库读。
 
-    只在库文件已经存在时读：没有库的新环境不该因为一次只读检索就凭空建库。
+    只在库文件已经存在时返回空集：没有库的新环境不该因为一次只读检索就凭空建库，
+    也确实没有任何隐藏记录。库存在但读失败时抛 `_HiddenReadError` —— 吞掉异常
+    当空集会静默放宽过滤，把用户藏起来的场景又放回检索结果。
     读来的 Store 用完就 close()：这条路在 REST / CLI 里没有应用生命周期兜底，
     漏一个 sqlite 句柄会让 Windows 上删临时库失败（测试收尾会撞 WinError 32）。
     """
+    if not os.path.exists(store_mod.default_db_path()):
+        return set()
     store = None
     try:
-        if not os.path.exists(store_mod.default_db_path()):
-            return set()
         store = store_mod.default_store()
         return {e["scene_dir"] for e in store.list_hidden_scenes()}
-    except Exception:  # noqa: BLE001 — 隐藏集合读不到不该让检索失败
-        return set()
+    except Exception as e:  # noqa: BLE001 — 统一换成契约边界的错误
+        raise _HiddenReadError(f"{type(e).__name__}: {e}") from e
     finally:
         if store is not None:
             try:
@@ -151,7 +169,8 @@ def _workspace_rows(workspace: dict, root,
     return rows, unresolved, hidden_hits
 
 
-def _run(params: dict, *, workspace=None, hidden_dirs=None) -> dict:
+def _run(params: dict, *, workspace=None, hidden_dirs=None,
+         hidden_provider=None) -> dict:
     try:
         if not isinstance(params, dict):
             raise TypeError("arguments must be an object")
@@ -176,8 +195,24 @@ def _run(params: dict, *, workspace=None, hidden_dirs=None) -> dict:
             except ValueError:
                 return err(f"{name} must be 'YYYY-MM-DD'")
 
-    hidden = hidden_dirs if hidden_dirs is not None else _hidden_from_default_store()
-    root = os.environ.get("SR_SCENES_ROOT")
+    # 隐藏集合每次调用现读：工作区是「这条消息看到的」，隐藏是「服务端此刻的」。
+    if hidden_provider is not None:
+        try:
+            hidden = hidden_provider()
+        except Exception as e:  # noqa: BLE001 — contract boundary
+            return err(f"无法读取场景库隐藏设置：{type(e).__name__}: {e}")
+    elif hidden_dirs is not None:
+        hidden = hidden_dirs
+    else:
+        try:
+            hidden = _hidden_from_default_store()
+        except _HiddenReadError as e:
+            return err(f"无法读取场景库隐藏设置：{e}")
+
+    # 统一成 Path：库行的工作区 id 是「相对场景根的 rel」，要靠 `root / rel`
+    # 解析，直接传环境变量的 str 会在 paths.scene_id_to_abs 里抛 TypeError。
+    root_env = os.environ.get("SR_SCENES_ROOT")
+    root = Path(root_env) if root_env else None
     workspace = workspace or None
 
     # 空工作区（左侧列表里一张有场景身份的图都没有）没有可限定的范围：
@@ -216,7 +251,9 @@ def _run(params: dict, *, workspace=None, hidden_dirs=None) -> dict:
     if workspace is None:
         result["scope_reason"] = "no_workspace_snapshot"
     elif scope == "library":
-        result["scope_reason"] = "user_requested_library"
+        # 只陈述「这次调用自己要求了全库」。模型传参证明不了用户授权，
+        # 不要把它写成用户意图，否则后续推理/审计会错信这个声明。
+        result["scope_reason"] = "explicit_library_scope"
     else:
         result["scope_reason"] = "empty_workspace"
     result["workspace_version"] = (workspace or {}).get("version")
@@ -229,8 +266,12 @@ def run_search_scenes(**params) -> dict:
     return _run(params)
 
 
-def bound_tool(*, workspace=None, hidden_dirs=None) -> Tool:
+def bound_tool(*, workspace=None, hidden_dirs=None, hidden_provider=None) -> Tool:
     """把工作区快照与隐藏集合绑进工具，供 `services.viewer_context.bind_registry`。
+
+    `workspace` 随消息冻结；`hidden_provider` 是**每次调用时**执行的可调用对象，
+    用来读服务端当前的隐藏集合（隐藏/恢复在对话进行中也要立刻生效）。
+    `hidden_dirs` 是给测试用的静态集合，两者都传时 provider 优先。
 
     `run.__name__` / `__module__` 保持与内置工具一致：工具契约测试与清单按这两项
     认「哪个模块实现了这个工具」，绑定不该改变身份。
@@ -239,7 +280,8 @@ def bound_tool(*, workspace=None, hidden_dirs=None) -> Tool:
     frozen_hidden = hidden_dirs
 
     def run_search_scenes(**params):
-        return _run(params, workspace=frozen_workspace, hidden_dirs=frozen_hidden)
+        return _run(params, workspace=frozen_workspace, hidden_dirs=frozen_hidden,
+                    hidden_provider=hidden_provider)
 
     run_search_scenes.__module__ = __name__
     return Tool(name="search_scenes", description=_DESC, params_schema=_PARAMS,

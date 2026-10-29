@@ -793,7 +793,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
     if durable:
         active_registry.register(control_tool())
     if allowed_names is not None:
-        allowed_names = set(allowed_names) | {"read_tool_result", "get_current_image_info"}
+        allowed_names = set(allowed_names) | {"read_tool_result", "get_current_image_info", "present_spatial_annotations"}
         if durable:
             allowed_names.add(CLARIFY)
     messages = result_manager.project_history(messages, active_registry)
@@ -926,7 +926,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                 diagnostics["request_attempts"] = model_calls - calls_before
             diagnostics.update({k: out[k] for k in (
                 "request_attempts", "capability_rejections", "effective_thinking_parameters",
-                "thinking_applied", "stream_timings") if k in out})
+                "thinking_applied", "stream_timings", "model_timeout_seconds") if k in out})
             call_usage = _normalize_usage(out.get("usage"))
             if call_usage is not None:
                 call_index += 1
@@ -963,7 +963,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
             if out.get("response_error") in {"MODEL_TIMEOUT", "DEADLINE_EXCEEDED"}:
                 if out["response_error"] == "DEADLINE_EXCEEDED":
                     raise DeadlineExceeded("stream deadline exceeded")
-                raise TimeoutError("model stream timed out")
+                raise TimeoutError(f"model request timed out after {out.get('model_timeout_seconds', cfg.llm_timeout):g}s (includes image encoding/prefill and full response)")
         except Exception as e:  # noqa: BLE001 — surface cleanly, no retry loop
             if isinstance(e, DeadlineExceeded) and durable:
                 if trajectory is not None:
@@ -998,6 +998,10 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
         check_owner()
         content = out.get("content")
         tool_calls = out.get("tool_calls") or []
+        if on_step is not None:
+            on_step({"type": "thinking_status", "profile": policy["thinking_profile_requested"],
+                     "status": out.get("thinking_applied", "unavailable"),
+                     "rejections": out.get("capability_rejections", [])})
         integrity = _integrity_error(out)
         llm_finished = time.time()
         if trajectory is not None:
@@ -1116,7 +1120,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                 result = active_registry.invoke(CLARIFY, tc["arguments"], source="goal")
             elif tool_executor is not None:
                 result = tool_executor(tc, lambda: call_tool(tc["name"], tc["arguments"], registry=active_registry, allowed_names=allowed_names))
-            elif registry is None and tc["name"] not in {"read_tool_result", "get_current_image_info"}:
+            elif registry is None and tc["name"] not in {"read_tool_result", "get_current_image_info", "present_spatial_annotations"}:
                 # Preserve the two-argument seam used by existing callers/tests.
                 if allowed_names is None:
                     result = call_tool(tc["name"], tc["arguments"])
@@ -1145,12 +1149,18 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
             if verbose:
                 status = "ok" if result["ok"] else "ERR: " + (result["error"] or "")
                 print(f"[turn {turn}] tool {tc['name']} → {status}")
+            # Spatial display facts must survive history projection and model budgets.
+            # Persist complete validated results before making them visible over SSE.
+            if tc['name'] == 'present_spatial_annotations':
+                commit({'role': 'tool', 'tool_call_id': tc['id'],
+                        'content': encode_tool_result(result)})
             if on_step is not None:
                 on_step({"type": "tool_result", "id": tc["id"], "name": tc["name"],
                          "ok": bool(result["ok"]), "data": result["data"],
                          "error": result["error"]})
-            commit({"role": "tool", "tool_call_id": tc["id"],
-                    "content": encode_tool_result(model_view)})
+            if tc["name"] != "present_spatial_annotations":
+                commit({"role": "tool", "tool_call_id": tc["id"],
+                        "content": encode_tool_result(model_view)})
             transcript.append({"role": "tool", "name": tc["name"],
                                "tool_call_id": tc["id"], "content": result})
             if durable and tc["name"] == CLARIFY and result.get("ok"):
