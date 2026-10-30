@@ -1,6 +1,6 @@
 """Disk-array scene preview JPEG generation (server-side).
 
-规则 v3（2026-09-20 起）：**长宽各为源图的 1/div**，显示值用**直方图均衡**。
+规则 v4：优先使用已有无压缩条带 Overview；**长宽各为源图的 1/div**，显示值用**直方图均衡**。
 div 由调用方按用户的滑块档位传入（`div ∈ PREVIEW_DIVISORS`，缺省 `LEGACY_PREVIEW_DIV`）。
 
     ps   = min(1, max_edge / max(W, H))，max_edge = round(max(W,H) / div)
@@ -46,9 +46,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-#: 预览下采样档位：预览长宽各为源图的 1/div。**档位的唯一真源** ——
+#: 预览下采样档位：1 为原档尺寸，其余长宽各为源图的 1/div。**档位的唯一真源** ——
 #: HTTP 层的 `?div=` 与前端滑块都只能取这里面的值。
-PREVIEW_DIVISORS = (2, 4, 8, 16, 32)
+PREVIEW_DIVISORS = (1, 2, 4, 8, 16, 32)
 
 #: 缺档位参数时用的值。取 2（逐字节等于 v2 那套「各边 1/2」）而不是产品的默认 4：
 #: 只换 backend、没换 dist 的部署不会因为少一个 query 参数就把盘上所有预览判废。
@@ -61,7 +61,7 @@ PILLOW_FALLBACK_MAX_PX = 1 << 26  # 67M px：Pillow 兜底只敢接小文件（�
 #: 规则版本戳：改动「尺寸 / 档位 / 拉伸 / 质量」任一规则都必须 bump，否则旧缓存不会失效。
 #: v3（2026-09-20）：尺度从写死的 1/2 变成可调档位，戳里必须带上 div，
 #: 否则同一落点上换个档位会被判成缓存命中 —— 界面滑了、盘上的图一个字节都不变。
-PREVIEW_RULE_VERSION = "v3"
+PREVIEW_RULE_VERSION = "v4"  # Existing overview resampling can change sampled values.
 #: 并行读的行数阈值：小图线程开销盖过收益，保持串行（也让小 fixture 的测试确定）。
 PARALLEL_MIN_ROWS = 512
 #: 并行度。盘阵若是单块 HDD，磁头竞争可能让更高并发反而更慢，故取保守的 8。
@@ -81,7 +81,7 @@ Image.MAX_IMAGE_PIXELS = 1 << 30
 
 # TIFF type sizes（与前端 parseStrips tsize 表一致；index 0 无效）
 _TYPESIZE = (None, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8,
-             None, None, None, 8, 8, 8)
+             4, None, None, 8, 8, 8)
 _TAG_W = 256
 _TAG_H = 257
 _TAG_BITS = 258
@@ -171,7 +171,11 @@ def _read_ifd(path, is_big, endian, ifd_off) -> tuple[dict, dict]:
         else:
             cnt = int.from_bytes(f.read(2), endian)
             esz, val_at, inline = 12, 8, 4
+        if cnt > 4096:
+            raise PreviewError("TIFF IFD 条目过多")
         raw = f.read(cnt * esz)
+        if len(raw) != cnt * esz:
+            raise PreviewError("TIFF IFD 不完整")
     scalars, arrays = {}, {}
     for i in range(cnt):
         e = i * esz
@@ -180,6 +184,8 @@ def _read_ifd(path, is_big, endian, ifd_off) -> tuple[dict, dict]:
         if not (0 < typ < len(_TYPESIZE)):
             continue
         size = _TYPESIZE[typ]
+        if size is None:
+            continue
         c = int.from_bytes(raw[e + 4:e + (8 if is_big else 4) + 4], endian) \
             if is_big else int.from_bytes(raw[e + 4:e + 8], endian)
         if c <= 0:
@@ -317,7 +323,7 @@ def _np_dtype(bits: int, sf: int, endian: str) -> np.dtype:
     raise PreviewError(f"仅支持 8/16/32bit 采样（bits={bits}）")
 
 
-def sample_strips(path, endian, scalars, arrays, max_edge: int):
+def sample_strips(path, endian, scalars, arrays, max_edge: int, *, output_shape=None):
     """Sparse-sample band 1 of an uncompressed strip TIFF to <=max_edge.
 
     Returns stretched uint8 grayscale (ph, pw). Raises PreviewError when the
@@ -370,6 +376,8 @@ def sample_strips(path, endian, scalars, arrays, max_edge: int):
     ps = min(1.0, max_edge / max(W, H))
     pw = max(1, int(round(W * ps)))
     ph = max(1, int(round(H * ps)))
+    if output_shape is not None:
+        ph, pw = output_shape
     stride = spp if planar == 1 else 1
     row_bytes = W * bpp * stride
     dt = _np_dtype(bits, sf, endian)
@@ -503,13 +511,66 @@ def _pillow_preview(path, max_edge: int) -> np.ndarray:
         raise PreviewError(f"Pillow 兜底失败：{e}") from e
 
 
+def _overview_preview(path, max_edge, is_big, endian, root, base):
+    """Read only reduced-resolution IFDs; never build or modify a pyramid.
+
+    Bound traversal (cycles/corrupt offsets included). Ordinary multipage pages
+    and masks are not overviews. Unsupported encodings use the legacy reader.
+    """
+    w, h = base.get(256, 0), base.get(257, 0)
+    if not w or not h:
+        return None
+    scale = min(1., max_edge / max(w, h))
+    shape = (max(1, round(h * scale)), max(1, round(w * scale)))
+    pending, seen, candidates = [root], set(), []
+    file_size = os.path.getsize(path)
+    count_size, entry_size, ptr_size = (8, 20, 8) if is_big else (2, 12, 4)
+    while pending and len(seen) < 64:
+        offset = pending.pop()
+        if offset in seen or not 0 < offset < file_size:
+            continue
+        seen.add(offset)
+        try:
+            s, a = _read_ifd(path, is_big, endian, offset)
+            with open(path, 'rb') as f:
+                f.seek(offset)
+                count = int.from_bytes(f.read(count_size), endian)
+                f.seek(offset + count_size + count * entry_size)
+                nxt = int.from_bytes(f.read(ptr_size), endian)
+            if nxt:
+                pending.append(nxt)
+            if 330 in s:
+                pending.append(s[330])
+            elif 330 in a and a[330][0] <= 64:
+                pending.extend(map(int, _read_array(path, a[330], endian)))
+            ow, oh = s.get(256, 0), s.get(257, 0)
+            if (offset != root and s.get(254, 0) & 1
+                    and not s.get(254, 0) & 4
+                    and shape[1] <= ow < w and shape[0] <= oh < h
+                    and abs(ow / w - oh / h) <= 1 / min(w, h)
+                    and all(s.get(t, default) == base.get(t, default)
+                            for t, default in ((277, 1), (262, 1), (339, 1), (274, 1)))
+                    and s.get(259, 1) == 1 and 322 not in s):
+                candidates.append((ow * oh, s, a))
+        except Exception:
+            continue  # Broken optional IFD must not break a valid base image.
+    for _, s, a in sorted(candidates, key=lambda c: c[0]):
+        try:
+            return sample_strips(path, endian, s, a, max_edge,
+                                 output_shape=shape)[0]
+        except Exception:
+            continue
+    return None
+
+
 def build_preview_pixels(path, max_edge: int | None = None) -> np.ndarray:
     """uint8 grayscale preview pixels (h×w) for a scene TIFF.
 
     max_edge 省略时按 `LEGACY_PREVIEW_DIV`（各边 1/2）从源图尺寸推出 —— 只有直接
     调本函数的地方（测试）会走那个分支；`ensure_preview_jpg` 一定显式算好再传进来。
 
-    Prefers the sparse strip sampler (real-array layout); falls back to Pillow
+    Prefers a compatible existing reduced IFD, then the sparse strip sampler
+    (real-array layout); falls back to Pillow
     for anything the sampler cannot handle (compressed / tiled),
     as long as it is small enough. Structural errors (corrupt file, unsupported
     bit depth …) raise so the caller reports the real cause.
@@ -523,6 +584,12 @@ def build_preview_pixels(path, max_edge: int | None = None) -> np.ndarray:
         max_edge = preview_max_edge(p)
     is_big, endian, ifd_off = _parse_tiff_header(path)
     scalars, arrays = _read_ifd(path, is_big, endian, ifd_off)
+    try:
+        overview = _overview_preview(path, max_edge, is_big, endian, ifd_off, scalars)
+        if overview is not None:
+            return overview
+    except Exception:
+        pass  # Optimization failure preserves the original error/fallback contract.
     try:
         pixels, _ph, _pw = sample_strips(path, endian, scalars, arrays,
                                          max_edge)

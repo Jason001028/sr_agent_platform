@@ -1,5 +1,13 @@
 # Learnings
 
+## 2026-10-30 correction: scene input identity
+
+用户指出一键解析完整生产序列号_PAN.tif 被替换成裸 PAN.tif。根因是
+input_scene_path 因 PAN 与完整序列号_NOSR 同时存在而抢占输入优先级。
+恢复 input_candidates 的完整序列号优先顺序；NOSR 的存在不能作为切换浏览影像的信号。
+回归必须包含完整序列号.tif、PAN.tif、完整序列号_NOSR.tif 三者共存，
+检查文件身份、尺寸与掩码名，另保留只有 PAN 输入时的修复测试。
+
 ## [LRN-20261026-001] correction
 
 **Logged**: 2026-10-26
@@ -51,3 +59,6 @@ Category: correction. Bounded observation queues must not carry the only final f
 - Optional grounding metadata must never break ordinary screenshot attachments.
 - Render geometry per pane, while selecting a single popover by annotation ID and pane side.
 - Persist confirmed bindings only to server resource revisions; local filenames and dimensions alone do not establish identity.
+
+## 2026-10-30 correction: shared scene list thumbnail
+User confirms one existing scene _thumb.jpg may represent NOSR, PAN and ORI list cards. Preserve separate stage identities and detailed pixel sources. SR products were not included in this clarification.

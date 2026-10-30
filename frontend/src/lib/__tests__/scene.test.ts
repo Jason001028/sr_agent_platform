@@ -120,8 +120,8 @@ describe('预览档位（全局下采样）', () => {
       previewDiv: null }), 4)).toBe(false);
   });
 
-  it('档位表与后端 PREVIEW_DIVISORS 同序同值，默认 ÷4', () => {
-    expect([...SCENE_PREVIEW_DIVS]).toEqual([2, 4, 8, 16, 32]);
+  it('界面提供原档至 ÷16，默认 ÷4', () => {
+    expect([...SCENE_PREVIEW_DIVS]).toEqual([1, 2, 4, 8, 16]);
     expect(DEFAULT_PREVIEW_DIV).toBe(4);
     expect(previewDivLabel(16)).toBe('1/16');
   });
@@ -135,6 +135,8 @@ describe('预览档位（全局下采样）', () => {
     expect(loadPreviewDiv()).toBe(DEFAULT_PREVIEW_DIV);   // 没存过
     savePreviewDiv(16);
     expect(loadPreviewDiv()).toBe(16);
+    store.set('sr.previewDiv', '32');                     // 已移除档位
+    expect(loadPreviewDiv()).toBe(DEFAULT_PREVIEW_DIV);
     store.set('sr.previewDiv', '3');                      // 不是合法档位
     expect(loadPreviewDiv()).toBe(DEFAULT_PREVIEW_DIV);
     store.set('sr.previewDiv', 'abc');

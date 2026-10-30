@@ -1,26 +1,14 @@
 <script setup lang="ts">
-/**
- * FileThumb.vue — 文件卡里的小图预览
- * ------------------------------------------------------------------
- * 画的是 `rec.thumb` —— 解码后**已经画好的显示层画布**（stretch 之后那份）。不另拉
- * 一次盘阵 JPG：那既多一次网络，又和画布上看到的不是同一份像素。所有 route
- * （utif / sparse / chunked / jpg / img）都走这条，不必按来源分叉。
- *
- * 两种形态：
- * - 默认（不传 `size`）：整行宽的 96px 横幅，用于截图选择浮层（ChatImagePicker）。
- * - `size`：固定边长的方块（查看器左栏 96×96），contain 装进完整画面，
- *   留白由浅灰绿底兜着 —— 侧栏卡片因此能做成横向紧凑布局。
- *
- * 解码是懒的：**没打开过的图根本没有像素**，这时显占位。这是刻意的，不是缺陷 ——
- * 为了列表里的小图去把每张大图都解码一遍，代价是几十秒 × N。
- *
- * 重绘时机只看这张图自己的像素标识（thumb / paintedMode），**不听全局 renderTick**：
- * 那个值在平移缩放时每个 mousemove 都 +1，会让整列缩略图跟着无谓重绘。
- */
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
+/** Disk cards use existing lazy thumbnails; local files retain their canvas preview. */
+import { onBeforeUnmount, onMounted, computed, ref, watch } from 'vue';
+import { loadSrConfig, sceneImageUrl } from '../lib/scene';
 import type { ViewerRec } from '../stores/viewer';
 
 const props = defineProps<{ rec?: ViewerRec; size?: number; previewSrc?: string; detailSrc?: string }>();
+
+const diskSrc = computed(() => sceneImageUrl(loadSrConfig(), props.rec?.card?.row.thumbnail_url ?? null));
+const failed = ref(false);
+watch(diskSrc, () => { failed.value = false; });
 
 const BOX_H = 96;                       // 横幅形态的高度（与 CSS 一致）
 
@@ -87,12 +75,13 @@ onBeforeUnmount(() => {
     :class="{ compact: !!size }"
     :style="size ? { width: size + 'px', height: size + 'px' } : undefined"
   >
-    <template v-if="previewSrc">
+    <img v-if="diskSrc && !failed" class="ft-preview" :src="diskSrc" alt="" loading="lazy" decoding="async" draggable="false" @error="failed = true" />
+    <template v-else-if="previewSrc">
       <img class="ft-preview" :src="previewSrc" alt="" draggable="false" />
       <img v-if="detailSrc" class="ft-preview ft-detail" :src="detailSrc" alt="" draggable="false" />
     </template>
-    <canvas v-else ref="cv" class="ft-cv"></canvas>
-    <span v-if="!previewSrc && !rec?.thumb" class="ft-ph">{{ rec?.status || '未打开' }}</span>
+    <canvas v-else-if="!rec?.card" ref="cv" class="ft-cv"></canvas>
+    <span v-if="rec?.card ? (!diskSrc || failed) : (!previewSrc && !rec?.thumb)" class="ft-ph">{{ rec?.status || '未打开' }}</span>
   </div>
 </template>
 

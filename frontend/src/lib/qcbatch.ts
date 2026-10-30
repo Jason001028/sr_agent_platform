@@ -95,8 +95,8 @@ export type BakeStage = 'resolve' | 'body' | 'nosr' | 'old';
 export const BAKE_STAGE_LABEL: Record<BakeStage, string> = {
   old: 'old JPG',
   resolve: '解析场景',
-  body: '生成本体 jpg',
-  nosr: '生成 NOSR jpg',
+  body: '解析本体卡片',
+  nosr: '关联 NOSR 卡片',
 };
 
 export interface BakeFail { stage: BakeStage; reason: string }
@@ -190,14 +190,14 @@ export async function runSceneBake<T extends BakeRow>(
     deps.onProgress?.(i + 1, total, it, 'nosr');
     try {
       if (await deps.nosr(it, res) === 'missing') {
-        notes[it.name] = '盘上没有未超分那份（NOSR），只生成了本体';
+        notes[it.name] = '盘上没有未超分那份（NOSR），只加入本体卡片';
       }
     } catch (e) {
       // 本体生成成功、NOSR 没成功：**不覆盖**本体那条失败记录（两条记的是不同的事，
       // 而卡片上只有一个名字）。本体已成的状态下这条只进 notes 更准确 —— 但
       // 名字只有一个键，所以本体失败时保留本体那条（更严重、且先发生）。
       if (!fails[it.name]) fails[it.name] = { stage: 'nosr', reason: errText(e) };
-      else notes[it.name] = 'NOSR 那份没生成成功：' + errText(e);
+      else notes[it.name] = 'NOSR 卡片关联失败：' + errText(e);
     }
     if (signal.aborted) { stopped = true; break; }
     if (deps.old) {

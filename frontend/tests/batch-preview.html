@@ -1,0 +1,12 @@
+<!doctype html><html><body><div id="root"></div><script type="module">
+import { createApp, h, nextTick } from 'vue';
+import { createPinia, setActivePinia } from 'pinia';
+import { useViewerStore } from '/src/stores/viewer.ts';
+import FileThumb from '/src/components/FileThumb.vue';
+const pinia = createPinia();
+setActivePinia(pinia);
+const store = useViewerStore();
+createApp({ render: () => h('div', {}, store.recs.map(rec => h(FileThumb, { key: rec.id, rec, size: 96 }))) })
+  .use(pinia).mount('#root');
+window.batchTest = { store, nextTick };
+</script></body></html>

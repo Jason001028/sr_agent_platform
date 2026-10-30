@@ -201,6 +201,25 @@ def _raster_preview(abs_path: Path, root: Path | None) -> dict | None:
     return out
 
 
+def _thumbnail_url(source: Path, root: Path | None) -> str | None:
+    """Reuse one scene thumbnail for input/PAN/ORI/NOSR list cards only.
+
+    The shared thumbnail is a browsing aid, never the stage's analysis pixels.
+    """
+    if root is None or not scene_search.is_scene_dir(source.parent):
+        return None
+    stem = source.stem.lower()
+    base = source.parent.name.lower()
+    if not (stem in (base, "pan", "ori", base + "_ori", "pan_ori")
+            or stem == base + "_nosr" or stem == "pan_nosr"
+            or (stem.startswith((base + "_", "pan_")) and stem.endswith("_nosr"))):
+        return None
+    thumb = source.parent / (source.parent.name + "_thumb.jpg")
+    if not is_within(thumb, root) or not thumb.is_file():
+        return None
+    return paths.rel_url(thumb, root)
+
+
 def _scene_row(scene: dict, root: Path | None) -> dict:
     """Wrap one search_scenes row with W/H + jpgUrl (opaque id, no abs file path).
 
@@ -246,6 +265,7 @@ def _scene_row(scene: dict, root: Path | None) -> dict:
     # lq_path 一律盘阵 POSIX 形态：它会与 /api/queue 行 params.lq_path（提交侧
     # 归一化的 POSIX 值）逐字比对，宿主形态在 Windows 开发机上永远比不中。
     # Linux 上 as_posix() 与 str() 同值，生产行为不变。
+    row["thumbnail_url"] = _thumbnail_url(abs_path, root)
     row["lq_path"] = abs_path.parent.as_posix()
     if abs_path.suffix.lower() in (".jpg", ".jpeg"):
         # 盘阵里的 JPG 就是显示就绪图本身（§4.7）：不需要预览生成预览，
@@ -303,6 +323,7 @@ def _manual_row(abs_path: Path, dir_path: Path, root: Path | None) -> dict:
         # 同 _scene_row：lq_path 一律 POSIX（它会被原样带进提交表单）。
         "lq_path": dir_path.as_posix(),
         "manual": True,
+        "thumbnail_url": _thumbnail_url(abs_path, root),
         # 同 _scene_row：显示件 jpg 的同名栅格（只对 jpg 源非空）。
         "rasterPreview": _raster_preview(abs_path, root),
     }
@@ -1549,7 +1570,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Scene resource unavailable") from exc
 
     @app.get("/api/scenes/{scene_id}/preview")
-    def preview(scene_id: str, div: int = Query(2)):
+    def preview(scene_id: str, div: int = Query(2), ready_only: bool = False):
         """场景预览 JPG（响应体即字节）。`?div=` 选下采样档位（各边 ÷div）。
 
         落点：源同目录（或 `SR_PREVIEWS_ROOT` 镜像树）的 `<stem>_preview.jpg`，
@@ -1579,7 +1600,7 @@ def create_app() -> FastAPI:
             # 源就是显示就绪图（§4.7）：直接回源文件，不必（也无法）预览生成预览。
             # 正常路径下前端拿 hasPreview/jpgUrl 走静态 URL，不会打到这里，
             # 这是契约兜底：/preview 对任何场景行都返回可显示的 JPEG。
-            return FileResponse(str(abs_path), media_type="image/jpeg")
+            return {"ready": True} if ready_only else FileResponse(str(abs_path), media_type="image/jpeg")
         jpg = paths.preview_jpg_for(abs_path, root)
         try:
             ensure_preview_jpg(str(abs_path), str(jpg), div=div)
@@ -1587,7 +1608,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=422,
                                 detail=f"预览生成失败：{e}") from e
         _sweep_legacy_preview(jpg, abs_path)     # 老点号那份没有任何读者了
-        return FileResponse(str(jpg), media_type="image/jpeg")
+        return {"ready": True} if ready_only else FileResponse(str(jpg), media_type="image/jpeg")
 
     @app.get("/api/scenes/{scene_id}/preview-drop")
     def preview_drop(scene_id: str, div: int = Query(2)):
@@ -1850,6 +1871,7 @@ def create_app() -> FastAPI:
                    "hasPreview": False, "previewDiv": None, "jpgUrl": None}
             if p is None:
                 return row
+            row["thumbnail_url"] = _thumbnail_url(p, root) if kind != "product" else None
             row["name"] = p.name
             if root is not None and is_within(p, root):
                 row["rel"] = paths.rel_of_scene(p, root)

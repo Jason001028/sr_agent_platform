@@ -875,6 +875,13 @@ export async function fetchExistingSceneJpg(cfg: SrConfig, row: SceneRow): Promi
  *  `onPhase` 在「本次会触发生成预览」时被调用一次（只有这一次，没有百分比）：
  *  首次生成预览要读一遍源图，2.4 万像素级的场景在盘阵上要几秒到几十秒，调用方拿它
  *  更新遮罩文案，别让界面看起来像卡死了。 */
+export async function ensureScenePreviewReady(cfg: SrConfig, row: SceneRow, div: number): Promise<void> {
+  if (!previewNeedsBake(row, div) && !(row.rasterPreview && rasterPreviewWins(row.rasterPreview, div))) return;
+  await http(scenePreviewUrl(cfg, row.id, div) + '&ready_only=true');
+  row.hasPreview = true;
+  if (row.jpgUrl) row.previewDiv = div;
+}
+
 export async function fetchSceneJpg(
   cfg: SrConfig,
   row: SceneRow,
@@ -1068,6 +1075,7 @@ export interface SceneSibling {
   H: number | null;
   hasPreview: boolean;
   previewDiv: number | null;
+  thumbnail_url?: string | null;
   jpgUrl: string | null;
 }
 
@@ -1120,6 +1128,7 @@ export function siblingRow(res: SceneSiblings, item: SceneSibling): SceneRow {
     W: item.W, H: item.H,
     rel: item.rel,
     jpgUrl: item.jpgUrl,
+    thumbnail_url: item.thumbnail_url,
     hasPreview: item.hasPreview,
     previewDiv: item.previewDiv,
     lq_path: res.lqPath,

@@ -62,6 +62,7 @@ export interface SceneRow {
   W: number | null;
   H: number | null;
   rel: string | null;       // scenes 根下相对路径（仅调试用）
+  thumbnail_url?: string | null;
   jpgUrl: string | null;    // 相对 /disk-array/…（JPG 已生成才非空）
   hasPreview: boolean;      // 服务端缓存 JPG 是否已生成
   /** 盘上那份预览是按哪一档（各边 ÷N）生成的；null = 没有 / 旧格式规则签名 /
@@ -268,8 +269,8 @@ export function isDiskArrayUrl(url: string): boolean {
  * 传了别的值是 400。
  */
 
-/** 可选档位：预览长宽各为源图的 1/N。与后端 PREVIEW_DIVISORS 同序同值。 */
-export const SCENE_PREVIEW_DIVS = [2, 4, 8, 16, 32] as const;
+/** 界面可选档位：预览长宽各为源图的 1/N，均为后端支持的值。 */
+export const SCENE_PREVIEW_DIVS = [1, 2, 4, 8, 16] as const;
 
 /** 产品默认档位。**只活在前端** —— 后端缺参数时是 2（旧行为，逐字节不变），
  *  那是给「旧 dist 配新 backend」留的兼容口子，不是 UI 默认值。 */

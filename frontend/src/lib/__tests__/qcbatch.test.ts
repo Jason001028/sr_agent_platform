@@ -231,14 +231,14 @@ describe('runSceneBake —— 单景失败不中断整批', () => {
     });
     const r = await runSceneBake([ROWS[0]], deps, never.signal);
     expect(r.fails).toEqual({ a: { stage: 'body', reason: '生成预览超时' } });
-    expect(r.notes).toEqual({ a: 'NOSR 那份没生成成功：siblings 502' });
+    expect(r.notes).toEqual({ a: 'NOSR 卡片关联失败：siblings 502' });
   });
 
   it("NOSR 返回 'missing' → 进 notes 不进 fails（盘上没有那份是事实）", async () => {
     const { deps } = harness({ nosr: async () => 'missing' });
     const r = await runSceneBake([ROWS[0]], deps, never.signal);
     expect(r.fails).toEqual({});
-    expect(r.notes).toEqual({ a: '盘上没有未超分那份（NOSR），只生成了本体' });
+    expect(r.notes).toEqual({ a: '盘上没有未超分那份（NOSR），只加入本体卡片' });
     expect(r.done).toBe(1);
   });
 

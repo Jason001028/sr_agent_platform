@@ -119,8 +119,8 @@ def input_scene_path(dir_path) -> Path | None:
     if not is_scene_dir(dir_path):
         return None
     d = Path(dir_path)
-    if (d / 'PAN.tif').is_file() and (d / (d.name + '_NOSR.tif')).is_file():
-        return d / 'PAN.tif'
+    # NOSR is a backup, not a signal to replace an existing named input with PAN.
+    # Keep SC-before-RC priority shared by resolve, masks and SR metadata.
     for cand in input_candidates(dir_path):
         if cand.is_file():
             return cand

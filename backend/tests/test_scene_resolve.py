@@ -136,6 +136,23 @@ class ResolveBase(unittest.TestCase):
 
 
 class TestResolveOk(ResolveBase):
+    def test_named_pan_input_keeps_priority_with_pan_and_nosr(self):
+        """Batch resolve must not replace the serial-number TIFF with PAN.tif."""
+        d = self.make_scene()
+        tifffile.imwrite(d / 'PAN.tif', np.zeros((40, 80), dtype=np.uint16))
+        tifffile.imwrite(d / (d.name + '_NOSR.tif'), np.zeros((20, 40), dtype=np.uint16))
+        c = self.client()
+        for request in ({'name': SCENE_NAME}, {'name': NAME_NOPROD, 'product': 'PAN'},
+                        {'name': SCENE_NAME + '.tif'}, {'path': self.win_path(d)}):
+            with self.subTest(request=request):
+                response = c.post('/api/scenes/resolve', json=request)
+                self.assertEqual(response.status_code, 200, response.text)
+                body = response.json()
+                self.assertEqual(body['row']['name'], SCENE_NAME)
+                self.assertEqual((body['row']['W'], body['row']['H']), (320, 640))
+                self.assertEqual(body['resolved']['input_name'], SCENE_NAME + '.tif')
+                self.assertTrue(body['resolved']['mask_path'].endswith('/' + SCENE_NAME + '_mask.tif'))
+
     def test_windows_form_opens_manual_scene(self):
         d = self.make_scene()
         c = self.client()

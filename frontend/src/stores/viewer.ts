@@ -47,7 +47,7 @@ import {
   sceneAnchors,
 } from '../lib/scene.js';
 import {
-  apiResolveScene, apiBakeMask, apiSceneSiblings, fetchSceneJpg, fetchDropSceneJpg,
+  apiResolveScene, apiBakeMask, apiSceneSiblings, ensureScenePreviewReady, fetchSceneJpg, fetchDropSceneJpg,
   siblingRow, nosrItemOf, previewCacheStats, clearPreviewCache, watchPreviewCache,
 } from '../lib/api.js';
 import type { SceneResolveResult, SceneSibling, SceneSiblings } from '../lib/api.js';
@@ -112,6 +112,7 @@ export interface ViewerRec {
    *  （Float32Array），**一景两张卡 ≈ 1.6GB** —— 浏览器单次分配上限约 2GB，批量必爆。
    *  所以批量只负责把 jpg 生成到盘上，点开时再取（那时命中服务端缓存，秒回）。
    *  拖入链与场景库链的卡片创建时像素就在手，这个字段恒为 undefined。 */
+  detailDiv?: number;
   card?: { row: SceneRow; meta: SceneOpenMeta };
   /** 批量入列的占位卡：先按清单行排满，解析成功后原地补齐身份。占位期间不可点/拖/删。 */
   pending?: boolean;
@@ -1359,7 +1360,7 @@ export const useViewerStore = defineStore('viewer', () => {
     const already = activeId.value === id;
     const moved = placeRec(id, side);
     noteCompareEntry(id);                // 对比模式下露面的这张要进点选清单（幂等）
-    if (already && rec.thumb) {
+    if (already && rec.thumb && (!rec.card || rec.detailDiv === previewDiv.value)) {
       // 已经是活动侧这张：只重画。**只有它真的换了格子才重新适配** ——
       // 同一张图留在原格时若也 fit，一次多余的点选就把用户的缩放抹了。
       // 换了格子（两格互换）也走 `fitAfterImageChange`：新格子的视口与图都换了，
@@ -1376,7 +1377,7 @@ export const useViewerStore = defineStore('viewer', () => {
     if (drawMode.value) {
       pendingPts.value = null; pendingRect.value = null; hoverPt.value = null;
     }
-    if (rec.thumb) {
+    if (rec.thumb && (!rec.card || rec.detailDiv === previewDiv.value)) {
       repaintOnActivate(rec);
       // 分屏（对比）下换图保住用户的缩放与位置，其余情况看全幅；见 fitAfterImageChange。
       fitAfterImageChange(activeSide.value, rec);
@@ -1571,7 +1572,9 @@ export const useViewerStore = defineStore('viewer', () => {
   async function applySceneJpgToRec(rec: ViewerRec, meta: SceneOpenMeta,
                                     blob: Blob, layout?: string): Promise<boolean> {
     const my = ++rec.token;                     // 领号：JPG 要接管像素了
+    const requestedDiv = previewDiv.value;
     const cv = await decodeJpgToCanvas(blob);
+    if (rec.card && previewDiv.value !== requestedDiv) return false;
     if (rec.token !== my || !recs.value.includes(rec)) return false;
     const tw = cv.width, th = cv.height;
     const ctx = cv.getContext('2d');
@@ -1733,12 +1736,8 @@ export const useViewerStore = defineStore('viewer', () => {
     }
   }
 
-  /** 同一张卡正在取图的那些。**按场景 id 去重** —— 一个场景 id 只对应一张 rec
-   *  （`insertSceneCard` 用 `findRecByMeta` 去重），所以「这个 id 已经在取」就等于
-   *  「这张卡已经在取」：用户对着同一张空卡连点两下不会起两个请求去读同一个大文件。
-   *  （它挡的是**整条取图+装像素**；跨「批量生成」与「点开取图」两条路的那层汇合见
-   *  `fetchSceneJpgShared`。） */
-  const cardFetchInflight = new Set<string>();
+  /** Shared, awaitable pixel loads, keyed by record and preview tier. */
+  const cardFetchInflight = new Map<string, { token: number; promise: Promise<void> }>();
 
   /** 同一个场景、同一档位正在取的图。键是 `场景 id|档位` —— **档位不同就是两张不同的
    *  图**，不能合。
@@ -1751,11 +1750,26 @@ export const useViewerStore = defineStore('viewer', () => {
    *  失败也要摘掉表项：留一个已 reject 的 promise 在表里，后续每次调用都会立刻炸同一个错。 */
   const sceneJpgInflight = new Map<string, Promise<Blob>>();
 
+  const sceneReadyInflight = new Map<string, Promise<void>>();
+  function ensureSceneReadyShared(row: SceneRow, div: number): Promise<void> {
+    const key = row.id + '|' + div;
+    const flying = sceneReadyInflight.get(key);
+    if (flying) return flying;
+    const tracked = ensureScenePreviewReady(loadSrConfig(), row, div).finally(() => {
+      if (sceneReadyInflight.get(key) === tracked) sceneReadyInflight.delete(key);
+    });
+    sceneReadyInflight.set(key, tracked);
+    return tracked;
+  }
+
   function fetchSceneJpgShared(row: SceneRow, div: number): Promise<Blob> {
     const key = row.id + '|' + div;
     const flying = sceneJpgInflight.get(key);
     if (flying) return flying;
-    const tracked = fetchSceneJpg(loadSrConfig(), row, div).finally(() => {
+    const tracked = (async () => {
+      await ensureSceneReadyShared(row, div);
+      return fetchSceneJpg(loadSrConfig(), row, div);
+    })().finally(() => {
       if (sceneJpgInflight.get(key) === tracked) sceneJpgInflight.delete(key);
     });
     sceneJpgInflight.set(key, tracked);
@@ -1766,51 +1780,47 @@ export const useViewerStore = defineStore('viewer', () => {
    *
    *  装回失败（`applySceneJpgToRec` 返回 false）= 「期间有更新的写者接手 / 这张卡已经
    *  被移除了」，**那是被取消，不是失败** —— 静默返回，绝不写成取图失败。 */
-  async function fetchCardPixels(rec: ViewerRec): Promise<void> {
+  function fetchCardPixels(rec: ViewerRec): Promise<void> {
     const card = rec.card;
-    if (!card) return;
-    const key = card.meta.sceneId;
-    if (cardFetchInflight.has(key)) return;    // 这张卡已经在取了（连点两下）
-    cardFetchInflight.add(key);
-    try {
-      const div = previewDiv.value;
-      const blob = await fetchSceneJpgShared(card.row, div);
-      await applySceneJpgToRec(rec, card.meta, blob,
-        `盘阵 JPG（${previewDivLabel(div)} 尺度 + 直方图均衡，服务端已生成）`);
-      // **成败都摘掉 card**：成功 = 像素已在 rec 里；返回 false = 这一笔落空了（被取消 /
-      // 已被更新的写者接手），但那份新像素也不是这份空卡能再取出来的 —— 留着它只会让
-      // 下次点开再走一遍「取图」而不是直接用；而 rec 若已被移除，改它也无人在意。
-      rec.card = undefined;
-    } finally {
-      cardFetchInflight.delete(key);
-    }
+    if (!card) return Promise.resolve();
+    const div = previewDiv.value;
+    const key = rec.id + '|' + div;
+    const flying = cardFetchInflight.get(key);
+    if (flying && flying.token === rec.token) return flying.promise;
+    const intent = { token: ++rec.token, promise: Promise.resolve() };
+    const tracked = (async () => {
+      try {
+        const blob = await fetchSceneJpgShared(card.row, div);
+        if (rec.token !== intent.token || !recs.value.includes(rec) || previewDiv.value !== div) return;
+        intent.token++; // applySceneJpgToRec claims the next write token before decoding.
+        const applied = await applySceneJpgToRec(rec, card.meta, blob);
+        if (applied) rec.detailDiv = div;
+      } catch (e) {
+        if (rec.token === intent.token && recs.value.includes(rec) && previewDiv.value === div) throw e;
+      }
+    })().finally(() => {
+      if (cardFetchInflight.get(key) === intent) cardFetchInflight.delete(key);
+    });
+    intent.promise = tracked;
+    cardFetchInflight.set(key, intent);
+    return tracked;
   }
 
-  /** 批量路：把这一张卡的 jpg 生成到盘上（服务端那份 + 本地 LRU），**不装像素**。
-   *
-   *  抛错 = 这一景这一步失败了（由批量那边记账）；正常返回 = 成功、或这张卡已经不在了。 */
+  /** Complete metadata-only list preparation. Detailed previews are fetched on open.
+   * The legacy name is retained for qclist callers; this never bakes pixels. */
   async function bakeCardPixels(id: number): Promise<void> {
     const rec = recs.value.find((r) => r.id === id);
-    if (!rec || !rec.card) return;             // 已经被移除 / 已经装上了
-    rec.status = '正在生成预览…';
-    try {
-      // 取到手就扔掉：服务端那份已落盘，本地 LRU 也留了一份（api.ts 的 previewBlobs），
-      // 所以点开这张卡时是一次命中、直接出图，不会重新生成。
-      await fetchSceneJpgShared(rec.card.row, previewDiv.value);
-      rec.status = '待打开（已加载）';
-      rec.statusCls = '';
-    } catch (e) {
-      rec.status = '生成预览失败';
-      rec.statusCls = 'err';
-      rec.linkNote = e instanceof Error ? e.message : String(e);
-      throw e;                                 // 交给批量记进失败账
-    }
+    if (!rec?.card || rec.thumb) return;
+    rec.status = '待打开';
+    rec.statusCls = '';
   }
 
   /** 点击路：取像素 + 上屏 + 预热缩放（遮罩盖着，把首次缩放那笔一次性付掉）。 */
+  let cardLoadCount = 0;
   async function loadCardPixels(rec: ViewerRec): Promise<void> {
+    cardLoadCount++;
     busy.value = true;
-    showMask('正在取盘阵场景的图…', rec.name + '（预览已生成，'
+    showMask('正在取盘阵场景的图…', rec.name + '（按需生成或读取预览，'
       + previewDivLabel(previewDiv.value) + ' 尺度）', false);
     try {
       await fetchCardPixels(rec);
@@ -1820,7 +1830,8 @@ export const useViewerStore = defineStore('viewer', () => {
       rec.status = '取图失败'; rec.statusCls = 'err'; rec.linkNote = t;
       showErr('「' + rec.name + '」取图失败：' + t);
     } finally {
-      hideMask(); busy.value = false;
+      cardLoadCount--;
+      if (cardLoadCount === 0) { hideMask(); busy.value = false; }
       void maybePrefetchCompare();             // 对比模式里换了图 → 可能换了场景
     }
   }

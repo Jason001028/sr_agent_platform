@@ -19,7 +19,7 @@ import {
   apiWriteQcList, apiSceneSiblings, nosrItemOf, siblingRow,
 } from '../lib/api.js';
 import type { SceneResolveResult, SceneSiblings, SceneSibling } from '../lib/api.js';
-import { matchesScene, runSceneBake, progressText, fmtElapsed } from '../lib/qcbatch.js';
+import { matchesScene, runSceneBake, fmtElapsed } from '../lib/qcbatch.js';
 import type { BakeFail } from '../lib/qcbatch.js';
 import { pathLeafOf } from './queue.js';
 import { useViewerStore } from './viewer.js';
@@ -254,15 +254,8 @@ export const useQcListStore = defineStore('qclist', () => {
     if (hit) selName.value = hit.name;
   }
 
-  /* ---------------- 一键解析：按 .txt 顺序批量生成预览 + 入列 ----------------
-     一景两步：本体 jpg + NOSR jpg（盘上没有那份就只生成本体，如实记一笔「缺失」）。
-     每一步都**只把 jpg 生成到盘上**，卡片入列时只有身份、没有像素 —— 几十景一次装进
-     内存必爆（算式见 viewer 的 ViewerRec.card）。点开某张卡时命中服务端缓存，秒出。
-
-     全程走既有端点（resolve / preview / siblings），**没有新后端接口**：批量端点既
-     停不下服务端已经在生成的那一份，又要把「试过哪些候选、各自为什么不行」重写一遍
-     （那就成了新的「静默换路径」入口）。服务端读盘本就该并发 1（后台主动生成 ticker 就是
-     单消费者），省下的只有毫秒级往返。 */
+  /* 一键解析仅 resolve / siblings 元数据并入列；详细预览由用户打开时按需生成。
+     保留既有串行驱动、停止点和逐景失败记账，不为列表预览读取详细影像。 */
 
   type BakeState = 'idle' | 'running' | 'stopping' | 'done' | 'stopped';
 
@@ -331,7 +324,7 @@ export const useQcListStore = defineStore('qclist', () => {
     };
   }
 
-  /** 按 .txt 顺序把整份清单跑一遍：清空暂存区 → 逐景 resolve + 生成两份 jpg + 入列。
+  /** 按 .txt 顺序把整份清单跑一遍：清空暂存区 → 逐景 resolve + 关联 NOSR + 入列。
    *
    *  跑的过程中**不弹遮罩、不动 busy**（那是模态的，会把用户正在看的图挡住、工具栏
    *  锁住几十景 × 每景几十秒）；进度只走面板上那一行字。 */
@@ -348,7 +341,6 @@ export const useQcListStore = defineStore('qclist', () => {
     viewer.insertPendingCards(rows.map((r) => r.name));
     bakeTotal.value = rows.length;
     const withOld = includeOld.value;
-    const div = viewer.previewDiv;         // 抓一次，整批沿用（中途拖滑块只影响后面那些景）
     const startedAt = Date.now();
     const ac = new AbortController();
     bakeAbort = ac;
@@ -363,8 +355,7 @@ export const useQcListStore = defineStore('qclist', () => {
       const report = await runSceneBake(rows, {
         resolve: (it, signal) => scenes.resolveByName(it.name, it.imgType, { signal }),
         body: async (it, res) => {
-          // ① 占位卡原地补齐身份 ② 把 jpg 生成到盘上。顺序不能反：先拿到身份，
-          // 生成过程中卡片才能显示「正在生成预览…」而不是继续挂着「解析中」。
+          // 补齐权威身份后完成列表准备；详细预览生成不属于批量成功条件。
           const r = res as SceneResolveResult;
           const meta = bodyMeta(r);
           const id = viewer.fillPendingCard(it.name, meta, r.row)
@@ -394,7 +385,7 @@ export const useQcListStore = defineStore('qclist', () => {
         } : undefined,
         onProgress: (i, n, it, phase) => {
           bakeDone.value = i - 1;
-          bakeNow.value = progressText(i, n, it.name, div);
+          bakeNow.value = `第 ${i}/${n} 景 · ${it.name} · 解析列表`;
           // 还没轮到生成的那张占位卡，状态跟着这一步走。
           if (phase === 'resolve') viewer.setPendingStatus(it.name, '解析中…');
         },
@@ -421,9 +412,7 @@ export const useQcListStore = defineStore('qclist', () => {
     }
   }
 
-  /** 中途停：掐掉在飞的 resolve，并在下一景开跑之前收手。
-   *  **正在生成的那一景停不下来** —— 取图的两个 API 都不收 AbortSignal，所以让它生成完
-   *  （落盘正是用户要的缓存），文案如实写「正在停止（等这一景生成完…）」。 */
+  /** 中途停：掐掉在飞的 resolve；siblings 返回后在驱动器的下一个取消点停止。 */
   function stopBake(): void {
     if (bakeState.value !== 'running') return;
     bakeState.value = 'stopping';
@@ -439,8 +428,8 @@ export const useQcListStore = defineStore('qclist', () => {
    *  **失败与「缺 NOSR」分开数**：前者是要处理的，后者是盘上的事实。 */
   const bakeLine = computed(() => {
     const st = bakeState.value;
-    if (st === 'idle') return '按清单顺序逐景生成本体 + NOSR 两份 jpg，每景左侧落两张卡';
-    if (st === 'stopping') return '正在停止（等这一景生成完…）';
+    if (st === 'idle') return '按清单顺序解析本体与 NOSR 卡片，详细预览在打开时加载';
+    if (st === 'stopping') return '正在停止（等待当前场景解析结束…）';
     if (st === 'running') {
       return (bakeNow.value || '正在准备…') + ' · 已用 ' + fmtElapsed(bakeElapsed.value * 1000);
     }

@@ -53,7 +53,7 @@ const stretchTitle = computed(() =>
 
 /** 预览缩放档位（各边 ÷N）：**平台级**设置，拖入 / 场景库两条入口
     都按它生成。拖动条按**下标**走（`SCENE_PREVIEW_DIVS` 的次序），不是按档位值本身 ——
-    ÷2…÷32 是等比数列，用下标每格等宽，用户按起来才是均匀的。 */
+    原档…÷16 是等比数列，用下标每格等宽，用户按起来才是均匀的。 */
 const DIVS = SCENE_PREVIEW_DIVS;
 const divIndex = computed(() => {
   const i = (DIVS as readonly number[]).indexOf(store.previewDiv);
@@ -194,7 +194,7 @@ watch(
         + '档位越小越清晰、首次打开越慢（要读一遍大图）；'
         + '改档后已打开过的场景会在下次打开时按新档重新生成（原地覆盖，不堆积）。'"
     >
-      预览 {{ divLabel }}
+      <span class="divsel-label">{{ store.previewDiv === 1 ? '原档预览' : '预览 ' + divLabel }}</span>
       <input
         type="range"
         :min="0"
@@ -202,6 +202,7 @@ watch(
         step="1"
         :value="divIndex"
         aria-label="预览下采样档位"
+        :aria-valuetext="store.previewDiv === 1 ? '原档预览，原始分辨率' : '预览 ' + divLabel"
         @input="onDivInput"
       />
     </span>
@@ -416,7 +417,8 @@ watch(
 
 /* ---- 预览档位：不再是一颗白 pill，直接坐在雾白底上（组内已用间距分开） ---- */
 .divsel {
-  display: inline-flex;
+  display: inline-grid;
+  grid-template-columns: 76px 80px;
   align-items: center;
   gap: 8px;
   flex: none;
@@ -428,8 +430,13 @@ watch(
   white-space: nowrap;
   user-select: none;
 }
+.divsel-label {
+  min-width: 0;
+  text-align: left;
+}
 .divsel input[type='range'] {
-  width: 64px;
+  width: 80px;
+  min-width: 0;
   height: 16px;
   margin: 0;
   background: transparent;

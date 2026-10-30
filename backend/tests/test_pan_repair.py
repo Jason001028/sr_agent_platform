@@ -235,7 +235,7 @@ class TestPanRepair(unittest.TestCase):
 
 class TestPanRepairSceneApi(ResolveBase):
     def test_current_pan_nosr_and_backup_identity(self):
-        d = self.make_scene()
+        d = self.make_scene(tif=False)
         make_strip_tif(d, 'PAN.tif', 80, 40)
         make_strip_tif(d, d.name + '_NOSR.tif', 40, 20)
         make_strip_tif(d, 'PAN_old_2.tif', 80, 40)

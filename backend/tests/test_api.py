@@ -361,7 +361,7 @@ class TestPreviewDiv(SceneListMixin):
     def test_each_div_bakes_its_own_size_and_stamp(self):
         c = self._client()
         sid = self._row(c)["id"]
-        for div, (w, h) in ((2, (160, 320)), (4, (80, 160)), (8, (40, 80)),
+        for div, (w, h) in ((1, (320, 640)), (2, (160, 320)), (4, (80, 160)), (8, (40, 80)),
                             (16, (20, 40)), (32, (10, 20))):
             with self.subTest(div=div):
                 r = c.get(f"/api/scenes/{sid}/preview?div={div}")
@@ -373,7 +373,7 @@ class TestPreviewDiv(SceneListMixin):
     def test_invalid_div_400(self):
         c = self._client()
         sid = self._row(c)["id"]
-        for bad in (0, 1, 3, 64):
+        for bad in (0, 3, 64):
             with self.subTest(div=bad):
                 self.assertEqual(
                     c.get(f"/api/scenes/{sid}/preview?div={bad}").status_code, 400)
