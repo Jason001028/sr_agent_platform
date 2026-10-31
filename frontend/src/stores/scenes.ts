@@ -352,6 +352,8 @@ export const useScenesStore = defineStore('scenes', () => {
         // 否则这条入口的 rec 少一个 serverMaskPath，「保存掩码到盘阵」前后
         // 显示的掩码路径与查看器那条入口不一致（两边最终都以后端回的为准）。
         serverMaskPath: resolved ? resolved.mask_path : null,
+        previewOnly: resolved?.preview_only === true,
+        srcRev: row.srcRev ?? null,
       }, blob);
       // 打开成功 = 这一景**确实还在盘上**的实证，而且这一趟之后盘上必有它当前档位的
       // 预览（fetchSceneJpg 的保证）。若当前列表里也有它，就地翻回来 —— 那一格的灰块

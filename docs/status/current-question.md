@@ -26,6 +26,10 @@ Skill 接口说明见 [skill_interface.md](../planning/skill_interface.md)：Age
 
 Agent 中文交互、执行概览、自动中文标题与手动改名见 [agent-interaction-titles.md](agent-interaction-titles.md)。自动命名在首轮结束后独立执行，metadata 条件更新保护手动标题；真实模型和浏览器视觉验收待核。
 
+《待修复清单》选中行驱动的左侧「场景聚焦遮罩」见 [spotlight-focus.md](spotlight-focus.md)：同景卡片保持清晰、其余压暗，三档模式可切换并持久化；真卡片与真机验收待核。
+
+盘阵外授权 TIFF 的通用预览见 [generic-preview-p1.md](generic-preview-p1.md)：`SR_PREVIEW_ROOTS` 只放行看图 / ROI / Agent 读图，提交 SR 与写掩码仍只认 `SR_ALLOWED_ROOTS`；外部源预览落隔离缓存并走只读 `/preview` 换档位。场景行按实际源核对缓存签名，同名 `.tif/.tiff` 各有独立落点（冲突名带源路径哈希），`/preview` 回字节快照并核对档位与源身份；前端需要生成时直接用 `/preview` 的响应体、静态取图也复核签名。真机验收待核。
+
 ## 1. 平台是什么，现在能做什么
 
 遥感影像超分（SR）处理平台。浏览器查看盘阵上的大 TIF、绘制掩码、提交 SR 作业、跟踪共享队列。
@@ -42,7 +46,8 @@ Agent 中文交互、执行概览、自动中文标题与手动改名见 [agent-
   （NOSR），它出现在列表里时带 `NOSR` 标（与本体标区分、可点开进当前活动格）。
   清单导入后多一颗橘色「**一键解析**」：按行序逐景把本体 jpg 与 NOSR jpg 一次性生成到盘上，
   每景两张卡**共用同一个序号**依次入列（生下来不带像素、点开才取图），失败逐条记账标红、
-  可随时停；点清单里任意一行，左侧那两张卡橘色点亮并滚过去（见 §6.4）。
+  可随时停；点清单里任意一行，左侧那两张卡橘色点亮并滚过去，其余卡压上聚焦遮罩
+  （再点同一行取消，见 §6.6）。
   左侧列表顶部有一排图标键：多选、收藏选中（置顶且活过批量清理）、移除选中、清理冗余、
   清理全部、撤回（见 §6.5）。
   右侧「上下文侧舱」含 `[ROI/工具]` 与 `[Agent]` 两个页签。
@@ -130,8 +135,11 @@ Agent 中文交互、执行概览、自动中文标题与手动改名见 [agent-
     即队列表里得有一行。诊断时先看 `/queue` 那次 `page.goto` 之后 `queue.tasks` 是不是空的。
 5. 预览内存不释放：每个文件的预览 `Float32Array` 常驻，各边 ÷4 约 145MB/张、÷2 约 600MB/张；
     分屏按设计同时保留两张，点选清单鼓励多开。当前只记录，无 LRU 释放。
-6. 同一场景的 `<目录名>.jpg` 与 `<目录名>.tif` 两行预览相同（工作流 B 使两行落到同一份落点），
-    且该落点会被不同档位的客户端互相顶掉（div 抖动）。去重与带档位落点留待对比相关的一轮一并定。
+6. 同一场景的 `<目录名>.jpg` 与 `<目录名>.tif` 两行在「栅格更清晰」档位下显示同一份栅格预览
+    （设计如此）；同一份源换档位仍原地覆盖同一落点，客户端会互相触发重生成（响应已改为
+    字节快照，档位与源身份都对上才发出去，不会串图）。同名 `.tif/.tiff` 已按落点分开
+    （`<stem>_<ext>_<源路径哈希>_preview.jpg`）；前端在「需要生成」时直接用 `/preview`
+    的响应体，静态取图也复核签名、对不上退回端点。带档位落点留待对比相关的一轮一并定。
 7. `SR_SCENES_ROOT` 是**单根**，没有多根写法；符号链接只有建在根本身才能通过路径校验。
 8. 场景检索采用白名单：所在目录须含 `<目录名>_meta.xml`，且文件名为 `<目录名>.<ext>` 或 `PAN.<ext>`。
     **代价**：没有该 xml 的目录整个不显示（已接受）。
@@ -199,9 +207,14 @@ Agent 中文交互、执行概览、自动中文标题与手动改名见 [agent-
 
 ### 6.2 关键常量与口径
 
-- **预览预览生成**：规则签名 `srprev:v3:div<N>+equal:q<Q>`；前端档位 各边 ÷2 · ÷4 · ÷8 · ÷16 · ÷32，
-  默认 ÷4（`SR_PRODUCT_PREVIEW_DIV` 默认 4，`0` = 关闭）——**前端档位与该 env 是两个独立的 4，互不联动**。
-  预览落点统一为 `<源 stem>_preview.jpg`。
+- **预览生成**：规则签名 `srprev:v4:div<N>+equal:q<Q>`，可带 `;src=<路径哈希>-<字节数>-<mtime_ns>`；
+  前端档位 各边 ÷2 · ÷4 · ÷8 · ÷16 · ÷32，默认 ÷4（`SR_PRODUCT_PREVIEW_DIV` 默认 4，`0` = 关闭）
+  ——**前端档位与该 env 是两个独立的 4，互不联动**。
+  预览落点默认 `<源 stem>_preview.jpg`；同 stem `.tif/.tiff` 并存时用
+  `<stem>_<ext>_<源路径哈希>_preview.jpg`，避免共用一份可覆盖缓存（只拼 `_tif` 会
+  与 `same_tif.tif` 的原名撞车）。`/preview` 与 `/preview-drop` 回字节快照，档位
+  或 `;src=` 与本次请求的源不一致就重生成；前端需要生成时直接用响应体，静态取图
+  复核签名后才写本地缓存。
 - **掩码**：值域 0/255（0 = 不处理，255 = 处理）；`run_sr` 用 `cv2.threshold(>0)` 读取。
   矢量格式 `{"width":W,"height":H,"polygons":[{"label":"roi","points":[[x,y],...]}]}`，
   x 为列、y 为行，均为原图像素坐标。
@@ -277,6 +290,27 @@ Agent 中文交互、执行概览、自动中文标题与手动改名见 [agent-
 - **撤回只撤列表结构**（成员/顺序/收藏/活动侧/视图/序号），深度 10，一键解析开跑时清空；
   快照共享 rec 对象，不重新解码。键盘：Esc 退出多选、Delete 移除选中、Ctrl/⌘+Z 撤回。
 - 设计取舍与踩坑见 [gui-experience.md §13](../experience/gui-experience.md)。
+
+### 6.6 场景聚焦遮罩（2026-10-30）
+
+- **入口只有《待修复清单》的选中行**：`qc.selName` 变 → 一个 watch 调
+  `setSpotlight(sceneCardIds(sceneNameCandidates(...)))`，命中的是同一 `sceneDir` 的**全部**卡
+  （本体 + NOSR）。点行 / 再点取消 / 自动选中当前图 / 关清单 / 换清单自动同步。
+- **再点同一行 = 取消选中**：点亮与聚焦一起收，不再滚视口。这是有意改的既有语义（此前再点会
+  再点亮一次），现有脚本只在不同行之间连点，未覆盖同行连点两次。
+- **只压左侧列表的滚动视口**：零高度 sticky 锚点（z-index 10）钉在 `.sidebar` 滚动口，
+  `isolation: isolate` 局部层叠；工具条 30 在其上；遮罩 `pointer-events: none` 全穿透。
+  坐标每次现场量滚动口 / 锚点 / 只量聚焦卡，换算成遮罩层局部坐标，滚动 rAF 合帧同帧贴住。
+- **镂空用矩形分块而不是 clip-path**：毛玻璃要 `backdrop-filter`，镂空必须完全不画；
+  「整块 − 窗口」拆成互不重叠的块，窗口外扩 4px 供 1.5px 深松绿描边，块+描边节点数恒为个位数。
+- **三档（设置浮层）**：柔焦毛玻璃（40% 雾白 + `blur(3px)`，默认）/ 柔和暗化
+  （`rgba(17,35,32,0.32)`）/ 无遮罩（只留描边），localStorage `sr.viewer.spotlightMode` 持久化。
+- **动画**：窗口 250ms `cubic-bezier(.22,1,.36,1)`（rAF 插值，可打断，滚动只改目标不重启）；
+  整体 240ms 淡入淡出；减少动态下都直接到位。
+- **纯视觉**：不改像素/缓存/选中态/Agent 状态；`dropRecs` / `removeRec` / `clearRecs` 后
+  `pruneSpotlight()` 剪枝，删光自动收起。
+- 细节、坐标系论证与未覆盖项见 [spotlight-focus.md](spotlight-focus.md)；浏览器回归
+  `node .e2e/test-spotlight-focus.js`。
 
 ### 6.3 测试基线
 
@@ -402,6 +436,13 @@ store 里「用上面的『盘阵场景』栏打开」「请在『盘阵场景�
 临时跳过那两条后跑到 M 段，止于橙描边颜色的既有 0.992 时序抖动（重跑会换到另一条时序失败，
 与本轮改动无关）。
 
+**2026-10-30（场景聚焦遮罩）**：前端 **565 passed**（37 个文件；新增 `spotlight.test.ts` 25 条、
+`spotlightStore.test.ts` 5 条）+ `vue-tsc --noEmit` 零错误 + `npm run build` 通过 +
+`check:terms` 通过。浏览器回归新增 `node .e2e/test-spotlight-focus.js`（真实无头 Chrome，
+宿主 `frontend/tests/spotlight.html`）整轮全绿：选中成窗 / 分区完备 / 点击穿透 / 工具条在上 /
+滚动与缩放跟随 / 滚出视口 / 三档与持久化 / 折叠收场 / 100 张卡节点数 ≤ 8 / 减少动态。
+`test-manual-scene.js` 与其他三套 e2e 本轮**未重跑**（需要后端/内网环境）。
+
 ## 7. 去哪查什么
 
 | 查什么 | 去哪 |
@@ -410,6 +451,7 @@ store 里「用上面的『盘阵场景』栏打开」「请在『盘阵场景�
 | 真机验收怎么勾 | [real-machine-acceptance.md](real-machine-acceptance.md) |
 | 真机怎么部署、起不来怎么办 | [real-machine-bringup.md](real-machine-bringup.md) · [ADHD 动作版](real-machine-bringup-adhd.md) · [deploy/README.md](../../deploy/README.md) |
 | 踩坑与硬约束 | [gui-experience.md](../experience/gui-experience.md) |
+| 场景聚焦遮罩（选中行 → 左侧同景聚焦） | [spotlight-focus.md](spotlight-focus.md) |
 | 平台 API 契约 | [api-contract.md](../planning/api-contract.md) |
 | 预览预览生成端到端链路 | [preview-bake-pipeline.md](../knowledge/preview-bake-pipeline.md) |
 | SR 算法 / 调用契约 / 移植环境 | [docs/sr_code/](../sr_code/) |

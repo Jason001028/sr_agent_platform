@@ -222,12 +222,12 @@ class TestBigPreviewNotMistakenForBomb(unittest.TestCase):
 
     HUGE = 20000          # 20000² = 4 亿像素 > 2× 默认上限
 
-    def _fake_huge_jpeg(self, path, w, h):
+    def _fake_huge_jpeg(self, path, w, h, source=None):
         """把小 JPEG 的 SOF0 宽高改成 w×h（只骗过头解析，不解码像素）。"""
         import io
         buf = io.BytesIO()
         Image.fromarray(np.zeros((8, 8), dtype=np.uint8)).save(
-            buf, format="JPEG", comment=rule_stamp())
+            buf, format="JPEG", comment=rule_stamp(source=source))
         data = bytearray(buf.getvalue())
         i = data.index(b"\xff\xc0")            # SOF0
         data[i + 5:i + 7] = h.to_bytes(2, "big")
@@ -246,7 +246,7 @@ class TestBigPreviewNotMistakenForBomb(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p, _ = make_strip_tif(d, "s.tif", 64, 64)
             jpg = Path(d, "s.preview.jpg")
-            self._fake_huge_jpeg(jpg, self.HUGE, self.HUGE)
+            self._fake_huge_jpeg(jpg, self.HUGE, self.HUGE, source=p)
             future = p.stat().st_mtime + 100
             os.utime(jpg, (future, future))
             r = ensure_preview_jpg(str(p), str(jpg))
@@ -292,7 +292,29 @@ class TestEnsurePreviewJpg(unittest.TestCase):
             jpg = Path(d, "s.preview.jpg")
             ensure_preview_jpg(str(p), str(jpg))
             with Image.open(jpg) as im:
-                self.assertEqual(im.info.get("comment"), rule_stamp())
+                self.assertEqual(im.info.get("comment"), rule_stamp(source=p))
+
+    def test_replaced_source_with_preserved_mtime_regenerates(self):
+        """mtime 没变、内容换了（尺寸不同）→ 源身份戳必须判废。"""
+        with tempfile.TemporaryDirectory() as d:
+            p, _ = make_strip_tif(d, "s.tif", 64, 64)
+            jpg = Path(d, "s.preview.jpg")
+            self.assertEqual(ensure_preview_jpg(str(p), str(jpg))["status"],
+                             "generated")
+            st = p.stat()
+            make_strip_tif(d, "s.tif", 128, 128)
+            os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+            r = ensure_preview_jpg(str(p), str(jpg))
+            self.assertEqual(r["status"], "generated")
+            self.assertEqual((r["w"], r["h"]), (64, 64))
+
+    def test_single_row_source_does_not_divide_by_zero(self):
+        with tempfile.TemporaryDirectory() as d:
+            p, _ = make_strip_tif(d, "thin.tif", 64, 1)
+            self.assertEqual(build_preview_pixels(str(p), 16).shape, (1, 16))
+            jpg = Path(d, "thin.preview.jpg")
+            r = ensure_preview_jpg(str(p), str(jpg), div=4)
+            self.assertEqual((r["w"], r["h"]), (16, 1))
 
     def _old_cache(self, p: Path, jpg: Path, comment: bytes | None) -> None:
         """造一张「旧规则产物」：mtime 明确比源新，可选带某个旧规则签名。"""

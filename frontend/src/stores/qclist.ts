@@ -304,6 +304,7 @@ export const useQcListStore = defineStore('qclist', () => {
       lqPath: r.row.lq_path, sceneDir: r.resolved.dir,
       serverMaskPath: r.resolved.mask_path,
       stageKind: r.resolved.kind, stageSuffix: r.resolved.suffix,
+      srcRev: r.row.srcRev ?? null,
     };
   }
 
@@ -321,6 +322,7 @@ export const useQcListStore = defineStore('qclist', () => {
       sceneId: item.id ?? '', lqPath: sib.lqPath, sceneDir: sib.lqPath,
       serverMaskPath: null,
       stageKind: 'nosr', stageSuffix: sib.suffix,
+      srcRev: item.srcRev ?? null,
     };
   }
 

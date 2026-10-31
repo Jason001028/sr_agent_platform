@@ -37,6 +37,7 @@ the source *and* carries the current rule stamp.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import tempfile
@@ -385,7 +386,9 @@ def sample_strips(path, endian, scalars, arrays, max_edge: int, *, output_shape=
     out = np.empty((ph, pw), dtype=dt)
     col_idx = (np.round(np.arange(pw) * (W - 1) / (pw - 1)).astype(np.int64)
                if pw > 1 else np.zeros(1, dtype=np.int64))
-    row_idx = [int(round(i * (H - 1) / (ph - 1))) for i in range(ph)]
+    # ph == 1 时没有「第 ph-1 行」可除；与上面的单列一样取首行。
+    row_idx = ([int(round(i * (H - 1) / (ph - 1))) for i in range(ph)]
+               if ph > 1 else [0])
 
     def read_rows(start: int, end: int) -> None:
         """把采样行 [start, end) 读进 out。
@@ -604,19 +607,63 @@ def build_preview_pixels(path, max_edge: int | None = None) -> np.ndarray:
         raise
 
 
+def source_key(path) -> str:
+    """源文件的稳定身份标识：解析后绝对路径的哈希（不含 size / mtime）。
+
+    用途是**把同名不同源在缓存落点上也分开**：`same.tif` 与同目录的 `same.tiff`
+    撞 stem 时，光靠扩展名拼出的 `_tif` 段本身又可以是另一份源的 stem
+    （`same_tif.tif`），所以落点名要带一个与 stem 无关的身份段。路径哈希不随
+    文件内容更新而变化 —— 同一份源换档位仍复用同一个落点，靠戳里的档位判废。
+    """
+    try:
+        real = Path(path).resolve().as_posix()
+    except OSError:
+        real = Path(path).as_posix()
+    return hashlib.sha1(real.encode("utf-8")).hexdigest()[:12]
+
+
+def source_revision(path) -> str | None:
+    """源文件的身份串：路径哈希 + 字节数 + mtime_ns。
+
+    写进规则戳，用来识破「源被换上另一份内容、但 mtime 仍不晚于预览」这种陈旧
+    缓存。只用 size/mtime_ns 无法识破同尺寸同时间戳的替换（那要读全文件哈希，
+    在 GB 级源上不可接受）；但这已覆盖「保留时间戳的复制」里尺寸发生变化的那类，
+    再加上路径哈希，同名不同源也不会互相认成同一份。
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return f"{source_key(path)}-{st.st_size}-{st.st_mtime_ns}"
+
+
 def rule_stamp(quality: int = PREVIEW_JPG_QUALITY,
-               div: int = LEGACY_PREVIEW_DIV) -> bytes:
+               div: int = LEGACY_PREVIEW_DIV, *,
+               source=None, source_rev: str | None = None) -> bytes:
     """当前预览生成规则的签名（写进 JPEG 注释，用来判缓存是否还符合现规则）。
 
     **div 进戳**（v3 起）：同一个落点上换个档位必须判废重生成 —— 只按落点判的话，
     界面上的滑块动了、盘上那张图一个字节都不会变。v2 那代戳是 `…:half+equal:…`，
     与这里的 `…:div2+equal:…` 字符串本就不同，所以 v2 产物一律重生成一轮（预期内）。
+
+    `source` / `source_rev`（v4 内追加，不换版本）：把源文件身份一并写进戳的
+    `;src=` 尾巴。缓存判据除了「规则相同」还要「源仍是同一份」—— 只靠 mtime 会被
+    「保留时间戳的复制」骗过。不传源时戳的形态与旧版逐字节相同，测试与手工造缓存
+    仍可沿用。
     """
-    return f"srprev:{PREVIEW_RULE_VERSION}:div{div}+equal:q{quality}".encode("ascii")
+    stamp = f"srprev:{PREVIEW_RULE_VERSION}:div{div}+equal:q{quality}"
+    rev = source_rev if source_rev is not None else (
+        source_revision(source) if source is not None else None)
+    if rev:
+        stamp += f";src={rev}"
+    return stamp.encode("ascii")
 
 
 #: 规则签名的形态。`ver` 宽松匹配（v1 那代是 `8192+linear2`，本式匹配不上）。
-_STAMP_RE = re.compile(r"^srprev:(?P<ver>[^:]+):div(?P<div>\d+)\+equal:q(?P<q>\d+)$")
+#: `;src=` 尾巴可选：旧缓存没有它，仍然解得出版本 / 档位 / 质量。
+_STAMP_RE = re.compile(
+    r"^srprev:(?P<ver>[^:]+):div(?P<div>\d+)\+equal:q(?P<q>\d+)"
+    r"(?:;src=(?P<src>[0-9a-f]+-\d+-\d+))?$")
 
 
 def stamp_div(stamp) -> int | None:
@@ -636,6 +683,21 @@ def stamp_div(stamp) -> int | None:
         return None
     div = int(m.group("div"))
     return div if div in PREVIEW_DIVISORS else None
+
+
+def stamp_src(stamp) -> str | None:
+    """解出戳里的源身份（`;src=` 尾巴）；没有 / 旧戳 / 解不出 → None。
+
+    **端点发字节前要用它核对「这份预览确实由本次请求的源生成」**：档位对得上
+    还不够 —— 两个同名不同源的落点万一撞在一起，同档位的图照样会串源。
+    """
+    if isinstance(stamp, (bytes, bytearray)):
+        try:
+            stamp = bytes(stamp).decode("ascii")
+        except UnicodeDecodeError:
+            return None
+    m = _STAMP_RE.match(str(stamp or "").strip())
+    return m.group("src") if m else None
 
 
 def _comment_of(jpg_path):
@@ -691,12 +753,16 @@ def has_rule_stamp(jpg_path) -> bool:
     return str(_comment_of(jpg_path) or "").strip().startswith(_STAMP_PREFIX)
 
 
-def cache_hit(dst: Path, quality: int, div: int) -> dict | None:
-    """缓存可用则返回 {w, h}，否则 None（缺戳 / 旧规则 / 换档 / 损坏一律按需重生成）。
+def cache_meta(dst: Path, *, quality: int = PREVIEW_JPG_QUALITY,
+               source=None, source_rev: str | None = None) -> dict | None:
+    """盘上这份预览的元信息 `{w, h, div}`；不符合当前规则 / 源身份 → None。
 
-    公开（无下划线）是因为**产物急生成**（`api/app.py::_eager_bake_tick`）要在动手读
-    大图之前先问一遍：用户可能刚打开过这份产物、盘上那份就是当前档位的 —— 那时
-    再读一遍 GB 级文件纯属白干。判据本身与惰性路径**逐字相同**，没有第二套。
+    与 `cache_hit` 是同一套判据，但不要求调用方**先知道档位**：场景列表要回填
+    「盘上这份是哪一档」，再让前端据此判断要不要重生成（见 `api/app.py` 的行构造）。
+    版本、质量、合法档位与可选的源身份逐条校验，旧戳（没有 `;src=`）在传了源时
+    一律不命中。
+
+    只 `Image.open` 读头拿注释，不解码像素 —— 与 `scene_dims` 同级，可以逐行调。
     """
     try:
         with Image.open(dst) as im:
@@ -704,14 +770,49 @@ def cache_hit(dst: Path, quality: int, div: int) -> dict | None:
             w, h = im.width, im.height
     except Exception:  # noqa: BLE001 — 缓存损坏按重新生成处理
         return None
-    if stamp != rule_stamp(quality, div):
+    raw = stamp
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            raw = bytes(raw).decode("ascii")
+        except UnicodeDecodeError:
+            return None
+    m = _STAMP_RE.match(str(raw or "").strip())
+    if not m:
         return None
-    return {"w": w, "h": h}
+    div = int(m.group("div"))
+    if (m.group("ver") != PREVIEW_RULE_VERSION
+            or int(m.group("q")) != quality
+            or div not in PREVIEW_DIVISORS):
+        return None
+    if source is not None or source_rev is not None:
+        rev = source_rev if source_rev is not None else source_revision(source)
+        if not rev or m.group("src") != rev:
+            return None
+    return {"w": w, "h": h, "div": div}
+
+
+def cache_hit(dst: Path, quality: int, div: int, *,
+              source=None, source_rev: str | None = None) -> dict | None:
+    """缓存可用则返回 {w, h}，否则 None（缺戳 / 旧规则 / 换档 / 换源 / 损坏一律重生成）。
+
+    公开（无下划线）是因为**产物急生成**（`api/app.py::_eager_bake_tick`）要在动手读
+    大图之前先问一遍：用户可能刚打开过这份产物、盘上那份就是当前档位的 —— 那时
+    再读一遍 GB 级文件纯属白干。判据与 `cache_meta` **逐字相同**，没有第二套。
+
+    传 `source` / `source_rev` 时还要求戳里的 `;src=` 与源当前身份一致。旧戳没有
+    这一节 → 判为不命中（升级后一次性重生成），否则保留时间戳的替换永远看不出来。
+    """
+    meta = cache_meta(dst, quality=quality, source=source,
+                      source_rev=source_rev)
+    if meta is None or meta["div"] != div:
+        return None
+    return {"w": meta["w"], "h": meta["h"]}
 
 
 def write_preview_jpg(jpg_path, pixels, *,
                       quality: int = PREVIEW_JPG_QUALITY,
-                      div: int = LEGACY_PREVIEW_DIV) -> dict:
+                      div: int = LEGACY_PREVIEW_DIV,
+                      source=None, source_rev: str | None = None) -> dict:
     """把灰度像素落成预览 JPEG（先写临时文件再 `os.replace`，原子替换）。
 
     从 `ensure_preview_jpg` 里抽出来，是为了让**产物急生成**能在「像素已读出」与
@@ -729,8 +830,10 @@ def write_preview_jpg(jpg_path, pixels, *,
                                dir=str(dst.parent))
     try:
         with os.fdopen(fd, "wb") as f:
-            Image.fromarray(pixels).save(f, format="JPEG", quality=quality,
-                                         comment=rule_stamp(quality, div))
+            Image.fromarray(pixels).save(
+                f, format="JPEG", quality=quality,
+                comment=rule_stamp(quality, div, source=source,
+                                   source_rev=source_rev))
         os.replace(tmp, dst)
     finally:
         if os.path.exists(tmp):
@@ -757,13 +860,20 @@ def ensure_preview_jpg(source_path, jpg_path, div: int = LEGACY_PREVIEW_DIV,
     """
     src, dst = Path(source_path), Path(jpg_path)
     max_edge = preview_max_edge(src, div)      # 顺带校验 div 合法
-    if dst.is_file() and os.path.getmtime(dst) >= os.path.getmtime(src):
-        hit = cache_hit(dst, quality, div)
+    # 源身份在动手前记一次、落盘前再核一次：读到一半源被换掉（重跑覆盖产物、
+    # 有人保留时间戳换了一份文件）就不能把半新半旧的像素写成长期缓存。
+    rev = source_revision(src)
+    if (rev is not None and dst.is_file()
+            and os.path.getmtime(dst) >= os.path.getmtime(src)):
+        hit = cache_hit(dst, quality, div, source_rev=rev)
         if hit is not None:
             return {"status": "cached", "path": str(dst),
                     "w": hit["w"], "h": hit["h"], "error": None}
     pixels = build_preview_pixels(str(src), max_edge)
-    out = write_preview_jpg(dst, pixels, quality=quality, div=div)
+    if source_revision(src) != rev:
+        raise PreviewError("源在预览生成途中被改写")
+    out = write_preview_jpg(dst, pixels, quality=quality, div=div,
+                            source_rev=rev)
     return {"status": "generated", "path": out["path"],
             "w": out["w"], "h": out["h"], "error": None}
 

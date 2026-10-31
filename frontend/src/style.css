@@ -104,6 +104,14 @@
   --page-pad: 24px;
   --page-w: 1360px;   /* 内容页统一最大宽度（场景库/任务队列/聊天同宽） */
 
+  /* ---- 场景聚焦遮罩（2026-10-30）：左侧图组列表里的聚焦窗口 ----
+     雾白毛玻璃是默认档；暗化档取品牌深松绿的半透明，不另起一套色系。
+     描边用比卡片青绿（--accent-*）更沉的松绿 —— 它是「这里清晰、外面被压暗」的
+     边界线，不是可选中的强调色，所以不抢 --accent-2 的语义。 */
+  --spot-frost: rgba(255, 255, 255, 0.40);  /* 柔焦毛玻璃档的雾白遮罩 */
+  --spot-dim: rgba(17, 35, 32, 0.32);       /* 柔和暗化档的深松绿遮罩 */
+  --spot-ring: #2F6B5E;                     /* 聚焦窗口的 1.5px 描边 */
+
   /* ---- 字体 ---- */
   --font-sans: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
   --font-mono: ui-monospace, "SF Mono", Consolas, "Courier New", monospace;
@@ -117,6 +125,11 @@
   --motion-hover: 150ms;
   --motion-live: 200ms;
   --motion-emphasis: 500ms;
+  /* 场景聚焦遮罩：窗口移动 250ms、遮罩整体淡入淡出 240ms；缓动与窗口插值
+     （lib/spotlight.ts::easeSpotlight）同一条曲线，两边不会打架。 */
+  --motion-spotlight: 250ms;
+  --motion-spotlight-fade: 240ms;
+  --ease-spotlight: cubic-bezier(0.22, 1, 0.36, 1);
   --motion-spin: 900ms;
   --motion-think: 1200ms;
   --motion-think-step: 150ms;

@@ -379,12 +379,16 @@ class TestSiblingsNeverListsDirectories(SiblingsBase):
         `Path.resolve()` 自己 stat 的），而**不随目录内容变**才是那条约束。
         `SR_SCENES_ROOT` 关闭时这些盘阵文件根本不在库内、本就不该被列举筛选；
         换成「列举目录再筛」的改法，这个数会直接随噪声文件数涨。
+
+        上限从 40 提到 48：预览落点名要为同名 `.tif` / `.tiff` 做**固定候选**
+        探测（每类图至多几次 `is_file`，与目录内容无关），这是把两份源的可覆盖
+        缓存分开所必需的。真正的不变量仍是上面的 `small == big`。
         """
         small = self._stat_count(0)
         big = self._stat_count(200)
         self.assertEqual(small, big,
                          "探测次数随目录内容变了 —— 这就是扫盘")
-        self.assertLessEqual(small, 40, "粗上限：钉住数量级，防止哪天悄悄翻几倍")
+        self.assertLessEqual(small, 48, "粗上限：钉住数量级，防止哪天悄悄翻几倍")
 
 
 if __name__ == "__main__":

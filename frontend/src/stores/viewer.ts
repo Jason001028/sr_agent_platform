@@ -55,6 +55,8 @@ import { classifyImages, imageKindOf } from '../lib/imageFiles.js';
 import type { SceneOpenMeta, SceneRow } from '../lib/scene.js';
 import { isIntermediateStage, stageLabel, stageRefusal } from '../lib/stage.js';
 import type { StageKind } from '../lib/stage.js';
+import { readSpotlightMode, saveSpotlightMode } from '../lib/spotlight.js';
+import type { SpotlightMode } from '../lib/spotlight.js';
 import { buildStats, luma, STAT_HI } from '../lib/roiStats.js';
 import type { RoiStats } from '../lib/roiStats.js';
 import { downloadBlob } from '../lib/saver.js';
@@ -104,6 +106,12 @@ export interface ViewerRec {
    *  但它仍属于某个场景目录 —— 卡片上那颗「同一景共用一个序号」的小标按这一项
    *  分组。无伴随件的 .tif / 场景库之外的单张图没有场景目录，这里与 `lqPath` 同为 null。 */
   sceneDir?: string | null;
+  /** 仅预览源（`SR_PREVIEW_ROOTS`）：换档位走只读的 `/preview`，不走会往场景目录
+   *  写文件的 `/preview-drop`。缺省 false = 盘阵场景的既有行为。 */
+  previewOnly?: boolean;
+  /** 源文件身份：换档位时喂给 `fetchSceneJpg` 的临时行，让本地预览 blob 缓存
+   *  随源修订失效（源没变则键不变，照常命中）。 */
+  srcRev?: string | null;
   /** 「一键解析」批量入列的卡片：**只有身份、没有像素**，附上「第一次点开时去哪儿取图」
    *  的两样东西 —— 取图认的库行 + 装回像素要的元数据。
    *
@@ -852,8 +860,22 @@ export const useViewerStore = defineStore('viewer', () => {
 
      2026-09-20：两块都改走 `fitAfterImageChange` —— 对比模式下换图不再把用户的
      缩放与位置抹掉（按相对视野搬过去）。关闭模式 `compareOn` 为假，仍然走 `fit()`。 */
-  function afterPixels(rec: ViewerRec) {
+  function afterPixels(rec: ViewerRec, previousSize?: { w: number; h: number }) {
     stopViewAnim();
+    if (previousSize && rec.thumb) {
+      for (const side of ['A', 'B'] as const) {
+        if ((side === 'A' ? paneA.value : paneB.value) !== rec.id) continue;
+        const rect = rectForSide(side);
+        const size = { w: rec.thumb.width, h: rec.thumb.height };
+        const current = side === 'B' ? viewB.value : viewA.value;
+        setSideView(side, remapViewForImage(current, previousSize, size, rect.w, rect.h));
+        viewFor[side] = size;
+      }
+      refreshCloudStats();
+      refreshRoiStats();
+      renderTick.value++;
+      return;
+    }
     if (split.value) {
       if (paneA.value === rec.id) fitAfterImageChange('A', rec);
       if (paneB.value === rec.id) fitAfterImageChange('B', rec);
@@ -1189,6 +1211,54 @@ export const useViewerStore = defineStore('viewer', () => {
     if (litIds.value.length) litIds.value = [];
   }
 
+  /* ---------------- 场景聚焦遮罩（Spotlight Focus） ----------------
+     聚焦的是**左侧列表里的一整组卡**（同一场景目录：本体 + 产物），由《待修复清单》
+     的选中行驱动。状态放在这里而不是 qclist：遮罩画在左侧，得按卡片 id 找 DOM；
+     也不做成 `selName` 的 computed —— 那份会被自动选中/导入/关闭改写，而遮罩只该
+     跟着「用户点了哪一行」走（谁触发谁负责调 `setSpotlight`/`clearSpotlight`）。 */
+
+  const spotlightMode = ref<SpotlightMode>(readSpotlightMode());
+  /** 三档遮罩模式立即生效并持久化（设置面板与组件共用这一个入口）。 */
+  function setSpotlightMode(mode: SpotlightMode): void {
+    if (spotlightMode.value === mode) return;
+    spotlightMode.value = mode;
+    saveSpotlightMode(mode);
+  }
+
+  /** 正在聚焦的卡片 id（一景可能多张）。空数组 = 没有聚焦。 */
+  const spotlightIds = ref<number[]>([]);
+
+  /** 候选场景名 → 列表里属于这些场景的**全部**卡片 id（不点亮、不滚动）。 */
+  function sceneCardIds(cands: readonly string[]): number[] {
+    const want = new Set(cands.filter(Boolean));
+    if (!want.size) return [];
+    return recs.value
+      .filter((r) => {
+        const leaf = r.sceneDir ? pathLeafOf(r.sceneDir) : '';
+        return !!leaf && want.has(leaf);
+      })
+      .map((r) => r.id);
+  }
+
+  /** 设聚焦窗口。已经是这组卡时不换数组（Scroll/Resize 每条都调，内容没变就别触发重算）。
+   *  已不在列表里的 id 顺手滤掉：拖走/删掉的那张不该撑着一个空窗口。 */
+  function setSpotlight(ids: readonly number[]): void {
+    const live = new Set(recs.value.map((r) => r.id));
+    const next = ids.filter((id) => live.has(id));
+    if (next.length === spotlightIds.value.length
+        && next.every((id, i) => spotlightIds.value[i] === id)) return;
+    spotlightIds.value = next;
+  }
+
+  function clearSpotlight(): void {
+    if (spotlightIds.value.length) spotlightIds.value = [];
+  }
+
+  /** 列表删卡后把已消失的 id 滤掉（删的是别的卡时它是不动声色的 no-op）。 */
+  function pruneSpotlight(): void {
+    if (spotlightIds.value.length) setSpotlight(spotlightIds.value);
+  }
+
   /* ---------------- 点选清单 ---------------- */
 
   /** 新拖入的图自动加入清单（幂等）。 */
@@ -1290,6 +1360,7 @@ export const useViewerStore = defineStore('viewer', () => {
         sceneId: item.id, lqPath: res.lqPath, sceneDir: res.lqPath,
         serverMaskPath: null,
         stageKind: item.kind, stageSuffix: res.suffix,
+        srcRev: item.srcRev ?? null,
       }, blob, split.value ? activeSide.value : undefined);
       if (res.suffixFrom !== 'query') {
         showToast('suffix 用的是'
@@ -1570,17 +1641,19 @@ export const useViewerStore = defineStore('viewer', () => {
    *  `rec.file`/`name`/`size` 归调用方管：拖拽升级那条路要**保持**用户拖进来的
    *  那个文件名与字节数（FileList 展示与 addFiles 查重都靠它），只换像素与身份。 */
   async function applySceneJpgToRec(rec: ViewerRec, meta: SceneOpenMeta,
-                                    blob: Blob, layout?: string): Promise<boolean> {
+                                    blob: Blob, layout?: string, preserveView = false): Promise<boolean> {
     const my = ++rec.token;                     // 领号：JPG 要接管像素了
     const requestedDiv = previewDiv.value;
     const cv = await decodeJpgToCanvas(blob);
-    if (rec.card && previewDiv.value !== requestedDiv) return false;
+    if (previewDiv.value !== requestedDiv) return false;
     if (rec.token !== my || !recs.value.includes(rec)) return false;
     const tw = cv.width, th = cv.height;
     const ctx = cv.getContext('2d');
     if (!ctx) throw new Error('取不到 2d 上下文');
     const img = ctx.getImageData(0, 0, tw, th);
     const d = sceneDecodePixels(img.data, tw, th);   // 固定 0..255 → linear 恒等
+    const previousSize = preserveView && rec.thumb
+      ? { w: rec.thumb.width, h: rec.thumb.height } : undefined;
     rec.thumb = markRaw(cv as unknown as KitCanvas);
     rec.W = meta.W; rec.H = meta.H;
     rec.src = markRaw(d.src); rec.srcw = d.tw; rec.srch = d.th;
@@ -1591,6 +1664,8 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.sceneId = meta.sceneId ?? null;
     rec.lqPath = meta.lqPath ?? null;
     rec.sceneDir = meta.sceneDir ?? null;
+    rec.previewOnly = meta.previewOnly === true;
+    rec.srcRev = meta.srcRev ?? null;
     // 这一景是「用户当前打开着的」——记下来，供下一次拖没有场景身份的 jpg 时当
     // `anchor` 用（见 lastSceneDir）。中途产物那条路 lqPath 是空的，用 sceneDir。
     noteSceneDir(rec);
@@ -1615,7 +1690,7 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.serverMaskPath = meta.serverMaskPath ?? null;
     // 像素刚换过 → 一律重画（沿用已选模式，不重置用户的选择）
     paintStretch(rec, rec.paintedMode ?? startStretch(rec.route, stretchMode.value));
-    afterPixels(rec);
+    afterPixels(rec, previousSize);
     return true;
   }
 
@@ -1793,7 +1868,7 @@ export const useViewerStore = defineStore('viewer', () => {
         const blob = await fetchSceneJpgShared(card.row, div);
         if (rec.token !== intent.token || !recs.value.includes(rec) || previewDiv.value !== div) return;
         intent.token++; // applySceneJpgToRec claims the next write token before decoding.
-        const applied = await applySceneJpgToRec(rec, card.meta, blob);
+        const applied = await applySceneJpgToRec(rec, card.meta, blob, undefined, true);
         if (applied) rec.detailDiv = div;
       } catch (e) {
         if (rec.token === intent.token && recs.value.includes(rec) && previewDiv.value === div) throw e;
@@ -1945,6 +2020,7 @@ export const useViewerStore = defineStore('viewer', () => {
     recs.value = recs.value.filter((r) => !ids.has(r.id));
     const n = before - recs.value.length;
     if (!n) return 0;
+    pruneSpotlight();
     selectedIds.value = selectedIds.value.filter((id) => !ids.has(id));
 
     let paneCleared = false;
@@ -2055,6 +2131,7 @@ export const useViewerStore = defineStore('viewer', () => {
     if (i < 0 || recs.value[i].pending) return;
     pushUndo('移除 1 张');
     recs.value.splice(i, 1);
+    pruneSpotlight();
     selectedIds.value = selectedIds.value.filter((x) => x !== id);
     // 分屏的两格与点选清单都可能还指着它
     let paneCleared = false;
@@ -2093,6 +2170,7 @@ export const useViewerStore = defineStore('viewer', () => {
     stopPrefetch();                      // 在飞的预取自己发现代次变了就收手
     if (markerTimer !== null) { clearTimeout(markerTimer); markerTimer = null; }
     recs.value = keep;
+    pruneSpotlight();
     // 批量开跑是新的一章：上一批的增删不再可撤（否则撤回会把半批卡与占位卡混回一起）。
     undoStack.value = [];
     selectMode.value = false;
@@ -2173,15 +2251,52 @@ export const useViewerStore = defineStore('viewer', () => {
     refreshCloudStats();            // …云量数字/红叠同理随显示层刷新
   }
 
-  /** 切换预览缩放档位（工具栏拖动条）。
-
-  点选即生效：只写进 store + localStorage，**不去动已经打开的图** —— 当前这张的
-  像素已经在手上了，重新生成它既慢又不是用户此刻的诉求。档位在下次取图时生效
-  （`fetchSceneJpg` / `fetchDropSceneJpg` 自己读它）。 */
+  /** Commit a preview level and refresh visible server images without refitting. */
   function setPreviewDiv(div: number) {
-    if (!(SCENE_PREVIEW_DIVS as readonly number[]).includes(div)) return;
+    if (!(SCENE_PREVIEW_DIVS as readonly number[]).includes(div) || div === previewDiv.value) return;
     previewDiv.value = div;
     savePreviewDiv(div);
+    const visible = new Set([paneA.value, ...(split.value ? [paneB.value] : [])]);
+    for (const rec of recs.value) {
+      if (!visible.has(rec.id) || rec.route !== 'jpg' || !rec.sceneId) continue;
+      void reloadPreviewLevel(rec, div);
+    }
+  }
+
+  async function reloadPreviewLevel(rec: ViewerRec, div: number) {
+    const meta: SceneOpenMeta = rec.card?.meta ?? {
+      name: rec.name, W: rec.W, H: rec.H, sceneId: rec.sceneId!,
+      lqPath: rec.lqPath, sceneDir: rec.sceneDir,
+      serverMaskPath: rec.serverMaskPath, stageKind: rec.stageKind,
+      stageSuffix: rec.stageKind === 'product' ? rec.stageLabel : '',
+      previewOnly: rec.previewOnly,
+      srcRev: rec.srcRev,
+    };
+    const token = ++rec.token;
+    rec.status = '正在切换预览 ' + previewDivLabel(div);
+    try {
+      if (rec.card) await fetchCardPixels(rec);
+      else {
+        // 仅预览源（盘阵外授权 TIFF）没有场景目录可写，必须走只读的 `/preview`；
+        // `/preview-drop` 会把预览写回源所在目录并只认盘阵前缀，对这类源必然 404。
+        // 用一条一次性行喂 `fetchSceneJpg` 的「库外」分支（jpgUrl=null → /preview），
+        // 不碰任何真实的场景行状态。
+        const blob = rec.previewOnly
+          ? await fetchSceneJpg(loadSrConfig(), {
+              id: rec.sceneId!, name: rec.name, W: rec.W, H: rec.H,
+              jpgUrl: null, hasPreview: true, previewDiv: div, lq_path: null,
+              srcRev: rec.srcRev ?? null,
+            } as SceneRow, div)
+          : await fetchDropSceneJpg(loadSrConfig(), rec.sceneId!, div);
+        if (rec.token !== token || previewDiv.value !== div || !recs.value.includes(rec)) return;
+        if (await applySceneJpgToRec(rec, meta, blob, undefined, true)) rec.detailDiv = div;
+      }
+    } catch (error) {
+      if (previewDiv.value !== div || !recs.value.includes(rec)) return;
+      if (!rec.card && rec.token !== token && rec.token !== token + 1) return;
+      rec.status = '预览切换失败'; rec.statusCls = 'err';
+      showErr(error instanceof Error ? error.message : String(error));
+    }
   }
 
   function setCanvasSize(w: number, h: number) {
@@ -3179,6 +3294,8 @@ export const useViewerStore = defineStore('viewer', () => {
     canUndo, undoLabel, undo,
     // 一键解析：清空暂存区 + 批量入列的「空卡」 + 点亮联动
     clearRecs, insertSceneCard, bakeCardPixels, litIds, litTick, lightCards, clearLights,
+    // 场景聚焦遮罩：模式（持久化）+ 聚焦中的卡片
+    spotlightMode, setSpotlightMode, spotlightIds, sceneCardIds, setSpotlight, clearSpotlight,
     // 一键解析：先排满占位卡，再原地补齐 / 标红 / 收尾
     insertPendingCards, fillPendingCard, setPendingStatus, failPendingCard, finishPendingCards,
     // 拉伸 / 视图

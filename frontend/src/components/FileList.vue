@@ -21,6 +21,7 @@ import { useChatShot } from '../composables/useChatShot.js';
 import { SHOT_MAX_COUNT } from '../lib/chatShot.js';
 import { isIntermediateStage } from '../lib/stage.js';
 import FileListTools from './FileListTools.vue';
+import FileListSpotlight from './FileListSpotlight.vue';
 import FileThumb from './FileThumb.vue';
 import FileListCard from './FileListCard.vue';
 import AppIcon from './AppIcon.vue';
@@ -113,6 +114,18 @@ function setItemEl(id: number, el: Element | ComponentPublicInstance | null): vo
   else itemEls.delete(id);
 }
 
+/** 场景聚焦遮罩用：按 id 取卡片 DOM（只量这几张，不遍历整列）。 */
+function itemEl(id: number): HTMLElement | undefined {
+  return itemEls.get(id);
+}
+
+/* 聚焦遮罩的「结构版本」：成员或顺序一变就变（收藏置顶、增删、撤回）。
+   做成字符串而不是数组，watch 按值比较才不会每帧重启。 */
+const spotRevision = computed(() => store.recsOrdered.map((r) => r.id).join(','));
+
+/** 侧栏滚动容器本身（聚焦遮罩的坐标基准，也是 e2e 读 scrollTop 的那个元素）。 */
+const scrollEl = ref<HTMLElement | null>(null);
+
 /** 点亮的两套动画类**奇偶交替挂**：同名 keyframes 反复挂同一个类不会重放，换一个名字
  *  才重放 —— 这样既不用重建元素，也不必强制 reflow。只有命中的卡才有类。 */
 function litCls(id: number): string {
@@ -166,7 +179,9 @@ function linkTag(note: string): string {
 </script>
 
 <template>
-  <aside class="sidebar" :class="{ collapsed: store.sidebarCollapsed }">
+  <aside ref="scrollEl" class="sidebar" :class="{ collapsed: store.sidebarCollapsed }">
+    <!-- 场景聚焦遮罩的零高度锚点：必须是滚动容器的首个子元素（见组件头注释）。 -->
+    <FileListSpotlight :viewport="scrollEl" :el-for="itemEl" :revision="spotRevision" />
     <FileListTools />
     <div v-if="showExamples" class="demo-list" :class="{ 'demo-paused': demoPaused || demoHovered || store.sidebarCollapsed }" aria-label="影像示例" @pointermove="hoverDemoCard" @pointerleave="demoHovered = false">
       <FileListCard v-for="example in examples" :key="example.name" class="demo-card" :class="example.stage === 'PAN' ? 'demo-pan' : 'demo-nosr'" inert :draggable="false" aria-disabled="true">
@@ -298,7 +313,12 @@ function linkTag(note: string): string {
      收缩的 100ms 里内容比栏宽，会闪出一条横向滚动条并挤动纵向布局。 */
   overflow-x: hidden;
   overflow-y: auto;
+  /* Keep centered actions stationary when clearing/restoring a scrolling list. */
+  scrollbar-gutter: stable;
   padding: 10px;
+  /* 场景聚焦遮罩的 z-index 只在本侧栏内比较：卡片 0 < 遮罩 10 < 工具条 30。
+     没有这行，侧栏里那个 10 会跑去和页面其他浮层（如聊天面板）抢层。 */
+  isolation: isolate;
   transition: width var(--motion-fold) var(--ease-linear), padding var(--motion-fold) var(--ease-linear);
 }
 .sidebar.collapsed {

@@ -321,7 +321,7 @@ class TestPreviewDiv(SceneListMixin):
 
     def setUp(self):
         super().setUp()
-        make_scene(self._root.name, self.NAME + ".tif", 320, 640)
+        self.src = make_scene(self._root.name, self.NAME + ".tif", 320, 640)
         self.jpg = Path(self._root.name, self.NAME, self.NAME + "_preview.jpg")
 
     def _client(self):
@@ -386,7 +386,8 @@ class TestPreviewDiv(SceneListMixin):
         r = c.get(f"/api/scenes/{sid}/preview")
         with Image.open(io.BytesIO(r.content)) as im:
             self.assertEqual(im.size, (160, 320))
-            self.assertEqual(im.info.get("comment"), rule_stamp(85, 2))
+            self.assertEqual(im.info.get("comment"),
+                             rule_stamp(85, 2, source=self.src))
 
 
 if __name__ == "__main__":

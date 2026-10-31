@@ -91,8 +91,17 @@ async function sync() {
  *  点亮用**候选集合**（这一行的名字补上产品段后的几种形态）去对卡片的场景目录名，
  *  命中的是同一景的**全部**卡（本体 + NOSR 两张）。它与 `qc.select` 的 1:1 名字相等
  *  互不干扰：前者只给左栏上色 + 滚动，后者驱动这一行的选中态与「打开 / 当前」。
- *  没点亮任何一张时只出一声 toast —— 假阴性最坏是多说一句话，绝不会点亮错的一张。 */
+ *  没点亮任何一张时只出一声 toast —— 假阴性最坏是多说一句话，绝不会点亮错的一张。
+ *
+ *  **再点同一行 = 取消选中**：聚焦遮罩要有一个「不聚焦」的出口，否则只能靠关清单或
+ *  清空暂存区。取消时点亮与聚焦一起收，左侧不再滚（用户是在收手，不该再动视口）。 */
 function onRow(it: QcIssue) {
+  if (qc.selName === it.name) {
+    qc.select(null);
+    viewer.clearLights();
+    viewer.clearSpotlight();
+    return;
+  }
   qc.select(it.name);
   const ids = viewer.lightCards(sceneNameCandidates(it.name, it.imgType));
   if (!ids.length) viewer.showToast('左侧还没有这一景的卡片');
@@ -101,6 +110,21 @@ function onRow(it: QcIssue) {
     viewer.locatePixel(it.row, it.col);
   }
 }
+
+/* ---------------- 场景聚焦遮罩 ----------------
+   右侧「选中的那一行」就是左侧「聚焦的那一景」。聚焦状态从 `qc.selName` 这**一个**
+   来源推出来（不再各处零散地调 setSpotlight）：点行、再点取消、自动选中当前打开的图、
+   换清单/关清单把这行清掉 —— 所有改 selName 的路径都自动同步，不会漏；也不会出现
+   遮罩停在一景、右侧却选中另一行的错位。
+
+   注意它只管**聚焦窗口**；卡片点亮与滚动仍由 onRow 里那次 lightCards 负责 ——
+   自动选中（打开一张卡）不该把列表滚一下，但把窗口挪到那一景是合理的。 */
+watch(() => qc.selName, (name) => {
+  if (!name) { viewer.clearSpotlight(); return; }
+  const it = qc.issues.find((i) => i.name === name);
+  if (!it) { viewer.clearSpotlight(); return; }
+  viewer.setSpotlight(viewer.sceneCardIds(sceneNameCandidates(it.name, it.imgType)));
+});
 
 /* ---------------- 一键解析 ---------------- */
 
@@ -232,6 +256,9 @@ watch(
           :key="it.name"
           class="qc-row"
           :class="{ on: qc.selName === it.name, 'bake-fail': !!qc.bakeFails[it.name] }"
+          :title="qc.selName === it.name
+            ? '再点一下取消选中（左侧聚焦窗口随之收起）'
+            : '选中这一景：左侧同景卡片保持清晰，其余压暗'"
           @click="onRow(it)"
         >
           <div class="qc-l1">

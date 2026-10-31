@@ -18,9 +18,13 @@ import {
   clearDeveloperMode, isDeveloperMode, verifyDeveloperPassword,
 } from '../lib/developerMode';
 import { isStreamingEnabled, setStreamingEnabled } from '../lib/streaming';
+import { SPOTLIGHT_MODE_OPTIONS } from '../lib/spotlight.js';
 
 const store = useViewerStore();
 const qc = useQcListStore();
+
+/** 聚焦遮罩三档（顺序与文案由 lib/spotlight.ts 统一给，设置与组件不各写一份）。 */
+const spotlightOptions = SPOTLIGHT_MODE_OPTIONS;
 
 /** 缓存的展示值。**跟着缓存的内容走**（打开浮层时读一次，之后每逢内容变化再读一次，
     见 store 的 previewCacheRev）—— 改这份缓存的按钮（预取开关）就在这一行上面，
@@ -99,6 +103,29 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
         <div class="set-note">
           超出预算时释放最久未查看的图片，再次点击会重新加载。当前显示的图片始终保留，
           因此可能超过预算。此值仅计算预览画布和像素数组，不代表浏览器总内存；选择会在本机保存。
+        </div>
+      </div>
+
+      <div class="set-row">
+        <span class="set-line">场景聚焦遮罩</span>
+        <div class="set-seg" role="radiogroup" aria-label="场景聚焦遮罩模式" data-e2e="set-spotlight">
+          <button
+            v-for="opt in spotlightOptions"
+            :key="opt.value"
+            type="button"
+            class="set-seg-btn"
+            :class="{ on: store.spotlightMode === opt.value }"
+            role="radio"
+            :aria-checked="store.spotlightMode === opt.value"
+            :data-e2e="'set-spotlight-' + opt.value"
+            :title="opt.hint"
+            @click="store.setSpotlightMode(opt.value)"
+          >{{ opt.label }}</button>
+        </div>
+        <div class="set-note">
+          在《待修复清单》里选中一行时，左侧同一景的整组卡片保持清晰，列表其余区域
+          压暗（工具条、画布与右侧面板不受影响）；再点同一行取消。切换立即生效，
+          三个档位都在本机保存。
         </div>
       </div>
 
@@ -244,6 +271,37 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
   border-color: var(--tb-active-border);
   color: var(--tb-active-fg);
 }
+/* 聚焦遮罩的三档分段控件：档位要能并排一眼比较，所以不用单按钮 toggle 那套；
+   选中面沿用工具栏的 --tb-active-*，与浮层其余控件同一视觉语言。 */
+.set-seg {
+  display: flex;
+  align-self: flex-start;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--tb-border);
+  border-radius: var(--r-pill);
+  background: var(--tb-bg);
+}
+.set-seg-btn {
+  height: 24px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--tb-muted);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--motion-hover) var(--ease-standard), color var(--motion-hover) var(--ease-standard);
+}
+.set-seg-btn:hover { color: var(--tb-active-fg); }
+.set-seg-btn.on {
+  background: var(--tb-active-bg);
+  color: var(--tb-active-fg);
+  box-shadow: inset 0 0 0 1px var(--tb-active-border);
+}
+
 .set-note { color: var(--tb-muted); font-size: 11px; line-height: 1.6; opacity: 0.9; }
 .set-note code {
   font-family: var(--font-mono);

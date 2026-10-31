@@ -187,7 +187,9 @@ function toggleFavorite(): void {
 .file-tools {
   position: sticky;
   top: 0;
-  z-index: 2;
+  /* 高于场景聚焦遮罩（.spot-anchor = 10）：工具条永远清晰，遮罩从它下面起铺。
+     两边的 z-index 都在 .sidebar 的 isolation 里比较，不外溢。 */
+  z-index: 30;
   display: flex;
   justify-content: center;
   margin: -10px -10px 8px;

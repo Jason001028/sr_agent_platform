@@ -135,13 +135,25 @@ describe('fetchSceneJpg', () => {
 
   let urls: string[];
   /** 打桩 fetch：记下每个 URL，按 URL 返回对应字节；非 2xx 交给 http() 抛。 */
-  function stubFetch(bodies: Record<string, string>): void {
+  function stubFetch(bodies: Record<string, string | Uint8Array<ArrayBuffer>>): void {
     urls = [];
     vi.stubGlobal('fetch', (u: string) => {
       urls.push(u);
       if (!(u in bodies)) return Promise.resolve(new Response('nope', { status: 404 }));
       return Promise.resolve(new Response(bodies[u], { status: 200 }));
     });
+  }
+
+  /** 造一段带 COM 规则签名的最小 JPEG 头（前端只读标记段，不解码像素）。 */
+  function jpegWithStamp(stamp: string): Uint8Array<ArrayBuffer> {
+    const text = new TextEncoder().encode(stamp);
+    const out = new Uint8Array(8 + text.length);
+    out.set([0xff, 0xd8, 0xff, 0xfe], 0);            // SOI + COM
+    out[4] = ((text.length + 2) >> 8) & 0xff;         // COM 长度（含自身 2 字节）
+    out[5] = (text.length + 2) & 0xff;
+    out.set(text, 6);
+    out.set([0xff, 0xd9], 6 + text.length);           // EOI
+    return out;
   }
 
   afterEach(() => { vi.unstubAllGlobals(); });
@@ -168,6 +180,15 @@ describe('fetchSceneJpg', () => {
     expect(r.previewDiv).toBe(8);
   });
 
+  it('缩略图也复核签名：档位对不上的静态字节不写入查看器缓存', async () => {
+    const wrong = jpegWithStamp('srprev:v4:div2+equal:q85;src=abc-100-1');
+    stubFetch({ '/disk-array/a/b_preview.jpg?div=4': wrong });
+    const r = row({ jpgUrl: BAKED, hasPreview: true, previewDiv: 4,
+      srcRev: 'abc-100-1' });
+    expect(await fetchExistingSceneJpg(CFG, r)).toBeNull();
+    expect(previewCacheStats().count).toBe(0);
+  });
+
   it('未知档位的缩略图不会阻止查看器按需生成正确档位', async () => {
     stubFetch({ '/disk-array/a/b_preview.jpg?div=4': 'JPEG', '/api/scenes/~YWJj/preview?div=4': 'BAKE' });
     const r = row({ jpgUrl: BAKED, hasPreview: true, previewDiv: null });
@@ -185,18 +206,18 @@ describe('fetchSceneJpg', () => {
     expect(r.hasPreview).toBe(true);          // 取到手就记上，下次不再当首次
   });
 
-  it('库行未生成：先打 /preview?div=N 懒生成，再静态取图（两次请求，顺序固定）', async () => {
-    // 那张图由 nginx 直出（几 MB 起，不该占 API 进程的内存/带宽），所以生成预览那一下
-    // 只回一个 `ok`，字节还要再取一次 —— 稳态下只有一次（档位对得上那条走上面的分支）。
+  it('库行未生成：/preview 的响应体就是图，不再转静态取一次', async () => {
+    // 需要生成时，静态落点可能在「生成」与「再取图」之间被另一客户端换掉，
+    // `?div=N` 只改变浏览器缓存键、不锁定盘上内容 —— 所以直接用 /preview 的
+    // 响应字节（端点内读定并核对过档位 / 源身份）。
     stubFetch({
-      'http://127.0.0.1:8000/api/scenes/~YWJj/preview?div=8': 'ok',
+      'http://127.0.0.1:8000/api/scenes/~YWJj/preview?div=8': 'BAKED',
       'http://static:9000/disk-array/a/b_preview.jpg?div=8': 'STATIC',
     });
     const r = row({ jpgUrl: BAKED, hasPreview: false, previewDiv: null });
-    expect(await (await fetchSceneJpg(CFG_BASE, r, 8)).text()).toBe('STATIC');
+    expect(await (await fetchSceneJpg(CFG_BASE, r, 8)).text()).toBe('BAKED');
     expect(urls).toEqual([
       'http://127.0.0.1:8000/api/scenes/~YWJj/preview?div=8',
-      'http://static:9000/disk-array/a/b_preview.jpg?div=8',
     ]);
     expect(r.hasPreview).toBe(true);
     expect(r.previewDiv).toBe(8);             // 记上实际档位，同一会话内不再重新生成
@@ -211,33 +232,69 @@ describe('fetchSceneJpg', () => {
     ]);
   });
 
+  it('静态落点的档位 / 源对不上 → 不缓存错字节，退回 /preview 快照', async () => {
+    // 另一客户端在「行已取回」与「静态取图」之间换了档位：`?div=4` 不约束
+    // 盘上内容，取到的可能是 ÷2 那张。签名复核不过，必须退回端点。
+    const wrong = jpegWithStamp('srprev:v4:div2+equal:q85;src=def-200-2');
+    const right = jpegWithStamp('srprev:v4:div4+equal:q85;src=def-200-2');
+    stubFetch({
+      '/disk-array/a/b_preview.jpg?div=4': wrong,
+      '/api/scenes/~YWJj/preview?div=4': right,
+    });
+    const r = row({ jpgUrl: BAKED, hasPreview: true, previewDiv: 4,
+      srcRev: 'def-200-2' });
+    const got = new Uint8Array(await (await fetchSceneJpg(CFG, r, 4)).arrayBuffer());
+    expect(Array.from(got)).toEqual(Array.from(right));
+    expect(urls).toEqual(['/disk-array/a/b_preview.jpg?div=4',
+      '/api/scenes/~YWJj/preview?div=4']);
+  });
+
+  it('静态落点档位相同但源身份不同 → 同样退回 /preview', async () => {
+    const other = jpegWithStamp('srprev:v4:div4+equal:q85;src=old-100-1');
+    const mine = jpegWithStamp('srprev:v4:div4+equal:q85;src=new-200-2');
+    stubFetch({
+      '/disk-array/a/b_preview.jpg?div=4': other,
+      '/api/scenes/~YWJj/preview?div=4': mine,
+    });
+    const r = row({ jpgUrl: BAKED, hasPreview: true, previewDiv: 4,
+      srcRev: 'new-200-2' });
+    const got = new Uint8Array(await (await fetchSceneJpg(CFG, r, 4)).arrayBuffer());
+    expect(Array.from(got)).toEqual(Array.from(mine));
+  });
+
+  it('静态落点的签名与请求一致 → 只用它，一次请求', async () => {
+    const ok = jpegWithStamp('srprev:v4:div4+equal:q85;src=abc-100-1');
+    stubFetch({ '/disk-array/a/b_preview.jpg?div=4': ok });
+    const r = row({ jpgUrl: BAKED, hasPreview: true, previewDiv: 4,
+      srcRev: 'abc-100-1' });
+    const got = new Uint8Array(await (await fetchSceneJpg(CFG, r, 4)).arrayBuffer());
+    expect(Array.from(got)).toEqual(Array.from(ok));
+    expect(urls).toEqual(['/disk-array/a/b_preview.jpg?div=4']);
+  });
+
   it('**换档位后必须重新生成**：盘上那份仍在（hasPreview 为真）但档位不符', async () => {
     // 只看 hasPreview 的话这里会跳过重新生成、直接取静态 URL —— 界面滑了，盘上那张图
     // 一个字节都不变，用户看到的还是旧档位。这是这条子逻辑的核心。
     stubFetch({
-      'http://127.0.0.1:8000/api/scenes/~YWJj/preview?div=16': 'ok',
-      'http://static:9000/disk-array/a/b_preview.jpg?div=16': 'REBAKED',
+      'http://127.0.0.1:8000/api/scenes/~YWJj/preview?div=16': 'REBAKED',
+      'http://static:9000/disk-array/a/b_preview.jpg?div=16': 'STATIC',
     });
     const r = row({ jpgUrl: BAKED, hasPreview: true, previewDiv: 4 });
     expect(await (await fetchSceneJpg(CFG_BASE, r, 16)).text()).toBe('REBAKED');
     expect(urls).toEqual([
       'http://127.0.0.1:8000/api/scenes/~YWJj/preview?div=16',
-      // `?div=16` 就是这里的要害：不带它，nginx 的 max-age=3600 会把旧档位那张
-      // 端上来，重新生成了也看不见。
-      'http://static:9000/disk-array/a/b_preview.jpg?div=16',
     ]);
     expect(r.previewDiv).toBe(16);
   });
 
   it('旧格式规则签名（previewDiv 为 null）也算「档位不符」→ 重新生成一轮', async () => {
     stubFetch({
-      '/api/scenes/~YWJj/preview?div=4': 'ok',
-      '/disk-array/a/b_preview.jpg?div=4': 'REBAKED',
+      '/api/scenes/~YWJj/preview?div=4': 'REBAKED',
+      '/disk-array/a/b_preview.jpg?div=4': 'STATIC',
     });
     const r = row({ jpgUrl: BAKED, hasPreview: true, previewDiv: null });
     expect(await (await fetchSceneJpg(CFG, r, 4)).text()).toBe('REBAKED');
-    expect(urls).toEqual(['/api/scenes/~YWJj/preview?div=4',
-      '/disk-array/a/b_preview.jpg?div=4']);
+    expect(urls).toEqual(['/api/scenes/~YWJj/preview?div=4']);
   });
 
   it('**源本身就是显示件**（jpgUrl 不是 _preview.jpg）：档位对它无意义，永不重新生成', async () => {
@@ -285,17 +342,15 @@ describe('fetchSceneJpg', () => {
     expect(phase).toHaveBeenCalledTimes(1);
   });
 
-  it('**同一档位重新生成后取静态图必须绕开浏览器缓存**（清除缓存 / 规则换代那条）', async () => {
-    // `?div=N` 只击穿「档位变了」这种情况。档位没变而服务端把同一个 URL 下的文件
-    // 重写了一遍（场景库「清除缓存」、规则签名 v2→v3 原地重新生成）时，URL 逐字相同，
-    // nginx 的 max-age=3600 会让浏览器把旧字节端上来 —— 用户以为清了个寂寞。
-    // 判据是 needBake：只有它成立时才**知道**服务端刚重写过。
+  it('**需要生成时 /preview 走 no-store，稳态静态取图不额外绕缓存**', async () => {
+    // 场景库「清除缓存」、规则签名换代都会让同一个 URL 下的内容重写一遍；
+    // /preview 的 URL 按 id+div 稳定，不能被浏览器那份旧字节糊弄。
     const inits: (RequestInit | undefined)[] = [];
     vi.stubGlobal('fetch', (u: string, init?: RequestInit) => {
       inits.push(init);
       const bodies: Record<string, string> = {
-        '/api/scenes/~YWJj/preview?div=4': 'ok',
-        '/disk-array/a/b_preview.jpg?div=4': 'REBAKED',
+        '/api/scenes/~YWJj/preview?div=4': 'REBAKED',
+        '/disk-array/a/b_preview.jpg?div=4': 'STATIC',
       };
       if (!(u in bodies)) return Promise.resolve(new Response('nope', { status: 404 }));
       return Promise.resolve(new Response(bodies[u], { status: 200 }));
@@ -303,9 +358,11 @@ describe('fetchSceneJpg', () => {
     // 行是服务端刚回的（清完缓存 → hasPreview false、previewDiv null）
     const r = row({ jpgUrl: BAKED, hasPreview: false, previewDiv: null });
     expect(await (await fetchSceneJpg(CFG, r, 4)).text()).toBe('REBAKED');
-    expect(inits[1]?.cache).toBe('no-store');   // 第二次 = 静态取图那一下
+    expect(inits.length).toBe(1);
+    expect(inits[0]?.cache).toBe('no-store');
 
-    // 没重新生成（档位已对上）时不要多这一道 —— 常态下绕缓存等于每次打开都重下一遍
+    // 没重新生成（档位已对上）时只取静态，不要多这一道 ——
+    // 常态下绕缓存等于每次打开都重下一遍
     inits.length = 0;
     resetPreviewCache();
     await fetchSceneJpg(CFG, row({ jpgUrl: BAKED, hasPreview: true, previewDiv: 4 }), 4);
@@ -320,6 +377,24 @@ describe('fetchSceneJpg', () => {
 
   /* ---------------- 本地 blob 缓存（对比模式来回切图靠它） ---------------- */
 
+  it('源身份变化 → 本地预览 blob 缓存失效，重新取图', async () => {
+    stubFetch({ '/api/scenes/~YWJj/preview?div=4': 'OLD' });
+    const before = row({ jpgUrl: null, srcRev: 'abc-100-1' });
+    expect(await (await fetchSceneJpg(CFG, before, 4)).text()).toBe('OLD');
+    expect(urls.length).toBe(1);
+
+    // 源换了一份内容：后端行上的 srcRev 跟着变 → 键变 → 不发旧 blob
+    stubFetch({ '/api/scenes/~YWJj/preview?div=4': 'NEW' });
+    const after = row({ jpgUrl: null, srcRev: 'abc-128-2' });
+    expect(await (await fetchSceneJpg(CFG, after, 4)).text()).toBe('NEW');
+    expect(urls.length).toBe(1);
+
+    // 源没变：键稳定，照常命中本地缓存
+    const same = row({ jpgUrl: null, srcRev: 'abc-128-2' });
+    expect(await (await fetchSceneJpg(CFG, same, 4)).text()).toBe('NEW');
+    expect(urls.length).toBe(1);
+  });
+
   it('同一行 + 同一档位取第二次：零请求，拿到同一份字节', async () => {
     stubFetch({ '/api/scenes/~YWJj/preview?div=4': 'PREVIEW' });
     const r = row({ jpgUrl: null });
@@ -331,33 +406,32 @@ describe('fetchSceneJpg', () => {
   });
 
   it('命中缓存时照旧做那两行记账（hasPreview / previewDiv），语义不漂移', async () => {
-    // 库行这条支路是「先 /preview 生成、再静态取图」两次请求
+    // 库行这条支路是「打 /preview 生成并用它的响应体」
     stubFetch({
       '/api/scenes/~YWJj/preview?div=4': 'PREVIEW',
       '/disk-array/a/b_preview.jpg?div=4': 'STATIC',
     });
     expect(await (await fetchSceneJpg(CFG, row({ jpgUrl: BAKED }), 4)).text())
-      .toBe('STATIC');
-    expect(urls.length).toBe(2);
+      .toBe('PREVIEW');
+    expect(urls.length).toBe(1);
 
     // 第二次：**同 id、记账字段是旧值**的行（等价于刷新后重进场景库）
     const again = row({ jpgUrl: BAKED, hasPreview: false, previewDiv: null });
-    expect(await (await fetchSceneJpg(CFG, again, 4)).text()).toBe('STATIC');
+    expect(await (await fetchSceneJpg(CFG, again, 4)).text()).toBe('PREVIEW');
     expect(again.hasPreview).toBe(true);       // 命中缓存也照旧记上
     expect(again.previewDiv).toBe(4);
-    expect(urls.length).toBe(2);               // 一个请求都没多发
+    expect(urls.length).toBe(1);               // 一个请求都没多发
   });
 
   it('档位进键：换了档位就不是命中，得重新取（并触发生成预览）', async () => {
     stubFetch({
       '/disk-array/a/b_preview.jpg?div=2': 'D2',       // 档位对得上 → 只取静态
-      '/api/scenes/~YWJj/preview?div=8': 'ok',         // 档位不符 → 先重新生成
-      '/disk-array/a/b_preview.jpg?div=8': 'D8',
+      '/api/scenes/~YWJj/preview?div=8': 'D8',         // 档位不符 → 生成并直接用响应体
     });
     const r = row({ jpgUrl: BAKED, hasPreview: true, previewDiv: 2 });
     expect(await (await fetchSceneJpg(CFG, r, 2)).text()).toBe('D2');
     expect(await (await fetchSceneJpg(CFG, r, 8)).text()).toBe('D8');
-    expect(urls.length).toBe(3);
+    expect(urls.length).toBe(2);
   });
 
   it('栅格那份与源 jpg 那份是两个键：档位翻到「栅格赢」时不会命中源 jpg 的缓存', async () => {
@@ -365,16 +439,15 @@ describe('fetchSceneJpg', () => {
     // 端上来的是**两张不同的图**。只按 id+div 存键的话这里会串味。
     stubFetch({
       '/api/scenes/~YWJj/preview?div=4': 'RASTER',
-      '/disk-array/a/PAN_preview.jpg?div=4': 'RASTER',
       '/disk-array/a/PAN.jpg': 'SOURCE',
     });
     const r = rasterRow();
     expect(await (await fetchSceneJpg(CFG, r, 4)).text()).toBe('RASTER');
     expect(await (await fetchSceneJpg(CFG, r, 32)).text()).toBe('SOURCE');
-    expect(urls.length).toBe(3);
+    expect(urls.length).toBe(2);
     // 再切回 ÷4：这次才是真的命中（此前那份栅格还在缓存里）
     expect(await (await fetchSceneJpg(CFG, r, 4)).text()).toBe('RASTER');
-    expect(urls.length).toBe(3);
+    expect(urls.length).toBe(2);
   });
 
   it('缓存上限是从 api 层能读到的（设置浮层要用它报「N 项 / X MB」）', async () => {
@@ -425,17 +498,16 @@ describe('fetchSceneJpg', () => {
     ...over,
   });
 
-  it('栅格更清晰时优先：先 /preview 生成栅格那份，再静态取图；**源 jpg 的三个字段一字不动**', async () => {
+  it('栅格更清晰时优先：/preview 的响应体就是栅格那份；**源 jpg 的三个字段一字不动**', async () => {
     // 请求用的是**这条行自己的 id** —— 后端在 /preview 那一层把 jpg 换成同名栅格，
     // 前端不必先取一次栅格的 id、更不必多一次往返。
     stubFetch({
-      '/api/scenes/~YWJj/preview?div=4': 'ok',
-      '/disk-array/a/PAN_preview.jpg?div=4': 'RASTER',
+      '/api/scenes/~YWJj/preview?div=4': 'RASTER',
+      '/disk-array/a/PAN_preview.jpg?div=4': 'STATIC',
     });
     const r = rasterRow();
     expect(await (await fetchSceneJpg(CFG, r, 4)).text()).toBe('RASTER');
-    expect(urls).toEqual(['/api/scenes/~YWJj/preview?div=4',
-      '/disk-array/a/PAN_preview.jpg?div=4']);
+    expect(urls).toEqual(['/api/scenes/~YWJj/preview?div=4']);
     // 栅格那份预览的记账：就地改，语义与栅格行一致
     expect(r.rasterPreview!.hasPreview).toBe(true);
     expect(r.rasterPreview!.previewDiv).toBe(4);
@@ -460,8 +532,8 @@ describe('fetchSceneJpg', () => {
     // 显示件，÷4 更清晰、÷32 更糊），所以换档位有可能直接翻到源 jpg 那一支去。
     // 判据每个档位各算一次，不缓存、不跨档位沿用。
     stubFetch({
-      '/api/scenes/~YWJj/preview?div=8': 'ok',
-      '/disk-array/a/PAN_preview.jpg?div=8': 'REBAKED',
+      '/api/scenes/~YWJj/preview?div=8': 'REBAKED',
+      '/disk-array/a/PAN_preview.jpg?div=8': 'STATIC',
     });
     const r = rasterRow();
     Object.assign(r.rasterPreview!, { rasterW: 24000, rasterH: 24000,
@@ -469,8 +541,7 @@ describe('fetchSceneJpg', () => {
     r.rasterPreview!.hasPreview = true;
     r.rasterPreview!.previewDiv = 4;
     expect(await (await fetchSceneJpg(CFG, r, 8)).text()).toBe('REBAKED');
-    expect(urls).toEqual(['/api/scenes/~YWJj/preview?div=8',
-      '/disk-array/a/PAN_preview.jpg?div=8']);
+    expect(urls).toEqual(['/api/scenes/~YWJj/preview?div=8']);
     expect(r.rasterPreview!.previewDiv).toBe(8);
 
     // 同一行滑到 ÷32：round(24000/32)=750 < 1000 → 栅格更糊，落回源 jpg（行为同今天）

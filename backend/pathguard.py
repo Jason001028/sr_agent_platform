@@ -16,6 +16,9 @@
 ----
 * SR_DRIVE_MAP    盘符映射，`;` 分隔的多条 `KEY=VAL`，默认 `W:=/DiskArray`。
 * SR_ALLOWED_ROOTS 允许访问的盘阵前缀，`;` 分隔，默认 `/DiskArray`。
+* SR_PREVIEW_ROOTS 盘阵**之外**、只允许预览读取的前缀，`;` 分隔，默认空。
+                   只放行看图 / ROI / Agent 读图；提交 SR、写掩码、场景检索
+                   仍只认 SR_ALLOWED_ROOTS（见 `ensure_preview_allowed`）。
 * SR_SCENE_PATH_TEMPLATE 反推模板（含盘符，便于沿用用户侧写法）。可用占位符
                    `{y} {m} {d} {name} {sat} {mid}`；**配了只按它一条走**，未配
                    则按默认的生产树模板。后两个占位符由生产命名规则从文件名拆出
@@ -34,6 +37,10 @@ from pathlib import Path
 
 _DEFAULT_DRIVE_MAP = "W:=/DiskArray"
 _DEFAULT_ALLOWED_ROOTS = "/DiskArray"
+#: 盘阵**之外**、只允许预览读取的根（`SR_PREVIEW_ROOTS`，`;` 分隔，缺省空）。
+#: 与 SR_ALLOWED_ROOTS 是两套权限：这里放行的文件能看、能画 ROI、能给 Agent 看，
+#: 但**不能提交 SR、不能写掩码、不进场景检索** —— 那些入口只认 SR_ALLOWED_ROOTS。
+_DEFAULT_PREVIEW_ROOTS = ""
 
 #: 形如 `W:` / `W:\` / `W:/`；只认盘符本身，后面的分隔符原样留给下一步处理。
 _DRIVE_RE = re.compile(r"^([A-Za-z]):(?=[\\/]|$)")
@@ -155,13 +162,48 @@ def is_allowed(path: str | Path) -> bool:
     return any(is_within(path, r) for r in allowed_roots())
 
 
-def ensure_allowed(path: str | Path, *, kind: str = "any") -> Path:
-    """校验绝对路径落在白名单内。``kind`` ∈ ``any`` / ``file`` / ``dir``。
+def preview_roots() -> list[Path]:
+    """SR_PREVIEW_ROOTS 解析结果（`;` 分隔）。缺省空 —— 不额外放行任何目录。
 
-    ``kind="any"`` 允许目标尚不存在（只做词法 + 白名单）—— 供"路径还没
-    stat 就要先判可否"的场景用。注意这里**不做 is_file() 兜底**：调用方
-    要文件就显式传 ``kind="file"``，免得目录被误拒。
+    词法解析、不要求存在，与 ``allowed_roots`` 同一纪律。**只用于预览读取**：
+    调用方必须明确走 ``ensure_preview_allowed``，不要拿它去判提交或写盘。
     """
+    raw = os.environ.get("SR_PREVIEW_ROOTS", _DEFAULT_PREVIEW_ROOTS)
+    roots: list[Path] = []
+    for item in raw.split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            roots.append(Path(to_posix_array_path(item)))
+        except PathDeniedError as e:
+            raise PathDeniedError(f"SR_PREVIEW_ROOTS 条目非法（{item}）：{e}") from e
+    return roots
+
+
+def is_preview_allowed(path: str | Path) -> bool:
+    """文件是否在「预览可读」范围内（盘阵前缀 ∪ 预览前缀）。"""
+    return any(is_within(path, r) for r in allowed_roots() + preview_roots())
+
+
+def is_preview_only(path: str | Path) -> bool:
+    """文件是否**只**在预览前缀之下（盘阵前缀之外）。
+
+    这个判据只服务一件事：给它挑一个隔离的缓存落点，别把预览 JPG 写进
+    外部目录。它**不**参与权限判断 —— 权限始终是 ``is_preview_allowed``。
+
+    `SR_PREVIEW_ROOTS` 未配置（缺省）时**一次 stat 都不做**：功能没开，就不该
+    让每次 resolve / siblings 都多付白名单解析的代价。
+    """
+    roots = preview_roots()
+    if not roots:
+        return False
+    return any(is_within(path, r) for r in roots) and not is_allowed(path)
+
+
+def _ensure_under(roots: list[Path], path: str | Path, *, kind: str,
+                  missing: str, label: str) -> Path:
+    """共同的绝对路径 + 前缀校验（错误文案由调用方给）。"""
     if kind not in ("any", "file", "dir"):
         raise ValueError(f"kind 取值非法：{kind}")
     p = Path(path)
@@ -173,17 +215,48 @@ def ensure_allowed(path: str | Path, *, kind: str = "any") -> Path:
     # 可盘阵路径本来就是 POSIX 形态，必须放行 —— 所以两种都认。
     if not (p.is_absolute() or p.as_posix().startswith("/")):
         raise PathDeniedError("仅接受绝对路径")
-    roots = allowed_roots()
     if not roots:
-        raise PathDeniedError("未配置允许的盘阵前缀（SR_ALLOWED_ROOTS）")
-    if not is_allowed(p):
-        listed = "、".join(str(r) for r in roots)
-        raise PathDeniedError(f"路径不在允许的盘阵前缀内（SR_ALLOWED_ROOTS={listed}）：{p}")
+        raise PathDeniedError(missing)
+    if not any(is_within(p, r) for r in roots):
+        raise PathDeniedError(f"路径不在允许的{label}：{p}")
     if kind == "file" and not p.is_file():
         raise PathDeniedError(f"文件不存在：{p}")
     if kind == "dir" and not p.is_dir():
         raise PathDeniedError(f"目录不存在：{p}")
     return p
+
+
+def ensure_allowed(path: str | Path, *, kind: str = "any") -> Path:
+    """校验绝对路径落在盘阵白名单内。``kind`` ∈ ``any`` / ``file`` / ``dir``。
+
+    ``kind="any"`` 允许目标尚不存在（只做词法 + 白名单）—— 供"路径还没
+    stat 就要先判可否"的场景用。注意这里**不做 is_file() 兜底**：调用方
+    要文件就显式传 ``kind="file"``，免得目录被误拒。
+    """
+    roots = allowed_roots()
+    listed = "、".join(str(r) for r in roots)
+    return _ensure_under(
+        roots, path, kind=kind,
+        missing="未配置允许的盘阵前缀（SR_ALLOWED_ROOTS）",
+        label=f"盘阵前缀内（SR_ALLOWED_ROOTS={listed}）")
+
+
+def ensure_preview_allowed(path: str | Path, *, kind: str = "any") -> Path:
+    """校验绝对路径落在**预览可读**范围（盘阵前缀 ∪ SR_PREVIEW_ROOTS）。
+
+    只给查看链路用：resolve 的 `{path}` 分支、`GET /preview`、只读的空间标识。
+    **不得**用它做提交/写盘判据 —— 那两条仍走 ``ensure_allowed``，否则一张
+    盘阵外的 TIFF 就能换来 SR 执行权。
+    """
+    roots = allowed_roots() + preview_roots()
+    listed = "；".join(
+        f"{name}={('、'.join(str(r) for r in part) or '（未配置）')}"
+        for name, part in (("SR_ALLOWED_ROOTS", allowed_roots()),
+                           ("SR_PREVIEW_ROOTS", preview_roots())))
+    return _ensure_under(
+        roots, path, kind=kind,
+        missing="未配置允许的盘阵前缀（SR_ALLOWED_ROOTS）或预览前缀（SR_PREVIEW_ROOTS）",
+        label=f"预览前缀内（{listed}）")
 
 
 def normalize_submit_path(raw: str | Path) -> str:

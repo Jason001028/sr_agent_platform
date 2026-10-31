@@ -10,7 +10,7 @@ import { computed, ref, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import { useQcListStore } from '../stores/qclist';
 import { parseLocPair } from '../lib/viewMath';
-import { SCENE_PREVIEW_DIVS, previewDivLabel } from '../lib/scene';
+import PreviewScaleControl from './PreviewScaleControl.vue';
 import { isIntermediateStage } from '../lib/stage';
 import type { StretchMode } from '../lib/tifDecode';
 import AppIcon from './AppIcon.vue';
@@ -50,19 +50,6 @@ const stretchTitle = computed(() =>
       + '（均衡不可逆，拉不回来）'
     : '',
 );
-
-/** 预览缩放档位（各边 ÷N）：**平台级**设置，拖入 / 场景库两条入口
-    都按它生成。拖动条按**下标**走（`SCENE_PREVIEW_DIVS` 的次序），不是按档位值本身 ——
-    原档…÷16 是等比数列，用下标每格等宽，用户按起来才是均匀的。 */
-const DIVS = SCENE_PREVIEW_DIVS;
-const divIndex = computed(() => {
-  const i = (DIVS as readonly number[]).indexOf(store.previewDiv);
-  return i < 0 ? (DIVS as readonly number[]).indexOf(4) : i;
-});
-const divLabel = computed(() => previewDivLabel(store.previewDiv));
-function onDivInput(e: Event) {
-  store.setPreviewDiv(DIVS[Number((e.target as HTMLInputElement).value)] ?? 4);
-}
 
 /** 对比模式的中文短名（按钮上那个后缀，与 CompareBar 的三选一同一套叫法）。 */
 const cmpModeLabel = computed(() => (store.compareMode === 'split' ? '分屏' : '点选'));
@@ -187,25 +174,7 @@ watch(
     <!-- 预览下采样档位：紧邻定位组件，因为两者是同一类「看图前先定参数」的控件。
          文案「预览 1/N」而不是「缩放」：它改的是**服务端生成的那张 JPG**的分辨率，
          不是画布的显示缩放（那个在右下角，别混）。 -->
-    <span
-      class="divsel"
-      data-e2e="preview-div"
-      :title="'服务端预览档位：长宽各为源图的 ' + divLabel + '。'
-        + '档位越小越清晰、首次打开越慢（要读一遍大图）；'
-        + '改档后已打开过的场景会在下次打开时按新档重新生成（原地覆盖，不堆积）。'"
-    >
-      <span class="divsel-label">{{ store.previewDiv === 1 ? '原档预览' : '预览 ' + divLabel }}</span>
-      <input
-        type="range"
-        :min="0"
-        :max="DIVS.length - 1"
-        step="1"
-        :value="divIndex"
-        aria-label="预览下采样档位"
-        :aria-valuetext="store.previewDiv === 1 ? '原档预览，原始分辨率' : '预览 ' + divLabel"
-        @input="onDivInput"
-      />
-    </span>
+    <PreviewScaleControl :model-value="store.previewDiv" @update:model-value="store.setPreviewDiv" />
 
     <span class="spacer"></span>
 
@@ -416,41 +385,6 @@ watch(
 .loc-btn { padding: 0 12px; }
 
 /* ---- 预览档位：不再是一颗白 pill，直接坐在雾白底上（组内已用间距分开） ---- */
-.divsel {
-  display: inline-grid;
-  grid-template-columns: 76px 80px;
-  align-items: center;
-  gap: 8px;
-  flex: none;
-  height: 32px;
-  padding: 0 8px 0 10px;
-  color: var(--tb-muted);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  user-select: none;
-}
-.divsel-label {
-  min-width: 0;
-  text-align: left;
-}
-.divsel input[type='range'] {
-  width: 80px;
-  min-width: 0;
-  height: 16px;
-  margin: 0;
-  background: transparent;
-  accent-color: var(--tb-primary);   /* 灰绿滑轨 + 青绿滑块（浏览器原生配色） */
-  cursor: pointer;
-}
-.divsel input[type='range']:focus-visible {
-  outline: 2px solid var(--tb-focus);
-  outline-offset: 2px;
-  border-radius: 8px;
-}
-
-/* ---- 模式激活：图像对比开启 / 绘制掩码开启。持续可见，不依赖 hover；
-        hover 时保持同一底色，免得一碰就「掉激活」。 ---- */
 .outbtn.on,
 .cmp-btn.on {
   background: var(--tb-active-bg);

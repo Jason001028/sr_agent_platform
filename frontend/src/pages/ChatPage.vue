@@ -16,6 +16,7 @@ import type { ChatMsg } from '../stores/chat.js';
 import type { ChatSession } from '../lib/api.js';
 import TokenUsagePanel from '../components/TokenUsagePanel.vue';
 import MarkdownBody from '../components/MarkdownBody.vue';
+import UserMessageText from '../components/UserMessageText.vue';
 import ReasoningBlock from '../components/ReasoningBlock.vue';
 import { phaseLabel } from '../lib/executionOverview.js';
 import ThinkingIndicator from '../components/ThinkingIndicator.vue';
@@ -308,7 +309,7 @@ onMounted(() => {
           <template v-if="m.role === 'user'">
             <div class="bubble user" :class="{ 'has-shots': Boolean(m.images?.length) }">
               <ChatBubbleImages v-if="m.images?.length" :images="m.images" />
-              <p v-if="userText(m.content)" class="utext">{{ userText(m.content) }}</p>
+              <UserMessageText v-if="userText(m.content)" class="utext" :text="userText(m.content)" />
             </div>
           </template>
 

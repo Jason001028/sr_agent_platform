@@ -5,14 +5,66 @@ import { createPinia, setActivePinia } from 'pinia';
 vi.mock('../../router/index.js', () => ({ default: {} }));
 vi.mock('../../lib/api.js', async (original) => ({
   ...await original<typeof import('../../lib/api.js')>(),
-  fetchSceneJpg: vi.fn(), ensureScenePreviewReady: vi.fn().mockResolvedValue(undefined),
+  fetchSceneJpg: vi.fn(), fetchDropSceneJpg: vi.fn(), ensureScenePreviewReady: vi.fn().mockResolvedValue(undefined),
 }));
 import { browserKit } from '../../lib/browserKit';
 import { useViewerStore } from '../viewer';
-import { fetchSceneJpg, ensureScenePreviewReady } from '../../lib/api';
+import { fetchSceneJpg, fetchDropSceneJpg, ensureScenePreviewReady } from '../../lib/api';
 import type { SceneRow, SceneOpenMeta } from '../../lib/scene';
 beforeEach(() => { setActivePinia(createPinia()); vi.clearAllMocks(); vi.mocked(ensureScenePreviewReady).mockResolvedValue(undefined); });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+it.each([true, false])('reloads visible preview while preserving viewport (card=%s)', async (card) => {
+  let edge = 2;
+  vi.stubGlobal('createImageBitmap', vi.fn().mockImplementation(async () => ({ width: edge, height: edge, close() {} })));
+  vi.spyOn(browserKit, 'createCanvas').mockImplementation((width, height) => ({
+    width, height, getContext: () => ({ drawImage() {}, putImageData() {},
+      getImageData: () => ({ data: new Uint8ClampedArray(width * height * 4).fill(100) }) }),
+  } as never));
+  vi.stubGlobal('ImageData', class { constructor(public data: unknown, public width: number, public height: number) {} });
+  vi.mocked(fetchSceneJpg).mockResolvedValue(new Blob(['jpeg']));
+  vi.mocked(fetchDropSceneJpg).mockResolvedValue(new Blob(['jpeg']));
+  const store = useViewerStore();
+  store.setCanvasSize(800, 600);
+  store.setPreviewDiv(4);
+  const id = store.insertSceneCard({ sceneId: 'level', name: 'level', W: 200, H: 200 } as SceneOpenMeta,
+    { id: 'level' } as SceneRow);
+  await store.activate(id);
+  if (!card) delete store.recs[0].card;
+  store.view.scale = 100; store.view.ox = -20; store.view.oy = -30;
+  edge = 4;
+  store.setPreviewDiv(2);
+  for (let i = 0; i < 10; i++) await new Promise(done => setTimeout(done, 0));
+  expect(store.recs[0].detailDiv).toBe(2);
+  expect(store.recs[0].srcw).toBe(4);
+  expect(store.view.scale).toBe(50);
+  expect(store.view.ox).toBe(-20);
+  expect(store.view.oy).toBe(-30);
+  expect(store.activeId).toBe(id);
+});
+it('switches preview-only sources through /preview, never /preview-drop', async () => {
+  vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue({ width: 2, height: 2, close() {} }));
+  vi.spyOn(browserKit, 'createCanvas').mockImplementation((width, height) => ({
+    width, height, getContext: () => ({ drawImage() {}, putImageData() {},
+      getImageData: () => ({ data: new Uint8ClampedArray(width * height * 4).fill(100) }) }),
+  } as never));
+  vi.stubGlobal('ImageData', class { constructor(public data: unknown, public width: number, public height: number) {} });
+  vi.mocked(fetchSceneJpg).mockResolvedValue(new Blob(['jpeg']));
+  const store = useViewerStore();
+  store.setCanvasSize(800, 600);
+  const id = store.insertSceneCard(
+    { sceneId: 'ext', name: 'ext', W: 200, H: 200, previewOnly: true } as SceneOpenMeta,
+    { id: 'ext' } as SceneRow);
+  await store.activate(id);
+  delete store.recs[0].card;              // 盘阵外授权 TIFF 打开后没有批量卡
+  vi.mocked(fetchSceneJpg).mockClear();
+  vi.mocked(fetchDropSceneJpg).mockClear();
+  store.setPreviewDiv(store.previewDiv === 2 ? 4 : 2);
+  for (let i = 0; i < 10; i++) await new Promise(done => setTimeout(done, 0));
+  expect(fetchDropSceneJpg).not.toHaveBeenCalled();
+  expect(fetchSceneJpg).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(fetchSceneJpg).mock.calls[0][1].id).toBe('ext');
+});
+
 it.each([10, 50, 100])('enqueues %i cards without fetching detailed JPEGs', async (count) => {
   const store = useViewerStore();
   const begin = performance.now();

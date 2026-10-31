@@ -1520,10 +1520,14 @@ class TestDropPreview(ResolveBase):
                     self.assertEqual(im.size, (w, h))
 
     def test_invalid_div_400(self):
-        """非法档位一律 400（三条入口同一套校验），且不落任何文件。"""
+        """非法档位一律 400（三条入口同一套校验），且不落任何文件。
+
+        `1` 是合法档位（原尺寸；`PREVIEW_DIVISORS = (1, 2, 4, 8, 16, 32)`），
+        不再列在这里。
+        """
         c = self.client()
         sid = self.scene_id_of_manual(c)
-        for bad in (0, 1, 3, 64, -4):
+        for bad in (0, 3, 64, -4):
             with self.subTest(div=bad):
                 r = c.get(f"/api/scenes/{sid}/preview-drop?div={bad}")
                 self.assertEqual(r.status_code, 400, r.text)

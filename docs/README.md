@@ -490,6 +490,8 @@ sr_agent_platform/
 | [durable_goal_runtime.md](status/durable_goal_runtime.md) | Goal/Round 执行、SR 自动续跑、Lease Fencing、独立验收与自动化验证 |
 | [goal_clarification.md](status/goal_clarification.md) | Goal 澄清、WAITING_USER、原子回答/恢复、崩溃窗口与实测验收 |
 | [runtime_status.md](status/runtime_status.md) | 每次模型请求的临时运行状态、计数口径、注入边界与测试 |
+| [spotlight-focus.md](status/spotlight-focus.md) | 《待修复清单》选中行驱动的左侧场景聚焦遮罩：层级、坐标、镂空分块、三档与验证 |
+| [generic-preview-p1.md](status/generic-preview-p1.md) | 盘阵外授权 TIFF 的通用预览：预览/生产权限拆分、隔离缓存、Overview 复用与实测 |
 | [sr-local-execution.md](status/sr-local-execution.md) | 本机执行 SR 的链路与运行期规则：单槽串行、重启、UNKNOWN、判定文件 |
 | [real-machine-acceptance.md](status/real-machine-acceptance.md) | 真机验收判据与勾选 |
 | [real-machine-bringup.md](status/real-machine-bringup.md) | node81-135 的部署与启动运行手册 |

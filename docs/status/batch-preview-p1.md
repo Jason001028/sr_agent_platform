@@ -1,5 +1,19 @@
 # P1 批量预览优化记录（2026-10-30）
 
+## 缩略图空白回归修复（2026-10-30）
+
+`FileThumb.vue` 原先在盘阵卡片上禁用Canvas回退，已有 `_thumb.jpg` 缺失或失败时，
+即使详细影像已经打开，仍只显示“场景就绪”。现保留轻量图片优先策略，失败或无URL时
+使用用户已打开的 `rec.thumb` 绘制小Canvas，不新增详细影像请求。Canvas引用变化时
+重新绑定ResizeObserver，像素监听使用post flush，覆盖图片失败后才插入Canvas的时序。
+小Canvas绘制后独立保留，不持有原始大Canvas引用；详细像素被预算淘汰后仍显示小图。
+
+`node .e2e/test-batch-preview.js` 真实Chrome回归通过：无URL、404、损坏JPEG、
+打开之后缩略图才返回404、正常图片五种情况；前四种检查Canvas实际像素与状态遮罩消失，
+并验证尺寸变化重绘及详细像素淘汰后的缩略图保留。原10/50/100卡片入列无详细请求、
+预算恢复、截图与分屏store消费测试同时通过。TypeScript检查及最终生产构建通过。
+测试图片为本地HTTP夹具，未访问内网生产影像。
+
 ## A. 根因与调用链
 
 一键解析由 `frontend/src/stores/qclist.ts:373` 等处调用 Viewer 的批量方法。占位卡经 `fillPendingCard` 补齐权威 SceneRow 与 SceneOpenMeta；NOSR 通过 siblings 返回的身份另外插入，并保留阶段区分。

@@ -7,6 +7,11 @@ Env
 ---
 SR_SCENES_ROOT    盘阵场景根（unset → fake 回退）
 SR_PREVIEWS_ROOT  可选预览缓存根（须在 scenes 根内，长期缓存）
+SR_PREVIEW_ROOTS  盘阵**之外**、只允许预览读取的前缀（`;` 分隔，缺省空）。
+                  只放行看图 / ROI / Agent 读图；提交 SR、写掩码、场景检索
+                  仍只认 SR_ALLOWED_ROOTS（见 backend/pathguard.py）。
+SR_PREVIEW_CACHE_ROOT 盘阵外预览源的缓存根（缺省 = SR_TEMP_PREVIEWS_ROOT/generic）。
+                  文件按源绝对路径的哈希命名，不与盘阵内的缓存混用。
 SR_TEMP_PREVIEWS_ROOT 拖拽入口的**兜底**预览缓存根（1 天 TTL，每日 0 点清）；
                   仅在场景目录不可写时才用，默认系统临时目录
                   （见 services/preview_cache.py 的约定）
@@ -32,12 +37,15 @@ SR_API_HOST/PORT  仅 `python -m backend.api` 直启用
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from PIL import Image
+
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
@@ -48,9 +56,10 @@ from backend.api.platform import (
     router as platform_router)
 from backend.config import load_config
 from backend.pathguard import (
-    ensure_allowed, flat_scene_layout, infer_scene_paths, is_within,
-    looks_like_scene_name, parse_scene_date, production_tree_depth,
-    scene_name_products, strip_raster_ext, to_posix_array_path)
+    ensure_allowed, ensure_preview_allowed, flat_scene_layout, infer_scene_paths,
+    is_allowed, is_preview_only, is_within, looks_like_scene_name,
+    parse_scene_date, production_tree_depth, scene_name_products,
+    strip_raster_ext, to_posix_array_path)
 from backend.services import preview_cache
 from backend.runtime_context import AppContext
 from backend.tools import build_builtin_registry
@@ -61,9 +70,11 @@ from backend.services import goal_runtime, goal_worker
 from backend.services import scene_search, store as store_mod
 from backend.services.preview_jpg import (PREVIEW_DIVISORS, PREVIEW_JPG_QUALITY,
                                           PreviewError, build_preview_pixels,
-                                          cache_hit, ensure_preview_jpg,
-                                          preview_div_of, preview_max_edge,
-                                          scene_dims, write_preview_jpg)
+                                          cache_hit, cache_meta,
+                                          ensure_preview_jpg,
+                                          preview_max_edge, scene_dims,
+                                          source_revision, stamp_div,
+                                          stamp_src, write_preview_jpg)
 
 # W/H 探测缓存：LRU，key = (绝对路径, mtime)，header 级读取很廉价但盘阵文件多
 _DIMS_CACHE: dict[tuple[str, float], dict] = {}
@@ -99,31 +110,38 @@ def _cached_dims(abs_path: Path) -> dict | None:
     return dims
 
 
-# 预览档位缓存：LRU，key = (预览 JPG 绝对路径, mtime)。与 _DIMS_CACHE 同一范式 ——
-# 只读 JPEG 注释头、不解码像素，但列表路径上逐行都要来一次，仍值得缓存。
-# 注意 `None` 是**合法结果**（「不知道是哪一档」），所以判命中必须用 `in` 而不是 .get()。
-_DIV_CACHE: dict[tuple[str, float], int | None] = {}
-_DIV_CACHE_MAX = 1024
+# 预览有效性缓存：LRU，key = (预览 JPG 路径, mtime, 源身份)。值 =(可用, 档位)。
+# 与 _DIMS_CACHE 同一范式 —— 只读 JPEG 注释头、不解码像素，但列表路径上逐行都要来
+# 一次，仍值得缓存。源身份进 key：源换了（size / mtime_ns 变）就不该再认旧结论。
+_PREVIEW_STATE_CACHE: dict[tuple[str, float, str], tuple[bool, int | None]] = {}
+_PREVIEW_STATE_CACHE_MAX = 1024
 
 
-def _cached_preview_div(jpg: Path) -> int | None:
-    """盘上这份预览 JPG 是按哪一档生成的；不存在 / 旧格式 / 读不出 → None。
+def _preview_cache_state(jpg: Path, source: Path) -> tuple[bool, int | None]:
+    """盘上这份预览是否**确实由 `source` 按当前规则**生成；返回 (可用, 档位)。
 
-    None 对前端的含义是「不知道是哪一档」→ 按当前档位重生成一轮。v2 那代戳解不出
-    div，所以换包后每个场景首次打开都会重生成一次（惰性，预期内）。
+    只看「文件在 + 戳里解得出档位」是不够的：旧戳没有 `;src=`、源也可能已经被
+    换成另一份内容。那种情况下若行上仍回 `hasPreview=true` / `previewDiv=4`，
+    前端就会跳过 `/preview` 直接读静态 JPG —— 错图照样被展示。这里把源身份
+    一并核对，无效就让 `hasPreview=false`、`previewDiv=null`，前端据此重生成。
     """
     try:
-        mtime = jpg.stat().st_mtime
+        mtime = jpg.stat().st_mtime_ns
     except OSError:
-        return None
-    key = (str(jpg), mtime)
-    if key in _DIV_CACHE:
-        return _DIV_CACHE[key]
-    if len(_DIV_CACHE) >= _DIV_CACHE_MAX:
-        _DIV_CACHE.clear()
-    div = preview_div_of(jpg)
-    _DIV_CACHE[key] = div
-    return div
+        return False, None
+    rev = source_revision(source)
+    key = (str(jpg), mtime, rev or "")
+    if key in _PREVIEW_STATE_CACHE:
+        return _PREVIEW_STATE_CACHE[key]
+    if len(_PREVIEW_STATE_CACHE) >= _PREVIEW_STATE_CACHE_MAX:
+        _PREVIEW_STATE_CACHE.clear()
+    state: tuple[bool, int | None] = (False, None)
+    if rev is not None:
+        meta = cache_meta(jpg, source_rev=rev)
+        if meta is not None:
+            state = (True, meta["div"])
+    _PREVIEW_STATE_CACHE[key] = state
+    return state
 
 
 def _check_div(div: int) -> int:
@@ -184,14 +202,18 @@ def _raster_preview(abs_path: Path, root: Path | None) -> dict | None:
     if not rdims or not jdims:
         return None
     jpg = paths.preview_jpg_for(raster, root)
+    has_preview, preview_div = _preview_cache_state(jpg, raster)
     out = {
         "id": paths.scene_id_abs(raster),
         "name": raster.name,
         "rel": None, "jpgUrl": None,
         "rasterW": rdims["W"], "rasterH": rdims["H"],
         "jpgW": jdims["W"], "jpgH": jdims["H"],
-        "hasPreview": jpg.is_file(),
-        "previewDiv": _cached_preview_div(jpg),
+        "hasPreview": has_preview,
+        "previewDiv": preview_div,
+        # 源身份随行下发给前端：预览 blob 的本地缓存键带上它，源换过就自然失效
+        # （见 frontend/src/lib/scene.ts::previewCacheKey）。
+        "srcRev": source_revision(raster),
     }
     if root is not None and is_within(raster, root):
         out["rel"] = paths.rel_of_scene(raster, root)
@@ -239,9 +261,12 @@ def _scene_row(scene: dict, root: Path | None) -> dict:
         "fake": bool(scene.get("fake")),
         "W": None, "H": None,
         "rel": None, "jpgUrl": None, "hasPreview": False,
-        # 盘上那份预览是按哪一档生成的（null = 没有/旧格式/读不出）。前端据它与
-        # 当前档位比对，决定要不要重生成 —— hasPreview 不认档位，只看它不够。
+        # 盘上那份预览是按哪一档生成的（null = 没有/旧格式/读不出/源已变）。前端据
+        # 它与当前档位比对，决定要不要重生成 —— hasPreview 不认档位，只看它不够。
         "previewDiv": None,
+        # 源文件身份（路径哈希 + 字节数 + mtime_ns）。前端预览 blob 的缓存键带上它，
+        # 源换了一份就自然失效；NULL = 没有源（fake / 文件读不到）。
+        "srcRev": None,
         # 阶段5 viewer 上下文侧舱任务关联用：scene 文件父目录（= run_sr 的 lq_path，
         # queue 行 params.lq_path 与之同值）。只读字段，仅 disk 行非空；fake 恒 null。
         "lq_path": None,
@@ -267,6 +292,7 @@ def _scene_row(scene: dict, root: Path | None) -> dict:
     # Linux 上 as_posix() 与 str() 同值，生产行为不变。
     row["thumbnail_url"] = _thumbnail_url(abs_path, root)
     row["lq_path"] = abs_path.parent.as_posix()
+    row["srcRev"] = source_revision(abs_path)
     if abs_path.suffix.lower() in (".jpg", ".jpeg"):
         # 盘阵里的 JPG 就是显示就绪图本身（§4.7）：不需要预览生成预览，
         # jpgUrl 直接指向源文件，前端拿到即开（不再走 /preview 生成端点）。
@@ -281,9 +307,10 @@ def _scene_row(scene: dict, root: Path | None) -> dict:
         row["rasterPreview"] = _raster_preview(abs_path, root)
         return row
     jpg = paths.preview_jpg_path(abs_path, root)
-    row["hasPreview"] = jpg.is_file()
+    # **按实际源核对缓存**：只判 jpg.is_file() 会让旧戳 / 换过源的缓存继续以
+    # `hasPreview=true` 通向静态 URL，前端于是跳过 /preview、展示错图。
+    row["hasPreview"], row["previewDiv"] = _preview_cache_state(jpg, abs_path)
     row["jpgUrl"] = paths.rel_url(jpg, root)
-    row["previewDiv"] = _cached_preview_div(jpg)
     return row
 
 
@@ -298,6 +325,30 @@ def _same_file(a: Path, b: Path) -> bool:
         return os.path.samefile(a, b)
     except OSError:
         return os.path.normcase(str(a)) == os.path.normcase(str(b))
+
+
+def _capabilities(*, sr_capable: bool, scene_dir: Path | None,
+                  in_array: bool, preview_only: bool) -> dict:
+    """把「这张图能做什么」显式写出来，而不是让调用方从来源去猜。
+
+    浏览类能力（预览 / ROI / Agent 读图）对任何能打开的影像都开放；生产类能力
+    只认盘阵前缀（`SR_ALLOWED_ROOTS`）里的合法场景。**盘阵外的预览源即使能
+    打开，也不会因为这一行而获得 SR 提交或写掩码的权限。**
+
+    ``in_array`` / ``preview_only`` 由调用方算好传进来：同一个请求里已经判过
+    一次，不再重复 resolve（解析结果也要落进响应，不能让两处算法漂移）。
+    """
+    prod_ok = bool(sr_capable and in_array and scene_dir is not None)
+    return {
+        "preview": True,
+        "roi": True,
+        # Agent 的空间批注与视觉问答是只读的：有场景 id 就能绑定身份。
+        "agent": True,
+        "mask_write": prod_ok,
+        "sr_submit": prod_ok,
+        "scene_search": prod_ok,
+        "preview_only": preview_only,
+    }
 
 
 def _manual_row(abs_path: Path, dir_path: Path, root: Path | None) -> dict:
@@ -318,8 +369,10 @@ def _manual_row(abs_path: Path, dir_path: Path, root: Path | None) -> dict:
         "fake": False,
         "W": None, "H": None,
         "rel": None, "jpgUrl": None, "hasPreview": False,
-        # 同 _scene_row：盘上那份预览是按哪一档生成的（null = 没有/旧格式/读不出）。
+        # 同 _scene_row：盘上那份预览是按哪一档生成的（null = 没有/旧格式/读不出/源已变）。
         "previewDiv": None,
+        # 同 _scene_row：源身份，前端预览 blob 缓存键的一部分。
+        "srcRev": None,
         # 同 _scene_row：lq_path 一律 POSIX（它会被原样带进提交表单）。
         "lq_path": dir_path.as_posix(),
         "manual": True,
@@ -331,8 +384,10 @@ def _manual_row(abs_path: Path, dir_path: Path, root: Path | None) -> dict:
     # URL，但前端要靠它判断「这次会不会触发首次预览生成」并提示用户等待，所以不能
     # 因为「库外用不上」就一律留 False。
     jpg = paths.preview_jpg_for(abs_path, root)
-    row["hasPreview"] = jpg.is_file()
-    row["previewDiv"] = _cached_preview_div(jpg)
+    # 与 _scene_row 同一条判据：缓存存在还不够，必须确认它确实由这份源按当前
+    # 规则生成；否则 `hasPreview` 会骗过前端，让它跳过 /preview 直接展示旧图。
+    row["hasPreview"], row["previewDiv"] = _preview_cache_state(jpg, abs_path)
+    row["srcRev"] = source_revision(abs_path)
     if root is not None and is_within(abs_path, root):
         # 恰好也在场景库根之下（例如用户手填了库内路径）：静态预览 URL 可用，
         # 与库行行为对齐，省掉一次 /preview 生成。
@@ -478,6 +533,61 @@ def _finish_preview(state, task: dict, state_name: str, note: str) -> None:
                        "note": row.get("preview_note")})
 
 
+def _display_sibling_raster(path: Path) -> Path | None:
+    """显示件 jpg 的同名栅格；**显式 TIFF 原样返回 None**。
+
+    `sibling_raster_path` 的候选顺序是 `.tif` 在前，对 `same.tiff` 会先命中
+    `same.tif` —— 只该用于「这张 jpg 要不要改从栅格生成」这条业务规则。用户显式
+    打开 `same.tiff` 时替换成另一份文件，会把预览、空间标识都绑到错的源上。
+    """
+    if path.suffix.lower() not in (".jpg", ".jpeg"):
+        return None
+    return scene_search.sibling_raster_path(path)
+
+
+class _PreviewSnapshotError(Exception):
+    """预览 JPG 在生成与读取之间被另一个请求换掉了（档位 / 源对不上）。"""
+
+
+def _jpeg_snapshot(path: Path, *, div: int, source_rev: str | None = None,
+                   headers: dict | None = None) -> Response:
+    """把预览 JPG 读成**字节快照**再返回（而不是交给 FileResponse 延迟打开）。
+
+    `FileResponse` 在响应发送阶段才按路径打开文件，而预览落点是「换档位原地覆盖
+    同一路径」—— 端点 A 生成完返回响应对象、端点 B 随后覆盖同名文件（同一源换
+    档位，或落点名万一撞在一起的另一份源），A 最终发出去的就会是 B 的像素。这里
+    在端点内把字节读定，并核对戳里的**档位与源身份**；对不上（确实被并发换掉）
+    由调用方重试一次。
+
+    只核对档位不够：同档位的另一份源写进同一个落点时，档位天然相等，图却是错
+    的。`source_rev` 传调用方在生成后算出的源身份，必须与戳里的 `;src=` 逐字
+    相同才放行。
+
+    字节量就是一张预览 JPEG（压缩显示件），不会像原图那样占几百 MB。
+    """
+    try:
+        data = Path(path).read_bytes()
+    except OSError as e:
+        raise HTTPException(status_code=422,
+                            detail=f"预览读取失败：{e}") from e
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            comment = im.info.get("comment")
+            got = stamp_div(comment)
+            got_src = stamp_src(comment)
+    except Exception as e:  # noqa: BLE001 — 损坏的缓存不能当图发出去
+        raise _PreviewSnapshotError(f"预览缓存不可读：{e}") from e
+    if got != div:
+        raise _PreviewSnapshotError(
+            f"预览档位在读取时变成 {got}（期望 {div}）")
+    if source_rev is not None and got_src != source_rev:
+        raise _PreviewSnapshotError(
+            f"预览缓存来自另一份源（戳 {got_src or '无'}，期望 {source_rev}）")
+    h = dict(headers or {})
+    h["Content-Length"] = str(len(data))
+    return Response(content=data, media_type="image/jpeg", headers=h)
+
+
 def _sweep_legacy_preview(jpg: Path, source: Path) -> None:
     """把改名前的点号那份删掉（2026-09-22 起预览只有一个名字）。
 
@@ -570,7 +680,7 @@ def _bake_product_preview(state, task: dict, div: int) -> None:
     # （几十秒 + 读遍 GB 级文件）。判据与惰性路径**同一个函数**，没有第二套。
     try:
         if jpg.is_file() and os.path.getmtime(jpg) >= os.path.getmtime(product):
-            hit = cache_hit(jpg, PREVIEW_JPG_QUALITY, div)
+            hit = cache_hit(jpg, PREVIEW_JPG_QUALITY, div, source=product)
             if hit is not None:
                 _finish_preview(state, task, "done",
                                 f"cached: 盘上那份已是 ÷{div}"
@@ -590,7 +700,7 @@ def _bake_product_preview(state, task: dict, div: int) -> None:
             _finish_preview(state, task, "skipped",
                             "source_changed: 产物在预览生成途中被改写，本次一个字节都没写")
             return
-        out = write_preview_jpg(jpg, pixels, div=div)
+        out = write_preview_jpg(jpg, pixels, div=div, source=product)
         _finish_preview(state, task, "done",
                         f"baked: ÷{div}（{out['w']}×{out['h']}）")
     except (PreviewError, OSError) as e:
@@ -641,7 +751,7 @@ def _bake_nosr_preview(task: dict, div: int) -> str:
     # 判据与打开链/产物那份**同一个** cache_hit，没有第二套。
     try:
         if out.is_file() and os.path.getmtime(out) >= os.path.getmtime(source):
-            hit = cache_hit(out, PREVIEW_JPG_QUALITY, div)
+            hit = cache_hit(out, PREVIEW_JPG_QUALITY, div, source=source)
             if hit is not None:
                 return f"cached: {out.name} 已是 ÷{div}（{hit['w']}×{hit['h']}）"
     except OSError:
@@ -652,7 +762,7 @@ def _bake_nosr_preview(task: dict, div: int) -> str:
         # 落盘前复核，理由同产物那一份：读到一半源被改写会留下半截图
         if _source_sig(source) != before:
             return "skipped: 源在预览生成途中被改写，本次一个字节都没写"
-        res = write_preview_jpg(out, pixels, div=div)
+        res = write_preview_jpg(out, pixels, div=div, source=source)
         return f"baked: {out.name} ÷{div}（{res['w']}×{res['h']}）"
     except (PreviewError, OSError) as e:
         return f"failed: {e}"
@@ -1174,12 +1284,18 @@ def create_app() -> FastAPI:
         inp = scene_search.input_scene_path(parent)
         if inp is not None and _same_file(inp, src):
             scene_dir = parent
+        # 能不能提交 SR 有两道门：父目录得是合法场景目录，**且**这个文件在盘阵
+        # 前缀里。第二道是为 `SR_PREVIEW_ROOTS` 加的 —— 盘阵外的一张 TIFF 可以
+        # 打开、可以给 Agent 看，但不能因为目录里恰好有 meta.xml 就变成可提交场景。
+        in_array = is_allowed(src)
+        can_submit = scene_dir is not None and in_array
+        preview_only = is_preview_only(src)
         row = _manual_row(src, parent, root)
         row["W"], row["H"] = dims["W"], dims["H"]
-        if scene_dir is None:
-            # 与 sr_capable 同源：没有 scene_dir 就没有可提交的目录。
+        if not can_submit:
+            # 与 sr_capable 同源：没有可提交的目录就没有 lq_path。
             row["lq_path"] = None
-        mask_path = derived_mask_path(str(scene_dir)) if scene_dir else None
+        mask_path = derived_mask_path(str(scene_dir)) if can_submit else None
         return {
             "source": "manual",
             "row": row,
@@ -1190,7 +1306,11 @@ def create_app() -> FastAPI:
                 "mask_path": mask_path,
                 "mask_exists": bool(mask_path) and Path(mask_path).is_file(),
                 "writable": os.access(str(parent), os.W_OK),
-                "sr_capable": scene_dir is not None,
+                "sr_capable": can_submit,
+                "preview_only": preview_only,
+                "capabilities": _capabilities(
+                    sr_capable=can_submit, scene_dir=scene_dir,
+                    in_array=in_array, preview_only=preview_only),
             },
         }
 
@@ -1272,11 +1392,16 @@ def create_app() -> FastAPI:
                 raise HTTPException(
                     status_code=422,
                     detail=f"场景成立但读不到影像尺寸（{raster}）—— 前端开图需要 W/H")
+            # 生产权限的第二道门：目录必须在盘阵前缀里（`SR_PREVIEW_ROOTS` 里的
+            # 目录即便碰巧带 meta.xml 也不算可提交场景）。
+            in_array = is_allowed(d)
+            can_submit = kind == "input" and in_array
+            preview_only = is_preview_only(d)
             # 这一行描述的是**这一环节自己的栅格**（本体 / 产物 / NOSR）：产物的
             # W/H 是本体的倍数，拿本体的尺寸建画布，整张图的比例都是错的。
             row = _manual_row(raster, d, root)
             row["W"], row["H"] = dims["W"], dims["H"]
-            if kind != "input":
+            if not can_submit:
                 # **中间产物不可修复**，而这条服务的形状是「能不能提交 / 掩码写哪」，
                 # 所以在这里就把口径定死，不指望前端记得住：
                 # `lq_path` 置空 → 前端那颗「提交 SR」与「保存掩码到盘阵」都拿不到落点
@@ -1300,7 +1425,8 @@ def create_app() -> FastAPI:
                 row["rasterPreview"] = _raster_preview(d / Path(name).name, root)
             # 中间产物没有「可提交的场景」这一说（上面把 row.lq_path 置了空），掩码路径
             # 也就无从推起 —— 推出来的那份是本体的掩码，与这张产物毫无关系。
-            mask_path = derived_mask_path(str(d)) if kind == "input" else None
+            # 盘阵外的预览源同理：没有写掩码的权限。
+            mask_path = derived_mask_path(str(d)) if can_submit else None
             return {
                 "source": "manual",
                 "row": row,
@@ -1319,11 +1445,16 @@ def create_app() -> FastAPI:
                     # 服务账号对场景目录的写权限：meta.xml 回写、Debug/ 日志、掩码、
                     # 预览缓存四处都要写。提前告知，好过提交后 422。
                     "writable": os.access(str(d), os.W_OK),
-                    # 目录分支走到这里就已经确认是合法场景目录（有 meta.xml 且有
-                    # 输入影像），所以恒为 True。裸 .tif 分支才可能是 False。
-                    # **例外**：拖进来的中间产物（kind != 'input'）恒为 False —— 那一类
-                    # 不是可修复对象，前端据此不给提交/写掩码的入口。
-                    "sr_capable": kind == "input",
+                    # 可提交 = 本体影像 **且** 目录在盘阵前缀内。裸 .tif 分支、
+                    # 中间产物（kind != 'input'）与盘阵外的预览源恒为 False ——
+                    # 前端据此不给提交/写掩码的入口。
+                    "sr_capable": can_submit,
+                    # 这张图只在 `SR_PREVIEW_ROOTS` 之下（盘阵外只读预览源）。
+                    "preview_only": preview_only,
+                    # 浏览能力 / 生产能力分开列，调用方不必从来源反推。
+                    "capabilities": _capabilities(
+                        sr_capable=can_submit, scene_dir=d,
+                        in_array=in_array, preview_only=preview_only),
                     # 这一次拖进来的影像是场景里的哪个环节（2026-09-21 起中间产物也能
                     # 关联）。三种取值，只有 `input` 是可修复对象 —— 掩码与 SR 都建在
                     # 本体影像的网格上，产物的尺寸是它的倍数（见 lib/stage.ts）。
@@ -1342,11 +1473,13 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=400,
                                     detail=f"路径形态非法：{e}") from e
             try:
-                ensure_allowed(posix)
+                # 只读预览范围 = 盘阵前缀 ∪ SR_PREVIEW_ROOTS。盘阵外的 TIFF 能
+                # 打开看图，但下面的 can_submit 仍只认盘阵前缀。
+                ensure_preview_allowed(posix)
             except PathDeniedError as e:
                 raise HTTPException(
                     status_code=403,
-                    detail=f"路径不在允许的盘阵前缀内：{e}") from e
+                    detail=f"路径不在允许的盘阵或预览前缀内：{e}") from e
             target = Path(posix)
             if target.is_file():
                 # 裸文件形态：只接受 TIFF。别的文件（.jpg 源、meta.xml、掩码…）
@@ -1563,8 +1696,13 @@ def create_app() -> FastAPI:
     def spatial_identity(scene_id: str):
         from backend.services.spatial_identity import resource_identity
         try:
-            source = paths.scene_id_to_abs(scene_id, root)
-            source = scene_search.sibling_raster_path(source) or source
+            # 只读：盘阵外的预览源同样要给 Agent 一个稳定的图像身份，否则空间
+            # 批注只能退回会话内临时键。这里不涉及任何写盘。
+            source = paths.scene_id_to_abs(scene_id, root, allow_preview=True)
+            raster = _display_sibling_raster(source)
+            if raster is not None:
+                # 换过路径也要重新过权限：候选的 `.tif` 可能是指向前缀外的符号链接。
+                source = ensure_preview_allowed(raster, kind="file")
             return resource_identity(source)
         except (PathDeniedError, OSError) as exc:
             raise HTTPException(status_code=404, detail="Scene resource unavailable") from exc
@@ -1575,6 +1713,8 @@ def create_app() -> FastAPI:
 
         落点：源同目录（或 `SR_PREVIEWS_ROOT` 镜像树）的 `<stem>_preview.jpg`，
         **与档位无关** —— 换档位是原地覆盖同一份，靠戳里的 div 判废重生成。
+        盘阵外、`SR_PREVIEW_ROOTS` 之下的源改用隔离缓存根
+        （`SR_PREVIEW_CACHE_ROOT`，文件名带源路径哈希），不往外部目录写文件。
 
         前端「一键解析」（《待修复清单》批量预览生成，2026-09-27）每景就是打这一个端点
         两次（本体 + 未超分那份），**不要为它加批量端点**：这里是 sync def、进了 anyio
@@ -1584,7 +1724,8 @@ def create_app() -> FastAPI:
         """
         div = _check_div(div)
         try:
-            abs_path = paths.scene_id_to_abs(scene_id, root)
+            # 预览是只读链路：盘阵内、盘阵外的授权预览源都从这里取图。
+            abs_path = paths.scene_id_to_abs(scene_id, root, allow_preview=True)
         except PathDeniedError as e:
             raise HTTPException(status_code=404,
                                 detail=f"场景不可访问：{e}") from e
@@ -1593,22 +1734,48 @@ def create_app() -> FastAPI:
         # 也就是栅格行用的那一份，所以「前端调 jpg 行的 id」与「栅格行自己打开」
         # 命中同一份缓存，不会生成两次。换不换由后端在这一层决定，前端不必知道。
         # 前端只在「栅格生成出来更清晰」时才走到这里（见 api-contract「显示源比较规则」）。
-        raster = scene_search.sibling_raster_path(abs_path)
+        raster = _display_sibling_raster(abs_path)
         if raster is not None:
-            abs_path = raster
+            try:
+                abs_path = ensure_preview_allowed(raster, kind="file")
+            except PathDeniedError as e:
+                raise HTTPException(status_code=404,
+                                    detail=f"场景不可访问：{e}") from e
         if abs_path.suffix.lower() in (".jpg", ".jpeg"):
             # 源就是显示就绪图（§4.7）：直接回源文件，不必（也无法）预览生成预览。
             # 正常路径下前端拿 hasPreview/jpgUrl 走静态 URL，不会打到这里，
             # 这是契约兜底：/preview 对任何场景行都返回可显示的 JPEG。
             return {"ready": True} if ready_only else FileResponse(str(abs_path), media_type="image/jpeg")
         jpg = paths.preview_jpg_for(abs_path, root)
-        try:
-            ensure_preview_jpg(str(abs_path), str(jpg), div=div)
-        except PreviewError as e:
-            raise HTTPException(status_code=422,
-                                detail=f"预览生成失败：{e}") from e
-        _sweep_legacy_preview(jpg, abs_path)     # 老点号那份没有任何读者了
-        return {"ready": True} if ready_only else FileResponse(str(jpg), media_type="image/jpeg")
+        if ready_only:
+            try:
+                ensure_preview_jpg(str(abs_path), str(jpg), div=div)
+            except PreviewError as e:
+                raise HTTPException(status_code=422,
+                                    detail=f"预览生成失败：{e}") from e
+            _sweep_legacy_preview(jpg, abs_path)   # 老点号那份没有任何读者了
+            return {"ready": True}
+        # 生成到响应发送之间可能被另一个请求原地覆盖（同一源换档位；同 stem 的
+        # `.tif/.tiff` 已由落点名分开）。字节快照 + 档位复核保证发出去的就是
+        # 这次确认过的那一份；真被抢换就再生成一次。
+        last: _PreviewSnapshotError | None = None
+        for _ in range(2):
+            try:
+                ensure_preview_jpg(str(abs_path), str(jpg), div=div)
+            except PreviewError as e:
+                raise HTTPException(status_code=422,
+                                    detail=f"预览生成失败：{e}") from e
+            _sweep_legacy_preview(jpg, abs_path)   # 老点号那份没有任何读者了
+            # 生成后现算源身份再比对（不是生成前算好的那份）：源在这两步之间
+            # 被换掉时，戳里仍是旧身份 → 判废重生成，不会把旧字节发出去。
+            try:
+                return _jpeg_snapshot(jpg, div=div,
+                                      source_rev=source_revision(abs_path))
+            except _PreviewSnapshotError as e:
+                last = e
+        raise HTTPException(
+            status_code=503,
+            detail=f"预览在生成与读取之间被并发改写，请重试：{last}")
 
     @app.get("/api/scenes/{scene_id}/preview-drop")
     def preview_drop(scene_id: str, div: int = Query(2)):
@@ -1638,36 +1805,50 @@ def create_app() -> FastAPI:
                                 detail=f"场景不可访问：{e}") from e
         # 同 /preview：显示件 jpg 若配着同名栅格，改从栅格生成。拖入链的落点是
         # `<stem>_preview.jpg`，对 jpg 与 tif 也是同一个文件名。
-        raster = scene_search.sibling_raster_path(abs_path)
+        raster = _display_sibling_raster(abs_path)
         if raster is not None:
-            abs_path = raster
+            try:
+                abs_path = ensure_allowed(raster, kind="file")
+            except PathDeniedError as e:
+                raise HTTPException(status_code=404,
+                                    detail=f"场景不可访问：{e}") from e
         if abs_path.suffix.lower() in (".jpg", ".jpeg"):
             # 源本身就是显示就绪图：回源文件即可（build_preview_pixels 只认
             # TIFF，不给这行短路会抛「仅支持 TIFF 生成预览」）。
             return FileResponse(str(abs_path), media_type="image/jpeg",
                                 headers=headers)
         main_jpg = paths.drop_preview_path(abs_path)
+
+        def bake_and_serve(path: Path) -> Response:
+            """生成/命中后读成字节快照；并发抢换档位则整轮再试一次。"""
+            last: _PreviewSnapshotError | None = None
+            for _ in range(2):
+                ensure_preview_jpg(str(abs_path), str(path), div=div)
+                _sweep_legacy_preview(path, abs_path)
+                try:
+                    return _jpeg_snapshot(
+                        path, div=div, headers=headers,
+                        source_rev=source_revision(abs_path))
+                except _PreviewSnapshotError as e:
+                    last = e
+            raise PreviewError(f"预览在生成与读取之间被并发改写：{last}")
+
         # 主落点与兜底包在**同一个 try** 里：兜底自己也要 mkdir + 原子写，临时根
         # 同样可能不可写（配到只读盘、磁盘满），漏掉就是 500 逃出请求。
         try:
             if not os.access(str(main_jpg.parent), os.W_OK):
                 raise PreviewError(f"场景目录不可写：{main_jpg.parent}")
-            ensure_preview_jpg(str(abs_path), str(main_jpg), div=div)
-            _sweep_legacy_preview(main_jpg, abs_path)
+            return bake_and_serve(main_jpg)
         except (PreviewError, OSError) as e:
             try:
                 tmp_jpg = preview_cache.tmp_preview_path(abs_path)
-                ensure_preview_jpg(str(abs_path), str(tmp_jpg), div=div)
+                headers["X-SR-Preview-Fallback"] = "tmp"
+                return bake_and_serve(tmp_jpg)
             except (PreviewError, OSError) as e2:
                 raise HTTPException(
                     status_code=422,
                     detail=f"预览生成失败：场景目录不可写（{e}）；"
                            f"临时缓存也不可用（{e2}）") from e2
-            headers["X-SR-Preview-Fallback"] = "tmp"
-            return FileResponse(str(tmp_jpg), media_type="image/jpeg",
-                                headers=headers)
-        return FileResponse(str(main_jpg), media_type="image/jpeg",
-                            headers=headers)
 
     @app.post("/api/scenes/clear-preview")
     async def clear_scene_previews(request: Request):
@@ -1868,7 +2049,8 @@ def create_app() -> FastAPI:
             row = {"kind": kind, "id": None, "name": None, "rel": None,
                    "exists": False, "sizeBytes": None, "mtime": None,
                    "W": None, "H": None,
-                   "hasPreview": False, "previewDiv": None, "jpgUrl": None}
+                   "hasPreview": False, "previewDiv": None, "jpgUrl": None,
+                   "srcRev": None}
             if p is None:
                 return row
             row["thumbnail_url"] = _thumbnail_url(p, root) if kind != "product" else None
@@ -1890,8 +2072,8 @@ def create_app() -> FastAPI:
                 if dims:
                     row["W"], row["H"] = dims["W"], dims["H"]
             jpg = paths.preview_jpg_for(p, root)
-            row["hasPreview"] = jpg.is_file()
-            row["previewDiv"] = _cached_preview_div(jpg)
+            row["srcRev"] = source_revision(p)
+            row["hasPreview"], row["previewDiv"] = _preview_cache_state(jpg, p)
             if root is not None and is_within(jpg, root):
                 row["jpgUrl"] = paths.rel_url(jpg, root)
             return row

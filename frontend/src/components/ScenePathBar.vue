@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /**
  * ScenePathBar.vue — 手工打开盘阵场景目录 / 单个 TIF（仅场景库页使用）
+ * 也接受服务端已授权的盘阵外 TIFF（`SR_PREVIEW_ROOTS`）—— 只读预览，不能提交 SR。
  * ------------------------------------------------------------------
  * 输入框预填**当天日期前缀**（`W:\GSHC2IMPS\PRODUCT\<年>\<月>\<日>`）—— 注意它
  * 只是前缀，还得往下补**三层**到景级目录（真机六层树：
@@ -25,7 +26,7 @@ const props = withDefaults(defineProps<{
   placeholder?: string;
 }>(), {
   busy: false,
-  placeholder: '粘贴景级场景目录（W:\\GSHC2IMPS\\PRODUCT\\<年>\\<月>\\<日>\\<卫星型号>\\<段级>\\<景级=完整生产名>）或单个 .tif 文件路径',
+  placeholder: '粘贴景级场景目录（W:\\GSHC2IMPS\\PRODUCT\\<年>\\<月>\\<日>\\<卫星型号>\\<段级>\\<景级=完整生产名>）或单个 .tif 文件路径（含已授权的盘阵外 TIFF）',
 });
 
 const emit = defineEmits<{ (e: 'open', path: string): void }>();
@@ -46,7 +47,7 @@ function resetToday(): void {
 
 <template>
   <div class="spb">
-    <span class="spb-label">盘阵场景</span>
+    <span class="spb-label">场景 / 影像</span>
     <input v-model="path" class="spb-in" type="text" spellcheck="false"
            :placeholder="props.placeholder" :disabled="props.busy"
            @keyup.enter="submit" />
@@ -59,6 +60,7 @@ function resetToday(): void {
       预填的只是<strong>当天日期前缀</strong>，还要往下补三层
       （&lt;卫星型号&gt;\&lt;段级目录&gt;\&lt;景级目录&gt;）才是场景目录。
       路径认两种写法：<strong>W:\…（盘阵）</strong>与 /DiskArray/…；
+      盘阵外 TIFF 须由服务端授权（SR_PREVIEW_ROOTS），只读预览、不能提交 SR；
       只打开你填的这一个路径，不扫盘。
     </span>
   </div>

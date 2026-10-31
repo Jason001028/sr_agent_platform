@@ -25,6 +25,8 @@ import AnnotationManager from './AnnotationManager.vue';
 import CurrentImagePill from './CurrentImagePill.vue';
 import AgentAnnotationReference from './AgentAnnotationReference.vue';
 import MarkdownBody from './MarkdownBody.vue';
+import UserMessageText from './UserMessageText.vue';
+import { ANALYZE_CURRENT_PROMPT } from '../lib/analysisPrompt';
 import ReasoningBlock from './ReasoningBlock.vue';
 import { phaseLabel } from '../lib/executionOverview.js';
 import ThinkingIndicator from './ThinkingIndicator.vue';
@@ -240,7 +242,7 @@ async function analyzeCurrent() {
   const recId=rec.value.id;
   const shot=await viewer.captureForChat(recId);
   if (!shot || rec.value?.id!==recId || !chat.addPendingImage(shot)) return;
-  if (!draft.value.trim()) draft.value='请分析附件中的地貌特征，并在有视觉定位依据时调用空间批注工具，在影像上标出对应位置。使用实际附件像素坐标，不需要经纬度或投影；所有候选均待核实。若无法可靠定位，只返回文字并说明未获得可验证空间批注，不虚构坐标。';
+  if (!draft.value.trim()) draft.value = ANALYZE_CURRENT_PROMPT;
   await onSend();
 }
 function annotationConversation(event: Event) {
@@ -337,7 +339,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
               <ChatBubbleImages v-if="m.images?.length" :images="m.images" />
               <!-- 原话。自动附的查看器上下文（CTX_DIVIDER 之后）默认不上屏，只在开发者
                    模式下方折叠块里给；历史 /chat 消息没有分隔线，整条都是原话。 -->
-              <p v-if="userText(m.content)" class="uq">{{ userText(m.content) }}</p>
+              <UserMessageText v-if="userText(m.content)" class="uq" :text="userText(m.content)" />
             </div>
             <!-- 开发者模式才渲染自动附文：浅米色块，默认收起；普通模式完全不上屏。 -->
             <details v-if="developerMode && ctxNote(m.content)" class="ctx-dev">

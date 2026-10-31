@@ -1,0 +1,234 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>场景聚焦遮罩 e2e</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #dfe9e4; font-family: sans-serif; }
+  #root { height: 100%; }
+  /* 复刻 FileList 的滚动容器口径：padding 10 / 右侧滚动条常驻 / 局部层叠上下文。
+     卡片用等高色块代替 FileListCard —— 这里验的是遮罩的坐标与分层，不是卡片本身。 */
+  .sidebar {
+    width: 400px;
+    height: 100%;
+    box-sizing: border-box;
+    background: #dfe9e4;
+    border-right: 1px solid #ececf0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+    padding: 10px;
+    isolation: isolate;
+  }
+  .tools {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    box-sizing: border-box;
+    height: 44px;
+    margin: -10px -10px 8px;
+    padding: 12px 10px;
+    background: #dfe9e4;
+  }
+  .card {
+    box-sizing: border-box;
+    height: 114px;
+    margin-bottom: 6px;
+    padding: 8px;
+    background: #fff;
+    border: 1px solid #ececf0;
+    border-radius: 10px;
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="module">
+import '/src/style.css';
+import { createApp, defineComponent, computed, h, nextTick, ref } from 'vue';
+import { createPinia, setActivePinia } from 'pinia';
+import { useViewerStore } from '/src/stores/viewer.ts';
+import FileListSpotlight from '/src/components/FileListSpotlight.vue';
+
+const pinia = createPinia();
+setActivePinia(pinia);
+const store = useViewerStore();
+const cards = new Map();
+const scrollEl = ref(null);
+const revision = computed(() => store.recsOrdered.map((r) => r.id).join(','));
+
+const setEl = (id, el) => { if (el) cards.set(id, el); else cards.delete(id); };
+const itemEl = (id) => cards.get(id);
+
+// 现场构建的测试宿主用**渲染函数**（生产 vue 是 runtime-only，不支持 template 字符串）。
+const App = defineComponent({
+  setup() {
+    return () => h('div', { style: 'display:flex;height:100%' }, [
+      h('aside', { class: 'sidebar', ref: scrollEl }, [
+        h(FileListSpotlight, {
+          viewport: scrollEl.value,
+          elFor: itemEl,
+          revision: revision.value,
+        }),
+        h('div', { class: 'tools', 'data-tools': '1' }, '工具条'),
+        ...store.recsOrdered.map((rec) => h('div', {
+          key: rec.id,
+          class: 'card',
+          'data-card': rec.name,
+          ref: (el) => setEl(rec.id, el),
+        }, rec.name)),
+      ]),
+      h('div', { style: 'flex:1' }),
+    ]);
+  },
+});
+
+createApp(App).use(pinia).mount('#root');
+
+function toRect(r) { return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height }; }
+const inRect = (p, r, inset) => p.x >= r.left + inset && p.x <= r.right - inset
+  && p.y >= r.top + inset && p.y <= r.bottom - inset;
+/** 遮罩块用**半开区间**统计：相邻块共用一条边，闭区间会把缝上的点数两遍。 */
+const inBlock = (p, r) => p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom;
+
+/** 一次把遮罩的全部可验证事实量出来（视口坐标）。 */
+function inspect() {
+  const sb = document.querySelector('.sidebar');
+  const layer = document.querySelector('.spot-layer');
+  const holeEls = [...document.querySelectorAll('[data-spot-hole]')];
+  const blockEls = [...document.querySelectorAll('[data-spot-block]')];
+  const holes = holeEls.map((el) => toRect(el.getBoundingClientRect()));
+  const blocks = blockEls.map((el) => toRect(el.getBoundingClientRect()));
+  const sbRect = toRect(sb.getBoundingClientRect());
+  const port = {
+    left: sbRect.left + sb.clientLeft,
+    top: sbRect.top + sb.clientTop,
+    right: sbRect.left + sb.clientLeft + sb.clientWidth,
+    bottom: sbRect.top + sb.clientTop + sb.clientHeight,
+  };
+
+  const focusIds = [...store.spotlightIds];
+  const focusCards = focusIds.map((id) => cards.get(id)).filter(Boolean);
+  const focusRects = focusCards.map((el) => toRect(el.getBoundingClientRect()));
+  const otherCards = [...document.querySelectorAll('.card')]
+    .filter((el) => !focusCards.includes(el));
+
+  const covers = (h, c) => h.left <= c.left + 0.5 && h.top <= c.top + 0.5
+    && h.right >= c.right - 0.5 && h.bottom >= c.bottom - 0.5;
+  const intersects = (a, b) => a.left < b.right - 0.5 && b.left < a.right - 0.5
+    && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5;
+
+  // 分区完备性：视口内每个采样点要么在镂空里（0 块），要么恰好被 1 块盖住。
+  let badHole = 0;
+  let badMask = 0;
+  let samples = 0;
+  const badPoints = [];
+  for (let y = port.top + 10; y < port.bottom - 2; y += 10) {
+    for (let x = port.left + 10; x < port.right - 2; x += 10) {
+      const p = { x, y };
+      const besidesEdge = holes.some((h) => (Math.abs(x - h.left) < 1 || Math.abs(x - h.right) < 1
+        || Math.abs(y - h.top) < 1 || Math.abs(y - h.bottom) < 1) && inRect(p, h, -1));
+      if (besidesEdge) continue;
+      samples++;
+      const inHole = holes.some((h) => inRect(p, h, 0));
+      const n = blocks.filter((b) => inBlock(p, b)).length;
+      if (inHole && n !== 0) badHole++;
+      if (!inHole && n !== 1) {
+        badMask++;
+        if (badPoints.length < 5) badPoints.push({ x: +x.toFixed(2), y: +y.toFixed(2), n });
+      }
+    }
+  }
+
+  // 点击穿透：遮罩盖着的另一边卡片仍该是命中目标。
+  const maskedCard = otherCards.find((el) => {
+    const r = el.getBoundingClientRect();
+    return r.bottom > port.top && r.top < port.bottom;
+  });
+  let hitName = null;
+  let hitIsLayer = null;
+  if (maskedCard) {
+    const r = maskedCard.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    hitIsLayer = !!(hit && hit.closest('.spot-layer'));
+    hitName = hit && hit.closest('.card') ? hit.closest('.card').dataset.card : null;
+  }
+  const toolEl = document.querySelector('.tools');
+  const toolRect = toolEl ? toolEl.getBoundingClientRect() : null;
+  const toolHit = toolRect ? document.elementFromPoint(toolRect.left + 30, toolRect.top + toolRect.height / 2) : null;
+
+  return {
+    mode: layer ? layer.dataset.spotlightMode : null,
+    layerPresent: !!layer,
+    layerOpacity: layer ? Number(getComputedStyle(layer).opacity) : null,
+    layerPointerEvents: layer ? getComputedStyle(layer).pointerEvents : null,
+    anchorZ: document.querySelector('.spot-anchor') ? getComputedStyle(document.querySelector('.spot-anchor')).zIndex : null,
+    anchorHeight: document.querySelector('.spot-anchor')?.getBoundingClientRect().height ?? null,
+    holeCount: holes.length,
+    blockCount: blocks.length,
+    holes,
+    blocks,
+    port,
+    sidebar: sbRect,
+    focusIds,
+    focusRects,
+    allFocusCovered: focusRects.every((c) => holes.some((h) => covers(h, c))),
+    holeOverlapsOtherCard: otherCards.some((el) => {
+      const r = el.getBoundingClientRect();
+      return holes.some((h) => intersects(h, r));
+    }),
+    blockOverlapsHole: blocks.some((b) => holes.some((h) => intersects(b, h))),
+    blocksOutsidePort: blocks.filter((b) => b.left < port.left - 1 || b.top < port.top - 1
+      || b.right > port.right + 2 || b.bottom > port.bottom + 2).length,
+    partition: { samples, badHole, badMask, badPoints },
+    maskedCardHit: { expected: maskedCard ? maskedCard.dataset.card : null, hit: hitName, hitIsLayer },
+    toolHit: toolHit && toolHit.closest('.tools') ? 'tools' : (toolHit ? toolHit.className : null),
+    scrollTop: sb.scrollTop,
+    backdropFilter: blockEls.length ? getComputedStyle(blockEls[0]).backdropFilter : null,
+    blockBackground: blockEls.length ? getComputedStyle(blockEls[0]).backgroundColor : null,
+  };
+}
+
+function insert(count) {
+  for (let s = 0; s < count; s++) {
+    for (const suffix of ['PAN', 'NOSR']) {
+      const sceneId = 's' + s + '-' + suffix;
+      store.insertSceneCard({
+        sceneId,
+        name: 'S' + s + '_' + suffix + '.tif',
+        W: 100,
+        H: 100,
+        sceneDir: '/DiskArray/GSHC2IMPS/2026/10/01/S' + s,
+      }, { id: sceneId });
+    }
+  }
+}
+
+window.spotlightTest = {
+  store,
+  nextTick,
+  inspect,
+  insert,
+  select: (names) => store.setSpotlight(store.sceneCardIds(names)),
+  clear: () => store.clearSpotlight(),
+  ids: () => [...store.spotlightIds],
+  scrollBy: (dy) => { document.querySelector('.sidebar').scrollTop += dy; },
+  scrollTop: (top) => { document.querySelector('.sidebar').scrollTop = top; },
+  /** 把某张卡滚到视口中线以上（直接算 scrollTop：scrollIntoView 的 smooth 行为在
+   *  headless 下时机不稳定，这里要的是「确定发生了滚动」而不是「用了哪个 API」）。 */
+  scrollCardIntoView: (name) => {
+    const sb = document.querySelector('.sidebar');
+    const el = document.querySelector(`[data-card="${name}"]`);
+    if (!sb || !el) return { found: false };
+    const r = el.getBoundingClientRect();
+    const s = sb.getBoundingClientRect();
+    const delta = r.top - s.top - sb.clientHeight / 2 + r.height / 2;
+    const before = sb.scrollTop;
+    sb.scrollTop += delta;
+    return { found: true, delta, before, after: sb.scrollTop };
+  },
+  mode: () => store.spotlightMode,
+};
+</script>
+</body>
+</html>

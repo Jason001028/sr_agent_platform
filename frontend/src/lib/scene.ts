@@ -72,6 +72,11 @@ export interface SceneRow {
    *  重新生成、把旧档位的图端上来。所以判定「要不要重新生成」必须连这个字段一起看
    *  （见 lib/api.ts 的 fetchSceneJpg）。 */
   previewDiv?: number | null;
+  /** 源文件身份（路径哈希 + 字节数 + mtime_ns），后端按**实际源**核对缓存时给出。
+   *
+   *  预览 blob 的本地缓存键带上它（见 previewCacheKey）：源换了一份内容，键就变，
+   *  旧字节不会被当成本次的有效缓存；源没变则键稳定，照常命中。 */
+  srcRev?: string | null;
   /** 阶段6 viewer 上下文侧舱：scene 文件父目录绝对路径（= run_sr 目录语义，
    *  与 /api/queue params.lq_path 同值关联）；disk 行非空、fake 恒 null。 */
   lq_path: string | null;
@@ -316,9 +321,15 @@ export function previewDivLabel(div: number): string {
  * 而且看不出来（两张都是这张场景的预览，只是清晰度不同）。
  */
 export function previewCacheKey(
-  row: { id: string }, div: number, raster?: { name: string } | null,
+  row: { id: string; srcRev?: string | null }, div: number,
+  raster?: { name: string; srcRev?: string | null } | null,
 ): string {
-  return raster ? `${row.id}|${div}|ras:${raster.name}` : `${row.id}|${div}|jpg`;
+  const base = raster
+    ? `${row.id}|${div}|ras:${raster.name}` : `${row.id}|${div}|jpg`;
+  // 源身份只在后端给了的时候并入键：旧调用方 / 测试构造的行没有这个字段时，
+  // 键与升级前逐字相同（不会凭空多一次取图）。
+  const rev = raster ? raster.srcRev : row.srcRev;
+  return rev ? `${base}|${rev}` : base;
 }
 
 /* ---------------- 显示源比较规则：谁清晰用谁 ----------------
@@ -351,8 +362,10 @@ export interface RasterPreview {
   jpgH: number;
   /** 栅格那份 `<stem>_preview.jpg` 在不在盘上。 */
   hasPreview: boolean;
-  /** 栅格那份预览是按哪一档生成的；null = 没有 / 旧格式规则签名 / 读不出。 */
+  /** 栅格那份预览是按哪一档生成的；null = 没有 / 旧格式规则签名 / 读不出 / 源已变。 */
   previewDiv: number | null;
+  /** 栅格源身份，语义同 SceneRow.srcRev（进预览 blob 缓存键）。 */
+  srcRev?: string | null;
 }
 
 /** 服务端从同名栅格生成的图，是否比**这张显示件 jpg 本身**更清晰。
@@ -430,6 +443,12 @@ export interface SceneOpenMeta {
   stageKind?: StageKind;
   /** 本轮超分产物的 suffix（标签用；后端给什么写什么，前端不猜）。 */
   stageSuffix?: string | null;
+  /** 仅预览源（`SR_PREVIEW_ROOTS`）：能看、能批注，但不能提交 SR / 写掩码。
+   *  换档位必须走只读的 `/preview`，不能走会往生产场景目录写文件的 `/preview-drop`。 */
+  previewOnly?: boolean;
+  /** 源文件身份：换档位/重载时用它让本地预览 blob 缓存随源修订失效。
+   *  缺省 null（旧调用方）时键与升级前一致。 */
+  srcRev?: string | null;
 }
 
 /* ---------------- JPG 像素 → 查看器 rec 的同构数据 ---------------- */

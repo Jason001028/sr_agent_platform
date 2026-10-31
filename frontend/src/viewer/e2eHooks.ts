@@ -171,6 +171,12 @@ export interface ViewerHook {
   litIds: () => number[];
   /** 点亮次数（每次点行 +1）。**看它才知道「又点了一次同一行」也重放了动画**。 */
   litTick: () => number;
+  /** 场景聚焦遮罩档位（默认 frosted；持久化在 localStorage['sr.viewer.spotlightMode']）。 */
+  spotlightMode: () => import('../lib/spotlight.js').SpotlightMode;
+  /** 切档位（等价设置浮层里的三选一）。 */
+  setSpotlightMode: (m: import('../lib/spotlight.js').SpotlightMode) => void;
+  /** 左侧正在聚焦的卡片 id（空 = 没有聚焦窗口）。几何看 DOM 的 `[data-spot-hole]`。 */
+  spotlightIds: () => number[];
   /** 清空左侧暂存区（等价一键解析开跑前那一下；返回清掉几张，收藏的保留）。 */
   clearRecs: () => number;
   /** 收藏的 rec id（按**显示**顺序：置顶组在前）。 */
@@ -378,6 +384,9 @@ export function mountE2EHooks(): ViewerHook {
     qcBakeStop: () => useQcListStore().stopBake(),
     litIds: () => [...useViewerStore().litIds],
     litTick: () => useViewerStore().litTick,
+    spotlightMode: () => useViewerStore().spotlightMode,
+    setSpotlightMode: (m) => useViewerStore().setSpotlightMode(m),
+    spotlightIds: () => [...useViewerStore().spotlightIds],
     clearRecs: () => useViewerStore().clearRecs(),
     favIds: () => useViewerStore().recsOrdered.filter((r) => r.fav).map((r) => r.id),
     selectMode: () => useViewerStore().selectMode,

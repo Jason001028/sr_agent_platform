@@ -57,6 +57,13 @@ Environment=SR_SLURM_FAKE=0
 # 可选：预览 JPG 缓存根（默认落源同目录）。配了必须在 SR_SCENES_ROOT 之下。
 # Environment=SR_PREVIEWS_ROOT=/data/scenes/.previews
 #
+# 可选：盘阵**之外**的只读预览前缀（`;` 分隔，2026-10-30）。只放行看图 / ROI /
+# Agent 读图；提交 SR、写掩码、场景检索仍只认 SR_ALLOWED_ROOTS。盘阵外的预览
+# JPG 落 SR_PREVIEW_CACHE_ROOT（缺省 <SR_TEMP_PREVIEWS_ROOT>/generic），
+# 不往外部源目录写文件；文件名带源路径哈希，同名不同源不会共用缓存。
+#   Environment=SR_PREVIEW_ROOTS=/data/external;/mnt/archive
+#   Environment=SR_PREVIEW_CACHE_ROOT=/DiskArray/tmp/wangrz/sr_preview_generic
+#
 # 可选：**拖拽入口**的临时预览缓存根（2026-09-18）。用户把盘阵上的 .tif 拖进浏览器
 # 时走这条：预览生成规则与上面那份长期缓存完全相同，但落在**独立**目录、按
 # YYYY-MM-DD 分桶，每天 0 点整桶删除（服务启动时也先清一次）。

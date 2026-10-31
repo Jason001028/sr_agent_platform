@@ -1,6 +1,6 @@
 <script setup lang="ts">
-/** Disk cards use existing lazy thumbnails; local files retain their canvas preview. */
-import { onBeforeUnmount, onMounted, computed, ref, watch } from 'vue';
+/** Prefer existing lazy thumbnails; fall back to pixels already opened by the user. */
+import { onBeforeUnmount, computed, ref, watch } from 'vue';
 import { loadSrConfig, sceneImageUrl } from '../lib/scene';
 import type { ViewerRec } from '../stores/viewer';
 
@@ -9,15 +9,22 @@ const props = defineProps<{ rec?: ViewerRec; size?: number; previewSrc?: string;
 const diskSrc = computed(() => sceneImageUrl(loadSrConfig(), props.rec?.card?.row.thumbnail_url ?? null));
 const failed = ref(false);
 watch(diskSrc, () => { failed.value = false; });
+const showDisk = computed(() => !!diskSrc.value && !failed.value);
 
 const BOX_H = 96;                       // 横幅形态的高度（与 CSS 一致）
 
 const cv = ref<HTMLCanvasElement | null>(null);
+const hasDrawing = ref(false);
+watch(() => props.rec?.id, () => { hasDrawing.value = false; });
 let ro: ResizeObserver | null = null;
 
 function draw(): void {
   const el = cv.value;
   if (!el) return;
+  const src = props.rec?.thumb as unknown as HTMLCanvasElement | null;
+  // Keep the tiny rendered thumbnail after the detailed canvas is evicted.
+  // No reference to the large source is retained by this component.
+  if (!src || !src.width || !src.height) return;
   // 侧栏收起时 clientWidth 为 0（元素还在、只是被宽度 0 的父级压扁）：这时别改背衬
   // 尺寸，否则展开回来会是一张按错尺寸画出来的糊图。ResizeObserver 会补一次重绘。
   const boxW = el.clientWidth;
@@ -36,9 +43,6 @@ function draw(): void {
   if (!ctx) return;
   ctx.clearRect(0, 0, w, h);
 
-  const src = props.rec?.thumb as unknown as HTMLCanvasElement | null;
-  if (!src || !src.width || !src.height) return;
-
   // contain：整幅装进框里，不裁切 —— 预览是给判读用的（比色调、看有没有云），
   // 裁掉边缘会让人对构图产生错误印象。留白由容器底色兜着。
   const s = Math.min(w / src.width, h / src.height);
@@ -47,6 +51,7 @@ function draw(): void {
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(src, (w - dw) / 2, (h - dh) / 2, dw, dh);
+  hasDrawing.value = true;
 }
 
 // thumb 出现 = 解码完成；paintedMode 变 = 换了拉伸模式（画布是原地重画的，
@@ -54,15 +59,19 @@ function draw(): void {
 watch(
   () => [props.rec?.thumb, props.rec?.paintedMode],
   () => draw(),
+  { flush: 'post' },
 );
 
-onMounted(() => {
-  draw();
-  if (cv.value && typeof ResizeObserver !== 'undefined') {
+// A failed image can create this canvas after mount. Rebind the observer and
+// paint after Vue inserts it; a pre-flush thumb watcher would miss that frame.
+watch(cv, (el) => {
+  ro?.disconnect(); ro = null;
+  if (el && typeof ResizeObserver !== 'undefined') {
     ro = new ResizeObserver(() => draw());
-    ro.observe(cv.value);
+    ro.observe(el);
   }
-});
+  draw();
+}, { flush: 'post' });
 
 onBeforeUnmount(() => {
   if (ro) { ro.disconnect(); ro = null; }
@@ -75,13 +84,13 @@ onBeforeUnmount(() => {
     :class="{ compact: !!size }"
     :style="size ? { width: size + 'px', height: size + 'px' } : undefined"
   >
-    <img v-if="diskSrc && !failed" class="ft-preview" :src="diskSrc" alt="" loading="lazy" decoding="async" draggable="false" @error="failed = true" />
+    <img v-if="showDisk" :key="diskSrc" class="ft-preview" :src="diskSrc" alt="" loading="lazy" decoding="async" draggable="false" @error="failed = true" />
     <template v-else-if="previewSrc">
       <img class="ft-preview" :src="previewSrc" alt="" draggable="false" />
       <img v-if="detailSrc" class="ft-preview ft-detail" :src="detailSrc" alt="" draggable="false" />
     </template>
-    <canvas v-else-if="!rec?.card" ref="cv" class="ft-cv"></canvas>
-    <span v-if="rec?.card ? (!diskSrc || failed) : (!previewSrc && !rec?.thumb)" class="ft-ph">{{ rec?.status || '未打开' }}</span>
+    <canvas v-else-if="rec?.thumb || hasDrawing || !rec?.card" ref="cv" class="ft-cv"></canvas>
+    <span v-if="!showDisk && !previewSrc && !rec?.thumb && !hasDrawing" class="ft-ph">{{ rec?.status || '未打开' }}</span>
   </div>
 </template>
 

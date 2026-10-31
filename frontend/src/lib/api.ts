@@ -320,6 +320,8 @@ export interface SceneResolveResult {
      *  **拖进来的中间产物（`kind != 'input'`）也是 false**：那一类的 `row.lq_path`
      *  被服务端置空，前端别指望能提交（见 kind）。 */
     sr_capable: boolean;
+    /** 仅预览源（`SR_PREVIEW_ROOTS`）：只读预览，换档位走 `/preview`。 */
+    preview_only?: boolean;
     /** 拖进来的这份影像属于场景里的哪个环节（2026-09-21 起中间产物也能关联）。
      *  `'input'` = 本体（显示件 / 输入影像，可修复可提交）；`'product'` = 本次
      *  SR 产物；`'nosr'` = 上一次的产物。**只有 kind='input' 才是可修复对象** ——
@@ -831,6 +833,63 @@ function cacheBlob(key: string, blob: Blob): Blob {
   return blob;
 }
 
+/** 预览 JPEG 规则签名的两份要点（见后端 `preview_jpg.rule_stamp`）。 */
+interface PreviewStamp { div: number; src: string | null }
+
+/** 从 JPEG 的 COM 段里读出预览规则签名（只看文件头，不解码像素）。
+ *
+ *  返回 `null` = 不是 JPEG；`false` = 是 JPEG 但没有可解析的本平台规则签名。
+ *
+ *  静态 URL 由 nginx 直出，`?div=N` 只决定浏览器缓存键，**不约束盘上文件内容**：
+ *  另一客户端可能在两次请求之间换了档位（或同名不同源撞进了同一落点）。取到
+ *  字节后必须复核，缓存键说的档位 / 源才与实际字节一致。 */
+async function jpegPreviewStamp(blob: Blob): Promise<PreviewStamp | false | null> {
+  let buf: Uint8Array;
+  try {
+    // 只看文件头：预览的 COM 段由本平台写在 SOI / APP0 之后，64 KiB 足够。
+    // 缩略图路径也要复核签名，整份读进来白白多一份几 MB 的瞬时副本。
+    buf = new Uint8Array(await blob.slice(0, 65536).arrayBuffer());
+  } catch {
+    return null;
+  }
+  if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) return null;
+  let i = 2;
+  while (i + 4 <= buf.length) {
+    if (buf[i] !== 0xff) { i++; continue; }
+    const marker = buf[i + 1];
+    if (marker === 0xff) { i++; continue; }                    // 填充字节
+    if (marker === 0xd8 || marker === 0x01
+        || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue; }
+    if (marker === 0xda || marker === 0xd9) break;             // SOS / EOI
+    const len = (buf[i + 2] << 8) | buf[i + 3];
+    if (len < 2 || i + 2 + len > buf.length) break;
+    if (marker === 0xfe) {                                     // COM
+      const text = new TextDecoder().decode(buf.subarray(i + 4, i + 2 + len));
+      const m = /^srprev:[^:]+:div(\d+)\+equal:q(\d+)(?:;src=([0-9a-f]+-\d+-\d+))?$/
+        .exec(text.trim());
+      if (!m) return false;
+      return { div: Number(m[1]), src: m[3] ?? null };
+    }
+    i += 2 + len;
+  }
+  return false;
+}
+
+/** 静态落点取到的字节是否**确实**是「请求档位、请求源」的那张预览。
+ *
+ *  * 不是 JPEG（正常链路不会发生；真发生时下游解码自会报错）→ 放行；
+ *  * JPEG 但没有本平台规则签名（旧缓存 / 别人的同名文件）→ 不认；
+ *  * 档位对不上，或行上给了源身份而戳里的对不上 → 不认。 */
+async function blobMatchesPreview(
+  blob: Blob, div: number, srcRev?: string | null,
+): Promise<boolean> {
+  const stamp = await jpegPreviewStamp(blob);
+  if (stamp === null) return true;
+  if (!stamp) return false;
+  if (stamp.div !== div) return false;
+  return !srcRev || stamp.src === srcRev;
+}
+
 /** Result thumbnails reuse ready JPEGs only; never trigger TIFF preview baking. */
 export async function fetchExistingSceneJpg(cfg: SrConfig, row: SceneRow): Promise<Blob | null> {
   const div = row.previewDiv ?? loadPreviewDiv();
@@ -845,25 +904,34 @@ export async function fetchExistingSceneJpg(cfg: SrConfig, row: SceneRow): Promi
   const ready = previewBlobs.get(readyKey);
   if (ready) return ready;
   const response = await http(sceneImageUrl(cfg, row.jpgUrl, div));
-  return cacheBlob(readyKey, await response.blob());
+  const blob = await response.blob();
+  // 已知档位的缩略图同样复核签名：它的缓存键与查看器共用，放错字节进来会
+  // 让查看器把别的档位当成本档位命中。未知档位（旧缓存）维持原样，不在此判。
+  if (isBakedPreviewUrl(row.jpgUrl) && row.previewDiv != null
+      && !(await blobMatchesPreview(blob, div, row.srcRev))) {
+    return null;
+  }
+  return cacheBlob(readyKey, blob);
 }
 
 /** 取一条场景行的显示 JPG 字节。两条来源，调用方不必区分：
  *
- *  * 库行（jpgUrl 非空）：缓存没生成过、或**盘上那份不是当前档位**，就先打一次
- *    `/preview?div=N` 懒生成，再走静态 URL 取字节（nginx 直出，大图不经过
- *    API 进程）；档位已对上就直接取静态 URL。
+ *  * 库行（jpgUrl 非空）：缓存没生成过、或**盘上那份不是当前档位**，就打一次
+ *    `/preview?div=N` 懒生成并**直接用它回的那份字节**（服务端快照已核对档位与
+ *    源身份）；档位已对上则走静态 URL（nginx 直出，大图不经过 API 进程），取到
+ *    字节后仍要核对戳里的档位 / 源，对不上退回 `/preview` 的响应体。
  *  * 库外的场景（手工 resolve 的盘阵目录，jpgUrl 为空）：没有静态 URL，
  *    /api/scenes/{id}/preview 的**响应体本身**就是那张 JPEG。
  *
  *  两条路都必须真正取到字节 —— 库外那条早期版本把响应取到手又丢掉，结果手工
  *  场景一律打不开。首次要解压采样整幅大图，可能较慢。
  *
- *  库行这条为什么要「先触发一次重新生成并丢掉响应」，而不是直接拿它的响应体当图：那张图
- *  得由 nginx 直出（几 MB 到几十 MB，走 API 进程会白白占用一个工作进程的内存与带宽）。
- *  代价是重新生成那一次下载两遍（第一遍只触发预览生成、丢掉响应）；稳态下只有一遍。
- *  换档位不会因此看到旧图 —— 静态 URL 带 `?div=N`（见 sceneImageUrl），
- *  nginx 的 `max-age=3600` 缓存键跟着变，第二遍拿到的一定是新生成的。
+ *  为什么「需要生成」时不再转去静态 URL 取：静态 URL 的 `?div=N` 只改变浏览器
+ *  缓存键，**不约束盘上内容**。A 拿到 ÷4 的响应后再去静态落点取图，另一客户端
+ *  可能在这中间把同一落点换成了 ÷2 —— A 最终缓存的是那张 ÷2，键却写着 ÷4
+ *  （档位与源都在键里，错一次就一直错）。`/preview` 的响应是端点内读定的字节
+ *  快照，直接用它才是与请求档位 / 源一致的唯一保证；稳态（档位已对上）仍走
+ *  静态直出，并复核签名。
  *
  *  **重新生成判据不能只看 `hasPreview`**：它不认档位，换完档位盘上那份旧图仍在，
  *  只看它就会跳过重新生成、把旧档位的图端上来（而且是每次换档都这样）。
@@ -918,20 +986,26 @@ export async function fetchSceneJpg(
     return cacheBlob(previewCacheKey(row, div), await p.blob());
   }
   if (needBake) {
-    await http(scenePreviewUrl(cfg, row.id, div));   // 只触发生成预览，字节丢掉
+    // `/preview` 的响应体就是权威字节（端点内读定并核对过档位 / 源身份）。
+    // `no-store`：URL 按 id+div 稳定，内容却会随源重写 —— 不能被浏览器缓存糊弄。
+    const p = await http(scenePreviewUrl(cfg, row.id, div),
+                         { cache: 'no-store' });
     row.hasPreview = true;
     row.previewDiv = div;      // 记上实际档位：同一会话内再打开不必重新生成
+    return cacheBlob(previewCacheKey(row, div), await p.blob());
   }
-  // 刚生成过这一下 → 静态 URL 那份缓存整个作废，绕开浏览器 HTTP 缓存去拿。
-  // 判据正是 needBake：只有它成立时我们才**知道**服务端刚刚重写了那个文件，而
-  // `?div=N` 那条击穿只对「档位变了」有效。**档位没变但内容重新生成**有两条路：
-  // 规则签名换代（v2→v3，盘上原地重新生成）与场景库的「清除缓存」——后者的整个卖点
-  // 就是「下次打开看新的」，若这里吃浏览器那份（nginx `max-age=3600`）旧字节，
-  // 用户会以为清了个寂寞。代价：每次真生成预览后这一次多走一趟网络（本来就在等
-  // 几十秒的生成过程，这点开销看不见）。
-  const img = await http(sceneImageUrl(cfg, row.jpgUrl, div),
-                         needBake ? { cache: 'no-store' } : undefined);
-  return cacheBlob(previewCacheKey(row, div), await img.blob());
+  // 档位已对上 → 静态直出。取到字节后仍要复核：`?div=N` 只击穿浏览器缓存，
+  // 不锁定盘上内容；另一客户端可能在这次请求之前把落点换成了别的档位 / 别的源。
+  const img = await http(sceneImageUrl(cfg, row.jpgUrl, div));
+  const blob = await img.blob();
+  if (baked && !(await blobMatchesPreview(blob, div, row.srcRev))) {
+    const p = await http(scenePreviewUrl(cfg, row.id, div),
+                         { cache: 'no-store' });
+    row.hasPreview = true;
+    row.previewDiv = div;
+    return cacheBlob(previewCacheKey(row, div), await p.blob());
+  }
+  return cacheBlob(previewCacheKey(row, div), blob);
 }
 
 /** 显示件 jpg 的「同名栅格赢」那一支：取**栅格那份**预览（见 rasterPreviewWins）。
@@ -976,14 +1050,26 @@ async function fetchRasterPreview(
     return cacheBlob(key, await p.blob());
   }
   if (needBake) {
-    await http(scenePreviewUrl(cfg, row.id, div));   // 只触发生成预览，字节丢掉
+    // 同 fetchSceneJpg：需要生成时，`/preview` 的响应体就是与档位 / 源一致的
+    // 那份字节；转去静态落点取，可能被另一客户端换过档位。
+    const p = await http(scenePreviewUrl(cfg, row.id, div),
+                         { cache: 'no-store' });
     rp.hasPreview = true;
     rp.previewDiv = div;
+    return cacheBlob(key, await p.blob());
   }
-  // 刚生成过 → 绕开浏览器 HTTP 缓存取（理由同 fetchSceneJpg 那一处）
-  const img = await http(sceneImageUrl(cfg, rp.jpgUrl, div),
-                         needBake ? { cache: 'no-store' } : undefined);
-  return cacheBlob(key, await img.blob());
+  // 档位已对上 → 静态直出，但取到字节后复核签名（理由同 fetchSceneJpg）。
+  const img = await http(sceneImageUrl(cfg, rp.jpgUrl, div));
+  const blob = await img.blob();
+  if (isBakedPreviewUrl(rp.jpgUrl)
+      && !(await blobMatchesPreview(blob, div, rp.srcRev))) {
+    const p = await http(scenePreviewUrl(cfg, row.id, div),
+                         { cache: 'no-store' });
+    rp.hasPreview = true;
+    rp.previewDiv = div;
+    return cacheBlob(key, await p.blob());
+  }
+  return cacheBlob(key, blob);
 }
 
 /** 拖入链取预览 JPG：GET /api/scenes/{id}/preview-drop?div=N。
@@ -1075,6 +1161,8 @@ export interface SceneSibling {
   H: number | null;
   hasPreview: boolean;
   previewDiv: number | null;
+  /** 这一类栅格的源身份（后端按实际源核对预览缓存时给出）。 */
+  srcRev?: string | null;
   thumbnail_url?: string | null;
   jpgUrl: string | null;
 }
@@ -1131,6 +1219,7 @@ export function siblingRow(res: SceneSiblings, item: SceneSibling): SceneRow {
     thumbnail_url: item.thumbnail_url,
     hasPreview: item.hasPreview,
     previewDiv: item.previewDiv,
+    srcRev: item.srcRev ?? null,
     lq_path: res.lqPath,
     rasterPreview: null,
   };

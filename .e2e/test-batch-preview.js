@@ -38,13 +38,20 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
       return canvas.toDataURL('image/jpeg').split(',')[1];
     }));
     const requests = [];
+    let releaseThumbnail;
     await page.setRequestInterception(true);
     page.on('request', async req => {
       const url = req.url();
       if (url.includes('/disk-array/')) {
         requests.push(url);
         const thumb = url.includes('_thumb.jpg');
-        await req.respond({ status: 200, contentType: 'image/jpeg', body: Buffer.from(fixtures[thumb ? 0 : 1], 'base64') });
+        if (thumb && url.includes('/fallback/404/')) { await req.respond({ status: 404, body: '' }); return; }
+        if (thumb && url.includes('/fallback/broken/')) { await req.respond({ status: 200, contentType: 'image/jpeg', body: 'bad jpeg' }); return; }
+        if (thumb && url.includes('/fallback/late/')) {
+          await new Promise(resolve => { releaseThumbnail = resolve; });
+          await req.respond({ status: 404, body: '' }); return;
+        }
+        await req.respond({ status: 200, contentType: 'image/jpeg', body: Buffer.from(fixtures[thumb || url.includes('/fallback/') ? 0 : 1], 'base64') });
       } else if (url.includes('/api/')) {
         requests.push(url);
         await req.respond({ status: 200, contentType: 'application/json', body: '{}' });
@@ -110,6 +117,50 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     assert.equal(consumers.rightTargetWasEvicted, true); assert.equal(consumers.bothResident, true);
     assert.equal(consumers.leftId, consumers.expectedLeft); assert.equal(consumers.rightId, consumers.expectedRight);
     console.log('browser consumers', JSON.stringify(consumers));
+    // Missing/corrupt/late lightweight thumbnails must use already-decoded pixels.
+    for (const kind of ['absent', '404', 'broken', 'late', 'valid']) {
+      requests.length = 0;
+      const id = await page.evaluate(async kind => {
+        const { store, nextTick } = window.batchTest;
+        store.clearRecs();
+        const id = store.insertSceneCard({ sceneId: kind, name: kind, W: 64, H: 64 },
+          { id: kind, thumbnail_url: kind === 'absent' ? null : `/disk-array/fallback/${kind}/image_thumb.jpg`,
+            jpgUrl: `/disk-array/fallback/${kind}/image.jpg`, hasPreview: true });
+        await nextTick();
+        return id;
+      }, kind);
+      await delay(100);
+      assert.equal(await page.$$eval('.ft canvas', es => es.length), 0, 'unopened cards do not decode');
+      assert(requests.every(url => url.includes('_thumb.jpg')), 'no detailed fetch for list');
+      await page.evaluate(async id => { await window.batchTest.store.activate(id); await window.batchTest.nextTick(); }, id);
+      if (kind === 'late') { assert(releaseThumbnail); releaseThumbnail(); }
+      if (kind === 'valid') {
+        await page.waitForFunction(() => document.querySelector('.ft img')?.naturalWidth > 0);
+        assert.equal(await page.$$eval('.ft canvas', es => es.length), 0);
+      } else {
+        await page.waitForFunction(() => {
+          const cv = document.querySelector('.ft canvas');
+          return cv && cv.getContext('2d').getImageData(48, 48, 1, 1).data[3] > 0;
+        });
+        assert.equal(await page.$$eval('.ft-ph', es => es.length), 0, 'ready text must not cover opened pixels');
+        // New fallback canvas must repaint when resized after mount.
+        await page.$eval('.ft', e => { e.style.width = '72px'; e.style.height = '72px'; });
+        await page.waitForFunction(() => {
+          const cv = document.querySelector('.ft canvas');
+          return cv.clientWidth >= 70 && cv.clientWidth <= 72 && cv.getContext('2d').getImageData(35, 35, 1, 1).data[3] > 0;
+        });
+        await page.evaluate(async id => {
+          const { store, nextTick } = window.batchTest;
+          const rec = store.recs.find(rec => rec.id === id);
+          rec.thumb = null; rec.src = null;
+          await nextTick();
+        }, id);
+        assert.equal(await page.$$eval('.ft-ph', es => es.length), 0);
+        assert(await page.$eval('.ft canvas', cv => cv.getContext('2d').getImageData(35, 35, 1, 1).data[3] > 0),
+          'small thumbnail survives detailed pixel eviction');
+      }
+      console.log('thumbnail fallback', kind, 'passed');
+    }
   } finally {
     if (browser) await browser.close();
     server.close();

@@ -419,6 +419,22 @@ describe('previewCacheKey（预览 blob 的缓存键）', () => {
     expect(previewCacheKey({ id: 'a' }, 4, { name: 'jpg' }))
       .not.toBe(previewCacheKey({ id: 'a' }, 4));
   });
+
+  it('源身份进键：源换了一份内容，本地旧 blob 不能继续命中', () => {
+    const before = { id: 'a', srcRev: 'abc-100-1' };
+    const after = { id: 'a', srcRev: 'abc-128-2' };
+    expect(previewCacheKey(before, 4)).not.toBe(previewCacheKey(after, 4));
+    // 没有源身份时键与升级前逐字相同（不凭空多一次取图）
+    expect(previewCacheKey({ id: 'a' }, 4)).toBe('a|4|jpg');
+  });
+
+  it('栅格源身份进栅格键，且与源 jpg 那份互不影响', () => {
+    const row = { id: 'a', srcRev: 'jpg-1' };
+    const rp = { name: 'PAN.tif', srcRev: 'ras-1' };
+    expect(previewCacheKey(row, 4, rp)).toBe('a|4|ras:PAN.tif|ras-1');
+    expect(previewCacheKey(row, 4, { ...rp, srcRev: 'ras-2' }))
+      .not.toBe(previewCacheKey(row, 4, rp));
+  });
 });
 
 describe('sceneAnchors —— 拖 jpg 时递给后端的锚定目录', () => {
