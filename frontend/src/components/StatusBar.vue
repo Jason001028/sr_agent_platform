@@ -58,6 +58,7 @@ const zoom = computed(() => {
   return (pct >= 10 ? String(Math.round(pct)) : pct.toFixed(1)) + '%';
 });
 
+const gray = computed(()=>{const r=store.activeRec,c=store.cursor;if(!r?.thumb||!c)return '?';try{const x=Math.floor(c[0]*r.thumb.width/r.W),y=Math.floor(c[1]*r.thumb.height/r.H);const d=(r.thumb as unknown as HTMLCanvasElement).getContext('2d')?.getImageData(x,y,1,1).data;return d?'Display RGB '+Array.from(d).slice(0,3).join('/')+' / Raw DN unavailable':'?';}catch{return '?';}});
 const pixel = computed(() => {
   const c = store.cursor;
   return c ? '(' + c[0] + ', ' + c[1] + ')' : '—';
@@ -75,6 +76,7 @@ const pixel = computed(() => {
     </span>
     <span class="sb-zoom" data-e2e="sb-zoom">缩放 {{ zoom }}</span>
     <span class="sb-px" data-e2e="sb-px">像素 {{ pixel }}</span>
+    <span>{{ store.activeRec.W }}×{{ store.activeRec.H }} · 预览 {{ store.view.scale.toFixed(2) }}× · {{ gray }}</span>
   </div>
 </template>
 

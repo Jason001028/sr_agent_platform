@@ -12,6 +12,7 @@ import { phaseLabel } from '../lib/executionOverview.js';
 
 const props = defineProps<{
   text: string;
+  activity?: string;
   streaming?: boolean;
   phase?: ChatPhase | null;
   developerMode?: boolean;
@@ -19,7 +20,7 @@ const props = defineProps<{
 
 const open = ref(false);
 const bodyEl = ref<HTMLElement | null>(null);
-const currentPhase = computed(() => phaseLabel(props.phase));
+const currentPhase = computed(() => props.activity || phaseLabel(props.phase));
 /** 用户手动点过之后，定稿时不再自动收起。 */
 let userToggled = false;
 

@@ -90,7 +90,7 @@ const liveMsg = computed<ChatMsg | null>(() => {
 });
 
 function waitLabel(m: ChatMsg): string {
-  return phaseLabel(m.phase);
+  return chat.activity.label || phaseLabel(m.phase);
 }
 
 /** 用户气泡只显示用户原话；查看器 Agent 页签自动附的上下文不算用户输入。 */
@@ -318,7 +318,7 @@ onMounted(() => {
             <div v-if="m.isError" class="bubble assistant err">{{ m.content }}</div>
             <template v-else>
               <ReasoningBlock v-if="m.reasoning" :text="m.reasoning"
-                              :streaming="m.streaming" :phase="m.phase ?? null" :developer-mode="developerMode" />
+                              :streaming="m.streaming" :phase="m.phase ?? null" :activity="m.streaming ? chat.activity.label : undefined" :developer-mode="developerMode" />
               <div v-if="m.content" class="bubble assistant">
                 <MarkdownBody :source="m.content" />
                 <div v-if="m.toolCalls && m.toolCalls.length" class="tc-inline">
@@ -352,7 +352,7 @@ onMounted(() => {
 
         <GoalClarifications :session-id="chat.sessionId" @updated="!chat.sending && chat.sessionId && chat.loadHistory(chat.sessionId)" />
         <div v-if="chat.sending && !liveMsg" class="cp-thinking">
-          <ThinkingIndicator label="正在分析任务" />
+          <ThinkingIndicator :label="chat.activity.label" />
         </div>
         <div v-if="chat.lastRunId && !chat.sending" class="cp-feedback">
           <span>这次回答有帮助吗？</span>

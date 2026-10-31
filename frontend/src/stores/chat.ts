@@ -1,3 +1,4 @@
+import { startActivity, advanceActivity } from '../lib/chatActivity';
 /**
  * stores/chat.ts — Agent 聊天（阶段5：SSE 流式 Agent 过程）
  * ------------------------------------------------------------------
@@ -272,6 +273,7 @@ export const useChatStore = defineStore('chat', () => {
   const sessionId = ref<string | null>(null);
   const messages = ref<ChatMsg[]>([]);
   const sending = ref(false);
+  const activity = ref(startActivity());
   const thinkingStatus = ref('');
   const thinkingProfile = ref<'fast' | 'low' | 'balanced' | 'deep'>('balanced');
   const agentStatus = ref<'idle' | 'thinking' | 'responding'>('idle');
@@ -413,6 +415,7 @@ export const useChatStore = defineStore('chat', () => {
     const pending = pendingImages.value;
     const viewerContext = captureViewerContext(pending.length);
     pendingImages.value = [];
+    activity.value = startActivity(pending.length > 0, /User source ROI|Source Pixel ROI/.test(text));
     const upload: ChatUploadImage[] = pending.map((p) => ({ data: p.dataUrl, name: p.name, spatial: p.spatial }));
     const optimistic: ChatImage[] = pending.map((p) => ({ url: p.dataUrl, name: p.name }));
     // 乐观上屏用户消息；SSE 事件逐帧归并在其后
@@ -452,6 +455,8 @@ export const useChatStore = defineStore('chat', () => {
         streamTick.value += 1;
       };
       const onEvent = (ev: PlatformSseEvent): void => {
+        const nextActivity = advanceActivity(activity.value, ev);
+        if (nextActivity !== activity.value) activity.value = nextActivity;
         if (ev.type === 'token' && ev.delta) agentStatus.value = 'responding';
         if ((ev.type === 'assistant' || ev.type === 'turn_done') && 'content' in ev && ev.content?.trim()) {
           agentStatus.value = 'responding';
@@ -479,6 +484,7 @@ export const useChatStore = defineStore('chat', () => {
                                      { type: 'error', error: '回合异常中止' });
     } finally {
       finalizeStreaming();                // 没有 turn_done 的异常路径也要熄灯
+      activity.value = { ...activity.value, label: '', pending: [], terminal: true };
       sending.value = false;
       agentStatusTimer = setTimeout(() => {
         agentStatus.value = 'idle';
@@ -593,7 +599,7 @@ export const useChatStore = defineStore('chat', () => {
 
   return {
     sessions, sessionId, messages, sending, agentStatus, streamTick, error, loading,
-    usage, lastRunId, feedbackRating, thinkingProfile, thinkingStatus,
+    activity, usage, lastRunId, feedbackRating, thinkingProfile, thinkingStatus,
     pendingImages, addPendingImage, removePendingImage, clearPendingImages,
     hasSession, init, refreshSessions, loadHistory, newSession, selectSession, send,
     submitFeedback, deleteSession, deleteSessions, pinSession, pinSessions, renameSession,

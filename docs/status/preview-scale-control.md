@@ -1,5 +1,15 @@
 # 磁吸预览倍率控件（2026-10-30）
 
+2026-10-31：排查 1:1 档位 `could not be decoded`：`decodeJpgToCanvas`
+原先在 `createImageBitmap(blob)` 全尺寸解码完成后才缩到 4096，原尺寸 JPG
+存在解码峰值内存风险。现在 `lib/jpegBitmap.ts` 仅读 JPEG 段头取得 SOF 尺寸，
+在解码请求中传入长边 4096 的 resize 参数，之后仍保留画布尺寸保护及 bitmap.close。
+失败信息附源 JPG 尺寸及低档位重试提示，不自动重试全尺寸解码。
+1:1 仍表示服务端采样档位，现有前端显示层长边上限仍为 4096；该修改不提供
+原始像元级全分辨率查看。浏览器内部的解码峰值不能仅靠 resize 参数保证，
+真实内网图仍需确认；若仍失败，应考虑服务端切片，不能把 resize 当作任意大图的保证。
+针对性回归 16 项通过（含 baseline/progressive SOF、截断头、解码失败和换档状态）。
+
 列表操作胶囊的清空位移修复：FileList侧栏增加 `scrollbar-gutter: stable`，
 保留纵向滚动条占位。`test-preview-clear-layout.js` 使用真实Chrome，显式去掉
 Puppeteer默认的 `--hide-scrollbars`，用12张本地生成JPEG验证长列表、清空和撤回。

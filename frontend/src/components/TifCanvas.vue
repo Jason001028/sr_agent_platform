@@ -10,6 +10,7 @@
  * dblclick（drawMode→closePolygon，否则 fit）、contextmenu（drawMode→closePolygon）、
  * window keydown（Esc/Enter）、window dragover/drop（文件拖入；.txt 走待修复清单）。
  */
+import MiniNavigator from './MiniNavigator.vue';
 import AgentAnnotationOverlay from './AgentAnnotationOverlay.vue';
 import { ref, onMounted, onBeforeUnmount, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
@@ -374,10 +375,15 @@ function cursorAt(e: MouseEvent): Pt | null {
   const t = mouseToThumb(store.view, e.clientX - pane.x, e.clientY - pane.y,
     { left: r.left, top: r.top });
   const tw = rec.thumb.width, th = rec.thumb.height;
-  if (t[0] < 0 || t[1] < 0 || t[0] > tw || t[1] > th) return null;
+  if (t[0] < 0 || t[1] < 0 || t[0] >= tw || t[1] >= th) return null;
   return thumbToOrig(t[0], t[1], rec.W, rec.H, tw, th);
 }
 
+function askSelected(){
+ const r=store.activeRec,poly=store.getRois()[store.roiSelIndex()];if(!r?.thumb||!poly)return;
+ const xs=poly.map(p=>p[0]*r.W/r.thumb!.width),ys=poly.map(p=>p[1]*r.H/r.thumb!.height);
+ store.bindQuestionRegion([Math.max(0,Math.min(...xs)),Math.max(0,Math.min(...ys)),Math.min(r.W,Math.max(...xs)),Math.min(r.H,Math.max(...ys))]);
+}
 function onWheel(e: WheelEvent) {
   const vc = viewCanvasRef.value;
   // 分屏下只要**任一侧**有图就该响应：活动侧恰好空着时也还能缩放另一侧。
@@ -408,9 +414,11 @@ function onMouseDown(e: MouseEvent) {
   lastY = e.clientY;
 }
 
+let cursorFrame=0; let cursorEvent:MouseEvent|null=null;
+function queueCursor(e:MouseEvent){cursorEvent=e;if(cursorFrame)return;cursorFrame=requestAnimationFrame(()=>{cursorFrame=0;if(cursorEvent)store.setCursor(cursorAt(cursorEvent));});}
 function onWindowMouseMove(e: MouseEvent) {
   // 状态栏坐标与「在不在绘制」无关：平移、看像素、画框都要它
-  store.setCursor(cursorAt(e));
+  queueCursor(e);
   if (store.drawMode) { store.onCanvasMove(mousePos(e)); return; }
   if (!dragging.value) return;
   store.onPan(e.clientX - lastX, e.clientY - lastY);
@@ -548,6 +556,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   store.setCanvasAttached(false);
   store.setCursor(null);
+  if(cursorFrame)cancelAnimationFrame(cursorFrame);
   if (resizeObs) resizeObs.disconnect();
   if (resizeTimer !== null) { clearTimeout(resizeTimer); resizeTimer = null; }
   window.removeEventListener('transitionend', onLayoutTransitionEnd, true);
@@ -578,11 +587,17 @@ onBeforeUnmount(() => {
     ></canvas>
     <canvas ref="drawCanvasRef" class="draw-canvas"></canvas>
     <AgentAnnotationOverlay @wheel="onWheel" />
+    <MiniNavigator />
+    <div class="question-tools" @mousedown.stop @dblclick.stop>
+      <button v-if="store.roiSelIndex()>=0 && !store.pendingRect" @click="askSelected">询问 Agent · 选中 ROI</button>
+    </div>
     <slot></slot>
   </div>
 </template>
 
 <style scoped>
+.question-tools{position:absolute;top:12px;left:12px;z-index:4}.question-tools button{background:#f5f8f6;color:#244c3b;border:1px solid #b8ccc3;border-radius:8px;padding:7px 12px;cursor:pointer}
+
 .stage {
   position: relative;
   flex: 1;

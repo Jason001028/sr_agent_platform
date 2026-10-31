@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { imageRef } from '../lib/spatial';
 import ThinkingSlider from "./ThinkingSlider.vue";
 /**
  * AgentChatTab.vue — 上下文侧舱 [Agent] tab（阶段6 L2）
@@ -205,7 +206,7 @@ const liveMsg = computed<ChatMsg | null>(() => {
 });
 
 function waitLabel(m: ChatMsg): string {
-  return phaseLabel(m.phase);
+  return chat.activity.label || phaseLabel(m.phase);
 }
 
 const creating = ref(false);   // 防止双击并发 newSession 建出两个会话
@@ -217,7 +218,7 @@ function canSend(): boolean {
 }
 
 async function onSend(): Promise<void> {
-  const text = draft.value.trim();
+  let text = draft.value.trim();
   const s = snap.value;
   if (!canSend() || !s) return;
   if (!chat.sessionId) {
@@ -232,6 +233,15 @@ async function onSend(): Promise<void> {
   }
   // Opening a session may await the network; recheck access after image changes.
   if (!canSend()) return;
+  const region=viewer.questionRegion;
+  if(region) {
+    const source=viewer.recs.find(r=>r.id===region.recId);
+    if(!source || imageRef(source)?.image_key!==region.key || source.id!==viewer.activeRec?.id) { chat.error='ROI source changed; return to the original image'; return; }
+    const shot=await viewer.captureForChat(region.recId,region.bounds);
+    if(!shot || !chat.addPendingImage(shot)) { chat.error='ROI source changed; return to the original image??'; return; }
+    text += '\nUser source ROI (not AI detection): '+JSON.stringify(region)+'; attachment is a display preview crop, not raw DN.';
+    viewer.questionRegion=null;
+  }
   draft.value = '';
   const latest = snap.value;
   if (latest) void chat.send(agentPayload(text, buildContextNote(latest)));
@@ -353,7 +363,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
             <div v-if="m.isError" class="bubble assistant err">{{ m.content }}</div>
             <template v-else>
               <ReasoningBlock v-if="m.reasoning" :text="m.reasoning"
-                              :streaming="m.streaming" :phase="m.phase ?? null" :developer-mode="developerMode" />
+                              :streaming="m.streaming" :phase="m.phase ?? null" :activity="m.streaming ? chat.activity.label : undefined" :developer-mode="developerMode" />
               <div v-if="m.content" class="bubble assistant">
                 <MarkdownBody :source="m.content" />
                 <div v-if="m.toolCalls && m.toolCalls.length" class="tc-inline">
@@ -395,7 +405,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
 
         <GoalClarifications :session-id="chat.sessionId" @updated="!chat.sending && chat.sessionId && chat.loadHistory(chat.sessionId)" />
         <div v-if="chat.sending && !liveMsg" class="at-thinking">
-          <ThinkingIndicator label="正在分析任务" />
+          <ThinkingIndicator :label="chat.activity.label" />
         </div>
       </div>
 
@@ -403,6 +413,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
         <div :inert="!enabled">
 
         <div class="thinking-tools"><ThinkingSlider v-model="chat.thinkingProfile" :status="chat.thinkingStatus" :disabled="!enabled" /></div>
+        <div v-if="viewer.questionRegion" class="roi-reference"><button @click="viewer.activeRec?.id===viewer.questionRegion.recId && viewer.focusSourceBounds(viewer.activeSide,viewer.questionRegion.bounds)">{{ viewer.questionRegion.name }} ? Source ROI {{ viewer.questionRegion.bounds.join(', ') }}</button><button @click="viewer.questionRegion=null">Remove</button><small>Display preview crop attached on send.</small></div>
         <ChatAttachTray :items="chat.pendingImages" @remove="chat.removePendingImage" />
         <div class="at-inputbar">
           <button type="button" class="at-shot" data-e2e="chat-shot-open"

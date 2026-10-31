@@ -1,4 +1,5 @@
 import { imageRef, spatialId } from '../lib/spatial';
+import { decodeJpegBitmap } from '../lib/jpegBitmap';
 import { registerViewerContext, snapshotViewer } from '../lib/viewerContext.js';
 /**
  * stores/viewer.ts — 查看器状态 + 编排（tif-viewer.html 交互层 Vue 化）
@@ -177,7 +178,7 @@ const CLOUD_OVERLAY_MAX = 2048;
 
 /** 限制显示层尺寸：后续 RGBA 拷贝和 Float32 像素也按此尺寸分配。 */
 async function decodeJpgToCanvas(blob: Blob): Promise<HTMLCanvasElement> {
-  const bmp = await createImageBitmap(blob);
+  const bmp = await decodeJpegBitmap(blob);
   try {
     const scale = Math.min(1, 4096 / Math.max(bmp.width, bmp.height));
     const width = Math.max(1, Math.round(bmp.width * scale));
@@ -529,7 +530,7 @@ export const useViewerStore = defineStore('viewer', () => {
        - 空卡（「一键解析」批量入列、只有身份没有像素）→ `loadCardPixels` 现取
          像素（它只装像素、不换图，自带进度遮罩），再按整幅截。
      返回 null = 截不出来（没这张图 / 取图失败），原因已由 `showErr` 说明。 */
-  async function captureForChat(recId: number): Promise<ChatShot | null> {
+  async function captureForChat(recId: number, bounds?: [number,number,number,number]): Promise<ChatShot | null> {
     let rec = recs.value.find((r) => r.id === recId);
     if (!rec) return null;
 
@@ -544,8 +545,16 @@ export const useViewerStore = defineStore('viewer', () => {
     const side = canvasAttached.value ? sideOfRec(recId) : null;
     const rect = side ? rectForSide(side) : null;
     const view = side === 'A' ? viewA.value : side === 'B' ? viewB.value : null;
-    const plan = planShot(view, rect?.w ?? 0, rect?.h ?? 0,
+    let plan = planShot(view, rect?.w ?? 0, rect?.h ?? 0,
                           rec.thumb.width, rec.thumb.height);
+    if (bounds) {
+      const [x,y,right,bottom]=bounds;
+      if (![x,y,right,bottom].every(Number.isFinite) || x<0 || y<0 || right>rec.W || bottom>rec.H || right<=x || bottom<=y) return null;
+      const sx=x*rec.thumb.width/rec.W, sy=y*rec.thumb.height/rec.H;
+      const sw=(right-x)*rec.thumb.width/rec.W, sh=(bottom-y)*rec.thumb.height/rec.H;
+      const factor=Math.min(1,1280/Math.max(sw,sh));
+      plan={sx,sy,sw,sh,dw:Math.max(1,Math.round(sw*factor)),dh:Math.max(1,Math.round(sh*factor))};
+    }
     if (!plan) return null;
     try {
       const dataUrl=drawShot(rec.thumb as unknown as HTMLCanvasElement, plan);
@@ -3274,7 +3283,14 @@ export const useViewerStore = defineStore('viewer', () => {
     // search_scenes 默认限定检索范围；本地拖入图单列 local_only。
     recs: recsOrdered.value, workspaceVersion: workspaceVersion.value }, count));
 
+  const questionRegion = ref<{recId:number; key:string; name:string; bounds:[number,number,number,number]} | null>(null);
+  function bindQuestionRegion(bounds:[number,number,number,number]) {
+    const r=activeRec.value; if(!r) return;
+    questionRegion.value={recId:r.id,key:imageRef(r)!.image_key,name:r.name,bounds:[...bounds]};
+    setCtxRailOpen(true); window.dispatchEvent(new Event('annotation-conversation'));
+  }
   return {
+    questionRegion, bindQuestionRegion,
     agentAnnotationsVisible, setAgentAnnotationsVisible, toggleAgentAnnotations,
     previewMemoryMB, previewMemoryOptions, setPreviewMemoryMB,
     // 状态
