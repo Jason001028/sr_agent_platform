@@ -504,4 +504,6 @@ Viewer 消息快照、当前影像只读工具及评测边界见 [viewer-context
 
 请求级 Deadline 与 Thinking 配置实现及内网待验收边界见 [reasoning-budget-deadline.md](reasoning-budget-deadline.md)。
 
+思考强度 UI（2026-11-02）已收进输入框同行的胶囊，点击向上淡入浮动抽屉；聊天页与查看器 Agent 共用，四档支持点选、拖动和键盘，关闭淡出不拦截输入。交互及验证见上述文档「前端思考强度抽屉」，浏览器回归：`node .e2e/test-thinking-slider.js`。
+
 P1 spatial annotations: [implementation and pending acceptance](spatial-annotations.md).

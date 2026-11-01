@@ -402,9 +402,9 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
       <div class="at-foot" :class="{ locked: !enabled }">
         <div :inert="!enabled">
 
-        <div class="thinking-tools"><ThinkingSlider v-model="chat.thinkingProfile" :status="chat.thinkingStatus" :disabled="!enabled" /></div>
         <ChatAttachTray :items="chat.pendingImages" @remove="chat.removePendingImage" />
         <div class="at-inputbar">
+          <ThinkingSlider v-model="chat.thinkingProfile" :status="chat.thinkingStatus" :disabled="!enabled" />
           <button type="button" class="at-shot" data-e2e="chat-shot-open"
                   aria-label="添加截图" title="添加截图（截取当前视野）"
                   :disabled="!enabled || chat.sending || creating"
@@ -430,7 +430,6 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
 </template>
 
 <style scoped>
-.thinking-tools { display: flex; padding: 6px 8px 0; }
 .at {
   position: relative;          /* 会话菜单的定位基准 */
   height: 100%;
@@ -636,7 +635,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
 .at-foot { flex: none; border-top: 1px solid var(--line); background: var(--surface); }
 .at-inputbar {
   flex: none;
-  display: flex; gap: 6px;
+  display: flex; align-items: center; gap: 6px;
   padding: 8px;
   background: var(--surface);
 }

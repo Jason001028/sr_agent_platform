@@ -369,9 +369,9 @@ onMounted(() => {
 
       <div class="cp-foot">
 
-        <div class="thinking-tools"><ThinkingSlider v-model="chat.thinkingProfile" :status="chat.thinkingStatus" /></div>
         <ChatAttachTray :items="chat.pendingImages" @remove="chat.removePendingImage" />
         <div class="cp-inputbar">
+          <ThinkingSlider v-model="chat.thinkingProfile" :status="chat.thinkingStatus" />
           <button type="button" class="cp-shot" data-e2e="chat-shot-open"
                   aria-label="添加截图" title="添加截图（截取查看器当前画面）"
                   :disabled="chat.sending"
@@ -395,7 +395,6 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.thinking-tools { display: flex; padding: 6px 8px 0; }
 .chat-page {
   height: calc(100vh - var(--topbar-h));
   display: flex;
@@ -600,7 +599,7 @@ onMounted(() => {
 /* 输入区连托板一起做成一整块：分隔线画在整块顶部，待发缩略图才不像悬在消息区里 */
 .cp-foot { flex: none; border-top: 1px solid var(--line); background: var(--surface); }
 .cp-inputbar {
-  display: flex; gap: 10px; padding: 12px 16px;
+  display: flex; align-items: center; gap: 10px; padding: 12px 16px;
   flex: none;
   background: var(--surface);
 }
@@ -620,7 +619,7 @@ onMounted(() => {
 .cp-shot:disabled { opacity: .5; cursor: not-allowed; }
 .cp-shot:focus-visible { outline: 2px solid var(--accent-3); outline-offset: 1px; }
 .cp-input {
-  flex: 1; height: 36px; padding: 0 12px; border: 1px solid var(--line);
+  flex: 1; min-width: 0; height: 36px; padding: 0 12px; border: 1px solid var(--line);
   border-radius: var(--r-ctrl); background: var(--surface-2);
   font-size: 14px; font-family: inherit; color: var(--ink);
   outline: none;
