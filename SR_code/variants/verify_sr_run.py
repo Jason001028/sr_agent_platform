@@ -402,9 +402,14 @@ def _check_repair(v, config_path, doc, sr_exit_code):
         with open(receipt, encoding='utf-8') as stream:
             result = json.load(stream)
         expected_nosr = _cfg_value(doc, 'RepairNOSR')
-        backup = os.path.join(v.lq_path, 'PAN_old_2.tif')
+        # PAN_old_latest.tif is canonical since 2026-11-02; the legacy name stays
+        # accepted so a repair queued before the rename can still be verified
+        # after the upgrade. Both are fixed, same-directory names.
+        allowed_backups = {os.path.normpath(os.path.join(v.lq_path, name))
+                           for name in ('PAN_old_latest.tif', 'PAN_old_2.tif')}
+        backup = os.path.normpath(result.get('backup') or '')
         if (result['mode'] != 'pan-nosr-v1' or os.path.normpath(result['output']) != os.path.normpath(v.output)
-                or os.path.normpath(result['backup']) != os.path.normpath(backup)
+                or backup not in allowed_backups
                 or os.path.normpath(result['nosr']) != os.path.normpath(expected_nosr)):
             raise ValueError('receipt paths do not match this repair')
         for path, key in ((v.output, 'output_signature'), (backup, 'backup_signature'),

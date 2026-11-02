@@ -1,6 +1,6 @@
 # 平台 API 契约（阶段5 · REST / SSE）
 
-`POST /api/queue` 与 Agent `run_sr` 的 PAN 修复语义见 [pan_repair_contract.md](../sr_code/pan_repair_contract.md)。提交参数由服务端附加 `repair` 与文件版本；计算源是完整生产名 `_NOSR.tif`，正式结果恒为 `PAN.tif`，旧 PAN 备份为 `PAN_old_2.tif`。`suffix` 只控制私有计算中间文件名。
+`POST /api/queue` 与 Agent `run_sr` 的 PAN 修复语义见 [pan_repair_contract.md](../sr_code/pan_repair_contract.md)。提交参数由服务端附加 `repair` 与文件版本；计算源是完整生产名 `_NOSR.tif`，正式结果恒为 `PAN.tif`，旧 PAN 备份为 `PAN_old_latest.tif`（旧名 `PAN_old_2.tif` 只读兼容）。`suffix` 只控制私有计算中间文件名。
 
 > 日期：2026-09-02 · 状态：**评审**（2026-09-16 按 §7 红线置回，待复核后改回「已定」）
 >

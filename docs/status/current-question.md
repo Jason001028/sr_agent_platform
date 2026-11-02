@@ -9,7 +9,7 @@
 
 配置文件路径速查见 [config_locations.md](config_locations.md)，包含本地仓库、node81-135 已确认的 systemd drop-in、llama.cpp、nginx、Python 环境和 SR 参数位置。
 
-“提交 SR”的 PAN/NOSR 输入、掩码映射、PAN_old_2 备份与 PAN 发布契约见
+“提交 SR”的 PAN/NOSR 输入、掩码映射、PAN_old_latest 备份（旧名 PAN_old_2 只读兼容）与 PAN 发布契约见
 [pan_repair_contract.md](../sr_code/pan_repair_contract.md)。REST 与 Agent 提交均使用修复适配层；真实 GDAL/GPU 验收待核。
 
 ---

@@ -412,3 +412,31 @@ class TestOldOptional(SiblingsBase):
         self.assertTrue(old['exists'])
         self.assertEqual((old['W'], old['H']), (80, 40))
         self.assertNotEqual(old['id'], row['id'])
+
+    def test_repair_backup_surfaces_as_old(self):
+        d = self.make_scene()
+        make_strip_tif(d, 'PAN_old_latest.tif', 80, 40)
+        c = self.client()
+        row = self.resolve(c, d)
+        old = self.by_kind(self.q(c, row['id'], suffix='old'), 'product')
+        self.assertTrue(old['exists'])
+        self.assertEqual(old['name'], 'PAN_old_latest.tif')
+
+    def test_legacy_repair_backup_still_surfaces(self):
+        d = self.make_scene()
+        make_strip_tif(d, 'PAN_old_2.tif', 80, 40)
+        c = self.client()
+        row = self.resolve(c, d)
+        old = self.by_kind(self.q(c, row['id'], suffix='old'), 'product')
+        self.assertTrue(old['exists'])
+        self.assertEqual(old['name'], 'PAN_old_2.tif')
+
+    def test_canonical_repair_backup_beats_legacy(self):
+        d = self.make_scene()
+        make_strip_tif(d, 'PAN_old_latest.tif', 80, 40)
+        make_strip_tif(d, 'PAN_old_2.tif', 40, 20)
+        c = self.client()
+        row = self.resolve(c, d)
+        old = self.by_kind(self.q(c, row['id'], suffix='old'), 'product')
+        self.assertEqual(old['name'], 'PAN_old_latest.tif')
+        self.assertEqual((old['W'], old['H']), (80, 40))

@@ -127,7 +127,10 @@ def run(config, sr_script, gdal=None, execute=None):
         raise ValueError('Missing supported RepairMode')
     scene = Path(root.findtext('DatarootLQ')).resolve()
     pan = scene / 'PAN.tif'
-    backup = scene / 'PAN_old_2.tif'
+    # 新旧顺序：<完整生产名>_old（上一轮产物）→ PAN_old_latest（本次修复前）→
+    # PAN.tif（修复后）。旧平台写过的 PAN_old_2 只做只读兼容，不再新写。
+    backup = scene / 'PAN_old_latest.tif'
+    legacy_backups = (scene / 'PAN_old_2.tif',)
     raw_nosr = root.findtext('RepairNOSR')
     if not raw_nosr:
         raise ValueError('RepairNOSR is required; never infer from current PAN')
@@ -140,8 +143,9 @@ def run(config, sr_script, gdal=None, execute=None):
             raise ValueError('Missing repair input: ' + str(path))
     if os.path.samefile(str(pan), str(nosr)):
         raise ValueError('NOSR must not alias current PAN')
-    if backup.exists():
-        raise ValueError('Backup exists; refusing to overwrite ' + str(backup))
+    existing_backup = next((p for p in (backup,) + legacy_backups if p.exists()), None)
+    if existing_backup is not None:
+        raise ValueError('Backup exists; refusing to overwrite ' + str(existing_backup))
     expected = json.loads(root.findtext('RepairRevision') or '{}')
     for key, path in (('mask', mask), ('nosr', nosr)):
         if key in expected and signature(path)[:2] != expected[key][:2]:
@@ -208,8 +212,10 @@ def run(config, sr_script, gdal=None, execute=None):
         compose(gdal, pan, nosr, full_mask, verdict.output, candidate, work)
         if [signature(pan), signature(nosr), signature(mask)] != [pan_sig, nosr_sig, mask_sig]:
             raise ValueError('Repair input changed during inference; nothing published')
-        if backup.exists():
-            raise ValueError('Backup appeared during inference; nothing published')
+        existing_backup = next((p for p in (backup,) + legacy_backups if p.exists()), None)
+        if existing_backup is not None:
+            raise ValueError('Backup appeared during inference; nothing published: '
+                             + str(existing_backup))
         # Reserve backup without overwriting, then atomically replace current PAN.
         os.link(str(pan), str(backup))
         try:

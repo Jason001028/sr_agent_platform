@@ -2096,11 +2096,19 @@ def create_app() -> FastAPI:
         repaired = any((r.get('params') or {}).get('repair')
                        for r in _completed_rows_for_dir(request.app.state.store, scene_dir.as_posix())[:1])
         if inp is not None and suffix:
-            cands = ([scene_dir / 'PAN_old_2.tif'] + [scene_dir / (base + "_old" + ext)
-                      for base in dict.fromkeys([scene_dir.name, inp.stem])
-                      for ext in (".tif", ".tiff")] if suffix == "old"
-                     else ([scene_dir / 'PAN.tif'] if repaired and suffix_from != 'query'
-                           else scene_search.product_candidates(inp, suffix)))
+            if suffix == "old":
+                # 新旧顺序：<完整生产名>_old（上一轮产物）→ PAN_old_latest（本次
+                # 修复前）→ PAN.tif（修复后）。旧平台写过的 PAN_old_2 仍在候选里，
+                # 让已修复场景的 old 卡片不因改名消失；但新任务只写 PAN_old_latest。
+                cands = ([scene_dir / run_sr_svc.REPAIR_BACKUP_NAME]
+                         + [scene_dir / name
+                            for name in run_sr_svc.LEGACY_REPAIR_BACKUP_NAMES]
+                         + [scene_dir / (base + "_old" + ext)
+                            for base in dict.fromkeys([scene_dir.name, inp.stem])
+                            for ext in (".tif", ".tiff")])
+            else:
+                cands = ([scene_dir / 'PAN.tif'] if repaired and suffix_from != 'query'
+                         else scene_search.product_candidates(inp, suffix))
             cand_names = [c.name for c in cands]
             whitelist(cands, "产物")
             # 没有一个存在时回报第一个候选（`.tif`）并置 exists: false —— 报错口径

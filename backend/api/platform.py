@@ -1156,7 +1156,7 @@ async def submit_queue(request: Request):
             out["notice"] = (
                 f"场景目录 {params['lq_path']}：从同景完整生产名_NOSR.tif 计算，掩码内模型超分、掩码外插值，"
                 "保持当前 PAN 的尺寸与文件大小；校验后将旧 PAN.tif 备份为 "
-                "PAN_old_2.tif，新结果发布为 PAN.tif。备份已存在则停止。")
+                "PAN_old_latest.tif，新结果发布为 PAN.tif。备份已存在则停止。")
     return out
 
 

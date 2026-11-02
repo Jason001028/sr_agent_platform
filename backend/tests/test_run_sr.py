@@ -932,6 +932,14 @@ class TestSuffixResolution(unittest.TestCase):
                         f"<?xml version='1.0'?><SFSR_Config><Suffix>{bad}"
                         "</Suffix></SFSR_Config>")
                     self.assertEqual(svc.default_suffix(), "sr")
+            # 与平台/产线派生件同名的后缀同样视为不可用，回落而不是照写。
+            for reserved in ("old", "OLD", "old_latest", "NOSR", "ori", "mask"):
+                with self.subTest(value=reserved):
+                    write_bundle_cfg(
+                        self.bundle,
+                        f"<?xml version='1.0'?><SFSR_Config><Suffix>{reserved}"
+                        "</Suffix></SFSR_Config>")
+                    self.assertEqual(svc.default_suffix(), "sr")
 
     def test_normalize_suffix_covers_both_entries(self):
         with mock.patch.dict(os.environ, {"SR_BUNDLE_DIR": self.bundle}):
@@ -945,6 +953,12 @@ class TestSuffixResolution(unittest.TestCase):
                     with self.assertRaises(ValueError) as ctx:
                         svc.normalize_suffix(bad)
                     self.assertIn("suffix 非法", str(ctx.exception))
+            for reserved in ("old", "OLD", "old_latest", "NOSR", "ori", "mask",
+                             "cloud", "thumb", "preview"):
+                with self.subTest(value=reserved):
+                    with self.assertRaises(ValueError) as ctx:
+                        svc.normalize_suffix(reserved)
+                    self.assertIn("派生件重名", str(ctx.exception))
 
 
 class TestEntryPointParity(unittest.TestCase):

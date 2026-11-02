@@ -25,7 +25,7 @@ _DESC = (
     "异步提交 PAN 局部修复作业：以场景目录的 <目录名>_NOSR.tif 为低分输入，掩码内做模型 SR，"
     "掩码外用 NOSR 三次插值；不是任意影像的整图超分工具。"
     "适配器要求同景 PAN.tif、NOSR、掩码和 <目录名>_meta.xml，各栅格为单波段，PAN 与 NOSR 样本类型一致，PAN 为未压缩 TIFF，"
-    "NOSR 分辨率低于 PAN；校验候选尺寸和字节数与 PAN 一致后，将旧 PAN 备份为 PAN_old_2.tif 并发布新 PAN.tif，已有备份会拒绝执行。"
+    "NOSR 分辨率低于 PAN；校验候选尺寸和字节数与 PAN 一致后，将旧 PAN 备份为 PAN_old_latest.tif 并发布新 PAN.tif，已有备份会拒绝执行。"
     "lq_path 和显式 mask_path 经盘阵白名单及映射归一，拒绝 Fake 占位路径；掩码省略时推导路径，不退化成整图处理，缺文件可能在取得 job_id 后的作业内失败。"
     "提交会写任务记录、Tool Intent、XML 和批脚本，由 SR_EXECUTOR 选择本机进程或 Slurm；作业另写暂存文件、日志、回执和 PAN 文件。"
     "返回 job_id、status、idempotent、config_xml、batch_script、log_dir；SUBMITTED 是提交回执，RESUMED_ACTIVE/RESUMED_COMPLETED 表示复用。"

@@ -22,7 +22,8 @@ PAN repair uses original NOSR as model input; current PAN is the annotation and 
 Do not describe submitting SR as applying another enlargement to the latest PAN.
 The original is `<full-production-name>_PAN_NOSR.tif` in the scene directory.
 Model output is selected inside the mask, cubic NOSR interpolation outside.
-Publish an equally sized PAN.tif and retain the previous bytes as PAN_old_2.tif.
+Publish an equally sized PAN.tif and retain the previous bytes as PAN_old_latest.tif
+(the legacy PAN_old_2.tif is still read for scenes repaired before the rename).
 The 260318-suffixed inference product is intermediate, not the final public name.
 
 ### Metadata

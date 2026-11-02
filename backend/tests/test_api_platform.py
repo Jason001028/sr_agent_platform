@@ -636,7 +636,7 @@ class TestQueue(PlatformBase):
         self.assertTrue(body["in_place"])
         self.assertIn(self.LQ_POSIX, body["notice"])
         self.assertIn("PAN.tif", body["notice"])
-        self.assertIn("PAN_old_2.tif", body["notice"])
+        self.assertIn("PAN_old_latest.tif", body["notice"])
         self.assertIn("_NOSR.tif", body["notice"])
 
     def test_no_in_place_notice_when_sandboxed(self):

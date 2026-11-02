@@ -62,7 +62,7 @@ Skill 工具启用时保留在过滤后的列表中。`disable-model-invocation`
   掩码必须非空，尺寸匹配 PAN 或 NOSR。REST 在缺省掩码不存在时提前拒绝，Agent 工具没有同样的存在性预检，
   可能先提交，再在作业内失败；不存在自动整图回退。
 - PAN 修复固定读取 `<目录名>_NOSR.tif`，不能把普通场景解析器的其他 NOSR 候选当作适配器自动支持的输入。
-  适配器要求已有 PAN、NOSR、掩码及同景元数据，成功时备份 `PAN_old_2.tif` 并发布 `PAN.tif`。
+  适配器要求已有 PAN、NOSR、掩码及同景元数据，成功时备份 `PAN_old_latest.tif` 并发布 `PAN.tif`。
   已有备份会拒绝执行，暂存文件保留在 Debug 中供诊断。
 - `suffix` 首先取显式有效值，其次读生产配置，最后回退 `sr`；它控制内部推理与作业文件命名，
   最终发布仍是 `PAN.tif`。Schema 中 `default=""` 不代表实际向 SR 传空后缀。

@@ -2,7 +2,7 @@
 
 PAN 局部修复部署契约见 [pan_repair_contract.md](../docs/sr_code/pan_repair_contract.md)。
 后端更新包包含 `backend/` 与 `SR_code/variants/repair_sr.py`、`verify_sr_run.py`，须一并解压到应用根目录。
-适配层使用生产 SR Python 的 GDAL/NumPy，从完整生产名 `_NOSR.tif` 计算，旧 PAN 保留为 `PAN_old_2.tif`，新结果发布为 `PAN.tif`。
+适配层使用生产 SR Python 的 GDAL/NumPy，从完整生产名 `_NOSR.tif` 计算，旧 PAN 保留为 `PAN_old_latest.tif`，新结果发布为 `PAN.tif`。
 
 > 产物自包含、全离线，无任何 CDN/外网依赖。本包 = `dist/`（前端产物）+ `nginx.conf`
 > + `backend/`（FastAPI 平台 API）+ `sr-api.service`（systemd）+ `requirements-api.txt`

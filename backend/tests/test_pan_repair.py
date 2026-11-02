@@ -122,7 +122,7 @@ class TestPanRepair(unittest.TestCase):
         expected[3, 3] = 99
         np.testing.assert_array_equal(got, expected)
         self.assertEqual(self.pan.stat().st_size, len(old))
-        self.assertEqual((self.scene / 'PAN_old_2.tif').read_bytes(), old)
+        self.assertEqual((self.scene / 'PAN_old_latest.tif').read_bytes(), old)
         self.assertEqual(self.nosr.read_bytes(), original)
         self.assertEqual(self.meta.read_bytes(), metadata)
         self.assertFalse((self.scene / 'PAN_260318.tif').exists())
@@ -151,7 +151,7 @@ class TestPanRepair(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Missing repair input'):
             self.run_repair(lambda _: self.fail('inference must not run'))
         self.assertEqual(self.pan.read_bytes(), old)
-        self.assertFalse((self.scene / 'PAN_old_2.tif').exists())
+        self.assertFalse((self.scene / 'PAN_old_latest.tif').exists())
 
     def test_skipped_inference_is_not_a_successful_pan_repair(self):
         old = self.pan.read_bytes()
@@ -165,21 +165,44 @@ class TestPanRepair(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'no verified repair'):
             self.run_repair(skipped)
         self.assertEqual(self.pan.read_bytes(), old)
-        self.assertFalse((self.scene / 'PAN_old_2.tif').exists())
+        self.assertFalse((self.scene / 'PAN_old_latest.tif').exists())
 
     def test_existing_backup_is_preserved_without_running_inference(self):
-        backup = self.scene / 'PAN_old_2.tif'
+        backup = self.scene / 'PAN_old_latest.tif'
         backup.write_bytes(b'keep existing backup')
         with self.assertRaisesRegex(ValueError, 'Backup exists'):
             self.run_repair(lambda _: self.fail('inference must not run'))
         self.assertEqual(backup.read_bytes(), b'keep existing backup')
+
+    def test_legacy_backup_also_blocks_repair(self):
+        legacy = self.scene / 'PAN_old_2.tif'
+        legacy.write_bytes(b'legacy backup')
+        with self.assertRaisesRegex(ValueError, 'Backup exists'):
+            self.run_repair(lambda _: self.fail('inference must not run'))
+        self.assertEqual(legacy.read_bytes(), b'legacy backup')
+        self.assertFalse((self.scene / 'PAN_old_latest.tif').exists())
+
+    def test_verifier_accepts_legacy_backup_receipt(self):
+        """A repair queued before the rename writes PAN_old_2; verification after
+        the upgrade must still accept the receipt's declared legacy path."""
+        import json
+        self.run_repair()
+        canonical = self.scene / 'PAN_old_latest.tif'
+        legacy = self.scene / 'PAN_old_2.tif'
+        canonical.rename(legacy)
+        receipt = repair.receipt_path(self.config)
+        doc = json.loads(receipt.read_text(encoding='utf-8'))
+        doc['backup'] = str(legacy)
+        receipt.write_text(json.dumps(doc), encoding='utf-8')
+        verdict = verifier.check_contract(str(self.config), 0)
+        self.assertTrue(verdict.ok, verdict.reason_text)
 
     def test_wrong_model_dimensions_does_not_publish(self):
         old = self.pan.read_bytes()
         with self.assertRaisesRegex(ValueError, 'dimensions'):
             self.run_repair(lambda argv: self.inference(argv, size=(16, 16)))
         self.assertEqual(self.pan.read_bytes(), old)
-        self.assertFalse((self.scene / 'PAN_old_2.tif').exists())
+        self.assertFalse((self.scene / 'PAN_old_latest.tif').exists())
 
     def test_silent_inference_exit_is_not_success(self):
         old = self.pan.read_bytes()
@@ -193,7 +216,7 @@ class TestPanRepair(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.run_repair()
         self.assertEqual(self.pan.read_bytes(), old)
-        self.assertFalse((self.scene / 'PAN_old_2.tif').exists())
+        self.assertFalse((self.scene / 'PAN_old_latest.tif').exists())
 
     def test_repair_plan_and_script_and_mask_revision(self):
         tree = ET.fromstring(build_config_xml(self.params))
@@ -219,7 +242,7 @@ class TestPanRepair(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'input changed during inference'):
             self.run_repair(changed)
         self.assertEqual(self.pan.read_bytes(), old)
-        self.assertFalse((self.scene / 'PAN_old_2.tif').exists())
+        self.assertFalse((self.scene / 'PAN_old_latest.tif').exists())
 
     def test_empty_mask_is_rejected(self):
         tifffile.imwrite(self.mask, np.zeros((8, 8), dtype=np.uint8))
@@ -238,7 +261,7 @@ class TestPanRepairSceneApi(ResolveBase):
         d = self.make_scene(tif=False)
         make_strip_tif(d, 'PAN.tif', 80, 40)
         make_strip_tif(d, d.name + '_NOSR.tif', 40, 20)
-        make_strip_tif(d, 'PAN_old_2.tif', 80, 40)
+        make_strip_tif(d, 'PAN_old_latest.tif', 80, 40)
         c = self.client()
         response = c.post('/api/scenes/resolve', json={'path': self.win_path(d)})
         self.assertEqual(response.status_code, 200, response.text)
@@ -249,6 +272,32 @@ class TestPanRepairSceneApi(ResolveBase):
         siblings = c.get('/api/scenes/' + body['row']['id'] + '/siblings', params={'suffix': 'old'}).json()
         old = next(i for i in siblings['items'] if i['kind'] == 'product')
         nosr = next(i for i in siblings['items'] if i['kind'] == 'nosr')
-        self.assertEqual(old['name'], 'PAN_old_2.tif')
+        self.assertEqual(old['name'], 'PAN_old_latest.tif')
         self.assertEqual(nosr['name'], d.name + '_NOSR.tif')
         self.assertNotEqual(old['id'], body['row']['id'])
+
+    def test_legacy_backup_still_surfaces_as_old(self):
+        d = self.make_scene(tif=False)
+        make_strip_tif(d, 'PAN.tif', 80, 40)
+        make_strip_tif(d, d.name + '_NOSR.tif', 40, 20)
+        make_strip_tif(d, 'PAN_old_2.tif', 80, 40)
+        c = self.client()
+        row = c.post('/api/scenes/resolve', json={'path': self.win_path(d)}).json()['row']
+        old = next(i for i in c.get('/api/scenes/' + row['id'] + '/siblings',
+                                    params={'suffix': 'old'}).json()['items']
+                   if i['kind'] == 'product')
+        self.assertEqual(old['name'], 'PAN_old_2.tif')
+
+    def test_canonical_backup_preferred_over_legacy(self):
+        d = self.make_scene(tif=False)
+        make_strip_tif(d, 'PAN.tif', 80, 40)
+        make_strip_tif(d, d.name + '_NOSR.tif', 40, 20)
+        make_strip_tif(d, 'PAN_old_latest.tif', 80, 40)
+        make_strip_tif(d, 'PAN_old_2.tif', 40, 20)
+        c = self.client()
+        row = c.post('/api/scenes/resolve', json={'path': self.win_path(d)}).json()['row']
+        old = next(i for i in c.get('/api/scenes/' + row['id'] + '/siblings',
+                                    params={'suffix': 'old'}).json()['items']
+                   if i['kind'] == 'product')
+        self.assertEqual(old['name'], 'PAN_old_latest.tif')
+        self.assertEqual((old['W'], old['H']), (80, 40))

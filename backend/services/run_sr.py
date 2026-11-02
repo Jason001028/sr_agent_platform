@@ -120,6 +120,22 @@ BUNDLE_SUFFIX_CONFIG_NAMES = (
 SUFFIX_RE = re.compile(r"^[A-Za-z0-9_-]{1,16}$")
 SUFFIX_RULE = "只允许字母/数字/下划线/短横，长度 1..16"
 
+#: 修复前的 PAN 备份名。新旧顺序是
+#: `<完整生产名>_old.tif`（上一轮产物）→ `PAN_old_latest.tif`（本次修复前）→
+#: `PAN.tif`（修复后）；`latest` 直接表明它比 `_old` 新。固定一份，出现即拒绝
+#: 再次修复，见 docs/sr_code/pan_repair_contract.md。
+REPAIR_BACKUP_NAME = "PAN_old_latest.tif"
+
+#: 改名前的平台产出名，只读兼容：现场已经存在的旧备份仍要能被 /siblings 找到。
+#: 新任务不再写这个名字（2026-11-02 起）。
+LEGACY_REPAIR_BACKUP_NAMES = ("PAN_old_2.tif",)
+
+#: 与产线/平台派生件同名的后缀。它们作为产物后缀拼进 `<输入名>_<Suffix>.tif`
+#: 时会与 `_old` / `_NOSR` / `_ori` / `_mask` 等尾段撞车，明确拒绝，不静默改名。
+RESERVED_SUFFIXES = frozenset({
+    "old", "old_latest", "nosr", "ori", "mask", "cloud", "thumb", "preview",
+})
+
 
 def _posix_basename(path) -> str:
     """Last component of a *disk-array* path, on any host.
@@ -389,7 +405,7 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
         # (util.writeTiff). Say it in the log every single time (plan §4.2): the
         # log is what gets read when a run is being explained afterwards.
         *(['echo "PAN repair: NOSR input; ROI model SR, background cubic; '
-           'old PAN -> PAN_old_2.tif, verified result -> PAN.tif."'] if repair else []),
+           'old PAN -> PAN_old_latest.tif, verified result -> PAN.tif."'] if repair else []),
         *([] if (sandbox_src and sandbox_parent) or repair else [
             'echo "WARNING: no sandbox — SR runs in place: it writes'
             ' <input>_<suffix>.tif into the scene directory and leaves the input'
@@ -512,8 +528,9 @@ def read_bundle_suffix(bundle_dir=None, config_name=None) -> str | None:
 def default_suffix() -> str:
     """The <Suffix> a submit that carries none gets.
 
-    The file's value wins; anything unusable — file absent, unparseable, or a
-    value that fails SUFFIX_RE — falls back to DEFAULT_SUFFIX. A bad value is
+    The file's value wins; anything unusable — file absent, unparseable, a
+    value that fails SUFFIX_RE, or a reserved derived-file suffix (see
+    RESERVED_SUFFIXES) — falls back to DEFAULT_SUFFIX. A bad value is
     DISCARDED rather than sanitised: it gets spliced into an output file name,
     so a separator or shell character must never reach the pipeline.
 
@@ -527,7 +544,9 @@ def default_suffix() -> str:
     correct (it names different output files) and shows up on the queue row.
     """
     value = read_bundle_suffix()
-    return value if value and SUFFIX_RE.match(value) else DEFAULT_SUFFIX
+    if value and SUFFIX_RE.match(value) and value.lower() not in RESERVED_SUFFIXES:
+        return value
+    return DEFAULT_SUFFIX
 
 
 def normalize_suffix(value) -> str:
@@ -544,6 +563,10 @@ def normalize_suffix(value) -> str:
         return default_suffix()
     if not SUFFIX_RE.match(raw):
         raise ValueError(f"suffix 非法：{raw!r}（{SUFFIX_RULE}）")
+    if raw.lower() in RESERVED_SUFFIXES:
+        raise ValueError(
+            f"suffix 与平台/产线派生件重名：{raw!r}"
+            f"（保留：{'、'.join(sorted(RESERVED_SUFFIXES))}）")
     return raw
 
 

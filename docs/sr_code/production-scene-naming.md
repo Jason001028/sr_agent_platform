@@ -80,7 +80,25 @@ Windows 形态 `W:\GSHC2IMPS\PRODUCT\...`（`W:` 由 `SR_DRIVE_MAP` 映射到盘
   —— 表现为整批图 404「目录不存在」，名字看着却像是对的。补法是**把产品段追加到名字后面**
   再走本节的规则，段级名因此自动跟着对；补哪一段不写明时按 `_PAN` 处理。
 
-## 四、已知边界与待核
+## 四、派生件与修复备份命名
+
+生产目录里除输入影像外，还有产线与平台生成的派生件。名字必须让人能排出新旧顺序，
+并且不能与 `<输入名>_<Suffix>.tif` 产物重名。
+
+| 名字 | 含义 | 新旧顺序 |
+|---|---|---|
+| `<完整生产名>_old.tif` | 管线把上一轮产物改名为 old | 最旧 |
+| `PAN_old_latest.tif` | 平台 PAN 局部修复前的备份 | 比 `_old` 新 |
+| `PAN.tif` | 当前 PAN（修复后） | 最新 |
+
+- `PAN_old_latest.tif` 固定一份、排他创建；已存在即拒绝再次修复。
+- 改名前的平台旧名 `PAN_old_2.tif` 只读兼容，不再新写。
+- `old`、`old_latest`、`NOSR`、`ori`、`mask`、`cloud`、`thumb`、`preview`
+  为保留后缀，SR 产物后缀不得使用（唯一实现见
+  `backend/services/run_sr.py::RESERVED_SUFFIXES`）。
+- 修复语义、发布顺序与校验见 [pan_repair_contract.md](pan_repair_contract.md)。
+
+## 五、已知边界与待核
 
 - 「段级 = 景级去景号」这条关系目前只有**一组真机样本**支撑（第一节那组）。其它卫星、
   其它产品是否同样成立**待核**：`ls /DiskArray/GSHC2IMPS/PRODUCT/<年>/<月>/<日>/<卫星型号>/`
