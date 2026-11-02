@@ -493,6 +493,8 @@ sr_agent_platform/
 | [p0-gap-review.md](status/p0-gap-review.md) | 2026-11-02 对 Harness P0 计划的逐项差距复核与测试基线 |
 | [batch-pr-ab.md](status/batch-pr-ab.md) | 旧版批量修复计划 PR A/B：修复契约夹具、Manifest 冻结、原子 Goal/Items 与验收 |
 | [batch-pr-c.md](status/batch-pr-c.md) | PR C Producer / Monitor：异步切片、执行隔离、提交幂等与容量、暂停后监控、事件契约 |
+| [batch-pr-d.md](status/batch-pr-d.md) | PR D Detector / MaskBuilder：窗口读取、Predictor、Mask 契约、Overlay 读路径与查看器叠加层 |
+| [batch-pr-e.md](status/batch-pr-e.md) | PR E SR 提交/监控/分层验证：Intent 对账、查询退避、五层 Verifier 与 50 景 Fake SR 验收 |
 | [goal_clarification.md](status/goal_clarification.md) | Goal 澄清、WAITING_USER、原子回答/恢复、崩溃窗口与实测验收 |
 | [runtime_status.md](status/runtime_status.md) | 每次模型请求的临时运行状态、计数口径、注入边界与测试 |
 | [spotlight-focus.md](status/spotlight-focus.md) | 《待修复清单》选中行驱动的左侧场景聚焦遮罩：层级、坐标、镂空分块、三档与验证 |

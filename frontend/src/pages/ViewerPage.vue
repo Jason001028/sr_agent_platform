@@ -21,6 +21,7 @@ import TifCanvas from '../components/TifCanvas.vue';
 import ViewerEmptyState from '../components/ViewerEmptyState.vue';
 import DrawPanel from '../components/DrawPanel.vue';
 import CompareOverlay from '../components/CompareOverlay.vue';
+import BatchDetectionOverlay from '../components/BatchDetectionOverlay.vue';
 import DecodeOverlay from '../components/DecodeOverlay.vue';
 import ContextPanel from '../components/ContextPanel.vue';
 import NoticeModal from '../components/NoticeModal.vue';
@@ -52,6 +53,7 @@ onUnmounted(() => viewer.hideModal());
         <ViewerEmptyState />
         <DrawPanel />
         <CompareOverlay />
+        <BatchDetectionOverlay />
         <DecodeOverlay />
       </TifCanvas>
       <ContextPanel />

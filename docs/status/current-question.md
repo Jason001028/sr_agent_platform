@@ -16,7 +16,7 @@
 
 普通聊天 SSE 的执行所有权、断线行为、异常用量与诊断边界见 [sse_execution_ownership.md](sse_execution_ownership.md)。Goal 进程级验收尚有未关闭失败，详见该文档。
 
-Durable Goal Runtime 的执行、恢复和验收说明见 [durable_goal_runtime.md](durable_goal_runtime.md)。Goal 使用有限 Round、Lease Token Fencing 和服务端独立验收；SR 终态回灌后继续模型决策。真实模型与内网 SR/GPU 验收待核。2026-11-02 对 P0 逐项的差距复核见 [p0-gap-review.md](p0-gap-review.md)。旧版批量修复计划的 PR A/B 实施记录见 [batch-pr-ab.md](batch-pr-ab.md)；PR C（Producer / Monitor）后端与测试已实施，见 [batch-pr-c.md](batch-pr-c.md)，演示入口与 Panel 归 PR F。2026-11-02 复审后已补：提交边界重新核对冻结输入与掩码、未决容量耗尽的批次收口、暂停批次 Monitor 查询窗口；重启完成超时定位为夹具 RC/SC 与修复回执不一致并修正；组合套件中 `test_durable_model_request_timeout_and_sdk_retries_obey_slice` 的偶发失败定位为 httpcore 首调用惰性导入（约 0.2s）落在 0.25s 轮次预算内，已在 `async_transport.py` 的请求计时外预热，未改测试断言。复跑六套件 189 passed。A/B 的混合调度饿死、Manifest 完整性、BOM 非法 UTF-8、旧 Batch 行 `kind` 回填均已修复并补回归；重启验收 `external_job_terminal` 实际 1 的差异已定位为测试只读事件第一页（500 行）导致的截断观察，改为分页读全量、原 `== 2` 断言保留，targeted 164 项通过。
+Durable Goal Runtime 的执行、恢复和验收说明见 [durable_goal_runtime.md](durable_goal_runtime.md)。Goal 使用有限 Round、Lease Token Fencing 和服务端独立验收；SR 终态回灌后继续模型决策。真实模型与内网 SR/GPU 验收待核。2026-11-02 对 P0 逐项的差距复核见 [p0-gap-review.md](p0-gap-review.md)。旧版批量修复计划的 PR A/B 实施记录见 [batch-pr-ab.md](batch-pr-ab.md)；PR C（Producer / Monitor）后端与测试已实施，见 [batch-pr-c.md](batch-pr-c.md)，演示入口与 Panel 归 PR F。PR D1/D2 已实施并通过第三轮复审：Predictor=2 逐像素还原、复核前后双采集输入身份、NaN NoData 严格 JSON 三项补修均通过；Overlay 只读 API 与查看器叠加层已落地（D3 其余部分仍归后续），详见 [batch-pr-d.md](batch-pr-d.md)。PR E（SR 提交/监控/分层验证）已实施：五层 Verifier、查询失败有界退避与停放、50 景 Fake SR 验收（重复提交 0、未验证成功 0），demo 成功仍只标 `demo_contract`/`provenance=mock`，production 提交门未开放，详见 [batch-pr-e.md](batch-pr-e.md)；PR F 待推进。2026-11-02 复审后已补：提交边界重新核对冻结输入与掩码、未决容量耗尽的批次收口、暂停批次 Monitor 查询窗口；重启完成超时定位为夹具 RC/SC 与修复回执不一致并修正；组合套件中 `test_durable_model_request_timeout_and_sdk_retries_obey_slice` 的偶发失败定位为 httpcore 首调用惰性导入（约 0.2s）落在 0.25s 轮次预算内，已在 `async_transport.py` 的请求计时外预热，未改测试断言。复跑六套件 189 passed。A/B 的混合调度饿死、Manifest 完整性、BOM 非法 UTF-8、旧 Batch 行 `kind` 回填均已修复并补回归；重启验收 `external_job_terminal` 实际 1 的差异已定位为测试只读事件第一页（500 行）导致的截断观察，改为分页读全量、原 `== 2` 断言保留，targeted 164 项通过。
 
 Goal 澄清已接入：`request_clarification → WAITING_USER → 回答入库 → 同一 Goal 重新入队`，请求与回答均有事务及故障恢复。接口、23 项专项测试、浏览器闭环与全量回归剩余失败见 [goal_clarification.md](goal_clarification.md)；真实模型效果待验收。
 
@@ -191,7 +191,8 @@ Agent 中文交互、执行概览、自动中文标题与手动改名见 [agent-
   [deploy/README.md](../../deploy/README.md) §四 的 `/preview` 一条自查（`ct` 必须是 `application/json`）。
 - **浏览器 e2e 可用**：`.e2e/launchBrowser.js`（puppeteer-core + 无头浏览器，每次使用独立的临时配置目录）。
   候选顺序 **Chrome 优先** —— 本机 Edge 与正在运行的 Edge 实例握手会 `Code: 0` 闪退；
-  换浏览器设 `SR_E2E_BROWSER`。
+  换浏览器设 `SR_E2E_BROWSER`。批量检测叠加层回归：先 `cd frontend && npm run build`，
+  再 `cd .e2e && node test-batch-overlay.js`（`npm run test:batch-overlay` 同义）。
 
 ## 6. 现值速查
 
@@ -317,6 +318,32 @@ Agent 中文交互、执行概览、自动中文标题与手动改名见 [agent-
   `node .e2e/test-spotlight-focus.js`。
 
 ### 6.3 测试基线
+
+**2026-11-02（PR D 复审通过 + PR E 实施，最新）**：
+
+- 后端目标套件：`test_batch_artifacts.py` + `test_batch_worker.py` + `test_batch_manifest.py`
+  **117 passed**（57 + 46 + 14），28.74s。
+- 后端全量：**1293 passed / 7 skipped / 195 subtests passed**，另有 **5 个既有失败**，全部在
+  `backend/tests/test_agent_loop.py` 的 `thinking_status` 事件顺序断言；`main` @ `1f6d49d` 上同样复现，
+  `backend/agent` 与该测试文件无本轮改动，属既有问题。
+- PR D 第三轮补修专项：Deflate+Predictor=2 的 8×4 uint16 与 Pillow 独立解码逐像素一致且不再误报平列；
+  PAN/NOSR/Mask/备份在 `verify_mask` 期间变化均 `BLOCKED`、零提交零预约；float32 `nan` NoData
+  从检测、Mask、`overlay.json` 到 Overlay HTTP 200 全程 `allow_nan=False` 可序列化。复审已通过。
+- PR E 专项：五层 Verifier（提交/终止/执行契约/产物/质量）区分 `demo_contract` 与
+  `production_contract`，demo 的契约/产物/质量层为 `not_applicable`、production 质量层为
+  `unverified` 且提交门仍关闭；非零退出码不算成功；查询失败首次 + 3 次重试（1/2/4s）后停放，
+  成功一次清零；3 景中 1 景失败时其余 2 景仍成功；取消后迟到的检测结果不覆盖 `SKIPPED`。
+- PR E 50 景 Fake SR 验收：真实 `submit_run_sr` + 内存 Fake 调度器（无 mock 提交/查询），
+  观察到并发等待与独立完成；50 景全部接受后仅凭账本重启并收敛；物理提交 = 指纹 = 不同
+  Job ID = 50，完成后继续 tick 不再新增；所有成功均为 `provenance=mock`/`demo_contract` 且
+  `failed_layers=[]`，`model_calls_used=0`、`rounds_used=0`。
+- P1 1 内存证据：子进程固定 32 行窗口，8192 宽单条带 8192×4096 与 8192×8192 峰值均约 34.5 MiB；
+  第三轮复审另测 30000×30000 峰值 39.90 MiB（修复前 901.34 MiB）。
+- 前端：本轮未改前端逻辑，沿用 **628 passed / 43 files**（`npm test`，自动跑 `check:terms`，通过）；
+  `npm run typecheck` 零错误；`npm run build` 通过。
+- 浏览器回归：本轮未改查看器逻辑，`test-batch-overlay.js` 沿用上一轮通过结果。
+- PR D 已通过复审并关闭；PR E 只证明 demo/Fake SR 链路，不证明真实 SR/GPU 修复质量，
+  production 批量执行仍被拒绝。详见 [batch-pr-d.md](batch-pr-d.md)、[batch-pr-e.md](batch-pr-e.md)。
 
 **2026-10-20 全套重跑（全部绿）**：
 

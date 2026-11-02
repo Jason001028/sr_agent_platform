@@ -35,7 +35,12 @@ Event contract (stable for PR F)
 All state changes and their events share one Store transaction:
 
 ``item_state_changed``       item_id, item_version, attempt, from, to
-``mask_ready``               item_id, path, sha256, width, height, provenance
+``mask_ready``               item_id, path, sha256, width, height, spp,
+                             foreground_pixels, provenance, contract_version,
+                             coordinate_space, dtype, candidate_count,
+                             builder_name, builder_version, detector_name,
+                             detector_version, detection_contract_version,
+                             overlay {path, sha256, width, height, scale}
 ``sr_submission_reserved``   item_id, intent_key, fingerprint, attempt
 ``sr_receipt_recorded``      item_id, job_id, fingerprint, status, recovered
 ``external_job_terminal``    item_id, job_id, state, exit_code, provenance
@@ -63,9 +68,11 @@ import uuid
 
 from backend.config import sr_runtime
 from backend.pathguard import PathDeniedError, ensure_allowed, normalize_submit_path
-from backend.services import batch_detector, batch_manifest, batch_mask, preview_jpg
+from backend.services import (
+    batch_contracts, batch_detector, batch_manifest, batch_mask, preview_jpg)
 from backend.services import run_sr as sr_service
-from backend.services.goal_lease import GoalLease, current_lease, current_tool
+from backend.services.goal_lease import (
+    GoalLease, LeaseLost, current_lease, current_tool)
 
 EVT_ITEM_STATE = "item_state_changed"
 EVT_MASK_READY = "mask_ready"
@@ -86,6 +93,18 @@ PRE_SUBMIT = {"PENDING", "RETRY_WAIT", "OPENING", "DETECTING", "MASK_READY"}
 
 MAX_UNKNOWN_CHECKS = 3
 MAX_DETECTION_ATTEMPTS = 3
+# K4: a read-only status query gets the first attempt plus three retries
+# (1s / 2s / 4s backoff); a fourth consecutive failure parks the Item.
+MAX_MONITOR_QUERY_FAILURES = 4
+
+# Verification layers (E3).  ``passed`` is the only state that can contribute
+# to a success verdict; ``not_applicable`` records what this execution mode
+# cannot prove, and ``unverified`` explicitly refuses a success verdict.
+LAYER_PASSED = "passed"
+LAYER_FAILED = "failed"
+LAYER_SKIPPED = "skipped"
+LAYER_NOT_APPLICABLE = "not_applicable"
+LAYER_UNVERIFIED = "unverified"
 
 
 class BatchConfigError(RuntimeError):
@@ -165,8 +184,8 @@ def ensure_execution_allowed(mode):
     runtime = sr_runtime()
     if mode == "production":
         raise BatchGateError(
-            "production batch execution is not enabled in PR C "
-            "(real Detector/Verifier arrives in PR D/F)")
+            "production batch execution is not enabled yet "
+            "(real Detector/Verifier arrives in a later PR)")
     if mode != "demo":
         raise BatchGateError(f"unsupported batch mode: {mode!r}")
     if runtime.executor != "slurm":
@@ -208,17 +227,46 @@ def _io_key(goal_id, item):
     return f"{goal_id}:{item['item_id']}:{item['version']}"
 
 
+def _detection_provenance_gate(detection, mode):
+    """Keep MockDetector results out of production.
+
+    The detector contract already carries ``provenance``; this gate is the
+    worker-side check so a patched/future detector cannot claim a real result by
+    flipping one field.  Demo may exercise the real, deterministic TIFF
+    detector (there is no GPU or external side effect); it still records the
+    truthful provenance, so a demo result is never reported as production.
+    A mismatch is a deterministic configuration error, not a transient IO
+    failure.
+    """
+    provenance = detection.get("provenance")
+    if provenance not in ("mock", "real"):
+        raise batch_detector.DetectionError(
+            f"未知检测 provenance：{provenance!r}")
+    if mode == "production" and provenance == "mock":
+        raise batch_detector.DetectionError(
+            "production 批次拒绝 MockDetector 结果")
+
+
 def _detection_job(snapshot):
-    detection = batch_detector.detect(snapshot["target_image"])
+    target = snapshot["target_image"]
+    mode = snapshot.get("mode") or "demo"
+    # Keep the single positional argument: existing tests patch ``detect`` with
+    # a one-argument wrapper, and the real detector reads the frozen reference
+    # from ``target_image["reference_image"]``.
+    detection = batch_detector.detect(target)
+    _detection_provenance_gate(detection, mode)
     candidates = detection.get("candidates") or []
     if not candidates:
         return {"detection": detection, "mask": None}
-    mask = batch_mask.build_mask(
-        snapshot["mask_path"],
-        width=snapshot["target_image"]["width"],
-        height=snapshot["target_image"]["height"],
-        candidates=candidates,
-        provenance=detection.get("provenance") or "mock",
+    mask = batch_mask.build_mask_result(
+        detection,
+        target,
+        {
+            "path": snapshot["mask_path"],
+            "execution_mode": mode,
+            "rows_per_strip": snapshot.get("rows_per_strip"),
+            "overlay_max_edge": snapshot.get("overlay_max_edge"),
+        },
     )
     return {"detection": detection, "mask": mask}
 
@@ -232,6 +280,8 @@ def _ensure_io_executor(state):
         state.batch_io_executor = executor
     if not hasattr(state, "batch_io_jobs"):
         state.batch_io_jobs = {}
+    if not hasattr(state, "batch_submit_jobs"):
+        state.batch_submit_jobs = {}
     return executor
 
 
@@ -288,23 +338,38 @@ def _start_detection(state, goal, item, lease, cfg):
     """Record DETECTING and hand detection+Mask to the IO executor."""
     cp = dict(item["checkpoint"])
     cp["phase"] = "DETECTING"
-    cp["detection_round"] = int(cp.get("detection_round") or 0) + 1
-    round_no = cp["detection_round"]
+    # A restart replays a DETECTING item with the same round: detection is
+    # read-only, and ``build_mask_result`` validates/reuses an already
+    # published bundle for that round instead of orphaning it.  A semantic
+    # retry (OPENING after RETRY_WAIT) gets a fresh round.
+    round_no = int(cp.get("detection_round") or 0)
+    if item["status"] != "DETECTING" or round_no <= 0:
+        round_no += 1
+    cp["detection_round"] = round_no
     updated = state.store.transition_goal_item(
         goal["goal_id"], step_id=item["step_id"],
         expected_version=item["version"], status="DETECTING",
         lease_token=lease.token, checkpoint=cp, next_wake_at=time.time())
     if not updated:
         return False
+    target = dict(cp.get("target_image") or {})
+    target["item_id"] = item["item_id"]
+    target["reference_image"] = cp.get("reference_image")
+    item_config = cp.get("config") or {}
     snapshot = {
         "goal_id": goal["goal_id"],
         "item_id": item["item_id"],
         "version": updated["version"],
         "attempt": int(cp.get("attempt") or 0),
         "scene_ref": cp.get("scene_ref"),
-        "target_image": cp.get("target_image"),
+        "target_image": target,
         "reference_image": cp.get("reference_image"),
         "mask_path": _mask_path(goal["goal_id"], item["item_id"], round_no).as_posix(),
+        # The mode is frozen on the Goal checkpoint at import time; a resumed
+        # item must not silently switch between demo and production.
+        "mode": (goal.get("checkpoint") or {}).get("mode") or "demo",
+        "rows_per_strip": item_config.get("mask_rows_per_strip"),
+        "overlay_max_edge": item_config.get("mask_overlay_max_edge"),
     }
     executor = _ensure_io_executor(state)
     try:
@@ -401,6 +466,17 @@ def _collect_detections(state, goal, lease, cfg, *, allow_write=True):
             "height": mask["height"], "spp": mask["spp"],
             "foreground_pixels": mask["foreground_pixels"],
             "provenance": mask.get("provenance"),
+            "contract_version": mask.get("contract_version"),
+            "coordinate_space": mask.get("coordinate_space"),
+            "dtype": mask.get("dtype"),
+            "candidate_count": mask.get("candidate_count"),
+            "builder_name": mask.get("builder_name"),
+            "builder_version": mask.get("builder_version"),
+            "detector_name": mask.get("detector_name"),
+            "detector_version": mask.get("detector_version"),
+            "detection_contract_version": mask.get(
+                "detection_contract_version"),
+            "overlay": mask.get("overlay"),
         }
         state.store.transition_goal_item(
             gid, step_id=item["step_id"], expected_version=item["version"],
@@ -432,6 +508,10 @@ def _produce_one(state, goal, lease, cfg):
     items = store.list_goal_items(gid)
     now = time.time()
 
+    prepared = _collect_submit_preparation(state, goal, lease, cfg)
+    if prepared is not None:
+        return prepared
+
     opening = next((i for i in items if i["status"] == "OPENING"), None)
     if opening:
         return _advance_open(state, goal, opening, lease, cfg)
@@ -452,7 +532,7 @@ def _produce_one(state, goal, lease, cfg):
             (i for i in items if i["status"] == "MASK_READY"
              and (i["next_wake_at"] is None or i["next_wake_at"] <= now)), None)
     if ready:
-        return _submit_ready(state, goal, ready, lease, cfg)
+        return _start_submit_preparation(state, goal, ready, lease, cfg)
 
     prepared = sum(1 for i in items if i["status"] in PREPARING)
     if prepared >= cfg["max_prepared_items"]:
@@ -476,6 +556,199 @@ def _produce_one(state, goal, lease, cfg):
     return _advance_open(state, goal, updated, lease, cfg)
 
 
+def _submit_prepare_key(goal_id, item):
+    return f"prepare:{goal_id}:{item['item_id']}:{item['version']}"
+
+
+def _file_identity(path):
+    """Path + size + mtime_ns + revision of one frozen submission input."""
+    if not path:
+        raise ItemBlocked("提交前复核缺少输入文件路径")
+    stat = os.stat(path)
+    return {
+        "path": Path(path).as_posix(),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "revision": preview_jpg.source_revision(path),
+    }
+
+
+def _backup_names(scene_ref):
+    """Names of PAN backups that must still be absent at the commit boundary."""
+    if not scene_ref:
+        raise ItemBlocked("提交前复核缺少场景目录")
+    scene = Path(scene_ref)
+    return sorted(
+        backup.name
+        for backup in (scene / "PAN_old_latest.tif", scene / "PAN_old_2.tif")
+        if backup.exists())
+
+
+_INPUT_LABELS = {
+    "pan": "PAN", "nosr": "NOSR", "mask": "掩码", "backups": "PAN 备份",
+}
+
+
+def _input_identities(cp):
+    """Capture every input that the submit boundary verified.
+
+    The Mask identity alone is not enough: PAN/NOSR can be replaced, or a PAN
+    backup can appear, while the async preparation result waits for the commit
+    step.  The commit re-stats all of them before reserving capacity.
+    """
+    target = cp.get("target_image") or {}
+    reference = cp.get("reference_image") or {}
+    mask = cp.get("mask") or {}
+    return {
+        "pan": _file_identity(target.get("path")),
+        "nosr": _file_identity(reference.get("path")),
+        "mask": _file_identity(mask.get("path")),
+        "backups": _backup_names(cp.get("scene_ref")),
+    }
+
+
+def _capture_identities(cp):
+    """``_input_identities`` with IO errors turned into a blocking item fact."""
+    try:
+        return _input_identities(cp)
+    except OSError as exc:
+        raise ItemBlocked(
+            f"提交前读取输入身份失败：{type(exc).__name__}: {exc}") from exc
+
+
+def _changed_inputs(before, after):
+    """Labels of inputs whose captured identity differs between two reads."""
+    return [
+        label for key, label in _INPUT_LABELS.items()
+        if (before or {}).get(key) != (after or {}).get(key)
+    ]
+
+
+def _prepare_submission(snapshot):
+    """Read-only submit-boundary verification, run on the IO executor.
+
+    This is the expensive re-check (PAN/NOSR revision + full streaming Mask
+    verification).  It must not run on the scheduler thread: a large mask would
+    delay every SR status query behind it.
+
+    Input identities are captured *before* the verification as well as after
+    it.  The verification itself can take long enough for PAN/NOSR/Mask to be
+    replaced while ``verify_mask`` is decoding, so an after-only snapshot would
+    bless the replacement as the baseline.  A drift between the two captures
+    blocks here; the commit step then compares the post-verification snapshot
+    against the current files once more, covering the wait for the lease.
+    """
+    item = snapshot["item"]
+    cp = item.get("checkpoint") or {}
+    before = _capture_identities(cp)
+    _verify_submission_inputs(item, snapshot["mode"])
+    # Re-prove the frozen revisions after the long Mask scan: a PAN/NOSR swap
+    # or a new PAN backup during verification must not be adopted silently.
+    try:
+        _open_item(cp)
+    except ItemBlocked:
+        raise
+    except Exception as exc:  # noqa: BLE001 — any IO fact becomes an item fact
+        raise ItemBlocked(
+            f"提交前复核输入失败：{type(exc).__name__}: {exc}") from exc
+    params = _submit_params(item)
+    inputs = _capture_identities(cp)
+    changed = _changed_inputs(before, inputs)
+    if changed:
+        raise ItemBlocked(
+            "、".join(changed) + " 在复核期间发生变化，拒绝提交")
+    return {
+        "params": params,
+        "mask_path": inputs["mask"]["path"],
+        "inputs": inputs,
+    }
+
+
+def _block_item(state, goal, item, lease, reason):
+    cp = dict(item["checkpoint"])
+    cp["phase"] = "BLOCKED"
+    state.store.transition_goal_item(
+        goal["goal_id"], step_id=item["step_id"],
+        expected_version=item["version"], status="BLOCKED",
+        lease_token=lease.token, checkpoint=cp, error=reason,
+        capacity_reserved=0)
+    return False
+
+
+def _start_submit_preparation(state, goal, item, lease, cfg):
+    executor = _ensure_io_executor(state)
+    key = _submit_prepare_key(goal["goal_id"], item)
+    snapshot = {
+        "item": item,
+        "mode": (goal.get("checkpoint") or {}).get("mode") or "demo",
+    }
+    try:
+        future = executor.submit(_prepare_submission, snapshot)
+    except Exception as exc:  # executor shutdown is a worker bug, not an item fact
+        return _block_item(
+            state, goal, item, lease,
+            f"提交前复核任务启动失败：{type(exc).__name__}: {exc}")
+    state.batch_submit_jobs[key] = {
+        "future": future,
+        "started": time.monotonic(),
+        "goal_id": goal["goal_id"],
+        "item_id": item["item_id"],
+        "version": item["version"],
+    }
+    return True
+
+
+def _finish_submit_preparation(state, goal, item, lease, cfg, record):
+    future = record["future"]
+    error = future.exception()
+    if error is not None:
+        reason = f"提交前复核失败：{type(error).__name__}: {error}"
+        if isinstance(error, ItemBlocked):
+            reason = str(error)
+        return _block_item(state, goal, item, lease, reason)
+    return _submit_ready(state, goal, item, lease, cfg, future.result())
+
+
+def _collect_submit_preparation(state, goal, lease, cfg):
+    """Advance one goal's pending submit preparation without blocking."""
+    jobs = getattr(state, "batch_submit_jobs", None) or {}
+    gid = goal["goal_id"]
+    for key, record in list(jobs.items()):
+        if record["goal_id"] != gid:
+            continue
+        current = state.store.get_goal_item(gid, record["item_id"])
+        if (not current or current["version"] != record["version"]
+                or current["status"] != "MASK_READY"):
+            jobs.pop(key, None)
+            record["future"].cancel()
+            return False
+        future = record["future"]
+        if not future.done():
+            if (time.monotonic() - record["started"]
+                    <= cfg["detection_timeout_sec"]):
+                return False
+            jobs.pop(key, None)
+            future.cancel()
+            # Read-only verification can be replayed; back off instead of
+            # spinning on the same large/broken Mask every scheduler pass.
+            failures = int(
+                (current["checkpoint"] or {}).get("submit_prepare_failures")
+                or 0) + 1
+            cp = dict(current["checkpoint"])
+            cp["submit_prepare_failures"] = failures
+            cp["last_submit_prepare_error"] = "提交前复核超时"
+            state.store.transition_goal_item(
+                gid, step_id=current["step_id"],
+                expected_version=current["version"], status="MASK_READY",
+                lease_token=lease.token, checkpoint=cp,
+                next_wake_at=time.time() + min(30, 2 ** (failures - 1)))
+            return False
+        jobs.pop(key, None)
+        return _finish_submit_preparation(state, goal, current, lease, cfg,
+                                         record)
+    return None
+
+
 def _submit_params(item):
     cp = item["checkpoint"]
     mask = cp.get("mask") or {}
@@ -496,7 +769,7 @@ def _submit_params(item):
     })
 
 
-def _verify_submission_inputs(item):
+def _verify_submission_inputs(item, mode="demo"):
     """Re-check the frozen PAN/NOSR and Mask at the submit boundary.
 
     ``_open_item`` runs before detection; a ``MASK_READY`` item can still wait
@@ -507,6 +780,7 @@ def _verify_submission_inputs(item):
     """
     cp = item["checkpoint"]
     target = cp.get("target_image") or {}
+    detection = cp.get("detection") or {}
     mask = cp.get("mask") or {}
     try:
         _open_item(cp)
@@ -519,6 +793,30 @@ def _verify_submission_inputs(item):
         raise ItemBlocked("MASK_READY 项缺少掩码工件")
     if target.get("width") is None or target.get("height") is None:
         raise ItemBlocked("MASK_READY 项缺少冻结的 PAN 尺寸")
+    # The mask on disk can satisfy the byte-level check while the checkpoint
+    # describes a mask produced under an older/incompatible contract.  Reject
+    # the mismatch before spending a capacity slot.
+    if detection.get("contract_version") != (
+            batch_contracts.DETECTION_CONTRACT_VERSION):
+        raise ItemBlocked("检测结果契约版本缺失或过期")
+    if detection.get("item_id") != item["item_id"]:
+        raise ItemBlocked("检测结果 item_id 与当前项不一致")
+    if mask.get("contract_version") != batch_contracts.MASK_CONTRACT_VERSION:
+        raise ItemBlocked("掩码契约版本缺失或过期")
+    if mask.get("coordinate_space") != batch_contracts.COORDINATE_SPACE:
+        raise ItemBlocked("掩码坐标空间不是 source_pixel")
+    if mask.get("dtype") != batch_contracts.MASK_DTYPE:
+        raise ItemBlocked("掩码数据类型不是 uint8")
+    if mask.get("item_id") != item["item_id"]:
+        raise ItemBlocked("掩码 item_id 与当前项不一致")
+    # The mask inherits the detector provenance.  Re-check it at the boundary
+    # so a resumed/tampered checkpoint cannot carry a mock mask into a
+    # production submission, or a mask whose provenance disagrees with the
+    # detection it claims to rasterize.
+    if mask.get("provenance") != detection.get("provenance"):
+        raise ItemBlocked("掩码 provenance 与检测结果不一致")
+    if mode == "production" and mask.get("provenance") == "mock":
+        raise ItemBlocked("production 批次拒绝 Mock 掩码")
     try:
         artifact_root = batch_manifest.artifact_root().resolve()
         mask_path = Path(mask["path"]).resolve()
@@ -537,22 +835,43 @@ def _verify_submission_inputs(item):
         raise ItemBlocked("掩码前景像素数与冻结值不一致")
 
 
-def _submit_ready(state, goal, item, lease, cfg):
+def _submit_ready(state, goal, item, lease, cfg, prepared):
+    """Commit a prepared submission: re-check fences, then reserve+submit.
+
+    The expensive mask verification already ran on the IO executor.  This
+    function is the short commit window: it re-checks the Goal lease, the Item
+    version, and the PAN/NOSR/Mask/backup identities captured by that
+    verification, then performs the capacity reservation and external submit.
+    No other pass can modify this Item meanwhile (same serialized goal pass),
+    and the CAS reservation is the final fence.
+    """
     store = state.store
     gid = goal["goal_id"]
-    work_root = ensure_execution_allowed(
-        (goal["checkpoint"] or {}).get("mode") or "demo")
-    try:
-        _verify_submission_inputs(item)
-        params = _submit_params(item)
-    except ItemBlocked as exc:
-        cp = dict(item["checkpoint"])
-        cp["phase"] = "BLOCKED"
-        store.transition_goal_item(
-            gid, step_id=item["step_id"], expected_version=item["version"],
-            status="BLOCKED", lease_token=lease.token, checkpoint=cp,
-            error=str(exc), capacity_reserved=0)
+    mode = (goal["checkpoint"] or {}).get("mode") or "demo"
+    lease.check(store)
+    current = store.get_goal_item(gid, item["item_id"])
+    if (not current or current["version"] != item["version"]
+            or current["status"] != "MASK_READY"):
         return False
+    try:
+        identities = _input_identities(current["checkpoint"] or {})
+    except (OSError, ItemBlocked) as exc:
+        return _block_item(
+            state, goal, current, lease,
+            f"提交前输入文件不可读：{type(exc).__name__}: {exc}")
+    prepared_inputs = prepared.get("inputs") or {}
+    changed = _changed_inputs(identities, prepared_inputs)
+    if changed:
+        return _block_item(
+            state, goal, current, lease,
+            "、".join(changed)
+            + " 在复核后发生变化，拒绝按旧复核结果提交")
+    work_root = ensure_execution_allowed(mode)
+    try:
+        params = prepared["params"]
+    except KeyError as exc:  # pragma: no cover — programming error
+        return _block_item(
+            state, goal, current, lease, f"复核结果缺少参数：{exc}")
     fingerprint = sr_service.task_fingerprint(params)
     attempt = _item_attempt(item) + 1
     intent_key = f"batch:{gid}:{item['item_id']}:a{attempt}:{fingerprint}"
@@ -673,64 +992,260 @@ def _reconcile_submitting(state, goal, lease):
 # monitor
 # ---------------------------------------------------------------------------
 
+def _success_scope(mode):
+    return "demo_contract" if mode == "demo" else "production_contract"
+
+
+def _record_monitor_failure(state, goal, item, lease, exc):
+    """Bound a failing read-only status query; park after K4's budget."""
+    store = state.store
+    cp = dict(item["checkpoint"])
+    failures = int(cp.get("monitor_failures") or 0) + 1
+    cp["monitor_failures"] = failures
+    cp["last_monitor_error"] = f"{type(exc).__name__}: {exc}"
+    if failures >= MAX_MONITOR_QUERY_FAILURES:
+        cp["phase"] = "BLOCKED"
+        cp["sr_status"] = "UNKNOWN"
+        return store.transition_goal_item(
+            goal["goal_id"], step_id=item["step_id"],
+            expected_version=item["version"], status="BLOCKED",
+            lease_token=lease.token, checkpoint=cp,
+            error=(f"外部 SR 状态查询连续失败 {failures} 次，需人工核对："
+                   f"{cp['last_monitor_error']}"),
+            capacity_reserved=1)
+    delay = min(30, 2 ** (failures - 1))
+    return store.transition_goal_item(
+        goal["goal_id"], step_id=item["step_id"],
+        expected_version=item["version"], status="WAITING_SR",
+        lease_token=lease.token, checkpoint=cp, capacity_reserved=1,
+        next_wake_at=time.time() + delay)
+
+
+def _query_status_or_park(state, goal, item, lease, task, job_id):
+    """Run the existing status query; a failure is a durable Item fact."""
+    try:
+        return sr_service.query_job_status(job_id, task=task)
+    except Exception as exc:  # noqa: BLE001 — bounded by _record_monitor_failure
+        item = _record_monitor_failure(state, goal, item, lease, exc)
+        if item is not None and item["status"] != "WAITING_SR":
+            logging.getLogger(__name__).warning(
+                "Batch item %s parked after status query failures: %s",
+                item["item_id"], exc)
+        return None
+
+
+def _submit_layer(task, job_id):
+    if job_id in (None, ""):
+        return {"status": LAYER_FAILED, "reason": "缺少外部 Job ID"}
+    if not task:
+        return {"status": LAYER_FAILED, "reason": "缺少 SR 任务记录"}
+    recorded = task.get("job_id")
+    if recorded in (None, ""):
+        return {"status": LAYER_FAILED, "reason": "SR 任务记录缺少 Job ID"}
+    try:
+        same = int(recorded) == int(job_id)
+    except (TypeError, ValueError):
+        same = str(recorded) == str(job_id)
+    if not same:
+        return {
+            "status": LAYER_FAILED,
+            "reason": (f"SR 任务记录 Job ID={recorded} 与 Item Job ID={job_id} "
+                       "不一致"),
+        }
+    return {
+        "status": LAYER_PASSED,
+        "job_id": int(job_id),
+        "intent_status": task.get("status") or "unknown",
+    }
+
+
+def _terminal_layer(status):
+    state = status.get("state")
+    exit_code = status.get("exit_code")
+    if state != "COMPLETED":
+        return {
+            "status": LAYER_FAILED, "state": state, "exit_code": exit_code,
+            "reason": f"SR 作业终止状态为 {state}",
+        }
+    rc = None
+    if exit_code is not None:
+        try:
+            rc = int(str(exit_code).split(":")[0])
+        except (TypeError, ValueError):
+            rc = None
+    if rc is not None and rc != 0:
+        return {
+            "status": LAYER_FAILED, "state": state, "exit_code": exit_code,
+            "reason": f"SR 进程退出码 {rc} != 0",
+        }
+    return {"status": LAYER_PASSED, "state": state, "exit_code": exit_code}
+
+
+def _contract_layers(task, status, mode, terminal_ok):
+    """Layer 3/4: SR execution contract and artifact completeness.
+
+    Demo (Fake SR) has no SRLOG, output tif or verdict file, so both layers
+    are ``not_applicable``; the demo success scope stays ``demo_contract``.
+    Production reuses the deployed verifier via ``goal_worker.sr_contract``.
+    """
+    if not terminal_ok:
+        reason = "SR 作业未正常终止，未执行执行契约校验"
+        return (
+            {"status": LAYER_SKIPPED, "reason": reason},
+            {"status": LAYER_SKIPPED, "reason": reason},
+        )
+    if mode == "demo":
+        reason = "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+        return (
+            {"status": LAYER_NOT_APPLICABLE, "provenance": "mock",
+             "reason": reason},
+            {"status": LAYER_NOT_APPLICABLE, "provenance": "mock",
+             "reason": reason},
+        )
+    from backend.services import goal_worker
+    contract = goal_worker.sr_contract(task, status)
+    reasons = list(contract.get("reasons") or [])
+    output = contract.get("output")
+    if contract.get("skip"):
+        contract_layer = {
+            "status": LAYER_SKIPPED, "skip": True, "reasons": reasons,
+            "output": output,
+        }
+        artifacts = {
+            "status": LAYER_SKIPPED,
+            "reason": "SR 策略跳过，按契约无输出 tif",
+        }
+        return contract_layer, artifacts
+    contract_layer = {
+        "status": LAYER_PASSED if contract.get("ok") else LAYER_FAILED,
+        "output": output, "reasons": reasons,
+    }
+    if not output:
+        artifacts = {"status": LAYER_FAILED, "reason": "执行契约未给出输出路径"}
+        return contract_layer, artifacts
+    path = Path(str(output))
+    try:
+        size = path.stat().st_size
+    except OSError:
+        artifacts = {
+            "status": LAYER_FAILED, "path": str(path),
+            "reason": "输出产物不存在",
+        }
+    else:
+        if size <= 0:
+            artifacts = {
+                "status": LAYER_FAILED, "path": str(path), "size": size,
+                "reason": "输出产物为 0 字节",
+            }
+        else:
+            artifacts = {
+                "status": LAYER_PASSED, "path": str(path), "size": size,
+            }
+    return contract_layer, artifacts
+
+
+def _quality_layer(mode):
+    if mode == "demo":
+        return {
+            "status": LAYER_NOT_APPLICABLE, "provenance": "mock",
+            "reason": "MockVerifier 只证明演示契约，不评估修复质量",
+        }
+    return {
+        "status": LAYER_UNVERIFIED,
+        "reason": "生产修复质量 Verifier 尚未准入，拒绝宣告真实修复成功",
+    }
+
+
+def _verify_layers(status, mode, task, job_id):
+    """Five explicit layers; any failed/unverified layer refuses success."""
+    submit = _submit_layer(task, job_id)
+    terminal = _terminal_layer(status)
+    contract, artifacts = _contract_layers(
+        task, status, mode, terminal["status"] == LAYER_PASSED)
+    layers = {
+        "submit": submit,
+        "terminal": terminal,
+        "contract": contract,
+        "artifacts": artifacts,
+        "quality": _quality_layer(mode),
+    }
+    blocking = [
+        name for name, layer in layers.items()
+        if layer["status"] in (LAYER_FAILED, LAYER_UNVERIFIED)
+    ]
+    reasons = []
+    for name in blocking:
+        layer = layers[name]
+        for reason in (layer.get("reasons") or [layer.get("reason")]):
+            if reason:
+                reasons.append(f"{name}: {reason}")
+    ok = not blocking
+    verification = {
+        "ok": ok,
+        "provenance": "mock" if mode == "demo" else "contract",
+        "success_scope": _success_scope(mode),
+        "layers": layers,
+        "failed_layers": blocking,
+        "state": status.get("state"),
+        "job_id": job_id,
+        "exit_code": status.get("exit_code"),
+        "reasons": reasons,
+    }
+    if layers["contract"].get("skip"):
+        verification["skip"] = True
+    return verification
+
+
 def _verify_item(state, goal, item, lease, cfg, mode):
     store = state.store
     gid = goal["goal_id"]
     cp = dict(item["checkpoint"])
+    job_id = item.get("external_job_id") or cp.get("job_id")
+    task = store.get_sr_task(cp.get("sr_fingerprint") or "")
     status = cp.get("job_status")
     if not status:
-        task = store.get_sr_task(cp.get("sr_fingerprint") or "")
-        job_id = item.get("external_job_id") or cp.get("job_id")
         if not task or job_id is None:
             cp["phase"] = "BLOCKED"
             return store.transition_goal_item(
                 gid, step_id=item["step_id"], expected_version=item["version"],
                 status="BLOCKED", lease_token=lease.token, checkpoint=cp,
                 error="外部作业记录或 Job ID 缺失", capacity_reserved=1)
-        status = sr_service.query_job_status(job_id, task=task)
+        status = _query_status_or_park(state, goal, item, lease, task, job_id)
+        if status is None:
+            return store.get_goal_item(gid, item["item_id"])
         if status.get("active"):
+            cp.pop("monitor_failures", None)
             return store.transition_goal_item(
                 gid, step_id=item["step_id"], expected_version=item["version"],
-                status="WAITING_SR", lease_token=lease.token,
+                status="WAITING_SR", lease_token=lease.token, checkpoint=cp,
                 next_wake_at=time.time() + cfg["monitor_poll_interval"],
                 capacity_reserved=1)
         if status.get("state") == "UNKNOWN" or status.get("active") is None:
+            cp.pop("monitor_failures", None)
             return store.transition_goal_item(
                 gid, step_id=item["step_id"], expected_version=item["version"],
-                status="WAITING_SR", lease_token=lease.token,
+                status="WAITING_SR", lease_token=lease.token, checkpoint=cp,
                 next_wake_at=time.time() + cfg["monitor_poll_interval"],
                 capacity_reserved=1)
         cp["job_status"] = status
+    cp.pop("monitor_failures", None)
 
-    job_id = item.get("external_job_id") or cp.get("job_id")
-    if mode == "demo":
-        ok = status.get("state") == "COMPLETED"
-        verification = {
-            "ok": bool(ok), "provenance": "mock",
-            "state": status.get("state"), "job_id": job_id,
-            "exit_code": status.get("exit_code"),
-            "reasons": [] if ok else [f"SR job {status.get('state')}"],
-        }
-    else:
-        from backend.services import goal_worker
-        task = store.get_sr_task(cp.get("sr_fingerprint") or "")
-        contract = (goal_worker.sr_contract(task, status)
-                    if status.get("state") == "COMPLETED"
-                    else {"ok": False,
-                          "reasons": [f"SR job {status.get('state')}"]})
-        verification = {"provenance": "contract", **contract}
-    cp["phase"] = "SUCCEEDED" if verification["ok"] else "FAILED"
+    verification = _verify_layers(status, mode, task, job_id)
+    ok = verification["ok"]
+    cp["phase"] = "SUCCEEDED" if ok else "FAILED"
     cp["verification"] = verification
     return store.transition_goal_item(
         gid, step_id=item["step_id"], expected_version=item["version"],
-        status="SUCCEEDED" if verification["ok"] else "FAILED",
+        status="SUCCEEDED" if ok else "FAILED",
         lease_token=lease.token, checkpoint=cp, verification=verification,
-        error=None if verification["ok"] else "; ".join(
+        error=None if ok else "; ".join(
             verification.get("reasons") or ["verification failed"]),
         capacity_reserved=0,
         extra_events=[(EVT_ITEM_VERIFIED, {
-            "item_id": item["item_id"], "ok": verification["ok"],
+            "item_id": item["item_id"], "ok": ok,
             "provenance": verification.get("provenance"),
+            "success_scope": verification.get("success_scope"),
+            "failed_layers": verification.get("failed_layers"),
             "state": status.get("state"), "job_id": job_id})])
 
 
@@ -749,10 +1264,13 @@ def _monitor_item(state, goal, item, lease, cfg, mode):
             gid, step_id=item["step_id"], expected_version=item["version"],
             status="BLOCKED", lease_token=lease.token, checkpoint=cp,
             error="找不到该 Item 对应的 SR 任务记录", capacity_reserved=1)
-    status = sr_service.query_job_status(job_id, task=task)
+    status = _query_status_or_park(state, goal, item, lease, task, job_id)
+    if status is None:
+        return store.get_goal_item(gid, item["item_id"])
     if status.get("active"):
         cp["sr_status"] = status.get("state")
         cp.pop("unknown_checks", None)
+        cp.pop("monitor_failures", None)
         return store.transition_goal_item(
             gid, step_id=item["step_id"], expected_version=item["version"],
             status="WAITING_SR", lease_token=lease.token, checkpoint=cp,
@@ -762,6 +1280,7 @@ def _monitor_item(state, goal, item, lease, cfg, mode):
         checks = int(cp.get("unknown_checks") or 0) + 1
         cp["unknown_checks"] = checks
         cp["sr_status"] = "UNKNOWN"
+        cp.pop("monitor_failures", None)
         if checks >= MAX_UNKNOWN_CHECKS:
             cp["phase"] = "BLOCKED"
             return store.transition_goal_item(
@@ -812,6 +1331,7 @@ def _build_report(goal, items, counts, mode):
         "manifest_ref": goal["checkpoint"].get("manifest_ref"),
         "mode": mode,
         "provenance": "mock" if mode == "demo" else "contract",
+        "success_scope": _success_scope(mode),
         "generated_at": time.time(),
         "counts": counts,
         "items": [{
@@ -839,17 +1359,35 @@ def _write_report(goal_id, report):
 
 
 def _verify_batch(items, mode):
+    """Aggregate only verified successes; no status alone is a verdict.
+
+    An Item can be ``SUCCEEDED`` only after its layered verification ran.  This
+    gate re-checks the persisted verdict so an old/patched row cannot turn the
+    batch into a trustworthy success without the matching provenance.
+    """
+    provenance = "mock" if mode == "demo" else "contract"
     effective = [i for i in items if i["status"] != "SKIPPED"]
     bad = [i for i in effective if i["status"] not in {"SUCCEEDED", "NO_ISSUE"}]
-    if bad:
+    unverified = [
+        i for i in effective
+        if i["status"] == "SUCCEEDED"
+        and ((i.get("verification") or {}).get("ok") is not True
+             or (i.get("verification") or {}).get("provenance") != provenance)
+    ]
+    if bad or unverified:
+        reasons = [f"{i['item_id']} is {i['status']}" for i in bad]
+        reasons += [f"{i['item_id']} has no verified success"
+                    for i in unverified]
         return {
             "ok": False,
-            "provenance": "mock" if mode == "demo" else "contract",
-            "reasons": [f"{i['item_id']} is {i['status']}" for i in bad],
+            "provenance": provenance,
+            "success_scope": _success_scope(mode),
+            "reasons": reasons,
         }
     return {
         "ok": True,
-        "provenance": "mock" if mode == "demo" else "contract",
+        "provenance": provenance,
+        "success_scope": _success_scope(mode),
         "items": len(effective),
         "skipped": len(items) - len(effective),
     }
@@ -873,6 +1411,11 @@ def _block_capacity_deadlock(state, goal, lease, cfg, mode, items, counts):
     for key, record in list(jobs.items()):
         if record.get("goal_id") == gid:
             jobs.pop(key, None)
+            record["future"].cancel()
+    submit_jobs = getattr(state, "batch_submit_jobs", None) or {}
+    for key, record in list(submit_jobs.items()):
+        if record.get("goal_id") == gid:
+            submit_jobs.pop(key, None)
             record["future"].cancel()
     for item in items:
         if item["status"] in CONVERGED or item["status"] in PARKED:
@@ -1058,6 +1601,11 @@ def _process_batch(state, claimed, lease, allow_produce):
 
 def _skip_pre_submit(state, goal, lease):
     """Cancelled items that never entered the external window are SKIPPED."""
+    jobs = getattr(state, "batch_submit_jobs", None) or {}
+    for key, record in list(jobs.items()):
+        if record["goal_id"] == goal["goal_id"]:
+            jobs.pop(key, None)
+            record["future"].cancel()
     for item in state.store.list_goal_items(goal["goal_id"]):
         if item["status"] not in PRE_SUBMIT:
             continue

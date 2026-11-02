@@ -13,7 +13,8 @@
     "test:platform": "node test-platform.js",
     "test:scenes": "node test-scenes.js",
     "test:manual-scene": "node test-manual-scene.js",
-    "gen:sparse": "python gen-test-images.py ../test-tifs/sparse"
+    "gen:sparse": "python gen-test-images.py ../test-tifs/sparse",
+    "test:batch-overlay": "node test-batch-overlay.js"
   },
   "engines": {
     "node": ">=18"

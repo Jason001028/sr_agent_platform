@@ -4,10 +4,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import hashlib
 import json
+from pathlib import Path
 import time
+from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from backend.services import batch_manifest
 from backend.services.goal_worker import validate_acceptance
@@ -235,6 +238,140 @@ def items(goal_id: str, request: Request, after_ordinal: int = 0,
         "items": items,
         "next_after_ordinal": items[-1]["ordinal"] if items else after_ordinal,
     }
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _batch_overlay_refs(goal_id: str, item_id: str, request: Request):
+    """Resolve one published batch Overlay through the artifact-root guard.
+
+    The endpoint never accepts a path from the client.  The path comes from the
+    Item checkpoint, must resolve inside the batch artifact root, and its
+    content digest must match the manifest written next to it.  Only the small
+    overlay PNG is served; the full-size Mask is not exposed to the Viewer.
+    """
+    store = request.app.state.store
+    goal = store.get_goal(goal_id)
+    if not goal:
+        raise HTTPException(404, "goal not found")
+    item = store.get_goal_item(goal_id, item_id)
+    if not item:
+        raise HTTPException(404, "batch item not found")
+    cp = item.get("checkpoint") or {}
+    mask = cp.get("mask") or {}
+    overlay_ref = mask.get("overlay") or {}
+    overlay_value = overlay_ref.get("path")
+    if not overlay_value:
+        raise HTTPException(404, "item has no published Overlay")
+    root = batch_manifest.artifact_root().resolve()
+    overlay_path = Path(str(overlay_value)).resolve()
+    if root not in overlay_path.parents:
+        raise HTTPException(403, "Overlay path is outside the batch artifact root")
+    if overlay_path.suffix.lower() != ".png" or not overlay_path.is_file():
+        raise HTTPException(404, "Overlay file is missing")
+    doc_path = overlay_path.parent / "overlay.json"
+    try:
+        doc = json.loads(doc_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(409, "Overlay manifest is unreadable") from exc
+    if not isinstance(doc, dict):
+        raise HTTPException(409, "Overlay manifest is malformed")
+    if doc.get("contract_version") != "overlay.v1":
+        raise HTTPException(409, "Overlay manifest version is unsupported")
+    if doc.get("item_id") != item_id:
+        raise HTTPException(409, "Overlay does not belong to this Item")
+    doc_overlay = doc.get("overlay") or {}
+    if Path(str(doc_overlay.get("file") or "")).name != overlay_path.name:
+        raise HTTPException(409, "Overlay manifest names a different file")
+    actual_sha = _sha256_file(overlay_path)
+    if actual_sha != overlay_ref.get("sha256"):
+        raise HTTPException(409, "Overlay digest does not match the checkpoint")
+    if actual_sha != doc_overlay.get("sha256"):
+        raise HTTPException(409, "Overlay digest does not match its manifest")
+    doc_mask = doc.get("mask") or {}
+    mask_name = Path(str(doc_mask.get("file") or "")).name
+    mask_path = overlay_path.parent / mask_name
+    if not mask_name or not mask_path.is_file():
+        raise HTTPException(409, "Mask referenced by the Overlay is missing")
+    mask_sha = _sha256_file(mask_path)
+    if mask_sha != doc_mask.get("sha256") or mask_sha != mask.get("sha256"):
+        raise HTTPException(409, "Mask digest does not match the Overlay/checkpoint")
+    source_image_key = mask.get("source_image_key")
+    source_revision = mask.get("source_revision")
+    if not source_image_key or not source_revision:
+        raise HTTPException(409, "Overlay is not bound to a frozen source image")
+    image_size = doc.get("image_size") or {}
+    if (image_size.get("width") != mask.get("width")
+            or image_size.get("height") != mask.get("height")):
+        raise HTTPException(409, "Overlay image size disagrees with the Mask")
+    return item, mask, doc, overlay_path
+
+
+@router.get("/{goal_id}/items/{item_id}/overlay")
+def item_overlay(goal_id: str, item_id: str, request: Request):
+    """Overlay metadata bound to Goal/Item/source identity.
+
+    The Viewer matches ``source.image_key`` and ``source.revision`` against the
+    image it is displaying; a newer PAN after a successful repair must not draw
+    an older Overlay over it.
+    """
+    item, mask, doc, overlay_path = _batch_overlay_refs(
+        goal_id, item_id, request)
+    overlay = doc.get("overlay") or {}
+    return {
+        "contract_version": doc.get("contract_version"),
+        "goal_id": goal_id,
+        "item_id": item_id,
+        "item_version": item.get("version"),
+        "item_status": item.get("status"),
+        "source": {
+            "image_key": mask.get("source_image_key"),
+            "revision": mask.get("source_revision"),
+            "width": mask.get("width"),
+            "height": mask.get("height"),
+        },
+        "image_size": doc.get("image_size"),
+        "coordinate_space": doc.get("coordinate_space"),
+        "scale": doc.get("scale"),
+        "provenance": doc.get("provenance"),
+        "detector_name": doc.get("detector_name"),
+        "detector_version": doc.get("detector_version"),
+        "candidates": doc.get("candidates") or [],
+        "diagnostics": doc.get("diagnostics") or [],
+        "mask": {
+            "sha256": mask.get("sha256"),
+            "width": mask.get("width"),
+            "height": mask.get("height"),
+            "foreground_pixels": mask.get("foreground_pixels"),
+        },
+        "overlay": {
+            "url": (f"/api/goals/{quote(goal_id, safe='')}/items/"
+                    f"{quote(item_id, safe='')}/overlay.png"),
+            "sha256": overlay.get("sha256"),
+            "width": overlay.get("width"),
+            "height": overlay.get("height"),
+            "scale": doc.get("scale"),
+            "kind": "png",
+        },
+    }
+
+
+@router.get("/{goal_id}/items/{item_id}/overlay.png")
+def item_overlay_png(goal_id: str, item_id: str, request: Request):
+    item, mask, doc, overlay_path = _batch_overlay_refs(
+        goal_id, item_id, request)
+    sha = (doc.get("overlay") or {}).get("sha256") or ""
+    return FileResponse(
+        overlay_path,
+        media_type="image/png",
+        headers={"Cache-Control": "no-cache", "ETag": f'"{sha}"'},
+    )
+
 
 @router.post("/{goal_id}/tool-intents")
 async def tool_intent(goal_id: str, request: Request):
