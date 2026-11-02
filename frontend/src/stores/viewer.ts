@@ -582,12 +582,13 @@ export const useViewerStore = defineStore('viewer', () => {
     return null;
   }
 
-  const previewMemoryOptions = [256, 512, 1024, 2048, 4096];
+  const defaultPreviewMemoryMB = 8 * 1024;
+  const previewMemoryOptions = [8, 16, 24, 32, 40].map(gb => gb * 1024);
   const previewMemoryMB = ref((() => {
     try {
       const saved = Number(localStorage.getItem('sr-preview-memory-mb'));
-      return previewMemoryOptions.includes(saved) ? saved : 1024;
-    } catch { return 1024; }
+      return previewMemoryOptions.includes(saved) ? saved : defaultPreviewMemoryMB;
+    } catch { return defaultPreviewMemoryMB; }
   })());
   function setPreviewMemoryMB(value: number) {
     if (!previewMemoryOptions.includes(value)) return;

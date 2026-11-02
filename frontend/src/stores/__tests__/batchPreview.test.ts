@@ -79,7 +79,7 @@ it.each([10, 50, 100])('enqueues %i cards without fetching detailed JPEGs', asyn
   expect(store.recs.every(r => !r.thumb && !r.src && !!r.card)).toBe(true);
 });
 
-it.each([256, 512, 1024])('restores repeatedly after real budget eviction at %i MB', async (budget) => {
+it.each([8, 16, 24, 32, 40].map(gb => gb * 1024))('restores repeatedly after real budget eviction at %i MB', async (budget) => {
   vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue({ width: 2, height: 2, close() {} }));
   vi.spyOn(browserKit, 'createCanvas').mockImplementation((width, height) => ({
     width, height, getContext: () => ({ drawImage() {}, putImageData() {},
@@ -101,11 +101,12 @@ it.each([256, 512, 1024])('restores repeatedly after real budget eviction at %i 
     const other = store.insertSceneCard({ sceneId: 'b' + round, name: 'b' + round } as SceneOpenMeta,
       { id: 'b' + round } as SceneRow);
     await store.activate(other);
-    // Account for a large resident canvas without allocating gigabytes in the test runner.
-    rec.thumb!.width = 20000;
-    rec.thumb!.height = 20000;
-    store.setPreviewMemoryMB(budget === 256 ? 512 : 256);
-    store.setPreviewMemoryMB(budget);
+    // Simulate 1 GiB per offscreen canvas without allocating bitmap memory.
+    for (let i = 0; i <= budget / 1024; i++) {
+      const pressureId = store.insertSceneCard({ sceneId: `pressure-${round}-${i}`, name: `pressure-${round}-${i}` } as SceneOpenMeta,
+        { id: `pressure-${round}-${i}` } as SceneRow);
+      store.recs.find(r => r.id === pressureId)!.thumb = { width: 16384, height: 16384 } as never;
+    }
     await nextTick();
     expect(rec.thumb).toBeNull();
   }

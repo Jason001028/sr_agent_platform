@@ -97,7 +97,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
           data-e2e="set-preview-memory"
           @change="store.setPreviewMemoryMB(Number(($event.target as HTMLSelectElement).value))">
           <option v-for="mb in store.previewMemoryOptions" :key="mb" :value="mb">
-            {{ mb < 1024 ? mb + ' MB' : (mb / 1024) + ' GB' }}{{ mb === 1024 ? '（默认）' : '' }}
+            {{ (mb / 1024) + ' GB' }}{{ mb === store.previewMemoryOptions[0] ? '（默认）' : '' }}
           </option>
         </select>
         <div class="set-note">
