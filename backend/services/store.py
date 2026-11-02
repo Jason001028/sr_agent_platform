@@ -72,9 +72,19 @@ def _fenced_write(method):
 
 DEFAULT_DB = "sr_agent.db"
 
+#: Distinguishes "leave the column alone" from an explicit NULL/False.
+_UNSET = object()
+
 
 class ClarificationConflict(ValueError):
     """A stale or competing answer must not schedule execution."""
+
+
+class BatchConflict(ValueError):
+    """A batch idempotency key was reused with different frozen content."""
+
+
+BATCH_WORKFLOW = "batch_pan_repair_v1"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tool_result_refs (
@@ -262,7 +272,10 @@ CREATE TABLE IF NOT EXISTS agent_goals (
     error TEXT,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
-    finished_at REAL
+    finished_at REAL,
+    kind TEXT NOT NULL DEFAULT 'chat',
+    monitor_done INTEGER NOT NULL DEFAULT 0,
+    monitor_state TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_agent_goals_schedule
     ON agent_goals(status, next_wake_at, updated_at);
@@ -298,6 +311,12 @@ CREATE TABLE IF NOT EXISTS agent_goal_steps (
     error TEXT,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'tool',
+    item_id TEXT,
+    checkpoint TEXT NOT NULL DEFAULT '{}',
+    version INTEGER NOT NULL DEFAULT 0,
+    resource_key TEXT,
+    next_wake_at REAL,
     UNIQUE(goal_id, ordinal)
 );
 CREATE TABLE IF NOT EXISTS agent_tool_intents (
@@ -345,6 +364,20 @@ _SR_TASK_ADDED_COLUMNS = (("started_at", "REAL"), ("finished_at", "REAL"),
 #: 老行补出来是 0（未置顶），列表顺序与升级前一致。
 _SESSION_ADDED_COLUMNS = (("pinned", "INTEGER NOT NULL DEFAULT 0"),)
 
+#: agent_goal_steps 的 Batch 增量。kind 的默认值让既有工具 Step 原样兼容；
+#: 其余列在旧行里是 NULL/空对象，读取时按「不是批任务项」处理。
+_STEP_ADDED_COLUMNS = (
+    ("kind", "TEXT NOT NULL DEFAULT 'tool'"),
+    ("item_id", "TEXT"),
+    ("checkpoint", "TEXT NOT NULL DEFAULT '{}'"),
+    ("version", "INTEGER NOT NULL DEFAULT 0"),
+    ("resource_key", "TEXT"),
+    ("next_wake_at", "REAL"),
+    # 已预留（或占用）一个外部 SR 容量位。SUBMITTING / WAITING_SR 由状态本身
+    # 计数；崩溃后无法确认的 BLOCKED 项必须继续占位，否则重启会把容量放大。
+    ("capacity_reserved", "INTEGER NOT NULL DEFAULT 0"),
+)
+
 
 def _add_missing_columns(db: sqlite3.Connection, table: str, columns) -> bool:
     have = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
@@ -354,6 +387,37 @@ def _add_missing_columns(db: sqlite3.Connection, table: str, columns) -> bool:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
             added = True
     return added
+
+
+def _backfill_batch_goal_kinds(db: sqlite3.Connection) -> None:
+    """Repair Goal kind for Batch rows written before the column existed.
+
+    The first migration added every old row as ``chat``. Newly created rows are
+    already correct, so only parse candidates whose checkpoint contains the
+    frozen workflow string, then confirm the trusted ``checkpoint.workflow``
+    value before promoting them. Running this on every open also repairs a DB
+    that already went through the earlier chat-only migration.
+    """
+    rows = db.execute(
+        "SELECT goal_id, checkpoint FROM agent_goals "
+        "WHERE kind='chat' AND instr(checkpoint, ?) > 0",
+        (BATCH_WORKFLOW,),
+    ).fetchall()
+    batch_ids = []
+    for goal_id, raw in rows:
+        try:
+            checkpoint = json.loads(raw or "{}")
+        except (TypeError, ValueError):
+            continue
+        if isinstance(checkpoint, dict) and checkpoint.get(
+                "workflow") == BATCH_WORKFLOW:
+            batch_ids.append((goal_id,))
+    if batch_ids:
+        db.executemany(
+            "UPDATE agent_goals SET kind='batch' "
+            "WHERE goal_id=? AND kind='chat'",
+            batch_ids,
+        )
 
 
 def _ensure_columns(db: sqlite3.Connection) -> None:
@@ -368,7 +432,21 @@ def _ensure_columns(db: sqlite3.Connection) -> None:
     try:
         _add_missing_columns(db, "sr_tasks", _SR_TASK_ADDED_COLUMNS)
         _add_missing_columns(db, "sessions", _SESSION_ADDED_COLUMNS)
-        _add_missing_columns(db, "agent_goals", (("lease_token", "TEXT"),))
+        _add_missing_columns(db, "agent_goals", (
+            ("lease_token", "TEXT"),
+            ("kind", "TEXT NOT NULL DEFAULT 'chat'"),
+            # Monitor-only control state, kept out of the checkpoint so the
+            # paused/cancelled query can filter before LIMIT (see
+            # list_batch_monitor_goals). Old rows default to "not converged".
+            ("monitor_done", "INTEGER NOT NULL DEFAULT 0"),
+            ("monitor_state", "TEXT"),
+        ))
+        _backfill_batch_goal_kinds(db)
+        _add_missing_columns(db, "agent_goal_steps", _STEP_ADDED_COLUMNS)
+        # Created here, not in _SCHEMA: on an old DB executescript() would hit
+        # the index before _ensure_columns() had added item_id.
+        db.execute("CREATE INDEX IF NOT EXISTS idx_agent_goal_steps_item "
+                   "ON agent_goal_steps(goal_id, item_id)")
         db.commit()
     except Exception:
         db.rollback()
@@ -1425,12 +1503,13 @@ class Store:
                 "max_rounds": row[11], "rounds_used": row[12],
                 "max_model_calls": row[13], "model_calls_used": row[14],
                 "error": row[15], "created_at": row[16], "updated_at": row[17],
-                "finished_at": row[18], "lease_token": row[19]}
+                "finished_at": row[18], "lease_token": row[19], "kind": row[20],
+                "monitor_done": bool(row[21]), "monitor_state": row[22]}
 
     _GOAL_COLS = ("goal_id, session_id, request_key, title, status, phase, checkpoint, "
                   "version, lease_owner, lease_until, next_wake_at, max_rounds, "
                   "rounds_used, max_model_calls, model_calls_used, error, created_at, "
-                  "updated_at, finished_at, lease_token")
+                  "updated_at, finished_at, lease_token, kind, monitor_done, monitor_state")
 
     def get_goal(self, goal_id: str):
         return self._goal_row(self._db().execute(
@@ -1456,23 +1535,43 @@ class Store:
                 old = self.get_goal_by_request_key(request_key)
                 if old: db.rollback(); return old
             safe_cp = {k: v for k, v in (checkpoint or {}).items() if k == "acceptance"}
-            db.execute(f"INSERT INTO agent_goals ({self._GOAL_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            db.execute(f"INSERT INTO agent_goals ({self._GOAL_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                        (gid, session_id, request_key, title, status, phase,
                         json.dumps(safe_cp, ensure_ascii=False), 0, None, None, now,
-                        max(1,int(max_rounds)), 0, max(1,int(max_model_calls)), 0, None, now, now, None, None))
+                        max(1,int(max_rounds)), 0, max(1,int(max_model_calls)), 0, None, now, now, None, None, "chat",
+                        0, None))
             self._append_goal_event_tx(db, gid, "goal_created", {"status": status})
             db.commit()
         except Exception:
             db.rollback(); raise
         return self.get_goal(gid)
 
-    def list_goals(self, *, limit: int = 100, statuses=None, session_id=None):
-        q = f"SELECT {self._GOAL_COLS} FROM agent_goals"; args=[]
+    def list_goals(self, *, limit: int = 100, statuses=None, session_id=None,
+                   kinds=None, exclude_kinds=None):
+        """List Goals, filtering by kind *before* LIMIT.
+
+        The worker excludes Batch Goals here rather than skipping them in
+        Python after the query: a parked Batch backlog must not fill the
+        candidate window and starve ordinary Goals.
+        """
+        q = f"SELECT {self._GOAL_COLS} FROM agent_goals"
+        where=[]; args=[]
         if statuses:
-            vals=list(statuses); q += " WHERE status IN (" + ",".join("?" for _ in vals) + ")"; args.extend(vals)
+            vals=list(statuses)
+            where.append("status IN (" + ",".join("?" for _ in vals) + ")")
+            args.extend(vals)
         if session_id is not None:
-            q += (" AND" if statuses else " WHERE") + " session_id=?"
-            args.append(session_id)
+            where.append("session_id=?"); args.append(session_id)
+        if kinds:
+            vals=list(kinds)
+            where.append("kind IN (" + ",".join("?" for _ in vals) + ")")
+            args.extend(vals)
+        if exclude_kinds:
+            vals=list(exclude_kinds)
+            where.append("kind NOT IN (" + ",".join("?" for _ in vals) + ")")
+            args.extend(vals)
+        if where:
+            q += " WHERE " + " AND ".join(where)
         q += " ORDER BY updated_at DESC LIMIT ?"; args.append(int(limit))
         return [self._goal_row(r) for r in self._db().execute(q, args).fetchall()]
 
@@ -1496,6 +1595,7 @@ class Store:
                         checkpoint: dict | None=None, error: str | None=None,
                         next_wake_at: float | None=None, expected_version: int | None=None,
                         event_type: str | None=None, event_payload: dict | None=None,
+                        extra_events=None,
                         lease_token=None, release=False, rounds_inc=0, model_calls_inc=0,
                         _verification=False, _clarification=False, _answer=False) -> dict | None:
         valid = {"QUEUED","RUNNING","WAITING_EXTERNAL","WAITING_USER","VERIFYING","RETRY_WAIT","PAUSED","BLOCKED","COMPLETED","FAILED","CANCELLED"}
@@ -1526,6 +1626,9 @@ class Store:
             if status in {"CANCELLED", "FAILED", "BLOCKED", "COMPLETED"}:
                 db.execute("UPDATE agent_goal_clarifications SET status='CANCELLED',version=version+1 WHERE goal_id=? AND status='PENDING'", (goal_id,))
             self._append_goal_event_tx(db, goal_id, event_type or "goal_status", {"status":status, **(event_payload or {})})
+            for extra_type, extra_payload in (extra_events or ()):
+                self._append_goal_event_tx(
+                    db, goal_id, extra_type, extra_payload)
             db.commit()
         except Exception: db.rollback(); raise
         result = self.get_goal(goal_id)
@@ -1666,6 +1769,37 @@ class Store:
             cur=db.execute("UPDATE agent_goals SET lease_owner=NULL,lease_token=NULL,lease_until=NULL WHERE goal_id=? AND lease_token=? AND version=? AND lease_until>?", (goal_id,token,expected_version,time.time()))
             return bool(cur.rowcount)
 
+    def arm_goal(self, goal_id, *, lease_token, expected_version, next_wake_at,
+                 status=None, phase=None, checkpoint=None, event_type=None,
+                 event_payload=None) -> bool:
+        """Set the next wake time (and optional status/phase) without a version
+        bump. Used by the batch Monitor for ordinary poll re-arming: bumping the
+        version every wake would fence out nothing and would flood the event log
+        that PR F consumes. Status/phase changes still emit an event when asked.
+        """
+        with self.worker_transaction() as db:
+            now = time.time()
+            sets = ["next_wake_at=?", "updated_at=?"]
+            vals = [next_wake_at, now]
+            if status is not None:
+                sets.append("status=?"); vals.append(status)
+            if phase is not None:
+                sets.append("phase=?"); vals.append(phase)
+            if checkpoint is not None:
+                sets.append("checkpoint=?")
+                vals.append(json.dumps(checkpoint, ensure_ascii=False))
+            vals += [goal_id, lease_token, expected_version, now]
+            cur = db.execute(
+                "UPDATE agent_goals SET " + ", ".join(sets) +
+                " WHERE goal_id=? AND lease_token=? AND version=? AND lease_until>?",
+                vals)
+            if not cur.rowcount:
+                return False
+            if event_type:
+                self._append_goal_event_tx(
+                    db, goal_id, event_type, event_payload or {})
+            return True
+
     def get_sr_task_by_job(self, job_id):
         row=self._db().execute("SELECT fingerprint FROM sr_tasks WHERE job_id=?", (job_id,)).fetchone()
         return self.get_sr_task(row[0]) if row else None
@@ -1703,9 +1837,393 @@ class Store:
             db.execute("UPDATE agent_goal_steps SET external_job_id=?,updated_at=? WHERE step_id=(SELECT step_id FROM agent_tool_intents WHERE intent_id=?)", (external_job_id,time.time(),intent_id))
         db.commit()
 
+    _STEP_COLS = ("step_id,goal_id,ordinal,name,status,tool_name,external_job_id,"
+                  "verification,error,created_at,updated_at,kind,item_id,"
+                  "checkpoint,version,resource_key,next_wake_at,capacity_reserved")
+
+    def _step_row(self, r):
+        return {"step_id":r[0],"goal_id":r[1],"ordinal":r[2],"name":r[3],
+                "status":r[4],"tool_name":r[5],"external_job_id":r[6],
+                "verification":json.loads(r[7] or "{}"),"error":r[8],
+                "created_at":r[9],"updated_at":r[10],
+                "kind":r[11] or "tool","item_id":r[12],
+                "checkpoint":json.loads(r[13] or "{}"),"version":r[14],
+                "resource_key":r[15],"next_wake_at":r[16],
+                "capacity_reserved":bool(r[17])}
+
     def list_goal_steps(self, goal_id):
-        rows=self._db().execute("SELECT step_id,goal_id,ordinal,name,status,tool_name,external_job_id,verification,error,created_at,updated_at FROM agent_goal_steps WHERE goal_id=? ORDER BY ordinal",(goal_id,)).fetchall()
-        return [{"step_id":r[0],"goal_id":r[1],"ordinal":r[2],"name":r[3],"status":r[4],"tool_name":r[5],"external_job_id":r[6],"verification":json.loads(r[7] or "{}"),"error":r[8],"created_at":r[9],"updated_at":r[10]} for r in rows]
+        rows=self._db().execute(
+            f"SELECT {self._STEP_COLS} FROM agent_goal_steps WHERE goal_id=? ORDER BY ordinal",
+            (goal_id,)).fetchall()
+        return [self._step_row(r) for r in rows]
+
+    def list_goal_items(self, goal_id, *, statuses=None, after_ordinal=0, limit=500):
+        """Batch items only. Tool steps introduced by the generic agent keep kind='tool'."""
+        q = (f"SELECT {self._STEP_COLS} FROM agent_goal_steps "
+             "WHERE goal_id=? AND kind='batch_item' AND ordinal>?")
+        args = [goal_id, int(after_ordinal)]
+        if statuses:
+            vals = list(statuses)
+            q += " AND status IN (" + ",".join("?" for _ in vals) + ")"
+            args.extend(vals)
+        q += " ORDER BY ordinal LIMIT ?"
+        args.append(max(1, min(int(limit), 1000)))
+        return [self._step_row(r) for r in self._db().execute(q, args).fetchall()]
+
+    def get_goal_item(self, goal_id, item_id):
+        row = self._db().execute(
+            f"SELECT {self._STEP_COLS} FROM agent_goal_steps "
+            "WHERE goal_id=? AND kind='batch_item' AND item_id=?",
+            (goal_id, item_id)).fetchone()
+        return self._step_row(row) if row else None
+
+    def list_due_goal_items(self, goal_id, *, statuses, due_before=None,
+                            after_ordinal=0, limit=100):
+        """Items in the given states whose wake time has arrived.
+
+        ``next_wake_at IS NULL`` counts as due: recovery rows written before a
+        wake time existed must not become invisible. Used by the Monitor; the
+        row order is wake time then ordinal so one stuck item cannot starve the
+        rest of the batch.
+        """
+        vals = list(statuses)
+        if not vals:
+            return []
+        q = (f"SELECT {self._STEP_COLS} FROM agent_goal_steps "
+             "WHERE goal_id=? AND kind='batch_item' AND ordinal>? "
+             "AND status IN (" + ",".join("?" for _ in vals) + ") "
+             "AND (next_wake_at IS NULL OR next_wake_at<=?) "
+             "ORDER BY COALESCE(next_wake_at, 0), ordinal LIMIT ?")
+        cutoff = time.time() if due_before is None else float(due_before)
+        args = [goal_id, int(after_ordinal), *vals, cutoff,
+                max(1, min(int(limit), 1000))]
+        return [self._step_row(r)
+                for r in self._db().execute(q, args).fetchall()]
+
+    def goal_item_status_counts(self, goal_id) -> dict:
+        rows = self._db().execute(
+            "SELECT status,COUNT(*) FROM agent_goal_steps "
+            "WHERE goal_id=? AND kind='batch_item' GROUP BY status",
+            (goal_id,)).fetchall()
+        return {str(status): int(count) for status, count in rows}
+
+    def count_reserved_slots(self, goal_id) -> int:
+        """Capacity actually held by this Goal.
+
+        A crash can leave an item BLOCKED with ``capacity_reserved=1`` when the
+        external side effect could not be confirmed. Counting the column (not
+        only SUBMITTING/WAITING_SR) keeps that slot reserved across restarts
+        instead of silently admitting an extra concurrent SR job.
+        """
+        row = self._db().execute(
+            "SELECT COUNT(*) FROM agent_goal_steps "
+            "WHERE goal_id=? AND kind='batch_item' "
+            "AND (status IN ('SUBMITTING','WAITING_SR') OR capacity_reserved=1)",
+            (goal_id,)).fetchone()
+        return int(row[0]) if row else 0
+
+    def claim_goal_monitor(self, goal_id: str, owner: str, *,
+                           lease_sec: float = 60) -> dict | None:
+        """Lease a PAUSED/CANCELLED batch Goal **without** changing its status.
+
+        PR C keeps the Monitor alive after the user stops the Producer: items
+        already accepted by the external scheduler must still converge, and the
+        Goal must not be re-claimed by the ordinary worker. The version bump
+        only fences monitors; the status stays PAUSED/CANCELLED so no producer
+        path can treat it as runnable again.
+        """
+        with self.worker_transaction() as db:
+            now = time.time()
+            cur = db.execute(
+                "UPDATE agent_goals SET lease_owner=?,lease_token=?,lease_until=?,"
+                "version=version+1,updated_at=?,monitor_done=0 "
+                "WHERE goal_id=? AND kind='batch' AND status IN ('PAUSED','CANCELLED') "
+                "AND (lease_until IS NULL OR lease_until<=?)",
+                (owner, uuid.uuid4().hex, now + lease_sec, now,
+                 goal_id, now))
+            if not cur.rowcount:
+                return None
+            self._append_goal_event_tx(
+                db, goal_id, "goal_claimed", {"owner": owner, "monitor": True})
+            return self.get_goal(goal_id)
+
+    def patch_goal_checkpoint(self, goal_id, checkpoint, *, lease_token,
+                              expected_version, monitor_done=None,
+                              monitor_state=_UNSET, event_type=None,
+                              event_payload=None) -> bool:
+        """Update Goal bookkeeping without changing status/version.
+
+        Used by the monitor-only path (pause/cancel), which must never look like
+        a producer transition. ``monitor_done``/``monitor_state`` are mirrored
+        into real columns so list_batch_monitor_goals can filter before LIMIT
+        instead of paging through already-converged rows in Python. The event,
+        when given, shares this commit.
+        """
+        with self.worker_transaction() as db:
+            now = time.time()
+            sets = ["checkpoint=?", "updated_at=?"]
+            vals = [json.dumps(checkpoint, ensure_ascii=False), now]
+            if monitor_done is not None:
+                sets.append("monitor_done=?")
+                vals.append(1 if monitor_done else 0)
+            if monitor_state is not _UNSET:
+                sets.append("monitor_state=?")
+                vals.append(monitor_state)
+            vals += [goal_id, lease_token, expected_version, now]
+            cur = db.execute(
+                "UPDATE agent_goals SET " + ", ".join(sets) +
+                " WHERE goal_id=? AND lease_token=? AND version=? AND lease_until>?",
+                vals)
+            if not cur.rowcount:
+                return False
+            if event_type:
+                self._append_goal_event_tx(
+                    db, goal_id, event_type, event_payload or {})
+            return True
+
+    def list_batch_monitor_goals(self, *, limit: int = 200):
+        """Paused/cancelled Batch Goals that still need a monitor pass.
+
+        The filter runs in SQL before LIMIT. Skipping finished rows in Python
+        after fetching the newest 200 let a large converged control backlog
+        starve an older paused Goal that still owns a live external job.
+        ``updated_at ASC`` makes every processed row move to the back, so even a
+        live backlog larger than ``limit`` rotates instead of starving.
+        """
+        rows = self._db().execute(
+            f"SELECT {self._GOAL_COLS} FROM agent_goals "
+            "WHERE kind='batch' AND status IN ('PAUSED','CANCELLED') "
+            "AND (monitor_done=0 OR monitor_state IS NULL "
+            "     OR monitor_state<>status) "
+            "ORDER BY updated_at ASC LIMIT ?",
+            (max(1, int(limit)),)).fetchall()
+        return [self._goal_row(row) for row in rows]
+
+    def transition_goal_item(self, goal_id, *, step_id, expected_version,
+                             status, lease_token, checkpoint=None,
+                             error=_UNSET, next_wake_at=_UNSET,
+                             verification=_UNSET, external_job_id=_UNSET,
+                             capacity_reserved=_UNSET,
+                             event_type="item_state_changed",
+                             event_payload=None, extra_events=None) -> dict | None:
+        """CAS one batch Item and append its events in the same transaction.
+
+        The Goal lease is the fencing token; the Step version is the long-lived
+        identity. A stale worker (renewal lost, restart, cancel) returns None
+        instead of overwriting the current owner's state.
+        """
+        valid = {"PENDING", "OPENING", "DETECTING", "MASK_READY", "SUBMITTING",
+                 "WAITING_SR", "VERIFYING", "SUCCEEDED", "NO_ISSUE", "FAILED",
+                 "BLOCKED", "SKIPPED", "RETRY_WAIT"}
+        if status not in valid:
+            raise ValueError(f"invalid batch item status: {status}")
+        with self.worker_transaction() as db:
+            now = time.time()
+            goal = self.get_goal(goal_id)
+            if (not goal or goal["lease_token"] != lease_token
+                    or not goal["lease_until"] or goal["lease_until"] <= now):
+                raise LeaseLost("batch monitor lost its Goal lease")
+            row = db.execute(
+                f"SELECT {self._STEP_COLS} FROM agent_goal_steps "
+                "WHERE step_id=? AND goal_id=? AND kind='batch_item'",
+                (step_id, goal_id)).fetchone()
+            if not row:
+                return None
+            item = self._step_row(row)
+            if int(item["version"]) != int(expected_version):
+                return None
+            cp = dict(item["checkpoint"])
+            if checkpoint is not None:
+                cp = dict(checkpoint)
+            sets = ["status=?", "version=version+1", "updated_at=?"]
+            vals = [status, now]
+            if checkpoint is not None:
+                sets.append("checkpoint=?")
+                vals.append(json.dumps(cp, ensure_ascii=False))
+            if error is not _UNSET:
+                sets.append("error=?"); vals.append(error)
+            if verification is not _UNSET:
+                sets.append("verification=?")
+                vals.append(json.dumps(verification or {}, ensure_ascii=False))
+            if external_job_id is not _UNSET:
+                sets.append("external_job_id=?"); vals.append(external_job_id)
+            if next_wake_at is _UNSET:
+                wake = None if status in {
+                    "SUCCEEDED", "NO_ISSUE", "FAILED", "SKIPPED"} else item["next_wake_at"]
+            else:
+                wake = next_wake_at
+            sets.append("next_wake_at=?"); vals.append(wake)
+            if capacity_reserved is _UNSET:
+                reserved = 0 if status in {
+                    "SUCCEEDED", "NO_ISSUE", "FAILED", "SKIPPED"} else int(item["capacity_reserved"])
+            else:
+                reserved = 1 if capacity_reserved else 0
+            sets.append("capacity_reserved=?"); vals.append(reserved)
+            cur = db.execute(
+                "UPDATE agent_goal_steps SET " + ", ".join(sets) +
+                " WHERE step_id=? AND version=? AND goal_id=? AND kind='batch_item'",
+                (*vals, step_id, int(expected_version), goal_id))
+            if not cur.rowcount:
+                return None
+            payload = {
+                "item_id": item["item_id"],
+                "item_version": int(expected_version) + 1,
+                "attempt": int(cp.get("attempt") or 0),
+                "from": item["status"],
+                "to": status,
+                **(event_payload or {}),
+            }
+            self._append_goal_event_tx(
+                db, goal_id, event_type, payload, step_id=step_id)
+            for extra_type, extra_payload in (extra_events or ()):
+                self._append_goal_event_tx(
+                    db, goal_id, extra_type, extra_payload, step_id=step_id)
+        return self.get_goal_item(goal_id, item["item_id"])
+
+    def reserve_item_submission(self, goal_id, *, step_id, expected_version,
+                                lease_token, intent_key, intent_args,
+                                max_inflight=None, checkpoint=None,
+                                tool_name="run_sr") -> dict | None:
+        """Atomically check capacity, CAS MASK_READY→SUBMITTING and create the
+        Tool Intent that ``submit_run_sr`` will reuse.
+
+        The intent is committed *before* the external side effect, exactly like
+        the generic tool boundary. Its key embeds the SR task fingerprint, so a
+        crash can look up the same ``sr_tasks`` row instead of re-submitting.
+        An existing INTENDED intent is reused; anything further along means the
+        external effect may exist and this call refuses to duplicate it.
+        """
+        with self.worker_transaction() as db:
+            now = time.time()
+            goal = self.get_goal(goal_id)
+            if (not goal or goal["lease_token"] != lease_token
+                    or not goal["lease_until"] or goal["lease_until"] <= now):
+                raise LeaseLost("batch producer lost its Goal lease")
+            row = db.execute(
+                f"SELECT {self._STEP_COLS} FROM agent_goal_steps "
+                "WHERE step_id=? AND goal_id=? AND kind='batch_item'",
+                (step_id, goal_id)).fetchone()
+            if not row:
+                return None
+            item = self._step_row(row)
+            if (int(item["version"]) != int(expected_version)
+                    or item["status"] != "MASK_READY"):
+                return None
+            if max_inflight is not None:
+                held = db.execute(
+                    "SELECT COUNT(*) FROM agent_goal_steps "
+                    "WHERE goal_id=? AND kind='batch_item' "
+                    "AND (status IN ('SUBMITTING','WAITING_SR') OR capacity_reserved=1)",
+                    (goal_id,)).fetchone()[0]
+                if int(held) >= int(max_inflight):
+                    return None
+            existing = self.get_tool_intent(goal_id, intent_key)
+            if existing is not None and existing["status"] != "INTENDED":
+                # Another attempt already left the intent behind; never attach
+                # a second external submission to it.
+                return None
+            intent = existing or self.create_tool_intent(
+                goal_id=goal_id, step_id=step_id, tool_name=tool_name,
+                args=intent_args, idempotency_key=intent_key,
+                side_effect_class="RECONCILE_REQUIRED",
+                replay_policy="RECONCILE_BEFORE_REPLAY")
+            cp = dict(checkpoint if checkpoint is not None else item["checkpoint"])
+            cp["attempt"] = int(cp.get("attempt") or 0) + 1
+            cp["intent_key"] = intent_key
+            cp["submitted_at"] = now
+            cur = db.execute(
+                "UPDATE agent_goal_steps SET status='SUBMITTING',"
+                "version=version+1,checkpoint=?,capacity_reserved=1,"
+                "updated_at=?,next_wake_at=? "
+                "WHERE step_id=? AND version=? AND goal_id=? AND kind='batch_item'",
+                (json.dumps(cp, ensure_ascii=False), now, now, step_id,
+                 int(expected_version), goal_id))
+            if not cur.rowcount:
+                return None
+            payload = {
+                "item_id": item["item_id"],
+                "item_version": int(expected_version) + 1,
+                "attempt": cp["attempt"],
+                "from": "MASK_READY",
+                "to": "SUBMITTING",
+            }
+            self._append_goal_event_tx(
+                db, goal_id, "item_state_changed", payload, step_id=step_id)
+            self._append_goal_event_tx(
+                db, goal_id, "sr_submission_reserved",
+                {"item_id": item["item_id"], "intent_key": intent_key,
+                 "fingerprint": cp.get("sr_fingerprint"),
+                 "attempt": cp["attempt"]}, step_id=step_id)
+        return {"item": self.get_goal_item(goal_id, item["item_id"]),
+                "intent": self.get_tool_intent(goal_id, intent_key)}
+
+    def create_batch_goal(self, *, title: str, request_key: str,
+                          content_sha256: str, checkpoint: dict, items: list[dict],
+                          session_id: str | None = None,
+                          max_rounds: int = 20,
+                          max_model_calls: int = 0) -> dict:
+        """Create one Goal and all Item Steps in a single fenced transaction.
+
+        ``content_sha256`` covers the frozen manifest plus the exclusions that
+        produced these items. Reusing the request key with the same content
+        returns the existing Goal; different content is a conflict. A crash
+        therefore leaves either the whole batch or no runnable Goal — never a
+        Goal with a partial Item set.
+        """
+        if not isinstance(request_key, str) or not request_key.strip():
+            raise ValueError("batch request key is required")
+        if not isinstance(content_sha256, str) or not content_sha256:
+            raise ValueError("batch content hash is required")
+        if not items:
+            raise ValueError("batch must contain at least one item")
+        ordinals = [int(item["ordinal"]) for item in items]
+        if sorted(ordinals) != list(range(1, len(items) + 1)):
+            raise ValueError("batch item ordinals must be contiguous from 1")
+        if not isinstance(checkpoint, dict):
+            raise ValueError("batch checkpoint must be an object")
+        now = time.time(); gid = uuid.uuid4().hex
+        db = self._db(); db.execute("BEGIN IMMEDIATE")
+        try:
+            old = self.get_goal_by_request_key(request_key)
+            if old:
+                old_cp = old.get("checkpoint") or {}
+                if old_cp.get("batch_content_sha256") != content_sha256:
+                    raise BatchConflict(
+                        "Idempotency-Key was already used for different batch content")
+                db.rollback()
+                return old
+            cp = {**checkpoint, "batch_content_sha256": content_sha256}
+            db.execute(
+                f"INSERT INTO agent_goals ({self._GOAL_COLS}) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (gid, session_id, request_key, title, "QUEUED", "dispatching",
+                 json.dumps(cp, ensure_ascii=False), 0, None, None, now,
+                 max(1, int(max_rounds)), 0, max(0, int(max_model_calls)), 0,
+                 None, now, now, None, None, "batch", 0, None))
+            for item in items:
+                item_status = str(item.get("status") or "PENDING")
+                if item_status not in {"PENDING", "SKIPPED"}:
+                    raise ValueError(f"invalid batch item status: {item_status}")
+                db.execute(
+                    "INSERT INTO agent_goal_steps(step_id,goal_id,ordinal,name,status,"
+                    "verification,error,created_at,updated_at,kind,item_id,checkpoint,"
+                    "version,resource_key,next_wake_at) "
+                    "VALUES (?,?,?,?,?,'{}',NULL,?,?, 'batch_item',?,?,0,?,?)",
+                    (uuid.uuid4().hex, gid, int(item["ordinal"]),
+                     str(item.get("name") or item.get("item_id") or ""),
+                     item_status, now, now, item.get("item_id"),
+                     json.dumps(item.get("checkpoint") or {}, ensure_ascii=False),
+                     item.get("resource_key"), item.get("next_wake_at", now)))
+            self._append_goal_event_tx(
+                db, gid, "batch_goal_created",
+                {"items": len(items),
+                 "pending": sum(1 for i in items if i.get("status", "PENDING") == "PENDING"),
+                 "skipped": sum(1 for i in items if i.get("status") == "SKIPPED"),
+                 "manifest_ref": cp.get("manifest_ref")})
+            db.commit()
+        except Exception:
+            db.rollback(); raise
+        return self.get_goal(gid)
 
     def put_goal_step(self, goal_id, *, ordinal: int, name: str, status="PENDING", tool_name=None):
         sid=uuid.uuid4().hex; now=time.time(); db=self._db()
@@ -1721,5 +2239,7 @@ for _name in (
     "append_trajectory_event", "set_goal_session", "append_goal_event",
     "transition_goal", "create_tool_intent", "update_tool_intent", "put_goal_step",
     "put_sr_task", "update_sr_task_job", "set_sr_task_state", "complete_verified_goal",
+    "create_batch_goal", "transition_goal_item", "reserve_item_submission",
+    "patch_goal_checkpoint", "arm_goal",
 ):
     setattr(Store, _name, _fenced_write(getattr(Store, _name)))

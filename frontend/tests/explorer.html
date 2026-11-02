@@ -1,0 +1,20 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>Explorer card fixture</title>
+<body><div id="root"></div><script type="module">
+import { createApp, h, nextTick } from 'vue';
+import { createPinia, setActivePinia } from 'pinia';
+import { useViewerStore } from '/src/stores/viewer.ts';
+import FileList from '/src/components/FileList.vue';
+import '/src/style.css';
+const pinia = createPinia(); setActivePinia(pinia);
+const store = useViewerStore();
+for (const [id, stageKind, sceneDir] of [
+  ['pan', 'input', '/DiskArray/GSHC2IMPS/PRODUCT/测试场景'],
+  ['nosr', 'nosr', '/DiskArray/GSHC2IMPS/PRODUCT/测试场景'],
+  ['local', 'input', null],
+]) {
+  store.insertSceneCard({ sceneId: id, name: id + '_影像文件名示例.tif', W: 8192, H: 4096, stageKind, sceneDir },
+    { id, thumbnail_url: '/demo_pan.webp', hasPreview: true, size_bytes: 67108864 });
+}
+createApp({render: () => h(FileList)}).use(pinia).mount('#root');
+window.explorerTest = { store, nextTick };
+</script></body></html>

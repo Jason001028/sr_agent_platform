@@ -16,9 +16,13 @@
 
 普通聊天 SSE 的执行所有权、断线行为、异常用量与诊断边界见 [sse_execution_ownership.md](sse_execution_ownership.md)。Goal 进程级验收尚有未关闭失败，详见该文档。
 
-Durable Goal Runtime 的执行、恢复和验收说明见 [durable_goal_runtime.md](durable_goal_runtime.md)。Goal 使用有限 Round、Lease Token Fencing 和服务端独立验收；SR 终态回灌后继续模型决策。真实模型与内网 SR/GPU 验收待核。
+Durable Goal Runtime 的执行、恢复和验收说明见 [durable_goal_runtime.md](durable_goal_runtime.md)。Goal 使用有限 Round、Lease Token Fencing 和服务端独立验收；SR 终态回灌后继续模型决策。真实模型与内网 SR/GPU 验收待核。2026-11-02 对 P0 逐项的差距复核见 [p0-gap-review.md](p0-gap-review.md)。旧版批量修复计划的 PR A/B 实施记录见 [batch-pr-ab.md](batch-pr-ab.md)；PR C（Producer / Monitor）后端与测试已实施，见 [batch-pr-c.md](batch-pr-c.md)，演示入口与 Panel 归 PR F。2026-11-02 复审后已补：提交边界重新核对冻结输入与掩码、未决容量耗尽的批次收口、暂停批次 Monitor 查询窗口；重启完成超时定位为夹具 RC/SC 与修复回执不一致并修正；组合套件中 `test_durable_model_request_timeout_and_sdk_retries_obey_slice` 的偶发失败定位为 httpcore 首调用惰性导入（约 0.2s）落在 0.25s 轮次预算内，已在 `async_transport.py` 的请求计时外预热，未改测试断言。复跑六套件 189 passed。A/B 的混合调度饿死、Manifest 完整性、BOM 非法 UTF-8、旧 Batch 行 `kind` 回填均已修复并补回归；重启验收 `external_job_terminal` 实际 1 的差异已定位为测试只读事件第一页（500 行）导致的截断观察，改为分页读全量、原 `== 2` 断言保留，targeted 164 项通过。
 
 Goal 澄清已接入：`request_clarification → WAITING_USER → 回答入库 → 同一 Goal 重新入队`，请求与回答均有事务及故障恢复。接口、23 项专项测试、浏览器闭环与全量回归剩余失败见 [goal_clarification.md](goal_clarification.md)；真实模型效果待验收。
+
+资源管理器组件的 PowerShell 闪窗已改为 GUI 启动器 + CreateNoWindow：本地编译验证 PE 子系统为 GUI、后台 PowerShell 控制台句柄为 0。旧版客户端需覆盖安装新版；内网实际无闪窗效果待确认，详见 [explorer-open.md](explorer-open.md)。
+
+缩略图卡片 × 左侧提供淡绿色「在资源管理器中打开」入口，使用已关联 sceneDir；未关联置灰，多选隐藏。用户已反馈安装及打开流程跑通，公司客户端统一 Windows / W 盘；默认安装免选盘符。新版安装包同时合并 Chrome 当前用户免提示规则（仅 http://10.10.81.135:80 → sr-explorer），需消除重复弹窗的旧版用户重新安装一次，再通过 chrome://policy 检查生效。组件随前端发布，详见 [explorer-open.md](explorer-open.md)。本地浏览器、客户端及策略合并测试通过，内网 Chrome 免提示待核；测试未改注册表或启动原生 Explorer。
 
 每次模型请求的临时 Runtime Status、计数口径与验证见 [runtime_status.md](runtime_status.md)。状态由后端现有计数及实时 Goal 行构建，不写入聊天历史或 Checkpoint；真实模型效果待核。
 
@@ -507,3 +511,17 @@ Viewer 消息快照、当前影像只读工具及评测边界见 [viewer-context
 思考强度 UI（2026-11-02）已收进输入框同行的胶囊，点击向上淡入浮动抽屉；聊天页与查看器 Agent 共用，四档支持点选、拖动和键盘，关闭淡出不拦截输入。交互及验证见上述文档「前端思考强度抽屉」，浏览器回归：`node .e2e/test-thinking-slider.js`。
 
 P1 spatial annotations: [implementation and pending acceptance](spatial-annotations.md).
+
+### 修复链路支持 SC 场景（2026-11-02）
+
+真机 job 24 暴露：`repair_sr.py` 把修复对象硬编码成 `PAN.tif`，而该景是 SC 场景（meta 的 `<SolarAzimuth>` 有值），本体应为 `<目录名>.tif`。同目录的 `PAN.tif` 是另一份无关影像（18688×15800），掩码按本体 30831×30948 绘制，预检报「Mask dimensions match neither PAN nor NOSR」。平台侧“掩码与 PAN 同尺寸”的猜测不成立：掩码本来就可以是本体的网格。
+
+改动：
+
+- `SR_code/variants/repair_sr.py` 新增 `repair_body(scene)`：按 `_meta.xml` 的 `<SolarAzimuth>` 判定（空 → RC/`PAN.tif`，有文本 → SC/`<目录名>.tif`）；备份名、输入签名、候选文件、日志名、回执 `output` 全部跟随本体。查找必须用 `root.iter()`——真实 meta 把该标签嵌在 `<ProductInfo>` 下，`ElementTree.findall` 只查直接子节点，job 25 因此报「meta.xml has no SolarAzimuth」。
+- 模型输出与本体网格不完全一致时（实测 SC 本体/NOSR ≈ 1.96，而 `SRScale=2` 给 2.0），`compose` 在偏差 ≤10% 时把模型输出重采样到本体网格；超过 10% 判为倍率错误并拒绝，不再一律要求逐像素同尺寸。
+- `SR_code/variants/verify_sr_run.py` 的修复分支同样解析本体名，允许的备份由固定 `PAN_old_latest.tif` 改为 `<本体 stem>_old_latest.tif`（`_old_2` 只读兼容）。
+- `backend/services/scene_search.py` 新增 `previous_step` / `body_path`（判据与 `util.check_sr_previous_step` 一致）；`/siblings` 的 old 候选、修复后产物、提交提示与作业审计日志都按本体命名，不再一律写 PAN。
+- 测试：`test_pan_repair.py` 新增 SC 用例；`test_scene_siblings.py` 覆盖 `previous_step` / `body_path` 与 SC 备份卡片；`test_api_platform.py` 覆盖 SC 提交提示。
+
+部署：`repair_sr.py`、`verify_sr_run.py` 随 backend 包进 `<APP>/SR_code/variants/`；`verify_sr_run.py` 另外同步到 `$BUNDLE`（`deploy/apply_bundle_verifier.sh` 的期望 hash 已更新）。新 hash：repair `9b93c427…`、verify `e3eb2fc5…`。

@@ -390,23 +390,46 @@ def _tiff_dimensions(path):
         return dimensions[256], dimensions[257]
 
 
+def _repair_body_name(lq_path, doc):
+    """The raster a repair replaces: RC -> PAN.tif, SC -> <scene>.tif.
+
+    Same rule as util.check_sr_previous_step and repair_sr.repair_body. The
+    verifier must not assume PAN.tif: SC scenes carry their body under the
+    scene name, and a stale PAN.tif next to it would otherwise be treated as
+    the repaired artifact.
+    """
+    step = resolve_previous_step(lq_path)
+    if step is None:
+        raise ValueError('meta.xml 不可读或缺 <SolarAzimuth>，无法判定 RC/SC 本体')
+    opt_yml = _cfg_value(doc, 'OPT')
+    tiftype = _DEFAULT_TIFTYPE
+    if isinstance(opt_yml, str) and opt_yml.strip():
+        tiftype = _yml_scalar(opt_yml.strip(), _TIFTYPE_KEYS) or _DEFAULT_TIFTYPE
+    img_name = resolve_image_name(lq_path, tiftype, step)
+    if not img_name:
+        raise ValueError('无法从 lq_path 推导本体文件名（previous_step=%s）' % (step,))
+    return img_name
+
+
 def _check_repair(v, config_path, doc, sr_exit_code):
-    v.output = os.path.join(v.lq_path, 'PAN.tif')
-    v.srlog = os.path.join(v.lq_path, 'Debug', 'PAN_SRLOG.txt')
     if sr_exit_code != 0:
-        v.fail('PAN repair process did not exit successfully')
+        v.fail('repair process did not exit successfully')
     try:
+        img_name = _repair_body_name(v.lq_path, doc)
+        stem = img_name[:-4]
+        v.output = os.path.join(v.lq_path, img_name)
+        v.srlog = srlog_path_for(v.lq_path, img_name)
         with open(config_path, 'rb') as stream:
             digest = hashlib.sha256(stream.read()).hexdigest()
         receipt = os.path.join(v.lq_path, 'Debug', '_SRREPAIR_' + digest + '.json')
         with open(receipt, encoding='utf-8') as stream:
             result = json.load(stream)
         expected_nosr = _cfg_value(doc, 'RepairNOSR')
-        # PAN_old_latest.tif is canonical since 2026-11-02; the legacy name stays
-        # accepted so a repair queued before the rename can still be verified
-        # after the upgrade. Both are fixed, same-directory names.
+        # <body stem>_old_latest.tif is canonical since 2026-11-02; the legacy
+        # name stays accepted so a repair queued before the rename can still be
+        # verified after the upgrade. Both are fixed, same-directory names.
         allowed_backups = {os.path.normpath(os.path.join(v.lq_path, name))
-                           for name in ('PAN_old_latest.tif', 'PAN_old_2.tif')}
+                           for name in (stem + '_old_latest.tif', stem + '_old_2.tif')}
         backup = os.path.normpath(result.get('backup') or '')
         if (result['mode'] != 'pan-nosr-v1' or os.path.normpath(result['output']) != os.path.normpath(v.output)
                 or backup not in allowed_backups
@@ -417,16 +440,16 @@ def _check_repair(v, config_path, doc, sr_exit_code):
             if _signature(path) != result[key]:
                 raise ValueError('artifact changed: ' + path)
         if os.path.getsize(v.output) != os.path.getsize(backup) or os.path.getsize(v.output) <= 0:
-            raise ValueError('PAN byte size changed')
+            raise ValueError('body byte size changed')
         dimensions = _tiff_dimensions(v.output)
         if dimensions != _tiff_dimensions(backup) or dimensions != (result['width'], result['height']):
-            raise ValueError('PAN dimensions changed')
+            raise ValueError('body dimensions changed')
         if tail_last_line(v.srlog) != RUN_FINISHED_MARKER:
             raise ValueError('repair success log is missing')
         if _is_stale(receipt, _safe_mtime(config_path)) or _is_stale(v.srlog, _safe_mtime(config_path)):
             raise ValueError('stale repair evidence')
     except Exception as exc:
-        v.fail('PAN repair contract: %s' % exc)
+        v.fail('repair contract: %s' % exc)
 
 
 def _safe_mtime(path):

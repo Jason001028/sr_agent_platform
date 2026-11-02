@@ -25,8 +25,10 @@ import {
 } from './tifDecode.js';
 import type { CanvasKit, KitCanvas, BandStats, ProbeInfo } from './tifDecode.js';
 import type { Source } from './source.js';
+import { localPreviewSize } from './local_preview.js';
 
 export interface DecodeCallbacks {
+  previewDiv?: number;
   /** 遮罩文案（HTML showMask）；store 负责真正展示/隐藏 */
   onOverlay?: (title: string, sub: string, bar: boolean) => void;
   /** 进度 0~1（HTML updateProgressUI）；store 负责 `rec===activeRec` 守卫后刷新 */
@@ -123,7 +125,8 @@ export async function decodeUtif(file: Blob, kit: CanvasKit, cb?: DecodeCallback
 export function chunkedDecode(source: Source, probe: ProbeInfo, kit: CanvasKit, cb?: DecodeCallbacks): Promise<DecodedRec> {
   const W = probe.W, H = probe.H;
   const plan = getSamplePlan(probe.image);
-  const ps = Math.min(1, PREVIEW_MAX / Math.max(W, H));
+  const target = cb?.previewDiv ? localPreviewSize(W, H, plan.comps, cb.previewDiv) : null;
+  const ps = target ? Math.min(target.w / W, target.h / H) : Math.min(1, PREVIEW_MAX / Math.max(W, H));
   const pw = Math.max(1, Math.round(W * ps)), ph = Math.max(1, Math.round(H * ps));
   const cv = kit.createCanvas(pw, ph);
   const t0 = Date.now();
@@ -145,7 +148,8 @@ export function sparseDecode(source: Source, probe: ProbeInfo, kit: CanvasKit, c
   cb?.onProgress?.(0);
   return parseStrips(source).then((sp) => {
     if (!sp || !sp.ok) throw new Error('稀疏条带布局解析失败');
-    return sparseCollect(source, probe, sp, SPARSE_PREVIEW_MAX, (f) => cb?.onProgress?.(f)).then((r) => {
+    const target = cb?.previewDiv ? localPreviewSize(sp.W, sp.H, 1, cb.previewDiv) : null;
+    return sparseCollect(source, probe, sp, target ? Math.max(target.w, target.h) : SPARSE_PREVIEW_MAX, (f) => cb?.onProgress?.(f)).then((r) => {
       const cv = kit.createCanvas(r.sw, r.sh);
       return {
         W: sp.W, H: sp.H, thumb: cv, src: r.src, srcw: r.sw, srch: r.sh,
@@ -173,7 +177,7 @@ export function decodeGeoTiff(source: Source, probe: ProbeInfo, kit: CanvasKit, 
 export async function decodeOne(
   source: Source, probe: ProbeInfo, file: Blob, kit: CanvasKit, cb?: DecodeCallbacks,
 ): Promise<DecodedRec> {
-  if (needGeo(probe)) {
+  if (cb?.previewDiv || needGeo(probe)) {
     return decodeGeoTiff(source, probe, kit, cb);
   }
   try {

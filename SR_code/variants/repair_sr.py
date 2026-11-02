@@ -32,6 +32,35 @@ def receipt_path(config):
     return scene / 'Debug' / ('_SRREPAIR_' + digest + '.json')
 
 
+def repair_body(scene):
+    """Current body raster: RC -> PAN.tif, SC -> <scene>.tif.
+
+    Mirrors util.check_sr_previous_step: an empty <SolarAzimuth> means the
+    previous step was RC, a value means SC. The detector must agree with the
+    SR script, because the body is the raster this repair replaces. Repairing
+    an SC scene against PAN.tif (the old hardcoded name) both compares the mask
+    with the wrong grid and would publish into an unrelated file.
+    """
+    scene = Path(scene)
+    meta = scene / (scene.name + '_meta.xml')
+    if not meta.is_file():
+        raise ValueError('Missing repair input: ' + str(meta))
+    try:
+        root = ET.parse(str(meta)).getroot()
+    except ET.ParseError as exc:
+        raise ValueError('Cannot parse ' + str(meta) + ': ' + str(exc))
+    # Descendant search, not root.findall: production meta.xml nests the tag
+    # (minidom getElementsByTagName walks the whole tree). ElementTree's
+    # findall only looks at direct children, which made real scenes look like
+    # they had no SolarAzimuth at all.
+    node = next(root.iter('SolarAzimuth'), None)
+    if node is None:
+        raise ValueError('meta.xml has no SolarAzimuth; cannot choose the repair body')
+    step = 'RC' if node.text is None else 'SC'
+    name = 'PAN.tif' if step == 'RC' else scene.name + '.tif'
+    return step, scene / name
+
+
 def _open(gdal, path, update=False):
     ds = gdal.Open(str(path), gdal.GA_Update if update else gdal.GA_ReadOnly)
     if ds is None:
@@ -80,8 +109,6 @@ def compose(gdal, pan, nosr, mask, model, destination, work):
     current = _open(gdal, pan)
     original = _open(gdal, nosr)
     inferred = _open(gdal, model)
-    if _size(inferred) != _size(current):
-        raise ValueError('Model output dimensions do not match current PAN')
     dtype = current.GetRasterBand(1).DataType
     if inferred.GetRasterBand(1).DataType != dtype or original.GetRasterBand(1).DataType != dtype:
         raise ValueError('PAN, NOSR and model output sample types differ')
@@ -89,6 +116,25 @@ def compose(gdal, pan, nosr, mask, model, destination, work):
     if compression.upper() != 'NONE':
         raise ValueError('Exact byte-size repair requires an uncompressed PAN TIFF')
     width, height = _size(current)
+    if _size(inferred) != (width, height):
+        # SC scenes need not sit on an integer multiple of NOSR: the field case
+        # is 30831x30948 from 15730x15790 (x1.96), while SRScale=2 produces
+        # 31460x31580. Refuse only a gross mismatch (wrong scale), otherwise
+        # resample the model output onto the body grid before composing.
+        iw, ih = _size(inferred)
+        if not 0.9 <= iw / float(width) <= 1.1 or not 0.9 <= ih / float(height) <= 1.1:
+            raise ValueError('Model output is off the body grid: %dx%d vs %dx%d'
+                             % (iw, ih, width, height))
+        resampled = Path(work) / 'inferred_body.tif'
+        inferred = None
+        ds = gdal.Translate(str(resampled), str(model), format='GTiff',
+                            width=width, height=height, resampleAlg='cubic',
+                            outputType=dtype,
+                            creationOptions=['BIGTIFF=IF_SAFER', 'COMPRESS=NONE'])
+        if ds is None:
+            raise ValueError('Cannot resample the model output onto the body grid')
+        ds = None
+        inferred = _open(gdal, resampled)
     bg_path = Path(work) / 'bicubic.tif'
     bg = gdal.Translate(str(bg_path), original, format='GTiff', width=width, height=height,
                         resampleAlg='cubic', outputType=dtype,
@@ -126,23 +172,24 @@ def run(config, sr_script, gdal=None, execute=None):
     if root.findtext('RepairMode') != MODE:
         raise ValueError('Missing supported RepairMode')
     scene = Path(root.findtext('DatarootLQ')).resolve()
-    pan = scene / 'PAN.tif'
-    # 新旧顺序：<完整生产名>_old（上一轮产物）→ PAN_old_latest（本次修复前）→
-    # PAN.tif（修复后）。旧平台写过的 PAN_old_2 只做只读兼容，不再新写。
-    backup = scene / 'PAN_old_latest.tif'
-    legacy_backups = (scene / 'PAN_old_2.tif',)
+    _, body = repair_body(scene)
+    body_stem = body.stem
+    # 新旧顺序：<完整生产名>_old（上一轮产物）→ <本体 stem>_old_latest（本次修复前）
+    # → 本体（修复后）。旧平台写过的 PAN_old_2 只做只读兼容，不再新写。
+    backup = scene / (body_stem + '_old_latest.tif')
+    legacy_backups = (scene / (body_stem + '_old_2.tif'),)
     raw_nosr = root.findtext('RepairNOSR')
     if not raw_nosr:
-        raise ValueError('RepairNOSR is required; never infer from current PAN')
+        raise ValueError('RepairNOSR is required; never infer from the current body')
     nosr = Path(raw_nosr).resolve()
-    if nosr.parent != scene or not nosr.stem.endswith('_NOSR') or nosr == pan:
+    if nosr.parent != scene or not nosr.stem.endswith('_NOSR') or nosr == body:
         raise ValueError('RepairNOSR must identify a same-scene _NOSR raster')
     mask = Path(root.findtext('MaskPath') or '').resolve()
-    for path in (pan, nosr, mask, scene / (scene.name + '_meta.xml')):
+    for path in (body, nosr, mask, scene / (scene.name + '_meta.xml')):
         if not path.is_file():
             raise ValueError('Missing repair input: ' + str(path))
-    if os.path.samefile(str(pan), str(nosr)):
-        raise ValueError('NOSR must not alias current PAN')
+    if os.path.samefile(str(body), str(nosr)):
+        raise ValueError('NOSR must not alias the current body')
     existing_backup = next((p for p in (backup,) + legacy_backups if p.exists()), None)
     if existing_backup is not None:
         raise ValueError('Backup exists; refusing to overwrite ' + str(existing_backup))
@@ -157,19 +204,19 @@ def run(config, sr_script, gdal=None, execute=None):
     os.close(fd)
     work = Path(tempfile.mkdtemp(prefix='.repair-', dir=str(debug)))
     try:
-        pan_sig, nosr_sig, mask_sig = signature(pan), signature(nosr), signature(mask)
-        p, n, m = _open(gdal, pan), _open(gdal, nosr), _open(gdal, mask)
+        body_sig, nosr_sig, mask_sig = signature(body), signature(nosr), signature(mask)
+        p, n, m = _open(gdal, body), _open(gdal, nosr), _open(gdal, mask)
         pw, ph = _size(p)
         nw, nh = _size(n)
         if (p.GetMetadata('IMAGE_STRUCTURE') or {}).get('COMPRESSION', 'NONE').upper() != 'NONE':
-            raise ValueError('Exact byte-size repair requires an uncompressed PAN TIFF')
+            raise ValueError('Exact byte-size repair requires an uncompressed body TIFF')
         if p.GetRasterBand(1).DataType != n.GetRasterBand(1).DataType:
-            raise ValueError('PAN and NOSR sample types differ')
+            raise ValueError('Body and NOSR sample types differ')
         if not (pw >= nw and ph >= nh and (pw, ph) != (nw, nh)):
-            raise ValueError('NOSR must have lower resolution than current PAN')
+            raise ValueError('NOSR must have lower resolution than the current body')
         if _size(m) not in ((pw, ph), (nw, nh)):
-            raise ValueError('Mask dimensions match neither PAN nor NOSR')
-        mask_is_pan = _size(m) == (pw, ph)
+            raise ValueError('Mask dimensions match neither body nor NOSR')
+        mask_is_body = _size(m) == (pw, ph)
         p = n = m = None
         private = work / scene.name
         private.mkdir()
@@ -181,12 +228,12 @@ def run(config, sr_script, gdal=None, execute=None):
         lr_mask = work / 'mask_lr.tif'
         reduce_mask(gdal, mask, lr_mask, nw, nh)
         full_mask = mask
-        if not mask_is_pan:
-            full_mask = work / 'mask_pan.tif'
+        if not mask_is_body:
+            full_mask = work / 'mask_body.tif'
             ds = gdal.Translate(str(full_mask), str(mask), format='GTiff', width=pw, height=ph,
                                 resampleAlg='nearest')
             if ds is None:
-                raise ValueError('Cannot map NOSR mask to PAN')
+                raise ValueError('Cannot map NOSR mask to the body grid')
             ds = None
         for tag, text in (('DatarootLQ', str(private)), ('MaskPath', str(lr_mask)),
                           ('Suffix', root.findtext('Suffix') or '260318'), ('DeleteOriTifNeeded', 'False')):
@@ -208,32 +255,32 @@ def run(config, sr_script, gdal=None, execute=None):
         verdict = check_contract(str(stage_config), 0)
         if not verdict.ok or verdict.skip:
             raise ValueError('Inference produced no verified repair: ' + verdict.reason_text)
-        candidate = work / 'PAN_repaired.tif'
-        compose(gdal, pan, nosr, full_mask, verdict.output, candidate, work)
-        if [signature(pan), signature(nosr), signature(mask)] != [pan_sig, nosr_sig, mask_sig]:
+        candidate = work / (body_stem + '_repaired.tif')
+        compose(gdal, body, nosr, full_mask, verdict.output, candidate, work)
+        if [signature(body), signature(nosr), signature(mask)] != [body_sig, nosr_sig, mask_sig]:
             raise ValueError('Repair input changed during inference; nothing published')
         existing_backup = next((p for p in (backup,) + legacy_backups if p.exists()), None)
         if existing_backup is not None:
             raise ValueError('Backup appeared during inference; nothing published: '
                              + str(existing_backup))
-        # Reserve backup without overwriting, then atomically replace current PAN.
-        os.link(str(pan), str(backup))
+        # Reserve backup without overwriting, then atomically replace the body.
+        os.link(str(body), str(backup))
         try:
-            os.replace(str(candidate), str(pan))
+            os.replace(str(candidate), str(body))
         except BaseException:
             backup.unlink()
             raise
-        receipt = {'mode': MODE, 'output': str(pan), 'backup': str(backup), 'nosr': str(nosr),
-                   'output_signature': signature(pan), 'backup_signature': pan_sig,
+        receipt = {'mode': MODE, 'output': str(body), 'backup': str(backup), 'nosr': str(nosr),
+                   'output_signature': signature(body), 'backup_signature': body_sig,
                    'nosr_signature': nosr_sig, 'width': pw, 'height': ph,
-                   'size_bytes': pan_sig[0]}
+                   'size_bytes': body_sig[0]}
         target = receipt_path(config)
         temporary = work / 'receipt.json'
         temporary.write_text(json.dumps(receipt), encoding='utf-8')
         os.replace(str(temporary), str(target))
         # The success log is written only after publication and receipt persistence.
-        log = debug / 'PAN_SRLOG.txt'
-        log.write_text('PAN repair from NOSR; mask SR, outside mask cubic.\nRun finished.\n', encoding='utf-8')
+        log = debug / (body_stem + '_SRLOG.txt')
+        log.write_text('Repair from NOSR; mask SR, outside mask cubic.\nRun finished.\n', encoding='utf-8')
         return receipt
     finally:
         # Retain staging files for diagnosis, including uncommitted candidates.

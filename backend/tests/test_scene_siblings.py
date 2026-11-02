@@ -14,12 +14,14 @@
 """
 
 import os
+import tempfile
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
 from unittest import mock
 
 from backend.services import run_sr as run_sr_svc
+from backend.services import scene_search
 from backend.services.run_sr import task_fingerprint
 from backend.tests.test_preview_jpg import make_strip_tif
 from backend.tests.test_scene_resolve import SCENE_NAME, ResolveBase
@@ -440,3 +442,52 @@ class TestOldOptional(SiblingsBase):
         old = self.by_kind(self.q(c, row['id'], suffix='old'), 'product')
         self.assertEqual(old['name'], 'PAN_old_latest.tif')
         self.assertEqual((old['W'], old['H']), (80, 40))
+
+    def test_sc_repair_backup_surfaces_as_old(self):
+        # SC 场景的本体是 <目录名>.tif，修复备份随之叫 <目录名>_old_latest.tif；
+        # 候选表不能只认 PAN_old_latest，否则 SC 修完的 old 卡片永远是空的。
+        d = self.make_scene()
+        make_strip_tif(d, f'{SCENE_NAME}_old_latest.tif', 80, 40)
+        c = self.client()
+        row = self.resolve(c, d)
+        old = self.by_kind(self.q(c, row['id'], suffix='old'), 'product')
+        self.assertTrue(old['exists'])
+        self.assertEqual(old['name'], f'{SCENE_NAME}_old_latest.tif')
+
+
+class TestSceneBody(unittest.TestCase):
+    """previous_step / body_path：修复发布回的那份影像随 RC/SC 变名。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name) / "S1"
+        self.dir.mkdir()
+
+    def _meta(self, inner: str):
+        (self.dir / "S1_meta.xml").write_text(
+            f"<meta>{inner}</meta>", encoding="utf-8")
+
+    def test_empty_solar_azimuth_is_rc_and_body_is_pan(self):
+        self._meta("<SolarAzimuth></SolarAzimuth>")
+        make_strip_tif(self.dir, "PAN.tif", 8, 8)
+        # 上游 SC 遗留件：input_scene_path 会优先挑它，本体必须是 PAN.tif。
+        make_strip_tif(self.dir, "S1.tif", 4, 4)
+        self.assertEqual(scene_search.previous_step(self.dir), "RC")
+        self.assertEqual(scene_search.body_path(self.dir).name, "PAN.tif")
+
+    def test_self_closing_solar_azimuth_is_rc(self):
+        self._meta("<SolarAzimuth/>")
+        make_strip_tif(self.dir, "PAN.tif", 8, 8)
+        self.assertEqual(scene_search.previous_step(self.dir), "RC")
+
+    def test_solar_azimuth_value_is_sc_and_body_is_directory_name(self):
+        self._meta("<SolarAzimuth>137.8424</SolarAzimuth>")
+        make_strip_tif(self.dir, "S1.tif", 8, 8)
+        make_strip_tif(self.dir, "PAN.tif", 4, 4)
+        self.assertEqual(scene_search.previous_step(self.dir), "SC")
+        self.assertEqual(scene_search.body_path(self.dir).name, "S1.tif")
+
+    def test_missing_meta_has_no_body(self):
+        self.assertIsNone(scene_search.previous_step(self.dir))
+        self.assertIsNone(scene_search.body_path(self.dir))

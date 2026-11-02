@@ -757,7 +757,15 @@ async def goal_tick(state):
         if owned:
             executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="goal")
         try:
-            for goal in state.store.list_goals(limit=100, statuses=SCHEDULED):
+            for goal in state.store.list_goals(
+                    limit=200, statuses=SCHEDULED, exclude_kinds=("batch",)):
+                # Batch Goals belong to the deterministic Producer/Monitor
+                # (PR C). They are excluded inside the query, before LIMIT, so a
+                # parked batch backlog cannot fill the candidate window and
+                # starve ordinary Goals. The checkpoint check also covers rows
+                # that predate the goal-level kind column.
+                if (goal.get("checkpoint") or {}).get("workflow") == "batch_pan_repair_v1":
+                    continue
                 if not hasattr(state, "chat_locks"):
                     state.chat_locks = {}
                 session_lock = (

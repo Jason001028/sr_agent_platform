@@ -59,6 +59,7 @@ from backend.config import SR_DEFAULT_BUNDLE_DIR, SR_DEFAULT_OPTIONS_YML
 from backend.config import SR_DEFAULT_SUFFIX, SR_DEFAULT_WORK_DIR, sr_runtime
 
 from . import local_exec
+from . import scene_search
 from . import slurm
 from . import store as store_mod
 
@@ -120,14 +121,17 @@ BUNDLE_SUFFIX_CONFIG_NAMES = (
 SUFFIX_RE = re.compile(r"^[A-Za-z0-9_-]{1,16}$")
 SUFFIX_RULE = "只允许字母/数字/下划线/短横，长度 1..16"
 
-#: 修复前的 PAN 备份名。新旧顺序是
-#: `<完整生产名>_old.tif`（上一轮产物）→ `PAN_old_latest.tif`（本次修复前）→
-#: `PAN.tif`（修复后）；`latest` 直接表明它比 `_old` 新。固定一份，出现即拒绝
-#: 再次修复，见 docs/sr_code/pan_repair_contract.md。
+#: RC 场景修复前的本体备份名（本体 = PAN.tif）。SC 场景的本体是
+#: `<目录名>.tif`，备份随之叫 `<目录名>_old_latest.tif`（见
+#: scene_search.body_path）；本常量只固定 RC 那一条候选名。
+#: 新旧顺序是 `<完整生产名>_old.tif`（上一轮产物）→ `<本体 stem>_old_latest.tif`
+#: （本次修复前）→ 本体（修复后）；`latest` 直接表明它比 `_old` 新。固定一份，
+#: 出现即拒绝再次修复，见 docs/sr_code/pan_repair_contract.md。
 REPAIR_BACKUP_NAME = "PAN_old_latest.tif"
 
 #: 改名前的平台产出名，只读兼容：现场已经存在的旧备份仍要能被 /siblings 找到。
-#: 新任务不再写这个名字（2026-11-02 起）。
+#: 新任务不再写这个名字（2026-11-02 起）。SC 场景的 `<目录名>_old_2.tif`
+#: 由 app.py 按 body_path 另拼，不在这里固定。
 LEGACY_REPAIR_BACKUP_NAMES = ("PAN_old_2.tif",)
 
 #: 与产线/平台派生件同名的后缀。它们作为产物后缀拼进 `<输入名>_<Suffix>.tif`
@@ -340,6 +344,18 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
     repair_script = Path(__file__).resolve().parents[2] / 'SR_code' / 'variants' / 'repair_sr.py'
     if repair:
         verify_script = str(repair_script.with_name('verify_sr_run.py'))
+    # The repair body is PAN.tif for RC scenes and <directory>.tif for SC ones;
+    # name it in the audit line rather than always claiming PAN (the scene's
+    # meta.xml is the same RC/SC switch the SR script reads).
+    repair_body = "PAN.tif"
+    if repair:
+        try:
+            lq = ET.parse(str(config_xml_path)).getroot().findtext("DatarootLQ")
+        except (OSError, ET.ParseError):
+            lq = None
+        body = scene_search.body_path(lq) if lq else None
+        if body is not None:
+            repair_body = body.name
     # Which SR script the job runs (same shape as SR_VERIFY_SCRIPT above).  Both
     # names are resolved HERE, not in the job: the batch script carries
     # --export=NONE, so nothing set in this process survives into it — the name
@@ -404,8 +420,9 @@ def build_batch_script(config_xml_path, out_dir, python=None, bundle_dir=None,
         # output path is renamed to `*_NOSR.tif` before being overwritten
         # (util.writeTiff). Say it in the log every single time (plan §4.2): the
         # log is what gets read when a run is being explained afterwards.
-        *(['echo "PAN repair: NOSR input; ROI model SR, background cubic; '
-           'old PAN -> PAN_old_latest.tif, verified result -> PAN.tif."'] if repair else []),
+        *([f'echo "Repair: NOSR input; ROI model SR, background cubic; '
+           f'old {repair_body} -> {Path(repair_body).stem}_old_latest.tif, '
+           f'verified result -> {repair_body}."'] if repair else []),
         *([] if (sandbox_src and sandbox_parent) or repair else [
             'echo "WARNING: no sandbox — SR runs in place: it writes'
             ' <input>_<suffix>.tif into the scene directory and leaves the input'

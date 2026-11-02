@@ -1153,10 +1153,14 @@ async def submit_queue(request: Request):
             f"<输入名>_{params['suffix']}.tif，输入 tif 不改名也不删除；"
             "该目录里已存在同名输出时，旧输出先被改名为 <同名>_NOSR.tif 再覆盖")
         if params.get("repair"):
+            # 本体名随场景步骤变：RC 是 PAN.tif，SC 是 <目录名>.tif（判据同
+            # SR 脚本）。判不出来时退回 PAN.tif，保持旧口径。
+            body = scene_search.body_path(params["lq_path"])
+            body_name = body.name if body is not None else "PAN.tif"
             out["notice"] = (
                 f"场景目录 {params['lq_path']}：从同景完整生产名_NOSR.tif 计算，掩码内模型超分、掩码外插值，"
-                "保持当前 PAN 的尺寸与文件大小；校验后将旧 PAN.tif 备份为 "
-                "PAN_old_latest.tif，新结果发布为 PAN.tif。备份已存在则停止。")
+                f"保持当前本体 {body_name} 的尺寸与文件大小；校验后将旧 {body_name} 备份为 "
+                f"{Path(body_name).stem}_old_latest.tif，新结果发布为 {body_name}。备份已存在则停止。")
     return out
 
 

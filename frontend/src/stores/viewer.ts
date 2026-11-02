@@ -54,6 +54,7 @@ import {
 import type { SceneResolveResult, SceneSibling, SceneSiblings } from '../lib/api.js';
 import { classifyImages, imageKindOf } from '../lib/imageFiles.js';
 import type { SceneOpenMeta, SceneRow } from '../lib/scene.js';
+import { sourceFingerprint } from '../lib/local_preview.js';
 import { isIntermediateStage, stageLabel, stageRefusal } from '../lib/stage.js';
 import type { StageKind } from '../lib/stage.js';
 import { readSpotlightMode, saveSpotlightMode } from '../lib/spotlight.js';
@@ -1440,6 +1441,10 @@ export const useViewerStore = defineStore('viewer', () => {
     const already = activeId.value === id;
     const moved = placeRec(id, side);
     noteCompareEntry(id);                // 对比模式下露面的这张要进点选清单（幂等）
+    if (rec.thumb && ['sparse', 'chunked', 'utif'].includes(rec.route ?? '') && rec.detailDiv !== previewDiv.value) {
+      await decodeRec(rec, true);
+      return;
+    }
     if (already && rec.thumb && (!rec.card || rec.detailDiv === previewDiv.value)) {
       // 已经是活动侧这张：只重画。**只有它真的换了格子才重新适配** ——
       // 同一张图留在原格时若也 fit，一次多余的点选就把用户的缩放抹了。
@@ -1503,8 +1508,10 @@ export const useViewerStore = defineStore('viewer', () => {
     void maybePrefetchCompare();
   }
 
-  async function decodeRec(rec: ViewerRec) {
+  async function decodeRec(rec: ViewerRec, preserveView = false) {
     const my = ++rec.token;                     // 领号：本地解码要接管像素了
+    const div = previewDiv.value;
+    const previousSize = preserveView && rec.thumb ? { w: rec.thumb.width, h: rec.thumb.height } : undefined;
     busy.value = true;
     let probe: ProbeInfo | null = null;
     try { probe = await probeImage(rec.file); } catch (e) { probe = null; }
@@ -1520,10 +1527,16 @@ export const useViewerStore = defineStore('viewer', () => {
     const source = new FileSource(rec.file, rec.name);
     try {
       const d = await decodeOne(source, probe, rec.file, browserKit, {
+        previewDiv: div,
         onOverlay: (title, sub, bar) => showMask(title, sub, bar),
-        onProgress: (f) => { if (activeId.value === rec.id) updateProgressUI(f); },
+        onProgress: (f) => {
+          if (rec.token !== my || !recs.value.includes(rec)) throw new Error('预览请求已替换');
+          if (activeId.value === rec.id) updateProgressUI(f);
+        },
       });
-      applyDecoded(rec, d, my);
+      if (rec.token !== my || !recs.value.includes(rec)) return;
+      rec.detailDiv = div;
+      applyDecoded(rec, d, my, previousSize);
       // 遮罩还盖着（finally 里才收）：把首次缩放那笔一次性重采样在这里付掉
       await warmZoom(rec);
     } catch (e) {
@@ -1534,7 +1547,7 @@ export const useViewerStore = defineStore('viewer', () => {
     }
   }
 
-  function applyDecoded(rec: ViewerRec, d: DecodedRec, token: number) {
+  function applyDecoded(rec: ViewerRec, d: DecodedRec, token: number, previousSize?: { w: number; h: number }) {
     // 解码是几十秒级的异步过程：期间这张图可能已经被升级成盘阵 JPG（或又被解码
     // 一次），那份结果比这份新。令牌对不上就整份丢掉，一个字都不写。
     if (rec.token !== token) return;
@@ -1551,9 +1564,12 @@ export const useViewerStore = defineStore('viewer', () => {
       : '';
     rec.status = '完成，' + (d.route === 'utif' ? '解码' : '读取') + '耗时 ' + fmtTime(d.ms) + routeText;
     rec.statusCls = 'ok';
+    const ratio = Math.max(d.W / d.srcw, d.H / d.srch);
+    rec.status += ` · 实际约 1/${Number(ratio.toFixed(2))}（${d.srcw}×${d.srch}）`;
+    if (ratio > previewDiv.value * 1.01) rec.status += ' · 已达本地预览内存上限';
     // 像素刚换过 → 一律重画。已选过模式的（同一 rec 重复解码）沿用原模式，不重置。
     paintStretch(rec, rec.paintedMode ?? startStretch(rec.route, stretchMode.value));
-    afterPixels(rec);                // 分屏下这张可能在非活动侧解码完成
+    afterPixels(rec, previousSize);                // 分屏下这张可能在非活动侧解码完成
   }
 
   function failRec(rec: ViewerRec, e: unknown) {
@@ -2267,8 +2283,9 @@ export const useViewerStore = defineStore('viewer', () => {
     savePreviewDiv(div);
     const visible = new Set([paneA.value, ...(split.value ? [paneB.value] : [])]);
     for (const rec of recs.value) {
-      if (!visible.has(rec.id) || rec.route !== 'jpg' || !rec.sceneId) continue;
-      void reloadPreviewLevel(rec, div);
+      if (!visible.has(rec.id)) continue;
+      if (rec.route === 'jpg' && rec.sceneId) void reloadPreviewLevel(rec, div);
+      else if (rec.route === 'sparse' || rec.route === 'chunked' || rec.route === 'utif') void decodeRec(rec, true);
     }
   }
 
@@ -2975,6 +2992,28 @@ export const useViewerStore = defineStore('viewer', () => {
    *  请求里还带一串 `anchor` = 「用户当前打开的那几景」（见 `noteSceneDir`）。产物名
    *  里**没有场景身份**时（RC 场景的 `PAN_<suffix>.jpg`）后端只能靠它 —— 名字能反推
    *  时它一个字都不起作用，所以照旧先反推、失败才用到它。 */
+  async function linkServerPath(id: number, path: string): Promise<void> {
+    const rec = recs.value.find(r => r.id === id);
+    if (!rec || rec.pending || rec.sceneId) throw new Error('影像已关闭或已关联');
+    const token = ++rec.token;
+    const div = previewDiv.value;
+    const cfg = loadSrConfig();
+    const fingerprint = await sourceFingerprint(rec.file);
+    const res = await apiResolveScene(cfg, { path, source_fingerprint: fingerprint });
+    if (rec.token !== token || !recs.value.includes(rec)) return;
+    if (!res.row.W || !res.row.H) throw new Error('服务端源影像缺少有效尺寸');
+    if (rec.W && rec.H && (rec.W !== res.row.W || rec.H !== res.row.H)) throw new Error('源影像尺寸不符，不能关联');
+    const blob = await fetchSceneJpg(cfg, res.row, div);
+    if (rec.token !== token || !recs.value.includes(rec) || previewDiv.value !== div) throw new Error('影像或预览档位已变化，请重新关联');
+    await applySceneJpgToRec(rec, {
+      name: rec.name, W: res.row.W, H: res.row.H, sceneId: res.row.id,
+      lqPath: res.resolved.sr_capable ? res.resolved.dir : null,
+      sceneDir: res.resolved.dir, serverMaskPath: res.resolved.mask_path,
+      stageKind: res.resolved.kind, stageSuffix: res.resolved.suffix,
+      previewOnly: res.resolved.preview_only, srcRev: res.row.srcRev,
+    }, blob, `服务端预览（${previewDivLabel(div)}，文件名、字节数与三段内容采样已核对）`, true);
+  }
+
   async function tryLinkScenes(rec?: ViewerRec | null): Promise<boolean> {
     const r = rec ?? activeRec.value;
     // 已是盘阵场景 / 走过 resolve / 已关联过 / 已试过 —— 都直接返回
@@ -2992,7 +3031,8 @@ export const useViewerStore = defineStore('viewer', () => {
     ]);
     try {
       res = await apiResolveScene(loadSrConfig(),
-        { name: r.name, size_bytes: r.file.size, anchor },
+        { name: r.name, size_bytes: r.file.size, anchor,
+          ...(/\.tiff?$/i.test(r.file.name) ? { source_fingerprint: await sourceFingerprint(r.file) } : {}) },
         { signal: AbortSignal.timeout(20000) });
     } catch (e) {
       if (!recs.value.includes(r)) return false;
@@ -3321,7 +3361,7 @@ export const useViewerStore = defineStore('viewer', () => {
     mergeRois, delClick, wandSelect, buildMaskJson, exportMaskJson, genMask,
     getRois, submitSr, bakeMaskToServer,
     // 本地图反推关联（打开盘阵场景统一走「场景库」页）
-    tryLinkScenes,
+    tryLinkScenes, linkServerPath,
     // 图像对比（关闭 / 点选对比 / 分屏对比）
     compareMode, compareOn, split, setCompareMode,
     cmpStripOpen, setCmpStripOpen,

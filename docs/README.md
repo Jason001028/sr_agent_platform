@@ -484,10 +484,15 @@ sr_agent_platform/
 
 ### 6.1 交接与状态（`docs/status/`）
 
+缩略图卡片的「在资源管理器中打开」与 Windows 客户端一次性配置见 [explorer-open.md](status/explorer-open.md)。
+
 | 文档 | 内容 |
 |---|---|
 | [current-question.md](status/current-question.md) | 平台现状、当前路线、未收口项、下一步、现值速查。新会话先读 |
 | [durable_goal_runtime.md](status/durable_goal_runtime.md) | Goal/Round 执行、SR 自动续跑、Lease Fencing、独立验收与自动化验证 |
+| [p0-gap-review.md](status/p0-gap-review.md) | 2026-11-02 对 Harness P0 计划的逐项差距复核与测试基线 |
+| [batch-pr-ab.md](status/batch-pr-ab.md) | 旧版批量修复计划 PR A/B：修复契约夹具、Manifest 冻结、原子 Goal/Items 与验收 |
+| [batch-pr-c.md](status/batch-pr-c.md) | PR C Producer / Monitor：异步切片、执行隔离、提交幂等与容量、暂停后监控、事件契约 |
 | [goal_clarification.md](status/goal_clarification.md) | Goal 澄清、WAITING_USER、原子回答/恢复、崩溃窗口与实测验收 |
 | [runtime_status.md](status/runtime_status.md) | 每次模型请求的临时运行状态、计数口径、注入边界与测试 |
 | [spotlight-focus.md](status/spotlight-focus.md) | 《待修复清单》选中行驱动的左侧场景聚焦遮罩：层级、坐标、镂空分块、三档与验证 |
@@ -524,6 +529,7 @@ sr_agent_platform/
 | 文档 | 内容 |
 |---|---|
 | [api-contract.md](planning/api-contract.md) | 平台 REST / SSE 契约：端点、参数、错误码、帧类型。截图、trajectory、机器与插件端点以代码和对应 planning 文档为准 |
+| [1023.md](planning/1023.md) | Harness P0 与 Batch v2 统一计划：当前状态、PR A–F、M0–M4、异步执行与验收边界 |
 | [gui-requirements.md](planning/gui-requirements.md) | Agent 与 GUI 平台的中长期需求与阶段目标 |
 | [frontend-migration.md](planning/frontend-migration.md) | tif-viewer 迁移到 Vue 3 的范围、阶段与验收 |
 | [frontend-phase4-phase5-prompts.md](planning/frontend-phase4-phase5-prompts.md) | 已归档的开工提示词，供追溯，不照抄重做 |

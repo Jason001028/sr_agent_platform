@@ -578,9 +578,12 @@ head -3 code_0817_prod_slurm.py                                  # ✓= "GENERAT
 ls -l code_0817_prod.py                                          # ✓= 生产原脚本仍在，未被改动
 ```
 
-> ⚠️ `verify_sr_run.py` 的仓库副本 **2026-09-15 起为 17164 B / `5fa627d8…`**（判定文件的
-> 编码锁定，见 `docs/status/timeline-archive.md`）。机上若还是 09-11 拷的 16419 B 旧版，
-> 跑任何真实作业前都重新拷一次——旧版会把终态判歪。
+> ⚠️ `verify_sr_run.py` 的仓库副本 **2026-11-02 起为 22370 B / `e3eb2fc5…`**（含
+> PAN/SC 修复契约与判定文件的编码锁定，见 `docs/status/timeline-archive.md`）。
+> 机上若还是 09-11 拷的 16419 B 旧版，跑任何真实作业前都重新拷一次——旧版会把终态判歪。
+> 注意：平台当前所有提交都走 repair 分支，作业实际执行的是
+> `<APP>/SR_code/variants/verify_sr_run.py`（绝对路径）；bundle 里这份只在非 repair
+> 提交时才会被读取。
 
 > **为什么可以不顶替**：运行脚本里那两个程序名是 `SR_SR_SCRIPT` / `SR_VERIFY_SCRIPT` 两个 env
 > 决定的（`run_sr.py`），后端在生成脚本时把名字写进文本。所以变体只要跟原脚本放在同一目录、
@@ -599,7 +602,7 @@ env——`sr-api.service` 里**下面七项**全部必填，node81-135 实测值
 | --- | --- | --- |
 | `SR_EXECUTOR` | `local` | `slurm`（仓库默认）/ `local` 二选一。**真机必须显式写 `local`**，否则会走已冻结的调度分支 |
 | `SR_PYTHON` | `/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python` | **SR 生产解释器**（py3.6 + torch + GDAL + ImgHistMatch.so），与平台 venv `/opt/sr-venv`（py3.9）平行、互不污染——后端不 import SR/torch/GDAL，只在运行脚本里写一行解释器路径，由子进程解析。2026-09-14 实测：**torch 1.10.2+cu113 / GDAL 2.4.0**（目录名里的 1.9.1 ≠ 实际版本）。2026-09-15 `ls -d` 复核：该前缀存在，可直接照抄（备选的 `/media/node81-135/SSD` 不存在） |
-| `SR_BUNDLE_DIR` | `/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes` | `code_0817_prod.py` / `models` / `utils` / `options` 所在目录；拼写以 `code_0817_prod.py:27` 的 `load_library()` 为准 |
+| `SR_BUNDLE_DIR` | `/DiskArray/tmp/wangrz/mmsr_bundle_240617/codes` | `code_0817_prod.py` / `models` / `utils` / `options` 所在目录；拼写以 `code_0817_prod.py:27` 的 `load_library()` 为准 |
 | `SR_SLURM_WORK_DIR` | `/DiskArray/tmp/wangrz/sr_agent_work` | **历史变量名**（本机直跑沿用）：config.xml、运行脚本、子进程日志与 `.local_job_seq` 的落盘处。本机直跑不再要求共享盘，但必须是 **nginx 可写**的本机/盘阵路径；默认值 `/tmp/sr_agent_work` |
 | `SR_SR_SCRIPT` | `code_0817_prod_slurm.py` | 作业跑哪个超分脚本（相对 `SR_BUNDLE_DIR`）。**不配 = 跑生产原脚本**，见上面的警告 |
 | `SR_VERIFY_SCRIPT` | `verify_sr_run.py` | 作业内契约校验器（相对 `SR_BUNDLE_DIR`）。不配也会跑这个名字，显式写出来是为了可审计。⚠️ 该文件必须是本批版本，否则终态可能判错（§7.3） |

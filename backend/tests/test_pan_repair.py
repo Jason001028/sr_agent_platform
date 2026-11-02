@@ -153,6 +153,39 @@ class TestPanRepair(unittest.TestCase):
         self.assertEqual(self.pan.read_bytes(), old)
         self.assertFalse((self.scene / 'PAN_old_latest.tif').exists())
 
+    def test_model_output_within_ten_percent_is_resampled_onto_body(self):
+        # SC 场景的 NOSR 不必是整数倍：实测 30831/15730 ≈ 1.96，而 SRScale=2
+        # 会给出 2 倍。2% 的偏差要重采样到本体网格，而不是直接失败。
+        work = Path(self.tmp.name) / 'compose'
+        work.mkdir()
+        pan, nosr = work / 'pan.tif', work / 'nosr.tif'
+        mask, model = work / 'mask.tif', work / 'model.tif'
+        dest = work / 'dest.tif'
+        tifffile.imwrite(pan, np.zeros((100, 100), dtype=np.uint16))
+        tifffile.imwrite(nosr, np.zeros((50, 50), dtype=np.uint16))
+        selection = np.zeros((100, 100), dtype=np.uint8)
+        selection[60, 60] = 255
+        tifffile.imwrite(mask, selection)
+        tifffile.imwrite(model, np.full((102, 102), 99, dtype=np.uint16))
+        repair.compose(self.gdal, pan, nosr, mask, model, dest, work)
+        got = tifffile.imread(dest)
+        self.assertEqual(got.shape, (100, 100))
+        self.assertEqual(got[60, 60], 99)
+        self.assertEqual(os.path.getsize(dest), os.path.getsize(pan))
+
+    def test_model_output_grossly_off_body_grid_is_refused(self):
+        work = Path(self.tmp.name) / 'compose_bad'
+        work.mkdir()
+        pan, nosr = work / 'pan.tif', work / 'nosr.tif'
+        mask, model = work / 'mask.tif', work / 'model.tif'
+        tifffile.imwrite(pan, np.zeros((100, 100), dtype=np.uint16))
+        tifffile.imwrite(nosr, np.zeros((50, 50), dtype=np.uint16))
+        tifffile.imwrite(mask, np.zeros((100, 100), dtype=np.uint8))
+        tifffile.imwrite(model, np.full((200, 200), 99, dtype=np.uint16))
+        with self.assertRaisesRegex(ValueError, 'off the body grid'):
+            repair.compose(self.gdal, pan, nosr, mask, model,
+                           work / 'dest.tif', work)
+
     def test_skipped_inference_is_not_a_successful_pan_repair(self):
         old = self.pan.read_bytes()
 
@@ -199,7 +232,7 @@ class TestPanRepair(unittest.TestCase):
 
     def test_wrong_model_dimensions_does_not_publish(self):
         old = self.pan.read_bytes()
-        with self.assertRaisesRegex(ValueError, 'dimensions'):
+        with self.assertRaisesRegex(ValueError, 'off the body grid'):
             self.run_repair(lambda argv: self.inference(argv, size=(16, 16)))
         self.assertEqual(self.pan.read_bytes(), old)
         self.assertFalse((self.scene / 'PAN_old_latest.tif').exists())
@@ -301,3 +334,81 @@ class TestPanRepairSceneApi(ResolveBase):
                    if i['kind'] == 'product')
         self.assertEqual(old['name'], 'PAN_old_latest.tif')
         self.assertEqual((old['W'], old['H']), (80, 40))
+
+
+class TestScRepair(unittest.TestCase):
+    """SC scenes carry the body under the scene name, not PAN.tif.
+
+    Field case 2026-11-02: mask matched the SC body (30831x30948), while a
+    stale PAN.tif of another size (18688x15800) sat next to it. The adapter
+    compared the mask with PAN.tif and refused the repair.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.scene = Path(self.tmp.name) / 'A_B_20261009120519_200544503_101_0017_001_L1_PAN'
+        self.scene.mkdir()
+        self.body = self.scene / (self.scene.name + '.tif')
+        self.nosr = self.scene / (self.scene.name + '_NOSR.tif')
+        self.mask = self.scene / (self.scene.name + '_mask.tif')
+        self.decoy = self.scene / 'PAN.tif'
+        tifffile.imwrite(self.body, np.full((8, 8), 77, dtype=np.uint16))
+        tifffile.imwrite(self.nosr, np.full((4, 4), 12, dtype=np.uint16))
+        mask = np.zeros((8, 8), dtype=np.uint8)
+        mask[3, 3] = 255
+        tifffile.imwrite(self.mask, mask)
+        tifffile.imwrite(self.decoy, np.full((6, 7), 5, dtype=np.uint16))
+        self.meta = self.scene / (self.scene.name + '_meta.xml')
+        # Production meta.xml nests the tag under ProductInfo; minidom
+        # getElementsByTagName searches descendants, ElementTree findall does
+        # not. Keep the nesting here so a regression fails this test.
+        self.meta.write_text(
+            '<meta><ProductInfo><SolarAzimuth>137.8424</SolarAzimuth>'
+            '</ProductInfo></meta>', encoding='utf-8')
+        self.opt = Path(self.tmp.name) / 'options.yml'
+        self.opt.write_text('tiftype: .tif\nscale: 2\n', encoding='utf-8')
+        self.config = Path(self.tmp.name) / 'config.xml'
+        self.params = repair_request({'lq_path': str(self.scene), 'mask_path': str(self.mask),
+                                      'suffix': '260318', 'sr_scale': 2,
+                                      'options_yml': str(self.opt)})
+        self.config.write_text(build_config_xml(self.params), encoding='utf-8')
+        self.gdal = FakeGdal()
+        self.patch = patch.dict('sys.modules', {'verify_sr_run': verifier})
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+
+    def inference(self, argv):
+        self.assertIn('--infer', argv)
+        config = ET.parse(argv[-1]).getroot()
+        private = Path(config.findtext('DatarootLQ'))
+        self.assertNotEqual(private, self.scene)
+        np.testing.assert_array_equal(
+            tifffile.imread(private / (self.scene.name + '.tif')),
+            tifffile.imread(self.nosr))
+        mapped = tifffile.imread(config.findtext('MaskPath'))
+        self.assertEqual(mapped.shape, (4, 4))
+        self.assertEqual(mapped[1, 1], 255)
+        tifffile.imwrite(private / (self.scene.name + '_260318.tif'),
+                         np.full((8, 8), 99, dtype=np.uint16))
+        debug = private / 'Debug'
+        debug.mkdir()
+        (debug / (self.scene.name + '_SRLOG.txt')).write_text('Run finished.\n')
+
+    def test_sc_body_is_repaired_and_decoy_pan_untouched(self):
+        old = self.body.read_bytes()
+        decoy = self.decoy.read_bytes()
+        receipt = repair.run(self.config, 'unused-inference.py', gdal=self.gdal,
+                             execute=self.inference)
+        got = tifffile.imread(self.body)
+        expected = np.full((8, 8), 12, dtype=np.uint16)
+        expected[3, 3] = 99
+        np.testing.assert_array_equal(got, expected)
+        self.assertEqual(self.body.stat().st_size, len(old))
+        backup = self.scene / (self.scene.name + '_old_latest.tif')
+        self.assertEqual(backup.read_bytes(), old)
+        self.assertEqual(self.decoy.read_bytes(), decoy)
+        verdict = verifier.check_contract(str(self.config), 0)
+        self.assertTrue(verdict.ok, verdict.reason_text)
+        self.assertEqual(Path(verdict.output), self.body)
+        self.assertEqual(receipt['width'], 8)

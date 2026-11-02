@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import socket
 import subprocess
@@ -108,6 +110,25 @@ class ExternalServices:
         self.thread.join(3)
 
     def model(self, request):
+        if request.get("model") == "title-model":
+            # Session titles are an unrelated background service. Answering
+            # them here as Goal budget calls made the process test race with
+            # the title loop (external count 6 while the Goal reserved 5).
+            return {
+                "id": "chatcmpl-title",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": "title-model",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant",
+                                "content": json.dumps({"title": "过程验收"},
+                                                      ensure_ascii=False)},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1,
+                          "total_tokens": 2},
+            }
         with self.lock:
             self.model_calls += 1
             ordinal = self.model_calls
@@ -178,15 +199,51 @@ class ExternalServices:
         }
 
     def finish(self, job_id):
-        config = ET.parse(self.jobs[job_id]["config_xml"]).getroot()
+        """Produce the artifacts the real PAN/NOSR repair contract checks.
+
+        The old fake wrote ``<scene>_<suffix>.tif`` and a scene-named SRLOG,
+        which is the legacy SR layout.  A repair run instead publishes PAN.tif,
+        keeps PAN_old_latest.tif, and writes PAN_SRLOG.txt plus a receipt whose
+        signatures match those exact files.
+        """
+        config_path = Path(self.jobs[job_id]["config_xml"])
+        config = ET.parse(config_path).getroot()
         scene = Path(config.findtext("DatarootLQ"))
-        suffix = config.findtext("Suffix")
+        nosr = Path(config.findtext("RepairNOSR"))
         debug = scene / "Debug"
         debug.mkdir(exist_ok=True)
-        (debug / f"{scene.name}_SRLOG.txt").write_text(
-            "Run finished.", encoding="utf-8"
-        )
-        Image.new("I;16", (16, 16), 7).save(scene / f"{scene.name}_{suffix}.tif")
+        pan = scene / "PAN.tif"
+        backup = scene / "PAN_old_latest.tif"
+        if not backup.exists():
+            if not pan.exists():
+                raise AssertionError(f"fake repair needs an input PAN: {pan}")
+            os.replace(pan, backup)
+        # A fresh copy keeps the byte size and dimensions identical while
+        # making the output newer than config.xml (the contract rejects stale
+        # artifacts, and copy2 would preserve the input mtime).
+        shutil.copyfile(backup, pan)
+        (debug / "PAN_SRLOG.txt").write_text("Run finished.", encoding="utf-8")
+
+        def signature(path):
+            stat = os.stat(path)
+            return [stat.st_size, stat.st_mtime_ns, stat.st_ino]
+
+        with Image.open(pan) as image:
+            width, height = image.size
+        digest = hashlib.sha256(config_path.read_bytes()).hexdigest()
+        receipt = {
+            "mode": "pan-nosr-v1",
+            "output": str(pan),
+            "backup": str(backup),
+            "nosr": str(nosr),
+            "output_signature": signature(pan),
+            "backup_signature": signature(backup),
+            "nosr_signature": signature(nosr),
+            "width": width,
+            "height": height,
+        }
+        (debug / f"_SRREPAIR_{digest}.json").write_text(
+            json.dumps(receipt), encoding="utf-8")
         with self.lock:
             self.jobs[job_id]["complete"] = True
 
@@ -203,10 +260,17 @@ class GoalProcessAcceptance(unittest.TestCase):
         self.scenes = [self.root / "scene_one", self.root / "scene_two"]
         for scene in self.scenes:
             scene.mkdir()
+            # Empty <SolarAzimuth> makes this an RC scene, so the repair body
+            # (and the fake's receipt) is PAN.tif. A non-empty value means SC,
+            # whose body is <scene_dir>.tif — the fake would then publish the
+            # wrong artifact and the verifier would reject it forever.
             (scene / f"{scene.name}_meta.xml").write_text(
-                "<meta><SolarAzimuth>1</SolarAzimuth></meta>"
+                "<meta><SolarAzimuth></SolarAzimuth></meta>"
             )
-            Image.new("I;16", (8, 8), 7).save(scene / f"{scene.name}.tif")
+            # Same fixed pair the repair adapter reads: PAN.tif plus
+            # <dir>_NOSR.tif, both single-band, NOSR at half resolution.
+            Image.new("I;16", (16, 16), 7).save(scene / "PAN.tif")
+            Image.new("I;16", (8, 8), 7).save(scene / f"{scene.name}_NOSR.tif")
         self.options = self.root / "options.yml"
         self.options.write_text("tiftype: .tif\n", encoding="utf-8")
         self.report = self.root / "report.json"
@@ -228,6 +292,7 @@ class GoalProcessAcceptance(unittest.TestCase):
             "SR_LLM_BASE_URL": self.external.url + "/v1",
             "SR_LLM_API_KEY": "test-only",
             "SR_LLM_MODEL": "fake-process-model",
+            "SR_TITLE_MODEL": "title-model",
             "SR_LLM_TIMEOUT": "10",
             "SR_LLM_STREAM": "0",
             "SR_EXECUTOR": "slurm",
@@ -260,13 +325,18 @@ class GoalProcessAcceptance(unittest.TestCase):
 
     def tearDown(self):
         self.external.release_model.set()
-        for process in self.processes:
-            self.stop(process)
-        self.external.close()
-        self.store.close()
-        for log in self.logs:
-            log.close()
-        self.tmp.cleanup()
+        try:
+            for process in self.processes:
+                self.stop(process)
+        finally:
+            self.external.close()
+            self.store.close()
+            for log in self.logs:
+                try:
+                    log.close()
+                except OSError:
+                    pass
+            self.tmp.cleanup()
 
     def spawn(self, mode="tick", port=None):
         log = (self.root / f"child_{len(self.processes)}.log").open(
@@ -296,16 +366,26 @@ class GoalProcessAcceptance(unittest.TestCase):
         return process
 
     def stop(self, process):
-        if process.poll() is None:
+        if process.poll() is not None:
+            return
+        try:
             if os.name == "nt":
                 subprocess.run(
                     ["taskkill", "/PID", str(process.pid), "/T", "/F"],
                     capture_output=True,
-                    timeout=10,
+                    timeout=20,
                 )
             else:
                 os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            # Fall through to Popen.kill(): a slow taskkill must not turn a
+            # teardown into a second failure that hides the product assertion.
+            pass
+        try:
+            process.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=20)
 
     def run_tick(self, expected=0):
         process = self.spawn()
@@ -405,6 +485,25 @@ class GoalProcessAcceptance(unittest.TestCase):
             time.sleep(0.025)
         self.fail("timed out waiting for process acceptance condition")
 
+    def goal_events(self, gid):
+        """Read the complete event log, not just the store's first page.
+
+        ``list_goal_events`` defaults to 500 rows.  A terminate fallback that
+        leaves the old backend alive lets it keep appending
+        ``external_job_waiting`` every poll interval, so a later
+        ``external_job_terminal`` can legitimately sit past row 500.  Reading
+        one page made the acceptance assertion observe a truncated history
+        (reproduced: 500 rows, one terminal) even though both terminal events
+        were committed.  Paging keeps the assertion on the whole history.
+        """
+        events, after = [], 0
+        while True:
+            page = self.store.list_goal_events(gid, after=after, limit=500)
+            events.extend(page)
+            if len(page) < 500:
+                return events
+            after = page[-1]["seq"]
+
     def request(self, base, path, body=None):
         data = json.dumps(body).encode() if body is not None else None
         request = Request(
@@ -428,7 +527,7 @@ class GoalProcessAcceptance(unittest.TestCase):
             except OSError:
                 return None
 
-        self.wait_for(ready)
+        self.wait_for(ready, timeout=30)
         return process, base
 
     def test_hard_exit_after_external_accept_before_receipt_never_resubmits(self):
@@ -447,7 +546,7 @@ class GoalProcessAcceptance(unittest.TestCase):
         self.assertEqual(
             self.store.get_messages(crashed["session_id"])[-1]["role"], "assistant"
         )
-        events = self.store.list_goal_events(gid)
+        events = self.goal_events(gid)
         self.assertFalse(any(e["event_type"] == "round_finished" for e in events))
         self.capture("external_accepted_worker_hard_exited_before_receipt")
         time.sleep(max(0, crashed["lease_until"] - time.time()) + 0.05)
@@ -460,7 +559,7 @@ class GoalProcessAcceptance(unittest.TestCase):
         self.assertTrue(
             any(
                 e["event_type"] == "tool_recovery_unknown"
-                for e in self.store.list_goal_events(gid)
+                for e in self.goal_events(gid)
             )
         )
         self.capture("new_process_blocked_without_resubmission")
@@ -476,7 +575,10 @@ class GoalProcessAcceptance(unittest.TestCase):
         self.external.block_first_model = True
         gid = self.goal()["goal_id"]
         old_process = self.spawn()
-        self.assertTrue(self.external.model_started.wait(5))
+        # Child startup imports the whole app; 5s was not enough on a loaded
+        # Windows runner. This is a readiness budget, not a relaxed product
+        # assertion: the test still requires the model call to actually start.
+        self.assertTrue(self.external.model_started.wait(20))
         old_token = self.store.get_goal(gid)["lease_token"]
         self.store._db().execute(
             "UPDATE agent_goals SET lease_until=0 WHERE goal_id=?", (gid,)
@@ -487,12 +589,12 @@ class GoalProcessAcceptance(unittest.TestCase):
         self.assertEqual(successor["status"], "WAITING_EXTERNAL")
         self.assertNotEqual(old_token, successor["lease_token"])
         self.assertEqual(self.external.physical_count(), 1)
-        events = self.store.list_goal_events(gid)
+        events = self.goal_events(gid)
         self.capture("new_worker_submitted_old_worker_still_waiting_for_model")
         self.external.release_model.set()
         self.assertEqual(old_process.wait(timeout=10), 0)
         self.assertEqual(self.external.physical_count(), 1)
-        self.assertEqual(events, self.store.list_goal_events(gid))
+        self.assertEqual(events, self.goal_events(gid))
         self.assertEqual(len(self.store.list_tool_intents(gid)), 1)
         self.assertEqual(len(self.store.list_goal_steps(gid)), 1)
         self.assertEqual(self.store.get_goal(gid)["model_calls_used"], 2)
@@ -540,7 +642,7 @@ class GoalProcessAcceptance(unittest.TestCase):
         self.assertFalse(
             any(
                 e["event_type"] == "goal_verified"
-                for e in self.store.list_goal_events(gid)
+                for e in self.goal_events(gid)
             )
         )
         self.capture("first_restart_recovered_then_second_sr_waiting")
@@ -563,9 +665,13 @@ class GoalProcessAcceptance(unittest.TestCase):
         self.assertEqual(
             [s["status"] for s in self.store.list_goal_steps(gid)], ["SUCCEEDED"] * 4
         )
-        events = self.store.list_goal_events(gid)
+        events = self.goal_events(gid)
         self.assertEqual(
-            sum(e["event_type"] == "external_job_terminal" for e in events), 2
+            sum(e["event_type"] == "external_job_terminal" for e in events), 2,
+            [
+                (e["seq"], e["event_type"], e.get("payload"))
+                for e in events
+            ],
         )
         self.assertEqual(sum(e["event_type"] == "goal_verified" for e in events), 1)
         self.assertEqual(

@@ -639,6 +639,17 @@ class TestQueue(PlatformBase):
         self.assertIn("PAN_old_latest.tif", body["notice"])
         self.assertIn("_NOSR.tif", body["notice"])
 
+    def test_sc_repair_notice_names_the_directory_body(self):
+        # SC 场景（<SolarAzimuth> 有值）的本体是 <目录名>.tif，修复发布回的也是它；
+        # 提示不能照抄 PAN.tif。
+        (self.scene_dir / f"{self.SCENE}_meta.xml").write_text(
+            "<meta><SolarAzimuth>181.79</SolarAzimuth></meta>", encoding="utf-8")
+        touch_tif(self.scene_dir / f"{self.SCENE}.tif")
+        body = self._submit(self.client()).json()
+        self.assertIn(f"{self.SCENE}.tif", body["notice"])
+        self.assertIn(f"{self.SCENE}_old_latest.tif", body["notice"])
+        self.assertNotIn("旧 PAN.tif", body["notice"])
+
     def test_no_in_place_notice_when_sandboxed(self):
         os.environ["SR_SANDBOX_ROOT"] = "/DiskArray/tmp/sbx"
         self.addCleanup(os.environ.pop, "SR_SANDBOX_ROOT", None)

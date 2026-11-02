@@ -85,7 +85,7 @@ systemctl show sr-api -p Environment | sed 's/^Environment=//' | tr ' ' '\n' | t
 | 依赖预检脚本 | `<APP>/backend/check_runtime.py` | 本地代码存在，部署机是否已更新待核 |
 | API 环境 | `/opt/sr-venv/` | 用户回传服务入口确认；不能替换为当前 shell 的 `(base)` |
 | SR 生产解释器 | `/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python` | 项目部署文档记录，由有效 `SR_PYTHON` 决定实际使用值 |
-| SR 程序目录 | `/DiskArray/ProductionSchedule/exe_CentOS7/SR_bundle/mmsr_bundle/codes` | 仓库默认值与部署文档，由有效 `SR_BUNDLE_DIR` 决定 |
+| SR 程序目录 | `/DiskArray/tmp/wangrz/mmsr_bundle_240617/codes` | node81-135 有效 `SR_BUNDLE_DIR`（2026-11-02 探测）；仓库默认值仍是文档模板里的 ProductionSchedule 路径 |
 | SR 参数 YAML | `/DiskArray/tmp/wangrz/sr_utils/espan3_2026_gf04_tile500.yml` | `backend/config.py` 默认值；具体请求可传 `options_yml`，真实文件内容待核 |
 | SR 工作目录 | `/DiskArray/tmp/wangrz/sr_agent_work` | 项目部署模板与文档记录，由有效 `SR_SLURM_WORK_DIR` 决定 |
 | 每次作业的 XML 配置 | `<SR_SLURM_WORK_DIR>/run_sr_<suffix>_<指纹前缀>.xml` | `backend/services/run_sr.py` 生成；以任务表 `config_xml` 字段为准，不是手工维护的全局配置 |
@@ -211,7 +211,7 @@ Claude Code 的用户级 Skill 目录与平台 `SR_SKILL_ROOTS` 默认目录不�
 | `/opt/sr-venv/pyvenv.cfg` | 用户汇总中的 API venv 解释器来源配置位置，内容待核 |
 | `/opt/sr-venv/lib/.../site-packages/` | API 依赖安装位置的模式，`...` 不是实际目录名；应使用 API Python 的 `site` 模块查询具体路径 |
 | `/DiskArray/tmp/wangrz/sr_agent_work/.local_job_seq` | 用户汇总中的本地作业编号状态文件；所在工作目录以有效 `SR_SLURM_WORK_DIR` 为准，勿作为配置覆盖或重置 |
-| `wangrz/mmsr_bundle_240617` | 用户汇总中的另一套 SR bundle 线索，尚无完整绝对路径及当前生效证据；不能据此覆盖 `SR_BUNDLE_DIR` 或替换已知默认值 |
+| `wangrz/mmsr_bundle_240617` | 已确认（2026-11-02 探测）：绝对路径为 `/DiskArray/tmp/wangrz/mmsr_bundle_240617/codes`，就是当前生效的 `SR_BUNDLE_DIR` |
 | `/etc/systemd/system/llama-server.service` | 用户汇总提供的待核 unit 路径，尚未确认存在或参与当前启动；当前已确认的是 `/etc/systemd/system/llama-cpp.service` |
 | `start_llama.sh` | 用户汇总中的启动脚本线索，绝对路径及是否参与当前启动待核；其中参数不能替代第 3 节直接回传的服务配置 |
 

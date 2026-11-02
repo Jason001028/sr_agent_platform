@@ -7,6 +7,10 @@ import httpx
 
 # Load platform trust once, outside request timing (Windows certificate loading is blocking).
 _TLS_CONTEXT = ssl.create_default_context()
+# Warm the same path for httpcore: its first AsyncHTTPTransport construction
+# imports the package lazily (~0.2s on Windows) and would otherwise be charged
+# to the round slice of the first durable request after process start.
+_WARM_TRANSPORT = httpx.AsyncHTTPTransport(verify=_TLS_CONTEXT)
 
 from openai import AsyncOpenAI, APITimeoutError
 

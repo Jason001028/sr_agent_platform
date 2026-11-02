@@ -587,7 +587,7 @@ onBeforeUnmount(() => {
     ></canvas>
     <canvas ref="drawCanvasRef" class="draw-canvas"></canvas>
     <AgentAnnotationOverlay @wheel="onWheel" />
-    <MiniNavigator />
+    <MiniNavigator v-if="store.panes.some(p => p.rec?.thumb)" />
     <div class="question-tools" @mousedown.stop @dblclick.stop>
       <button v-if="store.roiSelIndex()>=0 && !store.pendingRect" @click="askSelected">询问 Agent · 选中 ROI</button>
     </div>

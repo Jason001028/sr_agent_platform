@@ -58,15 +58,16 @@ from backend.config import load_config
 from backend.pathguard import (
     ensure_allowed, ensure_preview_allowed, flat_scene_layout, infer_scene_paths,
     is_allowed, is_preview_only, is_within, looks_like_scene_name,
-    parse_scene_date, production_tree_depth, scene_name_products,
+    parse_scene_date, production_tree_depth,
     strip_raster_ext, to_posix_array_path)
 from backend.services import preview_cache
+from backend.services import scene_resolve
 from backend.runtime_context import AppContext
 from backend.tools import build_builtin_registry
 from backend.services import preview_clear
 from backend.services import plugins as plugin_svc
 from backend.services import run_sr as run_sr_svc
-from backend.services import goal_runtime, goal_worker
+from backend.services import goal_runtime, goal_worker, batch_worker
 from backend.services import scene_search, store as store_mod
 from backend.services.preview_jpg import (PREVIEW_DIVISORS, PREVIEW_JPG_QUALITY,
                                           PreviewError, build_preview_pixels,
@@ -1180,6 +1181,7 @@ def create_app() -> FastAPI:
             asyncio.create_task(_tmp_preview_purge_loop()),
             asyncio.create_task(_eager_preview_loop(app.state)),
             asyncio.create_task(goal_worker.goal_loop(app.state)),
+            asyncio.create_task(batch_worker.batch_loop(app.state)),
         ]
         yield
         for t in app.state.tasks:
@@ -1290,6 +1292,11 @@ def create_app() -> FastAPI:
         in_array = is_allowed(src)
         can_submit = scene_dir is not None and in_array
         preview_only = is_preview_only(src)
+        kind, suffix = "input", ""
+        if inp is not None and not _same_file(inp, src):
+            stage = scene_search.stage_of_jpg(parent, inp, src.stem)
+            if stage is not None and _same_file(stage[2], src):
+                kind, suffix = stage[:2]
         row = _manual_row(src, parent, root)
         row["W"], row["H"] = dims["W"], dims["H"]
         if not can_submit:
@@ -1308,6 +1315,8 @@ def create_app() -> FastAPI:
                 "writable": os.access(str(parent), os.W_OK),
                 "sr_capable": can_submit,
                 "preview_only": preview_only,
+                "kind": kind,
+                "suffix": suffix,
                 "capabilities": _capabilities(
                     sr_capable=can_submit, scene_dir=scene_dir,
                     in_array=in_array, preview_only=preview_only),
@@ -1387,6 +1396,12 @@ def create_app() -> FastAPI:
             两条路的命中形状都是 `(场景目录, 本体输入影像, 环节, suffix, 该环节的栅格)`。
             """
             d, inp, kind, suffix, raster = hit
+            if "source_fingerprint" in body:
+                from backend.services.source_match import verify_source
+                try:
+                    verify_source(raster, body["source_fingerprint"])
+                except ValueError as exc:
+                    raise HTTPException(status_code=409, detail=str(exc)) from exc
             dims = _cached_dims(raster)
             if not dims:
                 raise HTTPException(
@@ -1489,7 +1504,15 @@ def create_app() -> FastAPI:
                         status_code=400,
                         detail=f"路径指向文件 {target.name}，但它不是 .tif/.tiff"
                                " —— 请粘场景目录，或粘单个 .tif 文件路径")
+                if "source_fingerprint" in body:
+                    from backend.services.source_match import verify_source
+                    try:
+                        verify_source(target, body["source_fingerprint"])
+                    except ValueError as exc:
+                        raise HTTPException(status_code=409, detail=str(exc)) from exc
                 return _resolve_bare_tif(target)
+            if "source_fingerprint" in body:
+                raise HTTPException(status_code=400, detail="关联拖入文件须填写具体 TIFF 文件路径，不能填目录")
             tried = [(posix, "")]
         else:
             name, date = body.get("name") or "", body.get("date")
@@ -1555,16 +1578,18 @@ def create_app() -> FastAPI:
                 raise HTTPException(
                     status_code=400,
                     detail=f"product 须为字符串（收到 {product_hint!r}）")
-            products = scene_name_products(name, product_hint)
             try:
+                # 候选构造与 Batch 导入共用 scene_resolve：两边必须对同一个名字
+                # 得出同一组目录，否则预览能打开、后台批任务却找不到。
                 # 第一个候选组（**原样那个名字**）单独留着：下面「反推不出来」的 400
                 # 与 day_note 的判据都只看它 —— 补产品段是给能反推的名字多几条候选，
                 # 不该改动这两条既有措辞的判据（自定模板只有一天时尤其明显）。
-                base_cands = infer_scene_paths(products[0][0], date)
-                tried = [(c, name) for c in base_cands]
-                for stem, _code in products[1:]:
-                    tried += [(c, name) for c in infer_scene_paths(stem, date)]
-            except PathDeniedError as e:
+                candidate_info = scene_resolve.name_candidates(
+                    name, date=date, product=product_hint)
+                products = candidate_info["products"]
+                base_cands = candidate_info["base_candidates"]
+                tried = candidate_info["candidates"]
+            except (PathDeniedError, scene_resolve.SceneLookupError) as e:
                 raise HTTPException(status_code=400,
                                     detail=f"反推路径失败：{e}") from e
             if not tried:
@@ -2097,17 +2122,23 @@ def create_app() -> FastAPI:
                        for r in _completed_rows_for_dir(request.app.state.store, scene_dir.as_posix())[:1])
         if inp is not None and suffix:
             if suffix == "old":
-                # 新旧顺序：<完整生产名>_old（上一轮产物）→ PAN_old_latest（本次
-                # 修复前）→ PAN.tif（修复后）。旧平台写过的 PAN_old_2 仍在候选里，
-                # 让已修复场景的 old 卡片不因改名消失；但新任务只写 PAN_old_latest。
-                cands = ([scene_dir / run_sr_svc.REPAIR_BACKUP_NAME]
-                         + [scene_dir / name
-                            for name in run_sr_svc.LEGACY_REPAIR_BACKUP_NAMES]
-                         + [scene_dir / (base + "_old" + ext)
-                            for base in dict.fromkeys([scene_dir.name, inp.stem])
-                            for ext in (".tif", ".tiff")])
+                # 新旧顺序：<完整生产名>_old（上一轮产物）→ <本体 stem>_old_latest
+                # （本次修复前）→ 本体（修复后）。本体随场景步骤变：RC 是 PAN.tif，
+                # SC 是 <目录名>.tif。旧平台写过的 PAN_old_2 仍在候选里，让已修复
+                # 场景的 old 卡片不因改名消失；但新任务只写 <本体 stem>_old_latest。
+                body = scene_search.body_path(scene_dir)
+                names = [run_sr_svc.REPAIR_BACKUP_NAME,
+                         *run_sr_svc.LEGACY_REPAIR_BACKUP_NAMES]
+                if body is not None:
+                    names += [body.stem + "_old_latest.tif",
+                              body.stem + "_old_2.tif"]
+                names += [base + "_old" + ext
+                          for base in dict.fromkeys([scene_dir.name, inp.stem])
+                          for ext in (".tif", ".tiff")]
+                cands = list(dict.fromkeys(scene_dir / name for name in names))
             else:
-                cands = ([scene_dir / 'PAN.tif'] if repaired and suffix_from != 'query'
+                cands = ([scene_search.body_path(scene_dir) or (scene_dir / 'PAN.tif')]
+                         if repaired and suffix_from != 'query'
                          else scene_search.product_candidates(inp, suffix))
             cand_names = [c.name for c in cands]
             whitelist(cands, "产物")

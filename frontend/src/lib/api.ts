@@ -1130,9 +1130,9 @@ export async function fetchDropSceneJpg(
  * 首次调用可能要解压采样整幅大图（生成预览缓存），界面应提示「首次较慢」。 */
 export async function apiResolveScene(
   cfg: SrConfig,
-  body: { path: string }
+  body: { path: string; source_fingerprint?: { name: string; size: number; samples: string[] } }
       | { name: string; date?: string; size_bytes?: number; anchor?: string[];
-          product?: string },
+          product?: string; source_fingerprint?: { name: string; size: number; samples: string[] } },
   opts?: { signal?: AbortSignal },
 ): Promise<SceneResolveResult> {
   const r = await http(sceneResolveUrl(cfg), {

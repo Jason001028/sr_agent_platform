@@ -63,6 +63,12 @@ _RC_INPUT_STEM = "pan"
 
 _TS_RE = re.compile(r"\d{8,14}")
 
+#: `<SolarAzimuth/>`（无内容）与 `<SolarAzimuth></SolarAzimuth>` 都算 RC；
+#: 有任何文本（含空白节点）都算 SC —— 与 util.check_sr_previous_step 的
+#: minidom `childNodes.length == 0` 判据一致。
+_SOLAR_AZIMUTH_RE = re.compile(
+    r"<SolarAzimuth(?:\s*/>|>(.*?)</SolarAzimuth>)", re.S)
+
 
 def is_scene_dir(path) -> bool:
     """该目录是不是一个可提交的场景目录（内含 <目录名>_meta.xml）。"""
@@ -125,6 +131,47 @@ def input_scene_path(dir_path) -> Path | None:
         if cand.is_file():
             return cand
     return None
+
+
+def previous_step(dir_path) -> str | None:
+    """RC / SC，按 `<目录名>_meta.xml` 的 `<SolarAzimuth>` 判定。
+
+    判据与 SR 脚本同源（util.check_sr_previous_step）：没有文本 → RC，
+    有文本 → SC。meta 缺失、读不出或没有 `<SolarAzimuth>` 时返回 None，
+    调用方自己决定退回什么口径。
+    """
+    d = Path(dir_path)
+    try:
+        text = (d / (d.name + _META_SUFFIX)).read_text(
+            encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = _SOLAR_AZIMUTH_RE.search(text)
+    if match is None:
+        return None
+    return "RC" if (match.group(1) or "") == "" else "SC"
+
+
+def body_path(dir_path) -> Path | None:
+    """场景当前**本体影像**的路径 —— 修复会发布回的那一份。
+
+    RC 步骤的本体是 `PAN.tif`，SC 是 `<目录名>.tif`（util.get_l1_pan_tif_rcsc
+    只认这两个名字）。`input_scene_path` 不能直接拿来当本体：它按 SC 优先挑
+    存在的文件，混合目录里会给 RC 场景挑到上游 SC 遗留的 `<目录名>.tif`。
+
+    只拼名字、不列举目录；扩展名按 _RASTER_EXT_ORDER 试存在的，都不在时回报
+    `.tif` 那个名字，让调用方统一按 exists 口径交代。meta 判不出步骤 → None。
+    """
+    d = Path(dir_path)
+    step = previous_step(d)
+    if step is None:
+        return None
+    stem = _RC_INPUT_STEM.upper() if step == "RC" else d.name
+    for ext in _RASTER_EXT_ORDER:
+        candidate = d / f"{stem}{ext}"
+        if candidate.is_file():
+            return candidate
+    return d / f"{stem}{_RASTER_EXT_ORDER[0]}"
 
 
 def mask_stem(lq_path) -> str:

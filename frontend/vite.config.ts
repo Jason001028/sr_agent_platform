@@ -1,11 +1,13 @@
 import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
+// @ts-ignore Local build plugin (Node ESM), no browser runtime dependency.
+import { explorerSetupPlugin } from './scripts/explorer-package.mjs';
 
 // Vue3 + TS + Vite 构建配置（阶段2）
 // - base:'./'：产物用相对路径引用资源，解压到任意 Nginx 根/子目录都能跑（离线交付友好）。
 // - vendor 三库（pako→utif→geotiff）经 src/vendor/vendor.ts 以模块导入打进 dist，产物自包含无 CDN。
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [vue(), explorerSetupPlugin()],
   base: './',
   build: {
     target: 'es2022', // 仅 Chromium 系内网机，直接用现代目标，产物更小

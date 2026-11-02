@@ -26,8 +26,21 @@ import FileThumb from './FileThumb.vue';
 import FileListCard from './FileListCard.vue';
 import AppIcon from './AppIcon.vue';
 import FavoriteStar from './FavoriteStar.vue';
+import ExplorerButton from './ExplorerButton.vue';
 
 const store = useViewerStore();
+const linkId = ref<number|null>(null);
+const linkPath = ref('');
+const linkError = ref('');
+const linking = ref(false);
+function startLink(id: number) { linkId.value=id; linkPath.value=''; linkError.value=''; }
+async function submitLink() {
+  if (linkId.value === null || !linkPath.value.trim() || linking.value) return;
+  linking.value=true; linkError.value='';
+  try { await store.linkServerPath(linkId.value, linkPath.value.trim()); linkId.value=null; }
+  catch (e) { linkError.value=e instanceof Error ? e.message : String(e); }
+  finally { linking.value=false; }
+}
 const chat = useChatStore();
 const demoPaused = ref(false);
 const demoHovered = ref(false);
@@ -174,7 +187,7 @@ function fmtBytes(n: number): string {
  *  路径与原因，卡片上放不下，整句仍进 title。字节数不符是「目录在、文件对不上」，
  *  与「目录不存在」不是一回事，分开说。 */
 function linkTag(note: string): string {
-  return note.includes('字节数') ? '文件对不上' : '未找到目录';
+  return note.includes('字节数') ? '文件对不上' : '未关联服务端目录';
 }
 </script>
 
@@ -256,6 +269,7 @@ function linkTag(note: string): string {
         >
           <AppIcon name="camera" :size="14" />
         </button>
+        <ExplorerButton v-if="!rec.pending && !store.selectMode" :directory="rec.sceneDir" />
         <!-- × 浮在卡片右上角（不占右侧文字列）；多选与占位卡不给删除入口。 -->
         <span
           v-if="!rec.pending && !store.selectMode"
@@ -290,17 +304,33 @@ function linkTag(note: string): string {
               :title="RO_TITLE"
             >仅对比，不作修复</span>
             <span v-if="rec.linkNote" class="link-tag" :title="rec.linkNote">{{ linkTag(rec.linkNote) }}</span>
+            <span v-if="rec.previewOnly" class="link-tag" title="已关联服务端预览源，仅可查看，不能提交 SR 或写入掩码">只读预览</span>
+            <button v-if="!rec.sceneId && /\.tiff?$/i.test(rec.file.name)" type="button" class="link-source" @click.stop="startLink(rec.id)">关联服务端路径</button>
           </div>
         </template>
       </FileListCard>
     </template>
   </aside>
+  <div v-if="linkId !== null" class="source-link-backdrop" @click.self="!linking && (linkId=null)">
+    <form class="source-link-dialog" role="dialog" aria-modal="true" aria-labelledby="source-link-title" @submit.prevent="submitLink">
+      <h3 id="source-link-title">关联服务端影像</h3>
+      <p>填写这张 TIFF 在服务端的完整文件路径。核对文件名、字节数及头中尾内容采样后使用服务端预览；采样不等同于全文件校验。仅预览授权不增加 SR 提交权限。</p>
+      <input v-model="linkPath" aria-label="服务端 TIFF 文件路径" placeholder="完整 TIFF 路径（不能只填目录）" :disabled="linking" required />
+      <p v-if="linkError" role="alert">{{ linkError }}</p>
+      <div><button type="button" :disabled="linking" @click="linkId=null">取消</button><button type="submit" :disabled="linking || !linkPath.trim()">{{ linking ? '正在核对…' : '核对并关联' }}</button></div>
+    </form>
+  </div>
   <div class="side-toggle" :title="collapseTitle" @click="store.sidebarCollapsed = !store.sidebarCollapsed">
     {{ collapseBtn }}
   </div>
 </template>
 
 <style scoped>
+.link-source{border:1px solid var(--line);border-radius:4px;background:var(--surface);color:var(--accent-2);cursor:pointer;font-size:12px}
+.source-link-backdrop{position:fixed;inset:0;z-index:1000;background:#0006;display:grid;place-items:center}
+.source-link-dialog{width:min(520px,90vw);padding:20px;border-radius:10px;background:var(--surface);color:var(--text);box-shadow:0 8px 32px #0004}
+.source-link-dialog p{font-size:13px;line-height:1.6}.source-link-dialog input{box-sizing:border-box;width:100%;padding:8px}
+.source-link-dialog>div{display:flex;justify-content:flex-end;gap:10px;margin-top:16px}
 /* 侧栏：浅莫兰迪 chrome，白文件卡浮其上；选中青绿描边。
    宽度 400：左侧 96 方块之后仍留出约 270px 给文件名（两行截断）与元信息；
    右侧栏同样是 400，两栏对齐。缩略图的方形尺寸见 FileThumb.vue 的 compact 形态。 */
@@ -528,6 +558,7 @@ function linkTag(note: string): string {
   line-height: 1.45;
   word-break: break-all;
 }
+.file-item:not(.demo-card) .name { padding-right: 43px; } /* 为目录与移除小按钮留出空间 */
 /* 文件名最多两行，超出省略；完整名在 .name 的 title 里。 */
 .file-item .fname {
   display: -webkit-box;

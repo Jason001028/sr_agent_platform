@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import json
 import time
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from backend.services import batch_manifest
 from backend.services.goal_worker import validate_acceptance
-from backend.services.store import ClarificationConflict
+from backend.services.store import BatchConflict, ClarificationConflict
 
 router = APIRouter(prefix="/api/goals", tags=["goals"])
 TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "BLOCKED"}
@@ -21,10 +25,87 @@ ALLOWED = {
     "PAUSED": {"QUEUED", "CANCELLED"},
 }
 
+def _batch_item_checkpoint(item: dict) -> dict:
+    return {
+        "phase": item["status"],
+        "attempt": 0,
+        "source_lines": item.get("source_lines") or [],
+        "name": item.get("name"),
+        "scene_ref": item.get("scene_ref"),
+        "target_image": item.get("target_image"),
+        "reference_image": item.get("reference_image"),
+        "config": item.get("config") or {},
+        "exclusion_reason": item.get("exclusion_reason") or "",
+    }
+
+
+def _create_batch_goal(request: Request, body: dict):
+    key = request.headers.get("Idempotency-Key") or body.get("request_key")
+    if not key:
+        raise HTTPException(400, "Idempotency-Key is required for a batch Goal")
+    ref = str(body.get("manifest_ref") or "")
+    try:
+        manifest = batch_manifest.load_manifest(ref)
+        exclusions = batch_manifest.normalize_exclusions(body.get("exclusions"))
+        planned = batch_manifest.plan_goal_items(manifest, exclusions)
+    except batch_manifest.ManifestConflict as exc:
+        raise HTTPException(409, {
+            "message": str(exc), "diagnostics": exc.diagnostics}) from exc
+    except batch_manifest.ManifestError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    # The execution mode is part of the frozen import. Accepting a different
+    # mode here would let a demo manifest be relabelled as production (or the
+    # reverse) without re-freezing.
+    mode = str(manifest.get("mode") or "demo")
+    requested_mode = str(body.get("mode") or mode).strip().lower()
+    if requested_mode != mode:
+        raise HTTPException(400, "mode does not match the frozen manifest")
+    title = str(body.get("title") or "").strip()
+    if not title:
+        title = "批量影像修复 · %d 景" % len(planned)
+    if len(title) > 200:
+        raise HTTPException(400, "title is too long (max 200 characters)")
+    content_sha256 = batch_manifest.canonical_hash({
+        "manifest_ref": ref,
+        "manifest_sha256": manifest.get("manifest_sha256"),
+        "exclusions": exclusions,
+        "mode": mode,
+        "title": title,
+    })
+    checkpoint = {
+        "workflow": batch_manifest.WORKFLOW,
+        "manifest_ref": ref,
+        "manifest_sha256": manifest.get("manifest_sha256"),
+        "mode": mode,
+        "exclusions": exclusions,
+        "batch_control": {"pause_requested": False, "cancel_requested": False},
+        "producer_status": "DISPATCHING",
+        "report_ref": None,
+    }
+    items = [{
+        "item_id": item["item_id"],
+        "ordinal": item["ordinal"],
+        "name": item["name"],
+        "status": item["status"],
+        "checkpoint": _batch_item_checkpoint(item),
+        "resource_key": (item.get("target_image") or {}).get("image_key"),
+        "next_wake_at": time.time() if item["status"] == "PENDING" else None,
+    } for item in planned]
+    try:
+        return request.app.state.store.create_batch_goal(
+            title=title, session_id=body.get("session_id"), request_key=key,
+            content_sha256=content_sha256, checkpoint=checkpoint, items=items,
+            max_model_calls=0)
+    except BatchConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @router.post("")
 async def create_goal(request: Request):
     body=await request.json()
     if not isinstance(body, dict): raise HTTPException(400,"body must be an object")
+    if body.get("workflow") == batch_manifest.WORKFLOW or body.get("manifest_ref"):
+        return _create_batch_goal(request, body)
     checkpoint=body.get("checkpoint") or {}
     if not isinstance(checkpoint, dict): raise HTTPException(400,"checkpoint must be an object")
     if "acceptance" in checkpoint:
@@ -34,6 +115,41 @@ async def create_goal(request: Request):
     if not title: raise HTTPException(400,"title/prompt is required")
     key=request.headers.get("Idempotency-Key") or body.get("request_key")
     return request.app.state.store.create_goal(title=title, session_id=body.get("session_id"), request_key=key, checkpoint=body.get("checkpoint"), max_rounds=body.get("max_rounds",20), max_model_calls=body.get("max_model_calls",100))
+
+
+@router.post("/batch-imports")
+async def batch_import(request: Request):
+    """Freeze a QC TXT import. This endpoint never creates or runs a Goal."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "body must be an object")
+    text = body.get("text")
+    encoded = body.get("content_base64")
+    if text is not None and encoded is not None:
+        raise HTTPException(400, "provide text or content_base64, not both")
+    try:
+        if encoded is not None:
+            if not isinstance(encoded, str) or len(encoded) > 3 * 1024 * 1024:
+                raise HTTPException(400, "content_base64 is missing or too large")
+            try:
+                data = base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise HTTPException(400, "content_base64 is not valid base64") from exc
+            result = batch_manifest.import_manifest(
+                data=data, encoding=str(body.get("encoding") or "auto"),
+                date=body.get("date"), product=body.get("product"),
+                mode=str(body.get("mode") or "demo"))
+        elif text is not None:
+            if not isinstance(text, str):
+                raise HTTPException(400, "text must be a string")
+            result = batch_manifest.import_manifest(
+                text=text, date=body.get("date"), product=body.get("product"),
+                mode=str(body.get("mode") or "demo"))
+        else:
+            raise HTTPException(400, "text or content_base64 is required")
+    except batch_manifest.ManifestError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return result
 
 @router.get("")
 def list_goals(request: Request, limit: int=100, session_id: str | None=None, include_clarifications: bool=False):
@@ -101,6 +217,24 @@ async def event_stream(goal_id: str, request: Request, after: int=0):
 def steps(goal_id: str, request: Request):
     if not request.app.state.store.get_goal(goal_id): raise HTTPException(404,"goal not found")
     return request.app.state.store.list_goal_steps(goal_id)
+
+
+@router.get("/{goal_id}/items")
+def items(goal_id: str, request: Request, after_ordinal: int = 0,
+          status: str | None = None, limit: int = 200):
+    """Business projection of batch Item steps; never returns artifact bytes."""
+    goal = request.app.state.store.get_goal(goal_id)
+    if not goal:
+        raise HTTPException(404, "goal not found")
+    statuses = [s for s in (status or "").split(",") if s] or None
+    items = request.app.state.store.list_goal_items(
+        goal_id, statuses=statuses, after_ordinal=after_ordinal, limit=limit)
+    return {
+        "goal_id": goal_id,
+        "workflow": (goal.get("checkpoint") or {}).get("workflow"),
+        "items": items,
+        "next_after_ordinal": items[-1]["ordinal"] if items else after_ordinal,
+    }
 
 @router.post("/{goal_id}/tool-intents")
 async def tool_intent(goal_id: str, request: Request):
