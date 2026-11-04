@@ -21,6 +21,8 @@ import TifCanvas from '../components/TifCanvas.vue';
 import ViewerEmptyState from '../components/ViewerEmptyState.vue';
 import DrawPanel from '../components/DrawPanel.vue';
 import CompareOverlay from '../components/CompareOverlay.vue';
+import FlickerControls from '../components/FlickerControls.vue';
+import AutoTourControls from '../components/AutoTourControls.vue';
 import BatchDetectionOverlay from '../components/BatchDetectionOverlay.vue';
 import DecodeOverlay from '../components/DecodeOverlay.vue';
 import ContextPanel from '../components/ContextPanel.vue';
@@ -31,12 +33,22 @@ import { useViewerStore } from '../stores/viewer.js';
 
 const viewer = useViewerStore();
 
+// 页面切到后台就停表：交替对比是「人看着比细节」的工具，后台继续翻面既没意义，
+// 也会在回到前台时落在任意一帧。store 每拍也会自查 document.hidden，这里是立即版。
+function onVisibility() {
+  if (document.hidden) viewer.flickerPause();
+}
+
 onMounted(() => {
   mountE2EHooks();      // window.__viewer（浏览器回归 + 真机验收）
+  document.addEventListener('visibilitychange', onVisibility);
 });
 
-// 模态提示不自动消失，而 store 是全局单例：不关就换页，它会跟着到别的页面上。
-onUnmounted(() => viewer.hideModal());
+onUnmounted(() => {
+  document.removeEventListener('visibilitychange', onVisibility);
+  viewer.flickerStop();            // 组件卸载 / 换页：不留计时器
+  viewer.hideModal();              // 模态提示是全局单例，不关会跟着到别的页面
+});
 </script>
 
 <template>
@@ -53,6 +65,8 @@ onUnmounted(() => viewer.hideModal());
         <ViewerEmptyState />
         <DrawPanel />
         <CompareOverlay />
+        <FlickerControls />
+        <AutoTourControls />
         <BatchDetectionOverlay />
         <DecodeOverlay />
       </TifCanvas>

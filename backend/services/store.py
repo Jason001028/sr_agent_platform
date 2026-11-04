@@ -84,6 +84,20 @@ class BatchConflict(ValueError):
     """A batch idempotency key was reused with different frozen content."""
 
 
+class BatchControlConflict(RuntimeError):
+    """A Batch control request lost its optimistic-concurrency check.
+
+    ``reason`` is a stable code (``stale_revision``/``invalid_state``/
+    ``missing_revision``); ``goal`` is the latest row when one exists.
+    """
+
+    def __init__(self, message: str, *, reason: str = "conflict",
+                 goal: dict | None = None):
+        super().__init__(message)
+        self.reason = reason
+        self.goal = goal
+
+
 BATCH_WORKFLOW = "batch_pan_repair_v1"
 
 _SCHEMA = """
@@ -1590,6 +1604,231 @@ class Store:
     def list_goal_events(self, goal_id, *, after: int = 0, limit: int = 500):
         rows=self._db().execute("SELECT seq,event_type,run_id,step_id,payload,created_at FROM agent_goal_events WHERE goal_id=? AND seq>? ORDER BY seq LIMIT ?", (goal_id,int(after),int(limit))).fetchall()
         return [{"goal_id":goal_id,"seq":r[0],"event_type":r[1],"run_id":r[2],"step_id":r[3],"payload":json.loads(r[4] or "{}"),"created_at":r[5]} for r in rows]
+
+    def list_goal_events_page(self, goal_id, *, after=None, before=None,
+                              limit: int = 200) -> dict:
+        """One page of Goal events with an explicit direction.
+
+        ``after`` walks forward (SSE/catch-up), ``before`` walks backward
+        (recent-first history).  Both are exclusive cursors.  The response
+        carries enough cursor state for the client to continue without ever
+        guessing from event counts.
+        """
+        if after is not None and before is not None:
+            raise ValueError("after and before are mutually exclusive")
+        limit = max(1, min(int(limit), 1000))
+        db = self._db()
+        if before is None:
+            cursor = int(after or 0)
+            rows = db.execute(
+                "SELECT e.seq,e.event_type,e.run_id,e.step_id,e.payload,"
+                "e.created_at,s.ordinal,s.name "
+                "FROM agent_goal_events e "
+                "LEFT JOIN agent_goal_steps s "
+                "  ON s.goal_id=e.goal_id AND s.step_id=e.step_id "
+                "WHERE e.goal_id=? AND e.seq>? ORDER BY e.seq ASC LIMIT ?",
+                (goal_id, cursor, limit + 1)).fetchall()
+            has_more = len(rows) > limit
+            rows = rows[:limit]
+            direction = "forward"
+        else:
+            cursor = int(before)
+            rows = db.execute(
+                "SELECT e.seq,e.event_type,e.run_id,e.step_id,e.payload,"
+                "e.created_at,s.ordinal,s.name "
+                "FROM agent_goal_events e "
+                "LEFT JOIN agent_goal_steps s "
+                "  ON s.goal_id=e.goal_id AND s.step_id=e.step_id "
+                "WHERE e.goal_id=? AND e.seq<? ORDER BY e.seq DESC LIMIT ?",
+                (goal_id, cursor, limit + 1)).fetchall()
+            has_more = len(rows) > limit
+            rows = list(reversed(rows[:limit]))
+            direction = "backward"
+        events = [{
+            "goal_id": goal_id, "seq": row[0], "event_type": row[1],
+            "run_id": row[2], "step_id": row[3],
+            "payload": json.loads(row[4] or "{}"), "created_at": row[5],
+            "step_ordinal": row[6], "step_name": row[7],
+        } for row in rows]
+        last_seq = int(db.execute(
+            "SELECT COALESCE(MAX(seq),0) FROM agent_goal_events WHERE goal_id=?",
+            (goal_id,)).fetchone()[0])
+        if direction == "forward":
+            next_after = events[-1]["seq"] if events else cursor
+            return {
+                "goal_id": goal_id, "events": events, "last_seq": last_seq,
+                "next_after": next_after, "has_more": has_more,
+                "next_before": None, "has_earlier": False,
+            }
+        next_before = events[0]["seq"] if events else cursor
+        return {
+            "goal_id": goal_id, "events": events, "last_seq": last_seq,
+            "next_after": None, "has_more": False,
+            "next_before": next_before, "has_earlier": has_more,
+        }
+
+    # ---- batch snapshot / user control (PR F) ---------------------------
+
+    def _snapshot_tasks(self, db, items) -> dict:
+        from backend.services import batch_snapshot
+        fingerprints = sorted({
+            str((item.get("checkpoint") or {}).get("sr_fingerprint"))
+            for item in items
+            if (item.get("checkpoint") or {}).get("sr_fingerprint")
+            and (item.get("status") in batch_snapshot.ACTIVE_JOB_STATUSES
+                 or item.get("status") in batch_snapshot.ATTENTION_JOB_STATUSES)
+        })
+        result: dict[str, dict] = {}
+        for start in range(0, len(fingerprints), 400):
+            chunk = fingerprints[start:start + 400]
+            rows = db.execute(
+                "SELECT fingerprint,job_id,status,created_at,started_at,"
+                "finished_at FROM sr_tasks WHERE fingerprint IN ("
+                + ",".join("?" for _ in chunk) + ")",
+                chunk).fetchall()
+            for row in rows:
+                result[row[0]] = {
+                    "fingerprint": row[0], "job_id": row[1],
+                    "status": row[2], "created_at": row[3],
+                    "started_at": row[4], "finished_at": row[5],
+                }
+        return result
+
+    def _batch_snapshot_in(self, db, goal_id: str):
+        from backend.services import batch_snapshot
+        goal = self.get_goal(goal_id)
+        if not goal or goal.get("kind") != "batch":
+            return None
+        rows = db.execute(
+            f"SELECT {self._STEP_COLS} FROM agent_goal_steps "
+            "WHERE goal_id=? AND kind='batch_item' ORDER BY ordinal",
+            (goal_id,)).fetchall()
+        items = [self._step_row(row) for row in rows]
+        last_seq = int(db.execute(
+            "SELECT COALESCE(MAX(seq),0) FROM agent_goal_events WHERE goal_id=?",
+            (goal_id,)).fetchone()[0])
+        tasks = self._snapshot_tasks(db, items)
+        return batch_snapshot.build_snapshot(
+            goal, items, tasks, last_seq=last_seq)
+
+    def batch_snapshot(self, goal_id: str):
+        """Read Goal, all batch Items, relevant SR tasks and MAX(seq) in one
+        SQLite read transaction.  The returned counts and ``last_seq``
+        therefore describe exactly the same committed state.
+        """
+        db = self._db()
+        if getattr(self._local, "transaction", None) is not None:
+            return self._batch_snapshot_in(db, goal_id)
+        db.execute("BEGIN")
+        try:
+            result = self._batch_snapshot_in(db, goal_id)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        return result
+
+    def batch_control(self, goal_id: str, action: str,
+                      expected_revision) -> dict | None:
+        """Apply one user control action with optimistic concurrency.
+
+        ``expected_revision`` is the independent ``checkpoint.control_revision``
+        exposed by the snapshot.  It changes only here, never on a scheduler
+        claim or a Monitor ``monitoring_done`` update, so an active batch's
+        one-second lease churn cannot make Pause/Cancel permanently stale.
+        """
+        from backend.services import batch_snapshot
+        if action not in {"pause", "resume", "cancel"}:
+            raise ValueError(f"unknown batch control action: {action}")
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise BatchControlConflict(
+                "expected_version must be a non-negative integer",
+                reason="missing_revision")
+
+        pausable = {"QUEUED", "RUNNING", "WAITING_EXTERNAL", "VERIFYING",
+                    "RETRY_WAIT"}
+        runnable = {"QUEUED", "RUNNING", "WAITING_EXTERNAL", "VERIFYING",
+                    "RETRY_WAIT"}
+        terminal = {"COMPLETED", "FAILED", "CANCELLED", "BLOCKED"}
+        db = self._db()
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            goal = self.get_goal(goal_id)
+            if not goal or goal.get("kind") != "batch":
+                db.rollback()
+                return None
+            current = batch_snapshot.control_revision(goal)
+            if current != expected_revision:
+                raise BatchControlConflict(
+                    "control revision changed; reload the snapshot",
+                    reason="stale_revision", goal=goal)
+            status = goal["status"]
+            target = None
+            phase = None
+            if action == "pause":
+                if status == "PAUSED":
+                    db.rollback()
+                    return {"goal": goal, "changed": False}
+                if status not in pausable:
+                    raise BatchControlConflict(
+                        f"cannot pause a {status} batch",
+                        reason="invalid_state", goal=goal)
+                target, phase = "PAUSED", "paused"
+            elif action == "resume":
+                if status in runnable:
+                    db.rollback()
+                    return {"goal": goal, "changed": False}
+                if status != "PAUSED":
+                    raise BatchControlConflict(
+                        f"cannot resume a {status} batch",
+                        reason="invalid_state", goal=goal)
+                target, phase = "QUEUED", "queued"
+            else:  # cancel
+                if status == "CANCELLED":
+                    db.rollback()
+                    return {"goal": goal, "changed": False}
+                if status in terminal:
+                    raise BatchControlConflict(
+                        f"cannot cancel a {status} batch",
+                        reason="invalid_state", goal=goal)
+                target, phase = "CANCELLED", "cancelled"
+
+            now = time.time()
+            revision = current + 1
+            cp = dict(goal.get("checkpoint") or {})
+            cp["control_revision"] = revision
+            control = dict(cp.get("batch_control") or {})
+            control["last_action"] = action
+            control["last_action_at"] = now
+            if action == "pause":
+                control["pause_requested"] = True
+                control["pause_requested_at"] = now
+            elif action == "resume":
+                control["pause_requested"] = False
+                control["pause_requested_at"] = None
+            else:
+                control["cancel_requested"] = True
+                control["cancel_requested_at"] = now
+            cp["batch_control"] = control
+            finished = now if target in terminal else goal.get("finished_at")
+            db.execute(
+                "UPDATE agent_goals SET status=?,phase=?,checkpoint=?,"
+                "version=version+1,updated_at=?,finished_at=?,"
+                "lease_owner=NULL,lease_token=NULL,lease_until=NULL "
+                "WHERE goal_id=?",
+                (target, phase, json.dumps(cp, ensure_ascii=False), now,
+                 finished, goal_id))
+            self._append_goal_event_tx(
+                db, goal_id, "batch_user_control", {
+                    "action": action, "from": status, "status": target,
+                    "phase": phase, "control_revision": revision,
+                    "monitoring_done": bool(cp.get("monitoring_done")),
+                })
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        return {"goal": self.get_goal(goal_id), "changed": True}
 
     def transition_goal(self, goal_id: str, status: str, *, phase: str | None=None,
                         checkpoint: dict | None=None, error: str | None=None,

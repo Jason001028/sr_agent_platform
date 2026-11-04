@@ -37,8 +37,165 @@ export interface DurableGoal {
   goal_id: string;
   session_id: string | null;
   status: string;
+  phase?: string | null;
+  title?: string;
+  kind?: 'chat' | 'batch' | string;
   version: number;
+  checkpoint?: Record<string, unknown>;
+  updated_at?: number;
   clarifications?: GoalClarification[];
+}
+
+/* ---------------- PR F: Batch Snapshot / events / control ---------------- */
+
+/** One progress track from `batch_snapshot.v1`.
+ *  `applicable=false` → denominator is 0 (「不适用」).
+ *  `known=false` → detection is still running; a 0 numerator means
+ *  「暂无需修复项·统计中」, never a settled 0%. */
+export interface BatchProgressTrack {
+  done: number;
+  total: number;
+  applicable: boolean;
+  known: boolean;
+}
+
+export interface BatchCounts {
+  total: number;
+  eligible: number;
+  detected: number;
+  detection_pending: number;
+  needs_repair: number;
+  submitted: number;
+  verified: number;
+  verified_demo: number;
+  verified_production: number;
+  verified_other: number;
+  converged: number;
+  no_issue: number;
+  failed: number;
+  blocked: number;
+  excluded: number;
+  skipped_runtime: number;
+  cancelled: number;
+  capacity_skipped: number;
+  unknown_jobs: number;
+  detecting: number;
+  submitting: number;
+  waiting_sr: number;
+  verifying: number;
+  in_flight_sr: number;
+}
+
+export interface BatchItemSummary {
+  item_id: string;
+  ordinal: number;
+  name: string;
+  status: string;
+  item_version: number;
+  attempt: number;
+  updated_at: number | null;
+  scene_ref?: unknown;
+  image_path?: string | null;
+  has_mask: boolean;
+  overlay_ready: boolean;
+  candidate_count: number;
+  job_id: number | null;
+  sr_status?: string | null;
+  error?: string | null;
+}
+
+export interface BatchJobSummary {
+  item_id: string;
+  ordinal: number;
+  name: string;
+  status: string;
+  item_version: number;
+  attempt: number;
+  job_id: number | null;
+  sr_status?: string | null;
+  task_status?: string | null;
+  unknown: boolean;
+  submitted_at?: number | null;
+  updated_at?: number | null;
+  error?: string | null;
+  image_path?: string | null;
+  has_mask?: boolean;
+  overlay_ready?: boolean;
+  verification_ok?: boolean | null;
+}
+
+export interface BatchSnapshotGoal {
+  goal_id: string;
+  session_id: string | null;
+  title: string;
+  kind: string;
+  status: string;
+  phase: string | null;
+  mode: 'demo' | 'production' | string;
+  version: number;
+  control_revision: number;
+  monitoring_done: boolean;
+  monitor_state: string | null;
+  last_seq: number;
+  created_at: number;
+  updated_at: number;
+  finished_at: number | null;
+  batch_control: Record<string, unknown>;
+}
+
+export interface BatchSnapshot {
+  contract_version: string;
+  goal: BatchSnapshotGoal;
+  counts: BatchCounts;
+  progress: {
+    detection: BatchProgressTrack;
+    submission: BatchProgressTrack;
+    verification: BatchProgressTrack;
+  };
+  producer: {
+    current: BatchItemSummary | null;
+    detecting_count: number;
+    preparing_count: number;
+    prepared_count: number;
+  };
+  active_jobs: BatchJobSummary[];
+  /** Active first, then attention, then the recent completion tail. */
+  recent_jobs?: BatchJobSummary[];
+  report: { available: boolean; updated_at: number | null };
+  server_time: number;
+}
+
+/** A persisted Goal event.  Pagination keys come from the server:
+ *  `next_after` for catch-up, `next_before` for history. */
+export interface BatchEvent {
+  goal_id: string;
+  seq: number;
+  event_type: string;
+  payload: Record<string, unknown>;
+  created_at: number;
+  run_id?: string | null;
+  step_id?: string | null;
+  step_ordinal?: number | null;
+  step_name?: string | null;
+}
+
+export interface BatchEventPage {
+  goal_id: string;
+  events: BatchEvent[];
+  last_seq: number;
+  next_after: number | null;
+  has_more: boolean;
+  next_before: number | null;
+  has_earlier: boolean;
+}
+
+export type BatchControlAction = 'pause' | 'resume' | 'cancel';
+
+export interface BatchControlResult {
+  goal: DurableGoal;
+  changed: boolean;
+  control_revision: number;
+  monitoring_done: boolean;
 }
 
 export async function apiSessionGoals(cfg: SrConfig, sid: string, signal?: AbortSignal): Promise<DurableGoal[]> {
@@ -49,6 +206,100 @@ export async function apiSessionGoals(cfg: SrConfig, sid: string, signal?: Abort
 export async function apiGoalClarifications(cfg: SrConfig, goal: string, signal?: AbortSignal): Promise<GoalClarification[]> {
   const r = await http(apiUrl(cfg, `/api/goals/${encodeURIComponent(goal)}/clarifications`), { signal });
   return await r.json();
+}
+
+/* ---------------- PR F: batch endpoints ---------------- */
+
+export const batchSnapshotUrl = (cfg: SrConfig, goalId: string): string =>
+  apiUrl(cfg, `/api/goals/${encodeURIComponent(goalId)}/batch-snapshot`);
+export const batchEventsUrl = (cfg: SrConfig, goalId: string): string =>
+  apiUrl(cfg, `/api/goals/${encodeURIComponent(goalId)}/events`);
+export const batchReportUrl = (cfg: SrConfig, goalId: string): string =>
+  apiUrl(cfg, `/api/goals/${encodeURIComponent(goalId)}/batch-report`);
+export const batchControlUrl = (cfg: SrConfig, goalId: string,
+  action: BatchControlAction): string =>
+  apiUrl(cfg, `/api/goals/${encodeURIComponent(goalId)}/${action}`);
+export const goalEventsStreamUrl = (cfg: SrConfig, goalId: string,
+  after: number): string =>
+  apiUrl(cfg, `/api/goals/${encodeURIComponent(goalId)}/events/stream?after=${after}`);
+
+/** Batch Goals only (server filters by kind before LIMIT). */
+export async function apiBatchGoals(cfg: SrConfig, limit = 20): Promise<DurableGoal[]> {
+  const r = await http(apiUrl(cfg, `/api/goals?kind=batch&limit=${Math.max(1, limit)}`));
+  return await r.json() as DurableGoal[];
+}
+
+export async function apiBatchSnapshot(
+  cfg: SrConfig, goalId: string, signal?: AbortSignal,
+): Promise<BatchSnapshot> {
+  const r = await http(batchSnapshotUrl(cfg, goalId), { signal });
+  return await r.json() as BatchSnapshot;
+}
+
+export async function apiBatchEvents(
+  cfg: SrConfig, goalId: string,
+  opts: { after?: number; before?: number; limit?: number; signal?: AbortSignal } = {},
+): Promise<BatchEventPage> {
+  const q = new URLSearchParams();
+  if (opts.after != null) q.set('after', String(opts.after));
+  if (opts.before != null) q.set('before', String(opts.before));
+  q.set('limit', String(opts.limit ?? 20));
+  const r = await http(`${batchEventsUrl(cfg, goalId)}?${q.toString()}`,
+    { signal: opts.signal });
+  return await r.json() as BatchEventPage;
+}
+
+/** Full report through the controlled endpoint; the client never builds a
+ *  server filesystem path. */
+export async function apiBatchReport(cfg: SrConfig, goalId: string): Promise<unknown> {
+  const r = await http(batchReportUrl(cfg, goalId));
+  return await r.json();
+}
+
+/** Pause/resume/cancel with the independent control revision.
+ *  A 409 (`stale_revision`) means the caller must re-read the snapshot. */
+export async function apiBatchControl(
+  cfg: SrConfig, goalId: string, action: BatchControlAction,
+  expectedVersion: number,
+): Promise<BatchControlResult> {
+  const r = await http(batchControlUrl(cfg, goalId, action), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ expected_version: expectedVersion }),
+  });
+  return await r.json() as BatchControlResult;
+}
+
+/** Subscribe to the persisted Goal SSE stream.  `after` is the client's
+ *  consumed cursor, never a snapshot watermark it has not replayed. */
+export function subscribeGoalEvents(
+  cfg: SrConfig, goalId: string, after: number,
+  onEvent: (event: BatchEvent) => void,
+  onError?: (err: Error) => void,
+  onOpen?: () => void,
+  onClose?: (err: Error | null) => void,
+): () => void {
+  const ctrl = new AbortController();
+  void (async () => {
+    try {
+      const r = await fetch(goalEventsStreamUrl(cfg, goalId, after),
+        { signal: ctrl.signal });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      if (onOpen) onOpen();
+      await readSseJsonStream(r.body, (value) => {
+        if (value && typeof value === 'object'
+            && typeof (value as BatchEvent).seq === 'number') {
+          onEvent(value as BatchEvent);
+        }
+      });
+      if (onClose) onClose(null);
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') return;
+      if (onError) onError(e as Error);
+      if (onClose) onClose(e as Error);
+    }
+  })();
+  return () => ctrl.abort();
 }
 
 export async function apiRespondClarification(cfg: SrConfig, item: GoalClarification,
@@ -433,6 +684,34 @@ export async function readSseStream(
   }
 }
 
+/** Like `readSseStream`, but for streams whose frames are bare JSON objects
+ *  without a `type` discriminator (Goal events).  A frame that is not JSON is
+ *  ignored, not fatal. */
+export async function readSseJsonStream(
+  body: ReadableStream<Uint8Array> | null,
+  onEvent: (value: unknown) => void,
+): Promise<void> {
+  if (!body) return;
+  const reader = body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  const deliver = (frames: string[]) => {
+    for (const data of frames) {
+      try { onEvent(JSON.parse(data)); } catch { /* ignore bad frame */ }
+    }
+  };
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const { frames, rest } = stepSse(buf);
+    buf = rest;
+    deliver(frames);
+  }
+  buf += dec.decode();
+  deliver(stepSse(buf).frames);
+}
+
 /* ---------------- fetch 封装（读运行期 apiBase） ---------------- */
 
 /** HTTP 层的失败，**带状态码**。`message` 仍是给人看的那份文案（JSON 错误体里
@@ -451,12 +730,17 @@ export class HttpError extends Error {
   /** 错误体是不是 JSON。后端 HTTPException 一律是（`{"detail": …}`），
    *  nginx 的静态/错误页不是。 */
   readonly jsonBody: boolean;
-  constructor(status: number, message: string, url = '', jsonBody = false) {
+  /** Parsed `detail` when it is an object (batch control 409 carries
+   *  `{reason, control_revision}`).  String details stay in `message`. */
+  readonly detail?: unknown;
+  constructor(status: number, message: string, url = '', jsonBody = false,
+    detail?: unknown) {
     super(message);
     this.name = 'HttpError';
     this.status = status;
     this.url = url;
     this.jsonBody = jsonBody;
+    this.detail = detail;
   }
 }
 
@@ -499,14 +783,20 @@ async function http(url: string, init?: RequestInit): Promise<Response> {
   if (!resp.ok) {
     let detail = `HTTP ${resp.status}`;
     let jsonBody = false;
+    let raw: unknown;
     try {
-      const body = (await resp.json()) as { detail?: string };
+      const body = (await resp.json()) as { detail?: unknown };
       jsonBody = true;
-      if (body.detail) detail = body.detail;
+      raw = body.detail;
+      if (typeof body.detail === 'string') detail = body.detail;
+      else if (body.detail && typeof body.detail === 'object'
+               && typeof (body.detail as { message?: unknown }).message === 'string') {
+        detail = (body.detail as { message: string }).message;
+      }
     } catch {
       /* 非 JSON 错误体 */
     }
-    throw new HttpError(resp.status, detail, url, jsonBody);
+    throw new HttpError(resp.status, detail, url, jsonBody, raw);
   }
   return resp;
 }
@@ -670,6 +960,7 @@ export async function apiSubmitQueue(
 ): Promise<QueueSubmitResult> {
   const r = await http(queueUrl(cfg), {
     method: 'POST',
+    signal: AbortSignal.timeout(30_000),
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });

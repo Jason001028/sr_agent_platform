@@ -10,7 +10,7 @@
  * `setCanvasSize()` 的既有语义就是重新适配，所以展开/收起对比条会重置当前缩放
  * （分屏下两侧都重置）。这是既有行为（切路径栏同理），本轮不改它。
  *
- * 三选一用 `<button>` + `.on`（全仓没有 `type="radio"`），抄 ContextPanel 的
+ * 四选一用 `<button>` + `.on`（全仓没有 `type="radio"`），抄 ContextPanel 的
  * `.ctx-tab` 形态；补 `role="radio"` + `aria-checked` 让读屏知道这是个单选组。
  */
 import { computed } from 'vue';
@@ -23,6 +23,7 @@ const MODES: { value: CompareMode; label: string; title: string }[] = [
   { value: 'off', label: '关闭', title: '一次看一张（拖入的新图顶掉当前这张，与原行为一致）' },
   { value: 'click', label: '点选对比', title: '拖入的新图直接覆盖当前这张；「点选清单」里可来回切' },
   { value: 'split', label: '分屏对比', title: '左右各一张，滚轮与拖动同步作用于两侧；拖放落在哪半就进哪半' },
+  { value: 'flicker', label: '交替对比', title: '同一视口里按节拍在两张同场景影像之间硬切换；播放/暂停与节拍在画布顶部的胶囊里，平移、缩放、切图会暂停' },
 ];
 
 /** 只有分屏需要图例与「回正」。 */

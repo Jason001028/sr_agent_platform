@@ -12,9 +12,10 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
-from backend.services import batch_manifest
+from backend.services import batch_manifest, batch_snapshot
 from backend.services.goal_worker import validate_acceptance
-from backend.services.store import BatchConflict, ClarificationConflict
+from backend.services.store import (BatchConflict, BatchControlConflict,
+                                    ClarificationConflict)
 
 router = APIRouter(prefix="/api/goals", tags=["goals"])
 TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "BLOCKED"}
@@ -82,6 +83,11 @@ def _create_batch_goal(request: Request, body: dict):
         "mode": mode,
         "exclusions": exclusions,
         "batch_control": {"pause_requested": False, "cancel_requested": False},
+        # Independent optimistic-concurrency counter for user controls.  It is
+        # deliberately not ``goal.version``: the scheduler bumps that on every
+        # lease claim, so a one-second batch tick would make Pause/Cancel
+        # permanently stale.  Only ``batch_control`` increments this.
+        "control_revision": 0,
         "producer_status": "DISPATCHING",
         "report_ref": None,
     }
@@ -155,9 +161,13 @@ async def batch_import(request: Request):
     return result
 
 @router.get("")
-def list_goals(request: Request, limit: int=100, session_id: str | None=None, include_clarifications: bool=False):
+def list_goals(request: Request, limit: int=100, session_id: str | None=None,
+               kind: str | None=None, include_clarifications: bool=False):
+    """Goal list.  ``kind=batch`` lets the Panel find an active batch without
+    guessing that ``limit=1`` contains the newest non-terminal one."""
     store = request.app.state.store
-    goals = store.list_goals(limit=max(1,min(limit,500)), session_id=session_id)
+    goals = store.list_goals(limit=max(1,min(limit,500)), session_id=session_id,
+                             kinds=[kind] if kind else None)
     if include_clarifications:
         return [{**g, "clarifications": store.list_goal_clarifications(g["goal_id"])} for g in goals]
     return goals
@@ -193,25 +203,97 @@ def get_goal(goal_id: str, request: Request):
     if not goal: raise HTTPException(404,"goal not found")
     return goal
 
+
+def _batch_report_path(goal_id: str) -> Path:
+    """Server-computed report location.  The client never supplies a path."""
+    return batch_manifest.artifact_root() / "reports" / f"{goal_id}.json"
+
+
+def _batch_report_info(goal_id: str) -> dict:
+    path = _batch_report_path(goal_id)
+    try:
+        stat = path.stat()
+    except OSError:
+        return {"available": False, "updated_at": None}
+    return {"available": True, "updated_at": stat.st_mtime}
+
+
+@router.get("/{goal_id}/batch-snapshot")
+def batch_snapshot_view(goal_id: str, request: Request):
+    """Authoritative Batch progress projection.
+
+    Counts, progress, the representative Item, active Jobs and ``last_seq`` are
+    read in one SQLite transaction.  Report availability is a stat of the
+    server-computed report path; it carries no business count.
+    """
+    snapshot = request.app.state.store.batch_snapshot(goal_id)
+    if snapshot is None:
+        raise HTTPException(404, "batch goal not found")
+    snapshot["report"] = _batch_report_info(goal_id)
+    return snapshot
+
+
+@router.get("/{goal_id}/batch-report")
+def batch_report(goal_id: str, request: Request):
+    """Controlled read-only full report.  Rejects non-batch Goals and never
+    accepts a client-provided path."""
+    goal = request.app.state.store.get_goal(goal_id)
+    if not goal or goal.get("kind") != "batch":
+        raise HTTPException(404, "batch goal not found")
+    path = _batch_report_path(goal["goal_id"]).resolve()
+    root = (batch_manifest.artifact_root() / "reports").resolve()
+    if root not in path.parents:
+        raise HTTPException(403, "report path is outside the batch artifact root")
+    if not path.is_file():
+        raise HTTPException(404, "batch report is not available yet")
+    return FileResponse(path, media_type="application/json",
+                        headers={"Cache-Control": "no-cache"})
+
 @router.get("/{goal_id}/events")
-def events(goal_id: str, request: Request, after: int=0, limit: int=500):
-    if not request.app.state.store.get_goal(goal_id): raise HTTPException(404,"goal not found")
-    return {"goal_id":goal_id,"events":request.app.state.store.list_goal_events(goal_id,after=after,limit=min(limit,1000))}
+def events(goal_id: str, request: Request, after: int | None = None,
+           before: int | None = None, limit: int = 500):
+    """Paged Goal events.
+
+    Forward (``after``) is the SSE catch-up direction; backward (``before``)
+    is the recent-first history direction.  ``next_after``/``next_before`` are
+    the client's only legal cursors: ``last_seq`` is a snapshot watermark, not
+    a place the client may jump to without replaying the gap.
+    """
+    store = request.app.state.store
+    if not store.get_goal(goal_id):
+        raise HTTPException(404, "goal not found")
+    try:
+        return store.list_goal_events_page(
+            goal_id, after=after, before=before, limit=min(limit, 1000))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+def _stream_finished(goal) -> bool:
+    if not goal or goal["status"] not in TERMINAL:
+        return False
+    # A batch keeps emitting Monitor facts after PAUSED/CANCELLED.  Close the
+    # stream only once the Monitor has actually settled, not when the Goal
+    # status first becomes terminal.
+    if goal.get("kind") == "batch":
+        return batch_snapshot.monitoring_done(goal)
+    return True
+
 
 @router.get("/{goal_id}/events/stream")
 async def event_stream(goal_id: str, request: Request, after: int=0):
-    if not request.app.state.store.get_goal(goal_id): raise HTTPException(404,"goal not found")
+    store = request.app.state.store
+    if not store.get_goal(goal_id): raise HTTPException(404,"goal not found")
+
     async def gen():
         cursor=int(after)
         while True:
-            rows=request.app.state.store.list_goal_events(goal_id,after=cursor,limit=100)
+            rows=store.list_goal_events(goal_id,after=cursor,limit=100)
             if rows:
                 for row in rows:
                     cursor=row["seq"]
-                    import json
                     yield "data: "+json.dumps(row,ensure_ascii=False)+"\n\n"
-            goal=request.app.state.store.get_goal(goal_id)
-            if goal and goal["status"] in TERMINAL and not rows: break
+            goal=store.get_goal(goal_id)
+            if _stream_finished(goal) and not rows: break
             if await request.is_disconnected(): break
             await asyncio.sleep(1)
     return StreamingResponse(gen(),media_type="text/event-stream",headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
@@ -406,14 +488,70 @@ def _transition(goal_id, request, target):
     if result is None: raise HTTPException(409,"goal changed; reload before transition")
     return result
 
+
+async def _control(goal_id: str, request: Request, action: str):
+    """One endpoint family for both Goal kinds.
+
+    Batch Goals use the independent ``control_revision`` (not ``goal.version``,
+    which the scheduler bumps every tick).  Ordinary Goals keep the legacy
+    status-transition behavior.
+    """
+    store = request.app.state.store
+    goal = store.get_goal(goal_id)
+    if not goal:
+        raise HTTPException(404, "goal not found")
+    if goal.get("kind") != "batch":
+        if action == "pause":
+            return _transition(goal_id, request, "PAUSED")
+        if action == "resume":
+            return _transition(goal_id, request, "QUEUED")
+        if goal["status"] in TERMINAL:
+            return goal
+        return store.transition_goal(goal_id, "CANCELLED", phase="cancelled",
+                                     event_type="goal_cancelled")
+
+    body = {}
+    raw = await request.body()
+    if raw:
+        try:
+            body = json.loads(raw)
+        except ValueError as exc:
+            raise HTTPException(400, "body must be valid JSON") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(400, "body must be an object")
+    expected = body.get("expected_version", body.get("expected_revision"))
+    try:
+        result = store.batch_control(goal_id, action, expected)
+    except BatchControlConflict as exc:
+        detail = {
+            "message": str(exc), "reason": exc.reason,
+            "control_revision": (batch_snapshot.control_revision(exc.goal)
+                                 if exc.goal else None),
+        }
+        raise HTTPException(
+            400 if exc.reason == "missing_revision" else 409, detail) from exc
+    if result is None:
+        raise HTTPException(404, "batch goal not found")
+    updated = result["goal"]
+    return {
+        "goal": updated,
+        "changed": result["changed"],
+        "control_revision": batch_snapshot.control_revision(updated),
+        "monitoring_done": batch_snapshot.monitoring_done(updated),
+    }
+
+
 @router.post("/{goal_id}/pause")
-def pause(goal_id: str, request: Request): return _transition(goal_id,request,"PAUSED")
+async def pause(goal_id: str, request: Request):
+    return await _control(goal_id, request, "pause")
+
+
 @router.post("/{goal_id}/resume")
-def resume(goal_id: str, request: Request): return _transition(goal_id,request,"QUEUED")
+async def resume(goal_id: str, request: Request):
+    return await _control(goal_id, request, "resume")
+
+
 @router.post("/{goal_id}/cancel")
-def cancel(goal_id: str, request: Request):
-    old=request.app.state.store.get_goal(goal_id)
-    if not old: raise HTTPException(404,"goal not found")
-    if old["status"] in TERMINAL: return old
-    return request.app.state.store.transition_goal(goal_id,"CANCELLED",phase="cancelled",event_type="goal_cancelled")
+async def cancel(goal_id: str, request: Request):
+    return await _control(goal_id, request, "cancel")
 

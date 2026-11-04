@@ -51,6 +51,8 @@ export const useQcListStore = defineStore('qclist', () => {
   const statuses = ref<Record<string, QcStatus>>({});
   /** 导入的文件名 / 原文 / 原编码（写回时要按原编码、原换行符还原）。 */
   const sourceName = ref('');
+  // Live successful imports only: restoring history and selecting scenes do not increment it.
+  const coordinateImportRevision = ref(0);
   const sourceText = ref('');
   const sourceEncoding = ref<QcEncoding>('utf-8');
   /** 当前选中的行（点行、或当前打开的图自动命中）。 */
@@ -157,6 +159,7 @@ export const useQcListStore = defineStore('qclist', () => {
     selName.value = null;
     clearBakeLedger();                 // 键是行名，换一份清单即作废
     persist();
+    coordinateImportRevision.value++;
     return true;
   }
 
@@ -518,7 +521,7 @@ export const useQcListStore = defineStore('qclist', () => {
   return {
     // 状态
     list, issues, statuses, loaded, counts,
-    sourceName, sourceEncoding, selName, selIssue, targetPath,
+    sourceName, coordinateImportRevision, sourceEncoding, selName, selIssue, targetPath,
     // 动作
     importText, importFile, close,
     setStatus, statusOf, labelOf,

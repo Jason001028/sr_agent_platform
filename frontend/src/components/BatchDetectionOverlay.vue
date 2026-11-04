@@ -14,7 +14,7 @@
  * 3. 加载失败只显示一条原因，不画任何“看起来像检测结果”的东西；
  *    Mock 来源必须明确标注“非真实结果”。
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import { imageRef } from '../lib/spatial';
 import {
@@ -25,8 +25,17 @@ import type { BatchOverlayDoc } from '../lib/batchOverlay';
 import type { PaneRect } from '../lib/viewMath';
 
 const viewer = useViewerStore();
-const params = parseBatchOverlayParams(
+/** URL is only the **initial** target (old links keep working).  The Batch
+ *  Panel / auto-follow can point the overlay at another Item without a page
+ *  reload; validation still happens in the overlay document itself. */
+const urlParams = parseBatchOverlayParams(
   typeof window === 'undefined' ? '' : window.location.search);
+const params = computed(() => {
+  if (viewer.batchOverlayOff) return null;
+  const target = viewer.batchOverlayTarget;
+  if (target) return { goalId: target.goalId, itemId: target.itemId };
+  return urlParams;
+});
 const doc = ref<BatchOverlayDoc | null>(null);
 const failure = ref<string | null>(null);
 const loading = ref(false);
@@ -37,12 +46,13 @@ let controller: AbortController | null = null;
 let requestSeq = 0;
 
 async function refresh() {
-  if (!params) return;
+  const target = params.value;
+  if (!target) return;
   controller?.abort();
   controller = new AbortController();
   const seq = ++requestSeq;
   loading.value = true;
-  const result = await loadBatchOverlay(params, { signal: controller.signal });
+  const result = await loadBatchOverlay(target, { signal: controller.signal });
   if (seq !== requestSeq) return;
   loading.value = false;
   if (result.status === 'ready') {
@@ -55,7 +65,15 @@ async function refresh() {
   failure.value = result.reason;
 }
 
-onMounted(refresh);
+watch(params, (target) => {
+  requestSeq += 1;
+  controller?.abort();
+  controller = null;
+  doc.value = null;
+  failure.value = null;
+  pngState.value = 'loading';
+  if (target) void refresh();
+}, { immediate: true });
 onBeforeUnmount(() => {
   requestSeq += 1;
   controller?.abort();

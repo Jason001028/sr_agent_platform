@@ -14,7 +14,9 @@
     "test:scenes": "node test-scenes.js",
     "test:manual-scene": "node test-manual-scene.js",
     "gen:sparse": "python gen-test-images.py ../test-tifs/sparse",
-    "test:batch-overlay": "node test-batch-overlay.js"
+    "test:batch-overlay": "node test-batch-overlay.js",
+    "test:batch-panel": "node test-batch-panel.js",
+    "test:flicker": "node test-flicker.js"
   },
   "engines": {
     "node": ">=18"

@@ -42,7 +42,7 @@ const status = computed(() => {
     }
     return { text: tool, cls: '' };
   }
-  const rec = store.activeRec;
+  const rec = store.displayRec;
   if (!rec) return { text: '', cls: '' };
   // 解码/生成预览完成的具体耗时留在 title 里，这一行只给结论
   if (rec.statusCls === 'ok') return { text: '已就绪', cls: 'ok' };
@@ -51,14 +51,14 @@ const status = computed(() => {
 
 /** 中段：原图基准的缩放百分比；不足 10% 保留一位小数（fit 到全景时不会变成「0%」）。 */
 const zoom = computed(() => {
-  const rec = store.activeRec;
+  const rec = store.displayRec;
   if (!rec || !rec.thumb || !rec.W) return '—';
   const pct = store.view.scale * rec.thumb.width / rec.W * 100;
   if (!(pct > 0) || !Number.isFinite(pct)) return '—';
   return (pct >= 10 ? String(Math.round(pct)) : pct.toFixed(1)) + '%';
 });
 
-const gray = computed(()=>{const r=store.activeRec,c=store.cursor;if(!r?.thumb||!c)return '?';try{const x=Math.floor(c[0]*r.thumb.width/r.W),y=Math.floor(c[1]*r.thumb.height/r.H);const d=(r.thumb as unknown as HTMLCanvasElement).getContext('2d')?.getImageData(x,y,1,1).data;return d?'Display RGB '+Array.from(d).slice(0,3).join('/')+' / Raw DN unavailable':'?';}catch{return '?';}});
+const gray = computed(()=>{const r=store.displayRec,c=store.cursor;if(!r?.thumb||!c)return '?';try{const x=Math.floor(c[0]*r.thumb.width/r.W),y=Math.floor(c[1]*r.thumb.height/r.H);const d=(r.thumb as unknown as HTMLCanvasElement).getContext('2d')?.getImageData(x,y,1,1).data;return d?'Display RGB '+Array.from(d).slice(0,3).join('/')+' / Raw DN unavailable':'?';}catch{return '?';}});
 const pixel = computed(() => {
   const c = store.cursor;
   return c ? '(' + c[0] + ', ' + c[1] + ')' : '—';
@@ -66,8 +66,8 @@ const pixel = computed(() => {
 </script>
 
 <template>
-  <div v-if="store.activeRec" class="rec-bar">
-    <span class="sb-status" :class="status.cls" :title="store.activeRec.status">
+  <div v-if="store.displayRec" class="rec-bar">
+    <span class="sb-status" :class="status.cls" :title="store.displayRec.status">
       <!-- 分屏时先说清这条讲的是**哪一侧**（缩放/像素都来自活动侧那套 view 与 rec）。 -->
       <span v-if="store.split" class="side" data-e2e="sb-side">
         [{{ store.activeSide === 'A' ? '左' : '右' }}]
@@ -76,7 +76,7 @@ const pixel = computed(() => {
     </span>
     <span class="sb-zoom" data-e2e="sb-zoom">缩放 {{ zoom }}</span>
     <span class="sb-px" data-e2e="sb-px">像素 {{ pixel }}</span>
-    <span>{{ store.activeRec.W }}×{{ store.activeRec.H }} · 预览 {{ store.view.scale.toFixed(2) }}× · {{ gray }}</span>
+    <span>{{ store.displayRec.W }}×{{ store.displayRec.H }} · 预览 {{ store.view.scale.toFixed(2) }}× · {{ gray }}</span>
   </div>
 </template>
 

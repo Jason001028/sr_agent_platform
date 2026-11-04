@@ -16,20 +16,32 @@ import { useViewerStore } from '../stores/viewer';
 import RoiToolsTab from './RoiToolsTab.vue';
 import AgentChatTab from './AgentChatTab.vue';
 import AgentBotIcon from './AgentBotIcon.vue';
+import BatchProgressPanel from './BatchProgressPanel.vue';
 import { useChatStore } from '../stores/chat.js';
+import { useBatchGoalStore } from '../stores/batchGoal.js';
 
 const store = useViewerStore();
 const chat = useChatStore();
-function readTab(): 'roi' | 'agent' {
-  try { return localStorage.getItem('sr.viewer.ctxTab') === 'roi' ? 'roi' : 'agent'; }
-  catch { return 'agent'; }
+const batch = useBatchGoalStore();
+type CtxTab = 'roi' | 'agent' | 'batch';
+function readTab(): CtxTab {
+  try {
+    const saved = localStorage.getItem('sr.viewer.ctxTab');
+    return saved === 'roi' || saved === 'batch' ? saved : 'agent';
+  } catch { return 'agent'; }
 }
-const tab = ref<'roi' | 'agent'>(readTab());
+const tab = ref<CtxTab>(readTab());
 function openAnnotationConversation(){tab.value='agent';}
 onMounted(()=>window.addEventListener('annotation-conversation',openAnnotationConversation));
 onBeforeUnmount(()=>window.removeEventListener('annotation-conversation',openAnnotationConversation));
 watch(tab, value => {
   try { localStorage.setItem('sr.viewer.ctxTab', value); } catch { /* Optional persistence. */ }
+});
+/** 批次 Tab 只在确有可关联批次时出现。批次消失时退回 Agent，不把用户留在空页。 */
+const shownTab = computed<CtxTab>(() =>
+  (tab.value === 'batch' && !batch.isVisible ? 'agent' : tab.value));
+watch(() => batch.isVisible, visible => {
+  if (!visible && tab.value === 'batch') tab.value = 'agent';
 });
 
 /** store 里存的是「展开」，组件里用「收起」更自然（CSS 也是 .collapsed）。 */
@@ -54,28 +66,41 @@ const toggleTitle = () => (collapsed.value ? '展开上下文侧舱' : '收起�
       <button
         type="button"
         class="ctx-tab"
-        :class="{ on: tab === 'roi' }"
+        :class="{ on: shownTab === 'roi' }"
         @click="tab = 'roi'"
         >工具栏</button>
       <button
         type="button"
         class="ctx-tab"
-        :class="{ on: tab === 'agent' }"
+        :class="{ on: shownTab === 'agent' }"
         @click="tab = 'agent'"
         ><AgentBotIcon :status="chat.agentStatus" :size="16" />Agent</button>
+      <button
+        v-if="batch.isVisible"
+        type="button"
+        class="ctx-tab"
+        data-e2e="ctx-tab-batch"
+        :class="{ on: shownTab === 'batch' }"
+        @click="tab = 'batch'"
+        >批次</button>
     </div>
     <div class="ctx-body">
-      <!-- 两块都常驻（v-show），切换不打断队列 SSE / Agent 会话；淡入只做新进来那块，
-           旧的立即让位。两个 pane 绝对定位叠在同一块区域 —— 否则 v-show 离场的那 100ms
-           里两块各占 100% 高度，正在进入的那块会被挤出可视区。 -->
+      <!-- 各块都常驻（v-show），切换不打断队列 SSE / Agent 会话 / 批次事件流；淡入只做
+           新进来那块，旧的立即让位。pane 绝对定位叠在同一块区域 —— 否则 v-show 离场
+           的那 100ms 里各块各占 100% 高度，正在进入的那块会被挤出可视区。 -->
       <Transition name="ctx-content-fade">
-        <div v-show="tab === 'roi'" class="ctx-pane">
+        <div v-show="shownTab === 'roi'" class="ctx-pane">
           <RoiToolsTab />
         </div>
       </Transition>
       <Transition name="ctx-content-fade">
-        <div v-show="tab === 'agent'" class="ctx-pane">
+        <div v-show="shownTab === 'agent'" class="ctx-pane">
           <AgentChatTab />
+        </div>
+      </Transition>
+      <Transition name="ctx-content-fade">
+        <div v-show="shownTab === 'batch'" class="ctx-pane">
+          <BatchProgressPanel />
         </div>
       </Transition>
     </div>

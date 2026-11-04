@@ -29,6 +29,10 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
         <div class="nm-title">{{ store.modal.title }}</div>
         <div class="nm-body">{{ store.modal.body }}</div>
         <div v-if="store.modal.hint" class="nm-hint">{{ store.modal.hint }}</div>
+        <details v-if="store.modal.raw" class="nm-raw">
+          <summary>原始 JSON</summary>
+          <pre>{{ store.modal.raw }}</pre>
+        </details>
         <button class="nm-ok" type="button" @click="store.hideModal()">知道了</button>
       </div>
     </div>
@@ -64,6 +68,20 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
 /* 长路径不换行会把卡片撑破（后端那串候选清单里全是绝对路径）*/
 .nm-body { color: var(--ink-sub); font-size: 13px; line-height: 1.7; white-space: pre-wrap; word-break: break-all; }
 .nm-hint { color: var(--ink-sub); font-size: 12px; line-height: 1.6; opacity: 0.85; }
+.nm-raw { color: var(--ink-sub); font-size: 12px; }
+.nm-raw summary { cursor: pointer; color: var(--accent-deep); }
+.nm-raw pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  max-height: 32vh;
+  overflow: auto;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctrl);
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 11px;
+}
 .nm-ok {
   align-self: flex-end;
   margin-top: 4px;

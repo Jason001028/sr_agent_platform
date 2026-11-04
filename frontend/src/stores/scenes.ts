@@ -319,27 +319,47 @@ export const useScenesStore = defineStore('scenes', () => {
 
       反过来，**打开成功**也是一条实证：那一景还在盘上（而且这趟之后盘上有了它当前
       档位的预览）。所以成功路径顺带把列表里同一景的那一行翻回来，见 try 末尾。 */
-  async function open(row: SceneRow, resolved?: SceneResolveResult['resolved']): Promise<void> {
+  async function open(
+    row: SceneRow, resolved?: SceneResolveResult['resolved'],
+    opts: {
+      quiet?: boolean; origin?: 'user' | 'follow';
+      /** Re-checked after the (possibly slow) JPG fetch, immediately before
+       *  the viewer is touched.  Auto-follow uses it so a request that became
+       *  stale while downloading cannot override a newer user action. */
+      stillWanted?: () => boolean;
+    } = {},
+  ): Promise<string> {
     const viewer = useViewerStore();
     const cfg = loadSrConfig();
+    const quiet = opts.quiet === true;
+    const origin = opts.origin ?? 'user';
+    const stillWanted = opts.stillWanted;
+    const fail = (message: string): string => {
+      if (!quiet) error.value = message;
+      return message;
+    };
+    // Caller no longer wants this view: leave everything as it is.
+    if (stillWanted && !stillWanted()) return '';
     if (row.fake) {
-      error.value = '「' + row.name + '」是 fake 占位场景'
-        + '（未配 SR_SCENES_ROOT 或盘阵不可达），没有真实文件可打开';
-      return;
+      return fail('「' + row.name + '」是 fake 占位场景'
+        + '（未配 SR_SCENES_ROOT 或盘阵不可达），没有真实文件可打开');
     }
     if (!row.W || !row.H) {
-      error.value = '「' + row.name + '」尺寸未知（元数据缺 W/H），无法换算掩码，拒绝打开';
-      return;
+      return fail('「' + row.name + '」尺寸未知（元数据缺 W/H），无法换算掩码，拒绝打开');
     }
-    openingId.value = row.id;
-    error.value = '';
+    if (!quiet) openingId.value = row.id;
+    if (!quiet) error.value = '';
+    let failure = '';
     try {
       // 首次要服务端生成预览（读一遍大图，几十秒）。遮罩（viewer.showMask）只挂在
       // /viewer 上，本页调了也看不见，所以这里走自己的 phase 文案行。
       // 档位取 viewer store 里的那份（工具栏拖动条写的就是它）—— 这样用户拖完
       // 滑块不必刷新页面就生效；loadPreviewDiv() 只负责冷启动时的初值。
       const blob = await fetchSceneJpg(cfg, row, viewer.previewDiv,
-                                       (text) => { phase.value = text; });
+                                       (text) => { if (!quiet) phase.value = text; });
+      // The byte fetch may have taken long enough for the caller's reason to
+      // open this image to expire.  Check before mutating the viewer.
+      if (stillWanted && !stillWanted()) return '';
       await viewer.openSceneJpg({
         name: row.name, W: row.W, H: row.H, sceneId: row.id,
         // 无伴随件的 .tif 且父目录不是场景目录时后端把它置 null（= 不能提交 SR），
@@ -354,7 +374,7 @@ export const useScenesStore = defineStore('scenes', () => {
         serverMaskPath: resolved ? resolved.mask_path : null,
         previewOnly: resolved?.preview_only === true,
         srcRev: row.srcRev ?? null,
-      }, blob);
+      }, blob, undefined, origin, stillWanted);
       // 打开成功 = 这一景**确实还在盘上**的实证，而且这一趟之后盘上必有它当前档位的
       // 预览（fetchSceneJpg 的保证）。若当前列表里也有它，就地翻回来 —— 那一格的灰块
       // 「已自动清除」是按**推定**画的，别让列表继续印着一个刚落空的结论。
@@ -375,26 +395,52 @@ export const useScenesStore = defineStore('scenes', () => {
         // 能点的按钮只会让人反复撞墙。**只陈述「取不到」，不写死原因** —— 自动清理是
         // 最像的那个（用户的口径：产出后几天），但平台没在盘上看到过清理这件事。
         row.purged = true;
-        error.value = '打开「' + row.name + '」失败：盘阵上已没有这个文件（HTTP 404）。'
+        failure = fail('打开「' + row.name + '」失败：盘阵上已没有这个文件（HTTP 404）。'
           + '这一行的「打开」已改成「已自动清除」；'
-          + '列表可能是清理之前的旧结果，按「检索」刷新即知它还在不在。';
+          + '列表可能是清理之前的旧结果，按「检索」刷新即知它还在不在。');
       } else if (isProxyMiss(e)) {
         // 打后端的请求**没走到后端**（响应不是 JSON）。**不置 purged**：这个状态码
         // 来自别人，说明不了盘上有没有这一景 —— 2026-09-23 那次「老景打不开」正是
         // 这一支（nginx 在 /api/ 下漏了同一层的 proxy_pass），当时只看 404 就把能打开
         // 的行标成了「已自动清除」。这里如实说清是配置问题并给出自查方向。
-        error.value = '打开「' + row.name + '」失败：'
+        failure = fail('打开「' + row.name + '」失败：'
           + (e instanceof Error ? e.message : String(e))
           + '，且响应不是后端给的 JSON —— 这次请求没走到平台后端（多半是 nginx 反代'
           + '配置：/api/ 下的 location 少了同一层的 proxy_pass，见 deploy/nginx.conf）。'
-          + '这个状态码说明不了盘阵上还有没有这一景。';
+          + '这个状态码说明不了盘阵上还有没有这一景。');
       } else {
-        error.value = '打开「' + row.name + '」失败：'
-          + (e instanceof Error ? e.message : String(e));
+        failure = fail('打开「' + row.name + '」失败：'
+          + (e instanceof Error ? e.message : String(e)));
       }
     } finally {
-      phase.value = '';
+      if (!quiet) phase.value = '';
       openingId.value = null;
+    }
+    return failure;
+  }
+
+  /** Quiet open for the Batch Panel / auto-follow.
+   *
+   *  Why quiet: `open()` reports failures through `scenes.error`, which only the
+   *  Scenes page renders.  On /viewer that would be a silent no-op.  This path
+   *  returns the reason to the caller, never touches the global error line, and
+   *  carries `origin='follow'` so `viewer.activate` does not count as a manual
+   *  user intent (which would immediately cancel follow). */
+  async function openQuiet(
+    path: string, origin: 'user' | 'follow' = 'user',
+    opts: { stillWanted?: () => boolean } = {},
+  ): Promise<string> {
+    const trimmed = String(path ?? '').trim();
+    if (!trimmed) return '影像路径为空';
+    const stillWanted = opts.stillWanted;
+    if (stillWanted && !stillWanted()) return '';
+    try {
+      const res = await apiResolveScene(loadSrConfig(), { path: trimmed });
+      if (stillWanted && !stillWanted()) return '';
+      return await open(res.row, res.resolved, { quiet: true, origin, stillWanted });
+    } catch (e) {
+      return '打开「' + trimmed + '」失败：'
+        + (e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -492,7 +538,8 @@ export const useScenesStore = defineStore('scenes', () => {
     searched, searchedAt,
     query, satellite, sensor, dateFrom, dateTo,
     satellites, sensors, dates,
-    list, ensureSearched, invalidateSearch, resetFilters, open, resolvePath, openByName, resolveByName,
+    list, ensureSearched, invalidateSearch, resetFilters, open, openQuiet,
+    resolvePath, openByName, resolveByName,
     // 清除预览缓存（SceneCacheBar 用）
     selected, clearing, clearResult, clearRemoved, clearError, clearSummary,
     selectableRows, selectedCount, allSelected,

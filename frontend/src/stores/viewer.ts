@@ -38,6 +38,11 @@ import {
   loadCmpPrefetch, saveCmpPrefetch, placeInSplit,
 } from '../lib/compare.js';
 import type { CompareMode } from '../lib/compare.js';
+import {
+  FLICKER_INTERVALS_MS, parseFlickerInterval, loadFlickerInterval, saveFlickerInterval,
+  registrationRefusal, pickFlickerPartner, flickerPairLabel, flickerLabel,
+} from '../lib/flicker.js';
+import type { FlickerImageMeta } from '../lib/flicker.js';
 import { FileSource } from '../lib/source.js';
 import { browserKit } from '../lib/browserKit.js';
 import { decodeOne } from '../lib/decode.js';
@@ -62,7 +67,8 @@ import type { SpotlightMode } from '../lib/spotlight.js';
 import { buildStats, luma, STAT_HI } from '../lib/roiStats.js';
 import type { RoiStats } from '../lib/roiStats.js';
 import { downloadBlob } from '../lib/saver.js';
-import { useQueueStore, pathLeafOf } from './queue.js';
+import { useQueueStore, pathLeafOf, defaultForm, formToSubmit } from './queue.js';
+import { isAutoSubmissionEnabled, saveAutoSubmission } from '../lib/autoSubmission';
 import router from '../router/index.js';
 
 export type DrawTool = 'rect' | 'polygon' | 'wand' | 'del';
@@ -337,6 +343,19 @@ export const useViewerStore = defineStore('viewer', () => {
   /** 当前左侧临时工作区版本；清空/刷新后旧 Agent 上下文立即失效。 */
   const workspaceVersion = ref(0);
   const activeId = ref<number | null>(null);
+  /** 最近一次**用户主动**改变视图的序号（选图/缩放/平移/分屏/切侧）。
+   *  Batch 自动跟随监听它：变化即退出跟随。程序化跟随打开不带这个序号。 */
+  const userIntentSeq = ref(0);
+  /** 当前要绘制的 Batch 检测叠加层（来自「批次」面板或 URL 初始值）。 */
+  const batchOverlayTarget = ref<{ goalId: string; itemId: string } | null>(null);
+  /** 用户明确关掉叠加层时，URL 里的初始目标也不能复活它。 */
+  const batchOverlayOff = ref(false);
+  function noteUserIntent(): void {
+    userIntentSeq.value += 1;
+    // 平移 / 缩放 / 切图 / 切侧 / 改分隔 / 开新图都会走这里 —— 交替对比里
+    // 任何主动操作都先停播，画面停在用户此刻看到的那一帧（要求 7）。
+    if (flickerPlaying.value) pauseFlicker();
+  }
 
   /* ---------------- 左侧列表的工具条状态 ----------------
      列表顺序与收藏分开存：`recs` 保持插入顺序（批量占位卡按清单行序追加），
@@ -447,7 +466,7 @@ export const useViewerStore = defineStore('viewer', () => {
   const error = ref('');
   /** 模态提示：**不自动消失**，得用户点掉。给的是后端那些一长串、需要照着做的
    *  原因（toast 六秒既看不完也留不住）。全局只有一个，后弹的顶掉先弹的。 */
-  const modal = ref({ visible: false, title: '', body: '', hint: '' });
+  const modal = ref({ visible: false, title: '', body: '', hint: '', raw: '' });
   const sidebarCollapsed = ref(false);
   const busy = ref(false);
   const srBusy = ref(false);       // 「提交 SR」进行中（掩码服务端生成）
@@ -488,11 +507,147 @@ export const useViewerStore = defineStore('viewer', () => {
   let lastSceneDir: string | null = null;
   const ctxRailPrevOpen = ref<boolean | null>(null);
 
+  /* ---------------- 交替对比（Flicker Comparison，2026-11-03） ----------------
+
+     与分屏并列的第四态。**单画布**：同一视口里只画当前可见的那一张，定时把
+     `flickerIndex` 在 0/1 之间翻。两张图都不重新解码、不重新取图、不重建画布 ——
+     切换只是 `panes[0].rec` 换了个引用，渲染器照旧 drawImage。
+
+     视口用**参考图**（pair[0]）的缩略图坐标存一份 `flickerView`；另一张的视图
+     由 `remapViewForImage` 按「整幅 = 同一地面」实时换算（归一化坐标对应）。
+     因此两张图宽高比必须一致 —— 这是 `lib/flicker.ts::registrationRefusal` 的门槛，
+     过不了就不让自动交替，并把原因说出来。
+
+     `viewA`/`viewB` **一律不碰**：交替对比退出后，分屏/单屏的原始视口原样还在，
+     「切换模式恢复原始查看状态」由「根本没改」保证，不需要快照回滚。 */
+
+  const flickerIntervalMs = ref(loadFlickerInterval());
+  const flickerPlaying = ref(false);
+  /** 当前可见的是 pair[0]（参考图）还是 pair[1]。 */
+  const flickerIndex = ref<0 | 1>(0);
+  /** 参与的这两条 rec（id）。进入模式时定一次；之后列表变化由 watcher 收口。 */
+  const flickerPair = ref<{ a: number; b: number } | null>(null);
+  /** 参考图（pair[0]）的视图。另一张的视图是它的纯换算结果。 */
+  const flickerView = ref<ViewState>({ scale: 1, ox: 0, oy: 0 });
+  let flickerTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 进入交替对比时是不是从分屏来的。从分屏来时，viewA/viewB 存的是**半幅**视口，
+   *  退到单屏模式要重新适配整幅；从单屏进来则原样恢复，不 fit。 */
+  let flickerFromSplit = false;
+  /** 进入交替对比时的活动图 id。退出时若它变了（用户在交替中切过图），
+   *  把当前 flickerView 交给单屏；没变就原样保留 viewA（进入前的状态）。 */
+  let flickerEnterActiveId: number | null = null;
+
+  function flickerMeta(rec: ViewerRec): FlickerImageMeta {
+    return {
+      id: rec.id, w: rec.W, h: rec.H,
+      sceneDir: rec.sceneDir ?? rec.lqPath ?? null,
+      stageKind: rec.stageKind ?? null,
+      stageLabel: rec.stageLabel ?? null,
+      name: rec.name,
+      pending: !!rec.pending,
+    };
+  }
+
+  const flickerRefRec = computed<ViewerRec | null>(() => {
+    const p = flickerPair.value;
+    return p ? recs.value.find((r) => r.id === p.a) ?? null : null;
+  });
+  const flickerAltRec = computed<ViewerRec | null>(() => {
+    const p = flickerPair.value;
+    return p ? recs.value.find((r) => r.id === p.b) ?? null : null;
+  });
+  const flickerCurrentRec = computed<ViewerRec | null>(() =>
+    flickerIndex.value === 1 ? flickerAltRec.value : flickerRefRec.value);
+  /** 正在显示的是不是配对里的第二张（叠加层要据此避让，见 TifCanvas.renderDraw）。 */
+  const flickerShowingAlt = computed(() =>
+    compareMode.value === 'flicker' && flickerIndex.value === 1);
+
+  /** 另一张的视图：按参考图视图换算；图还没像素时退回参考图视图（不画第二张）。 */
+  const flickerDisplayView = computed<ViewState>(() => {
+    if (flickerIndex.value !== 1) return flickerView.value;
+    const a = flickerRefRec.value;
+    const b = flickerAltRec.value;
+    if (!a?.thumb || !b?.thumb) return flickerView.value;
+    return remapViewForImage(
+      flickerView.value,
+      { w: a.thumb.width, h: a.thumb.height },
+      { w: b.thumb.width, h: b.thumb.height },
+      canvasSize.value.w, canvasSize.value.h,
+    );
+  });
+
+  /** 两图能否自动交替：能 → null；不能 → 一句原因（配准 / 缺图 / 未加载完）。 */
+  const flickerReason = computed<string>(() => {
+    if (compareMode.value !== 'flicker') return '';
+    const p = flickerPair.value;
+    if (!p) {
+      return '没有可交替的第二张影像 —— 先在分屏对比里放两张同场景影像，'
+        + '或用「输入影像 / 本轮超分产物 / NOSR」芯片打开同景的另一张';
+    }
+    const a = flickerRefRec.value;
+    const b = flickerAltRec.value;
+    if (!a || !b) return '参与交替的影像已被关闭，请重新进入交替对比';
+    const refusal = registrationRefusal(flickerMeta(a), flickerMeta(b));
+    if (refusal) return refusal;
+    if (!a.thumb || !b.thumb) return '对比影像还在加载，加载完成后即可播放';
+    return '';
+  });
+
+  const flickerReady = computed(() => compareMode.value === 'flicker' && !flickerReason.value);
+
+  /** 胶囊上的配对文字（PAN/NOSR）与当前可见那张的名字。 */
+  const flickerPairName = computed(() => {
+    const a = flickerRefRec.value;
+    const b = flickerAltRec.value;
+    if (a && b) return flickerPairLabel(flickerMeta(a), flickerMeta(b));
+    if (a) return flickerLabel(flickerMeta(a));
+    return '';
+  });
+  const flickerCurrentName = computed(() => {
+    const r = flickerCurrentRec.value;
+    return r ? r.name : '';
+  });
+  /** 胶囊上两端的短标签（PAN / NOSR …），用来高亮「现在看的是哪张」。 */
+  const flickerNames = computed<{ a: string; b: string }>(() => ({
+    a: flickerRefRec.value ? flickerLabel(flickerMeta(flickerRefRec.value)) : '',
+    b: flickerAltRec.value ? flickerLabel(flickerMeta(flickerAltRec.value)) : '',
+  }));
+
+  /** 展示层那张：交替对比时是当前可见图，其余时候就是活动图。
+   *  只给**显示相关**的读取点用（状态栏、光标坐标）；掩码/ROI/Agent 仍认 activeRec。 */
+  const displayRec = computed<ViewerRec | null>(() =>
+    compareMode.value === 'flicker'
+      ? (flickerCurrentRec.value ?? activeRec.value)
+      : activeRec.value);
+
   /** 活动侧的视图变换。**全仓 `view.value = …` 只有 5 处，都在本文件内**，
-     读点一个都不用改。Pinia 会解包 computed，`store.view.ox` 照旧可用。 */
+     读点一个都不用改。Pinia 会解包 computed，`store.view.ox` 照旧可用。
+
+     交替对比是第六处：读的是「当前可见那张」的视图，写回去时**换算回参考图**
+     —— 这样滚轮/拖动改的永远是同一份 `flickerView`，两张图不会各自漂移。 */
   const view = computed<ViewState>({
-    get: () => (activeSide.value === 'B' ? viewB.value : viewA.value),
-    set: (v) => { if (activeSide.value === 'B') viewB.value = v; else viewA.value = v; },
+    get: () => {
+      if (compareMode.value === 'flicker') return flickerDisplayView.value;
+      return activeSide.value === 'B' ? viewB.value : viewA.value;
+    },
+    set: (v) => {
+      if (compareMode.value === 'flicker') {
+        const a = flickerRefRec.value;
+        const b = flickerAltRec.value;
+        if (flickerIndex.value === 1 && a?.thumb && b?.thumb) {
+          flickerView.value = remapViewForImage(
+            v,
+            { w: b.thumb.width, h: b.thumb.height },
+            { w: a.thumb.width, h: a.thumb.height },
+            canvasSize.value.w, canvasSize.value.h,
+          );
+        } else {
+          flickerView.value = v;
+        }
+        return;
+      }
+      if (activeSide.value === 'B') viewB.value = v; else viewA.value = v;
+    },
   });
 
   /** 分屏中（关闭 / 点选对比都是单屏）。 */
@@ -596,20 +751,26 @@ export const useViewerStore = defineStore('viewer', () => {
     try { localStorage.setItem('sr-preview-memory-mb', String(value)); } catch { /* 本次仍生效 */ }
   }
   // 按用户预算淘汰最久未使用的预览；正在显示的两格永不淘汰。
+  // 交替对比的两张也算「正在显示」—— 被淘汰一张，下一拍就会黑屏或退回参考图。
   const previewUse = new Map<number, number>();
   let previewClock = 0;
+  const onScreenId = (id: number): boolean =>
+    sideOfRec(id) !== null
+    || (compareMode.value === 'flicker'
+      && (flickerPair.value?.a === id || flickerPair.value?.b === id));
   watch(() => [previewMemoryMB.value, activeId.value, split.value, paneA.value, paneB.value,
+    flickerPair.value?.a, flickerPair.value?.b, compareMode.value,
     ...recs.value.map((r) => r.thumb)], () => {
     const resident = recs.value.filter((r) => r.thumb);
     for (const r of resident) {
-      if (sideOfRec(r.id) !== null || !previewUse.has(r.id)) {
+      if (onScreenId(r.id) || !previewUse.has(r.id)) {
         previewUse.set(r.id, ++previewClock);
       }
     }
     const bytes = (r: ViewerRec) => (r.thumb ? r.thumb.width * r.thumb.height * 4 : 0)
       + (r.src?.byteLength ?? 0);
     let total = resident.reduce((sum, r) => sum + bytes(r), 0);
-    const idle = resident.filter((r) => sideOfRec(r.id) === null)
+    const idle = resident.filter((r) => !onScreenId(r.id))
       .sort((a, b) => (previewUse.get(a.id) ?? 0) - (previewUse.get(b.id) ?? 0));
     while (idle.length && total > previewMemoryMB.value * 1024 * 1024) {
       const r = idle.shift()!;
@@ -629,6 +790,37 @@ export const useViewerStore = defineStore('viewer', () => {
     }
   }, { flush: 'post' });
 
+  /* 交替对比的口径收口：列表/活动图变了以后，配对不能还指着旧 id。
+     - 活动图换了（用户点列表、拖入、Batch 跟随）→ 以新活动图为参考图重新配一对；
+     - 配对里有一张被关掉 → 停表、清配对，由胶囊说明原因（不静默替用户选一张）。
+     切图时 `noteUserIntent` 已经先暂停，这里只负责重配，不会「自动接着播」。 */
+  watch(
+    () => [compareMode.value, activeId.value,
+      recs.value.map((r) => r.id).join(',')] as const,
+    () => {
+      if (compareMode.value !== 'flicker') return;
+      const p = flickerPair.value;
+      if (!p) return;
+      const live = (id: number) => recs.value.some((r) => r.id === id);
+      if (!live(p.a) || !live(p.b)) {
+        stopFlicker();
+        flickerPair.value = null;
+        flickerIndex.value = 0;
+        // 另一张还在、活动图也还在 → 按当前活动图重新配一对，别让模式卡在「无配对」。
+        // 连活动图都没了（清空列表）就保持空配对，等用户下次打开。
+        if (activeRec.value) rebuildFlickerPair();
+        renderTick.value++;
+        return;
+      }
+      if (p.a !== activeId.value) {
+        stopFlicker();
+        rebuildFlickerPair();
+        renderTick.value++;
+      }
+    },
+    { flush: 'post' },
+  );
+
   const activeRec = computed<ViewerRec | null>(() =>
     recs.value.find((r) => r.id === activeId.value) || null,
   );
@@ -646,7 +838,13 @@ export const useViewerStore = defineStore('viewer', () => {
   /** 某一格上摆着哪张 rec。**单屏时与 `activeRec` 同源** —— 于是渲染器只有
       `panes` 一个输入，不必分「单屏走老路、分屏走新路」。 */
   function recForSide(side: 'A' | 'B'): ViewerRec | null {
-    if (!split.value) return activeRec.value;
+    if (!split.value) {
+      // 交替对比：画布上摆着的是「当前可见那张」，不是 activeRec（它固定为参考图）。
+      if (compareMode.value === 'flicker' && side === 'A') {
+        return flickerCurrentRec.value ?? activeRec.value;
+      }
+      return activeRec.value;
+    }
     const id = side === 'A' ? paneA.value : paneB.value;
     return id === null ? null : recs.value.find((r) => r.id === id) ?? null;
   }
@@ -656,7 +854,12 @@ export const useViewerStore = defineStore('viewer', () => {
   const panes = computed<Pane[]>(() => {
     const { w, h } = canvasSize.value;
     if (!split.value) {
-      return [{ side: 'A', rect: { x: 0, y: 0, w, h }, view: viewA.value, rec: recForSide('A'), active: true }];
+      const flicker = compareMode.value === 'flicker';
+      return [{
+        side: 'A', rect: { x: 0, y: 0, w, h },
+        view: flicker ? flickerDisplayView.value : viewA.value,
+        rec: recForSide('A'), active: true,
+      }];
     }
     const r = splitRects(splitRatio.value, w, h);
     return [
@@ -744,6 +947,7 @@ export const useViewerStore = defineStore('viewer', () => {
         (next?.stageLabel ?? '产物') + '不能画掩码），先点「完成」再切');
       return;
     }
+    noteUserIntent();
     activeSide.value = side;
     switchActive(id);
     renderTick.value++;
@@ -763,6 +967,14 @@ export const useViewerStore = defineStore('viewer', () => {
 
   function setSideView(side: 'A' | 'B', v: ViewState) {
     if (side === 'B') viewB.value = v; else viewA.value = v;
+  }
+
+  /** 外部组件（鹰眼）改某一格的视口。交替对比只有一份视口，且 `panes[0].view` 在
+   *  第二张时是**换算出来的临时对象** —— 直接改它不会留下任何状态，必须走这里。 */
+  function setPaneView(side: 'A' | 'B', v: ViewState) {
+    if (compareMode.value === 'flicker') view.value = v;
+    else setSideView(side, v);
+    renderTick.value++;
   }
 
   /** 这一格适配后的目标视图；同时记下 `viewFor`（记账与「是否立即落位」无关）。
@@ -855,6 +1067,17 @@ export const useViewerStore = defineStore('viewer', () => {
    *  否则用户会看到一张缩在左上角的图。 */
   function fitAfterImageChange(side: 'A' | 'B', rec: ViewerRec) {
     if (!rec.thumb) return;
+    // 交替对比：画布上那只是参考图，只改 flickerView；viewA/viewB 保持原样。
+    if (compareMode.value === 'flicker') {
+      const size = { w: rec.thumb.width, h: rec.thumb.height };
+      const { w, h } = canvasSize.value;
+      const prev = viewFor.A;
+      flickerView.value = prev
+        ? remapViewForImage(flickerView.value, prev, size, w, h)
+        : fitView(size.w, size.h, w, h);
+      viewFor.A = size;
+      return;
+    }
     const rect = rectForSide(side);
     const size = { w: rec.thumb.width, h: rec.thumb.height };
     const prev = viewFor[side];
@@ -873,6 +1096,23 @@ export const useViewerStore = defineStore('viewer', () => {
      缩放与位置抹掉（按相对视野搬过去）。关闭模式 `compareOn` 为假，仍然走 `fit()`。 */
   function afterPixels(rec: ViewerRec, previousSize?: { w: number; h: number }) {
     stopViewAnim();
+    // 交替对比：只有**参考图**的视口由 flickerView 保管，另一张靠换算。
+    // 不走下面分屏那套写 viewA/viewB 的路 —— 那会把「退出后恢复原视口」破坏掉。
+    if (compareMode.value === 'flicker') {
+      const p = flickerPair.value;
+      if (p && rec.id === p.a && rec.thumb) {
+        const size = { w: rec.thumb.width, h: rec.thumb.height };
+        const { w, h } = canvasSize.value;
+        flickerView.value = previousSize
+          ? remapViewForImage(flickerView.value, previousSize, size, w, h)
+          : fitView(size.w, size.h, w, h);
+        viewFor.A = size;
+      }
+      refreshCloudStats();
+      refreshRoiStats();
+      renderTick.value++;
+      return;
+    }
     if (previousSize && rec.thumb) {
       for (const side of ['A', 'B'] as const) {
         if ((side === 'A' ? paneA.value : paneB.value) !== rec.id) continue;
@@ -918,19 +1158,197 @@ export const useViewerStore = defineStore('viewer', () => {
     ctxRailPrevOpen.value = null;
   }
 
-  /** 切「关闭 / 点选对比 / 分屏对比」。 */
+  /* ---------------- 交替对比：配对、计时、预加载 ---------------- */
+
+  /** 进入交替对比。返回 false = 没有可用的当前图，模式没变。 */
+  function enterFlickerMode(): boolean {
+    const active = activeRec.value;
+    if (!active) {
+      showToast('先打开一张影像，再进入交替对比');
+      return false;
+    }
+    const wasSplit = split.value;
+    flickerFromSplit = wasSplit;
+    let partnerId: number | null = null;
+    if (wasSplit) {
+      // 分屏里用户已经摆好两张 → 就用这对，不再自作主张换一张。
+      const other = paneA.value === active.id ? paneB.value : paneA.value;
+      if (other !== null && other !== active.id) partnerId = other;
+    }
+    if (partnerId === null) {
+      const partner = pickFlickerPartner(
+        flickerMeta(active),
+        recs.value.map((r) => flickerMeta(r)),
+      );
+      if (partner) partnerId = partner.id;
+    }
+    flickerPair.value = partnerId === null ? null : { a: active.id, b: partnerId };
+    flickerIndex.value = 0;
+    flickerEnterActiveId = active.id;
+    // 分屏的半幅视口不能直接搬到整块画布（会缩在左上角）→ 参考图重新适配；
+    // 单屏本来就是这个视口，原样接过来，进入模式时画面不跳。
+    flickerView.value = wasSplit && active.thumb
+      ? fitView(active.thumb.width, active.thumb.height, canvasSize.value.w, canvasSize.value.h)
+      : { ...viewA.value };
+    if (active.thumb) viewFor.A = { w: active.thumb.width, h: active.thumb.height };
+    compareMode.value = 'flicker';
+    compareList.value = seedCompareList(recs.value.map((r) => r.id));
+    // 分屏期间收起的右栏**保持收起**：交替对比仍是看图模式，展开它会改画布宽度、
+    // 触发一次重新适配，刚接过来的视口会跳。退出到单屏模式时再还原（见 setCompareMode）。
+    void prepareFlickerPixels();
+    renderTick.value++;
+    return true;
+  }
+
+  /** 预加载配对里还没像素的那张（「一键解析」的懒卡）。已有像素时是空操作。 */
+  async function prepareFlickerPixels(): Promise<void> {
+    const p = flickerPair.value;
+    if (!p) return;
+    for (const id of [p.a, p.b]) {
+      if (compareMode.value !== 'flicker') return;   // 期间用户已经切走了
+      if (flickerPair.value !== p) return;           // 配对换了
+      const rec = recs.value.find((r) => r.id === id);
+      if (!rec || rec.thumb || !rec.card) continue;
+      await loadCardPixels(rec);
+    }
+    if (compareMode.value === 'flicker' && flickerPair.value === p) renderTick.value++;
+  }
+
+  function clearFlickerTimer(): void {
+    if (flickerTimer !== null) {
+      clearTimeout(flickerTimer);
+      flickerTimer = null;
+    }
+  }
+
+  function scheduleFlickerTick(): void {
+    clearFlickerTimer();
+    if (!flickerPlaying.value) return;
+    flickerTimer = setTimeout(() => {
+      flickerTimer = null;
+      if (!flickerPlaying.value || compareMode.value !== 'flicker') return;
+      // 页面隐藏 / 系统要求减少动态效果 → 停，不继续在后台闪。
+      if ((typeof document !== 'undefined' && document.hidden) || prefersReducedMotion()) {
+        pauseFlicker();
+        return;
+      }
+      flickerIndex.value = flickerIndex.value === 0 ? 1 : 0;
+      marker.value = null;             // 红叉属于上一张图，翻面后不能留在新图上
+      renderTick.value++;
+      scheduleFlickerTick();
+    }, flickerIntervalMs.value);
+  }
+
+  function startFlicker(): boolean {
+    if (compareMode.value !== 'flicker') return false;
+    if (flickerPlaying.value) return true;
+    if (!flickerReady.value) {
+      if (flickerReason.value) showToast(flickerReason.value);
+      return false;
+    }
+    if (prefersReducedMotion()) {
+      showToast('系统已开启「减少动态效果」，不自动交替；可以手动查看两张图');
+      return false;
+    }
+    flickerPlaying.value = true;
+    scheduleFlickerTick();
+    return true;
+  }
+
+  /** 暂停：画面停在当前这一帧（不回到 pair[0]）。 */
+  function pauseFlicker(): void {
+    clearFlickerTimer();
+    if (flickerPlaying.value) {
+      flickerPlaying.value = false;
+      renderTick.value++;
+    }
+  }
+
+  function stopFlicker(): void {
+    clearFlickerTimer();
+    flickerPlaying.value = false;
+  }
+
+  function toggleFlicker(): void {
+    if (flickerPlaying.value) pauseFlicker(); else startFlicker();
+  }
+
+  function setFlickerInterval(ms: number): void {
+    const next = parseFlickerInterval(ms);
+    if (next === flickerIntervalMs.value) return;
+    flickerIntervalMs.value = next;
+    saveFlickerInterval(next);
+    if (flickerPlaying.value) scheduleFlickerTick();   // 下一拍就按新节拍走
+  }
+
+  /** 配对成员被关掉 / 活动图换了 → 重新定一对（播放在调用方先停）。 */
+  function rebuildFlickerPair(): void {
+    if (compareMode.value !== 'flicker') return;
+    const active = activeRec.value;
+    if (!active) { flickerPair.value = null; return; }
+    const partner = pickFlickerPartner(flickerMeta(active), recs.value.map((r) => flickerMeta(r)));
+    flickerPair.value = partner ? { a: active.id, b: partner.id } : null;
+    flickerIndex.value = 0;
+    // 活动图就是刚换上的这张。若 `activate` 已经按相对视野把 flickerView 换过来了
+    // （viewFor.A 与新图尺寸一致），原样保留；否则老实适配，别让图缩在左上角。
+    if (active.thumb) {
+      const size = { w: active.thumb.width, h: active.thumb.height };
+      const prev = viewFor.A;
+      const { w, h } = canvasSize.value;
+      flickerView.value = prev && prev.w === size.w && prev.h === size.h
+        ? flickerView.value
+        : fitView(size.w, size.h, w, h);
+      viewFor.A = size;
+    } else {
+      flickerView.value = { ...viewA.value };
+    }
+    void prepareFlickerPixels();
+  }
+
+  /** 切「关闭 / 点选对比 / 分屏对比 / 交替对比」。 */
   function setCompareMode(mode: CompareMode) {
     const next = parseCompareMode(mode);
     if (next === compareMode.value) return;
+    noteUserIntent();
     stopViewAnim();
     const wasSplit = split.value;
+    const wasFlicker = compareMode.value === 'flicker';
     const wasOff = compareMode.value === 'off';
     // **刻意不再 exitDraw()**（2026-09-22）：对比模式下可以继续画掩码（活动侧那张），
     // 切模式不该把用户画了一半的框丢掉。pendingRect/pendingPts 存的是缩略图坐标，
     // 换了视口也仍然指着同一片影像区域，所以留着是对的。
 
+    if (next === 'flicker') {
+      if (!enterFlickerMode()) return;
+      return;
+    }
+
+    // 离开交替对比：停表、丢掉配对。**viewA/viewB 一直没被改过**，
+    // 所以分屏/单屏的原始视口天然还在。
+    const flickerWasFromSplit = flickerFromSplit;
+    const flickerActiveChanged = wasFlicker
+      && flickerEnterActiveId !== null && activeId.value !== flickerEnterActiveId;
+    let flickerExitSize: { w: number; h: number } | null = null;
+    if (wasFlicker) {
+      const pair = flickerPair.value;
+      const ref = flickerRefRec.value;
+      flickerExitSize = ref?.thumb ? { w: ref.thumb.width, h: ref.thumb.height } : null;
+      flickerFromSplit = false;
+      flickerEnterActiveId = null;
+      stopFlicker();
+      flickerPair.value = null;
+      flickerIndex.value = 0;
+      if (next === 'split') {
+        paneA.value = pair?.a ?? activeId.value;
+        paneB.value = pair?.b ?? null;
+        viewFor.A = null;
+        viewFor.B = null;
+        activeSide.value = 'A';
+      }
+    }
+
     if (next === 'split') {
-      if (!wasSplit) {
+      if (!wasSplit && !wasFlicker) {
         // 进分屏：当前这张进左格，右格空着等拖入。两侧都是新视口 → 两边重新适配。
         paneA.value = activeId.value;
         paneB.value = null;
@@ -961,17 +1379,39 @@ export const useViewerStore = defineStore('viewer', () => {
       return;
     }
 
-    // 关闭 ↔ 点选：单屏语义完全不变，只换模式与清单播种。
+    // 关闭 ↔ 点选（含「从交替对比退到这两种」）：单屏语义不变，只换模式与清单播种。
     compareMode.value = next;
     if (next === 'off') {
       compareList.value = [];
       paneB.value = null;
       viewFor.B = null;
       activeSide.value = 'A';
+      paneA.value = activeId.value;
       stopPrefetch();
     } else {
+      paneA.value = activeId.value;
+      paneB.value = null;
+      viewFor.B = null;
+      activeSide.value = 'A';
       compareList.value = seedCompareList(recs.value.map((r) => r.id));
       if (wasOff) void maybePrefetchCompare();
+    }
+    // 右栏若因进分屏被收起，离开对比时还原。画布宽度变了会由 ResizeObserver →
+    // setCanvasSize 走既有的重新适配；宽度没变时**不 fit** —— 交替期间 viewA/viewB
+    // 一个数都没动，用户进入前的缩放/位置原样还在，这里再 fit 一次反而把它抹了。
+    if (wasFlicker) {
+      restoreRailAfterCompare();
+      if (flickerWasFromSplit) {
+        // 从分屏进来的那对：viewA/viewB 是半幅视口，退到单屏要重新适配整幅
+        // （与 split→off 同口径）。
+        fit();
+      } else if (flickerActiveChanged && flickerExitSize) {
+        // 交替期间用户切过图：单屏该显示**新活动图 + 刚才看到的视口**，
+        // 而不是换图前那张的旧视口（viewA 一直没被交替写过，直接读会错位）。
+        viewA.value = { ...flickerView.value };
+        viewFor.A = flickerExitSize;
+      }
+      // 没切过图 → viewA 就是进入前的状态，一个数都不用动。
     }
     renderTick.value++;
   }
@@ -983,6 +1423,11 @@ export const useViewerStore = defineStore('viewer', () => {
   /* ---------------- 设置浮层 ---------------- */
 
   const settingsOpen = ref(false);
+  const autoSubmission = ref(isAutoSubmissionEnabled());
+  function setAutoSubmission(enabled: boolean) {
+    autoSubmission.value = enabled;
+    saveAutoSubmission(enabled);
+  }
   function setSettingsOpen(open: boolean) {
     settingsOpen.value = !!open;
   }
@@ -1093,6 +1538,7 @@ export const useViewerStore = defineStore('viewer', () => {
     stopViewAnim();
     const next = clampSplitRatio(r, canvasSize.value.w);
     if (next === splitRatio.value) return;
+    noteUserIntent();
     splitRatio.value = next;
     saveSplitRatio(next);
     renderTick.value++;
@@ -1435,7 +1881,9 @@ export const useViewerStore = defineStore('viewer', () => {
   /* ---------------- 激活 / 解码（HTML activate + decodeGeoTiff/decodeUtif） ---------------- */
   /** 激活一条 rec。`side` 只在分屏下有意义（拖放位置算出来的那一半）；不给就是
       「落活动侧」（文件列表点击 / 盘阵栏 / 待修复清单「打开」都不给）。 */
-  async function activate(id: number, side?: 'A' | 'B') {
+  async function activate(id: number, side?: 'A' | 'B',
+                          origin: 'user' | 'follow' = 'user') {
+    if (origin === 'user') noteUserIntent();
     stopViewAnim();                       // 换图/切侧优先于缓动
     const rec = recs.value.find((r) => r.id === id);
     if (!rec || rec.pending) return;
@@ -1937,13 +2385,22 @@ export const useViewerStore = defineStore('viewer', () => {
     }
   }
 
-  /** `side` 只在分屏下由调用方（场景快捷入口按活动侧 / 拖放位置）给出。 */
-  async function openSceneJpg(meta: SceneOpenMeta, blob: Blob, side?: 'A' | 'B') {
+  /** `side` 只在分屏下由调用方（场景快捷入口按活动侧 / 拖放位置）给出。
+   *  `origin='follow'` = Batch 自动跟随打开，不算用户手动意图。
+   *  `stillWanted` 由自动跟随传入：JPG 解码也要几百毫秒到数秒，用户可能在这段时间
+   *  已经选图/缩放/退出跟随。解码完成后、激活之前再查一次，过期就不再改动视图。 */
+  async function openSceneJpg(meta: SceneOpenMeta, blob: Blob,
+                              side?: 'A' | 'B',
+                              origin: 'user' | 'follow' = 'user',
+                              stillWanted?: () => boolean) {
+    if (stillWanted && !stillWanted()) return;
+    if (origin === 'user') noteUserIntent();
     const dup = findRecByMeta(meta);
     if (dup) {
       // 已经在列表里的场景：只需重新上屏。**仍要过一遍预热** —— 重复打开往往正是
       // 换过预览档位之后（画布换了），那份旧画布的缩放缓存不作数。
-      await activate(dup.id, side);
+      if (stillWanted && !stillWanted()) return;
+      await activate(dup.id, side, origin);
       await warmZoom(dup);
       return;
     }
@@ -1962,7 +2419,15 @@ export const useViewerStore = defineStore('viewer', () => {
     recs.value.push(rec);
     try {
       await applySceneJpgToRec(rec, meta, blob);
-      await activate(rec.id, side);
+      // 解码期间用户可能已经放弃这次跟随：把刚入列的空壳撤掉，不激活、不抢视图。
+      if (stillWanted && !stillWanted()) {
+        const i = recs.value.indexOf(rec);
+        if (i >= 0) recs.value.splice(i, 1);
+        hideMask();
+        busy.value = false;
+        return;
+      }
+      await activate(rec.id, side, origin);
       await warmZoom(rec);                 // 遮罩仍盖着：把首次缩放的代价在这里付掉
       hideMask(); busy.value = false;
       showToast('已打开盘阵场景「' + meta.name + '」（掩码按元数据 ' + meta.W + '×' + meta.H + ' 换算）');
@@ -2260,7 +2725,14 @@ export const useViewerStore = defineStore('viewer', () => {
   function setStretch(mode: StretchMode) {
     const rec = activeRec.value;
     if (!rec || rec.route !== 'jpg') stretchMode.value = mode;
-    if (split.value) {
+    if (compareMode.value === 'flicker') {
+      // 两张都在同一视口里轮换显示，拉伸必须一起换，否则翻面时明暗忽变。
+      let painted = false;
+      for (const r of [flickerRefRec.value, flickerAltRec.value]) {
+        if (r && r.thumb && r.src) { paintStretch(r, mode); painted = true; }
+      }
+      if (!painted) return;
+    } else if (split.value) {
       let painted = false;
       for (const side of ['A', 'B'] as const) {
         const r = recForSide(side);
@@ -2282,7 +2754,10 @@ export const useViewerStore = defineStore('viewer', () => {
     if (!(SCENE_PREVIEW_DIVS as readonly number[]).includes(div) || div === previewDiv.value) return;
     previewDiv.value = div;
     savePreviewDiv(div);
-    const visible = new Set([paneA.value, ...(split.value ? [paneB.value] : [])]);
+    // 交替对比的两张都在同一块画布上轮换，换档位时一起重取，不然翻到另一张还是旧档。
+    const flickerIds = compareMode.value === 'flicker' && flickerPair.value
+      ? [flickerPair.value.a, flickerPair.value.b] : [];
+    const visible = new Set([paneA.value, ...(split.value ? [paneB.value] : []), ...flickerIds]);
     for (const rec of recs.value) {
       if (!visible.has(rec.id)) continue;
       if (rec.route === 'jpg' && rec.sceneId) void reloadPreviewLevel(rec, div);
@@ -2329,6 +2804,11 @@ export const useViewerStore = defineStore('viewer', () => {
   function setCanvasSize(w: number, h: number) {
     stopViewAnim();
     canvasSize.value = { w, h };
+    if (compareMode.value === 'flicker') {
+      fit();
+      renderTick.value++;
+      return;
+    }
     if (split.value) {
       // 半幅宽度变了 → 比例先收进新界限，再两格各自适配
       splitRatio.value = clampSplitRatio(splitRatio.value, w);
@@ -2344,6 +2824,14 @@ export const useViewerStore = defineStore('viewer', () => {
       **写 `viewFor`**：这就是「这格当前视图是按多大的一张图算的」这笔账。 */
   function fit() {
     stopViewAnim();
+    if (compareMode.value === 'flicker') {
+      // 交替对比只适配**参考图**：另一张的视图是它的换算结果，一起适配就是两套视口。
+      const ref = flickerRefRec.value;
+      if (!ref || !ref.thumb) return;
+      flickerView.value = fitView(ref.thumb.width, ref.thumb.height,
+        canvasSize.value.w, canvasSize.value.h);
+      return;
+    }
     const rec = activeRec.value;
     if (!rec || !rec.thumb) return;
     const rect = activePaneRect();
@@ -2437,6 +2925,7 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   function onWheel(mx: number, my: number, factor: number) {
+    noteUserIntent();
     stopViewAnim();                       // 手势优先：缓动中的归位立即让位
     if (split.value) {
       // 指针落在哪一格，就以那一格里的归一化位置为锚点，同一个归一化位置施加到另一格。
@@ -2463,6 +2952,7 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   function onPan(dx: number, dy: number) {
+    noteUserIntent();
     stopViewAnim();
     if (split.value) {
       const out = panBoth(viewA.value, viewB.value, dx, dy);
@@ -2490,6 +2980,8 @@ export const useViewerStore = defineStore('viewer', () => {
 
   function locatePixel(x: number | string, y: number | string) {
     stopViewAnim();
+    // 坐标属于活动图：交替时必须显示那一张，红叉才不会落在另一张的像素上。
+    if (compareMode.value === 'flicker') { pauseFlicker(); flickerIndex.value = 0; }
     const rec = activeRec.value;
     if (!rec || !rec.thumb) { showErr('请先打开一张图'); return; }
     const W = rec.W, H = rec.H;
@@ -2673,6 +3165,9 @@ export const useViewerStore = defineStore('viewer', () => {
     if (!canDrawOn(rec)) {
       showErr(stageRefusal(rec.stageLabel ?? '产物')); return;
     }
+    // 掩码画在活动图（= 交替对比的参考图）上：停表并切回参考图，
+    // 不然笔下的框会落在「另一张」的画面里（那张只换显示层，不是绘制对象）。
+    if (compareMode.value === 'flicker') { pauseFlicker(); flickerIndex.value = 0; }
     drawMode.value = true;
     drawTool.value = 'rect';
     pendingRect.value = null; pendingPts.value = null; hoverPt.value = null;
@@ -2873,15 +3368,15 @@ export const useViewerStore = defineStore('viewer', () => {
 
   /**
    * 场景 → SR 提交（最小原型 §4.3）：不再生成掩码，也不再要求先画掩码。
-   * 只把「这张图所在的原图目录」填进队列表单，掩码由后端按
+   * 自动化开启时以默认参数直接提交；关闭时把原图目录填进队列表单。掩码由后端按
    * `<lq_path>/<输入影像 stem>_mask.tif` 推导并校验存在性 —— 前端不猜掩码
    * 文件名，那条规则只有一处实现（services/scene_search.derived_mask_path）。
    * 表单显示用的 mask_path 取后端已经回给这张图的权威值（resolve 响应或写掩码
    * 响应），而不是前端那份无 stat 的镜像 —— PAN.tif（RC）场景两者不同名。
-   * 不自动提交：提交 SR 是真副作用，跳 /queue 等人工确认。
+   * 自动化默认开启；只有用户点击才发起提交，不在打开影像或更改设置时提交。
    * 仅 route='jpg'（盘阵场景）可用 —— 本地 TIF 没有盘阵路径，无从提交。
    */
-  function submitSr() {
+  async function submitSr() {
     const rec = activeRec.value;
     // 中间产物不提交：SR 跑的是本体（RC 场景的 PAN.tif），从产物视图提交等于让
     // 用户以为「我在修这张产物」。与绘制掩码同一句话，先于 lqPath 那道判。
@@ -2897,10 +3392,17 @@ export const useViewerStore = defineStore('viewer', () => {
     }
     if (srBusy.value) return;
     srBusy.value = true;
+    if (autoSubmission.value) {
+      try {
+        // Capture this scene before awaiting; later selection changes cannot change this request.
+        return await useQueueStore().submit(formToSubmit({ ...defaultForm(), lq_path: rec.lqPath }));
+      } finally {
+        srBusy.value = false;
+      }
+    }
     useQueueStore().setSrDraft(rec.lqPath, rec.serverMaskPath ?? null);
     showToast('已带入目录 ' + rec.lqPath + '，去「任务队列」确认后提交 SR');
-    void router.push('/queue');
-    srBusy.value = false;
+    try { await router.push('/queue'); } finally { srBusy.value = false; }
   }
 
   /* ---------------- 手工盘阵场景（查看器侧入口） ---------------- */
@@ -3266,6 +3768,14 @@ export const useViewerStore = defineStore('viewer', () => {
   /** 双击 = 适配活动格。缓动 160ms；绘制模式下双击是「闭合多边形」，不走这里。 */
   function onDblClick() {
     if (drawMode.value) { closePolygon(); return; }
+    // 交替对比：归位的是整个视口（flickerView），不是某一格；停表避免刚归位就被翻面。
+    if (compareMode.value === 'flicker') {
+      pauseFlicker();
+      flickerIndex.value = 0;
+      fit();
+      renderTick.value++;
+      return;
+    }
     const side = activeSide.value;
     const target = fitTarget(side);
     if (!target) { renderTick.value++; return; }
@@ -3305,8 +3815,8 @@ export const useViewerStore = defineStore('viewer', () => {
     errTimer = setTimeout(() => { error.value = ''; }, 6000);
   }
   /** 模态提示：没有计时器，只能由用户关掉（或切换/离开页面时 hideModal）。 */
-  function showModal(title: string, body: string, hint = '') {
-    modal.value = { visible: true, title, body, hint };
+  function showModal(title: string, body: string, hint = '', raw = '') {
+    modal.value = { visible: true, title, body, hint, raw };
   }
   function hideModal() {
     modal.value.visible = false;
@@ -3336,6 +3846,7 @@ export const useViewerStore = defineStore('viewer', () => {
     previewMemoryMB, previewMemoryOptions, setPreviewMemoryMB,
     // 状态
     recs, workspaceVersion, activeId, activeRec, view, canvasSize, renderTick, marker,
+    userIntentSeq, noteUserIntent, batchOverlayTarget, batchOverlayOff,
     cursor, setCursor,
     canvasAttached, setCanvasAttached,
     stretchMode, activeStretch, drawMode, drawTool, pendingRect, pendingPts, hoverPt, hoverRoi, flashRoi,
@@ -3368,16 +3879,23 @@ export const useViewerStore = defineStore('viewer', () => {
     cmpStripOpen, setCmpStripOpen,
     panes, splitX, splitRatio, setSplitRatio, resetSplit,
     activeSide, setActiveSide, paneA, paneB, recForSide, rectForSide, activePaneRect,
+    setPaneView, stopViewAnim,
     captureForChat,
     fitBoth, fitSide,
     compareList, cmpListRecs, clearCompareEntry,
+    // 交替对比（Flicker Comparison）：单画布、同视口、定时翻面
+    flickerIntervalMs, setFlickerInterval, flickerIntervals: FLICKER_INTERVALS_MS,
+    flickerPlaying, flickerStart: startFlicker, flickerPause: pauseFlicker,
+    flickerToggle: toggleFlicker, flickerStop: stopFlicker,
+    flickerReady, flickerReason, flickerPairName, flickerCurrentName, flickerNames,
+    flickerShowingAlt, flickerIndex, displayRec,
     dragHint, setDragHint,
     // 侧栏卡片拖进画布：载荷类型 + 起手/收尾 + 同景序号（卡片小标）
     REC_MIME, startRecDrag, endRecDrag, sceneOrdinalOf,
     ctxRailOpen, ctxRailPrevOpen, setCtxRailOpen,
     activeSceneId, openSceneSibling,
     // 设置浮层（右上角）：对比模式后台预取开关 + 本地预览缓存
-    settingsOpen, setSettingsOpen,
+    settingsOpen, setSettingsOpen, autoSubmission, setAutoSubmission,
     cmpPrefetchOn, setCmpPrefetch, prefetchNote,
     previewCacheStats, clearPreviewCache, previewCacheRev,
     // 侧舱 ROI 选择 / 确定性统计

@@ -13,9 +13,9 @@
 
 /* ---------------- 三态 ---------------- */
 
-export type CompareMode = 'off' | 'click' | 'split';
+export type CompareMode = 'off' | 'click' | 'split' | 'flicker';
 
-const MODES: readonly CompareMode[] = ['off', 'click', 'split'];
+const MODES: readonly CompareMode[] = ['off', 'click', 'split', 'flicker'];
 
 /** 规范化模式值。认不出来一律 `'off'` —— 不抛，脏值不该让查看器打不开。 */
 export function parseCompareMode(v: unknown): CompareMode {
@@ -108,6 +108,8 @@ export interface RectLike {
  * - `mode === 'off'`：不问落点，返回 `null`（调用方本来也不会问 —— 关闭模式下全窗口
  *   都是拖放目标，落点不参与决策）。
  * - `mode === 'click'`：只有一块画布，落在画布内就是 `'A'`，画布外 `null`。
+ * - `mode === 'flicker'`：同样只有一块画布（交替对比是单画布切换可见图层），
+ *   与 `click` 一样落在画布内就是 `'A'` —— 拖入新图按既有单屏路径换图。
  * - `mode === 'split'`：`splitX` 是**画布局部**坐标的分隔线位置，正好压在线上算右格
  *   （与 `viewMath.paneAtX` 同口径）。
  *
@@ -121,7 +123,7 @@ export function dropSideAt(
   const inside = clientX >= rect.left && clientX <= rect.right
     && clientY >= rect.top && clientY <= rect.bottom;
   if (!inside) return null;
-  if (mode === 'click') return 'A';
+  if (mode === 'click' || mode === 'flicker') return 'A';
   return clientX - rect.left < splitX ? 'A' : 'B';
 }
 

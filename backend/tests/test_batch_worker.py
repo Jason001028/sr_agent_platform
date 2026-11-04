@@ -806,7 +806,14 @@ class BatchWorkerTest(unittest.TestCase):
         ]
 
         def flaky(job_id, task=None, run_cmd=None):
-            outcome = outcomes.pop(0)
+            # The loop allows one extra tick for the submit receipt's wake
+            # time.  Once the four scripted outcomes are consumed, answer as a
+            # healthy RUNNING job instead of letting an empty list raise
+            # IndexError, which the production code (correctly) counts as one
+            # more query failure.
+            outcome = outcomes.pop(0) if outcomes else {
+                "job_id": int(job_id), "active": True, "state": "RUNNING",
+                "exit_code": None}
             if isinstance(outcome, Exception):
                 raise outcome
             return dict(outcome)
@@ -816,8 +823,12 @@ class BatchWorkerTest(unittest.TestCase):
                 side_effect=flaky):
             # The first tick can land before the submit receipt updates the
             # next-wake time, so allow one extra tick for the four outcomes.
+            # Only force the Item due while outcomes remain: after the fourth
+            # one, a further forced query would add a fifth observation and
+            # change the counter the assertion is about.
             for _ in range(5):
-                self.make_monitor_due(gid)
+                if outcomes:
+                    self.make_monitor_due(gid)
                 self.tick()
                 time.sleep(0.01)
         item = self.items(gid)[0]
@@ -925,9 +936,13 @@ class BatchWorkerTest(unittest.TestCase):
         self.sbatch_patch.stop()
         try:
             slurm._fake_reset()
-            # Two 100ms stages keep several accepted jobs live long enough for
-            # the concurrency/independent-completion samples below.
-            os.environ["SR_SLURM_FAKE_T_MS"] = "100"
+            # Each fake job has two stages of ``T_MS``; total lifetime is
+            # ``2 * T_MS``.  One scheduler tick on the slower CI/dev box takes
+            # 60-125ms, and the next Item is submitted about three ticks after
+            # the previous one, so 100ms stages finish before the second
+            # acceptance is visible.  300ms stages keep several jobs live
+            # long enough to sample the real concurrency deterministically.
+            os.environ["SR_SLURM_FAKE_T_MS"] = "300"
             goal, _ = self.make_goal(50)
             gid = goal["goal_id"]
             peak = 0

@@ -407,10 +407,11 @@ export const useQueueStore = defineStore('queue', () => {
       const cfg = loadSrConfig();
       const res = await apiSubmitQueue(cfg, body);
       draft.value = null;                    // 落库成功即清预填（含 RESUMED_*）
-      await list();
+      void list();
       return res;
     } catch (e) {
-      error.value = '提交失败：' + (e instanceof Error ? e.message : String(e));
+      // The submit component distinguishes rejection from an ambiguous response.
+      error.value = '';
       throw e;
     }
   }

@@ -16,7 +16,7 @@
 
 普通聊天 SSE 的执行所有权、断线行为、异常用量与诊断边界见 [sse_execution_ownership.md](sse_execution_ownership.md)。Goal 进程级验收尚有未关闭失败，详见该文档。
 
-Durable Goal Runtime 的执行、恢复和验收说明见 [durable_goal_runtime.md](durable_goal_runtime.md)。Goal 使用有限 Round、Lease Token Fencing 和服务端独立验收；SR 终态回灌后继续模型决策。真实模型与内网 SR/GPU 验收待核。2026-11-02 对 P0 逐项的差距复核见 [p0-gap-review.md](p0-gap-review.md)。旧版批量修复计划的 PR A/B 实施记录见 [batch-pr-ab.md](batch-pr-ab.md)；PR C（Producer / Monitor）后端与测试已实施，见 [batch-pr-c.md](batch-pr-c.md)，演示入口与 Panel 归 PR F。PR D1/D2 已实施并通过第三轮复审：Predictor=2 逐像素还原、复核前后双采集输入身份、NaN NoData 严格 JSON 三项补修均通过；Overlay 只读 API 与查看器叠加层已落地（D3 其余部分仍归后续），详见 [batch-pr-d.md](batch-pr-d.md)。PR E（SR 提交/监控/分层验证）已实施：五层 Verifier、查询失败有界退避与停放、50 景 Fake SR 验收（重复提交 0、未验证成功 0），demo 成功仍只标 `demo_contract`/`provenance=mock`，production 提交门未开放，详见 [batch-pr-e.md](batch-pr-e.md)；PR F 待推进。2026-11-02 复审后已补：提交边界重新核对冻结输入与掩码、未决容量耗尽的批次收口、暂停批次 Monitor 查询窗口；重启完成超时定位为夹具 RC/SC 与修复回执不一致并修正；组合套件中 `test_durable_model_request_timeout_and_sdk_retries_obey_slice` 的偶发失败定位为 httpcore 首调用惰性导入（约 0.2s）落在 0.25s 轮次预算内，已在 `async_transport.py` 的请求计时外预热，未改测试断言。复跑六套件 189 passed。A/B 的混合调度饿死、Manifest 完整性、BOM 非法 UTF-8、旧 Batch 行 `kind` 回填均已修复并补回归；重启验收 `external_job_terminal` 实际 1 的差异已定位为测试只读事件第一页（500 行）导致的截断观察，改为分页读全量、原 `== 2` 断言保留，targeted 164 项通过。
+Durable Goal Runtime 的执行、恢复和验收说明见 [durable_goal_runtime.md](durable_goal_runtime.md)。Goal 使用有限 Round、Lease Token Fencing 和服务端独立验收；SR 终态回灌后继续模型决策。真实模型与内网 SR/GPU 验收待核。2026-11-02 对 P0 逐项的差距复核见 [p0-gap-review.md](p0-gap-review.md)。旧版批量修复计划的 PR A/B 实施记录见 [batch-pr-ab.md](batch-pr-ab.md)；PR C（Producer / Monitor）后端与测试已实施，见 [batch-pr-c.md](batch-pr-c.md)，演示入口与 Panel 归 PR F。PR D1/D2 已实施并通过第三轮复审：Predictor=2 逐像素还原、复核前后双采集输入身份、NaN NoData 严格 JSON 三项补修均通过；Overlay 只读 API 与查看器叠加层已落地（D3 其余部分仍归后续），详见 [batch-pr-d.md](batch-pr-d.md)。PR E（SR 提交/监控/分层验证）已实施：五层 Verifier、查询失败有界退避与停放、50 景 Fake SR 验收（重复提交 0、未验证成功 0），demo 成功仍只标 `demo_contract`/`provenance=mock`，production 提交门未开放，详见 [batch-pr-e.md](batch-pr-e.md)；PR F（进度 Panel、快照契约、独立控制版本、事件分页追平与自动跟随）已实施，详见 [batch-pr-f.md](batch-pr-f.md)。2026-11-02 复审后已补：提交边界重新核对冻结输入与掩码、未决容量耗尽的批次收口、暂停批次 Monitor 查询窗口；重启完成超时定位为夹具 RC/SC 与修复回执不一致并修正；组合套件中 `test_durable_model_request_timeout_and_sdk_retries_obey_slice` 的偶发失败定位为 httpcore 首调用惰性导入（约 0.2s）落在 0.25s 轮次预算内，已在 `async_transport.py` 的请求计时外预热，未改测试断言。复跑六套件 189 passed。A/B 的混合调度饿死、Manifest 完整性、BOM 非法 UTF-8、旧 Batch 行 `kind` 回填均已修复并补回归；重启验收 `external_job_terminal` 实际 1 的差异已定位为测试只读事件第一页（500 行）导致的截断观察，改为分页读全量、原 `== 2` 断言保留，targeted 164 项通过。
 
 Goal 澄清已接入：`request_clarification → WAITING_USER → 回答入库 → 同一 Goal 重新入队`，请求与回答均有事务及故障恢复。接口、23 项专项测试、浏览器闭环与全量回归剩余失败见 [goal_clarification.md](goal_clarification.md)；真实模型效果待验收。
 
@@ -43,7 +43,7 @@ Agent 中文交互、执行概览、自动中文标题与手动改名见 [agent-
 四条链路：
 
 - **`/viewer` 查看器** —— 两种数据源（本地 TIF 文件 / 盘阵场景 JPG）。功能：亮度拉伸、像素定位、
-  ROI 统计、掩码绘制（矩形 / 多边形 / 魔棒 / 合并重叠 / 删除）、图像对比（点选 / 分屏）、
+  ROI 统计、掩码绘制（矩形 / 多边形 / 魔棒 / 合并重叠 / 删除）、图像对比（点选 / 分屏 / 交替）、
   《待修复清单》导入与写回、提交 SR —— 行内「打开」按**那一行的影像类型**补出清单上惯例省掉的
   产品段（`…_001_L1` → `…_001_L1_PAN`，没写就 `_PAN`，见
   [api-contract](../planning/api-contract.md) §3.5 的 `product`）。拖入盘阵场景的显示件时会自动预热同景的**未超分那份**
@@ -317,9 +317,58 @@ Agent 中文交互、执行概览、自动中文标题与手动改名见 [agent-
 - 细节、坐标系论证与未覆盖项见 [spotlight-focus.md](spotlight-focus.md)；浏览器回归
   `node .e2e/test-spotlight-focus.js`。
 
+### 6.7 交替对比（2026-11-03）
+
+- **入口**：顶部「图像对比」四选一（关闭 / 点选 / 分屏 / 交替）；进入后操作在画布顶部悬浮胶囊
+  `交替对比 | PAN/NOSR | 1.0秒 | 播放/暂停`，不占常驻工具栏。五档节拍 0.6–1.5 秒，
+  默认 1.0 秒，localStorage `sr.viewer.flickerInterval`。
+- **配准判据**：同一非空 `sceneDir` + 宽高比相对偏差 ≤ 1% + 尺寸已知；否则禁止自动交替并在
+  胶囊下说明原因。从分屏进入沿用分屏那对，从单屏进入在同景里按「配准 → 环节互补 → id」
+  挑另一张（`lib/flicker.ts::pickFlickerPartner`）。
+- **渲染**：同一块画布只换可见 rec 与显示视图，第二张视图由 `remapViewForImage` 从参考图换算；
+  复用预览 JPG / 图层 / 缓存，不重解码、不重请求、不重建 Canvas。翻面是硬切，不做淡变。
+- **暂停**：用户点播才开跑；平移 / 缩放 / 切图 / 切侧 / 改分隔 / 进 ROI 掩码编辑 / 双击复位 /
+  像素定位都会自动暂停并停在当前帧；页面隐藏、组件卸载、配对失效即停；减少动态效果下拒绝启动。
+- **恢复**：交替期间不写 `viewA/viewB`，单屏进入且未切图时退出视口原样不变；从分屏进入则退出时
+  重新适配整幅；期间切过图则把交替中看到的视口交给单屏并显示那张。
+- 细节与验证见 [flicker-compare.md](flicker-compare.md)；浏览器回归
+  `cd .e2e && node test-flicker.js`（`npm run test:flicker` 同义）。
+
 ### 6.3 测试基线
 
-**2026-11-02（PR D 复审通过 + PR E 实施，最新）**：
+**2026-11-03（交替对比，最新）**：
+
+- 前端：**677 passed / 47 files**（`npm test`，自动跑 `check:terms`，通过；新增 `flicker.test.ts`
+  18 条与 `compare.test.ts` 的第四模式用例）；`npm run typecheck` 零错误；
+  `npm run build` 10.96s（仅既有 chunk >500 kB 警告）。
+- 浏览器回归：`node .e2e/test-flicker.js` **25 项全绿**；`node .e2e/test-vue-viewer.js`
+  **191 项全绿**（含第四种对比模式、预览档位生效后的解码路由/缩略图尺寸/E 段画布视口修正）。
+  两套都跑 `frontend/dist` + 无头 Chrome。
+- 本轮只改前端查看器与 e2e，后端未动；后端沿用下方 PR F 批次基线。
+
+**2026-11-03（PR F 批次进度 Panel）**：
+
+- 后端目标套件：`test_batch_snapshot.py` **25 passed**（9.47s）；`test_batch_snapshot.py` +
+  `test_batch_worker.py` + `test_goal_runtime.py` **102 passed**（88.44s）；50 景 Fake SR
+  `test_batch_worker.py -k fifty` **1 passed / 45 deselected**。
+- 后端全量：**1318 passed / 7 skipped / 195 subtests passed**（546.57s），另有 **5 个既有失败**，
+  仍全部在 `backend/tests/test_agent_loop.py` 的 `thinking_status` 事件顺序断言；`main` @ `1bc2bea`
+  上同样复现，`backend/agent` 与该测试文件本轮无改动。基线 1293 + 新增 25 = 1318。
+- 前端：**658 passed / 46 files**（`npm test`，自动跑 `check:terms`，通过，12.69s）；
+  `npm run typecheck` 零错误；`npm run build` 8.94s（仅既有 chunk >500 kB 警告）。
+- 只读复核后的竞态修订：批次切换按加载代次与 Goal ID 校验，旧快照/旧控制响应不覆盖新批次；
+  跟随取图在解析后、JPG 取回后各查一次 `stillWanted`，并在查看器 JPG 解码后、`activate` 前
+  再查一次，用户已操作时不再改动查看器。新增 3 条 store 用例（A/B 乱序、同批次刷新乱序、
+  跟随迟到打开）；解码窗口分支依赖真实解码，未加单测。「加载更早」累计 500 条后的游标问题
+  记为已知限制并延期。
+- 浏览器验收：`node test-batch-panel.js` 通过 —— 50 景快照三维进度/当前项/队列、默认折叠事件时间线
+  （原始 payload 可展开）、控制先 409 后成功、受控报告弹窗、用户操作退出跟随。使用 `frontend/dist`
+  与本地假服务，是 Panel 渲染与交互验收，不是真实 50 景运行链路。
+- 覆盖八项修订：独立 `control_revision`、会话隔离的批次关联、跟随默认关闭、R=0 进度措辞、
+  已消费游标追平、首屏信息优先级、并行检测计数、先修 Fake SR 基线。真实 SR/GPU、真实 50 景规模、
+  nginx SSE 未验收，production 提交门仍关闭。详见 [batch-pr-f.md](batch-pr-f.md)。
+
+**2026-11-02（PR D 复审通过 + PR E 实施）**：
 
 - 后端目标套件：`test_batch_artifacts.py` + `test_batch_worker.py` + `test_batch_manifest.py`
   **117 passed**（57 + 46 + 14），28.74s。

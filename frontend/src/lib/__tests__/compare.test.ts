@@ -15,10 +15,11 @@ import {
 } from '../compare.js';
 
 describe('parseCompareMode', () => {
-  it('三个合法值原样通过', () => {
+  it('四个合法值原样通过', () => {
     expect(parseCompareMode('off')).toBe('off');
     expect(parseCompareMode('click')).toBe('click');
     expect(parseCompareMode('split')).toBe('split');
+    expect(parseCompareMode('flicker')).toBe('flicker');
   });
   it('认不出的一律 off（不抛）', () => {
     for (const v of [undefined, null, '', 'SPLIT', 'on', 'close', 0, 1, {}, []]) {
@@ -58,6 +59,12 @@ describe('dropSideAt（拖放位置归哪一格）', () => {
     expect(dropSideAt(100 + 399, 300, rect, 'split', splitX)).toBe('A');
     expect(dropSideAt(100 + 400, 300, rect, 'split', splitX)).toBe('B');   // 压线算右
     expect(dropSideAt(100 + 700, 300, rect, 'split', splitX)).toBe('B');
+  });
+
+  it('flicker：与 click 同口径 —— 画布内一律 A（交替对比也是单画布）', () => {
+    expect(dropSideAt(100 + 10, 300, rect, 'flicker', splitX)).toBe('A');
+    expect(dropSideAt(100 + 780, 300, rect, 'flicker', splitX)).toBe('A');
+    expect(dropSideAt(99, 300, rect, 'flicker', splitX)).toBeNull();
   });
 
   it('click：画布内一律 A（只有一块画布，落哪都覆盖当前这张）', () => {

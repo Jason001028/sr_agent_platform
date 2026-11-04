@@ -265,6 +265,9 @@ function renderDraw() {
   if (!dc) return;
   const ctx = dc.getContext('2d')!;
   ctx.clearRect(0, 0, dc.width, dc.height);
+  // 交替对比翻到第二张时，叠加层（ROI / 云叠 / 选中高亮）属于活动图（参考图），
+  // 不能画在另一张的像素上；翻回参考图时自然恢复。绘制模式进入时已强制切回参考图。
+  if (store.flickerShowingAlt) return;
   const active = store.activeRec;
   if (!active || !active.thumb) return;
   // 掩码/ROI/云叠/选中高亮**只画活动侧**：它们本来就读 store.getRois()
@@ -365,7 +368,9 @@ function mousePos(e: MouseEvent): Pt {
  *  分屏时**刻意不跟随指针所在格**：状态栏报的是活动侧那张图，坐标若偷偷换成另一侧，
  *  同一行里的缩放与像素就指了两张图。指针挪过去时先点一下那半（onMouseDown 会切）即可。 */
 function cursorAt(e: MouseEvent): Pt | null {
-  const rec = store.activeRec;
+  // 交替对比翻到另一张时，状态栏的像素坐标必须报**画面上那张**的坐标；
+  // 单屏/分屏下 displayRec 就是 activeRec，与改前一致。
+  const rec = store.displayRec;
   const vc = viewCanvasRef.value;
   if (!rec || !rec.thumb || !rec.W || !vc) return null;
   const r = vc.getBoundingClientRect();
@@ -532,7 +537,9 @@ watch(
 
 // 切图 / 切活动侧 / 进出分屏：上一条图的像素坐标不能留在新图上（鼠标恰好没动时
 // 不会有 mousemove 来覆盖它，状态栏就会报一个不属于这张图的点）。
-watch(() => [store.activeId, store.activeSide, store.split], () => store.setCursor(null));
+// 交替对比翻面同理：上一帧的像素坐标指的不是现在这张图。
+watch(() => [store.activeId, store.activeSide, store.split, store.flickerIndex],
+  () => store.setCursor(null));
 
 onMounted(() => {
   applyResize();

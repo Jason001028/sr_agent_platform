@@ -92,6 +92,18 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
       <div class="set-title">设置</div>
 
       <div class="set-row">
+        <button type="button" class="set-sw" :class="{ on: store.autoSubmission }"
+          role="switch" :aria-checked="store.autoSubmission" :disabled="store.srBusy" data-e2e="set-auto-submission"
+          @click="store.setAutoSubmission(!store.autoSubmission)">
+          自动化任务提交{{ store.autoSubmission ? ' · 开' : ' · 关' }}
+        </button>
+        <div class="set-note">
+          默认开启：查看器点击「提交 SR」即使用默认参数提交，留在当前影像并显示任务回执；
+          任务完成或失败时在右下角提醒。关闭后进入任务队列确认参数再提交。选择在本机保存。
+        </div>
+      </div>
+
+      <div class="set-row">
         <label class="set-line" for="preview-memory">预览内存预算</label>
         <select id="preview-memory" class="set-sw" :value="store.previewMemoryMB"
           data-e2e="set-preview-memory"

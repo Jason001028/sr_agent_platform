@@ -495,9 +495,11 @@ sr_agent_platform/
 | [batch-pr-c.md](status/batch-pr-c.md) | PR C Producer / Monitor：异步切片、执行隔离、提交幂等与容量、暂停后监控、事件契约 |
 | [batch-pr-d.md](status/batch-pr-d.md) | PR D Detector / MaskBuilder：窗口读取、Predictor、Mask 契约、Overlay 读路径与查看器叠加层 |
 | [batch-pr-e.md](status/batch-pr-e.md) | PR E SR 提交/监控/分层验证：Intent 对账、查询退避、五层 Verifier 与 50 景 Fake SR 验收 |
+| [batch-pr-f.md](status/batch-pr-f.md) | PR F 进度 Panel：快照契约、控制版本、事件分页追平、Panel 与自动跟随 |
 | [goal_clarification.md](status/goal_clarification.md) | Goal 澄清、WAITING_USER、原子回答/恢复、崩溃窗口与实测验收 |
 | [runtime_status.md](status/runtime_status.md) | 每次模型请求的临时运行状态、计数口径、注入边界与测试 |
 | [spotlight-focus.md](status/spotlight-focus.md) | 《待修复清单》选中行驱动的左侧场景聚焦遮罩：层级、坐标、镂空分块、三档与验证 |
+| [flicker-compare.md](status/flicker-compare.md) | 交替对比：胶囊、配对与配准判据、播放/暂停与自动暂停、视口复用与状态恢复 |
 | [generic-preview-p1.md](status/generic-preview-p1.md) | 盘阵外授权 TIFF 的通用预览：预览/生产权限拆分、隔离缓存、Overview 复用与实测 |
 | [sr-local-execution.md](status/sr-local-execution.md) | 本机执行 SR 的链路与运行期规则：单槽串行、重启、UNKNOWN、判定文件 |
 | [real-machine-acceptance.md](status/real-machine-acceptance.md) | 真机验收判据与勾选 |

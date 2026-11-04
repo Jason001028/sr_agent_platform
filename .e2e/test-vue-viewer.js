@@ -2,7 +2,8 @@
 // ------------------------------------------------------------------
 // 对齐 HTML 原版各浏览器套件的**等价行为**，全部经 window.__viewer 钩子 + DOM 驱动：
 //   A. bootstrap：应用挂载、__viewer 齐全、无外部请求
-//   B. 解码路由 + 像素：rgb8→utif、u16_whitezero→chunked(反相)、f32_grad→chunked、
+//   B. 解码路由 + 像素：rgb8→chunked（预览档位生效后统一走 geotiff）、
+//      u16_whitezero→chunked(反相)、f32_grad→chunked、
 //      bigtiff_strips→chunked（BigTIFF 必须走 geotiff，UTIF 不能解）
 //   C. 稀疏：setSparseMin(1000) 后 gray16_grad → route='sparse' + 渐变 golden
 //   D. 拉伸切换重绘（thumb 像素变化）
@@ -186,6 +187,7 @@ async function main() {
       'qcState', 'qcOpenByName',
       'cmpMode', 'setCmpMode', 'cmpStripOpen', 'setCmpStripOpen', 'cmpPanes',
       'activeSide', 'setActiveSide', 'splitRatio', 'setSplitRatio', 'splitX', 'cmpReset',
+      'flicker', 'flickerPlay', 'flickerPause', 'flickerToggle', 'setFlickerInterval',
       'dragHint', 'cmpList', 'cmpClear', 'ctxRail', 'setCtxRail',
       'notices', 'pushNotice', 'dismissNotice']) {
       if (!hookKeys.includes(k)) throw new Error('__viewer 缺钩子 ' + k);
@@ -196,17 +198,25 @@ async function main() {
     /* ============ B. 解码路由 + 像素 ============ */
     console.log('--- B. 解码路由 + 像素 ---');
     {
-      // rgb8: 8bit RGB 小图 → UTIF
+      // 这一段按**原图尺寸**核对像素与稀疏/分块路由；默认档位是 ÷4，先切到 ÷1。
+      // （2026-11-02 起预览档位对所有本地图生效，decodeOne 有 previewDiv 就走 geotiff。）
+      await page.evaluate(() => window.__viewer.setPreviewDiv(1));
+      // rgb8: 8bit RGB 小图。
       let rec = await uploadAndWait(page, F('rgb8.tif'), 30000);
-      assert(rec.route === 'utif', `rgb8 → utif (实际 ${rec.route})`);
+      assert(rec.route === 'chunked', `rgb8 → chunked (实际 ${rec.route})`);
       assert(rec.W === 64 && rec.H === 64, `rgb8 尺寸 64×64 (${rec.W}×${rec.H})`);
+      // 分块路径会把缩略图按各自波段 min/max 做线性拉伸（UTIF 路径是 0~255 恒等），
+      // 所以不再比原始像素值；改验 R 随 x、G 随 y 各自增长，证明三通道按坐标正确解码。
       const px = await page.evaluate(() => {
         const t = window.__viewer.activeRec().thumb;
-        const d = t.getContext('2d').getImageData(5, 7, 1, 1).data;
-        return [d[0], d[1], d[2]];
+        const g = t.getContext('2d');
+        const at = (x, y) => [...g.getImageData(x, y, 1, 1).data].slice(0, 3);
+        return { p: at(5, 7), right: at(6, 7), down: at(5, 8), w: t.width, h: t.height };
       });
-      assert(Math.abs(px[0] - 5) <= 3 && Math.abs(px[1] - 7) <= 3 && Math.abs(px[2] - 12) <= 3,
-        `rgb8 像素(5,7)≈(5,7,12) 实为 (${px[0]},${px[1]},${px[2]})`);
+      assert(px.p[0] > 0 && px.p[1] > 0 && px.p[2] > 0,
+        `rgb8 像素非空 (${px.p.join(',')})`);
+      assert(px.right[0] > px.p[0] && px.down[1] > px.p[1],
+        `rgb8 R 随 x、G 随 y 增长 (p=${px.p.join(',')} right=${px.right.join(',')} down=${px.down.join(',')})`);
 
       // u16_whitezero: 16bit WhiteIsZero → chunked + 反相
       rec = await uploadAndWait(page, F('u16_whitezero.tif'), 30000);
@@ -230,6 +240,7 @@ async function main() {
         `bigtiff_strips 尺寸/缩略图 256×256 (thumb ${rec.thumbW}×${rec.thumbH})`);
       s = await sampleThumb(page, 256);
       assert(s.max - s.min > 150, `bigtiff_strips 行内渐变 (min=${s.min} max=${s.max})`);
+      await page.evaluate(() => window.__viewer.setPreviewDiv(4));   // 回到默认档位
     }
 
     /* ============ C. 稀疏条带路由 ============ */
@@ -239,7 +250,8 @@ async function main() {
       const rec = await uploadAndWait(page, F('gray16_grad.tif'), 30000);
       assert(rec.route === 'sparse', `gray16_grad → sparse (实际 ${rec.route})`);
       assert(rec.status.indexOf('稀疏条带预览') >= 0, `状态含稀疏条带预览: ${rec.status}`);
-      assert(rec.thumbW === 256 && rec.thumbH === 256, `稀疏缩略图 256×256 (${rec.thumbW}×${rec.thumbH})`);
+      // 源图 256×256；预览档位（默认 ÷4）同样作用于稀疏路径 → 缩略图 64×64。
+      assert(rec.thumbW === 64 && rec.thumbH === 64, `稀疏缩略图 64×64（÷4）(${rec.thumbW}×${rec.thumbH})`);
       const s = await sampleThumb(page, 256);
       assert(s.max - s.min > 150 && s.meanR - s.meanL > 40,
         `稀疏渐变正确 (L=${s.meanL.toFixed(1)} R=${s.meanR.toFixed(1)} min=${s.min} max=${s.max})`);
@@ -265,6 +277,10 @@ async function main() {
     /* ============ E. 像素定位 ============ */
     console.log('--- E. 像素定位 ---');
     {
+      // 与 H 同一条理由：默认 800×600 放不下左栏 + 右栏 + 画布，舞台宽度会是 0，
+      // 红叉画在 0 宽画布上采不到。定位/红叉这一段需要真实可用的画布。
+      await page.setViewport({ width: 1366, height: 768 });
+      await sleep(400);
       const sampleCenterRed = () => page.evaluate(() => {
         const c = document.querySelector('canvas.tif-canvas');
         const g = c.getContext('2d');
@@ -305,19 +321,28 @@ async function main() {
       assert(locBox.inner >= locBox.textW,
         `占位提示整句放得下（可用 ${locBox.inner}px ≥ 文本 ${locBox.textW}px）`);
 
+      // marker 由 renderTick 后的那一帧真正光栅化；整页解码过多张图后 250ms 可能不够，
+      // 轮询到出现为止（最多 2s），避免把「帧还没画」误判成「没画红叉」。
+      const waitCenterRed = async (ms = 2000) => {
+        const t0 = Date.now();
+        for (;;) {
+          const n = await sampleCenterRed();
+          if (n > 0 || Date.now() - t0 > ms) return n;
+          await sleep(50);
+        }
+      };
+
       // 定位原图中心 (128, 64)：单框里填「X,Y」→ 视图居中 + 红叉 marker
       await setLoc('128,64');
       await page.click('.loc-btn');
-      await sleep(250);
-      const centerRed = await sampleCenterRed();
+      const centerRed = await waitCenterRed();
       assert(centerRed > 0, `定位后中心出现红叉 marker (红像素 ${centerRed})`);
       assert(await locVal() === '128,64', `定位成功后框里是规范化「X,Y」(实际 ${await locVal()})`);
 
       // 掩膜中心点坐标那种形态：全角逗号照样认，成功后框里回写成半角「X,Y」→ 跳到 (64,32)
       await setLoc('64，32');
       await page.click('.loc-btn');
-      await sleep(250);
-      assert(await sampleCenterRed() > 0, '全角逗号分隔的「64，32」同样跳到 (64,32)（中心出现红叉）');
+      assert(await waitCenterRed() > 0, '全角逗号分隔的「64，32」同样跳到 (64,32)（中心出现红叉）');
       assert(await locVal() === '64,32', `回写成半角「X,Y」(实际 ${await locVal()})`);
 
       // 单个数（手输到一半的形态）不是坐标对：不许拿它跳，必须出声且原样留着
@@ -368,9 +393,17 @@ async function main() {
       const json = await page.evaluate(() => window.__viewer.buildMaskJson());
       assert(json.width === 256 && json.height === 128, `buildMaskJson 尺寸 ${json.width}×${json.height}`);
       assert(json.polygons.length === 2 && json.polygons[0].points.length === 4, 'polygons 2 个各 4 点');
+      // 缩略图可能已被预览档位缩小（这里是 64×32），反算公式是 (W-1)/(tw-1)，
+      // 期望值按当前缩略图尺寸算，不假设 thumb == 原图。
+      const th0 = await page.evaluate(() => {
+        const r = window.__viewer.activeRec();
+        return { W: r.W, H: r.H, tw: r.thumbW, th: r.thumbH };
+      });
+      const ex = Math.round(10 * (th0.W - 1) / (th0.tw - 1));
+      const ey = Math.round(10 * (th0.H - 1) / (th0.th - 1));
       const p0 = json.polygons[0].points[0];
-      assert(Math.abs(p0[0] - 10) <= 1 && Math.abs(p0[1] - 10) <= 1,
-        `缩略图→原图坐标反算 (${p0[0]},${p0[1]})≈(10,10)`);
+      assert(Math.abs(p0[0] - ex) <= 1 && Math.abs(p0[1] - ey) <= 1,
+        `缩略图→原图坐标反算 (${p0[0]},${p0[1]})≈(${ex},${ey})`);
 
       // genMask → mask.tif + mask.txt 两次下载
       await page.evaluate(() => window.__viewer.genMask());
@@ -558,7 +591,7 @@ async function main() {
         && !document.querySelector('[data-e2e="cmp-list"]')),
         '关闭态：无对比条 / 无叠加层 / 无点选清单');
 
-      // 工具栏入口 → 展开一条，三选一，默认「关闭」
+      // 工具栏入口 → 展开一条，四选一，默认「关闭」
       await page.click('[data-e2e="cmp-open"]');
       await sleep(150);
       const bar = await page.evaluate(() => {
@@ -571,8 +604,8 @@ async function main() {
           checked: modes.map((b) => b.getAttribute('aria-checked')),
         };
       });
-      assert(bar.n === 3 && bar.on === '关闭' && bar.checked.join(',') === 'true,false,false',
-        `对比条三选一、默认「关闭」(${bar.labels.join(' / ')})`);
+      assert(bar.n === 4 && bar.on === '关闭' && bar.checked.join(',') === 'true,false,false,false',
+        `对比条四选一、默认「关闭」(${bar.labels.join(' / ')})`);
 
       // 第一张走选文件那条路（落活动侧）
       const rec1 = await uploadAndWait(page, F('gray16_grad.tif'), 30000);

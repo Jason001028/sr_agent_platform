@@ -6,20 +6,43 @@
  * 预览下采样档位拖动条 / 绘制掩码 toggle / 生成掩码 / 提交 SR。
  * 最小原型删去了 HTML 的「输出目录」三态按钮与「自动JPG」勾选（前端不再导出 JPG）。
  */
-import { computed, ref, watch } from 'vue';
+import { computed, ref, watch, onBeforeUnmount } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import { useQcListStore } from '../stores/qclist';
-import { parseLocPair } from '../lib/viewMath';
+import CoordinateInput from './CoordinateInput.vue';
 import PreviewScaleControl from './PreviewScaleControl.vue';
+import AutoTourButton from './AutoTourButton.vue';
 import { isIntermediateStage } from '../lib/stage';
 import type { StretchMode } from '../lib/tifDecode';
 import AppIcon from './AppIcon.vue';
+import SRSubmitFeedback from './SRSubmitFeedback.vue';
+import { useQueueStore } from '../stores/queue';
+import { useRouter } from 'vue-router';
+
+const router = useRouter();
+const queue = useQueueStore();
+let queuePulse: Animation | undefined;
+onBeforeUnmount(() => queuePulse?.cancel());
+function submissionAccepted(_id: number, fresh: boolean) {
+  if (!fresh || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const entry = document.querySelector<HTMLAnchorElement>('.nav-links a[href="/queue"]');
+  if (!entry) return;
+  const rect = entry.getBoundingClientRect();
+  if (!rect.width || !rect.height || rect.bottom < 0 || rect.top >= innerHeight) return;
+  queuePulse?.cancel();
+  queuePulse = entry.animate([{ transform: 'scale(1)' }, { transform: 'scale(1.045)' }, { transform: 'scale(1)' }], { duration: 240, delay: 180 });
+}
 
 const store = useViewerStore();
 const qc = useQcListStore();
 const fileInput = ref<HTMLInputElement | null>(null);
 /** 定位框：一个框装「X,Y」两个数（原先是 X、Y 两个框，拆开填反而要用户自己数着填）。 */
-const locText = ref('');
+const coordinateIssue = computed(() => qc.rowForScene(store.activeRec?.sceneDir ?? store.activeRec?.lqPath));
+const importedCoordinates = computed<readonly [number, number] | null>(() => {
+  const it = coordinateIssue.value;
+  return it && it.row !== null && it.col !== null && Number.isFinite(it.row) && Number.isFinite(it.col)
+    ? [it.row, it.col] : null;
+});
 
 /** 盘阵场景激活：只用来决定 title 文案（服务端生成的直方图均衡是二次拉伸的底图，
     均衡不可逆）。**不再**禁用下拉 —— 场景图照样可在显示层换模式，
@@ -52,7 +75,11 @@ const stretchTitle = computed(() =>
 );
 
 /** 对比模式的中文短名（按钮上那个后缀，与 CompareBar 的三选一同一套叫法）。 */
-const cmpModeLabel = computed(() => (store.compareMode === 'split' ? '分屏' : '点选'));
+const cmpModeLabel = computed(() => {
+  if (store.compareMode === 'split') return '分屏';
+  if (store.compareMode === 'flicker') return '交替';
+  return '点选';
+});
 
 const STRETCH_OPTIONS: { value: StretchMode; label: string }[] = [
   { value: 'linear', label: '线性' },
@@ -68,40 +95,6 @@ function onPick(e: Event) {
   el.value = '';   // 允许重复选同一文件（触发 change）
 }
 
-/** 「定位」：框里要的是「X,Y」两个数（1000.23,3000.27 这种形态，认法见 lib/viewMath.parseLocPair，
-    半角/全角逗号、空格、制表符分隔都收）。
-
-    **只在点按钮 / 回车时校验，不边敲边管**：单框之后敲字的过程必然经过「只有一个数」
-    「尾随一个逗号」这些中间态，input 事件上校验等于每输一个逗号就骂一次。
-    认不出来（只给了一个数、或连编号一起拷了整行的三个数）一律出声不跳 ——
-    把「1,30766.11,21862.51」截前两个去定位，比不跳更糟。
-
-    认出来就把框统一回写成规范化的「X,Y」：全角逗号、空格、尾随分隔符都收掉了，
-    用户能对照着看解析结果 —— 越界报错时也看得到底拿的是哪个点。 */
-function doLocate() {
-  const pair = parseLocPair(locText.value);
-  if (!pair) {
-    store.showErr('坐标对认不出来（要的是「X,Y」两个数，例如 1000.23,3000.27）');
-    return;
-  }
-  locText.value = pair[0] + ',' + pair[1];
-  store.locatePixel(pair[0], pair[1]);
-}
-
-/** 切图时把清单里这一行的坐标**预填**进定位框（只填、不跳 —— 跳不跳由人按「定位」）。
-    键取场景目录优先（与 QcListPanel 的自动选中同源）：本体与产物卡落在同一个 sceneDir，
-    于是同景各卡预填同一个坐标。这一行没有行列号就清空，免得留着上一张图的坐标；
-    没导入清单时一律不动框。 */
-watch(
-  () => store.activeRec?.sceneDir ?? store.activeRec?.lqPath,
-  (dir) => {
-    if (!qc.loaded) return;
-    const it = qc.rowForScene(dir);
-    // Preserve source order: row -> X, col -> Y.
-    locText.value = it && it.row !== null && it.col !== null ? it.row + ',' + it.col : '';
-  },
-  { immediate: true },
-);
 </script>
 
 <template>
@@ -133,22 +126,11 @@ watch(
       <option v-for="o in STRETCH_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
     </select>
 
-    <!-- 单框 text 而不是 number：number 框会把「1000.23,3000.27」这种整串判为非法、
-         值直接变空，粘进来等于什么都没发生（拆法见 doLocate / parseLocPair）。
-         不再另挂「坐标」标签：占位文本自己就以「输入坐标」开头，两句话说的是同一件事，
-         框一填上字标签又成了唯一线索 —— 不如把这份宽度给占位文本。 -->
-    <span class="loc" title="填「X,Y」两个数，例如 1000.23,3000.27（逗号、空格分隔都收）">
-      <input
-        v-model="locText"
-        type="text"
-        inputmode="decimal"
-        placeholder="输入坐标（X,Y）:123.456,456.123"
-        @keydown.enter="doLocate"
-      />
-      <button type="button" class="loc-btn" @click="doLocate">
-        定位
-      </button>
-    </span>
+    <CoordinateInput :scene-key="store.activeRec?.id ?? null" :coordinates="importedCoordinates"
+      :scene-group="store.activeRec?.sceneDir ? store.sceneOrdinalOf(store.activeRec) : null"
+      :import-revision="qc.coordinateImportRevision"
+      :source-name="qc.sourceName" :batch-state="qc.bakeState"
+      @locate="(x, y) => store.locatePixel(x, y)" @error="store.showErr" />
 
     <!-- 组间分隔：左段「打开 / 拉伸 / 定位」与中段「对比 / 预览档位」都是看图前先定的参数，
          但性质不同（对一张图动、对两张图动），用一条 1px 细线分开，不另加大面积容器。 -->
@@ -164,7 +146,7 @@ watch(
       data-e2e="cmp-open"
       :title="store.compareOn
         ? '图像对比已开启（' + cmpModeLabel + '）；点这里收起或展开对比条'
-        : '图像对比：点选对比（拖入即覆盖当前这张）或分屏对比（左右各一张、缩放平移同步）'"
+        : '图像对比：点选对比（拖入即覆盖当前这张）、分屏对比（左右各一张、缩放平移同步）或交替对比（同视口按节拍切换）'"
       @click="store.setCmpStripOpen(!store.cmpStripOpen)"
     >
       <AppIcon name="layers" :size="15" tint />
@@ -175,6 +157,7 @@ watch(
          文案「预览 1/N」而不是「缩放」：它改的是**服务端生成的那张 JPG**的分辨率，
          不是画布的显示缩放（那个在右下角，别混）。 -->
     <PreviewScaleControl :model-value="store.previewDiv" @update:model-value="store.setPreviewDiv" />
+    <AutoTourButton />
 
     <span class="spacer"></span>
 
@@ -211,19 +194,10 @@ watch(
     <span class="tb-sep" aria-hidden="true"></span>
     <!-- 提交 SR：工具栏里**唯一**的实心主按钮，且只在真正可提交时才呈现这个权重
          （`srReady` 是业务判据，不是 class 判出来的）；不可提交时落到禁用样式。 -->
-    <button
-      type="button"
-      class="outbtn primary"
-      :disabled="store.srBusy || !srReady"
-      :title="intermediate ? roTitle
-        : srReady
-          ? '带出该场景的目录，跳转队列页确认后提交 SR'
-          : '提交 SR 需要盘阵目录：到「场景库」页打开该场景，或让本地文件按文件名关联'"
-      @click="store.submitSr()"
-    >
-      <AppIcon name="square-chart-gantt" :size="15" tint />
-      提交 SR
-    </button>
+    <SRSubmitFeedback compact :submit="store.submitSr" :navigate-only="!store.autoSubmission"
+      :disabled="store.srBusy || !srReady" :title="intermediate ? roTitle : store.autoSubmission ? '使用默认参数提交 SR，任务回执将在此显示' : '带出该场景的目录，跳转队列页确认后提交 SR'"
+      @accepted="submissionAccepted" @query="queue.list()"
+      @view="id => router.push({ path: '/queue', hash: `#queue-task-${id}` })" />
 
     <!-- 设置（右上角浮层）：对比模式后台预取开关 + 本地预览缓存的行与清空。
          摆在最右端而不是挤进中间那串看图控件里 —— 它是**偏好**，不是一次性动作。
@@ -257,6 +231,7 @@ watch(
    图标一律 `tint`（AppIcon 用遮罩按 currentColor 着色），颜色随上面四种状态走。
    ========================================================================== */
 .toolbar {
+  position: relative;
   flex: none;
   display: flex;
   align-items: center;
@@ -349,40 +324,7 @@ watch(
 .stretch-sel:hover { background: var(--tb-hover); }
 .stretch-sel:focus-visible { outline: 2px solid var(--tb-focus); outline-offset: 1px; }
 
-/* ---- 坐标定位：一个框装「X,Y」两个数，高度对齐其余控件 ---- */
-.loc {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex: none;
-  font-size: 12px;
-}
-.loc input {
-  /* 一个框装两串数，宽度按**占位文本**定：「输入坐标（X,Y）:123.456,456.123」
-     在 13px 下实测 202px，加左右 padding 18px 是 220px —— 取 224px，
-     让整句提示放得下（test-vue-viewer 有「可用宽 ≥ 文本宽」的断言）；
-     同时「图像对比 · 分屏」把右段撑宽时，1366 视口仍放得下右端的设置键
-     （溢出守卫见 .e2e/test-manual-scene.js）。 */
-  width: 224px;
-  height: 32px;
-  padding: 0 9px;
-  background: var(--tb-surface);
-  color: var(--tb-fg);
-  font-family: inherit;
-  font-size: 13px;
-  border: 1px solid var(--tb-border);
-  border-radius: 8px;
-  outline: none;
-  transition: border-color var(--motion-hover) var(--ease-standard),
-              box-shadow var(--motion-hover) var(--ease-standard);
-}
-.loc input::placeholder { color: var(--tb-muted); opacity: 0.85; }
-.loc input:hover { border-color: var(--tb-active-border); }
-.loc input:focus {
-  border-color: var(--tb-focus);
-  box-shadow: 0 0 0 3px rgba(45, 150, 143, 0.16);
-}
-.loc-btn { padding: 0 12px; }
+
 
 /* ---- 预览档位：不再是一颗白 pill，直接坐在雾白底上（组内已用间距分开） ---- */
 .outbtn.on,

@@ -9,15 +9,47 @@
  * COMPLETED/FAILED）；每行可「以这行参数再提交」——同参数同目录会命中幂等复用旧作业，
  * 改一个参数才是新建任务，所以这是唯一能"再来一次并改点什么"的入口。
  */
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, reactive, ref, watch, nextTick } from 'vue';
+import { useRoute } from 'vue-router';
 import {
   useQueueStore, defaultForm, draftToForm, formToSubmit, derivedMaskPath, stateTone,
   normDir, isActiveState, taskElapsed, formatDuration,
 } from '../stores/queue.js';
 import type { QueueDraft, QueueForm } from '../stores/queue.js';
+import SRSubmitFeedback from '../components/SRSubmitFeedback.vue';
+import type { QueueSubmitResult } from '../lib/api.js';
 import type { QueueTask } from '../lib/api.js';
 
 const queue = useQueueStore();
+const route = useRoute();
+watch([() => route.hash, () => queue.tasks], async () => {
+  const match = /^#queue-task-(\d+)$/.exec(route.hash);
+  if (!match) return;
+  await nextTick();
+  if (mounted) viewTask(Number(match[1]));
+}, { immediate: true });
+const highlighted = ref<number | null>(null);
+let highlightTimer: ReturnType<typeof setTimeout> | undefined;
+let mounted = true;
+let pendingHighlight: number | null = null;
+async function onAccepted(id: number, fresh: boolean) {
+  if (!fresh) return;
+  highlightTimer = setTimeout(() => {
+    if (!mounted) return;
+    pendingHighlight = id;
+    highlightIfPresent();
+  }, 180);
+}
+function highlightIfPresent() {
+  if (pendingHighlight !== null && queue.tasks.some(t => t.task_id === pendingHighlight)) {
+    highlighted.value = pendingHighlight;
+    pendingHighlight = null;
+  }
+}
+watch(() => queue.tasks, highlightIfPresent);
+function viewTask(id: number) {
+  document.getElementById(`queue-task-${id}`)?.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+}
 const showForm = ref(false);
 const cancelling = ref<number | null>(null);
 const formErr = ref('');
@@ -98,7 +130,7 @@ function syncFormFromDraft(d: QueueDraft): void {
   showForm.value = true;
 }
 
-async function openSubmit(): Promise<void> {
+async function openSubmit(): Promise<QueueSubmitResult | undefined> {
   formErr.value = '';
   if (!f.lq_path) {
     formErr.value = '请先填 lq_path：在「查看器 → 盘阵场景」打开一张图后点「提交 SR」带入，'
@@ -115,8 +147,9 @@ async function openSubmit(): Promise<void> {
     const res = await queue.submit(body);
     formErr.value = '';
     formNote.value = res.notice ?? '';
+    return res;
   } catch (e) {
-    formErr.value = e instanceof Error ? e.message : String(e);
+    throw e;
   }
 }
 
@@ -146,6 +179,8 @@ onMounted(() => {
 });
 onUnmounted(() => {
   if (ticker !== undefined) window.clearInterval(ticker);
+  mounted = false;
+  clearTimeout(highlightTimer);
   queue.disconnect();
 });
 </script>
@@ -222,9 +257,7 @@ onUnmounted(() => {
         </label>
       </div>
       <div class="qp-submit-row">
-        <button type="button" class="btn" :disabled="queue.loading" @click="openSubmit()">
-          提交 SR
-        </button>
+        <SRSubmitFeedback :submit="openSubmit" @accepted="onAccepted" @query="queue.list()" @view="viewTask" />
       </div>
     </section>
 
@@ -239,7 +272,7 @@ onUnmounted(() => {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="t in queue.tasks" :key="t.task_id" class="qp-row">
+          <tr v-for="t in queue.tasks" :key="t.task_id" :id="`queue-task-${t.task_id}`" class="qp-row" :class="{ 'sr-new-task': highlighted === t.task_id }">
             <td><span class="tag" :class="stateCls(t)">{{ stateText(t) }}</span></td>
             <td>{{ t.task_id }}</td>
             <td>{{ t.job_id ?? '—' }}</td>
@@ -392,4 +425,10 @@ onUnmounted(() => {
 .qp-ops { white-space: nowrap; }
 .qp-ops .btn + .btn { margin-left: 6px; }
 .qp-loading { color: var(--ink-sub); font-size: 12px; }
+</style>
+
+<style scoped>
+.sr-new-task { animation: sr-row-highlight var(--motion-sr-highlight) ease-out; }
+@keyframes sr-row-highlight { from { background: var(--ok-bg); opacity: .3; } to { background: transparent; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .sr-new-task { animation: none; } }
 </style>

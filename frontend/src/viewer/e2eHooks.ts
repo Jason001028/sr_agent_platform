@@ -195,7 +195,7 @@ export interface ViewerHook {
   /** 撤回栈顶的说明（空串 = 没有可撤回的）。 */
   undoLabel: () => string;
   undo: () => string | null;
-  // 图像对比（关闭 / 点选对比 / 分屏对比，2026-09-20）
+  // 图像对比（关闭 / 点选对比 / 分屏对比 / 交替对比，2026-09-20 / 2026-11-03）
   /** 当前模式。 */
   cmpMode: () => import('../lib/compare.js').CompareMode;
   /** 切模式（等效对比条三选一）。 */
@@ -223,6 +223,24 @@ export interface ViewerHook {
   splitX: () => number;
   /** 回正（比例回 0.5 且两侧重新适配）。 */
   cmpReset: () => void;
+  // 交替对比：只暴露**判定与播放状态**，计时与配对收口都在 store 里。
+  /** 当前配对/可见帧/能否播放/不能播的原因。 */
+  flicker: () => {
+    ready: boolean;
+    reason: string;
+    playing: boolean;
+    index: 0 | 1;
+    showingAlt: boolean;
+    intervalMs: number;
+    pair: { a: string; b: string };
+    current: string;
+  };
+  /** 播放（等效胶囊上的「播放」）；返回是否真的播起来。 */
+  flickerPlay: () => boolean;
+  flickerPause: () => void;
+  flickerToggle: () => void;
+  /** 五档之一：600 / 800 / 1000 / 1200 / 1500。 */
+  setFlickerInterval: (ms: number) => void;
   /** 落位提示（dragover 期间为真，500ms 无新事件自己熄）。 */
   dragHint: () => { active: boolean; side: 'A' | 'B' | null };
   /** 点选清单里的 rec id（有序）。 */
@@ -419,6 +437,23 @@ export function mountE2EHooks(): ViewerHook {
     setSplitRatio: (r) => useViewerStore().setSplitRatio(r),
     splitX: () => useViewerStore().splitX,
     cmpReset: () => useViewerStore().resetSplit(),
+    flicker: () => {
+      const v = useViewerStore();
+      return {
+        ready: v.flickerReady,
+        reason: v.flickerReason,
+        playing: v.flickerPlaying,
+        index: v.flickerIndex,
+        showingAlt: v.flickerShowingAlt,
+        intervalMs: v.flickerIntervalMs,
+        pair: { ...v.flickerNames },
+        current: v.flickerCurrentName,
+      };
+    },
+    flickerPlay: () => useViewerStore().flickerStart(),
+    flickerPause: () => useViewerStore().flickerPause(),
+    flickerToggle: () => useViewerStore().flickerToggle(),
+    setFlickerInterval: (ms) => useViewerStore().setFlickerInterval(ms),
     dragHint: () => ({ ...useViewerStore().dragHint }),
     cmpList: () => [...useViewerStore().compareList],
     cmpClear: (id) => useViewerStore().clearCompareEntry(id),
