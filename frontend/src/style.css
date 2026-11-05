@@ -123,6 +123,8 @@
   --motion-fold: 100ms;
   --motion-fade: 120ms;
   --motion-hover: 150ms;
+  --motion-canvas-background: 180ms;
+  --motion-history-reveal: 170ms;
   --motion-live: 200ms;
   --motion-batch-progress: 280ms;
   --motion-emphasis: 500ms;

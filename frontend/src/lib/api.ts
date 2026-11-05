@@ -18,6 +18,7 @@ import { createBlobCache } from './blobCache.js';
 import type { BlobCacheStats } from './blobCache.js';
 import type { ClearResponse } from './scene.js';
 import type { ViewerContextSnapshot } from './agentContext.js';
+import type { DiffRequest, DiffResult } from './diffLocate.js';
 
 export { loadSrConfig } from './scene.js';
 
@@ -602,6 +603,17 @@ export const sessionMessagesUrl = (cfg: SrConfig, sid: string): string =>
   apiUrl(cfg, `/api/chat/sessions/${encodeURIComponent(sid)}/messages`);
 export const queueUrl = (cfg: SrConfig): string => apiUrl(cfg, '/api/queue');
 export const queueEventsUrl = (cfg: SrConfig): string => apiUrl(cfg, '/api/queue/events');
+export const diffAnalyzeUrl = (cfg: SrConfig): string => apiUrl(cfg, '/api/diff/analyze');
+
+/** 智能差异定位（只读）。请求体见 `lib/diffLocate.ts::DiffRequest`。 */
+export async function apiDiffAnalyze(cfg: SrConfig, body: DiffRequest): Promise<DiffResult> {
+  const r = await http(diffAnalyzeUrl(cfg), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return (await r.json()) as DiffResult;
+}
 
 /** 聊天截图 → `<img src>` 用的地址。
  *
@@ -1440,6 +1452,7 @@ export async function apiResolveScene(
 /** 一类图。字段与 backend/api/app.py 里 `scene_siblings.item()` 一一对应，
  *  **名字也一样**（后端就是这么取的）——两边一起改的时候不容易漏。 */
 export interface SceneSibling {
+  tourIdentity?: Omit<import('./tourCompare').TourImage,'id'>;
   kind: 'input' | 'product' | 'nosr';
   /** 这一类自己的不透明 id（供 /api/scenes/{id}/preview）。拼不出名字时为 null。 */
   id: string | null;
@@ -1459,6 +1472,8 @@ export interface SceneSibling {
 }
 
 export interface SceneSiblings {
+  tourItems?: SceneSibling[];
+  tourDiagnostics?: string[];
   sceneId: string;
   /** 场景目录绝对路径（= 提交 SR 的 lq_path 语义）。产物的 rec 靠它拿到盘阵关联。 */
   lqPath: string;
@@ -1479,9 +1494,11 @@ export interface SceneSiblings {
 /** 场景内三类图。**纯只读端点**：永不生成预览、永不写盘、永不列目录。
  *  找不到也是答案（`exists:false` + `productCandidates`），不抛。 */
 export async function apiSceneSiblings(
-  cfg: SrConfig, sceneId: string, suffix?: string,
+  cfg: SrConfig, sceneId: string, suffix?: string, tour = false, known: readonly string[] = [],
 ): Promise<SceneSiblings> {
-  const r = await http(sceneSiblingsUrl(cfg, sceneId, suffix));
+  const url=sceneSiblingsUrl(cfg, sceneId, suffix);
+  const query=tour?'tour=true'+known.slice(0,32).map(id=>'&known='+encodeURIComponent(id)).join(''):'';
+  const r = await http(url+(query?(url.includes('?')?'&':'?')+query:''));
   return (await r.json()) as SceneSiblings;
 }
 

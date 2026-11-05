@@ -249,14 +249,29 @@ def probe_tiff(path) -> dict:
     if not W or not H:
         raise PreviewError("TIFF 缺 ImageWidth/ImageLength")
     bits = scalars.get(_TAG_BITS)
-    if bits is None and _TAG_BITS in arrays:   # BitsPerSample 多采样点 → 取第一个
-        bits = int(_read_array(path, arrays[_TAG_BITS], endian)[0])
+    if bits is None and _TAG_BITS in arrays:   # BitsPerSample 多采样点 → 各波段必须一致
+        vals = _read_array(path, arrays[_TAG_BITS], endian)
+        if vals.size == 0:
+            raise PreviewError("BitsPerSample 为空")
+        if int(vals.min()) != int(vals.max()):
+            raise PreviewError("各波段 BitsPerSample 不一致，暂不支持")
+        bits = int(vals[0])
+    # SampleFormat 也常以数组形式出现（标准三波段 float32 就是 [3,3,3]）。
+    # 只看标量会把数组默认成无符号整数，原始 DN 会被整段读错。
+    sf = scalars.get(_TAG_SF)
+    if sf is None and _TAG_SF in arrays:
+        vals = _read_array(path, arrays[_TAG_SF], endian)
+        if vals.size == 0:
+            raise PreviewError("SampleFormat 为空")
+        if int(vals.min()) != int(vals.max()):
+            raise PreviewError("各波段 SampleFormat 不一致，暂不支持")
+        sf = int(vals[0])
     return {
         "W": W, "H": H,
         "bits": bits if bits is not None else 8,
         "spp": scalars.get(_TAG_SPP, 1),
         "compression": scalars.get(_TAG_COMP, 1),
-        "sample_format": scalars.get(_TAG_SF, 1),
+        "sample_format": sf if sf is not None else 1,
         "photometric": scalars.get(_TAG_PHOTO),
         "big": is_big,
         "tiled": (_TAG_TILE_W in scalars or _TAG_TILE_W in arrays),
@@ -313,6 +328,8 @@ def preview_max_edge(source_path, div: int = LEGACY_PREVIEW_DIV) -> int:
 # 稀疏采样（前端 sparseSample / stretchMap 语义的 Python 镜像）
 # --------------------------------------------------------------------------
 def _np_dtype(bits: int, sf: int, endian: str) -> np.dtype:
+    if sf not in (1, 2, 3):
+        raise PreviewError(f"不支持的 SampleFormat={sf}（只认无符号/有符号/浮点）")
     if bits == 8:
         return np.dtype("u1" if sf == 1 else "i1")
     if bits == 16:

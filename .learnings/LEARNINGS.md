@@ -63,3 +63,7 @@ Category: correction. Bounded observation queues must not carry the only final f
 
 ## 2026-10-30 correction: shared scene list thumbnail
 User confirms one existing scene _thumb.jpg may represent NOSR, PAN and ORI list cards. Preserve separate stage identities and detailed pixel sources. SR products were not included in this clarification.
+
+## 2026-11-05 correction: production tour registration evidence
+
+The initial tour implementation assumed GeoTIFF tags were available on SR production outputs. `SR_code/util.py::writeTiff` creates TIFFs and writes pixels without setting a geotransform or projection. Scene identity, registration evidence and candidate eligibility must be reported separately. Display rejected candidates with reasons; never silently turn a registration refusal into an empty selector or infer verified alignment from same-directory names. Keep old and ori as distinct roles. Existing loaded Scene IDs may supply bounded candidates, but not substitute for registration proof.

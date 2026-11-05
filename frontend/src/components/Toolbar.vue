@@ -12,6 +12,7 @@ import { useQcListStore } from '../stores/qclist';
 import CoordinateInput from './CoordinateInput.vue';
 import PreviewScaleControl from './PreviewScaleControl.vue';
 import AutoTourButton from './AutoTourButton.vue';
+import DiffLocateButton from './DiffLocateButton.vue';
 import { isIntermediateStage } from '../lib/stage';
 import type { StretchMode } from '../lib/tifDecode';
 import AppIcon from './AppIcon.vue';
@@ -158,6 +159,7 @@ function onPick(e: Event) {
          不是画布的显示缩放（那个在右下角，别混）。 -->
     <PreviewScaleControl :model-value="store.previewDiv" @update:model-value="store.setPreviewDiv" />
     <AutoTourButton />
+    <DiffLocateButton />
 
     <span class="spacer"></span>
 
@@ -245,6 +247,7 @@ function onPick(e: Event) {
 }
 
 /* ---- 控件共通骨架：高度 / 圆角 / 描边 / 字号 / 过渡只写这一处 ---- */
+.toolbar:has(.tour-popover),.toolbar:has(.diff-popover){z-index:7}
 .btn,
 .outbtn,
 .cmp-btn,

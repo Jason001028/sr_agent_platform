@@ -51,8 +51,13 @@ async function paint(){
   c.width=Math.max(1,Math.round(r.thumb.width*scale));
   c.height=Math.max(1,Math.round(r.thumb.height*scale));
   ctx.drawImage(r.thumb as unknown as CanvasImageSource,0,0,c.width,c.height);
+  if(tour.coverageVisible){
+   const n=tour.coverage.size;ctx.fillStyle='rgba(61,169,164,.22)';ctx.beginPath();
+   for(let j=0;j<n;j++)for(let k=0;k<n;k++)if(tour.coverage.viewed(j*n+k,tour.coverageCompare))ctx.rect(k*c.width/n,j*c.height/n,c.width/n,c.height/n);
+   ctx.fill();
+  }
   const route=tour.plan;
-  if(route && p.rec?.id===store.activeRec?.id){
+  if(route && (tour.compare||p.rec?.id===store.activeRec?.id)){
    ctx.strokeStyle='rgba(22,108,103,.4)';ctx.lineWidth=.75;ctx.beginPath();
    route.points.forEach((point,j)=>{const x=point.x/route.width*c.width,y=point.y/route.height*c.height;if(j===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});ctx.stroke();
    if(tour.current){ctx.fillStyle='#166c67';ctx.beginPath();ctx.arc(tour.current.x/route.width*c.width,tour.current.y/route.height*c.height,2.5,0,Math.PI*2);ctx.fill();}
@@ -63,7 +68,7 @@ async function paint(){
   ctx.strokeRect(-p.view.ox/p.view.scale*sx,-p.view.oy/p.view.scale*sy,p.rect.w/p.view.scale*sx,p.rect.h/p.view.scale*sy);
  });
 }
-watch(()=>[store.renderTick,size.value,visible.value,tour.plan],paint,{immediate:true});
+watch(()=>[store.renderTick,size.value,visible.value,tour.plan,tour.coverageVersion],paint,{immediate:true});
 function navigate(e:PointerEvent,i:number){if(e.type==='pointermove'&&!e.buttons)return;const p=store.panes[i],r=p.rec;if(!r?.thumb||store.drawMode)return;const c=e.currentTarget as HTMLCanvasElement,b=c.getBoundingClientRect();if(e.type==='pointerdown')c.setPointerCapture(e.pointerId);const x=Math.max(0,Math.min(1,(e.clientX-b.left)/b.width))*r.thumb.width,y=Math.max(0,Math.min(1,(e.clientY-b.top)/b.height))*r.thumb.height;store.noteUserIntent();store.setPaneView(p.side,{...p.view,ox:p.rect.w/2-x*p.view.scale,oy:p.rect.h/2-y*p.view.scale});}
 </script>
 <template>
@@ -73,7 +78,7 @@ function navigate(e:PointerEvent,i:number){if(e.type==='pointermove'&&!e.buttons
  </button>
  </Transition>
  <Transition name="minimap">
- <div v-show="visible" ref="windowRef" class="navigator" aria-label="鹰眼导航" :style="position?{left:position.left+'px',top:position.top+'px',right:'auto',bottom:'auto'}:{}" @mousedown.stop @dblclick.stop @wheel.stop>
+ <div v-show="visible" ref="windowRef" class="navigator" aria-label="鹰眼导航" :style="{'--navigator-opacity':opacity/100,...(position?{left:position.left+'px',top:position.top+'px',right:'auto',bottom:'auto'}:{})}" @mousedown.stop @dblclick.stop @wheel.stop>
   <div class="navigator-tools">
   <button class="move-handle" aria-label="移动鹰眼窗口" title="拖动移动，松开吸附边缘；方向键移动" @pointerdown.stop.prevent="startDrag" @pointermove.stop="moveDrag" @pointerup.stop="endDrag" @pointercancel.stop="endDrag" @lostpointercapture="endDrag" @keydown="moveByKey">
    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1v14M1 8h14M5 4l3-3 3 3M5 12l3 3 3-3M4 5L1 8l3 3M12 5l3 3-3 3" /></svg>
@@ -82,16 +87,19 @@ function navigate(e:PointerEvent,i:number){if(e.type==='pointermove'&&!e.buttons
    <button aria-label="关闭鹰眼导航" title="收起鹰眼导航" aria-expanded="true" @pointerdown.stop @click.stop="visible=false">×</button>
   </div>
   <div v-if="settingsOpen" class="settings" @pointerdown.stop @keydown.esc.stop="settingsOpen=false">
-   <label>不透明度 <output>{{ opacity }}%</output><input v-model.number="opacity" type="range" min="10" max="100" step="5" aria-label="鹰眼不透明度" /></label>
+   <label>不透明度 <output>{{ opacity }}%</output><input v-model.number="opacity" type="range" min="0" max="100" step="5" aria-label="鹰眼不透明度" /></label>
    <label>大小 <output>{{ size }}%</output><input v-model.number="size" type="range" min="50" max="200" step="10" aria-label="鹰眼相对大小" /></label>
   </div>
-  <div class="maps" :style="{opacity:opacity/100}"><canvas v-for="(p,i) in store.panes" v-show="p.rec?.thumb" :key="p.side" :ref="el=>{if(el)roots[i]=el as HTMLCanvasElement}" :aria-label="p.side+' 影像导航'" @pointerdown.stop="navigate($event,i)" @pointermove.stop="navigate($event,i)" /></div>
+  <div class="navigator-surface"><div class="maps"><canvas v-for="(p,i) in store.panes" v-show="p.rec?.thumb" :key="p.side" :ref="el=>{if(el)roots[i]=el as HTMLCanvasElement}" :aria-label="p.side+' 影像导航'" @pointerdown.stop="navigate($event,i)" @pointermove.stop="navigate($event,i)" /></div></div>
  </div>
  </Transition>
 </template>
 <style scoped>
-.navigator{position:absolute;bottom:14px;right:14px;border:1px solid var(--tb-border);border-radius:10px;z-index:4;background:var(--tb-bg);box-shadow:0 2px 5px #183c3014,0 8px 24px #183c3024;transform-origin:bottom right}
-.maps{display:flex;align-items:flex-start;gap:1px;border-radius:9px;overflow:hidden}
+.navigator{position:absolute;bottom:14px;right:14px;border:1px solid transparent;border-radius:10px;z-index:4;transform-origin:bottom right}
+/* Fade the whole map surface, including its backing, while keeping controls usable. */
+.navigator-surface{position:relative;border-radius:inherit;opacity:var(--navigator-opacity,1)}
+.navigator-surface::before{content:'';position:absolute;inset:-1px;pointer-events:none;border:1px solid var(--tb-border);border-radius:inherit;background:var(--tb-bg);box-shadow:0 2px 5px #183c3014,0 8px 24px #183c3024}
+.maps{position:relative;display:flex;align-items:flex-start;gap:1px;border-radius:9px;overflow:hidden}
 canvas{display:block;width:auto;height:auto;flex:none;cursor:crosshair;touch-action:none}
 .navigator-tools{position:absolute;left:6px;right:6px;top:6px;z-index:2;display:flex;align-items:center;gap:4px;pointer-events:none;opacity:.45;transition:opacity var(--motion-hover) var(--ease-standard)}
 .navigator:hover .navigator-tools,.navigator:focus-within .navigator-tools{opacity:1}

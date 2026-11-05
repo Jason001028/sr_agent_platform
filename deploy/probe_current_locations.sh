@@ -207,7 +207,7 @@ if [ -d "$BUNDLE" ]; then
 fi
 
 if [ -n "$APP" ]; then
-  show_file "$APP/SR_code/variants/repair_sr.py" "repair adapter" "9b93c427db0f80779b5e67e6d1ac0d09507887ad191e14768ca5797f6723c081"
+  show_file "$APP/SR_code/variants/repair_sr.py" "repair adapter" "f301d2341d4863c9b1924f305796342fde1cbe99493b829e109979de2079fd35"
   show_file "$APP/SR_code/variants/verify_sr_run.py" "app verifier" "e3eb2fc560489117e3f9ed8980973f059eec07d757e0194a17b539bdc095aa4a"
   if [ -f "$APP/SR_code/variants/code_0817_prod_slurm.py" ]; then
     show_file "$APP/SR_code/variants/code_0817_prod_slurm.py" "app variant copy" "041bea73b36f6e3c8289d4e4c029c5fe492cbd09502a178c5f1d9798287474a9"

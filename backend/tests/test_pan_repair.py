@@ -284,6 +284,25 @@ class TestPanRepair(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'mask is empty'):
             self.run_repair(lambda _: self.fail('must not run'))
 
+    def test_swallowed_oom_in_inference_log_blocks_publication(self):
+        # The bundle's test() keeps the previous tile's fake_H on RuntimeError,
+        # so an OOM still exits 0 with a complete output file.
+        old = self.pan.read_bytes()
+
+        def oom(argv):
+            config = ET.parse(argv[-1]).getroot()
+            private = Path(config.findtext('DatarootLQ'))
+            tifffile.imwrite(private / 'PAN_260318.tif', np.full((8, 8), 99, dtype=np.uint16))
+            debug = private / 'Debug'
+            debug.mkdir()
+            (debug / 'PAN_SRLOG.txt').write_text(
+                'RuntimeError: CUDA out of memory. Tried to allocate 1.15 GiB\n')
+
+        with self.assertRaisesRegex(ValueError, 'reported errors'):
+            self.run_repair(oom)
+        self.assertEqual(self.pan.read_bytes(), old)
+        self.assertFalse((self.scene / 'PAN_old_latest.tif').exists())
+
     def test_existing_pan_without_matching_receipt_never_passes_verifier(self):
         verdict = verifier.check_contract(str(self.config), 0)
         self.assertFalse(verdict.ok)

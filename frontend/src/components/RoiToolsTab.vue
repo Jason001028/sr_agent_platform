@@ -22,6 +22,7 @@ import type { RoiStats } from '../lib/roiStats.js';
 import { roiOrigGeom, STAT_HI, STAT_CLIP } from '../lib/roiStats.js';
 import QcListPanel from './QcListPanel.vue';
 import CompareListPanel from './CompareListPanel.vue';
+import DiffCandidatesPanel from './DiffCandidatesPanel.vue';
 
 const viewer = useViewerStore();
 const queue = useQueueStore();
@@ -157,6 +158,10 @@ function fmtTime(ts: number): string {
     <!-- 点选清单（仅对比模式）：在《待修复清单》**上方** —— 两者都是「一列可以点的图/条目」，
          但点选清单是本次对比的临时成员，位置在待办之上才符合「先选图、再对着清单干活」。 -->
     <CompareListPanel />
+
+    <!-- 差异候选：与点选清单相邻 —— 同样是「一列可点的区域」，但来自只读分析，
+         点「加入掩码」才写进人工掩码。 -->
+    <DiffCandidatesPanel />
 
     <!-- 置顶：待修复清单（质检 .txt 的导入 / 标记 / 写回） -->
     <QcListPanel />

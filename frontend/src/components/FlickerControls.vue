@@ -15,6 +15,8 @@
  */
 import { computed } from 'vue';
 import { useViewerStore } from '../stores/viewer';
+import { useAutoTourStore } from '../stores/autoTour';
+const tour=useAutoTourStore();
 
 const store = useViewerStore();
 
@@ -41,7 +43,7 @@ function toggle() {
 <template>
   <Transition name="fx-capsule-fade">
     <div
-      v-if="store.compareMode === 'flicker'"
+      v-if="store.compareMode === 'flicker' && tour.status==='idle'"
       class="fx-wrap"
       data-e2e="flicker-capsule"
       @mousedown.stop

@@ -8,7 +8,7 @@ const visible = computed(() => isViewerEmpty(viewer));
 </script>
 
 <template>
-  <section v-if="visible" class="viewer-empty" aria-label="影像分析欢迎页">
+  <section v-if="visible" class="viewer-empty" :class="{'on-graphite':viewer.canvasBackground==='graphite'}" aria-label="影像分析欢迎页">
     <div class="welcome-content">
       <AsciiLogoIntro />
       <h1>开启你的图像工作流</h1>
@@ -18,7 +18,9 @@ const visible = computed(() => isViewerEmpty(viewer));
 </template>
 
 <style scoped>
-.viewer-empty { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; user-select: none; container-type: size; }
+.viewer-empty { position: absolute; inset: 0; z-index:2; display: grid; place-items: center; pointer-events: none; user-select: none; container-type: size; }
+.on-graphite .welcome-content{color:#dce8e3}
+.on-graphite .subtitle{color:#b4c3bd}
 .welcome-content { width: min(400px, calc(100% - 32px), max(80px, calc(100cqh - 220px))); text-align: center; transform: translateY(-24px); color: #244b40; }
 h1 { margin: 20px 0 10px; font-size: 20px; font-weight: 600; line-height: 1.4; }
 p { max-width: 340px; margin: 0 auto; }

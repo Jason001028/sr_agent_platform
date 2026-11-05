@@ -1,4 +1,5 @@
 import { imageRef, spatialId } from '../lib/spatial';
+import { tourImageFromEvidence, tourPairRefusal } from '../lib/tourCompare';
 import { decodeJpegBitmap } from '../lib/jpegBitmap';
 import { registerViewerContext, snapshotViewer } from '../lib/viewerContext.js';
 /**
@@ -63,6 +64,10 @@ import { sourceFingerprint } from '../lib/local_preview.js';
 import { isIntermediateStage, stageLabel, stageRefusal } from '../lib/stage.js';
 import type { StageKind } from '../lib/stage.js';
 import { readSpotlightMode, saveSpotlightMode } from '../lib/spotlight.js';
+import { readViewerBackground, saveViewerBackground, isViewerBackground } from '../lib/viewerBackground';
+import type { ViewerBackground } from '../lib/viewerBackground';
+import type { ViewHistoryEntry } from '../lib/viewHistory';
+import {VIEW_HISTORY_MS} from '../lib/motion';
 import type { SpotlightMode } from '../lib/spotlight.js';
 import { buildStats, luma, STAT_HI } from '../lib/roiStats.js';
 import type { RoiStats } from '../lib/roiStats.js';
@@ -75,6 +80,7 @@ export type DrawTool = 'rect' | 'polygon' | 'wand' | 'del';
 
 /** 一条解码记录（HTML rec 直译；thumb/src/stats 为 markRaw 重字段） */
 export interface ViewerRec {
+  tourIdentity?: import('../lib/tourCompare').TourImage;
   spatialIdentity?: string;
   spatialIdentityToken?: number;
   id: number;
@@ -1013,6 +1019,7 @@ export const useViewerStore = defineStore('viewer', () => {
      系统偏好减少动画时直接落位（与样式层的 prefers-reduced-motion 同口径）。 */
   let viewAnimId = 0;
   let viewAnimFrame: number | null = null;
+  const viewAnimating=ref(false);
 
   function prefersReducedMotion(): boolean {
     try {
@@ -1022,6 +1029,7 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   function stopViewAnim() {
+    viewAnimating.value=false;
     viewAnimId++;
     if (viewAnimFrame !== null) {
       if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(viewAnimFrame);
@@ -1030,22 +1038,26 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   function animateViewsTo(
-    targets: { A?: ViewState; B?: ViewState }, duration = VIEW_FIT_MS,
+    targets: { A?: ViewState; B?: ViewState; F?: ViewState }, duration = VIEW_FIT_MS,
   ) {
     stopViewAnim();
     const toA = targets.A;
     const toB = targets.B;
-    if (!toA && !toB) { renderTick.value++; return; }
+    const toF = targets.F;
+    if (!toA && !toB && !toF) { renderTick.value++; return; }
 
     if (typeof requestAnimationFrame !== 'function' || prefersReducedMotion()) {
       if (toA) viewA.value = { ...toA };
       if (toB) viewB.value = { ...toB };
+      if (toF) flickerView.value = { ...toF };
       renderTick.value++;
       return;
     }
 
     const fromA = { ...viewA.value };
     const fromB = { ...viewB.value };
+    const fromF = {...flickerView.value};
+    viewAnimating.value=true;
     const id = viewAnimId;
     const t0 = performance.now();
     const step = (now: number) => {
@@ -1054,10 +1066,50 @@ export const useViewerStore = defineStore('viewer', () => {
       const e = easeOutCubic(p);
       if (toA) viewA.value = lerpView(fromA, toA, e);
       if (toB) viewB.value = lerpView(fromB, toB, e);
+      if (toF) flickerView.value = lerpView(fromF, toF, e);
       renderTick.value++;
       viewAnimFrame = p < 1 ? requestAnimationFrame(step) : null;
+      if(p===1)viewAnimating.value=false;
     };
     viewAnimFrame = requestAnimationFrame(step);
+  }
+
+  function captureNavigationView():ViewHistoryEntry|null {
+    if(!canvasAttached.value||busy.value||!panes.value.some(p=>p.rec?.thumb))return null;
+    const flicker=compareMode.value==='flicker',ref=flickerRefRec.value;
+    const entry:ViewHistoryEntry={mode:compareMode.value,active:activeSide.value,panes:panes.value.map(p=>{
+      const r=flicker?ref:p.rec,v=flicker?flickerView.value:p.view;
+      const w=r?.thumb?.width??0,h=r?.thumb?.height??0;
+      return {side:p.side,id:r?.id??null,revision:r?.srcRev??'',cx:w?(p.rect.w/2-v.ox)/(w*v.scale):0,cy:h?(p.rect.h/2-v.oy)/(h*v.scale):0,zoom:w?v.scale*w/r!.W:1};
+    })};
+    if(flicker){entry.altId=flickerAltRec.value?.id;entry.altRevision=flickerAltRec.value?.srcRev??'';entry.showingAlt=flickerShowingAlt.value;}
+    return entry;
+  }
+  function navigationViewAvailable(entry:ViewHistoryEntry):boolean {
+    return entry.mode===compareMode.value&&(entry.mode!=='flicker'||entry.panes[0].id===flickerRefRec.value?.id&&entry.altId===flickerAltRec.value?.id)&&entry.panes.every(p=>p.id===null||recs.value.some(r=>r.id===p.id&&r.thumb&&(r.srcRev??'')===p.revision))&&
+      (entry.altId===undefined||recs.value.some(r=>r.id===entry.altId&&r.thumb&&(r.srcRev??'')===entry.altRevision));
+  }
+  function restoreNavigationView(entry:ViewHistoryEntry):boolean {
+    if(!navigationViewAvailable(entry)||drawMode.value||busy.value)return false;
+    noteUserIntent();stopViewAnim();
+    const flicker=entry.mode==='flicker';
+    if(flicker){
+      setTourLayer(!!entry.showingAlt);
+    }else{
+      paneA.value=entry.panes.find(p=>p.side==='A')?.id??null;
+      paneB.value=entry.mode==='split'?entry.panes.find(p=>p.side==='B')?.id??null:null;
+      activeSide.value=entry.active;
+      const id=entry.active==='A'?paneA.value:paneB.value;
+      if(id!==null)switchActive(id);
+    }
+    const targets:{A?:ViewState;B?:ViewState;F?:ViewState}={};
+    for(const p of entry.panes){
+      const r=recs.value.find(r=>r.id===p.id);if(!r?.thumb)continue;
+      const rect=rectForSide(p.side),scale=p.zoom*r.W/r.thumb.width;
+      targets[flicker?'F':p.side]={scale,ox:rect.w/2-p.cx*r.thumb.width*scale,oy:rect.h/2-p.cy*r.thumb.height*scale};
+      viewFor[p.side]={w:r.thumb.width,h:r.thumb.height};
+    }
+    animateViewsTo(targets,VIEW_HISTORY_MS);return true;
   }
 
   /** **换图**之后那一格的适配：对比模式下按相对视野搬过去，其余情况老实 fit。
@@ -1161,6 +1213,75 @@ export const useViewerStore = defineStore('viewer', () => {
   /* ---------------- 交替对比：配对、计时、预加载 ---------------- */
 
   /** 进入交替对比。返回 false = 没有可用的当前图，模式没变。 */
+  function setTourLayer(alternate: boolean) {
+    pauseFlicker();
+    if (!flickerReady.value) return false;
+    flickerIndex.value = alternate ? 1 : 0;
+    renderTick.value++;
+    return true;
+  }
+  function setTourCamera(v: ViewState) {
+    flickerView.value = v;
+    renderTick.value++;
+  }
+  /** Both cached previews must be ready before changing the visible pair. */
+  function selectTourPair(aId:number,bId:number) {
+    const a=recs.value.find(r=>r.id===aId),b=recs.value.find(r=>r.id===bId);
+    if(!a?.thumb||!b?.thumb||!a.tourIdentity||!b.tourIdentity||tourPairRefusal(a.tourIdentity,b.tourIdentity))return false;
+    // A single isotropic Camera cannot correct independently rounded previews.
+    // Refuse these instead of introducing a small vertical registration drift.
+    if(a.thumb.width*b.thumb.height!==b.thumb.width*a.thumb.height)return false;
+    if(registrationRefusal(flickerMeta(a),flickerMeta(b)))return false;
+    const previous=compareMode.value==='flicker'?flickerRefRec.value:activeRec.value;
+    const previousView=compareMode.value==='flicker'?flickerView.value:viewA.value;
+    pauseFlicker();stopViewAnim();
+    flickerView.value=previous?.thumb?remapViewForImage(previousView,{w:previous.thumb.width,h:previous.thumb.height},{w:a.thumb.width,h:a.thumb.height},canvasSize.value.w,canvasSize.value.h):{...viewA.value};
+    flickerFromSplit=false;flickerEnterActiveId=activeId.value;
+    flickerPair.value={a:aId,b:bId};flickerIndex.value=0;compareMode.value='flicker';renderTick.value++;
+    return true;
+  }
+  async function loadTourImage(item:SceneSibling,res:SceneSiblings,stillWanted:()=>boolean=()=>true) {
+    if(!item.id||!item.tourIdentity||!item.exists)throw new Error('影像身份不完整');
+    const row=siblingRow(res,item);
+    const meta:SceneOpenMeta={name:item.name!,W:item.tourIdentity.width,H:item.tourIdentity.height,sceneId:item.id,lqPath:res.lqPath,sceneDir:res.lqPath,srcRev:item.srcRev,stageKind:item.kind};
+    const id=insertSceneCard(meta,row),rec=recs.value.find(r=>r.id===id)!;
+    if(!rec.thumb||rec.srcRev!==item.srcRev){rec.card=markRaw({row,meta});await fetchCardPixels(rec,stillWanted);}
+    if(!stillWanted())throw new Error('配对载入已取消');
+    if(!rec.thumb||rec.srcRev!==item.srcRev)throw new Error('影像预览版本不匹配，请重新载入配对');
+    rec.tourIdentity=tourImageFromEvidence(id,item.tourIdentity,rec.srcRev);
+    return id;
+  }
+  /** 用一对指定影像进入交替对比（差异定位候选清单的「双图交替」）。
+   *
+   *  与 `selectTourPair` 的区别：不要求巡览身份（tourIdentity），只要求像素就绪、
+   *  同宽高比、`registrationRefusal` 放行 —— 差异定位本来就只处理同网格的一对图。 */
+  function openComparePair(aId: number, bId: number): boolean {
+    const a = recs.value.find((r) => r.id === aId);
+    const b = recs.value.find((r) => r.id === bId);
+    if (!a?.thumb || !b?.thumb || a.id === b.id) return false;
+    if (a.thumb.width * b.thumb.height !== b.thumb.width * a.thumb.height) return false;
+    if (registrationRefusal(flickerMeta(a), flickerMeta(b))) return false;
+    const previous = compareMode.value === 'flicker' ? flickerRefRec.value : activeRec.value;
+    const previousView = compareMode.value === 'flicker' ? flickerView.value : viewA.value;
+    pauseFlicker();
+    stopViewAnim();
+    flickerView.value = previous?.thumb
+      ? remapViewForImage(previousView,
+        { w: previous.thumb.width, h: previous.thumb.height },
+        { w: a.thumb.width, h: a.thumb.height },
+        canvasSize.value.w, canvasSize.value.h)
+      : { ...viewA.value };
+    flickerFromSplit = false;
+    flickerEnterActiveId = activeId.value;
+    flickerPair.value = { a: aId, b: bId };
+    flickerIndex.value = 0;
+    compareMode.value = 'flicker';
+    compareList.value = seedCompareList(recs.value.map((r) => r.id));
+    void prepareFlickerPixels();
+    renderTick.value++;
+    return true;
+  }
+
   function enterFlickerMode(): boolean {
     const active = activeRec.value;
     if (!active) {
@@ -1675,6 +1796,12 @@ export const useViewerStore = defineStore('viewer', () => {
      跟着「用户点了哪一行」走（谁触发谁负责调 `setSpotlight`/`clearSpotlight`）。 */
 
   const spotlightMode = ref<SpotlightMode>(readSpotlightMode());
+  const canvasBackground = ref<ViewerBackground>(readViewerBackground());
+  function setCanvasBackground(value:ViewerBackground):void {
+    if(!isViewerBackground(value))return;
+    canvasBackground.value=value;
+    saveViewerBackground(value);
+  }
   /** 三档遮罩模式立即生效并持久化（设置面板与组件共用这一个入口）。 */
   function setSpotlightMode(mode: SpotlightMode): void {
     if (spotlightMode.value === mode) return;
@@ -1761,18 +1888,18 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   /** 打开活动侧场景里的某一类图（input / product / nosr），落在活动侧。 */
-  async function openSceneSibling(kind: SceneSibling['kind']): Promise<boolean> {
+  async function openSceneSibling(kind: SceneSibling['kind'] | 'old'): Promise<boolean> {
     const sid = activeSceneId();
     if (!sid) { showToast('先打开一张带盘阵关联的图，才能取同场景的其它图'); return false; }
     busy.value = true;
-    showMask('正在查找同场景的图…', '三类图（输入 / 本轮超分产物 / NOSR）', false);
+    showMask('正在查找同场景的图…', '输入 / 本轮超分产物 / NOSR / old', false);
     try {
-      const res = await apiSceneSiblings(loadSrConfig(), sid);
-      const item = res.items.find((it) => it.kind === kind);
+      const res = await apiSceneSiblings(loadSrConfig(), sid, kind === 'old' ? 'old' : undefined);
+      const item = res.items.find((it) => it.kind === (kind === 'old' ? 'product' : kind));
       if (!item || !item.id || !item.exists) {
         // 「找不到」如实交代：把试过哪些名字一并说出来，别只说一句「没有」。
         const kindName = kind === 'input' ? '输入影像'
-          : kind === 'product' ? '本轮超分产物' : 'NOSR';
+          : kind === 'product' ? '本轮超分产物' : kind === 'old' ? 'old 旧影像' : 'NOSR';
         // 两个类别的名字来源不同，试过的名字也就不是同一串：产物的名字靠 suffix，
         // NOSR 的名字由输入影像的 stem 拼（与 suffix 无关），各报各的。
         const cands = kind === 'nosr' ? res.nosrCandidates : res.productCandidates;
@@ -2115,12 +2242,12 @@ export const useViewerStore = defineStore('viewer', () => {
    *  `rec.file`/`name`/`size` 归调用方管：拖拽升级那条路要**保持**用户拖进来的
    *  那个文件名与字节数（FileList 展示与 addFiles 查重都靠它），只换像素与身份。 */
   async function applySceneJpgToRec(rec: ViewerRec, meta: SceneOpenMeta,
-                                    blob: Blob, layout?: string, preserveView = false): Promise<boolean> {
+                                    blob: Blob, layout?: string, preserveView = false, stillWanted:()=>boolean=()=>true): Promise<boolean> {
     const my = ++rec.token;                     // 领号：JPG 要接管像素了
     const requestedDiv = previewDiv.value;
     const cv = await decodeJpgToCanvas(blob);
     if (previewDiv.value !== requestedDiv) return false;
-    if (rec.token !== my || !recs.value.includes(rec)) return false;
+    if (!stillWanted() || rec.token !== my || !recs.value.includes(rec)) return false;
     const tw = cv.width, th = cv.height;
     const ctx = cv.getContext('2d');
     if (!ctx) throw new Error('取不到 2d 上下文');
@@ -2329,7 +2456,7 @@ export const useViewerStore = defineStore('viewer', () => {
    *
    *  装回失败（`applySceneJpgToRec` 返回 false）= 「期间有更新的写者接手 / 这张卡已经
    *  被移除了」，**那是被取消，不是失败** —— 静默返回，绝不写成取图失败。 */
-  function fetchCardPixels(rec: ViewerRec): Promise<void> {
+  function fetchCardPixels(rec: ViewerRec, stillWanted:()=>boolean=()=>true): Promise<void> {
     const card = rec.card;
     if (!card) return Promise.resolve();
     const div = previewDiv.value;
@@ -2340,9 +2467,9 @@ export const useViewerStore = defineStore('viewer', () => {
     const tracked = (async () => {
       try {
         const blob = await fetchSceneJpgShared(card.row, div);
-        if (rec.token !== intent.token || !recs.value.includes(rec) || previewDiv.value !== div) return;
+        if (!stillWanted() || rec.token !== intent.token || !recs.value.includes(rec) || previewDiv.value !== div) return;
         intent.token++; // applySceneJpgToRec claims the next write token before decoding.
-        const applied = await applySceneJpgToRec(rec, card.meta, blob, undefined, true);
+        const applied = await applySceneJpgToRec(rec, card.meta, blob, undefined, true, stillWanted);
         if (applied) rec.detailDiv = div;
       } catch (e) {
         if (rec.token === intent.token && recs.value.includes(rec) && previewDiv.value === div) throw e;
@@ -2976,6 +3103,60 @@ export const useViewerStore = defineStore('viewer', () => {
     const target={scale,ox:pane.rect.w/2-(x0+x1)*.5*sx*scale,oy:pane.rect.h/2-(y0+y1)*.5*sy*scale};
     setActiveSide(side);
     animateViewsTo(side==='A'?{A:target}:{B:target});
+  }
+
+  /** 把某一格平滑定位到**缩略图坐标矩形**（差异候选区域用；不改变底层影像）。 */
+  function focusPaneRect(side: 'A' | 'B', rect: [number, number, number, number]): boolean {
+    if (drawMode.value) return false;
+    const pane = panes.value.find((p) => p.side === side);
+    const r = pane?.rec;
+    if (!pane || !r?.thumb) return false;
+    let [x, y, w, h] = rect;
+    if (compareMode.value === 'flicker') {
+      const ref = flickerRefRec.value;
+      if (ref?.thumb && ref.id !== r.id) {
+        // 区域来自另一张图：按同一归一化范围换到参考图缩略图坐标。
+        const sx = ref.thumb.width / r.thumb.width;
+        const sy = ref.thumb.height / r.thumb.height;
+        x *= sx; y *= sy; w *= sx; h *= sy;
+      }
+      const scale = Math.max(0.02, Math.min(24, pane.rect.w * 0.78 / Math.max(1, w),
+        pane.rect.h * 0.78 / Math.max(1, h)));
+      const target = {
+        scale,
+        ox: pane.rect.w / 2 - (x + w / 2) * scale,
+        oy: pane.rect.h / 2 - (y + h / 2) * scale,
+      };
+      pauseFlicker();
+      flickerIndex.value = 0;
+      animateViewsTo({ F: target });
+      return true;
+    }
+    const scale = Math.max(0.02, Math.min(24, pane.rect.w * 0.78 / Math.max(1, w),
+      pane.rect.h * 0.78 / Math.max(1, h)));
+    const target = {
+      scale,
+      ox: pane.rect.w / 2 - (x + w / 2) * scale,
+      oy: pane.rect.h / 2 - (y + h / 2) * scale,
+    };
+    setActiveSide(side);
+    animateViewsTo(side === 'A' ? { A: target } : { B: target });
+    return true;
+  }
+
+  /** 把一段多边形加入指定影像的掩码 ROI（差异候选「加入掩码」用）。
+   *  与分析结果分开：分析不会自动生成掩码，只有用户显式确认才落进来。 */
+  function addMaskPolygon(recId: number, poly: Poly): boolean {
+    const rec = recs.value.find((r) => r.id === recId);
+    if (!rec || !rec.thumb || poly.length < 3) return false;
+    if (!rec.maskRois) rec.maskRois = [];
+    rec.maskRois.push(poly);
+    if (activeId.value === recId) {
+      selRoi.value = poly;
+      roiStats.value = roiStatsOnCanvas(rec, poly);
+    }
+    renderTick.value++;
+    return true;
   }
 
   function locatePixel(x: number | string, y: number | string) {
@@ -3847,6 +4028,7 @@ export const useViewerStore = defineStore('viewer', () => {
     // 状态
     recs, workspaceVersion, activeId, activeRec, view, canvasSize, renderTick, marker,
     userIntentSeq, noteUserIntent, batchOverlayTarget, batchOverlayOff,
+    viewAnimating,captureNavigationView,navigationViewAvailable,restoreNavigationView,
     cursor, setCursor,
     canvasAttached, setCanvasAttached,
     stretchMode, activeStretch, drawMode, drawTool, pendingRect, pendingPts, hoverPt, hoverRoi, flashRoi,
@@ -3863,11 +4045,13 @@ export const useViewerStore = defineStore('viewer', () => {
     // 一键解析：清空暂存区 + 批量入列的「空卡」 + 点亮联动
     clearRecs, insertSceneCard, bakeCardPixels, litIds, litTick, lightCards, clearLights,
     // 场景聚焦遮罩：模式（持久化）+ 聚焦中的卡片
+    canvasBackground, setCanvasBackground,
     spotlightMode, setSpotlightMode, spotlightIds, sceneCardIds, setSpotlight, clearSpotlight,
     // 一键解析：先排满占位卡，再原地补齐 / 标红 / 收尾
     insertPendingCards, fillPendingCard, setPendingStatus, failPendingCard, finishPendingCards,
     // 拉伸 / 视图
     setStretch, setPreviewDiv, setCanvasSize, fit, onWheel, onPan, locatePixel, focusSourceBounds,
+    focusPaneRect, addMaskPolygon,
     // 掩码
     enterDraw, exitDraw, setDrawTool, commitRect, closePolygon, undoRoi, clearRois,
     mergeRois, delClick, wandSelect, buildMaskJson, exportMaskJson, genMask,
@@ -3888,7 +4072,7 @@ export const useViewerStore = defineStore('viewer', () => {
     flickerPlaying, flickerStart: startFlicker, flickerPause: pauseFlicker,
     flickerToggle: toggleFlicker, flickerStop: stopFlicker,
     flickerReady, flickerReason, flickerPairName, flickerCurrentName, flickerNames,
-    flickerShowingAlt, flickerIndex, displayRec,
+    flickerShowingAlt, flickerIndex, displayRec, flickerRefRec, flickerAltRec, flickerView, setTourLayer, setTourCamera, selectTourPair, loadTourImage, openComparePair,
     dragHint, setDragHint,
     // 侧栏卡片拖进画布：载荷类型 + 起手/收尾 + 同景序号（卡片小标）
     REC_MIME, startRecDrag, endRecDrag, sceneOrdinalOf,

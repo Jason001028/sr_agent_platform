@@ -1,5 +1,5 @@
 ﻿import { describe,it,expect } from 'vitest';
-import { planTour,travelFraction } from '../autoTour';
+import { planTour,travelFraction,tourGridOrder,TOUR_ROUTES } from '../autoTour';
 describe('pixel tour route',()=>{
  it('covers an image with <=85% viewport steps and bounded centers',()=>{
   const p=planTour(16000,8000,4000,2000,1000,600);
@@ -24,5 +24,29 @@ describe('pixel tour route',()=>{
   expect(travelFraction(2,d,s).fraction-travelFraction(1,d,s).fraction).toBeCloseTo(.1);
   expect(travelFraction(.1,d,s).fraction).toBeLessThan(.01);
   expect(travelFraction(100,d,s).fraction).toBe(1);
+ });
+ it('preserves the existing horizontal snake as the default',()=>{
+  const baseline=planTour(16000,8000,4000,2000,1000,600);
+  expect(planTour(16000,8000,4000,2000,1000,600,undefined,'rows')).toEqual(baseline);
+  const xs=[...new Set(baseline.points.map(p=>p.x))],ys=[...new Set(baseline.points.map(p=>p.y))];
+  expect(baseline.points).toEqual(ys.flatMap((y,i)=>(i%2?[...xs].reverse():xs).map(x=>({x,y}))));
+ });
+ it.each(TOUR_ROUTES)('$label covers the same grid exactly once with adjacent steps',({value})=>{
+  for(const [nx,ny] of [[5,4],[4,5],[1,7],[8,1],[1,1],[64,64]]){
+   const points=tourGridOrder(nx,ny,value);
+   expect(points).toHaveLength(nx*ny);expect(new Set(points.map(p=>`${p.x},${p.y}`)).size).toBe(nx*ny);
+   for(let i=0;i<points.length;i++){
+    const p=points[i];expect(p.x>=0&&p.x<nx&&p.y>=0&&p.y<ny).toBe(true);
+    if(i)expect(Math.abs(p.x-points[i-1].x)+Math.abs(p.y-points[i-1].y)).toBe(1);
+   }
+  }
+  const p=planTour(16000,8000,4000,2000,1000,600,{x:1000,y:1000,w:12000,h:6000},value);
+  const baseline=planTour(16000,8000,4000,2000,1000,600,{x:1000,y:1000,w:12000,h:6000});
+  expect(new Set(p.points.map(p=>JSON.stringify(p)))).toEqual(new Set(baseline.points.map(p=>JSON.stringify(p))));
+ });
+ it('distinguishes route directions and bounds the schematic grid',()=>{
+  expect(tourGridOrder(4,4,'columns').slice(0,3)).toEqual([{x:0,y:0},{x:0,y:1},{x:0,y:2}]);
+  expect(tourGridOrder(4,4,'inward').slice(-4)).toEqual([{x:1,y:1},{x:2,y:1},{x:2,y:2},{x:1,y:2}]);
+  expect(()=>tourGridOrder(100,100)).toThrow();expect(()=>tourGridOrder(0,3)).toThrow();
  });
 });

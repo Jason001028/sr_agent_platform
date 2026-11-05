@@ -502,6 +502,7 @@ sr_agent_platform/
 | [runtime_status.md](status/runtime_status.md) | 每次模型请求的临时运行状态、计数口径、注入边界与测试 |
 | [spotlight-focus.md](status/spotlight-focus.md) | 《待修复清单》选中行驱动的左侧场景聚焦遮罩：层级、坐标、镂空分块、三档与验证 |
 | [flicker-compare.md](status/flicker-compare.md) | 交替对比：胶囊、配对与配准判据、播放/暂停与自动暂停、视口复用与状态恢复 |
+| [diff-locate.md](status/diff-locate.md) | 智能差异定位：公共网格、像素差分/SSIM、连通域候选、图层次与侧舱清单、预览/原始 ROI 口径 |
 | [generic-preview-p1.md](status/generic-preview-p1.md) | 盘阵外授权 TIFF 的通用预览：预览/生产权限拆分、隔离缓存、Overview 复用与实测 |
 | [sr-local-execution.md](status/sr-local-execution.md) | 本机执行 SR 的链路与运行期规则：单槽串行、重启、UNKNOWN、判定文件 |
 | [real-machine-acceptance.md](status/real-machine-acceptance.md) | 真机验收判据与勾选 |

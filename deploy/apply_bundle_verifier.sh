@@ -36,7 +36,7 @@ SRC_REPAIR="$APP/SR_code/variants/repair_sr.py"
 DST="$BUNDLE/verify_sr_run.py"
 
 EXPECT_VERIFY=e3eb2fc560489117e3f9ed8980973f059eec07d757e0194a17b539bdc095aa4a
-EXPECT_REPAIR=9b93c427db0f80779b5e67e6d1ac0d09507887ad191e14768ca5797f6723c081
+EXPECT_REPAIR=f301d2341d4863c9b1924f305796342fde1cbe99493b829e109979de2079fd35
 
 say() { printf '%s\n' "$*"; }
 hr()  { printf '%s\n' "------------------------------------------------------------"; }

@@ -24,3 +24,13 @@ eval-type-backport; python_version < "3.10"
 
 # 工具参数 Schema 校验与场景库入库校验；必须安装，不允许缺包时跳过校验。
 jsonschema>=4.17,<4.18
+
+# 智能差异定位（/api/diff/analyze）的计算后端。形态学、连通域、真实轮廓追踪、
+# 重采样与 NoData 处理都固定走 SciPy，必须安装；不要只在开发机上装。
+scipy>=1.10,<2
+# 可选：SSIM 走 skimage.metrics.structural_similarity(full=True)。缺省时使用
+# 本仓库的 SciPy 等效实现，结果里 parameters.backend 会标明实际实现。
+#   scikit-image>=0.21
+# 内网镜像若解析不到匹配 wheel，不要为此阻塞部署；SSIM 仍有兜底。
+
+

@@ -22,6 +22,7 @@ import time
 from backend.pathguard import PathDeniedError, ensure_allowed
 from backend.services import preview_jpg, scene_resolve
 from backend.services.spatial_identity import resource_identity
+from backend.services.tour_identity import image_identity
 from backend.services.store import BATCH_WORKFLOW, default_db_path
 
 WORKFLOW = BATCH_WORKFLOW
@@ -227,6 +228,8 @@ def _image(path: Path) -> dict:
         "sample_format": info["sample_format"],
         "spp": info["spp"],
         "compression": info["compression"],
+        "tourIdentity": image_identity(
+            path, path.parent.as_posix(), "pan" if path.stem == "PAN" else "nosr"),
     }
 
 

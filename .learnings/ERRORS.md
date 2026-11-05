@@ -34,3 +34,14 @@ The regression command initially referenced nonexistent test_tool_result_budget.
 ## 2026-10-29 P1 validation
 - npm launcher hit EPERM resolving C:/Users/lenovo; direct local Node entry with --preserve-symlinks --preserve-symlinks-main succeeded.
 - Goal timeout test (0.25 second slice) failed before model dispatch, including isolated rerun; do not claim full Goal regression passes.
+
+## 2026-11-04 local UI verification
+Node npm failed under sandbox with EPERM on user directory; authorized execution succeeded. agent-browser auto-launch failed with CDP channel closed despite doctor passing; use repository isolated-profile Puppeteer launcher. Mock API matching must inspect URL pathname, not source module filename.
+
+
+## 2026-11-05 PowerShell Python stdin encoding
+中文脚本通过 PowerShell 管道送入 Python 前须将 $OutputEncoding 设为 UTF8；默认编码使中文匹配字符串丢失。本次失败发生在写文件之前，重跑已修正。
+
+
+## 2026-11-05 Batch Mock UI timing
+Puppeteer 点击跟随复选框后立即读取 checked 在布局/响应式更新期间出现 false；增加调试往返后可稳定观察到 store.follow=true。验收改为等待真实 checked=true，再验证 userIntent 退出；未修改业务状态或断言目标。

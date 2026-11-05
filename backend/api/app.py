@@ -48,6 +48,7 @@ from PIL import Image
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from starlette.concurrency import run_in_threadpool
 
 from backend.api import paths
 from backend.api.paths import PathDeniedError
@@ -60,6 +61,7 @@ from backend.pathguard import (
     is_allowed, is_preview_only, is_within, looks_like_scene_name,
     parse_scene_date, production_tree_depth,
     strip_raster_ext, to_posix_array_path)
+from backend.services import image_diff
 from backend.services import preview_cache
 from backend.services import scene_resolve
 from backend.runtime_context import AppContext
@@ -153,6 +155,129 @@ def _check_div(div: int) -> int:
             detail=f"下采样档位非法：{div}（只认 "
                    f"{'/'.join(map(str, PREVIEW_DIVISORS))}）")
     return div
+
+
+def _diff_source_path(scene_id: str, root: Path | None) -> Path:
+    """场景 id → 用于差异分析的源文件（显示件 jpg 优先换成同名栅格）。"""
+    abs_path = paths.scene_id_to_abs(scene_id, root, allow_preview=True)
+    raster = _display_sibling_raster(abs_path)
+    if raster is not None:
+        abs_path = ensure_preview_allowed(raster, kind="file")
+    return abs_path
+
+
+def _diff_load_scene(scene_id: str, root: Path | None):
+    """供 Batch Goal / Agent 复用的「读预览像素」入口。
+
+    与查看器自己传 PNG 的那条路等价：盘阵栅格走**已有预览缓存**
+    （缺省 ÷4，可由 ``SR_DIFF_PREVIEW_DIV`` 配），显示件 jpg 直接读。
+    """
+    abs_path = _diff_source_path(scene_id, root)
+    warnings: list[str] = []
+    if abs_path.suffix.lower() in (".tif", ".tiff"):
+        try:
+            div = int(os.environ.get("SR_DIFF_PREVIEW_DIV", "4"))
+        except ValueError:
+            div = 4
+        if div not in PREVIEW_DIVISORS:
+            div = 4
+        jpg = paths.preview_jpg_for(abs_path, root)
+        try:
+            ensure_preview_jpg(str(abs_path), str(jpg), div=div)
+        except PreviewError as e:
+            raise image_diff.DiffError(f"预览生成失败：{e}") from e
+        read_path = jpg
+        warnings.append(f"影像 {abs_path.name} 读取自服务端预览 JPG（÷{div}）。")
+    else:
+        read_path = abs_path
+        warnings.append(f"影像 {abs_path.name} 读取自显示件 JPG。")
+    gray, valid = image_diff.load_gray_image(read_path)
+    return gray, valid, warnings
+
+
+def _diff_source_roi(body: dict, root: Path | None) -> dict:
+    """原始分辨率 ROI 差异（可选路径）。
+
+    两个影像都必须有 ``sceneId``（本地浏览器文件没有服务端路径）。ROI 用 **A 的
+    原始像素坐标**；B 按同一地面范围换算。只支持无压缩条带 TIFF，压缩 / tiled
+    由服务层明确拒绝，前端据此退回预览分析。
+    """
+    specs = []
+    for key, label in (("image_a", "A"), ("image_b", "B")):
+        spec = body.get(key)
+        if not isinstance(spec, dict) or not spec.get("sceneId"):
+            raise image_diff.DiffError(f"原始 ROI 分析需要影像 {label} 的盘阵场景")
+        specs.append(spec)
+    sa, sb = specs
+    path_a = _diff_source_path(str(sa["sceneId"]), root)
+    path_b = _diff_source_path(str(sb["sceneId"]), root)
+    if path_a.suffix.lower() not in (".tif", ".tiff") or path_b.suffix.lower() not in (".tif", ".tiff"):
+        raise image_diff.DiffError("原始 ROI 分析需要两张影像都是 TIFF")
+    roi = body.get("roi")
+    if not isinstance(roi, dict):
+        raise image_diff.DiffError("缺少 ROI 参数")
+    try:
+        x, y, w, h = (int(roi["x"]), int(roi["y"]), int(roi["w"]), int(roi["h"]))
+    except (KeyError, TypeError, ValueError) as e:
+        raise image_diff.DiffError(f"ROI 参数格式不正确：{e}") from e
+    max_edge = image_diff.resolve_max_edge(body.get("maxEdge"))
+    a, va, dims_a, rect_a = image_diff.read_source_window(
+        path_a, x, y, x + w, y + h, max_edge=max_edge)
+    ax0, ay0, ax1, ay1 = rect_a
+    aw, ah = ax1 - ax0, ay1 - ay0
+    ra = aw / a.shape[1] if a.shape[1] else 1.0
+    # B 与 A 同一地面范围：按**实际读取**的 A 窗口换算到 B 的源尺寸。
+    dims_b_meta = scene_dims(str(path_b)) or {}
+    bw, bh = int(dims_b_meta.get("W", 0)), int(dims_b_meta.get("H", 0))
+    if not bw or not bh:
+        raise image_diff.DiffError("无法读取影像 B 的尺寸")
+    ax, ay = dims_a[0], dims_a[1]
+    bx, by = int(round(ax0 * bw / ax)), int(round(ay0 * bh / ay))
+    bw2 = max(1, int(round(aw * bw / ax)))
+    bh2 = max(1, int(round(ah * bh / ay)))
+    b, vb, dims_b, rect_b = image_diff.read_source_window(
+        path_b, bx, by, bx + bw2, by + bh2, max_edge=max_edge)
+    if a.shape != b.shape:
+        b, vb = image_diff.resize_to(a.shape, b, vb)
+    result = image_diff.analyze_arrays(
+        a, b, valid_a=va, valid_b=vb,
+        method=body.get("method"), sensitivity=body.get("sensitivity"),
+        threshold=body.get("threshold"),
+        min_area_px=body.get("minAreaPx", image_diff.DEFAULT_MIN_AREA_PX),
+        blur=bool(body.get("blur", True)),
+        open_kernel=body.get("openKernel", 3),
+        close_kernel=body.get("closeKernel", 3),
+        ssim_window=body.get("ssimWindow", 7),
+        ssim_gaussian=bool(body.get("ssimGaussian", False)),
+        source="source-roi",
+        scale_a=(ra, ah / a.shape[0]),
+        scale_b=(dims_b[0] / b.shape[1], dims_b[1] / b.shape[0]),
+        warnings=["原始 ROI 分析：按原始分辨率重算该区域，区域外仍是预览结果。"],
+    )
+    if (ax0, ay0, ax1, ay1) != (x, y, x + w, y + h):
+        result["warnings"].append(
+            f"请求的 ROI 超出影像范围，实际分析窗口已夹紧到 "
+            f"[{ax0},{ay0},{aw},{ah}]。")
+    result["imageA"] = {
+        "id": sa.get("id"), "name": sa.get("name") or path_a.name,
+        "sourceWidth": dims_a[0], "sourceHeight": dims_a[1],
+        "thumbWidth": sa.get("thumbWidth"), "thumbHeight": sa.get("thumbHeight"),
+        "gridWidth": a.shape[1], "gridHeight": a.shape[0],
+    }
+    result["imageB"] = {
+        "id": sb.get("id"), "name": sb.get("name") or path_b.name,
+        "sourceWidth": dims_b[0], "sourceHeight": dims_b[1],
+        "thumbWidth": sb.get("thumbWidth"), "thumbHeight": sb.get("thumbHeight"),
+        "gridWidth": b.shape[1], "gridHeight": b.shape[0],
+    }
+    # 区域坐标已经是 ROI 局部坐标（analyze_arrays 不再加全图偏移），origin 只
+    # 记录这块 ROI 在源图里的位置；sourceRoi 必须是实际读取范围。
+    result["analysisGrid"].update({"mode": "source", "origin": [ax0, ay0],
+                                    "sourceRoi": [ax0, ay0, aw, ah],
+                                    "imageASource": [dims_a[0], dims_a[1]],
+                                    "imageBSource": [dims_b[0], dims_b[1]]})
+    result["operation"] = "difference-localization"
+    return result
 
 
 def _fake_dims(sid: str) -> tuple[int, int]:
@@ -1239,6 +1364,39 @@ def create_app() -> FastAPI:
     def health():
         return {"ok": True, "source": "disk" if root else "fake"}
 
+    @app.post("/api/diff/analyze")
+    async def diff_analyze(request: Request):
+        """智能差异定位（只读）：两张影像 → 连续差异图、二值掩码、候选区域。
+
+        两种输入：
+
+        * 默认 —— 前端把预览灰度采样到共同分析网格后以 PNG 传入（快速模式）；
+        * ``precision='source-roi'`` —— 两端都给 ``sceneId``，服务端按原始分辨率
+          读取候选区域的 TIFF 窗口重新计算（可选精细模式）。
+
+        本端点不写盘、不触发 SR，结果可以给 Viewer / Batch Goal / Agent 共用。
+        """
+        body = await _json_body(request)
+
+        def _run():
+            if str(body.get("precision") or "") == "source-roi":
+                return _diff_source_roi(body, root)
+            return image_diff.analyze_payload(
+                body, load_scene=lambda sid: _diff_load_scene(sid, root))
+
+        try:
+            # SSIM、形态学、PNG 编码与原始 TIFF 窗口读取都是同步 CPU/磁盘工作，
+            # 放到工作线程，避免阻塞事件循环与同一 worker 上的 SSE 请求。
+            return await run_in_threadpool(_run)
+        except image_diff.DiffError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except PathDeniedError as e:
+            raise HTTPException(status_code=404,
+                                detail=f"场景不可访问：{e}") from e
+        except PreviewError as e:
+            raise HTTPException(status_code=422,
+                                detail=f"预览生成失败：{e}") from e
+
     from backend.services.scene_library import install as install_scene_library
     install_scene_library(app, root, _manual_row, _cached_dims)
 
@@ -2019,7 +2177,9 @@ def create_app() -> FastAPI:
 
     @app.get("/api/scenes/{scene_id}/siblings")
     def scene_siblings(scene_id: str, request: Request,
-                       suffix: str | None = Query(default=None)):
+                       suffix: str | None = Query(default=None),
+                       tour: bool = Query(default=False),
+                       known: list[str] = Query(default=[])):
         """这个场景的三类图：输入影像 / 本轮超分产物 / NOSR。
 
         **纯只读**：固定候选名的 `is_file()` + 尺寸探测 + 读 JPEG 注释里的档位。
@@ -2154,7 +2314,72 @@ def create_app() -> FastAPI:
             items.append(item("nosr",
                               next((c for c in nosr_cands if c.is_file()),
                                    nosr_cands[0])))
+        # Bounded production names, never directory discovery. Keep the legacy
+        # three items intact; tours expose all existing candidates for selection.
+        from backend.services.tour_identity import image_identity
+        tour_items = []
+        tour_diagnostics = []
+        body = scene_search.body_path(scene_dir) if tour else None
+        if tour and (body is not None or inp is not None):
+            body = body or inp
+            fixed = [("pan", body)]
+            if inp is not None:
+                fixed.append(("pan", inp))
+            fixed += [("nosr", p) for p in scene_search.nosr_candidates(scene_dir, inp or body, product)]
+            stems = dict.fromkeys([body.stem, scene_dir.name, product.stem if product else body.stem])
+            fixed += [("ori", scene_dir / (stem + "_ori" + ext))
+                      for stem in stems for ext in (".tif", ".tiff")]
+            fixed += [("old", scene_dir / (stem + tail + ext))
+                      for stem in dict.fromkeys([body.stem, scene_dir.name])
+                      for tail in ("_old", "_old_latest", "_old_2")
+                      for ext in (".tif", ".tiff")]
+            # Read only explicitly opened Scene IDs, never enumerate a directory.
+            # Classification reuses the production stage contract, not card labels.
+            if len(known) > 32:
+                raise HTTPException(400, detail="巡览显式候选最多 32 张")
+            for sid in dict.fromkeys([scene_id, *known]):
+                try:
+                    p = paths.scene_id_to_abs(sid, root)
+                except PathDeniedError:
+                    tour_diagnostics.append("已忽略不可访问的已打开影像")
+                    continue
+                if p.parent != scene_dir:
+                    tour_diagnostics.append("已忽略不属于当前生产场景的已打开影像")
+                    continue
+                stem = scene_search.strip_preview_tail(p.stem)
+                # ori is a named backup, old remains a separate role.
+                if stem in [base + "_ori" for base in stems]:
+                    role = "ori"
+                else:
+                    classified = scene_search.stage_of_jpg(scene_dir, inp or body, stem)
+                    if classified is None:
+                        tour_diagnostics.append(f"{p.name}：生产环节身份未确认")
+                        continue
+                    kind, stage_suffix, raster = classified
+                    role = ("pan" if kind == "input" else "nosr" if kind == "nosr"
+                            else "old" if stage_suffix.lower() in ("old", "old_latest", "old_2") else None)
+                    if role is None:
+                        tour_diagnostics.append(f"{p.name}：不属于 PAN/NOSR/ori/old 配对角色")
+                        continue
+                    if p.suffix.lower() in (".jpg", ".jpeg"):
+                        p = raster
+                if p.suffix.lower() not in (".tif", ".tiff"):
+                    continue
+                fixed.append((role, p))
+            whitelist([p for _, p in fixed], "巡览配对")
+            seen = set()
+            for role, p in fixed:
+                if p in seen or not p.is_file():
+                    continue
+                seen.add(p)
+                entry = item("nosr" if role == "nosr" else "input" if role == "pan" else "product", p)
+                entry["tourIdentity"] = image_identity(p, scene_dir.as_posix(), role)
+                tour_items.append(entry)
+        elif tour:
+            tour_diagnostics.append("场景元数据未能确定生产本体，请核对 Scene 关联")
         return {
+            "tourItems": tour_items,
+            "tourDiagnostics": tour_diagnostics,
             "sceneId": scene_id,
             "lqPath": scene_dir.as_posix(),
             "suffix": suffix, "suffixFrom": suffix_from,

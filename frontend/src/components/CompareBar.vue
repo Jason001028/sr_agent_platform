@@ -32,13 +32,14 @@ const isSplit = computed(() => store.compareMode === 'split');
 /** 场景芯片：绑**活动侧**的 rec。活动侧是本地文件（没有 sceneId）→ 整排禁用。 */
 const sceneId = computed(() => store.activeSceneId());
 
-const CHIPS: { kind: 'input' | 'product' | 'nosr'; label: string }[] = [
+const CHIPS: { kind: 'input' | 'product' | 'nosr' | 'old'; label: string }[] = [
   { kind: 'input', label: '输入影像' },
   { kind: 'product', label: '本轮超分产物' },
   { kind: 'nosr', label: 'NOSR' },
+  { kind: 'old', label: 'old' },
 ];
 
-function pick(kind: 'input' | 'product' | 'nosr') {
+function pick(kind: 'input' | 'product' | 'nosr' | 'old') {
   void store.openSceneSibling(kind);
 }
 </script>

@@ -11,9 +11,15 @@
  * window keydown（Esc/Enter）、window dragover/drop（文件拖入；.txt 走待修复清单）。
  */
 import MiniNavigator from './MiniNavigator.vue';
+import ViewerBackdrop from './ViewerBackdrop.vue';
+import ViewerHistoryNavigation from './ViewerHistoryNavigation.vue';
+import { useAutoTourStore } from '../stores/autoTour';
+const tour=useAutoTourStore();
 import AgentAnnotationOverlay from './AgentAnnotationOverlay.vue';
+import DiffOverlay from './DiffOverlay.vue';
 import { ref, onMounted, onBeforeUnmount, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
+import { useDiffStore } from '../stores/diff';
 import type { Pane } from '../stores/viewer';
 import { useQcListStore } from '../stores/qclist';
 import { mouseToThumb, thumbToScreen, thumbToOrig, paneAtX } from '../lib/viewMath';
@@ -21,6 +27,7 @@ import { dropSideAt } from '../lib/compare';
 import type { Pt } from '../lib/maskgen';
 
 const store = useViewerStore();
+const diff = useDiffStore();
 const qc = useQcListStore();
 const stageRef = ref<HTMLDivElement | null>(null);
 const viewCanvasRef = ref<HTMLCanvasElement | null>(null);
@@ -206,6 +213,7 @@ function render() {
       ctx.restore();
     }
   }
+  tour.presented();
   renderDraw();
   // 像素定位红叉（约 7 秒，随缩放/平移保持在目标像素上）
   const m = store.marker;
@@ -260,6 +268,34 @@ function drawSelectedOutline(pts: Pt[]) {
   ctx.globalAlpha = 1;
 }
 
+/** 差异定位的显示层：热力图 / 羽化掩码，按每格自己的视图贴到缩略图上。
+ *  只贴显示图，不碰影像像素；分屏时 A/B 两格各自换算覆盖范围。 */
+function drawDiffLayers(ctx: CanvasRenderingContext2D, ps: Pane[]) {
+  if (!diff.result || (!diff.showHeat && !diff.showMask)) return;
+  for (const p of ps) {
+    const layer = diff.layerFor(p.rec);
+    if (!layer) continue;
+    const [cx, cy, cw, ch] = layer.coverage;
+    const x = p.rect.x + p.view.ox + cx * p.view.scale;
+    const y = p.rect.y + p.view.oy + cy * p.view.scale;
+    const w = cw * p.view.scale;
+    const h = ch * p.view.scale;
+    if (!(w > 0 && h > 0)) continue;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(p.rect.x, p.rect.y, p.rect.w, p.rect.h);
+    ctx.clip();
+    ctx.imageSmoothingEnabled = p.view.scale < 4;
+    if (diff.showHeat) ctx.drawImage(layer.heat, x, y, w, h);
+    if (diff.showMask) {
+      ctx.globalAlpha = 0.55;
+      ctx.drawImage(layer.mask, x, y, w, h);
+      ctx.globalAlpha = 1;
+    }
+    ctx.restore();
+  }
+}
+
 function renderDraw() {
   const dc = drawCanvasRef.value;
   if (!dc) return;
@@ -268,6 +304,7 @@ function renderDraw() {
   // 交替对比翻到第二张时，叠加层（ROI / 云叠 / 选中高亮）属于活动图（参考图），
   // 不能画在另一张的像素上；翻回参考图时自然恢复。绘制模式进入时已强制切回参考图。
   if (store.flickerShowingAlt) return;
+  drawDiffLayers(ctx, store.panes);
   const active = store.activeRec;
   if (!active || !active.thumb) return;
   // 掩码/ROI/云叠/选中高亮**只画活动侧**：它们本来就读 store.getRois()
@@ -585,6 +622,7 @@ onBeforeUnmount(() => {
     @contextmenu="onContextMenu"
     @mouseleave="store.setCursor(null)"
   >
+    <ViewerBackdrop />
     <canvas
       ref="viewCanvasRef"
       class="view-canvas tif-canvas"
@@ -594,7 +632,9 @@ onBeforeUnmount(() => {
     ></canvas>
     <canvas ref="drawCanvasRef" class="draw-canvas"></canvas>
     <AgentAnnotationOverlay @wheel="onWheel" />
+    <DiffOverlay @wheel="onWheel" />
     <MiniNavigator v-if="store.panes.some(p => p.rec?.thumb)" />
+    <ViewerHistoryNavigation />
     <div class="question-tools" @mousedown.stop @dblclick.stop>
       <button v-if="store.roiSelIndex()>=0 && !store.pendingRect" @click="askSelected">询问 Agent · 选中 ROI</button>
     </div>
@@ -609,11 +649,14 @@ onBeforeUnmount(() => {
   position: relative;
   flex: 1;
   overflow: hidden;
+  isolation: isolate;
   /* 画布井位：浅中性面（影像区不铺莫兰迪绿，避免干扰调色判读） */
   background: #e9edeb;
 }
 
 .view-canvas {
+  position:relative;
+  z-index:1;
   display: block;
   width: 100%;
   height: 100%;
@@ -627,6 +670,7 @@ onBeforeUnmount(() => {
 }
 
 .draw-canvas {
+  z-index:2;
   position: absolute;
   left: 0;
   top: 0;

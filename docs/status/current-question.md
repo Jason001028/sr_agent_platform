@@ -7,6 +7,10 @@
 > 真机勾选项见 [real-machine-acceptance.md](real-machine-acceptance.md)（验收单）。
 > 日期：2026-09-24 · 状态：已定。
 
+Viewer 四种画布背景、设置持久化、分屏层级和合成影像验收见 [viewer_background.md](viewer_background.md)。默认工程网格；背景切换不重绘影像或重置 Camera。
+
+Viewer 底部隐藏式「上一景 / 下一景」视野历史导航、手势合并、缓存恢复和巡览互斥见 [view_history_navigation.md](view_history_navigation.md)。
+
 配置文件路径速查见 [config_locations.md](config_locations.md)，包含本地仓库、node81-135 已确认的 systemd drop-in、llama.cpp、nginx、Python 环境和 SR 参数位置。
 
 “提交 SR”的 PAN/NOSR 输入、掩码映射、PAN_old_latest 备份（旧名 PAN_old_2 只读兼容）与 PAN 发布契约见
@@ -602,4 +606,4 @@ P1 spatial annotations: [implementation and pending acceptance](spatial-annotati
 - `backend/services/scene_search.py` 新增 `previous_step` / `body_path`（判据与 `util.check_sr_previous_step` 一致）；`/siblings` 的 old 候选、修复后产物、提交提示与作业审计日志都按本体命名，不再一律写 PAN。
 - 测试：`test_pan_repair.py` 新增 SC 用例；`test_scene_siblings.py` 覆盖 `previous_step` / `body_path` 与 SC 备份卡片；`test_api_platform.py` 覆盖 SC 提交提示。
 
-部署：`repair_sr.py`、`verify_sr_run.py` 随 backend 包进 `<APP>/SR_code/variants/`；`verify_sr_run.py` 另外同步到 `$BUNDLE`（`deploy/apply_bundle_verifier.sh` 的期望 hash 已更新）。新 hash：repair `9b93c427…`、verify `e3eb2fc5…`。
+部署：`repair_sr.py`、`verify_sr_run.py` 随 backend 包进 `<APP>/SR_code/variants/`；`verify_sr_run.py` 另外同步到 `$BUNDLE`（`deploy/apply_bundle_verifier.sh` 的期望 hash 已更新）。新 hash：repair `f301d234…`、verify `e3eb2fc5…`。

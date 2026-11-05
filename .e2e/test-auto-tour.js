@@ -32,7 +32,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   }
   return r.respond({status:200,contentType:r.url().endsWith('/events')?'text/event-stream':'application/json',body:r.url().endsWith('/events') ? (viewerCompletion && tasks.length ? 'data: '+JSON.stringify({type:'job_update',task_id:42,job_id:77,state:'COMPLETED'})+'\n\n' : '') : r.url().endsWith('/queue')?JSON.stringify({tasks}):'{}'});
  });
- const out = path.resolve(__dirname,'artifacts/submission-feedback'); fs.mkdirSync(out,{recursive:true});
+ const out = path.resolve(__dirname,process.env.SR_E2E_ARTIFACT_DIR || 'artifacts/submission-feedback'); fs.mkdirSync(out,{recursive:true});
 
  
  await page.setViewport({width:1600,height:900});await page.goto(base+'/viewer');await page.waitForFunction(()=>!!window.__viewer);
@@ -46,6 +46,26 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
  const view=()=>page.evaluate(()=>window.__viewer.cmpPanes()[0].view);
  const initial=await view();
  await page.click('.tour-button');await sleep(200);assert.deepEqual(await view(),initial);
+ assert.equal(await page.$eval('[data-route="rows"]',e=>e.getAttribute('aria-checked')),'true');
+ for(const route of ['columns','inward','rows']){
+  const beforeSelection=await view();
+  await page.click(`[data-route="${route}"]`);assert.deepEqual(await view(),beforeSelection);
+  await page.click('.tour-start');await page.waitForSelector('.tour-capsule');
+  const state=await page.evaluate(()=>window.__viewer.autoTour());assert.equal(state.route,route);
+  assert(state.routeSteps.length>1);
+  if(route==='columns')assert.equal(state.routeSteps[0].x,state.routeSteps[1].x);
+  else assert.equal(state.routeSteps[0].y,state.routeSteps[1].y);
+  await page.keyboard.press('Escape');await sleep(230);await page.click('.tour-button');
+ }
+ await page.focus('[data-route="rows"]');await page.keyboard.press('ArrowRight');
+ assert.equal(await page.$eval('[data-route="columns"]',e=>e.getAttribute('aria-checked')),'true');
+ await page.keyboard.press('Home');
+ for(const width of [1280,1366,1600]){
+  await page.setViewport({width,height:width===1600?900:720});await sleep(100);
+  const panel=await page.$eval('.tour-popover',e=>{const b=e.getBoundingClientRect();return {width:b.width,right:b.right,bottom:b.bottom,height:b.height,overflow:e.scrollWidth>e.clientWidth};});
+  assert.equal(panel.width,328);assert(panel.right<=width&&panel.bottom<=(width===1600?900:720));assert(!panel.overflow);
+  await page.screenshot({path:path.join(out,`tour-panel-${width}.png`)});
+ }
  await page.click('.tour-start');await page.waitForSelector('.tour-capsule');await sleep(1700);
  assert.notDeepEqual(await view(),initial);
  await page.screenshot({path:path.join(out,'auto-tour.png')});

@@ -19,6 +19,17 @@ import xml.etree.ElementTree as ET
 
 MODE = 'pan-nosr-v1'
 
+#: Inference card, fixed. Slurm injects an integer CUDA_VISIBLE_DEVICES without
+#: binding the device, so every job lands on card 0, where the LLM service
+#: lives; the SR model then gets the leftovers and a tile's forward OOMs.
+#: Card 1 is kept free of the LLM service.
+INFERENCE_GPU = 1
+
+#: Model-side markers for a swallowed per-tile failure. The bundle's
+#: `test()` catches RuntimeError, leaves `fake_H` from the previous tile and
+#: keeps running, so an OOM would otherwise publish a stale block as success.
+INFERENCE_ERROR_MARKERS = ('out of memory', 'runtimeerror', 'exception is')
+
 
 def signature(path):
     st = os.stat(str(path))
@@ -160,7 +171,19 @@ def compose(gdal, pan, nosr, mask, model, destination, work):
         raise ValueError('Candidate byte size differs from current PAN; nothing published')
 
 
-def run(config, sr_script, gdal=None, execute=None):
+def inference_errors(private):
+    """Lines in the private SRLOG that mark a swallowed per-tile failure."""
+    found = []
+    for log in sorted(Path(private).rglob('*_SRLOG.txt')):
+        text = log.read_text(errors='replace')
+        for line in text.splitlines():
+            lowered = line.lower()
+            if any(marker in lowered for marker in INFERENCE_ERROR_MARKERS):
+                found.append(log.name + ': ' + line.strip()[:200])
+    return found
+
+
+def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
     if gdal is None:
         from osgeo import gdal
     execute = execute or subprocess.check_call
@@ -250,6 +273,12 @@ def run(config, sr_script, gdal=None, execute=None):
         tree.write(str(stage_config), encoding='utf-8', xml_declaration=True)
         execute([sys.executable, str(Path(__file__).resolve()), '--infer',
                  '--sr-script', str(Path(sr_script).resolve()), '-f', str(stage_config)])
+        # The model wrapper swallows per-tile RuntimeError and keeps the previous
+        # tile's result, so an out-of-memory run still exits 0 with a full output.
+        # Refuse it here: a stale block must never be published as a repair.
+        errors = inference_errors(private)
+        if errors:
+            raise ValueError('Inference reported errors: ' + '; '.join(errors))
         # Reuse the ordinary verifier before trusting a silent exit(0).
         from verify_sr_run import check_contract
         verdict = check_contract(str(stage_config), 0)
@@ -280,7 +309,9 @@ def run(config, sr_script, gdal=None, execute=None):
         os.replace(str(temporary), str(target))
         # The success log is written only after publication and receipt persistence.
         log = debug / (body_stem + '_SRLOG.txt')
-        log.write_text('Repair from NOSR; mask SR, outside mask cubic.\nRun finished.\n', encoding='utf-8')
+        note = ('Repair GPU: ' + gpu_note + '\n') if gpu_note else ''
+        log.write_text('Repair from NOSR; mask SR, outside mask cubic.\n' + note
+                       + 'Run finished.\n', encoding='utf-8')
         return receipt
     finally:
         # Retain staging files for diagnosis, including uncommitted candidates.
@@ -311,7 +342,13 @@ def main():
             sys.argv = [str(script), '-f', args.config]
             runpy.run_path(str(script), run_name='__main__')
             return 0
-        run(args.config, args.sr_script)
+        # Pin the card in the parent, before any CUDA import; the --infer child
+        # inherits CUDA_VISIBLE_DEVICES. This deliberately overrides the integer
+        # Slurm injects, which points every job at the LLM service's card.
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(INFERENCE_GPU)
+        gpu_note = 'card %d (fixed)' % INFERENCE_GPU
+        print('Repair inference GPU: ' + gpu_note, flush=True)
+        run(args.config, args.sr_script, gpu_note=gpu_note)
         return 0
     except Exception as exc:
         print('PAN repair failed: ' + str(exc), file=sys.stderr)

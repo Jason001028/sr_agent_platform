@@ -25,6 +25,7 @@ import MaskGen from '../lib/maskgen.js';
 import type { SceneOpenMeta } from '../lib/scene.js';
 import type { StageKind } from '../lib/stage.js';
 import { useViewerStore } from '../stores/viewer.js';
+import { useAutoTourStore } from '../stores/autoTour.js';
 import type { ViewerRec } from '../stores/viewer.js';
 import { useQcListStore } from '../stores/qclist.js';
 import { useScenesStore } from '../stores/scenes.js';
@@ -200,6 +201,7 @@ export interface ViewerHook {
   cmpMode: () => import('../lib/compare.js').CompareMode;
   /** 切模式（等效对比条三选一）。 */
   setCmpMode: (m: import('../lib/compare.js').CompareMode) => void;
+  autoTour: () => {status:string;route:string;routeSteps:{x:number;y:number}[];progress:number;index:number;coverageA:number;coverageB:number;intersection:number};
   /** 对比条是否展开。 */
   cmpStripOpen: () => boolean;
   setCmpStripOpen: (open: boolean) => void;
@@ -253,6 +255,7 @@ export interface ViewerHook {
   /** 右上角设置浮层是否开着。 */
   settingsOpen: () => boolean;
   setSettingsOpen: (open: boolean) => void;
+  setCanvasBackground: (value: import('../lib/viewerBackground').ViewerBackground) => void;
   /** 对比模式后台预取开关（默认关；持久化在 localStorage['sr.viewer.cmpPrefetch']）。 */
   cmpPrefetchOn: () => boolean;
   setCmpPrefetch: (on: boolean) => void;
@@ -422,6 +425,10 @@ export function mountE2EHooks(): ViewerHook {
     undo: () => useViewerStore().undo(),
     cmpMode: () => useViewerStore().compareMode,
     setCmpMode: (m) => useViewerStore().setCompareMode(m),
+    autoTour: () => {
+      const t=useAutoTourStore(),c=t.coverage;
+      return {status:t.status,route:t.route,routeSteps:t.plan?.points.slice(0,6)??[],progress:t.progress,index:t.index,coverageA:c.a.reduce((a,b)=>a+b,0),coverageB:c.b.reduce((a,b)=>a+b,0),intersection:c.a.reduce((a,_,i)=>a+Number(c.viewed(i,true)),0)};
+    },
     cmpStripOpen: () => useViewerStore().cmpStripOpen,
     setCmpStripOpen: (open) => useViewerStore().setCmpStripOpen(open),
     cmpPanes: () => useViewerStore().panes.map((p) => ({
@@ -464,6 +471,7 @@ export function mountE2EHooks(): ViewerHook {
     setCtxRail: (open) => useViewerStore().setCtxRailOpen(open),
     settingsOpen: () => useViewerStore().settingsOpen,
     setSettingsOpen: (open) => useViewerStore().setSettingsOpen(open),
+    setCanvasBackground: (value) => useViewerStore().setCanvasBackground(value),
     cmpPrefetchOn: () => useViewerStore().cmpPrefetchOn,
     setCmpPrefetch: (on) => useViewerStore().setCmpPrefetch(on),
     previewCacheStats: () => useViewerStore().previewCacheStats(),

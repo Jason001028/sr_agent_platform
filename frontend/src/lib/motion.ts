@@ -2,6 +2,7 @@
  *  角色与选型见 docs/conventions/motion-conventions.md。 */
 export const VIEW_FIT_MS = 160;
 export const VIEW_RESET_MS = 140;
+export const VIEW_HISTORY_MS = 250;
 
 /** 批量入列的整段错峰窗口；单卡淡入 `CARD_ENTER_MS` 已含在内。
  *  `CARD_ENTER_MS` 与 style.css 的 `--motion-fade` 同值 —— 两边只许一起改，

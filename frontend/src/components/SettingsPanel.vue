@@ -19,6 +19,7 @@ import {
 } from '../lib/developerMode';
 import { isStreamingEnabled, setStreamingEnabled } from '../lib/streaming';
 import { SPOTLIGHT_MODE_OPTIONS } from '../lib/spotlight.js';
+import { VIEWER_BACKGROUNDS } from '../lib/viewerBackground';
 
 const store = useViewerStore();
 const qc = useQcListStore();
@@ -90,6 +91,20 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
       </div>
 
       <div class="set-title">设置</div>
+
+      <div class="set-row">
+        <span class="set-line">画布背景</span>
+        <div class="background-options" role="group" aria-label="画布背景">
+          <button v-for="option in VIEWER_BACKGROUNDS" :key="option.value" type="button"
+            class="background-option" :class="{on:store.canvasBackground===option.value}"
+            :aria-pressed="store.canvasBackground===option.value" :data-background-option="option.value"
+            @click="store.setCanvasBackground(option.value)">
+            <span class="background-swatch" :class="'swatch-'+option.value" aria-hidden="true" />
+            <span>{{ option.value==='grid'?'工程网格':option.label }}<small v-if="option.value==='grid'">默认</small></span>
+          </button>
+        </div>
+        <div class="set-note">仅改变影像周围的画布环境，选择在本机保存。</div>
+      </div>
 
       <div class="set-row">
         <button type="button" class="set-sw" :class="{ on: store.autoSubmission }"
@@ -242,6 +257,8 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
   flex-direction: column;
   gap: 12px;
   width: 320px;
+  max-height:calc(100dvh - var(--topbar-h) - 80px);
+  overflow-y:auto;
   padding: 14px 16px;
   background: var(--tb-surface);
   border: 1px solid var(--tb-border);
@@ -251,6 +268,15 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
   color: var(--tb-fg);
 }
 .set-title { color: var(--tb-fg); font-size: 14px; font-weight: 600; }
+.background-options{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.background-option{display:flex;align-items:center;gap:7px;min-width:0;padding:6px;border:1px solid var(--tb-border);border-radius:7px;background:var(--tb-bg);color:var(--tb-muted);font:inherit;cursor:pointer;text-align:left}
+.background-option.on{border-color:var(--tb-active-border);background:var(--tb-active-bg);color:var(--tb-active-fg)}
+.background-option>span:last-child{white-space:nowrap;font-size:11px}.background-option small{margin-left:3px;font-size:8px;opacity:.7}
+.background-option:focus-visible{outline:2px solid var(--tb-focus);outline-offset:2px}
+.background-swatch{width:27px;height:25px;flex:none;border-radius:4px;border:1px solid #71857c26;background-color:#e7e9ea}
+.swatch-grid{background-image:linear-gradient(#425b541a,#425b5400 1px),linear-gradient(90deg,#425b541a,#425b5400 1px);background-size:9px 9px}
+.swatch-dots{background-image:radial-gradient(circle,#425b5429 .5px,transparent .75px);background-size:8px 8px}
+.swatch-studio{background:radial-gradient(ellipse,#eff0f0,#dce0e0)}.swatch-graphite{background:#303738}
 
 .set-row { display: flex; flex-direction: column; gap: 6px; }
 .set-row-cache {
