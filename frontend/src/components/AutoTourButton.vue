@@ -4,6 +4,7 @@ import { useAutoTourStore } from '../stores/autoTour';
 import AppIcon from './AppIcon.vue';
 import TourRoutePicker from './TourRoutePicker.vue';
 const tour=useAutoTourStore(),open=ref(false);
+const INTERVALS=[200,300,400,500,600,700,800,900,1000,1100,1200,1300,1400,1500,1600];
 import { useViewerStore } from '../stores/viewer';
 const viewer=useViewerStore();
 const locked=computed(()=>tour.status!=='idle');
@@ -42,7 +43,7 @@ onBeforeUnmount(()=>{tour.cancelPreparation();document.removeEventListener('keyd
     <TourRoutePicker v-model="tour.route" :disabled="locked" />
     <div class="tour-grid tour-navigation">
      <label class="tour-field"><span>巡览范围</span><select v-model="tour.range" aria-label="巡览范围" :disabled="locked"><option value="all">整张影像</option><option value="visible">当前可见区域</option></select></label>
-     <label class="tour-field"><span>行进速度</span><select v-model="tour.speed" aria-label="巡览速度" :disabled="locked"><option value="slow">{{ tour.compare?'20 px/s · 慢速':'慢速' }}</option><option value="normal">{{ tour.compare?'35 px/s · 标准':'标准' }}</option><option value="fast">{{ tour.compare?'50 px/s · 快速':'快速' }}</option></select></label>
+     <label class="tour-field"><span>行进速度</span><select v-model="tour.speed" aria-label="巡览速度" :disabled="locked"><option value="slow">{{ tour.compare?'40 px/s · 慢速':'慢速' }}</option><option value="normal">{{ tour.compare?'60 px/s · 标准':'标准' }}</option><option value="fast">{{ tour.compare?'80 px/s · 快速':'快速' }}</option><option value="ultra">{{ tour.compare?'120 px/s · 极速':'极速' }}</option></select></label>
     </div>
     <section class="tour-compare-section" aria-label="交替设置">
      <label class="tour-toggle"><span><span class="toggle-title">交替对比</span><span class="toggle-caption">双图共用同一条路线</span></span><input v-model="tour.compare" class="tour-switch" aria-label="交替对比" type="checkbox" role="switch" :disabled="locked" /></label>
@@ -51,7 +52,7 @@ onBeforeUnmount(()=>{tour.cancelPreparation();document.removeEventListener('keyd
       <div class="pair-actions"><button :disabled="tour.pairLoading||locked" @click="tour.discoverPairs">刷新配对</button><button :disabled="!tour.selectedPair||!!tour.selectedPair.refusal||tour.pairLoading||locked" @click="tour.preparePair">{{ tour.pairLoading?'正在载入…':'载入配对' }}</button><button :disabled="!!tour.pairReason||tour.status==='playing'" @click="viewer.setTourLayer(!viewer.flickerShowingAlt)">手动切换</button></div>
       <div class="tour-grid">
        <label class="tour-field"><span>交替模式</span><select v-model="tour.mode" aria-label="交替模式" :disabled="locked"><option value="stop">驻停交替</option><option value="move">移动交替</option></select></label>
-       <label class="tour-field"><span>切换间隔</span><select v-model.number="tour.interval" aria-label="切换间隔" :disabled="locked"><option :value="600">0.6 秒</option><option :value="1000">1.0 秒</option><option :value="1500">1.5 秒</option></select></label>
+       <label class="tour-field"><span>切换间隔</span><select v-model.number="tour.interval" aria-label="切换间隔" :disabled="locked"><option v-for="ms in INTERVALS" :key="ms" :value="ms">{{ (ms/1000).toFixed(1) }} 秒</option></select></label>
       </div>
       <p v-if="pairNotice" class="tour-notice" role="status">{{ pairNotice }}</p>
      </div>

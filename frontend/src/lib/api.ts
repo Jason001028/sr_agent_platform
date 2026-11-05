@@ -1586,6 +1586,47 @@ export async function apiWriteQcList(
 /** 新会话随手一张（ChatPage 顶部用）。 */
 export const freshApi = () => loadSrConfig();
 
+export interface ImageRefreshResult {
+  task_id: number;
+  aliases?: string[];
+  state: 'preparing' | 'ready' | 'unavailable';
+  note: string;
+  version?: string;
+  row?: SceneRow;
+  group?: string;
+  kind?: 'input' | 'product';
+  source?: string;
+  finished_at?: number;
+}
+export async function apiImageRefresh(taskId: number): Promise<ImageRefreshResult> {
+  const r = await http(apiUrl(loadSrConfig(), `/api/queue/${taskId}/image-refresh`));
+  return r.json();
+}
+/** Only reads already generated JPEGs. Shares the versioned Viewer Blob LRU. */
+export async function fetchImageRefreshPreview(result: ImageRefreshResult, signal?: AbortSignal, maxBytes = 128 * 1024 * 1024): Promise<Blob> {
+  const row = result.row;
+  if (!row?.srcRev || !row.previewDiv || !result.version) throw new Error('成果身份或预览档位缺失');
+  const key = previewCacheKey(row, row.previewDiv);
+  const hit = previewBlobs.get(key);
+  if (hit) return hit;
+  const r = await http(apiUrl(loadSrConfig(), `/api/queue/${result.task_id}/image-refresh/preview?version=${encodeURIComponent(result.version)}`), { signal });
+  if (Number(r.headers.get('Content-Length')) > maxBytes) { await r.body?.cancel(); throw new Error('预览超过后台预热容量，点击时按需加载'); }
+  const reader = r.body?.getReader();
+  if (!reader) throw new Error('预览响应体为空');
+  const chunks: Uint8Array[] = []; let bytes = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read(); if (chunk.done) break;
+      bytes += chunk.value.byteLength;
+      if (bytes > maxBytes) { await reader.cancel(); throw new Error('预览超过缓存读取上限'); }
+      chunks.push(chunk.value);
+    }
+  } finally { reader.releaseLock(); }
+  const blob = new Blob(chunks as BlobPart[], { type: 'image/jpeg' });
+  if (!(await blobMatchesPreview(blob, row.previewDiv, row.srcRev))) throw new Error('预览源版本或档位已变化，请重试');
+  return cacheBlob(key, blob);
+}
+
 
 /** 校验插件使用的只读查看器上下文契约。 */
 export async function apiValidateViewerContext(

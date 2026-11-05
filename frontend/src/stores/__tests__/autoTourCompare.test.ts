@@ -33,7 +33,7 @@ describe('shared tour and comparison scheduler',()=>{
   t.pause();const paused={...mocks.viewer.flickerView},count=mocks.viewer.setTourLayer.mock.calls.length;tick(3000);expect(mocks.viewer.flickerView).toEqual(paused);expect(mocks.viewer.setTourLayer.mock.calls.length).toBe(count);
   t.resume();tick(500);expect(mocks.viewer.flickerView).not.toEqual(paused);t.stop();expect(callback).toBeUndefined();
  });
- it.each([['slow',20],['normal',35],['fast',50]] as const)('uses %s moving speed', (speed,px)=>{
+ it.each([['slow',40],['normal',60],['fast',80],['ultra',120]] as const)('uses %s moving speed', (speed,px)=>{
   const t=useAutoTourStore();t.compare=true;t.mode='move';t.speed=speed;t.start();tick(2500);const x=mocks.viewer.flickerView.ox;tick(1000);expect(Math.abs(mocks.viewer.flickerView.ox-x)).toBeCloseTo(px,5);
  });
  it('records only presented layers, pauses on intent, invalidates on revision change',()=>{

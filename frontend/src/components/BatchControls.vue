@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** 批次控制：暂停/继续/取消 + 只读报告。
  *  控制带 control_revision，冲突由服务端 409 判定；前端不自行推断版本。 */
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useBatchGoalStore } from '../stores/batchGoal.js';
 import { useViewerStore } from '../stores/viewer.js';
 import { apiBatchReport, loadSrConfig } from '../lib/api.js';
@@ -18,6 +18,12 @@ const notice = ref('');
 const confirmingCancel = ref(false);
 const reportBusy = ref(false);
 const reportError = ref('');
+let requestGen = 0;
+watch(() => props.snapshot.goal.goal_id, () => {
+  requestGen += 1;
+  notice.value = ''; confirmingCancel.value = false;
+  reportBusy.value = false; reportError.value = '';
+}, { flush: 'sync' });
 
 const status = computed(() => props.snapshot.goal.status);
 const terminal = computed(() => ['COMPLETED', 'FAILED', 'CANCELLED', 'BLOCKED']
@@ -39,9 +45,12 @@ async function run(action: 'pause' | 'resume' | 'cancel'): Promise<void> {
 async function openReport(): Promise<void> {
   if (reportBusy.value || !batch.goalId) return;
   reportBusy.value = true;
+  const gen = requestGen;
+  const gid = batch.goalId;
   reportError.value = '';
   try {
-    const report = await apiBatchReport(loadSrConfig(), batch.goalId);
+    const report = await apiBatchReport(loadSrConfig(), gid);
+    if (gen !== requestGen || gid !== batch.goalId) return;
     viewer.showModal(
       '批次报告',
       reportSummary(report),
@@ -49,9 +58,10 @@ async function openReport(): Promise<void> {
       prettyJson(report),
     );
   } catch (e) {
+    if (gen !== requestGen || gid !== batch.goalId) return;
     reportError.value = '读取批次报告失败：' + (e instanceof Error ? e.message : String(e));
   } finally {
-    reportBusy.value = false;
+    if (gen === requestGen && gid === batch.goalId) reportBusy.value = false;
   }
 }
 

@@ -1,0 +1,300 @@
+
+/* ==========================================
+   SR Image Refresh · Holographic Foil
+   新超分成果卡片视觉系统
+   ========================================== */
+
+.sr-refresh-card {
+  --holo-cyan: #79c8e6;
+  --holo-blue: #8295f4;
+  --holo-violet: #b2a0eb;
+  --holo-silver: #e2e7f4;
+  --holo-bg: #f5f7ff;
+
+  position: relative;
+  isolation: isolate;
+  border-radius: 10px;
+  transition:
+    background-color var(--motion-refresh-read) var(--ease-standard),
+    box-shadow var(--motion-refresh-read) var(--ease-standard);
+}
+
+/* 1. 未读新成果：浅珍珠色背景 */
+.sr-refresh-card--unread:not(.is-selected):not(.active):not(.picked) {
+  background-color: var(--holo-bg);
+}
+
+/* 2. 全息渐变细描边 */
+.sr-refresh-card--unread::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  border: 1.25px solid transparent;
+  border-radius: inherit;
+  pointer-events: none;
+
+  background: linear-gradient(
+    115deg,
+    var(--holo-cyan) 0%,
+    var(--holo-blue) 28%,
+    var(--holo-violet) 55%,
+    var(--holo-silver) 77%,
+    var(--holo-cyan) 100%
+  );
+
+  /* 仅保留渐变边框，不遮盖卡片内容 */
+  -webkit-mask:
+    linear-gradient(#fff 0 0) padding-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+
+  mask:
+    linear-gradient(#fff 0 0) padding-box,
+    linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+
+  opacity: 0.9;
+  transition: opacity var(--motion-refresh-read) var(--ease-standard);
+}
+
+/* 3. Hover：轻微增强镭射质感 */
+.sr-refresh-card--unread:hover {
+  box-shadow:
+    0 2px 10px rgba(108, 131, 213, 0.10),
+    0 0 0 1px rgba(130, 149, 244, 0.07);
+}
+
+.sr-refresh-card--unread:hover::after {
+  opacity: 1;
+}
+
+/* 4. 左侧星蓝状态条 */
+.sr-refresh-card__rail {
+  position: absolute;
+  left: 0;
+  top: 9px;
+  bottom: 9px;
+  width: 3px;
+  z-index: 2;
+  border-radius: 3px;
+
+  background: linear-gradient(
+    to bottom,
+    var(--holo-cyan),
+    var(--holo-blue) 48%,
+    var(--holo-violet)
+  );
+
+  pointer-events: none;
+}
+
+/* 5. 缩略图：扫光裁剪容器 */
+.sr-refresh-card__thumb {
+  position: relative;
+  overflow: hidden;
+  border-radius: 7px;
+  isolation: isolate;
+}
+
+/* 镭射扫光，默认不可见 */
+.sr-refresh-card__thumb::after {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  pointer-events: none;
+
+  background: linear-gradient(
+    110deg,
+    transparent 0%,
+    transparent 32%,
+    rgba(198, 226, 255, 0.10) 42%,
+    rgba(255, 255, 255, 0.55) 50%,
+    rgba(203, 187, 255, 0.12) 58%,
+    transparent 70%
+  );
+
+  transform: translateX(-220%) skewX(-12deg);
+  opacity: 0;
+}
+
+/* 每 5.8 秒扫光一次，其余时间静止 */
+.sr-refresh-card--unread.sr-refresh-card--sweep
+.sr-refresh-card__thumb::after {
+  animation: sr-holo-sheen var(--motion-refresh-loop) var(--ease-standard) infinite;
+}
+
+@keyframes sr-holo-sheen {
+  0%, 70% {
+    transform: translateX(-220%) skewX(-12deg);
+    opacity: 0;
+  }
+
+  73% {
+    opacity: 0.65;
+  }
+
+  86% {
+    transform: translateX(220%) skewX(-12deg);
+    opacity: 0.65;
+  }
+
+  90%, 100% {
+    transform: translateX(220%) skewX(-12deg);
+    opacity: 0;
+  }
+}
+
+/* 6. 新成果徽标 */
+.sr-refresh-card__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+
+  min-height: 21px;
+  padding: 2px 7px;
+  border: 1px solid rgba(130, 149, 244, 0.18);
+  border-radius: 999px;
+
+  background: #eceeff;
+  color: #626cb4;
+
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+/* 可放入已有 SVG 素材 */
+.sr-refresh-card__badge-icon {
+  display: block;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  transform-origin: center;
+}
+
+/* 低频星点呼吸 */
+.sr-refresh-card--unread.sr-refresh-card--sweep
+.sr-refresh-card__badge-icon {
+  animation: sr-holo-spark var(--motion-refresh-loop) var(--ease-standard) infinite;
+}
+
+@keyframes sr-holo-spark {
+  0%, 65%, 100% {
+    opacity: 0.72;
+
+  }
+
+  77% {
+    opacity: 1;
+
+  }
+
+  90% {
+    opacity: 0.78;
+
+  }
+}
+
+/* 7. 新预览就绪辅助文字 */
+.sr-refresh-card__subtitle {
+  color: #687db7;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+/* 8. 首次抵达：只动画装饰层，不移动卡片 */
+.sr-refresh-card--enter::after {
+  animation: sr-holo-arrive var(--motion-refresh-arrive) var(--ease-enter) both;
+}
+
+.sr-refresh-card--enter .sr-refresh-card__badge {
+  animation: sr-holo-badge-arrive var(--motion-refresh-badge) var(--ease-enter) both;
+}
+
+@keyframes sr-holo-arrive {
+  from { opacity: 0; }
+  to   { opacity: 0.9; }
+}
+
+@keyframes sr-holo-badge-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 9. 关闭离屏/非活跃卡片循环 */
+.sr-refresh-card--paused
+.sr-refresh-card__thumb::after,
+.sr-refresh-card--paused
+.sr-refresh-card__badge-icon {
+  animation-play-state: paused !important;
+}
+
+/* 10. 已读卡片恢复普通显示 */
+.sr-refresh-card--read {
+  background-color: transparent;
+}
+
+.sr-refresh-card--read::after,
+.sr-refresh-card--read .sr-refresh-card__rail,
+.sr-refresh-card--read .sr-refresh-card__badge {
+  display: none;
+}
+
+/* 11. 缺少 CSS Mask 支持时降级为普通细边框 */
+@supports not (mask-composite: exclude) {
+  .sr-refresh-card--unread::after {
+    background: none;
+    border: 1px solid var(--holo-blue);
+    -webkit-mask: none;
+    mask: none;
+  }
+}
+
+/* 12. 尊重减少动态效果设置 */
+@media (prefers-reduced-motion: reduce) {
+  .sr-refresh-card,
+  .sr-refresh-card::after,
+  .sr-refresh-card__badge,
+  .sr-refresh-card__badge-icon,
+  .sr-refresh-card__thumb::after {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .sr-refresh-card__thumb::after {
+    opacity: 0;
+  }
+}
+
+/* Integration: retain card dimensions, active/picked outlines and all existing controls. */
+.sr-refresh-card .sr-refresh-card__badge { position: absolute; top: 3px; right: 57px; z-index: 2; padding: 0 5px; height: 22px; box-sizing: border-box; pointer-events: none; }
+.sr-refresh-card .sr-refresh-card__rail { background: var(--holo-blue); }
+.sr-refresh-card--enter.sr-refresh-card--sweep .sr-refresh-card__thumb::after { animation: sr-holo-first var(--motion-refresh-sheen) var(--ease-standard) both; }
+@keyframes sr-holo-first {
+  0% { transform: translateX(-150%) skewX(-12deg); opacity: 0; }
+  20% { opacity: .35; }
+  85% { transform: translateX(150%) skewX(-12deg); opacity: .35; }
+  100% { transform: translateX(150%) skewX(-12deg); opacity: 0; }
+}
+.sr-refresh-card--leaving::after, .sr-refresh-card--leaving .sr-refresh-card__rail, .sr-refresh-card--leaving .sr-refresh-card__badge { opacity: 0; transition: opacity var(--motion-refresh-read) var(--ease-standard); animation: none; }
+.sr-refresh-card--leaving:not(.active):not(.picked) { background-color: var(--surface); }
+.sr-refresh-card--leaving .sr-refresh-card__thumb::after { animation: none; opacity: 0; }
+.sr-refresh-card__badge-icon { transform: none !important; }
+.refresh-open { border: 0; border-radius: 5px; background: #eceeff; color: #5663a2; font: inherit; font-size: 10px; padding: 2px 5px; cursor: pointer; }
+.refresh-open:disabled { opacity: .6; cursor: wait; }
+.refresh-error { color: var(--err); font-size: 10px; overflow-wrap: anywhere; }
+.refresh-group { display: flex; justify-content: space-between; align-items: center; width: 100%; margin: 0 0 6px; padding: 3px 7px; min-height: 24px; border: 0; border-radius: 7px; background: transparent; font: inherit; font-size: 11px; color: var(--ink-sub); cursor: pointer; }
+.refresh-group-count { border: 1px solid #8295f438; border-radius: 12px; padding: 1px 7px; color: #626cb4; background: #eceeff; font-variant-numeric: tabular-nums; }
+@media (prefers-reduced-motion: reduce) {
+  .sr-refresh-card--enter.sr-refresh-card--sweep .sr-refresh-card__thumb::after { animation: none !important; opacity: 0; }
+}

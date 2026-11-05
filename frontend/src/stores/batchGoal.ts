@@ -80,6 +80,20 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
   /* Same-goal refreshes may also resolve out of order; only the newest one
    * may commit, so an older response cannot roll the snapshot back. */
   let refreshSeq = 0;
+  let discoverySeq = 0;
+
+  async function discover(sessionId: string | null): Promise<void> {
+    const seq = ++discoverySeq;
+    const gen = loadGen;
+    try {
+      const goals = await apiBatchGoals(cfg(), 100);
+      if (seq !== discoverySeq || gen !== loadGen) return;
+      availableGoals.value = goals.filter(g => g.session_id === sessionId || g.goal_id === goalId.value);
+      // An explicit or remembered selection remains authoritative. New work
+      // appears in the existing selector, without stealing the current view.
+      if (!goalId.value && sessionId) await associate(sessionId);
+    } catch { /* Discovery must not replace the active stream's error state. */ }
+  }
 
   function isCurrent(gen: number, gid: string | null): boolean {
     return gen === loadGen && goalId.value === gid;
@@ -113,6 +127,8 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     events.value = [];
     historyPage.value = [];
     historyBefore.value = null;
+    loadingEarlier.value = false;
+    controlBusy.value = false;
     consumedSeq.value = 0;
     hasEarlier.value = false;
     syncError.value = '';
@@ -122,6 +138,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     followNote.value = '';
     syncState.value = 'idle';
     lastFollowKey = '';
+    clearOverlay();
   }
 
   function detach(): void {
@@ -149,6 +166,9 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     });
     if (!isCurrent(gen, gid)) return;
     events.value = mergeBatchEvents([], page.events);
+    // Anchor history before the initially visible ten events. Never derive
+    // this again from a live buffer which may already have been trimmed.
+    historyBefore.value = [...page.events].sort((a, b) => b.seq - a.seq).slice(0, 10).at(-1)?.seq ?? upTo + 1;
     hasEarlier.value = page.has_earlier || page.events.length > 10;
   }
 
@@ -336,11 +356,14 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
   function startStream(): void {
     if (!goalId.value) return;
     stopStream();
+    const gen = loadGen;
+    const gid = goalId.value;
     streamStop = subscribeGoalEvents(
       cfg(), goalId.value, consumedSeq.value,
-      onStreamEvent,
+      (event) => { if (isCurrent(gen, gid)) onStreamEvent(event); },
       () => { /* onClose carries the reason; onError is not fatal by itself. */ },
       () => {
+        if (!isCurrent(gen, gid)) return;
         syncState.value = 'live';
         syncError.value = '';
         retryDelay = 1000;
@@ -348,6 +371,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
         scheduleRefresh(80);
       },
       (err) => {
+        if (!isCurrent(gen, gid)) return;
         if (manualStop) return;
         if (isDone.value) {
           syncState.value = 'done';
@@ -370,9 +394,13 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     retryTimer = setTimeout(() => {
       retryTimer = null;
       if (!goalId.value) return;
+      const gen = loadGen;
+      const gid = goalId.value;
       void (async () => {
         await refreshSnapshot();
+        if (!isCurrent(gen, gid)) return;
         await catchUp();
+        if (!isCurrent(gen, gid)) return;
         startStream();
       })();
     }, delay);
@@ -397,7 +425,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
       if (!isCurrent(gen, gid)) return;
       syncError.value = '加载更早事件失败：' + errorText(e);
     } finally {
-      loadingEarlier.value = false;
+      if (isCurrent(gen, gid)) loadingEarlier.value = false;
     }
   }
 
@@ -445,7 +473,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
       }
       return controlError.value;
     } finally {
-      controlBusy.value = false;
+      if (isCurrent(gen, gid)) controlBusy.value = false;
     }
   }
 
@@ -478,10 +506,11 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
      * before it touches the viewer, so a late arrival cannot steal the view
      * from a user who already selected, zoomed, drew or switched batches. */
     const seq = viewer.userIntentSeq;
+    const gen = loadGen;
     const stillWanted = (): boolean => {
       const v = useViewerStore();
       const latest = snapshot.value?.producer.current;
-      return follow.value && goalId.value === gid
+      return follow.value && isCurrent(gen, gid)
         && v.userIntentSeq === seq && !v.drawMode
         && !!latest && `${latest.item_id}` === key;
     };
@@ -561,7 +590,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     loadingEarlier, hasEarlier, consumedSeq,
     follow, followNote, followError,
     hasGoal, isVisible, isTerminal, isDone, paused,
-    associate, selectGoal, attach, detach,
+    associate, discover, selectGoal, attach, detach,
     refreshSnapshot, catchUp, loadEarlier, control,
     setFollow, navigateToCurrent, openItem, clearOverlay,
     scheduleRefresh,

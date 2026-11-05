@@ -126,7 +126,7 @@ export const useAutoTourStore=defineStore('autoTour',()=>{
   const next=index.value+direction;
   if(next<0||next>=p.points.length){if(loop.value){direction*=-1;hold=.3;schedule();}else{stop();viewer.showToast('巡览结束');}return;}
   const a=p.points[index.value],b=p.points[next],distance=Math.hypot((b.x-a.x)*p.tw/p.width,(b.y-a.y)*p.th/p.height)*p.scale;
-  elapsed+=dt;const f=travelFraction(elapsed,distance,(compare.value?{slow:20,normal:35,fast:50}[speed.value]:TOUR_SPEEDS[speed.value])).fraction;
+  elapsed+=dt;const f=travelFraction(elapsed,distance,(compare.value?{slow:40,normal:60,fast:80,ultra:120}[speed.value]:TOUR_SPEEDS[speed.value])).fraction;
   fraction.value=direction*f;write(a.x+(b.x-a.x)*f,a.y+(b.y-a.y)*f);
   if(f===1){index.value=next;fraction.value=0;elapsed=0;hold=.3;observing=compare.value&&mode.value==='stop';switchCount=0;if(mode.value==='stop')switchElapsed=0;}
   schedule();

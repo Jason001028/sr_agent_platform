@@ -2009,7 +2009,7 @@ export const useViewerStore = defineStore('viewer', () => {
   /** 激活一条 rec。`side` 只在分屏下有意义（拖放位置算出来的那一半）；不给就是
       「落活动侧」（文件列表点击 / 盘阵栏 / 待修复清单「打开」都不给）。 */
   async function activate(id: number, side?: 'A' | 'B',
-                          origin: 'user' | 'follow' = 'user') {
+                          origin: 'user' | 'follow' = 'user', readyDiv?: number) {
     if (origin === 'user') noteUserIntent();
     stopViewAnim();                       // 换图/切侧优先于缓动
     const rec = recs.value.find((r) => r.id === id);
@@ -2021,7 +2021,7 @@ export const useViewerStore = defineStore('viewer', () => {
       await decodeRec(rec, true);
       return;
     }
-    if (already && rec.thumb && (!rec.card || rec.detailDiv === previewDiv.value)) {
+    if (already && rec.thumb && (!rec.card || (rec.detailDiv === previewDiv.value || rec.detailDiv === readyDiv))) {
       // 已经是活动侧这张：只重画。**只有它真的换了格子才重新适配** ——
       // 同一张图留在原格时若也 fit，一次多余的点选就把用户的缩放抹了。
       // 换了格子（两格互换）也走 `fitAfterImageChange`：新格子的视口与图都换了，
@@ -2038,7 +2038,7 @@ export const useViewerStore = defineStore('viewer', () => {
     if (drawMode.value) {
       pendingPts.value = null; pendingRect.value = null; hoverPt.value = null;
     }
-    if (rec.thumb && (!rec.card || rec.detailDiv === previewDiv.value)) {
+    if (rec.thumb && (!rec.card || (rec.detailDiv === previewDiv.value || rec.detailDiv === readyDiv))) {
       repaintOnActivate(rec);
       // 分屏（对比）下换图保住用户的缩放与位置，其余情况看全幅；见 fitAfterImageChange。
       fitAfterImageChange(activeSide.value, rec);
@@ -2308,8 +2308,8 @@ export const useViewerStore = defineStore('viewer', () => {
    *  **不 activate、不弹遮罩、不 warmZoom、不碰 busy** —— 批量几十张，任何一样都会
    *  把界面锁住或把用户的视野抢走。其余字段按「打开过」的口径一次填足（尺寸、字节数、
    *  环节标签都在），列表里看着是一张齐了的卡，只有小图横幅是占位。 */
-  function insertSceneCard(meta: SceneOpenMeta, row: SceneRow, afterId?: number): number {
-    const dup = findRecByMeta(meta);
+  function insertSceneCard(meta: SceneOpenMeta, row: SceneRow, afterId?: number, strictIdentity = false): number {
+    const dup = strictIdentity ? recs.value.find(r => r.sceneId === meta.sceneId) : findRecByMeta(meta);
     if (dup) return dup.id;        // 同一景已在列表里（批量前会清空，这里只是兜底）
     const rec: ViewerRec = {
       id: nextId++,
@@ -2428,7 +2428,7 @@ export const useViewerStore = defineStore('viewer', () => {
 
   const sceneReadyInflight = new Map<string, Promise<void>>();
   function ensureSceneReadyShared(row: SceneRow, div: number): Promise<void> {
-    const key = row.id + '|' + div;
+    const key = row.id + '|' + div + '|' + (row.srcRev ?? '');
     const flying = sceneReadyInflight.get(key);
     if (flying) return flying;
     const tracked = ensureScenePreviewReady(loadSrConfig(), row, div).finally(() => {
@@ -2439,7 +2439,7 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   function fetchSceneJpgShared(row: SceneRow, div: number): Promise<Blob> {
-    const key = row.id + '|' + div;
+    const key = row.id + '|' + div + '|' + (row.srcRev ?? '');
     const flying = sceneJpgInflight.get(key);
     if (flying) return flying;
     const tracked = (async () => {
@@ -2460,7 +2460,7 @@ export const useViewerStore = defineStore('viewer', () => {
     const card = rec.card;
     if (!card) return Promise.resolve();
     const div = previewDiv.value;
-    const key = rec.id + '|' + div;
+    const key = rec.id + '|' + div + '|' + (card.row.srcRev ?? '');
     const flying = cardFetchInflight.get(key);
     if (flying && flying.token === rec.token) return flying.promise;
     const intent = { token: ++rec.token, promise: Promise.resolve() };
@@ -2567,6 +2567,33 @@ export const useViewerStore = defineStore('viewer', () => {
       // scenes.error 才显示得出来；viewer 的错误条挂在 /viewer，写进去等于没报。
       throw e;
     }
+  }
+
+  /** Atomic, user-requested refresh; keep old pixels/ROI/camera until JPEG decode succeeds. */
+  async function displayImageRefresh(id: number, meta: SceneOpenMeta, row: SceneRow,
+      blob: Blob, stillWanted: () => boolean): Promise<boolean> {
+    const rec = recs.value.find(r => r.id === id);
+    if (!rec || !row.previewDiv || !row.srcRev || drawMode.value || !stillWanted()) return false;
+    const wasShown = panes.value.some(p => p.rec?.id === id);
+    const old = activeRec.value;
+    const priorSize = old?.thumb ? { w: old.thumb.width, h: old.thumb.height } : null;
+    const priorView = { ...(activeSide.value === 'B' ? viewB.value : viewA.value) };
+    const sameGroup = !!old?.sceneDir && old.sceneDir === meta.sceneDir;
+    const applied = await applySceneJpgToRec(rec, meta, blob, undefined, true, stillWanted);
+    if (!applied || !stillWanted()) return false;
+    rec.detailDiv = row.previewDiv;
+    rec.card = markRaw({ row, meta });
+    rec.file = markRaw(new File([blob], meta.name + '.jpg', { type: 'image/jpeg' }));
+    await activate(id, undefined, 'follow', row.previewDiv);
+    if (!wasShown && sameGroup && priorSize && rec.thumb && compareMode.value !== 'flicker') {
+      const side = activeSide.value, rect = rectForSide(side);
+      setSideView(side, remapViewForImage(priorView, priorSize, { w: rec.thumb.width, h: rec.thumb.height }, rect.w, rect.h));
+    }
+    renderTick.value++;
+    await nextTick();
+    if (typeof requestAnimationFrame === 'function') await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    return stillWanted() && canvasAttached.value && rec.srcRev === row.srcRev
+      && panes.value.some(p => p.rec?.id === id);
   }
 
   /* ---------------- 左侧列表：收藏 / 多选 / 批量清理 / 撤回 ---------------- */
@@ -4036,7 +4063,7 @@ export const useViewerStore = defineStore('viewer', () => {
     wandTol, merging, overlay, toast, error, modal,
     sidebarCollapsed, busy, srBusy,
     // 文件 / 解码
-    addFiles, removeRec, activate, openSceneJpg, openLocalImage,
+    addFiles, removeRec, activate, openSceneJpg, openLocalImage, displayImageRefresh,
     // 左侧列表工具条：收藏（置顶）/ 多选 / 批量清理 / 撤回
     recsOrdered, favCount, selectMode, selectedIds, isSelected,
     toggleSelectMode, toggleSelected, clearSelection,

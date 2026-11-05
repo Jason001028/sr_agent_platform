@@ -363,13 +363,20 @@ export const useQueueStore = defineStore('queue', () => {
     _dropped();
   }
 
+  let reconcileTimer: ReturnType<typeof setTimeout> | undefined;
+  function scheduleList() {
+    if (reconcileTimer) return;
+    reconcileTimer = setTimeout(() => { reconcileTimer = undefined; void list(); }, 150);
+  }
   /** SSE 帧分发（订阅回调，闭包内直接用 store 状态）。 */
   function _onEvent(ev: PlatformSseEvent): void {
     if (ev.type === 'preview_update') {
       tasks.value = mergePreviewUpdate(tasks.value, ev);
+      scheduleList();
       return;
     }
     if (ev.type !== 'job_update') return;
+    if (ev.state === 'COMPLETED') scheduleList();
     tasks.value = mergeJobUpdate(tasks.value, ev);
     if (ev.state === 'FAILED' && ev.error) {
       failReason.value = { ...failReason.value, [ev.task_id]: ev.error };

@@ -1109,6 +1109,31 @@ def list_queue(request: Request):
     return {"tasks": tasks}
 
 
+@router.get("/api/queue/{task_id}/image-refresh")
+def image_refresh(task_id: int, request: Request):
+    from backend.services.image_refresh import discover
+    task = request.app.state.store.get_sr_task_by_id(task_id)
+    if not task:
+        raise HTTPException(404, "task not found")
+    try:
+        return discover(task, request.app.state.scenes_root)
+    except (OSError, ValueError, PathDeniedError) as exc:
+        return {"task_id": task_id, "state": "unavailable", "note": str(exc)}
+
+
+@router.get("/api/queue/{task_id}/image-refresh/preview")
+def image_refresh_preview(task_id: int, version: str, request: Request):
+    from backend.services.image_refresh import preview_bytes
+    task = request.app.state.store.get_sr_task_by_id(task_id)
+    if not task:
+        raise HTTPException(404, "task not found")
+    try:
+        data = preview_bytes(task, request.app.state.scenes_root, version)
+        return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+    except (OSError, ValueError, PathDeniedError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @router.post("/api/queue", status_code=201)
 async def submit_queue(request: Request):
     state = request.app.state

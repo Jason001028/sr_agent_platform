@@ -4,6 +4,7 @@ import { onMounted, onUnmounted, ref } from 'vue';
 import { useRoute, RouterLink, RouterView } from 'vue-router';
 import { APP_NAME } from './lib/brand';
 import JobNoticeStack from './components/JobNoticeStack.vue';
+import { useImageRefreshStore } from './stores/imageRefresh';
 import { useQueueStore } from './stores/queue.js';
 import { enabledExtensionNavigation } from './extensions/registry.js';
 
@@ -15,8 +16,9 @@ const extensionNavigation = enabledExtensionNavigation();
 // 的提醒。队列页与查看器侧舱各自还会 connect 一次，计数归零才真的断（stores/queue 里有
 // 引用计数）——所以它们 unmount 时的 disconnect 不会把这一份带走。
 // 放在外壳而不是某个页面里，正是因为提醒要在**用户不在**那个页面时也能到。
-onMounted(() => queue.connect());
-onUnmounted(() => queue.disconnect());
+const imageRefresh = useImageRefreshStore();
+onMounted(() => { queue.connect(); imageRefresh.start(); });
+onUnmounted(() => { imageRefresh.stop(); queue.disconnect(); });
 
 // 品牌 logo：素材不进仓库，部署后在服务器上换 `<APP>/dist/logo.png` 即可（见 brand.ts）。
 // 没有这份文件时 <img> 触发 error，这里把它摘掉，退回到 .brand-mark 里那颗占位小方块 ——

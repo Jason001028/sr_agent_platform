@@ -53,4 +53,4 @@ export function travelFraction(elapsed:number, distance:number, speed:number) {
   const d=t<ramp?speed*t*t/(2*ramp):t>duration-ramp?distance-speed*(duration-t)**2/(2*ramp):speed*(t-ramp/2);
   return {fraction: distance?Math.min(1,d/distance):1, duration};
 }
-export const TOUR_SPEEDS = { slow:70, normal:110, fast:160 };
+export const TOUR_SPEEDS = { slow:50, normal:75, fast:100, ultra:150 };

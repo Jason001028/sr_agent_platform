@@ -22,6 +22,9 @@ onMounted(() => window.addEventListener('batch-task-open', open));
 onBeforeUnmount(() => window.removeEventListener('batch-task-open', open));
 // Association lives above the collapsible detail, so both tabs keep synchronization alive.
 onMounted(() => { void batch.associate(chat.sessionId); });
+let discoveryTimer: ReturnType<typeof setInterval> | undefined;
+onMounted(() => { discoveryTimer = setInterval(() => { void batch.discover(chat.sessionId); }, 5000); });
+onBeforeUnmount(() => { clearInterval(discoveryTimer); batch.detach(); });
 watch(() => chat.sessionId, sid => { void batch.associate(sid); });
 </script>
 

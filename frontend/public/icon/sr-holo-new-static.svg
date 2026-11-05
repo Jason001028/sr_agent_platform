@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">新影像成果</title>
+  <desc id="desc">全息镭射风格新影像标识</desc>
+  <defs>
+    <linearGradient id="foilFrame" x1="5" y1="9" x2="39" y2="40" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#79C8E6"/><stop offset=".42" stop-color="#8295F4"/><stop offset=".76" stop-color="#B2A0EB"/><stop offset="1" stop-color="#E2E7F4"/>
+    </linearGradient>
+    <linearGradient id="foilLandscape" x1="8" y1="26" x2="37" y2="38" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8DD4E6"/><stop offset=".58" stop-color="#8B9AF4"/><stop offset="1" stop-color="#AD9EEB"/>
+    </linearGradient>
+    <linearGradient id="foilStar" x1="31" y1="4" x2="45" y2="20" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#85DDEB"/><stop offset=".52" stop-color="#8C9AFB"/><stop offset="1" stop-color="#CBABE9"/>
+    </linearGradient>
+    <clipPath id="previewClip"><rect x="8.5" y="12.5" width="28" height="26" rx="4.1"/></clipPath>
+  </defs>
+  <rect x="5.3" y="9.3" width="34.4" height="32.4" rx="6.8" fill="#F9FBFF" stroke="url(#foilFrame)" stroke-width="1.8"/>
+  <g clip-path="url(#previewClip)">
+    <rect x="8.5" y="12.5" width="28" height="26" fill="#E9F3F6"/>
+    <circle cx="16.5" cy="20" r="3" fill="#ABCBEA"/>
+    <path d="M8.5 32.4L17 24.4L22.4 29.3L29.1 21.8L36.5 30.1V38.5H8.5Z" fill="url(#foilLandscape)"/>
+    <path d="M8.5 35L16.9 27.6L22 31.8L27.3 27.2L36.5 35.5" stroke="#FFFFFF" stroke-width="1" stroke-opacity=".7" stroke-linejoin="round"/>
+  </g>
+  <path d="M37 3.8L39.3 9.6L45.2 12L39.3 14.4L37 20.2L34.7 14.4L28.8 12L34.7 9.6Z" fill="#F9FBFF" stroke="#F9FBFF" stroke-width="2.6" stroke-linejoin="round"/>
+  <path d="M37 4.7L39.05 9.95L44.3 12L39.05 14.05L37 19.3L34.95 14.05L29.7 12L34.95 9.95Z" fill="url(#foilStar)"/>
+  <circle cx="43.2" cy="24.5" r="1.45" fill="#B2A0EB" opacity=".55"/>
+</svg>

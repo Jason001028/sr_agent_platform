@@ -27,8 +27,73 @@ import FileListCard from './FileListCard.vue';
 import AppIcon from './AppIcon.vue';
 import FavoriteStar from './FavoriteStar.vue';
 import ExplorerButton from './ExplorerButton.vue';
+import { useImageRefreshStore } from '../stores/imageRefresh';
+import '../styles/sr-holo-card.css';
 
 const store = useViewerStore();
+const refresh = useImageRefreshStore();
+const refreshIconBase = `${import.meta.env.BASE_URL}icon/`;
+const pageVisible = ref(!document.hidden);
+const reduced = ref(false);
+const visibleCards = ref<number[]>([]);
+const arriving = ref<number[]>([]);
+const leaving = ref<number[]>([]);
+const closedGroups = ref<string[]>([]);
+const animationSeen = new Set<string>();
+const previousUnread = new Map<number, boolean>();
+const timers = new Set<ReturnType<typeof setTimeout>>();
+let visibleObserver: IntersectionObserver | undefined, nearObserver: IntersectionObserver | undefined;
+const nearCards = new Set<number>();
+const sweepId = computed(() => pageVisible.value && !reduced.value && !store.sidebarCollapsed
+  ? store.recsOrdered.find(r => visibleCards.value.includes(r.id) && refresh.entries[r.id]?.unread)?.id ?? null : null);
+function later(fn: () => void, ms: number) { const timer = setTimeout(() => { timers.delete(timer); fn(); }, ms); timers.add(timer); }
+function updateRefreshVisibility() {
+  pageVisible.value = !document.hidden;
+  refresh.setVisible(store.sidebarCollapsed ? [] : visibleCards.value, store.sidebarCollapsed ? [] : [...nearCards]);
+}
+watch(() => [sweepId.value, refresh.entries[sweepId.value ?? -1]?.result.version], () => {
+  const id = sweepId.value, version = id == null ? undefined : refresh.entries[id]?.result.version;
+  if (id == null || !version || animationSeen.has(version)) return;
+  animationSeen.add(version); arriving.value = [...arriving.value, id];
+  later(() => { arriving.value = arriving.value.filter(x => x !== id); }, 1000);
+});
+watch(() => Object.values(refresh.entries).map(e => `${e.recId}:${e.unread}:${e.result.version}`).join('|'), () => {
+  for (const e of Object.values(refresh.entries)) {
+    if (previousUnread.get(e.recId) && !e.unread) {
+      leaving.value = [...leaving.value, e.recId];
+      later(() => { leaving.value = leaving.value.filter(x => x !== e.recId); }, 300);
+    }
+    previousUnread.set(e.recId, e.unread);
+  }
+});
+function decorated(id: number) { return refresh.entries[id]?.unread || leaving.value.includes(id); }
+function groupOf(rec: { sceneDir?: string | null; lqPath?: string | null }) { return rec.sceneDir || rec.lqPath || ''; }
+function groupHeader(id: number, group: string) {
+  return !!group && Object.values(refresh.entries).some(e => e.result.group === group)
+    && store.recsOrdered.find(r => groupOf(r) === group)?.id === id;
+}
+function toggleGroup(group: string) { closedGroups.value = closedGroups.value.includes(group) ? closedGroups.value.filter(g => g !== group) : [...closedGroups.value, group]; }
+let motionQuery: MediaQueryList | undefined;
+function syncMotion() { reduced.value = motionQuery?.matches ?? false; }
+onMounted(() => {
+  motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)'); syncMotion();
+  motionQuery.addEventListener('change', syncMotion);
+  document.addEventListener('visibilitychange', updateRefreshVisibility);
+  if (typeof IntersectionObserver !== 'undefined') {
+    visibleObserver = new IntersectionObserver(entries => {
+      const ids = new Set(visibleCards.value);
+      for (const entry of entries) { const id = Number((entry.target as HTMLElement).dataset.recId); if (entry.isIntersecting) ids.add(id); else ids.delete(id); }
+      visibleCards.value = [...ids]; updateRefreshVisibility();
+    }, { root: scrollEl.value, threshold: 0.05 });
+    nearObserver = new IntersectionObserver(entries => {
+      for (const entry of entries) { const id = Number((entry.target as HTMLElement).dataset.recId); if (entry.isIntersecting) nearCards.add(id); else nearCards.delete(id); }
+      updateRefreshVisibility();
+    }, { root: scrollEl.value, rootMargin: '180px' });
+    for (const el of itemEls.values()) { visibleObserver.observe(el); nearObserver.observe(el); }
+  }
+});
+watch(() => store.sidebarCollapsed, updateRefreshVisibility);
+onUnmounted(() => { visibleObserver?.disconnect(); nearObserver?.disconnect(); motionQuery?.removeEventListener('change', syncMotion); document.removeEventListener('visibilitychange', updateRefreshVisibility); timers.forEach(clearTimeout); refresh.setVisible([]); });
 const linkId = ref<number|null>(null);
 const linkPath = ref('');
 const linkError = ref('');
@@ -81,6 +146,7 @@ async function addShot(recId: number): Promise<void> {
 function onCardClick(rec: { id: number; pending?: boolean }): void {
   if (rec.pending) return;
   if (store.selectMode) { store.toggleSelected(rec.id); return; }
+  if (refresh.entries[rec.id]?.unread) { void refresh.open(rec.id); return; }
   void store.activate(rec.id);
 }
 
@@ -123,8 +189,11 @@ const itemEls = new Map<number, HTMLElement>();
 
 function setItemEl(id: number, el: Element | ComponentPublicInstance | null): void {
   const element = el && '$el' in el ? el.$el : el;
-  if (element instanceof HTMLElement) itemEls.set(id, element);
-  else itemEls.delete(id);
+  const old = itemEls.get(id);
+  if (old === element) return;
+  if (old) { visibleObserver?.unobserve(old); nearObserver?.unobserve(old); }
+  if (element instanceof HTMLElement) { itemEls.set(id, element); visibleObserver?.observe(element); nearObserver?.observe(element); }
+  else { itemEls.delete(id); nearCards.delete(id); visibleCards.value = visibleCards.value.filter(x => x !== id); }
 }
 
 /** 场景聚焦遮罩用：按 id 取卡片 DOM（只量这几张，不遍历整列）。 */
@@ -215,13 +284,22 @@ function linkTag(note: string): string {
         class="fav-divider"
         aria-hidden="true"
       ></div>
+      <button v-if="groupHeader(rec.id, groupOf(rec))" type="button" class="refresh-group" :aria-expanded="!closedGroups.includes(groupOf(rec))" @click="toggleGroup(groupOf(rec))">
+        <span>影像组 {{ store.sceneOrdinalOf(rec) }} {{ closedGroups.includes(groupOf(rec)) ? '›' : '⌄' }}</span><span v-if="refresh.groupCount(groupOf(rec))" class="refresh-group-count">{{ refresh.groupCount(groupOf(rec)) }} 张新图</span>
+      </button>
       <FileListCard
+        v-show="!closedGroups.includes(groupOf(rec))"
         :ref="(el) => setItemEl(rec.id, el)"
         :data-rec-id="rec.id"
-        class="file-item"
+        class="file-item sr-refresh-card"
         :class="[
           {
             active: rec.id === store.activeId,
+            'sr-refresh-card--unread': decorated(rec.id),
+            'sr-refresh-card--sweep': sweepId === rec.id && !leaving.includes(rec.id),
+            'sr-refresh-card--enter': arriving.includes(rec.id),
+            'sr-refresh-card--leaving': leaving.includes(rec.id),
+            'sr-refresh-card--paused': !pageVisible || !visibleCards.includes(rec.id) || store.sidebarCollapsed,
             pending: rec.pending,
             picked: store.isSelected(rec.id),
             entering: rec.enterDelay !== undefined,
@@ -234,7 +312,11 @@ function linkTag(note: string): string {
         @dragstart="store.startRecDrag(rec, $event)"
         @dragend="store.endRecDrag()"
       >
-        <template #thumbnail><FileThumb :rec="rec" :size="96" /></template>
+        <template #thumbnail><FileThumb class="sr-refresh-card__thumb" :rec="rec" :size="96" /></template>
+        <span v-if="decorated(rec.id)" class="sr-refresh-card__rail" aria-hidden="true" />
+        <span v-if="decorated(rec.id)" class="sr-refresh-card__badge" data-e2e="image-refresh-badge">
+          <img class="sr-refresh-card__badge-icon" :src="`${refreshIconBase}sr-holo-new-${sweepId === rec.id && !reduced && !leaving.includes(rec.id) ? 'animated' : 'static'}.svg`" alt="" draggable="false">✦ 新成果
+        </span>
         <!-- 多选的眼睛：勾选态一眼可见。卡片整块可点，这颗只是指示器。 -->
         <span
           v-if="store.selectMode && !rec.pending"
@@ -295,7 +377,13 @@ function linkTag(note: string): string {
                关联原因仍然单独一个字段：rec.status 会被解码进度/结果覆盖，写在那里
                等于没写（用户只看得到「完成，解码耗时…」）。整句理由进 title。 -->
           <div class="tags">
-            <span class="status" :class="rec.statusCls" :title="rec.pendingError">{{ rec.status }}</span>
+            <template v-if="refresh.entries[rec.id]?.unread">
+              <span class="sr-refresh-card__subtitle">SR 已完成 · 新预览就绪</span>
+              <button type="button" class="refresh-open" :disabled="refresh.opening !== null" @click.stop="refresh.open(rec.id)">{{ refresh.opening === rec.id ? '加载中…' : '查看新图' }}</button>
+            </template>
+            <span v-else-if="refresh.preparing[groupOf(rec)]" class="status muted">成果准备中</span>
+            <span v-else class="status" :class="rec.statusCls" :title="rec.pendingError">{{ rec.status }}</span>
+            <span v-if="refresh.errors[rec.id]" class="refresh-error" role="status">{{ refresh.errors[rec.id] }}</span>
             <!-- 中间产物：说清它与本体的关系。卡片上那三颗小标只说「哪一景、哪个环节」，
                  这一条说的是「所以你不能对它做什么」。 -->
             <span

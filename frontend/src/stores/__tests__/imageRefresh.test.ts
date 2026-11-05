@@ -1,0 +1,68 @@
+// @vitest-environment jsdom
+import { beforeEach, afterEach, expect, it, vi } from 'vitest';
+import { reactive } from 'vue';
+import { createPinia, setActivePinia } from 'pinia';
+vi.mock('../../router/index.js', () => ({ default: {} }));
+vi.mock('../../lib/api', () => ({ apiImageRefresh: vi.fn(), fetchImageRefreshPreview: vi.fn() }));
+const state = vi.hoisted(() => ({ viewer: null as any, queue: null as any }));
+vi.mock('../viewer', () => ({ useViewerStore: () => state.viewer }));
+vi.mock('../queue', () => ({ useQueueStore: () => state.queue, normDir: (p: string) => p.replace(/[/\\]+$/, '') }));
+import { apiImageRefresh, fetchImageRefreshPreview } from '../../lib/api';
+import type { ImageRefreshResult } from '../../lib/api';
+import { useImageRefreshStore } from '../imageRefresh';
+function result(rev = 'path-100-1', task = 1): ImageRefreshResult {
+  return { task_id: task, state: 'ready', note: 'ready', group: '/scene', kind: 'product', version: `product|${rev}`, finished_at: task,
+    row: { id: 'product', name: 'NOSR.tif', srcRev: rev, W: 16, H: 16, hasPreview: true, previewDiv: 4, lq_path: '/scene', fake: false, satellite: null, sensor: null, date: null, size_bytes: 20, rel: null, jpgUrl: null } };
+}
+beforeEach(() => {
+  setActivePinia(createPinia()); localStorage.clear(); vi.clearAllMocks();
+  state.viewer = reactive({ recs: [{ id: 1, sceneId: 'input', sceneDir: '/scene' }], busy: false, drawMode: false, userIntentSeq: 0,
+    noteUserIntent: vi.fn(() => { state.viewer.userIntentSeq++; }),
+    insertSceneCard: vi.fn(meta => { const id = state.viewer.recs.length + 1; state.viewer.recs.push({ id, sceneId: meta.sceneId, sceneDir: meta.sceneDir }); return id; }),
+    displayImageRefresh: vi.fn().mockResolvedValue(true),
+  });
+  state.queue = reactive({ tasks: [], list: vi.fn().mockResolvedValue(undefined) });
+  vi.mocked(apiImageRefresh).mockResolvedValue(result());
+  vi.mocked(fetchImageRefreshPreview).mockResolvedValue(new Blob(['jpg']));
+});
+afterEach(() => { useImageRefreshStore().stop(); vi.useRealTimers(); });
+it('does not decorate a completed job until its preview and source identity are ready', () => {
+  const store = useImageRefreshStore();
+  store.accept({ ...result(), state: 'preparing' });
+  store.accept({ ...result(), state: 'unavailable' });
+  store.accept({ ...result(), version: 'wrong-source' });
+  expect(store.unreadCount).toBe(0);
+  expect(state.viewer.insertSceneCard).not.toHaveBeenCalled();
+});
+it('keys unread by real source revision and only marks read after successful display', async () => {
+  const store = useImageRefreshStore(); store.accept(result());
+  expect(store.groupCount('/scene/')).toBe(1);
+  state.viewer.displayImageRefresh.mockResolvedValueOnce(false);
+  expect(await store.open(2)).toBe(false); expect(store.entries[2]?.unread).toBe(true);
+  expect(await store.open(2)).toBe(true); expect(store.unreadCount).toBe(0);
+  expect(JSON.parse(localStorage.getItem('sr.imageRefresh.read.v1')!)).toEqual(['product|path-100-1']);
+  store.accept(result('path-100-2', 2));
+  expect(store.entries[2]?.unread).toBe(true); expect(store.unreadCount).toBe(1);
+  expect(state.viewer.recs).toHaveLength(2); // Same filename, new revision; no duplicate record.
+});
+it('restores viewed versions on reload and counts actual versions in a group', async () => {
+  localStorage.setItem('sr.imageRefresh.read.v1', JSON.stringify(['product|path-100-1']));
+  const store = useImageRefreshStore(); store.accept(result());
+  expect(store.unreadCount).toBe(0);
+  const other = result('other-100-1', 2); other.row!.id = 'other'; other.version = 'other|other-100-1';
+  store.accept(other); expect(store.groupCount('/scene')).toBe(1);
+  store.accept(result('path-100-2', 3)); expect(store.groupCount('/scene')).toBe(2);
+});
+it('matches library / manual scene aliases without duplicating the input card', () => {
+  const store = useImageRefreshStore(); const input = result(); input.aliases = ['input'];
+  store.accept(input); expect(store.entries[1]?.unread).toBe(true);
+  expect(state.viewer.insertSceneCard).not.toHaveBeenCalled();
+});
+it('does not acknowledge failed or superseded preview loads', async () => {
+  const store = useImageRefreshStore(); store.accept(result());
+  vi.mocked(fetchImageRefreshPreview).mockRejectedValueOnce(new Error('offline'));
+  expect(await store.open(2)).toBe(false); expect(store.unreadCount).toBe(1);
+  vi.mocked(apiImageRefresh).mockResolvedValue(result('path-100-2', 2));
+  expect(await store.open(2)).toBe(false); expect(state.viewer.displayImageRefresh).not.toHaveBeenCalled();
+  expect(store.entries[2]?.result.version).toContain('path-100-2');
+});

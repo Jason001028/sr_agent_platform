@@ -22,6 +22,8 @@ const imported = ref<BatchImportResult | null>(null);
 const busy = ref(false);
 const error = ref('');
 const authorized = ref(false);
+const excludedLines = ref<number[]>([]);
+const blockingErrors = computed(() => imported.value?.diagnostics.some(d => d.severity === 'error' && !excludedLines.value.includes(d.line)) ?? true);
 function newKey() { const bytes = new Uint32Array(4); crypto.getRandomValues(bytes); return Array.from(bytes, n => n.toString(16)).join('-'); }
 const requestKey = ref(newKey());
 const strategy = ref<'automatic' | 'review'>('automatic');
@@ -57,7 +59,9 @@ async function locate(path: string) {
   if (err) error.value = err;
 }
 async function freeze() {
+  if (busy.value) return;
   busy.value = true; error.value = ''; imported.value = null; authorized.value = false;
+  excludedLines.value = [];
   try {
     const confirmed = draft.candidates.filter(c => c.status === '已确认');
     imported.value = await apiBatchImport(text.value, mode.value, confirmed.map(c => ({ path: c.path, name: c.name, evidence: c.evidence })), strategy.value);
@@ -68,7 +72,7 @@ async function create() {
   if (!imported.value || !authorized.value || busy.value) return;
   busy.value = true; error.value = '';
   try {
-    const goal = await apiCreateBatch({ manifest_ref: imported.value.manifest_ref, title: title.value, session_id: chat.sessionId, request_key: requestKey.value, exclusions: [] });
+    const goal = await apiCreateBatch({ manifest_ref: imported.value.manifest_ref, title: title.value, session_id: chat.sessionId, request_key: requestKey.value, exclusions: excludedLines.value.map(line => ({ line, reason: '用户核验冻结清单后明确排除' })) });
     await batch.selectGoal(goal.goal_id);
     emit('created');
     authorized.value = false;
@@ -96,9 +100,9 @@ async function create() {
     <div v-if="imported" class="frozen">
       <strong>冻结清单 · {{ imported.counts.items }} 景</strong><p class="identity">{{ imported.manifest_ref }}</p>
       <div class="candidate-list"><p v-for="i in imported.items" :key="i.item_id">#{{ i.ordinal }} {{ i.name }}<br><small>{{ i.scene_ref }}</small></p></div>
-      <p v-for="(d, i) in imported.diagnostics" :key="i">第 {{ d.line }} 行 · {{ d.message }}</p>
-      <label><input v-model="authorized" type="checkbox" :disabled="busy || imported.rejected">我确认以上范围及所选执行规则{{ mode === 'demo' ? '（仅演示）' : '（生产提交门仍关闭）' }}</label>
-      <button :disabled="busy || !authorized || imported.rejected || !imported.counts.items" @click="create">创建 Batch Goal</button>
+      <p v-for="(d, i) in imported.diagnostics" :key="i">第 {{ d.line }} 行 · {{ d.message }}<label v-if="d.severity === 'error' && d.line > 0"><input v-model="excludedLines" type="checkbox" :value="d.line" :disabled="busy" @change="authorized = false">确认排除此行</label></p>
+      <label><input v-model="authorized" type="checkbox" :disabled="busy || blockingErrors">我确认以上范围及所选执行规则{{ mode === 'demo' ? '（仅演示）' : '（生产提交门仍关闭）' }}</label>
+      <button :disabled="busy || !authorized || blockingErrors || !imported.counts.items" @click="create">创建 Batch Goal</button>
     </div>
     <p v-if="error" role="alert" class="error">{{ error }}</p>
   </div>
