@@ -126,6 +126,7 @@ beforeEach(() => {
   setActivePinia(createPinia());
   vi.clearAllMocks();
   localStorage.clear();
+  window.history.replaceState(null, "", "/");
   streamCbs = null;
   vi.mocked(apiBatchSnapshot).mockResolvedValue(snapshot());
   vi.mocked(apiBatchEvents).mockResolvedValue(page([event(9), event(10)], 8));
@@ -142,6 +143,15 @@ afterEach(() => {
 });
 
 describe('attach / associate', () => {
+  it('显式选择批次同步 URL，刷新不会回到旧链接任务', async () => {
+    window.history.replaceState(null, '', '/viewer?batch_goal=old&batch_item=old-item');
+    vi.mocked(apiBatchSnapshot).mockResolvedValue(snapshot({ goal_id: 'g-selected' }));
+    const batch = useBatchGoalStore();
+    expect(await batch.selectGoal('g-selected')).toBe(true);
+    expect(new URLSearchParams(window.location.search).get('batch_goal')).toBe('g-selected');
+    expect(new URLSearchParams(window.location.search).has('batch_item')).toBe(false);
+  });
+
   it('同会话有活动批次时自动关联，不盲取列表第一条', async () => {
     vi.mocked(apiBatchGoals).mockResolvedValue([
       goal('g-other', 's2'), goal('g-mine', 's1'), goal('g-done', 's1', 'COMPLETED'),
@@ -237,6 +247,21 @@ describe('事件追平', () => {
   });
 });
 
+describe('有界事件历史', () => {
+  it('从最近十条之前读取历史，分页游标独立于实时尾部', async () => {
+    vi.mocked(apiBatchEvents).mockResolvedValue(page(Array.from({ length: 20 }, (_, i) => event(i + 1)), 20));
+    const batch = useBatchGoalStore();
+    await batch.attach('g1');
+    vi.mocked(apiBatchEvents).mockResolvedValue({ ...page([event(9), event(10)], 20), next_before: 9 });
+    await batch.loadEarlier();
+    expect(vi.mocked(apiBatchEvents).mock.calls.at(-1)?.[2]?.before).toBe(11);
+    expect(batch.historyPage.map(e => e.seq)).toEqual([9, 10]);
+    batch.events = [event(400), event(500)];
+    await batch.loadEarlier();
+    expect(vi.mocked(apiBatchEvents).mock.calls.at(-1)?.[2]?.before).toBe(9);
+  });
+});
+
 describe('控制冲突', () => {
   it('409 后重新读快照并提示用户确认', async () => {
     const batch = useBatchGoalStore();
@@ -255,6 +280,27 @@ describe('控制冲突', () => {
 });
 
 describe('自动跟随', () => {
+  it('刷新后不恢复自动跟随；同一 Item 的版本变化不重复导航', async () => {
+    localStorage.setItem('sr.batch.follow', 'true');
+    const batch = useBatchGoalStore();
+    expect(batch.follow).toBe(false);
+    const snap = snapshot();
+    snap.producer.current = item({ image_path: '/Disk/scene/SCENE.tif' });
+    vi.mocked(apiBatchSnapshot).mockResolvedValue(snap);
+    vi.mocked(apiResolveScene).mockResolvedValue(resolveResult());
+    vi.mocked(fetchSceneJpg).mockResolvedValue(new Blob(['jpg']));
+    vi.spyOn(useViewerStore(), 'openSceneJpg').mockResolvedValue(undefined);
+    await batch.attach('g1');
+    batch.setFollow(true);
+    await vi.waitFor(() => expect(useViewerStore().batchOverlayTarget).not.toBeNull());
+    const calls = vi.mocked(apiResolveScene).mock.calls.length;
+    const updated = { ...snap, producer: { ...snap.producer, current: { ...snap.producer.current!, item_version: 5 } } };
+    vi.mocked(apiBatchSnapshot).mockResolvedValue(updated);
+    await batch.refreshSnapshot();
+    await nextTick();
+    expect(vi.mocked(apiResolveScene).mock.calls.length).toBe(calls);
+  });
+
   it('默认关闭；用户视图操作立即退出跟随', async () => {
     const batch = useBatchGoalStore();
     await batch.attach('g1');

@@ -94,6 +94,7 @@ export function eventNeedsSnapshot(eventType: string): boolean {
     case 'batch_phase_changed':
     case 'batch_control_changed':
     case 'batch_user_control':
+    case 'batch_item_reviewed':
     case 'batch_report_updated':
     case 'goal_verified':
       return true;

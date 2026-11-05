@@ -1,5 +1,6 @@
 ﻿"""Agent tool library and built-in registry factory."""
 
+from . import batch_repair  # noqa: F401
 from . import fix_bad_lines  # noqa: F401 — importing registers the tool
 from . import run_sr  # noqa: F401 — importing registers the tool
 from . import search_scenes  # noqa: F401 — importing registers the tool

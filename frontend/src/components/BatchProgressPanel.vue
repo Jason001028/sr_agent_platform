@@ -2,7 +2,7 @@
 /** Batch Progress Panel 编排层（PR F）。
  *  首屏顺序：概览/统计 → 三维进度 → Producer 当前项 → Monitor SR 队列；
  *  控制与事件时间线在下，事件默认折叠。 */
-import { computed, onMounted, watch } from 'vue';
+import { computed, ref } from 'vue';
 import { useBatchGoalStore } from '../stores/batchGoal.js';
 import { useChatStore } from '../stores/chat.js';
 import { useViewerStore } from '../stores/viewer.js';
@@ -12,6 +12,8 @@ import BatchCurrentItem from './BatchCurrentItem.vue';
 import BatchJobQueue from './BatchJobQueue.vue';
 import BatchControls from './BatchControls.vue';
 import BatchEventTimeline from './BatchEventTimeline.vue';
+import BatchItemsList from './BatchItemsList.vue';
+const fullQueue = ref(false);
 
 const batch = useBatchGoalStore();
 const chat = useChatStore();
@@ -78,8 +80,8 @@ function toggleFollow(event: Event): void {
   batch.setFollow((event.target as HTMLInputElement).checked);
 }
 
-onMounted(() => { void batch.associate(chat.sessionId); });
-watch(() => chat.sessionId, (sid) => { void batch.associate(sid); });
+
+
 </script>
 
 <template>
@@ -131,8 +133,9 @@ watch(() => chat.sessionId, (sid) => { void batch.associate(sid); });
       <BatchProgressTracks :snapshot="batch.snapshot" />
       <BatchCurrentItem :snapshot="batch.snapshot" />
       <BatchJobQueue :snapshot="batch.snapshot" />
-      <BatchControls :snapshot="batch.snapshot" />
+      <details @toggle="fullQueue = ($event.target as HTMLDetailsElement).open"><summary>完整执行队列（分页）</summary><BatchItemsList v-if="fullQueue" /></details>
       <BatchEventTimeline />
+      <BatchControls :snapshot="batch.snapshot" />
     </template>
 
     <div v-else-if="batch.syncState === 'loading'" class="bp-loading">正在读取批次…</div>

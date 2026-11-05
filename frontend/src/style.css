@@ -124,6 +124,7 @@
   --motion-fade: 120ms;
   --motion-hover: 150ms;
   --motion-live: 200ms;
+  --motion-batch-progress: 280ms;
   --motion-emphasis: 500ms;
   /* 场景聚焦遮罩：窗口移动 250ms、遮罩整体淡入淡出 240ms；缓动与窗口插值
      （lib/spotlight.ts::easeSpotlight）同一条曲线，两边不会打架。 */

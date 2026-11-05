@@ -12,6 +12,8 @@ Skill 加载与外部工具调用接口见 [skill_interface.md](planning/skill_i
 
 Agent 中文交互、执行概览与自动会话标题见 [agent-interaction-titles.md](status/agent-interaction-titles.md)。
 
+批量智能修复工具栏任务中枢、冻结范围与人工掩码复核见 [batch-task-dock.md](status/batch-task-dock.md)。
+
 PAN/NOSR 局部修复与产物发布见 [pan_repair_contract.md](sr_code/pan_repair_contract.md)。
 
 ---

@@ -501,6 +501,16 @@ def _advance_open(state, goal, item, lease, cfg):
     return _start_detection(state, goal, item, lease, cfg)
 
 
+def _review_allows_submit(item):
+    cp = item.get("checkpoint") or {}
+    if not cp.get("review_required"):
+        return True
+    review = cp.get("review") or {}
+    sha = (cp.get("mask") or {}).get("sha256")
+    return bool(sha and review.get("decision") == "approve"
+                and review.get("mask_sha256") == sha)
+
+
 def _produce_one(state, goal, lease, cfg):
     """Advance at most one Item. Returns True when a producer step happened."""
     store = state.store
@@ -529,7 +539,7 @@ def _produce_one(state, goal, lease, cfg):
     ready = None
     if not capacity_full:
         ready = next(
-            (i for i in items if i["status"] == "MASK_READY"
+            (i for i in items if i["status"] == "MASK_READY" and _review_allows_submit(i)
              and (i["next_wake_at"] is None or i["next_wake_at"] <= now)), None)
     if ready:
         return _start_submit_preparation(state, goal, ready, lease, cfg)
@@ -852,6 +862,8 @@ def _submit_ready(state, goal, item, lease, cfg, prepared):
     current = store.get_goal_item(gid, item["item_id"])
     if (not current or current["version"] != item["version"]
             or current["status"] != "MASK_READY"):
+        return False
+    if not _review_allows_submit(current):
         return False
     try:
         identities = _input_identities(current["checkpoint"] or {})
@@ -1479,13 +1491,16 @@ def _settle(state, goal, lease, cfg, mode):
         can_prepare = (
             prepared < cfg["max_prepared_items"]
             and (counts.get("PENDING", 0) + counts.get("RETRY_WAIT", 0)) > 0)
-        can_submit = (not capacity_full) and counts.get("MASK_READY", 0) > 0
+        can_submit = (not capacity_full) and any(
+            i["status"] == "MASK_READY" and _review_allows_submit(i) for i in items)
         # "Draining" means the Producer genuinely cannot advance. An inflight
         # job alone must not stop N+1: keep dispensing until capacity and the
         # prepared window are both saturated.
         draining = not (can_prepare or can_submit)
         target = "WAITING_EXTERNAL" if draining else "RUNNING"
         phase = "draining" if draining else "dispatching"
+        if draining and not monitored and any(i["status"] == "MASK_READY" and not _review_allows_submit(i) for i in items):
+            phase = "waiting_review"
         wake = (time.time() + cfg["monitor_poll_interval"]
                 if draining else time.time())
         changed = goal["status"] != target or goal["phase"] != phase

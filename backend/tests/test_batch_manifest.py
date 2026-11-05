@@ -61,6 +61,53 @@ class BatchManifestTest(unittest.TestCase):
     def import_text(self, text: str, **kwargs) -> dict:
         return batch_manifest.import_manifest(text=text, **kwargs)
 
+    def test_review_strategy_is_frozen_into_created_items_and_rest_cas(self):
+        name = self.scene(803)
+        app = FastAPI()
+        app.state.store = self.store
+        app.include_router(goal_runtime.router)
+        with TestClient(app) as client:
+            imported = client.post("/api/goals/batch-imports", json={
+                "text": "", "strategy": "review", "sources": [{"path": str(self.root / (name + "_PAN") / "PAN.tif")}]})
+            self.assertEqual(imported.status_code, 200, imported.text)
+            created = client.post("/api/goals", json={"manifest_ref": imported.json()["manifest_ref"], "request_key": "review-rest"})
+            self.assertEqual(created.status_code, 200, created.text)
+            gid = created.json()["goal_id"]
+            item = self.store.list_goal_items(gid)[0]
+            self.assertTrue(item["checkpoint"]["review_required"])
+            endpoint = f"/api/goals/{gid}/items/{item['item_id']}/review"
+            self.assertEqual(client.post(endpoint, json={"decision": "approve"}).status_code, 400)
+            # Pending input has not been detected: it cannot be pre-approved.
+            self.assertEqual(client.post(endpoint, json={"expected_version": item["version"], "decision": "approve"}).status_code, 409)
+
+    def test_explicit_viewer_sources_never_infer_names(self):
+        name = self.scene(801)
+        path = self.root / (name + "_PAN") / "PAN.tif"
+        with mock.patch.object(batch_manifest.scene_resolve, "resolve_scene_dir",
+                               side_effect=AssertionError("must not infer")):
+            result = self.import_text("", sources=[{"path": str(path), "name": "Viewer PAN"}], strategy="review")
+        self.assertFalse(result["rejected"])
+        frozen = batch_manifest.load_manifest(result["manifest_ref"])
+        self.assertEqual(frozen["items"][0]["target_image"]["path"], path.as_posix())
+        self.assertEqual(frozen["config"]["strategy"], "review")
+        automatic = self.import_text("", sources=[{"path": str(path), "name": "Viewer PAN"}])
+        self.assertNotEqual(automatic["manifest_ref"], result["manifest_ref"])
+
+    def test_explicit_viewer_sources_reject_non_pan_and_duplicate_scene(self):
+        name = self.scene(802)
+        directory = self.root / (name + "_PAN")
+        source = {"path": str(directory / "PAN.tif"), "name": name}
+        duplicate = self.import_text("", sources=[source, source])
+        self.assertTrue(duplicate["rejected"])
+        with self.assertRaises(batch_manifest.ManifestConflict):
+            batch_manifest.plan_goal_items(batch_manifest.load_manifest(duplicate["manifest_ref"]), [])
+        wrong = self.import_text("", sources=[{"path": str(directory / (directory.name + "_NOSR.tif"))}])
+        self.assertTrue(wrong["rejected"])
+        with self.assertRaises(batch_manifest.ManifestError):
+            self.import_text("", sources="not an array")
+        with self.assertRaises(batch_manifest.ManifestError):
+            self.import_text("", strategy={})
+
     def test_fifty_line_freeze_is_content_addressed(self):
         names = [self.scene(i) for i in range(1, 51)]
         result = self.import_text(self.qc(*names))

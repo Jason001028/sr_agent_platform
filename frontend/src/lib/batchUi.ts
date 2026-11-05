@@ -49,6 +49,7 @@ const PHASE: Record<string, string> = {
   monitoring: '等待超分',
   verifying: '验证中',
   draining: '收尾中',
+  waiting_review: '等待人工复核',
   done: '已完成',
   paused: '已暂停',
   cancelled: '已取消',

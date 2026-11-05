@@ -34,6 +34,8 @@ Agent 中文交互、执行概览、自动中文标题与手动改名见 [agent-
 
 盘阵外授权 TIFF 的通用预览见 [generic-preview-p1.md](generic-preview-p1.md)：`SR_PREVIEW_ROOTS` 只放行看图 / ROI / Agent 读图，提交 SR 与写掩码仍只认 `SR_ALLOWED_ROOTS`；外部源预览落隔离缓存并走只读 `/preview` 换档位。场景行按实际源核对缓存签名，同名 `.tif/.tiff` 各有独立落点（冲突名带源路径哈希），`/preview` 回字节快照并核对档位与源身份；前端需要生成时直接用 `/preview` 的响应体、静态取图也复核签名。真机验收待核。
 
+批量智能修复已由第三个 Tab 改为「工具栏｜Agent」双 Tab 的顶部任务中枢；草案冻结、Viewer 显式集合、自动/人工策略、掩码复核门禁与 Agent 移交见 [batch-task-dock.md](batch-task-dock.md)。该记录替代 batch-pr-f.md 中旧第三 Tab 的布局说明；生产提交门仍关闭。
+
 ## 1. 平台是什么，现在能做什么
 
 遥感影像超分（SR）处理平台。浏览器查看盘阵上的大 TIF、绘制掩码、提交 SR 作业、跟踪共享队列。

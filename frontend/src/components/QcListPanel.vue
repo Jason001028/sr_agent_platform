@@ -193,7 +193,7 @@ watch(
     <!-- 头部：没导入时只有标题 + 导入；导入后是 名字 / 计数 / 三个操作 -->
     <h4 class="qc-h">
       <span class="qc-title">
-        待修复清单<template v-if="qc.loaded"> · {{ qc.sourceName }}</template>
+        质检 TXT 清单<template v-if="qc.loaded"> · {{ qc.sourceName }}</template>
       </span>
       <span v-if="qc.loaded" class="qc-count" title="已出终态的行 / 全部行">
         {{ qc.counts.done }}/{{ qc.counts.total }}

@@ -1,14 +1,15 @@
 <script setup lang="ts">
 /** 事件时间线：默认折叠、最新在前、原始 payload 按需展开。
  *  事件只作解释材料；进度数字一律来自快照。 */
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import { useBatchGoalStore } from '../stores/batchGoal.js';
 import { eventLabel, eventTone, formatClock } from '../lib/batchUi.js';
 
 const batch = useBatchGoalStore();
 
+const history = ref(false);
 const ordered = computed(() =>
-  [...batch.events].sort((a, b) => b.seq - a.seq));
+  [...(history.value ? batch.historyPage : batch.events)].sort((a, b) => b.seq - a.seq).slice(0, history.value ? 20 : 10));
 const latest = computed(() => ordered.value[0] ?? null);
 
 function payloadText(payload: Record<string, unknown>): string {
@@ -27,13 +28,14 @@ function payloadText(payload: Record<string, unknown>): string {
     </summary>
 
     <button
-      v-if="batch.hasEarlier"
+      v-if="batch.hasEarlier || (!history && batch.events.length > 10)"
       type="button"
       class="be-earlier"
       :disabled="batch.loadingEarlier"
-      @click="batch.loadEarlier()"
+      @click="history = true; batch.loadEarlier()"
     >{{ batch.loadingEarlier ? '加载中…' : '加载更早' }}</button>
 
+    <button v-if="history" type="button" class="be-earlier" @click="history = false">返回最近事件</button>
     <p v-if="!ordered.length" class="be-empty">还没有事件。</p>
     <ol v-else class="be-list">
       <li
@@ -106,6 +108,8 @@ function payloadText(payload: Record<string, unknown>): string {
 }
 .be-earlier:disabled { opacity: 0.5; cursor: default; }
 .be-list {
+  max-height: 280px;
+  overflow-y: auto;
   list-style: none;
   margin: 7px 0 0;
   padding: 0;

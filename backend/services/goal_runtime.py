@@ -96,7 +96,8 @@ def _create_batch_goal(request: Request, body: dict):
         "ordinal": item["ordinal"],
         "name": item["name"],
         "status": item["status"],
-        "checkpoint": _batch_item_checkpoint(item),
+        "checkpoint": {**_batch_item_checkpoint(item),
+                       "review_required": manifest["config"].get("strategy") == "review"},
         "resource_key": (item.get("target_image") or {}).get("image_key"),
         "next_wake_at": time.time() if item["status"] == "PENDING" else None,
     } for item in planned]
@@ -147,13 +148,13 @@ async def batch_import(request: Request):
             result = batch_manifest.import_manifest(
                 data=data, encoding=str(body.get("encoding") or "auto"),
                 date=body.get("date"), product=body.get("product"),
-                mode=str(body.get("mode") or "demo"))
+                mode=str(body.get("mode") or "demo"), sources=body.get("sources"), strategy=body.get("strategy", "automatic"))
         elif text is not None:
             if not isinstance(text, str):
                 raise HTTPException(400, "text must be a string")
             result = batch_manifest.import_manifest(
                 text=text, date=body.get("date"), product=body.get("product"),
-                mode=str(body.get("mode") or "demo"))
+                mode=str(body.get("mode") or "demo"), sources=body.get("sources"), strategy=body.get("strategy", "automatic"))
         else:
             raise HTTPException(400, "text or content_base64 is required")
     except batch_manifest.ManifestError as exc:
@@ -555,3 +556,19 @@ async def resume(goal_id: str, request: Request):
 async def cancel(goal_id: str, request: Request):
     return await _control(goal_id, request, "cancel")
 
+
+
+@router.post("/{goal_id}/items/{item_id}/review")
+async def review_batch_item(goal_id: str, item_id: str, request: Request):
+    body = await request.json()
+    if not isinstance(body, dict) or type(body.get("expected_version")) is not int:
+        raise HTTPException(400, "expected_version is required")
+    if not isinstance(body.get("decision"), str) or body.get("decision") not in {"approve", "exclude"}:
+        raise HTTPException(400, "decision must be approve or exclude")
+    try:
+        return request.app.state.store.review_batch_item(
+            goal_id, item_id, body["expected_version"], body["decision"])
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc

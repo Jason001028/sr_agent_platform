@@ -21,13 +21,14 @@ const TOTAL = 50;
 let revision = 2;
 let status = 'RUNNING';
 let pauseCalls = 0;
+let createCalls = 0;
 const openStreams = new Set();
 
 function counts() {
   return {
     total: TOTAL, eligible: TOTAL, detected: 40, detection_pending: 10,
     needs_repair: 40, submitted: 30, verified: 10,
-    verified_demo: 0, verified_production: 10, verified_other: 0,
+    verified_demo: 10, verified_production: 0, verified_other: 0,
     converged: 0, no_issue: 0, failed: 2, blocked: 1, excluded: 0,
     skipped_runtime: 0, cancelled: 0, capacity_skipped: 0,
     unknown_jobs: 1, detecting: 3, submitting: 1, waiting_sr: 5,
@@ -134,6 +135,25 @@ function sendJson(res, body, code = 200) {
     const url = new URL(req.url, 'http://local');
     const u = url.pathname;
 
+    if (u === '/api/goals/batch-imports') {
+      let body = ''; req.on('data', chunk => body += chunk); req.on('end', () => {
+        const input = JSON.parse(body);
+        assert.equal(input.strategy, 'review');
+        sendJson(res, { manifest_ref: 'frozen-mock', rejected: false,
+          counts: { items: 2, errors: 0, warnings: 0 }, diagnostics: [],
+          items: [1, 2].map(n => ({ item_id: 'candidate-' + n, ordinal: n, name: 'selected-scene-' + n, scene_ref: '/mock/scene-' + n, source_lines: [n] })) });
+      }); return;
+    }
+    if (u === '/api/goals' && req.method === 'POST') {
+      let body = ''; req.on('data', chunk => body += chunk); req.on('end', () => {
+        const input = JSON.parse(body);
+        assert.equal(input.manifest_ref, 'frozen-mock');
+        assert.ok(input.request_key);
+        createCalls++;
+        sendJson(res, { goal_id: GOAL, kind: 'batch', status: 'QUEUED', version: 1 });
+      }); return;
+    }
+    if (u === `/api/goals/${GOAL}/items`) { sendJson(res, { items: [], next_after_ordinal: 0 }); return; }
     if (u === '/api/goals' && url.searchParams.get('kind') === 'batch') {
       sendJson(res, [{
         goal_id: GOAL, session_id: 'session-1', status: 'RUNNING',
@@ -201,6 +221,7 @@ function sendJson(res, body, code = 200) {
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 
+  if (process.env.BATCH_MOCK_SERVER_ONLY) { console.log('MOCK_URL=http://127.0.0.1:' + server.address().port + '/viewer?batch_goal=' + GOAL); return; }
   let browser;
   try {
     browser = await launchBrowser();
@@ -213,10 +234,16 @@ function sendJson(res, body, code = 200) {
     await page.waitForSelector('.stage');
 
     // A. URL 指定批次 → 快照加载后出现「批次」Tab。
-    await page.waitForSelector('[data-e2e=ctx-tab-batch]');
-    await page.click('[data-e2e=ctx-tab-batch]');
+    await page.waitForSelector('[data-e2e=batch-task-dock]');
+    assert.equal(await page.$$eval('.ctx-tabs .ctx-tab', es => es.length), 2);
+    await page.click('.ctx-tab');
+    await page.click('[data-e2e=batch-task-expand]');
     await page.waitForSelector('[data-e2e=batch-panel]');
     await page.waitForSelector('[data-e2e=batch-overview]');
+    const summaryTop = await page.$eval('[data-e2e=batch-task-dock]', e => e.getBoundingClientRect().top);
+    await page.$eval('.tools-scroll', e => { e.scrollTop = 300; });
+    assert.equal(await page.$eval('[data-e2e=batch-task-dock]', e => e.getBoundingClientRect().top), summaryTop);
+    await page.$eval('.tools-scroll', e => { e.scrollTop = 0; });
 
     // B. 50 景快照的三个事实来源都在首屏。
     const overview = await page.$eval('[data-e2e=batch-overview]', (e) => e.textContent);
@@ -253,7 +280,7 @@ function sendJson(res, body, code = 200) {
     assert.match(summary, /用户暂停批次/);
     await page.click('[data-e2e=batch-events] > summary');
     await page.waitForFunction(
-      "document.querySelectorAll('[data-e2e=batch-events] .be-row').length === 20");
+      "document.querySelectorAll('[data-e2e=batch-events] .be-row').length === 10");
     const first = await page.$eval('[data-e2e=batch-events] .be-row', (e) => e.textContent);
     assert.match(first, /用户暂停批次/);
     await page.click('[data-e2e=batch-events] .be-row .be-raw summary');
@@ -284,7 +311,8 @@ function sendJson(res, body, code = 200) {
     const followBefore = await page.$eval('[data-e2e=batch-follow]', (e) => e.checked);
     assert.equal(followBefore, false);
     await page.click('[data-e2e=batch-follow]');
-    assert.equal(await page.$eval('[data-e2e=batch-follow]', (e) => e.checked), true);
+    await page.waitForFunction(
+      "document.querySelector('[data-e2e=batch-follow]').checked === true");
     await page.evaluate(() => {
       const pinia = document.querySelector('#app').__vue_app__
         .config.globalProperties.$pinia;
@@ -294,8 +322,30 @@ function sendJson(res, body, code = 200) {
       "document.querySelector('[data-e2e=batch-follow]').checked === false");
     assert.match(await page.$eval('[data-e2e=batch-panel]', (e) => e.textContent), /退出跟随/);
 
+    // G. Scope freezing and explicit review authorization precede Goal creation.
+    await page.click('.task-detail nav button');
+    await page.type('[data-e2e=batch-draft] textarea', 'explicit fake QC selection');
+    await page.select('[data-e2e=batch-draft] label select', 'review');
+    await page.evaluate(() => [...document.querySelectorAll('[data-e2e=batch-draft] button')].find(b => b.textContent.includes('核验并冻结')).click());
+    await page.waitForSelector('.frozen');
+    assert.equal(createCalls, 0);
+    const createDisabled = await page.$eval('.frozen button', e => e.disabled);
+    assert.equal(createDisabled, true);
+    await page.click('.frozen input[type=checkbox]');
+    await page.click('.frozen button');
+    await page.waitForFunction(() => document.querySelector('.task-detail nav button:nth-child(2)').classList.contains('on'));
+    assert.equal(createCalls, 1);
+    // Explicitly switching tabs preserves store association and snapshot.
+    await page.click('.ctx-tab:nth-child(2)');
+    await page.click('.ctx-tab:first-child');
+    assert.match(await page.$eval('[data-e2e=batch-task-dock]', e => e.textContent), /50 景/);
+    await page.reload();
+    await page.waitForSelector('[data-e2e=batch-task-expand]');
+    assert.equal(await page.$eval('[data-e2e=batch-task-expand]', e => e.getAttribute('aria-expanded')), 'false');
+    assert.match(await page.$eval('[data-e2e=batch-task-dock]', e => e.textContent), /40 \/ 50/);
+    assert.equal(await page.$$eval('.ctx-tabs .ctx-tab', es => es.length), 2);
     assert.deepEqual(errors, []);
-    console.log('Batch Panel browser checks passed: tab gating via URL, 50-scene snapshot tracks/current/queue, collapsed event timeline with raw payload, control 409 then success notice, controlled report modal, follow exits on user intent');
+    console.log('Batch Panel browser checks passed: two tabs, fixed summary, frozen draft authorization, refresh recovery, 50-scene snapshot tracks/current/queue, collapsed event timeline with raw payload, control 409 then success notice, controlled report modal, follow exits on user intent');
   } finally {
     for (const res of openStreams) {
       try { res.destroy(); } catch { /* already closed */ }

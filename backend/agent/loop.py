@@ -793,7 +793,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
     if durable:
         active_registry.register(control_tool())
     if allowed_names is not None:
-        allowed_names = set(allowed_names) | {"read_tool_result", "get_current_image_info", "present_spatial_annotations"}
+        allowed_names = set(allowed_names) | {"read_tool_result", "get_current_image_info", "present_spatial_annotations", "prepare_batch_repair", "query_batch_repair"}
         if durable:
             allowed_names.add(CLARIFY)
     messages = result_manager.project_history(messages, active_registry)
@@ -1120,7 +1120,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                 result = active_registry.invoke(CLARIFY, tc["arguments"], source="goal")
             elif tool_executor is not None:
                 result = tool_executor(tc, lambda: call_tool(tc["name"], tc["arguments"], registry=active_registry, allowed_names=allowed_names))
-            elif registry is None and tc["name"] not in {"read_tool_result", "get_current_image_info", "present_spatial_annotations"}:
+            elif registry is None and tc["name"] not in {"read_tool_result", "get_current_image_info", "present_spatial_annotations", "prepare_batch_repair", "query_batch_repair"}:
                 # Preserve the two-argument seam used by existing callers/tests.
                 if allowed_names is None:
                     result = call_tool(tc["name"], tc["arguments"])

@@ -185,6 +185,33 @@ class BatchWorkerTest(unittest.TestCase):
             "SELECT COUNT(*) FROM sr_tasks WHERE job_id IS NOT NULL").fetchone()[0]
 
     # ---- acceptance ----------------------------------------------------
+    def test_manual_mask_review_gates_submission_and_survives_reload(self):
+        goal, _ = self.make_goal(count=1)
+        gid = goal["goal_id"]
+        item = self.items(gid)[0]
+        cp = {**item["checkpoint"], "review_required": True}
+        db = self.store._db()
+        db.execute("UPDATE agent_goal_steps SET checkpoint=? WHERE step_id=?", (json.dumps(cp), item["step_id"]))
+        db.commit()
+        self.run_until(lambda: self.statuses(gid) == {"MASK_READY"})
+        for _ in range(5):
+            self.tick()
+        self.assertEqual(self._submitted_count(), 0)
+        ready = self.items(gid)[0]
+        with self.assertRaises(ValueError):
+            self.store.review_batch_item(gid, ready["item_id"], ready["version"] - 1, "approve")
+        approved = self.store.review_batch_item(gid, ready["item_id"], ready["version"], "approve")
+        self.assertTrue(batch_worker._review_allows_submit(approved))
+        tampered = {**approved, "checkpoint": {**approved["checkpoint"], "mask": {"sha256": "changed"}}}
+        self.assertFalse(batch_worker._review_allows_submit(tampered))
+        self.store.close()
+        self.store = Store(self.root / "test.db")
+        self.state.store = self.store
+        self.run_until(lambda: self.store.get_goal(gid)["status"] == "COMPLETED")
+        self.assertEqual(self._submitted_count(), 1)
+        with self.assertRaises(ValueError):
+            self.store.review_batch_item(gid, ready["item_id"], approved["version"], "exclude")
+
     def test_five_scene_pipeline_completes_without_model_calls(self):
         goal, manifest = self.make_goal(5)
         self.run_until(

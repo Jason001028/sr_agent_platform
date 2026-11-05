@@ -13,21 +13,20 @@
  */
 import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue';
 import { useViewerStore } from '../stores/viewer';
-import RoiToolsTab from './RoiToolsTab.vue';
 import AgentChatTab from './AgentChatTab.vue';
 import AgentBotIcon from './AgentBotIcon.vue';
-import BatchProgressPanel from './BatchProgressPanel.vue';
+import BatchTaskDock from './BatchTaskDock.vue';
 import { useChatStore } from '../stores/chat.js';
 import { useBatchGoalStore } from '../stores/batchGoal.js';
 
 const store = useViewerStore();
 const chat = useChatStore();
 const batch = useBatchGoalStore();
-type CtxTab = 'roi' | 'agent' | 'batch';
+type CtxTab = 'roi' | 'agent';
 function readTab(): CtxTab {
   try {
     const saved = localStorage.getItem('sr.viewer.ctxTab');
-    return saved === 'roi' || saved === 'batch' ? saved : 'agent';
+    return saved === 'roi' || saved === 'batch' ? 'roi' : 'agent';
   } catch { return 'agent'; }
 }
 const tab = ref<CtxTab>(readTab());
@@ -37,12 +36,10 @@ onBeforeUnmount(()=>window.removeEventListener('annotation-conversation',openAnn
 watch(tab, value => {
   try { localStorage.setItem('sr.viewer.ctxTab', value); } catch { /* Optional persistence. */ }
 });
-/** 批次 Tab 只在确有可关联批次时出现。批次消失时退回 Agent，不把用户留在空页。 */
-const shownTab = computed<CtxTab>(() =>
-  (tab.value === 'batch' && !batch.isVisible ? 'agent' : tab.value));
-watch(() => batch.isVisible, visible => {
-  if (!visible && tab.value === 'batch') tab.value = 'agent';
-});
+const shownTab = tab;
+function openBatchTask() { tab.value = 'roi'; store.setCtxRailOpen(true); }
+onMounted(() => window.addEventListener('batch-task-open', openBatchTask));
+onBeforeUnmount(() => window.removeEventListener('batch-task-open', openBatchTask));
 
 /** store 里存的是「展开」，组件里用「收起」更自然（CSS 也是 .collapsed）。 */
 const collapsed = computed({
@@ -68,29 +65,21 @@ const toggleTitle = () => (collapsed.value ? '展开上下文侧舱' : '收起�
         class="ctx-tab"
         :class="{ on: shownTab === 'roi' }"
         @click="tab = 'roi'"
-        >工具栏</button>
+        >工具栏<span v-if="batch.snapshot && !batch.isDone" class="task-dot" aria-label="有活动批次">•</span></button>
       <button
         type="button"
         class="ctx-tab"
         :class="{ on: shownTab === 'agent' }"
         @click="tab = 'agent'"
         ><AgentBotIcon :status="chat.agentStatus" :size="16" />Agent</button>
-      <button
-        v-if="batch.isVisible"
-        type="button"
-        class="ctx-tab"
-        data-e2e="ctx-tab-batch"
-        :class="{ on: shownTab === 'batch' }"
-        @click="tab = 'batch'"
-        >批次</button>
     </div>
     <div class="ctx-body">
       <!-- 各块都常驻（v-show），切换不打断队列 SSE / Agent 会话 / 批次事件流；淡入只做
            新进来那块，旧的立即让位。pane 绝对定位叠在同一块区域 —— 否则 v-show 离场
            的那 100ms 里各块各占 100% 高度，正在进入的那块会被挤出可视区。 -->
       <Transition name="ctx-content-fade">
-        <div v-show="shownTab === 'roi'" class="ctx-pane">
-          <RoiToolsTab />
+        <div v-show="shownTab === 'roi'" class="ctx-pane tools-pane">
+          <BatchTaskDock />
         </div>
       </Transition>
       <Transition name="ctx-content-fade">
@@ -98,11 +87,7 @@ const toggleTitle = () => (collapsed.value ? '展开上下文侧舱' : '收起�
           <AgentChatTab />
         </div>
       </Transition>
-      <Transition name="ctx-content-fade">
-        <div v-show="shownTab === 'batch'" class="ctx-pane">
-          <BatchProgressPanel />
-        </div>
-      </Transition>
+
     </div>
   </aside>
 </template>
@@ -189,6 +174,8 @@ const toggleTitle = () => (collapsed.value ? '展开上下文侧舱' : '收起�
   border: 1px solid var(--line);
   border-bottom: none;
 }
+.task-dot { color: var(--accent-deep); font-size: 14px; }
+.tools-pane { display: flex; flex-direction: column; min-height: 0; }
 .ctx-pane { position: absolute; inset: 0; }
 /* 只给**进入**的那块做淡入：离场留空反而干净（交叉淡化会让两段内容叠字）。
    没有 leave 规则 = Vue 认为无过渡，切 tab 时旧内容立即隐藏。 */

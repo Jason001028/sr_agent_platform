@@ -1,5 +1,6 @@
 ﻿"""Message-scoped, untrusted Viewer observations; no filesystem authority."""
 from copy import deepcopy
+from dataclasses import replace
 import json
 from backend.tools.contract import Tool, ToolRegistry, ok, err
 
@@ -141,6 +142,11 @@ def bind_registry(registry, snapshot, *, store=None):
 
     result = ToolRegistry()
     for item in registry.list():
+        if item.name == 'query_batch_repair' and store is not None:
+            from backend.tools.batch_repair import query_batch_repair
+            if item.run.__module__ == query_batch_repair.__module__:
+                result.register(replace(item, run=lambda goal_id: query_batch_repair(goal_id, _store=store)))
+                continue
         if item.name == 'get_current_image_info':
             continue
         if item.name == 'search_scenes':

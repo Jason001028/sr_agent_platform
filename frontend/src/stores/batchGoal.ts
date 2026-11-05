@@ -48,6 +48,8 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
   const goalId = ref<string | null>(null);
   const snapshot = ref<BatchSnapshot | null>(null);
   const events = ref<BatchEvent[]>([]);
+  const historyPage = ref<BatchEvent[]>([]);
+  const historyBefore = ref<number | null>(null);
   const availableGoals = ref<DurableGoal[]>([]);
   const syncState = ref<BatchSyncState>('idle');
   const syncError = ref('');
@@ -57,7 +59,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
   const loadingEarlier = ref(false);
   const hasEarlier = ref(false);
   const consumedSeq = ref(0);
-  const follow = ref(readStored(FOLLOW_KEY) === 'true');
+  const follow = ref(false);
   const followNote = ref('');
   const followError = ref('');
 
@@ -109,6 +111,8 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     stopStream();
     snapshot.value = null;
     events.value = [];
+    historyPage.value = [];
+    historyBefore.value = null;
     consumedSeq.value = 0;
     hasEarlier.value = false;
     syncError.value = '';
@@ -145,7 +149,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     });
     if (!isCurrent(gen, gid)) return;
     events.value = mergeBatchEvents([], page.events);
-    hasEarlier.value = page.has_earlier;
+    hasEarlier.value = page.has_earlier || page.events.length > 10;
   }
 
   /** Attach to one Goal.  Returns false when the id is not a batch Goal, or
@@ -233,7 +237,14 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
   }
 
   async function selectGoal(id: string): Promise<boolean> {
-    return await attach(id);
+    const attached = await attach(id);
+    if (attached && goalId.value === id && typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      url.searchParams.set('batch_goal', id);
+      url.searchParams.delete('batch_item');
+      window.history.replaceState(window.history.state, '', url);
+    }
+    return attached;
   }
 
   function scheduleRefresh(delay = 350): void {
@@ -371,16 +382,17 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     if (!goalId.value || loadingEarlier.value) return;
     const gid = goalId.value;
     const gen = loadGen;
-    const first = events.value[0];
-    const before = first ? first.seq : (snapshot.value?.goal.last_seq ?? 0) + 1;
+    const first = [...events.value].sort((a, b) => b.seq - a.seq).slice(0, 10).at(-1);
+    const before = historyBefore.value ?? (first ? first.seq : (snapshot.value?.goal.last_seq ?? 0) + 1);
     loadingEarlier.value = true;
     try {
       const page = await apiBatchEvents(cfg(), gid, {
         before, limit: DEFAULT_EVENT_LIMIT,
       });
       if (!isCurrent(gen, gid)) return;
-      events.value = mergeBatchEvents(events.value, page.events);
-      hasEarlier.value = page.has_earlier;
+      historyPage.value = page.events;
+      historyBefore.value = page.next_before ?? page.events[0]?.seq ?? before;
+      hasEarlier.value = page.has_earlier && historyBefore.value < before;
     } catch (e) {
       if (!isCurrent(gen, gid)) return;
       syncError.value = '加载更早事件失败：' + errorText(e);
@@ -459,7 +471,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
       followNote.value = '正在绘制/编辑，导航暂停；退出绘制后会跟上当前场景。';
       return;
     }
-    const key = `${current.item_id}:${current.item_version}`;
+    const key = `${current.item_id}`;
     if (key === lastFollowKey) return;
     /* The image fetch can take seconds.  Everything that made this open
      * desirable is captured now and re-checked in the scenes store right
@@ -471,7 +483,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
       const latest = snapshot.value?.producer.current;
       return follow.value && goalId.value === gid
         && v.userIntentSeq === seq && !v.drawMode
-        && !!latest && `${latest.item_id}:${latest.item_version}` === key;
+        && !!latest && `${latest.item_id}` === key;
     };
     const scenes = useScenesStore();
     const err = await scenes.openQuiet(current.image_path, 'follow', { stillWanted });
@@ -534,7 +546,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
 
   watch(() => {
     const cur = snapshot.value?.producer.current;
-    return cur ? `${cur.item_id}:${cur.item_version}` : '';
+    return cur ? `${cur.item_id}` : '';
   }, () => {
     if (follow.value) void navigateToCurrent();
   });
@@ -544,7 +556,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
   }
 
   return {
-    goalId, snapshot, events, availableGoals,
+    goalId, snapshot, events, historyPage, availableGoals,
     syncState, syncError, loadError, controlError, controlBusy,
     loadingEarlier, hasEarlier, consumedSeq,
     follow, followNote, followError,

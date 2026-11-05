@@ -142,7 +142,7 @@ async function locate(job: BatchJobSummary): Promise<void> {
   cursor: pointer;
 }
 .bj-filter input { margin: 0; }
-.bj-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+.bj-list { max-height: 300px; overflow-y: auto; list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
 .bj-row {
   display: flex;
   flex-direction: column;

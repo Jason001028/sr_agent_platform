@@ -1728,6 +1728,35 @@ class Store:
             raise
         return result
 
+    def review_batch_item(self, goal_id, item_id, expected_version, decision):
+        """Approve the exact detected mask, never a running or historical item."""
+        with self.worker_transaction() as db:
+            goal = self.get_goal(goal_id)
+            item = self.get_goal_item(goal_id, item_id)
+            if not goal or goal.get("kind") != "batch" or not item:
+                raise KeyError("batch item not found")
+            if goal["status"] in {"COMPLETED", "CANCELLED", "FAILED", "BLOCKED"}:
+                raise ValueError("batch is terminal")
+            cp = dict(item["checkpoint"])
+            if (item["version"] != expected_version or item["status"] != "MASK_READY"
+                    or not cp.get("review_required") or cp.get("review") or item.get("capacity_reserved")):
+                raise ValueError("item changed or is not awaiting review; reload")
+            if decision not in {"approve", "exclude"}:
+                raise ValueError("invalid review decision")
+            mask_sha = (cp.get("mask") or {}).get("sha256")
+            if not mask_sha:
+                raise ValueError("mask identity is missing")
+            cp["review"] = {"decision": decision, "mask_sha256": mask_sha,
+                            "reviewed_at": time.time()}
+            status = "MASK_READY" if decision == "approve" else "SKIPPED"
+            cp["phase"] = status
+            db.execute("UPDATE agent_goal_steps SET checkpoint=?, status=?, version=version+1, "
+                       "updated_at=? WHERE goal_id=? AND item_id=? AND kind='batch_item'",
+                       (json.dumps(cp, ensure_ascii=False), status, time.time(), goal_id, item_id))
+            self._append_goal_event_tx(db, goal_id, "batch_item_reviewed",
+                {"item_id": item_id, **cp["review"]}, step_id=item["step_id"])
+        return self.get_goal_item(goal_id, item_id)
+
     def batch_control(self, goal_id: str, action: str,
                       expected_revision) -> dict | None:
         """Apply one user control action with optimistic concurrency.

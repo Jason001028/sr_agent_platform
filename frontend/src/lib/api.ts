@@ -1581,3 +1581,46 @@ export async function apiValidateViewerContext(
   });
   return (await r.json()) as { ok: boolean; schema_version: number; context: ViewerContextSnapshot };
 }
+
+
+/** Batch preparation uses the existing frozen import contract. */
+export interface BatchImportResult {
+  manifest_ref: string;
+  rejected: boolean;
+  counts: { items: number; errors: number; warnings: number };
+  diagnostics: { line: number; severity: string; message: string }[];
+  items: { item_id: string; ordinal: number; name: string; scene_ref: string; source_lines: number[] }[];
+}
+export async function apiBatchImport(text: string, mode: 'demo' | 'production', sources: { path: string; name: string; evidence: string }[] = [], strategy: 'automatic' | 'review' = 'automatic'): Promise<BatchImportResult> {
+  const r = await http(apiUrl(loadSrConfig(), '/api/goals/batch-imports'), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, mode, sources, strategy }),
+  });
+  return r.json();
+}
+export async function apiCreateBatch(body: { manifest_ref: string; title: string; session_id: string | null; request_key: string; exclusions: { line: number; reason: string }[] }): Promise<DurableGoal> {
+  const r = await http(apiUrl(loadSrConfig(), '/api/goals'), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  return r.json();
+}
+
+export interface BatchItemRecord {
+  item_id: string; ordinal: number; name: string; status: string; version: number;
+  checkpoint: {
+    target_image?: { path?: string }; scene_ref?: string; attempt?: number;
+    review_required?: boolean; review?: { decision: string };
+    detection?: { candidates?: unknown[]; provenance?: string };
+    mask?: { sha256?: string }; config?: unknown;
+  };
+  error?: string;
+}
+export async function apiBatchItems(goal: string, after = 0, status = ''): Promise<{ items: BatchItemRecord[]; next_after_ordinal: number }> {
+  const r = await http(apiUrl(loadSrConfig(), `/api/goals/${encodeURIComponent(goal)}/items?after_ordinal=${after}&limit=20&status=${encodeURIComponent(status)}`));
+  return r.json();
+}
+export async function apiBatchReview(goal: string, item: BatchItemRecord, decision: 'approve' | 'exclude'): Promise<BatchItemRecord> {
+  const r = await http(apiUrl(loadSrConfig(), `/api/goals/${encodeURIComponent(goal)}/items/${encodeURIComponent(item.item_id)}/review`), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expected_version: item.version, decision }),
+  });
+  return r.json();
+}

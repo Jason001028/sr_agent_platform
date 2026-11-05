@@ -231,8 +231,14 @@ def _image(path: Path) -> dict:
 
 
 def _resolve_item(row: dict, *, date: str | None, product: str | None) -> dict:
-    scene = scene_resolve.resolve_scene_dir(
-        row["name"], date=date, product=product or row.get("imgType") or None)
+    if row.get("explicit_path"):
+        source = ensure_allowed(Path(row["explicit_path"]), kind="file")
+        if source.name != "PAN.tif":
+            raise scene_resolve.SceneLookupError("显式影像必须为场景本体 PAN.tif")
+        scene = {"dir": source.parent, "input": source}
+    else:
+        scene = scene_resolve.resolve_scene_dir(
+            row["name"], date=date, product=product or row.get("imgType") or None)
     directory: Path = scene["dir"]
     try:
         ensure_allowed(directory, kind="dir")
@@ -313,7 +319,7 @@ def _manifest_payload(manifest: dict) -> dict:
     missing = [key for key in _SOURCE_FIELDS if key not in source]
     if missing:
         raise ManifestError("manifest source 缺少字段：" + "、".join(missing))
-    if source["format"] != SOURCE_FORMAT:
+    if source["format"] not in {SOURCE_FORMAT, "explicit_sources_v1"}:
         raise ManifestError("不支持的清单源格式")
     if source["document_ref"] != "original.bin":
         raise ManifestError("manifest 源文档引用非法")
@@ -394,7 +400,8 @@ def _publish(manifest_id: str, raw: bytes, manifest: dict) -> Path:
 
 def import_manifest(*, data: bytes | None = None, text: str | None = None,
                     encoding: str = "auto", date: str | None = None,
-                    product: str | None = None, mode: str = "demo") -> dict:
+                    product: str | None = None, mode: str = "demo",
+                    sources: list[dict] | None = None, strategy: str = "automatic") -> dict:
     """Freeze a QC TXT import; no Goal is created here."""
     if data is not None:
         raw = bytes(data)
@@ -412,7 +419,29 @@ def import_manifest(*, data: bytes | None = None, text: str | None = None,
     mode = str(mode or "demo").strip().lower()
     if mode not in {"demo", "production"}:
         raise ManifestError("mode 只支持 demo、production")
+    if not isinstance(strategy, str) or strategy not in {"automatic", "review"}:
+        raise ManifestError("strategy 只支持 automatic、review")
     parsed = parse_qc_text(decoded)
+    if sources is not None:
+        if not isinstance(sources, list) or len(sources) > MAX_ITEMS:
+            raise ManifestError("sources 必须是最多 500 项的数组")
+        for source in sources:
+            if not isinstance(source, dict) or not isinstance(source.get("path"), str):
+                raise ManifestError("sources 每项必须有显式 path")
+            if not source["path"].strip() or len(source["path"]) > 4096:
+                raise ManifestError("sources path 非法")
+            line = len(decoded.splitlines()) + len(parsed["items"]) + 1
+            name = str(source.get("name") or Path(source["path"]).name)
+            parsed["items"].append({
+                "name": name, "source_lines": [line], "explicit_path": source["path"],
+                "desc": str(source.get("evidence") or "Viewer 手动加入；待检测"),
+                "owner": "viewer", "kind": "待检测", "imgType": "", "row": None, "col": None,
+            })
+        if sources:
+            raw = json.dumps({"text": decoded, "sources": sources}, ensure_ascii=False).encode("utf-8")
+            used_encoding = "utf-8"
+            if len(raw) > MAX_SOURCE_BYTES:
+                raise ManifestError("显式清单超过字节上限")
     if len(parsed["items"]) > MAX_ITEMS:
         raise ManifestError(f"清单超过 {MAX_ITEMS} 个场景")
     diagnostics = list(parsed["diagnostics"])
@@ -454,10 +483,11 @@ def import_manifest(*, data: bytes | None = None, text: str | None = None,
     content = {
         "version": MANIFEST_VERSION,
         "workflow": WORKFLOW,
-        "source": {"format": SOURCE_FORMAT, "sha256": source_sha,
+        "source": {"format": "explicit_sources_v1" if sources else SOURCE_FORMAT, "sha256": source_sha,
                    "encoding": used_encoding, "document_ref": "original.bin"},
         "mode": mode,
         "config": {
+            "strategy": strategy,
             "max_inflight_sr_jobs": 3 if mode == "demo" else 1,
             "max_prepared_items": 1,
         },
