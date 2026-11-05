@@ -145,6 +145,7 @@ export const useAutoTourStore=defineStore('autoTour',()=>{
   initial={...v};camera(initial);index.value=0;fraction.value=0;direction=1;elapsed=0;hold=0;valid=true;entry=true;entryTarget=null;resumeElapsed=null;status.value='playing';schedule();return true;
  }
  function resume(){if(!valid||!allowed()||reduced()||document.hidden){reason.value='当前视图已变化，请结束后重新规划巡览';return;}
+  viewer.noteUserIntent();
   if(reason.value==='已暂停 · 手动操作'){
    initial={...(compare.value?viewer.flickerView:viewer.panes[0].view)};entryTarget=current.value?{...current.value}:null;resumeElapsed=entry?0:elapsed;entry=true;elapsed=0;
   }

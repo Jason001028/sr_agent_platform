@@ -225,8 +225,9 @@ export const goalEventsStreamUrl = (cfg: SrConfig, goalId: string,
   apiUrl(cfg, `/api/goals/${encodeURIComponent(goalId)}/events/stream?after=${after}`);
 
 /** Batch Goals only (server filters by kind before LIMIT). */
-export async function apiBatchGoals(cfg: SrConfig, limit = 20): Promise<DurableGoal[]> {
-  const r = await http(apiUrl(cfg, `/api/goals?kind=batch&limit=${Math.max(1, limit)}`));
+export async function apiBatchGoals(cfg: SrConfig, limit = 20, sessionId?: string | null): Promise<DurableGoal[]> {
+  const session = sessionId ? `&session_id=${encodeURIComponent(sessionId)}` : '';
+  const r = await http(apiUrl(cfg, `/api/goals?kind=batch&limit=${Math.max(1, limit)}${session}`));
   return await r.json() as DurableGoal[];
 }
 
@@ -1623,7 +1624,8 @@ export async function fetchImageRefreshPreview(result: ImageRefreshResult, signa
     }
   } finally { reader.releaseLock(); }
   const blob = new Blob(chunks as BlobPart[], { type: 'image/jpeg' });
-  if (!(await blobMatchesPreview(blob, row.previewDiv, row.srcRev))) throw new Error('预览源版本或档位已变化，请重试');
+  const stamp = await jpegPreviewStamp(blob);
+  if (!stamp || stamp.div !== row.previewDiv || stamp.src !== row.srcRev) throw new Error('预览源版本或档位已变化，请重试');
   return cacheBlob(key, blob);
 }
 

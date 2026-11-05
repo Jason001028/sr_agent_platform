@@ -11,6 +11,7 @@ const history = ref(false);
 const ordered = computed(() =>
   [...(history.value ? batch.historyPage : batch.events)].sort((a, b) => b.seq - a.seq).slice(0, history.value ? 20 : 10));
 const latest = computed(() => ordered.value[0] ?? null);
+const important = computed(() => [...batch.events].sort((a, b) => b.seq - a.seq).filter(e => eventTone(e) !== 'normal' || ['batch_report', 'goal_paused', 'goal_resumed', 'goal_created'].includes(e.event_type)).slice(0, 3));
 
 function payloadText(payload: Record<string, unknown>): string {
   try { return JSON.stringify(payload, null, 2); } catch { return String(payload); }
@@ -18,6 +19,7 @@ function payloadText(payload: Record<string, unknown>): string {
 </script>
 
 <template>
+  <section class="recent-events"><h4>最近重要事件</h4><p v-if="!important.length">暂无重要事件。</p><p v-for="event in important" :key="event.seq">{{ formatClock(event.created_at) }} · {{ eventLabel(event) }}</p></section>
   <details class="batch-events" data-e2e="batch-events">
     <summary class="be-summary">
       <span class="be-title">事件时间线</span>
@@ -59,6 +61,7 @@ function payloadText(payload: Record<string, unknown>): string {
 </template>
 
 <style scoped>
+.recent-events { padding: 8px 0; } .recent-events h4 { font-size: 11px; font-weight: 500; margin: 0 0 6px; color: var(--ink); } .recent-events p { font-size: 11px; margin: 4px 0; color: var(--ink-sub); overflow-wrap: anywhere; }
 .batch-events {
   padding: 8px 10px;
   background: var(--surface);

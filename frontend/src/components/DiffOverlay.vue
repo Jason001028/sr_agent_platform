@@ -2,13 +2,14 @@
 /**
  * DiffOverlay.vue — 差异候选的编号锚点 / 选中轮廓 / 信息浮层
  * ------------------------------------------------------------------
- * 只画**显示层**：热力图与羽化掩码由 TifCanvas 在 drawCanvas 上贴图，
+ * 只画**显示层**：连续热力图由 TifCanvas 在主画布按实际影像身份渲染，
  * 这里负责可交互的编号与轮廓。坐标都从分析网格换算到当前格的缩略图坐标，
  * 再经 thumbToScreen 跟随平移缩放；缩略图像素不会被当成原图坐标。
  *
  * 只显示排名靠前的少量候选（`viewerRegions`），其余在侧舱「差异候选」里；
  * 同一时刻最多展开一个区域。
  */
+import DiffColorLegend from './DiffColorLegend.vue';
 import { computed, onBeforeUnmount, onMounted } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import { useDiffStore } from '../stores/diff';
@@ -37,6 +38,8 @@ interface PaneView {
   contour: string;
   selected: Marker | null;
 }
+
+const legendVisible = computed(() => diff.showHeat && viewer.panes.some(p => !!diff.layerFor(p.rec)));
 
 const panes = computed<PaneView[]>(() => {
   const res = diff.result;
@@ -112,7 +115,7 @@ function popoverTop(m: Marker, h: number): number {
 function outside(e: Event) {
   if (viewer.drawMode) return;
   const el = e.target as Element | null;
-  if (el?.closest?.('.diff-interactive, [data-diff-id]')) return;
+  if (el?.closest?.('.diff-interactive, [data-diff-id], .diff-entry, .diff-visibility')) return;
   diff.selectRegion(null);
 }
 onMounted(() => window.addEventListener('pointerdown', outside));
@@ -121,10 +124,11 @@ onBeforeUnmount(() => window.removeEventListener('pointerdown', outside));
 
 <template>
   <div
-    v-if="panes.length"
+    v-if="panes.length || legendVisible"
     class="diff-overlay-root"
     :style="{ width: viewer.canvasSize.w + 'px', height: viewer.canvasSize.h + 'px' }"
   >
+    <div v-if="legendVisible" class="viewer-legend"><DiffColorLegend /></div>
     <div
       v-for="p in panes"
       :key="p.side"
@@ -180,7 +184,8 @@ onBeforeUnmount(() => window.removeEventListener('pointerdown', outside));
 
 <style scoped>
 .diff-overlay-root{position:absolute;top:0;left:50%;transform:translateX(-50%);z-index:4;pointer-events:none;overflow:visible}
-.diff-pane{position:absolute;overflow:visible;pointer-events:none}
+.viewer-legend{position:absolute;left:14px;bottom:14px;width:220px;padding:9px 11px;border:1px solid var(--tb-border);border-radius:9px;background:var(--surface);box-shadow:0 2px 10px #0002;pointer-events:none}
+.diff-pane{position:absolute;overflow:hidden;pointer-events:none}
 .diff-geometry{position:absolute;inset:0;overflow:visible;pointer-events:none}
 .diff-contour{fill:rgba(224,86,50,.12);stroke:#e05632;stroke-width:2;vector-effect:non-scaling-stroke;stroke-linejoin:round}
 .diff-contour-halo{fill:none;stroke:rgba(255,255,255,.9);stroke-width:4.5;stroke-linejoin:round}

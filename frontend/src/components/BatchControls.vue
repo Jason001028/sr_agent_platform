@@ -10,7 +10,7 @@ import {
   goalStatusLabel, modeBadge, phaseLabel, trackText,
 } from '../lib/batchUi.js';
 
-const props = defineProps<{ snapshot: BatchSnapshot }>();
+const props = withDefaults(defineProps<{ snapshot: BatchSnapshot; variant?: 'all' | 'monitor' | 'report' }>(), { variant: 'all' });
 const batch = useBatchGoalStore();
 const viewer = useViewerStore();
 
@@ -37,7 +37,9 @@ const reportReady = computed(() => props.snapshot.report.available);
 
 async function run(action: 'pause' | 'resume' | 'cancel'): Promise<void> {
   confirmingCancel.value = false;
+  const gen = requestGen;
   const message = await batch.control(action);
+  if (gen !== requestGen) return;
   // A 409 already renders through controlError; do not repeat it as a notice.
   notice.value = batch.controlError ? '' : message;
 }
@@ -95,7 +97,7 @@ function prettyJson(value: unknown): string {
   <section class="batch-controls" data-e2e="batch-controls">
     <div class="bc-actions">
       <button
-        v-if="status === 'PAUSED'"
+        v-if="variant !== 'report' && status === 'PAUSED'"
         type="button"
         class="primary"
         data-e2e="batch-resume"
@@ -103,12 +105,13 @@ function prettyJson(value: unknown): string {
         @click="run('resume')"
       >继续</button>
       <button
-        v-else
+        v-else-if="variant !== 'report' && !terminal"
         type="button"
         data-e2e="batch-pause"
         :disabled="!canPause"
         @click="run('pause')"
       >暂停</button>
+      <details v-if="variant !== 'report'"><summary>更多控制</summary>
       <template v-if="!confirmingCancel">
         <button type="button" class="danger" data-e2e="batch-cancel"
                 :disabled="!canCancel" @click="confirmingCancel = true">
@@ -122,20 +125,22 @@ function prettyJson(value: unknown): string {
                 @click="run('cancel')">确认取消</button>
         <button type="button" @click="confirmingCancel = false">返回</button>
       </template>
+      </details>
       <button
+        v-if="variant !== 'monitor'"
         type="button"
         class="report"
         data-e2e="batch-report"
         :disabled="!reportReady || reportBusy"
         :title="reportReady ? '打开只读批次报告' : '报告尚未生成'"
         @click="openReport"
-      >{{ reportBusy ? '读取中…' : '查看报告' }}</button>
+      >{{ reportBusy ? '读取中…' : '查看完整报告' }}</button>
     </div>
 
     <p v-if="notice" class="bc-notice">{{ notice }}</p>
     <p v-if="batch.controlError" class="bc-error">{{ batch.controlError }}</p>
     <p v-if="reportError" class="bc-error">{{ reportError }}</p>
-    <p class="bc-hint">
+    <p v-if="variant !== 'report'" class="bc-hint">
       暂停/取消只影响派发；已经提交给外部调度器的 SR 作业不会被终止。
     </p>
   </section>

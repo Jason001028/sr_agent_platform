@@ -28,6 +28,7 @@ import AppIcon from './AppIcon.vue';
 import FavoriteStar from './FavoriteStar.vue';
 import ExplorerButton from './ExplorerButton.vue';
 import { useImageRefreshStore } from '../stores/imageRefresh';
+import { normDir } from '../stores/queue';
 import '../styles/sr-holo-card.css';
 
 const store = useViewerStore();
@@ -67,9 +68,9 @@ watch(() => Object.values(refresh.entries).map(e => `${e.recId}:${e.unread}:${e.
   }
 });
 function decorated(id: number) { return refresh.entries[id]?.unread || leaving.value.includes(id); }
-function groupOf(rec: { sceneDir?: string | null; lqPath?: string | null }) { return rec.sceneDir || rec.lqPath || ''; }
+function groupOf(rec: { sceneDir?: string | null; lqPath?: string | null }) { return normDir(rec.sceneDir || rec.lqPath || ''); }
 function groupHeader(id: number, group: string) {
-  return !!group && Object.values(refresh.entries).some(e => e.result.group === group)
+  return !!group && Object.values(refresh.entries).some(e => normDir(e.result.group || '') === group)
     && store.recsOrdered.find(r => groupOf(r) === group)?.id === id;
 }
 function toggleGroup(group: string) { closedGroups.value = closedGroups.value.includes(group) ? closedGroups.value.filter(g => g !== group) : [...closedGroups.value, group]; }
@@ -143,10 +144,12 @@ async function addShot(recId: number): Promise<void> {
 }
 
 /** 多选开着时点卡片 = 勾选；否则照旧激活换图。 */
-function onCardClick(rec: { id: number; pending?: boolean }): void {
+function onCardClick(rec: { id: number; pending?: boolean; srcRev?: string | null }): void {
   if (rec.pending) return;
   if (store.selectMode) { store.toggleSelected(rec.id); return; }
-  if (refresh.entries[rec.id]?.unread) { void refresh.open(rec.id); return; }
+  const entry = refresh.entries[rec.id];
+  // A persisted read receipt suppresses decoration, but must not resurrect old pixels.
+  if (entry && (entry.unread || rec.srcRev !== entry.result.row?.srcRev)) { void refresh.open(rec.id); return; }
   void store.activate(rec.id);
 }
 
@@ -302,7 +305,7 @@ function linkTag(note: string): string {
             'sr-refresh-card--paused': !pageVisible || !visibleCards.includes(rec.id) || store.sidebarCollapsed,
             pending: rec.pending,
             picked: store.isSelected(rec.id),
-            entering: rec.enterDelay !== undefined,
+            entering: rec.enterDelay !== undefined && !refresh.entries[rec.id],
           },
           litCls(rec.id),
         ]"

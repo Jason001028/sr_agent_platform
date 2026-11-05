@@ -788,7 +788,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
     result_manager = ToolResults(store, session_id)
     active_registry = result_manager.registry(bind_registry(
         registry or default_registry(), latest_user.get("viewer_snapshot"),
-        store=store))
+        store=store, session_id=session_id))
     active_registry = ToolRegistry(t for t in active_registry.list() if t.name != CLARIFY)
     if durable:
         active_registry.register(control_tool())

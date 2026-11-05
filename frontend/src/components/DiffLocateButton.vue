@@ -2,7 +2,7 @@
 /**
  * DiffLocateButton.vue — 顶栏「差异定位」入口 + 紧凑参数面板
  * ------------------------------------------------------------------
- * 与自动巡览同一套按钮/浮层几何：32px 高、328px 宽、右对齐。
+ * 与自动巡览同一套按钮/浮层几何：32px 高、336px 宽、右对齐。
  * 面板常开不挤占画布；只负责**设参数与发起分析**，结果显示在 Viewer 叠加层
  * 与侧舱「差异候选」里（见 DiffOverlay.vue / DiffCandidatesPanel.vue）。
  *
@@ -11,10 +11,13 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useDiffStore } from '../stores/diff';
+import { useViewerStore } from '../stores/viewer';
 import { DIFF_THRESHOLD_PRESETS } from '../lib/diffLocate';
+import DiffColorLegend from './DiffColorLegend.vue';
 import AppIcon from './AppIcon.vue';
 
 const diff = useDiffStore();
+const viewer = useViewerStore();
 const entry = ref<HTMLElement | null>(null);
 
 const autoThreshold = computed(() =>
@@ -103,7 +106,7 @@ onBeforeUnmount(() => {
         <span class="heading-icon"><AppIcon name="scan-search" :size="16" tint /></span>
         <div>
           <strong>智能差异定位</strong>
-          <span class="heading-caption">两张影像，找出成片的变化区域</span>
+
         </div>
         <button class="diff-close" type="button" aria-label="关闭差异定位设置" title="关闭设置"
           @click="diff.closePanel">
@@ -113,7 +116,7 @@ onBeforeUnmount(() => {
 
       <div class="diff-body">
         <section class="diff-section" aria-label="影像组合">
-          <div class="diff-section-title">影像组合</div>
+          <div class="diff-section-title">影像与分析参数</div>
           <div class="diff-grid">
             <label class="diff-field">
               <span>影像 A</span>
@@ -136,15 +139,13 @@ onBeforeUnmount(() => {
           </div>
           <div class="pair-actions">
             <button type="button" :disabled="diff.busy" @click="diff.selectPairFromActive(); diff.ensurePair()">用当前图作 A</button>
-            <button type="button" :disabled="diff.busy || !diff.aRec || !diff.bRec" @click="diff.openFlicker()">交替对比</button>
+            <button type="button" :disabled="diff.busy || !diff.aRec || !diff.bRec || !!diff.precisionReason" @click="diff.openFlicker()">精确交替</button>
+            <button type="button" :disabled="diff.busy || !diff.aRec || !diff.bRec || diff.aId===diff.bId" @click="viewer.openPreviewPair(diff.aId!,diff.bId!)">并排预览</button>
           </div>
-          <p class="diff-note">
-            只比较同一空间范围的影像；宽高比不一致或尺寸未知时不建立共同网格。
-          </p>
+
         </section>
 
         <section class="diff-section" aria-label="分析方法">
-          <div class="diff-section-title">分析方法</div>
           <div class="seg" role="radiogroup" aria-label="分析方法">
             <button type="button" :class="{ on: diff.method === 'absdiff' }" role="radio"
               :aria-checked="diff.method === 'absdiff'" :disabled="diff.busy"
@@ -181,29 +182,36 @@ onBeforeUnmount(() => {
           </label>
         </section>
 
-        <section class="diff-section" aria-label="显示方式">
-          <div class="diff-section-title">显示方式</div>
+        <section class="diff-section diff-display-section" :class="{ ready: !!diff.result }" aria-label="显示方式">
+          <div class="diff-section-title">显示方式<span v-if="diff.result">{{ diff.resultVisible ? '显示中' : '已隐藏' }}</span></div>
           <div class="seg" role="radiogroup" aria-label="显示方式">
-            <button type="button" :class="{ on: diff.display === 'heat' }" role="radio"
-              :aria-checked="diff.display === 'heat'" @click="diff.display = 'heat'">热力图</button>
             <button type="button" :class="{ on: diff.display === 'regions' }" role="radio"
-              :aria-checked="diff.display === 'regions'" @click="diff.display = 'regions'">区域标记</button>
+              :aria-checked="diff.display === 'regions'" @click="diff.display = 'regions'">原图标记</button>
+            <button type="button" :class="{ on: diff.display === 'heat' }" role="radio"
+              :aria-checked="diff.display === 'heat'" @click="diff.display = 'heat'">独立热力图</button>
             <button type="button" :class="{ on: diff.display === 'overlay' }" role="radio"
-              :aria-checked="diff.display === 'overlay'" @click="diff.display = 'overlay'">叠加</button>
+              :aria-checked="diff.display === 'overlay'" @click="diff.display = 'overlay'">热力叠加</button>
           </div>
-          <label class="diff-field diff-inline">
-            <span>羽化强度</span>
-            <select v-model="diff.feather" aria-label="羽化强度" :disabled="diff.display !== 'overlay'">
-              <option value="off">关闭</option>
-              <option value="light">轻度</option>
-              <option value="medium">中度</option>
-            </select>
-            <em>仅影响显示</em>
-          </label>
+          <template v-if="diff.display === 'overlay'">
+            <label class="diff-field diff-inline">
+              <span>叠加不透明度</span>
+              <input v-model.number="diff.opacity" type="range" min="0" max="1" step="0.05" aria-label="热力叠加不透明度" />
+              <em>{{ Math.round(diff.opacity * 100) }}%</em>
+            </label>
+            <label class="diff-field diff-inline">
+              <span>边缘羽化</span>
+              <select v-model="diff.feather" aria-label="羽化强度">
+                <option value="off">关闭</option>
+                <option value="light">轻度</option>
+                <option value="medium">中度</option>
+              </select>
+            </label>
+          </template>
+          <DiffColorLegend v-if="diff.result && diff.display !== 'regions'" class="panel-legend" />
         </section>
 
         <details class="diff-advanced">
-          <summary>高级参数</summary>
+          <summary>高级设置</summary>
           <div class="diff-grid">
             <label class="diff-field">
               <span>开运算核</span>
@@ -251,6 +259,7 @@ onBeforeUnmount(() => {
         </details>
 
         <p v-if="diff.notice" class="diff-notice" role="status">{{ diff.notice }}</p>
+        <p v-if="diff.precisionReason" role="status">精确分析暂不可用：{{ diff.precisionReason }}；可继续并排预览。</p>
         <p v-if="diff.error" class="diff-error" role="alert">{{ diff.error }}</p>
         <p v-else-if="diff.stale" class="diff-notice" role="status">
           参数已修改，当前仍显示上一次结果；重新分析后生效。
@@ -267,7 +276,7 @@ onBeforeUnmount(() => {
       </div>
 
       <footer class="diff-footer">
-        <button class="diff-start" type="button" :disabled="diff.busy || !diff.aRec || !diff.bRec || diff.aId === diff.bId"
+        <button class="diff-start" type="button" :disabled="diff.busy || !diff.aRec || !diff.bRec || diff.aId === diff.bId || !!diff.precisionReason"
           data-e2e="diff-analyze" @click="run">
           {{ diff.busy ? '分析中…' : diff.result ? '重新分析' : '开始分析' }}
         </button>
@@ -284,36 +293,41 @@ onBeforeUnmount(() => {
 .diff-button{display:inline-flex;align-items:center;justify-content:center;gap:6px;flex:none;width:100px;height:32px;padding:0 10px;box-sizing:border-box;white-space:nowrap;font-family:inherit;font-size:13px;font-weight:500;border:1px solid var(--tb-border);border-radius:8px;background:var(--tb-surface);color:var(--tb-fg);cursor:pointer;transition:background var(--motion-hover),color var(--motion-hover)}
 .diff-button:hover,.diff-button.on{background:var(--tb-active-bg);color:var(--tb-primary)}
 .diff-button:focus-visible{outline:2px solid var(--tb-focus)}
-.diff-popover{position:absolute;top:calc(100% + 8px);right:0;width:336px;max-width:calc(100vw - 24px);max-height:calc(100dvh - 116px);overflow:auto;box-sizing:border-box;z-index:40;background:var(--surface);border:1px solid var(--tb-border);border-radius:12px;box-shadow:0 1px 2px #173e3110,0 4px 12px #173e3114,0 12px 32px #173e3114;font-size:11px;color:var(--ink);scrollbar-width:thin}
-.diff-heading{display:flex;align-items:center;gap:8px;padding:12px 13px 10px;border-bottom:1px solid var(--tb-divider)}
+.diff-popover{position:absolute;top:calc(100% + 8px);right:0;width:336px;max-width:calc(100vw - 24px);max-height:calc(100dvh - 116px);overflow:auto;box-sizing:border-box;z-index:40;background:var(--surface);border:1px solid var(--tb-border);border-radius:12px;box-shadow:0 1px 2px #173e3110,0 4px 12px #173e3114,0 12px 32px #173e3114;font-size:12px;color:var(--ink);scrollbar-width:thin}
+.diff-heading{display:flex;align-items:center;gap:8px;padding:10px 13px;border-bottom:1px solid var(--tb-divider)}
 .heading-icon{display:grid;place-items:center;width:29px;height:29px;border:1px solid color-mix(in srgb,var(--tb-primary) 15%,var(--tb-border));border-radius:8px;background:var(--tb-active-bg);color:var(--tb-primary)}
 .diff-heading strong{display:block;font-size:12px;line-height:17px;font-weight:650;letter-spacing:.03em}
-.heading-caption{display:block;font-size:10px;line-height:15px;color:var(--ink-sub)}
+.heading-caption{display:block;font-size:12px;line-height:15px;color:var(--ink-sub)}
 .diff-close{margin-left:auto;align-self:flex-start;border:0;background:transparent;display:grid;place-items:center;width:24px;height:24px;border-radius:5px;color:var(--ink-sub);cursor:pointer}
 .diff-close svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.2;stroke-linecap:round}
 .diff-close:hover{background:var(--tb-active-bg);color:var(--ink)}
 .diff-body{padding:11px 13px 4px}
-.diff-section{margin-bottom:11px}
-.diff-section-title{font-size:10px;color:var(--ink-sub);line-height:14px;margin-bottom:6px}
+.diff-section{margin-bottom:9px}
+.diff-section-title{display:flex;justify-content:space-between;font-size:12px;font-weight:600;color:var(--ink-sub);line-height:14px;margin-bottom:6px}
 .diff-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
 .diff-field{display:flex;flex-direction:column;gap:5px;min-width:0}
-.diff-field>span{font-size:10px;color:var(--ink-sub);line-height:14px}
-.diff-field select,.diff-field input{width:100%;min-width:0;height:28px;box-sizing:border-box;border:1px solid var(--tb-border);border-radius:6px;background:var(--tb-surface);padding:0 7px;color:var(--ink);font:inherit;font-size:11px;cursor:pointer}
+.diff-field>span{font-size:12px;color:var(--ink-sub);line-height:14px}
+.diff-field select,.diff-field input{width:100%;min-width:0;height:30px;box-sizing:border-box;border:1px solid var(--tb-border);border-radius:6px;background:var(--tb-surface);padding:0 7px;color:var(--ink);font:inherit;font-size:12px;cursor:pointer}
 .diff-field input{cursor:text}
 .diff-inline{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:7px;margin-top:8px}
-.diff-inline>span{font-size:10px;color:var(--ink-sub);white-space:nowrap}
+.diff-inline>span{font-size:12px;color:var(--ink-sub);white-space:nowrap}
 .diff-inline em{font-style:normal;font-size:9px;color:var(--ink-sub);white-space:nowrap}
 .pair-actions{display:flex;gap:5px;margin-top:8px}
-.pair-actions button{flex:1;min-width:0;height:25px;box-sizing:border-box;font:inherit;font-size:10px;border:1px solid var(--tb-border);border-radius:5px;background:var(--tb-surface);color:var(--ink-sub);padding:0 5px;cursor:pointer;transition:background var(--motion-hover) var(--ease-standard)}
+.pair-actions button{flex:1;min-width:0;height:30px;box-sizing:border-box;font:inherit;font-size:12px;border:1px solid var(--tb-border);border-radius:5px;background:var(--tb-surface);color:var(--ink-sub);padding:0 5px;cursor:pointer;transition:background var(--motion-hover) var(--ease-standard)}
 .pair-actions button:hover:enabled{background:var(--tb-active-bg);color:var(--tb-primary)}
 .seg{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:0;border:1px solid var(--tb-border);border-radius:6px;overflow:hidden;background:var(--tb-surface)}
-.seg button{height:27px;border:0;border-right:1px solid var(--tb-border);background:transparent;color:var(--ink-sub);font:inherit;font-size:10.5px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:0 4px}
+.seg button{height:30px;border:0;border-right:1px solid var(--tb-border);background:transparent;color:var(--ink-sub);font:inherit;font-size:12px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:0 4px}
 .seg button:last-child{border-right:0}
 .seg button:hover{background:var(--tb-active-bg)}
 .seg button.on{background:var(--tb-active-bg);color:var(--tb-primary);font-weight:600;box-shadow:inset 0 -2px 0 var(--tb-primary)}
 .diff-note{margin:7px 0 0;font-size:9.5px;line-height:14px;color:var(--ink-sub);overflow-wrap:anywhere}
+.diff-display-section{border-top:1px solid var(--tb-divider);padding-top:9px}
+.diff-display-section.ready{padding:9px;border:1px solid color-mix(in srgb,var(--tb-primary) 30%,var(--tb-border));border-radius:8px;background:color-mix(in srgb,var(--tb-active-bg) 35%,var(--surface))}
+.diff-section-title span{font-size:11px;font-weight:400;color:var(--tb-primary)}
+.panel-legend{margin-top:8px}
+.diff-field input[type="range"]{padding:0;accent-color:var(--tb-primary);border:0;background:transparent}
 .diff-advanced{margin:0 0 10px;border-top:1px solid var(--tb-divider);padding-top:9px}
-.diff-advanced summary{cursor:pointer;font-size:10.5px;font-weight:600;color:var(--ink);margin-bottom:8px;list-style:none}
+.diff-advanced summary{cursor:pointer;font-size:12px;font-weight:600;color:var(--ink);margin-bottom:8px;list-style:none}
 .diff-advanced summary::before{content:'▸';display:inline-block;width:12px;color:var(--ink-sub);transition:transform var(--motion-hover) var(--ease-standard)}
 .diff-advanced[open] summary::before{transform:rotate(90deg)}
 .diff-toggle{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:25px;cursor:pointer;margin-top:4px}
@@ -322,16 +336,16 @@ onBeforeUnmount(() => {
 .diff-switch::after{content:'';position:absolute;left:2px;top:2px;width:10px;height:10px;border-radius:50%;background:var(--surface);box-shadow:0 1px 2px #173e3129;transition:transform var(--motion-hover) var(--ease-standard)}
 .diff-switch:checked{background:var(--tb-primary);border-color:var(--tb-primary)}
 .diff-switch:checked::after{transform:translateX(12px)}
-.diff-error{margin:6px 0;padding:6px 7px;border-radius:5px;background:#fbe9e6;color:#9d3b2f;font-size:10px;line-height:15px;overflow-wrap:anywhere}
-.diff-notice{margin:6px 0;padding:6px 7px;border-radius:5px;background:#fdf3e3;color:#8a5a1f;font-size:10px;line-height:15px}
-.diff-summary{margin:6px 0;font-size:10px;line-height:15px;color:var(--ink-sub);overflow-wrap:anywhere}
-.diff-warnings{margin:6px 0 0;font-size:10px;line-height:15px;color:var(--ink-sub)}
+.diff-error{margin:6px 0;padding:6px 7px;border-radius:5px;background:#fbe9e6;color:#9d3b2f;font-size:12px;line-height:15px;overflow-wrap:anywhere}
+.diff-notice{margin:6px 0;padding:6px 7px;border-radius:5px;background:#fdf3e3;color:#8a5a1f;font-size:12px;line-height:15px}
+.diff-summary{margin:6px 0;font-size:12px;line-height:15px;color:var(--ink-sub);overflow-wrap:anywhere}
+.diff-warnings{margin:6px 0 0;font-size:12px;line-height:15px;color:var(--ink-sub)}
 .diff-warnings summary{cursor:pointer;color:var(--ink-sub)}
 .diff-warnings p{margin:4px 0 0}
 .diff-footer{display:grid;grid-template-columns:1fr auto;gap:7px;padding:9px 13px 10px;border-top:1px solid var(--tb-divider);background:color-mix(in srgb,var(--tb-bg) 45%,var(--surface));border-radius:0 0 12px 12px}
-.diff-start{display:flex;align-items:center;justify-content:center;min-height:31px;padding:6px;border:1px solid transparent;border-radius:7px;background:var(--tb-primary);color:white;font:inherit;font-size:11px;font-weight:600;cursor:pointer;transition:background var(--motion-hover) var(--ease-standard)}
+.diff-start{display:flex;align-items:center;justify-content:center;min-height:31px;padding:6px;border:1px solid transparent;border-radius:7px;background:var(--tb-primary);color:white;font:inherit;font-size:12px;font-weight:600;cursor:pointer;transition:background var(--motion-hover) var(--ease-standard)}
 .diff-start:hover:enabled{background:color-mix(in srgb,var(--tb-primary) 88%,black)}
-.diff-clear{min-height:31px;padding:6px 11px;border:1px solid var(--tb-border);border-radius:7px;background:var(--tb-surface);color:var(--ink-sub);font:inherit;font-size:11px;cursor:pointer;transition:background var(--motion-hover) var(--ease-standard)}
+.diff-clear{min-height:31px;padding:6px 11px;border:1px solid var(--tb-border);border-radius:7px;background:var(--tb-surface);color:var(--ink-sub);font:inherit;font-size:12px;cursor:pointer;transition:background var(--motion-hover) var(--ease-standard)}
 .diff-clear:hover:enabled{background:var(--tb-active-bg);color:var(--tb-primary)}
 button:disabled,select:disabled,input:disabled{opacity:.45;cursor:default}
 button:focus-visible,select:focus-visible,input:focus-visible,summary:focus-visible{outline:2px solid var(--tb-focus);outline-offset:2px}

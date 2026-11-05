@@ -25,6 +25,9 @@ import type {
   DiffAdvanced, DiffDisplay, DiffFeather, DiffImageInput, DiffMethod, DiffRequest,
   DiffResult, DiffScope, DiffSensitivity,
 } from '../lib/diffLocate';
+import { colorizeHeatPixels } from '../lib/diffRender';
+import { precisePairReason } from '../lib/compareCapabilities';
+import { registerViewerObservation } from '../lib/viewerContext';
 import { visibleThumbRect } from '../lib/viewMath';
 import type { ViewerRec } from './viewer';
 
@@ -97,29 +100,15 @@ function canvasFromPng(dataUrl: string): Promise<HTMLCanvasElement> {
   });
 }
 
-/** 连续差异图（8-bit 灰度）→ 半透明热力层：低差异透明，中琥珀，高橙红。 */
-function colorizeHeat(src: HTMLCanvasElement): HTMLCanvasElement {
+/** 固定连续色表；有效像素不透明，NoData 由显示背景承接。 */
+export function colorizeHeat(src: HTMLCanvasElement, valid?: HTMLCanvasElement | null): HTMLCanvasElement {
   const out = document.createElement('canvas');
   out.width = src.width;
   out.height = src.height;
-  const octx = out.getContext('2d')!;
-  const ictx = src.getContext('2d')!;
-  const img = ictx.getImageData(0, 0, src.width, src.height);
-  const d = img.data;
-  const rgba = new Uint8ClampedArray(d.length);
-  for (let i = 0; i < d.length; i += 4) {
-    const v = d[i] / 255;
-    if (v <= 0.04) continue;                 // 低差异完全透明
-    const t = Math.max(0, Math.min(1, (v - 0.04) / 0.96));
-    // 琥珀 (246,166,35) → 橙红 (226,74,45)
-    const k = Math.pow(t, 0.85);
-    rgba[i] = 246 + (226 - 246) * k;
-    rgba[i + 1] = 166 + (74 - 166) * k;
-    rgba[i + 2] = 35 + (45 - 35) * k;
-    // 整体不透明度约 34%，低差异再压一档
-    rgba[i + 3] = Math.round(255 * 0.34 * Math.min(1, 0.25 + v * 1.2));
-  }
-  octx.putImageData(
+  const img = src.getContext('2d')!.getImageData(0, 0, src.width, src.height);
+  const validity = valid?.getContext('2d')!.getImageData(0, 0, src.width, src.height).data;
+  const rgba = colorizeHeatPixels(img.data, validity);
+  out.getContext('2d')!.putImageData(
     new ImageData(rgba as Uint8ClampedArray<ArrayBuffer>, src.width, src.height), 0, 0);
   return out;
 }
@@ -227,6 +216,8 @@ export const useDiffStore = defineStore('diff', () => {
 
   /* ---------------- 参数 ---------------- */
   const open = ref(false);
+  const resultVisible = ref(true);
+  const opacity = ref(0.45);
   const busy = ref(false);
   const error = ref('');
   /** 非错误提示（例如「参数已变更，过期结果已丢弃」）。 */
@@ -250,6 +241,7 @@ export const useDiffStore = defineStore('diff', () => {
   const maskLayer = shallowRef<HTMLCanvasElement | null>(null);
   const rawMask = shallowRef<HTMLCanvasElement | null>(null);
   const selectedId = ref<string | null>(null);
+  const selectedRegionIds = ref<string[]>([]);
   const hoveredId = ref<string | null>(null);
   const lastWarnings = ref<string[]>([]);
   const baseSnapshot = shallowRef<Snapshot | null>(null);
@@ -257,9 +249,9 @@ export const useDiffStore = defineStore('diff', () => {
   const regions = computed(() => result.value?.regions ?? []);
   const viewerRegions = computed(() => regions.value.slice(0, VIEWER_MARKER_MAX));
   const selectedRegion = computed(() => regions.value.find((r) => r.id === selectedId.value) ?? null);
-  const showHeat = computed(() => display.value === 'heat' || display.value === 'overlay');
-  const showMask = computed(() => display.value === 'overlay');
-  const showMarkers = computed(() => display.value !== 'heat');
+  const showHeat = computed(() => resultVisible.value && !!result.value && display.value !== 'regions');
+  const showMask = computed(() => false); // 连续热力叠加不再混入二值掩码。
+  const showMarkers = computed(() => resultVisible.value && !!result.value);
   const refined = computed(() => result.value?.analysisGrid.mode === 'source');
   const canRestore = computed(() => !!baseSnapshot.value);
 
@@ -389,7 +381,7 @@ export const useDiffStore = defineStore('diff', () => {
     const r = viewer.recs.find((x) => x.id === id);
     if (!r) return 'missing';
     if (r.pending || !r.src) return 'pending';
-    return `${r.srcRev ?? ''}|${r.token ?? 0}|${r.srcw}x${r.srch}`;
+    return `${r.srcRev ?? ''}|${r.token ?? 0}|${r.srcw}x${r.srch}|${JSON.stringify(r.tourIdentity)}`;
   }
 
   function currentKey(): string {
@@ -400,6 +392,7 @@ export const useDiffStore = defineStore('diff', () => {
     });
   }
   const stale = computed(() => !!result.value && resultKey.value !== currentKey());
+  const precisionReason = computed(() => precisePairReason(aRec.value, bRec.value));
 
   /* ---------------- 分析范围 ---------------- */
   function visibleGridRect(planW: number, planH: number): GridRect {
@@ -440,12 +433,13 @@ export const useDiffStore = defineStore('diff', () => {
 
   /** 只解码与着色，不落任何 store 状态；由调用方复核身份后一次性安装。 */
   async function decodeLayers(res: DiffResult): Promise<DecodedLayers> {
-    const [diffCanvas, maskCanvas] = await Promise.all([
+    const [diffCanvas, maskCanvas, validCanvas] = await Promise.all([
       canvasFromPng(res.differenceMap),
       canvasFromPng(res.binaryMask),
+      res.validityMap ? canvasFromPng(res.validityMap) : Promise.resolve(null),
     ]);
     return {
-      heat: markRaw(colorizeHeat(diffCanvas)),
+      heat: markRaw(colorizeHeat(diffCanvas, validCanvas)),
       rawMask: markRaw(maskCanvas),
     };
   }
@@ -468,6 +462,7 @@ export const useDiffStore = defineStore('diff', () => {
       };
     }
     result.value = res;
+    resultVisible.value = true;
     resultKey.value = key;
     lastWarnings.value = [...(res.warnings ?? [])];
     selectedId.value = null;
@@ -489,6 +484,7 @@ export const useDiffStore = defineStore('diff', () => {
       error.value = '两张影像不能是同一张';
       return false;
     }
+    if (precisionReason.value) { error.value = '精确差异定位不可用：' + precisionReason.value + '；仍可分屏预览'; return false; }
     if (!a.src || !a.thumb || !b.src || !b.thumb) {
       error.value = '影像预览尚未就绪，请先在左侧打开这两张图';
       return false;
@@ -691,6 +687,7 @@ export const useDiffStore = defineStore('diff', () => {
   function clearResults(): void {
     requestSeq++;                          // 作废仍在途的分析/精算响应
     result.value = null;
+    resultVisible.value = true;
     resultKey.value = '';
     baseSnapshot.value = null;
     releaseLayers();
@@ -704,6 +701,11 @@ export const useDiffStore = defineStore('diff', () => {
   /* ---------------- Viewer 交互 ---------------- */
   function selectRegion(id: string | null): void {
     selectedId.value = id;
+  }
+  function toggleRegionSelection(id: string) {
+    if (!regions.value.some(r=>r.id===id)) return;
+    selectedRegionIds.value = selectedRegionIds.value.includes(id)
+      ? selectedRegionIds.value.filter(x=>x!==id) : [...selectedRegionIds.value,id];
   }
 
   function hoverRegion(id: string | null): void {
@@ -796,7 +798,7 @@ export const useDiffStore = defineStore('diff', () => {
   /** TifCanvas 按 pane 的 rec 取显示层；坐标已换算到该 rec 的缩略图。 */
   function layerFor(rec: ViewerRec | null): DiffLayer | null {
     const res = result.value;
-    if (!res || !rec?.thumb) return null;
+    if (!resultVisible.value || !res || !rec?.thumb) return null;
     if (rec.id !== res.imageA.id && rec.id !== res.imageB.id) return null;
     if (!heatLayer.value || !maskLayer.value) return null;
     return {
@@ -824,21 +826,35 @@ export const useDiffStore = defineStore('diff', () => {
     ensurePair();
   }
 
-  /* 图层或显示方式变化 → 让 TifCanvas 重绘 drawCanvas（它只认 renderTick）。 */
-  watch([display, heatLayer, maskLayer, result], () => { viewer.renderTick++; });
+  /* 图层、显隐或显示方式变化 → 主画布与鹰眼同步重绘；不触发分析或 Camera 写入。 */
+  watch([resultVisible, opacity, display, heatLayer, maskLayer, result], () => { viewer.renderTick++; });
   /* 羽化只改显示 alpha：从精确二值掩码重建，不重算、不改区域统计。 */
   watch(feather, () => { rebuildMask(); viewer.renderTick++; });
+  watch(result, () => { selectedRegionIds.value = []; }, {flush:'sync'});
+  registerViewerObservation('differences', () => {
+    const res=result.value;
+    if(!res)return null;
+    const chosen=selectedRegionIds.value.length?selectedRegionIds.value:selectedId.value?[selectedId.value]:[];
+    const items=[...regions.value].sort((a,b)=>Number(chosen.includes(b.id))-Number(chosen.includes(a.id))).slice(0,80);
+    return {image_a:res.imageA.id,image_b:res.imageB.id,stale:stale.value,
+      precision_reason:precisionReason.value,method:res.method,source:res.source,
+      total:regions.value.length,truncated:regions.value.length>items.length,selected_ids:[...chosen].slice(0,80),
+      bbox_format:'xywh',coordinate_space:'image_a_source_pixels',
+      regions:items.map(r=>({id:r.id,rank:r.rank,bbox:gridRectToSource(res,r.bbox),
+        area_grid_pixels:r.areaPx,relative_area:r.relativeArea,mean_diff:r.meanDiff,max_diff:r.maxDiff,
+        contour_kind:r.contourKind??'exact',holes:r.holes??0,refined:!!r.refined}))};
+  });
 
   return {
     // 面板
-    open, openPanel, closePanel, busy, error, notice,
+    open, resultVisible, opacity, openPanel, closePanel, busy, error, notice,
     method, sensitivity, scope, display, feather, minAreaPx, advanced,
     aId, bId, aRec, bRec, pairOptions, compatible, setPair,
     recommendedPair, ensurePair, selectPairFromActive,
     // 分析
     analyze, stale, currentKey, resultKey,
     // 结果
-    result, regions, viewerRegions, selectedRegion, selectedId, hoveredId,
+    result, regions, viewerRegions, selectedRegion, selectedId, hoveredId, precisionReason, selectedRegionIds, toggleRegionSelection,
     selectRegion, hoverRegion, locateRegion, addRegionToMask, openFlicker,
     clearResults, lastWarnings, refined, canRestore, refineRegion, restorePreview,
     // 显示层

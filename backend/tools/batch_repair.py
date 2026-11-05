@@ -10,7 +10,7 @@ from .contract import tool, ok, err
     name="prepare_batch_repair",
     description=(
         "为用户明确指定的 Viewer 影像集合生成结构化待修复草案，不扫描场景库，不执行 SR。"
-        "必须传入实际已知的 PAN.tif 路径，不允许猜路径。evidence 只写已有检测依据；"
+        "传入 Viewer 已知的影像或场景引用，不允许猜路径；准备阶段不访问文件、不校验生产条件。evidence 只写已有检测依据与复核建议；"
         "没有检测结果时必须注明待检测。返回草案由用户加入工具栏、确认范围与执行策略后，"
         "经统一批次导入与 Batch Goal 创建执行。不要在 Agent 内循环处理长任务。"),
     params_schema={
@@ -27,17 +27,19 @@ def prepare_batch_repair(items):
         candidates = []
         seen = set()
         for item in items:
-            path = ensure_allowed(Path(item["path"]), kind="file")
-            if path.name != "PAN.tif":
-                return err("仅支持明确指定的场景本体 PAN.tif")
-            identity = resource_identity(path)
-            if identity["image_key"] in seen:
+            # Pure planning: preserve explicit references, never read or authorize a file.
+            path = item['path'].strip()
+            evidence = item['evidence']
+            if not path or len(path) > 4096 or not isinstance(evidence, str) or len(evidence) > 4096:
+                return err('草案引用或依据无效')
+            if path in seen:
                 continue
-            seen.add(identity["image_key"])
-            candidates.append({"path": path.as_posix(), "name": path.parent.name,
-                "image_key": identity["image_key"], "evidence": item["evidence"]})
+            seen.add(path)
+            name = path.replace('\\', '/').rstrip('/').split('/')[-1]
+            candidates.append({"path": path, "name": name, "evidence": evidence})
         return ok({"kind": "batch_repair_draft.v1", "persisted": False,
-                   "candidates": candidates, "requires_confirmation": True})
+                   "candidates": candidates, "requires_confirmation": False,
+                   "submission_requires_scope_and_strategy": True})
     except (ValueError, OSError, PathDeniedError) as exc:
         return err(str(exc))
 

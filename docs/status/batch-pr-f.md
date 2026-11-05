@@ -1,6 +1,7 @@
 # 批量修复 PR F 实施记录：进度 Panel、事件同步与跟随（2026-11-03）
 
-> 状态：**已实施；快照 / 控制 API / 事件分页 / Batch Store / Panel / Overlay 跟随 / 50 景 Fake 验收全部完成。**
+> 当前状态（2026-11-06）：**F 达到 M3 演示退出条件；现有入口连接实际 Batch 后端 + 独立 Fake SR 的 50 景浏览器联合验收通过。** 最新证据见 §12；§1–11 保留历史记录，不能作为本轮验证结果。
+> 当前布局沿用 [batch-task-dock.md](batch-task-dock.md) 的「工具栏｜Agent」及「待修复｜执行监控｜结果报告」，取代本文早期第三 Tab 描述。
 > 只证明 demo/Fake SR 的监控事实链，不证明真实 SR/GPU 修复质量；production 提交门仍关闭。
 > 前序见 [batch-pr-c.md](batch-pr-c.md)、[batch-pr-d.md](batch-pr-d.md)、[batch-pr-e.md](batch-pr-e.md)。
 > 基线：`main` @ `1bc2bea`，本机 Windows；未执行真实 SR/GPU，未扫描盘阵，未读写真实生产数据。
@@ -146,6 +147,8 @@ cd .e2e && node test-batch-panel.js
 
 ## 9. 未覆盖的真实环境边界
 
+> 历史边界清单：本轮已关闭的浏览器真实后端联验、实时发现、500 条历史及恢复缺口见 §12。内网代理、真实盘阵 / SR / GPU / 修复质量仍未验收。
+
 - **真实 SR/GPU/盘阵**：50 景验收仍为 Fake 调度器与合成数据；真实并发、真实作业时长、真实阵列对账未验收。
 - **真实进度规模**：浏览器验收用假快照模拟 50 景，未在真实 50 景批次上长时间观察 Panel 的刷新、重连与内存表现。
 - **SSE 代理行为**：只验证了本地直连与假服务；nginx/内网代理下的长连断开、缓冲与超时未演练。
@@ -175,3 +178,98 @@ cd .e2e && node test-batch-panel.js
 新增测试（`frontend/src/stores/__tests__/batchGoal.test.ts`，10 passed）：A/B 快照乱序返回、同批次新旧刷新乱序、跟随取图途中用户操作后不调用 `openSceneJpg` 且不设置叠加层。复核指出查看器内「解码后仍无条件 `activate`」的窗口，现已把 `stillWanted` 传进 `openSceneJpg` 并在 `applySceneJpgToRec` 之后、`activate` 之前检查；该分支依赖 JPG 解码，未新增单测（现有用例在调用 `openSceneJpg` 前即命中守卫），由本轮 `typecheck`、全量测试、`build` 与浏览器验收覆盖其余路径。
 
 复核给出的后端专项结果为 **102 passed in 97.74s**，与本记录 §7 一致。本轮修订后已重跑前端全量（658 passed / 12.69s）、`typecheck`、`build`（8.94s）与 `test-batch-panel.js`（通过），未重跑后端全量。
+
+## 12. 入口接线、正确性补修与实际后端联合验收（2026-11-06）
+
+### 本轮基线与范围
+
+起始 HEAD 为 `fb15a3e`，首次 `git status --short` 为空。执行过程中工作树出现同期的任务中枢、结果报告、Agent 移交及影像刷新修改；全部保留，未覆盖、回退或归为本轮原创。未执行 reset / clean / commit / push。
+
+| 对照 | 本轮源码核查结论 |
+| --- | --- |
+| 已完成、直接复用 | A–E 的 Manifest 冻结 / 幂等创建、Producer / Monitor、Intent / SR 查询 / 分层 Verifier；F 的 Snapshot、control_revision、SSE、Store、Overlay 与 Panel；现有双 Tab 任务中枢和草案入口 |
+| 设计已有且源码已接线 | TXT / Viewer 显式集合 → 核验、诊断与明确排除 → 冻结确认 → 创建 → 关联返回 Goal ID 并更新 URL → 执行监控 / 影像 / Overlay / 报告；导入不创建 Goal，创建才授权执行 |
+| 历史记录过时 | 第三 Tab、缺少创建入口、没有同会话发现、历史游标完全依赖尾部等描述已被现有实现部分取代，不重新建设入口或状态体系 |
+| 本轮发现的真实缺陷 | 实时增长后的历史入口 / 首次锚点、事件密集刷新饥饿、追平期间延长的目标、空页缺口、页面与网络恢复、初始 Overlay 被清空、手动导航 / 复核迟到响应等，见下表 |
+| 必须新增的证据 | 浏览器从用户入口创建并连接实际后端，独立统计物理提交，关闭页面与 API 重启恢复，超过 500 条事件的历史全量访问，最终 Snapshot / 前端 / 报告一致 |
+
+### 修复与影响
+
+| 修复 | 行为与影响范围 |
+| --- | --- |
+| 历史与尾部解耦 | 实时尾部仍最多 500 条，历史只保留一页 20 条；首次翻页从当时可见的最新十条之前固定游标，随后只按 `next_before` 前进。首屏事件少时，实时增长也会开放历史入口，不跳过初始化之后的历史 |
+| 密集事件与一致快照 | 刷新改为有界合并，持续事件不能无限重置定时器；计数始终来自 Snapshot，不按事件累加 |
+| 并发追平与终态尾事件 | 正在追平时到达的更高目标在本轮结束后继续追平；空页但未到目标记为中断；只有消费到快照水位才声明同步收尾，重复事件仍去重 |
+| 断网与页面生命周期 | offline / pagehide 主动收流和清定时器；online / pageshow 重读 Snapshot、从消费游标分页追平后接流。避免半开流或 bfcache 文档占用旧连接 |
+| 会话关联 | API 列表增加服务端 session_id 过滤，避免其他会话的全局前 N 条挤掉本会话任务；同会话发现进入既有选择器，不抢当前选择；URL / 创建返回 ID / 用户选择仍优先 |
+| 请求隔离 | 创建期间切会话不把旧会话 Goal 挂到新会话；手动定位先记录用户意图并带导航守卫，绘制中拒绝定位；复核、区域定位、控制通知增加代次隔离；原快照、控制和历史请求隔离继续保留 |
+| Viewer 与 Overlay | 初次 Panel 关联保留显式 batch_goal + batch_item 深链接，且不重复取 Overlay；主动关闭后不复活。恢复巡览声明用户意图，退出批次跟随；不改变 ROI、Mask 或视野历史实现 |
+
+未发现需修改 A–E 执行器的本轮阻断缺陷；未重构 Agent Loop、Goal Runtime、整个 Viewer，也未更改 production 提交门。
+
+### 实际执行的验证
+
+以下均为本轮执行，非引用历史通过结论：
+
+```text
+.venv\Scripts\python.exe -m pytest backend/tests/test_batch_snapshot.py backend/tests/test_batch_manifest.py backend/tests/test_batch_worker.py backend/tests/test_batch_artifacts.py backend/tests/test_goal_runtime.py -q
+# 177 passed, 1 warning in 45.79s，包含 50 景 Worker / 暂停取消 / 人工复核 / 恢复 / Snapshot 专项
+
+cd frontend
+npm run typecheck
+# 通过
+npm test
+# 61 files / 785 tests passed，Batch Store 22 项；术语检查通过
+npm run build
+# 通过，2.63s；仅既有大 chunk 提示
+
+node .e2e/test-batch-panel.js
+# 通过：固定假快照的渲染、冻结确认、控制 409 不重放、报告与交互
+node .e2e/test-batch-overlay.js
+# 通过：身份/版本、分屏裁剪、逐顶点投影、缩放/平移、文档与 PNG 失败不残留
+node .e2e/test-batch-real.js
+# PASS real Batch browser: 1b6ac0377ec549bfbc0195f7bf463e2a;
+# 50 physical submissions; 3010 events fully consumed; history reaches seq 1
+git diff --check -- frontend/src/stores/batchGoal.ts frontend/src/stores/__tests__/batchGoal.test.ts frontend/src/lib/api.ts frontend/src/lib/batchEventSync.ts frontend/src/lib/__tests__/batchEventSync.test.ts frontend/src/components/BatchItemsList.vue frontend/src/components/BatchControls.vue frontend/src/components/BatchRepairDraft.vue frontend/src/stores/autoTour.ts docs/status/batch-pr-f.md docs/planning/1023.md
+# 本轮范围通过；整树检查另报同期 DiffLocateButton.vue 的一处尾随空白，未改动该文件
+```
+
+环境问题如实保留：首轮后端为 175 passed / 2 failed，均因虚拟环境缺少已在 `deploy/requirements-api.txt` 声明的 SciPy；本机安装 `scipy==1.18.1` 后原断言不变重跑得到 177 passed。前端既有 geotiff source map 缺失警告仍存在。
+
+首轮前端另发现旧测试把「目标水位之前返回空页」视作非中断；保留 consumed 不前进断言，将 truncated 断言加强为 true，与缺口必须可恢复的契约一致。其他既有断言未放宽。浏览器脚本调试中的失败保留原严格要求：修复真实深链接问题，修正测试对 Vue 代理的序列化、画布选择与 Windows 子进程树关闭方式；历史遍历按真实水位计算页数，始终保留最终 seq == 1 断言。
+
+### 两类浏览器证据的边界
+
+1. `test-batch-panel.js` / `test-batch-overlay.js` 使用固定文档和假服务，只证明 UI 渲染与交互。
+2. 新增 `backend/tests/batch_browser_fixture.py` 启动实际完整 FastAPI 应用、真实 SQLite、Batch Worker、Manifest、真实小 TIFF / Mask IO、Snapshot / SSE / 控制 / 报告。`.e2e/test-batch-real.js` 只把外部 SR 提交与查询运输替换为独立 Fake SR 服务；无前端假 Snapshot、无直接改 Item 状态。Fake 账本在 Node 进程中独立于后端，后端被强制结束并重启时仍保留已接受作业与计时。Windows 按 PID 关闭测试子进程树，确保真正重启 API。
+
+实际用户链路先跑 5 景控制批次：TXT 含一条非法行，UI 显式排除；冻结前后 Goal 数不增加，创建响应在服务端提交后被浏览器模拟丢失，重试沿用 request_key，只得到一个 Goal。暂停期间 submitted 不增长而 verified 增长；恢复后继续派发；取消后原作业保留监控，最终 CANCELLED、monitoring_done=true、已提交并核验 2 项、未派发 3 项为 user_cancelled 跳过。
+
+随后从同一既有入口创建 50 景，联合验收包含：
+
+- 上一景 SR 活动作业仍在后台时，Panel 与后端都观察到更高序号的 Producer 当前项；数据来自实际状态机。
+- 打开后端真实影像及身份匹配 Overlay；延迟真实 resolve 响应，用户在真实画布滚轮操作后退出跟随，迟到响应不改变 activeId。
+- 整页刷新恢复同一 Goal；断网重连；页面在批次未结束时关闭，后台事件继续增长；重新打开恢复。
+- API 在已接受作业仍活动时强制结束 / 重启，SQLite 恢复并继续监控与派发，物理提交没有重复。
+- 最终 UI counts 与后端 Snapshot 深度一致，consumedSeq 等于最终 last_seq；只读报告 Modal 原始 JSON 与后端报告完全一致。
+- 事件历史逐页严格递减，150 页到达 seq 1；实时尾部裁剪不影响历史访问。
+
+### 50 景结果与可复核工件
+
+| 证据 | 本轮结果 |
+| --- | --- |
+| Goal ID | `1b6ac0377ec549bfbc0195f7bf463e2a` |
+| 物理提交 | 50 次、50 个不同提交脚本；重复 0。含前置小批次的独立账本总计 52 次 |
+| 最终 Snapshot | COMPLETED / monitoring_done=true；detected=50、submitted=50、verified=50、verified_demo=50、verified_production=0；failed / blocked / unknown / in_flight 均 0 |
+| 最终事件 | last_seq=3010，consumedSeq=3010；历史 150 页，末页最小 seq=1，游标严格递减 |
+| 报告 | counts={SUCCEEDED:50}，50 项 verification.ok=true；全部 provenance=mock / success_scope=demo_contract |
+| 原始证据 | [.e2e/artifacts/batch-real-evidence.json](../../.e2e/artifacts/batch-real-evidence.json)：最终完整 Snapshot、报告、重叠现场、控制批次、物理账本、历史游标 |
+| 浏览器截图 | [batch-real.png](../../.e2e/artifacts/batch-real.png) |
+
+运行时临时目录仅含合成输入、SQLite、Mask 与测试工件，路径记录在证据 JSON 的 root 字段；重跑会创建新的隔离目录及 Goal ID，计时导致事件数不保证恒为 3010，应检验游标与当轮水位一致。
+
+### M3 判断与尚未完成的边界
+
+**F 达到 M3 演示退出条件。** 依据为既有入口完成授权闭环、真实后端三轨进度 / 当前项 / 队列 / 报告、控制冲突与真实暂停恢复取消、事件恢复 / 完整历史、默认关闭跟随及迟到请求守卫，以及独立物理提交账本证明的 50 景重启恢复。此结论不等于 M4 生产准入。
+
+仍待真实环境验收：内网 nginx / 代理 SSE 缓冲与超时、真实大图长期内存、真实盘阵 / Detector / SR / GPU 的产物与修复质量、真实 local executor 重启对账。没有开放 production 门，没有扫描盘阵，没有把 demo_contract / provenance=mock 当成生产成功。草案依旧仅在窗口内，人工掩码审批依旧逐项，Last-Event-ID 头未实现（现用 after 游标），这些不属于本轮新增能力。

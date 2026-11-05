@@ -92,6 +92,7 @@ function rec(id: number, name: string) {
   return {
     id, name, src, srcw: w, srch: h, nbands: 1, W: w, H: h,
     thumb: { width: 16, height: 16 }, pending: false, sceneId: 's' + id,
+    srcRev: 'v1', tourIdentity: {id,sequence:'fixture',role:id===1?'pan':'nosr',width:w,height:h,sourceRevision:'v1'},
   } as any;
 }
 
@@ -343,5 +344,66 @@ describe('diff store — 候选绑定结果影像', () => {
     expect(await diff.locateRegion('r001')).toBe(true);
     expect(mocks.viewer.activate).toHaveBeenCalledWith(1);
     expect(mocks.viewer.focusPaneRect).toHaveBeenCalledWith('A', expect.any(Array));
+  });
+});
+
+
+describe('diff visualization controls', () => {
+  it('hides and restores cached layers and selection without changing camera, parameters or results', async () => {
+    mocks.api.mockResolvedValue(fakeResult());
+    const diff = useDiffStore();
+    diff.aId = 1; diff.bId = 2;
+    await diff.analyze();
+    diff.display = 'heat';
+    diff.selectRegion('r001');
+    const result = diff.result, heat = diff.heatLayer, regions = diff.regions;
+    const key = diff.currentKey();
+    const camera = { ...mocks.viewer.panes[0].view };
+    diff.openPanel(); diff.closePanel();
+    expect(diff.resultVisible).toBe(true);
+    expect(diff.layerFor(mocks.viewer.recs[0])?.heat).toBe(heat);
+    diff.resultVisible = false;
+    await nextTick();
+    expect(diff.layerFor(mocks.viewer.recs[0])).toBeNull();
+    expect(diff.showHeat).toBe(false);
+    expect(diff.showMarkers).toBe(false);
+    expect(diff.result).toBe(result);
+    expect(diff.regions).toBe(regions);
+    expect(diff.selectedId).toBe('r001');
+    diff.resultVisible = true;
+    await nextTick();
+    expect(diff.layerFor(mocks.viewer.recs[0])?.heat).toBe(heat);
+    expect(diff.showMarkers).toBe(true);
+    expect(mocks.viewer.panes[0].view).toEqual(camera);
+    expect(diff.currentKey()).toBe(key);
+    expect(mocks.api).toHaveBeenCalledTimes(1);
+    diff.clearResults();
+    expect(diff.result).toBeNull();
+    expect(diff.heatLayer).toBeNull();
+    expect(diff.regions).toEqual([]);
+  });
+
+  it('all modes, alpha and feather change locally; layers follow result identities and ROI coverage', async () => {
+    mocks.api.mockResolvedValue(fakeResult());
+    const diff = useDiffStore();
+    diff.aId = 1; diff.bId = 2;
+    await diff.analyze();
+    const result = diff.result!, heat = diff.heatLayer, key = diff.currentKey();
+    result.analysisGrid = { ...result.analysisGrid, width: 8, height: 8, fullWidth: 32, fullHeight: 32, scopeX: 8, scopeY: 16 };
+    for (const mode of ['regions', 'heat', 'overlay'] as const) {
+      diff.display = mode;
+      diff.opacity = 0.7;
+      diff.feather = 'medium';
+      await nextTick();
+      expect(diff.showHeat).toBe(mode !== 'regions');
+      expect(diff.showMarkers).toBe(true);
+      expect(diff.layerFor(mocks.viewer.recs[0])?.coverage).toEqual([4, 8, 4, 4]);
+      expect(diff.layerFor(mocks.viewer.recs[1])?.heat).toBe(heat);
+      expect(diff.layerFor(mocks.viewer.recs[2])).toBeNull();
+      expect(diff.result).toBe(result);
+      expect(diff.currentKey()).toBe(key);
+      expect(diff.stale).toBe(false);
+    }
+    expect(mocks.api).toHaveBeenCalledTimes(1);
   });
 });

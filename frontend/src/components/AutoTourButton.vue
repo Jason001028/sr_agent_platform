@@ -7,6 +7,14 @@ const tour=useAutoTourStore(),open=ref(false);
 const INTERVALS=[200,300,400,500,600,700,800,900,1000,1100,1200,1300,1400,1500,1600];
 import { useViewerStore } from '../stores/viewer';
 const viewer=useViewerStore();
+const previewA=ref<number|null>(null),previewB=ref<number|null>(null),previewBusy=ref(false),previewError=ref('');
+async function previewPair(){
+ if(previewA.value==null||previewB.value==null)return;
+ previewBusy.value=true;previewError.value='';
+ try { if(await viewer.openPreviewPair(previewA.value,previewB.value))open.value=false;else previewError.value='预览未就绪或操作已取消，请重新选择'; }
+ finally { previewBusy.value=false; }
+}
+watch(open,value=>{if(value){const ids=viewer.selectedIds.length===2?viewer.selectedIds:[viewer.activeRec?.id,...viewer.recs.filter(r=>r.id!==viewer.activeRec?.id).map(r=>r.id)];previewA.value=ids[0]??null;previewB.value=ids[1]??null;}});
 const locked=computed(()=>tour.status!=='idle');
 const pairNotice=computed(()=>[...new Set([tour.pairMessage,tour.pairReason].filter(Boolean))].join('；'));
 watch(()=>tour.compare,enabled=>{if(!enabled){tour.cancelPreparation();if(tour.status==='idle'&&viewer.compareMode==='flicker')viewer.setCompareMode('off');}});
@@ -40,6 +48,10 @@ onBeforeUnmount(()=>{tour.cancelPreparation();document.removeEventListener('keyd
     <button class="tour-close" type="button" aria-label="关闭巡览设置" title="关闭设置" @click="open=false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 5 6 6M11 5l-6 6" /></svg></button>
    </header>
    <div class="tour-body">
+    <details><summary>自由双图预览</summary><p>任意影像并排独立浏览，无需配准。精确交替巡览仍需可信配对。</p>
+     <div class="tour-grid"><label class="tour-field"><span>左图</span><select v-model.number="previewA"><option v-for="r in viewer.recs" :key="r.id" :value="r.id">{{ r.name }}</option></select></label><label class="tour-field"><span>右图</span><select v-model.number="previewB"><option v-for="r in viewer.recs" :key="r.id" :value="r.id">{{ r.name }}</option></select></label></div>
+     <button :disabled="previewBusy || viewer.drawMode || previewA==null || previewB==null || previewA===previewB" @click="previewPair">并排预览</button><p v-if="previewError">{{ previewError }}</p>
+    </details>
     <TourRoutePicker v-model="tour.route" :disabled="locked" />
     <div class="tour-grid tour-navigation">
      <label class="tour-field"><span>巡览范围</span><select v-model="tour.range" aria-label="巡览范围" :disabled="locked"><option value="all">整张影像</option><option value="visible">当前可见区域</option></select></label>

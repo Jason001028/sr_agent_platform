@@ -35,6 +35,20 @@ class ArrayAnalysisTest(unittest.TestCase):
         self.assertTrue(out["differenceMap"].startswith("data:image/png;base64,"))
         self.assertTrue(out["binaryMask"].startswith("data:image/png;base64,"))
 
+    def test_validity_map_distinguishes_nodata_from_zero_difference(self):
+        a = gradient()
+        a[10:20, 30:40] = np.nan
+        out = image_diff.analyze_arrays(a, a.copy())
+        def png(key):
+            return np.asarray(Image.open(io.BytesIO(base64.b64decode(out[key].split(",", 1)[1]))))
+        valid = png("validityMap")
+        self.assertEqual(valid.shape, a.shape)
+        np.testing.assert_array_equal(valid > 0, np.isfinite(a))
+        self.assertTrue((png("differenceMap") == 0).all())
+        self.assertTrue((png("binaryMask") == 0).all())
+        self.assertEqual(out["regions"], [])
+        self.assertEqual(out["coverage"]["validPixels"], int(np.isfinite(a).sum()))
+
     def test_local_block_difference_is_located(self):
         a = gradient()
         b = a.copy()

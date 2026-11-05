@@ -2,7 +2,7 @@
 import { beforeEach, expect, it } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import { useBatchDraftStore } from '../batchDraft';
-beforeEach(() => setActivePinia(createPinia()));
+beforeEach(() => { localStorage.clear(); setActivePinia(createPinia()); });
 it('keeps exact identities, deduplicates paths and requires explicit confirmation', () => {
   const draft = useBatchDraftStore();
   draft.add([{ path: '/one/PAN.tif', name: 'PAN' }, { path: '/two/PAN.tif', name: 'PAN' }]);

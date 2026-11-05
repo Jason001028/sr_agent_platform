@@ -65,7 +65,6 @@ export async function catchUpBatchEvents(
       cursor = next;
     } else {
       // No events at or below the target: keep consumed where it was, but stop.
-      if (!page.has_more) break;
       truncated = true;
       break;
     }

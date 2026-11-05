@@ -14,6 +14,7 @@
 import { computed, ref, watch } from 'vue';
 import { defineStore } from 'pinia';
 import { useViewerStore } from './viewer.js';
+import { registerViewerObservation } from '../lib/viewerContext';
 import { useScenesStore } from './scenes.js';
 import {
   apiBatchControl, apiBatchEvents, apiBatchGoals, apiBatchSnapshot,
@@ -47,6 +48,7 @@ export type BatchSyncState =
 export const useBatchGoalStore = defineStore('batchGoal', () => {
   const goalId = ref<string | null>(null);
   const snapshot = ref<BatchSnapshot | null>(null);
+  // The backend reads the actual session-bound Goal; client progress is not authority.
   const events = ref<BatchEvent[]>([]);
   const historyPage = ref<BatchEvent[]>([]);
   const historyBefore = ref<number | null>(null);
@@ -69,6 +71,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
   let catchUpTask: Promise<void> | null = null;
   let catchUpTaskGen = -1;
+  let catchUpTarget = 0;
   let catchUpToken: object | null = null;
   let retryDelay = 1000;
   let lastFollowKey = '';
@@ -86,7 +89,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     const seq = ++discoverySeq;
     const gen = loadGen;
     try {
-      const goals = await apiBatchGoals(cfg(), 100);
+      const goals = await apiBatchGoals(cfg(), 100, sessionId);
       if (seq !== discoverySeq || gen !== loadGen) return;
       availableGoals.value = goals.filter(g => g.session_id === sessionId || g.goal_id === goalId.value);
       // An explicit or remembered selection remains authoritative. New work
@@ -120,7 +123,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     manualStop = false;
   }
 
-  function reset(): void {
+  function reset(preserveOverlay = false): void {
     clearTimers();
     stopStream();
     snapshot.value = null;
@@ -138,13 +141,17 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     followNote.value = '';
     syncState.value = 'idle';
     lastFollowKey = '';
-    clearOverlay();
+    if (!preserveOverlay) clearOverlay();
   }
 
   function detach(): void {
     // Invalidates any attach/refresh still in flight for the old batch.
     loadGen += 1;
     document.removeEventListener('visibilitychange', onVisibility);
+    window.removeEventListener('offline', onOffline);
+    window.removeEventListener('online', onOnline);
+    window.removeEventListener('pagehide', onPageHide);
+    window.removeEventListener('pageshow', onOnline);
     reset();
     goalId.value = null;
   }
@@ -166,9 +173,9 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     });
     if (!isCurrent(gen, gid)) return;
     events.value = mergeBatchEvents([], page.events);
-    // Anchor history before the initially visible ten events. Never derive
-    // this again from a live buffer which may already have been trimmed.
-    historyBefore.value = [...page.events].sort((a, b) => b.seq - a.seq).slice(0, 10).at(-1)?.seq ?? upTo + 1;
+    // Anchor on the first history request, from the ten rows visible then.
+    // After browsing starts this cursor is independent of the live buffer.
+    historyBefore.value = null;
     hasEarlier.value = page.has_earlier || page.events.length > 10;
   }
 
@@ -178,8 +185,14 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
    *  generation; a direct attach starts a fresh one. */
   async function attach(id: string, gen?: number): Promise<boolean> {
     if (gen !== undefined && gen !== loadGen) return false;
+    const viewer = useViewerStore();
+    const query = new URLSearchParams(window.location.search);
+    const initialItem = !goalId.value && !viewer.batchOverlayOff
+      && query.get('batch_goal') === id ? query.get('batch_item') : null;
     document.removeEventListener('visibilitychange', onVisibility);
-    reset();
+    // Attaching the Panel must not disable or reload the explicit deep-link
+    // Overlay. Later switches/explicit closes still clear it normally.
+    reset(!!initialItem);
     const myGen = gen ?? ++loadGen;
     goalId.value = id;
     writeStored(LAST_GOAL_KEY, id);
@@ -205,6 +218,10 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
       return false;
     }
     document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('offline', onOffline);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('pagehide', onPageHide);
+    window.addEventListener('pageshow', onOnline);
     startStream();
     return true;
   }
@@ -219,9 +236,9 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     const gen = ++loadGen;
     loadError.value = '';
     try {
-      const goals = await apiBatchGoals(cfg(), 30);
+      const goals = await apiBatchGoals(cfg(), 100, sessionId);
       if (gen !== loadGen) return false;
-      availableGoals.value = goals;
+      availableGoals.value = goals.filter(g => g.session_id === sessionId || g.goal_id === goalId.value);
     } catch (e) {
       if (gen !== loadGen) return false;
       availableGoals.value = [];
@@ -268,7 +285,8 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
   }
 
   function scheduleRefresh(delay = 350): void {
-    if (refreshTimer != null) clearTimeout(refreshTimer);
+    // A busy event stream must not postpone the authoritative read forever.
+    if (refreshTimer != null) return;
     refreshTimer = setTimeout(() => {
       refreshTimer = null;
       void refreshSnapshot();
@@ -289,7 +307,8 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
       if (syncError.value.startsWith('事件追平中断')) syncError.value = '';
       if (snap.goal.last_seq > consumedSeq.value) await catchUp();
       if (!isCurrent(gen, gid) || seq !== refreshSeq) return;
-      if (snap.goal.monitoring_done && isTerminalStatus(snap.goal.status)) {
+      if (snap.goal.monitoring_done && isTerminalStatus(snap.goal.status)
+          && consumedSeq.value >= snap.goal.last_seq) {
         syncState.value = 'done';
       }
     } catch (e) {
@@ -302,12 +321,21 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
    *  `snapshot.last_seq` without replaying the events in between. */
   async function catchUp(upTo?: number): Promise<void> {
     if (!goalId.value) return;
+    const target = Math.max(upTo ?? 0, snapshot.value?.goal.last_seq ?? 0);
     // A task belongs to the batch that started it; after a switch it must not
     // be reused to answer for the new batch.
-    if (catchUpTask && catchUpTaskGen === loadGen) return catchUpTask;
+    if (catchUpTask && catchUpTaskGen === loadGen) {
+      const gen = loadGen;
+      const previousTarget = catchUpTarget;
+      await catchUpTask;
+      // An SSE tail/refresh arriving during pagination may extend the target.
+      if (gen === loadGen && target > previousTarget && consumedSeq.value < target) {
+        await catchUp(target);
+      }
+      return;
+    }
     const gid = goalId.value;
     const gen = loadGen;
-    const target = Math.max(upTo ?? 0, snapshot.value?.goal.last_seq ?? 0);
     const token = {};
     const task = (async () => {
       try {
@@ -318,6 +346,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
         if (!isCurrent(gen, gid)) return;
         if (result.events.length) {
           events.value = mergeBatchEvents(events.value, result.events);
+          if (historyBefore.value === null && events.value.length > 10) hasEarlier.value = true;
         }
         consumedSeq.value = Math.max(consumedSeq.value, result.consumed);
         if (result.truncated) {
@@ -337,6 +366,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     })();
     catchUpTask = task;
     catchUpTaskGen = gen;
+    catchUpTarget = target;
     catchUpToken = token;
     return task;
   }
@@ -348,6 +378,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
       void catchUp(event.seq);
     } else {
       events.value = mergeBatchEvents(events.value, [event]);
+      if (historyBefore.value === null && events.value.length > 10) hasEarlier.value = true;
       consumedSeq.value = event.seq;
     }
     if (eventNeedsSnapshot(event.event_type)) scheduleRefresh();
@@ -412,6 +443,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     const gen = loadGen;
     const first = [...events.value].sort((a, b) => b.seq - a.seq).slice(0, 10).at(-1);
     const before = historyBefore.value ?? (first ? first.seq : (snapshot.value?.goal.last_seq ?? 0) + 1);
+    historyBefore.value = before;
     loadingEarlier.value = true;
     try {
       const page = await apiBatchEvents(cfg(), gid, {
@@ -533,11 +565,17 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     const gid = goalId.value;
     if (!gid) return '还没有关联批次。';
     if (!item.image_path) return '这一项还没有可打开的影像路径。';
+    if (useViewerStore().drawMode) return '请先退出绘制 / 编辑后再定位影像。';
     const scenes = useScenesStore();
-    const err = await scenes.openQuiet(item.image_path, 'user');
-    if (err) return err;
-    if (goalId.value !== gid) return '';
+    const gen = loadGen;
     const viewer = useViewerStore();
+    // Record the user's action before IO, so a pending follow cannot win.
+    viewer.noteUserIntent();
+    const seq = viewer.userIntentSeq;
+    const stillWanted = () => isCurrent(gen, gid) && viewer.userIntentSeq === seq && !viewer.drawMode;
+    const err = await scenes.openQuiet(item.image_path, 'follow', { stillWanted });
+    if (err) return err;
+    if (!stillWanted()) return '已按新的视图操作取消定位。';
     viewer.batchOverlayOff = false;
     viewer.batchOverlayTarget = { goalId: gid, itemId: item.item_id };
     return '';
@@ -553,6 +591,22 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     if (document.visibilityState !== 'visible' || !goalId.value) return;
     void refreshSnapshot();
     void catchUp();
+  }
+
+  function onPageHide(): void {
+    clearTimers();
+    stopStream();
+  }
+
+  function onOffline(): void {
+    if (!goalId.value) return;
+    onPageHide();
+    syncState.value = 'reconnecting';
+    syncError.value = '事件流已断开，网络恢复后从已消费位置追平。';
+  }
+
+  function onOnline(): void {
+    if (goalId.value) scheduleReconnect();
   }
 
   function exitFollow(note: string): void {
@@ -584,6 +638,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     return error instanceof Error ? error.message : String(error);
   }
 
+  registerViewerObservation('batch_goal', () => goalId.value ? { goal_id: goalId.value } : null);
   return {
     goalId, snapshot, events, historyPage, availableGoals,
     syncState, syncError, loadError, controlError, controlBusy,

@@ -10,7 +10,8 @@ export interface RefreshEntry { result: ImageRefreshResult; unread: boolean; rec
 const READ_KEY = 'sr.imageRefresh.read.v1';
 const MAX_READ = 512;
 export function resultVersion(result: ImageRefreshResult): string | null {
-  return result.state === 'ready' && result.row?.id && result.row.srcRev && result.version === `${result.row.id}|${result.row.srcRev}` ? result.version : null;
+  return result.state === 'ready' && result.row?.hasPreview && result.row.previewDiv
+    && result.row.id && result.row.srcRev && result.version === `${result.row.id}|${result.row.srcRev}` ? result.version : null;
 }
 export const useImageRefreshStore = defineStore('imageRefresh', () => {
   const entries = ref<Record<number, RefreshEntry>>({});
@@ -24,10 +25,12 @@ export const useImageRefreshStore = defineStore('imageRefresh', () => {
   let active = false, scanning = false, again = false, poll: ReturnType<typeof setInterval> | undefined;
   let stopWatch: (() => void) | undefined;
   const signatures = new Map<number, string>();
+  const pendingTasks = new Map<number, string>();
   const dismissed = new Set<string>();
   const warmDone = new Set<string>();
   let warming = false;
   let warmController: AbortController | undefined;
+  let warmingId: number | undefined;
   const unreadCount = computed(() => Object.values(entries.value).filter(e => e.unread).length);
 
   function meta(result: ImageRefreshResult): SceneOpenMeta {
@@ -70,10 +73,12 @@ export const useImageRefreshStore = defineStore('imageRefresh', () => {
       }
       const tasks = useQueueStore().tasks.filter(t => t.state === 'COMPLETED' && groups.has(normDir(t.params.lq_path)))
         .sort((a, b) => (a.finished_at || a.updated_at) - (b.finished_at || b.updated_at));
-      const pendingGroups: Record<string, boolean> = {};
+      const taskIds = new Set(tasks.map(t => t.task_id));
+      for (const id of pendingTasks.keys()) if (!taskIds.has(id)) pendingTasks.delete(id);
       const jobs = tasks.filter(t => {
         const key = `${t.updated_at}|${t.finished_at}|${t.preview_state}`;
-        if (signatures.get(t.task_id) === key && !(retry && preparing.value[normDir(t.params.lq_path)])) return false;
+        // Recheck real source versions even when the task row itself did not change.
+        if (signatures.get(t.task_id) === key && !retry) return false;
         signatures.set(t.task_id, key); return true;
       });
       // Two metadata requests; JPEG warmup has a separate single compressed-byte slot.
@@ -90,36 +95,43 @@ export const useImageRefreshStore = defineStore('imageRefresh', () => {
             if (result.state !== 'ready') for (const [id, entry] of Object.entries(entries.value)) {
               if (entry.result.task_id === task.task_id) delete entries.value[Number(id)];
             }
-            if (result.state === 'preparing') pendingGroups[group] = true;
+            pendingTasks.delete(task.task_id);
+            if (result.state === 'preparing') pendingTasks.set(task.task_id, group);
             else if (result.state === 'ready') accept(result);
           } catch { signatures.delete(task.task_id); }
         }
       }));
-      // Keep pending groups on event-only scans; a retry rechecks all of them.
-      preparing.value = retry ? pendingGroups : { ...preparing.value, ...pendingGroups };
-      for (const e of Object.values(entries.value)) if (e.result.group && !pendingGroups[normDir(e.result.group)]) delete preparing.value[normDir(e.result.group)];
+      // A ready older result must not hide a newer job still preparing in the same group.
+      preparing.value = Object.fromEntries([...pendingTasks.values()].map(group => [group, true]));
       void warm();
     } finally { scanning = false; if (again) { again = false; void scan(); } }
   }
   function setVisible(visible: number[], near = visible) {
     visibleIds.value = visible; nearIds.value = near;
-    if (document.hidden) warmController?.abort();
+    if (document.hidden || warmingId != null && !near.includes(warmingId)) warmController?.abort();
     void warm();
   }
   async function warm() {
     if (warming || !active || document.hidden) return;
     warming = true;
     try {
-      for (const id of nearIds.value) {
+      // Re-evaluate after each request: scrolling must not warm an obsolete viewport.
+      while (active && !document.hidden) {
+        const id = nearIds.value.find(id => {
+          const e = entries.value[id], version = e && resultVersion(e.result);
+          return e?.unread && !!version && !warmDone.has(version);
+        });
+        if (id == null) break;
         const entry = entries.value[id], version = entry && resultVersion(entry.result);
         if (!active || document.hidden) break;
         if (!entry?.unread || !version || warmDone.has(version)) continue;
         warmDone.add(version);
+        warmingId = id;
         warmController = new AbortController();
         try { await fetchImageRefreshPreview(entry.result, warmController.signal, 32 * 1024 * 1024); }
-        catch { /* Optional warmup: user click can retry at the normal byte limit. */ }
+        catch { if (warmController.signal.aborted) warmDone.delete(version); }
       }
-    } finally { warming = false; warmController = undefined; }
+    } finally { warming = false; warmController = undefined; warmingId = undefined; }
   }
   async function open(id: number): Promise<boolean> {
     const entry = entries.value[id], version = entry && resultVersion(entry.result);

@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import {ref,watch,nextTick,onMounted,onBeforeUnmount} from 'vue';
 import {useViewerStore} from '../stores/viewer';
+import { drawDiffSource } from '../lib/diffRender';
+import { useDiffStore } from '../stores/diff';
 import {useAutoTourStore} from '../stores/autoTour';
+const diff = useDiffStore();
 const tour=useAutoTourStore();
 const store=useViewerStore(); const roots=ref<HTMLCanvasElement[]>([]);
 const windowRef=ref<HTMLDivElement|null>(null);
@@ -50,7 +53,10 @@ async function paint(){
   const scale=Math.min(320/r.thumb.width,200/r.thumb.height)*size.value/100;
   c.width=Math.max(1,Math.round(r.thumb.width*scale));
   c.height=Math.max(1,Math.round(r.thumb.height*scale));
-  ctx.drawImage(r.thumb as unknown as CanvasImageSource,0,0,c.width,c.height);
+  ctx.save();
+  ctx.scale(c.width/r.thumb.width,c.height/r.thumb.height);
+  drawDiffSource(ctx,r.thumb as unknown as CanvasImageSource,r.thumb.width,r.thumb.height,diff.layerFor(r),diff.display,diff.opacity,diff.feather);
+  ctx.restore();
   if(tour.coverageVisible){
    const n=tour.coverage.size;ctx.fillStyle='rgba(61,169,164,.22)';ctx.beginPath();
    for(let j=0;j<n;j++)for(let k=0;k<n;k++)if(tour.coverage.viewed(j*n+k,tour.coverageCompare))ctx.rect(k*c.width/n,j*c.height/n,c.width/n,c.height/n);

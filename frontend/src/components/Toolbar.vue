@@ -12,6 +12,7 @@ import { useQcListStore } from '../stores/qclist';
 import CoordinateInput from './CoordinateInput.vue';
 import PreviewScaleControl from './PreviewScaleControl.vue';
 import AutoTourButton from './AutoTourButton.vue';
+import { useDiffStore } from '../stores/diff';
 import DiffLocateButton from './DiffLocateButton.vue';
 import { isIntermediateStage } from '../lib/stage';
 import type { StretchMode } from '../lib/tifDecode';
@@ -35,6 +36,7 @@ function submissionAccepted(_id: number, fresh: boolean) {
 }
 
 const store = useViewerStore();
+const diff = useDiffStore();
 const qc = useQcListStore();
 const fileInput = ref<HTMLInputElement | null>(null);
 /** 定位框：一个框装「X,Y」两个数（原先是 X、Y 两个框，拆开填反而要用户自己数着填）。 */
@@ -160,6 +162,13 @@ function onPick(e: Event) {
     <PreviewScaleControl :model-value="store.previewDiv" @update:model-value="store.setPreviewDiv" />
     <AutoTourButton />
     <DiffLocateButton />
+    <button v-if="diff.result" type="button" class="diff-visibility" data-e2e="diff-visibility"
+      :aria-pressed="diff.resultVisible" :aria-label="diff.resultVisible ? '隐藏差异结果' : '显示差异结果'"
+      :title="diff.resultVisible ? '隐藏差异结果，保留分析数据' : '恢复差异结果'"
+      @pointerdown.stop @click="diff.resultVisible = !diff.resultVisible">
+      <AppIcon :name="diff.resultVisible ? 'eye' : 'eye-off'" :size="15" tint />
+      {{ diff.resultVisible ? '显示中' : '已隐藏' }}
+    </button>
 
     <span class="spacer"></span>
 
@@ -247,6 +256,9 @@ function onPick(e: Event) {
 }
 
 /* ---- 控件共通骨架：高度 / 圆角 / 描边 / 字号 / 过渡只写这一处 ---- */
+.diff-visibility{display:inline-flex;align-items:center;gap:4px;flex:none;height:32px;padding:0 7px;border:1px solid var(--tb-border);border-radius:8px;background:var(--tb-surface);color:var(--tb-fg);font:inherit;font-size:12px;cursor:pointer}
+.diff-visibility[aria-pressed="true"]{color:var(--tb-primary);background:var(--tb-active-bg)}
+.diff-visibility:focus-visible{outline:2px solid var(--tb-focus);outline-offset:2px}
 .toolbar:has(.tour-popover),.toolbar:has(.diff-popover){z-index:7}
 .btn,
 .outbtn,

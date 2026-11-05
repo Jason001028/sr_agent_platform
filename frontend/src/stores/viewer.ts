@@ -1,5 +1,6 @@
 import { imageRef, spatialId } from '../lib/spatial';
 import { tourImageFromEvidence, tourPairRefusal } from '../lib/tourCompare';
+import { precisePairReason } from '../lib/compareCapabilities';
 import { decodeJpegBitmap } from '../lib/jpegBitmap';
 import { registerViewerContext, snapshotViewer } from '../lib/viewerContext.js';
 /**
@@ -448,7 +449,7 @@ export const useViewerStore = defineStore('viewer', () => {
    *  工具栏那条拖动条读写它；取图的两处调用点也读它。 */
   const previewDiv = ref(loadPreviewDiv());
   const drawMode = ref(false);
-  const drawTool = ref<DrawTool>('rect');
+  const drawTool = ref<DrawTool>('polygon');
   const pendingRect = ref<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const pendingPts = ref<Pt[] | null>(null);
   const hoverPt = ref<Pt | null>(null);
@@ -499,6 +500,9 @@ export const useViewerStore = defineStore('viewer', () => {
   const activeSide = ref<'A' | 'B'>('A');
   /** 分隔比例。跨会话记住 —— 只有它持久化，对比模式本身不。 */
   const splitRatio = ref(loadSplitRatio());
+  const splitLinked = ref(true);
+  const splitPrecisionReason = computed(() => precisePairReason(recForSide('A'), recForSide('B')));
+  const splitSynchronized = computed(() => splitLinked.value && !splitPrecisionReason.value);
   const viewA = ref<ViewState>({ scale: 1, ox: 0, oy: 0 });
   const viewB = ref<ViewState>({ scale: 1, ox: 0, oy: 0 });
   /** 点选清单成员（有序 rec id）。 */
@@ -593,6 +597,8 @@ export const useViewerStore = defineStore('viewer', () => {
     const a = flickerRefRec.value;
     const b = flickerAltRec.value;
     if (!a || !b) return '参与交替的影像已被关闭，请重新进入交替对比';
+    const evidenceReason = precisePairReason(a, b);
+    if (evidenceReason) return '精确交替不可用：' + evidenceReason + '；仍可分屏预览';
     const refusal = registrationRefusal(flickerMeta(a), flickerMeta(b));
     if (refusal) return refusal;
     if (!a.thumb || !b.thumb) return '对比影像还在加载，加载完成后即可播放';
@@ -1224,10 +1230,27 @@ export const useViewerStore = defineStore('viewer', () => {
     flickerView.value = v;
     renderTick.value++;
   }
+  /** Exploratory viewing never implies a shared pixel grid or permission to submit SR. */
+  async function openPreviewPair(aId: number, bId: number): Promise<boolean> {
+    if (drawMode.value || aId === bId) return false;
+    const a = recs.value.find(r => r.id === aId), b = recs.value.find(r => r.id === bId);
+    if (!a || !b) return false;
+    const intent = userIntentSeq.value;
+    try { await Promise.all([a.thumb ? undefined : loadCardPixels(a), b.thumb ? undefined : loadCardPixels(b)]); }
+    catch (e) { showErr(String(e)); return false; }
+    if (intent !== userIntentSeq.value || drawMode.value || !a.thumb || !b.thumb ||
+      !recs.value.includes(a) || !recs.value.includes(b)) return false;
+    setCompareMode('split');
+    paneA.value = aId; paneB.value = bId; activeSide.value = 'A';
+    switchActive(aId); splitLinked.value = false;
+    fitBoth(); renderTick.value++;
+    return true;
+  }
+
   /** Both cached previews must be ready before changing the visible pair. */
   function selectTourPair(aId:number,bId:number) {
     const a=recs.value.find(r=>r.id===aId),b=recs.value.find(r=>r.id===bId);
-    if(!a?.thumb||!b?.thumb||!a.tourIdentity||!b.tourIdentity||tourPairRefusal(a.tourIdentity,b.tourIdentity))return false;
+    if(!a?.thumb||!b?.thumb||precisePairReason(a,b))return false;
     // A single isotropic Camera cannot correct independently rounded previews.
     // Refuse these instead of introducing a small vertical registration drift.
     if(a.thumb.width*b.thumb.height!==b.thumb.width*a.thumb.height)return false;
@@ -1259,6 +1282,7 @@ export const useViewerStore = defineStore('viewer', () => {
     const a = recs.value.find((r) => r.id === aId);
     const b = recs.value.find((r) => r.id === bId);
     if (!a?.thumb || !b?.thumb || a.id === b.id) return false;
+    if (precisePairReason(a, b)) return false;
     if (a.thumb.width * b.thumb.height !== b.thumb.width * a.thumb.height) return false;
     if (registrationRefusal(flickerMeta(a), flickerMeta(b))) return false;
     const previous = compareMode.value === 'flicker' ? flickerRefRec.value : activeRec.value;
@@ -3089,6 +3113,14 @@ export const useViewerStore = defineStore('viewer', () => {
       const onA = paneAtX(mx, r.a.w) === 'A';
       const pPane = onA ? r.a : r.b;      // 指针所在格
       const oPane = onA ? r.b : r.a;      // 另一格
+      if (!splitSynchronized.value) {
+        const side = onA ? 'A' : 'B';
+        if (!recForSide(side)?.thumb) return;
+        const target = onA ? viewA : viewB;
+        target.value = wheelZoom(target.value, mx - pPane.x, my - pPane.y, factor);
+        renderTick.value++;
+        return;
+      }
       const out = wheelZoomBoth(viewA.value, viewB.value, pPane, oPane,
         onA ? 'A' : 'B', mx, my, factor);
       viewA.value = out.a;
@@ -3109,6 +3141,11 @@ export const useViewerStore = defineStore('viewer', () => {
     noteUserIntent();
     stopViewAnim();
     if (split.value) {
+      if (!splitSynchronized.value) {
+        view.value = { ...view.value, ox: view.value.ox + dx, oy: view.value.oy + dy };
+        renderTick.value++;
+        return;
+      }
       const out = panBoth(viewA.value, viewB.value, dx, dy);
       viewA.value = out.a;
       viewB.value = out.b;
@@ -3377,7 +3414,7 @@ export const useViewerStore = defineStore('viewer', () => {
     // 不然笔下的框会落在「另一张」的画面里（那张只换显示层，不是绘制对象）。
     if (compareMode.value === 'flicker') { pauseFlicker(); flickerIndex.value = 0; }
     drawMode.value = true;
-    drawTool.value = 'rect';
+    drawTool.value = 'polygon';
     pendingRect.value = null; pendingPts.value = null; hoverPt.value = null;
     hoverRoi.value = -1; flashRoi.value = -1;
     renderTick.value++;
@@ -3409,8 +3446,14 @@ export const useViewerStore = defineStore('viewer', () => {
     renderTick.value++;
   }
 
+  function polygonCanCloseAt(p: Pt): boolean {
+    const pts = pendingPts.value;
+    return Boolean(pts && pts.length >= 3 &&
+      Math.hypot(p[0] - pts[0][0], p[1] - pts[0][1]) * view.value.scale <= 11);
+  }
+
   function closePolygon() {
-    if (pendingPts.value && pendingPts.value.length >= 3) {
+    if (drawMode.value && drawTool.value === 'polygon' && canDrawOn(activeRec.value) && pendingPts.value && pendingPts.value.length >= 3) {
       getRois().push(pendingPts.value.slice());
     }
     pendingPts.value = null; hoverPt.value = null;
@@ -3920,7 +3963,7 @@ export const useViewerStore = defineStore('viewer', () => {
 
   /* ---------------- 画布事件路由（TifCanvas 绑定） ---------------- */
   /** mousedown 在绘制模式下的分派：rect 起框 / polygon 加点 / wand 调 wandSelect / del 调 delClick */
-  function onCanvasDownDraw(p: Pt): boolean {
+  function onCanvasDownDraw(p: Pt, clickCount = 1): boolean {
     if (!drawMode.value) return false;
     // 兜底：绘制期间活动侧被换成了不可绘制的图（拖放落格、清单点选、盘阵栏都能换）。
     // 退出绘制并说明，而不是默默把 ROI 写到产物上 —— 那种错要等到掩码文件送进 SR
@@ -3941,7 +3984,12 @@ export const useViewerStore = defineStore('viewer', () => {
       delClick(p[0], p[1]);
       return true;
     } else {
+      // 双击的第二次按下只用于闭合，不重复落点。
+      if (clickCount > 1) return true;
+      if (polygonCanCloseAt(p)) { closePolygon(); return true; }
       if (!pendingPts.value) pendingPts.value = [];
+      const last = pendingPts.value[pendingPts.value.length - 1];
+      if (last && Math.hypot(p[0] - last[0], p[1] - last[1]) * view.value.scale < 1) return true;
       pendingPts.value.push(p);
       hoverPt.value = p;
     }
@@ -3992,11 +4040,18 @@ export const useViewerStore = defineStore('viewer', () => {
 
   function onKeyDown(e: KeyboardEvent) {
     if (!drawMode.value) return;
-    if (e.key === 'Escape') {
+    if (e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable="true"]')) return;
+    if (e.key === 'Backspace' && pendingPts.value) {
+      e.preventDefault();
+      pendingPts.value.pop();
+      if (!pendingPts.value.length) pendingPts.value = null;
+      renderTick.value++;
+    } else if (e.key === 'Escape') {
       pendingPts.value = null; pendingRect.value = null; hoverPt.value = null;
       hoverRoi.value = -1; flashRoi.value = -1;
       renderTick.value++;
     } else if (e.key === 'Enter' && pendingPts.value) {
+      e.preventDefault();
       closePolygon();
     }
   }
@@ -4038,6 +4093,8 @@ export const useViewerStore = defineStore('viewer', () => {
 
   registerViewerContext(count => snapshotViewer({ activeRec: activeRec.value,
     selectedIds: selectedIds.value, panes: panes.value,
+    selRoi: roiSelIndex(), drawMode: drawMode.value, drawTool: drawTool.value,
+    pendingPts: pendingPts.value, pendingRect: pendingRect.value,
     // 工作区候选集：左侧列表（视觉顺序）里有盘阵场景身份的那些影像，供
     // search_scenes 默认限定检索范围；本地拖入图单列 local_only。
     recs: recsOrdered.value, workspaceVersion: workspaceVersion.value }, count));
@@ -4080,7 +4137,7 @@ export const useViewerStore = defineStore('viewer', () => {
     setStretch, setPreviewDiv, setCanvasSize, fit, onWheel, onPan, locatePixel, focusSourceBounds,
     focusPaneRect, addMaskPolygon,
     // 掩码
-    enterDraw, exitDraw, setDrawTool, commitRect, closePolygon, undoRoi, clearRois,
+    enterDraw, exitDraw, setDrawTool, commitRect, closePolygon, polygonCanCloseAt, undoRoi, clearRois,
     mergeRois, delClick, wandSelect, buildMaskJson, exportMaskJson, genMask,
     getRois, submitSr, bakeMaskToServer,
     // 本地图反推关联（打开盘阵场景统一走「场景库」页）
@@ -4088,7 +4145,7 @@ export const useViewerStore = defineStore('viewer', () => {
     // 图像对比（关闭 / 点选对比 / 分屏对比）
     compareMode, compareOn, split, setCompareMode,
     cmpStripOpen, setCmpStripOpen,
-    panes, splitX, splitRatio, setSplitRatio, resetSplit,
+    panes, splitX, splitRatio, setSplitRatio, resetSplit, splitLinked, splitSynchronized, splitPrecisionReason, openPreviewPair,
     activeSide, setActiveSide, paneA, paneB, recForSide, rectForSide, activePaneRect,
     setPaneView, stopViewAnim,
     captureForChat,

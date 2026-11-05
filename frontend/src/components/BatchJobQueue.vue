@@ -7,7 +7,7 @@ import { useViewerStore } from '../stores/viewer.js';
 import type { BatchJobSummary, BatchSnapshot } from '../lib/api.js';
 import { formatClock, itemStatusLabel } from '../lib/batchUi.js';
 
-const props = defineProps<{ snapshot: BatchSnapshot }>();
+const props = defineProps<{ snapshot: BatchSnapshot; compact?: boolean }>();
 const batch = useBatchGoalStore();
 const viewer = useViewerStore();
 const onlyIssues = ref(false);
@@ -17,6 +17,7 @@ const activeIds = computed(() => new Set(
   props.snapshot.active_jobs.map((job) => job.item_id)));
 
 const jobs = computed<BatchJobSummary[]>(() => {
+  if (props.compact) return props.snapshot.active_jobs;
   const merged = new Map<string, BatchJobSummary>();
   for (const job of props.snapshot.recent_jobs ?? []) merged.set(job.item_id, job);
   for (const job of props.snapshot.active_jobs) {

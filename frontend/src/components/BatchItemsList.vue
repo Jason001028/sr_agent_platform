@@ -26,11 +26,13 @@ watch(status, () => { cursor.value = 0; previous.value = []; void load(); });
 onBeforeUnmount(() => { epoch++; });
 async function review(item: BatchItemRecord, decision: 'approve' | 'exclude') {
   if (!batch.goalId || busy.value) return;
+  const gid = batch.goalId;
+  const gen = epoch;
   busy.value = true;
   let notice = '';
-  try { await apiBatchReview(batch.goalId, item, decision); await batch.refreshSnapshot(); }
+  try { await apiBatchReview(gid, item, decision); if (gen === epoch && gid === batch.goalId) await batch.refreshSnapshot(); }
   catch (e) { notice = e instanceof HttpError && e.status === 409 ? '复核对象已变化，已重读；请核对当前掩码后重新操作。' : String(e); }
-  finally { await load(); error.value = notice; }
+  finally { if (gen === epoch && gid === batch.goalId) { await load(); error.value = notice; } }
 }
 function regions(item: BatchItemRecord): [number, number, number, number][] {
   return (item.checkpoint.detection?.candidates ?? []).map(c => (c as { bbox?: unknown }).bbox)
@@ -39,11 +41,14 @@ function regions(item: BatchItemRecord): [number, number, number, number][] {
 async function focus(item: BatchItemRecord, bounds: [number, number, number, number]) {
   const viewer = useViewerStore();
   if (viewer.drawMode) { error.value = '请先退出绘制 / 编辑后再定位区域。'; return; }
+  const gen = epoch;
   await open(item);
-  if (!error.value) viewer.focusSourceBounds(viewer.activeSide, bounds);
+  if (gen === epoch && !error.value) viewer.focusSourceBounds(viewer.activeSide, bounds);
 }
 async function open(item: BatchItemRecord) {
-  error.value = await batch.openItem({ item_id: item.item_id, image_path: item.checkpoint.target_image?.path });
+  const gen = epoch;
+  const message = await batch.openItem({ item_id: item.item_id, image_path: item.checkpoint.target_image?.path });
+  if (gen === epoch) error.value = message;
 }
 function next() { previous.value.push(cursor.value); cursor.value = items.value.at(-1)?.ordinal ?? cursor.value; void load(); }
 function back() { cursor.value = previous.value.pop() ?? 0; void load(); }

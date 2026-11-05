@@ -63,7 +63,7 @@ describe('catchUpBatchEvents', () => {
     expect(result.truncated).toBe(true);
   });
 
-  it('服务端确实没有事件：保持游标，不伪造也不重试', async () => {
+  it('水位之前返回空页：保留游标并标记缺口，不能宣称已追平', async () => {
     const result = await catchUpBatchEvents(
       async () => ({
         goal_id: 'g1', events: [], last_seq: 9,
@@ -72,7 +72,7 @@ describe('catchUpBatchEvents', () => {
       5, 12,
     );
     expect(result.consumed).toBe(5);
-    expect(result.truncated).toBe(false);
+    expect(result.truncated).toBe(true);
   });
 
   it('还有事件但服务端说完结、又没到水位：标记中断', async () => {

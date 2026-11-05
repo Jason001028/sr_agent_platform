@@ -19,6 +19,17 @@ describe('message Viewer observation', () => {
     expect(captureViewerContext(0).current).toBeNull();
     expect(captureViewerContext(0).workspace.items).toEqual([]);
   });
+  it('projects ROI coordinates and mask draft independently from the Camera', () => {
+    const r={id:1,name:'A',W:1000,H:2000,thumb:{width:100,height:200},maskRois:[[[1,2],[5,2],[5,6]]],
+      srcRev:'v1',token:3,spatialIdentity:'trusted',spatialIdentityToken:3} as ViewerRec;
+    const snapshot=snapshotViewer({activeRec:r,recs:[r],selectedIds:[1],panes:[{side:'B',rec:r}],selRoi:0,
+      drawMode:true,drawTool:'polygon',pendingPts:[[10,20],[30,40]]},0);
+    expect(snapshot.roi?.bbox).toEqual([10,20,50,60]);
+    expect(snapshot.masks).toMatchObject({count:1,editing:true,draft_vertex_count:2});
+    expect(snapshot.selected_images[0]?.image_key).toBe('trusted');
+    r.maskRois![0][0][0]=99;
+    expect(snapshot.roi?.points[0]).toEqual([10,20]);
+  });
 
   it('workspace carries opaque scene ids only; local drags are counted, never sent', () => {
     const a = { id: 1, name: 'A.tif', sceneId: 'sid-a' } as ViewerRec;

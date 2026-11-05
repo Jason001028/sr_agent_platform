@@ -665,6 +665,7 @@ def analyze_arrays(
         },
         "differenceMap": _b64_png((diff8 * 255.0).round().astype(np.uint8)),
         "binaryMask": _b64_png(mask8),
+        "validityMap": _b64_png(np.where(valid, 255, 0).astype(np.uint8)),
         "regions": out_regions,
         "truncated": truncated,
         "coverage": {

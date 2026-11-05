@@ -121,6 +121,8 @@ export interface DiffResult {
   analysisGrid: DiffAnalysisGrid;
   /** data:image/png;base64 —— 8-bit 连续差异图。 */
   differenceMap: string;
+  /** 白=有效，黑=NoData；兼容未提供此字段的旧服务。 */
+  validityMap?: string;
   /** data:image/png;base64 —— 面积筛选后的精确二值掩码。 */
   binaryMask: string;
   regions: DiffRegion[];

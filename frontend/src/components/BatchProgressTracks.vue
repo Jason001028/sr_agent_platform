@@ -23,7 +23,7 @@ const tracks = computed(() => {
       hint: !progress.submission.known && progress.submission.applicable ? '当前已知需修复 · 检测尚未结束' : repairTrackText(progress.submission),
     },
     {
-      key: 'verification', label: '验证', short: 'V/R',
+      key: 'verification', label: '结果验收', short: 'V/R',
       done: progress.verification.done, total: progress.verification.total,
       track: progress.verification as BatchProgressTrack,
       hint: !progress.verification.known && progress.verification.applicable ? '当前已知需修复 · 检测尚未结束' : repairTrackText(progress.verification),
@@ -98,4 +98,6 @@ function percent(track: BatchProgressTrack): number {
   transition: width var(--motion-batch-progress) var(--ease-standard);
 }
 .bt-hint { margin: 0; color: var(--ink-faint); font-size: 10px; line-height: 1.3; }
+.batch-tracks { padding: 8px 0; border: 0; border-radius: 0; gap: 12px; }
+.bt-fill { background: #6484BA; } .bt-row:last-child .bt-fill { background: #438C7B; }
 </style>

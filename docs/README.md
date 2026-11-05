@@ -14,6 +14,8 @@ Agent 中文交互、执行概览与自动会话标题见 [agent-interaction-tit
 
 批量智能修复工具栏任务中枢、冻结范围与人工掩码复核见 [batch-task-dock.md](status/batch-task-dock.md)。
 
+Batch F 的现有入口接线、恢复补修及浏览器连接实际 Batch 后端 + 独立 Fake SR 的 50 景 M3 联合验收见 [batch-pr-f.md §12](status/batch-pr-f.md)；固定快照 UI 验收与实际后端证据分开记录，真实生产准入仍未开放。
+
 PAN/NOSR 局部修复与产物发布见 [pan_repair_contract.md](sr_code/pan_repair_contract.md)。
 
 ---
@@ -504,6 +506,7 @@ sr_agent_platform/
 | [flicker-compare.md](status/flicker-compare.md) | 交替对比：胶囊、配对与配准判据、播放/暂停与自动暂停、视口复用与状态恢复 |
 | [diff-locate.md](status/diff-locate.md) | 智能差异定位：公共网格、像素差分/SSIM、连通域候选、图层次与侧舱清单、预览/原始 ROI 口径 |
 | [generic-preview-p1.md](status/generic-preview-p1.md) | 盘阵外授权 TIFF 的通用预览：预览/生产权限拆分、隔离缓存、Overview 复用与实测 |
+| [image-refresh.md](status/image-refresh.md) | 影像焕新：统一成果发现、镭射未读提示、版本预热缓存、已读记录与合成影像验收 |
 | [sr-local-execution.md](status/sr-local-execution.md) | 本机执行 SR 的链路与运行期规则：单槽串行、重启、UNKNOWN、判定文件 |
 | [real-machine-acceptance.md](status/real-machine-acceptance.md) | 真机验收判据与勾选 |
 | [real-machine-bringup.md](status/real-machine-bringup.md) | node81-135 的部署与启动运行手册 |

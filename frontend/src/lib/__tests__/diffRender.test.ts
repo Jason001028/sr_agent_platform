@@ -1,0 +1,60 @@
+import { describe, expect, it } from 'vitest';
+import { colorizeHeatPixels, drawDiffSource, HEAT_COLORS, NODATA_COLOR, UNANALYZED_COLOR } from '../diffRender';
+
+describe('continuous difference rendering', () => {
+  it('maps every fixed stop, including opaque zero, without changing source bytes', () => {
+    const values = new Uint8ClampedArray([0, 51, 102, 153, 204, 255].flatMap(v => [v, v, v, 255]));
+    const before = values.slice();
+    const colors = colorizeHeatPixels(values);
+    HEAT_COLORS.forEach((hex, i) => {
+      const expected = [1, 3, 5].map(j => parseInt(hex.slice(j, j + 2), 16));
+      expect([...colors.slice(i * 4, i * 4 + 4)]).toEqual([...expected, 255]);
+    });
+    expect(values).toEqual(before);
+    expect([...colorizeHeatPixels(new Uint8ClampedArray([25, 25, 25, 255]))]).toEqual([35, 13, 70, 255]);
+  });
+
+  it('keeps valid zero dark and distinguishes invalid zero using validity rather than intensity', () => {
+    const pixels = new Uint8ClampedArray([0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 0]);
+    const valid = new Uint8ClampedArray([255, 255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255]);
+    expect([...colorizeHeatPixels(pixels, valid)]).toEqual([11, 11, 29, 255, 0, 0, 0, 0, 0, 0, 0, 0]);
+  });
+
+  function context() {
+    const draws: unknown[][] = [], fills: unknown[][] = [], rects: number[][] = [];
+    const ctx = {
+      globalAlpha: 1, filter: 'none', fillStyle: '',
+      save() {}, restore() {}, beginPath() {}, clip() {},
+      rect(...args: number[]) { rects.push(args); },
+      fillRect(...args: number[]) { fills.push([this.fillStyle, ...args]); },
+      drawImage(...args: unknown[]) { draws.push([this.globalAlpha, this.filter, ...args]); },
+    };
+    return { ctx: ctx as unknown as CanvasRenderingContext2D, draws, fills, rects };
+  }
+  const original = {} as CanvasImageSource, heat = {} as CanvasImageSource;
+  const layer = { heat, coverage: [100, 50, 200, 120] as [number, number, number, number] };
+
+  it('independent ROI uses the full image background and exact coverage without drawing the original', () => {
+    const { ctx, draws, fills, rects } = context();
+    drawDiffSource(ctx, original, 1000, 600, layer, 'heat', 0.1, 'medium');
+    expect(draws).toEqual([[1, 'none', heat, 100, 50, 200, 120]]);
+    expect(fills).toEqual([[UNANALYZED_COLOR, 0, 0, 1000, 600], [NODATA_COLOR, 100, 50, 200, 120]]);
+    expect(rects).toEqual([[0, 0, 1000, 600], [100, 50, 200, 120]]);
+  });
+
+  it('overlay draws original plus the same heat data with independent alpha and display feather', () => {
+    const { ctx, draws, fills } = context();
+    drawDiffSource(ctx, original, 1000, 600, layer, 'overlay', 0.35, 'light');
+    expect(draws).toEqual([[1, 'none', original, 0, 0, 1000, 600], [0.35, 'blur(0.1953125px)', heat, 100, 50, 200, 120]]);
+    expect(fills).toEqual([]);
+  });
+
+  it('markers and hidden/unrelated layers render only the original', () => {
+    for (const [display, heatLayer] of [['regions', layer], ['heat', null]] as const) {
+      const { ctx, draws, fills } = context();
+      drawDiffSource(ctx, original, 1000, 600, heatLayer, display, 0.5, 'off');
+      expect(draws).toEqual([[1, 'none', original, 0, 0, 1000, 600]]);
+      expect(fills).toEqual([]);
+    }
+  });
+});

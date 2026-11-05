@@ -19,6 +19,37 @@ def test_baseline_missing_state():
     assert not bind_registry(ToolRegistry(), None).invoke('get_current_image_info')['ok']
 
 
+def test_regions_roi_masks_and_session_bound_batch_are_observed_without_file_authority():
+    from unittest.mock import Mock
+    value = validate_snapshot({'version': 1, 'current': {'id': 1, 'name': 'PAN', 'image_key': 'known'},
+        'roi': {'coordinate_space': 'source_pixels', 'bbox': [1, 2, 5, 6]},
+        'masks': {'image_id': 1, 'count': 4, 'editing': True},
+        'differences': {'selected_ids': ['r1', 'r2', 'r3'], 'regions': [
+            {'id': f'r{i}', 'bbox': [i, 2, 3, 4], 'mean_diff': .4} for i in range(1, 4)]},
+        'batch_goal': {'goal_id': 'b1', 'status': 'FAKE_SUCCESS'}})
+    store = Mock()
+    store.batch_snapshot.return_value = {'goal': {'goal_id': 'b1', 'session_id': 's1', 'status': 'RUNNING', 'phase': 'VERIFYING'},
+                                        'counts': {'submitted': 3, 'verified': 1}}
+    registry = bind_registry(ToolRegistry(), value, store=store, session_id='s1')
+    value['differences']['selected_ids'].clear()
+    data = registry.invoke('get_current_image_info')['data']
+    assert len(data['differences']['selected_ids']) == 3
+    assert data['masks']['count'] == 4 and data['roi']['bbox'] == [1, 2, 5, 6]
+    assert data['batch_goal']['goal']['status'] == 'RUNNING'
+    assert data['batch_goal']['counts']['verified'] == 1
+    assert not registry.invoke('get_current_image_info', {'path': '/production'})['ok']
+    other = bind_registry(ToolRegistry(), value, store=store, session_id='another')
+    assert other.invoke('get_current_image_info')['data']['batch_goal']['available'] is False
+
+
+def test_observation_limits_and_batch_progress_cannot_be_forged():
+    value = validate_snapshot({'version': 1, 'batch_goal': {'goal_id': 'b', 'counts': {'verified': 999}}})
+    assert value['batch_goal'] == {'goal_id': 'b'}
+    for v in ({'points': [0] * 129}, {'score': float('nan')}, {'raw': 'x' * 65000}):
+        with pytest.raises(ValueError):
+            validate_snapshot({'version': 1, 'differences': v})
+
+
 def test_frozen_binding_and_read_only_schema():
     value = snap()
     registry = bind_registry(ToolRegistry(), value)

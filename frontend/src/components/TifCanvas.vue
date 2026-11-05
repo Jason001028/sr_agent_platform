@@ -17,8 +17,9 @@ import { useAutoTourStore } from '../stores/autoTour';
 const tour=useAutoTourStore();
 import AgentAnnotationOverlay from './AgentAnnotationOverlay.vue';
 import DiffOverlay from './DiffOverlay.vue';
-import { ref, onMounted, onBeforeUnmount, watch } from 'vue';
+import { computed, ref, onMounted, onBeforeUnmount, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
+import { drawDiffSource } from '../lib/diffRender';
 import { useDiffStore } from '../stores/diff';
 import type { Pane } from '../stores/viewer';
 import { useQcListStore } from '../stores/qclist';
@@ -33,13 +34,47 @@ const stageRef = ref<HTMLDivElement | null>(null);
 const viewCanvasRef = ref<HTMLCanvasElement | null>(null);
 const drawCanvasRef = ref<HTMLCanvasElement | null>(null);
 const dragging = ref(false);
+const spaceHeld = ref(false);
+const polygonCompleted = ref(false);
+let completionTimer: ReturnType<typeof setTimeout> | null = null;
+let panButton: number | null = null;
+let suppressDoubleClick = false;
+let pointerEvent: MouseEvent | null = null;
+const closeHint = computed(() => {
+  if (dragging.value || !store.drawMode || store.drawTool !== 'polygon' || !store.hoverPt || !store.polygonCanCloseAt(store.hoverPt)) return null;
+  const p = thumbToScreen(store.view, store.pendingPts![0][0], store.pendingPts![0][1]);
+  const pane = store.activePaneRect();
+  return { left: (p[0] + pane.x + 13) + 'px', top: (p[1] + pane.y - 26) + 'px' };
+});
+function onKeyDown(e: KeyboardEvent) {
+  if (e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable="true"]')) return;
+  if (e.code === 'Space' && store.drawMode) { e.preventDefault(); spaceHeld.value = true; return; }
+  if (!dragging.value) store.onKeyDown(e);
+}
+function onKeyUp(e: KeyboardEvent) {
+  if (e.code === 'Space') spaceHeld.value = false;
+}
+function resetGesture() {
+  spaceHeld.value = false; dragging.value = false; panButton = null;
+}
+function pointerInActivePane(e: MouseEvent) {
+  const r = viewCanvasRef.value!.getBoundingClientRect(), p = store.activePaneRect();
+  const x = e.clientX - r.left, y = e.clientY - r.top;
+  return x >= p.x && x < p.x + p.w && y >= p.y && y < p.y + p.h;
+}
+function updatePrediction(e: MouseEvent) {
+  if (store.drawMode && store.drawTool === 'polygon' && store.pendingPts) {
+    if (pointerInActivePane(e)) store.onCanvasMove(mousePos(e));
+    else { store.hoverPt = null; store.renderTick++; }
+  }
+}
 let lastX = 0;
 let lastY = 0;
 let resizeObs: ResizeObserver | null = null;
 
 /* ---------------- 设计令牌 → canvas 覆盖层色（阶段6 侧舱选中 ROI 高亮） ----------------
    canvas 不能直接写 var(--x)，这里运行期从根元素读令牌。仅新增覆盖层用令牌取色；
-   既有影像判读专用覆盖色（ROI 青绿 / 魔棒琥珀 / 删除红等，tif-viewer 直译）不在改造范围。 */
+   绘制掩码使用统一红色，删除悬停使用琥珀色以区别普通掩码。 */
 function tokenColor(name: string, fallback: string): string {
   try {
     const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -184,34 +219,19 @@ function render() {
   const ctx = vc.getContext('2d')!;
   ctx.clearRect(0, 0, vc.width, vc.height);
   const ps = store.panes;
-  if (ps.length === 1) {
-    // 单屏：与「一次一张」时期逐字相同的写法
-    const rec = ps[0].rec;
-    const v = ps[0].view;
-    if (rec && rec.thumb) {
-      ctx.imageSmoothingEnabled = v.scale < 4;
-      ctx.drawImage(
-        rec.thumb as unknown as CanvasImageSource,
-        v.ox, v.oy, rec.thumb.width * v.scale, rec.thumb.height * v.scale,
-      );
-    }
-  } else {
-    for (const p of ps) {
-      const rec = p.rec;
-      if (!rec || !rec.thumb) continue;      // 空侧不画：占位由 CompareOverlay 出
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(p.rect.x, p.rect.y, p.rect.w, p.rect.h);
-      ctx.clip();
-      ctx.translate(p.rect.x, p.rect.y);
-      ctx.imageSmoothingEnabled = p.view.scale < 4;
-      ctx.drawImage(
-        rec.thumb as unknown as CanvasImageSource,
-        p.view.ox, p.view.oy,
-        rec.thumb.width * p.view.scale, rec.thumb.height * p.view.scale,
-      );
-      ctx.restore();
-    }
+  for (const p of ps) {
+    const rec = p.rec;
+    if (!rec?.thumb) continue;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(p.rect.x, p.rect.y, p.rect.w, p.rect.h);
+    ctx.clip();
+    ctx.translate(p.rect.x + p.view.ox, p.rect.y + p.view.oy);
+    ctx.scale(p.view.scale, p.view.scale);
+    ctx.imageSmoothingEnabled = p.view.scale < 4;
+    drawDiffSource(ctx, rec.thumb as unknown as CanvasImageSource,
+      rec.thumb.width, rec.thumb.height, diff.layerFor(rec), diff.display, diff.opacity, diff.feather);
+    ctx.restore();
   }
   tour.presented();
   renderDraw();
@@ -268,34 +288,6 @@ function drawSelectedOutline(pts: Pt[]) {
   ctx.globalAlpha = 1;
 }
 
-/** 差异定位的显示层：热力图 / 羽化掩码，按每格自己的视图贴到缩略图上。
- *  只贴显示图，不碰影像像素；分屏时 A/B 两格各自换算覆盖范围。 */
-function drawDiffLayers(ctx: CanvasRenderingContext2D, ps: Pane[]) {
-  if (!diff.result || (!diff.showHeat && !diff.showMask)) return;
-  for (const p of ps) {
-    const layer = diff.layerFor(p.rec);
-    if (!layer) continue;
-    const [cx, cy, cw, ch] = layer.coverage;
-    const x = p.rect.x + p.view.ox + cx * p.view.scale;
-    const y = p.rect.y + p.view.oy + cy * p.view.scale;
-    const w = cw * p.view.scale;
-    const h = ch * p.view.scale;
-    if (!(w > 0 && h > 0)) continue;
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(p.rect.x, p.rect.y, p.rect.w, p.rect.h);
-    ctx.clip();
-    ctx.imageSmoothingEnabled = p.view.scale < 4;
-    if (diff.showHeat) ctx.drawImage(layer.heat, x, y, w, h);
-    if (diff.showMask) {
-      ctx.globalAlpha = 0.55;
-      ctx.drawImage(layer.mask, x, y, w, h);
-      ctx.globalAlpha = 1;
-    }
-    ctx.restore();
-  }
-}
-
 function renderDraw() {
   const dc = drawCanvasRef.value;
   if (!dc) return;
@@ -304,7 +296,6 @@ function renderDraw() {
   // 交替对比翻到第二张时，叠加层（ROI / 云叠 / 选中高亮）属于活动图（参考图），
   // 不能画在另一张的像素上；翻回参考图时自然恢复。绘制模式进入时已强制切回参考图。
   if (store.flickerShowingAlt) return;
-  drawDiffLayers(ctx, store.panes);
   const active = store.activeRec;
   if (!active || !active.thumb) return;
   // 掩码/ROI/云叠/选中高亮**只画活动侧**：它们本来就读 store.getRois()
@@ -339,45 +330,50 @@ function renderDrawBody(ctx: CanvasRenderingContext2D) {
     return;
   }
   for (let i = 0; i < rois.length; i++) {
-    strokePoly(rois[i], 'rgba(45,164,162,0.22)', '#2da4a2', 2, false);
+    strokePoly(rois[i], '', 'rgba(255,255,255,0.35)', 2.8, false);
+    strokePoly(rois[i], 'rgba(217,71,82,0.18)', '#D94752', 1.4, false);
   }
   if (store.drawTool === 'del') {
-    // 删除工具叠加层：悬停柔和红边 + 待删区域柔和红闪（盖在普通蓝色之上，不辣眼）
+    // 删除工具使用琥珀色，与普通红色掩码明确区分。
     if (store.hoverRoi >= 0 && store.hoverRoi < rois.length) {
-      strokePoly(rois[store.hoverRoi], 'rgba(216,90,80,0.14)', '#d8605a', 1.5, false);
+      strokePoly(rois[store.hoverRoi], 'rgba(255,176,46,0.22)', '#ffb02e', 1.5, false);
     }
     if (store.flashRoi >= 0 && store.flashRoi < rois.length) {
-      strokePoly(rois[store.flashRoi], 'rgba(216,90,80,0.5)', '#d8605a', 2.5, false);
+      strokePoly(rois[store.flashRoi], 'rgba(255,176,46,0.5)', '#ffb02e', 2.5, false);
     }
   }
   if (store.pendingPts && store.pendingPts.length) {
-    strokePoly(store.pendingPts, 'rgba(255,176,46,0.15)', '#ffb02e', 2, true);
-    const last = store.pendingPts[store.pendingPts.length - 1];
-    if (store.hoverPt) {
-      const a = thumbToScreen(store.view, last[0], last[1]);
-      const b = thumbToScreen(store.view, store.hoverPt[0], store.hoverPt[1]);
-      ctx.setLineDash([6, 4]);
-      ctx.strokeStyle = '#ffb02e';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]);
-      ctx.stroke();
+    const pts = store.pendingPts;
+    const hover = store.hoverPt;
+    const snap = hover && store.polygonCanCloseAt(hover);
+    if (hover && pts.length >= 2) {
+      strokePoly([...pts, snap ? pts[0] : hover], 'rgba(217,71,82,0.14)', '', 0, false);
+    }
+    strokePoly(pts, '', 'rgba(255,255,255,0.35)', 2.8, true);
+    strokePoly(pts, '', '#D94752', 1.4, true);
+    if (hover) {
+      const guide = [pts[pts.length - 1], snap ? pts[0] : hover];
+      if (pts.length >= 2) guide.push(pts[0]);
+      ctx.setLineDash([4, 4]);
+      strokePoly(guide, '', '#D94752', 1.2, true);
       ctx.setLineDash([]);
     }
-    for (const p of store.pendingPts) {
+    pts.forEach((p, i) => {
       const pt = thumbToScreen(store.view, p[0], p[1]);
-      ctx.fillStyle = '#ffb02e';
-      ctx.fillRect(pt[0] - 3, pt[1] - 3, 6, 6);
-    }
+      ctx.beginPath();
+      ctx.arc(pt[0], pt[1], i === 0 ? (snap ? 5.5 : 4) : 3, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff'; ctx.fill();
+      ctx.strokeStyle = '#D94752'; ctx.lineWidth = 1.4; ctx.stroke();
+    });
   }
   if (store.pendingRect) {
     const ra = thumbToScreen(store.view, store.pendingRect.x0, store.pendingRect.y0);
     const rb = thumbToScreen(store.view, store.pendingRect.x1, store.pendingRect.y1);
     const rx = Math.min(ra[0], rb[0]), ry = Math.min(ra[1], rb[1]);
     const rw = Math.abs(rb[0] - ra[0]), rh = Math.abs(rb[1] - ra[1]);
-    ctx.fillStyle = 'rgba(45,164,162,0.22)';
-    ctx.strokeStyle = '#2da4a2';
-    ctx.lineWidth = 2;
+    ctx.fillStyle = 'rgba(217,71,82,0.14)';
+    ctx.strokeStyle = '#D94752';
+    ctx.lineWidth = 1.4;
     ctx.fillRect(rx, ry, rw, rh);
     ctx.strokeRect(rx, ry, rw, rh);
   }
@@ -433,11 +429,30 @@ function onWheel(e: WheelEvent) {
   const r = vc.getBoundingClientRect();
   const mx = e.clientX - r.left, my = e.clientY - r.top;
   const f = e.deltaY < 0 ? 1.2 : 1 / 1.2;
+  e.preventDefault();
   store.onWheel(mx, my, f);
+  pointerEvent = e;
+  updatePrediction(e);
 }
 
 function onMouseDown(e: MouseEvent) {
-  if (e.button !== 0) return;
+  if (e.button !== 0 && e.button !== 1) return;
+  e.preventDefault();
+  if (dragging.value) return;
+  pointerEvent = e;
+  // The temporary pan gesture owns movement before drawing or pane selection.
+  if (e.button === 1 || (e.button === 0 && spaceHeld.value)) {
+    if (!store.panes.some(p => p.rec?.thumb) || store.pendingRect) return;
+    if (store.split && !store.pendingPts?.length) {
+      const r = viewCanvasRef.value!.getBoundingClientRect();
+      store.setActiveSide(paneAtX(e.clientX - r.left, store.splitX));
+    }
+    dragging.value = true; panButton = e.button; suppressDoubleClick = true;
+    lastX = e.clientX; lastY = e.clientY;
+    return;
+  }
+  suppressDoubleClick = false;
+  if (store.pendingPts?.length && !pointerInActivePane(e)) return;
   const ps = store.panes;
   if (ps.length > 1) {
     // 分屏：点在另一半上先把活动侧切过去（掩码/云量/任务状态跟着切）。
@@ -449,9 +464,12 @@ function onMouseDown(e: MouseEvent) {
     }
   }
   if (!store.activeRec || !store.activeRec.thumb) return;
+  // 切到不可绘制的产物侧被 store 拒绝时，也不能把那一侧的点击写进活动影像。
+  if (store.drawMode && !pointerInActivePane(e)) return;
   const p = mousePos(e);
-  if (store.onCanvasDownDraw(p)) return;   // 绘制模式已处理
+  if (store.onCanvasDownDraw(p, e.detail)) return;   // 绘制模式已处理
   dragging.value = true;
+  panButton = 0;
   lastX = e.clientX;
   lastY = e.clientY;
 }
@@ -461,28 +479,42 @@ function queueCursor(e:MouseEvent){cursorEvent=e;if(cursorFrame)return;cursorFra
 function onWindowMouseMove(e: MouseEvent) {
   // 状态栏坐标与「在不在绘制」无关：平移、看像素、画框都要它
   queueCursor(e);
-  if (store.drawMode) { store.onCanvasMove(mousePos(e)); return; }
-  if (!dragging.value) return;
-  store.onPan(e.clientX - lastX, e.clientY - lastY);
-  lastX = e.clientX;
-  lastY = e.clientY;
+  pointerEvent = e;
+  if (dragging.value) {
+    store.onPan(e.clientX - lastX, e.clientY - lastY);
+    lastX = e.clientX; lastY = e.clientY;
+    updatePrediction(e);
+    return;
+  }
+  if (store.drawMode) {
+    if (store.drawTool === 'polygon') updatePrediction(e);
+    else if (store.pendingRect || pointerInActivePane(e)) store.onCanvasMove(mousePos(e));
+  }
 }
 
 function onWindowMouseUp(e: MouseEvent) {
-  if (store.drawMode && store.pendingRect) {
-    store.onCanvasUp(mousePos(e));
+  if (dragging.value) {
+    if (e.button !== panButton) return;
+    dragging.value = false; panButton = null;
+    pointerEvent = e; updatePrediction(e);
     return;
   }
-  dragging.value = false;
+  if (e.button === 0 && store.drawMode && store.pendingRect) store.onCanvasUp(mousePos(e));
 }
 
-function onDblClick() {
+function onDblClick(e: MouseEvent) {
+  if (dragging.value || spaceHeld.value || suppressDoubleClick) return;
+  if (store.drawMode && !pointerInActivePane(e)) return;
   store.onDblClick();
 }
 
 function onContextMenu(e: MouseEvent) {
-  if (store.drawMode) { e.preventDefault(); store.closePolygon(); }
+  if (store.drawMode) {
+    e.preventDefault();
+    if (!dragging.value && !spaceHeld.value && pointerInActivePane(e)) store.closePolygon();
+  }
 }
+
 
 /** 拖放位置归哪一格。compare 关闭 → null（全窗口都是拖放目标，位置不参与决策）。 */
 function dropSide(e: DragEvent): 'A' | 'B' | null {
@@ -576,7 +608,17 @@ watch(
 // 不会有 mousemove 来覆盖它，状态栏就会报一个不属于这张图的点）。
 // 交替对比翻面同理：上一帧的像素坐标指的不是现在这张图。
 watch(() => [store.activeId, store.activeSide, store.split, store.flickerIndex],
-  () => store.setCursor(null));
+  () => { resetGesture(); store.setCursor(null); }, {flush:'sync'});
+watch(() => [store.view.ox, store.view.oy, store.view.scale], () => {
+  if (pointerEvent) updatePrediction(pointerEvent);
+});
+watch(() => store.getRois().length, (count, previous) => {
+  if (!store.drawMode || store.drawTool !== 'polygon' || count <= previous) return;
+  polygonCompleted.value = true;
+  if (completionTimer !== null) clearTimeout(completionTimer);
+  const duration = parseFloat(tokenColor('--motion-hover', '150ms'));
+  completionTimer = setTimeout(() => { polygonCompleted.value = false; completionTimer = null; }, duration);
+});
 
 onMounted(() => {
   applyResize();
@@ -588,7 +630,9 @@ onMounted(() => {
     resizeObs.observe(stageRef.value);
   }
   window.addEventListener('transitionend', onLayoutTransitionEnd, true);
-  window.addEventListener('keydown', store.onKeyDown);
+  window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('keyup', onKeyUp);
+  window.addEventListener('blur', resetGesture);
   window.addEventListener('dragover', onDragOver);
   window.addEventListener('drop', onDrop);
   window.addEventListener('dragend', clearDragHint);
@@ -598,13 +642,16 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  if (completionTimer !== null) clearTimeout(completionTimer);
   store.setCanvasAttached(false);
   store.setCursor(null);
   if(cursorFrame)cancelAnimationFrame(cursorFrame);
   if (resizeObs) resizeObs.disconnect();
   if (resizeTimer !== null) { clearTimeout(resizeTimer); resizeTimer = null; }
   window.removeEventListener('transitionend', onLayoutTransitionEnd, true);
-  window.removeEventListener('keydown', store.onKeyDown);
+  window.removeEventListener('keydown', onKeyDown);
+  window.removeEventListener('keyup', onKeyUp);
+  window.removeEventListener('blur', resetGesture);
   window.removeEventListener('dragover', onDragOver);
   window.removeEventListener('drop', onDrop);
   window.removeEventListener('dragend', clearDragHint);
@@ -626,11 +673,15 @@ onBeforeUnmount(() => {
     <canvas
       ref="viewCanvasRef"
       class="view-canvas tif-canvas"
-      :class="{ dragging, crosshair: store.drawMode }"
+      :class="{ dragging, crosshair: store.drawMode && !dragging && !spaceHeld, grabbing: spaceHeld && !dragging }"
       @wheel="onWheel"
       @mousedown="onMouseDown"
     ></canvas>
     <canvas ref="drawCanvasRef" class="draw-canvas"></canvas>
+    <Transition name="polygon-hint">
+      <span v-if="closeHint" class="polygon-close-hint" :style="closeHint">点击闭合</span>
+    </Transition>
+    <span v-if="polygonCompleted" class="polygon-completed" :style="{ left: `${store.activePaneRect().x + 14}px` }">已闭合</span>
     <AgentAnnotationOverlay @wheel="onWheel" />
     <DiffOverlay @wheel="onWheel" />
     <MiniNavigator v-if="store.panes.some(p => p.rec?.thumb)" />
@@ -643,6 +694,13 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.polygon-close-hint { position:absolute; z-index:7; pointer-events:none; padding:4px 7px; border:1px solid #D94752; border-radius:5px; color:#9d2530; background:rgba(255,255,255,.96); font-size:12px; white-space:nowrap; }
+.polygon-hint-enter-active { transition:opacity var(--motion-hover) var(--ease-standard); }
+.polygon-hint-enter-from { opacity:0; }
+.polygon-completed { position:absolute; top:58px; z-index:7; pointer-events:none; color:#D94752; background:rgba(255,255,255,.94); padding:4px 7px; border-radius:5px; font-size:12px; animation:polygon-complete var(--motion-hover) var(--ease-standard); }
+@keyframes polygon-complete { from { opacity:.4; } to { opacity:1; } }
+.view-canvas.grabbing { cursor:grab; }
+
 .question-tools{position:absolute;top:12px;left:12px;z-index:4}.question-tools button{background:#f5f8f6;color:#244c3b;border:1px solid #b8ccc3;border-radius:8px;padding:7px 12px;cursor:pointer}
 
 .stage {

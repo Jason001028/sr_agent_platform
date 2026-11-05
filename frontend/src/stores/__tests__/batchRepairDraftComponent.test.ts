@@ -16,7 +16,8 @@ vi.mock('../../lib/api', () => ({
 import BatchRepairDraft from '../../components/BatchRepairDraft.vue';
 import { useBatchDraftStore } from '../../stores/batchDraft';
 import { apiResolveScene } from '../../lib/api';
-it('adds trusted resolved input without constructing paths or loading thumbnails', async () => {
+it('adds a Viewer reference freely and defers resolution to unified freeze', async () => {
+  localStorage.clear(); vi.clearAllMocks();
   const pinia = createPinia(); setActivePinia(pinia);
   const root = document.createElement('div'); document.body.append(root);
   const app = createApp(BatchRepairDraft); app.use(pinia); app.mount(root);
@@ -25,8 +26,8 @@ it('adds trusted resolved input without constructing paths or loading thumbnails
     button.click();
     await vi.waitFor(() => expect(useBatchDraftStore().candidates).toHaveLength(1));
     await nextTick();
-    expect(apiResolveScene).toHaveBeenCalledWith({}, { path: '/trusted/scene' });
-    expect(useBatchDraftStore().candidates[0]!.path).toBe('/trusted/scene/PAN.tif');
+    expect(apiResolveScene).not.toHaveBeenCalled();
+    expect(useBatchDraftStore().candidates[0]!.path).toBe('/trusted/scene');
     expect(useBatchDraftStore().candidates[0]!.status).toBe('待确认');
   } finally { app.unmount(); root.remove(); }
 });

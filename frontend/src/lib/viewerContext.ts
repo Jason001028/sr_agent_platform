@@ -57,6 +57,11 @@ export function snapshotViewer(viewer: {
   panes: { side: string; rec: ViewerRec | null }[];
   recs?: ViewerRec[];
   workspaceVersion?: number;
+  selRoi?: number;
+  drawMode?: boolean;
+  drawTool?: string;
+  pendingPts?: number[][] | null;
+  pendingRect?: {x0:number;y0:number;x1:number;y1:number} | null;
 }, attachmentCount: number) {
   const info = (r: ViewerRec | null) => r ? {
     // Reuse the existing metadata projection; pixel buffers stay in Viewer.
@@ -67,20 +72,48 @@ export function snapshotViewer(viewer: {
     size_bytes: r.size || null, layout: r.layout,
     bits: r.probe?.bits ?? null, sample_format: r.probe?.sampleFormat ?? null,
     compression: r.probe?.compression ?? null, metadata_source: 'viewer', pixels_loaded: Boolean(r.thumb),
+    image_key: r.spatialIdentityToken === r.token ? r.spatialIdentity ?? null : null,
+    source_revision: r.srcRev ?? null, stage: r.stageKind ?? null,
   } : null;
+  const active = viewer.activeRec;
+  const polygon = active?.maskRois?.[viewer.selRoi ?? -1];
+  const sourcePoint = (p: number[]) => [p[0] * active!.W / active!.thumb!.width, p[1] * active!.H / active!.thumb!.height];
+  const points = active?.thumb && polygon ? polygon.slice(0,128).map(sourcePoint) : [];
+  const roi = polygon && active?.thumb ? {
+    image_id: active.id, index: viewer.selRoi, coordinate_space: 'source_pixels',
+    bbox: [Math.min(...polygon.map(p=>p[0]))*active.W/active.thumb.width,
+      Math.min(...polygon.map(p=>p[1]))*active.H/active.thumb.height,
+      Math.max(...polygon.map(p=>p[0]))*active.W/active.thumb.width,
+      Math.max(...polygon.map(p=>p[1]))*active.H/active.thumb.height],
+    points, vertex_count: polygon.length, truncated: polygon.length > points.length,
+  } : null;
+  const selected = (viewer.recs ?? []).filter(r=>viewer.selectedIds.includes(r.id));
   return {
     version: 1, captured_at: new Date().toISOString(),
     current: info(viewer.activeRec), selected_ids: [...viewer.selectedIds].slice(0, 100),
     displayed: viewer.panes.map(p => ({ side: p.side, image: info(p.rec?.thumb ? p.rec : null) })),
     workspace: snapshotWorkspace(viewer.recs ?? [], viewer.workspaceVersion ?? 0),
     attachment_count: attachmentCount,
+    selected_images: selected.slice(0,24).map(r=>({id:r.id,name:r.name.slice(0,512),scene_id:r.sceneId??null,
+      image_key:r.spatialIdentityToken===r.token?r.spatialIdentity??null:null,source_revision:r.srcRev??null,width:r.W,height:r.H})),
+    selected_total: viewer.selectedIds.length, selected_truncated: selected.length > 24,
+    roi,
+    masks: { image_id: active?.id ?? null, count: active?.maskRois?.length ?? 0,
+      editing: Boolean(viewer.drawMode), tool: viewer.drawTool ?? null,
+      draft_vertex_count: viewer.pendingPts?.length ?? 0, rectangle_in_progress: Boolean(viewer.pendingRect),
+      draft_coordinate_space: 'source_pixels',
+      draft_points: active?.thumb ? (viewer.pendingPts ?? []).slice(0,128).map(sourcePoint) : [],
+      draft_truncated: (viewer.pendingPts?.length ?? 0)>128 },
   };
 }
 
 let capture: ((count: number) => ReturnType<typeof snapshotViewer>) | undefined;
-export function registerViewerContext(provider: NonNullable<typeof capture>) { capture = provider; }
+const observations = new Map<string, () => unknown>();
+export function registerViewerObservation(name: 'differences' | 'batch_goal' | 'batch_draft', provider: () => unknown) { observations.set(name, provider); }
+export function registerViewerContext(provider: NonNullable<typeof capture>) { capture = provider; observations.clear(); }
 export function captureViewerContext(count: number) {
-  return capture?.(count) ?? { version: 1, current: null, displayed: [], selected_ids: [],
+  const snapshot = capture?.(count) ?? { version: 1, current: null, displayed: [], selected_ids: [],
     workspace: { version: 0, items: [], total: 0, local_only: 0, truncated: false },
     attachment_count: count };
+  return { ...snapshot, ...Object.fromEntries([...observations].map(([name, provider])=>[name, provider()])) };
 }

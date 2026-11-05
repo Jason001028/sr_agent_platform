@@ -31,8 +31,54 @@ it('does not decorate a completed job until its preview and source identity are 
   store.accept({ ...result(), state: 'preparing' });
   store.accept({ ...result(), state: 'unavailable' });
   store.accept({ ...result(), version: 'wrong-source' });
+  const missingPreview = result(); missingPreview.row!.hasPreview = false;
+  store.accept(missingPreview);
   expect(store.unreadCount).toBe(0);
   expect(state.viewer.insertSceneCard).not.toHaveBeenCalled();
+});
+
+function task(id = 1) {
+  return { task_id: id, state: 'COMPLETED', updated_at: id, finished_at: id,
+    preview_state: 'running', params: { lq_path: '/scene' } };
+}
+async function idle() { await vi.waitFor(() => expect(apiImageRefresh).toHaveBeenCalled()); await new Promise(resolve => setTimeout(resolve, 0)); }
+
+it('keeps preparing across unrelated events, then discovers a ready preview without a task timestamp change', async () => {
+  state.queue.tasks = [task()];
+  vi.mocked(apiImageRefresh).mockResolvedValue({ ...result(), state: 'preparing' });
+  const store = useImageRefreshStore(); store.start(); await idle();
+  expect(store.preparing['/scene']).toBe(true); expect(store.unreadCount).toBe(0);
+  await store.scan(); expect(store.preparing['/scene']).toBe(true);
+  vi.mocked(apiImageRefresh).mockResolvedValue(result());
+  await store.scan(true);
+  expect(store.preparing['/scene']).toBeUndefined(); expect(store.unreadCount).toBe(1);
+  vi.mocked(apiImageRefresh).mockResolvedValue(result('path-100-2'));
+  await store.scan(true);
+  expect(store.entries[2]?.result.version).toBe('product|path-100-2');
+});
+
+it('does not let an older ready result clear another pending job in the same group', async () => {
+  state.queue.tasks = [task(), task(2)];
+  vi.mocked(apiImageRefresh).mockImplementation(async id => id === 1 ? result() : { ...result('path-100-2', 2), state: 'preparing' });
+  const store = useImageRefreshStore(); store.start(); await idle();
+  expect(store.unreadCount).toBe(1); expect(store.preparing['/scene']).toBe(true);
+  state.queue.tasks[1].state = 'FAILED'; await store.scan(true);
+  expect(store.preparing['/scene']).toBeUndefined();
+});
+
+it('warms one compressed preview at a time and cancels work when its card leaves the viewport', async () => {
+  const store = useImageRefreshStore(); store.start(); store.accept(result());
+  const other = result('other-100-1', 2); other.row!.id = 'other'; other.version = 'other|other-100-1'; store.accept(other);
+  let signal: AbortSignal | undefined;
+  vi.mocked(fetchImageRefreshPreview).mockImplementationOnce((_r, s) => new Promise((_resolve, reject) => {
+    signal = s; s!.addEventListener('abort', () => reject(new Error('aborted')));
+  }));
+  store.setVisible([2, 3]);
+  expect(fetchImageRefreshPreview).toHaveBeenCalledTimes(1);
+  store.setVisible([3]);
+  expect(signal?.aborted).toBe(true);
+  await vi.waitFor(() => expect(fetchImageRefreshPreview).toHaveBeenCalledTimes(2));
+  expect(vi.mocked(fetchImageRefreshPreview).mock.calls[1]?.[0].row?.id).toBe('other');
 });
 it('keys unread by real source revision and only marks read after successful display', async () => {
   const store = useImageRefreshStore(); store.accept(result());

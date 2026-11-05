@@ -6,7 +6,6 @@ import { computed, ref } from 'vue';
 import { useBatchGoalStore } from '../stores/batchGoal.js';
 import { useChatStore } from '../stores/chat.js';
 import { useViewerStore } from '../stores/viewer.js';
-import BatchOverview from './BatchOverview.vue';
 import BatchProgressTracks from './BatchProgressTracks.vue';
 import BatchCurrentItem from './BatchCurrentItem.vue';
 import BatchJobQueue from './BatchJobQueue.vue';
@@ -86,6 +85,7 @@ function toggleFollow(event: Event): void {
 
 <template>
   <div class="batch-panel" data-e2e="batch-panel">
+    <details class="bp-settings"><summary>批次与查看设置</summary>
     <header class="bp-head">
       <select
         v-if="goalOptions.length"
@@ -122,6 +122,7 @@ function toggleFollow(event: Event): void {
         <button type="button" title="关闭掩码叠加" @click="batch.clearOverlay()">×</button>
       </span>
     </div>
+    </details>
     <p v-if="batch.followNote" class="bp-follow-note">{{ batch.followNote }}</p>
     <p v-if="batch.followError" class="bp-follow-error">{{ batch.followError }}</p>
 
@@ -129,19 +130,18 @@ function toggleFollow(event: Event): void {
     <p v-if="batch.syncError" class="bp-warn">{{ batch.syncError }}</p>
 
     <template v-if="batch.snapshot">
-      <BatchOverview :snapshot="batch.snapshot" />
       <BatchProgressTracks :snapshot="batch.snapshot" />
+      <p class="bp-follow-note">Producer 检测与 SR Monitor 可并行推进。</p>
       <BatchCurrentItem :snapshot="batch.snapshot" />
-      <BatchJobQueue :snapshot="batch.snapshot" />
+      <BatchJobQueue :snapshot="batch.snapshot" compact />
       <details @toggle="fullQueue = ($event.target as HTMLDetailsElement).open"><summary>完整执行队列（分页）</summary><BatchItemsList v-if="fullQueue" /></details>
       <BatchEventTimeline />
-      <BatchControls :snapshot="batch.snapshot" />
+      <BatchControls :snapshot="batch.snapshot" variant="monitor" />
     </template>
 
     <div v-else-if="batch.syncState === 'loading'" class="bp-loading">正在读取批次…</div>
     <div v-else class="bp-empty">
-      <p>当前工作会话还没有关联的批量修复。</p>
-      <p class="bp-empty-hint">创建批量任务后，这里会显示三维进度、当前检测与后台 SR 队列。</p>
+      <p>尚未关联批次，请先核验待修复清单。</p>
       <button type="button" @click="batch.associate(chat.sessionId)">重新查找批次</button>
     </div>
   </div>
@@ -157,6 +157,9 @@ function toggleFollow(event: Event): void {
   padding: 9px;
 }
 .bp-head { display: flex; align-items: center; gap: 6px; }
+.bp-settings { order: 10; font-size: 11px; color: var(--ink-sub); border-top: 1px solid var(--line); }
+.bp-settings > summary { min-height: 34px; align-content: center; cursor: pointer; }
+.bp-settings .bp-follow { margin-top: 8px; }
 .bp-select {
   flex: 1;
   min-width: 0;

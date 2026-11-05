@@ -38,6 +38,9 @@ watch(tab, value => {
 });
 const shownTab = tab;
 function openBatchTask() { tab.value = 'roi'; store.setCtxRailOpen(true); }
+function openBatchAgent() { tab.value = 'agent'; store.setCtxRailOpen(true); }
+onMounted(() => window.addEventListener('batch-agent-handoff', openBatchAgent));
+onBeforeUnmount(() => window.removeEventListener('batch-agent-handoff', openBatchAgent));
 onMounted(() => window.addEventListener('batch-task-open', openBatchTask));
 onBeforeUnmount(() => window.removeEventListener('batch-task-open', openBatchTask));
 

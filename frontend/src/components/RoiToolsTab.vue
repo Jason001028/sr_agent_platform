@@ -12,7 +12,8 @@
  * - 置顶「待修复清单」（QcListPanel）：质检部门给的 .txt 的导入/标记/写回，自成一块，
  *   与本 tab 其余部分没有数据往来（它只借这里的显隐位置）。
  */
-import { computed, onUnmounted, watch } from 'vue';
+import { computed, onUnmounted, ref, watch } from 'vue';
+import { useDiffStore } from '../stores/diff';
 import { useViewerStore } from '../stores/viewer';
 import {
   useQueueStore, tasksForScene, stateTone, pathLeafOf,
@@ -25,6 +26,9 @@ import CompareListPanel from './CompareListPanel.vue';
 import DiffCandidatesPanel from './DiffCandidatesPanel.vue';
 
 const viewer = useViewerStore();
+const diff = useDiffStore();
+const sourcesOpen = ref(false);
+const inspectOpen = ref(false);
 const queue = useQueueStore();
 
 const rec = computed(() => viewer.activeRec);
@@ -157,14 +161,16 @@ function fmtTime(ts: number): string {
   <div class="rt">
     <!-- 点选清单（仅对比模式）：在《待修复清单》**上方** —— 两者都是「一列可以点的图/条目」，
          但点选清单是本次对比的临时成员，位置在待办之上才符合「先选图、再对着清单干活」。 -->
-    <CompareListPanel />
+    <details v-if="viewer.compareOn" class="tool-group" open><summary>对比工具 · 点选清单</summary><CompareListPanel /></details>
 
     <!-- 差异候选：与点选清单相邻 —— 同样是「一列可点的区域」，但来自只读分析，
          点「加入掩码」才写进人工掩码。 -->
-    <DiffCandidatesPanel />
+    <details class="tool-group" :open="!!diff.result"><summary>差异定位 · 差异候选</summary><DiffCandidatesPanel /></details>
 
     <!-- 置顶：待修复清单（质检 .txt 的导入 / 标记 / 写回） -->
-    <QcListPanel />
+    <details class="tool-group" @toggle="sourcesOpen = ($event.target as HTMLDetailsElement).open"><summary>数据来源 · 质检 TXT</summary><QcListPanel v-if="sourcesOpen" /></details>
+    <details class="tool-group" :open="inspectOpen" @toggle="inspectOpen = ($event.target as HTMLDetailsElement).open"><summary>影像工具 · ROI、云量与场景任务</summary>
+    <template v-if="inspectOpen">
 
     <!-- 云量估算（阶段6 启发：无真实云掩码时 = 显示层高亮占比估算 + 疑似云区红叠） -->
     <section class="rt-sec">
@@ -287,6 +293,7 @@ function fmtTime(ts: number): string {
       </div>
       <p v-else class="rt-empty">加载队列中…</p>
     </section>
+    </template></details>
   </div>
 </template>
 
@@ -301,6 +308,9 @@ function fmtTime(ts: number): string {
   box-sizing: border-box;
   background: var(--surface);
 }
+.tool-group > summary { min-height: 36px; align-content: center; cursor: pointer; font-size: 12px; color: var(--ink-sub); }
+.tool-group { border-bottom: 1px solid var(--line); }
+.tool-group[open] > summary { color: var(--ink); }
 .rt-sec { background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-ctrl); padding: 8px 10px; }
 .rt-h { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--ink); }
 .rt-h.hrow { display: flex; align-items: center; justify-content: space-between; }

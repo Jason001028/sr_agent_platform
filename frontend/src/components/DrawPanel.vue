@@ -32,14 +32,15 @@ const target = computed(() => {
     >画在：{{ target }}</span>
     <button
       type="button"
+      :class="{ on: store.drawTool === 'polygon' }"
+      @click="store.setDrawTool('polygon')"
+      title="Space + 左键 / 中键平移；滚轮缩放；Backspace 撤点；Enter / 双击 / 右键闭合；Esc 取消"
+    >多边形</button>
+    <button
+      type="button"
       :class="{ on: store.drawTool === 'rect' }"
       @click="store.setDrawTool('rect')"
     >矩形</button>
-    <button
-      type="button"
-      :class="{ on: store.drawTool === 'polygon' }"
-      @click="store.setDrawTool('polygon')"
-    >多边形</button>
     <button
       type="button"
       :class="{ on: store.drawTool === 'wand' }"

@@ -521,7 +521,7 @@ export const useQcListStore = defineStore('qclist', () => {
   return {
     // 状态
     list, issues, statuses, loaded, counts,
-    sourceName, coordinateImportRevision, sourceEncoding, selName, selIssue, targetPath,
+    sourceName, sourceText, coordinateImportRevision, sourceEncoding, selName, selIssue, targetPath,
     // 动作
     importText, importFile, close,
     setStatus, statusOf, labelOf,

@@ -131,7 +131,7 @@ def test_loop_sends_actual_descriptions_after_dynamic_binding_and_filtering(tmp_
     assert len(seen) == 1
 
 
-def test_current_info_is_frozen_current_only_and_missing_is_error():
+def test_current_info_is_frozen_observation_and_missing_is_error():
     snapshot = validate_snapshot({'version': 1, 'captured_at': 'send-time',
         'current': {'id': 7, 'name': 'local.tif', 'width': 30},
         'selected_ids': [8], 'displayed': [{'image': {'id': 9, 'name': 'other.tif'}}]})
@@ -140,7 +140,8 @@ def test_current_info_is_frozen_current_only_and_missing_is_error():
     snapshot['current']['width'] = 999
     result = registry.invoke('get_current_image_info', {})
     assert result == ok({'image': expected, 'captured_at': 'send-time',
-                         'source': 'message_viewer_snapshot', 'attachment_count': 0})
+                         'source': 'message_viewer_snapshot', 'attachment_count': 0,
+                         'selected_ids': [8], 'displayed': [{'image': {'id': 9, 'name': 'other.tif'}}]})
     assert not registry.invoke('get_current_image_info', {'selected_ids': [8]})['ok']
     assert not bind_registry(build_builtin_registry(), None).invoke('get_current_image_info')['ok']
     assert 'current' in registry.get('get_current_image_info').description

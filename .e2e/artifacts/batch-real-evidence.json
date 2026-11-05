@@ -1,0 +1,3923 @@
+{
+  "root": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5",
+  "scheduler": "independent Fake SR; wall-clock lifecycle; survives API restart",
+  "checks": [
+    {
+      "lostCreateResponse": "0ce2baad9d22478293462da2cf0fa63e"
+    },
+    {
+      "lostCreateResponse": "1b6ac0377ec549bfbc0195f7bf463e2a"
+    },
+    "Real backend image and identity-bound Overlay displayed",
+    "Late follow response after wheel cannot navigate",
+    {
+      "backendRestartWhileJobsActive": 5
+    },
+    "Import/explicit exclusion/create retry; pause/resume/cancel; overlap; refresh; offline reconnect; close/reopen; API crash/restart; report equality; >500 history to seq 1"
+  ],
+  "frontendIndexSha256": "5f78fa835cf294b9d0a703fd3c927bcb7b8333ec518ae57107a422319d6efce8",
+  "small": {
+    "contract_version": "batch_snapshot.v1",
+    "goal": {
+      "goal_id": "0ce2baad9d22478293462da2cf0fa63e",
+      "session_id": null,
+      "title": "小批次控制验收",
+      "kind": "batch",
+      "status": "CANCELLED",
+      "phase": "cancelled",
+      "mode": "demo",
+      "version": 171,
+      "control_revision": 3,
+      "monitoring_done": true,
+      "monitor_state": "CANCELLED",
+      "last_seq": 283,
+      "created_at": 1793896793.6313667,
+      "updated_at": 1793896808.192301,
+      "finished_at": 1793896801.6760352,
+      "batch_control": {
+        "pause_requested": false,
+        "cancel_requested": true,
+        "pause_requested_at": null,
+        "cancel_requested_at": 1793896801.6760352,
+        "last_action": "cancel",
+        "last_action_at": 1793896801.6760352
+      }
+    },
+    "counts": {
+      "total": 5,
+      "eligible": 5,
+      "detected": 2,
+      "detection_pending": 0,
+      "needs_repair": 2,
+      "submitted": 2,
+      "verified": 2,
+      "verified_demo": 2,
+      "verified_production": 0,
+      "verified_other": 0,
+      "converged": 5,
+      "no_issue": 0,
+      "failed": 0,
+      "blocked": 0,
+      "excluded": 0,
+      "skipped_runtime": 3,
+      "cancelled": 3,
+      "capacity_skipped": 0,
+      "unknown_jobs": 0,
+      "detecting": 0,
+      "submitting": 0,
+      "waiting_sr": 0,
+      "verifying": 0,
+      "in_flight_sr": 0
+    },
+    "progress": {
+      "detection": {
+        "done": 2,
+        "total": 5,
+        "applicable": true,
+        "known": true
+      },
+      "submission": {
+        "done": 2,
+        "total": 2,
+        "applicable": true,
+        "known": true
+      },
+      "verification": {
+        "done": 2,
+        "total": 2,
+        "applicable": true,
+        "known": true
+      }
+    },
+    "producer": {
+      "current": null,
+      "detecting_count": 0,
+      "preparing_count": 0,
+      "prepared_count": 0
+    },
+    "active_jobs": [],
+    "recent_jobs": [
+      {
+        "item_id": "item_8e55481b8dda0c9f",
+        "ordinal": 2,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0052_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 46,
+        "attempt": 1,
+        "job_id": 2,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896801.6338868,
+        "updated_at": 1793896808.1886306,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0052_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_6084461e2b90bf22",
+        "ordinal": 1,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0051_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 46,
+        "attempt": 1,
+        "job_id": 1,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896793.9070323,
+        "updated_at": 1793896800.61248,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0051_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      }
+    ],
+    "report": {
+      "available": false,
+      "updated_at": null
+    },
+    "server_time": 1793896808.2013052
+  },
+  "goalId": "1b6ac0377ec549bfbc0195f7bf463e2a",
+  "overlap": {
+    "contract_version": "batch_snapshot.v1",
+    "goal": {
+      "goal_id": "1b6ac0377ec549bfbc0195f7bf463e2a",
+      "session_id": null,
+      "title": "50 景实际后端 Fake SR 联合验收",
+      "kind": "batch",
+      "status": "WAITING_EXTERNAL",
+      "phase": "draining",
+      "mode": "demo",
+      "version": 4,
+      "control_revision": 0,
+      "monitoring_done": false,
+      "monitor_state": null,
+      "last_seq": 18,
+      "created_at": 1793896808.5126176,
+      "updated_at": 1793896808.898495,
+      "finished_at": null,
+      "batch_control": {
+        "pause_requested": false,
+        "cancel_requested": false
+      }
+    },
+    "counts": {
+      "total": 50,
+      "eligible": 50,
+      "detected": 1,
+      "detection_pending": 49,
+      "needs_repair": 1,
+      "submitted": 1,
+      "verified": 0,
+      "verified_demo": 0,
+      "verified_production": 0,
+      "verified_other": 0,
+      "converged": 0,
+      "no_issue": 0,
+      "failed": 0,
+      "blocked": 0,
+      "excluded": 0,
+      "skipped_runtime": 0,
+      "cancelled": 0,
+      "capacity_skipped": 0,
+      "unknown_jobs": 0,
+      "detecting": 1,
+      "submitting": 0,
+      "waiting_sr": 1,
+      "verifying": 0,
+      "in_flight_sr": 1
+    },
+    "progress": {
+      "detection": {
+        "done": 1,
+        "total": 50,
+        "applicable": true,
+        "known": false
+      },
+      "submission": {
+        "done": 1,
+        "total": 1,
+        "applicable": true,
+        "known": false
+      },
+      "verification": {
+        "done": 0,
+        "total": 1,
+        "applicable": true,
+        "known": false
+      }
+    },
+    "producer": {
+      "current": {
+        "item_id": "item_07f35ed7a81e4ead",
+        "ordinal": 2,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0002_001_L1",
+        "status": "DETECTING",
+        "item_version": 2,
+        "attempt": 0,
+        "updated_at": 1793896808.8944933,
+        "scene_ref": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0002_001_L1_PAN",
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0002_001_L1_PAN/PAN.tif",
+        "has_mask": false,
+        "overlay_ready": false,
+        "candidate_count": 0,
+        "job_id": null,
+        "sr_status": null,
+        "error": null
+      },
+      "detecting_count": 1,
+      "preparing_count": 1,
+      "prepared_count": 0
+    },
+    "active_jobs": [
+      {
+        "item_id": "item_0c0b2b49cc09267e",
+        "ordinal": 1,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0001_001_L1",
+        "status": "WAITING_SR",
+        "item_version": 5,
+        "attempt": 1,
+        "job_id": 3,
+        "sr_status": "SUBMITTED",
+        "task_status": "submitted",
+        "unknown": false,
+        "submitted_at": 1793896808.7669394,
+        "updated_at": 1793896808.8064528,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0001_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": null
+      }
+    ],
+    "recent_jobs": [
+      {
+        "item_id": "item_0c0b2b49cc09267e",
+        "ordinal": 1,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0001_001_L1",
+        "status": "WAITING_SR",
+        "item_version": 5,
+        "attempt": 1,
+        "job_id": 3,
+        "sr_status": "SUBMITTED",
+        "task_status": "submitted",
+        "unknown": false,
+        "submitted_at": 1793896808.7669394,
+        "updated_at": 1793896808.8064528,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0001_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": null
+      }
+    ],
+    "report": {
+      "available": false,
+      "updated_at": null
+    },
+    "server_time": 1793896808.9134943
+  },
+  "final": {
+    "contract_version": "batch_snapshot.v1",
+    "goal": {
+      "goal_id": "1b6ac0377ec549bfbc0195f7bf463e2a",
+      "session_id": null,
+      "title": "50 景实际后端 Fake SR 联合验收",
+      "kind": "batch",
+      "status": "COMPLETED",
+      "phase": "done",
+      "mode": "demo",
+      "version": 645,
+      "control_revision": 0,
+      "monitoring_done": true,
+      "monitor_state": null,
+      "last_seq": 3010,
+      "created_at": 1793896808.5126176,
+      "updated_at": 1793896924.0461159,
+      "finished_at": 1793896924.0461159,
+      "batch_control": {
+        "pause_requested": false,
+        "cancel_requested": false
+      }
+    },
+    "counts": {
+      "total": 50,
+      "eligible": 50,
+      "detected": 50,
+      "detection_pending": 0,
+      "needs_repair": 50,
+      "submitted": 50,
+      "verified": 50,
+      "verified_demo": 50,
+      "verified_production": 0,
+      "verified_other": 0,
+      "converged": 50,
+      "no_issue": 0,
+      "failed": 0,
+      "blocked": 0,
+      "excluded": 0,
+      "skipped_runtime": 0,
+      "cancelled": 0,
+      "capacity_skipped": 0,
+      "unknown_jobs": 0,
+      "detecting": 0,
+      "submitting": 0,
+      "waiting_sr": 0,
+      "verifying": 0,
+      "in_flight_sr": 0
+    },
+    "progress": {
+      "detection": {
+        "done": 50,
+        "total": 50,
+        "applicable": true,
+        "known": true
+      },
+      "submission": {
+        "done": 50,
+        "total": 50,
+        "applicable": true,
+        "known": true
+      },
+      "verification": {
+        "done": 50,
+        "total": 50,
+        "applicable": true,
+        "known": true
+      }
+    },
+    "producer": {
+      "current": null,
+      "detecting_count": 0,
+      "preparing_count": 0,
+      "prepared_count": 0
+    },
+    "active_jobs": [],
+    "recent_jobs": [
+      {
+        "item_id": "item_ac0411e8d5e7a554",
+        "ordinal": 50,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0050_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 43,
+        "attempt": 1,
+        "job_id": 52,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896917.4227848,
+        "updated_at": 1793896924.0341156,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0050_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_56b15347f52917dd",
+        "ordinal": 49,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0049_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 42,
+        "attempt": 1,
+        "job_id": 51,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896916.6112351,
+        "updated_at": 1793896923.202715,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0049_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_57e7bee1779fb5d7",
+        "ordinal": 48,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0048_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 41,
+        "attempt": 1,
+        "job_id": 50,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896911.1548183,
+        "updated_at": 1793896917.8140965,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0048_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_b6692aa622478990",
+        "ordinal": 47,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0047_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 41,
+        "attempt": 1,
+        "job_id": 49,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896910.7547176,
+        "updated_at": 1793896917.3018084,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0047_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_2e28f2bed7b050e0",
+        "ordinal": 46,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0046_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 41,
+        "attempt": 1,
+        "job_id": 48,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896909.9034908,
+        "updated_at": 1793896916.5064373,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0046_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_c8d200d52943e7c9",
+        "ordinal": 45,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0045_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 41,
+        "attempt": 1,
+        "job_id": 47,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896904.3712735,
+        "updated_at": 1793896911.0745838,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0045_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_8a3e9eece7ca13b8",
+        "ordinal": 44,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0044_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 40,
+        "attempt": 1,
+        "job_id": 46,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896903.9868374,
+        "updated_at": 1793896910.6115253,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0044_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_42bd80006a8ca178",
+        "ordinal": 43,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0043_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 39,
+        "attempt": 1,
+        "job_id": 45,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896903.2312803,
+        "updated_at": 1793896909.7767873,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0043_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_5ab7c98ab44003ca",
+        "ordinal": 42,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0042_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 40,
+        "attempt": 1,
+        "job_id": 44,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896897.6424239,
+        "updated_at": 1793896904.2647069,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0042_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_228c416c0966af83",
+        "ordinal": 41,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0041_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 40,
+        "attempt": 1,
+        "job_id": 43,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896897.1903868,
+        "updated_at": 1793896903.8915546,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0041_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_87773ab5f4fe4944",
+        "ordinal": 40,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0040_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 39,
+        "attempt": 1,
+        "job_id": 42,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896896.5083406,
+        "updated_at": 1793896903.0900235,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0040_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_b15961d3f98cc315",
+        "ordinal": 39,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0039_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 39,
+        "attempt": 1,
+        "job_id": 41,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896890.886297,
+        "updated_at": 1793896897.504117,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0039_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_be7edcb4c4ece9e3",
+        "ordinal": 38,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0038_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 40,
+        "attempt": 1,
+        "job_id": 40,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896890.461235,
+        "updated_at": 1793896897.1148512,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0038_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_f0995873e28cb5bb",
+        "ordinal": 37,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0037_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 40,
+        "attempt": 1,
+        "job_id": 39,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896889.8393087,
+        "updated_at": 1793896896.4100287,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0037_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_40ebd2473abfb537",
+        "ordinal": 36,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0036_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 39,
+        "attempt": 1,
+        "job_id": 38,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896884.2097983,
+        "updated_at": 1793896890.774998,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0036_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_4d3d46037ebe1846",
+        "ordinal": 35,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0035_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 39,
+        "attempt": 1,
+        "job_id": 37,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896883.7342114,
+        "updated_at": 1793896890.3117833,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0035_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_5caf3368cc26f4eb",
+        "ordinal": 34,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0034_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 40,
+        "attempt": 1,
+        "job_id": 36,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896883.08882,
+        "updated_at": 1793896889.7411902,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0034_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_a9bb2f7d7f21de39",
+        "ordinal": 33,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0033_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 42,
+        "attempt": 1,
+        "job_id": 35,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896877.3414583,
+        "updated_at": 1793896884.0844872,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0033_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_80d8f5b1220b8339",
+        "ordinal": 32,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0032_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 42,
+        "attempt": 1,
+        "job_id": 34,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896876.8955314,
+        "updated_at": 1793896883.622889,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0032_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_909e0a692c19ab56",
+        "ordinal": 31,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0031_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 42,
+        "attempt": 1,
+        "job_id": 33,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896876.248278,
+        "updated_at": 1793896882.923168,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0031_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_72fdb7370b32fcd4",
+        "ordinal": 30,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0030_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 39,
+        "attempt": 1,
+        "job_id": 32,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896870.4944139,
+        "updated_at": 1793896877.0558357,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0030_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_9fbc336fe8bcbde6",
+        "ordinal": 29,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0029_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 40,
+        "attempt": 1,
+        "job_id": 31,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896870.0261073,
+        "updated_at": 1793896876.7501748,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0029_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_a90a0b617217864d",
+        "ordinal": 28,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0028_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 40,
+        "attempt": 1,
+        "job_id": 30,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896869.417924,
+        "updated_at": 1793896876.1295342,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0028_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_a1e2f8525bd47dc7",
+        "ordinal": 27,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0027_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 41,
+        "attempt": 1,
+        "job_id": 29,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896863.7496257,
+        "updated_at": 1793896870.3707583,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0027_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_66b7a9e83206aa1f",
+        "ordinal": 26,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0026_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 42,
+        "attempt": 1,
+        "job_id": 28,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896863.313201,
+        "updated_at": 1793896869.9261029,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0026_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_d021317979996420",
+        "ordinal": 25,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0025_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 42,
+        "attempt": 1,
+        "job_id": 27,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896862.6965356,
+        "updated_at": 1793896869.301759,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0025_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_914945129ad4122e",
+        "ordinal": 24,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0024_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 41,
+        "attempt": 1,
+        "job_id": 26,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896856.99445,
+        "updated_at": 1793896863.632799,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0024_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_a4eff20def33247e",
+        "ordinal": 23,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0023_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 41,
+        "attempt": 1,
+        "job_id": 25,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896856.4945822,
+        "updated_at": 1793896863.1890583,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0023_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_4054d2d4e914a11e",
+        "ordinal": 22,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0022_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 40,
+        "attempt": 1,
+        "job_id": 24,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896855.9458647,
+        "updated_at": 1793896862.541745,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0022_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      },
+      {
+        "item_id": "item_04e815e6c0f5d1eb",
+        "ordinal": 21,
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0021_001_L1",
+        "status": "SUCCEEDED",
+        "item_version": 41,
+        "attempt": 1,
+        "job_id": 23,
+        "sr_status": "COMPLETED",
+        "task_status": null,
+        "unknown": false,
+        "submitted_at": 1793896850.2332585,
+        "updated_at": 1793896856.825348,
+        "error": null,
+        "image_path": "C:/Users/Admin/AppData/Local/Temp/batch-browser-OVWlF5/JXGF07D03_PMS_20260101010101_200516571_101_0021_001_L1_PAN/PAN.tif",
+        "has_mask": true,
+        "overlay_ready": true,
+        "verification_ok": true
+      }
+    ],
+    "report": {
+      "available": true,
+      "updated_at": 1793896924.0461159
+    },
+    "server_time": 1793896924.140983
+  },
+  "report": {
+    "workflow": "batch_pan_repair_v1",
+    "manifest_ref": "f7379713a80ddd9d13c517739aeef7e185b0022e2c5195bb05c8e5c3aef83a79",
+    "mode": "demo",
+    "provenance": "mock",
+    "success_scope": "demo_contract",
+    "generated_at": 1793896924.0441172,
+    "counts": {
+      "SUCCEEDED": 50
+    },
+    "items": [
+      {
+        "item_id": "item_0c0b2b49cc09267e",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0001_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 3,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 3,
+              "intent_status": "RUNNING"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 3,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_07f35ed7a81e4ead",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0002_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 4,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 4,
+              "intent_status": "RUNNING"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 4,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_5948986678a68c11",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0003_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 5,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 5,
+              "intent_status": "RUNNING"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 5,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_881781eab7fa2ef5",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0004_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 6,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 6,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 6,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_ddff489ffc9aa4c3",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0005_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 7,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 7,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 7,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_265f70eebc6b14e6",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0006_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 8,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 8,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 8,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_dceb486346cb3736",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0007_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 9,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 9,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 9,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_e1b3cab5de30f158",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0008_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 10,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 10,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 10,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_450c9a3a73234892",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0009_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 11,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 11,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 11,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_1b89a827b61705a2",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0010_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 12,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 12,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 12,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_0fd2cc3ff283492a",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0011_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 13,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 13,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 13,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_92905bcf5c4215a0",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0012_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 14,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 14,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 14,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_a87092191eec2589",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0013_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 15,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 15,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 15,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_986ea7f53c28e308",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0014_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 16,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 16,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 16,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_0b5ee4042c2e9875",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0015_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 17,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 17,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 17,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_cc52a15d426c31d3",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0016_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 18,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 18,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 18,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_803d997476727912",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0017_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 19,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 19,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 19,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_796445800a19f562",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0018_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 20,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 20,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 20,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_dfaea849d8f7155f",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0019_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 21,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 21,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 21,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_2dab211025be2b82",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0020_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 22,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 22,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 22,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_04e815e6c0f5d1eb",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0021_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 23,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 23,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 23,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_4054d2d4e914a11e",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0022_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 24,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 24,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 24,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_a4eff20def33247e",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0023_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 25,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 25,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 25,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_914945129ad4122e",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0024_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 26,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 26,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 26,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_d021317979996420",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0025_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 27,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 27,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 27,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_66b7a9e83206aa1f",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0026_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 28,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 28,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 28,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_a1e2f8525bd47dc7",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0027_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 29,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 29,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 29,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_a90a0b617217864d",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0028_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 30,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 30,
+              "intent_status": "RUNNING"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 30,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_9fbc336fe8bcbde6",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0029_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 31,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 31,
+              "intent_status": "RUNNING"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 31,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_72fdb7370b32fcd4",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0030_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 32,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 32,
+              "intent_status": "RUNNING"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 32,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_909e0a692c19ab56",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0031_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 33,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 33,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 33,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_80d8f5b1220b8339",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0032_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 34,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 34,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 34,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_a9bb2f7d7f21de39",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0033_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 35,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 35,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 35,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_5caf3368cc26f4eb",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0034_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 36,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 36,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 36,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_4d3d46037ebe1846",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0035_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 37,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 37,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 37,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_40ebd2473abfb537",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0036_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 38,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 38,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 38,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_f0995873e28cb5bb",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0037_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 39,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 39,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 39,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_be7edcb4c4ece9e3",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0038_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 40,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 40,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 40,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_b15961d3f98cc315",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0039_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 41,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 41,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 41,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_87773ab5f4fe4944",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0040_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 42,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 42,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 42,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_228c416c0966af83",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0041_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 43,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 43,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 43,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_5ab7c98ab44003ca",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0042_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 44,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 44,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 44,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_42bd80006a8ca178",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0043_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 45,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 45,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 45,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_8a3e9eece7ca13b8",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0044_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 46,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 46,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 46,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_c8d200d52943e7c9",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0045_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 47,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 47,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 47,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_2e28f2bed7b050e0",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0046_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 48,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 48,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 48,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_b6692aa622478990",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0047_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 49,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 49,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 49,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_57e7bee1779fb5d7",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0048_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 50,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 50,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 50,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_56b15347f52917dd",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0049_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 51,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 51,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 51,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      },
+      {
+        "item_id": "item_ac0411e8d5e7a554",
+        "name": "JXGF07D03_PMS_20260101010101_200516571_101_0050_001_L1",
+        "status": "SUCCEEDED",
+        "attempt": 1,
+        "external_job_id": 52,
+        "verification": {
+          "ok": true,
+          "provenance": "mock",
+          "success_scope": "demo_contract",
+          "layers": {
+            "submit": {
+              "status": "passed",
+              "job_id": 52,
+              "intent_status": "submitted"
+            },
+            "terminal": {
+              "status": "passed",
+              "state": "COMPLETED",
+              "exit_code": "0:0"
+            },
+            "contract": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "artifacts": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "Fake SR 只提供调度状态，不产生 SRLOG/输出产物"
+            },
+            "quality": {
+              "status": "not_applicable",
+              "provenance": "mock",
+              "reason": "MockVerifier 只证明演示契约，不评估修复质量"
+            }
+          },
+          "failed_layers": [],
+          "state": "COMPLETED",
+          "job_id": 52,
+          "exit_code": "0:0",
+          "reasons": []
+        },
+        "error": null,
+        "capacity_reserved": false
+      }
+    ]
+  },
+  "physicalSubmissions": [
+    {
+      "job_id": 3,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_e50ddf7a60c4.sh",
+      "accepted": 1793896808801
+    },
+    {
+      "job_id": 4,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_30c6fba25401.sh",
+      "accepted": 1793896809189
+    },
+    {
+      "job_id": 5,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_5eda0f1e4986.sh",
+      "accepted": 1793896809589
+    },
+    {
+      "job_id": 6,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_6f749568c59b.sh",
+      "accepted": 1793896815470
+    },
+    {
+      "job_id": 7,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_e43c21b90b7c.sh",
+      "accepted": 1793896815945
+    },
+    {
+      "job_id": 8,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_594909f3fd9b.sh",
+      "accepted": 1793896816436
+    },
+    {
+      "job_id": 9,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_c704b2e15792.sh",
+      "accepted": 1793896822225
+    },
+    {
+      "job_id": 10,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_d100fee4bbda.sh",
+      "accepted": 1793896822645
+    },
+    {
+      "job_id": 11,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_63b046d6b1ac.sh",
+      "accepted": 1793896823220
+    },
+    {
+      "job_id": 12,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_ec77c5252fb8.sh",
+      "accepted": 1793896828912
+    },
+    {
+      "job_id": 13,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_169a4d707fe4.sh",
+      "accepted": 1793896829343
+    },
+    {
+      "job_id": 14,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_f4466356c9c3.sh",
+      "accepted": 1793896829930
+    },
+    {
+      "job_id": 15,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_0a12d558f7d2.sh",
+      "accepted": 1793896835719
+    },
+    {
+      "job_id": 16,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_7fee5deec821.sh",
+      "accepted": 1793896836162
+    },
+    {
+      "job_id": 17,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_b38a53e6220c.sh",
+      "accepted": 1793896836551
+    },
+    {
+      "job_id": 18,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_0e81b82b2bb1.sh",
+      "accepted": 1793896842386
+    },
+    {
+      "job_id": 19,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_b6f865acce38.sh",
+      "accepted": 1793896843017
+    },
+    {
+      "job_id": 20,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_c14d06930faa.sh",
+      "accepted": 1793896843403
+    },
+    {
+      "job_id": 21,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_a187d50c2fed.sh",
+      "accepted": 1793896849174
+    },
+    {
+      "job_id": 22,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_9a43459f9819.sh",
+      "accepted": 1793896849808
+    },
+    {
+      "job_id": 23,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_6bfb2ddcbb99.sh",
+      "accepted": 1793896850253
+    },
+    {
+      "job_id": 24,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_19f8dd9cda12.sh",
+      "accepted": 1793896855955
+    },
+    {
+      "job_id": 25,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_629f4cf48363.sh",
+      "accepted": 1793896856527
+    },
+    {
+      "job_id": 26,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_c0e4b738acf3.sh",
+      "accepted": 1793896857022
+    },
+    {
+      "job_id": 27,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_0d085d219560.sh",
+      "accepted": 1793896862720
+    },
+    {
+      "job_id": 28,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_6a05e2570ac0.sh",
+      "accepted": 1793896863337
+    },
+    {
+      "job_id": 29,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_0f44924bbdfb.sh",
+      "accepted": 1793896863783
+    },
+    {
+      "job_id": 30,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_5a1d53ce1995.sh",
+      "accepted": 1793896869451
+    },
+    {
+      "job_id": 31,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_696afc315854.sh",
+      "accepted": 1793896870047
+    },
+    {
+      "job_id": 32,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_7d5f4e5c534b.sh",
+      "accepted": 1793896870519
+    },
+    {
+      "job_id": 33,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_47508136864d.sh",
+      "accepted": 1793896876273
+    },
+    {
+      "job_id": 34,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_a85f1b5808db.sh",
+      "accepted": 1793896876944
+    },
+    {
+      "job_id": 35,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_0505d4aa7b61.sh",
+      "accepted": 1793896877352
+    },
+    {
+      "job_id": 36,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_d165258b051b.sh",
+      "accepted": 1793896883111
+    },
+    {
+      "job_id": 37,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_c619cd7c0f33.sh",
+      "accepted": 1793896883757
+    },
+    {
+      "job_id": 38,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_1cb68a601178.sh",
+      "accepted": 1793896884221
+    },
+    {
+      "job_id": 39,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_d51b6e71b516.sh",
+      "accepted": 1793896889862
+    },
+    {
+      "job_id": 40,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_0bb54aa6c214.sh",
+      "accepted": 1793896890491
+    },
+    {
+      "job_id": 41,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_3547434b7066.sh",
+      "accepted": 1793896890910
+    },
+    {
+      "job_id": 42,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_6c603bcc6418.sh",
+      "accepted": 1793896896539
+    },
+    {
+      "job_id": 43,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_57362e671443.sh",
+      "accepted": 1793896897218
+    },
+    {
+      "job_id": 44,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_e4ccd42af09b.sh",
+      "accepted": 1793896897681
+    },
+    {
+      "job_id": 45,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_15fc499f54e4.sh",
+      "accepted": 1793896903253
+    },
+    {
+      "job_id": 46,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_cd4d1ddac8c1.sh",
+      "accepted": 1793896904010
+    },
+    {
+      "job_id": 47,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_f433d2518b97.sh",
+      "accepted": 1793896904394
+    },
+    {
+      "job_id": 48,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_d90ca0a3dc60.sh",
+      "accepted": 1793896909925
+    },
+    {
+      "job_id": 49,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_4e01ac4954dc.sh",
+      "accepted": 1793896910777
+    },
+    {
+      "job_id": 50,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_b81faad0e6fa.sh",
+      "accepted": 1793896911177
+    },
+    {
+      "job_id": 51,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_e86f20906857.sh",
+      "accepted": 1793896916641
+    },
+    {
+      "job_id": 52,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_a9655f6795ba.sh",
+      "accepted": 1793896917445
+    }
+  ],
+  "eventRecovery": {
+    "consumed": 3010,
+    "watermark": 3010,
+    "historicalCursors": [
+      2981,
+      2961,
+      2941,
+      2921,
+      2901,
+      2881,
+      2861,
+      2841,
+      2821,
+      2801,
+      2781,
+      2761,
+      2741,
+      2721,
+      2701,
+      2681,
+      2661,
+      2641,
+      2621,
+      2601,
+      2581,
+      2561,
+      2541,
+      2521,
+      2501,
+      2481,
+      2461,
+      2441,
+      2421,
+      2401,
+      2381,
+      2361,
+      2341,
+      2321,
+      2301,
+      2281,
+      2261,
+      2241,
+      2221,
+      2201,
+      2181,
+      2161,
+      2141,
+      2121,
+      2101,
+      2081,
+      2061,
+      2041,
+      2021,
+      2001,
+      1981,
+      1961,
+      1941,
+      1921,
+      1901,
+      1881,
+      1861,
+      1841,
+      1821,
+      1801,
+      1781,
+      1761,
+      1741,
+      1721,
+      1701,
+      1681,
+      1661,
+      1641,
+      1621,
+      1601,
+      1581,
+      1561,
+      1541,
+      1521,
+      1501,
+      1481,
+      1461,
+      1441,
+      1421,
+      1401,
+      1381,
+      1361,
+      1341,
+      1321,
+      1301,
+      1281,
+      1261,
+      1241,
+      1221,
+      1201,
+      1181,
+      1161,
+      1141,
+      1121,
+      1101,
+      1081,
+      1061,
+      1041,
+      1021,
+      1001,
+      981,
+      961,
+      941,
+      921,
+      901,
+      881,
+      861,
+      841,
+      821,
+      801,
+      781,
+      761,
+      741,
+      721,
+      701,
+      681,
+      661,
+      641,
+      621,
+      601,
+      581,
+      561,
+      541,
+      521,
+      501,
+      481,
+      461,
+      441,
+      421,
+      401,
+      381,
+      361,
+      341,
+      321,
+      301,
+      281,
+      261,
+      241,
+      221,
+      201,
+      181,
+      161,
+      141,
+      121,
+      101,
+      81,
+      61,
+      41,
+      21,
+      1
+    ]
+  },
+  "result": "passed",
+  "ledger": [
+    {
+      "job_id": 1,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_1153730ae9eb.sh",
+      "accepted": 1793896793937
+    },
+    {
+      "job_id": 2,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_ba46aeaa44cf.sh",
+      "accepted": 1793896801655
+    },
+    {
+      "job_id": 3,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_e50ddf7a60c4.sh",
+      "accepted": 1793896808801
+    },
+    {
+      "job_id": 4,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_30c6fba25401.sh",
+      "accepted": 1793896809189
+    },
+    {
+      "job_id": 5,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_5eda0f1e4986.sh",
+      "accepted": 1793896809589
+    },
+    {
+      "job_id": 6,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_6f749568c59b.sh",
+      "accepted": 1793896815470
+    },
+    {
+      "job_id": 7,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_e43c21b90b7c.sh",
+      "accepted": 1793896815945
+    },
+    {
+      "job_id": 8,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_594909f3fd9b.sh",
+      "accepted": 1793896816436
+    },
+    {
+      "job_id": 9,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_c704b2e15792.sh",
+      "accepted": 1793896822225
+    },
+    {
+      "job_id": 10,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_d100fee4bbda.sh",
+      "accepted": 1793896822645
+    },
+    {
+      "job_id": 11,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_63b046d6b1ac.sh",
+      "accepted": 1793896823220
+    },
+    {
+      "job_id": 12,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_ec77c5252fb8.sh",
+      "accepted": 1793896828912
+    },
+    {
+      "job_id": 13,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_169a4d707fe4.sh",
+      "accepted": 1793896829343
+    },
+    {
+      "job_id": 14,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_f4466356c9c3.sh",
+      "accepted": 1793896829930
+    },
+    {
+      "job_id": 15,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_0a12d558f7d2.sh",
+      "accepted": 1793896835719
+    },
+    {
+      "job_id": 16,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_7fee5deec821.sh",
+      "accepted": 1793896836162
+    },
+    {
+      "job_id": 17,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_b38a53e6220c.sh",
+      "accepted": 1793896836551
+    },
+    {
+      "job_id": 18,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_0e81b82b2bb1.sh",
+      "accepted": 1793896842386
+    },
+    {
+      "job_id": 19,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_b6f865acce38.sh",
+      "accepted": 1793896843017
+    },
+    {
+      "job_id": 20,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_c14d06930faa.sh",
+      "accepted": 1793896843403
+    },
+    {
+      "job_id": 21,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_a187d50c2fed.sh",
+      "accepted": 1793896849174
+    },
+    {
+      "job_id": 22,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_9a43459f9819.sh",
+      "accepted": 1793896849808
+    },
+    {
+      "job_id": 23,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_6bfb2ddcbb99.sh",
+      "accepted": 1793896850253
+    },
+    {
+      "job_id": 24,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_19f8dd9cda12.sh",
+      "accepted": 1793896855955
+    },
+    {
+      "job_id": 25,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_629f4cf48363.sh",
+      "accepted": 1793896856527
+    },
+    {
+      "job_id": 26,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_c0e4b738acf3.sh",
+      "accepted": 1793896857022
+    },
+    {
+      "job_id": 27,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_0d085d219560.sh",
+      "accepted": 1793896862720
+    },
+    {
+      "job_id": 28,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_6a05e2570ac0.sh",
+      "accepted": 1793896863337
+    },
+    {
+      "job_id": 29,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_0f44924bbdfb.sh",
+      "accepted": 1793896863783
+    },
+    {
+      "job_id": 30,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_5a1d53ce1995.sh",
+      "accepted": 1793896869451
+    },
+    {
+      "job_id": 31,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_696afc315854.sh",
+      "accepted": 1793896870047
+    },
+    {
+      "job_id": 32,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_7d5f4e5c534b.sh",
+      "accepted": 1793896870519
+    },
+    {
+      "job_id": 33,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_47508136864d.sh",
+      "accepted": 1793896876273
+    },
+    {
+      "job_id": 34,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_a85f1b5808db.sh",
+      "accepted": 1793896876944
+    },
+    {
+      "job_id": 35,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_0505d4aa7b61.sh",
+      "accepted": 1793896877352
+    },
+    {
+      "job_id": 36,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_d165258b051b.sh",
+      "accepted": 1793896883111
+    },
+    {
+      "job_id": 37,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_c619cd7c0f33.sh",
+      "accepted": 1793896883757
+    },
+    {
+      "job_id": 38,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_1cb68a601178.sh",
+      "accepted": 1793896884221
+    },
+    {
+      "job_id": 39,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_d51b6e71b516.sh",
+      "accepted": 1793896889862
+    },
+    {
+      "job_id": 40,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_0bb54aa6c214.sh",
+      "accepted": 1793896890491
+    },
+    {
+      "job_id": 41,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_3547434b7066.sh",
+      "accepted": 1793896890910
+    },
+    {
+      "job_id": 42,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_6c603bcc6418.sh",
+      "accepted": 1793896896539
+    },
+    {
+      "job_id": 43,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_57362e671443.sh",
+      "accepted": 1793896897218
+    },
+    {
+      "job_id": 44,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_e4ccd42af09b.sh",
+      "accepted": 1793896897681
+    },
+    {
+      "job_id": 45,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_15fc499f54e4.sh",
+      "accepted": 1793896903253
+    },
+    {
+      "job_id": 46,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_cd4d1ddac8c1.sh",
+      "accepted": 1793896904010
+    },
+    {
+      "job_id": 47,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_f433d2518b97.sh",
+      "accepted": 1793896904394
+    },
+    {
+      "job_id": 48,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_d90ca0a3dc60.sh",
+      "accepted": 1793896909925
+    },
+    {
+      "job_id": 49,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_4e01ac4954dc.sh",
+      "accepted": 1793896910777
+    },
+    {
+      "job_id": 50,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_b81faad0e6fa.sh",
+      "accepted": 1793896911177
+    },
+    {
+      "job_id": 51,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_e86f20906857.sh",
+      "accepted": 1793896916641
+    },
+    {
+      "job_id": 52,
+      "script": "C:\\Users\\Admin\\AppData\\Local\\Temp\\batch-browser-OVWlF5\\work\\run_sr_sr_a9655f6795ba.sh",
+      "accepted": 1793896917445
+    }
+  ]
+}

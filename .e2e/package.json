@@ -16,6 +16,7 @@
     "gen:sparse": "python gen-test-images.py ../test-tifs/sparse",
     "test:batch-overlay": "node test-batch-overlay.js",
     "test:batch-panel": "node test-batch-panel.js",
+    "test:batch-real": "node test-batch-real.js",
     "test:flicker": "node test-flicker.js"
   },
   "engines": {

@@ -54,6 +54,16 @@ const viewer = useViewerStore();
 const chat = useChatStore();
 const scenes = useScenesStore();
 const draft = ref('');
+const batchContext = ref(false);
+const composerEnabled = computed(() => enabled.value || batchContext.value);
+function receiveBatch(event: Event) {
+  const text = (event as CustomEvent<{ text?: string }>).detail?.text;
+  if (!text) return;
+  batchContext.value = true;
+  draft.value = draft.value.trim() ? `${draft.value}\n\n${text}` : text;
+}
+onMounted(() => window.addEventListener('batch-agent-handoff', receiveBatch));
+onBeforeUnmount(() => window.removeEventListener('batch-agent-handoff', receiveBatch));
 const scrollEl = ref<HTMLElement | null>(null);
 /** 截图选择器（截查看器当前画面，来源是左侧影像列表）。 */
 const pickerOpen = ref(false);
@@ -217,14 +227,14 @@ const creating = ref(false);   // 防止双击并发 newSession 建出两个会�
 
 /** 有截图时可以不写字：上下文快照照样附上（Agent 仍能引用 W×H / 拉伸）。 */
 function canSend(): boolean {
-  return enabled.value && snap.value !== null && !chat.sending && !creating.value
+  return composerEnabled.value && (snap.value !== null || batchContext.value) && !chat.sending && !creating.value
     && (Boolean(draft.value.trim()) || chat.pendingImages.length > 0);
 }
 
 async function onSend(): Promise<void> {
   let text = draft.value.trim();
   const s = snap.value;
-  if (!canSend() || !s) return;
+  if (!canSend() || (!s && !batchContext.value)) return;
   if (!chat.sessionId) {
     // 首问自动建会话（与 /chat 同一 store；newSession 失败会在 error 区显示）
     creating.value = true;
@@ -248,7 +258,8 @@ async function onSend(): Promise<void> {
   }
   draft.value = '';
   const latest = snap.value;
-  if (latest) void chat.send(agentPayload(text, buildContextNote(latest)));
+  batchContext.value = false;
+  void chat.send(latest ? agentPayload(text, buildContextNote(latest)) : text);
 }
 
 async function analyzeCurrent() {
@@ -415,8 +426,9 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
         </div>
       </div>
 
-      <div class="at-foot" :class="{ locked: !enabled }">
-        <div :inert="!enabled">
+      <div class="at-foot" :class="{ locked: !composerEnabled }">
+        <div :inert="!composerEnabled">
+        <p v-if="batchContext" class="at-desc">已携带批次上下文，可补充问题后发送。</p>
 
         <div v-if="viewer.questionRegion" class="roi-reference"><button @click="viewer.activeRec?.id===viewer.questionRegion.recId && viewer.focusSourceBounds(viewer.activeSide,viewer.questionRegion.bounds)">{{ viewer.questionRegion.name }} ? Source ROI {{ viewer.questionRegion.bounds.join(', ') }}</button><button @click="viewer.questionRegion=null">Remove</button><small>Display preview crop attached on send.</small></div>
         <ChatAttachTray :items="chat.pendingImages" @remove="chat.removePendingImage" />
@@ -430,14 +442,14 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
           </button>
           <input v-model="draft" class="at-input" type="text"
                  :placeholder="placeholder"
-                 :disabled="!enabled || chat.sending || creating"
+                 :disabled="!composerEnabled || chat.sending || creating"
                  @keyup.enter="onSend()" />
           <button type="button" class="cbtn" :disabled="!canSend()" @click="onSend()">
             {{ chat.sending || creating ? '…' : '发送' }}
           </button>
         </div>
         </div>
-        <div v-if="!enabled" class="at-input-lock" role="status" aria-live="polite">
+        <div v-if="!composerEnabled" class="at-input-lock" role="status" aria-live="polite">
           <p class="at-desc">Agent 服务仅对盘阵生产目录开放</p>
           <p class="at-reason">{{ reason }}</p>
         </div>

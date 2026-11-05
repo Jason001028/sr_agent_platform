@@ -22,7 +22,7 @@ const store = useViewerStore();
 const MODES: { value: CompareMode; label: string; title: string }[] = [
   { value: 'off', label: '关闭', title: '一次看一张（拖入的新图顶掉当前这张，与原行为一致）' },
   { value: 'click', label: '点选对比', title: '拖入的新图直接覆盖当前这张；「点选清单」里可来回切' },
-  { value: 'split', label: '分屏对比', title: '左右各一张，滚轮与拖动同步作用于两侧；拖放落在哪半就进哪半' },
+  { value: 'split', label: '分屏对比', title: '任意两张影像独立浏览；可信配对后可启用同步；拖放落在哪半就进哪半' },
   { value: 'flicker', label: '交替对比', title: '同一视口里按节拍在两张同场景影像之间硬切换；播放/暂停与节拍在画布顶部的胶囊里，平移、缩放、切图会暂停' },
 ];
 
@@ -68,9 +68,11 @@ function pick(kind: 'input' | 'product' | 'nosr' | 'old') {
           <span class="cmp-chip-a">左</span>
           <span class="cmp-chip-b">右</span>
           <span class="cmp-legend-text">
-            拖放至左右侧；左右同步预览
+            {{ store.splitSynchronized ? '可信配对 · 同步浏览' : '探索预览 · 独立浏览' }}
           </span>
         </span>
+        <button type="button" class="cmp-reset" :disabled="!!store.splitPrecisionReason" :title="store.splitPrecisionReason || '切换同步与独立浏览'" @click="store.splitLinked = !store.splitLinked">{{ store.splitSynchronized ? '改为独立' : '同步浏览' }}</button>
+        <span v-if="store.splitPrecisionReason" class="cmp-note" :title="store.splitPrecisionReason">未验证配准 · {{ store.splitPrecisionReason }}</span>
         <button
           type="button"
           class="cmp-reset"

@@ -39,3 +39,15 @@
 - 前端 `src/stores/__tests__/diffStore.test.ts` 10 项：过期响应丢弃、结果与图层解码后一次性发布并在解码期失效时丢弃、像素代次变化使结果失效、成功结果签名、羽化重建、候选绑定结果影像、过期/bbox/孔洞/approx 拒绝写掩码、定位不驱动无关影像、结果影像不在格子时先激活。
 - 后端计算依赖改为 SciPy 必需；scikit-image 可选（缺省走 SSIM 兜底，`parameters.backend` 标明实现）。
 - 前端全量 767 项测试、`vue-tsc --noEmit`、`npm run build` 与 `check:terms`（216 文件）通过；后端 25 项差异测试、预览与 API 套件 213 passed + 4 skipped 通过。真机大图、多尺寸浏览器视觉回归与真实盘阵 ROI 验收仍未做。
+
+
+## 差异定位可视化 2.0（2026-11-06）
+
+- 顶部白色工具栏在「差异定位」右侧增加 eye / eye-off「显示中 / 已隐藏」，仅有结果时出现。store 的 resultVisible 与 open、result 分离；关闭设置不会隐藏结果，显隐不清除候选、选中项、参数、图层缓存或 Camera。「清除结果」仍单独释放结果。
+- 显示方式为「原图标记 / 独立热力图 / 热力叠加」。主画布与鹰眼共用 lib/diffRender.ts 的显示源绘制，独立模式不绘制原图，叠加模式只叠连续热力图，不混入二值掩码。显示模式、显隐、叠加不透明度与羽化均只触发本地重绘，不请求分析、不重载 TIFF、不创建影像记录、不写 Camera。
+- 固定连续色表为 #0B0B1D → #3B0F70 → #8C2981 → #DE4968 → #FCA636 → #FCFFA4；有效零差异完全不透明。主画布和面板提供连续色标，使用结果方法标注 AbsDiff / 1−SSIM，范围 0–1，显示 NoData 状态。
+- 保留 gridCoverageToThumb 的共同网格 / 当前视野 ROI / 原始 ROI 映射。独立模式整幅先画未分析背景 #202C39，只在覆盖矩形内贴热力图；NoData 背景 #637180。分屏、交替对比均认 viewer.panes 的实际 rec，不将局部结果拉伸为整图。
+- 后端仅新增已有 valid 的只读 PNG 输出 validityMap（白=有效，黑=NoData）；AbsDiff / SSIM / 连通域算法、differenceMap、binaryMask 与统计不变。字段可选以兼容旧服务；旧服务有 NoData 但未返回空间位置时，色标明确提示，不把零差异猜成 NoData。
+- 设置面板保持 336px，按「影像与分析参数 → 显示方式 → 高级设置」组织；常用控件 30px / 12px，高级默认折叠，有结果时突出显示方式。独立模式保留候选编号、选中轮廓与定位，批注 / ROI / 巡览继续使用原有交互和坐标。
+
+验证：前端全量 792 项、术语检查、typecheck、build 通过；后端差异测试 26 项通过。新增色阶/有效性/ROI 绘制/显隐缓存/模式参数测试。浏览器回归运行 node .e2e/test-diff-visualization.js（先构建 frontend），以合成影像和模拟只读分析响应验证真实 UI、ROI 外与 NoData 像素、336px 面板、Camera 不变、分屏/交替身份及候选定位，显示切换全程仅一次分析请求；1366px / 1920px 截图位于 .e2e/artifacts/diff-visualization-*.png。真实盘阵大图仍待内网验收。

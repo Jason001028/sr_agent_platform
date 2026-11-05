@@ -73,6 +73,7 @@ function toggle(reg: DiffRegion) {
           class="dc-row"
           :class="{ on: diff.selectedId === reg.id, hot: diff.hoveredId === reg.id }"
         >
+          <label><input type="checkbox" :checked="diff.selectedRegionIds.includes(reg.id)" :aria-label="'选择差异区域 '+reg.rank" @change="diff.toggleRegionSelection(reg.id)">选入讨论 / 草案</label>
           <button
             type="button"
             class="dc-main"
