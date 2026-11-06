@@ -45,3 +45,28 @@ Node npm failed under sandbox with EPERM on user directory; authorized execution
 
 ## 2026-11-05 Batch Mock UI timing
 Puppeteer 点击跟随复选框后立即读取 checked 在布局/响应式更新期间出现 false；增加调试往返后可稳定观察到 store.follow=true。验收改为等待真实 checked=true，再验证 userIntent 退出；未修改业务状态或断言目标。
+
+
+## 2026-11-06 Image Refresh metadata and browser fixtures
+- `_manual_row` leaves W/H unset; the read-only result endpoint must explicitly read TIFF header dimensions before reporting a client-usable result. Added a dimension assertion alongside the ready/changed-source regression.
+- Browser camera assertions must use public `setPaneView` / scalar `view` fields after initial ResizeObserver layout settles; private `viewA` is not exposed by the setup store and reactive proxies serialize incompletely through CDP.
+
+## [ERR-20261106-BATCH-PS] PowerShell source encoding
+
+**Logged**: 2026-11-06
+**Priority**: medium
+**Status**: resolved
+**Area**: frontend
+
+### Summary
+Windows PowerShell's default ASCII pipeline corrupted Chinese literals passed to Python stdin during the batch Panel edit.
+
+### Error
+Chinese UI text became question marks; Unicode-dependent replacement anchors consequently failed. A separate relative-path command also ran from the frontend directory rather than the repository root.
+
+### Suggested Fix
+Use apply_patch for Unicode source edits, or explicitly set `$OutputEncoding = [System.Text.UTF8Encoding]::new($false)` before Python pipelines; specify the intended working directory. Inspect rendered screenshots as well as repeated-question-mark searches, since a single corrupted character is easy to miss. Quote agent-browser `@eN` arguments in PowerShell to avoid splatting; direct eval arguments work where the Windows stdin pipeline does not forward the script.
+
+### Metadata
+- Reproducible: yes
+- Related Files: frontend/src/components/BatchRepairDraft.vue, .e2e/test-batch-panel.js

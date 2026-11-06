@@ -21,11 +21,26 @@ beforeEach(()=>{
 });
 afterEach(()=>vi.unstubAllGlobals());
 describe('shared tour and comparison scheduler',()=>{
- it('holds 300ms then presents two full rounds before moving',()=>{
-  const t=useAutoTourStore();t.compare=true;t.interval=600;expect(t.start()).toBe(true);tick(1200);
-  const arrival={...mocks.viewer.flickerView};tick(300);expect(mocks.viewer.setTourLayer.mock.calls).toHaveLength(1);
-  tick(2400);expect(mocks.viewer.setTourLayer.mock.calls.slice(1,5).map((c:any)=>c[0])).toEqual([true,false,true,false]);
-  expect(mocks.viewer.flickerView).toEqual(arrival);tick(500);expect(mocks.viewer.flickerView).not.toEqual(arrival);
+ it('teleports between stops by default and dwells 1.3s before flickering two rounds',()=>{
+  const t=useAutoTourStore();t.compare=true;t.interval=600;expect(t.speed).toBe('teleport');expect(t.start()).toBe(true);
+  const p=t.plan!;const stop=(i:number)=>{const q=p.points[i];return{scale:p.scale,ox:400-q.x*p.tw/p.width*p.scale,oy:300-q.y*p.th/p.height*p.scale};};
+  // 到点后先静止 1.3 秒（连续推进是 0.3 秒），此时只有启动时的图层复位。
+  tick(1000);expect(mocks.viewer.setTourLayer.mock.calls).toHaveLength(1);
+  tick(3200);
+  // 落位与块间切换都是精确停点，没有任何中间插值位置。
+  expect(mocks.viewer.flickerView).toEqual(stop(1));
+  // 第 1 次调用是启动时把图层复位到参考图，其后才是两轮四个切换。
+  expect(mocks.viewer.setTourLayer.mock.calls.slice(1).map((c:any)=>c[0])).toEqual([true,false,true,false]);
+  for(const [camera] of mocks.viewer.setTourCamera.mock.calls){
+   expect([stop(0),stop(1)].some(v=>v.scale===camera.scale&&v.ox===camera.ox&&v.oy===camera.oy)).toBe(true);
+  }
+ });
+ it('defaults to teleport only for stop compare and falls back on move',()=>{
+  const t=useAutoTourStore();expect(t.speed).toBe('normal');
+  t.compare=true;expect(t.speed).toBe('teleport');
+  t.mode='move';expect(t.speed).toBe('normal');
+  t.mode='stop';expect(t.speed).toBe('teleport');
+  t.speed='fast';t.compare=false;expect(t.speed).toBe('fast');
  });
  it.each([600,1000,1500])('moves while alternating at %ims and freezes both on pause',interval=>{
   const t=useAutoTourStore();t.compare=true;t.mode='move';t.interval=interval;t.start();tick(1300);

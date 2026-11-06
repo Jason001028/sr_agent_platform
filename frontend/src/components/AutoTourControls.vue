@@ -15,7 +15,7 @@ onBeforeUnmount(()=>{tour.stop();document.removeEventListener('visibilitychange'
   <template v-if="tour.compare"><span>{{ viewer.flickerPairName }} · {{ tour.mode==='stop'?'驻停交替':'移动交替' }}</span><span class="tour-image" :title="viewer.flickerCurrentName">{{ viewer.flickerCurrentName }}</span></template>
   <button @click="tour.status==='playing'?tour.pause():tour.resume()">{{ tour.status==='playing'?'暂停':'继续' }}</button>
   <span role="status">{{ tour.status==='playing'?'播放中':'已暂停' }}</span>
-  <span>{{ {slow:'慢速',normal:'标准',fast:'快速',ultra:'极速'}[tour.speed] }}</span>
+  <span>{{ {slow:'慢速',normal:'标准',fast:'快速',ultra:'极速',teleport:'瞬移'}[tour.speed] }}</span>
   <span :aria-label="'路线进度 '+tour.progress+'%'">{{ tour.progress }}%</span>
   <span v-if="tour.reason" class="tour-reason" role="status">{{ tour.reason }}</span>
   <button @click="tour.stop">结束</button>

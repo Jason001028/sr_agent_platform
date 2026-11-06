@@ -55,7 +55,7 @@ onBeforeUnmount(()=>{tour.cancelPreparation();document.removeEventListener('keyd
     <TourRoutePicker v-model="tour.route" :disabled="locked" />
     <div class="tour-grid tour-navigation">
      <label class="tour-field"><span>巡览范围</span><select v-model="tour.range" aria-label="巡览范围" :disabled="locked"><option value="all">整张影像</option><option value="visible">当前可见区域</option></select></label>
-     <label class="tour-field"><span>行进速度</span><select v-model="tour.speed" aria-label="巡览速度" :disabled="locked"><option value="slow">{{ tour.compare?'40 px/s · 慢速':'慢速' }}</option><option value="normal">{{ tour.compare?'60 px/s · 标准':'标准' }}</option><option value="fast">{{ tour.compare?'80 px/s · 快速':'快速' }}</option><option value="ultra">{{ tour.compare?'120 px/s · 极速':'极速' }}</option></select></label>
+     <label class="tour-field"><span>行进速度</span><select v-model="tour.speed" aria-label="巡览速度" :disabled="locked"><option v-if="tour.compare && tour.mode==='stop'" value="teleport">瞬移 · 无过渡</option><option value="slow">{{ tour.compare?'40 px/s · 慢速':'慢速' }}</option><option value="normal">{{ tour.compare?'60 px/s · 标准':'标准' }}</option><option value="fast">{{ tour.compare?'80 px/s · 快速':'快速' }}</option><option value="ultra">{{ tour.compare?'120 px/s · 极速':'极速' }}</option></select></label>
     </div>
     <section class="tour-compare-section" aria-label="交替设置">
      <label class="tour-toggle"><span><span class="toggle-title">交替对比</span><span class="toggle-caption">双图共用同一条路线</span></span><input v-model="tour.compare" class="tour-switch" aria-label="交替对比" type="checkbox" role="switch" :disabled="locked" /></label>

@@ -22,7 +22,7 @@ and external-job idempotency (run_sr task table) are separate layers.
 """
 
 from __future__ import annotations
-from backend.agent.request_budget import DeadlineExceeded, timeout_for, request_policy, error_class
+from backend.agent.request_budget import DeadlineExceeded, timeout_for, request_policy, error_class, timeout_message
 
 import inspect
 import json
@@ -926,7 +926,9 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                 diagnostics["request_attempts"] = model_calls - calls_before
             diagnostics.update({k: out[k] for k in (
                 "request_attempts", "capability_rejections", "effective_thinking_parameters",
-                "thinking_applied", "stream_timings", "model_timeout_seconds") if k in out})
+                "thinking_applied", "stream_timings", "model_timeout_seconds",
+                "model_first_output_timeout_seconds", "model_idle_timeout_seconds",
+                "timeout_phase", "timeout_limit_seconds") if k in out})
             call_usage = _normalize_usage(out.get("usage"))
             if call_usage is not None:
                 call_index += 1
@@ -963,7 +965,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
             if out.get("response_error") in {"MODEL_TIMEOUT", "DEADLINE_EXCEEDED"}:
                 if out["response_error"] == "DEADLINE_EXCEEDED":
                     raise DeadlineExceeded("stream deadline exceeded")
-                raise TimeoutError(f"model request timed out after {out.get('model_timeout_seconds', cfg.llm_timeout):g}s (includes image encoding/prefill and full response)")
+                raise TimeoutError(timeout_message(diagnostics, cfg))
         except Exception as e:  # noqa: BLE001 — surface cleanly, no retry loop
             if isinstance(e, DeadlineExceeded) and durable:
                 if trajectory is not None:

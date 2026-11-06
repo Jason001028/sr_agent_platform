@@ -38,6 +38,10 @@
 - 两张有同一个非空场景目录；
 - 宽高比相对偏差 ≤ 1%（`FLICKER_ASPECT_TOLERANCE`）—— 整幅图按归一化坐标一一对应，
   宽高比一致时这条映射不变形地覆盖同一片地面；2 倍产物比例不变，被裁过的图会露馅。
+  判据按**比例**计算（`aspectDeviation`），不要求像素网格严格成整数倍：PAN 本体与
+  NOSR 常是不同分辨率（生产实测 SC 本体/NOSR ≈ 1.96），重采样取整后
+  `宽1×高2 ≠ 宽2×高1`，但覆盖比例一致，仍可交替。预览缩略图各自取整的偏差同样按
+  这 1% 放行，不再要求缩略图乘积严格相等。
 
 任何一条不满足就**禁止自动交替**并说明原因，不拿两张不同地面的图来回闪。
 
@@ -93,8 +97,9 @@
 
 ## 8. 验证
 
-- `frontend/src/lib/__tests__/flicker.test.ts`（18 条）：五档与脏值、持久化与 localStorage
-  抛错、配准拒绝的四种情形与 1% 边界、标签、配对排序（同场景 / 互补 / 配准优先 / id 稳定）。
+- `frontend/src/lib/__tests__/flicker.test.ts`（19 条）：五档与脏值、持久化与 localStorage
+  抛错、配准拒绝的四种情形与 1% 边界、宽高比按比例计算（1.96 倍网格的取整误差不误伤）、
+  标签、配对排序（同场景 / 互补 / 配准优先 / id 稳定）。
 - `frontend/src/lib/__tests__/compare.test.ts`：`parseCompareMode` 认四个值、`dropSideAt`
   在交替模式下整块画布归 A。
 - `node .e2e/test-flicker.js`（`npm run test:flicker`，`frontend/dist` + 无头 Chrome，

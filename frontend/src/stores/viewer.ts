@@ -45,6 +45,7 @@ import type { CompareMode } from '../lib/compare.js';
 import {
   FLICKER_INTERVALS_MS, parseFlickerInterval, loadFlickerInterval, saveFlickerInterval,
   registrationRefusal, pickFlickerPartner, flickerPairLabel, flickerLabel,
+  aspectDeviation, FLICKER_ASPECT_TOLERANCE,
 } from '../lib/flicker.js';
 import type { FlickerImageMeta } from '../lib/flicker.js';
 import { FileSource } from '../lib/source.js';
@@ -1253,9 +1254,9 @@ export const useViewerStore = defineStore('viewer', () => {
   function selectTourPair(aId:number,bId:number) {
     const a=recs.value.find(r=>r.id===aId),b=recs.value.find(r=>r.id===bId);
     if(!a?.thumb||!b?.thumb||precisePairReason(a,b))return false;
-    // A single isotropic Camera cannot correct independently rounded previews.
-    // Refuse these instead of introducing a small vertical registration drift.
-    if(a.thumb.width*b.thumb.height!==b.thumb.width*a.thumb.height)return false;
+    // 预览按各自分辨率缩放，尺寸取整会让比例差几个像素；按宽高比容差放行，
+    // 远大于 1% 的偏差仍拒绝，避免共享同一视口时出现可见的纵向漂移。
+    if(aspectDeviation(a.thumb.width,a.thumb.height,b.thumb.width,b.thumb.height)>FLICKER_ASPECT_TOLERANCE)return false;
     if(registrationRefusal(flickerMeta(a),flickerMeta(b)))return false;
     const previous=compareMode.value==='flicker'?flickerRefRec.value:activeRec.value;
     const previousView=compareMode.value==='flicker'?flickerView.value:viewA.value;
@@ -1265,6 +1266,29 @@ export const useViewerStore = defineStore('viewer', () => {
     flickerPair.value={a:aId,b:bId};flickerIndex.value=0;compareMode.value='flicker';renderTick.value++;
     return true;
   }
+  /** 差异定位：把同景候选装成身份卡片（只建身份，不取像素）。
+   *
+   *  与 `loadTourImage` 的区别：不要求 `tourIdentity` —— 差异分析只需要宽高与场景
+   *  身份；`/siblings` 的 `items`（本体 / 本轮产物 / NOSR）没有巡览证据，但照样应
+   *  出现在差异定位的可选列表里。返回 rec id；身份不全（无 id / 尺寸未知）返回 null。 */
+  function ensureSceneImage(item:SceneSibling,res:SceneSiblings):number|null {
+    const W=item.tourIdentity?.width??item.W,H=item.tourIdentity?.height??item.H;
+    if(!item.id||!item.exists||!W||!H)return null;
+    const meta:SceneOpenMeta={name:item.name??item.id,W,H,sceneId:item.id,lqPath:res.lqPath,sceneDir:res.lqPath,srcRev:item.srcRev??null,stageKind:item.kind};
+    return insertSceneCard(meta,siblingRow(res,item));
+  }
+
+  /** 差异定位：确保某张卡片已有像素；本来就打开的返回 true。
+   *  取图走「点开卡片」同一条路（含进度遮罩与失败提示），不另开一条链路。 */
+  async function ensureCardPixels(id:number):Promise<boolean> {
+    const rec=recs.value.find(r=>r.id===id);
+    if(!rec||rec.pending)return false;
+    if(rec.thumb&&rec.src)return true;
+    if(!rec.card)return false;
+    await loadCardPixels(rec);
+    return !!rec.thumb&&!!rec.src;
+  }
+
   async function loadTourImage(item:SceneSibling,res:SceneSiblings,stillWanted:()=>boolean=()=>true) {
     if(!item.id||!item.tourIdentity||!item.exists)throw new Error('影像身份不完整');
     const row=siblingRow(res,item);
@@ -1285,7 +1309,6 @@ export const useViewerStore = defineStore('viewer', () => {
     const b = recs.value.find((r) => r.id === bId);
     if (!a?.thumb || !b?.thumb || a.id === b.id) return false;
     if (precisePairReason(a, b)) return false;
-    if (a.thumb.width * b.thumb.height !== b.thumb.width * a.thumb.height) return false;
     if (registrationRefusal(flickerMeta(a), flickerMeta(b))) return false;
     const previous = compareMode.value === 'flicker' ? flickerRefRec.value : activeRec.value;
     const previousView = compareMode.value === 'flicker' ? flickerView.value : viewA.value;
@@ -2357,7 +2380,7 @@ export const useViewerStore = defineStore('viewer', () => {
     // 一键解析：NOSR 卡紧跟本体卡；其余情况追加到末尾。不参与批量错峰（延迟 0），
     // 只占一次淡入，免得凭空一跳。
     const at = afterId == null ? -1 : recs.value.findIndex((r) => r.id === afterId);
-    if (at >= 0) { rec.enterDelay = 0; recs.value.splice(at + 1, 0, rec); }
+    if (at >= 0) { rec.enterDelay = strictIdentity ? undefined : 0; recs.value.splice(at + 1, 0, rec); }
     else recs.value.push(rec);
     noteSceneDir(rec);
     return rec.id;
@@ -2608,7 +2631,7 @@ export const useViewerStore = defineStore('viewer', () => {
     const applied = await applySceneJpgToRec(rec, meta, blob, undefined, true, stillWanted);
     if (!applied || !stillWanted()) return false;
     rec.detailDiv = row.previewDiv;
-    rec.card = markRaw({ row, meta });
+    rec.card = markRaw({ row: { ...row, thumbnail_url: null }, meta });
     rec.file = markRaw(new File([blob], meta.name + '.jpg', { type: 'image/jpeg' }));
     await activate(id, undefined, 'follow', row.previewDiv);
     if (!wasShown && sameGroup && priorSize && rec.thumb && compareMode.value !== 'flicker') {
@@ -4205,7 +4228,7 @@ export const useViewerStore = defineStore('viewer', () => {
     flickerPlaying, flickerStart: startFlicker, flickerPause: pauseFlicker,
     flickerToggle: toggleFlicker, flickerStop: stopFlicker,
     flickerReady, flickerReason, flickerPairName, flickerCurrentName, flickerNames,
-    flickerShowingAlt, flickerIndex, displayRec, flickerRefRec, flickerAltRec, flickerView, setTourLayer, setTourCamera, selectTourPair, loadTourImage, openComparePair,
+    flickerShowingAlt, flickerIndex, displayRec, flickerRefRec, flickerAltRec, flickerView, setTourLayer, setTourCamera, selectTourPair, loadTourImage, ensureSceneImage, ensureCardPixels, openComparePair,
     dragHint, setDragHint,
     // 侧栏卡片拖进画布：载荷类型 + 起手/收尾 + 同景序号（卡片小标）
     REC_MIME, startRecDrag, endRecDrag, sceneOrdinalOf,

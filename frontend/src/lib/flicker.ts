@@ -71,6 +71,17 @@ function ratio(w: number, h: number): number {
   return w > 0 && h > 0 ? w / h : 0;
 }
 
+/** 两张影像宽高比的相对偏差（0 = 完全一致，Infinity = 尺寸无效）。
+ *
+ *  比较的是比例而不是逐像素乘积：PAN 本体与 NOSR 常是不同分辨率（例如
+ *  实测约 1.96 倍），重采样后尺寸取整会让 `w1*h2 === w2*h1` 差几个像素，
+ *  但两者在地面上的覆盖比例仍然一致。 */
+export function aspectDeviation(aW: number, aH: number, bW: number, bH: number): number {
+  const a = ratio(aW, aH), b = ratio(bW, bH);
+  if (!a || !b) return Infinity;
+  return Math.abs(a - b) / Math.max(a, b);
+}
+
 /** 两张图能否按「整幅 = 同一地面」配准。能 → null；不能 → 一句给用户看的原因。 */
 export function registrationRefusal(a: FlickerImageMeta, b: FlickerImageMeta): string | null {
   if (!(a.w > 0 && a.h > 0 && b.w > 0 && b.h > 0)) {
@@ -84,10 +95,7 @@ export function registrationRefusal(a: FlickerImageMeta, b: FlickerImageMeta): s
   if (dirA !== dirB) {
     return '两张影像来自不同的场景目录，无法确认是同一地块';
   }
-  const arA = ratio(a.w, a.h);
-  const arB = ratio(b.w, b.h);
-  const dev = Math.abs(arA - arB) / Math.max(arA, arB);
-  if (dev > FLICKER_ASPECT_TOLERANCE) {
+  if (aspectDeviation(a.w, a.h, b.w, b.h) > FLICKER_ASPECT_TOLERANCE) {
     return '两张影像的宽高比不一致（' + a.w + '×' + a.h + ' / ' + b.w + '×' + b.h
       + '），无法在不变形的前提下覆盖同一视口';
   }

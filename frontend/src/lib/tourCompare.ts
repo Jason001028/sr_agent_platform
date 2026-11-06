@@ -1,3 +1,5 @@
+import { aspectDeviation, FLICKER_ASPECT_TOLERANCE } from './flicker';
+
 /** Pair known production siblings on proportional full-image pixel grids. */
 export interface TourImage {
  id: number;
@@ -33,7 +35,11 @@ export function tourPairRefusal(a: TourImage, b: TourImage): string | null {
  if(x.extent.some((v,i)=>v!==y.extent[i]) || x.orientation.some((v,i)=>v!==y.orientation[i])) return '空间范围或方向不一致';
  if(x.orientation[0]*x.orientation[3]-x.orientation[1]*x.orientation[2]===0) return '方向映射不可逆';
  }
- if(a.width*b.height!==b.width*a.height) return '像素网格比例不一致';
+ // PAN 本体与 NOSR 通常是不同分辨率（生产上实测约 1.96 倍），按比例重采样后
+ // 尺寸取整，逐像素乘积会差几个像素，但覆盖比例仍然一致。按宽高比容差判断，
+ // 不再要求两个网格严格成整数倍。
+ if(aspectDeviation(a.width,a.height,b.width,b.height)>FLICKER_ASPECT_TOLERANCE)
+  return `像素网格比例不一致（${a.width}×${a.height} / ${b.width}×${b.height}），无法共享同一视口`;
  return null;
 }
 export function tourCandidates(a: TourImage, images: readonly TourImage[], role: 'nosr'|'ori'|'old') {

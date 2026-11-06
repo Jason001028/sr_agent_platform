@@ -10,7 +10,10 @@ docs/knowledge/agent-orchestration-research.md §1).
     SR_LLM_MODEL       model id, default gpt-4o-mini
     SR_LLM_MAX_TOKENS  per-turn completion cap, default 1024
     SR_LLM_TEMPERATURE sampling temperature, default 0.2
-    SR_LLM_TIMEOUT     HTTP timeout seconds, default 60
+    SR_LLM_TIMEOUT     ordinary streaming idle seconds / Goal request cap, default 60
+    SR_LLM_FIRST_OUTPUT_TIMEOUT ordinary first semantic output wait, default 180
+    SR_LLM_RESPONSE_TIMEOUT ordinary whole response cap, default 600
+    SR_LLM_VISION_TIMEOUT visual first-output minimum, default 180
     SR_LLM_INTEGRITY_RETRIES  consecutive incomplete-response retries, default 1 (0 disables)
     SR_LLM_STREAM      =0 → 关闭模型流式输出（缺省 1：逐 token 推 SSE，前端可再按
                        回合关闭）。端点不支持 stream 时置 0 退回一次性调用。
@@ -31,6 +34,7 @@ package): the services import *it*, so a back-import would close a cycle.
 from __future__ import annotations
 
 import os
+import math
 from dataclasses import dataclass
 
 # --------------------------------------------------------------------------
@@ -125,9 +129,15 @@ class Config:
     llm_thinking_profile: str = "balanced"
     llm_thinking_adapter: str = "none"
     llm_vision_timeout: float = 180.0
+    # None preserves the legacy contract for callers constructing Config directly.
+    # load_config enables bounded progress-aware ordinary chat by default.
+    llm_response_timeout: float | None = None
+    llm_first_output_timeout: float | None = None
 
     def __post_init__(self):
-        if self.llm_timeout <= 0 or self.llm_vision_timeout <= 0 or self.llm_deadline_margin < 0:
+        limits = [self.llm_timeout, self.llm_vision_timeout]
+        limits += [v for v in (self.llm_response_timeout, self.llm_first_output_timeout) if v is not None]
+        if any(not math.isfinite(v) or v <= 0 for v in limits) or not math.isfinite(self.llm_deadline_margin) or self.llm_deadline_margin < 0:
             raise ValueError("invalid request timeout/margin")
         if self.llm_thinking_profile not in {"fast", "low", "balanced", "deep"}:
             raise ValueError("invalid thinking profile")
@@ -155,6 +165,8 @@ def load_config() -> Config:
         llm_max_tokens=env_int("SR_LLM_MAX_TOKENS", 1024),
         llm_temperature=env_float("SR_LLM_TEMPERATURE", 0.2),
         llm_timeout=env_float("SR_LLM_TIMEOUT", 60),
+        llm_response_timeout=env_float("SR_LLM_RESPONSE_TIMEOUT", 600),
+        llm_first_output_timeout=env_float("SR_LLM_FIRST_OUTPUT_TIMEOUT", 180),
         llm_vision_timeout=env_float("SR_LLM_VISION_TIMEOUT", 180),
         llm_deadline_margin=env_float("SR_LLM_DEADLINE_MARGIN", 0.1),
         llm_thinking_profile=os.getenv("SR_LLM_THINKING_PROFILE", "balanced").lower(),

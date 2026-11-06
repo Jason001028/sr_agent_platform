@@ -20,8 +20,8 @@ onBeforeUnmount(()=>{
 </script>
 <template>
  <nav ref="root" class="viewer-history" :class="{near}" :hidden="tour.status!=='idle'" aria-label="视野历史导航" @pointerdown.stop @mousedown.stop @dblclick.stop @wheel.stop>
-  <button type="button" :disabled="!history.canBack" title="恢复上一视野" @click="history.go(-1)"><span aria-hidden="true">‹</span>上一景</button>
-  <button type="button" :disabled="!history.canForward" title="恢复下一视野" @click="history.go(1)">下一景<span aria-hidden="true">›</span></button>
+  <button type="button" :disabled="!history.canBack" title="恢复上一视点" @click="history.go(-1)"><span aria-hidden="true">‹</span>上一视点</button>
+  <button type="button" :disabled="!history.canForward" title="恢复下一视点" @click="history.go(1)">下一视点<span aria-hidden="true">›</span></button>
  </nav>
 </template>
 <style scoped>

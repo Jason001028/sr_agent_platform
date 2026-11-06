@@ -3,6 +3,7 @@ import {
   FLICKER_INTERVALS_MS, DEFAULT_FLICKER_INTERVAL_MS, FLICKER_ASPECT_TOLERANCE,
   parseFlickerInterval, loadFlickerInterval, saveFlickerInterval,
   registrationRefusal, flickerLabel, flickerPairLabel, pickFlickerPartner,
+  aspectDeviation,
 } from '../flicker.js';
 import type { FlickerImageMeta } from '../flicker.js';
 
@@ -86,6 +87,12 @@ describe('registrationRefusal（能否确认同一地面）', () => {
     expect(registrationRefusal(meta({ id: 1 }), meta({
       id: 2, sceneDir: '/DiskArray/GSHC2IMPS/2026/01/01/S002',
     }))).toContain('不同的场景目录');
+  });
+
+  it('宽高比偏差按比例计算，重采样的取整误差不误伤', () => {
+    expect(aspectDeviation(30831, 30948, 15768, 15823)).toBeLessThan(FLICKER_ASPECT_TOLERANCE);
+    expect(aspectDeviation(8000, 6000, 8000, 6000)).toBe(0);
+    expect(aspectDeviation(0, 6000, 8000, 6000)).toBe(Infinity);
   });
 
   it('宽高比偏差 ≤1% 放行，>1% 拒绝', () => {

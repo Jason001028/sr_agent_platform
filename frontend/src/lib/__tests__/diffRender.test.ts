@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { colorizeHeatPixels, drawDiffSource, HEAT_COLORS, NODATA_COLOR, UNANALYZED_COLOR } from '../diffRender';
+import {
+  colorizeHeatBytes, colorizeHeatPixels, drawDiffSource,
+  HEAT_COLORS, NODATA_COLOR, UNANALYZED_COLOR,
+} from '../diffRender';
 
 describe('continuous difference rendering', () => {
   it('maps every fixed stop, including opaque zero, without changing source bytes', () => {
@@ -18,6 +21,29 @@ describe('continuous difference rendering', () => {
     const pixels = new Uint8ClampedArray([0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 0]);
     const valid = new Uint8ClampedArray([255, 255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255]);
     expect([...colorizeHeatPixels(pixels, valid)]).toEqual([11, 11, 29, 255, 0, 0, 0, 0, 0, 0, 0, 0]);
+  });
+
+  it('multiplies intensity by the per-pixel weight before the color table', () => {
+    // 权重字节 255/85/170 = 1.8×/0.8×/1.3×，乘 100 后正好是 180/80/130。
+    const intensity = new Uint8Array([100, 100, 100]);
+    const weights = new Uint8Array([255, 85, 170]);
+    const got = colorizeHeatBytes(intensity, 3, 1, null, weights);
+    const expected = colorizeHeatBytes(new Uint8Array([180, 80, 130]), 3, 1);
+    expect([...got]).toEqual([...expected]);
+  });
+
+  it('clamps weighted intensity above 1 to the hottest stop', () => {
+    const got = colorizeHeatBytes(new Uint8Array([200]), 1, 1, null, new Uint8Array([255]));
+    const hottest = colorizeHeatBytes(new Uint8Array([255]), 1, 1);
+    expect([...got]).toEqual([...hottest]);
+  });
+
+  it('keeps NoData transparent with or without weights', () => {
+    const valid = new Uint8Array([1, 0]);
+    const weights = new Uint8Array([255, 255]);
+    const got = colorizeHeatBytes(new Uint8Array([100, 100]), 2, 1, valid, weights);
+    expect(got[7]).toBe(0);
+    expect(got[3]).toBe(255);
   });
 
   function context() {

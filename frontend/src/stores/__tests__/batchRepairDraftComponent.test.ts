@@ -3,7 +3,8 @@ import { createApp, nextTick } from 'vue';
 import { createPinia, setActivePinia } from 'pinia';
 import { expect, it, vi } from 'vitest';
 vi.mock('../../stores/viewer', () => ({ useViewerStore: () => ({
-  selectedIds: [], recs: [], activeRec: { name: 'PAN', lqPath: '/trusted/scene' },
+  selectedIds: [], recs: [], recsOrdered: [], sceneOrdinalOf: () => 0,
+  activeRec: { name: 'PAN', lqPath: '/trusted/scene' },
 }) }));
 vi.mock('../../stores/scenes', () => ({ useScenesStore: () => ({}) }));
 vi.mock('../../stores/batchGoal', () => ({ useBatchGoalStore: () => ({}) }));
@@ -15,19 +16,23 @@ vi.mock('../../lib/api', () => ({
 }));
 import BatchRepairDraft from '../../components/BatchRepairDraft.vue';
 import { useBatchDraftStore } from '../../stores/batchDraft';
-import { apiResolveScene } from '../../lib/api';
-it('adds a Viewer reference freely and defers resolution to unified freeze', async () => {
+import { apiResolveScene, apiBatchImport, apiCreateBatch } from '../../lib/api';
+it('preserves previous drafts and requires a numbered production sequence before starting', async () => {
   localStorage.clear(); vi.clearAllMocks();
   const pinia = createPinia(); setActivePinia(pinia);
+  const draft = useBatchDraftStore();
+  draft.add([{ name: 'previous draft', path: '/trusted/scene' }]);
   const root = document.createElement('div'); document.body.append(root);
   const app = createApp(BatchRepairDraft); app.use(pinia); app.mount(root);
   try {
-    const button = [...root.querySelectorAll('button')].find(b => b.textContent?.includes('加入待修复'))!;
-    button.click();
-    await vi.waitFor(() => expect(useBatchDraftStore().candidates).toHaveLength(1));
     await nextTick();
+    expect(root.querySelector<HTMLButtonElement>('.primary')?.disabled).toBe(true);
+    expect(root.textContent).toContain('暂无已关联生产序列');
+    expect(root.textContent).not.toContain('加入待修复');
     expect(apiResolveScene).not.toHaveBeenCalled();
-    expect(useBatchDraftStore().candidates[0]!.path).toBe('/trusted/scene');
-    expect(useBatchDraftStore().candidates[0]!.status).toBe('待确认');
+    expect(apiBatchImport).not.toHaveBeenCalled();
+    expect(apiCreateBatch).not.toHaveBeenCalled();
+    expect(draft.candidates[0]!.path).toBe('/trusted/scene');
+    expect(draft.candidates[0]!.status).toBe('待确认');
   } finally { app.unmount(); root.remove(); }
 });

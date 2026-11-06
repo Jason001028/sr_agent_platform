@@ -31,6 +31,7 @@ def test_no_badge_before_preview_and_real_revision_changes(scene):
     preview_jpg.ensure_preview_jpg(source, jpg, div=4)
     ready = image_refresh.discover(task, root)
     assert ready['state'] == 'ready'
+    assert (ready['row']['W'], ready['row']['H']) == (16, 16)
     assert image_refresh.preview_bytes(task, root, ready['version']).startswith(b'\xff\xd8')
     Image.new('I;16', (16, 16), 200).save(source)
     updated = image_refresh.discover(task, root)

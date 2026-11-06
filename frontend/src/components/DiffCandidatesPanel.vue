@@ -15,8 +15,8 @@ import type { DiffRegion } from '../lib/diffLocate';
 const LIST_MAX = 80;
 const diff = useDiffStore();
 
-const regions = computed(() => diff.regions.slice(0, LIST_MAX));
-const hiddenCount = computed(() => Math.max(0, diff.regions.length - LIST_MAX));
+const regions = computed(() => diff.orderedRegions.slice(0, LIST_MAX));
+const hiddenCount = computed(() => Math.max(0, diff.orderedRegions.length - LIST_MAX));
 const summary = computed(() => {
   const r = diff.result;
   if (!r) return '';
@@ -30,6 +30,12 @@ function pad(rank: number): string {
 }
 function areaText(n: number): string {
   return n.toLocaleString('en-US');
+}
+function pct(v: number): string {
+  return Math.round(v * 100) + '%';
+}
+function deltaText(d: number): string {
+  return (d >= 0 ? '+' : '') + Math.round(d);
 }
 function choose(reg: DiffRegion) {
   diff.selectRegion(reg.id);
@@ -61,6 +67,9 @@ function toggle(reg: DiffRegion) {
 
     <template v-else>
       <p class="dc-summary">{{ summary }}</p>
+      <p v-if="diff.toneWeight" class="dc-note">
+        已按亮度归因权重排序，热力图同步逐像素加权；灰度取显示层，不是原始 DN。
+      </p>
       <p v-if="diff.refined" class="dc-refined">
         当前是原始 ROI 分析结果，区域外仍是预览分析。
         <button type="button" :disabled="diff.busy" @click="diff.restorePreview()">返回预览结果</button>
@@ -88,6 +97,15 @@ function toggle(reg: DiffRegion) {
             <span class="dc-text">
               <b>差异区域</b>
               <small>面积 {{ areaText(reg.areaPx) }} px² · 平均差异 {{ reg.meanDiff.toFixed(3) }}</small>
+              <template v-if="diff.toneWeight && reg.tone">
+                <span class="dc-tone" :title="'复核权重 ' + reg.tone.weight.toFixed(2) + '×'">
+                  <i class="dc-tone-track"><i class="dc-tone-fill" :style="{ width: pct(reg.tone.norm) }"></i></i>
+                  <em>{{ reg.tone.weight.toFixed(2) }}×</em>
+                </span>
+                <small class="dc-tone-note">
+                  灰 {{ Math.round(reg.tone.meanA) }} · 中间调 {{ pct(reg.tone.mid) }} · 平坦 {{ pct(reg.tone.flat) }} · 变化 {{ deltaText(reg.tone.delta) }}
+                </small>
+              </template>
             </span>
             <span class="dc-more" :title="'查看轮廓 #' + pad(reg.rank)" @click.stop="toggle(reg)">⋯</span>
           </button>
@@ -151,6 +169,11 @@ function toggle(reg: DiffRegion) {
 .dc-text{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}
 .dc-text b{font-size:11px;font-weight:600}
 .dc-text small{font-size:9.5px;line-height:13px;color:var(--ink-sub);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dc-tone{display:flex;align-items:center;gap:5px;margin-top:2px}
+.dc-tone-track{flex:1;height:3px;border-radius:2px;background:var(--surface-2,#eef1ef);overflow:hidden}
+.dc-tone-fill{display:block;height:100%;border-radius:2px;background:linear-gradient(90deg,#4e7ca8,#e05632)}
+.dc-tone em{flex:none;font-style:normal;font-size:9px;line-height:11px;color:var(--ink-sub)}
+.dc-tone-note{font-size:9px;line-height:12px;color:var(--ink-sub);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dc-more{flex:none;width:20px;height:20px;display:grid;place-items:center;border-radius:4px;color:var(--ink-sub);font-size:13px;line-height:1}
 .dc-more:hover{background:var(--surface-2);color:var(--ink)}
 .dc-actions{display:flex;gap:4px;padding:0 7px 6px}

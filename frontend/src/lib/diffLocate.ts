@@ -13,6 +13,8 @@
  *   换算，缩略图像素不会被当成原始 TIFF 坐标。
  */
 
+import type { RegionToneStats } from './diffTone';
+
 export type DiffMethod = 'absdiff' | 'ssim';
 export type DiffSensitivity = 'low' | 'standard' | 'high';
 export type DiffScope = 'common' | 'visible';
@@ -66,6 +68,8 @@ export interface DiffRegion {
   /** 已按原始分辨率重算过（只更新了该区域的统计与轮廓）。 */
   refined?: boolean;
   refinedSource?: 'source-roi';
+  /** 前端补充的亮度归因统计（仅显示层，不来自后端）。 */
+  tone?: RegionToneStats;
 }
 
 export interface DiffAnalysisGrid {

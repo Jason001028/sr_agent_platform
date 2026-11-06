@@ -98,6 +98,18 @@ function rec(id: number, name: string) {
   } as any;
 }
 
+/** 场景卡：给 rec 补上场景目录与环节（延续到下一景按这两项分组、按角色配对）。 */
+function sceneRec(
+  id: number, name: string, sceneDir: string,
+  stageKind?: 'input' | 'product' | 'nosr', stageLabel = '',
+) {
+  const r = rec(id, name);
+  r.sceneDir = sceneDir;
+  r.stageKind = stageKind;
+  r.stageLabel = stageLabel;
+  return r;
+}
+
 function fakeResult(overrides: Partial<DiffResult> = {}): DiffResult {
   return {
     operation: 'difference-localization',
@@ -147,11 +159,14 @@ function makeViewer() {
     split: false,
     paneB: null,
     compareMode: 'none',
+    compareOn: false,
     drawMode: false,
     renderTick: 0,
     focusPaneRect: vi.fn(() => true),
     addMaskPolygon: vi.fn(() => true),
     openComparePair: vi.fn(() => true),
+    ensureSceneImage: vi.fn(() => null),
+    ensureCardPixels: vi.fn(async () => true),
     activate: vi.fn(async (id: number) => {
       state.activeRec = state.recs.find((r: any) => r.id === id);
       state.panes = [{ side: 'A', rec: state.activeRec, rect: { x: 0, y: 0, w: 800, h: 600 }, view: { scale: 1, ox: 0, oy: 0 }, active: true }];
@@ -174,6 +189,8 @@ beforeEach(() => {
   });
   mocks.viewer = makeViewer();
   mocks.api.mockReset();
+  mocks.siblings.mockReset();
+  mocks.siblings.mockResolvedValue({ items: [], tourItems: [] });
   holdImages = false;
   imageQueue.length = 0;
 });
@@ -317,6 +334,20 @@ describe('automatic polygon staging and identity isolation', () => {
 });
 
 describe('diff store — 请求与结果身份', () => {
+  it('analyzes proportional PAN/NOSR at different resolutions without tour certificates', async () => {
+    const viewer = mocks.viewer;
+    viewer.recs[0].tourIdentity = undefined;
+    viewer.recs[1].tourIdentity = undefined;
+    viewer.recs[1].W *= 4; viewer.recs[1].H *= 4;
+    const diff = useDiffStore();
+    diff.aId = viewer.recs[0].id; diff.bId = viewer.recs[1].id;
+    mocks.api.mockResolvedValue(fakeResult());
+    expect(diff.precisionReason).toBeNull();
+    expect(await diff.analyze()).toBe(true);
+    expect(mocks.api).toHaveBeenCalledOnce();
+    expect(diff.result?.warnings.join(' ')).toContain('分辨率不同');
+  });
+
   it('discards a response for parameters changed while the request was in flight', async () => {
     let resolve!: (value: DiffResult) => void;
     mocks.api.mockReturnValue(new Promise<DiffResult>((r) => { resolve = r; }));
@@ -540,5 +571,230 @@ describe('diff visualization controls', () => {
       expect(diff.stale).toBe(false);
     }
     expect(mocks.api).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('diff store — 同景收口', () => {
+  it('lists only images from the scene selected on the left', () => {
+    const v = mocks.viewer;
+    v.recs[0].sceneDir = '/scenes/20260101'; v.recs[1].sceneDir = '/scenes/20260101';
+    v.recs[2].sceneDir = '/scenes/20260102';
+    const diff = useDiffStore();
+    expect(diff.pairOptions.map((o) => o.id)).toEqual([1, 2]);
+    v.activeRec = v.recs[2];
+    expect(diff.pairOptions.map((o) => o.id)).toEqual([3]);
+  });
+
+  it('adds unopened same-scene images to the dropdown when the panel opens', async () => {
+    const v = mocks.viewer;
+    v.recs.forEach((r: any) => { r.sceneDir = '/scenes/20260101'; });
+    mocks.siblings.mockResolvedValue({
+      lqPath: '/scenes/20260101', tourItems: [],
+      items: [{ kind: 'nosr', id: 's9', name: 'PAN_NOSR.tif', exists: true, W: 32, H: 32, srcRev: 'v9' }],
+    });
+    v.ensureSceneImage.mockImplementation((item: any) => {
+      v.recs.push({
+        id: 9, name: item.name, W: item.W, H: item.H, sceneId: item.id,
+        sceneDir: '/scenes/20260101', srcRev: 'v9', pending: false, card: {},
+      });
+      return 9;
+    });
+    const diff = useDiffStore();
+    diff.openPanel();
+    await vi.waitFor(() => expect(diff.pairOptions.map((o) => o.id)).toContain(9));
+    expect(mocks.siblings).toHaveBeenCalledWith({}, 's1', undefined, true, ['s1', 's2', 's3']);
+  });
+
+  it('fetches pixels for an unopened same-scene image before analyzing', async () => {
+    const v = mocks.viewer;
+    v.recs.forEach((r: any) => { r.sceneDir = '/scenes/20260101'; });
+    v.recs.push({
+      id: 9, name: 'PAN_ori.tif', W: 32, H: 32, sceneId: 's9',
+      sceneDir: '/scenes/20260101', srcRev: 'v9', pending: false,
+      thumb: null, src: null, card: {},
+    });
+    v.ensureCardPixels.mockImplementation(async (id: number) => {
+      const r = v.recs.find((x: any) => x.id === id);
+      if (!r) return false;
+      if (!r.thumb) {
+        r.thumb = { width: 16, height: 16 };
+        r.src = new Float32Array(32 * 32);
+        r.srcw = 32; r.srch = 32; r.nbands = 1;
+      }
+      return true;
+    });
+    mocks.api.mockResolvedValue(fakeResult());
+    const diff = useDiffStore();
+    diff.aId = 1; diff.bId = 9;
+    expect(await diff.analyze()).toBe(true);
+    expect(v.ensureCardPixels).toHaveBeenCalledWith(9);
+  });
+});
+
+describe('diff store — 延续到下一景', () => {
+  function twoSceneViewer() {
+    const v = mocks.viewer;
+    const pan1 = sceneRec(1, 'PAN.tif', '/scenes/A', 'input', 'PAN');
+    const nosr1 = sceneRec(2, 'PAN_NOSR.tif', '/scenes/A', 'nosr', 'NOSR');
+    const pan2 = sceneRec(11, 'PAN.tif', '/scenes/B', 'input', 'PAN');
+    const sr2 = sceneRec(12, 'PAN_SR.tif', '/scenes/B', 'product', 'SR');
+    const nosr2 = sceneRec(13, 'PAN_NOSR.tif', '/scenes/B', 'nosr', 'NOSR');
+    v.recs = [pan1, nosr1, pan2, sr2, nosr2];
+    v.activeRec = pan1;
+    v.panes = [{ side: 'A', rec: pan1, rect: { x: 0, y: 0, w: 800, h: 600 }, view: { scale: 1, ox: 0, oy: 0 }, active: true }];
+    return { v, pan1, nosr1, pan2, sr2, nosr2 };
+  }
+
+  it('只在本景有热力结果、单图显示且还有下一景时出现', async () => {
+    const { v, pan1, nosr1 } = twoSceneViewer();
+    const diff = useDiffStore();
+    diff.aId = pan1.id; diff.bId = nosr1.id;
+    mocks.api.mockResolvedValue(fakeResult());
+
+    expect(diff.canContinueScene).toBe(false);       // 还没有结果
+    await diff.analyze();
+    diff.display = 'regions';
+    expect(diff.canContinueScene).toBe(false);       // 原图标记不是热力图
+    diff.display = 'overlay';
+    expect(diff.canContinueScene).toBe(true);
+
+    v.compareOn = true;
+    expect(diff.canContinueScene).toBe(false);       // 对比上下文不算单景图
+    v.compareOn = false;
+
+    v.activeRec = v.recs[4];                         // 末景没有下一景
+    expect(diff.canContinueScene).toBe(false);
+  });
+
+  it('按当前 A/B 角色落到下一景，并直接重新分析', async () => {
+    const { v, pan1, nosr1, nosr2, pan2 } = twoSceneViewer();
+    const diff = useDiffStore();
+    // 当前 A/B 故意反着填：A=NOSR、B=PAN，下一景也必须维持这个角色。
+    diff.aId = nosr1.id; diff.bId = pan1.id;
+    mocks.api.mockResolvedValue(fakeResult());
+    await diff.analyze();
+    diff.display = 'overlay';
+
+    expect(diff.canContinueScene).toBe(true);
+    expect(await diff.continueToNextScene()).toBe(true);
+    // 活动景 watcher 的 ensurePair 会推荐 PAN/NOSR；这里必须保住 NOSR/PAN 的角色顺序。
+    expect(v.activate).toHaveBeenCalledWith(nosr2.id);
+    expect(diff.aId).toBe(nosr2.id);
+    expect(diff.bId).toBe(pan2.id);
+    expect(mocks.api).toHaveBeenCalledTimes(2);
+  });
+
+  it('下一景只开了本体时，向只读同景候选补齐缺的角色', async () => {
+    const v = mocks.viewer;
+    const pan1 = sceneRec(1, 'PAN.tif', '/scenes/A', 'input', 'PAN');
+    const nosr1 = sceneRec(2, 'PAN_NOSR.tif', '/scenes/A', 'nosr', 'NOSR');
+    const pan2 = sceneRec(11, 'PAN.tif', '/scenes/B', 'input', 'PAN');
+    v.recs = [pan1, nosr1, pan2];
+    v.activeRec = pan1;
+    v.panes = [{ side: 'A', rec: pan1, rect: { x: 0, y: 0, w: 800, h: 600 }, view: { scale: 1, ox: 0, oy: 0 }, active: true }];
+    mocks.siblings.mockResolvedValue({
+      lqPath: '/scenes/B', tourItems: [],
+      items: [{ kind: 'nosr', id: 's99', name: 'PAN_NOSR.tif', exists: true, W: 32, H: 32, srcRev: 'v9' }],
+    });
+    v.ensureSceneImage.mockImplementation((item: any, res: any) => {
+      v.recs.push(sceneRec(99, item.name, res.lqPath, item.kind, 'NOSR'));
+      return 99;
+    });
+    mocks.api.mockResolvedValue(fakeResult());
+    const diff = useDiffStore();
+    diff.aId = pan1.id; diff.bId = nosr1.id;
+    await diff.analyze();
+    diff.display = 'heat';
+
+    expect(await diff.continueToNextScene()).toBe(true);
+    expect(mocks.siblings).toHaveBeenCalledWith({}, 's11', undefined, true, ['s11']);
+    expect(v.activate).toHaveBeenCalledWith(pan2.id);
+    expect(diff.aId).toBe(pan2.id);
+    expect(diff.bId).toBe(99);
+  });
+
+  it('没有下一景或下一景凑不出兼容配对时保持原状并给出原因', async () => {
+    const { v, pan1, nosr1 } = twoSceneViewer();
+    const diff = useDiffStore();
+    diff.aId = pan1.id; diff.bId = nosr1.id;
+    mocks.api.mockResolvedValue(fakeResult());
+    await diff.analyze();
+    diff.display = 'overlay';
+
+    // 下一景只剩一张图：角色补不齐、也构不成一对。
+    v.recs = v.recs.filter((r: any) => r.id !== 13 && r.id !== 12);
+    const calls = mocks.api.mock.calls.length;
+    expect(await diff.continueToNextScene()).toBe(false);
+    expect(diff.error).toContain('下一景');
+    expect(mocks.api.mock.calls.length).toBe(calls);
+
+    // 末景：没有下一景。
+    v.activeRec = v.recs.find((r: any) => r.id === 11);
+    expect(diff.canContinueScene).toBe(false);
+    expect(await diff.continueToNextScene()).toBe(false);
+    expect(diff.error).toContain('没有下一景');
+  });
+});
+
+describe('diff store — 亮度归因权重', () => {
+  const tone = (weight: number) => ({
+    meanA: 150, meanB: 155, delta: 5, mid: 1, dark: 0, flat: 1,
+    weight, norm: weight >= 1.8 ? 1 : 0, pixels: 100,
+  });
+
+  it('默认关闭时保持后端顺序，开启后按复核权重排序', () => {
+    const res = fakeResult();
+    res.regions = [
+      { ...res.regions[0], id: 'r001', rank: 1, rankScore: 100, tone: tone(0.3) },
+      { ...res.regions[0], id: 'r002', rank: 2, rankScore: 80, tone: tone(1.8) },
+    ];
+    const diff = useDiffStore();
+    diff.result = res;
+
+    expect(diff.toneWeight).toBe(false);
+    expect(diff.orderedRegions.map((r) => r.id)).toEqual(['r001', 'r002']);
+    expect(diff.viewerRegions.map((r) => r.id)).toEqual(['r001', 'r002']);
+
+    diff.toneWeight = true;
+    // 100×0.3 = 30 < 80×1.8 = 144
+    expect(diff.orderedRegions.map((r) => r.id)).toEqual(['r002', 'r001']);
+    expect(diff.viewerRegions.map((r) => r.id)).toEqual(['r002', 'r001']);
+    expect(diff.regions.map((r) => r.id)).toEqual(['r001', 'r002']); // 原始顺序不变
+  });
+
+  it('开启逐像素加权会重建热力图层，关闭后重建未加权图层', async () => {
+    mocks.api.mockResolvedValue(fakeResult());
+    const diff = useDiffStore();
+    diff.aId = 1; diff.bId = 2;
+    expect(await diff.analyze()).toBe(true);
+    const off = diff.heatLayer;
+    expect(off).not.toBeNull();
+
+    diff.toneWeight = true;
+    await nextTick();
+    const on = diff.heatLayer;
+    expect(on).not.toBeNull();
+    expect(on).not.toBe(off);
+
+    diff.toneWeight = false;
+    await nextTick();
+    expect(diff.heatLayer).not.toBeNull();
+    expect(diff.heatLayer).not.toBe(on);
+    // 只重建显示层，不重新请求分析。
+    expect(mocks.api).toHaveBeenCalledTimes(1);
+  });
+
+  it('分析结果会附带连续归因统计', async () => {
+    mocks.api.mockResolvedValue(fakeResult());
+    const diff = useDiffStore();
+    diff.aId = 1;
+    diff.bId = 2;
+    expect(await diff.analyze()).toBe(true);
+    const toneStats = diff.result?.regions[0].tone;
+    expect(toneStats).toBeDefined();
+    expect(toneStats!.weight).toBeGreaterThanOrEqual(0.3);
+    expect(toneStats!.weight).toBeLessThanOrEqual(1.8);
+    expect(toneStats!.norm).toBeGreaterThanOrEqual(0);
+    expect(toneStats!.norm).toBeLessThanOrEqual(1);
   });
 });

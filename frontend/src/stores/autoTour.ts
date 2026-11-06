@@ -6,8 +6,10 @@ import { loadSrConfig } from '../lib/scene';
 import { defineStore } from 'pinia';
 import { ref, computed, watch } from 'vue';
 import { useViewerStore } from './viewer';
-import { planTour, travelFraction, TOUR_SPEEDS } from '../lib/autoTour';
-import type { TourPlan, TourRoute } from '../lib/autoTour';
+import { planTour, travelFraction, TOUR_SPEEDS, TOUR_COMPARE_SPEEDS } from '../lib/autoTour';
+import type { TourPlan, TourRoute, TourSpeed } from '../lib/autoTour';
+/** 瞬移停点的静止驻留（秒）。没有平移过渡，比连续推进多停一秒，让人先看清落在哪一块再开始频闪。 */
+const TELEPORT_DWELL=1.3;
 export const useAutoTourStore=defineStore('autoTour',()=>{
  const viewer=useViewerStore();
  const coverage=new TourCoverage(),coverageVersion=ref(0),coverageVisible=ref(false),coverageCompare=ref(false);
@@ -18,7 +20,7 @@ export const useAutoTourStore=defineStore('autoTour',()=>{
   coverage.record(compare.value&&viewer.flickerShowingAlt?1:0,-v.ox/v.scale/t.width,-v.oy/v.scale/t.height,pane.rect.w/v.scale/t.width,pane.rect.h/v.scale/t.height);coverageVersion.value++;
  }
  const status=ref<'idle'|'playing'|'paused'>('idle'), reason=ref('');
- const range=ref<'all'|'visible'>('all'), speed=ref<keyof typeof TOUR_SPEEDS>('normal'), loop=ref(false);
+ const range=ref<'all'|'visible'>('all'), speed=ref<TourSpeed>('normal'), loop=ref(false);
  const route=ref<TourRoute>('rows');
  const compare=ref(false), mode=ref<'stop'|'move'>('stop'), interval=ref(1000), rounds=ref(2);
  const pairs=ref<{a:SceneSibling;b:SceneSibling;label:string;refusal:string|null}[]>([]),selected=ref(-1),pairLoading=ref(false),pairMessage=ref('');
@@ -109,10 +111,16 @@ export const useAutoTourStore=defineStore('autoTour',()=>{
   if(document.hidden||reduced()){pause(document.hidden?'已暂停 · 页面隐藏':'已暂停 · 减少动效');return;}
   const dt=last?Math.min(.1,(now-last)/1000):0;last=now;
   if(compare.value&&(!viewer.flickerReady||pairReason.value)){pause(pairReason.value||viewer.flickerReason);return;}
-  const p=plan.value!;
-  if(entry){elapsed+=dt;const u=Math.min(1,elapsed),t=u*u*(3-2*u),point=entryTarget??p.points[index.value];const end=target(point.x,point.y);camera({scale:initial.scale+(end.scale-initial.scale)*t,ox:initial.ox+(end.ox-initial.ox)*t,oy:initial.oy+(end.oy-initial.oy)*t});
-   const v=compare.value?viewer.flickerView:viewer.panes[0].view,r=viewer.panes[0].rect;current.value={x:(r.w/2-v.ox)/v.scale*p.width/p.tw,y:(r.h/2-v.oy)/v.scale*p.height/p.th};
-   if(u===1){hold=.3;observing=compare.value&&mode.value==='stop';switchCount=0;switchElapsed=0;entry=false;elapsed=resumeElapsed??0;resumeElapsed=null;entryTarget=null;} schedule();return;
+  const p=plan.value!,teleport=speed.value==='teleport';
+  if(entry){
+   const point=entryTarget??p.points[index.value];
+   if(teleport)write(point.x,point.y);
+   else{
+    elapsed+=dt;const u=Math.min(1,elapsed),t=u*u*(3-2*u),end=target(point.x,point.y);camera({scale:initial.scale+(end.scale-initial.scale)*t,ox:initial.ox+(end.ox-initial.ox)*t,oy:initial.oy+(end.oy-initial.oy)*t});
+    const v=compare.value?viewer.flickerView:viewer.panes[0].view,r=viewer.panes[0].rect;current.value={x:(r.w/2-v.ox)/v.scale*p.width/p.tw,y:(r.h/2-v.oy)/v.scale*p.height/p.th};
+    if(u<1){schedule();return;}
+   }
+   hold=teleport?TELEPORT_DWELL:.3;observing=compare.value&&mode.value==='stop';switchCount=0;switchElapsed=0;entry=false;elapsed=resumeElapsed??0;resumeElapsed=null;entryTarget=null;schedule();return;
   }
   if(hold>0&&!(compare.value&&mode.value==='move')){hold=Math.max(0,hold-dt);schedule();return;}
   if(compare.value&&(mode.value==='move'||observing)){
@@ -125,8 +133,13 @@ export const useAutoTourStore=defineStore('autoTour',()=>{
   }
   const next=index.value+direction;
   if(next<0||next>=p.points.length){if(loop.value){direction*=-1;hold=.3;schedule();}else{stop();viewer.showToast('巡览结束');}return;}
-  const a=p.points[index.value],b=p.points[next],distance=Math.hypot((b.x-a.x)*p.tw/p.width,(b.y-a.y)*p.th/p.height)*p.scale;
-  elapsed+=dt;const f=travelFraction(elapsed,distance,(compare.value?{slow:40,normal:60,fast:80,ultra:120}[speed.value]:TOUR_SPEEDS[speed.value])).fraction;
+  const a=p.points[index.value],b=p.points[next];
+  // 瞬移：不插值、不推进 elapsed，直接落到下一个停点；驻停交替随后照常在该块频闪。
+  if(teleport){
+   index.value=next;fraction.value=0;elapsed=0;write(b.x,b.y);hold=TELEPORT_DWELL;observing=compare.value&&mode.value==='stop';switchCount=0;if(mode.value==='stop')switchElapsed=0;schedule();return;
+  }
+  const distance=Math.hypot((b.x-a.x)*p.tw/p.width,(b.y-a.y)*p.th/p.height)*p.scale;
+  elapsed+=dt;const f=travelFraction(elapsed,distance,(compare.value?TOUR_COMPARE_SPEEDS[speed.value as keyof typeof TOUR_COMPARE_SPEEDS]:TOUR_SPEEDS[speed.value as keyof typeof TOUR_SPEEDS])).fraction;
   fraction.value=direction*f;write(a.x+(b.x-a.x)*f,a.y+(b.y-a.y)*f);
   if(f===1){index.value=next;fraction.value=0;elapsed=0;hold=.3;observing=compare.value&&mode.value==='stop';switchCount=0;if(mode.value==='stop')switchElapsed=0;}
   schedule();
@@ -156,6 +169,8 @@ export const useAutoTourStore=defineStore('autoTour',()=>{
  watch(()=>viewer.busy||viewer.overlay.visible,v=>{if(v)pause('已暂停 · 影像正在处理');},{flush:'sync'});
  watch(()=>[viewer.activeRec?.id,viewer.compareMode,viewer.canvasSize.w,viewer.canvasSize.h,viewer.activeRec?.thumb,viewer.flickerRefRec?.id,viewer.flickerAltRec?.id,viewer.flickerRefRec?.thumb,viewer.flickerAltRec?.thumb,viewer.flickerRefRec?.srcRev,viewer.flickerAltRec?.srcRev],()=>{coverage.clear();coverageVisible.value=false;coverageVersion.value++;if(status.value!=='idle'){pause('已暂停 · 视图已变化，请重新规划');valid=false;plan.value=null;current.value=null;}},{flush:'sync'});
  watch(()=>viewer.activeRec?.id,()=>{cancelPreparation();pairs.value=[];selected.value=-1;sceneEvidence.value=null;coverage.clear();coverageVersion.value++;},{flush:'sync'});
+ // 驻停交替默认「瞬移」：停点之间直接跳块，不出现平移过渡。移动交替仍按连续推进速度。
+ watch([compare,mode],([c,m])=>{if(c&&m==='stop')speed.value='teleport';else if(speed.value==='teleport')speed.value='normal';},{flush:'sync'});
  return {pairs,availablePairs,selected,pairLoading,pairMessage,selectedPair,discoverPairs,preparePair,cancelPreparation,coverage,coverageVersion,coverageVisible,coverageCompare,presented,compare,mode,interval,rounds,pairReason,status,reason,range,speed,loop,route,plan,index,current,progress,start,pause,resume,stop};
 });
 

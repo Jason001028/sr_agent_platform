@@ -1,4 +1,5 @@
 import type { DiffDisplay, DiffFeather } from './diffLocate';
+import { decodeToneWeight } from './diffTone';
 
 export const HEAT_COLORS = ['#0B0B1D', '#3B0F70', '#8C2981', '#DE4968', '#FCA636', '#FCFFA4'];
 export const HEAT_GRADIENT = `linear-gradient(to right, ${HEAT_COLORS.join(', ')})`;
@@ -16,6 +17,39 @@ export function colorizeHeatPixels(data: Uint8ClampedArray, valid?: Uint8Clamped
     const t = position - index;
     for (let c = 0; c < 3; c++) rgba[i + c] = Math.round(stops[index][c] * (1 - t) + stops[index + 1][c] * t);
     rgba[i + 3] = 255;
+  }
+  return rgba;
+}
+
+/**
+ * 单通道差异字节 → RGBA。
+ *
+ * `weights` 是逐像素的归因 norm 字节（0 = 0.3×，119 = 1.0×，255 = 1.8×）；
+ * 给出时先做 `强度 × 权重` 再查色表，超过 1 的一律截断到最暖色。没有权重时
+ * 与 `colorizeHeatPixels` 的着色完全一致。
+ */
+export function colorizeHeatBytes(
+  intensity: Uint8Array,
+  width: number,
+  height: number,
+  valid?: Uint8Array | null,
+  weights?: Uint8Array | null,
+): Uint8ClampedArray {
+  const n = width * height;
+  const rgba = new Uint8ClampedArray(n * 4);
+  for (let i = 0; i < n; i++) {
+    if (valid && !valid[i]) continue;
+    let v = intensity[i];
+    if (weights) {
+      const scaled = v * decodeToneWeight(weights[i]);
+      v = scaled >= 255 ? 255 : scaled;
+    }
+    const position = v / 255 * (stops.length - 1);
+    const index = Math.min(stops.length - 2, Math.floor(position));
+    const t = position - index;
+    const o = i * 4;
+    for (let c = 0; c < 3; c++) rgba[o + c] = Math.round(stops[index][c] * (1 - t) + stops[index + 1][c] * t);
+    rgba[o + 3] = 255;
   }
   return rgba;
 }

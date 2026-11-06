@@ -52,6 +52,11 @@ Environment=SR_SCENES_ROOT=/data/scenes
 Environment=SR_AGENT_DB=/DiskArray/tmp/wangrz/sr_agent_db/sr_agent.db
 # 阶段5：真机显式关假实现 —— mock LLM 必须 =0（离机验收 / .e2e 才置 =1）
 Environment=SR_LLM_MOCK=0
+# 普通 Chat：首段 180s、有效输出停滞 60s、单次总上限 600s；Goal 轮次预算独立。
+# 按需覆盖；配置启动时读取，修改后需重启 sr-api。
+# Environment=SR_LLM_FIRST_OUTPUT_TIMEOUT=180
+# Environment=SR_LLM_TIMEOUT=60
+# Environment=SR_LLM_RESPONSE_TIMEOUT=600
 # SR_SLURM_FAKE 只对已冻结的调度分支有效（执行器=slurm 时才读），当前路线保持 0 即可
 Environment=SR_SLURM_FAKE=0
 # 可选：预览 JPG 缓存根（默认落源同目录）。配了必须在 SR_SCENES_ROOT 之下。
