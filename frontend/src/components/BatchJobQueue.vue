@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /** Monitor 后台 SR 队列：在途优先，其次是异常，最后是最近结束的尾部。
  *  数字来自快照；错误原文可展开，不做二次加工。 */
+import BatchFeedbackIcon from './BatchFeedbackIcon.vue';
 import { computed, ref } from 'vue';
 import { useBatchGoalStore } from '../stores/batchGoal.js';
 import { useViewerStore } from '../stores/viewer.js';
@@ -17,7 +18,7 @@ const activeIds = computed(() => new Set(
   props.snapshot.active_jobs.map((job) => job.item_id)));
 
 const jobs = computed<BatchJobSummary[]>(() => {
-  if (props.compact) return props.snapshot.active_jobs;
+  if (props.compact) return [...props.snapshot.active_jobs, ...(props.snapshot.recent_jobs ?? []).filter(j => !activeIds.value.has(j.item_id)).slice(0, 3)];
   const merged = new Map<string, BatchJobSummary>();
   for (const job of props.snapshot.recent_jobs ?? []) merged.set(job.item_id, job);
   for (const job of props.snapshot.active_jobs) {
@@ -92,6 +93,7 @@ async function locate(job: BatchJobSummary): Promise<void> {
     <ul v-else class="bj-list">
       <li v-for="job in jobs" :key="job.item_id" class="bj-row" :class="'is-' + tone(job)">
         <div class="bj-line">
+          <BatchFeedbackIcon :goal-id="snapshot.goal.goal_id" :item-id="job.item_id" :attempt="job.attempt" :enabled="!['PAUSED', 'CANCELLED'].includes(snapshot.goal.status)" :status="job.status" :cue="batch.feedback[job.item_id]" />
           <span class="bj-ordinal">#{{ job.ordinal }}</span>
           <span class="bj-name" :title="job.name">{{ job.name }}</span>
           <span class="bj-status">{{ label(job) }}</span>

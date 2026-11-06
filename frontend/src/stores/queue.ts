@@ -394,17 +394,28 @@ export const useQueueStore = defineStore('queue', () => {
     ));
   }
 
-  async function list(): Promise<void> {
+  let listTask: Promise<void> | null = null;
+  let listAgain = false;
+  function list(): Promise<void> {
+    if (listTask) { listAgain = true; return listTask; }
     loading.value = true;
     error.value = '';
-    try {
-      const cfg = loadSrConfig();
-      tasks.value = await apiListQueue(cfg);
-    } catch (e) {
-      error.value = '队列加载失败：' + (e instanceof Error ? e.message : String(e));
-    } finally {
-      loading.value = false;
-    }
+    listTask = (async () => {
+      try {
+        do {
+          listAgain = false;
+          const rows = await apiListQueue(loadSrConfig());
+          // A newer refresh was requested during IO: skip this obsolete projection.
+          if (!listAgain) tasks.value = rows;
+        } while (listAgain);
+      } catch (e) {
+        error.value = '队列加载失败：' + (e instanceof Error ? e.message : String(e));
+      } finally {
+        loading.value = false;
+        listTask = null;
+      }
+    })();
+    return listTask;
   }
 
   /** POST /api/queue；成功后刷新列表（idempotent RESUMED_* 也在任务行可见）。 */

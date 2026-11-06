@@ -77,7 +77,12 @@ let browser, calls = 0;
     await page.waitForFunction(() => testStores.viewer.recs.length === 2 && testStores.viewer.recs.every(r => r.src && r.thumb && r.route === 'jpg'));
     await page.evaluate(() => {
       const { viewer: v, diff: d } = testStores;
-      v.recs.forEach(r => { r.sceneDir = '/synthetic/same-scene'; });
+      // Match the existing precisePairReason contract: merely sharing a folder
+      // no longer authorizes spatial analysis. Explicit fixture evidence only.
+      v.recs.forEach((r,i) => {
+        r.sceneDir = '/synthetic/same-scene'; r.srcRev = 'fixture-v1'; r.stageKind = i ? 'product' : 'input';
+        r.tourIdentity = {id:r.id, sequence:'fixture', role:i?'old':'pan', width:r.W, height:r.H, sourceRevision:r.srcRev};
+      });
       d.aId = v.recs[0].id; d.bId = v.recs[1].id; d.scope = 'visible';
       const p = v.panes[0]; v.setPaneView(p.side, { scale: 5, ox: p.rect.w/2-640, oy: p.rect.h/2-640 });
     });

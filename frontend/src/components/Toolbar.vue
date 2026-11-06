@@ -162,6 +162,13 @@ function onPick(e: Event) {
     <PreviewScaleControl :model-value="store.previewDiv" @update:model-value="store.setPreviewDiv" />
     <AutoTourButton />
     <DiffLocateButton />
+    <button v-if="diff.result?.autoMask" type="button" class="auto-mask-button" data-e2e="auto-mask-draw"
+      :disabled="!!diff.autoDrawReason" :title="diff.autoDrawReason || '自动绘制：将差异区域绘制到 PAN 本体，可整批撤销（Esc 取消动画）'"
+      aria-label="自动绘制" @click="diff.autoDraw()">
+      <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m3 16 9-9 3 3-9 9-3-3ZM11 8l3 3M14 2v4M12 4h4M5 3v4M3 5h4M16 14v4M14 16h4" /></svg>
+    </button>
+    <button v-if="diff.autoDrawing" type="button" class="auto-mask-button" aria-label="取消自动绘制"
+      title="取消自动绘制（Esc），保留原有 Mask" @click="diff.cancelAutoDraw()">×</button>
     <button v-if="diff.result" type="button" class="diff-visibility" data-e2e="diff-visibility"
       :aria-pressed="diff.resultVisible" :aria-label="diff.resultVisible ? '隐藏差异结果' : '显示差异结果'"
       :title="diff.resultVisible ? '隐藏差异结果，保留分析数据' : '恢复差异结果'"
@@ -229,6 +236,10 @@ function onPick(e: Event) {
 </template>
 
 <style scoped>
+.auto-mask-button{display:inline-grid;place-items:center;flex:none;width:28px;height:28px;padding:4px;border:1px solid var(--tb-border);border-radius:7px;background:var(--tb-bg);color:var(--tb-primary);cursor:pointer;transition:background 150ms,color 150ms}
+.auto-mask-button:hover:enabled{background:var(--tb-hover);color:var(--tb-fg)}
+.auto-mask-button:disabled{opacity:.45;cursor:not-allowed}
+.auto-mask-button:focus-visible{outline:2px solid var(--tb-primary);outline-offset:2px}
 /* ==========================================================================
    影像操作工具栏：雾白浅底 + 白底细描边控件（2026-10-23，Deep Forest × Mist White）
    --------------------------------------------------------------------------

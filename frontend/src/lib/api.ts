@@ -145,6 +145,7 @@ export interface BatchSnapshotGoal {
 }
 
 export interface BatchSnapshot {
+  quality?: { waiting_scenes: number; rejected_scenes: number; items: {review_id:string;item_id:string;item_version:number;status:string}[] };
   contract_version: string;
   goal: BatchSnapshotGoal;
   counts: BatchCounts;
@@ -1496,10 +1497,11 @@ export interface SceneSiblings {
  *  找不到也是答案（`exists:false` + `productCandidates`），不抛。 */
 export async function apiSceneSiblings(
   cfg: SrConfig, sceneId: string, suffix?: string, tour = false, known: readonly string[] = [],
+  signal?: AbortSignal,
 ): Promise<SceneSiblings> {
   const url=sceneSiblingsUrl(cfg, sceneId, suffix);
   const query=tour?'tour=true'+known.slice(0,32).map(id=>'&known='+encodeURIComponent(id)).join(''):'';
-  const r = await http(url+(query?(url.includes('?')?'&':'?')+query:''));
+  const r = await http(url+(query?(url.includes('?')?'&':'?')+query:''), { signal });
   return (await r.json()) as SceneSiblings;
 }
 

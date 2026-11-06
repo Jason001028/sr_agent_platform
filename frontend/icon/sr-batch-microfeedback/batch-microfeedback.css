@@ -1,0 +1,66 @@
+/* sr_agent_platform · 微交互示例样式（按现有 Vue 类名集成）。
+   所有彩色动效只作用于小图标、状态轨和增量反馈，不处理真实影像。 */
+:root {
+  --sr-flow-ink: #304B50;
+  --sr-flow-muted: #7B8A90;
+  --sr-flow-line: #E0E7E8;
+  --sr-flow-blue: #6E91D3;
+  --sr-flow-purple: #8B80C8;
+  --sr-flow-amber: #C99358;
+  --sr-flow-teal: #249487;
+  --sr-flow-error: #C65B5F;
+}
+.sr-flow-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 46px;
+  padding: 7px 9px;
+  border: 1px solid var(--sr-flow-line);
+  border-radius: 10px;
+  background: #fff;
+  transition: border-color 200ms ease, background-color 200ms ease;
+}
+.sr-flow-row.is-current {
+  background: #F7FAFC;
+  border-color: #B8CEE7;
+}
+.sr-flow-icon { flex: 0 0 27px; width: 27px; height: 27px; }
+.sr-flow-icon img { display: block; width: 100%; height: 100%; }
+.sr-flow-main { flex: 1 1 auto; min-width: 0; }
+.sr-flow-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; font-weight: 600; color: var(--sr-flow-ink); }
+.sr-flow-state { font-size: 10px; color: var(--sr-flow-muted); }
+.sr-flow-receipt { color: #986836; font-weight: 600; font-variant-numeric: tabular-nums; }
+.sr-flow-complete { color: var(--sr-flow-teal); font-weight: 600; }
+/* 本次新回执的点亮动画。由真实状态变化时短暂添加类名，非循环。 */
+.sr-flow-row.just-received { animation: srRowArrival 520ms cubic-bezier(.2,.7,.2,1) both; }
+@keyframes srRowArrival {
+  0% { box-shadow: inset 0 0 0 0 rgba(201,147,88,0); border-color: var(--sr-flow-line); }
+  48% { box-shadow: inset 0 0 0 1px rgba(201,147,88,.23); border-color: rgba(201,147,88,.60); }
+  100% { box-shadow: inset 0 0 0 0 rgba(201,147,88,0); border-color: var(--sr-flow-line); }
+}
+.sr-flow-row.just-verified { animation: srRowVerified 650ms ease-out both; }
+@keyframes srRowVerified {
+  0% { background: #EFFAF7; border-color: #A2D4C8; }
+  100% { background: #fff; border-color: var(--sr-flow-line); }
+}
+/* 三条独立进度轨使用后端快照计算的宽度；不要以补间帧数冒充完成数。 */
+.sr-flow-progress { height: 4px; border-radius: 999px; overflow: hidden; background: #E8EDF0; }
+.sr-flow-progress > span { display: block; height: 100%; border-radius: inherit; width: var(--sr-progress, 0%); background: var(--sr-flow-blue); transition: width 360ms cubic-bezier(.18,.7,.22,1); }
+.sr-flow-progress.is-submission > span { background: var(--sr-flow-amber); }
+.sr-flow-progress.is-verification > span { background: var(--sr-flow-teal); }
+/* 状态数值短促上浮，需只在真实计数变化时重建小范围 DOM 触发 */
+.sr-flow-count.just-updated { display: inline-block; animation: srCountIn 240ms cubic-bezier(.17,.72,.23,1) both; }
+@keyframes srCountIn { from { opacity: .25; transform: translateY(4px) } to { opacity: 1; transform: translateY(0) } }
+/* 所有动画降级到静态，但状态文字、图标仍显示 */
+@media (prefers-reduced-motion: reduce) {
+  .sr-flow-row, .sr-flow-row.just-received, .sr-flow-row.just-verified,
+  .sr-flow-progress > span, .sr-flow-count.just-updated { animation: none !important; transition: none !important; }
+}
+
+.batch-panel :is(.bc-body,.bj-row):has(.is-verified-feedback) { animation: srItemVerified 750ms ease-out; }
+@keyframes srItemVerified { 0%,35% { background-color:#EFFAF7; border-color:#A2D4C8; } }
+@media(prefers-reduced-motion:reduce) { .batch-panel :is(.bc-body,.bj-row):has(.is-verified-feedback) { animation:none!important; } }
+
+.batch-panel :is(.bc-body,.bj-row):has(.is-verified-feedback.is-paused) { animation-play-state: paused; }

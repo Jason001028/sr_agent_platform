@@ -12,16 +12,18 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { nextTick, reactive } from 'vue';
 import { createPinia, setActivePinia } from 'pinia';
 
-const mocks = vi.hoisted(() => ({ viewer: null as any, api: vi.fn() }));
+const mocks = vi.hoisted(() => ({ viewer: null as any, api: vi.fn(), siblings: vi.fn() }));
 
 vi.mock('../viewer', () => ({ useViewerStore: () => mocks.viewer }));
 vi.mock('../../lib/api.js', () => ({
   apiDiffAnalyze: (...args: unknown[]) => mocks.api(...args),
+  apiSceneSiblings: (...args: unknown[]) => mocks.siblings(...args),
 }));
 vi.mock('../../lib/scene.js', () => ({ loadSrConfig: () => ({}) }));
 
 import { useDiffStore } from '../diff';
 import type { DiffResult } from '../../lib/diffLocate';
+import { thumbToOrig } from '../../lib/viewMath';
 
 class FakeCtx {
   data: Uint8ClampedArray | null = null;
@@ -176,9 +178,142 @@ beforeEach(() => {
   imageQueue.length = 0;
 });
 afterEach(() => {
+  vi.useRealTimers();
   holdImages = false;
   imageQueue.length = 0;
   vi.unstubAllGlobals();
+});
+
+async function readyAuto() {
+  const v = mocks.viewer;
+  v.activeId = 1;
+  v.recs[0].stageKind = 'input';
+  v.recs[1].stageKind = 'nosr';
+  v.recs[0].maskRois = [];
+  v.enterDraw = vi.fn(() => { v.drawMode = true; });
+  v.showToast = vi.fn();
+  v.addMaskPolygonBatch = vi.fn(() => true);
+  mocks.siblings.mockImplementation(async () => ({ items: v.recs.map((r: any) => ({
+    id:r.sceneId, exists:true, srcRev:r.srcRev, W:r.W, H:r.H, kind:r.stageKind, tourIdentity:r.tourIdentity,
+  })) }));
+  mocks.api.mockImplementation(async (_cfg, req) => {
+    const r = fakeResult();
+    r.autoMask = {
+      analysis_id: 'analysis-1', parameter_version: 'v1', margin: 'standard',
+      coordinate_space: 'analysis_pixel', analysis_size: [32, 32], truncated: false, elapsed_ms: 5,
+      sources: [req.image_a, req.image_b].map((s, i) => ({ side: i ? 'B' : 'A', image_id: s.id,
+        scene_id: s.sceneId, source_revision: s.sourceRevision, pixel_key: s.pixelKey,
+        source_size: [32, 32], transform: { scale: [1, 1], offset: [0, 0] } })),
+      polygons: [{ region_id: 'region1', rank: 1, coordinate_space: 'analysis_pixel', analysis_size: [32, 32],
+        source_polygons: [{ image_id: 1, points: [[4, 4], [15, 4], [15, 15], [4, 15]], coordinate_space: 'source_pixel', coverage_ratio: 1, drawable: true }],
+        points: [[4, 4], [15, 4], [15, 15], [4, 15]], vertex_count: 4,
+        coverage_ratio: 1, supersample_coverage_ratio: 1, area_ratio: 1.2, buffer_px: 1,
+        fallback: null, needs_review: false, diagnostics: [], holes: { count: 0, area_px: 0, filled: false, large: false } }],
+    };
+    return r;
+  });
+  const d = useDiffStore(); d.aId = 1; d.bId = 2;
+  expect(await d.analyze()).toBe(true);
+  return d;
+}
+
+describe('automatic polygon staging and identity isolation', () => {
+  it('works outside heat mode, stages SVG vectors, and atomically commits once', async () => {
+    const d = await readyAuto(); vi.useFakeTimers();
+    d.display = 'regions'; d.resultVisible = false;
+    expect(d.autoDrawReason).toBe('');
+    const pending = d.autoDraw();
+    await Promise.resolve(); await Promise.resolve();
+    expect(d.autoDrawing?.polygons).toHaveLength(1);
+    expect(mocks.viewer.addMaskPolygonBatch).not.toHaveBeenCalled();
+    expect(await d.autoDraw()).toBe(false); // double click
+    await vi.advanceTimersByTimeAsync(3200);
+    expect(await pending).toBe(true);
+    expect(mocks.viewer.addMaskPolygonBatch).toHaveBeenCalledTimes(1);
+    const p = mocks.viewer.addMaskPolygonBatch.mock.calls[0][1][0];
+    expect(thumbToOrig(p[0][0], p[0][1], 32, 32, 16, 16)).toEqual([4, 4]);
+    expect(p.autoDiff.source).toBe('auto_diff');
+  });
+  it.each(['switch', 'revision', 'dimensions', 'clear', 'cancel', 'draft', 'reanalyze'])(
+    'discards staged polygons on %s', async action => {
+      const d = await readyAuto(); vi.useFakeTimers();
+      const pending = d.autoDraw();
+      await Promise.resolve(); await Promise.resolve();
+      if (action === 'switch') mocks.viewer.activeId = 2;
+      if (action === 'revision') mocks.viewer.recs[0].srcRev = 'v2';
+      if (action === 'dimensions') mocks.viewer.recs[0].W = 100;
+      if (action === 'clear') d.clearResults();
+      if (action === 'cancel') d.cancelAutoDraw();
+      if (action === 'draft') mocks.viewer.pendingPts = [[3, 3]];
+      if (action === 'reanalyze') await d.analyze();
+      await vi.advanceTimersByTimeAsync(3200);
+      expect(await pending).toBe(false);
+      expect(mocks.viewer.addMaskPolygonBatch).not.toHaveBeenCalled();
+    });
+  it('supports reduced motion and reports review flags', async () => {
+    const d = await readyAuto();
+    vi.stubGlobal('window', { matchMedia: () => ({ matches: true }) });
+    d.result!.autoMask!.polygons[0].needs_review = true;
+    expect(await d.autoDraw()).toBe(true);
+    expect(d.notice).toContain('待复核');
+    expect(d.autoDrawing).toBeNull();
+  });
+  it('rejects unavailable or changed server files before drawing, and rechecks before commit', async () => {
+    const d = await readyAuto();
+    mocks.siblings.mockResolvedValueOnce({ items:[] });
+    expect(await d.autoDraw()).toBe(false);
+    expect(d.error).toContain('源文件');
+    expect(mocks.viewer.addMaskPolygonBatch).not.toHaveBeenCalled();
+    expect(d.autoDrawReason).toContain('源文件');
+    await d.analyze();
+    vi.useFakeTimers();
+    const pending=d.autoDraw(); await Promise.resolve(); await Promise.resolve();
+    mocks.siblings.mockResolvedValueOnce({ items:[] });
+    await vi.advanceTimersByTimeAsync(3200);
+    expect(await pending).toBe(false);
+    expect(mocks.viewer.addMaskPolygonBatch).not.toHaveBeenCalled();
+  });
+  it('disables for NOSR/SR only, mismatched identity, stale parameters, draft and old API', async () => {
+    const d = await readyAuto();
+    mocks.viewer.recs[0].stageKind = 'product';
+    expect(d.autoDrawReason).toMatch(/过期|PAN/);
+    mocks.viewer.recs[0].stageKind = 'input';
+    mocks.viewer.pendingPts = [[1, 1]];
+    expect(d.autoDrawReason).toContain('草稿');
+    mocks.viewer.pendingPts = null;
+    d.result!.autoMask!.sources[0].source_size = [33, 32];
+    expect(d.autoDrawReason).toContain('尺寸');
+    d.result = { ...d.result!, autoMask: undefined };
+    expect(d.autoDrawReason).toContain('未提供');
+  });
+  it('isolates a late source-check response from a newer drawing transaction', async () => {
+    const d = await readyAuto(); vi.useFakeTimers();
+    const first=d.autoDraw(); await Promise.resolve(); await Promise.resolve();
+    let release!: (value: unknown) => void;
+    mocks.siblings.mockImplementationOnce(() => new Promise(r => { release=r; }));
+    await vi.advanceTimersByTimeAsync(3200); // old commit is waiting for server
+    d.cancelAutoDraw(); expect(await first).toBe(false);
+    const second=d.autoDraw(); await Promise.resolve(); await Promise.resolve();
+    expect(d.autoDrawing).not.toBeNull();
+    release({ items:[] }); await Promise.resolve(); await Promise.resolve();
+    expect(d.autoDrawing).not.toBeNull();
+    await vi.advanceTimersByTimeAsync(3200);
+    expect(await second).toBe(true);
+    expect(mocks.viewer.addMaskPolygonBatch).toHaveBeenCalledTimes(1);
+  });
+  it('preserves a draft started while the initial source check is in flight', async () => {
+    const d = await readyAuto();
+    mocks.viewer.activeId = 2;
+    let release!: (value: unknown) => void;
+    mocks.siblings.mockImplementationOnce(() => new Promise(r => { release=r; }));
+    const pending=d.autoDraw();
+    mocks.viewer.pendingPts=[[7,7],[8,8]];
+    release({items:mocks.viewer.recs.map((r: any)=>({id:r.sceneId,exists:true,srcRev:r.srcRev,W:r.W,H:r.H,kind:r.stageKind,tourIdentity:r.tourIdentity}))});
+    expect(await pending).toBe(false);
+    expect(mocks.viewer.pendingPts).toEqual([[7,7],[8,8]]);
+    expect(mocks.viewer.activate).not.toHaveBeenCalled();
+    expect(mocks.viewer.addMaskPolygonBatch).not.toHaveBeenCalled();
+  });
 });
 
 describe('diff store — 请求与结果身份', () => {

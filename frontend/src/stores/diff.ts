@@ -16,7 +16,7 @@ import { computed, markRaw, ref, shallowRef, watch } from 'vue';
 import { defineStore } from 'pinia';
 import { useViewerStore } from './viewer';
 import { loadSrConfig } from '../lib/scene.js';
-import { apiDiffAnalyze } from '../lib/api.js';
+import { apiDiffAnalyze, apiSceneSiblings } from '../lib/api.js';
 import {
   ANALYSIS_MAX_EDGE, DEFAULT_ADVANCED, commonGrid, sampleGray, jointRange,
   quantizeToRgba, gridPointToThumb, gridRectToThumb, gridCoverageToThumb, gridRectToSource,
@@ -28,7 +28,8 @@ import type {
 import { colorizeHeatPixels } from '../lib/diffRender';
 import { precisePairReason } from '../lib/compareCapabilities';
 import { registerViewerObservation } from '../lib/viewerContext';
-import { visibleThumbRect } from '../lib/viewMath';
+import { visibleThumbRect, sourceToMaskThumb } from '../lib/viewMath';
+import type { OwnedPoly } from '../lib/maskHistory';
 import type { ViewerRec } from './viewer';
 
 /** 共同网格坐标里的矩形。 */
@@ -381,7 +382,7 @@ export const useDiffStore = defineStore('diff', () => {
     const r = viewer.recs.find((x) => x.id === id);
     if (!r) return 'missing';
     if (r.pending || !r.src) return 'pending';
-    return `${r.srcRev ?? ''}|${r.token ?? 0}|${r.srcw}x${r.srch}|${JSON.stringify(r.tourIdentity)}`;
+    return `${r.sceneId ?? ''}|${r.stageKind ?? ''}|${r.W}x${r.H}|${r.thumb?.width}x${r.thumb?.height}|${r.srcRev ?? ''}|${r.token ?? 0}|${r.srcw}x${r.srch}|${JSON.stringify(r.tourIdentity)}`;
   }
 
   function currentKey(): string {
@@ -393,6 +394,169 @@ export const useDiffStore = defineStore('diff', () => {
   }
   const stale = computed(() => !!result.value && resultKey.value !== currentKey());
   const precisionReason = computed(() => precisePairReason(aRec.value, bRec.value));
+
+  /* Automatic polygons are staged in SVG; only one atomic vector transaction
+     is committed after the animation and a final identity/draft recheck. */
+  const autoDrawing = shallowRef<{ imageId: number; groupId: string; polygons: OwnedPoly[]; duration: number } | null>(null);
+  const autoPreparing = ref(false);
+  const autoSourceError = ref('');
+  let autoValidation: AbortController | null = null;
+  let autoTimer: ReturnType<typeof setTimeout> | null = null;
+  let autoEpoch = 0;
+  let autoActivating = false;
+  let finishAuto: ((ok: boolean) => void) | null = null;
+  function cancelAutoDraw() {
+    autoEpoch++;
+    autoValidation?.abort(); autoValidation = null;
+    if (autoTimer !== null) clearTimeout(autoTimer);
+    autoTimer = null; autoDrawing.value = null; autoPreparing.value = false;
+    finishAuto?.(false); finishAuto = null;
+  }
+  const autoTarget = computed(() => {
+    const res = result.value;
+    if (!res) return null;
+    return viewer.recs.find(r => [res.imageA.id, res.imageB.id].includes(r.id)
+      && r.stageKind === 'input' && r.tourIdentity?.role === 'pan') ?? null;
+  });
+  const autoDrawReason = computed(() => {
+    const res = result.value, auto = res?.autoMask, target = autoTarget.value;
+    if (busy.value || autoPreparing.value || autoDrawing.value || viewer.merging) return '正在处理，请稍候';
+    if (!auto) return '当前服务未提供自动绘制数据，请升级服务并重新分析';
+    if (stale.value) return '分析结果已过期，请重新分析';
+    if (autoSourceError.value) return autoSourceError.value;
+    if (!target) return '需要对应的 PAN 本体（input）；只有 NOSR / SR 时不能绘制';
+    if (!target.thumb || !target.src || target.pending || !target.sceneId || !target.srcRev) return 'PAN 本体源文件或预览不可用';
+    const a = viewer.recs.find(r => r.id === res!.imageA.id);
+    const b = viewer.recs.find(r => r.id === res!.imageB.id);
+    const reason = precisePairReason(a, b);
+    if (reason) return '影像身份不一致：' + reason;
+    const source = auto.sources?.find(s => s.image_id === target.id);
+    if (!source?.transform || source.pixel_key !== pixelKey(target.id)
+      || source.scene_id !== target.sceneId || source.source_revision !== target.srcRev
+      || source.source_size[0] !== target.W || source.source_size[1] !== target.H
+      || target.tourIdentity?.width !== target.W || target.tourIdentity?.height !== target.H) return '源影像身份或尺寸已改变，请重新分析';
+    if (auto.coordinate_space !== 'analysis_pixel' || auto.analysis_size[0] !== res!.analysisGrid.width
+      || auto.analysis_size[1] !== res!.analysisGrid.height) return '分析网格不一致，请重新分析';
+    if (!auto.polygons.some(p => p.coverage_ratio === 1 && p.supersample_coverage_ratio === 1
+      && p.source_polygons?.some(s => s.image_id === target.id && s.coverage_ratio === 1 && s.drawable)
+      && p.vertex_count === p.points.length && p.points.length >= 3 && p.points.length <= 24)) return '没有满足完整覆盖与顶点约束的候选区域';
+    if (viewer.pendingPts?.length || viewer.pendingRect) return '请先完成或取消当前手绘草稿';
+    return '';
+  });
+  async function autoDraw(): Promise<boolean> {
+    if (autoDrawReason.value) { error.value = autoDrawReason.value; return false; }
+    const res = result.value!, auto = res.autoMask!, target = autoTarget.value!;
+    const key = currentKey(), pixels = pixelKey(target.id), epoch = ++autoEpoch;
+    const groupId = `${auto.analysis_id}:${target.id}:${auto.parameter_version}`;
+    const polygons: OwnedPoly[] = [];
+    for (const p of auto.polygons) {
+      if (p.coverage_ratio !== 1 || p.supersample_coverage_ratio !== 1 || p.points.length < 3
+        || p.points.length > 24 || p.vertex_count !== p.points.length) continue;
+      if (p.coordinate_space !== 'analysis_pixel' || p.analysis_size[0] !== auto.analysis_size[0]
+        || p.analysis_size[1] !== auto.analysis_size[1]) continue;
+      const projected = p.source_polygons?.find(s => s.image_id === target.id);
+      if (!projected || projected.coordinate_space !== 'source_pixel' || projected.coverage_ratio !== 1
+        || !projected.drawable || projected.points.length !== p.points.length) continue;
+      // Source vertices were independently checked with the official rasterizer.
+      const poly: OwnedPoly = projected.points.map(([x, y]) => sourceToMaskThumb(
+        x, y, target.W, target.H, target.thumb!.width, target.thumb!.height));
+      if (projected.points.some(([x,y]) => !Number.isInteger(x) || !Number.isInteger(y)
+        || x < 0 || y < 0 || x >= target.W || y >= target.H) || poly.some(v => !v.every(Number.isFinite))) continue;
+      poly.autoDiff = { source: 'auto_diff', analysis_id: auto.analysis_id, image_id: target.id,
+        group_id: groupId, region_id: p.region_id, parameter_version: auto.parameter_version,
+        initial_points: JSON.stringify(poly), needs_review: p.needs_review };
+      polygons.push(poly);
+    }
+    if (!polygons.length) { error.value = '没有可安全绘制的多边形'; return false; }
+    autoPreparing.value = true;
+    error.value = ''; notice.value = '';
+    const inputs = [res.imageA.id, res.imageB.id].map(id => viewer.recs.find(r => r.id === id)!);
+    async function validateFiles() {
+      // Existing read-only, named-sibling endpoint: no scan, preview generation,
+      // mask write or SR. Check again after animation to catch source replacement.
+      const controller = new AbortController();
+      autoValidation = controller;
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      let siblings;
+      try {
+        siblings = await apiSceneSiblings(loadSrConfig(), target.sceneId!, undefined, true,
+          inputs.map(r => r.sceneId!).filter(Boolean), controller.signal);
+      } finally {
+        clearTimeout(timeout);
+        if (autoValidation === controller) autoValidation = null;
+      }
+      for (const r of inputs) {
+        const item = [...(siblings.tourItems ?? []), ...siblings.items].find(i => i.id === r.sceneId && i.exists);
+        if (!item || item.srcRev !== r.srcRev || item.W !== r.W || item.H !== r.H
+          || (r.id === target.id && item.kind !== 'input')
+          || item.tourIdentity?.role !== r.tourIdentity?.role
+          || item.tourIdentity?.sequence !== r.tourIdentity?.sequence) {
+          throw new Error('源文件不可用、版本或尺寸已改变，请重新加载影像并分析');
+        }
+      }
+    }
+    try {
+      await validateFiles();
+      if (epoch !== autoEpoch || result.value !== res || stale.value || currentKey() !== key
+        || viewer.pendingPts?.length || viewer.pendingRect) return false;
+      autoActivating = true;
+      try { if (viewer.activeId !== target.id) await viewer.activate(target.id); }
+      finally { autoActivating = false; }
+      if (epoch !== autoEpoch || viewer.activeId !== target.id || result.value !== res || stale.value
+        || currentKey() !== key || pixelKey(target.id) !== pixels || viewer.pendingPts?.length || viewer.pendingRect) return false;
+      viewer.enterDraw();
+      const before = JSON.stringify(target.maskRois ?? []);
+      const duration = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 0 : 3200;
+      autoDrawing.value = { imageId: target.id, groupId, polygons, duration };
+      const commit = async () => {
+        try { await validateFiles(); }
+        catch (e) {
+          if (epoch === autoEpoch) {
+            error.value = autoSourceError.value = e instanceof Error ? e.message : String(e);
+            viewer.showToast(error.value); cancelAutoDraw();
+          }
+          return false;
+        }
+        if (epoch !== autoEpoch) return false;
+        if (viewer.activeId !== target.id || result.value !== res || stale.value
+          || currentKey() !== key || pixelKey(target.id) !== pixels || !viewer.drawMode
+          || viewer.pendingPts?.length || viewer.pendingRect || JSON.stringify(target.maskRois ?? []) !== before) {
+          cancelAutoDraw(); return false;
+        }
+        const ok = viewer.addMaskPolygonBatch(target.id, polygons, auto.analysis_id);
+        const review = polygons.filter(p => p.autoDiff?.needs_review).length;
+        const skipped = auto.polygons.length - polygons.length;
+        if (ok) {
+          notice.value = `已绘制 ${polygons.length} 个区域${review ? `，${review} 个待复核（面积或孔洞边界）` : ''}${skipped ? `；${skipped} 个因覆盖或坐标冲突未绘制，请复核` : ''}；可整批撤销 / 重做。`;
+          viewer.showToast(notice.value);
+        }
+        autoDrawing.value = null; autoPreparing.value = false; autoTimer = null;
+        return ok;
+      };
+      if (!duration) return commit();
+      return await new Promise<boolean>(resolve => {
+        finishAuto = resolve;
+        autoTimer = setTimeout(() => { void commit().then(ok => {
+          if (epoch === autoEpoch) finishAuto = null;
+          resolve(ok);
+        }); }, duration);
+      });
+    } catch (e) {
+      if (epoch === autoEpoch) {
+        error.value = autoSourceError.value = e instanceof Error ? e.message : String(e);
+        viewer.showToast(error.value);
+      }
+      return false;
+    } finally { if (epoch === autoEpoch) autoPreparing.value = false; }
+  }
+  watch([() => viewer.activeId, () => viewer.drawMode, () => viewer.pendingPts?.length,
+    () => viewer.pendingRect, result, currentKey, busy], () => {
+    if (autoDrawing.value) cancelAutoDraw();
+  }, { flush: 'sync' });
+  watch([() => viewer.activeId, result, currentKey, busy], () => {
+    if (autoPreparing.value && !autoDrawing.value && !autoActivating) cancelAutoDraw();
+  }, { flush: 'sync' });
+  watch(result, () => { autoSourceError.value = ''; }, { flush: 'sync' });
 
   /* ---------------- 分析范围 ---------------- */
   function visibleGridRect(planW: number, planH: number): GridRect {
@@ -472,6 +636,8 @@ export const useDiffStore = defineStore('diff', () => {
   /* ---------------- 开始分析 ---------------- */
   async function analyze(): Promise<boolean> {
     if (busy.value) return false;
+    cancelAutoDraw();
+    autoSourceError.value = '';
     error.value = '';
     baseSnapshot.value = null;              // 新一轮预览结果不继承上一次的精算快照
     const a = aRec.value;
@@ -529,14 +695,16 @@ export const useDiffStore = defineStore('diff', () => {
       const specA: DiffImageInput = {
         id: a.id, name: a.name, sourceWidth: a.W, sourceHeight: a.H,
         thumbWidth: a.thumb.width, thumbHeight: a.thumb.height,
-        grayPng: pngA, sceneId: a.sceneId,
+        grayPng: pngA, sceneId: a.sceneId, sourceRevision: a.srcRev, pixelKey: pixelKey(a.id),
       };
       const specB: DiffImageInput = {
         id: b.id, name: b.name, sourceWidth: b.W, sourceHeight: b.H,
         thumbWidth: b.thumb.width, thumbHeight: b.thumb.height,
-        grayPng: pngB, sceneId: b.sceneId,
+        grayPng: pngB, sceneId: b.sceneId, sourceRevision: b.srcRev, pixelKey: pixelKey(b.id),
       };
       const req: DiffRequest = {
+        autoMask: true,
+        autoMaskGrid: { width: plan.width, height: plan.height, x: scopeRect.x, y: scopeRect.y },
         method: method.value,
         sensitivity: sensitivity.value,
         minAreaPx: Math.max(1, Math.round(minAreaPx.value)),
@@ -580,6 +748,7 @@ export const useDiffStore = defineStore('diff', () => {
 
   /* ---------------- 精算（原始 ROI，可选） ---------------- */
   async function refineRegion(id: string): Promise<boolean> {
+    cancelAutoDraw();
     const res = result.value;
     const reg = res?.regions.find((r) => r.id === id);
     // 精算必须绑定**产生这份结果**的两张影像，不能用后来换过的当前配对。
@@ -624,16 +793,17 @@ export const useDiffStore = defineStore('diff', () => {
         ssimGaussian: advanced.value.ssimGaussian,
         maxEdge: MAX_CANVAS_EDGE,
         precision: 'source-roi',
+        autoMask: true,
         roi,
         image_a: {
           id: a.id, name: a.name, sourceWidth: a.W, sourceHeight: a.H,
           thumbWidth: a.thumb?.width ?? a.W, thumbHeight: a.thumb?.height ?? a.H,
-          sceneId: a.sceneId,
+          sceneId: a.sceneId, sourceRevision: a.srcRev, pixelKey: pixelKey(a.id),
         },
         image_b: {
           id: b.id, name: b.name, sourceWidth: b.W, sourceHeight: b.H,
           thumbWidth: b.thumb?.width ?? b.W, thumbHeight: b.thumb?.height ?? b.H,
-          sceneId: b.sceneId,
+          sceneId: b.sceneId, sourceRevision: b.srcRev, pixelKey: pixelKey(b.id),
         },
       };
       const refinedRes = await apiDiffAnalyze(loadSrConfig(), req);
@@ -846,6 +1016,7 @@ export const useDiffStore = defineStore('diff', () => {
   });
 
   return {
+    autoDrawing, autoPreparing, autoDrawReason, autoDraw, cancelAutoDraw,
     // 面板
     open, resultVisible, opacity, openPanel, closePanel, busy, error, notice,
     method, sensitivity, scope, display, feather, minAreaPx, advanced,

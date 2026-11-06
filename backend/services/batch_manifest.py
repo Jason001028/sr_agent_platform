@@ -483,6 +483,10 @@ def import_manifest(*, data: bytes | None = None, text: str | None = None,
         by_scene[item["scene_ref"]] = item
         items.append(item)
     source_sha = hashlib.sha256(raw).hexdigest()
+    if mode == "production":
+        for item in items:
+            item["config"]["detection"]={"mode":"diff","method":"absdiff","sensitivity":"standard",
+                "max_edge":2048,"min_area_px":64,"margin":"standard","version":"shared-difference.v1"}
     content = {
         "version": MANIFEST_VERSION,
         "workflow": WORKFLOW,

@@ -596,6 +596,7 @@ def detect(image_ref, reference_ref=None, config=None):
     image_id = contracts.require_string(image_id, "image_id")
     if reference_ref is None:
         reference_ref = image_ref.get("reference_image")
+    config = config or image_ref.get("detection_config") or {}
     mode = _detection_mode(config)
     execution_mode = (config or {}).get("execution_mode")
     diagnostics = []
@@ -624,6 +625,11 @@ def detect(image_ref, reference_ref=None, config=None):
             base, mode=execution_mode)
     if mode == "error":
         raise DetectionError("SR_BATCH_DETECTION=error")
+    if mode == "diff":
+        from backend.services import batch_difference
+        if not isinstance(reference_ref, dict):
+            raise DetectionError("差异检测需要 NOSR 参考影像")
+        return batch_difference.detect(image_ref, reference_ref, base, config)
     if mode == "real":
         return _detect_real(
             image_ref, reference_ref, width, height, base, config)

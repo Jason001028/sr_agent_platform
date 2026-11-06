@@ -1,0 +1,11 @@
+{
+  "seeded_jobs": 2,
+  "new_sr_submissions": 0,
+  "regions_per_scene": 2,
+  "review_posts": 5,
+  "restart_persisted": true,
+  "stale_output_rejected": true,
+  "goal_status": "BLOCKED",
+  "errors": [],
+  "root": "C:\\Users\\Admin\\AppData\\Local\\Temp\\sr-quality-e2e-oWNWJf"
+}

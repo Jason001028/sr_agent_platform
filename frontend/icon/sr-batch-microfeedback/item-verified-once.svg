@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40" role="img" aria-label="修复结果验收通过">
+  <title>修复结果验收通过</title>
+  <rect x="6" y="6" width="28" height="28" rx="7" fill="#F1FBFA" stroke="#C9E8E2" stroke-width="1.2"/>
+  <circle class="verify-halo" cx="20" cy="20" r="10" fill="none" stroke="#61BEB2" stroke-width="1.4" opacity=".65"/>
+  <circle cx="20" cy="20" r="9" fill="#228D82"/>
+  <path class="verify-check" d="M15.4 20.1L18.6 23.1L24.8 16.6" fill="none" stroke="white" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="17" stroke-dashoffset="17"/>
+  <circle class="verify-spark" cx="30" cy="10" r="1.8" fill="#8D91D8"/>
+  <style>
+    .verify-check{animation:srVerifyDraw .35s cubic-bezier(.2,.8,.3,1) .13s forwards}
+    .verify-halo{transform-origin:20px 20px;animation:srVerifyHalo .75s ease-out .03s both}
+    .verify-spark{animation:srVerifySpark .6s ease-out .12s both;transform-origin:30px 10px}
+    @keyframes srVerifyDraw{to{stroke-dashoffset:0}}
+    @keyframes srVerifyHalo{0%{transform:scale(.72);opacity:0}40%{opacity:.7}100%{transform:scale(1.2);opacity:0}}
+    @keyframes srVerifySpark{0%{transform:scale(.5);opacity:0}55%{transform:scale(1.25);opacity:.9}100%{transform:scale(1);opacity:.6}}
+    @media(prefers-reduced-motion:reduce){*{animation:none!important}.verify-check{stroke-dashoffset:0}.verify-halo{opacity:0}}
+  </style>
+</svg>

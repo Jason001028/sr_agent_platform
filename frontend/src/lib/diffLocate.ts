@@ -113,6 +113,7 @@ export interface DiffParameters {
 }
 
 export interface DiffResult {
+  autoMask?: AutoMaskGeometry;
   operation: 'difference-localization';
   method: DiffMethod;
   source: 'preview' | 'source-roi';
@@ -134,6 +135,8 @@ export interface DiffResult {
 }
 
 export interface DiffImageInput {
+  sourceRevision?: string | null;
+  pixelKey?: string;
   id: number | null;
   name: string;
   sourceWidth: number;
@@ -147,6 +150,9 @@ export interface DiffImageInput {
 }
 
 export interface DiffRequest {
+  autoMask?: boolean;
+  autoMaskMargin?: 'tight' | 'standard' | 'loose';
+  autoMaskGrid?: { width: number; height: number; x: number; y: number };
   method: DiffMethod;
   sensitivity: DiffSensitivity;
   minAreaPx: number;
@@ -161,6 +167,28 @@ export interface DiffRequest {
   image_a: DiffImageInput;
   image_b: DiffImageInput;
   precision?: 'source-roi';
+}
+
+export interface AutoMaskSource {
+  side: 'A' | 'B'; image_id: number; scene_id: string | null;
+  source_revision: string | null; pixel_key: string;
+  source_size: [number, number];
+  transform: { scale: [number, number]; offset: [number, number] } | null;
+}
+export interface AutoMaskPolygon {
+  source_polygons: { image_id: number; points: [number, number][];
+    coordinate_space: 'source_pixel'; coverage_ratio: number; drawable: boolean }[];
+  region_id: string; rank: number; coordinate_space: 'analysis_pixel';
+  analysis_size: [number, number]; points: [number, number][]; vertex_count: number;
+  coverage_ratio: number; supersample_coverage_ratio: number; area_ratio: number;
+  buffer_px: number; fallback: string | null; needs_review: boolean;
+  diagnostics: string[]; holes: { count: number; area_px: number; filled: boolean; large: boolean };
+}
+export interface AutoMaskGeometry {
+  analysis_id: string;
+  parameter_version: string; margin: string; coordinate_space: 'analysis_pixel';
+  analysis_size: [number, number]; polygons: AutoMaskPolygon[];
+  sources: AutoMaskSource[]; truncated: boolean; elapsed_ms: number;
 }
 
 export interface GridPlan {

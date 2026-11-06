@@ -17,6 +17,7 @@ import { useAutoTourStore } from '../stores/autoTour';
 const tour=useAutoTourStore();
 import AgentAnnotationOverlay from './AgentAnnotationOverlay.vue';
 import DiffOverlay from './DiffOverlay.vue';
+import AutoMaskOverlay from './AutoMaskOverlay.vue';
 import { computed, ref, onMounted, onBeforeUnmount, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import { drawDiffSource } from '../lib/diffRender';
@@ -684,6 +685,7 @@ onBeforeUnmount(() => {
     <span v-if="polygonCompleted" class="polygon-completed" :style="{ left: `${store.activePaneRect().x + 14}px` }">已闭合</span>
     <AgentAnnotationOverlay @wheel="onWheel" />
     <DiffOverlay @wheel="onWheel" />
+    <AutoMaskOverlay />
     <MiniNavigator v-if="store.panes.some(p => p.rec?.thumb)" />
     <ViewerHistoryNavigation />
     <div class="question-tools" @mousedown.stop @dblclick.stop>

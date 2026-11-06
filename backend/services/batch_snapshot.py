@@ -367,9 +367,23 @@ def build_snapshot(
         },
         "active_jobs": active_jobs(items, tasks),
         "recent_jobs": recent_jobs(items, tasks),
+        "quality": quality_summary(items),
         "report": {
             "available": bool(report_available),
             "updated_at": report_updated_at,
         },
         "server_time": now,
     }
+
+
+def quality_summary(items):
+    rows=[]
+    for item in items:
+        cp=_cp(item)
+        if cp.get("quality_review_id"):
+            rows.append({"item_id":item["item_id"],"name":item["name"],"ordinal":item["ordinal"],
+                "item_version":item["version"],
+                "status":item["status"],"review_id":cp["quality_review_id"],"job_id":item_job_id(item),
+                "region_count":len(cp.get("detection",{}).get("candidates",[]))})
+    return {"waiting_scenes":sum(r["status"]=="AWAITING_REVIEW" for r in rows),
+            "rejected_scenes":sum(r["status"]=="REVIEW_REJECTED" for r in rows),"items":rows}

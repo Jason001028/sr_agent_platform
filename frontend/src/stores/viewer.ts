@@ -23,6 +23,8 @@ import {
 } from '../lib/tifDecode.js';
 import type { ProbeInfo, BandStats, StretchMode, KitCanvas } from '../lib/tifDecode.js';
 import type { Poly, Pt } from '../lib/maskgen.js';
+import { MaskHistory, replaceAutoGroup } from '../lib/maskHistory';
+import type { OwnedPoly } from '../lib/maskHistory';
 import {
   floodSelect, fillRegionHoles, traceContour, simplifyPoly,
   mergeConnectedAsync, buildTiff, buildMaskTxt,
@@ -3213,14 +3215,51 @@ export const useViewerStore = defineStore('viewer', () => {
   function addMaskPolygon(recId: number, poly: Poly): boolean {
     const rec = recs.value.find((r) => r.id === recId);
     if (!rec || !rec.thumb || poly.length < 3) return false;
-    if (!rec.maskRois) rec.maskRois = [];
-    rec.maskRois.push(poly);
+    if (poly.some(p => !p.every(Number.isFinite))) return false;
+    changeMasks(rec, [...(rec.maskRois ?? []), poly]);
     if (activeId.value === recId) {
       selRoi.value = poly;
       roiStats.value = roiStatsOnCanvas(rec, poly);
     }
     renderTick.value++;
     return true;
+  }
+
+  // Mask history is separate from the existing file-list undo stack.
+  const maskHistories = new WeakMap<ViewerRec, MaskHistory>();
+  const maskHistoryTick = ref(0);
+  const maskHistoryFor = (rec: ViewerRec) => {
+    let h = maskHistories.get(rec);
+    if (!h) { h = new MaskHistory(); maskHistories.set(rec, h); }
+    return h;
+  };
+  const canRedoMask = computed(() => { void maskHistoryTick.value; return !!activeRec.value && maskHistoryFor(activeRec.value).canRedo; });
+  function changeMasks(rec: ViewerRec, polys: Poly[]) {
+    maskHistoryFor(rec).record(rec.maskRois ?? [], polys);
+    rec.maskRois = polys;
+    maskHistoryTick.value++;
+    refreshRoiStats();
+    renderTick.value++;
+  }
+  function addMaskPolygonBatch(recId: number, polys: OwnedPoly[], analysisId: string): boolean {
+    const rec = recs.value.find(r => r.id === recId);
+    if (!rec || activeId.value !== recId || !canDrawOn(rec) || pendingPts.value?.length || pendingRect.value) return false;
+    if (!polys.length || polys.some(p => p.length < 3 || p.length > 24 || p.some(v => !v.every(Number.isFinite)))) return false;
+    if (!analysisId || new Set(polys.map(p => p.autoDiff?.region_id)).size !== polys.length
+      || polys.some(p => p.autoDiff?.source !== 'auto_diff' || p.autoDiff.image_id !== recId
+        || p.autoDiff.analysis_id !== analysisId || !p.autoDiff.group_id || !p.autoDiff.parameter_version
+        || p.some(([x,y]) => x < 0 || y < 0 || x > rec.thumb!.width - 1 || y > rec.thumb!.height - 1))) return false;
+    // All validation before this assignment: animation never partially writes.
+    changeMasks(rec, replaceAutoGroup(rec.maskRois ?? [], polys, analysisId));
+    return true;
+  }
+  function redoRoi() {
+    const rec = activeRec.value;
+    if (!rec || pendingPts.value?.length || pendingRect.value) return;
+    const restored = maskHistoryFor(rec).redo(rec.maskRois ?? []);
+    if (!restored) return;
+    rec.maskRois = restored; maskHistoryTick.value++;
+    refreshRoiStats(); renderTick.value++;
   }
 
   function locatePixel(x: number | string, y: number | string) {
@@ -3442,7 +3481,7 @@ export const useViewerStore = defineStore('viewer', () => {
     const x0 = Math.min(r.x0, r.x1), y0 = Math.min(r.y0, r.y1);
     const x1 = Math.max(r.x0, r.x1), y1 = Math.max(r.y0, r.y1);
     if (x1 - x0 < 1 || y1 - y0 < 1) { renderTick.value++; return; }   // 忽略过小的框
-    getRois().push([[x0, y0], [x1, y0], [x1, y1], [x0, y1]]);
+    if (activeRec.value) addMaskPolygon(activeRec.value.id, [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]);
     renderTick.value++;
   }
 
@@ -3454,14 +3493,21 @@ export const useViewerStore = defineStore('viewer', () => {
 
   function closePolygon() {
     if (drawMode.value && drawTool.value === 'polygon' && canDrawOn(activeRec.value) && pendingPts.value && pendingPts.value.length >= 3) {
-      getRois().push(pendingPts.value.slice());
+      addMaskPolygon(activeRec.value!.id, pendingPts.value.slice());
     }
     pendingPts.value = null; hoverPt.value = null;
     renderTick.value++;
   }
 
   function undoRoi() {
-    getRois().pop();
+    const rec = activeRec.value;
+    if (!rec) return;
+    const h = maskHistoryFor(rec);
+    if (h.canUndo) {
+      const restored = h.undo(rec.maskRois ?? []);
+      if (!restored) { showToast('区域已被编辑，无法覆盖这些修改'); return; }
+      rec.maskRois = restored; maskHistoryTick.value++;
+    } else changeMasks(rec, (rec.maskRois ?? []).slice(0, -1));
     pendingPts.value = null; pendingRect.value = null; hoverPt.value = null;
     refreshRoiStats();
     renderTick.value++;
@@ -3469,7 +3515,7 @@ export const useViewerStore = defineStore('viewer', () => {
 
   function clearRois() {
     const rec = activeRec.value;
-    if (rec) rec.maskRois = [];
+    if (rec) changeMasks(rec, []);
     pendingPts.value = null; pendingRect.value = null; hoverPt.value = null;
     refreshRoiStats();
     renderTick.value++;
@@ -3493,7 +3539,7 @@ export const useViewerStore = defineStore('viewer', () => {
       hideMask(); merging.value = false;
       if (activeId.value !== owner.id) return;   // 合并期间切了图，丢弃不写
       if (!merged.length) { showErr('合并失败：没有可保留的区域'); return; }
-      owner.maskRois = merged;
+      changeMasks(owner, merged);
       refreshRoiStats();                          // 合并重建对象 → 旧选择失效即清
       pendingPts.value = null; pendingRect.value = null;
       hoverRoi.value = -1; flashRoi.value = -1;
@@ -3523,7 +3569,7 @@ export const useViewerStore = defineStore('viewer', () => {
       if (activeId.value === owner.id) {
         const list = owner.maskRois;
         const k = list ? list.indexOf(target) : -1;
-        if (k >= 0 && list) list.splice(k, 1);
+        if (k >= 0 && list) changeMasks(owner, list.filter(p => p !== target));
         refreshRoiStats();          // 删除的就是选中对象 → 选择自动失效
       }
       flashRoi.value = -1;
@@ -3558,7 +3604,7 @@ export const useViewerStore = defineStore('viewer', () => {
     poly = simplifyPoly(poly, 0.5);
     if (poly.length < 3) { showErr('选中区域过小，无法构成多边形'); return; }
     const pts: Pt[] = poly.map((p) => [p[0] - 1 + x0, p[1] - 1 + y0]);   // 填充空间 → 缩略图坐标
-    getRois().push(pts);
+    addMaskPolygon(rec.id, pts);
     showToast('魔棒已添加选区（' + pts.length + ' 个顶点，容差 ' + tol + '）');
     renderTick.value++;
   }
@@ -4041,7 +4087,10 @@ export const useViewerStore = defineStore('viewer', () => {
   function onKeyDown(e: KeyboardEvent) {
     if (!drawMode.value) return;
     if (e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable="true"]')) return;
-    if (e.key === 'Backspace' && pendingPts.value) {
+    if ((e.ctrlKey || e.metaKey) && ['z', 'y'].includes(e.key.toLowerCase())) {
+      e.preventDefault();
+      if (e.shiftKey || e.key.toLowerCase() === 'y') redoRoi(); else undoRoi();
+    } else if (e.key === 'Backspace' && pendingPts.value) {
       e.preventDefault();
       pendingPts.value.pop();
       if (!pendingPts.value.length) pendingPts.value = null;
@@ -4135,7 +4184,7 @@ export const useViewerStore = defineStore('viewer', () => {
     insertPendingCards, fillPendingCard, setPendingStatus, failPendingCard, finishPendingCards,
     // 拉伸 / 视图
     setStretch, setPreviewDiv, setCanvasSize, fit, onWheel, onPan, locatePixel, focusSourceBounds,
-    focusPaneRect, addMaskPolygon,
+    focusPaneRect, addMaskPolygon, addMaskPolygonBatch, redoRoi, canRedoMask,
     // 掩码
     enterDraw, exitDraw, setDrawTool, commitRect, closePolygon, polygonCanCloseAt, undoRoi, clearRois,
     mergeRois, delClick, wandSelect, buildMaskJson, exportMaskJson, genMask,

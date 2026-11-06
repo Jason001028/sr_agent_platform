@@ -18,6 +18,10 @@ Batch F 的现有入口接线、恢复补修及浏览器连接实际 Batch 后�
 
 PAN/NOSR 局部修复与产物发布见 [pan_repair_contract.md](sr_code/pan_repair_contract.md)。
 
+差异定位自动绘制 Mask 的源码审计、坐标/覆盖契约、编辑事务与本轮验证见 [mask-auto-draw.md](planning/mask-auto-draw.md)。
+
+Batch 共享真实差异检测、MaskBuilder 与人工逐区域质量验收的实现、接口、测试及生产限制见 [batch-human-quality.md](status/batch-human-quality.md)。
+
 ---
 
 ## 一、项目是什么

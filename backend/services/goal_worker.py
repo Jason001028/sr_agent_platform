@@ -417,6 +417,9 @@ def validate_acceptance(spec):
 
 def verify_goal(state, goal):
     """Acceptance is explicit input; evidence is re-read by backend services."""
+    if goal.get("kind")=="batch" and goal.get("checkpoint",{}).get("mode")=="production":
+        from backend.services import batch_quality
+        return batch_quality.verify_goal(state.store,goal)
     try:
         spec = validate_acceptance(goal["checkpoint"].get("acceptance"))
     except ValueError as exc:

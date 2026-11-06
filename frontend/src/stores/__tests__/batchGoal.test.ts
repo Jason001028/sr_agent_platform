@@ -25,6 +25,8 @@ import {
   apiBatchControl, apiBatchEvents, apiBatchGoals, apiBatchSnapshot,
   apiResolveScene, fetchSceneJpg, HttpError, subscribeGoalEvents,
 } from '../../lib/api';
+import { useQueueStore } from '../queue';
+import { useImageRefreshStore } from '../imageRefresh';
 import { useBatchGoalStore } from '../batchGoal';
 import { useViewerStore } from '../viewer';
 import type {
@@ -71,7 +73,7 @@ function snapshot(overrides: Partial<BatchSnapshot['goal']> = {}): BatchSnapshot
 function event(seq: number): BatchEvent {
   return {
     goal_id: 'g1', seq, event_type: 'item_state_changed',
-    payload: { from: 'DETECTING', to: 'MASK_READY' }, created_at: seq,
+    payload: { from: 'DETECTING', to: 'MASK_READY' }, created_at: Date.now() / 1000,
   };
 }
 
@@ -491,5 +493,76 @@ describe('自动跟随', () => {
     batch.clearOverlay();
     expect(viewer.batchOverlayTarget).toBeNull();
     expect(viewer.batchOverlayOff).toBe(true);
+  });
+});
+
+
+describe('batch microfeedback facts', () => {
+  it('hydrates quietly, then distinguishes mask, real receipt and successful verification; deduplicates reconnect', async () => {
+    const snap = snapshot(); snap.producer.current = item({ attempt: 1 });
+    vi.mocked(apiBatchSnapshot).mockResolvedValue(snap);
+    const batch = useBatchGoalStore(); await batch.attach('g1');
+    expect(batch.feedback).toEqual({});
+    const emit = (seq: number, event_type: string, payload: Record<string, unknown>) => streamCbs!.onEvent({ goal_id: 'g1', seq, event_type, payload: { item_id: 'i1', attempt: 1, ...payload }, created_at: Date.now() / 1000 });
+    emit(11, 'item_state_changed', { to: 'MASK_READY' });
+    const mask = batch.feedback.i1; expect(mask.kind).toBe('mask');
+    emit(12, 'mask_ready', {}); expect(batch.feedback.i1).toBe(mask);
+    emit(13, 'item_state_changed', { to: 'SUBMITTING' }); expect(batch.feedback.i1).toBe(mask);
+    emit(14, 'sr_receipt_recorded', { job_id: 42 });
+    const receipt = batch.feedback.i1; expect(receipt.kind).toBe('receipt'); expect(receipt.jobId).toBe(42);
+    emit(15, 'sr_receipt_recorded', { job_id: 42 }); expect(batch.feedback.i1).toBe(receipt);
+    expect(batch.claimFeedback(receipt.key)).toBe(true); expect(batch.claimFeedback(receipt.key)).toBe(false);
+    emit(16, 'item_verified', { ok: false }); expect(batch.feedback.i1).toBe(receipt);
+    emit(17, 'item_verified', { ok: true, state: 'NO_ISSUE' }); expect(batch.feedback.i1).toBe(receipt);
+    emit(18, 'item_verified', { ok: true, state: 'COMPLETED' }); expect(batch.feedback.i1.kind).toBe('verified');
+    const verified = batch.feedback.i1;
+    await batch.attach('g1'); expect(batch.feedback).toEqual({});
+    emit(19, 'item_verified', { ok: true, state: 'COMPLETED' }); expect(batch.feedback.i1).toBeUndefined();
+    expect(verified.key).toContain('verified');
+  });
+  it('keeps concurrent scene and retry identities separate', async () => {
+    await useBatchGoalStore().attach('g1'); const batch = useBatchGoalStore();
+    const emit = (seq: number, id: string, attempt: number) => streamCbs!.onEvent({ goal_id: 'g1', seq, event_type: 'sr_receipt_recorded', payload: { item_id: id, attempt, job_id: seq }, created_at: Date.now() / 1000 });
+    emit(11, 'i1', 1); emit(12, 'i2', 1);
+    expect(Object.keys(batch.feedback)).toEqual(['i1', 'i2']);
+    const first = batch.feedback.i1.key; emit(13, 'i1', 2); expect(batch.feedback.i1.key).not.toBe(first);
+  });
+});
+
+
+describe('microfeedback recovery regressions', () => {
+  it('reconnect catch-up is silent even when the new snapshot is already verified', async () => {
+    const first = snapshot(); first.producer.current = item({ attempt: 1, status: 'SUBMITTING' });
+    vi.mocked(apiBatchSnapshot).mockResolvedValue(first);
+    const batch = useBatchGoalStore(); await batch.attach('g1');
+    const next = snapshot({ last_seq: 13 });
+    next.recent_jobs = [{ ...item({ attempt: 1, status: 'SUCCEEDED', job_id: 42 }), unknown: false, verification_ok: true }];
+    vi.mocked(apiBatchSnapshot).mockResolvedValue(next);
+    vi.mocked(apiBatchEvents).mockResolvedValue(page([
+      { ...event(11), payload: { item_id: 'i1', attempt: 1, to: 'WAITING_SR' } },
+      { ...event(12), event_type: 'sr_receipt_recorded', payload: { item_id: 'i1', job_id: 42 } },
+      { ...event(13), event_type: 'item_verified', payload: { item_id: 'i1', ok: true, state: 'COMPLETED' } },
+    ], 10));
+    await batch.refreshSnapshot();
+    expect(batch.snapshot?.recent_jobs?.[0].status).toBe('SUCCEEDED');
+    expect(batch.feedback).toEqual({}); expect(batch.consumedSeq).toBe(13);
+  });
+  it('invalidates the previous attempt receipt immediately on retry or failure', async () => {
+    await useBatchGoalStore().attach('g1'); const batch = useBatchGoalStore();
+    streamCbs!.onEvent({ ...event(11), event_type: 'sr_receipt_recorded', payload: { item_id: 'i1', attempt: 1, job_id: 42 } });
+    expect(batch.feedback.i1.attempt).toBe(1);
+    streamCbs!.onEvent({ ...event(12), payload: { item_id: 'i1', attempt: 2, to: 'DETECTING' } });
+    expect(batch.feedback.i1).toBeUndefined();
+  });
+  it('coalesces a burst of verified items into one queue refresh and result scan', async () => {
+    vi.useFakeTimers();
+    try {
+      const list = vi.spyOn(useQueueStore(), 'list').mockResolvedValue();
+      const scan = vi.spyOn(useImageRefreshStore(), 'scan').mockResolvedValue();
+      await useBatchGoalStore().attach('g1');
+      for (let n = 0; n < 50; n++) streamCbs!.onEvent({ ...event(11 + n), event_type: 'item_verified', payload: { item_id: 'i' + n, attempt: 1, ok: true } });
+      await vi.advanceTimersByTimeAsync(250);
+      expect(list).toHaveBeenCalledTimes(1); expect(scan).toHaveBeenCalledTimes(1);
+    } finally { vi.useRealTimers(); }
   });
 });

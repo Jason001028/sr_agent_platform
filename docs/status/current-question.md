@@ -9,7 +9,11 @@
 
 2026-11-06：Batch F 已完成现有用户入口与 Panel 的实际后端 + Fake SR 联合验收，达到 **M3 演示退出条件**。沿用现有「工具栏｜Agent」任务中枢，不新增入口或状态体系；修复历史 / 实时游标边界、密集事件刷新、断网与页面恢复、追平竞态、Overlay 深链接及迟到导航。50 景实际物理提交 **50 次、重复 0**，最终 detected / submitted / verified 均 50，消费游标 / 快照水位 **3010 / 3010**，历史 **150 页到 seq 1**，报告全 50 项 demo_contract / provenance=mock。命令、本轮原始证据与边界见 [batch-pr-f.md §12](batch-pr-f.md)；固定假快照 UI 测试与实际后端联验分开记录。production 门仍关闭，真实 SR/GPU/盘阵/内网代理未验收。
 
+最新增量：Batch 已复用 HTTP 差异检测及 autoMask 几何，接入真实 MaskBuilder 与持久人工区域/整景验收；任务面板复用双图同步、覆盖和闪烁。源码、API、测试与边界见 [batch-human-quality.md](batch-human-quality.md)。production 提交门仍关闭，内网真实 SR 单景联验未执行；50 景 Fake 不代表生产质量通过。
+
 Viewer 四种画布背景、设置持久化、分屏层级和合成影像验收见 [viewer_background.md](viewer_background.md)。默认工程网格；背景切换不重绘影像或重置 Camera。
+
+差异定位的自动绘制 P1 已实现：独立前16连通域、安全边距与覆盖核验、PAN身份隔离、SVG动画和整批Mask撤销/重做，详见 [mask-auto-draw.md](../planning/mask-auto-draw.md)。仅写入可编辑向量，不生成最终mask.tif、不自动提交SR、不修改Batch Worker；真实内网大图待核。
 
 影像焕新 Image Refresh 的统一成果发现、镭射未读卡片、版本缓存、已读持久化与浏览器验收见 [image-refresh.md](image-refresh.md)。单景和批量共用队列链路，不自动切图；内网真实成果验收待核。
 

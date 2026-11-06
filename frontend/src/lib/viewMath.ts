@@ -74,6 +74,13 @@ export function origToThumb(x: number, y: number, tw: number, th: number, W: num
   return [x * (tw / W), y * (th / H)];
 }
 
+/** Exact inverse of MASK export's endpoint-aligned thumbToOrig. Display
+ * positioning uses origToThumb above; verified source polygons must round-trip
+ * their integer vertices through the export contract without a one-pixel drift. */
+export function sourceToMaskThumb(x: number, y: number, W: number, H: number, tw: number, th: number): Pt {
+  return [W <= 1 ? 0 : x * (tw - 1) / (W - 1), H <= 1 ? 0 : y * (th - 1) / (H - 1)];
+}
+
 /* 「X,Y」文本 → 两个坐标串（Vue 版新增，HTML 版没有这一条）。
 
    给工具栏那一个定位框用（原先是 X、Y 两个框，见 Toolbar.doLocate）：从别处拷来的坐标是

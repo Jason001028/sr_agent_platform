@@ -10,6 +10,7 @@ vi.mock('../../components/AgentAnnotationOverlay.vue', () => ({ default: { rende
 vi.mock('../../components/DiffOverlay.vue', () => ({ default: { render: () => null } }));
 import TifCanvas from '../../components/TifCanvas.vue';
 import { useViewerStore, type ViewerRec } from '../viewer';
+import type { OwnedPoly } from '../../lib/maskHistory';
 let store: ReturnType<typeof useViewerStore>, root: HTMLDivElement, canvas: HTMLCanvasElement;
 let app: ReturnType<typeof createApp>;
 const fills: string[] = [];
@@ -47,6 +48,36 @@ it('defaults to polygon; fills only dynamic closed predictions after two anchors
   expect(fills).toContain('rgba(217,71,82,0.14)');
   expect(lines).toContainEqual([100,100]);
   expect(store.getRois()).toHaveLength(0); expect(store.drawTool).toBe('polygon');
+});
+
+it('commits sixteen automatic polygons as one history step, retaining manual ROIs and redo', () => {
+  triangle(); store.closePolygon();
+  const hand = JSON.stringify(store.getRois());
+  const polygons: OwnedPoly[] = Array.from({ length: 16 }, (_, i) => {
+    const p: OwnedPoly = [[1+i, 1], [5+i, 1], [5+i, 5]];
+    p.autoDiff = { source:'auto_diff', analysis_id:'analysis', image_id:1, group_id:'group',
+      region_id:'r'+i, parameter_version:'v1', initial_points:JSON.stringify(p), needs_review:false };
+    return p;
+  });
+  expect(store.addMaskPolygonBatch(1, polygons, 'analysis')).toBe(true);
+  expect(store.getRois()).toHaveLength(17);
+  expect(store.addMaskPolygonBatch(1, polygons, 'analysis')).toBe(true);
+  expect(store.getRois()).toHaveLength(17);
+  store.undoRoi();
+  expect(JSON.stringify(store.getRois())).toBe(hand);
+  expect(store.canRedoMask).toBe(true);
+  store.redoRoi(); expect(store.getRois()).toHaveLength(17);
+  store.clearRois(); expect(store.getRois()).toHaveLength(0);
+  store.undoRoi(); expect(store.getRois()).toHaveLength(17);
+});
+
+it('refuses a batch while a hand-drawn draft is open or the target is not active', () => {
+  triangle();
+  const p: OwnedPoly = [[1,1],[6,1],[6,6]];
+  expect(store.addMaskPolygonBatch(1, [p], 'a')).toBe(false);
+  expect(store.getRois()).toHaveLength(0);
+  store.pendingPts = null; store.activeId = 99;
+  expect(store.addMaskPolygonBatch(1, [p], 'a')).toBe(false);
 });
 it.each([0,1])('pans with Space-left or middle without changing anchors (button %s)', async button => {
   triangle(); const points=JSON.stringify(store.pendingPts);

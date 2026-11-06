@@ -954,6 +954,9 @@ def build_mask_result(detection_result, source_metadata, config=None) -> dict:
         raise MaskError(str(exc)) from exc
     if detection["item_id"] != item_id:
         raise MaskError("DetectionResult.item_id 与冻结项不一致")
+    if detection.get("detector_name")=="shared-difference" and (
+            detection.get("image_key")!=image_key or detection.get("image_id")!=image_key):
+        raise MaskError("差异多边形属于另一份源影像，拒绝栅格化")
 
     path_value = config.get("path")
     if not path_value:

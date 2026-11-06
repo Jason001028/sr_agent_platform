@@ -362,6 +362,18 @@ CREATE TABLE IF NOT EXISTS agent_goal_events (
     created_at REAL NOT NULL,
     PRIMARY KEY(goal_id, seq)
 );
+CREATE TABLE IF NOT EXISTS batch_quality_reviews (
+    review_id TEXT PRIMARY KEY, goal_id TEXT NOT NULL, item_id TEXT NOT NULL,
+    job_id TEXT NOT NULL, binding TEXT NOT NULL, regions TEXT NOT NULL,
+    scene_decision TEXT NOT NULL DEFAULT 'pending', version INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL, updated_at REAL NOT NULL,
+    UNIQUE(goal_id,item_id,job_id,review_id)
+);
+CREATE INDEX IF NOT EXISTS idx_quality_goal ON batch_quality_reviews(goal_id,item_id);
+CREATE TABLE IF NOT EXISTS batch_quality_events (
+    review_id TEXT NOT NULL, request_key TEXT NOT NULL, payload TEXT NOT NULL,
+    created_at REAL NOT NULL, PRIMARY KEY(review_id,request_key)
+);
 """
 
 #: sr_tasks 里发布后新增的列。`CREATE TABLE IF NOT EXISTS` 对**已存在**的表一个字
@@ -2079,6 +2091,12 @@ class Store:
     def complete_verified_goal(self, goal_id, verification, **kwargs):
         if verification.get("ok") is not True:
             raise ValueError("verification did not pass")
+        goal=self.get_goal(goal_id)
+        if goal and goal.get("kind")=="batch" and goal.get("checkpoint",{}).get("mode")=="production":
+            from backend.services import batch_quality
+            human=batch_quality.verify_goal(self,goal)
+            if not human["ok"]:
+                raise ValueError("human quality review did not pass: "+"; ".join(human["reasons"]))
         return self.transition_goal(goal_id, "COMPLETED", _verification=True,
                                     event_type="goal_verified", event_payload=verification, **kwargs)
 
@@ -2280,7 +2298,7 @@ class Store:
         identity. A stale worker (renewal lost, restart, cancel) returns None
         instead of overwriting the current owner's state.
         """
-        valid = {"PENDING", "OPENING", "DETECTING", "MASK_READY", "SUBMITTING",
+        valid = {"AWAITING_REVIEW", "REVIEW_REJECTED", "PENDING", "OPENING", "DETECTING", "MASK_READY", "SUBMITTING",
                  "WAITING_SR", "VERIFYING", "SUCCEEDED", "NO_ISSUE", "FAILED",
                  "BLOCKED", "SKIPPED", "RETRY_WAIT"}
         if status not in valid:

@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
 from backend.services import batch_manifest, batch_snapshot
+from backend.services import batch_quality
 from backend.services.goal_worker import validate_acceptance
 from backend.services.store import (BatchConflict, BatchControlConflict,
                                     ClarificationConflict)
@@ -321,6 +322,64 @@ def items(goal_id: str, request: Request, after_ordinal: int = 0,
         "items": items,
         "next_after_ordinal": items[-1]["ordinal"] if items else after_ordinal,
     }
+
+
+def _quality_item(request,goal_id,item_id):
+    item=request.app.state.store.get_goal_item(goal_id,item_id)
+    if not item: raise HTTPException(404,"batch item not found")
+    return item
+
+
+@router.get("/{goal_id}/quality-reviews")
+def quality_reviews(goal_id:str,request:Request):
+    store=request.app.state.store
+    if not store.get_goal(goal_id): raise HTTPException(404,"goal not found")
+    reviews=[]
+    for item in store.list_goal_items(goal_id):
+        review=batch_quality.review_for_item(store,item,verify=False)
+        if not review: continue
+        reasons=[]
+        try: batch_quality.validate_current(store,review)
+        except (ValueError,OSError,KeyError) as e: reasons.append(str(e))
+        reviews.append({"review_id":review["review_id"],"item_id":item["item_id"],"name":item["name"],
+            "scene_name":Path(item["checkpoint"]["scene_ref"]).name,"ordinal":item["ordinal"],
+            "job_id":review["job_id"],"status":item["status"],"scene_decision":review["scene_decision"],
+            "version":review["version"],"current":not reasons,"reasons":reasons,
+            "counts":{key:sum(r["decision"]==key for r in review["regions"]) for key in ("approved","rejected","pending")}})
+    return {"goal_id":goal_id,"reviews":reviews}
+
+
+@router.get("/{goal_id}/items/{item_id}/quality-review")
+def quality_review(goal_id:str,item_id:str,request:Request):
+    from backend.api import paths
+    store=request.app.state.store; item=_quality_item(request,goal_id,item_id)
+    review=batch_quality.review_for_item(store,item,verify=False)
+    if not review: raise HTTPException(404,"quality review not found")
+    try: batch_quality.validate_current(store,review)
+    except (ValueError,OSError,KeyError) as e: raise HTTPException(409,str(e)) from e
+    b=review["binding"]
+    images=[]
+    for name,role in (("output","pan"),("nosr","nosr")):
+        file=b[name]; path=Path(file["path"])
+        images.append({"id":paths.scene_id_abs(path),"name":path.name,"kind":"input" if role=="pan" else "nosr",
+            "exists":True,"W":file["width"],"H":file["height"],"srcRev":file["revision"],
+            "sizeBytes":file["size"],"rel":None,"hasPreview":False,"previewDiv":None,"mtime":None,"jpgUrl":None,
+            "tourIdentity":batch_quality.image_identity(path,Path(b["output"]["path"]).parent.as_posix(),role),
+            "image_key":file["image_key"]})
+    audit=store._db().execute("SELECT request_key,payload,created_at FROM batch_quality_events WHERE review_id=? ORDER BY created_at",(review["review_id"],)).fetchall()
+    return {**review,"images":images,"scene_path":Path(b["output"]["path"]).parent.as_posix(),
+        "audit":[{"request_key":row[0],"payload":json.loads(row[1]),"created_at":row[2]} for row in audit]}
+
+
+@router.post("/{goal_id}/items/{item_id}/quality-review")
+async def quality_review_decide(goal_id:str,item_id:str,request:Request):
+    body=await request.json()
+    if not isinstance(body,dict): raise HTTPException(400,"body must be an object")
+    try:
+        return batch_quality.decide(request.app.state.store,goal_id,item_id,body)
+    except KeyError as e: raise HTTPException(404,str(e)) from e
+    except (batch_quality.ReviewConflict,OSError) as e: raise HTTPException(409,str(e)) from e
+    except ValueError as e: raise HTTPException(400,str(e)) from e
 
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()

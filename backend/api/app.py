@@ -250,6 +250,8 @@ def _diff_source_roi(body: dict, root: Path | None) -> dict:
         ssim_window=body.get("ssimWindow", 7),
         ssim_gaussian=bool(body.get("ssimGaussian", False)),
         source="source-roi",
+        auto_mask=body.get("autoMask") is True,
+        auto_mask_margin=body.get("autoMaskMargin", "standard"),
         scale_a=(ra, ah / a.shape[0]),
         scale_b=(dims_b[0] / b.shape[1], dims_b[1] / b.shape[0]),
         warnings=["原始 ROI 分析：按原始分辨率重算该区域，区域外仍是预览结果。"],
@@ -277,6 +279,12 @@ def _diff_source_roi(body: dict, root: Path | None) -> dict:
                                     "imageASource": [dims_a[0], dims_a[1]],
                                     "imageBSource": [dims_b[0], dims_b[1]]})
     result["operation"] = "difference-localization"
+    if body.get("autoMask") is True:
+        from backend.services.auto_mask_geometry import bind_auto_mask
+        try:
+            bind_auto_mask(result, (sa, sb), source_windows=(rect_a, rect_b))
+        except (ValueError, TypeError, KeyError) as e:
+            raise image_diff.DiffError(str(e)) from e
     return result
 
 

@@ -1,0 +1,72 @@
+{
+  "analysisCalls": 2,
+  "polygons": 3,
+  "metrics": [
+    {
+      "elapsed_ms": 32.63,
+      "polygons": [
+        {
+          "rank": 1,
+          "vertices": 4,
+          "coverage": 1,
+          "sourceCoverage": 1,
+          "ratio": 1.1387412587412586,
+          "fallback": null,
+          "needs_review": false
+        },
+        {
+          "rank": 2,
+          "vertices": 4,
+          "coverage": 1,
+          "sourceCoverage": 1,
+          "ratio": 1.1442424242424243,
+          "fallback": null,
+          "needs_review": false
+        },
+        {
+          "rank": 3,
+          "vertices": 12,
+          "coverage": 1,
+          "sourceCoverage": 1,
+          "ratio": 1.119702029283329,
+          "fallback": null,
+          "needs_review": false
+        }
+      ]
+    },
+    {
+      "elapsed_ms": 32.66,
+      "polygons": [
+        {
+          "rank": 1,
+          "vertices": 4,
+          "coverage": 1,
+          "sourceCoverage": 1,
+          "ratio": 1.1387412587412586,
+          "fallback": null,
+          "needs_review": false
+        },
+        {
+          "rank": 2,
+          "vertices": 4,
+          "coverage": 1,
+          "sourceCoverage": 1,
+          "ratio": 1.1442424242424243,
+          "fallback": null,
+          "needs_review": false
+        },
+        {
+          "rank": 3,
+          "vertices": 12,
+          "coverage": 1,
+          "sourceCoverage": 1,
+          "ratio": 1.119702029283329,
+          "fallback": null,
+          "needs_review": false
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "forbidden": []
+}

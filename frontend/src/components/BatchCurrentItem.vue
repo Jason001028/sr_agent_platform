@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /** Producer 当前代表项 + 在途数量（修订 7）。
  *  缩略图只用现成 JPG（不生成预览、不读 TIFF）；点开才加载整幅图。 */
+import BatchFeedbackIcon from './BatchFeedbackIcon.vue';
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useBatchGoalStore } from '../stores/batchGoal.js';
 import { useViewerStore } from '../stores/viewer.js';
@@ -74,7 +75,7 @@ async function refresh(): Promise<void> {
     </div>
 
     <template v-if="current">
-      <div class="bc-body">
+      <div class="bc-body" :key="current.item_id + current.attempt">
         <div class="bc-thumb">
           <img v-if="thumbUrl" :src="thumbUrl" alt="" draggable="false">
           <span v-else class="bc-thumb-empty">{{ thumbFailed ? '无现成预览' : '…' }}</span>
@@ -82,6 +83,7 @@ async function refresh(): Promise<void> {
         <div class="bc-info">
           <div class="bc-name" :title="current.name">#{{ current.ordinal }} {{ current.name }}</div>
           <div class="bc-meta">
+            <BatchFeedbackIcon :goal-id="snapshot.goal.goal_id" :item-id="current.item_id" :attempt="current.attempt" :enabled="!['PAUSED', 'CANCELLED'].includes(snapshot.goal.status)" :status="current.status" :cue="batch.feedback[current.item_id]" scanning />
             <span class="bc-status" :data-status="current.status">
               {{ itemStatusLabel(current.status) }}
             </span>
@@ -90,6 +92,7 @@ async function refresh(): Promise<void> {
               {{ current.candidate_count }} 个候选
             </span>
           </div>
+          <span v-if="current.job_id != null" class="sr-flow-receipt">Job {{ current.job_id }}</span>
           <div class="bc-actions">
             <button type="button" :disabled="opening || !current.image_path" @click="open(false)">
               定位影像

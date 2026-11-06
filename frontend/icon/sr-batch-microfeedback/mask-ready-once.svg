@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40" role="img" aria-label="修复掩码已就绪">
+  <title>修复掩码已就绪</title>
+  <rect x="6" y="6" width="28" height="28" rx="7" fill="#F7F5FE" stroke="#DCD5F1" stroke-width="1.2"/>
+  <path d="M11 12H29M11 18H29M11 24H29M11 30H29M12 11V29M18 11V29M24 11V29M30 11V29" stroke="#B4ABD5" stroke-width=".7" opacity=".6"/>
+  <path class="mask-fill" d="M12 18L18 13L24 16L29 23L24 29L17 27L12 23Z" fill="#B5A5ED" opacity=".32"/>
+  <path class="mask-edge" d="M12 18L18 13L24 16L29 23L24 29L17 27L12 23Z" fill="none" stroke="#7B70CA" stroke-width="1.85" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="48" stroke-dashoffset="48"/>
+  <circle class="mask-point" cx="29" cy="23" r="2.1" fill="#7B70CA" stroke="white" stroke-width="1"/>
+  <style>
+    .mask-edge{animation:srMaskDraw .62s cubic-bezier(.16,.76,.25,1) .08s forwards}
+    .mask-fill{animation:srMaskFill .52s ease-out .18s both}
+    .mask-point{animation:srMaskPoint .24s ease-out .53s both;transform-origin:29px 23px}
+    @keyframes srMaskDraw{to{stroke-dashoffset:0}}
+    @keyframes srMaskFill{from{opacity:0}to{opacity:.32}}
+    @keyframes srMaskPoint{from{transform:scale(.3);opacity:0}to{transform:scale(1);opacity:1}}
+    @media(prefers-reduced-motion:reduce){*{animation:none!important}.mask-edge{stroke-dashoffset:0}}
+  </style>
+</svg>

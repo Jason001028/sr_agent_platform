@@ -88,7 +88,7 @@ CLAIMABLE = {"QUEUED", "RUNNING", "RETRY_WAIT", "WAITING_EXTERNAL", "VERIFYING"}
 MONITORED = {"SUBMITTING", "WAITING_SR", "VERIFYING"}
 PREPARING = {"OPENING", "DETECTING", "MASK_READY"}
 CONVERGED = {"SUCCEEDED", "NO_ISSUE", "FAILED", "SKIPPED"}
-PARKED = {"BLOCKED"}
+PARKED = {"BLOCKED", "REVIEW_REJECTED"}
 PRE_SUBMIT = {"PENDING", "RETRY_WAIT", "OPENING", "DETECTING", "MASK_READY"}
 
 MAX_UNKNOWN_CHECKS = 3
@@ -185,7 +185,7 @@ def ensure_execution_allowed(mode):
     if mode == "production":
         raise BatchGateError(
             "production batch execution is not enabled yet "
-            "(real Detector/Verifier arrives in a later PR)")
+            "(intranet single-scene SR acceptance is still required)")
     if mode != "demo":
         raise BatchGateError(f"unsupported batch mode: {mode!r}")
     if runtime.executor != "slurm":
@@ -245,17 +245,30 @@ def _detection_provenance_gate(detection, mode):
     if mode == "production" and provenance == "mock":
         raise batch_detector.DetectionError(
             "production 批次拒绝 MockDetector 结果")
+    if mode == "production":
+        accounting=detection.get("candidate_accounting") or {}
+        if (detection.get("detector_name")!="shared-difference" or detection.get("analysis",{}).get("source")!="real-dn-grid"
+            or any(isinstance(accounting.get(k),bool) or not isinstance(accounting.get(k),int) or accounting[k]<0 for k in ("total","processed","unprocessed"))
+            or accounting["processed"]+accounting["unprocessed"]!=accounting["total"]
+            or accounting["processed"]!=len(detection.get("candidates",[]))):
+            raise batch_detector.DetectionError("生产批次要求共享差异核心及完整的候选处理统计")
 
 
 def _detection_job(snapshot):
-    target = snapshot["target_image"]
+    target = dict(snapshot["target_image"])
     mode = snapshot.get("mode") or "demo"
+    if mode == "production":
+        target["detection_config"] = {**snapshot.get("detection_config",{}), "mode":"diff", "execution_mode":"production"}
+    elif snapshot.get("detection_config"):
+        target["detection_config"] = {**snapshot["detection_config"], "execution_mode":mode}
     # Keep the single positional argument: existing tests patch ``detect`` with
     # a one-argument wrapper, and the real detector reads the frozen reference
     # from ``target_image["reference_image"]``.
     detection = batch_detector.detect(target)
     _detection_provenance_gate(detection, mode)
     candidates = detection.get("candidates") or []
+    if (detection.get("candidate_accounting") or {}).get("unprocessed"):
+        return {"detection":detection,"mask":None,"incomplete":True}
     if not candidates:
         return {"detection": detection, "mask": None}
     mask = batch_mask.build_mask_result(
@@ -370,6 +383,7 @@ def _start_detection(state, goal, item, lease, cfg):
         "mode": (goal.get("checkpoint") or {}).get("mode") or "demo",
         "rows_per_strip": item_config.get("mask_rows_per_strip"),
         "overlay_max_edge": item_config.get("mask_overlay_max_edge"),
+        "detection_config": item_config.get("detection") or {},
     }
     executor = _ensure_io_executor(state)
     try:
@@ -444,6 +458,14 @@ def _collect_detections(state, goal, lease, cfg, *, allow_write=True):
         detection = payload["detection"]
         cp = dict(item["checkpoint"])
         cp["detection"] = detection
+        if payload.get("incomplete"):
+            cp["phase"]="BLOCKED"
+            state.store.transition_goal_item(gid,step_id=item["step_id"],expected_version=item["version"],
+                status="BLOCKED",lease_token=lease.token,checkpoint=cp,capacity_reserved=0,
+                error="差异候选未全部处理，禁止部分掩码自动提交；详见 candidate_accounting")
+            continue
+        if detection.get("requires_geometry_review"):
+            cp["review_required"]=True
         if not detection.get("candidates"):
             cp["phase"] = "NO_ISSUE"
             state.store.transition_goal_item(
@@ -827,6 +849,11 @@ def _verify_submission_inputs(item, mode="demo"):
         raise ItemBlocked("掩码 provenance 与检测结果不一致")
     if mode == "production" and mask.get("provenance") == "mock":
         raise ItemBlocked("production 批次拒绝 Mock 掩码")
+    if mode == "production":
+        try:_detection_provenance_gate(detection,mode)
+        except batch_detector.DetectionError as exc:raise ItemBlocked(str(exc)) from exc
+        if detection["candidate_accounting"]["unprocessed"]:
+            raise ItemBlocked("候选区域尚未全部处理，禁止提交部分掩码")
     try:
         artifact_root = batch_manifest.artifact_root().resolve()
         mask_path = Path(mask["path"]).resolve()
@@ -878,7 +905,12 @@ def _submit_ready(state, goal, item, lease, cfg, prepared):
             state, goal, current, lease,
             "、".join(changed)
             + " 在复核后发生变化，拒绝按旧复核结果提交")
-    work_root = ensure_execution_allowed(mode)
+    try:
+        work_root = ensure_execution_allowed(mode)
+    except BatchGateError as exc:
+        # A closed submission gate must not stop monitoring already accepted
+        # Jobs or drain all other read-only detection work.
+        return _block_item(state,goal,current,lease,str(exc))
     try:
         params = prepared["params"]
     except KeyError as exc:  # pragma: no cover — programming error
@@ -1243,6 +1275,20 @@ def _verify_item(state, goal, item, lease, cfg, mode):
     cp.pop("monitor_failures", None)
 
     verification = _verify_layers(status, mode, task, job_id)
+    if mode == "production":
+        from backend.services import batch_quality
+        infrastructure_ok=all(verification["layers"][name]["status"]==LAYER_PASSED for name in ("submit","terminal","contract","artifacts"))
+        if infrastructure_ok:
+            if not cp.get("quality_review_id"):
+                try:
+                    return batch_quality.enqueue(store,goal,item,lease,task,verification)
+                except (ValueError,OSError,KeyError) as exc:
+                    return _block_item(state,goal,item,lease,"人工审核对象建立失败："+str(exc))
+            layer=batch_quality.quality_layer(store,item)
+            verification["layers"]["quality"]=layer
+            verification["failed_layers"]=[n for n,l in verification["layers"].items() if l["status"] in {LAYER_FAILED,LAYER_UNVERIFIED}]
+            verification["ok"]=not verification["failed_layers"]
+            verification["reasons"]=[] if verification["ok"] else [layer.get("reason","人工审核未完成")]
     ok = verification["ok"]
     cp["phase"] = "SUCCEEDED" if ok else "FAILED"
     cp["verification"] = verification
@@ -1499,7 +1545,9 @@ def _settle(state, goal, lease, cfg, mode):
         draining = not (can_prepare or can_submit)
         target = "WAITING_EXTERNAL" if draining else "RUNNING"
         phase = "draining" if draining else "dispatching"
-        if draining and not monitored and any(i["status"] == "MASK_READY" and not _review_allows_submit(i) for i in items):
+        if draining and not monitored and any(i["status"] == "AWAITING_REVIEW" for i in items):
+            phase = "waiting_quality_review"
+        elif draining and not monitored and any(i["status"] == "MASK_READY" and not _review_allows_submit(i) for i in items):
             phase = "waiting_review"
         wake = (time.time() + cfg["monitor_poll_interval"]
                 if draining else time.time())
@@ -1527,7 +1575,7 @@ def _settle(state, goal, lease, cfg, mode):
     report = _build_report(goal, items, counts, mode)
     cp.update({"producer_status": "DONE", "counts": counts,
                "monitoring_done": True})
-    blocked = [i for i in items if i["status"] == "BLOCKED"]
+    blocked = [i for i in items if i["status"] in {"BLOCKED","REVIEW_REJECTED"}]
     failed = [i for i in items if i["status"] == "FAILED"]
     if blocked:
         cp["report"] = report
@@ -1556,6 +1604,14 @@ def _settle(state, goal, lease, cfg, mode):
             extra_events=[(EVT_BATCH_REPORT, report)])
         return True
     verification = _verify_batch(items, mode)
+    if mode == "production":
+        from backend.services import batch_quality
+        human = batch_quality.verify_goal(store,goal)
+        if not human["ok"]:
+            cp["report"]=report
+            store.transition_goal(gid,"BLOCKED",checkpoint=cp,phase="blocked",expected_version=lease.version,
+                lease_token=lease.token,release=True,error="; ".join(human["reasons"]))
+            return True
     try:
         report_ref = _write_report(gid, report)
     except OSError:
@@ -1587,7 +1643,7 @@ def _process_batch(state, claimed, lease, allow_produce):
         goal = lease.check(store)
         manifest, mode = _load(goal)
         cfg = batch_config(manifest)
-        if allow_produce:
+        if allow_produce and mode != "production":
             ensure_execution_allowed(mode)
         # A resumed Goal must not inherit a stale monitoring_done marker from
         # an earlier pause; otherwise a later pause would skip its accepted

@@ -519,6 +519,9 @@ def analyze_arrays(
     nodata_b: float | None = None,
     warnings: list[str] | None = None,
     elapsed_ms: float | None = None,
+    auto_mask: bool = False,
+    auto_mask_margin: str = "standard",
+    auto_mask_limit: int = 16,
 ) -> dict:
     """核心入口。数组形状必须一致；不一致由调用方先重采样。
 
@@ -651,7 +654,7 @@ def analyze_arrays(
     mask8 = np.where(final_mask, 255, 0).astype(np.uint8)
 
     took = (time.perf_counter() - started) * 1000 if elapsed_ms is None else elapsed_ms
-    return {
+    result = {
         "method": method,
         "source": source,
         "imageA": {"name": None},
@@ -667,6 +670,7 @@ def analyze_arrays(
         "binaryMask": _b64_png(mask8),
         "validityMap": _b64_png(np.where(valid, 255, 0).astype(np.uint8)),
         "regions": out_regions,
+        "regionAccounting": {"connected": len(regions), "eligible": len(kept), "filtered_min_area": len(regions)-len(kept)},
         "truncated": truncated,
         "coverage": {
             "validPixels": int(valid.sum()),
@@ -688,6 +692,13 @@ def analyze_arrays(
         "warnings": notes,
         "elapsedMs": int(round(took)),
     }
+    if auto_mask:
+        from backend.services.auto_mask_geometry import build_auto_mask
+        try:
+            result["autoMask"] = build_auto_mask(labels, kept, margin=auto_mask_margin, limit=auto_mask_limit)
+        except ValueError as e:
+            raise DiffError(str(e)) from e
+    return result
 
 
 def analyze_payload(payload: dict, *, load_scene=None) -> dict:
@@ -764,6 +775,8 @@ def analyze_payload(payload: dict, *, load_scene=None) -> dict:
         roi=payload.get("roi"),
         source=source,
         warnings=warnings,
+        auto_mask=payload.get("autoMask") is True,
+        auto_mask_margin=payload.get("autoMaskMargin", "standard"),
     )
     result["imageA"] = {
         "id": spec_a.get("id"), "name": spec_a.get("name"),
@@ -783,6 +796,12 @@ def analyze_payload(payload: dict, *, load_scene=None) -> dict:
         result["analysisGrid"]["mode"] = "source"
     result["elapsedMs"] = int(round((time.perf_counter() - started) * 1000))
     result["operation"] = "difference-localization"
+    if payload.get("autoMask") is True:
+        from backend.services.auto_mask_geometry import bind_auto_mask
+        try:
+            bind_auto_mask(result, (spec_a, spec_b), preview_grid=payload.get("autoMaskGrid"))
+        except (ValueError, KeyError, TypeError) as e:
+            raise DiffError(str(e)) from e
     return result
 
 

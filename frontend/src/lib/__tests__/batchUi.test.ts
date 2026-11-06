@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  eventLabel, goalStatusLabel, modeBadge, repairTrackText, trackPercent,
+  isolateFeedbackSvg, eventLabel, goalStatusLabel, modeBadge, repairTrackText, trackPercent,
   trackText, verificationNote,
 } from '../batchUi';
 import type { BatchEvent, BatchProgressTrack, BatchSnapshot } from '../api';
@@ -124,4 +124,17 @@ describe('事件摘要', () => {
     expect(eventLabel(ev('batch_control_changed', { monitoring_done: true })))
       .toBe('监控更新 · 已收尾');
   });
+});
+
+
+it('isolates SVG styles, keyframes, IDs and reduced-motion selectors per instance', () => {
+  const source = '<svg><defs><clipPath id="clip"/></defs><path class="edge" clip-path="url(#clip)"/><style>.edge{animation:draw 1s}@keyframes draw{to{opacity:1}}@media(prefers-reduced-motion:reduce){*{animation:none!important}}</style></svg>';
+  const animated = isolateFeedbackSvg(source, 'one', true);
+  const still = isolateFeedbackSvg(source, 'two', false);
+  expect(animated).toContain('.one-edge{animation:one-draw');
+  expect(animated).toContain('@keyframes one-draw');
+  expect(animated).toContain('url(#one-clip)');
+  expect(animated).toContain('svg[data-feedback-svg="one"] *{');
+  expect(still).toContain('.two-edge{animation:none!important}');
+  expect(still).not.toContain('one-edge');
 });

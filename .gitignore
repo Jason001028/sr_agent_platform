@@ -5,6 +5,8 @@
 .e2e/fixtures/
 .e2e/*.tif
 .e2e/*.jpg
+# 质量浏览器验收的临时运行目录（app.db、生成的 TIF、.repair-* 等）不入库
+.e2e/artifacts/quality-test-temp/
 
 # 压缩包
 *.zip

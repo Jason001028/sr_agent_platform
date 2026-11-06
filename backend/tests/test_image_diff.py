@@ -360,6 +360,7 @@ class SourceWindowTest(unittest.TestCase):
             pb = write_tiff(Path(tmp) / "b.tif", b)
             body = {
                 "precision": "source-roi",
+                "autoMask": True,
                 "method": "absdiff",
                 "minAreaPx": 16,
                 "roi": {"x": 70, "y": 60, "w": 100, "h": 100},  # 右下越界
@@ -375,6 +376,9 @@ class SourceWindowTest(unittest.TestCase):
             self.assertEqual(grid["origin"], [70, 60])
             self.assertEqual(grid["width"], 30)
             self.assertEqual(grid["height"], 20)
+            self.assertEqual(out["autoMask"]["sources"][0]["transform"],
+                             {"scale": [1.0, 1.0], "offset": [70.0, 60.0]})
+            self.assertEqual(out["autoMask"]["polygons"][0]["source_polygons"][0]["coverage_ratio"], 1)
             self.assertTrue(any("夹紧" in w for w in out["warnings"]))
             self.assertEqual(len(out["regions"]), 1)
             x, y, w, h = out["regions"][0]["bbox"]

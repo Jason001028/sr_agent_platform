@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40" role="img" aria-label="影像检测中">
+  <title>影像检测中</title>
+  <defs>
+    <linearGradient id="scanLine" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#80B7F6" stop-opacity="0"/><stop offset=".5" stop-color="#6D95E4"/><stop offset="1" stop-color="#80B7F6" stop-opacity="0"/></linearGradient>
+    <clipPath id="scanClip"><rect x="7" y="8" width="26" height="24" rx="5"/></clipPath>
+  </defs>
+  <rect x="5.8" y="6.8" width="28.4" height="26.4" rx="7.2" fill="#F3F7FF" stroke="#CFDBED" stroke-width="1.2"/>
+  <g clip-path="url(#scanClip)">
+    <path d="M8 26L14.5 19L19 23L25.5 14L32 22V32H8Z" fill="#AABED7" opacity=".64"/>
+    <path d="M8 29L17 18L22 22L28 16L33 23" fill="none" stroke="#6E91C0" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity=".85"/>
+    <path d="M8 12H32" stroke="#C8D6EA" stroke-width=".8"/>
+    <rect class="scanner-glow" x="7" y="8" width="26" height="5" fill="#86B7F1" opacity=".12"/>
+    <path class="scanner-line" d="M7 9.5H33" stroke="url(#scanLine)" stroke-width="1.7" stroke-linecap="round"/>
+  </g>
+  <circle class="scanner-dot" cx="31.5" cy="8.6" r="2.4" fill="#6D95E4" stroke="#F3F7FF" stroke-width="1.1"/>
+  <style>
+    .scanner-line,.scanner-glow{animation:srScan 2.5s cubic-bezier(.38,0,.62,1) infinite;transform-origin:center;}
+    .scanner-dot{animation:srPulse 2.5s ease-in-out infinite;}
+    @keyframes srScan{0%,10%{transform:translateY(0);opacity:0}18%{opacity:1}67%{transform:translateY(21px);opacity:1}78%,100%{transform:translateY(21px);opacity:0}}
+    @keyframes srPulse{0%,100%{opacity:.55}45%{opacity:1}}
+    @media(prefers-reduced-motion:reduce){*{animation:none!important}.scanner-line{transform:translateY(11px);opacity:.85}}
+  </style>
+</svg>

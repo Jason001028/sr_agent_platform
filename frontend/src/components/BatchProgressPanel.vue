@@ -2,6 +2,7 @@
 /** Batch Progress Panel 编排层（PR F）。
  *  首屏顺序：概览/统计 → 三维进度 → Producer 当前项 → Monitor SR 队列；
  *  控制与事件时间线在下，事件默认折叠。 */
+import '../../icon/sr-batch-microfeedback/batch-microfeedback.css';
 import { computed, ref } from 'vue';
 import { useBatchGoalStore } from '../stores/batchGoal.js';
 import { useChatStore } from '../stores/chat.js';
@@ -12,6 +13,7 @@ import BatchJobQueue from './BatchJobQueue.vue';
 import BatchControls from './BatchControls.vue';
 import BatchEventTimeline from './BatchEventTimeline.vue';
 import BatchItemsList from './BatchItemsList.vue';
+import BatchQualityPanel from './BatchQualityPanel.vue';
 const fullQueue = ref(false);
 
 const batch = useBatchGoalStore();
@@ -134,6 +136,7 @@ function toggleFollow(event: Event): void {
       <p class="bp-follow-note">Producer 检测与 SR Monitor 可并行推进。</p>
       <BatchCurrentItem :snapshot="batch.snapshot" />
       <BatchJobQueue :snapshot="batch.snapshot" compact />
+      <BatchQualityPanel />
       <details @toggle="fullQueue = ($event.target as HTMLDetailsElement).open"><summary>完整执行队列（分页）</summary><BatchItemsList v-if="fullQueue" /></details>
       <BatchEventTimeline />
       <BatchControls :snapshot="batch.snapshot" variant="monitor" />

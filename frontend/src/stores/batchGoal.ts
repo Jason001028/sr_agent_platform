@@ -27,7 +27,11 @@ import {
   catchUpBatchEvents, eventNeedsSnapshot, mergeBatchEvents,
   pickAssociatedBatchId, DEFAULT_EVENT_LIMIT,
 } from '../lib/batchEventSync.js';
-import { isTerminalStatus } from '../lib/batchUi.js';
+import { feedbackEventKind, feedbackKey, isTerminalStatus } from '../lib/batchUi.js';
+
+import type { BatchFeedback } from '../lib/batchUi.js';
+import { useImageRefreshStore } from './imageRefresh';
+import { useQueueStore } from './queue';
 
 const LAST_GOAL_KEY = 'sr.batch.lastGoal';
 const FOLLOW_KEY = 'sr.batch.follow';
@@ -49,6 +53,45 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
   const goalId = ref<string | null>(null);
   const snapshot = ref<BatchSnapshot | null>(null);
   // The backend reads the actual session-bound Goal; client progress is not authority.
+  const feedback = ref<Record<string, BatchFeedback>>({});
+  const seenFeedback = new Set<string>();
+  const presentedFeedback = new Set<string>();
+  function claimFeedback(key: string): boolean {
+    if (presentedFeedback.has(key)) return false;
+    presentedFeedback.add(key);
+    return true;
+  }
+  let resultRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  function scheduleResultRefresh(): void {
+    if (resultRefreshTimer != null) return;
+    resultRefreshTimer = setTimeout(() => {
+      resultRefreshTimer = null;
+      void useQueueStore().list().then(() => useImageRefreshStore().scan(true)).catch(() => {});
+    }, 250);
+  }
+  let feedbackFloor = 0;
+  const itemAttempts = new Map<string, number>();
+  function observeFeedbackEvent(event: BatchEvent, live = true): void {
+    if (event.seq <= feedbackFloor || !goalId.value) return;
+    const kind = feedbackEventKind(event);
+    const id = String(event.payload.item_id ?? event.step_id ?? '');
+    const snap = snapshot.value;
+    const row = [snap?.producer.current, ...(snap?.active_jobs ?? []), ...(snap?.recent_jobs ?? [])].find(r => r?.item_id === id);
+    if (typeof event.payload.attempt === 'number') itemAttempts.set(id, event.payload.attempt);
+    const attempt = typeof event.payload.attempt === 'number' ? event.payload.attempt : itemAttempts.get(id) ?? row?.attempt;
+    const previous = feedback.value[id];
+    if (event.event_type === 'item_state_changed' && previous && event.seq >= previous.seq
+        && (attempt !== previous.attempt || ['FAILED', 'BLOCKED', 'SKIPPED', 'NO_ISSUE', 'REVIEW_REJECTED'].includes(String(event.payload.to)))) delete feedback.value[id];
+    if (!kind || !id || attempt == null) return;
+    const key = feedbackKey(goalId.value, id, attempt, kind);
+    if (seenFeedback.has(key)) return;
+    seenFeedback.add(key);
+    if (kind === 'verified') scheduleResultRefresh();
+    // Catch-up repairs business state silently. A delayed event is never a fresh celebration.
+    if (!live || !Number.isFinite(event.created_at) || Math.abs(Date.now() - event.created_at * 1000) > 3000) return;
+    if (previous && (previous.attempt > attempt || previous.seq > event.seq)) return;
+    feedback.value[id] = { key, goalId: goalId.value, itemId: id, attempt, kind, seq: event.seq, at: Date.now(), jobId: typeof event.payload.job_id === 'number' ? event.payload.job_id : undefined };
+  }
   const events = ref<BatchEvent[]>([]);
   const historyPage = ref<BatchEvent[]>([]);
   const historyBefore = ref<number | null>(null);
@@ -126,7 +169,12 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
   function reset(preserveOverlay = false): void {
     clearTimers();
     stopStream();
+    if (resultRefreshTimer != null) clearTimeout(resultRefreshTimer);
+    resultRefreshTimer = null;
     snapshot.value = null;
+    feedback.value = {};
+    feedbackFloor = 0;
+    itemAttempts.clear();
     events.value = [];
     historyPage.value = [];
     historyBefore.value = null;
@@ -203,6 +251,8 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
       if (!isCurrent(myGen, id)) return false;
       snapshot.value = snap;
       consumedSeq.value = snap.goal.last_seq;
+      feedbackFloor = snap.goal.last_seq;
+      for (const row of [snap.producer.current, ...snap.active_jobs, ...(snap.recent_jobs ?? [])]) if (row) itemAttempts.set(row.item_id, row.attempt);
       await readRecentEvents(snap.goal.last_seq, myGen, id);
       if (!isCurrent(myGen, id)) return false;
     } catch (e) {
@@ -307,6 +357,12 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
       if (syncError.value.startsWith('事件追平中断')) syncError.value = '';
       if (snap.goal.last_seq > consumedSeq.value) await catchUp();
       if (!isCurrent(gen, gid) || seq !== refreshSeq) return;
+      for (const row of [snap.producer.current, ...snap.active_jobs, ...(snap.recent_jobs ?? [])]) {
+        if (!row) continue;
+        itemAttempts.set(row.item_id, row.attempt);
+        const cue = feedback.value[row.item_id];
+        if (cue && (cue.attempt !== row.attempt || ['FAILED', 'BLOCKED', 'SKIPPED', 'NO_ISSUE', 'REVIEW_REJECTED'].includes(row.status))) delete feedback.value[row.item_id];
+      }
       if (snap.goal.monitoring_done && isTerminalStatus(snap.goal.status)
           && consumedSeq.value >= snap.goal.last_seq) {
         syncState.value = 'done';
@@ -345,6 +401,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
         );
         if (!isCurrent(gen, gid)) return;
         if (result.events.length) {
+          result.events.forEach(event => observeFeedbackEvent(event, false));
           events.value = mergeBatchEvents(events.value, result.events);
           if (historyBefore.value === null && events.value.length > 10) hasEarlier.value = true;
         }
@@ -377,6 +434,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     if (event.seq > consumedSeq.value + 1) {
       void catchUp(event.seq);
     } else {
+      observeFeedbackEvent(event);
       events.value = mergeBatchEvents(events.value, [event]);
       if (historyBefore.value === null && events.value.length > 10) hasEarlier.value = true;
       consumedSeq.value = event.seq;
@@ -640,7 +698,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
 
   registerViewerObservation('batch_goal', () => goalId.value ? { goal_id: goalId.value } : null);
   return {
-    goalId, snapshot, events, historyPage, availableGoals,
+    goalId, snapshot, feedback, claimFeedback, events, historyPage, availableGoals,
     syncState, syncError, loadError, controlError, controlBusy,
     loadingEarlier, hasEarlier, consumedSeq,
     follow, followNote, followError,

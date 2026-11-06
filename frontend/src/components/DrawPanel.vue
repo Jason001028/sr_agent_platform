@@ -7,9 +7,11 @@
  */
 import { computed } from 'vue';
 import { useViewerStore } from '../stores/viewer';
+import type { OwnedPoly } from '../lib/maskHistory';
 
 const store = useViewerStore();
 const roiCount = computed(() => store.getRois().length);
+const reviewCount = computed(() => store.getRois().filter(p => (p as OwnedPoly).autoDiff?.needs_review).length);
 
 /** 这次画的掩码落在哪张图上。**只在对比模式下显示** —— 单屏模式只有一个格子，
  *  「画在哪张」没有第二种答案。分屏里却真的会看错：两张图并排，人容易以为「画在我
@@ -62,12 +64,14 @@ const target = computed(() => {
       @click="store.mergeRois()"
     >合并重叠</button>
     <button type="button" @click="store.undoRoi()">撤销</button>
+    <button type="button" :disabled="!store.canRedoMask" @click="store.redoRoi()" title="重做上一批区域（Ctrl+Shift+Z）">重做</button>
     <button type="button" @click="store.clearRois()">清空</button>
     <button type="button" @click="store.exportMaskJson()">导出掩码JSON</button>
 
     <span class="sep"></span>
 
     <span v-if="roiCount" class="lbl">ROI {{ roiCount }} 个</span>
+    <span v-if="reviewCount" class="lbl" role="status" title="自动区域存在面积膨胀或孔洞填充，请逐个确认">{{ reviewCount }} 个待复核</span>
     <button type="button" @click="store.exitDraw()">完成</button>
   </div>
 </template>
@@ -79,6 +83,9 @@ const target = computed(() => {
   top: 12px;
   z-index: 15;
   display: inline-flex;
+  flex-wrap: wrap;
+  box-sizing: border-box;
+  max-width: calc(100% - 24px);
   align-items: center;
   gap: 6px;
   padding: 8px 10px;

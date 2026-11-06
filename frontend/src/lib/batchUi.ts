@@ -8,6 +8,38 @@ import type {
   BatchEvent, BatchProgressTrack, BatchSnapshot,
 } from './api.js';
 
+export type BatchFeedbackKind = 'mask' | 'receipt' | 'verified';
+export interface BatchFeedback {
+  key: string; goalId: string; itemId: string; attempt: number;
+  kind: BatchFeedbackKind; at: number; seq: number; jobId?: number;
+}
+export function feedbackMatches(cue: BatchFeedback | undefined, goalId: string, itemId: string, attempt: number, status: string): boolean {
+  if (!cue || cue.goalId !== goalId || cue.itemId !== itemId || cue.attempt !== attempt) return false;
+  if (cue.kind === 'mask') return status === 'MASK_READY';
+  if (cue.kind === 'verified') return status === 'SUCCEEDED';
+  return ['SUBMITTING', 'WAITING_SR', 'VERIFYING'].includes(status);
+}
+/** SVGs are inline: namespace classes, keyframes and fragment IDs per instance. */
+export function isolateFeedbackSvg(source: string, scope: string, animated: boolean): string {
+  const names = new Set<string>();
+  for (const match of source.matchAll(/class="([^"]+)"/g)) for (const name of match[1].split(/\s+/)) names.add(name);
+  for (const match of source.matchAll(/(?:id="|@keyframes\s+)([\w-]+)/g)) names.add(match[1]);
+  let svg = source;
+  for (const name of names) svg = svg.replace(new RegExp('(?<![\\w-])' + name + '(?![\\w-])', 'g'), scope + '-' + name);
+  svg = svg.replace(/\*\s*\{/g, 'svg[data-feedback-svg="' + scope + '"] *{');
+  svg = svg.replace('<svg ', '<svg data-feedback-svg="' + scope + '" ');
+  return animated ? svg : svg.replace(/animation:[^;}]+/g, 'animation:none!important').replace(/stroke-dashoffset="[^"]*"/g, 'stroke-dashoffset="0"');
+}
+export function feedbackKey(goal: string, item: string, attempt: number, kind: BatchFeedbackKind): string {
+  return JSON.stringify([goal, item, attempt, kind]);
+}
+export function feedbackEventKind(event: BatchEvent): BatchFeedbackKind | null {
+  if (event.event_type === 'sr_receipt_recorded' && typeof event.payload.job_id === 'number') return 'receipt';
+  if (event.event_type === 'mask_ready' || (event.event_type === 'item_state_changed' && event.payload.to === 'MASK_READY')) return 'mask';
+  if (event.event_type === 'item_verified' && event.payload.ok === true && event.payload.state !== 'NO_ISSUE') return 'verified';
+  return null;
+}
+
 export const BATCH_GEO_META = {
   contractVersion: 'batch_snapshot.v1',
 };
@@ -27,6 +59,8 @@ const GOAL_STATUS: Record<string, string> = {
 };
 
 const ITEM_STATUS: Record<string, string> = {
+  AWAITING_REVIEW: '待人工验收',
+  REVIEW_REJECTED: '验收驳回 · 待处理',
   PENDING: '待处理',
   OPENING: '打开影像',
   DETECTING: '检测中',
@@ -43,6 +77,7 @@ const ITEM_STATUS: Record<string, string> = {
 };
 
 const PHASE: Record<string, string> = {
+  waiting_quality_review: '等待人工质量验收',
   dispatching: '派发中',
   detecting: '检测中',
   submitting: '提交超分',
