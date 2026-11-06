@@ -15,7 +15,10 @@ const noData = computed(() => {
   <div v-if="diff.result" class="diff-color-legend" aria-label="差异强度色标" data-e2e="diff-legend">
     <div class="legend-title"><strong>{{ diff.result.method === 'ssim' ? '1−SSIM' : 'AbsDiff' }}</strong><span>差异强度</span></div>
     <div class="gradient" :style="{ background: HEAT_GRADIENT }"></div>
-    <div class="range"><span>0 · 低</span><span>1 · 高</span></div>
+    <div class="range"><span>0 · 低</span><span>{{ diff.toneWeight ? '1 · 高（已加权）' : '1 · 高' }}</span></div>
+    <div v-if="diff.toneWeight" class="tone-note" data-e2e="diff-legend-tone">
+      逐像素亮度归因 ×0.3–1.8；差异乘权重后超过 1 截断
+    </div>
     <div class="status"><i class="nodata"></i>{{ noData }}<i class="outside"></i>未分析</div>
   </div>
 </template>
@@ -29,4 +32,5 @@ const noData = computed(() => {
 .status{display:flex;align-items:center;flex-wrap:wrap;gap:4px;margin-top:3px;font-size:10px}
 .status i{width:8px;height:8px;display:inline-block;border:1px solid #ffffff35;border-radius:2px;flex:none}
 .nodata{background:#637180}.outside{background:#202c39;margin-left:6px}
+.tone-note{margin-top:2px;font-size:10px;line-height:14px;color:var(--ink-sub)}
 </style>

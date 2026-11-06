@@ -16,17 +16,19 @@ import { computed, markRaw, ref, shallowRef, watch } from 'vue';
 import { defineStore } from 'pinia';
 import { useViewerStore } from './viewer';
 import { loadSrConfig } from '../lib/scene.js';
-import { apiDiffAnalyze } from '../lib/api.js';
+import { apiDiffAnalyze, apiSceneSiblings } from '../lib/api.js';
 import {
   ANALYSIS_MAX_EDGE, DEFAULT_ADVANCED, commonGrid, sampleGray, jointRange,
   quantizeToRgba, gridPointToThumb, gridRectToThumb, gridCoverageToThumb, gridRectToSource,
 } from '../lib/diffLocate';
 import type {
-  DiffAdvanced, DiffDisplay, DiffFeather, DiffImageInput, DiffMethod, DiffRequest,
-  DiffResult, DiffScope, DiffSensitivity,
+  DiffAdvanced, DiffDisplay, DiffFeather, DiffImageInput, DiffMethod, DiffRegion,
+  DiffRequest, DiffResult, DiffScope, DiffSensitivity,
 } from '../lib/diffLocate';
-import { colorizeHeatPixels } from '../lib/diffRender';
-import { precisePairReason } from '../lib/compareCapabilities';
+import { regionTone, toneWeightMap } from '../lib/diffTone';
+import type { ToneGrid, ToneRect } from '../lib/diffTone';
+import { colorizeHeatBytes, colorizeHeatPixels } from '../lib/diffRender';
+import { analysisPairReason, analysisPairNote, precisePairReason } from '../lib/compareCapabilities';
 import { registerViewerObservation } from '../lib/viewerContext';
 import { visibleThumbRect } from '../lib/viewMath';
 import type { ViewerRec } from './viewer';
@@ -203,12 +205,37 @@ export interface DiffLayer {
   coverage: [number, number, number, number];
 }
 
+/** 解码后的差异强度（单通道）与有效位，逐像素加权重建热力图时用。 */
+interface HeatData {
+  diff: Uint8Array;
+  /** null = 全部有效（旧服务没有 validityMap）。 */
+  valid: Uint8Array | null;
+  w: number;
+  h: number;
+}
+
+/** 逐像素归因的输入：A/B 两侧同一网格的显示灰度。 */
+interface ToneSource {
+  a: ToneGrid;
+  b: ToneGrid;
+}
+
+/** 当前结果的逐像素权重图（norm 0..255），按需计算。 */
+interface ToneMapData {
+  bytes: Uint8Array;
+  w: number;
+  h: number;
+}
+
 interface Snapshot {
   result: DiffResult;
   heat: HTMLCanvasElement | null;
   mask: HTMLCanvasElement | null;
   maskSource: HTMLCanvasElement | null;
   paramsKey: string;
+  rawHeat: HeatData | null;
+  toneSource: ToneSource | null;
+  toneMap: ToneMapData | null;
 }
 
 export const useDiffStore = defineStore('diff', () => {
@@ -224,11 +251,15 @@ export const useDiffStore = defineStore('diff', () => {
   const notice = ref('');
   /** 请求序号：只有最后一次请求允许落结果，预览与精算共用。 */
   let requestSeq = 0;
+  /** 「延续到下一景」正在切景：抑制活动景 watcher 的 ensurePair，别覆盖刚按角色挑好的组合。 */
+  let continuing = false;
   const method = ref<DiffMethod>('absdiff');
   const sensitivity = ref<DiffSensitivity>('standard');
   const scope = ref<DiffScope>('common');
   const display = ref<DiffDisplay>('regions');
   const feather = ref<DiffFeather>('light');
+  /** 亮度归因权重：连续非线性先验，只影响候选排序与轮廓冷暖，不改差异数值。默认关闭。 */
+  const toneWeight = ref(false);
   const minAreaPx = ref(64);
   const advanced = ref<DiffAdvanced>({ ...DEFAULT_ADVANCED });
   const aId = ref<number | null>(null);
@@ -245,9 +276,27 @@ export const useDiffStore = defineStore('diff', () => {
   const hoveredId = ref<string | null>(null);
   const lastWarnings = ref<string[]>([]);
   const baseSnapshot = shallowRef<Snapshot | null>(null);
+  /** 当前结果的原始差异字节；热力图的着色/加权都从它重建，不重复解码 PNG。 */
+  const rawHeat = shallowRef<HeatData | null>(null);
+  /** 当前结果可用的灰度来源；逐像素权重在第一次需要时才计算。 */
+  const toneSource = shallowRef<ToneSource | null>(null);
+  const toneMap = shallowRef<ToneMapData | null>(null);
 
   const regions = computed(() => result.value?.regions ?? []);
-  const viewerRegions = computed(() => regions.value.slice(0, VIEWER_MARKER_MAX));
+  /** 复核排序分 = 强度 × 亮度归因权重；关闭归因时就是后端 rankScore。 */
+  function reviewScore(reg: DiffRegion): number {
+    const base = Number.isFinite(reg.rankScore)
+      ? reg.rankScore
+      : reg.meanDiff * Math.sqrt(Math.max(1, reg.areaPx));
+    return base * (toneWeight.value ? (reg.tone?.weight ?? 1) : 1);
+  }
+  /** 候选展示顺序：归因开启时按复核分降序，保持稳定排序（同分仍按原顺序）。 */
+  const orderedRegions = computed(() => {
+    const list = regions.value;
+    if (!toneWeight.value) return list;
+    return [...list].sort((a, b) => reviewScore(b) - reviewScore(a));
+  });
+  const viewerRegions = computed(() => orderedRegions.value.slice(0, VIEWER_MARKER_MAX));
   const selectedRegion = computed(() => regions.value.find((r) => r.id === selectedId.value) ?? null);
   const showHeat = computed(() => resultVisible.value && !!result.value && display.value !== 'regions');
   const showMask = computed(() => false); // 连续热力叠加不再混入二值掩码。
@@ -262,17 +311,150 @@ export const useDiffStore = defineStore('diff', () => {
     () => viewer.recs.find((r) => r.id === bId.value && !r.pending) ?? null,
   );
 
-  const pairOptions = computed<DiffPairOption[]>(() =>
-    viewer.recs
-      .filter((r) => !r.pending && !!r.thumb && !!r.src && r.W > 0 && r.H > 0)
+  /** 左侧列表按场景目录分组，差异定位的下拉用同一把键收口：只列当前场景的图。 */
+  function sceneKeyOf(r: { sceneDir?: string | null; lqPath?: string | null }): string {
+    return (r.sceneDir || r.lqPath || '').replace(/[/\\]+$/, '');
+  }
+  function activeSceneKey(): string {
+    return viewer.activeRec ? sceneKeyOf(viewer.activeRec) : '';
+  }
+  /** 当前场景里已打开的 Scene ID，交给后端做候选分类（不列目录）。 */
+  function openedSceneIds(): string[] {
+    const dir = activeSceneKey();
+    return [...new Set(viewer.recs
+      .filter((r) => !!r.sceneId && sceneKeyOf(r) === dir)
+      .map((r) => r.sceneId!))].slice(0, 32);
+  }
+
+  /* ---------------- 逐景延续 ---------------- */
+  /** 影像在场景里的角色。下一景据此把同一角色填回 A / B：
+   *  A=PAN、B=NOSR 的人换景后仍拿到 PAN / NOSR，不会反过来。 */
+  type DiffRole = 'pan' | 'pan_old' | 'nosr' | 'sr' | 'old' | 'ori' | 'input';
+
+  function roleOf(r: ViewerRec | null): DiffRole | null {
+    if (!r) return null;
+    if (r.stageKind === 'nosr') return 'nosr';
+    if (r.stageKind === 'product') {
+      return (r.stageLabel ?? '').toLowerCase() === 'old' ? 'old' : 'sr';
+    }
+    const n = r.name.toLowerCase();
+    if (n.includes('pan_old') || n.includes('pan-old')) return 'pan_old';
+    if (n.includes('nosr')) return 'nosr';
+    if (n.includes('pan')) return 'pan';
+    if (n.includes('ori') || n.includes('original')) return 'ori';
+    if (n.includes('_sr') || n.includes('sr_')) return 'sr';
+    return 'input';
+  }
+
+  interface SceneGroup { key: string; recs: ViewerRec[] }
+
+  /** 左侧列表按场景目录分组，顺序 = 首次出现的顺序。一键解析按清单行序入列，
+   *  所以这个顺序就是「下一景」的自然顺序；收藏置顶不参与（那是渲染顺序）。 */
+  function sceneGroups(): SceneGroup[] {
+    const groups: SceneGroup[] = [];
+    const byKey = new Map<string, SceneGroup>();
+    for (const r of viewer.recs) {
+      if (r.pending) continue;
+      const key = sceneKeyOf(r);
+      if (!key) continue;
+      let g = byKey.get(key);
+      if (!g) { g = { key, recs: [] }; byKey.set(key, g); groups.push(g); }
+      g.recs.push(r);
+    }
+    return groups;
+  }
+
+  /** 「下一景」= 当前活动景之后的第一组；不循环，末景没有下一景。 */
+  const nextSceneGroup = computed<SceneGroup | null>(() => {
+    const key = activeSceneKey();
+    if (!key) return null;
+    const groups = sceneGroups();
+    const i = groups.findIndex((g) => g.key === key);
+    return i >= 0 && i + 1 < groups.length ? groups[i + 1] : null;
+  });
+
+  /** 单图看热力结果、左侧还有下一景时，才提供「延续到下一景」。 */
+  const canContinueScene = computed(() =>
+    !!result.value && showHeat.value && !viewer.compareOn && !viewer.drawMode
+    && viewer.panes.length === 1 && !!nextSceneGroup.value,
+  );
+
+  function compatibleRecs(a: ViewerRec, b: ViewerRec): boolean {
+    return a.id !== b.id && !commonGrid(a.W, a.H, b.W, b.H).refusal;
+  }
+
+  /** 在下一景里按角色挑 A / B；角色缺位时只按兼容性补位，不把两张同角色的图硬配。 */
+  function pickRolePair(
+    group: SceneGroup, roleA: DiffRole, roleB: DiffRole,
+  ): { a: ViewerRec; b: ViewerRec } | null {
+    const pool = group.recs.filter((r) => !r.pending && r.W > 0 && r.H > 0);
+    if (pool.length < 2) return null;
+    const rank = (r: ViewerRec) => hintRank(r.name);
+    const byRole = (role: DiffRole, except?: ViewerRec | null) =>
+      pool.filter((r) => r !== except && roleOf(r) === role)
+        .sort((x, y) => rank(x) - rank(y));
+    const a = byRole(roleA)[0] ?? null;
+    const b = byRole(roleB, a)[0] ?? null;
+    if (a && b && compatibleRecs(a, b)) return { a, b };
+    // 保留能认出的那一侧，另一侧只在池子里找兼容的补位。
+    const keepB = b ?? byRole(roleB)[0] ?? null;
+    if (keepB) {
+      const partner = pool.filter((r) => r !== keepB)
+        .sort((x, y) => rank(x) - rank(y))
+        .find((r) => compatibleRecs(r, keepB));
+      if (partner) return { a: partner, b: keepB };
+    }
+    if (a) {
+      const partner = pool.filter((r) => r !== a)
+        .sort((x, y) => rank(x) - rank(y))
+        .find((r) => compatibleRecs(a, r));
+      if (partner) return { a, b: partner };
+    }
+    for (let i = 0; i < pool.length; i++) {
+      for (let j = i + 1; j < pool.length; j++) {
+        if (compatibleRecs(pool[i], pool[j])) return { a: pool[i], b: pool[j] };
+      }
+    }
+    return null;
+  }
+
+  let sceneEpoch = 0;
+  /** 拉取当前场景的候选并装成身份卡片（只建身份，不取像素）。
+   *
+   *  这样下拉里既有已打开的图，也有盘阵上存在、还没打开的同景图；选中未打开的
+   *  那张时按需取像素（见下面 aId/bId 的 watch 与 analyze）。取不到候选不是错误：
+   *  保留已打开的图，分析照常可用。 */
+  async function refreshSceneImages(): Promise<void> {
+    const sid = viewer.activeRec?.sceneId;
+    if (!sid) { sceneEpoch++; return; }
+    const epoch = ++sceneEpoch, dir = activeSceneKey();
+    try {
+      const res = await apiSceneSiblings(loadSrConfig(), sid, undefined, true, openedSceneIds());
+      if (epoch !== sceneEpoch || activeSceneKey() !== dir) return;
+      const seen = new Set<string>();
+      for (const item of [...(res.tourItems ?? []), ...res.items]) {
+        if (!item.id || seen.has(item.id)) continue;
+        seen.add(item.id);
+        viewer.ensureSceneImage(item, res);
+      }
+    } catch {
+      // 只读候选失败时保持现状；不弹错，不挡已打开影像之间的分析。
+    }
+  }
+
+  const pairOptions = computed<DiffPairOption[]>(() => {
+    const dir = activeSceneKey();
+    return viewer.recs
+      .filter((r) => !r.pending && r.W > 0 && r.H > 0 && sceneKeyOf(r) === dir
+        && ((!!r.thumb && !!r.src) || !!r.card))
       .map((r) => ({
         id: r.id,
         name: r.name,
         stage: r.stageLabel ?? '',
         width: r.W,
         height: r.H,
-      })),
-  );
+      }));
+  });
 
   /** 影像组合是否满足「同宽高比 + 尺寸已知」。 */
   function compatible(a: number | null, b: number | null): boolean {
@@ -311,8 +493,17 @@ export const useDiffStore = defineStore('diff', () => {
     return score;
   }
 
+  /** 自动配对只在**已取到像素**的图里挑：下拉里那些还没打开的同景图留给用户主动选，
+   *  不能因为打开面板或切景就替人下载一串预览。 */
+  function openOptions(): DiffPairOption[] {
+    return pairOptions.value.filter((o) => {
+      const r = viewer.recs.find((x) => x.id === o.id);
+      return !!r?.thumb && !!r?.src;
+    });
+  }
+
   function recommendedPair(): { a: number; b: number } | null {
-    const list = pairOptions.value;
+    const list = openOptions();
     if (list.length < 2) return null;
     const active = list.find((o) => o.id === viewer.activeRec?.id);
     if (active) {
@@ -350,9 +541,11 @@ export const useDiffStore = defineStore('diff', () => {
       bId.value = rec.b;
       return;
     }
-    const first = pairOptions.value[0];
+    const ready = openOptions();
+    const pool = ready.length ? ready : pairOptions.value;
+    const first = pool[0];
     aId.value = first?.id ?? null;
-    bId.value = pairOptions.value.find((o) => o.id !== first?.id)?.id ?? null;
+    bId.value = pool.find((o) => o.id !== first?.id)?.id ?? null;
   }
 
   function setPair(a: number | null, b: number | null): void {
@@ -364,6 +557,7 @@ export const useDiffStore = defineStore('diff', () => {
   function openPanel(): void {
     ensurePair();
     open.value = true;
+    void refreshSceneImages();
   }
 
   function closePanel(): void {
@@ -392,7 +586,9 @@ export const useDiffStore = defineStore('diff', () => {
     });
   }
   const stale = computed(() => !!result.value && resultKey.value !== currentKey());
-  const precisionReason = computed(() => precisePairReason(aRec.value, bRec.value));
+  const precisionReason = computed(() => analysisPairReason(aRec.value, bRec.value));
+  const alignmentNote = computed(() => analysisPairNote(aRec.value, bRec.value));
+  const flickerPairReason = computed(() => precisePairReason(aRec.value, bRec.value));
 
   /* ---------------- 分析范围 ---------------- */
   function visibleGridRect(planW: number, planH: number): GridRect {
@@ -419,6 +615,9 @@ export const useDiffStore = defineStore('diff', () => {
     heatLayer.value = null;
     maskLayer.value = null;
     rawMask.value = null;
+    rawHeat.value = null;
+    toneSource.value = null;
+    toneMap.value = null;
   }
 
   function rebuildMask(): void {
@@ -427,27 +626,96 @@ export const useDiffStore = defineStore('diff', () => {
   }
 
   interface DecodedLayers {
-    heat: HTMLCanvasElement;
+    raw: HeatData;
     rawMask: HTMLCanvasElement;
   }
 
-  /** 只解码与着色，不落任何 store 状态；由调用方复核身份后一次性安装。 */
+  /** 只解码，不落任何 store 状态；由调用方复核身份后一次性安装。
+   *  差异强度只留单通道字节，逐像素加权/关闭时都从这里重新着色。 */
   async function decodeLayers(res: DiffResult): Promise<DecodedLayers> {
     const [diffCanvas, maskCanvas, validCanvas] = await Promise.all([
       canvasFromPng(res.differenceMap),
       canvasFromPng(res.binaryMask),
       res.validityMap ? canvasFromPng(res.validityMap) : Promise.resolve(null),
     ]);
-    return {
-      heat: markRaw(colorizeHeat(diffCanvas, validCanvas)),
-      rawMask: markRaw(maskCanvas),
-    };
+    const w = diffCanvas.width;
+    const h = diffCanvas.height;
+    const diff = new Uint8Array(w * h);
+    const src = diffCanvas.getContext('2d')!.getImageData(0, 0, w, h).data;
+    for (let i = 0; i < diff.length; i++) diff[i] = src[i * 4];
+    let valid: Uint8Array | null = null;
+    if (validCanvas) {
+      valid = new Uint8Array(w * h);
+      const v = validCanvas.getContext('2d')!.getImageData(0, 0, w, h).data;
+      for (let i = 0; i < valid.length; i++) valid[i] = v[i * 4] ? 1 : 0;
+    }
+    return { raw: { diff, valid, w, h }, rawMask: markRaw(maskCanvas) };
   }
 
-  /** 结果发布与显示图层安装在同一处完成；羽化按**当前**档位重建。 */
+  /* ---------------- 逐像素归因权重（显示层） ---------------- */
+  /** 权重图与热力图网格不一致时双线性放大。原始 ROI 精算的灰度来自预览缩略图，
+   *  权重图比结果网格小，直接放大权重比在结果网格上重新估局部纹理更稳定。 */
+  function upsampleWeights(map: ToneMapData, w: number, h: number): Uint8Array {
+    if (map.w === w && map.h === h) return map.bytes;
+    const out = new Uint8Array(w * h);
+    const sx = map.w / w;
+    const sy = map.h / h;
+    for (let y = 0; y < h; y++) {
+      const fy = Math.max(0, Math.min(map.h - 1, (y + 0.5) * sy - 0.5));
+      const y0 = Math.floor(fy);
+      const y1 = Math.min(map.h - 1, y0 + 1);
+      const ty = fy - y0;
+      const row0 = y0 * map.w;
+      const row1 = y1 * map.w;
+      for (let x = 0; x < w; x++) {
+        const fx = Math.max(0, Math.min(map.w - 1, (x + 0.5) * sx - 0.5));
+        const x0 = Math.floor(fx);
+        const x1 = Math.min(map.w - 1, x0 + 1);
+        const tx = fx - x0;
+        const top = map.bytes[row0 + x0] * (1 - tx) + map.bytes[row0 + x1] * tx;
+        const bottom = map.bytes[row1 + x0] * (1 - tx) + map.bytes[row1 + x1] * tx;
+        out[y * w + x] = Math.round(top * (1 - ty) + bottom * ty);
+      }
+    }
+    return out;
+  }
+
+  /** 需要时才算权重图；算完缓存到当前结果，反复开关不重算。 */
+  function ensureToneMap(): ToneMapData | null {
+    if (toneMap.value) return toneMap.value;
+    const src = toneSource.value;
+    if (!src) return null;
+    const map = toneWeightMap(src.a, src.b);
+    if (!map) return null;
+    const data: ToneMapData = { bytes: map.norm, w: map.w, h: map.h };
+    toneMap.value = data;
+    return data;
+  }
+
+  /** 用原始差异 + 当前加权开关重建热力图画布。 */
+  function rebuildHeat(): void {
+    const raw = rawHeat.value;
+    if (!raw) { heatLayer.value = null; return; }
+    let weights: Uint8Array | null = null;
+    if (toneWeight.value) {
+      const map = ensureToneMap();
+      if (map) weights = upsampleWeights(map, raw.w, raw.h);
+    }
+    const rgba = colorizeHeatBytes(raw.diff, raw.w, raw.h, raw.valid, weights);
+    const out = document.createElement('canvas');
+    out.width = raw.w;
+    out.height = raw.h;
+    out.getContext('2d')!.putImageData(
+      new ImageData(rgba as Uint8ClampedArray<ArrayBuffer>, raw.w, raw.h), 0, 0);
+    heatLayer.value = markRaw(out);
+  }
+
+  /** 结果发布与显示图层安装在同一处完成；热力图按当前加权开关、
+   *  掩码按当前羽化档位重建。 */
   function installLayers(layers: DecodedLayers): void {
-    heatLayer.value = layers.heat;
+    rawHeat.value = layers.raw;
     rawMask.value = layers.rawMask;
+    rebuildHeat();
     rebuildMask();
   }
 
@@ -469,13 +737,159 @@ export const useDiffStore = defineStore('diff', () => {
     hoveredId.value = null;
   }
 
+  /* ---------------- 亮度归因（仅显示层） ---------------- */
+  /** 二值掩码画布 → 区域掩码（>127 属于某个区域），用于排除外接矩形里的背景。 */
+  function maskFromCanvas(canvas: HTMLCanvasElement | null): { data: Uint8Array; w: number; h: number } | null {
+    if (!canvas) return null;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    const { width: w, height: h } = canvas;
+    if (w < 1 || h < 1) return null;
+    const img = ctx.getImageData(0, 0, w, h).data;
+    const data = new Uint8Array(w * h);
+    for (let i = 0; i < data.length; i++) data[i] = img[i * 4] > 127 ? 255 : 0;
+    return { data, w, h };
+  }
+
+  /** 预览分析：区域坐标与裁剪后的分析网格一一对应，直接按掩码统计。 */
+  function attachPreviewTone(
+    res: DiffResult, a: ToneGrid, b: ToneGrid, maskCanvas: HTMLCanvasElement | null,
+  ): void {
+    const mask = maskFromCanvas(maskCanvas);
+    // 读不到掩码（画布实现缺像素、或掩码全黑）时退回外接矩形，别让归因整片缺失。
+    const usable = mask && mask.w === a.w && mask.h === a.h && mask.data.some((v) => v > 0)
+      ? mask : null;
+    for (const reg of res.regions) {
+      const rect: ToneRect = { x: reg.bbox[0], y: reg.bbox[1], w: reg.bbox[2], h: reg.bbox[3] };
+      const stats = regionTone(a, b, rect, rect,
+        usable ? { mask: usable.data, maskWidth: usable.w } : {});
+      if (stats) reg.tone = stats;
+    }
+  }
+
+  function thumbRectToBufferRect(
+    rect: [number, number, number, number], tw: number, th: number, bw: number, bh: number,
+  ): ToneRect {
+    const sx = bw / Math.max(1, tw);
+    const sy = bh / Math.max(1, th);
+    return {
+      x: rect[0] * sx, y: rect[1] * sy,
+      w: Math.max(1, rect[2] * sx), h: Math.max(1, rect[3] * sy),
+    };
+  }
+
+  /** 原始 ROI 精算：结果坐标在 ROI 里，换到预览缩略图再取两图各自的像素缓冲。 */
+  function attachThumbTone(res: DiffResult): void {
+    const a = viewer.recs.find((r) => r.id === res.imageA.id && !r.pending);
+    const b = viewer.recs.find((r) => r.id === res.imageB.id && !r.pending);
+    if (!a?.thumb || !b?.thumb) return;
+    const bufA = grayBuffer(a);
+    const bufB = grayBuffer(b);
+    if (!bufA || !bufB) return;
+    const gridA: ToneGrid = { gray: bufA.src, w: bufA.w, h: bufA.h };
+    const gridB: ToneGrid = { gray: bufB.src, w: bufB.w, h: bufB.h };
+    for (const reg of res.regions) {
+      const ta = gridRectToThumb(res, reg.bbox, a.thumb.width, a.thumb.height);
+      const tb = gridRectToThumb(res, reg.bbox, b.thumb.width, b.thumb.height);
+      const stats = regionTone(
+        gridA, gridB,
+        thumbRectToBufferRect(ta, a.thumb.width, a.thumb.height, bufA.w, bufA.h),
+        thumbRectToBufferRect(tb, b.thumb.width, b.thumb.height, bufB.w, bufB.h),
+      );
+      if (stats) reg.tone = stats;
+    }
+  }
+
+  /** 把裁剪后的 Float32 分析网格压成 0..255 字节，长期保存给逐像素归因用。
+   *  全有效的网格不存 valid，省一份内存。 */
+  function quantizeToneGrid(
+    g: { gray: Float32Array; valid: Uint8Array }, w: number, h: number,
+  ): ToneGrid {
+    const gray = new Uint8Array(w * h);
+    for (let i = 0; i < gray.length; i++) {
+      const v = g.gray[i];
+      gray[i] = Number.isFinite(v) ? Math.max(0, Math.min(255, Math.round(v))) : 0;
+    }
+    let all = true;
+    for (let i = 0; i < g.valid.length; i++) {
+      if (!g.valid[i]) { all = false; break; }
+    }
+    return { gray, valid: all ? undefined : new Uint8Array(g.valid), w, h };
+  }
+
+  function previewToneSource(
+    ca: { gray: Float32Array; valid: Uint8Array },
+    cb: { gray: Float32Array; valid: Uint8Array },
+    w: number, h: number,
+  ): ToneSource {
+    return { a: quantizeToneGrid(ca, w, h), b: quantizeToneGrid(cb, w, h) };
+  }
+
+  function sampleBuffer(
+    buf: { src: Float32Array; w: number; h: number }, fx: number, fy: number,
+  ): number {
+    const x = Math.max(0, Math.min(buf.w - 1, fx));
+    const y = Math.max(0, Math.min(buf.h - 1, fy));
+    const x0 = Math.floor(x);
+    const y0 = Math.floor(y);
+    const x1 = Math.min(buf.w - 1, x0 + 1);
+    const y1 = Math.min(buf.h - 1, y0 + 1);
+    const tx = x - x0;
+    const ty = y - y0;
+    const p00 = buf.src[y0 * buf.w + x0];
+    const p10 = buf.src[y0 * buf.w + x1];
+    const p01 = buf.src[y1 * buf.w + x0];
+    const p11 = buf.src[y1 * buf.w + x1];
+    return p00 * (1 - tx) * (1 - ty) + p10 * tx * (1 - ty)
+      + p01 * (1 - tx) * ty + p11 * tx * ty;
+  }
+
+  /** 原始 ROI 精算：前端拿不到源 TIFF，按归一化坐标把两张预览缩略图重采样到
+   *  一个共同的小网格（长边 ≤ 512），作为显示层归因的输入。
+   *
+   *  不直接用结果网格：源 ROI 的分辨率远高于预览，把缩略图放大到结果网格后
+   *  局部标准差会在块内塌成 0、块边骤升，权重反而失真。先在预览尺度算权重，
+   *  再由 `upsampleWeights` 平滑放大。 */
+  function refinedToneSource(res: DiffResult): ToneSource | null {
+    const a = viewer.recs.find((r) => r.id === res.imageA.id && !r.pending);
+    const b = viewer.recs.find((r) => r.id === res.imageB.id && !r.pending);
+    if (!a?.thumb || !b?.thumb) return null;
+    const bufA = grayBuffer(a);
+    const bufB = grayBuffer(b);
+    if (!bufA || !bufB) return null;
+    const grid = res.analysisGrid;
+    const ra = gridRectToThumb(res, [0, 0, grid.width, grid.height], a.thumb.width, a.thumb.height);
+    const rb = gridRectToThumb(res, [0, 0, grid.width, grid.height], b.thumb.width, b.thumb.height);
+    const ow = Math.max(16, Math.min(512, Math.round(Math.max(ra[2], rb[2]))));
+    const oh = Math.max(16, Math.min(512, Math.round(ow * (ra[3] / Math.max(1, ra[2])))));
+    const ga = new Uint8Array(ow * oh);
+    const gb = new Uint8Array(ow * oh);
+    for (let y = 0; y < oh; y++) {
+      const gy = ((y + 0.5) / oh) * grid.height;
+      for (let x = 0; x < ow; x++) {
+        const gx = ((x + 0.5) / ow) * grid.width;
+        const [ax, ay] = gridPointToThumb(res, gx, gy, bufA.w, bufA.h);
+        const [bx, by] = gridPointToThumb(res, gx, gy, bufB.w, bufB.h);
+        const va = sampleBuffer(bufA, ax - 0.5, ay - 0.5);
+        const vb = sampleBuffer(bufB, bx - 0.5, by - 0.5);
+        const i = y * ow + x;
+        ga[i] = Number.isFinite(va) ? Math.max(0, Math.min(255, Math.round(va))) : 0;
+        gb[i] = Number.isFinite(vb) ? Math.max(0, Math.min(255, Math.round(vb))) : 0;
+      }
+    }
+    return {
+      a: { gray: ga, w: ow, h: oh },
+      b: { gray: gb, w: ow, h: oh },
+    };
+  }
+
   /* ---------------- 开始分析 ---------------- */
   async function analyze(): Promise<boolean> {
     if (busy.value) return false;
     error.value = '';
     baseSnapshot.value = null;              // 新一轮预览结果不继承上一次的精算快照
-    const a = aRec.value;
-    const b = bRec.value;
+    let a = aRec.value;
+    let b = bRec.value;
     if (!a || !b) {
       error.value = '请选择两张已打开、像素就绪的影像';
       return false;
@@ -484,8 +898,28 @@ export const useDiffStore = defineStore('diff', () => {
       error.value = '两张影像不能是同一张';
       return false;
     }
-    if (precisionReason.value) { error.value = '精确差异定位不可用：' + precisionReason.value + '；仍可分屏预览'; return false; }
+    if (precisionReason.value) { error.value = '差异分析暂不可用：' + precisionReason.value; return false; }
     if (!a.src || !a.thumb || !b.src || !b.thumb) {
+      // 下拉里的同景图可能只建了身份卡（还没打开过）：按需取像素后再继续。
+      // 取图期间先占住 busy，避免连点分析并发取同一份预览。
+      busy.value = true;
+      try {
+        await Promise.all([viewer.ensureCardPixels(a.id), viewer.ensureCardPixels(b.id)]);
+      } finally {
+        busy.value = false;
+      }
+      a = aRec.value;
+      b = bRec.value;
+      if (!a || !b) {
+        error.value = '影像预览尚未就绪，请先在左侧打开这两张图';
+        return false;
+      }
+      if (!a.src || !a.thumb || !b.src || !b.thumb) {
+        error.value = '影像预览尚未就绪，请先在左侧打开这两张图';
+        return false;
+      }
+    }
+    if (!a || !b) {
       error.value = '影像预览尚未就绪，请先在左侧打开这两张图';
       return false;
     }
@@ -551,6 +985,7 @@ export const useDiffStore = defineStore('diff', () => {
         image_b: specB,
       };
       const res = await apiDiffAnalyze(loadSrConfig(), req);
+      if (alignmentNote.value) res.warnings = [...res.warnings, alignmentNote.value];
       // 请求期间改了配对/方法/灵敏度：这份结果属于旧配置，不能签成当前结果。
       if (seq !== requestSeq || key !== currentKey()) {
         if (seq === requestSeq) {
@@ -567,6 +1002,14 @@ export const useDiffStore = defineStore('diff', () => {
         }
         return false;
       }
+      // 归因统计始终附在结果上：开关默认关闭，但打开后要立即可用，不再重算。
+      attachPreviewTone(res,
+        { gray: ca.gray, valid: ca.valid, w: scopeRect.w, h: scopeRect.h },
+        { gray: cb.gray, valid: cb.valid, w: scopeRect.w, h: scopeRect.h },
+        layers.rawMask);
+      // 归因输入与结果一起落盘（压成字节）；逐像素权重等开关真正打开时再算。
+      toneSource.value = previewToneSource(ca, cb, scopeRect.w, scopeRect.h);
+      toneMap.value = null;
       applyResult(res, key, { w: plan.width, h: plan.height }, scopeRect);
       installLayers(layers);
       return true;
@@ -576,6 +1019,64 @@ export const useDiffStore = defineStore('diff', () => {
     } finally {
       busy.value = false;
     }
+  }
+
+  /* ---------------- 延续到下一景 ---------------- */
+  /** 下一景只打开了本体时，向服务端问一次同景候选，把缺的角色装成身份卡再重挑。 */
+  async function fillNextSceneRoles(
+    group: SceneGroup, roleA: DiffRole, roleB: DiffRole,
+  ): Promise<{ a: ViewerRec; b: ViewerRec } | null> {
+    const sid = group.recs.find((r) => !!r.sceneId)?.sceneId;
+    if (!sid) return null;
+    try {
+      const known = [...new Set(group.recs
+        .map((r) => r.sceneId)
+        .filter((v): v is string => !!v))].slice(0, 32);
+      const res = await apiSceneSiblings(loadSrConfig(), sid, undefined, true, known);
+      for (const item of [...(res.tourItems ?? []), ...res.items]) {
+        if (!item.id) continue;
+        viewer.ensureSceneImage(item, res);
+      }
+    } catch {
+      return null;
+    }
+    const next = sceneGroups().find((g) => g.key === group.key) ?? group;
+    return pickRolePair(next, roleA, roleB);
+  }
+
+  /** 单景看完热力结果后「延续到下一景」：沿用当前 A / B 的角色与全部显示参数，
+   *  切到左侧列表里的下一景并立即重新分析。
+   *
+   *  顺序是「先取下一景的候选卡 → 切景 → 落 A/B → 分析」：先进场景会让活动景
+   *  watcher 触发 ensurePair，把刚按角色挑好的组合换掉，所以切景期间置
+   *  `continuing` 抑制它。显示方式、不透明度、羽化、方法、灵敏度等本来就在
+   *  store 里，`analyze()` 原样沿用，不需要再写一遍。 */
+  async function continueToNextScene(): Promise<boolean> {
+    if (busy.value || continuing) return false;
+    continuing = true;
+    try {
+      const group = nextSceneGroup.value;
+      if (!group) { error.value = '左侧列表里没有下一景'; return false; }
+      const roleA = roleOf(aRec.value);
+      const roleB = roleOf(bRec.value);
+      if (!roleA || !roleB) { error.value = '请先完成当前景的差异分析'; return false; }
+      error.value = '';
+      notice.value = '';
+      let pair = pickRolePair(group, roleA, roleB);
+      if (!pair) pair = await fillNextSceneRoles(group, roleA, roleB);
+      if (!pair) {
+        error.value = '下一景缺少与当前 A / B 对应的影像（如 PAN / NOSR）';
+        return false;
+      }
+      const refusal = analysisPairReason(pair.a, pair.b);
+      if (refusal) { error.value = '下一景无法延续：' + refusal; return false; }
+      await viewer.activate(pair.a.id);
+      aId.value = pair.a.id;
+      bId.value = pair.b.id;
+    } finally {
+      continuing = false;
+    }
+    return analyze();
   }
 
   /* ---------------- 精算（原始 ROI，可选） ---------------- */
@@ -650,12 +1151,17 @@ export const useDiffStore = defineStore('diff', () => {
         }
         return false;
       }
+      attachThumbTone(refinedRes);
       if (!baseSnapshot.value) {
         baseSnapshot.value = {
           result: res, heat: heatLayer.value, mask: maskLayer.value,
           maskSource: rawMask.value, paramsKey: resultKey.value,
+          rawHeat: rawHeat.value, toneSource: toneSource.value, toneMap: toneMap.value,
         };
       }
+      // 精算结果的逐像素权重来自预览缩略图（见 refinedToneSource）。
+      toneSource.value = refinedToneSource(refinedRes);
+      toneMap.value = null;
       applyResult(refinedRes, key);
       installLayers(layers);
       return true;
@@ -674,12 +1180,16 @@ export const useDiffStore = defineStore('diff', () => {
     result.value = snap.result;
     resultKey.value = snap.paramsKey;
     lastWarnings.value = [...(snap.result.warnings ?? [])];
-    heatLayer.value = snap.heat ? markRaw(snap.heat) : null;
+    rawHeat.value = snap.rawHeat;
+    toneSource.value = snap.toneSource;
+    toneMap.value = snap.toneMap;
     rawMask.value = snap.maskSource ? markRaw(snap.maskSource) : null;
     maskLayer.value = snap.mask ? markRaw(snap.mask) : null;
     selectedId.value = null;
     hoveredId.value = null;
-    // 快照里的显示掩码可能对应旧羽化档位；按当前档位重建一次。
+    // 快照里的热力图/掩码可能对应旧的加权开关与羽化档位，按当前状态各重建一次。
+    rebuildHeat();
+    if (!heatLayer.value) heatLayer.value = snap.heat ? markRaw(snap.heat) : null;
     rebuildMask();
   }
 
@@ -830,7 +1340,33 @@ export const useDiffStore = defineStore('diff', () => {
   watch([resultVisible, opacity, display, heatLayer, maskLayer, result], () => { viewer.renderTick++; });
   /* 羽化只改显示 alpha：从精确二值掩码重建，不重算、不改区域统计。 */
   watch(feather, () => { rebuildMask(); viewer.renderTick++; });
+  /* 逐像素加权只改热力图着色：从原始差异字节重建，不改差异数值与候选资格。
+     第一次开启时才计算滑动窗口权重图，之后反复开关直接用缓存。 */
+  watch(toneWeight, () => {
+    if (!rawHeat.value) return;
+    rebuildHeat();
+    viewer.renderTick++;
+  });
   watch(result, () => { selectedRegionIds.value = []; }, {flush:'sync'});
+  /* 左侧换景 → 下拉收口到新场景并补候选；不在新场景里的已选组合由 ensurePair 换掉。
+     「延续到下一景」切景期间跳过：A/B 已按角色落好，ensurePair 只会把它换成推荐项。 */
+  watch(
+    () => [viewer.activeRec?.sceneId, viewer.activeRec?.sceneDir, viewer.activeRec?.lqPath],
+    () => {
+      if (!open.value || continuing) return;
+      ensurePair();
+      void refreshSceneImages();
+    },
+    { flush: 'sync' },
+  );
+  /* 选到还没取过像素的同景图：立即按需取图，分析 / 交替对比 / 并排预览到手即可用。 */
+  watch([aId, bId], () => {
+    for (const id of [aId.value, bId.value]) {
+      if (id == null) continue;
+      const r = viewer.recs.find((x) => x.id === id);
+      if (r && !r.thumb && !r.pending && r.card) void viewer.ensureCardPixels(id);
+    }
+  });
   registerViewerObservation('differences', () => {
     const res=result.value;
     if(!res)return null;
@@ -848,13 +1384,14 @@ export const useDiffStore = defineStore('diff', () => {
   return {
     // 面板
     open, resultVisible, opacity, openPanel, closePanel, busy, error, notice,
-    method, sensitivity, scope, display, feather, minAreaPx, advanced,
+    method, sensitivity, scope, display, feather, minAreaPx, advanced, toneWeight,
     aId, bId, aRec, bRec, pairOptions, compatible, setPair,
     recommendedPair, ensurePair, selectPairFromActive,
     // 分析
     analyze, stale, currentKey, resultKey,
+    canContinueScene, continueToNextScene,
     // 结果
-    result, regions, viewerRegions, selectedRegion, selectedId, hoveredId, precisionReason, selectedRegionIds, toggleRegionSelection,
+    result, regions, orderedRegions, viewerRegions, selectedRegion, selectedId, hoveredId, precisionReason, alignmentNote, flickerPairReason, selectedRegionIds, toggleRegionSelection,
     selectRegion, hoverRegion, locateRegion, addRegionToMask, openFlicker,
     clearResults, lastWarnings, refined, canRestore, refineRegion, restorePreview,
     // 显示层

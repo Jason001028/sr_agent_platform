@@ -14,6 +14,7 @@ import PreviewScaleControl from './PreviewScaleControl.vue';
 import AutoTourButton from './AutoTourButton.vue';
 import { useDiffStore } from '../stores/diff';
 import DiffLocateButton from './DiffLocateButton.vue';
+import DiffContinueButton from './DiffContinueButton.vue';
 import { isIntermediateStage } from '../lib/stage';
 import type { StretchMode } from '../lib/tifDecode';
 import AppIcon from './AppIcon.vue';
@@ -162,6 +163,7 @@ function onPick(e: Event) {
     <PreviewScaleControl :model-value="store.previewDiv" @update:model-value="store.setPreviewDiv" />
     <AutoTourButton />
     <DiffLocateButton />
+    <DiffContinueButton />
     <button v-if="diff.result" type="button" class="diff-visibility" data-e2e="diff-visibility"
       :aria-pressed="diff.resultVisible" :aria-label="diff.resultVisible ? '隐藏差异结果' : '显示差异结果'"
       :title="diff.resultVisible ? '隐藏差异结果，保留分析数据' : '恢复差异结果'"

@@ -7,6 +7,15 @@ describe('production sibling tour pairing',()=>{
  it('accepts explicitly registered proportional grids',()=>expect(tourPairRefusal(a,b)).toBeNull());
  it('accepts same-sequence proportional grids without GeoTIFF tags',()=>expect(tourPairRefusal({...a,registration:undefined},{...b,registration:undefined})).toBeNull());
  it('accepts a sibling when only one image has GeoTIFF tags',()=>expect(tourPairRefusal(a,{...b,registration:undefined})).toBeNull());
+ it('accepts PAN body and NOSR at a rounded non-integer resolution ratio',()=>{
+  // 生产实测 SC 本体/NOSR ≈ 1.96，重采样后尺寸取整；逐像素乘积不相等，
+  // 但宽高比一致，仍应视为同一地面。
+  const body={...a,width:30831,height:30948,registration:undefined};
+  const nosr={...b,width:15768,height:15823,registration:undefined};
+  expect(body.width*nosr.height).not.toBe(nosr.width*body.height);
+  expect(tourPairRefusal(body,nosr)).toBeNull();
+ });
+ it('still rejects aspect ratios beyond the tolerance',()=>expect(tourPairRefusal({...a,registration:undefined},{...b,width:15768,height:16000,registration:undefined})).toContain('比例'));
  it('still rejects different aspect ratios without GeoTIFF tags',()=>expect(tourPairRefusal({...a,registration:undefined},{...b,height:500,registration:undefined})).toContain('比例'));
  it('rejects different sequences',()=>expect(tourPairRefusal(a,{...b,sequence:'other'})).toBeTruthy());
  it('rejects shifted extents',()=>expect(tourPairRefusal(a,{...b,registration:{...b.registration!,extent:[1,0,101,50]}})).toBeTruthy());

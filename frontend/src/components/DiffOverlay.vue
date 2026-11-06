@@ -14,6 +14,8 @@ import { computed, onBeforeUnmount, onMounted } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import { useDiffStore } from '../stores/diff';
 import { gridPointToThumb } from '../lib/diffLocate';
+import { toneColor } from '../lib/diffTone';
+import type { RegionToneStats } from '../lib/diffTone';
 import { thumbToScreen } from '../lib/viewMath';
 
 const emit = defineEmits<{ wheel: [event: WheelEvent] }>();
@@ -29,6 +31,7 @@ interface Marker {
   mean: number;
   max: number;
   relative: number;
+  tone: RegionToneStats | null;
 }
 
 interface PaneView {
@@ -36,6 +39,7 @@ interface PaneView {
   rect: { x: number; y: number; w: number; h: number };
   markers: Marker[];
   contour: string;
+  contourStyle: { stroke: string; fill: string; strokeWidth: number } | null;
   selected: Marker | null;
 }
 
@@ -47,7 +51,10 @@ const panes = computed<PaneView[]>(() => {
   return viewer.panes.map((p) => {
     const rec = p.rec;
     if (!rec?.thumb || diff.recSide(rec.id) === null) {
-      return { side: p.side, rect: p.rect, markers: [], contour: '', selected: null };
+      return {
+        side: p.side, rect: p.rect, markers: [], contour: '',
+        contourStyle: null, selected: null,
+      };
     }
     const tw = rec.thumb.width;
     const th = rec.thumb.height;
@@ -59,10 +66,12 @@ const panes = computed<PaneView[]>(() => {
       markers.push({
         id: reg.id, rank: reg.rank, x: sx, y: sy,
         area: reg.areaPx, mean: reg.meanDiff, max: reg.maxDiff, relative: reg.relativeArea,
+        tone: diff.toneWeight ? (reg.tone ?? null) : null,
       });
     }
     const sel = diff.selectedRegion;
     let contour = '';
+    let contourStyle: PaneView['contourStyle'] = null;
     let selected: Marker | null = null;
     if (sel) {
       contour = sel.contour.map(([x, y]) => {
@@ -75,9 +84,14 @@ const panes = computed<PaneView[]>(() => {
       selected = {
         id: sel.id, rank: sel.rank, x: sx, y: sy,
         area: sel.areaPx, mean: sel.meanDiff, max: sel.maxDiff, relative: sel.relativeArea,
+        tone: diff.toneWeight ? (sel.tone ?? null) : null,
       };
+      if (sel.tone && diff.toneWeight) {
+        const c = toneColor(sel.tone.norm);
+        contourStyle = { stroke: c.stroke, fill: c.fill, strokeWidth: c.width };
+      }
     }
-    return { side: p.side, rect: p.rect, markers, contour, selected };
+    return { side: p.side, rect: p.rect, markers, contour, contourStyle, selected };
   }).filter((p) => p.markers.length || p.contour);
 });
 
@@ -103,6 +117,17 @@ function flicker(event: MouseEvent) {
 
 function fmtArea(n: number): string {
   return n.toLocaleString('en-US');
+}
+function markerStyle(m: Marker): Record<string, string> {
+  const style: Record<string, string> = { left: m.x + 'px', top: m.y + 'px' };
+  if (m.tone) style.opacity = (0.6 + 0.4 * m.tone.norm).toFixed(3);
+  return style;
+}
+function pct(v: number): string {
+  return Math.round(v * 100) + '%';
+}
+function deltaText(d: number): string {
+  return (d >= 0 ? '+' : '') + Math.round(d);
 }
 
 function popoverLeft(m: Marker, w: number): number {
@@ -137,7 +162,7 @@ onBeforeUnmount(() => window.removeEventListener('pointerdown', outside));
     >
       <svg class="diff-geometry" width="100%" height="100%" aria-hidden="true">
       <polygon v-if="p.contour" class="diff-contour-halo" :points="p.contour" />
-      <polygon v-if="p.contour" class="diff-contour" :points="p.contour" />
+      <polygon v-if="p.contour" class="diff-contour" :points="p.contour" :style="p.contourStyle ?? undefined" />
     </svg>
     <button
       v-for="m in p.markers"
@@ -145,7 +170,7 @@ onBeforeUnmount(() => window.removeEventListener('pointerdown', outside));
       type="button"
       class="diff-marker diff-interactive"
       :class="{ hot: diff.hoveredId === m.id, on: diff.selectedId === m.id }"
-      :style="{ left: m.x + 'px', top: m.y + 'px' }"
+      :style="markerStyle(m)"
       :aria-label="'差异候选 ' + m.rank + '，面积 ' + m.area + ' 像素'"
       :aria-pressed="diff.selectedId === m.id"
       :title="'#' + String(m.rank).padStart(2, '0') + ' · 面积 ' + fmtArea(m.area) + ' px²'"
@@ -173,6 +198,11 @@ onBeforeUnmount(() => window.removeEventListener('pointerdown', outside));
       </header>
       <p>面积 {{ fmtArea(p.selected.area) }} px² · 相对面积 {{ (p.selected.relative * 100).toFixed(3) }}%</p>
       <p>平均差异 {{ p.selected.mean.toFixed(3) }} · 最大 {{ p.selected.max.toFixed(3) }}</p>
+      <p v-if="p.selected.tone">
+        灰 {{ Math.round(p.selected.tone.meanA) }} · 中间调 {{ pct(p.selected.tone.mid) }} ·
+        平坦 {{ pct(p.selected.tone.flat) }} · 变化 {{ deltaText(p.selected.tone.delta) }} ·
+        复核 ×{{ p.selected.tone.weight.toFixed(2) }}
+      </p>
       <footer>
         <button type="button" @click="addMask(p.selected.id, $event)">加入掩码</button>
         <button type="button" @click="flicker($event)">交替对比</button>

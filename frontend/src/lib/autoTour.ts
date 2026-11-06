@@ -54,3 +54,6 @@ export function travelFraction(elapsed:number, distance:number, speed:number) {
   return {fraction: distance?Math.min(1,d/distance):1, duration};
 }
 export const TOUR_SPEEDS = { slow:50, normal:75, fast:100, ultra:150 };
+/** 交替对比里的连续推进速度（px/s）；`teleport` 不走这里，直接在停点之间跳转。 */
+export const TOUR_COMPARE_SPEEDS = { slow:40, normal:60, fast:80, ultra:120 };
+export type TourSpeed = keyof typeof TOUR_SPEEDS | 'teleport';

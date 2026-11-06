@@ -10,14 +10,16 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
  try{
  const page=await browser.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));let images={},fetches=0,insufficient=true,oldQueries=0;
  const evidence={sequence:'synthetic-sequence',width:24000,height:16000,registration:{reference:'geotiff:EPSG:32650:PixelIsArea',crs:'EPSG:32650',extent:[0,0,24000,16000],orientation:[1,0,0,-1]}};
- const items=[['a','PAN.tif','pan',24000,16000],['b','PAN_NOSR.tif','nosr',12000,8000],['c','PAN_ori.tif','ori',24000,16000],['d','PAN_old.tif','old',24000,16000]].map(([id,name,role,width,height])=>({id,name,kind:role==='pan'?'input':role==='nosr'?'nosr':'product',exists:true,W:width,H:height,srcRev:id,sizeBytes:1,mtime:1,rel:name,hasPreview:true,previewDiv:4,jpgUrl:`/synthetic/${id}.png`,tourIdentity:{...evidence,role,width,height,sourceRevision:id}}));
+ // NOSR 用 1.96 倍的非整数网格（生产实测）：逐像素乘积不相等，但宽高比一致，
+ // 自动巡览必须仍能把它和 PAN 本体排成一对。预览仍按 1/2 缩放，便于断言视口换算。
+ const items=[['a','PAN.tif','pan',24000,16000],['b','PAN_NOSR.tif','nosr',12245,8163],['c','PAN_ori.tif','ori',24000,16000],['d','PAN_old.tif','old',24000,16000]].map(([id,name,role,width,height])=>({id,name,kind:role==='pan'?'input':role==='nosr'?'nosr':'product',exists:true,W:width,H:height,srcRev:id,sizeBytes:1,mtime:1,rel:name,hasPreview:true,previewDiv:4,jpgUrl:`/synthetic/${id}.png`,tourIdentity:{...evidence,role,width,height,sourceRevision:id}}));
  await page.setRequestInterception(true);
  page.on('request',r=>{const u=new URL(r.url());
   if(u.pathname.startsWith('/synthetic/')){fetches++;return r.respond({status:200,contentType:'image/png',body:images[u.pathname.split('/').pop()[0]]});}
   if(!u.pathname.startsWith('/api/'))return r.continue();
   if(r.method()!=='GET')return r.respond({status:403,body:'Synthetic tests forbid mutations'});
   const old=u.searchParams.get('suffix')==='old';if(old)oldQueries++;
-  const body=u.pathname.endsWith('/siblings')?JSON.stringify({sceneId:'a',lqPath:'/synthetic/sequence',items:old?[items[3]]:[],suffix:old?'old':null,suffixFrom:old?'query':null,productCandidates:old?['PAN_old.tif']:[],nosrCandidates:[],tourItems:items.map(i=>insufficient?{...i,tourIdentity:{...i.tourIdentity,registration:undefined}}:i)}):u.pathname.endsWith('/queue')?'{}':'{}';
+  const body=u.pathname.endsWith('/siblings')?JSON.stringify({sceneId:'a',lqPath:'/synthetic/sequence',items:old?[items[3]]:[],suffix:old?'old':null,suffixFrom:old?'query':null,productCandidates:old?['PAN_old.tif']:[],nosrCandidates:[],tourItems:items.map(i=>insufficient?{...i,tourIdentity:{...i.tourIdentity,registration:undefined}}:i)}):u.pathname.endsWith('/queue')?'{"tasks":[]}':'{}';
   return r.respond({status:200,contentType:u.pathname.endsWith('/events')?'text/event-stream':'application/json',body:u.pathname.endsWith('/events')?'':body});
  });
  await page.setViewport({width:1600,height:900});await page.goto(`http://127.0.0.1:${server.address().port}/viewer`);await page.waitForFunction(()=>!!window.__viewer);

@@ -27,7 +27,6 @@ import DiffCandidatesPanel from './DiffCandidatesPanel.vue';
 
 const viewer = useViewerStore();
 const diff = useDiffStore();
-const sourcesOpen = ref(false);
 const inspectOpen = ref(false);
 const queue = useQueueStore();
 
@@ -159,16 +158,18 @@ function fmtTime(ts: number): string {
 
 <template>
   <div class="rt">
-    <!-- 点选清单（仅对比模式）：在《待修复清单》**上方** —— 两者都是「一列可以点的图/条目」，
-         但点选清单是本次对比的临时成员，位置在待办之上才符合「先选图、再对着清单干活」。 -->
+    <!-- 置顶、不折叠：质检 TXT 是这块标签页的主入口，每次都要看，折起来只会多一次点击。
+         「智能修复」开关也在这一块里（见 QcListPanel 的 .qc-go-row）。 -->
+    <QcListPanel />
+
+    <!-- 点选清单（仅对比模式）：都是「一列可以点的图/条目」，点选清单是本次对比的
+         临时成员，放在质检清单之后、差异候选之前。 -->
     <details v-if="viewer.compareOn" class="tool-group" open><summary>对比工具 · 点选清单</summary><CompareListPanel /></details>
 
     <!-- 差异候选：与点选清单相邻 —— 同样是「一列可点的区域」，但来自只读分析，
          点「加入掩码」才写进人工掩码。 -->
     <details class="tool-group" :open="!!diff.result"><summary>差异定位 · 差异候选</summary><DiffCandidatesPanel /></details>
 
-    <!-- 置顶：待修复清单（质检 .txt 的导入 / 标记 / 写回） -->
-    <details class="tool-group" @toggle="sourcesOpen = ($event.target as HTMLDetailsElement).open"><summary>数据来源 · 质检 TXT</summary><QcListPanel v-if="sourcesOpen" /></details>
     <details class="tool-group" :open="inspectOpen" @toggle="inspectOpen = ($event.target as HTMLDetailsElement).open"><summary>影像工具 · ROI、云量与场景任务</summary>
     <template v-if="inspectOpen">
 

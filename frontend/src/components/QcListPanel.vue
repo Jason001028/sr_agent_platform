@@ -23,6 +23,7 @@ import { useQueueStore } from '../stores/queue';
 import { QC_STAGES, QC_FINALS, QC_STATUS_LABEL, isTerminal } from '../lib/qclist';
 import type { QcIssue, QcStatus } from '../lib/qclist';
 import { BAKE_STAGE_LABEL, sceneNameCandidates } from '../lib/qcbatch';
+import { batchDockOpen, openBatchSelection } from '../lib/batchDock';
 
 const viewer = useViewerStore();
 const qc = useQcListStore();
@@ -230,17 +231,28 @@ watch(
 
     <!-- 一键解析：单占一行，不挤进 .qc-h（那一行 400px 里已有标题/计数/换一份/未完成/✕，
          再塞一颗要抢戏的橘色按钮，标题会被压成省略号）。
+         「智能修复」排在它左边：先决定怎么修，再决定解析哪批；点开/收起上方任务中枢。
          **不做二次确认弹窗**：清空只清视图、盘上什么都没动，卡片重跑一遍就回来了。 -->
-    <div v-if="qc.loaded" class="qc-go-row">
+    <div class="qc-go-row">
       <button
         type="button"
-        class="qc-go"
-        :class="qc.bakeState"
-        :disabled="qc.bakeState === 'stopping'"
-        :title="GO_TITLE"
-        @click="onBake"
-      >{{ qc.bakeHead }}</button>
-      <span class="qc-go-txt">{{ qc.bakeLine }}</span>
+        class="qc-smart"
+        :class="{ on: batchDockOpen }"
+        :aria-pressed="batchDockOpen"
+        title="选择生产序列并开始批量智能修复"
+        @click="openBatchSelection"
+      >智能修复</button>
+      <template v-if="qc.loaded">
+        <button
+          type="button"
+          class="qc-go"
+          :class="qc.bakeState"
+          :disabled="qc.bakeState === 'stopping'"
+          :title="GO_TITLE"
+          @click="onBake"
+        >{{ qc.bakeHead }}</button>
+        <span class="qc-go-txt">{{ qc.bakeLine }}</span>
+      </template>
     </div>
 
     <p v-if="!qc.loaded" class="qc-empty">
@@ -421,6 +433,29 @@ watch(
 /* 一键解析：醒目橘色，用 --notice-job 那族令牌（**刻意非主题色** —— 主题的青绿已经被
    .file-item.active 与「盘阵」芯片占用，再借它就没有「这是一颗特别的按钮」的意思了）。 */
 .qc-go-row { display: flex; align-items: center; gap: 6px; margin: 0 0 6px; }
+/* 「智能修复」：任务中枢的开关。蓝底取设计令牌 --cmp-a（调色板里唯一的浅蓝族，
+   与列表里的环节标签同源），与隔壁橘色的「一键解析」靠色相分开；两颗按钮的
+   字号/字重与白字保持一致，阴影同为三层。 */
+.qc-smart {
+  flex: none;
+  height: 24px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  color: #fff;
+  background: var(--cmp-a);
+  border: 1px solid var(--cmp-a);
+  border-radius: var(--r-ctrl);
+  cursor: pointer;
+  box-shadow:
+    0 1px 2px rgba(63, 109, 168, 0.22),
+    0 3px 7px rgba(63, 109, 168, 0.18),
+    0 8px 16px rgba(63, 109, 168, 0.12);
+  transition: filter var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard);
+}
+.qc-smart:hover { filter: brightness(1.08); }
+.qc-smart.on { background: color-mix(in srgb, var(--cmp-a) 84%, #000); border-color: color-mix(in srgb, var(--cmp-a) 84%, #000); }
 .qc-go {
   flex: none;
   height: 24px;
@@ -433,7 +468,10 @@ watch(
   border: 1px solid var(--notice-job-ink);
   border-radius: var(--r-ctrl);
   cursor: pointer;
-  box-shadow: 0 2px 5px rgba(194, 116, 58, 0.28);
+  box-shadow:
+    0 1px 2px rgba(194, 116, 58, 0.24),
+    0 3px 7px rgba(194, 116, 58, 0.20),
+    0 8px 16px rgba(194, 116, 58, 0.12);
   transition: filter var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard);
 }
 .qc-go:hover:not(:disabled) { filter: brightness(1.06); }

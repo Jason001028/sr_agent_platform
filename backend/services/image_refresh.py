@@ -6,7 +6,7 @@ from pathlib import Path
 
 from backend.pathguard import ensure_allowed
 from backend.services.goal_worker import sr_contract
-from backend.services.preview_jpg import source_revision
+from backend.services.preview_jpg import source_revision, probe_tiff
 
 
 def discover(task, root):
@@ -26,14 +26,17 @@ def discover(task, root):
     if source.parent.resolve() != Path(dataroot).resolve():
         return {**base, "state": "unavailable", "note": "成果目录与作业不符"}
     row = _manual_row(source, source.parent, root)
+    dimensions = probe_tiff(source)
+    row["W"], row["H"] = dimensions["W"], dimensions["H"]
     revision = source_revision(source)
     if not revision or row.get("srcRev") != revision:
         return base
     from backend.api.paths import scene_id
     aliases = [row["id"]] + ([scene_id(row["rel"])] if row.get("rel") else [])
+    ready = bool(row.get("hasPreview") and row.get("previewDiv") and row.get("W") and row.get("H"))
     kind = "input" if params.get("repair") else "product"
-    return {**base, "state": "ready" if row.get("hasPreview") and row.get("previewDiv") else "preparing",
-            "note": "新预览就绪" if row.get("hasPreview") else "成果准备中",
+    return {**base, "state": "ready" if ready else "preparing",
+            "note": "新预览就绪" if ready else "成果准备中",
             "version": row["id"] + "|" + revision, "row": row, "aliases": aliases,
             "group": source.parent.as_posix(), "kind": kind,
             "source": source.as_posix(), "finished_at": task.get("finished_at") or task.get("updated_at")}

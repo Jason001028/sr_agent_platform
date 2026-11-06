@@ -1,5 +1,7 @@
 # 请求预算与 Thinking 控制（2026-10-28）
 
+> 2026-11-06 更新：普通 Chat 已改为分阶段进展超时（首段 180s / 停滞 60s / 总上限 600s）；下文原单次墙钟上限属于历史实现，Goal deadline 约束仍保留。详见 [model-progress-timeout.md](model-progress-timeout.md)。
+
 ## 源码审计与基线
 
 本地工作树为依据，未覆盖原有未提交修改，未提交 Git。

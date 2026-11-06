@@ -8,6 +8,8 @@
 
 Skill 加载与外部工具调用接口见 [skill_interface.md](planning/skill_interface.md)。
 
+普通聊天的首段 / 停滞 / 总响应时限与批次移交输入压缩见 [model-progress-timeout.md](status/model-progress-timeout.md)。
+
 工具实际暴露条件、描述契约与审计验收见 [tool_description_audit.md](status/tool_description_audit.md)。
 
 Agent 中文交互、执行概览与自动会话标题见 [agent-interaction-titles.md](status/agent-interaction-titles.md)。
@@ -539,6 +541,7 @@ sr_agent_platform/
 | 文档 | 内容 |
 |---|---|
 | [api-contract.md](planning/api-contract.md) | 平台 REST / SSE 契约：端点、参数、错误码、帧类型。截图、trajectory、机器与插件端点以代码和对应 planning 文档为准 |
+| [mask-auto-draw.md](planning/mask-auto-draw.md) | 差异热力图「自动绘制」外接多边形：算法对比、边距与顶点上限、后端接口与动效方案（草稿，未实现） |
 | [1023.md](planning/1023.md) | Harness P0 与 Batch v2 统一计划：当前状态、PR A–F、M0–M4、异步执行与验收边界 |
 | [gui-requirements.md](planning/gui-requirements.md) | Agent 与 GUI 平台的中长期需求与阶段目标 |
 | [frontend-migration.md](planning/frontend-migration.md) | tif-viewer 迁移到 Vue 3 的范围、阶段与验收 |

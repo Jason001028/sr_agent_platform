@@ -13,7 +13,7 @@ Viewer 四种画布背景、设置持久化、分屏层级和合成影像验收�
 
 影像焕新 Image Refresh 的统一成果发现、镭射未读卡片、版本缓存、已读持久化与浏览器验收见 [image-refresh.md](image-refresh.md)。单景和批量共用队列链路，不自动切图；内网真实成果验收待核。
 
-Viewer 底部隐藏式「上一景 / 下一景」视野历史导航、手势合并、缓存恢复和巡览互斥见 [view_history_navigation.md](view_history_navigation.md)。
+Viewer 底部隐藏式「上一视点 / 下一视点」视野历史导航、手势合并、缓存恢复和巡览互斥见 [view_history_navigation.md](view_history_navigation.md)。
 
 配置文件路径速查见 [config_locations.md](config_locations.md)，包含本地仓库、node81-135 已确认的 systemd drop-in、llama.cpp、nginx、Python 环境和 SR 参数位置。
 
@@ -21,6 +21,8 @@ Viewer 底部隐藏式「上一景 / 下一景」视野历史导航、手势合�
 [pan_repair_contract.md](../sr_code/pan_repair_contract.md)。REST 与 Agent 提交均使用修复适配层；真实 GDAL/GPU 验收待核。
 
 ---
+
+普通聊天不再以 60 秒截断持续输出：首段有效输出 180 秒、输出停滞 60 秒、单次响应总上限 600 秒；“交给 Agent 整理”去重重复依据并保留全清单，详见 [model-progress-timeout.md](model-progress-timeout.md)。Goal 轮次预算不延长，部署需更新后端并重启 API。
 
 普通聊天 SSE 的执行所有权、断线行为、异常用量与诊断边界见 [sse_execution_ownership.md](sse_execution_ownership.md)。Goal 进程级验收尚有未关闭失败，详见该文档。
 

@@ -139,9 +139,11 @@ function sendJson(res, body, code = 200) {
     if (u === '/api/goals/batch-imports') {
       let body = ''; req.on('data', chunk => body += chunk); req.on('end', () => {
         const input = JSON.parse(body);
-        assert.equal(input.strategy, 'review');
+        assert.equal(input.strategy, 'automatic');
+        assert.equal(input.mode, 'production');
+        assert.ok(input.sources.every(row => row.path.endsWith('/PAN.tif')));
         sendJson(res, { manifest_ref: 'frozen-mock', rejected: false,
-          counts: { items: 2, errors: 0, warnings: 0 }, diagnostics: [],
+          counts: { items: input.sources.length, errors: 0, warnings: 0 }, diagnostics: [],
           items: [1, 2].map(n => ({ item_id: 'candidate-' + n, ordinal: n, name: 'selected-scene-' + n, scene_ref: '/mock/scene-' + n, source_lines: [n] })) });
       }); return;
     }
@@ -235,10 +237,13 @@ function sendJson(res, body, code = 200) {
     await page.waitForSelector('.stage');
 
     // A. URL 指定批次 → 快照加载后出现「批次」Tab。
-    await page.waitForSelector('[data-e2e=batch-task-dock]');
-    assert.equal(await page.$$eval('.ctx-tabs .ctx-tab', es => es.length), 2);
+    // 任务中枢默认收起，由质检清单的「智能修复」按钮展开。
     await page.click('.ctx-tab');
-    await page.click('#batch-tab-monitor');
+    await page.click('.qc-smart');
+    await page.waitForSelector('[data-e2e=batch-task-dock]', { visible: true });
+    assert.equal(await page.$$eval('.ctx-tabs .ctx-tab', es => es.length), 2);
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent('batch-task-open')));
+    await page.click('.task-body > details > summary');
     await page.waitForSelector('[data-e2e=batch-panel]');
     await page.waitForSelector('[data-e2e=batch-status]');
     const summaryTop = await page.$eval('[data-e2e=batch-task-dock]', e => e.getBoundingClientRect().top);
@@ -250,7 +255,8 @@ function sendJson(res, body, code = 200) {
     const overview = await page.$eval('[data-e2e=batch-status]', (e) => e.textContent);
     assert.match(overview, /50 景修复批次/);
     assert.match(overview, /DEMO \/ MOCK/);
-    assert.match(overview, /g50/);
+    assert.match(overview, /已完成 10/);
+    assert.match(overview, /检测中 3 · SR 执行中 6 · 验收中 1/);
 
     const tracks = await page.$eval('[data-e2e=batch-tracks]', (e) => e.textContent);
     assert.match(tracks, /检测[\s\S]*40 \/ 50/);
@@ -295,8 +301,7 @@ function sendJson(res, body, code = 200) {
     assert.equal(pauseCalls, 2);
 
     // E. 报告：受控入口 + 摘要 + 按需展开的原始 JSON。
-    await page.click('#batch-tab-report');
-    assert.equal(await page.$('[data-e2e=batch-panel]'), null);
+    await page.waitForSelector('[data-e2e=batch-result]');
     assert.equal(await page.$$eval('[data-e2e=batch-result] .attention article', es => es.length), 3);
     await page.click('[data-e2e=batch-report]');
     await page.waitForSelector('.notice-modal .nm-title');
@@ -309,7 +314,6 @@ function sendJson(res, body, code = 200) {
     await page.waitForSelector('.notice-modal', { hidden: true });
 
     // F. 跟随默认关闭；用户视图操作立即退出。
-    await page.click('#batch-tab-monitor');
     await page.waitForSelector('[data-e2e=batch-follow]');
     await page.click('.bp-settings > summary');
     const followBefore = await page.$eval('[data-e2e=batch-follow]', (e) => e.checked);
@@ -326,60 +330,73 @@ function sendJson(res, body, code = 200) {
       "document.querySelector('[data-e2e=batch-follow]').checked === false");
     assert.match(await page.$eval('[data-e2e=batch-panel]', (e) => e.textContent), /退出跟随/);
 
-    // G. Scope freezing and explicit review authorization precede Goal creation.
-    await page.click('.task-detail nav button');
-    await page.click('[data-e2e=batch-draft] .advanced > summary');
-    await page.type('[data-e2e=batch-draft] textarea', 'explicit fake QC selection');
-    await page.click('#batch-tab-report');
-    assert.equal(await page.$('[data-e2e=batch-draft]'), null);
-    await page.click('#batch-tab-draft');
-    assert.equal(await page.$eval('[data-e2e=batch-draft] textarea', e => e.value), 'explicit fake QC selection');
-    await page.select('[data-e2e=batch-draft] label select', 'review');
-    await page.evaluate(() => [...document.querySelectorAll('[data-e2e=batch-draft] button')].find(b => b.textContent.includes('核验并创建')).click());
-    await page.waitForSelector('.frozen');
+    // G. Existing entry shows numbered groups, including unopened canonical bodies.
+    await page.evaluate(() => {
+      const viewer = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('viewer');
+      for (const [name, kind] of [['scene-a', 'nosr'], ['scene-a', 'product'], ['scene-b', 'nosr']]) {
+        viewer.insertSceneCard({ name: name + '-' + kind, W: 128, H: 128, sceneId: name + kind,
+          sceneDir: '/mock/' + name, lqPath: null, stageKind: kind }, { id: name + kind, name,
+          size_bytes: 0, W: 128, H: 128, lq_path: null, hasPreview: false });
+      }
+    });
+    await page.click('.qc-smart');
+    await page.waitForFunction(() => document.querySelector('[data-e2e=batch-draft] .primary')?.textContent.includes('已选 2 组'));
     assert.equal(createCalls, 0);
-    const createDisabled = await page.$eval('.frozen button', e => e.disabled);
-    assert.equal(createDisabled, true);
-    await page.click('.frozen input[type=checkbox]');
-    await page.click('.frozen button');
-    await page.waitForFunction(() => document.querySelector('.task-detail nav button:nth-child(2)').classList.contains('on'));
+    assert.equal(await page.$$eval('.sequence-row', rows => rows.length), 2);
+    const labels = await page.$$eval('.sequence-row .ordinal', rows => rows.map(r => r.textContent));
+    const viewerLabels = await page.$$eval('.ord', rows => [...new Set(rows.map(r => r.textContent.trim().padStart(2, '0')))]);
+    assert.deepEqual(labels, viewerLabels);
+    assert.equal(await page.$eval('[data-e2e=batch-draft]', e => e.textContent.includes('/mock/')), false);
+    assert.equal(await page.$('[data-e2e=batch-draft] textarea'), null);
+    await page.click('.selection button:last-child');
+    assert.equal(await page.$eval('[data-e2e=batch-draft] .primary', e => e.disabled), true);
+    await page.click('.selection button:first-of-type');
+    const compactRows = await page.$$eval('.sequence-row', rows => rows.map(row => ({ height: row.getBoundingClientRect().height,
+      badge: row.querySelector('.state').textContent, count: row.querySelector('.count') })));
+    assert.ok(compactRows.every(row => row.height <= 42 && row.badge === '可修复' && row.count === null));
+    await page.screenshot({ path: path.join(__dirname, 'artifacts/batch-sequences-draft.png') });
+    // Production clients use HTTP: reproduce an origin without randomUUID.
+    await page.evaluate(() => Object.defineProperty(crypto, 'randomUUID', { value: undefined, configurable: true }));
+    await page.click('[data-e2e=batch-draft] .primary');
+    await page.waitForSelector('[data-e2e=batch-status]');
+    assert.equal(await page.$('[data-e2e=batch-draft]'), null);
     assert.equal(createCalls, 1);
     // Explicitly switching tabs preserves store association and snapshot.
     await page.click('.ctx-tab:nth-child(2)');
     await page.click('.ctx-tab:first-child');
     assert.match(await page.$eval('[data-e2e=batch-task-dock]', e => e.textContent), /50 景/);
     await page.reload();
+    await page.waitForSelector('.qc-smart');
+    await page.click('.qc-smart');
     await page.waitForSelector('[data-e2e=batch-task-expand]');
     assert.equal(await page.$eval('[data-e2e=batch-task-expand]', e => e.getAttribute('aria-expanded')), 'true');
-    assert.match(await page.$eval('[data-e2e=batch-task-dock]', e => e.textContent), /40 \/ 50/);
+    assert.equal(await page.$eval('[data-e2e=batch-draft] .primary', e => e.disabled), true);
     assert.equal(await page.$$eval('.ctx-tabs .ctx-tab', es => es.length), 2);
-    await page.click('#batch-tab-report');
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent('batch-task-open')));
+    await page.click('.task-body > details > summary');
+    await page.waitForSelector('[data-e2e=batch-result] button');
     await page.evaluate(() => [...document.querySelectorAll('[data-e2e=batch-result] button')].find(b => b.textContent.includes('交给 Agent')).click());
     await page.waitForFunction(() => document.querySelector('.ctx-tab:nth-child(2)').classList.contains('on'));
     assert.match(await page.$eval('.at-input', e => e.value), /g50/);
     assert.equal(await page.$eval('.at-input', e => e.disabled), false);
     await page.click('.ctx-tab:first-child');
-    await page.$eval('#batch-tab-monitor', e => e.click());
-    await page.waitForSelector('[data-e2e=batch-tracks]');
     await page.setViewport({ width: 1024, height: 720, deviceScaleFactor: 1 });
     const layout = await page.$eval('.ctx-rail', e => ({ width: e.getBoundingClientRect().width, overflow: e.scrollWidth > e.clientWidth }));
     assert.equal(layout.width, 400);
     assert.equal(layout.overflow, false);
-    await page.screenshot({ path: path.join(__dirname, 'artifacts/batch-quiet-monitor.png') });
-    await page.click('#batch-tab-draft');
+    await page.screenshot({ path: path.join(__dirname, 'artifacts/batch-sequences-monitor.png') });
+    await page.click('.qc-smart');
     await page.waitForSelector('[data-e2e=batch-draft]', { visible: true });
-    assert.equal(await page.$eval('[data-e2e=batch-draft] .advanced', e => e.open), false);
-    assert.equal(await page.$$eval('[data-e2e=batch-draft] .key-rows article', es => es.length), 0);
-    await page.screenshot({ path: path.join(__dirname, 'artifacts/batch-quiet-draft.png') });
+    assert.equal(await page.$eval('[data-e2e=batch-draft] .primary', e => e.disabled), true);
+    await page.screenshot({ path: path.join(__dirname, 'artifacts/batch-sequences-empty.png') });
     reportAvailable = false;
     await page.evaluate(() => document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('batchGoal').refreshSnapshot());
-    await page.click('#batch-tab-report');
-    await page.waitForSelector('[data-e2e=batch-result] .empty');
-    assert.equal(await page.$eval('[data-e2e=batch-result]', e => e.textContent.trim()), '报告尚未生成。');
-    assert.equal(await page.$('[data-e2e=batch-result] button'), null);
-    await page.screenshot({ path: path.join(__dirname, 'artifacts/batch-quiet-empty.png') });
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent('batch-task-open')));
+    await page.click('.task-body > details > summary');
+    await page.waitForSelector('[data-e2e=batch-panel]');
+    assert.equal(await page.$('[data-e2e=batch-result]'), null);
     assert.deepEqual(errors, []);
-    console.log('Batch Panel browser checks passed: two tabs, fixed summary, frozen draft authorization, refresh recovery, 50-scene snapshot tracks/current/queue, collapsed event timeline with raw payload, control 409 then success notice, controlled report modal, follow exits on user intent');
+    console.log('Batch Panel browser checks passed: two tabs, fixed summary, numbered sequence selection and single-click frozen submission, refresh recovery, 50-scene snapshot tracks/current/queue, collapsed event timeline with raw payload, control 409 then success notice, controlled report modal, follow exits on user intent');
   } finally {
     for (const res of openStreams) {
       try { res.destroy(); } catch { /* already closed */ }

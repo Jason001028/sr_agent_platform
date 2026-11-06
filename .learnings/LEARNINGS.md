@@ -64,6 +64,12 @@ Category: correction. Bounded observation queues must not carry the only final f
 ## 2026-10-30 correction: shared scene list thumbnail
 User confirms one existing scene _thumb.jpg may represent NOSR, PAN and ORI list cards. Preserve separate stage identities and detailed pixel sources. SR products were not included in this clarification.
 
+## 2026-11-06 correction: compact batch rows and HTTP-safe start identity
+
+The batch sequence selector should match QcListPanel's compact bordered rows (4px/7px padding, 3px gaps), with a single-line name and bottom-right rounded status badge. The user explicitly rejected large rows and redundant PAN scene counts. Retain anomaly explanations in accessible labels/tooltips.
+
+Do not call crypto.randomUUID() in the intranet HTTP deployment. Reuse the existing spatialId() implementation for non-secret request identities, preserve the same frozen manifest/request_key on retry, and test actual start/selectGoal with randomUUID absent (also with crypto absent). Secure localhost browser tests alone did not cover this deployment constraint.
+
 ## 2026-11-05 correction: production tour registration evidence
 
 The initial tour implementation assumed GeoTIFF tags were available on SR production outputs. `SR_code/util.py::writeTiff` creates TIFFs and writes pixels without setting a geotransform or projection. Scene identity, registration evidence and candidate eligibility must be reported separately. Display rejected candidates with reasons; never silently turn a registration refusal into an empty selector or infer verified alignment from same-directory names. Keep old and ori as distinct roles. Existing loaded Scene IDs may supply bounded candidates, but not substitute for registration proof.

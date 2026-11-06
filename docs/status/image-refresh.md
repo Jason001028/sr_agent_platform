@@ -18,3 +18,12 @@
 - 浏览器截图：`.e2e/artifacts/image-refresh-unread.png`、`.e2e/artifacts/image-refresh-read.png`。
 
 内网待核：单景与批量真实作业完成后，现有预览生产链生成匹配源版本的 JPEG，再由本功能发现；验证几十景同时完成、跨页面恢复以及实际 PAN/NOSR 同名覆盖行为。
+
+
+### 2026-11-06 补充验证
+
+成果查询显式补齐输出 TIFF 头中的 W/H（`_manual_row` 本身不填尺寸），避免预览已就绪却无法在客户端登记。加载成功后卡片改用当前显示像素的缩略图，不再优先沿用旧的公共浏览缩略图。
+
+追加 `node .e2e/test-image-refresh-lifecycle.js` 合成 JPEG + 共享队列 SSE 浏览器闭环：准备态无徽标、就绪两张未读、只播放一张、点击后 Camera/ROI 保持、同名新源版本重新未读、刷新后的版本已读恢复以及 reduced-motion 静态素材；不触发常规 TIFF 预览生成。新版截图位于 `.e2e/artifacts/image-refresh/unread.png`。
+
+本轮验证：前端全量 813 passed，typecheck/build 通过；Image Refresh + Image Diff + Batch Snapshot 后端 54 passed；原 Image Refresh、增补 lifecycle 与差异可视化三个 Mock 浏览器脚本均通过。保留既有 vendor sourcemap 与 chunk 体积提示。

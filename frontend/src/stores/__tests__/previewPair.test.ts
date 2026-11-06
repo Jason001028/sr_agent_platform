@@ -19,6 +19,18 @@ it('opens unrelated image grids and pans/zooms independently without enabling pr
  expect(v.panes[0].view.scale).toBeCloseTo(left.scale*1.2);
  expect(v.selectTourPair(1,2)).toBe(false);expect(v.openComparePair(1,2)).toBe(false);
 });
+it('accepts a PAN body / NOSR pair even when rounded preview sizes differ by a pixel', () => {
+ const v=useViewerStore(); v.setCanvasSize(800,600);
+ const mk=(id:number,w:number,h:number,role:'pan'|'nosr')=>{
+  const thumb=document.createElement('canvas');thumb.width=Math.round(w/4);thumb.height=Math.round(h/4);
+  return {id,name:role==='pan'?'PAN.tif':'scene_NOSR.tif',W:w,H:h,srcRev:'v1',sceneDir:'/scenes/s1',
+   stageKind:role==='pan'?'input':'nosr',thumb:markRaw(thumb),maskRois:[],
+   tourIdentity:{id,sequence:'s1',role,width:w,height:h,sourceRevision:'v1'}} as unknown as ViewerRec;
+ };
+ // 生产实测 SC 本体/NOSR ≈ 1.96；预览各自取整后宽高比仍一致。
+ v.recs.push(mk(1,30831,30948,'pan'),mk(2,15768,15823,'nosr'));v.activeId=1;
+ expect(v.selectTourPair(1,2)).toBe(true);
+});
 it('requires current source revisions and accepts strict evidence in either order', () => {
  const a={id:1,srcRev:'v1',tourIdentity:{id:1,sequence:'s',role:'pan' as const,width:100,height:100,sourceRevision:'v1'}};
  const b={id:2,srcRev:'v2',tourIdentity:{id:2,sequence:'s',role:'nosr' as const,width:200,height:200,sourceRevision:'v2'}};

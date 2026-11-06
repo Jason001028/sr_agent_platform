@@ -22,6 +22,14 @@ const entry = ref<HTMLElement | null>(null);
 
 const autoThreshold = computed(() =>
   DIFF_THRESHOLD_PRESETS[diff.method][diff.sensitivity]);
+/** 下拉收口说明：跟着左侧选中的影像，只列同一场景的图。 */
+const sceneNote = computed(() => {
+  const rec = viewer.activeRec;
+  if (!rec || (!rec.sceneDir && !rec.lqPath)) return '';
+  const group = rec.sceneDir ? viewer.sceneOrdinalOf(rec) : 0;
+  return `影像 A / B 只列左侧当前场景${group ? `（影像组 ${group}）` : ''}的图；`
+    + '未打开的同景图也可直接选择，分析时自动载入。';
+});
 const thresholdText = computed({
   get: () => diff.advanced.threshold == null ? '' : String(diff.advanced.threshold),
   set: (v: string) => {
@@ -137,9 +145,10 @@ onBeforeUnmount(() => {
               </select>
             </label>
           </div>
+          <p v-if="sceneNote" class="diff-note">{{ sceneNote }}</p>
           <div class="pair-actions">
             <button type="button" :disabled="diff.busy" @click="diff.selectPairFromActive(); diff.ensurePair()">用当前图作 A</button>
-            <button type="button" :disabled="diff.busy || !diff.aRec || !diff.bRec || !!diff.precisionReason" @click="diff.openFlicker()">精确交替</button>
+            <button type="button" :disabled="diff.busy || !diff.aRec || !diff.bRec || !!diff.flickerPairReason" :title="diff.flickerPairReason || '同景影像按比例交替查看'" @click="diff.openFlicker()">交替对比</button>
             <button type="button" :disabled="diff.busy || !diff.aRec || !diff.bRec || diff.aId===diff.bId" @click="viewer.openPreviewPair(diff.aId!,diff.bId!)">并排预览</button>
           </div>
 
@@ -210,6 +219,20 @@ onBeforeUnmount(() => {
           <DiffColorLegend v-if="diff.result && diff.display !== 'regions'" class="panel-legend" />
         </section>
 
+        <section class="diff-section" aria-label="候选复核">
+          <div class="diff-section-title">候选复核</div>
+          <label class="diff-toggle">
+            <span>亮度归因权重（非线性）</span>
+            <input v-model="diff.toneWeight" class="diff-switch" type="checkbox" role="switch"
+              aria-label="亮度归因权重" data-e2e="diff-tone-weight" />
+          </label>
+          <p class="diff-note">
+            开启后按原始灰度带、提亮方向与平坦度逐像素连续调权：热力图强度乘以局部权重
+            （滑动窗口随分析网格自适应），候选同时按复核权重重排、轮廓由冷到暖。
+            只影响显示与排序，不改差异数值、面积和掩码资格；灰度取显示层，不是原始 DN。
+          </p>
+        </section>
+
         <details class="diff-advanced">
           <summary>高级设置</summary>
           <div class="diff-grid">
@@ -259,7 +282,8 @@ onBeforeUnmount(() => {
         </details>
 
         <p v-if="diff.notice" class="diff-notice" role="status">{{ diff.notice }}</p>
-        <p v-if="diff.precisionReason" role="status">精确分析暂不可用：{{ diff.precisionReason }}；可继续并排预览。</p>
+        <p v-if="diff.precisionReason" role="status">差异分析暂不可用：{{ diff.precisionReason }}；可继续并排预览。</p>
+        <p v-else-if="diff.alignmentNote" class="diff-note" role="status">{{ diff.alignmentNote }}</p>
         <p v-if="diff.error" class="diff-error" role="alert">{{ diff.error }}</p>
         <p v-else-if="diff.stale" class="diff-notice" role="status">
           参数已修改，当前仍显示上一次结果；重新分析后生效。

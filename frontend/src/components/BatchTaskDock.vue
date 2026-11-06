@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue';
+import { useImageRefreshStore } from '../stores/imageRefresh';
 import { useBatchGoalStore } from '../stores/batchGoal';
 import { useChatStore } from '../stores/chat';
 import { goalStatusLabel, phaseLabel, trackText } from '../lib/batchUi';
+import { batchDockOpen, openBatchDock } from '../lib/batchDock';
 import RoiToolsTab from './RoiToolsTab.vue';
 import BatchProgressPanel from './BatchProgressPanel.vue';
 import BatchRepairDraft from './BatchRepairDraft.vue';
@@ -12,8 +14,10 @@ import AppIcon from './AppIcon.vue';
 const batch = useBatchGoalStore();
 const chat = useChatStore();
 const expanded = ref(true);
-const section = ref<'draft' | 'monitor' | 'report'>(batch.goalId ? 'monitor' : 'draft');
-const sections = [{ id: 'draft', label: '待修复' }, { id: 'monitor', label: '执行监控' }, { id: 'report', label: '结果报告' }] as const;
+const section = ref<'draft' | 'monitor'>(batch.goalId ? 'monitor' : 'draft');
+const detailsOpen = ref(false);
+const dock = ref<HTMLElement | null>(null);
+const refresh = useImageRefreshStore();
 const completedAnimation = ref(false);
 const seenCompletions = new Set<string>();
 watch(() => batch.snapshot?.goal, (goal, previous) => {
@@ -22,10 +26,15 @@ watch(() => batch.snapshot?.goal, (goal, previous) => {
   if (!goal || goal.status !== 'COMPLETED') return;
   if (!seenCompletions.has(goal.goal_id) && previous?.goal_id === goal.goal_id && previous.status !== 'COMPLETED') completedAnimation.value = true;
   seenCompletions.add(goal.goal_id);
+  void refresh.scan(true);
 });
 const snap = computed(() => batch.snapshot);
 const disconnected = computed(() => ['error', 'reconnecting'].includes(batch.syncState));
-function open(event?: Event) { expanded.value = true; section.value = (event as CustomEvent)?.detail?.section === 'draft' ? 'draft' : batch.goalId ? 'monitor' : 'draft'; }
+async function open(event?: Event) {
+  openBatchDock(); expanded.value = true; detailsOpen.value = false;
+  section.value = (event as CustomEvent)?.detail?.section === 'draft' ? 'draft' : batch.goalId ? 'monitor' : 'draft';
+  await nextTick(); dock.value?.scrollIntoView({ block: 'nearest' }); dock.value?.focus({ preventScroll: true });
+}
 onMounted(() => window.addEventListener('batch-task-open', open));
 onBeforeUnmount(() => window.removeEventListener('batch-task-open', open));
 // Association lives above the collapsible detail, so both tabs keep synchronization alive.
@@ -37,31 +46,34 @@ watch(() => chat.sessionId, sid => { void batch.associate(sid); });
 </script>
 
 <template>
-  <section class="task-summary" data-e2e="batch-task-dock">
+  <section ref="dock" tabindex="-1" v-show="batchDockOpen" class="task-summary" data-e2e="batch-task-dock">
     <div class="summary-heading">
       <strong><AppIcon name="workflow" :size="16" /> 批量智能修复</strong>
       <button data-e2e="batch-task-expand" :aria-expanded="expanded" @click="expanded = !expanded">{{ expanded ? '收起 ⌃' : '展开 ⌄' }}</button>
     </div>
-    <div v-if="snap" class="persistent-status" data-e2e="batch-status" role="status">
+    <div v-if="snap && section !== 'draft'" class="persistent-status" data-e2e="batch-status" role="status">
       <div class="summary-track"><span class="state"><span v-if="snap.goal.status === 'COMPLETED'" class="completion" :class="{ animate: completedAnimation }">✓ </span>{{ goalStatusLabel(snap.goal.status) }}<template v-if="snap.goal.phase && snap.goal.status !== 'PAUSED'"> · {{ phaseLabel(snap.goal.phase) }}</template></span><small v-if="snap.goal.mode === 'demo'">DEMO / MOCK</small></div>
       <div class="summary-title" :title="snap.goal.title">{{ snap.goal.title }} · {{ snap.counts.total }} 景</div>
-      <div class="batch-id" :title="snap.goal.goal_id">{{ snap.goal.goal_id }}</div>
+      <p>已完成 {{ snap.counts.verified }} · 失败 {{ snap.counts.failed }} · 跳过 {{ snap.counts.excluded + snap.counts.skipped_runtime + snap.counts.capacity_skipped }} · 无需修复 {{ snap.counts.no_issue }}</p>
       <div class="summary-track progress-summary"><span>检测 {{ trackText(snap.progress.detection) }}</span><span>提交 {{ trackText(snap.progress.submission) }}</span><span>验收 {{ trackText(snap.progress.verification) }}</span></div>
+      <p>检测中 {{ snap.counts.detecting }} · SR 执行中 {{ snap.counts.in_flight_sr }} · 验收中 {{ snap.counts.verifying }}</p>
       <p v-if="snap.goal.status === 'PAUSED'">Goal 已暂停派发 · 外部 SR 不会因此停止（在途 {{ snap.counts.in_flight_sr }}）</p>
-      <p v-if="snap.counts.failed || snap.counts.blocked" class="issue">失败 {{ snap.counts.failed }} · 受阻 {{ snap.counts.blocked }}</p>
+      <p v-if="snap.goal.status === 'COMPLETED'">批次已完成，左侧符合条件的影像将显示更新提醒。</p>
+      <p v-if="snap.counts.blocked" class="issue">受阻 {{ snap.counts.blocked }} · 异常信息见详情</p>
     </div>
     <p v-else-if="batch.syncState === 'loading'">正在读取批次…</p>
     <p v-if="disconnected" role="status">连接中断，数据可能滞后</p>
     <p v-if="batch.loadError" role="alert">{{ batch.loadError }}</p>
   </section>
   <div class="tools-scroll">
-    <section v-show="expanded" class="task-detail">
-      <nav aria-label="批量修复详情" role="tablist" :style="{ '--tab-index': sections.findIndex(s => s.id === section) }">
-        <button v-for="s in sections" :id="`batch-tab-${s.id}`" :key="s.id" role="tab" :aria-selected="section === s.id" :aria-controls="`batch-view-${s.id}`" :class="{ on: section === s.id }" @click="section = s.id">{{ s.label }}</button>
-      </nav>
-      <div v-show="section === 'draft'" id="batch-view-draft" role="tabpanel" aria-labelledby="batch-tab-draft"><KeepAlive><BatchRepairDraft v-if="section === 'draft'" @created="section = 'monitor'" /></KeepAlive></div>
-      <div v-if="section === 'monitor'" id="batch-view-monitor" role="tabpanel" aria-labelledby="batch-tab-monitor"><BatchProgressPanel /></div>
-      <div v-if="section === 'report'" id="batch-view-report" role="tabpanel" aria-labelledby="batch-tab-report"><BatchResultReport /></div>
+    <section v-show="batchDockOpen && expanded" class="task-detail">
+      <div class="task-body">
+        <BatchRepairDraft v-if="batchDockOpen && section === 'draft'" @created="section = 'monitor'" />
+        <details v-else-if="section === 'monitor'" @toggle="detailsOpen = ($event.target as HTMLDetailsElement).open">
+          <summary>查看详情</summary>
+          <template v-if="detailsOpen"><BatchProgressPanel /><BatchResultReport v-if="snap?.report.available" /></template>
+        </details>
+      </div>
     </section>
     <RoiToolsTab />
   </div>
@@ -82,6 +94,9 @@ small { font-size: 10px; color: var(--warn); }
 .task-summary .issue { color: #9b5145; }
 .tools-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; }
 .task-detail { border-bottom: 1px solid var(--line); }
+/* 选择列表内部滚动，主操作常驻底部；逐景监控和报告只在详情内展开。 */
+.task-body { max-height: 440px; overflow-y: auto; overflow-x: hidden; }
+.task-body > details > summary { cursor: pointer; padding: 12px; font-size: 12px; color: var(--accent-deep); }
 nav { display: flex; gap: 4px; padding: 8px 10px 0; }
 nav button { flex: 1; }
 nav .on { background: var(--accent-soft); }
@@ -94,7 +109,7 @@ nav .on { background: var(--accent-soft); }
 .batch-id { color: var(--ink-faint); font: 10px var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 8px; }
 .progress-summary { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 4px; font-size: 10px; }
 .summary-heading button { min-height: 32px; background: white; border-radius: 6px; }
-.state { color: #6484BA; }
+.state { color: #245B50; }
 .task-detail { background: white; margin-bottom: 14px; }
 nav { position: relative; padding: 0; gap: 0; margin: 0 12px; border-bottom: 1px solid var(--line); }
 nav button { min-width: 0; height: 36px; border: 0; border-radius: 0; background: transparent; color: var(--ink-sub); padding: 0 2px; }
