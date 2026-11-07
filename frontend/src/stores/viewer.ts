@@ -357,7 +357,7 @@ export const useViewerStore = defineStore('viewer', () => {
    *  Batch 自动跟随监听它：变化即退出跟随。程序化跟随打开不带这个序号。 */
   const userIntentSeq = ref(0);
   /** 当前要绘制的 Batch 检测叠加层（来自「批次」面板或 URL 初始值）。 */
-  const batchOverlayTarget = ref<{ goalId: string; itemId: string } | null>(null);
+  const batchOverlayTarget = ref<{ goalId: string; itemId: string; overlayReady?: boolean } | null>(null);
   /** 用户明确关掉叠加层时，URL 里的初始目标也不能复活它。 */
   const batchOverlayOff = ref(false);
   function noteUserIntent(): void {

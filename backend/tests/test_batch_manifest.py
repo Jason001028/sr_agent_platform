@@ -48,8 +48,9 @@ class BatchManifestTest(unittest.TestCase):
         stem = BASE.format(scene=index)
         directory = self.root / (stem + "_PAN")
         directory.mkdir()
+        # 空 <SolarAzimuth> = RC 场景，本体是 PAN.tif（与下面两份夹具一致）。
         (directory / (directory.name + "_meta.xml")).write_text(
-            "<meta><SolarAzimuth>1</SolarAzimuth></meta>", encoding="utf-8")
+            "<meta><SolarAzimuth/></meta>", encoding="utf-8")
         Image.new("I;16", (16, 16), 7).save(directory / "PAN.tif")
         Image.new("I;16", (8, 8), 7).save(
             directory / (directory.name + "_NOSR.tif"))
@@ -107,6 +108,28 @@ class BatchManifestTest(unittest.TestCase):
             self.import_text("", sources="not an array")
         with self.assertRaises(batch_manifest.ManifestError):
             self.import_text("", strategy={})
+
+    def test_scene_body_follows_rc_sc_switch_not_a_stale_pan(self):
+        """SC 场景的本体是 <目录名>.tif；混合目录里的 PAN.tif 只是遗留件。
+
+        批次以前把目标钉死成 PAN.tif，于是 SC 场景拿遗留的 PAN.tif 去和
+        <目录名>_NOSR.tif 比宽高比。现在目标、冻结身份都与 /siblings、SR
+        使用同一个本体判据（meta.xml 的 SolarAzimuth）。
+        """
+        from backend.services import batch_difference
+        name = self.scene(804)
+        directory = self.root / (name + "_PAN")
+        (directory / (directory.name + "_meta.xml")).write_text(
+            "<meta><SolarAzimuth>137.8424</SolarAzimuth></meta>", encoding="utf-8")
+        body = directory / (directory.name + ".tif")
+        Image.new("I;16", (16, 16), 7).save(body)
+        result = self.import_text(self.qc(name))
+        self.assertFalse(result["rejected"], result["diagnostics"])
+        item = batch_manifest.load_manifest(result["manifest_ref"])["items"][0]
+        self.assertEqual(item["target_image"]["path"], body.as_posix())
+        self.assertEqual(item["target_image"]["tourIdentity"]["role"], "pan")
+        batch_difference.validate_pair(
+            item["target_image"], item["reference_image"])
 
     def test_fifty_line_freeze_is_content_addressed(self):
         names = [self.scene(i) for i in range(1, 51)]

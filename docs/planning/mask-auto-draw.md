@@ -9,7 +9,7 @@
 - `backend/services/mask.py::rasterize_polygons` 的权威语义为整数像素中心、边界含入、PIL polygon。4× 覆盖仅作补充，不能替代正式整数填充检查。
 - 前端 `stores/diff.ts` 已有差异显示、预览/ROI 精算、结果与像素代次隔离；`Toolbar.vue` 实际只有差异定位与结果显隐，**没有「延续到下一景」按钮**。本轮自动绘制键紧邻差异定位，不虚构或新增巡览延续流程。
 - Mask 没有独立 Store：`ViewerRec.maskRois` 保存缩略图坐标数组，`addMaskPolygon` 是现有添加入口；原 `undoRoi` 仅 pop，文件列表的 undo 与 Mask 无关。原编辑器支持添加、选择、删除、魔棒、合并，没有独立顶点拖动编辑器，也没有 16/24 顶点上限。本轮自动几何单独限制 ≤24，保留手绘既有语义。
-- `stageKind=input` 是后端确认的可修复本体，包含 RC 的 PAN.tif 与 SC 的生产全名；不能以文件名或同目录判断。自动绘制另要求 `tourIdentity.role=pan`、可信同序列配对、源版本与尺寸一致。undefined 在旧手绘入口可视为本体，但不满足自动绘制条件。
+- `stageKind=input` 是后端确认的可修复本体，包含 RC 的 PAN.tif 与 SC 的生产全名；不能以文件名或同目录判断。自动绘制要求该本体在实际分析 A/B 中、具备绑定它的 autoMask 源坐标映射、源版本与尺寸一致，并在预备/提交向量前两次用服务端 siblings 复核 kind、Scene ID、源版本与尺寸。2026-11-07 修正：普通打开/拖入/差异候选建卡不一定有 `tourIdentity`，其缺失不再判为「只有 NOSR / SR」；若提供巡览证据，角色、序列和尺寸仍须一致，不忽略明确矛盾。undefined 在旧手绘入口可视为本体，但不满足自动绘制条件。
 - `thumbToOrig`（现有 Mask JSON/TIFF/盘阵写入入口复用）采用端点对齐 `(W−1)/(tw−1)`。自动区域通过新增精确逆函数 `sourceToMaskThumb` 入库，确保未来导出仍是后端核验过的整数源顶点。
 - 不生成最终 mask.tif，不调用 run_sr，不改变 Batch Worker、调度或 SR 生产契约。
 
@@ -129,3 +129,9 @@ node .e2e/test-diff-visualization.js
 - 没有跨整个3.2s持有文件锁；前后两次版本核验与本地像素代次隔离保护编辑写入，未来真正导出/提交仍走既有源版本与 SR 契约复核。
 - 大孔洞以单外多边形填充后标待复核；不支持带洞多环可编辑几何。真实复杂区域可能只有保守凸包/外接框，标记冲突，不伪称精确。
 - 仅复用既有选择/删除/合并/重绘编辑能力；本轮没有引入通用顶点拖动编辑器或 Batch 自动掩码链路。
+
+## 2026-11-07：PAN 本体缺巡览元数据时的误判修正
+
+`autoTarget` 原要求 A/B 里的 `input` 同时具有 `tourIdentity.role=pan`，但正常打开、拖入和差异候选建卡不保证携带巡览证书。现允许已确认的 input 使用原 Scene ID / revision / source_size / pixel_key / 坐标映射进入既有两次只读服务端复核；有巡览证据时仍检查已知角色与尺寸，并与服务端角色/序列核对。服务端类型与本地类型不符仍拒绝。A/B 不含本体时明确提示选择本体重新分析，不把当前活动的第三张 PAN 当作旧结果的绘制网格。
+
+验证：新增 5 项专项（PAN 在 A、PAN 在 B、两图均缺巡览证书、服务端判 NOSR 时拒绝、第三张 PAN 不替代 A/B）；差异 Store 43 项通过，全量前端 73 files / 907 tests、typecheck、build 通过。`node .e2e/test-mask-auto-draw.js` 移除两张图的本地证书，服务端仍回可信类型和证书，实际调用 Python 差异/几何服务并验证 3 区域绘制、两次核验、手绘保留、整批撤销/重做、重复替换、Esc、源版本变化和旧接口。浏览器错误与禁止调用均为 0；不生成最终 Mask TIF，不运行生产 SR/GPU。脚本优先使用 SR_TEST_PYTHON 或项目 .venv，缺少 .venv 时使用 PATH 的 python。

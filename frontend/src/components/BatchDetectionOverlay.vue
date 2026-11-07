@@ -16,6 +16,7 @@
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
+import { useBatchGoalStore } from '../stores/batchGoal';
 import { imageRef } from '../lib/spatial';
 import {
   candidateScreenPoints, loadBatchOverlay, overlayFailureText, overlayImageUrl,
@@ -30,8 +31,19 @@ const viewer = useViewerStore();
  *  reload; validation still happens in the overlay document itself. */
 const urlParams = parseBatchOverlayParams(
   typeof window === 'undefined' ? '' : window.location.search);
+const batch = useBatchGoalStore();
+// Readiness changes independently of image navigation. Once published, the
+// same selected Item loads its Overlay without reopening or moving the image.
+const overlayReady = computed(() => {
+  const target = viewer.batchOverlayTarget ?? urlParams;
+  if (!target) return false;
+  const snap = batch.goalId === target.goalId ? batch.snapshot : null;
+  const row = [snap?.producer.current, ...(snap?.active_jobs ?? []), ...(snap?.recent_jobs ?? [])]
+    .find(item => item?.item_id === target.itemId);
+  return row?.overlay_ready ?? viewer.batchOverlayTarget?.overlayReady ?? true;
+});
 const params = computed(() => {
-  if (viewer.batchOverlayOff) return null;
+  if (viewer.batchOverlayOff || !overlayReady.value) return null;
   const target = viewer.batchOverlayTarget;
   if (target) return { goalId: target.goalId, itemId: target.itemId };
   return urlParams;

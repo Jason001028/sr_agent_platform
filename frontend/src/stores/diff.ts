@@ -253,7 +253,7 @@ export const useDiffStore = defineStore('diff', () => {
   /** 请求序号：只有最后一次请求允许落结果，预览与精算共用。 */
   let requestSeq = 0;
   /** 「延续到下一景」正在切景：抑制活动景 watcher 的 ensurePair，别覆盖刚按角色挑好的组合。 */
-  let continuing = false;
+  const continuing = ref(false);
   const method = ref<DiffMethod>('absdiff');
   const sensitivity = ref<DiffSensitivity>('standard');
   const scope = ref<DiffScope>('common');
@@ -374,11 +374,21 @@ export const useDiffStore = defineStore('diff', () => {
     return i >= 0 && i + 1 < groups.length ? groups[i + 1] : null;
   });
 
-  /** 单图看热力结果、左侧还有下一景时，才提供「延续到下一景」。 */
-  const canContinueScene = computed(() =>
-    !!result.value && showHeat.value && !viewer.compareOn && !viewer.drawMode
-    && viewer.panes.length === 1 && !!nextSceneGroup.value,
-  );
+  /** 显隐只取决于结果与下一景，不随显示/绘制/对比的临时状态摘掉按钮。
+   *  续到末景时，保留到取图、分析与解码全部结束，避免操作中途消失。 */
+  const showContinueScene = computed(() =>
+    !!result.value && (!!nextSceneGroup.value || continuing.value));
+  const continueSceneReason = computed(() => {
+    if (continuing.value) return '正在延续到下一景，请稍候';
+    if (busy.value) return '差异分析处理中，请稍候';
+    if (!result.value) return '请先完成当前景的差异分析';
+    if (!nextSceneGroup.value) return '左侧列表里没有下一景';
+    if (viewer.drawMode) return '请先完成或退出掩码绘制';
+    if (viewer.compareOn || viewer.panes.length !== 1) return '请先退出对比，回到单图查看';
+    if (!aRec.value || !bRec.value) return '请先选择当前景的影像 A / B';
+    return '';
+  });
+  const canContinueScene = computed(() => !continueSceneReason.value);
 
   function compatibleRecs(a: ViewerRec, b: ViewerRec): boolean {
     return a.id !== b.id && !commonGrid(a.W, a.H, b.W, b.H).refusal;
@@ -611,8 +621,10 @@ export const useDiffStore = defineStore('diff', () => {
   const autoTarget = computed(() => {
     const res = result.value;
     if (!res) return null;
+    // kind=input is the server's body identity. A tour certificate is optional
+    // on normal opening paths, but an explicit conflicting role is not ignored.
     return viewer.recs.find(r => [res.imageA.id, res.imageB.id].includes(r.id)
-      && r.stageKind === 'input' && r.tourIdentity?.role === 'pan') ?? null;
+      && r.stageKind === 'input' && (!r.tourIdentity || r.tourIdentity.role === 'pan')) ?? null;
   });
   const autoDrawReason = computed(() => {
     const res = result.value, auto = res?.autoMask, target = autoTarget.value;
@@ -620,7 +632,7 @@ export const useDiffStore = defineStore('diff', () => {
     if (!auto) return '当前服务未提供自动绘制数据，请升级服务并重新分析';
     if (stale.value) return '分析结果已过期，请重新分析';
     if (autoSourceError.value) return autoSourceError.value;
-    if (!target) return '需要对应的 PAN 本体（input）；只有 NOSR / SR 时不能绘制';
+    if (!target) return '当前分析的 A/B 未包含已确认的 PAN 本体，请选择本体后重新分析';
     if (!target.thumb || !target.src || target.pending || !target.sceneId || !target.srcRev) return 'PAN 本体源文件或预览不可用';
     const a = viewer.recs.find(r => r.id === res!.imageA.id);
     const b = viewer.recs.find(r => r.id === res!.imageB.id);
@@ -630,7 +642,7 @@ export const useDiffStore = defineStore('diff', () => {
     if (!source?.transform || source.pixel_key !== pixelKey(target.id)
       || source.scene_id !== target.sceneId || source.source_revision !== target.srcRev
       || source.source_size[0] !== target.W || source.source_size[1] !== target.H
-      || target.tourIdentity?.width !== target.W || target.tourIdentity?.height !== target.H) return '源影像身份或尺寸已改变，请重新分析';
+      || (target.tourIdentity && (target.tourIdentity.width !== target.W || target.tourIdentity.height !== target.H))) return '源影像身份或尺寸已改变，请重新分析';
     if (auto.coordinate_space !== 'analysis_pixel' || auto.analysis_size[0] !== res!.analysisGrid.width
       || auto.analysis_size[1] !== res!.analysisGrid.height) return '分析网格不一致，请重新分析';
     if (!auto.polygons.some(p => p.coverage_ratio === 1 && p.supersample_coverage_ratio === 1
@@ -684,9 +696,13 @@ export const useDiffStore = defineStore('diff', () => {
       for (const r of inputs) {
         const item = [...(siblings.tourItems ?? []), ...siblings.items].find(i => i.id === r.sceneId && i.exists);
         if (!item || item.srcRev !== r.srcRev || item.W !== r.W || item.H !== r.H
-          || (r.id === target.id && item.kind !== 'input')
-          || item.tourIdentity?.role !== r.tourIdentity?.role
-          || item.tourIdentity?.sequence !== r.tourIdentity?.sequence) {
+          || (r.stageKind && item.kind !== r.stageKind)
+          || (r.id === target.id && (item.kind !== 'input' || (item.tourIdentity && item.tourIdentity.role !== 'pan')))
+          // Normal open/drop/card paths may lack a tour certificate. Recheck
+          // authoritative kind + exact scene ID/revision/size regardless; when
+          // a local certificate exists it must still match the server.
+          || (r.tourIdentity && (item.tourIdentity?.role !== r.tourIdentity.role
+            || item.tourIdentity?.sequence !== r.tourIdentity.sequence))) {
           throw new Error('源文件不可用、版本或尺寸已改变，请重新加载影像并分析');
         }
       }
@@ -1220,8 +1236,11 @@ export const useDiffStore = defineStore('diff', () => {
    *  `continuing` 抑制它。显示方式、不透明度、羽化、方法、灵敏度等本来就在
    *  store 里，`analyze()` 原样沿用，不需要再写一遍。 */
   async function continueToNextScene(): Promise<boolean> {
-    if (busy.value || continuing) return false;
-    continuing = true;
+    if (!canContinueScene.value) {
+      if (!busy.value && !continuing.value) error.value = continueSceneReason.value;
+      return false;
+    }
+    continuing.value = true;
     try {
       const group = nextSceneGroup.value;
       if (!group) { error.value = '左侧列表里没有下一景'; return false; }
@@ -1241,10 +1260,13 @@ export const useDiffStore = defineStore('diff', () => {
       await viewer.activate(pair.a.id);
       aId.value = pair.a.id;
       bId.value = pair.b.id;
+      return await analyze();
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : String(e);
+      return false;
     } finally {
-      continuing = false;
+      continuing.value = false;
     }
-    return analyze();
   }
 
   /* ---------------- 精算（原始 ROI，可选） ---------------- */
@@ -1523,7 +1545,7 @@ export const useDiffStore = defineStore('diff', () => {
   watch(
     () => [viewer.activeRec?.sceneId, viewer.activeRec?.sceneDir, viewer.activeRec?.lqPath],
     () => {
-      if (!open.value || continuing) return;
+      if (!open.value || continuing.value) return;
       ensurePair();
       void refreshSceneImages();
     },
@@ -1560,7 +1582,7 @@ export const useDiffStore = defineStore('diff', () => {
     recommendedPair, ensurePair, selectPairFromActive,
     // 分析
     analyze, stale, currentKey, resultKey,
-    canContinueScene, continueToNextScene,
+    showContinueScene, canContinueScene, continueSceneReason, continuing, continueToNextScene,
     // 结果
     result, regions, orderedRegions, viewerRegions, selectedRegion, selectedId, hoveredId, precisionReason, alignmentNote, flickerPairReason, selectedRegionIds, toggleRegionSelection,
     selectRegion, hoverRegion, locateRegion, addRegionToMask, openFlicker,

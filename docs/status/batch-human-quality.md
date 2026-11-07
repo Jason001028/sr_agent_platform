@@ -16,7 +16,11 @@
 
 条带读取源 DN，在最多 2048 边长的共同分析网格检测，再通过显式变换转成源 PAN 像素坐标。记录源尺寸、分析尺寸、PAN/NOSR 变换、NoData、有效像素、算法参数、耗时、区域数、顶点、覆盖、面积、孔洞及回退诊断。MaskBuilder 消费源像素多边形，不依赖 Viewer。
 
-要求冻结来源仍有效、同景 PAN/NOSR 身份、尺寸比例精确一致。有 GeoTIFF 元数据时核对 CRS、方向和范围；无标签时沿用现有生产比例网格约定，并明确记录该假设，不能证明未知影像已配准。无有效数据、输入漂移或不支持的 TIFF 编码会失败，不当成无缺陷。保守几何进入既有提交前复核。
+要求冻结来源仍有效、同景 PAN/NOSR 身份、宽高比相对偏差不超过 1%（与 Viewer 的 `tourPairRefusal` / `FLICKER_ASPECT_TOLERANCE` 同口径）。不要求分辨率成整数倍或两个宽高交叉乘积精确相等。有 GeoTIFF 元数据时核对 CRS、方向和范围；无标签时沿用现有生产比例网格约定，并明确记录该假设，不能证明未知影像已配准。无有效数据、输入漂移或不支持的 TIFF 编码会失败，不当成无缺陷。保守几何进入既有提交前复核。
+
+2026-11-07 修正：`batch_difference.validate_pair` 曾把场景目录检查与 `PAN.width * NOSR.height == PAN.height * NOSR.width` 合并，生产约 1.96 倍重采样及尺寸取整会被错误报为「场景或网格比例不一致」。现分开校验场景和 1% 相对宽高比，并在真实超限时报告两张图的尺寸与偏差；保持冻结资源/版本、GeoTIFF 及提交保护不变。回归覆盖生产示例尺寸 30831×30948 / 15768×15823、1% 边界及超限、合成非整数网格的差异检测与 PAN 网格掩码生成、跨场景与身份漂移拒绝。需更新并重启后端 API 生效；未启动真实 SR/GPU。
+
+本次验证命令：`python -m pytest backend/tests/test_batch_difference.py backend/tests/test_batch_manifest.py backend/tests/test_tour_identity.py -q --tb=short`，39 passed。当前 Anaconda 的 tifffile 2021.7.2 / imagecodecs 组合读 Deflate 掩码失败，已用 HEAD 原实现单独复现，非比例修复引入；测试使用 Pillow 独立读回掩码，尺寸、dtype、缺陷像素全覆盖和值域断言保留，生产条带读写器未更改。仅剩已有 Paramiko Blowfish 弃用警告。
 
 100% 覆盖指已检测分析区域及投影后的采样像素覆盖，不代表源全分辨率检测召回率；下采样可能遗漏细小异常。当前读取器支持范围沿用现有条带 TIFF 实现，未增加全幅解码兜底。
 

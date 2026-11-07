@@ -341,7 +341,7 @@ def _open_item(snapshot):
             and preview_jpg.source_revision(ref_path) != reference["revision"]):
         raise ItemBlocked("NOSR 输入修订已变化，拒绝按冻结清单继续")
     scene = Path(snapshot["scene_ref"])
-    for backup in (scene / "PAN_old_latest.tif", scene / "PAN_old_2.tif"):
+    for backup in _backup_paths(scene, target.get("path")):
         if backup.exists():
             raise ItemBlocked(f"已存在 PAN 备份，拒绝重复修复：{backup.name}")
     return info
@@ -605,14 +605,25 @@ def _file_identity(path):
     }
 
 
-def _backup_names(scene_ref):
+def _backup_paths(scene, target_path=None):
+    """Repair backups for this scene — fixed PAN names plus the current body's.
+
+    RC scenes back up ``PAN.tif`` as ``PAN_old_latest.tif``; SC scenes back up
+    ``<目录名>.tif`` as ``<目录名>_old_latest.tif``.  Either presence must block
+    a repeated repair before detection/submission.
+    """
+    stems = {"PAN", Path(target_path).stem if target_path else "PAN"}
+    return [scene / f"{stem}{tail}"
+            for stem in sorted(stems) for tail in ("_old_latest.tif", "_old_2.tif")]
+
+
+def _backup_names(scene_ref, target_path=None):
     """Names of PAN backups that must still be absent at the commit boundary."""
     if not scene_ref:
         raise ItemBlocked("提交前复核缺少场景目录")
-    scene = Path(scene_ref)
     return sorted(
         backup.name
-        for backup in (scene / "PAN_old_latest.tif", scene / "PAN_old_2.tif")
+        for backup in _backup_paths(Path(scene_ref), target_path)
         if backup.exists())
 
 
@@ -635,7 +646,7 @@ def _input_identities(cp):
         "pan": _file_identity(target.get("path")),
         "nosr": _file_identity(reference.get("path")),
         "mask": _file_identity(mask.get("path")),
-        "backups": _backup_names(cp.get("scene_ref")),
+        "backups": _backup_names(cp.get("scene_ref"), target.get("path")),
     }
 
 

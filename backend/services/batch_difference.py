@@ -14,6 +14,20 @@ from backend.services.auto_mask_geometry import bind_auto_mask
 from backend.services.tour_identity import image_identity
 from backend.services.spatial_identity import resource_identity
 
+# Same relative aspect tolerance as frontend/lib/flicker.ts and tourCompare.ts.
+# Production PAN/NOSR resolutions are not necessarily integer multiples.
+PAN_NOSR_ASPECT_TOLERANCE = 0.01
+
+
+def _check_grid_aspect(width, height, rw, rh):
+    # Rounding either axis during production resampling must not reject a pair.
+    cross_pan, cross_nosr = width * rh, height * rw
+    deviation = abs(cross_pan - cross_nosr) / max(cross_pan, cross_nosr)
+    if deviation > PAN_NOSR_ASPECT_TOLERANCE:
+        raise contracts.DetectionError(
+            f"PAN/NOSR 网格比例不一致：PAN {width}×{height}，NOSR {rw}×{rh}，"
+            f"宽高比偏差 {deviation:.3%}，超过 {PAN_NOSR_ASPECT_TOLERANCE:.0%} 容差")
+
 
 def sample_grid(path, width, height, shape, config):
     from backend.services import batch_detector as reader
@@ -58,8 +72,9 @@ def validate_pair(target, reference):
     pan, pi = reader._probe_image(target, "PAN", width, height)
     nosr, ni = reader._probe_image(reference, "NOSR", rw, rh)
     reader._check_reference_grid(pi, ni, width, height)
-    if pan.parent.resolve() != nosr.parent.resolve() or width*rh != height*rw:
-        raise contracts.DetectionError("PAN/NOSR 场景或网格比例不一致")
+    if pan.parent.resolve() != nosr.parent.resolve():
+        raise contracts.DetectionError("PAN/NOSR 不属于同一生产场景")
+    _check_grid_aspect(width, height, rw, rh)
     identities = [image_identity(p, pan.parent.as_posix(), role) for p, role in ((pan,"pan"),(nosr,"nosr"))]
     for frozen, actual in zip((target, reference), identities):
         old = frozen.get("tourIdentity") or {}

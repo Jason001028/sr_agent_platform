@@ -2,23 +2,25 @@
 // contract. The CPU fixture seeds two completed synthetic SR jobs; NO real SR.
 const assert=require('assert/strict'),fs=require('fs'),path=require('path'),os=require('os'),net=require('net');
 const {spawn}=require('child_process');const {launchBrowser}=require('./launchBrowser');
-const repo=path.resolve(__dirname,'..'),root=fs.mkdtempSync(path.join(os.tmpdir(),'sr-quality-e2e-'));
+const repo=path.resolve(__dirname,'..'),root=fs.mkdtempSync(path.join(os.tmpdir(),'q-'));
 const artifacts=path.join(__dirname,'artifacts');let child,browser,logs='';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function port(){const s=net.createServer();await new Promise(r=>s.listen(0,'127.0.0.1',r));const p=s.address().port;await new Promise(r=>s.close(r));return p;}
 async function start(p){
-  child=spawn(path.join(repo,'.venv/Scripts/python.exe'),['-m','backend.tests.quality_browser_fixture','--root',root,'--port',String(p)],
+  const venv=path.join(repo,'.venv/Scripts/python.exe');
+  child=spawn(process.env.SR_TEST_PYTHON || (fs.existsSync(venv)?venv:'python'),['-m','backend.tests.quality_browser_fixture','--root',root,'--port',String(p)],
     {cwd:repo,windowsHide:true,env:{...process.env,PYTHONUTF8:'1'}});
   child.stdout.on('data',d=>logs+=d);child.stderr.on('data',d=>logs+=d);
-  for(let i=0;i<100;i++){if(child.exitCode!=null)throw new Error(logs);try{if((await fetch(`http://127.0.0.1:${p}/api/health`)).ok)return;}catch{}await sleep(100);}
+  for(let i=0;i<600;i++){if(child.exitCode!=null)throw new Error(logs);try{if((await fetch(`http://127.0.0.1:${p}/api/health`)).ok)return;}catch{}await sleep(100);}
   throw new Error('fixture startup timeout: '+logs);
 }
 async function stop(){if(child&&child.exitCode==null){const c=child;await new Promise(r=>{c.once('exit',r);c.kill();});}child=null;}
 (async()=>{
-  const p=await port(),base=`http://127.0.0.1:${p}`;await start(p);
+  const p=await port(),base=`http://127.0.0.1:${p}`;
+  try{
+  await start(p);
   const fixture=JSON.parse(fs.readFileSync(path.join(root,'fixtures.json'),'utf8'));
   const api=async route=>{const r=await fetch(base+route);return{status:r.status,data:await r.json()};};
-  try{
     browser=await launchBrowser();const page=await browser.newPage(),errors=[],posts=[];
     page.on('pageerror',e=>errors.push(e.stack));
     page.on('request',r=>{if(r.method()==='POST'&&r.url().endsWith('/quality-review'))posts.push(JSON.parse(r.postData()));});
@@ -32,6 +34,15 @@ async function stop(){if(child&&child.exitCode==null){const c=child;await new Pr
         await qstores.batch.selectGoal(gid);
         window.dispatchEvent(new CustomEvent('batch-task-open'));
       },fixture.goal_id);
+      await page.waitForSelector('.quality-entry > summary', {visible:true});
+      try { await page.click('.quality-entry > summary'); }
+      catch (e) {
+        await page.screenshot({path:path.join(artifacts,'batch-quality-mission-failure.png')});
+        console.error(JSON.stringify(await page.$eval('.quality-entry > summary', el=>{
+          const result=[];for(let p=el;p;p=p.parentElement){const r=p.getBoundingClientRect();const s=getComputedStyle(p);result.push({tag:p.tagName,cls:p.className,x:r.x,y:r.y,w:r.width,h:r.height,overflow:s.overflow,scroll:p.scrollTop});}return result;
+        })));
+        throw e;
+      }
       await page.waitForSelector('[data-e2e=batch-quality-panel] .quality-tasks button');
     }
     async function select(index){

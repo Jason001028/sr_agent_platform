@@ -12,6 +12,7 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 import tifffile
+from PIL import Image
 
 from backend.tests import allowed_roots_env
 from backend.tests.test_pan_repair import FakeGdal, Raster
@@ -19,7 +20,10 @@ from backend.tests.test_pan_repair import FakeGdal, Raster
 
 class ReadRaster:
     def __init__(self,path):
-        self.pixels=tifffile.imread(path)
+        # Independent read-only decoder for compressed fixture masks. This also
+        # works with the host's older tifffile/imagecodecs installation.
+        with Image.open(path) as image:
+            self.pixels=np.array(image)
         self.RasterYSize,self.RasterXSize=self.pixels.shape
         self.RasterCount=1; self.DataType=1 if self.pixels.dtype==np.uint8 else 2
     def GetRasterBand(self,_):return self
@@ -109,7 +113,10 @@ def main():
     def frontend(asset:str):
         path=(dist/asset).resolve()
         if dist not in path.parents or not path.is_file():path=dist/'index.html'
-        return FileResponse(path)
+        # Windows' MIME registry may call CSS application/x-css; Chromium then
+        # rejects every stylesheet. Keep the fixture's built UI deterministic.
+        media={'.css':'text/css','.js':'application/javascript','.html':'text/html','.svg':'image/svg+xml'}
+        return FileResponse(path,media_type=media.get(path.suffix))
     import uvicorn
     uvicorn.run(app,host='127.0.0.1',port=args.port,log_level='warning')
 

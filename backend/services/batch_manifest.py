@@ -20,7 +20,7 @@ import tempfile
 import time
 
 from backend.pathguard import PathDeniedError, ensure_allowed
-from backend.services import preview_jpg, scene_resolve
+from backend.services import preview_jpg, scene_resolve, scene_search
 from backend.services.spatial_identity import resource_identity
 from backend.services.tour_identity import image_identity
 from backend.services.store import BATCH_WORKFLOW, default_db_path
@@ -214,7 +214,7 @@ def parse_qc_text(text: str) -> dict:
     return {"rows": rows, "items": items, "diagnostics": diagnostics}
 
 
-def _image(path: Path) -> dict:
+def _image(path: Path, role: str | None = None) -> dict:
     info = preview_jpg.probe_tiff(path)
     identity = resource_identity(path)
     revision = preview_jpg.source_revision(path)
@@ -229,16 +229,21 @@ def _image(path: Path) -> dict:
         "spp": info["spp"],
         "compression": info["compression"],
         "tourIdentity": image_identity(
-            path, path.parent.as_posix(), "pan" if path.stem == "PAN" else "nosr"),
+            path, path.parent.as_posix(),
+            role or ("pan" if path.stem == "PAN" else "nosr")),
     }
 
 
 def _resolve_item(row: dict, *, date: str | None, product: str | None) -> dict:
     if row.get("explicit_path"):
-        source = ensure_allowed(Path(row["explicit_path"]), kind="file")
-        if source.name != "PAN.tif":
-            raise scene_resolve.SceneLookupError("显式影像必须为场景本体 PAN.tif")
-        scene = {"dir": source.parent, "input": source}
+        hinted = Path(row["explicit_path"])
+        directory = ensure_allowed(hinted.parent, kind="dir")
+        # Viewer 只传得出场景目录加上一个输入候选名（通常是 PAN.tif）；本体
+        # 随 RC/SC 变名，这里只认「同一场景的输入候选」，真正的那份下面定。
+        if hinted.name not in {c.name for c in scene_search.input_candidates(directory)}:
+            raise scene_resolve.SceneLookupError("显式影像必须为场景输入影像")
+        scene = {"dir": directory,
+                 "input": scene_search.input_scene_path(directory) or hinted}
     else:
         scene = scene_resolve.resolve_scene_dir(
             row["name"], date=date, product=product or row.get("imgType") or None)
@@ -247,7 +252,10 @@ def _resolve_item(row: dict, *, date: str | None, product: str | None) -> dict:
         ensure_allowed(directory, kind="dir")
     except PathDeniedError as exc:
         raise scene_resolve.SceneLookupError(str(exc)) from exc
-    pan = directory / "PAN.tif"
+    # 本体随场景步骤变：RC 是 PAN.tif，SC 是 <目录名>.tif（判据同 SR 与
+    # /siblings）。批量检测的宽高比与修复发布都针对本体；混合目录里那份
+    # PAN.tif 可能只是上游遗留，不能拿来当 SC 场景的比较对象。
+    pan = scene_search.body_path(directory) or (directory / "PAN.tif")
     nosr = directory / (directory.name + "_NOSR.tif")
     meta = directory / (directory.name + "_meta.xml")
     if not meta.is_file():
@@ -258,11 +266,13 @@ def _resolve_item(row: dict, *, date: str | None, product: str | None) -> dict:
         if not path.is_file():
             raise scene_resolve.SceneLookupError(f"缺 {path.name}")
         ensure_allowed(path, kind="file")
-    backup = directory / "PAN_old_latest.tif"
-    legacy = directory / "PAN_old_2.tif"
-    if backup.exists() or legacy.exists():
-        raise scene_resolve.SceneLookupError(
-            "已存在 PAN 备份，拒绝重复修复：" + str(backup if backup.exists() else legacy))
+    # 备份名随本体走：RC 是 PAN_old_latest，SC 是 <目录名>_old_latest。
+    for name in dict.fromkeys(
+            ["PAN_old_latest.tif", "PAN_old_2.tif",
+             pan.stem + "_old_latest.tif", pan.stem + "_old_2.tif"]):
+        if (directory / name).exists():
+            raise scene_resolve.SceneLookupError(
+                "已存在 PAN 备份，拒绝重复修复：" + name)
     pan_info = preview_jpg.probe_tiff(pan)
     nosr_info = preview_jpg.probe_tiff(nosr)
     if pan_info["spp"] != 1 or nosr_info["spp"] != 1:
@@ -276,8 +286,8 @@ def _resolve_item(row: dict, *, date: str | None, product: str | None) -> dict:
             and pan_info["H"] >= nosr_info["H"]
             and (pan_info["W"], pan_info["H"]) != (nosr_info["W"], nosr_info["H"])):
         raise scene_resolve.SceneLookupError("NOSR 分辨率必须低于 PAN")
-    target = _image(pan)
-    reference = _image(nosr)
+    target = _image(pan, "pan")
+    reference = _image(nosr, "nosr")
     scene_ref = directory.as_posix()
     item_id = "item_" + hashlib.sha256(scene_ref.encode("utf-8")).hexdigest()[:16]
     return {

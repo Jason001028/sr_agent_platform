@@ -4,7 +4,9 @@ export interface RepairSequence {
   key: string; ordinal: number; name: string; path: string;
   count: number; reason: string; checked: boolean; loading: boolean;
 }
-/** A Viewer number represents one scene directory, whose canonical body is PAN.tif. */
+/** A Viewer number represents one scene directory. The path only names an input
+ *  candidate (a directory hint); the backend resolves the current body from
+ *  meta.xml (RC: PAN.tif, SC: <目录名>.tif) before comparing it with the NOSR. */
 export function viewerRepairSequences(recs: readonly ViewerRec[], ordinal: (rec: ViewerRec) => number): RepairSequence[] {
   const groups = new Map<string, RepairSequence>();
   for (const rec of recs) {

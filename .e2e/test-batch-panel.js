@@ -23,6 +23,8 @@ let status = 'RUNNING';
 let pauseCalls = 0;
 let createCalls = 0;
 let reportAvailable = true;
+let noGoals = false;
+let cancelCalls = 0;
 const openStreams = new Set();
 
 function counts() {
@@ -66,11 +68,11 @@ function jobs() {
   return rows;
 }
 
-function snapshot() {
+function runningSnapshot() {
   return {
     contract_version: 'batch_snapshot.v1',
     goal: {
-      goal_id: GOAL, session_id: 'session-1', title: '50 景修复批次（Fake SR）',
+      goal_id: GOAL, session_id: null, title: '50 景修复批次（Fake SR）',
       kind: 'batch', status, phase: status === 'PAUSED' ? 'paused' : 'monitoring',
       mode: 'demo', version: 17, control_revision: revision,
       monitoring_done: false, monitor_state: 'running', last_seq: 50,
@@ -98,6 +100,35 @@ function snapshot() {
     report: { available: reportAvailable, updated_at: 1760000500 },
     server_time: 1760000500,
   };
+}
+
+function snapshot(id = GOAL) {
+  const s = runningSnapshot();
+  if (id === GOAL) return s;
+  s.goal.goal_id = id; s.goal.version = 20;
+  s.producer.current = null; s.producer.detecting_count = 0; s.producer.preparing_count = 0;
+  s.active_jobs = []; s.recent_jobs = [];
+  s.counts = Object.fromEntries(Object.keys(s.counts).map(k => [k, 0]));
+  s.counts.total = s.counts.eligible = 27;
+  s.goal.status = id === 'g27' ? 'BLOCKED' : 'COMPLETED';
+  s.goal.phase = id === 'g27' ? 'blocked' : 'done';
+  s.goal.title = id === 'g27' ? '27 景预检异常' : '27 景已完成';
+  s.goal.monitoring_done = true; s.goal.last_seq = 0;
+  s.progress = { detection: {done:0,total:27,known:true,applicable:true}, submission: {done:0,total:0,known:true,applicable:false}, verification: {done:0,total:0,known:true,applicable:false} };
+  if (id === 'g27') {
+    s.counts.failed = 27;
+    s.recent_jobs = Array.from({length:27},(_,i)=>job(i+1,'FAILED',{job_id:null,sr_status:null,error:'pair_invalid: PAN/NOSR 配对核验失败 · 原始记录 '+(i+1)}));
+  } else {
+    Object.assign(s.counts,{detected:27,submitted:27,verified:27,verified_demo:27,converged:27});
+    for (const t of Object.values(s.progress)) Object.assign(t,{done:27,total:27,known:true,applicable:true});
+  }
+  return s;
+}
+function records(id) {
+  const snap = snapshot(id), rows = new Map();
+  for (const row of [...snap.recent_jobs,...snap.active_jobs,snap.producer.current].filter(Boolean)) rows.set(row.item_id,row);
+  return [...rows.values()].sort((a,b)=>a.ordinal-b.ordinal).map(row=>({ ...row, version:row.item_version, external_job_id:row.job_id,
+    checkpoint:{target_image:{path:row.image_path},attempt:row.attempt}, error:row.error }));
 }
 
 function eventsPage() {
@@ -156,23 +187,26 @@ function sendJson(res, body, code = 200) {
         sendJson(res, { goal_id: GOAL, kind: 'batch', status: 'QUEUED', version: 1 });
       }); return;
     }
-    if (u === `/api/goals/${GOAL}/items`) { sendJson(res, { items: [], next_after_ordinal: 0 }); return; }
+    const goalId = u.split('/')[3];
+    if (/^\/api\/goals\/(g50|g27|gdone)\/items$/.test(u)) {
+      const statuses = (url.searchParams.get('status') || '').split(',').filter(Boolean);
+      const after = Number(url.searchParams.get('after_ordinal') || 0);
+      const items = records(goalId).filter(row=>row.ordinal>after && (!statuses.length || statuses.includes(row.status))).slice(0,20);
+      sendJson(res,{items,next_after_ordinal:items.at(-1)?.ordinal || after}); return;
+    }
     if (u === '/api/goals' && url.searchParams.get('kind') === 'batch') {
-      sendJson(res, [{
-        goal_id: GOAL, session_id: 'session-1', status: 'RUNNING',
-        title: '50 景修复批次（Fake SR）', kind: 'batch', version: 17,
-      }]);
+      sendJson(res, noGoals ? [] : [GOAL,'g27','gdone'].map(id=>({ ...snapshot(id).goal,kind:'batch' }))); return;
+    }
+    if (/^\/api\/goals\/(g50|g27|gdone)\/batch-snapshot$/.test(u)) {
+      sendJson(res, snapshot(goalId));
       return;
     }
-    if (u === `/api/goals/${GOAL}/batch-snapshot`) {
-      sendJson(res, snapshot());
-      return;
-    }
-    if (u === `/api/goals/${GOAL}/events`) {
+    if (/^\/api\/goals\/(g50|g27|gdone)\/events$/.test(u)) {
+      if (goalId !== GOAL) { sendJson(res,{goal_id:goalId,events:[],last_seq:0,has_more:false,has_earlier:false}); return; }
       sendJson(res, eventsPage());
       return;
     }
-    if (u === `/api/goals/${GOAL}/events/stream`) {
+    if (/^\/api\/goals\/(g50|g27|gdone)\/events\/stream$/.test(u)) {
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
@@ -183,7 +217,7 @@ function sendJson(res, body, code = 200) {
       req.on('close', () => openStreams.delete(res));
       return;
     }
-    if (u === `/api/goals/${GOAL}/batch-report`) {
+    if (/^\/api\/goals\/(g50|g27|gdone)\/batch-report$/.test(u)) {
       sendJson(res, {
         goal_id: GOAL, title: '50 景修复批次（Fake SR）',
         summary: { total: TOTAL, verified: 10, failed: 2, blocked: 1 },
@@ -207,6 +241,11 @@ function sendJson(res, body, code = 200) {
         changed: true, control_revision: revision, monitoring_done: false,
       });
       return;
+    }
+    if (u === `/api/goals/${GOAL}/resume` || u === `/api/goals/${GOAL}/cancel`) {
+      revision++; status = u.endsWith('/cancel') ? 'CANCELLED' : 'RUNNING';
+      if (status === 'CANCELLED') cancelCalls++;
+      sendJson(res,{goal:{goal_id:GOAL,status,version:19},changed:true,control_revision:revision,monitoring_done:status==='CANCELLED'}); return;
     }
     if (u.startsWith('/api/')) {
       sendJson(res, {}, 404);
@@ -236,167 +275,129 @@ function sendJson(res, body, code = 200) {
     await page.goto(`http://127.0.0.1:${server.address().port}/viewer?batch_goal=${GOAL}`);
     await page.waitForSelector('.stage');
 
-    // A. URL 指定批次 → 快照加载后出现「批次」Tab。
-    // 任务中枢默认收起，由质检清单的「智能修复」按钮展开。
-    await page.click('.ctx-tab');
-    await page.click('.qc-smart');
-    await page.waitForSelector('[data-e2e=batch-task-dock]', { visible: true });
-    assert.equal(await page.$$eval('.ctx-tabs .ctx-tab', es => es.length), 2);
+    const stores = () => document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s;
+    async function openMenu() { if (await page.$eval('[data-e2e=batch-settings]',e=>e.getAttribute('aria-expanded')) !== 'true') await page.click('[data-e2e=batch-settings]'); }
+    async function closeMenu() { if (await page.$eval('[data-e2e=batch-settings]',e=>e.getAttribute('aria-expanded')) === 'true') await page.click('[data-e2e=batch-settings]'); }
+    async function selectGoal(id) {
+      await openMenu(); await page.select('.bp-select',id);
+      await page.waitForFunction(id=>document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('batchGoal').snapshot?.goal.goal_id===id,{},id);
+      await closeMenu();
+    }
+    // Empty/selection: no dormant progress/current/queue components, no auto submit.
+    await page.click('.ctx-tab'); await page.click('.qc-smart');
+    await page.waitForSelector('[data-e2e=batch-draft]',{visible:true});
+    assert.equal(await page.$('[data-e2e=batch-tracks]'),null);
+    assert.equal(await page.$('[data-e2e=mission-queue]'),null);
+    assert.equal(createCalls,0);
+    assert.equal(await page.$$eval('.ctx-tabs .ctx-tab',es=>es.length),2);
     await page.evaluate(() => window.dispatchEvent(new CustomEvent('batch-task-open')));
-    await page.click('.task-body > details > summary');
-    await page.waitForSelector('[data-e2e=batch-panel]');
     await page.waitForSelector('[data-e2e=batch-status]');
-    const summaryTop = await page.$eval('[data-e2e=batch-task-dock]', e => e.getBoundingClientRect().top);
-    await page.$eval('.tools-scroll', e => { e.scrollTop = 300; });
-    assert.equal(await page.$eval('[data-e2e=batch-task-dock]', e => e.getBoundingClientRect().top), summaryTop);
-    await page.$eval('.tools-scroll', e => { e.scrollTop = 0; });
-
-    // B. 50 景快照的三个事实来源都在首屏。
-    const overview = await page.$eval('[data-e2e=batch-status]', (e) => e.textContent);
-    assert.match(overview, /50 景修复批次/);
-    assert.match(overview, /DEMO \/ MOCK/);
-    assert.match(overview, /已完成 10/);
-    assert.match(overview, /检测中 3 · SR 执行中 6 · 验收中 1/);
-
-    const tracks = await page.$eval('[data-e2e=batch-tracks]', (e) => e.textContent);
-    assert.match(tracks, /检测[\s\S]*40 \/ 50/);
-    assert.match(tracks, /提交 SR[\s\S]*30 \/ 40/);
-    assert.match(tracks, /结果验收[\s\S]*10 \/ 30/);
-
-    const current = await page.$eval('[data-e2e=batch-current]', (e) => e.textContent);
-    assert.match(current, /#41 scene-41/);
-    assert.match(current, /检测中/);
-    assert.match(current, /另有 2 景同时检测中（在途共 3 景）/);
-
-    const queue = await page.$eval('[data-e2e=batch-jobs]', (e) => e.textContent);
-    assert.match(queue, /在途 6/);
-    assert.match(queue, /3 异常/);
-    const allRows = await page.$$eval('[data-e2e=batch-jobs] .bj-row', (a) => a.length);
-    assert.equal(allRows, 6);
-    assert.match(await page.$eval('[data-e2e=batch-jobs] .bj-error', (e) => e.textContent),
-      /quality gate exited 3/);
-
-    // C. 事件默认折叠；展开后最新在前（seq 50 的用户控制）。
-    const eventsOpen = await page.$eval('[data-e2e=batch-events]', (e) => e.open);
-    assert.equal(eventsOpen, false, '事件时间线默认必须折叠');
-    const summary = await page.$eval('[data-e2e=batch-events] summary', (e) => e.textContent);
-    assert.match(summary, /用户暂停批次/);
-    await page.click('[data-e2e=batch-events] > summary');
-    await page.waitForFunction(
-      "document.querySelectorAll('[data-e2e=batch-events] .be-row').length === 10");
-    const first = await page.$eval('[data-e2e=batch-events] .be-row', (e) => e.textContent);
-    assert.match(first, /用户暂停批次/);
-    await page.click('[data-e2e=batch-events] .be-row .be-raw summary');
-    const raw = await page.$eval('[data-e2e=batch-events] .be-row .be-raw pre',
-      (e) => e.textContent);
-    assert.match(raw, /"action": "pause"/);
-
-    // D. 409 → 重新读快照并提示；重试成功说明外部作业不会被终止。
-    await page.click('[data-e2e=batch-pause]');
-    await page.waitForSelector('.bc-error');
-    assert.match(await page.$eval('.bc-error', (e) => e.textContent), /控制版本已变化/);
-    await page.click('[data-e2e=batch-pause]');
-    await page.waitForFunction(
-      "document.querySelector('[data-e2e=batch-controls] .bc-notice')?.textContent.includes('外部调度器')");
-    assert.equal(pauseCalls, 2);
-
-    // E. 报告：受控入口 + 摘要 + 按需展开的原始 JSON。
-    await page.waitForSelector('[data-e2e=batch-result]');
-    assert.equal(await page.$$eval('[data-e2e=batch-result] .attention article', es => es.length), 3);
-    await page.click('[data-e2e=batch-report]');
-    await page.waitForSelector('.notice-modal .nm-title');
-    assert.match(await page.$eval('.notice-modal .nm-title', (e) => e.textContent), /批次报告/);
-    assert.match(await page.$eval('.notice-modal .nm-body', (e) => e.textContent), /检测 40 \/ 50/);
-    await page.click('.notice-modal .nm-raw summary');
-    const reportRaw = await page.$eval('.notice-modal .nm-raw pre', (e) => e.textContent);
-    assert.match(reportRaw, /"summary"/);
-    await page.click('.notice-modal .nm-ok');
-    await page.waitForSelector('.notice-modal', { hidden: true });
-
-    // F. 跟随默认关闭；用户视图操作立即退出。
-    await page.waitForSelector('[data-e2e=batch-follow]');
-    await page.click('.bp-settings > summary');
-    const followBefore = await page.$eval('[data-e2e=batch-follow]', (e) => e.checked);
-    assert.equal(followBefore, false);
+    // One meaningful hero + independently denominated stage nodes, one current row.
+    const overview = await page.$eval('[data-e2e=batch-status]',e=>e.textContent);
+    assert.match(overview,/检测进度/); assert.match(overview,/40 \/ 50/); assert.match(overview,/DEMO \/ MOCK/);
+    const stages=await page.$$eval('[data-stage]',es=>es.map(e=>e.textContent));
+    assert.match(stages[0],/检测.*40 \/ 50/); assert.match(stages[1],/SR 提交.*30 \/ 40/); assert.match(stages[2],/验收.*10 \/ 30/);
+    assert.equal(await page.$$eval('.mission-item',es=>es.length),1);
+    assert.equal(await page.$('[data-e2e=mission-statistics]'),null);
+    assert.equal(await page.$('[data-e2e=batch-events]'),null);
+    assert.equal(await page.$('[data-e2e=batch-items]'),null);
+    assert.doesNotMatch(await page.$eval('.mission-body',e=>e.textContent),/后台 SR 队列|完整执行队列|D\/A|S\/R|V\/R/);
+    await page.screenshot({path:path.join(__dirname,'artifacts/batch-mission-running.png')});
+    // Pause/409 and resume live in a single settings menu, without auto retries.
+    await openMenu(); await page.click('[data-e2e=batch-pause]');
+    await page.waitForSelector('.bc-error'); assert.match(await page.$eval('.bc-error',e=>e.textContent),/控制版本已变化/);
+    assert.equal(pauseCalls,1); await page.click('[data-e2e=batch-pause]');
+    await page.waitForSelector('[data-e2e=batch-resume]'); assert.equal(pauseCalls,2);
+    await page.click('[data-e2e=batch-resume]'); await page.waitForSelector('[data-e2e=batch-pause]');
+    // View settings never create or cancel work. Follow keeps its existing user-intent exit.
+    await page.click('[data-e2e=mission-statistics-toggle]');
+    await page.waitForSelector('[data-e2e=mission-statistics]'); assert.equal(createCalls,0);assert.equal(cancelCalls,0);
+    assert.equal(await page.$eval('[data-e2e=batch-follow]',e=>e.checked),false);
     await page.click('[data-e2e=batch-follow]');
-    await page.waitForFunction(
-      "document.querySelector('[data-e2e=batch-follow]').checked === true");
-    await page.evaluate(() => {
-      const pinia = document.querySelector('#app').__vue_app__
-        .config.globalProperties.$pinia;
-      pinia._s.get('viewer').noteUserIntent();
+    await page.evaluate(()=>document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('viewer').noteUserIntent());
+    await page.waitForFunction(()=>!document.querySelector('[data-e2e=batch-follow]').checked);
+    await page.click('[data-e2e=mission-statistics-toggle]'); await closeMenu();
+    // Collapse is one short header; keep the live association and reopen without reset.
+    await page.click('[data-e2e=batch-task-expand]');
+    assert.ok(await page.$eval('[data-e2e=batch-task-dock]',e=>e.getBoundingClientRect().height)<80);
+    await page.click('[data-e2e=batch-task-expand]');
+    // All pre-job failures: never fabricate SR state or job IDs; only first three by default.
+    await selectGoal('g27');
+    assert.match(await page.$eval('.hero-number',e=>e.textContent),/27.*景异常/);
+    assert.match(await page.$eval('.mission-notice',e=>e.textContent),/尚无已提交的 SR 作业/);
+    assert.equal(await page.$$eval('.mission-item',es=>es.length),3);
+    assert.equal(await page.$$eval('[role=progressbar]',es=>es.length),1);
+    assert.doesNotMatch(await page.$eval('.mission-body',e=>e.textContent),/SR 执行失败|Job 0|undefined/);
+    for (const n of [0,1]) await (await page.$$('.item-content'))[n].click();
+    assert.match(await page.$eval('[data-item=item-1] .item-error',e=>e.textContent),/原始记录 1/);
+    assert.match(await page.$eval('[data-item=item-2] .item-error',e=>e.textContent),/原始记录 2/);
+    await page.evaluate(()=>{const b=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('batchGoal'); window.savedOpen=b.openItem; window.located=[]; b.openItem=async row=>{located.push(row.item_id);return '';};});
+    await (await page.$$('.locate'))[0].click(); await (await page.$$('.locate'))[1].click();
+    assert.deepEqual(await page.evaluate(()=>located),['item-1','item-2']);
+    await page.evaluate(()=>{document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('batchGoal').openItem=savedOpen;});
+    for (const n of [0,1]) await (await page.$$('.item-content'))[n].click();
+    await page.screenshot({path:path.join(__dirname,'artifacts/batch-mission-failed.png')});
+    await openMenu();
+    await page.evaluate(()=>[...document.querySelectorAll('.mission-menu .menu-link')].find(e=>e.textContent.includes('交给 Agent')).click());
+    await page.waitForFunction(()=>document.querySelector('.ctx-tab:nth-child(2)').classList.contains('on'));
+    assert.match(await page.$eval('.at-input',e=>e.value),/g27/);
+    await page.click('.ctx-tab:first-child');
+    // One queue: the expanded list replaces compact focus, pages all 27 failures.
+    await page.click('.mission-queue header .link'); await page.waitForSelector('[data-e2e=batch-items]');
+    await page.waitForFunction(()=>document.querySelectorAll('.mission-item').length===20);
+    assert.equal(await page.$('[data-e2e=batch-jobs]'),null);
+    await page.click('[data-e2e=batch-items] footer button:last-child');
+    await page.waitForFunction(()=>document.querySelectorAll('.mission-item').length===7);
+    await page.click('.mission-queue header .link');
+    // Correct empty tracks and no stale focus after completion.
+    await selectGoal('gdone');
+    assert.match(await page.$eval('[data-e2e=batch-status]',e=>e.textContent),/已验收/);
+    assert.equal(await page.$('[data-e2e=batch-tracks]'),null); assert.equal(await page.$('[data-e2e=mission-queue]'),null);
+    await page.click('[data-e2e=batch-report]'); await page.waitForSelector('.notice-modal');
+    assert.match(await page.$eval('.notice-modal .nm-body',e=>e.textContent),/27/);
+    await page.click('.notice-modal .nm-ok');
+    await page.screenshot({path:path.join(__dirname,'artifacts/batch-mission-completed.png')});
+    // Debug history is discoverable only in the established developer mode.
+    await selectGoal(GOAL);
+    await page.evaluate(()=>localStorage.setItem('sr.developerMode.local','1'));
+    await openMenu(); await page.click('[data-e2e=mission-events-toggle]'); await closeMenu();
+    await page.waitForSelector('[data-e2e=batch-events]');
+    await page.click('[data-e2e=batch-events] > summary');
+    await page.waitForFunction(()=>document.querySelectorAll('.be-row').length===10);
+    await page.click('[data-e2e=batch-events] .be-raw summary');
+    assert.match(await page.$eval('[data-e2e=batch-events] .be-raw pre',e=>e.textContent),/pause/);
+    await openMenu(); await page.click('[data-e2e=mission-events-toggle]'); await closeMenu();
+    // Offline/online recovery keeps the same compact item and no duplicate rows.
+    await page.setOfflineMode(true); await page.waitForFunction(()=>document.querySelector('.connection-note')?.textContent.includes('连接中断'));
+    await page.setOfflineMode(false); await page.waitForFunction(()=>!document.querySelector('.connection-note'));
+    assert.equal(await page.$$eval('.mission-item',es=>es.length),1);
+    // Responsive: one scroll owner; reduced-motion disables transitions.
+    await page.setViewport({width:1100,height:820});
+    for (const width of [328,400]) {
+      await page.$eval('.ctx-rail',(e,width)=>e.style.width=width+'px',width);
+      const overflow=await page.$eval('[data-e2e=batch-task-dock]',e=>e.scrollWidth>e.clientWidth);
+      assert.equal(overflow,false);
+      const nested=await page.$$eval('.mission-body *',es=>es.filter(e=>e.clientHeight>0&&e.scrollHeight>e.clientHeight+1&&['auto','scroll'].includes(getComputedStyle(e).overflowY)).length);
+      assert.equal(nested,0);
+      await page.screenshot({path:path.join(__dirname,`artifacts/batch-mission-${width}.png`)});
+    }
+    assert.equal(await page.$eval('.phase-node',e=>getComputedStyle(e).transitionDuration),'0s');
+    // Start directly from numbered Viewer groups; local HTTP without randomUUID.
+    await page.evaluate(()=>{
+      const v=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('viewer');
+      for(const [name,kind] of [['scene-a','nosr'],['scene-a','product'],['scene-b','nosr']]) v.insertSceneCard({name:name+'-'+kind,W:128,H:128,sceneId:name+kind,sceneDir:'/mock/'+name,lqPath:null,stageKind:kind},{id:name+kind,name,W:128,H:128,size_bytes:0,lq_path:null,hasPreview:false});
     });
-    await page.waitForFunction(
-      "document.querySelector('[data-e2e=batch-follow]').checked === false");
-    assert.match(await page.$eval('[data-e2e=batch-panel]', (e) => e.textContent), /退出跟随/);
-
-    // G. Existing entry shows numbered groups, including unopened canonical bodies.
-    await page.evaluate(() => {
-      const viewer = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('viewer');
-      for (const [name, kind] of [['scene-a', 'nosr'], ['scene-a', 'product'], ['scene-b', 'nosr']]) {
-        viewer.insertSceneCard({ name: name + '-' + kind, W: 128, H: 128, sceneId: name + kind,
-          sceneDir: '/mock/' + name, lqPath: null, stageKind: kind }, { id: name + kind, name,
-          size_bytes: 0, W: 128, H: 128, lq_path: null, hasPreview: false });
-      }
-    });
-    await page.click('.qc-smart');
-    await page.waitForFunction(() => document.querySelector('[data-e2e=batch-draft] .primary')?.textContent.includes('已选 2 组'));
-    assert.equal(createCalls, 0);
-    assert.equal(await page.$$eval('.sequence-row', rows => rows.length), 2);
-    const labels = await page.$$eval('.sequence-row .ordinal', rows => rows.map(r => r.textContent));
-    const viewerLabels = await page.$$eval('.ord', rows => [...new Set(rows.map(r => r.textContent.trim().padStart(2, '0')))]);
-    assert.deepEqual(labels, viewerLabels);
-    assert.equal(await page.$eval('[data-e2e=batch-draft]', e => e.textContent.includes('/mock/')), false);
-    assert.equal(await page.$('[data-e2e=batch-draft] textarea'), null);
-    await page.click('.selection button:last-child');
-    assert.equal(await page.$eval('[data-e2e=batch-draft] .primary', e => e.disabled), true);
+    await page.click('.qc-smart'); await page.waitForFunction(()=>document.querySelector('[data-e2e=batch-draft] .primary')?.textContent.includes('已选 2 组'));
+    assert.equal(createCalls,0);
+    await page.click('.selection button:last-child');assert.equal(await page.$eval('.primary',e=>e.disabled),true);
     await page.click('.selection button:first-of-type');
-    const compactRows = await page.$$eval('.sequence-row', rows => rows.map(row => ({ height: row.getBoundingClientRect().height,
-      badge: row.querySelector('.state').textContent, count: row.querySelector('.count') })));
-    assert.ok(compactRows.every(row => row.height <= 42 && row.badge === '可修复' && row.count === null));
-    await page.screenshot({ path: path.join(__dirname, 'artifacts/batch-sequences-draft.png') });
-    // Production clients use HTTP: reproduce an origin without randomUUID.
-    await page.evaluate(() => Object.defineProperty(crypto, 'randomUUID', { value: undefined, configurable: true }));
-    await page.click('[data-e2e=batch-draft] .primary');
-    await page.waitForSelector('[data-e2e=batch-status]');
-    assert.equal(await page.$('[data-e2e=batch-draft]'), null);
-    assert.equal(createCalls, 1);
-    // Explicitly switching tabs preserves store association and snapshot.
-    await page.click('.ctx-tab:nth-child(2)');
-    await page.click('.ctx-tab:first-child');
-    assert.match(await page.$eval('[data-e2e=batch-task-dock]', e => e.textContent), /50 景/);
-    await page.reload();
-    await page.waitForSelector('.qc-smart');
-    await page.click('.qc-smart');
-    await page.waitForSelector('[data-e2e=batch-task-expand]');
-    assert.equal(await page.$eval('[data-e2e=batch-task-expand]', e => e.getAttribute('aria-expanded')), 'true');
-    assert.equal(await page.$eval('[data-e2e=batch-draft] .primary', e => e.disabled), true);
-    assert.equal(await page.$$eval('.ctx-tabs .ctx-tab', es => es.length), 2);
-    await page.evaluate(() => window.dispatchEvent(new CustomEvent('batch-task-open')));
-    await page.click('.task-body > details > summary');
-    await page.waitForSelector('[data-e2e=batch-result] button');
-    await page.evaluate(() => [...document.querySelectorAll('[data-e2e=batch-result] button')].find(b => b.textContent.includes('交给 Agent')).click());
-    await page.waitForFunction(() => document.querySelector('.ctx-tab:nth-child(2)').classList.contains('on'));
-    assert.match(await page.$eval('.at-input', e => e.value), /g50/);
-    assert.equal(await page.$eval('.at-input', e => e.disabled), false);
-    await page.click('.ctx-tab:first-child');
-    await page.setViewport({ width: 1024, height: 720, deviceScaleFactor: 1 });
-    const layout = await page.$eval('.ctx-rail', e => ({ width: e.getBoundingClientRect().width, overflow: e.scrollWidth > e.clientWidth }));
-    assert.equal(layout.width, 400);
-    assert.equal(layout.overflow, false);
-    await page.screenshot({ path: path.join(__dirname, 'artifacts/batch-sequences-monitor.png') });
-    await page.click('.qc-smart');
-    await page.waitForSelector('[data-e2e=batch-draft]', { visible: true });
-    assert.equal(await page.$eval('[data-e2e=batch-draft] .primary', e => e.disabled), true);
-    await page.screenshot({ path: path.join(__dirname, 'artifacts/batch-sequences-empty.png') });
-    reportAvailable = false;
-    await page.evaluate(() => document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('batchGoal').refreshSnapshot());
-    await page.evaluate(() => window.dispatchEvent(new CustomEvent('batch-task-open')));
-    await page.click('.task-body > details > summary');
-    await page.waitForSelector('[data-e2e=batch-panel]');
-    assert.equal(await page.$('[data-e2e=batch-result]'), null);
+    await page.screenshot({path:path.join(__dirname,'artifacts/batch-mission-draft.png')});
+    await page.evaluate(()=>Object.defineProperty(crypto,'randomUUID',{value:undefined,configurable:true}));
+    await page.click('[data-e2e=batch-draft] .primary');await page.waitForSelector('[data-e2e=batch-status]');assert.equal(createCalls,1);
+    await openMenu();await page.click('[data-e2e=batch-cancel]');assert.equal(cancelCalls,0);
+    await page.click('[data-e2e=batch-cancel-confirm]');await page.waitForFunction(()=>document.querySelector('[data-e2e=batch-status]')?.textContent.includes('已取消'));assert.equal(cancelCalls,1);
     assert.deepEqual(errors, []);
-    console.log('Batch Panel browser checks passed: two tabs, fixed summary, numbered sequence selection and single-click frozen submission, refresh recovery, 50-scene snapshot tracks/current/queue, collapsed event timeline with raw payload, control 409 then success notice, controlled report modal, follow exits on user intent');
+    console.log('Quiet Mission browser checks passed: two tabs, fixed summary, numbered sequence selection and single-click frozen submission, refresh recovery, 50-scene snapshot tracks/current/queue, collapsed event timeline with raw payload, control 409 then success notice, controlled report modal, follow exits on user intent');
   } finally {
     for (const res of openStreams) {
       try { res.destroy(); } catch { /* already closed */ }

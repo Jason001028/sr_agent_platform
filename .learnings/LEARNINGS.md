@@ -70,6 +70,18 @@ The batch sequence selector should match QcListPanel's compact bordered rows (4p
 
 Do not call crypto.randomUUID() in the intranet HTTP deployment. Reuse the existing spatialId() implementation for non-secret request identities, preserve the same frozen manifest/request_key on retry, and test actual start/selectGoal with randomUUID absent (also with crypto absent). Secure localhost browser tests alone did not cover this deployment constraint.
 
+## 2026-11-07 correction: Batch PAN/NOSR aspect checks must match Viewer
+
+Production PAN/NOSR dimensions include non-integer resampling and independent axis rounding (documented example: 30831×30948 / 15768×15823). Exact width/height cross-product equality in batch_difference rejected these valid production pairs even though Viewer already accepted them. Use the same symmetric relative aspect deviation and inclusive 1% tolerance as tourCompare/flicker; keep same-scene, frozen revision/resource and GeoTIFF contradiction checks independent. Test real non-integer dimension examples, boundary rejection and source-grid mask generation rather than only exact 2× square TIFF fixtures.
+
+## 2026-11-07 correction: keep continuation navigation visible through transient states
+
+DiffContinueButton used canContinueScene for v-if, conflating navigation availability with heat visibility and temporary compare/draw states. Separate visibility from disabled reasons. A reactive continuing flag must cover candidate loading, activation, analysis and result-layer decoding, including the move into the last scene; clear it only after the awaited operation settles. Test delayed stages and double clicks, not only the finished first/last scene screenshots.
+
+## 2026-11-07 correction: missing tour metadata is not a negative PAN identity
+
+Normal scene open/drop/ensureSceneImage paths can carry the authoritative input kind, Scene ID, revision and dimensions without tourIdentity. Auto-draw incorrectly treated that missing optional certificate as proof that only NOSR/SR was open. Accept a confirmed input among the analyzed A/B, retaining frozen autoMask source transforms and all supplied identity contradictions; revalidate current server kind, exact Scene ID, revision and dimensions before staging and before committing editable vectors. Do not redirect an NOSR/SR-only result to a third PAN merely because that file is active. Test both PAN A/B positions with absent local certificates against a server that does return certificates.
+
 ## 2026-11-05 correction: production tour registration evidence
 
 The initial tour implementation assumed GeoTIFF tags were available on SR production outputs. `SR_code/util.py::writeTiff` creates TIFFs and writes pixels without setting a geotransform or projection. Scene identity, registration evidence and candidate eligibility must be reported separately. Display rejected candidates with reasons; never silently turn a registration refusal into an empty selector or infer verified alignment from same-directory names. Keep old and ori as distinct roles. Existing loaded Scene IDs may supply bounded candidates, but not substitute for registration proof.

@@ -2,7 +2,7 @@
 /**
  * DiffContinueButton.vue — 「延续到下一景」
  * ------------------------------------------------------------------
- * 只在本景已有热力结果、查看器是单图、左侧列表还有下一景时出现，位置紧挨
+ * 本景已有差异结果且左侧列表还有下一景时出现，临时操作中保留并置灰，位置紧挨
  * 「差异定位」。视觉沿用鹰眼导航的工具键：28px、tb 令牌、圆角 8、浅阴影，
  * 默认半透明，悬停 / 键盘聚焦时恢复不透明。
  *
@@ -16,17 +16,17 @@ const diff = useDiffStore();
 
 <template>
   <button
-    v-if="diff.canContinueScene"
+    v-if="diff.showContinueScene"
     type="button"
     class="diff-continue"
     data-e2e="diff-continue"
-    :disabled="diff.busy"
+    :disabled="!diff.canContinueScene"
     aria-label="延续到下一景"
-    title="沿用当前 A / B 的角色与显示方式，直接分析左侧列表里的下一景热力图"
+    :title="diff.continueSceneReason || '沿用当前 A / B 的角色与显示方式，直接分析左侧列表里的下一景'"
     @pointerdown.stop
     @click="diff.continueToNextScene()"
   >
-    {{ diff.busy ? '续景中…' : '延续到下一景' }}
+    {{ diff.continuing ? '续景中…' : diff.busy ? '分析中…' : '延续到下一景' }}
   </button>
 </template>
 

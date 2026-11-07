@@ -10,7 +10,7 @@ import {
   goalStatusLabel, modeBadge, phaseLabel, trackText,
 } from '../lib/batchUi.js';
 
-const props = withDefaults(defineProps<{ snapshot: BatchSnapshot; variant?: 'all' | 'monitor' | 'report' }>(), { variant: 'all' });
+const props = withDefaults(defineProps<{ snapshot: BatchSnapshot; variant?: 'all' | 'monitor' | 'report'; reportLabel?: string }>(), { variant: 'all', reportLabel: '查看结果' });
 const batch = useBatchGoalStore();
 const viewer = useViewerStore();
 
@@ -108,10 +108,11 @@ function prettyJson(value: unknown): string {
         v-else-if="variant !== 'report' && !terminal"
         type="button"
         data-e2e="batch-pause"
+        title="暂停后续派发，已提交的 SR 作业继续运行"
         :disabled="!canPause"
         @click="run('pause')"
       >暂停</button>
-      <details v-if="variant !== 'report'"><summary>更多控制</summary>
+      <div v-if="variant !== 'report' && !terminal" class="cancel-control">
       <template v-if="!confirmingCancel">
         <button type="button" class="danger" data-e2e="batch-cancel"
                 :disabled="!canCancel" @click="confirmingCancel = true">
@@ -119,66 +120,31 @@ function prettyJson(value: unknown): string {
         </button>
       </template>
       <template v-else>
-        <span class="bc-confirm-text">取消后未开始的场景不再派发。</span>
+        <span class="bc-confirm-text">取消后不再派发新场景；已提交的 SR 作业不会终止。</span>
         <button type="button" class="danger solid" data-e2e="batch-cancel-confirm"
                 :disabled="batch.controlBusy"
                 @click="run('cancel')">确认取消</button>
         <button type="button" @click="confirmingCancel = false">返回</button>
       </template>
-      </details>
+      </div>
       <button
-        v-if="variant !== 'monitor'"
+        v-if="variant !== 'monitor' && reportReady"
         type="button"
         class="report"
         data-e2e="batch-report"
         :disabled="!reportReady || reportBusy"
         :title="reportReady ? '打开只读批次报告' : '报告尚未生成'"
         @click="openReport"
-      >{{ reportBusy ? '读取中…' : '查看完整报告' }}</button>
+      >{{ reportBusy ? '读取中…' : reportLabel }}</button>
     </div>
 
     <p v-if="notice" class="bc-notice">{{ notice }}</p>
     <p v-if="batch.controlError" class="bc-error">{{ batch.controlError }}</p>
     <p v-if="reportError" class="bc-error">{{ reportError }}</p>
-    <p v-if="variant !== 'report'" class="bc-hint">
-      暂停/取消只影响派发；已经提交给外部调度器的 SR 作业不会被终止。
-    </p>
+
   </section>
 </template>
 
 <style scoped>
-.batch-controls {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  padding: 9px 10px;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--r-card);
-}
-.bc-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.bc-actions button {
-  padding: 3px 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-ctrl);
-  background: var(--surface-2);
-  color: var(--ink-sub);
-  font: inherit;
-  font-size: 11px;
-  cursor: pointer;
-}
-.bc-actions button:hover:not(:disabled) { background: var(--chrome); }
-.bc-actions button:disabled { opacity: 0.45; cursor: default; }
-.bc-actions button.primary { color: var(--accent-deep); border-color: var(--accent-soft); }
-.bc-actions button.danger { color: var(--err); }
-.bc-actions button.danger.solid {
-  color: var(--err);
-  background: var(--err-bg);
-  border-color: var(--err-line);
-}
-.bc-actions button.report { margin-left: auto; color: var(--accent-deep); }
-.bc-confirm-text { color: var(--ink-faint); font-size: 10px; }
-.bc-notice { margin: 0; color: var(--ink-sub); font-size: 10.5px; line-height: 1.4; }
-.bc-error { margin: 0; color: var(--err); font-size: 10.5px; line-height: 1.4; }
-.bc-hint { margin: 0; color: var(--ink-faint); font-size: 9.5px; line-height: 1.35; }
+.batch-controls{display:grid;gap:7px;border:0;background:transparent;padding:0;font:inherit}.bc-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.bc-actions button{font:inherit;font-size:12px;cursor:pointer;padding:7px 9px;min-height:30px;background:white;border:1px solid var(--line);border-radius:6px;color:var(--ink-sub)}.bc-actions button:hover:enabled{background:#f5f8f6}.bc-actions button:disabled{opacity:.4;cursor:default}.bc-actions button.primary{color:var(--accent-deep)}.cancel-control{border-top:1px solid var(--line);padding-top:8px;flex-basis:100%}.bc-actions button.danger{color:#ac594e}.bc-actions button.danger.solid{background:#faf0ee;border-color:#eedad5}.bc-confirm-text{display:block;font-size:11px;color:var(--ink-sub);line-height:1.65;margin-bottom:6px}.bc-actions button.report{margin:0;min-height:36px;border:0;background:#285b50;color:white;width:100%;border-radius:8px}.bc-notice,.bc-error{font-size:11px;line-height:1.6;overflow-wrap:anywhere;margin:0}.bc-notice{color:var(--ink-sub)}.bc-error{color:#ac594e}
 </style>

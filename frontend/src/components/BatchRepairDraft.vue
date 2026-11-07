@@ -73,12 +73,12 @@ async function start() {
     <p v-if="!groups.length">左侧暂无已关联生产序列。</p>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <p class="note">自动配对、检测、绘制掩码并提交验收；沿用生产提交限制和成果保护。</p>
-    <button class="primary" :disabled="busy || loading || !chosen.length" @click="start">{{ busy ? '正在核验并创建任务…' : `开始修复 · 已选 ${chosen.length} 组` }}</button>
+    <button class="primary" :disabled="busy || loading || !chosen.length" @click="start">{{ busy ? '正在核验并创建任务…' : `开始智能修复 · 已选 ${chosen.length} 组` }}</button>
   </div>
 </template>
 <style scoped>
-.draft { padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; color: var(--ink-sub); font-size: 12px; min-width: 0; max-height: 440px; box-sizing: border-box; }
-.sequence-list { display: flex; flex-direction: column; gap: 3px; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+.draft { padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 8px; color: var(--ink-sub); font-size: 12px; min-width: 0;  box-sizing: border-box; }
+.sequence-list { display: flex; flex-direction: column; gap: 3px; min-height: 0; }
 .selection, .draft > p, .primary { flex-shrink: 0; }
 p { margin: 0; line-height: 1.6; overflow-wrap: anywhere; }
 .selection { display: flex; gap: 12px; align-items: center; } .selection span { margin-right: auto; }
@@ -86,12 +86,12 @@ button { font: inherit; cursor: pointer; color: var(--accent-deep); background: 
 button:disabled { opacity: .5; cursor: default; }
 .sequence-row { display: grid; grid-template-columns: 14px 22px minmax(0, 1fr); gap: 2px 6px; align-items: center; padding: 4px 7px; border: 1px solid var(--line); border-radius: var(--r-ctrl); background: var(--surface); cursor: pointer; flex-shrink: 0; }
 .sequence-row:hover { border-color: var(--accent-2); }
-.sequence-row.selected { border-color: var(--accent-2); background: var(--accent-soft); }
+.sequence-row.selected { border-color: #cdded4; background: #f6f9f7; }
 input { accent-color: #245b50; margin: 0; } .ordinal { color: #245b50; font-size: 11px; line-height: 16px; font-variant-numeric: tabular-nums; }
 .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); font-size: 11.5px; line-height: 16px; }
 .state { grid-column: 3; justify-self: end; border-radius: var(--r-pill, 999px); padding: 0 6px; font-size: 10px; line-height: 14px; white-space: nowrap; color: #245b50; background: #e8f2ed; }
 .state.issue { color: #9b5145; background: #f8eeeb; cursor: help; } .state.pending { color: var(--ink-sub); background: var(--surface-2); }
 .error { color: #9b5145; }
-.note { font-size: 11px; } .primary { background: #245b50; color: white; padding: 10px; border-radius: 6px; width: 100%; }
+.note { display: none; } .primary { position: sticky; bottom: 8px; z-index: 1; background: #245b50; color: white; padding: 10px; border-radius: 6px; width: 100%; }
 .primary:disabled { background: #eef1f0; color: #8a9692; opacity: 1; }
 </style>

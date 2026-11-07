@@ -1,112 +1,27 @@
 <script setup lang="ts">
-/** 三维进度轨：检测 D/A、提交 S/R、验证 V/R。
- *  比例只画条；数字是快照事实。R=0 且检测未完成不写成「不适用」。 */
-import { computed, ref, watch } from 'vue';
-import type { BatchProgressTrack, BatchSnapshot } from '../lib/api.js';
-import { repairTrackText, trackPercent, trackText } from '../lib/batchUi.js';
-
+import { computed } from 'vue';
+import type { BatchSnapshot } from '../lib/api';
+import { missionStage, missionSummary, missionTrackText, terminalMission } from '../lib/batchMission';
+import { trackPercent } from '../lib/batchUi';
 const props = defineProps<{ snapshot: BatchSnapshot }>();
-
-const tracks = computed(() => {
-  const progress = props.snapshot.progress;
-  return [
-    {
-      key: 'detection', label: '检测', short: 'D/A',
-      done: progress.detection.done, total: progress.detection.total,
-      track: progress.detection as BatchProgressTrack,
-      hint: progress.detection.known ? '' : '检测尚未完成',
-    },
-    {
-      key: 'submission', label: '提交 SR', short: 'S/R',
-      done: progress.submission.done, total: progress.submission.total,
-      track: progress.submission as BatchProgressTrack,
-      hint: !progress.submission.known && progress.submission.applicable ? '当前已知需修复 · 检测尚未结束' : repairTrackText(progress.submission),
-    },
-    {
-      key: 'verification', label: '结果验收', short: 'V/R',
-      done: progress.verification.done, total: progress.verification.total,
-      track: progress.verification as BatchProgressTrack,
-      hint: !progress.verification.known && progress.verification.applicable ? '当前已知需修复 · 检测尚未结束' : repairTrackText(progress.verification),
-    },
-  ];
-});
-
-const increments = ref<Record<string, number>>({});
-watch(() => props.snapshot, (next, previous) => {
-  if (!previous || next.goal.goal_id !== previous.goal.goal_id) { increments.value = {}; return; }
-  for (const key of ['detection', 'submission', 'verification'] as const) {
-    for (const field of ['done', 'total'] as const) {
-      if (next.progress[key][field] > previous.progress[key][field]) increments.value[key + field] = (increments.value[key + field] ?? 0) + 1;
-    }
-  }
-});
-function percent(track: BatchProgressTrack): number {
-  return trackPercent(track) ?? 0;
-}
+const tracks = computed(() => [
+  { key: 'detection' as const, label: '检测', path: 'M7 12a5 5 0 1 1 7-7 5 5 0 0 1-7 7m7 0 4 4' },
+  { key: 'submission' as const, label: 'SR 提交', path: 'm5 15 9-9 2 2-9 9H5v-2M12 6l3 3' },
+  { key: 'verification' as const, label: '验收', path: 'm4 10 4 4 8-8' },
+].map(t => ({ ...t, track: props.snapshot.progress[t.key],
+  active: !terminalMission(props.snapshot.goal.status) && props.snapshot.goal.status !== 'PAUSED' && missionStage(props.snapshot) === t.key,
+  attention: t.key === 'detection' && missionSummary(props.snapshot).issueFocus && props.snapshot.counts.submitted === 0 && props.snapshot.counts.detected < props.snapshot.counts.total,
+})));
 </script>
-
 <template>
-  <section class="batch-tracks" data-e2e="batch-tracks">
-    <div v-for="track in tracks" :key="track.key" class="bt-row">
-      <div class="bt-head">
-        <span class="bt-label">{{ track.label }} <em>{{ track.short }}</em></span>
-        <span class="bt-value" :class="{ muted: !track.track.applicable }">
-          <template v-if="track.track.applicable"><span :key="track.key + 'done' + increments[track.key + 'done']" :class="{ 'sr-flow-count just-updated': increments[track.key + 'done'] }">{{ track.done }}</span> / <span :key="track.key + 'total' + increments[track.key + 'total']" :class="{ 'sr-flow-count just-updated': increments[track.key + 'total'] }">{{ track.total }}</span></template><template v-else>{{ trackText(track.track) }}</template>
-        </span>
-      </div>
-      <div
-        class="bt-bar"
-        :class="{ empty: !track.track.applicable }"
-        role="progressbar"
-        :aria-label="track.label"
-        :aria-valuenow="track.track.applicable ? track.done : 0"
-        :aria-valuemax="track.track.applicable ? track.total : 100"
-      >
-        <span class="bt-fill" :style="{ width: percent(track.track) + '%' }" />
-      </div>
-      <p v-if="track.hint" class="bt-hint">{{ track.hint }}</p>
+  <div class="phase-track" data-e2e="batch-tracks" aria-label="独立阶段进度">
+    <div v-for="t in tracks" :key="t.key" class="phase" :class="{ active: t.active, complete: t.track.known && t.track.applicable && t.track.total > 0 && t.track.done >= t.track.total, inactive: t.track.known && !t.track.applicable, attention: t.attention }" :data-stage="t.key" :aria-current="t.active ? 'step' : undefined">
+      <span class="phase-node"><svg viewBox="0 0 20 20" aria-hidden="true"><path :d="t.path"/></svg></span>
+      <span class="phase-label">{{ t.label }}</span><strong>{{ missionTrackText(t.track) }}</strong>
+      <span v-if="t.track.known && t.track.applicable && t.track.total > 0" class="phase-progress" role="progressbar" :aria-label="t.label" :aria-valuenow="t.track.done" :aria-valuemin="0" :aria-valuemax="t.track.total"><i :style="{ width: `${trackPercent(t.track) ?? 0}%` }"/></span>
     </div>
-  </section>
+  </div>
 </template>
-
 <style scoped>
-.batch-tracks {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--r-card);
-}
-.bt-row { display: flex; flex-direction: column; gap: 4px; }
-.bt-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-.bt-label { color: var(--ink-sub); font-size: 11px; font-weight: 600; }
-.bt-label em {
-  margin-left: 3px;
-  font-style: normal;
-  font-weight: 400;
-  color: var(--ink-faint);
-  font-size: 9.5px;
-}
-.bt-value { color: var(--ink); font-size: 12px; font-variant-numeric: tabular-nums; }
-.bt-value.muted { color: var(--ink-faint); font-size: 11px; }
-.bt-bar {
-  height: 5px;
-  overflow: hidden;
-  border-radius: var(--r-pill);
-  background: var(--surface-3);
-}
-.bt-bar.empty { background: var(--surface-2); border: 1px dashed var(--line); }
-.bt-fill {
-  display: block;
-  height: 100%;
-  min-width: 0;
-  border-radius: inherit;
-  background: var(--accent-deep);
-  transition: width 350ms ease;
-}
-.bt-hint { margin: 0; color: var(--ink-faint); font-size: 10px; line-height: 1.3; }
-.batch-tracks { padding: 8px 0; border: 0; border-radius: 0; gap: 12px; }
-.bt-row:nth-child(2) .bt-fill { background: #C99358; } .bt-fill { background: #6484BA; } .bt-row:last-child .bt-fill { background: #438C7B; }
+.phase-track{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;border-top:1px solid var(--line);padding-top:16px}.phase{display:flex;flex-direction:column;gap:6px;position:relative;min-width:0;color:#819188}.phase:not(:last-child)::after{content:'';position:absolute;top:12px;left:30px;right:-7px;height:1px;background:var(--line);transition:background 220ms ease}.phase-node{display:grid;place-items:center;width:24px;height:24px;border:1px solid var(--line);border-radius:7px;background:#f5f8f6;transition:color 220ms,background 220ms,border-color 220ms}.phase-node svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}.phase-label{font-size:11px}.phase strong{font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;color:#53665c}.phase.active .phase-node{color:#285b50;background:#edf4ef;border-color:#c8dbd0}.phase.complete:not(:last-child)::after{background:#7ba38d}.phase.complete .phase-node{color:#285b50;background:#edf4ef;border-color:#c8dbd0}.phase.active .phase-label{color:#285b50}.phase.attention .phase-node{color:#ac594e;background:#fbf2f0;border-color:#eedbd5}.phase.inactive{opacity:.55}.phase-progress{height:2px;background:#edf1ee;border-radius:2px;overflow:hidden;max-width:80px}.phase-progress i{display:block;height:100%;background:#658e7b;transition:width 220ms ease}.attention .phase-progress i{background:#ac594e}@media(prefers-reduced-motion:reduce){.phase::after,.phase-node,.phase-progress i{transition:none}}
 </style>

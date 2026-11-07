@@ -7,13 +7,15 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { launchBrowser } = require('./launchBrowser');
 const root = path.resolve(__dirname, '..'), dist = path.join(root, 'frontend/dist');
+const venvPython = path.join(root, '.venv/Scripts/python.exe');
+const python = process.env.SR_TEST_PYTHON || (fs.existsSync(venvPython) ? venvPython : 'python');
 const artifacts = path.join(__dirname, 'artifacts');
 const mime = { '.html':'text/html', '.js':'text/javascript', '.css':'text/css', '.svg':'image/svg+xml' };
 const forbidden = [], metrics = [];
 let calls = 0, legacy = false;
 function analyze(body) {
   return new Promise((resolve, reject) => {
-    const child = spawn(path.join(root, '.venv/Scripts/python.exe'), ['-c',
+    const child = spawn(python, ['-c',
       'import sys,json; from backend.services.image_diff import analyze_payload; print(json.dumps(analyze_payload(json.load(sys.stdin)),allow_nan=False))'],
       { cwd:root, windowsHide:true, env:{...process.env, PYTHONUTF8:'1'} });
     let out = '', err = '';
@@ -81,8 +83,10 @@ let browser;
     await page.waitForFunction(() => stores.v.recs.length===2 && stores.v.recs.every(r=>r.src&&r.thumb&&r.route==='jpg'));
     await page.evaluate(() => {
       const {v,d}=stores;
+      v.recs.sort((a,b)=>Number(a.name.includes('NOSR'))-Number(b.name.includes('NOSR')));
       v.recs.forEach((r,i)=>{r.srcRev='fixture-v1';r.sceneDir='/synthetic/scene';r.stageKind=i?'nosr':'input';
-        r.tourIdentity={id:r.id,sequence:'fixture',role:i?'nosr':'pan',width:r.W,height:r.H,sourceRevision:r.srcRev};});
+        // Normal open/drop paths have confirmed kind/revision but no tour certificate.
+        delete r.tourIdentity;});
       d.aId=v.recs[0].id;d.bId=v.recs[1].id;d.advanced.blur=false;d.advanced.openKernel=1;d.advanced.closeKernel=1;
     });
     assert.equal(await page.evaluate(()=>stores.d.analyze()),true);

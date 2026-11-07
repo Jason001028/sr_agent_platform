@@ -25,6 +25,9 @@ const server = http.createServer((req, res) => {
 
 let browser;
 let analyzeCalls = 0;
+let holdAnalysis = false;
+let releaseAnalysis;
+let heldRequestReady;
 (async () => {
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   try {
@@ -38,6 +41,9 @@ let analyzeCalls = 0;
       if (!req.url().includes('/api/diff/analyze')) return req.continue();
       analyzeCalls++;
       try {
+        if (holdAnalysis) {
+          await new Promise(resolve => { releaseAnalysis = resolve; heldRequestReady?.(); });
+        }
         const body = JSON.parse(req.postData());
         const fixture = await page.evaluate(async (body) => {
           const image = new Image();
@@ -133,11 +139,36 @@ let analyzeCalls = 0;
     assert.equal(style.radius, '8px');
     assert.equal(style.text, '延续到下一景');
     await page.screenshot({ path: path.join(__dirname, 'artifacts', 'diff-continue-button.png') });
+
+    // Display-only switches do not remove navigation; temporary modes disable it.
+    await page.evaluate(() => { testStores.diff.resultVisible = false; testStores.diff.display = 'regions'; });
+    await page.waitForFunction(() => !!document.querySelector('[data-e2e=diff-continue]') && !document.querySelector('[data-e2e=diff-continue]').disabled);
+    await page.evaluate(() => testStores.viewer.enterDraw());
+    await page.waitForFunction(() => document.querySelector('[data-e2e=diff-continue]')?.disabled);
+    assert.match(await page.$eval('[data-e2e=diff-continue]', e => e.title), /绘制/);
+    await page.evaluate(() => { testStores.viewer.exitDraw(); testStores.viewer.setCompareMode('split'); });
+    await page.waitForFunction(() => document.querySelector('[data-e2e=diff-continue]')?.disabled);
+    assert.match(await page.$eval('[data-e2e=diff-continue]', e => e.title), /退出对比/);
+    await page.evaluate(() => {
+      testStores.viewer.setCompareMode('off'); testStores.diff.display = 'overlay'; testStores.diff.resultVisible = true;
+    });
+    await page.waitForFunction(() => !document.querySelector('[data-e2e=diff-continue]').disabled);
+    assert.equal(analyzeCalls, 1, '临时状态切换不重新分析');
     await page.hover('[data-e2e=diff-continue]');
     await page.waitForFunction(() =>
       getComputedStyle(document.querySelector('[data-e2e=diff-continue]')).opacity === '1');
 
+    const heldRequest = new Promise(resolve => { heldRequestReady = resolve; });
+    holdAnalysis = true;
     await page.click('[data-e2e=diff-continue]');
+    await heldRequest;
+    await page.waitForFunction(() => testStores.diff.busy && testStores.diff.continuing);
+    const during = await page.$eval('[data-e2e=diff-continue]', e => ({ disabled: e.disabled, text: e.textContent.trim() }));
+    assert.deepEqual(during, { disabled: true, text: '续景中…' });
+    assert.equal(await page.evaluate(() => testStores.diff.continueToNextScene()), false);
+    assert.equal(analyzeCalls, 2);
+    holdAnalysis = false;
+    releaseAnalysis();
     await page.waitForFunction((n) =>
       !testStores.diff.busy && testStores.diff.aId === n.b1 && testStores.diff.bId === n.b2, {}, ids);
     for (let i = 0; i < 100 && analyzeCalls < 2; i++) await new Promise((r) => setTimeout(r, 50));
@@ -152,7 +183,7 @@ let analyzeCalls = 0;
     await page.screenshot({ path: path.join(__dirname, 'artifacts', 'diff-continue-next.png') });
 
     assert.deepEqual(errors, []);
-    console.log('PASS: 延续到下一景 appears beside 差异定位, keeps display params, switches scene, reanalyzes once');
+    console.log('PASS: 延续到下一景 survives display changes, disables in draw/compare, stays during delayed final-scene analysis, blocks duplicate navigation, preserves roles and parameters');
   } finally {
     if (browser) await browser.close();
     await new Promise((r) => server.close(r));

@@ -215,6 +215,8 @@ async function readyAuto() {
   })) }));
   mocks.api.mockImplementation(async (_cfg, req) => {
     const r = fakeResult();
+    r.imageA = { ...r.imageA, ...req.image_a };
+    r.imageB = { ...r.imageB, ...req.image_b };
     r.autoMask = {
       analysis_id: 'analysis-1', parameter_version: 'v1', margin: 'standard',
       coordinate_space: 'analysis_pixel', analysis_size: [32, 32], truncated: false, elapsed_ms: 5,
@@ -235,6 +237,54 @@ async function readyAuto() {
 }
 
 describe('automatic polygon staging and identity isolation', () => {
+  it.each(['PAN-A', 'PAN-B', 'both-missing'])('draws confirmed input without a tour certificate (%s)', async mode => {
+    const d = await readyAuto();
+    const v = mocks.viewer;
+    const items = v.recs.slice(0, 2).map((r: any) => ({
+      id: r.sceneId, exists: true, srcRev: r.srcRev, W: r.W, H: r.H,
+      kind: r.stageKind, tourIdentity: { ...r.tourIdentity },
+    }));
+    v.recs[0].sceneDir = v.recs[1].sceneDir = '/production/scene';
+    delete v.recs[0].tourIdentity;
+    if (mode === 'both-missing') delete v.recs[1].tourIdentity;
+    if (mode === 'PAN-B') { d.aId = 2; d.bId = 1; }
+    mocks.siblings.mockResolvedValue({ lqPath: '/production/scene', items });
+    expect(await d.analyze()).toBe(true);
+    expect(d.autoDrawReason).toBe('');
+    vi.stubGlobal('window', { matchMedia: () => ({ matches: true }) });
+    expect(await d.autoDraw()).toBe(true);
+    expect(v.addMaskPolygonBatch).toHaveBeenCalledTimes(1);
+    expect(v.addMaskPolygonBatch.mock.calls[0][0]).toBe(1);
+    expect(mocks.siblings).toHaveBeenCalledTimes(2); // before staging and before commit
+  });
+
+  it('rejects a missing-certificate input if the server identifies it as NOSR', async () => {
+    const d = await readyAuto();
+    const v = mocks.viewer;
+    v.recs[0].sceneDir = v.recs[1].sceneDir = '/production/scene';
+    delete v.recs[0].tourIdentity;
+    expect(await d.analyze()).toBe(true);
+    mocks.siblings.mockResolvedValue({ items: v.recs.slice(0, 2).map((r: any) => ({
+      id: r.sceneId, exists: true, srcRev: r.srcRev, W: r.W, H: r.H,
+      kind: 'nosr', tourIdentity: { role: 'nosr', sequence: '/production/scene' },
+    })) });
+    expect(await d.autoDraw()).toBe(false);
+    expect(d.error).toContain('源文件');
+    expect(v.addMaskPolygonBatch).not.toHaveBeenCalled();
+  });
+
+  it('does not draw onto an open PAN that was not part of the analyzed A/B', async () => {
+    const d = await readyAuto();
+    const v = mocks.viewer;
+    v.recs[0].stageKind = 'nosr'; v.recs[1].stageKind = 'product';
+    v.recs.push(sceneRec(4, 'PAN.tif', '/production/scene', 'input', 'PAN'));
+    v.activeId = 4;
+    d.resultKey = d.currentKey();
+    expect(d.autoDrawReason).toContain('当前分析的 A/B');
+    expect(await d.autoDraw()).toBe(false);
+    expect(v.addMaskPolygonBatch).not.toHaveBeenCalled();
+  });
+
   it('works outside heat mode, stages SVG vectors, and atomically commits once', async () => {
     const d = await readyAuto(); vi.useFakeTimers();
     d.display = 'regions'; d.resultVisible = false;
@@ -645,25 +695,104 @@ describe('diff store — 延续到下一景', () => {
     return { v, pan1, nosr1, pan2, sr2, nosr2 };
   }
 
-  it('只在本景有热力结果、单图显示且还有下一景时出现', async () => {
+  it('显示切换不摘掉按钮，临时对比/绘制/忙碌只禁用，清除或末景才收起', async () => {
     const { v, pan1, nosr1 } = twoSceneViewer();
     const diff = useDiffStore();
     diff.aId = pan1.id; diff.bId = nosr1.id;
     mocks.api.mockResolvedValue(fakeResult());
 
     expect(diff.canContinueScene).toBe(false);       // 还没有结果
+    expect(diff.showContinueScene).toBe(false);
     await diff.analyze();
-    diff.display = 'regions';
-    expect(diff.canContinueScene).toBe(false);       // 原图标记不是热力图
-    diff.display = 'overlay';
-    expect(diff.canContinueScene).toBe(true);
+    for (const mode of ['regions', 'overlay', 'heat'] as const) {
+      diff.display = mode;
+      diff.resultVisible = false;
+      expect(diff.showContinueScene).toBe(true);
+      expect(diff.canContinueScene).toBe(true);
+    }
 
     v.compareOn = true;
     expect(diff.canContinueScene).toBe(false);       // 对比上下文不算单景图
+    expect(diff.showContinueScene).toBe(true);
+    expect(diff.continueSceneReason).toContain('退出对比');
+    expect(await diff.continueToNextScene()).toBe(false);
+    expect(v.activate).not.toHaveBeenCalled();
     v.compareOn = false;
+    v.drawMode = true;
+    expect(diff.showContinueScene).toBe(true);
+    expect(diff.canContinueScene).toBe(false);
+    expect(diff.continueSceneReason).toContain('绘制');
+    v.drawMode = false;
+    diff.busy = true;
+    expect(diff.showContinueScene).toBe(true);
+    expect(diff.canContinueScene).toBe(false);
+    diff.busy = false;
+    expect(diff.canContinueScene).toBe(true);
 
     v.activeRec = v.recs[4];                         // 末景没有下一景
     expect(diff.canContinueScene).toBe(false);
+    expect(diff.showContinueScene).toBe(false);
+    v.activeRec = pan1;
+    expect(diff.showContinueScene).toBe(true);
+    diff.clearResults();
+    expect(diff.showContinueScene).toBe(false);
+  });
+
+  it('续到末景的激活、请求与解码全程保留按钮并禁止重复导航', async () => {
+    const { v, pan1, nosr1, pan2, nosr2 } = twoSceneViewer();
+    const diff = useDiffStore();
+    diff.aId = pan1.id; diff.bId = nosr1.id;
+    mocks.api.mockResolvedValueOnce(fakeResult());
+    await diff.analyze();
+    let activated!: () => void, respond!: (r: DiffResult) => void;
+    v.activate.mockImplementationOnce(async (id: number) => {
+      v.activeRec = v.recs.find((r: any) => r.id === id);
+      await new Promise<void>(resolve => { activated = resolve; });
+    });
+    mocks.api.mockImplementationOnce(() => new Promise<DiffResult>(resolve => { respond = resolve; }));
+    const task = diff.continueToNextScene();
+    expect(diff.continuing).toBe(true);
+    expect(diff.showContinueScene).toBe(true);
+    expect(diff.canContinueScene).toBe(false);
+    expect(await diff.continueToNextScene()).toBe(false);
+    expect(v.activate).toHaveBeenCalledTimes(1);
+    activated();
+    await vi.waitFor(() => expect(mocks.api).toHaveBeenCalledTimes(2));
+    expect(diff.showContinueScene).toBe(true);
+    expect(diff.busy).toBe(true);
+    holdImages = true;
+    const result = fakeResult();
+    result.imageA.id = pan2.id; result.imageB.id = nosr2.id;
+    respond(result);
+    await vi.waitFor(() => expect(imageQueue.length).toBeGreaterThan(0));
+    expect(diff.showContinueScene).toBe(true);
+    expect(diff.continuing).toBe(true);
+    flushImages();
+    expect(await task).toBe(true);
+    expect(diff.continuing).toBe(false);
+    expect(diff.showContinueScene).toBe(false);      // 末景完成后才收起
+  });
+
+  it('补角色期间保留忙碌按钮，失败后恢复可重试', async () => {
+    const { v, pan1, nosr1 } = twoSceneViewer();
+    v.recs = v.recs.filter((r: any) => r.id !== 12 && r.id !== 13);
+    const diff = useDiffStore();
+    diff.aId = pan1.id; diff.bId = nosr1.id;
+    mocks.api.mockResolvedValueOnce(fakeResult());
+    await diff.analyze();
+    let resolve!: (value: any) => void;
+    mocks.siblings.mockImplementationOnce(() => new Promise(r => { resolve = r; }));
+    const task = diff.continueToNextScene();
+    expect(diff.showContinueScene).toBe(true);
+    expect(diff.continuing).toBe(true);
+    expect(diff.busy).toBe(false);
+    expect(diff.canContinueScene).toBe(false);
+    expect(await diff.continueToNextScene()).toBe(false);
+    resolve({ items: [] });
+    expect(await task).toBe(false);
+    expect(diff.error).toContain('下一景缺少');
+    expect(diff.showContinueScene).toBe(true);
+    expect(diff.canContinueScene).toBe(true);
   });
 
   it('按当前 A/B 角色落到下一景，并直接重新分析', async () => {

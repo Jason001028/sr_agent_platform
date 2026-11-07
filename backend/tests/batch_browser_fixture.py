@@ -47,7 +47,7 @@ def main():
             continue
         directory.mkdir()
         (directory / (directory.name + '_meta.xml')).write_text(
-            '<meta><SolarAzimuth>1</SolarAzimuth></meta>', encoding='utf-8')
+            '<meta><SolarAzimuth/></meta>', encoding='utf-8')
         Image.new('I;16', (32, 32), 7).save(directory / 'PAN.tif')
         Image.new('I;16', (16, 16), 7).save(directory / (directory.name + '_NOSR.tif'))
     (root / 'fixtures.json').write_text(json.dumps({'names': names}), encoding='utf-8')

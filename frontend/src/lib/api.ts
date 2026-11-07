@@ -1668,11 +1668,13 @@ export async function apiCreateBatch(body: { manifest_ref: string; title: string
 
 export interface BatchItemRecord {
   item_id: string; ordinal: number; name: string; status: string; version: number;
+  external_job_id?: number | string | null;
   checkpoint: {
+    job_id?: number | string | null;
     target_image?: { path?: string }; scene_ref?: string; attempt?: number;
     review_required?: boolean; review?: { decision: string };
     detection?: { candidates?: unknown[]; provenance?: string };
-    mask?: { sha256?: string }; config?: unknown;
+    mask?: { sha256?: string; overlay?: { path?: string } }; config?: unknown;
   };
   error?: string;
 }

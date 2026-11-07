@@ -70,3 +70,9 @@ Use apply_patch for Unicode source edits, or explicitly set `$OutputEncoding = [
 ### Metadata
 - Reproducible: yes
 - Related Files: frontend/src/components/BatchRepairDraft.vue, .e2e/test-batch-panel.js
+
+## 2026-11-07 ? Test file path relative to workdir
+
+- Status: resolved
+- A Python test-file creation used frontend/src while the command workdir was already frontend; creation failed with FileNotFoundError.
+- Fix: apply patches from workspace root with explicit paths; use src paths for commands running inside frontend.

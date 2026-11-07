@@ -615,11 +615,11 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     followError.value = '';
     followNote.value = '';
     viewer.batchOverlayOff = false;
-    viewer.batchOverlayTarget = { goalId: gid, itemId: current.item_id };
+    viewer.batchOverlayTarget = { goalId: gid, itemId: current.item_id, overlayReady: current.overlay_ready };
   }
 
   async function openItem(item: Pick<BatchItemSummary,
-    'item_id' | 'image_path'>): Promise<string> {
+    'item_id' | 'image_path'> & Partial<Pick<BatchItemSummary, 'overlay_ready'>>): Promise<string> {
     const gid = goalId.value;
     if (!gid) return '还没有关联批次。';
     if (!item.image_path) return '这一项还没有可打开的影像路径。';
@@ -635,7 +635,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     if (err) return err;
     if (!stillWanted()) return '已按新的视图操作取消定位。';
     viewer.batchOverlayOff = false;
-    viewer.batchOverlayTarget = { goalId: gid, itemId: item.item_id };
+    viewer.batchOverlayTarget = { goalId: gid, itemId: item.item_id, overlayReady: item.overlay_ready === true };
     return '';
   }
 

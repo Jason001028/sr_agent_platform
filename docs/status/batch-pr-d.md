@@ -219,3 +219,10 @@ cd .e2e && node test-batch-overlay.js
 - 第三轮复审已通过，PR D 关闭；PR E（提交/监控/分层验证/50 景 Fake 验收）已实施，见 [batch-pr-e.md](batch-pr-e.md)。
 - D3 剩余部分（Item 跳转、刷新恢复、进度 Panel）与 PR F 一并规划；Overlay 读路径与查看器叠加层已先行落地。
 - 真实 SR/GPU/盘阵准入必须单独确认：真实 Detector/Mask、真实产物契约、修复质量 Verifier 与 production 提交门同时到位后才能打开。
+
+
+## 2026-11-07 — 查看器未发布 Overlay 的 404 提示修复
+
+- 原因：自动跟随与手动定位无条件请求 Overlay，未使用 overlay_ready；未发布时后端按契约返回 404，错误提示持续保留。
+- 修复：目标携带就绪标志，列表从 checkpoint.mask.overlay 推导；组件订阅同一 Item 的快照就绪状态，未发布不请求，发布后自动加载，不重复打开影像。保留真实加载错误、重试、旧 URL 与显式关闭行为。
+- 验证：既有相关测试 68 项、新增组件测试 4 项通过；类型检查与生产构建通过。内网现场效果待核，需更新 frontend/dist。

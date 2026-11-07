@@ -1,5 +1,21 @@
 # 批量智能修复工具栏任务中枢
 
+## 2026-11-07：极简平面化 Mission（当前实现）
+
+本节替代下方历史布局说明。参考 `frontend/icon/batch_repair_prototype_bundle/`，现有「智能修复」入口打开序列选择；选择、任务监控与原影像工具共享一个外层滚动区，无内部队列滚动条。保留真实 Viewer 分组、默认全选、原核验与冻结创建链路。
+
+监控仅由 Mission Header、Mission Focus、按需完整队列组成。Header 展示明确阶段的主数字及检测／SR 提交／验收三个图形节点；未知分母显示「统计中」，不适用显示「—」，不合成总体百分比。Focus 与完整队列互斥，不重复列出同一任务。异常默认最多三条，可直接展开完整原因和定位影像；不生成虚假作业 ID。关联到 Viewer 时沿用其数字标签，否则标注批次项序号。
+
+四种主要状态：准备态显示紧凑勾选列表与唯一开始按钮；运行态显示阶段进度和当前任务；异常态显示异常主数字、少量异常及完整队列入口；完成态显示验收结果和「查看结果」，隐藏过期当前任务及过程轨迹。暂停、取消保持真实状态，不被异常计数覆盖。人工质量验收只在存在待验收项时按需展开原组件。
+
+右上角统一设置包含批次选择、刷新、统计、完整队列、跟随、暂停／恢复／取消及报告／Agent 移交；事件历史仅在已有开发者模式中可开启。显示偏好存于 `sr.batch.mission.view.v1`，不写入执行策略。取消仍明确保留已提交外部 SR 的语义。折叠保留组件状态，220ms 收展、200ms 行进入，尊重 reduced-motion。328px／400px 均无横向溢出或多层滚动。
+
+实现：`BatchTaskDock`、`BatchProgressPanel`、`BatchProgressTracks`、`BatchCurrentItem`、`BatchJobQueue`、`BatchItemsList`、`BatchControls`、`BatchResultReport`、`BatchRepairDraft`；新增共用行 `BatchMissionItem` 与纯快照投影 `lib/batchMission.ts`。移除重复摘要、独立 SR 队列、重复报告统计与空当前任务卡片。API 仅补齐已有作业字段类型；本轮未修改生产 Runtime、状态机或门禁。原 SSE／断线恢复、control_revision／409 重读、用户退出跟随、Viewer 定位、受控报告与结果保护沿用现有链路。
+
+验证：typecheck、75 文件／923 项前端测试、build 通过；本地合成浏览器回归通过，覆盖选择单次提交、缺少 randomUUID、三阶段、27 条异常分页、独立原因／定位、显示偏好、控制 409、恢复、取消确认、报告、Agent 移交、断线及窄栏。人工验收浏览器夹具通过：2 个预置作业、5 次审阅、重启持久化、旧成果 409 拒绝、0 次新 SR 提交。夹具仅调整 Pillow 解码、短临时路径、静态 MIME 和启动等待以适配 Windows。未启动真实生产 SR／GPU，未验证内网大图生产运行；既有 geotiff sourcemap、jsdom Canvas 和构建 chunk 提示仍在。
+
+截图：`.e2e/artifacts/batch-mission-{draft,running,failed,completed,328,400}.png`；测试日志：`batch-mission-{typecheck,frontend-tests,build}.log`；人工验收结果：`batch-quality-report.json`。未提交或清理工作树，其他既有及并行改动保留。
+
 日期：2026-11-05。基于本地工作树实现，未 commit/push/reset/clean；未访问真实盘阵或启动真实 SR/GPU。
 
 ## 2026-11-06：序列选择与单次启动（当前界面）

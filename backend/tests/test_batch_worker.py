@@ -90,8 +90,9 @@ class BatchWorkerTest(unittest.TestCase):
         stem = BASE.format(scene=index)
         directory = self.root / (stem + "_PAN")
         directory.mkdir()
+        # 空 <SolarAzimuth> = RC 场景，本体是 PAN.tif（与下面两份夹具一致）。
         (directory / (directory.name + "_meta.xml")).write_text(
-            "<meta><SolarAzimuth>1</SolarAzimuth></meta>", encoding="utf-8")
+            "<meta><SolarAzimuth/></meta>", encoding="utf-8")
         Image.new("I;16", (16, 16), 7).save(directory / "PAN.tif")
         Image.new("I;16", (8, 8), 7).save(
             directory / (directory.name + "_NOSR.tif"))
