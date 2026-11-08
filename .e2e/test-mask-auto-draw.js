@@ -105,6 +105,9 @@ let browser;
     }))));
     await page.waitForSelector('.auto-mask-pane polygon');
     assert.equal(await page.evaluate(()=>stores.v.activeRec.maskRois.length),1,'no partial writes');
+    // Initial camera focus legitimately repaints the canvas. Measure SVG-only
+    // drawing after the short camera transition has settled.
+    await page.evaluate(async()=>{await new Promise(r=>setTimeout(r,300));window.renderBefore=stores.v.renderTick;});
     await page.waitForFunction(()=>{
       const p=document.querySelector('.auto-mask-pane polygon');
       return p && parseFloat(getComputedStyle(p).strokeDashoffset)===0;
@@ -112,7 +115,7 @@ let browser;
     await fs.promises.mkdir(artifacts,{recursive:true});
     await page.screenshot({path:path.join(artifacts,'mask-auto-draw-animation.png')});
     // CSS SVG animation must not repaint the TIFF canvas once per frame.
-    assert.ok(await page.evaluate(()=>stores.v.renderTick-window.renderBefore)<12);
+    assert.ok(await page.evaluate(()=>stores.v.renderTick-window.renderBefore)<4);
     await page.waitForFunction(()=>!stores.d.autoDrawing);
     const count=await page.evaluate(()=>stores.v.activeRec.maskRois.length);
     assert.equal(count,4,'three independent regions + existing hand mask');

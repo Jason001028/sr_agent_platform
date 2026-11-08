@@ -3,7 +3,7 @@
   "polygons": 3,
   "metrics": [
     {
-      "elapsed_ms": 102.18,
+      "elapsed_ms": 35.03,
       "polygons": [
         {
           "rank": 1,
@@ -11,7 +11,7 @@
           "coverage": 1,
           "sourceCoverage": 1,
           "ratio": 1.1387412587412586,
-          "fallback": null,
+          "fallback": "repair_rectangle",
           "needs_review": false
         },
         {
@@ -20,22 +20,22 @@
           "coverage": 1,
           "sourceCoverage": 1,
           "ratio": 1.1442424242424243,
-          "fallback": null,
+          "fallback": "repair_rectangle",
           "needs_review": false
         },
         {
           "rank": 3,
-          "vertices": 12,
+          "vertices": 4,
           "coverage": 1,
           "sourceCoverage": 1,
-          "ratio": 1.119702029283329,
-          "fallback": null,
+          "ratio": 1.4836886719753404,
+          "fallback": "repair_rectangle",
           "needs_review": false
         }
       ]
     },
     {
-      "elapsed_ms": 103.18,
+      "elapsed_ms": 32.16,
       "polygons": [
         {
           "rank": 1,
@@ -43,7 +43,7 @@
           "coverage": 1,
           "sourceCoverage": 1,
           "ratio": 1.1387412587412586,
-          "fallback": null,
+          "fallback": "repair_rectangle",
           "needs_review": false
         },
         {
@@ -52,16 +52,16 @@
           "coverage": 1,
           "sourceCoverage": 1,
           "ratio": 1.1442424242424243,
-          "fallback": null,
+          "fallback": "repair_rectangle",
           "needs_review": false
         },
         {
           "rank": 3,
-          "vertices": 12,
+          "vertices": 4,
           "coverage": 1,
           "sourceCoverage": 1,
-          "ratio": 1.119702029283329,
-          "fallback": null,
+          "ratio": 1.4836886719753404,
+          "fallback": "repair_rectangle",
           "needs_review": false
         }
       ]

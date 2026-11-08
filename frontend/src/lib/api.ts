@@ -1678,8 +1678,8 @@ export interface BatchItemRecord {
   };
   error?: string;
 }
-export async function apiBatchItems(goal: string, after = 0, status = ''): Promise<{ items: BatchItemRecord[]; next_after_ordinal: number }> {
-  const r = await http(apiUrl(loadSrConfig(), `/api/goals/${encodeURIComponent(goal)}/items?after_ordinal=${after}&limit=20&status=${encodeURIComponent(status)}`));
+export async function apiBatchItems(goal: string, after = 0, status = '', signal?: AbortSignal): Promise<{ items: BatchItemRecord[]; next_after_ordinal: number }> {
+  const r = await http(apiUrl(loadSrConfig(), `/api/goals/${encodeURIComponent(goal)}/items?after_ordinal=${after}&limit=20&status=${encodeURIComponent(status)}`), { signal });
   return r.json();
 }
 export async function apiBatchReview(goal: string, item: BatchItemRecord, decision: 'approve' | 'exclude'): Promise<BatchItemRecord> {

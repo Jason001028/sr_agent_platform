@@ -105,6 +105,8 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
   const hasEarlier = ref(false);
   const consumedSeq = ref(0);
   const follow = ref(false);
+  const playbackManaged = ref(false);
+  const overlayCloseSeq = ref(0);
   const followNote = ref('');
   const followError = ref('');
 
@@ -581,6 +583,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
   }
 
   async function navigateToCurrent(): Promise<void> {
+    if (playbackManaged.value) return;
     const viewer = useViewerStore();
     const current = snapshot.value?.producer.current;
     const gid = goalId.value;
@@ -640,6 +643,8 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
   }
 
   function clearOverlay(): void {
+    setFollow(false);
+    overlayCloseSeq.value++;
     const viewer = useViewerStore();
     viewer.batchOverlayTarget = null;
     viewer.batchOverlayOff = true;
@@ -701,7 +706,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     goalId, snapshot, feedback, claimFeedback, events, historyPage, availableGoals,
     syncState, syncError, loadError, controlError, controlBusy,
     loadingEarlier, hasEarlier, consumedSeq,
-    follow, followNote, followError,
+    follow, followNote, followError, playbackManaged, overlayCloseSeq,
     hasGoal, isVisible, isTerminal, isDone, paused,
     associate, discover, selectGoal, attach, detach,
     refreshSnapshot, catchUp, loadEarlier, control,

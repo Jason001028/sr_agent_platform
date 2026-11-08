@@ -122,7 +122,8 @@ def detect(target, reference, base, config):
             rejected.append({"region_id":p["region_id"],"reason":"coverage_or_degeneracy"}); continue
         candidates.append({"candidate_id":p["region_id"],"kind":"polygon","points":source["points"],
                            "label":"difference", "auto_mask":{k:p[k] for k in (
-                               "rank","coverage_ratio","area_ratio","buffer_px","needs_review","holes","fallback")}})
+                               "rank","coverage_ratio","area_ratio","buffer_px","needs_review","holes","fallback",
+                               "merged_regions","full_image_area_ratio","soft_min_area_ratio","soft_target_met")}})
     for ref in (target,reference):
         if (preview_jpg.source_revision(Path(ref["path"])) != ref["revision"]
                 or resource_identity(Path(ref["path"]))["image_key"]!=ref["image_key"]):

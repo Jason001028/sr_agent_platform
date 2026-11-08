@@ -24,6 +24,7 @@ import CompareOverlay from '../components/CompareOverlay.vue';
 import FlickerControls from '../components/FlickerControls.vue';
 import AutoTourControls from '../components/AutoTourControls.vue';
 import BatchDetectionOverlay from '../components/BatchDetectionOverlay.vue';
+import BatchRepairPlayback from '../components/BatchRepairPlayback.vue';
 import BatchQualityOverlay from '../components/BatchQualityOverlay.vue';
 import DecodeOverlay from '../components/DecodeOverlay.vue';
 import ContextPanel from '../components/ContextPanel.vue';
@@ -69,6 +70,7 @@ onUnmounted(() => {
         <FlickerControls />
         <AutoTourControls />
         <BatchDetectionOverlay />
+        <BatchRepairPlayback />
         <BatchQualityOverlay />
         <DecodeOverlay />
       </TifCanvas>

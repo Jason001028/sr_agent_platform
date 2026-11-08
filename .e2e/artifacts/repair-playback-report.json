@@ -1,0 +1,25 @@
+{
+  "opens": [
+    "/1.tif",
+    "/1.tif",
+    "/2.tif",
+    "/2.tif",
+    "/3.tif"
+  ],
+  "preloads": [
+    "/2.tif",
+    "/2.tif",
+    "/3.tif",
+    "/3.tif"
+  ],
+  "calls": [
+    0,
+    0,
+    1,
+    1,
+    2,
+    3
+  ],
+  "errors": [],
+  "forbidden": []
+}

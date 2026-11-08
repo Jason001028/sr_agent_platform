@@ -19,7 +19,7 @@ from scipy.spatial import ConvexHull, QhullError
 
 from backend.services.mask import rasterize_polygons
 
-VERSION = "auto-diff-v1"
+VERSION = "auto-diff-v2-repair"
 MAX_REGIONS = 16
 
 
@@ -129,7 +129,7 @@ def build_auto_mask(labels, regions, *, margin="standard", limit=MAX_REGIONS):
             "analysis_size": [width, height],
             "analysis_seed": [int(np.nonzero(original)[1][0] + x0), int(np.nonzero(original)[0][0] + y0)],
             "points": [[int(x + x0), int(y + y0)] for x, y in poly],
-            "vertex_count": len(poly), "coverage_ratio": coverage,
+            "vertex_count": len(poly), "detected_area_px": int(r.area), "coverage_ratio": coverage,
             "supersample_coverage_ratio": super_coverage, "area_ratio": ratio,
             "area_ratio_limit": float(area_limit), "buffer_px": float(radius + retries),
             "buffer_space": "analysis_pixel", "fallback": fallback,
@@ -194,6 +194,8 @@ def bind_auto_mask(result, specs, *, preview_grid=None, source_windows=None):
                            "scene_id": spec.get("sceneId"), "source_revision": spec.get("sourceRevision"),
                            "pixel_key": spec.get("pixelKey"), "source_size": [sw, sh],
                            "transform": transform})
+    from backend.services.repair_regions import consolidate
+    consolidate(auto, transforms)
     auto["sources"] = transforms
     auto["analysis_id"] = hashlib.sha256(json.dumps({
         "mask": result["binaryMask"], "parameters": result["parameters"],
@@ -205,7 +207,7 @@ def bind_auto_mask(result, specs, *, preview_grid=None, source_windows=None):
     for polygon in auto["polygons"]:
         polygon["sources"] = transforms
         seed_x, seed_y = polygon["analysis_seed"]
-        target_label = labels[seed_y, seed_x]
+        target_labels = [labels[y, x] for x, y in polygon.get("analysis_seeds", [[seed_x, seed_y]])]
         # Actual source rasterizer recheck, not a promise that affine rounding
         # cannot affect coverage. Only source pixels corresponding to original
         # analysis pixel centres are asserted (not unobserved sub-grid defects).
@@ -223,7 +225,8 @@ def bind_auto_mask(result, specs, *, preview_grid=None, source_windows=None):
             # Allocate one source scanline, never a full source mask.
             covered = total = 0
             for y in range(mask.shape[0]):
-                xs = np.flatnonzero(labels[y] == target_label)
+                xs = np.flatnonzero(labels[y] == target_labels[0] if len(target_labels) == 1
+                                    else np.isin(labels[y], target_labels))
                 if not xs.size:
                     continue
                 source_y = max(0, min(int(sh) - 1, int(np.floor(y*sy + oy + .5))))

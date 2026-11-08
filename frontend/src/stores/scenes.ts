@@ -419,6 +419,26 @@ export const useScenesStore = defineStore('scenes', () => {
     return failure;
   }
 
+  // Preloading uses the shared, revision-keyed preview cache. Its existing
+  // eviction and clear/forget actions remain authoritative for every open.
+  const preparing = new Map<string, Promise<void>>();
+  function previewKey(path: string) { return `${loadSrConfig().apiBase}:${useViewerStore().previewDiv}:${path.trim()}`; }
+  async function preloadQuiet(path: string): Promise<void> {
+    if (!path) return;
+    const key = previewKey(path);
+    if (preparing.has(key)) return preparing.get(key);
+    const task = (async () => {
+      try {
+        const cfg = loadSrConfig();
+        const result = await apiResolveScene(cfg, { path });
+        await fetchSceneJpg(cfg, result.row, useViewerStore().previewDiv);
+      } catch { /* Opening remains the authority for reporting failure. */ }
+      finally { preparing.delete(key); }
+    })();
+    preparing.set(key, task);
+    return task;
+  }
+
   /** Quiet open for the Batch Panel / auto-follow.
    *
    *  Why quiet: `open()` reports failures through `scenes.error`, which only the
@@ -435,6 +455,9 @@ export const useScenesStore = defineStore('scenes', () => {
     const stillWanted = opts.stillWanted;
     if (stillWanted && !stillWanted()) return '';
     try {
+      const key = previewKey(trimmed);
+      await preparing.get(key);
+      if (stillWanted && !stillWanted()) return '';
       const res = await apiResolveScene(loadSrConfig(), { path: trimmed });
       if (stillWanted && !stillWanted()) return '';
       return await open(res.row, res.resolved, { quiet: true, origin, stillWanted });
@@ -539,7 +562,7 @@ export const useScenesStore = defineStore('scenes', () => {
     query, satellite, sensor, dateFrom, dateTo,
     satellites, sensors, dates,
     list, ensureSearched, invalidateSearch, resetFilters, open, openQuiet,
-    resolvePath, openByName, resolveByName,
+    resolvePath, openByName, resolveByName, preloadQuiet,
     // 清除预览缓存（SceneCacheBar 用）
     selected, clearing, clearResult, clearRemoved, clearError, clearSummary,
     selectableRows, selectedCount, allSelected,

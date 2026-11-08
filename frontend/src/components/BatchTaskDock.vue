@@ -86,7 +86,7 @@ watch(() => chat.sessionId, sid => { void batch.associate(sid); });
             <h4>显示设置</h4>
             <label><span>详细统计</span><input v-model="prefs.statistics" type="checkbox" data-e2e="mission-statistics-toggle"></label>
             <label><span>完整任务列表</span><input v-model="prefs.fullQueue" type="checkbox" data-e2e="mission-queue-toggle"></label>
-            <label><span>自动跟随当前影像</span><input type="checkbox" data-e2e="batch-follow" :checked="batch.follow" @change="batch.setFollow(($event.target as HTMLInputElement).checked)"></label>
+            <label><span>逐景定位与掩码动画</span><input type="checkbox" data-e2e="batch-follow" :checked="batch.follow" @change="batch.setFollow(($event.target as HTMLInputElement).checked)"></label>
             <label v-if="developer"><span>事件历史（调试）</span><input v-model="prefs.events" type="checkbox" data-e2e="mission-events-toggle"></label>
             <template v-if="goalOptions.length"><h4>关联批次</h4><select class="bp-select" :value="batch.goalId ?? ''" aria-label="选择批次" @change="selectGoal"><option v-for="goal in goalOptions" :key="goal.goal_id" :value="goal.goal_id">{{ goal.title || '未命名批次' }}</option></select></template>
             <template v-if="snap">

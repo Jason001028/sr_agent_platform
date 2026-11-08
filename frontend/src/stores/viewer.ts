@@ -3195,7 +3195,7 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   /** 把某一格平滑定位到**缩略图坐标矩形**（差异候选区域用；不改变底层影像）。 */
-  function focusPaneRect(side: 'A' | 'B', rect: [number, number, number, number]): boolean {
+  function focusPaneRect(side: 'A' | 'B', rect: [number, number, number, number], activatePane = true): boolean {
     if (drawMode.value) return false;
     const pane = panes.value.find((p) => p.side === side);
     const r = pane?.rec;
@@ -3228,7 +3228,7 @@ export const useViewerStore = defineStore('viewer', () => {
       ox: pane.rect.w / 2 - (x + w / 2) * scale,
       oy: pane.rect.h / 2 - (y + h / 2) * scale,
     };
-    setActiveSide(side);
+    if (activatePane) setActiveSide(side);
     animateViewsTo(side === 'A' ? { A: target } : { B: target });
     return true;
   }

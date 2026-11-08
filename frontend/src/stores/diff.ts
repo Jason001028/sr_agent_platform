@@ -716,6 +716,10 @@ export const useDiffStore = defineStore('diff', () => {
       finally { autoActivating = false; }
       if (epoch !== autoEpoch || viewer.activeId !== target.id || result.value !== res || stale.value
         || currentKey() !== key || pixelKey(target.id) !== pixels || viewer.pendingPts?.length || viewer.pendingRect) return false;
+      const vertices = polygons.flat();
+      const xs = vertices.map(p => p[0]), ys = vertices.map(p => p[1]);
+      viewer.focusPaneRect(viewer.activeSide, [Math.min(...xs), Math.min(...ys),
+        Math.max(...xs)-Math.min(...xs), Math.max(...ys)-Math.min(...ys)], false);
       viewer.enterDraw();
       const before = JSON.stringify(target.maskRois ?? []);
       const duration = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 0 : 3200;
@@ -739,7 +743,7 @@ export const useDiffStore = defineStore('diff', () => {
         const review = polygons.filter(p => p.autoDiff?.needs_review).length;
         const skipped = auto.polygons.length - polygons.length;
         if (ok) {
-          notice.value = `已绘制 ${polygons.length} 个区域${review ? `，${review} 个待复核（面积或孔洞边界）` : ''}${skipped ? `；${skipped} 个因覆盖或坐标冲突未绘制，请复核` : ''}；可整批撤销 / 重做。`;
+          notice.value = `已绘制 ${polygons.length} 个区域${review ? `，${review} 个待复核（扩展范围或孔洞）` : ''}${skipped ? `；${skipped} 个因覆盖或坐标冲突未绘制，请复核` : ''}；可整批撤销 / 重做。`;
           viewer.showToast(notice.value);
         }
         autoDrawing.value = null; autoPreparing.value = false; autoTimer = null;

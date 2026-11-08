@@ -13,7 +13,7 @@
 
 Viewer 四种画布背景、设置持久化、分屏层级和合成影像验收见 [viewer_background.md](viewer_background.md)。默认工程网格；背景切换不重绘影像或重置 Camera。
 
-差异定位的自动绘制 P1 已实现：独立前16连通域、安全边距与覆盖核验、PAN身份隔离、SVG动画和整批Mask撤销/重做，详见 [mask-auto-draw.md](../planning/mask-auto-draw.md)。仅写入可编辑向量，不生成最终mask.tif、不自动提交SR、不修改Batch Worker；真实内网大图待核。
+自动掩码使用邻近小区域合并、四边形包围和整图面积 2% 软目标；Viewer 与智能修复共享几何。逐景展示按加载、定位、真实结果等待、SVG 绘制、下一景推进，支持暂停/继续/跳过与失败恢复，见 [mask-repair-playback.md](mask-repair-playback.md)。单景工具栏仍只写可编辑向量；批量 MaskBuilder 与后台调度独立运行。真实内网大图和 SR 效果待核。
 
 影像焕新 Image Refresh 的统一成果发现、镭射未读卡片、版本缓存、已读持久化与浏览器验收见 [image-refresh.md](image-refresh.md)。单景和批量共用队列链路，不自动切图；内网真实成果验收待核。
 

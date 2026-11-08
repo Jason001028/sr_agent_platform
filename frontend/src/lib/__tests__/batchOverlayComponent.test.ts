@@ -53,6 +53,8 @@ it('uses readiness from a manually selected item outside the snapshot', async ()
 });
 it('renders published metadata after waiting and keeps legacy URL targets usable', async () => {
   vi.mocked(loadBatchOverlay).mockResolvedValue({ status: 'ready', doc: {
+    contract_version: 'overlay.v1', goal_id: 'g', item_id: 'i',
+    source: { image_key: 'fixture', revision: 'v1', width: 10, height: 10 },
     provenance: 'real', candidates: [], item_version: 1,
     overlay: { url: '/overlay.png', width: 10, height: 10 },
   } as BatchOverlayDoc });
