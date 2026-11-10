@@ -3,6 +3,11 @@ import { afterEach, beforeEach, it, expect, vi } from 'vitest';
 import { nextTick } from 'vue';
 import { createPinia, setActivePinia } from 'pinia';
 vi.mock('../../router/index.js', () => ({ default: {} }));
+// Retain coverage of the explicitly supported legacy-backend fallback.
+vi.mock('../../lib/imageOpen',async original=>{
+  const mod=await original<typeof import('../../lib/imageOpen')>();
+  return {...mod,createPreviewAsset:vi.fn(async()=>{throw new mod.ImageOpenError('legacy fixture',404);})};
+});
 vi.mock('../../lib/api.js', async (original) => ({
   ...await original<typeof import('../../lib/api.js')>(),
   fetchSceneJpg: vi.fn(), fetchDropSceneJpg: vi.fn(), ensureScenePreviewReady: vi.fn().mockResolvedValue(undefined),
@@ -62,6 +67,7 @@ it('switches preview-only sources through /preview, never /preview-drop', async 
   for (let i = 0; i < 10; i++) await new Promise(done => setTimeout(done, 0));
   expect(fetchDropSceneJpg).not.toHaveBeenCalled();
   expect(fetchSceneJpg).toHaveBeenCalledTimes(1);
+  expect(ensureScenePreviewReady).not.toHaveBeenCalled();
   expect(vi.mocked(fetchSceneJpg).mock.calls[0][1].id).toBe('ext');
 });
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from backend.services.async_work import run_sync
 from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import json
@@ -750,6 +751,25 @@ def _process(state, claimed, lease):
         store.close_thread()
 
 
+def _renew_tick_lease(state, lease, seconds):
+    # The worker can hold this threading lock while committing. Wait off-loop.
+    with lease.lock:
+        if not state.store.renew_goal(lease.goal_id, lease.token, lease.version,
+                                      lease_sec=seconds):
+            lease.stopped.set()
+
+
+def _tick_session(state, claimed, lease):
+    scope = current_lease.set(lease)
+    try:
+        with state.store.worker_transaction():
+            sid = state.store.create_session({"goal_id": claimed["goal_id"]})
+            state.store.set_goal_session(claimed["goal_id"], sid)
+        return sid
+    finally:
+        current_lease.reset(scope)
+
+
 async def goal_tick(state):
     """One serial pass; model work lives in a dedicated bounded executor."""
     if not hasattr(state, "goal_tick_lock"):
@@ -760,8 +780,9 @@ async def goal_tick(state):
         if owned:
             executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="goal")
         try:
-            for goal in state.store.list_goals(
-                    limit=200, statuses=SCHEDULED, exclude_kinds=("batch",)):
+            candidates = await run_sync(state.store.list_goals,
+                    limit=200, statuses=SCHEDULED, exclude_kinds=("batch",))
+            for goal in candidates:
                 # Batch Goals belong to the deterministic Producer/Monitor
                 # (PR C). They are excluded inside the query, before LIMIT, so a
                 # parked batch backlog cannot fill the candidate window and
@@ -779,25 +800,16 @@ async def goal_tick(state):
                 if session_lock is not None and session_lock.locked():
                     continue
                 seconds = max(0.1, float(os.getenv("SR_GOAL_LEASE_SEC", "60")))
-                claimed = state.store.claim_goal(
-                    goal["goal_id"], "worker:" + uuid.uuid4().hex, lease_sec=seconds
-                )
+                claimed = await run_sync(state.store.claim_goal,
+                    goal["goal_id"], "worker:" + uuid.uuid4().hex, lease_sec=seconds)
                 if not claimed:
                     continue
                 lease = GoalLease(
                     claimed["goal_id"], claimed["lease_token"], claimed["version"]
                 )
                 if not claimed.get("session_id"):
-                    scope = current_lease.set(lease)
-                    try:
-                        with state.store.worker_transaction():
-                            sid = state.store.create_session(
-                                {"goal_id": claimed["goal_id"]}
-                            )
-                            state.store.set_goal_session(claimed["goal_id"], sid)
-                        claimed["session_id"] = sid
-                    finally:
-                        current_lease.reset(scope)
+                    sid = await run_sync(_tick_session, state, claimed, lease)
+                    claimed["session_id"] = sid
                     session_lock = state.chat_locks.setdefault(sid, asyncio.Lock())
                 await session_lock.acquire()
                 work = asyncio.get_running_loop().run_in_executor(
@@ -808,19 +820,14 @@ async def goal_tick(state):
                         done, _ = await asyncio.wait({work}, timeout=seconds / 3)
                         if done:
                             break
-                        with lease.lock:
-                            if not state.store.renew_goal(
-                                lease.goal_id,
-                                lease.token,
-                                lease.version,
-                                lease_sec=seconds,
-                            ):
-                                lease.stopped.set()
+                        await run_sync(_renew_tick_lease, state, lease, seconds)
                     await work
                 finally:
                     lease.stopped.set()
-                    state.store.release_goal(lease.goal_id, lease.token, lease.version)
-                    session_lock.release()
+                    try:
+                        await run_sync(state.store.release_goal, lease.goal_id, lease.token, lease.version)
+                    finally:
+                        session_lock.release()
         finally:
             if owned:
                 executor.shutdown(wait=False, cancel_futures=True)

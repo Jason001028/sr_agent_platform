@@ -51,7 +51,12 @@ class TestOwnership(PlatformBase):
             def __init__(self): self.app = app
             async def body(self): return b'{"content":"hi"}'
         async def scenario():
-            with patch('threading.Thread.start', side_effect=RuntimeError('start')):
+            original_start = threading.Thread.start
+            def fail_chat_start(thread):
+                if thread.name == 'chat-execution':
+                    raise RuntimeError('start')
+                return original_start(thread)
+            with patch('threading.Thread.start', new=fail_chat_start):
                 with self.assertRaises(RuntimeError): await chat_send(sid, Req())
             assert not app.state.chat_locks[sid].locked()
             with patch('backend.api.platform.loop_mod.run_loop', side_effect=RuntimeError('worker')):

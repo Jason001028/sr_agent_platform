@@ -18,19 +18,39 @@ export interface Source {
   read(offset: number, length: number): Promise<ArrayBuffer>;
 }
 
+import type { LoadControl } from './loadControl';
+
 export class FileSource implements Source {
   readonly size: number;
   readonly name?: string;
   readonly blob: Blob;
 
-  constructor(blob: Blob, name?: string) {
+  constructor(blob: Blob, name?: string, private control?: LoadControl) {
     this.blob = blob;
     this.size = blob.size;
     this.name = name || (blob as { name?: string }).name;
   }
 
-  read(offset: number, length: number): Promise<ArrayBuffer> {
-    return this.blob.slice(offset, offset + length).arrayBuffer();
+  async read(offset: number, length: number): Promise<ArrayBuffer> {
+    await this.control?.checkpoint();
+    const part = this.blob.slice(offset, offset + length);
+    if (!this.control || typeof FileReader === 'undefined') {
+      const pending = part.arrayBuffer();
+      return this.control ? this.control.wait(pending) : pending;
+    }
+    const control = this.control;
+    const buffer = await new Promise<ArrayBuffer>((resolve, reject) => {
+      const reader = new FileReader();
+      const clean = () => control.signal.removeEventListener('abort', abort);
+      const abort = () => { reader.abort(); clean(); reject(new DOMException('加载已停止', 'AbortError')); };
+      reader.onload = () => { clean(); resolve(reader.result as ArrayBuffer); };
+      reader.onerror = () => { clean(); reject(reader.error); };
+      reader.onabort = () => { clean(); reject(new DOMException('加载已停止', 'AbortError')); };
+      control.signal.addEventListener('abort', abort, { once: true });
+      if (control.signal.aborted) abort(); else reader.readAsArrayBuffer(part);
+    });
+    await control.checkpoint();
+    return buffer;
   }
 }
 

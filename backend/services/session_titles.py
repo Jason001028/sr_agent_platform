@@ -1,5 +1,6 @@
 """Independent, bounded title task. Metadata CAS is the cross-process fence."""
 import asyncio
+from backend.services.async_work import run_sync
 import json
 import logging
 import os
@@ -117,11 +118,13 @@ async def title_loop(state):
             # Durable rounds also create agent_runs; stale crashed rows cease
             # blocking recovery after five minutes.
             import time
-            if state.store._db().execute(
-                "SELECT 1 FROM agent_runs WHERE status='running' AND started_at>? LIMIT 1",
+            def candidates():
+                if state.store._db().execute(
+                    "SELECT 1 FROM agent_runs WHERE status='running' AND started_at>? LIMIT 1",
                     (time.time()-300,)).fetchone():
-                continue
-            for sid in state.store.pending_session_titles():
+                    return []
+                return state.store.pending_session_titles()
+            for sid in await run_sync(candidates):
                 worker = asyncio.create_task(asyncio.to_thread(process_title, state.store, state.cfg, sid))
                 try:
                     await asyncio.shield(worker)

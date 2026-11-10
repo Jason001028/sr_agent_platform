@@ -189,10 +189,19 @@ Environment=SR_SANDBOX_ROOT=/DiskArray/tmp/wangrz/sr_sandbox
 #   这是**词法**策略：不要求路径存在，所以开发机没有 /DiskArray 也能跑测试。
 # Environment=SR_ALLOWED_ROOTS=/DiskArray
 #
-# 盘符映射，`;` 分隔的多条 `KEY=VAL`。默认 `W:=/DiskArray`（用户侧 W: 就是盘阵根）。
-# 用户在资源管理器里看到的是 W:\GSHC2IMPS\PRODUCT\...，粘进来照这个表翻译。
-#   ⚠️ 表里没有的盘符一律拒（400 报「未知盘符 X:」），不会静默当相对路径处理。
-# Environment=SR_DRIVE_MAP=W:=/DiskArray
+# 盘符映射，`;` 分隔的多条 `KEY=VAL`。默认 W:、X: 都映射到 /DiskArray。
+# 不同用户的 W:\ 或 X:\GSHC2IMPS\PRODUCT\... 会归一为同一服务端路径。
+#   ⚠️ 显式配置会替换默认映射；其他未配置盘符仍拒绝，不会当相对路径处理。
+# Environment="SR_DRIVE_MAP=W:=/DiskArray;X:=/DiskArray"
+# UNC 必须显式映射，并同时满足 SR_ALLOWED_ROOTS；未知路径走上传缓存。
+# Environment="SR_UNC_MAP=\\host\share=/DiskArray"
+# 选择影像的上传原文件/JPG 缓存，应放独立可写磁盘目录，避免数 GiB 文件占满 tmpfs。
+# 默认 TTL 24 小时，每 5 分钟清理；运行中的任务受保护，不删除生产源图。
+# Environment=SR_IMAGE_CACHE_ROOT=/DiskArray/tmp/wangrz/image-preview-cache
+# Environment=SR_IMAGE_CACHE_TTL_SEC=86400
+# Environment=SR_IMAGE_UPLOAD_MAX_BYTES=8589934592
+# 上传空间预留预算；JPG 和元数据另需磁盘余量。
+# Environment=SR_IMAGE_CACHE_MAX_BYTES=34359738368
 #
 # 「文件名 → 场景目录」反推模板。占位符：
 #   {y} {m} {d}  成像日（文件名里的 14 位或 8 位时间戳，取不到就报错让用户手粘）；

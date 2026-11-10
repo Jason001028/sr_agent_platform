@@ -1,0 +1,61 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>Local load acceptance</title>
+<body><div id="root"></div><script type="module">
+import { createApp, h, watch } from 'vue';
+import { createPinia, setActivePinia } from 'pinia';
+import { useViewerStore } from '/src/stores/viewer.ts';
+import TifCanvas from '/src/components/TifCanvas.vue';
+import FileList from '/src/components/FileList.vue';
+import DecodeOverlay from '/src/components/DecodeOverlay.vue';
+import '/src/style.css';
+const pinia=createPinia();setActivePinia(pinia);
+const store=useViewerStore();
+let scenario='unlinked', file;
+const nativeFetch=window.fetch.bind(window);
+const fixture={store,pauseAt:'',pausedOnce:false,pauseOnFrame:0,frames:0,firstFrameMs:null,pixelsMs:null,started:0};
+window.fetch=async (url,options)=>{
+  const path=String(url);
+  if(path.includes('/api/image-open'))return new Response(JSON.stringify({detail:'fixture: legacy backend'}),{status:404,headers:{'Content-Type':'application/json'}});
+  if(path.includes('/api/scenes/resolve')){
+    if(scenario==='unlinked')return new Response(JSON.stringify({detail:'fixture: no matching server source'}),{status:404,headers:{'Content-Type':'application/json'}});
+    return new Response(JSON.stringify({source:'manual',row:{id:'fixture-source',name:'local-sparse',W:10001,H:10001,srcRev:'fixture-v1',jpgUrl:null,hasPreview:false},
+      resolved:{dir:'/DiskArray/fixture/local-sparse',input:'/DiskArray/fixture/local-sparse/PAN.tif',input_name:'PAN.tif',mask_path:'/DiskArray/fixture/local-sparse/PAN_mask.tif',
+        mask_exists:false,writable:true,sr_capable:true,preview_only:false,kind:'input',suffix:''}}),{headers:{'Content-Type':'application/json'}});
+  }
+  if(path.includes('/api/scenes/fixture-source/preview'))return new Response('deliberately-invalid-jpeg',{headers:{'Content-Type':'image/jpeg'}});
+  if(path.includes('/api/'))return new Response('{}',{headers:{'Content-Type':'application/json'}});
+  return nativeFetch(url,options);
+};
+function syntheticFile(){
+  if(file)return file;
+  const W=10001,H=10001,offs=256,lens=offs+H*4,pixels=lens+H*4;
+  const bytes=new Uint8Array(pixels+W*H),v=new DataView(bytes.buffer);
+  bytes.set([73,73,42,0]);v.setUint32(4,8,true);v.setUint16(8,10,true);
+  const tags=[[256,4,1,W],[257,4,1,H],[258,3,1,8],[259,3,1,1],[262,3,1,1],
+    [273,4,H,offs],[277,3,1,1],[278,4,1,1],[279,4,H,lens],[339,3,1,1]];
+  tags.forEach(([tag,type,count,value],i)=>{const at=10+i*12;v.setUint16(at,tag,true);v.setUint16(at+2,type,true);v.setUint32(at+4,count,true);v.setUint32(at+8,value,true);});
+  for(let y=0;y<H;y++){v.setUint32(offs+y*4,pixels+y*W,true);v.setUint32(lens+y*4,W,true);bytes.fill(y%256,pixels+y*W,pixels+(y+1)*W);}
+  return file=new File([bytes],'local-sparse.tif',{type:'image/tiff'});
+}
+fixture.open=(file,div=4,linked=false,pauseAt='')=>{
+  scenario=linked?'linked':'unlinked';fixture.pauseAt=pauseAt;fixture.pausedOnce=false;
+  fixture.frames=0;fixture.firstFrameMs=null;fixture.pixelsMs=null;fixture.started=performance.now();
+  store.clearRecs();store.setPreviewDiv(div);store.addFiles(file);
+};
+fixture.start=(linked=false,pauseAt='')=>fixture.open(syntheticFile(),4,linked,pauseAt);
+fixture.status=()=>({load:{...store.imageLoad},error:store.error,records:store.recs.map(r=>({id:r.id,route:r.route,status:r.status,sceneId:r.sceneId,
+  dir:r.sceneDir,verified:r.serverSourceVerified===true,width:r.W,height:r.H,srcw:r.srcw,srch:r.srch,jpegBytes:r.localPreviewJpeg?.size??0,progressive:!!r.progressivePreview,token:r.token})),
+  frames:fixture.frames,firstFrameMs:fixture.firstFrameMs,pixelsMs:fixture.pixelsMs});
+watch(()=>store.renderTick,()=>{
+  if(store.recs[0]?.progressivePreview){
+    fixture.frames++;
+    fixture.firstFrameMs??=performance.now()-fixture.started;
+    if(fixture.pauseOnFrame&&fixture.frames>=fixture.pauseOnFrame&&!fixture.pausedOnce){fixture.pausedOnce=true;store.pauseImageLoad();}
+  }
+},{flush:'sync'});
+watch(()=>store.recs[0]?.src,src=>{if(src)fixture.pixelsMs=performance.now()-fixture.started;},{flush:'sync'});
+watch(()=>store.imageLoad.stage,stage=>{
+  if(fixture.pauseAt&&stage.includes(fixture.pauseAt)&&!fixture.pausedOnce){fixture.pausedOnce=true;store.pauseImageLoad();}
+},{flush:'sync'});
+createApp({render:()=>h('main',{style:'display:flex;height:100vh'},[h(FileList),h(TifCanvas,{},()=>h(DecodeOverlay))])}).use(pinia).mount('#root');
+window.localLoadTest=fixture;
+</script></body></html>

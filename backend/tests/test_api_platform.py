@@ -1411,8 +1411,9 @@ class TestProductPreviewBake(PlatformBase):
 
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.content, baked, "打开时命中的就是急生成那份，字节不差")
-        self.assertEqual([p.name for p in sorted(self.scene_dir.glob("*preview*"))],
-                         [jpg.name], "一个场景目录里只有一份预览名")
+        files = list(self.scene_dir.glob("*preview*"))
+        self.assertEqual(len(files), 2, "兼容名称与分档缓存各一份")
+        self.assertTrue(all(p.read_bytes() == baked for p in files))
 
     def _legacy(self, product):
         """改名前的点号落点：`<产物 stem>.preview.jpg`（真机升级后只剩老目录里有）。"""

@@ -85,3 +85,27 @@ Normal scene open/drop/ensureSceneImage paths can carry the authoritative input 
 ## 2026-11-05 correction: production tour registration evidence
 
 The initial tour implementation assumed GeoTIFF tags were available on SR production outputs. `SR_code/util.py::writeTiff` creates TIFFs and writes pixels without setting a geotransform or projection. Scene identity, registration evidence and candidate eligibility must be reported separately. Display rejected candidates with reasons; never silently turn a registration refusal into an empty selector or infer verified alignment from same-directory names. Keep old and ori as distinct roles. Existing loaded Scene IDs may supply bounded candidates, but not substitute for registration proof.
+
+## 2026-11-09 correction: shared work queues need caller-specific cancellation ownership
+
+A thread-safe proxy around an async waiter does not give Batch cancellation ownership over the queued native job. Distinguish admission capacity from quality/execution errors; use a pending/running Future that removes cancelled queued work and refuses cancellation after native start. Measure execution from actual function entry, retain timed-out running records until native completion, and test both detection and submission verification against the real shared queue. Warm-cache checks must cover drop and temporary fallback paths. Fetch resolves at headers: keep navigation cancellation through complete body consumption and test an intentionally open ReadableStream, not only unresolved fetch promises.
+
+## 2026-11-10: progressive preview ownership and sparse TIFF offsets
+
+Keep provisional display pixels separate from authoritative DN and ROI inputs. Use a fixed scene-wide sampled stretch and receiver acknowledgement when publishing partial rows; publish completed pixels before optional JPEG export. Moving a whole-image loop into a Worker improves responsiveness but does not establish shorter decode time: measure first complete overview and final pixels separately. Read IFD tables and external arrays by validated file offsets; fixed prefix buffers cannot support a trailing BigTIFF IFD beyond 4 GiB.
+
+## 2026-11-10 correction: navigation prepasses can regress X-drive loading
+
+The user reports the progressive TIFF pipeline is slower in production. A separate overview decode, ACK backpressure on every patch, a full-size provisional canvas and an overly restrictive server-JPEG admission test added work. Synthetic local timings did not establish network-drive throughput. Prioritize a small subset of the final sparse sampling groups, reuse their DN, keep the original read set, make intermediate frames optional/rate-limited, and preserve the ordinary server-JPEG fast path. Do not force compressed sources through an independent navigation scan.
+
+## 2026-11-10: server previews must not depend on business association
+
+Chrome File inputs cannot expose a real client path. Use an explicitly installed native picker with callback-origin validation for mapped server reads, and bounded upload for inaccessible paths. Separate expiring preview assets from scene/SR authority. Keep original names in metadata and use short opaque storage names to handle Windows Unicode filenames on Linux. Protect queued raster jobs from cache cleanup after an HTTP consumer disconnects; keep disk quota scans outside the global ticket-status lock. Local synthetic upload speed does not establish production network-drive or multi-GiB throughput.
+
+## 2026-11-10 correction: PowerShell overload binding overflows large file offsets
+
+The native picker used Math.Max(0, largeOffset) and Math.Min(4096, fileLength). Windows PowerShell chose Int32 overloads from the literal first argument and failed before server-side preview on a user's 4.85 GB source. Explicitly cast both comparison arguments to Int64; only bounded buffer lengths may become Int32. Exercise the actual sampler function against a synthetic seekable stream above both 2 GiB and 4 GiB, checking offsets and bytes without allocating a giant file. Native fixes require rebuilding and reinstalling the client package.
+
+## 2026-11-10 correction: diff candidate loading used a separate legacy path
+
+The user clarified that slow second-image loading occurs in Diff Locate analysis, not ordinary file selection. Trace ensureCardPixels/fetchCardPixels, including the selection watcher, rather than assuming scene resolution. That path used full-size tier previews and a separate ready-only preparation round trip. Correction: the current backend returns JSON for ready-only, so buffering that response does not establish duplicate JPG transfer. Read the server contract before attributing costs. Threshold-only migration still left smaller ori/old candidates on the old path; unify all candidates on bounded assets, retaining only explicit 404 plus safe-size legacy fallback. Share each card's in-flight request and independent A/B controls. Preserve authoritative metadata and permissions. Report actual queue/render/download states so cold disk reads are distinguishable from a retry loop.

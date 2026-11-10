@@ -20,9 +20,22 @@ import {
 import { isStreamingEnabled, setStreamingEnabled } from '../lib/streaming';
 import { SPOTLIGHT_MODE_OPTIONS } from '../lib/spotlight.js';
 import { VIEWER_BACKGROUNDS } from '../lib/viewerBackground';
+import ImagePickerDialog from './ImagePickerDialog.vue';
 
 const store = useViewerStore();
 const qc = useQcListStore();
+const imagePicker = ref<InstanceType<typeof ImagePickerDialog> | null>(null);
+const fileInput = ref<HTMLInputElement | null>(null);
+const pickerInstaller = `${import.meta.env.BASE_URL}client-explorer/SrExplorer-Setup.zip`;
+function browseImages() {
+  store.setSettingsOpen(false);
+  fileInput.value?.click();
+}
+function pickImages(event: Event) {
+  const input = event.target as HTMLInputElement;
+  if (input.files) store.addFiles(input.files);
+  input.value = '';
+}
 
 /** 聚焦遮罩三档（顺序与文案由 lib/spotlight.ts 统一给，设置与组件不各写一份）。 */
 const spotlightOptions = SPOTLIGHT_MODE_OPTIONS;
@@ -91,6 +104,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
       </div>
 
       <div class="set-title">设置</div>
+
+      <div class="set-row" data-e2e="set-image-picker">
+        <span class="set-line">影像路径组件（可选）</span>
+        <div class="set-note">默认使用普通文件选择。需要读取真实路径、优先直读盘阵时，可手动下载安装组件。</div>
+        <a class="set-clear" :href="pickerInstaller" download="SrExplorer-Setup.zip">下载／升级 Windows 组件</a>
+        <button type="button" class="set-clear" @click="store.setSettingsOpen(false); imagePicker?.open()">使用组件选择影像…</button>
+      </div>
 
       <div class="set-row">
         <span class="set-line">画布背景</span>
@@ -236,6 +256,8 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
       </div>
     </div>
   </template>
+  <ImagePickerDialog ref="imagePicker" @browse="browseImages" />
+  <input ref="fileInput" type="file" accept=".tif,.tiff,.jpg,.jpeg,.png" multiple hidden @change="pickImages" />
 </template>
 
 <style scoped>

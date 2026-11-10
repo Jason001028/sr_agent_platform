@@ -23,12 +23,16 @@ import {
   sparseCollect,
   isSparseCandidate,
 } from './tifDecode.js';
-import type { CanvasKit, KitCanvas, BandStats, ProbeInfo } from './tifDecode.js';
+import type { CanvasKit, KitCanvas, BandStats, ProbeInfo, SparseLayoutOk } from './tifDecode.js';
 import type { Source } from './source.js';
 import { localPreviewSize } from './local_preview.js';
 
 export interface DecodeCallbacks {
   previewDiv?: number;
+  /** Display statistics stay fixed throughout one progressive load. */
+  statistics?: BandStats[];
+  onRows?: (src: Float32Array, width: number, height: number, y: number) => Promise<void>;
+  checkpoint?: (stage?: string) => Promise<void>;
   /** 遮罩文案（HTML showMask）；store 负责真正展示/隐藏 */
   onOverlay?: (title: string, sub: string, bar: boolean) => void;
   /** 进度 0~1（HTML updateProgressUI）；store 负责 `rec===activeRec` 守卫后刷新 */
@@ -92,7 +96,9 @@ export async function decodeUtif(file: Blob, kit: CanvasKit, cb?: DecodeCallback
   const t0 = Date.now();
   cb?.onOverlay?.('正在读取文件…', '「' + (file as unknown as { name?: string }).name + '」 ' + fmtBytes(file.size), false);
   await tick();
+  await cb?.checkpoint?.('读取文件');
   const buf = await file.arrayBuffer();
+  await cb?.checkpoint?.('解码 TIFF');
   cb?.onOverlay?.(
     '正在完整解码…',
     '已读入 ' + fmtBytes(buf.byteLength) + '。这一步会一次性解码全部像素，' +
@@ -104,6 +110,7 @@ export async function decodeUtif(file: Blob, kit: CanvasKit, cb?: DecodeCallback
   if (!ifds || !ifds.length) throw new Error('无法解析 tif 结构');
   UTIF.decodeImage(buf, ifds[0]);
   const rgba = UTIF.toRGBA8(ifds[0]);
+  await cb?.checkpoint?.('统计像素');
   const W = ifds[0].width, H = ifds[0].height;
   const thumb = buildThumb(rgba, W, H, kit);
   const d = (thumb as unknown as HTMLCanvasElement).getContext('2d')!.getImageData(0, 0, thumb.width, thumb.height).data;
@@ -132,24 +139,25 @@ export function chunkedDecode(source: Source, probe: ProbeInfo, kit: CanvasKit, 
   const t0 = Date.now();
   cb?.onOverlay?.('正在分块读取整图…', '', true);
   cb?.onProgress?.(0);
-  return chunkedCollect(probe.image, W, H, plan, ps, pw, ph, (f) => cb?.onProgress?.(f)).then((src) => {
+  return chunkedCollect(probe.image, W, H, plan, ps, pw, ph, (f) => cb?.onProgress?.(f), { checkpoint: cb?.checkpoint, onRows: cb?.onRows }).then(async (src) => {
+    await cb?.checkpoint?.('统计像素');
     return {
       W, H, thumb: cv, src, srcw: pw, srch: ph, nbands: plan.comps,
-      invert: plan.invert, stats: computeStats(src, pw, ph, plan.comps),
+      invert: plan.invert, stats: cb?.statistics ?? computeStats(src, pw, ph, plan.comps),
       route: 'chunked' as const, ms: Date.now() - t0,
     };
   });
 }
 
 /* ---------------- 稀疏条带预览（无压缩+条带+单波段大图快路径，秒级） ---------------- */
-export function sparseDecode(source: Source, probe: ProbeInfo, kit: CanvasKit, cb?: DecodeCallbacks): Promise<DecodedRec> {
+export function sparseDecode(source: Source, probe: ProbeInfo, kit: CanvasKit, cb?: DecodeCallbacks, layout?: SparseLayoutOk): Promise<DecodedRec> {
   const t0 = Date.now();
   cb?.onOverlay?.('稀疏条带预览：只抽样读少数条带，跳过全文件…', '', true);
   cb?.onProgress?.(0);
-  return parseStrips(source).then((sp) => {
+  return (layout ? Promise.resolve(layout) : parseStrips(source)).then((sp) => {
     if (!sp || !sp.ok) throw new Error('稀疏条带布局解析失败');
     const target = cb?.previewDiv ? localPreviewSize(sp.W, sp.H, 1, cb.previewDiv) : null;
-    return sparseCollect(source, probe, sp, target ? Math.max(target.w, target.h) : SPARSE_PREVIEW_MAX, (f) => cb?.onProgress?.(f)).then((r) => {
+    return sparseCollect(source, probe, sp, target ? Math.max(target.w, target.h) : SPARSE_PREVIEW_MAX, (f) => cb?.onProgress?.(f), cb?.checkpoint, cb?.onRows, cb?.statistics).then((r) => {
       const cv = kit.createCanvas(r.sw, r.sh);
       return {
         W: sp.W, H: sp.H, thumb: cv, src: r.src, srcw: r.sw, srch: r.sh,
@@ -166,7 +174,7 @@ export function decodeGeoTiff(source: Source, probe: ProbeInfo, kit: CanvasKit, 
   const plan = getSamplePlan(probe.image);
   if (isSparseCandidate(probe)) {
     return parseStrips(source).then((sp) => {
-      if (sp && sp.ok) return sparseDecode(source, probe, kit, cb);
+      if (sp && sp.ok) return sparseDecode(source, probe, kit, cb, sp);
       return chunkedDecode(source, probe, kit, cb);
     });
   }

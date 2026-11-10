@@ -233,7 +233,7 @@ watch(
          再塞一颗要抢戏的橘色按钮，标题会被压成省略号）。
          「智能修复」排在它左边：先决定怎么修，再决定解析哪批；点开/收起上方任务中枢。
          **不做二次确认弹窗**：清空只清视图、盘上什么都没动，卡片重跑一遍就回来了。 -->
-    <div class="qc-go-row">
+    <div v-if="qc.loaded" class="qc-go-row">
       <button
         type="button"
         class="qc-smart"

@@ -47,6 +47,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  viewer.stopImageLoad();
   document.removeEventListener('visibilitychange', onVisibility);
   viewer.flickerStop();            // 组件卸载 / 换页：不留计时器
   viewer.hideModal();              // 模态提示是全局单例，不关会跟着到别的页面

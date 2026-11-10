@@ -1,0 +1,48 @@
+﻿{
+  "phases": [
+    {
+      "jpegBytes": 239121,
+      "paused": true,
+      "phase": "读取 TIFF 属性",
+      "route": "sparse",
+      "verified": true
+    },
+    {
+      "jpegBytes": 239121,
+      "paused": true,
+      "phase": "稀疏条带",
+      "route": "sparse",
+      "verified": true
+    },
+    {
+      "jpegBytes": 239121,
+      "paused": true,
+      "phase": "统计像素",
+      "route": "sparse",
+      "verified": true
+    },
+    {
+      "jpegBytes": 239121,
+      "paused": true,
+      "phase": "拉伸预览",
+      "route": "sparse",
+      "verified": true
+    },
+    {
+      "jpegBytes": 239121,
+      "paused": true,
+      "phase": "生成本地 JPG",
+      "route": "sparse",
+      "verified": true
+    },
+    {
+      "jpegBytes": 239121,
+      "paused": true,
+      "phase": "装载本地预览",
+      "route": "sparse",
+      "verified": true
+    }
+  ],
+  "stopAndRetry": true,
+  "unlinkedStaysLocal": true
+}

@@ -1,6 +1,8 @@
 """Durable Goal REST/SSE routes; execution lives in goal_worker."""
 from __future__ import annotations
 
+from starlette.concurrency import run_in_threadpool
+
 import asyncio
 import base64
 import binascii
@@ -113,7 +115,11 @@ def _create_batch_goal(request: Request, body: dict):
 
 @router.post("")
 async def create_goal(request: Request):
-    body=await request.json()
+    body = await request.json()
+    return await run_in_threadpool(_create_goal_sync, request, body)
+
+
+def _create_goal_sync(request, body):
     if not isinstance(body, dict): raise HTTPException(400,"body must be an object")
     if body.get("workflow") == batch_manifest.WORKFLOW or body.get("manifest_ref"):
         return _create_batch_goal(request, body)
@@ -132,6 +138,10 @@ async def create_goal(request: Request):
 async def batch_import(request: Request):
     """Freeze a QC TXT import. This endpoint never creates or runs a Goal."""
     body = await request.json()
+    return await run_in_threadpool(_batch_import_sync, request, body)
+
+
+def _batch_import_sync(request, body):
     if not isinstance(body, dict):
         raise HTTPException(400, "body must be an object")
     text = body.get("text")
@@ -186,6 +196,10 @@ def clarifications(goal_id: str, request: Request):
 @router.post("/{goal_id}/clarifications/{clarification_id}/respond")
 async def respond(goal_id: str, clarification_id: str, request: Request):
     body = await request.json()
+    return await run_in_threadpool(_respond_sync, goal_id, clarification_id, request, body)
+
+
+def _respond_sync(goal_id, clarification_id, request, body):
     if not isinstance(body, dict):
         raise HTTPException(400, "body must be an object")
     try:
@@ -284,17 +298,17 @@ def _stream_finished(goal) -> bool:
 @router.get("/{goal_id}/events/stream")
 async def event_stream(goal_id: str, request: Request, after: int=0):
     store = request.app.state.store
-    if not store.get_goal(goal_id): raise HTTPException(404,"goal not found")
+    if not await run_in_threadpool(store.get_goal, goal_id): raise HTTPException(404,"goal not found")
 
     async def gen():
         cursor=int(after)
         while True:
-            rows=store.list_goal_events(goal_id,after=cursor,limit=100)
+            rows=await run_in_threadpool(store.list_goal_events, goal_id, after=cursor, limit=100)
             if rows:
                 for row in rows:
                     cursor=row["seq"]
                     yield "data: "+json.dumps(row,ensure_ascii=False)+"\n\n"
-            goal=store.get_goal(goal_id)
+            goal=await run_in_threadpool(store.get_goal, goal_id)
             if _stream_finished(goal) and not rows: break
             if await request.is_disconnected(): break
             await asyncio.sleep(1)
@@ -373,7 +387,11 @@ def quality_review(goal_id:str,item_id:str,request:Request):
 
 @router.post("/{goal_id}/items/{item_id}/quality-review")
 async def quality_review_decide(goal_id:str,item_id:str,request:Request):
-    body=await request.json()
+    body = await request.json()
+    return await run_in_threadpool(_quality_review_decide_sync, goal_id, item_id, request, body)
+
+
+def _quality_review_decide_sync(goal_id, item_id, request, body):
     if not isinstance(body,dict): raise HTTPException(400,"body must be an object")
     try:
         return batch_quality.decide(request.app.state.store,goal_id,item_id,body)
@@ -517,8 +535,13 @@ def item_overlay_png(goal_id: str, item_id: str, request: Request):
 
 @router.post("/{goal_id}/tool-intents")
 async def tool_intent(goal_id: str, request: Request):
+    body = await request.json()
+    return await run_in_threadpool(_tool_intent_sync, goal_id, request, body)
+
+
+def _tool_intent_sync(goal_id, request, body):
     if not request.app.state.store.get_goal(goal_id): raise HTTPException(404,"goal not found")
-    body=await request.json(); name=str(body.get("tool_name") or "")
+    name=str(body.get("tool_name") or "")
     if not name or "args" not in body: raise HTTPException(400,"tool_name and args are required")
     key=str(body.get("idempotency_key") or "")
     if not key: raise HTTPException(400,"idempotency_key is required")
@@ -527,7 +550,12 @@ async def tool_intent(goal_id: str, request: Request):
 @router.post("/{goal_id}/external-job")
 async def external_job(goal_id: str, request: Request):
     """Associate an already submitted SR job after its id is durably known."""
-    body=await request.json(); job_id=body.get("job_id")
+    body = await request.json()
+    return await run_in_threadpool(_external_job_sync, goal_id, request, body)
+
+
+def _external_job_sync(goal_id, request, body):
+    job_id=body.get("job_id")
     if job_id is None: raise HTTPException(400,"job_id is required")
     old=request.app.state.store.get_goal(goal_id)
     if not old: raise HTTPException(404,"goal not found")
@@ -556,6 +584,11 @@ async def _control(goal_id: str, request: Request, action: str):
     which the scheduler bumps every tick).  Ordinary Goals keep the legacy
     status-transition behavior.
     """
+    raw = await request.body()
+    return await run_in_threadpool(_control_sync, goal_id, request, action, raw)
+
+
+def _control_sync(goal_id, request, action, raw):
     store = request.app.state.store
     goal = store.get_goal(goal_id)
     if not goal:
@@ -571,7 +604,6 @@ async def _control(goal_id: str, request: Request, action: str):
                                      event_type="goal_cancelled")
 
     body = {}
-    raw = await request.body()
     if raw:
         try:
             body = json.loads(raw)
@@ -620,6 +652,10 @@ async def cancel(goal_id: str, request: Request):
 @router.post("/{goal_id}/items/{item_id}/review")
 async def review_batch_item(goal_id: str, item_id: str, request: Request):
     body = await request.json()
+    return await run_in_threadpool(_review_batch_item_sync, goal_id, item_id, request, body)
+
+
+def _review_batch_item_sync(goal_id, item_id, request, body):
     if not isinstance(body, dict) or type(body.get("expected_version")) is not int:
         raise HTTPException(400, "expected_version is required")
     if not isinstance(body.get("decision"), str) or body.get("decision") not in {"approve", "exclude"}:

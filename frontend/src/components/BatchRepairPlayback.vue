@@ -52,7 +52,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div v-if="batch.goalId" class="repair-playback" data-e2e="repair-playback">
+  <div v-if="batch.goalId && (playback.running || playback.phase !== 'idle')" class="repair-playback" data-e2e="repair-playback">
     <template v-if="playback.running || playback.phase === 'paused' || playback.phase === 'done'">
       <svg v-for="pane in panes" :key="pane.side" class="repair-vectors"
         :style="{ left: `${pane.rect.x}px`, top: `${pane.rect.y}px`, width: `${pane.rect.w}px`, height: `${pane.rect.h}px` }">

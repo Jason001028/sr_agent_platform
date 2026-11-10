@@ -13,6 +13,10 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import { nextTick } from 'vue';
 vi.mock('../../router/index.js', () => ({ default: {} }));
+vi.mock('../../lib/imageOpen',async original=>{
+  const mod=await original<typeof import('../../lib/imageOpen')>();
+  return {...mod,createPreviewAsset:vi.fn(async()=>{throw new mod.ImageOpenError('legacy fixture',404);})};
+});
 vi.mock('../../lib/api.js', async (original) => ({
   ...await original<typeof import('../../lib/api.js')>(),
   fetchSceneJpg: vi.fn(), fetchDropSceneJpg: vi.fn(), ensureScenePreviewReady: vi.fn().mockResolvedValue(undefined),

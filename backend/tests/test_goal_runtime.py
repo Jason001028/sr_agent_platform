@@ -688,6 +688,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         release = threading.Event()
         renewed = asyncio.Event()
+        event_loop = asyncio.get_running_loop()
         renewals = []
         original_renew = self.store.renew_goal
 
@@ -696,7 +697,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             if result:
                 renewals.append(time.monotonic())
                 if len(renewals) >= 4:
-                    renewed.set()
+                    event_loop.call_soon_threadsafe(renewed.set)
             return result
 
         def slow(messages, tools):

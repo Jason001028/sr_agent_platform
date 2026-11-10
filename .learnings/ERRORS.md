@@ -76,3 +76,20 @@ Use apply_patch for Unicode source edits, or explicitly set `$OutputEncoding = [
 - Status: resolved
 - A Python test-file creation used frontend/src while the command workdir was already frontend; creation failed with FileNotFoundError.
 - Fix: apply patches from workspace root with explicit paths; use src paths for commands running inside frontend.
+
+## 2026-11-09 - Concurrency regression URL corrected
+- Status: resolved
+- New regression initially requested /api/sessions, which does not exist. Corrected to /api/chat/sessions and reran successfully.
+- Check registered routes before choosing an independent endpoint for concurrency tests.
+
+## 2026-11-09 Preview variant path length
+
+Preview variant names that repeated the scene stem exceeded Windows legacy path limits in the existing six-level scene fixtures. Use a short identity digest and a short temporary-file prefix. Re-run path/preview scope tests; preserve guarded `_preview.jpg` cleanup recognition.
+
+## 2026-11-10 resolved: invalid pixel offset in new sparse progression fixture
+
+The first one-pass sampling test used pixel data at file offset 0. The existing sparse reader treats offset 0 as absent, so its required first navigation row never arrived. Corrected the fixture to place pixels after a 16-byte header; no production reader exception was weakened. Read-set and DN parity assertions now pass.
+
+## 2026-11-10 resolved: asynchronous cleanup test patched shared asyncio module
+
+Mocking image_open.asyncio.sleep changed the shared asyncio module during AnyIO's lazy import and leaked the mock into its imported sleep reference. Patch the local module's asyncio binding with a small namespace instead; a fresh-process image-open suite then passed. PowerShell callback test URL concatenations also need parentheses per array element to ensure every invalid URL is tested independently.

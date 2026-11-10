@@ -1,0 +1,27 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>Server JPG selection acceptance</title>
+<body><div id="root"></div><script type="module">
+import {createApp,h,watch} from 'vue';import {createPinia,setActivePinia} from 'pinia';
+import Toolbar from '/src/components/Toolbar.vue';import FileList from '/src/components/FileList.vue';
+import SettingsPanel from '/src/components/SettingsPanel.vue';
+import TifCanvas from '/src/components/TifCanvas.vue';import DecodeOverlay from '/src/components/DecodeOverlay.vue';
+import {useViewerStore} from '/src/stores/viewer.ts';import {sourceFingerprint} from '/src/lib/local_preview.ts';
+import '/src/style.css';
+window.__SR_CFG__={apiBase:'http://127.0.0.1:8766',staticBase:''};
+const pinia=createPinia();setActivePinia(pinia);const store=useViewerStore();
+const requests=[];const nativeFetch=window.fetch.bind(window);
+window.fetch=(url,options={})=>{requests.push({url:String(url),method:options.method||'GET',bytes:options.body instanceof Blob?options.body.size:0});return nativeFetch(url,options);};
+// Native protocol is intercepted in this fixture only; no Windows handler runs.
+document.addEventListener('click',e=>{const a=e.target.closest?.('a[href^="sr-explorer://pick/"]');if(a){e.preventDefault();
+  const value=a.getAttribute('href').split('/').at(-1).replace(/-/g,'+').replace(/_/g,'/');window.nativeCallback=atob(value);
+}},{capture:true});
+window.imageOpenTest={store,requests,pauseAt:'',pausedOnce:false,async nativeSelect(path='X:\\native-source.tif'){
+  const blob=await(await fetch('http://127.0.0.1:8766/fixture/source.tif')).blob();
+  const file=new File([blob],'native-source.tif');const fingerprint=await sourceFingerprint(file);
+  const response=await fetch(window.nativeCallback,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({files:[{path,name:file.name,size:file.size,fingerprint}]})});
+  if(!response.ok)throw Error(await response.text());return response.json();
+}};
+watch(()=>store.imageLoad.stage,stage=>{const f=window.imageOpenTest;if(f.pauseAt&&stage.includes(f.pauseAt)&&!f.pausedOnce){f.pausedOnce=true;store.pauseImageLoad();}},{flush:'sync'});
+createApp({render:()=>h('main',{style:'display:flex;flex-direction:column;height:100vh'},[
+  h(Toolbar),h(SettingsPanel),h('section',{style:'display:flex;min-height:0;flex:1'},[h(FileList),h(TifCanvas,{},()=>h(DecodeOverlay))])
+])}).use(pinia).mount('#root');
+</script></body></html>

@@ -57,6 +57,8 @@ detector/verifier result.
 from __future__ import annotations
 
 import asyncio
+from backend.services.async_work import run_sync
+from backend.services.heavy_work import WorkCapacityError
 import functools
 import json
 import logging
@@ -166,6 +168,7 @@ def batch_config(manifest):
         "monitor_poll_interval": seconds(
             "monitor_poll_interval",
             _env_float("SR_BATCH_MONITOR_POLL_SEC", 5.0)),
+        "io_queue_timeout_sec": seconds("io_queue_timeout_sec", 300.0),
         "detection_timeout_sec": seconds(
             "detection_timeout_sec",
             _env_float("SR_BATCH_IO_TIMEOUT_SEC", 30.0)),
@@ -347,6 +350,46 @@ def _open_item(snapshot):
     return info
 
 
+def _submit_io(executor, fn, snapshot, queue_timeout=300):
+    timing = {"queued_at": time.monotonic(), "started_at": None, "finished_at": None}
+    def execute():
+        # Revalidate at dispatch as well as in the collector. A slot can free
+        # between polling ticks after the queue deadline has already expired.
+        if time.monotonic() - timing["queued_at"] > queue_timeout:
+            raise WorkCapacityError("后台任务排队已过期，请稍后重试")
+        timing["started_at"] = time.monotonic()
+        try:
+            return fn(snapshot)
+        finally:
+            timing["finished_at"] = time.monotonic()
+    return executor.submit(execute), timing
+
+
+def _io_timeout(record, cfg):
+    timing = record.get("timing")
+    if timing is None:  # Compatibility with an existing process/test record.
+        return "running" if time.monotonic() - record["started"] > cfg["detection_timeout_sec"] else None
+    started = timing["started_at"]
+    if started is None:
+        return "queued" if time.monotonic() - timing["queued_at"] > cfg.get("io_queue_timeout_sec", 300) else None
+    end = timing["finished_at"] or time.monotonic()
+    return "running" if end - started > cfg["detection_timeout_sec"] else None
+
+
+def _defer_io_capacity(state, goal, item, lease, reason):
+    cp = dict(item["checkpoint"])
+    waits = int(cp.get("io_capacity_waits") or 0) + 1
+    cp["io_capacity_waits"] = waits
+    cp["last_io_capacity_error"] = reason
+    # Keep DETECTING/MASK_READY and frozen quality facts. Admission is not an
+    # algorithm failure and consumes neither detection nor preparation attempts.
+    state.store.transition_goal_item(
+        goal["goal_id"], step_id=item["step_id"], expected_version=item["version"],
+        status=item["status"], lease_token=lease.token, checkpoint=cp,
+        next_wake_at=time.time() + min(30, 2 ** min(waits, 5)))
+    return False
+
+
 def _start_detection(state, goal, item, lease, cfg):
     """Record DETECTING and hand detection+Mask to the IO executor."""
     cp = dict(item["checkpoint"])
@@ -387,13 +430,16 @@ def _start_detection(state, goal, item, lease, cfg):
     }
     executor = _ensure_io_executor(state)
     try:
-        future = executor.submit(_detection_job, snapshot)
+        future, timing = _submit_io(executor, _detection_job, snapshot, cfg.get("io_queue_timeout_sec", 300))
+    except WorkCapacityError as exc:
+        return _defer_io_capacity(state, goal, updated, lease, str(exc))
     except Exception as exc:  # executor shutdown is a worker bug, not an item fact
         _retry_detection(state, goal, updated, lease, cfg,
                          f"检测任务启动失败：{type(exc).__name__}: {exc}")
         return False
     state.batch_io_jobs[_io_key(goal["goal_id"], updated)] = {
         "future": future,
+        "timing": timing,
         "started": time.monotonic(),
         "goal_id": goal["goal_id"],
         "item_id": item["item_id"],
@@ -430,26 +476,36 @@ def _collect_detections(state, goal, lease, cfg, *, allow_write=True):
         if record["goal_id"] != gid:
             continue
         future = record["future"]
-        if not future.done():
-            if (time.monotonic() - record["started"]
-                    > cfg["detection_timeout_sec"]):
-                jobs.pop(key, None)
-                future.cancel()
-                if allow_write:
-                    item = state.store.get_goal_item(gid, record["item_id"])
-                    if (item and item["version"] == record["version"]
-                            and item["status"] == "DETECTING"):
-                        _retry_detection(state, goal, item, lease, cfg,
-                                         "检测超时")
-            continue
-        jobs.pop(key, None)
         item = state.store.get_goal_item(gid, record["item_id"])
         if (not item or item["version"] != record["version"]
                 or item["status"] != "DETECTING"):
-            continue                       # cancelled, retried or superseded
+            jobs.pop(key, None)
+            future.cancel()  # Removes queued work; running work retains its slot.
+            continue
+        timeout = _io_timeout(record, cfg)
+        if not future.done():
+            if timeout == "queued" and future.cancel():
+                jobs.pop(key, None)
+                if allow_write:
+                    _defer_io_capacity(state, goal, item, lease, "检测排队超时")
+            elif timeout == "running":
+                # Native work cannot be killed. Retain this record until it
+                # exits, so an execution timeout never launches another copy.
+                record["timed_out"] = True
+            continue
+        jobs.pop(key, None)
         if not allow_write:
             continue
+        if future.cancelled():
+            _defer_io_capacity(state, goal, item, lease, "检测排队已取消")
+            continue
         error = future.exception()
+        if isinstance(error, WorkCapacityError):
+            _defer_io_capacity(state, goal, item, lease, str(error))
+            continue
+        if record.get("timed_out") or timeout == "running":
+            _retry_detection(state, goal, item, lease, cfg, "检测超时")
+            continue
         if error is not None:
             _retry_detection(state, goal, item, lease, cfg,
                              f"检测/掩码失败：{type(error).__name__}: {error}")
@@ -551,7 +607,8 @@ def _produce_one(state, goal, lease, cfg):
     jobs = getattr(state, "batch_io_jobs", None) or {}
     orphan = next(
         (i for i in items if i["status"] == "DETECTING"
-         and _io_key(gid, i) not in jobs), None)
+         and _io_key(gid, i) not in jobs
+         and (i["next_wake_at"] is None or i["next_wake_at"] <= now)), None)
     if orphan:
         # Read-only detection is safe to replay after a restart.
         return _start_detection(state, goal, orphan, lease, cfg)
@@ -726,13 +783,16 @@ def _start_submit_preparation(state, goal, item, lease, cfg):
         "mode": (goal.get("checkpoint") or {}).get("mode") or "demo",
     }
     try:
-        future = executor.submit(_prepare_submission, snapshot)
+        future, timing = _submit_io(executor, _prepare_submission, snapshot, cfg.get("io_queue_timeout_sec", 300))
+    except WorkCapacityError as exc:
+        return _defer_io_capacity(state, goal, item, lease, str(exc))
     except Exception as exc:  # executor shutdown is a worker bug, not an item fact
         return _block_item(
             state, goal, item, lease,
             f"提交前复核任务启动失败：{type(exc).__name__}: {exc}")
     state.batch_submit_jobs[key] = {
         "future": future,
+        "timing": timing,
         "started": time.monotonic(),
         "goal_id": goal["goal_id"],
         "item_id": item["item_id"],
@@ -744,6 +804,8 @@ def _start_submit_preparation(state, goal, item, lease, cfg):
 def _finish_submit_preparation(state, goal, item, lease, cfg, record):
     future = record["future"]
     error = future.exception()
+    if isinstance(error, WorkCapacityError):
+        return _defer_io_capacity(state, goal, item, lease, str(error))
     if error is not None:
         reason = f"提交前复核失败：{type(error).__name__}: {error}"
         if isinstance(error, ItemBlocked):
@@ -766,12 +828,19 @@ def _collect_submit_preparation(state, goal, lease, cfg):
             record["future"].cancel()
             return False
         future = record["future"]
+        timeout = _io_timeout(record, cfg)
         if not future.done():
-            if (time.monotonic() - record["started"]
-                    <= cfg["detection_timeout_sec"]):
-                return False
+            if timeout == "queued" and future.cancel():
+                jobs.pop(key, None)
+                return _defer_io_capacity(state, goal, current, lease, "提交前复核排队超时")
+            if timeout == "running":
+                record["timed_out"] = True
+            return False
+        if future.cancelled():
             jobs.pop(key, None)
-            future.cancel()
+            return _defer_io_capacity(state, goal, current, lease, "提交前复核排队已取消")
+        if record.get("timed_out") or timeout == "running":
+            jobs.pop(key, None)
             # Read-only verification can be replayed; back off instead of
             # spinning on the same large/broken Mask every scheduler pass.
             failures = int(
@@ -1761,6 +1830,13 @@ def _process_batch_monitor(state, claimed, lease):
 # scheduling loop
 # ---------------------------------------------------------------------------
 
+def _renew_tick_lease(state, lease, seconds):
+    with lease.lock:
+        if not state.store.renew_goal(lease.goal_id, lease.token, lease.version,
+                                      lease_sec=seconds):
+            lease.stopped.set()
+
+
 async def _run_leased(state, executor, fn, claimed, lease, seconds):
     loop = asyncio.get_running_loop()
     work = loop.run_in_executor(executor, fn, state, claimed, lease)
@@ -1769,15 +1845,11 @@ async def _run_leased(state, executor, fn, claimed, lease, seconds):
             done, _ = await asyncio.wait({work}, timeout=seconds / 3)
             if done:
                 break
-            with lease.lock:
-                if not state.store.renew_goal(
-                        lease.goal_id, lease.token, lease.version,
-                        lease_sec=seconds):
-                    lease.stopped.set()
+            await run_sync(_renew_tick_lease, state, lease, seconds)
         return await work
     finally:
         lease.stopped.set()
-        state.store.release_goal(lease.goal_id, lease.token, lease.version)
+        await run_sync(state.store.release_goal, lease.goal_id, lease.token, lease.version)
 
 
 def _rotate(goals, state):
@@ -1803,11 +1875,11 @@ async def batch_tick(state):
         try:
             seconds = max(0.5, float(os.getenv("SR_BATCH_LEASE_SEC", "60")))
             produced = False
-            active = _rotate(
-                state.store.list_goals(
-                    limit=200, statuses=CLAIMABLE, kinds=("batch",)), state)
+            candidates = await run_sync(state.store.list_goals,
+                    limit=200, statuses=CLAIMABLE, kinds=("batch",))
+            active = _rotate(candidates, state)
             for goal in active:
-                claimed = state.store.claim_goal(
+                claimed = await run_sync(state.store.claim_goal,
                     goal["goal_id"], "batch:" + uuid.uuid4().hex,
                     lease_sec=seconds)
                 if not claimed:
@@ -1832,9 +1904,9 @@ async def batch_tick(state):
             # being re-claimed as runnable. Already-converged control rows are
             # filtered out in SQL before LIMIT, so a large finished backlog
             # cannot hide an older Goal that still owns a live job.
-            for goal in _rotate(
-                    state.store.list_batch_monitor_goals(limit=200), state):
-                claimed = state.store.claim_goal_monitor(
+            monitoring = await run_sync(state.store.list_batch_monitor_goals, limit=200)
+            for goal in _rotate(monitoring, state):
+                claimed = await run_sync(state.store.claim_goal_monitor,
                     goal["goal_id"], "batch-monitor:" + uuid.uuid4().hex,
                     lease_sec=seconds)
                 if not claimed:
@@ -1858,6 +1930,9 @@ async def batch_tick(state):
 async def batch_loop(state):
     state.batch_executor = ThreadPoolExecutor(
         max_workers=1, thread_name_prefix="batch")
+    if hasattr(state, "heavy_work"):
+        state.heavy_work.loop = asyncio.get_running_loop()
+        state.batch_io_executor = state.heavy_work.background_executor()
     _ensure_io_executor(state)
     try:
         while True:

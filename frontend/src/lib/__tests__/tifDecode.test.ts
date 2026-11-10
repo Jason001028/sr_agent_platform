@@ -15,9 +15,9 @@ import {
   tiffTags, parseStrips, layoutInfo, sparseSample, sparseCollect,
   probeImage, getSamplePlan, chunkedCollect,
   computeStats, stretchMap, stretchRgba, planExport,
-  SPARSE_PREVIEW_MAX, type SparseLayoutOk, type ProbeInfo,
+  SPARSE_PREVIEW_MAX, SPARSE_MIN, setSparseMin, type SparseLayoutOk, type ProbeInfo, type CanvasKit,
 } from '../tifDecode.js';
-import { needGeo } from '../decode.js';
+import { needGeo, decodeGeoTiff } from '../decode.js';
 import { FileSource } from '../source.js';
 
 interface FixtureMeta {
@@ -98,6 +98,24 @@ describe('tiffTags / parseStrips（manifest 驱动）', () => {
 
 /* ---------------- 稀疏条带采样 golden ---------------- */
 describe('sparseSample（稀疏条带字节切片）', () => {
+  it('reuses the parsed layout without reading the network header twice', async () => {
+    const local = fixtureSource('gray16_grad.tif');
+    const probe = await probeImage(local.blob);
+    let headerReads = 0;
+    const source = { size: local.size, read(offset: number, length: number) {
+      if (offset === 0) headerReads++;
+      return local.read(offset, length);
+    } };
+    const kit = { createCanvas: (width: number, height: number) => ({ width, height }) } as unknown as CanvasKit;
+    const oldMin = SPARSE_MIN;
+    try {
+      setSparseMin(0);
+      const result = await decodeGeoTiff(source, probe, kit);
+      expect(result.route).toBe('sparse');
+      expect(headerReads).toBe(1);
+      expect(result.srcw).toBe(256);
+    } finally { setSparseMin(oldMin); }
+  });
   it('gray16_grad → pw=64 端点精确对齐、逐像素 = mapX(j)*257', async () => {
     const src = fixtureSource('gray16_grad.tif');   // 256×256 uint16 v=x*257
     const sp = await parseStrips(src) as SparseLayoutOk;

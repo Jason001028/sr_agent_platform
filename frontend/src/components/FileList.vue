@@ -368,7 +368,7 @@ function linkTag(note: string): string {
             <!-- 三颗小标挤在文件名上方、**不留换行**：换行会被 Vue 编成空白文本节点，
                  名字的 textContent 会多出空格（e2e 有整串比对名字的断言）。间距一律
                  由 CSS 的 margin-right 给。 -->
-            <template v-if="rec.route === 'jpg'"><span class="scn" :title="SCENE_TITLE">盘阵</span><span v-if="rec.sceneDir" class="ord" :title="ORD_TITLE">{{ store.sceneOrdinalOf(rec) }}</span><span class="stage" :class="rec.stageKind" :title="STAGE_TITLE">{{ rec.stageLabel }}</span></template><span class="fname">{{ rec.name }}</span>
+            <template v-if="rec.route === 'jpg'"><span class="scn" :title="rec.sceneDir && !rec.previewOnly ? SCENE_TITLE : '服务端缓存 JPG；业务关联与预览独立'">{{ rec.sceneDir && !rec.previewOnly ? '盘阵' : '服务端 JPG' }}</span><span v-if="rec.sceneDir" class="ord" :title="ORD_TITLE">{{ store.sceneOrdinalOf(rec) }}</span><span v-if="rec.sceneDir" class="stage" :class="rec.stageKind" :title="STAGE_TITLE">{{ rec.stageLabel }}</span></template><span class="fname">{{ rec.name }}</span>
           </div>
           <div class="meta">
             <!-- 占位卡没有尺寸可言，但这一行**留在原地**：补齐时不至于整卡跳一下。 -->
@@ -394,7 +394,9 @@ function linkTag(note: string): string {
               class="link-tag ro-tag"
               :title="RO_TITLE"
             >仅对比，不作修复</span>
-            <span v-if="rec.linkNote" class="link-tag" :title="rec.linkNote">{{ linkTag(rec.linkNote) }}</span>
+            <span v-if="rec.linkNote" class="link-tag" :title="rec.linkNote">{{ rec.previewAsset ? (rec.serverSourceVerified?'已核对服务端源':'临时 JPG · 未关联') : rec.serverSourceVerified ? '已关联 · 本地预览' : linkTag(rec.linkNote) }}</span>
+            <button v-if="rec.localPreviewJpeg" type="button" class="link-source" title="下载生成的显示预览，长边不超过 4096；页面后续拉伸与绘制不写入此文件" @click.stop="store.downloadLocalPreview(rec.id)">{{ rec.previewAsset?'缓存预览 JPG':'本地预览 JPG' }}</button>
+            <span v-if="rec.previewAsset" class="link-tag" :title="rec.previewAsset.clientPath || rec.previewAsset.serverPath || 'Chrome 普通选择器不提供绝对路径'">{{ rec.previewAsset.uploaded?'上传缓存':'服务端直读' }}</span>
             <span v-if="rec.previewOnly" class="link-tag" title="已关联服务端预览源，仅可查看，不能提交 SR 或写入掩码">只读预览</span>
             <button v-if="!rec.sceneId && /\.tiff?$/i.test(rec.file.name)" type="button" class="link-source" @click.stop="startLink(rec.id)">关联服务端路径</button>
           </div>
@@ -408,6 +410,12 @@ function linkTag(note: string): string {
       <p>填写这张 TIFF 在服务端的完整文件路径。核对文件名、字节数及头中尾内容采样后使用服务端预览；采样不等同于全文件校验。仅预览授权不增加 SR 提交权限。</p>
       <input v-model="linkPath" aria-label="服务端 TIFF 文件路径" placeholder="完整 TIFF 路径（不能只填目录）" :disabled="linking" required />
       <p v-if="linkError" role="alert">{{ linkError }}</p>
+      <div v-if="linking && store.imageLoad.active && store.imageLoad.recId === linkId">
+        <span>{{ store.imageLoad.stage }}{{ store.imageLoad.state === 'paused' ? '（已暂停）' : '' }}</span>
+        <button v-if="store.imageLoad.state === 'running'" type="button" @click="store.pauseImageLoad">暂停</button>
+        <button v-else type="button" @click="store.resumeImageLoad">继续</button>
+        <button type="button" @click="store.stopImageLoad">停止加载</button>
+      </div>
       <div><button type="button" :disabled="linking" @click="linkId=null">取消</button><button type="submit" :disabled="linking || !linkPath.trim()">{{ linking ? '正在核对…' : '核对并关联' }}</button></div>
     </form>
   </div>

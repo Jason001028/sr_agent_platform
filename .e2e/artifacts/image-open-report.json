@@ -1,0 +1,21 @@
+{
+  "browserUpload": {
+    "bytes": 10580122,
+    "changeTierWithoutUpload": true,
+    "chunks": 3,
+    "maxChunk": 4194304,
+    "pauseBeforeUpload": true,
+    "sceneId": null,
+    "serverJpg": true
+  },
+  "componentAvailableInSettings": true,
+  "defaultOrdinaryChooserWithoutDialog": true,
+  "nativePath": {
+    "cacheHitWithoutDecode": true,
+    "clientPath": "X:\\native-source.tif",
+    "serverJpg": true,
+    "sourceDirectoryUntouched": true,
+    "uploadedBytes": 0
+  },
+  "stopDoesNotFallback": true
+}

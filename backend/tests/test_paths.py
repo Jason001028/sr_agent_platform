@@ -64,9 +64,16 @@ class EnvMixin(unittest.TestCase):
 
 
 class TestDriveMap(EnvMixin):
-    def test_default_maps_w_to_diskarray(self):
+    def test_default_maps_w_and_x_to_diskarray(self):
         self.setenv(SR_DRIVE_MAP=None)
-        self.assertEqual(drive_map(), {"W:": "/DiskArray"})
+        self.assertEqual(drive_map(), {"W:": "/DiskArray", "X:": "/DiskArray"})
+
+    def test_explicit_map_replaces_defaults(self):
+        self.setenv(SR_DRIVE_MAP="X:=/data/production")
+        self.assertEqual(drive_map(), {"X:": "/data/production"})
+        self.assertEqual(to_posix_array_path(r"X:\scene"), "/data/production/scene")
+        with self.assertRaises(PathDeniedError):
+            to_posix_array_path(r"W:\scene")
 
     def test_multiple_entries_skips_malformed(self):
         # 键统一大写；无 `=` / 空键的条目忽略
@@ -87,6 +94,23 @@ class TestToPosixArrayPath(EnvMixin):
 
     def test_windows_form(self):
         self.assertEqual(to_posix_array_path(r"W:\a\b"), "/DiskArray/a/b")
+
+    def test_x_drive_alias_matches_server_identity(self):
+        expected = "/DiskArray/GSHC2IMPS/PRODUCT/2026/11/09/scene/PAN.tif"
+        for raw in (r"X:\GSHC2IMPS\PRODUCT\2026\11\09\scene\PAN.tif",
+                    "x:/GSHC2IMPS/PRODUCT/2026/11/09/scene/PAN.tif",
+                    r'"X:\GSHC2IMPS\PRODUCT\2026\11\09\scene\PAN.tif"',
+                    r"W:\GSHC2IMPS\PRODUCT\2026\11\09\scene\PAN.tif",
+                    expected):
+            with self.subTest(raw=raw):
+                self.assertEqual(to_posix_array_path(raw), expected)
+
+    def test_x_drive_alias_does_not_bypass_path_guards(self):
+        with self.assertRaises(PathDeniedError):
+            to_posix_array_path(r"X:\scene\..\secret")
+        self.setenv(SR_ALLOWED_ROOTS="/DiskArray/production")
+        with self.assertRaises(PathDeniedError):
+            ensure_allowed(r"X:\outside\scene")
 
     def test_windows_form_forward_slashes_and_trailing(self):
         self.assertEqual(to_posix_array_path("w:/a/b/"), "/DiskArray/a/b")

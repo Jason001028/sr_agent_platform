@@ -9,7 +9,7 @@
  * 纯函数，无 DOM：便于 vitest 覆盖（store 的 addFiles 直接用它分派）。
  */
 
-export type ImageKind = 'tif' | 'jpg';
+export type ImageKind = 'tif' | 'jpg' | 'png';
 
 export interface NamedFileLike {
   name: string;
@@ -22,6 +22,7 @@ export function imageKindOf(f: NamedFileLike): ImageKind | null {
   const mime = f.type || '';
   if (/\.tiff?$/i.test(name) || mime.indexOf('tiff') !== -1) return 'tif';
   if (/\.jpe?g$/i.test(name) || mime.indexOf('jpeg') !== -1) return 'jpg';
+  if (/\.png$/i.test(name) || mime === 'image/png') return 'png';
   return null;
 }
 
@@ -32,7 +33,7 @@ export function classifyImages<T extends NamedFileLike>(files: T[]): { tifs: T[]
   for (const f of files) {
     const kind = imageKindOf(f);
     if (kind === 'tif') tifs.push(f);
-    else if (kind === 'jpg') imgs.push(f);
+    else if (kind === 'jpg'||kind === 'png') imgs.push(f);
   }
   return { tifs, imgs };
 }

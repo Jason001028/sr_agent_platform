@@ -3,6 +3,7 @@
 param(
     [string]$ServerRoot = '/DiskArray',
     [string]$WindowsRoot = 'W:\',
+    [string[]]$PickerOrigins = @('http://10.10.81.135'),
     [switch]$Uninstall,
     [switch]$Interactive
 )
@@ -12,6 +13,7 @@ $protocolKey = 'HKCU:\Software\Classes\sr-explorer'
 $handlerFile = Join-Path $installDir 'Open-SrDirectory.ps1'
 $launcherFile = Join-Path $installDir 'Open-SrDirectory.exe'
 $configFile = Join-Path $installDir 'mapping.json'
+$pickerFile = Join-Path $installDir 'Pick-SrImage.ps1'
 $chromePolicyScript = Join-Path $PSScriptRoot 'Chrome-SrExplorerPolicy.ps1'
 if (-not (Test-Path -LiteralPath $chromePolicyScript)) {
     throw 'Extract the entire new setup ZIP first; Chrome-SrExplorerPolicy.ps1 must be beside the installer.'
@@ -24,7 +26,7 @@ if ($Uninstall) {
         if (-not $command.Contains($handlerFile) -and -not $command.Contains($launcherFile)) { throw 'Protocol belongs to another installation; refusing to remove it.' }
         Remove-Item -LiteralPath $protocolKey -Recurse -Force
     }
-    foreach ($file in @($handlerFile, $launcherFile, $configFile)) {
+    foreach ($file in @($handlerFile, $launcherFile, $configFile, $pickerFile)) {
         if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force }
     }
     if (Test-Path -LiteralPath $installDir) { Remove-Item -LiteralPath $installDir -ErrorAction SilentlyContinue }
@@ -52,14 +54,19 @@ $handler = @'
 param([Parameter(Mandatory=$true)][string]$Uri, [switch]$ValidateOnly)
 $ErrorActionPreference = 'Stop'
 try {
-    if ($args.Count -ne 0 -or $Uri.Length -gt 24000 -or $Uri -cnotmatch '^sr-explorer://open/([A-Za-z0-9_-]+)$') {
+    if ($args.Count -ne 0 -or $Uri.Length -gt 24000 -or $Uri -cnotmatch '^sr-explorer://(open|pick)/([A-Za-z0-9_-]+)$') {
         throw 'Invalid SR Explorer request.'
     }
-    $encoded = $Matches[1].Replace('-', '+').Replace('_', '/')
+    $action = $Matches[1]
+    $encoded = $Matches[2].Replace('-', '+').Replace('_', '/')
     if (($encoded.Length % 4) -eq 1) { throw 'Invalid directory encoding.' }
     $encoded += '=' * ((4 - ($encoded.Length % 4)) % 4)
     $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
     $path = $utf8.GetString([Convert]::FromBase64String($encoded))
+    if ($action -eq 'pick') {
+        & (Join-Path $PSScriptRoot 'Pick-SrImage.ps1') -Callback $path -ValidateOnly:$ValidateOnly
+        return
+    }
     if ($path.Length -gt 4096 -or $path -notmatch '^/(?!/)' -or $path -match '[\x00-\x1f\x7f"<>|?*:\\]' -or
         ($path.Split('/') | Where-Object { $_ -eq '.' -or $_ -eq '..' -or $_ -match '[. ]$' })) {
         throw 'Invalid server directory.'
@@ -108,14 +115,14 @@ public static class SrExplorerLauncher {
     public static int Main(string[] args) {
         try {
             if (args.Length != 1 || args[0].Length > 24000 ||
-                !Regex.IsMatch(args[0], @"\Asr-explorer://open/[A-Za-z0-9_-]+\z"))
+                !Regex.IsMatch(args[0], @"\Asr-explorer://(?:open|pick)/[A-Za-z0-9_-]+\z"))
                 throw new ArgumentException("Invalid SR Explorer request.");
             string script = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Open-SrDirectory.ps1");
             if (!File.Exists(script)) throw new FileNotFoundException("Please reinstall SR Explorer.");
             var start = new ProcessStartInfo();
             start.FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
                 @"WindowsPowerShell\v1.0\powershell.exe");
-            start.Arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \"" +
+            start.Arguments = "-STA -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \"" +
                 script + "\" \"" + args[0] + "\"";
             // GUI-subsystem launcher + CREATE_NO_WINDOW: no console is created,
             // rather than hiding a console after PowerShell has already started.
@@ -142,7 +149,8 @@ try {
     if (Test-Path -LiteralPath $temporaryLauncher) { Remove-Item -LiteralPath $temporaryLauncher -Force }
 }
 $handler | Set-Content -LiteralPath $handlerFile -Encoding UTF8
-@{ server_root=$ServerRoot; windows_root=$WindowsRoot } | ConvertTo-Json | Set-Content -LiteralPath $configFile -Encoding UTF8
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Pick-SrImage.ps1') -Destination $pickerFile -Force
+@{ server_root=$ServerRoot; windows_root=$WindowsRoot; picker_origins=$PickerOrigins } | ConvertTo-Json | Set-Content -LiteralPath $configFile -Encoding UTF8
 New-Item -Path "$protocolKey\shell\open\command" -Force | Out-Null
 Set-Item -LiteralPath $protocolKey -Value 'URL:SR Agent Explorer'
 New-ItemProperty -LiteralPath $protocolKey -Name 'URL Protocol' -Value '' -PropertyType String -Force | Out-Null

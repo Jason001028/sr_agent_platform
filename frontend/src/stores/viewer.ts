@@ -1,4 +1,5 @@
 import { imageRef, spatialId } from '../lib/spatial';
+import { imagePreviewDiv } from '../lib/previewLevel';
 import { tourImageFromEvidence, tourPairRefusal } from '../lib/tourCompare';
 import { precisePairReason } from '../lib/compareCapabilities';
 import { decodeJpegBitmap } from '../lib/jpegBitmap';
@@ -18,7 +19,7 @@ import { registerViewerContext, snapshotViewer } from '../lib/viewerContext.js';
 import { defineStore } from 'pinia';
 import { ref, computed, markRaw, nextTick, shallowRef, toRaw, watch } from 'vue';
 import {
-  probeImage, tiffTags, layoutInfo, stretchRgba,
+  probeImage, stretchRgba,
   setSparseMin as setSparseMinLib,
 } from '../lib/tifDecode.js';
 import type { ProbeInfo, BandStats, StretchMode, KitCanvas } from '../lib/tifDecode.js';
@@ -58,13 +59,20 @@ import {
   sceneAnchors,
 } from '../lib/scene.js';
 import {
-  apiResolveScene, apiBakeMask, apiSceneSiblings, ensureScenePreviewReady, fetchSceneJpg, fetchDropSceneJpg,
+  apiResolveScene, apiBakeMask, apiSceneSiblings, fetchSceneJpg, fetchDropSceneJpg,
   siblingRow, nosrItemOf, previewCacheStats, clearPreviewCache, watchPreviewCache,
 } from '../lib/api.js';
 import type { SceneResolveResult, SceneSibling, SceneSiblings } from '../lib/api.js';
 import { classifyImages, imageKindOf } from '../lib/imageFiles.js';
 import type { SceneOpenMeta, SceneRow } from '../lib/scene.js';
 import { sourceFingerprint } from '../lib/local_preview.js';
+import { LoadControl, isLoadAbort } from '../lib/loadControl';
+import { decodeLocalFile } from '../lib/localDecodeWorker';
+import { createPreviewAsset, uploadPreviewFile, fetchPreviewAsset, ImageOpenError } from '../lib/imageOpen';
+import type { PreviewAsset } from '../lib/imageOpen';
+import type { LocalPixels } from '../lib/localDecodeWorker';
+import { wholeJpegFits } from '../lib/progressivePreview';
+import type { PreviewFrame } from '../lib/progressivePreview';
 import { isIntermediateStage, stageLabel, stageRefusal } from '../lib/stage.js';
 import type { StageKind } from '../lib/stage.js';
 import { readSpotlightMode, saveSpotlightMode } from '../lib/spotlight.js';
@@ -84,6 +92,10 @@ export type DrawTool = 'rect' | 'polygon' | 'wand' | 'del';
 
 /** 一条解码记录（HTML rec 直译；thumb/src/stats 为 markRaw 重字段） */
 export interface ViewerRec {
+  previewAsset?: PreviewAsset;
+  resolvedSuffix?: string | null;
+  /** Display only. Partial pixels must never become ROI or repair input. */
+  progressivePreview?: KitCanvas;
   tourIdentity?: import('../lib/tourCompare').TourImage;
   spatialIdentity?: string;
   spatialIdentityToken?: number;
@@ -107,7 +119,7 @@ export interface ViewerRec {
   /** 阶段4 不透明场景 id（route='jpg' 时必有；掩码生成 POST /api/masks 用）。 */
   sceneId: string | null;
   /** 阶段6 scene 文件父目录绝对路径（= run_sr 目录语义，与 /api/queue
-   *  params.lq_path 同值）；任务区用它关联当前场景的队列行。本地文件恒 null，
+   *  params.lq_path 同值）；任务区用它关联当前场景的队列行。未核对的本地文件为 null，
    *  除非 tryLinkScenes 命中了盘阵目录并把它升级成 route='jpg'。 */
   lqPath: string | null;
   /** 掩码写到服务端后，服务端告知的绝对路径（`bakeMaskToServer` 成功才非空）。
@@ -139,6 +151,7 @@ export interface ViewerRec {
    *  所以批量只负责把 jpg 生成到盘上，点开时再取（那时命中服务端缓存，秒回）。
    *  拖入链与场景库链的卡片创建时像素就在手，这个字段恒为 undefined。 */
   detailDiv?: number;
+  previewPanSize?: {W:number;H:number};
   card?: { row: SceneRow; meta: SceneOpenMeta };
   /** 批量入列的占位卡：先按清单行排满，解析成功后原地补齐身份。占位期间不可点/拖/删。 */
   pending?: boolean;
@@ -163,12 +176,15 @@ export interface ViewerRec {
    *  `status`：activate 里紧接着的本地解码几百毫秒内就会覆盖 status，写在那儿
    *  等于没写；用户与 e2e 都只看得到这一份。 */
   linkNote?: string;
+  /** Verified scene identity may exist independently of server JPG pixels. */
+  serverSourceVerified?: boolean;
+  localPreviewJpeg?: Blob;
   /** 像素写令牌：每次「有新的写者要接管这张图的像素」时 +1（本地解码
    *  `decodeRec` / 盘阵 JPG 升级 `applySceneJpgToRec`）。落笔前比对，对不上就说
    *  明期间有更新的写者接手，自己这份已经过期 —— 真机上本地解码要几十秒，
    *  切图/升级完全可能挤在中间完成，旧解码结果绝不能盖到新图上。 */
   token: number;
-  layout: string;              // 即探标签摘要
+  layout: string;              // 受控属性探测得到的布局摘要
   status: string;
   statusCls: '' | 'ok' | 'err' | 'muted';
   paintedMode: StretchMode | null;
@@ -471,7 +487,54 @@ export const useViewerStore = defineStore('viewer', () => {
   const cloudOverlay = ref<HTMLCanvasElement | null>(null);
   const wandTol = ref(20);
   const merging = ref(false);
-  const overlay = ref({ visible: false, title: '', sub: '', bar: false, progress: 0 });
+  const overlay = ref({ visible: false, title: '', sub: '', bar: false, progress: 0, indeterminate: true });
+  const imageLoad = ref({ active: false, recId: 0, stage: '', state: 'running' as 'running' | 'pausing' | 'paused' | 'stopped' });
+  let imageLoadOwner: { rec: ViewerRec; control: LoadControl } | null = null;
+  const loadControlFor = (rec: ViewerRec) => imageLoadOwner?.rec === rec ? imageLoadOwner.control : undefined;
+  function pauseImageLoad() { imageLoadOwner?.control.pause(); }
+  function resumeImageLoad() { imageLoadOwner?.control.resume(); }
+  function stopImageLoad() { imageLoadOwner?.control.stop(); }
+  async function withImageLoad<T>(rec: ViewerRec, run: (control: LoadControl) => Promise<T>, stopped: T): Promise<T> {
+    const existing = loadControlFor(rec);
+    if (existing && !existing.signal.aborted) return run(existing);
+    imageLoadOwner?.control.stop();
+    const owner = { rec, control: new LoadControl() };
+    imageLoadOwner = owner;
+    const sync = () => {
+      if (imageLoadOwner === owner) {
+        if(imageLoad.value.stage!==owner.control.stage) {
+          overlay.value.progress=0;overlay.value.indeterminate=true;overlay.value.sub='';
+        }
+        imageLoad.value = { active: true, recId: rec.id, stage: owner.control.stage, state: owner.control.state };
+        if (owner.control.stage && owner.control.state !== 'stopped') {
+          rec.status = (owner.control.state === 'paused' ? '已暂停：' : '') + owner.control.stage;
+          rec.statusCls = '';
+        }
+      }
+    };
+    const off = owner.control.subscribe(sync);
+    sync(); busy.value = true;
+    showMask('正在加载影像', '', true);
+    try { return await run(owner.control); }
+    catch (error) {
+      if (isLoadAbort(error)) {
+        if (imageLoadOwner === owner && recs.value.includes(rec)) {
+          rec.status = rec.thumb && rec.detailDiv === effectivePreviewDiv(rec) ? '已停止后台处理，保留已完成预览'
+            : rec.progressivePreview ? '已停止细节回填，保留概览；点选可重试' : '已停止加载，可点选重试';
+          rec.statusCls = '';
+          if (!rec.serverSourceVerified) rec.linkTried = false;
+        }
+        return stopped;
+      }
+      throw error;
+    } finally {
+      off();
+      if (imageLoadOwner === owner) {
+        imageLoadOwner = null; imageLoad.value.active = false;
+        busy.value = false; hideMask();
+      }
+    }
+  }
   const toast = ref('');
   const error = ref('');
   /** 模态提示：**不自动消失**，得用户点掉。给的是后端那些一长串、需要照着做的
@@ -997,10 +1060,11 @@ export const useViewerStore = defineStore('viewer', () => {
      「往空格里拖图该老实 fit」的判据。 */
   function fitTarget(side: 'A' | 'B'): ViewState | null {
     const rec = recForSide(side);
-    if (!rec || !rec.thumb) return null;
+    const image = rec?.thumb ?? rec?.progressivePreview;
+    if (!image) return null;
     const rect = rectForSide(side);
-    viewFor[side] = { w: rec.thumb.width, h: rec.thumb.height };
-    return fitView(rec.thumb.width, rec.thumb.height, rect.w, rect.h);
+    viewFor[side] = { w: image.width, h: image.height };
+    return fitView(image.width, image.height, rect.w, rect.h);
   }
 
   /** 只适配某一格（按它自己的视口矩形），立即落位。 */
@@ -1274,7 +1338,7 @@ export const useViewerStore = defineStore('viewer', () => {
   function ensureSceneImage(item:SceneSibling,res:SceneSiblings):number|null {
     const W=item.tourIdentity?.width??item.W,H=item.tourIdentity?.height??item.H;
     if(!item.id||!item.exists||!W||!H)return null;
-    const meta:SceneOpenMeta={name:item.name??item.id,W,H,sceneId:item.id,lqPath:res.lqPath,sceneDir:res.lqPath,srcRev:item.srcRev??null,stageKind:item.kind};
+    const meta:SceneOpenMeta={name:item.name??item.id,W,H,sceneId:item.id,lqPath:res.lqPath,sceneDir:res.lqPath,srcRev:item.srcRev??null,stageKind:item.kind,previewPanSize:siblingPanSize(res)};
     return insertSceneCard(meta,siblingRow(res,item));
   }
 
@@ -1292,7 +1356,7 @@ export const useViewerStore = defineStore('viewer', () => {
   async function loadTourImage(item:SceneSibling,res:SceneSiblings,stillWanted:()=>boolean=()=>true) {
     if(!item.id||!item.tourIdentity||!item.exists)throw new Error('影像身份不完整');
     const row=siblingRow(res,item);
-    const meta:SceneOpenMeta={name:item.name!,W:item.tourIdentity.width,H:item.tourIdentity.height,sceneId:item.id,lqPath:res.lqPath,sceneDir:res.lqPath,srcRev:item.srcRev,stageKind:item.kind};
+    const meta:SceneOpenMeta={name:item.name!,W:item.tourIdentity.width,H:item.tourIdentity.height,sceneId:item.id,lqPath:res.lqPath,sceneDir:res.lqPath,srcRev:item.srcRev,stageKind:item.kind,previewPanSize:siblingPanSize(res)};
     const id=insertSceneCard(meta,row),rec=recs.value.find(r=>r.id===id)!;
     if(!rec.thumb||rec.srcRev!==item.srcRev){rec.card=markRaw({row,meta});await fetchCardPixels(rec,stillWanted);}
     if(!stillWanted())throw new Error('配对载入已取消');
@@ -1674,7 +1738,7 @@ export const useViewerStore = defineStore('viewer', () => {
     // 只挑「服务端已有一份现成预览、且档位对得上」的那几类，且**没开着的**。
     const todo = res.items.filter((it) => it.exists && it.id && it.name
       && it.W != null && it.H != null
-      && it.hasPreview && it.previewDiv === div
+      && it.hasPreview && it.previewDiv === imagePreviewDiv(div,it.kind,{W:it.W!,H:it.H!},siblingPanSize(res))
       && !recs.value.some((r) => r.sceneId === it.id));
     if (!todo.length) {
       prefetchNote.value = '这次没有可预取的：另两类在盘上还没有现成预览'
@@ -1688,7 +1752,7 @@ export const useViewerStore = defineStore('viewer', () => {
       try {
         // 顺序取（并发 1）：真机上别同时读几份盘阵预览。
         // **不传 onPhase**：预取不该占用遮罩，用户此刻在看别的。
-        await fetchSceneJpg(cfg, siblingRow(res, it), div);
+        await fetchSceneJpg(cfg, siblingRow(res, it), imagePreviewDiv(div,it.kind,{W:it.W!,H:it.H!},siblingPanSize(res)));
         done++;
       } catch {
         /* 单张失败就跳过，接着取下一张 */
@@ -1937,6 +2001,14 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   /** 打开活动侧场景里的某一类图（input / product / nosr），落在活动侧。 */
+  function effectivePreviewDiv(rec:Pick<ViewerRec,'W'|'H'|'stageKind'|'sceneDir'|'previewPanSize'>,selected=previewDiv.value) {
+    const pan=rec.sceneDir?recs.value.find(r=>r.sceneDir===rec.sceneDir&&r.stageKind==='input'&&r.W>0&&r.H>0):undefined;
+    return imagePreviewDiv(selected,rec.stageKind,rec,pan??rec.previewPanSize);
+  }
+  function siblingPanSize(res:SceneSiblings) {
+    const pan=res.items.find(item=>item.kind==='input'&&item.exists&&item.W&&item.H);
+    return pan?{W:pan.W!,H:pan.H!}:undefined;
+  }
   async function openSceneSibling(kind: SceneSibling['kind'] | 'old'): Promise<boolean> {
     const sid = activeSceneId();
     if (!sid) { showToast('先打开一张带盘阵关联的图，才能取同场景的其它图'); return false; }
@@ -1973,12 +2045,22 @@ export const useViewerStore = defineStore('viewer', () => {
       // 于是「同一枚芯片连点两次」= 一次 `/siblings`（仍要问，才知道它对应哪条 rec）+ 零次 `/preview`。
       const opened = recs.value.find((r) => r.sceneId === item.id);
       if (opened) {
+        opened.previewPanSize=siblingPanSize(res);
         hideMask(); busy.value = false;
         await activate(opened.id, split.value ? activeSide.value : undefined);
         return true;
       }
       const row = siblingRow(res, item);
-      const blob = await fetchSceneJpg(loadSrConfig(), row, previewDiv.value, (text) => {
+      const previewPanSize=siblingPanSize(res);
+      const div=imagePreviewDiv(previewDiv.value,item.kind,{W:item.W,H:item.H},previewPanSize);
+      if(item.kind==='nosr'&&!wholeJpegFits(item.W,item.H,div)) {
+        const id=insertSceneCard({name:(item.name??kind).replace(/\.(tif|tiff|jpg|jpeg)$/i,''),W:item.W,H:item.H,
+          sceneId:item.id,lqPath:res.lqPath,sceneDir:res.lqPath,stageKind:item.kind,stageSuffix:res.suffix,
+          srcRev:item.srcRev??null,previewPanSize},row);
+        hideMask();busy.value=false;
+        await activate(id,split.value?activeSide.value:undefined);return true;
+      }
+      const blob = await fetchSceneJpg(loadSrConfig(), row, div, (text) => {
         showMask('正在加载同场景的图…', text, false);
       });
       hideMask(); busy.value = false;
@@ -1993,6 +2075,7 @@ export const useViewerStore = defineStore('viewer', () => {
         sceneId: item.id, lqPath: res.lqPath, sceneDir: res.lqPath,
         serverMaskPath: null,
         stageKind: item.kind, stageSuffix: res.suffix,
+        previewPanSize,
         srcRev: item.srcRev ?? null,
       }, blob, split.value ? activeSide.value : undefined);
       if (res.suffixFrom !== 'query') {
@@ -2022,20 +2105,35 @@ export const useViewerStore = defineStore('viewer', () => {
       return;
     }
     const dupOf = (f: File): ViewerRec | undefined =>
-      recs.value.find((r) => r.file.name === f.name && r.file.size === f.size);
+      recs.value.find((r) => r.file.name === f.name && (r.previewAsset?r.size:r.file.size) === f.size);
+    const queued: {id?:number;file?:File}[]=[];
     tifs.forEach((f) => {
       const dup = dupOf(f);
       // 重复的仍然走一遍 activate：分屏下「把同一张图拖到另一侧」是有意义的操作，
       // 归位规则（含两格互换）在 placeRec 里。
-      if (dup) void activate(dup.id, side); else openOne(f, side);
+      queued.push({id:dup?dup.id:openOne(f)});
     });
     imgs.forEach((f) => {
       const dup = dupOf(f);
-      if (dup) void activate(dup.id, side); else void openLocalImage(f, side);
+      queued.push(dup?{id:dup.id}:{file:f});
     });
+    // One chooser batch shares the foreground instead of cancelling every
+    // preceding upload as the next file is enqueued.
+    void (async()=>{
+      for(const item of queued){
+        if(item.id!==undefined){
+          const rec=recs.value.find(row=>row.id===item.id);if(!rec)return;
+          await activate(item.id,side);
+          if(!recs.value.includes(rec)||rec.status.startsWith('已停止'))return;
+        }else if(item.file){
+          await openUploadedImage(item.file,side);
+          if(recs.value.some(row=>row.file===item.file&&row.status.startsWith('已停止')))return;
+        }
+      }
+    })().catch(error=>{if(!isLoadAbort(error))showErr(error instanceof Error?error.message:String(error));});
   }
 
-  function openOne(file: File, side?: 'A' | 'B') {
+  function openOne(file: File):number {
     const rec: ViewerRec = {
       id: nextId++, file: markRaw(file),
       probe: null, name: file.name, size: file.size,
@@ -2045,19 +2143,24 @@ export const useViewerStore = defineStore('viewer', () => {
       paintedMode: null, maskRois: null, token: 0,
     };
     recs.value.push(rec);
-    // 即探：只读头部标签，秒显压缩/布局，不等待解码。
-    // 落笔前判 route：帧头解析虽快，但若这期间 rec 已被升级成盘阵场景
-    // （route='jpg'），标签摘要就会把「盘阵 JPG」那行文案盖掉。
-    tiffTags(new FileSource(file, rec.name)).then((tags) => {
-      if (rec.route === null) rec.layout = layoutInfo(tags);
-    }).catch(() => { /* 头部解析失败不阻塞 */ });
-    void activate(rec.id, side);
+    // 属性探测纳入受控解码，避免另起不可暂停的头部读取。
+    return rec.id;
   }
 
   /* ---------------- 激活 / 解码（HTML activate + decodeGeoTiff/decodeUtif） ---------------- */
   /** 激活一条 rec。`side` 只在分屏下有意义（拖放位置算出来的那一半）；不给就是
       「落活动侧」（文件列表点击 / 盘阵栏 / 待修复清单「打开」都不给）。 */
   async function activate(id: number, side?: 'A' | 'B',
+                          origin: 'user' | 'follow' = 'user', readyDiv?: number) {
+    const rec = recs.value.find(r => r.id === id);
+    if (!rec || rec.pending) return;
+    if (imageLoadOwner && imageLoadOwner.rec !== rec) imageLoadOwner.control.stop();
+    if (!rec.thumb || ((rec.previewAsset || (rec.route==='jpg'&&rec.sceneId&&rec.detailDiv!==undefined) || ['sparse', 'chunked', 'utif'].includes(rec.route ?? '')) && rec.detailDiv !== effectivePreviewDiv(rec) && rec.detailDiv!==readyDiv)) {
+      return withImageLoad(rec, () => activateCore(id, side, origin, readyDiv), undefined);
+    }
+    return activateCore(id, side, origin, readyDiv);
+  }
+  async function activateCore(id: number, side?: 'A' | 'B',
                           origin: 'user' | 'follow' = 'user', readyDiv?: number) {
     if (origin === 'user') noteUserIntent();
     stopViewAnim();                       // 换图/切侧优先于缓动
@@ -2066,11 +2169,17 @@ export const useViewerStore = defineStore('viewer', () => {
     const already = activeId.value === id;
     const moved = placeRec(id, side);
     noteCompareEntry(id);                // 对比模式下露面的这张要进点选清单（幂等）
-    if (rec.thumb && ['sparse', 'chunked', 'utif'].includes(rec.route ?? '') && rec.detailDiv !== previewDiv.value) {
+    if(rec.previewAsset && (!rec.thumb || rec.detailDiv!==effectivePreviewDiv(rec))) {
+      await loadPreviewAsset(rec,rec.previewAsset,loadControlFor(rec)!);return;
+    }
+    if(rec.thumb&&rec.route==='jpg'&&rec.sceneId&&rec.detailDiv!==undefined&&rec.detailDiv!==effectivePreviewDiv(rec)&&rec.detailDiv!==readyDiv) {
+      await reloadPreviewLevel(rec,previewDiv.value);return;
+    }
+    if (rec.thumb && ['sparse', 'chunked', 'utif'].includes(rec.route ?? '') && rec.detailDiv !== effectivePreviewDiv(rec)) {
       await decodeRec(rec, true);
       return;
     }
-    if (already && rec.thumb && (!rec.card || (rec.detailDiv === previewDiv.value || rec.detailDiv === readyDiv))) {
+    if (already && rec.thumb && (!rec.card || (rec.detailDiv === effectivePreviewDiv(rec) || rec.detailDiv === readyDiv))) {
       // 已经是活动侧这张：只重画。**只有它真的换了格子才重新适配** ——
       // 同一张图留在原格时若也 fit，一次多余的点选就把用户的缩放抹了。
       // 换了格子（两格互换）也走 `fitAfterImageChange`：新格子的视口与图都换了，
@@ -2087,7 +2196,7 @@ export const useViewerStore = defineStore('viewer', () => {
     if (drawMode.value) {
       pendingPts.value = null; pendingRect.value = null; hoverPt.value = null;
     }
-    if (rec.thumb && (!rec.card || (rec.detailDiv === previewDiv.value || rec.detailDiv === readyDiv))) {
+    if (rec.thumb && (!rec.card || (rec.detailDiv === effectivePreviewDiv(rec) || rec.detailDiv === readyDiv))) {
       repaintOnActivate(rec);
       // 分屏（对比）下换图保住用户的缩放与位置，其余情况看全幅；见 fitAfterImageChange。
       fitAfterImageChange(activeSide.value, rec);
@@ -2128,18 +2237,88 @@ export const useViewerStore = defineStore('viewer', () => {
     // 未命中（盘阵上没有 / 指纹不符 / 后端不可达）才回落本地解码，能力不变。
     if (!rec.route && await tryLinkScenes(rec)) return;
     if (!recs.value.includes(rec)) return;      // 关联期间被移除了
+    if(!rec.route && !rec.serverSourceVerified) {
+      const control=loadControlFor(rec)!;
+      try {
+        const asset=await uploadPreviewFile(rec.file,control,f=>updateProgressUI(f));
+        rec.previewAsset=markRaw(asset); // Retry a stopped JPEG request without uploading again.
+        await loadPreviewAsset(rec,asset,control);return;
+      } catch(error) {
+        if(isLoadAbort(error)||control.signal.aborted)throw error;
+        delete rec.previewAsset;
+        showToast('服务端临时 JPG 不可用，改用本地预览：'+(error instanceof Error?error.message:String(error)));
+      }
+    }
     await decodeRec(rec);
     // 解完才有 sceneId（本地解码的那条路不会命中盘阵，这里多半直接返回）。
     void maybePrefetchCompare();
   }
 
-  async function decodeRec(rec: ViewerRec, preserveView = false) {
+  async function decodeRec(rec: ViewerRec, preserveView = false): Promise<void> {
+    if (!loadControlFor(rec) || loadControlFor(rec)!.signal.aborted) return withImageLoad(rec, () => decodeRec(rec, preserveView), undefined);
+    const control = loadControlFor(rec)!;
     const my = ++rec.token;                     // 领号：本地解码要接管像素了
-    const div = previewDiv.value;
+    const div = effectivePreviewDiv(rec);
     const previousSize = preserveView && rec.thumb ? { w: rec.thumb.width, h: rec.thumb.height } : undefined;
     busy.value = true;
+    try {
+    await control.checkpoint('读取本地 TIFF');
+    showMask('正在生成本地 TIFF 预览…', rec.name, true);
+    // All native image decoding and CPU-heavy sampling lives off the UI thread.
+    if (typeof Worker !== 'undefined' && typeof OffscreenCanvas !== 'undefined') {
+      let committed = false;
+      let readyStatus = '';
+      const wanted = () => imageLoadOwner?.control === control && !control.signal.aborted && rec.token === my && recs.value.includes(rec);
+      const commitPixels = (result: LocalPixels) => {
+        if (!wanted()) return;
+        if (rec.serverSourceVerified && (rec.W !== result.W || rec.H !== result.H)) throw new Error('本地 TIFF 尺寸与已核对的服务端源不一致');
+        const prior = previousSize ?? (rec.progressivePreview ? { w: rec.progressivePreview.width, h: rec.progressivePreview.height } : undefined);
+        const cv = browserKit.createCanvas(result.srcw, result.srch);
+        const { rgba, paintedMode, ...pixels } = result;
+        delete rec.progressivePreview;
+        applyDecoded(rec, { ...pixels, thumb: cv }, my, prior, { rgba, mode: paintedMode });
+        readyStatus = rec.status;
+        delete rec.localPreviewJpeg;
+        rec.layout = result.layout; rec.detailDiv = div; committed = true;
+      };
+      const result = await decodeLocalFile(rec.file, div, rec.paintedMode ?? startStretch('sparse', stretchMode.value), control, f => {
+        if (imageLoadOwner?.control === control) updateProgressUI(f);
+      }, {
+        preview: (frame: PreviewFrame) => {
+          if (!wanted()) return;
+          if (rec.serverSourceVerified && (rec.W !== frame.W || rec.H !== frame.H)) throw new Error('概览尺寸与已核对的服务端源不一致');
+          let canvas = rec.progressivePreview;
+          if (frame.kind === 'overview' || !canvas) {
+            const scale = Math.min(1, 2048 / Math.max(frame.canvasWidth,frame.canvasHeight));
+            canvas = browserKit.createCanvas(Math.max(1,Math.round(frame.canvasWidth*scale)), Math.max(1,Math.round(frame.canvasHeight*scale)));
+            rec.progressivePreview = markRaw(canvas);
+            if (!rec.thumb) {
+              for (const p of panes.value.filter(p => p.rec === rec)) {
+                setSideView(p.side, fitView(canvas.width, canvas.height, p.rect.w, p.rect.h));
+              }
+            }
+          }
+          const block = browserKit.createCanvas(frame.width, frame.rows);
+          block.getContext('2d')!.putImageData(browserKit.createImageData(frame.rgba, frame.width, frame.rows), 0, 0);
+          if (frame.kind === 'overview') canvas.getContext('2d')!.drawImage(block, 0, 0, canvas.width, canvas.height);
+          else canvas.getContext('2d')!.drawImage(block, 0, 0, frame.width, frame.rows, 0,
+            frame.y * canvas.height / frame.canvasHeight, canvas.width, frame.rows * canvas.height / frame.canvasHeight);
+          renderTick.value++;
+        },
+        pixels: commitPixels,
+      });
+      await control.checkpoint();
+      if (rec.token !== my || !recs.value.includes(rec)) return;
+      if (!committed) commitPixels(result);
+      if (result.jpeg) rec.localPreviewJpeg = markRaw(result.jpeg);
+      if (result.exportError) showToast('影像已显示，本地 JPG 导出失败：' + result.exportError);
+      rec.status = readyStatus + (result.exportError ? ' · 本地 JPG 导出失败' : ' · 本地 JPG 可下载');
+      rec.statusCls = 'ok';
+      return;
+    }
+    // Older environments retain the existing decoder with cooperative gates.
     let probe: ProbeInfo | null = null;
-    try { probe = await probeImage(rec.file); } catch (e) { probe = null; }
+    try { probe = await control.wait(probeImage(rec.file), '读取 TIFF 属性'); } catch (e) { if (isLoadAbort(e)) throw e; probe = null; }
     rec.probe = probe;
     if (!probe) {
       if (rec.token !== my) return;             // 已过期：别覆盖新写者的状态
@@ -2149,11 +2328,12 @@ export const useViewerStore = defineStore('viewer', () => {
       busy.value = false;
       return;
     }
-    const source = new FileSource(rec.file, rec.name);
+    const source = new FileSource(rec.file, rec.name, control);
     try {
       const d = await decodeOne(source, probe, rec.file, browserKit, {
         previewDiv: div,
-        onOverlay: (title, sub, bar) => showMask(title, sub, bar),
+        checkpoint: stage => control.checkpoint(stage),
+        onOverlay: (title, sub, bar) => { if (imageLoadOwner?.control === control) showMask(title, sub, bar); },
         onProgress: (f) => {
           if (rec.token !== my || !recs.value.includes(rec)) throw new Error('预览请求已替换');
           if (activeId.value === rec.id) updateProgressUI(f);
@@ -2165,14 +2345,95 @@ export const useViewerStore = defineStore('viewer', () => {
       // 遮罩还盖着（finally 里才收）：把首次缩放那笔一次性重采样在这里付掉
       await warmZoom(rec);
     } catch (e) {
+      if (isLoadAbort(e)) throw e;
       if (rec.token === my) failRec(rec, e);
-    } finally {
-      busy.value = false;
-      hideMask();
+    }
+    } catch (e) {
+      if (isLoadAbort(e)) throw e;
+      if (rec.token === my) failRec(rec, e);
     }
   }
 
-  function applyDecoded(rec: ViewerRec, d: DecodedRec, token: number, previousSize?: { w: number; h: number }) {
+  const assetAssociations = new Map<number,{assetId:string;controller:AbortController}>();
+  function cancelAssetAssociation(id:number) {
+    assetAssociations.get(id)?.controller.abort();assetAssociations.delete(id);
+  }
+  function associatePreviewAsset(rec:ViewerRec,asset:PreviewAsset) {
+    if(!asset.serverPath||rec.serverSourceVerified||rec.card)return;
+    if(assetAssociations.get(rec.id)?.assetId===asset.id)return;
+    cancelAssetAssociation(rec.id);
+    const job={assetId:asset.id,controller:new AbortController()};
+    assetAssociations.set(rec.id,job);
+    rec.linkNote='服务端 JPG 已显示，正在后台核对盘阵关联；核对完成前仅预览。';
+    const wanted=()=>assetAssociations.get(rec.id)===job&&recs.value.includes(rec)&&rec.previewAsset?.id===asset.id&&!rec.serverSourceVerified;
+    void apiResolveScene(loadSrConfig(),{path:asset.serverPath,source_fingerprint:asset.fingerprint},
+      {signal:AbortSignal.any([job.controller.signal,AbortSignal.timeout(20000)])}).then(resolved=>{
+      if(!wanted())return;
+      if(resolved.row.srcRev!==asset.sourceRev||resolved.row.W!==asset.W||resolved.row.H!==asset.H) {
+        rec.linkNote='服务端 JPG 已显示；盘阵源身份或尺寸已变化，未授予业务关联。';return;
+      }
+      rememberVerifiedSource(rec,resolved);
+      rec.linkNote='源文件已核对；使用服务端缓存 JPG。';
+    }).catch(error=>{
+      if(!wanted())return;
+      rec.linkNote=(error as Error)?.name==='TimeoutError'
+        ?'服务端 JPG 已显示；后台盘阵核对超时，仅预览，可稍后关联。'
+        :'服务端 JPG 已显示；未确认盘阵业务关联，仅预览。';
+    }).finally(()=>{if(assetAssociations.get(rec.id)===job)assetAssociations.delete(rec.id);});
+  }
+  async function loadPreviewAsset(rec:ViewerRec,asset:PreviewAsset,control:LoadControl) {
+    await control.checkpoint('获取服务端缓存 JPG');
+    const div=effectivePreviewDiv(rec);
+    const result=await control.request(signal=>fetchPreviewAsset(asset,div,signal),'服务端下采样 JPG（缓存）');
+    await control.checkpoint('装载服务端 JPG');
+    if(!recs.value.includes(rec)||effectivePreviewDiv(rec)!==div)return;
+    const ratio=result.width?Math.max(asset.W/result.width,asset.H/result.height):0;
+    const layout=`服务端缓存 JPG 概览 · 请求 ${previewDivLabel(div)}${ratio?' · 实际约 1/'+Number(ratio.toFixed(2)):''} · 缓存定期清理`;
+    const applied=await applySceneJpgToRec(rec,{
+      name:rec.name,W:asset.W,H:asset.H,sceneId:rec.sceneId!,lqPath:rec.lqPath,
+      sceneDir:rec.sceneDir,serverMaskPath:rec.serverMaskPath,stageKind:rec.stageKind,
+      stageSuffix:rec.card?.meta.stageSuffix??rec.resolvedSuffix,previewOnly:rec.card?!!rec.card.meta.previewOnly:rec.serverSourceVerified?rec.previewOnly:true,srcRev:asset.sourceRev,previewPanSize:rec.previewPanSize,
+    },result.blob,layout,true,()=>!control.signal.aborted);
+    if(!applied)return;
+    rec.previewAsset=markRaw(asset);rec.detailDiv=div;
+    rec.localPreviewJpeg=markRaw(result.blob);
+    rec.status=layout;rec.statusCls='ok';
+    rec.linkNote=rec.serverSourceVerified?'源文件已核对；使用服务端缓存 JPG。':'服务端临时 JPG，仅预览，未关联盘阵业务场景。';
+    if(!rec.file.size)rec.file=markRaw(new File([result.blob],asset.name,{type:'image/jpeg'}));
+    // The asset already authorizes preview. Optional scene classification must
+    // not hold up this JPG, the next image, or the foreground loading controls.
+    associatePreviewAsset(rec,asset);
+  }
+
+  async function openPreviewAsset(asset:PreviewAsset):Promise<void> {
+    const existing=recs.value.find(rec=>rec.previewAsset?.id===asset.id);
+    if(existing){await activate(existing.id);return;}
+    const rec:ViewerRec={id:nextId++,file:markRaw(new File([],asset.name)),name:asset.name,size:asset.size,
+      W:asset.W,H:asset.H,probe:null,thumb:null,src:null,srcw:0,srch:0,nbands:0,invert:false,stats:null,
+      route:null,sceneId:null,lqPath:null,layout:'',status:'等待服务端 JPG…',statusCls:'',paintedMode:null,maskRois:null,token:0,previewAsset:markRaw(asset)};
+    recs.value.push(rec);
+    try{await activate(rec.id);}catch(error){if(!isLoadAbort(error))failRec(rec,error);throw error;}
+  }
+
+  async function openUploadedImage(file:File,side?:'A'|'B') {
+    const rec:ViewerRec={id:nextId++,file:markRaw(file),name:file.name,size:file.size,W:0,H:0,probe:null,thumb:null,
+      src:null,srcw:0,srch:0,nbands:0,invert:false,stats:null,route:null,sceneId:null,lqPath:null,layout:'',
+      status:'准备服务端 JPG…',statusCls:'',paintedMode:null,maskRois:null,token:0};
+    recs.value.push(rec);let opened=false,stopped=false;
+    const live=recs.value.find(row=>row.id===rec.id)!;
+    await withImageLoad(live,async control=>{
+      placeRec(rec.id,side);
+      try {const asset=await uploadPreviewFile(file,control,f=>updateProgressUI(f));live.previewAsset=markRaw(asset);await loadPreviewAsset(live,asset,control);opened=true;}
+      catch(error){if(isLoadAbort(error)||control.signal.aborted){stopped=true;throw error;}delete live.previewAsset;showToast('服务端 JPG 不可用，改用本地图片：'+(error instanceof Error?error.message:String(error)));}
+    },undefined);
+    if(!opened&&!stopped&&recs.value.find(r=>r.id===rec.id)&&!live.thumb) {
+      const position=recs.value.findIndex(r=>r.id===rec.id);if(position>=0)recs.value.splice(position,1);
+      // Explicit Stop is final, never a request to launch another decoder.
+      await openLocalImage(file,side);
+    }
+  }
+
+  function applyDecoded(rec: ViewerRec, d: DecodedRec, token: number, previousSize?: { w: number; h: number }, rendered?: { rgba: Uint8ClampedArray; mode: StretchMode }) {
     // 解码是几十秒级的异步过程：期间这张图可能已经被升级成盘阵 JPG（或又被解码
     // 一次），那份结果比这份新。令牌对不上就整份丢掉，一个字都不写。
     if (rec.token !== token) return;
@@ -2193,7 +2454,11 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.status += ` · 实际约 1/${Number(ratio.toFixed(2))}（${d.srcw}×${d.srch}）`;
     if (ratio > previewDiv.value * 1.01) rec.status += ' · 已达本地预览内存上限';
     // 像素刚换过 → 一律重画。已选过模式的（同一 rec 重复解码）沿用原模式，不重置。
-    paintStretch(rec, rec.paintedMode ?? startStretch(rec.route, stretchMode.value));
+    if (rendered) {
+      const ctx = (rec.thumb as unknown as HTMLCanvasElement).getContext('2d');
+      ctx?.putImageData(new ImageData(rendered.rgba as Uint8ClampedArray<ArrayBuffer>, d.srcw, d.srch), 0, 0);
+      rec.paintedMode = rendered.mode;
+    } else paintStretch(rec, rec.paintedMode ?? startStretch(rec.route, stretchMode.value));
     afterPixels(rec, previousSize);                // 分屏下这张可能在非活动侧解码完成
   }
 
@@ -2291,10 +2556,13 @@ export const useViewerStore = defineStore('viewer', () => {
    *  `rec.file`/`name`/`size` 归调用方管：拖拽升级那条路要**保持**用户拖进来的
    *  那个文件名与字节数（FileList 展示与 addFiles 查重都靠它），只换像素与身份。 */
   async function applySceneJpgToRec(rec: ViewerRec, meta: SceneOpenMeta,
-                                    blob: Blob, layout?: string, preserveView = false, stillWanted:()=>boolean=()=>true): Promise<boolean> {
+                                    blob: Blob, layout?: string, preserveView = false, stillWanted:()=>boolean=()=>true, ownedControl?:LoadControl): Promise<boolean> {
+    const control = ownedControl??loadControlFor(rec);
+    await control?.checkpoint('解码服务端 JPG');
     const my = ++rec.token;                     // 领号：JPG 要接管像素了
     const requestedDiv = previewDiv.value;
-    const cv = await decodeJpgToCanvas(blob);
+    const cv = control ? await control.wait(decodeJpgToCanvas(blob)) : await decodeJpgToCanvas(blob);
+    await control?.checkpoint('装载服务端预览');
     if (previewDiv.value !== requestedDiv) return false;
     if (!stillWanted() || rec.token !== my || !recs.value.includes(rec)) return false;
     const tw = cv.width, th = cv.height;
@@ -2323,6 +2591,8 @@ export const useViewerStore = defineStore('viewer', () => {
     // 缺省按本体 —— 只有盘阵场景才有这一项，本地图片 stageKind 保持 undefined。
     // 标签在这一个漏斗里算出来，卡片直接渲染，不必各自再判一遍。
     rec.stageKind = meta.stageKind ?? 'input';
+    rec.previewPanSize=meta.previewPanSize??rec.previewPanSize;
+    rec.detailDiv=effectivePreviewDiv(rec);
     rec.stageLabel = stageLabel(rec.stageKind, meta.stageSuffix, rec.name);
     // 默认是服务端生成预览那份的口径；拖本地 jpg 升级进来的那条路自报来源
     // （它的像素是用户拖进来的原图，写成「服务端已生成」与事实不符）。
@@ -2330,7 +2600,7 @@ export const useViewerStore = defineStore('viewer', () => {
     // 「刚拿到手的这张是按哪一档生成的」就是它（用户若在取图途中又拖了滑块，
     // 文案最多早一拍，下次打开即对齐）。
     rec.layout = layout
-      ?? `盘阵 JPG（${previewDivLabel(previewDiv.value)} 尺度 + 直方图均衡，服务端已生成）`;
+      ?? `盘阵 JPG（${previewDivLabel(rec.detailDiv)} 尺度 + 直方图均衡，服务端已生成）`;
     // 同上：名字与尺寸卡片上已有（标题行、图属性行、布局行），状态只表态
     rec.status = '场景就绪';
     rec.statusCls = 'ok';
@@ -2359,7 +2629,10 @@ export const useViewerStore = defineStore('viewer', () => {
    *  环节标签都在），列表里看着是一张齐了的卡，只有小图横幅是占位。 */
   function insertSceneCard(meta: SceneOpenMeta, row: SceneRow, afterId?: number, strictIdentity = false): number {
     const dup = strictIdentity ? recs.value.find(r => r.sceneId === meta.sceneId) : findRecByMeta(meta);
-    if (dup) return dup.id;        // 同一景已在列表里（批量前会清空，这里只是兜底）
+    if (dup) {
+      if(meta.previewPanSize)dup.previewPanSize=meta.previewPanSize;
+      return dup.id;
+    }
     const rec: ViewerRec = {
       id: nextId++,
       // 空 File：这条路的像素永远从服务端取（见 card），它只为满足类型存在，绝不被读。
@@ -2375,6 +2648,7 @@ export const useViewerStore = defineStore('viewer', () => {
       card: markRaw({ row, meta }),
     };
     rec.stageKind = meta.stageKind ?? 'input';
+    rec.previewPanSize=meta.previewPanSize;
     rec.stageLabel = stageLabel(rec.stageKind, meta.stageSuffix, rec.name);
     rec.serverMaskPath = meta.serverMaskPath ?? null;
     // 一键解析：NOSR 卡紧跟本体卡；其余情况追加到末尾。不参与批量错峰（延迟 0），
@@ -2421,6 +2695,7 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.lqPath = meta.lqPath;
     rec.sceneDir = meta.sceneDir ?? null;
     rec.stageKind = meta.stageKind ?? 'input';
+    rec.previewPanSize=meta.previewPanSize;
     rec.stageLabel = stageLabel(rec.stageKind, meta.stageSuffix, rec.name);
     rec.serverMaskPath = meta.serverMaskPath ?? null;
     rec.status = '正在生成预览…';
@@ -2462,7 +2737,7 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   /** Shared, awaitable pixel loads, keyed by record and preview tier. */
-  const cardFetchInflight = new Map<string, { token: number; promise: Promise<void> }>();
+  const cardFetchInflight = new Map<string, { token: number; promise: Promise<void>; control?: LoadControl }>();
 
   /** 同一个场景、同一档位正在取的图。键是 `场景 id|档位` —— **档位不同就是两张不同的
    *  图**，不能合。
@@ -2475,26 +2750,13 @@ export const useViewerStore = defineStore('viewer', () => {
    *  失败也要摘掉表项：留一个已 reject 的 promise 在表里，后续每次调用都会立刻炸同一个错。 */
   const sceneJpgInflight = new Map<string, Promise<Blob>>();
 
-  const sceneReadyInflight = new Map<string, Promise<void>>();
-  function ensureSceneReadyShared(row: SceneRow, div: number): Promise<void> {
-    const key = row.id + '|' + div + '|' + (row.srcRev ?? '');
-    const flying = sceneReadyInflight.get(key);
-    if (flying) return flying;
-    const tracked = ensureScenePreviewReady(loadSrConfig(), row, div).finally(() => {
-      if (sceneReadyInflight.get(key) === tracked) sceneReadyInflight.delete(key);
-    });
-    sceneReadyInflight.set(key, tracked);
-    return tracked;
-  }
-
   function fetchSceneJpgShared(row: SceneRow, div: number): Promise<Blob> {
     const key = row.id + '|' + div + '|' + (row.srcRev ?? '');
     const flying = sceneJpgInflight.get(key);
     if (flying) return flying;
-    const tracked = (async () => {
-      await ensureSceneReadyShared(row, div);
-      return fetchSceneJpg(loadSrConfig(), row, div);
-    })().finally(() => {
+    // fetchSceneJpg already generates on demand and returns those exact bytes.
+    // A preceding ready-only call adds an unnecessary preparation round trip.
+    const tracked = fetchSceneJpg(loadSrConfig(), row, div).finally(() => {
       if (sceneJpgInflight.get(key) === tracked) sceneJpgInflight.delete(key);
     });
     sceneJpgInflight.set(key, tracked);
@@ -2506,22 +2768,53 @@ export const useViewerStore = defineStore('viewer', () => {
    *  装回失败（`applySceneJpgToRec` 返回 false）= 「期间有更新的写者接手 / 这张卡已经
    *  被移除了」，**那是被取消，不是失败** —— 静默返回，绝不写成取图失败。 */
   function fetchCardPixels(rec: ViewerRec, stillWanted:()=>boolean=()=>true): Promise<void> {
+    const control = loadControlFor(rec);
     const card = rec.card;
     if (!card) return Promise.resolve();
-    const div = previewDiv.value;
+    const div = effectivePreviewDiv(rec);
     const key = rec.id + '|' + div + '|' + (card.row.srcRev ?? '');
     const flying = cardFetchInflight.get(key);
-    if (flying && flying.token === rec.token) return flying.promise;
-    const intent = { token: ++rec.token, promise: Promise.resolve() };
+    if (flying && (flying.token === rec.token || flying.token === rec.token+1) && !flying.control?.signal.aborted) return flying.promise;
+    const intent = { token: ++rec.token, promise: Promise.resolve(), control:control??new LoadControl() };
+    const phase=(text:string)=>{
+      if(!recs.value.includes(rec)||rec.token!==intent.token||intent.control.signal.aborted)return;
+      rec.status=text;
+      if(!imageLoadOwner||imageLoadOwner.rec===rec)showMask('正在加载候选影像：'+rec.name,text,true);
+    };
     const tracked = (async () => {
       try {
-        const blob = await fetchSceneJpgShared(card.row, div);
-        if (!stillWanted() || rec.token !== intent.token || !recs.value.includes(rec) || previewDiv.value !== div) return;
+        await control?.checkpoint('获取盘阵预览');
+        // Diff A/B preload owns independent controls. All candidate roles use
+        // the same bounded cache; legacy fallback requires 404 and safe size.
+        const owner=intent.control;
+        phase('正在准备服务端 JPG 缓存…');
+        let resolvedAsset:PreviewAsset|undefined;
+        try {
+          resolvedAsset=rec.previewAsset??await owner.request(signal=>createPreviewAsset({sceneId:rec.sceneId!},signal),'准备服务端概览');
+        } catch(error) {
+          if(isLoadAbort(error)||owner.signal.aborted)throw error;
+          if(!(error instanceof ImageOpenError&&error.status===404&&wholeJpegFits(rec.W,rec.H,div)))throw error;
+        }
+        if(resolvedAsset) {
+          const asset=resolvedAsset;
+          if(asset.W!==rec.W||asset.H!==rec.H||(card.row.srcRev&&asset.sourceRev!==card.row.srcRev))throw new Error('候选影像源版本或尺寸已变化，请刷新候选');
+          const result=await owner.request(signal=>fetchPreviewAsset(asset,div,signal,phase),'服务端下采样 JPG（缓存）');
+          if(!stillWanted()||rec.token!==intent.token||!recs.value.includes(rec)||effectivePreviewDiv(rec)!==div)return;
+          phase('正在解码并装载 JPG…');intent.token++;
+          const ratio=result.width?Math.max(asset.W/result.width,asset.H/result.height):0;
+          const layout=`服务端缓存 JPG 概览 · 请求 ${previewDivLabel(div)}${ratio?' · 实际约 1/'+Number(ratio.toFixed(2)):''} · 缓存定期清理`;
+          const applied=await applySceneJpgToRec(rec,{...card.meta,srcRev:asset.sourceRev},result.blob,layout,true,stillWanted,owner);
+          if(applied){rec.previewAsset=markRaw(asset);rec.localPreviewJpeg=markRaw(result.blob);rec.detailDiv=div;}
+          return;
+        }
+        const pending = fetchSceneJpgShared(card.row, div);
+        const blob = await (control ? control.wait(pending) : pending);
+        if (!stillWanted() || rec.token !== intent.token || !recs.value.includes(rec) || effectivePreviewDiv(rec) !== div) return;
         intent.token++; // applySceneJpgToRec claims the next write token before decoding.
         const applied = await applySceneJpgToRec(rec, card.meta, blob, undefined, true, stillWanted);
         if (applied) rec.detailDiv = div;
       } catch (e) {
-        if (rec.token === intent.token && recs.value.includes(rec) && previewDiv.value === div) throw e;
+        if (rec.token === intent.token && recs.value.includes(rec) && effectivePreviewDiv(rec) === div) throw e;
       }
     })().finally(() => {
       if (cardFetchInflight.get(key) === intent) cardFetchInflight.delete(key);
@@ -2543,20 +2836,22 @@ export const useViewerStore = defineStore('viewer', () => {
   /** 点击路：取像素 + 上屏 + 预热缩放（遮罩盖着，把首次缩放那笔一次性付掉）。 */
   let cardLoadCount = 0;
   async function loadCardPixels(rec: ViewerRec): Promise<void> {
+    const control = loadControlFor(rec);
     cardLoadCount++;
     busy.value = true;
     showMask('正在取盘阵场景的图…', rec.name + '（按需生成或读取预览，'
-      + previewDivLabel(previewDiv.value) + ' 尺度）', false);
+      + previewDivLabel(effectivePreviewDiv(rec)) + ' 尺度）', false);
     try {
       await fetchCardPixels(rec);
       await warmZoom(rec);
     } catch (e) {
+      if (isLoadAbort(e)) throw e;
       const t = e instanceof Error ? e.message : String(e);
       rec.status = '取图失败'; rec.statusCls = 'err'; rec.linkNote = t;
       showErr('「' + rec.name + '」取图失败：' + t);
     } finally {
       cardLoadCount--;
-      if (cardLoadCount === 0) { hideMask(); busy.value = false; }
+      if (cardLoadCount === 0 && !imageLoadOwner) { hideMask(); busy.value = false; }
       void maybePrefetchCompare();             // 对比模式里换了图 → 可能换了场景
     }
   }
@@ -2710,6 +3005,9 @@ export const useViewerStore = defineStore('viewer', () => {
    *  清理 20 张就取 20 次图，其中 19 次是白取。这里只在最后处理一次活动侧。
    *  活动图被清掉时也不自动打开下一张：批量清理不该顺手把一张没点过的卡拉起来取图。 */
   function dropRecs(ids: Set<number>): number {
+    for(const id of ids)cancelAssetAssociation(id);
+    for(const [key,job] of cardFetchInflight)if(ids.has(Number(key.split('|')[0])))job.control?.stop();
+    if (imageLoadOwner && ids.has(imageLoadOwner.rec.id)) imageLoadOwner.control.stop();
     const before = recs.value.length;
     recs.value = recs.value.filter((r) => !ids.has(r.id));
     const n = before - recs.value.length;
@@ -2821,8 +3119,11 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   function removeRec(id: number) {
+    if (imageLoadOwner?.rec.id === id) imageLoadOwner.control.stop();
     const i = recs.value.findIndex((r) => r.id === id);
     if (i < 0 || recs.value[i].pending) return;
+    cancelAssetAssociation(id);
+    for(const [key,job] of cardFetchInflight)if(key.startsWith(id+'|'))job.control?.stop();
     pushUndo('移除 1 张');
     recs.value.splice(i, 1);
     pruneSpotlight();
@@ -2857,9 +3158,13 @@ export const useViewerStore = defineStore('viewer', () => {
    *
    *  返回清掉几张（调用方报给用户）。 */
   function clearRecs(): number {
+    imageLoadOwner?.control.stop();
     workspaceVersion.value++;
     // 收藏的卡留下：一键解析是「换一批看」，而收藏是用户明确要留住的那几张。
     const keep = recs.value.filter((r) => r.fav);
+    const retained = new Set(keep.map(r=>r.id));
+    for(const id of assetAssociations.keys())if(!retained.has(id))cancelAssetAssociation(id);
+    for(const [key,job] of cardFetchInflight)if(!retained.has(Number(key.split('|')[0])))job.control?.stop();
     const n = recs.value.length - keep.length;
     stopPrefetch();                      // 在飞的预取自己发现代次变了就收手
     if (markerTimer !== null) { clearTimeout(markerTimer); markerTimer = null; }
@@ -2956,19 +3261,31 @@ export const useViewerStore = defineStore('viewer', () => {
   function setPreviewDiv(div: number) {
     if (!(SCENE_PREVIEW_DIVS as readonly number[]).includes(div) || div === previewDiv.value) return;
     previewDiv.value = div;
+    stopImageLoad();
     savePreviewDiv(div);
     // 交替对比的两张都在同一块画布上轮换，换档位时一起重取，不然翻到另一张还是旧档。
     const flickerIds = compareMode.value === 'flicker' && flickerPair.value
       ? [flickerPair.value.a, flickerPair.value.b] : [];
     const visible = new Set([paneA.value, ...(split.value ? [paneB.value] : []), ...flickerIds]);
-    for (const rec of recs.value) {
-      if (!visible.has(rec.id)) continue;
-      if (rec.route === 'jpg' && rec.sceneId) void reloadPreviewLevel(rec, div);
-      else if (rec.route === 'sparse' || rec.route === 'chunked' || rec.route === 'utif') void decodeRec(rec, true);
-    }
+    const rows = recs.value.filter(rec => visible.has(rec.id));
+    void (async () => {
+      for (const rec of rows) {
+        if (previewDiv.value !== div) return;
+        if (rec.route === 'jpg' && (rec.sceneId || rec.previewAsset) && rec.detailDiv!==effectivePreviewDiv(rec,div)) await reloadPreviewLevel(rec, div);
+        else if (rec.route === 'sparse' || rec.route === 'chunked' || rec.route === 'utif') await decodeRec(rec, true);
+      }
+    })().catch(error => { if (!isLoadAbort(error)) showErr(error instanceof Error ? error.message : String(error)); });
   }
 
-  async function reloadPreviewLevel(rec: ViewerRec, div: number) {
+  async function reloadPreviewLevel(rec: ViewerRec, selectedDiv: number): Promise<void> {
+    if (!loadControlFor(rec) || loadControlFor(rec)!.signal.aborted) return withImageLoad(rec, () => reloadPreviewLevel(rec, selectedDiv), undefined);
+    const div=effectivePreviewDiv(rec,selectedDiv);
+    const control = loadControlFor(rec)!;
+    if(!rec.previewAsset&&rec.stageKind==='nosr'&&!wholeJpegFits(rec.W,rec.H,div)) {
+      rec.previewAsset=markRaw(await control.request(signal=>createPreviewAsset({sceneId:rec.sceneId!},signal),'准备 NOSR 服务端概览'));
+    }
+    if(rec.previewAsset){await loadPreviewAsset(rec,rec.previewAsset,control);return;}
+    await control.checkpoint('切换服务端预览');
     const meta: SceneOpenMeta = rec.card?.meta ?? {
       name: rec.name, W: rec.W, H: rec.H, sceneId: rec.sceneId!,
       lqPath: rec.lqPath, sceneDir: rec.sceneDir,
@@ -2976,6 +3293,7 @@ export const useViewerStore = defineStore('viewer', () => {
       stageSuffix: rec.stageKind === 'product' ? rec.stageLabel : '',
       previewOnly: rec.previewOnly,
       srcRev: rec.srcRev,
+      previewPanSize:rec.previewPanSize,
     };
     const token = ++rec.token;
     rec.status = '正在切换预览 ' + previewDivLabel(div);
@@ -2986,18 +3304,20 @@ export const useViewerStore = defineStore('viewer', () => {
         // `/preview-drop` 会把预览写回源所在目录并只认盘阵前缀，对这类源必然 404。
         // 用一条一次性行喂 `fetchSceneJpg` 的「库外」分支（jpgUrl=null → /preview），
         // 不碰任何真实的场景行状态。
-        const blob = rec.previewOnly
-          ? await fetchSceneJpg(loadSrConfig(), {
+        const blob = await control.request(signal => rec.previewOnly
+          ? fetchSceneJpg(loadSrConfig(), {
               id: rec.sceneId!, name: rec.name, W: rec.W, H: rec.H,
               jpgUrl: null, hasPreview: true, previewDiv: div, lq_path: null,
               srcRev: rec.srcRev ?? null,
-            } as SceneRow, div)
-          : await fetchDropSceneJpg(loadSrConfig(), rec.sceneId!, div);
-        if (rec.token !== token || previewDiv.value !== div || !recs.value.includes(rec)) return;
+            } as SceneRow, div, undefined, signal)
+          : fetchDropSceneJpg(loadSrConfig(), rec.sceneId!, div, undefined, signal), '切换服务端预览');
+        await control.checkpoint('装载服务端预览');
+        if (rec.token !== token || effectivePreviewDiv(rec) !== div || !recs.value.includes(rec)) return;
         if (await applySceneJpgToRec(rec, meta, blob, undefined, true)) rec.detailDiv = div;
       }
     } catch (error) {
-      if (previewDiv.value !== div || !recs.value.includes(rec)) return;
+      if (isLoadAbort(error)) throw error;
+      if (effectivePreviewDiv(rec) !== div || !recs.value.includes(rec)) return;
       if (!rec.card && rec.token !== token && rec.token !== token + 1) return;
       rec.status = '预览切换失败'; rec.statusCls = 'err';
       showErr(error instanceof Error ? error.message : String(error));
@@ -3036,10 +3356,11 @@ export const useViewerStore = defineStore('viewer', () => {
       return;
     }
     const rec = activeRec.value;
-    if (!rec || !rec.thumb) return;
+    const image = rec?.thumb ?? rec?.progressivePreview;
+    if (!image) return;
     const rect = activePaneRect();
-    view.value = fitView(rec.thumb.width, rec.thumb.height, rect.w, rect.h);
-    viewFor[activeSide.value] = { w: rec.thumb.width, h: rec.thumb.height };
+    view.value = fitView(image.width, image.height, rect.w, rect.h);
+    viewFor[activeSide.value] = { w: image.width, h: image.height };
   }
 
   /* ---------------- 大图缩放预热（2026-09-21） ----------------
@@ -3103,10 +3424,12 @@ export const useViewerStore = defineStore('viewer', () => {
     // 已经在盖遮罩的（解码 / 取图那几条路）只把文案换成准确说明；没盖的（从位置文件
     // 升级盘阵场景那条路）自己盖一个、热完收回 —— 调用方不必重复编排这件事。
     const mine = overlay.value.visible;
+    const control = loadControlFor(live);
     showMask('正在预热缩放…', live.name, false);
     const keep = targets.map((p) => ({ side: p.side, view: p.view, marked: viewFor[p.side] }));
     try {
       for (const s of WARM_SCALES) {
+        await control?.checkpoint('预热缩放');
         for (const p of targets) {
           // 以该格中心为锚：与用户滚轮缩放的位置无关，只是要让整张图都进重采样路径
           setSideView(p.side, {
@@ -3120,10 +3443,12 @@ export const useViewerStore = defineStore('viewer', () => {
         await twoFrames();                             // …再等它真的光栅化完
       }
     } finally {
-      for (const k of keep) { setSideView(k.side, k.view); viewFor[k.side] = k.marked; }
-      renderTick.value++;
-      live.warmed = live.thumb;
-      if (!mine) hideMask();
+      if (!control || imageLoadOwner?.control === control) {
+        for (const k of keep) { setSideView(k.side, k.view); viewFor[k.side] = k.marked; }
+        renderTick.value++;
+        if (!control?.signal.aborted) live.warmed = live.thumb;
+        if (!mine) hideMask();
+      }
     }
   }
 
@@ -3140,7 +3465,7 @@ export const useViewerStore = defineStore('viewer', () => {
       const oPane = onA ? r.b : r.a;      // 另一格
       if (!splitSynchronized.value) {
         const side = onA ? 'A' : 'B';
-        if (!recForSide(side)?.thumb) return;
+        if (!recForSide(side)?.thumb && !recForSide(side)?.progressivePreview) return;
         const target = onA ? viewA : viewB;
         target.value = wheelZoom(target.value, mx - pPane.x, my - pPane.y, factor);
         renderTick.value++;
@@ -3154,7 +3479,7 @@ export const useViewerStore = defineStore('viewer', () => {
       return;
     }
     const rec = activeRec.value;
-    if (!rec || !rec.thumb) return;
+    if (!rec?.thumb && !rec?.progressivePreview) return;
     // **单屏刻意保留这条字面表达式**：改走 normAnchor/anchorAt 会多一次除法与乘法，
     // IEEE double 下不保证往返（100/1314*1314 = 99.99999999999999），
     // 而 test-vue-viewer.js 的 D/E 段在采样画布中心像素。
@@ -3557,7 +3882,7 @@ export const useViewerStore = defineStore('viewer', () => {
     try {
       const merged = await mergeConnectedAsync(rois, tw, th, {
         onPhase: (phase) => { overlay.value.sub = phase + '…'; },
-        onProgress: (f) => { overlay.value.progress = Math.round(f * 100); },
+        onProgress: (f) => { updateProgressUI(f); },
       });
       hideMask(); merging.value = false;
       if (activeId.value !== owner.id) return;   // 合并期间切了图，丢弃不写
@@ -3671,7 +3996,7 @@ export const useViewerStore = defineStore('viewer', () => {
       const tif = await buildTiff(W, H, polys, {
         batch: 128,
         onProgress: (f) => {
-          overlay.value.progress = Math.round(f * 100);
+          updateProgressUI(f);
           overlay.value.sub = '栅格化 + 压缩中：' + Math.round(f * 100) + '%（' + W + '×' + H + '，请稍候）';
         },
       });
@@ -3776,7 +4101,9 @@ export const useViewerStore = defineStore('viewer', () => {
       const res = await apiSceneSiblings(cfg, sid);
       const item = nosrItemOf(res);
       if (!item) return;                  // 盘上没有那份：什么都不做
-      await fetchSceneJpg(cfg, siblingRow(res, item), previewDiv.value);
+      const div=imagePreviewDiv(previewDiv.value,item.kind,{W:item.W??0,H:item.H??0},siblingPanSize(res));
+      if(!wholeJpegFits(item.W??0,item.H??0,div))return; // Do not bake an oversized hidden JPG.
+      await fetchSceneJpg(cfg, siblingRow(res, item), div);
     })().catch(() => {
       // 静默（见上），但**把这一景从已试清单里放掉**：失败多半是「盘阵暂时写不进」
       // 这类可恢复的事，锁住的话再拖几次都悄无声息。盘上没有那份（`!item` 提前返回）
@@ -3805,7 +4132,7 @@ export const useViewerStore = defineStore('viewer', () => {
    *  * 网络失败 / 超时（20s）：**清掉 linkTried**，下次激活还能再试 —— 那不是服务端
    *    的答案，留着等于「问过了、没有」，用户永远拿不到第二次机会。超时要出提示：
    *    后端答不上来时用户看得见的只有「拖完什么都没发生」。
-   *  * 命中了但临时 JPG 生成不出来：报错 + 回落本地解码，不写 lqPath。
+   *  * 已核对源但临时 JPG 装载失败：保留关联，回落本地解码。
    *
    *  **route='jpg' 一律不试**：那种 rec 的目录已经由 resolve 按绝对路径定过（就是
    *  权威值）。粘单个 .tif 且父目录不是场景目录时它的 lqPath 是 null —— 这时若按
@@ -3815,30 +4142,80 @@ export const useViewerStore = defineStore('viewer', () => {
    *  请求里还带一串 `anchor` = 「用户当前打开的那几景」（见 `noteSceneDir`）。产物名
    *  里**没有场景身份**时（RC 场景的 `PAN_<suffix>.jpg`）后端只能靠它 —— 名字能反推
    *  时它一个字都不起作用，所以照旧先反推、失败才用到它。 */
+  function rememberVerifiedSource(rec: ViewerRec, res: SceneResolveResult) {
+    const { W, H } = res.row;
+    if (!W || !H || (rec.W && rec.H && (rec.W !== W || rec.H !== H))) {
+      throw new Error('源影像尺寸不符，不能关联');
+    }
+    rec.W = W; rec.H = H;
+    rec.sceneId = res.row.id;
+    rec.sceneDir = res.resolved.dir;
+    rec.lqPath = res.resolved.sr_capable ? res.resolved.dir : null;
+    rec.previewOnly = res.resolved.preview_only;
+    rec.srcRev = res.row.srcRev;
+    rec.serverMaskPath = res.resolved.mask_path;
+    rec.stageKind = res.resolved.kind;
+    rec.resolvedSuffix=res.resolved.suffix;
+    rec.stageLabel = stageLabel(res.resolved.kind, res.resolved.suffix, rec.name);
+    rec.serverSourceVerified = true;
+    noteSceneDir(rec);
+  }
+
+  function downloadLocalPreview(id: number) {
+    const rec = recs.value.find(r => r.id === id);
+    if (rec?.localPreviewJpeg) downloadBlob(rec.localPreviewJpeg, rec.name.replace(/\.tiff?$/i, '') + '_local_preview.jpg');
+  }
+
   async function linkServerPath(id: number, path: string): Promise<void> {
     const rec = recs.value.find(r => r.id === id);
     if (!rec || rec.pending || rec.sceneId) throw new Error('影像已关闭或已关联');
+    if (!loadControlFor(rec)) return withImageLoad(rec, () => linkServerPath(id, path), undefined);
+    const control = loadControlFor(rec)!;
     const token = ++rec.token;
     const div = previewDiv.value;
     const cfg = loadSrConfig();
-    const fingerprint = await sourceFingerprint(rec.file);
-    const res = await apiResolveScene(cfg, { path, source_fingerprint: fingerprint });
+    await control.checkpoint('核对源文件');
+    const fingerprint = rec.previewAsset?.fingerprint ?? await control.wait(sourceFingerprint(rec.file));
+    const res = await control.request(signal => apiResolveScene(cfg, { path, source_fingerprint: fingerprint }, { signal }), '关联盘阵目录');
     if (rec.token !== token || !recs.value.includes(rec)) return;
     if (!res.row.W || !res.row.H) throw new Error('服务端源影像缺少有效尺寸');
     if (rec.W && rec.H && (rec.W !== res.row.W || rec.H !== res.row.H)) throw new Error('源影像尺寸不符，不能关联');
-    const blob = await fetchSceneJpg(cfg, res.row, div);
+    rememberVerifiedSource(rec, res);
+    try {
+      const asset=await control.request(signal=>createPreviewAsset({sceneId:res.row.id},signal),'服务端临时 JPG');
+      await loadPreviewAsset(rec,asset,control);return;
+    }catch(error){if(isLoadAbort(error)||control.signal.aborted)throw error;if(error instanceof ImageOpenError&&error.status!==404){await decodeRec(rec,true);return;}}
+    if (!wholeJpegFits(res.row.W, res.row.H, div) && /\.tiff?$/i.test(rec.file.name)) {
+      rec.linkNote = '已核对盘阵源；整幅 JPG 超出显示预算，直接使用本地渐进预览。';
+      await decodeRec(rec, true); return;
+    }
+    await control.checkpoint('获取服务端预览');
+    let blob: Blob;
+    try { blob = await control.request(signal => fetchSceneJpg(cfg, res.row, div, undefined, signal), '获取服务端预览'); }
+    catch (error) {
+      if (isLoadAbort(error)) throw error;
+      rec.linkNote = '源文件已核对；服务端预览不可用，正在使用本地预览。';
+      await decodeRec(rec, true); return;
+    }
     if (rec.token !== token || !recs.value.includes(rec) || previewDiv.value !== div) throw new Error('影像或预览档位已变化，请重新关联');
-    await applySceneJpgToRec(rec, {
+    try { await applySceneJpgToRec(rec, {
       name: rec.name, W: res.row.W, H: res.row.H, sceneId: res.row.id,
       lqPath: res.resolved.sr_capable ? res.resolved.dir : null,
       sceneDir: res.resolved.dir, serverMaskPath: res.resolved.mask_path,
       stageKind: res.resolved.kind, stageSuffix: res.resolved.suffix,
       previewOnly: res.resolved.preview_only, srcRev: res.row.srcRev,
-    }, blob, `服务端预览（${previewDivLabel(div)}，文件名、字节数与三段内容采样已核对）`, true);
+    }, blob, `服务端预览（${previewDivLabel(div)}，文件名、字节数与三段内容采样已核对）`, true); }
+    catch (error) {
+      if (isLoadAbort(error)) throw error;
+      rec.linkNote = '源文件已核对；JPG 解码失败，改用本地 TIFF 预览。';
+      await decodeRec(rec, true);
+    }
   }
 
   async function tryLinkScenes(rec?: ViewerRec | null): Promise<boolean> {
     const r = rec ?? activeRec.value;
+    const control = r ? loadControlFor(r) : undefined;
+    await control?.checkpoint('关联盘阵目录');
     // 已是盘阵场景 / 走过 resolve / 已关联过 / 已试过 —— 都直接返回
     if (!r) return false;
     if (r.route === 'jpg') return true;             // 本来就是盘阵场景，无需本地解码
@@ -3853,11 +4230,15 @@ export const useViewerStore = defineStore('viewer', () => {
       lastSceneDir, sceneDirOf(recForSide('A')), sceneDirOf(recForSide('B')),
     ]);
     try {
-      res = await apiResolveScene(loadSrConfig(),
+      const fingerprint = /\.tiff?$/i.test(r.file.name)
+        ? await (control ? control.wait(sourceFingerprint(r.file), '核对源文件') : sourceFingerprint(r.file)) : undefined;
+      const request = (signal: AbortSignal) => apiResolveScene(loadSrConfig(),
         { name: r.name, size_bytes: r.file.size, anchor,
-          ...(/\.tiff?$/i.test(r.file.name) ? { source_fingerprint: await sourceFingerprint(r.file) } : {}) },
-        { signal: AbortSignal.timeout(20000) });
+          ...(fingerprint ? { source_fingerprint: fingerprint } : {}) },
+        { signal });
+      res = await (control ? control.request(signal => request(AbortSignal.any([signal, AbortSignal.timeout(20000)])), '关联盘阵目录') : request(AbortSignal.timeout(20000)));
     } catch (e) {
+      if (control?.signal.aborted) throw e;
       if (!recs.value.includes(r)) return false;
       const err = e as Error;
       if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
@@ -3891,6 +4272,8 @@ export const useViewerStore = defineStore('viewer', () => {
       return false;
     }
     if (!recs.value.includes(r)) return false;      // 期间已切图/关掉
+    await control?.checkpoint('核对关联结果');
+    if (/\.tiff?$/i.test(r.file.name)) rememberVerifiedSource(r, res);
     // 命中：把这张 rec 就地升级成盘阵场景。**不新建 rec** —— 用户拖进来的那个
     // 文件就是这张图，新建一条会多出第二份 maskRois。
     // 拖进来的本来就是 jpg（且是生产全名）→ 它就是这张图的原图，**默认不去服务端
@@ -3903,21 +4286,35 @@ export const useViewerStore = defineStore('viewer', () => {
     // 不用用户拖进来这份的：指纹对 jpg 行只比名字，本地那份可能另存过，
     // 平台口径是「盘阵上的才是基准」。
     const localJpg = imageKindOf(r.file) === 'jpg';
+    if(!localJpg&&control) {
+      try {
+        const asset=await control.request(signal=>createPreviewAsset({sceneId:res.row.id},signal),'服务端临时 JPG');
+        await loadPreviewAsset(r,asset,control);
+        if(r.previewAsset)return true;
+      }catch(error){if(isLoadAbort(error)||control.signal.aborted)throw error;if(error instanceof ImageOpenError&&error.status!==404){r.linkNote='服务端缓存 JPG 不可用，改用本地预览：'+error.message;return false;}}
+    }
+    if (!localJpg && res.row.W && res.row.H && !wholeJpegFits(res.row.W, res.row.H, previewDiv.value)) {
+      r.linkNote = '已核对盘阵源；整幅 JPG 超出显示预算，直接使用本地渐进预览。';
+      return false;
+    }
     const rp = res.row.rasterPreview;
     const useServer = localJpg && !!rp && rasterPreviewWins(rp, previewDiv.value);
     try {
+      await control?.checkpoint('获取服务端预览');
       let blob: Blob;
       if (localJpg && !useServer) {
         blob = r.file;                     // File 是 Blob 子类，直接喂解码
       } else {
         // 未走服务端时那句 layout 自报来源；走服务端时传 undefined，让
         // openSceneJpg 用默认的「服务端已生成」——那才准确。
-        blob = await fetchDropSceneJpg(loadSrConfig(), res.row.id, previewDiv.value,
+        const pending = (signal?: AbortSignal) => fetchDropSceneJpg(loadSrConfig(), res.row.id, previewDiv.value,
                                        (text) => {
-          if (r === activeRec.value) showMask('正在关联盘阵场景…', text, false);
-        });
+          if (r === activeRec.value && (!control || imageLoadOwner?.control === control)) showMask('正在关联盘阵场景…', text, false);
+        }, signal);
+        blob = await (control ? control.request(signal => pending(signal), '获取服务端预览') : pending());
       }
-      hideMask();
+      await control?.checkpoint('解码预览');
+      if (!control) hideMask();
       if (!recs.value.includes(r)) return false;
       const ok = await applySceneJpgToRec(r, {
         name: res.row.name, W: res.row.W as number, H: res.row.H as number,
@@ -3940,11 +4337,9 @@ export const useViewerStore = defineStore('viewer', () => {
       // 那份更清晰时上面那次 fetchDropSceneJpg 已经把同一份生成了，再发一次是
       // 无效生成一张图。它不碰 rec 的像素，所以不 await 也不会拖慢画面。
       if (localJpg && !useServer && r.sceneId) void bakeDropPreview(r);
-      // 一并把「未超分那份」也生成为 jpg 放在场景目录里（用户口径 2026-09-24）。
-      // 触发点**只有拖入显示件**这一处（场景库、路径栏打开都不触发），而它由
-      // `localJpg` 精确圈定：能走到这里的 jpg 都是显示件，本体与产物各是一次。
-      // 拖进来的若本来就是那份 NOSR，别再重新生成一次（stageKind 挡掉）。
-      if (localJpg && r.sceneId && r.stageKind !== 'nosr') void warmNosrPreview(r);
+      // 选择与拖入共用本入口：核对成功的 TIFF 同样预热 NOSR，供同景对比。
+      // 仅预览授权的外部源不预热；已打开 NOSR 不重复生成。
+      if (r.sceneId && !res.resolved.preview_only && r.stageKind !== 'nosr') void warmNosrPreview(r);
       if (isIntermediateStage(r.stageKind)) {
         // 中间产物：如实说清它与本体的关系。此处**不能**说「可以提交 SR 了」——
         // 这一条的 lqPath 已被服务端置空（见 resolve 的 kind 分岔），提交按钮是
@@ -3956,15 +4351,17 @@ export const useViewerStore = defineStore('viewer', () => {
       }
       return true;
     } catch (e) {
-      hideMask();
+      if (control?.signal.aborted || isLoadAbort(e)) throw e;
+      if (!control) hideMask();
       if (!recs.value.includes(r)) return false;
-      // 升级失败：字段一个都别留（半升级的 rec 既不像本地图也不像盘阵场景），
-      // 回落本地解码，能力不变。
+      if (r.serverSourceVerified) r.linkNote = '源文件已核对；服务端 JPG 装载失败，改用本地 TIFF 预览。' + (e instanceof Error ? e.message : String(e));
+      // 已核对的源身份独立保留；像素失败不提交半成品，交给本地解码。
       r.statusCls = 'err';
       // 措辞对三条来源都成立：无伴随件的 .tif 那条是生成预览失败；拖 jpg 那条要么是这份
       // 本地文件解不动（本地解码也失败，所以不说「改用本地解码」），要么是它被判
       // 「服务端那份更清晰」后服务端生成失败了 —— 两种情况都是「装载像素失败」。
-      showErr('关联到盘阵目录 ' + res.resolved.dir + ' 了，但装载像素失败：'
+      if (r.serverSourceVerified) showToast('已保留盘阵关联，正在从本地 TIFF 生成预览');
+      else showErr('关联到盘阵目录 ' + res.resolved.dir + ' 了，但装载像素失败：'
         + (e instanceof Error ? e.message : String(e)) + ' —— 仍按本地文件查看');
       return false;
     }
@@ -4007,7 +4404,7 @@ export const useViewerStore = defineStore('viewer', () => {
       let f = 0;
       const tick = window.setInterval(() => {
         f = Math.min(f + 0.02, 0.95);
-        overlay.value.progress = Math.round(f * 100);
+        updateProgressUI(f);
         overlay.value.sub = '服务端栅格化中，请稍候';
       }, 200);
       try {
@@ -4108,6 +4505,7 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   function onKeyDown(e: KeyboardEvent) {
+    if (e.key === 'Escape' && imageLoad.value.active) { e.preventDefault(); stopImageLoad(); return; }
     if (!drawMode.value) return;
     if (e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable="true"]')) return;
     if ((e.ctrlKey || e.metaKey) && ['z', 'y'].includes(e.key.toLowerCase())) {
@@ -4130,14 +4528,16 @@ export const useViewerStore = defineStore('viewer', () => {
 
   /* ---------------- 遮罩 / toast / 错误 ---------------- */
   function showMask(title: string, sub: string, bar: boolean) {
-    overlay.value = { visible: true, title, sub: sub || '', bar, progress: 0 };
+    overlay.value = { visible: true, title, sub: sub || '', bar, progress: 0, indeterminate:true };
   }
   function hideMask() {
     overlay.value.visible = false;
   }
   function updateProgressUI(f: number) {
-    overlay.value.progress = Math.round(f * 100);
-    overlay.value.sub = '分块读取中：' + Math.round(f * 100) + '%（边读边生成缩略图，可随时切换其他文件）';
+    if(!Number.isFinite(f))return;
+    overlay.value.progress = Math.round(Math.max(0,Math.min(1,f)) * 100);
+    overlay.value.indeterminate=false;
+    overlay.value.sub = '当前阶段进度：' + overlay.value.progress + '%';
   }
   function showToast(msg: string) {
     toast.value = msg;
@@ -4190,9 +4590,10 @@ export const useViewerStore = defineStore('viewer', () => {
     stretchMode, activeStretch, drawMode, drawTool, pendingRect, pendingPts, hoverPt, hoverRoi, flashRoi,
     previewDiv,
     wandTol, merging, overlay, toast, error, modal,
+    imageLoad, pauseImageLoad, resumeImageLoad, stopImageLoad, downloadLocalPreview,
     sidebarCollapsed, busy, srBusy,
     // 文件 / 解码
-    addFiles, removeRec, activate, openSceneJpg, openLocalImage, displayImageRefresh,
+    addFiles, removeRec, activate, openSceneJpg, openLocalImage, openPreviewAsset, displayImageRefresh,
     // 左侧列表工具条：收藏（置顶）/ 多选 / 批量清理 / 撤回
     recsOrdered, favCount, selectMode, selectedIds, isSelected,
     toggleSelectMode, toggleSelected, clearSelection,

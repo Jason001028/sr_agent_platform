@@ -12,6 +12,8 @@ listdir/scandir/walk 全部打桩成抛错，resolve 仍须 200）。
 两层才命中（平铺形态只在一个专门验诊断措辞的用例里现搭）。
 """
 
+import asyncio
+import threading
 import os
 import shutil
 import tempfile
@@ -23,6 +25,7 @@ from unittest import mock
 
 import numpy as np
 import tifffile
+import httpx
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -136,6 +139,54 @@ class ResolveBase(unittest.TestCase):
 
 
 class TestResolveOk(ResolveBase):
+    def test_slow_scene_resolve_does_not_block_other_users(self):
+        from backend.api import app as app_module
+        d = self.make_scene()
+        app = create_app()
+        self._apps.append(app)
+        entered, release, expired = threading.Event(), threading.Event(), threading.Event()
+        original = app_module._cached_dims
+
+        def stalled_dims(path):
+            entered.set()
+            if not release.wait(3):
+                expired.set()
+            return original(path)
+
+        async def exercise():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                opening = asyncio.create_task(client.post("/api/scenes/resolve", json={"path": self.win_path(d)}))
+                try:
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                    for endpoint in ("/api/health", "/api/chat/sessions"):
+                        response = await asyncio.wait_for(client.get(endpoint), timeout=1)
+                        self.assertEqual(response.status_code, 200, response.text)
+                    self.assertFalse(expired.is_set(), "scene I/O stalled the shared event loop")
+                    self.assertFalse(opening.done(), "other requests must finish before scene I/O is released")
+                finally:
+                    release.set()
+                    response = await asyncio.wait_for(opening, timeout=5)
+                self.assertEqual(response.status_code, 200, response.text)
+
+        with mock.patch.object(app_module, "_cached_dims", side_effect=stalled_dims):
+            asyncio.run(exercise())
+
+    def test_w_and_x_aliases_resolve_same_scene_and_input(self):
+        d = self.make_scene()
+        os.environ["SR_DRIVE_MAP"] += f";X:={self.root.as_posix()}"
+        c = self.client()
+        w_path = self.win_path(d)
+        paths = (w_path, "x:" + w_path[2:], "X:" + w_path[2:] + "\\" + SCENE_NAME + ".tif")
+        bodies = []
+        for path in paths:
+            with self.subTest(path=path):
+                response = c.post("/api/scenes/resolve", json={"path": path})
+                self.assertEqual(response.status_code, 200, response.text)
+                bodies.append(response.json())
+        for body in bodies[1:]:
+            self.assertEqual(body["row"]["id"], bodies[0]["row"]["id"])
+            self.assertEqual(body["resolved"], bodies[0]["resolved"])
+
     def test_named_pan_input_keeps_priority_with_pan_and_nosr(self):
         """Batch resolve must not replace the serial-number TIFF with PAN.tif."""
         d = self.make_scene()
@@ -1490,8 +1541,8 @@ class TestDropPreview(ResolveBase):
         self.assertEqual(c.get(f"/api/scenes/{sid}/preview-drop").status_code, 200)
         self.assertEqual(self.drop_jpg.stat().st_mtime_ns, first)
 
-    def test_div_change_rebakes_in_place(self):
-        """换档位 → **同一个落点原地重生成**（尺寸变了，文件数不变）。
+    def test_div_change_keeps_separate_cached_tiers(self):
+        """换档位保留各档版本件，兼容名称指向最近生成的预览。
 
         这是「div 进戳」的直接验收：只按落点判缓存的话，这里第二次会命中、
         盘上那张图一个字节都不变。
@@ -1504,7 +1555,7 @@ class TestDropPreview(ResolveBase):
         c.get(f"/api/scenes/{sid}/preview-drop?div=8")
         with Image.open(self.drop_jpg) as im:
             self.assertEqual(im.size, (40, 80))
-        self.assertEqual(len(list(self.d.glob("*_preview.jpg"))), 1)
+        self.assertEqual(len(list(self.d.glob("*_preview.jpg"))), 3)
 
     def test_each_div_bakes_its_own_size(self):
         """档位维度的尺寸表：源 320×640（竖幅），长边 = 640/div。"""

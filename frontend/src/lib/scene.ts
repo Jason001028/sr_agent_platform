@@ -169,7 +169,7 @@ export function scenesListUrl(cfg: SrConfig, p: SceneQueryParams): string {
  * 绝不静默提交。
  */
 
-/** 盘符映射的默认值（与 backend/pathguard.py 的 SR_DRIVE_MAP 默认一致）。 */
+/** 日期前缀的默认显示盘符；后端默认同时接受 W: 与 X:。 */
 export const WIN_DRIVE = 'W:';
 
 /** 当天场景目录前缀（Windows 形态），按**客户端本地日期**生成。
@@ -422,6 +422,8 @@ export function previewNeedsBake(row: SceneRow, div: number): boolean {
 
 /** 场景 → 查看器 openSceneJpg 的最小元数据（掩码换算用 W/H；sceneId 供掩码生成）。 */
 export interface SceneOpenMeta {
+  /** Same-scene input dimensions from /siblings; used only for NOSR preview tiers. */
+  previewPanSize?: {W:number;H:number};
   name: string;
   W: number;
   H: number;

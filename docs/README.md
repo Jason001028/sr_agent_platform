@@ -8,6 +8,18 @@
 
 Skill 加载与外部工具调用接口见 [skill_interface.md](planning/skill_interface.md)。
 
+选择影像原生路径组件、未关联时服务端 JPG 优先及缓存清理见 [server-jpg-picker.md](status/server-jpg-picker.md)。
+
+本地 TIFF 预览、已核对关联保留与加载阶段暂停/停止见 [local-tiff-load-control.md](status/local-tiff-load-control.md)。
+
+整图概览、后台行带回填、超限整幅 JPG 提前分流与后置 IFD 兼容见 [progressive-tiff-preview.md](status/progressive-tiff-preview.md)。
+
+多用户切页等待的 API 事件循环修复与并发验收见 [multi-user-api-blocking.md](status/multi-user-api-blocking.md)。
+
+有界影像调度、同景共享、分档分版本缓存、排队反馈与部署验收见 [multi_user_preview_scheduling.md](status/multi_user_preview_scheduling.md)。
+
+本地稀疏条带预览性能优化、兼容性验证与网络盘现场验收见 [sparse-preview-performance.md](status/sparse-preview-performance.md)。
+
 普通聊天的首段 / 停滞 / 总响应时限与批次移交输入压缩见 [model-progress-timeout.md](status/model-progress-timeout.md)。
 
 工具实际暴露条件、描述契约与审计验收见 [tool_description_audit.md](status/tool_description_audit.md)。

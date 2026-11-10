@@ -14,7 +14,7 @@ function crc32(bytes) {
 export function createExplorerSetupArchive() {
   const local = [], central = [];
   let offset = 0;
-  const files = ['Install-SrExplorer.cmd', 'Install-SrExplorer.ps1', 'Chrome-SrExplorerPolicy.ps1'];
+  const files = ['Install-SrExplorer.cmd', 'Install-SrExplorer.ps1', 'Chrome-SrExplorerPolicy.ps1', 'Pick-SrImage.ps1'];
   for (const name of files) {
     const text = readFileSync(new URL(`../public/client-explorer/${name}`, import.meta.url), 'utf8');
     const data = Buffer.from(text.replace(/\r?\n/g, '\r\n'));

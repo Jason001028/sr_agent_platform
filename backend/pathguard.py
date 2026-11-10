@@ -14,7 +14,7 @@
 
 约定
 ----
-* SR_DRIVE_MAP    盘符映射，`;` 分隔的多条 `KEY=VAL`，默认 `W:=/DiskArray`。
+* SR_DRIVE_MAP    盘符映射，`;` 分隔的多条 `KEY=VAL`，默认 `W:=/DiskArray;X:=/DiskArray`。
 * SR_ALLOWED_ROOTS 允许访问的盘阵前缀，`;` 分隔，默认 `/DiskArray`。
 * SR_PREVIEW_ROOTS 盘阵**之外**、只允许预览读取的前缀，`;` 分隔，默认空。
                    只放行看图 / ROI / Agent 读图；提交 SR、写掩码、场景检索
@@ -35,7 +35,7 @@ import re
 from datetime import date, timedelta
 from pathlib import Path
 
-_DEFAULT_DRIVE_MAP = "W:=/DiskArray"
+_DEFAULT_DRIVE_MAP = "W:=/DiskArray;X:=/DiskArray"
 _DEFAULT_ALLOWED_ROOTS = "/DiskArray"
 #: 盘阵**之外**、只允许预览读取的根（`SR_PREVIEW_ROOTS`，`;` 分隔，缺省空）。
 #: 与 SR_ALLOWED_ROOTS 是两套权限：这里放行的文件能看、能画 ROI、能给 Agent 看，
@@ -77,7 +77,7 @@ def to_posix_array_path(raw: str | Path) -> str:
     """用户给的任意形态 → 盘阵 POSIX 绝对路径。**纯词法，不碰文件系统。**
 
     接受 `/DiskArray/...`（服务端形态）与 `W:\\GSHC2IMPS\\...`（Windows
-    形态，经 SR_DRIVE_MAP 映射）。拒绝：空、控制字符、UNC（`\\\\srv\\share`）、
+    形态，经 SR_DRIVE_MAP 映射）；UNC 需显式配置 SR_UNC_MAP。拒绝：空、控制字符、未映射 UNC（`\\\\srv\\share`）、
     相对路径、`..` 穿越段、未知盘符。
 
     不做 `lower()`（Linux 挂载区分大小写）；`~` 段原样保留（Python 不做
@@ -91,7 +91,20 @@ def to_posix_array_path(raw: str | Path) -> str:
     if _CTRL_RE.search(s):
         raise PathDeniedError("路径含控制字符")
     if s.startswith("\\\\") or s.startswith("//"):
-        raise PathDeniedError("不接受 UNC 网络路径（\\\\server\\share）")
+        unc = s.replace('\\','/').rstrip('/')
+        mappings = []
+        for item in os.environ.get('SR_UNC_MAP','').split(';'):
+            if '=' in item:
+                key,target = item.split('=',1)
+                key = key.strip().replace('\\','/').rstrip('/')
+                if key.startswith('//') and len(key.split('/')) >= 4:
+                    mappings.append((key,target.strip().replace('\\','/').rstrip('/')))
+        for key,target in sorted(mappings,key=lambda pair:len(pair[0]),reverse=True):
+            if unc.lower() == key.lower() or unc.lower().startswith(key.lower()+'/'):
+                s = target+unc[len(key):]
+                break
+        else:
+            raise PathDeniedError("UNC 网络路径未配置 SR_UNC_MAP")
 
     m = _DRIVE_RE.match(s)
     if m:

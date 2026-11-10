@@ -41,6 +41,8 @@ import hashlib
 import os
 import re
 import tempfile
+import threading
+from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -826,6 +828,27 @@ def cache_hit(dst: Path, quality: int, div: int, *,
     return {"w": meta["w"], "h": meta["h"]}
 
 
+_PREVIEW_LOCKS = [threading.RLock() for _ in range(64)]
+
+
+def _serialize_preview(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        index = 1 if fn.__name__ == "ensure_preview_jpg" else 0
+        dst = args[index] if len(args) > index else kwargs["jpg_path"]
+        with _PREVIEW_LOCKS[hash(str(Path(dst).absolute())) % len(_PREVIEW_LOCKS)]:
+            return fn(*args, **kwargs)
+    return wrapped
+
+
+def versioned_preview_path(jpg_path, source_rev, div, quality=PREVIEW_JPG_QUALITY):
+    """Immutable cache identity, still matching the guarded preview clear rule."""
+    dst = Path(jpg_path)
+    identity = hashlib.sha256(str(dst.name).encode("utf-8") + rule_stamp(quality, div, source_rev=source_rev)).hexdigest()[:24]
+    return dst.with_name(f"v_{identity}_preview.jpg")
+
+
+@_serialize_preview
 def write_preview_jpg(jpg_path, pixels, *,
                       quality: int = PREVIEW_JPG_QUALITY,
                       div: int = LEGACY_PREVIEW_DIV,
@@ -858,9 +881,14 @@ def write_preview_jpg(jpg_path, pixels, *,
                 os.remove(tmp)
             except OSError:
                 pass
+    rev = source_rev if source_rev is not None else (
+        source_revision(source) if source is not None else None)
+    if rev is not None:
+        _copy_preview(dst, versioned_preview_path(dst, rev, div, quality))
     return {"path": str(dst), "w": w, "h": h}
 
 
+@_serialize_preview
 def ensure_preview_jpg(source_path, jpg_path, div: int = LEGACY_PREVIEW_DIV,
                        quality: int = PREVIEW_JPG_QUALITY) -> dict:
     """Generate preview JPEG if missing/stale; idempotent (cache by caller).
@@ -880,19 +908,39 @@ def ensure_preview_jpg(source_path, jpg_path, div: int = LEGACY_PREVIEW_DIV,
     # 源身份在动手前记一次、落盘前再核一次：读到一半源被换掉（重跑覆盖产物、
     # 有人保留时间戳换了一份文件）就不能把半新半旧的像素写成长期缓存。
     rev = source_revision(src)
+    variant = versioned_preview_path(dst, rev, div, quality)
+    if rev is not None:
+        hit = cache_hit(variant, quality, div, source_rev=rev)
+        if hit is not None:
+            return {"status": "cached", "path": str(variant),
+                    "w": hit["w"], "h": hit["h"], "error": None}
     if (rev is not None and dst.is_file()
             and os.path.getmtime(dst) >= os.path.getmtime(src)):
         hit = cache_hit(dst, quality, div, source_rev=rev)
         if hit is not None:
-            return {"status": "cached", "path": str(dst),
+            _copy_preview(dst, variant)
+            return {"status": "cached", "path": str(variant),
                     "w": hit["w"], "h": hit["h"], "error": None}
     pixels = build_preview_pixels(str(src), max_edge)
     if source_revision(src) != rev:
         raise PreviewError("源在预览生成途中被改写")
     out = write_preview_jpg(dst, pixels, quality=quality, div=div,
                             source_rev=rev)
-    return {"status": "generated", "path": out["path"],
+    return {"status": "generated", "path": str(variant),
             "w": out["w"], "h": out["h"], "error": None}
+
+
+def _copy_preview(source, target):
+    """Publish a byte-identical snapshot atomically, including on Windows."""
+    import shutil
+    fd, tmp = tempfile.mkstemp(prefix="pv.", suffix=".tmp", dir=target.parent)
+    try:
+        with os.fdopen(fd, "wb") as out, open(source, "rb") as inp:
+            shutil.copyfileobj(inp, out)
+        os.replace(tmp, target)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
 def is_uncompressed_strip_error(msg: str) -> bool:

@@ -1,5 +1,6 @@
 """Curated scene references and tags; source files stay in their existing location."""
 from fastapi import HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 from jsonschema import Draft202012Validator
 
 from backend.api import paths
@@ -25,6 +26,9 @@ def install(app, root, make_row, dimensions):
             body = await request.json()
         except ValueError:
             raise HTTPException(422, "请求不是有效 JSON")
+        return await run_in_threadpool(_add_entries_sync, body)
+
+    def _add_entries_sync(body):
         if next(_BATCH.iter_errors(body), None) is not None:
             raise HTTPException(422, "条目或标签无效：每批最多 200 张，每组最多 40 个标签，每个标签 1–40 字")
         entries = []

@@ -73,7 +73,7 @@ const roTitle = computed(() =>
 const stretchValue = computed(() => store.activeStretch);
 const stretchTitle = computed(() =>
   sceneActive.value
-    ? '这张盘阵 JPG 已由服务端按直方图均衡预览生成，这里改的是显示层的二次拉伸'
+    ? '这张服务端 JPG 已生成，这里改的是显示层的二次拉伸'
       + '（均衡不可逆，拉不回来）'
     : '',
 );
@@ -106,6 +106,7 @@ function onPick(e: Event) {
     <button
       type="button"
       class="btn"
+      title="选择 TIFF 或 JPG；核对盘阵后优先使用服务端下采样 JPG，并可打开同景影像"
       :disabled="store.busy"
       @click="fileInput?.click()"
     >
@@ -115,7 +116,7 @@ function onPick(e: Event) {
     <input
       ref="fileInput"
       type="file"
-      accept=".tif,.tiff,.jpg,.jpeg,.TIF,.TIFF,.JPG,.JPEG"
+      accept=".tif,.tiff,.jpg,.jpeg,.png,.TIF,.TIFF,.JPG,.JPEG,.PNG"
       multiple
       style="display: none"
       @change="onPick"
@@ -160,7 +161,8 @@ function onPick(e: Event) {
     <!-- 预览下采样档位：紧邻定位组件，因为两者是同一类「看图前先定参数」的控件。
          文案「预览 1/N」而不是「缩放」：它改的是**服务端生成的那张 JPG**的分辨率，
          不是画布的显示缩放（那个在右下角，别混）。 -->
-    <PreviewScaleControl :model-value="store.previewDiv" @update:model-value="store.setPreviewDiv" />
+    <PreviewScaleControl :model-value="store.previewDiv" @update:model-value="store.setPreviewDiv"
+      title="PAN／通用预览档位；同景较小的 NOSR 默认使用 1/2，PAN 为 1/2 或 1:1 时 NOSR 使用 1:1" />
     <AutoTourButton />
     <DiffLocateButton />
     <DiffContinueButton />

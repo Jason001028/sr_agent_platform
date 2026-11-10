@@ -1250,9 +1250,56 @@ export async function fetchExistingSceneJpg(cfg: SrConfig, row: SceneRow): Promi
  *  更新遮罩文案，别让界面看起来像卡死了。 */
 export async function ensureScenePreviewReady(cfg: SrConfig, row: SceneRow, div: number): Promise<void> {
   if (!previewNeedsBake(row, div) && !(row.rasterPreview && rasterPreviewWins(row.rasterPreview, div))) return;
-  await http(scenePreviewUrl(cfg, row.id, div) + '&ready_only=true');
+  await requestPreview(cfg, row.id, div, undefined, scenePreviewUrl(cfg, row.id, div) + '&ready_only=true');
   row.hasPreview = true;
   if (row.jpgUrl) row.previewDiv = div;
+}
+
+/** Buffer the complete body under pagehide cancellation, then return a local
+ * Response. Status reads never start another generation. */
+export async function requestPreview(
+  cfg: SrConfig, id: string, div: number, onPhase?: (text: string) => void, requestUrl?: string,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const statusAbort = new AbortController();
+  const imageAbort = new AbortController();
+  let finished = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stop = () => {
+    finished = true;
+    clearTimeout(timer);
+    statusAbort.abort();
+    imageAbort.abort();
+  };
+  if (typeof window !== 'undefined') window.addEventListener('pagehide', stop, { once: true });
+  signal?.addEventListener('abort', stop, { once: true });
+  if (signal?.aborted) stop();
+  const poll = async () => {
+    try {
+      const r = await fetch(joinBase(cfg.apiBase,
+        `/api/scenes/${encodeURIComponent(id)}/preview-status?div=${div}`),
+      { signal: statusAbort.signal, cache: 'no-store' });
+      if (r.ok && !finished) {
+        const status = await r.json() as { state: string };
+        if (!finished && status.state === 'queued') onPhase?.('预览正在排队，其他页面可继续使用…');
+        if (!finished && status.state === 'running') onPhase?.(`正在服务端生成 ${previewDivLabel(div)} 预览图…`);
+      }
+    } catch { /* Status is advisory; the image request carries the real error. */ }
+    if (!finished) timer = setTimeout(() => { void poll(); }, 1500);
+  };
+  if (onPhase && !requestUrl) timer = setTimeout(() => { void poll(); }, 1000);
+  try {
+    const response = await http(requestUrl ?? scenePreviewUrl(cfg, id, div), { cache: 'no-store', signal: imageAbort.signal });
+    // Fetch resolves at headers; ownership must last until the body completes.
+    const body = await response.blob();
+    return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+  } finally {
+    finished = true;
+    clearTimeout(timer);
+    statusAbort.abort();
+    if (typeof window !== 'undefined') window.removeEventListener('pagehide', stop);
+    signal?.removeEventListener('abort', stop);
+  }
 }
 
 export async function fetchSceneJpg(
@@ -1260,10 +1307,11 @@ export async function fetchSceneJpg(
   row: SceneRow,
   div: number = loadPreviewDiv(),
   onPhase?: (text: string) => void,
+  signal?: AbortSignal,
 ): Promise<Blob> {
   const rp = row.rasterPreview;
   if (rp && rasterPreviewWins(rp, div)) {
-    return await fetchRasterPreview(cfg, row, rp, div, onPhase);
+    return await fetchRasterPreview(cfg, row, rp, div, onPhase, signal);
   }
   const baked = isBakedPreviewUrl(row.jpgUrl);
   const needBake = previewNeedsBake(row, div);
@@ -1286,26 +1334,24 @@ export async function fetchSceneJpg(
   }
   if (!row.jpgUrl) {
     // 库外：没有静态 URL，这次请求的**响应体本身**就是那张 JPEG。
-    const p = await http(scenePreviewUrl(cfg, row.id, div));
+    const p = await requestPreview(cfg, row.id, div, onPhase, undefined, signal);
     row.hasPreview = true;
     return cacheBlob(previewCacheKey(row, div), await p.blob());
   }
   if (needBake) {
     // `/preview` 的响应体就是权威字节（端点内读定并核对过档位 / 源身份）。
     // `no-store`：URL 按 id+div 稳定，内容却会随源重写 —— 不能被浏览器缓存糊弄。
-    const p = await http(scenePreviewUrl(cfg, row.id, div),
-                         { cache: 'no-store' });
+    const p = await requestPreview(cfg, row.id, div, onPhase, undefined, signal);
     row.hasPreview = true;
     row.previewDiv = div;      // 记上实际档位：同一会话内再打开不必重新生成
     return cacheBlob(previewCacheKey(row, div), await p.blob());
   }
   // 档位已对上 → 静态直出。取到字节后仍要复核：`?div=N` 只击穿浏览器缓存，
   // 不锁定盘上内容；另一客户端可能在这次请求之前把落点换成了别的档位 / 别的源。
-  const img = await http(sceneImageUrl(cfg, row.jpgUrl, div));
+  const img = await http(sceneImageUrl(cfg, row.jpgUrl, div), { signal });
   const blob = await img.blob();
   if (baked && !(await blobMatchesPreview(blob, div, row.srcRev))) {
-    const p = await http(scenePreviewUrl(cfg, row.id, div),
-                         { cache: 'no-store' });
+    const p = await requestPreview(cfg, row.id, div, onPhase, undefined, signal);
     row.hasPreview = true;
     row.previewDiv = div;
     return cacheBlob(previewCacheKey(row, div), await p.blob());
@@ -1331,6 +1377,7 @@ async function fetchRasterPreview(
   rp: RasterPreview,
   div: number,
   onPhase?: (text: string) => void,
+  signal?: AbortSignal,
 ): Promise<Blob> {
   const needBake = !rp.hasPreview || rp.previewDiv !== div;
   // 键里带 `rp.name`：这一支端上来的是**栅格**那份预览，与源 jpg 那份不是同一串字节
@@ -1349,7 +1396,7 @@ async function fetchRasterPreview(
   }
   if (!rp.jpgUrl) {
     // 库外栅格：没有静态 URL，这次请求的**响应体本身**就是那张 JPEG。
-    const p = await http(scenePreviewUrl(cfg, row.id, div));
+    const p = await requestPreview(cfg, row.id, div, onPhase, undefined, signal);
     rp.hasPreview = true;
     rp.previewDiv = div;
     return cacheBlob(key, await p.blob());
@@ -1357,19 +1404,17 @@ async function fetchRasterPreview(
   if (needBake) {
     // 同 fetchSceneJpg：需要生成时，`/preview` 的响应体就是与档位 / 源一致的
     // 那份字节；转去静态落点取，可能被另一客户端换过档位。
-    const p = await http(scenePreviewUrl(cfg, row.id, div),
-                         { cache: 'no-store' });
+    const p = await requestPreview(cfg, row.id, div, onPhase, undefined, signal);
     rp.hasPreview = true;
     rp.previewDiv = div;
     return cacheBlob(key, await p.blob());
   }
   // 档位已对上 → 静态直出，但取到字节后复核签名（理由同 fetchSceneJpg）。
-  const img = await http(sceneImageUrl(cfg, rp.jpgUrl, div));
+  const img = await http(sceneImageUrl(cfg, rp.jpgUrl, div), { signal });
   const blob = await img.blob();
   if (isBakedPreviewUrl(rp.jpgUrl)
       && !(await blobMatchesPreview(blob, div, rp.srcRev))) {
-    const p = await http(scenePreviewUrl(cfg, row.id, div),
-                         { cache: 'no-store' });
+    const p = await requestPreview(cfg, row.id, div, onPhase, undefined, signal);
     rp.hasPreview = true;
     rp.previewDiv = div;
     return cacheBlob(key, await p.blob());
@@ -1395,10 +1440,11 @@ export async function fetchDropSceneJpg(
   id: string,
   div: number = loadPreviewDiv(),
   onPhase?: (text: string) => void,
+  signal?: AbortSignal,
 ): Promise<Blob> {
   onPhase?.(`已关联到盘阵场景：正在服务端生成预览 ${previewDivLabel(div)} 预览图，`
     + '首次要读一遍大图…');
-  const r = await http(dropPreviewUrl(cfg, id, div));
+  const r = await requestPreview(cfg, id, div, onPhase, dropPreviewUrl(cfg, id, div), signal);
   if (r.headers.get('X-SR-Preview-Fallback') === 'tmp') {
     onPhase?.('该场景目录不可写，预览暂时落在服务端临时缓存，次日会清掉。');
   }
@@ -1432,7 +1478,7 @@ export async function fetchDropSceneJpg(
  * `_PAN` / `_MSS`，没给或认不出就 `_PAN` 在先。补出来的名字**排在原样那个之后**，
  * 所以名字自带产品段时（真机形态）行为一个字不变。
  *
- * 首次调用可能要解压采样整幅大图（生成预览缓存），界面应提示「首次较慢」。 */
+ * 这里只定位源并核对元数据/有界采样，不生成预览；生成 JPG 由预览接口负责。 */
 export async function apiResolveScene(
   cfg: SrConfig,
   body: { path: string; source_fingerprint?: { name: string; size: number; samples: string[] } }

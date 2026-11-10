@@ -41,6 +41,8 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from starlette.concurrency import run_in_threadpool
+
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
 
@@ -322,7 +324,8 @@ def list_machine_tools_endpoint(request: Request):
 @router.post("/api/tools/{name}")
 async def call_tool_endpoint(name: str, request: Request):
     registry = _tool_registry(request)
-    tool = next((t for t in _visible_tools(request) if t.name == name), None)
+    visible = await run_in_threadpool(_visible_tools, request)
+    tool = next((t for t in visible if t.name == name), None)
     if tool is None:
         raise HTTPException(status_code=404,
                             detail=f"工具不存在或未在当前机器启用：{name}")
@@ -335,7 +338,11 @@ async def call_tool_endpoint(name: str, request: Request):
         raise HTTPException(status_code=400, detail="请求体须为 JSON 对象")
     # 工具业务错误仍作为 HTTP 200 的契约结果返回；只有 JSON 语法、未知工具
     # 等传输层错误使用 HTTP 错误码。
-    return registry.invoke(name, body, source="rest")
+    if name == "fix_bad_lines":
+        from functools import partial
+        return await request.app.state.heavy_work.run(
+            partial(registry.invoke, name, body, source="rest"))
+    return await run_in_threadpool(registry.invoke, name, body, source="rest")
 
 
 @router.get('/api/skills')
@@ -395,6 +402,10 @@ def list_machines_endpoint(request: Request):
 @router.post("/api/machines/register", status_code=201)
 async def register_machine_endpoint(request: Request):
     body = await _json_body(request)
+    return await run_in_threadpool(_register_machine_endpoint_sync, request, body)
+
+
+def _register_machine_endpoint_sync(request, body):
     machine_id = body.get("machine_id")
     if not isinstance(machine_id, str):
         raise HTTPException(status_code=400, detail="machine_id 必填")
@@ -411,6 +422,10 @@ async def register_machine_endpoint(request: Request):
 @router.post("/api/machines/{machine_id}/heartbeat")
 async def machine_heartbeat_endpoint(machine_id: str, request: Request):
     body = await _json_body(request)
+    return await run_in_threadpool(_machine_heartbeat_endpoint_sync, machine_id, request, body)
+
+
+def _machine_heartbeat_endpoint_sync(machine_id, request, body):
     try:
         machine = plugin_svc.ensure_machine(
             request.app.state.store, machine_id,
@@ -437,12 +452,16 @@ def list_plugins_endpoint(request: Request):
 @router.post("/api/machines/{machine_id}/plugins/{plugin_id}/actions")
 async def plugin_action_endpoint(machine_id: str, plugin_id: str,
                                  request: Request):
+    body = await _json_body(request)
+    return await run_in_threadpool(_plugin_action_endpoint_sync, machine_id, plugin_id, request, body)
+
+
+def _plugin_action_endpoint_sync(machine_id, plugin_id, request, body):
     try:
         machine_id = plugin_svc.validate_machine_id(machine_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     _guard_machine_access(request, machine_id)
-    body = await _json_body(request)
     action = body.get("action")
     if not isinstance(action, str):
         raise HTTPException(status_code=400,
@@ -486,6 +505,10 @@ def pending_plugin_operations_endpoint(machine_id: str, request: Request):
 async def plugin_operation_result_endpoint(operation_id: int,
                                            request: Request):
     body = await _json_body(request)
+    return await run_in_threadpool(_plugin_operation_result_endpoint_sync, operation_id, request, body)
+
+
+def _plugin_operation_result_endpoint_sync(operation_id, request, body):
     status = body.get("status")
     actual_state = body.get("actual_state")
     if status not in {"COMPLETED", "FAILED"}:
@@ -558,9 +581,13 @@ def list_sessions(request: Request):
 @router.patch("/api/chat/sessions/{session_id}")
 async def patch_session(session_id: str, request: Request):
     """会话属性更新（当前只有置顶 pinned）。"""
+    body = await _json_body(request)
+    return await run_in_threadpool(_patch_session_sync, session_id, request, body)
+
+
+def _patch_session_sync(session_id, request, body):
     state = request.app.state
     _session_or_404(state, session_id)
-    body = await _json_body(request)
     pinned = body.get("pinned")
     if 'title' in body:
         from backend.services.session_titles import validate_title
@@ -657,9 +684,13 @@ def get_trajectory(session_id: str, request: Request):
 @router.post("/api/chat/sessions/{session_id}/trajectory-feedback", status_code=201)
 async def add_trajectory_feedback(session_id: str, request: Request):
     """Store one optional human rating for a completed Agent run."""
+    body = await _json_body(request)
+    return await run_in_threadpool(_add_trajectory_feedback_sync, session_id, request, body)
+
+
+def _add_trajectory_feedback_sync(session_id, request, body):
     state = request.app.state
     _session_or_404(state, session_id)
-    body = await _json_body(request)
     run_id = body.get("run_id")
     rating = body.get("rating")
     reason = body.get("reason")
@@ -687,7 +718,7 @@ async def chat_send(session_id: str, request: Request):
     回合 → 409（前端据此禁用发送 + 显示"正在思考"）。会话不存在 → 404。
     """
     state = request.app.state
-    _session_or_404(state, session_id)
+    await run_in_threadpool(_session_or_404, state, session_id)
     machine_id = _machine_id(request)
     raw = await request.body()
     try:
@@ -890,7 +921,7 @@ async def chat_send(session_id: str, request: Request):
                 pass  # Process/event-loop shutdown: in-process ownership expires.
 
     try:
-        thread = threading.Thread(target=execute, daemon=True)
+        thread = threading.Thread(target=execute, daemon=True, name="chat-execution")
         thread.start()
     except BaseException:
         lock.release()
@@ -1136,8 +1167,11 @@ def image_refresh_preview(task_id: int, version: str, request: Request):
 
 @router.post("/api/queue", status_code=201)
 async def submit_queue(request: Request):
-    state = request.app.state
     body = await _json_body(request)
+    return await run_in_threadpool(_submit_queue_sync, request, body)
+
+def _submit_queue_sync(request: Request, body: dict):
+    state = request.app.state
     params = _norm_sr_params(body)
     try:
         data = run_sr_svc.submit_run_sr(params, store=state.store)
@@ -1229,7 +1263,10 @@ async def queue_events(request: Request):
     async def gen():
         try:
             while True:
-                yield await q.get()
+                try:
+                    yield await asyncio.wait_for(q.get(), 15)
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
         finally:
             state.subscribers.discard(sub)
 
@@ -1242,8 +1279,10 @@ async def queue_events(request: Request):
 # --------------------------------------------------------------------------
 @router.post("/api/masks")
 async def bake_mask(request: Request):
-    state = request.app.state
     body = await _json_body(request)
+    return await request.app.state.heavy_work.run(_bake_mask_sync, request, body)
+
+def _bake_mask_sync(request: Request, body: dict):
 
     scene_abs = _mask_target_dir(body)
 
@@ -1358,6 +1397,9 @@ async def write_qclist(request: Request):
     前端只把 detail 原样显示，分类没有消费者，不照搬 §3.5 那套 400/403/404。
     """
     body = await _json_body(request)
+    return await run_in_threadpool(_write_qclist_sync, request, body)
+
+def _write_qclist_sync(request: Request, body: dict):
 
     raw_path = body.get("path")
     if not isinstance(raw_path, str) or not raw_path.strip():

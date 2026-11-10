@@ -11,13 +11,114 @@ import {
   queueEventsUrl, fetchSceneJpg, fetchExistingSceneJpg, fetchDropSceneJpg, apiResolveScene,
   resetPreviewCache, previewCacheStats, clearPreviewCache, PREVIEW_BLOB_CACHE_MAX,
   apiClearScenePreviews, watchPreviewCache, nosrItemOf,
-  HttpError, isSceneGone, isProxyMiss,
+  HttpError, isSceneGone, isProxyMiss, requestPreview,
 } from '../api.js';
 import type { PlatformSseEvent, ChatSseEvent, SceneSiblings, SceneSibling } from '../api.js';
 import type { SceneRow } from '../scene.js';
 
 const CFG = { apiBase: '', staticBase: '' };
 const CFG_BASE = { apiBase: 'http://127.0.0.1:8000', staticBase: 'http://static:9000' };
+
+describe('long preview status', () => {
+  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+  it('shows queued/running without starting extra image requests and stops after ready', async () => {
+    vi.useFakeTimers();
+    let resolveImage!: (r: Response) => void;
+    const image = new Promise<Response>((resolve) => { resolveImage = resolve; });
+    let polls = 0;
+    let imageRequests = 0;
+    const signals: AbortSignal[] = [];
+    vi.stubGlobal('fetch', vi.fn((url: string, options?: RequestInit) => {
+      if (url.includes('preview-status')) {
+        polls++;
+        signals.push(options!.signal as AbortSignal);
+        return Promise.resolve(new Response(JSON.stringify({ state: polls === 1 ? 'queued' : 'running' })));
+      }
+      imageRequests++;
+      return image;
+    }));
+    const phase = vi.fn();
+    const pending = requestPreview(CFG, 'same', 4, phase);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(phase.mock.calls[0]?.[0]).toContain('排队');
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(phase.mock.calls[1]?.[0]).toContain('生成');
+    resolveImage(new Response('JPEG'));
+    expect(await (await pending).text()).toBe('JPEG');
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(polls).toBe(2);
+    expect(imageRequests).toBe(1);
+    expect(signals.every((s) => s.aborted)).toBe(true);
+  });
+
+  it('keeps the image error authoritative and clears polling on failure', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response('busy', { status: 503 }))));
+    await expect(requestPreview(CFG, 'same', 4, vi.fn())).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels the image and pending status timer on pagehide', async () => {
+    vi.useFakeTimers();
+    const page = new EventTarget();
+    vi.stubGlobal('window', page);
+    vi.stubGlobal('fetch', vi.fn((_url: string, options: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      options.signal!.addEventListener('abort', () => reject(new DOMException('left page', 'AbortError')));
+    })));
+    const pending = requestPreview(CFG, 'same', 4, vi.fn());
+    const failure = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    page.dispatchEvent(new Event('pagehide'));
+    await failure;
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps pagehide cancellation after headers while a streamed body is downloading', async () => {
+    vi.useFakeTimers();
+    const page = new EventTarget();
+    vi.stubGlobal('window', page);
+    let signal!: AbortSignal;
+    vi.stubGlobal('fetch', vi.fn((_url: string, options: RequestInit) => {
+      signal = options.signal as AbortSignal;
+      const stream = new ReadableStream<Uint8Array>({ start(controller) {
+        controller.enqueue(new Uint8Array([0xff, 0xd8]));
+        signal.addEventListener('abort', () => controller.error(new DOMException('left page', 'AbortError')));
+      } });
+      return Promise.resolve(new Response(stream, { headers: { 'X-SR-Preview-Fallback': 'tmp' } }));
+    }));
+    let settled = false;
+    const pending = requestPreview(CFG, 'same', 4).finally(() => { settled = true; });
+    const failure = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    await vi.advanceTimersByTimeAsync(0);  // Headers delivered; body deliberately remains open.
+    expect(settled).toBe(false);
+    page.dispatchEvent(new Event('pagehide'));
+    await failure;
+    expect(signal.aborted).toBe(true);
+  });
+
+  it('releases the listener after the complete body and preserves headers and bytes', async () => {
+    vi.useFakeTimers();
+    const page = new EventTarget();
+    vi.stubGlobal('window', page);
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    let signal!: AbortSignal;
+    vi.stubGlobal('fetch', vi.fn((_url: string, options: RequestInit) => {
+      signal = options.signal as AbortSignal;
+      return Promise.resolve(new Response(new ReadableStream<Uint8Array>({ start(c) { controller = c; } }),
+        { headers: { 'X-SR-Preview-Fallback': 'tmp', 'Content-Type': 'image/jpeg' } }));
+    }));
+    const pending = requestPreview(CFG, 'same', 4);
+    await vi.advanceTimersByTimeAsync(0);
+    controller.enqueue(new Uint8Array([1, 2, 3]));
+    controller.close();
+    const response = await pending;
+    expect(response.headers.get('X-SR-Preview-Fallback')).toBe('tmp');
+    expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual([1, 2, 3]);
+    page.dispatchEvent(new Event('pagehide'));
+    expect(signal.aborted).toBe(false);
+  });
+});
 
 describe('stepSse 帧切分', () => {
   it('整段单帧（\n\n 收尾）', () => {

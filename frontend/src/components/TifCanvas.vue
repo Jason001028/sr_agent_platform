@@ -222,7 +222,8 @@ function render() {
   const ps = store.panes;
   for (const p of ps) {
     const rec = p.rec;
-    if (!rec?.thumb) continue;
+    const image = rec?.progressivePreview ?? rec?.thumb;
+    if (!rec || !image) continue;
     ctx.save();
     ctx.beginPath();
     ctx.rect(p.rect.x, p.rect.y, p.rect.w, p.rect.h);
@@ -230,8 +231,10 @@ function render() {
     ctx.translate(p.rect.x + p.view.ox, p.rect.y + p.view.oy);
     ctx.scale(p.view.scale, p.view.scale);
     ctx.imageSmoothingEnabled = p.view.scale < 4;
-    drawDiffSource(ctx, rec.thumb as unknown as CanvasImageSource,
-      rec.thumb.width, rec.thumb.height, diff.layerFor(rec), diff.display, diff.opacity, diff.feather);
+    const basis = rec.thumb ?? image;
+    if (rec.progressivePreview) ctx.drawImage(image as unknown as CanvasImageSource, 0, 0, basis.width, basis.height);
+    else drawDiffSource(ctx, image as unknown as CanvasImageSource,
+      basis.width, basis.height, diff.layerFor(rec), diff.display, diff.opacity, diff.feather);
     ctx.restore();
   }
   tour.presented();
@@ -426,7 +429,7 @@ function askSelected(){
 function onWheel(e: WheelEvent) {
   const vc = viewCanvasRef.value;
   // 分屏下只要**任一侧**有图就该响应：活动侧恰好空着时也还能缩放另一侧。
-  if (!vc || !store.panes.some((p) => p.rec && p.rec.thumb)) return;
+  if (!vc || !store.panes.some((p) => p.rec?.thumb || p.rec?.progressivePreview)) return;
   const r = vc.getBoundingClientRect();
   const mx = e.clientX - r.left, my = e.clientY - r.top;
   const f = e.deltaY < 0 ? 1.2 : 1 / 1.2;
@@ -443,7 +446,7 @@ function onMouseDown(e: MouseEvent) {
   pointerEvent = e;
   // The temporary pan gesture owns movement before drawing or pane selection.
   if (e.button === 1 || (e.button === 0 && spaceHeld.value)) {
-    if (!store.panes.some(p => p.rec?.thumb) || store.pendingRect) return;
+    if (!store.panes.some(p => p.rec?.thumb || p.rec?.progressivePreview) || store.pendingRect) return;
     if (store.split && !store.pendingPts?.length) {
       const r = viewCanvasRef.value!.getBoundingClientRect();
       store.setActiveSide(paneAtX(e.clientX - r.left, store.splitX));
@@ -464,11 +467,11 @@ function onMouseDown(e: MouseEvent) {
       store.setActiveSide(paneAtX(e.clientX - r.left, store.splitX));
     }
   }
-  if (!store.activeRec || !store.activeRec.thumb) return;
+  if (!store.activeRec?.thumb && !store.activeRec?.progressivePreview) return;
   // 切到不可绘制的产物侧被 store 拒绝时，也不能把那一侧的点击写进活动影像。
   if (store.drawMode && !pointerInActivePane(e)) return;
   const p = mousePos(e);
-  if (store.onCanvasDownDraw(p, e.detail)) return;   // 绘制模式已处理
+  if (store.activeRec?.thumb && store.onCanvasDownDraw(p, e.detail)) return;   // 仅完整 DN 可绘制
   dragging.value = true;
   panButton = 0;
   lastX = e.clientX;

@@ -1,3 +1,4 @@
+import { readTiffDirectory } from './tiffDirectory';
 /**
  * tifDecode.ts — 遥感 TIF 解码/拉伸/预览纯函数（tif-viewer.html 机械直译）
  * ---------------------------------------------------------------
@@ -58,6 +59,9 @@ export interface GeoTiffImageLike {
 }
 
 export interface ProbeInfo {
+  stripRows?: number;
+  tileWidth?: number;
+  tileHeight?: number;
   W: number;
   H: number;
   spp: number;
@@ -126,6 +130,8 @@ export interface SparseCollectResult extends SparseSampleResult {
 
 export interface BandPassOpts {
   bandRows?: number;
+  checkpoint?: (stage?: string) => Promise<void>;
+  onRows?: (src: Float32Array, width: number, height: number, y: number) => Promise<void>;
 }
 
 /* ---------------- geotiff 辅助 ---------------- */
@@ -173,10 +179,11 @@ export function stretchMap(v: number, b: number, st: BandStats[] | null | undefi
 export function stretchRgba(
   src: Float32Array, sw: number, sh: number, nb: number,
   st: BandStats[] | null | undefined, mode: StretchMode, invert: boolean,
+  output?: Uint8ClampedArray,
 ): Uint8ClampedArray {
   if (!nb) nb = (st && st.length) ? st.length : 1;   // 兜底：nb 缺失时按 stats 波段数，避免误走 3 波段分支
   const n = sw * sh;
-  const rgba = new Uint8ClampedArray(n * 4);
+  const rgba = output ?? new Uint8ClampedArray(n * 4);
   let k = 0;
   for (let i = 0; i < n; i++, k += 4) {
     const b0 = i * nb;
@@ -243,7 +250,7 @@ export function chunkedCollect(
   const npx = sw * sh;
   // 导出高分辨率时 Float64 累加器会超单次分配上限（16384² 单波段 ≈2.1GB）→ 改用带通累加。
   // 预览（≤2048）恒 < BAND_ACC_LIMIT，走原逻辑，行为逐字节不变。
-  if (npx * nb * 8 > BAND_ACC_LIMIT) {
+  if (opts?.onRows || npx * nb * 8 > BAND_ACC_LIMIT) {
     return bandPassCollect(image, W, H, plan, ps, sw, sh, onProgress, opts);
   }
   const cols = Math.ceil(W / chunk), rows = Math.ceil(H / chunk), total = cols * rows;
@@ -261,8 +268,10 @@ export function chunkedCollect(
       const dxx = new Uint32Array(cw), dyy = new Uint32Array(chh);
       for (let q = 0; q < cw; q++) { const dq = Math.floor((x0 + q) * ps); dxx[q] = dq >= sw ? sw - 1 : dq; }
       for (let r2 = 0; r2 < chh; r2++) { const dr = Math.floor((y0 + r2) * ps); dyy[r2] = dr >= sh ? sh - 1 : dr; }
-      return image.readRasters({ window: [x0, y0, x1, y1], samples: plan.samples, interleave: true }).then((raster) => {
+      return (opts?.checkpoint?.() ?? Promise.resolve()).then(() => image.readRasters({ window: [x0, y0, x1, y1], samples: plan.samples, interleave: true })).then(async (raster) => {
+        await opts?.checkpoint?.();
         for (let yy = 0; yy < chh; yy++) {
+          if (yy % 128 === 0) await opts?.checkpoint?.();
           const rowA = dyy[yy] * sw, rowS = yy * cw;
           for (let xx = 0; xx < cw; xx++) {
             const ai = rowA + dxx[xx], si = (rowS + xx) * nb;
@@ -280,13 +289,14 @@ export function chunkedCollect(
     };
     return colStep();
   };
-  return rowLoop(0).then(() => {
+  return rowLoop(0).then(async () => {
     const src = new Float32Array(npx * nb);
     for (let i = 0; i < npx; i++) {
       const c = cnt[i];
       if (!c) continue;
       for (let b2 = 0; b2 < nb; b2++) src[i * nb + b2] = acc[i * nb + b2] / c;
     }
+    await opts?.onRows?.(src, sw, sh, 0);
     return src;
   });
 }
@@ -324,8 +334,10 @@ export function bandPassCollect(
         x++;
         const dxx = new Uint32Array(cw);
         for (let q = 0; q < cw; q++) { const dq = Math.floor((x0 + q) * ps); dxx[q] = dq >= sw ? sw - 1 : dq; }
-        return image.readRasters({ window: [x0, y0, x1, y1], samples: plan.samples, interleave: true }).then((raster) => {
+        return (opts?.checkpoint?.() ?? Promise.resolve()).then(() => image.readRasters({ window: [x0, y0, x1, y1], samples: plan.samples, interleave: true })).then(async (raster) => {
+          await opts?.checkpoint?.();
           for (let yy = 0; yy < chh; yy++) {
+            if (yy % 128 === 0) await opts?.checkpoint?.();
             const d = dyy[yy];
             if (d < or0 || d >= or1) continue;
             const local = (d - or0) * sw, rowS = yy * cw;
@@ -343,7 +355,7 @@ export function bandPassCollect(
       };
       return colStep();
     };
-    return rowLoop(0).then(() => {
+    return rowLoop(0).then(async () => {
       for (let i = 0; i < bandH * sw; i++) {
         const c = cnt[i];
         if (!c) continue;
@@ -351,6 +363,7 @@ export function bandPassCollect(
         for (let b2 = 0; b2 < nb; b2++) src[oi + b2] = acc[i * nb + b2] / c;
       }
       if (onProgress) onProgress(or1 / sh);
+      await opts?.onRows?.(src.subarray(or0 * sw * nb, or1 * sw * nb), sw, bandH, or0);
       return rowBand(or1);
     });
   };
@@ -370,7 +383,7 @@ export function stripPxVal(u8: Uint8Array, dv: DataView, le: boolean, bpp: numbe
       return sf === 2 ? (v << 16 >> 16) : v;
     }
     case 4:
-      if (sf === 3) return dv.getFloat32(bo, true);
+      if (sf === 3) return dv.getFloat32(bo, le);
       const v32 = le ? dv.getUint32(bo, true) : dv.getUint32(bo, false);
       return sf === 2 ? (v32 | 0) : v32;
   }
@@ -379,67 +392,18 @@ export function stripPxVal(u8: Uint8Array, dv: DataView, le: boolean, bpp: numbe
 
 // 解析无压缩条带布局（偏移/长度数组），供稀疏预览直接做字节切片。
 // 仅接受：无压缩(259=1) + 条带(非tiled) + 单波段(277=1)；其余返回 {ok:false}。
-const STRIP_HEAD = 2 * 1024 * 1024;
-export function parseStrips(source: Source): Promise<SparseLayout> {
-  return source.read(0, STRIP_HEAD).then((buf) => {
-    const u8 = new Uint8Array(buf), dv = new DataView(buf);
-    const le = u8[0] === 0x49;
-    const u = (off: number, size: number): number => {
-      if (size === 1) return dv.getUint8(off);
-      if (size === 2) return le ? dv.getUint16(off, true) : dv.getUint16(off, false);
-      if (size === 4) return le ? dv.getUint32(off, true) : dv.getUint32(off, false);
-      if (size === 8) { try { return Number(le ? dv.getBigUint64(off, true) : dv.getBigUint64(off, false)); } catch (e) { return 0; } }
-      return 0;
-    };
-    const magic = u(2, 2);
-    if (magic !== 42 && magic !== 43) return { ok: false } as SparseLayout;
-    const big = magic === 43;
-    const ifdOff = big ? u(8, 8) : u(4, 4);
-    const cnt = big ? u(ifdOff, 8) : u(ifdOff, 2);
-    const esz = big ? 20 : 12;
-    const ebase = ifdOff + (big ? 8 : 2);
-    const valInline = big ? 8 : 4, valAt = big ? 12 : 8;
-    const tsize = [0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8, 0, 0, 0, 8, 8, 8];
-    const WANT: Record<number, 1> = { 256: 1, 257: 1, 277: 1, 258: 1, 278: 1, 259: 1, 273: 1, 279: 1, 339: 1 };
-    const tags: Record<number, { type: number; cnt: number; off: number; s1: number }> = {};
-    for (let i = 0; i < cnt; i++) {
-      const e = ebase + i * esz;
-      const tag = u(e, 2), type = u(e + 2, 2);
-      if (!WANT[tag]) continue;
-      const c = big ? u(e + 4, 8) : u(e + 4, 4);
-      const s1 = (type > 0 && type < tsize.length) ? tsize[type] : 0;
-      let vo = e + valAt;
-      if (s1 * c > valInline) vo = u(e + valAt, big ? 8 : 4);
-      tags[tag] = { type, cnt: c, off: vo, s1 };
-    }
-    const scalar = (tag: number, dflt: number): number => {
-      const t = tags[tag];
-      if (!t || !t.s1) return dflt;
-      return u(t.off, t.s1);
-    };
-    const comp = scalar(259, -1);
-    if (comp !== 1 || tags[322] || tags[323]) return { ok: false } as SparseLayout;
-    const W = scalar(256, 0), H = scalar(257, 0), spp = scalar(277, 1);
-    const rps = scalar(278, 0), bits = scalar(258, 8), sf = scalar(339, 1);
-    if (!W || !H || !rps || spp !== 1) return { ok: false } as SparseLayout;
-    const bpp = bits / 8;
-    if (bpp !== Math.floor(bpp) || bpp < 1 || bpp > 8) return { ok: false } as SparseLayout;
-    const strips = Math.ceil(H / rps);
-    const readArr = (tag: number, n: number): number[] | null => {
-      const t = tags[tag];
-      if (!t || !t.s1) return null;
-      if (t.off + t.s1 * n > buf.byteLength) return null;
-      const arr = new Array<number>(n);
-      for (let k = 0; k < n; k++) arr[k] = u(t.off + k * t.s1, t.s1);
-      return arr;
-    };
-    const offs = readArr(273, strips), lens = readArr(279, strips);
-    if (!offs || !lens) return { ok: false } as SparseLayout;
-    const result: SparseLayoutOk = {
-      ok: true, le, W, H, bits, sf, rps, bpp, rowBytes: W * bpp, offs, lens, strips,
-    };
-    return result;
-  });
+export async function parseStrips(source: Source): Promise<SparseLayout> {
+  const dir = await readTiffDirectory(source);
+  if (!dir || await dir.scalar(259, -1) !== 1 || dir.entries.has(322) || dir.entries.has(323)) return { ok: false };
+  const [W, H, spp, rps, bits, sf] = await Promise.all([
+    dir.scalar(256, 0), dir.scalar(257, 0), dir.scalar(277, 1), dir.scalar(278, 0), dir.scalar(258, 8), dir.scalar(339, 1),
+  ]);
+  const bpp = bits / 8;
+  if (!W || !H || !rps || spp !== 1 || ![1, 2, 4].includes(bpp)) return { ok: false };
+  const strips = Math.ceil(H / rps);
+  const [offs, lens] = await Promise.all([dir.values(273, strips), dir.values(279, strips)]);
+  if (!offs || !lens) return { ok: false };
+  return { ok: true, le: dir.le, W, H, bits, sf, rps, bpp, rowBytes: W * bpp, offs, lens, strips };
 }
 
 export function isSparseCandidate(probe: ProbeInfo | null): boolean {
@@ -453,7 +417,7 @@ export function isSparseCandidate(probe: ProbeInfo | null): boolean {
 
 // 稀疏条带采样：直接按条带字节切片把抽样行写入目标数组（不再留 rows[] 整行副本，省 ~1GB）。
 // 导出复用同一机制（targetMax 可调大），返回 {src, sw, sh, bytesRead, stripsTouched}。
-export function sparseSample(source: Source, sp: SparseLayoutOk, targetMax?: number, onProgress?: (f: number) => void): Promise<SparseSampleResult> {
+export function sparseSample(source: Source, sp: SparseLayoutOk, targetMax?: number, onProgress?: (f: number) => void, checkpoint?: (stage?: string) => Promise<void>, onRows?: BandPassOpts['onRows'], priorityRows?: readonly number[]): Promise<SparseSampleResult> {
   const W = sp.W, H = sp.H, bpp = sp.bpp, sf = sp.sf, le = sp.le, rps = sp.rps;
   const tMax = (typeof targetMax === 'number') ? targetMax : SPARSE_PREVIEW_MAX;
   const ps = Math.min(1, tMax / Math.max(W, H));
@@ -464,46 +428,106 @@ export function sparseSample(source: Source, sp: SparseLayoutOk, targetMax?: num
   const mapX = (j: number): number => pw <= 1 ? 0 : Math.round(j * (W - 1) / (pw - 1));
   const mapY = (i: number): number => ph <= 1 ? 0 : Math.round(i * (H - 1) / (ph - 1));
   const src = new Float32Array(pw * ph);
-  let bytesRead = 0, stripsTouched = 0;
-  const readRow = (i: number): Promise<void> => {
+  // Bound read amplification: coalescing must not turn sparse sampling into a
+  // full-file read. At most 1 MiB per group, 64 KiB gaps and 50% extra bytes.
+  const maxRead = 1024 * 1024, maxGap = 64 * 1024;
+  const rows: { i: number; offset: number; length: number }[] = [];
+  for (let i = 0; i < ph; i++) {
     const r = mapY(i);
     const si = Math.floor(r / rps), rowOff = (r % rps) * sp.rowBytes;
     const base = sp.offs[si], avail = sp.lens[si];
-    if (!base || !avail) return Promise.resolve();
+    if (!base || !avail) continue;
     const len = Math.min(avail - rowOff, sp.rowBytes);
-    if (len < bpp) return Promise.resolve();
-    return source.read(base + rowOff, len).then((buf) => {
-      const u8 = new Uint8Array(buf), dv = new DataView(buf);
-      const off = i * pw;
-      for (let j = 0; j < pw; j++) {
-        src[off + j] = stripPxVal(u8, dv, le, bpp, sf, mapX(j) * bpp);
-      }
-      bytesRead += len; stripsTouched++;
-    });
+    if (len < bpp) continue;
+    rows.push({ i, offset: base + rowOff, length: len });
+  }
+  // TIFF strip offsets need not follow image order. Read in file order while
+  // writing each row to its original output position.
+  rows.sort((a, b) => a.offset - b.offset);
+  const groups: { offset: number; end: number; useful: number; rows: typeof rows }[] = [];
+  for (const row of rows) {
+    const last = groups[groups.length - 1];
+    const end = Math.max(last?.end ?? 0, row.offset + row.length);
+    if (last && row.offset - last.end <= maxGap && end - last.offset <= maxRead
+        && end - last.offset <= (last.useful + row.length) * 1.5) {
+      last.end = end; last.useful += row.length; last.rows.push(row);
+    } else groups.push({ offset: row.offset, end: row.offset + row.length, useful: row.length, rows: [row] });
+  }
+  const xs = new Uint32Array(pw);
+  if (priorityRows?.length) {
+    const wanted = new Set(priorityRows);
+    const priority = new Set(groups.filter(group => group.rows.some(row => wanted.has(row.i))));
+    // Reorder existing reads only. Coalescing, byte count and samples stay intact.
+    groups.sort((a,b) => Number(priority.has(b)) - Number(priority.has(a)));
+  }
+  for (let j = 0; j < pw; j++) xs[j] = mapX(j);
+  const nativeLE = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+  let bytesRead = 0, stripsTouched = 0, next = 0, completed = ph - rows.length;
+  let failed = false;
+  // Eight continuously replenished workers avoid waiting for the slowest row
+  // of every old batch. Large source rows reduce concurrency to an 8 MiB budget
+  // (one oversized row remains readable without allocating the entire strip).
+  const largest = groups.reduce((n, g) => Math.max(n, g.end - g.offset), 1);
+  const concurrency = Math.max(1, Math.min(8, Math.floor(8 * 1024 * 1024 / largest)));
+  const worker = async (): Promise<void> => {
+    while (!failed && next < groups.length) {
+      await checkpoint?.();
+      if (failed || next >= groups.length) return;
+      const group = groups[next++];
+      try {
+        const buf = await source.read(group.offset, group.end - group.offset);
+        await checkpoint?.();
+        if (failed) return;
+        const u8 = new Uint8Array(buf), dv = new DataView(buf);
+        bytesRead += buf.byteLength;
+        for (const row of group.rows) {
+          const start = row.offset - group.offset;
+          if (start + xs[pw - 1] * bpp + bpp > buf.byteLength
+              || xs[pw - 1] * bpp + bpp > row.length) {
+            throw new Error('TIFF sampled row is truncated');
+          }
+          const off = row.i * pw;
+          // Aligned native-endian buffers avoid a function/DataView dispatch
+          // for every pixel. Other layouts retain the portable scalar reader.
+          let values: ArrayLike<number> | null = null;
+          if ((bpp === 1 || le === nativeLE) && start % bpp === 0) {
+            const count = Math.floor(row.length / bpp);
+            if (bpp === 1) values = sf === 2 ? new Int8Array(buf, start, count) : new Uint8Array(buf, start, count);
+            else if (bpp === 2) values = sf === 2 ? new Int16Array(buf, start, count) : new Uint16Array(buf, start, count);
+            else if (bpp === 4) values = sf === 3 ? new Float32Array(buf, start, count)
+              : sf === 2 ? new Int32Array(buf, start, count) : new Uint32Array(buf, start, count);
+          }
+          if (values) for (let j = 0; j < pw; j++) src[off + j] = values[xs[j]];
+          else for (let j = 0; j < pw; j++) src[off + j] = stripPxVal(u8, dv, le, bpp, sf, start + xs[j] * bpp);
+          stripsTouched++;
+        }
+        completed += group.rows.length;
+        onProgress?.(completed / ph);
+        // A group may complete out of order. Publish only its finished rows;
+        // never expose still-zero rows from another in-flight read.
+        if (onRows) for (const row of group.rows) {
+          await onRows(src.subarray(row.i * pw, (row.i + 1) * pw), pw, 1, row.i);
+        }
+      } catch (error) { failed = true; throw error; }
+    }
   };
-  let idx = 0;
-  const loop = (): Promise<void> => {
-    if (idx >= ph) return Promise.resolve();
-    const end = Math.min(ph, idx + 8);
-    const batch: Promise<void>[] = [];
-    for (let k = idx; k < end; k++) batch.push(readRow(k));
-    idx = end;
-    return Promise.all(batch).then(() => {
-      if (onProgress) onProgress(idx / ph);
-      return loop();
+  return Promise.all(Array.from({ length: Math.min(concurrency, groups.length) }, worker))
+    .then(() => {
+      if (!groups.length) onProgress?.(1);
+      return { src, sw: pw, sh: ph, bytesRead, stripsTouched };
     });
-  };
-  return loop().then(() => ({ src, sw: pw, sh: ph, bytesRead, stripsTouched }));
 }
 
 // 稀疏收集纯管线（原 sparseCollect 的 silent 分支）：采样 → 统计 → 统一产出对象。
 // rec 变更 / 遮罩 / 进度 UI 等交互层在 Phase 3 由 Vue 编排，本文件不碰 DOM。
 export function sparseCollect(
-  source: Source, probe: ProbeInfo, sp: SparseLayoutOk, targetMax?: number, onProgress?: (f: number) => void,
+  source: Source, probe: ProbeInfo, sp: SparseLayoutOk, targetMax?: number, onProgress?: (f: number) => void, checkpoint?: (stage?: string) => Promise<void>,
+  onRows?: BandPassOpts['onRows'], statistics?: BandStats[],
 ): Promise<SparseCollectResult> {
-  return sparseSample(source, sp, targetMax, onProgress).then((r) => {
+  return sparseSample(source, sp, targetMax, onProgress, checkpoint, onRows).then(async (r) => {
+    await checkpoint?.('统计像素');
     const src = r.src, pw = r.sw, ph = r.sh;
-    const stats = computeStats(src, pw, ph, 1);
+    const stats = statistics ?? computeStats(src, pw, ph, 1);
     return {
       src, sw: pw, sh: ph, nb: 1 as const, stats,
       invert: probe.photometric === 0, W: sp.W, H: sp.H,
@@ -513,9 +537,8 @@ export function sparseCollect(
 }
 
 /* ---------------- 头部 IFD 解析 ---------------- */
-// 直接从文件头部解析少量关键 IFD 标签（兼容 classic TIFF 与 BigTIFF）。
+// 按偏移读取 IFD 与值数组，兼容文件尾目录及 classic TIFF / BigTIFF。
 // geotiff 的 getFileDirectory() 在部分构建里是惰性桩，读不到 photometric/compression，故自行解析。
-const TIFF_HEAD = 1048576;   // 1MB（比 parseStrips 的 2MB 小：仅需读常用标量标签）
 /** 读头部 magic 判断是否 BigTIFF（magic 43 vs classic 42）。vendored UTIF 不能解 BigTIFF，
  *  decode 路由（needGeo）据此把小的 8bit BigTIFF 也走 geotiff 分块。 */
 export function isBigTiff(source: Source): Promise<boolean> {
@@ -528,40 +551,14 @@ export function isBigTiff(source: Source): Promise<boolean> {
   }).catch(() => false);
 }
 
-export function tiffTags(source: Source): Promise<Record<number, number>> {
-  return source.read(0, TIFF_HEAD).then((buf) => {
-    const u8 = new Uint8Array(buf), dv = new DataView(buf);
-    if (u8.length < 16) return {};
-    const le = u8[0] === 0x49;   // 'II' = 小端
-    const u = (off: number, size: number): number => {
-      if (size === 1) return dv.getUint8(off);
-      if (size === 2) return le ? dv.getUint16(off, true) : dv.getUint16(off, false);
-      if (size === 4) return le ? dv.getUint32(off, true) : dv.getUint32(off, false);
-      if (size === 8) { try { return Number(le ? dv.getBigUint64(off, true) : dv.getBigUint64(off, false)); } catch (e) { return 0; } }
-      return 0;
-    };
-    const magic = u(2, 2);
-    if (magic !== 42 && magic !== 43) return {};   // 42=classic, 43=BigTIFF
-    const big = magic === 43;
-    const ifdOff = big ? u(8, 8) : u(4, 4);
-    const cnt = big ? u(ifdOff, 8) : u(ifdOff, 2);
-    const esz = big ? 20 : 12;
-    const ebase = ifdOff + (big ? 8 : 2);
-    const valInline = big ? 8 : 4, valAt = big ? 12 : 8;
-    const tsize = [0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8, 0, 0, 0, 8, 8, 8];   // TIFF type → 字节数
-    const tags: Record<number, number> = {};
-    const n = Math.min(cnt, 300);
-    for (let i = 0; i < n; i++) {
-      const e = ebase + i * esz;
-      const tag = u(e, 2), type = u(e + 2, 2);
-      const cntv = big ? u(e + 4, 8) : u(e + 4, 4);
-      const s1 = (type > 0 && type < tsize.length) ? tsize[type] : 0;
-      let vo = e + valAt;
-      if (s1 * cntv > valInline) vo = u(e + valAt, big ? 8 : 4);
-      if (s1) tags[tag] = u(vo, s1);
-    }
-    return tags;
-  });
+export async function tiffTags(source: Source): Promise<Record<number, number>> {
+  const dir = await readTiffDirectory(source), tags: Record<number, number> = {};
+  if (!dir) return tags;
+  for (const tag of [256, 257, 258, 259, 262, 273, 277, 278, 279, 284, 322, 323, 324, 325, 339]) {
+    const value = await dir.values(tag);
+    if (value) tags[tag] = value[0];
+  }
+  return tags;
 }
 
 // 由头部标签生成压缩/布局摘要（用于文件列表即探显示）
@@ -598,6 +595,7 @@ export function probeImage(file: Blob): Promise<ProbeInfo> {
           sampleFormat: sf,             // 1=无符号整数 2=有符号 3=浮点
           photometric: ph,
           compression: tags[259] != null ? tags[259] : null,
+          stripRows: tags[278], tileWidth: tags[322], tileHeight: tags[323],
           layout: layoutInfo(tags),
           image, tiff,
           big,

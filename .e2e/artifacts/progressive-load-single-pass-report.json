@@ -1,0 +1,18 @@
+﻿{
+  "compressed": {
+    "dnSamplesCorrect": true,
+    "frames": 0,
+    "noExtraPreviewPass": true,
+    "pixelsMs": 516.1000001430511,
+    "route": "chunked"
+  },
+  "firstFrameMs": 177,
+  "frames": 12,
+  "jpegBytes": 252276,
+  "pauseStable": true,
+  "pixelsBeforeJpg": true,
+  "pixelsMs": 1593.8000001907349,
+  "stopAndRetry": true,
+  "stoppedExportKeepsPixels": true,
+  "verified": true
+}

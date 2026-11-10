@@ -34,7 +34,7 @@ describe('imageKindOf', () => {
   });
 
   it('其它格式 → null', () => {
-    expect(imageKindOf(f('a.png', 'image/png'))).toBeNull();
+    expect(imageKindOf(f('a.png', 'image/png'))).toBe('png');
     expect(imageKindOf(f('a.txt'))).toBeNull();
     expect(imageKindOf(f(''))).toBeNull();
     // 不能把 .jpgis 之类的前缀混淆当成合法扩展
@@ -49,7 +49,7 @@ describe('classifyImages', () => {
       f('a.tif'), f('b.jpg'), f('c.tiff'), f('d.jpeg'), f('e.png'),
     ]);
     expect(tifs.map((x) => x.name)).toEqual(['a.tif', 'c.tiff']);
-    expect(imgs.map((x) => x.name)).toEqual(['b.jpg', 'd.jpeg']);
+    expect(imgs.map((x) => x.name)).toEqual(['b.jpg', 'd.jpeg','e.png']);
   });
 
   it('只有 TIF / 只有 JPG', () => {
@@ -58,7 +58,7 @@ describe('classifyImages', () => {
   });
 
   it('全不支持 → 两堆皆空（调用方据此报错）', () => {
-    const got = classifyImages([f('a.png'), f('b.txt')]);
+    const got = classifyImages([f('a.bmp'), f('b.txt')]);
     expect(got.tifs).toEqual([]);
     expect(got.imgs).toEqual([]);
   });

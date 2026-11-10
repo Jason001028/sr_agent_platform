@@ -6,23 +6,46 @@
  * showMask/hideMask/updateProgressUI 由 store 编排。
  */
 import { useViewerStore } from '../stores/viewer';
+import { computed } from 'vue';
 
 const store = useViewerStore();
+const previewVisible = computed(() => {
+  const rec = store.recs.find(r => r.id === store.imageLoad.recId);
+  return store.imageLoad.active && !!(rec?.progressivePreview || (rec?.thumb && ['装载本地预览', '生成本地 JPG'].includes(store.imageLoad.stage)));
+});
+const progressLabel = computed(() => {
+  if(store.imageLoad.active&&store.imageLoad.state==='paused')return '已暂停';
+  if(store.imageLoad.active&&store.imageLoad.state==='pausing')return '正在暂停…';
+  if(!store.overlay.indeterminate)return store.overlay.progress+'%';
+  return store.imageLoad.stage.includes('服务端')?'等待服务端处理…':'处理中…';
+});
 </script>
 
 <template>
   <!-- 解码/合并/生成遮罩 -->
   <Transition name="decode-fade">
-    <div v-if="store.overlay.visible" class="decode-mask">
+    <div v-if="store.overlay.visible" class="decode-mask" :class="{ 'preview-ready': previewVisible }">
       <div class="decode-box">
         <div class="spinner"></div>
-        <div class="mask-title">{{ store.overlay.title }}</div>
-        <div v-if="store.overlay.sub" class="mask-sub">{{ store.overlay.sub }}</div>
-        <div v-if="store.overlay.bar" class="progress-wrap">
-          <div class="progress-track">
-            <div class="progress-bar" :style="{ width: store.overlay.progress + '%' }"></div>
+        <div class="mask-title">{{ previewVisible ? (store.imageLoad.stage === '生成本地 JPG' ? '影像已显示，后台生成 JPG' : '整图概览已显示，后台回填中') : store.overlay.title }}</div>
+        <div v-if="store.overlay.sub && !previewVisible" class="mask-sub">{{ store.overlay.sub }}</div>
+        <template v-if="store.imageLoad.active">
+          <div class="mask-sub" aria-live="polite">{{ store.imageLoad.stage }}</div>
+          <div v-if="store.imageLoad.state === 'pausing'" class="mask-sub">正在暂停，当前读取或处理块结束后生效…</div>
+          <div v-if="store.imageLoad.state === 'paused'" class="mask-sub">已暂停，继续后保留当前进度</div>
+          <div class="load-actions" @pointerdown.stop>
+            <button v-if="store.imageLoad.state === 'running'" type="button" @click="store.pauseImageLoad">暂停</button>
+            <button v-else-if="store.imageLoad.state !== 'stopped'" type="button" @click="store.resumeImageLoad">继续</button>
+            <button type="button" :disabled="store.imageLoad.state === 'stopped'" @click="store.stopImageLoad">停止加载</button>
           </div>
-          <div class="progress-pct">{{ store.overlay.progress }}%</div>
+        </template>
+        <div v-if="store.overlay.bar" class="progress-wrap">
+          <div class="progress-track" role="progressbar" aria-label="当前阶段处理进度" :aria-valuemin="0" :aria-valuemax="100"
+            :aria-valuenow="store.overlay.indeterminate ? undefined : store.overlay.progress" :aria-valuetext="progressLabel">
+            <div class="progress-bar" :class="{ indeterminate:store.overlay.indeterminate, paused:store.imageLoad.active&&store.imageLoad.state!=='running' }"
+              :style="store.overlay.indeterminate ? undefined : { width: store.overlay.progress + '%' }"></div>
+          </div>
+          <div class="progress-pct" aria-live="polite">{{ progressLabel }}</div>
         </div>
       </div>
     </div>
@@ -40,6 +63,10 @@ const store = useViewerStore();
 </template>
 
 <style scoped>
+.load-actions{display:flex;justify-content:center;gap:10px;margin:12px 0}.load-actions button{font:inherit;padding:6px 14px;border:1px solid var(--line);border-radius:7px;background:var(--surface);color:var(--ink);cursor:pointer}
+.decode-mask.preview-ready { background: transparent; backdrop-filter: none; align-items: flex-end; justify-content: flex-end; padding: 16px; pointer-events: none; }
+.preview-ready .decode-box { pointer-events: auto; gap: 5px; padding: 12px 16px; max-width: 360px; }
+.preview-ready .spinner { display: none; }
 /* 解码遮罩：浅色毛玻璃，浮于浅色画布之上；内容为白色卡片。
    **`user-select: none` 是必须的**：遮罩盖住整块画布，且是画布区里唯一带可选文字的一层。
    没有它时，在遮罩上按住拖动会先给标题/进度文字拉出一个文本选择（画布那边收不到 mousedown，
@@ -112,6 +139,10 @@ const store = useViewerStore();
   transition: width var(--motion-live);
 }
 .progress-pct { color: var(--ink-sub); font-size: 12px; min-width: 40px; text-align: right; }
+.progress-bar.indeterminate { width:35%;animation:progress-pending 1.4s ease-in-out infinite; }
+.progress-bar.paused { animation-play-state:paused; }
+@keyframes progress-pending { from{transform:translateX(-100%)} to{transform:translateX(290%)} }
+@media(prefers-reduced-motion:reduce){.progress-bar.indeterminate{animation:none;transform:translateX(90%);}}
 
 /* toast：白色浮条 + 青绿语义色，替代原暗绿 */
 .toast {

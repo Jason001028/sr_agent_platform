@@ -437,7 +437,7 @@ class TestLibraryRows(ClearBase):
         res = self.clear([iid], client=c).json()
 
         self.assertEqual(res["summary"]["cleared"], 1)
-        self.assertEqual(res["summary"]["files"], 2, "两处各一份，都要清")
+        self.assertEqual(res["summary"]["files"], 3, "兼容名称、分档缓存与场景目录都要清")
         self.assertFalse(mirror.exists())
         self.assertFalse(local.exists())
         self.assertTrue(mirror.parent.is_dir(), "空目录保留：镜像树骨架留着")

@@ -38,7 +38,9 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -62,7 +64,9 @@ from backend.pathguard import (
     parse_scene_date, production_tree_depth,
     strip_raster_ext, to_posix_array_path)
 from backend.services import image_diff
+from backend.services.heavy_work import HeavyWork
 from backend.services import preview_cache
+from backend.services.image_open import ImageOpen, router_for as image_open_router, purge_loop as image_open_purge_loop
 from backend.services import scene_resolve
 from backend.runtime_context import AppContext
 from backend.tools import build_builtin_registry
@@ -77,7 +81,7 @@ from backend.services.preview_jpg import (PREVIEW_DIVISORS, PREVIEW_JPG_QUALITY,
                                           ensure_preview_jpg,
                                           preview_max_edge, scene_dims,
                                           source_revision, stamp_div,
-                                          stamp_src, write_preview_jpg)
+                                          stamp_src, write_preview_jpg, versioned_preview_path)
 
 # W/H 探测缓存：LRU，key = (绝对路径, mtime)，header 级读取很廉价但盘阵文件多
 _DIMS_CACHE: dict[tuple[str, float], dict] = {}
@@ -157,6 +161,42 @@ def _check_div(div: int) -> int:
     return div
 
 
+def _reuse_shared_preview(source: Path, destination: Path, div: int):
+    """Reuse a tier across mirror/drop destinations without decoding again.
+
+    Only fixed known paths are probed. The outer raster queue owns writes;
+    immutable variant bytes and the source revision are checked before reuse.
+    """
+    from backend.services.preview_jpg import _copy_preview
+    rev = source_revision(source)
+    target = versioned_preview_path(destination, rev, div)
+    if not rev or cache_hit(target, PREVIEW_JPG_QUALITY, div, source_rev=rev):
+        return
+    candidates = []
+    try:
+        candidates.append(paths.preview_jpg_for(source, paths.scenes_root()))
+    except (PreviewError, PathDeniedError):
+        # The drop endpoint keeps its own destination even when the optional
+        # mirror is misconfigured. Its destination is validated independently.
+        pass
+    if not is_preview_only(source):
+        candidates.append(paths.drop_preview_path(source))
+    for base in candidates:
+        candidate = versioned_preview_path(base, rev, div)
+        if candidate == target:
+            continue
+        if cache_hit(candidate, PREVIEW_JPG_QUALITY, div, source_rev=rev):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            _copy_preview(candidate, target)
+            _copy_preview(target, destination)
+            return
+
+
+def _ensure_shared_preview(source_path, jpg_path, div=2):
+    _reuse_shared_preview(Path(source_path), Path(jpg_path), div)
+    return ensure_preview_jpg(source_path, jpg_path, div=div)
+
+
 def _diff_source_path(scene_id: str, root: Path | None) -> Path:
     """场景 id → 用于差异分析的源文件（显示件 jpg 优先换成同名栅格）。"""
     abs_path = paths.scene_id_to_abs(scene_id, root, allow_preview=True)
@@ -183,10 +223,10 @@ def _diff_load_scene(scene_id: str, root: Path | None):
             div = 4
         jpg = paths.preview_jpg_for(abs_path, root)
         try:
-            ensure_preview_jpg(str(abs_path), str(jpg), div=div)
+            out = _ensure_shared_preview(str(abs_path), str(jpg), div=div)
         except PreviewError as e:
             raise image_diff.DiffError(f"预览生成失败：{e}") from e
-        read_path = jpg
+        read_path = Path(out["path"])
         warnings.append(f"影像 {abs_path.name} 读取自服务端预览 JPG（÷{div}）。")
     else:
         read_path = abs_path
@@ -616,7 +656,7 @@ async def _eager_preview_loop(state) -> None:
     while True:
         await asyncio.sleep(state.poll_sec)
         try:
-            await asyncio.to_thread(_eager_bake_tick, state)
+            await state.heavy_work.run(_eager_bake_tick, state, background=True)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — 单轮失败不 kill 循环
@@ -813,8 +853,11 @@ def _bake_product_preview(state, task: dict, div: int) -> None:
     # 用户在急生成动手之前先打开过这份产物：盘上那份已是当前档位，重生成纯属白干
     # （几十秒 + 读遍 GB 级文件）。判据与惰性路径**同一个函数**，没有第二套。
     try:
+        _reuse_shared_preview(product, jpg, div)
         if jpg.is_file() and os.path.getmtime(jpg) >= os.path.getmtime(product):
-            hit = cache_hit(jpg, PREVIEW_JPG_QUALITY, div, source=product)
+            hit = (cache_hit(versioned_preview_path(jpg, source_revision(product), div),
+                             PREVIEW_JPG_QUALITY, div, source=product)
+                   or cache_hit(jpg, PREVIEW_JPG_QUALITY, div, source=product))
             if hit is not None:
                 _finish_preview(state, task, "done",
                                 f"cached: 盘上那份已是 ÷{div}"
@@ -825,6 +868,7 @@ def _bake_product_preview(state, task: dict, div: int) -> None:
 
     try:
         before = _source_sig(product)
+        before_rev = source_revision(product)
         max_edge = preview_max_edge(product, div)
         pixels = build_preview_pixels(str(product), max_edge)
         # **落盘前复核**：同一 suffix 重跑会覆盖同一个产物路径。若不复核，一次
@@ -834,7 +878,7 @@ def _bake_product_preview(state, task: dict, div: int) -> None:
             _finish_preview(state, task, "skipped",
                             "source_changed: 产物在预览生成途中被改写，本次一个字节都没写")
             return
-        out = write_preview_jpg(jpg, pixels, div=div, source=product)
+        out = write_preview_jpg(jpg, pixels, div=div, source_rev=before_rev)
         _finish_preview(state, task, "done",
                         f"baked: ÷{div}（{out['w']}×{out['h']}）")
     except (PreviewError, OSError) as e:
@@ -884,19 +928,23 @@ def _bake_nosr_preview(task: dict, div: int) -> str:
     # 盘上那份已是当前档位就不重生成（同 suffix 反复迭代时省掉每次读遍 GB 级文件）。
     # 判据与打开链/产物那份**同一个** cache_hit，没有第二套。
     try:
+        _reuse_shared_preview(source, out, div)
         if out.is_file() and os.path.getmtime(out) >= os.path.getmtime(source):
-            hit = cache_hit(out, PREVIEW_JPG_QUALITY, div, source=source)
+            hit = (cache_hit(versioned_preview_path(out, source_revision(source), div),
+                             PREVIEW_JPG_QUALITY, div, source=source)
+                   or cache_hit(out, PREVIEW_JPG_QUALITY, div, source=source))
             if hit is not None:
                 return f"cached: {out.name} 已是 ÷{div}（{hit['w']}×{hit['h']}）"
     except OSError:
         pass        # 读不了 mtime 就当没命中，往下走正常流程
     try:
         before = _source_sig(source)
+        before_rev = source_revision(source)
         pixels = build_preview_pixels(str(source), preview_max_edge(source, div))
         # 落盘前复核，理由同产物那一份：读到一半源被改写会留下半截图
         if _source_sig(source) != before:
             return "skipped: 源在预览生成途中被改写，本次一个字节都没写"
-        res = write_preview_jpg(out, pixels, div=div, source=source)
+        res = write_preview_jpg(out, pixels, div=div, source_rev=before_rev)
         return f"baked: {out.name} ÷{div}（{res['w']}×{res['h']}）"
     except (PreviewError, OSError) as e:
         return f"failed: {e}"
@@ -1112,6 +1160,7 @@ async def _tmp_preview_purge_loop() -> None:
     while True:
         try:
             await asyncio.to_thread(preview_cache.purge_temp_previews)
+            await asyncio.to_thread(preview_cache.purge_generic_versions, paths.generic_preview_root())
             delay = _seconds_to_next_midnight()
         except asyncio.CancelledError:
             raise
@@ -1309,9 +1358,11 @@ def create_app() -> FastAPI:
         # 任务列表而不是单个 poller：漏 cancel 一个，它会在 app 关闭后继续跑
         # （测试里就是往下一个用例的 env 上写）。
         app.state.tasks = [
+            asyncio.create_task(app.state.heavy_work.monitor()),
             asyncio.create_task(title_loop(app.state)),
             asyncio.create_task(_poll_loop(app.state)),
             asyncio.create_task(_tmp_preview_purge_loop()),
+            asyncio.create_task(image_open_purge_loop(app.state.image_open)),
             asyncio.create_task(_eager_preview_loop(app.state)),
             asyncio.create_task(goal_worker.goal_loop(app.state)),
             asyncio.create_task(batch_worker.batch_loop(app.state)),
@@ -1328,6 +1379,7 @@ def create_app() -> FastAPI:
         # Runs finish persistence before closing their Store. No SSE owns them.
         if app.state.chat_workers:
             await asyncio.gather(*(asyncio.shield(w) for w in tuple(app.state.chat_workers)))
+        await app.state.heavy_work.close()
         app.state.store.close()
 
     app = FastAPI(title="sr_agent_platform api", version="0.5.0",
@@ -1338,7 +1390,7 @@ def create_app() -> FastAPI:
     # 不列这里的话 X-SR-Preview-Fallback 恒为 null，那条提示就是死代码。
     app.add_middleware(CORSMiddleware, allow_origins=["*"],
                        allow_methods=["*"], allow_headers=["*"],
-                       expose_headers=["X-SR-Preview-Fallback"])
+                       expose_headers=["X-SR-Preview-Fallback", "X-SR-Image-W", "X-SR-Image-H", "X-SR-Preview-W", "X-SR-Preview-H"])
 
     # 阶段5 运行时状态：create_app 即建（env 已就绪）；lifespan 只额外启轮询。
     app.state.store = store_mod.Store()          # SR_AGENT_DB，懒打开
@@ -1348,6 +1400,9 @@ def create_app() -> FastAPI:
         name="API 本机", status="online", default_state="enabled")
     app.state.cfg = load_config()
     app.state.tool_registry = build_builtin_registry()
+    app.state.heavy_work = HeavyWork()
+    app.state.image_open = ImageOpen()
+    app.include_router(image_open_router(app.state.image_open))
     app.state.chat_locks = {}                    # session_id → asyncio.Lock
     app.state.chat_workers = set()               # rounds may outlive an SSE connection
     app.state.subscribers = set()                # /api/queue/events 订阅者
@@ -1395,7 +1450,7 @@ def create_app() -> FastAPI:
         try:
             # SSIM、形态学、PNG 编码与原始 TIFF 窗口读取都是同步 CPU/磁盘工作，
             # 放到工作线程，避免阻塞事件循环与同一 worker 上的 SSE 请求。
-            return await run_in_threadpool(_run)
+            return await app.state.heavy_work.run(_run)
         except image_diff.DiffError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         except PathDeniedError as e:
@@ -1534,6 +1589,26 @@ def create_app() -> FastAPI:
         只有 `{path}` 分支不收：精确路径没有反推，也就没有可补的段。
         """
         body = await _json_body(request)
+        submitted=time.monotonic()
+        def measured():
+            started=time.monotonic();timings={}
+            try:
+                return _resolve_scene_sync(request,body,timings)
+            finally:
+                elapsed=time.monotonic()-started
+                logging.getLogger(__name__).log(logging.WARNING if elapsed>2 or started-submitted>2 else logging.INFO,
+                    'scene_resolve mode=%s wait_ms=%.0f run_ms=%.0f sample_ms=%.0f dims_ms=%.0f row_ms=%.0f',
+                    'path' if body.get('path') else 'name',(started-submitted)*1000,
+                    elapsed*1000,timings.get('sample',0)*1000,
+                    timings.get('dims',0)*1000,timings.get('row',0)*1000)
+        return await app.state.heavy_work.resolve(measured)
+
+    def _resolve_scene_sync(request: Request, body: dict, timings=None):
+        timings={} if timings is None else timings
+        def timed(key,fn,*args):
+            start=time.monotonic()
+            try:return fn(*args)
+            finally:timings[key]=timings.get(key,0)+time.monotonic()-start
         # 拖拽入口的可选双指纹（{name} 分支才用得上，见 _fingerprint_mismatch）：
         # 给了就必须是正整数；不给则一切照旧（粘路径 / 场景库不走这里）。
         size_bytes = body.get("size_bytes")
@@ -1565,10 +1640,10 @@ def create_app() -> FastAPI:
             if "source_fingerprint" in body:
                 from backend.services.source_match import verify_source
                 try:
-                    verify_source(raster, body["source_fingerprint"])
+                    timed('sample',verify_source,raster,body["source_fingerprint"])
                 except ValueError as exc:
                     raise HTTPException(status_code=409, detail=str(exc)) from exc
-            dims = _cached_dims(raster)
+            dims = timed('dims',_cached_dims,raster)
             if not dims:
                 raise HTTPException(
                     status_code=422,
@@ -1580,7 +1655,7 @@ def create_app() -> FastAPI:
             preview_only = is_preview_only(d)
             # 这一行描述的是**这一环节自己的栅格**（本体 / 产物 / NOSR）：产物的
             # W/H 是本体的倍数，拿本体的尺寸建画布，整张图的比例都是错的。
-            row = _manual_row(raster, d, root)
+            row = timed('row',_manual_row,raster,d,root)
             row["W"], row["H"] = dims["W"], dims["H"]
             if not can_submit:
                 # **中间产物不可修复**，而这条服务的形状是「能不能提交 / 掩码写哪」，
@@ -1673,10 +1748,10 @@ def create_app() -> FastAPI:
                 if "source_fingerprint" in body:
                     from backend.services.source_match import verify_source
                     try:
-                        verify_source(target, body["source_fingerprint"])
+                        timed('sample',verify_source,target,body["source_fingerprint"])
                     except ValueError as exc:
                         raise HTTPException(status_code=409, detail=str(exc)) from exc
-                return _resolve_bare_tif(target)
+                return timed('row',_resolve_bare_tif,target)
             if "source_fingerprint" in body:
                 raise HTTPException(status_code=400, detail="关联拖入文件须填写具体 TIFF 文件路径，不能填目录")
             tried = [(posix, "")]
@@ -1898,18 +1973,67 @@ def create_app() -> FastAPI:
         except (PathDeniedError, OSError) as exc:
             raise HTTPException(status_code=404, detail="Scene resource unavailable") from exc
 
+    @app.get("/api/work-status")
+    async def work_status():
+        return {**app.state.heavy_work.snapshot(), "event_loop_delay_ms": app.state.heavy_work.loop_delay_ms}
+
+    @app.get("/api/scenes/{scene_id}/preview-status")
+    async def preview_status(scene_id: str, div: int = Query(2)):
+        div = _check_div(div)
+        try:
+            ready = await app.state.heavy_work.read(_ready_preview, scene_id, div, True)
+            if ready is not None:
+                return {"state": "ready"}
+            key = await app.state.heavy_work.read(_preview_job_key, scene_id, div, False)
+        except PathDeniedError as exc:
+            raise HTTPException(404, f"场景不可访问：{exc}") from exc
+        return {"state": app.state.heavy_work.states.get(key, "missing")}
+
     @app.get("/api/scenes/{scene_id}/preview")
-    def preview(scene_id: str, div: int = Query(2), ready_only: bool = False):
+    async def preview(scene_id: str, div: int = Query(2), ready_only: bool = False):
+        div = _check_div(div)
+        try:
+            cached = await app.state.heavy_work.read(_ready_preview, scene_id, div, ready_only)
+            if cached is not None:
+                return cached
+            key = await app.state.heavy_work.read(_preview_job_key, scene_id, div, ready_only)
+        except PathDeniedError as exc:
+            raise HTTPException(404, f"场景不可访问：{exc}") from exc
+        return await app.state.heavy_work.run(
+            _preview_sync, scene_id, div, ready_only, key=key)
+
+    def _preview_job_key(scene_id, div, ready_only):
+        source = _diff_source_path(scene_id, root)
+        return ("preview", str(source), source_revision(source), div, ready_only)
+
+    def _ready_preview(scene_id, div, ready_only):
+        source = _diff_source_path(scene_id, root)
+        if source.suffix.lower() in (".jpg", ".jpeg"):
+            return {"ready": True} if ready_only else FileResponse(str(source), media_type="image/jpeg")
+        jpg = paths.preview_jpg_for(source, root)
+        rev = source_revision(source)
+        variant = versioned_preview_path(jpg, rev, div)
+        hit = cache_hit(variant, PREVIEW_JPG_QUALITY, div, source_rev=rev)
+        if hit is None:
+            return None
+        if ready_only:
+            return {"ready": True}
+        try:
+            return _jpeg_snapshot(variant, div=div, source_rev=source_revision(source))
+        except _PreviewSnapshotError:
+            return None
+
+    def _preview_sync(scene_id: str, div: int = Query(2), ready_only: bool = False):
         """场景预览 JPG（响应体即字节）。`?div=` 选下采样档位（各边 ÷div）。
 
         落点：源同目录（或 `SR_PREVIEWS_ROOT` 镜像树）的 `<stem>_preview.jpg`，
-        **与档位无关** —— 换档位是原地覆盖同一份，靠戳里的 div 判废重生成。
+        作为兼容名称；实际响应从源修订、规则和档位对应的版本件读取。
         盘阵外、`SR_PREVIEW_ROOTS` 之下的源改用隔离缓存根
         （`SR_PREVIEW_CACHE_ROOT`，文件名带源路径哈希），不往外部目录写文件。
 
         前端「一键解析」（《待修复清单》批量预览生成，2026-09-27）每景就是打这一个端点
-        两次（本体 + 未超分那份），**不要为它加批量端点**：这里是 sync def、进了 anyio
-        线程池，掐响应停不了已经在生成的那一份（取消只能「假装取消」）；而「试过哪些
+        两次（本体 + 未超分那份），**不要为它加批量端点**：同步业务由有界影像队列执行，
+        请求断开只分离等待者，不能停止原生生成；而「试过哪些
         候选、各自为什么不行」的真源在 `scene_search` / `resolve_scene`，批量端点
         重写一遍就是新增一个「静默换路径」的入口。串行由前端保证（并发恒为 1）。
         """
@@ -1940,7 +2064,7 @@ def create_app() -> FastAPI:
         jpg = paths.preview_jpg_for(abs_path, root)
         if ready_only:
             try:
-                ensure_preview_jpg(str(abs_path), str(jpg), div=div)
+                out = _ensure_shared_preview(str(abs_path), str(jpg), div=div)
             except PreviewError as e:
                 raise HTTPException(status_code=422,
                                     detail=f"预览生成失败：{e}") from e
@@ -1952,7 +2076,7 @@ def create_app() -> FastAPI:
         last: _PreviewSnapshotError | None = None
         for _ in range(2):
             try:
-                ensure_preview_jpg(str(abs_path), str(jpg), div=div)
+                out = _ensure_shared_preview(str(abs_path), str(jpg), div=div)
             except PreviewError as e:
                 raise HTTPException(status_code=422,
                                     detail=f"预览生成失败：{e}") from e
@@ -1960,7 +2084,7 @@ def create_app() -> FastAPI:
             # 生成后现算源身份再比对（不是生成前算好的那份）：源在这两步之间
             # 被换掉时，戳里仍是旧身份 → 判废重生成，不会把旧字节发出去。
             try:
-                return _jpeg_snapshot(jpg, div=div,
+                return _jpeg_snapshot(Path(out["path"]), div=div,
                                       source_rev=source_revision(abs_path))
             except _PreviewSnapshotError as e:
                 last = e
@@ -1969,7 +2093,50 @@ def create_app() -> FastAPI:
             detail=f"预览在生成与读取之间被并发改写，请重试：{last}")
 
     @app.get("/api/scenes/{scene_id}/preview-drop")
-    def preview_drop(scene_id: str, div: int = Query(2)):
+    async def preview_drop(scene_id: str, div: int = Query(2)):
+        div = _check_div(div)
+        try:
+            cached, key = await app.state.heavy_work.read(_ready_drop_preview, scene_id, div)
+        except PathDeniedError as exc:
+            raise HTTPException(404, f"场景不可访问：{exc}") from exc
+        if cached is not None:
+            return cached
+        return await app.state.heavy_work.run(_preview_drop_sync, scene_id, div, key=key)
+
+    def _ready_drop_preview(scene_id, div):
+        # Keep drop's write-capable whitelist, including sibling substitution.
+        source = paths.scene_id_to_abs(scene_id, root)
+        raster = _display_sibling_raster(source)
+        if raster is not None:
+            source = ensure_allowed(raster, kind="file")
+        headers = {"Cache-Control": "no-store"}
+        if source.suffix.lower() in (".jpg", ".jpeg"):
+            return FileResponse(str(source), media_type="image/jpeg", headers=headers), None
+        rev = source_revision(source)
+        main = paths.drop_preview_path(source)
+        tmp = preview_cache.tmp_preview_path(source, create=False)
+        key = ("preview-drop", str(source), rev, div, str(main), str(tmp))
+        if rev is None:
+            return None, key
+        for base, fallback in ((main, False), (tmp, True)):
+            for candidate in (versioned_preview_path(base, rev, div), base):
+                if cache_hit(candidate, PREVIEW_JPG_QUALITY, div, source_rev=rev) is None:
+                    continue
+                try:
+                    response = _jpeg_snapshot(candidate, div=div,
+                        source_rev=source_revision(source), headers={**headers,
+                            **({"X-SR-Preview-Fallback": "tmp"} if fallback else {})})
+                    return response, key
+                except _PreviewSnapshotError:
+                    continue
+                except HTTPException as exc:
+                    if exc.status_code != 422:
+                        raise
+                    # A concurrent clear may remove the candidate after its
+                    # header check; regenerate through the owned queue.
+        return None, key
+
+    def _preview_drop_sync(scene_id: str, div: int = Query(2)):
         """拖入链的预览图：**写回源所在的盘阵场景目录**，`<stem>_preview.jpg`。
 
         **名字与 `/preview` 那条完全一样**（2026-09-22 起点号那份不再产出），差别只剩
@@ -2014,11 +2181,11 @@ def create_app() -> FastAPI:
             """生成/命中后读成字节快照；并发抢换档位则整轮再试一次。"""
             last: _PreviewSnapshotError | None = None
             for _ in range(2):
-                ensure_preview_jpg(str(abs_path), str(path), div=div)
+                out = _ensure_shared_preview(str(abs_path), str(path), div=div)
                 _sweep_legacy_preview(path, abs_path)
                 try:
                     return _jpeg_snapshot(
-                        path, div=div, headers=headers,
+                        Path(out["path"]), div=div, headers=headers,
                         source_rev=source_revision(abs_path))
                 except _PreviewSnapshotError as e:
                     last = e
@@ -2062,6 +2229,9 @@ def create_app() -> FastAPI:
         （`failed`）分开 —— 前者是这条请求本身没意义，后者是盘上没删成。
         """
         body = await _json_body(request)
+        return await app.state.heavy_work.run(_clear_scene_previews_sync, request, body)
+
+    def _clear_scene_previews_sync(request: Request, body: dict):
         raw = body.get("ids")
         if not isinstance(raw, list) or not raw:
             raise HTTPException(status_code=400, detail="ids 须为非空数组")
@@ -2135,6 +2305,9 @@ def create_app() -> FastAPI:
         返回这些场景；`POST /api/scenes/restore-hidden` 可恢复。
         """
         body = await _json_body(request)
+        return await run_in_threadpool(_hide_scenes_sync, request, body)
+
+    def _hide_scenes_sync(request: Request, body: dict):
         raw = body.get("ids")
         if not isinstance(raw, list) or not raw:
             raise HTTPException(status_code=400, detail="ids 须为非空数组")
@@ -2175,6 +2348,9 @@ def create_app() -> FastAPI:
         `keys` 就是隐藏集合里的 `scene_dir` 键。恢复只删记录，不碰盘上文件。
         """
         body = await _json_body(request)
+        return await run_in_threadpool(_restore_hidden_scenes_sync, request, body)
+
+    def _restore_hidden_scenes_sync(request: Request, body: dict):
         keys = body.get("keys")
         if keys is not None and not isinstance(keys, list):
             raise HTTPException(status_code=400, detail="keys 须为数组")

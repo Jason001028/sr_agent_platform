@@ -1266,12 +1266,20 @@ class BatchWorkerTest(unittest.TestCase):
             self.tick()
             item = self.items(gid)[0]
             self.assertEqual(item["status"], "MASK_READY")
+            record = next(iter(self.state.batch_submit_jobs.values()))
+            self.assertTrue(record["timed_out"])
+            self.assertEqual(item["checkpoint"].get("submit_prepare_failures", 0), 0)
+            self.assertFalse(record["future"].cancel())
+            self.assertEqual(self.submits, [])
+            release.set()
+            record["future"].result(timeout=5)
+            self.tick()
+            item = self.items(gid)[0]
             self.assertEqual(
                 item["checkpoint"]["submit_prepare_failures"], 1)
             self.assertGreater(item["next_wake_at"], time.time())
             self.assertEqual(self.submits, [])
             self.assertEqual(self.store.count_reserved_slots(gid), 0)
-            release.set()
         self.run_until(
             lambda: self.store.get_goal(gid)["status"] == "COMPLETED",
             ticks=600)

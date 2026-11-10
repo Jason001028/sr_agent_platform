@@ -79,7 +79,7 @@ def _bucket_name(now: date | datetime | None = None) -> str:
 
 
 def tmp_preview_path(source_abs: str | Path,
-                     now: date | datetime | None = None) -> Path:
+                     now: date | datetime | None = None, *, create: bool = True) -> Path:
     """源影像 → 临时预览图路径：`<root>/<YYYY-MM-DD>/<sha256(abs)[:16]>.jpg`。
 
     只 `mkdir`，**绝不列举目录** —— `tests/test_scene_resolve.py` 的
@@ -93,7 +93,7 @@ def tmp_preview_path(source_abs: str | Path,
     """
     root = temp_previews_root()
     bucket = root / _bucket_name(now)
-    if not bucket.exists():
+    if create and not bucket.exists():
         bucket.mkdir(parents=True, exist_ok=True)
         try:
             (bucket / MARKER_NAME).touch()
@@ -146,5 +146,33 @@ def purge_temp_previews(now: date | datetime | None = None) -> list[str]:
             shutil.rmtree(entry)
             removed.append(name)
     except Exception:               # noqa: BLE001 — 清理失败不向外抛
+        pass
+    return removed
+
+
+def purge_generic_versions(root: Path, *, now: float | None = None) -> int:
+    """Daily, shallow cleanup of signed generic variants older than seven days.
+
+    Never traverse symlinks, recurse, or remove user-provided images. Scene
+    directory variants follow the existing explicit scene-clear policy.
+    """
+    import time
+    from backend.services.preview_jpg import has_rule_stamp
+    removed = 0
+    try:
+        if _refuse_reason(root) or not root.is_dir():
+            return 0
+        cutoff = (time.time() if now is None else now) - 7 * 86400
+        for entry in root.iterdir():
+            if not re.fullmatch(r"v_[0-9a-f]{24}_preview\.jpg", entry.name):
+                continue
+            try:
+                if (not entry.is_symlink() and entry.is_file() and is_within(entry, root)
+                        and entry.stat().st_mtime < cutoff and has_rule_stamp(entry)):
+                    entry.unlink()
+                    removed += 1
+            except OSError:
+                continue
+    except OSError:
         pass
     return removed

@@ -112,6 +112,8 @@ nginx 站点的盘阵 `alias` 应与有效 `SR_SCENES_ROOT` 一致。交接记�
 | `deploy/README.md` | 安装、更新、依赖预检、配置与服务重载说明 |
 
 平台配置通过环境变量读取；没有已确认的自动加载 `.env` 文件入口，不能仅创建 `.env` 就假定服务会读取它。
+
+2026-11-09：`SR_DRIVE_MAP` 未设置时默认 `W:=/DiskArray;X:=/DiskArray`，兼容不同客户端的盘阵盘符，两者归一为同一服务端路径。显式配置仍完整替换默认值；线上若已设置为仅 W:，需将现有 systemd 配置改为 `Environment="SR_DRIVE_MAP=W:=/DiskArray;X:=/DiskArray"`（保留其他自定义映射），然后 `systemctl daemon-reload`、重启 `sr-api`。仅更新前端不会改变后端映射。拖入文件按文件名反推场景，浏览器不提供本机完整路径；粘贴 X: 路径及手动关联使用此映射。资源管理器组件的本机反向映射独立配置，不由此项修改。
 `backend/config.py` 不是全部环境变量的唯一读取位置；Goal、工具结果预算、Skill 等模块也直接读取各自变量。
 平台默认 Skill 目录为 `<仓库根>/.agents/skills/`，每个 Skill 的入口为 `SKILL.md`；本地当前未发现 `.agents/` 目录，设置 `SR_SKILL_ROOTS` 时以其指定目录为准。
 
