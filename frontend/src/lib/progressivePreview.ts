@@ -1,5 +1,6 @@
 import type { BandStats, StretchMode } from './tifDecode';
 import { stretchRgba } from './tifDecode';
+import { getPreviewTrueMaxEdge, previewTrueMaxPixels } from './previewLevel';
 
 /** Progress itself must not flood the UI with one event per disk read. */
 export function progressReporter(send: (fraction: number) => void, now = () => performance.now()) {
@@ -37,10 +38,15 @@ export interface PreviewFrame {
 }
 
 // Conservative whole-JPEG admission. This does not change the selected div.
+// 与当前平台设置的真分辨率上限同口径：档位采样后的长边 ≤ 上限且总面积 ≤ 上限²
+// 才整幅接纳。上限调低时，原本能整幅读的档位会自动改走稀疏/分块路径，而不是
+// 先下载一张浏览器装不下的 JPG。
 export function wholeJpegFits(W: number, H: number, div: number): boolean {
   if (![W, H, div].every(value => Number.isFinite(value) && value > 0)) return false;
+  const maxEdge = getPreviewTrueMaxEdge();
   const w = Math.max(1, Math.round(W / div)), h = Math.max(1, Math.round(H / div));
-  return Number.isFinite(w * h) && w <= 16384 && h <= 16384 && w * h <= 64 * 1024 * 1024;
+  return Number.isFinite(w * h) && w <= maxEdge && h <= maxEdge
+    && w * h <= previewTrueMaxPixels();
 }
 
 /** Batch completed rows with backpressure; do not send a message per sparse row.

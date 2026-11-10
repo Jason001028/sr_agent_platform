@@ -64,6 +64,7 @@ from backend.pathguard import (
     parse_scene_date, production_tree_depth,
     strip_raster_ext, to_posix_array_path)
 from backend.services import image_diff
+from backend.services import platform_settings
 from backend.services.heavy_work import HeavyWork
 from backend.services import preview_cache
 from backend.services.image_open import ImageOpen, router_for as image_open_router, purge_loop as image_open_purge_loop
@@ -78,6 +79,7 @@ from backend.services import scene_search, store as store_mod
 from backend.services.preview_jpg import (PREVIEW_DIVISORS, PREVIEW_JPG_QUALITY,
                                           PreviewError, build_preview_pixels,
                                           cache_hit, cache_meta,
+                                          configured_preview_max_edge,
                                           ensure_preview_jpg,
                                           preview_max_edge, scene_dims,
                                           source_revision, stamp_div,
@@ -117,10 +119,11 @@ def _cached_dims(abs_path: Path) -> dict | None:
     return dims
 
 
-# 预览有效性缓存：LRU，key = (预览 JPG 路径, mtime, 源身份)。值 =(可用, 档位)。
+# 预览有效性缓存：LRU，key = (预览 JPG 路径, mtime, 源身份, 长边上限)。值 =(可用, 档位)。
 # 与 _DIMS_CACHE 同一范式 —— 只读 JPEG 注释头、不解码像素，但列表路径上逐行都要来
 # 一次，仍值得缓存。源身份进 key：源换了（size / mtime_ns 变）就不该再认旧结论。
-_PREVIEW_STATE_CACHE: dict[tuple[str, float, str], tuple[bool, int | None]] = {}
+# 长边上限也进 key：设置改了之后，同一份 JPG 的有效性结论必须重新算。
+_PREVIEW_STATE_CACHE: dict[tuple[str, float, str, int], tuple[bool, int | None]] = {}
 _PREVIEW_STATE_CACHE_MAX = 1024
 
 
@@ -137,7 +140,7 @@ def _preview_cache_state(jpg: Path, source: Path) -> tuple[bool, int | None]:
     except OSError:
         return False, None
     rev = source_revision(source)
-    key = (str(jpg), mtime, rev or "")
+    key = (str(jpg), mtime, rev or "", configured_preview_max_edge())
     if key in _PREVIEW_STATE_CACHE:
         return _PREVIEW_STATE_CACHE[key]
     if len(_PREVIEW_STATE_CACHE) >= _PREVIEW_STATE_CACHE_MAX:
@@ -869,7 +872,9 @@ def _bake_product_preview(state, task: dict, div: int) -> None:
     try:
         before = _source_sig(product)
         before_rev = source_revision(product)
-        max_edge = preview_max_edge(product, div)
+        # 上限读一次：像素尺寸用它算，规则戳记它本身（小图时两者不同）。
+        cap = configured_preview_max_edge()
+        max_edge = preview_max_edge(product, div, cap=cap)
         pixels = build_preview_pixels(str(product), max_edge)
         # **落盘前复核**：同一 suffix 重跑会覆盖同一个产物路径。若不复核，一次
         # 「读的时候是旧产物、写的时候新产物已经在写」就会把一张半截图永久留在盘上，
@@ -878,7 +883,8 @@ def _bake_product_preview(state, task: dict, div: int) -> None:
             _finish_preview(state, task, "skipped",
                             "source_changed: 产物在预览生成途中被改写，本次一个字节都没写")
             return
-        out = write_preview_jpg(jpg, pixels, div=div, source_rev=before_rev)
+        out = write_preview_jpg(jpg, pixels, div=div, source_rev=before_rev,
+                                max_edge=cap)
         _finish_preview(state, task, "done",
                         f"baked: ÷{div}（{out['w']}×{out['h']}）")
     except (PreviewError, OSError) as e:
@@ -940,11 +946,15 @@ def _bake_nosr_preview(task: dict, div: int) -> str:
     try:
         before = _source_sig(source)
         before_rev = source_revision(source)
-        pixels = build_preview_pixels(str(source), preview_max_edge(source, div))
+        # 同上：上限读一次，像素按 min(上限, 源长边/div)，戳记上限。
+        cap = configured_preview_max_edge()
+        max_edge = preview_max_edge(source, div, cap=cap)
+        pixels = build_preview_pixels(str(source), max_edge)
         # 落盘前复核，理由同产物那一份：读到一半源被改写会留下半截图
         if _source_sig(source) != before:
             return "skipped: 源在预览生成途中被改写，本次一个字节都没写"
-        res = write_preview_jpg(out, pixels, div=div, source_rev=before_rev)
+        res = write_preview_jpg(out, pixels, div=div, source_rev=before_rev,
+                                max_edge=cap)
         return f"baked: {out.name} ÷{div}（{res['w']}×{res['h']}）"
     except (PreviewError, OSError) as e:
         return f"failed: {e}"
@@ -2340,6 +2350,33 @@ def create_app() -> FastAPI:
         """当前服务端隐藏集合（场景库「恢复已隐藏」与排查用）。"""
         items = app.state.store.list_hidden_scenes()
         return {"count": len(items), "items": items}
+
+    # ---- 平台级设置（服务端持久化，所有客户端机器共用） ----
+    def _settings_view(values: dict) -> dict:
+        return {"settings": values,
+                "options": {platform_settings.PREVIEW_MAX_EDGE_KEY:
+                            list(platform_settings.PREVIEW_MAX_EDGE_OPTIONS)}}
+
+    @app.get("/api/settings")
+    def get_platform_settings():
+        """当前平台设置 + 可选值。
+
+        `refresh=True`：另一台机器刚改过时，这台一打开设置面板就能看到新值，
+        不必等进程内 2 秒缓存过期。
+        """
+        return _settings_view(
+            platform_settings.load_settings(app.state.store, refresh=True))
+
+    @app.put("/api/settings")
+    async def put_platform_settings(request: Request):
+        """改平台设置（目前只有真分辨率长边上限）。改动立即对后续预览生效。"""
+        body = await _json_body(request)
+        try:
+            values = await run_in_threadpool(
+                platform_settings.save_settings, body, app.state.store)
+        except platform_settings.SettingsError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _settings_view(values)
 
     @app.post("/api/scenes/restore-hidden")
     async def restore_hidden_scenes(request: Request):

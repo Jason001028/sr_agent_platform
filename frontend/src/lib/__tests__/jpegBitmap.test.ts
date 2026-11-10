@@ -16,7 +16,7 @@ it.each([0xc0, 0xc2])('requests bounded decode for a 30000px JPEG (SOF %s)', asy
   expect(await jpegSize(blob)).toEqual({ width: 30000, height: 20000 });
   expect(await decodeJpegBitmap(blob)).toBe(bitmap);
   expect(decode).toHaveBeenCalledWith(blob, {
-    resizeWidth: 4096, resizeHeight: 2731, resizeQuality: 'high',
+    resizeWidth: 16384, resizeHeight: 10923, resizeQuality: 'high',
   });
 });
 it('keeps small images unchanged and rejects truncated frame headers', async () => {

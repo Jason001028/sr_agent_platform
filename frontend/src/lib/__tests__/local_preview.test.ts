@@ -1,5 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect } from 'vitest';
 import { localPreviewSize, sourceFingerprint } from '../local_preview.js';
+import { applyPreviewTrueMaxEdge, PREVIEW_TRUE_MAX_EDGE } from '../previewLevel';
+afterEach(() => { applyPreviewTrueMaxEdge(PREVIEW_TRUE_MAX_EDGE); });
 import { decodeOne, sparseDecode } from '../decode.js';
 import { probeImage } from '../tifDecode.js';
 import { FileSource } from '../source.js';
@@ -31,10 +33,16 @@ describe('local TIFF preview', () => {
   it('bounds huge and multiband sources by canvas and float buffer limits', () => {
     for (const bands of [1, 3, 4]) {
       const { w, h } = localPreviewSize(100000, 80000, bands, 2);
-      expect(Math.max(w, h)).toBeLessThanOrEqual(8192);
+      expect(Math.max(w, h)).toBeLessThanOrEqual(16384);
       expect(w * h * bands * 4).toBeLessThanOrEqual(256 * 1024 * 1024);
       expect(w / h).toBeCloseTo(1.25, 3);
     }
+  });
+  it('honors a lower platform long-edge limit', () => {
+    applyPreviewTrueMaxEdge(4096);
+    const { w, h } = localPreviewSize(100000, 80000, 1, 1);
+    expect(Math.max(w, h)).toBe(4096);
+    expect(w / h).toBeCloseTo(1.25, 3);
   });
   it('samples only bounded parts and distinguishes same-size files', async () => {
     const bytes = new Uint8Array(20000);

@@ -1,5 +1,7 @@
-import { expect, it } from 'vitest';
+import { afterEach, expect, it } from 'vitest';
 import { rowPublisher, wholeJpegFits, stretchIncrementally, progressReporter } from '../progressivePreview';
+import { applyPreviewTrueMaxEdge, PREVIEW_TRUE_MAX_EDGE } from '../previewLevel';
+afterEach(() => { applyPreviewTrueMaxEdge(PREVIEW_TRUE_MAX_EDGE); });
 import { computeStats, stretchRgba, chunkedCollect } from '../tifDecode';
 
 it('limits progress traffic while always reporting start and completion', () => {
@@ -11,11 +13,21 @@ it('limits progress traffic while always reporting start and completion', () => 
 });
 
 it('rejects unsafe whole JPEG before downloading without changing the requested level', () => {
-  expect(wholeJpegFits(49474, 49454, 2)).toBe(false);
+  expect(wholeJpegFits(49474, 49454, 2)).toBe(false); // 24737 > 16384
+  expect(wholeJpegFits(49474, 49454, 4)).toBe(true);  // 12368 ≤ 16384 且面积 < 16384²
   expect(wholeJpegFits(49474, 49454, 16)).toBe(true);
   expect(wholeJpegFits(49474, 49454, 8)).toBe(true); // previously over-eager local fallback
+  expect(wholeJpegFits(16384, 16384, 1)).toBe(true);  // 真分辨率上限边界
+  expect(wholeJpegFits(16385, 16384, 1)).toBe(false);
   for (const dimensions of [[NaN, 20, 2], [10, 0, 2], [10, 10, 0], [Infinity, 10, 2]])
     expect(wholeJpegFits(...dimensions as [number, number, number])).toBe(false);
+});
+it('re-admits whole JPEGs when the platform limit is lowered', () => {
+  applyPreviewTrueMaxEdge(4096);
+  expect(wholeJpegFits(49474, 49454, 4)).toBe(false); // 12368 > 4096
+  expect(wholeJpegFits(49474, 49454, 16)).toBe(true); // 3092 ≤ 4096
+  expect(wholeJpegFits(4096, 4096, 1)).toBe(true);
+  expect(wholeJpegFits(4097, 4096, 1)).toBe(false);
 });
 it('best-effort patches never wait for the main thread inside the read callback', async () => {
   const stats = computeStats(new Float32Array([0,255]), 2, 1, 1);

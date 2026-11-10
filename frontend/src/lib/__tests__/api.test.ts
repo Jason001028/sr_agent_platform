@@ -15,6 +15,7 @@ import {
 } from '../api.js';
 import type { PlatformSseEvent, ChatSseEvent, SceneSiblings, SceneSibling } from '../api.js';
 import type { SceneRow } from '../scene.js';
+import { applyPreviewTrueMaxEdge, PREVIEW_TRUE_MAX_EDGE } from '../previewLevel.js';
 
 const CFG = { apiBase: '', staticBase: '' };
 const CFG_BASE = { apiBase: 'http://127.0.0.1:8000', staticBase: 'http://static:9000' };
@@ -261,7 +262,10 @@ describe('fetchSceneJpg', () => {
   // 预览 blob 缓存是**模块级单例**（store 与设置浮层共用一份），用例之间会串味：
   // 上一条把 `~YWJj|4|jpg` 生成出来，下一条同名同档位就变成缓存命中、请求数归零。
   // 每条用例从空缓存起跑，「走哪条 URL」才是它在断言的东西。
-  beforeEach(() => { resetPreviewCache(); });
+  beforeEach(() => {
+    resetPreviewCache();
+    applyPreviewTrueMaxEdge(PREVIEW_TRUE_MAX_EDGE);
+  });
 
   it('结果缩略图缺失时不触发预览生成或读取 TIF', async () => {
     stubFetch({});
@@ -371,6 +375,24 @@ describe('fetchSceneJpg', () => {
     const got = new Uint8Array(await (await fetchSceneJpg(CFG, r, 4)).arrayBuffer());
     expect(Array.from(got)).toEqual(Array.from(ok));
     expect(urls).toEqual(['/disk-array/a/b_preview.jpg?div=4']);
+  });
+
+  it('静态落点的生成上限与当前设置不一致 → 退回 /preview 重生成', async () => {
+    // nginx 静态链有 max-age=3600：设置里调低上限后，同一 ?div= 的 URL 可能还是
+    // 旧口径那张。签名复核要挡住它，否则界面一直显示超限的大图。
+    applyPreviewTrueMaxEdge(4096);
+    const old = jpegWithStamp('srprev:v4:div4+equal:q85;max=16384;src=abc-100-1');
+    const fresh = jpegWithStamp('srprev:v4:div4+equal:q85;max=4096;src=abc-100-1');
+    stubFetch({
+      '/disk-array/a/b_preview.jpg?div=4': old,
+      '/api/scenes/~YWJj/preview?div=4': fresh,
+    });
+    const r = row({ jpgUrl: BAKED, hasPreview: true, previewDiv: 4,
+      srcRev: 'abc-100-1' });
+    const got = new Uint8Array(await (await fetchSceneJpg(CFG, r, 4)).arrayBuffer());
+    expect(Array.from(got)).toEqual(Array.from(fresh));
+    expect(urls).toEqual(['/disk-array/a/b_preview.jpg?div=4',
+      '/api/scenes/~YWJj/preview?div=4']);
   });
 
   it('**换档位后必须重新生成**：盘上那份仍在（hasPreview 为真）但档位不符', async () => {

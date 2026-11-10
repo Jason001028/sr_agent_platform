@@ -63,7 +63,19 @@ function refreshCache() {
 }
 
 watch([() => store.settingsOpen, () => store.previewCacheRev],
-  ([open]) => { if (open) refreshCache(); });
+  ([open]) => {
+    if (!open) return;
+    refreshCache();
+    // 平台设置由服务端保存，别的机器可能刚改过；打开面板时强制拉一次。
+    void store.loadPlatformSettings(true);
+  });
+
+/** 上限保存失败时把选择框拨回服务端的值，避免界面显示一个没生效的数字。 */
+async function changePreviewMaxEdge(event: Event) {
+  const select = event.target as HTMLSelectElement;
+  await store.setPreviewMaxEdge(Number(select.value));
+  select.value = String(store.previewMaxEdge);
+}
 
 function clearCache() {
   store.clearPreviewCache();
@@ -150,6 +162,22 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
         <div class="set-note">
           超出预算时释放最久未查看的图片，再次点击会重新加载。当前显示的图片始终保留，
           因此可能超过预算。此值仅计算预览画布和像素数组，不代表浏览器总内存；选择会在本机保存。
+        </div>
+      </div>
+
+      <div class="set-row">
+        <label class="set-line" for="preview-max-edge">真分辨率长边</label>
+        <select id="preview-max-edge" class="set-sw" :value="store.previewMaxEdge"
+          data-e2e="set-preview-max-edge"
+          @change="changePreviewMaxEdge">
+          <option v-for="edge in store.previewMaxEdgeOptions" :key="edge" :value="edge">
+            {{ edge }}{{ edge === 16384 ? '（默认）' : '' }}
+          </option>
+        </select>
+        <div class="set-note">
+          预览实际长边不超过这个值时按真实采样交付，超过才截断。调低能减少内存占用，
+          1:1 档位会相应变模糊；调高更清晰但画布与解码内存也更大。
+          由服务端保存，所有机器共用同一份。
         </div>
       </div>
 

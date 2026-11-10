@@ -1,5 +1,4 @@
 import { imageRef, spatialId } from '../lib/spatial';
-import { imagePreviewDiv } from '../lib/previewLevel';
 import { tourImageFromEvidence, tourPairRefusal } from '../lib/tourCompare';
 import { precisePairReason } from '../lib/compareCapabilities';
 import { decodeJpegBitmap } from '../lib/jpegBitmap';
@@ -54,13 +53,18 @@ import { browserKit } from '../lib/browserKit.js';
 import { decodeOne } from '../lib/decode.js';
 import type { DecodedRec } from '../lib/decode.js';
 import {
-  sceneDecodePixels, loadSrConfig, startStretch, loadPreviewDiv,
+  sceneDecodeCanvas, loadSrConfig, startStretch, loadPreviewDiv,
   savePreviewDiv, SCENE_PREVIEW_DIVS, previewDivLabel, rasterPreviewWins,
   sceneAnchors,
 } from '../lib/scene.js';
 import {
+  applyPreviewTrueMaxEdge, getPreviewTrueMaxEdge, imagePreviewDiv,
+  PREVIEW_TRUE_MAX_EDGE_OPTIONS, previewResolutionNote,
+} from '../lib/previewLevel.js';
+import {
   apiResolveScene, apiBakeMask, apiSceneSiblings, fetchSceneJpg, fetchDropSceneJpg,
   siblingRow, nosrItemOf, previewCacheStats, clearPreviewCache, watchPreviewCache,
+  apiGetSettings, apiSaveSettings,
 } from '../lib/api.js';
 import type { SceneResolveResult, SceneSibling, SceneSiblings } from '../lib/api.js';
 import { classifyImages, imageKindOf } from '../lib/imageFiles.js';
@@ -145,9 +149,10 @@ export interface ViewerRec {
   /** 「一键解析」批量入列的卡片：**只有身份、没有像素**，附上「第一次点开时去哪儿取图」
    *  的两样东西 —— 取图认的库行 + 装回像素要的元数据。
    *
-   *  为什么不在入列时就把像素装上：批量一次几十景，而一份 ÷4 的 4 万² 预览在
-   *  `applySceneJpgToRec` 之后会同时留下 thumb（canvas，RGBA 约 400MB）与 src
-   *  （Float32Array），**一景两张卡 ≈ 1.6GB** —— 浏览器单次分配上限约 2GB，批量必爆。
+   *  为什么不在入列时就把像素装上：批量一次几十景，而一份大图预览在
+   *  `applySceneJpgToRec` 之后会同时留下 thumb（canvas RGBA）与 src（Float32Array）；
+   *  16384 长边时两者各约 1GB，**一景两张卡就是数个 GB** —— 浏览器单次分配上限约
+   *  2GB，批量必爆。
    *  所以批量只负责把 jpg 生成到盘上，点开时再取（那时命中服务端缓存，秒回）。
    *  拖入链与场景库链的卡片创建时像素就在手，这个字段恒为 undefined。 */
   detailDiv?: number;
@@ -209,11 +214,13 @@ const WAND_EDGE = 64;
 /** 云叠画布长边上限：整幅降到 ≤2048（RGBA ≤16MB），避免 8192² 全幅叠加再撞画布/内存上限。 */
 const CLOUD_OVERLAY_MAX = 2048;
 
-/** 限制显示层尺寸：后续 RGBA 拷贝和 Float32 像素也按此尺寸分配。 */
+/** 限制显示层尺寸：后续 RGBA 拷贝和 Float32 像素也按此尺寸分配。
+ *  上限 = 平台设置里的「真分辨率」长边（默认 16384，可下调到 4096/8192）；
+ *  超过才截断。 */
 async function decodeJpgToCanvas(blob: Blob): Promise<HTMLCanvasElement> {
   const bmp = await decodeJpegBitmap(blob);
   try {
-    const scale = Math.min(1, 4096 / Math.max(bmp.width, bmp.height));
+    const scale = Math.min(1, getPreviewTrueMaxEdge() / Math.max(bmp.width, bmp.height));
     const width = Math.max(1, Math.round(bmp.width * scale));
     const height = Math.max(1, Math.round(bmp.height * scale));
     const cv = browserKit.createCanvas(width, height) as unknown as HTMLCanvasElement;
@@ -395,7 +402,7 @@ export const useViewerStore = defineStore('viewer', () => {
   });
   const favCount = computed(() => recs.value.reduce((n, r) => n + (r.fav ? 1 : 0), 0));
 
-  /** 多选模式：卡片点击改成勾选而不是激活 —— 勾一张 400MB 的图只为收藏太亏。 */
+  /** 多选模式：卡片点击改成勾选而不是激活 —— 勾一张大图只为收藏太亏。 */
   const selectMode = ref(false);
   const selectedIds = ref<number[]>([]);
   function isSelected(id: number): boolean {
@@ -827,6 +834,69 @@ export const useViewerStore = defineStore('viewer', () => {
     if (!previewMemoryOptions.includes(value)) return;
     previewMemoryMB.value = value;
     try { localStorage.setItem('sr-preview-memory-mb', String(value)); } catch { /* 本次仍生效 */ }
+  }
+
+  /* 真分辨率长边上限：**平台级**设置，服务端 SQLite 存一份，所有机器共用。
+     与上面的预览内存预算（本机 localStorage）不同，这里不能乐观更新：改动会
+     让服务端生成与缓存判据一起换口径，必须等服务端确认后再改本地。 */
+  const previewMaxEdgeOptions = PREVIEW_TRUE_MAX_EDGE_OPTIONS;
+  const previewMaxEdge = ref(getPreviewTrueMaxEdge());
+  let platformSettingsLoaded = false;
+
+  /** 上限变了以后重载当前可见影像：旧尺寸不能继续占着内存、显示层也不能继续
+   *  按旧口径报「真分辨率」。只动可见格（与 setPreviewDiv 同一范围），隐藏图
+   *  等下次打开时自然按新上限解码。 */
+  function reloadVisibleForPreviewCap() {
+    const flickerIds = compareMode.value === 'flicker' && flickerPair.value
+      ? [flickerPair.value.a, flickerPair.value.b] : [];
+    const visible = new Set([paneA.value, ...(split.value ? [paneB.value] : []), ...flickerIds]);
+    const rows = recs.value.filter(rec => visible.has(rec.id));
+    void (async () => {
+      for (const rec of rows) {
+        if (rec.route === 'jpg' && (rec.sceneId || rec.previewAsset)) {
+          await reloadPreviewLevel(rec, previewDiv.value);
+        } else if (rec.route === 'sparse' || rec.route === 'chunked'
+                   || rec.route === 'utif' || rec.route === 'img') {
+          // 'img'（本地 JPG）也按新上限从原文件重缩放：不重载就会继续占着旧尺寸。
+          await decodeRec(rec, true);
+        }
+      }
+    })().catch(error => {
+      if (!isLoadAbort(error)) showErr(error instanceof Error ? error.message : String(error));
+    });
+  }
+
+  /** 启动时同步一次；设置面板打开 / 窗口回焦时可 `force` 刷新，看到别的机器
+   *  刚改的值。远端改过也走同一条重载路径，保持「所有机器同一口径」。 */
+  async function loadPlatformSettings(force = false) {
+    if (platformSettingsLoaded && !force) return;
+    try {
+      const body = await apiGetSettings(loadSrConfig());
+      const edge = Number(body?.settings?.preview_max_edge);
+      const changed = Number.isFinite(edge) && edge !== previewMaxEdge.value;
+      if (applyPreviewTrueMaxEdge(edge)) {
+        previewMaxEdge.value = edge;
+        if (changed) reloadVisibleForPreviewCap();
+      }
+      platformSettingsLoaded = true;
+    } catch { /* 读不到就用默认 16384，不阻塞查看 */ }
+  }
+
+  /** 改全局上限；成功后立刻重载当前可见影像，旧尺寸不会继续占着内存。 */
+  async function setPreviewMaxEdge(edge: number) {
+    if (!(previewMaxEdgeOptions as readonly number[]).includes(edge)
+        || edge === previewMaxEdge.value) return;
+    try {
+      const body = await apiSaveSettings(loadSrConfig(), { preview_max_edge: edge });
+      const saved = Number(body?.settings?.preview_max_edge);
+      if (!applyPreviewTrueMaxEdge(saved)) return;
+      previewMaxEdge.value = saved;
+      platformSettingsLoaded = true;
+    } catch (e) {
+      showErr('保存真分辨率上限失败：' + (e instanceof Error ? e.message : String(e)));
+      return;
+    }
+    reloadVisibleForPreviewCap();
   }
   // 按用户预算淘汰最久未使用的预览；正在显示的两格永不淘汰。
   // 交替对比的两张也算「正在显示」—— 被淘汰一张，下一拍就会黑屏或退回参考图。
@@ -2217,8 +2287,7 @@ export const useViewerStore = defineStore('viewer', () => {
       try {
         const cv = await decodeJpgToCanvas(rec.file);
         if (rec.token !== my || !recs.value.includes(rec)) return;
-        const d = sceneDecodePixels(cv.getContext('2d')!.getImageData(0, 0, cv.width, cv.height).data,
-          cv.width, cv.height);
+        const d = sceneDecodeCanvas(cv.getContext('2d')!, cv.width, cv.height);
         rec.thumb = markRaw(cv as unknown as KitCanvas);
         rec.src = markRaw(d.src); rec.srcw = d.tw; rec.srch = d.th;
         rec.nbands = d.nbands; rec.stats = d.stats ? markRaw(d.stats) : null;
@@ -2387,8 +2456,8 @@ export const useViewerStore = defineStore('viewer', () => {
     const result=await control.request(signal=>fetchPreviewAsset(asset,div,signal),'服务端下采样 JPG（缓存）');
     await control.checkpoint('装载服务端 JPG');
     if(!recs.value.includes(rec)||effectivePreviewDiv(rec)!==div)return;
-    const ratio=result.width?Math.max(asset.W/result.width,asset.H/result.height):0;
-    const layout=`服务端缓存 JPG 概览 · 请求 ${previewDivLabel(div)}${ratio?' · 实际约 1/'+Number(ratio.toFixed(2)):''} · 缓存定期清理`;
+    const note=previewResolutionNote(asset.W,asset.H,result.width,result.height);
+    const layout=`服务端缓存 JPG 概览 · 请求 ${previewDivLabel(div)}${note?' · '+note:''} · 缓存定期清理`;
     const applied=await applySceneJpgToRec(rec,{
       name:rec.name,W:asset.W,H:asset.H,sceneId:rec.sceneId!,lqPath:rec.lqPath,
       sceneDir:rec.sceneDir,serverMaskPath:rec.serverMaskPath,stageKind:rec.stageKind,
@@ -2450,8 +2519,9 @@ export const useViewerStore = defineStore('viewer', () => {
       : '';
     rec.status = '完成，' + (d.route === 'utif' ? '解码' : '读取') + '耗时 ' + fmtTime(d.ms) + routeText;
     rec.statusCls = 'ok';
+    const note = previewResolutionNote(d.W, d.H, d.srcw, d.srch);
+    if (note) rec.status += ' · ' + note;
     const ratio = Math.max(d.W / d.srcw, d.H / d.srch);
-    rec.status += ` · 实际约 1/${Number(ratio.toFixed(2))}（${d.srcw}×${d.srch}）`;
     if (ratio > previewDiv.value * 1.01) rec.status += ' · 已达本地预览内存上限';
     // 像素刚换过 → 一律重画。已选过模式的（同一 rec 重复解码）沿用原模式，不重置。
     if (rendered) {
@@ -2476,7 +2546,7 @@ export const useViewerStore = defineStore('viewer', () => {
 
   /* ---------------- 本地影像（.jpg/.jpeg，route='img'） ----------------
      本地 JPG 与盘阵 JPG 都是 8bit 显示就绪图，共用同一条像素管线
-     （createImageBitmap → 画布 RGBA → sceneDecodePixels 单波段 0..255）。
+     （createImageBitmap → 画布 RGBA → sceneDecodeCanvas 单波段 0..255）。
      差别只在来源：本地图没有 sceneId/lqPath，故不能提交 SR，也不打「盘阵」徽标 —
      所以给它独立的 route='img'，让「盘阵场景」相关的判断（徽标 / 拉伸禁用 /
      ScenesPage 的 W/H 提示 / 提交 SR）都继续只认 route==='jpg'。
@@ -2489,7 +2559,7 @@ export const useViewerStore = defineStore('viewer', () => {
       const tw = cv.width, th = cv.height;
       const ctx = cv.getContext('2d');
       if (!ctx) throw new Error('取不到 2d 上下文');
-      const d = sceneDecodePixels(ctx.getImageData(0, 0, tw, th).data, tw, th);
+      const d = sceneDecodeCanvas(ctx, tw, th);
       const rec: ViewerRec = {
         id: nextId++, file: markRaw(file),
         probe: null, name: file.name, size: file.size,
@@ -2568,8 +2638,7 @@ export const useViewerStore = defineStore('viewer', () => {
     const tw = cv.width, th = cv.height;
     const ctx = cv.getContext('2d');
     if (!ctx) throw new Error('取不到 2d 上下文');
-    const img = ctx.getImageData(0, 0, tw, th);
-    const d = sceneDecodePixels(img.data, tw, th);   // 固定 0..255 → linear 恒等
+    const d = sceneDecodeCanvas(ctx, tw, th);   // 固定 0..255 → linear 恒等
     const previousSize = preserveView && rec.thumb
       ? { w: rec.thumb.width, h: rec.thumb.height } : undefined;
     rec.thumb = markRaw(cv as unknown as KitCanvas);
@@ -2599,8 +2668,9 @@ export const useViewerStore = defineStore('viewer', () => {
     // 尺度报当前档位 —— 取图的两处调用点都按 `previewDiv.value` 生成，所以
     // 「刚拿到手的这张是按哪一档生成的」就是它（用户若在取图途中又拖了滑块，
     // 文案最多早一拍，下次打开即对齐）。
+    const sizeNote = previewResolutionNote(meta.W, meta.H, tw, th);
     rec.layout = layout
-      ?? `盘阵 JPG（${previewDivLabel(rec.detailDiv)} 尺度 + 直方图均衡，服务端已生成）`;
+      ?? `盘阵 JPG（${previewDivLabel(rec.detailDiv)} 尺度 + 直方图均衡，服务端已生成）${sizeNote ? ' · ' + sizeNote : ''}`;
     // 同上：名字与尺寸卡片上已有（标题行、图属性行、布局行），状态只表态
     rec.status = '场景就绪';
     rec.statusCls = 'ok';
@@ -2616,8 +2686,9 @@ export const useViewerStore = defineStore('viewer', () => {
 
   /* ---------------- 一键解析：批量入列的「空卡」 ----------------
      批量一次几十景（每景两张卡），而 `applySceneJpgToRec` 装一次像素会留下
-     thumb（canvas，RGBA 约 400MB）+ src（Float32Array）——一景两张卡 ≈1.6GB，
-     浏览器单次分配上限约 2GB，装到第三四张就爆。所以批量只负责**把 jpg 生成到盘上**，
+     thumb（canvas RGBA）+ src（Float32Array）——16384 长边时各约 1GB，一景两张卡
+     就是数个 GB；浏览器单次分配上限约 2GB，装到第三四张就爆。所以批量只负责
+     **把 jpg 生成到盘上**，
      卡片生下来只有身份；第一次点开时 `activate` 的懒分支才去取图（那时命中服务端
      缓存，秒回）。「没打开过的图没有像素」本来就是这套代码的既有状态，见
      FileThumb.vue 顶部那段注释。 */
@@ -2801,8 +2872,8 @@ export const useViewerStore = defineStore('viewer', () => {
           const result=await owner.request(signal=>fetchPreviewAsset(asset,div,signal,phase),'服务端下采样 JPG（缓存）');
           if(!stillWanted()||rec.token!==intent.token||!recs.value.includes(rec)||effectivePreviewDiv(rec)!==div)return;
           phase('正在解码并装载 JPG…');intent.token++;
-          const ratio=result.width?Math.max(asset.W/result.width,asset.H/result.height):0;
-          const layout=`服务端缓存 JPG 概览 · 请求 ${previewDivLabel(div)}${ratio?' · 实际约 1/'+Number(ratio.toFixed(2)):''} · 缓存定期清理`;
+          const note=previewResolutionNote(asset.W,asset.H,result.width,result.height);
+          const layout=`服务端缓存 JPG 概览 · 请求 ${previewDivLabel(div)}${note?' · '+note:''} · 缓存定期清理`;
           const applied=await applySceneJpgToRec(rec,{...card.meta,srcRev:asset.sourceRev},result.blob,layout,true,stillWanted,owner);
           if(applied){rec.previewAsset=markRaw(asset);rec.localPreviewJpeg=markRaw(result.blob);rec.detailDiv=div;}
           return;
@@ -3215,10 +3286,19 @@ export const useViewerStore = defineStore('viewer', () => {
       拉伸（均衡是不可逆的，拉不回来 —— 这一点在工具栏 title 里说明）。 */
   function paintStretch(rec: ViewerRec, mode: StretchMode = stretchMode.value) {
     if (!rec.src || !rec.thumb) return;
-    const rgba = stretchRgba(rec.src, rec.srcw, rec.srch, rec.nbands, rec.stats, mode, rec.invert);
     const ctx = (rec.thumb as unknown as HTMLCanvasElement).getContext('2d');
     if (!ctx) return;
-    ctx.putImageData(new ImageData(rgba as Uint8ClampedArray<ArrayBuffer>, rec.srcw, rec.srch), 0, 0);
+    // 逐带拉伸/上屏：16384 档位整幅 RGBA 又是约 1GB，一次分配会把
+    // 「画布 + Float32 + RGBA」叠到 3GB 以上。带高按约 16MB 输出反推，
+    // 峰值只多这一条带；putImageData 每带落在自己的 y 偏移上。
+    const w = rec.srcw, h = rec.srch, nb = rec.nbands;
+    const bandRows = Math.max(1, Math.min(512, Math.floor((16 * 1024 * 1024) / (w * 4))));
+    for (let y = 0; y < h; y += bandRows) {
+      const rows = Math.min(bandRows, h - y);
+      const rgba = stretchRgba(rec.src.subarray(y * w * nb, (y + rows) * w * nb),
+        w, rows, nb, rec.stats, mode, rec.invert);
+      ctx.putImageData(new ImageData(rgba as Uint8ClampedArray<ArrayBuffer>, w, rows), 0, y);
+    }
     rec.paintedMode = mode;
   }
 
@@ -4581,6 +4661,7 @@ export const useViewerStore = defineStore('viewer', () => {
     questionRegion, bindQuestionRegion,
     agentAnnotationsVisible, setAgentAnnotationsVisible, toggleAgentAnnotations,
     previewMemoryMB, previewMemoryOptions, setPreviewMemoryMB,
+    previewMaxEdge, previewMaxEdgeOptions, loadPlatformSettings, setPreviewMaxEdge,
     // 状态
     recs, workspaceVersion, activeId, activeRec, view, canvasSize, renderTick, marker,
     userIntentSeq, noteUserIntent, batchOverlayTarget, batchOverlayOff,

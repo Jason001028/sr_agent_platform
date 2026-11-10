@@ -16,6 +16,9 @@ import {
 import type { SceneRow, SrConfig, RasterPreview } from './scene.js';
 import { createBlobCache } from './blobCache.js';
 import type { BlobCacheStats } from './blobCache.js';
+import {
+  PREVIEW_TRUE_MAX_EDGE, getPreviewTrueMaxEdge, isPreviewMaxEdgeSynced,
+} from './previewLevel.js';
 import type { ClearResponse } from './scene.js';
 import type { ViewerContextSnapshot } from './agentContext.js';
 import type { DiffRequest, DiffResult } from './diffLocate.js';
@@ -1102,6 +1105,30 @@ export async function apiClearScenePreviews(
   return body;
 }
 
+/** 平台级设置：服务端持久化，所有客户端机器共用一份（不是 localStorage 本机偏好）。 */
+export interface PlatformSettings { preview_max_edge: number }
+export interface PlatformSettingsResponse {
+  settings: PlatformSettings;
+  options: { preview_max_edge: number[] };
+}
+
+export async function apiGetSettings(cfg: SrConfig): Promise<PlatformSettingsResponse> {
+  const r = await http(joinBase(cfg.apiBase, '/api/settings'));
+  return (await r.json()) as PlatformSettingsResponse;
+}
+
+/** 只提交要改的项；返回写入后的全量设置。 */
+export async function apiSaveSettings(
+  cfg: SrConfig, patch: Partial<PlatformSettings>,
+): Promise<PlatformSettingsResponse> {
+  const r = await http(joinBase(cfg.apiBase, '/api/settings'), {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  return (await r.json()) as PlatformSettingsResponse;
+}
+
 /** 只把场景加入服务端隐藏集合（不删盘上任何文件）。
  *
  *  隐藏按**场景目录**记：同一目录的 `<目录名>.tif` 与 `PAN.tif` 一起隐藏。集合由
@@ -1138,8 +1165,9 @@ function cacheBlob(key: string, blob: Blob): Blob {
   return blob;
 }
 
-/** 预览 JPEG 规则签名的两份要点（见后端 `preview_jpg.rule_stamp`）。 */
-interface PreviewStamp { div: number; src: string | null }
+/** 预览 JPEG 规则签名的要点（见后端 `preview_jpg.rule_stamp`）。
+ *  `max` 是生成时的真分辨率长边上限；升级前的老戳没有这一段。 */
+interface PreviewStamp { div: number; src: string | null; max: number | null }
 
 /** 从 JPEG 的 COM 段里读出预览规则签名（只看文件头，不解码像素）。
  *
@@ -1170,10 +1198,10 @@ async function jpegPreviewStamp(blob: Blob): Promise<PreviewStamp | false | null
     if (len < 2 || i + 2 + len > buf.length) break;
     if (marker === 0xfe) {                                     // COM
       const text = new TextDecoder().decode(buf.subarray(i + 4, i + 2 + len));
-      const m = /^srprev:[^:]+:div(\d+)\+equal:q(\d+)(?:;src=([0-9a-f]+-\d+-\d+))?$/
+      const m = /^srprev:[^:]+:div(\d+)\+equal:q(\d+)(?:;max=(\d+))?(?:;src=([0-9a-f]+-\d+-\d+))?$/
         .exec(text.trim());
       if (!m) return false;
-      return { div: Number(m[1]), src: m[3] ?? null };
+      return { div: Number(m[1]), src: m[4] ?? null, max: m[3] ? Number(m[3]) : null };
     }
     i += 2 + len;
   }
@@ -1184,7 +1212,13 @@ async function jpegPreviewStamp(blob: Blob): Promise<PreviewStamp | false | null
  *
  *  * 不是 JPEG（正常链路不会发生；真发生时下游解码自会报错）→ 放行；
  *  * JPEG 但没有本平台规则签名（旧缓存 / 别人的同名文件）→ 不认；
- *  * 档位对不上，或行上给了源身份而戳里的对不上 → 不认。 */
+ *  * 档位对不上，或行上给了源身份而戳里的对不上 → 不认；
+ *  * 生成时的长边上限与当前平台设置对不上 → 不认。nginx 静态链有 `max-age=3600`，
+ *    在设置里改完上限后，同一 `?div=` 的 URL 可能还是旧口径的那张；这里不放行，
+ *    下游会退回 `/preview`（`no-store`）让服务端按新上限重生成。
+ *    老戳没有 `max`：它生成于固定上限 16384 的版本，当前上限仍是默认值时可信。
+ *    本页还没同步过服务端设置（`isPreviewMaxEdgeSynced()` 为假）时不做这条判断：
+ *    同一后端的别处可能已把上限调低，用未同步的默认值去判只会把有效缩略图全判废。 */
 async function blobMatchesPreview(
   blob: Blob, div: number, srcRev?: string | null,
 ): Promise<boolean> {
@@ -1192,6 +1226,11 @@ async function blobMatchesPreview(
   if (stamp === null) return true;
   if (!stamp) return false;
   if (stamp.div !== div) return false;
+  if (isPreviewMaxEdgeSynced()) {
+    if (stamp.max == null) {
+      if (getPreviewTrueMaxEdge() !== PREVIEW_TRUE_MAX_EDGE) return false;
+    } else if (stamp.max !== getPreviewTrueMaxEdge()) return false;
+  }
   return !srcRev || stamp.src === srcRev;
 }
 

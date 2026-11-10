@@ -1,5 +1,7 @@
 # current_question — 平台现状与交接入口
 
+2026-11-10：预览「档位缩水」统一口径，并把真分辨率长边上限做成**设置项**。默认 16384（4096×4，与 Chromium 画布 16384² 面积上限同口径），设置面板提供 4096 / 8192 / 16384 三档（不提供 16383：与 16384 只差 1 像素、面积几乎相同，反而误导）；值存在服务端 SQLite（`platform_settings`），所有连同一后端的机器共用，不再只是本机偏好。服务端场景预览生成、`image-open` 概览、前端 JPG 解码/显示、`wholeJpegFits` 准入、本地 TIFF 预览与状态栏文案都读同一个值；长边 ≤ 上限的档位按真实采样交付，超过才截断。缓存规则戳加入 `;max=N`，上限调高或调低都会让旧预览失效（避免「调回 16384 后永远停在低清」）。JPG 像素改为逐块读 RGBA，去掉 16384 档位整图 `getImageData` 副本；16384 档位峰值内存仍高，真实内网大图需复核。详见 [preview-scale-control.md](preview-scale-control.md)。
+
 2026-11-10：关联盘阵请求一个字节都没发出的原因已定位：旧内核缺少 `AbortSignal.timeout`（Chromium < 103）与 `AbortSignal.any`（< 116），这两处在 fetch 之前求值，缺失即抛 TypeError，被 catch 吞成“未关联”后直接退回上传。现场判据：卡片 linkNote 写着 `AbortSignal.timeout is not a function`，`performance.getEntriesByType('resource')` 里查 `/api/scenes/resolve` 为空集合。新增 `lib/signals.ts` 兜底并在 main.ts 入口安装，只补缺失项、不覆盖原生实现。受影响的不止拖入关联：服务端 JPG 显示后的后台关联核对、以及两处带超时（30 秒 / 10 秒）的请求同样会整体不发。前端全量 1024 项、类型检查与生产构建通过；需重新发布 dist 后在旧浏览器内网机复核。
 
 2026-11-10：ori/old 仍慢的跟进：差异定位候选统一优先使用新版受限 JPG 缓存，补掉之前“只有超预算图才切换”的遗漏；仅 404 且尺寸安全时兼容旧接口。候选加载展示准备缓存/排队/采样生成/下载/解码与等待秒数，新增只读状态查询和 image_preview 缓存/采样耗时日志。A/B 独立控制、同卡共享及移除取消保留。纠正旧结论：当前 ready-only 返回 JSON，减少前置请求不是消除整张 JPG 重复下载。原图冷读和单执行队列仍可能慢，真实内网 ori/old 吞吐待部署核验。

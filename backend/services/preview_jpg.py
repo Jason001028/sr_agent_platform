@@ -1,6 +1,7 @@
 """Disk-array scene preview JPEG generation (server-side).
 
-规则 v4：优先使用已有无压缩条带 Overview；**长宽各为源图的 1/div**，显示值用**直方图均衡**。
+规则 v4：优先使用已有无压缩条带 Overview；**长宽各为源图的 1/div**（长边再按
+平台设置里的「真分辨率长边上限」封顶，默认 16384），显示值用**直方图均衡**。
 div 由调用方按用户的滑块档位传入（`div ∈ PREVIEW_DIVISORS`，缺省 `LEGACY_PREVIEW_DIV`）。
 
     ps   = min(1, max_edge / max(W, H))，max_edge = round(max(W,H) / div)
@@ -22,7 +23,8 @@ div 由调用方按用户的滑块档位传入（`div ∈ PREVIEW_DIVISORS`，�
 
 **缓存失效靠写进 JPEG 注释的规则签名**，不是只看 mtime：升级后旧规则生成出来的图
 mtime 比源新，只看 mtime 会把它判为有效而永不重生成，真机上换包后看不到任何变化。
-规则签名 = PREVIEW_RULE_VERSION + div + quality，改规则/改档位/改质量都要跟着 bump。
+规则签名 = PREVIEW_RULE_VERSION + div + max_edge + quality，改规则/改档位/改上限/改质量
+都要跟着变（上限进戳后，设置调高调低都会让旧图失效）。
 
 Pure-struct TIFF header/IFD parsing — no new runtime dependency, classic TIFF
 (42) and BigTIFF (43) both handled. The reader targets the confirmed real
@@ -49,9 +51,23 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from backend.services import platform_settings
+
 #: 预览下采样档位：1 为原档尺寸，其余长宽各为源图的 1/div。**档位的唯一真源** ——
 #: HTTP 层的 `?div=` 与前端滑块都只能取这里面的值。
 PREVIEW_DIVISORS = (1, 2, 4, 8, 16, 32)
+
+#: 「真分辨率」长边上限的**默认值**：4096 × 4 = 16384。实际生效值由平台设置
+#: `preview_max_edge` 决定（4096 / 8192 / 16384，服务端 SQLite 持久化，所有机器
+#: 共用）。这里保留常量是为了「读不到设置时仍有安全默认」与测试基准；
+#: 生成/缓存判据一律走 `configured_preview_max_edge()`，不要再直接引用它。
+PREVIEW_TRUE_MAX_EDGE = platform_settings.DEFAULT_PREVIEW_MAX_EDGE
+
+
+def configured_preview_max_edge() -> int:
+    """当前生效的长边上限（平台设置；读不到时回落默认 16384）。"""
+    return platform_settings.configured_preview_max_edge()
+
 
 #: 缺档位参数时用的值。取 2（逐字节等于 v2 那套「各边 1/2」）而不是产品的默认 4：
 #: 只换 backend、没换 dist 的部署不会因为少一个 query 参数就把盘上所有预览判废。
@@ -306,10 +322,18 @@ def scene_dims(path) -> dict | None:
     return None
 
 
-def preview_max_edge(source_path, div: int = LEGACY_PREVIEW_DIV) -> int:
-    """本次预览生成的长边上限 = 源图长边 / div（不封顶）。
+def preview_max_edge(source_path, div: int = LEGACY_PREVIEW_DIV, *,
+                     cap: int | None = None) -> int:
+    """本次预览生成的长边 = min(源图长边 / div, 平台设置的上限)。
 
-    只读头 / `.hdr` 拿尺寸，极便宜（`scene_dims`），不解码任何像素。
+    上限默认 16384 = 4096×4，是浏览器画布/内存能按真分辨率装下的上限；超过它再
+    生成也只是白占服务端内存，前端必然要截断。设置里可降到 4096 / 8192（低内存
+    机器），服务端生成、前端解码与缓存判据用的是同一个值。只读头 / `.hdr` 拿
+    尺寸，极便宜（`scene_dims`），不解码任何像素。
+
+    `cap` 用于调用方已经读过一次设置、要把「像素尺寸」与「规则戳里的上限」钉在
+    同一个值上：不传时现读平台设置。**注意返回值是实际生成尺寸，不是上限本身** ——
+    小图 / 浅档位时它小于上限；写规则戳时要用 `cap`，不能用这个返回值。
 
     `div` 非法一律抛 `PreviewError`：HTTP 层会先校验成 400，走到这儿还不合法就是
     调用方漏了校验 —— 宁可报错，也不要拿一个奇怪的尺寸生成出一张图来。
@@ -323,7 +347,9 @@ def preview_max_edge(source_path, div: int = LEGACY_PREVIEW_DIV) -> int:
     dims = scene_dims(src)
     if not dims:
         raise PreviewError(f"无法读取图像尺寸：{src.name}")
-    return max(1, int(round(max(dims["W"], dims["H"]) / div)))
+    limit = configured_preview_max_edge() if cap is None else int(cap)
+    return min(limit,
+               max(1, int(round(max(dims["W"], dims["H"]) / div))))
 
 
 # --------------------------------------------------------------------------
@@ -658,19 +684,29 @@ def source_revision(path) -> str | None:
 
 def rule_stamp(quality: int = PREVIEW_JPG_QUALITY,
                div: int = LEGACY_PREVIEW_DIV, *,
-               source=None, source_rev: str | None = None) -> bytes:
+               source=None, source_rev: str | None = None,
+               max_edge: int | None = None) -> bytes:
     """当前预览生成规则的签名（写进 JPEG 注释，用来判缓存是否还符合现规则）。
 
     **div 进戳**（v3 起）：同一个落点上换个档位必须判废重生成 —— 只按落点判的话，
     界面上的滑块动了、盘上那张图一个字节都不会变。v2 那代戳是 `…:half+equal:…`，
     与这里的 `…:div2+equal:…` 字符串本就不同，所以 v2 产物一律重生成一轮（预期内）。
 
+    **max 也进戳**（2026-11-10 起）：真分辨率长边上限可在设置里改。只按尺寸判废
+    能处理「调低」，处理不了「调高」—— 16384 档恢复后，盘上那份 8192 的旧图
+    尺寸并不超限，会被当成命中，界面永远看不到更清晰的版本。把上限写进戳后，
+    两个方向都会重生成一轮；旧戳没有 `;max=`，升级后也一次性判废（预期内）。
+
+    `max_edge` 参数是**平台设置里的上限**（4096 / 8192 / 16384），不是本次按
+    `min(上限, 源长边/div)` 算出的实际尺寸 —— 小图在浅档位下两者不同，戳必须记
+    上限，`cache_meta` 才能按「当前设置」逐个对得上。
+
     `source` / `source_rev`（v4 内追加，不换版本）：把源文件身份一并写进戳的
     `;src=` 尾巴。缓存判据除了「规则相同」还要「源仍是同一份」—— 只靠 mtime 会被
-    「保留时间戳的复制」骗过。不传源时戳的形态与旧版逐字节相同，测试与手工造缓存
-    仍可沿用。
+    「保留时间戳的复制」骗过。
     """
-    stamp = f"srprev:{PREVIEW_RULE_VERSION}:div{div}+equal:q{quality}"
+    cap = max_edge if max_edge is not None else configured_preview_max_edge()
+    stamp = f"srprev:{PREVIEW_RULE_VERSION}:div{div}+equal:q{quality};max={cap}"
     rev = source_rev if source_rev is not None else (
         source_revision(source) if source is not None else None)
     if rev:
@@ -679,9 +715,11 @@ def rule_stamp(quality: int = PREVIEW_JPG_QUALITY,
 
 
 #: 规则签名的形态。`ver` 宽松匹配（v1 那代是 `8192+linear2`，本式匹配不上）。
-#: `;src=` 尾巴可选：旧缓存没有它，仍然解得出版本 / 档位 / 质量。
+#: `;max=` / `;src=` 尾巴可选：旧缓存没有它们，仍然解得出版本 / 档位 / 质量；
+#: 是否**命中**由 `cache_meta` 另行要求当前上限与源身份，不靠这个正则判。
 _STAMP_RE = re.compile(
     r"^srprev:(?P<ver>[^:]+):div(?P<div>\d+)\+equal:q(?P<q>\d+)"
+    r"(?:;max=(?P<max>\d+))?"
     r"(?:;src=(?P<src>[0-9a-f]+-\d+-\d+))?$")
 
 
@@ -778,8 +816,10 @@ def cache_meta(dst: Path, *, quality: int = PREVIEW_JPG_QUALITY,
 
     与 `cache_hit` 是同一套判据，但不要求调用方**先知道档位**：场景列表要回填
     「盘上这份是哪一档」，再让前端据此判断要不要重生成（见 `api/app.py` 的行构造）。
-    版本、质量、合法档位与可选的源身份逐条校验，旧戳（没有 `;src=`）在传了源时
-    一律不命中。
+    版本、质量、合法档位、当前长边上限与可选的源身份逐条校验。旧戳（没有
+    `;max=` / `;src=`）一律不命中：那是上限可配置之前生成的，继续发会出现
+    「设置调高后仍看旧分辨率」或「设置调低后仍发超大图」。再按实际尺寸兜底判废
+    —— 防止手写注释伪造出超限的产物。
 
     只 `Image.open` 读头拿注释，不解码像素 —— 与 `scene_dims` 同级，可以逐行调。
     """
@@ -799,14 +839,20 @@ def cache_meta(dst: Path, *, quality: int = PREVIEW_JPG_QUALITY,
     if not m:
         return None
     div = int(m.group("div"))
+    max_edge = configured_preview_max_edge()
     if (m.group("ver") != PREVIEW_RULE_VERSION
             or int(m.group("q")) != quality
-            or div not in PREVIEW_DIVISORS):
+            or div not in PREVIEW_DIVISORS
+            or m.group("max") != str(max_edge)):
         return None
     if source is not None or source_rev is not None:
         rev = source_rev if source_rev is not None else source_revision(source)
         if not rev or m.group("src") != rev:
             return None
+    # 上限已经由戳里的 `;max=` 核对过，这里再按实际尺寸兜底：注释可以手写，
+    # 尺寸不能撒谎。调低上限后，旧的大图正好在这里被判废。
+    if max(w, h) > max_edge:
+        return None
     return {"w": w, "h": h, "div": div}
 
 
@@ -841,10 +887,13 @@ def _serialize_preview(fn):
     return wrapped
 
 
-def versioned_preview_path(jpg_path, source_rev, div, quality=PREVIEW_JPG_QUALITY):
+def versioned_preview_path(jpg_path, source_rev, div, quality=PREVIEW_JPG_QUALITY,
+                           *, max_edge: int | None = None):
     """Immutable cache identity, still matching the guarded preview clear rule."""
     dst = Path(jpg_path)
-    identity = hashlib.sha256(str(dst.name).encode("utf-8") + rule_stamp(quality, div, source_rev=source_rev)).hexdigest()[:24]
+    identity = hashlib.sha256(str(dst.name).encode("utf-8")
+                              + rule_stamp(quality, div, source_rev=source_rev,
+                                           max_edge=max_edge)).hexdigest()[:24]
     return dst.with_name(f"v_{identity}_preview.jpg")
 
 
@@ -852,7 +901,8 @@ def versioned_preview_path(jpg_path, source_rev, div, quality=PREVIEW_JPG_QUALIT
 def write_preview_jpg(jpg_path, pixels, *,
                       quality: int = PREVIEW_JPG_QUALITY,
                       div: int = LEGACY_PREVIEW_DIV,
-                      source=None, source_rev: str | None = None) -> dict:
+                      source=None, source_rev: str | None = None,
+                      max_edge: int | None = None) -> dict:
     """把灰度像素落成预览 JPEG（先写临时文件再 `os.replace`，原子替换）。
 
     从 `ensure_preview_jpg` 里抽出来，是为了让**产物急生成**能在「像素已读出」与
@@ -873,7 +923,7 @@ def write_preview_jpg(jpg_path, pixels, *,
             Image.fromarray(pixels).save(
                 f, format="JPEG", quality=quality,
                 comment=rule_stamp(quality, div, source=source,
-                                   source_rev=source_rev))
+                                   source_rev=source_rev, max_edge=max_edge))
         os.replace(tmp, dst)
     finally:
         if os.path.exists(tmp):
@@ -884,7 +934,8 @@ def write_preview_jpg(jpg_path, pixels, *,
     rev = source_rev if source_rev is not None else (
         source_revision(source) if source is not None else None)
     if rev is not None:
-        _copy_preview(dst, versioned_preview_path(dst, rev, div, quality))
+        _copy_preview(dst, versioned_preview_path(dst, rev, div, quality,
+                                                  max_edge=max_edge))
     return {"path": str(dst), "w": w, "h": h}
 
 
@@ -904,11 +955,13 @@ def ensure_preview_jpg(source_path, jpg_path, div: int = LEGACY_PREVIEW_DIV,
     Raises PreviewError on generation failure.
     """
     src, dst = Path(source_path), Path(jpg_path)
-    max_edge = preview_max_edge(src, div)      # 顺带校验 div 合法
+    # 上限读一次，像素尺寸与规则戳共用，避免生成途中改设置造成「旧尺寸配新戳」。
+    cap = configured_preview_max_edge()
+    max_edge = preview_max_edge(src, div, cap=cap)  # 顺带校验 div 合法
     # 源身份在动手前记一次、落盘前再核一次：读到一半源被换掉（重跑覆盖产物、
     # 有人保留时间戳换了一份文件）就不能把半新半旧的像素写成长期缓存。
     rev = source_revision(src)
-    variant = versioned_preview_path(dst, rev, div, quality)
+    variant = versioned_preview_path(dst, rev, div, quality, max_edge=cap)
     if rev is not None:
         hit = cache_hit(variant, quality, div, source_rev=rev)
         if hit is not None:
@@ -925,7 +978,7 @@ def ensure_preview_jpg(source_path, jpg_path, div: int = LEGACY_PREVIEW_DIV,
     if source_revision(src) != rev:
         raise PreviewError("源在预览生成途中被改写")
     out = write_preview_jpg(dst, pixels, quality=quality, div=div,
-                            source_rev=rev)
+                            source_rev=rev, max_edge=cap)
     return {"status": "generated", "path": str(variant),
             "w": out["w"], "h": out["h"], "error": None}
 

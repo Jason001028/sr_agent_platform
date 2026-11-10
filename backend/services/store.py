@@ -126,6 +126,14 @@ CREATE TABLE IF NOT EXISTS scene_hidden (
     created_at REAL NOT NULL
 );
 
+-- 平台级设置（服务端持久化，所有客户端机器共用一份）。
+-- 值用 JSON 存：以后加开关/数字/字符串都不用再改表。
+CREATE TABLE IF NOT EXISTS platform_settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
     id         TEXT PRIMARY KEY,
     created_at REAL NOT NULL,
@@ -690,6 +698,31 @@ class Store:
             else:
                 cur = db.execute("DELETE FROM scene_hidden")
             return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+
+    # ---- 平台级设置 ----
+    # 与「本机偏好」相对：这些值由服务端 SQLite 存一份，所有连到同一后端的
+    # 客户端机器读到同一个值（设置面板里的真分辨率长边上限就是第一项）。
+    def list_platform_settings(self) -> dict:
+        out = {}
+        for key, value in self._db().execute(
+                "SELECT key, value FROM platform_settings").fetchall():
+            try:
+                out[key] = json.loads(value)
+            except (TypeError, ValueError):
+                continue  # 手工改坏的行按「没设过」处理，回落到默认值
+        return out
+
+    def save_platform_settings(self, values: dict) -> dict:
+        """写入若干键（只更新传入的键，不删除其它键），返回全部设置。"""
+        now = time.time()
+        with self.worker_transaction() as db:
+            for key, value in values.items():
+                db.execute(
+                    "INSERT INTO platform_settings(key, value, updated_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+                    "updated_at=excluded.updated_at",
+                    (key, json.dumps(value, ensure_ascii=False), now))
+        return self.list_platform_settings()
 
     def create_session(self, metadata: dict | None = None) -> str:
         """Insert a session row and return its id."""

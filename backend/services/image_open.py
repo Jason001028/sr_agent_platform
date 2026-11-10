@@ -325,7 +325,7 @@ class ImageOpen:
 
     def _preview(self, ident, div, ready_only):
         started=time.monotonic();sample_ms=0
-        from backend.services.preview_jpg import PREVIEW_DIVISORS
+        from backend.services.preview_jpg import PREVIEW_DIVISORS, configured_preview_max_edge
         if div not in PREVIEW_DIVISORS:
             raise HTTPException(400, '预览档位无效')
         meta = self.metadata(ident)
@@ -337,7 +337,8 @@ class ImageOpen:
         rev = source_revision(source)
         if rev != meta['sourceRev']:
             raise HTTPException(409, '源文件已变化，请重新选择')
-        edge = min(4096, max(1, round(max(meta['W'],meta['H'])/div)))
+        edge = min(configured_preview_max_edge(),
+                   max(1, round(max(meta['W'],meta['H'])/div)))
         jpg = self.directory(ident) / f'preview-v1-{PREVIEW_RULE_VERSION}-{edge}.jpg'
         cache_kind='hit' if jpg.is_file() else 'miss'
         if jpg.is_symlink():

@@ -4,11 +4,12 @@
  * Node 环境（无 DOM）：只测纯函数 —— query 拼装 / RGBA→1band src（线性=恒等）/
  * 元数据 W/H 的 thumbToOrig 换算分支。JPG 加载/画布在浏览器 .e2e 回归覆盖。
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { applyPreviewTrueMaxEdge } from '../previewLevel.js';
 import {
   loadSrConfig, joinBase, scenesQuery, scenesListUrl, scenePreviewUrl,
   dropPreviewUrl,
-  sceneImageUrl, graySrcFromRgba, sceneDecodePixels, thumbPolysToOrig,
+  sceneImageUrl, graySrcFromRgba, sceneDecodePixels, sceneDecodeCanvas, thumbPolysToOrig,
   todayScenePrefix, sceneResolveUrl,
   isImageSource, startStretch, SCENE_START_STRETCH,
   isBakedPreviewUrl, previewNeedsBake, previewDivLabel, loadPreviewDiv,
@@ -273,6 +274,26 @@ describe('graySrcFromRgba / sceneDecodePixels（route=JPG 同构数据）', () =
     }
   });
 
+  it('逐块读取画布 RGBA 与整张读取结果一致（16384 档位不整图复制）', () => {
+    const w = 5, h = 7, rows: number[] = [];
+    const values = Array.from({ length: w * h }, (_, i) => (i * 37) % 256);
+    const ctx = {
+      getImageData(_x: number, y: number, _w: number, band: number) {
+        rows.push(y);
+        const data = new Uint8ClampedArray(w * band * 4);
+        for (let i = 0; i < w * band; i++) {
+          const v = values[y * w + i]!;
+          data[i * 4] = v; data[i * 4 + 1] = v; data[i * 4 + 2] = v; data[i * 4 + 3] = 255;
+        }
+        return { data } as ImageData;
+      },
+    };
+    const d = sceneDecodeCanvas(ctx, w, h, 2);
+    expect(rows).toEqual([0, 2, 4, 6]);
+    expect(Array.from(d.src)).toEqual(values);
+    expect(d.srcw).toBe(w); expect(d.srch).toBe(h);
+  });
+
   it('route=JPG rec 同构：src/srcw/srch/nbands/invert 与本地稀疏 rec 对齐', () => {
     const rgba = new Uint8Array(4 * 4 * 4).fill(77);   // 4×4 灰 77
     for (let i = 0; i < 16; i++) rgba[i * 4 + 3] = 255;
@@ -383,6 +404,8 @@ describe('手工场景路径（盘阵任意合法场景目录）', () => {
 });
 
 describe('previewCacheKey（预览 blob 的缓存键）', () => {
+  afterEach(() => { applyPreviewTrueMaxEdge(16384); });
+
   it('同一条行 + 同档位 → 稳定（同参数两次调用逐字相同）', () => {
     const row = { id: 'abc123' };
     expect(previewCacheKey(row, 4)).toBe(previewCacheKey({ id: 'abc123' }, 4));
@@ -434,6 +457,20 @@ describe('previewCacheKey（预览 blob 的缓存键）', () => {
     expect(previewCacheKey(row, 4, rp)).toBe('a|4|ras:PAN.tif|ras-1');
     expect(previewCacheKey(row, 4, { ...rp, srcRev: 'ras-2' }))
       .not.toBe(previewCacheKey(row, 4, rp));
+  });
+
+  it('真分辨率上限进键：调低后同档位不能命中旧口径的字节；默认值不加后缀', () => {
+    const row = { id: 'a' };
+    const atDefault = previewCacheKey(row, 4);
+    expect(atDefault).toBe('a|4|jpg');
+    applyPreviewTrueMaxEdge(4096);
+    const lowered = previewCacheKey(row, 4);
+    expect(lowered).not.toBe(atDefault);
+    expect(lowered).toBe('a|4|jpg|max:4096');
+    // 前缀仍是行 id，场景库「清除缓存」按 `${id}|` 删得掉
+    expect(lowered.startsWith('a|')).toBe(true);
+    applyPreviewTrueMaxEdge(16384);
+    expect(previewCacheKey(row, 4)).toBe(atDefault);
   });
 });
 

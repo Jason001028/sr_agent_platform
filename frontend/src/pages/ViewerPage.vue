@@ -39,16 +39,26 @@ const viewer = useViewerStore();
 // 也会在回到前台时落在任意一帧。store 每拍也会自查 document.hidden，这里是立即版。
 function onVisibility() {
   if (document.hidden) viewer.flickerPause();
+  else void viewer.loadPlatformSettings(true);   // 回前台：跟上别的机器改过的全局设置
+}
+
+/** 平台级设置（真分辨率长边上限）由服务端保存，进入查看器先同步一次；
+ *  窗口回焦 / 回到前台再拉一遍。只在查看器页做，别让聊天页也建一份查看器状态。 */
+function syncPlatformSettings() {
+  if (document.visibilityState === 'visible') void viewer.loadPlatformSettings(true);
 }
 
 onMounted(() => {
   mountE2EHooks();      // window.__viewer（浏览器回归 + 真机验收）
+  void viewer.loadPlatformSettings();
   document.addEventListener('visibilitychange', onVisibility);
+  window.addEventListener('focus', syncPlatformSettings);
 });
 
 onUnmounted(() => {
   viewer.stopImageLoad();
   document.removeEventListener('visibilitychange', onVisibility);
+  window.removeEventListener('focus', syncPlatformSettings);
   viewer.flickerStop();            // 组件卸载 / 换页：不留计时器
   viewer.hideModal();              // 模态提示是全局单例，不关会跟着到别的页面
 });

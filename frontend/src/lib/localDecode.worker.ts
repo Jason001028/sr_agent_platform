@@ -23,7 +23,8 @@ scope.onmessage = e => {
     scope.postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) });
   });
 };
-async function run(input: { file: File; div: number; mode?: StretchMode; paused: boolean }) {
+async function run(input: { file: File; div: number; maxEdge?: number;
+                            mode?: StretchMode; paused: boolean }) {
   const started = Date.now();
   const gate = control = new LoadControl();
   if (input.paused) gate.pause();
@@ -64,14 +65,15 @@ async function run(input: { file: File; div: number; mode?: StretchMode; paused:
     });
     await checkpoint();
   };
-  const target = localPreviewSize(probe.W, probe.H, probe.spp >= 3 ? 3 : 1, input.div);
+  const target = localPreviewSize(probe.W, probe.H, probe.spp >= 3 ? 3 : 1, input.div,
+                                  input.maxEdge);
   const progress = progressReporter(value => scope.postMessage({ type: 'progress', value }));
   const layout = isSparseCandidate(probe) && Math.max(target.w,target.h) > 1024 ? await parseStrips(source) : null;
   const decoded = layout?.ok
     ? await decodeSparseProgressively(source, layout, probe, kit, input.div, mode, checkpoint,
-      progress, publish)
+      progress, publish, input.maxEdge)
     : await decodeOne(source, probe, input.file, kit, {
-    previewDiv: input.div, checkpoint,
+    previewDiv: input.div, previewMaxEdge: input.maxEdge, checkpoint,
     onOverlay: title => scope.postMessage({ type: 'phase', stage: title }),
     onProgress: progress,
   });
@@ -90,6 +92,8 @@ async function run(input: { file: File; div: number; mode?: StretchMode; paused:
   });
   await checkpoint('生成本地 JPG');
   // JPEG is a display artifact, not a replacement for DN or selected sampling.
+  // 4096 只约束**导出文件**；查看器显示档位按平台设置的 `maxEdge` 另算
+  // （主线程把当前上限随 start 消息传进来，worker 不读自己的设置副本）。
   try {
     const scale = Math.min(1, 4096 / Math.max(decoded.srcw, decoded.srch));
     const jpgCanvas = new OffscreenCanvas(Math.max(1, Math.round(decoded.srcw * scale)), Math.max(1, Math.round(decoded.srch * scale)));

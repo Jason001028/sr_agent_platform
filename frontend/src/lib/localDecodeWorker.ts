@@ -2,6 +2,7 @@ import { LoadControl } from './loadControl';
 import type { DecodedRec } from './decode';
 import type { StretchMode } from './tifDecode';
 import type { PreviewFrame } from './progressivePreview';
+import { getPreviewTrueMaxEdge } from './previewLevel';
 
 export type LocalPixels = Omit<DecodedRec, 'thumb'> & {
   rgba: Uint8ClampedArray; paintedMode: StretchMode; layout: string;
@@ -11,7 +12,8 @@ export type LocalDecoded = LocalPixels & { jpeg?: Blob; exportError?: string };
 /** A dedicated worker is terminated on Stop; late messages cannot publish. */
 export function decodeLocalFile(file: File, div: number, mode: StretchMode | undefined,
   control: LoadControl, progress: (fraction: number) => void,
-  display?: { preview: (frame: PreviewFrame) => void; pixels: (result: LocalPixels) => void }): Promise<LocalDecoded> {
+  display?: { preview: (frame: PreviewFrame) => void; pixels: (result: LocalPixels) => void },
+  maxEdge = getPreviewTrueMaxEdge()): Promise<LocalDecoded> {
   return new Promise((resolve, reject) => {
     const worker = new Worker(new URL('./localDecode.worker.ts', import.meta.url), { type: 'module' });
     let settled = false;
@@ -55,7 +57,7 @@ export function decodeLocalFile(file: File, div: number, mode: StretchMode | und
         }, abort);
       }
     };
-    worker.postMessage({ type: 'start', file, div, mode, paused: control.paused });
+    worker.postMessage({ type: 'start', file, div, maxEdge, mode, paused: control.paused });
     if (control.signal.aborted) abort();
   });
 }

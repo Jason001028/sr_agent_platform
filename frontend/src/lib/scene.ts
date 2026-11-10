@@ -17,6 +17,7 @@ import type { BandStats, StretchMode } from './tifDecode.js';
 import { thumbToOrig } from './viewMath.js';
 import type { Poly } from './maskgen.js';
 import type { StageKind } from './stage.js';
+import { PREVIEW_TRUE_MAX_EDGE, getPreviewTrueMaxEdge } from './previewLevel.js';
 
 /* ---------------- 运行期配置（前后端 / e2e 注入） ---------------- */
 export interface SrConfig {
@@ -329,7 +330,13 @@ export function previewCacheKey(
   // 源身份只在后端给了的时候并入键：旧调用方 / 测试构造的行没有这个字段时，
   // 键与升级前逐字相同（不会凭空多一次取图）。
   const rev = raster ? raster.srcRev : row.srcRev;
-  return rev ? `${base}|${rev}` : base;
+  const key = rev ? `${base}|${rev}` : base;
+  // 真分辨率上限也并入键：**同一档位在不同上限下是不同尺寸的字节**（见
+  // previewResolutionNote）。不并的话，用户在设置里把上限调低后，同一会话里
+  // 命中旧 blob 会继续显示高强度拉伸的大图，重载也看不出变化。
+  // 默认上限不加后缀 —— 键与升级前逐字相同，老缓存照常命中。
+  const edge = getPreviewTrueMaxEdge();
+  return edge === PREVIEW_TRUE_MAX_EDGE ? key : `${key}|max:${edge}`;
 }
 
 /* ---------------- 显示源比较规则：谁清晰用谁 ----------------
@@ -477,6 +484,26 @@ export function sceneDecodePixels(
 ): SceneDecoded {
   const n = tw * th;
   const src = graySrcFromRgba(rgba, n);
+  const stats = computeStats(src, tw, th, 1, 0, 255);
+  return { src, tw, th, nbands: 1 as const, invert: false as const, stats };
+}
+
+/** 由 JPG 画布构造同构数据，但**逐块**读 RGBA。
+ *
+ *  整张 `getImageData` 会在画布之外再复制一份 RGBA（16384² 时约 1GB）；
+ *  按 512 行一块读，峰值只多一小块，16384 长边档位才落得下去。 */
+export function sceneDecodeCanvas(
+  ctx: { getImageData(sx: number, sy: number, sw: number, sh: number): ImageData },
+  tw: number, th: number, bandRows = 512,
+): SceneDecoded {
+  const src = new Float32Array(tw * th);
+  let offset = 0;
+  for (let y = 0; y < th; y += bandRows) {
+    const rows = Math.min(bandRows, th - y);
+    const rgba = ctx.getImageData(0, y, tw, rows).data;
+    for (let i = 0; i < tw * rows; i++) src[offset + i] = rgba[i * 4];
+    offset += tw * rows;
+  }
   const stats = computeStats(src, tw, th, 1, 0, 255);
   return { src, tw, th, nbands: 1 as const, invert: false as const, stats };
 }

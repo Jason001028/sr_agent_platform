@@ -34,7 +34,10 @@ class ImageOpenTests(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
         self.data=self.root/'data';self.data.mkdir()
         env=allowed_roots_env(self.data)
-        env.update(SR_IMAGE_CACHE_ROOT=str(self.root/'cache'),SR_PREVIEW_ROOTS='',SR_IMAGE_CACHE_TTL_SEC='300')
+        # 平台设置（真分辨率长边上限）从 SR_AGENT_DB 读；不隔离就会跟着开发者
+        # 本地库里的值走，断言 16384 时会假红。
+        env.update(SR_IMAGE_CACHE_ROOT=str(self.root/'cache'),SR_PREVIEW_ROOTS='',SR_IMAGE_CACHE_TTL_SEC='300',
+                   SR_AGENT_DB=str(self.root/'db.sqlite'))
         env['SR_DRIVE_MAP']=env.get('SR_DRIVE_MAP','')+f';W:={self.data};X:={self.data}'
         self.env=patch.dict(os.environ,env);self.env.start()
         self.manager=ImageOpen()
@@ -102,7 +105,7 @@ class ImageOpenTests(unittest.TestCase):
             for div in (1,2):
                 response=self.client.get(f"/api/image-open/assets/{asset['id']}/preview?div={div}")
                 self.assertEqual(response.status_code,200,response.text)
-            build.assert_called_once_with(self.source,max_edge=4096)
+            build.assert_called_once_with(self.source,max_edge=16384)
 
     def test_wrong_fingerprint_uploads_instead_of_linking_another_file(self):
         token=self.ticket();fp=fingerprint(self.source);fp['samples'][0]=''

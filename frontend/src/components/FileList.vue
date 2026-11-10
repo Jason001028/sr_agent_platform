@@ -395,7 +395,7 @@ function linkTag(note: string): string {
               :title="RO_TITLE"
             >仅对比，不作修复</span>
             <span v-if="rec.linkNote" class="link-tag" :title="rec.linkNote">{{ rec.previewAsset ? (rec.serverSourceVerified?'已核对服务端源':'临时 JPG · 未关联') : rec.serverSourceVerified ? '已关联 · 本地预览' : linkTag(rec.linkNote) }}</span>
-            <button v-if="rec.localPreviewJpeg" type="button" class="link-source" title="下载生成的显示预览，长边不超过 4096；页面后续拉伸与绘制不写入此文件" @click.stop="store.downloadLocalPreview(rec.id)">{{ rec.previewAsset?'缓存预览 JPG':'本地预览 JPG' }}</button>
+            <button v-if="rec.localPreviewJpeg" type="button" class="link-source" :title="rec.previewAsset ? '下载服务端缓存预览 JPG（按当前缩放档位，长边最多为设置里的真分辨率上限）' : '下载本地生成的显示预览 JPG（导出长边最多 4096；查看器显示档位按设置里的真分辨率上限）'" @click.stop="store.downloadLocalPreview(rec.id)">{{ rec.previewAsset?'缓存预览 JPG':'本地预览 JPG' }}</button>
             <span v-if="rec.previewAsset" class="link-tag" :title="rec.previewAsset.clientPath || rec.previewAsset.serverPath || 'Chrome 普通选择器不提供绝对路径'">{{ rec.previewAsset.uploaded?'上传缓存':'服务端直读' }}</span>
             <span v-if="rec.previewOnly" class="link-tag" title="已关联服务端预览源，仅可查看，不能提交 SR 或写入掩码">只读预览</span>
             <button v-if="!rec.sceneId && /\.tiff?$/i.test(rec.file.name)" type="button" class="link-source" @click.stop="startLink(rec.id)">关联服务端路径</button>

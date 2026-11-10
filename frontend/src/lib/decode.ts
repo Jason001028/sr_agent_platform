@@ -29,6 +29,8 @@ import { localPreviewSize } from './local_preview.js';
 
 export interface DecodeCallbacks {
   previewDiv?: number;
+  /** Worker 里没有主线程的设置实例，长边上限必须显式传进来。 */
+  previewMaxEdge?: number;
   /** Display statistics stay fixed throughout one progressive load. */
   statistics?: BandStats[];
   onRows?: (src: Float32Array, width: number, height: number, y: number) => Promise<void>;
@@ -132,7 +134,8 @@ export async function decodeUtif(file: Blob, kit: CanvasKit, cb?: DecodeCallback
 export function chunkedDecode(source: Source, probe: ProbeInfo, kit: CanvasKit, cb?: DecodeCallbacks): Promise<DecodedRec> {
   const W = probe.W, H = probe.H;
   const plan = getSamplePlan(probe.image);
-  const target = cb?.previewDiv ? localPreviewSize(W, H, plan.comps, cb.previewDiv) : null;
+  const target = cb?.previewDiv
+    ? localPreviewSize(W, H, plan.comps, cb.previewDiv, cb.previewMaxEdge) : null;
   const ps = target ? Math.min(target.w / W, target.h / H) : Math.min(1, PREVIEW_MAX / Math.max(W, H));
   const pw = Math.max(1, Math.round(W * ps)), ph = Math.max(1, Math.round(H * ps));
   const cv = kit.createCanvas(pw, ph);
@@ -156,7 +159,8 @@ export function sparseDecode(source: Source, probe: ProbeInfo, kit: CanvasKit, c
   cb?.onProgress?.(0);
   return (layout ? Promise.resolve(layout) : parseStrips(source)).then((sp) => {
     if (!sp || !sp.ok) throw new Error('稀疏条带布局解析失败');
-    const target = cb?.previewDiv ? localPreviewSize(sp.W, sp.H, 1, cb.previewDiv) : null;
+    const target = cb?.previewDiv
+      ? localPreviewSize(sp.W, sp.H, 1, cb.previewDiv, cb.previewMaxEdge) : null;
     return sparseCollect(source, probe, sp, target ? Math.max(target.w, target.h) : SPARSE_PREVIEW_MAX, (f) => cb?.onProgress?.(f), cb?.checkpoint, cb?.onRows, cb?.statistics).then((r) => {
       const cv = kit.createCanvas(r.sw, r.sh);
       return {

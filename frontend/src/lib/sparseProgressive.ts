@@ -10,8 +10,9 @@ import type { PreviewFrame } from './progressivePreview';
  * prioritized within the original coalesced reads, never a second TIFF decode. */
 export async function decodeSparseProgressively(source: Source, sp: SparseLayoutOk, probe: ProbeInfo,
   kit: CanvasKit, div: number, mode: StretchMode, checkpoint: (stage?: string) => Promise<void>,
-  progress: (fraction: number) => void, publish: (frame: PreviewFrame) => Promise<void>): Promise<DecodedRec> {
-  const started = performance.now(), target = localPreviewSize(sp.W, sp.H, 1, div);
+  progress: (fraction: number) => void, publish: (frame: PreviewFrame) => Promise<void>,
+  maxEdge?: number): Promise<DecodedRec> {
+  const started = performance.now(), target = localPreviewSize(sp.W, sp.H, 1, div, maxEdge);
   const max = Math.max(target.w, target.h), ps = Math.min(1, max / Math.max(sp.W, sp.H));
   const width = Math.max(1, Math.round(sp.W*ps)), height = Math.max(1, Math.round(sp.H*ps));
   const seedCount = Math.min(32, height), seedRows = Array.from({ length: seedCount }, (_, i) =>

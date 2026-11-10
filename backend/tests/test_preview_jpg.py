@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import tifffile
@@ -15,6 +16,28 @@ from backend.services.preview_jpg import (PREVIEW_JPG_QUALITY, PreviewError,
                                           ensure_preview_jpg, probe_tiff,
                                           rule_stamp, scene_dims,
                                           write_preview_jpg)
+
+
+_old_db = None
+_db_dir = None
+
+
+def setUpModule():
+    """平台设置（真分辨率长边上限）从 SR_AGENT_DB 读，而默认值是「工作目录下的
+    sr_agent.db」。不隔离的话，开发者在本机应用里改过上限后，这里的
+    `rule_stamp` / `cache_meta` 会跟着变（尺寸兜底判据尤其敏感）。"""
+    global _old_db, _db_dir
+    _old_db = os.environ.get("SR_AGENT_DB")
+    _db_dir = tempfile.TemporaryDirectory()
+    os.environ["SR_AGENT_DB"] = str(Path(_db_dir.name) / "db.sqlite")
+
+
+def tearDownModule():
+    if _old_db is None:
+        os.environ.pop("SR_AGENT_DB", None)
+    else:
+        os.environ["SR_AGENT_DB"] = _old_db
+    _db_dir.cleanup()
 
 
 def make_strip_tif(dirp, name, w, h, bits=16, dtype=None, **kw):
@@ -242,14 +265,21 @@ class TestBigPreviewNotMistakenForBomb(unittest.TestCase):
                 self.assertEqual(im.size, (self.HUGE, self.HUGE))
 
     def test_huge_preview_cache_still_hits(self):
-        """端到端：巨大的旧缓存 + mtime 比源新 → 必须判为命中，而不是重生成。"""
+        """端到端：巨大的旧缓存 + mtime 比源新 → 必须判为命中，而不是重生成。
+
+        默认上限 16384 下不会再生成 20000 的产物；这里模拟「上限允许更大」的
+        未来档位（钉住的是 cache_hit 只读文件头、且不能被 Pillow 炸弹阈值挡住），
+        生成与缓存判据读的是同一个上限，所以戳与尺寸仍能对上。
+        """
         with tempfile.TemporaryDirectory() as d:
             p, _ = make_strip_tif(d, "s.tif", 64, 64)
             jpg = Path(d, "s.preview.jpg")
-            self._fake_huge_jpeg(jpg, self.HUGE, self.HUGE, source=p)
-            future = p.stat().st_mtime + 100
-            os.utime(jpg, (future, future))
-            r = ensure_preview_jpg(str(p), str(jpg))
+            with patch("backend.services.preview_jpg.configured_preview_max_edge",
+                       return_value=self.HUGE):
+                self._fake_huge_jpeg(jpg, self.HUGE, self.HUGE, source=p)
+                future = p.stat().st_mtime + 100
+                os.utime(jpg, (future, future))
+                r = ensure_preview_jpg(str(p), str(jpg))
             self.assertEqual(r["status"], "cached")
             self.assertEqual((r["w"], r["h"]), (self.HUGE, self.HUGE))
 
