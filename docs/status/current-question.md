@@ -1,5 +1,7 @@
 # current_question — 平台现状与交接入口
 
+2026-11-10：关联盘阵请求一个字节都没发出的原因已定位：旧内核缺少 `AbortSignal.timeout`（Chromium < 103）与 `AbortSignal.any`（< 116），这两处在 fetch 之前求值，缺失即抛 TypeError，被 catch 吞成“未关联”后直接退回上传。现场判据：卡片 linkNote 写着 `AbortSignal.timeout is not a function`，`performance.getEntriesByType('resource')` 里查 `/api/scenes/resolve` 为空集合。新增 `lib/signals.ts` 兜底并在 main.ts 入口安装，只补缺失项、不覆盖原生实现。受影响的不止拖入关联：服务端 JPG 显示后的后台关联核对、以及两处带超时（30 秒 / 10 秒）的请求同样会整体不发。前端全量 1024 项、类型检查与生产构建通过；需重新发布 dist 后在旧浏览器内网机复核。
+
 2026-11-10：ori/old 仍慢的跟进：差异定位候选统一优先使用新版受限 JPG 缓存，补掉之前“只有超预算图才切换”的遗漏；仅 404 且尺寸安全时兼容旧接口。候选加载展示准备缓存/排队/采样生成/下载/解码与等待秒数，新增只读状态查询和 image_preview 缓存/采样耗时日志。A/B 独立控制、同卡共享及移除取消保留。纠正旧结论：当前 ready-only 返回 JSON，减少前置请求不是消除整张 JPG 重复下载。原图冷读和单执行队列仍可能慢，真实内网 ori/old 吞吐待部署核验。
 
 2026-11-10：NOSR 分图档位联动已实现。以同景实际 W/H 确认 NOSR 两边均不大于 PAN 且至少一边更小：PAN/通用档位 1/4 及更低时 NOSR 用 1/2；PAN 为 1/2、1:1 时 NOSR 用 1:1。未知尺寸、等大、某边更大或其他场景 PAN 不参与自动调整。全局档位保留 PAN 基准，切图/分屏/懒加载按各图实际档位缓存，超预算 NOSR 仍走受限 JPG 概览并标注实际比例，不能把请求 1:1 误报为完整像素。
