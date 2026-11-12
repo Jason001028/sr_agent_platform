@@ -6,6 +6,7 @@ import { getPreviewTrueMaxEdge } from './previewLevel';
 
 export type LocalPixels = Omit<DecodedRec, 'thumb'> & {
   rgba: Uint8ClampedArray; paintedMode: StretchMode; layout: string;
+  dnDomain?:{bits:number;sampleFormat:number};
 };
 export type LocalDecoded = LocalPixels & { jpeg?: Blob; exportError?: string };
 

@@ -42,6 +42,18 @@ try {
         if (-not $rejected) { throw "Accepted invalid URI: $uri" }
         $count++
     }
+    # 多盘符候选：windows_roots 去重后按顺序取第一个（ValidateOnly 不探测盘符是否在线）。
+    @{ server_root='/DiskArray'; windows_roots=@('X:\','W:\','X:\') } | ConvertTo-Json | Set-Content -LiteralPath $mappingFile -Encoding UTF8
+    $actual = & $handlerFile -Uri (Make-Uri '/DiskArray/scene') -ValidateOnly
+    if ($actual -cne 'X:\scene') { throw "Unexpected multi-drive mapping: $actual" }
+    $count++
+    # 全都是非法盘符时按配置损坏处理，而不是悄悄退回某个默认盘。
+    @{ server_root='/DiskArray'; windows_roots=@('X:','W:/') } | ConvertTo-Json | Set-Content -LiteralPath $mappingFile -Encoding UTF8
+    $rejected = $false
+    try { & $handlerFile -Uri (Make-Uri '/DiskArray/scene') -ValidateOnly | Out-Null } catch { $rejected = $true }
+    if (-not $rejected) { throw 'Accepted an invalid windows_roots mapping.' }
+    $count++
+    # 探测失败分支（ValidateOnly 不探测、也不弹窗）留待真机 W:/X: 双环境验收，避免测试启动 Explorer。
     Write-Output "PASS: $count handler cases; no registry changes or Explorer launch."
 } finally {
     Remove-Item -LiteralPath $handlerFile, $mappingFile -Force -ErrorAction SilentlyContinue

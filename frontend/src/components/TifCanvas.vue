@@ -222,7 +222,7 @@ function render() {
   const ps = store.panes;
   for (const p of ps) {
     const rec = p.rec;
-    const image = rec?.progressivePreview ?? rec?.thumb;
+    const image = rec?.stretchPreview ?? rec?.progressivePreview ?? rec?.thumb;
     if (!rec || !image) continue;
     ctx.save();
     ctx.beginPath();
@@ -231,7 +231,7 @@ function render() {
     ctx.translate(p.rect.x + p.view.ox, p.rect.y + p.view.oy);
     ctx.scale(p.view.scale, p.view.scale);
     ctx.imageSmoothingEnabled = p.view.scale < 4;
-    const basis = rec.thumb ?? image;
+    const basis = rec.thumb ?? rec.progressivePreview ?? image;
     if (rec.progressivePreview) ctx.drawImage(image as unknown as CanvasImageSource, 0, 0, basis.width, basis.height);
     else drawDiffSource(ctx, image as unknown as CanvasImageSource,
       basis.width, basis.height, diff.layerFor(rec), diff.display, diff.opacity, diff.feather);

@@ -8,6 +8,8 @@
 
 Skill 加载与外部工具调用接口见 [skill_interface.md](planning/skill_interface.md)。
 
+交互式直方图拉伸、黑白场、视野统计及双图共享映射见 [histogram-stretch.md](status/histogram-stretch.md)。
+
 选择影像原生路径组件、未关联时服务端 JPG 优先及缓存清理见 [server-jpg-picker.md](status/server-jpg-picker.md)。
 
 本地 TIFF 预览、已核对关联保留与加载阶段暂停/停止见 [local-tiff-load-control.md](status/local-tiff-load-control.md)。

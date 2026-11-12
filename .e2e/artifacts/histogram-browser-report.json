@@ -1,0 +1,21 @@
+{
+  "actualPointerDrag": true,
+  "cameraUnchanged": true,
+  "flickerIndependentB": true,
+  "flickerShared": true,
+  "independentIsolation": true,
+  "large": {
+    "dragFrames": 12,
+    "fullPaintFinished": true,
+    "maxEventMs": 21,
+    "meanEventMs": 14.683333337306976,
+    "pixels": 16777216,
+    "previewMaxPixels": 262144
+  },
+  "reset": true,
+  "sharedSameCdf": true,
+  "sourceDnUnchanged": true,
+  "sourceStatsUnchanged": true,
+  "viewSampleCount": 65340,
+  "wholeSampleCount": 786432
+}

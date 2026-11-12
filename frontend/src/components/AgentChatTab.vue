@@ -34,9 +34,6 @@ import ThinkingIndicator from './ThinkingIndicator.vue';
 import ChatAttachTray from './ChatAttachTray.vue';
 import GoalClarifications from './GoalClarifications.vue';
 import AgentBatchReceipt from './AgentBatchReceipt.vue';
-import { useBatchGoalStore } from '../stores/batchGoal';
-const batchTasks = useBatchGoalStore();
-function viewBatchTask() { window.dispatchEvent(new CustomEvent('batch-task-open')); }
 import ChatImagePicker from './ChatImagePicker.vue';
 import ChatBubbleImages from './ChatBubbleImages.vue';
 import AppIcon from './AppIcon.vue';
@@ -419,7 +416,6 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
           </template>
         </div>
 
-        <div v-if="batchTasks.snapshot && batchTasks.snapshot.goal.session_id === chat.sessionId" class="tool-trace"><span>批次 {{ batchTasks.goalId }}</span><button @click="viewBatchTask">查看任务</button></div>
         <GoalClarifications :session-id="chat.sessionId" @updated="!chat.sending && chat.sessionId && chat.loadHistory(chat.sessionId)" />
         <div v-if="chat.sending && !liveMsg" class="at-thinking">
           <ThinkingIndicator :label="chat.activity.label" />

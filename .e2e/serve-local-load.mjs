@@ -8,7 +8,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const { build } = await import(pathToFileURL(path.join(root, 'frontend/node_modules/vite/dist/node/index.js')).href);
 const outDir = path.join(root, '.e2e/fixtures/local-load-build');
 await build({ root: path.join(root, 'frontend'), configFile: path.join(root, 'frontend/vite.config.ts'), base: '/',
-  build: { outDir, rollupOptions: { input: [path.join(root, 'frontend/tests/local-load.html'),path.join(root,'frontend/tests/image-open.html')] } } });
+  build: { outDir, rollupOptions: { input: [path.join(root, 'frontend/tests/local-load.html'),path.join(root,'frontend/tests/image-open.html'),path.join(root,'frontend/tests/histogram.html')] } } });
 // Real compressed 16-bit TIFF for the non-sparse worker route, no native tools.
 {
   const W = 2049, H = 2049, rows = 64, count = Math.ceil(H/rows), parts = [];

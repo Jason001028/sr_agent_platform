@@ -1,4 +1,6 @@
 import { imageRef, spatialId } from '../lib/spatial';
+import { planeStats, samplePlane, sharedStats, presetRange } from '../lib/histogramStretch';
+import type { DisplayStretch, PixelPlane } from '../lib/histogramStretch';
 import { tourImageFromEvidence, tourPairRefusal } from '../lib/tourCompare';
 import { precisePairReason } from '../lib/compareCapabilities';
 import { decodeJpegBitmap } from '../lib/jpegBitmap';
@@ -96,6 +98,11 @@ export type DrawTool = 'rect' | 'polygon' | 'wand' | 'del';
 
 /** 一条解码记录（HTML rec 直译；thumb/src/stats 为 markRaw 重字段） */
 export interface ViewerRec {
+  displayStretch?:DisplayStretch;
+  stretchDefaultMode?:StretchMode;
+  stretchPreview?:KitCanvas;
+  progressiveDN?:PixelPlane;
+  dnDomain?:{bits:number;sampleFormat:number};
   previewAsset?: PreviewAsset;
   resolvedSuffix?: string | null;
   /** Display only. Partial pixels must never become ROI or repair input. */
@@ -927,6 +934,7 @@ export const useViewerStore = defineStore('viewer', () => {
       r.thumb!.width = 1;
       r.thumb!.height = 1;
       r.thumb = null;
+      delete r.stretchPreview;
       r.src = null;
       r.stats = null;
       r.probe = null;
@@ -2343,6 +2351,7 @@ export const useViewerStore = defineStore('viewer', () => {
         if (rec.serverSourceVerified && (rec.W !== result.W || rec.H !== result.H)) throw new Error('本地 TIFF 尺寸与已核对的服务端源不一致');
         const prior = previousSize ?? (rec.progressivePreview ? { w: rec.progressivePreview.width, h: rec.progressivePreview.height } : undefined);
         const cv = browserKit.createCanvas(result.srcw, result.srch);
+        rec.dnDomain=result.dnDomain;
         const { rgba, paintedMode, ...pixels } = result;
         delete rec.progressivePreview;
         applyDecoded(rec, { ...pixels, thumb: cv }, my, prior, { rgba, mode: paintedMode });
@@ -2372,6 +2381,25 @@ export const useViewerStore = defineStore('viewer', () => {
           if (frame.kind === 'overview') canvas.getContext('2d')!.drawImage(block, 0, 0, canvas.width, canvas.height);
           else canvas.getContext('2d')!.drawImage(block, 0, 0, frame.width, frame.rows, 0,
             frame.y * canvas.height / frame.canvasHeight, canvas.width, frame.rows * canvas.height / frame.canvasHeight);
+          if(frame.values&&frame.stats){
+            if(frame.dnDomain)rec.dnDomain=frame.dnDomain;
+            if(frame.kind==='overview'||!rec.progressiveDN){
+              const scale=Math.min(1,1024/Math.max(frame.canvasWidth,frame.canvasHeight));
+              const w=Math.max(1,Math.round(frame.canvasWidth*scale)),h=Math.max(1,Math.round(frame.canvasHeight*scale));
+              rec.progressiveDN=markRaw({src:new Float32Array(w*h),w,h,nb:1,stats:frame.stats,invert:!!frame.invert});
+            }
+            const p=rec.progressiveDN;
+            const y0=frame.kind==='overview'?0:Math.ceil(frame.y*p.h/frame.canvasHeight);
+            const y1=frame.kind==='overview'?p.h:Math.min(p.h,Math.ceil((frame.y+frame.rows)*p.h/frame.canvasHeight));
+            for(let y=y0;y<y1;y++)for(let x=0;x<p.w;x++){
+              const sy=frame.kind==='overview'?Math.min(frame.rows-1,Math.floor(y*frame.rows/p.h)):
+                Math.max(0,Math.min(frame.rows-1,Math.floor(y*frame.canvasHeight/p.h)-frame.y));
+              p.src[y*p.w+x]=frame.values[sy*frame.width+Math.min(frame.width-1,Math.floor(x*frame.width/p.w))];
+            }
+            displaySamples.delete(p.src);
+            validateDisplayDomain(rec);
+            if(rec.displayStretch)renderDisplayStretch(rec,true);
+          }
           renderTick.value++;
         },
         pixels: commitPixels,
@@ -2389,6 +2417,7 @@ export const useViewerStore = defineStore('viewer', () => {
     let probe: ProbeInfo | null = null;
     try { probe = await control.wait(probeImage(rec.file), '读取 TIFF 属性'); } catch (e) { if (isLoadAbort(e)) throw e; probe = null; }
     rec.probe = probe;
+    if(probe)rec.dnDomain={bits:probe.bits,sampleFormat:probe.sampleFormat};
     if (!probe) {
       if (rec.token !== my) return;             // 已过期：别覆盖新写者的状态
       rec.status = '解码失败：无法读取文件属性';
@@ -2514,6 +2543,7 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.invert = d.invert;
     rec.stats = d.stats ? markRaw(d.stats) : null;
     rec.route = d.route;
+    validateDisplayDomain(rec);
     const routeText = d.route === 'sparse'
       ? '（稀疏条带预览：' + d.sparseInfo + '）'
       : '';
@@ -2529,6 +2559,8 @@ export const useViewerStore = defineStore('viewer', () => {
       ctx?.putImageData(new ImageData(rendered.rgba as Uint8ClampedArray<ArrayBuffer>, d.srcw, d.srch), 0, 0);
       rec.paintedMode = rendered.mode;
     } else paintStretch(rec, rec.paintedMode ?? startStretch(rec.route, stretchMode.value));
+    delete rec.progressiveDN;
+    if(rec.displayStretch)renderDisplayStretch(rec,false);
     afterPixels(rec, previousSize);                // 分屏下这张可能在非活动侧解码完成
   }
 
@@ -2653,6 +2685,7 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.sceneDir = meta.sceneDir ?? null;
     rec.previewOnly = meta.previewOnly === true;
     rec.srcRev = meta.srcRev ?? null;
+    validateDisplayDomain(rec);
     // 这一景是「用户当前打开着的」——记下来，供下一次拖没有场景身份的 jpg 时当
     // `anchor` 用（见 lastSceneDir）。中途产物那条路 lqPath 是空的，用 sceneDir。
     noteSceneDir(rec);
@@ -3274,6 +3307,7 @@ export const useViewerStore = defineStore('viewer', () => {
       画过 → 只有「本地图 + 工具栏模式变了」才跟一次。盘阵场景不跟随全局：用户在
       某张场景图上选过的模式是那张图的属性，不该被另一张图上的操作改掉。 */
   function repaintOnActivate(rec: ViewerRec) {
+    if(rec.displayStretch){if(rec.stretchPreview&&!displayPaints.has(rec.id))renderDisplayStretch(rec,false);return;}
     if (rec.paintedMode === null) {
       paintStretch(rec, startStretch(rec.route, stretchMode.value));
     } else if (rec.route !== 'jpg' && rec.paintedMode !== stretchMode.value) {
@@ -3286,6 +3320,7 @@ export const useViewerStore = defineStore('viewer', () => {
       拉伸（均衡是不可逆的，拉不回来 —— 这一点在工具栏 title 里说明）。 */
   function paintStretch(rec: ViewerRec, mode: StretchMode = stretchMode.value) {
     if (!rec.src || !rec.thumb) return;
+    if(rec.displayStretch){renderDisplayStretch(rec,false);return;}
     const ctx = (rec.thumb as unknown as HTMLCanvasElement).getContext('2d');
     if (!ctx) return;
     // 逐带拉伸/上屏：16384 档位整幅 RGBA 又是约 1GB，一次分配会把
@@ -3310,31 +3345,151 @@ export const useViewerStore = defineStore('viewer', () => {
 
       **对比模式下改一次刷两侧**：并排看的两张图若用着不同拉伸，看到的差异里混着
       拉伸差异，对比结论就是错的。关闭模式下仍是「每张图各自记」（e2e 盯着这条）。 */
-  function setStretch(mode: StretchMode) {
-    const rec = activeRec.value;
-    if (!rec || rec.route !== 'jpg') stretchMode.value = mode;
-    if (compareMode.value === 'flicker') {
-      // 两张都在同一视口里轮换显示，拉伸必须一起换，否则翻面时明暗忽变。
-      let painted = false;
-      for (const r of [flickerRefRec.value, flickerAltRec.value]) {
-        if (r && r.thumb && r.src) { paintStretch(r, mode); painted = true; }
-      }
-      if (!painted) return;
-    } else if (split.value) {
-      let painted = false;
-      for (const side of ['A', 'B'] as const) {
-        const r = recForSide(side);
-        if (r && r.thumb && r.src) { paintStretch(r, mode); painted = true; }
-      }
-      if (!painted) return;
-    } else if (rec && rec.thumb && rec.src) {
-      paintStretch(rec, mode);
-    } else {
-      return;
+  const histogramScope=ref<'whole'|'view'>('whole');
+  const histogramTarget=ref<'active'|'A'|'B'>('active');
+  const histogramRec=computed(()=>histogramTarget.value==='active'?activeRec.value:
+    comparisonStretchPair()[histogramTarget.value==='A'?0:1]??activeRec.value);
+  const stretchLink=ref<'independent'|'shared'>('independent');
+  const displayJobs=new Map<number,number>();
+  const displayPaints=new Map<number,number>();
+  const displaySamples=new WeakMap<Float32Array,PixelPlane>();
+  let stretchVersion=0;
+  function cachedPlane(rec:ViewerRec):PixelPlane|null {
+    if(rec.progressivePreview)return rec.progressiveDN??null;
+    return rec.src&&rec.srcw&&rec.srch?{src:rec.src,w:rec.srcw,h:rec.srch,nb:rec.nbands||1,stats:rec.stats,invert:rec.invert}:rec.progressiveDN??null;
+  }
+  function comparisonStretchPair() {
+    return compareMode.value==='flicker'?[flickerRefRec.value,flickerAltRec.value]:split.value?[recForSide('A'),recForSide('B')]:[];
+  }
+  function stretchDomain(rec:ViewerRec) {
+    if(!rec.progressiveDN&&(rec.route==='jpg'||rec.route==='img'))return 'display-gray';
+    const d=rec.dnDomain??rec.probe;
+    return d?`dn:${d.bits}:${d.sampleFormat}`:'dn:unknown';
+  }
+  const sharedStretchReason=computed(()=>{
+    const [a,b]=comparisonStretchPair();
+    if(!a||!b||a.id===b.id)return '请先打开两张对比影像';
+    const pa=cachedPlane(a),pb=cachedPlane(b);
+    if(!pa||!pb)return '等待两张影像的缓存像素';
+    if(pa.nb!==1||pb.nb!==1)return '共享暂仅支持单波段灰度影像';
+    const da=stretchDomain(a),db=stretchDomain(b);
+    if(da!==db||da==='dn:unknown'||pa.invert!==pb.invert)return '数据来源、DN 类型或反相方式不同，不能共享映射';
+    if(da!=='display-gray'&&(!a.sceneDir||a.sceneDir!==b.sceneDir))return '缺少同景身份，不能确认两图 DN 数值域可比';
+    if([planeStats(pa)[0],planeStats(pb)[0]].some(s=>!Number.isFinite(s.min)||!Number.isFinite(s.max)))return '当前范围没有有效采样值';
+    return '';
+  });
+  function histogramForRec(rec:ViewerRec|null,scope=histogramScope.value) {
+    const p=rec&&cachedPlane(rec);
+    if(!rec||!p)return null;
+    let rect:ReturnType<typeof visibleThumbRect>=null;
+    if(scope==='view'){
+      const pane=panes.value.find(v=>v.rec?.id===rec.id)??panes.value[0];
+      if(!pane)return null;
+      const basis=pane.rec?.thumb??pane.rec?.progressivePreview;
+      if(!basis)return null;
+      const r=visibleThumbRect(pane.view,pane.rect.w,pane.rect.h,basis.width,basis.height);
+      if(!r)return null;
+      rect={x0:Math.floor(r.x0*p.w/basis.width),y0:Math.floor(r.y0*p.h/basis.height),
+        x1:Math.min(p.w-1,Math.floor(r.x1*p.w/basis.width)),y1:Math.min(p.h-1,Math.floor(r.y1*p.h/basis.height))};
     }
-    renderTick.value++;
-    refreshRoiStats();              // 显示层像素变了 → 选中 ROI 统计随层刷新
-    refreshCloudStats();            // …云量数字/红叠同理随显示层刷新
+    const stats=planeStats(p,rect??undefined),mode=rec.displayStretch?.mode??rec.paintedMode??startStretch(rec.route,stretchMode.value);
+    if(!stats[0]||!Number.isFinite(stats[0].min)||!Number.isFinite(stats[0].max))return null;
+    return {id:rec.id,stats,mode,custom:rec.displayStretch?.custom??false,curve:rec.displayStretch?.curve,
+      ...(rec.displayStretch?{low:rec.displayStretch.low,high:rec.displayStretch.high}:presetRange(stats[0],mode)),
+      source:stretchDomain(rec)==='display-gray'?(rec.route==='img'?'预览像素 · 显示灰度':'JPG 显示灰度 · 仅二次拉伸，不能恢复原始 DN'):
+        rec.progressivePreview?'TIFF 采样 DN · 渐进概览':'TIFF 采样 DN · '+(p.nb===1?'单波段':'首波段直方图，RGB 共用范围')};
+  }
+  function histogramSnapshot(scope=histogramScope.value){return histogramForRec(histogramRec.value,scope);}
+  watch(()=>comparisonStretchPair().map(r=>r?`${r.id}:${r.srcRev??''}`:'').join('|'),()=>{stretchLink.value='independent';histogramTarget.value='active';});
+  watch(sharedStretchReason,reason=>{if(reason)stretchLink.value='independent';});
+  function renderDisplayStretch(rec:ViewerRec,lightOnly:boolean) {
+    const settings=rec.displayStretch,p=cachedPlane(rec);
+    if(!settings||!p)return;
+    const version=(displayJobs.get(rec.id)??0)+1;displayJobs.set(rec.id,version);
+    let small=displaySamples.get(p.src);
+    if(!small){small=samplePlane(p,undefined,512*512);displaySamples.set(p.src,small);}
+    const cv=rec.stretchPreview?.width===small.w&&rec.stretchPreview?.height===small.h?rec.stretchPreview:browserKit.createCanvas(small.w,small.h);
+    const rgba=stretchRgba(small.src,small.w,small.h,small.nb,settings.stats,settings.mode,p.invert,undefined,settings.custom?settings:undefined);
+    cv.getContext('2d')!.putImageData(browserKit.createImageData(rgba,small.w,small.h),0,0);
+    rec.stretchPreview=markRaw(cv);rec.paintedMode=settings.mode;renderTick.value++;
+    if(lightOnly||!rec.src||!rec.thumb||p.src!==rec.src)return;
+    const src=rec.src,thumb=rec.thumb;
+    const wanted=()=>recs.value.includes(rec)&&rec.src===src&&rec.thumb===thumb&&rec.displayStretch===settings&&displayJobs.get(rec.id)===version;
+    displayPaints.set(rec.id,version);
+    void(async()=>{
+      const ctx=thumb.getContext('2d')!;
+      const rows=Math.max(1,Math.min(64,Math.floor(128*1024/Math.max(1,p.w))));
+      for(let y=0;y<p.h;y+=rows){
+        await new Promise(resolve=>setTimeout(resolve,0));if(!wanted())return;
+        const n=Math.min(rows,p.h-y);
+        const block=stretchRgba(src.subarray(y*p.w*p.nb,(y+n)*p.w*p.nb),p.w,n,p.nb,settings.stats,settings.mode,p.invert,undefined,settings.custom?settings:undefined);
+        ctx.putImageData(browserKit.createImageData(block,p.w,n),0,y);
+      }
+      if(!wanted())return;
+      delete rec.stretchPreview;renderTick.value++;refreshRoiStats();refreshCloudStats();
+    })().catch(error=>{if(wanted())showErr('显示拉伸失败：'+String(error));})
+      .finally(()=>{if(displayPaints.get(rec.id)===version)displayPaints.delete(rec.id);});
+  }
+  function applyHistogramStretch(mode:StretchMode,custom?:import('../lib/tifDecode').StretchRange,lightOnly=false) {
+    const rec=histogramRec.value,snapshot=histogramSnapshot();
+    if(!rec||!snapshot)return;
+    noteUserIntent();
+    let targets=[rec],stats=snapshot.stats;
+    if(stretchLink.value==='shared'){
+      if(sharedStretchReason.value){stretchLink.value='independent';showToast(sharedStretchReason.value);}
+      else {
+        targets=comparisonStretchPair().filter((r):r is ViewerRec=>!!r);
+        const other=targets.find(r=>r.id!==rec.id)!;
+        stats=[sharedStats(stats[0],(histogramForRec(other)?.stats??planeStats(cachedPlane(other)!))[0])];
+      }
+    }
+    const range=custom??presetRange(stats[0],mode);
+    if(!Number.isFinite(range.low)||!Number.isFinite(range.high)||range.high<range.low)return;
+    const version=++stretchVersion;
+    for(const target of targets){
+      target.stretchDefaultMode??=target.paintedMode??startStretch(target.route,stretchMode.value);
+      target.displayStretch=markRaw({...range,mode:custom?'linear':mode,custom:!!custom,stats,version,domain:stretchDomain(target),sourceRev:target.srcRev});
+      renderDisplayStretch(target,lightOnly);
+    }
+  }
+  function setStretch(mode:StretchMode){
+    const rec=histogramRec.value;
+    if(rec)rec.stretchDefaultMode??=rec.paintedMode??startStretch(rec.route,stretchMode.value);
+    if(!rec||rec.route!=='jpg')stretchMode.value=mode;
+    applyHistogramStretch(mode);
+  }
+  function setStretchBounds(low:number,high:number,preview=false){applyHistogramStretch('linear',{low,high,curve:histogramRec.value?.displayStretch?.curve},preview);}
+  function setStretchCurve(points:readonly import('../lib/tifDecode').CurvePoint[],preview=false){
+    if(points.length<2||points.some((p,i)=>!Number.isFinite(p.x)||!Number.isFinite(p.y)||p.x<0||p.x>1||p.y<0||p.y>1||(i>0&&p.x<=points[i-1].x))||points[0].x!==0||points[points.length-1]?.x!==1)return;
+    const s=histogramSnapshot();if(!s)return;
+    applyHistogramStretch('linear',{low:s.low,high:s.high,curve:points.map(p=>({...p}))},preview);
+  }
+  function setStretchLink(value:'independent'|'shared') {
+    if(value==='shared'&&sharedStretchReason.value){showToast(sharedStretchReason.value);return;}
+    stretchLink.value=value;if(value==='shared'){
+      const s=histogramSnapshot();applyHistogramStretch(s?.mode??activeStretch.value,s?.custom?{low:s.low,high:s.high,curve:s.curve}:undefined);
+    }
+  }
+  function resetHistogramStretch() {
+    const targets=stretchLink.value==='shared'?comparisonStretchPair():[histogramRec.value];
+    noteUserIntent();
+    stretchLink.value='independent';
+    for(const rec of targets){if(!rec)continue;const p=cachedPlane(rec);if(!p)continue;
+      const stats=planeStats(p),mode=rec.stretchDefaultMode??startStretch(rec.route,stretchMode.value);
+      rec.displayStretch=markRaw({...presetRange(stats[0],mode),mode,custom:false,stats,version:++stretchVersion,domain:stretchDomain(rec),sourceRev:rec.srcRev});
+      renderDisplayStretch(rec,false);}
+    renderTick.value++;refreshRoiStats();refreshCloudStats();
+  }
+  function finishStretchInteraction(id:number) {
+    const rec=recs.value.find(r=>r.id===id),version=rec?.displayStretch?.version;
+    if(version===undefined)return;
+    for(const target of recs.value)if(target.displayStretch?.version===version)renderDisplayStretch(target,false);
+  }
+  function validateDisplayDomain(rec:ViewerRec) {
+    const d=rec.displayStretch;
+    if(d&&((d.domain&&d.domain!==stretchDomain(rec))||(d.sourceRev&&rec.srcRev&&d.sourceRev!==rec.srcRev))){
+      delete rec.displayStretch;delete rec.stretchPreview;delete rec.stretchDefaultMode;displayJobs.set(rec.id,(displayJobs.get(rec.id)??0)+1);
+    }
   }
 
   /** Commit a preview level and refresh visible server images without refitting. */
@@ -4669,6 +4824,7 @@ export const useViewerStore = defineStore('viewer', () => {
     cursor, setCursor,
     canvasAttached, setCanvasAttached,
     stretchMode, activeStretch, drawMode, drawTool, pendingRect, pendingPts, hoverPt, hoverRoi, flashRoi,
+    histogramScope,histogramTarget,histogramRec,stretchLink,sharedStretchReason,histogramSnapshot,setStretchBounds,setStretchCurve,setStretchLink,resetHistogramStretch,finishStretchInteraction,
     previewDiv,
     wandTol, merging, overlay, toast, error, modal,
     imageLoad, pauseImageLoad, resumeImageLoad, stopImageLoad, downloadLocalPreview,

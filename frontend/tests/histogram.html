@@ -1,0 +1,24 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>Histogram stretch acceptance</title><body><div id="root"></div>
+<script type="module">
+import {createApp,h,markRaw} from 'vue';import {createPinia,setActivePinia} from 'pinia';
+import {useViewerStore} from '/src/stores/viewer.ts';import HistogramStretch from '/src/components/HistogramStretch.vue';
+import TifCanvas from '/src/components/TifCanvas.vue';import MiniNavigator from '/src/components/MiniNavigator.vue';
+import {computeStats,stretchRgba} from '/src/lib/tifDecode.ts';import '/src/style.css';
+const pinia=createPinia();setActivePinia(pinia);const store=useViewerStore();
+let id=0;
+function add(w=1024,h=768,offset=0,route='sparse'){
+ const src=new Float32Array(w*h);
+ for(let y=0;y<h;y++)for(let x=0;x<w;x++){const hill=Math.exp(-((x/w-.45)**2+(y/h-.5)**2)*12);src[y*w+x]=offset+Math.round(900+hill*4200+(x/w)*1800+(Math.sin(y*.12)+1)*150);}
+ const stats=computeStats(src,w,h,1),canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;
+ canvas.getContext('2d').putImageData(new ImageData(stretchRgba(src,w,h,1,stats,'linear2',false),w,h),0,0);
+ const key=++id;store.recs.push({id:key,file:markRaw(new File([],'PAN.tif')),name:key===1?'PAN · 缓存采样':'NOSR · 缓存采样',size:4894165908,W:48000,H:Math.round(48000*h/w),
+ probe:null,thumb:markRaw(canvas),src:markRaw(src),srcw:w,srch:h,nbands:1,invert:false,stats:markRaw(stats),route,sceneId:null,lqPath:null,sceneDir:'/DiskArray/test',stageKind:key===1?'input':'nosr',dnDomain:{bits:16,sampleFormat:1},
+ layout:'验收合成缓存像素',status:'就绪',statusCls:'ok',paintedMode:'linear2',maskRois:null,token:1});return key;
+}
+const first=add();store.activeId=first;store.paneA=first;
+window.histTest={store,add,pair(){const second=add(800,600,1000);store.setCompareMode('split');store.paneA=first;store.paneB=second;store.activeId=first;store.fitBoth();return second;},large(){store.clearRecs();const key=add(4096,4096);store.activeId=key;store.paneA=key;store.fit();return key;}};
+createApp({render:()=>h('main',{style:'height:100vh;display:flex;flex-direction:column;background:#f4f6f4'},[
+ h('header',{style:'padding:12px 20px;display:flex;align-items:center;gap:20px;background:#fafbfa;border-bottom:1px solid #d8e4df'},[h(HistogramStretch),h('span',{style:'font-size:12px;color:#85938a'},'PAN · 48000 × 36000 · 缓存 DN · 显示层调节')]),
+ h('section',{style:'display:flex;flex:1;min-height:0;position:relative'},[h(TifCanvas)])
+])}).use(pinia).mount('#root');
+</script></body></html>

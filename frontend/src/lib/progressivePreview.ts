@@ -35,6 +35,10 @@ export interface PreviewFrame {
   canvasWidth: number; canvasHeight: number;
   y: number; rows: number;
   rgba: Uint8ClampedArray;
+  values?:Float32Array;
+  stats?:BandStats[];
+  invert?:boolean;
+  dnDomain?:{bits:number;sampleFormat:number};
 }
 
 // Conservative whole-JPEG admission. This does not change the selected div.
@@ -52,7 +56,7 @@ export function wholeJpegFits(W: number, H: number, div: number): boolean {
 /** Batch completed rows with backpressure; do not send a message per sparse row.
  * Out-of-order I/O is legal. A packet contains only completed contiguous rows. */
 export function rowPublisher(nb: number, stats: BandStats[], mode: StretchMode, invert: boolean,
-  send: (rgba: Uint8ClampedArray, width: number, rows: number, y: number) => Promise<void>,
+  send: (rgba: Uint8ClampedArray, width: number, rows: number, y: number, values:Float32Array) => Promise<void>,
   options?: { bestEffort: boolean; intervalMs?: number }) {
   let pending: { values: Float32Array; width: number; rows: number; y: number }[] = [];
   let count = 0, tail = Promise.resolve();
@@ -72,7 +76,7 @@ export function rowPublisher(nb: number, stats: BandStats[], mode: StretchMode, 
         const values = new Float32Array(first.width * rows * nb);
         let offset = 0;
         for (const item of group) { values.set(item.values, offset); offset += item.values.length; }
-        await send(stretchRgba(values, first.width, rows, nb, stats, mode, invert), first.width, rows, first.y);
+        await send(stretchRgba(values, first.width, rows, nb, stats, mode, invert), first.width, rows, first.y,values);
       }
     });
     if (options?.bestEffort) void tail.then(() => { sending = false; }, error => { failure = error; sending = false; });

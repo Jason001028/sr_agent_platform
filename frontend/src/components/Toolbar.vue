@@ -16,7 +16,7 @@ import { useDiffStore } from '../stores/diff';
 import DiffLocateButton from './DiffLocateButton.vue';
 import DiffContinueButton from './DiffContinueButton.vue';
 import { isIntermediateStage } from '../lib/stage';
-import type { StretchMode } from '../lib/tifDecode';
+import HistogramStretch from './HistogramStretch.vue';
 import AppIcon from './AppIcon.vue';
 import SRSubmitFeedback from './SRSubmitFeedback.vue';
 import { useQueueStore } from '../stores/queue';
@@ -54,7 +54,6 @@ const importedCoordinates = computed<readonly [number, number] | null>(() => {
     注意判据是 route==='jpg'：反推关联**命中**的本地 TIF 也会被就地升级成
     route='jpg'（拿的是服务端生成的预览 JPG，见 stores/viewer.tryLinkScenes），
     没命中的才保持本地 route。 */
-const sceneActive = computed(() => store.activeRec?.route === 'jpg');
 /** 「提交 SR」可用：这张图有盘阵目录（= 提交时 lq_path 的语义）。
     盘阵场景打开的有，反推关联上的本地 TIF 也**有** —— 判据从「是不是盘阵场景」
     放宽成「有没有盘阵目录」，否则本地关联那条路走通了按钮还是灰的。 */
@@ -70,13 +69,6 @@ const roTitle = computed(() =>
   + '），仅用于对比，不作修复 —— 请打开本体再修复与提交');
 /** 下拉显示**当前这张图实际**的拉伸模式（store.activeStretch），不是全局那份：
     全局只决定新打开的本地图用什么起手，场景图另有起手值且各记各的。 */
-const stretchValue = computed(() => store.activeStretch);
-const stretchTitle = computed(() =>
-  sceneActive.value
-    ? '这张服务端 JPG 已生成，这里改的是显示层的二次拉伸'
-      + '（均衡不可逆，拉不回来）'
-    : '',
-);
 
 /** 对比模式的中文短名（按钮上那个后缀，与 CompareBar 的三选一同一套叫法）。 */
 const cmpModeLabel = computed(() => {
@@ -85,13 +77,6 @@ const cmpModeLabel = computed(() => {
   return '点选';
 });
 
-const STRETCH_OPTIONS: { value: StretchMode; label: string }[] = [
-  { value: 'linear', label: '线性' },
-  { value: 'linear2', label: '2% 线性' },
-  { value: 'sqrt', label: '平方根' },
-  { value: 'log', label: '对数' },
-  { value: 'equal', label: '直方图均衡' },
-];
 
 function onPick(e: Event) {
   const el = e.target as HTMLInputElement;
@@ -122,14 +107,7 @@ function onPick(e: Event) {
       @change="onPick"
     />
 
-    <select
-      class="stretch-sel"
-      :value="stretchValue"
-      :title="stretchTitle"
-      @change="store.setStretch(($event.target as HTMLSelectElement).value as StretchMode)"
-    >
-      <option v-for="o in STRETCH_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
-    </select>
+    <HistogramStretch />
 
     <CoordinateInput :scene-key="store.activeRec?.id ?? null" :coordinates="importedCoordinates"
       :scene-group="store.activeRec?.sceneDir ? store.sceneOrdinalOf(store.activeRec) : null"

@@ -55,7 +55,7 @@ async function paint(){
   c.height=Math.max(1,Math.round(r.thumb.height*scale));
   ctx.save();
   ctx.scale(c.width/r.thumb.width,c.height/r.thumb.height);
-  drawDiffSource(ctx,r.thumb as unknown as CanvasImageSource,r.thumb.width,r.thumb.height,diff.layerFor(r),diff.display,diff.opacity,diff.feather);
+  drawDiffSource(ctx,(r.stretchPreview??r.thumb) as unknown as CanvasImageSource,r.thumb.width,r.thumb.height,diff.layerFor(r),diff.display,diff.opacity,diff.feather);
   ctx.restore();
   if(tour.coverageVisible){
    const n=tour.coverage.size;ctx.fillStyle='rgba(61,169,164,.22)';ctx.beginPath();

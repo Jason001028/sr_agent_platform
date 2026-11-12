@@ -28,11 +28,11 @@ export async function decodeSparseProgressively(source: Source, sp: SparseLayout
     }
     stats = computeStats(values, sw, seedCount, 1);
     await publish({ kind: 'overview', W: sp.W, H: sp.H, width: sw, height: seedCount, canvasWidth: width, canvasHeight: height,
-      y: 0, rows: seedCount, rgba: stretchRgba(values, sw, seedCount, 1, stats, mode, invert) });
+      y: 0, rows: seedCount, rgba: stretchRgba(values, sw, seedCount, 1, stats, mode, invert),values,stats,invert,dnDomain:{bits:probe.bits,sampleFormat:probe.sampleFormat} });
     await checkpoint('稀疏条带回填（单次采样）');
     seeds.clear();
-    publisher = rowPublisher(1, stats, mode, invert, (rgba,w,rows,y) => publish({ kind: 'rows', W: sp.W, H: sp.H,
-      width: w, height: rows, canvasWidth: width, canvasHeight: height, rows, y, rgba }), { bestEffort: true, intervalMs: 150 });
+    publisher = rowPublisher(1, stats, mode, invert, (rgba,w,rows,y,values) => publish({ kind: 'rows', W: sp.W, H: sp.H,
+      width: w, height: rows, canvasWidth: width, canvasHeight: height, rows, y, rgba,values,stats,invert }), { bestEffort: true, intervalMs: 150 });
   };
   await checkpoint('稀疏条带读取（单次采样）');
   const sampled = await sparseSample(source, sp, max, progress, checkpoint, async (values,w,rows,y) => {

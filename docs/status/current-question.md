@@ -1,5 +1,11 @@
 # current_question — 平台现状与交接入口
 
+2026-11-11：工具栏拉伸下拉升级为 332px 交互直方图：黑白场拖动/数值/键盘、常用三模式与更多模式、整图/视野采样统计、双图独立/共享 CDF；JPG 明确只做显示灰度二次拉伸。拖动 RAF 合并到 512² 轻量显示，松手分带更新完整显示，源 DN、分析 token、Camera、ROI/Mask 不变；稀疏 Worker 复用 DN 块，后到像素沿用当前显示版本。真实鼠标、分屏/交替、16M 缓存像素流畅性及 Worker 渐进回填合成验收通过，真实内网/16384² 待核。需完整发布前端和 Worker，详见 [histogram-stretch.md](histogram-stretch.md)。
+
+2026-11-11：「在资源管理器打开」固定走 W: 的问题已改为多盘符候选。原因：客户端 mapping.json 只存安装时的一个 windows_root，handler 不做探测，盘阵在 X: 的机器必然打不开。现安装时写入 windows_roots（-WindowsRoot 指定的盘符、W:\、X:\，去重后），handler 按顺序取第一个目标目录真实存在的盘符；-ValidateOnly 与旧版只写 windows_root 的配置仍可用。改的是客户端组件脚本，需重新下载安装包并覆盖安装才生效；handler 专项 23 项通过（未改注册表、未启动 Explorer），真实 W:/X: 双环境待核。详见 [explorer-open.md](explorer-open.md)。
+
+2026-11-11：Agent 聊天区“批次＋随机 ID／查看任务”凭空出现，根源为 AgentChatTab 在消息循环外插入全局 batchGoal 快捷条：BatchTaskDock 挂载会恢复 URL/本机最近批次，而旧条件只比较 snapshot.goal.session_id === chat.sessionId，无会话时 null===null 也成立；界面直接输出 goalId，因此看起来像乱码。已移除这条额外快捷条及专用依赖，保留任务中枢和真实工具消息里的 AgentBatchReceipt，不清除批次/聊天数据。
+
 2026-11-10：预览「档位缩水」统一口径，并把真分辨率长边上限做成**设置项**。默认 16384（4096×4，与 Chromium 画布 16384² 面积上限同口径），设置面板提供 4096 / 8192 / 16384 三档（不提供 16383：与 16384 只差 1 像素、面积几乎相同，反而误导）；值存在服务端 SQLite（`platform_settings`），所有连同一后端的机器共用，不再只是本机偏好。服务端场景预览生成、`image-open` 概览、前端 JPG 解码/显示、`wholeJpegFits` 准入、本地 TIFF 预览与状态栏文案都读同一个值；长边 ≤ 上限的档位按真实采样交付，超过才截断。缓存规则戳加入 `;max=N`，上限调高或调低都会让旧预览失效（避免「调回 16384 后永远停在低清」）。JPG 像素改为逐块读 RGBA，去掉 16384 档位整图 `getImageData` 副本；16384 档位峰值内存仍高，真实内网大图需复核。详见 [preview-scale-control.md](preview-scale-control.md)。
 
 2026-11-10：关联盘阵请求一个字节都没发出的原因已定位：旧内核缺少 `AbortSignal.timeout`（Chromium < 103）与 `AbortSignal.any`（< 116），这两处在 fetch 之前求值，缺失即抛 TypeError，被 catch 吞成“未关联”后直接退回上传。现场判据：卡片 linkNote 写着 `AbortSignal.timeout is not a function`，`performance.getEntriesByType('resource')` 里查 `/api/scenes/resolve` 为空集合。新增 `lib/signals.ts` 兜底并在 main.ts 入口安装，只补缺失项、不覆盖原生实现。受影响的不止拖入关联：服务端 JPG 显示后的后台关联核对、以及两处带超时（30 秒 / 10 秒）的请求同样会整体不发。前端全量 1024 项、类型检查与生产构建通过；需重新发布 dist 后在旧浏览器内网机复核。

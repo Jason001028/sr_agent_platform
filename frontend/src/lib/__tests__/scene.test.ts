@@ -291,7 +291,7 @@ describe('graySrcFromRgba / sceneDecodePixels（route=JPG 同构数据）', () =
     const d = sceneDecodeCanvas(ctx, w, h, 2);
     expect(rows).toEqual([0, 2, 4, 6]);
     expect(Array.from(d.src)).toEqual(values);
-    expect(d.srcw).toBe(w); expect(d.srch).toBe(h);
+    expect(d.tw).toBe(w); expect(d.th).toBe(h);
   });
 
   it('route=JPG rec 同构：src/srcw/srch/nbands/invert 与本地稀疏 rec 对齐', () => {

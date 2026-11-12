@@ -94,6 +94,8 @@ export interface BandStats {
 }
 
 export type StretchMode = 'linear' | 'linear2' | 'sqrt' | 'log' | 'equal';
+export interface CurvePoint {x:number;y:number}
+export interface StretchRange { low:number; high:number; curve?:readonly CurvePoint[] }
 
 /** 稀疏条带解析结果（布局元数据；数据仍由 source.read 抽读，不持有 file） */
 export interface SparseLayoutOk {
@@ -156,18 +158,33 @@ export function getSamplePlan(image: GeoTiffImageLike): SamplePlan {
 }
 
 /* ---------------- 显示拉伸（ENVI 风格预处理） ---------------- */
-export function stretchMap(v: number, b: number, st: BandStats[] | null | undefined, mode: StretchMode): number {
+export function stretchMap(v: number, b: number, st: BandStats[] | null | undefined, mode: StretchMode, range?:StretchRange): number {
   const s = st && st[b];
   // 统计缺失兜底：直接按值自身截断到 0~255 返回，保证任何情况下都不抛错
   if (!s) { const cv = (v > 255) ? 255 : (v < 0 ? 0 : v); return (cv === cv) ? cv : 0; }
-  const lo = (mode === 'linear2') ? s.p2 : s.min;
-  const hi = (mode === 'linear2') ? s.p98 : s.max;
+  const lo = range?.low ?? ((mode === 'linear2') ? s.p2 : s.min);
+  const hi = range?.high ?? ((mode === 'linear2') ? s.p98 : s.max);
   if (hi > lo) {
     let t = (v - lo) / (hi - lo);
     if (t < 0) t = 0; else if (t > 1) t = 1;
+    if(range?.curve){
+      const points=range.curve;
+      for(let i=1;i<points.length;i++)if(t<=points[i].x){
+        const a=points[i-1],z=points[i];
+        return (a.y+(z.y-a.y)*(t-a.x)/(z.x-a.x))*255;
+      }
+      return 255;
+    }
     if (mode === 'sqrt') return Math.sqrt(t) * 255;
     if (mode === 'log') return Math.log(1 + t) / Math.LN2 * 255;
     if (mode === 'equal') {
+      if(!(s.total>0))return t*255;
+      if(range&&s.max>s.min){
+        if(t<=0)return 0;if(t>=1)return 255;
+        const bin=(value:number)=>Math.max(0,Math.min(s.cdf.length-1,Math.floor((value-s.min)/(s.max-s.min)*s.cdf.length)));
+        const a=s.cdf[bin(lo)],z=s.cdf[bin(hi)];
+        return z>a?(s.cdf[bin(v)]-a)/(z-a)*255:t*255;
+      }
       const BINS = s.cdf.length, k = (t * (BINS - 1)) | 0;
       return s.cdf[k] / s.total * 255;
     }
@@ -180,6 +197,7 @@ export function stretchRgba(
   src: Float32Array, sw: number, sh: number, nb: number,
   st: BandStats[] | null | undefined, mode: StretchMode, invert: boolean,
   output?: Uint8ClampedArray,
+  range?:StretchRange,
 ): Uint8ClampedArray {
   if (!nb) nb = (st && st.length) ? st.length : 1;   // 兜底：nb 缺失时按 stats 波段数，避免误走 3 波段分支
   const n = sw * sh;
@@ -188,8 +206,8 @@ export function stretchRgba(
   for (let i = 0; i < n; i++, k += 4) {
     const b0 = i * nb;
     let r: number, g: number, b: number;
-    if (nb === 1) { r = g = b = stretchMap(src[b0], 0, st, mode); }
-    else { r = stretchMap(src[b0], 0, st, mode); g = stretchMap(src[b0 + 1], 1, st, mode); b = stretchMap(src[b0 + 2], 2, st, mode); }
+    if (nb === 1) { r = g = b = stretchMap(src[b0], 0, st, mode, range); }
+    else { r = stretchMap(src[b0], 0, st, mode, range); g = stretchMap(src[b0 + 1], 1, st, mode, range); b = stretchMap(src[b0 + 2], 2, st, mode, range); }
     if (invert) { r = 255 - r; g = 255 - g; b = 255 - b; }
     if (r < 0) r = 0; else if (r > 255) r = 255;
     if (g < 0) g = 0; else if (g > 255) g = 255;

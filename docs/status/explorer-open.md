@@ -26,15 +26,17 @@ PAN、NOSR、SR 卡片使用各自已确认的 sceneDir，打开所在目录，�
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-SrExplorer.ps1
 ```
 
-默认客户端映射 /DiskArray → W:\。W: 必须已在该用户的普通 Windows 会话中连通；脚本不会挂载盘阵、收集凭据或修改服务器。盘符不同可配置：
+默认客户端映射 /DiskArray → W:\。安装时写入的盘符排第一候选，另补 W:\、X:\ 两个常见盘符；打开目录时按顺序取第一个目标目录真实存在的盘符。W: 必须已在该用户的普通 Windows 会话中连通；脚本不会挂载盘阵、收集凭据或修改服务器。盘符不同可配置：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-SrExplorer.ps1 -WindowsRoot 'Z:\'
 ```
 
-服务器挂载前缀不同，可同时传 -ServerRoot '/实际挂载根'。根按大小写与完整路径段匹配，/DiskArrayElse 不会命中 /DiskArray。本版只支持一个 POSIX 服务端根映射到一个本机盘符根；多映射与 UNC 不在本版范围。
+候选顺序为 -WindowsRoot 指定的盘符、W:\、X:\，去重后写入 mapping.json 的 windows_roots（windows_root 保留为首选项，兼容旧版 handler）。同一份安装包在挂 W: 和挂 X: 的机器上都能直接打开；已有安装需重新运行新版安装包才会写入多候选。
 
-安装位置：%LOCALAPPDATA%\SrAgentExplorer，包含 Open-SrDirectory.exe、Open-SrDirectory.ps1 与 mapping.json；协议注册在 HKCU\Software\Classes\sr-explorer。公司客户端盘符统一 W:，客户端 mapping.json 与服务端 SR_DRIVE_MAP 仍是独立配置；特殊情况可通过高级参数覆盖。
+服务器挂载前缀不同，可同时传 -ServerRoot '/实际挂载根'。根按大小写与完整路径段匹配，/DiskArrayElse 不会命中 /DiskArray。本版只支持一个 POSIX 服务端根映射到本机盘符候选；一个服务端根对应多个不同目录树、以及 UNC 不在本版范围。
+
+安装位置：%LOCALAPPDATA%\SrAgentExplorer，包含 Open-SrDirectory.exe、Open-SrDirectory.ps1 与 mapping.json；协议注册在 HKCU\Software\Classes\sr-explorer。客户端 mapping.json 与服务端 SR_DRIVE_MAP 仍是独立配置；特殊情况可通过高级参数覆盖。
 
 卸载（使用同一份下载脚本）：
 

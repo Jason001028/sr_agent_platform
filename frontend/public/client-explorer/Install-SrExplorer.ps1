@@ -48,7 +48,11 @@ if ($ServerRoot -notmatch '^/(?!/)' -or $ServerRoot -match '[\x00-\x1f\x7f"<>|?*
     throw 'ServerRoot must be an absolute POSIX directory without traversal, e.g. /DiskArray.'
 }
 if (-not $ServerRoot) { throw 'Mapping the entire server filesystem is not supported.' }
-$WindowsRoot = $WindowsRoot.Substring(0, 1).ToUpperInvariant() + ':\'
+# 候选盘符：安装时指定的那个排最前，再补公司环境里常见的 W:、X:。
+# 同一份安装包在盘阵挂 W: 和挂 X: 的机器上都能打开；handler 取第一个目标目录真实存在的。
+$WindowsRoots = @($WindowsRoot, 'W:\', 'X:\') |
+    ForEach-Object { $_.Substring(0, 1).ToUpperInvariant() + ':\' } |
+    Select-Object -Unique
 $handler = @'
 [CmdletBinding()]
 param([Parameter(Mandatory=$true)][string]$Uri, [switch]$ValidateOnly)
@@ -73,22 +77,31 @@ try {
     }
     $mapping = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'mapping.json') -Raw | ConvertFrom-Json
     $root = [string]$mapping.server_root
-    $drive = [string]$mapping.windows_root
-    if (-not $root -or $drive -notmatch '^[A-Z]:\\$') { throw 'Invalid client mapping. Please reinstall.' }
+    # windows_roots = 多个候选，按顺序取第一个目标存在的；旧配置只有 windows_root。
+    $drives = @()
+    if ($mapping.windows_roots) { $drives = @($mapping.windows_roots) }
+    if ($drives.Count -eq 0) { $drives = @($mapping.windows_root) }
+    $drives = @($drives | ForEach-Object { [string]$_ } | Where-Object { $_ -match '^[A-Z]:\\$' } | Select-Object -Unique)
+    if (-not $root -or $drives.Count -eq 0) { throw 'Invalid client mapping. Please reinstall.' }
     if ($path -cne $root -and -not $path.StartsWith($root + '/', [StringComparison]::Ordinal)) {
         throw 'This directory is outside the configured server root. Reinstall with the correct ServerRoot.'
     }
     $relative = $path.Substring($root.Length).TrimStart('/').Replace('/', '\')
-    $target = [IO.Path]::GetFullPath($drive + $relative)
-    if (-not $target.StartsWith($drive, [StringComparison]::OrdinalIgnoreCase)) { throw 'Directory escapes the configured drive.' }
     # Windows treats these names as devices, even with a file extension.
     foreach ($part in $relative.Split('\')) {
         if ($part -match '^(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(\.|$)') { throw 'Reserved Windows path segment.' }
     }
-    if ($ValidateOnly) { Write-Output $target; return }
-    if (-not (Test-Path -LiteralPath $target -PathType Container)) {
-        throw 'The directory is unavailable. Check the mapped drive and network access on this computer.'
+    $target = $null
+    foreach ($drive in $drives) {
+        $candidate = [IO.Path]::GetFullPath($drive + $relative)
+        if (-not $candidate.StartsWith($drive, [StringComparison]::OrdinalIgnoreCase)) { throw 'Directory escapes the configured drive.' }
+        if ($ValidateOnly -or (Test-Path -LiteralPath $candidate -PathType Container)) { $target = $candidate; break }
     }
+    if (-not $target) {
+        $tried = ($drives | ForEach-Object { $_ + $relative }) -join '; '
+        throw "The directory is unavailable ($tried). Check the mapped drive and network access on this computer."
+    }
+    if ($ValidateOnly) { Write-Output $target; return }
     # No shell / Invoke-Expression. Quotes and control characters were rejected.
     $start = New-Object System.Diagnostics.ProcessStartInfo
     $start.FileName = Join-Path $env:WINDIR 'explorer.exe'
@@ -150,15 +163,15 @@ try {
 }
 $handler | Set-Content -LiteralPath $handlerFile -Encoding UTF8
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Pick-SrImage.ps1') -Destination $pickerFile -Force
-@{ server_root=$ServerRoot; windows_root=$WindowsRoot; picker_origins=$PickerOrigins } | ConvertTo-Json | Set-Content -LiteralPath $configFile -Encoding UTF8
+@{ server_root=$ServerRoot; windows_root=$WindowsRoots[0]; windows_roots=@($WindowsRoots); picker_origins=$PickerOrigins } | ConvertTo-Json | Set-Content -LiteralPath $configFile -Encoding UTF8
 New-Item -Path "$protocolKey\shell\open\command" -Force | Out-Null
 Set-Item -LiteralPath $protocolKey -Value 'URL:SR Agent Explorer'
 New-ItemProperty -LiteralPath $protocolKey -Name 'URL Protocol' -Value '' -PropertyType String -Force | Out-Null
 $command = '"' + $launcherFile + '" "%1"'
 Set-Item -LiteralPath "$protocolKey\shell\open\command" -Value $command
-Write-Host "Installed: $ServerRoot -> $WindowsRoot"
+Write-Host "Installed: $ServerRoot -> $($WindowsRoots -join ' | ') (first accessible wins)"
 & $chromePolicyScript
 Write-Host 'Return to http://10.10.81.135/viewer after checking Chrome policy status.'
-if (-not (Test-Path -LiteralPath $WindowsRoot -PathType Container)) {
-    Write-Warning 'The mapped drive is not currently accessible. Connect it before opening a directory.'
+if (-not ($WindowsRoots | Where-Object { Test-Path -LiteralPath $_ -PathType Container })) {
+    Write-Warning 'None of the candidate drives is currently accessible. Connect one before opening a directory.'
 }
