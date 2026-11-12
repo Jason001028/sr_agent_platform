@@ -15,6 +15,7 @@ import { useViewerStore } from '../stores/viewer';
 import { DIFF_THRESHOLD_PRESETS } from '../lib/diffLocate';
 import DiffColorLegend from './DiffColorLegend.vue';
 import AppIcon from './AppIcon.vue';
+import { isDeveloperMode } from '../lib/developerMode';
 
 const diff = useDiffStore();
 const viewer = useViewerStore();
@@ -65,8 +66,8 @@ const summary = computed(() => {
     coverage: Math.round((r.coverage?.validRatio ?? 0) * 1000) / 10,
     ms: r.elapsedMs,
     threshold: r.parameters.threshold,
-    source: r.source === 'source-roi' ? '原始 ROI' : '预览',
-    method: r.method === 'ssim' ? '结构差异' : '像素差分',
+    source: r.source === 'source-roi' ? '原始 DN 精检' : r.source === 'source-grid' ? '原始 DN 分析网格' : '预览',
+    method: r.method === 'smart' ? '智能对比' : r.method === 'ssim' ? '结构差异' : '像素差分',
   };
 });
 
@@ -162,6 +163,9 @@ onBeforeUnmount(() => {
             <button type="button" :class="{ on: diff.method === 'ssim' }" role="radio"
               :aria-checked="diff.method === 'ssim'" :disabled="diff.busy"
               @click="diff.method = 'ssim'">结构差异 SSIM</button>
+            <button type="button" :class="{ on: diff.method === 'smart' }" role="radio"
+              :aria-checked="diff.method === 'smart'" :disabled="diff.busy" data-e2e="diff-smart"
+              @click="diff.method = 'smart'">智能对比</button>
           </div>
         </section>
 
@@ -217,9 +221,14 @@ onBeforeUnmount(() => {
             </label>
           </template>
           <DiffColorLegend v-if="diff.result && diff.display !== 'regions'" class="panel-legend" />
+          <label v-if="diff.method === 'smart'" class="diff-field diff-inline">
+            <span>异常显示阈值</span><input v-model.number="diff.displayThreshold" type="range" min="0" max="1" step="0.01" aria-label="异常显示阈值" />
+            <em>{{ diff.displayThreshold.toFixed(2) }}</em>
+          </label>
+          <label class="diff-toggle"><span>显示异常边界</span><input v-model="diff.boundariesVisible" type="checkbox" aria-label="显示异常边界" /></label>
         </section>
 
-        <section class="diff-section" aria-label="候选复核">
+        <section v-if="diff.method !== 'smart'" class="diff-section" aria-label="候选复核">
           <div class="diff-section-title">候选复核</div>
           <label class="diff-toggle">
             <span>亮度归因权重（非线性）</span>
@@ -235,6 +244,20 @@ onBeforeUnmount(() => {
 
         <details class="diff-advanced">
           <summary>高级设置</summary>
+          <div v-if="diff.method === 'smart'" class="diff-grid">
+            <label class="diff-field"><span>纹理窗口</span><select v-model.number="diff.smartOptions.window" aria-label="纹理窗口"><option :value="7">7×7</option><option :value="15">15×15</option><option :value="31">31×31</option></select></label>
+            <label class="diff-field"><span>分析精度</span><select v-model="diff.smartPrecision" aria-label="智能对比分析精度"><option value="source-grid">原始 DN 网格</option><option value="preview">预览检测</option></select></label>
+            <label class="diff-field"><span>传感器配置</span><select v-model="diff.smartOptions.sensor" aria-label="传感器配置"><option v-for="s in ['generic','JL1KF01','JL1KF02','JL1GF04']" :key="s">{{ s }}</option></select></label>
+            <label class="diff-field"><span>固定校准尺度（可选）</span><input :value="diff.smartOptions.calibrationScale ?? ''" type="number" min="0.01" step="0.1" aria-label="固定校准尺度" @change="diff.smartOptions.calibrationScale = ($event.target as HTMLInputElement).value ? Number(($event.target as HTMLInputElement).value) : undefined" /></label>
+          </div>
+          <template v-if="diff.method === 'smart'">
+            <label class="diff-toggle"><span>场景掩码降权（可用时）</span><input v-model="diff.smartOptions.sceneSuppression" type="checkbox" aria-label="场景掩码降权" /></label>
+            <label class="diff-toggle"><span>频域复核（实验性）</span><input v-model="diff.smartOptions.frequencyReview" type="checkbox" aria-label="频域复核" /></label>
+            <button type="button" :disabled="diff.busy || !!diff.smartPairReason" @click="diff.scanNativeVisible()">当前视野原始尺度补扫</button>
+            <p class="diff-note">补扫保留细小异常，每次最多 64 个 512² 块；范围过大时请放大视野。补扫概览仍需原图精检后才能加入掩码。</p>
+            <p class="diff-note">当前参数未完成生产校准；缺少云水阴影掩码时会明确标为未验证。窗口单位为分析网格像素。</p>
+          </template>
+          <label v-if="isDeveloperMode()" class="diff-toggle"><span>三算法并行对照（共享读取）</span><input v-model="diff.parallelCompare" type="checkbox" aria-label="三算法对照" /></label>
           <div class="diff-grid">
             <label class="diff-field">
               <span>开运算核</span>
@@ -285,6 +308,13 @@ onBeforeUnmount(() => {
         <p v-if="diff.precisionReason" role="status">差异分析暂不可用：{{ diff.precisionReason }}；可继续并排预览。</p>
         <p v-else-if="diff.alignmentNote" class="diff-note" role="status">{{ diff.alignmentNote }}</p>
         <p v-if="diff.error" class="diff-error" role="alert">{{ diff.error }}</p>
+        <p v-if="diff.method === 'smart' && diff.smartPairReason" class="diff-note">{{ diff.smartPairReason }}</p>
+        <p v-if="diff.method === 'smart'" role="status">{{ diff.analysisState }}</p>
+        <details v-if="diff.comparison"><summary>三算法对照</summary>
+          <button v-for="item in diff.comparison.summary" :key="item.method" type="button" @click="diff.showComparison(item.method)">{{ item.method }} · {{ item.regions }} 区域 · {{ item.areaPixels }} px² · {{ item.elapsedMs }} ms</button>
+          <p v-for="pair in diff.comparison.overlaps" :key="pair.methods.join('/')">{{ pair.methods.join(' / ') }} IoU {{ pair.iou.toFixed(3) }}</p>
+          <p>Smart 独有候选像素 {{ diff.comparison.smartUniquePixels }}</p>
+        </details>
         <p v-else-if="diff.stale" class="diff-notice" role="status">
           参数已修改，当前仍显示上一次结果；重新分析后生效。
         </p>
@@ -307,6 +337,7 @@ onBeforeUnmount(() => {
         <button class="diff-clear" type="button" :disabled="diff.busy || !diff.result" @click="clear">
           清除结果
         </button>
+        <button v-if="diff.busy" type="button" @click="diff.cancelAnalysis()">取消</button>
       </footer>
     </div>
   </span>

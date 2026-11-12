@@ -43,6 +43,8 @@ def sample_grid(path, width, height, shape, config):
     validity = [np.empty((gh, gw), bool), np.empty((gh, gw), bool)]
     start = 0
     for block in reader._iter_windows(path, layout, width, height, rows):
+        if config.get("cancel_check"):
+            config["cancel_check"]()
         end = start + len(block)
         for n, desired in enumerate((y0, y1)):
             indexes = np.flatnonzero((desired >= start) & (desired < end))
@@ -104,6 +106,7 @@ def detect(target, reference, base, config):
     b, vb = sample_grid(nosr,rw,rh,shape,config)
     result = image_diff.analyze_arrays(a,b,valid_a=va,valid_b=vb,
         method=config.get("method","absdiff"), sensitivity=config.get("sensitivity","standard"),
+        reference_side="B", smart_options=config.get("smart_options"),
         threshold=config.get("threshold"), min_area_px=config.get("min_area_px",64),
         blur=config.get("blur",True), open_kernel=config.get("open_kernel",3),
         close_kernel=config.get("close_kernel",5), source="source-grid",
@@ -134,11 +137,16 @@ def detect(target, reference, base, config):
     return contracts.validate_detection_result({**base,"provenance":"real","detector_name":"shared-difference",
         "detector_version":"1.0.0","candidates":candidates,"candidate_accounting":counts,
         "source_revision":target["revision"],
-        "requires_geometry_review":any(p["needs_review"] for p in auto["polygons"]),
+        "requires_geometry_review":config.get("method") == "smart" or any(p["needs_review"] for p in auto["polygons"]),
         "geometry_diagnostics":[{k:p[k] for k in ("region_id","vertex_count","coverage_ratio","supersample_coverage_ratio","buffer_px","buffer_space","needs_review","diagnostics","area_ratio","holes","fallback")} for p in auto["polygons"]],
         "analysis":{"source":"real-dn-grid","size":[gw,gh],"parameters":result["parameters"],
                     "grid_to_pan":auto["sources"][0]["transform"],"grid_to_nosr":auto["sources"][1]["transform"],
                     "coverage_scope":"projected_analysis_pixel_centres","downsampled":gw<w or gh<h,
                     "parameter_version":auto["parameter_version"],"registration":"geotiff" if registered else "production-proportional-grid",
-                    "valid_ratio":result["coverage"]["validRatio"],"region_accounting":result["regionAccounting"],"elapsed_ms":round((time.perf_counter()-started)*1000,2)},
+                    "valid_ratio":result["coverage"]["validRatio"],"region_accounting":result["regionAccounting"],"elapsed_ms":round((time.perf_counter()-started)*1000,2),
+                    **({"algorithmVersion":result["algorithmVersion"], "scoreSemantics":result["scoreSemantics"],
+                        "regionDiagnostics":result["regionDiagnostics"], "maskAvailability":result["maskAvailability"],
+                        "sensorProfile":result["sensorProfile"], "calibrationStatus":result["calibrationStatus"],
+                        "normalization":result["normalization"], "sourceIdentity":{"pan":target["image_key"], "nosr":reference["image_key"]}}
+                       if config.get("method") == "smart" else {})},
         "diagnostics":[*base["diagnostics"],{"code":"candidate_accounting",**counts}]},mode=config.get("execution_mode"))

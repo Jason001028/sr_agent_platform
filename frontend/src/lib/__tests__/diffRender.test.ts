@@ -5,6 +5,14 @@ import {
 } from '../diffRender';
 
 describe('continuous difference rendering', () => {
+  it('keeps Smart scores immutable while hiding below-threshold and invalid pixels', () => {
+    const values=new Uint8Array([0,128,255]),before=values.slice();
+    const rgba=colorizeHeatBytes(values,3,1,new Uint8Array([1,1,0]),null,{smart:true,threshold:.4});
+    expect(rgba[3]).toBe(0);expect(rgba[7]).toBe(255);expect(rgba[11]).toBe(0);
+    expect(values).toEqual(before);
+    const dim=colorizeHeatBytes(values,3,1,null,null,{smart:true,selectedBbox:[1,0,1,1]});
+    expect(dim[3]).toBe(85);expect(dim[7]).toBe(255);
+  });
   it('maps every fixed stop, including opaque zero, without changing source bytes', () => {
     const values = new Uint8ClampedArray([0, 51, 102, 153, 204, 255].flatMap(v => [v, v, v, 255]));
     const before = values.slice();

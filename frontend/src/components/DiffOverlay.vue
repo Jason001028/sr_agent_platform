@@ -198,13 +198,15 @@ onBeforeUnmount(() => window.removeEventListener('pointerdown', outside));
       </header>
       <p>面积 {{ fmtArea(p.selected.area) }} px² · 相对面积 {{ (p.selected.relative * 100).toFixed(3) }}%</p>
       <p>平均差异 {{ p.selected.mean.toFixed(3) }} · 最大 {{ p.selected.max.toFixed(3) }}</p>
+      <p v-if="diff.selectedRegion?.diagnostics">疑似纹理损失 · 待人工复核<br>方差比 {{ diff.selectedRegion.diagnostics.varianceRatioMean.toFixed(2) }} · 纹理损失 {{ diff.selectedRegion.diagnostics.textureLossMean.toFixed(2) }}</p>
       <p v-if="p.selected.tone">
         灰 {{ Math.round(p.selected.tone.meanA) }} · 中间调 {{ pct(p.selected.tone.mid) }} ·
         平坦 {{ pct(p.selected.tone.flat) }} · 变化 {{ deltaText(p.selected.tone.delta) }} ·
         复核 ×{{ p.selected.tone.weight.toFixed(2) }}
       </p>
       <footer>
-        <button type="button" @click="addMask(p.selected.id, $event)">加入掩码</button>
+        <button type="button" :disabled="diff.stale || (diff.result?.method === 'smart' && !diff.selectedRegion?.maskEligible)" @click="addMask(p.selected.id, $event)">加入修复掩码</button>
+        <button v-if="diff.result?.method === 'smart'" type="button" :disabled="diff.busy || diff.stale || !diff.aRec?.sceneId || !diff.bRec?.sceneId" @click="diff.refineRegion(p.selected.id)">原图精算</button>
         <button type="button" @click="flicker($event)">交替对比</button>
       </footer>
     </section>

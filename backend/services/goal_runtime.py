@@ -159,13 +159,15 @@ def _batch_import_sync(request, body):
             result = batch_manifest.import_manifest(
                 data=data, encoding=str(body.get("encoding") or "auto"),
                 date=body.get("date"), product=body.get("product"),
-                mode=str(body.get("mode") or "demo"), sources=body.get("sources"), strategy=body.get("strategy", "automatic"))
+                mode=str(body.get("mode") or "demo"), sources=body.get("sources"), strategy=body.get("strategy", "automatic"),
+                detection_method=body.get("detection_method", "absdiff"), smart_options=body.get("smart_options"))
         elif text is not None:
             if not isinstance(text, str):
                 raise HTTPException(400, "text must be a string")
             result = batch_manifest.import_manifest(
                 text=text, date=body.get("date"), product=body.get("product"),
-                mode=str(body.get("mode") or "demo"), sources=body.get("sources"), strategy=body.get("strategy", "automatic"))
+                mode=str(body.get("mode") or "demo"), sources=body.get("sources"), strategy=body.get("strategy", "automatic"),
+                detection_method=body.get("detection_method", "absdiff"), smart_options=body.get("smart_options"))
         else:
             raise HTTPException(400, "text or content_base64 is required")
     except batch_manifest.ManifestError as exc:

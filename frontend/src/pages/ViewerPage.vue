@@ -32,6 +32,7 @@ import NoticeModal from '../components/NoticeModal.vue';
 import SettingsPanel from '../components/SettingsPanel.vue';
 import StatusBar from '../components/StatusBar.vue';
 import { useViewerStore } from '../stores/viewer.js';
+import { useDiffStore } from '../stores/diff';
 
 const viewer = useViewerStore();
 
@@ -56,6 +57,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  useDiffStore().cancelAnalysis();
   viewer.stopImageLoad();
   document.removeEventListener('visibilitychange', onVisibility);
   window.removeEventListener('focus', syncPlatformSettings);

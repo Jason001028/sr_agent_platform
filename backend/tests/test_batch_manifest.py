@@ -59,6 +59,17 @@ class BatchManifestTest(unittest.TestCase):
     def qc(self, *names: str) -> str:
         return "".join(f"{name}\t{DESC}\t张三\n" for name in names)
 
+    def test_smart_detection_is_frozen_and_forces_human_review(self):
+        name = self.scene(809)
+        result = self.import_text(self.qc(name), mode="production", detection_method="smart",
+                                  smart_options={"window":15,"sensor":"JL1KF01"})
+        frozen = batch_manifest.load_manifest(result["manifest_ref"])
+        self.assertEqual(frozen["config"]["strategy"], "review")
+        self.assertEqual(frozen["items"][0]["config"]["detection"]["method"], "smart")
+        self.assertEqual(frozen["items"][0]["config"]["detection"]["smart_options"]["sensor"], "JL1KF01")
+        restored = batch_manifest.load_manifest(result["manifest_ref"])
+        self.assertEqual(restored["manifest_id"],frozen["manifest_id"])
+
     def import_text(self, text: str, **kwargs) -> dict:
         return batch_manifest.import_manifest(text=text, **kwargs)
 

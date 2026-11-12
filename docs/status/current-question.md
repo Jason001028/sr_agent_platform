@@ -1,5 +1,7 @@
 # current_question — 平台现状与交接入口
 
+2026-11-12：Smart Compare 第三种独立检测模式已接入共享差异核心、Viewer、带 Halo 的原图 ROI 精检、原始尺度补扫、候选 Mask 事务、Agent 消息快照、Batch 可选检测与开发者三算法对照。本地合成 TIFF 的真实 HTTP/浏览器检测→精检→Mask→撤销已验证；参数与频域规则仍为实验性，真实内网/生产校准待验。详见 [smart-compare.md](smart-compare.md)。
+
 2026-11-11：工具栏拉伸下拉升级为 332px 交互直方图：黑白场拖动/数值/键盘、常用三模式与更多模式、整图/视野采样统计、双图独立/共享 CDF；JPG 明确只做显示灰度二次拉伸。拖动 RAF 合并到 512² 轻量显示，松手分带更新完整显示，源 DN、分析 token、Camera、ROI/Mask 不变；稀疏 Worker 复用 DN 块，后到像素沿用当前显示版本。真实鼠标、分屏/交替、16M 缓存像素流畅性及 Worker 渐进回填合成验收通过，真实内网/16384² 待核。需完整发布前端和 Worker，详见 [histogram-stretch.md](histogram-stretch.md)。
 
 2026-11-11：「在资源管理器打开」固定走 W: 的问题已改为多盘符候选。原因：客户端 mapping.json 只存安装时的一个 windows_root，handler 不做探测，盘阵在 X: 的机器必然打不开。现安装时写入 windows_roots（-WindowsRoot 指定的盘符、W:\、X:\，去重后），handler 按顺序取第一个目标目录真实存在的盘符；-ValidateOnly 与旧版只写 windows_root 的配置仍可用。改的是客户端组件脚本，需重新下载安装包并覆盖安装才生效；handler 专项 23 项通过（未改注册表、未启动 Explorer），真实 W:/X: 双环境待核。详见 [explorer-open.md](explorer-open.md)。

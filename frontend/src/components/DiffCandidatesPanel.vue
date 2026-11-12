@@ -20,8 +20,8 @@ const hiddenCount = computed(() => Math.max(0, diff.orderedRegions.length - LIST
 const summary = computed(() => {
   const r = diff.result;
   if (!r) return '';
-  const method = r.method === 'ssim' ? '结构差异 SSIM' : '像素差分';
-  const src = r.source === 'source-roi' ? '原始 ROI' : '预览';
+  const method = r.method === 'smart' ? '智能对比' : r.method === 'ssim' ? '结构差异 SSIM' : '像素差分';
+  const src = r.source === 'source-roi' ? '原始 DN 精检' : r.source === 'source-grid' ? '原始 DN 分析网格' : '预览';
   return `${method} · ${src} · 阈值 ${r.parameters.threshold} · ${r.elapsedMs} ms`;
 });
 
@@ -67,6 +67,12 @@ function toggle(reg: DiffRegion) {
 
     <template v-else>
       <p class="dc-summary">{{ summary }}</p>
+      <div v-if="diff.result.method === 'smart'" class="dc-actions">
+        <button class="dc-act" @click="diff.nextRegion(-1)">上一异常</button><button class="dc-act" @click="diff.nextRegion(1)">下一异常</button><button class="dc-act" @click="diff.restoreView()">恢复视野</button>
+        <button class="dc-act" :disabled="diff.busy || diff.stale || !diff.aRec?.sceneId || !diff.bRec?.sceneId" @click="diff.refineVisible()">视野 ROI 原图精检</button>
+        <button class="dc-act" :disabled="diff.busy || diff.stale" @click="diff.refineDrawnRoi()">框选 ROI 精检</button>
+      </div>
+      <button v-if="diff.result.method === 'smart' && diff.selectedRegionIds.length" class="dc-act" :disabled="diff.busy || !!diff.autoDrawReason" :title="diff.autoDrawReason" @click="diff.autoDraw()">将勾选候选加入修复掩码</button>
       <p v-if="diff.toneWeight" class="dc-note">
         已按亮度归因权重排序，热力图同步逐像素加权；灰度取显示层，不是原始 DN。
       </p>
@@ -95,8 +101,10 @@ function toggle(reg: DiffRegion) {
           >
             <span class="dc-no">#{{ pad(reg.rank) }}</span>
             <span class="dc-text">
-              <b>差异区域</b>
-              <small>面积 {{ areaText(reg.areaPx) }} px² · 平均差异 {{ reg.meanDiff.toFixed(3) }}</small>
+              <b>{{ reg.diagnostics ? (reg.diagnostics.classification === 'difference_only' ? '差异 · 模糊证据不足' : '疑似模糊 · 待复核') : '差异区域' }}</b>
+              <small>面积 {{ areaText(reg.areaPx) }} px² · 平均强度 {{ reg.meanDiff.toFixed(3) }}</small>
+              <small v-if="reg.diagnostics && diff.selectedId === reg.id">方差比 {{ reg.diagnostics.varianceRatioMean.toFixed(2) }} · 纹理损失 {{ reg.diagnostics.textureLossMean.toFixed(2) }} · {{ reg.diagnostics.confidence }}</small>
+              <small v-if="reg.diagnostics && diff.selectedId === reg.id">频域 {{ reg.diagnostics.frequency.status }} · 云/水/阴影：{{ Object.values(diff.result.maskAvailability ?? {}).join(' / ') }}</small>
               <template v-if="diff.toneWeight && reg.tone">
                 <span class="dc-tone" :title="'复核权重 ' + reg.tone.weight.toFixed(2) + '×'">
                   <i class="dc-tone-track"><i class="dc-tone-fill" :style="{ width: pct(reg.tone.norm) }"></i></i>
@@ -114,7 +122,7 @@ function toggle(reg: DiffRegion) {
             <button
               type="button"
               class="dc-act"
-              :disabled="diff.stale || reg.contourKind === 'bbox'
+              :disabled="diff.stale || (diff.result.method === 'smart' && !reg.maskEligible) || reg.contourKind === 'bbox'
                 || (reg.contourKind ?? 'exact') !== 'exact' || (reg.holes ?? 0) > 0"
               :title="diff.stale ? '结果已对应旧参数，请重新分析'
                 : reg.contourKind === 'bbox' ? '只有外接矩形轮廓，不能直接作为精确区域'
@@ -122,7 +130,7 @@ function toggle(reg: DiffRegion) {
                 : (reg.contourKind ?? 'exact') !== 'exact' ? '轮廓简化后与真实掩码偏差较大，请手工绘制'
                 : '把该区域轮廓加入结果对应影像的人工掩码'"
               @click="diff.addRegionToMask(reg.id)"
-            >加入掩码</button>
+            >加入修复掩码</button>
             <button
               type="button"
               class="dc-act"

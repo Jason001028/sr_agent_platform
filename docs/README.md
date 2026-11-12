@@ -8,6 +8,8 @@
 
 Skill 加载与外部工具调用接口见 [skill_interface.md](planning/skill_interface.md)。
 
+Smart Compare 智能对比、原始 DN 精检、候选 Mask、Agent/Batch 接入与实测审查报告见 [smart-compare.md](status/smart-compare.md)。
+
 交互式直方图拉伸、黑白场、视野统计及双图共享映射见 [histogram-stretch.md](status/histogram-stretch.md)。
 
 选择影像原生路径组件、未关联时服务端 JPG 优先及缓存清理见 [server-jpg-picker.md](status/server-jpg-picker.md)。

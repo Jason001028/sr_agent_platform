@@ -206,7 +206,8 @@ def bind_registry(registry, snapshot, *, store=None, session_id=None):
     result.register(Tool('get_current_image_info',
         '零参数只读查询本条消息冻结的 Viewer current、selected_ids/selected_images、displayed 显示格、ROI、掩码与 differences 区域摘要。'
         '返回 image、captured_at、source=message_viewer_snapshot、attachment_count 和已有观察字段；缺失属性未知。'
-        'differences.selected_ids 对应用户勾选区域，BBox 带坐标空间。关联 Batch Goal 从本会话服务端读取真实阶段、检测/提交/验收进度。'
+        'differences.selected_ids 对应用户勾选区域，BBox 带坐标空间。method=smart 为智能对比，evidence 是候选证据，非确认缺陷或已校准概率；mask_availability=unverified 表示干扰未验证。'
+        '只读摘要不含热力图或像素，不能据此自动提交 SR 或修改质量等级；原始 DN 精检状态见 source/refined。关联 Batch Goal 从本会话服务端读取真实阶段、检测/提交/验收进度。'
         '无需截图即可查询元数据；不搜索场景库、不执行视觉分析，也不授予文件访问权限。'
         '未绑定快照时返回错误，不自行寻找替代影像。',
         {'type': 'object', 'properties': {}, 'additionalProperties': False}, current_info))

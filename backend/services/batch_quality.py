@@ -226,6 +226,8 @@ def verify_goal(store,goal):
         if item["status"]=="SKIPPED": continue
         if item["status"]=="NO_ISSUE":
             d=item["checkpoint"].get("detection",{})
+            if d.get("analysis",{}).get("calibrationStatus") == "experimental-unvalidated":
+                reasons.append("智能对比未检出候选不等于人工质量通过；实验性参数尚未生产校准")
             if d.get("provenance")!="real" or d.get("detector_name")!="shared-difference" or d.get("candidate_accounting",{}).get("unprocessed",1): reasons.append("未验证的无异常结果")
             for key in ("target_image","reference_image"):
                 try:

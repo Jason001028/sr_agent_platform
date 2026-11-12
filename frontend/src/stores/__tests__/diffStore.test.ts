@@ -175,6 +175,57 @@ function makeViewer() {
   return state;
 }
 
+describe('Smart Compare integration', () => {
+  function setup() {
+    const a=mocks.viewer.recs[0],b=mocks.viewer.recs[1];
+    a.stageKind='input';b.stageKind='nosr';b.name='PAN_NOSR';
+    a.sceneDir=b.sceneDir='/fixture';
+    const diff=useDiffStore();diff.setPair(1,2);diff.method='smart';
+    return diff;
+  }
+  function answer(req:any) {
+    return fakeResult({method:'smart',source:req.precision==='source-roi'?'source-roi':'source-grid',
+      imageA:{...fakeResult().imageA,...req.image_a},imageB:{...fakeResult().imageB,...req.image_b},
+      analysisGrid:{...fakeResult().analysisGrid,mode:req.precision==='source-roi'?'source':'preview'},
+      scoreSemantics:'relative-texture-loss-not-probability',algorithmVersion:'experimental'});
+  }
+  it('uses real DN source-grid with explicit roles and no PNG upload; display controls do not reanalyze',async()=>{
+    const diff=setup();mocks.api.mockImplementation(async(_cfg,req)=>answer(req));
+    expect(await diff.analyze()).toBe(true);
+    const req=mocks.api.mock.calls[0][1];
+    expect(req.precision).toBe('source-grid');expect(req.referenceSide).toBe('B');
+    expect(req.image_a.grayPng).toBeUndefined();expect(req.maxEdge).toBe(2048);
+    const result=diff.result;
+    diff.opacity=.2;diff.displayThreshold=.7;diff.boundariesVisible=false;await nextTick();
+    expect(mocks.api).toHaveBeenCalledTimes(1);expect(diff.result).toBe(result);
+    expect(diff.opacity).toBe(.2);expect(diff.stale).toBe(false);
+  });
+  it('refines the bound source ROI and restores the overview',async()=>{
+    const diff=setup();mocks.api.mockImplementation(async(_cfg,req)=>answer(req));
+    await diff.analyze();const overview=diff.result;
+    expect(await diff.refineRegion('r001')).toBe(true);
+    expect(mocks.api.mock.calls[1][1].precision).toBe('source-roi');
+    expect(mocks.api.mock.calls[1][1].image_a.sourceRevision).toBe('v1');
+    expect(diff.result?.source).toBe('source-roi');
+    await diff.restorePreview();expect(diff.result).toBe(overview);
+  });
+  it('rejects old/other roles and protects unrefined candidates from Mask insertion',async()=>{
+    const diff=setup();mocks.viewer.recs[1].tourIdentity.role='pan_old';mocks.viewer.recs[1].stageKind='input';
+    expect(await diff.analyze()).toBe(false);expect(mocks.api).not.toHaveBeenCalled();
+    mocks.viewer.recs[1].tourIdentity.role='nosr';mocks.viewer.recs[1].stageKind='nosr';
+    mocks.api.mockImplementation(async(_cfg,req)=>answer(req));await diff.analyze();
+    expect(diff.addRegionToMask('r001')).toBe(false);expect(mocks.viewer.addMaskPolygon).not.toHaveBeenCalled();
+  });
+  it('aborts a request and ignores its late result after switching image',async()=>{
+    const diff=setup();let finish!:(v:any)=>void;
+    mocks.api.mockImplementation((_cfg,req)=>new Promise(resolve=>{finish=()=>resolve(answer(req));}));
+    const pending=diff.analyze();await Promise.resolve();
+    const signal=mocks.api.mock.calls[0][2] as AbortSignal;
+    diff.setPair(1,3);expect(signal.aborted).toBe(true);finish(null);await pending;
+    expect(diff.result).toBeNull();expect(diff.busy).toBe(false);
+  });
+});
+
 beforeEach(() => {
   setActivePinia(createPinia());
   vi.stubGlobal('document', { createElement: () => new FakeCanvas() });

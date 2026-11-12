@@ -11,11 +11,12 @@ import type { BatchImportResult } from '../lib/api';
 const emit = defineEmits<{ created: [] }>();
 const viewer = useViewerStore(), batch = useBatchGoalStore(), chat = useChatStore();
 const groups = ref<RepairSequence[]>([]), busy = ref(false), loading = ref(false), error = ref('');
+const detectionMethod = ref<'absdiff' | 'ssim' | 'smart'>('absdiff');
 const chosen = computed(() => groups.value.filter(g => g.checked && g.count && !g.reason && !g.loading));
 let generation = 0;
 onBeforeUnmount(() => { generation++; });
 let frozen: { scope: string; result: BatchImportResult; requestKey: string } | null = null;
-const scope = () => JSON.stringify([chat.sessionId, chosen.value.map(g => g.path)]);
+const scope = () => JSON.stringify([chat.sessionId, chosen.value.map(g => g.path), detectionMethod.value]);
 watch(() => JSON.stringify(viewer.recsOrdered.map(r => [r.id, r.sceneDir, r.previewOnly])), async () => {
   const token = ++generation;
   frozen = null;
@@ -42,7 +43,9 @@ async function start() {
   const sources = chosen.value.map(g => ({ path: g.path, name: g.name, evidence: `Viewer 序列 ${g.ordinal}；自动批量修复` }));
   try {
     if (!frozen || frozen.scope !== key) {
-      const result = await apiBatchImport('', 'production', sources, 'automatic');
+      const result = detectionMethod.value === 'absdiff'
+        ? await apiBatchImport('', 'production', sources, 'automatic')
+        : await apiBatchImport('', 'production', sources, 'review', detectionMethod.value);
       if (key !== scope() || token !== generation) throw new Error('序列或会话已变化，请重新开始');
       const problem = importProblem(result);
       if (problem) throw new Error(problem);
@@ -61,6 +64,8 @@ async function start() {
 <template>
   <div class="draft" data-e2e="batch-draft" :aria-busy="busy || loading">
     <p>选择左侧生产序列，自动处理组内全部符合条件的 PAN 本体。</p>
+    <label>检测方法 <select v-model="detectionMethod" :disabled="busy || loading" aria-label="批量检测方法"><option value="absdiff">像素差异</option><option value="ssim">结构差异</option><option value="smart">智能对比（实验性，需人工复核）</option></select></label>
+    <p v-if="detectionMethod === 'smart'">智能候选不会自动提交 SR；先复核候选掩码，再沿用人工质量验收。未检出候选不等于质量通过。</p>
     <div class="selection"><span>{{ groups.length }} 组序列</span><button :disabled="busy || loading" @click="selectAll(true)">全选</button><button :disabled="busy || loading" @click="selectAll(false)">取消全选</button></div>
     <div class="sequence-list">
       <label v-for="g in groups" :key="g.key" class="sequence-row" :class="{ selected: g.checked }">

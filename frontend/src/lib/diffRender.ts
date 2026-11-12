@@ -6,6 +6,9 @@ export const HEAT_GRADIENT = `linear-gradient(to right, ${HEAT_COLORS.join(', ')
 export const UNANALYZED_COLOR = '#202C39';
 export const NODATA_COLOR = '#637180';
 const stops = HEAT_COLORS.map(c => [1, 3, 5].map(i => parseInt(c.slice(i, i + 2), 16)));
+export const SMART_HEAT_COLORS = ['#2451a4', '#13bfc6', '#f4d74d', '#f18b32', '#d6332f'];
+export const SMART_HEAT_GRADIENT = `linear-gradient(to right, ${SMART_HEAT_COLORS.join(', ')})`;
+const smartStops = SMART_HEAT_COLORS.map(c => [1, 3, 5].map(i => parseInt(c.slice(i, i + 2), 16)));
 
 /** Color only: neither intensity bytes nor validity are modified. */
 export function colorizeHeatPixels(data: Uint8ClampedArray, valid?: Uint8ClampedArray): Uint8ClampedArray {
@@ -34,22 +37,27 @@ export function colorizeHeatBytes(
   height: number,
   valid?: Uint8Array | null,
   weights?: Uint8Array | null,
+  options?: { smart?: boolean; threshold?: number; selectedBbox?: [number, number, number, number] | null },
 ): Uint8ClampedArray {
   const n = width * height;
   const rgba = new Uint8ClampedArray(n * 4);
+  const palette = options?.smart ? smartStops : stops;
   for (let i = 0; i < n; i++) {
     if (valid && !valid[i]) continue;
     let v = intensity[i];
+    if (v / 255 < (options?.threshold ?? 0)) continue;
     if (weights) {
       const scaled = v * decodeToneWeight(weights[i]);
       v = scaled >= 255 ? 255 : scaled;
     }
-    const position = v / 255 * (stops.length - 1);
-    const index = Math.min(stops.length - 2, Math.floor(position));
+    const position = v / 255 * (palette.length - 1);
+    const index = Math.min(palette.length - 2, Math.floor(position));
     const t = position - index;
     const o = i * 4;
-    for (let c = 0; c < 3; c++) rgba[o + c] = Math.round(stops[index][c] * (1 - t) + stops[index + 1][c] * t);
+    for (let c = 0; c < 3; c++) rgba[o + c] = Math.round(palette[index][c] * (1 - t) + palette[index + 1][c] * t);
     rgba[o + 3] = 255;
+    const box = options?.selectedBbox;
+    if (box && (i % width < box[0] || i % width >= box[0]+box[2] || Math.floor(i/width) < box[1] || Math.floor(i/width) >= box[1]+box[3])) rgba[o+3] = 85;
   }
   return rgba;
 }

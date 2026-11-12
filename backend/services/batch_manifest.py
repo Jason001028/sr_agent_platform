@@ -414,7 +414,8 @@ def _publish(manifest_id: str, raw: bytes, manifest: dict) -> Path:
 def import_manifest(*, data: bytes | None = None, text: str | None = None,
                     encoding: str = "auto", date: str | None = None,
                     product: str | None = None, mode: str = "demo",
-                    sources: list[dict] | None = None, strategy: str = "automatic") -> dict:
+                    sources: list[dict] | None = None, strategy: str = "automatic",
+                    detection_method: str = "absdiff", smart_options: dict | None = None) -> dict:
     """Freeze a QC TXT import; no Goal is created here."""
     if data is not None:
         raw = bytes(data)
@@ -434,6 +435,16 @@ def import_manifest(*, data: bytes | None = None, text: str | None = None,
         raise ManifestError("mode 只支持 demo、production")
     if not isinstance(strategy, str) or strategy not in {"automatic", "review"}:
         raise ManifestError("strategy 只支持 automatic、review")
+    if detection_method not in ("absdiff", "ssim", "smart"):
+        raise ManifestError("detection_method 只支持 absdiff、ssim、smart")
+    if detection_method == "smart":
+        from backend.services.blur_detection import config_from_dict
+        try:
+            config_from_dict(smart_options)
+        except (ValueError, TypeError) as e:
+            raise ManifestError(str(e)) from e
+        # Experimental candidates always enter the existing human review path.
+        strategy = "review"
     parsed = parse_qc_text(decoded)
     if sources is not None:
         if not isinstance(sources, list) or len(sources) > MAX_ITEMS:
@@ -497,6 +508,11 @@ def import_manifest(*, data: bytes | None = None, text: str | None = None,
         for item in items:
             item["config"]["detection"]={"mode":"diff","method":"absdiff","sensitivity":"standard",
                 "max_edge":2048,"min_area_px":64,"margin":"standard","version":"shared-difference.v1"}
+            if detection_method != "absdiff":
+                item["config"]["detection"]["method"] = detection_method
+            if detection_method == "smart":
+                item["config"]["detection"]["smart_options"] = smart_options or {}
+                item["config"]["detection"]["version"] = "smart-compare-0.1-experimental"
     content = {
         "version": MANIFEST_VERSION,
         "workflow": WORKFLOW,

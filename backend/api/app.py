@@ -38,6 +38,8 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
+import threading
 import logging
 import os
 import time
@@ -1449,9 +1451,41 @@ def create_app() -> FastAPI:
 
         本端点不写盘、不触发 SR，结果可以给 Viewer / Batch Goal / Agent 共用。
         """
-        body = await _json_body(request)
+        # Reject oversized PNG envelopes while streaming, before JSON/base64
+        # decoding. Existing heavy_work bounds CPU/disk concurrency.
+        chunks = bytearray()
+        async for chunk in request.stream():
+            if len(chunks) + len(chunk) > 48 * 1024 * 1024:
+                raise HTTPException(413, "差异分析请求超过 48 MiB")
+            chunks.extend(chunk)
+        try:
+            body = json.loads(chunks)
+        except (ValueError, UnicodeError) as e:
+            raise HTTPException(400, "请求体必须是 JSON 对象") from e
+        if not isinstance(body, dict):
+            raise HTTPException(400, "请求体必须是 JSON 对象")
+        cancelled = threading.Event()
+        deadline = time.monotonic() + 120
+        def check_cancelled():
+            if cancelled.is_set() or time.monotonic() > deadline:
+                raise image_diff.DiffError("检测已取消或超过 120 秒预算")
+        body["_cancel_check"] = check_cancelled
 
         def _run():
+            check_cancelled()
+            body["method"] = image_diff._method(body.get("method"))
+            if body.get("method") == "smart" or body.get("compare") is True:
+                from backend.services import smart_compare
+                resolve = lambda sid: _diff_source_path(sid, root)
+                if body.get("precision") == "source-tiled":
+                    return smart_compare.analyze_native_scan(body, resolve)
+                if body.get("precision") == "source-roi":
+                    return smart_compare.analyze_roi(body, resolve)
+                if body.get("precision") != "preview":
+                    return smart_compare.analyze_grid(body, resolve)
+                if body.get("compare") is True:
+                    raise image_diff.DiffError("三算法对照需要共享原始 DN 分析网格")
+                body["source"] = "preview"
             if str(body.get("precision") or "") == "source-roi":
                 return _diff_source_roi(body, root)
             return image_diff.analyze_payload(
@@ -1460,7 +1494,20 @@ def create_app() -> FastAPI:
         try:
             # SSIM、形态学、PNG 编码与原始 TIFF 窗口读取都是同步 CPU/磁盘工作，
             # 放到工作线程，避免阻塞事件循环与同一 worker 上的 SSE 请求。
-            return await app.state.heavy_work.run(_run)
+            async def watch_disconnect():
+                while not cancelled.is_set():
+                    if await request.is_disconnected():
+                        cancelled.set()
+                        return
+                    await asyncio.sleep(.25)
+            monitor = asyncio.create_task(watch_disconnect())
+            try:
+                return await asyncio.wait_for(app.state.heavy_work.run(_run), timeout=120)
+            except asyncio.TimeoutError as e:
+                raise HTTPException(504, "差异分析超过 120 秒预算") from e
+            finally:
+                cancelled.set()
+                monitor.cancel()
         except image_diff.DiffError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         except PathDeniedError as e:
@@ -2543,6 +2590,7 @@ def create_app() -> FastAPI:
         body = scene_search.body_path(scene_dir) if tour else None
         if tour and (body is not None or inp is not None):
             body = body or inp
+            explicit_aliases = {}
             fixed = [("pan", body)]
             if inp is not None:
                 fixed.append(("pan", inp))
@@ -2586,6 +2634,7 @@ def create_app() -> FastAPI:
                         p = raster
                 if p.suffix.lower() not in (".tif", ".tiff"):
                     continue
+                explicit_aliases.setdefault(p.resolve(), []).append(sid)
                 fixed.append((role, p))
             whitelist([p for _, p in fixed], "巡览配对")
             seen = set()
@@ -2595,6 +2644,7 @@ def create_app() -> FastAPI:
                 seen.add(p)
                 entry = item("nosr" if role == "nosr" else "input" if role == "pan" else "product", p)
                 entry["tourIdentity"] = image_identity(p, scene_dir.as_posix(), role)
+                entry["aliases"] = explicit_aliases.get(p.resolve(), [])
                 tour_items.append(entry)
         elif tour:
             tour_diagnostics.append("场景元数据未能确定生产本体，请核对 Scene 关联")

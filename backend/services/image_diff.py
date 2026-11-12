@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import base64
 import io
+import hashlib
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,7 +53,7 @@ except Exception:  # noqa: BLE001 - 没装 scikit-image 时走兜底
 from backend.services import preview_jpg
 
 
-METHODS = ("absdiff", "ssim")
+METHODS = ("absdiff", "ssim", "smart")
 SENSITIVITIES = ("low", "standard", "high")
 
 #: 分析网格长边上限。前端默认按 2048 生成；后端只做兜底校验（再大内存与耗时都失控）。
@@ -65,6 +66,7 @@ MAX_EDGE = 4096
 THRESHOLD_PRESETS = {
     "absdiff": {"low": 0.20, "standard": 0.12, "high": 0.07},
     "ssim": {"low": 0.26, "standard": 0.15, "high": 0.08},
+    "smart": {"low": 0.7, "standard": 0.5, "high": 0.3},
 }
 
 DEFAULT_MIN_AREA_PX = 64
@@ -99,6 +101,8 @@ def decode_gray_png(data: str) -> tuple[np.ndarray, np.ndarray]:
         raise DiffError(f"影像数据不是合法 base64：{e}") from e
     try:
         with Image.open(io.BytesIO(blob)) as im:
+            if max(im.size) > MAX_EDGE or min(im.size) < 2:
+                raise DiffError("PNG 分析网格必须在 2–4096 px 内")
             im.load()
             if im.mode in ("RGBA", "LA"):
                 arr = np.asarray(im.convert("RGBA"))
@@ -522,6 +526,10 @@ def analyze_arrays(
     auto_mask: bool = False,
     auto_mask_margin: str = "standard",
     auto_mask_limit: int = 16,
+    smart_options: dict | None = None,
+    reference_side: str | None = None,
+    scene_masks: dict | None = None,
+    score_override: np.ndarray | None = None,
 ) -> dict:
     """核心入口。数组形状必须一致；不一致由调用方先重采样。
 
@@ -537,6 +545,10 @@ def analyze_arrays(
         raise DiffError(f"两张影像的分析网格不一致：{a.shape} / {b.shape}")
     if a.ndim != 2:
         raise DiffError("差异分析只支持单通道灰度分析网格")
+    if max(a.shape) > MAX_EDGE or min(a.shape) < 2:
+        raise DiffError("分析网格超出支持范围")
+    if method == "smart" and reference_side not in ("A", "B"):
+        raise DiffError("智能对比必须明确 NOSR referenceSide=A/B；禁止猜测输入方向")
 
     valid = np.isfinite(a) & np.isfinite(b)
     if valid_a is not None:
@@ -562,8 +574,10 @@ def analyze_arrays(
     b = np.where(valid, b, 0.0).astype(np.float32)
 
     # 同一灰度范围归一化（绝不对两张图分别自动拉伸）。
-    a, b = _shared_normalize(a, b, valid)
+    if method != "smart":
+        a, b = _shared_normalize(a, b, valid)
 
+    smart_context = (a, b, valid) if method == "smart" else None
     x0, y0, x1, y1 = _roi_slice(roi, a.shape)
     a = a[y0:y1, x0:x1]
     b = b[y0:y1, x0:x1]
@@ -571,12 +585,34 @@ def analyze_arrays(
     if not valid.any():
         raise DiffError("分析范围内没有共同有效像素（全部是 NoData）")
 
-    if blur:
+    if blur and method != "smart":
         # 有效邻域加权平滑；图外/NoData 不当 0 参与平均。
         a = _masked_blur(a, valid, sigma=1.0 / 3.0)
         b = _masked_blur(b, valid, sigma=1.0 / 3.0)
 
-    if method == "absdiff":
+    evidence = None
+    if method == "smart":
+        from backend.services import blur_detection as bd
+        try:
+            smart_config = bd.config_from_dict(smart_options)
+            full_a, full_b, full_valid = smart_context
+            full_reference, full_target = (full_a, full_b) if reference_side == "A" else (full_b, full_a)
+            evidence = bd.analyze_texture(full_reference, full_target, valid=full_valid, config=smart_config)
+            if score_override is not None:
+                override = np.asarray(score_override, dtype=np.float32)
+                if override.shape != full_valid.shape or not np.isfinite(override).all() or (override < 0).any() or (override > 1).any():
+                    raise DiffError("Invalid internal native-scan score grid")
+                evidence["score"] = override
+            bd.apply_scene_masks(evidence, scene_masks, smart_config)
+            for key, value in list(evidence.items()):
+                if isinstance(value, np.ndarray):
+                    evidence[key] = value[y0:y1, x0:x1]
+            evidence["sceneMasks"] = {key: value[y0:y1, x0:x1] for key, value in evidence.get("sceneMasks", {}).items()}
+            reference, target = (a, b) if reference_side == "A" else (b, a)
+            diff = evidence["score"]
+        except (ValueError, TypeError) as e:
+            raise DiffError(str(e)) from e
+    elif method == "absdiff":
         diff = np.abs(a - b).astype(np.float32)
     else:
         # SSIM 窗口不能吃 NaN；用最近有效像素填充无效位置，最后仍按 valid 清零。
@@ -642,6 +678,15 @@ def analyze_arrays(
             "contourKind": contour_kind,
             "holes": holes,
         })
+        if evidence is not None:
+            digest = hashlib.sha256(np.packbits(labels[r.y:r.y+r.h, r.x:r.x+r.w] == r.label).tobytes()
+                                    + f"{r.x+x0},{r.y+y0},{r.w},{r.h}".encode()).hexdigest()[:16]
+            out_regions[-1]["id"] = "smart-" + digest
+            seed_y, seed_x = np.nonzero(labels[r.y:r.y+r.h, r.x:r.x+r.w] == r.label)
+            out_regions[-1]["componentSeed"] = [int(seed_x[0]+r.x), int(seed_y[0]+r.y)]
+            out_regions[-1]["_label"] = r.label
+            out_regions[-1]["diagnostics"] = bd.region_diagnostics(evidence, labels, out_regions[-1], reference, target, smart_config)
+            out_regions[-1]["maskEligible"] = contour_kind == "exact" and not holes
 
     notes = list(warnings or [])
     if hole_regions:
@@ -692,6 +737,29 @@ def analyze_arrays(
         "warnings": notes,
         "elapsedMs": int(round(took)),
     }
+    if evidence is not None:
+        result.update({key: evidence[key] for key in (
+            "algorithmVersion", "scoreSemantics", "maskAvailability", "calibrationStatus", "normalization")})
+        result["evidenceMaps"] = {
+            "varianceRatioLog2": _b64_png((np.clip((np.log2(np.maximum(evidence["varianceRatio"], 1e-12))+8)/16,0,1)*255).astype(np.uint8)),
+            "varianceRatioEncoding": "R=2**(byte/255*16-8); display range 1/256..256; raw region statistics preserved",
+            "textureLoss": _b64_png((np.clip(evidence["textureLoss"] / 4, 0, 1) * 255).astype(np.uint8)),
+            "informative": _b64_png(evidence["informative"].astype(np.uint8) * 255),
+            "textureLossEncoding": "value=byte/255*4; clipped at 4",
+        }
+        result["sensorProfile"] = {"sensor": smart_config.sensor, "version": bd.VERSION,
+                                   "source": "generic-experimental", "productionCalibrated": False}
+        result["parameters"]["smartOptions"] = smart_options or {}
+        result["parameters"]["referenceSide"] = reference_side
+        result["parameters"]["blur"] = False
+        result["analysisPrecision"] = {"source": source, "windowsAnalysisPixels": evidence["windowsAnalysisPixels"],
+            "windowsSourceA": [[n * v for v in (scale_a or (1., 1.))] for n in evidence["windowsAnalysisPixels"]],
+            "halo": evidence["halo"], "nativeRefined": source == "source-roi"}
+        result["regionDiagnostics"] = [{"id": r["id"], **r["diagnostics"]} for r in out_regions]
+        result["filterReasons"] = {"minArea": len(regions)-len(kept),
+            "insufficientTexturePixels": int((valid & ~evidence["informative"]).sum())}
+        result["warnings"].extend(["智能对比为实验性纹理损失证据，评分不是模糊概率；候选需人工复核。",
+            "云、水、阴影掩膜未验证时，不代表干扰不存在。下采样可能遗漏细小缺陷。"])
     if auto_mask:
         from backend.services.auto_mask_geometry import build_auto_mask
         try:
@@ -777,6 +845,8 @@ def analyze_payload(payload: dict, *, load_scene=None) -> dict:
         warnings=warnings,
         auto_mask=payload.get("autoMask") is True,
         auto_mask_margin=payload.get("autoMaskMargin", "standard"),
+        smart_options=payload.get("smartOptions"),
+        reference_side=payload.get("referenceSide"),
     )
     result["imageA"] = {
         "id": spec_a.get("id"), "name": spec_a.get("name"),
@@ -796,6 +866,12 @@ def analyze_payload(payload: dict, *, load_scene=None) -> dict:
         result["analysisGrid"]["mode"] = "source"
     result["elapsedMs"] = int(round((time.perf_counter() - started) * 1000))
     result["operation"] = "difference-localization"
+    if method == "smart":
+        result["sourceIdentity"] = {"referenceSide": payload.get("referenceSide"),
+            "registration": "caller-declared-preview-unverified", "images": [
+                {"id": s.get("id"), "revision": s.get("sourceRevision"), "sceneId": s.get("sceneId")} for s in (spec_a, spec_b)]}
+        for region in result["regions"]:
+            region["maskEligible"] = False
     if payload.get("autoMask") is True:
         from backend.services.auto_mask_geometry import bind_auto_mask
         try:

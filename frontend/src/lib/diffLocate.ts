@@ -15,7 +15,24 @@
 
 import type { RegionToneStats } from './diffTone';
 
-export type DiffMethod = 'absdiff' | 'ssim';
+export type DiffMethod = 'absdiff' | 'ssim' | 'smart';
+export interface SmartOptions {
+  window: number;
+  sensor: string;
+  frequencyReview: boolean;
+  sceneSuppression: boolean;
+  calibrationScale?: number;
+}
+export interface SmartDiagnostic {
+  classification: 'difference_only' | 'blur_candidate' | 'joint_confirmed';
+  reviewStatus: string;
+  scoreMean: number; scoreMax: number; scoreP95: number;
+  varianceRatioMean: number; textureLossMean: number;
+  compactness: number; aspectRatio: number; orientationDegrees: number;
+  sceneOverlap: Record<string, number>; confidence: string;
+  frequency: { status: string; experimental: boolean };
+  reasons: string[];
+}
 export type DiffSensitivity = 'low' | 'standard' | 'high';
 export type DiffScope = 'common' | 'visible';
 export type DiffDisplay = 'heat' | 'regions' | 'overlay';
@@ -28,6 +45,7 @@ export const ANALYSIS_MAX_EDGE = 2048;
 export const DIFF_THRESHOLD_PRESETS: Record<DiffMethod, Record<DiffSensitivity, number>> = {
   absdiff: { low: 0.2, standard: 0.12, high: 0.07 },
   ssim: { low: 0.26, standard: 0.15, high: 0.08 },
+  smart: { low: 0.7, standard: 0.5, high: 0.3 },
 };
 
 export interface DiffAdvanced {
@@ -50,6 +68,9 @@ export const DEFAULT_ADVANCED: DiffAdvanced = {
 };
 
 export interface DiffRegion {
+  diagnostics?: SmartDiagnostic;
+  maskEligible?: boolean;
+  sourceBboxA?: [number, number, number, number];
   id: string;
   rank: number;
   areaPx: number;
@@ -117,10 +138,19 @@ export interface DiffParameters {
 }
 
 export interface DiffResult {
+  algorithmVersion?: string;
+  scoreSemantics?: string;
+  maskAvailability?: Record<string, string>;
+  calibrationStatus?: string;
+  normalization?: { scale: number; logRatioBaseline: number; mode: string };
+  analysisPrecision?: { source: string; nativeRefined: boolean; windowsAnalysisPixels: number[] };
+  comparison?: { summary: {method: DiffMethod; regions: number; areaPixels: number; coverage: number; elapsedMs: number; status: string}[];
+    overlaps: {methods: string[]; iou: number; onlyA: number; onlyB: number}[];
+    smartUniquePixels: number; results: Record<DiffMethod, DiffResult> };
   autoMask?: AutoMaskGeometry;
   operation: 'difference-localization';
   method: DiffMethod;
-  source: 'preview' | 'source-roi';
+  source: 'preview' | 'source-roi' | 'source-grid' | 'source-tiled';
   imageA: DiffImageMeta;
   imageB: DiffImageMeta;
   analysisGrid: DiffAnalysisGrid;
@@ -154,6 +184,9 @@ export interface DiffImageInput {
 }
 
 export interface DiffRequest {
+  smartOptions?: SmartOptions;
+  referenceSide?: 'A' | 'B';
+  compare?: boolean;
   autoMask?: boolean;
   autoMaskMargin?: 'tight' | 'standard' | 'loose';
   autoMaskGrid?: { width: number; height: number; x: number; y: number };
@@ -170,7 +203,7 @@ export interface DiffRequest {
   roi?: { x: number; y: number; w: number; h: number } | null;
   image_a: DiffImageInput;
   image_b: DiffImageInput;
-  precision?: 'source-roi';
+  precision?: 'source-roi' | 'source-grid' | 'preview' | 'source-tiled';
 }
 
 export interface AutoMaskSource {
@@ -180,6 +213,7 @@ export interface AutoMaskSource {
   transform: { scale: [number, number]; offset: [number, number] } | null;
 }
 export interface AutoMaskPolygon {
+  candidate_ids?: string[];
   source_polygons: { image_id: number; points: [number, number][];
     coordinate_space: 'source_pixel'; coverage_ratio: number; drawable: boolean }[];
   region_id: string; rank: number; coordinate_space: 'analysis_pixel';

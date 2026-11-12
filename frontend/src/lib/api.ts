@@ -611,11 +611,12 @@ export const queueEventsUrl = (cfg: SrConfig): string => apiUrl(cfg, '/api/queue
 export const diffAnalyzeUrl = (cfg: SrConfig): string => apiUrl(cfg, '/api/diff/analyze');
 
 /** 智能差异定位（只读）。请求体见 `lib/diffLocate.ts::DiffRequest`。 */
-export async function apiDiffAnalyze(cfg: SrConfig, body: DiffRequest): Promise<DiffResult> {
+export async function apiDiffAnalyze(cfg: SrConfig, body: DiffRequest, signal?: AbortSignal): Promise<DiffResult> {
   const r = await http(diffAnalyzeUrl(cfg), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
+    signal,
   });
   return (await r.json()) as DiffResult;
 }
@@ -1539,6 +1540,7 @@ export async function apiResolveScene(
 /** 一类图。字段与 backend/api/app.py 里 `scene_siblings.item()` 一一对应，
  *  **名字也一样**（后端就是这么取的）——两边一起改的时候不容易漏。 */
 export interface SceneSibling {
+  aliases?: string[];
   tourIdentity?: Omit<import('./tourCompare').TourImage,'id'>;
   kind: 'input' | 'product' | 'nosr';
   /** 这一类自己的不透明 id（供 /api/scenes/{id}/preview）。拼不出名字时为 null。 */
@@ -1738,9 +1740,9 @@ export interface BatchImportResult {
   diagnostics: { line: number; severity: string; message: string }[];
   items: { item_id: string; ordinal: number; name: string; scene_ref: string; source_lines: number[] }[];
 }
-export async function apiBatchImport(text: string, mode: 'demo' | 'production', sources: { path: string; name: string; evidence: string }[] = [], strategy: 'automatic' | 'review' = 'automatic'): Promise<BatchImportResult> {
+export async function apiBatchImport(text: string, mode: 'demo' | 'production', sources: { path: string; name: string; evidence: string }[] = [], strategy: 'automatic' | 'review' = 'automatic', detectionMethod: 'absdiff' | 'ssim' | 'smart' = 'absdiff'): Promise<BatchImportResult> {
   const r = await http(apiUrl(loadSrConfig(), '/api/goals/batch-imports'), {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, mode, sources, strategy }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, mode, sources, strategy, ...(detectionMethod !== 'absdiff' ? {detection_method:detectionMethod} : {}) }),
   });
   return r.json();
 }

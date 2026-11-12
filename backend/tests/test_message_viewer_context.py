@@ -19,6 +19,20 @@ def test_baseline_missing_state():
     assert not bind_registry(ToolRegistry(), None).invoke('get_current_image_info')['ok']
 
 
+def test_smart_summary_is_message_frozen_and_contains_no_raster():
+    value=validate_snapshot({'version':1,'current':{'id':1,'name':'PAN'},'differences':{
+        'method':'smart','source':'source-roi','completed':True,'algorithm_version':'experimental',
+        'mask_availability':{'cloud':'unverified','water':'unverified','shadow':'unverified'},
+        'regions':[{'id':'candidate-1','bbox':[10,20,30,40],'refined':True,
+                    'evidence':{'classification':'blur_candidate','review_status':'pending-human-review'}}]}})
+    first=bind_registry(ToolRegistry(),value)
+    value['differences']['regions'].clear()
+    data=first.invoke('get_current_image_info')['data']
+    assert len(data['differences']['regions'])==1
+    assert 'differenceMap' not in json.dumps(data)
+    assert not bind_registry(ToolRegistry(),None).invoke('get_current_image_info')['ok']
+
+
 def test_regions_roi_masks_and_session_bound_batch_are_observed_without_file_authority():
     from unittest.mock import Mock
     value = validate_snapshot({'version': 1, 'current': {'id': 1, 'name': 'PAN', 'image_key': 'known'},
