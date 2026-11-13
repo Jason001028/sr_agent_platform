@@ -1,5 +1,16 @@
 # Learnings
 
+## 2026-11-13 — Smart Compare review corrections
+
+Category: correction. Cached comparison results need an immutable source,
+scope and parameter signature independent of the displayed method. Never
+re-sign cached data with the current key. Native max-score aggregation must
+carry validity and evidence from the same source sample; a second sparse read
+cannot validate the first. Morphology needs context before ROI cropping.
+Scene interference changes confidence/priority rather than deleting candidates.
+Experimental no-candidate results require an input-bound whole-scene human
+review with no invented Job or Mask. Test this path through batch completion.
+
 ## 2026-11-13 — Smart Compare spatial and publication checks
 
 Category: best_practice. A cropped analysis result retains the full grid's

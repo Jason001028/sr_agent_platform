@@ -1,5 +1,14 @@
 # Errors
 
+## 2026-11-13 — Review-fix verification setup
+
+The new component fixture initially omitted its API audit array; complete the
+fixture instead of relaxing the production schema. Whole-scene completion
+tests must set SR_BATCH_ARTIFACT_DIR to their temporary workspace. A generated
+report from the first run was moved under ignored test-tifs artifacts.
+Windows PowerShell stdin can replace non-ASCII Python source: use apply_patch
+or escaped Unicode data and assert document replacements actually match.
+
 ## 2026-11-13 — Smart Compare verification
 
 New source-scale regression initially assumed the common grid followed NOSR;
