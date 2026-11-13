@@ -1479,6 +1479,11 @@ def create_app() -> FastAPI:
             body["method"] = image_diff._method(body.get("method"))
             if body.get("method") == "smart" or body.get("compare") is True:
                 from backend.services import smart_compare
+                precision = body.get("precision") or "source-grid"
+                if precision not in ("preview", "source-grid", "source-roi", "source-tiled"):
+                    raise image_diff.DiffError("不支持的LTD分析精度")
+                if body.get("compare") is True and precision != "source-grid":
+                    raise image_diff.DiffError("三算法对照需要共享原始 DN 分析网格")
                 resolve = lambda sid: _diff_source_path(sid, root)
                 if body.get("precision") == "source-tiled":
                     return smart_compare.analyze_native_scan(body, resolve)

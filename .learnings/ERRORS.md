@@ -1,5 +1,27 @@
 # Errors
 
+## 2026-11-13 — Review-fix verification setup
+
+The new component fixture initially omitted its API audit array; complete the
+fixture instead of relaxing the production schema. Whole-scene completion
+tests must set SR_BATCH_ARTIFACT_DIR to their temporary workspace. A generated
+report from the first run was moved under ignored test-tifs artifacts.
+Windows PowerShell stdin can replace non-ASCII Python source: use apply_patch
+or escaped Unicode data and assert document replacements actually match.
+
+## 2026-11-13 — Smart Compare verification
+
+New source-scale regression initially assumed the common grid followed NOSR;
+the shared planner uses the larger PAN grid (up to max_edge). The test now
+explicitly requests 128 and verifies the actual source scale. A new UI label
+failed terminology checks; use 掩码. Restrict Smart parameter cancellation to
+Smart/comparison requests to preserve legacy decoding/discard notices.
+Browser comparison actions must open their details element before clicking.
+On PowerShell quote agent-browser refs such as '@e16'; unquoted @ is splatting.
+The local agent-browser stdin pipeline returned null; quoted inline eval worked.
+One CLI wait timed out; offline doctor passed, and the actual calculated UI was
+then checked from DOM state. Automated HTTP/browser regression also passed.
+
 ## 2026-10-26 — test work directory isolation
 
 SR idempotency tests wrote to the default /tmp/sr_agent_work under Windows,
@@ -93,3 +115,7 @@ The first one-pass sampling test used pixel data at file offset 0. The existing 
 ## 2026-11-10 resolved: asynchronous cleanup test patched shared asyncio module
 
 Mocking image_open.asyncio.sleep changed the shared asyncio module during AnyIO's lazy import and leaked the mock into its imported sleep reference. Patch the local module's asyncio binding with a small namespace instead; a fresh-process image-open suite then passed. PowerShell callback test URL concatenations also need parentheses per array element to ensure every invalid URL is tested independently.
+
+## 2026-11-13 resolved: PowerShell stdin encoding and baseline evaluation binding
+
+Python source piped from Windows PowerShell can replace Chinese literals with question marks. Use apply_patch for Unicode source edits, and inspect the diff before tests. git show may return UTF-8 with BOM; decode with utf-8-sig before compile. Agent Loop imports viewer_context inside run_loop, so an in-memory baseline must bind that import as well as loading old Loop source; otherwise paired tool reachability silently measures the new binding twice. The fixed evaluation now reports baseline 3/9 versus enhanced 9/9 and labels scripted replay separately from live-model selection accuracy.

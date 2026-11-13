@@ -11,6 +11,7 @@ export interface RepairCandidate {
 }
 const STORAGE_KEY='sr.batch.draft.v1';
 export const useBatchDraftStore = defineStore('batchDraft', () => {
+  const draftVersion = ref(0);
   const candidates = ref<RepairCandidate[]>([]);
   const text=ref(''),title=ref('批量影像修复'),mode=ref<'demo'|'production'>('demo'),strategy=ref<'automatic'|'review'>('automatic');
   function add(rows: { path: string; name: string; evidence?: string }[]) {
@@ -31,8 +32,8 @@ export const useBatchDraftStore = defineStore('batchDraft', () => {
       mode.value=saved.mode==='production'?'production':'demo';strategy.value=saved.strategy==='review'?'review':'automatic';
     }
   } catch { /* Draft recovery never performs network or production operations. */ }
-  watch([candidates,text,title,mode,strategy],()=>{try{localStorage.setItem(STORAGE_KEY,JSON.stringify({version:1,candidates:candidates.value,text:text.value,title:title.value,mode:mode.value,strategy:strategy.value}));}catch{/* Optional persistence. */}},{deep:true,flush:'sync'});
-  registerViewerObservation('batch_draft',()=>({submitted:false,count:candidates.value.filter(c=>c.status!=='已排除').length,
+  watch([candidates,text,title,mode,strategy],()=>{draftVersion.value++;try{localStorage.setItem(STORAGE_KEY,JSON.stringify({version:1,candidates:candidates.value,text:text.value,title:title.value,mode:mode.value,strategy:strategy.value}));}catch{/* Optional persistence. */}},{deep:true,flush:'sync'});
+  registerViewerObservation('batch_draft',()=>({submitted:false,version:draftVersion.value,draft_id:STORAGE_KEY,total:candidates.value.length,selected:candidates.value.filter(c=>c.status!=='已排除').length,excluded:candidates.value.filter(c=>c.status==='已排除').length,count:candidates.value.filter(c=>c.status!=='已排除').length,
     candidates:candidates.value.slice(0,24).map(c=>({...c})),truncated:candidates.value.length>24,strategy:strategy.value}));
   return { candidates, text,title,mode,strategy,add,remove,move };
 });

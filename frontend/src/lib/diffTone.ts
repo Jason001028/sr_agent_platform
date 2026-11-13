@@ -3,8 +3,8 @@
  * ------------------------------------------------------------------
  * 目的不是改差异测量，而是回答「这个差异值不值得先看」：
  *
- *   * 暗部被提亮、并补上纹理，通常是超分正常补细节；
- *   * 中间调平坦区出现零碎波动，更像是伪影；
+ *   * 暗部明显提亮时提高复核优先级；
+ *   * 中间调平坦区额外升权，明显提亮时进一步加强；
  *
  * 这里用 softstep 隶属度把上述经验写成**连续**权重，避免 120/121 的硬切。
  * 权重有两种用法，都在显示层（见 stores/diff.ts / DiffOverlay.vue）：
@@ -30,8 +30,10 @@ export interface ToneBands {
   bright: [number, number];
   /** 中间调最高升权幅度：1 + midGain。 */
   midGain: number;
-  /** 暗部提亮最大折扣：1 − darkDiscount。 */
-  darkDiscount: number;
+  /** 中间调明显提亮的额外增益。 */
+  midBrightGain: number;
+  /** 暗部明显提亮的额外增益。 */
+  darkBrightGain: number;
 }
 
 export const DEFAULT_TONE_BANDS: ToneBands = {
@@ -40,13 +42,14 @@ export const DEFAULT_TONE_BANDS: ToneBands = {
   dark: [70, 110],
   flat: [2, 8],
   bright: [2, 15],
-  midGain: 0.8,
-  darkDiscount: 0.7,
+  midGain: 1,
+  midBrightGain: 0.2,
+  darkBrightGain: 0.5,
 };
 
 /** 权重理论范围，显示层据此归一化到 0..1。 */
-export const TONE_WEIGHT_MIN = 0.3;
-export const TONE_WEIGHT_MAX = 1.8;
+export const TONE_WEIGHT_MIN = 1;
+export const TONE_WEIGHT_MAX = 2.5;
 
 export interface RegionToneStats {
   /** 原始侧（A）区域平均灰度 0..255。 */
@@ -61,7 +64,7 @@ export interface RegionToneStats {
   dark: number;
   /** 原始平坦度隶属度均值 0..1（越大越平）。 */
   flat: number;
-  /** 复核权重 0.3..1.8。 */
+  /** 复核权重 1..2.5。 */
   weight: number;
   /** 归一化权重 0..1，供透明度 / 颜色插值。 */
   norm: number;
@@ -78,7 +81,7 @@ export interface ToneGrid {
   h: number;
 }
 
-/** 逐像素归因权重图：norm 是 weight 在 0.3–1.8 区间上的 0..255 量化。 */
+/** 逐像素归因权重图：norm 是 weight 在 1–2.5 区间上的 0..255 量化。 */
 export interface ToneWeightMap {
   norm: Uint8Array;
   w: number;
@@ -129,6 +132,13 @@ export function brightMembership(delta: number, bands: ToneBands = DEFAULT_TONE_
   return smoothstep(bands.bright[0], bands.bright[1], delta);
 }
 
+/** 区域与逐像素路径共享公式，避免排序与热力图的权重方向不一致。 */
+function toneWeight(mid: number, dark: number, flat: number, bright: number, bands: ToneBands): number {
+  const wMid = 1 + bands.midGain * mid * (0.5 + 0.5 * flat);
+  const wBright = 1 + bright * (bands.midBrightGain * mid + bands.darkBrightGain * dark);
+  return Math.max(TONE_WEIGHT_MIN, Math.min(TONE_WEIGHT_MAX, wMid * wBright));
+}
+
 /** 由区域隶属度均值与提亮量算复核权重。 */
 export function weightFromShares(
   mid: number,
@@ -138,9 +148,7 @@ export function weightFromShares(
   bands: ToneBands = DEFAULT_TONE_BANDS,
 ): { weight: number; norm: number } {
   const bright = brightMembership(delta, bands);
-  const wMid = 1 + bands.midGain * mid * (0.5 + 0.5 * flat);
-  const wDark = 1 - bands.darkDiscount * dark * bright;
-  const weight = wMid * wDark;
+  const weight = toneWeight(mid, dark, flat, bright, bands);
   const span = TONE_WEIGHT_MAX - TONE_WEIGHT_MIN;
   const norm = span > 0 ? clamp01((weight - TONE_WEIGHT_MIN) / span) : 0;
   return { weight, norm };
@@ -266,8 +274,8 @@ export function toneWindowRadius(w: number, h: number): number {
   return Math.max(2, Math.min(8, Math.round(short / 300)));
 }
 
-/** 权重 → 0..255 的 norm 字节（在 0.3–1.8 上线性归一化）。
- *  这样 1.0× 落在 119、1.4× 落在 187，都是精确整数，中性权重不会因量化变成 1.002×。 */
+/** 权重 → 0..255 的 norm 字节（在 1–2.5 上线性归一化）。
+ *  中性 1.0× 精确落在 0，不会因量化改变未加权的强度。 */
 export function encodeToneWeight(weight: number): number {
   const span = TONE_WEIGHT_MAX - TONE_WEIGHT_MIN;
   const clamped = Math.max(TONE_WEIGHT_MIN, Math.min(TONE_WEIGHT_MAX, weight));
@@ -413,9 +421,7 @@ export function toneWeightMap(
       const dark = darkLut[li];
       const flat = flatLut[si];
       const bright = brightLut[di];
-      const wMid = 1 + bands.midGain * mid * (0.5 + 0.5 * flat);
-      const wDark = 1 - bands.darkDiscount * dark * bright;
-      out[i] = encodeToneWeight(wMid * wDark);
+      out[i] = encodeToneWeight(toneWeight(mid, dark, flat, bright, bands));
     }
   }
   return { norm: out, w, h, radius };

@@ -258,6 +258,8 @@ export const useDiffStore = defineStore('diff', () => {
   const displayThreshold = ref(0);
   const boundariesVisible = ref(true);
   const parallelCompare = ref(false);
+  const comparisonView = ref(false);
+  const comparisonKey = ref('');
   const smartPrecision = ref<'source-grid' | 'preview'>('source-grid');
   const smartOptions = ref<SmartOptions>({ window: 15, sensor: 'generic', frequencyReview: false, sceneSuppression: true });
   const comparison = shallowRef<DiffResult['comparison']>(undefined);
@@ -608,6 +610,15 @@ export const useDiffStore = defineStore('diff', () => {
       pa: pixelKey(aId.value), pb: pixelKey(bId.value),
     });
   }
+  function comparisonSignature(): string {
+    const key = JSON.parse(currentKey());
+    delete key.method;
+    key.smart = [smartOptions.value, smartPrecision.value, parallelCompare.value];
+    return JSON.stringify(key);
+  }
+  function clearComparison() {
+    comparison.value = undefined; comparisonKey.value = ''; comparisonView.value = false;
+  }
   const stale = computed(() => !!result.value && resultKey.value !== currentKey());
   const precisionReason = computed(() => analysisPairReason(aRec.value, bRec.value));
   const alignmentNote = computed(() => analysisPairNote(aRec.value, bRec.value));
@@ -616,17 +627,37 @@ export const useDiffStore = defineStore('diff', () => {
     const a = aRec.value, b = bRec.value;
     if (!a || !b) return '请选择 PAN 与 NOSR';
     const roles = [a.tourIdentity?.role ?? roleOf(a), b.tourIdentity?.role ?? roleOf(b)];
-    if (!roles.includes('pan') || !roles.includes('nosr')) return '智能对比需要 PAN 本体与 NOSR；不能使用 old 或 SR 产物代替';
+    if (!roles.includes('pan') || !roles.includes('nosr')) return 'LTD需要 PAN 本体与 NOSR；不能使用 old 或 SR 产物代替';
     if (smartPrecision.value !== 'preview' && (!a.sceneId || !b.sceneId || !a.srcRev || !b.srcRev)) return '原始 DN 分析需要可访问的盘阵影像与源版本';
     const groupA=sceneKeyOf(a),groupB=sceneKeyOf(b);
-    if ((!groupA || groupA!==groupB) && a.tourIdentity?.sequence!==b.tourIdentity?.sequence) return '缺少可靠的共同场景关联';
+    const sequenceA=a.tourIdentity?.sequence, sequenceB=b.tourIdentity?.sequence;
+    if ((!groupA || groupA!==groupB) && (!sequenceA || sequenceA!==sequenceB)) return '缺少可靠的共同场景关联';
     if (!!a.tourIdentity?.registration !== !!b.tourIdentity?.registration) return '两张影像的空间配准证据不对称，请先核对';
     return analysisPairReason(a,b) ?? '';
+  });
+  const nativeRefineReason = computed(() => {
+    if (smartPairReason.value) return smartPairReason.value;
+    const a=aRec.value, b=bRec.value;
+    if (!a?.sceneId || !b?.sceneId || !a.srcRev || !b.srcRev) return '原图精检需要可访问的 PAN/NOSR 源 TIFF 与版本';
+    if ((a.tourIdentity?.role ?? roleOf(a)) !== 'pan') return '原图精检请将 PAN 本体选为 A、NOSR 选为 B';
+    return '';
   });
 
   /* Automatic polygons are staged in SVG; only one atomic vector transaction
      is committed after the animation and a final identity/draft recheck. */
-  const autoDrawing = shallowRef<{ imageId: number; groupId: string; polygons: OwnedPoly[]; duration: number } | null>(null);
+  const autoDrawing = shallowRef<{ imageId: number; groupId: string; polygons: OwnedPoly[]; duration: number;
+    reviewing: boolean; decisions: Record<string, 'approved' | 'rejected'> } | null>(null);
+  let finishReview: (() => Promise<boolean>) | null = null;
+  const autoReviewBusy = ref(false);
+  async function reviewAutoRegion(id: string, decision: 'approved' | 'rejected') {
+    const batch = autoDrawing.value;
+    if (!batch?.reviewing || autoReviewBusy.value || !batch.polygons.some(p => p.autoDiff?.region_id === id)) return;
+    autoDrawing.value = { ...batch, decisions: { ...batch.decisions, [id]: decision } };
+    if (batch.polygons.every(p => autoDrawing.value?.decisions[p.autoDiff!.region_id])) {
+      autoReviewBusy.value = true;
+      try { await finishReview?.(); } finally { autoReviewBusy.value = false; }
+    }
+  }
   const autoPreparing = ref(false);
   const autoSourceError = ref('');
   let autoValidation: AbortController | null = null;
@@ -639,6 +670,7 @@ export const useDiffStore = defineStore('diff', () => {
     autoValidation?.abort(); autoValidation = null;
     if (autoTimer !== null) clearTimeout(autoTimer);
     autoTimer = null; autoDrawing.value = null; autoPreparing.value = false;
+    finishReview = null; autoReviewBusy.value = false;
     finishAuto?.(false); finishAuto = null;
   }
   const autoTarget = computed(() => {
@@ -654,7 +686,7 @@ export const useDiffStore = defineStore('diff', () => {
     if (busy.value || autoPreparing.value || autoDrawing.value || viewer.merging) return '正在处理，请稍候';
     if (!auto) return '当前服务未提供自动绘制数据，请升级服务并重新分析';
     if (stale.value) return '分析结果已过期，请重新分析';
-    if (res?.method === 'smart' && res.source !== 'source-roi') return '智能对比网格候选需先原图精检，再加入修复掩码';
+    if (res?.method === 'smart' && res.source !== 'source-roi') return 'LTD网格候选需先原图精检，再加入修复掩码';
     if (autoSourceError.value) return autoSourceError.value;
     if (!target) return '当前分析的 A/B 未包含已确认的 PAN 本体，请选择本体后重新分析';
     if (!target.thumb || !target.src || target.pending || !target.sceneId || !target.srcRev) return 'PAN 本体源文件或预览不可用';
@@ -752,7 +784,7 @@ export const useDiffStore = defineStore('diff', () => {
       viewer.enterDraw();
       const before = JSON.stringify(target.maskRois ?? []);
       const duration = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 0 : 3200;
-      autoDrawing.value = { imageId: target.id, groupId, polygons, duration };
+      autoDrawing.value = { imageId: target.id, groupId, polygons, duration, reviewing: false, decisions: {} };
       const commit = async () => {
         try { await validateFiles(); }
         catch (e) {
@@ -768,20 +800,41 @@ export const useDiffStore = defineStore('diff', () => {
           || viewer.pendingPts?.length || viewer.pendingRect || JSON.stringify(target.maskRois ?? []) !== before) {
           cancelAutoDraw(); return false;
         }
-        const ok = viewer.addMaskPolygonBatch(target.id, polygons, auto.analysis_id);
-        const review = polygons.filter(p => p.autoDiff?.needs_review).length;
+        const accepted = polygons.filter(p => autoDrawing.value?.decisions[p.autoDiff!.region_id] === 'approved').map(p => {
+          const copy: OwnedPoly = p.map(([x, y]) => [x, y]);
+          copy.autoDiff = { ...p.autoDiff!, reviewed: true, needs_review: false };
+          return copy;
+        });
+        const ok = !accepted.length || viewer.addMaskPolygonBatch(target.id, accepted, auto.analysis_id);
         const skipped = auto.polygons.length - polygons.length;
         if (ok) {
-          notice.value = `已绘制 ${polygons.length} 个区域${review ? `，${review} 个待复核（扩展范围或孔洞）` : ''}${skipped ? `；${skipped} 个因覆盖或坐标冲突未绘制，请复核` : ''}；可整批撤销 / 重做。`;
+          resultVisible.value = false;
+          notice.value = `审批完成：通过 ${accepted.length} 个，驳回 ${polygons.length - accepted.length} 个${skipped ? `；${skipped} 个因覆盖或坐标冲突未绘制` : ''}；通过区域已转为可编辑掩码，可整批撤销 / 重做。`;
           viewer.showToast(notice.value);
         }
-        autoDrawing.value = null; autoPreparing.value = false; autoTimer = null;
+        autoDrawing.value = null; autoPreparing.value = false; autoTimer = null; finishReview = null;
         return ok;
       };
-      if (!duration) return commit();
+      const beginReview = async () => {
+        try { await validateFiles(); }
+        catch (e) {
+          if (epoch === autoEpoch) { error.value = autoSourceError.value = e instanceof Error ? e.message : String(e); cancelAutoDraw(); }
+          return false;
+        }
+        if (epoch !== autoEpoch || !autoDrawing.value) return false;
+        if (viewer.activeId !== target.id || result.value !== res || stale.value || currentKey() !== key
+          || pixelKey(target.id) !== pixels || !viewer.drawMode || viewer.pendingPts?.length || viewer.pendingRect
+          || JSON.stringify(target.maskRois ?? []) !== before) { cancelAutoDraw(); return false; }
+        autoDrawing.value = { ...autoDrawing.value, reviewing: true };
+        finishReview = commit;
+        notice.value = '请逐区点击右上角 √ / ×；全部审批后，通过区域将转为普通掩码。';
+        autoPreparing.value = false;
+        return true;
+      };
+      if (!duration) return beginReview();
       return await new Promise<boolean>(resolve => {
         finishAuto = resolve;
-        autoTimer = setTimeout(() => { void commit().then(ok => {
+        autoTimer = setTimeout(() => { void beginReview().then(ok => {
           if (epoch === autoEpoch) finishAuto = null;
           resolve(ok);
         }); }, duration);
@@ -936,6 +989,7 @@ export const useDiffStore = defineStore('diff', () => {
   }
 
   function applyResult(res: DiffResult, key: string, plan?: { w: number; h: number }, scopeRect?: GridRect): void {
+    if(res.source==='source-roi'||res.source==='source-tiled') comparisonView.value=false;
     if (plan && scopeRect) {
       res.analysisGrid = {
         ...res.analysisGrid,
@@ -1103,6 +1157,7 @@ export const useDiffStore = defineStore('diff', () => {
   async function analyze(): Promise<boolean> {
     if (busy.value) return false;
     if (method.value === 'smart' || parallelCompare.value) return analyzeSmart();
+    clearComparison();
     cancelAutoDraw();
     autoSourceError.value = '';
     error.value = '';
@@ -1258,6 +1313,7 @@ export const useDiffStore = defineStore('diff', () => {
       sceneId:r.sceneId, sourceRevision:r.srcRev, pixelKey:pixelKey(r.id)});
     return {method:method.value, sensitivity:sensitivity.value, minAreaPx:minAreaPx.value,
       threshold:advanced.value.threshold ?? undefined, openKernel:advanced.value.openKernel, closeKernel:advanced.value.closeKernel,
+      blur:advanced.value.blur, ssimWindow:advanced.value.ssimWindow, ssimGaussian:advanced.value.ssimGaussian,
       smartOptions:{...smartOptions.value}, referenceSide:(a.tourIdentity?.role ?? roleOf(a)) === 'nosr' ? 'A' : 'B',
       maxEdge:ANALYSIS_MAX_EDGE, autoMask:true, image_a:spec(a), image_b:spec(b), precision:smartPrecision.value,
       compare:parallelCompare.value};
@@ -1268,7 +1324,7 @@ export const useDiffStore = defineStore('diff', () => {
     const a = aRec.value!, b = bRec.value!;
     cancelAutoDraw();
     busy.value = true; error.value = ''; notice.value = ''; analysisState.value = '读取中';
-    baseSnapshot.value = null; comparison.value = undefined;
+    baseSnapshot.value = null; clearComparison();
     const seq = ++requestSeq, key = currentKey();
     const controller = new AbortController(); analysisController = controller;
     try {
@@ -1294,6 +1350,13 @@ export const useDiffStore = defineStore('diff', () => {
       if (res.source === 'preview') applyResult(res,key,{w:plan.width,h:plan.height},rect);
       else applyResult(res,key);
       comparison.value = res.comparison;
+      comparisonKey.value = res.comparison ? comparisonSignature() : '';
+      if (res.comparison?.requestedMethod && res.comparison.requestedMethod !== res.method) {
+        busy.value = false; analysisController = null;
+        method.value = res.method;
+        resultKey.value = currentKey();
+        notice.value = '所选方法检测失败，已显示成功方法；失败原因见对照摘要。';
+      }
       installLayers(layers);
       display.value = 'overlay'; opacity.value = .6; toneWeight.value = false;
       analysisState.value = '已完成';
@@ -1306,16 +1369,25 @@ export const useDiffStore = defineStore('diff', () => {
 
   async function showComparison(next: DiffMethod): Promise<void> {
     const entry = comparison.value?.results[next];
-    if (!entry || busy.value || stale.value) return;
+    if (!entry || busy.value || stale.value || comparisonKey.value !== comparisonSignature()) return;
     const seq = ++requestSeq, key=currentKey();
     const layers = await decodeLayers(entry);
-    if (seq !== requestSeq || key!==currentKey()) return;
+    if (seq !== requestSeq || key!==currentKey() || comparisonKey.value !== comparisonSignature()) return;
+    // Refinement snapshots belong to another precision/result. A cached method
+    // switch must not offer to restore an unrelated earlier ROI overview.
+    baseSnapshot.value = null;
     method.value = next;
     applyResult(entry,currentKey()); installLayers(layers);
   }
+  async function comparisonRaster(next: DiffMethod) {
+    const entry=comparison.value?.results[next], key=comparisonKey.value;
+    if (!entry || !key || key!==comparisonSignature()) return null;
+    const layers=await decodeLayers(entry);
+    return comparisonKey.value===key && key===comparisonSignature() ? layers.raw : null;
+  }
 
   async function refineVisible(): Promise<boolean> {
-    if (!result.value || !aRec.value || !bRec.value) { error.value = '请先完成智能对比'; return false; }
+    if (!result.value || !aRec.value || !bRec.value) { error.value = '请先完成LTD'; return false; }
     const plan = commonGrid(aRec.value.W,aRec.value.H,bRec.value.W,bRec.value.H);
     const rect = visibleGridRect(plan.width,plan.height);
     const a = aRec.value;
@@ -1335,25 +1407,30 @@ export const useDiffStore = defineStore('diff', () => {
   }
 
   async function scanNativeVisible(): Promise<boolean> {
-    if (busy.value || smartPairReason.value) { error.value=smartPairReason.value; return false; }
+    if (busy.value) return false;
+    if (nativeRefineReason.value) { error.value=nativeRefineReason.value; return false; }
     const a=aRec.value!,b=bRec.value!,plan=commonGrid(a.W,a.H,b.W,b.H);
     const rect=visibleGridRect(plan.width,plan.height);
     const req=smartRequest();req.method='smart';req.compare=false;req.precision='source-tiled';
     req.roi={x:Math.floor(rect.x*a.W/plan.width),y:Math.floor(rect.y*a.H/plan.height),
       w:Math.ceil(rect.w*a.W/plan.width),h:Math.ceil(rect.h*a.H/plan.height)};
     const seq=++requestSeq,key=currentKey(),controller=new AbortController();analysisController=controller;
-    busy.value=true;error.value='';analysisState.value='分析中';
+    busy.value=true;error.value='';notice.value='';analysisState.value='分析中';
+    const old=result.value;
     try{
       const res=await apiDiffAnalyze(loadSrConfig(),req,controller.signal);
       const layers=await decodeLayers(res);
       if(seq!==requestSeq||key!==currentKey())return false;
+      if(old && !baseSnapshot.value) baseSnapshot.value={result:old,heat:heatLayer.value,mask:maskLayer.value,
+        maskSource:rawMask.value,paramsKey:resultKey.value,rawHeat:rawHeat.value,toneSource:toneSource.value,toneMap:toneMap.value};
       applyResult(res,key);installLayers(layers);display.value='overlay';opacity.value=.6;analysisState.value='已完成';return true;
     }catch(e){if(seq===requestSeq){error.value=e instanceof Error?e.message:String(e);analysisState.value='检测失败';}return false;}
     finally{if(seq===requestSeq){busy.value=false;analysisController=null;}}
   }
 
   async function refineSmartRoi(roi: {x:number;y:number;w:number;h:number}): Promise<boolean> {
-    if (busy.value || stale.value || smartPairReason.value) return false;
+    if (busy.value || stale.value) return false;
+    if (nativeRefineReason.value) { error.value=nativeRefineReason.value; return false; }
     const old = result.value;
     if (!old) return false;
     busy.value = true; error.value = ''; analysisState.value = '分析中';
@@ -1361,6 +1438,9 @@ export const useDiffStore = defineStore('diff', () => {
     const controller = new AbortController(); analysisController = controller;
     try {
       const req = smartRequest(); req.precision = 'source-roi'; req.method = 'smart'; req.compare = false; req.roi = roi;
+      if (old.method==='smart' && old.source!=='preview' && old.normalization) {
+        req.smartOptions={...req.smartOptions!,calibrationScale:old.normalization.scale,logRatioBaseline:old.normalization.logRatioBaseline};
+      }
       const res = await apiDiffAnalyze(loadSrConfig(),req,controller.signal);
       const layers = await decodeLayers(res);
       if (seq !== requestSeq || key !== currentKey() || result.value !== old) return false;
@@ -1444,8 +1524,9 @@ export const useDiffStore = defineStore('diff', () => {
       if (!reg) return false;
       const [x,y,w,h] = gridRectToSource(result.value,reg.bbox);
       const margin = smartOptions.value.window * 2;
-      return refineSmartRoi({x:Math.max(0,Math.floor(x)-margin),y:Math.max(0,Math.floor(y)-margin),
-        w:Math.ceil(w)+margin*2,h:Math.ceil(h)+margin*2});
+      const left=Math.max(0,Math.floor(x)-margin),top=Math.max(0,Math.floor(y)-margin);
+      const right=Math.min(aRec.value!.W,Math.ceil(x+w)+margin),bottom=Math.min(aRec.value!.H,Math.ceil(y+h)+margin);
+      return refineSmartRoi({x:left,y:top,w:right-left,h:bottom-top});
     }
     cancelAutoDraw();
     const res = result.value;
@@ -1564,7 +1645,7 @@ export const useDiffStore = defineStore('diff', () => {
   /* ---------------- 清除 ---------------- */
   function clearResults(): void {
     analysisController?.abort(); analysisController = null;
-    comparison.value = undefined;
+    clearComparison();
     busy.value = false; analysisState.value = '待分析'; savedViews = null;
     requestSeq++;                          // 作废仍在途的分析/精算响应
     result.value = null;
@@ -1685,6 +1766,7 @@ export const useDiffStore = defineStore('diff', () => {
   /** TifCanvas 按 pane 的 rec 取显示层；坐标已换算到该 rec 的缩略图。 */
   function layerFor(rec: ViewerRec | null): DiffLayer | null {
     const res = result.value;
+    if (autoDrawing.value) return null;
     if (!resultVisible.value || !res || !rec?.thumb) return null;
     if (stale.value && res.method === 'smart') return null;
     if (rec.id !== res.imageA.id && rec.id !== res.imageB.id) return null;
@@ -1715,7 +1797,7 @@ export const useDiffStore = defineStore('diff', () => {
   }
 
   /* 图层、显隐或显示方式变化 → 主画布与鹰眼同步重绘；不触发分析或 Camera 写入。 */
-  watch([resultVisible, opacity, display, heatLayer, maskLayer, result], () => { viewer.renderTick++; });
+  watch([resultVisible, opacity, display, heatLayer, maskLayer, result, autoDrawing], () => { viewer.renderTick++; });
   /* 羽化只改显示 alpha：从精确二值掩码重建，不重算、不改区域统计。 */
   watch(feather, () => { rebuildMask(); viewer.renderTick++; });
   /* 逐像素加权只改热力图着色：从原始差异字节重建，不改差异数值与候选资格。
@@ -1731,7 +1813,16 @@ export const useDiffStore = defineStore('diff', () => {
   watch([aId,bId,method], () => {
     if (busy.value) { cancelAnalysis(); notice.value = '影像或方法已变更，旧结果已丢弃；请重新分析。'; }
   }, {flush:'sync'});
+  watch(currentKey, () => {
+    if (busy.value && analysisController && (method.value === 'smart' || parallelCompare.value)) {
+      cancelAnalysis();
+      notice.value = '检测参数或源版本已变更，旧请求已取消；请重新分析。';
+    }
+  }, {flush:'sync'});
   watch(result, () => { selectedRegionIds.value = []; }, {flush:'sync'});
+  watch(comparisonSignature, () => {
+    if (comparisonKey.value && comparisonKey.value !== comparisonSignature()) clearComparison();
+  }, {flush:'sync'});
   /* 左侧换景 → 下拉收口到新场景并补候选；不在新场景里的已选组合由 ensurePair 换掉。
      「延续到下一景」切景期间跳过：A/B 已按角色落好，ensurePair 只会把它换成推荐项。 */
   watch(
@@ -1759,6 +1850,12 @@ export const useDiffStore = defineStore('diff', () => {
     return {image_a:res.imageA.id,image_b:res.imageB.id,stale:stale.value,
       precision_reason:precisionReason.value,method:res.method,source:res.source,
       completed:!busy.value, algorithm_version:res.algorithmVersion, score_semantics:res.scoreSemantics,
+      comparison:comparison.value ? {requested_method:comparison.value.requestedMethod,status:comparison.value.status,
+        methods:comparison.value.summary.slice(0,3).map(s=>({method:s.method,status:s.status,regions:s.regions,error:s.error?.slice(0,512)}))} : undefined,
+      analysis_state:analysisState.value,
+      source_identity:res.sourceIdentity ? {reference_side:res.sourceIdentity.referenceSide,
+        registration:res.sourceIdentity.registration,images:res.sourceIdentity.images.slice(0,2).map(i=>({
+          id:i.id,scene_id:i.sceneId,revision:i.revision,role:i.role}))} : undefined,
       mask_availability:res.maskAvailability, calibration_status:res.calibrationStatus,
       total:regions.value.length,truncated:regions.value.length>items.length,selected_ids:[...chosen].slice(0,80),
       bbox_format:'xywh',coordinate_space:'image_a_source_pixels',
@@ -1771,12 +1868,12 @@ export const useDiffStore = defineStore('diff', () => {
   });
 
   return {
-    smartOptions, smartPrecision, smartPairReason, displayThreshold, boundariesVisible, analysisState,
-    parallelCompare, comparison, showComparison, refineVisible, refineDrawnRoi, scanNativeVisible, cancelAnalysis,
+    smartOptions, smartPrecision, smartPairReason, nativeRefineReason, displayThreshold, boundariesVisible, analysisState,
+    parallelCompare, comparison, comparisonView, comparisonRaster, showComparison, refineVisible, refineDrawnRoi, scanNativeVisible, cancelAnalysis,
     nextRegion: (step:number) => { const list=orderedRegions.value; if(!list.length)return;
       const index=list.findIndex(r=>r.id===selectedId.value); void locateRegion(list[(index+step+list.length)%list.length].id); },
     restoreView: () => { for(const p of savedViews??[]) if(viewer.panes.some(q=>q.side===p.side&&q.rec?.id===p.id)) viewer.setPaneView(p.side,{...p.view}); savedViews=null; },
-    autoDrawing, autoPreparing, autoDrawReason, autoDraw, cancelAutoDraw,
+    autoDrawing, autoPreparing, autoDrawReason, autoDraw, cancelAutoDraw, autoReviewBusy, reviewAutoRegion,
     // 面板
     open, resultVisible, opacity, openPanel, closePanel, busy, error, notice,
     method, sensitivity, scope, display, feather, minAreaPx, advanced, toneWeight,

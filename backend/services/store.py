@@ -2601,6 +2601,23 @@ class Store:
         row=self._db().execute("SELECT fingerprint FROM sr_tasks WHERE job_id=?", (job_id,)).fetchone()
         return self.get_sr_task(row[0]) if row else None
 
+    def session_owns_sr_job(self, session_id, job_id):
+        """Authorize a known Job through persisted ownership, never UI paths.
+
+        Older Batch task receipts have no session_id; their Item/Intent links
+        remain authoritative. This does not query or refresh executor state.
+        """
+        if not session_id:
+            return False
+        row = self._db().execute(
+            "SELECT 1 FROM sr_tasks WHERE job_id=? AND session_id=? "
+            "UNION ALL SELECT 1 FROM agent_goal_steps s JOIN agent_goals g "
+            "ON g.goal_id=s.goal_id WHERE s.external_job_id=? AND g.session_id=? "
+            "UNION ALL SELECT 1 FROM agent_tool_intents i JOIN agent_goals g "
+            "ON g.goal_id=i.goal_id WHERE i.external_job_id=? AND g.session_id=? LIMIT 1",
+            (job_id,session_id,job_id,session_id,job_id,session_id)).fetchone()
+        return row is not None
+
     def list_tool_intents(self, goal_id):
         keys=self._db().execute("SELECT idempotency_key FROM agent_tool_intents WHERE goal_id=? ORDER BY created_at,intent_id", (goal_id,)).fetchall()
         return [self.get_tool_intent(goal_id, r[0]) for r in keys]

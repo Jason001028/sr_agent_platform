@@ -480,7 +480,7 @@ def _pick_regions(regions: list[_Region], min_area: int) -> list[_Region]:
     return kept
 
 
-def _roi_slice(roi, shape) -> tuple[int, int, int, int]:
+def _roi_slice(roi, shape, *, minimum=8) -> tuple[int, int, int, int]:
     if roi is None:
         return 0, 0, int(shape[1]), int(shape[0])
     if not isinstance(roi, dict):
@@ -495,8 +495,8 @@ def _roi_slice(roi, shape) -> tuple[int, int, int, int]:
     H, W = shape
     x0, y0 = max(0, x), max(0, y)
     x1, y1 = min(W, x + w), min(H, y + h)
-    if x1 - x0 < 8 or y1 - y0 < 8:
-        raise DiffError("分析范围太小（至少 8×8 px）")
+    if x1 - x0 < minimum or y1 - y0 < minimum:
+        raise DiffError(f"分析范围太小（至少 {minimum}×{minimum} px）")
     return x0, y0, x1, y1
 
 
@@ -530,6 +530,8 @@ def analyze_arrays(
     reference_side: str | None = None,
     scene_masks: dict | None = None,
     score_override: np.ndarray | None = None,
+    smart_evidence: dict | None = None,
+    evidence_sink=None,
 ) -> dict:
     """核心入口。数组形状必须一致；不一致由调用方先重采样。
 
@@ -548,7 +550,7 @@ def analyze_arrays(
     if max(a.shape) > MAX_EDGE or min(a.shape) < 2:
         raise DiffError("分析网格超出支持范围")
     if method == "smart" and reference_side not in ("A", "B"):
-        raise DiffError("智能对比必须明确 NOSR referenceSide=A/B；禁止猜测输入方向")
+        raise DiffError("LTD必须明确 NOSR referenceSide=A/B；禁止猜测输入方向")
 
     valid = np.isfinite(a) & np.isfinite(b)
     if valid_a is not None:
@@ -578,7 +580,7 @@ def analyze_arrays(
         a, b = _shared_normalize(a, b, valid)
 
     smart_context = (a, b, valid) if method == "smart" else None
-    x0, y0, x1, y1 = _roi_slice(roi, a.shape)
+    x0, y0, x1, y1 = _roi_slice(roi, a.shape, minimum=3 if method == "smart" else 8)
     a = a[y0:y1, x0:x1]
     b = b[y0:y1, x0:x1]
     valid = valid[y0:y1, x0:x1]
@@ -597,13 +599,16 @@ def analyze_arrays(
             smart_config = bd.config_from_dict(smart_options)
             full_a, full_b, full_valid = smart_context
             full_reference, full_target = (full_a, full_b) if reference_side == "A" else (full_b, full_a)
-            evidence = bd.analyze_texture(full_reference, full_target, valid=full_valid, config=smart_config)
+            evidence = smart_evidence if smart_evidence is not None else bd.analyze_texture(full_reference, full_target, valid=full_valid, config=smart_config)
             if score_override is not None:
                 override = np.asarray(score_override, dtype=np.float32)
                 if override.shape != full_valid.shape or not np.isfinite(override).all() or (override < 0).any() or (override > 1).any():
                     raise DiffError("Invalid internal native-scan score grid")
                 evidence["score"] = override
-            bd.apply_scene_masks(evidence, scene_masks, smart_config)
+            if smart_evidence is None:
+                bd.apply_scene_masks(evidence, scene_masks, smart_config)
+            full_evidence = evidence
+            evidence = dict(evidence)
             for key, value in list(evidence.items()):
                 if isinstance(value, np.ndarray):
                     evidence[key] = value[y0:y1, x0:x1]
@@ -620,6 +625,8 @@ def analyze_arrays(
                          ssim_window, ssim_gaussian)
         diff = np.clip(1.0 - ssim, 0.0, 1.0).astype(np.float32)
     diff[~valid] = 0.0
+    if evidence is not None and callable(evidence_sink):
+        evidence_sink(evidence, reference, target)
 
     if threshold is None:
         thr = THRESHOLD_PRESETS[method][sensitivity]
@@ -638,11 +645,24 @@ def analyze_arrays(
         raise DiffError("最小区域面积至少为 1 px²")
 
     raw_mask = (diff >= thr) & valid
-    mask = _morphology(raw_mask, _odd_kernel(open_kernel, 3, "开运算核"),
-                       _odd_kernel(close_kernel, 3, "闭运算核")) & valid
+    if evidence is not None:
+        # Morphology needs the same context as texture statistics. Crop only
+        # after these neighbourhood operations, then trace ROI-local labels.
+        context_mask = (full_evidence["score"] >= thr) & full_evidence["validity"]
+        mask = _morphology(context_mask, _odd_kernel(open_kernel, 3, "开运算核"),
+                           _odd_kernel(close_kernel, 3, "闭运算核"))[y0:y1,x0:x1] & valid
+    else:
+        mask = _morphology(raw_mask, _odd_kernel(open_kernel, 3, "开运算核"),
+                           _odd_kernel(close_kernel, 3, "闭运算核")) & valid
 
     labels, regions = _regions(mask, diff)
     kept = _pick_regions(regions, min_area)
+    priority_weights = {}
+    if evidence is not None and smart_config.scene_suppression and evidence.get("sceneMasks"):
+        for r in kept:
+            sl=np.s_[r.y:r.y+r.h,r.x:r.x+r.w];inside=labels[sl]==r.label
+            priority_weights[r.label]=.5 if any(float(m[sl][inside].mean())>.5 for m in evidence["sceneMasks"].values()) else 1.
+        kept.sort(key=lambda r:r.mean_diff*np.sqrt(r.area)*priority_weights[r.label],reverse=True)
 
     # binaryMask = 通过面积筛选后的精确结果（不是阈值原图）。
     keep_labels = np.array([r.label for r in kept], dtype=labels.dtype)
@@ -673,7 +693,7 @@ def analyze_arrays(
             "centroid": [round(r.cx, 2), round(r.cy, 2)],
             "meanDiff": round(r.mean_diff, 4),
             "maxDiff": round(r.max_diff, 4),
-            "rankScore": round(float(r.mean_diff * np.sqrt(r.area)), 4),
+            "rankScore": round(float(r.mean_diff * np.sqrt(r.area) * priority_weights.get(r.label,1.)), 4),
             "contour": contour,
             "contourKind": contour_kind,
             "holes": holes,
@@ -686,6 +706,7 @@ def analyze_arrays(
             out_regions[-1]["componentSeed"] = [int(seed_x[0]+r.x), int(seed_y[0]+r.y)]
             out_regions[-1]["_label"] = r.label
             out_regions[-1]["diagnostics"] = bd.region_diagnostics(evidence, labels, out_regions[-1], reference, target, smart_config)
+            out_regions[-1]["diagnostics"]["priorityWeight"] = priority_weights.get(r.label,1.)
             out_regions[-1]["maskEligible"] = contour_kind == "exact" and not holes
 
     notes = list(warnings or [])
@@ -738,6 +759,9 @@ def analyze_arrays(
         "elapsedMs": int(round(took)),
     }
     if evidence is not None:
+        result["regionSummary"] = {"count": len(kept), "shownCount": len(shown), "truncated": truncated,
+            "areaPixels": int(final_mask.sum()), "maxConnectedAreaPixels": max((r.area for r in kept), default=0),
+            "coverageDensity": float(final_mask.sum()/max(1, valid.sum()))}
         result.update({key: evidence[key] for key in (
             "algorithmVersion", "scoreSemantics", "maskAvailability", "calibrationStatus", "normalization")})
         result["evidenceMaps"] = {
@@ -758,7 +782,7 @@ def analyze_arrays(
         result["regionDiagnostics"] = [{"id": r["id"], **r["diagnostics"]} for r in out_regions]
         result["filterReasons"] = {"minArea": len(regions)-len(kept),
             "insufficientTexturePixels": int((valid & ~evidence["informative"]).sum())}
-        result["warnings"].extend(["智能对比为实验性纹理损失证据，评分不是模糊概率；候选需人工复核。",
+        result["warnings"].extend(["LTD为实验性纹理损失证据，评分不是模糊概率；候选需人工复核。",
             "云、水、阴影掩膜未验证时，不代表干扰不存在。下采样可能遗漏细小缺陷。"])
     if auto_mask:
         from backend.services.auto_mask_geometry import build_auto_mask

@@ -1,5 +1,26 @@
 # Learnings
 
+## 2026-11-13 — Smart Compare review corrections
+
+Category: correction. Cached comparison results need an immutable source,
+scope and parameter signature independent of the displayed method. Never
+re-sign cached data with the current key. Native max-score aggregation must
+carry validity and evidence from the same source sample; a second sparse read
+cannot validate the first. Morphology needs context before ROI cropping.
+Scene interference changes confidence/priority rather than deleting candidates.
+Experimental no-candidate results require an input-bound whole-scene human
+review with no invented Job or Mask. Test this path through batch completion.
+
+## 2026-11-13 — Smart Compare spatial and publication checks
+
+Category: best_practice. A cropped analysis result retains the full grid's
+source scale and adds its actual crop origin. Intersect negative source ROIs
+using the original right/bottom, without shifting the requested footprint.
+Sample categorical masks by nearest pixel centres, never bilinear DN mixing.
+Validate handoff claims against git show: an internal reference described as
+untracked may already be in the previous commit. Do not repeat that claim or
+publish the repository without resolving its distribution authorization.
+
 ## 2026-10-30 correction: scene input identity
 
 用户指出一键解析完整生产序列号_PAN.tif 被替换成裸 PAN.tif。根因是

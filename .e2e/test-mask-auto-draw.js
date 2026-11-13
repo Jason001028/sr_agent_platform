@@ -45,6 +45,10 @@ const server = http.createServer(async (req, res) => {
         resolved:{dir:'/synthetic/scene',sr_capable:false,kind:input.name.includes('NOSR')?'nosr':'input'}})); return;
     }
     if (url.pathname === '/api/queue') { res.end('{"tasks":[]}'); return; }
+    // Current file loader probes ticket support before its local JPEG fallback.
+    // This fixture deliberately creates no ticket/upload; production mutations
+    // below remain forbidden throughout detection and review.
+    if (url.pathname === '/api/image-open/tickets') { res.statusCode=404; res.end('{}'); return; }
     if (url.pathname.endsWith('/siblings')) {
       res.end(JSON.stringify({items:['PAN.jpg','PAN_NOSR.jpg'].map((id,i)=>({id,exists:true,
         srcRev:'fixture-v1',W:256,H:256,kind:i?'nosr':'input',tourIdentity:{sequence:'fixture',role:i?'nosr':'pan'}}))})); return;
@@ -109,13 +113,19 @@ let browser;
     // drawing after the short camera transition has settled.
     await page.evaluate(async()=>{await new Promise(r=>setTimeout(r,300));window.renderBefore=stores.v.renderTick;});
     await page.waitForFunction(()=>{
-      const p=document.querySelector('.auto-mask-pane polygon');
+      const p=document.querySelector('.auto-mask-pane g polygon');
       return p && parseFloat(getComputedStyle(p).strokeDashoffset)===0;
     });
     await fs.promises.mkdir(artifacts,{recursive:true});
     await page.screenshot({path:path.join(artifacts,'mask-auto-draw-animation.png')});
     // CSS SVG animation must not repaint the TIFF canvas once per frame.
     assert.ok(await page.evaluate(()=>stores.v.renderTick-window.renderBefore)<4);
+    await page.waitForSelector('.approval-actions button');
+    assert.equal(await page.evaluate(()=>stores.v.activeRec.maskRois.length),1,'pending approval preserves only manual masks');
+    await page.evaluate(async()=>{
+      const ids=stores.d.autoDrawing.polygons.map(p=>p.autoDiff.region_id);
+      for(const id of ids) await stores.d.reviewAutoRegion(id,'approved');
+    });
     await page.waitForFunction(()=>!stores.d.autoDrawing);
     const count=await page.evaluate(()=>stores.v.activeRec.maskRois.length);
     assert.equal(count,4,'three independent regions + existing hand mask');
@@ -126,6 +136,10 @@ let browser;
     assert.equal(await page.evaluate(()=>stores.v.activeRec.maskRois.length),count);
     await page.emulateMediaFeatures([{name:'prefers-reduced-motion',value:'reduce'}]);
     assert.equal(await page.evaluate(()=>stores.d.autoDraw()),true);
+    await page.evaluate(async()=>{
+      const ids=stores.d.autoDrawing.polygons.map(p=>p.autoDiff.region_id);
+      for(const id of ids) await stores.d.reviewAutoRegion(id,'approved');
+    });
     assert.equal(await page.evaluate(()=>stores.v.activeRec.maskRois.length),count,'repeat replaces batch');
     assert.equal(await page.evaluate(()=>stores.d.autoDrawing),null);
     await page.emulateMediaFeatures([{name:'prefers-reduced-motion',value:'no-preference'}]);

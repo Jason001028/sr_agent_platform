@@ -44,6 +44,15 @@ describe('atomic mask vector history and ownership', () => {
     h.record([], after); after[0][0][0] = 8;
     expect(h.undo(after)).toBeNull();
   });
+  it('preserves approved regions on regeneration and round-trips approval in history', () => {
+    const approved = auto(); approved.autoDiff!.reviewed = true;
+    const next = replaceAutoGroup([approved], [auto(), auto('r2')], 'analysis');
+    expect(next).toHaveLength(2);
+    expect(next[0]).toBe(approved);
+    const h = new MaskHistory(); h.record([], next);
+    const before = h.undo(next)!;
+    expect((h.redo(before)![0] as OwnedPoly).autoDiff?.reviewed).toBe(true);
+  });
   it('records manual operations after a batch and invalidates redo on branching', () => {
     const h = new MaskHistory(), batch = [auto()], more = [...batch, auto('manual')];
     h.record([], batch); h.record(batch, more);

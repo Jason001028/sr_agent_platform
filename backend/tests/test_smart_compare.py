@@ -56,6 +56,14 @@ def test_native_roi_halo_and_mask_contract(pair):
     json.dumps(result, allow_nan=False)
 
 
+@pytest.mark.parametrize('edge', [3,7,8])
+def test_small_native_roi_honors_three_pixel_minimum(pair,edge):
+    _,body,resolve = pair
+    result = smart_compare.analyze_roi({**body,'roi':{'x':70,'y':70,'w':edge,'h':edge}}, resolve)
+    assert result['analysisGrid']['width'] == result['analysisGrid']['height'] == edge
+    assert result['analysisPrecision']['nativeRefined']
+
+
 def test_reversed_grid_roles_and_revision_guard(pair):
     _, body, resolve = pair
     original = smart_compare.analyze_grid(body,resolve)
@@ -70,10 +78,11 @@ def test_batch_smart_uses_same_core_and_review_guard(pair):
     paths, _, _ = pair
     target = {**batch_manifest._image(paths[0]),'item_id':'smart-test'}
     reference = batch_manifest._image(paths[1])
-    result = batch_detector.detect(target,reference,{'mode':'diff','method':'smart','min_area_px':16,'open_kernel':1,'close_kernel':1})
+    result = batch_detector.detect(target,reference,{'mode':'diff','method':'smart','max_edge':128,'min_area_px':16,'open_kernel':1,'close_kernel':1})
     assert result['analysis']['algorithmVersion'].startswith('smart-compare')
     assert result['requires_geometry_review']
     assert result['analysis']['calibrationStatus'] == 'experimental-unvalidated'
+    assert result['analysis']['analysisPrecision']['windowsSourceA'] == [[22.5,22.5],[46.5,46.5]]
 
 
 def test_scene_masks_are_explicit_and_never_erase_evidence():
@@ -83,8 +92,108 @@ def test_scene_masks_are_explicit_and_never_erase_evidence():
     assert evidence['maskAvailability']['cloud'] == 'unverified-registration'
     before = evidence['score'].copy()
     apply_scene_masks(evidence,{'water':{'mask':np.ones(a.shape,bool),'registered':True,'sourceIdentity':'fixture'}},BlurConfig())
-    np.testing.assert_allclose(evidence['score'],before*.5)
+    np.testing.assert_allclose(evidence['score'],before)
     assert evidence['maskAvailability']['shadow'] == 'unverified'
+
+
+def test_overlapping_scene_masks_keep_blur_candidates_as_low_confidence():
+    ref=np.random.default_rng(72).normal(30000,3000,(192,192));target=ref.copy()
+    target[48:144,48:144]=gaussian_filter(ref,2)[48:144,48:144]
+    kw=dict(method='smart',reference_side='A',min_area_px=16,open_kernel=1,close_kernel=1)
+    plain=image_diff.analyze_arrays(ref,target,**kw)
+    masks={name:{'registered':True,'sourceIdentity':name,'mask':np.ones(ref.shape,bool)} for name in ('cloud','water')}
+    masked=image_diff.analyze_arrays(ref,target,scene_masks=masks,**kw)
+    assert plain['regions'] and masked['regions']
+    assert plain['differenceMap']==masked['differenceMap']
+    assert all(r['diagnostics']['confidence']=='low' for r in masked['regions'])
+    assert all(r['diagnostics']['priorityWeight']==.5 for r in masked['regions'])
+
+
+def test_roi_morphology_uses_the_context_before_cropping():
+    ref=np.random.default_rng(9).normal(30000,3000,(256,256)).astype('float32')
+    kw=dict(method='smart',reference_side='A',score_override=np.ones(ref.shape,'float32'),min_area_px=1,open_kernel=3,close_kernel=3)
+    full=image_diff.analyze_arrays(ref,ref,**kw)
+    cropped=image_diff.analyze_arrays(ref,ref,roi={'x':64,'y':64,'w':64,'h':64},**kw)
+    np.testing.assert_array_equal(smart_compare._mask(cropped),smart_compare._mask(full)[64:128,64:128])
+    assert cropped['regions'][0]['areaPx']==4096
+
+
+def test_selected_method_failure_returns_other_completed_methods(pair):
+    _,body,resolve=pair;original=image_diff.analyze_arrays
+    def fail_selected(*args,**kw):
+        if kw['method']=='smart':raise RuntimeError('selected-smart-failed')
+        return original(*args,**kw)
+    with patch.object(image_diff,'analyze_arrays',side_effect=fail_selected):
+        result=smart_compare.analyze_grid({**body,'compare':True},resolve)
+    assert result['method']=='absdiff'
+    assert result['comparison']['requestedMethod']=='smart'
+    assert result['comparison']['status']=='partial'
+    assert set(result['comparison']['results'])=={'absdiff','ssim'}
+    assert result['comparison']['summary'][2]['error']=='selected-smart-failed'
+
+
+def test_all_comparison_methods_failing_is_an_explicit_error(pair):
+    _,body,resolve=pair
+    with patch.object(image_diff,'analyze_arrays',side_effect=image_diff.DiffError('all-failed')):
+        with pytest.raises(image_diff.DiffError,match='三算法均未完成'):
+            smart_compare.analyze_grid({**body,'compare':True},resolve)
+
+
+@pytest.fixture
+def wide_pair(tmp_path):
+    reference=np.random.default_rng(71).uniform(10000,50000,(160,320)).astype(np.uint16)
+    target,_=image_diff.resize_to((320,640),reference,np.ones(reference.shape,bool))
+    target[80:260,100:570]=gaussian_filter(target,2)[80:260,100:570]
+    paths=[tmp_path/'PAN.tif',tmp_path/(tmp_path.name+'_NOSR.tif')]
+    def write(nodata=False):
+        data=target.copy()
+        if nodata=='left-tile':
+            data[:,:512]=0
+        elif nodata:
+            rows=np.rint(np.arange(64)*319/63).astype(int);cols=np.rint(np.arange(128)*639/127).astype(int)
+            data[np.ix_(rows,cols)]=0
+        tifffile.imwrite(paths[0],data.astype('uint16'),rowsperstrip=8,extratags=[(42113,'s',2,'0',False)])
+        tifffile.imwrite(paths[1],reference,rowsperstrip=8)
+        specs=[{'id':i,'sceneId':str(i),'sourceRevision':preview_jpg.source_revision(p)} for i,p in enumerate(paths)]
+        return {'method':'smart','image_a':specs[0],'image_b':specs[1],'maxEdge':128,'minAreaPx':1,'openKernel':1,'closeKernel':1}
+    return write,lambda sid:paths[int(sid)]
+
+
+def test_native_scan_keeps_valid_support_when_overview_sampling_would_be_all_nodata(wide_pair):
+    write,resolve=wide_pair
+    result=smart_compare.analyze_native_scan(write(True),resolve)
+    assert result['regions'] and result['coverage']['validRatio']>.9
+    assert result['analysisPrecision']['nativeScanned']
+    assert all(not r['maskEligible'] for r in result['regions'])
+
+
+def test_native_scan_skips_nodata_only_tile_without_discarding_valid_tiles(wide_pair):
+    write,resolve=wide_pair
+    result=smart_compare.analyze_native_scan(write('left-tile'),resolve)
+    assert result['regions'] and 0<result['coverage']['validRatio']<.3
+    assert result['analysisPrecision']['tiles']==2
+
+
+def test_native_scan_aggregates_mask_failures_from_all_tiles(wide_pair):
+    write,resolve=wide_pair;states=[]
+    def masks(body,resolve,refs,shape,window=None):
+        if not states:
+            states.append('unverified-read-failed');return {'cloud':{'registered':False,'status':states[-1]}}
+        states.append('available');return {'cloud':{'registered':True,'sourceIdentity':'fixture','mask':np.zeros(shape,bool)}}
+    with patch.object(smart_compare,'load_scene_masks',side_effect=masks):
+        result=smart_compare.analyze_native_scan(write(),resolve)
+    assert result['maskAvailability']['cloud']=='partial-unverified'
+    assert result['sceneMaskCoverage']['cloud']=={'tiles':2,'availableTiles':1,'statuses':{'available':1,'unverified-read-failed':1}}
+
+
+def test_frozen_smart_version_is_explicit_and_unknown_versions_are_rejected(pair):
+    paths,_,_=pair
+    target={**batch_manifest._image(paths[0]),'item_id':'version'};ref=batch_manifest._image(paths[1])
+    result=batch_detector.detect(target,ref,{'mode':'diff','method':'smart','version':'smart-compare-0.1-experimental'})
+    assert result['analysis']['versionPolicy']['policy']=='experimental-upgrade-human-review-required'
+    assert result['analysis']['versionPolicy']['executed']==result['analysis']['algorithmVersion']
+    with pytest.raises(ValueError,match='冻结'):
+        batch_detector.detect(target,ref,{'mode':'diff','method':'smart','version':'future-unknown'})
 
 
 def test_context_halo_crop_matches_full_map():
@@ -113,6 +222,96 @@ def test_native_supplement_has_explicit_precision_and_cancel(pair):
     def cancelled(): raise image_diff.DiffError('cancelled')
     with pytest.raises(image_diff.DiffError,match='cancelled'):
         smart_compare.analyze_grid({**body,'_cancel_check':cancelled},resolve)
+
+
+@pytest.mark.parametrize('precision', ['roi', 'scan'])
+def test_source_roi_clips_intersection_without_shifting_requested_extent(pair, precision):
+    _, body, resolve = pair
+    analyze = smart_compare.analyze_roi if precision == 'roi' else smart_compare.analyze_native_scan
+    result = analyze({**body, 'roi': {'x':-10, 'y':-20, 'w':80, 'h':90}}, resolve)
+    assert result['analysisGrid']['sourceRoi'] == [0, 0, 70, 70]
+
+
+def test_grid_roi_source_coordinates_keep_full_grid_scale_and_actual_origin(pair):
+    _, body, resolve = pair
+    result = smart_compare.analyze_grid({**body,'roi':{'x':20,'y':30,'w':140,'h':130}}, resolve)
+    assert result['regions']
+    assert result['analysisGrid']['scopeX'] == 20
+    for region in result['regions']:
+        x,y,w,h = region['bbox']
+        assert region['sourceBboxA'] == [20+x,30+y,w,h]
+    clipped = smart_compare.analyze_grid({**body,'roi':{'x':-10,'y':-20,'w':150,'h':160}}, resolve)
+    assert clipped['analysisGrid']['scopeX'] == clipped['analysisGrid']['scopeY'] == 0
+
+
+def test_region_summary_counts_candidates_beyond_http_display_limit():
+    a = np.random.default_rng(315).normal(size=(128,128))
+    score = np.zeros(a.shape,np.float32)
+    for y in range(3,123,8):
+        for x in range(3,123,8):
+            score[y:y+3,x:x+3] = 1
+    result = image_diff.analyze_arrays(a,a,method='smart',reference_side='A',score_override=score,
+        min_area_px=1,open_kernel=1,close_kernel=1)
+    assert len(result['regions']) == 200
+    assert result['regionSummary'] == {'count':225,'shownCount':200,'truncated':True,
+        'areaPixels':2025,'maxConnectedAreaPixels':9,'coverageDensity':2025/16384}
+
+
+@pytest.mark.parametrize('value', [1.5, True, '5', None])
+def test_native_roi_rejects_lossy_integer_coercion(pair, value):
+    _, body, resolve = pair
+    for analyze in (smart_compare.analyze_roi, smart_compare.analyze_native_scan):
+        with pytest.raises(image_diff.DiffError, match='整数'):
+            analyze({**body, 'roi': {'x': value, 'y':0, 'w':32, 'h':32}}, resolve)
+
+
+def test_comparison_reports_failed_nonselected_method_without_losing_results(pair):
+    _, body, resolve = pair
+    original = image_diff.analyze_arrays
+    def fail_ssim(*args, **kwargs):
+        if kwargs['method'] == 'ssim':
+            raise image_diff.DiffError('synthetic SSIM unavailable')
+        return original(*args, **kwargs)
+    with patch.object(image_diff, 'analyze_arrays', side_effect=fail_ssim):
+        result = smart_compare.analyze_grid({**body, 'compare':True}, resolve)
+    comparison = result['comparison']
+    assert result['method'] == 'smart' and result['regions']
+    assert set(comparison['results']) == {'smart', 'absdiff'}
+    assert comparison['summary'][1]['status'] == 'failed'
+    assert comparison['summary'][1]['error'] == 'synthetic SSIM unavailable'
+    assert comparison['smartUniquePixels'] is None
+    assert comparison['overlaps'][0]['iou'] is None
+    json.dumps(result, allow_nan=False)
+
+
+def test_categorical_scene_mask_sampling_does_not_interpolate_labels(tmp_path):
+    path = tmp_path/'mask.tif'
+    mask = np.zeros((12,12), np.uint8)
+    mask[:,3] = 255  # Bilinear 12→5 sampling leaks into the second output column.
+    tifffile.imwrite(path, mask, rowsperstrip=3)
+    sampled, valid = smart_compare.batch_difference.sample_grid(path,12,12,(5,5),{'categorical':True})
+    expected = mask[np.ix_([1,3,6,8,10], [1,3,6,8,10])]
+    np.testing.assert_array_equal(sampled, expected)
+    assert valid.all()
+
+
+def test_scene_mask_roi_uses_pan_pixel_centres_not_blind_resize(pair):
+    paths, body, resolve = pair
+    mask_path = paths[0].parent/'cloud.tif'
+    mask = np.zeros((96,96), np.uint8)
+    mask[:,20] = 255
+    tifffile.imwrite(mask_path, mask)
+    _, _, refs, _ = smart_compare.prepare_pair(body, resolve)
+    registration = {'crs':'synthetic','extent':[0,0,192,192],'orientation':[1,-1]}
+    refs[0]['tourIdentity']['registration'] = registration
+    spec = {'sceneId':'cloud','sourceRevision':preview_jpg.source_revision(mask_path)}
+    identity = {'width':96,'height':96,'registration':registration,'sourceRevision':spec['sourceRevision']}
+    with patch.object(smart_compare, 'image_identity', return_value=identity):
+        result = smart_compare.load_scene_masks({'sceneMasks':{'cloud':spec}}, lambda _:mask_path,
+            refs, (21,23), window=(31,30,54,51))
+    expected = mask[np.ix_(np.arange(30,51)//2, np.arange(31,54)//2)] > 0
+    assert result['cloud']['registered']
+    np.testing.assert_array_equal(result['cloud']['mask'], expected)
 
 
 def test_native_tiled_seams_match_single_native_score(tmp_path):

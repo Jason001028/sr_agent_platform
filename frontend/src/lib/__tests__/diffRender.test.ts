@@ -32,11 +32,11 @@ describe('continuous difference rendering', () => {
   });
 
   it('multiplies intensity by the per-pixel weight before the color table', () => {
-    // 权重字节 255/85/170 = 1.8×/0.8×/1.3×，乘 100 后正好是 180/80/130。
+    // 权重字节 255/85/170 = 2.5×/1.5×/2.0×，乘 100 后正好是 250/150/200。
     const intensity = new Uint8Array([100, 100, 100]);
     const weights = new Uint8Array([255, 85, 170]);
     const got = colorizeHeatBytes(intensity, 3, 1, null, weights);
-    const expected = colorizeHeatBytes(new Uint8Array([180, 80, 130]), 3, 1);
+    const expected = colorizeHeatBytes(new Uint8Array([250, 150, 200]), 3, 1);
     expect([...got]).toEqual([...expected]);
   });
 

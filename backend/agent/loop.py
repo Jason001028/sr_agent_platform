@@ -1131,7 +1131,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                     "present_spatial_annotations", "prepare_batch_repair",
                     "query_batch_repair", "prepare_repair", "start_repair",
                     "get_repair_workspace", "list_repair_items",
-                    "get_repair_item"}:
+                    "get_repair_item", "sr_job_status"}:
                 # Preserve the two-argument seam used by existing callers/tests.
                 if allowed_names is None:
                     result = call_tool(tc["name"], tc["arguments"])

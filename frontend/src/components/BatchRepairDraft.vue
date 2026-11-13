@@ -5,6 +5,7 @@ import { useBatchGoalStore } from '../stores/batchGoal';
 import { useChatStore } from '../stores/chat';
 import { apiBatchImport, apiConfirmRepair, apiPrepareRepair, apiStartRepair, HttpError } from '../lib/api';
 import type { RepairPlan } from '../lib/api';
+import { registerViewerObservation } from '../lib/viewerContext';
 import { compactBatchError, importProblem, viewerRepairSequences } from '../lib/batchSequences';
 import type { RepairSequence } from '../lib/batchSequences';
 const emit = defineEmits<{ created: [] }>();
@@ -17,6 +18,14 @@ const chosen = computed(() => groups.value.filter(g => g.checked && g.count && !
 // A prepared plan is shown first; the second click is the real user
 // confirmation, recorded server-side. The Agent cannot produce that record.
 const pendingPlan = ref<RepairPlan | null>(null);
+const selectionVersion = ref(0);
+watch(groups, () => { selectionVersion.value++; }, {deep:true, flush:'sync'});
+const unregisterSelection = registerViewerObservation('repair_selection', () => ({
+  draft_id:'viewer-sequences', version:selectionVersion.value, total:groups.value.length,
+  selected:chosen.value.length, excluded:groups.value.filter(g=>!g.checked).length,
+  selected_names:chosen.value.slice(0,3).map(g=>g.name), loading:loading.value,
+}));
+onBeforeUnmount(unregisterSelection);
 let generation = 0;
 onBeforeUnmount(() => { generation++; });
 const signature = () => JSON.stringify([chat.sessionId, chosen.value.map(g => g.path), mode.value, detectionMethod.value, strategy.value]);
@@ -107,8 +116,8 @@ async function start() {
   <div class="draft" data-e2e="batch-draft" :aria-busy="busy || loading">
     <p>选择左侧生产序列，自动处理组内全部符合条件的 PAN 本体。</p>
     <label>执行模式 <select v-model="mode" :disabled="busy || loading" aria-label="批量执行模式"><option value="demo">演示（Fake SR）</option><option value="production">生产（受准入限制）</option></select></label>
-    <label>检测方法 <select v-model="detectionMethod" :disabled="busy || loading" aria-label="批量检测方法"><option value="absdiff">像素差异</option><option value="ssim">结构差异</option><option value="smart">智能对比（实验性，需人工复核）</option></select></label>
-    <p v-if="detectionMethod === 'smart'">智能候选不会自动提交 SR；先复核候选掩码，再沿用人工质量验收。未检出候选不等于质量通过。</p>
+    <label>检测方法 <select v-model="detectionMethod" :disabled="busy || loading" aria-label="批量检测方法"><option value="absdiff">像素差异</option><option value="ssim">结构差异</option><option value="smart">LTD（实验性，需人工复核）</option></select></label>
+    <p v-if="detectionMethod === 'smart'">LTD · 局部纹理退化检测 · 内网传统算法。候选不会自动提交 SR；先复核候选掩码，再沿用人工质量验收。未检出候选不等于质量通过。</p>
     <div class="selection"><span>{{ groups.length }} 组序列</span><button :disabled="busy || loading" @click="selectAll(true)">全选</button><button :disabled="busy || loading" @click="selectAll(false)">取消全选</button></div>
     <div class="sequence-list">
       <label v-for="g in groups" :key="g.key" class="sequence-row" :class="{ selected: g.checked }">

@@ -3,6 +3,7 @@ import type { Poly } from './maskgen';
 export interface AutoDiffOrigin {
   source: 'auto_diff'; analysis_id: string; image_id: number; group_id: string;
   region_id: string; parameter_version: string; initial_points: string; needs_review: boolean;
+  reviewed?: boolean;
 }
 export type OwnedPoly = Poly & { autoDiff?: AutoDiffOrigin };
 const signature = (polys: Poly[]) => JSON.stringify(polys.map(p => ({ points: p, origin: (p as OwnedPoly).autoDiff })));
@@ -43,7 +44,7 @@ export class MaskHistory {
 export function replaceAutoGroup(current: Poly[], incoming: OwnedPoly[], analysisId: string): Poly[] {
   const edited = new Set(current.filter(p => {
     const o = (p as OwnedPoly).autoDiff;
-    return o?.analysis_id === analysisId && JSON.stringify(p) !== o.initial_points;
+    return o?.analysis_id === analysisId && (o.reviewed === true || JSON.stringify(p) !== o.initial_points);
   }).map(p => (p as OwnedPoly).autoDiff!.region_id));
   return [...current.filter(p => {
     const o = (p as OwnedPoly).autoDiff;

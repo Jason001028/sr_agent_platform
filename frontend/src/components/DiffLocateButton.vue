@@ -16,6 +16,9 @@ import { DIFF_THRESHOLD_PRESETS } from '../lib/diffLocate';
 import DiffColorLegend from './DiffColorLegend.vue';
 import AppIcon from './AppIcon.vue';
 import { isDeveloperMode } from '../lib/developerMode';
+import { differenceSourceLabel } from '../lib/smartCompareLabels';
+
+const methodLabel = (method: string) => (({ absdiff: 'AbsDiff', ssim: 'SSIM', smart: 'LTD' } as Record<string, string>)[method] ?? method);
 
 const diff = useDiffStore();
 const viewer = useViewerStore();
@@ -66,13 +69,20 @@ const summary = computed(() => {
     coverage: Math.round((r.coverage?.validRatio ?? 0) * 1000) / 10,
     ms: r.elapsedMs,
     threshold: r.parameters.threshold,
-    source: r.source === 'source-roi' ? '原始 DN 精检' : r.source === 'source-grid' ? '原始 DN 分析网格' : '预览',
-    method: r.method === 'smart' ? '智能对比' : r.method === 'ssim' ? '结构差异' : '像素差分',
+    source: differenceSourceLabel(r.source),
+    method: r.method === 'smart' ? 'LTD' : r.method === 'ssim' ? '结构差异' : '像素差分',
   };
 });
 
 async function run() {
   await diff.analyze();
+}
+async function selectMethod(next:'absdiff'|'ssim'|'smart') {
+  if(diff.comparison && !diff.stale) {
+    if(!diff.comparison.results[next]) {diff.error=diff.comparison.summary.find(s=>s.method===next)?.error??'该方法没有可用结果';return;}
+    await diff.showComparison(next);return;
+  }
+  diff.method=next;
 }
 
 function clear() {
@@ -159,14 +169,16 @@ onBeforeUnmount(() => {
           <div class="seg" role="radiogroup" aria-label="分析方法">
             <button type="button" :class="{ on: diff.method === 'absdiff' }" role="radio"
               :aria-checked="diff.method === 'absdiff'" :disabled="diff.busy"
-              @click="diff.method = 'absdiff'">像素差分</button>
+              @click="selectMethod('absdiff')">像素差分</button>
             <button type="button" :class="{ on: diff.method === 'ssim' }" role="radio"
               :aria-checked="diff.method === 'ssim'" :disabled="diff.busy"
-              @click="diff.method = 'ssim'">结构差异 SSIM</button>
+              @click="selectMethod('ssim')">结构差异 SSIM</button>
             <button type="button" :class="{ on: diff.method === 'smart' }" role="radio"
               :aria-checked="diff.method === 'smart'" :disabled="diff.busy" data-e2e="diff-smart"
-              @click="diff.method = 'smart'">智能对比</button>
+              title="Local Texture Degradation · 局部纹理退化检测 · 内网传统算法"
+              @click="selectMethod('smart')">LTD</button>
           </div>
+          <p v-if="diff.method === 'smart'" class="diff-note">局部纹理退化检测 · 内网传统算法 · 候选需人工复核</p>
         </section>
 
         <section class="diff-section" aria-label="分析范围">
@@ -246,14 +258,14 @@ onBeforeUnmount(() => {
           <summary>高级设置</summary>
           <div v-if="diff.method === 'smart'" class="diff-grid">
             <label class="diff-field"><span>纹理窗口</span><select v-model.number="diff.smartOptions.window" aria-label="纹理窗口"><option :value="7">7×7</option><option :value="15">15×15</option><option :value="31">31×31</option></select></label>
-            <label class="diff-field"><span>分析精度</span><select v-model="diff.smartPrecision" aria-label="智能对比分析精度"><option value="source-grid">原始 DN 网格</option><option value="preview">预览检测</option></select></label>
+            <label class="diff-field"><span>分析精度</span><select v-model="diff.smartPrecision" aria-label="LTD分析精度"><option value="source-grid">原始 DN 网格</option><option value="preview">预览检测</option></select></label>
             <label class="diff-field"><span>传感器配置</span><select v-model="diff.smartOptions.sensor" aria-label="传感器配置"><option v-for="s in ['generic','JL1KF01','JL1KF02','JL1GF04']" :key="s">{{ s }}</option></select></label>
             <label class="diff-field"><span>固定校准尺度（可选）</span><input :value="diff.smartOptions.calibrationScale ?? ''" type="number" min="0.01" step="0.1" aria-label="固定校准尺度" @change="diff.smartOptions.calibrationScale = ($event.target as HTMLInputElement).value ? Number(($event.target as HTMLInputElement).value) : undefined" /></label>
           </div>
           <template v-if="diff.method === 'smart'">
             <label class="diff-toggle"><span>场景掩码降权（可用时）</span><input v-model="diff.smartOptions.sceneSuppression" type="checkbox" aria-label="场景掩码降权" /></label>
             <label class="diff-toggle"><span>频域复核（实验性）</span><input v-model="diff.smartOptions.frequencyReview" type="checkbox" aria-label="频域复核" /></label>
-            <button type="button" :disabled="diff.busy || !!diff.smartPairReason" @click="diff.scanNativeVisible()">当前视野原始尺度补扫</button>
+            <button type="button" :disabled="diff.busy || !!diff.nativeRefineReason" :title="diff.nativeRefineReason" @click="diff.scanNativeVisible()">当前视野原始尺度补扫</button>
             <p class="diff-note">补扫保留细小异常，每次最多 64 个 512² 块；范围过大时请放大视野。补扫概览仍需原图精检后才能加入掩码。</p>
             <p class="diff-note">当前参数未完成生产校准；缺少云水阴影掩码时会明确标为未验证。窗口单位为分析网格像素。</p>
           </template>
@@ -278,7 +290,7 @@ onBeforeUnmount(() => {
             <label class="diff-field">
               <span>SSIM 窗口</span>
               <select v-model.number="diff.advanced.ssimWindow" aria-label="SSIM 窗口"
-                :disabled="diff.method !== 'ssim'">
+                :disabled="diff.method !== 'ssim' && !diff.parallelCompare">
                 <option :value="5">5×5</option>
                 <option :value="7">7×7</option>
                 <option :value="9">9×9</option>
@@ -294,12 +306,12 @@ onBeforeUnmount(() => {
           <label class="diff-toggle">
             <span>轻度高斯平滑（3×3）</span>
             <input v-model="diff.advanced.blur" class="diff-switch" type="checkbox" role="switch"
-              aria-label="轻度高斯平滑" />
+              aria-label="轻度高斯平滑" :disabled="diff.method === 'smart' && !diff.parallelCompare" />
           </label>
-          <label class="diff-toggle" :class="{ muted: diff.method !== 'ssim' }">
+          <label class="diff-toggle" :class="{ muted: diff.method !== 'ssim' && !diff.parallelCompare }">
             <span>SSIM 使用高斯权重</span>
             <input v-model="diff.advanced.ssimGaussian" class="diff-switch" type="checkbox" role="switch"
-              aria-label="SSIM 使用高斯权重" :disabled="diff.method !== 'ssim'" />
+              aria-label="SSIM 使用高斯权重" :disabled="diff.method !== 'ssim' && !diff.parallelCompare" />
           </label>
           <p class="diff-note">阈值留空 = 按灵敏度自动取值（当前 {{ autoThreshold.toFixed(2) }}）。</p>
         </details>
@@ -311,9 +323,14 @@ onBeforeUnmount(() => {
         <p v-if="diff.method === 'smart' && diff.smartPairReason" class="diff-note">{{ diff.smartPairReason }}</p>
         <p v-if="diff.method === 'smart'" role="status">{{ diff.analysisState }}</p>
         <details v-if="diff.comparison"><summary>三算法对照</summary>
-          <button v-for="item in diff.comparison.summary" :key="item.method" type="button" @click="diff.showComparison(item.method)">{{ item.method }} · {{ item.regions }} 区域 · {{ item.areaPixels }} px² · {{ item.elapsedMs }} ms</button>
-          <p v-for="pair in diff.comparison.overlaps" :key="pair.methods.join('/')">{{ pair.methods.join(' / ') }} IoU {{ pair.iou.toFixed(3) }}</p>
-          <p>Smart 独有候选像素 {{ diff.comparison.smartUniquePixels }}</p>
+          <button type="button" :disabled="diff.stale || diff.busy" data-e2e="diff-three-open" @click="diff.comparisonView=true;diff.closePanel()">三图同步对照</button>
+          <div v-for="item in diff.comparison.summary" :key="item.method" class="compare-row">
+            <button type="button" :disabled="diff.busy || diff.stale || item.status !== 'completed'" @click="diff.showComparison(item.method)">{{ methodLabel(item.method) }} · {{ item.status === 'completed' ? item.regions + ' 区域' : '检测失败' }}</button>
+            <small v-if="item.status === 'completed'">{{ item.areaPixels }} px² · 有效覆盖 {{ (item.coverage*100).toFixed(2) }}% · {{ item.elapsedMs }} ms</small>
+            <small v-else role="status">{{ item.error }}</small>
+          </div>
+          <p v-for="pair in diff.comparison.overlaps" :key="pair.methods.join('/')">{{ pair.methods.map(methodLabel).join(' / ') }} IoU {{ pair.iou == null ? '不可用' : pair.iou.toFixed(3) }}</p>
+          <p>LTD 独有候选像素 {{ diff.comparison.smartUniquePixels ?? '不可用（对照不完整）' }}</p>
         </details>
         <p v-else-if="diff.stale" class="diff-notice" role="status">
           参数已修改，当前仍显示上一次结果；重新分析后生效。
@@ -345,6 +362,8 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .diff-entry{position:relative;display:inline-flex;flex:none}
+.compare-row{display:flex;flex-direction:column;gap:3px;margin:7px 0;color:var(--ink-sub)}
+.compare-row button{font:inherit;color:var(--ink);background:var(--surface-2);border:1px solid var(--line);border-radius:5px;padding:5px;cursor:pointer}
 .diff-button{display:inline-flex;align-items:center;justify-content:center;gap:6px;flex:none;width:100px;height:32px;padding:0 10px;box-sizing:border-box;white-space:nowrap;font-family:inherit;font-size:13px;font-weight:500;border:1px solid var(--tb-border);border-radius:8px;background:var(--tb-surface);color:var(--tb-fg);cursor:pointer;transition:background var(--motion-hover),color var(--motion-hover)}
 .diff-button:hover,.diff-button.on{background:var(--tb-active-bg);color:var(--tb-primary)}
 .diff-button:focus-visible{outline:2px solid var(--tb-focus)}

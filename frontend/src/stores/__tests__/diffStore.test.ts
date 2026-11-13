@@ -175,7 +175,7 @@ function makeViewer() {
   return state;
 }
 
-describe('Smart Compare integration', () => {
+describe('LTD integration', () => {
   function setup() {
     const a=mocks.viewer.recs[0],b=mocks.viewer.recs[1];
     a.stageKind='input';b.stageKind='nosr';b.name='PAN_NOSR';
@@ -223,6 +223,77 @@ describe('Smart Compare integration', () => {
     const signal=mocks.api.mock.calls[0][2] as AbortSignal;
     diff.setPair(1,3);expect(signal.aborted).toBe(true);finish(null);await pending;
     expect(diff.result).toBeNull();expect(diff.busy).toBe(false);
+  });
+  it('passes the same advanced settings to the three-method comparison', async()=>{
+    const diff=setup();diff.parallelCompare=true;
+    diff.advanced={...diff.advanced,blur:false,ssimWindow:9,ssimGaussian:true};
+    mocks.api.mockImplementation(async(_cfg,req)=>answer(req));
+    expect(await diff.analyze()).toBe(true);
+    expect(mocks.api.mock.calls[0][1]).toMatchObject({compare:true,blur:false,ssimWindow:9,ssimGaussian:true});
+  });
+  it('cancels native requests when a texture parameter changes and does not stick in analyzing state',async()=>{
+    const diff=setup();let finish!:(v:any)=>void;
+    mocks.api.mockImplementation((_cfg,req)=>new Promise(resolve=>{finish=()=>resolve(answer(req));}));
+    const pending=diff.analyze();await Promise.resolve();
+    const signal=mocks.api.mock.calls[0][2] as AbortSignal;
+    diff.smartOptions.window=31;
+    expect(signal.aborted).toBe(true);expect(diff.analysisState).toBe('已取消');
+    finish(null);await pending;
+    expect(diff.result).toBeNull();expect(diff.busy).toBe(false);
+  });
+  it('disables native refinement for reversed pairs before sending a request',async()=>{
+    const diff=setup();diff.setPair(2,1);
+    expect(diff.nativeRefineReason).toContain('PAN 本体选为 A');
+    expect(await diff.scanNativeVisible()).toBe(false);
+    expect(diff.error).toContain('PAN 本体选为 A');expect(mocks.api).not.toHaveBeenCalled();
+  });
+  it('does not accept unrelated scene groups with missing sequence identities',async()=>{
+    const diff=setup();
+    mocks.viewer.recs[0].tourIdentity={role:'pan'};
+    mocks.viewer.recs[1].tourIdentity={role:'nosr'};
+    mocks.viewer.recs[1].sceneDir='/different-scene';
+    mocks.viewer.recs[1].lqPath='/different-scene';
+    expect(diff.smartPairReason).toContain('共同场景');
+    expect(await diff.analyze()).toBe(false);expect(mocks.api).not.toHaveBeenCalled();
+  });
+  it('invalidates old comparison before a new legacy result can revive it on a revised source',async()=>{
+    const diff=setup();diff.parallelCompare=true;
+    const oldAbs=fakeResult({elapsedMs:111}),oldSmart=answer({image_a:{id:1},image_b:{id:2}});
+    mocks.api.mockResolvedValue({...oldSmart,comparison:{summary:[],overlaps:[],smartUniquePixels:0,results:{absdiff:oldAbs,smart:oldSmart}}});
+    expect(await diff.analyze()).toBe(true);expect(diff.comparison).toBeDefined();
+    diff.parallelCompare=false;diff.method='absdiff';diff.sensitivity='high';
+    mocks.viewer.recs[0].srcRev='v2';mocks.viewer.recs[0].token=2;
+    const fresh=fakeResult({elapsedMs:999,parameters:{...fakeResult().parameters,sensitivity:'high'}});
+    mocks.api.mockResolvedValue(fresh);expect(await diff.analyze()).toBe(true);
+    await diff.showComparison('absdiff');
+    expect(diff.comparison).toBeUndefined();expect(diff.result?.elapsedMs).toBe(999);
+    expect(diff.stale).toBe(false);
+  });
+  it('keeps valid cached methods switchable but drops them on a source revision change',async()=>{
+    const diff=setup();diff.parallelCompare=true;
+    const smart=answer({image_a:{id:1},image_b:{id:2}}),abs=fakeResult({source:'source-grid'});
+    mocks.api.mockResolvedValue({...smart,comparison:{summary:[],overlaps:[],smartUniquePixels:0,results:{smart,absdiff:abs}}});
+    await diff.analyze();await diff.showComparison('absdiff');
+    expect(diff.result?.method).toBe('absdiff');expect(diff.stale).toBe(false);
+    await diff.showComparison('smart');expect(diff.result?.method).toBe('smart');
+    expect(mocks.api).toHaveBeenCalledTimes(1);
+    await diff.showComparison('absdiff');diff.comparisonView=true;
+    mocks.viewer.recs[0].srcRev='v2';expect(diff.comparison).toBeUndefined();
+    expect(diff.comparisonView).toBe(false);expect(diff.stale).toBe(true);
+    expect(diff.addRegionToMask('r001')).toBe(false);expect(mocks.viewer.addMaskPolygon).not.toHaveBeenCalled();
+  });
+  it('publishes a successful fallback and preserves the failed requested method status',async()=>{
+    const diff=setup();diff.parallelCompare=true;
+    const abs=fakeResult({source:'source-grid'});
+    mocks.api.mockResolvedValue({...abs,comparison:{requestedMethod:'smart',status:'partial',summary:[],overlaps:[],smartUniquePixels:null,results:{absdiff:abs}}});
+    expect(await diff.analyze()).toBe(true);
+    expect(diff.method).toBe('absdiff');expect(diff.stale).toBe(false);
+    expect(diff.comparison?.requestedMethod).toBe('smart');expect(diff.notice).toContain('检测失败');
+  });
+  it('passes the original normalization to native refinement',async()=>{
+    const diff=setup();mocks.api.mockImplementation(async(_cfg,req)=>({...answer(req),normalization:{scale:2.5,logRatioBaseline:.4,mode:'scene-q99'}}));
+    await diff.analyze();await diff.refineRegion('r001');
+    expect(mocks.api.mock.calls[1][1].smartOptions).toMatchObject({calibrationScale:2.5,logRatioBaseline:.4});
   });
 });
 
@@ -304,9 +375,10 @@ describe('automatic polygon staging and identity isolation', () => {
     expect(d.autoDrawReason).toBe('');
     vi.stubGlobal('window', { matchMedia: () => ({ matches: true }) });
     expect(await d.autoDraw()).toBe(true);
+    await d.reviewAutoRegion(d.autoDrawing!.polygons[0].autoDiff!.region_id, 'approved');
     expect(v.addMaskPolygonBatch).toHaveBeenCalledTimes(1);
     expect(v.addMaskPolygonBatch.mock.calls[0][0]).toBe(1);
-    expect(mocks.siblings).toHaveBeenCalledTimes(2); // before staging and before commit
+    expect(mocks.siblings).toHaveBeenCalledTimes(3); // staging, review, final commit
   });
 
   it('rejects a missing-certificate input if the server identifies it as NOSR', async () => {
@@ -347,6 +419,9 @@ describe('automatic polygon staging and identity isolation', () => {
     expect(await d.autoDraw()).toBe(false); // double click
     await vi.advanceTimersByTimeAsync(3200);
     expect(await pending).toBe(true);
+    expect(d.autoDrawing?.reviewing).toBe(true);
+    expect(mocks.viewer.addMaskPolygonBatch).not.toHaveBeenCalled();
+    await d.reviewAutoRegion(d.autoDrawing!.polygons[0].autoDiff!.region_id, 'approved');
     expect(mocks.viewer.addMaskPolygonBatch).toHaveBeenCalledTimes(1);
     const p = mocks.viewer.addMaskPolygonBatch.mock.calls[0][1][0];
     expect(thumbToOrig(p[0][0], p[0][1], 32, 32, 16, 16)).toEqual([4, 4]);
@@ -373,8 +448,47 @@ describe('automatic polygon staging and identity isolation', () => {
     vi.stubGlobal('window', { matchMedia: () => ({ matches: true }) });
     d.result!.autoMask!.polygons[0].needs_review = true;
     expect(await d.autoDraw()).toBe(true);
-    expect(d.notice).toContain('待复核');
+    expect(d.autoDrawing?.reviewing).toBe(true);
+    await d.reviewAutoRegion(d.autoDrawing!.polygons[0].autoDiff!.region_id, 'approved');
+    expect(d.notice).toContain('审批完成');
     expect(d.autoDrawing).toBeNull();
+  });
+  it('waits for all decisions and commits only approved polygons once', async () => {
+    const d = await readyAuto();
+    vi.stubGlobal('window', { matchMedia: () => ({ matches: true }) });
+    const second = structuredClone(d.result!.autoMask!.polygons[0]);
+    second.region_id = 'second';
+    d.result!.autoMask!.polygons.push(second);
+    expect(await d.autoDraw()).toBe(true);
+    const ids = d.autoDrawing!.polygons.map(p => p.autoDiff!.region_id);
+    await d.reviewAutoRegion(ids[0], 'approved');
+    expect(mocks.viewer.addMaskPolygonBatch).not.toHaveBeenCalled();
+    await d.reviewAutoRegion(ids[1], 'rejected');
+    expect(mocks.viewer.addMaskPolygonBatch).toHaveBeenCalledTimes(1);
+    expect(mocks.viewer.addMaskPolygonBatch.mock.calls[0][1]).toHaveLength(1);
+    expect(d.autoDrawing).toBeNull();
+    expect(d.resultVisible).toBe(false);
+  });
+  it('all rejected or cancelled candidates never modify existing masks', async () => {
+    const d = await readyAuto();
+    vi.stubGlobal('window', { matchMedia: () => ({ matches: true }) });
+    await d.autoDraw();
+    await d.reviewAutoRegion(d.autoDrawing!.polygons[0].autoDiff!.region_id, 'rejected');
+    expect(mocks.viewer.addMaskPolygonBatch).not.toHaveBeenCalled();
+    await d.autoDraw();
+    d.cancelAutoDraw();
+    expect(d.autoDrawing).toBeNull();
+    expect(mocks.viewer.addMaskPolygonBatch).not.toHaveBeenCalled();
+  });
+  it('rechecks source identity after approval and refuses a replaced source', async () => {
+    const d = await readyAuto();
+    vi.stubGlobal('window', { matchMedia: () => ({ matches: true }) });
+    await d.autoDraw();
+    mocks.siblings.mockResolvedValueOnce({ items: [] });
+    await d.reviewAutoRegion(d.autoDrawing!.polygons[0].autoDiff!.region_id, 'approved');
+    expect(mocks.viewer.addMaskPolygonBatch).not.toHaveBeenCalled();
+    expect(d.autoDrawing).toBeNull();
+    expect(d.error).toContain('源文件');
   });
   it('rejects unavailable or changed server files before drawing, and rechecks before commit', async () => {
     const d = await readyAuto();
@@ -417,6 +531,7 @@ describe('automatic polygon staging and identity isolation', () => {
     expect(d.autoDrawing).not.toBeNull();
     await vi.advanceTimersByTimeAsync(3200);
     expect(await second).toBe(true);
+    await d.reviewAutoRegion(d.autoDrawing!.polygons[0].autoDiff!.region_id, 'approved');
     expect(mocks.viewer.addMaskPolygonBatch).toHaveBeenCalledTimes(1);
   });
   it('preserves a draft started while the initial source check is in flight', async () => {

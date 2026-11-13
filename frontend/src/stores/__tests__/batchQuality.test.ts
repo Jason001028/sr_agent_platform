@@ -37,6 +37,14 @@ beforeEach(()=>{
 afterEach(()=>vi.unstubAllGlobals());
 
 describe('batch human quality UI state',()=>{
+  it('opens input-bound no-candidate reviews and sends explicit whole-scene confirmation',async()=>{
+    const d=document();d.job_id='';d.regions=[];d.binding={...d.binding,kind:'no-candidate',grid:{width:128,height:128},mask:undefined,regions:[]};
+    mocks.document.mockResolvedValue(d);
+    const q=useBatchQualityStore();await q.select('one');
+    expect(q.comparisonReady).toBe(true);expect(q.doc?.binding.kind).toBe('no-candidate');
+    q.reviewer='整景审核人';await q.decide('scene','approved');
+    expect(mocks.decide.mock.calls[0][2]).toMatchObject({action:'scene',decision:'approved',review_id:d.review_id,reviewer:'整景审核人'});
+  });
   it('opens the exact output/NOSR pair and focuses both normalized Mask regions',async()=>{
     const q=useBatchQualityStore();await q.select('one');
     expect(q.comparisonReady).toBe(true);expect(q.doc?.job_id).toBe('81');

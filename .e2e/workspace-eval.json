@@ -1,0 +1,335 @@
+{
+  "mode": "scripted_contract_replay",
+  "draft50_projection_utf8_bytes": {
+    "baseline": 5967,
+    "enhanced": 279
+  },
+  "baseline_ref": "HEAD",
+  "note": "回放仅测工具可达性与链路，不代表模型选工具准确率；耗时不代表真实首次有效回答。",
+  "rows": [
+    {
+      "enhanced": false,
+      "case": "local",
+      "expected": "get_current_image_info",
+      "calls": [
+        "get_current_image_info"
+      ],
+      "first_tool_correct": null,
+      "expected_tool_executed": true,
+      "irrelevant_searches": 0,
+      "tool_calls": 1,
+      "first_effective_tool_seconds": 0.05242759990505874,
+      "elapsed_seconds": 0.05346779990941286,
+      "ok": true,
+      "answer": null,
+      "unsupported_state_reports": null,
+      "answer_review": "真实模型答案需人工复核；回放不产生自然语言状态结论。"
+    },
+    {
+      "enhanced": false,
+      "case": "draft",
+      "expected": "get_repair_workspace",
+      "calls": [
+        "get_repair_workspace"
+      ],
+      "first_tool_correct": null,
+      "expected_tool_executed": false,
+      "irrelevant_searches": 0,
+      "tool_calls": 1,
+      "first_effective_tool_seconds": null,
+      "elapsed_seconds": 0.04915220011025667,
+      "ok": true,
+      "answer": null,
+      "unsupported_state_reports": null,
+      "answer_review": "真实模型答案需人工复核；回放不产生自然语言状态结论。"
+    },
+    {
+      "enhanced": false,
+      "case": "batch50",
+      "expected": "get_repair_workspace",
+      "calls": [
+        "get_repair_workspace"
+      ],
+      "first_tool_correct": null,
+      "expected_tool_executed": false,
+      "irrelevant_searches": 0,
+      "tool_calls": 1,
+      "first_effective_tool_seconds": null,
+      "elapsed_seconds": 0.05119220004417002,
+      "ok": true,
+      "answer": null,
+      "unsupported_state_reports": null,
+      "answer_review": "真实模型答案需人工复核；回放不产生自然语言状态结论。"
+    },
+    {
+      "enhanced": false,
+      "case": "failed",
+      "expected": "list_repair_items",
+      "calls": [
+        "list_repair_items"
+      ],
+      "first_tool_correct": null,
+      "expected_tool_executed": false,
+      "irrelevant_searches": 0,
+      "tool_calls": 1,
+      "first_effective_tool_seconds": null,
+      "elapsed_seconds": 0.059496300062164664,
+      "ok": true,
+      "answer": null,
+      "unsupported_state_reports": null,
+      "answer_review": "真实模型答案需人工复核；回放不产生自然语言状态结论。"
+    },
+    {
+      "enhanced": false,
+      "case": "review",
+      "expected": "list_repair_items",
+      "calls": [
+        "list_repair_items"
+      ],
+      "first_tool_correct": null,
+      "expected_tool_executed": false,
+      "irrelevant_searches": 0,
+      "tool_calls": 1,
+      "first_effective_tool_seconds": null,
+      "elapsed_seconds": 0.048031700076535344,
+      "ok": true,
+      "answer": null,
+      "unsupported_state_reports": null,
+      "answer_review": "真实模型答案需人工复核；回放不产生自然语言状态结论。"
+    },
+    {
+      "enhanced": false,
+      "case": "third",
+      "expected": "get_repair_item",
+      "calls": [
+        "get_repair_item"
+      ],
+      "first_tool_correct": null,
+      "expected_tool_executed": false,
+      "irrelevant_searches": 0,
+      "tool_calls": 1,
+      "first_effective_tool_seconds": null,
+      "elapsed_seconds": 0.05142359994351864,
+      "ok": true,
+      "answer": null,
+      "unsupported_state_reports": null,
+      "answer_review": "真实模型答案需人工复核；回放不产生自然语言状态结论。"
+    },
+    {
+      "enhanced": false,
+      "case": "empty",
+      "expected": "get_repair_workspace",
+      "calls": [
+        "get_repair_workspace"
+      ],
+      "first_tool_correct": null,
+      "expected_tool_executed": false,
+      "irrelevant_searches": 0,
+      "tool_calls": 1,
+      "first_effective_tool_seconds": null,
+      "elapsed_seconds": 0.05203400016762316,
+      "ok": true,
+      "answer": null,
+      "unsupported_state_reports": null,
+      "answer_review": "真实模型答案需人工复核；回放不产生自然语言状态结论。"
+    },
+    {
+      "enhanced": false,
+      "case": "job",
+      "expected": "sr_job_status",
+      "calls": [
+        "sr_job_status"
+      ],
+      "first_tool_correct": null,
+      "expected_tool_executed": true,
+      "irrelevant_searches": 0,
+      "tool_calls": 1,
+      "first_effective_tool_seconds": 0.06484660017304122,
+      "elapsed_seconds": 0.06575180008076131,
+      "ok": true,
+      "answer": null,
+      "unsupported_state_reports": null,
+      "answer_review": "真实模型答案需人工复核；回放不产生自然语言状态结论。"
+    },
+    {
+      "enhanced": false,
+      "case": "search",
+      "expected": "search_scenes",
+      "calls": [
+        "search_scenes"
+      ],
+      "first_tool_correct": null,
+      "expected_tool_executed": true,
+      "irrelevant_searches": 0,
+      "tool_calls": 1,
+      "first_effective_tool_seconds": 0.05044140014797449,
+      "elapsed_seconds": 0.0513007000554353,
+      "ok": true,
+      "answer": null,
+      "unsupported_state_reports": null,
+      "answer_review": "真实模型答案需人工复核；回放不产生自然语言状态结论。"
+    },
+    {
+      "enhanced": true,
+      "case": "local",
+      "expected": "get_current_image_info",
+      "calls": [
+        "get_current_image_info"
+      ],
+      "first_tool_correct": null,
+      "expected_tool_executed": true,
+      "irrelevant_searches": 0,
+      "tool_calls": 1,
+      "first_effective_tool_seconds": 0.08549490012228489,
+      "elapsed_seconds": 0.08664759993553162,
+      "ok": true,
+      "answer": null,
+      "unsupported_state_reports": null,
+      "answer_review": "真实模型答案需人工复核；回放不产生自然语言状态结论。"
+    },
+    {
+      "enhanced": true,
+      "case": "draft",
+      "expected": "get_repair_workspace",
+      "calls": [
+        "get_repair_workspace"
+      ],
+      "first_tool_correct": null,
+      "expected_tool_executed": true,
+      "irrelevant_searches": 0,
+      "tool_calls": 1,
+      "first_effective_tool_seconds": 0.07615639991126955,
+      "elapsed_seconds": 0.07704539992846549,
+      "ok": true,
+      "answer": null,
+      "unsupported_state_reports": null,
+      "answer_review": "真实模型答案需人工复核；回放不产生自然语言状态结论。"
+    },
+    {
+      "enhanced": true,
+      "case": "batch50",
+      "expected": "get_repair_workspace",
+      "calls": [
+        "get_repair_workspace"
+      ],
+      "first_tool_correct": null,
+      "expected_tool_executed": true,
+      "irrelevant_searches": 0,
+      "tool_calls": 1,
+      "first_effective_tool_seconds": 0.06691000005230308,
+      "elapsed_seconds": 0.06781839998438954,
+      "ok": true,
+      "answer": null,
+      "unsupported_state_reports": null,
+      "answer_review": "真实模型答案需人工复核；回放不产生自然语言状态结论。"
+    },
+    {
+      "enhanced": true,
+      "case": "failed",
+      "expected": "list_repair_items",
+      "calls": [
+        "list_repair_items"
+      ],
+      "first_tool_correct": null,
+      "expected_tool_executed": true,
+      "irrelevant_searches": 0,
+      "tool_calls": 1,
+      "first_effective_tool_seconds": 0.06713600014336407,
+      "elapsed_seconds": 0.06809590011835098,
+      "ok": true,
+      "answer": null,
+      "unsupported_state_reports": null,
+      "answer_review": "真实模型答案需人工复核；回放不产生自然语言状态结论。"
+    },
+    {
+      "enhanced": true,
+      "case": "review",
+      "expected": "list_repair_items",
+      "calls": [
+        "list_repair_items"
+      ],
+      "first_tool_correct": null,
+      "expected_tool_executed": true,
+      "irrelevant_searches": 0,
+      "tool_calls": 1,
+      "first_effective_tool_seconds": 0.0765943001024425,
+      "elapsed_seconds": 0.0776041999924928,
+      "ok": true,
+      "answer": null,
+      "unsupported_state_reports": null,
+      "answer_review": "真实模型答案需人工复核；回放不产生自然语言状态结论。"
+    },
+    {
+      "enhanced": true,
+      "case": "third",
+      "expected": "get_repair_item",
+      "calls": [
+        "get_repair_item"
+      ],
+      "first_tool_correct": null,
+      "expected_tool_executed": true,
+      "irrelevant_searches": 0,
+      "tool_calls": 1,
+      "first_effective_tool_seconds": 0.07982630003243685,
+      "elapsed_seconds": 0.08083190000616014,
+      "ok": true,
+      "answer": null,
+      "unsupported_state_reports": null,
+      "answer_review": "真实模型答案需人工复核；回放不产生自然语言状态结论。"
+    },
+    {
+      "enhanced": true,
+      "case": "empty",
+      "expected": "get_repair_workspace",
+      "calls": [
+        "get_repair_workspace"
+      ],
+      "first_tool_correct": null,
+      "expected_tool_executed": true,
+      "irrelevant_searches": 0,
+      "tool_calls": 1,
+      "first_effective_tool_seconds": 0.08186420006677508,
+      "elapsed_seconds": 0.08281020005233586,
+      "ok": true,
+      "answer": null,
+      "unsupported_state_reports": null,
+      "answer_review": "真实模型答案需人工复核；回放不产生自然语言状态结论。"
+    },
+    {
+      "enhanced": true,
+      "case": "job",
+      "expected": "sr_job_status",
+      "calls": [
+        "sr_job_status"
+      ],
+      "first_tool_correct": null,
+      "expected_tool_executed": true,
+      "irrelevant_searches": 0,
+      "tool_calls": 1,
+      "first_effective_tool_seconds": 0.07085959985852242,
+      "elapsed_seconds": 0.07177489995956421,
+      "ok": true,
+      "answer": null,
+      "unsupported_state_reports": null,
+      "answer_review": "真实模型答案需人工复核；回放不产生自然语言状态结论。"
+    },
+    {
+      "enhanced": true,
+      "case": "search",
+      "expected": "search_scenes",
+      "calls": [
+        "search_scenes"
+      ],
+      "first_tool_correct": null,
+      "expected_tool_executed": true,
+      "irrelevant_searches": 0,
+      "tool_calls": 1,
+      "first_effective_tool_seconds": 0.0728733001742512,
+      "elapsed_seconds": 0.0738588001113385,
+      "ok": true,
+      "answer": null,
+      "unsupported_state_reports": null,
+      "answer_review": "真实模型答案需人工复核；回放不产生自然语言状态结论。"
+    }
+  ]
+}

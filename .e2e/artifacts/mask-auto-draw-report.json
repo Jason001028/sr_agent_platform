@@ -3,7 +3,7 @@
   "polygons": 3,
   "metrics": [
     {
-      "elapsed_ms": 35.03,
+      "elapsed_ms": 131.76,
       "polygons": [
         {
           "rank": 1,
@@ -35,7 +35,7 @@
       ]
     },
     {
-      "elapsed_ms": 32.16,
+      "elapsed_ms": 315.16,
       "polygons": [
         {
           "rank": 1,

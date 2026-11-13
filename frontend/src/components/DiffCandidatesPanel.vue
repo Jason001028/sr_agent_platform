@@ -8,20 +8,28 @@
  * 点行 = 定位并选中该区域；选中后才展开「交替对比 / 加入掩码 / 精算」等动作，
  * 清单保持紧凑。显示方式与羽化在顶栏「差异定位」面板里改，不改这里的统计。
  */
-import { computed } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useDiffStore } from '../stores/diff';
 import type { DiffRegion } from '../lib/diffLocate';
+import { differenceSourceLabel, sceneEvidenceLabel, frequencyEvidenceLabel, confidenceEvidenceLabel } from '../lib/smartCompareLabels';
 
 const LIST_MAX = 80;
 const diff = useDiffStore();
+const expanded = ref(false);
+watch(() => diff.result, () => { expanded.value = false; });
 
-const regions = computed(() => diff.orderedRegions.slice(0, LIST_MAX));
-const hiddenCount = computed(() => Math.max(0, diff.orderedRegions.length - LIST_MAX));
+const limit = computed(() => diff.result?.method === 'smart' && !expanded.value ? 5 : LIST_MAX);
+const regions = computed(() => {
+  const top = diff.orderedRegions.slice(0, limit.value);
+  const selected = diff.selectedRegion;
+  return selected && !top.some(r=>r.id===selected.id) ? [...top,selected] : top;
+});
+const hiddenCount = computed(() => Math.max(0, diff.orderedRegions.length - regions.value.length));
 const summary = computed(() => {
   const r = diff.result;
   if (!r) return '';
-  const method = r.method === 'smart' ? '智能对比' : r.method === 'ssim' ? '结构差异 SSIM' : '像素差分';
-  const src = r.source === 'source-roi' ? '原始 DN 精检' : r.source === 'source-grid' ? '原始 DN 分析网格' : '预览';
+  const method = r.method === 'smart' ? 'LTD' : r.method === 'ssim' ? '结构差异 SSIM' : '像素差分';
+  const src = differenceSourceLabel(r.source);
   return `${method} · ${src} · 阈值 ${r.parameters.threshold} · ${r.elapsedMs} ms`;
 });
 
@@ -69,16 +77,16 @@ function toggle(reg: DiffRegion) {
       <p class="dc-summary">{{ summary }}</p>
       <div v-if="diff.result.method === 'smart'" class="dc-actions">
         <button class="dc-act" @click="diff.nextRegion(-1)">上一异常</button><button class="dc-act" @click="diff.nextRegion(1)">下一异常</button><button class="dc-act" @click="diff.restoreView()">恢复视野</button>
-        <button class="dc-act" :disabled="diff.busy || diff.stale || !diff.aRec?.sceneId || !diff.bRec?.sceneId" @click="diff.refineVisible()">视野 ROI 原图精检</button>
-        <button class="dc-act" :disabled="diff.busy || diff.stale" @click="diff.refineDrawnRoi()">框选 ROI 精检</button>
+        <button class="dc-act" :disabled="diff.busy || diff.stale || !!diff.nativeRefineReason" :title="diff.nativeRefineReason" @click="diff.refineVisible()">视野 ROI 原图精检</button>
+        <button class="dc-act" :disabled="diff.busy || diff.stale || !!diff.nativeRefineReason" :title="diff.nativeRefineReason" @click="diff.refineDrawnRoi()">框选 ROI 精检</button>
       </div>
       <button v-if="diff.result.method === 'smart' && diff.selectedRegionIds.length" class="dc-act" :disabled="diff.busy || !!diff.autoDrawReason" :title="diff.autoDrawReason" @click="diff.autoDraw()">将勾选候选加入修复掩码</button>
       <p v-if="diff.toneWeight" class="dc-note">
         已按亮度归因权重排序，热力图同步逐像素加权；灰度取显示层，不是原始 DN。
       </p>
-      <p v-if="diff.refined" class="dc-refined">
-        当前是原始 ROI 分析结果，区域外仍是预览分析。
-        <button type="button" :disabled="diff.busy" @click="diff.restorePreview()">返回预览结果</button>
+      <p v-if="diff.refined || diff.result.source === 'source-tiled'" class="dc-refined">
+        {{ diff.refined ? '当前仅显示原始 DN ROI 精检范围。' : '补扫保留原始尺度评分，概览轮廓仍需精检。' }}
+        <button v-if="diff.canRestore" type="button" :disabled="diff.busy" @click="diff.restorePreview()">返回上次网格结果</button>
       </p>
 
       <ul v-if="regions.length" class="dc-list">
@@ -103,8 +111,6 @@ function toggle(reg: DiffRegion) {
             <span class="dc-text">
               <b>{{ reg.diagnostics ? (reg.diagnostics.classification === 'difference_only' ? '差异 · 模糊证据不足' : '疑似模糊 · 待复核') : '差异区域' }}</b>
               <small>面积 {{ areaText(reg.areaPx) }} px² · 平均强度 {{ reg.meanDiff.toFixed(3) }}</small>
-              <small v-if="reg.diagnostics && diff.selectedId === reg.id">方差比 {{ reg.diagnostics.varianceRatioMean.toFixed(2) }} · 纹理损失 {{ reg.diagnostics.textureLossMean.toFixed(2) }} · {{ reg.diagnostics.confidence }}</small>
-              <small v-if="reg.diagnostics && diff.selectedId === reg.id">频域 {{ reg.diagnostics.frequency.status }} · 云/水/阴影：{{ Object.values(diff.result.maskAvailability ?? {}).join(' / ') }}</small>
               <template v-if="diff.toneWeight && reg.tone">
                 <span class="dc-tone" :title="'复核权重 ' + reg.tone.weight.toFixed(2) + '×'">
                   <i class="dc-tone-track"><i class="dc-tone-fill" :style="{ width: pct(reg.tone.norm) }"></i></i>
@@ -134,17 +140,26 @@ function toggle(reg: DiffRegion) {
             <button
               type="button"
               class="dc-act"
-              :disabled="diff.busy || diff.stale"
-              :title="diff.refined ? '当前已是原始 ROI 结果' : '按原始 TIFF 分辨率重算该区域（仅盘阵场景）'"
+              :disabled="diff.busy || diff.stale || (diff.result.method === 'smart' && !!diff.nativeRefineReason)"
+              :title="diff.result.method === 'smart' && diff.nativeRefineReason ? diff.nativeRefineReason : '按原始 TIFF 分辨率重算该区域（仅盘阵场景）'"
               @click="diff.refineRegion(reg.id)"
             >精算</button>
+          </div>
+          <div v-if="reg.diagnostics && diff.selectedId === reg.id" class="dc-evidence" aria-label="区域诊断证据">
+            <p>方差比 {{ reg.diagnostics.varianceRatioMean.toFixed(2) }} · 纹理损失 {{ reg.diagnostics.textureLossMean.toFixed(2) }}</p>
+            <p>强度均值 {{ reg.diagnostics.scoreMean.toFixed(3) }} · P95 {{ reg.diagnostics.scoreP95.toFixed(3) }} · 最大 {{ reg.diagnostics.scoreMax.toFixed(3) }}</p>
+            <p>{{ confidenceEvidenceLabel(reg.diagnostics.confidence) }}；频域{{ frequencyEvidenceLabel(reg.diagnostics.frequency.status) }}。</p>
+            <p v-for="(label,key) in {cloud:'云',water:'水',shadow:'阴影'}" :key="key">{{ label }}：{{ sceneEvidenceLabel(diff.result.maskAvailability?.[key] ?? 'unverified') }}<template v-if="reg.diagnostics.sceneOverlap[key] != null"> · 重叠 {{ pct(reg.diagnostics.sceneOverlap[key]) }}</template></p>
+            <p v-if="diff.result.source === 'source-tiled'">统计来自概览像素对应的原始最高分样本，面积属于概览网格；候选仍需 ROI 精检，不能据此生成精确 Mask。</p>
+            <p>{{ reg.maskEligible ? '轮廓具备加入草案资格，仍需人工复核。' : '尚不具备精确 Mask 资格，请精检并核对轮廓。' }}</p>
           </div>
         </li>
       </ul>
       <p v-else class="rt-empty">
         未发现超过阈值的连续区域。可提高差异灵敏度、降低最小区域面积，或改用「叠加」确认弱差异。
       </p>
-      <p v-if="hiddenCount" class="dc-note">另有 {{ hiddenCount }} 个候选未列出（仅显示前 {{ LIST_MAX }} 个）。</p>
+      <button v-if="diff.result.method === 'smart' && !expanded && hiddenCount" type="button" class="dc-act" @click="expanded=true">展开更多候选（{{ hiddenCount }}）</button>
+      <p v-else-if="hiddenCount" class="dc-note">另有 {{ hiddenCount }} 个候选未列出（最多显示 {{ LIST_MAX }} 个）。</p>
 
       <details v-if="diff.lastWarnings.length" class="dc-warn">
         <summary>分析口径（{{ diff.lastWarnings.length }}）</summary>
@@ -170,7 +185,7 @@ function toggle(reg: DiffRegion) {
 .dc-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
 .dc-row{border:1px solid var(--line);border-radius:6px;background:var(--surface);overflow:hidden}
 .dc-row.hot{border-color:#e0a294}
-.dc-row.on{border-color:#d97a5f;background:#fdf6f3}
+.dc-row.on{border-color:var(--tb-primary);background:var(--tb-active-bg)}
 .dc-main{display:flex;align-items:center;gap:7px;width:100%;border:0;background:transparent;padding:6px 7px;text-align:left;font:inherit;cursor:pointer;color:var(--ink)}
 .dc-main:hover{background:var(--surface-2)}
 .dc-no{flex:none;font:600 10px/14px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#b34a2a}
@@ -184,7 +199,9 @@ function toggle(reg: DiffRegion) {
 .dc-tone-note{font-size:9px;line-height:12px;color:var(--ink-sub);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dc-more{flex:none;width:20px;height:20px;display:grid;place-items:center;border-radius:4px;color:var(--ink-sub);font-size:13px;line-height:1}
 .dc-more:hover{background:var(--surface-2);color:var(--ink)}
-.dc-actions{display:flex;gap:4px;padding:0 7px 6px}
+.dc-actions{display:flex;flex-wrap:wrap;gap:4px;padding:0 7px 6px}
+.dc-evidence{padding:0 7px 7px;font-size:10px;line-height:15px;color:var(--ink-sub);overflow-wrap:anywhere}
+.dc-evidence p{margin:3px 0}
 .dc-act{flex:1;height:23px;border:1px solid var(--line);border-radius:5px;background:var(--surface);color:var(--ink-sub);font:inherit;font-size:10px;cursor:pointer;padding:0 4px}
 .dc-act:hover:enabled{background:var(--surface-2);color:var(--ink)}
 .dc-note{margin:6px 0 0;font-size:9.5px;line-height:14px;color:var(--ink-sub)}

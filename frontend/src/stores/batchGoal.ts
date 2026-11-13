@@ -701,7 +701,9 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     return error instanceof Error ? error.message : String(error);
   }
 
-  registerViewerObservation('batch_goal', () => goalId.value ? { goal_id: goalId.value } : null);
+  registerViewerObservation('batch_goal', () => goalId.value ? { goal_id: goalId.value,
+    item_id:useViewerStore().batchOverlayTarget?.goalId===goalId.value
+      ? useViewerStore().batchOverlayTarget?.itemId : null } : null);
   return {
     goalId, snapshot, feedback, claimFeedback, events, historyPage, availableGoals,
     syncState, syncError, loadError, controlError, controlBusy,

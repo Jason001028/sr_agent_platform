@@ -112,11 +112,49 @@ def enqueue(store,goal,item,lease,task,verification):
     return updated
 
 
+def enqueue_no_candidates(store,goal,item,lease):
+    """Input-bound whole-scene review; no Job, Mask or production execution."""
+    cp=item["checkpoint"]; detection=cp["detection"]
+    if (detection.get("candidates") or detection.get("provenance") != "real" or detection.get("detector_name")!="shared-difference"
+            or detection.get("candidate_accounting",{}).get("unprocessed",1)):
+        raise ReviewConflict("无候选整景审核要求完整的真实检测")
+    actual=[]
+    for key in ("target_image","reference_image"):
+        ref=cp[key]; file=_file(ref["path"],raster=True)
+        if file["image_key"]!=ref["image_key"] or file["revision"]!=ref["revision"]:
+            raise ReviewConflict("无候选源版本已改变")
+        actual.append(file)
+    binding={"version":"human-no-candidate.v1","kind":"no-candidate","input":actual[0],
+        "output":actual[0],"nosr":actual[1],"detection_sha256":_hash(detection),"regions":[],
+        "grid":{"width":actual[0]["width"],"height":actual[0]["height"]}}
+    rid=_hash({"goal":goal["goal_id"],"item":item["item_id"],"binding":binding})
+    with store.worker_transaction() as db:
+        now=time.time()
+        db.execute("INSERT OR IGNORE INTO batch_quality_reviews(review_id,goal_id,item_id,job_id,binding,regions,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+            (rid,goal["goal_id"],item["item_id"],"",json.dumps(binding,ensure_ascii=False),"[]",now,now))
+        updated=store.transition_goal_item(goal["goal_id"],step_id=item["step_id"],expected_version=item["version"],
+            status="AWAITING_REVIEW",lease_token=lease.token,
+            checkpoint={**cp,"phase":"AWAITING_REVIEW","quality_review_id":rid},capacity_reserved=0,next_wake_at=None,
+            verification={"ok":False,"reason":"no-candidate-human-review-required"},error=None,
+            extra_events=[("quality_review_ready",{"item_id":item["item_id"],"review_id":rid,"kind":"no-candidate","regions":0})])
+        if updated is None: raise ReviewConflict("审核建立期间 Item 已改变")
+    return updated
+
+
 def validate_current(store,review,*,contract=True):
     item=store.get_goal_item(review["goal_id"],review["item_id"])
     if not item or item["checkpoint"].get("quality_review_id") != review["review_id"]:
         raise ReviewConflict("审核对象已被替代")
     b=review["binding"]
+    if b.get("kind")=="no-candidate":
+        cp=item["checkpoint"]
+        if cp.get("detection",{}).get("candidates") or _hash(cp.get("detection"))!=b["detection_sha256"]:
+            raise ReviewConflict("无候选检测结果已改变")
+        for key,name in (("target_image","input"),("reference_image","nosr")):
+            ref=cp[key];old=b[name];actual=_file(ref["path"],raster=True)
+            if any(ref[k]!=old[v] or actual[v]!=old[v] for k,v in (("image_key","image_key"),("revision","revision"))):
+                raise ReviewConflict("无候选源版本已改变，必须重新检测复核")
+        return item
     if str(item.get("external_job_id")) != b["job_id"] or item["checkpoint"].get("sr_fingerprint") != b["fingerprint"]:
         raise ReviewConflict("Job 已改变，旧审核无效")
     cp=item["checkpoint"]
@@ -163,7 +201,7 @@ def quality_layer(store,item):
         ok=review["scene_decision"]=="approved" and all(r["decision"]=="approved" for r in review["regions"])
         return {"status":"passed" if ok else "unverified","review_id":review["review_id"],
                 "review_version":review["version"],"binding_sha256":_hash(review["binding"]),
-                "reason":"人工逐区域及整景确认通过" if ok else "尚未完成逐区域和整景人工确认"}
+                "reason":("无候选整景人工确认通过" if review["binding"].get("kind")=="no-candidate" else "人工逐区域及整景确认通过") if ok else "尚未完成人工确认"}
     except (ValueError,OSError,KeyError) as e:
         return {"status":"failed","reason":str(e)}
 
@@ -197,24 +235,29 @@ def decide(store,goal_id,item_id,body):
         if review["version"]!=version:
             raise ReviewConflict("审核版本冲突，请刷新")
         regions=review["regions"]; scene="pending"
+        no_candidates=review["binding"].get("kind")=="no-candidate"
         if action=="region":
+            if no_candidates: raise ReviewConflict("无候选只支持整景人工确认")
             region=next((r for r in regions if r["region_id"]==body.get("region_id")),None)
             if region is None: raise KeyError("region not found")
             region.update(decision=decision,reason=reason,reviewer=reviewer,reviewed_at=time.time())
         else:
             if decision=="pending": raise ValueError("整景只能通过或驳回")
-            if decision=="approved" and (not regions or any(r["decision"]!="approved" for r in regions)):
+            if decision=="approved" and not no_candidates and (not regions or any(r["decision"]!="approved" for r in regions)):
                 raise ReviewConflict("所有必要区域通过后才可整景确认")
             scene=decision
         now=time.time()
         db.execute("UPDATE batch_quality_reviews SET regions=?,scene_decision=?,version=version+1,updated_at=? WHERE review_id=? AND version=?",
             (json.dumps(regions,ensure_ascii=False),scene,now,rid,version))
         status="VERIFYING" if scene=="approved" else "REVIEW_REJECTED" if scene=="rejected" else "AWAITING_REVIEW"
+        if no_candidates and scene=="approved": status="NO_ISSUE"
         cp={**item["checkpoint"],"phase":status}
         db.execute("UPDATE agent_goal_steps SET status=?,checkpoint=?,version=version+1,capacity_reserved=0,next_wake_at=?,updated_at=? WHERE step_id=? AND version=?",
             (status,json.dumps(cp,ensure_ascii=False),now if status=="VERIFYING" else None,now,item["step_id"],item["version"]))
         db.execute("INSERT INTO batch_quality_events VALUES(?,?,?,?)",(rid,key,json.dumps(payload,ensure_ascii=False),now))
-        if status=="VERIFYING":
+        if status=="NO_ISSUE":
+            db.execute("UPDATE agent_goal_steps SET verification=? WHERE step_id=?",(json.dumps({"ok":True,"provenance":"human","reason":"no-candidate-scene-approved","review_id":rid}),item["step_id"]))
+        if status in {"VERIFYING","NO_ISSUE"}:
             db.execute("UPDATE agent_goals SET monitor_done=0,next_wake_at=? WHERE goal_id=?",(now,goal_id))
         store._append_goal_event_tx(db,goal_id,"quality_review_changed",{"item_id":item_id,"review_id":rid,"version":version+1,"scene_decision":scene,"status":status},step_id=item["step_id"])
     return get_review(store,rid)
@@ -227,7 +270,8 @@ def verify_goal(store,goal):
         if item["status"]=="NO_ISSUE":
             d=item["checkpoint"].get("detection",{})
             if d.get("analysis",{}).get("calibrationStatus") == "experimental-unvalidated":
-                reasons.append("智能对比未检出候选不等于人工质量通过；实验性参数尚未生产校准")
+                layer=quality_layer(store,item)
+                if layer["status"]!="passed": reasons.append("LTD无候选仍需整景人工确认："+layer.get("reason","未复核"))
             if d.get("provenance")!="real" or d.get("detector_name")!="shared-difference" or d.get("candidate_accounting",{}).get("unprocessed",1): reasons.append("未验证的无异常结果")
             for key in ("target_image","reference_image"):
                 try:

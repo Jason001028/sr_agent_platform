@@ -512,7 +512,8 @@ def import_manifest(*, data: bytes | None = None, text: str | None = None,
                 item["config"]["detection"]["method"] = detection_method
             if detection_method == "smart":
                 item["config"]["detection"]["smart_options"] = smart_options or {}
-                item["config"]["detection"]["version"] = "smart-compare-0.1-experimental"
+                from backend.services.blur_detection import VERSION
+                item["config"]["detection"]["version"] = VERSION
     content = {
         "version": MANIFEST_VERSION,
         "workflow": WORKFLOW,

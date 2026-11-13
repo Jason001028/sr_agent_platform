@@ -5,7 +5,7 @@ import { useViewerStore } from '../stores/viewer';
 import { thumbToScreen } from '../lib/viewMath';
 const quality=useBatchQualityStore(),viewer=useViewerStore();
 const panes=computed(()=>{
-  const d=quality.doc;if(!d||!quality.comparisonReady||quality.overlay==='off')return [];
+  const d=quality.doc;if(!d||!d.binding.mask||d.binding.kind==='no-candidate'||!quality.comparisonReady||quality.overlay==='off')return [];
   const {width,height}=d.binding.mask;
   return viewer.panes.map(p=>({side:p.side,rect:p.rect,polygons:d.binding.regions.map(c=>{
     const [x0,y0,x1,y1]=c.bbox;

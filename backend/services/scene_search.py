@@ -557,7 +557,11 @@ def scan_root(root) -> list[dict]:
     base = Path(root)
     if not base.is_dir():
         return scenes
-    for p in sorted(base.rglob("*")):
+    # Bound the legacy fallback: result limit alone does not bound traversal.
+    # Refuse rather than presenting a partial archive as complete.
+    for visited, p in enumerate(base.rglob("*"), 1):
+        if visited > 20000:
+            raise ValueError('场景库旧版递归检索超过 20000 条目预算；请使用精确场景引用或缩小服务端场景根目录')
         if is_scene_file(p):
             meta = parse_filename(p)
             scenes.append({**meta, "id": p.stem, "path": str(p),
