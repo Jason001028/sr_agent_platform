@@ -619,9 +619,17 @@ export const useDiffStore = defineStore('diff', () => {
     if (!roles.includes('pan') || !roles.includes('nosr')) return '智能对比需要 PAN 本体与 NOSR；不能使用 old 或 SR 产物代替';
     if (smartPrecision.value !== 'preview' && (!a.sceneId || !b.sceneId || !a.srcRev || !b.srcRev)) return '原始 DN 分析需要可访问的盘阵影像与源版本';
     const groupA=sceneKeyOf(a),groupB=sceneKeyOf(b);
-    if ((!groupA || groupA!==groupB) && a.tourIdentity?.sequence!==b.tourIdentity?.sequence) return '缺少可靠的共同场景关联';
+    const sequenceA=a.tourIdentity?.sequence, sequenceB=b.tourIdentity?.sequence;
+    if ((!groupA || groupA!==groupB) && (!sequenceA || sequenceA!==sequenceB)) return '缺少可靠的共同场景关联';
     if (!!a.tourIdentity?.registration !== !!b.tourIdentity?.registration) return '两张影像的空间配准证据不对称，请先核对';
     return analysisPairReason(a,b) ?? '';
+  });
+  const nativeRefineReason = computed(() => {
+    if (smartPairReason.value) return smartPairReason.value;
+    const a=aRec.value, b=bRec.value;
+    if (!a?.sceneId || !b?.sceneId || !a.srcRev || !b.srcRev) return '原图精检需要可访问的 PAN/NOSR 源 TIFF 与版本';
+    if ((a.tourIdentity?.role ?? roleOf(a)) !== 'pan') return '原图精检请将 PAN 本体选为 A、NOSR 选为 B';
+    return '';
   });
 
   /* Automatic polygons are staged in SVG; only one atomic vector transaction
@@ -1258,6 +1266,7 @@ export const useDiffStore = defineStore('diff', () => {
       sceneId:r.sceneId, sourceRevision:r.srcRev, pixelKey:pixelKey(r.id)});
     return {method:method.value, sensitivity:sensitivity.value, minAreaPx:minAreaPx.value,
       threshold:advanced.value.threshold ?? undefined, openKernel:advanced.value.openKernel, closeKernel:advanced.value.closeKernel,
+      blur:advanced.value.blur, ssimWindow:advanced.value.ssimWindow, ssimGaussian:advanced.value.ssimGaussian,
       smartOptions:{...smartOptions.value}, referenceSide:(a.tourIdentity?.role ?? roleOf(a)) === 'nosr' ? 'A' : 'B',
       maxEdge:ANALYSIS_MAX_EDGE, autoMask:true, image_a:spec(a), image_b:spec(b), precision:smartPrecision.value,
       compare:parallelCompare.value};
@@ -1310,6 +1319,9 @@ export const useDiffStore = defineStore('diff', () => {
     const seq = ++requestSeq, key=currentKey();
     const layers = await decodeLayers(entry);
     if (seq !== requestSeq || key!==currentKey()) return;
+    // Refinement snapshots belong to another precision/result. A cached method
+    // switch must not offer to restore an unrelated earlier ROI overview.
+    baseSnapshot.value = null;
     method.value = next;
     applyResult(entry,currentKey()); installLayers(layers);
   }
@@ -1335,25 +1347,30 @@ export const useDiffStore = defineStore('diff', () => {
   }
 
   async function scanNativeVisible(): Promise<boolean> {
-    if (busy.value || smartPairReason.value) { error.value=smartPairReason.value; return false; }
+    if (busy.value) return false;
+    if (nativeRefineReason.value) { error.value=nativeRefineReason.value; return false; }
     const a=aRec.value!,b=bRec.value!,plan=commonGrid(a.W,a.H,b.W,b.H);
     const rect=visibleGridRect(plan.width,plan.height);
     const req=smartRequest();req.method='smart';req.compare=false;req.precision='source-tiled';
     req.roi={x:Math.floor(rect.x*a.W/plan.width),y:Math.floor(rect.y*a.H/plan.height),
       w:Math.ceil(rect.w*a.W/plan.width),h:Math.ceil(rect.h*a.H/plan.height)};
     const seq=++requestSeq,key=currentKey(),controller=new AbortController();analysisController=controller;
-    busy.value=true;error.value='';analysisState.value='分析中';
+    busy.value=true;error.value='';notice.value='';analysisState.value='分析中';
+    const old=result.value;
     try{
       const res=await apiDiffAnalyze(loadSrConfig(),req,controller.signal);
       const layers=await decodeLayers(res);
       if(seq!==requestSeq||key!==currentKey())return false;
+      if(old && !baseSnapshot.value) baseSnapshot.value={result:old,heat:heatLayer.value,mask:maskLayer.value,
+        maskSource:rawMask.value,paramsKey:resultKey.value,rawHeat:rawHeat.value,toneSource:toneSource.value,toneMap:toneMap.value};
       applyResult(res,key);installLayers(layers);display.value='overlay';opacity.value=.6;analysisState.value='已完成';return true;
     }catch(e){if(seq===requestSeq){error.value=e instanceof Error?e.message:String(e);analysisState.value='检测失败';}return false;}
     finally{if(seq===requestSeq){busy.value=false;analysisController=null;}}
   }
 
   async function refineSmartRoi(roi: {x:number;y:number;w:number;h:number}): Promise<boolean> {
-    if (busy.value || stale.value || smartPairReason.value) return false;
+    if (busy.value || stale.value) return false;
+    if (nativeRefineReason.value) { error.value=nativeRefineReason.value; return false; }
     const old = result.value;
     if (!old) return false;
     busy.value = true; error.value = ''; analysisState.value = '分析中';
@@ -1444,8 +1461,9 @@ export const useDiffStore = defineStore('diff', () => {
       if (!reg) return false;
       const [x,y,w,h] = gridRectToSource(result.value,reg.bbox);
       const margin = smartOptions.value.window * 2;
-      return refineSmartRoi({x:Math.max(0,Math.floor(x)-margin),y:Math.max(0,Math.floor(y)-margin),
-        w:Math.ceil(w)+margin*2,h:Math.ceil(h)+margin*2});
+      const left=Math.max(0,Math.floor(x)-margin),top=Math.max(0,Math.floor(y)-margin);
+      const right=Math.min(aRec.value!.W,Math.ceil(x+w)+margin),bottom=Math.min(aRec.value!.H,Math.ceil(y+h)+margin);
+      return refineSmartRoi({x:left,y:top,w:right-left,h:bottom-top});
     }
     cancelAutoDraw();
     const res = result.value;
@@ -1731,6 +1749,12 @@ export const useDiffStore = defineStore('diff', () => {
   watch([aId,bId,method], () => {
     if (busy.value) { cancelAnalysis(); notice.value = '影像或方法已变更，旧结果已丢弃；请重新分析。'; }
   }, {flush:'sync'});
+  watch(currentKey, () => {
+    if (busy.value && analysisController && (method.value === 'smart' || parallelCompare.value)) {
+      cancelAnalysis();
+      notice.value = '检测参数或源版本已变更，旧请求已取消；请重新分析。';
+    }
+  }, {flush:'sync'});
   watch(result, () => { selectedRegionIds.value = []; }, {flush:'sync'});
   /* 左侧换景 → 下拉收口到新场景并补候选；不在新场景里的已选组合由 ensurePair 换掉。
      「延续到下一景」切景期间跳过：A/B 已按角色落好，ensurePair 只会把它换成推荐项。 */
@@ -1759,6 +1783,10 @@ export const useDiffStore = defineStore('diff', () => {
     return {image_a:res.imageA.id,image_b:res.imageB.id,stale:stale.value,
       precision_reason:precisionReason.value,method:res.method,source:res.source,
       completed:!busy.value, algorithm_version:res.algorithmVersion, score_semantics:res.scoreSemantics,
+      analysis_state:analysisState.value,
+      source_identity:res.sourceIdentity ? {reference_side:res.sourceIdentity.referenceSide,
+        registration:res.sourceIdentity.registration,images:res.sourceIdentity.images.slice(0,2).map(i=>({
+          id:i.id,scene_id:i.sceneId,revision:i.revision,role:i.role}))} : undefined,
       mask_availability:res.maskAvailability, calibration_status:res.calibrationStatus,
       total:regions.value.length,truncated:regions.value.length>items.length,selected_ids:[...chosen].slice(0,80),
       bbox_format:'xywh',coordinate_space:'image_a_source_pixels',
@@ -1771,7 +1799,7 @@ export const useDiffStore = defineStore('diff', () => {
   });
 
   return {
-    smartOptions, smartPrecision, smartPairReason, displayThreshold, boundariesVisible, analysisState,
+    smartOptions, smartPrecision, smartPairReason, nativeRefineReason, displayThreshold, boundariesVisible, analysisState,
     parallelCompare, comparison, showComparison, refineVisible, refineDrawnRoi, scanNativeVisible, cancelAnalysis,
     nextRegion: (step:number) => { const list=orderedRegions.value; if(!list.length)return;
       const index=list.findIndex(r=>r.id===selectedId.value); void locateRegion(list[(index+step+list.length)%list.length].id); },

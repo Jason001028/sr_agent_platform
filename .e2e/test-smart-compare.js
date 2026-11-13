@@ -14,7 +14,9 @@ const server=http.createServer((req,res)=>{
   res.setHeader('content-type',({'.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.html':'text/html'})[path.extname(file)]||'application/octet-stream');fs.createReadStream(file).pipe(res);
 });
 (async()=>{
-  await new Promise(r=>server.listen(0,'127.0.0.1',r));
+  const serveOnly=process.argv.includes('--serve');
+  await new Promise(r=>server.listen(serveOnly ? 8768 : 0,'127.0.0.1',r));
+  if(serveOnly){console.log('Synthetic Smart Compare Viewer: http://127.0.0.1:8768/viewer');return;}
   const {browser,page,errors}=await launchPage();let requests=0;
   const responses=[];
   page.on('request',r=>{if(r.url().includes('/api/diff/analyze'))requests++;});
@@ -50,6 +52,7 @@ const server=http.createServer((req,res)=>{
     await page.click('.diff-close');
     await page.waitForSelector('.diff-marker');await page.click('.diff-marker');
     await page.waitForSelector('.diff-popover-card');
+    assert((await page.$eval('.dc-evidence',n=>n.textContent)).includes('未验证'),'missing scene evidence should be explicit');
     const refine=await page.$$('.diff-popover-card button');
     let clicked=false;
     for(const x of refine){const t=await x.evaluate(n=>n.textContent);if(t.includes('精算')){await x.click();clicked=true;break;}}
@@ -80,9 +83,20 @@ const server=http.createServer((req,res)=>{
     await page.click('[data-e2e="diff-analyze"]');
     await page.waitForFunction(()=>document.body.textContent.includes('Smart 独有候选像素'),{timeout:30000});
     assert(responses.some(r=>r.comparison?.summary.length===3));
+    await page.$eval('.compare-row',n=>n.closest('details').open=true);
+    await page.click('.compare-row button');
+    await page.waitForFunction(()=>document.querySelector('.diff-summary')?.textContent.includes('像素差分'));
+    assert.equal(requests,3,'switching cached comparison reran detector');
+    const comparisonButtons=await page.$$('.compare-row button');await comparisonButtons[2].click();
+    await page.waitForFunction(()=>document.querySelector('.diff-summary')?.textContent.includes('智能对比'));
+    // Native supplement is a score overview and must say so in the actual UI.
+    const buttons=await page.$$('details.diff-advanced button');
+    for(const button of buttons)if((await button.evaluate(n=>n.textContent)).includes('原始尺度补扫'))await button.click();
+    await page.waitForFunction(()=>document.querySelector('.diff-summary')?.textContent.includes('原始尺度补扫概览'),{timeout:30000});
+    assert(responses.some(r=>r.source==='source-tiled' && r.regions.every(x=>!x.maskEligible)));
     const shot=path.resolve(__dirname,'../test-tifs/smart-compare');fs.mkdirSync(shot,{recursive:true});
     await page.screenshot({path:path.join(shot,'viewer.png'),fullPage:true});
     assert.equal(errors.length,0,errors.join('\n'));
-    console.log(JSON.stringify({source:'real-http-synthetic-tiff',requests,gridRegions:responses[0].regions.length,roi:true,maskTransaction:true,maskUndo:true,comparison:true,displayWithoutReanalysis:true}));
+    console.log(JSON.stringify({source:'real-http-synthetic-tiff',requests,gridRegions:responses[0].regions.length,roi:true,maskTransaction:true,maskUndo:true,comparison:true,nativeScanOverview:true,unverifiedSceneEvidence:true,displayWithoutReanalysis:true}));
   }finally{await browser.close();server.closeAllConnections();server.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;server.close();});

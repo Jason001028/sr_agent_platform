@@ -138,15 +138,18 @@ export interface DiffParameters {
 }
 
 export interface DiffResult {
+  sourceIdentity?: { referenceSide: 'A' | 'B'; registration: string;
+    images: {id: number | null; sceneId: string; revision: string; resource: string; role: string}[] };
   algorithmVersion?: string;
   scoreSemantics?: string;
   maskAvailability?: Record<string, string>;
   calibrationStatus?: string;
   normalization?: { scale: number; logRatioBaseline: number; mode: string };
-  analysisPrecision?: { source: string; nativeRefined: boolean; windowsAnalysisPixels: number[] };
-  comparison?: { summary: {method: DiffMethod; regions: number; areaPixels: number; coverage: number; elapsedMs: number; status: string}[];
-    overlaps: {methods: string[]; iou: number; onlyA: number; onlyB: number}[];
-    smartUniquePixels: number; results: Record<DiffMethod, DiffResult> };
+  analysisPrecision?: { source: string; nativeRefined: boolean; nativeScanned?: boolean; windowsAnalysisPixels: number[];
+    windowsSourceA?: number[][]; tiles?: number; evidenceStatistics?: string };
+  comparison?: { summary: {method: DiffMethod; regions: number; areaPixels: number; coverage: number; elapsedMs: number; status: string; error?: string}[];
+    overlaps: {methods: string[]; iou: number | null; onlyA: number | null; onlyB: number | null; status?: string}[];
+    smartUniquePixels: number | null; results: Partial<Record<DiffMethod, DiffResult>> };
   autoMask?: AutoMaskGeometry;
   operation: 'difference-localization';
   method: DiffMethod;

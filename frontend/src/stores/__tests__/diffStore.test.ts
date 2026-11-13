@@ -224,6 +224,38 @@ describe('Smart Compare integration', () => {
     diff.setPair(1,3);expect(signal.aborted).toBe(true);finish(null);await pending;
     expect(diff.result).toBeNull();expect(diff.busy).toBe(false);
   });
+  it('passes the same advanced settings to the three-method comparison', async()=>{
+    const diff=setup();diff.parallelCompare=true;
+    diff.advanced={...diff.advanced,blur:false,ssimWindow:9,ssimGaussian:true};
+    mocks.api.mockImplementation(async(_cfg,req)=>answer(req));
+    expect(await diff.analyze()).toBe(true);
+    expect(mocks.api.mock.calls[0][1]).toMatchObject({compare:true,blur:false,ssimWindow:9,ssimGaussian:true});
+  });
+  it('cancels native requests when a texture parameter changes and does not stick in analyzing state',async()=>{
+    const diff=setup();let finish!:(v:any)=>void;
+    mocks.api.mockImplementation((_cfg,req)=>new Promise(resolve=>{finish=()=>resolve(answer(req));}));
+    const pending=diff.analyze();await Promise.resolve();
+    const signal=mocks.api.mock.calls[0][2] as AbortSignal;
+    diff.smartOptions.window=31;
+    expect(signal.aborted).toBe(true);expect(diff.analysisState).toBe('已取消');
+    finish(null);await pending;
+    expect(diff.result).toBeNull();expect(diff.busy).toBe(false);
+  });
+  it('disables native refinement for reversed pairs before sending a request',async()=>{
+    const diff=setup();diff.setPair(2,1);
+    expect(diff.nativeRefineReason).toContain('PAN 本体选为 A');
+    expect(await diff.scanNativeVisible()).toBe(false);
+    expect(diff.error).toContain('PAN 本体选为 A');expect(mocks.api).not.toHaveBeenCalled();
+  });
+  it('does not accept unrelated scene groups with missing sequence identities',async()=>{
+    const diff=setup();
+    mocks.viewer.recs[0].tourIdentity={role:'pan'};
+    mocks.viewer.recs[1].tourIdentity={role:'nosr'};
+    mocks.viewer.recs[1].sceneDir='/different-scene';
+    mocks.viewer.recs[1].lqPath='/different-scene';
+    expect(diff.smartPairReason).toContain('共同场景');
+    expect(await diff.analyze()).toBe(false);expect(mocks.api).not.toHaveBeenCalled();
+  });
 });
 
 beforeEach(() => {
