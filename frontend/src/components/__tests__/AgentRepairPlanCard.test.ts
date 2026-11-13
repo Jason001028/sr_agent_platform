@@ -180,6 +180,7 @@ it('shows the verified SR output and opens the existing review block directly', 
     ],
     quality: { waiting_scenes: 1, rejected_scenes: 0, items: [] },
     quality_reviews: { approved: 0, rejected: 0, pending: 1 },
+    quality_products: { approved: 0, rejected: 0, pending: 1 },
     quality_regions: { approved: 1, rejected: 0, pending: 2, total: 3 },
   }) as never);
   await mount(plan({ status: 'STARTED', mode: 'production' }));
@@ -215,6 +216,7 @@ it('marks a fully approved production result as quality accepted', async () => {
         quality_review_id: 'rev-2', output_path: '/b/PAN.tif' },
     ],
     quality_reviews: { approved: 2, rejected: 0, pending: 0 },
+    quality_products: { approved: 2, rejected: 0, pending: 0 },
     quality_regions: { approved: 4, rejected: 0, pending: 0, total: 4 },
     acceptance: { mode: 'production', computed: true, quality_required: 2,
                   quality_approved: 2, quality_rejected: 0, quality_pending: 0,

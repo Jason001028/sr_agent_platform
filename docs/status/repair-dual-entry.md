@@ -172,6 +172,9 @@ cd frontend && npm run typecheck
   `last_seq` 重新读取 `GET /api/repairs/{plan_id}`。卡片新增区域级计数
   `quality_regions`（approved/rejected/pending/total）与 `quality_reviews` 场景计数，
   计数只包含当前 Item 绑定的审核，重新修复后的旧审核行不计入。
+- **LTD 无候选审核**：合并 origin 的 `no-candidate` 整景人工确认后，
+  `quality_products` 只统计真正生成了 SR 产物的审核；无候选场景仍计入
+  `quality_reviews` 与验收门禁，但不会在任务卡里被写成「修复产物」。
 - **确定性总结**继续区分：SR 执行中 → 计算结束（演示契约 / 文件契约）→ 等待人工质量复核
   → 部分驳回 → 全部必要区域通过 → 失败/受阻。`get_repair_result.quality_passed`
   只可能在 production + COMPLETED + 无 pending/rejected 时为 true，演示恒为 false。

@@ -1889,6 +1889,26 @@ class Store:
             counts[str(decision)] = int(count)
         return counts
 
+    def batch_quality_product_counts(self, goal_id: str,
+                                     review_ids=None) -> dict:
+        """Scene decisions for reviews that actually produced an SR artifact.
+
+        LTD / Smart-Compare runs can enqueue a whole-scene ``no-candidate``
+        review with no Job and no output.  It is a real human acceptance task,
+        but it must not be counted as a "repair product" in summaries.
+        """
+        clause, args = self._current_review_filter(review_ids)
+        rows = self._db().execute(
+            "SELECT scene_decision,COUNT(*) FROM batch_quality_reviews "
+            "WHERE goal_id=?" + clause
+            + " AND COALESCE(json_extract(binding,'$.kind'),'repair')"
+              " != 'no-candidate' GROUP BY scene_decision",
+            (goal_id, *args)).fetchall()
+        counts = {"approved": 0, "rejected": 0, "pending": 0}
+        for decision, count in rows:
+            counts[str(decision)] = int(count)
+        return counts
+
     def batch_quality_region_counts(self, goal_id: str,
                                     review_ids=None) -> dict:
         """Region-level decisions for the reviews currently bound to Items."""

@@ -1203,6 +1203,8 @@ def get_repair_status(store, plan_id: str) -> dict:
     # re-run's superseded review must not keep inflating the acceptance view.
     result["quality_reviews"] = store.batch_quality_review_counts(
         goal_id, review_ids=review_ids)
+    result["quality_products"] = store.batch_quality_product_counts(
+        goal_id, review_ids=review_ids)
     result["quality_regions"] = store.batch_quality_region_counts(
         goal_id, review_ids=review_ids)
     result["acceptance"] = _acceptance(

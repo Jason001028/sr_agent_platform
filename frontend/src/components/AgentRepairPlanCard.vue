@@ -171,6 +171,15 @@ const approvedReviews = computed(() => status.value?.quality_reviews?.approved ?
 const rejectedReviews = computed(() => status.value?.quality_reviews?.rejected ?? 0);
 const pendingReviews = computed(() => status.value?.quality_reviews?.pending ?? 0);
 const regionCounts = computed(() => status.value?.quality_regions ?? null);
+/** Reviews that actually produced an SR artifact.  LTD / Smart-Compare can
+ *  enqueue a whole-scene review with no candidate and no Job; that is a real
+ *  human task but not a repair product. */
+const productReviews = computed(() => {
+  const row = status.value?.quality_products;
+  return row ? row.approved + row.rejected + row.pending : 0;
+});
+const productPending = computed(() => status.value?.quality_products?.pending ?? 0);
+const noCandidatePending = computed(() => Math.max(0, pendingReviews.value - productPending.value));
 /** Backend-owned acceptance verdict; never inferred from a green status. */
 const qualityPassed = computed(() => status.value?.acceptance?.quality_passed === true);
 /** Only a scene with a bound quality review that still needs a decision is
@@ -196,8 +205,7 @@ const productCount = computed(() => {
   const c = counts.value;
   if (!c) return 0;
   if (plan.value?.mode !== 'production') return c.verified;
-  const reviewed = approvedReviews.value + rejectedReviews.value + pendingReviews.value;
-  return reviewed || c.verified;
+  return productReviews.value || c.verified;
 });
 /** The one scene whose SR output was actually verified for this Job.  A demo
  *  run has no artifacts layer, so ``output_path`` is absent rather than
@@ -233,14 +241,19 @@ const summary = computed(() => {
     }
     text += '。';
   }
+  if (noCandidatePending.value) {
+    text += `${noCandidatePending.value} 景未检出候选，等待整景人工确认（不生成 SR 产物）。`;
+  }
   if (rejectedReviews.value) {
     text += `${rejectedReviews.value} 景人工审核驳回，需人工处理。`;
   }
   const reviewed = approvedReviews.value + pendingReviews.value + rejectedReviews.value;
-  if (qualityPassed.value && reviewed) {
+  if (qualityPassed.value && productReviews.value) {
     text += '全部必要区域已通过人工质量审核，修复质量验收完成。';
   } else if (qualityPassed.value) {
-    text += '本批次没有需要人工质量验收的修复产物。';
+    text += reviewed
+      ? '未检出候选的场景已完成整景人工确认，本批次没有需要修复的产物。'
+      : '本批次没有需要人工质量验收的修复产物。';
   } else if (reviewed && approvedReviews.value === reviewed) {
     text += '已审核区域均已通过，但批次仍有未完成的修复或失败项，不能宣告最终验收。';
   } else if (reviewed) {

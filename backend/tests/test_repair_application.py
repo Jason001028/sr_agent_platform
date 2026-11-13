@@ -458,6 +458,8 @@ class RepairApplicationTest(unittest.TestCase):
         self.assertEqual(status["items"][0]["quality_review_id"], "rev-current")
         self.assertEqual(status["quality_reviews"],
                          {"approved": 0, "rejected": 0, "pending": 1})
+        self.assertEqual(status["quality_products"],
+                         {"approved": 0, "rejected": 0, "pending": 1})
         self.assertEqual(status["quality_regions"],
                          {"approved": 1, "rejected": 0, "pending": 1, "total": 2})
         self.assertTrue(status["acceptance"]["computed"])
@@ -466,6 +468,28 @@ class RepairApplicationTest(unittest.TestCase):
         result = svc.get_repair_result(self.store, plan["plan_id"])
         self.assertEqual(result["state"], "settled")
         self.assertFalse(result["quality_passed"])
+
+    def test_product_counts_exclude_no_candidate_reviews(self):
+        goal_id = self._resource_goal("goal-quality", "item-quality")
+        now = time.time()
+        db = self.store._db()
+        for review_id, binding, decision in (
+                ("rev-repair", "{}", "approved"),
+                ("rev-nocand", '{"kind":"no-candidate"}', "pending")):
+            db.execute(
+                "INSERT INTO batch_quality_reviews(review_id,goal_id,item_id,"
+                "job_id,binding,regions,scene_decision,version,created_at,"
+                "updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (review_id, goal_id, "item-quality", review_id, binding, "[]",
+                 decision, 1, now, now))
+        db.commit()
+        ids = ["rev-repair", "rev-nocand"]
+        self.assertEqual(
+            self.store.batch_quality_review_counts(goal_id, review_ids=ids),
+            {"approved": 1, "rejected": 0, "pending": 1})
+        self.assertEqual(
+            self.store.batch_quality_product_counts(goal_id, review_ids=ids),
+            {"approved": 1, "rejected": 0, "pending": 0})
 
     def test_verified_output_requires_a_passed_artifacts_layer(self):
         self.assertIsNone(svc.verified_output_path({}))

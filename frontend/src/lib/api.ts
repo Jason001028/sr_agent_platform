@@ -1866,6 +1866,8 @@ export interface RepairStatus {
   active_jobs?: BatchJobSummary[];
   quality?: BatchSnapshot['quality'];
   quality_reviews?: { approved: number; rejected: number; pending: number };
+  /** Review decisions that actually produced an SR artifact (excludes no-candidate). */
+  quality_products?: { approved: number; rejected: number; pending: number };
   quality_regions?: { approved: number; rejected: number; pending: number; total: number };
   acceptance?: RepairAcceptance;
   report: { available: boolean; updated_at: number | null };
