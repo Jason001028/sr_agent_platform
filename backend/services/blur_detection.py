@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.ndimage import uniform_filter, binary_dilation, binary_erosion
 
-VERSION = "smart-compare-0.1-experimental"
+VERSION = "smart-compare-0.2-experimental"
 
 
 @dataclass(frozen=True)
@@ -23,18 +23,22 @@ class BlurConfig:
     def __post_init__(self):
         if isinstance(self.window, bool) or not isinstance(self.window, int) or not 3 <= self.window <= 63 or self.window % 2 == 0:
             raise ValueError("Texture window must be an odd integer in [3, 63]")
-        if self.calibration_scale is not None and (not np.isfinite(self.calibration_scale) or self.calibration_scale <= 0):
+        if self.calibration_scale is not None and (isinstance(self.calibration_scale, bool)
+                or not isinstance(self.calibration_scale, (int, float))
+                or not np.isfinite(self.calibration_scale) or self.calibration_scale <= 0):
             raise ValueError("Calibration scale must be finite and positive")
 
 
 def local_statistics(image, valid, window):
     """Masked population statistics; missing pixels do not become zero DN."""
-    x = np.where(valid, image, 0).astype(np.float64)
+    # Centre before squaring: E[x²]-E[x]² loses small texture at large DN.
+    anchor = float(np.asarray(image)[valid].mean()) if valid.any() else 0.
+    x = np.where(valid, np.asarray(image, dtype=np.float64) - anchor, 0)
     weight = uniform_filter(valid.astype(np.float64), window, mode="reflect")
     denominator = np.maximum(weight, np.finfo(np.float64).eps)
     mean = uniform_filter(x, window, mode="reflect") / denominator
     variance = np.maximum(uniform_filter(x * x, window, mode="reflect") / denominator - mean * mean, 0)
-    return mean, variance, weight
+    return mean + anchor, variance, weight
 
 
 def analyze_texture(reference, target, *, valid=None, config=None):
@@ -105,7 +109,7 @@ def analyze_texture(reference, target, *, valid=None, config=None):
 
 
 def config_from_dict(raw=None):
-    raw = raw or {}
+    raw = {} if raw is None else raw
     if not isinstance(raw, dict):
         raise ValueError("smartOptions must be an object")
     allowed = {"window", "calibrationScale", "sensor", "frequencyReview", "sceneSuppression"}
@@ -146,14 +150,18 @@ def apply_scene_masks(evidence, masks, config):
 
 def frequency_evidence(reference, target, valid):
     """Candidate-only, bounded radial high-frequency energy; never a veto."""
+    # A native crop preserves frequency units. Strided decimation aliases fine
+    # texture and can even sample only NoData despite 80% full-patch validity.
+    y, x = (max(0, (n - 256) // 2) for n in reference.shape)
+    crop = np.s_[y:y+256, x:x+256]
+    reference, target, valid = reference[crop], target[crop], valid[crop]
+    valid = valid & np.isfinite(reference) & np.isfinite(target)
     if min(reference.shape) < 8 or valid.mean() < .8:
         return {"status": "insufficient-data", "experimental": True}
     # Limit FFT working set; this diagnostic is not the detector itself.
-    stride = max(1, int(np.ceil(max(reference.shape) / 256)))
-    valid = valid[::stride, ::stride]
     energies = []
     for x in (reference, target):
-        x = x[::stride, ::stride].astype(float)
+        x = x.astype(float)
         x = np.where(valid, x, np.mean(x[valid]))
         x -= x.mean()
         window = np.outer(np.hanning(x.shape[0]), np.hanning(x.shape[1]))
@@ -163,7 +171,9 @@ def frequency_evidence(reference, target, valid):
         high = np.hypot(fx, fy) >= .25
         energies.append(float(power[high].sum() / max(power.sum(), 1e-12)))
     return {"status": "reviewed", "experimental": True, "referenceHighFrequency": energies[0],
-            "targetHighFrequency": energies[1], "sampleStride": stride,
+            "targetHighFrequency": energies[1], "sampleStride": 1,
+            "cropOffset": [int(crop[1].start), int(crop[0].start)],
+            "cropShape": list(reference.shape), "frequencyUnits": "cycles-per-analysis-pixel",
             "interpretation": "supporting-evidence-not-a-veto"}
 
 
@@ -189,10 +199,11 @@ def region_diagnostics(evidence, labels, region, reference, target, config):
     ey1,ex1=min(labels.shape[0],y+h+3),min(labels.shape[1],x+w+3)
     expanded=np.s_[ey0:ey1,ex0:ex1]
     expanded_inside=labels[expanded]==label_id
-    ring = binary_dilation(expanded_inside, iterations=3) & ~expanded_inside & evidence["validity"][expanded]
+    ring = binary_dilation(expanded_inside, iterations=3) & (labels[expanded] == 0) & evidence["informative"][expanded]
     overlap = {name: float(mask[slices][inside].mean()) for name, mask in evidence.get("sceneMasks", {}).items()}
     diff = abs(reference[slices] - target[slices])
-    span = max(float(np.quantile(reference[slices], .95)-np.quantile(reference[slices], .05)), 1e-12)
+    valid_values = reference[slices][evidence["validity"][slices]]
+    span = max(float(np.quantile(valid_values, .95)-np.quantile(valid_values, .05)), 1e-12)
     difference = float(diff[inside].mean()) / span
     cls = "joint_confirmed" if difference > .03 else "blur_candidate"
     if not values.size or float(texture.mean()) < .05:
@@ -207,6 +218,7 @@ def region_diagnostics(evidence, labels, region, reference, target, config):
             "compactness": min(1., float(4 * np.pi * len(xx) / perimeter ** 2)),
             "aspectRatio": max(w, h) / max(1, min(w, h)), "orientationDegrees": orientation,
             "shape": "stripe" if max(w, h) / max(1, min(w, h)) > 8 else "continuous-region",
-            "sceneOverlap": overlap, "confidence": "low" if any(v > .5 for v in overlap.values()) else "unverified-scene",
+            "sceneOverlap": overlap, "confidence": "low" if any(v > .5 for v in overlap.values()) else
+                "scene-checked" if all(v.startswith("available") for v in evidence["maskAvailability"].values()) else "unverified-scene",
             "frequency": frequency, "reasons": ["local-variance-loss", "multi-scale-texture-loss"],
             "algorithmVersion": VERSION}

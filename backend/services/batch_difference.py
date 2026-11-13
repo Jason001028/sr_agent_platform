@@ -36,6 +36,9 @@ def sample_grid(path, width, height, shape, config):
     rows = min(reader._window_rows(config, width), max(1, (1 << 22) // width))
     fy = np.clip((np.arange(gh) + .5) * height / gh - .5, 0, height-1)
     fx = np.clip((np.arange(gw) + .5) * width / gw - .5, 0, width-1)
+    if config.get("categorical"):
+        # Scene labels must not bleed across boundaries through bilinear DN sampling.
+        fy, fx = np.floor(fy + .5), np.floor(fx + .5)
     y0, x0 = np.floor(fy).astype(int), np.floor(fx).astype(int)
     y1, x1 = np.minimum(y0+1, height-1), np.minimum(x0+1, width-1)
     wx, wy = fx-x0, fy-y0
@@ -101,6 +104,8 @@ def detect(target, reference, base, config):
     started = time.perf_counter()
     pan, nosr, (w,h), (rw,rh), registered = validate_pair(target, reference)
     max_edge = image_diff.resolve_max_edge(config.get("max_edge", 2048))
+    if config.get("method") == "smart":
+        max_edge = min(2048, max_edge)
     shape = image_diff.common_grid_shape((h,w),(rh,rw),max_edge)
     a, va = sample_grid(pan,w,h,shape,config)
     b, vb = sample_grid(nosr,rw,rh,shape,config)
@@ -110,7 +115,8 @@ def detect(target, reference, base, config):
         threshold=config.get("threshold"), min_area_px=config.get("min_area_px",64),
         blur=config.get("blur",True), open_kernel=config.get("open_kernel",3),
         close_kernel=config.get("close_kernel",5), source="source-grid",
-        auto_mask=True, auto_mask_limit=512, auto_mask_margin=config.get("margin","standard"))
+        auto_mask=True, auto_mask_limit=512, auto_mask_margin=config.get("margin","standard"),
+        scale_a=(w/shape[1], h/shape[0]), scale_b=(rw/shape[1], rh/shape[0]))
     gh, gw = shape
     for key, ref in (("imageA",target),("imageB",reference)):
         width,height=contracts.image_size(ref)
@@ -147,6 +153,7 @@ def detect(target, reference, base, config):
                     **({"algorithmVersion":result["algorithmVersion"], "scoreSemantics":result["scoreSemantics"],
                         "regionDiagnostics":result["regionDiagnostics"], "maskAvailability":result["maskAvailability"],
                         "sensorProfile":result["sensorProfile"], "calibrationStatus":result["calibrationStatus"],
+                        "analysisPrecision":result["analysisPrecision"], "filterReasons":result["filterReasons"],
                         "normalization":result["normalization"], "sourceIdentity":{"pan":target["image_key"], "nosr":reference["image_key"]}}
                        if config.get("method") == "smart" else {})},
         "diagnostics":[*base["diagnostics"],{"code":"candidate_accounting",**counts}]},mode=config.get("execution_mode"))

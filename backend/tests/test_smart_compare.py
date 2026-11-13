@@ -70,10 +70,11 @@ def test_batch_smart_uses_same_core_and_review_guard(pair):
     paths, _, _ = pair
     target = {**batch_manifest._image(paths[0]),'item_id':'smart-test'}
     reference = batch_manifest._image(paths[1])
-    result = batch_detector.detect(target,reference,{'mode':'diff','method':'smart','min_area_px':16,'open_kernel':1,'close_kernel':1})
+    result = batch_detector.detect(target,reference,{'mode':'diff','method':'smart','max_edge':128,'min_area_px':16,'open_kernel':1,'close_kernel':1})
     assert result['analysis']['algorithmVersion'].startswith('smart-compare')
     assert result['requires_geometry_review']
     assert result['analysis']['calibrationStatus'] == 'experimental-unvalidated'
+    assert result['analysis']['analysisPrecision']['windowsSourceA'] == [[22.5,22.5],[46.5,46.5]]
 
 
 def test_scene_masks_are_explicit_and_never_erase_evidence():
@@ -113,6 +114,96 @@ def test_native_supplement_has_explicit_precision_and_cancel(pair):
     def cancelled(): raise image_diff.DiffError('cancelled')
     with pytest.raises(image_diff.DiffError,match='cancelled'):
         smart_compare.analyze_grid({**body,'_cancel_check':cancelled},resolve)
+
+
+@pytest.mark.parametrize('precision', ['roi', 'scan'])
+def test_source_roi_clips_intersection_without_shifting_requested_extent(pair, precision):
+    _, body, resolve = pair
+    analyze = smart_compare.analyze_roi if precision == 'roi' else smart_compare.analyze_native_scan
+    result = analyze({**body, 'roi': {'x':-10, 'y':-20, 'w':80, 'h':90}}, resolve)
+    assert result['analysisGrid']['sourceRoi'] == [0, 0, 70, 70]
+
+
+def test_grid_roi_source_coordinates_keep_full_grid_scale_and_actual_origin(pair):
+    _, body, resolve = pair
+    result = smart_compare.analyze_grid({**body,'roi':{'x':20,'y':30,'w':140,'h':130}}, resolve)
+    assert result['regions']
+    assert result['analysisGrid']['scopeX'] == 20
+    for region in result['regions']:
+        x,y,w,h = region['bbox']
+        assert region['sourceBboxA'] == [20+x,30+y,w,h]
+    clipped = smart_compare.analyze_grid({**body,'roi':{'x':-10,'y':-20,'w':150,'h':160}}, resolve)
+    assert clipped['analysisGrid']['scopeX'] == clipped['analysisGrid']['scopeY'] == 0
+
+
+def test_region_summary_counts_candidates_beyond_http_display_limit():
+    a = np.random.default_rng(315).normal(size=(128,128))
+    score = np.zeros(a.shape,np.float32)
+    for y in range(3,123,8):
+        for x in range(3,123,8):
+            score[y:y+3,x:x+3] = 1
+    result = image_diff.analyze_arrays(a,a,method='smart',reference_side='A',score_override=score,
+        min_area_px=1,open_kernel=1,close_kernel=1)
+    assert len(result['regions']) == 200
+    assert result['regionSummary'] == {'count':225,'shownCount':200,'truncated':True,
+        'areaPixels':2025,'maxConnectedAreaPixels':9,'coverageDensity':2025/16384}
+
+
+@pytest.mark.parametrize('value', [1.5, True, '5', None])
+def test_native_roi_rejects_lossy_integer_coercion(pair, value):
+    _, body, resolve = pair
+    for analyze in (smart_compare.analyze_roi, smart_compare.analyze_native_scan):
+        with pytest.raises(image_diff.DiffError, match='整数'):
+            analyze({**body, 'roi': {'x': value, 'y':0, 'w':32, 'h':32}}, resolve)
+
+
+def test_comparison_reports_failed_nonselected_method_without_losing_results(pair):
+    _, body, resolve = pair
+    original = image_diff.analyze_arrays
+    def fail_ssim(*args, **kwargs):
+        if kwargs['method'] == 'ssim':
+            raise image_diff.DiffError('synthetic SSIM unavailable')
+        return original(*args, **kwargs)
+    with patch.object(image_diff, 'analyze_arrays', side_effect=fail_ssim):
+        result = smart_compare.analyze_grid({**body, 'compare':True}, resolve)
+    comparison = result['comparison']
+    assert result['method'] == 'smart' and result['regions']
+    assert set(comparison['results']) == {'smart', 'absdiff'}
+    assert comparison['summary'][1]['status'] == 'failed'
+    assert comparison['summary'][1]['error'] == 'synthetic SSIM unavailable'
+    assert comparison['smartUniquePixels'] is None
+    assert comparison['overlaps'][0]['iou'] is None
+    json.dumps(result, allow_nan=False)
+
+
+def test_categorical_scene_mask_sampling_does_not_interpolate_labels(tmp_path):
+    path = tmp_path/'mask.tif'
+    mask = np.zeros((12,12), np.uint8)
+    mask[:,3] = 255  # Bilinear 12→5 sampling leaks into the second output column.
+    tifffile.imwrite(path, mask, rowsperstrip=3)
+    sampled, valid = smart_compare.batch_difference.sample_grid(path,12,12,(5,5),{'categorical':True})
+    expected = mask[np.ix_([1,3,6,8,10], [1,3,6,8,10])]
+    np.testing.assert_array_equal(sampled, expected)
+    assert valid.all()
+
+
+def test_scene_mask_roi_uses_pan_pixel_centres_not_blind_resize(pair):
+    paths, body, resolve = pair
+    mask_path = paths[0].parent/'cloud.tif'
+    mask = np.zeros((96,96), np.uint8)
+    mask[:,20] = 255
+    tifffile.imwrite(mask_path, mask)
+    _, _, refs, _ = smart_compare.prepare_pair(body, resolve)
+    registration = {'crs':'synthetic','extent':[0,0,192,192],'orientation':[1,-1]}
+    refs[0]['tourIdentity']['registration'] = registration
+    spec = {'sceneId':'cloud','sourceRevision':preview_jpg.source_revision(mask_path)}
+    identity = {'width':96,'height':96,'registration':registration,'sourceRevision':spec['sourceRevision']}
+    with patch.object(smart_compare, 'image_identity', return_value=identity):
+        result = smart_compare.load_scene_masks({'sceneMasks':{'cloud':spec}}, lambda _:mask_path,
+            refs, (21,23), window=(31,30,54,51))
+    expected = mask[np.ix_(np.arange(30,51)//2, np.arange(31,54)//2)] > 0
+    assert result['cloud']['registered']
+    np.testing.assert_array_equal(result['cloud']['mask'], expected)
 
 
 def test_native_tiled_seams_match_single_native_score(tmp_path):

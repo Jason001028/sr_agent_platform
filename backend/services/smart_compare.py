@@ -13,6 +13,20 @@ from backend.services.tour_identity import image_identity
 from backend.pathguard import PathDeniedError
 
 
+def source_roi(raw, width, height, *, max_edge=None):
+    """Strict source-pixel xywh and true rectangle intersection (no shifted ROI)."""
+    if not isinstance(raw, dict) or any(type(raw.get(k)) is not int for k in ("x", "y", "w", "h")):
+        raise image_diff.DiffError("ROI 必须是整数 xywh")
+    x, y, w, h = (raw[k] for k in ("x", "y", "w", "h"))
+    if min(w, h) < 3 or (max_edge is not None and max(w, h) > max_edge):
+        raise image_diff.DiffError("原图精检 ROI 边长需为 3–2048；请缩小框选范围后重试" if max_edge else "补扫 ROI 边长至少为 3")
+    right, bottom = min(width, x+w), min(height, y+h)
+    left, top = max(0, x), max(0, y)
+    if min(right-left, bottom-top) < 3:
+        raise image_diff.DiffError("ROI 在影像范围外或过小")
+    return left, top, right, bottom
+
+
 def prepare_pair(body, resolve):
     specs = [body.get("image_a"), body.get("image_b")]
     if any(not isinstance(s, dict) or not s.get("sceneId") for s in specs):
@@ -55,11 +69,12 @@ def assert_revisions(paths, refs):
 
 
 def load_scene_masks(body, resolve, refs, shape, window=None):
-    supplied = body.get("sceneMasks") or {}
+    supplied = {} if body.get("sceneMasks") is None else body["sceneMasks"]
     if not isinstance(supplied, dict) or set(supplied)-{"cloud","water","shadow"}:
         raise image_diff.DiffError("sceneMasks 仅支持 cloud/water/shadow 来源引用")
     masks = {}
     for name, spec in supplied.items():
+        body.get("_cancel_check", lambda: None)()
         masks[name] = {"registered":False,"status":"unverified-source"}
         if not isinstance(spec, dict) or not spec.get("sceneId") or not spec.get("sourceRevision"):
             continue
@@ -76,17 +91,28 @@ def load_scene_masks(body, resolve, refs, shape, window=None):
             if window:
                 aw,ah=refs[0]["width"],refs[0]["height"]
                 x0,y0,x1,y1=window
-                a,v,_,_=image_diff.read_source_window(path,int(x0*width/aw),int(y0*height/ah),
-                    int(np.ceil(x1*width/aw)),int(np.ceil(y1*height/ah)),max_edge=4096)
-                a,v=image_diff.resize_to(shape,a,v)
+                rect = (int(np.floor(x0*width/aw)), int(np.floor(y0*height/ah)),
+                        int(np.ceil(x1*width/aw)), int(np.ceil(y1*height/ah)))
+                if max(rect[2]-rect[0], rect[3]-rect[1]) > 4096:
+                    masks[name]["status"] = "unverified-window-budget"
+                    continue
+                a,v,_,actual_rect=image_diff.read_source_window(path,*rect,max_edge=4096)
+                # Nearest categorical sample at the SAME PAN pixel centres.
+                yy = (np.arange(shape[0])+.5)*(y1-y0)/shape[0]+y0
+                xx = (np.arange(shape[1])+.5)*(x1-x0)/shape[1]+x0
+                iy = np.clip(np.floor(yy*height/ah).astype(int)-actual_rect[1],0,a.shape[0]-1)
+                ix = np.clip(np.floor(xx*width/aw).astype(int)-actual_rect[0],0,a.shape[1]-1)
+                a,v = a[iy[:,None],ix[None,:]],v[iy[:,None],ix[None,:]]
             else:
-                a,v=batch_difference.sample_grid(path,width,height,shape,{"cancel_check":body.get("_cancel_check",lambda:None)})
+                a,v=batch_difference.sample_grid(path,width,height,shape,
+                    {"categorical":True,"cancel_check":body.get("_cancel_check",lambda:None)})
             if not v.all() or preview_jpg.source_revision(path) != spec["sourceRevision"]:
                 masks[name]["status"]="unverified-invalid-pixels-or-revision"
                 continue
             masks[name]={"registered":True,"sourceIdentity":resource_identity(path)["image_key"],"mask":a>0}
         except (OSError,ValueError,KeyError,PathDeniedError):
             masks[name]["status"]="unverified-read-failed"
+        body.get("_cancel_check", lambda: None)()
     return masks
 
 
@@ -106,15 +132,13 @@ def bind_metadata(result, specs, refs, reference_side, *, windows=None):
             ox, oy, right, bottom = windows[0]
             sx, sy = (right-ox)/g["width"], (bottom-oy)/g["height"]
         else:
-            ox, oy = 0, 0
-            sx, sy = refs[0]["width"]/g["width"], refs[0]["height"]/g["height"]
+            sx, sy = g["scaleA"]
+            # Grid ROI coordinates are local to the cropped output, while the
+            # scale still refers to the full common grid.
+            ox, oy = g["origin"][0]*sx, g["origin"][1]*sy
         region["sourceBboxA"] = [ox+x*sx, oy+y*sy, w*sx, h*sy]
         region["sourceIdentity"] = result["sourceIdentity"]
         region["maskEligible"] = bool(region.get("maskEligible", True) and windows and sx == 1 and sy == 1)
-    result["regionSummary"]={"count":len(result["regions"]),
-        "areaPixels":sum(r["areaPx"] for r in result["regions"]),
-        "maxConnectedAreaPixels":max((r["areaPx"] for r in result["regions"]),default=0),
-        "coverageDensity":sum(r["areaPx"] for r in result["regions"])/max(1,result["coverage"]["validPixels"])}
     if result.get("method") == "smart":
         for p in result.get("autoMask", {}).get("polygons", []):
             seeds = p.get("analysis_seeds", [p.get("analysis_seed")])
@@ -129,21 +153,36 @@ def _mask(result):
 
 
 def compare_results(results):
-    masks = {name: _mask(value) for name, value in results.items()}
+    masks = {name: _mask(value) for name, value in results.items() if "error" not in value}
     overlaps = []
     for a, b in (("absdiff", "ssim"), ("absdiff", "smart"), ("ssim", "smart")):
+        if a not in masks or b not in masks:
+            overlaps.append({"methods": [a, b], "status": "unavailable", "iou": None, "onlyA": None, "onlyB": None})
+            continue
         union = int((masks[a] | masks[b]).sum())
         overlaps.append({"methods": [a, b], "iou": float((masks[a] & masks[b]).sum()/union) if union else 1.,
                          "onlyA": int((masks[a] & ~masks[b]).sum()), "onlyB": int((masks[b] & ~masks[a]).sum())})
-    return {"execution": "sequential-shared-input-bounded", "summary": [
-        {"method": k, "regions": len(v["regions"]), "areaPixels": int(masks[k].sum()),
+    summary = []
+    for k, v in results.items():
+        if k not in masks:
+            summary.append({"method": k, "status": "failed", "error": v["error"], "elapsedMs": v["elapsedMs"],
+                            "regions": 0, "areaPixels": 0, "coverage": 0})
+            continue
+        summary.append({"method": k, "regions": v["regionAccounting"]["eligible"], "areaPixels": int(masks[k].sum()),
          "coverage": float(masks[k].sum()/max(v["coverage"]["validPixels"], 1)), "elapsedMs": v["elapsedMs"],
-         "status": "completed"} for k, v in results.items()], "overlaps": overlaps,
-         "smartUniquePixels": int((masks["smart"] & ~masks["absdiff"] & ~masks["ssim"]).sum()), "results": results}
+         "status": "completed"})
+    return {"execution": "sequential-shared-input-bounded", "summary": summary, "overlaps": overlaps,
+         "smartUniquePixels": int((masks["smart"] & ~masks["absdiff"] & ~masks["ssim"]).sum()) if len(masks) == 3 else None,
+         "results": {k: v for k, v in results.items() if k in masks}}
 
 
 def analyze_grid(body, resolve):
     started = time.perf_counter()
+    from backend.services.blur_detection import config_from_dict
+    try:
+        config_from_dict(body.get("smartOptions"))
+    except (TypeError, ValueError) as exc:
+        raise image_diff.DiffError(str(exc)) from exc
     specs, paths, refs, reference_side = prepare_pair(body, resolve)
     edge = min(2048, image_diff.resolve_max_edge(body.get("maxEdge")))
     shape = image_diff.common_grid_shape((refs[0]["height"], refs[0]["width"]),
@@ -155,7 +194,9 @@ def analyze_grid(body, resolve):
     results = {}
     for method in methods:
         check()
-        result = image_diff.analyze_arrays(arrays[0][0], arrays[1][0], valid_a=arrays[0][1], valid_b=arrays[1][1],
+        method_started = time.perf_counter()
+        try:
+            result = image_diff.analyze_arrays(arrays[0][0], arrays[1][0], valid_a=arrays[0][1], valid_b=arrays[1][1],
             method=method, sensitivity=body.get("sensitivity", "standard"), threshold=body.get("threshold"),
             min_area_px=body.get("minAreaPx", 64), open_kernel=body.get("openKernel", 3), close_kernel=body.get("closeKernel", 3),
             blur=body.get("blur", True), ssim_window=body.get("ssimWindow", 7), ssim_gaussian=body.get("ssimGaussian", False),
@@ -164,6 +205,12 @@ def analyze_grid(body, resolve):
             scene_masks=scene_masks,
             scale_a=(refs[0]["width"]/shape[1], refs[0]["height"]/shape[0]),
             scale_b=(refs[1]["width"]/shape[1], refs[1]["height"]/shape[0]), roi=body.get("roi"))
+        except (ValueError, TypeError) as exc:
+            check()
+            if method == body.get("method", "smart") or len(methods) == 1:
+                raise image_diff.DiffError(str(exc)) from exc
+            results[method] = {"error": str(exc), "elapsedMs": round((time.perf_counter()-method_started)*1000, 2)}
+            continue
         for side, spec, ref in zip(("A", "B"), specs, refs):
             result["image"+side] = {**spec, "sourceWidth": ref["width"], "sourceHeight": ref["height"],
                                    "gridWidth": shape[1], "gridHeight": shape[0]}
@@ -172,10 +219,11 @@ def analyze_grid(body, resolve):
         result["analysisGrid"]["mode"] = "preview"
         result["operation"] = "difference-localization"
         if body.get("roi"):
-            roi = body["roi"]
-            result["analysisGrid"].update(fullWidth=shape[1], fullHeight=shape[0], scopeX=roi["x"], scopeY=roi["y"])
+            result["analysisGrid"].update(fullWidth=shape[1], fullHeight=shape[0],
+                scopeX=result["analysisGrid"]["origin"][0], scopeY=result["analysisGrid"]["origin"][1])
         bind_metadata(result, specs, refs, reference_side)
         results[method] = result
+        check()
     assert_revisions(paths, refs)
     selected = dict(results[body.get("method", "smart")])
     if len(results) > 1:
@@ -191,20 +239,15 @@ def analyze_roi(body, resolve):
     if reference_side != "B":
         raise image_diff.DiffError("原图精检请将 PAN 本体选为 A、NOSR 选为 B，确保按目标 PAN 原始尺度分析")
     body.get("_cancel_check", lambda: None)()
-    cfg = config_from_dict(body.get("smartOptions"))
+    try:
+        cfg = config_from_dict(body.get("smartOptions"))
+    except (TypeError, ValueError) as exc:
+        raise image_diff.DiffError(str(exc)) from exc
     roi = body.get("roi")
     if not isinstance(roi, dict):
         raise image_diff.DiffError("原图精检需要 ROI")
-    try:
-        x, y, w, h = [int(roi[k]) for k in ("x", "y", "w", "h")]
-    except (ValueError, TypeError, KeyError) as e:
-        raise image_diff.DiffError("ROI 必须是整数 xywh") from e
-    if min(w, h) < 3 or max(w, h) > 2048:
-        raise image_diff.DiffError("原图精检 ROI 边长需为 3–2048；请缩小框选范围后重试")
     aw, ah = refs[0]["width"], refs[0]["height"]
-    x0, y0, x1, y1 = max(0, x), max(0, y), min(aw, x+w), min(ah, y+h)
-    if min(x1-x0, y1-y0) < 3:
-        raise image_diff.DiffError("ROI 在影像范围外或过小")
+    x0, y0, x1, y1 = source_roi(roi, aw, ah, max_edge=2048)
     opening = image_diff._odd_kernel(body.get("openKernel", 3), 3, "开运算核")
     closing = image_diff._odd_kernel(body.get("closeKernel", 3), 3, "闭运算核")
     halo = cfg.window + 2 + 2 * (opening + closing)
@@ -239,6 +282,7 @@ def analyze_roi(body, resolve):
                                    imageASource=[aw, ah], imageBSource=[bw, bh])
     windows = ((x0, y0, x1, y1), (x0*bw/aw, y0*bh/ah, x1*bw/aw, y1*bh/ah))
     bind_metadata(result, specs, refs, reference_side, windows=windows)
+    body.get("_cancel_check", lambda: None)()
     assert_revisions(paths, refs)
     return result
 
@@ -255,13 +299,9 @@ def analyze_native_scan(body, resolve):
     if side != "B":
         raise image_diff.DiffError("原始尺度补扫请将 PAN 本体选为 A、NOSR 选为 B")
     aw, ah = refs[0]["width"], refs[0]["height"]
-    roi = body.get("roi") or {"x":0,"y":0,"w":aw,"h":ah}
-    try:
-        x, y, w, h = [int(roi[k]) for k in ("x","y","w","h")]
-    except (TypeError, ValueError, KeyError) as e:
-        raise image_diff.DiffError("补扫 ROI 必须为整数 xywh") from e
-    x, y = max(0,x), max(0,y)
-    w, h = min(w,aw-x), min(h,ah-y)
+    roi = body.get("roi") if body.get("roi") is not None else {"x":0,"y":0,"w":aw,"h":ah}
+    x, y, right, bottom = source_roi(roi, aw, ah)
+    w, h = right-x, bottom-y
     tile = 512
     count = int(np.ceil(w/tile)*np.ceil(h/tile))
     if min(w,h) < 3 or count > 64:

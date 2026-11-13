@@ -738,6 +738,9 @@ def analyze_arrays(
         "elapsedMs": int(round(took)),
     }
     if evidence is not None:
+        result["regionSummary"] = {"count": len(kept), "shownCount": len(shown), "truncated": truncated,
+            "areaPixels": int(final_mask.sum()), "maxConnectedAreaPixels": max((r.area for r in kept), default=0),
+            "coverageDensity": float(final_mask.sum()/max(1, valid.sum()))}
         result.update({key: evidence[key] for key in (
             "algorithmVersion", "scoreSemantics", "maskAvailability", "calibrationStatus", "normalization")})
         result["evidenceMaps"] = {

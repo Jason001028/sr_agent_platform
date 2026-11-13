@@ -32,6 +32,11 @@ def test_http_parameter_and_size_guards(client,pair):
     with patch('backend.api.app._diff_source_path',side_effect=lambda sid,root:resolve(sid)):
         assert client.post('/api/diff/analyze',json={**body,'smartOptions':{'window':14}}).status_code==400
         assert client.post('/api/diff/analyze',json={**body,'image_a':{**body['image_a'],'sourceRevision':'changed'}}).status_code==400
+        for options in ({'calibrationScale':True}, {'calibrationScale':{}}, {'window':4}):
+            assert client.post('/api/diff/analyze',json={**body,'smartOptions':options}).status_code==400
+        for extra in ({'precision':'unknown'}, {'compare':True,'precision':'source-roi'},
+                      {'compare':True,'precision':'source-tiled'}):
+            assert client.post('/api/diff/analyze',json={**body,**extra}).status_code==400
     assert client.post('/api/diff/analyze',json=[]).status_code==400
     assert client.post('/api/diff/analyze',content=b'x'*(48*1024*1024+1)).status_code==413
 
