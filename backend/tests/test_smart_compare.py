@@ -56,6 +56,14 @@ def test_native_roi_halo_and_mask_contract(pair):
     json.dumps(result, allow_nan=False)
 
 
+@pytest.mark.parametrize('edge', [3,7,8])
+def test_small_native_roi_honors_three_pixel_minimum(pair,edge):
+    _,body,resolve = pair
+    result = smart_compare.analyze_roi({**body,'roi':{'x':70,'y':70,'w':edge,'h':edge}}, resolve)
+    assert result['analysisGrid']['width'] == result['analysisGrid']['height'] == edge
+    assert result['analysisPrecision']['nativeRefined']
+
+
 def test_reversed_grid_roles_and_revision_guard(pair):
     _, body, resolve = pair
     original = smart_compare.analyze_grid(body,resolve)

@@ -480,7 +480,7 @@ def _pick_regions(regions: list[_Region], min_area: int) -> list[_Region]:
     return kept
 
 
-def _roi_slice(roi, shape) -> tuple[int, int, int, int]:
+def _roi_slice(roi, shape, *, minimum=8) -> tuple[int, int, int, int]:
     if roi is None:
         return 0, 0, int(shape[1]), int(shape[0])
     if not isinstance(roi, dict):
@@ -495,8 +495,8 @@ def _roi_slice(roi, shape) -> tuple[int, int, int, int]:
     H, W = shape
     x0, y0 = max(0, x), max(0, y)
     x1, y1 = min(W, x + w), min(H, y + h)
-    if x1 - x0 < 8 or y1 - y0 < 8:
-        raise DiffError("分析范围太小（至少 8×8 px）")
+    if x1 - x0 < minimum or y1 - y0 < minimum:
+        raise DiffError(f"分析范围太小（至少 {minimum}×{minimum} px）")
     return x0, y0, x1, y1
 
 
@@ -578,7 +578,7 @@ def analyze_arrays(
         a, b = _shared_normalize(a, b, valid)
 
     smart_context = (a, b, valid) if method == "smart" else None
-    x0, y0, x1, y1 = _roi_slice(roi, a.shape)
+    x0, y0, x1, y1 = _roi_slice(roi, a.shape, minimum=3 if method == "smart" else 8)
     a = a[y0:y1, x0:x1]
     b = b[y0:y1, x0:x1]
     valid = valid[y0:y1, x0:x1]

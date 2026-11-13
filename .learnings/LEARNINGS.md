@@ -1,5 +1,15 @@
 # Learnings
 
+## 2026-11-13 — Smart Compare spatial and publication checks
+
+Category: best_practice. A cropped analysis result retains the full grid's
+source scale and adds its actual crop origin. Intersect negative source ROIs
+using the original right/bottom, without shifting the requested footprint.
+Sample categorical masks by nearest pixel centres, never bilinear DN mixing.
+Validate handoff claims against git show: an internal reference described as
+untracked may already be in the previous commit. Do not repeat that claim or
+publish the repository without resolving its distribution authorization.
+
 ## 2026-10-30 correction: scene input identity
 
 用户指出一键解析完整生产序列号_PAN.tif 被替换成裸 PAN.tif。根因是

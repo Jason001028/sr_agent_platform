@@ -1,5 +1,18 @@
 # Errors
 
+## 2026-11-13 — Smart Compare verification
+
+New source-scale regression initially assumed the common grid followed NOSR;
+the shared planner uses the larger PAN grid (up to max_edge). The test now
+explicitly requests 128 and verifies the actual source scale. A new UI label
+failed terminology checks; use 掩码. Restrict Smart parameter cancellation to
+Smart/comparison requests to preserve legacy decoding/discard notices.
+Browser comparison actions must open their details element before clicking.
+On PowerShell quote agent-browser refs such as '@e16'; unquoted @ is splatting.
+The local agent-browser stdin pipeline returned null; quoted inline eval worked.
+One CLI wait timed out; offline doctor passed, and the actual calculated UI was
+then checked from DOM state. Automated HTTP/browser regression also passed.
+
 ## 2026-10-26 — test work directory isolation
 
 SR idempotency tests wrote to the default /tmp/sr_agent_work under Windows,
