@@ -7,12 +7,32 @@ const state = vi.hoisted(() => ({ viewer: {} as any, batch: {} as any, chat: {} 
 vi.mock('../../stores/viewer', () => ({ useViewerStore: () => state.viewer }));
 vi.mock('../../stores/batchGoal', () => ({ useBatchGoalStore: () => state.batch }));
 vi.mock('../../stores/chat', () => ({ useChatStore: () => state.chat }));
-vi.mock('../api', () => ({ apiBatchImport: vi.fn(), apiCreateBatch: vi.fn() }));
-import { apiBatchImport, apiCreateBatch } from '../api';
+vi.mock('../api', () => {
+  class HttpError extends Error {
+    status: number;
+    constructor(status: number, message = '') { super(message); this.status = status; }
+  }
+  return {
+    HttpError,
+    apiBatchImport: vi.fn(), apiPrepareRepair: vi.fn(),
+    apiConfirmRepair: vi.fn(), apiStartRepair: vi.fn(),
+  };
+});
+import { apiBatchImport, apiConfirmRepair, apiPrepareRepair, apiStartRepair, HttpError } from '../api';
+import type { RepairPlan } from '../api';
 import BatchRepairDraft from '../../components/BatchRepairDraft.vue';
 import { viewerRepairSequences } from '../batchSequences';
 import { batchDockOpen, openBatchSelection } from '../batchDock';
 const imported = (n = 1) => ({ manifest_ref: 'manifest:test', rejected: false, counts: { items: n, errors: 0, warnings: 0 }, diagnostics: [], items: [] });
+const plan = (n = 2, over: Partial<RepairPlan> = {}): RepairPlan => ({
+  kind: 'repair_plan.v1', contract_version: 'repair_plan.v1', plan_id: 'plan-a',
+  version: 1, scope: 'batch', status: 'READY', confirmation_required: true,
+  targets: { total: n, excluded: 0, applicable: n, items: [] },
+  strategy: { detection: 'existing_diff_pipeline', detection_method: 'absdiff', mask: 'auto_or_existing', execution: 'existing_batch_runtime' },
+  mode: 'demo', execution: { allowed: true, mode: 'demo', reason: null },
+  manifest_ref: 'manifest:test', title: '批量智能修复',
+  ...over,
+});
 const rec = (id: number, dir: string | null, stageKind = 'nosr') => ({ id, sceneDir: dir, stageKind, name: 'display.jpg' } as ViewerRec);
 let app: App | undefined, root: HTMLDivElement;
 async function flush() { for (let i = 0; i < 12; i++) { await Promise.resolve(); await nextTick(); } }
@@ -25,7 +45,9 @@ beforeEach(() => {
   state.chat = reactive({ sessionId: 'session-a' });
   state.batch = { selectGoal: vi.fn().mockResolvedValue(undefined), setFollow: vi.fn() };
   vi.mocked(apiBatchImport).mockImplementation(async (_t, _m, sources) => imported(sources?.length));
-  vi.mocked(apiCreateBatch).mockResolvedValue({ goal_id: 'goal-a' } as any);
+  vi.mocked(apiPrepareRepair).mockResolvedValue(plan(2) as never);
+  vi.mocked(apiConfirmRepair).mockResolvedValue(plan(2, { status: 'CONFIRMED' }) as never);
+  vi.mocked(apiStartRepair).mockResolvedValue({ plan: plan(2, { status: 'STARTED' }), goal: { goal_id: 'goal-a' }, reused: false } as never);
 });
 afterEach(() => { app?.unmount(); app = undefined; root?.remove(); vi.unstubAllGlobals(); });
 describe('compact sequence selection', () => {
@@ -38,15 +60,15 @@ describe('compact sequence selection', () => {
     batchDockOpen.value = false; openBatchSelection(); openBatchSelection();
     expect(batchDockOpen.value).toBe(true);
     expect(handler.mock.calls[0][0].detail.section).toBe('draft');
-    expect(apiCreateBatch).not.toHaveBeenCalled();
+    expect(apiPrepareRepair).not.toHaveBeenCalled();
     window.removeEventListener('batch-task-open', handler);
   });
-  it('defaults to all eligible groups; supports none, all, and individual selection', async () => {
+  it('prepares a plan first and only starts after the user confirms', async () => {
+    vi.mocked(apiPrepareRepair).mockResolvedValue(plan(1) as never);
     await mount();
     expect(start().textContent).toContain('已选 2 组');
-    expect(apiCreateBatch).not.toHaveBeenCalled();
+    expect(apiPrepareRepair).not.toHaveBeenCalled();
     expect(root.textContent).not.toContain('/prod/');
-    expect(root.querySelector('.count')).toBeNull();
     expect([...root.querySelectorAll('.state')].map(e => e.textContent)).toEqual(['可修复', '可修复']);
     expect([...root.querySelectorAll('.ordinal')].map(e => e.textContent)).toEqual(['02', '07']);
     buttons()[1].click(); await flush(); expect(start().disabled).toBe(true);
@@ -54,8 +76,15 @@ describe('compact sequence selection', () => {
     root.querySelector<HTMLInputElement>('input')!.click(); await flush();
     expect(start().textContent).toContain('已选 1 组');
     start().click(); await flush();
-    expect(vi.mocked(apiBatchImport).mock.calls.at(-1)).toEqual(['', 'production', [{ path: '/prod/A/PAN.tif', name: 'A', evidence: expect.any(String) }], 'automatic']);
-    expect(apiCreateBatch).toHaveBeenCalledTimes(1);
+    expect(apiPrepareRepair).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(apiPrepareRepair).mock.calls[0][0]).toMatchObject({
+      session_id: 'session-a', mode: 'demo',
+      sources: [{ path: '/prod/A/PAN.tif', name: 'A', evidence: expect.any(String) }],
+    });
+    expect(start().textContent).toContain('确认并启动 · 1 景');
+    start().click(); await flush();
+    expect(apiConfirmRepair).toHaveBeenCalledWith('plan-a', { session_id: 'session-a' });
+    expect(apiStartRepair).toHaveBeenCalledWith('plan-a', { session_id: 'session-a', plan_version: 1 });
     expect(state.batch.selectGoal).toHaveBeenCalledWith('goal-a');
     expect(state.batch.setFollow).toHaveBeenCalledWith(false);
   });
@@ -69,36 +98,52 @@ describe('compact sequence selection', () => {
     expect(root.textContent).not.toContain('/prod/');
     expect([...root.querySelectorAll<HTMLInputElement>('input')].every(e => e.disabled)).toBe(true);
   });
-  it('never creates from a rejected final manifest', async () => {
+  it('never starts a blocked plan and shows the blocking reason', async () => {
     await mount();
-    vi.mocked(apiBatchImport).mockResolvedValue({ ...imported(0), rejected: true, diagnostics: [{ line: 1, severity: 'error', message: 'PAN 备份已存在' }] });
+    vi.mocked(apiPrepareRepair).mockResolvedValue(plan(2, { status: 'BLOCKED', blocking: [{ message: 'PAN 备份已存在' }] }) as never);
     start().click(); await flush();
-    expect(apiCreateBatch).not.toHaveBeenCalled();
+    expect(apiConfirmRepair).not.toHaveBeenCalled();
     expect(root.querySelector('[role=alert]')?.textContent).toContain('备份');
   });
-  it.each(['http', 'no-crypto'])('starts without randomUUID (%s), guards double clicks and keeps retry identity', async environment => {
-    const getRandomValues = vi.fn((bytes: Uint32Array) => { bytes.fill(7); return bytes; });
-    vi.stubGlobal('crypto', environment === 'http' ? { getRandomValues } : undefined);
+  it('guards double clicks and reuses the prepared plan', async () => {
     await mount();
-    vi.mocked(apiCreateBatch).mockRejectedValueOnce(new Error('连接中断'));
     start().click(); start().click(); await flush();
-    expect(apiCreateBatch).toHaveBeenCalledTimes(1);
-    const first = vi.mocked(apiCreateBatch).mock.calls[0][0];
-    expect(first.request_key).toMatch(/^batch-[a-z0-9]+-[a-z0-9]+-[a-f0-9]{32}$/);
-    if (environment === 'http') expect(getRandomValues).toHaveBeenCalledTimes(1);
-    const imports = vi.mocked(apiBatchImport).mock.calls.length;
+    expect(apiPrepareRepair).toHaveBeenCalledTimes(1);
+    expect(apiStartRepair).not.toHaveBeenCalled();
     start().click(); await flush();
-    expect(apiCreateBatch).toHaveBeenLastCalledWith(first);
-    expect(apiBatchImport).toHaveBeenCalledTimes(imports);
-    expect(state.batch.selectGoal).toHaveBeenCalledWith('goal-a');
+    expect(apiPrepareRepair).toHaveBeenCalledTimes(1);
+    expect(apiConfirmRepair).toHaveBeenCalledTimes(1);
+    expect(apiStartRepair).toHaveBeenCalledTimes(1);
   });
-  it('discards final validation when the session changes', async () => {
+  it('re-prepares after a 409 stale-plan response', async () => {
     await mount();
-    let resolve!: (value: ReturnType<typeof imported>) => void;
-    vi.mocked(apiBatchImport).mockImplementationOnce(() => new Promise(r => { resolve = r; }));
+    start().click(); await flush();
+    expect(start().textContent).toContain('确认并启动');
+    vi.mocked(apiConfirmRepair).mockRejectedValueOnce(new HttpError(409, 'stale'));
+    start().click(); await flush();
+    expect(apiPrepareRepair).toHaveBeenCalledTimes(2);
+    expect(apiStartRepair).not.toHaveBeenCalled();
+    expect(root.querySelector('[role=alert]')?.textContent).toContain('计划已失效');
+    expect(start().textContent).toContain('确认并启动');
+  });
+  it('detection method change invalidates a prepared plan before start', async () => {
+    await mount();
+    start().click(); await flush();
+    expect(start().textContent).toContain('确认并启动');
+    const detection = root.querySelectorAll<HTMLSelectElement>('select')[1]!;
+    detection.value = 'ssim';
+    detection.dispatchEvent(new Event('change'));
+    await flush();
+    expect(apiConfirmRepair).not.toHaveBeenCalled();
+    expect(start().textContent).toContain('准备修复计划');
+  });
+  it('discards the prepared plan when the session changes', async () => {
+    await mount();
+    let resolve!: (value: ReturnType<typeof plan>) => void;
+    vi.mocked(apiPrepareRepair).mockImplementationOnce(() => new Promise<RepairPlan>(r => { resolve = r; }));
     start().click(); await flush(); state.chat.sessionId = 'session-b';
-    resolve(imported(2)); await flush();
-    expect(apiCreateBatch).not.toHaveBeenCalled();
+    resolve(plan(2)); await flush();
+    expect(apiConfirmRepair).not.toHaveBeenCalled();
     expect(root.querySelector('[role=alert]')?.textContent).toContain('会话已变化');
   });
 });

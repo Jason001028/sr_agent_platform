@@ -40,11 +40,19 @@ describe('batch human quality UI state',()=>{
   it('opens the exact output/NOSR pair and focuses both normalized Mask regions',async()=>{
     const q=useBatchQualityStore();await q.select('one');
     expect(q.comparisonReady).toBe(true);expect(q.doc?.job_id).toBe('81');
+    expect(q.regionId).toBe('r1');
     expect(mocks.viewer.loadTourImage.mock?.calls??mocks.viewer.recs.map((r:any)=>r.sceneId)).toEqual(['pan-one','nosr-one']);
     expect(mocks.viewer.setPaneView).toHaveBeenCalledTimes(2);
     const calls=mocks.viewer.setPaneView.mock.calls;
     expect(calls[0][1].scale*32).toBeCloseTo(calls[1][1].scale*16);
     q.flicker();expect(mocks.viewer.openComparePair).toHaveBeenCalledWith(1,2);
+  });
+  it('lands on the first pending region instead of an already approved one',async()=>{
+    mocks.document.mockImplementationOnce(async(_goal:string,item:string)=>{
+      const d=document(item);d.regions[0].decision='approved';return d;});
+    const q=useBatchQualityStore();await q.select('one');
+    expect(q.regionId).toBe('r2');
+    expect(mocks.viewer.setPaneView).toHaveBeenCalledTimes(2);
   });
   it('sends explicit review identity/version/reason, and prevents confirmation on a different displayed source',async()=>{
     const q=useBatchQualityStore();await q.select('one');q.reviewer='审核人';q.reason='纹理通过';

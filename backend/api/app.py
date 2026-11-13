@@ -77,6 +77,7 @@ from backend.services import preview_clear
 from backend.services import plugins as plugin_svc
 from backend.services import run_sr as run_sr_svc
 from backend.services import goal_runtime, goal_worker, batch_worker
+from backend.api import repair as repair_api
 from backend.services import scene_search, store as store_mod
 from backend.services.preview_jpg import (PREVIEW_DIVISORS, PREVIEW_JPG_QUALITY,
                                           PreviewError, build_preview_pixels,
@@ -1434,6 +1435,8 @@ def create_app() -> FastAPI:
     # Durable goals are opt-in for callers; mounting the read/write API is
     # backward compatible and the worker only advances persisted goals.
     app.include_router(goal_runtime.router)
+    # Unified repair entry shared by the tool panel and the Agent tools.
+    app.include_router(repair_api.router)
 
     @app.get("/api/health")
     def health():

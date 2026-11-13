@@ -11,6 +11,9 @@ from backend.services.trajectory import _redact
 META = "_tool_result_budget"
 # These values are copied verbatim, including nested contract/verdict records.
 CRITICAL = frozenset({"ok", "error", "error_class", "control", "job_id", "state", "status",
+    # Repair task cards must survive model-view clipping: the UI re-reads the
+    # authoritative plan/status from these stable IDs.
+    "kind", "plan_id", "goal_id",
     "active", "exit_code", "verdict", "skip", "reason", "reasons", "contract", "idempotent",
     "reuse", "fingerprint", "artifacts", "outputs", "output_path", "config_xml", "batch_script",
     "log_dir", "source", "count", "scanned", "total", "query", "filters", "pagination",

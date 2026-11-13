@@ -19,9 +19,10 @@ from unittest import mock
 
 from PIL import Image
 
+from backend.api import paths
 from backend.services import (
     batch_detector, batch_manifest, batch_mask, batch_worker,
-    run_sr as sr_service, slurm)
+    repair_application as repair_svc, run_sr as sr_service, scene_search, slurm)
 from backend.services.goal_runtime import _batch_item_checkpoint
 from backend.services.store import Store
 from backend.tests import allowed_roots_env
@@ -185,6 +186,27 @@ class BatchWorkerTest(unittest.TestCase):
         return self.store._db().execute(
             "SELECT COUNT(*) FROM sr_tasks WHERE job_id IS NOT NULL").fetchone()[0]
 
+    def manual_plan_goal(self, index, *, session="s1"):
+        """Create one confirmed manual-mask plan and start its one-Item Goal."""
+        name = self.scene(index)
+        scene_dir = self.root / (name + "_PAN")
+        inp = scene_dir / "PAN.tif"
+        mask = Image.new("L", (16, 16), 0)
+        for x in range(2, 8):
+            for y in range(3, 9):
+                mask.putpixel((x, y), 255)
+        mask.save(scene_search.derived_mask_path(scene_dir.as_posix()))
+        plan = repair_svc.prepare_repair(
+            self.store, session_id=session, scope="current",
+            current={"scene_id": paths.scene_id_abs(inp),
+                     "name": scene_dir.name},
+            mode="demo", mask_policy="existing")
+        self.assertEqual(plan["status"], "READY", plan.get("blocking"))
+        repair_svc.confirm_repair(self.store, plan["plan_id"],
+                                  session_id=session)
+        return repair_svc.start_repair(
+            self.store, plan["plan_id"], session_id=session)["goal"]
+
     # ---- acceptance ----------------------------------------------------
     def test_manual_mask_review_gates_submission_and_survives_reload(self):
         goal, _ = self.make_goal(count=1)
@@ -212,6 +234,79 @@ class BatchWorkerTest(unittest.TestCase):
         self.assertEqual(self._submitted_count(), 1)
         with self.assertRaises(ValueError):
             self.store.review_batch_item(gid, ready["item_id"], approved["version"], "exclude")
+
+    def test_manual_mask_fake_sr_closes_and_recovers_after_restart(self):
+        goal = self.manual_plan_goal(70)
+        gid = goal["goal_id"]
+        # The Item is already MASK_READY with the copied artifact; restart the
+        # store before any submission and let the normal Producer recover.
+        self.store.close()
+        self.store = Store(self.root / "test.db")
+        self.state.store = self.store
+        self.run_until(
+            lambda: self.store.get_goal(gid)["status"] == "COMPLETED")
+        items = self.items(gid)
+        self.assertEqual([i["status"] for i in items], ["SUCCEEDED"])
+        self.assertEqual(len(self.submits), 1)
+        mask = items[0]["checkpoint"]["mask"]
+        self.assertTrue(Path(mask["path"]).is_file())
+        with Image.open(mask["path"]) as image:
+            self.assertEqual(image.size, (16, 16))
+            self.assertGreater(image.getpixel((3, 4)), 0)
+
+    def test_completed_scene_can_be_repaired_by_a_newer_plan(self):
+        name = self.scene(72)
+        scene_dir = self.root / (name + "_PAN")
+        inp = scene_dir / "PAN.tif"
+
+        def start_plan(session):
+            plan = repair_svc.prepare_repair(
+                self.store, session_id=session, scope="current",
+                current={"scene_id": paths.scene_id_abs(inp),
+                         "name": scene_dir.name}, mode="demo")
+            repair_svc.confirm_repair(
+                self.store, plan["plan_id"], session_id=session)
+            return repair_svc.start_repair(
+                self.store, plan["plan_id"], session_id=session)["goal"]
+
+        first = start_plan("repair-one")
+        self.run_until(
+            lambda: self.store.get_goal(first["goal_id"])["status"] == "COMPLETED")
+        self.assertEqual(self._submitted_count(), 1)
+        time.sleep(0.01)  # new Goal created after the first settlement
+        second = start_plan("repair-two")
+        self.run_until(
+            lambda: self.store.get_goal(second["goal_id"])["status"] == "COMPLETED")
+        self.assertEqual(self._submitted_count(), 2)
+
+    def test_two_plans_for_the_same_pan_submit_only_once(self):
+        name = self.scene(71)
+        scene_dir = self.root / (name + "_PAN")
+        inp = scene_dir / "PAN.tif"
+        goals = []
+        for session in ("plan-a", "plan-b"):
+            plan = repair_svc.prepare_repair(
+                self.store, session_id=session, scope="current",
+                current={"scene_id": paths.scene_id_abs(inp),
+                         "name": scene_dir.name},
+                mode="demo")
+            repair_svc.confirm_repair(
+                self.store, plan["plan_id"], session_id=session)
+            goals.append(repair_svc.start_repair(
+                self.store, plan["plan_id"], session_id=session)["goal"])
+        self.assertNotEqual(goals[0]["goal_id"], goals[1]["goal_id"])
+
+        def settled():
+            return all(self.store.get_goal(g["goal_id"])["status"]
+                       in {"COMPLETED", "FAILED", "BLOCKED"} for g in goals)
+
+        self.run_until(settled)
+        self.assertEqual(self._submitted_count(), 1)
+        statuses = [{i["status"] for i in self.items(g["goal_id"])}
+                    for g in goals]
+        self.assertEqual(sum("SUCCEEDED" in row for row in statuses), 1)
+        self.assertEqual(
+            sum(bool(row & {"BLOCKED", "FAILED"}) for row in statuses), 1)
 
     def test_five_scene_pipeline_completes_without_model_calls(self):
         goal, manifest = self.make_goal(5)

@@ -3,7 +3,7 @@ import { expect, it, vi } from 'vitest';
 const fixture = vi.hoisted(() => ({ rows: [] as any[] }));
 vi.mock('../../stores/batchGoal', () => ({ useBatchGoalStore: () => ({ goalId: null, snapshot: null }) }));
 vi.mock('../../stores/batchDraft', () => ({ useBatchDraftStore: () => ({ candidates: fixture.rows, title: 'fixture', mode: 'demo', strategy: 'review' }) }));
-import { handoffBatch } from '../batchHandoff';
+import { AGENT_REPAIR_PROMPT, handoffBatch, requestAgentRepair } from '../batchHandoff';
 it('compacts repeated evidence without dropping identities, states or validation issues', () => {
   fixture.rows = Array.from({ length: 50 }, (_, i) => ({ name: `image-${i}`, path: `/scene-${i}/PAN.tif`, evidence: '需要人工核对的同一条检测依据。'.repeat(20), status: '待确认', validationError: i === 3 ? '来源待核' : undefined }));
   let text = '';
@@ -20,4 +20,18 @@ it('compacts repeated evidence without dropping identities, states or validation
   expect(context.candidates[3][4]).toBe('来源待核');
   expect(text.length).toBeLessThan(JSON.stringify(fixture.rows).length / 2);
   expect(text).toContain('不提交 SR');
+});
+
+it('requests one auto-sent Agent repair that still needs plan confirmation', () => {
+  let detail: { text?: string; autoSend?: boolean } = {};
+  window.addEventListener('batch-agent-handoff', e => {
+    detail = (e as CustomEvent).detail;
+  }, { once: true });
+  requestAgentRepair();
+  expect(detail.autoSend).toBe(true);
+  expect(detail.text).toBe(AGENT_REPAIR_PROMPT);
+  expect(detail.text).toContain('prepare_repair');
+  expect(detail.text).toContain('不要直接提交 SR');
+  expect(detail.text).toContain('确认后启动');
+  expect(detail.text).not.toContain('start_repair');
 });

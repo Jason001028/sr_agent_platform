@@ -7,6 +7,7 @@ import BatchJobQueue from './BatchJobQueue.vue';
 import BatchItemsList from './BatchItemsList.vue';
 import BatchQualityPanel from './BatchQualityPanel.vue';
 import BatchResultReport from './BatchResultReport.vue';
+import { batchQualityRequest } from '../lib/batchDock';
 const props = withDefaults(defineProps<{ fullQueue?: boolean }>(), { fullQueue: false });
 const emit = defineEmits<{ 'update:fullQueue': [value: boolean] }>();
 const batch = useBatchGoalStore();
@@ -16,6 +17,13 @@ const focus = computed(() => snap.value ? focusMissionItems(snap.value) : []);
 const filter = ref('');
 const qualityOpen = ref(false);
 watch(() => batch.goalId, () => { filter.value = ''; qualityOpen.value = false; });
+/* Agent「开始复核」requests one direct landing.  The quality section opens
+ * here; BatchQualityPanel then picks the Item and first pending region.  The
+ * panel may mount a tick after the request was published, so the watcher only
+ * needs to react to the token — the mounted child reads it immediately. */
+watch(() => batchQualityRequest.value?.token, () => {
+  if (batchQualityRequest.value) qualityOpen.value = true;
+}, { immediate: true });
 function openAll() { filter.value = mission.value?.issueFocus ? ISSUE_STATUSES : ''; emit('update:fullQueue', true); }
 const qualityCount = computed(() => (snap.value?.quality?.waiting_scenes ?? 0) + (snap.value?.quality?.rejected_scenes ?? 0));
 </script>
@@ -31,7 +39,7 @@ const qualityCount = computed(() => (snap.value?.quality?.waiting_scenes ?? 0) +
       <BatchJobQueue v-else :snapshot="snap" />
     </section>
     <button v-else-if="snap.counts.total > 0 && !terminalMission(snap.goal.status)" class="link standalone" @click="openAll">查看任务列表 ↗</button>
-    <details v-if="qualityCount > 0" class="quality-entry" @toggle="qualityOpen = ($event.target as HTMLDetailsElement).open"><summary>人工质量验收 · {{ qualityCount }} 景</summary><BatchQualityPanel v-if="qualityOpen" /></details>
+    <details v-if="qualityCount > 0 || qualityOpen" :open="qualityOpen" class="quality-entry" @toggle="qualityOpen = ($event.target as HTMLDetailsElement).open"><summary>人工质量验收 · {{ qualityCount }} 景</summary><BatchQualityPanel v-if="qualityOpen" /></details>
     <BatchResultReport v-if="snap.report.available && snap.goal.status === 'COMPLETED'" />
     <p v-if="batch.followNote" class="notice" role="status">{{ batch.followNote }}</p>
     <p v-if="batch.followError" class="error" role="alert">{{ batch.followError }}</p>

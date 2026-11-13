@@ -9,6 +9,7 @@ export default defineConfig({
     include: [
       'src/lib/__tests__/**/*.test.ts',
       'src/stores/__tests__/**/*.test.ts',
+      'src/components/__tests__/**/*.test.ts',
     ],
     setupFiles: ['src/lib/__tests__/setup.ts'],
     testTimeout: 60000,

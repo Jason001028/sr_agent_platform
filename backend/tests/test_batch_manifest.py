@@ -17,7 +17,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from backend.services import batch_manifest, goal_runtime, goal_worker
+from backend.services import (batch_manifest, goal_runtime, goal_worker,
+                              repair_application)
 from backend.services.store import BatchConflict, Store
 from backend.tests import allowed_roots_env
 
@@ -29,11 +30,15 @@ class BatchManifestTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        (self.root / "work").mkdir()
         self.env = {
             **allowed_roots_env(self.root),
             "SR_SCENE_PATH_TEMPLATE": str(self.root) + "/{name}",
             "SR_AGENT_DB": str(self.root / "test.db"),
             "SR_BATCH_ARTIFACT_DIR": str(self.root / "artifacts"),
+            "SR_EXECUTOR": "slurm",
+            "SR_SLURM_FAKE": "1",
+            "SR_SLURM_WORK_DIR": str(self.root / "work"),
         }
         self.patch = mock.patch.dict(os.environ, self.env)
         self.patch.start()
@@ -73,16 +78,32 @@ class BatchManifestTest(unittest.TestCase):
     def import_text(self, text: str, **kwargs) -> dict:
         return batch_manifest.import_manifest(text=text, **kwargs)
 
+    def confirmed_plan(self, manifest_ref, session_id, *, exclusions=None,
+                       mode="demo"):
+        """Old /api/goals now requires a server-confirmed plan."""
+        plan = repair_application.prepare_repair(
+            self.store, session_id=session_id, manifest_ref=manifest_ref,
+            exclusions=exclusions, mode=mode)
+        if plan["status"] == "READY":
+            repair_application.confirm_repair(
+                self.store, plan["plan_id"], session_id=session_id)
+        return plan
+
     def test_review_strategy_is_frozen_into_created_items_and_rest_cas(self):
         name = self.scene(803)
         app = FastAPI()
         app.state.store = self.store
         app.include_router(goal_runtime.router)
+        sid = self.store.create_session()
         with TestClient(app) as client:
             imported = client.post("/api/goals/batch-imports", json={
                 "text": "", "strategy": "review", "sources": [{"path": str(self.root / (name + "_PAN") / "PAN.tif")}]})
             self.assertEqual(imported.status_code, 200, imported.text)
-            created = client.post("/api/goals", json={"manifest_ref": imported.json()["manifest_ref"], "request_key": "review-rest"})
+            plan = self.confirmed_plan(imported.json()["manifest_ref"], sid)
+            created = client.post(
+                "/api/goals",
+                json={"plan_id": plan["plan_id"], "session_id": sid},
+                headers={"Idempotency-Key": "review-rest"})
             self.assertEqual(created.status_code, 200, created.text)
             gid = created.json()["goal_id"]
             item = self.store.list_goal_items(gid)[0]
@@ -451,25 +472,24 @@ class BatchManifestTest(unittest.TestCase):
             self.assertEqual(len(body["items"]), 2)
             ref = body["manifest_ref"]
 
+            sid = self.store.create_session()
+            plan = self.confirmed_plan(ref, sid)
             created = client.post(
-                "/api/goals", json={"manifest_ref": ref, "mode": "demo"},
+                "/api/goals",
+                json={"plan_id": plan["plan_id"], "manifest_ref": ref,
+                      "mode": "demo", "session_id": sid},
                 headers={"Idempotency-Key": "same"})
             self.assertEqual(created.status_code, 200, created.text)
             goal = created.json()
             self.assertEqual(goal["status"], "QUEUED")
             self.assertEqual(goal["checkpoint"]["workflow"],
                              batch_manifest.WORKFLOW)
-            self.assertEqual(
-                goal["checkpoint"]["batch_content_sha256"],
-                batch_manifest.canonical_hash({
-                    "manifest_ref": ref,
-                    "manifest_sha256": goal["checkpoint"]["manifest_sha256"],
-                    "exclusions": [],
-                    "mode": "demo",
-                    "title": "批量影像修复 · 2 景",
-                }))
+            self.assertEqual(goal["checkpoint"]["repair_plan_id"],
+                             plan["plan_id"])
+            self.assertTrue(goal["checkpoint"]["batch_content_sha256"])
             again = client.post(
-                "/api/goals", json={"manifest_ref": ref, "mode": "demo"},
+                "/api/goals",
+                json={"plan_id": plan["plan_id"], "session_id": sid},
                 headers={"Idempotency-Key": "same"})
             self.assertEqual(again.json()["goal_id"], goal["goal_id"])
             self.assertEqual(len(self.store.list_goals()), 1)
@@ -479,16 +499,51 @@ class BatchManifestTest(unittest.TestCase):
             self.assertEqual(len(items.json()["items"]), 2)
             self.assertEqual(items.json()["workflow"], batch_manifest.WORKFLOW)
 
-            # Reusing the key with another manifest is a 409, not a silent
-            # second batch under the same idempotency identity.
+            # A different confirmed plan is a different task; the old
+            # client-supplied key is no longer the idempotency source.
             other = client.post("/api/goals/batch-imports",
                                 json={"text": self.qc(self.scene(3))}).json()
-            conflict = client.post(
-                "/api/goals", json={"manifest_ref": other["manifest_ref"],
-                                    "mode": "demo"},
+            other_plan = self.confirmed_plan(other["manifest_ref"], sid)
+            second = client.post(
+                "/api/goals",
+                json={"plan_id": other_plan["plan_id"], "session_id": sid},
                 headers={"Idempotency-Key": "same"})
-            self.assertEqual(conflict.status_code, 409)
-            self.assertIn("different batch content", conflict.text)
+            self.assertEqual(second.status_code, 200, second.text)
+            self.assertNotEqual(second.json()["goal_id"], goal["goal_id"])
+            self.assertEqual(len(self.store.list_goals()), 2)
+
+    def test_legacy_goals_cannot_bypass_confirmation_or_production_gate(self):
+        name = self.scene(19)
+        app = FastAPI()
+        app.state.store = self.store
+        app.include_router(goal_runtime.router)
+        sid = self.store.create_session()
+        with TestClient(app) as client:
+            imported = client.post(
+                "/api/goals/batch-imports",
+                json={"text": self.qc(name)}).json()
+            missing = client.post(
+                "/api/goals", json={"manifest_ref": imported["manifest_ref"],
+                                    "session_id": sid},
+                headers={"Idempotency-Key": "legacy"})
+            self.assertEqual(missing.status_code, 400, missing.text)
+            self.assertIn("plan_id", missing.text)
+
+        prod = batch_manifest.import_manifest(
+            text=self.qc(self.scene(20)), mode="production")
+        plan = repair_application.prepare_repair(
+            self.store, session_id=sid, manifest_ref=prod["manifest_ref"],
+            mode="production")
+        self.assertFalse(plan["execution"]["allowed"])
+        repair_application.confirm_repair(
+            self.store, plan["plan_id"], session_id=sid)
+        with TestClient(app) as client:
+            blocked = client.post(
+                "/api/goals",
+                json={"plan_id": plan["plan_id"], "session_id": sid},
+                headers={"Idempotency-Key": "prod"})
+            self.assertEqual(blocked.status_code, 409, blocked.text)
+        self.assertEqual(self.store.list_goals(kinds=["batch"]), [])
 
     def test_api_conflicting_exclusions_return_diagnostics(self):
         name = self.scene(1)
@@ -496,19 +551,26 @@ class BatchManifestTest(unittest.TestCase):
         app = FastAPI()
         app.state.store = self.store
         app.include_router(goal_runtime.router)
+        sid = self.store.create_session()
         with TestClient(app) as client:
             imported = client.post("/api/goals/batch-imports",
                                    json={"text": text}).json()
             self.assertTrue(imported["rejected"])
+            blocked_plan = repair_application.prepare_repair(
+                self.store, session_id=sid,
+                manifest_ref=imported["manifest_ref"], mode="demo")
+            self.assertEqual(blocked_plan["status"], "BLOCKED")
             blocked = client.post(
-                "/api/goals", json={"manifest_ref": imported["manifest_ref"]},
+                "/api/goals",
+                json={"plan_id": blocked_plan["plan_id"], "session_id": sid},
                 headers={"Idempotency-Key": "dup"})
-            self.assertEqual(blocked.status_code, 409)
-            self.assertEqual(blocked.json()["detail"]["diagnostics"][0]["line"], 2)
+            self.assertEqual(blocked.status_code, 409, blocked.text)
             accepted = client.post(
                 "/api/goals",
-                json={"manifest_ref": imported["manifest_ref"],
-                      "exclusions": [{"line": 2, "reason": "重复记录"}]},
+                json={"plan_id": self.confirmed_plan(
+                    imported["manifest_ref"], sid,
+                    exclusions=[{"line": 2, "reason": "重复记录"}])["plan_id"],
+                      "session_id": sid},
                 headers={"Idempotency-Key": "dup"})
             self.assertEqual(accepted.status_code, 200, accepted.text)
             self.assertEqual(len(self.store.list_goal_items(

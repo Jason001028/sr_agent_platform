@@ -2,6 +2,7 @@
 
 from . import batch_repair  # noqa: F401
 from . import fix_bad_lines  # noqa: F401 — importing registers the tool
+from . import repair  # noqa: F401 — importing registers the unified repair tools
 from . import run_sr  # noqa: F401 — importing registers the tool
 from . import search_scenes  # noqa: F401 — importing registers the tool
 from . import sr_job_status  # noqa: F401 — importing registers the tool

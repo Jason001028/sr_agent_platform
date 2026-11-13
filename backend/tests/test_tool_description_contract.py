@@ -48,6 +48,19 @@ SCHEMAS = {
             'properties': {'path': {'type': 'string'}, 'evidence': {'type': 'string'}},
             'required': ['path', 'evidence']}}}, ['items']),
     'query_batch_repair': ({'goal_id': {'type': 'string', 'minLength': 1}}, ['goal_id']),
+    'prepare_repair': ({
+        'scope': {'type': 'string', 'enum': ['current', 'selection', 'workspace', 'draft'], 'default': 'workspace'},
+        'mode': {'type': 'string', 'enum': ['demo', 'production'], 'default': 'demo'},
+        'strategy': {'type': 'string', 'enum': ['automatic', 'review'], 'default': 'automatic'},
+        'detection_method': {'type': 'string', 'enum': ['absdiff', 'ssim', 'smart'], 'default': 'absdiff'},
+        'mask_policy': {'type': 'string', 'enum': ['auto', 'existing'], 'default': 'auto'},
+        'title': {'type': 'string'}}, []),
+    'start_repair': ({'plan_id': {'type': 'string', 'minLength': 1},
+                     'plan_version': {'type': 'integer', 'minimum': 1}}, ['plan_id']),
+    'get_repair_workspace': ({}, []),
+    'list_repair_items': ({'goal_id': {'type': 'string', 'minLength': 1}}, ['goal_id']),
+    'get_repair_item': ({'goal_id': {'type': 'string', 'minLength': 1},
+                         'item_id': {'type': 'string', 'minLength': 1}}, ['goal_id', 'item_id']),
     'search_scenes': ({'query': {'type': 'string'}, 'satellite': {'type': 'string'},
         'sensor': {'type': 'string'},
         'date_from': {'type': 'string'}, 'date_to': {'type': 'string'},
@@ -82,7 +95,12 @@ def test_all_model_contracts_keep_schema_and_handlers(tmp_path):
         expected = {'type': 'object', 'properties': props}
         if required is not None:
             expected['required'] = required
-        if tool.name in {'prepare_batch_repair', 'query_batch_repair', 'get_current_image_info', 'read_tool_result', 'read_skill', 'read_skill_resource'}:
+        if tool.name in {'prepare_batch_repair', 'query_batch_repair',
+                         'prepare_repair', 'start_repair',
+                         'get_repair_workspace', 'list_repair_items',
+                         'get_repair_item', 'get_current_image_info',
+                         'read_tool_result', 'read_skill',
+                         'read_skill_resource'}:
             expected['additionalProperties'] = False
         assert without_descriptions(tool.params_schema) == expected
         assert re.search('[\u4e00-\u9fff]', tool.description)
@@ -102,7 +120,10 @@ def test_all_model_contracts_keep_schema_and_handlers(tmp_path):
 def test_loop_sends_actual_descriptions_after_dynamic_binding_and_filtering(tmp_path, monkeypatch, skills, allowed):
     monkeypatch.setenv('SR_SKILL_ROOTS', str(tmp_path))
     catalog = catalog_at(tmp_path) if skills else SkillCatalog([])
-    expected = {'get_current_image_info', 'read_tool_result', 'prepare_batch_repair', 'query_batch_repair'}
+    expected = {'get_current_image_info', 'read_tool_result',
+                'prepare_batch_repair', 'query_batch_repair',
+                'prepare_repair', 'start_repair', 'get_repair_workspace',
+                'list_repair_items', 'get_repair_item'}
     expected |= {t.name for t in build_builtin_registry().list()} if allowed is None else allowed
     if skills:
         expected |= {'read_skill', 'read_skill_resource'}

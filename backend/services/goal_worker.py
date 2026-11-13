@@ -56,9 +56,15 @@ def _execute_tool(state, goal, tc, invoke):
     lease = current_lease.get()
     lease.check(store)
     args = agent_loop._parse_args(tc["arguments"])
-    readonly = tc["name"] in {"search_scenes", "sr_job_status", "read_tool_result"} or (
-        tc["name"] == "fix_bad_lines" and not args.get("output_path")
-    )
+    # Planning/read tools are replay-safe.  ``start_repair`` is deliberately
+    # absent: it creates a Goal and must go through the reconcile-before-replay
+    # path if a round crashes mid-call.
+    readonly = tc["name"] in {
+        "search_scenes", "sr_job_status", "read_tool_result",
+        "prepare_batch_repair", "query_batch_repair",
+        "prepare_repair", "get_repair_workspace", "list_repair_items",
+        "get_repair_item",
+    } or (tc["name"] == "fix_bad_lines" and not args.get("output_path"))
     # Unknown extension tools are conservatively non-replayable.
     key = _intent_key(store, goal["session_id"], tc["id"])
     old = store.get_tool_intent(goal["goal_id"], key)

@@ -1,6 +1,24 @@
 import { useBatchGoalStore } from '../stores/batchGoal';
 import { useBatchDraftStore } from '../stores/batchDraft';
 
+/** One-click handoff from the Viewer tool panel into the Agent repair flow.
+ *
+ *  It only prepares work: the Agent must call ``prepare_repair`` and let the
+ *  real user confirm the plan card.  ``start_repair`` remains server-gated by
+ *  that confirmation, so this prompt cannot auto-approve anything. */
+export const AGENT_REPAIR_PROMPT =
+  '请对当前 Viewer 工作区发起智能修复：先调用 prepare_repair'
+  + '（scope=workspace；当前工作区为空时改用 current）准备修复计划并展示计划卡，'
+  + '不要直接提交 SR。请说明目标景数、检测方法与掩码策略，'
+  + '我会在计划卡上确认后启动。';
+
+export function requestAgentRepair(): void {
+  window.dispatchEvent(new CustomEvent('batch-agent-handoff', { detail: {
+    text: AGENT_REPAIR_PROMPT,
+    autoSend: true,
+  } }));
+}
+
 /** Transfer facts into the existing Agent composer. Sending remains explicit. */
 export function handoffBatch(kind: 'draft' | 'report'): void {
   const batch = useBatchGoalStore();

@@ -34,6 +34,8 @@ import ThinkingIndicator from './ThinkingIndicator.vue';
 import ChatAttachTray from './ChatAttachTray.vue';
 import GoalClarifications from './GoalClarifications.vue';
 import AgentBatchReceipt from './AgentBatchReceipt.vue';
+import AgentRepairPlanCard from './AgentRepairPlanCard.vue';
+import { repairPlanId } from '../lib/repairPlan';
 import ChatImagePicker from './ChatImagePicker.vue';
 import ChatBubbleImages from './ChatBubbleImages.vue';
 import AppIcon from './AppIcon.vue';
@@ -54,10 +56,15 @@ const draft = ref('');
 const batchContext = ref(false);
 const composerEnabled = computed(() => enabled.value || batchContext.value);
 function receiveBatch(event: Event) {
-  const text = (event as CustomEvent<{ text?: string }>).detail?.text;
+  const detail = (event as CustomEvent<{ text?: string; autoSend?: boolean }>).detail;
+  const text = detail?.text;
   if (!text) return;
   batchContext.value = true;
   draft.value = draft.value.trim() ? `${draft.value}\n\n${text}` : text;
+  // The [Agent修复] entry asks for one real send, not just a prefilled draft.
+  // Recheck canSend on the next tick; if the Agent is busy or the image is
+  // still loading, the prompt stays in the composer for the user to send.
+  if (detail?.autoSend) void nextTick(() => { if (canSend()) void onSend(); });
 }
 onMounted(() => window.addEventListener('batch-agent-handoff', receiveBatch));
 onBeforeUnmount(() => window.removeEventListener('batch-agent-handoff', receiveBatch));
@@ -208,6 +215,21 @@ function toolResultsAt(index: number, name: string): ChatMsg[] {
   const out: ChatMsg[] = [];
   for (let j = index + 1; j < chat.messages.length && chat.messages[j].role === 'tool'; j++) if (chat.messages[j].toolName === name) out.push(chat.messages[j]);
   return out;
+}
+
+/** 同一计划可能因模型重试出现多条 prepare 结果；只保留最后一条的计划卡。 */
+const latestRepairPlan = computed(() => {
+  const latest = new Map<string, number>();
+  chat.messages.forEach((message, index) => {
+    if (message.role !== 'tool') return;
+    const id = repairPlanId(message.data);
+    if (id) latest.set(id, index);
+  });
+  return latest;
+});
+function isLatestRepairPlan(message: ChatMsg, index: number): boolean {
+  const id = repairPlanId(message.data);
+  return !!id && latestRepairPlan.value.get(id) === index;
 }
 
 /** 队尾仍在流式接收的 assistant 消息（思考/回答/工具声明阶段指示用）。 */
@@ -408,6 +430,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
           <!-- tool 结果：单行摘要 pill -->
           <template v-else>
             <AgentBatchReceipt :data="m.data" />
+            <AgentRepairPlanCard v-if="isLatestRepairPlan(m, i)" :data="m.data" />
             <div v-if="m.toolName!=='present_spatial_annotations' && !(chat.messages[i - 1]?.role === 'assistant' && chat.messages[i - 1]?.toolCalls?.some(t => t.name === m.toolName))" class="tool-trace" :class="{ fail: m.ok === false }">
               <AppIcon class="tool-ic" :class="{ fail: m.ok === false }" :name="toolIconName(m.toolName ?? '')" :size="16" :label="m.toolName ?? '工具'" />
               <span class="tool-name">{{ m.toolName ?? '工具' }}</span>

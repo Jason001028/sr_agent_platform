@@ -47,69 +47,58 @@ def _batch_item_checkpoint(item: dict) -> dict:
 
 
 def _create_batch_goal(request: Request, body: dict):
-    key = request.headers.get("Idempotency-Key") or body.get("request_key")
-    if not key:
-        raise HTTPException(400, "Idempotency-Key is required for a batch Goal")
-    ref = str(body.get("manifest_ref") or "")
+    """Legacy batch create, now strictly a confirmed-plan start.
+
+    There is no path from a frozen manifest straight to a running Goal: the
+    caller must name a server-confirmed ``plan_id``.  This closes the old
+    ``/api/goals`` bypass of both user confirmation and the execution gate.
+    """
+    from backend.services import repair_application
+
+    # The confirmed plan carries the durable request key; a separate
+    # client-supplied Idempotency-Key is no longer the idempotency source.
+    plan_id = body.get("plan_id") or body.get("repair_plan_id")
+    if not isinstance(plan_id, str) or not plan_id.strip():
+        raise HTTPException(
+            400, "batch Goal requires plan_id from a confirmed repair plan")
+    store = request.app.state.store
+    session_id = body.get("session_id")
+    if (not isinstance(session_id, str) or not session_id
+            or store.get_session(session_id) is None):
+        raise HTTPException(403, "unknown session")
+    plan = store.get_repair_plan(plan_id.strip())
+    if plan is None:
+        raise HTTPException(404, "repair plan not found")
+    ref = body.get("manifest_ref")
+    if ref and str(ref) != plan["manifest_ref"]:
+        raise HTTPException(409, "manifest_ref does not match the confirmed plan")
+    mode = body.get("mode")
+    if mode and str(mode).strip().lower() != plan.get("mode"):
+        raise HTTPException(409, "mode does not match the confirmed plan")
+    if body.get("exclusions") not in (None, [], plan.get("exclusions")):
+        raise HTTPException(409, "exclusions do not match the confirmed plan")
     try:
-        manifest = batch_manifest.load_manifest(ref)
-        exclusions = batch_manifest.normalize_exclusions(body.get("exclusions"))
-        planned = batch_manifest.plan_goal_items(manifest, exclusions)
-    except batch_manifest.ManifestConflict as exc:
-        raise HTTPException(409, {
-            "message": str(exc), "diagnostics": exc.diagnostics}) from exc
-    except batch_manifest.ManifestError as exc:
+        result = repair_application.start_repair(
+            store, plan_id.strip(), session_id=session_id,
+            workspace=body.get("workspace"),
+            workspace_version=body.get("workspace_version"),
+            plan_version=body.get("plan_version"))
+        # Legacy callers expect the persisted Goal row (with checkpoint), not
+        # the compact projection returned by the Agent tool.
+        return store.get_goal(result["goal"]["goal_id"]) or result["goal"]
+    except KeyError as exc:
+        raise HTTPException(404, "repair plan not found") from exc
+    except repair_application.RepairPlanConflict as exc:
+        raise HTTPException(409, {"message": str(exc),
+                                  "reason": exc.reason}) from exc
+    except repair_application.RepairBlocked as exc:
+        raise HTTPException(409, {"message": str(exc),
+                                  "reason": exc.reason}) from exc
+    except repair_application.RepairError as exc:
         raise HTTPException(400, str(exc)) from exc
-    # The execution mode is part of the frozen import. Accepting a different
-    # mode here would let a demo manifest be relabelled as production (or the
-    # reverse) without re-freezing.
-    mode = str(manifest.get("mode") or "demo")
-    requested_mode = str(body.get("mode") or mode).strip().lower()
-    if requested_mode != mode:
-        raise HTTPException(400, "mode does not match the frozen manifest")
-    title = str(body.get("title") or "").strip()
-    if not title:
-        title = "批量影像修复 · %d 景" % len(planned)
-    if len(title) > 200:
-        raise HTTPException(400, "title is too long (max 200 characters)")
-    content_sha256 = batch_manifest.canonical_hash({
-        "manifest_ref": ref,
-        "manifest_sha256": manifest.get("manifest_sha256"),
-        "exclusions": exclusions,
-        "mode": mode,
-        "title": title,
-    })
-    checkpoint = {
-        "workflow": batch_manifest.WORKFLOW,
-        "manifest_ref": ref,
-        "manifest_sha256": manifest.get("manifest_sha256"),
-        "mode": mode,
-        "exclusions": exclusions,
-        "batch_control": {"pause_requested": False, "cancel_requested": False},
-        # Independent optimistic-concurrency counter for user controls.  It is
-        # deliberately not ``goal.version``: the scheduler bumps that on every
-        # lease claim, so a one-second batch tick would make Pause/Cancel
-        # permanently stale.  Only ``batch_control`` increments this.
-        "control_revision": 0,
-        "producer_status": "DISPATCHING",
-        "report_ref": None,
-    }
-    items = [{
-        "item_id": item["item_id"],
-        "ordinal": item["ordinal"],
-        "name": item["name"],
-        "status": item["status"],
-        "checkpoint": {**_batch_item_checkpoint(item),
-                       "review_required": manifest["config"].get("strategy") == "review"},
-        "resource_key": (item.get("target_image") or {}).get("image_key"),
-        "next_wake_at": time.time() if item["status"] == "PENDING" else None,
-    } for item in planned]
-    try:
-        return request.app.state.store.create_batch_goal(
-            title=title, session_id=body.get("session_id"), request_key=key,
-            content_sha256=content_sha256, checkpoint=checkpoint, items=items,
-            max_model_calls=0)
     except BatchConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (ValueError, OSError) as exc:
         raise HTTPException(409, str(exc)) from exc
 
 
@@ -121,7 +110,9 @@ async def create_goal(request: Request):
 
 def _create_goal_sync(request, body):
     if not isinstance(body, dict): raise HTTPException(400,"body must be an object")
-    if body.get("workflow") == batch_manifest.WORKFLOW or body.get("manifest_ref"):
+    if (body.get("workflow") == batch_manifest.WORKFLOW
+            or body.get("manifest_ref")
+            or body.get("plan_id") or body.get("repair_plan_id")):
         return _create_batch_goal(request, body)
     checkpoint=body.get("checkpoint") or {}
     if not isinstance(checkpoint, dict): raise HTTPException(400,"checkpoint must be an object")

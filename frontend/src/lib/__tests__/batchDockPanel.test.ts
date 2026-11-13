@@ -20,11 +20,13 @@ vi.mock('../../components/BatchRepairDraft.vue', async () => {
 });
 import BatchTaskDock from '../../components/BatchTaskDock.vue';
 import { missionFixture } from './batchMissionFixture';
-import { batchDockOpen, openBatchSelection } from '../batchDock';
+import { batchDockOpen, batchQualityRequest, openBatchSelection,
+         requestQualityReview } from '../batchDock';
 let app: App, root: HTMLDivElement;
 function snapshot() { return missionFixture(); }
 beforeEach(() => {
-  vi.useFakeTimers(); vi.clearAllMocks(); localStorage.clear(); batchDockOpen.value = false;
+  vi.useFakeTimers(); vi.clearAllMocks(); localStorage.clear();
+  batchDockOpen.value = false; batchQualityRequest.value = null;
   state.batch = reactive({ goalId: null, snapshot: null, syncState: 'live', availableGoals: [], setFollow: vi.fn(), selectGoal: vi.fn(), refreshSnapshot: vi.fn(), associate: vi.fn(), discover: vi.fn(), detach: vi.fn() });
   root = document.createElement('div'); document.body.append(root);
   root.scrollIntoView = vi.fn();
@@ -57,6 +59,17 @@ it('starts monitoring without a duplicate details gate and keeps it mounted when
   state.batch.snapshot.goal = { ...state.batch.snapshot.goal, status: 'COMPLETED' }; await nextTick();
   expect(state.scan).toHaveBeenCalledWith(true);
   expect(root.querySelector('[data-e2e=batch-tracks]')).toBeNull();
+});
+it('publishes one direct review landing per click without a second connection', async () => {
+  requestQualityReview('i1');
+  expect(batchDockOpen.value).toBe(true);
+  expect(batchQualityRequest.value).toMatchObject({ itemId: 'i1' });
+  const first = batchQualityRequest.value!.token;
+  requestQualityReview('i2', 'r2');
+  expect(batchQualityRequest.value!.token).toBe(first + 1);
+  expect(batchQualityRequest.value).toMatchObject({ itemId: 'i2', regionId: 'r2' });
+  expect(state.batch.selectGoal).not.toHaveBeenCalled();
+  expect(state.batch.refreshSnapshot).not.toHaveBeenCalled();
 });
 it('settings affect only presentation and stay independent of backend control', async () => {
   state.batch.snapshot = snapshot(); state.batch.goalId = 'g'; await nextTick();

@@ -98,7 +98,45 @@ class BatchControlConflict(RuntimeError):
         self.goal = goal
 
 
+class RepairPlanConflict(ValueError):
+    """A repair plan cannot be confirmed/started in its current state.
+
+    Subclasses ``ValueError`` so the tool/application boundary treats it as a
+    client-visible conflict rather than an internal failure.
+    """
+
+    def __init__(self, message: str, *, reason: str = "conflict"):
+        super().__init__(message)
+        self.reason = reason
+
+
 BATCH_WORKFLOW = "batch_pan_repair_v1"
+
+
+def _canonical_json_hash(value) -> str:
+    """Stable digest used only to bind a confirmation to its target set."""
+    import hashlib
+    body = json.dumps(value, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), default=str)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _repair_plan_content_key(plan: dict) -> str:
+    """Content identity for deciding whether re-preparing is a new revision."""
+    mask = plan.get("mask") or {}
+    return _canonical_json_hash({
+        "manifest_ref": plan.get("manifest_ref"),
+        "manifest_sha256": plan.get("manifest_sha256"),
+        "targets": plan.get("targets") or {},
+        "exclusions": plan.get("exclusions") or [],
+        "mode": plan.get("mode"),
+        "title": plan.get("title"),
+        "strategy_policy": plan.get("strategy_policy"),
+        "detection_method": plan.get("detection_method"),
+        "mask_policy": plan.get("mask_policy"),
+        "mask_revision": mask.get("revision"),
+        "mask_path": mask.get("path"),
+    })
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tool_result_refs (
@@ -382,6 +420,51 @@ CREATE TABLE IF NOT EXISTS batch_quality_events (
     review_id TEXT NOT NULL, request_key TEXT NOT NULL, payload TEXT NOT NULL,
     created_at REAL NOT NULL, PRIMARY KEY(review_id,request_key)
 );
+
+-- Repair plan / confirmation only.  Execution truth stays in agent_goals +
+-- agent_goal_steps + sr_tasks; this table never carries task progress.
+CREATE TABLE IF NOT EXISTS repair_plans (
+    plan_id TEXT PRIMARY KEY,
+    version INTEGER NOT NULL DEFAULT 1,
+    session_id TEXT,
+    scope TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    detection_method TEXT NOT NULL,
+    mask_policy TEXT NOT NULL,
+    manifest_ref TEXT NOT NULL,
+    manifest_sha256 TEXT NOT NULL,
+    targets_json TEXT NOT NULL,
+    plan_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'READY',
+    created_by TEXT NOT NULL DEFAULT 'agent',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    expires_at REAL NOT NULL,
+    confirmed_at REAL,
+    confirmed_by TEXT,
+    confirmation_json TEXT,
+    confirmation_expires_at REAL,
+    goal_id TEXT,
+    workspace_version INTEGER,
+    request_key TEXT NOT NULL UNIQUE,
+    stale_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_repair_plans_session
+    ON repair_plans(session_id, updated_at);
+
+-- Cross-Goal / cross-entry execution lease for one physical PAN.  The primary
+-- key makes the claim atomic: two plans can never both own the same source
+-- image.  Released when the owning Item settles.
+CREATE TABLE IF NOT EXISTS batch_resource_locks (
+    resource_key TEXT PRIMARY KEY,
+    goal_id      TEXT NOT NULL,
+    item_id      TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'ACTIVE',
+    created_at   REAL NOT NULL,
+    updated_at   REAL NOT NULL,
+    settled_at   REAL
+);
 """
 
 #: sr_tasks 里发布后新增的列。`CREATE TABLE IF NOT EXISTS` 对**已存在**的表一个字
@@ -477,6 +560,10 @@ def _ensure_columns(db: sqlite3.Connection) -> None:
         ))
         _backfill_batch_goal_kinds(db)
         _add_missing_columns(db, "agent_goal_steps", _STEP_ADDED_COLUMNS)
+        # The resource-lock table was introduced in PR 3.5; an environment that
+        # ran that build has the table without settled_at.
+        _add_missing_columns(db, "batch_resource_locks",
+                             (("settled_at", "REAL"),))
         # Created here, not in _SCHEMA: on an old DB executescript() would hit
         # the index before _ensure_columns() had added item_id.
         db.execute("CREATE INDEX IF NOT EXISTS idx_agent_goal_steps_item "
@@ -1773,6 +1860,57 @@ class Store:
             raise
         return result
 
+    @staticmethod
+    def _current_review_filter(review_ids):
+        # ``None`` means "no selection" (legacy whole-Goal count); an explicit
+        # empty list means no Item currently binds a review, so nothing counts.
+        if review_ids is None:
+            return "", []
+        ids = [str(value) for value in review_ids if value]
+        if not ids:
+            return " AND 0", []
+        return (" AND review_id IN (" + ",".join("?" for _ in ids) + ")", ids)
+
+    def batch_quality_review_counts(self, goal_id: str,
+                                    review_ids=None) -> dict:
+        """Whole-scene human quality decisions for one Batch Goal.
+
+        ``review_ids`` limits the count to the reviews currently bound to the
+        Goal's Items.  A re-run creates a new review; the superseded row must
+        not keep contributing to the visible acceptance counts.
+        """
+        clause, args = self._current_review_filter(review_ids)
+        rows = self._db().execute(
+            "SELECT scene_decision,COUNT(*) FROM batch_quality_reviews "
+            "WHERE goal_id=?" + clause + " GROUP BY scene_decision",
+            (goal_id, *args)).fetchall()
+        counts = {"approved": 0, "rejected": 0, "pending": 0}
+        for decision, count in rows:
+            counts[str(decision)] = int(count)
+        return counts
+
+    def batch_quality_region_counts(self, goal_id: str,
+                                    review_ids=None) -> dict:
+        """Region-level decisions for the reviews currently bound to Items."""
+        clause, args = self._current_review_filter(review_ids)
+        rows = self._db().execute(
+            "SELECT regions FROM batch_quality_reviews WHERE goal_id=?"
+            + clause, (goal_id, *args)).fetchall()
+        counts = {"approved": 0, "rejected": 0, "pending": 0, "total": 0}
+        for (raw,) in rows:
+            try:
+                regions = json.loads(raw or "[]")
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(regions, list):
+                continue
+            for region in regions:
+                decision = (region or {}).get("decision")
+                key = decision if decision in ("approved", "rejected") else "pending"
+                counts[key] += 1
+                counts["total"] += 1
+        return counts
+
     def review_batch_item(self, goal_id, item_id, expected_version, decision):
         """Approve the exact detected mask, never a running or historical item."""
         with self.worker_transaction() as db:
@@ -1903,6 +2041,352 @@ class Store:
             db.rollback()
             raise
         return {"goal": self.get_goal(goal_id), "changed": True}
+
+    # ---- repair plans / confirmation ------------------------------------
+
+    _REPAIR_PLAN_COLS = (
+        "plan_id, version, session_id, scope, mode, strategy, "
+        "detection_method, mask_policy, manifest_ref, manifest_sha256, "
+        "targets_json, plan_json, status, created_by, created_at, updated_at, "
+        "expires_at, confirmed_at, confirmed_by, confirmation_json, "
+        "confirmation_expires_at, goal_id, workspace_version, request_key, "
+        "stale_reason")
+
+    def _repair_plan_row(self, row):
+        if row is None:
+            return None
+        plan = json.loads(row[11] or "{}")
+        plan.update({
+            "plan_id": row[0], "version": row[1], "session_id": row[2],
+            "scope": row[3], "mode": row[4],
+            "manifest_ref": row[8], "manifest_sha256": row[9],
+            "status": row[12], "created_by": row[13],
+            "created_at": row[14], "updated_at": row[15],
+            "expires_at": row[16], "confirmed_at": row[17],
+            "confirmed_by": row[18],
+            "confirmation": json.loads(row[19]) if row[19] else None,
+            "confirmation_expires_at": row[20], "goal_id": row[21],
+            "workspace_version": row[22], "request_key": row[23],
+            "stale_reason": row[24],
+        })
+        # The columns are the small queryable projection; plan_json keeps the
+        # richer contract (strategy object etc.).  Do not let the string column
+        # overwrite the dict the Agent/UI reads.
+        plan.setdefault("strategy", row[5])
+        plan.setdefault("detection_method", row[6])
+        plan.setdefault("mask_policy", row[7])
+        plan["strategy_policy"] = row[5]
+        try:
+            plan["targets"] = json.loads(row[10] or "{}")
+        except (TypeError, ValueError):
+            pass
+        return plan
+
+    def get_repair_plan(self, plan_id: str):
+        return self._repair_plan_row(self._db().execute(
+            f"SELECT {self._REPAIR_PLAN_COLS} FROM repair_plans WHERE plan_id=?",
+            (plan_id,)).fetchone())
+
+    def list_repair_plans(self, *, session_id: str | None = None,
+                          limit: int = 20) -> list[dict]:
+        q = f"SELECT {self._REPAIR_PLAN_COLS} FROM repair_plans"
+        args = []
+        if session_id is not None:
+            q += " WHERE session_id=?"
+            args.append(session_id)
+        q += " ORDER BY updated_at DESC LIMIT ?"
+        args.append(max(1, min(int(limit), 100)))
+        return [self._repair_plan_row(row) for row in
+                self._db().execute(q, args).fetchall()]
+
+    def upsert_repair_plan(self, plan: dict) -> dict:
+        """Persist a prepared plan; re-preparing the same binding is idempotent.
+
+        An already confirmed, unexpired plan is returned unchanged: a second
+        ``prepare`` must not silently drop the user's confirmation.  A started
+        plan is never rewritten.
+        """
+        plan_id = str(plan.get("plan_id") or "")
+        if not plan_id:
+            raise ValueError("plan_id is required")
+        now = time.time()
+        with self.worker_transaction() as db:
+            old = self.get_repair_plan(plan_id)
+            if old is not None:
+                if old["status"] == "STARTED":
+                    return old
+                if (old["status"] == "CONFIRMED"
+                        and old.get("confirmation_expires_at")
+                        and float(old["confirmation_expires_at"]) > now):
+                    return old
+                if (old["status"] == "READY"
+                        and float(old.get("expires_at") or 0) > now
+                        and _repair_plan_content_key(old)
+                        == _repair_plan_content_key(plan)):
+                    # Repeating the same prepare is not a new revision; this
+                    # keeps a plan card and the Agent tool result stable.
+                    return old
+            # Re-preparing the same plan binding is a new plan revision: the
+            # old confirmation must not survive a refresh.  Content changes
+            # normally produce a new plan_id; a matching id therefore only
+            # reaches here after expiry/staleness or an explicit re-prepare.
+            version = (int(old["version"] or 1) + 1 if old is not None
+                       else int(plan.get("version") or 1))
+            plan = {**plan, "version": version}
+            session = plan.get("session_id")
+            scope = plan.get("scope") or "batch"
+            mode = plan.get("mode") or "demo"
+            strategy_value = plan.get("strategy_policy")
+            if not isinstance(strategy_value, str):
+                raw_strategy = plan.get("strategy")
+                strategy_value = (raw_strategy if isinstance(raw_strategy, str)
+                                  else "automatic")
+            strategy = strategy_value
+            detection = plan.get("detection_method") or "absdiff"
+            mask_policy = plan.get("mask_policy") or "auto"
+            manifest_ref = plan.get("manifest_ref") or ""
+            manifest_sha = plan.get("manifest_sha256") or ""
+            targets_json = json.dumps(plan.get("targets") or {},
+                                      ensure_ascii=False)
+            plan_json = json.dumps(plan, ensure_ascii=False, default=str)
+            created_by = plan.get("created_by") or "agent"
+            expires = float(plan.get("expires_at") or (now + 3600))
+            workspace_version = (plan.get("workspace") or {}).get("version")
+            request_key = plan.get("request_key") or ("repair:" + plan_id)
+            if old is None:
+                columns = (
+                    "version", "session_id", "scope", "mode", "strategy",
+                    "detection_method", "mask_policy", "manifest_ref",
+                    "manifest_sha256", "targets_json", "plan_json", "status",
+                    "created_by", "created_at", "updated_at", "expires_at",
+                    "confirmed_at", "confirmed_by", "confirmation_json",
+                    "confirmation_expires_at", "goal_id", "workspace_version",
+                    "request_key", "stale_reason", "plan_id")
+                db.execute(
+                    "INSERT INTO repair_plans ("
+                    + ", ".join(columns) + ") VALUES ("
+                    + ", ".join("?" for _ in columns) + ")",
+                    (version, session, scope, mode, strategy, detection,
+                     mask_policy, manifest_ref, manifest_sha, targets_json,
+                     plan_json, "READY", created_by, now, now, expires,
+                     None, None, None, None, None, workspace_version,
+                     request_key, None, plan_id))
+            else:
+                db.execute(
+                    "UPDATE repair_plans SET version=?, session_id=?, scope=?, "
+                    "mode=?, strategy=?, detection_method=?, mask_policy=?, "
+                    "manifest_ref=?, manifest_sha256=?, targets_json=?, "
+                    "plan_json=?, status=?, created_by=?, updated_at=?, "
+                    "expires_at=?, confirmed_at=NULL, confirmed_by=NULL, "
+                    "confirmation_json=NULL, confirmation_expires_at=NULL, "
+                    "goal_id=NULL, workspace_version=?, stale_reason=NULL "
+                    "WHERE plan_id=?",
+                    (version, session, scope, mode, strategy, detection,
+                     mask_policy, manifest_ref, manifest_sha, targets_json,
+                     plan_json, "READY", created_by, now, expires,
+                     workspace_version, plan_id))
+        return self.get_repair_plan(plan_id)
+
+    def confirm_repair_plan(self, plan_id: str, *, session_id: str | None,
+                            confirmed_by: str | None = None,
+                            confirm_ttl_sec: float = 900.0) -> dict:
+        """Record a real user confirmation bound to this plan/session."""
+        now = time.time()
+        with self.worker_transaction() as db:
+            plan = self.get_repair_plan(plan_id)
+            if plan is None:
+                raise KeyError("repair plan not found")
+            if plan["status"] == "STARTED":
+                return plan
+            if plan["status"] == "SUPERSEDED":
+                raise RepairPlanConflict(
+                    "旧计划已失效，请重新准备", reason="stale_plan")
+            if plan["status"] == "BLOCKED":
+                raise RepairPlanConflict(
+                    "计划存在阻断项，不能确认", reason="plan_blocked")
+            if float(plan.get("expires_at") or 0) <= now:
+                db.execute("UPDATE repair_plans SET status='EXPIRED',"
+                           "updated_at=?,stale_reason=? WHERE plan_id=?",
+                           (now, "expired", plan_id))
+                raise RepairPlanConflict(
+                    "计划已过期，请重新准备", reason="expired")
+            if (plan.get("session_id") is not None
+                    and plan["session_id"] != session_id):
+                raise RepairPlanConflict(
+                    "计划属于另一个会话，不能在这里确认",
+                    reason="session_mismatch")
+            confirmation = {
+                "plan_id": plan_id,
+                "plan_version": int(plan.get("version") or 1),
+                "session_id": session_id,
+                "targets_hash": _canonical_json_hash(plan.get("targets") or {}),
+                "manifest_ref": plan.get("manifest_ref"),
+                "manifest_sha256": plan.get("manifest_sha256"),
+                "exclusions": plan.get("exclusions") or [],
+                "mode": plan.get("mode"),
+                "strategy": plan.get("strategy"),
+                "mask_policy": plan.get("mask_policy"),
+                "confirmed_at": now,
+            }
+            confirmation_expires = min(
+                float(plan.get("expires_at") or (now + confirm_ttl_sec)),
+                now + max(60.0, float(confirm_ttl_sec)))
+            db.execute(
+                "UPDATE repair_plans SET status='CONFIRMED', confirmed_at=?, "
+                "confirmed_by=?, confirmation_json=?, "
+                "confirmation_expires_at=?, updated_at=? WHERE plan_id=?",
+                (now,
+                 confirmed_by or (f"user:{session_id}" if session_id else "user"),
+                 json.dumps(confirmation, ensure_ascii=False),
+                 confirmation_expires, now, plan_id))
+        return self.get_repair_plan(plan_id)
+
+    def bind_repair_plan_goal(self, plan_id: str, goal_id: str) -> dict:
+        """Attach the created/reused Goal.  A second Goal is never recorded."""
+        now = time.time()
+        with self.worker_transaction() as db:
+            plan = self.get_repair_plan(plan_id)
+            if plan is None:
+                raise KeyError("repair plan not found")
+            if plan.get("goal_id") and plan["goal_id"] != goal_id:
+                raise RepairPlanConflict(
+                    "计划已经关联另一个任务", reason="goal_conflict")
+            db.execute(
+                "UPDATE repair_plans SET status='STARTED', goal_id=?, "
+                "updated_at=?, stale_reason=NULL WHERE plan_id=?",
+                (goal_id, now, plan_id))
+        return self.get_repair_plan(plan_id)
+
+    def update_repair_plan_status(self, plan_id: str, status: str,
+                                  reason: str | None = None) -> dict | None:
+        with self.worker_transaction() as db:
+            db.execute(
+                "UPDATE repair_plans SET status=?, stale_reason=?, updated_at=? "
+                "WHERE plan_id=? AND status<>'STARTED'",
+                (status, reason, time.time(), plan_id))
+        return self.get_repair_plan(plan_id)
+
+    # ---- cross-plan physical resource leases ----------------------------
+
+    def claim_batch_resource(self, goal_id: str, item_id: str,
+                             resource_key: str | None) -> bool:
+        """Atomically claim one PAN for this Goal Item.
+
+        States:
+        * ``ACTIVE``   another executing plan owns the PAN -> refuse;
+        * ``SETTLED``  the owner finished successfully.  A *newer* confirmed
+          plan may take over (legitimate re-repair), but a concurrent plan
+          created before settlement may not;
+        * ``RELEASED`` the owner never left a successful external effect ->
+          anyone may take over.
+
+        The owner Goal/Item rows are read in the same transaction, so a crashed
+        owner (missing rows) and a cancelled/blocked pre-submit owner are
+        handled without a second lock manager.
+        """
+        if not resource_key:
+            return False
+        now = time.time()
+        with self.worker_transaction() as db:
+            row = db.execute(
+                "SELECT goal_id,item_id,status,settled_at "
+                "FROM batch_resource_locks WHERE resource_key=?",
+                (resource_key,)).fetchone()
+            new_goal = self.get_goal(goal_id)
+            new_created = float((new_goal or {}).get("created_at") or now)
+            if row is None:
+                db.execute(
+                    "INSERT INTO batch_resource_locks"
+                    "(resource_key,goal_id,item_id,status,created_at,"
+                    "updated_at,settled_at) VALUES (?,?,?,'ACTIVE',?,?,NULL)",
+                    (resource_key, goal_id, item_id, now, now))
+                return True
+
+            owner_goal_id, owner_item_id, status, settled_at = row
+            status = "ACTIVE" if status in ("ACTIVE", "RESERVED") else status
+
+            def takeover():
+                db.execute(
+                    "UPDATE batch_resource_locks SET goal_id=?,item_id=?,"
+                    "status='ACTIVE',settled_at=NULL,updated_at=? "
+                    "WHERE resource_key=?",
+                    (goal_id, item_id, now, resource_key))
+                return True
+
+            if owner_goal_id == goal_id and owner_item_id == item_id:
+                if status == "SETTLED":
+                    return False
+                db.execute(
+                    "UPDATE batch_resource_locks SET status='ACTIVE',"
+                    "settled_at=NULL,updated_at=? WHERE resource_key=?",
+                    (now, resource_key))
+                return True
+
+            owner_goal = self.get_goal(owner_goal_id)
+            owner_item = (self.get_goal_item(owner_goal_id, owner_item_id)
+                          if owner_goal is not None else None)
+            if owner_goal is None or owner_item is None:
+                return takeover()
+            if status == "RELEASED":
+                return takeover()
+
+            item_status = owner_item.get("status")
+            if status == "ACTIVE":
+                if owner_goal.get("status") not in {
+                        "COMPLETED", "FAILED", "CANCELLED", "BLOCKED"}:
+                    return False
+                if item_status in {"SUCCEEDED", "NO_ISSUE"}:
+                    # Use the Item's successful transition time, not "now":
+                    # a plan created after the repair finished is legitimate,
+                    # while the concurrent plan created earlier is not.
+                    settled_at = (settled_at
+                                  or float(owner_item.get("updated_at") or now))
+                    db.execute(
+                        "UPDATE batch_resource_locks SET status='SETTLED',"
+                        "settled_at=COALESCE(settled_at,?),updated_at=? "
+                        "WHERE resource_key=?", (settled_at, now, resource_key))
+                    status = "SETTLED"
+                elif (item_status in {"FAILED", "SKIPPED", "MASK_READY",
+                                      "PENDING", "RETRY_WAIT"}
+                      or (item_status == "BLOCKED"
+                          and not owner_item.get("capacity_reserved"))):
+                    db.execute(
+                        "UPDATE batch_resource_locks SET status='RELEASED',"
+                        "settled_at=NULL,updated_at=? WHERE resource_key=?",
+                        (now, resource_key))
+                    return takeover()
+                else:
+                    # SUBMITTING / WAITING_SR / VERIFYING / BLOCKED-with-slot:
+                    # the external outcome is not safely known.
+                    return False
+            if status == "SETTLED":
+                if item_status not in {"SUCCEEDED", "NO_ISSUE"}:
+                    return False
+                if owner_goal.get("status") not in {
+                        "COMPLETED", "FAILED", "CANCELLED", "BLOCKED"}:
+                    return False
+                if settled_at is None:
+                    settled_at = now
+                    db.execute(
+                        "UPDATE batch_resource_locks SET settled_at=? "
+                        "WHERE resource_key=?", (now, resource_key))
+                # A plan created before the previous repair settled was already
+                # in flight alongside it; it must not sneak in afterwards.
+                if new_created <= float(settled_at):
+                    return False
+                return takeover()
+            return False
+
+    def release_batch_resource(self, goal_id: str, item_id: str,
+                               resource_key: str | None) -> None:
+        if not resource_key:
+            return
+        with self.worker_transaction() as db:
+            db.execute(
+                "UPDATE batch_resource_locks SET status='RELEASED',"
+                "settled_at=NULL,updated_at=? WHERE resource_key=? "
+                "AND goal_id=? AND item_id=?",
+                (time.time(), resource_key, goal_id, item_id))
 
     def transition_goal(self, goal_id: str, status: str, *, phase: str | None=None,
                         checkpoint: dict | None=None, error: str | None=None,
@@ -2397,6 +2881,27 @@ class Store:
             for extra_type, extra_payload in (extra_events or ()):
                 self._append_goal_event_tx(
                     db, goal_id, extra_type, extra_payload, step_id=step_id)
+            # Lifecycle: success keeps a SETTLED row (re-repair by a *newer*
+            # confirmed plan is allowed by claim_batch_resource); pre-submit,
+            # failed and capacity-free blocked outcomes become RELEASED; an
+            # unknown external outcome (BLOCKED + capacity_reserved) stays
+            # ACTIVE so nobody else submits the PAN.
+            resource_key = (item.get("resource_key")
+                            or (cp.get("target_image") or {}).get("image_key"))
+            if resource_key:
+                if status in {"SUCCEEDED", "NO_ISSUE"}:
+                    db.execute(
+                        "UPDATE batch_resource_locks SET status='SETTLED',"
+                        "settled_at=COALESCE(settled_at,?),updated_at=? "
+                        "WHERE resource_key=? AND goal_id=? AND item_id=?",
+                        (now, now, resource_key, goal_id, item["item_id"]))
+                elif (status in {"FAILED", "SKIPPED", "MASK_READY"}
+                      or (status == "BLOCKED" and not reserved)):
+                    db.execute(
+                        "UPDATE batch_resource_locks SET status='RELEASED',"
+                        "settled_at=NULL,updated_at=? "
+                        "WHERE resource_key=? AND goal_id=? AND item_id=?",
+                        (now, resource_key, goal_id, item["item_id"]))
         return self.get_goal_item(goal_id, item["item_id"])
 
     def reserve_item_submission(self, goal_id, *, step_id, expected_version,
@@ -2521,7 +3026,11 @@ class Store:
                  None, now, now, None, None, "batch", 0, None))
             for item in items:
                 item_status = str(item.get("status") or "PENDING")
-                if item_status not in {"PENDING", "SKIPPED"}:
+                # MASK_READY is the manual-mask entry: the operator's saved
+                # mask was verified and copied into the artifact root before
+                # the Goal was created, so the normal Producer picks it up at
+                # the submit-preparation step and never runs a detector.
+                if item_status not in {"PENDING", "SKIPPED", "MASK_READY"}:
                     raise ValueError(f"invalid batch item status: {item_status}")
                 db.execute(
                     "INSERT INTO agent_goal_steps(step_id,goal_id,ordinal,name,status,"
@@ -2559,6 +3068,8 @@ for _name in (
     "transition_goal", "create_tool_intent", "update_tool_intent", "put_goal_step",
     "put_sr_task", "update_sr_task_job", "set_sr_task_state", "complete_verified_goal",
     "create_batch_goal", "transition_goal_item", "reserve_item_submission",
-    "patch_goal_checkpoint", "arm_goal",
+    "patch_goal_checkpoint", "arm_goal", "upsert_repair_plan",
+    "confirm_repair_plan", "bind_repair_plan_goal", "update_repair_plan_status",
+    "claim_batch_resource", "release_batch_resource",
 ):
     setattr(Store, _name, _fenced_write(getattr(Store, _name)))

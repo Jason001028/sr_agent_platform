@@ -996,6 +996,22 @@ def _submit_ready(state, goal, item, lease, cfg, prepared):
     except KeyError as exc:  # pragma: no cover — programming error
         return _block_item(
             state, goal, current, lease, f"复核结果缺少参数：{exc}")
+    # One physical PAN may only be executed by one repair Item at a time,
+    # across plans and across the tool-panel / Agent entries.  The claim is a
+    # single SQLite transaction; a check-then-write in Python would still let
+    # two concurrent ticks both pass.
+    resource_key = (item.get("resource_key")
+                    or ((current.get("checkpoint") or {}).get("target_image")
+                        or {}).get("image_key"))
+    if not resource_key:
+        return _block_item(
+            state, goal, current, lease,
+            "缺少 PAN 资源身份，无法证明跨计划独占；拒绝提交")
+    if not store.claim_batch_resource(gid, item["item_id"], resource_key):
+        return _block_item(
+            state, goal, current, lease,
+            "同一 PAN 已被另一个修复任务占用，拒绝并发提交；"
+            "请等待该任务结束或核对已有成果")
     fingerprint = sr_service.task_fingerprint(params)
     attempt = _item_attempt(item) + 1
     intent_key = f"batch:{gid}:{item['item_id']}:a{attempt}:{fingerprint}"
@@ -1006,6 +1022,8 @@ def _submit_ready(state, goal, item, lease, cfg, prepared):
         lease_token=lease.token, intent_key=intent_key, intent_args=params,
         max_inflight=cfg["max_inflight_sr_jobs"], checkpoint=cp)
     if reserved is None:
+        # No reservation and therefore no external side effect was started.
+        store.release_batch_resource(gid, item["item_id"], resource_key)
         return False
     scope = current_tool.set({"store": store, "intent": reserved["intent"]})
     try:

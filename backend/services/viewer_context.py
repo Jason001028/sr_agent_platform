@@ -174,9 +174,23 @@ def bind_registry(registry, snapshot, *, store=None, session_id=None):
         return ok(data)
 
     from backend.tools import search_scenes as search_tool
+    from backend.tools import repair as repair_tools
 
     result = ToolRegistry()
     for item in registry.list():
+        if item.name in repair_tools.BOUND_NAMES:
+            # Only bind the built-in implementation; a plugin/test tool with
+            # the same name does not understand the workspace context.
+            if getattr(item.run, '__module__', None) == repair_tools.__name__:
+                result.register(repair_tools.bound_tool(
+                    item.name, workspace=workspace,
+                    current=(frozen or {}).get('current'),
+                    selected_images=(frozen or {}).get('selected_images'),
+                    batch_draft=(frozen or {}).get('batch_draft'),
+                    session_id=session_id, store=store))
+            else:
+                result.register(item)
+            continue
         if item.name == 'query_batch_repair' and store is not None:
             from backend.tools.batch_repair import query_batch_repair
             if item.run.__module__ == query_batch_repair.__module__:

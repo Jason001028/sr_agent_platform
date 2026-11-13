@@ -1746,10 +1746,133 @@ export async function apiBatchImport(text: string, mode: 'demo' | 'production', 
   });
   return r.json();
 }
-export async function apiCreateBatch(body: { manifest_ref: string; title: string; session_id: string | null; request_key: string; exclusions: { line: number; reason: string }[] }): Promise<DurableGoal> {
+/** Legacy batch create.  It now requires a confirmed repair plan_id. */
+export async function apiCreateBatch(body: { plan_id: string; session_id: string; manifest_ref?: string; plan_version?: number }): Promise<DurableGoal> {
   const r = await http(apiUrl(loadSrConfig(), '/api/goals'), {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });
+  return r.json();
+}
+
+/* ---------------- Unified repair plan (tool panel + Agent) ---------------- */
+
+export interface RepairPlanTargetItem {
+  item_id: string; ordinal: number; name: string; scene_ref?: string;
+  source_lines?: number[];
+}
+export interface RepairPlan {
+  kind?: string;
+  contract_version: string;
+  plan_id: string;
+  version: number;
+  scope: 'single' | 'batch';
+  status: 'READY' | 'BLOCKED' | 'CONFIRMED' | 'STARTED' | 'EXPIRED' | 'SUPERSEDED' | string;
+  confirmation_required: boolean;
+  targets: {
+    total: number; excluded: number; applicable: number;
+    items: RepairPlanTargetItem[];
+    unresolved?: { name: string; reason: string }[];
+  };
+  strategy: { detection: string; detection_method: string; mask: string; execution: string };
+  mode: 'demo' | 'production' | string;
+  execution: { allowed: boolean; mode: string; reason: string | null };
+  manifest_ref: string;
+  manifest_sha256?: string;
+  title?: string;
+  session_id?: string | null;
+  mask?: { policy: string; path: string; revision?: string; width: number; height: number } | null;
+  goal_id?: string | null;
+  blocking?: { message?: string; code?: string }[];
+  diagnostics?: { severity?: string; message?: string }[];
+  expires_at?: number;
+  confirmation?: unknown;
+}
+export interface RepairStartResult {
+  plan: RepairPlan;
+  goal: DurableGoal;
+  reused: boolean;
+}
+export async function apiPrepareRepair(body: {
+  session_id: string | null;
+  sources?: { path: string; name: string; evidence: string }[];
+  workspace?: unknown;
+  current?: unknown;
+  selected_images?: unknown;
+  scope?: 'current' | 'selection' | 'workspace' | 'draft';
+  mode: 'demo' | 'production';
+  strategy?: 'automatic' | 'review';
+  detection_method?: 'absdiff' | 'ssim' | 'smart';
+  smart_options?: unknown;
+  mask_policy?: 'auto' | 'existing';
+  mask_path?: string | null;
+  title?: string;
+  created_by?: string;
+}): Promise<RepairPlan> {
+  const r = await http(apiUrl(loadSrConfig(), '/api/repairs/prepare'), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  return r.json();
+}
+export async function apiConfirmRepair(planId: string, body: { session_id: string | null; confirmed_by?: string }): Promise<RepairPlan> {
+  const r = await http(apiUrl(loadSrConfig(), `/api/repairs/${encodeURIComponent(planId)}/confirm`), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  return r.json();
+}
+export async function apiStartRepair(planId: string, body: { session_id: string | null; plan_version?: number; workspace_version?: number; workspace?: unknown }): Promise<RepairStartResult> {
+  const r = await http(apiUrl(loadSrConfig(), `/api/repairs/${encodeURIComponent(planId)}/start`), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  return r.json();
+}
+export interface RepairStatusItem {
+  item_id: string; ordinal: number; name: string; status: string;
+  attempt: number; error?: string | null;
+  review?: { decision?: string; mask_sha256?: string; reviewed_at?: number } | null;
+  review_required?: boolean;
+  review_decision?: string | null;
+  /** Current human quality review bound to this Item (absent before enqueue). */
+  quality_review_id?: string | null;
+  verification_ok?: boolean | null;
+  job_id?: number | string | null;
+  sr_status?: string | null;
+  /** Frozen target image; after a production repair it is the new output. */
+  image_path?: string | null;
+  /** The SR output actually named by the passed artifacts layer; never in demo. */
+  output_path?: string | null;
+  overlay_ready?: boolean;
+  phase?: string | null;
+  candidate_count?: number;
+}
+export interface RepairAcceptance {
+  mode: string;
+  computed: boolean;
+  quality_required: number;
+  quality_approved: number;
+  quality_rejected: number;
+  quality_pending: number;
+  quality_passed: boolean;
+}
+export interface RepairStatus {
+  plan: RepairPlan;
+  goal: (DurableGoal & {
+    monitoring_done?: boolean | null;
+    monitor_done?: boolean;
+    control_revision?: number;
+  }) | null;
+  counts: BatchCounts | null;
+  progress?: BatchSnapshot['progress'];
+  items: RepairStatusItem[];
+  active_jobs?: BatchJobSummary[];
+  quality?: BatchSnapshot['quality'];
+  quality_reviews?: { approved: number; rejected: number; pending: number };
+  quality_regions?: { approved: number; rejected: number; pending: number; total: number };
+  acceptance?: RepairAcceptance;
+  report: { available: boolean; updated_at: number | null };
+}
+export async function apiRepairStatus(planId: string, sessionId: string): Promise<RepairStatus> {
+  const query = new URLSearchParams({ session_id: sessionId });
+  const r = await http(apiUrl(loadSrConfig(), `/api/repairs/${encodeURIComponent(planId)}?${query}`));
   return r.json();
 }
 

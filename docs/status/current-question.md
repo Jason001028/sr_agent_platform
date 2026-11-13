@@ -1,5 +1,41 @@
 # current_question — 平台现状与交接入口
 
+2026-11-14（PR 5）：Agent 修复成果与人工验收闭环。任务卡完成态只认 Goal 终态 +
+显式 `monitoring_done=true`；「查看成果」只打开 Job `artifacts` 层验证通过的 SR 输出
+（Demo 无产物，不退回原始 PAN）；「开始复核」只在存在绑定 `quality_review_id` 的
+可审核 Item 时出现，并直接展开既有 Batch Panel 的人工质量区块、选中 Item 与第一个待审
+区域。审核计数只统计当前 Item 绑定的审核，重新修复的旧审核不继承；Viewer 审核后经共享
+Goal 事件 / 快照同步回任务卡。「待修复清单」操作行新增浅蓝「Agent修复」按钮：一键把
+确定性提示词填进 Agent 输入区并发送，由 Agent 调用 `prepare_repair` 准备计划，仍需用户
+在计划卡确认。本轮 `python`/`npm` 被环境拒绝，测试未运行。详见
+[repair-dual-entry.md §7.7](repair-dual-entry.md)。
+
+2026-11-13（PR 4）：Agent 智能修复任务卡改为单卡三阶段（计划 / 执行 / 结果），
+复用共享 `batchGoal` Store 的 SSE/snapshot 与 `GET /api/repairs/{plan_id}`；
+计算结束（含 production 等待人工验收）自动生成确定性中文摘要，提供查看任务、
+查看成果、开始复核三个真实入口；同一 plan_id 只渲染最后一张卡。详见
+[repair-dual-entry.md](repair-dual-entry.md) §7.6。测试执行状态同见该文档。
+
+2026-11-13（PR 3.6）：资源锁改为 `ACTIVE / SETTLED / RELEASED` 三态；
+只有创建时间晚于上一次成功结算的新确认计划可接管同一 PAN，并发旧计划仍被拒绝；
+计划分别保存可执行目标与完整工作区身份摘要，同数量不同场景集合会失效；截断快照
+在准备和启动两侧拒绝。测试执行状态见 [repair-dual-entry.md](repair-dual-entry.md) §7
+（本会话执行权限仍不可用，未运行）。
+
+2026-11-13（PR 3.5）：修复双入口可靠性缺陷——旧 `/api/goals` batch 必须有已确认
+`plan_id` 且创建阶段执行 production 门禁；REST 会话必须是服务端已存在会话，
+`confirmed_by` 由服务端生成；计划版本/确认记录/Goal binding 与响应丢失恢复收紧；
+新增 `batch_resource_locks` 跨计划原子独占同一 PAN；人工 Mask 原子发布并拒绝空掩码/
+跨景掩码；混合工作区可启动，截断工作区拒绝静默子集。详见
+[repair-dual-entry.md](repair-dual-entry.md) §7.5。测试执行状态见该文档。
+
+2026-11-13：智能修复「工具面板 / Agent」双入口统一到
+`backend/services/repair_application.py`：计划、服务端用户确认、Goal 幂等创建
+只有一份业务契约；单景人工 Mask 表达为单 Item Batch Goal（Item 直接
+`MASK_READY`）；Agent 新增 `prepare_repair` / `start_repair` 与三个只读查询工具。
+production 门仍关闭，demo 仍需 Fake SR 环境。脚本与未收口项见
+[repair-dual-entry.md](repair-dual-entry.md)。
+
 2026-11-12：Smart Compare 第三种独立检测模式已接入共享差异核心、Viewer、带 Halo 的原图 ROI 精检、原始尺度补扫、候选 Mask 事务、Agent 消息快照、Batch 可选检测与开发者三算法对照。本地合成 TIFF 的真实 HTTP/浏览器检测→精检→Mask→撤销已验证；参数与频域规则仍为实验性，真实内网/生产校准待验。详见 [smart-compare.md](smart-compare.md)。
 
 2026-11-11：工具栏拉伸下拉升级为 332px 交互直方图：黑白场拖动/数值/键盘、常用三模式与更多模式、整图/视野采样统计、双图独立/共享 CDF；JPG 明确只做显示灰度二次拉伸。拖动 RAF 合并到 512² 轻量显示，松手分带更新完整显示，源 DN、分析 token、Camera、ROI/Mask 不变；稀疏 Worker 复用 DN 块，后到像素沿用当前显示版本。真实鼠标、分屏/交替、16M 缓存像素流畅性及 Worker 渐进回填合成验收通过，真实内网/16384² 待核。需完整发布前端和 Worker，详见 [histogram-stretch.md](histogram-stretch.md)。

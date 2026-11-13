@@ -24,6 +24,7 @@ import { QC_STAGES, QC_FINALS, QC_STATUS_LABEL, isTerminal } from '../lib/qclist
 import type { QcIssue, QcStatus } from '../lib/qclist';
 import { BAKE_STAGE_LABEL, sceneNameCandidates } from '../lib/qcbatch';
 import { batchDockOpen, openBatchSelection } from '../lib/batchDock';
+import { requestAgentRepair } from '../lib/batchHandoff';
 
 const viewer = useViewerStore();
 const qc = useQcListStore();
@@ -232,6 +233,7 @@ watch(
     <!-- 一键解析：单占一行，不挤进 .qc-h（那一行 400px 里已有标题/计数/换一份/未完成/✕，
          再塞一颗要抢戏的橘色按钮，标题会被压成省略号）。
          「智能修复」排在它左边：先决定怎么修，再决定解析哪批；点开/收起上方任务中枢。
+         「Agent修复」紧挨着它：把同一批修复意图交给 Agent 准备计划（仍需在计划卡确认）。
          **不做二次确认弹窗**：清空只清视图、盘上什么都没动，卡片重跑一遍就回来了。 -->
     <div v-if="qc.loaded" class="qc-go-row">
       <button
@@ -242,6 +244,13 @@ watch(
         title="选择生产序列并开始批量智能修复"
         @click="openBatchSelection"
       >智能修复</button>
+      <button
+        type="button"
+        class="qc-agent"
+        data-e2e="qc-agent-repair"
+        title="让 Agent 准备当前工作区的修复计划；在计划卡确认后启动"
+        @click="requestAgentRepair"
+      >Agent修复</button>
       <template v-if="qc.loaded">
         <button
           type="button"
@@ -456,6 +465,28 @@ watch(
 }
 .qc-smart:hover { filter: brightness(1.08); }
 .qc-smart.on { background: color-mix(in srgb, var(--cmp-a) 84%, #000); border-color: color-mix(in srgb, var(--cmp-a) 84%, #000); }
+/* 「Agent修复」：第三颗入口，浅蓝底 + 深蓝字，与实心蓝的「智能修复」、橘色的
+   「一键解析」同尺寸同圆角，但用浅底区分「交给 Agent 准备计划」这条路径。 */
+.qc-agent {
+  flex: none;
+  height: 24px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--cmp-a);
+  background: var(--cmp-a-bg);
+  border: 1px solid var(--cmp-a-line);
+  border-radius: var(--r-ctrl);
+  cursor: pointer;
+  box-shadow:
+    0 1px 2px rgba(63, 109, 168, 0.10),
+    0 3px 7px rgba(63, 109, 168, 0.08),
+    0 8px 16px rgba(63, 109, 168, 0.05);
+  transition: filter var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard);
+}
+.qc-agent:hover { background: color-mix(in srgb, var(--cmp-a-bg) 80%, var(--cmp-a) 20%); }
+.qc-agent:focus-visible { outline: 2px solid var(--cmp-a); outline-offset: 1px; }
 .qc-go {
   flex: none;
   height: 24px;

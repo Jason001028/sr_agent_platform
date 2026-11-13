@@ -24,3 +24,26 @@ export function openBatchSelection(): void {
   openBatchDock();
   window.dispatchEvent(new CustomEvent('batch-task-open', { detail: { section: 'draft' } }));
 }
+
+/** A request to land directly on the human quality review block.
+ *
+ *  The Agent card and any other entry publish one lightweight intent; the
+ *  existing Batch Panel opens its quality section and the existing quality
+ *  store selects the Item + first pending region.  No second review state is
+ *  introduced.  The token makes identical repeated clicks observable. */
+export interface BatchQualityRequest {
+  token: number;
+  itemId?: string;
+  regionId?: string;
+}
+export const batchQualityRequest = ref<BatchQualityRequest | null>(null);
+let qualityRequestToken = 0;
+
+export function requestQualityReview(itemId?: string, regionId?: string): void {
+  qualityRequestToken += 1;
+  batchQualityRequest.value = { token: qualityRequestToken, itemId, regionId };
+  openBatchDock();
+  window.dispatchEvent(new CustomEvent('batch-task-open', {
+    detail: { section: 'monitor', quality: true },
+  }));
+}

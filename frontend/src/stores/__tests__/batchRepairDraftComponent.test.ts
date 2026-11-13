@@ -9,11 +9,19 @@ vi.mock('../../stores/viewer', () => ({ useViewerStore: () => ({
 vi.mock('../../stores/scenes', () => ({ useScenesStore: () => ({}) }));
 vi.mock('../../stores/batchGoal', () => ({ useBatchGoalStore: () => ({}) }));
 vi.mock('../../stores/chat', () => ({ useChatStore: () => ({ sessionId: null }) }));
-vi.mock('../../lib/api', () => ({
-  loadSrConfig: () => ({}),
-  apiResolveScene: vi.fn().mockResolvedValue({ row: { name: 'resolved scene' }, resolved: { sr_capable: true, input: '/trusted/scene/PAN.tif' } }),
-  apiBatchImport: vi.fn(), apiCreateBatch: vi.fn(),
-}));
+vi.mock('../../lib/api', () => {
+  class HttpError extends Error {
+    status: number;
+    constructor(status: number, message = '') { super(message); this.status = status; }
+  }
+  return {
+    HttpError,
+    loadSrConfig: () => ({}),
+    apiResolveScene: vi.fn().mockResolvedValue({ row: { name: 'resolved scene' }, resolved: { sr_capable: true, input: '/trusted/scene/PAN.tif' } }),
+    apiBatchImport: vi.fn(), apiCreateBatch: vi.fn(),
+    apiPrepareRepair: vi.fn(), apiConfirmRepair: vi.fn(), apiStartRepair: vi.fn(),
+  };
+});
 import BatchRepairDraft from '../../components/BatchRepairDraft.vue';
 import { useBatchDraftStore } from '../../stores/batchDraft';
 import { apiResolveScene, apiBatchImport, apiCreateBatch } from '../../lib/api';
