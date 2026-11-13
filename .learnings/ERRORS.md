@@ -115,3 +115,7 @@ The first one-pass sampling test used pixel data at file offset 0. The existing 
 ## 2026-11-10 resolved: asynchronous cleanup test patched shared asyncio module
 
 Mocking image_open.asyncio.sleep changed the shared asyncio module during AnyIO's lazy import and leaked the mock into its imported sleep reference. Patch the local module's asyncio binding with a small namespace instead; a fresh-process image-open suite then passed. PowerShell callback test URL concatenations also need parentheses per array element to ensure every invalid URL is tested independently.
+
+## 2026-11-13 resolved: PowerShell stdin encoding and baseline evaluation binding
+
+Python source piped from Windows PowerShell can replace Chinese literals with question marks. Use apply_patch for Unicode source edits, and inspect the diff before tests. git show may return UTF-8 with BOM; decode with utf-8-sig before compile. Agent Loop imports viewer_context inside run_loop, so an in-memory baseline must bind that import as well as loading old Loop source; otherwise paired tool reachability silently measures the new binding twice. The fixed evaluation now reports baseline 3/9 versus enhanced 9/9 and labels scripted replay separately from live-model selection accuracy.

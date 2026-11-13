@@ -1,0 +1,9 @@
+{
+  "mode": "live_model_fake_executor",
+  "status": "blocked",
+  "reason": "真实模型评测未执行：未配置可用模型凭证/端点；不能以回放代替选择准确率。",
+  "tool_selection_accuracy": null,
+  "irrelevant_searches": null,
+  "extra_tool_calls": null,
+  "rows": []
+}

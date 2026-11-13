@@ -549,14 +549,15 @@ class TestScopeAndHidden(unittest.TestCase):
         self.assertEqual(data["unresolved_count"], 1)
         self.assertEqual(data["unresolved"][0]["name"], "坏图")
 
-    def test_empty_workspace_falls_back_to_library(self):
-        """左侧列表空着时没有可限定的范围：按全库检索，但必须说明为什么。"""
+    def test_empty_workspace_never_expands_to_library(self):
+        """Empty workspace stays empty without an archive scan."""
         empty = {"version": 0, "items": [], "total": 0,
                  "local_only": 0, "truncated": False}
         data = self.run_bound(workspace=empty)
-        self.assertEqual(data["scope"], "library")
+        self.assertEqual(data["scope"], "workspace")
         self.assertEqual(data["scope_reason"], "empty_workspace")
-        self.assertEqual(data["count"], 2)
+        self.assertEqual(data["count"], 0)
+        self.assertEqual(data['scanned'], 0)
 
     def test_explicit_library_scope_wins_over_workspace(self):
         data = self.run_bound(workspace=self.ws(self.a), params={"scope": "library"})

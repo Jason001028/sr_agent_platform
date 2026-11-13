@@ -1,5 +1,6 @@
 import { buildViewerContextSnapshot } from './agentContext.js';
 import type { ViewerRec } from '../stores/viewer.js';
+import { imageRef } from './spatial';
 
 /** 工作区候选集的条数上限（后端同名上限见 services/viewer_context.py）。 */
 const WORKSPACE_MAX_ITEMS = 200;
@@ -72,7 +73,8 @@ export function snapshotViewer(viewer: {
     size_bytes: r.size || null, layout: r.layout,
     bits: r.probe?.bits ?? null, sample_format: r.probe?.sampleFormat ?? null,
     compression: r.probe?.compression ?? null, metadata_source: 'viewer', pixels_loaded: Boolean(r.thumb),
-    image_key: r.spatialIdentityToken === r.token ? r.spatialIdentity ?? null : null,
+    image_key: r.spatialIdentity && r.spatialIdentityToken===r.token ? r.spatialIdentity
+      : r.file ? imageRef(r)?.image_key ?? null : null,
     source_revision: r.srcRev ?? null, stage: r.stageKind ?? null,
   } : null;
   const active = viewer.activeRec;
@@ -95,7 +97,7 @@ export function snapshotViewer(viewer: {
     workspace: snapshotWorkspace(viewer.recs ?? [], viewer.workspaceVersion ?? 0),
     attachment_count: attachmentCount,
     selected_images: selected.slice(0,24).map(r=>({id:r.id,name:r.name.slice(0,512),scene_id:r.sceneId??null,
-      image_key:r.spatialIdentityToken===r.token?r.spatialIdentity??null:null,source_revision:r.srcRev??null,width:r.W,height:r.H})),
+      image_key:r.spatialIdentity&&r.spatialIdentityToken===r.token?r.spatialIdentity:r.file?imageRef(r)?.image_key??null:null,source_revision:r.srcRev??null,width:r.W,height:r.H})),
     selected_total: viewer.selectedIds.length, selected_truncated: selected.length > 24,
     roi,
     masks: { image_id: active?.id ?? null, count: active?.maskRois?.length ?? 0,
@@ -109,11 +111,18 @@ export function snapshotViewer(viewer: {
 
 let capture: ((count: number) => ReturnType<typeof snapshotViewer>) | undefined;
 const observations = new Map<string, () => unknown>();
-export function registerViewerObservation(name: 'differences' | 'batch_goal' | 'batch_draft', provider: () => unknown) { observations.set(name, provider); }
-export function registerViewerContext(provider: NonNullable<typeof capture>) { capture = provider; observations.clear(); }
+export function registerViewerObservation(name: 'differences' | 'batch_goal' | 'batch_draft' | 'repair_selection' | 'qc_draft' | 'repair_item', provider: () => unknown) {
+  observations.set(name, provider);
+  return () => { if (observations.get(name) === provider) observations.delete(name); };
+}
+export function registerViewerContext(provider: NonNullable<typeof capture>) { capture = provider; }
 export function captureViewerContext(count: number) {
   const snapshot = capture?.(count) ?? { version: 1, current: null, displayed: [], selected_ids: [],
     workspace: { version: 0, items: [], total: 0, local_only: 0, truncated: false },
     attachment_count: count };
-  return { ...snapshot, ...Object.fromEntries([...observations].map(([name, provider])=>[name, provider()])) };
+  // Freeze at send time, including provider-owned arrays; later UI edits cannot
+  // mutate the request while attachments/session setup are awaiting IO.
+  return JSON.parse(JSON.stringify({ ...snapshot,
+    ...Object.fromEntries([...observations].map(([name, provider])=>[name, provider()])) })) as
+    typeof snapshot & Record<string, unknown>;
 }

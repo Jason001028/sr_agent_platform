@@ -39,11 +39,12 @@ from backend.services import store as store_mod
 from .contract import Tool, err, ok, tool
 
 _DESC = (
+    "本工具仅用于场景库发现与检索。禁止用于查询当前打开的影像、当前待修复清单、已知 Batch Item 或 SR Job。工作区查询为空，不代表需要搜索全库。"
     "只读检索遥感场景库，返回可用影像的元数据。默认检索当前 Viewer 工作区"
     "（workspace）：用户从场景库打开或手工解析过的那些影像。只有用户明确要求"
     "“检索整个场景库/盘阵”时才传 scope=library 检索 SR_SCENES_ROOT 全库。"
-    "两种范围都排除用户已从场景库隐藏的场景。工作区为空（左侧没有场景身份影像）"
-    "或这条消息没有工作区快照时按全库检索，并在 scope_reason 里说明原因。"
+    "两种范围都排除用户已从场景库隐藏的场景。工作区为空时返回真实空状态，不扩大范围。"
+    "无消息快照的 CLI/REST 兼容入口保留全库检索，并在 scope_reason 里说明原因。"
     "当前 Viewer 本地或离线影像的信息"
     "应使用 get_current_image_info；检索零匹配不代表当前影像不存在。"
     "各条件同时生效；workspace 按工作区顺序返回，library 按日期及 id 降序返回。"
@@ -215,8 +216,11 @@ def _run(params: dict, *, workspace=None, hidden_dirs=None,
     root = Path(root_env) if root_env else None
     workspace = workspace or None
 
-    # 空工作区（左侧列表里一张有场景身份的图都没有）没有可限定的范围：
-    # 按库检索并如实说明，否则模型只会拿到 0 条、以为盘阵上没有这一景。
+    # Empty message workspace must never silently expand to the archive.
+    if scope == 'workspace' and workspace is not None and not workspace.get('items'):
+        return ok({'source': 'message_workspace_snapshot', 'scope': 'workspace',
+                   'scope_reason': 'empty_workspace', 'count': 0, 'scanned': 0,
+                   'results': [], 'note': '工作区为空；只有明确检索其他场景时才使用 scope=library。'})
     if scope == "workspace" and workspace is not None and workspace.get("items"):
         rows, unresolved, excluded_hidden = _workspace_rows(
             workspace, root, hidden)

@@ -66,6 +66,12 @@ SCHEMAS = {
         'window': {'type': 'integer', 'minimum': 1, 'default': 5},
         'threshold': {'type': 'number', 'minimum': 0, 'default': 3.0}}, ['input_path']),
     'get_current_image_info': ({}, None),
+    'get_repair_workspace': ({}, []),
+    'list_repair_items': ({'goal_id':{'type':'string','minLength':1,'maxLength':512},
+        'status':{'type':'string'},'limit':{'type':'integer','minimum':1,'maximum':50},
+        'cursor':{'type':'integer','minimum':0}}, ['goal_id']),
+    'get_repair_item': ({'goal_id':{'type':'string','minLength':1,'maxLength':512},
+        'item_id':{'type':'string','minLength':1,'maxLength':512}}, ['goal_id','item_id']),
     'read_tool_result': ({'result_id': {'type': 'string', 'pattern': '^[a-f0-9]{32}$'},
         'path': {'type': 'string', 'maxLength': 512}, 'offset': {'type': 'integer', 'minimum': 0},
         'limit': {'type': 'integer', 'minimum': 1, 'maximum': 20}}, ['result_id']),
@@ -82,7 +88,7 @@ def test_all_model_contracts_keep_schema_and_handlers(tmp_path):
         expected = {'type': 'object', 'properties': props}
         if required is not None:
             expected['required'] = required
-        if tool.name in {'prepare_batch_repair', 'query_batch_repair', 'get_current_image_info', 'read_tool_result', 'read_skill', 'read_skill_resource'}:
+        if tool.name in {'get_repair_workspace','list_repair_items','get_repair_item','prepare_batch_repair', 'query_batch_repair', 'get_current_image_info', 'read_tool_result', 'read_skill', 'read_skill_resource'}:
             expected['additionalProperties'] = False
         assert without_descriptions(tool.params_schema) == expected
         assert re.search('[\u4e00-\u9fff]', tool.description)
@@ -103,6 +109,7 @@ def test_loop_sends_actual_descriptions_after_dynamic_binding_and_filtering(tmp_
     monkeypatch.setenv('SR_SKILL_ROOTS', str(tmp_path))
     catalog = catalog_at(tmp_path) if skills else SkillCatalog([])
     expected = {'get_current_image_info', 'read_tool_result', 'prepare_batch_repair', 'query_batch_repair'}
+    expected |= {'get_repair_workspace','list_repair_items','get_repair_item'}
     expected |= {t.name for t in build_builtin_registry().list()} if allowed is None else allowed
     if skills:
         expected |= {'read_skill', 'read_skill_resource'}

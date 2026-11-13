@@ -24,6 +24,7 @@ import type { BakeFail } from '../lib/qcbatch.js';
 import { pathLeafOf } from './queue.js';
 import { useViewerStore } from './viewer.js';
 import { useScenesStore } from './scenes.js';
+import { registerViewerObservation } from '../lib/viewerContext';
 
 const LS_KEY = 'sr.viewer.qcList';
 
@@ -66,6 +67,12 @@ export const useQcListStore = defineStore('qclist', () => {
 
   const issues = computed<QcIssue[]>(() => list.value?.issues ?? []);
   const loaded = computed(() => list.value !== null);
+  const observationVersion = ref(0);
+  watch([list,statuses,selName],()=>{observationVersion.value++;},{deep:true,flush:'sync'});
+  registerViewerObservation('qc_draft',()=>({draft_id:'viewer-qc',version:observationVersion.value,
+    loaded:loaded.value,total:issues.value.length,selected_name:selName.value,
+    source_name:sourceName.value,selected:selName.value?1:0,
+    excluded:0,selection_semantics:'focused row; no exclusion checkbox in TXT list'}));
   const selIssue = computed<QcIssue | null>(
     () => issues.value.find((i) => i.name === selName.value) ?? null,
   );

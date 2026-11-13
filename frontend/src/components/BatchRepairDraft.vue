@@ -5,6 +5,7 @@ import { useBatchGoalStore } from '../stores/batchGoal';
 import { useChatStore } from '../stores/chat';
 import { apiBatchImport, apiCreateBatch } from '../lib/api';
 import { spatialId } from '../lib/spatial';
+import { registerViewerObservation } from '../lib/viewerContext';
 import { compactBatchError, importProblem, viewerRepairSequences } from '../lib/batchSequences';
 import type { RepairSequence } from '../lib/batchSequences';
 import type { BatchImportResult } from '../lib/api';
@@ -13,6 +14,14 @@ const viewer = useViewerStore(), batch = useBatchGoalStore(), chat = useChatStor
 const groups = ref<RepairSequence[]>([]), busy = ref(false), loading = ref(false), error = ref('');
 const detectionMethod = ref<'absdiff' | 'ssim' | 'smart'>('absdiff');
 const chosen = computed(() => groups.value.filter(g => g.checked && g.count && !g.reason && !g.loading));
+const selectionVersion = ref(0);
+watch(groups, () => { selectionVersion.value++; }, {deep:true, flush:'sync'});
+const unregisterSelection = registerViewerObservation('repair_selection', () => ({
+  draft_id:'viewer-sequences', version:selectionVersion.value, total:groups.value.length,
+  selected:chosen.value.length, excluded:groups.value.filter(g=>!g.checked).length,
+  selected_names:chosen.value.slice(0,3).map(g=>g.name), loading:loading.value,
+}));
+onBeforeUnmount(unregisterSelection);
 let generation = 0;
 onBeforeUnmount(() => { generation++; });
 let frozen: { scope: string; result: BatchImportResult; requestKey: string } | null = null;

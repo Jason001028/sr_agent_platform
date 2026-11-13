@@ -6,10 +6,13 @@ import { qualityList, qualityDocument, qualityDecide } from '../lib/batchQuality
 import type { QualityDocument, QualitySummary, QualityDecision } from '../lib/batchQuality';
 import type { SceneSiblings } from '../lib/api';
 import { spatialId } from '../lib/spatial';
+import { registerViewerObservation } from '../lib/viewerContext';
 
 export const useBatchQualityStore=defineStore('batchQuality',()=>{
   const batch=useBatchGoalStore(), viewer=useViewerStore();
   const reviews=ref<QualitySummary[]>([]), doc=shallowRef<QualityDocument|null>(null);
+  registerViewerObservation('repair_item',()=>doc.value && doc.value.goal_id===batch.goalId
+    ? {goal_id:doc.value.goal_id,item_id:doc.value.item_id,source:'quality_panel'} : null);
   const regionId=ref(''), error=ref(''), busy=ref(false), loading=ref(false);
   const reviewer=ref(''), reason=ref(''), overlay=ref<'off'|'outline'|'fill'>('fill');
   const pair=shallowRef<{output:number;nosr:number;review:string}|null>(null);

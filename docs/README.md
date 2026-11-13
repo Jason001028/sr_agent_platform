@@ -8,6 +8,8 @@
 
 Skill 加载与外部工具调用接口见 [skill_interface.md](planning/skill_interface.md)。
 
+Agent 工作区、持久任务与场景资源库的只读职责、分页工具和评测边界见 [repair-workspace-awareness.md](status/repair-workspace-awareness.md)。
+
 Smart Compare 智能对比、原始 DN 精检、候选 Mask、Agent/Batch 接入与实测审查报告见 [smart-compare.md](status/smart-compare.md)。
 
 交互式直方图拉伸、黑白场、视野统计及双图共享映射见 [histogram-stretch.md](status/histogram-stretch.md)。

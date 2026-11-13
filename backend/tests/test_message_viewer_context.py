@@ -42,6 +42,8 @@ def test_regions_roi_masks_and_session_bound_batch_are_observed_without_file_aut
             {'id': f'r{i}', 'bbox': [i, 2, 3, 4], 'mean_diff': .4} for i in range(1, 4)]},
         'batch_goal': {'goal_id': 'b1', 'status': 'FAKE_SUCCESS'}})
     store = Mock()
+    store.get_goal.return_value = {'kind':'batch','session_id':'s1'}
+    store.list_goal_items.return_value = []
     store.batch_snapshot.return_value = {'goal': {'goal_id': 'b1', 'session_id': 's1', 'status': 'RUNNING', 'phase': 'VERIFYING'},
                                         'counts': {'submitted': 3, 'verified': 1}}
     registry = bind_registry(ToolRegistry(), value, store=store, session_id='s1')
@@ -49,11 +51,13 @@ def test_regions_roi_masks_and_session_bound_batch_are_observed_without_file_aut
     data = registry.invoke('get_current_image_info')['data']
     assert len(data['differences']['selected_ids']) == 3
     assert data['masks']['count'] == 4 and data['roi']['bbox'] == [1, 2, 5, 6]
-    assert data['batch_goal']['goal']['status'] == 'RUNNING'
-    assert data['batch_goal']['counts']['verified'] == 1
+    assert 'batch_goal' not in data
+    workspace = registry.invoke('get_repair_workspace')['data']
+    assert workspace['batch']['status'] == 'RUNNING'
+    assert workspace['batch']['counts']['verified'] == 1
     assert not registry.invoke('get_current_image_info', {'path': '/production'})['ok']
     other = bind_registry(ToolRegistry(), value, store=store, session_id='another')
-    assert other.invoke('get_current_image_info')['data']['batch_goal']['available'] is False
+    assert other.invoke('get_repair_workspace')['data']['batch']['available'] is False
 
 
 def test_observation_limits_and_batch_progress_cannot_be_forged():
@@ -153,7 +157,9 @@ def test_workspace_is_a_tool_scope_not_model_observation():
     wire = project_messages([{'role': 'system', 'content': 'base'},
                              {'role': 'user', 'content': 'hi', 'viewer_snapshot': value}])
     assert 'SECRET-ID' not in json.dumps(wire, ensure_ascii=False)
-    assert 'workspace' not in wire[1]['content'][-1]['text']
+    observed = json.loads(wire[1]['content'][-1]['text'].split('\n',1)[1])
+    assert 'workspace' not in observed
+    assert observed['repair_context']['workspace_empty'] is False
 
 
 def test_binding_scopes_search_scenes_to_the_workspace(monkeypatch, tmp_path):
