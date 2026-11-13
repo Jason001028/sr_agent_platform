@@ -3,7 +3,8 @@ import { computed, onMounted } from 'vue';
 import { useBatchQualityStore } from '../stores/batchQuality';
 const quality=useBatchQualityStore();
 onMounted(()=>quality.refresh());
-const canConfirm=computed(()=>!!quality.doc?.regions.length&&quality.doc.regions.every(r=>r.decision==='approved'));
+const noCandidates=computed(()=>quality.doc?.binding.kind==='no-candidate');
+const canConfirm=computed(()=>noCandidates.value||!!quality.doc?.regions.length&&quality.doc.regions.every(r=>r.decision==='approved'));
 const editable=computed(()=>quality.doc?.scene_decision==='pending'&&quality.comparisonReady&&!quality.busy);
 const label=(v:string)=>({approved:'通过',rejected:'驳回',pending:'待复核'}[v]??v);
 </script>
@@ -14,25 +15,25 @@ const label=(v:string)=>({approved:'通过',rejected:'驳回',pending:'待复核
     <div class="quality-tasks">
       <button v-for="r in quality.reviews" :key="r.review_id" :class="{selected:quality.doc?.review_id===r.review_id}"
         :title="r.reasons.join('；')||r.scene_name||r.name" @click="quality.select(r.item_id)">
-        <span>#{{ r.ordinal }} {{ r.scene_name||r.name }}</span><small>Job {{ r.job_id }} · {{ r.current?label(r.scene_decision):'版本失效' }} · {{ r.counts.approved }}/{{ r.counts.approved+r.counts.rejected+r.counts.pending }}</small>
+        <span>#{{ r.ordinal }} {{ r.scene_name||r.name }}</span><small>{{ r.review_kind==='no-candidate' ? '无候选整景复核' : 'Job '+r.job_id }} · {{ r.current?label(r.scene_decision):'版本失效' }} · {{ r.counts.approved }}/{{ r.counts.approved+r.counts.rejected+r.counts.pending }}</small>
       </button>
     </div>
     <p v-if="quality.loading">正在核对版本并载入双图…</p>
     <p v-if="quality.error" class="error" role="alert">{{ quality.error }}</p>
     <template v-if="quality.doc">
       <div class="quality-tools">
-        <select :value="quality.regionId" aria-label="选择待验收区域" @change="quality.openRegion(($event.target as HTMLSelectElement).value)">
+        <select v-if="!noCandidates" :value="quality.regionId" aria-label="选择待验收区域" @change="quality.openRegion(($event.target as HTMLSelectElement).value)">
           <option v-for="(r,i) in quality.doc.regions" :key="r.region_id" :value="r.region_id">区域 {{ i+1 }} · {{ label(r.decision) }}</option>
         </select>
         <button @click="quality.openRegion(quality.regionId)">定位双图</button>
         <button :disabled="!quality.comparisonReady" @click="quality.flicker()">闪烁对比</button>
-        <select v-model="quality.overlay" aria-label="审核 Mask 显示"><option value="fill">半透明 Mask</option><option value="outline">Mask 轮廓</option><option value="off">隐藏 Mask</option></select>
+        <select v-if="!noCandidates" v-model="quality.overlay" aria-label="审核 Mask 显示"><option value="fill">半透明 Mask</option><option value="outline">Mask 轮廓</option><option value="off">隐藏 Mask</option></select>
       </div>
-      <p class="hint">左侧为本次 Job 的 PAN 产物，右侧为对应 NOSR；同步缩放和平移。请逐区域确认后再整景确认。</p>
+      <p class="hint">{{ noCandidates ? '本次实验检测未检出候选；左侧为冻结的 PAN，右侧为对应 NOSR。请人工核对整景，未执行 SR。' : '左侧为本次 Job 的 PAN 产物，右侧为对应 NOSR；同步缩放和平移。请逐区域确认后再整景确认。' }}</p>
       <p v-if="!quality.comparisonReady" class="hint">当前双图或版本未匹配，禁止提交审核；请重新定位。</p>
       <input v-model="quality.reviewer" aria-label="审核人" placeholder="审核人（必填）" maxlength="100">
       <textarea v-model="quality.reason" aria-label="审核原因" placeholder="审核原因；驳回必须填写" maxlength="2000" rows="2" />
-      <div class="quality-actions">
+      <div v-if="!noCandidates" class="quality-actions">
         <button :disabled="!editable||!quality.reviewer.trim()" @click="quality.decide('region','approved')">本区域通过</button>
         <button :disabled="!editable||!quality.reviewer.trim()||!quality.reason.trim()" @click="quality.decide('region','rejected')">驳回</button>
         <button :disabled="!editable||!quality.reviewer.trim()" @click="quality.decide('region','pending')">待复核</button>

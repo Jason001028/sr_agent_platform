@@ -523,6 +523,13 @@ def _collect_detections(state, goal, lease, cfg, *, allow_write=True):
         if detection.get("requires_geometry_review"):
             cp["review_required"]=True
         if not detection.get("candidates"):
+            if detection.get("analysis",{}).get("calibrationStatus")=="experimental-unvalidated":
+                from backend.services import batch_quality
+                try:
+                    batch_quality.enqueue_no_candidates(state.store,goal,{**item,"checkpoint":cp},lease)
+                except (ValueError,OSError,KeyError) as exc:
+                    _block_item(state,goal,item,lease,"无候选人工审核建立失败："+str(exc))
+                continue
             cp["phase"] = "NO_ISSUE"
             state.store.transition_goal_item(
                 gid, step_id=item["step_id"], expected_version=item["version"],
@@ -1596,8 +1603,19 @@ def _block_capacity_deadlock(state, goal, lease, cfg, mode, items, counts):
 def _settle(state, goal, lease, cfg, mode):
     store = state.store
     gid = goal["goal_id"]
-    counts = store.goal_item_status_counts(gid)
     items = store.list_goal_items(gid)
+    # Older experimental batches may already have a NO_ISSUE item without a
+    # review ledger. Upgrade only this unfinished verification path on resume.
+    if mode=="production":
+        from backend.services import batch_quality
+        for item in items:
+            cp=item["checkpoint"]
+            if (item["status"]=="NO_ISSUE" and not cp.get("quality_review_id")
+                    and cp.get("detection",{}).get("analysis",{}).get("calibrationStatus")=="experimental-unvalidated"):
+                try: batch_quality.enqueue_no_candidates(store,goal,item,lease)
+                except (ValueError,OSError,KeyError) as exc: _block_item(state,goal,item,lease,"无候选审核恢复失败："+str(exc))
+        items=store.list_goal_items(gid)
+    counts = store.goal_item_status_counts(gid)
     remaining = {status for status in counts
                  if status not in CONVERGED and status not in PARKED}
     if remaining:

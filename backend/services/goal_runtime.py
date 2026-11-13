@@ -360,6 +360,7 @@ def quality_reviews(goal_id:str,request:Request):
         reviews.append({"review_id":review["review_id"],"item_id":item["item_id"],"name":item["name"],
             "scene_name":Path(item["checkpoint"]["scene_ref"]).name,"ordinal":item["ordinal"],
             "job_id":review["job_id"],"status":item["status"],"scene_decision":review["scene_decision"],
+            "review_kind":review["binding"].get("kind","repair"),
             "version":review["version"],"current":not reasons,"reasons":reasons,
             "counts":{key:sum(r["decision"]==key for r in review["regions"]) for key in ("approved","rejected","pending")}})
     return {"goal_id":goal_id,"reviews":reviews}

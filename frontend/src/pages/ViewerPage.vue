@@ -26,6 +26,7 @@ import AutoTourControls from '../components/AutoTourControls.vue';
 import BatchDetectionOverlay from '../components/BatchDetectionOverlay.vue';
 import BatchRepairPlayback from '../components/BatchRepairPlayback.vue';
 import BatchQualityOverlay from '../components/BatchQualityOverlay.vue';
+import DiffComparisonViews from '../components/DiffComparisonViews.vue';
 import DecodeOverlay from '../components/DecodeOverlay.vue';
 import ContextPanel from '../components/ContextPanel.vue';
 import NoticeModal from '../components/NoticeModal.vue';
@@ -35,6 +36,7 @@ import { useViewerStore } from '../stores/viewer.js';
 import { useDiffStore } from '../stores/diff';
 
 const viewer = useViewerStore();
+const diff = useDiffStore();
 
 // 页面切到后台就停表：交替对比是「人看着比细节」的工具，后台继续翻面既没意义，
 // 也会在回到前台时落在任意一帧。store 每拍也会自查 document.hidden，这里是立即版。
@@ -86,6 +88,7 @@ onUnmounted(() => {
         <BatchRepairPlayback />
         <BatchQualityOverlay />
         <DecodeOverlay />
+        <DiffComparisonViews v-if="diff.comparisonView && diff.comparison" />
       </TifCanvas>
       <ContextPanel />
     </div>

@@ -75,6 +75,13 @@ const summary = computed(() => {
 async function run() {
   await diff.analyze();
 }
+async function selectMethod(next:'absdiff'|'ssim'|'smart') {
+  if(diff.comparison && !diff.stale) {
+    if(!diff.comparison.results[next]) {diff.error=diff.comparison.summary.find(s=>s.method===next)?.error??'该方法没有可用结果';return;}
+    await diff.showComparison(next);return;
+  }
+  diff.method=next;
+}
 
 function clear() {
   diff.clearResults();
@@ -160,13 +167,13 @@ onBeforeUnmount(() => {
           <div class="seg" role="radiogroup" aria-label="分析方法">
             <button type="button" :class="{ on: diff.method === 'absdiff' }" role="radio"
               :aria-checked="diff.method === 'absdiff'" :disabled="diff.busy"
-              @click="diff.method = 'absdiff'">像素差分</button>
+              @click="selectMethod('absdiff')">像素差分</button>
             <button type="button" :class="{ on: diff.method === 'ssim' }" role="radio"
               :aria-checked="diff.method === 'ssim'" :disabled="diff.busy"
-              @click="diff.method = 'ssim'">结构差异 SSIM</button>
+              @click="selectMethod('ssim')">结构差异 SSIM</button>
             <button type="button" :class="{ on: diff.method === 'smart' }" role="radio"
               :aria-checked="diff.method === 'smart'" :disabled="diff.busy" data-e2e="diff-smart"
-              @click="diff.method = 'smart'">智能对比</button>
+              @click="selectMethod('smart')">智能对比</button>
           </div>
         </section>
 
@@ -312,6 +319,7 @@ onBeforeUnmount(() => {
         <p v-if="diff.method === 'smart' && diff.smartPairReason" class="diff-note">{{ diff.smartPairReason }}</p>
         <p v-if="diff.method === 'smart'" role="status">{{ diff.analysisState }}</p>
         <details v-if="diff.comparison"><summary>三算法对照</summary>
+          <button type="button" :disabled="diff.stale || diff.busy" data-e2e="diff-three-open" @click="diff.comparisonView=true;diff.closePanel()">三图同步对照</button>
           <div v-for="item in diff.comparison.summary" :key="item.method" class="compare-row">
             <button type="button" :disabled="diff.busy || diff.stale || item.status !== 'completed'" @click="diff.showComparison(item.method)">{{ item.method }} · {{ item.status === 'completed' ? item.regions + ' 区域' : '检测失败' }}</button>
             <small v-if="item.status === 'completed'">{{ item.areaPixels }} px² · 有效覆盖 {{ (item.coverage*100).toFixed(2) }}% · {{ item.elapsedMs }} ms</small>

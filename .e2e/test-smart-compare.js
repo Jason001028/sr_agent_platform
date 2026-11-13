@@ -84,6 +84,24 @@ const server=http.createServer((req,res)=>{
     await page.waitForFunction(()=>document.body.textContent.includes('Smart 独有候选像素'),{timeout:30000});
     assert(responses.some(r=>r.comparison?.summary.length===3));
     await page.$eval('.compare-row',n=>n.closest('details').open=true);
+    await page.click('[data-e2e="diff-three-open"]');
+    await page.waitForSelector('[data-e2e="diff-three-views"] canvas');
+    await page.waitForFunction(()=>!document.querySelector('[data-e2e="diff-three-views"]')?.textContent.includes('正在解码'));
+    assert.equal(await page.$$eval('.three-views canvas',xs=>xs.length),3);
+    const initialTransform=await page.$eval('.three-views canvas',x=>x.dataset.viewTransform);
+    const middle=await page.$('.three-views .method-pane:nth-child(2) canvas');const middleBox=await middle.boundingBox();
+    await page.mouse.move(middleBox.x+middleBox.width/2,middleBox.y+middleBox.height/2);await page.mouse.wheel({deltaY:-200});
+    await page.waitForFunction(before=>document.querySelector('.three-views canvas').dataset.viewTransform!==before,{},initialTransform);
+    let transforms=await page.$$eval('.three-views canvas',xs=>xs.map(x=>x.dataset.viewTransform));assert.equal(new Set(transforms).size,1,'three zoom views diverged');
+    const zoomTransform=transforms[0];
+    await page.mouse.down();await page.mouse.move(middleBox.x+middleBox.width/2+35,middleBox.y+middleBox.height/2+20,{steps:4});await page.mouse.up();
+    transforms=await page.$$eval('.three-views canvas',xs=>xs.map(x=>x.dataset.viewTransform));assert.equal(new Set(transforms).size,1);assert.notEqual(transforms[0],zoomTransform,'pan did not update shared camera');
+    assert.equal(requests,3,'three-view gestures reran analysis');
+    fs.mkdirSync(path.resolve(__dirname,'../test-tifs/smart-compare'),{recursive:true});
+    await page.screenshot({path:path.resolve(__dirname,'../test-tifs/smart-compare/three-views.png'),fullPage:true});
+    await page.click('.three-views header button:last-child');
+    await page.click('[data-e2e="diff-open"]');await page.$eval('.compare-row',n=>n.closest('details').open=true);
+    await page.$eval('details.diff-advanced',n=>n.open=true);
     await page.click('.compare-row button');
     await page.waitForFunction(()=>document.querySelector('.diff-summary')?.textContent.includes('像素差分'));
     assert.equal(requests,3,'switching cached comparison reran detector');
@@ -97,6 +115,6 @@ const server=http.createServer((req,res)=>{
     const shot=path.resolve(__dirname,'../test-tifs/smart-compare');fs.mkdirSync(shot,{recursive:true});
     await page.screenshot({path:path.join(shot,'viewer.png'),fullPage:true});
     assert.equal(errors.length,0,errors.join('\n'));
-    console.log(JSON.stringify({source:'real-http-synthetic-tiff',requests,gridRegions:responses[0].regions.length,roi:true,maskTransaction:true,maskUndo:true,comparison:true,nativeScanOverview:true,unverifiedSceneEvidence:true,displayWithoutReanalysis:true}));
+    console.log(JSON.stringify({source:'real-http-synthetic-tiff',requests,gridRegions:responses[0].regions.length,roi:true,maskTransaction:true,maskUndo:true,comparison:true,threeViewsSharedZoomAndPan:true,nativeScanOverview:true,unverifiedSceneEvidence:true,displayWithoutReanalysis:true}));
   }finally{await browser.close();server.closeAllConnections();server.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;server.close();});

@@ -1,6 +1,7 @@
 /** Present evidence states without suggesting human confirmation or calibration. */
 export function sceneEvidenceLabel(status: string): string {
-  if (status === 'available') return '已验证 · 已降权';
+  if (status === 'available') return '已验证 · 按场景标记低可信';
+  if (status === 'partial-unverified') return '部分区域未验证 · 未排除干扰';
   if (status === 'available-disabled') return '已验证 · 未降权';
   if (status.includes('read-failed')) return '读取失败 · 未排除干扰';
   if (status.includes('budget')) return '超出读取预算 · 未验证';

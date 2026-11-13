@@ -45,9 +45,9 @@ export const useBatchQualityStore=defineStore('batchQuality',()=>{
     finally{if(gen===generation)loading.value=false;}
   }
   function focus(){
-    const d=doc.value,c=selectedRegion.value;if(!d||!c||!comparisonReady.value)return;
-    const {width:w,height:h}=d.binding.mask;
-    const [x0,y0,x1,y1]=c.bbox,cx=(x0+x1)/2/w,cy=(y0+y1)/2/h;
+    const d=doc.value,c=selectedRegion.value;if(!d||(!c&&d.binding.kind!=='no-candidate')||!comparisonReady.value)return;
+    const {width:w,height:h}=d.binding.kind==='no-candidate'?d.binding.grid!:d.binding.mask!;
+    const [x0,y0,x1,y1]=c?.bbox??[0,0,w-1,h-1],cx=(x0+x1)/2/w,cy=(y0+y1)/2/h;
     if(viewer.compareMode==='flicker'){
       const pane=viewer.panes[0],r=viewer.flickerRefRec;if(!r?.thumb||!pane)return;
       const norm=Math.min(pane.rect.w*.7/Math.max((x1-x0+1)/w,.001),pane.rect.h*.7/Math.max((y1-y0+1)/w,.001));

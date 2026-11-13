@@ -4,6 +4,8 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import uuid
+import time
+from concurrent.futures import Future
 
 import pytest
 
@@ -55,6 +57,88 @@ def decision(q,action='region',value='approved',**kwargs):
     return batch_quality.decide(q.store,q.goal['goal_id'],'item',{
         'review_id':r['review_id'],'expected_version':r['version'],'request_key':uuid.uuid4().hex,
         'action':action,'decision':value,'region_id':'r1','reviewer':'测试审核人','reason':'人工检查',**kwargs})
+
+
+@pytest.fixture
+def clean_review(tmp_path,monkeypatch):
+    import numpy as np
+    import tifffile
+    from backend.tests import allowed_roots_env
+    for key,value in allowed_roots_env(tmp_path).items():monkeypatch.setenv(key,value)
+    monkeypatch.setenv('SR_BATCH_ARTIFACT_DIR',str(tmp_path/'artifacts'))
+    paths=[tmp_path/'PAN.tif',tmp_path/'scene_NOSR.tif']
+    for path,edge in zip(paths,(32,16)):tifffile.imwrite(path,np.ones((edge,edge),np.uint16))
+    detection={'provenance':'real','detector_name':'shared-difference','candidates':[],
+        'candidate_accounting':{'unprocessed':0},'analysis':{'calibrationStatus':'experimental-unvalidated'}}
+    cp={'target_image':batch_manifest._image(paths[0]),'reference_image':batch_manifest._image(paths[1]),'scene_ref':str(tmp_path)}
+    db=tmp_path/'clean.db';store=Store(db)
+    goal=store.create_batch_goal(title='clean',request_key='clean',content_sha256='clean',checkpoint={'mode':'production','workflow':batch_manifest.WORKFLOW},
+        items=[{'item_id':'clean','ordinal':1,'name':'clean','status':'PENDING','checkpoint':cp}])
+    claimed=store.claim_goal(goal['goal_id'],'worker',lease_sec=600);lease=GoalLease(goal['goal_id'],claimed['lease_token'],claimed['version'])
+    item=store.get_goal_item(goal['goal_id'],'clean')
+    item=store.transition_goal_item(goal['goal_id'],step_id=item['step_id'],expected_version=item['version'],status='DETECTING',lease_token=lease.token)
+    future=Future();future.set_result({'detection':detection})
+    state=SimpleNamespace(store=store,batch_io_jobs={'clean':{'future':future,'goal_id':goal['goal_id'],'item_id':'clean','version':item['version'],'started':time.monotonic()}})
+    batch_worker._collect_detections(state,goal,lease,{'detection_timeout_sec':120})
+    q=SimpleNamespace(store=store,goal=goal,lease=lease,paths=paths,db=db)
+    try:yield q
+    finally:q.store.close()
+
+
+def test_no_candidate_detection_requires_persisted_whole_scene_confirmation_without_sr(clean_review):
+    q=clean_review;gid=q.goal['goal_id']
+    item=q.store.get_goal_item(gid,'clean')
+    assert item['status']=='AWAITING_REVIEW' and item['capacity_reserved']==0
+    assert not item['external_job_id'] and not item['verification']['ok']
+    review=batch_quality.review_for_item(q.store,item)
+    assert review['regions']==[] and review['binding']['kind']=='no-candidate' and not review['job_id']
+    assert not batch_quality.verify_goal(q.store,q.store.get_goal(gid))['ok']
+    q.store.close();q.store=Store(q.db)
+    body={'review_id':review['review_id'],'expected_version':0,'request_key':'clean-approve','action':'scene',
+        'decision':'approved','reviewer':'整景审核人','reason':'核对 PAN 与 NOSR'}
+    approved=batch_quality.decide(q.store,gid,'clean',body)
+    assert approved['scene_decision']=='approved'
+    assert q.store.get_goal_item(gid,'clean')['status']=='NO_ISSUE'
+    assert batch_quality.verify_goal(q.store,q.store.get_goal(gid))['ok']
+    assert batch_quality.decide(q.store,gid,'clean',body)['version']==1
+    assert q.store._db().execute('SELECT COUNT(*) FROM sr_tasks').fetchone()[0]==0
+    token=current_lease.set(q.lease)
+    try: assert batch_worker._settle(SimpleNamespace(store=q.store),q.store.get_goal(gid),q.lease,{},'production')
+    finally:current_lease.reset(token)
+    assert q.store.get_goal(gid)['status']=='COMPLETED'
+
+
+def test_no_candidate_review_rejects_replaced_input_and_wrong_region_action(clean_review):
+    q=clean_review;gid=q.goal['goal_id'];item=q.store.get_goal_item(gid,'clean')
+    review=batch_quality.review_for_item(q.store,item)
+    body={'review_id':review['review_id'],'expected_version':0,'request_key':'clean','action':'region',
+        'decision':'approved','reviewer':'审核人','reason':'核对'}
+    with pytest.raises(batch_quality.ReviewConflict,match='只支持整景'):
+        batch_quality.decide(q.store,gid,'clean',body)
+    body.update(action='scene',decision='rejected')
+    batch_quality.decide(q.store,gid,'clean',body)
+    assert q.store.get_goal_item(gid,'clean')['status']=='REVIEW_REJECTED'
+    path=q.paths[0];replacement=path.with_suffix('.replacement');replacement.write_bytes(path.read_bytes());os.replace(replacement,path)
+    with pytest.raises(batch_quality.ReviewConflict,match='源版本'):
+        batch_quality.decide(q.store,gid,'clean',{**body,'decision':'approved','request_key':'again','expected_version':1})
+
+
+def test_no_candidate_review_http_has_input_pair_and_no_job_or_mask(clean_review):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from backend.services.goal_runtime import router
+    q=clean_review;app=FastAPI();app.state.store=q.store;app.include_router(router)
+    gid=q.goal['goal_id']
+    with TestClient(app) as client:
+        listing=client.get(f'/api/goals/{gid}/quality-reviews')
+        assert listing.status_code==200 and listing.json()['reviews'][0]['review_kind']=='no-candidate'
+        response=client.get(f'/api/goals/{gid}/items/clean/quality-review')
+        assert response.status_code==200,response.text
+        doc=response.json();assert not doc['job_id'] and len(doc['images'])==2 and not doc['binding']['regions']
+        response=client.post(f'/api/goals/{gid}/items/clean/quality-review',json={'review_id':doc['review_id'],'expected_version':0,
+            'request_key':'http-clean','action':'scene','decision':'approved','reviewer':'整景审核人','reason':'已核对双图'})
+        assert response.status_code==200,response.text
+        assert q.store.get_goal_item(gid,'clean')['status']=='NO_ISSUE'
 
 
 def test_completed_sr_enters_review_releases_capacity_and_cannot_complete(quality):

@@ -150,7 +150,7 @@ function toggle(reg: DiffRegion) {
             <p>强度均值 {{ reg.diagnostics.scoreMean.toFixed(3) }} · P95 {{ reg.diagnostics.scoreP95.toFixed(3) }} · 最大 {{ reg.diagnostics.scoreMax.toFixed(3) }}</p>
             <p>{{ confidenceEvidenceLabel(reg.diagnostics.confidence) }}；频域{{ frequencyEvidenceLabel(reg.diagnostics.frequency.status) }}。</p>
             <p v-for="(label,key) in {cloud:'云',water:'水',shadow:'阴影'}" :key="key">{{ label }}：{{ sceneEvidenceLabel(diff.result.maskAvailability?.[key] ?? 'unverified') }}<template v-if="reg.diagnostics.sceneOverlap[key] != null"> · 重叠 {{ pct(reg.diagnostics.sceneOverlap[key]) }}</template></p>
-            <p v-if="diff.result.source === 'source-tiled'">方差与纹理统计来自概览网格；原始尺度评分仅用于定位，不能据此生成精确 Mask。</p>
+            <p v-if="diff.result.source === 'source-tiled'">统计来自概览像素对应的原始最高分样本，面积属于概览网格；候选仍需 ROI 精检，不能据此生成精确 Mask。</p>
             <p>{{ reg.maskEligible ? '轮廓具备加入草案资格，仍需人工复核。' : '尚不具备精确 Mask 资格，请精检并核对轮廓。' }}</p>
           </div>
         </li>
