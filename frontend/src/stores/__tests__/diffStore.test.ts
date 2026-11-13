@@ -256,6 +256,45 @@ describe('Smart Compare integration', () => {
     expect(diff.smartPairReason).toContain('共同场景');
     expect(await diff.analyze()).toBe(false);expect(mocks.api).not.toHaveBeenCalled();
   });
+  it('invalidates old comparison before a new legacy result can revive it on a revised source',async()=>{
+    const diff=setup();diff.parallelCompare=true;
+    const oldAbs=fakeResult({elapsedMs:111}),oldSmart=answer({image_a:{id:1},image_b:{id:2}});
+    mocks.api.mockResolvedValue({...oldSmart,comparison:{summary:[],overlaps:[],smartUniquePixels:0,results:{absdiff:oldAbs,smart:oldSmart}}});
+    expect(await diff.analyze()).toBe(true);expect(diff.comparison).toBeDefined();
+    diff.parallelCompare=false;diff.method='absdiff';diff.sensitivity='high';
+    mocks.viewer.recs[0].srcRev='v2';mocks.viewer.recs[0].token=2;
+    const fresh=fakeResult({elapsedMs:999,parameters:{...fakeResult().parameters,sensitivity:'high'}});
+    mocks.api.mockResolvedValue(fresh);expect(await diff.analyze()).toBe(true);
+    await diff.showComparison('absdiff');
+    expect(diff.comparison).toBeUndefined();expect(diff.result?.elapsedMs).toBe(999);
+    expect(diff.stale).toBe(false);
+  });
+  it('keeps valid cached methods switchable but drops them on a source revision change',async()=>{
+    const diff=setup();diff.parallelCompare=true;
+    const smart=answer({image_a:{id:1},image_b:{id:2}}),abs=fakeResult({source:'source-grid'});
+    mocks.api.mockResolvedValue({...smart,comparison:{summary:[],overlaps:[],smartUniquePixels:0,results:{smart,absdiff:abs}}});
+    await diff.analyze();await diff.showComparison('absdiff');
+    expect(diff.result?.method).toBe('absdiff');expect(diff.stale).toBe(false);
+    await diff.showComparison('smart');expect(diff.result?.method).toBe('smart');
+    expect(mocks.api).toHaveBeenCalledTimes(1);
+    await diff.showComparison('absdiff');diff.comparisonView=true;
+    mocks.viewer.recs[0].srcRev='v2';expect(diff.comparison).toBeUndefined();
+    expect(diff.comparisonView).toBe(false);expect(diff.stale).toBe(true);
+    expect(diff.addRegionToMask('r001')).toBe(false);expect(mocks.viewer.addMaskPolygon).not.toHaveBeenCalled();
+  });
+  it('publishes a successful fallback and preserves the failed requested method status',async()=>{
+    const diff=setup();diff.parallelCompare=true;
+    const abs=fakeResult({source:'source-grid'});
+    mocks.api.mockResolvedValue({...abs,comparison:{requestedMethod:'smart',status:'partial',summary:[],overlaps:[],smartUniquePixels:null,results:{absdiff:abs}}});
+    expect(await diff.analyze()).toBe(true);
+    expect(diff.method).toBe('absdiff');expect(diff.stale).toBe(false);
+    expect(diff.comparison?.requestedMethod).toBe('smart');expect(diff.notice).toContain('检测失败');
+  });
+  it('passes the original normalization to native refinement',async()=>{
+    const diff=setup();mocks.api.mockImplementation(async(_cfg,req)=>({...answer(req),normalization:{scale:2.5,logRatioBaseline:.4,mode:'scene-q99'}}));
+    await diff.analyze();await diff.refineRegion('r001');
+    expect(mocks.api.mock.calls[1][1].smartOptions).toMatchObject({calibrationScale:2.5,logRatioBaseline:.4});
+  });
 });
 
 beforeEach(() => {

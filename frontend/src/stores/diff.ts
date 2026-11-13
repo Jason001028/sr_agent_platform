@@ -258,6 +258,8 @@ export const useDiffStore = defineStore('diff', () => {
   const displayThreshold = ref(0);
   const boundariesVisible = ref(true);
   const parallelCompare = ref(false);
+  const comparisonView = ref(false);
+  const comparisonKey = ref('');
   const smartPrecision = ref<'source-grid' | 'preview'>('source-grid');
   const smartOptions = ref<SmartOptions>({ window: 15, sensor: 'generic', frequencyReview: false, sceneSuppression: true });
   const comparison = shallowRef<DiffResult['comparison']>(undefined);
@@ -608,6 +610,15 @@ export const useDiffStore = defineStore('diff', () => {
       pa: pixelKey(aId.value), pb: pixelKey(bId.value),
     });
   }
+  function comparisonSignature(): string {
+    const key = JSON.parse(currentKey());
+    delete key.method;
+    key.smart = [smartOptions.value, smartPrecision.value, parallelCompare.value];
+    return JSON.stringify(key);
+  }
+  function clearComparison() {
+    comparison.value = undefined; comparisonKey.value = ''; comparisonView.value = false;
+  }
   const stale = computed(() => !!result.value && resultKey.value !== currentKey());
   const precisionReason = computed(() => analysisPairReason(aRec.value, bRec.value));
   const alignmentNote = computed(() => analysisPairNote(aRec.value, bRec.value));
@@ -944,6 +955,7 @@ export const useDiffStore = defineStore('diff', () => {
   }
 
   function applyResult(res: DiffResult, key: string, plan?: { w: number; h: number }, scopeRect?: GridRect): void {
+    if(res.source==='source-roi'||res.source==='source-tiled') comparisonView.value=false;
     if (plan && scopeRect) {
       res.analysisGrid = {
         ...res.analysisGrid,
@@ -1111,6 +1123,7 @@ export const useDiffStore = defineStore('diff', () => {
   async function analyze(): Promise<boolean> {
     if (busy.value) return false;
     if (method.value === 'smart' || parallelCompare.value) return analyzeSmart();
+    clearComparison();
     cancelAutoDraw();
     autoSourceError.value = '';
     error.value = '';
@@ -1277,7 +1290,7 @@ export const useDiffStore = defineStore('diff', () => {
     const a = aRec.value!, b = bRec.value!;
     cancelAutoDraw();
     busy.value = true; error.value = ''; notice.value = ''; analysisState.value = '读取中';
-    baseSnapshot.value = null; comparison.value = undefined;
+    baseSnapshot.value = null; clearComparison();
     const seq = ++requestSeq, key = currentKey();
     const controller = new AbortController(); analysisController = controller;
     try {
@@ -1303,6 +1316,13 @@ export const useDiffStore = defineStore('diff', () => {
       if (res.source === 'preview') applyResult(res,key,{w:plan.width,h:plan.height},rect);
       else applyResult(res,key);
       comparison.value = res.comparison;
+      comparisonKey.value = res.comparison ? comparisonSignature() : '';
+      if (res.comparison?.requestedMethod && res.comparison.requestedMethod !== res.method) {
+        busy.value = false; analysisController = null;
+        method.value = res.method;
+        resultKey.value = currentKey();
+        notice.value = '所选方法检测失败，已显示成功方法；失败原因见对照摘要。';
+      }
       installLayers(layers);
       display.value = 'overlay'; opacity.value = .6; toneWeight.value = false;
       analysisState.value = '已完成';
@@ -1315,15 +1335,21 @@ export const useDiffStore = defineStore('diff', () => {
 
   async function showComparison(next: DiffMethod): Promise<void> {
     const entry = comparison.value?.results[next];
-    if (!entry || busy.value || stale.value) return;
+    if (!entry || busy.value || stale.value || comparisonKey.value !== comparisonSignature()) return;
     const seq = ++requestSeq, key=currentKey();
     const layers = await decodeLayers(entry);
-    if (seq !== requestSeq || key!==currentKey()) return;
+    if (seq !== requestSeq || key!==currentKey() || comparisonKey.value !== comparisonSignature()) return;
     // Refinement snapshots belong to another precision/result. A cached method
     // switch must not offer to restore an unrelated earlier ROI overview.
     baseSnapshot.value = null;
     method.value = next;
     applyResult(entry,currentKey()); installLayers(layers);
+  }
+  async function comparisonRaster(next: DiffMethod) {
+    const entry=comparison.value?.results[next], key=comparisonKey.value;
+    if (!entry || !key || key!==comparisonSignature()) return null;
+    const layers=await decodeLayers(entry);
+    return comparisonKey.value===key && key===comparisonSignature() ? layers.raw : null;
   }
 
   async function refineVisible(): Promise<boolean> {
@@ -1378,6 +1404,9 @@ export const useDiffStore = defineStore('diff', () => {
     const controller = new AbortController(); analysisController = controller;
     try {
       const req = smartRequest(); req.precision = 'source-roi'; req.method = 'smart'; req.compare = false; req.roi = roi;
+      if (old.method==='smart' && old.source!=='preview' && old.normalization) {
+        req.smartOptions={...req.smartOptions!,calibrationScale:old.normalization.scale,logRatioBaseline:old.normalization.logRatioBaseline};
+      }
       const res = await apiDiffAnalyze(loadSrConfig(),req,controller.signal);
       const layers = await decodeLayers(res);
       if (seq !== requestSeq || key !== currentKey() || result.value !== old) return false;
@@ -1582,7 +1611,7 @@ export const useDiffStore = defineStore('diff', () => {
   /* ---------------- 清除 ---------------- */
   function clearResults(): void {
     analysisController?.abort(); analysisController = null;
-    comparison.value = undefined;
+    clearComparison();
     busy.value = false; analysisState.value = '待分析'; savedViews = null;
     requestSeq++;                          // 作废仍在途的分析/精算响应
     result.value = null;
@@ -1756,6 +1785,9 @@ export const useDiffStore = defineStore('diff', () => {
     }
   }, {flush:'sync'});
   watch(result, () => { selectedRegionIds.value = []; }, {flush:'sync'});
+  watch(comparisonSignature, () => {
+    if (comparisonKey.value && comparisonKey.value !== comparisonSignature()) clearComparison();
+  }, {flush:'sync'});
   /* 左侧换景 → 下拉收口到新场景并补候选；不在新场景里的已选组合由 ensurePair 换掉。
      「延续到下一景」切景期间跳过：A/B 已按角色落好，ensurePair 只会把它换成推荐项。 */
   watch(
@@ -1783,6 +1815,8 @@ export const useDiffStore = defineStore('diff', () => {
     return {image_a:res.imageA.id,image_b:res.imageB.id,stale:stale.value,
       precision_reason:precisionReason.value,method:res.method,source:res.source,
       completed:!busy.value, algorithm_version:res.algorithmVersion, score_semantics:res.scoreSemantics,
+      comparison:comparison.value ? {requested_method:comparison.value.requestedMethod,status:comparison.value.status,
+        methods:comparison.value.summary.slice(0,3).map(s=>({method:s.method,status:s.status,regions:s.regions,error:s.error?.slice(0,512)}))} : undefined,
       analysis_state:analysisState.value,
       source_identity:res.sourceIdentity ? {reference_side:res.sourceIdentity.referenceSide,
         registration:res.sourceIdentity.registration,images:res.sourceIdentity.images.slice(0,2).map(i=>({
@@ -1800,7 +1834,7 @@ export const useDiffStore = defineStore('diff', () => {
 
   return {
     smartOptions, smartPrecision, smartPairReason, nativeRefineReason, displayThreshold, boundariesVisible, analysisState,
-    parallelCompare, comparison, showComparison, refineVisible, refineDrawnRoi, scanNativeVisible, cancelAnalysis,
+    parallelCompare, comparison, comparisonView, comparisonRaster, showComparison, refineVisible, refineDrawnRoi, scanNativeVisible, cancelAnalysis,
     nextRegion: (step:number) => { const list=orderedRegions.value; if(!list.length)return;
       const index=list.findIndex(r=>r.id===selectedId.value); void locateRegion(list[(index+step+list.length)%list.length].id); },
     restoreView: () => { for(const p of savedViews??[]) if(viewer.panes.some(q=>q.side===p.side&&q.rec?.id===p.id)) viewer.setPaneView(p.side,{...p.view}); savedViews=null; },

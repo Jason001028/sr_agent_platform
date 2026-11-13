@@ -92,8 +92,108 @@ def test_scene_masks_are_explicit_and_never_erase_evidence():
     assert evidence['maskAvailability']['cloud'] == 'unverified-registration'
     before = evidence['score'].copy()
     apply_scene_masks(evidence,{'water':{'mask':np.ones(a.shape,bool),'registered':True,'sourceIdentity':'fixture'}},BlurConfig())
-    np.testing.assert_allclose(evidence['score'],before*.5)
+    np.testing.assert_allclose(evidence['score'],before)
     assert evidence['maskAvailability']['shadow'] == 'unverified'
+
+
+def test_overlapping_scene_masks_keep_blur_candidates_as_low_confidence():
+    ref=np.random.default_rng(72).normal(30000,3000,(192,192));target=ref.copy()
+    target[48:144,48:144]=gaussian_filter(ref,2)[48:144,48:144]
+    kw=dict(method='smart',reference_side='A',min_area_px=16,open_kernel=1,close_kernel=1)
+    plain=image_diff.analyze_arrays(ref,target,**kw)
+    masks={name:{'registered':True,'sourceIdentity':name,'mask':np.ones(ref.shape,bool)} for name in ('cloud','water')}
+    masked=image_diff.analyze_arrays(ref,target,scene_masks=masks,**kw)
+    assert plain['regions'] and masked['regions']
+    assert plain['differenceMap']==masked['differenceMap']
+    assert all(r['diagnostics']['confidence']=='low' for r in masked['regions'])
+    assert all(r['diagnostics']['priorityWeight']==.5 for r in masked['regions'])
+
+
+def test_roi_morphology_uses_the_context_before_cropping():
+    ref=np.random.default_rng(9).normal(30000,3000,(256,256)).astype('float32')
+    kw=dict(method='smart',reference_side='A',score_override=np.ones(ref.shape,'float32'),min_area_px=1,open_kernel=3,close_kernel=3)
+    full=image_diff.analyze_arrays(ref,ref,**kw)
+    cropped=image_diff.analyze_arrays(ref,ref,roi={'x':64,'y':64,'w':64,'h':64},**kw)
+    np.testing.assert_array_equal(smart_compare._mask(cropped),smart_compare._mask(full)[64:128,64:128])
+    assert cropped['regions'][0]['areaPx']==4096
+
+
+def test_selected_method_failure_returns_other_completed_methods(pair):
+    _,body,resolve=pair;original=image_diff.analyze_arrays
+    def fail_selected(*args,**kw):
+        if kw['method']=='smart':raise RuntimeError('selected-smart-failed')
+        return original(*args,**kw)
+    with patch.object(image_diff,'analyze_arrays',side_effect=fail_selected):
+        result=smart_compare.analyze_grid({**body,'compare':True},resolve)
+    assert result['method']=='absdiff'
+    assert result['comparison']['requestedMethod']=='smart'
+    assert result['comparison']['status']=='partial'
+    assert set(result['comparison']['results'])=={'absdiff','ssim'}
+    assert result['comparison']['summary'][2]['error']=='selected-smart-failed'
+
+
+def test_all_comparison_methods_failing_is_an_explicit_error(pair):
+    _,body,resolve=pair
+    with patch.object(image_diff,'analyze_arrays',side_effect=image_diff.DiffError('all-failed')):
+        with pytest.raises(image_diff.DiffError,match='三算法均未完成'):
+            smart_compare.analyze_grid({**body,'compare':True},resolve)
+
+
+@pytest.fixture
+def wide_pair(tmp_path):
+    reference=np.random.default_rng(71).uniform(10000,50000,(160,320)).astype(np.uint16)
+    target,_=image_diff.resize_to((320,640),reference,np.ones(reference.shape,bool))
+    target[80:260,100:570]=gaussian_filter(target,2)[80:260,100:570]
+    paths=[tmp_path/'PAN.tif',tmp_path/(tmp_path.name+'_NOSR.tif')]
+    def write(nodata=False):
+        data=target.copy()
+        if nodata=='left-tile':
+            data[:,:512]=0
+        elif nodata:
+            rows=np.rint(np.arange(64)*319/63).astype(int);cols=np.rint(np.arange(128)*639/127).astype(int)
+            data[np.ix_(rows,cols)]=0
+        tifffile.imwrite(paths[0],data.astype('uint16'),rowsperstrip=8,extratags=[(42113,'s',2,'0',False)])
+        tifffile.imwrite(paths[1],reference,rowsperstrip=8)
+        specs=[{'id':i,'sceneId':str(i),'sourceRevision':preview_jpg.source_revision(p)} for i,p in enumerate(paths)]
+        return {'method':'smart','image_a':specs[0],'image_b':specs[1],'maxEdge':128,'minAreaPx':1,'openKernel':1,'closeKernel':1}
+    return write,lambda sid:paths[int(sid)]
+
+
+def test_native_scan_keeps_valid_support_when_overview_sampling_would_be_all_nodata(wide_pair):
+    write,resolve=wide_pair
+    result=smart_compare.analyze_native_scan(write(True),resolve)
+    assert result['regions'] and result['coverage']['validRatio']>.9
+    assert result['analysisPrecision']['nativeScanned']
+    assert all(not r['maskEligible'] for r in result['regions'])
+
+
+def test_native_scan_skips_nodata_only_tile_without_discarding_valid_tiles(wide_pair):
+    write,resolve=wide_pair
+    result=smart_compare.analyze_native_scan(write('left-tile'),resolve)
+    assert result['regions'] and 0<result['coverage']['validRatio']<.3
+    assert result['analysisPrecision']['tiles']==2
+
+
+def test_native_scan_aggregates_mask_failures_from_all_tiles(wide_pair):
+    write,resolve=wide_pair;states=[]
+    def masks(body,resolve,refs,shape,window=None):
+        if not states:
+            states.append('unverified-read-failed');return {'cloud':{'registered':False,'status':states[-1]}}
+        states.append('available');return {'cloud':{'registered':True,'sourceIdentity':'fixture','mask':np.zeros(shape,bool)}}
+    with patch.object(smart_compare,'load_scene_masks',side_effect=masks):
+        result=smart_compare.analyze_native_scan(write(),resolve)
+    assert result['maskAvailability']['cloud']=='partial-unverified'
+    assert result['sceneMaskCoverage']['cloud']=={'tiles':2,'availableTiles':1,'statuses':{'available':1,'unverified-read-failed':1}}
+
+
+def test_frozen_smart_version_is_explicit_and_unknown_versions_are_rejected(pair):
+    paths,_,_=pair
+    target={**batch_manifest._image(paths[0]),'item_id':'version'};ref=batch_manifest._image(paths[1])
+    result=batch_detector.detect(target,ref,{'mode':'diff','method':'smart','version':'smart-compare-0.1-experimental'})
+    assert result['analysis']['versionPolicy']['policy']=='experimental-upgrade-human-review-required'
+    assert result['analysis']['versionPolicy']['executed']==result['analysis']['algorithmVersion']
+    with pytest.raises(ValueError,match='冻结'):
+        batch_detector.detect(target,ref,{'mode':'diff','method':'smart','version':'future-unknown'})
 
 
 def test_context_halo_crop_matches_full_map():

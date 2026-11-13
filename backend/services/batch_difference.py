@@ -102,6 +102,13 @@ def validate_pair(target, reference):
 
 def detect(target, reference, base, config):
     started = time.perf_counter()
+    version_policy = None
+    if config.get("method") == "smart":
+        from backend.services.blur_detection import VERSION
+        frozen = config.get("version", VERSION)
+        if frozen not in (VERSION,"smart-compare-0.1-experimental","smart-compare-0.2-experimental"):
+            raise contracts.DetectionError("不支持的冻结 Smart Compare 版本，请重新导入清单")
+        version_policy = {"requested":frozen,"executed":VERSION,"policy":"exact" if frozen==VERSION else "experimental-upgrade-human-review-required"}
     pan, nosr, (w,h), (rw,rh), registered = validate_pair(target, reference)
     max_edge = image_diff.resolve_max_edge(config.get("max_edge", 2048))
     if config.get("method") == "smart":
@@ -154,6 +161,7 @@ def detect(target, reference, base, config):
                         "regionDiagnostics":result["regionDiagnostics"], "maskAvailability":result["maskAvailability"],
                         "sensorProfile":result["sensorProfile"], "calibrationStatus":result["calibrationStatus"],
                         "analysisPrecision":result["analysisPrecision"], "filterReasons":result["filterReasons"],
+                        "versionPolicy":version_policy,
                         "normalization":result["normalization"], "sourceIdentity":{"pan":target["image_key"], "nosr":reference["image_key"]}}
                        if config.get("method") == "smart" else {})},
         "diagnostics":[*base["diagnostics"],{"code":"candidate_accounting",**counts}]},mode=config.get("execution_mode"))

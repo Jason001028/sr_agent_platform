@@ -205,11 +205,12 @@ def analyze_grid(body, resolve):
             scene_masks=scene_masks,
             scale_a=(refs[0]["width"]/shape[1], refs[0]["height"]/shape[0]),
             scale_b=(refs[1]["width"]/shape[1], refs[1]["height"]/shape[0]), roi=body.get("roi"))
-        except (ValueError, TypeError) as exc:
+        except Exception as exc:
             check()
-            if method == body.get("method", "smart") or len(methods) == 1:
+            if len(methods) == 1:
+                if not isinstance(exc,(ValueError,TypeError)): raise
                 raise image_diff.DiffError(str(exc)) from exc
-            results[method] = {"error": str(exc), "elapsedMs": round((time.perf_counter()-method_started)*1000, 2)}
+            results[method] = {"error": str(exc)[:1000], "errorClass":type(exc).__name__,"elapsedMs": round((time.perf_counter()-method_started)*1000, 2)}
             continue
         for side, spec, ref in zip(("A", "B"), specs, refs):
             result["image"+side] = {**spec, "sourceWidth": ref["width"], "sourceHeight": ref["height"],
@@ -225,9 +226,14 @@ def analyze_grid(body, resolve):
         results[method] = result
         check()
     assert_revisions(paths, refs)
-    selected = dict(results[body.get("method", "smart")])
+    requested = body.get("method", "smart")
+    successful = [key for key, value in results.items() if "error" not in value]
+    if not successful:
+        raise image_diff.DiffError("三算法均未完成：" + "; ".join(f"{k}: {v['error']}" for k,v in results.items()))
+    selected = dict(results[requested if requested in successful else successful[0]])
     if len(results) > 1:
         selected["comparison"] = compare_results(results)
+        selected["comparison"].update(requestedMethod=requested, status="completed" if len(successful)==3 else "partial")
     selected["totalElapsedMs"] = round((time.perf_counter()-started)*1000, 2)
     return selected
 
@@ -270,6 +276,7 @@ def analyze_roi(body, resolve):
         source="source-roi", auto_mask=body.get("autoMask") is True,
         smart_options=body.get("smartOptions"), reference_side=reference_side,
         scene_masks=load_scene_masks(body,resolve,refs,a.shape,window=rect_a),
+        evidence_sink=body.get("_native_sink"),
         sensitivity=body.get("sensitivity", "standard"), threshold=body.get("threshold"),
         min_area_px=body.get("minAreaPx", 64), open_kernel=body.get("openKernel", 3), close_kernel=body.get("closeKernel", 3),
         scale_a=(1., 1.), scale_b=(bw/aw, bh/ah))
@@ -282,6 +289,7 @@ def analyze_roi(body, resolve):
                                    imageASource=[aw, ah], imageBSource=[bw, bh])
     windows = ((x0, y0, x1, y1), (x0*bw/aw, y0*bh/ah, x1*bw/aw, y1*bh/ah))
     bind_metadata(result, specs, refs, reference_side, windows=windows)
+    result["analysisPrecision"].update(textureHalo=result["analysisPrecision"]["halo"],halo=halo,contextWindow=list(rect_a))
     body.get("_cancel_check", lambda: None)()
     assert_revisions(paths, refs)
     return result
@@ -295,6 +303,9 @@ def analyze_native_scan(body, resolve):
     returned heat grid is a conservative overview and cannot be a precise mask.
     """
     started = time.perf_counter()
+    from backend.services.blur_detection import config_from_dict
+    try: config_from_dict(body.get("smartOptions"))
+    except (TypeError,ValueError) as exc: raise image_diff.DiffError(str(exc)) from exc
     specs, paths, refs, side = prepare_pair(body, resolve)
     if side != "B":
         raise image_diff.DiffError("原始尺度补扫请将 PAN 本体选为 A、NOSR 选为 B")
@@ -309,9 +320,14 @@ def analyze_native_scan(body, resolve):
     edge = min(2048,image_diff.resolve_max_edge(body.get("maxEdge")))
     scale = min(1.,edge/max(w,h))
     gh,gw = max(3,round(h*scale)),max(3,round(w*scale))
-    score = np.zeros((gh,gw),np.float32)
+    pooled = None
+    pooled_reference = np.zeros((gh,gw), np.float32)
+    pooled_target = np.zeros((gh,gw), np.float32)
+    pooled_masks = {name: np.zeros((gh,gw),bool) for name in ("cloud","water","shadow")}
+    mask_states = {name: [] for name in pooled_masks}
     options = {**(body.get("smartOptions") or {})}
-    options.setdefault("calibrationScale",1.)
+    if options.get("calibrationScale") is None:
+        options["calibrationScale"] = 1.
     check = body.get("_cancel_check",lambda:None)
     for ty in range(y,y+h,tile):
         for tx in range(x,x+w,tile):
@@ -319,19 +335,46 @@ def analyze_native_scan(body, resolve):
             # A final <3px sliver shares the previous tile's context/core.
             left,top = min(tx,x+w-3),min(ty,y+h-3)
             tw,th = min(tile,x+w-left),min(tile,y+h-top)
-            part = analyze_roi({**body,"roi":{"x":left,"y":top,"w":tw,"h":th},
-                                "autoMask":False,"smartOptions":options},resolve)
-            pixels = np.asarray(Image.open(io.BytesIO(base64.b64decode(part["differenceMap"].split(",",1)[1]))),dtype=np.float32)/255
-            yy = np.minimum(gh-1,((np.arange(th)+top-y+.5)*gh/h).astype(int))
-            xx = np.minimum(gw-1,((np.arange(tw)+left-x+.5)*gw/w).astype(int))
-            np.maximum.at(score,(yy[:,None],xx[None,:]),pixels)
-    arrays=[]
-    for p,r in zip(paths,refs):
-        rx,ry = r["width"]/aw,r["height"]/ah
-        a,v,_,_=image_diff.read_source_window(p,int(x*rx),int(y*ry),int(np.ceil((x+w)*rx)),int(np.ceil((y+h)*ry)),max_edge=edge)
-        arrays.append(image_diff.resize_to((gh,gw),a,v))
-    result=image_diff.analyze_arrays(arrays[0][0],arrays[1][0],valid_a=arrays[0][1],valid_b=arrays[1][1],
-        method="smart",reference_side=side,source="source-tiled",smart_options=options,score_override=score,
+            def collect(evidence, reference, target):
+                nonlocal pooled
+                fields = ("score","varianceRatio","textureLoss","referenceVariance","targetVariance","informative","validity")
+                if pooled is None:
+                    pooled = {k:v for k,v in evidence.items() if not isinstance(v,np.ndarray) and k != "sceneMasks"}
+                    pooled.update({k:np.zeros((gh,gw),dtype=evidence[k].dtype) for k in fields})
+                yy = np.minimum(gh-1,((np.arange(th)+top-y+.5)*gh/h).astype(int))
+                xx = np.minimum(gw-1,((np.arange(tw)+left-x+.5)*gw/w).astype(int))
+                bins = np.broadcast_to(yy[:,None]*gw+xx[None,:],(th,tw)).ravel()
+                valid = evidence["validity"].ravel()
+                scores = evidence["score"].ravel()
+                previous = pooled["score"].ravel()[bins].copy()
+                previous_valid = pooled["validity"].ravel()[bins].copy()
+                np.maximum.at(pooled["score"].ravel(),bins[valid],scores[valid])
+                # Carry evidence, DN and validity from the SAME native pixel
+                # that won the maximum. Never resample validity a second time.
+                eligible = valid & ((scores>previous) | ~previous_valid) & (scores==pooled["score"].ravel()[bins])
+                indexes = np.flatnonzero(eligible)
+                unique, first = np.unique(bins[indexes],return_index=True)
+                chosen = indexes[first]
+                for key in fields:
+                    if key != "score": pooled[key].ravel()[unique] = evidence[key].ravel()[chosen]
+                pooled_reference.ravel()[unique] = reference.ravel()[chosen]
+                pooled_target.ravel()[unique] = target.ravel()[chosen]
+                for name in mask_states:
+                    mask_states[name].append(evidence["maskAvailability"][name])
+                    source_mask = evidence.get("sceneMasks",{}).get(name)
+                    pooled_masks[name].ravel()[unique] = source_mask.ravel()[chosen] if source_mask is not None else False
+            try:
+                analyze_roi({**body,"roi":{"x":left,"y":top,"w":tw,"h":th},
+                             "autoMask":False,"smartOptions":options,"_native_sink":collect},resolve)
+            except image_diff.DiffError as exc:
+                if "没有共同有效像素" not in str(exc): raise
+                for states in mask_states.values(): states.append("unverified-no-valid-pixels")
+    check()
+    if pooled is None: raise image_diff.DiffError("补扫范围没有共同有效像素")
+    pooled["maskAvailability"] = {name: states[0] if len(set(states))==1 else "partial-unverified" for name,states in mask_states.items()}
+    pooled["sceneMasks"] = {name:mask for name,mask in pooled_masks.items() if all(s.startswith("available") for s in mask_states[name])}
+    result=image_diff.analyze_arrays(pooled_target,pooled_reference,valid_a=pooled["validity"],valid_b=pooled["validity"],
+        method="smart",reference_side=side,source="source-tiled",smart_options=options,smart_evidence=pooled,
         auto_mask=body.get("autoMask") is True,min_area_px=body.get("minAreaPx",64),
         threshold=body.get("threshold"),sensitivity=body.get("sensitivity","standard"),
         open_kernel=body.get("openKernel",3),close_kernel=body.get("closeKernel",3),scale_a=(w/gw,h/gh))
@@ -342,11 +385,16 @@ def analyze_native_scan(body, resolve):
                                    imageBSource=[refs[1]["width"],refs[1]["height"]])
     bind_metadata(result,specs,refs,side,windows=((x,y,x+w,y+h),
         (x*refs[1]["width"]/aw,y*refs[1]["height"]/ah,(x+w)*refs[1]["width"]/aw,(y+h)*refs[1]["height"]/ah)))
-    for r in result["regions"]: r["maskEligible"]=False
+    for r in result["regions"]:
+        r["maskEligible"]=False
+        if options.get("frequencyReview"):
+            r["diagnostics"]["frequency"] = {"status":"native-roi-review-required","experimental":True}
     result["analysisPrecision"].update(nativeRefined=False,nativeScanned=True,tiles=count,
-        overviewAggregation="max",evidenceStatistics="overview-grid; native-score-only",sourcePixelsScanned=w*h)
-    result["maskAvailability"] = part["maskAvailability"]
-    result["analysisPrecision"]["sceneMaskStatus"] = "applied-per-tile; overview-overlap-unavailable"
+        overviewAggregation="max",evidenceStatistics="native-max-representative-pixels; area-in-overview-grid",sourcePixelsScanned=w*h)
+    result["analysisPrecision"]["validitySemantics"] = "overview-cell-has-native-valid-support"
+    result["sceneMaskCoverage"] = {name:{"tiles":len(states),"availableTiles":sum(s.startswith("available") for s in states),
+        "statuses":{s:states.count(s) for s in set(states)}} for name,states in mask_states.items()}
+    result["analysisPrecision"]["sceneMaskStatus"] = "aggregated-all-tiles"
     result["warnings"].append("原始尺度补扫采用带 Halo 的重叠上下文和最大值概览投影；概览候选仍需原图 ROI 精检，非精确掩码。")
     result["elapsedMs"]=round((time.perf_counter()-started)*1000)
     assert_revisions(paths,refs)

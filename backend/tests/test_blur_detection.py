@@ -82,3 +82,13 @@ def test_frequency_rechecks_validity_after_bounded_crop():
     valid[384:640, 384:640] = False
     result = frequency_evidence(a, a, valid)
     assert result['status'] == 'insufficient-data'
+
+
+def test_refinement_can_inherit_scene_normalization_instead_of_normalizing_blur_away():
+    ref=np.random.default_rng(31).normal(30000,3000,(512,512))
+    target=ref.copy();target[96:416,96:416]=gaussian_filter(ref,2)[96:416,96:416]
+    full=analyze_texture(ref,target)
+    norm=full['normalization']
+    local=analyze_texture(ref[176:336,176:336],target[176:336,176:336],
+        config=BlurConfig(calibration_scale=norm['scale'],log_ratio_baseline=norm['logRatioBaseline']))
+    np.testing.assert_allclose(local['score'][32:-32,32:-32],full['score'][208:304,208:304],atol=1e-6)

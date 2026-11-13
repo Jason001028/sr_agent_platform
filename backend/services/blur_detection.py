@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.ndimage import uniform_filter, binary_dilation, binary_erosion
 
-VERSION = "smart-compare-0.2-experimental"
+VERSION = "smart-compare-0.3-experimental"
 
 
 @dataclass(frozen=True)
@@ -19,6 +19,7 @@ class BlurConfig:
     sensor: str = "generic"
     frequency_review: bool = False
     scene_suppression: bool = True
+    log_ratio_baseline: float | None = None
 
     def __post_init__(self):
         if isinstance(self.window, bool) or not isinstance(self.window, int) or not 3 <= self.window <= 63 or self.window % 2 == 0:
@@ -27,6 +28,10 @@ class BlurConfig:
                 or not isinstance(self.calibration_scale, (int, float))
                 or not np.isfinite(self.calibration_scale) or self.calibration_scale <= 0):
             raise ValueError("Calibration scale must be finite and positive")
+        if self.log_ratio_baseline is not None and (isinstance(self.log_ratio_baseline,bool)
+                or not isinstance(self.log_ratio_baseline,(int,float)) or not np.isfinite(self.log_ratio_baseline)
+                or abs(self.log_ratio_baseline)>100 or self.calibration_scale is None):
+            raise ValueError("Baseline requires a fixed scale and a finite log ratio in [-100,100]")
 
 
 def local_statistics(image, valid, window):
@@ -67,6 +72,7 @@ def analyze_texture(reference, target, *, valid=None, config=None):
     log_ratio = np.log(np.maximum(ratio, 1e-12))
     informative = finite & (va > floor * 100) & (support >= .8)
     baseline = (float(np.median(log_ratio[informative])) if informative.any() else 0.) if config.calibration_scale is None else 0.
+    if config.log_ratio_baseline is not None: baseline = config.log_ratio_baseline
     loss = np.maximum(log_ratio - max(0., baseline), 0.)
     large = min(127, config.window * 2 + 1)
     _, ca, _ = local_statistics(a, finite, large)
@@ -112,7 +118,7 @@ def config_from_dict(raw=None):
     raw = {} if raw is None else raw
     if not isinstance(raw, dict):
         raise ValueError("smartOptions must be an object")
-    allowed = {"window", "calibrationScale", "sensor", "frequencyReview", "sceneSuppression"}
+    allowed = {"window", "calibrationScale", "logRatioBaseline", "sensor", "frequencyReview", "sceneSuppression"}
     if set(raw) - allowed:
         raise ValueError("Unknown Smart Compare option")
     for key in ("frequencyReview", "sceneSuppression"):
@@ -122,7 +128,7 @@ def config_from_dict(raw=None):
     if not isinstance(sensor, str) or len(sensor) > 64:
         raise ValueError("Invalid sensor")
     return BlurConfig(raw.get("window", 15), raw.get("calibrationScale"), sensor,
-                      raw.get("frequencyReview", False), raw.get("sceneSuppression", True))
+                      raw.get("frequencyReview", False), raw.get("sceneSuppression", True),raw.get("logRatioBaseline"))
 
 
 def apply_scene_masks(evidence, masks, config):
@@ -142,9 +148,8 @@ def apply_scene_masks(evidence, masks, config):
             continue
         availability[name] = "available" if config.scene_suppression else "available-disabled"
         overlaps[name] = mask
-        if config.scene_suppression:
-            # Retain evidence in scene masks, with reduced confidence.
-            evidence["score"][mask] *= .5
+        # Scene interference affects confidence, never removes the underlying
+        # texture-loss candidate. Multiple masks must not become a hard veto.
     evidence["sceneMasks"] = overlaps
 
 
@@ -218,7 +223,7 @@ def region_diagnostics(evidence, labels, region, reference, target, config):
             "compactness": min(1., float(4 * np.pi * len(xx) / perimeter ** 2)),
             "aspectRatio": max(w, h) / max(1, min(w, h)), "orientationDegrees": orientation,
             "shape": "stripe" if max(w, h) / max(1, min(w, h)) > 8 else "continuous-region",
-            "sceneOverlap": overlap, "confidence": "low" if any(v > .5 for v in overlap.values()) else
+            "sceneOverlap": overlap, "confidence": "low" if config.scene_suppression and any(v > .5 for v in overlap.values()) else
                 "scene-checked" if all(v.startswith("available") for v in evidence["maskAvailability"].values()) else "unverified-scene",
             "frequency": frequency, "reasons": ["local-variance-loss", "multi-scale-texture-loss"],
             "algorithmVersion": VERSION}

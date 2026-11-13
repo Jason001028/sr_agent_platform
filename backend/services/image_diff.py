@@ -530,6 +530,8 @@ def analyze_arrays(
     reference_side: str | None = None,
     scene_masks: dict | None = None,
     score_override: np.ndarray | None = None,
+    smart_evidence: dict | None = None,
+    evidence_sink=None,
 ) -> dict:
     """核心入口。数组形状必须一致；不一致由调用方先重采样。
 
@@ -597,13 +599,16 @@ def analyze_arrays(
             smart_config = bd.config_from_dict(smart_options)
             full_a, full_b, full_valid = smart_context
             full_reference, full_target = (full_a, full_b) if reference_side == "A" else (full_b, full_a)
-            evidence = bd.analyze_texture(full_reference, full_target, valid=full_valid, config=smart_config)
+            evidence = smart_evidence if smart_evidence is not None else bd.analyze_texture(full_reference, full_target, valid=full_valid, config=smart_config)
             if score_override is not None:
                 override = np.asarray(score_override, dtype=np.float32)
                 if override.shape != full_valid.shape or not np.isfinite(override).all() or (override < 0).any() or (override > 1).any():
                     raise DiffError("Invalid internal native-scan score grid")
                 evidence["score"] = override
-            bd.apply_scene_masks(evidence, scene_masks, smart_config)
+            if smart_evidence is None:
+                bd.apply_scene_masks(evidence, scene_masks, smart_config)
+            full_evidence = evidence
+            evidence = dict(evidence)
             for key, value in list(evidence.items()):
                 if isinstance(value, np.ndarray):
                     evidence[key] = value[y0:y1, x0:x1]
@@ -620,6 +625,8 @@ def analyze_arrays(
                          ssim_window, ssim_gaussian)
         diff = np.clip(1.0 - ssim, 0.0, 1.0).astype(np.float32)
     diff[~valid] = 0.0
+    if evidence is not None and callable(evidence_sink):
+        evidence_sink(evidence, reference, target)
 
     if threshold is None:
         thr = THRESHOLD_PRESETS[method][sensitivity]
@@ -638,11 +645,24 @@ def analyze_arrays(
         raise DiffError("最小区域面积至少为 1 px²")
 
     raw_mask = (diff >= thr) & valid
-    mask = _morphology(raw_mask, _odd_kernel(open_kernel, 3, "开运算核"),
-                       _odd_kernel(close_kernel, 3, "闭运算核")) & valid
+    if evidence is not None:
+        # Morphology needs the same context as texture statistics. Crop only
+        # after these neighbourhood operations, then trace ROI-local labels.
+        context_mask = (full_evidence["score"] >= thr) & full_evidence["validity"]
+        mask = _morphology(context_mask, _odd_kernel(open_kernel, 3, "开运算核"),
+                           _odd_kernel(close_kernel, 3, "闭运算核"))[y0:y1,x0:x1] & valid
+    else:
+        mask = _morphology(raw_mask, _odd_kernel(open_kernel, 3, "开运算核"),
+                           _odd_kernel(close_kernel, 3, "闭运算核")) & valid
 
     labels, regions = _regions(mask, diff)
     kept = _pick_regions(regions, min_area)
+    priority_weights = {}
+    if evidence is not None and smart_config.scene_suppression and evidence.get("sceneMasks"):
+        for r in kept:
+            sl=np.s_[r.y:r.y+r.h,r.x:r.x+r.w];inside=labels[sl]==r.label
+            priority_weights[r.label]=.5 if any(float(m[sl][inside].mean())>.5 for m in evidence["sceneMasks"].values()) else 1.
+        kept.sort(key=lambda r:r.mean_diff*np.sqrt(r.area)*priority_weights[r.label],reverse=True)
 
     # binaryMask = 通过面积筛选后的精确结果（不是阈值原图）。
     keep_labels = np.array([r.label for r in kept], dtype=labels.dtype)
@@ -673,7 +693,7 @@ def analyze_arrays(
             "centroid": [round(r.cx, 2), round(r.cy, 2)],
             "meanDiff": round(r.mean_diff, 4),
             "maxDiff": round(r.max_diff, 4),
-            "rankScore": round(float(r.mean_diff * np.sqrt(r.area)), 4),
+            "rankScore": round(float(r.mean_diff * np.sqrt(r.area) * priority_weights.get(r.label,1.)), 4),
             "contour": contour,
             "contourKind": contour_kind,
             "holes": holes,
@@ -686,6 +706,7 @@ def analyze_arrays(
             out_regions[-1]["componentSeed"] = [int(seed_x[0]+r.x), int(seed_y[0]+r.y)]
             out_regions[-1]["_label"] = r.label
             out_regions[-1]["diagnostics"] = bd.region_diagnostics(evidence, labels, out_regions[-1], reference, target, smart_config)
+            out_regions[-1]["diagnostics"]["priorityWeight"] = priority_weights.get(r.label,1.)
             out_regions[-1]["maskEligible"] = contour_kind == "exact" and not holes
 
     notes = list(warnings or [])

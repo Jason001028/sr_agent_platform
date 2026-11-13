@@ -22,6 +22,7 @@ export interface SmartOptions {
   frequencyReview: boolean;
   sceneSuppression: boolean;
   calibrationScale?: number;
+  logRatioBaseline?: number;
 }
 export interface SmartDiagnostic {
   classification: 'difference_only' | 'blur_candidate' | 'joint_confirmed';
@@ -147,7 +148,7 @@ export interface DiffResult {
   normalization?: { scale: number; logRatioBaseline: number; mode: string };
   analysisPrecision?: { source: string; nativeRefined: boolean; nativeScanned?: boolean; windowsAnalysisPixels: number[];
     windowsSourceA?: number[][]; tiles?: number; evidenceStatistics?: string };
-  comparison?: { summary: {method: DiffMethod; regions: number; areaPixels: number; coverage: number; elapsedMs: number; status: string; error?: string}[];
+  comparison?: { requestedMethod?: DiffMethod; status?: string; summary: {method: DiffMethod; regions: number; areaPixels: number; coverage: number; elapsedMs: number; status: string; error?: string}[];
     overlaps: {methods: string[]; iou: number | null; onlyA: number | null; onlyB: number | null; status?: string}[];
     smartUniquePixels: number | null; results: Partial<Record<DiffMethod, DiffResult>> };
   autoMask?: AutoMaskGeometry;
