@@ -120,7 +120,7 @@ def config_from_dict(raw=None):
         raise ValueError("smartOptions must be an object")
     allowed = {"window", "calibrationScale", "logRatioBaseline", "sensor", "frequencyReview", "sceneSuppression"}
     if set(raw) - allowed:
-        raise ValueError("Unknown Smart Compare option")
+        raise ValueError("Unknown LTD option")
     for key in ("frequencyReview", "sceneSuppression"):
         if key in raw and not isinstance(raw[key], bool):
             raise ValueError(f"{key} must be boolean")

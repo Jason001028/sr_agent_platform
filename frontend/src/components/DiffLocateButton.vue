@@ -18,6 +18,8 @@ import AppIcon from './AppIcon.vue';
 import { isDeveloperMode } from '../lib/developerMode';
 import { differenceSourceLabel } from '../lib/smartCompareLabels';
 
+const methodLabel = (method: string) => (({ absdiff: 'AbsDiff', ssim: 'SSIM', smart: 'LTD' } as Record<string, string>)[method] ?? method);
+
 const diff = useDiffStore();
 const viewer = useViewerStore();
 const entry = ref<HTMLElement | null>(null);
@@ -68,7 +70,7 @@ const summary = computed(() => {
     ms: r.elapsedMs,
     threshold: r.parameters.threshold,
     source: differenceSourceLabel(r.source),
-    method: r.method === 'smart' ? '智能对比' : r.method === 'ssim' ? '结构差异' : '像素差分',
+    method: r.method === 'smart' ? 'LTD' : r.method === 'ssim' ? '结构差异' : '像素差分',
   };
 });
 
@@ -173,8 +175,10 @@ onBeforeUnmount(() => {
               @click="selectMethod('ssim')">结构差异 SSIM</button>
             <button type="button" :class="{ on: diff.method === 'smart' }" role="radio"
               :aria-checked="diff.method === 'smart'" :disabled="diff.busy" data-e2e="diff-smart"
-              @click="selectMethod('smart')">智能对比</button>
+              title="Local Texture Degradation · 局部纹理退化检测 · 内网传统算法"
+              @click="selectMethod('smart')">LTD</button>
           </div>
+          <p v-if="diff.method === 'smart'" class="diff-note">局部纹理退化检测 · 内网传统算法 · 候选需人工复核</p>
         </section>
 
         <section class="diff-section" aria-label="分析范围">
@@ -254,7 +258,7 @@ onBeforeUnmount(() => {
           <summary>高级设置</summary>
           <div v-if="diff.method === 'smart'" class="diff-grid">
             <label class="diff-field"><span>纹理窗口</span><select v-model.number="diff.smartOptions.window" aria-label="纹理窗口"><option :value="7">7×7</option><option :value="15">15×15</option><option :value="31">31×31</option></select></label>
-            <label class="diff-field"><span>分析精度</span><select v-model="diff.smartPrecision" aria-label="智能对比分析精度"><option value="source-grid">原始 DN 网格</option><option value="preview">预览检测</option></select></label>
+            <label class="diff-field"><span>分析精度</span><select v-model="diff.smartPrecision" aria-label="LTD分析精度"><option value="source-grid">原始 DN 网格</option><option value="preview">预览检测</option></select></label>
             <label class="diff-field"><span>传感器配置</span><select v-model="diff.smartOptions.sensor" aria-label="传感器配置"><option v-for="s in ['generic','JL1KF01','JL1KF02','JL1GF04']" :key="s">{{ s }}</option></select></label>
             <label class="diff-field"><span>固定校准尺度（可选）</span><input :value="diff.smartOptions.calibrationScale ?? ''" type="number" min="0.01" step="0.1" aria-label="固定校准尺度" @change="diff.smartOptions.calibrationScale = ($event.target as HTMLInputElement).value ? Number(($event.target as HTMLInputElement).value) : undefined" /></label>
           </div>
@@ -321,12 +325,12 @@ onBeforeUnmount(() => {
         <details v-if="diff.comparison"><summary>三算法对照</summary>
           <button type="button" :disabled="diff.stale || diff.busy" data-e2e="diff-three-open" @click="diff.comparisonView=true;diff.closePanel()">三图同步对照</button>
           <div v-for="item in diff.comparison.summary" :key="item.method" class="compare-row">
-            <button type="button" :disabled="diff.busy || diff.stale || item.status !== 'completed'" @click="diff.showComparison(item.method)">{{ item.method }} · {{ item.status === 'completed' ? item.regions + ' 区域' : '检测失败' }}</button>
+            <button type="button" :disabled="diff.busy || diff.stale || item.status !== 'completed'" @click="diff.showComparison(item.method)">{{ methodLabel(item.method) }} · {{ item.status === 'completed' ? item.regions + ' 区域' : '检测失败' }}</button>
             <small v-if="item.status === 'completed'">{{ item.areaPixels }} px² · 有效覆盖 {{ (item.coverage*100).toFixed(2) }}% · {{ item.elapsedMs }} ms</small>
             <small v-else role="status">{{ item.error }}</small>
           </div>
-          <p v-for="pair in diff.comparison.overlaps" :key="pair.methods.join('/')">{{ pair.methods.join(' / ') }} IoU {{ pair.iou == null ? '不可用' : pair.iou.toFixed(3) }}</p>
-          <p>Smart 独有候选像素 {{ diff.comparison.smartUniquePixels ?? '不可用（对照不完整）' }}</p>
+          <p v-for="pair in diff.comparison.overlaps" :key="pair.methods.join('/')">{{ pair.methods.map(methodLabel).join(' / ') }} IoU {{ pair.iou == null ? '不可用' : pair.iou.toFixed(3) }}</p>
+          <p>LTD 独有候选像素 {{ diff.comparison.smartUniquePixels ?? '不可用（对照不完整）' }}</p>
         </details>
         <p v-else-if="diff.stale" class="diff-notice" role="status">
           参数已修改，当前仍显示上一次结果；重新分析后生效。

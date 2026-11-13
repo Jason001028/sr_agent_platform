@@ -28,7 +28,7 @@ const hiddenCount = computed(() => Math.max(0, diff.orderedRegions.length - regi
 const summary = computed(() => {
   const r = diff.result;
   if (!r) return '';
-  const method = r.method === 'smart' ? '智能对比' : r.method === 'ssim' ? '结构差异 SSIM' : '像素差分';
+  const method = r.method === 'smart' ? 'LTD' : r.method === 'ssim' ? '结构差异 SSIM' : '像素差分';
   const src = differenceSourceLabel(r.source);
   return `${method} · ${src} · 阈值 ${r.parameters.threshold} · ${r.elapsedMs} ms`;
 });

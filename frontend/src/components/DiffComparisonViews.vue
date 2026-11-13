@@ -9,7 +9,7 @@ import { fitView, wheelZoom } from '../lib/viewMath';
 
 const diff=useDiffStore(), viewer=useViewerStore();
 const methods:DiffMethod[]=['absdiff','ssim','smart'];
-const names={absdiff:'像素差异',ssim:'结构差异 SSIM',smart:'智能对比'};
+const names={absdiff:'像素差异',ssim:'结构差异 SSIM',smart:'LTD'};
 const host=ref<HTMLElement|null>(null), mode=ref<'heat'|'overlay'>('heat');
 const camera=ref({scale:1,ox:0,oy:0}), error=ref(''), loading=ref(true);
 const canvases=new Map<DiffMethod,HTMLCanvasElement>();

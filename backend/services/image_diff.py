@@ -550,7 +550,7 @@ def analyze_arrays(
     if max(a.shape) > MAX_EDGE or min(a.shape) < 2:
         raise DiffError("分析网格超出支持范围")
     if method == "smart" and reference_side not in ("A", "B"):
-        raise DiffError("智能对比必须明确 NOSR referenceSide=A/B；禁止猜测输入方向")
+        raise DiffError("LTD必须明确 NOSR referenceSide=A/B；禁止猜测输入方向")
 
     valid = np.isfinite(a) & np.isfinite(b)
     if valid_a is not None:
@@ -782,7 +782,7 @@ def analyze_arrays(
         result["regionDiagnostics"] = [{"id": r["id"], **r["diagnostics"]} for r in out_regions]
         result["filterReasons"] = {"minArea": len(regions)-len(kept),
             "insufficientTexturePixels": int((valid & ~evidence["informative"]).sum())}
-        result["warnings"].extend(["智能对比为实验性纹理损失证据，评分不是模糊概率；候选需人工复核。",
+        result["warnings"].extend(["LTD为实验性纹理损失证据，评分不是模糊概率；候选需人工复核。",
             "云、水、阴影掩膜未验证时，不代表干扰不存在。下采样可能遗漏细小缺陷。"])
     if auto_mask:
         from backend.services.auto_mask_geometry import build_auto_mask

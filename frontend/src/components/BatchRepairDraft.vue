@@ -64,8 +64,8 @@ async function start() {
 <template>
   <div class="draft" data-e2e="batch-draft" :aria-busy="busy || loading">
     <p>选择左侧生产序列，自动处理组内全部符合条件的 PAN 本体。</p>
-    <label>检测方法 <select v-model="detectionMethod" :disabled="busy || loading" aria-label="批量检测方法"><option value="absdiff">像素差异</option><option value="ssim">结构差异</option><option value="smart">智能对比（实验性，需人工复核）</option></select></label>
-    <p v-if="detectionMethod === 'smart'">智能候选不会自动提交 SR；先复核候选掩码，再沿用人工质量验收。未检出候选不等于质量通过。</p>
+    <label>检测方法 <select v-model="detectionMethod" :disabled="busy || loading" aria-label="批量检测方法"><option value="absdiff">像素差异</option><option value="ssim">结构差异</option><option value="smart">LTD（实验性，需人工复核）</option></select></label>
+    <p v-if="detectionMethod === 'smart'">LTD · 局部纹理退化检测 · 内网传统算法。候选不会自动提交 SR；先复核候选掩码，再沿用人工质量验收。未检出候选不等于质量通过。</p>
     <div class="selection"><span>{{ groups.length }} 组序列</span><button :disabled="busy || loading" @click="selectAll(true)">全选</button><button :disabled="busy || loading" @click="selectAll(false)">取消全选</button></div>
     <div class="sequence-list">
       <label v-for="g in groups" :key="g.key" class="sequence-row" :class="{ selected: g.checked }">

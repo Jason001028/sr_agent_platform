@@ -27,7 +27,7 @@ export function colorizeHeatPixels(data: Uint8ClampedArray, valid?: Uint8Clamped
 /**
  * 单通道差异字节 → RGBA。
  *
- * `weights` 是逐像素的归因 norm 字节（0 = 0.3×，119 = 1.0×，255 = 1.8×）；
+ * `weights` 是逐像素的归因 norm 字节（0 = 1.0×，255 = 2.5×）；
  * 给出时先做 `强度 × 权重` 再查色表，超过 1 的一律截断到最暖色。没有权重时
  * 与 `colorizeHeatPixels` 的着色完全一致。
  */

@@ -145,7 +145,7 @@ function onPick(e: Event) {
     <DiffLocateButton />
     <DiffContinueButton />
     <button v-if="diff.result?.autoMask" type="button" class="auto-mask-button" data-e2e="auto-mask-draw"
-      :disabled="!!diff.autoDrawReason" :title="diff.autoDrawReason || '自动绘制：将差异区域绘制到 PAN 本体，可整批撤销（Esc 取消动画）'"
+      :disabled="!!diff.autoDrawReason" :title="diff.autoDrawReason || '自动绘制：逐区审批后，将通过区域加入 PAN 本体掩码，可整批撤销（Esc 取消）'"
       aria-label="自动绘制" @click="diff.autoDraw()">
       <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m3 16 9-9 3 3-9 9-3-3ZM11 8l3 3M14 2v4M12 4h4M5 3v4M3 5h4M16 14v4M14 16h4" /></svg>
     </button>

@@ -175,7 +175,7 @@ function makeViewer() {
   return state;
 }
 
-describe('Smart Compare integration', () => {
+describe('LTD integration', () => {
   function setup() {
     const a=mocks.viewer.recs[0],b=mocks.viewer.recs[1];
     a.stageKind='input';b.stageKind='nosr';b.name='PAN_NOSR';
@@ -375,9 +375,10 @@ describe('automatic polygon staging and identity isolation', () => {
     expect(d.autoDrawReason).toBe('');
     vi.stubGlobal('window', { matchMedia: () => ({ matches: true }) });
     expect(await d.autoDraw()).toBe(true);
+    await d.reviewAutoRegion(d.autoDrawing!.polygons[0].autoDiff!.region_id, 'approved');
     expect(v.addMaskPolygonBatch).toHaveBeenCalledTimes(1);
     expect(v.addMaskPolygonBatch.mock.calls[0][0]).toBe(1);
-    expect(mocks.siblings).toHaveBeenCalledTimes(2); // before staging and before commit
+    expect(mocks.siblings).toHaveBeenCalledTimes(3); // staging, review, final commit
   });
 
   it('rejects a missing-certificate input if the server identifies it as NOSR', async () => {
@@ -418,6 +419,9 @@ describe('automatic polygon staging and identity isolation', () => {
     expect(await d.autoDraw()).toBe(false); // double click
     await vi.advanceTimersByTimeAsync(3200);
     expect(await pending).toBe(true);
+    expect(d.autoDrawing?.reviewing).toBe(true);
+    expect(mocks.viewer.addMaskPolygonBatch).not.toHaveBeenCalled();
+    await d.reviewAutoRegion(d.autoDrawing!.polygons[0].autoDiff!.region_id, 'approved');
     expect(mocks.viewer.addMaskPolygonBatch).toHaveBeenCalledTimes(1);
     const p = mocks.viewer.addMaskPolygonBatch.mock.calls[0][1][0];
     expect(thumbToOrig(p[0][0], p[0][1], 32, 32, 16, 16)).toEqual([4, 4]);
@@ -444,8 +448,47 @@ describe('automatic polygon staging and identity isolation', () => {
     vi.stubGlobal('window', { matchMedia: () => ({ matches: true }) });
     d.result!.autoMask!.polygons[0].needs_review = true;
     expect(await d.autoDraw()).toBe(true);
-    expect(d.notice).toContain('待复核');
+    expect(d.autoDrawing?.reviewing).toBe(true);
+    await d.reviewAutoRegion(d.autoDrawing!.polygons[0].autoDiff!.region_id, 'approved');
+    expect(d.notice).toContain('审批完成');
     expect(d.autoDrawing).toBeNull();
+  });
+  it('waits for all decisions and commits only approved polygons once', async () => {
+    const d = await readyAuto();
+    vi.stubGlobal('window', { matchMedia: () => ({ matches: true }) });
+    const second = structuredClone(d.result!.autoMask!.polygons[0]);
+    second.region_id = 'second';
+    d.result!.autoMask!.polygons.push(second);
+    expect(await d.autoDraw()).toBe(true);
+    const ids = d.autoDrawing!.polygons.map(p => p.autoDiff!.region_id);
+    await d.reviewAutoRegion(ids[0], 'approved');
+    expect(mocks.viewer.addMaskPolygonBatch).not.toHaveBeenCalled();
+    await d.reviewAutoRegion(ids[1], 'rejected');
+    expect(mocks.viewer.addMaskPolygonBatch).toHaveBeenCalledTimes(1);
+    expect(mocks.viewer.addMaskPolygonBatch.mock.calls[0][1]).toHaveLength(1);
+    expect(d.autoDrawing).toBeNull();
+    expect(d.resultVisible).toBe(false);
+  });
+  it('all rejected or cancelled candidates never modify existing masks', async () => {
+    const d = await readyAuto();
+    vi.stubGlobal('window', { matchMedia: () => ({ matches: true }) });
+    await d.autoDraw();
+    await d.reviewAutoRegion(d.autoDrawing!.polygons[0].autoDiff!.region_id, 'rejected');
+    expect(mocks.viewer.addMaskPolygonBatch).not.toHaveBeenCalled();
+    await d.autoDraw();
+    d.cancelAutoDraw();
+    expect(d.autoDrawing).toBeNull();
+    expect(mocks.viewer.addMaskPolygonBatch).not.toHaveBeenCalled();
+  });
+  it('rechecks source identity after approval and refuses a replaced source', async () => {
+    const d = await readyAuto();
+    vi.stubGlobal('window', { matchMedia: () => ({ matches: true }) });
+    await d.autoDraw();
+    mocks.siblings.mockResolvedValueOnce({ items: [] });
+    await d.reviewAutoRegion(d.autoDrawing!.polygons[0].autoDiff!.region_id, 'approved');
+    expect(mocks.viewer.addMaskPolygonBatch).not.toHaveBeenCalled();
+    expect(d.autoDrawing).toBeNull();
+    expect(d.error).toContain('源文件');
   });
   it('rejects unavailable or changed server files before drawing, and rechecks before commit', async () => {
     const d = await readyAuto();
@@ -488,6 +531,7 @@ describe('automatic polygon staging and identity isolation', () => {
     expect(d.autoDrawing).not.toBeNull();
     await vi.advanceTimersByTimeAsync(3200);
     expect(await second).toBe(true);
+    await d.reviewAutoRegion(d.autoDrawing!.polygons[0].autoDiff!.region_id, 'approved');
     expect(mocks.viewer.addMaskPolygonBatch).toHaveBeenCalledTimes(1);
   });
   it('preserves a draft started while the initial source check is in flight', async () => {

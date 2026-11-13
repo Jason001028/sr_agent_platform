@@ -1,4 +1,6 @@
-# Smart Compare 接入与审查报告
+# LTD 接入与审查报告
+
+统一名称：LTD（Local Texture Degradation，局部纹理退化检测），为本项目传统检测方法的自定义简称。前端、Batch、Agent 及诊断提示统一使用 LTD；原称 Smart Compare。接口 `method=smart`、字段、文件名与 `smart-compare-*` 算法版本标识保持兼容，不代表完整移植内部恢复脚本。部署说明使用“内网运行的传统图像检测”，实验性与人工复核要求不变。
 
 日期：2026-11-13。状态：本地合成数据功能验收，生产校准及内网真实影像待验。
 
@@ -60,26 +62,26 @@ Mask 验收补足了 `/siblings?tour=true&known=…` 的显式来源别名：服
 
 两张 source 输入均需 `sceneId/sourceRevision`。读取前后复核源版本与资源身份，核对场景、生产本体/NOSR 文件名、尺寸比例、样本类型及可用 GeoTIFF 配准。无 GeoTIFF 时使用原项目的“已核对同景生产比例网格”约定，明确警告其不是严格空间配准证明。
 
-保持旧响应字段；Smart 追加版本、评分语义、归一化、证据图、场景可用性、传感器来源、区域诊断、精度和来源身份。候选区域 ID 由内容和位置生成，不依赖排行。HTTP 最多展示 200 个候选，自动几何仍遵守旧预算/孔洞/覆盖规则；源坐标投影和精确资格分别记录。
+保持旧响应字段；LTD 追加版本、评分语义、归一化、证据图、场景可用性、传感器来源、区域诊断、精度和来源身份。候选区域 ID 由内容和位置生成，不依赖排行。HTTP 最多展示 200 个候选，自动几何仍遵守旧预算/孔洞/覆盖规则；源坐标投影和精确资格分别记录。
 
-请求体流式限制 48 MiB，PNG 在解码前限制边长 4096，全图 Smart 网格不超过 2048。工作队列沿用现有容量；120 秒请求预算，断连、超时或取消向源网格读取/补扫循环传递协作取消信号。已经进入 SciPy 的单个计算块不会被强杀；队列槽一直保留到工作返回。前端 AbortController 与请求序号/参数签名双重阻止旧结果回填；离开 Viewer 取消在途分析。没有新增服务端结果共享缓存，浏览器仅保留当前结果、当前精检前快照和最多一套三方法对照；重新分析/清除释放引用。
+请求体流式限制 48 MiB，PNG 在解码前限制边长 4096，全图 LTD 网格不超过 2048。工作队列沿用现有容量；120 秒请求预算，断连、超时或取消向源网格读取/补扫循环传递协作取消信号。已经进入 SciPy 的单个计算块不会被强杀；队列槽一直保留到工作返回。前端 AbortController 与请求序号/参数签名双重阻止旧结果回填；离开 Viewer 取消在途分析。没有新增服务端结果共享缓存，浏览器仅保留当前结果、当前精检前快照和最多一套三方法对照；重新分析/清除释放引用。
 
-原始 ROI 严格要求 JSON 整数，不把小数、布尔或字符串静默转为坐标；负坐标与影像求真实交集，不移动原范围。分析网格 ROI 的源 BBox 使用完整网格尺度与实际裁剪原点，不能按裁后尺寸重新拉伸。Smart 参数或源版本变化会取消在途请求，旧结果无法回填，状态不继续停在“分析中”。
+原始 ROI 严格要求 JSON 整数，不把小数、布尔或字符串静默转为坐标；负坐标与影像求真实交集，不移动原范围。分析网格 ROI 的源 BBox 使用完整网格尺度与实际裁剪原点，不能按裁后尺寸重新拉伸。LTD 参数或源版本变化会取消在途请求，旧结果无法回填，状态不继续停在“分析中”。
 
 ## Agent 与 Batch
 
 复用 `get_current_image_info` 和每条消息冻结的 `differences` 观察：智能对比只提供最多 20 个优先候选及简要证据、选择状态、方法/精度/版本、场景状态和精检状态，并冻结两侧 sceneId/revision/role、referenceSide 与配准来源。没有 PNG 或像素数组进入 LLM。继续使用既有会话绑定、快照预算、工具权限与 ROI 观察；工具描述明确候选非确认缺陷，不得据热力图自动 SR 或修改质量等级。
 
-Batch 导入新增可选 `detection_method=smart`、`smart_options`，前端既有批量草案可选方法；不选择时仍是原 AbsDiff 默认。参数、算法版本和结果摘要保存在原冻结 manifest/checkpoint 中，旧批次无新字段仍可恢复。Smart 强制采用已有 review 策略，候选几何要求人工复核后才可提交；产物沿用原人工质量审核。实验 Smart 的“未检出候选”不能替代质量通过，无候选进入整景人工审核，绑定本次检测和 PAN/NOSR 版本，未确认前不记为通过。用户核对双图并整景确认后才标 NO_ISSUE，并在完成批次前重新验证来源及人工记录；该路线没有 Job、Mask 或 SR 执行。审核持久化、CAS、幂等及替换失效沿用现有账本。没有更改 Agent Loop、Executor 或 SR 生产算法。
+Batch 导入新增可选 `detection_method=smart`、`smart_options`，前端既有批量草案可选方法；不选择时仍是原 AbsDiff 默认。参数、算法版本和结果摘要保存在原冻结 manifest/checkpoint 中，旧批次无新字段仍可恢复。LTD 强制采用已有 review 策略，候选几何要求人工复核后才可提交；产物沿用原人工质量审核。实验 LTD 的“未检出候选”不能替代质量通过，无候选进入整景人工审核，绑定本次检测和 PAN/NOSR 版本，未确认前不记为通过。用户核对双图并整景确认后才标 NO_ISSUE，并在完成批次前重新验证来源及人工记录；该路线没有 Job、Mask 或 SR 执行。审核持久化、CAS、幂等及替换失效沿用现有账本。没有更改 Agent Loop、Executor 或 SR 生产算法。
 
-Batch Smart 网格强制最多 2048，保存真实 PAN/NOSR 像素比例、窗口对应源空间尺度、analysisPrecision 与 filterReasons；旧方法的最大边长及计算口径保持原样。新清单版本取自引擎常量；0.1/0.2 实验清单恢复时 versionPolicy 明示请求/执行版本及升级后的强制人工复核，未知版本拒绝。
+Batch LTD 网格强制最多 2048，保存真实 PAN/NOSR 像素比例、窗口对应源空间尺度、analysisPrecision 与 filterReasons；旧方法的最大边长及计算口径保持原样。新清单版本取自引擎常量；0.1/0.2 实验清单恢复时 versionPolicy 明示请求/执行版本及升级后的强制人工复核，未知版本拒绝。
 
 ## 验证与实测
 
 本轮实测环境为 Windows / Anaconda Python 3.11.3。合成 TIFF 来自 NumPy/Pillow/tifffile，未使用内网真实影像或 GDAL/GPU。
 
 - 前端全量 95 个测试文件、1060 项通过，类型检查和生产构建通过。P0 来源/参数缓存回归、部分失败回退、ROI 归一化继承和无候选整景审核控件均有覆盖。已有 vendor sourcemap 缺失、jsdom Canvas 和大 bundle 提示仍存在。
-- 后端相关算法、HTTP、源读取、Mask、Batch manifest/worker/quality、Viewer 观察和配对组合回归 221 项通过；随后 Smart 专项 41 项通过（包含运行时异常部分成功，与组合回归重叠，不累加）。覆盖掩码重叠不删除候选、64² ROI 上下文形态学、96% 有效源补扫、全 NoData 单块、全部块场景状态、已选方法失败、全失败、新旧冻结版本和整景审核。整景审核使用真实临时 TIFF/SQLite/API，验证重启、幂等、源替换失效及批次最终完成；SR 作业记录为零。仅有既有 Paramiko Blowfish 弃用提示。
+- 后端相关算法、HTTP、源读取、Mask、Batch manifest/worker/quality、Viewer 观察和配对组合回归 221 项通过；随后 LTD 专项 41 项通过（包含运行时异常部分成功，与组合回归重叠，不累加）。覆盖掩码重叠不删除候选、64² ROI 上下文形态学、96% 有效源补扫、全 NoData 单块、全部块场景状态、已选方法失败、全失败、新旧冻结版本和整景审核。整景审核使用真实临时 TIFF/SQLite/API，验证重启、幂等、源替换失效及批次最终完成；SR 作业记录为零。仅有既有 Paramiko Blowfish 弃用提示。
 - 新算法合成覆盖同图、局部高斯模糊、median 非线性平滑、亮度/对比度、锐化、噪声/椒盐、低纹理水域、云/阴影/条带、高 DN、无效像素、常值与角色反转。除明示的定位/低误报断言外，其他场景仅验证数值稳定与实验状态，不宣称生产召回率。
 - HTTP 验证三方法兼容、source-grid/source-roi/source-tiled、三算法共享读取、版本漂移、输入预算和参数拒绝。原始补扫跨 512 块接缝与单块评分差异在 1 个显示字节内。
 - 真实 HTTP + 构建后 Viewer 浏览器验收：计算得到候选 → 原图精检 → 加入可编辑 Mask → 整批撤销 → 三算法对照 → 缓存方法切换 → 原始尺度补扫概览；共四次分析请求，三格独立热力图共用缩放和平移，显示阈值/不透明度、三图手势和缓存方法切换不重发请求，缺失场景证据明确展示。另经 agent-browser 实际页面检查，看到 DN 网格 384²、一个真实计算候选、逐项“未验证·未排除干扰”与“非概率”图例。只使用合成 TIFF，未执行 SR。
@@ -109,7 +111,7 @@ python -m pytest backend/tests/test_blur_detection.py backend/tests/test_smart_c
 | `backend/services/blur_detection.py` | 0.3 场景可信度与评分分离、固定基准继承及原有纹理算法 |
 | `backend/services/smart_compare.py` | 原始证据共同投影、全部块场景状态、部分成功回退、Halo 元数据 |
 | `backend/services/image_diff.py` | 上下文形态学、原始证据投影入口和可信度排序；旧两种方法计算不变 |
-| `backend/services/batch_difference.py` | 共享类别采样、Smart 2048 预算、源尺度与诊断保存 |
+| `backend/services/batch_difference.py` | 共享类别采样、LTD 2048 预算、源尺度与诊断保存 |
 | `backend/api/app.py` | 智能精度枚举与三算法精度契约校验 |
 | `backend/tests/test_blur_detection.py`、`test_smart_compare.py`、`test_smart_compare_api.py` | 算法、坐标、预算、失败及 HTTP 回归 |
 | `frontend/src/stores/diff.ts`、`stores/__tests__/diffStore.test.ts` | 参数取消、精检资格、完整高级参数、缓存切换/恢复、Agent 来源摘要与回归 |

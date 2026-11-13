@@ -271,7 +271,7 @@ def verify_goal(store,goal):
             d=item["checkpoint"].get("detection",{})
             if d.get("analysis",{}).get("calibrationStatus") == "experimental-unvalidated":
                 layer=quality_layer(store,item)
-                if layer["status"]!="passed": reasons.append("智能对比无候选仍需整景人工确认："+layer.get("reason","未复核"))
+                if layer["status"]!="passed": reasons.append("LTD无候选仍需整景人工确认："+layer.get("reason","未复核"))
             if d.get("provenance")!="real" or d.get("detector_name")!="shared-difference" or d.get("candidate_accounting",{}).get("unprocessed",1): reasons.append("未验证的无异常结果")
             for key in ("target_image","reference_image"):
                 try:

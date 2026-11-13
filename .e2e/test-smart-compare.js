@@ -16,7 +16,7 @@ const server=http.createServer((req,res)=>{
 (async()=>{
   const serveOnly=process.argv.includes('--serve');
   await new Promise(r=>server.listen(serveOnly ? 8768 : 0,'127.0.0.1',r));
-  if(serveOnly){console.log('Synthetic Smart Compare Viewer: http://127.0.0.1:8768/viewer');return;}
+  if(serveOnly){console.log('Synthetic LTD Viewer: http://127.0.0.1:8768/viewer');return;}
   const {browser,page,errors}=await launchPage();let requests=0;
   const responses=[];
   page.on('request',r=>{if(r.url().includes('/api/diff/analyze'))requests++;});
@@ -42,7 +42,9 @@ const server=http.createServer((req,res)=>{
     await page.select('select[aria-label="影像 A"]',a.value);
     await page.select('select[aria-label="影像 B"]',b.value);
     await page.click('[data-e2e="diff-analyze"]');
-    await page.waitForFunction(()=>document.querySelector('.diff-summary')?.textContent.includes('智能对比'),{timeout:30000});
+    await page.waitForFunction(()=>document.querySelector('.diff-summary')?.textContent.includes('LTD'),{timeout:30000});
+    // response.json() in the Node listener can finish after Vue renders summary.
+    for(let i=0;i<100&&!responses.length;i++) await new Promise(r=>setTimeout(r,50));
     assert(responses[0]?.source==='source-grid',JSON.stringify(responses));
     assert(responses[0].regions.length>0,'no computed candidate');
     const before=requests;
@@ -71,6 +73,15 @@ const server=http.createServer((req,res)=>{
       assert.equal(await button.evaluate(n=>n.disabled),false,'refined candidate is not eligible');await button.click();maskClicked=true;break;
     }
     assert(maskClicked,'mask action unavailable');
+    await page.waitForSelector('.approval-actions button', {timeout:15000});
+    assert.equal(await page.evaluate(()=>window.__viewer.getRois().length),0,'unreviewed masks must stay staged');
+    await page.screenshot({path:path.resolve(__dirname,'artifacts/auto-mask-review.png'),fullPage:false});
+    for (let i=0; i<200; i++) {
+      const approve = await page.$('.approval-actions button:first-child:not([aria-pressed="true"])');
+      if (!approve) break;
+      await approve.click();
+      await new Promise(r=>setTimeout(r,50));
+    }
     try { await page.waitForFunction(()=>window.__viewer.getRois().length>0,{timeout:15000}); }
     catch(e){ console.error(await page.evaluate(()=>({errors:[...document.querySelectorAll('.dc-err,.diff-error,.dc-notice,.diff-notice')].map(x=>x.textContent),modal:window.__viewer.modal()})));throw e; }
     const maskCount=await page.evaluate(()=>window.__viewer.getRois().length);
@@ -81,7 +92,7 @@ const server=http.createServer((req,res)=>{
     await page.$eval('details.diff-advanced',x=>x.open=true);
     await page.$eval('input[aria-label="三算法对照"]',x=>{x.checked=true;x.dispatchEvent(new Event('change',{bubbles:true}));});
     await page.click('[data-e2e="diff-analyze"]');
-    await page.waitForFunction(()=>document.body.textContent.includes('Smart 独有候选像素'),{timeout:30000});
+    await page.waitForFunction(()=>document.body.textContent.includes('LTD 独有候选像素'),{timeout:30000});
     assert(responses.some(r=>r.comparison?.summary.length===3));
     await page.$eval('.compare-row',n=>n.closest('details').open=true);
     await page.click('[data-e2e="diff-three-open"]');
@@ -106,7 +117,7 @@ const server=http.createServer((req,res)=>{
     await page.waitForFunction(()=>document.querySelector('.diff-summary')?.textContent.includes('像素差分'));
     assert.equal(requests,3,'switching cached comparison reran detector');
     const comparisonButtons=await page.$$('.compare-row button');await comparisonButtons[2].click();
-    await page.waitForFunction(()=>document.querySelector('.diff-summary')?.textContent.includes('智能对比'));
+    await page.waitForFunction(()=>document.querySelector('.diff-summary')?.textContent.includes('LTD'));
     // Native supplement is a score overview and must say so in the actual UI.
     const buttons=await page.$$('details.diff-advanced button');
     for(const button of buttons)if((await button.evaluate(n=>n.textContent)).includes('原始尺度补扫'))await button.click();

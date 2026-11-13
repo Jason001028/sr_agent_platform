@@ -627,7 +627,7 @@ export const useDiffStore = defineStore('diff', () => {
     const a = aRec.value, b = bRec.value;
     if (!a || !b) return '请选择 PAN 与 NOSR';
     const roles = [a.tourIdentity?.role ?? roleOf(a), b.tourIdentity?.role ?? roleOf(b)];
-    if (!roles.includes('pan') || !roles.includes('nosr')) return '智能对比需要 PAN 本体与 NOSR；不能使用 old 或 SR 产物代替';
+    if (!roles.includes('pan') || !roles.includes('nosr')) return 'LTD需要 PAN 本体与 NOSR；不能使用 old 或 SR 产物代替';
     if (smartPrecision.value !== 'preview' && (!a.sceneId || !b.sceneId || !a.srcRev || !b.srcRev)) return '原始 DN 分析需要可访问的盘阵影像与源版本';
     const groupA=sceneKeyOf(a),groupB=sceneKeyOf(b);
     const sequenceA=a.tourIdentity?.sequence, sequenceB=b.tourIdentity?.sequence;
@@ -645,7 +645,19 @@ export const useDiffStore = defineStore('diff', () => {
 
   /* Automatic polygons are staged in SVG; only one atomic vector transaction
      is committed after the animation and a final identity/draft recheck. */
-  const autoDrawing = shallowRef<{ imageId: number; groupId: string; polygons: OwnedPoly[]; duration: number } | null>(null);
+  const autoDrawing = shallowRef<{ imageId: number; groupId: string; polygons: OwnedPoly[]; duration: number;
+    reviewing: boolean; decisions: Record<string, 'approved' | 'rejected'> } | null>(null);
+  let finishReview: (() => Promise<boolean>) | null = null;
+  const autoReviewBusy = ref(false);
+  async function reviewAutoRegion(id: string, decision: 'approved' | 'rejected') {
+    const batch = autoDrawing.value;
+    if (!batch?.reviewing || autoReviewBusy.value || !batch.polygons.some(p => p.autoDiff?.region_id === id)) return;
+    autoDrawing.value = { ...batch, decisions: { ...batch.decisions, [id]: decision } };
+    if (batch.polygons.every(p => autoDrawing.value?.decisions[p.autoDiff!.region_id])) {
+      autoReviewBusy.value = true;
+      try { await finishReview?.(); } finally { autoReviewBusy.value = false; }
+    }
+  }
   const autoPreparing = ref(false);
   const autoSourceError = ref('');
   let autoValidation: AbortController | null = null;
@@ -658,6 +670,7 @@ export const useDiffStore = defineStore('diff', () => {
     autoValidation?.abort(); autoValidation = null;
     if (autoTimer !== null) clearTimeout(autoTimer);
     autoTimer = null; autoDrawing.value = null; autoPreparing.value = false;
+    finishReview = null; autoReviewBusy.value = false;
     finishAuto?.(false); finishAuto = null;
   }
   const autoTarget = computed(() => {
@@ -673,7 +686,7 @@ export const useDiffStore = defineStore('diff', () => {
     if (busy.value || autoPreparing.value || autoDrawing.value || viewer.merging) return '正在处理，请稍候';
     if (!auto) return '当前服务未提供自动绘制数据，请升级服务并重新分析';
     if (stale.value) return '分析结果已过期，请重新分析';
-    if (res?.method === 'smart' && res.source !== 'source-roi') return '智能对比网格候选需先原图精检，再加入修复掩码';
+    if (res?.method === 'smart' && res.source !== 'source-roi') return 'LTD网格候选需先原图精检，再加入修复掩码';
     if (autoSourceError.value) return autoSourceError.value;
     if (!target) return '当前分析的 A/B 未包含已确认的 PAN 本体，请选择本体后重新分析';
     if (!target.thumb || !target.src || target.pending || !target.sceneId || !target.srcRev) return 'PAN 本体源文件或预览不可用';
@@ -771,7 +784,7 @@ export const useDiffStore = defineStore('diff', () => {
       viewer.enterDraw();
       const before = JSON.stringify(target.maskRois ?? []);
       const duration = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 0 : 3200;
-      autoDrawing.value = { imageId: target.id, groupId, polygons, duration };
+      autoDrawing.value = { imageId: target.id, groupId, polygons, duration, reviewing: false, decisions: {} };
       const commit = async () => {
         try { await validateFiles(); }
         catch (e) {
@@ -787,20 +800,41 @@ export const useDiffStore = defineStore('diff', () => {
           || viewer.pendingPts?.length || viewer.pendingRect || JSON.stringify(target.maskRois ?? []) !== before) {
           cancelAutoDraw(); return false;
         }
-        const ok = viewer.addMaskPolygonBatch(target.id, polygons, auto.analysis_id);
-        const review = polygons.filter(p => p.autoDiff?.needs_review).length;
+        const accepted = polygons.filter(p => autoDrawing.value?.decisions[p.autoDiff!.region_id] === 'approved').map(p => {
+          const copy: OwnedPoly = p.map(([x, y]) => [x, y]);
+          copy.autoDiff = { ...p.autoDiff!, reviewed: true, needs_review: false };
+          return copy;
+        });
+        const ok = !accepted.length || viewer.addMaskPolygonBatch(target.id, accepted, auto.analysis_id);
         const skipped = auto.polygons.length - polygons.length;
         if (ok) {
-          notice.value = `已绘制 ${polygons.length} 个区域${review ? `，${review} 个待复核（扩展范围或孔洞）` : ''}${skipped ? `；${skipped} 个因覆盖或坐标冲突未绘制，请复核` : ''}；可整批撤销 / 重做。`;
+          resultVisible.value = false;
+          notice.value = `审批完成：通过 ${accepted.length} 个，驳回 ${polygons.length - accepted.length} 个${skipped ? `；${skipped} 个因覆盖或坐标冲突未绘制` : ''}；通过区域已转为可编辑掩码，可整批撤销 / 重做。`;
           viewer.showToast(notice.value);
         }
-        autoDrawing.value = null; autoPreparing.value = false; autoTimer = null;
+        autoDrawing.value = null; autoPreparing.value = false; autoTimer = null; finishReview = null;
         return ok;
       };
-      if (!duration) return commit();
+      const beginReview = async () => {
+        try { await validateFiles(); }
+        catch (e) {
+          if (epoch === autoEpoch) { error.value = autoSourceError.value = e instanceof Error ? e.message : String(e); cancelAutoDraw(); }
+          return false;
+        }
+        if (epoch !== autoEpoch || !autoDrawing.value) return false;
+        if (viewer.activeId !== target.id || result.value !== res || stale.value || currentKey() !== key
+          || pixelKey(target.id) !== pixels || !viewer.drawMode || viewer.pendingPts?.length || viewer.pendingRect
+          || JSON.stringify(target.maskRois ?? []) !== before) { cancelAutoDraw(); return false; }
+        autoDrawing.value = { ...autoDrawing.value, reviewing: true };
+        finishReview = commit;
+        notice.value = '请逐区点击右上角 √ / ×；全部审批后，通过区域将转为普通掩码。';
+        autoPreparing.value = false;
+        return true;
+      };
+      if (!duration) return beginReview();
       return await new Promise<boolean>(resolve => {
         finishAuto = resolve;
-        autoTimer = setTimeout(() => { void commit().then(ok => {
+        autoTimer = setTimeout(() => { void beginReview().then(ok => {
           if (epoch === autoEpoch) finishAuto = null;
           resolve(ok);
         }); }, duration);
@@ -1353,7 +1387,7 @@ export const useDiffStore = defineStore('diff', () => {
   }
 
   async function refineVisible(): Promise<boolean> {
-    if (!result.value || !aRec.value || !bRec.value) { error.value = '请先完成智能对比'; return false; }
+    if (!result.value || !aRec.value || !bRec.value) { error.value = '请先完成LTD'; return false; }
     const plan = commonGrid(aRec.value.W,aRec.value.H,bRec.value.W,bRec.value.H);
     const rect = visibleGridRect(plan.width,plan.height);
     const a = aRec.value;
@@ -1732,6 +1766,7 @@ export const useDiffStore = defineStore('diff', () => {
   /** TifCanvas 按 pane 的 rec 取显示层；坐标已换算到该 rec 的缩略图。 */
   function layerFor(rec: ViewerRec | null): DiffLayer | null {
     const res = result.value;
+    if (autoDrawing.value) return null;
     if (!resultVisible.value || !res || !rec?.thumb) return null;
     if (stale.value && res.method === 'smart') return null;
     if (rec.id !== res.imageA.id && rec.id !== res.imageB.id) return null;
@@ -1762,7 +1797,7 @@ export const useDiffStore = defineStore('diff', () => {
   }
 
   /* 图层、显隐或显示方式变化 → 主画布与鹰眼同步重绘；不触发分析或 Camera 写入。 */
-  watch([resultVisible, opacity, display, heatLayer, maskLayer, result], () => { viewer.renderTick++; });
+  watch([resultVisible, opacity, display, heatLayer, maskLayer, result, autoDrawing], () => { viewer.renderTick++; });
   /* 羽化只改显示 alpha：从精确二值掩码重建，不重算、不改区域统计。 */
   watch(feather, () => { rebuildMask(); viewer.renderTick++; });
   /* 逐像素加权只改热力图着色：从原始差异字节重建，不改差异数值与候选资格。
@@ -1838,7 +1873,7 @@ export const useDiffStore = defineStore('diff', () => {
     nextRegion: (step:number) => { const list=orderedRegions.value; if(!list.length)return;
       const index=list.findIndex(r=>r.id===selectedId.value); void locateRegion(list[(index+step+list.length)%list.length].id); },
     restoreView: () => { for(const p of savedViews??[]) if(viewer.panes.some(q=>q.side===p.side&&q.rec?.id===p.id)) viewer.setPaneView(p.side,{...p.view}); savedViews=null; },
-    autoDrawing, autoPreparing, autoDrawReason, autoDraw, cancelAutoDraw,
+    autoDrawing, autoPreparing, autoDrawReason, autoDraw, cancelAutoDraw, autoReviewBusy, reviewAutoRegion,
     // 面板
     open, resultVisible, opacity, openPanel, closePanel, busy, error, notice,
     method, sensitivity, scope, display, feather, minAreaPx, advanced, toneWeight,

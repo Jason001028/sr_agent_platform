@@ -1,4 +1,4 @@
-"""Smart Compare source orchestration, using existing bounded TIFF readers."""
+"""LTD source orchestration, using existing bounded TIFF readers."""
 from pathlib import Path
 import time
 import base64
@@ -30,7 +30,7 @@ def source_roi(raw, width, height, *, max_edge=None):
 def prepare_pair(body, resolve):
     specs = [body.get("image_a"), body.get("image_b")]
     if any(not isinstance(s, dict) or not s.get("sceneId") for s in specs):
-        raise image_diff.DiffError("智能对比原始 DN 分析需要两张可访问盘阵影像")
+        raise image_diff.DiffError("LTD原始 DN 分析需要两张可访问盘阵影像")
     paths = [Path(resolve(s["sceneId"])).resolve() for s in specs]
     if paths[0].parent != paths[1].parent or paths[0] == paths[1]:
         raise image_diff.DiffError("PAN/NOSR 必须是同一场景的不同影像")
@@ -43,7 +43,7 @@ def prepare_pair(body, resolve):
     nosr_names = {p.resolve() for p in scene_search.nosr_candidates(directory, pan)}
     nosr_names.add((directory / (directory.name + "_NOSR.tif")).resolve())
     if pan not in paths or not any(p in nosr_names for p in paths if p != pan):
-        raise image_diff.DiffError("智能对比仅接受经场景命名契约确认的 PAN 本体与 NOSR")
+        raise image_diff.DiffError("LTD仅接受经场景命名契约确认的 PAN 本体与 NOSR")
     reference_side = "B" if paths[0] == pan else "A"
     refs = []
     for path, spec in zip(paths, specs):

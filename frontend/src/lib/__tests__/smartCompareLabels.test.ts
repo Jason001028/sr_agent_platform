@@ -1,7 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {sceneEvidenceLabel, frequencyEvidenceLabel, confidenceEvidenceLabel, differenceSourceLabel} from '../smartCompareLabels';
 
-describe('Smart Compare evidence wording', () => {
+describe('LTD evidence wording', () => {
   it('never presents a missing or failed scene mask as excluded interference', () => {
     for (const status of ['unverified', 'unverified-source', 'unverified-read-failed', 'future-status']) {
       expect(sceneEvidenceLabel(status)).toContain('未排除干扰');
