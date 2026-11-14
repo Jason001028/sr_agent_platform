@@ -12,6 +12,7 @@ export interface WorkspaceItem {
 }
 
 export interface WorkspaceSnapshot {
+  resources?: {id:number;name:string;image_key:string|null;source_revision:string|null;asset_id:string|null;width:number;height:number}[];
   /** 左侧临时工作区版本；清空/刷新后自增，旧快照据此失效。 */
   version: number;
   /** 有盘阵场景身份的影像（本地拖入的图不在其中）。 */
@@ -20,7 +21,10 @@ export interface WorkspaceSnapshot {
   total: number;
   /** 没有场景身份、无法参与盘阵检索的影像数。 */
   local_only: number;
+  /** 仅指场景候选 items 被丢掉；修复计划据此拒绝静默规划前缀。 */
   truncated: boolean;
+  /** 仅指本地资源身份被裁掉；不影响场景候选的规划。 */
+  resources_truncated?: boolean;
 }
 
 /** 左侧列表 → 工作区候选集。纯函数：只复制 id 与名字，不序列化任何图像数据。 */
@@ -29,10 +33,17 @@ export function snapshotWorkspace(
 ): WorkspaceSnapshot {
   const seen = new Set<string>();
   const items: WorkspaceItem[] = [];
+  const resources: NonNullable<WorkspaceSnapshot['resources']> = [];
   let total = 0;
   let localOnly = 0;
   for (const r of recs) {
-    if (!r.sceneId) { localOnly += 1; continue; }
+    if (!r.sceneId) {
+      localOnly += 1;
+      if (resources.length < WORKSPACE_MAX_ITEMS) resources.push({id:r.id,name:r.name.slice(0,512),
+        image_key:r.file?imageRef(r)?.image_key??null:null,source_revision:r.srcRev??null,
+        asset_id:r.previewAsset?.id??null,width:r.W||0,height:r.H||0});
+      continue;
+    }
     // 同一景可能被打开两次（输入 / 产物各一行）：按场景 id 去重，total 也只
     // 数一景 —— truncated 的判据是「有条目被丢掉了没有」，不能因为重复而误报。
     if (seen.has(r.sceneId)) continue;
@@ -45,9 +56,11 @@ export function snapshotWorkspace(
   return {
     version,
     items,
+    resources,
     total,
     local_only: localOnly,
     truncated: total > items.length,
+    resources_truncated: localOnly > resources.length,
   };
 }
 
@@ -76,6 +89,7 @@ export function snapshotViewer(viewer: {
     image_key: r.spatialIdentity && r.spatialIdentityToken===r.token ? r.spatialIdentity
       : r.file ? imageRef(r)?.image_key ?? null : null,
     source_revision: r.srcRev ?? null, stage: r.stageKind ?? null,
+    asset_id: r.previewAsset?.id ?? null,
   } : null;
   const active = viewer.activeRec;
   const polygon = active?.maskRois?.[viewer.selRoi ?? -1];
@@ -97,7 +111,7 @@ export function snapshotViewer(viewer: {
     workspace: snapshotWorkspace(viewer.recs ?? [], viewer.workspaceVersion ?? 0),
     attachment_count: attachmentCount,
     selected_images: selected.slice(0,24).map(r=>({id:r.id,name:r.name.slice(0,512),scene_id:r.sceneId??null,
-      image_key:r.spatialIdentity&&r.spatialIdentityToken===r.token?r.spatialIdentity:r.file?imageRef(r)?.image_key??null:null,source_revision:r.srcRev??null,width:r.W,height:r.H})),
+      image_key:r.spatialIdentity&&r.spatialIdentityToken===r.token?r.spatialIdentity:r.file?imageRef(r)?.image_key??null:null,source_revision:r.srcRev??null,asset_id:r.previewAsset?.id??null,width:r.W,height:r.H})),
     selected_total: viewer.selectedIds.length, selected_truncated: selected.length > 24,
     roi,
     masks: { image_id: active?.id ?? null, count: active?.maskRois?.length ?? 0,

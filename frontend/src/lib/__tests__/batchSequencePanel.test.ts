@@ -30,7 +30,7 @@ const plan = (n = 2, over: Partial<RepairPlan> = {}): RepairPlan => ({
   targets: { total: n, excluded: 0, applicable: n, items: [] },
   strategy: { detection: 'existing_diff_pipeline', detection_method: 'absdiff', mask: 'auto_or_existing', execution: 'existing_batch_runtime' },
   mode: 'demo', execution: { allowed: true, mode: 'demo', reason: null },
-  manifest_ref: 'manifest:test', title: '批量智能修复',
+  manifest_ref: 'manifest:test', title: '批量自动修复',
   ...over,
 });
 const rec = (id: number, dir: string | null, stageKind = 'nosr') => ({ id, sceneDir: dir, stageKind, name: 'display.jpg' } as ViewerRec);
@@ -104,6 +104,18 @@ describe('compact sequence selection', () => {
     start().click(); await flush();
     expect(apiConfirmRepair).not.toHaveBeenCalled();
     expect(root.querySelector('[role=alert]')?.textContent).toContain('备份');
+  });
+  it('keeps a valid plan when demo execution is unavailable and never confirms it', async () => {
+    vi.mocked(apiPrepareRepair).mockResolvedValue(plan(2,{execution:{allowed:false,mode:'demo',reason:"BatchGateError: demo batch requires SR_EXECUTOR=slurm, got 'local'"}}) as never);
+    await mount();
+    start().click();await flush();
+    expect(root.querySelector('[data-e2e=batch-plan-summary]')?.textContent).toContain('2 景');
+    expect(root.querySelector('[role=status]')?.textContent).toContain('本地执行器');
+    expect(root.querySelector('[role=alert]')).toBeNull();
+    expect(start().disabled).toBe(true);
+    start().click();await flush();
+    expect(apiConfirmRepair).not.toHaveBeenCalled();
+    expect(apiStartRepair).not.toHaveBeenCalled();
   });
   it('guards double clicks and reuses the prepared plan', async () => {
     await mount();

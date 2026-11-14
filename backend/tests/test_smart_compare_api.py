@@ -61,6 +61,24 @@ def test_queue_timeout_is_explicit(client,pair):
         assert response.status_code==504
 
 
+def test_ltd_runtime_failures_never_fall_through_to_opaque_500(client,pair):
+    from backend.services.batch_detector import DetectionError
+    _,body,resolve=pair
+    with patch('backend.api.app._diff_source_path',side_effect=lambda sid,root:resolve(sid)):
+        with patch('backend.services.smart_compare.prepare_pair',side_effect=FileNotFoundError('/disk/PAN.tif')):
+            response=client.post('/api/diff/analyze',json=body)
+            assert response.status_code==409,response.text
+            assert 'PAN.tif' in response.json()['detail']
+        with patch('backend.services.smart_compare.prepare_pair',
+                   side_effect=DetectionError('无法读取条带布局：compression=7')):
+            response=client.post('/api/diff/analyze',json=body)
+            assert response.status_code==400,response.text
+            assert 'DetectionError' in response.json()['detail']
+        with patch('backend.services.smart_compare.prepare_pair',side_effect=MemoryError()):
+            response=client.post('/api/diff/analyze',json=body)
+            assert response.status_code==503,response.text
+
+
 def test_named_sibling_aliases_bind_the_same_source(client,pair):
     from backend.api.paths import scene_id_abs
     paths,_,_=pair

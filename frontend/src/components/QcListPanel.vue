@@ -232,8 +232,8 @@ watch(
 
     <!-- 一键解析：单占一行，不挤进 .qc-h（那一行 400px 里已有标题/计数/换一份/未完成/✕，
          再塞一颗要抢戏的橘色按钮，标题会被压成省略号）。
-         「智能修复」排在它左边：先决定怎么修，再决定解析哪批；点开/收起上方任务中枢。
-         「Agent修复」紧挨着它：把同一批修复意图交给 Agent 准备计划（仍需在计划卡确认）。
+         「自动修复」排在它左边：先决定怎么修，再决定解析哪批；点开/收起上方任务中枢。
+         「Agent协助」紧挨着它：把同一批修复意图交给 Agent 准备计划（仍需在计划卡确认）。
          **不做二次确认弹窗**：清空只清视图、盘上什么都没动，卡片重跑一遍就回来了。 -->
     <div v-if="qc.loaded" class="qc-go-row">
       <button
@@ -241,16 +241,16 @@ watch(
         class="qc-smart"
         :class="{ on: batchDockOpen }"
         :aria-pressed="batchDockOpen"
-        title="选择生产序列并开始批量智能修复"
+        title="选择生产序列并开始批量自动修复"
         @click="openBatchSelection"
-      >智能修复</button>
+      >自动修复</button>
       <button
         type="button"
         class="qc-agent"
         data-e2e="qc-agent-repair"
         title="让 Agent 准备当前工作区的修复计划；在计划卡确认后启动"
         @click="requestAgentRepair"
-      >Agent修复</button>
+      >Agent协助</button>
       <template v-if="qc.loaded">
         <button
           type="button"
@@ -439,12 +439,13 @@ watch(
 .qc-empty { margin: 0; font-size: 11px; line-height: 1.7; color: var(--ink-sub); }
 .qc-busy { margin: 6px 0 0; font-size: 11px; color: var(--accent-deep); }
 
-/* 一键解析：醒目橘色，用 --notice-job 那族令牌（**刻意非主题色** —— 主题的青绿已经被
-   .file-item.active 与「盘阵」芯片占用，再借它就没有「这是一颗特别的按钮」的意思了）。 */
-.qc-go-row { display: flex; align-items: center; gap: 6px; margin: 0 0 6px; }
-/* 「智能修复」：任务中枢的开关。蓝底取设计令牌 --cmp-a（调色板里唯一的浅蓝族，
-   与列表里的环节标签同源），与隔壁橘色的「一键解析」靠色相分开；两颗按钮的
-   字号/字重与白字保持一致，阴影同为三层。 */
+/* 三个入口依次使用雾霭蓝、烟晶紫、香槟砂金，文字统一为白色。 */
+.qc-go-row {
+  --repair-blue: #58758F;
+  --agent-purple: #817095;
+  --parse-gold: #A08767;
+  display: flex; align-items: center; gap: 6px; margin: 0 0 6px;
+}
 .qc-smart {
   flex: none;
   height: 24px;
@@ -453,20 +454,18 @@ watch(
   font-weight: 600;
   font-family: inherit;
   color: #fff;
-  background: var(--cmp-a);
-  border: 1px solid var(--cmp-a);
+  background: var(--repair-blue);
+  border: 1px solid var(--repair-blue);
   border-radius: var(--r-ctrl);
   cursor: pointer;
   box-shadow:
-    0 1px 2px rgba(63, 109, 168, 0.22),
-    0 3px 7px rgba(63, 109, 168, 0.18),
-    0 8px 16px rgba(63, 109, 168, 0.12);
+    0 1px 2px rgba(88, 117, 143, 0.22),
+    0 3px 7px rgba(88, 117, 143, 0.18),
+    0 8px 16px rgba(88, 117, 143, 0.12);
   transition: filter var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard);
 }
 .qc-smart:hover { filter: brightness(1.08); }
-.qc-smart.on { background: color-mix(in srgb, var(--cmp-a) 84%, #000); border-color: color-mix(in srgb, var(--cmp-a) 84%, #000); }
-/* 「Agent修复」：第三颗入口，浅蓝底 + 深蓝字，与实心蓝的「智能修复」、橘色的
-   「一键解析」同尺寸同圆角，但用浅底区分「交给 Agent 准备计划」这条路径。 */
+.qc-smart.on { background: color-mix(in srgb, var(--repair-blue) 84%, #000); border-color: color-mix(in srgb, var(--repair-blue) 84%, #000); }
 .qc-agent {
   flex: none;
   height: 24px;
@@ -474,19 +473,19 @@ watch(
   font-size: 12px;
   font-weight: 600;
   font-family: inherit;
-  color: var(--cmp-a);
-  background: var(--cmp-a-bg);
-  border: 1px solid var(--cmp-a-line);
+  color: #fff;
+  background: var(--agent-purple);
+  border: 1px solid var(--agent-purple);
   border-radius: var(--r-ctrl);
   cursor: pointer;
   box-shadow:
-    0 1px 2px rgba(63, 109, 168, 0.10),
-    0 3px 7px rgba(63, 109, 168, 0.08),
-    0 8px 16px rgba(63, 109, 168, 0.05);
+    0 1px 2px rgba(129, 112, 149, 0.10),
+    0 3px 7px rgba(129, 112, 149, 0.08),
+    0 8px 16px rgba(129, 112, 149, 0.05);
   transition: filter var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard);
 }
-.qc-agent:hover { background: color-mix(in srgb, var(--cmp-a-bg) 80%, var(--cmp-a) 20%); }
-.qc-agent:focus-visible { outline: 2px solid var(--cmp-a); outline-offset: 1px; }
+.qc-agent:hover { filter: brightness(1.08); }
+.qc-agent:focus-visible { outline: 2px solid var(--agent-purple); outline-offset: 1px; }
 .qc-go {
   flex: none;
   height: 24px;
@@ -495,23 +494,23 @@ watch(
   font-weight: 600;
   font-family: inherit;
   color: #fff;
-  background: var(--notice-job);
-  border: 1px solid var(--notice-job-ink);
+  background: var(--parse-gold);
+  border: 1px solid var(--parse-gold);
   border-radius: var(--r-ctrl);
   cursor: pointer;
   box-shadow:
-    0 1px 2px rgba(194, 116, 58, 0.24),
-    0 3px 7px rgba(194, 116, 58, 0.20),
-    0 8px 16px rgba(194, 116, 58, 0.12);
+    0 1px 2px rgba(160, 135, 103, 0.24),
+    0 3px 7px rgba(160, 135, 103, 0.20),
+    0 8px 16px rgba(160, 135, 103, 0.12);
   transition: filter var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard);
 }
 .qc-go:hover:not(:disabled) { filter: brightness(1.06); }
 /* 跑着时这颗按钮是「停止」：底色压深一档，与待命态一眼分得开 */
-.qc-go.running { background: var(--notice-job-ink); }
+.qc-go.running { background: color-mix(in srgb, var(--parse-gold) 84%, #000); }
 .qc-go.stopping {
-  background: var(--surface-3);
-  border-color: var(--line);
-  color: var(--ink-faint);
+  background: color-mix(in srgb, var(--parse-gold) 75%, var(--surface-3));
+  border-color: var(--parse-gold);
+  color: #fff;
   box-shadow: none;
 }
 .qc-go:disabled { cursor: default; }

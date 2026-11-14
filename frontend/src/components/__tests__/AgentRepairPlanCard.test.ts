@@ -116,7 +116,7 @@ it('transitions the same card into the running stage after start', async () => {
   root.querySelector<HTMLButtonElement>('[data-e2e=repair-plan-start]')!.click();
   await flush();
   expect(apiStartRepair).toHaveBeenCalledTimes(1);
-  expect(root.textContent).toContain('智能修复');
+  expect(root.textContent).toContain('自动修复');
   expect(root.textContent).toContain('SCENE_A');
   expect(root.textContent).toContain('已验收 1');
   expect(root.querySelector('[data-e2e=repair-task-actions]')).not.toBeNull();

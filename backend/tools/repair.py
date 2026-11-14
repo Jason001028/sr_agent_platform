@@ -30,13 +30,14 @@ def _unbound_store():
 
 class _Context:
     def __init__(self, *, store=None, session_id=None, workspace=None,
-                 current=None, selected_images=None, batch_draft=None):
+                 current=None, selected_images=None, batch_draft=None, selected_truncated=False):
         self.store = store
         self.session_id = session_id
         self.workspace = workspace
         self.current = current
         self.selected_images = selected_images
         self.batch_draft = batch_draft
+        self.selected_truncated = selected_truncated
 
     def close(self):
         pass
@@ -75,10 +76,12 @@ def _prepare(ctx, scope, mode, strategy, detection_method, mask_policy, title,
     if store is None:
         store, owned = _unbound_store()
     try:
+        if scope == 'selection' and ctx.selected_truncated:
+            return err('多选影像快照被截断，请缩小选择范围后重新准备，不能静默只规划前一部分')
         if (scope != "draft" and ctx.workspace is None and ctx.current is None
                 and not ctx.selected_images):
             return err(
-                "这条消息没有绑定 Viewer 工作区；请先从场景库打开影像或勾选工作区，"
+                "这条消息没有绑定 Viewer 工作区；请先打开本地、上传或服务器影像，"
                 "不要用场景库检索代替当前工作区。")
         kwargs = {}
         if scope == "draft":
@@ -286,7 +289,9 @@ _PREPARE_DESC = (
     "准备一份修复计划，并持久化计划、目标身份与执行策略。"
     "只做目标校验与计划冻结，绝不提交 SR、不改原始影像、不启动后台修复。"
     "默认使用当前工作区，禁止为识别当前影像或清单而再次检索场景库。"
-    "只接受工作区里的盘阵场景身份，不接受任意文件路径；本地图片没有可信路径时会明确阻断。"
+    "支持本地TIFF、上传资源及允许目录中的服务器影像，不要求资源进入盘阵场景库。"
+    "没有后端源文件绑定或PAN/NOSR契约时仍返回资源评估计划及具体缺项；此类计划不可启动SR。"
+    "消息中的资源引用仅用于观察与规划，不授予任意文件访问权限。"
     "返回 plan_id、targets、strategy、mode、execution 与 confirmation_required；"
     "计划必须由真实用户在界面上确认后，才能用 start_repair 启动。"
 )
@@ -303,7 +308,7 @@ _START_DESC = (
 
 _GET_WORKSPACE_DESC = (
     "零控制参数只读查询本条消息冻结的 Viewer 工作区候选集、当前影像、多选影像、"
-    "本地无盘阵身份的数量，以及本会话最近的批量修复 Goal。"
+    "本地资源数量，以及本会话最近的批量修复 Goal。"
     "用于解释“这批图/当前影像”指的是什么；不检索场景库、不读取像素、不启动或控制任务。"
 )
 
@@ -325,7 +330,7 @@ _PREPARE_PARAMS = {
             "type": "string",
             "enum": ["current", "selection", "workspace", "draft"],
             "default": "workspace",
-            "description": "修复目标：current=当前活动影像，selection=当前多选影像，workspace=左侧工作区全部盘阵场景，draft=当前修复草稿清单（已排除项跳过）。",
+            "description": "修复目标：current=当前活动影像，selection=当前多选影像，workspace=左侧全部影像资源（含本地/上传），draft=当前修复草稿清单（已排除项跳过）。",
         },
         "mode": {
             "type": "string", "enum": ["demo", "production"], "default": "demo",
@@ -417,12 +422,12 @@ def get_repair_item(goal_id, item_id):
 # ---------------------------------------------------------------------------
 
 def bound_tool(name: str, *, workspace=None, current=None, selected_images=None,
-               batch_draft=None, session_id=None, store=None) -> Tool:
+               batch_draft=None, session_id=None, store=None, selected_truncated=False) -> Tool:
     """Return one tool bound to this message's frozen Viewer context."""
     context = _Context(store=store, session_id=session_id,
                        workspace=workspace, current=current,
                        selected_images=selected_images,
-                       batch_draft=batch_draft)
+                       batch_draft=batch_draft, selected_truncated=selected_truncated)
     if name == "prepare_repair":
         def run(scope="workspace", mode="demo", strategy="automatic",
                 detection_method="absdiff", mask_policy="auto", title=None):

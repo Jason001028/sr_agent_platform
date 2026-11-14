@@ -134,8 +134,19 @@ class RepairApplicationTest(unittest.TestCase):
                            "items": [{"scene_id": paths.scene_id_abs(inp),
                                       "name": "only first"}]})
 
+    def test_resource_truncation_does_not_block_scene_planning(self):
+        scene_dir, inp = self.scene(14)
+        workspace = {"version": 1, "total": 1, "truncated": False,
+                     "resources_truncated": True, "local_only": 0,
+                     "items": [{"scene_id": paths.scene_id_abs(inp), "name": "ok"}]}
+        plan = svc.prepare_repair(
+            self.store, session_id="s1", workspace=workspace,
+            scope="workspace", mode="demo")
+        self.assertEqual(plan["targets"]["applicable"], 1)
+        self.assertEqual(plan["status"], "READY")
+
     def test_local_only_workspace_is_blocked_with_a_reason(self):
-        with self.assertRaisesRegex(svc.RepairError, "可信盘阵路径"):
+        with self.assertRaisesRegex(svc.RepairError, "资源身份"):
             svc.prepare_repair(
                 self.store, session_id="s1", scope="workspace",
                 workspace={"version": 1, "total": 0, "items": [],
@@ -584,6 +595,83 @@ class RepairApplicationTest(unittest.TestCase):
                 f"user:{sid}")
 
     # ---- Agent tools ---------------------------------------------------
+    def test_local_resources_prepare_an_assessment_without_manifest_or_sr(self):
+        current={'id':7,'name':'local.tif','image_key':'local-session:7','source_revision':'r1',
+                 'path':'/forged/path','permissions':{'write':True},'asset_id':'uploaded-ref'}
+        with mock.patch.object(batch_manifest,'import_manifest',side_effect=AssertionError('no manifest')) as importer, \
+             mock.patch('backend.services.run_sr.submit_run_sr',side_effect=AssertionError('no SR')) as submit:
+            plan=svc.prepare_repair(self.store,session_id=self.session_id,current=current,scope='current')
+        self.assertEqual(plan['status'],'BLOCKED')
+        self.assertEqual(plan['targets']['total'],1)
+        self.assertEqual(plan['targets']['items'][0]['resource']['image_key'],'local-session:7')
+        self.assertNotIn('/forged/path',json.dumps(plan))
+        self.assertFalse(plan['execution']['allowed'])
+        self.assertTrue(plan['capabilities']['repair_assessment'])
+        self.assertIsNotNone(self.store.get_repair_plan(plan['plan_id']))
+        with self.assertRaises(RepairPlanConflict):
+            svc.confirm_repair(self.store,plan['plan_id'],session_id=self.session_id)
+        with self.assertRaises(RepairPlanConflict):
+            svc.start_repair(self.store,plan['plan_id'],session_id=self.session_id)
+        importer.assert_not_called();submit.assert_not_called()
+
+    def test_builtin_binding_has_one_owner_per_tool_and_keeps_pagination(self):
+        from backend.tools.contract import Tool, ToolRegistry, ok
+        registry=bind_registry(build_builtin_registry(),{'version':1},store=self.store,session_id=self.session_id)
+        names=[t.name for t in registry.list()]
+        for name in ('get_repair_workspace','list_repair_items','get_repair_item'):
+            self.assertEqual(names.count(name),1)
+            self.assertEqual(registry.get(name).run.__module__,'backend.services.repair_workspace')
+        self.assertIn('cursor',registry.get('list_repair_items').params_schema['properties'])
+        self.assertIsNotNone(registry.get('prepare_repair'))
+        self.assertIsNotNone(registry.get('start_repair'))
+        with self.assertRaises(ValueError):
+            registry.register(registry.get('get_repair_workspace'))
+        custom=Tool('get_repair_workspace','custom',{'type':'object'},lambda:ok('plugin'))
+        bound=bind_registry(ToolRegistry([custom]),{'version':1})
+        self.assertEqual(bound.invoke('get_repair_workspace')['data'],'plugin')
+
+    def test_mixed_workspace_keeps_local_resources_in_the_plan(self):
+        workspace={'version':1,'items':[{'scene_id':'server-id','name':'server.tif'}],
+            'resources':[{'image_key':'local:1','name':'local.tif'},{'asset_id':'upload1','name':'upload.tif'}],
+            'total':1,'local_only':2}
+        with mock.patch.object(batch_manifest,'import_manifest',side_effect=AssertionError('no silent partial batch')):
+            plan=svc.prepare_repair(self.store,session_id=self.session_id,workspace=workspace)
+        self.assertEqual(plan['targets']['total'],3)
+        self.assertEqual(plan['status'],'BLOCKED')
+        workspace['resources'].pop()
+        with self.assertRaisesRegex(svc.RepairError,'资源身份不完整'):
+            svc.prepare_repair(self.store,session_id=self.session_id,workspace=workspace)
+
+    def test_truncated_selection_does_not_silently_prepare_a_prefix(self):
+        registry=bind_registry(build_builtin_registry(),{'version':1,'selected_truncated':True,
+            'selected_images':[{'id':1,'name':'local.tif','image_key':'local1'}]},
+            store=self.store,session_id=self.session_id)
+        result=registry.invoke('prepare_repair',{'scope':'selection'})
+        self.assertFalse(result['ok'])
+        self.assertIn('截断',result['error'])
+
+    def test_non_library_allowed_directory_still_prepares_an_executable_input_plan(self):
+        directory,inp=self.scene(812)
+        # The configured library root deliberately contains no such directory.
+        with mock.patch.dict(os.environ,{'SR_SCENES_ROOT':str(self.root/'different-library')}):
+            plan=svc.prepare_repair(self.store,session_id=self.session_id,scope='current',
+                current={'scene_id':paths.scene_id_abs(inp),'name':directory.name})
+        self.assertEqual(plan['status'],'READY')
+        self.assertEqual(plan['targets']['applicable'],1)
+
+    def test_local_executor_keeps_ready_plan_but_cannot_create_goal(self):
+        directory,inp=self.scene(813)
+        with mock.patch.dict(os.environ,{'SR_EXECUTOR':'local'}), \
+             mock.patch.object(self.store,'create_batch_goal',side_effect=AssertionError('no Goal')) as create:
+            plan=svc.prepare_repair(self.store,session_id=self.session_id,
+                sources=[{'path':str(inp),'name':directory.name}])
+            self.assertEqual(plan['status'],'READY')
+            self.assertFalse(plan['execution']['allowed'])
+            svc.confirm_repair(self.store,plan['plan_id'],session_id=self.session_id)
+            with self.assertRaises(svc.RepairBlocked):
+                svc.start_repair(self.store,plan['plan_id'],session_id=self.session_id)
+            create.assert_not_called()
+
     def test_agent_prepare_then_start_shares_the_plan_contract(self):
         scene_dir, inp = self.scene(9)
         snapshot = validate_snapshot({

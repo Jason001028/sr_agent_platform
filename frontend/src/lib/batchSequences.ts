@@ -24,6 +24,7 @@ export function importProblem(result: BatchImportResult): string {
     : '';
 }
 export function compactBatchError(message: string): string {
+  if (message.includes("demo batch requires SR_EXECUTOR=slurm")) return '当前后端使用本地执行器，演示计划需要 Fake Slurm 环境；计划已保留，尚未启动任务。';
   if (message.includes('production batch execution is not enabled yet')) return '生产批量执行尚未开放，当前后端拒绝启动。';
   return message.replace(/(?:[A-Za-z]:[\\/]|\/)[^\s；，：]+/g, path => `影像文件（${path.split(/[\\/]/).pop()}）`);
 }

@@ -51,7 +51,6 @@ function selectAll(checked: boolean) { for (const g of groups.value) g.checked =
 function planProblem(plan: RepairPlan): string {
   const blocking = (plan.blocking ?? []).map(row => row.message).filter(Boolean).join('；');
   if (plan.status !== 'READY') return blocking || '计划存在阻断项，请重新核对清单';
-  if (!plan.execution.allowed) return plan.execution.reason || '当前执行环境不允许启动修复';
   if (!plan.targets.applicable) return '计划里没有可执行的目标项';
   return '';
 }
@@ -60,7 +59,7 @@ async function prepareOnly(sessionId: string | null, token: number, key: string)
   const plan = await apiPrepareRepair({
     session_id: sessionId, sources, mode: mode.value,
     strategy: strategy.value, detection_method: detectionMethod.value,
-    title: `批量智能修复 · ${sources.length} 组`, created_by: 'tool_panel',
+    title: `批量自动修复 · ${sources.length} 组`, created_by: 'tool_panel',
   });
   if (key !== signature() || token !== generation) throw new Error('序列、模式或会话已变化，请重新开始');
   const problem = planProblem(plan);
@@ -77,6 +76,7 @@ async function start() {
   const token = generation, key = signature();
   if (pendingPlan.value && key === signature()) {
     const pending = pendingPlan.value;
+    if (!pending.execution.allowed) return;
     busy.value = true;
     try {
       await apiConfirmRepair(pending.plan_id, { session_id: sessionId });
@@ -130,11 +130,14 @@ async function start() {
     <p v-if="!groups.length">左侧暂无已关联生产序列。</p>
     <p v-if="pendingPlan" class="plan-summary" data-e2e="batch-plan-summary">
       已准备计划：{{ pendingPlan.targets.applicable }} 景，{{ pendingPlan.mode === 'demo' ? '演示 / Fake SR' : '生产模式' }}，
-      {{ pendingPlan.strategy.detection }}。请在下方确认后启动。
+      {{ pendingPlan.strategy.detection }}。{{ pendingPlan.execution.allowed ? '请在下方确认后启动。' : '计划已保留，执行条件满足后请重新准备并确认。' }}
+    </p>
+    <p v-if="pendingPlan && !pendingPlan.execution.allowed" class="error" role="status">
+      计划已准备，当前环境暂不能启动：{{ compactBatchError(pendingPlan.execution.reason || '执行条件未满足') }}
     </p>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <p class="note">自动配对、检测、绘制掩码并提交验收；沿用生产提交限制和成果保护。</p>
-    <button class="primary" :disabled="busy || loading || !chosen.length" @click="start">{{ busy ? '正在核验并创建任务…' : pendingPlan ? `确认并启动 · ${pendingPlan.targets.applicable} 景` : `准备修复计划 · 已选 ${chosen.length} 组` }}</button>
+    <button class="primary" :disabled="busy || loading || !chosen.length || !!(pendingPlan && !pendingPlan.execution.allowed)" @click="start">{{ busy ? '正在核验并创建任务…' : pendingPlan && !pendingPlan.execution.allowed ? '计划已准备 · 当前环境不可启动' : pendingPlan ? `确认并启动 · ${pendingPlan.targets.applicable} 景` : `准备修复计划 · 已选 ${chosen.length} 组` }}</button>
   </div>
 </template>
 <style scoped>

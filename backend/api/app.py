@@ -1524,6 +1524,17 @@ def create_app() -> FastAPI:
         except PreviewError as e:
             raise HTTPException(status_code=422,
                                 detail=f"预览生成失败：{e}") from e
+        except OSError as e:
+            raise HTTPException(status_code=409,
+                                detail=f"源影像读取失败：{e}") from e
+        except (TypeError, ValueError) as e:
+            # 条带布局/影像尺寸等 DetectionError 属于 ValueError 子类，
+            # 原先落到未映射分支时前端只拿到无正文的 HTTP 500。
+            raise HTTPException(status_code=400,
+                                detail=f"{type(e).__name__}: {e}") from e
+        except MemoryError as e:
+            raise HTTPException(status_code=503,
+                                detail="差异分析内存不足，请缩小 ROI 或改用预览精度重试") from e
 
     from backend.services.scene_library import install as install_scene_library
     install_scene_library(app, root, _manual_row, _cached_dims)

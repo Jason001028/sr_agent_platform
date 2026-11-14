@@ -2139,7 +2139,7 @@ class Store:
                         and old.get("confirmation_expires_at")
                         and float(old["confirmation_expires_at"]) > now):
                     return old
-                if (old["status"] == "READY"
+                if (old["status"] in {"READY", "BLOCKED"}
                         and float(old.get("expires_at") or 0) > now
                         and _repair_plan_content_key(old)
                         == _repair_plan_content_key(plan)):
@@ -2153,6 +2153,9 @@ class Store:
             version = (int(old["version"] or 1) + 1 if old is not None
                        else int(plan.get("version") or 1))
             plan = {**plan, "version": version}
+            prepared_status = plan.get('status') or 'READY'
+            if prepared_status not in {'READY','BLOCKED'}:
+                raise ValueError('prepared plan status must be READY or BLOCKED')
             session = plan.get("session_id")
             scope = plan.get("scope") or "batch"
             mode = plan.get("mode") or "demo"
@@ -2188,7 +2191,7 @@ class Store:
                     + ", ".join("?" for _ in columns) + ")",
                     (version, session, scope, mode, strategy, detection,
                      mask_policy, manifest_ref, manifest_sha, targets_json,
-                     plan_json, "READY", created_by, now, now, expires,
+                     plan_json, prepared_status, created_by, now, now, expires,
                      None, None, None, None, None, workspace_version,
                      request_key, None, plan_id))
             else:
@@ -2203,7 +2206,7 @@ class Store:
                     "WHERE plan_id=?",
                     (version, session, scope, mode, strategy, detection,
                      mask_policy, manifest_ref, manifest_sha, targets_json,
-                     plan_json, "READY", created_by, now, expires,
+                     plan_json, prepared_status, created_by, now, expires,
                      workspace_version, plan_id))
         return self.get_repair_plan(plan_id)
 

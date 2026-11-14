@@ -159,7 +159,7 @@ function fmtTime(ts: number): string {
 <template>
   <div class="rt">
     <!-- 置顶、不折叠：质检 TXT 是这块标签页的主入口，每次都要看，折起来只会多一次点击。
-         「智能修复」开关也在这一块里（见 QcListPanel 的 .qc-go-row）。 -->
+         「自动修复」开关也在这一块里（见 QcListPanel 的 .qc-go-row）。 -->
     <QcListPanel />
 
     <!-- 点选清单（仅对比模式）：都是「一列可以点的图/条目」，点选清单是本次对比的

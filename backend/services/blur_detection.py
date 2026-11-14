@@ -4,6 +4,8 @@ Callers must establish registration and explicitly pass NOSR as reference and
 PAN as target. Scores are relative evidence, never calibrated probabilities.
 No production thresholds or code are imported from the internal reference.
 """
+from __future__ import annotations
+
 from dataclasses import dataclass
 
 import numpy as np

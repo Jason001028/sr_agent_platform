@@ -1,16 +1,18 @@
 # current_question — 平台现状与交接入口
 
+2026-11-14：修复 Agent 新旧只读工具重复注册和面板把执行限制当成计划失败的问题；BLOCKED 计划正确持久化。本地/上传/混合工作区可准备资源评估计划，不再先要求盘阵身份；完整输入可来自普通允许目录，实际 SR 仍需输入契约与用户确认。后端178、前端1082项通过，详见 [repair-dual-entry.md](repair-dual-entry.md) §2026-11-14。
+
 2026-11-14（PR 5）：Agent 修复成果与人工验收闭环。任务卡完成态只认 Goal 终态 +
 显式 `monitoring_done=true`；「查看成果」只打开 Job `artifacts` 层验证通过的 SR 输出
 （Demo 无产物，不退回原始 PAN）；「开始复核」只在存在绑定 `quality_review_id` 的
 可审核 Item 时出现，并直接展开既有 Batch Panel 的人工质量区块、选中 Item 与第一个待审
 区域。审核计数只统计当前 Item 绑定的审核，重新修复的旧审核不继承；Viewer 审核后经共享
-Goal 事件 / 快照同步回任务卡。「待修复清单」操作行新增浅蓝「Agent修复」按钮：一键把
+Goal 事件 / 快照同步回任务卡。「待修复清单」操作行新增浅蓝「Agent协助」按钮：一键把
 确定性提示词填进 Agent 输入区并发送，由 Agent 调用 `prepare_repair` 准备计划，仍需用户
 在计划卡确认。本轮 `python`/`npm` 被环境拒绝，测试未运行。详见
 [repair-dual-entry.md §7.7](repair-dual-entry.md)。
 
-2026-11-13（PR 4）：Agent 智能修复任务卡改为单卡三阶段（计划 / 执行 / 结果），
+2026-11-13（PR 4）：Agent 自动修复任务卡改为单卡三阶段（计划 / 执行 / 结果），
 复用共享 `batchGoal` Store 的 SSE/snapshot 与 `GET /api/repairs/{plan_id}`；
 计算结束（含 production 等待人工验收）自动生成确定性中文摘要，提供查看任务、
 查看成果、开始复核三个真实入口；同一 plan_id 只渲染最后一张卡。详见
@@ -29,7 +31,7 @@ Goal 事件 / 快照同步回任务卡。「待修复清单」操作行新增浅
 跨景掩码；混合工作区可启动，截断工作区拒绝静默子集。详见
 [repair-dual-entry.md](repair-dual-entry.md) §7.5。测试执行状态见该文档。
 
-2026-11-13：智能修复「工具面板 / Agent」双入口统一到
+2026-11-13：自动修复「工具面板 / Agent」双入口统一到
 `backend/services/repair_application.py`：计划、服务端用户确认、Goal 幂等创建
 只有一份业务契约；单景人工 Mask 表达为单 Item Batch Goal（Item 直接
 `MASK_READY`）；Agent 新增 `prepare_repair` / `start_repair` 与三个只读查询工具。
@@ -62,7 +64,7 @@ production 门仍关闭，demo 仍需 Fake SR 环境。脚本与未收口项见
 
 2026-11-10：加载进度增加不确定进度状态。服务端下采样目前没有逐行百分比回传，界面改为流动进度条与「等待服务端处理」，不再固定显示 0%；上传/本地读取等确有回调时显示真实阶段百分比，换阶段清掉上一阶段百分比，暂停时停止流动。此项为进度呈现修复，不等于服务端新增精确采样进度或已缩短解码耗时。
 
-2026-11-10：待修复清单的「智能修复」操作行改为仅在成功导入并解析出有效 TXT 清单后显示，沿用 qc.loaded 判据；未导入或关闭清单时隐藏，已有有效清单的历史恢复仍可显示。
+2026-11-10：待修复清单的「自动修复」操作行改为仅在成功导入并解析出有效 TXT 清单后显示，沿用 qc.loaded 判据；未导入或关闭清单时隐藏，已有有效清单的历史恢复仍可显示。
 
 2026-11-10：针对连续大图卡在关联阶段，已有服务端预览资产改为先显示 JPG、再后台核对业务关联，不占前台加载；版本/尺寸核对通过才授权，关闭卡片会取消请求并拒绝迟到结果。默认普通选择器最初反推服务端源仍需等待，不能据此宣称现场 4.8 GB 第二张耗时已消除。resolve 增加排队/采样/尺寸/行构造分段日志，超过 2 秒按 WARNING 输出，部署后可区分实际瓶颈。详见 [server-jpg-picker.md](server-jpg-picker.md)。
 
@@ -95,7 +97,7 @@ production 门仍关闭，demo 仍需 Fake SR 环境。脚本与未收口项见
 
 Viewer 四种画布背景、设置持久化、分屏层级和合成影像验收见 [viewer_background.md](viewer_background.md)。默认工程网格；背景切换不重绘影像或重置 Camera。
 
-自动掩码使用邻近小区域合并、四边形包围和整图面积 2% 软目标；Viewer 与智能修复共享几何。逐景展示按加载、定位、真实结果等待、SVG 绘制、下一景推进，支持暂停/继续/跳过与失败恢复，见 [mask-repair-playback.md](mask-repair-playback.md)。单景工具栏仍只写可编辑向量；批量 MaskBuilder 与后台调度独立运行。真实内网大图和 SR 效果待核。
+自动掩码使用邻近小区域合并、四边形包围和整图面积 2% 软目标；Viewer 与自动修复共享几何。逐景展示按加载、定位、真实结果等待、SVG 绘制、下一景推进，支持暂停/继续/跳过与失败恢复，见 [mask-repair-playback.md](mask-repair-playback.md)。单景工具栏仍只写可编辑向量；批量 MaskBuilder 与后台调度独立运行。真实内网大图和 SR 效果待核。
 
 影像焕新 Image Refresh 的统一成果发现、镭射未读卡片、版本缓存、已读持久化与浏览器验收见 [image-refresh.md](image-refresh.md)。单景和批量共用队列链路，不自动切图；内网真实成果验收待核。
 
@@ -130,7 +132,7 @@ Agent 中文交互、执行概览、自动中文标题与手动改名见 [agent-
 
 盘阵外授权 TIFF 的通用预览见 [generic-preview-p1.md](generic-preview-p1.md)：`SR_PREVIEW_ROOTS` 只放行看图 / ROI / Agent 读图，提交 SR 与写掩码仍只认 `SR_ALLOWED_ROOTS`；外部源预览落隔离缓存并走只读 `/preview` 换档位。场景行按实际源核对缓存签名，同名 `.tif/.tiff` 各有独立落点（冲突名带源路径哈希），`/preview` 回字节快照并核对档位与源身份；前端需要生成时直接用 `/preview` 的响应体、静态取图也复核签名。真机验收待核。
 
-批量智能修复已由第三个 Tab 改为「工具栏｜Agent」双 Tab 的顶部任务中枢；草案冻结、Viewer 显式集合、自动/人工策略、掩码复核门禁与 Agent 移交见 [batch-task-dock.md](batch-task-dock.md)。该记录替代 batch-pr-f.md 中旧第三 Tab 的布局说明；生产提交门仍关闭。
+批量自动修复已由第三个 Tab 改为「工具栏｜Agent」双 Tab 的顶部任务中枢；草案冻结、Viewer 显式集合、自动/人工策略、掩码复核门禁与 Agent 移交见 [batch-task-dock.md](batch-task-dock.md)。该记录替代 batch-pr-f.md 中旧第三 Tab 的布局说明；生产提交门仍关闭。
 
 ## 1. 平台是什么，现在能做什么
 

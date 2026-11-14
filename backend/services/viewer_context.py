@@ -81,13 +81,31 @@ def _validate_workspace(value):
         if len(kept) >= WORKSPACE_MAX_ITEMS:
             break
 
+    # `truncated` 只表示**场景候选 items** 被丢掉：补修计划按它拒绝静默规划前缀。
+    # 本地资源 resources 是辅助身份，被预算裁掉不影响场景规划，单独记在
+    # `resources_truncated`，不能让它把整份工作区判成“不完整”。
     truncated = bool(value.get('truncated')) or len(kept) < total
     while kept and len(json.dumps(kept, ensure_ascii=False)) > WORKSPACE_MAX_BYTES:
         kept.pop()
         truncated = True
 
-    return {'version': version, 'items': kept, 'total': max(total, len(kept)),
-            'local_only': local_only, 'truncated': truncated}
+    resources = []
+    raw_resources = value.get('resources') or []
+    if not isinstance(raw_resources,list):
+        raise ValueError('viewer_context.workspace.resources 须为数组')
+    resources_truncated = len(raw_resources)>WORKSPACE_MAX_ITEMS
+    for item in raw_resources[:WORKSPACE_MAX_ITEMS]:
+        if not isinstance(item,dict):
+            continue
+        resources.append({k:v[:512] if isinstance(v,str) else v for k,v in item.items()
+            if k in {'id','name','image_key','source_revision','asset_id','width','height'}
+            and (v is None or isinstance(v,str) or isinstance(v,(int,float)) and not isinstance(v,bool) and math.isfinite(v))})
+    while resources and len(json.dumps({'items':kept,'resources':resources},ensure_ascii=False)) > WORKSPACE_MAX_BYTES:
+        resources.pop()
+        resources_truncated = True
+    return {'version': version, 'items': kept, 'resources':resources, 'total': max(total, len(kept)),
+            'local_only': local_only, 'truncated': truncated,
+            'resources_truncated': resources_truncated}
 
 
 def validate_snapshot(value, attachment_count=0):
@@ -145,7 +163,7 @@ def validate_snapshot(value, attachment_count=0):
             if not isinstance(image, dict):
                 raise ValueError('viewer image 须为对象')
             allowed = {'id', 'name', 'scene_id', 'source', 'width', 'height', 'bands',
-                       'display_width', 'display_height', 'stretch', 'size_bytes', 'layout', 'bits', 'sample_format', 'compression', 'metadata_source', 'pixels_loaded', 'image_key', 'source_revision', 'stage'}
+                       'display_width', 'display_height', 'stretch', 'size_bytes', 'layout', 'bits', 'sample_format', 'compression', 'metadata_source', 'pixels_loaded', 'image_key', 'source_revision', 'stage', 'asset_id'}
             for key in list(image):
                 if key not in allowed:
                     del image[key]
@@ -185,7 +203,12 @@ def bind_registry(registry, snapshot, *, store=None, session_id=None):
     from backend.tools import repair as repair_tools
 
     result = ToolRegistry()
+    readonly_names = {'get_repair_workspace', 'list_repair_items', 'get_repair_item'}
     for item in registry.list():
+        if item.name in readonly_names and getattr(item.run, '__module__', None) == repair_tools.__name__:
+            # Legacy registrations are placeholders; the paged, session-scoped
+            # implementation below is the sole owner of these three names.
+            continue
         if item.name in repair_tools.BOUND_NAMES:
             # Only bind the built-in implementation; a plugin/test tool with
             # the same name does not understand the workspace context.
@@ -195,6 +218,7 @@ def bind_registry(registry, snapshot, *, store=None, session_id=None):
                     current=(frozen or {}).get('current'),
                     selected_images=(frozen or {}).get('selected_images'),
                     batch_draft=(frozen or {}).get('batch_draft'),
+                    selected_truncated=bool((frozen or {}).get('selected_truncated')),
                     session_id=session_id, store=store))
             else:
                 result.register(item)
@@ -249,7 +273,8 @@ def bind_registry(registry, snapshot, *, store=None, session_id=None):
         {'type': 'object', 'properties': {}, 'additionalProperties': False}, current_info))
     from backend.services.repair_workspace import bound_tools
     for tool in bound_tools(frozen, store, session_id):
-        result.register(tool)
+        if result.get(tool.name) is None:
+            result.register(tool)
     return result
 
 

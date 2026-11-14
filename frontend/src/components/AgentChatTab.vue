@@ -4,7 +4,7 @@ import ThinkingSlider from "./ThinkingSlider.vue";
 /**
  * AgentChatTab.vue — 上下文侧舱 [Agent] tab（阶段6 L2）
  * ------------------------------------------------------------------
- * - 仅盘阵场景可用（activeRec.sceneId 非空）；本地/离线 TIF 或未开图 → 禁用并给出原因。
+ * - 支持已加载的本地、上传及服务器影像；未就绪时提示原因，批次移交也可启用对话。
  * - 与 /chat **同一** chat store / 会话 / 后端。这里**不 init**（进查看器不自动挑会话，
  *   首问才 apiCreateSession），但头部给了会话三件事（三个 16px 图标键，2026-10-23）：
  *   新建（circle-plus）/ 历史（clock，点开切换）/ 删除当前（circle-x）。历史列表
@@ -61,7 +61,7 @@ function receiveBatch(event: Event) {
   if (!text) return;
   batchContext.value = true;
   draft.value = draft.value.trim() ? `${draft.value}\n\n${text}` : text;
-  // The [Agent修复] entry asks for one real send, not just a prefilled draft.
+  // The [Agent协助] entry asks for one real send, not just a prefilled draft.
   // Recheck canSend on the next tick; if the Agent is busy or the image is
   // still loading, the prompt stays in the composer for the user to send.
   if (detail?.autoSend) void nextTick(() => { if (canSend()) void onSend(); });
@@ -77,7 +77,7 @@ async function openSearchScene(row: Record<string, unknown>): Promise<void> {
 }
 
 const rec = computed(() => viewer.activeRec);
-/** 仅盘阵场景可用；无图 / 本地(无 sceneId) → false 并给 reason。 */
+/** 当前影像已加载且尺寸有效即可使用，不要求场景库身份。 */
 const enabled = computed(() => Boolean(rec.value?.thumb && rec.value.W > 0 && rec.value.H > 0));
 /** 无会话时首问会自动建会话 —— 输入框始终可输入；placeholder 提示差异。 */
 const placeholder = computed(() =>
@@ -86,8 +86,8 @@ const placeholder = computed(() =>
     : '输入问题即自动新建会话并附上下文…');
 const reason = computed(() => {
   const r = rec.value;
-  if (!r) return '当前未打开图像。请从左侧打开盘阵影像，或进入「打开场景」选择生产场景。';
-  return '盘阵影像正在加载，加载完成后即可使用 Agent。';
+  if (!r) return '当前未打开影像。请打开本地文件、上传影像或服务器影像，也可从修复清单携带批次上下文。';
+  return '当前影像尚未加载完成，准备就绪后即可使用 Agent。';
 });
 
 /** 当前查看器确定性上下文快照（禁用时 null；每次发送重新取，保证数字最新）。 */
@@ -469,7 +469,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
         </div>
         </div>
         <div v-if="!composerEnabled" class="at-input-lock" role="status" aria-live="polite">
-          <p class="at-desc">Agent 服务仅对盘阵生产目录开放</p>
+          <p class="at-desc">Agent 支持本地、上传及服务器影像</p>
           <p class="at-reason">{{ reason }}</p>
         </div>
       </div>

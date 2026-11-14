@@ -140,6 +140,19 @@ def test_workspace_validation_normalizes_and_bounds():
     assert w['truncated'] is True      # total 6 > 实际留下 1 条
 
 
+def test_resource_budget_trim_is_not_reported_as_scene_truncation():
+    """本地资源身份被预算裁掉 ≠ 场景候选被丢；只有后者才拦修复计划。"""
+    items = [(f'~scene-{n}', f'S{n}') for n in range(20)]
+    resources = [{'id': n, 'name': 'L' * 300, 'image_key': 'k' * 140,
+                  'source_revision': 'r' * 64, 'width': 100, 'height': 100}
+                 for n in range(200)]
+    w = validate_snapshot(workspace(*items, resources=resources,
+                                    total=20, local_only=200), 0)['workspace']
+    assert len(w['items']) == 20
+    assert w['truncated'] is False
+    assert w['resources_truncated'] is True
+
+
 def test_workspace_rejects_bad_container_but_skips_bad_items():
     for bad in ['x', {'version': -1, 'items': []}, {'items': []},
                 {'version': True, 'items': []}, {'version': 1, 'items': {}}]:

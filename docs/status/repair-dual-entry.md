@@ -1,6 +1,21 @@
-# 智能修复双入口（工具面板 / Agent）统一业务服务
+# 自动修复双入口（工具面板 / Agent）统一业务服务
 
 日期：2026-11-13 · 状态：M1–M3 代码已实施，M4 联验命令见下；真实 SR/GPU 未验。
+
+## 2026-11-14：入口故障修复与非盘阵资源规划
+
+- Agent 的三个同名只读工具此前由 `tools/repair.py` 和 `services/repair_workspace.py` 重复绑定，导致模型请求前抛 `工具已注册`。现在只读查询由后者统一绑定，保留分页、原始 ordinal、会话隔离及预算；prepare/start 仍走统一应用服务。Registry 继续严格拒绝重名，显式插件工具不会被内置实现覆盖。
+- 工具面板不再把 `execution.allowed=false` 当作计划准备失败：有效计划正常保留展示，执行条件未满足时给出中文说明并禁用启动，不更改执行器、不绕过 Fake/production 门禁。
+- Store 原来将所有新计划写为 READY，忽略 BLOCKED；现在正确持久化 READY/BLOCKED，未满足输入的资源评估计划不能确认或启动。
+- Viewer 消息快照新增独立的 `workspace.resources`（本地影像身份、版本、上传/预览资产ID和尺寸），场景库候选 `items` 保持原语义。两者都有数量/字节预算；不传 File、像素、磁盘路径或前端权限声明。
+- 截断标记拆分：`workspace.truncated` 只表示**场景候选 items** 被丢掉（修复计划据此拒绝静默规划前缀）；本地资源被预算裁剪只记 `resources_truncated`，不再把场景齐全的工作区判成“快照被截断”。`get_repair_workspace` 同时返回 `scenes` / `local_only` / `resources_truncated`，避免把“景数”和本地资源数混成一个 total。
+- `prepare_repair` 支持本地、上传/预览资源及混合工作区的持久化评估计划。不再要求所有资源先关联盘阵；缺少后端源文件绑定和 PAN/NOSR/元数据/Mask 契约时返回具体待办，标记 BLOCKED / sr_execution=false。混合工作区不静默遗漏本地图，不扫描盘阵寻找替代资源。仅有旧版 local_only 数量、没有资源身份时提示更新快照。
+- 普通允许目录中的完整场景输入，使用已有绝对资源引用即可准备可执行输入计划，不要求位于 SR_SCENES_ROOT；资源准入仍由允许根目录和实际输入契约决定。**本轮没有实现任意本地单 TIFF 直接执行现有生产 SR，也没有新增上传 PAN/NOSR 配对适配器。**
+- Agent 资源评估卡显示识别到的目标总数，即使当前可执行数量为0。计划身份、会话与源版本仍冻结保存，后续输入补齐需重新准备。
+
+验证：后端 `test_repair_application / test_repair_workspace / test_tool_description_contract / test_message_viewer_context / test_store / test_batch_manifest / test_tool_job_status / test_tool_result_formatter` 组合 **178 passed**；前端全量 **1,082 passed**，类型检查与生产构建通过。日志 `.e2e/repair-fixes-regression.log`、`.e2e/repair-fixes-frontend.log`。所有 SR 测试使用隔离输入与 Fake/Mock，未触发真实生产 SR。真实内网部署及模型、GPU质量验收仍待核。
+
+部署需同时更新后端、重启 API，并发布最新前端 dist；仅改前端不能解决 Registry 冲突。下文“本轮测试未执行”等为前期历史记录，本次结果以本节为准。
 
 ## 1. 一句话
 

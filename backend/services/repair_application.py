@@ -48,7 +48,7 @@ from backend.services.store import RepairPlanConflict
 PLAN_CONTRACT_VERSION = "repair_plan.v1"
 PLAN_TTL_SEC = 3600.0
 CONFIRM_TTL_SEC = 900.0
-_DEFAULT_TITLE = "智能修复"
+_DEFAULT_TITLE = "自动修复"
 
 _DETECTION_LABELS = {
     "absdiff": "existing_diff_pipeline",
@@ -169,8 +169,8 @@ def _workspace_sources(workspace, current, selected_images, scope):
         scene_id = (current or {}).get("scene_id")
         if not isinstance(scene_id, str) or not scene_id:
             raise RepairError(
-                "当前活动影像没有可信盘阵场景身份，无法准备修复计划；"
-                "请先打开盘阵场景或完成本地 TIFF 的盘阵关联")
+                "当前影像尚未绑定可用于SR的服务器资源；"
+                "可先准备资源评估计划，再补齐后端源文件与输入契约")
         ids.append((scene_id, str((current or {}).get("name") or "当前影像")))
     elif scope == "selection":
         for image in selected_images or []:
@@ -178,8 +178,8 @@ def _workspace_sources(workspace, current, selected_images, scope):
                 ids.append((image["scene_id"], str(image.get("name") or "选中影像")))
         if not ids:
             raise RepairError(
-                "这条消息没有带盘阵场景身份的多选影像；"
-                "请在左侧列表勾选盘阵场景后再让 Agent 修复")
+                "这条消息没有已绑定服务器源文件的多选影像；"
+                "请重新发送包含所选资源身份的快照，先准备资源评估计划")
     else:
         for item in (workspace or {}).get("items") or []:
             if isinstance(item, dict) and isinstance(item.get("scene_id"), str):
@@ -189,9 +189,9 @@ def _workspace_sources(workspace, current, selected_images, scope):
         local_only = int((workspace or {}).get("local_only") or 0)
         if local_only:
             raise RepairError(
-                f"工作区有 {local_only} 张本地影像没有可信盘阵路径，"
-                "不能创建生产修复计划；请先从场景库打开对应场景或完成盘阵关联")
-        raise RepairError("当前工作区没有可修复的盘阵场景")
+                f"工作区有 {local_only} 张本地影像，但旧快照没有资源身份；"
+                "请更新前端并重新发送消息，或指定当前影像准备资源评估计划")
+        raise RepairError("当前工作区没有可准备修复计划的影像资源")
 
     sources: list[dict] = []
     unresolved: list[dict] = []
@@ -220,7 +220,7 @@ def _workspace_sources(workspace, current, selected_images, scope):
     if not sources:
         reasons = "；".join(f"{row['name']}：{row['reason']}" for row in unresolved[:5])
         raise RepairError(
-            "工作区里没有可安全提交的盘阵场景" + (f"（{reasons}）" if reasons else ""))
+            "工作区里没有满足现有SR输入契约的服务器影像" + (f"（{reasons}）" if reasons else ""))
     return sources, unresolved, scene_ids, scene_refs
 
 
@@ -372,6 +372,76 @@ def _plan_hash(binding: dict) -> str:
     return "plan_" + batch_manifest.canonical_hash(binding)[:24]
 
 
+def _observed_resources(workspace, current, selected_images, scope):
+    """Metadata references only: these never grant server file access."""
+    if scope == 'current':
+        rows = [current] if current else []
+    elif scope == 'selection':
+        rows = selected_images or []
+    else:
+        rows = [*((workspace or {}).get('items') or []),
+                *((workspace or {}).get('resources') or [])]
+        if not rows and (workspace or {}).get('local_only') == 1 and current:
+            rows = [current]
+        elif int((workspace or {}).get('local_only') or 0) > len((workspace or {}).get('resources') or []):
+            if (workspace or {}).get('resources_truncated'):
+                raise RepairError('本地资源身份超过快照预算被截断，场景候选不受影响；'
+                                  '请缩小工作区或分批选择后重新发送，不能只规划部分资源')
+            raise RepairError('工作区本地资源身份不完整，请更新前端并重新发送快照，不能只规划部分资源')
+    result, seen = [], set()
+    for row in rows:
+        if not isinstance(row,dict):
+            continue
+        ref = {k:row[k] for k in ('id','name','image_key','source_revision','scene_id','asset_id','width','height')
+               if k in row and (row[k] is None or isinstance(row[k],(str,int,float)))}
+        key = ref.get('scene_id') or ref.get('image_key') or ref.get('asset_id')
+        if key is None:
+            key = ref.get('id')
+        if key is None or str(key) in seen:
+            continue
+        ref['source_kind'] = ('server_reference' if ref.get('scene_id') else
+                              'uploaded_or_preview_asset' if ref.get('asset_id') else 'browser_local')
+        seen.add(str(key))
+        result.append(ref)
+    return result
+
+
+def _resource_assessment(store, resources, *, session_id, scope, mode,
+                         strategy, detection_method, mask_policy, title, created_by,
+                         resolution_reason=None):
+    """Persist a useful incomplete plan for any user-selected resource source.
+
+    Execution still requires authoritative PAN/NOSR and Mask bindings. No path
+    resolution, upload-cache access, manifest import or filesystem scan occurs.
+    """
+    requirements = [
+        {'code':'backend_source_binding','message':'将源影像绑定为后端可读取的资源；浏览器文件或预览资产引用不等于SR输入授权。'},
+        {'code':'sr_input_contract','message':'为每个目标补齐并核验PAN/NOSR配对、生产元数据与掩码策略；可来自允许的普通目录或共享目录，不要求进入场景库。'}]
+    if resolution_reason:
+        from backend.services.repair_workspace import safe
+        requirements.insert(0,{'code':'source_resolution','message':safe(resolution_reason)})
+    plan_id = _plan_hash({'kind':'resource_assessment','session_id':session_id,'scope':scope,
+        'resources':resources,'mode':mode,'strategy':strategy,'detection':detection_method,'mask':mask_policy})
+    now = _now()
+    plan = {'kind':'repair_plan.v1','contract_version':PLAN_CONTRACT_VERSION,
+        'plan_id':plan_id,'version':1,'session_id':session_id,'scope':scope,'mode':mode,
+        'status':'BLOCKED','confirmation_required':True,'created_by':created_by,
+        'title':str(title or '影像资源修复评估')[:200],
+        'targets':{'total':len(resources),'applicable':0,'excluded':0,'items':[
+            {'item_id':'resource_'+batch_manifest.canonical_hash(row)[:20],'ordinal':n,
+             'name':row.get('name') or '影像资源','status':'INPUT_REQUIRED','resource':row}
+            for n,row in enumerate(resources,1)]},
+        'strategy_policy':strategy,'detection_method':detection_method,'mask_policy':mask_policy,
+        'strategy':{'detection':_DETECTION_LABELS.get(detection_method,'existing_diff_pipeline'),
+                    'mask':mask_policy,'execution':'existing_batch_runtime'},
+        'capabilities':{'workspace_observation':True,'repair_assessment':True,'sr_execution':False},
+        'execution':{'allowed':False,'mode':mode,'reason':'影像资源已纳入计划；待补齐后端源文件与SR输入契约。'},
+        'blocking':requirements,'diagnostics':[], 'identities':[],
+        'manifest_ref':'','manifest_sha256':'','confirmation':None,
+        'created_at':now,'expires_at':now+_env_float('SR_REPAIR_PLAN_TTL_SEC',PLAN_TTL_SEC)}
+    return public_plan(store.upsert_repair_plan(plan))
+
+
 def prepare_repair(
     store,
     *,
@@ -432,6 +502,16 @@ def prepare_repair(
         raise RepairError(str(exc)) from exc
     if manifest_ref and sources is not None:
         raise RepairError("manifest_ref 与 sources 只能提供一个")
+    if not manifest_ref and sources is None:
+        if scope not in ('current','selection','workspace'):
+            raise RepairError('scope 只支持 current、selection、workspace')
+        if scope == 'workspace' and (workspace or {}).get('truncated'):
+            raise RepairError('工作区快照被截断，请缩小选择范围后重新准备')
+        observed = _observed_resources(workspace,current,selected_images,scope)
+        if observed and any(not row.get('scene_id') for row in observed):
+            return _resource_assessment(store,observed,session_id=session_id,scope=scope,mode=mode,
+                strategy=strategy,detection_method=detection_method,mask_policy=mask_policy,
+                title=title,created_by=created_by)
     if manifest_ref:
         # Reuse an already frozen QC import (the legacy batch-import flow).
         # No re-import and no directory scan: the manifest is verified by the
@@ -467,9 +547,16 @@ def prepare_repair(
             # Explicit Viewer sources are already scene input files; the
             # service still validates every one through the frozen importer.
         else:
-            (sources, unresolved, workspace_scene_ids,
-             workspace_scene_refs) = _workspace_sources(
-                workspace, current, selected_images, scope)
+            try:
+                (sources, unresolved, workspace_scene_ids,
+                 workspace_scene_refs) = _workspace_sources(
+                    workspace, current, selected_images, scope)
+            except RepairError as exc:
+                if observed:
+                    return _resource_assessment(store,observed,session_id=session_id,scope=scope,mode=mode,
+                        strategy=strategy,detection_method=detection_method,mask_policy=mask_policy,
+                        title=title,created_by=created_by,resolution_reason=str(exc))
+                raise
         if not sources:
             raise RepairError("没有可准备的修复目标")
         try:

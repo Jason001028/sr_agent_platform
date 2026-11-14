@@ -77,6 +77,11 @@ def bound_tools(snapshot, store, session_id):
                 'repair_selection': observation_summary('repair_selection'), 'qc_draft': observation_summary('qc_draft'),
                 'selected_item_id': focused.get('item_id') if focused.get('goal_id') == goal_id else batch.get('item_id'),
                 'goal_id': goal_id, 'batch': None}
+        observed_workspace = frozen.get('workspace') or {}
+        data['total'] = int(observed_workspace.get('total') or 0) + int(observed_workspace.get('local_only') or 0)
+        data['local_only'] = int(observed_workspace.get('local_only') or 0)
+        data['scenes'] = int(observed_workspace.get('total') or 0)
+        data['resources_truncated'] = bool(observed_workspace.get('resources_truncated'))
         if goal_id and authorized(goal_id):
             actual = store.batch_snapshot(goal_id)
             data['batch'] = {k: actual.get(k) for k in ('counts', 'progress')}

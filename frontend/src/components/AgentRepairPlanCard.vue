@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * Agent 智能修复任务卡：计划 → 执行 → 结果，同一张卡、同一个 Goal。
+ * Agent 自动修复任务卡：计划 → 执行 → 结果，同一张卡、同一个 Goal。
  *
  * 状态来源只有两处：批次 Store（已有 SSE / snapshot）和 Repair Status REST。
  * 卡片不累计事件、不建立第二条 SSE、不生成第二套 Goal 状态；聊天关闭或页面
@@ -74,7 +74,7 @@ const stage = computed<'plan' | 'running' | 'done'>(() =>
 const modeLabel = computed(() => plan.value?.mode === 'production' ? '生产' : '演示 / Fake SR');
 const confirmed = computed(() => localConfirmed.value
   || plan.value?.status === 'CONFIRMED' || plan.value?.status === 'STARTED');
-const targetCount = computed(() => plan.value?.targets?.applicable
+const targetCount = computed(() => (plan.value?.status === 'BLOCKED' ? plan.value.targets.total : plan.value?.targets?.applicable)
   ?? counts.value?.eligible ?? 0);
 const blockedReason = computed(() => {
   const p = plan.value;
@@ -402,7 +402,7 @@ onBeforeUnmount(() => {
 <template>
   <div v-if="plan" class="repair-task" data-e2e="agent-repair-task" :data-stage="stage">
     <header class="task-head">
-      <strong>{{ stage === 'done' ? '修复结果' : stage === 'running' ? '智能修复' : '修复计划' }} · {{ targetCount }} 景</strong>
+      <strong>{{ stage === 'done' ? '修复结果' : stage === 'running' ? '自动修复' : '修复计划' }} · {{ targetCount }} 景</strong>
       <span class="state" :class="stateTone">{{ stateLabel }}</span>
     </header>
 

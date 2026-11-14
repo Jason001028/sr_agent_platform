@@ -107,8 +107,15 @@ def evaluate(live=False, ref='HEAD', core_only=False):
                     def observed_chat(messages, tools, **kwargs):
                         exposed.update(t['function']['name'] for t in tools)
                         return real_chat(messages,tools,**kwargs)
-                result = module.run_loop(cfg,prompt,viewer_snapshot=snapshot,on_step=events.append,
-                    chat=observed_chat if live else scripted_chat,tool_executor=fake_executor,max_tool_calls=5,stream=False)
+                try:
+                    result = module.run_loop(cfg,prompt,viewer_snapshot=snapshot,on_step=events.append,
+                        chat=observed_chat if live else scripted_chat,tool_executor=fake_executor,max_tool_calls=5,stream=False)
+                except ValueError as exc:
+                    if enhanced or '工具已注册' not in str(exc):
+                        raise
+                    # A broken historical registry is a measured baseline
+                    # failure, not a reason to skip evaluating the fixed tree.
+                    result = {'ok':False,'error':str(exc)}
             calls = [e['name'] for e in events if e.get('type')=='tool_call']
             rows.append({'enhanced':enhanced,'case':case,'expected':expected,'calls':calls,
                 'expected_chain':expected_chain,'chain_correct':calls==expected_chain if live else None,
@@ -120,6 +127,7 @@ def evaluate(live=False, ref='HEAD', core_only=False):
                 'irrelevant_searches':calls.count('search_scenes') if case!='search' else 0,
                 'tool_calls':len(calls),'first_effective_tool_seconds':effective_at,
                 'elapsed_seconds':time.perf_counter()-started,'ok':result.get('ok'),
+                'error':result.get('error'),
                 'answer':result.get('answer') if live else None,
                 'unsupported_state_reports':None,'answer_review':'真实模型答案需人工复核；回放不产生自然语言状态结论。'})
     old_viewer = types.ModuleType('old_viewer_projection')

@@ -379,7 +379,7 @@ onMounted(() => {
             <AppIcon name="camera" :size="16" />
           </button>
           <input v-model="draft" class="cp-input" type="text"
-                 placeholder="给 Agent 下指令（离线 mock 每回合固定检索盘阵场景）…"
+                 placeholder="给 Agent 下指令，查询工作区或准备修复计划…"
                  :disabled="chat.sending || !chat.hasSession()"
                  @keyup.enter="onSend()" />
           <button type="button" class="btn" :disabled="!canSend()"

@@ -32,13 +32,13 @@ Smart Compare 智能对比、原始 DN 精检、候选 Mask、Agent/Batch 接入
 
 Agent 中文交互、执行概览与自动会话标题见 [agent-interaction-titles.md](status/agent-interaction-titles.md)。
 
-批量智能修复工具栏任务中枢、冻结范围与人工掩码复核见 [batch-task-dock.md](status/batch-task-dock.md)。
+批量自动修复工具栏任务中枢、冻结范围与人工掩码复核见 [batch-task-dock.md](status/batch-task-dock.md)。
 
 Batch F 的现有入口接线、恢复补修及浏览器连接实际 Batch 后端 + 独立 Fake SR 的 50 景 M3 联合验收见 [batch-pr-f.md §12](status/batch-pr-f.md)；固定快照 UI 验收与实际后端证据分开记录，真实生产准入仍未开放。
 
 PAN/NOSR 局部修复与产物发布见 [pan_repair_contract.md](sr_code/pan_repair_contract.md)。
 
-自动掩码的四边形修复区域、整图 2% 软目标与智能修复逐景展示见 [mask-repair-playback.md](status/mask-repair-playback.md)；坐标/覆盖契约与编辑事务见 [mask-auto-draw.md](planning/mask-auto-draw.md)。
+自动掩码的四边形修复区域、整图 2% 软目标与自动修复逐景展示见 [mask-repair-playback.md](status/mask-repair-playback.md)；坐标/覆盖契约与编辑事务见 [mask-auto-draw.md](planning/mask-auto-draw.md)。
 
 Batch 共享真实差异检测、MaskBuilder 与人工逐区域质量验收的实现、接口、测试及生产限制见 [batch-human-quality.md](status/batch-human-quality.md)。
 

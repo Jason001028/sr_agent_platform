@@ -7,7 +7,7 @@ import { useBatchDraftStore } from '../stores/batchDraft';
  *  real user confirm the plan card.  ``start_repair`` remains server-gated by
  *  that confirmation, so this prompt cannot auto-approve anything. */
 export const AGENT_REPAIR_PROMPT =
-  '请对当前 Viewer 工作区发起智能修复：先调用 prepare_repair'
+  '请对当前 Viewer 工作区发起自动修复：先调用 prepare_repair'
   + '（scope=workspace；当前工作区为空时改用 current）准备修复计划并展示计划卡，'
   + '不要直接提交 SR。请说明目标景数、检测方法与掩码策略，'
   + '我会在计划卡上确认后启动。';

@@ -31,7 +31,7 @@ describe('message Viewer observation', () => {
     expect(snapshot.roi?.points[0]).toEqual([10,20]);
   });
 
-  it('workspace carries opaque scene ids only; local drags are counted, never sent', () => {
+  it('workspace keeps local metadata separate from scene-library ids', () => {
     const a = { id: 1, name: 'A.tif', sceneId: 'sid-a' } as ViewerRec;
     const b = { id: 2, name: 'B.tif', sceneId: 'sid-b' } as ViewerRec;
     const local = { id: 3, name: 'C.png', sceneId: null } as ViewerRec;
@@ -41,9 +41,28 @@ describe('message Viewer observation', () => {
                               { scene_id: 'sid-b', name: 'B.tif' }]);
     expect(ws.total).toBe(2);         // 按场景 id 去重后的景数
     expect(ws.local_only).toBe(1);    // 本地拖入的图不参与盘阵检索
+    expect(ws.resources).toEqual([expect.objectContaining({id:3,name:'C.png',asset_id:null})]);
     expect(ws.truncated).toBe(false);
   });
 
+  it('freezes uploaded identity without exposing its disk path',()=>{
+    const r={id:4,name:'upload.tif',W:10,H:20,token:1,file:{},sceneId:null,
+      previewAsset:{id:'asset-4',serverPath:'D:/private/upload.tif'}} as unknown as ViewerRec;
+    const ws=snapshotWorkspace([r],1);
+    expect(ws.resources?.[0].asset_id).toBe('asset-4');
+    expect(ws.resources?.[0].image_key).toMatch(/^local-session:/);
+    expect(JSON.stringify(ws)).not.toContain('D:/private');
+  });
+  it('bounds local resources without calling the scene list truncated', () => {
+    const scenes = Array.from({ length: 20 }, (_, i) => (
+      { id: i, name: `S${i}.tif`, sceneId: `sid-${i}` } as ViewerRec));
+    const locals = Array.from({ length: 205 }, (_, i) => (
+      { id: 1000 + i, name: `L${i}.png`, sceneId: null } as ViewerRec));
+    const ws = snapshotWorkspace([...scenes, ...locals], 0);
+    expect(ws.items).toHaveLength(20);
+    expect(ws.truncated).toBe(false);
+    expect(ws.resources_truncated).toBe(true);
+  });
   it('workspace is bounded to 200 items and says it truncated', () => {
     const recs = Array.from({ length: 205 }, (_, i) => (
       { id: i, name: `S${i}.tif`, sceneId: `sid-${i}` } as ViewerRec));

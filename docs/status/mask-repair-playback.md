@@ -4,7 +4,7 @@
 
 ## 修复区域
 
-`/api/diff/analyze` 与智能修复共用差异检测、轮廓提取和源坐标映射。
+`/api/diff/analyze` 与自动修复共用差异检测、轮廓提取和源坐标映射。
 `backend/services/repair_regions.py` 在源映射阶段整理最终修复区域：
 
 - 相邻小区域合并，远距离区域保持独立。
