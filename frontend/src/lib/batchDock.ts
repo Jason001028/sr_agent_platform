@@ -39,13 +39,15 @@ export interface BatchQualityRequest {
   token: number;
   itemId?: string;
   regionId?: string;
+  goalId?: string;
+  reviewId?: string;
 }
 export const batchQualityRequest = ref<BatchQualityRequest | null>(null);
 let qualityRequestToken = 0;
 
-export function requestQualityReview(itemId?: string, regionId?: string): void {
+export function requestQualityReview(itemId?: string, regionId?: string, goalId?: string, reviewId?: string): void {
   qualityRequestToken += 1;
-  batchQualityRequest.value = { token: qualityRequestToken, itemId, regionId };
+  batchQualityRequest.value = { token: qualityRequestToken, itemId, regionId, goalId, reviewId };
   openBatchDock();
   window.dispatchEvent(new CustomEvent('batch-task-open', {
     detail: { section: 'monitor', quality: true },

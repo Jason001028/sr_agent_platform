@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, watch } from 'vue';
 import { useBatchQualityStore } from '../stores/batchQuality';
+import { useBatchGoalStore } from '../stores/batchGoal';
 import { batchQualityRequest } from '../lib/batchDock';
 const quality=useBatchQualityStore();
+
 const noCandidates=computed(()=>quality.doc?.binding.kind==='no-candidate');
-const canConfirm=computed(()=>noCandidates.value||!!quality.doc?.regions.length&&quality.doc.regions.every(r=>r.decision==='approved'));
+const wholeScene=computed(()=>noCandidates.value||quality.doc?.binding.geometry_unavailable);
+const canConfirm=computed(()=>wholeScene.value||!!quality.doc?.regions.length&&quality.doc.regions.every(r=>r.decision==='approved'));
 const editable=computed(()=>quality.doc?.scene_decision==='pending'&&quality.comparisonReady&&!quality.busy);
 const label=(v:string)=>({approved:'通过',rejected:'驳回',pending:'待复核'}[v]??v);
 const regionIndex=computed(()=>{
@@ -31,12 +34,20 @@ let mounted=false;
 async function applyRequest(){
   const request=batchQualityRequest.value;if(!request)return;
   try{
-    if(!quality.reviews.length)await quality.refresh();
+    const batch=request.goalId ? useBatchGoalStore() : null;
+    if(request.goalId && batch && request.goalId!==batch.goalId){
+      if(!await batch.selectGoal(request.goalId))return;
+      if(batchQualityRequest.value?.token!==request.token)return;
+    }
+    if(!quality.reviews.length || request.goalId)await quality.refresh();
+    if(batchQualityRequest.value?.token!==request.token)return;
     const target=request.itemId
       ??quality.reviews.find(r=>['AWAITING_REVIEW','REVIEW_REJECTED'].includes(r.status))?.item_id
       ??quality.reviews[0]?.item_id;
     if(!target)return;
-    await quality.select(target);
+    if(request.reviewId)await quality.select(target,request.reviewId);
+    else await quality.select(target);
+    if(batchQualityRequest.value?.token!==request.token)return;
     if(request.regionId&&quality.doc)await quality.openRegion(request.regionId);
   }finally{
     // One request is one landing; a later remount must not replay it.
@@ -67,20 +78,20 @@ watch(()=>batchQualityRequest.value?.token,()=>{if(mounted)void applyRequest();}
           @click="quality.openRegion(r.region_id)">区域 {{ i+1 }} · {{ label(r.decision) }}</button>
       </div>
       <div class="quality-tools">
-        <select v-if="!noCandidates" :value="quality.regionId" aria-label="选择待验收区域" @change="quality.openRegion(($event.target as HTMLSelectElement).value)">
+        <select v-if="!wholeScene" :value="quality.regionId" aria-label="选择待验收区域" @change="quality.openRegion(($event.target as HTMLSelectElement).value)">
           <option v-for="(r,i) in quality.doc.regions" :key="r.region_id" :value="r.region_id">区域 {{ i+1 }} · {{ label(r.decision) }}</option>
         </select>
         <button @click="quality.openRegion(quality.regionId)">定位双图</button>
         <button data-e2e="quality-next-pending" :disabled="!pendingRegions||quality.busy||quality.loading" @click="nextPending">下一待审区域</button>
         <button :disabled="!quality.comparisonReady" @click="quality.flicker()">闪烁对比</button>
-        <select v-if="!noCandidates" v-model="quality.overlay" aria-label="审核 Mask 显示"><option value="fill">半透明 Mask</option><option value="outline">Mask 轮廓</option><option value="off">隐藏 Mask</option></select>
+        <select v-if="!wholeScene" v-model="quality.overlay" aria-label="审核 Mask 显示"><option value="fill">半透明 Mask</option><option value="outline">Mask 轮廓</option><option value="off">隐藏 Mask</option></select>
       </div>
-      <p v-if="!noCandidates" class="hint" data-e2e="quality-region-info">Job {{ quality.doc.job_id }} · {{ regionInfo }}</p>
-      <p class="hint">{{ noCandidates ? '本次实验检测未检出候选；左侧为冻结的 PAN，右侧为对应 NOSR。请人工核对整景，未执行 SR。' : '左侧为本次 Job 的 PAN 产物，右侧为对应 NOSR；同步缩放和平移。请逐区域确认后再整景确认。' }}</p>
+      <p v-if="!wholeScene" class="hint" data-e2e="quality-region-info">Job {{ quality.doc.job_id }} · {{ regionInfo }}</p>
+      <p class="hint">{{ quality.doc.binding.geometry_unavailable ? '旧人工掩码缺少精确矢量区域；请对本次产物进行整景人工复核，图像证据报告不支持精确定位。' : noCandidates ? '本次实验检测未检出候选；左侧为冻结的 PAN，右侧为对应 NOSR。请人工核对整景，未执行 SR。' : '左侧为本次 Job 的 PAN 产物，右侧为对应 NOSR；同步缩放和平移。请逐区域确认后再整景确认。' }}</p>
       <p v-if="!quality.comparisonReady" class="hint">当前双图或版本未匹配，禁止提交审核；请重新定位。</p>
       <input v-model="quality.reviewer" aria-label="审核人" placeholder="审核人（必填）" maxlength="100">
       <textarea v-model="quality.reason" aria-label="审核原因" placeholder="审核原因；驳回必须填写" maxlength="2000" rows="2" />
-      <div v-if="!noCandidates" class="quality-actions">
+      <div v-if="!wholeScene" class="quality-actions">
         <button :disabled="!editable||!quality.reviewer.trim()" @click="quality.decide('region','approved')">本区域通过</button>
         <button :disabled="!editable||!quality.reviewer.trim()||!quality.reason.trim()" @click="quality.decide('region','rejected')">驳回</button>
         <button :disabled="!editable||!quality.reviewer.trim()" @click="quality.decide('region','pending')">待复核</button>

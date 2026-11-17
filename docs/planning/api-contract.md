@@ -1185,3 +1185,17 @@ NULL ──claim──> running ──> done
 ## Workspace 场景候选集契约
 
 Agent 交互采用两层数据范围：`library` 是盘阵通用场景库，`workspace` 是当前左侧查看列表的临时候选集。每次左侧列表刷新生成新的 workspace version；旧版本的检索结果和 SR 提交请求必须失效。`search_scenes` 默认使用 workspace 范围，`run_sr` 仅允许提交 workspace 中已确认的 scene_id / scene_dir。完整场景库仍由场景库页面负责排序、筛选、批量浏览和对比。
+
+## 图像证据报告（工程预览）
+
+以下路径位于 `/api/repair-evidence-reports`：
+
+- `GET /by-goal/{goal_id}` 查询共享报告引用。
+- `GET /{report_id}` 返回小快照。
+- `GET /{report_id}/rows?offset=0&limit=30` 强制每页最多30行。
+- `GET /{report_id}/export` 返回版本化 JSON。
+- `GET /{report_id}/rows/{row_id}/assets/{window_id}/{role}` 只取 manifest 白名单角色 PNG。
+- `GET /{report_id}/rows/{row_id}/locator` 校验当前审核绑定后返回 Goal/Item/Review/Region；失效返回409。
+- `POST /{report_id}/rows/{row_id}/retry` 接受 `{ "stage": "evidence" }` 或 `{ "stage": "analysis" }`，须启用对应开关；不接受磁盘路径或模型地址。
+
+模型结果不写入人工审核。状态与限制见 [修复证据报告](../status/repair-evidence-report.md)。

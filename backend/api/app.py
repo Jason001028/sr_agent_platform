@@ -76,7 +76,7 @@ from backend.tools import build_builtin_registry
 from backend.services import preview_clear
 from backend.services import plugins as plugin_svc
 from backend.services import run_sr as run_sr_svc
-from backend.services import goal_runtime, goal_worker, batch_worker
+from backend.services import goal_runtime, goal_worker, batch_worker, evidence_worker
 from backend.api import repair as repair_api
 from backend.services import scene_search, store as store_mod
 from backend.services.preview_jpg import (PREVIEW_DIVISORS, PREVIEW_JPG_QUALITY,
@@ -1387,6 +1387,7 @@ def create_app() -> FastAPI:
         # （测试里就是往下一个用例的 env 上写）。
         app.state.tasks = [
             asyncio.create_task(app.state.heavy_work.monitor()),
+            asyncio.create_task(evidence_worker.evidence_loop(app.state)),
             asyncio.create_task(title_loop(app.state)),
             asyncio.create_task(_poll_loop(app.state)),
             asyncio.create_task(_tmp_preview_purge_loop()),
@@ -1457,6 +1458,8 @@ def create_app() -> FastAPI:
     # Durable goals are opt-in for callers; mounting the read/write API is
     # backward compatible and the worker only advances persisted goals.
     app.include_router(goal_runtime.router)
+    from backend.api.evidence_reports import router as evidence_router
+    app.include_router(evidence_router)
     # Unified repair entry shared by the tool panel and the Agent tools.
     app.include_router(repair_api.router)
 

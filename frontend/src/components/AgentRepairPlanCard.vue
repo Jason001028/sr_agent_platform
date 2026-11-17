@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import RepairEvidenceEntry from './RepairEvidenceEntry.vue';
 /**
  * Agent 自动修复任务卡：计划 → 执行 → 结果，同一张卡、同一个 Goal。
  *
@@ -546,6 +547,7 @@ onBeforeUnmount(() => {
 });
 </script>
 <template>
+  <RepairEvidenceEntry v-if="goalId" :goal-id="goalId" />
   <div v-if="plan" ref="cardRoot" class="repair-task" data-e2e="agent-repair-task" :data-stage="stage">
     <header class="task-head">
       <span class="task-title"><AppIcon v-if="stage !== 'plan'" name="layers" :size="18" tint /><strong>{{ stage === 'done' ? '修复结果' : stage === 'running' ? '自动修复' : '修复计划' }} · {{ targetCount }} 景</strong></span>

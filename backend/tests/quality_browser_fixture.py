@@ -37,7 +37,7 @@ class TinyGdal(FakeGdal):
         except ValueError:return ReadRaster(path)
 
 
-def seed(store,root,count=2,mask_review=False):
+def seed(store,root,count=2,mask_review=False,request_key="quality-browser"):
     from backend.services import batch_manifest,batch_detector,batch_mask,batch_worker,run_sr
     from backend.services.goal_runtime import _batch_item_checkpoint
     from backend.services.goal_lease import GoalLease,current_lease
@@ -58,7 +58,7 @@ def seed(store,root,count=2,mask_review=False):
     assert not imported['rejected'],imported
     manifest=batch_manifest.load_manifest(imported['manifest_ref'])
     planned=batch_manifest.plan_goal_items(manifest,[])
-    goal=store.create_batch_goal(title='真实几何 + 人工验收（合成测试）',request_key='quality-browser',content_sha256=imported['manifest_ref'],
+    goal=store.create_batch_goal(title='真实几何 + 人工验收（合成测试）',request_key=request_key,content_sha256=imported['manifest_ref'],
         checkpoint={'mode':'production','workflow':batch_manifest.WORKFLOW,'manifest_ref':imported['manifest_ref']},
         items=[{'item_id':p['item_id'],'ordinal':p['ordinal'],'name':p['name'],'status':'PENDING','checkpoint':_batch_item_checkpoint(p)} for p in planned])
     claimed=store.claim_goal(goal['goal_id'],'fixture',lease_sec=600)
@@ -69,7 +69,7 @@ def seed(store,root,count=2,mask_review=False):
             item=store.get_goal_item(goal['goal_id'],p['item_id']);cp=dict(item['checkpoint'])
             target={**cp['target_image'],'item_id':item['item_id']}
             detection=batch_detector.detect(target,cp['reference_image'],{'mode':'diff','blur':False,'min_area_px':1,'open_kernel':1,'close_kernel':1})
-            mask=batch_mask.build_mask_result(detection,target,{'path':str(root/'artifacts'/'work'/item['item_id']/'mask.tif')})
+            mask=batch_mask.build_mask_result(detection,target,{'path':str(batch_manifest.artifact_root()/'work'/item['item_id']/'mask.tif')})
             if mask_review:
                 cp.update(mask=mask,detection=detection,review_required=True,phase='MASK_READY')
                 store.transition_goal_item(goal['goal_id'],step_id=item['step_id'],expected_version=item['version'],
@@ -84,7 +84,7 @@ def seed(store,root,count=2,mask_review=False):
                 (private/'Debug').mkdir(exist_ok=True)
                 (private/'Debug'/'PAN_SRLOG.txt').write_text('Run finished.\n',encoding='utf-8')
             repair_sr.run(config,'synthetic-inference.py',gdal=TinyGdal(),execute=inference)
-            fingerprint=run_sr.task_fingerprint(params);jid=8100+item['ordinal']
+            fingerprint=run_sr.task_fingerprint(params);jid=8101+store._db().execute('SELECT COUNT(*) FROM sr_tasks').fetchone()[0]
             store.put_sr_task(fingerprint,params,status='COMPLETED',job_id=jid,config_xml=str(config))
             cp.update(mask=mask,detection=detection,sr_fingerprint=fingerprint,job_id=jid,attempt=1,
                 job_status={'state':'COMPLETED','active':False,'exit_code':'0'},phase='VERIFYING')
@@ -99,7 +99,8 @@ def seed(store,root,count=2,mask_review=False):
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--root',required=True);parser.add_argument('--port',type=int,required=True);parser.add_argument('--mask-review',action='store_true');args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--root',required=True);parser.add_argument('--port',type=int,required=True);parser.add_argument('--mask-review',action='store_true');parser.add_argument('--evidence',action='store_true');parser.add_argument('--evidence-scenes',type=int,default=2);args=parser.parse_args()
+    if not 1<=args.evidence_scenes<=40:raise ValueError('evidence-scenes must be 1..40')
     root=Path(args.root).resolve();root.mkdir(parents=True,exist_ok=True)
     os.environ.update({**allowed_roots_env(root),'SR_AGENT_DB':str(root/'app.db'),'SR_BATCH_ARTIFACT_DIR':str(root/'artifacts'),
         'SR_SCENES_ROOT':str(root/'empty'),'SR_EXECUTOR':'local','SR_LLM_MOCK':'1','SR_BATCH_POLL_SEC':'0.1',
@@ -111,7 +112,25 @@ def main():
     run_sr.query_job_status=lambda jid,**kw:{'job_id':jid,'state':'COMPLETED','active':False,'exit_code':'0'}
     app=create_app()
     fixtures=root/'fixtures.json'
-    if not fixtures.exists():fixtures.write_text(json.dumps(seed(app.state.store,root,mask_review=args.mask_review),ensure_ascii=False),encoding='utf-8')
+    if not fixtures.exists():fixtures.write_text(json.dumps(seed(app.state.store,root,count=args.evidence_scenes,mask_review=args.mask_review),ensure_ascii=False),encoding='utf-8')
+    if args.evidence:
+        if args.mask_review: raise ValueError('evidence requires published repair artifacts')
+        from backend.services import evidence_store as ledger, batch_quality
+        from backend.services.evidence_report import generate_window
+        os.environ['SR_EVIDENCE_STORAGE_LIMIT_BYTES']=str(1024**3)
+        data=json.loads(fixtures.read_text(encoding='utf-8'));gid=data['goal_id']
+        items=app.state.store.list_goal_items(gid)
+        reviews=[batch_quality.review_for_item(app.state.store,i) for i in items]
+        rid=ledger.create_report(app.state.store,app.state.store.get_goal(gid),items,reviews,'ready')
+        while task:=ledger.claim(app.state.store):
+            plan=app.state.store._db().execute('SELECT plan_json FROM repair_evidence_rows WHERE report_id=? AND row_id=?',(rid,task['row_id'])).fetchone()
+            windows=[generate_window(app.state.store,task,index) for index,_ in enumerate(json.loads(plan[0])['windows'])]
+            ledger.finish(app.state.store,task,state='ready',manifest={'windows':windows})
+        data['report_id']=rid
+        if not data.get('other_goal_id'):
+            other=seed(app.state.store,root/'other-batch',count=1,request_key='quality-browser-b')
+            data['other_goal_id']=other['goal_id']
+        fixtures.write_text(json.dumps(data),encoding='utf-8')
     from fastapi.responses import FileResponse
     dist=Path(__file__).resolve().parents[2]/'frontend'/'dist'
     @app.get('/{asset:path}')

@@ -108,6 +108,18 @@ _LOADED_WORK_DIR: str | None = None
 #: process must not start after a simulated restart (threads die in reality).
 _EPOCH = 0
 
+
+def activity_snapshot():
+    """Memory-only admission facts; never reconcile jobs or touch source files."""
+    import hashlib
+    with _LOCK:
+        rows = sorted((str(jid),str(rec.get('state')),bool(rec.get('done')))
+                      for jid,rec in _JOBS.items())
+        uncertain = not _STATE_LOADED or not _DISPATCH_BLOCKED.is_set()
+        pending = [rec for rec in _JOBS.values() if not rec.get('done')]
+        return {'active':len(pending), 'quarantine':any(rec.get('state') in ('starting','quarantine') for rec in pending),
+                'unknown':uncertain, 'generation':hashlib.sha256(repr((_EPOCH,rows)).encode()).hexdigest()}
+
 #: Cached local production preflight. Keyed by the env values that affect it,
 #: so the plan card can poll status without re-importing torch or calling
 #: nvidia-smi on every request.

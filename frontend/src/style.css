@@ -332,3 +332,10 @@ body {
   font-weight: 600;
   color: var(--ink);
 }
+
+@media (max-width: 700px) {
+  .report-route .app-nav { flex-wrap: wrap; height: auto; }
+  .report-route .nav-links { overflow-x: auto; width: 100%; flex: 1 1 100%; }
+  .report-route .brand { max-width: 100%; }
+  .report-route .brand-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}

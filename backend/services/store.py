@@ -623,6 +623,10 @@ class Store:
             self._conn = sqlite3.connect(self.path, timeout=10,
                                          check_same_thread=False)
             self._conn.executescript(_SCHEMA)
+            from backend.services.evidence_store import SCHEMA as evidence_schema
+            self._conn.executescript(evidence_schema)
+            from backend.services.evidence_store import migrate as migrate_evidence
+            migrate_evidence(self._conn)
             _ensure_columns(self._conn)
         return self._conn
 

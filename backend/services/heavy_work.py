@@ -32,7 +32,7 @@ class WorkFuture(Future):
 class HeavyWork:
     def __init__(self, limit=32):
         self.limit = limit
-        self.queues = (deque(), deque())
+        self.queues = (deque(), deque(), deque())
         self.inflight = {}
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="raster")
         self.reader = ThreadPoolExecutor(max_workers=2, thread_name_prefix="preview-cache")
@@ -65,7 +65,7 @@ class HeavyWork:
                 await asyncio.shield(task)
                 raise
 
-    async def run(self, fn, *args, key=None, background=False, _ticket=None):
+    async def run(self, fn, *args, key=None, background=False, evidence=False, _ticket=None):
         self.loop = asyncio.get_running_loop()
         if _ticket is not None and _ticket.cancelled():
             return None
@@ -84,7 +84,7 @@ class HeavyWork:
             self.states[key] = "queued"
             while len(self.states) > 128:
                 self.states.popitem(last=False)
-        self.queues[int(background)].append((fn, args, key, future, time.monotonic(), _ticket))
+        self.queues[2 if evidence else int(background)].append((fn, args, key, future, time.monotonic(), _ticket))
         if self.drain is None or self.drain.done():
             self.drain = asyncio.create_task(self._drain())
         return await asyncio.shield(future)
@@ -93,7 +93,8 @@ class HeavyWork:
         streak = 0
         while any(self.queues):
             bg = bool(self.queues[1]) and (not self.queues[0] or streak >= 4)
-            fn, args, key, future, queued, ticket = self.queues[int(bg)].popleft()
+            priority = int(bg) if self.queues[0] or self.queues[1] else 2
+            fn, args, key, future, queued, ticket = self.queues[priority].popleft()
             if ticket is not None and not ticket.set_running_or_notify_cancel():
                 future.cancel()
                 continue

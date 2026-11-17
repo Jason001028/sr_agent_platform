@@ -11,7 +11,7 @@ export interface QualityRegion {region_id:string;decision:QualityDecision;reason
 export interface QualityDocument {
   review_id:string;goal_id:string;item_id:string;job_id:string;version:number;scene_decision:QualityDecision;
   regions:QualityRegion[];images:(SceneSibling & {image_key:string})[];scene_path:string;
-  binding:{kind?:'no-candidate';grid?:{width:number;height:number};mask?:{width:number;height:number;sha256:string};
+  binding:{geometry_unavailable?:boolean;kind?:'no-candidate';grid?:{width:number;height:number};mask?:{width:number;height:number;sha256:string};
     regions:{candidate_id:string;kind:'bbox'|'polygon';bbox:[number,number,number,number];points:[number,number][]|null}[];
     output:{image_key:string};nosr:{image_key:string}};
   audit:{request_key:string;payload:Record<string,unknown>;created_at:number}[];

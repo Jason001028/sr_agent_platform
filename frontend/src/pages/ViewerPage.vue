@@ -15,6 +15,7 @@
 import { onMounted, onUnmounted, ref } from 'vue';
 import { installButtonPress } from '../lib/buttonPress';
 import { mountE2EHooks } from '../viewer/e2eHooks';
+import EvidenceComparisonBridge from '../components/EvidenceComparisonBridge.vue';
 import Toolbar from '../components/Toolbar.vue';
 import CompareBar from '../components/CompareBar.vue';
 import FileList from '../components/FileList.vue';
@@ -78,6 +79,7 @@ onUnmounted(() => {
 
 <template>
   <div ref="pageRoot" class="viewer-page">
+    <EvidenceComparisonBridge />
     <Toolbar />
     <!-- 对比条在工具栏与路径栏之间：**刻意不放进 .toolbar** —— 那条有「1366 下不横向
          溢出」的 e2e 守卫，三个模式 + 图例 + 场景芯片塞进去必然溢出。

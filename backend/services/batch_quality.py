@@ -72,14 +72,16 @@ def make_binding(item,task,verification):
     if frozen_stat!=[str(v) for v in receipt_doc["backup_signature"][:2]]:
         raise ReviewConflict("修复备份不属于冻结的 PAN 输入版本")
     candidates=cp["detection"]["candidates"]
-    if not candidates or len({c["candidate_id"] for c in candidates}) != len(candidates):
+    legacy_manual = cp['detection'].get('detector_name')=='existing-human-mask' and cp['detection'].get('geometry_unavailable')
+    if (not candidates and not legacy_manual) or len({c["candidate_id"] for c in candidates}) != len(candidates):
         raise ReviewConflict("Mask 区域清单缺失或身份重复")
     return {"version":"human-quality.v1","job_id":str(job),"fingerprint":cp["sr_fingerprint"],
             "task_params_sha256":_hash(task.get("params") or {}),
             "input":target,"nosr":reference,"output":output,"backup":backup,
             "mask":{**_file(mask_path),"sha256":mask["sha256"],"width":target["width"],"height":target["height"]},
             "config":{**_file(config),"sha256":config_sha},"receipt":receipt_info,
-            "geometry_sha256":_hash(candidates),"regions":candidates}
+            "geometry_sha256":_hash(candidates),"regions":candidates,
+            "geometry_unavailable":bool(legacy_manual)}
 
 
 def _decode(row):
@@ -243,7 +245,7 @@ def decide(store,goal_id,item_id,body):
             region.update(decision=decision,reason=reason,reviewer=reviewer,reviewed_at=time.time())
         else:
             if decision=="pending": raise ValueError("整景只能通过或驳回")
-            if decision=="approved" and not no_candidates and (not regions or any(r["decision"]!="approved" for r in regions)):
+            if decision=="approved" and not no_candidates and not review['binding'].get('geometry_unavailable') and (not regions or any(r["decision"]!="approved" for r in regions)):
                 raise ReviewConflict("所有必要区域通过后才可整景确认")
             scene=decision
         now=time.time()

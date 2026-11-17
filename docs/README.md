@@ -645,3 +645,6 @@ sr_agent_platform/
 不按上述规则改写。
 
 P1 spatial annotations: [implementation and pending acceptance](status/spatial-annotations.md).
+
+
+图像证据报告当前能力、配置与验收：[status/repair-evidence-report.md](status/repair-evidence-report.md)。

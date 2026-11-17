@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import RepairEvidenceEntry from './RepairEvidenceEntry.vue';
 import { computed, ref, watch } from 'vue';
 import { useBatchGoalStore } from '../stores/batchGoal';
 import { focusMissionItems, missionSummary, ISSUE_STATUSES, terminalMission } from '../lib/batchMission';
@@ -33,6 +34,7 @@ const qualityCount = computed(() => (snap.value?.quality?.waiting_scenes ?? 0) +
 </script>
 <template>
   <div v-if="snap" class="batch-panel" data-e2e="batch-panel">
+    <RepairEvidenceEntry v-if="batch.goalId" :goal-id="batch.goalId" />
     <button v-if="snap.goal.phase === 'waiting_review' && batch.goalId" class="link standalone" @click="requestMaskReview(batch.goalId)">前往可视化复核 ↗</button>
     <section v-if="focus.length || fullQueue" class="mission-queue" data-e2e="mission-queue">
       <header><h3>{{ fullQueue ? '任务列表' : mission?.issueFocus ? '异常任务' : '当前任务' }}</h3>

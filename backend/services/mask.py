@@ -125,7 +125,45 @@ def generate_mask(width, height, polygons, tif_path, txt_path):
     mask = rasterize_polygons(width, height, polygons)
     write_mask_tif(mask, tif_path)
     write_mask_centroid_txt(polygons, txt_path)
+    save_geometry(tif_path,width,height,polygons)
     return mask
+
+
+def save_geometry(tif_path, width, height, polygons):
+    """Freeze final vectors beside the saved mask; never infer them from pixels."""
+    import hashlib
+    import os
+    import uuid
+    from backend.services.preview_jpg import source_revision
+    path=Path(tif_path)
+    sha=hashlib.sha256()
+    with path.open('rb') as stream:
+        for chunk in iter(lambda:stream.read(1024*1024),b''):sha.update(chunk)
+    regions=[]
+    for index,points in enumerate(polygons):
+        key=hashlib.sha256(json.dumps([index,points],sort_keys=True).encode()).hexdigest()[:24]
+        xs=[p[0] for p in points];ys=[p[1] for p in points]
+        regions.append({'candidate_id':'manual-'+key,'kind':'polygon','points':points,
+                        'bbox':[min(xs),min(ys),max(xs),max(ys)],'score':None,'label':'manual'})
+    document={'schema_version':'mask-geometry.v1','width':width,'height':height,
+              'mask_revision':source_revision(path),'mask_sha256':sha.hexdigest(),'regions':regions}
+    temp=path.with_name('.geometry-'+uuid.uuid4().hex+'.json')
+    try:
+        temp.write_text(json.dumps(document,ensure_ascii=False,allow_nan=False),encoding='utf-8')
+        os.replace(temp,path.with_suffix(path.suffix+'.geometry.json'))
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def saved_geometry(path):
+    from backend.services.preview_jpg import source_revision
+    path=Path(path);sidecar=path.with_suffix(path.suffix+'.geometry.json')
+    if not sidecar.is_file():return None
+    if sidecar.stat().st_size>1024*1024:raise ValueError('mask_geometry_budget')
+    value=json.loads(sidecar.read_text(encoding='utf-8'))
+    if value.get('schema_version')!='mask-geometry.v1' or value.get('mask_revision')!=source_revision(path):
+        raise ValueError('mask_geometry_stale')
+    return value
 
 
 if __name__ == "__main__":

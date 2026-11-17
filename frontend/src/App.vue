@@ -30,7 +30,7 @@ const logoOk = ref(true);
 </script>
 
 <template>
-  <div class="app-shell">
+  <div class="app-shell" :class="{ 'report-route': route.path.startsWith('/repair-reports/') }">
     <header class="app-nav">
       <RouterLink to="/viewer" class="brand" :class="{ 'has-logo': logoOk }">
         <span class="brand-mark">

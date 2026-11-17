@@ -35,20 +35,22 @@ export const useBatchQualityStore=defineStore('batchQuality',()=>{
     try{const result=await qualityList(gid);if(batch.goalId===gid&&seq===listSeq)reviews.value=result.reviews;}
     catch(e){if(batch.goalId===gid&&seq===listSeq)error.value=String(e);}
   }
-  async function select(itemId:string){
+  async function select(itemId:string, expectedReviewId?:string){
     const gid=batch.goalId;if(!gid)return;
     const gen=++generation;controller?.abort();controller=new AbortController();
+    viewer.noteUserIntent();const selectionIntent=viewer.userIntentSeq;
     doc.value=null;pair.value=null;error.value='';loading.value=true;busy.value=false;
     try{
       const value=await qualityDocument(gid,itemId,controller.signal);
-      if(gen!==generation||batch.goalId!==gid)return;
+      if(gen!==generation||batch.goalId!==gid||viewer.userIntentSeq!==selectionIntent||viewer.drawMode)return;
+      if(expectedReviewId && value.review_id!==expectedReviewId)throw new Error('历史审核绑定已改变，请查看归档证据');
       doc.value=value;regionId.value=value.regions.find(r=>r.decision==='pending')?.region_id??value.regions[0]?.region_id??'';
       await openRegion(regionId.value);
     }catch(e){if(gen===generation){error.value=String(e);pair.value=null;}}
     finally{if(gen===generation)loading.value=false;}
   }
   function focus(){
-    const d=doc.value,c=selectedRegion.value;if(!d||(!c&&d.binding.kind!=='no-candidate')||!comparisonReady.value)return;
+    const d=doc.value,c=selectedRegion.value;if(!d||(!c&&d.binding.kind!=='no-candidate'&&!d.binding.geometry_unavailable)||!comparisonReady.value)return;
     const {width:w,height:h}=d.binding.kind==='no-candidate'?d.binding.grid!:d.binding.mask!;
     const [x0,y0,x1,y1]=c?.bbox??[0,0,w-1,h-1],cx=(x0+x1)/2/w,cy=(y0+y1)/2/h;
     if(viewer.compareMode==='flicker'){
@@ -75,10 +77,10 @@ export const useBatchQualityStore=defineStore('batchQuality',()=>{
       const ra=viewer.recs.find(r=>r.id===a)!,rb=viewer.recs.find(r=>r.id===b)!;
       if(!ra.thumb||!rb.thumb||ra.thumb.width*rb.thumb.height!==rb.thumb.width*ra.thumb.height)throw new Error('预览网格比例不一致，不能进行精确同步验收；请使用匹配档位');
       if(!await viewer.openPreviewPair(a,b))throw new Error('对比视图已被新的操作取消');
+      const openedIntent=viewer.userIntentSeq;
       viewer.setCtxRailOpen(true);
       await nextTick();
       await new Promise<void>(resolve=>requestAnimationFrame(()=>resolve()));
-      const openedIntent=viewer.userIntentSeq;
       const current=await qualityDocument(gid,d.item_id);
       if(gen!==generation||viewer.userIntentSeq!==openedIntent||doc.value!==d)return;
       if(current.review_id!==d.review_id||current.version!==d.version)throw new Error('审核对象已改变，请刷新');

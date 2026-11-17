@@ -358,7 +358,13 @@ def _mask_plan(mask_policy: str, mask_path, manifest: dict,
         raise RepairError(
             f"人工掩码尺寸 {info['W']}×{info['H']} 与本体 "
             f"{target.get('width')}×{target.get('height')} 不一致")
+    from backend.services.mask import saved_geometry
+    try:
+        geometry=saved_geometry(path)
+    except (ValueError,OSError):
+        geometry=None  # A legacy mask remains executable; precise report is unsupported.
     return {
+        "geometry": geometry,
         "policy": "existing",
         "scene_ref": Path(scene_ref).as_posix(),
         "path": path.as_posix(),
@@ -984,6 +990,10 @@ def _prepare_manual_mask(plan: dict, item: dict) -> tuple[dict, dict]:
         "strip_count": checked.get("strip_count"),
         "foreground_source": source.as_posix(),
     }
+    geometry=mask_info.get('geometry')
+    if geometry and (geometry.get('mask_sha256')!=checked['sha256'] or geometry.get('width')!=width or geometry.get('height')!=height):
+        raise RepairPlanConflict('人工掩码矢量与冻结掩码不匹配',reason='stale_source')
+    regions=geometry.get('regions',[]) if geometry else []
     detection = {
         "contract_version": batch_contracts.DETECTION_CONTRACT_VERSION,
         "coordinate_space": batch_contracts.COORDINATE_SPACE,
@@ -994,9 +1004,10 @@ def _prepare_manual_mask(plan: dict, item: dict) -> tuple[dict, dict]:
         "provenance": "real",
         "detector_name": "existing-human-mask",
         "detector_version": "1.0.0",
-        "candidates": [],
-        "candidate_count": 0,
-        "candidate_accounting": {"total": 0, "processed": 0, "unprocessed": 0},
+        "candidates": regions,
+        "candidate_count": len(regions),
+        "candidate_accounting": {"total": len(regions), "processed": len(regions), "unprocessed": 0},
+        "geometry_unavailable": not bool(regions),
         "requires_geometry_review": False,
         "diagnostics": [{"code": "existing_manual_mask",
                          "source": source.as_posix()}],
