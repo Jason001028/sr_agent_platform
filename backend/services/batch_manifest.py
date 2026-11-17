@@ -271,8 +271,9 @@ def _resolve_item(row: dict, *, date: str | None, product: str | None) -> dict:
             ["PAN_old_latest.tif", "PAN_old_2.tif",
              pan.stem + "_old_latest.tif", pan.stem + "_old_2.tif"]):
         if (directory / name).exists():
-            raise scene_resolve.SceneLookupError(
-                "已存在 PAN 备份，拒绝重复修复：" + name)
+            error = scene_resolve.SceneLookupError("已存在 PAN 备份，拒绝重复修复：" + name)
+            error.conflict = {"code": "pan_backup_exists", "scene_ref": str(directory), "conflict_path": str(directory / name), "filename": name}
+            raise error
     pan_info = preview_jpg.probe_tiff(pan)
     nosr_info = preview_jpg.probe_tiff(nosr)
     if pan_info["spp"] != 1 or nosr_info["spp"] != 1:
@@ -481,6 +482,7 @@ def import_manifest(*, data: bytes | None = None, text: str | None = None,
                 "line": row["source_lines"][0],
                 "severity": "error",
                 "code": "scene_unresolved",
+                **getattr(exc, "conflict", {}),
                 "message": str(exc),
                 "name": row["name"],
             })

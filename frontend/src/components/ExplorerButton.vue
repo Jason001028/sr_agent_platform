@@ -2,7 +2,7 @@
 import { computed, ref, useId } from 'vue';
 import { explorerUri, EXPLORER_READY_KEY } from '../lib/explorer';
 
-const props = defineProps<{ directory?: string | null }>();
+const props = defineProps<{ directory?: string | null; label?: string }>();
 const dialog = ref<HTMLDialogElement | null>(null);
 const pathInput = ref<HTMLInputElement | null>(null);
 const copied = ref(false);
@@ -51,7 +51,7 @@ async function copyPath() {
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
       stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v2M3 7v12a1 1 0 0 0 1 1h15a1 1 0 0 0 1-.8l2-8a1 1 0 0 0-1-1H7l-4 9" />
-    </svg>
+    </svg><span v-if="label">{{ label }}</span>
   </button>
   <Teleport to="body">
     <dialog ref="dialog" class="explorer-dialog" :aria-labelledby="titleId"

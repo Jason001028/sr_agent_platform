@@ -235,6 +235,54 @@ class BatchWorkerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.review_batch_item(gid, ready["item_id"], approved["version"], "exclude")
 
+    def test_region_mask_review_waits_for_all_and_rasterizes_only_accepted_geometry(self):
+        goal, _ = self.make_goal(count=1)
+        gid = goal['goal_id']
+        item = self.items(gid)[0]
+        cp = {**item['checkpoint'], 'review_required': True}
+        db = self.store._db()
+        db.execute('UPDATE agent_goal_steps SET checkpoint=? WHERE step_id=?', (json.dumps(cp), item['step_id']))
+        db.commit()
+        self.run_until(lambda: self.statuses(gid) == {'MASK_READY'})
+        ready = self.items(gid)[0]
+        cp = ready['checkpoint']
+        cp['detection']['candidates'] = [
+            {'candidate_id': 'one', 'kind': 'bbox', 'bbox': [1, 1, 4, 4]},
+            {'candidate_id': 'two', 'kind': 'bbox', 'bbox': [8, 8, 12, 12]},
+        ]
+        db.execute('UPDATE agent_goal_steps SET checkpoint=? WHERE step_id=?', (json.dumps(cp), ready['step_id']))
+        db.commit()
+        with self.assertRaises(ValueError):
+            self.store.review_batch_item(gid, ready['item_id'], ready['version'], 'approve', region_id='unknown')
+        first = self.store.review_batch_item(gid, ready['item_id'], ready['version'], 'approve', region_id='one')
+        self.assertFalse(batch_worker._review_allows_submit(first))
+        with self.assertRaises(ValueError):
+            self.store.review_batch_item(gid, ready['item_id'], ready['version'], 'exclude', region_id='two')
+        final = self.store.review_batch_item(gid, ready['item_id'], first['version'], 'exclude', region_id='two')
+        self.assertTrue(batch_worker._review_allows_submit(final))
+        self.assertNotEqual(final['checkpoint']['mask']['path'], cp['mask']['path'])
+        with Image.open(final['checkpoint']['mask']['path']) as image:
+            self.assertNotEqual(image.getpixel((2, 2)), 0)
+            self.assertEqual(image.getpixel((9, 9)), 0)
+        self.assertEqual(final['checkpoint']['region_reviews'], {'one': 'approve', 'two': 'exclude'})
+        self.assertEqual([c['candidate_id'] for c in final['checkpoint']['detection']['candidates']], ['one'])
+        self.assertEqual([c['candidate_id'] for c in final['checkpoint']['review_candidates']], ['one', 'two'])
+
+    def test_all_regions_rejected_skips_without_allowing_submission(self):
+        goal, _ = self.make_goal(count=1)
+        gid = goal['goal_id']
+        item = self.items(gid)[0]
+        db = self.store._db()
+        cp = {**item['checkpoint'], 'review_required': True}
+        db.execute('UPDATE agent_goal_steps SET checkpoint=? WHERE step_id=?', (json.dumps(cp), item['step_id']))
+        db.commit()
+        self.run_until(lambda: self.statuses(gid) == {'MASK_READY'})
+        ready = self.items(gid)[0]
+        candidate = ready['checkpoint']['detection']['candidates'][0]['candidate_id']
+        final = self.store.review_batch_item(gid, ready['item_id'], ready['version'], 'exclude', region_id=candidate)
+        self.assertEqual(final['status'], 'SKIPPED')
+        self.assertFalse(batch_worker._review_allows_submit(final))
+
     def test_manual_mask_fake_sr_closes_and_recovers_after_restart(self):
         goal = self.manual_plan_goal(70)
         gid = goal["goal_id"]

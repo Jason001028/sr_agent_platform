@@ -47,7 +47,6 @@ import { roiOrigGeom } from '../lib/roiStats.js';
 
 import AgentToolPresentation from './AgentToolPresentation.vue';
 import { projectAgentActivity } from '../lib/agentActivity';
-import { hasRepairPlanInTurn } from '../lib/repairPlan';
 
 const viewer = useViewerStore();
 const chat = useChatStore();
@@ -389,10 +388,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
                               :merged-count="reasoningView(i)?.merged ? reasoningView(i)?.count : undefined"
                               :merged-seconds="reasoningView(i)?.merged ? reasoningView(i)?.seconds : undefined"
                               @timing="onReasoningTiming(i, $event)" />
-              <details v-if="m.content && hasRepairPlanInTurn(chat.messages, i)" class="repair-narrative">
-                <summary>Agent 说明</summary><MarkdownBody :source="m.content" />
-              </details>
-              <div v-else-if="m.content" class="bubble assistant">
+              <div v-if="m.content" class="bubble assistant">
                 <MarkdownBody :source="m.content" />
               </div>
               <div v-else-if="chat.sending && !m.toolCalls?.length && ((m.streaming && !m.reasoning) || m.phase === 'tool_call')"
@@ -655,9 +651,6 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
 }
 .cbtn:hover { filter: brightness(1.05); }
 .cbtn:disabled { opacity: .55; cursor: not-allowed; }
-.repair-narrative { min-width:0; max-width:100%; font-size:11px; color:var(--tb-muted); }
-.repair-narrative > summary { padding:6px 0; cursor:pointer; }
-.repair-narrative[open] { max-height:260px; overflow:auto; overflow-wrap:anywhere; }
 .at-row:empty { display:none; }
 .bubble.tools { background:transparent; border:0; box-shadow:none; padding:0; }
 </style>

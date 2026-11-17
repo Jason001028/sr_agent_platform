@@ -12,7 +12,8 @@
  * 文件名反推关联（见 stores/viewer.tryLinkScenes）。此前工具栏下方那条横贯整页的
  * 「盘阵场景」路径栏已移除（使用频率低、视觉冗余）。
  */
-import { onMounted, onUnmounted } from 'vue';
+import { onMounted, onUnmounted, ref } from 'vue';
+import { installButtonPress } from '../lib/buttonPress';
 import { mountE2EHooks } from '../viewer/e2eHooks';
 import Toolbar from '../components/Toolbar.vue';
 import CompareBar from '../components/CompareBar.vue';
@@ -26,6 +27,7 @@ import AutoTourControls from '../components/AutoTourControls.vue';
 import BatchDetectionOverlay from '../components/BatchDetectionOverlay.vue';
 import BatchRepairPlayback from '../components/BatchRepairPlayback.vue';
 import BatchQualityOverlay from '../components/BatchQualityOverlay.vue';
+import BatchMaskReviewOverlay from '../components/BatchMaskReviewOverlay.vue';
 import DiffComparisonViews from '../components/DiffComparisonViews.vue';
 import DecodeOverlay from '../components/DecodeOverlay.vue';
 import ContextPanel from '../components/ContextPanel.vue';
@@ -34,9 +36,15 @@ import SettingsPanel from '../components/SettingsPanel.vue';
 import StatusBar from '../components/StatusBar.vue';
 import { useViewerStore } from '../stores/viewer.js';
 import { useDiffStore } from '../stores/diff';
+import { useBatchMaskReviewStore } from '../stores/batchMaskReview';
 
 const viewer = useViewerStore();
+const pageRoot = ref<HTMLElement | null>(null);
+let disposePress: (() => void) | undefined;
+onMounted(() => { if (pageRoot.value) disposePress = installButtonPress(pageRoot.value); });
+onUnmounted(() => disposePress?.());
 const diff = useDiffStore();
+const maskReview = useBatchMaskReviewStore();
 
 // 页面切到后台就停表：交替对比是「人看着比细节」的工具，后台继续翻面既没意义，
 // 也会在回到前台时落在任意一帧。store 每拍也会自查 document.hidden，这里是立即版。
@@ -69,7 +77,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="viewer-page">
+  <div ref="pageRoot" class="viewer-page">
     <Toolbar />
     <!-- 对比条在工具栏与路径栏之间：**刻意不放进 .toolbar** —— 那条有「1366 下不横向
          溢出」的 e2e 守卫，三个模式 + 图例 + 场景芯片塞进去必然溢出。
@@ -84,9 +92,10 @@ onUnmounted(() => {
         <CompareOverlay />
         <FlickerControls />
         <AutoTourControls />
-        <BatchDetectionOverlay />
+        <BatchDetectionOverlay v-if="!maskReview.active" />
         <BatchRepairPlayback />
         <BatchQualityOverlay />
+        <BatchMaskReviewOverlay />
         <DecodeOverlay />
         <DiffComparisonViews v-if="diff.comparisonView && diff.comparison" />
       </TifCanvas>

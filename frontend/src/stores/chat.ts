@@ -290,7 +290,7 @@ export const useChatStore = defineStore('chat', () => {
   const sending = ref(false);
   const activity = ref(startActivity());
   const thinkingStatus = ref('');
-  const thinkingProfile = ref<'fast' | 'low' | 'balanced' | 'deep'>('balanced');
+  const thinkingProfile = ref<'fast' | 'low' | 'balanced' | 'deep'>('low');
   const agentStatus = ref<'idle' | 'thinking' | 'responding'>('idle');
   /** 流式增量批次号：token/reasoning 批量合并后 +1，供滚动跟随用。 */
   const streamTick = ref(0);

@@ -3,6 +3,7 @@ import { computed } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import { useDiffStore } from '../stores/diff';
 import AppIcon from './AppIcon.vue';
+import LayerSwitch from './LayerSwitch.vue';
 
 const viewer = useViewerStore();
 const diff = useDiffStore();
@@ -25,13 +26,13 @@ function toggle(key: string) {
     <header><strong><AppIcon name="layers" :size="14" tint />图层显示</strong><span>Viewer 统一管理</span></header>
     <div class="layer-list">
       <button v-for="layer in layers" :key="layer.key" type="button" class="layer-row"
-        :data-layer="layer.key" :aria-label="layer.title" :aria-pressed="layer.selected" @click="toggle(layer.key)">
+        :data-layer="layer.key" :aria-label="layer.title" role="switch" :aria-checked="layer.selected" @click="toggle(layer.key)">
         <svg class="layer-symbol" :style="{ color: layer.color }" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
           <template v-if="layer.key === 'annotations'"><path d="M15 8c0 4-5 8-5 8S5 12 5 8a5 5 0 0 1 10 0Z"/><circle cx="10" cy="8" r="1.8"/></template>
           <template v-else><rect x="4" y="4" width="12" height="12" rx="2" :stroke-dasharray="layer.key === 'roi' ? '1.5 1.5' : '4 3'"/><circle v-if="layer.key === 'difference'" cx="10" cy="10" r="1.5"/></template>
         </svg>
         <span class="layer-copy"><span>{{ layer.title }}</span><small>{{ layer.detail }}</small></span>
-        <span class="layer-check" :class="{ selected: layer.selected }" aria-hidden="true"><svg v-if="layer.selected" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m2.5 6 2.2 2.2 4.8-4.8"/></svg></span>
+        <LayerSwitch :selected="layer.selected" />
       </button>
     </div>
     <footer><span>临时隐藏全部叠加层</span><button type="button" :aria-pressed="!viewer.overlayMasterVisible" @click="viewer.overlayMasterVisible = !viewer.overlayMasterVisible"><AppIcon :name="viewer.overlayMasterVisible ? 'eye' : 'eye-closed'" :size="12" tint />{{ viewer.overlayMasterVisible ? '全部隐藏' : '恢复显示' }}</button></footer>
@@ -50,8 +51,6 @@ header>span,footer{font-size:11px;color:var(--muted)}
 .layer-copy{display:grid;gap:3px;flex:1}
 .layer-copy small{font-size:10px;color:var(--muted)}
 .layer-symbol{flex:none}
-.layer-check{display:grid;place-items:center;width:18px;height:18px;box-sizing:border-box;border:1px solid #cdcfce;border-radius:50%;flex:none}
-.layer-check.selected{background:#202321;border-color:#202321;color:white}
 footer{justify-content:space-between;gap:12px;margin-top:12px;padding-top:16px;border-top:1px solid var(--line)}
 footer button{gap:5px;padding:4px 10px;border:1px solid var(--line);border-radius:20px;background:transparent;color:inherit;font:inherit;cursor:pointer}
 button:focus-visible{outline:2px solid var(--accent-3);outline-offset:2px}

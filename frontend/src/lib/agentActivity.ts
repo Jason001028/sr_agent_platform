@@ -45,9 +45,15 @@ function stepSummary(step: ActivityStep): string {
   if (step.state === 'running') return '正在执行';
   if (step.state === 'interrupted') return '结果未确认';
   if (step.state === 'failed') {
-    if (step.name === 'read_tool_result') return '结果读取失败，任务状态以业务卡片为准';
     const detail = step.result?.detail;
-    return detail && !/^[\s]*[{[]/.test(detail) ? detail.replace(/\s+/g,' ').slice(0,120) : '调用失败，请展开查看详情';
+    const readable = detail && !/^[\s]*[{[]/.test(detail)
+      ? detail.replace(/\s+/g,' ').slice(0,120) : '';
+    if (step.name === 'read_tool_result') {
+      return readable
+        ? `结果读取失败：${readable}；任务状态以业务卡片为准`
+        : '结果读取失败，任务状态以业务卡片为准';
+    }
+    return readable || '调用失败，请展开查看详情';
   }
   if (step.name === 'read_tool_result') return '已读取保存结果';
   if (step.name === 'get_current_image_info') return '已读取当前影像信息';

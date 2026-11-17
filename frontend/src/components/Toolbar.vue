@@ -39,6 +39,32 @@ function submissionAccepted(_id: number, fresh: boolean) {
 const store = useViewerStore();
 const diff = useDiffStore();
 const qc = useQcListStore();
+const maskRipples = new Map<Animation, HTMLElement>();
+onBeforeUnmount(() => {
+  maskRipples.forEach((element, animation) => { animation.cancel(); element.remove(); });
+  maskRipples.clear();
+});
+function toggleMask(event: MouseEvent) {
+  const button = event.currentTarget as HTMLButtonElement;
+  if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches && typeof button.animate === 'function') {
+    const bounds = button.getBoundingClientRect();
+    const diameter = bounds.width * 2.4;
+    const x = event.detail === 0 ? bounds.width / 2 : event.clientX - bounds.left;
+    const y = event.detail === 0 ? bounds.height / 2 : event.clientY - bounds.top;
+    const ripple = document.createElement('span');
+    ripple.className = 'mask-ripple';
+    ripple.setAttribute('aria-hidden', 'true');
+    Object.assign(ripple.style, {width:`${diameter}px`,height:`${diameter}px`,left:`${x-diameter/2}px`,top:`${y-diameter/2}px`});
+    button.append(ripple);
+    const timing = getComputedStyle(button).getPropertyValue('--motion-mask-ripple').trim();
+    const duration = (Number.parseFloat(timing) * (timing.endsWith('ms') ? 1 : 1000)) || 450;
+    const animation = ripple.animate([{transform:'scale(0)',opacity:.28},{transform:'scale(1)',opacity:0}],
+      {duration,easing:'ease-out'});
+    maskRipples.set(animation,ripple);
+    animation.onfinish = () => { ripple.remove(); maskRipples.delete(animation); };
+  }
+  store.drawMode ? store.exitDraw() : store.enterDraw();
+}
 const fileInput = ref<HTMLInputElement | null>(null);
 /** 定位框：一个框装「X,Y」两个数（原先是 X、Y 两个框，拆开填反而要用户自己数着填）。 */
 const coordinateIssue = computed(() => qc.rowForScene(store.activeRec?.sceneDir ?? store.activeRec?.lqPath));
@@ -161,13 +187,14 @@ function onPick(e: Event) {
          （掩码建在本体影像网格上，在产物上画，坐标写进掩码文件整片都是错的）。 -->
     <button
       type="button"
-      class="outbtn"
+      class="outbtn mask-draw-button"
       :class="{ on: store.drawMode }"
+      :aria-pressed="store.drawMode"
       :disabled="intermediate"
       :title="intermediate ? roTitle : ''"
-      @click="store.drawMode ? store.exitDraw() : store.enterDraw()"
+      @click="toggleMask"
     >
-      绘制掩码{{ store.drawMode ? ' ✓' : '' }}
+      绘制掩码
     </button>
     <button type="button" class="btn" :disabled="store.busy" @click="store.genMask()">
       生成掩码
@@ -212,6 +239,8 @@ function onPick(e: Event) {
 </template>
 
 <style scoped>
+.mask-draw-button{position:relative;overflow:hidden;isolation:isolate}
+.mask-draw-button :deep(.mask-ripple){position:absolute;border-radius:50%;background:currentColor;pointer-events:none}
 .auto-mask-button{display:inline-grid;place-items:center;flex:none;width:28px;height:28px;padding:4px;border:1px solid var(--tb-border);border-radius:7px;background:var(--tb-bg);color:var(--tb-primary);cursor:pointer;transition:background 150ms,color 150ms}
 .auto-mask-button:hover:enabled{background:var(--tb-hover);color:var(--tb-fg)}
 .auto-mask-button:disabled{opacity:.45;cursor:not-allowed}

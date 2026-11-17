@@ -1741,9 +1741,9 @@ export interface BatchImportResult {
   diagnostics: { line: number; severity: string; message: string }[];
   items: { item_id: string; ordinal: number; name: string; scene_ref: string; source_lines: number[] }[];
 }
-export async function apiBatchImport(text: string, mode: 'demo' | 'production', sources: { path: string; name: string; evidence: string }[] = [], strategy: 'automatic' | 'review' = 'automatic', detectionMethod: 'absdiff' | 'ssim' | 'smart' = 'absdiff'): Promise<BatchImportResult> {
+export async function apiBatchImport(text: string, mode: 'demo' | 'production', sources: { path: string; name: string; evidence: string }[] = [], strategy: 'automatic' | 'review' = 'automatic', detectionMethod: 'absdiff' | 'ssim' | 'smart' = 'ssim'): Promise<BatchImportResult> {
   const r = await http(apiUrl(loadSrConfig(), '/api/goals/batch-imports'), {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, mode, sources, strategy, ...(detectionMethod !== 'absdiff' ? {detection_method:detectionMethod} : {}) }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, mode, sources, strategy, detection_method: detectionMethod }),
   });
   return r.json();
 }
@@ -1784,7 +1784,9 @@ export interface RepairPlan {
   session_id?: string | null;
   mask?: { policy: string; path: string; revision?: string; width: number; height: number } | null;
   goal_id?: string | null;
-  blocking?: { message?: string; code?: string }[];
+  blocking?: { message?: string; code?: string; line?: number; name?: string; scene_ref?: string; conflict_path?: string; filename?: string }[];
+  exclusions?: { line: number; reason: string }[];
+  strategy_policy?: "automatic" | "review";
   diagnostics?: { severity?: string; message?: string }[];
   expires_at?: number;
   confirmation?: unknown;
@@ -1795,6 +1797,8 @@ export interface RepairStartResult {
   reused: boolean;
 }
 export async function apiPrepareRepair(body: {
+  manifest_ref?: string;
+  exclusions?: { line: number; reason: string }[];
   session_id: string | null;
   sources?: { path: string; name: string; evidence: string }[];
   workspace?: unknown;
@@ -1892,9 +1896,10 @@ export interface BatchItemRecord {
   external_job_id?: number | string | null;
   checkpoint: {
     job_id?: number | string | null;
-    target_image?: { path?: string }; scene_ref?: string; attempt?: number;
+    target_image?: { path?: string }; reference_image?: { path?: string; revision?: string }; scene_ref?: string; attempt?: number;
     review_required?: boolean; review?: { decision: string };
-    detection?: { candidates?: unknown[]; provenance?: string };
+    detection?: { candidates?: unknown[]; provenance?: string; analysis?: { differenceMap?: string; validityMap?: string } };
+    region_reviews?: Record<string, 'approve' | 'exclude'>;
     mask?: { sha256?: string; overlay?: { path?: string } }; config?: unknown;
   };
   error?: string;
@@ -1903,9 +1908,9 @@ export async function apiBatchItems(goal: string, after = 0, status = '', signal
   const r = await http(apiUrl(loadSrConfig(), `/api/goals/${encodeURIComponent(goal)}/items?after_ordinal=${after}&limit=20&status=${encodeURIComponent(status)}`), { signal });
   return r.json();
 }
-export async function apiBatchReview(goal: string, item: BatchItemRecord, decision: 'approve' | 'exclude'): Promise<BatchItemRecord> {
+export async function apiBatchReview(goal: string, item: BatchItemRecord, decision: 'approve' | 'exclude', regionId?: string): Promise<BatchItemRecord> {
   const r = await http(apiUrl(loadSrConfig(), `/api/goals/${encodeURIComponent(goal)}/items/${encodeURIComponent(item.item_id)}/review`), {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expected_version: item.version, decision }),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expected_version: item.version, decision, region_id: regionId }),
   });
   return r.json();
 }

@@ -97,8 +97,10 @@ class ToolRegistry:
             if failure.validator == "required" and isinstance(failure.instance, dict):
                 path.extend(k for k in failure.validator_value if k not in failure.instance)
             field = "/" + "/".join(str(p) for p in path)
+            detail = (" ".join(str(failure.message).split())[:240]
+                      or "Correct this field to match the tool schema.")
             return validation_error("schema_validation", field, failure.validator,
-                                    "Correct this field to match the tool schema.")
+                                    f"{field or '$'}: {detail}")
         return None
 
     def invoke(self, name: str, arguments=None, *, source: str = "unknown") -> dict:

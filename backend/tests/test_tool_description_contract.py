@@ -52,7 +52,7 @@ SCHEMAS = {
         'scope': {'type': 'string', 'enum': ['current', 'selection', 'workspace', 'draft'], 'default': 'workspace'},
         'mode': {'type': 'string', 'enum': ['production'], 'default': 'production'},
         'strategy': {'type': 'string', 'enum': ['automatic', 'review'], 'default': 'automatic'},
-        'detection_method': {'type': 'string', 'enum': ['absdiff', 'ssim', 'smart'], 'default': 'absdiff'},
+        'detection_method': {'type': 'string', 'enum': ['absdiff', 'ssim', 'smart'], 'default': 'ssim'},
         'mask_policy': {'type': 'string', 'enum': ['auto', 'existing'], 'default': 'auto'},
         'title': {'type': 'string'}}, []),
     'start_repair': ({'plan_id': {'type': 'string', 'minLength': 1},
@@ -87,7 +87,7 @@ SCHEMAS = {
         'item_id':{'type':'string','minLength':1,'maxLength':512}}, ['goal_id','item_id']),
     'read_tool_result': ({'result_id': {'type': 'string', 'pattern': '^[a-f0-9]{32}$'},
         'path': {'type': 'string', 'maxLength': 512}, 'offset': {'type': 'integer', 'minimum': 0},
-        'limit': {'type': 'integer', 'minimum': 1, 'maximum': 20}}, ['result_id']),
+        'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100}}, ['result_id']),
     'read_skill': ({'name': {'type': 'string'}}, ['name']),
     'read_skill_resource': ({'name': {'type': 'string'}, 'resource': {'type': 'string'}}, ['name', 'resource']),
 }

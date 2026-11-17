@@ -656,7 +656,7 @@ def _review_batch_item_sync(goal_id, item_id, request, body):
         raise HTTPException(400, "decision must be approve or exclude")
     try:
         return request.app.state.store.review_batch_item(
-            goal_id, item_id, body["expected_version"], body["decision"])
+            goal_id, item_id, body["expected_version"], body["decision"], region_id=body.get("region_id"))
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:

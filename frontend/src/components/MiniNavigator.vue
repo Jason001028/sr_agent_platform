@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import {ref,watch,nextTick,onMounted,onBeforeUnmount} from 'vue';
+import {computed,ref,watch,nextTick,onMounted,onBeforeUnmount} from 'vue';
+import {useBatchMaskReviewStore} from '../stores/batchMaskReview';
 import {useViewerStore} from '../stores/viewer';
 import { drawDiffSource } from '../lib/diffRender';
 import { useDiffStore } from '../stores/diff';
@@ -7,6 +8,13 @@ import {useAutoTourStore} from '../stores/autoTour';
 const diff = useDiffStore();
 const tour=useAutoTourStore();
 const store=useViewerStore(); const roots=ref<HTMLCanvasElement[]>([]);
+const review=useBatchMaskReviewStore();
+const heatRoot=ref<HTMLCanvasElement|null>(null);
+const heatSource=computed(()=>{
+ if(!store.overlayMasterVisible||!diff.resultVisible)return null;
+ if(review.active)return review.ready?review.heat:null;
+ return store.split?diff.layerFor(store.panes[0]?.rec??null)?.heat??null:null;
+});
 const windowRef=ref<HTMLDivElement|null>(null);
 const position=ref<{left:number;top:number}|null>(null);
 const VISIBILITY_KEY='sr.viewer.minimap.visible';
@@ -41,21 +49,23 @@ function moveByKey(e:KeyboardEvent){
  const d=moves[e.key],el=windowRef.value;if(!d||!el)return;
  e.preventDefault();e.stopPropagation();clamp(el.offsetLeft+d[0],el.offsetTop+d[1]);snap();
 }
-onMounted(()=>{observer=new ResizeObserver(()=>{if(position.value)snap();});if(windowRef.value?.parentElement)observer.observe(windowRef.value.parentElement);if(windowRef.value)observer.observe(windowRef.value);});
+onMounted(()=>{observer=new ResizeObserver(()=>{if(position.value)snap();void paint();});if(windowRef.value?.parentElement)observer.observe(windowRef.value.parentElement);});
 onBeforeUnmount(()=>observer?.disconnect());
 async function paint(){
  await nextTick();
  if(!visible.value)return;
+ const count=store.panes.filter(p=>p.rec?.thumb).length+Number(!!heatSource.value);
+ const maxWidth=Math.min(320*size.value/100,Math.max(60,((windowRef.value?.parentElement?.clientWidth??1000)-36)/Math.max(1,count)));
  store.panes.forEach((p,i)=>{
   const c=roots.value[i],r=p.rec;if(!c||!r?.thumb)return;
   const ctx=c.getContext('2d');if(!ctx||!r.thumb.width||!r.thumb.height)return;
   // Fit inside the navigator bounds without stretching the source image.
-  const scale=Math.min(320/r.thumb.width,200/r.thumb.height)*size.value/100;
+  const scale=Math.min(maxWidth/r.thumb.width,200*size.value/100/r.thumb.height);
   c.width=Math.max(1,Math.round(r.thumb.width*scale));
   c.height=Math.max(1,Math.round(r.thumb.height*scale));
   ctx.save();
   ctx.scale(c.width/r.thumb.width,c.height/r.thumb.height);
-  drawDiffSource(ctx,(r.stretchPreview??r.thumb) as unknown as CanvasImageSource,r.thumb.width,r.thumb.height,diff.layerFor(r),diff.display,diff.opacity,diff.feather);
+  drawDiffSource(ctx,(r.stretchPreview??r.thumb) as unknown as CanvasImageSource,r.thumb.width,r.thumb.height,review.active?null:diff.layerFor(r),diff.display,diff.opacity,diff.feather);
   ctx.restore();
   if(tour.coverageVisible){
    const n=tour.coverage.size;ctx.fillStyle='rgba(61,169,164,.22)';ctx.beginPath();
@@ -73,9 +83,33 @@ async function paint(){
   const sx=c.width/r.thumb.width,sy=c.height/r.thumb.height;
   ctx.strokeRect(-p.view.ox/p.view.scale*sx,-p.view.oy/p.view.scale*sy,p.rect.w/p.view.scale*sx,p.rect.h/p.view.scale*sy);
  });
+ const c=heatRoot.value,heat=heatSource.value,p=store.panes[0],r=p?.rec;
+ if(c&&heat&&r?.thumb){
+  const scale=Math.min(maxWidth/r.thumb.width,200*size.value/100/r.thumb.height);
+  c.width=Math.max(1,Math.round(r.thumb.width*scale));c.height=Math.max(1,Math.round(r.thumb.height*scale));
+  const ctx=c.getContext('2d');if(ctx){
+   ctx.fillStyle='#202c39';ctx.fillRect(0,0,c.width,c.height);
+   const coverage=review.active?[0,0,r.thumb.width,r.thumb.height]:diff.layerFor(r)?.coverage;
+   if(coverage){const [x,y,w,h]=coverage;ctx.drawImage(heat,x/r.thumb.width*c.width,y/r.thumb.height*c.height,w/r.thumb.width*c.width,h/r.thumb.height*c.height);}
+   ctx.strokeStyle='#b4bff7';ctx.lineWidth=1.5;
+   const roi=review.selected?.bbox,d=review.document;
+   if(review.active&&roi&&d)ctx.strokeRect(roi[0]/d.source.width*c.width,roi[1]/d.source.height*c.height,(roi[2]-roi[0]+1)/d.source.width*c.width,(roi[3]-roi[1]+1)/d.source.height*c.height);
+   ctx.strokeStyle='#e8f2ee';ctx.lineWidth=1;
+   ctx.strokeRect(-p.view.ox/p.view.scale*c.width/r.thumb.width,-p.view.oy/p.view.scale*c.height/r.thumb.height,p.rect.w/p.view.scale*c.width/r.thumb.width,p.rect.h/p.view.scale*c.height/r.thumb.height);
+  }
+ }
 }
-watch(()=>[store.renderTick,size.value,visible.value,tour.plan,tour.coverageVersion],paint,{immediate:true});
-function navigate(e:PointerEvent,i:number){if(e.type==='pointermove'&&!e.buttons)return;const p=store.panes[i],r=p.rec;if(!r?.thumb||store.drawMode)return;const c=e.currentTarget as HTMLCanvasElement,b=c.getBoundingClientRect();if(e.type==='pointerdown')c.setPointerCapture(e.pointerId);const x=Math.max(0,Math.min(1,(e.clientX-b.left)/b.width))*r.thumb.width,y=Math.max(0,Math.min(1,(e.clientY-b.top)/b.height))*r.thumb.height;store.noteUserIntent();store.setPaneView(p.side,{...p.view,ox:p.rect.w/2-x*p.view.scale,oy:p.rect.h/2-y*p.view.scale});}
+watch(()=>[store.renderTick,size.value,visible.value,tour.plan,tour.coverageVersion,heatSource.value,review.regionId],paint,{immediate:true});
+function navigate(e:PointerEvent,i:number){
+ if(e.type==='pointermove'&&!e.buttons)return;
+ const p=store.panes[i],r=p.rec;if(!r?.thumb||store.drawMode)return;
+ const c=e.currentTarget as HTMLCanvasElement,b=c.getBoundingClientRect();if(e.type==='pointerdown')c.setPointerCapture(e.pointerId);
+ const nx=Math.max(0,Math.min(1,(e.clientX-b.left)/b.width)),ny=Math.max(0,Math.min(1,(e.clientY-b.top)/b.height));
+ store.noteUserIntent();
+ const targets=store.splitSynchronized?store.panes:[p],norm=p.view.scale*r.thumb.width;
+ for(const q of targets){if(!q.rec?.thumb)continue;const scale=norm/q.rec.thumb.width;
+  store.setPaneView(q.side,{scale,ox:q.rect.w/2-nx*q.rec.thumb.width*scale,oy:q.rect.h/2-ny*q.rec.thumb.height*scale});}
+}
 </script>
 <template>
  <Transition name="minimap">
@@ -96,7 +130,7 @@ function navigate(e:PointerEvent,i:number){if(e.type==='pointermove'&&!e.buttons
    <label>不透明度 <output>{{ opacity }}%</output><input v-model.number="opacity" type="range" min="0" max="100" step="5" aria-label="鹰眼不透明度" /></label>
    <label>大小 <output>{{ size }}%</output><input v-model.number="size" type="range" min="50" max="200" step="10" aria-label="鹰眼相对大小" /></label>
   </div>
-  <div class="navigator-surface"><div class="maps"><canvas v-for="(p,i) in store.panes" v-show="p.rec?.thumb" :key="p.side" :ref="el=>{if(el)roots[i]=el as HTMLCanvasElement}" :aria-label="p.side+' 影像导航'" @pointerdown.stop="navigate($event,i)" @pointermove.stop="navigate($event,i)" /></div></div>
+  <div class="navigator-surface"><div class="maps"><canvas v-for="(p,i) in store.panes" v-show="p.rec?.thumb" :key="p.side" :ref="el=>{if(el)roots[i]=el as HTMLCanvasElement}" :aria-label="p.side+' 影像导航'" @pointerdown.stop="navigate($event,i)" @pointermove.stop="navigate($event,i)" /><div v-if="heatSource" class="heat-map"><span>差异热力图</span><canvas ref="heatRoot" aria-label="差异热力图导航" data-e2e="review-heat-navigator" @pointerdown.stop="navigate($event,0)" @pointermove.stop="navigate($event,0)" /></div></div></div>
  </div>
  </Transition>
 </template>
@@ -105,7 +139,8 @@ function navigate(e:PointerEvent,i:number){if(e.type==='pointermove'&&!e.buttons
 /* Fade the whole map surface, including its backing, while keeping controls usable. */
 .navigator-surface{position:relative;border-radius:inherit;opacity:var(--navigator-opacity,1)}
 .navigator-surface::before{content:'';position:absolute;inset:-1px;pointer-events:none;border:1px solid var(--tb-border);border-radius:inherit;background:var(--tb-bg);box-shadow:0 2px 5px #183c3014,0 8px 24px #183c3024}
-.maps{position:relative;display:flex;align-items:flex-start;gap:1px;border-radius:9px;overflow:hidden}
+.maps{position:relative;display:flex;align-items:flex-start;gap:1px;border-radius:9px;overflow:hidden;max-width:calc(100vw - 100px)}
+.heat-map{position:relative;min-width:0}.heat-map>span{position:absolute;left:7px;bottom:5px;padding:2px 4px;border-radius:3px;background:#173f3bcc;color:#fff;font-size:10px;pointer-events:none}
 canvas{display:block;width:auto;height:auto;flex:none;cursor:crosshair;touch-action:none}
 .navigator-tools{position:absolute;left:6px;right:6px;top:6px;z-index:2;display:flex;align-items:center;gap:4px;pointer-events:none;opacity:.45;transition:opacity var(--motion-hover) var(--ease-standard)}
 .navigator:hover .navigator-tools,.navigator:focus-within .navigator-tools{opacity:1}

@@ -19,7 +19,7 @@ const noData = computed(() => {
     <div v-if="diff.result.method === 'smart'" class="tone-note">{{ diff.result.normalization?.mode }} · 尺度 {{ diff.result.normalization?.scale.toFixed(3) }} · 跨图比较需固定校准</div>
     <div class="range"><span>0 · 低</span><span>{{ diff.toneWeight ? '1 · 高（已加权）' : '1 · 高' }}</span></div>
     <div v-if="diff.toneWeight" class="tone-note" data-e2e="diff-legend-tone">
-      亮度加权 ×1–2.5：增强中间调与暗部提亮；超过 1 截断
+      亮度加权 ×1–约2.1：增强中间调与暗部提亮；超过 1 截断
     </div>
     <div class="status"><i class="nodata"></i>{{ noData }}<i class="outside"></i>未分析</div>
   </div>

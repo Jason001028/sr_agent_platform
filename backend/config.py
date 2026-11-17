@@ -126,7 +126,7 @@ class Config:
     llm_integrity_retries: int = 1
 
     llm_deadline_margin: float = 0.1
-    llm_thinking_profile: str = "balanced"
+    llm_thinking_profile: str = "low"
     llm_thinking_adapter: str = "none"
     llm_vision_timeout: float = 180.0
     # None preserves the legacy contract for callers constructing Config directly.
@@ -169,7 +169,7 @@ def load_config() -> Config:
         llm_first_output_timeout=env_float("SR_LLM_FIRST_OUTPUT_TIMEOUT", 180),
         llm_vision_timeout=env_float("SR_LLM_VISION_TIMEOUT", 180),
         llm_deadline_margin=env_float("SR_LLM_DEADLINE_MARGIN", 0.1),
-        llm_thinking_profile=os.getenv("SR_LLM_THINKING_PROFILE", "balanced").lower(),
+        llm_thinking_profile=os.getenv("SR_LLM_THINKING_PROFILE", "low").lower(),
         llm_thinking_adapter=os.getenv("SR_LLM_THINKING_ADAPTER", "none").lower(),
         llm_integrity_retries=env_int("SR_LLM_INTEGRITY_RETRIES", 1),
         llm_mock=os.environ.get("SR_LLM_MOCK") == "1",

@@ -97,6 +97,9 @@ export const useBatchQualityStore=defineStore('batchQuality',()=>{
       if(gen!==generation||batch.goalId!==gid)return;
       doc.value=next;
       await Promise.all([refresh(),batch.refreshSnapshot()]);
+      if(gen!==generation||batch.goalId!==gid)return;
+      const pending=next.regions.find(r=>r.decision==='pending');
+      if(action==='region'&&decision!=='pending'&&pending)await openRegion(pending.region_id);
     }catch(e){if(gen===generation){error.value=String(e);pair.value=null;}}
     finally{if(gen===generation)busy.value=false;}
   }

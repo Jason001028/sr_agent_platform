@@ -129,48 +129,57 @@ let browser;
       };
       return { mid: px(200, 128), dark: px(60, 128) };
     });
-    const heatOff = await heatSample();
+    const heatOn = await heatSample();
 
-    const off = await page.evaluate(() => ({
+    const on = await page.evaluate(() => ({
       toneWeight: testStores.diff.toneWeight,
       order: testStores.diff.orderedRegions.map((r) => r.id),
       tones: testStores.diff.regions.map((r) => r.tone && {
         id: r.id, mid: r.tone.mid, dark: r.tone.dark, weight: r.tone.weight,
       }),
     }));
-    assert.equal(off.toneWeight, false);
-    assert.deepEqual(off.order, ['r001', 'r002']);
-    assert.ok(off.tones[0] && off.tones[0].dark > .9, JSON.stringify(off.tones));
-    assert.ok(off.tones[1] && off.tones[1].mid > .9, JSON.stringify(off.tones));
-    assert.ok(off.tones[1].weight > off.tones[0].weight, JSON.stringify(off.tones));
+    assert.equal(on.toneWeight, true);
+    assert.deepEqual(on.order, ['r002', 'r001']);
+    assert.ok(on.tones[0] && on.tones[0].dark > .9, JSON.stringify(on.tones));
+    assert.ok(on.tones[1] && on.tones[1].mid > .9, JSON.stringify(on.tones));
+    assert.ok(on.tones[1].weight > on.tones[0].weight, JSON.stringify(on.tones));
 
     await page.click('[data-e2e=diff-open]');
     await page.waitForSelector('[data-e2e=diff-tone-weight]');
-    await page.click('[data-e2e=diff-tone-weight]');
-    await page.waitForFunction(() => testStores.diff.toneWeight === true
-      && testStores.diff.orderedRegions[0]?.id === 'r002');
-
-    const on = await page.evaluate(() => ({
-      order: testStores.diff.orderedRegions.map((r) => r.id),
+    const onRows = await page.evaluate(() => ({
       rows: [...document.querySelectorAll('.dc-row')].map((el) => el.textContent.replace(/\s+/g, ' ').trim()),
       bars: document.querySelectorAll('.dc-tone-fill').length,
     }));
-    assert.deepEqual(on.order, ['r002', 'r001']);
-    assert.equal(on.bars, 2);
-    assert.ok(on.rows[0].includes('中间调'), on.rows[0]);
+    assert.equal(onRows.bars, 2);
+    assert.ok(onRows.rows[0].includes('中间调'), onRows.rows[0]);
 
-    // 逐像素加权必须真的改热力图：中间调平坦区升到近满色，暗部不变仍为中性权重。
+    // Turning the default-on weight off must restore the backend order and the
+    // unweighted heat layer.
+    await page.click('[data-e2e=diff-tone-weight]');
+    await page.waitForFunction(() => testStores.diff.toneWeight === false
+      && testStores.diff.orderedRegions[0]?.id === 'r001');
     await page.evaluate(() => { testStores.diff.display = 'heat'; });
-    await page.waitForSelector('[data-e2e=diff-legend-tone]');
-    const heatOn = await heatSample();
+    await page.waitForSelector('[data-e2e=diff-legend-tone]', { state: 'detached' }).catch(() => {});
+    const heatOff = await heatSample();
     assert.notDeepEqual(heatOn.mid, heatOff.mid);
     assert.deepEqual(heatOn.dark, heatOff.dark);
+    const off = await page.evaluate(() => ({
+      order: testStores.diff.orderedRegions.map((r) => r.id),
+      bars: document.querySelectorAll('.dc-tone-fill').length,
+    }));
+    assert.deepEqual(off.order, ['r001', 'r002']);
+    assert.equal(off.bars, 0);
+
+    await page.click('[data-e2e=diff-tone-weight]');
+    await page.waitForFunction(() => testStores.diff.toneWeight === true
+      && testStores.diff.orderedRegions[0]?.id === 'r002');
+    await page.waitForSelector('[data-e2e=diff-legend-tone]');
     assert.equal(heatOn.mid[3], 255);
     assert.ok(await page.$('[data-e2e=diff-legend-tone]'), 'legend must explain weighted intensity');
 
     await page.screenshot({ path: path.resolve(__dirname, 'artifacts/diff-tone-weight.png'), fullPage: false });
     assert.deepEqual(errors, []);
-    console.log('diff tone weight ok', JSON.stringify({ off, on, heatOff, heatOn }));
+    console.log('diff tone weight ok', JSON.stringify({ on, off, heatOff, heatOn }));
   } finally {
     await browser?.close();
     server.close();

@@ -1931,7 +1931,7 @@ class Store:
                 counts["total"] += 1
         return counts
 
-    def review_batch_item(self, goal_id, item_id, expected_version, decision):
+    def review_batch_item(self, goal_id, item_id, expected_version, decision, *, region_id=None):
         """Approve the exact detected mask, never a running or historical item."""
         with self.worker_transaction() as db:
             goal = self.get_goal(goal_id)
@@ -1949,15 +1949,49 @@ class Store:
             mask_sha = (cp.get("mask") or {}).get("sha256")
             if not mask_sha:
                 raise ValueError("mask identity is missing")
-            cp["review"] = {"decision": decision, "mask_sha256": mask_sha,
-                            "reviewed_at": time.time()}
-            status = "MASK_READY" if decision == "approve" else "SKIPPED"
+            status = "MASK_READY"
+            if region_id is not None:
+                candidates = (cp.get("detection") or {}).get("candidates") or []
+                ids = {c["candidate_id"] for c in candidates}
+                if not isinstance(region_id, str) or region_id not in ids:
+                    raise ValueError("unknown review region")
+                decisions = {**cp.get("region_reviews", {}), region_id: decision}
+                cp["region_reviews"] = decisions
+                if ids <= decisions.keys():
+                    accepted = [c for c in candidates if decisions[c["candidate_id"]] == "approve"]
+                    decision = "approve" if accepted else "exclude"
+                    if accepted and len(accepted) != len(candidates):
+                        from backend.services import batch_mask
+                        import hashlib
+                        from pathlib import Path
+                        original = Path(cp["mask"]["path"])
+                        digest = hashlib.sha256(json.dumps(decisions, sort_keys=True).encode()).hexdigest()[:16]
+                        detection = {**cp["detection"], "candidates": accepted}
+                        accounting = detection.get("candidate_accounting")
+                        if accounting:
+                            cp["review_candidate_accounting"] = accounting
+                            detection["candidate_accounting"] = {**accounting, "total": len(accepted),
+                                "processed": len(accepted), "unprocessed": 0, "excluded_by_review": len(candidates)-len(accepted)}
+                        cp["mask"] = batch_mask.build_mask_result(detection, {**cp["target_image"], "item_id": item_id}, {
+                            "path": str(original.parent.with_name(original.parent.name + "-review-" + digest) / original.name),
+                            "execution_mode": (goal.get("checkpoint") or {}).get("mode", "demo")})
+                        mask_sha = cp["mask"]["sha256"]
+                        cp["review_candidates"] = candidates
+                        cp["detection"] = detection
+                    cp["review"] = {"decision": decision, "mask_sha256": mask_sha, "reviewed_at": time.time()}
+                    status = "MASK_READY" if accepted else "SKIPPED"
+            else:
+                if cp.get("region_reviews"):
+                    raise ValueError("逐区域复核已开始，请处理剩余区域")
+                cp["review"] = {"decision": decision, "mask_sha256": mask_sha, "reviewed_at": time.time()}
+                status = "MASK_READY" if decision == "approve" else "SKIPPED"
             cp["phase"] = status
             db.execute("UPDATE agent_goal_steps SET checkpoint=?, status=?, version=version+1, "
                        "updated_at=? WHERE goal_id=? AND item_id=? AND kind='batch_item'",
                        (json.dumps(cp, ensure_ascii=False), status, time.time(), goal_id, item_id))
             self._append_goal_event_tx(db, goal_id, "batch_item_reviewed",
-                {"item_id": item_id, **cp["review"]}, step_id=item["step_id"])
+                {"item_id": item_id, "region_id": region_id, "decision": decision,
+                 "region_reviews": cp.get("region_reviews", {}), **(cp.get("review") or {})}, step_id=item["step_id"])
         return self.get_goal_item(goal_id, item_id)
 
     def batch_control(self, goal_id: str, action: str,

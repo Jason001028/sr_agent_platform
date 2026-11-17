@@ -157,7 +157,7 @@ describe('历史投影', () => {
 
 it.each(['fast', 'low', 'balanced', 'deep'] as const)('sends thinking profile %s', async (profile) => {
   const chat = useChatStore();
-  expect(chat.thinkingProfile).toBe('balanced');
+  expect(chat.thinkingProfile).toBe('low');
   chat.sessionId = 's1';
   chat.thinkingProfile = profile;
   let body: Record<string, unknown> = {};
@@ -182,7 +182,7 @@ it('allows changing the next profile while preserving an in-flight request', asy
   const request = chat.send('hello');
   expect(chat.sending).toBe(true);
   chat.thinkingProfile = 'deep';
-  expect(body.thinking_profile).toBe('balanced');
+  expect(body.thinking_profile).toBe('low');
   finish(sseResponse(['{"type":"turn_done","ok":true}']));
   await request;
   expect(chat.thinkingProfile).toBe('deep');

@@ -123,6 +123,8 @@
   --motion-fold: 100ms;
   --motion-fade: 120ms;
   --motion-hover: 150ms;
+  --motion-mask-ripple: 450ms;
+  --motion-layer-switch: 280ms;
   --motion-canvas-background: 180ms;
   --motion-history-reveal: 170ms;
   --motion-live: 200ms;
@@ -296,6 +298,13 @@ body {
 
 /* 动效只服务于状态反馈；用户明确关闭动画时，布局和提示立即到位，
    不影响进度数值或加载状态本身。 */
+.agent-trace{position:relative;isolation:isolate;font-family:var(--font-sans);font-size:12px;line-height:1.6}
+.agent-trace::before{content:'';position:absolute;z-index:-1;left:6.5px;top:0;bottom:0;width:1px;background:var(--line)}
+.trace-node{position:relative;display:inline-grid;place-items:center;width:14px;height:14px;flex:0 0 14px}
+.trace-node::after{content:'';width:7px;height:7px;border-radius:50%;background:var(--ink-faint,#999);box-shadow:0 0 0 3px var(--surface,#fff)}
+.trace-node.active::after{background:var(--accent-3,#78bd96)}
+.trace-node.issue::after{background:#b86f60}
+.agent-trace button[aria-expanded]:hover{color:var(--accent-deep)}
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;

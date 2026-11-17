@@ -1,8 +1,19 @@
 import { describe, it, expect } from 'vitest';
 import { ANALYZE_CURRENT_PROMPT, analysisPromptSummary } from '../analysisPrompt';
 import { agentPayload, splitAgentPayload } from '../agentContext';
+import { AGENT_REPAIR_PROMPT, AGENT_REPAIR_DISPLAY_TEXT } from '../repairPrompt';
 
 describe('automatic analysis instruction presentation', () => {
+  it('summarizes repair instructions identically after persisted payload recovery', () => {
+    const recovered = JSON.parse(JSON.stringify({content:agentPayload(AGENT_REPAIR_PROMPT,'workspace snapshot')}));
+    const parts = splitAgentPayload(recovered.content);
+    expect(parts.question).toBe(AGENT_REPAIR_PROMPT);
+    expect(analysisPromptSummary(parts.question)).toBe(AGENT_REPAIR_DISPLAY_TEXT);
+    expect(parts.question).toContain('mode=production');
+    expect(parts.question).toContain('不要直接提交 SR');
+    expect(parts.question).toContain('不切换模拟');
+    expect(analysisPromptSummary(AGENT_REPAIR_PROMPT+' 仅处理第1景')).toBeNull();
+  });
   it('summarizes the exact default while retaining the full transmitted question', () => {
     const payload = agentPayload(ANALYZE_CURRENT_PROMPT, 'context');
     const parts = splitAgentPayload(payload);

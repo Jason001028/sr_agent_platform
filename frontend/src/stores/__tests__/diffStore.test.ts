@@ -1047,7 +1047,7 @@ describe('diff store — 亮度归因权重', () => {
     weight, norm: weight >= 1.8 ? 1 : 0, pixels: 100,
   });
 
-  it('默认关闭时保持后端顺序，开启后按复核权重排序', () => {
+  it('默认开启按复核权重排序，关闭后保持后端顺序', () => {
     const res = fakeResult();
     res.regions = [
       { ...res.regions[0], id: 'r001', rank: 1, rankScore: 100, tone: tone(0.3) },
@@ -1056,35 +1056,36 @@ describe('diff store — 亮度归因权重', () => {
     const diff = useDiffStore();
     diff.result = res;
 
-    expect(diff.toneWeight).toBe(false);
-    expect(diff.orderedRegions.map((r) => r.id)).toEqual(['r001', 'r002']);
-    expect(diff.viewerRegions.map((r) => r.id)).toEqual(['r001', 'r002']);
-
-    diff.toneWeight = true;
+    expect(diff.toneWeight).toBe(true);
     // 100×0.3 = 30 < 80×1.8 = 144
     expect(diff.orderedRegions.map((r) => r.id)).toEqual(['r002', 'r001']);
     expect(diff.viewerRegions.map((r) => r.id)).toEqual(['r002', 'r001']);
+
+    diff.toneWeight = false;
+    expect(diff.orderedRegions.map((r) => r.id)).toEqual(['r001', 'r002']);
+    expect(diff.viewerRegions.map((r) => r.id)).toEqual(['r001', 'r002']);
     expect(diff.regions.map((r) => r.id)).toEqual(['r001', 'r002']); // 原始顺序不变
   });
 
-  it('开启逐像素加权会重建热力图层，关闭后重建未加权图层', async () => {
+  it('默认重建加权热力图层，关闭后重建未加权图层', async () => {
     mocks.api.mockResolvedValue(fakeResult());
     const diff = useDiffStore();
     diff.aId = 1; diff.bId = 2;
     expect(await diff.analyze()).toBe(true);
-    const off = diff.heatLayer;
-    expect(off).not.toBeNull();
-
-    diff.toneWeight = true;
-    await nextTick();
-    const on = diff.heatLayer;
-    expect(on).not.toBeNull();
-    expect(on).not.toBe(off);
+    expect(diff.toneWeight).toBe(true);
+    const weighted = diff.heatLayer;
+    expect(weighted).not.toBeNull();
 
     diff.toneWeight = false;
     await nextTick();
+    const unweighted = diff.heatLayer;
+    expect(unweighted).not.toBeNull();
+    expect(unweighted).not.toBe(weighted);
+
+    diff.toneWeight = true;
+    await nextTick();
     expect(diff.heatLayer).not.toBeNull();
-    expect(diff.heatLayer).not.toBe(on);
+    expect(diff.heatLayer).not.toBe(unweighted);
     // 只重建显示层，不重新请求分析。
     expect(mocks.api).toHaveBeenCalledTimes(1);
   });

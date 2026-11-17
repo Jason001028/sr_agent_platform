@@ -7,7 +7,7 @@ import BatchJobQueue from './BatchJobQueue.vue';
 import BatchItemsList from './BatchItemsList.vue';
 import BatchQualityPanel from './BatchQualityPanel.vue';
 import BatchResultReport from './BatchResultReport.vue';
-import { batchQualityRequest, batchMaskRequest } from '../lib/batchDock';
+import { batchQualityRequest, batchMaskRequest, requestMaskReview } from '../lib/batchDock';
 const props = withDefaults(defineProps<{ fullQueue?: boolean }>(), { fullQueue: false });
 const emit = defineEmits<{ 'update:fullQueue': [value: boolean] }>();
 const batch = useBatchGoalStore();
@@ -28,12 +28,12 @@ function openAll() { filter.value = mission.value?.issueFocus ? ISSUE_STATUSES :
 watch([() => batchMaskRequest.value?.token, () => batch.goalId], () => {
   if (batchMaskRequest.value?.goalId !== batch.goalId) return;
   filter.value = 'MASK_READY';
-  emit('update:fullQueue', true);
 }, { immediate: true });
 const qualityCount = computed(() => (snap.value?.quality?.waiting_scenes ?? 0) + (snap.value?.quality?.rejected_scenes ?? 0));
 </script>
 <template>
   <div v-if="snap" class="batch-panel" data-e2e="batch-panel">
+    <button v-if="snap.goal.phase === 'waiting_review' && batch.goalId" class="link standalone" @click="requestMaskReview(batch.goalId)">前往可视化复核 ↗</button>
     <section v-if="focus.length || fullQueue" class="mission-queue" data-e2e="mission-queue">
       <header><h3>{{ fullQueue ? '任务列表' : mission?.issueFocus ? '异常任务' : '当前任务' }}</h3>
         <button v-if="fullQueue" class="link" @click="emit('update:fullQueue', false)">收起列表</button>

@@ -37,7 +37,7 @@ class TinyGdal(FakeGdal):
         except ValueError:return ReadRaster(path)
 
 
-def seed(store,root,count=2):
+def seed(store,root,count=2,mask_review=False):
     from backend.services import batch_manifest,batch_detector,batch_mask,batch_worker,run_sr
     from backend.services.goal_runtime import _batch_item_checkpoint
     from backend.services.goal_lease import GoalLease,current_lease
@@ -70,6 +70,11 @@ def seed(store,root,count=2):
             target={**cp['target_image'],'item_id':item['item_id']}
             detection=batch_detector.detect(target,cp['reference_image'],{'mode':'diff','blur':False,'min_area_px':1,'open_kernel':1,'close_kernel':1})
             mask=batch_mask.build_mask_result(detection,target,{'path':str(root/'artifacts'/'work'/item['item_id']/'mask.tif')})
+            if mask_review:
+                cp.update(mask=mask,detection=detection,review_required=True,phase='MASK_READY')
+                store.transition_goal_item(goal['goal_id'],step_id=item['step_id'],expected_version=item['version'],
+                    status='MASK_READY',lease_token=lease.token,checkpoint=cp)
+                continue
             option=root/f'options-{item["ordinal"]}.yml';option.write_text('tiftype: .tif\nscale: 2\n',encoding='utf-8')
             params=run_sr.repair_request({'lq_path':cp['scene_ref'],'mask_path':mask['path'],'suffix':'260318','sr_scale':2,'options_yml':str(option)})
             config=root/f'job-{item["ordinal"]}.xml';config.write_text(run_sr.build_config_xml(params),encoding='utf-8')
@@ -94,7 +99,7 @@ def seed(store,root,count=2):
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--root',required=True);parser.add_argument('--port',type=int,required=True);args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--root',required=True);parser.add_argument('--port',type=int,required=True);parser.add_argument('--mask-review',action='store_true');args=parser.parse_args()
     root=Path(args.root).resolve();root.mkdir(parents=True,exist_ok=True)
     os.environ.update({**allowed_roots_env(root),'SR_AGENT_DB':str(root/'app.db'),'SR_BATCH_ARTIFACT_DIR':str(root/'artifacts'),
         'SR_SCENES_ROOT':str(root/'empty'),'SR_EXECUTOR':'local','SR_LLM_MOCK':'1','SR_BATCH_POLL_SEC':'0.1',
@@ -106,7 +111,7 @@ def main():
     run_sr.query_job_status=lambda jid,**kw:{'job_id':jid,'state':'COMPLETED','active':False,'exit_code':'0'}
     app=create_app()
     fixtures=root/'fixtures.json'
-    if not fixtures.exists():fixtures.write_text(json.dumps(seed(app.state.store,root),ensure_ascii=False),encoding='utf-8')
+    if not fixtures.exists():fixtures.write_text(json.dumps(seed(app.state.store,root,mask_review=args.mask_review),ensure_ascii=False),encoding='utf-8')
     from fastapi.responses import FileResponse
     dist=Path(__file__).resolve().parents[2]/'frontend'/'dist'
     @app.get('/{asset:path}')

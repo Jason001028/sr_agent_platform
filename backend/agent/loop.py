@@ -850,7 +850,22 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
 
     last_integrity_error = None
     consecutive_integrity_errors = 0
+    def budget_summary_fallback(turn):
+        answer = '本次处理已达到轮数预算，已停止继续调用工具。已有操作结果和任务卡仍然有效；未完成步骤、待确认事项及后台任务，请以对应结果和任务卡状态为准。本条不表示任务已完成，可继续发送消息处理剩余事项。'
+        commit({"role": "assistant", "content": answer})
+        transcript.append({"role": "assistant", "content": answer})
+        if on_step is not None:
+            on_step({"type": "assistant", "content": answer})
+        if store is not None:
+            store.set_session_status(session_id, "done")
+        if trajectory is not None:
+            trajectory.event('assistant', turn=turn, status='completed',
+                             payload={'content': answer, 'budget_limited': True})
+        return finish_run({"ok": True, "turns": turn, "messages": transcript,
+                           "answer": answer, "error": None, "budget_limited": True,
+                           "session_id": session_id, "usage": usage})
     for turn in range(1, max_turns + 1):
+        summarizing = not durable and turn == max_turns
         check_owner()
         if durable and ((max_model_calls is not None and model_calls >= max_model_calls)
                         or deadline - time.monotonic() <= cfg.llm_deadline_margin):
@@ -875,6 +890,10 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
         if durable:
             runtime_status["remaining_round_seconds_at_request"] = round(policy["remaining_round_seconds_at_request"], 2)
         request_messages = project_runtime_status(messages, runtime_status)
+        request_tools = [] if summarizing else tools
+        if summarizing:
+            request_messages = [dict(m) for m in request_messages]
+            request_messages[0]["content"] += '\n本次已到最后一轮预算。禁止调用工具或发起新操作。请仅根据已有结果用中文总结已完成、受阻、待确认及未完成事项。后台任务仍在执行或需要人工确认时必须明确说明，不得宣称完成。'
         if durable and goal_status is not None and goal_status.get("checkpoint", {}).get("clarification_id"):
             # Continuation observes the latest durable checkpoint, without
             # appending another synthetic message to the real input log.
@@ -887,7 +906,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
         if trajectory is not None:
             llm_event = trajectory.event(
                 "llm_request_start", turn=turn, status="started",
-                payload={"message_count": len(request_messages), "tool_count": len(tools),
+                payload={"message_count": len(request_messages), "tool_count": len(request_tools),
                          "runtime_status": runtime_status, "model": cfg.llm_model, "request_config": policy},
                 started_at=llm_started)
         on_delta, delta_state = (None, None)
@@ -922,7 +941,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                 kwargs["diagnostics"] = diagnostics
             failure = None
             try:
-                out = chat(request_messages, tools, **kwargs)
+                out = chat(request_messages, request_tools, **kwargs)
             except Exception as exc:
                 failure = exc
                 out = {}
@@ -963,6 +982,8 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                         payload={"provider_usage": None, "unknown_calls": unknown, "observation": "send_attempted_usage_unknown", "reason": out.get("response_error") or (error_class(failure) if failure else None)})
 
             if failure is not None:
+                if summarizing:
+                    return budget_summary_fallback(turn)
                 raise failure
             if deadline is not None and deadline-time.monotonic() <= cfg.llm_deadline_margin:
                 raise DeadlineExceeded("round budget exhausted during model request")
@@ -1076,6 +1097,10 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
             return finish_run({"ok": True, "turns": turn, "messages": transcript,
                                "answer": content or "", "error": None,
                                "session_id": session_id, "usage": usage})
+
+        if summarizing:
+            # Never dispatch a tool even if the model ignores the empty manifest.
+            return budget_summary_fallback(turn)
 
         # Checkpoint BEFORE the tools run: the assistant's intent is durable
         # before any external side effect, so a crash mid-tool leaves a

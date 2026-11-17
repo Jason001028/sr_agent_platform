@@ -455,7 +455,7 @@ def prepare_repair(
     exclusions=None,
     mode: str = "demo",
     strategy: str = "automatic",
-    detection_method: str = "absdiff",
+    detection_method: str = "ssim",
     smart_options=None,
     mask_policy: str = "auto",
     mask_path: str | None = None,
@@ -469,7 +469,7 @@ def prepare_repair(
     strategy = str(strategy or "automatic").strip().lower()
     if strategy not in ("automatic", "review"):
         raise RepairError("strategy 只支持 automatic、review")
-    detection_method = str(detection_method or "absdiff").strip().lower()
+    detection_method = str(detection_method or "ssim").strip().lower()
     if detection_method not in ("absdiff", "ssim", "smart"):
         raise RepairError("detection_method 只支持 absdiff、ssim、smart")
     mask_policy = str(mask_policy or "auto").strip().lower()

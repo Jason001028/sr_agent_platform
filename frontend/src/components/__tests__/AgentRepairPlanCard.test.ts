@@ -22,6 +22,7 @@ vi.mock('../../lib/api', () => {
   return {
     HttpError,
     apiConfirmRepair: vi.fn(),
+    apiPrepareRepair: vi.fn(),
     apiStartRepair: vi.fn(),
     apiRepairStatus: vi.fn(), apiRepairTargets: vi.fn(),
   };
@@ -30,7 +31,7 @@ vi.mock('../../lib/batchDock', () => ({ requestQualityReview: vi.fn(), requestMa
 vi.mock('../../router', () => ({ default: { push: vi.fn().mockResolvedValue(undefined) } }));
 
 import AgentRepairPlanCard from '../AgentRepairPlanCard.vue';
-import { apiConfirmRepair, apiRepairStatus, apiStartRepair, apiRepairTargets, HttpError } from '../../lib/api';
+import { apiPrepareRepair, apiConfirmRepair, apiRepairStatus, apiStartRepair, apiRepairTargets, HttpError } from '../../lib/api';
 import { requestQualityReview, requestMaskReview } from '../../lib/batchDock';
 import router from '../../router';
 
@@ -94,6 +95,33 @@ beforeEach(() => {
 });
 afterEach(() => { app?.unmount(); app = undefined; root?.remove(); document.querySelectorAll('.repair-drawer-backdrop').forEach(el => el.remove()); });
 
+it('keeps conflict paths collapsed and prepares a new manifest plan without starting SR', async () => {
+  const blocking = [1, 2].map(line => ({ code: 'pan_backup_exists', line, name: `PMS0${line}`,
+    scene_ref: `/DiskArray/PMS0${line}`, filename: 'PAN_old_latest.tif',
+    conflict_path: `/DiskArray/PMS0${line}/PAN_old_latest.tif`, message: `raw backup error ${line}` }));
+  const p = plan({ status: 'BLOCKED', blocking, exclusions: [{line: 3, reason: '原有排除'}] });
+  vi.mocked(apiRepairStatus).mockResolvedValue(status({plan:p}) as never);
+  await mount(p);
+  expect(root.textContent).toContain('2 项冲突');
+  expect(root.textContent).not.toContain('raw backup error');
+  expect(root.textContent).not.toContain('PMS02');
+  expect(root.querySelector('[data-e2e=repair-plan-start]')).toBeNull();
+  const expand = Array.from(root.querySelectorAll('button')).find(b => b.textContent?.includes('查看全部 2 项冲突'))!;
+  expand.click(); await flush();
+  expect(root.textContent).toContain('PMS02');
+  const next = plan({plan_id:'plan_' + 'b'.repeat(24)});
+  vi.mocked(apiPrepareRepair).mockResolvedValue(next as never);
+  vi.mocked(apiRepairStatus).mockResolvedValue(status({plan:next}) as never);
+  root.querySelector<HTMLButtonElement>('[data-e2e=repair-plan-exclude]')!.click();
+  await flush();
+  await new Promise(resolve => setTimeout(resolve, 450));
+  expect(apiPrepareRepair).toHaveBeenCalledWith(expect.objectContaining({manifest_ref:p.manifest_ref,
+    exclusions: [{line:3,reason:'原有排除'}, {line:1,reason:'已有 PAN 备份'}, {line:2,reason:'已有 PAN 备份'}]}));
+  expect(p.status).toBe('BLOCKED');
+  expect(apiStartRepair).not.toHaveBeenCalled();
+  expect(root.querySelector('[data-e2e=repair-plan-start]')).not.toBeNull();
+});
+
 it('keeps 27 long names out of the card and opens a sorted Viewer-labelled drawer', async () => {
   const rows = Array.from({length:27}, (_, n) => ({item_id:`i${n}`, ordinal:n+1, scene_ref:`/scenes/${n}`, name:`SCENE_${n}_` + 'LONG_FILENAME_'.repeat(30)}));
   const p = plan({targets:{total:27,applicable:27,excluded:0,items:rows.slice().reverse()}});
@@ -102,7 +130,7 @@ it('keeps 27 long names out of the card and opens a sorted Viewer-labelled drawe
   await mount(p);
   expect(root.textContent).not.toContain(rows[0].name);
   expect(root.querySelectorAll('.plan-actions button')).toHaveLength(1);
-  expect(root.textContent).toContain('启动 SR');
+  expect(root.textContent).toContain('确认并启动');
   root.querySelector<HTMLButtonElement>('[data-e2e=repair-targets-open]')!.click();
   await flush();
   const drawer = document.querySelector('[role=dialog]')!;
@@ -134,7 +162,7 @@ it('deduplicates rapid clicks and confirms before starting production', async ()
   vi.mocked(apiStartRepair).mockResolvedValue({plan:plan({status:'STARTED',mode:'production'}),goal:{goal_id:'g'},reused:false} as never);
   await mount(p);
   const button = root.querySelector<HTMLButtonElement>('[data-e2e=repair-plan-start]')!;
-  expect(button.textContent).toContain('启动 SR');
+  expect(button.textContent).toContain('确认并启动');
   button.click(); button.click();
   await flush();
   expect(apiConfirmRepair).toHaveBeenCalledTimes(1);
@@ -165,7 +193,7 @@ it('restores an already-started server plan without presenting a start button', 
   expect(apiConfirmRepair).not.toHaveBeenCalled();
 });
 
-it('breathes during execution and mask review while keeping paused and terminal states static', async () => {
+it('shows a three-quarter loading arc during execution and keeps paused and terminal states static', async () => {
   // Snapshot swaps must reach the card's computed goal, so this test's store
   // needs the same reactive wrapper Pinia provides in the app.
   state.batch = reactive({ ...state.batch });
@@ -186,6 +214,8 @@ it('breathes during execution and mask review while keeping paused and terminal 
   const ring = () => root.querySelector('[data-e2e=repair-state-ring]')!;
   expect(ring().getAttribute('data-state-icon')).toBe('running');
   expect(ring().classList.contains('running')).toBe(true);
+  expect(ring().querySelector('.loading-arc')?.getAttribute('stroke-dasharray')).toBe('75 25');
+  expect(ring().querySelector('.ring')).toBeNull();
 
   for (const [status, phase] of [['WAITING_USER', 'waiting_review'], ['WAITING_EXTERNAL', 'monitoring'], ['VERIFYING', 'verifying']]) {
     state.batch.snapshot = { ...snapshot, goal: { ...snapshot.goal, status, phase } } as never;
@@ -199,11 +229,13 @@ it('breathes during execution and mask review while keeping paused and terminal 
   await flush();
   expect(ring().getAttribute('data-state-icon')).toBe('paused');
 
-  // Paused: the breathing animation is gone, the ring keeps a static pause glyph.
+  // Paused: rotation is gone, the ring keeps a static pause glyph.
   state.batch.snapshot = { ...snapshot, goal: { ...snapshot.goal, status: 'PAUSED' } } as never;
   await flush();
   expect(ring().getAttribute('data-state-icon')).toBe('paused');
   expect(ring().classList.contains('running')).toBe(false);
+  expect(ring().querySelector('.loading-arc')).toBeNull();
+  expect(ring().querySelector('.ring')).not.toBeNull();
 
   state.batch.snapshot = {
     ...snapshot,
@@ -228,6 +260,25 @@ it('shows the plan stage and confirms/starts on the same card', async () => {
   expect(root.querySelector('[data-e2e=repair-plan-start]')).not.toBeNull();
 });
 
+it('requires confirmation and cancels the bound task through the existing control chain', async () => {
+  state.batch.goalId = 'cancel-goal';
+  state.batch.control = vi.fn().mockResolvedValue('已请求取消');
+  vi.mocked(apiRepairStatus).mockResolvedValue(status({
+    plan: plan({status:'STARTED'}),
+    goal: {goal_id:'cancel-goal',status:'WAITING_USER',phase:'waiting_review',monitoring_done:false},
+  }) as never);
+  await mount(plan({status:'STARTED'}));
+  expect(root.textContent).not.toContain('在后台执行，可随时查看进度');
+  const button = root.querySelector<HTMLButtonElement>('[data-e2e=repair-stop-task]')!;
+  button.click(); await nextTick();
+  expect(button.textContent).toBe('确认中止');
+  expect(state.batch.control).not.toHaveBeenCalled();
+  button.click(); button.click(); await flush();
+  expect(state.batch.control).toHaveBeenCalledTimes(1);
+  expect(state.batch.control).toHaveBeenCalledWith('cancel');
+  expect(apiStartRepair).not.toHaveBeenCalled();
+});
+
 it('opens the matching mask review from the waiting card without approving or starting SR', async () => {
   vi.mocked(apiRepairStatus).mockResolvedValue(status({
     plan: plan({status:'STARTED'}),
@@ -249,6 +300,11 @@ it('keeps unstarted historical Demo plans truthful and refuses to run them', asy
   vi.mocked(apiRepairStatus).mockResolvedValue(status({plan:old}) as never);
   await mount(old);
   expect(root.textContent).toContain('历史演示计划');
+  expect(root.textContent).not.toContain('重新准备自动修复');
+  root.querySelector<HTMLButtonElement>('.plan-body > .list-link')!.click();
+  await flush();
+  root.querySelector<HTMLButtonElement>('.detail-link')!.click();
+  await flush();
   expect(root.textContent).toContain('重新准备自动修复');
   expect(root.querySelector('[data-e2e=repair-plan-start]')).toBeNull();
   expect(apiStartRepair).not.toHaveBeenCalled();
@@ -259,6 +315,8 @@ it('labels a prepared plan with unavailable execution clearly', async () => {
   vi.mocked(apiRepairStatus).mockResolvedValue(status({ plan: unavailable }) as never);
   await mount(unavailable);
   expect(root.textContent).toContain('暂不可执行');
+  root.querySelector<HTMLButtonElement>('.detail-link')!.click();
+  await flush();
   expect(root.textContent).toContain('演示工作目录不可写');
   expect(root.textContent).not.toContain('待确认');
   expect(root.querySelector('[data-e2e=repair-plan-start]')).toBeNull();

@@ -153,6 +153,7 @@ def detect(target, reference, base, config):
         "requires_geometry_review":config.get("method") == "smart" or any(p["needs_review"] for p in auto["polygons"]),
         "geometry_diagnostics":[{k:p[k] for k in ("region_id","vertex_count","coverage_ratio","supersample_coverage_ratio","buffer_px","buffer_space","needs_review","diagnostics","area_ratio","holes","fallback")} for p in auto["polygons"]],
         "analysis":{"source":"real-dn-grid","size":[gw,gh],"parameters":result["parameters"],
+                    "differenceMap":result["differenceMap"],"validityMap":result["validityMap"],
                     "grid_to_pan":auto["sources"][0]["transform"],"grid_to_nosr":auto["sources"][1]["transform"],
                     "coverage_scope":"projected_analysis_pixel_centres","downsampled":gw<w or gh<h,
                     "parameter_version":auto["parameter_version"],"registration":"geotiff" if registered else "production-proportional-grid",

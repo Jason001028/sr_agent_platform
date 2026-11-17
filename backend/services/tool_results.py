@@ -45,6 +45,14 @@ class ToolResults:
         return format_result(name, result, budget=self.budget, reference=reference, arguments=arguments, tool=tool)
 
     def read(self, result_id, path="", offset=0, limit=10):
+        # Models routinely ask for a larger page than the contract.  The schema
+        # accepts the request but the server keeps its bounded page size, so a
+        # harmless over-request never turns into a validation failure.
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 10
+        limit = max(1, min(limit, 20))
         if self.store is not None and self.session_id is not None:
             value = self.store.read_tool_result(self.session_id, result_id)
         else:
@@ -160,8 +168,8 @@ class ToolResults:
                     "description":"完整结果中的 JSON Pointer，最多 512 字符；省略或空串选根对象，例如 /data/results；~1 表示 /，~0 表示 ~，数组用从 0 起的索引。"},
                 "offset":{"type":"integer","minimum":0,
                     "description":"从 0 起的非负偏移，省略为 0；单位是数组元素、对象键或字符串字符。下一页使用返回的 next_offset；标量不使用此参数。"},
-                "limit":{"type":"integer","minimum":1,"maximum":20,
-                    "description":"页大小，1..20，省略为 10；数组/对象最多取此数量的元素/键，字符串最多 min(limit×100,1000) 字符；还受字节预算限制，标量不使用此参数。"}}}, self.read))
+                "limit":{"type":"integer","minimum":1,"maximum":100,
+                    "description":"页大小，省略为 10；服务端最多取 20（大于 20 按 20 处理）；数组/对象最多取此数量的元素/键，字符串最多 min(limit×100,1000) 字符；还受字节预算限制，标量不使用此参数。"}}}, self.read))
         return active
 
     def project_history(self, messages, registry):

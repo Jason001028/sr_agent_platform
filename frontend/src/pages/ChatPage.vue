@@ -32,7 +32,6 @@ import { splitAgentPayload } from '../lib/agentContext.js';
 
 import AgentToolPresentation from '../components/AgentToolPresentation.vue';
 import { projectAgentActivity } from '../lib/agentActivity';
-import { hasRepairPlanInTurn } from '../lib/repairPlan';
 import { reasoningViews, type ReasoningTiming } from '../lib/reasoningTrace';
 
 const chat = useChatStore();
@@ -323,10 +322,7 @@ onMounted(() => {
                               :merged-count="reasoningView(i)?.merged ? reasoningView(i)?.count : undefined"
                               :merged-seconds="reasoningView(i)?.merged ? reasoningView(i)?.seconds : undefined"
                               @timing="onReasoningTiming(i, $event)" />
-              <details v-if="m.content && hasRepairPlanInTurn(chat.messages, i)" class="repair-narrative">
-                <summary>Agent 说明</summary><MarkdownBody :source="m.content" />
-              </details>
-              <div v-else-if="m.content" class="bubble assistant">
+              <div v-if="m.content" class="bubble assistant">
                 <MarkdownBody :source="m.content" />
               </div>
               <div v-else-if="chat.sending && !m.toolCalls?.length && ((m.streaming && !m.reasoning) || m.phase === 'tool_call')"
@@ -595,9 +591,6 @@ onMounted(() => {
 }
 .btn:hover { filter: brightness(1.05); }
 .btn:disabled { opacity: .55; cursor: not-allowed; box-shadow: none; }
-.repair-narrative { min-width:0; max-width:100%; font-size:11px; color:var(--tb-muted); }
-.repair-narrative > summary { padding:6px 0; cursor:pointer; }
-.repair-narrative[open] { max-height:260px; overflow:auto; overflow-wrap:anywhere; }
 .cp-row:empty { display:none; }
 .bubble.tools { background:transparent; border:0; box-shadow:none; padding:0; }
 </style>

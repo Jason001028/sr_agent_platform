@@ -143,7 +143,7 @@ describe('compact sequence selection', () => {
     start().click(); await flush();
     expect(start().textContent).toContain('确认并启动');
     const detection = root.querySelector<HTMLSelectElement>('select')!;
-    detection.value = 'ssim';
+    detection.value = 'absdiff';
     detection.dispatchEvent(new Event('change'));
     await flush();
     expect(apiConfirmRepair).not.toHaveBeenCalled();

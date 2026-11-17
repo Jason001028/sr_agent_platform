@@ -350,8 +350,8 @@ _PREPARE_PARAMS = {
             "description": "掩码策略：automatic 自动生成，review 在提交前等待人工复核；智能对比固定进入 review。",
         },
         "detection_method": {
-            "type": "string", "enum": ["absdiff", "ssim", "smart"], "default": "absdiff",
-            "description": "检测方法：absdiff 像素差异、ssim 结构差异、smart 实验性智能对比。",
+            "type": "string", "enum": ["absdiff", "ssim", "smart"], "default": "ssim",
+            "description": "检测方法：ssim 结构差异（默认）、absdiff 像素差异、smart 实验性智能对比。",
         },
         "mask_policy": {
             "type": "string", "enum": ["auto", "existing"], "default": "auto",
@@ -398,7 +398,7 @@ _GET_ITEM_PARAMS = {
 @tool(name="prepare_repair", description=_PREPARE_DESC,
       params_schema=_PREPARE_PARAMS)
 def prepare_repair(scope="workspace", mode="production", strategy="automatic",
-                   detection_method="absdiff", mask_policy="auto", title=None):
+                   detection_method="ssim", mask_policy="auto", title=None):
     return _prepare(_Context(), scope, mode, strategy, detection_method,
                     mask_policy, title)
 
@@ -439,7 +439,7 @@ def bound_tool(name: str, *, workspace=None, current=None, selected_images=None,
                        batch_draft=batch_draft, selected_truncated=selected_truncated)
     if name == "prepare_repair":
         def run(scope="workspace", mode="production", strategy="automatic",
-                detection_method="absdiff", mask_policy="auto", title=None):
+                detection_method="ssim", mask_policy="auto", title=None):
             return _prepare(context, scope, mode, strategy, detection_method,
                             mask_policy, title)
         base = prepare_repair

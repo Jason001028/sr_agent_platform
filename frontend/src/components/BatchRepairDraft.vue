@@ -12,7 +12,7 @@ import { REPAIR_EXECUTION_MODE } from '../lib/repairExecution';
 const emit = defineEmits<{ created: [] }>();
 const viewer = useViewerStore(), batch = useBatchGoalStore(), chat = useChatStore();
 const groups = ref<RepairSequence[]>([]), busy = ref(false), loading = ref(false), error = ref('');
-const detectionMethod = ref<'absdiff' | 'ssim' | 'smart'>('absdiff');
+const detectionMethod = ref<'absdiff' | 'ssim' | 'smart'>('ssim');
 const mode = ref(REPAIR_EXECUTION_MODE);
 const strategy = computed<'automatic' | 'review'>(() => detectionMethod.value === 'smart' ? 'review' : 'automatic');
 const chosen = computed(() => groups.value.filter(g => g.checked && g.count && !g.reason && !g.loading));

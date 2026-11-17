@@ -2649,8 +2649,8 @@ export const useViewerStore = defineStore('viewer', () => {
    *  `SC` —— 只按名字找会漏，于是同一个场景会开出两条 rec、两份 maskRois。 */
   function findRecByMeta(meta: { sceneId?: string | null; name: string })
       : ViewerRec | undefined {
-    return recs.value.find((r) =>
-      (!!meta.sceneId && r.sceneId === meta.sceneId) || r.name === meta.name);
+    const exact = meta.sceneId ? recs.value.find(r => r.sceneId === meta.sceneId) : undefined;
+    return exact ?? recs.value.find(r => r.name === meta.name && (!meta.sceneId || !r.sceneId));
   }
 
   /** 把「服务端生成的预览 JPG + 元数据」装进一条**已有**的 rec（新建 / 就地升级共用）。

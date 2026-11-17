@@ -115,9 +115,35 @@ class TestLoop(unittest.TestCase):
                 "arguments": '{"input_path": "no_such.tif"}'}]}
 
         r = run_loop(cfg(), "x", max_turns=3, chat=chat)
-        self.assertFalse(r["ok"])
+        self.assertTrue(r["ok"])
         self.assertEqual(r["turns"], 3)
-        self.assertIn("max_turns", r["error"])
+        self.assertTrue(r['budget_limited'])
+        self.assertIsNone(r['error'])
+        self.assertEqual(len([m for m in r['messages'] if m.get('role') == 'tool']), 2)
+
+    def test_last_turn_is_summary_only_with_no_extra_model_call(self):
+        requests = []
+        def chat(messages, tools):
+            requests.append((messages, tools))
+            if len(requests) == 1:
+                return {"finish_reason":"tool_calls", "content":None, "tool_calls":[{
+                    "id":"summary-test", "name":"fix_bad_lines", "arguments":'{"input_path":"no_such.tif"}'}]}
+            self.assertEqual(tools, [])
+            self.assertIn('禁止调用工具', messages[0]['content'])
+            return {"finish_reason":"stop", "content":"已有结果已保留，修复尚未完成。", "tool_calls":[]}
+        result = run_loop(cfg(), 'x', max_turns=2, chat=chat)
+        self.assertTrue(result['ok'])
+        self.assertEqual(len(requests), 2)
+        self.assertIn('尚未完成', result['answer'])
+
+    def test_summary_transport_failure_returns_persistable_budget_notice(self):
+        def chat(messages, tools):
+            raise ConnectionError('summary unavailable')
+        events = []
+        result = run_loop(cfg(), 'x', max_turns=1, chat=chat, on_step=events.append)
+        self.assertTrue(result['ok'])
+        self.assertTrue(result['budget_limited'])
+        self.assertEqual(events[-1]['type'], 'assistant')
 
     def test_llm_call_error_surfaces(self):
         def chat(messages, tools):
@@ -471,9 +497,9 @@ class TestOnStepSeam(unittest.TestCase):
                 "arguments": '{"input_path": "no_such.tif"}'}]}
 
         r = run_loop(cfg(), "x", max_turns=3, chat=chat, on_step=events.append)
-        self.assertFalse(r["ok"])
-        self.assertEqual(events[-1]["type"], "error")
-        self.assertIn("max_turns", events[-1]["error"])
+        self.assertTrue(r["ok"])
+        self.assertEqual(events[-1]["type"], "assistant")
+        self.assertIn("轮数预算", events[-1]["content"])
 
     def test_streaming_chat_emits_phase_and_deltas(self):
         events = []

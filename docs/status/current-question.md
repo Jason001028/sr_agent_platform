@@ -1,5 +1,9 @@
 # current_question — 平台现状与交接入口
 
+2026-11-17：Agent「前往复核」改为 Viewer 可视化候选掩码复核：自动打开 PAN / NOSR 同步分屏，等待侧栏布局稳定后放大首个待审 ROI；底部浮动条逐区通过/驳回并自动推进，支持保持位置与缩放切换交替对比。右下鹰眼新增第三幅独立差异热力图，优先使用本批次冻结的连续差异图（旧批次复用已有 Diff 或只读重算），候选掩码用灰紫轮廓区分，均受现有眼睛总控与图层选择管理。区域决定持久化到 Item/version；全部处理完后只栅格化通过区域到新工件目录，全驳回则跳过，原始候选与决定保留审计。修正跨景同名 PAN.tif 被错误复用的问题。合成双景浏览器验证分屏/ROI/三鹰眼/交替/显隐/自动下一景，后端88项相关回归、前端48项相关回归通过；真实盘阵验收待内网执行。可复跑夹具：`python -m backend.tests.quality_browser_fixture --root <临时目录> --port 8797 --mask-review`（使用已构建前端，禁止真实 SR 提交）。
+
+2026-11-17：自动修复默认检测方式改为 SSIM（前端批量面板、Agent `prepare_repair`、REST prepare 与 repair_application 同步）；差异定位的「亮度归因权重」默认开启，三个放大系数整体收敛 20%（`midGain 1→0.8`、`midBrightGain 0.2→0.16`、`darkBrightGain 0.5→0.4`），实际高权约 2.1×，排序与逐像素热力图共用同一公式；对应前端测试与文档已更新。
+
 2026-11-16：Agent 的 ReasoningBlock 改为轻量思考轨迹。运行中显示「深度思考中…」+三点呼吸；`phase` 离开 `thinking` 即用真实阶段耗时显示「已思考 X 秒」，不可靠时显示「思考已结束」，完成自动收起为低对比度灰绿标题。同一用户回合内连续、已结束且不超过 15 秒的短阶段由 `lib/reasoningTrace.ts` 合并为「已完成 N 段思考 · 累计 X 秒」，仅在最后一段渲染；工具失败、人工确认与业务结果仍独立。原始推理不再仅限开发者模式，用户可手动展开；不改 Agent Loop/SSE。前端全量 1132 项、typecheck 与术语检查通过；真实模型视觉与内网浏览器待核。
 
 2026-11-16：生产批量执行改为显式准入，且不再强制 Slurm。`batch_worker.ensure_execution_allowed('production')` 由 `SR_BATCH_PRODUCTION=1` 解禁：`SR_EXECUTOR=slurm` 时要求 `SR_SLURM_FAKE` 非 1，`SR_EXECUTOR=local` 时要求本机预检通过；两种执行器都要求工作目录存在且可写，否则计划卡保持「暂不可执行」并给出具体原因。Local 路径新增 `SR_WORK_DIR`（兼容旧 `SR_SLURM_WORK_DIR`）、`.local_jobs.json` 持久化排队/进程表（重启恢复 queued、按进程起始时间+cmdline 校验身份后接管 running、同 job_id 不重复启动）、启动窗口写盘失败/中断进入 quarantine 并阻塞后续排队、`cancel_requested` 持久化、`SR_LOCAL_JOB_TIMEOUT_SEC` 超时清理进程树，以及 bash/Python/算法入口/模型/GPU 的缓存预检；`deploy/sr-api.service` 用 `KillMode=process` 支持跨重启接管。已准备未启动的旧计划刷新状态即可重算执行资格。本次仅跑合成 bash 夹具，未提交真实 GPU 作业；真实单景/批量验收步骤见 [sr-local-execution.md](sr-local-execution.md) §4.1，结论待补。

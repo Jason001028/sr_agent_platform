@@ -113,10 +113,10 @@ function toggle(): void {
 </script>
 
 <template>
-  <div class="reason" :class="thinkingActive ? 'running' : 'done'">
+  <div class="reason agent-trace" :class="thinkingActive ? 'running' : 'done'">
     <button type="button" class="reason-toggle" :aria-expanded="open"
             :title="thinkingActive && activity ? activity : undefined" @click="toggle">
-      <span class="chev" :class="{ open }" aria-hidden="true">▸</span>
+      <span class="trace-node" :class="{active:thinkingActive}" aria-hidden="true"></span>
       <span class="reason-title">{{ title }}</span>
       <Transition name="reason-dots">
         <span v-if="thinkingActive" class="dots" role="status" aria-label="深度思考中">
@@ -140,13 +140,14 @@ function toggle(): void {
 .reason-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   max-width: 100%;
-  padding: 4px 2px;
+  padding: 0;
+  min-height: 28px;
   border: 0;
   background: none;
   font: inherit;
-  font-size: 11.5px;
+  font-size: 12px;
   text-align: left;
   cursor: pointer;
 }
@@ -163,8 +164,8 @@ function toggle(): void {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: #6d837a;              /* 完成后的低对比度灰绿 */
-  font-size: 11px;
+  color: var(--ink-sub);
+  font-size: inherit;
   font-weight: 400;
   transition: color var(--motion-hover) var(--ease-standard);
 }

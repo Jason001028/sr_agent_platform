@@ -431,6 +431,13 @@ def test_repair_plan_wrong_path_recovers_all_27_items_without_reexecution(tmp_pa
     assert bad['data']['resolved_path'] == '/data/targets'
     assert {'path':'/data/targets/items', 'type':'array'} in bad['data']['available_paths']
     assert size(bad) <= BUDGET.limit
+    # Models often over-ask the page size; the server clamps instead of
+    # failing schema validation before the read.
+    oversized = registry.invoke('read_tool_result', {
+        'result_id': reference, 'path': '/data/targets/items', 'limit': 35})
+    assert oversized['ok']
+    assert 0 < oversized['data']['shown'] <= 20
+    assert oversized['data']['has_more'] is True
     collected, offset = [], 0
     while True:
         page = registry.invoke('read_tool_result', {'result_id':reference, 'path':'/data/targets/items', 'offset':offset, 'limit':20})['data']

@@ -341,8 +341,10 @@ class BatchManifestTest(unittest.TestCase):
         (directory / "PAN_old_2.tif").write_bytes(b"old")
         result = self.import_text(self.qc(stem))
         self.assertTrue(result["rejected"])
-        self.assertEqual(result["diagnostics"][0]["code"], "scene_unresolved")
+        self.assertEqual(result["diagnostics"][0]["code"], "pan_backup_exists")
         self.assertIn("PAN 备份", result["diagnostics"][0]["message"])
+        self.assertEqual(result["diagnostics"][0]["scene_ref"], str(directory))
+        self.assertEqual(result["diagnostics"][0]["filename"], "PAN_old_2.tif")
 
     def test_store_idempotency_is_content_sensitive_and_atomic(self):
         name = self.scene(1)

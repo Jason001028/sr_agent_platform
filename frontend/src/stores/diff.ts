@@ -272,8 +272,8 @@ export const useDiffStore = defineStore('diff', () => {
   const scope = ref<DiffScope>('common');
   const display = ref<DiffDisplay>('regions');
   const feather = ref<DiffFeather>('light');
-  /** 亮度归因权重：连续非线性先验，只影响候选排序与轮廓冷暖，不改差异数值。默认关闭。 */
-  const toneWeight = ref(false);
+  /** 亮度归因权重：连续非线性先验，只影响候选排序与轮廓冷暖，不改差异数值。默认开启。 */
+  const toneWeight = ref(true);
   const minAreaPx = ref(64);
   const advanced = ref<DiffAdvanced>({ ...DEFAULT_ADVANCED });
   const aId = ref<number | null>(null);
@@ -1281,7 +1281,7 @@ export const useDiffStore = defineStore('diff', () => {
         }
         return false;
       }
-      // 归因统计始终附在结果上：开关默认关闭，但打开后要立即可用，不再重算。
+      // 归因统计始终附在结果上：开关默认开启，关闭/打开都要立即可用，不再重算。
       attachPreviewTone(res,
         { gray: ca.gray, valid: ca.valid, w: scopeRect.w, h: scopeRect.h },
         { gray: cb.gray, valid: cb.valid, w: scopeRect.w, h: scopeRect.h },
@@ -1360,7 +1360,7 @@ export const useDiffStore = defineStore('diff', () => {
         notice.value = '所选方法检测失败，已显示成功方法；失败原因见对照摘要。';
       }
       installLayers(layers);
-      display.value = 'overlay'; opacity.value = .6; toneWeight.value = false;
+      display.value = 'overlay'; opacity.value = .6; toneWeight.value = true;
       analysisState.value = '已完成';
       return true;
     } catch (e) {

@@ -150,7 +150,7 @@ async def prepare(request: Request):
     mode = _enum(body.get("mode"), _MODES, "mode", "production")
     strategy = _enum(body.get("strategy"), _STRATEGIES, "strategy", "automatic")
     detection = _enum(body.get("detection_method"), _DETECTIONS,
-                      "detection_method", "absdiff")
+                      "detection_method", "ssim")
     mask_policy = _enum(body.get("mask_policy"), _MASK_POLICIES,
                         "mask_policy", "auto")
     title = body.get("title")

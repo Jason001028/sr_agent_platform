@@ -1,9 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import {
-  DEFAULT_TONE_BANDS, brightMembership, darkMembership, encodeToneWeight, flatMembership,
+  DEFAULT_TONE_BANDS, TONE_WEIGHT_MAX, TONE_WEIGHT_MIN,
+  brightMembership, darkMembership, encodeToneWeight, flatMembership,
   midMembership, regionTone, smoothstep, toneColor, toneWeightMap, toneWindowRadius,
   weightFromShares,
 } from '../diffTone';
+
+const midFlat = 1 + DEFAULT_TONE_BANDS.midGain;
+const darkBright = 1 + DEFAULT_TONE_BANDS.darkBrightGain;
+const midBright = (bright: number) =>
+  midFlat * (1 + DEFAULT_TONE_BANDS.midBrightGain * bright);
+const normOf = (weight: number) =>
+  (weight - TONE_WEIGHT_MIN) / (TONE_WEIGHT_MAX - TONE_WEIGHT_MIN);
 import type { ToneGrid } from '../diffTone';
 
 function grid(value: number, w = 20, h = 20, valid?: Uint8Array): ToneGrid {
@@ -63,7 +71,7 @@ describe('隶属度', () => {
 });
 
 describe('weightFromShares', () => {
-  it('提亮增益连续单调，且中间调明显提亮达到 2.4 倍', () => {
+  it('提亮增益连续单调，且中间调明显提亮达到新上限', () => {
     for (const mid of [0, 1]) {
       let prev = 1;
       for (let delta = -20; delta <= 30; delta++) {
@@ -72,7 +80,7 @@ describe('weightFromShares', () => {
         prev = weight;
       }
     }
-    expect(weightFromShares(1, 0, 1, 20).weight).toBeCloseTo(2.4, 6);
+    expect(weightFromShares(1, 0, 1, 20).weight).toBeCloseTo(midBright(1), 6);
   });
 
   it('平坦区域和逐像素使用相同权重，并保留中性编码', () => {
@@ -83,22 +91,22 @@ describe('weightFromShares', () => {
     }
   });
 
-  it('暗部明显提亮时提高到 1.5', () => {
+  it('暗部明显提亮时提高到收敛后的暗部增益', () => {
     const w = weightFromShares(0, 1, 0.5, 20);
-    expect(w.weight).toBeCloseTo(1.5, 6);
-    expect(w.norm).toBeCloseTo(1 / 3, 6);
+    expect(w.weight).toBeCloseTo(darkBright, 6);
+    expect(w.norm).toBeCloseTo(normOf(darkBright), 6);
   });
 
-  it('中间调平坦区升到 2.0', () => {
+  it('中间调平坦区升到收敛后的中间调上限', () => {
     const w = weightFromShares(1, 0, 1, 0);
-    expect(w.weight).toBeCloseTo(2, 6);
-    expect(w.norm).toBeCloseTo(2 / 3, 6);
+    expect(w.weight).toBeCloseTo(midFlat, 6);
+    expect(w.norm).toBeCloseTo(normOf(midFlat), 6);
   });
 
   it('暗部变暗保持中性；中间调越平权重越高', () => {
     expect(weightFromShares(0, 1, 0.5, -10).weight).toBeCloseTo(1, 6);
-    expect(weightFromShares(1, 0, 0, 0).weight).toBeCloseTo(1.5, 6);
-    expect(weightFromShares(0.5, 0, 1, 0).weight).toBeCloseTo(1.5, 6);
+    expect(weightFromShares(1, 0, 0, 0).weight).toBeCloseTo(1 + DEFAULT_TONE_BANDS.midGain * 0.5, 6);
+    expect(weightFromShares(0.5, 0, 1, 0).weight).toBeCloseTo(1 + DEFAULT_TONE_BANDS.midGain * 0.5, 6);
   });
 });
 
@@ -110,7 +118,7 @@ describe('regionTone', () => {
     expect(s!.dark).toBeCloseTo(0, 6);
     expect(s!.flat).toBeCloseTo(1, 6);
     expect(s!.delta).toBeCloseTo(5, 6);
-    expect(s!.weight).toBeCloseTo(2 * (1 + 0.2 * brightMembership(5)), 6);
+    expect(s!.weight).toBeCloseTo(midBright(brightMembership(5)), 6);
     expect(s!.pixels).toBe(400);
   });
 
@@ -119,7 +127,7 @@ describe('regionTone', () => {
     expect(s!.dark).toBeCloseTo(1, 6);
     expect(s!.mid).toBeCloseTo(0, 6);
     expect(s!.delta).toBeCloseTo(20, 6);
-    expect(s!.weight).toBeCloseTo(1.5, 6);
+    expect(s!.weight).toBeCloseTo(darkBright, 6);
   });
 
   it('纹理区降低中间调权重', () => {
@@ -176,7 +184,7 @@ describe('toneWeightMap', () => {
     expect([map.w, map.h]).toEqual([20, 20]);
     expect(map.radius).toBe(2);
     expect(new Set(map.norm).size).toBe(1);
-    expect(map.norm[0]).toBe(encodeToneWeight(2 * (1 + 0.2 * brightMembership(5))));
+    expect(map.norm[0]).toBe(encodeToneWeight(midBright(brightMembership(5))));
   });
 
   it('纹理区的局部标准差压低中间调权重', () => {
@@ -186,14 +194,16 @@ describe('toneWeightMap', () => {
     for (let i = 0; i < b.gray.length; i++) b.gray[i] = i % 2 ? 165 : 145;
     const map = toneWeightMap(a, b)!;
     const center = map.norm[10 * 20 + 10];
-    expect(center).toBe(encodeToneWeight(1.5 * (1 + 0.2 * brightMembership(5))));          // mid=1、flat≈0
+    const texturedMid = (1 + DEFAULT_TONE_BANDS.midGain * 0.5)
+      * (1 + DEFAULT_TONE_BANDS.midBrightGain * brightMembership(5));
+    expect(center).toBe(encodeToneWeight(texturedMid));          // mid=1、flat≈0
     expect(center).toBeGreaterThan(encodeToneWeight(1));
-    expect(center).toBeLessThan(encodeToneWeight(2 * (1 + 0.2 * brightMembership(5))));
+    expect(center).toBeLessThan(encodeToneWeight(midBright(brightMembership(5))));
   });
 
   it('暗部被明显提亮额外升权', () => {
     const map = toneWeightMap(grid(40), grid(60))!;
-    expect(map.norm[10 * 20 + 10]).toBe(encodeToneWeight(1.5));
+    expect(map.norm[10 * 20 + 10]).toBe(encodeToneWeight(darkBright));
   });
 
   it('NoData 像素给中性权重，且不参与邻点的窗口统计', () => {
@@ -205,7 +215,7 @@ describe('toneWeightMap', () => {
     const map = toneWeightMap(a, grid(155))!;
     expect(map.norm[0]).toBe(encodeToneWeight(1));
     // 邻点仍按 150 的平坦网格统计，不被无效像素的 0 拖出纹理。
-    expect(map.norm[1]).toBe(encodeToneWeight(2 * (1 + 0.2 * brightMembership(5))));
+    expect(map.norm[1]).toBe(encodeToneWeight(midBright(brightMembership(5))));
   });
 
   it('两侧网格尺寸不一致时拒绝', () => {
@@ -216,7 +226,7 @@ describe('toneWeightMap', () => {
   it('接受 Uint8 灰度（长期缓存用）', () => {
     const a: ToneGrid = { gray: new Uint8Array(400).fill(150), w: 20, h: 20 };
     const b: ToneGrid = { gray: new Uint8Array(400).fill(155), w: 20, h: 20 };
-    expect(toneWeightMap(a, b)!.norm[0]).toBe(encodeToneWeight(2 * (1 + 0.2 * brightMembership(5))));
+    expect(toneWeightMap(a, b)!.norm[0]).toBe(encodeToneWeight(midBright(brightMembership(5))));
   });
 });
 
@@ -245,5 +255,11 @@ describe('默认参数', () => {
     expect(DEFAULT_TONE_BANDS.dark).toEqual([70, 110]);
     expect(DEFAULT_TONE_BANDS.flat).toEqual([2, 8]);
     expect(DEFAULT_TONE_BANDS.bright).toEqual([2, 15]);
+  });
+
+  it('放大系数较原值整体收敛 20%', () => {
+    expect(DEFAULT_TONE_BANDS.midGain).toBeCloseTo(0.8, 6);
+    expect(DEFAULT_TONE_BANDS.midBrightGain).toBeCloseTo(0.16, 6);
+    expect(DEFAULT_TONE_BANDS.darkBrightGain).toBeCloseTo(0.4, 6);
   });
 });

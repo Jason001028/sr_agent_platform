@@ -6,12 +6,7 @@ const stateLabels = {running:'执行中',success:'已完成',failed:'失败',int
 <template>
   <li class="activity-step" :data-state="step.state">
     <div class="step-line">
-      <span class="state-icon" :class="step.state" :aria-label="stateLabels[step.state]" role="img">
-        <svg v-if="step.state === 'success'" viewBox="0 0 14 14" aria-hidden="true"><path d="m3 7 2.5 2.5L11 4" /></svg>
-        <span v-else-if="step.state === 'failed'" aria-hidden="true">×</span>
-        <span v-else-if="step.state === 'interrupted'" aria-hidden="true">−</span>
-        <span v-else class="running-dot" aria-hidden="true" />
-      </span>
+      <span class="trace-node" :class="{active:step.state === 'running',issue:step.state === 'failed' || step.state === 'interrupted'}" :aria-label="stateLabels[step.state]" role="img"></span>
       <span class="step-label" :title="`${step.label} · ${step.summary}`">{{ step.label }}<span class="step-summary"> · {{ step.summary }}</span></span>
     </div>
     <details v-if="developerMode" class="step-details"><summary>开发者详情</summary>
