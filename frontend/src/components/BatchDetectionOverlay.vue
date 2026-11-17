@@ -160,7 +160,7 @@ const provenance = computed(() => doc.value?.provenance ?? null);
 </script>
 
 <template>
-  <div v-if="params" class="batch-overlay" data-e2e="batch-overlay">
+  <div v-if="params" v-show="viewer.overlayMasterVisible !== false && viewer.repairOverlaySelected !== false" class="batch-overlay" data-e2e="batch-overlay">
     <template v-if="pngState !== 'error'">
       <div
         v-for="pane in overlays"

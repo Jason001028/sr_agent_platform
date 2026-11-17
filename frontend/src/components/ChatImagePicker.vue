@@ -45,7 +45,7 @@ async function pick(recId: number): Promise<void> {
     <div class="pk-mask" data-e2e="chat-shot-picker" @click.self="close">
       <div class="pk" role="dialog" aria-modal="true" aria-label="选择影像截图">
         <div class="pk-head">
-          <span class="pk-title">选择影像（截取当前可见画面）</span>
+          <span class="pk-title">选择截图影像</span>
           <button type="button" class="pk-x" aria-label="关闭" @click="close">×</button>
         </div>
 

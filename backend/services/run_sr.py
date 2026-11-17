@@ -627,6 +627,9 @@ def query_job_status(job_id, task: dict | None = None, run_cmd=None) -> dict:
     `run_cmd=None` means "module default _run"; passing it through explicitly
     would override the default with None and crash. It is a Slurm-only seam.
     """
+    from backend.services import demo_exec
+    if ((task or {}).get('params') or {}).get(demo_exec.MARKER) == 1:
+        return demo_exec.status(job_id, task)
     exit_file = exit_code_file_for((task or {}).get("config_xml"), job_id)
     if sr_runtime().executor == "local":
         return local_exec.status(job_id, exit_code_file=exit_file)
@@ -698,6 +701,8 @@ def submit_run_sr(params: dict, run_cmd=None, store=None) -> dict:
     is SUBMITTED for a fresh submission (possibly with `previous_state` when
     it re-submitted after a failed job) or a RESUMED_* reuse marker.
     """
+    if params.get('_batch_demo_executor'):
+        raise ValueError('演示任务只能交给独立 Demo 执行器')
     _reject_delete_ori(params)      # 原型期禁用，见 DELETE_ORI_MSG；两个入口共用
     if sr_runtime().executor == "local":
         # No scheduler involved: the API host runs the job itself. local_exec

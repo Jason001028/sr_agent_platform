@@ -6,11 +6,26 @@
  * assistant → turn_done；history 投影 role 序列 = user/assistant/tool/assistant。
  */
 import { describe, it, expect } from 'vitest';
-import { reduceChatSse, msgFromHistory, sortSessions } from '../chat.js';
+import { reduceChatSse, msgFromHistory, sortSessions, toolResultArguments } from '../chat.js';
 import type { ChatMsg } from '../chat.js';
 import type { ChatSession, HistoryMsg } from '../../lib/api.js';
 
 const roles = (msgs: ChatMsg[]): string[] => msgs.map((m) => m.role);
+
+it('keeps repeated result reads identifiable and supplies a nonempty summary', () => {
+  let messages: ChatMsg[] = [];
+  messages = reduceChatSse(messages, { type: 'tool_call', id: 'first', name: 'read_tool_result', args: { path: '' } });
+  messages = reduceChatSse(messages, { type: 'tool_call', id: 'second', name: 'read_tool_result', args: { path: '/data/targets/ids' } });
+  messages = reduceChatSse(messages, { type: 'tool_result', id: 'first', name: 'read_tool_result', ok: true,
+    data: { path: '', shown: 3, total: 3, has_more: false }, error: null });
+  messages = reduceChatSse(messages, { type: 'tool_result', id: 'second', name: 'read_tool_result', ok: false,
+    data: null, error: '路径不存在' });
+  expect(messages[1].detail).toContain('本页 3 项');
+  expect(toolResultArguments(messages, messages[1])).toEqual({ path: '' });
+  expect(toolResultArguments(messages, messages[2])).toEqual({ path: '/data/targets/ids' });
+  expect(toolResultArguments(messages, { ...messages[2], toolCallId: undefined })).toBeNull();
+  expect(msgFromHistory({ seq: 1, role: 'tool', tool_name: 'read_tool_result', ok: true, content: '' } as HistoryMsg).detail).toContain('调用成功');
+});
 
 describe('msgFromHistory（GET messages 投影 → 展示）', () => {
   it('user / assistant 文本直映', () => {

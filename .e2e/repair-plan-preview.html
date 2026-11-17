@@ -1,0 +1,28 @@
+<!doctype html><html lang="zh-CN"><meta charset="UTF-8"><title>Repair plan visual fixture</title>
+<style>body{margin:0;background:#dfe9e4;font:13px system-ui}#preview{margin:24px auto;width:320px;max-width:calc(100vw - 24px)}h1{font-size:13px;color:#48615d;font-weight:500}#app{display:grid;gap:10px}*{box-sizing:border-box}</style>
+<div id="preview"><h1>Agent · 修复工作区</h1><div id="app"></div></div>
+<script>window.addEventListener('error',e=>{document.querySelector('#app').textContent=String(e.error?.stack||e.message)});window.addEventListener('unhandledrejection',e=>{document.querySelector('#app').textContent=String(e.reason?.stack||e.reason)});</script>
+<script type="module">
+import {createApp,h} from 'vue';
+import {createPinia} from 'pinia';
+import './src/style.css';
+import Card from './src/components/AgentRepairPlanCard.vue';
+import Tool from './src/components/RepairToolSummary.vue';
+import {useChatStore} from './src/stores/chat';
+import {useViewerStore} from './src/stores/viewer';
+const query=new URLSearchParams(location.search), mode=query.get('mode') || 'production';
+document.querySelector('#preview').style.width=(query.get('width') || '320')+'px';
+const rows=Array.from({length:27},(_,n)=>({item_id:'item-'+n,ordinal:n+1,name:`JXGF07D03_PMS_20260101010101_200516571_101_${String(n+1).padStart(4,'0')}_001_L1_PAN_PRODUCTION_LONG_SCENE_NAME.tif`,scene_ref:'/fixture/scene-'+n,status:'PENDING'}));
+const plan={kind:'repair_plan.v1',contract_version:'repair_plan.v1',plan_id:'plan_'+'a'.repeat(24),version:1,status:'READY',scope:'batch',workspace:{scope:'workspace'},confirmation_required:true,
+ targets:{total:27,applicable:27,excluded:0,items:rows},mode,strategy:{detection_method:'absdiff',detection:'现有差异检测',mask:'auto_or_existing'},execution:{allowed:true,mode,reason:null}};
+// Every request is intercepted locally. This fixture cannot submit SR.
+window.fetch=async()=>new Response(JSON.stringify({plan,goal:null,items:[],counts:null,quality:null}),{headers:{'Content-Type':'application/json'}});
+window.fixturePlan=plan;
+const pinia=createPinia(), app=createApp({render:()=>[h(Tool,{name:'prepare_repair',result:{ok:true,data:plan}}),h(Card,{data:plan}),h(Tool,{name:'read_tool_result',result:{ok:false,detail:'Missing pointer'}})]});
+app.use(pinia);
+useChatStore(pinia).sessionId='fixture';
+useViewerStore(pinia).recs=rows.map((r,n)=>({id:n+1,name:r.name,sceneDir:r.scene_ref,sceneId:'fixture-'+n}));
+// Issue Viewer labels in its list order, just as FileList does.
+const viewer=useViewerStore(pinia);viewer.recs.forEach(r=>viewer.sceneOrdinalOf(r));
+app.mount('#app');
+</script></html>

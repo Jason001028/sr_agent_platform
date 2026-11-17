@@ -410,6 +410,7 @@ export interface ChatUploadImage {
 
 /** GET /api/chat/sessions/{id}/messages 单条投影（role ∈ user/assistant/tool）。 */
 export interface HistoryMsg {
+  data?: unknown;
   seq: number;
   role: 'user' | 'assistant' | 'tool';
   content?: string | null;
@@ -1759,6 +1760,7 @@ export async function apiCreateBatch(body: { plan_id: string; session_id: string
 export interface RepairPlanTargetItem {
   item_id: string; ordinal: number; name: string; scene_ref?: string;
   source_lines?: number[];
+  status?: string;
 }
 export interface RepairPlan {
   kind?: string;
@@ -1818,6 +1820,13 @@ export async function apiConfirmRepair(planId: string, body: { session_id: strin
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });
   return r.json();
+}
+
+export async function apiRepairTargets(planId: string, sessionId: string, version: number, offset = 0): Promise<{
+  plan_id: string; version: number; items: RepairPlanTargetItem[]; total: number; next_offset: number; has_more: boolean;
+}> {
+  const query = new URLSearchParams({ session_id: sessionId, version: String(version), offset: String(offset), limit: '100' });
+  return (await http(apiUrl(loadSrConfig(), `/api/repairs/${encodeURIComponent(planId)}/targets?${query}`))).json();
 }
 export async function apiStartRepair(planId: string, body: { session_id: string | null; plan_version?: number; workspace_version?: number; workspace?: unknown }): Promise<RepairStartResult> {
   const r = await http(apiUrl(loadSrConfig(), `/api/repairs/${encodeURIComponent(planId)}/start`), {

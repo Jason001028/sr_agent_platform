@@ -9,7 +9,7 @@ import pytest
 from backend.agent.loop import run_loop
 from backend.config import Config
 from backend.services.store import Store
-from backend.services.tool_result_formatter import META, ResultBudget, format_result, size
+from backend.services.tool_result_formatter import META, ResultBudget, encode, format_result, size
 from backend.services.tool_results import ToolResults
 from backend.tools.contract import Tool, ToolRegistry, ok, err
 
@@ -411,5 +411,119 @@ def test_invalid_custom_return_falls_back_without_interrupting_result_hook(case,
         assert view[META]['formatter_error'] in ('TypeError', 'ValueError', 'UnicodeEncodeError')
         ref = view[META]['full_result']['id']
         assert store.read_tool_result(result['session_id'], ref) == full
+    finally:
+        store.close()
+
+
+def test_repair_plan_wrong_path_recovers_all_27_items_without_reexecution(tmp_path):
+    store = Store(tmp_path / 'repair-read.db')
+    sid = store.create_session()
+    manager = ToolResults(store, sid, budget=BUDGET)
+    full = ok({'kind':'repair_plan.v1', 'plan_id':'plan-test', 'targets': {
+        'total':27, 'items':[{'item_id':f'i{n}', 'name':'scene-' + str(n) + 'x'*150} for n in range(27)]}})
+    execute = Mock(return_value=full)
+    registry = manager.registry(ToolRegistry([Tool('prepare_repair', 'test', {}, execute)]))
+    view = manager.model_view('prepare_repair', registry.invoke('prepare_repair'), 'prepare')
+    reference = view[META]['full_result']['id']
+    assert view[META]['read_paths']['targets'] == '/data/targets/items'
+    bad = registry.invoke('read_tool_result', {'result_id':reference, 'path':'/data/targets/ids', 'limit':20})
+    assert not bad['ok']
+    assert bad['data']['resolved_path'] == '/data/targets'
+    assert {'path':'/data/targets/items', 'type':'array'} in bad['data']['available_paths']
+    assert size(bad) <= BUDGET.limit
+    collected, offset = [], 0
+    while True:
+        page = registry.invoke('read_tool_result', {'result_id':reference, 'path':'/data/targets/items', 'offset':offset, 'limit':20})['data']
+        collected.extend(page['value'])
+        if not page['has_more']:break
+        assert page['next_offset'] > offset
+        offset = page['next_offset']
+    assert collected == full['data']['targets']['items']
+    execute.assert_called_once()
+    assert store.read_tool_result(sid, reference) == full
+    assert not ToolResults(store, store.create_session()).read(reference)['ok']
+    store.close()
+
+
+@pytest.mark.parametrize('path', ['/data/rows/-1', '/data/rows/01', '/data/rows/+1', '/data/rows/1/x', '/data/bad~2key'])
+def test_reader_rejects_invalid_pointer_without_python_index_extensions(path):
+    manager = ToolResults(budget=BUDGET)
+    full = ok({'rows':[1,2], 'padding':'x'*4000})
+    reference = manager.model_view('test', full, 'read')[META]['full_result']['id']
+    result = manager.read(reference, path)
+    assert not result['ok']
+    assert 'available_paths' in result['data']
+    assert size(result) <= BUDGET.limit
+
+
+def test_reader_diagnostics_escape_keys_and_fit_minimum_budget():
+    budget = ResultBudget(max_bytes=1024, max_tokens=1024)
+    manager = ToolResults(budget=budget)
+    full = ok({'a/b':{'~name':list(range(100))}, **{str(n)*120:'secret'*100 for n in range(20)}})
+    reference = manager.model_view('test', full, 'large')[META]['full_result']['id']
+    result = manager.read(reference, '/data/a~1b/missing')
+    assert {'path':'/data/a~1b/~0name','type':'array'} in result['data']['available_paths']
+    assert size(result) <= budget.limit
+    result = manager.read(reference, '/data/missing')
+    assert size(result) <= budget.limit
+    assert 'secret' not in encode(result)
+    result = manager.read(reference, '/' + '影' * 500)
+    assert size(result) <= budget.limit
+
+
+def test_model_can_recover_bad_repair_pointer_without_preparing_again(tmp_path):
+    full = ok({'kind':'repair_plan.v1', 'targets': {'total':27, 'items': [
+        {'item_id':f'i{n}', 'name':'x'*300} for n in range(27)]}})
+    execute = Mock(return_value=full)
+    turns, ref = [], []
+    def chat(messages, tools):
+        turns.append(1)
+        if len(turns) == 1:
+            return call('prepare_repair')
+        previous = json.loads(messages[-1]['content'])
+        if len(turns) == 2:
+            ref.append(previous[META]['full_result']['id'])
+            path = '/data/targets/ids'
+        elif len(turns) == 3:
+            assert not previous['ok']
+            paths = previous['data']['available_paths']
+            path = next(row['path'] for row in paths if row['type'] == 'array')
+            assert path == '/data/targets/items'
+        else:
+            assert previous['ok']
+            assert previous['data']['value'][0]['item_id'] == 'i0'
+            return {'finish_reason':'stop', 'content':'read recovered'}
+        return {'finish_reason':'tool_calls', 'tool_calls':[{
+            'id':f'read-{len(turns)}', 'name':'read_tool_result',
+            'arguments':json.dumps({'result_id':ref[0], 'path':path, 'limit':1})}]}
+    store = Store(tmp_path / 'recovery.db')
+    try:
+        result = run_loop(cfg(), 'prepare', store=store,
+                          registry=ToolRegistry([Tool('prepare_repair','test',{},execute)]), chat=chat)
+        assert result['ok']
+        execute.assert_called_once()
+        assert len(turns) == 4
+    finally:
+        store.close()
+
+
+def test_repair_history_restores_structured_plan_from_legacy_archive(tmp_path):
+    from types import SimpleNamespace
+    from backend.api.platform import get_messages
+    store = Store(tmp_path / 'plan-history.db')
+    sid = store.create_session()
+    full = ok({'kind':'repair_plan.v1','plan_id':'plan_'+'a'*24,'version':1,'status':'READY',
+               'targets':{'total':27,'items':[{'item_id':str(n),'name':'long'*200,'status':'PENDING'} for n in range(27)]}})
+    manager = ToolResults(store,sid,BUDGET)
+    view = manager.model_view('prepare_repair',full,'prepare')
+    store.append_message(sid, {'role':'assistant','content':'','tool_calls':[{'id':'prepare','type':'function',
+        'function':{'name':'prepare_repair','arguments':'{}'}}]})
+    store.append_message(sid, {'role':'tool','tool_call_id':'prepare','content':encode(view)})
+    try:
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(store=store)))
+        restored = get_messages(sid,request)['messages'][-1]
+        assert restored['ok']
+        assert restored['data'] == full['data']
+        assert store.get_messages(sid)[-1]['content'] == encode(view)
     finally:
         store.close()

@@ -330,7 +330,7 @@ function renderDrawBody(ctx: CanvasRenderingContext2D) {
   if (!store.drawMode) {
     // 非绘制模式：只画侧舱选中 ROI 高亮（默认无选择 → 与原行为一致：无叠加层）
     const si = store.roiSelIndex();
-    if (si >= 0 && si < rois.length) drawSelectedOutline(rois[si]);
+    if (store.overlayMasterVisible && store.roiOverlaySelected && si >= 0 && si < rois.length) drawSelectedOutline(rois[si]);
     return;
   }
   for (let i = 0; i < rois.length; i++) {
@@ -613,6 +613,7 @@ watch(
 // 交替对比翻面同理：上一帧的像素坐标指的不是现在这张图。
 watch(() => [store.activeId, store.activeSide, store.split, store.flickerIndex],
   () => { resetGesture(); store.setCursor(null); }, {flush:'sync'});
+watch(() => [store.overlayMasterVisible, store.roiOverlaySelected], renderDraw);
 watch(() => [store.view.ox, store.view.oy, store.view.scale], () => {
   if (pointerEvent) updatePrediction(pointerEvent);
 });

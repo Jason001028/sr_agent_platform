@@ -50,7 +50,7 @@ SCHEMAS = {
     'query_batch_repair': ({'goal_id': {'type': 'string', 'minLength': 1}}, ['goal_id']),
     'prepare_repair': ({
         'scope': {'type': 'string', 'enum': ['current', 'selection', 'workspace', 'draft'], 'default': 'workspace'},
-        'mode': {'type': 'string', 'enum': ['demo', 'production'], 'default': 'demo'},
+        'mode': {'type': 'string', 'enum': ['production'], 'default': 'production'},
         'strategy': {'type': 'string', 'enum': ['automatic', 'review'], 'default': 'automatic'},
         'detection_method': {'type': 'string', 'enum': ['absdiff', 'ssim', 'smart'], 'default': 'absdiff'},
         'mask_policy': {'type': 'string', 'enum': ['auto', 'existing'], 'default': 'auto'},

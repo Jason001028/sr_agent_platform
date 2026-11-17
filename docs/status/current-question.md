@@ -1,5 +1,24 @@
 # current_question — 平台现状与交接入口
 
+2026-11-16：Agent 的 ReasoningBlock 改为轻量思考轨迹。运行中显示「深度思考中…」+三点呼吸；`phase` 离开 `thinking` 即用真实阶段耗时显示「已思考 X 秒」，不可靠时显示「思考已结束」，完成自动收起为低对比度灰绿标题。同一用户回合内连续、已结束且不超过 15 秒的短阶段由 `lib/reasoningTrace.ts` 合并为「已完成 N 段思考 · 累计 X 秒」，仅在最后一段渲染；工具失败、人工确认与业务结果仍独立。原始推理不再仅限开发者模式，用户可手动展开；不改 Agent Loop/SSE。前端全量 1132 项、typecheck 与术语检查通过；真实模型视觉与内网浏览器待核。
+
+2026-11-16：生产批量执行改为显式准入，且不再强制 Slurm。`batch_worker.ensure_execution_allowed('production')` 由 `SR_BATCH_PRODUCTION=1` 解禁：`SR_EXECUTOR=slurm` 时要求 `SR_SLURM_FAKE` 非 1，`SR_EXECUTOR=local` 时要求本机预检通过；两种执行器都要求工作目录存在且可写，否则计划卡保持「暂不可执行」并给出具体原因。Local 路径新增 `SR_WORK_DIR`（兼容旧 `SR_SLURM_WORK_DIR`）、`.local_jobs.json` 持久化排队/进程表（重启恢复 queued、按进程起始时间+cmdline 校验身份后接管 running、同 job_id 不重复启动）、启动窗口写盘失败/中断进入 quarantine 并阻塞后续排队、`cancel_requested` 持久化、`SR_LOCAL_JOB_TIMEOUT_SEC` 超时清理进程树，以及 bash/Python/算法入口/模型/GPU 的缓存预检；`deploy/sr-api.service` 用 `KillMode=process` 支持跨重启接管。已准备未启动的旧计划刷新状态即可重算执行资格。本次仅跑合成 bash 夹具，未提交真实 GPU 作业；真实单景/批量验收步骤见 [sr-local-execution.md](sr-local-execution.md) §4.1，结论待补。
+
+2026-11-16：Agent 自动修复运行卡改为紧凑标题/状态、单行省略当前影像、已处理文字摘要、三条同宽阶段进度和单一查看进度入口。Agent 卡、BatchProgressTracks 与任务中枢阶段摘要在展示层共用 counts.eligible 分母，各自完成数取 detected/submitted/verified；不沿用动态 needs_repair 分母，不改后端业务契约。总数未知显示统计中且空条；验收仍只取后端验证通过数，Job 结束不能推断验收成功。保留完成态产物/人工复核入口。280/320px 合成长名浏览器验证无横向溢出，3/27 填充 11.11%，等待人工验收为 0%。可复跑夹具见 .e2e/repair-progress-preview.html 与对应 vite 配置。
+
+2026-11-16：左侧眼睛作为叠加展示总开关，旁边图层图标展开简约面板：差异定位、修复区域、空间批注、ROI 选区，彩色线性图标与圆形勾选，底部全部隐藏/恢复显示。总开关保留各层选择及分析结果；ROI 仅控制非绘制状态下的选区高亮，正在绘制与审批不受影响。顶部重复差异显隐按钮已移入菜单。65 项相关回归、类型检查及构建通过，生产构建浏览器面板验看通过；真实内网影像待核。
+
+
+2026-11-16：Agent协助与工具栏自动修复统一production真实修复口径，不再创建/回退Demo；未提交草稿清除旧Demo偏好，旧Demo历史保持真实、待确认旧Demo不可从Agent启动。沿用统一确认/Goal链路。当时生产 Batch 硬门禁仍关闭；同日随后改为 `SR_BATCH_PRODUCTION` 显式准入（见首条），本次操作本身未开放真实 SR 执行；部署与验证见 [repair-dual-entry.md](repair-dual-entry.md) §Agent协助与自动修复统一真实修复口径。
+
+2026-11-16：普通Agent工具改为共享Activity Timeline，连续完成步骤自动折叠，运行/失败/未确认可见，手动展开不被收回。按调用ID匹配与旧会话顺序兼容；计划/候选/回执/批注/人工确认保留业务组件，两处聊天UI共用投影与呈现。不改Loop/SSE/消息持久化。前端1108项、typecheck/build通过，280px浏览器证据见 [repair-dual-entry.md](repair-dual-entry.md) §普通工具 Activity Timeline 视觉减法。
+
+2026-11-16：Agent/Chat修复计划卡重构为约292px的结构化卡片、独立滚动清单抽屉、单一确认启动入口；Demo明确标注、工具结果压缩并折叠技术细节。补齐历史结构化计划恢复和只读完整清单分页，快速点击/版本冲突仍走原确认与Goal幂等链。前端1094项、后端组合110项及分页专项1项通过；浏览器280/320宽度与27景清单验证见 [repair-dual-entry.md](repair-dual-entry.md) §Agent 修复计划卡交互与视觉收口。
+
+2026-11-16：Agent 修复计划结果回读补齐实际路径提示（`/data/targets/items`，无 `targets.ids`）及有界字段导航错误；错误回读不解释为任务启动失败、不重提修复。两处聊天界面记录各次调用参数和非空成功摘要。机制与验证见 [repair-dual-entry.md](repair-dual-entry.md) §Agent 工具结果回读路径纠正。
+
+2026-11-16：本机 `local` 部署的自动修复 Demo 改走独立持久化模拟执行器，不再因未使用 Slurm 而被拦截；不启动真实 SR、不生成成果/预览，旧显式 Fake Slurm 配置保留兼容。执行受阻计划卡显示“暂不可执行”。生产 Batch 门禁仍关闭，部署与边界见 [repair-dual-entry.md](repair-dual-entry.md) §2026-11-16。
+
 2026-11-14：修复 Agent 新旧只读工具重复注册和面板把执行限制当成计划失败的问题；BLOCKED 计划正确持久化。本地/上传/混合工作区可准备资源评估计划，不再先要求盘阵身份；完整输入可来自普通允许目录，实际 SR 仍需输入契约与用户确认。后端178、前端1082项通过，详见 [repair-dual-entry.md](repair-dual-entry.md) §2026-11-14。
 
 2026-11-14（PR 5）：Agent 修复成果与人工验收闭环。任务卡完成态只认 Goal 终态 +

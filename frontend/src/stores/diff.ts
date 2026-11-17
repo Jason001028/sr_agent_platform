@@ -29,6 +29,7 @@ import type {
 import { regionTone, toneWeightMap } from '../lib/diffTone';
 import type { ToneGrid, ToneRect } from '../lib/diffTone';
 import { colorizeHeatBytes, colorizeHeatPixels } from '../lib/diffRender';
+import { heatPalette } from '../lib/heatPalette';
 import { analysisPairReason, analysisPairNote, precisePairReason } from '../lib/compareCapabilities';
 import { registerViewerObservation } from '../lib/viewerContext';
 import { visibleThumbRect, sourceToMaskThumb, thumbToOrig } from '../lib/viewMath';
@@ -311,9 +312,9 @@ export const useDiffStore = defineStore('diff', () => {
   });
   const viewerRegions = computed(() => orderedRegions.value.slice(0, VIEWER_MARKER_MAX));
   const selectedRegion = computed(() => regions.value.find((r) => r.id === selectedId.value) ?? null);
-  const showHeat = computed(() => resultVisible.value && !!result.value && display.value !== 'regions');
+  const showHeat = computed(() => viewer.overlayMasterVisible !== false && resultVisible.value && !!result.value && display.value !== 'regions');
   const showMask = computed(() => false); // 连续热力叠加不再混入二值掩码。
-  const showMarkers = computed(() => resultVisible.value && !!result.value && boundariesVisible.value
+  const showMarkers = computed(() => viewer.overlayMasterVisible !== false && resultVisible.value && !!result.value && boundariesVisible.value
     && !(result.value?.method === 'smart' && stale.value));
   const refined = computed(() => result.value?.source === 'source-roi');
   const canRestore = computed(() => !!baseSnapshot.value);
@@ -968,6 +969,7 @@ export const useDiffStore = defineStore('diff', () => {
       if (map) weights = upsampleWeights(map, raw.w, raw.h);
     }
     const rgba = colorizeHeatBytes(raw.diff, raw.w, raw.h, raw.valid, weights, {
+      palette: heatPalette.value,
       smart: result.value?.method === 'smart', threshold: result.value?.method === 'smart' ? displayThreshold.value : 0,
       selectedBbox: result.value?.method === 'smart' ? selectedRegion.value?.bbox : null,
     });
@@ -1767,7 +1769,7 @@ export const useDiffStore = defineStore('diff', () => {
   function layerFor(rec: ViewerRec | null): DiffLayer | null {
     const res = result.value;
     if (autoDrawing.value) return null;
-    if (!resultVisible.value || !res || !rec?.thumb) return null;
+    if (viewer.overlayMasterVisible === false || !resultVisible.value || !res || !rec?.thumb) return null;
     if (stale.value && res.method === 'smart') return null;
     if (rec.id !== res.imageA.id && rec.id !== res.imageB.id) return null;
     if (!heatLayer.value || !maskLayer.value) return null;
@@ -1797,7 +1799,7 @@ export const useDiffStore = defineStore('diff', () => {
   }
 
   /* 图层、显隐或显示方式变化 → 主画布与鹰眼同步重绘；不触发分析或 Camera 写入。 */
-  watch([resultVisible, opacity, display, heatLayer, maskLayer, result, autoDrawing], () => { viewer.renderTick++; });
+  watch([() => viewer.overlayMasterVisible, resultVisible, opacity, display, heatLayer, maskLayer, result, autoDrawing], () => { viewer.renderTick++; });
   /* 羽化只改显示 alpha：从精确二值掩码重建，不重算、不改区域统计。 */
   watch(feather, () => { rebuildMask(); viewer.renderTick++; });
   /* 逐像素加权只改热力图着色：从原始差异字节重建，不改差异数值与候选资格。
@@ -1807,7 +1809,7 @@ export const useDiffStore = defineStore('diff', () => {
     rebuildHeat();
     viewer.renderTick++;
   });
-  watch(displayThreshold, () => { rebuildHeat(); viewer.renderTick++; });
+  watch([displayThreshold, heatPalette], () => { rebuildHeat(); viewer.renderTick++; });
   watch(selectedId, () => { if(result.value?.method==='smart'){rebuildHeat();viewer.renderTick++;} });
   watch(boundariesVisible, () => { viewer.renderTick++; });
   watch([aId,bId,method], () => {

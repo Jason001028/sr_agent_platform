@@ -71,3 +71,22 @@ it('renders published metadata after waiting and keeps legacy URL targets usable
   await flush();
   expect(loadBatchOverlay).toHaveBeenCalledWith({ goalId: 'legacy', itemId: 'old-item' }, expect.anything());
 });
+
+it('master and layer selection hide presentation without clearing or reloading the target', async () => {
+  state.batch.snapshot.producer.current.overlay_ready = true;
+  await flush();
+  const target = state.viewer.batchOverlayTarget;
+  const layer = root.querySelector<HTMLElement>('[data-e2e=batch-overlay]')!;
+  state.viewer.overlayMasterVisible = false;
+  await flush();
+  expect(layer.style.display).toBe('none');
+  expect(state.viewer.batchOverlayTarget).toBe(target);
+  state.viewer.overlayMasterVisible = true;
+  state.viewer.repairOverlaySelected = false;
+  await flush();
+  expect(layer.style.display).toBe('none');
+  state.viewer.repairOverlaySelected = true;
+  await flush();
+  expect(layer.style.display).not.toBe('none');
+  expect(loadBatchOverlay).toHaveBeenCalledTimes(1);
+});

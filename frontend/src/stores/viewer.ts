@@ -456,6 +456,10 @@ export const useViewerStore = defineStore('viewer', () => {
   const undoLabel = computed(
     () => undoStack.value[undoStack.value.length - 1]?.label ?? '',
   );
+  // 总开关只影响展示，不覆盖各模块的选择或编辑状态。
+  const overlayMasterVisible = ref(true);
+  const repairOverlaySelected = ref(true);
+  const roiOverlaySelected = ref(true);
   const agentAnnotationsVisible = ref(true);
   function setAgentAnnotationsVisible(visible: boolean) { agentAnnotationsVisible.value=visible; }
   function toggleAgentAnnotations() { setAgentAnnotationsVisible(!agentAnnotationsVisible.value); }
@@ -4814,6 +4818,7 @@ export const useViewerStore = defineStore('viewer', () => {
   }
   return {
     questionRegion, bindQuestionRegion,
+    overlayMasterVisible, repairOverlaySelected, roiOverlaySelected,
     agentAnnotationsVisible, setAgentAnnotationsVisible, toggleAgentAnnotations,
     previewMemoryMB, previewMemoryOptions, setPreviewMemoryMB,
     previewMaxEdge, previewMaxEdgeOptions, loadPlatformSettings, setPreviewMaxEdge,

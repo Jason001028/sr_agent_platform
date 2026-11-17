@@ -20,6 +20,7 @@ import {
 import { isStreamingEnabled, setStreamingEnabled } from '../lib/streaming';
 import { SPOTLIGHT_MODE_OPTIONS } from '../lib/spotlight.js';
 import { VIEWER_BACKGROUNDS } from '../lib/viewerBackground';
+import { heatPalette } from '../lib/heatPalette';
 import ImagePickerDialog from './ImagePickerDialog.vue';
 
 const store = useViewerStore();
@@ -109,6 +110,14 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
     <!-- 透明捕手：点浮层之外的任何地方即关（比只认「关」按钮省事，也不遮住画面） -->
     <div class="set-catch" @click="store.setSettingsOpen(false)"></div>
     <div class="set-panel" data-e2e="set-panel" role="dialog" aria-label="设置">
+      <div class="set-row">
+        <label class="set-line" for="heat-palette">差异热力图配色</label>
+        <select id="heat-palette" v-model="heatPalette" class="set-sw">
+          <option value="classic">黑紫 → 紫红 → 橙 → 浅黄（默认）</option>
+          <option value="spectrum">蓝 → 青 → 黄 → 橙 → 红</option>
+        </select>
+        <span class="set-line">三种算法共用，本机记住选择</span>
+      </div>
       <div class="set-row">
         <button type="button" class="set-sw" :class="{ on: qc.includeOld }"
           role="switch" :aria-checked="qc.includeOld" data-e2e="set-qc-old"

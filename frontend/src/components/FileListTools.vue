@@ -12,6 +12,7 @@
  */
 import { computed, ref } from 'vue';
 import { useViewerStore } from '../stores/viewer';
+import LayerDisplayMenu from './LayerDisplayMenu.vue';
 import { useQcListStore } from '../stores/qclist';
 import AppIcon from './AppIcon.vue';
 import FavoriteStar from './FavoriteStar.vue';
@@ -20,6 +21,8 @@ import type { ViewerRec } from '../stores/viewer';
 
 const store = useViewerStore();
 const qc = useQcListStore();
+const layersOpen = ref(false);
+
 const favPulseKey = ref(0);
 const libraryBatch = ref<ViewerRec[] | null>(null);
 function openLibrary(): void {
@@ -168,14 +171,22 @@ function toggleFavorite(): void {
       </button>
       <span class="ft-separator" aria-hidden="true"></span>
       <button type="button" class="ft-btn ft-annotations"
-              :class="{ 'annotations-visible': store.agentAnnotationsVisible }"
+              :class="{ 'annotations-visible': store.overlayMasterVisible }"
               data-e2e="ft-annotations"
-              :aria-pressed="store.agentAnnotationsVisible"
-              :aria-label="store.agentAnnotationsVisible ? '隐藏空间批注' : '显示空间批注'"
-              :title="store.agentAnnotationsVisible ? '隐藏空间批注' : '显示空间批注'"
-              @click="store.toggleAgentAnnotations()">
-        <AppIcon :name="store.agentAnnotationsVisible ? 'eye' : 'eye-closed'" :size="16" />
+              :aria-pressed="store.overlayMasterVisible"
+              :aria-label="store.overlayMasterVisible ? '隐藏叠加显示' : '恢复叠加显示'"
+              :title="store.overlayMasterVisible ? '隐藏叠加显示' : '恢复叠加显示'"
+              @click="store.overlayMasterVisible = !store.overlayMasterVisible">
+        <AppIcon :name="store.overlayMasterVisible ? 'eye' : 'eye-closed'" :size="16" />
       </button>
+      <div class="ft-layers" @keydown.esc.stop="layersOpen = false" @focusout="(event) => { if (!(event.currentTarget as HTMLElement).contains(event.relatedTarget as Node)) layersOpen = false; }">
+        <button type="button" class="ft-btn ft-layer-button" data-e2e="ft-layers"
+          aria-label="图层显示" :aria-expanded="layersOpen" aria-controls="viewer-layer-menu"
+          title="图层显示" @click="layersOpen = !layersOpen">
+          <AppIcon name="layers" :size="16" />
+        </button>
+        <LayerDisplayMenu v-if="layersOpen" id="viewer-layer-menu" class="ft-layer-menu" />
+      </div>
     </div>
   </div>
   <SceneLibrarySandbox v-if="libraryBatch" :records="libraryBatch" @close="libraryBatch = null" />
@@ -251,4 +262,7 @@ function toggleFavorite(): void {
 .ft-btn.ft-annotations.annotations-visible{background:#e5f2ee;border-color:#d0e5dd}
 .ft-btn.ft-annotations:hover{background:#e0e6e3;border-color:#c6d5ce}
 .ft-btn.ft-annotations.annotations-visible:hover{background:#d9ece5;border-color:#b5d4c7}
+.ft-layers{position:relative;flex:none}
+.ft-layer-button{width:32px;height:32px}
+.ft-layer-menu{position:absolute;right:0;top:calc(100% + 8px)}
 </style>

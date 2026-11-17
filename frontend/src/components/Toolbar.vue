@@ -151,13 +151,7 @@ function onPick(e: Event) {
     </button>
     <button v-if="diff.autoDrawing" type="button" class="auto-mask-button" aria-label="取消自动绘制"
       title="取消自动绘制（Esc），保留原有 Mask" @click="diff.cancelAutoDraw()">×</button>
-    <button v-if="diff.result" type="button" class="diff-visibility" data-e2e="diff-visibility"
-      :aria-pressed="diff.resultVisible" :aria-label="diff.resultVisible ? '隐藏差异结果' : '显示差异结果'"
-      :title="diff.resultVisible ? '隐藏差异结果，保留分析数据' : '恢复差异结果'"
-      @pointerdown.stop @click="diff.resultVisible = !diff.resultVisible">
-      <AppIcon :name="diff.resultVisible ? 'eye' : 'eye-off'" :size="15" tint />
-      {{ diff.resultVisible ? '显示中' : '已隐藏' }}
-    </button>
+
 
     <span class="spacer"></span>
 

@@ -5,7 +5,7 @@ import { useViewerStore } from '../stores/viewer';
 import { missionItemLabel, missionIssue } from '../lib/batchMission';
 import type { MissionItem } from '../lib/batchMission';
 import BatchFeedbackIcon from './BatchFeedbackIcon.vue';
-const props = defineProps<{ item: MissionItem }>();
+const props = defineProps<{ item: MissionItem; initialExpanded?: boolean }>();
 const batch = useBatchGoalStore();
 const viewer = useViewerStore();
 const viewerOrdinal = computed(() => {
@@ -14,9 +14,10 @@ const viewerOrdinal = computed(() => {
   const rec = viewer.recs?.find(r => r.sceneDir?.replace(/\\/g, '/').replace(/\/+$/, '') === directory);
   return rec ? viewer.sceneOrdinalOf(rec) : 0;
 });
-const details = ref(false), opening = ref(false), error = ref('');
+const details = ref(props.initialExpanded === true), opening = ref(false), error = ref('');
+watch(() => props.initialExpanded, value => { if (value) details.value = true; });
 let epoch = 0;
-watch([() => batch.goalId, () => props.item.item_id], () => { epoch++; details.value = false; opening.value = false; error.value = ''; });
+watch([() => batch.goalId, () => props.item.item_id], () => { epoch++; details.value = props.initialExpanded === true; opening.value = false; error.value = ''; });
 async function locate() {
   if (opening.value || !props.item.image_path) return;
   const gen = epoch; opening.value = true;

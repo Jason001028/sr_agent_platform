@@ -536,6 +536,12 @@ class RepairApplicationTest(unittest.TestCase):
                              "evidence": "Viewer 序列 1"}]})
             self.assertEqual(prepared.status_code, 200, prepared.text)
             plan_id = prepared.json()["plan_id"]
+            page = client.get(f'/api/repairs/{plan_id}/targets', params={'session_id':sid,'version':prepared.json()['version']})
+            self.assertEqual(page.status_code, 200, page.text)
+            self.assertEqual(len(page.json()['items']), 1)
+            self.assertFalse(page.json()['has_more'])
+            stale = client.get(f'/api/repairs/{plan_id}/targets', params={'session_id':sid,'version':999})
+            self.assertEqual(stale.status_code, 409)
             early = client.post(f"/api/repairs/{plan_id}/start",
                                 json={"session_id": sid})
             self.assertEqual(early.status_code, 409, early.text)
@@ -558,6 +564,8 @@ class RepairApplicationTest(unittest.TestCase):
             self.assertIn("monitor_done", status.json()["goal"])
             # Another existing session cannot read or confirm this plan.
             other = self.store.create_session()
+            hidden_targets = client.get(f'/api/repairs/{plan_id}/targets', params={'session_id':other,'version':1})
+            self.assertEqual(hidden_targets.status_code,404)
             hidden = client.get(f"/api/repairs/{plan_id}",
                                 params={"session_id": other})
             self.assertEqual(hidden.status_code, 404, hidden.text)
@@ -565,6 +573,28 @@ class RepairApplicationTest(unittest.TestCase):
                                  json={"session_id": other,
                                        "confirmed_by": "admin"})
             self.assertEqual(forged.status_code, 404, forged.text)
+
+    def test_target_drawer_pages_beyond_model_view_limit(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from backend.api import repair as repair_api
+        directory, inp = self.scene(814)
+        prepared = svc.prepare_repair(self.store, session_id=self.session_id,
+                                     sources=[{'path':str(inp),'name':directory.name}])
+        plan = self.store.get_repair_plan(prepared['plan_id'])
+        template = plan['targets']['items'][0]
+        rows = [{**template,'item_id':f'item-{n}','ordinal':n+1,'name':f'Scene {n}'} for n in range(127)]
+        plan['targets'] = {**plan['targets'],'items':rows,'total':127,'applicable':127}
+        stored = self.store.upsert_repair_plan(plan)
+        self.assertEqual(len(svc.public_plan(stored)['targets']['items']), 50)
+        app = FastAPI(); app.state.store = self.store; app.include_router(repair_api.router)
+        with TestClient(app) as client:
+            params = {'session_id':self.session_id,'version':stored['version']}
+            first = client.get(f"/api/repairs/{stored['plan_id']}/targets", params=params).json()
+            second = client.get(f"/api/repairs/{stored['plan_id']}/targets", params={**params,'offset':first['next_offset']}).json()
+            self.assertTrue(first['has_more'])
+            self.assertFalse(second['has_more'])
+            self.assertEqual([r['item_id'] for r in first['items'] + second['items']], [r['item_id'] for r in rows])
 
     def test_rest_rejects_unknown_session_and_forged_actor(self):
         scene_dir, inp = self.scene(11)
@@ -659,20 +689,76 @@ class RepairApplicationTest(unittest.TestCase):
         self.assertEqual(plan['status'],'READY')
         self.assertEqual(plan['targets']['applicable'],1)
 
-    def test_local_executor_keeps_ready_plan_but_cannot_create_goal(self):
+    def test_local_executor_prepares_confirms_and_starts_demo(self):
         directory,inp=self.scene(813)
-        with mock.patch.dict(os.environ,{'SR_EXECUTOR':'local'}), \
-             mock.patch.object(self.store,'create_batch_goal',side_effect=AssertionError('no Goal')) as create:
+        with mock.patch.dict(os.environ,{'SR_EXECUTOR':'local', 'SR_SLURM_FAKE':'0',
+                                        'SR_DEMO_WORK_DIR':str(self.root/'demo')}):
             plan=svc.prepare_repair(self.store,session_id=self.session_id,
                 sources=[{'path':str(inp),'name':directory.name}])
             self.assertEqual(plan['status'],'READY')
-            self.assertFalse(plan['execution']['allowed'])
+            self.assertTrue(plan['execution']['allowed'])
             svc.confirm_repair(self.store,plan['plan_id'],session_id=self.session_id)
-            with self.assertRaises(svc.RepairBlocked):
-                svc.start_repair(self.store,plan['plan_id'],session_id=self.session_id)
-            create.assert_not_called()
+            result=svc.start_repair(self.store,plan['plan_id'],session_id=self.session_id)
+            self.assertTrue(result['goal']['goal_id'])
 
-    def test_agent_prepare_then_start_shares_the_plan_contract(self):
+    def test_explicit_production_opt_in_marks_the_plan_executable(self):
+        directory, inp = self.scene(816)
+        # Prepare while the gate is closed: the persisted plan records the
+        # refusal, which is what the plan card shows at creation time.
+        plan = svc.prepare_repair(
+            self.store, session_id=self.session_id, mode='production',
+            sources=[{'path': str(inp), 'name': directory.name}])
+        self.assertEqual(plan['mode'], 'production')
+        self.assertFalse(plan['execution']['allowed'])
+        # Opening the switch re-probes the existing plan when the card reads
+        # status; the operator does not have to prepare a second plan.
+        with mock.patch.dict(os.environ, {'SR_BATCH_PRODUCTION': '1',
+                                          'SR_SLURM_FAKE': '0'}):
+            status = svc.get_repair_status(self.store, plan['plan_id'])
+        self.assertTrue(status['plan']['execution']['allowed'],
+                        status['plan']['execution'])
+        self.assertIsNone(status['plan']['execution']['reason'])
+        # The local executor is equally valid for production batch: no Slurm
+        # installation is required, only a usable bash.
+        with mock.patch.dict(os.environ, {'SR_BATCH_PRODUCTION': '1',
+                                          'SR_EXECUTOR': 'local'}), \
+             mock.patch('backend.services.local_exec.preflight',
+                        return_value={'ok': True, 'reason': None}):
+            local = svc.get_repair_status(self.store, plan['plan_id'])
+        self.assertTrue(local['plan']['execution']['allowed'],
+                        local['plan']['execution'])
+
+    def test_agent_and_rest_default_to_real_repair_without_demo_fallback(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from backend.api import repair as repair_api
+        directory, inp = self.scene(815)
+        snapshot = {'version':1,'workspace':self.workspace((directory,inp))}
+        registry = bind_registry(build_builtin_registry(), snapshot, store=self.store, session_id=self.session_id)
+        with mock.patch('backend.services.demo_exec.submit', side_effect=AssertionError('No demo fallback')):
+            prepared=registry.invoke('prepare_repair',{})
+            self.assertTrue(prepared['ok'],prepared)
+            self.assertEqual(prepared['data']['mode'],'production')
+            self.assertFalse(prepared['data']['execution']['allowed'])
+            self.assertFalse(registry.invoke('prepare_repair',{'mode':'demo'})['ok'])
+            svc.confirm_repair(self.store,prepared['data']['plan_id'],session_id=self.session_id)
+            denied=registry.invoke('start_repair',{'plan_id':prepared['data']['plan_id']})
+            self.assertFalse(denied['ok'])
+            self.assertEqual(denied.get('error_class'),'execution_blocked')
+            old=svc.prepare_repair(self.store,session_id=self.session_id,mode='demo',sources=[{'path':str(inp),'name':directory.name}])
+            refused=registry.invoke('start_repair',{'plan_id':old['plan_id']})
+            self.assertFalse(refused['ok'])
+            self.assertIn('历史演示',refused['error'])
+        app=FastAPI();app.state.store=self.store;app.include_router(repair_api.router)
+        with TestClient(app) as client:
+            response=client.post('/api/repairs/prepare',json={'session_id':self.session_id,'sources':[{'path':str(inp),'name':directory.name}]})
+            self.assertEqual(response.status_code,200,response.text)
+            self.assertEqual(response.json()['mode'],'production')
+
+    @mock.patch('backend.services.batch_worker.ensure_execution_allowed')
+    def test_agent_prepare_then_start_shares_the_plan_contract(self, execution_gate):
+        # Test only plan/Goal creation; no worker, detector or SR is run.
+        execution_gate.return_value = self.root / 'work'
         scene_dir, inp = self.scene(9)
         snapshot = validate_snapshot({
             "version": 1,
@@ -689,6 +775,7 @@ class RepairApplicationTest(unittest.TestCase):
                                  store=self.store, session_id="s1")
         prepared = registry.invoke("prepare_repair", {"scope": "workspace"})
         self.assertTrue(prepared["ok"], prepared)
+        self.assertEqual(prepared['data']['mode'],'production')
         plan_id = prepared["data"]["plan_id"]
         before = registry.invoke("start_repair", {"plan_id": plan_id})
         self.assertFalse(before["ok"])

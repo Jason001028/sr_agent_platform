@@ -18,13 +18,12 @@ import ThinkingSlider from "./ThinkingSlider.vue";
  *   原话：CTX_DIVIDER 之后的自动附文默认不进渲染，只有开发者模式在气泡下给一块浅米色
  *   折叠面板（`<details>`，默认收起）—— 排查「Agent 到底看到了什么」时才展开。
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import { useChatStore } from '../stores/chat.js';
 import type { ChatMsg } from '../stores/chat.js';
 import AnnotationManager from './AnnotationManager.vue';
 import CurrentImagePill from './CurrentImagePill.vue';
-import AgentAnnotationReference from './AgentAnnotationReference.vue';
 import MarkdownBody from './MarkdownBody.vue';
 import UserMessageText from './UserMessageText.vue';
 import { ANALYZE_CURRENT_PROMPT } from '../lib/analysisPrompt';
@@ -33,24 +32,26 @@ import { phaseLabel } from '../lib/executionOverview.js';
 import ThinkingIndicator from './ThinkingIndicator.vue';
 import ChatAttachTray from './ChatAttachTray.vue';
 import GoalClarifications from './GoalClarifications.vue';
-import AgentBatchReceipt from './AgentBatchReceipt.vue';
-import AgentRepairPlanCard from './AgentRepairPlanCard.vue';
-import { repairPlanId } from '../lib/repairPlan';
 import ChatImagePicker from './ChatImagePicker.vue';
 import ChatBubbleImages from './ChatBubbleImages.vue';
 import AppIcon from './AppIcon.vue';
 import AgentBotIcon from './AgentBotIcon.vue';
-import SceneSearchResultCard from './SceneSearchResultCard.vue';
 import { useScenesStore } from '../stores/scenes.js';
 import {
   agentPayload, buildContextNote, splitAgentPayload,
 } from '../lib/agentContext.js';
 import type { ViewerContextSnap } from '../lib/agentContext.js';
 import { isDeveloperMode } from '../lib/developerMode.js';
+import { reasoningViews, type ReasoningTiming } from '../lib/reasoningTrace';
 import { roiOrigGeom } from '../lib/roiStats.js';
+
+import AgentToolPresentation from './AgentToolPresentation.vue';
+import { projectAgentActivity } from '../lib/agentActivity';
+import { hasRepairPlanInTurn } from '../lib/repairPlan';
 
 const viewer = useViewerStore();
 const chat = useChatStore();
+const toolPresentation = computed(() => projectAgentActivity(chat.messages, chat.sending));
 const scenes = useScenesStore();
 const draft = ref('');
 const batchContext = ref(false);
@@ -82,7 +83,7 @@ const enabled = computed(() => Boolean(rec.value?.thumb && rec.value.W > 0 && re
 /** 无会话时首问会自动建会话 —— 输入框始终可输入；placeholder 提示差异。 */
 const placeholder = computed(() =>
   chat.sessionId
-    ? '问 Agent（自动附当前 ROI 统计）…'
+    ? '询问当前区域…'
     : '输入问题即自动新建会话并附上下文…');
 const reason = computed(() => {
   const r = rec.value;
@@ -184,6 +185,21 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onMenuKey));
 function msgKey(m: ChatMsg, i: number): string {
   return m.seq !== null ? 's' + m.seq : 'x' + i;
 }
+
+/* ---- 思考阶段计时 / 连续短阶段合并（ReasoningBlock 上报，不改 Agent Loop） ---- */
+const reasoningTimings = reactive<Record<string, ReasoningTiming>>({});
+const reasoning = computed(() => reasoningViews(
+  chat.messages, chat.messages.map((m, i) => msgKey(m, i)), reasoningTimings));
+function reasoningView(index: number) {
+  return reasoning.value.get(index);
+}
+function onReasoningTiming(index: number, value: ReasoningTiming): void {
+  const message = chat.messages[index];
+  if (message) reasoningTimings[msgKey(message, index)] = value;
+}
+watch(() => chat.sessionId, () => {
+  for (const key of Object.keys(reasoningTimings)) delete reasoningTimings[key];
+});
 /** 用户气泡只显示原话：自动附的查看器上下文只发给 Agent，不上屏（与 ChatPage 同口径）。 */
 function userText(content: string): string {
   return splitAgentPayload(content).question;
@@ -200,38 +216,6 @@ function readDeveloperMode(): void {
 }
 onMounted(readDeveloperMode);
 watch(() => viewer.settingsOpen, (open) => { if (!open) readDeveloperMode(); });
-function toolIconName(name: string): string {
-  const icons: Record<string, string> = {
-    search_scenes: 'search',
-    run_sr: 'file-code',
-  };
-  return icons[name] ?? 'hammer';
-}
-function toolResultAt(index: number, name: string): ChatMsg | null {
-  const next = chat.messages[index + 1];
-  return next?.role === 'tool' && next.toolName === name ? next : null;
-}
-function toolResultsAt(index: number, name: string): ChatMsg[] {
-  const out: ChatMsg[] = [];
-  for (let j = index + 1; j < chat.messages.length && chat.messages[j].role === 'tool'; j++) if (chat.messages[j].toolName === name) out.push(chat.messages[j]);
-  return out;
-}
-
-/** 同一计划可能因模型重试出现多条 prepare 结果；只保留最后一条的计划卡。 */
-const latestRepairPlan = computed(() => {
-  const latest = new Map<string, number>();
-  chat.messages.forEach((message, index) => {
-    if (message.role !== 'tool') return;
-    const id = repairPlanId(message.data);
-    if (id) latest.set(id, index);
-  });
-  return latest;
-});
-function isLatestRepairPlan(message: ChatMsg, index: number): boolean {
-  const id = repairPlanId(message.data);
-  return !!id && latestRepairPlan.value.get(id) === index;
-}
-
 /** 队尾仍在流式接收的 assistant 消息（思考/回答/工具声明阶段指示用）。 */
 const liveMsg = computed<ChatMsg | null>(() => {
   const last = chat.messages[chat.messages.length - 1];
@@ -374,10 +358,9 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
           <div class="bubble assistant">你好，我是遥感影像助手。你可以让我检索场景、打开影像或规划处理任务。</div>
         </div>
 
-        <div v-for="(m, i) in chat.messages" :key="msgKey(m, i)" class="at-row" :class="m.role"
-             v-show="m.toolName !== 'request_clarification' && !(m.role === 'assistant' && !m.content && m.toolCalls?.length === 1 && m.toolCalls[0].name === 'request_clarification')">
+        <div v-for="(m, i) in chat.messages" :key="msgKey(m, i)" class="at-row" :class="m.role">
           <!-- user：截图在上；原话为空（纯图消息）时不渲染空段 -->
-          <AgentAnnotationReference v-if="m.toolName==='present_spatial_annotations'" :data="m.data" />
+
           <template v-if="m.role === 'user'">
             <div class="bubble user" :class="{ 'has-shots': Boolean(m.images?.length) }">
               <ChatBubbleImages v-if="m.images?.length" :images="m.images" />
@@ -396,47 +379,31 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
           <template v-else-if="m.role === 'assistant'">
             <div v-if="m.isError" class="bubble assistant err">{{ m.content }}</div>
             <template v-else>
-              <ReasoningBlock v-if="m.reasoning" :text="m.reasoning"
-                              :streaming="m.streaming" :phase="m.phase ?? null" :activity="m.streaming ? chat.activity.label : undefined" :developer-mode="developerMode" />
-              <div v-if="m.content" class="bubble assistant">
+              <ReasoningBlock v-if="m.reasoning && reasoningView(i)"
+                              :text="reasoningView(i)?.text ?? m.reasoning"
+                              :streaming="reasoningView(i)?.streaming ?? false"
+                              :phase="reasoningView(i)?.phase ?? null"
+                              :activity="m.streaming ? chat.activity.label : undefined"
+                              :seconds="reasoningView(i)?.seconds ?? null"
+                              :segment-count="reasoningView(i)?.count ?? 1"
+                              :merged-count="reasoningView(i)?.merged ? reasoningView(i)?.count : undefined"
+                              :merged-seconds="reasoningView(i)?.merged ? reasoningView(i)?.seconds : undefined"
+                              @timing="onReasoningTiming(i, $event)" />
+              <details v-if="m.content && hasRepairPlanInTurn(chat.messages, i)" class="repair-narrative">
+                <summary>Agent 说明</summary><MarkdownBody :source="m.content" />
+              </details>
+              <div v-else-if="m.content" class="bubble assistant">
                 <MarkdownBody :source="m.content" />
-                <div v-if="m.toolCalls && m.toolCalls.length" class="tc-inline">
-                  <span class="tc-label">Agent 调用：</span>
-                  <span v-for="tool in (m.toolCalls ?? [])" :key="tool.id || tool.name" class="tc-tool">
-                    <AppIcon :name="toolIconName(tool.name)" :size="15" :label="tool.name" />{{ tool.name }}
-                  </span>
-                </div>
               </div>
-              <div v-else-if="m.toolCalls && m.toolCalls.length" class="agent-tool-list">
-                <template v-for="tool in m.toolCalls" :key="tool.id || tool.name">
-                  <SceneSearchResultCard v-if="tool.name === 'search_scenes'"
-                    :args="tool.args" :data="toolResultAt(i, tool.name)?.data" :detail="toolResultAt(i, tool.name)?.detail"
-                    :status="toolResultAt(i, tool.name)?.ok === false ? 'failed' : toolResultAt(i, tool.name)?.ok === true ? 'completed' : chat.sending ? 'running' : 'unconfirmed'"
-                    @open="openSearchScene">
-                    <details v-if="toolResultsAt(i, tool.name).length > 1" class="tool-history"><summary>查看调用记录</summary><div v-for="(result, n) in toolResultsAt(i, tool.name)" :key="n">{{ n + 1 }}. {{ result.detail }}</div></details>
-                  </SceneSearchResultCard>
-                  <div v-else class="bubble assistant tools">
-                    <div class="tool-card"><div class="tool-card-head"><AppIcon :name="toolIconName(tool.name)" :size="17" /><strong>{{ tool.name === 'search_scenes' ? '检索目标场景' : tool.name }}</strong><code v-if="tool.name === 'search_scenes'">{{ tool.name }}</code><span class="tool-state">{{ toolResultsAt(i, tool.name).length > 1 ? `共尝试 ${toolResultsAt(i, tool.name).length} 次` : (toolResultAt(i, tool.name)?.ok === true ? '✓ 完成' : toolResultAt(i, tool.name)?.ok === false ? '× 失败' : chat.sending ? '⏳ 调用中' : '结果未确认') }}</span></div><details class="tool-query"><summary>查询条件</summary><pre>{{ JSON.stringify(tool.args) }}</pre></details><div v-if="toolResultsAt(i, tool.name).length" class="tool-summary">最终结果：{{ toolResultsAt(i, tool.name).at(-1)?.detail }}</div><details v-if="toolResultsAt(i, tool.name).length > 1" class="tool-history"><summary>查看调用记录</summary><div v-for="(result, n) in toolResultsAt(i, tool.name)" :key="n">第 {{ n + 1 }} 次：{{ result.detail }}</div></details></div>
-                  </div>
-                </template>
-              </div>
-              <div v-else-if="(m.streaming && !m.reasoning) || m.phase === 'tool_call'"
+              <div v-else-if="chat.sending && !m.toolCalls?.length && ((m.streaming && !m.reasoning) || m.phase === 'tool_call')"
                    class="bubble assistant tools">
                 <ThinkingIndicator :label="waitLabel(m)" />
               </div>
             </template>
           </template>
 
-          <!-- tool 结果：单行摘要 pill -->
-          <template v-else>
-            <AgentBatchReceipt :data="m.data" />
-            <AgentRepairPlanCard v-if="isLatestRepairPlan(m, i)" :data="m.data" />
-            <div v-if="m.toolName!=='present_spatial_annotations' && !(chat.messages[i - 1]?.role === 'assistant' && chat.messages[i - 1]?.toolCalls?.some(t => t.name === m.toolName))" class="tool-trace" :class="{ fail: m.ok === false }">
-              <AppIcon class="tool-ic" :class="{ fail: m.ok === false }" :name="toolIconName(m.toolName ?? '')" :size="16" :label="m.toolName ?? '工具'" />
-              <span class="tool-name">{{ m.toolName ?? '工具' }}</span>
-              <span v-if="m.detail" class="tool-detail">{{ m.detail }}</span>
-            </div>
-          </template>
+          <AgentToolPresentation :projection="toolPresentation" :index="i" :session-key="chat.sessionId"
+            :developer-mode="developerMode" @open-scene="openSearchScene" />
         </div>
 
         <GoalClarifications :session-id="chat.sessionId" @updated="!chat.sending && chat.sessionId && chat.loadHistory(chat.sessionId)" />
@@ -646,39 +613,9 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
   box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 4px 12px rgba(0,0,0,.06), 0 12px 32px rgba(0,0,0,.08);
 }
 .bubble.assistant.err { white-space: pre-wrap; background: var(--err-bg); color: var(--err); border-color: var(--err-line); }
-.bubble.assistant.tools {
-  width: 100%; max-width: 100%; box-sizing: border-box;
-  background: #fff; border: 1px solid #D8E3DF; border-radius: 9px;
-  align-self: flex-start; padding: 12px;
-}
-.agent-tool-list { display: grid; gap: 6px; width: 100%; min-width: 0; }
+.bubble.assistant.tools { width:100%; max-width:100%; padding:0; background:transparent; border:0; box-shadow:none; }
 .at-row :deep(.reason) { max-width: 96%; }
-.tc-line { font-size: 11px; color: var(--ink-sub); display: inline-flex; align-items: center; gap: 7px; flex-wrap: wrap; }
-.tc-label { margin-right: 2px; }
-.tc-tool { display: inline-flex; align-items: center; gap: 4px; font-family: var(--font-mono); font-weight: 600; color: var(--ink-body); }
-.tool-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; font-size: 12px; }
-.tool-card-head strong { flex: 0 0 auto; white-space: nowrap; }
-.tool-card { width: 100%; }
-.tool-card-head code { font-family: var(--font-mono); color: var(--ink-sub); white-space: nowrap; }
-.tool-state { margin-left: auto; color: var(--ok); white-space: nowrap; }
-.tool-query { margin-top: 7px; font-size: 11px; color: var(--ink-sub); }
-.tool-query pre { margin: 5px 0 0; white-space: pre-wrap; }
-.tool-summary { margin-top: 7px; font-size: 11px; color: var(--ink-sub); }
-.tool-summary { padding: 8px 10px; background: #F5F8F6; border-radius: 7px; }
-.tool-history { margin-top: 8px; font-size: 11px; color: var(--ink-sub); line-height: 1.7; }
 /* 有正文时工具声明缩成正文脚注，不再单占一个虚线气泡 */
-.tc-inline {
-  margin-top: 6px; padding-top: 5px;
-  border-top: 1px dashed var(--line);
-  font-size: 11px; color: var(--ink-sub);
-}
-
-.tool-trace { width: 100%; box-sizing: border-box; align-self: flex-start; display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-body); background: #F5F8F6; border: 1px solid #D8E3DF; border-radius: 9px; padding: 8px 12px; }
-.tool-trace.fail { color: var(--err); background: var(--err-bg); border-color: var(--err-line); }
-.tool-ic.fail { color: var(--err); }
-.tool-name { font-family: var(--font-mono); font-weight: 600; flex: none; }
-.tool-detail { opacity: .85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
 /* 托板与输入行同属底部一块：分隔线画在块顶，缩略图不悬在消息区里 */
 .at-foot { flex: none; border-top: 1px solid var(--line); background: var(--surface); }
 .at-inputbar {
@@ -718,4 +655,9 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
 }
 .cbtn:hover { filter: brightness(1.05); }
 .cbtn:disabled { opacity: .55; cursor: not-allowed; }
+.repair-narrative { min-width:0; max-width:100%; font-size:11px; color:var(--tb-muted); }
+.repair-narrative > summary { padding:6px 0; cursor:pointer; }
+.repair-narrative[open] { max-height:260px; overflow:auto; overflow-wrap:anywhere; }
+.at-row:empty { display:none; }
+.bubble.tools { background:transparent; border:0; box-shadow:none; padding:0; }
 </style>

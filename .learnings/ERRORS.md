@@ -119,3 +119,6 @@ Mocking image_open.asyncio.sleep changed the shared asyncio module during AnyIO'
 ## 2026-11-13 resolved: PowerShell stdin encoding and baseline evaluation binding
 
 Python source piped from Windows PowerShell can replace Chinese literals with question marks. Use apply_patch for Unicode source edits, and inspect the diff before tests. git show may return UTF-8 with BOM; decode with utf-8-sig before compile. Agent Loop imports viewer_context inside run_loop, so an in-memory baseline must bind that import as well as loading old Loop source; otherwise paired tool reachability silently measures the new binding twice. The fixed evaluation now reports baseline 3/9 versus enhanced 9/9 and labels scripted replay separately from live-model selection accuracy.
+
+## 2026-11-16 ? ????????
+? frontend ???????????? frontend/src ?????????????????????????? workdir ???

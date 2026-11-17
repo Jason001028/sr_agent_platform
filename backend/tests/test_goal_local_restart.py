@@ -1,8 +1,9 @@
-"""Expose the local-executor restart acceptance gap without using SR/GPU.
+"""Local-executor restart continuation without using SR/GPU.
 
-This is a safety regression, not a passing autonomous-restart acceptance:
-losing the in-memory process record blocks the Goal even if a real child is
-still running and later writes a successful verdict.
+The durable queue must adopt a live child after the API process loses its
+in-memory table; the Goal then keeps waiting instead of turning UNKNOWN and
+blocking.  This is an automated continuation check, not a real GPU/SR
+acceptance.
 """
 
 import asyncio
@@ -20,10 +21,8 @@ from backend.services.store import Store
 from backend.tools.contract import ToolRegistry
 
 
-class LocalRestartAcceptanceGap(unittest.IsolatedAsyncioTestCase):
-    async def test_running_child_becomes_unknown_and_goal_stays_blocked_after_completion(
-        self,
-    ):
+class LocalRestartContinuation(unittest.IsolatedAsyncioTestCase):
+    async def test_running_child_is_adopted_and_the_goal_keeps_waiting(self):
         if not local_exec.available():
             self.skipTest("a real Bash is required")
         with tempfile.TemporaryDirectory() as td, mock.patch.dict(
@@ -94,15 +93,17 @@ class LocalRestartAcceptanceGap(unittest.IsolatedAsyncioTestCase):
                 # This models the exact loss of _JOBS on an API process restart;
                 # the operating-system child is deliberately kept alive.
                 local_exec._reset()
-                unknown = run_sr.query_job_status(70001, task=task)
-                self.assertEqual(unknown["state"], "UNKNOWN")
+                recovered = local_exec.recover()
+                self.assertEqual(recovered["adopted"], 1)
+                running = run_sr.query_job_status(70001, task=task)
+                self.assertEqual(running["state"], "RUNNING")
                 self.assertIsNone(process.poll())
                 state = SimpleNamespace(store=store, tool_registry=ToolRegistry())
                 await goal_worker.goal_tick(state)
-                blocked = store.get_goal(goal["goal_id"])
-                self.assertEqual(blocked["status"], "BLOCKED")
+                waiting = store.get_goal(goal["goal_id"])
+                self.assertEqual(waiting["status"], "WAITING_EXTERNAL")
                 before = store.list_goal_events(goal["goal_id"])
-                self.assertTrue(
+                self.assertFalse(
                     any(e["event_type"] == "external_job_unknown" for e in before)
                 )
                 release.touch()
@@ -111,21 +112,24 @@ class LocalRestartAcceptanceGap(unittest.IsolatedAsyncioTestCase):
                 completed = run_sr.query_job_status(70001, task=task)
                 self.assertEqual(completed["state"], "COMPLETED")
                 await goal_worker.goal_tick(state)
-                self.assertEqual(store.get_goal(goal["goal_id"])["status"], "BLOCKED")
-                self.assertEqual(store.list_goal_events(goal["goal_id"]), before)
+                # The Goal consumes the result and continues; it is no longer
+                # blocked by a lost in-memory process record.
+                self.assertNotEqual(
+                    store.get_goal(goal["goal_id"])["status"], "BLOCKED")
                 self.assertEqual(started.read_text().splitlines(), ["physical-start"])
                 self.assertEqual(store.get_goal(goal["goal_id"])["model_calls_used"], 0)
                 destination = os.environ.get("P0_TEST_EVIDENCE_DIR")
                 if destination:
                     folder = Path(destination)
                     folder.mkdir(parents=True, exist_ok=True)
-                    (folder / "local_restart_gap.json").write_text(
+                    (folder / "local_restart_continuation.json").write_text(
                         json.dumps(
                             {
-                                "acceptance": "NOT_PASSED_AUTOMATIC_LOCAL_RESTART_CONTINUATION",
+                                "acceptance": "AUTO_CONTINUATION_PASSED_WITHOUT_REAL_SR",
                                 "fixture": "real Bash child; simulated loss of API in-memory registry; no production SR",
-                                "state_after_registry_loss": unknown,
+                                "state_after_registry_loss": running,
                                 "state_after_child_completion": completed,
+                                "goal_after_registry_loss": waiting,
                                 "goal_after_child_completion": store.get_goal(
                                     goal["goal_id"]
                                 ),

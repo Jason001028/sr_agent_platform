@@ -56,14 +56,22 @@ it('uses the stable Viewer group number rather than renumbering a selected subse
   expect(root.querySelector('.ordinal')?.textContent).toBe('#07');
   expect(root.querySelector('.ordinal')?.getAttribute('title')).toContain('批次项 1');
 });
-it('renders unknown / not-applicable nodes without empty progress bars', async () => {
+it('uses the batch total despite changing repair subset denominators', async () => {
   const s = missionFixture();
   s.progress.submission = { done: 0, total: 0, applicable: false, known: true };
   s.progress.verification = { done: 0, total: 0, applicable: false, known: false };
   await mount(BatchProgressTracks, { snapshot: s });
-  expect(root.querySelector('[data-stage=submission]')?.textContent).toContain('—');
-  expect(root.querySelector('[data-stage=verification]')?.textContent).toContain('统计中');
-  expect(root.querySelectorAll('[role=progressbar]')).toHaveLength(1);
+  expect(root.querySelector('[data-stage=submission]')?.textContent).toContain('13 / 27');
+  expect(root.querySelector('[data-stage=verification]')?.textContent).toContain('8 / 27');
+  expect(root.querySelectorAll('[role=progressbar]')).toHaveLength(3);
+});
+it('renders missing denominator as unknown and never full', async () => {
+  await mount(BatchProgressTracks, {});
+  expect(root.textContent).toContain('统计中');
+  for (const bar of root.querySelectorAll('[role=progressbar]')) {
+    expect(bar.hasAttribute('aria-valuenow')).toBe(false);
+    expect((bar.firstElementChild as HTMLElement).style.width).toBe('0%');
+  }
 });
 it('pages the only complete queue and fences late replies after a goal switch', async () => {
   vi.mocked(apiBatchItems).mockImplementation(async (_id, cursor) => ({ items: cursor ? [record(21)] : Array.from({ length: 20 }, (_, n) => record(n + 1)), next_after_ordinal: cursor ? 21 : 20 }));

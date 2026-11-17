@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import ThinkingSlider from "../components/ThinkingSlider.vue";
-import AgentAnnotationReference from '../components/AgentAnnotationReference.vue';
 /**
  * ChatPage.vue — Agent 聊天（阶段5，api-contract.md §3.2）
  * 布局：左侧会话列表（新建/切换），右侧消息 timeline + 发送框。
@@ -8,7 +7,7 @@ import AgentAnnotationReference from '../components/AgentAnnotationReference.vue
  *   工具回合渲染为 用户 ─ Assistant(声明工具) ─ 工具结果 ─ 最终回复。
  * mock LLM（SR_LLM_MOCK=1）每回合固定 search_scenes → 总结，可离线走通。
  */
-import { computed, nextTick, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
 import { useChatStore } from '../stores/chat.js';
 import { useViewerStore } from '../stores/viewer.js';
 import { isDeveloperMode } from '../lib/developerMode.js';
@@ -25,14 +24,19 @@ import GoalClarifications from '../components/GoalClarifications.vue';
 import ChatImagePicker from '../components/ChatImagePicker.vue';
 import ChatBubbleImages from '../components/ChatBubbleImages.vue';
 import AppIcon from '../components/AppIcon.vue';
-import SceneSearchResultCard from '../components/SceneSearchResultCard.vue';
 import { useScenesStore } from '../stores/scenes.js';
 import AgentBotIcon from '../components/AgentBotIcon.vue';
 import { apiListPlugins } from '../lib/api.js';
 import { loadSrConfig } from '../lib/scene.js';
 import { splitAgentPayload } from '../lib/agentContext.js';
 
+import AgentToolPresentation from '../components/AgentToolPresentation.vue';
+import { projectAgentActivity } from '../lib/agentActivity';
+import { hasRepairPlanInTurn } from '../lib/repairPlan';
+import { reasoningViews, type ReasoningTiming } from '../lib/reasoningTrace';
+
 const chat = useChatStore();
+const toolPresentation = computed(() => projectAgentActivity(chat.messages, chat.sending));
 const viewer = useViewerStore();
 const developerMode = ref(false);
 onMounted(() => { developerMode.value = isDeveloperMode(); });
@@ -64,34 +68,13 @@ function argsText(a: Record<string, unknown>): string {
   return s && s !== '{}' ? s : '（无参数）';
 }
 
-function toolIconName(name: string): string {
-  const icons: Record<string, string> = {
-    search_scenes: 'search',
-    run_sr: 'file-code',
-  };
-  return icons[name] ?? 'hammer';
-}
-function toolResultAt(index: number, name: string): ChatMsg | null {
-  const next = chat.messages[index + 1];
-  return next?.role === 'tool' && next.toolName === name ? next : null;
-}
-function toolResultsAt(index: number, name: string): ChatMsg[] {
-  const out: ChatMsg[] = [];
-  for (let j = index + 1; j < chat.messages.length && chat.messages[j].role === 'tool'; j++) {
-    if (chat.messages[j].toolName === name) out.push(chat.messages[j]);
-  }
-  return out;
-}
-
-/** 队尾仍在流式接收的 assistant 消息（思考/回答/工具声明阶段指示用）。 */
-const liveMsg = computed<ChatMsg | null>(() => {
-  const last = chat.messages[chat.messages.length - 1];
-  return last && last.role === 'assistant' && last.streaming ? last : null;
-});
-
 function waitLabel(m: ChatMsg): string {
   return chat.activity.label || phaseLabel(m.phase);
 }
+const liveMsg = computed<ChatMsg | null>(() => {
+  const last = chat.messages[chat.messages.length - 1];
+  return last?.role === 'assistant' && last.streaming ? last : null;
+});
 
 /** 用户气泡只显示用户原话；查看器 Agent 页签自动附的上下文不算用户输入。 */
 function userText(content: string): string {
@@ -101,6 +84,21 @@ function userText(content: string): string {
 function msgKey(m: ChatMsg, i: number): string {
   return m.seq !== null ? 's' + m.seq : 'x' + i;
 }
+
+/* ---- 思考阶段计时 / 连续短阶段合并（ReasoningBlock 上报，不改 Agent Loop） ---- */
+const reasoningTimings = reactive<Record<string, ReasoningTiming>>({});
+const reasoning = computed(() => reasoningViews(
+  chat.messages, chat.messages.map((m, i) => msgKey(m, i)), reasoningTimings));
+function reasoningView(index: number) {
+  return reasoning.value.get(index);
+}
+function onReasoningTiming(index: number, value: ReasoningTiming): void {
+  const message = chat.messages[index];
+  if (message) reasoningTimings[msgKey(message, index)] = value;
+}
+watch(() => chat.sessionId, () => {
+  for (const key of Object.keys(reasoningTimings)) delete reasoningTimings[key];
+});
 
 /** 有截图时可以只发图（话术留空）：交给多模态模型看图，文字由它自己描述。 */
 function canSend(): boolean {
@@ -298,14 +296,12 @@ onMounted(() => {
           <ThinkingIndicator label="加载会话中" />
         </div>
         <div v-else-if="!chat.messages.length" class="cp-empty">
-          <p>离线试跑提示：当前运行模式（SR_LLM_MOCK / SR_SLURM_FAKE / 盘阵）由服务端 env
-            决定，聊天可发任意话术验证链路。</p>
+          <p>输入问题，或从查看器添加影像开始。</p>
         </div>
 
-        <div v-for="(m, i) in chat.messages" :key="msgKey(m, i)" class="cp-row" :class="m.role"
-             v-show="m.toolName !== 'request_clarification' && !(m.role === 'assistant' && !m.content && m.toolCalls?.length === 1 && m.toolCalls[0].name === 'request_clarification')">
+        <div v-for="(m, i) in chat.messages" :key="msgKey(m, i)" class="cp-row" :class="m.role">
           <!-- user：截图在上，原话在下；纯图消息不渲染空段落 -->
-          <AgentAnnotationReference v-if="m.toolName==='present_spatial_annotations'" :data="m.data" />
+
           <template v-if="m.role === 'user'">
             <div class="bubble user" :class="{ 'has-shots': Boolean(m.images?.length) }">
               <ChatBubbleImages v-if="m.images?.length" :images="m.images" />
@@ -317,37 +313,31 @@ onMounted(() => {
           <template v-else-if="m.role === 'assistant'">
             <div v-if="m.isError" class="bubble assistant err">{{ m.content }}</div>
             <template v-else>
-              <ReasoningBlock v-if="m.reasoning" :text="m.reasoning"
-                              :streaming="m.streaming" :phase="m.phase ?? null" :activity="m.streaming ? chat.activity.label : undefined" :developer-mode="developerMode" />
-              <div v-if="m.content" class="bubble assistant">
+              <ReasoningBlock v-if="m.reasoning && reasoningView(i)"
+                              :text="reasoningView(i)?.text ?? m.reasoning"
+                              :streaming="reasoningView(i)?.streaming ?? false"
+                              :phase="reasoningView(i)?.phase ?? null"
+                              :activity="m.streaming ? chat.activity.label : undefined"
+                              :seconds="reasoningView(i)?.seconds ?? null"
+                              :segment-count="reasoningView(i)?.count ?? 1"
+                              :merged-count="reasoningView(i)?.merged ? reasoningView(i)?.count : undefined"
+                              :merged-seconds="reasoningView(i)?.merged ? reasoningView(i)?.seconds : undefined"
+                              @timing="onReasoningTiming(i, $event)" />
+              <details v-if="m.content && hasRepairPlanInTurn(chat.messages, i)" class="repair-narrative">
+                <summary>Agent 说明</summary><MarkdownBody :source="m.content" />
+              </details>
+              <div v-else-if="m.content" class="bubble assistant">
                 <MarkdownBody :source="m.content" />
-                <div v-if="m.toolCalls && m.toolCalls.length" class="tc-inline">
-                  <span class="tc-label">Agent 调用：</span>
-                  <span v-for="tool in (m.toolCalls ?? [])" :key="tool.id || tool.name" class="tc-tool">
-                    <AppIcon :name="toolIconName(tool.name)" :size="15" :label="tool.name" />{{ tool.name }}
-                  </span>
-                </div>
               </div>
-              <div v-else-if="m.toolCalls && m.toolCalls.length" class="bubble assistant tools">
-                <div v-for="tc in m.toolCalls?.filter(t=>t.name!=='present_spatial_annotations')" :key="tc.id || tc.name" class="tool-card">
-                  <div class="tool-card-head"><AppIcon :name="toolIconName(tc.name)" :size="17" :label="tc.name" /><strong>{{ tc.name === 'search_scenes' ? '检索目标场景' : tc.name }}</strong><code v-if="tc.name === 'search_scenes'">{{ tc.name }}</code><span v-if="toolResultsAt(i, tc.name).length > 1" class="tool-state">共尝试 {{ toolResultsAt(i, tc.name).length }} 次</span><span v-else class="tool-state">{{ toolResultAt(i, tc.name)?.ok === true ? '✓ 完成' : toolResultAt(i, tc.name)?.ok === false ? '× 失败' : chat.sending ? '⏳ 调用中' : '结果未确认' }}</span></div>
-                  <details class="tool-query"><summary>查询条件</summary><pre>{{ argsText(tc.args) }}</pre></details>
-                  <div v-if="toolResultsAt(i, tc.name).length" class="tool-summary">最终结果：{{ toolResultsAt(i, tc.name).at(-1)?.detail }}</div>
-                  <SceneSearchResultCard v-if="tc.name === 'search_scenes'" :data="toolResultAt(i, tc.name)?.data" :args="tc.args" :status="toolResultAt(i, tc.name)?.ok === false ? 'failed' : toolResultAt(i, tc.name)?.ok === true ? 'completed' : 'running'" @open="openSearchScene" />
-                  <details v-if="toolResultsAt(i, tc.name).length > 1" class="tool-history"><summary>查看 {{ toolResultsAt(i, tc.name).length }} 次调用记录</summary><div v-for="(result, n) in toolResultsAt(i, tc.name)" :key="n">第 {{ n + 1 }} 次：{{ result.detail }}</div></details>
-                </div>
-              </div>
-              <div v-else-if="(m.streaming && !m.reasoning) || m.phase === 'tool_call'"
+              <div v-else-if="chat.sending && !m.toolCalls?.length && ((m.streaming && !m.reasoning) || m.phase === 'tool_call')"
                    class="bubble assistant tools">
                 <ThinkingIndicator :label="waitLabel(m)" />
               </div>
             </template>
           </template>
 
-          <!-- tool 结果行 -->
-          <template v-else>
-            <div v-if="m.toolName!=='present_spatial_annotations' && !(chat.messages[i - 1]?.role === 'assistant' && chat.messages[i - 1]?.toolCalls?.some(t => t.name === m.toolName))" class="tool-trace" :class="{ fail: m.ok === false }"><AppIcon :name="toolIconName(m.toolName ?? '')" :size="16" /><span class="tool-name">{{ m.toolName ?? '工具' }}</span><span v-if="m.detail" class="tool-detail">{{ m.detail }}</span></div>
-          </template>
+          <AgentToolPresentation :projection="toolPresentation" :index="i" :session-key="chat.sessionId"
+            :developer-mode="developerMode" @open-scene="openSearchScene" />
         </div>
 
         <GoalClarifications :session-id="chat.sessionId" @updated="!chat.sending && chat.sessionId && chat.loadHistory(chat.sessionId)" />
@@ -559,43 +549,10 @@ onMounted(() => {
 }
 .bubble.assistant.err { white-space: pre-wrap; background: var(--err-bg); color: var(--err); border-color: var(--err-line); }
 .bubble.tools { background: #fbfcfa; border: 1px dashed var(--line); border-radius: 12px; }
-.bubble.assistant.tools { width: 100%; max-width: 100%; box-sizing: border-box; padding: 12px; background: #fff; border: 1px solid #D8E3DF; border-radius: 9px; box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 4px 12px rgba(0,0,0,.06), 0 12px 32px rgba(0,0,0,.08); }
-.tool-title { margin: 0 0 4px; font-size: 12px; color: var(--ink-sub); }
-.tool-decl { display: flex; gap: 8px; align-items: baseline; font-size: 13px; }
-.tool-decl code { color: var(--accent-deep); font-family: var(--font-mono); }
-.tool-args { color: var(--ink-sub); font-size: 12px; word-break: break-all; }
+.bubble.assistant.tools { width:100%; max-width:100%; padding:0; background:transparent; border:0; box-shadow:none; }
 /* 推理块与正文气泡同宽，避免同一回合出现两种右边距 */
 .cp-row :deep(.reason) { max-width: 86%; }
 /* 有正文时不再单独占一条「工具声明」气泡，缩成正文脚注（工具轮的主线仍是同一条 assistant） */
-.tc-inline {
-  margin-top: 7px; padding-top: 6px;
-  border-top: 1px dashed var(--line);
-  color: var(--ink-sub); font-size: 11.5px;
-}
-.tc-inline { display: inline-flex; align-items: center; gap: 7px; flex-wrap: wrap; }
-.tc-label { margin-right: 2px; }
-.tc-tool { display: inline-flex; align-items: center; gap: 4px; font-family: var(--font-mono); font-weight: 600; color: var(--ink-body); }
-.tool-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; font-size: 12px; }
-.tool-card-head strong { flex: 0 0 auto; white-space: nowrap; }
-.tool-card { width: 100%; }
-.tool-card-head code { font-family: var(--font-mono); color: var(--ink-sub); white-space: nowrap; }
-.tool-state { margin-left: auto; color: var(--ok); white-space: nowrap; }
-.tool-query { margin-top: 7px; font-size: 11px; color: var(--ink-sub); }
-.tool-query pre { margin: 5px 0 0; white-space: pre-wrap; }
-.tool-summary { margin-top: 7px; font-size: 11px; color: var(--ink-sub); }
-.tool-summary { padding: 8px 10px; background: #F5F8F6; border-radius: 7px; }
-.tool-history { margin-top: 8px; font-size: 11px; color: var(--ink-sub); line-height: 1.7; }
-
-.tool-trace {
-  width: 100%; box-sizing: border-box; align-self: flex-start; display: flex; align-items: center; gap: 7px;
-  font-size: 12px; color: var(--ink-body); background: #F5F8F6;
-  border: 1px solid #D8E3DF; border-radius: 9px; padding: 8px 12px;
-}
-.tool-trace.fail { color: var(--err); background: var(--err-bg); border-color: var(--err-line); }
-.tool-ic.fail { color: var(--err); }
-.tool-name { font-family: var(--font-mono); font-weight: 600; }
-.tool-detail { opacity: .85; }
-
 /* 输入区连托板一起做成一整块：分隔线画在整块顶部，待发缩略图才不像悬在消息区里 */
 .cp-foot { flex: none; border-top: 1px solid var(--line); background: var(--surface); }
 .cp-inputbar {
@@ -638,4 +595,9 @@ onMounted(() => {
 }
 .btn:hover { filter: brightness(1.05); }
 .btn:disabled { opacity: .55; cursor: not-allowed; box-shadow: none; }
+.repair-narrative { min-width:0; max-width:100%; font-size:11px; color:var(--tb-muted); }
+.repair-narrative > summary { padding:6px 0; cursor:pointer; }
+.repair-narrative[open] { max-height:260px; overflow:auto; overflow-wrap:anywhere; }
+.cp-row:empty { display:none; }
+.bubble.tools { background:transparent; border:0; box-shadow:none; padding:0; }
 </style>

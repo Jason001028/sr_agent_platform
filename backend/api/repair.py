@@ -147,7 +147,7 @@ async def prepare(request: Request):
     store = _store(request)
     session_id = _session_id(store, body.get("session_id"), required=True)
     scope = _enum(body.get("scope"), _SCOPES, "scope", "workspace")
-    mode = _enum(body.get("mode"), _MODES, "mode", "demo")
+    mode = _enum(body.get("mode"), _MODES, "mode", "production")
     strategy = _enum(body.get("strategy"), _STRATEGIES, "strategy", "automatic")
     detection = _enum(body.get("detection_method"), _DETECTIONS,
                       "detection_method", "absdiff")
@@ -243,6 +243,25 @@ def status(plan_id: str, request: Request, session_id: str | None = None):
     session_id = _session_id(store, session_id, required=True)
     _owned_plan(store, plan_id, session_id)
     return svc.get_repair_status(store, plan_id)
+
+
+@router.get("/{plan_id}/targets")
+def targets(plan_id: str, request: Request, version: int, session_id: str | None = None,
+            offset: int = 0, limit: int = 100):
+    """Read the stored plan's full target list without the model-view cap."""
+    store = _store(request)
+    session_id = _session_id(store, session_id, required=True)
+    plan = _owned_plan(store, _plan_id(plan_id), session_id)
+    if version != plan['version']:
+        raise HTTPException(409, '计划版本已变化，请刷新后重新查看清单')
+    if offset < 0 or not 1 <= limit <= 100:
+        raise HTTPException(400, 'invalid target pagination')
+    rows = (plan.get('targets') or {}).get('items') or []
+    page = [{key: row[key] for key in ('item_id', 'ordinal', 'name', 'scene_ref', 'status') if key in row}
+            for row in rows[offset:offset + limit]]
+    return {'plan_id': plan_id, 'version': version, 'items': page, 'total': len(rows),
+            'next_offset': min(offset + len(page), len(rows)),
+            'has_more': offset + len(page) < len(rows)}
 
 
 @router.get("/{plan_id}/result")

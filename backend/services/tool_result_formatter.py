@@ -132,6 +132,9 @@ def format_result(name, result, *, budget=None, reference=None, arguments=None, 
                 "full_result": reference or {"available": False, "reason": "no_result_store"},
                 "read_tool": "read_tool_result", "tool": name}
     critical_input = safe
+    if isinstance(safe.get('data'), dict) and safe['data'].get('kind') == 'repair_plan.v1':
+        metadata['read_paths'] = {'targets': '/data/targets/items', 'plan_id': '/data/plan_id',
+                                  'execution': '/data/execution'}
     if name == "search_scenes" and isinstance(safe.get("data"), dict):
         critical_input = {**safe, "data": {k:v for k,v in safe["data"].items() if k != "results"}}
     critical = _critical(critical_input, extra=getattr(tool, "result_protected_fields", ()))

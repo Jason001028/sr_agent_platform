@@ -263,6 +263,8 @@ def run_round(state, goal):
 
 def sr_contract(task, status):
     """Re-run the deployed pure-stdlib verifier against current files."""
+    if (task.get('params') or {}).get('_batch_demo_executor') == 1:
+        return {"ok": False, "reasons": ["演示任务不能作为真实 SR 成果验收"]}
     script = Path(os.getenv("SR_VERIFY_SCRIPT", "verify_sr_run.py"))
     if (task.get('params') or {}).get('repair'):
         script = Path(__file__).resolve().parents[2] / 'SR_code/variants/verify_sr_run.py'

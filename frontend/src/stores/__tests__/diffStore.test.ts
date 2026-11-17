@@ -744,6 +744,16 @@ describe('diff visualization controls', () => {
     diff.openPanel(); diff.closePanel();
     expect(diff.resultVisible).toBe(true);
     expect(diff.layerFor(mocks.viewer.recs[0])?.heat).toBe(heat);
+    mocks.viewer.overlayMasterVisible = false;
+    await nextTick();
+    expect(diff.resultVisible).toBe(true);
+    expect(diff.layerFor(mocks.viewer.recs[0])).toBeNull();
+    expect(diff.showHeat).toBe(false);
+    expect(diff.showMarkers).toBe(false);
+    expect(diff.result).toBe(result);
+    mocks.viewer.overlayMasterVisible = true;
+    await nextTick();
+    expect(diff.layerFor(mocks.viewer.recs[0])?.heat).toBe(heat);
     diff.resultVisible = false;
     await nextTick();
     expect(diff.layerFor(mocks.viewer.recs[0])).toBeNull();

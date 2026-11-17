@@ -23,14 +23,16 @@ vi.mock('../../lib/api', () => {
     HttpError,
     apiConfirmRepair: vi.fn(),
     apiStartRepair: vi.fn(),
-    apiRepairStatus: vi.fn(),
+    apiRepairStatus: vi.fn(), apiRepairTargets: vi.fn(),
   };
 });
-vi.mock('../../lib/batchDock', () => ({ requestQualityReview: vi.fn() }));
+vi.mock('../../lib/batchDock', () => ({ requestQualityReview: vi.fn(), requestMaskReview: vi.fn() }));
+vi.mock('../../router', () => ({ default: { push: vi.fn().mockResolvedValue(undefined) } }));
 
 import AgentRepairPlanCard from '../AgentRepairPlanCard.vue';
-import { apiConfirmRepair, apiRepairStatus, apiStartRepair } from '../../lib/api';
-import { requestQualityReview } from '../../lib/batchDock';
+import { apiConfirmRepair, apiRepairStatus, apiStartRepair, apiRepairTargets, HttpError } from '../../lib/api';
+import { requestQualityReview, requestMaskReview } from '../../lib/batchDock';
+import router from '../../router';
 
 const PLAN_ID = 'plan_' + 'a'.repeat(24);
 const plan = (over: Record<string, unknown> = {}) => ({
@@ -41,7 +43,7 @@ const plan = (over: Record<string, unknown> = {}) => ({
     detection: '现有差异检测管线', detection_method: 'absdiff',
     mask: 'auto_or_existing', execution: 'existing_batch_runtime',
   },
-  mode: 'demo', execution: { allowed: true, mode: 'demo', reason: null },
+  mode: 'production', execution: { allowed: true, mode: 'production', reason: null },
   manifest_ref: 'manifest:test', ...over,
 });
 const counts = (over: Record<string, unknown> = {}) => ({
@@ -67,6 +69,8 @@ let app: App | undefined;
 let root: HTMLDivElement;
 async function flush() {
   for (let i = 0; i < 20; i++) { await Promise.resolve(); await nextTick(); }
+  await new Promise(resolve => setTimeout(resolve, 70));
+  await nextTick();
 }
 async function mount(data: unknown) {
   root = document.createElement('div');
@@ -84,17 +88,180 @@ beforeEach(() => {
     selectGoal: vi.fn().mockResolvedValue(true),
     openItem: vi.fn().mockResolvedValue(''),
   };
-  state.viewer = reactive({ workspaceVersion: 0, recsOrdered: [] });
+  state.viewer = reactive({ workspaceVersion: 0, recsOrdered: [], sceneOrdinalOf: (r: {id: number}) => r.id });
   vi.mocked(apiConfirmRepair).mockImplementation(async () => plan({ status: 'CONFIRMED' }) as never);
   vi.mocked(apiRepairStatus).mockResolvedValue(status() as never);
 });
-afterEach(() => { app?.unmount(); app = undefined; root?.remove(); });
+afterEach(() => { app?.unmount(); app = undefined; root?.remove(); document.querySelectorAll('.repair-drawer-backdrop').forEach(el => el.remove()); });
+
+it('keeps 27 long names out of the card and opens a sorted Viewer-labelled drawer', async () => {
+  const rows = Array.from({length:27}, (_, n) => ({item_id:`i${n}`, ordinal:n+1, scene_ref:`/scenes/${n}`, name:`SCENE_${n}_` + 'LONG_FILENAME_'.repeat(30)}));
+  const p = plan({targets:{total:27,applicable:27,excluded:0,items:rows.slice().reverse()}});
+  state.viewer.recsOrdered = rows.map((r, n) => ({id:n+101,sceneDir:r.scene_ref}));
+  vi.mocked(apiRepairStatus).mockResolvedValue(status({plan:p}) as never);
+  await mount(p);
+  expect(root.textContent).not.toContain(rows[0].name);
+  expect(root.querySelectorAll('.plan-actions button')).toHaveLength(1);
+  expect(root.textContent).toContain('启动 SR');
+  root.querySelector<HTMLButtonElement>('[data-e2e=repair-targets-open]')!.click();
+  await flush();
+  const drawer = document.querySelector('[role=dialog]')!;
+  expect(drawer.querySelectorAll('li')).toHaveLength(27);
+  expect(drawer.querySelector('.tag')?.textContent).toBe('101');
+  expect(drawer.querySelector('.filename')?.getAttribute('title')).toBe(rows[0].name);
+  drawer.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape',bubbles:true}));
+  await new Promise(resolve => setTimeout(resolve, 260));
+  expect(document.querySelector('[role=dialog]')).toBeNull();
+});
+
+it('loads the full server list when the model view omits targets', async () => {
+  const p = plan({targets:{total:27,applicable:27,excluded:0,items:[]}});
+  vi.mocked(apiRepairStatus).mockResolvedValue(status({plan:p}) as never);
+  vi.mocked(apiRepairTargets).mockResolvedValue({plan_id:PLAN_ID,version:1,total:27,has_more:false,next_offset:27,
+    items:Array.from({length:27}, (_, n) => ({item_id:`i${n}`,ordinal:n+1,name:`Scene ${n}`}))});
+  await mount(p);
+  root.querySelector<HTMLButtonElement>('[data-e2e=repair-targets-open]')!.click();
+  await flush();
+  expect(apiRepairTargets).toHaveBeenCalledWith(PLAN_ID,'s',1,0);
+  expect(document.querySelectorAll('.target-list li')).toHaveLength(27);
+});
+
+it('deduplicates rapid clicks and confirms before starting production', async () => {
+  const p = plan({mode:'production'});
+  vi.mocked(apiRepairStatus).mockResolvedValue(status({plan:p}) as never);
+  let finish!: (value: never) => void;
+  vi.mocked(apiConfirmRepair).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  vi.mocked(apiStartRepair).mockResolvedValue({plan:plan({status:'STARTED',mode:'production'}),goal:{goal_id:'g'},reused:false} as never);
+  await mount(p);
+  const button = root.querySelector<HTMLButtonElement>('[data-e2e=repair-plan-start]')!;
+  expect(button.textContent).toContain('启动 SR');
+  button.click(); button.click();
+  await flush();
+  expect(apiConfirmRepair).toHaveBeenCalledTimes(1);
+  expect(apiStartRepair).not.toHaveBeenCalled();
+  finish(plan({status:'CONFIRMED',mode:'production'}) as never);
+  await flush();
+  expect(apiStartRepair).toHaveBeenCalledTimes(1);
+  expect(apiStartRepair).toHaveBeenCalledWith(PLAN_ID,expect.objectContaining({plan_version:1}));
+});
+
+it('shows version conflicts without retrying or submitting a new plan', async () => {
+  vi.mocked(apiStartRepair).mockRejectedValue(new HttpError(409,'version conflict'));
+  await mount(plan());
+  vi.mocked(apiRepairStatus).mockResolvedValue(status({plan:plan({version:2})}) as never);
+  root.querySelector<HTMLButtonElement>('[data-e2e=repair-plan-start]')!.click();
+  await flush();
+  expect(root.textContent).toContain('计划状态已变化');
+  expect(apiStartRepair).toHaveBeenCalledTimes(1);
+});
+
+it('restores an already-started server plan without presenting a start button', async () => {
+  vi.mocked(apiRepairStatus).mockResolvedValue(status({plan:plan({status:'STARTED',goal_id:'g'}),
+    goal:{goal_id:'g',status:'RUNNING',phase:'dispatching',monitoring_done:false}}) as never);
+  await mount(plan());
+  expect(root.textContent).toContain('已启动');
+  expect(root.textContent).toContain('查看进度');
+  expect(root.querySelector('[data-e2e=repair-plan-start]')).toBeNull();
+  expect(apiConfirmRepair).not.toHaveBeenCalled();
+});
+
+it('breathes during execution and mask review while keeping paused and terminal states static', async () => {
+  // Snapshot swaps must reach the card's computed goal, so this test's store
+  // needs the same reactive wrapper Pinia provides in the app.
+  state.batch = reactive({ ...state.batch });
+  const snapshot = {
+    goal: { goal_id: 'g1', status: 'RUNNING', phase: 'monitoring', monitoring_done: false },
+    counts: counts({ verified: 1, submitted: 2, detected: 2 }),
+    progress: progress(1), quality: null,
+    active_jobs: [], recent_jobs: [], producer: { current: null },
+  };
+  vi.mocked(apiRepairStatus).mockResolvedValue(status({
+    plan: plan({ status: 'STARTED' }),
+    goal: { goal_id: 'g1', status: 'RUNNING', phase: 'monitoring', monitoring_done: false },
+    counts: snapshot.counts, progress: snapshot.progress,
+  }) as never);
+  await mount(plan({ status: 'STARTED' }));
+  state.batch.snapshot = snapshot as never;
+  await flush();
+  const ring = () => root.querySelector('[data-e2e=repair-state-ring]')!;
+  expect(ring().getAttribute('data-state-icon')).toBe('running');
+  expect(ring().classList.contains('running')).toBe(true);
+
+  for (const [status, phase] of [['WAITING_USER', 'waiting_review'], ['WAITING_EXTERNAL', 'monitoring'], ['VERIFYING', 'verifying']]) {
+    state.batch.snapshot = { ...snapshot, goal: { ...snapshot.goal, status, phase } } as never;
+    await flush();
+    expect(ring().getAttribute('data-state-icon')).toBe('running');
+  }
+  state.batch.snapshot = { ...snapshot, goal: { ...snapshot.goal, status: 'RUNNING', phase: 'waiting_quality_review' } } as never;
+  await flush();
+  expect(ring().getAttribute('data-state-icon')).toBe('waiting');
+  state.batch.snapshot = { ...snapshot, goal: { ...snapshot.goal, status: 'PAUSED', phase: 'waiting_review' } } as never;
+  await flush();
+  expect(ring().getAttribute('data-state-icon')).toBe('paused');
+
+  // Paused: the breathing animation is gone, the ring keeps a static pause glyph.
+  state.batch.snapshot = { ...snapshot, goal: { ...snapshot.goal, status: 'PAUSED' } } as never;
+  await flush();
+  expect(ring().getAttribute('data-state-icon')).toBe('paused');
+  expect(ring().classList.contains('running')).toBe(false);
+
+  state.batch.snapshot = {
+    ...snapshot,
+    goal: { ...snapshot.goal, status: 'COMPLETED', phase: 'done', monitoring_done: true },
+  } as never;
+  await flush();
+  expect(ring().getAttribute('data-state-icon')).toBe('done');
+
+  state.batch.snapshot = {
+    ...snapshot,
+    goal: { ...snapshot.goal, status: 'FAILED', phase: 'done', monitoring_done: true },
+  } as never;
+  await flush();
+  expect(ring().getAttribute('data-state-icon')).toBe('failed');
+  expect(ring().classList.contains('running')).toBe(false);
+});
 
 it('shows the plan stage and confirms/starts on the same card', async () => {
   await mount(plan());
   expect(root.textContent).toContain('修复计划 · 2 景');
-  expect(root.querySelector('[data-e2e=repair-plan-confirm]')).not.toBeNull();
+  expect(root.querySelector('[data-e2e=repair-plan-confirm]')).toBeNull();
   expect(root.querySelector('[data-e2e=repair-plan-start]')).not.toBeNull();
+});
+
+it('opens the matching mask review from the waiting card without approving or starting SR', async () => {
+  vi.mocked(apiRepairStatus).mockResolvedValue(status({
+    plan: plan({status:'STARTED'}),
+    goal: {goal_id:'mask-goal',status:'WAITING_USER',phase:'waiting_review',monitoring_done:false},
+  }) as never);
+  await mount(plan({status:'STARTED'}));
+  const button = root.querySelector<HTMLButtonElement>('[data-e2e=repair-mask-review]')!;
+  expect(button.textContent).toBe('前往复核');
+  button.click(); button.click(); await flush();
+  expect(state.batch.selectGoal).toHaveBeenCalledTimes(1);
+  expect(state.batch.selectGoal).toHaveBeenCalledWith('mask-goal');
+  expect(router.push).toHaveBeenCalledWith('/viewer');
+  expect(requestMaskReview).toHaveBeenCalledWith('mask-goal');
+  expect(apiStartRepair).not.toHaveBeenCalled();
+});
+
+it('keeps unstarted historical Demo plans truthful and refuses to run them', async () => {
+  const old = plan({mode:'demo',execution:{allowed:true,mode:'demo',reason:null}});
+  vi.mocked(apiRepairStatus).mockResolvedValue(status({plan:old}) as never);
+  await mount(old);
+  expect(root.textContent).toContain('历史演示计划');
+  expect(root.textContent).toContain('重新准备自动修复');
+  expect(root.querySelector('[data-e2e=repair-plan-start]')).toBeNull();
+  expect(apiStartRepair).not.toHaveBeenCalled();
+});
+
+it('labels a prepared plan with unavailable execution clearly', async () => {
+  const unavailable = plan({ execution: { allowed: false, mode: 'demo', reason: '演示工作目录不可写' } });
+  vi.mocked(apiRepairStatus).mockResolvedValue(status({ plan: unavailable }) as never);
+  await mount(unavailable);
+  expect(root.textContent).toContain('暂不可执行');
+  expect(root.textContent).toContain('演示工作目录不可写');
+  expect(root.textContent).not.toContain('待确认');
+  expect(root.querySelector('[data-e2e=repair-plan-start]')).toBeNull();
 });
 
 it('transitions the same card into the running stage after start', async () => {
@@ -118,13 +285,13 @@ it('transitions the same card into the running stage after start', async () => {
   expect(apiStartRepair).toHaveBeenCalledTimes(1);
   expect(root.textContent).toContain('自动修复');
   expect(root.textContent).toContain('SCENE_A');
-  expect(root.textContent).toContain('已验收 1');
+  expect(root.querySelector('[data-stage=verification]')?.textContent).toContain('1 / 2');
   expect(root.querySelector('[data-e2e=repair-task-actions]')).not.toBeNull();
 });
 
 it('switches to a deterministic demo summary and does not fake a result artifact', async () => {
   vi.mocked(apiRepairStatus).mockResolvedValue(status({
-    plan: plan({ status: 'STARTED',
+    plan: plan({ status: 'STARTED', mode: 'demo',
                  targets: { total: 12, excluded: 0, applicable: 12, items: [] } }),
     goal: { goal_id: 'g1', status: 'COMPLETED', phase: 'done',
             monitoring_done: true, monitor_done: true },
@@ -136,7 +303,7 @@ it('switches to a deterministic demo summary and does not fake a result artifact
         verification_ok: true, job_id: 1, image_path: '/a/PAN.tif', overlay_ready: true },
     ],
   }) as never);
-  await mount(plan({ status: 'STARTED' }));
+  await mount(plan({ status: 'STARTED', mode: 'demo' }));
   const text = root.textContent ?? '';
   expect(text).toContain('修复结果');
   expect(text).toContain('本批次 12 景影像的演示 / Fake SR 计算已结束');

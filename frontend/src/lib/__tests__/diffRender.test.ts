@@ -5,6 +5,15 @@ import {
 } from '../diffRender';
 
 describe('continuous difference rendering', () => {
+  it('defaults all methods to classic colors and switches palette without changing intensity', () => {
+    const values = new Uint8Array([0, 128, 255]), before = values.slice();
+    const classic = colorizeHeatBytes(values, 3, 1);
+    expect(colorizeHeatBytes(values, 3, 1, null, null, {smart:true})).toEqual(classic);
+    const spectrum = colorizeHeatBytes(values, 3, 1, null, null, {palette:'spectrum'});
+    expect([...spectrum.slice(0,4)]).toEqual([36,81,164,255]);
+    expect(spectrum).not.toEqual(classic);
+    expect(values).toEqual(before);
+  });
   it('keeps Smart scores immutable while hiding below-threshold and invalid pixels', () => {
     const values=new Uint8Array([0,128,255]),before=values.slice();
     const rgba=colorizeHeatBytes(values,3,1,new Uint8Array([1,1,0]),null,{smart:true,threshold:.4});

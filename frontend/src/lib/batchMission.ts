@@ -1,6 +1,7 @@
 /** Read-only presentation of batch_snapshot.v1. Never schedules work. */
 import type { BatchSnapshot, BatchProgressTrack, BatchItemRecord } from './api';
 import { itemStatusLabel } from './batchUi';
+import { batchDisplayProgress } from './batchDisplayProgress';
 
 export interface MissionItem {
   item_id: string; ordinal: number; name: string; status: string; attempt: number;
@@ -49,7 +50,7 @@ export function missionSummary(s: BatchSnapshot) {
   const failed = ['FAILED', 'BLOCKED'].includes(status);
   const issueFocus = !['COMPLETED', 'CANCELLED'].includes(status) && (failed || (!s.producer.current && !s.active_jobs.length && errors > 0));
   const names = { detection: '检测进度', submission: 'SR 提交进度', verification: '验收进度' };
-  let label = names[stage], value = missionTrackText(s.progress[stage]), unit = '';
+  let label = names[stage], value = missionTrackText(batchDisplayProgress(c)[stage]), unit = '';
   let state = stage === 'detection' ? '正在检测' : stage === 'submission' ? (c.in_flight_sr > 0 ? '正在修复' : '正在提交') : '正在验收';
   let tone = 'active';
   if (status === 'QUEUED') state = '等待开始';

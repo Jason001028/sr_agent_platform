@@ -84,6 +84,8 @@ def _prepare(ctx, scope, mode, strategy, detection_method, mask_policy, title,
                 "这条消息没有绑定 Viewer 工作区；请先打开本地、上传或服务器影像，"
                 "不要用场景库检索代替当前工作区。")
         kwargs = {}
+        if mode != 'production':
+            return err('Agent 协助与自动修复统一使用真实修复（production），不支持新建演示计划。')
         if scope == "draft":
             sources = _draft_sources(ctx.batch_draft)
             if not sources:
@@ -113,6 +115,10 @@ def _start(ctx, plan_id, plan_version):
     if store is None:
         store, owned = _unbound_store()
     try:
+        existing = store.get_repair_plan(plan_id)
+        if (isinstance(existing, dict) and existing.get('session_id') in (None, ctx.session_id)
+                and existing.get('mode') != 'production'):
+            return err('历史演示计划不能用于真实自动修复，请重新准备 production 计划并确认。')
         result = svc.start_repair(
             store, plan_id, session_id=ctx.session_id,
             workspace=ctx.workspace,
@@ -285,6 +291,7 @@ def _goal_items(ctx, goal_id, item_id=None):
 # ---------------------------------------------------------------------------
 
 _PREPARE_DESC = (
+    "Agent协助与工具栏自动修复统一准备真实SR计划（production），不提供Demo/Fake回退。"
     "根据当前可信 Viewer 工作区（当前影像 / 多选影像 / 左侧工作区或已冻结清单）"
     "准备一份修复计划，并持久化计划、目标身份与执行策略。"
     "只做目标校验与计划冻结，绝不提交 SR、不改原始影像、不启动后台修复。"
@@ -293,6 +300,8 @@ _PREPARE_DESC = (
     "没有后端源文件绑定或PAN/NOSR契约时仍返回资源评估计划及具体缺项；此类计划不可启动SR。"
     "消息中的资源引用仅用于观察与规划，不授予任意文件访问权限。"
     "返回 plan_id、targets、strategy、mode、execution 与 confirmation_required；"
+    "targets 含 total/excluded/applicable/items/unresolved，items 每项含 item_id/ordinal/name/scene_ref/status；不存在 targets.ids。"
+    "归档结果读取 /data/targets/items；启动仅需 plan_id 和版本，不需要逐景提取 ID。"
     "计划必须由真实用户在界面上确认后，才能用 start_repair 启动。"
 )
 
@@ -333,8 +342,8 @@ _PREPARE_PARAMS = {
             "description": "修复目标：current=当前活动影像，selection=当前多选影像，workspace=左侧全部影像资源（含本地/上传），draft=当前修复草稿清单（已排除项跳过）。",
         },
         "mode": {
-            "type": "string", "enum": ["demo", "production"], "default": "demo",
-            "description": "执行模式；demo 使用现有 Fake SR 安全链路，production 受现有准入限制，未开放时会被明确拒绝。",
+            "type": "string", "enum": ["production"], "default": "production",
+            "description": "与自动修复一致，使用真实 SR 执行（production）；必须经用户确认及现有生产准入，受阻时不回退模拟。",
         },
         "strategy": {
             "type": "string", "enum": ["automatic", "review"], "default": "automatic",
@@ -388,7 +397,7 @@ _GET_ITEM_PARAMS = {
 
 @tool(name="prepare_repair", description=_PREPARE_DESC,
       params_schema=_PREPARE_PARAMS)
-def prepare_repair(scope="workspace", mode="demo", strategy="automatic",
+def prepare_repair(scope="workspace", mode="production", strategy="automatic",
                    detection_method="absdiff", mask_policy="auto", title=None):
     return _prepare(_Context(), scope, mode, strategy, detection_method,
                     mask_policy, title)
@@ -429,7 +438,7 @@ def bound_tool(name: str, *, workspace=None, current=None, selected_images=None,
                        selected_images=selected_images,
                        batch_draft=batch_draft, selected_truncated=selected_truncated)
     if name == "prepare_repair":
-        def run(scope="workspace", mode="demo", strategy="automatic",
+        def run(scope="workspace", mode="production", strategy="automatic",
                 detection_method="absdiff", mask_policy="auto", title=None):
             return _prepare(context, scope, mode, strategy, detection_method,
                             mask_policy, title)

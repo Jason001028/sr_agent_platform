@@ -1,5 +1,6 @@
 import type { ChatMsg } from '../stores/chat.js';
 import type { ChatPhase } from './api.js';
+import { projectAgentActivity } from './agentActivity';
 
 export function phaseLabel(phase?: ChatPhase | null): string {
   if (phase === 'tool_call') return '正在组织工具调用';
@@ -12,20 +13,16 @@ export function executionEntries(messages: ChatMsg[], sending: boolean): { text:
   if (start < 0) return [];
   const msgs = messages.slice(start + 1);
   const rows: { text: string; state: string }[] = [];
-  const interrupted = !sending || msgs.some(m => m.isError);
+  const activity = projectAgentActivity(messages, sending);
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i];
-    if (m.role !== 'assistant') continue;
-    for (const phase of m.progress ?? (m.phase ? [m.phase] : [])) {
+    for (const phase of m.role === 'assistant' ? m.progress ?? (m.phase ? [m.phase] : []) : []) {
       if (phase === 'tool_call') continue;
       const active = m.streaming && m.phase === phase && sending;
       rows.push({ text: phase === 'thinking' ? (active ? '正在分析任务' : '任务分析阶段') : (active ? '正在整理回答' : '回答整理阶段'), state: active ? 'thinking' : 'ended' });
     }
-    for (const t of m.toolCalls ?? []) {
-      const nextAssistant = msgs.findIndex((n, j) => j > i && n.role === 'assistant');
-      const result = msgs.slice(i + 1, nextAssistant < 0 ? undefined : nextAssistant).find(n => n.role === 'tool' && (t.id ? n.toolCallId === t.id : n.toolName === t.name));
-      rows.push({ text: result ? `${t.name}：${result.ok ? '执行完成' : '执行失败'}${result.detail ? ' · ' + result.detail : ''}` : `正在执行 ${t.name}${interrupted ? '（结果未确认）' : ''}`,
-        state: result ? (result.ok ? 'success' : 'failed') : interrupted ? 'interrupted' : 'running' });
+    for (const step of activity.steps.filter(step => step.callIndex === start + 1 + i)) {
+      rows.push({ text: `${step.label} · ${step.summary}`, state: step.state });
     }
     if (m.isError) rows.push({ text: '回合异常中止', state: 'failed' });
   }

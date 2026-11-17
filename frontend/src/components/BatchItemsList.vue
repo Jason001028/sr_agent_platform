@@ -69,7 +69,7 @@ function back() { cursor.value = previous.value.pop() ?? 0; void load(); }
     <p v-if="busy && !items.length" class="quiet">正在读取任务…</p>
     <p v-else-if="!items.length" class="quiet">没有匹配的任务。</p>
     <div v-if="items.length" class="list">
-      <BatchMissionItem v-for="item in items" :key="item.item_id" :item="recordMissionItem(item)">
+      <BatchMissionItem v-for="item in items" :key="item.item_id" :item="recordMissionItem(item)" :initial-expanded="initialStatus === 'MASK_READY'">
         <details class="evidence"><summary>检测依据与参数</summary><pre>{{ JSON.stringify({ detection: item.checkpoint.detection, config: item.checkpoint.config, review: item.checkpoint.review }, null, 2) }}</pre><button v-for="(bbox, i) in regions(item).slice(0, 10)" :key="i" @click="focus(item, bbox)">定位区域 {{ i + 1 }}</button></details>
         <div v-if="item.status === 'MASK_READY' && item.checkpoint.review_required && !item.checkpoint.review" class="review-actions"><button :disabled="busy" @click="review(item, 'approve')">确认掩码并允许提交</button><button :disabled="busy" @click="review(item, 'exclude')">排除此项</button></div>
       </BatchMissionItem>

@@ -8,11 +8,12 @@ import type { RepairPlan } from '../lib/api';
 import { registerViewerObservation } from '../lib/viewerContext';
 import { compactBatchError, importProblem, viewerRepairSequences } from '../lib/batchSequences';
 import type { RepairSequence } from '../lib/batchSequences';
+import { REPAIR_EXECUTION_MODE } from '../lib/repairExecution';
 const emit = defineEmits<{ created: [] }>();
 const viewer = useViewerStore(), batch = useBatchGoalStore(), chat = useChatStore();
 const groups = ref<RepairSequence[]>([]), busy = ref(false), loading = ref(false), error = ref('');
 const detectionMethod = ref<'absdiff' | 'ssim' | 'smart'>('absdiff');
-const mode = ref<'demo' | 'production'>('demo');
+const mode = ref(REPAIR_EXECUTION_MODE);
 const strategy = computed<'automatic' | 'review'>(() => detectionMethod.value === 'smart' ? 'review' : 'automatic');
 const chosen = computed(() => groups.value.filter(g => g.checked && g.count && !g.reason && !g.loading));
 // A prepared plan is shown first; the second click is the real user
@@ -49,6 +50,7 @@ watch(() => JSON.stringify([viewer.recsOrdered.map(r => [r.id, r.sceneDir, r.pre
 }, { immediate: true });
 function selectAll(checked: boolean) { for (const g of groups.value) g.checked = checked && g.count > 0 && !g.reason; }
 function planProblem(plan: RepairPlan): string {
+  if (plan.mode !== REPAIR_EXECUTION_MODE) return '服务端返回了演示计划，请重新准备真实自动修复计划；不会启动模拟任务。';
   const blocking = (plan.blocking ?? []).map(row => row.message).filter(Boolean).join('；');
   if (plan.status !== 'READY') return blocking || '计划存在阻断项，请重新核对清单';
   if (!plan.targets.applicable) return '计划里没有可执行的目标项';
@@ -115,7 +117,7 @@ async function start() {
 <template>
   <div class="draft" data-e2e="batch-draft" :aria-busy="busy || loading">
     <p>选择左侧生产序列，自动处理组内全部符合条件的 PAN 本体。</p>
-    <label>执行模式 <select v-model="mode" :disabled="busy || loading" aria-label="批量执行模式"><option value="demo">演示（Fake SR）</option><option value="production">生产（受准入限制）</option></select></label>
+    <p class="note">执行方式：自动修复 · 真实 SR，确认后启动。</p>
     <label>检测方法 <select v-model="detectionMethod" :disabled="busy || loading" aria-label="批量检测方法"><option value="absdiff">像素差异</option><option value="ssim">结构差异</option><option value="smart">LTD（实验性，需人工复核）</option></select></label>
     <p v-if="detectionMethod === 'smart'">LTD · 局部纹理退化检测 · 内网传统算法。候选不会自动提交 SR；先复核候选掩码，再沿用人工质量验收。未检出候选不等于质量通过。</p>
     <div class="selection"><span>{{ groups.length }} 组序列</span><button :disabled="busy || loading" @click="selectAll(true)">全选</button><button :disabled="busy || loading" @click="selectAll(false)">取消全选</button></div>
@@ -129,7 +131,7 @@ async function start() {
     </div>
     <p v-if="!groups.length">左侧暂无已关联生产序列。</p>
     <p v-if="pendingPlan" class="plan-summary" data-e2e="batch-plan-summary">
-      已准备计划：{{ pendingPlan.targets.applicable }} 景，{{ pendingPlan.mode === 'demo' ? '演示 / Fake SR' : '生产模式' }}，
+      已准备计划：{{ pendingPlan.targets.applicable }} 景，真实 SR 自动修复，
       {{ pendingPlan.strategy.detection }}。{{ pendingPlan.execution.allowed ? '请在下方确认后启动。' : '计划已保留，执行条件满足后请重新准备并确认。' }}
     </p>
     <p v-if="pendingPlan && !pendingPlan.execution.allowed" class="error" role="status">

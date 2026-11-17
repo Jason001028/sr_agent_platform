@@ -1367,7 +1367,22 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        from backend.config import sr_runtime
+        from backend.services import local_exec
         from backend.services.session_titles import title_loop
+        # Local jobs outlive the API process: reload the durable queue before
+        # the scheduler starts, so queued work resumes and a live child is
+        # adopted by PID instead of being reported UNKNOWN.
+        if sr_runtime().executor == "local":
+            try:
+                recovered = local_exec.recover()
+                if recovered["adopted"] or recovered["resumed"]:
+                    logging.getLogger(__name__).info(
+                        "local executor recovered %s",
+                        recovered)
+            except Exception:              # noqa: BLE001 — never block startup
+                logging.getLogger(__name__).exception(
+                    "local executor recovery failed")
         # 任务列表而不是单个 poller：漏 cancel 一个，它会在 app 关闭后继续跑
         # （测试里就是往下一个用例的 env 上写）。
         app.state.tasks = [
@@ -1380,6 +1395,13 @@ def create_app() -> FastAPI:
             asyncio.create_task(goal_worker.goal_loop(app.state)),
             asyncio.create_task(batch_worker.batch_loop(app.state)),
         ]
+        # Warm the production preflight once at startup when the operator has
+        # opened production (Python imports + nvidia-smi can take seconds).
+        # Plan-card polling then reads the cache instead of probing again.
+        if (sr_runtime().executor == "local"
+                and os.environ.get("SR_BATCH_PRODUCTION") == "1"):
+            app.state.tasks.append(asyncio.create_task(
+                asyncio.to_thread(local_exec.preflight, True)))
         yield
         for t in app.state.tasks:
             t.cancel()

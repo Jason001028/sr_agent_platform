@@ -2,6 +2,67 @@
 
 日期：2026-11-13 · 状态：M1–M3 代码已实施，M4 联验命令见下；真实 SR/GPU 未验。
 
+## 2026-11-16：生产批量执行改为显式准入
+
+- 触发链路：`prepare_repair` → `probe_execution('production')` → `batch_worker.ensure_execution_allowed('production')`。旧实现对该模式无条件抛 `BatchGateError("production batch execution is not enabled yet ...")`，`execution.allowed` 因此为 false，计划卡显示「暂不可执行」。
+- 现在由 `SR_BATCH_PRODUCTION=1` 显式开关解禁，不再强制 Slurm：`SR_EXECUTOR=slurm` 时要求 `SR_SLURM_FAKE` 非 1，`SR_EXECUTOR=local` 时要求主机有可用 bash；两种执行器都要求 `SR_SLURM_WORK_DIR` 存在且可写。任一条件不满足仍拒绝，并在计划卡给出具体原因。
+- 默认未设开关时行为不变（拒绝 production）；`deploy/sr-api.service` 已写入 `SR_BATCH_PRODUCTION=1`。真机若用 drop-in 覆盖，新增 `/etc/systemd/system/sr-api.service.d/50-production.conf`，不改部署后的单元正文；改后 `systemctl daemon-reload && systemctl restart sr-api`。
+- 已准备但未启动的计划无需重新准备：`get_repair_status` 会用当前闸门重算 `execution`，计划卡刷新即可从「暂不可执行」变为可确认；已确认计划仍受原有确认有效期约束。
+- Local 可靠性：新增执行器中立工作目录 `SR_WORK_DIR`（旧 `SR_SLURM_WORK_DIR` 继续兼容）；`.local_jobs.json` 持久化排队/进程表，服务启动先恢复 queued、按进程起始时间+cmdline 校验身份后接管 running，同一 job_id 不重复启动；派发前写盘失败直接拒绝启动，`Popen` 后写 running 失败立即杀子进程并进入 quarantine，阻塞后续排队任务直到判定文件出现或人工 `resolve_quarantine()`；取消意图持久化 `cancel_requested`，重启后继续终止并确认进程树退出；`SR_LOCAL_JOB_TIMEOUT_SEC` 到点同样杀整棵进程树；生产预检覆盖 bash、工作目录、Python 导入、算法入口、模型权重与 GPU，结果按 env 缓存，计划卡轮询不重复探测。`deploy/sr-api.service` 使用 `KillMode=process` 让本机子进程跨重启存活。
+- 本轮只跑合成 bash 夹具与自动化测试，未提交真实 GPU 作业；真实单景/批量验收步骤见 [sr-local-execution.md](sr-local-execution.md) §4.1，全部标为待核。
+- 这次只改准入判断，没有跳过计划确认、PAN 资源锁、人工区域/整景质量验收或既有五层验证。本轮未提交真实 GPU 作业，内网单景联验结论仍需另行补记。
+
+## 2026-11-16：Agent协助与自动修复统一真实修复口径
+
+- 常规业务入口统一 `production`：前端共享 `repairExecution.ts`；工具栏自动修复固定真实SR、不再展示Demo模式选择；Agent协助提示明确 `mode=production`，模型工具schema仅允许production，工具默认值和REST准备计划默认值均改为production。
+- 两入口仍复用同一个 Repair Application / 用户确认 / start / Batch Goal服务，没有另建执行器。生产条件未满足时明确保留受阻计划，不自动切Demo；面板也拒绝服务端意外返回的Demo计划。
+- 旧的未提交浏览器草稿恢复时取消Demo偏好、保留候选身份。已落库的Demo计划/Goal不改写为生产；Agent计划卡不再启动待确认的旧Demo，Agent start工具同样拒绝旧Demo计划，必须重新准备并确认真实计划。已运行/完成的旧Demo仍如实保留历史标识和进度，不能冒充真实成果。
+- **生产Batch硬门禁当时仍关闭**（`batch_worker.ensure_execution_allowed('production')`）；同日随后改为 `SR_BATCH_PRODUCTION` 显式准入，见本节上方。本条操作本身没有绕过既有准入，也没有将开发机配置改成可执行生产SR。内部显式Demo REST/服务路径仅保留开发测试与历史兼容，不作为Agent/工具栏业务回退。
+
+测试：后端计划与工具契约42项、前端全量1111项通过，typecheck与build通过；专项验证Agent/REST缺省均为production、拒绝Demo、生产受阻不回退模拟，以及在隔离模拟门禁下复用确认/Goal幂等链；未启动真实SR/GPU。
+
+## 2026-11-16：普通工具 Activity Timeline 视觉减法
+
+- Viewer Agent栏与 `/chat` 共用 `AgentToolPresentation`、`AgentActivityTimeline` 与纯函数 `projectAgentActivity`；移除两套按工具名匹配结果的卡片模板。普通步骤为12px低对比文字、14px状态图标、1px连接线，单行28px；无大面积底色/描边/阴影。原始模型推理仍由 `ReasoningBlock` 管理，不以工具摘要代替思考。
+- 优先按 toolCallId 关联并去重；旧无ID记录按同名待匹配调用的顺序关联，不合并合法重复调用。显式ID不匹配时不借用其他调用的结果；缺少结果或明确成功证据时显示“结果未确认”。传输包装成功不能覆盖业务 `ok=false`。
+- 连续普通步骤归为完成计数，运行中默认展开、阶段结束后自动折叠；失败/未确认/正在运行步骤在收起时仍可见。用户手动选择存于有界会话内存Map，重连/历史替换/切换页面不强制收回；整页刷新使用默认折叠策略，不新增持久化字段。折叠180ms，只有运行点轻微呼吸，减少动效设置关闭动画。
+- 场景候选、修复计划、批次草案回执、空间批注继续由既有业务组件展示；对应成功步骤不在普通轨迹重复展示。人工澄清沿用页面现有 `GoalClarifications`。场景打开、确认启动和复核接口不变；开发者详情可查看参数、调用ID、原始结果。
+- 本轮不改Agent Loop、SSE协议、Store消息归并/落库或后端。原工作树其余未提交修改保留。`executionOverview`复用同一工具状态投影，动作中文名集中在 `chatActivity`。
+
+验证：前端全量 **1,108 passed**（`npm test -- --maxWorkers=2 --minWorkers=1`），typecheck、生产build与diff检查通过。覆盖同名并发/乱序结果、缺ID旧会话、重复事件与历史恢复、失败/未确认状态、自动/手动折叠、业务组件及场景打开交互。浏览器隔离夹具 `.e2e/activity-timeline-preview.html` 复用 `repair-plan-vite.config.mjs`（复制到 `frontend/__activity-timeline-preview.html` 后以5174测试，结束删除临时HTML）；280px窄栏实测折叠28px、步骤28px、背景透明、无横向溢出，完成后自动收起，失败行不隐藏。[折叠截图](../../.e2e/artifacts/activity-timeline/collapsed-280.png)、[展开截图](../../.e2e/artifacts/activity-timeline/expanded-280.png)、[失败截图](../../.e2e/artifacts/activity-timeline/failed-280.png)。未连接生产接口、未启动SR/GPU。
+
+## 2026-11-16：Agent 修复计划卡交互与视觉收口
+
+- Agent 栏和 Chat 页共用 `AgentRepairPlanCard`：雾白卡片、深松绿主按钮，默认六项对齐摘要（目标数、范围、检测、掩码、模式、状态）。仅保留“确认并启动 · 启动演示 / 启动 SR”，沿用服务端 confirm → start，不再提供重复的确认按钮。启动后单卡切换进度/成果，生产质量复核入口保留。
+- “查看全部 N 景”打开200ms侧抽屉，生产 ordinal 排序并显示真实 Viewer 数字标签；未打开的景标为 —，不猜标签。长名省略/title完整名、列表独立滚动，支持 Escape、焦点约束/归还、背景 inert 与减少动效设置。
+- `GET /api/repairs/{plan_id}/targets?session_id=…&version=…&offset=…&limit=100` 是只读清单分页：读取已有计划、沿用会话隔离、版本不符409，不碰影像/执行器。超过模型视图50项上限的清单可完整读取。
+- prepare/read工具显示中文名、真实成功/业务失败状态和一行摘要；同回合重复读取合并，技术JSON只在开发者详情显示。拥有结构化计划的同一用户回合中，Agent长说明默认折叠；提示词同时要求不再重复输出逐景Markdown表格，原文仍可展开。
+- 历史消息接口补充结构化工具 `data`，可从同会话归档恢复旧的截断计划，不修改原始消息。卡片刷新后按REST服务端计划/Goal恢复，首次核对完成前禁用启动；快速双击去重、确认返回版本变化与409均要求用户重新核对。
+- 浏览器隔离夹具：[.e2e/repair-plan-preview.html](../../.e2e/repair-plan-preview.html)、[.e2e/repair-plan-vite.config.mjs](../../.e2e/repair-plan-vite.config.mjs)。从仓库根复制HTML到 `frontend/__repair-plan-preview.html`，在frontend运行 `npx vite --config ../.e2e/repair-plan-vite.config.mjs --host 127.0.0.1 --port 5174`，打开 `/__repair-plan-preview.html?width=280&mode=production`；完成后只删除该临时HTML。夹具使用真实卡片组件、模拟Store/API，不允许提交SR。
+- 浏览器实测280px/320px宽度下计划卡均高292px、无横向溢出；27行列表可独立滚动（当次视口列表高度450、内容1377），文件名省略。截图：[窄卡](../../.e2e/artifacts/repair-plan-ui/card-280.png)、[27景抽屉](../../.e2e/artifacts/repair-plan-ui/targets-27.png)。
+
+验证：前端全量 **1,094 passed**（默认并发曾遇到宿主Node OOM，改用 `npm test -- --maxWorkers=2 --minWorkers=1` 完成）；后端计划/工具结果/消息快照/契约组合 **110 passed**，新增超50项清单分页专项 **1 passed**。类型检查与生产构建通过。所有确认/启动测试使用模拟接口或Fake，不运行生产SR/GPU；内网真实模型与部署后复核仍待核。部署需后端更新重启并发布前端dist。
+
+## 2026-11-16：Agent 工具结果回读路径纠正
+
+- 现场模型调用 `read_tool_result(path="/data/targets/ids")`，但修复计划真实契约为 `targets.items[].item_id`。prepare 工具说明和截断结果的 `read_paths` 明确提供 `/data/targets/items`，启动只需计划 ID 与版本，不要求提取所有影像 ID。
+- 回读仍严格按实际 JSON 结构定位，不添加虚假 `ids` 别名。不存在/非法路径返回有界的 `requested_path / resolved_path / available_paths`（只给脱敏后的字段路径和类型，不展开值），提示按实际路径纠正；错误明确属于回读，不据此判断启动失败或重新提交。不可用/过期/跨会话引用继续拒绝。
+- JSON Pointer 数组索引拒绝负数、前导零、加号；转义只接受 `~0 / ~1`。保留完整记录分页、字节预算及不前进游标规则。
+- 聊天栏与 Agent 栏调用历史按 tool_call_id 匹配并展示各次参数；成功回读提供非空页摘要，旧空摘要显示“调用成功（未提供摘要）”，避免第一条记录空白。
+- 回归包含真实归档的27景分页、错误路径恢复、只执行一次原工具、会话隔离、转义/预算边界，以及脚本化模型工具循环纠正。真实内网模型行为待核；需更新后端并重启、发布前端构建。
+
+验证：后端 `test_tool_result_formatter / test_tool_description_contract / test_repair_application / test_message_viewer_context` **109 passed**；前端全量 **1,085 passed**，类型检查与生产构建通过。工作区已有 `WORKSPACE_MAX_BYTES=240000` 修改保留；资源裁剪测试显式设置小预算，不再依赖生产预算值。未运行真实 SR 或连接内网现场模型。
+
+## 2026-11-16：本机 Demo 与旧 Slurm Fake 解耦
+
+- `SR_EXECUTOR=local` 的 `mode=demo` 使用独立 `services/demo_exec.py`，不要求安装 Slurm、不要求 `SR_SLURM_FAKE=1`，也不调用真实 `submit_run_sr` / 本机子进程。显式旧 `slurm + fake` 配置继续兼容；下文“demo 必须 Slurm”的历史描述仅适用于旧路径。
+- 新增可选 `SR_DEMO_WORK_DIR`，默认系统临时目录下的 `sr-platform-demo`。演示回执与模拟状态基于 SQLite `sr_tasks`，不依赖进程内 Fake 注册表；模拟 Job ID 在 JavaScript 安全整数范围内，带独立任务指纹标记，恢复和重复提交复用回执。
+- 沿用计划确认、Goal/Item、资源锁、提交 Intent 和五层验收；演示仍为 `demo_contract / mock`，没有 SR 输出。禁止真实提交器接收演示标记；禁用模拟任务完成后的成果预览生成和真实成果验收/发现。
+- 执行环境不可用的计划卡显示“暂不可执行”，不再同时显示“待确认”；后端原因不再附带 Python 异常类名。
+- **生产 Batch 门禁当时仍关闭**；同日随后改为 `SR_BATCH_PRODUCTION` 显式准入（见本节顶部）。本次修复本机部署的 Demo 可用性，不代表真实 GPU / 本机生产批处理已完成准入。需更新后端并重启、发布前端构建，旧计划建议重新准备；内网验收待核。
+
+验证：`test_batch_worker / test_repair_application / test_run_sr` 共 **182 passed**；新增本机 Demo 联验与 `test_image_refresh / test_goal_runtime` 共 **35 passed**；回执落盘后复跑两个本机专项 **2 passed**（与前述有重复，不累加）。前端计划卡 **7 passed**，类型检查、生产构建和 `git diff --check` 通过。测试使用合成小 TIFF，未启动真实 SR、GPU 或 Slurm。
+
 ## 2026-11-14：入口故障修复与非盘阵资源规划
 
 - Agent 的三个同名只读工具此前由 `tools/repair.py` 和 `services/repair_workspace.py` 重复绑定，导致模型请求前抛 `工具已注册`。现在只读查询由后者统一绑定，保留分页、原始 ordinal、会话隔离及预算；prepare/start 仍走统一应用服务。Registry 继续严格拒绝重名，显式插件工具不会被内置实现覆盖。

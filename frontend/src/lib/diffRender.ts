@@ -37,11 +37,11 @@ export function colorizeHeatBytes(
   height: number,
   valid?: Uint8Array | null,
   weights?: Uint8Array | null,
-  options?: { smart?: boolean; threshold?: number; selectedBbox?: [number, number, number, number] | null },
+  options?: { smart?: boolean; palette?: 'classic' | 'spectrum'; threshold?: number; selectedBbox?: [number, number, number, number] | null },
 ): Uint8ClampedArray {
   const n = width * height;
   const rgba = new Uint8ClampedArray(n * 4);
-  const palette = options?.smart ? smartStops : stops;
+  const palette = options?.palette === 'spectrum' ? smartStops : stops;
   for (let i = 0; i < n; i++) {
     if (valid && !valid[i]) continue;
     let v = intensity[i];

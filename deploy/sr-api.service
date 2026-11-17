@@ -35,6 +35,9 @@ WorkingDirectory=/data/www/sr-agent-platform
 ExecStart=/opt/sr-venv/bin/uvicorn backend.api.app:create_app --factory --host 127.0.0.1 --port 8000
 Restart=on-failure
 RestartSec=3
+# 本机执行器的 SR 子进程要能跨 sr-api 重启存活，重启后按 PID 接管；
+# 默认 control-group 会连子进程一起杀掉，重启只能看到无判定文件的 UNKNOWN。
+KillMode=process
 
 # 阶段4 必填：盘阵场景根（nginx.conf 的 alias /data/scenes/ 须与此一致）
 Environment=SR_SCENES_ROOT=/data/scenes
@@ -59,6 +62,13 @@ Environment=SR_LLM_MOCK=0
 # Environment=SR_LLM_RESPONSE_TIMEOUT=600
 # SR_SLURM_FAKE 只对已冻结的调度分支有效（执行器=slurm 时才读），当前路线保持 0 即可
 Environment=SR_SLURM_FAKE=0
+# 生产批量执行人工准入开关（2026-11-16）：只有内网单景真实 SR 联验通过后才置 1。
+# 执行器二选一：SR_EXECUTOR=slurm 时 SR_SLURM_FAKE 必须为 0；SR_EXECUTOR=local
+# 时主机必须有可用 bash。两种执行器都要求 SR_SLURM_WORK_DIR 存在且可写。
+# 任一不满足，计划卡保持「暂不可执行」并给出原因。
+# 真机若用 drop-in 覆盖，应在 /etc/systemd/system/sr-api.service.d/ 新增
+# 50-production.conf 写入本行，不要直接改部署后的单元正文。
+Environment=SR_BATCH_PRODUCTION=1
 # 可选：预览 JPG 缓存根（默认落源同目录）。配了必须在 SR_SCENES_ROOT 之下。
 # Environment=SR_PREVIEWS_ROOT=/data/scenes/.previews
 #
@@ -138,9 +148,23 @@ Environment=SR_SR_SCRIPT=code_0817_prod_slurm.py
 Environment=SR_VERIFY_SCRIPT=verify_sr_run.py
 #
 # SR_SLURM_WORK_DIR 是**历史变量名**（本机直跑沿用）：config.xml、运行脚本、
-#    子进程日志与 .local_job_seq 都落在这里。本机直跑不再要求共享盘，但 User=nginx
-#    必须可写；默认值 /tmp/sr_agent_work 在 CentOS7 上常是 tmpfs，建议放盘阵。
+#    子进程日志、.local_job_seq 与 .local_jobs.json 都落在这里。本机直跑不再要求
+#    共享盘，但 User=nginx 必须可写；默认值 /tmp/sr_agent_work 在 CentOS7 上常是
+#    tmpfs，建议放盘阵。
+# 新变量 SR_WORK_DIR 是执行器中立名，**两者都设时新值优先**；尚未改名的历史
+#    drop-in 继续有效，不需要为了升级改配置。
+# Environment=SR_WORK_DIR=/DiskArray/tmp/wangrz/sr_agent_work
 Environment=SR_SLURM_WORK_DIR=/DiskArray/tmp/wangrz/sr_agent_work
+# 可选：本机子进程墙钟上限（秒）。0/不配 = 不设上限；超时会杀掉整棵进程树，
+#    判定文件缺失时队列显示 TIMEOUT，不冒充成功。
+# Environment=SR_LOCAL_JOB_TIMEOUT_SEC=7200
+# 可选：本机生产预检。首次计划准备（或服务启动且 SR_BATCH_PRODUCTION=1）执行一次，
+#    结果按 env 快照缓存，计划卡轮询不会反复 import torch / 调 nvidia-smi。
+#    SR_PREFLIGHT_IMPORTS 缺省 torch,osgeo,numpy；两个超时缺省 30s / 5s。
+#    模型配置沿用 config.py 的默认 OPT；计划参数里的 options_yml 仍按原逻辑生效。
+# Environment=SR_PREFLIGHT_IMPORTS=torch,osgeo,numpy
+# Environment=SR_PREFLIGHT_PYTHON_TIMEOUT_SEC=30
+# Environment=SR_PREFLIGHT_GPU_TIMEOUT_SEC=5
 #
 # 以下四项只对已冻结的调度分支（SR_EXECUTOR=slurm）有效，当前路线不读，原样留存。
 # SR_SLURM_PARTITION 是 2026-09-11 `sinfo -h -o "%P"` 的实测值（centos7 / deicc /

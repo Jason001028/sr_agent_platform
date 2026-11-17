@@ -2,13 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { focusMissionItems, missionItemLabel, missionItems, missionSummary, missionTrackText, recordMissionItem } from '../batchMission';
 import { missionFixture } from './batchMissionFixture';
 describe('Quiet Mission authoritative projection', () => {
-  it('keeps stage-specific numerators/denominators, never a synthetic total ratio', () => {
+  it('keeps stage-specific numerators with the same eligible batch denominator', () => {
     const s = missionFixture();
     expect(missionSummary(s)).toMatchObject({ value: '21 / 27', label: '检测进度' });
     s.counts.detecting = 0; s.goal.phase = 'monitoring';
-    expect(missionSummary(s)).toMatchObject({ value: '13 / 18', label: 'SR 提交进度' });
+    expect(missionSummary(s)).toMatchObject({ value: '13 / 27', label: 'SR 提交进度' });
     s.goal.phase = 'verifying'; s.counts.verifying = 1;
-    expect(missionSummary(s)).toMatchObject({ value: '8 / 13', label: '验收进度' });
+    expect(missionSummary(s)).toMatchObject({ value: '8 / 27', label: '验收进度' });
   });
   it('distinguishes unknown, not applicable and a real zero', () => {
     expect(missionTrackText({ done: 0, total: 0, known: false, applicable: false })).toBe('统计中');

@@ -708,12 +708,59 @@ class BatchWorkerTest(unittest.TestCase):
         self.assertEqual(len(meta["sha256"]), 64)
         self.assertFalse(path.with_name("mask.tmp.tif").exists())
 
-    def test_demo_gate_rejects_production_local_and_bad_work_dir(self):
-        with self.assertRaises(batch_worker.BatchGateError):
+    def test_production_gate_requires_opt_in_and_accepts_slurm_or_local(self):
+        # Default: closed even though this fixture has a Slurm executor, because
+        # the operator has not recorded the intranet single-scene acceptance.
+        with self.assertRaises(batch_worker.BatchGateError) as closed:
             batch_worker.ensure_execution_allowed("production")
-        with mock.patch.dict(os.environ, {"SR_EXECUTOR": "local"}):
+        self.assertIn("SR_BATCH_PRODUCTION=1", str(closed.exception))
+        with mock.patch.dict(os.environ, {"SR_BATCH_PRODUCTION": "1"}):
+            # SR_SLURM_FAKE=1 is inherited from setUp and must stay refused.
             with self.assertRaises(batch_worker.BatchGateError):
-                batch_worker.ensure_execution_allowed("demo")
+                batch_worker.ensure_execution_allowed("production")
+            with mock.patch.dict(os.environ, {"SR_SLURM_FAKE": "0"}):
+                self.assertEqual(
+                    batch_worker.ensure_execution_allowed("production"),
+                    self.root / "work")
+            # The local executor is a first-class production path; the gate
+            # consumes its cached preflight result (Fake is inert here).
+            with mock.patch.dict(os.environ, {"SR_EXECUTOR": "local"}), \
+                 mock.patch("backend.services.local_exec.preflight",
+                            return_value={"ok": True, "reason": None}):
+                self.assertEqual(
+                    batch_worker.ensure_execution_allowed("production"),
+                    self.root / "work")
+            with mock.patch.dict(os.environ, {"SR_EXECUTOR": "local"}), \
+                 mock.patch("backend.services.local_exec.preflight",
+                            return_value={"ok": False,
+                                          "reason": "python unavailable"}):
+                with self.assertRaises(batch_worker.BatchGateError) as bad:
+                    batch_worker.ensure_execution_allowed("production")
+                self.assertIn("python unavailable", str(bad.exception))
+            with mock.patch.dict(os.environ, {"SR_EXECUTOR": "podman"}):
+                with self.assertRaises(batch_worker.BatchGateError):
+                    batch_worker.ensure_execution_allowed("production")
+            with mock.patch.dict(os.environ, {"SR_SLURM_FAKE": "0",
+                                              "SR_SLURM_WORK_DIR": ""}):
+                with self.assertRaises(batch_worker.BatchGateError):
+                    batch_worker.ensure_execution_allowed("production")
+            with mock.patch.dict(os.environ, {"SR_SLURM_FAKE": "0",
+                                              "SR_SLURM_WORK_DIR": str(self.root / "missing")}):
+                with self.assertRaises(batch_worker.BatchGateError):
+                    batch_worker.ensure_execution_allowed("production")
+
+    def test_gate_prefers_the_executor_neutral_work_dir(self):
+        neutral = self.root / "neutral"
+        neutral.mkdir()
+        with mock.patch.dict(os.environ, {
+                "SR_BATCH_PRODUCTION": "1", "SR_SLURM_FAKE": "0",
+                "SR_WORK_DIR": str(neutral)}):
+            self.assertEqual(
+                batch_worker.ensure_execution_allowed("production"), neutral)
+
+    def test_demo_gate_supports_local_and_rejects_unsafe_legacy_config(self):
+        with mock.patch.dict(os.environ, {"SR_EXECUTOR": "local", "SR_DEMO_WORK_DIR": str(self.root / "demo")}):
+            self.assertEqual(batch_worker.ensure_execution_allowed("demo"), self.root / "demo")
         with mock.patch.dict(os.environ, {"SR_SLURM_FAKE": "0"}):
             with self.assertRaises(batch_worker.BatchGateError):
                 batch_worker.ensure_execution_allowed("demo")
@@ -727,6 +774,36 @@ class BatchWorkerTest(unittest.TestCase):
                 work)
         batch_worker._check_submit_receipt(
             {"batch_script": str(work / "ok.sh"), "job_id": 1}, work)
+
+    def test_local_demo_completes_without_real_or_slurm_submission(self):
+        self.query_patch.stop()
+        with mock.patch.dict(os.environ, {"SR_EXECUTOR": "local", "SR_SLURM_FAKE": "0",
+                                          "SR_DEMO_WORK_DIR": str(self.root / "demo")}), \
+             mock.patch.object(sr_service, 'submit_run_sr', side_effect=AssertionError('real submit reached')), \
+             mock.patch('backend.services.local_exec.submit', side_effect=AssertionError('process reached')):
+            goal, _ = self.make_goal(2)
+            self.run_until(lambda: self.statuses(goal['goal_id']) == {'SUCCEEDED'})
+            self.assertEqual(self.submits, [])
+            tasks = self.store._db().execute('SELECT fingerprint FROM sr_tasks').fetchall()
+            self.assertEqual(len(tasks), 2)
+            from backend.services import demo_exec
+            for row in tasks:
+                task = self.store.get_sr_task(row[0])
+                self.assertEqual(task['params'][demo_exec.MARKER], 1)
+                self.assertEqual(task['preview_state'], 'skipped')
+                from backend.services import goal_worker, image_refresh
+                self.assertFalse(goal_worker.sr_contract(task, {'state':'COMPLETED'})['ok'])
+                completed = {**task, 'status':'COMPLETED'}
+                self.assertEqual(image_refresh.discover(completed, self.root)['state'], 'unavailable')
+                # Status derives from the durable row even after a Store reopen.
+                reopened = Store(self.root / 'test.db')
+                try:
+                    restored = reopened.get_sr_task(row[0])
+                    self.assertEqual(sr_service.query_job_status(restored['job_id'], task=restored)['state'], 'COMPLETED')
+                finally:
+                    reopened.close()
+                receipt = demo_exec.submit(task['params'], store=self.store)
+                self.assertEqual(receipt['job_id'], task['job_id'])
 
     def test_two_schedulers_do_not_submit_one_item_twice(self):
         goal, _ = self.make_goal(1)

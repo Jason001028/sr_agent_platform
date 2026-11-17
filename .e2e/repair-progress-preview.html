@@ -1,0 +1,16 @@
+<!doctype html><html lang="zh-CN"><meta charset="UTF-8"><title>Repair progress fixture</title>
+<style>body{margin:0;background:#e5ede9;font:13px system-ui}#app{margin:24px auto;max-width:calc(100vw - 24px)}</style>
+<div id="app"></div><script type="module">
+import {createApp,h} from 'vue';
+import './src/style.css';
+import Card from './src/components/AgentRepairPlanCard.vue';
+const q=new URLSearchParams(location.search), scenario=q.get('state')||'running';
+document.querySelector('#app').style.width=(q.get('width')||'292')+'px';
+const plan={kind:'repair_plan.v1',contract_version:'repair_plan.v1',plan_id:'plan_'+'a'.repeat(24),version:1,status:'STARTED',goal_id:'fixture',scope:'batch',mode:'production',targets:{total:27,applicable:27,excluded:0,items:[]},strategy:{detection_method:'absdiff',mask:'auto_or_existing'},execution:{allowed:true,mode:'production'}};
+const done=scenario==='done'?27:scenario==='waiting'?0:3;
+const track={done:3,total:3,known:true,applicable:true};
+window.fixtureStatus={plan,goal:{goal_id:'fixture',status:scenario==='done'?'COMPLETED':'RUNNING',phase:scenario==='waiting'?'waiting_quality_review':'detecting',monitoring_done:scenario==='done'},
+counts:scenario==='unknown'?null:{total:27,eligible:27,detected:scenario==='waiting'?27:done,submitted:scenario==='waiting'?27:done,verified:done,no_issue:0,failed:0,blocked:0,excluded:0,in_flight_sr:scenario==='waiting'?0:1,detection_pending:scenario==='waiting'?0:24},
+progress:{detection:track,submission:track,verification:track},items:scenario==='done'?[]:[{item_id:'one',name:'JL1KF02B02_PMS04_20261025120913_'+ 'LONG_SCENE_FILENAME_'.repeat(20)+'.tif',status:scenario==='waiting'?'AWAITING_REVIEW':'DETECTING'}]};
+createApp({render:()=>h(Card,{data:plan})}).mount('#app');
+</script></html>

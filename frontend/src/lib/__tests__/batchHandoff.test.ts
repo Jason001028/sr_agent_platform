@@ -31,6 +31,8 @@ it('requests one auto-sent Agent repair that still needs plan confirmation', () 
   expect(detail.autoSend).toBe(true);
   expect(detail.text).toBe(AGENT_REPAIR_PROMPT);
   expect(detail.text).toContain('prepare_repair');
+  expect(detail.text).toContain('mode=production');
+  expect(detail.text).toContain('不切换模拟');
   expect(detail.text).toContain('不要直接提交 SR');
   expect(detail.text).toContain('确认后启动');
   expect(detail.text).not.toContain('start_repair');

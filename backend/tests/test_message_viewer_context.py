@@ -140,8 +140,10 @@ def test_workspace_validation_normalizes_and_bounds():
     assert w['truncated'] is True      # total 6 > 实际留下 1 条
 
 
-def test_resource_budget_trim_is_not_reported_as_scene_truncation():
+def test_resource_budget_trim_is_not_reported_as_scene_truncation(monkeypatch):
     """本地资源身份被预算裁掉 ≠ 场景候选被丢；只有后者才拦修复计划。"""
+    # Exercise trimming explicitly, independent of deployment budget changes.
+    monkeypatch.setattr('backend.services.viewer_context.WORKSPACE_MAX_BYTES', 24000)
     items = [(f'~scene-{n}', f'S{n}') for n in range(20)]
     resources = [{'id': n, 'name': 'L' * 300, 'image_key': 'k' * 140,
                   'source_revision': 'r' * 64, 'width': 100, 'height': 100}

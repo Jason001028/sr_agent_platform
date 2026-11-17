@@ -50,6 +50,13 @@
 | `SR_LLM_STREAM` | `1` | 模型流式输出总开关；`0/false/no/off` → 关（退回一次性 create，请求里的 `stream:true` 不能强开） |
 | `SR_EXECUTOR` | `slurm`（仓库默认） | 生产部署写 `local`（本机直跑）；`slurm` 是已冻结的调度分支 |
 | `SR_SLURM_FAKE` | 未设 | `=1` 且执行器为 `slurm` 时提交走内存假调度器（§5.2），无 sbatch 也能跑通 submit→status→cancel |
+| `SR_BATCH_PRODUCTION` | 未设 | `=1` 才允许 production 批量提交（内网单景 SR 验收后由运维显式打开）；`SR_EXECUTOR=slurm` 时要求 `SR_SLURM_FAKE` 非 1，`SR_EXECUTOR=local` 时要求本机预检通过；两种执行器都要求工作目录存在且可写 |
+| `SR_WORK_DIR` | 未设 | 执行器中立的通用工作目录（config.xml、脚本、日志、本地队列）。**优先于**旧 `SR_SLURM_WORK_DIR`；两者都未设时用 `/tmp/sr_agent_work` |
+| `SR_SLURM_WORK_DIR` | 未设 | 历史工作目录名，继续兼容；`SR_WORK_DIR` 未设时生效 |
+| `SR_LOCAL_JOB_TIMEOUT_SEC` | `0`（不超时） | 本机子进程墙钟上限；超时杀整棵进程树，状态报 `TIMEOUT`，不冒充成功 |
+| `SR_PREFLIGHT_IMPORTS` | `torch,osgeo,numpy` | 本机生产预检用 `SR_PYTHON` 导入的模块；失败即阻断计划 |
+| `SR_PREFLIGHT_PYTHON_TIMEOUT_SEC` | `30` | 预检导入超时 |
+| `SR_PREFLIGHT_GPU_TIMEOUT_SEC` | `5` | `nvidia-smi` 预检超时；模型权重按 config.py 的默认 OPT 检查 |
 | `SR_SCENES_ROOT` | 未设 | 盘阵场景根；未设 → fake 回退（阶段4 已有） |
 | `SR_PRODUCT_PREVIEW_DIV` | `4` | **产物预览急生成**用哪一档（见 §4.5）；取值不在 `PREVIEW_DIVISORS = (2,4,8,16,32)` 里 → 当 `0` 处理并写一行启动日志，**不抛异常**；`0` = 关掉急生成（只剩惰性路径）。与前端 `DEFAULT_PREVIEW_DIV`（同为 4）**互不联动**——浏览器档位存在 localStorage，服务端看不见，这正是必须有服务端默认档的原因 |
 | `SR_PRODUCT_PREVIEW_MAX_AGE_SEC` | `86400` | 只生成 `finished_at` 落在这个窗口内的行；挡掉升级当天把历史 COMPLETED 行全生成一遍。`finished_at IS NULL` 的一律不生成 |

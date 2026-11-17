@@ -212,6 +212,11 @@ class SrRuntime:
     locked_dir: str | None    # None → /api/queue accepts any absolute lq_path
     local_gpu: str            # CUDA_VISIBLE_DEVICES for the local child
 
+    @property
+    def work_dir(self) -> str:
+        """Executor-neutral alias; the field name predates the local route."""
+        return self.slurm_work_dir
+
 
 def sr_runtime() -> SrRuntime:
     """Snapshot the SR env **at call time** (never cached).
@@ -238,7 +243,12 @@ def sr_runtime() -> SrRuntime:
     return SrRuntime(
         bundle_dir=os.environ.get("SR_BUNDLE_DIR") or SR_DEFAULT_BUNDLE_DIR,
         python=os.environ.get("SR_PYTHON") or SR_DEFAULT_PYTHON,
-        slurm_work_dir=os.environ.get("SR_SLURM_WORK_DIR") or SR_DEFAULT_WORK_DIR,
+        # ``SR_WORK_DIR`` is the executor-neutral name.  ``SR_SLURM_WORK_DIR``
+        # stays as a fallback so historical systemd/drop-in deployments keep
+        # working without a config change.
+        slurm_work_dir=(os.environ.get("SR_WORK_DIR")
+                        or os.environ.get("SR_SLURM_WORK_DIR")
+                        or SR_DEFAULT_WORK_DIR),
         partition=os.environ.get("SR_SLURM_PARTITION") or "",
         gres=env_int("SR_SLURM_GRES", SR_DEFAULT_SLURM_GRES),
         time=os.environ.get("SR_SLURM_TIME") or SR_DEFAULT_SLURM_TIME,

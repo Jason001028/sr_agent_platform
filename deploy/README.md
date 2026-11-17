@@ -596,14 +596,15 @@ ls -l code_0817_prod.py                                          # ✓= 生产�
 > 卡；失败时执行 `systemctl stop slurmd.service`（本机直跑时以 `User=nginx` 身份执行是权限拒绝；
 > 若有 root 进程跑它，会**真把节点从调度池里摘掉**）。
 
-env——`sr-api.service` 里**下面七项**全部必填，node81-135 实测值（详见 service 内注释）：
+env——`sr-api.service` 里除工作目录新旧名二选一外，下面其余项必填；node81-135 实测值（详见 service 内注释）：
 
 | env | node81-135 实测值 | 说明 |
 | --- | --- | --- |
 | `SR_EXECUTOR` | `local` | `slurm`（仓库默认）/ `local` 二选一。**真机必须显式写 `local`**，否则会走已冻结的调度分支 |
 | `SR_PYTHON` | `/run/media/root/SSD/program/anaconda/installed/envs/torch1.9.1py36/bin/python` | **SR 生产解释器**（py3.6 + torch + GDAL + ImgHistMatch.so），与平台 venv `/opt/sr-venv`（py3.9）平行、互不污染——后端不 import SR/torch/GDAL，只在运行脚本里写一行解释器路径，由子进程解析。2026-09-14 实测：**torch 1.10.2+cu113 / GDAL 2.4.0**（目录名里的 1.9.1 ≠ 实际版本）。2026-09-15 `ls -d` 复核：该前缀存在，可直接照抄（备选的 `/media/node81-135/SSD` 不存在） |
 | `SR_BUNDLE_DIR` | `/DiskArray/tmp/wangrz/mmsr_bundle_240617/codes` | `code_0817_prod.py` / `models` / `utils` / `options` 所在目录；拼写以 `code_0817_prod.py:27` 的 `load_library()` 为准 |
-| `SR_SLURM_WORK_DIR` | `/DiskArray/tmp/wangrz/sr_agent_work` | **历史变量名**（本机直跑沿用）：config.xml、运行脚本、子进程日志与 `.local_job_seq` 的落盘处。本机直跑不再要求共享盘，但必须是 **nginx 可写**的本机/盘阵路径；默认值 `/tmp/sr_agent_work` |
+| `SR_WORK_DIR` | `/DiskArray/tmp/wangrz/sr_agent_work` | **执行器中立的新名字**（推荐）。config.xml、运行脚本、子进程日志、`.local_job_seq` 与 `.local_jobs.json` 的落盘处；优先于旧变量，必须是 **nginx 可写**的本机/盘阵路径 |
+| `SR_SLURM_WORK_DIR` | 同上 | **历史变量名**，继续兼容；`SR_WORK_DIR` 未设时生效。**不要同时给两者设不同值** |
 | `SR_SR_SCRIPT` | `code_0817_prod_slurm.py` | 作业跑哪个超分脚本（相对 `SR_BUNDLE_DIR`）。**不配 = 跑生产原脚本**，见上面的警告 |
 | `SR_VERIFY_SCRIPT` | `verify_sr_run.py` | 作业内契约校验器（相对 `SR_BUNDLE_DIR`）。不配也会跑这个名字，显式写出来是为了可审计。⚠️ 该文件必须是本批版本，否则终态可能判错（§7.3） |
 | `SR_LOCAL_GPU` | `0` | 透传成子进程的 `CUDA_VISIBLE_DEVICES`（本机多卡时选哪张）。只有 `SR_EXECUTOR=local` 时生效 |
@@ -614,6 +615,8 @@ env——`sr-api.service` 里**下面七项**全部必填，node81-135 实测值
 | --- | --- |
 | `SR_LOCKED_DIR` | **一旦设置，`POST /api/queue` 只接受这一个 `lq_path`**（两侧去尾部 `/` + `realpath` 后比较），不匹配返回 400；不设 = 任意白名单内路径 |
 | `SR_SANDBOX_ROOT` | 只对调度器分支有效；`SR_EXECUTOR=local` 时被强制忽略（§7.5） |
+| `SR_LOCAL_JOB_TIMEOUT_SEC` | 本机子进程墙钟上限（秒）；0/不配 = 不设上限。超时杀整棵进程树并报 TIMEOUT |
+| `SR_PREFLIGHT_IMPORTS` / `SR_PREFLIGHT_*_TIMEOUT_SEC` | 本机生产预检的导入模块（缺省 `torch,osgeo,numpy`）与 Python/GPU 超时（缺省 30s / 5s）；模型权重按 config.py 默认 OPT 检查 |
 
 改完 `systemctl daemon-reload && systemctl restart sr-api`（`backend/config.sr_runtime()` 在进程内缓存
 一次，不 restart 不生效；已经生成并提交的作业不受影响——脚本名是**生成时**写进运行脚本文本的）。
@@ -756,9 +759,16 @@ SR 团队自己的配置文件（`sfsr_confgig_test_espan2_cuda1.xml`，同时�
 执行器的行为（`backend/services/local_exec.py`）：
 
 - **单槽串行**：同一时刻只跑一个作业（模块级锁当槽位），后到的排队 `PENDING`，前一个结束才
-  `RUNNING`。日志 `<SR_SLURM_WORK_DIR>/<运行脚本名>.<job_id>.out`；
-- **job_id**：自增整数，序号持久化在 `<SR_SLURM_WORK_DIR>/.local_job_seq`，sr-api 重启不重复
+  `RUNNING`。日志 `<工作目录>/<运行脚本名>.<job_id>.out`（工作目录 = `SR_WORK_DIR`，未设时
+  回退旧 `SR_SLURM_WORK_DIR`）；
+- **job_id**：自增整数，序号持久化在 `<工作目录>/.local_job_seq`，sr-api 重启不重复
   （`_SREXIT_<job_id>.txt` 靠它不串号）。作业脚本里显式带 `--job-id <id>`；
+- **重启恢复**：队列与 PID 写入 `<工作目录>/.local_jobs.json`。sr-api 启动时恢复 queued
+  记录、按 PID 接管仍存活的 running 记录；同一 job_id 不会启动第二个子进程。service 用
+  `KillMode=process` 让子进程跨重启存活。已被系统杀掉且无判定文件的作业仍是 UNKNOWN；
+- **超时**：`SR_LOCAL_JOB_TIMEOUT_SEC` 到点杀整棵进程树，状态 `TIMEOUT`；
+- **生产预检**：local + `SR_BATCH_PRODUCTION=1` 时检查 bash、工作目录、`SR_PYTHON` 导入、
+  算法入口、模型权重与 GPU；结果按 env 快照缓存，计划卡轮询不重复探测；
 - **子进程环境**：从 sr-api 的环境复制后只改四件事——删 `VIRTUAL_ENV`/`PYTHONHOME`/`PYTHONPATH`
   （sr-api 跑在 `/opt/sr-venv` py3.9，别让这些变量漏进 conda py3.6）、`PATH` 前置
   `dirname(SR_PYTHON)`、设 `CUDA_VISIBLE_DEVICES`、设 `SR_EXECUTOR=local`；其余原样保留

@@ -34,6 +34,7 @@
 | `--motion-spin` | 900ms | 不定进度旋转 |
 | `--motion-think` | 1200ms | 思考点循环 |
 | `--motion-think-step` | 150ms | 思考点错峰延迟（第二个点 ×1，第三个点 ×2） |
+| `--motion-breathe` | 2600ms | 状态指示灯呼吸（只改透明度与光晕，不旋转、不缩放） |
 
 ### 2.2 缓动
 
@@ -74,6 +75,7 @@ CSS 变量无法在 `requestAnimationFrame` 循环里读取，故前两项以常
 | 一次性的结果强调 | `--motion-emphasis` + `--ease-enter` |
 | 加载旋转 | `--motion-spin` + `--ease-linear` |
 | 思考点 | `--motion-think` + `--ease-loop` |
+| 运行状态指示灯（环形呼吸） | `--motion-breathe` + `--ease-loop` |
 | 查看器双击适配 / 分屏回正 | `VIEW_FIT_MS` / `VIEW_RESET_MS` + `easeOutCubic` |
 
 ## 4. 边界

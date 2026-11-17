@@ -107,7 +107,7 @@ def probe_execution(mode: str) -> dict:
         batch_worker.ensure_execution_allowed(mode)
     except Exception as exc:  # noqa: BLE001 — availability is reported, not raised
         return {"allowed": False, "mode": mode,
-                "reason": f"{type(exc).__name__}: {exc}"}
+                "reason": f"当前修复执行环境未就绪：{exc}"}
     return {"allowed": True, "mode": mode, "reason": None}
 
 
@@ -1224,12 +1224,25 @@ def _report_info(goal_id: str) -> dict:
     return {"available": True, "updated_at": stat.st_mtime}
 
 
+def _execution_is_current(plan: dict) -> dict:
+    """Re-probe a not-yet-started plan instead of serving a stale gate verdict.
+
+    The persisted ``execution`` block is a snapshot from preparation time.
+    Once the operator opens ``SR_BATCH_PRODUCTION`` (or a prerequisite changes),
+    the existing plan card must reflect the current gate; ``start_repair``
+    already re-probes, so this only keeps the read model from contradicting it.
+    """
+    if plan.get("goal_id") or plan.get("status") not in ("READY", "CONFIRMED"):
+        return plan
+    return {**plan, "execution": probe_execution(plan.get("mode") or "demo")}
+
+
 def get_repair_status(store, plan_id: str) -> dict:
     plan = store.get_repair_plan(plan_id)
     if not plan:
         raise KeyError("repair plan not found")
     result = {
-        "plan": public_plan(plan),
+        "plan": public_plan(_execution_is_current(plan)),
         "goal": None,
         "counts": None,
         "items": [],

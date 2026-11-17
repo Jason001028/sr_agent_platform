@@ -10,6 +10,12 @@
 import { ref } from 'vue';
 
 export const batchDockOpen = ref(false);
+export const batchMaskRequest = ref<{ goalId: string; token: number } | null>(null);
+export function requestMaskReview(goalId: string): void {
+  batchMaskRequest.value = { goalId, token: (batchMaskRequest.value?.token ?? 0) + 1 };
+  openBatchDock();
+  window.dispatchEvent(new CustomEvent('batch-task-open', { detail: { section: 'monitor' } }));
+}
 
 export function openBatchDock(): void {
   batchDockOpen.value = true;

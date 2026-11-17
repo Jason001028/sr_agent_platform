@@ -2,6 +2,7 @@
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue';
 import { useDiffStore } from '../stores/diff';
 import { useViewerStore } from '../stores/viewer';
+import { heatPalette } from '../lib/heatPalette';
 import { colorizeHeatBytes, drawDiffSource, HEAT_GRADIENT, SMART_HEAT_GRADIENT } from '../lib/diffRender';
 import { gridCoverageToThumb, gridRectToThumb } from '../lib/diffLocate';
 import type { DiffMethod } from '../lib/diffLocate';
@@ -25,7 +26,7 @@ function colorize(){
   for(const [method,{raw,heat}] of layers){
     heat.width=raw.w;heat.height=raw.h;
     heat.getContext('2d')!.putImageData(new ImageData(colorizeHeatBytes(raw.diff,raw.w,raw.h,raw.valid,null,
-      {smart:method==='smart',threshold:method==='smart'?diff.displayThreshold:0}) as Uint8ClampedArray<ArrayBuffer>,raw.w,raw.h),0,0);
+      {palette:heatPalette.value,threshold:method==='smart'?diff.displayThreshold:0}) as Uint8ClampedArray<ArrayBuffer>,raw.w,raw.h),0,0);
   }
   schedule();
 }
@@ -53,7 +54,7 @@ async function load(){
   finally{if(gen===generation)loading.value=false;}
 }
 watch(()=>diff.comparison,()=>{void load();});
-watch(()=>diff.displayThreshold,colorize);
+watch([()=>diff.displayThreshold,heatPalette],colorize);
 watch([mode,()=>diff.opacity],schedule);
 watch(()=>diff.selectedRegion,region=>{
   if(!region||!diff.result)return;
@@ -77,7 +78,7 @@ onBeforeUnmount(()=>{generation++;observer?.disconnect();cancelAnimationFrame(fr
         <canvas :ref="el=>{if(el)canvases.set(method,el as HTMLCanvasElement)}" :aria-label="names[method]+'热力图'"
           :data-view-transform="JSON.stringify(camera)" @wheel.prevent="wheel" @pointerdown="down" @pointermove="move" @pointerup="drag=null" @pointercancel="drag=null" @dblclick="fit" />
         <b>{{ names[method] }}</b>
-        <div class="method-legend"><i :style="{background:method==='smart'?SMART_HEAT_GRADIENT:HEAT_GRADIENT}"></i><span>0 · 低 — 1 · 高</span><small v-if="method==='smart'">相对异常强度 · 非概率</small></div>
+        <div class="method-legend"><i :style="{background:heatPalette==='spectrum'?SMART_HEAT_GRADIENT:HEAT_GRADIENT}"></i><span>0 · 低 — 1 · 高</span><small v-if="method==='smart'">相对异常强度 · 非概率</small></div>
         <p v-if="!diff.comparison?.results[method]" class="failure">{{ diff.comparison?.summary.find(s=>s.method===method)?.error||'该方法无可用结果' }}</p>
       </div>
     </div>

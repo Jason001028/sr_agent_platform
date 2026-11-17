@@ -141,6 +141,8 @@
   --motion-spin: 900ms;
   --motion-think: 1200ms;
   --motion-think-step: 150ms;
+  /* 状态指示灯呼吸：慢循环，只改透明度与光晕，不做旋转或缩放。 */
+  --motion-breathe: 2600ms;
   --ease-standard: ease;
   --ease-enter: ease-out;
   --ease-linear: linear;

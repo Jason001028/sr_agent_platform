@@ -29,7 +29,7 @@ const plan = (n = 2, over: Partial<RepairPlan> = {}): RepairPlan => ({
   version: 1, scope: 'batch', status: 'READY', confirmation_required: true,
   targets: { total: n, excluded: 0, applicable: n, items: [] },
   strategy: { detection: 'existing_diff_pipeline', detection_method: 'absdiff', mask: 'auto_or_existing', execution: 'existing_batch_runtime' },
-  mode: 'demo', execution: { allowed: true, mode: 'demo', reason: null },
+  mode: 'production', execution: { allowed: true, mode: 'production', reason: null },
   manifest_ref: 'manifest:test', title: '批量自动修复',
   ...over,
 });
@@ -78,7 +78,7 @@ describe('compact sequence selection', () => {
     start().click(); await flush();
     expect(apiPrepareRepair).toHaveBeenCalledTimes(1);
     expect(vi.mocked(apiPrepareRepair).mock.calls[0][0]).toMatchObject({
-      session_id: 'session-a', mode: 'demo',
+      session_id: 'session-a', mode: 'production',
       sources: [{ path: '/prod/A/PAN.tif', name: 'A', evidence: expect.any(String) }],
     });
     expect(start().textContent).toContain('确认并启动 · 1 景');
@@ -105,12 +105,12 @@ describe('compact sequence selection', () => {
     expect(apiConfirmRepair).not.toHaveBeenCalled();
     expect(root.querySelector('[role=alert]')?.textContent).toContain('备份');
   });
-  it('keeps a valid plan when demo execution is unavailable and never confirms it', async () => {
-    vi.mocked(apiPrepareRepair).mockResolvedValue(plan(2,{execution:{allowed:false,mode:'demo',reason:"BatchGateError: demo batch requires SR_EXECUTOR=slurm, got 'local'"}}) as never);
+  it('keeps a real plan when production is unavailable without falling back to Demo', async () => {
+    vi.mocked(apiPrepareRepair).mockResolvedValue(plan(2,{execution:{allowed:false,mode:'production',reason:'真实自动修复尚未准入'}}) as never);
     await mount();
     start().click();await flush();
     expect(root.querySelector('[data-e2e=batch-plan-summary]')?.textContent).toContain('2 景');
-    expect(root.querySelector('[role=status]')?.textContent).toContain('本地执行器');
+    expect(root.querySelector('[role=status]')?.textContent).toContain('未准入');
     expect(root.querySelector('[role=alert]')).toBeNull();
     expect(start().disabled).toBe(true);
     start().click();await flush();
@@ -142,12 +142,20 @@ describe('compact sequence selection', () => {
     await mount();
     start().click(); await flush();
     expect(start().textContent).toContain('确认并启动');
-    const detection = root.querySelectorAll<HTMLSelectElement>('select')[1]!;
+    const detection = root.querySelector<HTMLSelectElement>('select')!;
     detection.value = 'ssim';
     detection.dispatchEvent(new Event('change'));
     await flush();
     expect(apiConfirmRepair).not.toHaveBeenCalled();
     expect(start().textContent).toContain('准备修复计划');
+  });
+  it('rejects a Demo response instead of confirming the wrong execution mode', async () => {
+    vi.mocked(apiPrepareRepair).mockResolvedValue(plan(2,{mode:'demo'}) as never);
+    await mount(); start().click(); await flush();
+    expect(root.querySelector('[role=alert]')?.textContent).toContain('不会启动模拟');
+    expect(apiConfirmRepair).not.toHaveBeenCalled();
+    expect(apiStartRepair).not.toHaveBeenCalled();
+    expect(root.querySelector('[aria-label="批量执行模式"]')).toBeNull();
   });
   it('discards the prepared plan when the session changes', async () => {
     await mount();

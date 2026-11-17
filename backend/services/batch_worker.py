@@ -175,34 +175,83 @@ def batch_config(manifest):
     }
 
 
+def _work_dir_env() -> str:
+    """Explicit batch work directory, new name first, legacy second.
+
+    ``SR_WORK_DIR`` is executor-neutral; ``SR_SLURM_WORK_DIR`` remains valid
+    so existing units/drop-ins do not need to change.  An empty new value does
+    not shadow a legacy one.
+    """
+    return ((os.environ.get("SR_WORK_DIR") or "").strip()
+            or (os.environ.get("SR_SLURM_WORK_DIR") or "").strip())
+
+
 def ensure_execution_allowed(mode):
     """Refuse to mix demo and production execution paths.
 
-    The fake scheduler is only reachable through the Slurm executor; with
-    ``SR_EXECUTOR=local`` the same submit would start a real child process, so
-    the fake flag alone is not enough evidence.  The work directory must be an
-    explicit, writable, non-array directory because ``submit_run_sr`` writes the
-    generated config and batch script there.
+    Local deployments use the independent durable demo executor; no real
+    child process is started. The explicit legacy Slurm Fake configuration
+    remains supported for existing demo fixtures.
+
+    Production batch execution is unlocked only by an explicit operator
+    opt-in (``SR_BATCH_PRODUCTION=1``) recorded after the intranet
+    single-scene SR acceptance. It follows the configured executor: Slurm
+    must be real (never the Fake scheduler), and the local executor must have
+    a usable bash. The switch is checked on every submit, so a deployment
+    that has not opted in keeps refusing production plans instead of silently
+    running real jobs.
     """
     runtime = sr_runtime()
     if mode == "production":
-        raise BatchGateError(
-            "production batch execution is not enabled yet "
-            "(intranet single-scene SR acceptance is still required)")
+        if os.environ.get("SR_BATCH_PRODUCTION") != "1":
+            raise BatchGateError(
+                "production batch execution is not enabled yet "
+                "(set SR_BATCH_PRODUCTION=1 after intranet single-scene "
+                "SR acceptance)")
+        if runtime.executor == "slurm":
+            if runtime.fake:
+                raise BatchGateError(
+                    "production batch cannot run with SR_SLURM_FAKE=1")
+        elif runtime.executor == "local":
+            from backend.services import local_exec
+            preflight = local_exec.preflight()
+            if not preflight["ok"]:
+                raise BatchGateError(preflight["reason"])
+        else:
+            raise BatchGateError(
+                "production batch requires SR_EXECUTOR=slurm or local, "
+                f"got {runtime.executor!r}")
+        raw = _work_dir_env()
+        if not raw:
+            raise BatchGateError(
+                "production batch requires an explicit SR_WORK_DIR "
+                "(or legacy SR_SLURM_WORK_DIR)")
+        root = Path(raw).resolve()
+        if not root.is_dir() or not os.access(root, os.W_OK):
+            raise BatchGateError(
+                f"SR_WORK_DIR is not a writable directory: {root}")
+        return root
     if mode != "demo":
         raise BatchGateError(f"unsupported batch mode: {mode!r}")
+    if runtime.executor == "local":
+        from backend.services import demo_exec
+        try:
+            return demo_exec.work_root()
+        except (OSError, ValueError) as exc:
+            raise BatchGateError(str(exc)) from exc
     if runtime.executor != "slurm":
         raise BatchGateError(
             f"demo batch requires SR_EXECUTOR=slurm, got {runtime.executor!r}")
     if not runtime.fake:
         raise BatchGateError("demo batch requires SR_SLURM_FAKE=1")
-    raw = (os.environ.get("SR_SLURM_WORK_DIR") or "").strip()
+    raw = _work_dir_env()
     if not raw:
         raise BatchGateError(
-            "demo batch requires an explicit SR_SLURM_WORK_DIR")
+            "demo batch requires an explicit SR_WORK_DIR "
+            "(or legacy SR_SLURM_WORK_DIR)")
     root = Path(raw).resolve()
     if not root.is_dir() or not os.access(root, os.W_OK):
-        raise BatchGateError(f"SR_SLURM_WORK_DIR is not a writable directory: {root}")
+        raise BatchGateError(f"SR_WORK_DIR is not a writable directory: {root}")
     if "DiskArray" in root.parts:
         raise BatchGateError(
             "demo batch work directory must not be the production array")
@@ -1019,6 +1068,9 @@ def _submit_ready(state, goal, item, lease, cfg, prepared):
             state, goal, current, lease,
             "同一 PAN 已被另一个修复任务占用，拒绝并发提交；"
             "请等待该任务结束或核对已有成果")
+    if mode == "demo" and sr_runtime().executor == "local":
+        from backend.services import demo_exec
+        params = {**params, demo_exec.MARKER: 1}
     fingerprint = sr_service.task_fingerprint(params)
     attempt = _item_attempt(item) + 1
     intent_key = f"batch:{gid}:{item['item_id']}:a{attempt}:{fingerprint}"
@@ -1034,7 +1086,11 @@ def _submit_ready(state, goal, item, lease, cfg, prepared):
         return False
     scope = current_tool.set({"store": store, "intent": reserved["intent"]})
     try:
-        result = sr_service.submit_run_sr(params, store=store)
+        if params.get('_batch_demo_executor') == 1:
+            from backend.services import demo_exec
+            result = demo_exec.submit(params, store=store)
+        else:
+            result = sr_service.submit_run_sr(params, store=store)
     except sr_service.SubmissionUnknown:
         _reconcile_submitting(state, goal, lease)
         return False
@@ -1069,7 +1125,7 @@ def _submit_ready(state, goal, item, lease, cfg, prepared):
             "item_id": item["item_id"], "job_id": job_id,
             "fingerprint": current["checkpoint"].get("sr_fingerprint"),
             "status": result.get("status"),
-            "provenance": "fake" if sr_runtime().fake else "slurm",
+            "provenance": "mock" if mode == "demo" else sr_runtime().executor,
         })])
     return True
 

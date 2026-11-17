@@ -2,6 +2,7 @@
 import { computed } from 'vue';
 import { useDiffStore } from '../stores/diff';
 import { HEAT_GRADIENT, SMART_HEAT_GRADIENT } from '../lib/diffRender';
+import { heatPalette } from '../lib/heatPalette';
 const diff = useDiffStore();
 const noData = computed(() => {
   const r = diff.result;
@@ -14,7 +15,7 @@ const noData = computed(() => {
 <template>
   <div v-if="diff.result" class="diff-color-legend" aria-label="差异强度色标" data-e2e="diff-legend">
     <div class="legend-title"><strong>{{ diff.result.method === 'smart' ? 'LTD' : diff.result.method === 'ssim' ? '1−SSIM' : 'AbsDiff' }}</strong><span>{{ diff.result.method === 'smart' ? '相对异常强度 · 非概率' : '差异强度' }}</span></div>
-    <div class="gradient" :style="{ background: diff.result.method === 'smart' ? SMART_HEAT_GRADIENT : HEAT_GRADIENT }"></div>
+    <div class="gradient" :style="{ background: heatPalette === 'spectrum' ? SMART_HEAT_GRADIENT : HEAT_GRADIENT }"></div>
     <div v-if="diff.result.method === 'smart'" class="tone-note">{{ diff.result.normalization?.mode }} · 尺度 {{ diff.result.normalization?.scale.toFixed(3) }} · 跨图比较需固定校准</div>
     <div class="range"><span>0 · 低</span><span>{{ diff.toneWeight ? '1 · 高（已加权）' : '1 · 高' }}</span></div>
     <div v-if="diff.toneWeight" class="tone-note" data-e2e="diff-legend-tone">

@@ -66,6 +66,16 @@ export interface PendingImage {
 
 /* ================= 纯函数（vitest 可测） ================= */
 
+/** 同名工具可连续调用；只按调用 ID 匹配参数，旧记录缺 ID 时不猜。 */
+export function toolResultArguments(messages: ChatMsg[], result: ChatMsg): unknown {
+  if (!result.toolCallId) return null;
+  for (const message of messages) {
+    const call = message.toolCalls?.find(tc => tc.id === result.toolCallId);
+    if (call) return call.args;
+  }
+  return null;
+}
+
 /** GET messages 一行 → 展示消息（tool 行含 detail，无则显 ok/失败）。 */
 export function msgFromHistory(h: HistoryMsg): ChatMsg {
   if (h.role === 'user') {
@@ -80,14 +90,14 @@ export function msgFromHistory(h: HistoryMsg): ChatMsg {
       : null;
     return { seq: h.seq, role: 'assistant', content: h.content ?? '', toolCalls: tcs };
   }
-  let data: unknown;
-  if (h.content) {
+  let data: unknown = h.data;
+  if (data === undefined && h.content) {
     try { data = JSON.parse(h.content); } catch { /* legacy summarized tool rows */ }
   }
   return {
     seq: h.seq, role: 'tool', content: '',
     toolName: h.tool_name ?? null, toolCallId: h.tool_call_id, ok: h.ok,
-    detail: (h.ok === false && h.content) ? h.content : (h.content ?? ''),
+    detail: h.content || (h.ok === true ? '调用成功' : h.ok === false ? '调用失败' : '结果未确认'),
     data,
   };
 }
@@ -256,12 +266,17 @@ function errText(e: unknown): string {
 
 /** 工具结果 → 一行摘要（search_scenes 解包 source/count，其它截断原样）。 */
 function summarizeData(name: string, data: unknown): string {
+  if (name === 'read_tool_result' && data && typeof data === 'object') {
+    const d = data as { path?: string; shown?: number; total?: number; has_more?: boolean };
+    if (d.shown === undefined) return `已读取结果 ${d.path || '根对象'} 的值`;
+    return `已读取结果 ${d.path || '根对象'}：本页 ${d.shown ?? '?'} 项，共 ${d.total ?? '?'} 项${d.has_more ? '，还有下一页' : ''}`;
+  }
   if (name === 'search_scenes' && data && typeof data === 'object') {
     const d = data as { source?: string; count?: number; results?: unknown[] };
-    return `已检索 ${d.count ?? (d.results ? d.results.length : '?')} 个场景（source=${d.source ?? '?'}）`;
+    return `已检索 ${d.count ?? (d.results ? d.results.length : '?')} 个场景`;
   }
   const s = (() => {
-    try { return JSON.stringify(data); } catch { return String(data); }
+    try { return JSON.stringify(data) ?? '调用成功'; } catch { return String(data); }
   })();
   return s.length > 90 ? s.slice(0, 90) + '…' : s;
 }

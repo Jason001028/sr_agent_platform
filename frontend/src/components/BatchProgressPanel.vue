@@ -7,7 +7,7 @@ import BatchJobQueue from './BatchJobQueue.vue';
 import BatchItemsList from './BatchItemsList.vue';
 import BatchQualityPanel from './BatchQualityPanel.vue';
 import BatchResultReport from './BatchResultReport.vue';
-import { batchQualityRequest } from '../lib/batchDock';
+import { batchQualityRequest, batchMaskRequest } from '../lib/batchDock';
 const props = withDefaults(defineProps<{ fullQueue?: boolean }>(), { fullQueue: false });
 const emit = defineEmits<{ 'update:fullQueue': [value: boolean] }>();
 const batch = useBatchGoalStore();
@@ -25,6 +25,11 @@ watch(() => batchQualityRequest.value?.token, () => {
   if (batchQualityRequest.value) qualityOpen.value = true;
 }, { immediate: true });
 function openAll() { filter.value = mission.value?.issueFocus ? ISSUE_STATUSES : ''; emit('update:fullQueue', true); }
+watch([() => batchMaskRequest.value?.token, () => batch.goalId], () => {
+  if (batchMaskRequest.value?.goalId !== batch.goalId) return;
+  filter.value = 'MASK_READY';
+  emit('update:fullQueue', true);
+}, { immediate: true });
 const qualityCount = computed(() => (snap.value?.quality?.waiting_scenes ?? 0) + (snap.value?.quality?.rejected_scenes ?? 0));
 </script>
 <template>

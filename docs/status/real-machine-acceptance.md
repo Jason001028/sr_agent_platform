@@ -112,6 +112,16 @@
   状态变失败/取消 · 记录:
 - [ ] **重启校准**（⏱10′）· `systemctl restart sr-api` → 刷新 `/queue`。
   ✓= 内存缓存丢失后 `GET /api/queue` 当场校准（读判定文件），已完成作业仍显示「完成」 · 记录:
+- [ ] **生产批量准入 + 预检**（⏱20′）· 置 `SR_BATCH_PRODUCTION=1` 重启，准备单景自动修复计划。
+  ✓= 计划卡可确认启动；故意改错 `SR_PYTHON` / 模型路径 / `SR_LOCAL_GPU` 时，
+  卡上给出对应中文预检原因，且不会启动子进程 · 记录:
+- [ ] **运行中重启接管**（⏱15′）· 慢作业 RUNNING 时 `systemctl restart sr-api`。
+  ✓= 重启后作业仍为 RUNNING（PID 未变），完成后 COMPLETED；日志只有一次物理启动；
+  `sr_tasks` 无第二条相同指纹 · 记录 job_id / PID:
+- [ ] **排队任务重启恢复**（⏱15′）· 单槽被占时提交第二个（PENDING），重启 sr-api。
+  ✓= 第二个自动开始，未重复提交；`.local_jobs.json` 中 queued → running · 记录:
+- [ ] **超时清理**（⏱15′）· 临时设小 `SR_LOCAL_JOB_TIMEOUT_SEC` 跑慢作业。
+  ✓= 状态 TIMEOUT、`ps -ef` 无残留、判定文件缺失不冒充成功 · 记录:
 
 ## E 掩码 → SR 真链 + SSE 长连
 

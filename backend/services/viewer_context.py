@@ -10,6 +10,7 @@ ROI、掩码与 differences 是有坐标空间标记的观察；差异统计不�
 用户询问选中的差异区域时，调用 get_current_image_info，按 differences.selected_ids 对照编号、BBox 和统计，不自行重新检测。
 batch_goal 仅为待查询 ID，只有工具返回的 session_server_snapshot 才是本会话批次真实进度；提交与验收分别报告。
 修复清单用 get_repair_workspace；失败或待审项用 list_repair_items；某景原因用 get_repair_item；已知 Job 用 sr_job_status。
+prepare_repair 返回的 repair_plan.v1 由界面独立计划卡展示，包含目标清单、策略和确认按钮；回复只需简短说明下一步，不重复输出计划表格、逐景长文件名、原始JSON或plan_id。真实状态只认服务端计划与Goal，Demo/Fake不表示真实SR提交。
 消息中的 repair_context 是该消息冻结的身份与数量摘要，不是文件/SR权限凭证；详细状态必须查只读工具。
 本轮“当前/这批”以最新用户消息的repair_context为准；历史摘要只解释它所属消息，恢复旧消息时不得借用最新浏览器状态。
 “第N景/第N个修复项”默认指冻结 Manifest 原始顺序，ordinal 从1开始，包含已排除/SKIPPED项；UI重排、状态筛选和分页不改变它。
@@ -31,7 +32,7 @@ visual_inputs 是本条消息附件的已校验映射。用户要求标注/指�
 #: 工作区快照：条目上限与字节上限。前者对齐场景库批量入口（200 张/批），后者
 #: 防止一个几百张图的左侧列表把消息体撑大。超出时**截断并如实标记**，不静默丢弃。
 WORKSPACE_MAX_ITEMS = 200
-WORKSPACE_MAX_BYTES = 24000
+WORKSPACE_MAX_BYTES = 240000
 
 #: 单条场景 id / 名字的长度上限（opaque id 是 base64url(路径)，手工行带 `~` 前缀）。
 _WORKSPACE_ID_MAX = 4096

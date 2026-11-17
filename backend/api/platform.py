@@ -560,11 +560,13 @@ def _project_message(seq: int, wire: dict, name_of_call: dict) -> dict:
             payload = json.loads(wire["content"])
         except (TypeError, ValueError):
             payload = {"ok": False, "data": None, "error": str(wire["content"])}
+        structured = name_of_call.get(wire.get('tool_call_id')) in {'prepare_repair', 'start_repair', 'read_tool_result'}
         return {"seq": seq, "role": "tool",
                 "tool_name": name_of_call.get(wire.get("tool_call_id")),
                 "tool_call_id": wire.get("tool_call_id"),
                 "content": (json.dumps(payload, ensure_ascii=False) if name_of_call.get(wire.get("tool_call_id")) == "present_spatial_annotations" else payload.get("content") or payload.get("error")),
-                "ok": bool(payload.get("ok"))}
+                "ok": bool(payload.get("ok")),
+                **({'data': payload.get('data')} if structured else {})}
     return {"seq": seq, "role": role}
 
 
@@ -632,6 +634,20 @@ def get_messages(session_id: str, request: Request):
     for wire in wire_msgs:
         for tc in (wire.get("tool_calls") or []):
             name_of_call[tc.get("id")] = tc["function"]["name"]
+    # Older runs may only have persisted a budgeted model view. Recover the
+    # archived plan inside this session; never ask the model to regenerate it.
+    for wire in wire_msgs:
+        if wire.get('role') != 'tool' or name_of_call.get(wire.get('tool_call_id')) != 'prepare_repair':
+            continue
+        try:
+            payload = json.loads(wire['content'])
+            reference = (payload.get('_tool_result_budget') or {}).get('full_result') or {}
+            if reference.get('available'):
+                original = state.store.read_tool_result(session_id, reference.get('id'))
+                if original is not None:
+                    wire['content'] = json.dumps(original, ensure_ascii=False)
+        except (TypeError, ValueError):
+            pass
     projected = [_project_message(seq, wire, name_of_call)
                  for seq, wire in enumerate(wire_msgs, start=1)
                  if wire["role"] in ("user", "assistant", "tool")]

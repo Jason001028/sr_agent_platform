@@ -16,6 +16,8 @@ def discover(task, root):
     if task.get("status") != "COMPLETED":
         return {**base, "state": "unavailable", "note": "作业尚未成功完成"}
     params = task.get("params") or {}
+    if params.get('_batch_demo_executor') == 1:
+        return {**base, "state": "unavailable", "note": "演示任务不产生真实修复成果"}
     dataroot = _run_dataroot(task)
     if not dataroot or _norm_dir(dataroot) != _norm_dir(params.get("lq_path") or ""):
         return {**base, "state": "unavailable", "note": "沙箱成果不属于当前生产影像"}

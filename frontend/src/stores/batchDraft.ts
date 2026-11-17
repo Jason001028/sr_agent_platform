@@ -2,6 +2,7 @@
 import { defineStore } from 'pinia';
 import { ref, watch } from 'vue';
 import { registerViewerObservation } from '../lib/viewerContext';
+import { REPAIR_EXECUTION_MODE } from '../lib/repairExecution';
 export interface RepairCandidate {
   path: string;
   name: string;
@@ -13,7 +14,7 @@ const STORAGE_KEY='sr.batch.draft.v1';
 export const useBatchDraftStore = defineStore('batchDraft', () => {
   const draftVersion = ref(0);
   const candidates = ref<RepairCandidate[]>([]);
-  const text=ref(''),title=ref('批量影像修复'),mode=ref<'demo'|'production'>('demo'),strategy=ref<'automatic'|'review'>('automatic');
+  const text=ref(''),title=ref('批量影像修复'),mode=ref<'demo'|'production'>(REPAIR_EXECUTION_MODE),strategy=ref<'automatic'|'review'>('automatic');
   function add(rows: { path: string; name: string; evidence?: string }[]) {
     for (const row of rows) {
       if (!row.path || candidates.value.some(c => c.path === row.path) || candidates.value.length>=500) continue;
@@ -29,7 +30,7 @@ export const useBatchDraftStore = defineStore('batchDraft', () => {
       for(const row of candidates.value){const old=saved.candidates.find((r:RepairCandidate)=>r.path===row.path);if(['待确认','已确认','已排除','需复核'].includes(old?.status))row.status=old.status;}
       text.value=typeof saved.text==='string'?saved.text.slice(0,500000):'';
       title.value=typeof saved.title==='string'?saved.title.slice(0,200):title.value;
-      mode.value=saved.mode==='production'?'production':'demo';strategy.value=saved.strategy==='review'?'review':'automatic';
+      mode.value=REPAIR_EXECUTION_MODE;strategy.value=saved.strategy==='review'?'review':'automatic';
     }
   } catch { /* Draft recovery never performs network or production operations. */ }
   watch([candidates,text,title,mode,strategy],()=>{draftVersion.value++;try{localStorage.setItem(STORAGE_KEY,JSON.stringify({version:1,candidates:candidates.value,text:text.value,title:title.value,mode:mode.value,strategy:strategy.value}));}catch{/* Optional persistence. */}},{deep:true,flush:'sync'});

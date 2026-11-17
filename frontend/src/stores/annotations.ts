@@ -8,9 +8,9 @@ import type { ImageRef, Annotation } from '../lib/spatial';
 export const useAnnotationsStore = defineStore('annotations', () => {
  const chat=useChatStore(), viewer=useViewerStore();
  const selected=ref<string|null>(null), status=ref(''), demo=ref<Annotation[]>([]);
- const hidden=computed({get:()=>!viewer.agentAnnotationsVisible,set:(value:boolean)=>viewer.setAgentAnnotationsVisible(!value)});
+ const hidden=computed({get:()=>!viewer.overlayMasterVisible || !viewer.agentAnnotationsVisible,set:(value:boolean)=>viewer.setAgentAnnotationsVisible(!value)});
  const hovered=ref<string|null>(null);
- watch(()=>viewer.agentAnnotationsVisible,()=>{selected.value=null;hovered.value=null;},{flush:'sync'});
+ watch(()=>hidden.value,()=>{selected.value=null;hovered.value=null;},{flush:'sync'});
  const selectedPane=ref<'A'|'B'>('A');
  const bindings=ref<Record<string,ImageRef>>({});
  const bindingKey=()=> 'sr.spatial.bindings.v1:'+loadSrConfig().apiBase+':'+(chat.sessionId??'unsaved');

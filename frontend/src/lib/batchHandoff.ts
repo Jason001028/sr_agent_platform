@@ -1,5 +1,6 @@
 import { useBatchGoalStore } from '../stores/batchGoal';
 import { useBatchDraftStore } from '../stores/batchDraft';
+import { REPAIR_EXECUTION_MODE } from './repairExecution';
 
 /** One-click handoff from the Viewer tool panel into the Agent repair flow.
  *
@@ -8,7 +9,8 @@ import { useBatchDraftStore } from '../stores/batchDraft';
  *  that confirmation, so this prompt cannot auto-approve anything. */
 export const AGENT_REPAIR_PROMPT =
   '请对当前 Viewer 工作区发起自动修复：先调用 prepare_repair'
-  + '（scope=workspace；当前工作区为空时改用 current）准备修复计划并展示计划卡，'
+  + `（scope=workspace，mode=${REPAIR_EXECUTION_MODE}；当前工作区为空时改用 current）准备真实自动修复计划并展示计划卡，`
+  + '与「自动修复」使用同一执行链路，不使用 demo/Fake SR；执行条件不满足时说明受阻，不切换模拟。'
   + '不要直接提交 SR。请说明目标景数、检测方法与掩码策略，'
   + '我会在计划卡上确认后启动。';
 

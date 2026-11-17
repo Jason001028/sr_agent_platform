@@ -1,27 +1,44 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import type { BatchSnapshot } from '../lib/api';
-import { missionStage, missionSummary, missionTrackText, terminalMission } from '../lib/batchMission';
-import { trackPercent } from '../lib/batchUi';
-const props = defineProps<{ snapshot: BatchSnapshot }>();
-const tracks = computed(() => [
-  { key: 'detection' as const, label: '检测', path: 'M7 12a5 5 0 1 1 7-7 5 5 0 0 1-7 7m7 0 4 4' },
-  { key: 'submission' as const, label: 'SR 提交', path: 'm5 15 9-9 2 2-9 9H5v-2M12 6l3 3' },
-  { key: 'verification' as const, label: '验收', path: 'm4 10 4 4 8-8' },
-].map(t => ({ ...t, track: props.snapshot.progress[t.key],
-  active: !terminalMission(props.snapshot.goal.status) && props.snapshot.goal.status !== 'PAUSED' && missionStage(props.snapshot) === t.key,
-  attention: t.key === 'detection' && missionSummary(props.snapshot).issueFocus && props.snapshot.counts.submitted === 0 && props.snapshot.counts.detected < props.snapshot.counts.total,
-})));
+import type { BatchSnapshot, BatchCounts } from '../lib/api';
+import { missionTrackText } from '../lib/batchMission';
+import { batchDisplayProgress, displayPercent } from '../lib/batchDisplayProgress';
+const props = defineProps<{ snapshot?: BatchSnapshot; counts?: Partial<BatchCounts> | null; demo?: boolean }>();
+const tracks = computed(() => {
+  const progress = batchDisplayProgress(props.snapshot?.counts ?? props.counts);
+  return [
+    { key: 'detection' as const, label: '检测', path: 'M3 7V3h4m6 0h4v4m0 6v4h-4m-6 0H3v-4M13 10a3 3 0 1 1-6 0 3 3 0 0 1 6 0' },
+    { key: 'submission' as const, label: props.demo ? '模拟提交' : '提交', path: 'm2 6 8-4 8 4-8 4-8-4m0 4 8 4 8-4m-16 4 8 4 8-4' },
+    { key: 'verification' as const, label: props.demo ? '演示验证' : '验收', path: 'M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0M6 10l3 3 5-6' },
+  ].map(t => ({ ...t, track: progress[t.key], percent: displayPercent(progress[t.key]) }));
+});
 </script>
 <template>
   <div class="phase-track" data-e2e="batch-tracks" aria-label="独立阶段进度">
-    <div v-for="t in tracks" :key="t.key" class="phase" :class="{ active: t.active, complete: t.track.known && t.track.applicable && t.track.total > 0 && t.track.done >= t.track.total, inactive: t.track.known && !t.track.applicable, attention: t.attention }" :data-stage="t.key" :aria-current="t.active ? 'step' : undefined">
-      <span class="phase-node"><svg viewBox="0 0 20 20" aria-hidden="true"><path :d="t.path"/></svg></span>
-      <span class="phase-label">{{ t.label }}</span><strong>{{ missionTrackText(t.track) }}</strong>
-      <span v-if="t.track.known && t.track.applicable && t.track.total > 0" class="phase-progress" role="progressbar" :aria-label="t.label" :aria-valuenow="t.track.done" :aria-valuemin="0" :aria-valuemax="t.track.total"><i :style="{ width: `${trackPercent(t.track) ?? 0}%` }"/></span>
+    <div v-for="t in tracks" :key="t.key" class="phase" :data-stage="t.key">
+      <svg class="phase-node" viewBox="0 0 20 20" aria-hidden="true"><path :d="t.path"/></svg>
+      <span class="phase-label" :title="t.label">{{ t.label }}</span>
+      <strong :title="missionTrackText(t.track)">{{ missionTrackText(t.track) }}</strong>
+      <span class="phase-progress" role="progressbar" :aria-label="t.label"
+        :aria-valuenow="t.percent == null ? undefined : Math.min(t.track.done, t.track.total)" :aria-valuemin="0"
+        :aria-valuemax="t.percent == null ? undefined : t.track.total"
+        :aria-valuetext="t.percent == null ? missionTrackText(t.track) : undefined">
+        <i :style="{ width: `${t.percent ?? 0}%` }"/>
+      </span>
+      <span class="phase-percent">{{ t.percent == null ? '—' : `${Math.round(t.percent)}%` }}</span>
     </div>
   </div>
 </template>
 <style scoped>
-.phase-track{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;border-top:1px solid var(--line);padding-top:16px}.phase{display:flex;flex-direction:column;gap:6px;position:relative;min-width:0;color:#819188}.phase:not(:last-child)::after{content:'';position:absolute;top:12px;left:30px;right:-7px;height:1px;background:var(--line);transition:background 220ms ease}.phase-node{display:grid;place-items:center;width:24px;height:24px;border:1px solid var(--line);border-radius:7px;background:#f5f8f6;transition:color 220ms,background 220ms,border-color 220ms}.phase-node svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}.phase-label{font-size:11px}.phase strong{font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;color:#53665c}.phase.active .phase-node{color:#285b50;background:#edf4ef;border-color:#c8dbd0}.phase.complete:not(:last-child)::after{background:#7ba38d}.phase.complete .phase-node{color:#285b50;background:#edf4ef;border-color:#c8dbd0}.phase.active .phase-label{color:#285b50}.phase.attention .phase-node{color:#ac594e;background:#fbf2f0;border-color:#eedbd5}.phase.inactive{opacity:.55}.phase-progress{height:2px;background:#edf1ee;border-radius:2px;overflow:hidden;max-width:80px}.phase-progress i{display:block;height:100%;background:#658e7b;transition:width 220ms ease}.attention .phase-progress i{background:#ac594e}@media(prefers-reduced-motion:reduce){.phase::after,.phase-node,.phase-progress i{transition:none}}
+.phase-track{min-width:0;overflow:hidden;border:1px solid var(--line);border-radius:9px;padding:0 9px;background:#f3f7f52b}
+.phase{display:grid;grid-template-columns:15px 28px 46px minmax(0,1fr) 29px;align-items:center;gap:6px;min-width:0;padding:10px 0;color:var(--ink-sub);font-size:10px}
+.phase+.phase{border-top:1px solid var(--line)}
+.phase>*{min-width:0;overflow:hidden}
+.phase-node{width:15px;height:15px;stroke:#487d6e;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+.phase-label,.phase strong{white-space:nowrap;text-overflow:ellipsis}
+.phase strong{font-size:10px;font-weight:500;font-variant-numeric:tabular-nums;text-align:right}
+.phase-progress{height:5px;border-radius:8px;background:#dce7e1;overflow:hidden;width:100%}
+.phase-progress i{display:block;height:100%;max-width:100%;border-radius:inherit;background:#477e6c;transition:width 180ms ease}
+.phase-percent{text-align:right;font-variant-numeric:tabular-nums;color:#42695c;font-size:10px}
+@media(prefers-reduced-motion:reduce){.phase-progress i{transition:none}}
 </style>

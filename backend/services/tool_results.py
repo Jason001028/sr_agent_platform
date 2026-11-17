@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import hashlib
+from itertools import islice
 import json
+import re
 import uuid
 
 from backend.services.tool_result_formatter import META, ResultBudget, encode, format_result, size
@@ -52,15 +54,27 @@ class ToolResults:
             return err("Result reference unavailable, expired, or outside this session. No tool was re-executed.")
         # Apply the existing trajectory redaction policy before selecting a field.
         value = _redact(value)
+        resolved = ''
         try:
             if path:
                 if not path.startswith('/'):
                     raise ValueError()
                 for part in path.split('/')[1:]:
+                    if re.search(r'~(?![01])', part):
+                        raise ValueError()
                     part = part.replace('~1','/').replace('~0','~')
-                    value = value[int(part)] if isinstance(value, list) else value[part]
+                    if isinstance(value, list):
+                        if not re.fullmatch(r'0|[1-9][0-9]*', part):
+                            raise ValueError()
+                        child = value[int(part)]
+                    elif isinstance(value, dict):
+                        child = value[part]
+                    else:
+                        raise TypeError()
+                    resolved += '/' + part.replace('~','~0').replace('/','~1')
+                    value = child
         except (KeyError, IndexError, ValueError, TypeError):
-            return err("Result path does not exist; use a JSON pointer within the saved result.")
+            return self._path_error(result_id, path, resolved, value)
         reference = {"available": True, "id": result_id}
         if not isinstance(value, (list, str, dict)):
             result = ok({"value": value, "path": path, "result_id": result_id})
@@ -100,11 +114,42 @@ class ToolResults:
         return format_result("read_tool_result", page_result(0),
                              budget=self.budget, reference=reference)
 
+    def _path_error(self, result_id, path, resolved, value):
+        """Describe actual children of the last resolved node, never invent aliases."""
+        children = []
+        if isinstance(value, dict):
+            entries = value.items()
+        elif isinstance(value, list):
+            entries = enumerate(value)
+        else:
+            entries = ()
+        for key, child in islice(entries, 8):
+            pointer = resolved + '/' + str(key).replace('~','~0').replace('/','~1')
+            if len(pointer) <= 512:
+                children.append({'path': pointer, 'type':
+                    'object' if isinstance(child, dict) else 'array' if isinstance(child, list)
+                    else 'string' if isinstance(child, str) else 'scalar'})
+        result = err('工具结果路径不存在或格式不正确；请按 available_paths 读取实际字段。'
+                     '这只是历史结果回读失败，不代表修复任务启动失败；不要重新提交修复。')
+        result['data'] = {'result_id': result_id, 'requested_path': path,
+                          'resolved_path': resolved, 'available_paths': children,
+                          'recovery': '可先使用 path="" 查看根对象；修复计划目标使用 /data/targets/items，'
+                                      '逐项读取 item_id，不存在 targets.ids。任务进度使用 list_repair_items 查询。'}
+        # Diagnostics are bounded too; never archive errors into another read loop.
+        while size(result) > self.budget.limit and children:
+            children.pop()
+        for field in ('requested_path', 'resolved_path'):
+            while size(result) > self.budget.limit and result['data'][field]:
+                result['data'][field] = result['data'][field][:len(result['data'][field]) // 2]
+        return result
+
     def registry(self, registry):
         active = ToolRegistry(registry.list())
         active.register(Tool("read_tool_result", "只读读取当前会话已保存工具结果的有界页面，不重新执行原工具，也不读取任意服务端文件。"
                              "使用截断结果中 full_result.available=true 的引用 id；无持久化会话时引用仅本次运行有效。"
                              "路径基于完整的 ok/data/error 结果，读取前按既有策略脱敏。数组按元素、对象按键、字符串按字符分页；"
+                             "修复计划目标列表路径为 /data/targets/items，每项有 item_id；不存在 /data/targets/ids。"
+                             "路径失败时查看 available_paths，按实际字段改读；不确定先用空 path 查看根对象，不重复猜同一路径。"
                              "返回 value、shown、total、has_more、next_offset，标量仅返回 value 和引用信息。"
                              "has_more=true 时沿 next_offset 继续；预算可缩小页面（page_reduced），单项超限时 shown=0、游标不前进，须改读更深路径。"
                              "过期、跨会话、不可用引用或不存在的路径返回错误；不要因此盲目重调有副作用的原工具。",

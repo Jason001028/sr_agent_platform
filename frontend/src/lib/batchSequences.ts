@@ -25,6 +25,11 @@ export function importProblem(result: BatchImportResult): string {
 }
 export function compactBatchError(message: string): string {
   if (message.includes("demo batch requires SR_EXECUTOR=slurm")) return '当前后端使用本地执行器，演示计划需要 Fake Slurm 环境；计划已保留，尚未启动任务。';
-  if (message.includes('production batch execution is not enabled yet')) return '生产批量执行尚未开放，当前后端拒绝启动。';
+  if (message.includes('production batch execution is not enabled yet')) return '生产批量执行尚未开放；需要在后端设置 SR_BATCH_PRODUCTION=1 并重启。';
+  if (message.includes('production batch requires SR_EXECUTOR=slurm or local')) return '生产批量执行只支持 Slurm 或本机执行器；请检查 SR_EXECUTOR。';
+  if (message.includes('production batch requires a usable bash')) return '本机生产执行需要可用的 bash；当前主机未找到。';
+  if (message.includes('production batch cannot run with SR_SLURM_FAKE=1')) return '生产批量执行不能用 Fake 调度器；请关闭 SR_SLURM_FAKE。';
+  if (message.includes('production batch requires an explicit SR_SLURM_WORK_DIR')) return '生产批量执行需要显式配置 SR_SLURM_WORK_DIR。';
+  if (message.includes('SR_SLURM_WORK_DIR is not a writable directory')) return 'SR_SLURM_WORK_DIR 不存在或不可写；请检查目录权限。';
   return message.replace(/(?:[A-Za-z]:[\\/]|\/)[^\s；，：]+/g, path => `影像文件（${path.split(/[\\/]/).pop()}）`);
 }
