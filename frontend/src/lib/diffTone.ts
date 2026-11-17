@@ -43,8 +43,8 @@ export const DEFAULT_TONE_BANDS: ToneBands = {
   flat: [2, 8],
   bright: [2, 15],
   // 2026-11-17：三个放大系数整体收敛 20%，实际高权约 2.1×，上限仍夹在 2.5。
-  midGain: 0.75,
-  midBrightGain: 0.15,
+  midGain: 0.8,
+  midBrightGain: 0.16,
   darkBrightGain: 0.4,
 };
 

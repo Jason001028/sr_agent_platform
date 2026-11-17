@@ -140,6 +140,35 @@ function onBake() {
   else if (qc.bakeState !== 'stopping') void qc.bakeAll();
 }
 
+const agentPreparing = ref(false);
+async function onAgentRepair() {
+  if (agentPreparing.value) return;
+  agentPreparing.value = true;
+  const list = qc.list;
+  const revision = qc.coordinateImportRevision;
+  try {
+    if (!list || !qc.issues.length) return;
+    if (qc.bakeState !== 'done') await qc.bakeAll();
+    if (qc.list !== list || qc.coordinateImportRevision !== revision) {
+      viewer.showErr('清单已更换或关闭，请重新点击 Agent协助');
+      return;
+    }
+    if (qc.bakeState !== 'done') {
+      viewer.showErr('解析未全部完成，已取消发送 Agent 消息；请完成一键解析后重试');
+      return;
+    }
+    if (Object.keys(qc.bakeFails).length) {
+      viewer.showErr('部分场景解析失败，已取消发送 Agent 消息；请查看解析失败记录，重新解析后重试');
+      return;
+    }
+    requestAgentRepair();
+  } catch (e) {
+    viewer.showErr('解析失败，未发送 Agent 消息：' + (e instanceof Error ? e.message : String(e)));
+  } finally {
+    agentPreparing.value = false;
+  }
+}
+
 /** 去盘阵把这一行对应的场景开出来（不是当前图的行才显示这个入口）。 */
 async function onOpen(it: QcIssue) {
   if (opening.value) return;
@@ -248,9 +277,10 @@ watch(
         type="button"
         class="qc-agent"
         data-e2e="qc-agent-repair"
-        title="让 Agent 准备当前工作区的修复计划；在计划卡确认后启动"
-        @click="requestAgentRepair"
-      >Agent协助</button>
+        :disabled="agentPreparing"
+        title="等待整份清单解析完成后，让 Agent 准备修复计划；在计划卡确认后启动"
+        @click="onAgentRepair"
+      >{{ agentPreparing ? '等待解析…' : 'Agent协助' }}</button>
       <template v-if="qc.loaded">
         <button
           type="button"

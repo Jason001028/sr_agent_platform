@@ -340,7 +340,16 @@ export const useQcListStore = defineStore('qclist', () => {
    *
    *  跑的过程中**不弹遮罩、不动 busy**（那是模态的，会把用户正在看的图挡住、工具栏
    *  锁住几十景 × 每景几十秒）；进度只走面板上那一行字。 */
-  async function bakeAll(): Promise<void> {
+  let bakePromise: Promise<void> | null = null;
+
+  // 所有入口等待同一批任务，避免运行中调用被提前返回。
+  function bakeAll(): Promise<void> {
+    if (bakePromise) return bakePromise;
+    bakePromise = runBakeAll().finally(() => { bakePromise = null; });
+    return bakePromise;
+  }
+
+  async function runBakeAll(): Promise<void> {
     if (!list.value || bakeState.value === 'running' || bakeState.value === 'stopping') return;
     const rows = issues.value;
     if (!rows.length) return;
@@ -414,6 +423,9 @@ export const useQcListStore = defineStore('qclist', () => {
       // resolve 已确认这些场景在盘阵上存在；让场景库下一次进入时重新读取索引，
       // 否则它会继续复用一键解析前的 searched=true 快照。
       scenes.invalidateSearch();
+    } catch (e) {
+      bakeState.value = 'stopped';
+      throw e;
     } finally {
       // 取消 / 异常时没轮到的占位卡：如实写「未开始」，不留一张永远「排队中」的卡。
       viewer.finishPendingCards();
