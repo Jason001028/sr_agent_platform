@@ -5,6 +5,12 @@
 
 模型派发在共享 SQLite 中按规范化 base URL 取得单槽资源租约，普通聊天/持久 Agent、证据分析与自动标题共同参与；聊天等待具有跨实例优先权。superseded 报告在相同来源恢复时保留 ID/revision 和完成结果，撤销旧运行令牌后继续任务；批次入口优先返回有效报告。整体仍为约 70% 工程预览，完整验收未完成。
 
+修复流程 Skill 化的最终目标、当前能力、缺口任务板与多 Agent 分工见 [repair-skill-autonomy-handoff.md](repair-skill-autonomy-handoff.md)。Skill 正文下一轮撰写；在此之前不要新增只读工具或放开执行权限。
+
+2026-11-19：新增 `.agents/skills/batch-repair/`：`SKILL.md` 只保留硬约束、模式判断与流程入口；`references/workflow.md` 记录按意图分流的诊断/准备/卡片启动/监控细节，`state-model.md` 记录状态/计数/验证层，`plan-and-tools.md` 记录 prepare 参数、计划状态与工具字段，`failure-playbook.md` 记录症状与处置。每个文件控制在 4000 字节内，避免首次读取被工具结果预算截断。正文只写增量，关键确认门复述一次；不新增工具或权限。尚未用真实模型验证选择与遵循率，部署时需确认 `SR_SKILL_ROOTS` 指向该目录。详见 [repair-skill-autonomy-handoff.md](repair-skill-autonomy-handoff.md)。
+
+2026-11-18：收敛 Agent 只读修复工具，不新增工具。`list_repair_items` 的 `status` 支持英文逗号分隔并返回 `has_more`；`get_repair_item` 新增 `verify`（默认 true，调用 `validate_current` 返回 `review_valid`/`review_invalid_reason`），区域详情按 rejected > pending > approved 取前 20 条且不含几何/审核人；`query_batch_repair` 改为有界脱敏摘要（counts/progress、最多 20 条 active_jobs、10 条 recent_jobs、待审/驳回项），剔除 `session_id` 与绝对路径；legacy 静态工具复用同一投影。本轮执行环境拒绝 `python`，测试未运行。详见 [repair-workspace-awareness.md](repair-workspace-awareness.md) §2026-11-18。
+
 2026-11-17：质检 TXT「Agent协助」在尚未解析时自动调用一键解析，等待整批结束后才发送消息；运行中的解析共用同一 Promise，不重复开跑。等待期间按钮禁用并显示「等待解析…」。失败、停止、清单更换/关闭及异常均取消发送并提示原因；已全部解析成功直接发送，缺 NOSR 沿用事实备注口径。前端相关 41 项回归通过，覆盖等待、重复点击、已解析、失败、停止、换清单/关闭与异常。
 
 2026-11-17：Agent「前往复核」改为 Viewer 可视化候选掩码复核：自动打开 PAN / NOSR 同步分屏，等待侧栏布局稳定后放大首个待审 ROI；底部浮动条逐区通过/驳回并自动推进，支持保持位置与缩放切换交替对比。右下鹰眼新增第三幅独立差异热力图，优先使用本批次冻结的连续差异图（旧批次复用已有 Diff 或只读重算），候选掩码用灰紫轮廓区分，均受现有眼睛总控与图层选择管理。区域决定持久化到 Item/version；全部处理完后只栅格化通过区域到新工件目录，全驳回则跳过，原始候选与决定保留审计。修正跨景同名 PAN.tif 被错误复用的问题。合成双景浏览器验证分屏/ROI/三鹰眼/交替/显隐/自动下一景，后端88项相关回归、前端48项相关回归通过；真实盘阵验收待内网执行。可复跑夹具：`python -m backend.tests.quality_browser_fixture --root <临时目录> --port 8797 --mask-review`（使用已构建前端，禁止真实 SR 提交）。

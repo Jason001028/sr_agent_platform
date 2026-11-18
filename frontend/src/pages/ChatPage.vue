@@ -15,7 +15,7 @@ import { isDeveloperMode } from '../lib/developerMode.js';
 import type { ChatMsg } from '../stores/chat.js';
 import type { ChatSession } from '../lib/api.js';
 import TokenUsagePanel from '../components/TokenUsagePanel.vue';
-import MarkdownBody from '../components/MarkdownBody.vue';
+import AgentAssistantText from '../components/AgentAssistantText.vue';
 import UserMessageText from '../components/UserMessageText.vue';
 import ReasoningBlock from '../components/ReasoningBlock.vue';
 import { phaseLabel } from '../lib/executionOverview.js';
@@ -324,9 +324,7 @@ onMounted(() => {
                               :merged-count="reasoningView(i)?.merged ? reasoningView(i)?.count : undefined"
                               :merged-seconds="reasoningView(i)?.merged ? reasoningView(i)?.seconds : undefined"
                               @timing="onReasoningTiming(i, $event)" />
-              <div v-if="m.content" class="bubble assistant">
-                <MarkdownBody :source="m.content" />
-              </div>
+              <AgentAssistantText v-if="m.content" :message="m" :developer-mode="developerMode" />
               <div v-else-if="chat.sending && !m.toolCalls?.length && ((m.streaming && !m.reasoning) || m.phase === 'tool_call')"
                    class="bubble assistant tools">
                 <ThinkingIndicator :label="waitLabel(m)" />

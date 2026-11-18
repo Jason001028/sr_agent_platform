@@ -14,7 +14,7 @@ const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/', redirect: '/viewer' },
-    { path: '/repair-reports/:reportId', component: () => import('../pages/RepairEvidenceReportPage.vue'), meta: { title: '??????' } },
+    { path: '/repair-reports/:reportId', component: () => import('../pages/RepairEvidenceReportPage.vue'), meta: { title: '图像证据报告' } },
     {
       path: '/viewer',
       name: 'viewer',

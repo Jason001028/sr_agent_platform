@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { createApp, h, nextTick } from 'vue';
+import { createApp, h, nextTick, ref } from 'vue';
 import { expect, it, vi } from 'vitest';
 import type { ChatMsg } from '../../stores/chat';
 import { projectAgentActivity } from '../../lib/agentActivity';
@@ -8,6 +8,48 @@ vi.mock('../SceneSearchResultCard.vue',()=>({default:{props:['data'],emits:['ope
 vi.mock('../AgentBatchReceipt.vue',()=>({default:{render(){return h('section',{'data-business':'receipt'},'任务回执')}}}));
 vi.mock('../AgentAnnotationReference.vue',()=>({default:{render(){return h('section',{'data-business':'annotation'},'空间批注')}}}));
 import AgentToolPresentation from '../AgentToolPresentation.vue';
+
+it('renders one visible inspection table after all positions have arrived', async () => {
+  const name = 'JL1KF02B02_PMS04_20261025120913_200548603_102_0024_001_L1_PAN';
+  const page = (cursor: number, hasMore: boolean): ChatMsg => ({
+    seq: cursor + 2, role: 'tool', content: '', ok: true, toolName: 'inspect_repair_workspace',
+    data: { kind: 'repair_inspection.v1', total: 3, cursor, has_more: hasMore, scope: 'workspace',
+      items: [{ item_id: String(cursor), name, status: 'candidates', candidate_count: cursor }] },
+  });
+  const messages = ref<ChatMsg[]>([{ seq: 1, role: 'user', content: '质检' }, page(0, true), page(2, false)]);
+  const el = document.createElement('div');
+  const app = createApp(() => {
+    const projection = projectAgentActivity(messages.value, true);
+    return messages.value.map((_, index) => h(AgentToolPresentation, { key: index, projection, index }));
+  });
+  app.mount(el);
+  expect(el.querySelector('.inspection-card')).toBeNull();
+  messages.value.push(page(1, true));
+  await nextTick();
+  const table = el.querySelector('.inspection-card table')!;
+  expect(table.closest('details')).toBeNull();
+  expect([...table.querySelectorAll('th')].map(cell => cell.textContent)).toEqual(['景名 / 结果', 'PAN', 'NOSR', '差异图']);
+  expect([...table.querySelectorAll('tbody tr')].map(row => row.querySelector('td')?.textContent))
+    .toEqual([0, 1, 2].map(count => name + count + ' 处候选'));
+  expect(table.querySelector('.scene-name')?.getAttribute('title')).toBe(name);
+  messages.value.push({ ...page(2, false), seq: 5 });
+  await nextTick();
+  expect(el.querySelectorAll('.inspection-card')).toHaveLength(1);
+  expect(el.querySelector('.inspection-card table')).toBe(table);
+  const dialog = el.querySelector('dialog')!;
+  dialog.showModal = vi.fn();
+  dialog.close = () => dialog.dispatchEvent(new Event('close'));
+  el.querySelector<HTMLButtonElement>('.inspection-card > button')!.click();
+  await nextTick();
+  expect(dialog.showModal).toHaveBeenCalledOnce();
+  expect(dialog.querySelector('table')).toBe(table);
+  expect(el.querySelectorAll('.inspection-card table')).toHaveLength(1);
+  dialog.querySelector('button')!.click();
+  await nextTick();
+  expect(dialog.querySelector('table')).toBeNull();
+  expect(el.querySelector('.inspection-card table')).toBe(table);
+  app.unmount();
+});
 
 it('preserves actionable business components without an extra ordinary trace',async()=>{
   const messages: ChatMsg[] = [

@@ -11,7 +11,7 @@ import { startActivity, advanceActivity } from '../lib/chatActivity';
  * 并发回合由服务端 409 兜底；UI 发送中禁按钮。
  */
 import { captureViewerContext } from '../lib/viewerContext.js';
-import { agentRepairSettings } from '../lib/agentRepairSettings';
+import { agentRepairSettings, type AgentRepairSettings } from '../lib/agentRepairSettings';
 import { defineStore } from 'pinia';
 import { ref, onScopeDispose } from 'vue';
 import { loadSrConfig } from '../lib/scene.js';
@@ -416,7 +416,7 @@ export const useChatStore = defineStore('chat', () => {
     await loadHistory(sid);
   }
 
-  async function send(content: string): Promise<void> {
+  async function send(content: string, options?: { repairSettings: AgentRepairSettings }): Promise<void> {
     const sid = sessionId.value;
     const text = content.trim();
     if (!sid || (!text && !pendingImages.value.length)) return;
@@ -428,9 +428,13 @@ export const useChatStore = defineStore('chat', () => {
     if (agentStatusTimer !== null) { clearTimeout(agentStatusTimer); agentStatusTimer = null; }
     agentStatus.value = 'thinking';
     // 发送即取走托盘：失败也不回填，避免重试时同一张图发两遍
-    const pending = pendingImages.value;
-    const viewerContext = {...captureViewerContext(pending.length),agent_repair_settings:{...agentRepairSettings.value}};
-    pendingImages.value = [];
+    const pending = options ? [] : pendingImages.value;
+    const viewerContext = {
+      ...captureViewerContext(pending.length),
+      ...(options ? { roi: null } : {}),
+      agent_repair_settings: { ...(options?.repairSettings ?? agentRepairSettings.value) },
+    };
+    if (!options) pendingImages.value = [];
     activity.value = startActivity(pending.length > 0, /User source ROI|Source Pixel ROI/.test(text));
     const upload: ChatUploadImage[] = pending.map((p) => ({ data: p.dataUrl, name: p.name, spatial: p.spatial }));
     const optimistic: ChatImage[] = pending.map((p) => ({ url: p.dataUrl, name: p.name }));

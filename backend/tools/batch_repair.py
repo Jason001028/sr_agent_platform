@@ -46,12 +46,13 @@ def prepare_batch_repair(items):
 
 @tool(
     name="query_batch_repair",
-    description="只读查询已知 Batch Goal ID 的权威快照，解释检测、提交、验收与异常；不控制或循环执行任务。演示验收不得解释为生产成功。",
+    description="只读查询已知 Batch Goal ID 的权威摘要：阶段计数、进度、失败/阻塞 Job、待审与驳回项、报告可用性。列表有界且不含绝对路径；完整快照仍由 REST 提供。不控制或循环执行任务，演示验收不得解释为生产成功。",
     params_schema={"type": "object", "properties": {"goal_id": {"type": "string", "minLength": 1, "description": "已知批次 Goal ID，不猜最新任务。"}}, "required": ["goal_id"], "additionalProperties": False},
 )
 def query_batch_repair(goal_id, _store=None):
     from backend.services.store import Store
     from backend.services.goal_lease import current_tool
+    from backend.services.repair_workspace import batch_summary
     execution = current_tool.get() or {}
     store = _store if _store is not None else execution.get("store")
     owned = store is None
@@ -59,7 +60,7 @@ def query_batch_repair(goal_id, _store=None):
         store = Store()
     try:
         snapshot = store.batch_snapshot(goal_id)
-        return ok(snapshot) if snapshot else err("batch goal not found")
+        return ok(batch_summary(snapshot)) if snapshot else err("batch goal not found")
     finally:
         if owned:
             store.close()

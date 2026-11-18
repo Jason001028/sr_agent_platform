@@ -19,6 +19,15 @@ it('deduplicates SSE replay declarations/results and keeps stable history keys',
   const history = [user,calls('a'),{...result('a'),seq:3}];
   expect(projectAgentActivity(history,false).steps[0].key).toBe(p.steps[0].key);
 });
+it('updates a repeated repair plan in its original card position', () => {
+  const first = { ...result('p'), data: { kind: 'repair_plan.v1', plan_id: 'plan-one', version: 1 } };
+  const latest = { ...result('q'), data: { ...first.data, version: 2 } };
+  const messages = [user, calls('p'), first];
+  const original = projectAgentActivity(messages, true).business.get(2)![0];
+  const updated = projectAgentActivity([...messages, calls('q'), latest], false).business;
+  expect([...updated.keys()]).toEqual([2]);
+  expect(updated.get(2)![0]).toMatchObject({ key: original.key, result: latest });
+});
 it('matches legacy calls FIFO without merging legitimate identical operations', () => {
   const call: ChatMsg = {seq:2,role:'assistant',content:'',toolCalls:[{name:'read_skill',args:{}},{name:'read_skill',args:{}}]};
   const first: ChatMsg = {seq:3,role:'tool',content:'',toolName:'read_skill',ok:false};

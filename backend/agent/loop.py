@@ -47,7 +47,11 @@ from backend.agent.runtime_status import (
 )
 from backend.services.goal_lease import current_lease
 
-DEFAULT_SYSTEM_PROMPT = """Follow Runtime Status budgets and choose the minimal necessary action. Prefer direct answers or applicable read-only tools for simple queries. Never invent results when budget is low; durable tasks yield and resume under runtime control.
+THINKING_LANGUAGE_INSTRUCTION = "请用中文思考。"
+
+DEFAULT_SYSTEM_PROMPT = f"""{THINKING_LANGUAGE_INSTRUCTION}
+
+Follow Runtime Status budgets and choose the minimal necessary action. Prefer direct answers or applicable read-only tools for simple queries. Never invent results when budget is low; durable tasks yield and resume under runtime control.
 
 角色与目标
 
@@ -826,11 +830,11 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
             result["run_id"] = trajectory.run_id
         return result
 
-    def commit(msg: dict):
+    def commit(msg: dict, *, stored_content=None):
         """Append to the wire list and checkpoint to the store immediately."""
         messages.append({k: v for k, v in msg.items() if k not in {"goal_run_id", "goal_id", "clarification_id"}})
         if store is not None:
-            store.append_message(session_id, msg)
+            store.append_message(session_id, msg if stored_content is None else {**msg, "content": stored_content})
 
     usage = _empty_usage()
     call_index = 0
@@ -891,6 +895,9 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
         if durable:
             runtime_status["remaining_round_seconds_at_request"] = round(policy["remaining_round_seconds_at_request"], 2)
         request_messages = project_runtime_status(messages, runtime_status)
+        system_message = request_messages[0]
+        if THINKING_LANGUAGE_INSTRUCTION not in system_message["content"]:
+            system_message["content"] = f'{THINKING_LANGUAGE_INSTRUCTION}\n\n{system_message["content"]}'
         request_tools = [] if summarizing else tools
         if summarizing:
             request_messages = [dict(m) for m in request_messages]
@@ -1197,7 +1204,8 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                          "error": result["error"]})
             if tc["name"] != "present_spatial_annotations":
                 commit({"role": "tool", "tool_call_id": tc["id"],
-                        "content": encode_tool_result(model_view)})
+                        "content": encode_tool_result(model_view)},
+                       stored_content=encode_tool_result(result) if tc["name"] == "inspect_repair_workspace" else None)
             transcript.append({"role": "tool", "name": tc["name"],
                                "tool_call_id": tc["id"], "content": result})
             if durable and tc["name"] == CLARIFY and result.get("ok"):

@@ -1,6 +1,7 @@
 import { useBatchGoalStore } from '../stores/batchGoal';
 import { useBatchDraftStore } from '../stores/batchDraft';
 import { buildAgentRepairPrompt } from './repairPrompt';
+import { agentRepairSettings, type AgentRepairSettings } from './agentRepairSettings';
 export { AGENT_REPAIR_PROMPT } from './repairPrompt';
 
 /** One-click handoff from the Viewer tool panel into the Agent repair flow.
@@ -9,10 +10,20 @@ export { AGENT_REPAIR_PROMPT } from './repairPrompt';
  *  real user confirm the plan card.  ``start_repair`` remains server-gated by
  *  that confirmation, so this prompt cannot auto-approve anything. */
 
-export function requestAgentRepair(): void {
+export interface BatchAgentHandoff {
+  text: string;
+  autoSend?: boolean;
+  repairSettings?: AgentRepairSettings;
+  isCurrent?: () => boolean;
+}
+
+export function requestAgentRepair(isCurrent?: () => boolean): void {
+  const repairSettings = { ...agentRepairSettings.value };
   window.dispatchEvent(new CustomEvent('batch-agent-handoff', { detail: {
-    text: buildAgentRepairPrompt(),
+    text: buildAgentRepairPrompt(repairSettings),
     autoSend: true,
+    repairSettings,
+    isCurrent,
   } }));
 }
 

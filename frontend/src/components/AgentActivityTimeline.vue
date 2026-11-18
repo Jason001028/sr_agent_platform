@@ -7,18 +7,23 @@ const props = defineProps<{ group: ActivityGroup; sessionKey?: string | null; de
 const identity = computed(() => `${props.sessionKey ?? 'unbound'}:${props.group.key}`);
 const running = computed(() => props.group.steps.filter(s => s.state === 'running'));
 const completed = computed(() => props.group.steps.filter(s => s.state === 'success').length);
+const failed = computed(() => props.group.steps.filter(s => s.state === 'failed').length);
+const interrupted = computed(() => props.group.steps.filter(s => s.state === 'interrupted').length);
 const pinned = computed(() => props.group.steps.filter(s => s.state !== 'success'));
 const single = computed(() => props.group.steps.length === 1);
 const expanded = computed(() => activityDisclosure.get(identity.value) ?? running.value.length > 0);
-const heading = computed(() => completed.value ? `已完成 ${completed.value} 项操作`
-  : running.value.length ? `正在执行 ${running.value.length} 项操作` : `${props.group.steps.length} 项操作待核对`);
+const heading = computed(() => [
+  completed.value && `已完成 ${completed.value} 项操作`,
+  failed.value && `${failed.value} 项失败`,
+  interrupted.value && `${interrupted.value} 项结果未确认`,
+  running.value.length && `${running.value.length} 项执行中`,
+].filter(Boolean).join(' · '));
 function toggle() { setActivityDisclosure(identity.value,!expanded.value); }
 </script>
 <template>
   <section class="activity-timeline agent-trace" aria-label="工具执行轨迹" :data-group="group.key">
     <button v-if="!single" type="button" class="group-toggle" :aria-expanded="expanded" @click="toggle">
       <span class="trace-node" :class="{ active: running.length > 0, issue: pinned.some(s => s.state === 'failed' || s.state === 'interrupted') }" aria-hidden="true"></span><span>{{ heading }}</span>
-      <span v-if="completed && running.length" class="remaining"> · {{ running.length }} 项执行中</span>
     </button>
     <ol v-if="single || !expanded && pinned.length" class="steps pinned">
       <AgentActivityStep v-for="step in (single ? group.steps : pinned)" :key="step.key" :step="step" :developer-mode="developerMode" />

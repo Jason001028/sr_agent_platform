@@ -34,6 +34,7 @@ it('auto-collapses on completion but never overrides a manual expansion or close
 it('pins failures and unknown outcomes when collapsed instead of inventing green checks', async()=>{
   mount(['success','failed','interrupted']); await flush();
   expect(el.querySelectorAll('li')).toHaveLength(2);
+  expect(el.querySelector('button')?.textContent).toContain('1 项失败 · 1 项结果未确认');
   expect(el.textContent).toContain('结果读取失败');
   expect(el.querySelector('.state-icon.success')).toBeNull();
   expect(el.querySelector('[data-state=interrupted]')).not.toBeNull();

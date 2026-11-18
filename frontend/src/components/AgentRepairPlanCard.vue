@@ -7,7 +7,7 @@ import RepairEvidenceEntry from './RepairEvidenceEntry.vue';
  * 卡片不累计事件、不建立第二条 SSE、不生成第二套 Goal 状态；聊天关闭或页面
  * 刷新后重新读一次权威状态即可恢复。结果摘要由确定性中文模板生成，不调用 LLM。
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { isDeveloperMode } from '../lib/developerMode.js';
 import { useBatchGoalStore } from '../stores/batchGoal';
 import { useChatStore } from '../stores/chat';
@@ -131,17 +131,22 @@ async function openTargets() {
       if (disposed || token !== targetGen || chat.sessionId !== sid || plan.value?.plan_id !== current.plan_id || plan.value?.version !== current.version) return;
       if (page.version !== current.version || page.plan_id !== current.plan_id) throw new Error('计划身份已变化，请重新读取清单');
       rows.push(...page.items);
-      if (!page.has_more) break;
+      fullTargets.value = rows.slice();
+      if (!page.has_more) {
+        if (rows.length !== current.targets.total) throw new Error('清单返回景数与计划不一致，请重新读取。');
+        break;
+      }
       if (page.next_offset <= offset) throw new Error('清单分页未前进，请重新查看');
       offset = page.next_offset;
-    } while (rows.length < 500);
-    fullTargets.value = rows;
+    } while (true);
   } catch (e) { if (!disposed && token === targetGen) drawerError.value = e instanceof Error ? e.message : String(e); }
   finally { if (token === targetGen) drawerLoading.value = false; }
 }
-function resetTargets() {
-  targetGen++; fullTargets.value = []; drawerOpen.value = false;
+function resetTargets(keepOpen = false) {
+  targetGen++; fullTargets.value = [];
+  if (!keepOpen) drawerOpen.value = false;
   drawerLoading.value = false; drawerError.value = '';
+  if (drawerOpen.value) void openTargets();
 }
 const targetCount = computed(() => (plan.value?.status === 'BLOCKED' ? plan.value.targets.total : plan.value?.targets?.applicable)
   ?? counts.value?.eligible ?? 0);
@@ -163,6 +168,7 @@ const detailsOpen = ref(false), conflictsOpen = ref(false), preparing = ref(fals
 const conflicts = computed(() => plan.value?.blocking ?? []);
 const firstConflict = computed(() => conflicts.value.find(r => r.code === 'pan_backup_exists') ?? conflicts.value[0]);
 const otherConflicts = computed(() => conflicts.value.filter(r => r !== firstConflict.value));
+const firstConflictLabel = computed(() => [firstConflict.value?.name, firstConflict.value?.filename].filter(Boolean).join(' · '));
 const historical = computed(() => ['EXPIRED', 'SUPERSEDED'].includes(planStatus.value) || plan.value?.mode !== 'production');
 const historyExpanded = ref(false);
 const canExclude = computed(() => conflicts.value.some(r => r.code === 'pan_backup_exists' && r.scene_ref && Number.isInteger(r.line)));
@@ -462,6 +468,8 @@ async function openTask(): Promise<void> {
     const ok = await batch.selectGoal(gid);
     if (!ok) { error.value = '无法打开该任务，请稍后重试。'; return; }
   }
+  await router.push('/viewer');
+  await nextTick();
   window.dispatchEvent(new CustomEvent('batch-task-open',
     { detail: { section: 'monitor' } }));
 }
@@ -509,16 +517,20 @@ async function openResult(): Promise<void> {
     overlay_ready: false,
   });
   if (problem) error.value = problem;
+  else await router.push('/viewer');
 }
 async function startReview(): Promise<void> {
   const gid = goalId.value;
   if (!gid) return;
   if (batch.goalId !== gid && !await batch.selectGoal(gid)) return;
+  const itemId = reviewTarget.value?.item_id;
   error.value = '';
   // One direct landing: the existing Batch Panel opens its quality block and
   // the existing quality store selects this Item's first pending region and
   // opens the NOSR / SR pair.  No second review UI is created.
-  requestQualityReview(reviewTarget.value?.item_id);
+  await router.push('/viewer');
+  await nextTick();
+  requestQualityReview(itemId, undefined, gid);
 }
 function onVisibility(): void {
   if (document.visibilityState === 'visible') scheduleStatusRefresh(0);
@@ -527,13 +539,15 @@ watch(() => linkedSnapshot.value?.goal.last_seq, () => scheduleStatusRefresh());
 watch(() => batch.goalId, (value) => {
   if (value && value === goalId.value) scheduleStatusRefresh(100);
 });
-watch(() => plan.value?.version, resetTargets);
+watch(() => [plan.value?.plan_id, plan.value?.version] as const, ([id], [previousId]) => {
+  resetTargets(id === previousId);
+});
 watch(() => chat.sessionId, () => { statusGen++; synchronized.value = false; resetTargets(); void refreshStatus(); });
 watch(() => props.data, value => {
   const next = repairPlanData(value);
   if (!next || next.plan_id === plan.value?.plan_id && next.version === plan.value?.version) return;
   statusGen++; plan.value = next; status.value = null; goalId.value = '';
-  synchronized.value = false; resetTargets();
+  synchronized.value = false;
   void refreshStatus();
 });
 onMounted(() => {
@@ -577,7 +591,7 @@ onBeforeUnmount(() => {
       <template v-if="!historical || historyExpanded">
       <div v-if="blockedReason" class="conflict-section">
         <strong class="conflict-title">{{ firstConflict?.code === 'pan_backup_exists' ? '检测到已有 PAN 备份' : '计划待处理' }}</strong>
-        <p class="conflict-name">{{ [firstConflict?.name, firstConflict?.filename].filter(Boolean).join(' · ') }}</p>
+        <p v-if="firstConflictLabel" class="conflict-name" :title="firstConflictLabel">{{ firstConflictLabel }}</p>
         <div class="actions">
           <span v-if="firstConflict?.scene_ref" class="folder-action"><ExplorerButton :directory="firstConflict.scene_ref" label="定位文件夹" /></span>
           <button v-if="firstConflict?.conflict_path || firstConflict?.scene_ref" @click="copyConflictPath">复制路径</button>
@@ -586,7 +600,7 @@ onBeforeUnmount(() => {
         <button class="list-link detail-link" :aria-expanded="detailsOpen" @click="detailsOpen = !detailsOpen">{{ detailsOpen ? '收起详情' : '查看详情' }}<span class="chevron" :class="{ expanded: detailsOpen }" aria-hidden="true">›</span></button>
         <Transition name="repair-stage"><div v-if="detailsOpen" class="conflict-details"><p>{{ firstConflict?.conflict_path }}</p><p>{{ firstConflict?.message || blockedReason }}</p></div></Transition>
         <button v-if="conflicts.length > 1" class="list-link" :aria-expanded="conflictsOpen" @click="conflictsOpen = !conflictsOpen">{{ conflictsOpen ? '收起冲突列表' : `查看全部 ${conflicts.length} 项冲突` }}<span class="chevron" :class="{ expanded: conflictsOpen }" aria-hidden="true">›</span></button>
-        <Transition name="repair-stage"><ul v-if="conflictsOpen" class="conflict-details"><li v-for="(row, index) in otherConflicts" :key="index"><p>{{ row.name }} · {{ row.filename || '待处理冲突' }}</p><details><summary>查看详情</summary><p>{{ row.conflict_path }}</p><p>{{ row.message }}</p></details></li></ul></Transition>
+        <Transition name="repair-stage"><ul v-if="conflictsOpen" class="conflict-details"><li v-for="(row, index) in otherConflicts" :key="index"><p class="conflict-name" :title="[row.name, row.filename].filter(Boolean).join(' · ')">{{ row.name }} · {{ row.filename || '待处理冲突' }}</p><details><summary>查看详情</summary><p>{{ row.conflict_path }}</p><p>{{ row.message }}</p></details></li></ul></Transition>
       </div>
       <div class="plan-footer"><button class="list-link" data-e2e="repair-targets-open" :aria-expanded="drawerOpen" @click="openTargets">查看目标清单 · {{ plan.targets.total }} 景 <span class="chevron" :class="{ expanded: drawerOpen }" aria-hidden="true">›</span></button></div>
       <div v-if="canExclude && planStatus === 'BLOCKED'" class="actions plan-actions"><button class="primary" data-e2e="repair-plan-exclude" :aria-busy="preparing" :disabled="preparing || !synchronized" @click="excludeConflicts"><Transition name="button-label" mode="out-in"><span :key="primaryFeedback">{{ primaryFeedback }}</span></Transition></button></div>

@@ -105,10 +105,12 @@ it('keeps conflict paths collapsed and prepares a new manifest plan without star
   expect(root.textContent).toContain('2 项冲突');
   expect(root.textContent).not.toContain('raw backup error');
   expect(root.textContent).not.toContain('PMS02');
+  expect(root.querySelector('.conflict-name')?.getAttribute('title')).toBe('PMS01 · PAN_old_latest.tif');
   expect(root.querySelector('[data-e2e=repair-plan-start]')).toBeNull();
   const expand = Array.from(root.querySelectorAll('button')).find(b => b.textContent?.includes('查看全部 2 项冲突'))!;
   expand.click(); await flush();
   expect(root.textContent).toContain('PMS02');
+  expect(root.querySelector('.conflict-details .conflict-name')?.getAttribute('title')).toBe('PMS02 · PAN_old_latest.tif');
   const next = plan({plan_id:'plan_' + 'b'.repeat(24)});
   vi.mocked(apiPrepareRepair).mockResolvedValue(next as never);
   vi.mocked(apiRepairStatus).mockResolvedValue(status({plan:next}) as never);
@@ -143,15 +145,20 @@ it('keeps 27 long names out of the card and opens a sorted Viewer-labelled drawe
 });
 
 it('loads the full server list when the model view omits targets', async () => {
-  const p = plan({targets:{total:27,applicable:27,excluded:0,items:[]}});
+  const total = 501;
+  const p = plan({targets:{total,applicable:total,excluded:0,items:[]}});
   vi.mocked(apiRepairStatus).mockResolvedValue(status({plan:p}) as never);
-  vi.mocked(apiRepairTargets).mockResolvedValue({plan_id:PLAN_ID,version:1,total:27,has_more:false,next_offset:27,
-    items:Array.from({length:27}, (_, n) => ({item_id:`i${n}`,ordinal:n+1,name:`Scene ${n}`}))});
+  vi.mocked(apiRepairTargets).mockImplementation(async (_, __, ___, offset = 0) => {
+    const next = Math.min(total, offset + 100);
+    return {plan_id:PLAN_ID,version:1,total,has_more:next < total,next_offset:next,
+      items:Array.from({length:next-offset}, (_, n) => ({item_id:`i${n+offset}`,ordinal:n+offset+1,name:`Scene ${n+offset}`}))};
+  });
   await mount(p);
   root.querySelector<HTMLButtonElement>('[data-e2e=repair-targets-open]')!.click();
   await flush();
   expect(apiRepairTargets).toHaveBeenCalledWith(PLAN_ID,'s',1,0);
-  expect(document.querySelectorAll('.target-list li')).toHaveLength(27);
+  expect(apiRepairTargets).toHaveBeenCalledWith(PLAN_ID,'s',1,500);
+  expect(document.querySelectorAll('.target-list li')).toHaveLength(total);
 });
 
 it('deduplicates rapid clicks and confirms before starting production', async () => {
@@ -424,7 +431,8 @@ it('shows the verified SR output and opens the existing review block directly', 
 
   root.querySelector<HTMLButtonElement>('[data-e2e=repair-start-review]')!.click();
   await flush();
-  expect(requestQualityReview).toHaveBeenCalledWith('i1');
+  expect(router.push).toHaveBeenCalledWith('/viewer');
+  expect(requestQualityReview).toHaveBeenCalledWith('i1', undefined, 'g1');
 });
 
 it('marks a fully approved production result as quality accepted', async () => {

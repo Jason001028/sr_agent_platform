@@ -1,5 +1,5 @@
 ﻿<script setup lang="ts">
-import { ref, computed, onBeforeUnmount, watch } from 'vue';
+import { ref, computed, nextTick, onBeforeUnmount, watch } from 'vue';
 import { storeToRefs, createPinia } from 'pinia';
 import RepairEvidenceRow from '../components/RepairEvidenceRow.vue';
 import { useRepairEvidenceStore } from '../stores/repairEvidence';
@@ -11,6 +11,15 @@ import { requestQualityReview } from '../lib/batchDock';
 import { useViewerStore } from '../stores/viewer';
 const props = defineProps<{ reportId?: string; embedded?: boolean }>();
 const wide = ref(false);
+const expandButton = ref<HTMLButtonElement | null>(null);
+const reportPanel = ref<HTMLElement | null>(null);
+async function setWide(value: boolean) {
+  if (wide.value === value) return;
+  wide.value = value;
+  await nextTick();
+  if (value) reportPanel.value?.focus();
+  else expandButton.value?.focus();
+}
 const route = useRoute();
 const router = useRouter();
 let locatorToken = 0;
@@ -55,11 +64,10 @@ const selected = computed(() => analysisFilter.value ? 'pending' : sort.value ==
 onBeforeUnmount(() => { locatorToken++; evidence.stop(); });
 </script>
 <template>
-  <template v-for="mode in (wide ? ['compact','wide'] : ['compact'])" :key="mode">
-    <Teleport to="body" :disabled="mode !== 'wide'">
-      <div v-if="mode === 'wide'" class="evidence-shade" @click="wide = false"></div>
-      <main class="evidence-report" :class="{ 'is-wide': mode === 'wide', standalone: !embedded }" :role="mode === 'wide' ? 'dialog' : undefined" :aria-label="mode === 'wide' ? '图像证据审阅' : '图像证据报告'" @keydown.esc="wide = false" tabindex="-1">
-        <header class="report-heading"><h1><span class="report-icon">▦</span>{{ mode === 'wide' ? '图像证据' : '图像证据报告' }}</h1><button class="expand" @click="wide = !wide">{{ mode === 'wide' ? '收起' : '横向展开' }}</button></header>
+    <Teleport to="body" :disabled="!wide">
+      <div v-if="wide" class="evidence-shade" :class="{ standalone: !embedded }" @click="setWide(false)"></div>
+      <main ref="reportPanel" class="evidence-report" :class="{ 'is-wide': wide, standalone: !embedded }" :role="wide ? 'dialog' : undefined" :aria-label="wide ? '图像证据审阅' : '图像证据报告'" @keydown.esc="setWide(false)" tabindex="-1">
+        <header class="report-heading"><h1><span class="report-icon">▦</span>{{ wide ? '图像证据' : '图像证据报告' }}</h1><button ref="expandButton" class="expand" :aria-expanded="wide" @click="setWide(!wide)">{{ wide ? '收起' : '横向展开' }}</button></header>
         <p v-if="error" class="notice" role="alert">{{ error }}</p>
         <p v-if="report" class="coverage"><b>{{ report.coverage.total_scenes }}</b> 景 <i>·</i> <b>{{ report.coverage.analyzed }}</b> 已分析 <i>·</i> <b>{{ report.coverage.unanalyzed }}</b> 待分析</p>
         <div class="report-toolbar"><div class="tabs" aria-label="报告筛选"><button v-for="tab in [{id:'all',label:'全部'},{id:'priority',label:'优先复核'},{id:'pending',label:'待分析'}]" :key="tab.id" :class="{active:selected === tab.id}" :aria-pressed="selected === tab.id" @click="filter(tab.id)">{{ tab.label }}</button></div>
@@ -69,7 +77,7 @@ onBeforeUnmount(() => { locatorToken++; evidence.stop(); });
         <div class="report-rows" :aria-busy="loading">
           <p v-if="loading && !rows.length" class="notice" role="status">正在加载报告…</p><p v-else-if="!rows.length" class="notice">{{ reportTotal ? '没有符合筛选条件的区域' : '暂无可报告的修复区域' }}</p>
           <template v-for="row in rows" :key="row.row_id">
-            <RepairEvidenceRow :row="row" :wide="mode === 'wide'" :base="base()" :expanded="expanded === row.row_id" @locate="locate(row)" @toggle="expanded = expanded === row.row_id ? null : row.row_id" />
+            <RepairEvidenceRow :row="row" :wide="wide" :base="base()" :expanded="expanded === row.row_id" @locate="locate(row)" @toggle="expanded = expanded === row.row_id ? null : row.row_id" />
             <section v-if="expanded === row.row_id" class="row-details">
               <h3>分析依据与限制</h3><p>{{ row.analysis?.observation || '暂未分析' }}</p><p v-if="row.analysis">{{ row.analysis.recommendation }}</p><p>{{ row.analysis?.limitations }}</p><p>{{ row.plan.coverage === 'sampled' ? '抽样细节，区域未完整覆盖' : '完整上下文' }} · {{ row.plan.windows.length }} 个窗口</p>
               <p v-if="row.error_code">{{ evidenceAnalysisErrorLabel(row.error_code) }}</p>
@@ -82,8 +90,9 @@ onBeforeUnmount(() => { locatorToken++; evidence.stop(); });
         <footer><span>模型意见辅助复核 · 不替代人工验收</span><button @click="load">刷新</button><a :href="`${base()}/export`" download="repair-evidence.json">JSON</a></footer>
       </main>
     </Teleport>
-  </template>
 </template>
 <style scoped>
 .evidence-report{--forest:#183f3b;--muted:#7f9589;--line:#e3ebe5;box-sizing:border-box;width:100%;min-width:0;border:1px solid #d6e3da;border-radius:14px;background:#fff;color:#29483c;font:13px/1.5 system-ui,sans-serif;overflow:hidden;text-align:left}.evidence-report *{box-sizing:border-box}.standalone{max-width:1100px;margin:24px auto}.report-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:16px 12px 8px}h1{display:flex;align-items:center;gap:8px;margin:0;font-size:17px;white-space:nowrap}.report-icon{display:grid;place-items:center;width:32px;height:32px;border-radius:8px;background:#eaf1ec;color:#35735a;font-size:24px}.evidence-report button,.evidence-report a{font:inherit;color:#35654e;cursor:pointer}.evidence-report button{border:0;background:transparent;padding:6px 8px}.evidence-report button:focus-visible,.evidence-report a:focus-visible{outline:2px solid #34795b;outline-offset:2px}.evidence-report .expand{border:1px solid #d6e3da;border-radius:8px;font-weight:600;white-space:nowrap}.coverage{color:var(--muted);margin:4px 14px 12px}.coverage b{color:#47705a}.coverage i{font-style:normal;padding:0 6px;color:#bdcec2}.report-toolbar{display:flex;align-items:center;justify-content:space-between;padding:0 10px 10px;gap:4px}.tabs{display:flex;gap:3px}.tabs button{white-space:nowrap}.tabs .active{background:#eaf2ed;border-radius:7px;color:#276149;font-weight:600}.more-filter{position:relative;color:var(--muted);font-size:11px}.more-filter summary{cursor:pointer}.more-filter[open]{max-width:125px}.more-filter label{display:block}select{max-width:100%;color:#29483c;background:#fff;border:1px solid #d6e3da;border-radius:4px}.pager{display:flex;align-items:center;gap:8px;background:#f6f9f6;border-block:1px solid var(--line);padding:8px 12px;color:var(--muted)}.pager strong{margin-right:auto}.pager button{border:1px solid #dce7df;border-radius:7px;background:#fff;font-size:24px;line-height:20px;padding:2px 10px}.pager button:disabled{opacity:.35;cursor:default}.column-head{display:grid;grid-template-columns:112px 1fr;padding:7px 12px;border-bottom:1px solid var(--line);font-size:11px;color:var(--muted)}.column-head span:first-child,.column-head span:last-child{display:none}.row-details{padding:14px;background:#f5f8f5;border-bottom:1px solid var(--line);overflow-wrap:anywhere}.row-details h3{font-size:14px;margin:0}.row-details p{margin:6px 0}.detail-assets{display:flex;flex-wrap:wrap;gap:12px}.detail-assets figure{margin:0;flex:1;min-width:100px;max-width:220px}.detail-assets img{width:100%;height:140px;object-fit:contain;background:#edf1ed}.detail-actions{display:flex;flex-wrap:wrap}footer{display:flex;align-items:center;gap:8px;padding:10px 12px;font-size:10px;color:var(--muted)}footer span{margin-right:auto}.notice{padding:12px;color:#7c6451}.evidence-shade{position:fixed;inset:55px 400px 0 0;background:#183f3b30;z-index:1000}.is-wide{position:fixed;z-index:1001;top:76px;left:24px;width:calc(100vw - 448px);max-height:calc(100vh - 100px);display:flex;flex-direction:column;box-shadow:0 20px 70px #183f3b26;margin:0}.is-wide .report-heading{padding:20px 24px 8px}.is-wide h1{font-size:23px}.is-wide .coverage{margin-left:24px}.is-wide .report-toolbar{padding-inline:18px}.is-wide .column-head{grid-template-columns:100px minmax(180px,30%) minmax(0,1fr) 110px;gap:20px;padding:12px 24px;background:#f6f9f6}.is-wide .column-head span{display:block}.is-wide .report-rows{overflow:auto;min-height:0}.is-wide footer{flex-shrink:0}.is-wide .pager{flex-shrink:0}@media(max-width:1000px){.is-wide{left:12px;width:calc(100vw - 424px)}.is-wide .column-head{display:none}}@media(max-width:700px){.is-wide{inset:64px 12px auto;width:calc(100vw - 24px)}.evidence-shade{right:0}}
+.is-wide.standalone{left:50%;right:auto;transform:translateX(-50%);width:min(1100px,calc(100vw - 24px));max-width:none}
+.evidence-shade.standalone{right:0}
 </style>

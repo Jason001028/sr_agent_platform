@@ -1,15 +1,19 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, nextTick } from 'vue';
 import { useBatchDraftStore } from '../stores/batchDraft';
+import { openBatchSelection } from '../lib/batchDock';
+import router from '../router';
 const props = defineProps<{ data: unknown }>();
 const candidates = computed(() => {
   const raw = props.data as { data?: unknown } | undefined;
   const d = (raw?.data ?? props.data) as { kind?: string; candidates?: { path: string; name: string; evidence: string }[] } | undefined;
   return d?.kind === 'batch_repair_draft.v1' && Array.isArray(d.candidates) ? d.candidates.filter(c => typeof c.path === 'string' && typeof c.name === 'string') : [];
 });
-function show() {
+async function show() {
   useBatchDraftStore().add(candidates.value);
-  window.dispatchEvent(new CustomEvent('batch-task-open', { detail: { section: 'draft' } }));
+  await router.push('/viewer');
+  await nextTick();
+  openBatchSelection();
 }
 </script>
 <template><div v-if="candidates.length" class="receipt"><span>批量修复草案 · {{ candidates.length }} 景 · 等待范围与策略确认</span><button @click="show">查看待修复清单</button></div></template>

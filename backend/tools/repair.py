@@ -11,6 +11,7 @@ The read-only tools (``get_repair_workspace`` / ``list_repair_items`` /
 from __future__ import annotations
 
 from backend.services import repair_application as svc
+from backend.services import repair_workspace as workspace_tools
 from backend.services import store as store_mod
 from backend.services.goal_lease import current_tool, LeaseLost
 from .contract import Tool, err, ok, tool
@@ -228,7 +229,8 @@ def _workspace_view(ctx):
                 pass
 
 
-def _goal_items(ctx, goal_id, item_id=None):
+def _goal_items(ctx, goal_id, item_id=None, *, status=None, limit=10, cursor=0,
+                verify=True):
     owned = False
     store = ctx.store
     if store is None:
@@ -244,46 +246,9 @@ def _goal_items(ctx, goal_id, item_id=None):
             item = store.get_goal_item(goal_id, item_id)
             if not item:
                 return err("batch item not found")
-            cp = item.get("checkpoint") or {}
-            return ok({
-                "kind": "repair_item_detail.v1",
-                "goal_id": goal_id,
-                "item_id": item["item_id"],
-                "ordinal": item["ordinal"],
-                "name": item["name"],
-                "status": item["status"],
-                "attempt": int(cp.get("attempt") or 0),
-                "error": item.get("error"),
-                "job_id": item.get("external_job_id") or cp.get("job_id"),
-                "sr_status": cp.get("sr_status"),
-                "scene_ref": cp.get("scene_ref"),
-                "mask_ready": bool(cp.get("mask")),
-                "overlay_ready": bool((cp.get("mask") or {}).get("overlay")),
-                "review": cp.get("review"),
-                "review_required": bool(cp.get("review_required")),
-                "quality_review_id": cp.get("quality_review_id"),
-                "output_path": svc.verified_output_path(item),
-                "verification": item.get("verification") or {},
-                "last_detection_error": cp.get("last_detection_error"),
-                "last_submit_prepare_error": cp.get("last_submit_prepare_error"),
-            })
-        items = store.list_goal_items(goal_id, limit=500)
-        return ok({
-            "kind": "repair_items.v1",
-            "goal_id": goal_id,
-            "status": goal.get("status"),
-            "counts": store.goal_item_status_counts(goal_id),
-            "items": [{
-                "item_id": item["item_id"],
-                "ordinal": item["ordinal"],
-                "name": item["name"],
-                "status": item["status"],
-                "attempt": int((item.get("checkpoint") or {}).get("attempt") or 0),
-                "job_id": item.get("external_job_id")
-                or (item.get("checkpoint") or {}).get("job_id"),
-                "error": item.get("error"),
-            } for item in items],
-        })
+            return ok(workspace_tools.item_detail(store, item, verify=verify))
+        return ok(workspace_tools.items_page(store, goal_id, status=status,
+                                             limit=limit, cursor=cursor))
     except (ValueError, OSError, KeyError) as exc:
         return err(str(exc))
     finally:
@@ -330,13 +295,17 @@ _GET_WORKSPACE_DESC = (
 )
 
 _LIST_ITEMS_DESC = (
-    "只读查询一个已知 Batch Goal 的任务项列表与状态计数，用于解释进度和失败原因。"
+    "只读查询一个已知 Batch Goal 的任务项列表与状态摘要，用于解释进度和失败原因。"
+    "按冻结 Manifest 原始 ordinal 升序，含排除/SKIPPED 项；status 支持英文逗号分隔，"
+    "cursor 是排他原始 ordinal，多读一项判断 next_cursor/has_more。"
     "需要权威 goal_id；不猜最新任务，不按聊天文本推断成功，也不控制或提交作业。"
     "演示/Fake SR 结果不等于生产质量验收。"
 )
 
 _GET_ITEM_DESC = (
-    "只读查询一个已知 Batch Goal 中某一项的状态、作业、掩码就绪、人工复核与验证摘要。"
+    "只读查询一个已知 Batch Goal 中某一项的状态、作业、掩码、人工复核与验证摘要。"
+    "默认 verify=true 校验审核绑定与文件修订是否仍有效，返回 review_valid 与失效原因；"
+    "区域详情最多列出前 20 条决定（rejected 优先），不含候选几何或审核人身份。"
     "用于回答“第三景为什么还没完成”；不重新检测、不重新提交、不修改任务状态。"
 )
 
@@ -387,17 +356,27 @@ _GET_WORKSPACE_PARAMS = {"type": "object", "properties": {},
                          "required": [], "additionalProperties": False}
 _LIST_ITEMS_PARAMS = {
     "type": "object",
-    "properties": {"goal_id": {"type": "string", "minLength": 1,
-                               "description": "已知 Batch Goal ID；不猜最新任务。"}},
+    "properties": {
+        "goal_id": {"type": "string", "minLength": 1, "maxLength": 512,
+                    "description": "已知 Batch Goal ID；不猜最新任务。"},
+        "status": {"type": "string", "maxLength": 200,
+                   "description": "精确持久状态，多个用英文逗号分隔，如 FAILED,AWAITING_REVIEW；定位原始第N景时不传。"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 50,
+                  "description": "每页数量，最多50；定位原始序号时取1。"},
+        "cursor": {"type": "integer", "minimum": 0,
+                   "description": "排他原始ordinal；初始0，第N景用N-1，后续页用next_cursor。"},
+    },
     "required": ["goal_id"], "additionalProperties": False,
 }
 _GET_ITEM_PARAMS = {
     "type": "object",
     "properties": {
-        "goal_id": {"type": "string", "minLength": 1,
+        "goal_id": {"type": "string", "minLength": 1, "maxLength": 512,
                     "description": "已知 Batch Goal ID；不猜最新任务。"},
-        "item_id": {"type": "string", "minLength": 1,
+        "item_id": {"type": "string", "minLength": 1, "maxLength": 512,
                     "description": "该 Goal 内的任务项 ID；可从 list_repair_items 取得。"},
+        "verify": {"type": "boolean", "default": True,
+                   "description": "默认 true：校验审核绑定与文件修订是否仍有效（只读摘要，不执行 SR），结果见 review_valid/review_invalid_reason；false 只读数据库，review_valid 为 null。"},
     },
     "required": ["goal_id", "item_id"], "additionalProperties": False,
 }
@@ -424,14 +403,14 @@ def get_repair_workspace():
 
 @tool(name="list_repair_items", description=_LIST_ITEMS_DESC,
       params_schema=_LIST_ITEMS_PARAMS)
-def list_repair_items(goal_id):
-    return _goal_items(_Context(), goal_id)
+def list_repair_items(goal_id, status=None, limit=10, cursor=0):
+    return _goal_items(_Context(), goal_id, status=status, limit=limit, cursor=cursor)
 
 
 @tool(name="get_repair_item", description=_GET_ITEM_DESC,
       params_schema=_GET_ITEM_PARAMS)
-def get_repair_item(goal_id, item_id):
-    return _goal_items(_Context(), goal_id, item_id)
+def get_repair_item(goal_id, item_id, verify=True):
+    return _goal_items(_Context(), goal_id, item_id, verify=verify)
 
 
 # ---------------------------------------------------------------------------
@@ -482,11 +461,13 @@ def inspection_tool(snapshot,store,session_id,*,raster_runner=None):
                     rows.append({'item_id':item['item_id'],'name':item['name'],'status':'failed','reason':str(exc)[:300]})
             next_cursor=cursor+len(rows)
             return ok({'kind':'repair_inspection.v1','inspection_only':True,'detection_method':settings.get('detection_method','ssim'),
-                'tone_weight':settings.get('tone_weight',True),'total':len(items),'items':rows,'diagnostics':manifest.get('diagnostics',[]),
+                'tone_weight':settings.get('tone_weight',True),'scope':scope,'cursor':cursor,
+                'total':len(items),'items':rows,'diagnostics':manifest.get('diagnostics',[]),
                 'has_more':next_cursor<len(items),'next_cursor':next_cursor if next_cursor<len(items) else None,
                 'note':'只读检测候选，不代表确认缺陷；未生成掩码、修复计划、Goal 或 SR 作业'})
         except (ValueError,OSError) as exc:return err(str(exc))
-    return Tool(name='inspect_repair_workspace',description='仅质检：对本消息冻结的 Viewer PAN/NOSR 读取真实 DN 并复用差异检测。每页最多4景，按 next_cursor 继续直到 has_more=false；返回候选与失败/跳过事实，不生成掩码、计划或 SR 作业。',
+    return Tool(name='inspect_repair_workspace',description='仅质检：对本消息冻结的 Viewer PAN/NOSR 读取真实 DN 并复用差异检测。整批使用 limit=4，从 cursor=0 按 next_cursor 继续直到 has_more=false。直接调用工具，避免逐页播报快照字段、游标和分页计划。全部分页收齐后界面自动展示总表。返回候选与失败/跳过事实，不生成掩码、计划或 SR 作业。',
+        result_protected_fields=('next_cursor',),
         params_schema={'type':'object','properties':{'scope':{'type':'string','enum':['workspace','current','selection']},
             'cursor':{'type':'integer','minimum':0},'limit':{'type':'integer','minimum':1,'maximum':4}},'additionalProperties':False},run=run,timeout_sec=180)
 
@@ -513,12 +494,12 @@ def bound_tool(name: str, *, workspace=None, current=None, selected_images=None,
             return _workspace_view(context)
         base = get_repair_workspace
     elif name == "list_repair_items":
-        def run(goal_id):
-            return _goal_items(context, goal_id)
+        def run(goal_id, status=None, limit=10, cursor=0):
+            return _goal_items(context, goal_id, status=status, limit=limit, cursor=cursor)
         base = list_repair_items
     elif name == "get_repair_item":
-        def run(goal_id, item_id):
-            return _goal_items(context, goal_id, item_id)
+        def run(goal_id, item_id, verify=True):
+            return _goal_items(context, goal_id, item_id, verify=verify)
         base = get_repair_item
     else:
         raise KeyError(name)

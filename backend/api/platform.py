@@ -561,7 +561,9 @@ def _project_message(seq: int, wire: dict, name_of_call: dict) -> dict:
             payload = json.loads(wire["content"])
         except (TypeError, ValueError):
             payload = {"ok": False, "data": None, "error": str(wire["content"])}
-        structured = name_of_call.get(wire.get('tool_call_id')) in {'prepare_repair', 'start_repair', 'read_tool_result'}
+        structured = name_of_call.get(wire.get('tool_call_id')) in {
+            'prepare_repair', 'start_repair', 'read_tool_result', 'inspect_repair_workspace',
+        }
         return {"seq": seq, "role": "tool",
                 "tool_name": name_of_call.get(wire.get("tool_call_id")),
                 "tool_call_id": wire.get("tool_call_id"),

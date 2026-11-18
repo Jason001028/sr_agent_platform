@@ -4,6 +4,7 @@ const fixture = vi.hoisted(() => ({ rows: [] as any[] }));
 vi.mock('../../stores/batchGoal', () => ({ useBatchGoalStore: () => ({ goalId: null, snapshot: null }) }));
 vi.mock('../../stores/batchDraft', () => ({ useBatchDraftStore: () => ({ candidates: fixture.rows, title: 'fixture', mode: 'demo', strategy: 'review' }) }));
 import { AGENT_REPAIR_PROMPT, handoffBatch, requestAgentRepair } from '../batchHandoff';
+import { agentRepairSettings } from '../agentRepairSettings';
 it('compacts repeated evidence without dropping identities, states or validation issues', () => {
   fixture.rows = Array.from({ length: 50 }, (_, i) => ({ name: `image-${i}`, path: `/scene-${i}/PAN.tif`, evidence: '需要人工核对的同一条检测依据。'.repeat(20), status: '待确认', validationError: i === 3 ? '来源待核' : undefined }));
   let text = '';
@@ -36,4 +37,21 @@ it('requests one auto-sent Agent repair that still needs plan confirmation', () 
   expect(detail.text).toContain('不要直接提交 SR');
   expect(detail.text).toContain('确认后启动');
   expect(detail.text).not.toContain('start_repair');
+});
+
+it('uses the same frozen inspection settings for the prompt and automatic send', () => {
+  const previous = agentRepairSettings.value;
+  agentRepairSettings.value = { ...previous, inspection_only: true, detection_method: 'smart' };
+  try {
+    let detail: any;
+    window.addEventListener('batch-agent-handoff', e => { detail = (e as CustomEvent).detail; }, { once: true });
+    const isCurrent = () => true;
+    requestAgentRepair(isCurrent);
+    agentRepairSettings.value.inspection_only = false;
+    expect(detail.repairSettings).toMatchObject({ inspection_only: true, detection_method: 'smart' });
+    expect(detail.text).toContain('inspect_repair_workspace');
+    expect(detail.isCurrent).toBe(isCurrent);
+  } finally {
+    agentRepairSettings.value = previous;
+  }
 });

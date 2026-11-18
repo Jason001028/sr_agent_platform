@@ -29,14 +29,15 @@ python -m backend.eval_repair_workspace --core-only --live --baseline-ref <改�
 |---|---|---|
 | `get_current_image_info` | 无 | 仅消息冻结的 current、selected、displayed、ROI/Mask/differences；本地未入库 TIFF 可查；不查 Batch 数据库、不扫描场景库。无快照返回明确错误；有空快照返回 image=null。 |
 | `get_repair_workspace` | 无 | 消息冻结的活动影像、草案数量/版本、Viewer 序列勾选摘要、TXT 清单聚焦摘要、关联 Goal/当前 Item 引用；本会话 Goal 的实时数据库 counts/progress/审核数量和最多 3 项异常。 |
-| `list_repair_items` | `goal_id`, `status?`, `limit=10`（1..50）, `cursor=0` | 复用 `Store.list_goal_items`，按 ordinal 升序，cursor 排他；多读一行判断 next_cursor，末页 null。Item/场景名、阶段、Job、人工审核摘要及错误。 |
-| `get_repair_item` | `goal_id`, `item_id` | 精确 Item、SR Task、Quality Review 持久记录；PAN/NOSR image_key/revision、候选数、Mask 哈希/契约/构建器版本、Job ID/状态、五层验证、人工逐区计数及驳回原因。仅报告持久记录，不在查询中重新检查磁盘。 |
+| `list_repair_items` | `goal_id`, `status?`（英文逗号分隔）, `limit=10`（1..50）, `cursor=0` | 复用 `Store.list_goal_items`，按 ordinal 升序，cursor 排他；多读一行判断 `has_more`/`next_cursor`，末页 null。Item/场景名、阶段、Job、人工审核摘要及错误。 |
+| `get_repair_item` | `goal_id`, `item_id`, `verify=true` | 精确 Item、SR Task、Quality Review 持久记录；PAN/NOSR image_key/revision、候选数、Mask 哈希/契约/构建器版本、Job ID/状态、五层验证、人工逐区计数及驳回原因。`verify=true` 时调用 `validate_current`，返回 `review_valid` 与 `review_invalid_reason`；区域列表按 rejected > pending > approved 取前 20 条，`regions_truncated` 标记截断，不返回候选几何或审核人身份。`verify=false` 只读数据库（`review_valid=null`）。 |
+| `query_batch_repair` | `goal_id` | 返回 `batch_snapshot.v1` 的有界投影：goal 摘要、counts/progress、producer、最多 20 条 active_jobs、10 条 recent_jobs、审核计数与最多 10 条待审/驳回项、报告可用性。剔除 `session_id`、`image_path`/`scene_ref` 等路径并标记截断；完整快照仍由 REST `/api/goals/{id}/batch-snapshot` 提供。 |
 | `sr_job_status` | 现有整数 `job_id` | 仍复用 `run_sr.query_job_status`，精确 Task 查询与判定文件；Agent 会话入口先核对数据库归属。兼容没有 session_id 的旧 Batch 回执，通过 Item/Intent 与 Goal 的持久关联授权。 |
 | `search_scenes` | 现有 Schema | 明确仅用于场景资源库发现。保留兼容 workspace 范围；冻结工作区为空时返回 count=0/scanned=0，禁止悄悄转全库。明确检索其他场景使用 scope=library。无消息快照的旧 CLI/REST 保留兼容全库入口。 |
 
 `list/get` 每次先核验 Goal 的 kind=batch 和 session_id。UI 提供的权限、状态、路径不参与授权。详情只投影白名单字段；错误文本截断并过滤绝对路径/UNC。不返回 config_xml、params、执行目录、完整候选几何或 Reviewer 身份。完整结果仍由现有 Full Result / Model View、参数校验、预算和会话级 result_id 管理。
 
-四种证据分别保留：Job ID/提交回执、持久执行状态、contract/artifacts 验证层、quality 人工审核层。缺失记录返回未知；demo_contract / mock 不解释为生产质量通过。`review_for_item(..., verify=False)` 只读数据库，避免查询工具触发文件重验。
+四种证据分别保留：Job ID/提交回执、持久执行状态、contract/artifacts 验证层、quality 人工审核层。缺失记录返回未知；demo_contract / mock 不解释为生产质量通过。`get_repair_workspace` / `list_repair_items` 仍用 `review_for_item(..., verify=False)` 只读数据库；`get_repair_item` 默认 `verify=true`，调用 `validate_current` 校验审核绑定与文件修订，失败时返回 `review_valid=false` 与首个原因，`verify=false` 可恢复纯数据库读取。
 
 ## 上下文数据流
 
@@ -76,6 +77,21 @@ python -m backend.eval_repair_workspace --core-only --live --baseline-ref <改�
 python -m backend.eval_repair_workspace --baseline-ref HEAD
 # 配好真实模型后运行；仍全部走 Fake Executor，绝不调用生产工具：
 python -m backend.eval_repair_workspace --baseline-ref <改造前提交> --live --output .e2e/workspace-live-eval.json
+```
+
+## 2026-11-18 只读工具收敛
+
+只扩展已有工具、不新增只读工具，避免模型在多个近义工具间犹豫：
+
+- `list_repair_items`：`status` 支持英文逗号分隔；`next_cursor` 之外补 `has_more`；参数与 bound 实现由 `backend/services/repair_workspace.py` 统一。
+- `get_repair_item`：新增 `verify`（默认 true）。校验成功 `review_valid=true`，失败 `review_valid=false` + `review_invalid_reason`；区域详情按 rejected > pending > approved 取前 20 条并给 `region_count`/`regions_truncated`，不返回几何与审核人。
+- `query_batch_repair`：改为 `batch_snapshot.v1` 的有界、脱敏投影（counts/progress、最多 20 条 active_jobs、10 条 recent_jobs、10 条审核项），剔除 `session_id` 与绝对路径；REST 快照接口保持完整。
+- `backend/tools/repair.py` 的 legacy 静态工具改为复用同一投影函数，`/api/tools` 与实际 Agent 契约一致。
+
+验证：
+
+```powershell
+python -m pytest backend/tests/test_repair_workspace.py backend/tests/test_tool_description_contract.py backend/tests/test_batch_planning_tools.py backend/tests/test_repair_application.py -q
 ```
 
 回放使用固定工具调用脚本及隔离 Fake Executor，基线源码通过 `git show` 在内存加载，不替换工作树。

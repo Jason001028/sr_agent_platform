@@ -253,7 +253,8 @@ def bind_registry(registry, snapshot, *, store=None, session_id=None, raster_run
                     actual = store.batch_snapshot(goal_id) if session_id else None
                     if not actual or actual.get('goal', {}).get('session_id') != session_id:
                         return err('当前会话没有可读取的关联批次')
-                    return ok(actual)
+                    from backend.services.repair_workspace import batch_summary
+                    return ok(batch_summary(actual))
                 result.register(replace(item, run=session_batch))
                 continue
         if item.name == 'get_current_image_info':

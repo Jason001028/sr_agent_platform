@@ -239,3 +239,103 @@ def test_five_class_evaluation_replay_has_minimal_chain_and_no_real_execution():
     assert third['ordinal_lookup_correct'] is True
     assert all(row['first_tool_correct'] is None for row in enhanced)
     sr.assert_not_called();search.assert_not_called();llm.assert_not_called()
+
+
+def _attach_review(store, gid, item_id='i3'):
+    review_id = 'review-test'
+    regions = [
+        {'region_id': 'r-approved', 'decision': 'approved', 'reason': '', 'reviewer': 'alice'},
+        {'region_id': 'r-pending', 'decision': 'pending', 'reason': '', 'reviewer': ''},
+        {'region_id': 'r-rejected', 'decision': 'rejected', 'reason': 'D:/private/blur.tif 模糊', 'reviewer': 'bob'},
+    ]
+    item = store.get_goal_item(gid, item_id)
+    checkpoint = dict(item['checkpoint'], quality_review_id=review_id)
+    with store.worker_transaction() as db:
+        db.execute("INSERT INTO batch_quality_reviews(review_id,goal_id,item_id,job_id,"
+                   "binding,regions,scene_decision,version,created_at,updated_at) "
+                   "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                   (review_id, gid, item_id, '', json.dumps({'kind': 'no-candidate'}),
+                    json.dumps(regions), 'rejected', 1, 0, 0))
+        db.execute("UPDATE agent_goal_steps SET checkpoint=? WHERE step_id=?",
+                   (json.dumps(checkpoint), item['step_id']))
+    return review_id
+
+
+def test_item_detail_projects_regions_and_reports_invalid_binding(batch):
+    store, sid, gid, _ = batch
+    _attach_review(store, gid)
+    tools = registry(store, sid, gid)
+    cheap = tools.invoke('get_repair_item', {'goal_id': gid, 'item_id': 'i3', 'verify': False})['data']
+    assert cheap['review_valid'] is None
+    assert cheap['region_count'] == 3 and cheap['regions_truncated'] is False
+    assert [row['decision'] for row in cheap['regions']] == ['rejected', 'pending', 'approved']
+    assert cheap['regions'][0]['region_id'] == 'r-rejected'
+    text = json.dumps(cheap)
+    assert 'alice' not in text and 'bob' not in text and 'D:/private' not in text
+    checked = tools.invoke('get_repair_item', {'goal_id': gid, 'item_id': 'i3'})['data']
+    assert checked['review_valid'] is False
+    assert checked['review_invalid_reason']
+    assert 'D:/private' not in checked['review_invalid_reason']
+
+
+def test_list_items_accepts_comma_separated_status_and_exposes_has_more(batch):
+    store, sid, gid, _ = batch
+    with store.worker_transaction() as db:
+        db.execute("UPDATE agent_goal_steps SET status='BLOCKED' WHERE goal_id=? AND item_id='i4'", (gid,))
+    tools = registry(store, sid, gid)
+    page = tools.invoke('list_repair_items', {'goal_id': gid, 'status': 'FAILED, BLOCKED', 'limit': 10})['data']
+    assert [row['ordinal'] for row in page['items']] == [3, 4]
+    assert page['has_more'] is False and page['next_cursor'] is None
+    first = tools.invoke('list_repair_items', {'goal_id': gid, 'status': 'FAILED,BLOCKED', 'limit': 1})['data']
+    assert first['has_more'] is True and first['next_cursor'] == 3
+
+
+def test_batch_summary_is_bounded_and_paths_are_redacted():
+    from backend.services.repair_workspace import batch_summary
+    snapshot = {
+        'goal': {'goal_id': 'g1', 'session_id': 'secret-session', 'title': 't', 'status': 'RUNNING'},
+        'counts': {'total': 50, 'failed': 1}, 'progress': {},
+        'producer': {'current': {'item_id': 'i1', 'name': 'pan', 'image_path': 'D:/private/PAN.tif'}},
+        'active_jobs': [{'item_id': f'i{n}', 'ordinal': n, 'name': f'n{n}',
+                         'image_path': '/disk/raw.tif', 'error': 'D:/private/fail.log'} for n in range(25)],
+        'recent_jobs': [],
+        'quality': {'waiting_scenes': 2, 'rejected_scenes': 1,
+                    'items': [{'item_id': f'q{n}', 'ordinal': n, 'status': 'AWAITING_REVIEW',
+                               'image_path': '/disk/q.tif'} for n in range(15)]},
+        'report': {'available': True}, 'server_time': 1.0,
+    }
+    summary = batch_summary(snapshot)
+    text = json.dumps(summary)
+    assert 'secret-session' not in text and 'D:/' not in text and '/disk' not in text
+    assert len(summary['active_jobs']) == 20 and summary['active_jobs_truncated'] is True
+    assert len(summary['quality']['items']) == 10 and summary['quality']['items_truncated'] is True
+    assert summary['quality']['items_total'] == 15
+    assert summary['counts']['total'] == 50
+
+
+def test_bound_query_batch_repair_returns_bounded_snapshot(batch):
+    from backend.tools import build_builtin_registry
+    store, sid, gid, _ = batch
+    snapshot = validate_snapshot({'version': 1, 'batch_goal': {'goal_id': gid}})
+    tools = bind_registry(build_builtin_registry(), snapshot, store=store, session_id=sid)
+    data = tools.invoke('query_batch_repair', {'goal_id': gid})['data']
+    assert data['counts']['total'] == 50 and data['goal']['goal_id'] == gid
+    assert 'session_id' not in json.dumps(data)
+    denied = bind_registry(build_builtin_registry(), snapshot, store=store, session_id='other')
+    assert denied.invoke('query_batch_repair', {'goal_id': gid})['ok'] is False
+
+
+def test_unbound_legacy_tools_share_paging_and_verify_contract(batch):
+    from backend.tools import build_builtin_registry, repair as repair_tools
+    store, sid, gid, _ = batch
+    _attach_review(store, gid)
+    schema = build_builtin_registry().get('list_repair_items').params_schema['properties']
+    assert {'status', 'limit', 'cursor'} <= set(schema)
+    assert 'verify' in build_builtin_registry().get('get_repair_item').params_schema['properties']
+    with patch.object(repair_tools, '_unbound_store', return_value=(store, False)):
+        page = repair_tools.list_repair_items(gid, limit=2)
+        assert [row['ordinal'] for row in page['data']['items']] == [1, 2]
+        third = repair_tools.list_repair_items(gid, cursor=page['data']['next_cursor'], limit=1)
+        assert third['data']['items'][0]['ordinal'] == 3
+        detail = repair_tools.get_repair_item(gid, 'i3', verify=False)['data']
+        assert detail['region_count'] == 3 and detail['review_valid'] is None

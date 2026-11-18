@@ -25,6 +25,7 @@ import type { QcIssue, QcStatus } from '../lib/qclist';
 import { BAKE_STAGE_LABEL, sceneNameCandidates } from '../lib/qcbatch';
 import { batchDockOpen, openBatchSelection } from '../lib/batchDock';
 import { requestAgentRepair } from '../lib/batchHandoff';
+import { agentRepairSettings } from '../lib/agentRepairSettings';
 
 const viewer = useViewerStore();
 const qc = useQcListStore();
@@ -161,7 +162,7 @@ async function onAgentRepair() {
       viewer.showErr('部分场景解析失败，已取消发送 Agent 消息；请查看解析失败记录，重新解析后重试');
       return;
     }
-    requestAgentRepair();
+    requestAgentRepair(() => qc.list === list && qc.coordinateImportRevision === revision);
   } catch (e) {
     viewer.showErr('解析失败，未发送 Agent 消息：' + (e instanceof Error ? e.message : String(e)));
   } finally {
@@ -278,7 +279,9 @@ watch(
         class="qc-agent"
         data-e2e="qc-agent-repair"
         :disabled="agentPreparing"
-        title="等待整份清单解析完成后，让 Agent 准备修复计划；在计划卡确认后启动"
+        :title="agentRepairSettings.inspection_only
+          ? '等待整份清单解析完成后，让 Agent 进行只读质检'
+          : '等待整份清单解析完成后，让 Agent 准备修复计划，确认后启动'"
         @click="onAgentRepair"
       >{{ agentPreparing ? '等待解析…' : 'Agent协助' }}</button>
       <template v-if="qc.loaded">

@@ -14,7 +14,7 @@ const emit = defineEmits<{ openScene: [item: Record<string, unknown>] }>();
   <div v-if="projection.groups.has(index) || projection.business.has(index)" class="tool-presentation">
     <AgentActivityTimeline v-for="group in projection.groups.get(index)" :key="group.key" :group="group" :session-key="sessionKey" :developer-mode="developerMode" />
     <template v-for="step in projection.business.get(index)" :key="step.key">
-      <AgentInspectionCard v-if="step.business === 'inspection'" :data="toolPayload(step.result)" />
+      <AgentInspectionCard v-if="step.business === 'inspection'" :data="step.inspection" />
       <AgentRepairPlanCard v-else-if="step.business === 'plan'" :data="step.result?.data" />
       <SceneSearchResultCard v-else-if="step.business === 'scenes'" :data="toolPayload(step.result)" :args="(step.args ?? {}) as Record<string, unknown>" status="completed" @open="emit('openScene', $event)" />
       <AgentBatchReceipt v-else-if="step.business === 'receipt'" :data="step.result?.data" />

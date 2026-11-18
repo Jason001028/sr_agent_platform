@@ -517,6 +517,7 @@ sr_agent_platform/
 | 文档 | 内容 |
 |---|---|
 | [current-question.md](status/current-question.md) | 平台现状、当前路线、未收口项、下一步、现值速查。新会话先读 |
+| [repair-skill-autonomy-handoff.md](status/repair-skill-autonomy-handoff.md) | 修复流程 Skill 化的目标、现状、缺口任务板与多 Agent 分工；下一轮撰写 batch-repair Skill |
 | [durable_goal_runtime.md](status/durable_goal_runtime.md) | Goal/Round 执行、SR 自动续跑、Lease Fencing、独立验收与自动化验证 |
 | [p0-gap-review.md](status/p0-gap-review.md) | 2026-11-02 对 Harness P0 计划的逐项差距复核与测试基线 |
 | [batch-pr-ab.md](status/batch-pr-ab.md) | 旧版批量修复计划 PR A/B：修复契约夹具、Manifest 冻结、原子 Goal/Items 与验收 |

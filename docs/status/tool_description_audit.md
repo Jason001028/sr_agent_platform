@@ -1,6 +1,8 @@
 # 工具描述契约审计
 
 > 日期：2026-10-27 · 状态：已定（真实模型效果、内网 GDAL/GPU 验收待核）
+>
+> 2026-11-18 补充：`list_repair_items` 增加逗号分隔 `status` 与 `has_more`，`get_repair_item` 增加默认开启的 `verify` 与区域级审核投影，`query_batch_repair` 改为有界脱敏摘要；最新契约见 [repair-workspace-awareness.md](repair-workspace-awareness.md) 与 `backend/tests/test_tool_description_contract.py`。
 
 ## 范围与证据
 

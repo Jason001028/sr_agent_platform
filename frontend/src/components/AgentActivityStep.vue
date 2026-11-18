@@ -21,6 +21,7 @@ const stateLabels = {running:'执行中',success:'已完成',failed:'失败',int
 .state-icon.success { color:#709d87; } .state-icon.failed { color:#bb786d; }
 svg { width:14px; height:14px; fill:none; stroke:currentColor; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round; }
 .step-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+[data-state=failed] .step-label, [data-state=interrupted] .step-label { white-space:normal; overflow-wrap:anywhere; }
 .step-summary { color:var(--ink-faint); } [data-state=failed] .step-summary { color:#ad756c; }
 .running-dot { width:6px; height:6px; background:var(--ink-sub); border-radius:50%; animation:activity-breathe 1.8s ease-in-out infinite; }
 .step-details { margin:0 0 6px 22px; font-size:10px; color:var(--ink-faint); } summary { cursor:pointer; }

@@ -1,9 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import { ANALYZE_CURRENT_PROMPT, analysisPromptSummary } from '../analysisPrompt';
 import { agentPayload, splitAgentPayload } from '../agentContext';
-import { AGENT_REPAIR_PROMPT, AGENT_REPAIR_DISPLAY_TEXT } from '../repairPrompt';
+import { AGENT_REPAIR_PROMPT, AGENT_REPAIR_DISPLAY_TEXT, buildAgentRepairPrompt } from '../repairPrompt';
+import { DEFAULT_AGENT_REPAIR_SETTINGS } from '../agentRepairSettings';
 
 describe('automatic analysis instruction presentation', () => {
+  it('summarizes the automatic inspection instruction while keeping user additions visible', () => {
+    const prompt = buildAgentRepairPrompt({ ...DEFAULT_AGENT_REPAIR_SETTINGS, inspection_only: true });
+    expect(analysisPromptSummary(prompt)).toBe('对当前工作区仅做质检，不提交 SR。');
+    expect(analysisPromptSummary(prompt + '\n请优先核对第 3 景。')).toBeNull();
+  });
   it('summarizes repair instructions identically after persisted payload recovery', () => {
     const recovered = JSON.parse(JSON.stringify({content:agentPayload(AGENT_REPAIR_PROMPT,'workspace snapshot')}));
     const parts = splitAgentPayload(recovered.content);

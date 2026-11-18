@@ -25,7 +25,7 @@ import { useChatStore } from '../stores/chat.js';
 import type { ChatMsg } from '../stores/chat.js';
 import AnnotationManager from './AnnotationManager.vue';
 import CurrentImagePill from './CurrentImagePill.vue';
-import MarkdownBody from './MarkdownBody.vue';
+import AgentAssistantText from './AgentAssistantText.vue';
 import UserMessageText from './UserMessageText.vue';
 import { ANALYZE_CURRENT_PROMPT } from '../lib/analysisPrompt';
 import ReasoningBlock from './ReasoningBlock.vue';
@@ -48,6 +48,7 @@ import { roiOrigGeom } from '../lib/roiStats.js';
 
 import AgentToolPresentation from './AgentToolPresentation.vue';
 import { projectAgentActivity } from '../lib/agentActivity';
+import type { BatchAgentHandoff } from '../lib/batchHandoff';
 
 const viewer = useViewerStore();
 const chat = useChatStore();
@@ -57,15 +58,15 @@ const draft = ref('');
 const batchContext = ref(false);
 const composerEnabled = computed(() => enabled.value || batchContext.value);
 function receiveBatch(event: Event) {
-  const detail = (event as CustomEvent<{ text?: string; autoSend?: boolean }>).detail;
+  const detail = (event as CustomEvent<BatchAgentHandoff>).detail;
   const text = detail?.text;
   if (!text) return;
+  if (detail.autoSend && detail.repairSettings) {
+    void sendAgentRepair(detail);
+    return;
+  }
   batchContext.value = true;
   draft.value = draft.value.trim() ? `${draft.value}\n\n${text}` : text;
-  // The [Agent协助] entry asks for one real send, not just a prefilled draft.
-  // Recheck canSend on the next tick; if the Agent is busy or the image is
-  // still loading, the prompt stays in the composer for the user to send.
-  if (detail?.autoSend) void nextTick(() => { if (canSend()) void onSend(); });
 }
 onMounted(() => window.addEventListener('batch-agent-handoff', receiveBatch));
 onBeforeUnmount(() => window.removeEventListener('batch-agent-handoff', receiveBatch));
@@ -228,6 +229,25 @@ function waitLabel(m: ChatMsg): string {
 
 const creating = ref(false);   // 防止双击并发 newSession 建出两个会话
 
+async function sendAgentRepair(handoff: BatchAgentHandoff): Promise<void> {
+  if (!handoff.repairSettings) return;
+  if (chat.sending || creating.value) {
+    chat.error = 'Agent 正在处理上一条请求，请结束后重新点击 Agent协助。';
+    return;
+  }
+  if (!chat.sessionId) {
+    creating.value = true;
+    try { await chat.newSession(); }
+    finally { creating.value = false; }
+  }
+  if (!chat.sessionId) return;
+  if (handoff.isCurrent && !handoff.isCurrent()) {
+    chat.error = '清单已更换或关闭，请重新点击 Agent协助。';
+    return;
+  }
+  await chat.send(handoff.text, { repairSettings: handoff.repairSettings });
+}
+
 /** 有截图时可以不写字：上下文快照照样附上（Agent 仍能引用 W×H / 拉伸）。 */
 function canSend(): boolean {
   return composerEnabled.value && (snap.value !== null || batchContext.value) && !chat.sending && !creating.value
@@ -253,9 +273,9 @@ async function onSend(): Promise<void> {
   const region=viewer.questionRegion;
   if(region) {
     const source=viewer.recs.find(r=>r.id===region.recId);
-    if(!source || imageRef(source)?.image_key!==region.key || source.id!==viewer.activeRec?.id) { chat.error='ROI source changed; return to the original image'; return; }
+    if(!source || imageRef(source)?.image_key!==region.key || source.id!==viewer.activeRec?.id) { chat.error='区域来源影像已变化，请返回原影像后重试。'; return; }
     const shot=await viewer.captureForChat(region.recId,region.bounds);
-    if(!shot || !chat.addPendingImage(shot)) { chat.error='ROI source changed; return to the original image??'; return; }
+    if(!shot || !chat.addPendingImage(shot)) { chat.error='无法添加区域截图，请重试。'; return; }
     text += '\nUser source ROI (not AI detection): '+JSON.stringify(region)+'; attachment is a display preview crop, not raw DN.';
     viewer.questionRegion=null;
   }
@@ -350,11 +370,12 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
 
     <CurrentImagePill v-if="enabled && rec" :name="rec.name" :busy="chat.sending || creating" @analyze="analyzeCurrent" />
     <AnnotationManager />
-    <p v-if="chat.error" class="at-err">{{ chat.error }}</p>
+    <p v-if="chat.error" class="at-err" role="alert">{{ chat.error }}</p>
 
     <!-- 会话区 -->
       <div ref="scrollEl" class="at-scroll">
-        <div v-if="!chat.messages.length && !chat.sending" class="at-welcome">
+        <p v-if="creating && !chat.messages.length" class="at-desc" role="status">正在创建 Agent 会话…</p>
+        <div v-else-if="!chat.messages.length && !chat.sending" class="at-welcome">
           <AgentBotIcon :status="chat.agentStatus" :size="24" label="遥感影像助手" />
           <div class="bubble assistant">你好，我是遥感影像助手。你可以让我检索场景、打开影像或规划处理任务。</div>
         </div>
@@ -390,9 +411,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
                               :merged-count="reasoningView(i)?.merged ? reasoningView(i)?.count : undefined"
                               :merged-seconds="reasoningView(i)?.merged ? reasoningView(i)?.seconds : undefined"
                               @timing="onReasoningTiming(i, $event)" />
-              <div v-if="m.content" class="bubble assistant">
-                <MarkdownBody :source="m.content" />
-              </div>
+              <AgentAssistantText v-if="m.content" :message="m" :developer-mode="developerMode" />
               <div v-else-if="chat.sending && !m.toolCalls?.length && ((m.streaming && !m.reasoning) || m.phase === 'tool_call')"
                    class="bubble assistant tools">
                 <ThinkingIndicator :label="waitLabel(m)" />
@@ -414,7 +433,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
         <div :inert="!composerEnabled">
         <p v-if="batchContext" class="at-desc">已携带批次上下文，可补充问题后发送。</p>
 
-        <div v-if="viewer.questionRegion" class="roi-reference"><button @click="viewer.activeRec?.id===viewer.questionRegion.recId && viewer.focusSourceBounds(viewer.activeSide,viewer.questionRegion.bounds)">{{ viewer.questionRegion.name }} ? Source ROI {{ viewer.questionRegion.bounds.join(', ') }}</button><button @click="viewer.questionRegion=null">Remove</button><small>Display preview crop attached on send.</small></div>
+        <div v-if="viewer.questionRegion" class="roi-reference"><button @click="viewer.activeRec?.id===viewer.questionRegion.recId && viewer.focusSourceBounds(viewer.activeSide,viewer.questionRegion.bounds)">{{ viewer.questionRegion.name }} · 源影像区域 {{ viewer.questionRegion.bounds.join(', ') }}</button><button @click="viewer.questionRegion=null">移除</button><small>手动发送消息时附上区域预览截图。</small></div>
         <ChatAttachTray :items="chat.pendingImages" @remove="chat.removePendingImage" />
         <div class="at-inputbar">
           <ThinkingSlider v-model="chat.thinkingProfile" :status="chat.thinkingStatus" :disabled="!enabled" />
