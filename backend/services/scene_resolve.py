@@ -6,6 +6,7 @@ paths need — turning a production name into candidate scene directories and
 stating whether a directory really is a submit-ready scene — in one place.
 """
 from __future__ import annotations
+from typing import Optional
 
 from pathlib import Path
 
@@ -23,8 +24,8 @@ class SceneLookupError(ValueError):
     """A name cannot be turned into exactly one valid scene directory."""
 
 
-def name_candidates(name: str, *, date: str | None = None,
-                    product: str | None = None) -> dict:
+def name_candidates(name: str, *, date: Optional[str] = None,
+                    product: Optional[str] = None) -> dict:
     """Return the ordered candidates for a QC-TXT scene name.
 
     ``date`` defaults to the 14/8-digit timestamp inside the name.  ``product``
@@ -52,8 +53,8 @@ def name_candidates(name: str, *, date: str | None = None,
     }
 
 
-def resolve_scene_dir(name: str, *, date: str | None = None,
-                      product: str | None = None) -> dict:
+def resolve_scene_dir(name: str, *, date: Optional[str] = None,
+                      product: Optional[str] = None) -> dict:
     """Resolve exactly one submit-ready scene directory.
 
     A submit-ready scene, for this platform, is a directory inside

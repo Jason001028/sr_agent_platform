@@ -1196,6 +1196,12 @@ Agent 交互采用两层数据范围：`library` 是盘阵通用场景库，`wor
 - `GET /{report_id}/export` 返回版本化 JSON。
 - `GET /{report_id}/rows/{row_id}/assets/{window_id}/{role}` 只取 manifest 白名单角色 PNG。
 - `GET /{report_id}/rows/{row_id}/locator` 校验当前审核绑定后返回 Goal/Item/Review/Region；失效返回409。
+- `GET /{report_id}/rows/{row_id}/history` 按时间倒序返回最多30条分析尝试；`ready` 为成功分析，`cached` 为复用同一分析键，`failed` 为失败/中断，错误码独立保留。前端按需读取，不自动下载全报告历史。
+- `GET /{report_id}/rows/{row_id}/comparison?comparison_role=output_vs_before` 返回绑定版本的只读影像配对；也支持 `output_vs_nosr`，原始文件丢失/版本变化返回409，归档裁片仍可查看。
 - `POST /{report_id}/rows/{row_id}/retry` 接受 `{ "stage": "evidence" }` 或 `{ "stage": "analysis" }`，须启用对应开关；不接受磁盘路径或模型地址。
 
-模型结果不写入人工审核。状态与限制见 [修复证据报告](../status/repair-evidence-report.md)。
+模型结果不写入人工审核。格式修正与首次模型请求共用60秒 deadline；准入不足时任务留队，不记为模型失败。失败或不可用不删除已成功分析，页面须区分当前状态和保留的历史意见。状态与限制见 [修复证据报告](../status/repair-evidence-report.md)。
+
+同来源指纹的 superseded 报告恢复时保留 report_id/revision 与已完成行，撤销旧运行任务令牌后恢复队列；来源不同则建立新版本。`GET /by-goal/{goal_id}` 优先返回有效报告，只有全部失效时才返回最高 revision 的历史报告。
+
+模型资源准入是内部数据库租约，不增加用户审核或 SR 启动接口。同一平台 SQLite、同一规范化模型 base URL 的请求共用单槽，聊天等待优先于后台分析与自动标题；后台资源争用返回等待，不写成分析失败。队列等待计入聊天请求原始 deadline，取消完成传输清理后按 token 释放。

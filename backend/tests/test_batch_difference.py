@@ -17,6 +17,28 @@ def refs(tmp_path, size=(160,160)):
     return {**batch_manifest._image(pan),'item_id':'i'},batch_manifest._image(nosr),a
 
 
+def test_nonlinear_prior_changes_display_not_candidate_geometry(tmp_path):
+    target,reference,_=refs(tmp_path)
+    cfg={'mode':'diff','min_area_px':1,'blur':False,'open_kernel':1,'close_kernel':1}
+    raw=batch_detector.detect(target,reference,cfg)
+    weighted=batch_detector.detect(target,reference,{**cfg,'tone_weight':True})
+    geometry=lambda result:{c['candidate_id']:(c['bbox'],c['points']) for c in result['candidates']}
+    assert geometry(raw)==geometry(weighted)
+    assert raw['analysis']['differenceMap']==weighted['analysis']['differenceMap']
+    assert weighted['analysis']['weightedDifferenceMap'].startswith('data:image/png;base64,')
+    assert weighted['analysis']['tone_weight'] is True
+    assert raw['candidate_accounting']==weighted['candidate_accounting']
+
+
+def test_nonlinear_weights_preserve_neutral_and_raise_flat_midtones():
+    from backend.services.repair_tone import weight_map
+    a=np.tile(np.linspace(0,1,101,dtype=np.float32),(101,1));b=a.copy();b[:,45:55]+=.05
+    valid=np.ones(a.shape,bool);valid[50,50]=False
+    weights=weight_map(a,b,valid)
+    assert weights.dtype==np.float32 and 1<=weights.min()<=weights.max()<=2.5
+    assert weights[50,48]>1 and weights[50,1]==1 and weights[50,50]==1
+
+
 def test_http_and_batch_share_core_and_batch_keeps_more_than_16(tmp_path):
     target,reference,original=refs(tmp_path)
     config={'mode':'diff','min_area_px':1,'blur':False,'open_kernel':1,'close_kernel':1}

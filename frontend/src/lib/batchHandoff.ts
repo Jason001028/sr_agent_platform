@@ -1,6 +1,6 @@
 import { useBatchGoalStore } from '../stores/batchGoal';
 import { useBatchDraftStore } from '../stores/batchDraft';
-import { AGENT_REPAIR_PROMPT } from './repairPrompt';
+import { buildAgentRepairPrompt } from './repairPrompt';
 export { AGENT_REPAIR_PROMPT } from './repairPrompt';
 
 /** One-click handoff from the Viewer tool panel into the Agent repair flow.
@@ -11,7 +11,7 @@ export { AGENT_REPAIR_PROMPT } from './repairPrompt';
 
 export function requestAgentRepair(): void {
   window.dispatchEvent(new CustomEvent('batch-agent-handoff', { detail: {
-    text: AGENT_REPAIR_PROMPT,
+    text: buildAgentRepairPrompt(),
     autoSend: true,
   } }));
 }

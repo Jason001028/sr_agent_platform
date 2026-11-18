@@ -89,6 +89,54 @@ class RepairApplicationTest(unittest.TestCase):
         return plan
 
     # ---- plan / confirmation / idempotent start ------------------------
+    def test_agent_preferences_freeze_method_weight_and_skip_backups(self):
+        a=self.scene(91);b=self.scene(92)
+        (a[0]/'PAN_old_latest.tif').write_bytes(b'keep this backup')
+        prefs={'inspection_only':False,'detection_method':'smart','tone_weight':True,'skip_completed':True}
+        snapshot=validate_snapshot({'version':1,'workspace':self.workspace(a,b),'agent_repair_settings':prefs})
+        registry=bind_registry(build_builtin_registry(),snapshot,store=self.store,session_id=self.session_id)
+        with mock.patch('backend.services.run_sr.submit_run_sr',side_effect=AssertionError('must not submit')):
+            result=registry.get('prepare_repair').run(detection_method='absdiff')
+        self.assertTrue(result['ok'],result)
+        plan=result['data'];self.assertEqual(plan['strategy']['detection_method'],'smart')
+        self.assertTrue(plan['tone_weight']);self.assertEqual(len(plan['skipped_completed']),1)
+        manifest=batch_manifest.load_manifest(plan['manifest_ref'])
+        self.assertEqual(len(manifest['items']),1)
+        self.assertTrue(manifest['items'][0]['config']['detection']['tone_weight'])
+        self.assertEqual((a[0]/'PAN_old_latest.tif').read_bytes(),b'keep this backup')
+
+    def test_inspection_only_has_no_start_tools_or_sr_side_effects(self):
+        a=self.scene(93)
+        prefs={'inspection_only':True,'detection_method':'ssim','tone_weight':True,'skip_completed':True}
+        snapshot=validate_snapshot({'version':1,'workspace':self.workspace(a),'agent_repair_settings':prefs})
+        calls=[]
+        def runner(fn):calls.append(1);return fn()
+        registry=bind_registry(build_builtin_registry(),snapshot,store=self.store,session_id=self.session_id,raster_runner=runner)
+        for name in ['prepare_repair','start_repair','run_sr','fix_bad_lines','prepare_batch_repair']:
+            self.assertIsNone(registry.get(name))
+        with (mock.patch('backend.services.batch_mask.build_mask_result',side_effect=AssertionError('no mask')),
+              mock.patch('backend.services.run_sr.submit_run_sr',side_effect=AssertionError('no SR'))):
+            result=registry.get('inspect_repair_workspace').run()
+        self.assertTrue(result['ok'],result)
+        self.assertEqual(result['data']['kind'],'repair_inspection.v1')
+        self.assertEqual(result['data']['items'][0]['status'],'no_candidate')
+        # A page must stay readable as a tool result. The difference map is a
+        # multi-MB data URL and must not be embedded in the inspection payload.
+        encoded = json.dumps(result, ensure_ascii=False).encode('utf-8')
+        self.assertNotIn(b'data:image', encoded)
+        self.assertLess(len(encoded), 12000)
+        self.assertEqual(len(calls),2)
+        self.assertEqual(self.store._db().execute('SELECT COUNT(*) FROM repair_plans').fetchone()[0],0)
+        self.assertEqual(self.store._db().execute('SELECT COUNT(*) FROM agent_goals').fetchone()[0],0)
+
+    def test_skip_all_returns_no_startable_plan_and_disabled_skip_keeps_conflict(self):
+        a=self.scene(94);(a[0]/'PAN_old_latest.tif').write_bytes(b'keep')
+        skipped=self.prepared(a,skip_completed=True)
+        self.assertEqual(skipped['status'],'SKIPPED');self.assertFalse(skipped['execution']['allowed'])
+        blocked=self.prepared(a,skip_completed=False)
+        self.assertEqual(blocked['status'],'BLOCKED')
+        self.assertTrue(blocked['blocking'])
+
     def test_prepare_uses_workspace_without_searching_the_library(self):
         scene_dir, inp = self.scene(1)
         with mock.patch.object(

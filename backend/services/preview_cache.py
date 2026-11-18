@@ -42,6 +42,7 @@ SR_TEMP_PREVIEWS_ROOT 兜底预览缓存根。**建议显式配**：默认值是
 """
 
 from __future__ import annotations
+from typing import Optional, Union
 
 import hashlib
 import os
@@ -71,15 +72,15 @@ def temp_previews_root() -> Path:
     return Path(tempfile.gettempdir()) / "sr-tmp-previews"
 
 
-def _bucket_name(now: date | datetime | None = None) -> str:
+def _bucket_name(now: Optional[Union[date, datetime]] = None) -> str:
     """当天桶名（`YYYY-MM-DD`，本地日期）。`now` 可注入以便测试跨天行为。"""
     if isinstance(now, datetime):
         return now.date().isoformat()
     return (now or date.today()).isoformat()
 
 
-def tmp_preview_path(source_abs: str | Path,
-                     now: date | datetime | None = None, *, create: bool = True) -> Path:
+def tmp_preview_path(source_abs: Union[str, Path],
+                     now: Optional[Union[date, datetime]] = None, *, create: bool = True) -> Path:
     """源影像 → 临时预览图路径：`<root>/<YYYY-MM-DD>/<sha256(abs)[:16]>.jpg`。
 
     只 `mkdir`，**绝不列举目录** —— `tests/test_scene_resolve.py` 的
@@ -103,7 +104,7 @@ def tmp_preview_path(source_abs: str | Path,
     return bucket / (key[:16] + ".jpg")
 
 
-def _refuse_reason(root: Path) -> str | None:
+def _refuse_reason(root: Path) -> Optional[str]:
     """拒绝清理的配置错误（宁可不删，也不删错）。返回原因，None = 可以清。"""
     try:
         if root.is_symlink():
@@ -116,7 +117,7 @@ def _refuse_reason(root: Path) -> str | None:
     return None
 
 
-def purge_temp_previews(now: date | datetime | None = None) -> list[str]:
+def purge_temp_previews(now: Optional[Union[date, datetime]] = None) -> list[str]:
     """删掉所有过期日期桶（名 < 今天 **且带标记文件**），返回被删的桶名。
 
     启动时与每天 0 点各跑一次（`api/app.py::_tmp_preview_purge_loop`）。
@@ -150,7 +151,7 @@ def purge_temp_previews(now: date | datetime | None = None) -> list[str]:
     return removed
 
 
-def purge_generic_versions(root: Path, *, now: float | None = None) -> int:
+def purge_generic_versions(root: Path, *, now: Optional[float] = None) -> int:
     """Daily, shallow cleanup of signed generic variants older than seven days.
 
     Never traverse symlinks, recurse, or remove user-provided images. Scene

@@ -12,6 +12,7 @@ and retry; it never raises.
 """
 
 from __future__ import annotations
+from typing import Optional
 
 from backend.pathguard import (
     PathDeniedError, normalize_submit_path, to_posix_array_path)
@@ -34,7 +35,7 @@ _DESC = (
 )
 
 
-def _bad_path(path: str) -> str | None:
+def _bad_path(path: str) -> Optional[str]:
     """Why a path cannot be handed to run_sr, or None if it is acceptable.
 
     Rejects search_scenes fake rows (`<fake>/...`), relative paths, and anything

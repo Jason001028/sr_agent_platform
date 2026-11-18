@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { imageRef } from '../lib/spatial';
 import ThinkingSlider from "./ThinkingSlider.vue";
+import AgentRepairSettings from './AgentRepairSettings.vue';
 /**
  * AgentChatTab.vue — 上下文侧舱 [Agent] tab（阶段6 L2）
  * ------------------------------------------------------------------
@@ -320,6 +321,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
           <AppIcon name="circle-x" :size="16" />
         </button>
       </div>
+      <AgentRepairSettings />
       <router-link class="at-go" to="/chat">去 Chat 页继续 ↗</router-link>
     </div>
 

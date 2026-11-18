@@ -30,7 +30,7 @@ def _unbound_store():
 
 class _Context:
     def __init__(self, *, store=None, session_id=None, workspace=None,
-                 current=None, selected_images=None, batch_draft=None, selected_truncated=False):
+                 current=None, selected_images=None, batch_draft=None, selected_truncated=False, preferences=None):
         self.store = store
         self.session_id = session_id
         self.workspace = workspace
@@ -38,6 +38,7 @@ class _Context:
         self.selected_images = selected_images
         self.batch_draft = batch_draft
         self.selected_truncated = selected_truncated
+        self.preferences = preferences or {}
 
     def close(self):
         pass
@@ -76,6 +77,8 @@ def _prepare(ctx, scope, mode, strategy, detection_method, mask_policy, title,
     if store is None:
         store, owned = _unbound_store()
     try:
+        if ctx.preferences.get('inspection_only'):
+            return err('本条消息为仅质检模式，请使用 inspect_repair_workspace；不能准备或启动 SR')
         if scope == 'selection' and ctx.selected_truncated:
             return err('多选影像快照被截断，请缩小选择范围后重新准备，不能静默只规划前一部分')
         if (scope != "draft" and ctx.workspace is None and ctx.current is None
@@ -84,6 +87,9 @@ def _prepare(ctx, scope, mode, strategy, detection_method, mask_policy, title,
                 "这条消息没有绑定 Viewer 工作区；请先打开本地、上传或服务器影像，"
                 "不要用场景库检索代替当前工作区。")
         kwargs = {}
+        if ctx.preferences:
+            detection_method=ctx.preferences['detection_method']
+            kwargs.update(tone_weight=ctx.preferences['tone_weight'],skip_completed=ctx.preferences['skip_completed'])
         if mode != 'production':
             return err('Agent 协助与自动修复统一使用真实修复（production），不支持新建演示计划。')
         if scope == "draft":
@@ -110,6 +116,8 @@ def _prepare(ctx, scope, mode, strategy, detection_method, mask_policy, title,
 
 
 def _start(ctx, plan_id, plan_version):
+    if ctx.preferences.get('inspection_only'):
+        return err('本条消息为仅质检模式，禁止启动 SR')
     owned = False
     store = ctx.store
     if store is None:
@@ -430,13 +438,66 @@ def get_repair_item(goal_id, item_id):
 # bound variants (workspace/session frozen per message)
 # ---------------------------------------------------------------------------
 
+def inspection_tool(snapshot,store,session_id,*,raster_runner=None):
+    """Read-only, paged DN inspection. No MaskBuilder, repair plan or Goal."""
+    from backend.services import batch_manifest,batch_detector,agent_repair_settings
+    from backend.api.paths import scene_id_abs
+    from urllib.parse import quote
+    settings=agent_repair_settings.normalize((snapshot or {}).get('agent_repair_settings')) or {}
+    frozen=snapshot or {};manifests={}
+    def run(scope='workspace',cursor=0,limit=4):
+        if scope not in ('workspace','current','selection') or type(cursor) is not int or cursor<0 or type(limit) is not int or not 1<=limit<=4:
+            return err('质检分页参数无效，limit 为1–4')
+        if scope=='selection' and frozen.get('selected_truncated'):return err('多选影像已截断，请缩小选择范围')
+        if scope=='workspace' and not (frozen.get('workspace') or {}).get('items') and frozen.get('current'):scope='current'
+        try:
+            if scope not in manifests:
+                def prepare():
+                    sources,*_=svc._workspace_sources(frozen.get('workspace'),frozen.get('current'),frozen.get('selected_images'),scope)
+                    if not sources:raise ValueError('没有可质检的服务端影像，请先解析影像与 NOSR 配对')
+                    imported=batch_manifest.import_manifest(text='',sources=sources,mode='production',
+                        detection_method=settings.get('detection_method','ssim'),tone_weight=settings.get('tone_weight',True),
+                        skip_completed=settings.get('skip_completed',True))
+                    return batch_manifest.load_manifest(imported['manifest_ref'])
+                manifests[scope]=raster_runner(prepare) if raster_runner else prepare()
+            manifest=manifests[scope];items=manifest['items'];rows=[]
+            for item in items[cursor:cursor+limit]:
+                def inspect(item=item):
+                    target={**item['target_image'],'item_id':item['item_id']}
+                    return batch_detector.detect(target,item['reference_image'],{**item['config']['detection'],'execution_mode':'production'})
+                try:
+                    detected=raster_runner(inspect) if raster_runner else inspect()
+                    candidates=detected.get('candidates') or []
+                    rows.append({'item_id':item['item_id'],'name':item['name'],'ordinal':item['ordinal'],
+                        'status':'candidates' if candidates else 'no_candidate','candidate_count':len(candidates),
+                        # Keep only short browser URLs. The difference map is a
+                        # multi-megabyte base64 PNG; embedding it here made a
+                        # single item exceed the tool-result budget and the
+                        # whole page unreadable via read_tool_result.
+                        'images':{'pan': '/api/scenes/'+quote(scene_id_abs(item['target_image']['path']),safe='')+'/preview?div=16',
+                            'nosr':'/api/scenes/'+quote(scene_id_abs(item['reference_image']['path']),safe='')+'/preview?div=16'},
+                        'source':'real-dn-grid','candidates':[{'candidate_id':c['candidate_id'],'bbox':c.get('bbox'),'label':c.get('label')} for c in candidates[:12]],
+                        'candidates_truncated':len(candidates)>12})
+                except Exception as exc:
+                    rows.append({'item_id':item['item_id'],'name':item['name'],'status':'failed','reason':str(exc)[:300]})
+            next_cursor=cursor+len(rows)
+            return ok({'kind':'repair_inspection.v1','inspection_only':True,'detection_method':settings.get('detection_method','ssim'),
+                'tone_weight':settings.get('tone_weight',True),'total':len(items),'items':rows,'diagnostics':manifest.get('diagnostics',[]),
+                'has_more':next_cursor<len(items),'next_cursor':next_cursor if next_cursor<len(items) else None,
+                'note':'只读检测候选，不代表确认缺陷；未生成掩码、修复计划、Goal 或 SR 作业'})
+        except (ValueError,OSError) as exc:return err(str(exc))
+    return Tool(name='inspect_repair_workspace',description='仅质检：对本消息冻结的 Viewer PAN/NOSR 读取真实 DN 并复用差异检测。每页最多4景，按 next_cursor 继续直到 has_more=false；返回候选与失败/跳过事实，不生成掩码、计划或 SR 作业。',
+        params_schema={'type':'object','properties':{'scope':{'type':'string','enum':['workspace','current','selection']},
+            'cursor':{'type':'integer','minimum':0},'limit':{'type':'integer','minimum':1,'maximum':4}},'additionalProperties':False},run=run,timeout_sec=180)
+
+
 def bound_tool(name: str, *, workspace=None, current=None, selected_images=None,
-               batch_draft=None, session_id=None, store=None, selected_truncated=False) -> Tool:
+               batch_draft=None, session_id=None, store=None, selected_truncated=False, preferences=None) -> Tool:
     """Return one tool bound to this message's frozen Viewer context."""
     context = _Context(store=store, session_id=session_id,
                        workspace=workspace, current=current,
                        selected_images=selected_images,
-                       batch_draft=batch_draft, selected_truncated=selected_truncated)
+                       batch_draft=batch_draft, selected_truncated=selected_truncated,preferences=preferences)
     if name == "prepare_repair":
         def run(scope="workspace", mode="production", strategy="automatic",
                 detection_method="ssim", mask_policy="auto", title=None):

@@ -3,14 +3,14 @@ import { computed } from 'vue';
 import type { BatchSnapshot, BatchCounts } from '../lib/api';
 import { missionTrackText } from '../lib/batchMission';
 import { batchDisplayProgress, displayPercent } from '../lib/batchDisplayProgress';
-const props = defineProps<{ snapshot?: BatchSnapshot; counts?: Partial<BatchCounts> | null; demo?: boolean }>();
+const props = defineProps<{ snapshot?: BatchSnapshot; counts?: Partial<BatchCounts> | null; demo?: boolean; inspectionOnly?: boolean }>();
 const tracks = computed(() => {
   const progress = batchDisplayProgress(props.snapshot?.counts ?? props.counts);
   return [
     { key: 'detection' as const, label: '检测', path: 'M3 7V3h4m6 0h4v4m0 6v4h-4m-6 0H3v-4M13 10a3 3 0 1 1-6 0 3 3 0 0 1 6 0' },
     { key: 'submission' as const, label: props.demo ? '模拟提交' : '提交', path: 'm2 6 8-4 8 4-8 4-8-4m0 4 8 4 8-4m-16 4 8 4 8-4' },
     { key: 'verification' as const, label: props.demo ? '演示验证' : '验收', path: 'M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0M6 10l3 3 5-6' },
-  ].map(t => ({ ...t, track: progress[t.key], percent: displayPercent(progress[t.key]) }));
+  ].filter(t => !props.inspectionOnly || t.key === 'detection').map(t => ({ ...t, track: progress[t.key], percent: displayPercent(progress[t.key]) }));
 });
 </script>
 <template>

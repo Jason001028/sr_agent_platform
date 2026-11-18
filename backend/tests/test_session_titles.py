@@ -34,6 +34,21 @@ class TitlesTest(unittest.TestCase):
         self.store.append_message(self.sid, {'role': 'user', 'content': 'different'})
         self.assertEqual(self.meta(), before)
 
+    def test_title_defers_to_shared_model_without_claiming_its_session(self):
+        from backend.services import model_resources
+        cfg=SimpleNamespace(llm_mock=False,llm_base_url='http://model/v1',llm_api_key='test',llm_model='fake')
+        key=model_resources.resource_key(cfg.llm_base_url)
+        self.assertTrue(model_resources.acquire(self.store,key,'chat','chat',time.time()+60))
+        with patch.dict('os.environ',{'SR_TITLE_BASE_URL':cfg.llm_base_url}),patch('backend.services.session_titles.OpenAI') as client:
+            self.assertFalse(process_title(self.store,cfg,self.sid))
+            client.assert_not_called()
+            self.assertEqual(self.meta()['title_status'],'pending')
+            model_resources.release(self.store,key,'chat')
+            client.return_value.__enter__.return_value.chat.completions.create.return_value=SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({'title':'影像修复复核'})))])
+            self.assertTrue(process_title(self.store,cfg,self.sid))
+        self.assertEqual(self.store._db().execute('SELECT COUNT(*) FROM model_resource_leases').fetchone()[0],0)
+
     def test_concurrent_claim_one_winner(self):
         def claim(_):
             try:

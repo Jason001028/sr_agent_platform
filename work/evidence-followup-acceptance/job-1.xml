@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<SFSR_Config>
+  <DatarootLQ>D:/BaiduNetdiskDownload/sr_agent_platform/work/evidence-followup-acceptance/JXGF07D03_PMS_20260101010101_200516571_101_0001_001_L1_PAN</DatarootLQ>
+  <GPUIDS>0</GPUIDS>
+  <CloudLimit>80</CloudLimit>
+  <DeleteOriTifNeeded>False</DeleteOriTifNeeded>
+  <SRScale>2</SRScale>
+  <Suffix>260318</Suffix>
+  <OPT>D:\BaiduNetdiskDownload\sr_agent_platform\work\evidence-followup-acceptance\options-1.yml</OPT>
+  <MaskPath>D:/BaiduNetdiskDownload/sr_agent_platform/work/evidence-followup-acceptance/artifacts/work/item_8486098d2000bf04/mask.tif</MaskPath>
+  <RepairMode>pan-nosr-v1</RepairMode>
+  <RepairNOSR>D:/BaiduNetdiskDownload/sr_agent_platform/work/evidence-followup-acceptance/JXGF07D03_PMS_20260101010101_200516571_101_0001_001_L1_PAN/JXGF07D03_PMS_20260101010101_200516571_101_0001_001_L1_PAN_NOSR.tif</RepairNOSR>
+  <RepairRevision>{"mask": [219, 1794963137850616900, 8725724278061133], "nosr": [8448, 1794963137458481500, 10133099161614293]}</RepairRevision>
+</SFSR_Config>

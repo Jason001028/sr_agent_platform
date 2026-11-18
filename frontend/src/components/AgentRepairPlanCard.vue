@@ -148,6 +148,7 @@ const targetCount = computed(() => (plan.value?.status === 'BLOCKED' ? plan.valu
 const blockedReason = computed(() => {
   const p = plan.value;
   if (!p) return '';
+  if (p.status === 'SKIPPED') return '';
   if (p.mode !== 'production' && stage.value === 'plan') return '历史演示计划不能启动真实修复，请重新准备自动修复计划。';
   if (p.status === 'BLOCKED') {
     return (p.blocking ?? []).map(row => row.message).filter(Boolean).join('；')
@@ -203,6 +204,7 @@ const stateLabel = computed(() => {
   if (stage.value === 'plan') {
     if (plan.value?.mode !== 'production') return '历史演示计划';
     if (planStatus.value === 'BLOCKED') return conflicts.value.length ? `${conflicts.value.length} 项冲突` : '待处理冲突';
+    if (planStatus.value === 'SKIPPED') return '已跳过';
     if (planStatus.value === 'EXPIRED' || planStatus.value === 'SUPERSEDED') return '已失效';
     if (!plan.value?.execution?.allowed) return '暂不可执行';
     return confirmed.value ? '已确认' : '待确认';
@@ -570,6 +572,7 @@ onBeforeUnmount(() => {
     <Transition name="repair-stage" mode="out-in">
     <section v-if="stage === 'plan'" :key="planId" class="plan-body">
       <p class="plan-meta">{{ scopeLabel }} · {{ detectionLabel }} · {{ plan.strategy.mask === 'existing' ? '已有掩码' : '自动掩码' }}</p>
+      <p v-if="plan.skipped_completed?.length" class="plan-meta">已跳过 {{ plan.skipped_completed.length }} 景已有 PAN 备份的影像</p>
       <button v-if="historical" class="list-link" :aria-expanded="historyExpanded" @click="historyExpanded = !historyExpanded">{{ historyExpanded ? '收起历史计划' : '查看历史计划' }}</button>
       <template v-if="!historical || historyExpanded">
       <div v-if="blockedReason" class="conflict-section">

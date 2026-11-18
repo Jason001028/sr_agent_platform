@@ -46,7 +46,7 @@ import re
 import shutil
 import subprocess
 import time
-from typing import Callable
+from typing import Callable, Optional
 
 _JOB_RE = re.compile(r"Submitted batch job (\d+)", re.IGNORECASE)
 
@@ -70,7 +70,7 @@ def _fake_reset() -> None:
     _FAKE_SEQ[0] = 0
 
 
-def _fake_active_state(job_id: int) -> str | None:
+def _fake_active_state(job_id: int) -> Optional[str]:
     """squeue view of a fake job, or None once it left the queue."""
     rec = _FAKE_JOBS.get(job_id)
     if rec is None or rec["cancelled"]:

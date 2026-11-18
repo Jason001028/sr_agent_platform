@@ -29,6 +29,7 @@
 """
 
 from __future__ import annotations
+from typing import Optional, Union
 
 import os
 import re
@@ -73,7 +74,7 @@ def drive_map() -> dict[str, str]:
     return out
 
 
-def to_posix_array_path(raw: str | Path) -> str:
+def to_posix_array_path(raw: Union[str, Path]) -> str:
     """用户给的任意形态 → 盘阵 POSIX 绝对路径。**纯词法，不碰文件系统。**
 
     接受 `/DiskArray/...`（服务端形态）与 `W:\\GSHC2IMPS\\...`（Windows
@@ -158,7 +159,7 @@ def allowed_roots() -> list[Path]:
     return roots
 
 
-def is_within(child: str | Path, root: str | Path) -> bool:
+def is_within(child: Union[str, Path], root: Union[str, Path]) -> bool:
     """白名单包含判定：resolved child 严格在 resolved root 之下。
 
     `resolve()` 保证 `../` 与符号链接逃逸都过不了；`relative_to` 是段级
@@ -171,7 +172,7 @@ def is_within(child: str | Path, root: str | Path) -> bool:
         return False
 
 
-def is_allowed(path: str | Path) -> bool:
+def is_allowed(path: Union[str, Path]) -> bool:
     return any(is_within(path, r) for r in allowed_roots())
 
 
@@ -194,12 +195,12 @@ def preview_roots() -> list[Path]:
     return roots
 
 
-def is_preview_allowed(path: str | Path) -> bool:
+def is_preview_allowed(path: Union[str, Path]) -> bool:
     """文件是否在「预览可读」范围内（盘阵前缀 ∪ 预览前缀）。"""
     return any(is_within(path, r) for r in allowed_roots() + preview_roots())
 
 
-def is_preview_only(path: str | Path) -> bool:
+def is_preview_only(path: Union[str, Path]) -> bool:
     """文件是否**只**在预览前缀之下（盘阵前缀之外）。
 
     这个判据只服务一件事：给它挑一个隔离的缓存落点，别把预览 JPG 写进
@@ -214,7 +215,7 @@ def is_preview_only(path: str | Path) -> bool:
     return any(is_within(path, r) for r in roots) and not is_allowed(path)
 
 
-def _ensure_under(roots: list[Path], path: str | Path, *, kind: str,
+def _ensure_under(roots: list[Path], path: Union[str, Path], *, kind: str,
                   missing: str, label: str) -> Path:
     """共同的绝对路径 + 前缀校验（错误文案由调用方给）。"""
     if kind not in ("any", "file", "dir"):
@@ -239,7 +240,7 @@ def _ensure_under(roots: list[Path], path: str | Path, *, kind: str,
     return p
 
 
-def ensure_allowed(path: str | Path, *, kind: str = "any") -> Path:
+def ensure_allowed(path: Union[str, Path], *, kind: str = "any") -> Path:
     """校验绝对路径落在盘阵白名单内。``kind`` ∈ ``any`` / ``file`` / ``dir``。
 
     ``kind="any"`` 允许目标尚不存在（只做词法 + 白名单）—— 供"路径还没
@@ -254,7 +255,7 @@ def ensure_allowed(path: str | Path, *, kind: str = "any") -> Path:
         label=f"盘阵前缀内（SR_ALLOWED_ROOTS={listed}）")
 
 
-def ensure_preview_allowed(path: str | Path, *, kind: str = "any") -> Path:
+def ensure_preview_allowed(path: Union[str, Path], *, kind: str = "any") -> Path:
     """校验绝对路径落在**预览可读**范围（盘阵前缀 ∪ SR_PREVIEW_ROOTS）。
 
     只给查看链路用：resolve 的 `{path}` 分支、`GET /preview`、只读的空间标识。
@@ -272,7 +273,7 @@ def ensure_preview_allowed(path: str | Path, *, kind: str = "any") -> Path:
         label=f"预览前缀内（{listed}）")
 
 
-def normalize_submit_path(raw: str | Path) -> str:
+def normalize_submit_path(raw: Union[str, Path]) -> str:
     """提交侧的路径归一：任意形态 → 盘阵 POSIX 绝对路径，并过前缀白名单。
 
     REST 入口（`api/platform.py::_norm_sr_params`）与 agent 工具入口
@@ -332,7 +333,7 @@ _PRODUCT_CODES = ("PAN", "MSS")
 
 
 def scene_name_products(stem: str,
-                        hinted: str | None = None) -> list[tuple[str, str]]:
+                        hinted: Optional[str] = None) -> list[tuple[str, str]]:
     """名字该试的「完整生产名 + 产品段」候选（有序）；**原样那条恒排第一**。
 
     清单上的名字可以没有产品段（见 `_PRODUCT_CODES`），拿它去反推会同时拼错
@@ -372,7 +373,7 @@ def scene_name_products(stem: str,
     return [(raw, "")] + [(raw + sep + c, c) for c in order]
 
 
-def scene_name_layers(name: str) -> tuple[str, str] | None:
+def scene_name_layers(name: str) -> Optional[tuple[str, str]]:
     """按生产命名规则拆出「卫星型号」与「段级产品目录名」；不合规则返回 None。
 
     分段（`JXGF07D03_PMS_20260622052600_200516571_101_0006_001_L1_MSS`）：
@@ -410,11 +411,11 @@ _MONTH_SEG_RE = re.compile(r"0[1-9]|1[0-2]")
 _MDAY_SEG_RE = re.compile(r"0[1-9]|[12]\d|3[01]")
 
 
-def _segments(path: str | Path) -> list[str]:
+def _segments(path: Union[str, Path]) -> list[str]:
     return [seg for seg in Path(str(path)).as_posix().split("/") if seg]
 
 
-def _rightmost_day_index(parts: list[str]) -> int | None:
+def _rightmost_day_index(parts: list[str]) -> Optional[int]:
     """`<年>/<月>/<日>` 那一段里**最靠右**的起始下标；没有返回 None。"""
     for i in range(len(parts) - 3, -1, -1):
         if (_YEAR_SEG_RE.fullmatch(parts[i])
@@ -424,7 +425,7 @@ def _rightmost_day_index(parts: list[str]) -> int | None:
     return None
 
 
-def production_tree_depth(path: str | Path) -> int | None:
+def production_tree_depth(path: Union[str, Path]) -> Optional[int]:
     """目录落在日期目录之下第几层：日期目录 0、卫星型号 1、段级 2、景级 3；认不出 None。
 
     **纯词法**（只看路径末尾有没有 `<年>/<月>/<日>` 这一段、它后面还剩几段），
@@ -437,7 +438,7 @@ def production_tree_depth(path: str | Path) -> int | None:
     return None if i is None else len(parts) - (i + 3)
 
 
-def flat_scene_layout(path: str | Path) -> bool:
+def flat_scene_layout(path: Union[str, Path]) -> bool:
     """路径是不是**旧扁平形态**：日期目录紧接着的那个目录名就是生产名。
 
     六层生产树里日期目录下面那一段是**卫星型号**（`JL1KF02B03`：不含 14 位成像
@@ -464,7 +465,7 @@ def looks_like_scene_name(name: str) -> bool:
     return parse_scene_date(name) is not None
 
 
-def parse_scene_date(name: str) -> str | None:
+def parse_scene_date(name: str) -> Optional[str]:
     """从文件名里取成像日期，返回 ``YYYY-MM-DD``；取不到返回 None。
 
     生产场景名形如 `JL1KF02B03_PMS02_20260910124710_..._L1_PAN`，中间那段

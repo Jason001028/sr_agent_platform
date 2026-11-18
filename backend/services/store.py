@@ -27,6 +27,7 @@ DB path: SR_AGENT_DB env var, default "sr_agent.db" in the working directory.
 """
 
 from __future__ import annotations
+from typing import Optional
 
 import json
 import os
@@ -92,7 +93,7 @@ class BatchControlConflict(RuntimeError):
     """
 
     def __init__(self, message: str, *, reason: str = "conflict",
-                 goal: dict | None = None):
+                 goal: Optional[dict] = None):
         super().__init__(message)
         self.reason = reason
         self.goal = goal
@@ -623,11 +624,14 @@ class Store:
             self._conn = sqlite3.connect(self.path, timeout=10,
                                          check_same_thread=False)
             self._conn.executescript(_SCHEMA)
+            # Evidence indexes reference kind, added when upgrading old goals.
+            _ensure_columns(self._conn)
+            from backend.services.model_resources import SCHEMA as model_schema
+            self._conn.executescript(model_schema)
             from backend.services.evidence_store import SCHEMA as evidence_schema
             self._conn.executescript(evidence_schema)
             from backend.services.evidence_store import migrate as migrate_evidence
             migrate_evidence(self._conn)
-            _ensure_columns(self._conn)
         return self._conn
 
     @contextmanager
@@ -815,7 +819,7 @@ class Store:
                     (key, json.dumps(value, ensure_ascii=False), now))
         return self.list_platform_settings()
 
-    def create_session(self, metadata: dict | None = None) -> str:
+    def create_session(self, metadata: Optional[dict] = None) -> str:
         """Insert a session row and return its id."""
         sid = uuid.uuid4().hex
         now = time.time()
@@ -827,7 +831,7 @@ class Store:
         db.commit()
         return sid
 
-    def get_session(self, session_id: str) -> dict | None:
+    def get_session(self, session_id: str) -> Optional[dict]:
         row = self._db().execute(
             "SELECT id, created_at, updated_at, status, metadata, pinned "
             "FROM sessions WHERE id = ?", (session_id,)).fetchone()
@@ -854,7 +858,7 @@ class Store:
             (status, time.time(), session_id))
         db.commit()
 
-    def set_session_pinned(self, session_id: str, pinned: bool) -> dict | None:
+    def set_session_pinned(self, session_id: str, pinned: bool) -> Optional[dict]:
         """置顶/取消置顶；会话不存在返回 None。不动 updated_at（活动时间）。"""
         db = self._db()
         cur = db.execute("UPDATE sessions SET pinned = ? WHERE id = ?",
@@ -1014,11 +1018,11 @@ class Store:
 
     # ---- Agent trajectory -----------------------------------------------
 
-    def create_agent_run(self, session_id: str, *, machine_id: str | None = None,
-                         model: str | None = None, prompt: str | None = None,
-                         system_prompt_hash: str | None = None,
-                         tool_manifest_hash: str | None = None,
-                         metadata: dict | None = None) -> str:
+    def create_agent_run(self, session_id: str, *, machine_id: Optional[str] = None,
+                         model: Optional[str] = None, prompt: Optional[str] = None,
+                         system_prompt_hash: Optional[str] = None,
+                         tool_manifest_hash: Optional[str] = None,
+                         metadata: Optional[dict] = None) -> str:
         run_id = uuid.uuid4().hex
         now = time.time()
         self._db().execute(
@@ -1060,8 +1064,8 @@ class Store:
         return ids
 
     def finish_agent_run(self, run_id: str, *, status: str,
-                         answer: str | None = None, error: str | None = None,
-                         finished_at: float | None = None) -> dict | None:
+                         answer: Optional[str] = None, error: Optional[str] = None,
+                         finished_at: Optional[float] = None) -> Optional[dict]:
         finished = float(finished_at or time.time())
         db = self._db()
         db.execute(
@@ -1072,7 +1076,7 @@ class Store:
         db.commit()
         return self.get_agent_run(run_id)
 
-    def get_agent_run(self, run_id: str) -> dict | None:
+    def get_agent_run(self, run_id: str) -> Optional[dict]:
         row = self._db().execute(
             "SELECT run_id, session_id, machine_id, status, model, prompt, "
             "system_prompt_hash, tool_manifest_hash, answer, error, started_at, "
@@ -1097,15 +1101,15 @@ class Store:
 
     def append_trajectory_event(self, *, run_id: str, session_id: str,
                                 event_id: str, event_type: str,
-                                turn: int | None = None,
-                                parent_event_id: str | None = None,
-                                tool_call_id: str | None = None,
-                                tool_name: str | None = None,
-                                status: str | None = None,
-                                payload: dict | None = None,
-                                started_at: float | None = None,
-                                finished_at: float | None = None,
-                                duration_ms: int | None = None) -> dict:
+                                turn: Optional[int] = None,
+                                parent_event_id: Optional[str] = None,
+                                tool_call_id: Optional[str] = None,
+                                tool_name: Optional[str] = None,
+                                status: Optional[str] = None,
+                                payload: Optional[dict] = None,
+                                started_at: Optional[float] = None,
+                                finished_at: Optional[float] = None,
+                                duration_ms: Optional[int] = None) -> dict:
         now = time.time()
         cur = self._db().execute(
             "INSERT INTO trajectory_events (event_id, run_id, session_id, turn, "
@@ -1126,7 +1130,7 @@ class Store:
                 "started_at": started_at, "finished_at": finished_at,
                 "duration_ms": duration_ms, "payload": payload, "created_at": now}
 
-    def list_trajectory_events(self, session_id: str, *, run_id: str | None = None,
+    def list_trajectory_events(self, session_id: str, *, run_id: Optional[str] = None,
                                limit: int = 500, offset: int = 0) -> list[dict]:
         where = "session_id = ?"
         params: list = [session_id]
@@ -1154,7 +1158,7 @@ class Store:
         return out
 
     def add_trajectory_feedback(self, session_id: str, run_id: str, *,
-                                rating: str, reason: str | None = None) -> dict:
+                                rating: str, reason: Optional[str] = None) -> dict:
         if rating not in {"positive", "negative"}:
             raise ValueError("rating must be positive or negative")
         run = self.get_agent_run(run_id)
@@ -1188,8 +1192,8 @@ class Store:
 
     # ---- machines / plugins ---------------------------------------------
 
-    def upsert_machine(self, machine_id: str, *, name: str | None = None,
-                       status: str = "online", metadata: dict | None = None,
+    def upsert_machine(self, machine_id: str, *, name: Optional[str] = None,
+                       status: str = "online", metadata: Optional[dict] = None,
                        touch: bool = True) -> dict:
         """Create or update a machine registration."""
         machine_id = str(machine_id).strip()
@@ -1215,7 +1219,7 @@ class Store:
         db.commit()
         return self.get_machine(machine_id)  # type: ignore[return-value]
 
-    def get_machine(self, machine_id: str) -> dict | None:
+    def get_machine(self, machine_id: str) -> Optional[dict]:
         row = self._db().execute(
             "SELECT id, name, status, metadata, last_seen, created_at, updated_at "
             "FROM machines WHERE id = ?", (machine_id,)).fetchone()
@@ -1235,7 +1239,7 @@ class Store:
 
     def upsert_plugin(self, plugin_id: str, *, name: str, version: str,
                       description: str = "", entrypoint: str = "",
-                      metadata: dict | None = None) -> dict:
+                      metadata: Optional[dict] = None) -> dict:
         now = time.time()
         db = self._db()
         db.execute(
@@ -1250,7 +1254,7 @@ class Store:
         db.commit()
         return self.get_plugin(plugin_id)  # type: ignore[return-value]
 
-    def get_plugin(self, plugin_id: str) -> dict | None:
+    def get_plugin(self, plugin_id: str) -> Optional[dict]:
         row = self._db().execute(
             "SELECT id, name, version, description, entrypoint, metadata, created_at, updated_at "
             "FROM plugins WHERE id = ?", (plugin_id,)).fetchone()
@@ -1271,9 +1275,9 @@ class Store:
                  "created_at": r[6], "updated_at": r[7]} for r in rows]
 
     def set_machine_plugin(self, machine_id: str, plugin_id: str, *,
-                           desired_state: str, actual_state: str | None = None,
-                           version: str | None = None,
-                           last_error: str | None = None) -> dict:
+                           desired_state: str, actual_state: Optional[str] = None,
+                           version: Optional[str] = None,
+                           last_error: Optional[str] = None) -> dict:
         if desired_state not in {"enabled", "disabled", "uninstalled"}:
             raise ValueError("invalid desired plugin state")
         now = time.time()
@@ -1302,7 +1306,7 @@ class Store:
         db.commit()
         return self.get_machine_plugin(machine_id, plugin_id)  # type: ignore[return-value]
 
-    def get_machine_plugin(self, machine_id: str, plugin_id: str) -> dict | None:
+    def get_machine_plugin(self, machine_id: str, plugin_id: str) -> Optional[dict]:
         row = self._db().execute(
             "SELECT machine_id, plugin_id, desired_state, actual_state, version, last_error, updated_at "
             "FROM machine_plugins WHERE machine_id = ? AND plugin_id = ?",
@@ -1313,7 +1317,7 @@ class Store:
                 "desired_state": row[2], "actual_state": row[3],
                 "version": row[4], "last_error": row[5], "updated_at": row[6]}
 
-    def list_machine_plugins(self, machine_id: str | None = None) -> list[dict]:
+    def list_machine_plugins(self, machine_id: Optional[str] = None) -> list[dict]:
         where = " WHERE machine_id = ?" if machine_id else ""
         args = (machine_id,) if machine_id else ()
         rows = self._db().execute(
@@ -1326,8 +1330,8 @@ class Store:
 
     def create_plugin_operation(self, machine_id: str, plugin_id: str, *,
                                 action: str, target_state: str,
-                                version: str | None = None,
-                                request_id: str | None = None) -> dict:
+                                version: Optional[str] = None,
+                                request_id: Optional[str] = None) -> dict:
         now = time.time()
         cur = self._db().execute(
             "INSERT INTO plugin_operations (machine_id, plugin_id, action, target_state, status, version, request_id, created_at, updated_at) "
@@ -1336,7 +1340,7 @@ class Store:
         self._db().commit()
         return self.get_plugin_operation(int(cur.lastrowid))  # type: ignore[return-value]
 
-    def get_plugin_operation(self, operation_id: int) -> dict | None:
+    def get_plugin_operation(self, operation_id: int) -> Optional[dict]:
         row = self._db().execute(
             "SELECT id, machine_id, plugin_id, action, target_state, status, version, request_id, result, error, created_at, updated_at, finished_at "
             "FROM plugin_operations WHERE id = ?", (operation_id,)).fetchone()
@@ -1349,8 +1353,8 @@ class Store:
                 "created_at": row[10], "updated_at": row[11],
                 "finished_at": row[12]}
 
-    def list_plugin_operations(self, *, machine_id: str | None = None,
-                               status: str | None = None,
+    def list_plugin_operations(self, *, machine_id: Optional[str] = None,
+                               status: Optional[str] = None,
                                limit: int = 100) -> list[dict]:
         clauses, args = [], []
         if machine_id:
@@ -1386,8 +1390,8 @@ class Store:
         return [self.get_plugin_operation(operation_id) for operation_id in ids]
 
     def finish_plugin_operation(self, operation_id: int, *, status: str,
-                                actual_state: str, result: dict | None = None,
-                                error: str | None = None) -> dict | None:
+                                actual_state: str, result: Optional[dict] = None,
+                                error: Optional[str] = None) -> Optional[dict]:
         if status not in {"COMPLETED", "FAILED"}:
             raise ValueError("invalid plugin operation status")
         op = self.get_plugin_operation(operation_id)
@@ -1419,13 +1423,13 @@ class Store:
                 "started_at": row[11], "finished_at": row[12],
                 "preview_state": row[13], "preview_note": row[14]}
 
-    def get_sr_task(self, fingerprint: str) -> dict | None:
+    def get_sr_task(self, fingerprint: str) -> Optional[dict]:
         row = self._db().execute(
             f"SELECT {self._SR_TASK_COLS} "
             "FROM sr_tasks WHERE fingerprint = ?", (fingerprint,)).fetchone()
         return self._sr_task_row(row) if row is not None else None
 
-    def get_sr_task_by_id(self, task_id: int) -> dict | None:
+    def get_sr_task_by_id(self, task_id: int) -> Optional[dict]:
         """Look up a task by its primary key (queue REST endpoints)."""
         row = self._db().execute(
             f"SELECT {self._SR_TASK_COLS} "
@@ -1498,7 +1502,7 @@ class Store:
     _PREVIEW_SCAN_LIMIT = 20
 
     def list_preview_candidates(self, *, max_age_sec: float,
-                                limit: int | None = None) -> list[dict]:
+                                limit: Optional[int] = None) -> list[dict]:
         """等着做产物预览的 COMPLETED 行，最新跑完的在前。
 
         三条判据都是必须的：
@@ -1519,7 +1523,7 @@ class Store:
             (cutoff, int(limit or self._PREVIEW_SCAN_LIMIT))).fetchall()
         return [self._sr_task_row(r) for r in rows]
 
-    def claim_preview_bake(self, task_id: int) -> dict | None:
+    def claim_preview_bake(self, task_id: int) -> Optional[dict]:
         """认领一行的产物预览预览生成。抢到返回该行，被人抢在前面则 None。
 
         这是并发与重复认领的**唯一裁决点**：CAS 写 `preview_state='running'`，
@@ -1539,7 +1543,7 @@ class Store:
         return self.get_sr_task_by_id(task_id)
 
     def set_preview_state(self, task_id: int, state: str,
-                          note: str | None = None) -> dict | None:
+                          note: Optional[str] = None) -> Optional[dict]:
         """写回急生成结局（done / skipped / failed）+ 人话说明。
 
         **不碰 updated_at**：那个列是「这行最近一次写回」的时刻，队列按它排序、
@@ -1551,7 +1555,7 @@ class Store:
         db.commit()
         return self.get_sr_task_by_id(task_id)
 
-    def mark_preview_cleared(self, task_id: int, note: str | None = None) -> bool:
+    def mark_preview_cleared(self, task_id: int, note: Optional[str] = None) -> bool:
         """把一行的预览状态标成 `cleared`（人工清了缓存），挡掉后续急生成认领。
 
         **这是 CAS，不能用 `set_preview_state` 顶替。** 后者是无条件 UPDATE，会把
@@ -1582,10 +1586,10 @@ class Store:
         return cur.rowcount == 1
 
     def put_sr_task(self, fingerprint: str, params: dict, *,
-                    session_id: str | None = None, status: str = "submitted",
-                    job_id: int | None = None, config_xml: str | None = None,
-                    batch_script: str | None = None,
-                    log_dir: str | None = None) -> dict:
+                    session_id: Optional[str] = None, status: str = "submitted",
+                    job_id: Optional[int] = None, config_xml: Optional[str] = None,
+                    batch_script: Optional[str] = None,
+                    log_dir: Optional[str] = None) -> dict:
         """Insert a task row, or update the existing row for this fingerprint.
 
         Used by run_sr to record the submit *intent* (job_id=None) before the
@@ -1631,9 +1635,9 @@ class Store:
         return self.get_sr_task(fingerprint) or {"task_id": existing[0] if existing else None}
 
     def update_sr_task_job(self, fingerprint: str, *, job_id: int,
-                           status: str, config_xml: str | None = None,
-                           batch_script: str | None = None,
-                           log_dir: str | None = None) -> None:
+                           status: str, config_xml: Optional[str] = None,
+                           batch_script: Optional[str] = None,
+                           log_dir: Optional[str] = None) -> None:
         """Record the result of a submit: the job_id the scheduler returned."""
         db = self._db()
         db.execute(
@@ -1672,8 +1676,8 @@ class Store:
     def set_goal_session(self, goal_id: str, session_id: str) -> None:
         self._db().execute("UPDATE agent_goals SET session_id=?,updated_at=? WHERE goal_id=?", (session_id,time.time(),goal_id)); self._db().commit()
 
-    def create_goal(self, *, title: str, session_id: str | None = None,
-                    request_key: str | None = None, checkpoint: dict | None = None,
+    def create_goal(self, *, title: str, session_id: Optional[str] = None,
+                    request_key: Optional[str] = None, checkpoint: Optional[dict] = None,
                     max_rounds: int = 20, max_model_calls: int = 100,
                     status: str = "QUEUED", phase: str = "queued") -> dict:
         if status == "WAITING_USER":
@@ -1999,7 +2003,7 @@ class Store:
         return self.get_goal_item(goal_id, item_id)
 
     def batch_control(self, goal_id: str, action: str,
-                      expected_revision) -> dict | None:
+                      expected_revision) -> Optional[dict]:
         """Apply one user control action with optimistic concurrency.
 
         ``expected_revision`` is the independent ``checkpoint.control_revision``
@@ -2145,7 +2149,7 @@ class Store:
             f"SELECT {self._REPAIR_PLAN_COLS} FROM repair_plans WHERE plan_id=?",
             (plan_id,)).fetchone())
 
-    def list_repair_plans(self, *, session_id: str | None = None,
+    def list_repair_plans(self, *, session_id: Optional[str] = None,
                           limit: int = 20) -> list[dict]:
         q = f"SELECT {self._REPAIR_PLAN_COLS} FROM repair_plans"
         args = []
@@ -2177,7 +2181,7 @@ class Store:
                         and old.get("confirmation_expires_at")
                         and float(old["confirmation_expires_at"]) > now):
                     return old
-                if (old["status"] in {"READY", "BLOCKED"}
+                if (old["status"] in {"READY", "BLOCKED", "SKIPPED"}
                         and float(old.get("expires_at") or 0) > now
                         and _repair_plan_content_key(old)
                         == _repair_plan_content_key(plan)):
@@ -2192,8 +2196,8 @@ class Store:
                        else int(plan.get("version") or 1))
             plan = {**plan, "version": version}
             prepared_status = plan.get('status') or 'READY'
-            if prepared_status not in {'READY','BLOCKED'}:
-                raise ValueError('prepared plan status must be READY or BLOCKED')
+            if prepared_status not in {'READY','BLOCKED','SKIPPED'}:
+                raise ValueError('prepared plan status must be READY, BLOCKED or SKIPPED')
             session = plan.get("session_id")
             scope = plan.get("scope") or "batch"
             mode = plan.get("mode") or "demo"
@@ -2248,8 +2252,8 @@ class Store:
                      workspace_version, plan_id))
         return self.get_repair_plan(plan_id)
 
-    def confirm_repair_plan(self, plan_id: str, *, session_id: str | None,
-                            confirmed_by: str | None = None,
+    def confirm_repair_plan(self, plan_id: str, *, session_id: Optional[str],
+                            confirmed_by: Optional[str] = None,
                             confirm_ttl_sec: float = 900.0) -> dict:
         """Record a real user confirmation bound to this plan/session."""
         now = time.time()
@@ -2319,7 +2323,7 @@ class Store:
         return self.get_repair_plan(plan_id)
 
     def update_repair_plan_status(self, plan_id: str, status: str,
-                                  reason: str | None = None) -> dict | None:
+                                  reason: Optional[str] = None) -> Optional[dict]:
         with self.worker_transaction() as db:
             db.execute(
                 "UPDATE repair_plans SET status=?, stale_reason=?, updated_at=? "
@@ -2330,7 +2334,7 @@ class Store:
     # ---- cross-plan physical resource leases ----------------------------
 
     def claim_batch_resource(self, goal_id: str, item_id: str,
-                             resource_key: str | None) -> bool:
+                             resource_key: Optional[str]) -> bool:
         """Atomically claim one PAN for this Goal Item.
 
         States:
@@ -2439,7 +2443,7 @@ class Store:
             return False
 
     def release_batch_resource(self, goal_id: str, item_id: str,
-                               resource_key: str | None) -> None:
+                               resource_key: Optional[str]) -> None:
         if not resource_key:
             return
         with self.worker_transaction() as db:
@@ -2449,13 +2453,13 @@ class Store:
                 "AND goal_id=? AND item_id=?",
                 (time.time(), resource_key, goal_id, item_id))
 
-    def transition_goal(self, goal_id: str, status: str, *, phase: str | None=None,
-                        checkpoint: dict | None=None, error: str | None=None,
-                        next_wake_at: float | None=None, expected_version: int | None=None,
-                        event_type: str | None=None, event_payload: dict | None=None,
+    def transition_goal(self, goal_id: str, status: str, *, phase: Optional[str]=None,
+                        checkpoint: Optional[dict]=None, error: Optional[str]=None,
+                        next_wake_at: Optional[float]=None, expected_version: Optional[int]=None,
+                        event_type: Optional[str]=None, event_payload: Optional[dict]=None,
                         extra_events=None,
                         lease_token=None, release=False, rounds_inc=0, model_calls_inc=0,
-                        _verification=False, _clarification=False, _answer=False) -> dict | None:
+                        _verification=False, _clarification=False, _answer=False) -> Optional[dict]:
         valid = {"QUEUED","RUNNING","WAITING_EXTERNAL","WAITING_USER","VERIFYING","RETRY_WAIT","PAUSED","BLOCKED","COMPLETED","FAILED","CANCELLED"}
         if status not in valid: raise ValueError(f"invalid goal status: {status}")
         if status == "WAITING_USER" and not _clarification:
@@ -2608,7 +2612,7 @@ class Store:
             item = next(c for c in self.list_goal_clarifications(goal_id) if c["clarification_id"] == clarification_id)
             return {"goal": updated, "clarification": item}
 
-    def claim_goal(self, goal_id: str, owner: str, *, lease_sec: float=60) -> dict | None:
+    def claim_goal(self, goal_id: str, owner: str, *, lease_sec: float=60) -> Optional[dict]:
         with self.worker_transaction() as db:
             now=time.time()
             cur=db.execute("UPDATE agent_goals SET lease_owner=?,lease_token=?,lease_until=?,version=version+1,updated_at=? WHERE goal_id=? AND status IN ('QUEUED','RUNNING','RETRY_WAIT','WAITING_EXTERNAL','VERIFYING') AND (next_wake_at IS NULL OR next_wake_at<=?) AND (lease_until IS NULL OR lease_until<=?)", (owner,uuid.uuid4().hex,now+lease_sec,now,goal_id,now,now))
@@ -2804,7 +2808,7 @@ class Store:
         return int(row[0]) if row else 0
 
     def claim_goal_monitor(self, goal_id: str, owner: str, *,
-                           lease_sec: float = 60) -> dict | None:
+                           lease_sec: float = 60) -> Optional[dict]:
         """Lease a PAUSED/CANCELLED batch Goal **without** changing its status.
 
         PR C keeps the Monitor alive after the user stops the Producer: items
@@ -2886,7 +2890,7 @@ class Store:
                              verification=_UNSET, external_job_id=_UNSET,
                              capacity_reserved=_UNSET,
                              event_type="item_state_changed",
-                             event_payload=None, extra_events=None) -> dict | None:
+                             event_payload=None, extra_events=None) -> Optional[dict]:
         """CAS one batch Item and append its events in the same transaction.
 
         The Goal lease is the fencing token; the Step version is the long-lived
@@ -2985,7 +2989,7 @@ class Store:
     def reserve_item_submission(self, goal_id, *, step_id, expected_version,
                                 lease_token, intent_key, intent_args,
                                 max_inflight=None, checkpoint=None,
-                                tool_name="run_sr") -> dict | None:
+                                tool_name="run_sr") -> Optional[dict]:
         """Atomically check capacity, CAS MASK_READY→SUBMITTING and create the
         Tool Intent that ``submit_run_sr`` will reuse.
 
@@ -3061,7 +3065,7 @@ class Store:
 
     def create_batch_goal(self, *, title: str, request_key: str,
                           content_sha256: str, checkpoint: dict, items: list[dict],
-                          session_id: str | None = None,
+                          session_id: Optional[str] = None,
                           max_rounds: int = 20,
                           max_model_calls: int = 0) -> dict:
         """Create one Goal and all Item Steps in a single fenced transaction.

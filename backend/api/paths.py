@@ -24,6 +24,7 @@
 """
 
 from __future__ import annotations
+from typing import Optional, Union
 
 import base64
 import hashlib
@@ -53,7 +54,7 @@ __all__ = [
 ]
 
 
-def scenes_root() -> Path | None:
+def scenes_root() -> Optional[Path]:
     raw = os.environ.get("SR_SCENES_ROOT")
     if not raw:
         return None
@@ -61,7 +62,7 @@ def scenes_root() -> Path | None:
     return p if p.is_dir() else None
 
 
-def previews_root() -> Path | None:
+def previews_root() -> Optional[Path]:
     """Optional preview cache root (must sit under scenes_root)."""
     raw = os.environ.get("SR_PREVIEWS_ROOT")
     return Path(raw) if raw else None
@@ -71,7 +72,7 @@ def disk_url_prefix() -> str:
     return os.environ.get("SR_DISK_URL_PREFIX", _DISK_URL_PREFIX)
 
 
-def ensure_within(path: str | Path, root: Path) -> Path:
+def ensure_within(path: Union[str, Path], root: Path) -> Path:
     """Validate an absolute candidate path is a file under the whitelist root.
 
     Resolves symlinks (../ 与链接逃逸都过不了 realpath 比较)。Raise
@@ -108,14 +109,14 @@ def scene_id(rel: str) -> str:
     return base64.urlsafe_b64encode(rel.encode("utf-8")).decode("ascii").rstrip("=")
 
 
-def scene_id_abs(abs_path: str | Path) -> str:
+def scene_id_abs(abs_path: Union[str, Path]) -> str:
     """手工行的场景 id：`~` + base64url(绝对路径)，URL 安全、与库行不冲突。"""
     posix = Path(abs_path).as_posix().encode("utf-8")
     body = base64.urlsafe_b64encode(posix).decode("ascii").rstrip("=")
     return _ABS_ID_PREFIX + body
 
 
-def scene_id_to_abs(id_token: str, root: Path | None = None, *,
+def scene_id_to_abs(id_token: str, root: Optional[Path] = None, *,
                     allow_preview: bool = False) -> Path:
     """Resolve an opaque scene id to a whitelisted absolute file path.
 
@@ -217,7 +218,7 @@ def preview_jpg_path(source_abs: Path, root: Path) -> Path:
     return source_abs.with_name(preview_jpg_name(source_abs))
 
 
-def preview_jpg_for(source_abs: Path, root: Path | None) -> Path:
+def preview_jpg_for(source_abs: Path, root: Optional[Path]) -> Path:
     """预览 JPG 的落点：库内 `preview_jpg_path`，库外（手工路径）落源同目录。
 
     三个分支**文件名形态相同**，差别只在目录：

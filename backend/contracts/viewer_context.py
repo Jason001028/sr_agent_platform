@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 SCHEMA_VERSION = 1
 
 
-def validate_viewer_context(value: Any) -> tuple[bool, str | None]:
+def validate_viewer_context(value: Any) -> tuple[bool, Optional[str]]:
     if not isinstance(value, dict):
         return False, "context must be a JSON object"
     if value.get("schema_version") != SCHEMA_VERSION:

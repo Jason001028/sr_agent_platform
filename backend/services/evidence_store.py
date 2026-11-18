@@ -70,7 +70,7 @@ def report_compute_readiness(goal, items, executor_snapshot):
             return 'indeterminate'
     waiting = {'AWAITING_MASK_REVIEW', 'WAITING_INPUT'}
     if any(i['status'] in {'PENDING','RETRY_WAIT','OPENING','DETECTING','WAITING_SR','VERIFYING','PREPARING'}
-           or (i['status']=='MASK_READY' and not i.get('checkpoint',{}).get('review_required')) for i in items):
+           or (i['status']=='MASK_READY' and mask_ready_to_submit(i.get('checkpoint',{}))) for i in items):
         return 'computing'
     if any(i['status'] in waiting or (i['status']=='MASK_READY' and i.get('checkpoint',{}).get('review_required')) for i in items):
         return 'waiting_input'
@@ -88,6 +88,23 @@ def report_compute_readiness(goal, items, executor_snapshot):
     return 'ready'
 
 
+def mask_ready_to_submit(checkpoint):
+    if not checkpoint.get('review_required'):
+        return True
+    review=checkpoint.get('review') or {}
+    sha=(checkpoint.get('mask') or {}).get('sha256')
+    return bool(sha and review.get('decision')=='approve' and review.get('mask_sha256')==sha)
+
+
+def suspend_reports(db,goal_id,*,except_report=None):
+    """Fence in-flight writers as soon as a report stops being current."""
+    where="goal_id=? AND status!='superseded'";args=[goal_id]
+    if except_report is not None:where+=' AND report_id!=?';args.append(except_report)
+    db.execute(f"""UPDATE repair_evidence_tasks SET state='queued',lease_token=NULL,lease_until=NULL,next_wake_at=0
+        WHERE state='running' AND report_id IN (SELECT report_id FROM repair_evidence_reports WHERE {where})""",args)
+    db.execute(f"UPDATE repair_evidence_reports SET status='superseded',updated_at=MAX(updated_at+0.000001,?) WHERE {where}",(time.time(),*args))
+
+
 def create_report(store, goal, items, reviews, compute_state):
     from backend.services.evidence_config import load_settings
     settings=load_settings()
@@ -98,13 +115,20 @@ def create_report(store, goal, items, reviews, compute_state):
                         'compute_state':compute_state,'settings':settings})
     now=time.time()
     with store.worker_transaction() as db:
-        old=db.execute('SELECT report_id FROM repair_evidence_reports WHERE goal_id=? AND source_set_hash=? AND recipe_version=?',
+        old=db.execute('SELECT report_id,status FROM repair_evidence_reports WHERE goal_id=? AND source_set_hash=? AND recipe_version=?',
                        (goal['goal_id'],source_hash,RECIPE_VERSION)).fetchone()
         if old:
+            if old[1]=='superseded':
+                suspend_reports(db,goal['goal_id'],except_report=old[0])
+                # Also fence rows written by older deployments which suspended
+                # reports without revoking running task tokens.
+                db.execute("UPDATE repair_evidence_tasks SET state='queued',lease_token=NULL,lease_until=NULL,next_wake_at=0 WHERE report_id=? AND state='running'",(old[0],))
+                db.execute("UPDATE repair_evidence_reports SET status='pending' WHERE report_id=?",(old[0],))
+                touch(db,old[0])
             return old[0]
         rid=uuid.uuid4().hex
         revision=db.execute('SELECT COALESCE(MAX(revision),0)+1 FROM repair_evidence_reports WHERE goal_id=?',(goal['goal_id'],)).fetchone()[0]
-        db.execute("UPDATE repair_evidence_reports SET status='superseded' WHERE goal_id=?",(goal['goal_id'],))
+        suspend_reports(db,goal['goal_id'])
         coverage={'total_scenes':len(items),'verified_scenes':len([r for r in reviews if r['binding'].get('kind')!='no-candidate']),
                   'failed_scenes':sum(i['status']=='FAILED' for i in items),
                   'skipped_scenes':sum(i['status']=='SKIPPED' for i in items),

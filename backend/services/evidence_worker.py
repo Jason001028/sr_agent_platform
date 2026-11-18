@@ -13,7 +13,13 @@ log = logging.getLogger(__name__)
 def busy(store):
     return bool(store._db().execute("SELECT 1 FROM sr_tasks WHERE status NOT IN ('COMPLETED','FAILED','CANCELLED','TIMEOUT') LIMIT 1").fetchone()
         or store._db().execute("SELECT 1 FROM agent_goal_steps WHERE kind='batch_item' AND status IN ('SUBMITTING','WAITING_SR','VERIFYING','PENDING','RETRY_WAIT','OPENING','DETECTING') LIMIT 1").fetchone()
-        or store._db().execute("SELECT 1 FROM agent_goal_steps WHERE kind='batch_item' AND status='MASK_READY' AND COALESCE(json_extract(checkpoint,'$.review_required'),0)=0 LIMIT 1").fetchone())
+        or store._db().execute("""SELECT 1 FROM agent_goal_steps WHERE kind='batch_item' AND status='MASK_READY' AND
+            (COALESCE(json_extract(checkpoint,'$.review_required'),0)=0 OR
+             (json_extract(checkpoint,'$.review.decision')='approve' AND
+              json_extract(checkpoint,'$.mask.sha256') IS NOT NULL AND
+              json_extract(checkpoint,'$.mask.sha256')!='' AND
+              json_extract(checkpoint,'$.review.mask_sha256')=json_extract(checkpoint,'$.mask.sha256')))
+            LIMIT 1""").fetchone())
 
 
 def admission(state, *, model=False, running=False):
@@ -49,7 +55,7 @@ def discover(store, since):
             ledger.create_report(store,goal,items,reviews,readiness)
         else:
             with store.worker_transaction() as db:
-                db.execute("UPDATE repair_evidence_reports SET status='superseded' WHERE goal_id=? AND status!='superseded'",(gid,))
+                ledger.suspend_reports(db,gid)
     return (goals[-1][1],goals[-1][0]) if goals else since
 
 
@@ -67,7 +73,8 @@ async def run_task(state, task):
             if os.environ.get('SR_EVIDENCE_ANALYSIS_ENABLED')!='1' or not admission(state,model=True):
                 ledger.defer(store,task,'waiting_model_idle');return
             from backend.services.evidence_analysis import analyze
-            await analyze(store,task['report_id'],task['row_id'],task=task)
+            await analyze(store,task['report_id'],task['row_id'],task=task,
+                          can_dispatch=lambda: admission(state,model=True))
             with store.worker_transaction() as db:
                 if ledger.owned(db,task):
                     db.execute("UPDATE repair_evidence_tasks SET state='done',lease_token=NULL,lease_until=NULL WHERE task_id=?",(task['task_id'],))
@@ -98,7 +105,7 @@ async def run_task(state, task):
         raise
     except Exception as exc:
         code=str(exc) if isinstance(exc,ValueError) and len(str(exc))<80 else type(exc).__name__
-        if code=='waiting_idle': ledger.defer(store,task)
+        if code in {'waiting_idle','waiting_model_idle'}: ledger.defer(store,task,code)
         elif task['stage']=='analysis':
             with store.worker_transaction() as db:
                 if ledger.owned(db,task):

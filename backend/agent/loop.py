@@ -22,6 +22,7 @@ and external-job idempotency (run_sr task table) are separate layers.
 """
 
 from __future__ import annotations
+from typing import Optional
 from backend.agent.request_budget import DeadlineExceeded, timeout_for, request_policy, error_class, timeout_message
 
 import inspect
@@ -177,7 +178,7 @@ def _parse_args(arguments) -> dict:
         return {"raw": arguments}
 
 
-def _normalize_usage(raw) -> dict | None:
+def _normalize_usage(raw) -> Optional[dict]:
     """Normalize OpenAI-compatible usage, or return None when unavailable."""
     if raw is None:
         return None
@@ -574,8 +575,8 @@ def _integrity_message(constraint, max_tokens, retrying):
     return text + "已停止本轮自动重试。请检查 SR_LLM_MAX_TOKENS 与模型服务的生成限制后再试。"
 
 
-def call_tool(name, arguments_json, registry: ToolRegistry | None = None,
-              allowed_names: set[str] | None = None) -> dict:
+def call_tool(name, arguments_json, registry: Optional[ToolRegistry] = None,
+              allowed_names: Optional[set[str]] = None) -> dict:
     """Execute a tool through the shared registry boundary."""
     if allowed_names is not None and name not in allowed_names:
         return {"ok": False, "data": None,
@@ -584,7 +585,7 @@ def call_tool(name, arguments_json, registry: ToolRegistry | None = None,
     return active.invoke(name, arguments_json, source="agent")
 
 
-def _default_chat(cfg: Config, *, round_seconds=None):
+def _default_chat(cfg: Config, *, round_seconds=None, store=None):
     if cfg.llm_mock:
         return _mock_chat(cfg)
     image_cache: dict[str, str] = {}
@@ -598,7 +599,7 @@ def _default_chat(cfg: Config, *, round_seconds=None):
         return asyncio.run(request(cfg, wire, tools, on_delta=on_delta,
             request_config=request_config, deadline=deadline,
             fallback_reserve=fallback_reserve, consume=_consume_stream_async,
-            parse=parse_response, diagnostics=diagnostics))
+            parse=parse_response, diagnostics=diagnostics, store=store))
 
     return chat
 
@@ -658,7 +659,7 @@ def _transcript_from(messages: list[dict]) -> list[dict]:
 
 def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM_PROMPT,
              chat=None, verbose=False, store=None, session_id=None,
-             resume=False, on_step=None, registry: ToolRegistry | None = None,
+             resume=False, on_step=None, registry: Optional[ToolRegistry] = None,
              context=None, machine_id=None, stream=None, durable=False,
              max_model_calls=None, max_tool_calls=32, max_seconds=60,
              tool_executor=None, result_hook=None, before_model=None, viewer_snapshot=None,
@@ -719,7 +720,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
         raise ValueError("run_loop requires cfg or context")
 
     if chat is None:
-        chat = _default_chat(cfg, round_seconds=max_seconds if durable else None)
+        chat = _default_chat(cfg, round_seconds=max_seconds if durable else None, store=store)
 
     if stream is None:
         stream = bool(getattr(cfg, "llm_stream", True))
@@ -788,7 +789,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
     result_manager = ToolResults(store, session_id)
     active_registry = result_manager.registry(bind_registry(
         registry or default_registry(), latest_user.get("viewer_snapshot"),
-        store=store, session_id=session_id))
+        store=store, session_id=session_id,raster_runner=getattr(context,'raster_runner',None)))
     active_registry = ToolRegistry(t for t in active_registry.list() if t.name != CLARIFY)
     if durable:
         active_registry.register(control_tool())
@@ -797,7 +798,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
             "read_tool_result", "get_current_image_info",
             "present_spatial_annotations", "prepare_batch_repair",
             "query_batch_repair", "prepare_repair", "start_repair",
-            "get_repair_workspace", "list_repair_items", "get_repair_item"}
+            "get_repair_workspace", "list_repair_items", "get_repair_item", "inspect_repair_workspace"}
         if durable:
             allowed_names.add(CLARIFY)
     messages = result_manager.project_history(messages, active_registry)
@@ -1156,7 +1157,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
                     "present_spatial_annotations", "prepare_batch_repair",
                     "query_batch_repair", "prepare_repair", "start_repair",
                     "get_repair_workspace", "list_repair_items",
-                    "get_repair_item", "sr_job_status"}:
+                    "get_repair_item", "sr_job_status", "inspect_repair_workspace"}:
                 # Preserve the two-argument seam used by existing callers/tests.
                 if allowed_names is None:
                     result = call_tool(tc["name"], tc["arguments"])

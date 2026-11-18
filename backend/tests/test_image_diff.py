@@ -4,6 +4,7 @@
 包围盒；散点噪声被最小面积/形态学滤掉而连续块保留；SSIM 与像素差分输出
 同一套结构且阈值互不影响。全部走合成数组，不依赖盘阵与预览缓存。
 """
+from typing import Optional
 
 import base64
 import io
@@ -231,7 +232,7 @@ class ArrayAnalysisTest(unittest.TestCase):
         self.assertLess(y + h, 40)
 
 
-def write_tiff(path: Path, arr: np.ndarray, nodata: str | None = None) -> Path:
+def write_tiff(path: Path, arr: np.ndarray, nodata: Optional[str] = None) -> Path:
     info = TiffImagePlugin.ImageFileDirectory_v2()
     if nodata is not None:
         info[42113] = nodata              # GDAL_NODATA

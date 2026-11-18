@@ -5,6 +5,7 @@ PAN as target. Scores are relative evidence, never calibrated probabilities.
 No production thresholds or code are imported from the internal reference.
 """
 from __future__ import annotations
+from typing import Optional
 
 from dataclasses import dataclass
 
@@ -17,11 +18,11 @@ VERSION = "smart-compare-0.3-experimental"
 @dataclass(frozen=True)
 class BlurConfig:
     window: int = 15
-    calibration_scale: float | None = None
+    calibration_scale: Optional[float] = None
     sensor: str = "generic"
     frequency_review: bool = False
     scene_suppression: bool = True
-    log_ratio_baseline: float | None = None
+    log_ratio_baseline: Optional[float] = None
 
     def __post_init__(self):
         if isinstance(self.window, bool) or not isinstance(self.window, int) or not 3 <= self.window <= 63 or self.window % 2 == 0:

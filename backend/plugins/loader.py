@@ -1,13 +1,14 @@
 """Discover trusted source plugin manifests without importing plugin code."""
 
 from __future__ import annotations
+from typing import Union
 
 from pathlib import Path
 
 from .manifest import PluginManifest, load_manifest
 
 
-def discover_manifests(root: str | Path) -> tuple[list[PluginManifest], list[str]]:
+def discover_manifests(root: Union[str, Path]) -> tuple[list[PluginManifest], list[str]]:
     base = Path(root)
     found: list[PluginManifest] = []
     errors: list[str] = []

@@ -13,11 +13,14 @@ const report=process.env.SR_EVIDENCE_REPORT_ID;
   assert.deepStrictEqual(labels,['NOSR','修复产物']);
   await page.$$eval('article:first-of-type button',buttons=>buttons.find(b=>b.textContent.includes('展开')).click());
   await page.waitForFunction(()=>document.body.textContent.includes('修复前 PAN'));
+  await page.$$eval('article:first-of-type button',buttons=>buttons.find(b=>b.textContent==='分析记录').click());
+  await page.waitForSelector('section[aria-label="分析记录"]');
+  await page.waitForFunction(()=>document.querySelector('section[aria-label="分析记录"]').textContent.includes('尚无分析记录'));
   await page.reload();await page.waitForSelector('article');
   await page.setViewport({width:390,height:844});
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
   await page.screenshot({path:'.e2e/repair-evidence-preview.png',fullPage:true});
   assert.deepStrictEqual(errors,[]);
-  console.log('PASS evidence rows, role order, before expansion, refresh, narrow layout');
+  console.log('PASS evidence rows, role order, before expansion, on-demand analysis history, refresh, narrow layout');
  }finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

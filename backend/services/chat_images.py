@@ -27,6 +27,7 @@
 """
 
 from __future__ import annotations
+from typing import Optional, Union
 
 import base64
 import binascii
@@ -111,7 +112,7 @@ def save_images(session_id: str, images) -> list[dict]:
     return saved
 
 
-def image_path(session_id: str, filename: str) -> Path | None:
+def image_path(session_id: str, filename: str) -> Optional[Path]:
     """相对 URL 里的 (会话, 文件名) → 磁盘路径；不合法一律 None，不抛错。"""
     if not isinstance(session_id, str) or not _SESSION_RE.match(session_id):
         return None
@@ -136,7 +137,7 @@ def delete_session_images(session_id: str) -> None:
 
 
 def hydrate_images(messages: list[dict], *,
-                   cache: dict[str, str] | None = None) -> list[dict]:
+                   cache: Optional[dict[str, str]] = None) -> list[dict]:
     """把相对 URL 换成 data URL，供 OpenAI 兼容端点调用（**返回浅拷贝**）。
 
     `cache` 是「一次回合内」的 URL → data URL 记忆：同一张图会被每个 LLM 调用
@@ -166,7 +167,7 @@ def hydrate_images(messages: list[dict], *,
     return out
 
 
-def user_content(text: str, saved: list[dict]) -> str | list[dict]:
+def user_content(text: str, saved: list[dict]) -> Union[str, list[dict]]:
     """组装落库用的 user content：无图仍是纯字符串（老形状），有图是 block 列表。"""
     if not saved:
         return text
@@ -290,7 +291,7 @@ def _block_url(block: dict) -> str:
     return url if isinstance(url, str) else ""
 
 
-def _data_url(url: str, cache: dict[str, str] | None) -> str | None:
+def _data_url(url: str, cache: Optional[dict[str, str]]) -> Optional[str]:
     """相对/绝对图片 URL → data URL；取不到文件返回 None。"""
     if not url:
         return None
@@ -316,7 +317,7 @@ def _data_url(url: str, cache: dict[str, str] | None) -> str | None:
     return data
 
 
-def _unlink_quiet(path: Path | None) -> None:
+def _unlink_quiet(path: Optional[Path]) -> None:
     if path is None:
         return
     try:

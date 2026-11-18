@@ -4,7 +4,7 @@ import { toolActionLabel } from './chatActivity';
 import { repairPlanId } from './repairPlan';
 
 export type ActivityState = 'running' | 'success' | 'failed' | 'interrupted';
-export type BusinessKind = 'plan' | 'scenes' | 'receipt' | 'annotation' | 'confirmation';
+export type BusinessKind = 'inspection' | 'plan' | 'scenes' | 'receipt' | 'annotation' | 'confirmation';
 export interface ActivityStep {
   key: string; name: string; label: string; args: unknown; callId?: string;
   callIndex: number; resultIndex?: number; result?: ChatMsg;
@@ -33,6 +33,7 @@ export function toolOutcome(result?: ChatMsg): boolean | undefined {
 function businessKind(step: ActivityStep): BusinessKind | null {
   if (step.state !== 'success') return null;
   const data = toolPayload(step.result);
+  if (data?.kind === 'repair_inspection.v1') return 'inspection';
   if (repairPlanId(step.result?.data)) return 'plan';
   if (step.name === 'search_scenes' && data && (Array.isArray(data.results) || typeof data.count === 'number')) return 'scenes';
   if (data?.kind === 'batch_repair_draft.v1' && Array.isArray(data.candidates) && data.candidates.length) return 'receipt';

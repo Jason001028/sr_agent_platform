@@ -11,6 +11,7 @@ exists server-side, and every plan/Goal read is filtered by it.  The caller
 cannot supply ``confirmed_by``; the server records ``user:<session>``.
 """
 from __future__ import annotations
+from typing import Optional
 
 import re
 
@@ -52,7 +53,7 @@ def _plan_id(value: str) -> str:
     return value
 
 
-def _session_id(store, value, *, required: bool) -> str | None:
+def _session_id(store, value, *, required: bool) -> Optional[str]:
     """A session id must be an existing server-side session, not a free claim."""
     if value is None:
         if required:
@@ -114,7 +115,7 @@ def _validate_exclusions(value):
     return value
 
 
-def _owned_plan(store, plan_id: str, session_id: str | None) -> dict:
+def _owned_plan(store, plan_id: str, session_id: Optional[str]) -> dict:
     """Read a plan only inside the caller's existing session."""
     plan = store.get_repair_plan(plan_id)
     if plan is None:
@@ -227,7 +228,7 @@ async def start(plan_id: str, request: Request):
 
 
 @router.get("")
-def list_plans(request: Request, session_id: str | None = None,
+def list_plans(request: Request, session_id: Optional[str] = None,
                limit: int = 20):
     store = _store(request)
     session_id = _session_id(store, session_id, required=True)
@@ -237,7 +238,7 @@ def list_plans(request: Request, session_id: str | None = None,
 
 
 @router.get("/{plan_id}")
-def status(plan_id: str, request: Request, session_id: str | None = None):
+def status(plan_id: str, request: Request, session_id: Optional[str] = None):
     plan_id = _plan_id(plan_id)
     store = _store(request)
     session_id = _session_id(store, session_id, required=True)
@@ -246,7 +247,7 @@ def status(plan_id: str, request: Request, session_id: str | None = None):
 
 
 @router.get("/{plan_id}/targets")
-def targets(plan_id: str, request: Request, version: int, session_id: str | None = None,
+def targets(plan_id: str, request: Request, version: int, session_id: Optional[str] = None,
             offset: int = 0, limit: int = 100):
     """Read the stored plan's full target list without the model-view cap."""
     store = _store(request)
@@ -265,7 +266,7 @@ def targets(plan_id: str, request: Request, version: int, session_id: str | None
 
 
 @router.get("/{plan_id}/result")
-def result(plan_id: str, request: Request, session_id: str | None = None):
+def result(plan_id: str, request: Request, session_id: Optional[str] = None):
     plan_id = _plan_id(plan_id)
     store = _store(request)
     session_id = _session_id(store, session_id, required=True)

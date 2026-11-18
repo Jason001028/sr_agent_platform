@@ -1,0 +1,8 @@
+﻿<html><body style="margin:0;background:#eaf0eb"><div id="app" style="width:376px;margin:12px"></div><script type="module">
+import {createApp} from 'vue';
+import {createRouter,createMemoryHistory} from 'vue-router';
+import {createPinia} from 'pinia';
+import Report from '/src/pages/RepairEvidenceReportPage.vue';
+window.fetch=async url=>{const u=new URL(url,location.origin);const offset=Number(u.searchParams.get('offset')||0);return {ok:true,json:async()=>u.pathname.endsWith('/rows')?{rows:Array.from({length:Math.min(5,12-offset)},(_,i)=>({row_id:String(offset+i),region_id:'region-long-'+(offset+i),item_id:'scene',plan:{scene_name:'PAN-with-long-scene-name.tif',coverage:'full',windows:[]},manifest:{windows:[]},evidence_state:'ready',analysis_state:'not_requested',analysis:null})),total:12,report_total:12,offset,next_cursor:null}:{report_id:'preview',coverage:{total_scenes:3,analyzed:0,unanalyzed:12},evidence_counts:{ready:12},analysis_counts:{not_requested:12}}}};
+const router=createRouter({history:createMemoryHistory(),routes:[{path:'/',component:Report}]});createApp(Report,{reportId:'preview',embedded:true}).use(createPinia()).use(router).mount('#app');
+</script></body></html>

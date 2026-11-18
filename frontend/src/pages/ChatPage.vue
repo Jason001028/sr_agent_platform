@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import ThinkingSlider from "../components/ThinkingSlider.vue";
+import AgentRepairSettings from '../components/AgentRepairSettings.vue';
 /**
  * ChatPage.vue — Agent 聊天（阶段5，api-contract.md §3.2）
  * 布局：左侧会话列表（新建/切换），右侧消息 timeline + 发送框。
@@ -286,6 +287,7 @@ onMounted(() => {
         <span v-if="chat.sessionId" class="cp-sessid">{{ chat.sessions.find(s => s.session_id === chat.sessionId)?.metadata?.title || shortId(chat.sessionId) }}</span>
         <span v-else class="cp-sessid empty">未选择会话</span>
         <TokenUsagePanel v-if="tokenPluginEnabled" :usage="chat.usage" />
+        <AgentRepairSettings />
       </div>
 
       <p v-if="chat.error" class="cp-err">{{ chat.error }}</p>

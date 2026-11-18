@@ -1,5 +1,6 @@
 """Durable Goal REST/SSE routes; execution lives in goal_worker."""
 from __future__ import annotations
+from typing import Optional
 
 from starlette.concurrency import run_in_threadpool
 
@@ -166,8 +167,8 @@ def _batch_import_sync(request, body):
     return result
 
 @router.get("")
-def list_goals(request: Request, limit: int=100, session_id: str | None=None,
-               kind: str | None=None, include_clarifications: bool=False):
+def list_goals(request: Request, limit: int=100, session_id: Optional[str]=None,
+               kind: Optional[str]=None, include_clarifications: bool=False):
     """Goal list.  ``kind=batch`` lets the Panel find an active batch without
     guessing that ``limit=1`` contains the newest non-terminal one."""
     store = request.app.state.store
@@ -259,8 +260,8 @@ def batch_report(goal_id: str, request: Request):
                         headers={"Cache-Control": "no-cache"})
 
 @router.get("/{goal_id}/events")
-def events(goal_id: str, request: Request, after: int | None = None,
-           before: int | None = None, limit: int = 500):
+def events(goal_id: str, request: Request, after: Optional[int] = None,
+           before: Optional[int] = None, limit: int = 500):
     """Paged Goal events.
 
     Forward (``after``) is the SSE catch-up direction; backward (``before``)
@@ -315,7 +316,7 @@ def steps(goal_id: str, request: Request):
 
 @router.get("/{goal_id}/items")
 def items(goal_id: str, request: Request, after_ordinal: int = 0,
-          status: str | None = None, limit: int = 200):
+          status: Optional[str] = None, limit: int = 200):
     """Business projection of batch Item steps; never returns artifact bytes."""
     goal = request.app.state.store.get_goal(goal_id)
     if not goal:

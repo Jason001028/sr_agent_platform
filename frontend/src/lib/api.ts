@@ -1787,6 +1787,7 @@ export interface RepairPlan {
   blocking?: { message?: string; code?: string; line?: number; name?: string; scene_ref?: string; conflict_path?: string; filename?: string }[];
   exclusions?: { line: number; reason: string }[];
   strategy_policy?: "automatic" | "review";
+  tone_weight?: boolean; skip_completed?: boolean; skipped_completed?: {name?: string;scene_ref?: string}[];
   diagnostics?: { severity?: string; message?: string }[];
   expires_at?: number;
   confirmation?: unknown;
@@ -1898,7 +1899,7 @@ export interface BatchItemRecord {
     job_id?: number | string | null;
     target_image?: { path?: string }; reference_image?: { path?: string; revision?: string }; scene_ref?: string; attempt?: number;
     review_required?: boolean; review?: { decision: string };
-    detection?: { candidates?: unknown[]; provenance?: string; analysis?: { differenceMap?: string; validityMap?: string } };
+    detection?: { candidates?: unknown[]; provenance?: string; analysis?: { differenceMap?: string; weightedDifferenceMap?: string; validityMap?: string } };
     region_reviews?: Record<string, 'approve' | 'exclude'>;
     mask?: { sha256?: string; overlay?: { path?: string } }; config?: unknown;
   };

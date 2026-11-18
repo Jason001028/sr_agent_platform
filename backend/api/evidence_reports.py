@@ -1,4 +1,7 @@
 ﻿"""Read-only report resources and explicitly requested report planning."""
+from __future__ import annotations
+from typing import Optional
+
 import json
 from fastapi import APIRouter, Request, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -18,7 +21,7 @@ def require(store, rid):
 def by_goal(goal_id: str,request: Request):
     import os
     store=request.app.state.store
-    row=store._db().execute('SELECT report_id FROM repair_evidence_reports WHERE goal_id=? ORDER BY revision DESC LIMIT 1',(goal_id,)).fetchone()
+    row=store._db().execute("SELECT report_id FROM repair_evidence_reports WHERE goal_id=? ORDER BY (status!='superseded') DESC,revision DESC LIMIT 1",(goal_id,)).fetchone()
     return {'report':ledger.snapshot(store,row[0]) if row else None,'enabled':os.environ.get('SR_EVIDENCE_REPORT_ENABLED')=='1'}
 
 
@@ -51,7 +54,7 @@ def snapshot(report_id: str,request: Request):
 
 @router.get('/{report_id}/rows')
 def rows(report_id: str,request: Request,offset: int=Query(0,ge=0),limit: int=Query(30,ge=1,le=30),
-         evidence_state: str='', analysis_state: str='', sort: str='scene', cursor: str | None=Query(None,max_length=1024)):
+         evidence_state: str='', analysis_state: str='', sort: str='scene', cursor: Optional[str]=Query(None,max_length=1024)):
     require(request.app.state.store,report_id)
     try:return ledger.page(request.app.state.store,report_id,offset,limit,evidence_state=evidence_state,analysis_state=analysis_state,sort=sort,cursor=cursor)
     except ValueError as exc:raise HTTPException(409 if str(exc)=='cursor_stale' else 422,str(exc))

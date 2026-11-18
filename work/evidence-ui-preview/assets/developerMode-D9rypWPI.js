@@ -1,0 +1,1 @@
+const o="cgwx",l="sr.developerMode.";function r(e){return l+(e||"local")}function a(e="local"){try{return typeof localStorage<"u"&&localStorage.getItem(r(e))==="1"}catch{return!1}}function c(e,t="local"){if(e!==o)return!1;try{localStorage.setItem(r(t),"1")}catch{return!1}return!0}function n(e="local"){try{localStorage.removeItem(r(e))}catch{}}export{n as c,a as i,c as v};

@@ -29,7 +29,7 @@ it('requests one auto-sent Agent repair that still needs plan confirmation', () 
   }, { once: true });
   requestAgentRepair();
   expect(detail.autoSend).toBe(true);
-  expect(detail.text).toBe(AGENT_REPAIR_PROMPT);
+  expect(detail.text).toContain(AGENT_REPAIR_PROMPT);
   expect(detail.text).toContain('prepare_repair');
   expect(detail.text).toContain('mode=production');
   expect(detail.text).toContain('不切换模拟');

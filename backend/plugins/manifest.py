@@ -1,6 +1,7 @@
 """Static plugin manifest contract."""
 
 from __future__ import annotations
+from typing import Optional, Union
 
 import json
 from dataclasses import dataclass
@@ -14,11 +15,11 @@ class PluginManifest:
     version: str
     host_api_version: str
     enabled: bool
-    backend_entry: str | None = None
-    frontend_entry: str | None = None
+    backend_entry: Optional[str] = None
+    frontend_entry: Optional[str] = None
 
 
-def load_manifest(path: str | Path) -> PluginManifest:
+def load_manifest(path: Union[str, Path]) -> PluginManifest:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("插件清单必须是 JSON 对象")

@@ -1,5 +1,6 @@
 ﻿<script setup lang="ts">
 import { ref, watch, onBeforeUnmount } from 'vue';
+import RepairEvidenceReportPage from '../pages/RepairEvidenceReportPage.vue';
 const props=defineProps<{goalId:string}>();
 const reportId=ref(''),error=ref(''),enabled=ref(false);
 let token=0,controller:AbortController|undefined,timer:ReturnType<typeof setTimeout>|undefined;
@@ -27,4 +28,4 @@ async function create() {
 watch(()=>props.goalId,()=>{token++;reportId.value='';error.value='';enabled.value=false;void refresh();},{immediate:true});
 onBeforeUnmount(()=>{token++;controller?.abort();clearTimeout(timer);});
 </script>
-<template><RouterLink v-if="reportId" :to="`/repair-reports/${reportId}`">图像证据报告 ↗</RouterLink><button v-else-if="enabled" @click="create">生成图像证据报告</button><span v-if="error" role="status">{{error}}</span></template>
+<template><RepairEvidenceReportPage v-if="reportId" :report-id="reportId" embedded /><button v-else-if="enabled" @click="create">生成图像证据报告</button><span v-if="error" role="status">{{error}}</span></template>

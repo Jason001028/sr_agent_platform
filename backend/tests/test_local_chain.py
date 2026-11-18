@@ -15,6 +15,7 @@ the interpreter (conda py3.6 + torch/GDAL) and the GPU — not the chain.
 Cross-checked with docs/planning/sr-minimal-prototype-plan.md §5.1 (the "new
 tests" list) and §5.2 A-段 (the same steps, by hand, on node81-135).
 """
+from typing import Optional
 
 import os
 import shutil
@@ -179,7 +180,7 @@ class LocalChainTests(unittest.TestCase):
                 "delete_ori": False, "grid_align": True,
                 "options_yml": str(self.opt_yml)}
 
-    def submit(self, params: dict | None = None) -> dict:
+    def submit(self, params: Optional[dict] = None) -> dict:
         with mock.patch.object(svc, "build_batch_script", _host_script):
             return svc.submit_run_sr(params if params is not None else self.params(),
                                      store=self.store)

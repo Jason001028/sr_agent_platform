@@ -1,0 +1,158 @@
+{
+  "version": 2,
+  "workflow": "batch_pan_repair_v1",
+  "source": {
+    "format": "explicit_sources_v1",
+    "sha256": "5f7734d016c286b5d5097c1c36ed73ad64dd2ad6bdd6700b22376d57589e93f5",
+    "encoding": "utf-8",
+    "document_ref": "original.bin"
+  },
+  "mode": "production",
+  "config": {
+    "strategy": "automatic",
+    "max_inflight_sr_jobs": 1,
+    "max_prepared_items": 1
+  },
+  "items": [
+    {
+      "item_id": "item_8486098d2000bf04",
+      "name": "PAN.tif",
+      "source_lines": [
+        1
+      ],
+      "desc": "Viewer 手动加入；待检测",
+      "owner": "viewer",
+      "kind": "待检测",
+      "imgType": "",
+      "row": null,
+      "col": null,
+      "scene_ref": "D:/BaiduNetdiskDownload/sr_agent_platform/work/evidence-followup-acceptance/JXGF07D03_PMS_20260101010101_200516571_101_0001_001_L1_PAN",
+      "source_image": "D:/BaiduNetdiskDownload/sr_agent_platform/work/evidence-followup-acceptance/JXGF07D03_PMS_20260101010101_200516571_101_0001_001_L1_PAN/PAN.tif",
+      "target_image": {
+        "file_ref": "pan",
+        "path": "D:/BaiduNetdiskDownload/sr_agent_platform/work/evidence-followup-acceptance/JXGF07D03_PMS_20260101010101_200516571_101_0001_001_L1_PAN/PAN.tif",
+        "image_key": "scene-v1:d62131336893d8f40e4fc071256cd59dc05f44a055c839b0eb67dfdbf94461f6:aca8b40e8d0a8293b14fba6a12595d29cc1c4bec48ca6438a7af1cfad3afa8ca",
+        "revision": "275c7de45064-33024-1794963137456485500",
+        "width": 128,
+        "height": 128,
+        "bits": 16,
+        "sample_format": 1,
+        "spp": 1,
+        "compression": 1,
+        "tourIdentity": {
+          "sequence": "D:/BaiduNetdiskDownload/sr_agent_platform/work/evidence-followup-acceptance/JXGF07D03_PMS_20260101010101_200516571_101_0001_001_L1_PAN",
+          "role": "pan",
+          "sourceRevision": "275c7de45064-33024-1794963137456485500",
+          "width": 128,
+          "height": 128,
+          "evidenceReason": "缺少可验证的 GeoTIFF 全幅配准证据；同目录关联不等于配准证明"
+        }
+      },
+      "reference_image": {
+        "file_ref": "nosr",
+        "path": "D:/BaiduNetdiskDownload/sr_agent_platform/work/evidence-followup-acceptance/JXGF07D03_PMS_20260101010101_200516571_101_0001_001_L1_PAN/JXGF07D03_PMS_20260101010101_200516571_101_0001_001_L1_PAN_NOSR.tif",
+        "image_key": "scene-v1:9180b6e15c5e5fd45735ce52ed5a59926c2ff89416a345f3f41da81c564ddb7e:83372580fc1daffe489e18556a2d8cd40f7314447af77548d66cf5186afd4ef8",
+        "revision": "0213e94b0faf-8448-1794963137458481500",
+        "width": 64,
+        "height": 64,
+        "bits": 16,
+        "sample_format": 1,
+        "spp": 1,
+        "compression": 1,
+        "tourIdentity": {
+          "sequence": "D:/BaiduNetdiskDownload/sr_agent_platform/work/evidence-followup-acceptance/JXGF07D03_PMS_20260101010101_200516571_101_0001_001_L1_PAN",
+          "role": "nosr",
+          "sourceRevision": "0213e94b0faf-8448-1794963137458481500",
+          "width": 64,
+          "height": 64,
+          "evidenceReason": "缺少可验证的 GeoTIFF 全幅配准证据；同目录关联不等于配准证明"
+        }
+      },
+      "config": {
+        "sr_scale": 2,
+        "detection": {
+          "mode": "diff",
+          "method": "absdiff",
+          "sensitivity": "standard",
+          "max_edge": 2048,
+          "min_area_px": 64,
+          "margin": "standard",
+          "version": "shared-difference.v1"
+        }
+      },
+      "ordinal": 1
+    },
+    {
+      "item_id": "item_c666f2ffef6c3ad1",
+      "name": "PAN.tif",
+      "source_lines": [
+        2
+      ],
+      "desc": "Viewer 手动加入；待检测",
+      "owner": "viewer",
+      "kind": "待检测",
+      "imgType": "",
+      "row": null,
+      "col": null,
+      "scene_ref": "D:/BaiduNetdiskDownload/sr_agent_platform/work/evidence-followup-acceptance/JXGF07D03_PMS_20260101010101_200516571_101_0002_001_L1_PAN",
+      "source_image": "D:/BaiduNetdiskDownload/sr_agent_platform/work/evidence-followup-acceptance/JXGF07D03_PMS_20260101010101_200516571_101_0002_001_L1_PAN/PAN.tif",
+      "target_image": {
+        "file_ref": "pan",
+        "path": "D:/BaiduNetdiskDownload/sr_agent_platform/work/evidence-followup-acceptance/JXGF07D03_PMS_20260101010101_200516571_101_0002_001_L1_PAN/PAN.tif",
+        "image_key": "scene-v1:fd680e53cbdb3e89310d00050f0daf39846ae082889ad9975ffbad69deea49c8:9aa9aebb3b73a746e383c29f2f8bc03d1e6f4c8dd127883f0439531dd052d64d",
+        "revision": "f61150da2400-33024-1794963137463646400",
+        "width": 128,
+        "height": 128,
+        "bits": 16,
+        "sample_format": 1,
+        "spp": 1,
+        "compression": 1,
+        "tourIdentity": {
+          "sequence": "D:/BaiduNetdiskDownload/sr_agent_platform/work/evidence-followup-acceptance/JXGF07D03_PMS_20260101010101_200516571_101_0002_001_L1_PAN",
+          "role": "pan",
+          "sourceRevision": "f61150da2400-33024-1794963137463646400",
+          "width": 128,
+          "height": 128,
+          "evidenceReason": "缺少可验证的 GeoTIFF 全幅配准证据；同目录关联不等于配准证明"
+        }
+      },
+      "reference_image": {
+        "file_ref": "nosr",
+        "path": "D:/BaiduNetdiskDownload/sr_agent_platform/work/evidence-followup-acceptance/JXGF07D03_PMS_20260101010101_200516571_101_0002_001_L1_PAN/JXGF07D03_PMS_20260101010101_200516571_101_0002_001_L1_PAN_NOSR.tif",
+        "image_key": "scene-v1:51a162fc0c3fb51b7c95ad37c772051674602be07b27d3022d22570ff0ab088f:a4d9e9354a3cfc7ad473d914276b25e56001a69db381afaf718cd21ad328faa7",
+        "revision": "0906a16498d7-8448-1794963137466247800",
+        "width": 64,
+        "height": 64,
+        "bits": 16,
+        "sample_format": 1,
+        "spp": 1,
+        "compression": 1,
+        "tourIdentity": {
+          "sequence": "D:/BaiduNetdiskDownload/sr_agent_platform/work/evidence-followup-acceptance/JXGF07D03_PMS_20260101010101_200516571_101_0002_001_L1_PAN",
+          "role": "nosr",
+          "sourceRevision": "0906a16498d7-8448-1794963137466247800",
+          "width": 64,
+          "height": 64,
+          "evidenceReason": "缺少可验证的 GeoTIFF 全幅配准证据；同目录关联不等于配准证明"
+        }
+      },
+      "config": {
+        "sr_scale": 2,
+        "detection": {
+          "mode": "diff",
+          "method": "absdiff",
+          "sensitivity": "standard",
+          "max_edge": 2048,
+          "min_area_px": 64,
+          "margin": "standard",
+          "version": "shared-difference.v1"
+        }
+      },
+      "ordinal": 2
+    }
+  ],
+  "diagnostics": [],
+  "manifest_id": "01ebc8ce8f0e54ca293ece6f2ff6a778a9dd8aa93e590d790dc27da2429cf4ab",
+  "manifest_sha256": "01ebc8ce8f0e54ca293ece6f2ff6a778a9dd8aa93e590d790dc27da2429cf4ab",
+  "created_at": 1794963137.5770738
+}

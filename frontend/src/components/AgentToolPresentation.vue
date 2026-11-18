@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { AgentActivityProjection } from '../lib/agentActivity';
 import { toolPayload } from '../lib/agentActivity';
+import AgentInspectionCard from './AgentInspectionCard.vue';
 import AgentActivityTimeline from './AgentActivityTimeline.vue';
 import AgentRepairPlanCard from './AgentRepairPlanCard.vue';
 import SceneSearchResultCard from './SceneSearchResultCard.vue';
@@ -13,7 +14,8 @@ const emit = defineEmits<{ openScene: [item: Record<string, unknown>] }>();
   <div v-if="projection.groups.has(index) || projection.business.has(index)" class="tool-presentation">
     <AgentActivityTimeline v-for="group in projection.groups.get(index)" :key="group.key" :group="group" :session-key="sessionKey" :developer-mode="developerMode" />
     <template v-for="step in projection.business.get(index)" :key="step.key">
-      <AgentRepairPlanCard v-if="step.business === 'plan'" :data="step.result?.data" />
+      <AgentInspectionCard v-if="step.business === 'inspection'" :data="toolPayload(step.result)" />
+      <AgentRepairPlanCard v-else-if="step.business === 'plan'" :data="step.result?.data" />
       <SceneSearchResultCard v-else-if="step.business === 'scenes'" :data="toolPayload(step.result)" :args="(step.args ?? {}) as Record<string, unknown>" status="completed" @open="emit('openScene', $event)" />
       <AgentBatchReceipt v-else-if="step.business === 'receipt'" :data="step.result?.data" />
       <AgentAnnotationReference v-else-if="step.business === 'annotation'" :data="step.result?.data" />

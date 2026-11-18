@@ -121,7 +121,7 @@ export const useBatchMaskReviewStore = defineStore('batchMaskReview', () => {
       focus(regionId.value);
       const analysis = current.checkpoint.detection?.analysis;
       if (analysis?.differenceMap) {
-        const [raw, valid] = await Promise.all([decodePng(analysis.differenceMap), analysis.validityMap ? decodePng(analysis.validityMap) : Promise.resolve(null)]);
+        const [raw, valid] = await Promise.all([decodePng(analysis.weightedDifferenceMap || analysis.differenceMap), analysis.validityMap ? decodePng(analysis.validityMap) : Promise.resolve(null)]);
         if (gen === generation) heat.value = markRaw(colorizeHeat(raw, valid));
       } else if (diff.result && !diff.stale && diff.result.imageA.id === pan.id && diff.result.imageB.id === id) {
         heat.value = diff.heatLayer;

@@ -11,6 +11,7 @@ import { startActivity, advanceActivity } from '../lib/chatActivity';
  * 并发回合由服务端 409 兜底；UI 发送中禁按钮。
  */
 import { captureViewerContext } from '../lib/viewerContext.js';
+import { agentRepairSettings } from '../lib/agentRepairSettings';
 import { defineStore } from 'pinia';
 import { ref, onScopeDispose } from 'vue';
 import { loadSrConfig } from '../lib/scene.js';
@@ -428,7 +429,7 @@ export const useChatStore = defineStore('chat', () => {
     agentStatus.value = 'thinking';
     // 发送即取走托盘：失败也不回填，避免重试时同一张图发两遍
     const pending = pendingImages.value;
-    const viewerContext = captureViewerContext(pending.length);
+    const viewerContext = {...captureViewerContext(pending.length),agent_repair_settings:{...agentRepairSettings.value}};
     pendingImages.value = [];
     activity.value = startActivity(pending.length > 0, /User source ROI|Source Pixel ROI/.test(text));
     const upload: ChatUploadImage[] = pending.map((p) => ({ data: p.dataUrl, name: p.name, spatial: p.spatial }));

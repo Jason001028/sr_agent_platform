@@ -1,0 +1,49 @@
+{
+  "builder": {
+    "name": "strip-mask-builder",
+    "version": "1.0.0"
+  },
+  "contract_version": "mask.v1",
+  "detection": {
+    "candidate_digest": "cbd86c963edd5816465fc03c34d6dadf3c77b9323a251833804c1b278c9547dc",
+    "contract_version": "detection.v1",
+    "detector_name": "shared-difference",
+    "detector_version": "1.0.0",
+    "provenance": "real"
+  },
+  "diagnostics": [
+    {
+      "budget_exhausted": false,
+      "code": "candidate_accounting",
+      "processed": 2,
+      "region_budget": 512,
+      "rejected": [],
+      "total": 2,
+      "unprocessed": 0
+    }
+  ],
+  "item_id": "item_8486098d2000bf04",
+  "mask": {
+    "coordinate_space": "source_pixel",
+    "dtype": "uint8",
+    "file": "mask.tif",
+    "foreground_pixels": 1213,
+    "height": 128,
+    "sha256": "0f0230af4e1635bd84585e26371a3c35510fdaa02cfabfe5f97f0f68626e3be1",
+    "spp": 1,
+    "width": 128
+  },
+  "overlay": {
+    "file": "overlay.png",
+    "height": 128,
+    "scale": 1,
+    "sha256": "cdcdd76d232255ccc8b92aa1483aa1af7b810b09c5e5c751e57aca10a0c92514",
+    "width": 128
+  },
+  "source": {
+    "height": 128,
+    "image_key": "scene-v1:d62131336893d8f40e4fc071256cd59dc05f44a055c839b0eb67dfdbf94461f6:aca8b40e8d0a8293b14fba6a12595d29cc1c4bec48ca6438a7af1cfad3afa8ca",
+    "revision": "275c7de45064-33024-1794963137456485500",
+    "width": 128
+  }
+}

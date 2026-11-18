@@ -9,6 +9,7 @@ remote commands.
 """
 
 from __future__ import annotations
+from typing import Optional
 
 import re
 import uuid
@@ -78,8 +79,8 @@ def sync_catalog(store: Store) -> None:
         store.upsert_plugin(**p)
 
 
-def ensure_machine(store: Store, machine_id: str, *, name: str | None = None,
-                   status: str = "online", metadata: dict | None = None,
+def ensure_machine(store: Store, machine_id: str, *, name: Optional[str] = None,
+                   status: str = "online", metadata: Optional[dict] = None,
                    default_state: str = "disabled") -> dict:
     machine_id = validate_machine_id(machine_id)
     machine = store.upsert_machine(machine_id, name=name, status=status,
@@ -93,7 +94,7 @@ def ensure_machine(store: Store, machine_id: str, *, name: str | None = None,
     return machine
 
 
-def machine_id_from_header(value: str | None) -> str:
+def machine_id_from_header(value: Optional[str]) -> str:
     return validate_machine_id(value or LOCAL_MACHINE_ID)
 
 
@@ -105,7 +106,7 @@ def enabled_plugin_ids(store: Store, machine_id: str) -> set[str]:
 
 
 def request_operation(store: Store, machine_id: str, plugin_id: str, *,
-                      action: str, version: str | None = None) -> dict:
+                      action: str, version: Optional[str] = None) -> dict:
     machine_id = validate_machine_id(machine_id)
     if action not in VALID_ACTIONS:
         raise ValueError(f"unsupported plugin action: {action}")

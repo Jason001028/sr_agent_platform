@@ -1,5 +1,6 @@
 """Tests for preview_jpg service (ENVI dims, TIFF probe, sparse sampling,
 stretch, Pillow fallback, cache idempotency)."""
+from typing import Optional
 
 import os
 import tempfile
@@ -346,7 +347,7 @@ class TestEnsurePreviewJpg(unittest.TestCase):
             r = ensure_preview_jpg(str(p), str(jpg), div=4)
             self.assertEqual((r["w"], r["h"]), (16, 1))
 
-    def _old_cache(self, p: Path, jpg: Path, comment: bytes | None) -> None:
+    def _old_cache(self, p: Path, jpg: Path, comment: Optional[bytes]) -> None:
         """造一张「旧规则产物」：mtime 明确比源新，可选带某个旧规则签名。"""
         kw = {"comment": comment} if comment else {}
         Image.fromarray(np.zeros((64, 32), dtype=np.uint8)).save(

@@ -32,6 +32,7 @@ package): the services import *it*, so a back-import would close a cycle.
 """
 
 from __future__ import annotations
+from typing import Optional
 
 import os
 import math
@@ -131,8 +132,8 @@ class Config:
     llm_vision_timeout: float = 180.0
     # None preserves the legacy contract for callers constructing Config directly.
     # load_config enables bounded progress-aware ordinary chat by default.
-    llm_response_timeout: float | None = None
-    llm_first_output_timeout: float | None = None
+    llm_response_timeout: Optional[float] = None
+    llm_first_output_timeout: Optional[float] = None
 
     def __post_init__(self):
         limits = [self.llm_timeout, self.llm_vision_timeout]
@@ -207,9 +208,9 @@ class SrRuntime:
     # 注：**没有** scenes_root。场景根的唯一读取处是 backend/api/paths.py::
     # scenes_root()（每次读环境、且要求目录存在）—— 在这里再镜像一份就等于
     # 制造第二处真源，SR/Slurm 层也没人消费它（2026-09-17 删除）。
-    sandbox_root: str | None  # None → SR runs in place, writing to lq_path
+    sandbox_root: Optional[str]  # None → SR runs in place, writing to lq_path
     executor: str             # "slurm" | "local" — who launches the job
-    locked_dir: str | None    # None → /api/queue accepts any absolute lq_path
+    locked_dir: Optional[str]    # None → /api/queue accepts any absolute lq_path
     local_gpu: str            # CUDA_VISIBLE_DEVICES for the local child
 
     @property

@@ -33,6 +33,7 @@ and no detection rewrite.
 """
 
 from __future__ import annotations
+from typing import Optional
 
 import json
 import os
@@ -63,7 +64,7 @@ class RepairError(ValueError):
 
     code = "repair_error"
 
-    def __init__(self, message: str, *, code: str | None = None):
+    def __init__(self, message: str, *, code: Optional[str] = None):
         super().__init__(message)
         if code:
             self.code = code
@@ -129,7 +130,7 @@ def _scene_input_for_id(scene_id: str) -> Path:
     return inp
 
 
-def _workspace_identity(workspace) -> tuple[list[str], str | None]:
+def _workspace_identity(workspace) -> tuple[list[str], Optional[str]]:
     """Stable identity of the whole workspace (resolvable or not).
 
     ``scene_ids`` are opaque IDs, so display renames and unresolvable cards do
@@ -249,7 +250,7 @@ def _sources_from_argument(sources) -> list[dict]:
 
 
 def _item_identities(manifest: dict,
-                     planned: list[dict] | None = None) -> list[dict]:
+                     planned: Optional[list[dict]] = None) -> list[dict]:
     """Small source identities; never a full-file SHA256."""
     result = []
     for item in (planned if planned is not None else manifest.get("items") or []):
@@ -295,8 +296,8 @@ def _backup_names(scene_ref, target_path=None):
         if backup.exists())
 
 
-def _targets(manifest: dict, unresolved: list[dict] | None = None,
-             planned: list[dict] | None = None) -> dict:
+def _targets(manifest: dict, unresolved: Optional[list[dict]] = None,
+             planned: Optional[list[dict]] = None) -> dict:
     items = planned if planned is not None else (manifest.get("items") or [])
     rows = [{
         "item_id": item.get("item_id"),
@@ -317,7 +318,7 @@ def _targets(manifest: dict, unresolved: list[dict] | None = None,
 
 
 def _mask_plan(mask_policy: str, mask_path, manifest: dict,
-               planned: list[dict] | None = None) -> dict | None:
+               planned: Optional[list[dict]] = None) -> Optional[dict]:
     if mask_policy != "existing":
         return None
     items = planned if planned is not None else (manifest.get("items") or [])
@@ -451,25 +452,29 @@ def _resource_assessment(store, resources, *, session_id, scope, mode,
 def prepare_repair(
     store,
     *,
-    session_id: str | None = None,
+    session_id: Optional[str] = None,
     workspace=None,
     current=None,
     selected_images=None,
     scope: str = "workspace",
     sources=None,
-    manifest_ref: str | None = None,
+    manifest_ref: Optional[str] = None,
     exclusions=None,
     mode: str = "demo",
     strategy: str = "automatic",
     detection_method: str = "ssim",
     smart_options=None,
     mask_policy: str = "auto",
-    mask_path: str | None = None,
-    title: str | None = None,
+    mask_path: Optional[str] = None,
+    title: Optional[str] = None,
     created_by: str = "agent",
+    tone_weight: bool = False,
+    skip_completed: bool = False,
 ) -> dict:
     """Validate targets and persist a confirmable repair plan.  No SR side effect."""
     mode = str(mode or "demo").strip().lower()
+    if type(tone_weight) is not bool or type(skip_completed) is not bool:
+        raise RepairError('tone_weight / skip_completed 须为布尔值')
     if mode not in ("demo", "production"):
         raise RepairError("mode 只支持 demo、production")
     strategy = str(strategy or "automatic").strip().lower()
@@ -531,6 +536,8 @@ def prepare_repair(
             raise RepairError("mode does not match the frozen manifest")
         mode = frozen_mode
         frozen_config = manifest.get("config") or {}
+        tone_weight=bool((frozen_config.get('detection') or {}).get('tone_weight',False))
+        skip_completed=bool(frozen_config.get('skip_completed',False))
         frozen_strategy = str(frozen_config.get("strategy") or strategy)
         if frozen_strategy not in ("automatic", "review"):
             frozen_strategy = "automatic"
@@ -569,7 +576,7 @@ def prepare_repair(
             imported = batch_manifest.import_manifest(
                 text="", mode=mode, sources=sources, strategy=strategy,
                 detection_method=import_detection,
-                smart_options=smart_options)
+                smart_options=smart_options,tone_weight=tone_weight,skip_completed=skip_completed)
         except batch_manifest.ManifestError as exc:
             raise RepairError(str(exc)) from exc
         try:
@@ -639,6 +646,10 @@ def prepare_repair(
     plan_id = _plan_hash(binding)
     now = _now()
     execution = probe_execution(mode)
+    skipped_completed=[row for row in diagnostics if row.get('code')=='completed_scene_skipped']
+    if skipped_completed and not manifest.get('items') and not any(r.get('severity')=='error' for r in diagnostics):
+        status='SKIPPED';blocking=[]
+        execution={**execution,'allowed':False,'reason':'全部目标景已有 PAN 备份，已跳过'}
     plan = {
         "kind": "repair_plan.v1",
         "contract_version": PLAN_CONTRACT_VERSION,
@@ -679,6 +690,7 @@ def prepare_repair(
         "mask": mask,
         "diagnostics": diagnostics[:200],
         "blocking": blocking[:50],
+        "tone_weight":tone_weight,"skip_completed":skip_completed,"skipped_completed":skipped_completed,
         "identities": _item_identities(manifest, planned),
         "created_at": now,
         "expires_at": now + _env_float("SR_REPAIR_PLAN_TTL_SEC", PLAN_TTL_SEC),
@@ -709,11 +721,11 @@ def public_plan(plan: dict) -> dict:
     return result
 
 
-def get_repair_plan(store, plan_id: str) -> dict | None:
+def get_repair_plan(store, plan_id: str) -> Optional[dict]:
     return store.get_repair_plan(plan_id)
 
 
-def confirm_repair(store, plan_id: str, *, session_id: str | None) -> dict:
+def confirm_repair(store, plan_id: str, *, session_id: Optional[str]) -> dict:
     """Record a real user's confirmation.  The Agent cannot call this.
 
     The confirmation actor is derived server-side from the session; there is no
@@ -1095,9 +1107,9 @@ def _goal_matches_plan(goal: dict, plan: dict) -> bool:
     )
 
 
-def start_repair(store, plan_id: str, *, session_id: str | None,
+def start_repair(store, plan_id: str, *, session_id: Optional[str],
                  workspace=None, workspace_version=None,
-                 plan_version: int | None = None) -> dict:
+                 plan_version: Optional[int] = None) -> dict:
     """Start a plan that a real user has already confirmed server-side."""
     plan = store.get_repair_plan(plan_id)
     if not plan:
@@ -1185,7 +1197,7 @@ def start_repair(store, plan_id: str, *, session_id: str | None,
 # read projections (Goal/Item/SR/quality remain the only source of truth)
 # ---------------------------------------------------------------------------
 
-def verified_output_path(item: dict) -> str | None:
+def verified_output_path(item: dict) -> Optional[str]:
     """The SR output this Item actually verified, or ``None``.
 
     Only a passed ``artifacts`` layer names an output file.  Demo / Fake SR
@@ -1324,7 +1336,7 @@ def get_repair_status(store, plan_id: str) -> dict:
     return result
 
 
-def _acceptance(plan: dict, goal: dict | None, reviews: dict | None) -> dict:
+def _acceptance(plan: dict, goal: Optional[dict], reviews: Optional[dict]) -> dict:
     """Separate computation, file-contract verification and human acceptance.
 
     ``computed`` only turns true after the Goal is terminal **and** its

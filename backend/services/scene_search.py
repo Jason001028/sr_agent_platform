@@ -39,6 +39,7 @@ stage's own raster must sit next to it — `<目录名>.jpg` / `<目录名>_<suf
 """
 
 from __future__ import annotations
+from typing import Optional
 
 import re
 from datetime import datetime
@@ -111,7 +112,7 @@ def input_candidates(dir_path) -> list[Path]:
             for ext in _RASTER_EXT_ORDER]
 
 
-def input_scene_path(dir_path) -> Path | None:
+def input_scene_path(dir_path) -> Optional[Path]:
     """该场景目录里的输入影像（= 提交 SR 时的 `lq_path` 指向的那份文件）。
 
     与 `is_scene_file` 同一套判据，但**只试 6 个固定文件名、绝不列举目录**
@@ -133,7 +134,7 @@ def input_scene_path(dir_path) -> Path | None:
     return None
 
 
-def previous_step(dir_path) -> str | None:
+def previous_step(dir_path) -> Optional[str]:
     """RC / SC，按 `<目录名>_meta.xml` 的 `<SolarAzimuth>` 判定。
 
     判据与 SR 脚本同源（util.check_sr_previous_step）：没有文本 → RC，
@@ -152,7 +153,7 @@ def previous_step(dir_path) -> str | None:
     return "RC" if (match.group(1) or "") == "" else "SC"
 
 
-def body_path(dir_path) -> Path | None:
+def body_path(dir_path) -> Optional[Path]:
     """场景当前**本体影像**的路径 —— 修复会发布回的那一份。
 
     RC 步骤的本体是 `PAN.tif`，SC 是 `<目录名>.tif`（util.get_l1_pan_tif_rcsc
@@ -216,7 +217,7 @@ def derived_mask_path(lq_path) -> str:
 _PRODUCT_EXT_ORDER = (".tif", ".tiff")
 
 
-def sibling_raster_path(image_path) -> Path | None:
+def sibling_raster_path(image_path) -> Optional[Path]:
     """与 `image_path` **同目录同名**的栅格文件（只换后缀），没有则 None。
 
     用来认「盘阵里的显示件 jpg 配着一张同名栅格」：SC 场景里 `<目录名>.jpg` 配
@@ -374,7 +375,7 @@ def de_suffixed_stems(name: str, max_segments: int = 2) -> list[str]:
     return out
 
 
-def jpg_stage_name(stem: str, base: str) -> tuple[str, str] | None:
+def jpg_stage_name(stem: str, base: str) -> Optional[tuple[str, str]]:
     """纯词法：`<基准名>_<suffix>` / `<基准名>_<suffix>_NOSR` / `<基准名>_NOSR` → (环节, suffix)。
 
     **不 stat、不查任务库、不查配置**。返回 `('product', suffix)` /
@@ -468,7 +469,7 @@ def nosr_candidates(dir_path, input_path, product_path=None) -> list[Path]:
     return out
 
 
-def stage_of_jpg(dir_path, input_path, stem: str) -> tuple[str, str, Path] | None:
+def stage_of_jpg(dir_path, input_path, stem: str) -> Optional[tuple[str, str, Path]]:
     """拖进来的这份 jpg 是该场景的哪个环节 →
     `(('input'|'product'|'nosr'), suffix, **这一环节自己的栅格**)`；不是 → None。
 

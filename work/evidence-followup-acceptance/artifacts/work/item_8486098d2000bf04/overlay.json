@@ -1,0 +1,96 @@
+{
+  "candidates": [
+    {
+      "bbox": [
+        79,
+        69,
+        105,
+        95
+      ],
+      "candidate_id": "1103dd318ec60112",
+      "kind": "polygon",
+      "label": "difference",
+      "points": [
+        [
+          79,
+          69
+        ],
+        [
+          105,
+          69
+        ],
+        [
+          105,
+          95
+        ],
+        [
+          79,
+          95
+        ]
+      ],
+      "score": null
+    },
+    {
+      "bbox": [
+        19,
+        19,
+        40,
+        40
+      ],
+      "candidate_id": "e1ec49cfbe301882",
+      "kind": "polygon",
+      "label": "difference",
+      "points": [
+        [
+          19,
+          19
+        ],
+        [
+          40,
+          19
+        ],
+        [
+          40,
+          40
+        ],
+        [
+          19,
+          40
+        ]
+      ],
+      "score": null
+    }
+  ],
+  "contract_version": "overlay.v1",
+  "coordinate_space": "source_pixel",
+  "detector_name": "shared-difference",
+  "detector_version": "1.0.0",
+  "diagnostics": [
+    {
+      "budget_exhausted": false,
+      "code": "candidate_accounting",
+      "processed": 2,
+      "region_budget": 512,
+      "rejected": [],
+      "total": 2,
+      "unprocessed": 0
+    }
+  ],
+  "image_size": {
+    "height": 128,
+    "width": 128
+  },
+  "item_id": "item_8486098d2000bf04",
+  "mask": {
+    "file": "mask.tif",
+    "sha256": "0f0230af4e1635bd84585e26371a3c35510fdaa02cfabfe5f97f0f68626e3be1"
+  },
+  "overlay": {
+    "file": "overlay.png",
+    "height": 128,
+    "sha256": "cdcdd76d232255ccc8b92aa1483aa1af7b810b09c5e5c751e57aca10a0c92514",
+    "width": 128
+  },
+  "provenance": "real",
+  "scale": 1
+}

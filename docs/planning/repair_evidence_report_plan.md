@@ -1,10 +1,39 @@
 # Agent 修复图像证据报告实施规划
 
-> 日期：2026-11-17 · 状态：工程预览实施中；完整验收未完成
+> 日期：2026-11-18 · 状态：工程预览实施中；工程进度估计约 70%，完整验收未完成
 >
 > 目标：修复批次计算结束后，生成可持久化、可逐区复核的结构化报告。每行左侧为同位置 NOSR / 修复产物局部双图，右侧为多模态分析、建议和 Viewer 定位入口；每页最多 30 行。生成证据和模型分析不得成为检测、掩码落盘、SR 提交或人工质量验收的前置条件。
 >
 > 当前能力、实际检查和未覆盖范围见 [当前能力与验收](../status/repair-evidence-report.md)。下文仍为完整实现契约，不能据此假定每项已完成。实现者先完成 §12 的逐步工作包，再按 §13 验收。真实盘阵吞吐、真实模型视觉准确性均为待核。
+
+## 0. 当前工程基线与剩余实施顺序
+
+约 70% 为用户提供的工程进度估计，不是测试通过率或生产可用率。P0–P8 的主要代码接缝已存在，应在现有服务、Store、页面与夹具上补齐；不得按下文“建议新增”重新建立同名实现。两个生产开关默认关闭。
+
+| 工作包 | 当前代码与可验证能力 | 完整验收仍需覆盖 |
+|---|---|---|
+| P0 契约 | 独立报告生命周期、两个修复入口、状态矩阵 | 内网格式、模型图片能力与性能基线 |
+| P1 几何 | 稳定区域 ID、inclusive 转半开窗口、同 CRS 仿射与非整数映射测试 | 孔洞、最终审批子集与配准边界组合专项；不支持 CRS 重投影 |
+| P2 读取 | 局部列跨度、有界读、NoData、共享拉伸、PNG、读取字节量测试 | 冷缓存/盘阵多格式验证、极端条带性能 |
+| P3 持久化/API | 幂等报告、租约、原子发布、配额、30 行分页、历史接口 | 多进程重启/争用压力、磁盘满与发布中断组合 |
+| P4 调度 | 交互/Batch/证据三级队列；本地执行器 activity_snapshot 含 generation；已批准待提交 Mask 阻止后台任务；共享 SQLite 模型租约与聊天等待优先权 | generation 贯穿派发、跨实例长时压力与部署验证、A/B/C/D 抢占基准 |
+| P5 模型 | 真图片水合、严格引用、一次格式修正、总时限、原子资源准入、失败分类、缓存状态恢复与尝试历史 | 更完整端点故障组合、共享 GPU 实机准入、真实视觉评估 |
+| P6 报告页 | 独立 `repairEvidence` Store；筛选/游标/分组；按需分析记录；失败重试保留上次成功意见 | 0/31/65 行浏览器场景、图片失败和长文案布局、历史记录浏览器故障态 |
+| P7 Viewer | Goal/review 显式定位载荷、跨批次加载、只读 output/before 对照、草稿保护 | 快速连续定位、用户中途换图、加载晚到、布局变动的组合浏览器验收 |
+| P8 性能/交付 | 合成生产审核与报告夹具、报告浏览器脚本、单窗口热缓存 JSON 基准 | A/B/C/D 各至少五次冷/热对照、真实盘阵吞吐与模型必要性评估 |
+| P9 最终验收 | 使用 §15 清单汇总工程与实机结论 | 不以代码存在或单元测试覆盖代替端到端及生产验收 |
+
+### 剩余工作队列
+
+按以下顺序推进，每项以可复跑证据收口，不为凑百分比扩大首版范围：
+
+1. **调度与恢复**：在数据库模型资源租约基础上补跨实例长时任务移交/关闭压力和实机检查，验证忙碌期间不派发证据读取或模型请求。缓存命中同样须经过行版本和租约校验；格式重试与首次请求共享 60 秒 deadline，忙碌让回队列而不记成模型失败。同来源报告恢复的原 ID、剩余任务、旧令牌失效必须保持专项覆盖。
+2. **来源与几何**：将最终批准子集、手绘保存几何、孔洞/不支持几何、仿射/像素中心边界串成报告专项；核对 before/output 网格与来源版本，不能仅验证尺寸。
+3. **报告与 Viewer 浏览器闭环**：补 31/65 行分页、筛选游标变化、分析历史成功/失败/缓存、A 报告→B 当前批次、连续点击两个 ROI、用户中途切图、只读修复前对照。已有独立 Store 和桥接组件只补缺口。
+4. **性能及实机**：扩展现有基准为 §13 的 A/B/C/D，保留原始样本、冷/热标签和统计。无法控制 OS 冷缓存时写清不可验证，不能把换文件名当真正冷缓存。
+5. **P9 交接**：更新实际命令、配置边界、报告错误码与回退；分别列“工程实测”“生产待核”，不把实验模型意见升级为质量结论。
+
+当前检查结果统一维护在状态文档，§15 是最终交付门槛，未全量验收前不批量勾选。
 
 ## 1. 阅读顺序与范围
 
@@ -88,11 +117,12 @@
 | `backend/services/goal_runtime.py` | `/api/goals` 路由、质量文档和批次报告 | 保留现有确定性报告；新证据报告独立路由 |
 | `backend/agent/loop.py::_default_chat` | 图像水合后调用模型 transport | 提取可复用只读模型调用接缝，避免从服务层依赖整个私有 Loop |
 | `backend/agent/async_transport.py` | 模型请求、超时、取消、端点兼容 | 复用预算与端点配置；证据分析禁用工具调用 |
+| `backend/services/model_resources.py` | 共享 SQLite 的模型资源租约、聊天等待优先权与 token 释放 | 所有实际模型派发参与；不同数据库/端点的共享 GPU 仍需部署确认 |
 | `backend/services/chat_images.py` | 聊天截图存相对 URL，调用时转 data URL | 参考边界；当前聊天 URL 解析与图片数量约束不能直接用于证据三图 |
 | `frontend/src/stores/diff.ts::autoDraw` | 自动绘制、逐区通过、最终加入可编辑掩码 | 从最终提交的几何获取区域，不从动画帧截图 |
 | `frontend/src/stores/batchMaskReview.ts` | 候选逐区审批 | 最终通过集合为报告几何来源 |
 | `frontend/src/stores/batchQuality.ts` | 加载产物 / NOSR、同步对比、区域定位、审核 | 复用 Viewer 定位；扩展历史只读和修复前图比较 |
-| `frontend/src/lib/batchDock.ts` | `requestQualityReview(itemId, regionId)` | 现有请求缺显式 goalId；需补跨批次安全定位 |
+| `frontend/src/lib/batchDock.ts` | `requestQualityReview(itemId, regionId, goalId, reviewId)` | 复用显式 Goal/review 绑定；补组合并发定位验收 |
 | `frontend/src/components/BatchProgressPanel.vue` | 消费质量复核请求 | 核对 Goal → Item → Region 的加载顺序 |
 | `frontend/src/components/AgentRepairPlanCard.vue` | 修复计划、运行、成果、复核入口 | 增加轻量报告入口，不塞长表 |
 | `backend/tests/quality_browser_fixture.py` | 合成修复、实际应用、审核夹具；禁止 SR 提交 | 扩展证据报告浏览器夹具 |
@@ -137,6 +167,7 @@ computing | waiting_input | ready | partial | indeterminate
 - 协调器每轮仅取有限数量候选，使用 DB 索引和分页；不递归盘阵、不每轮扫描全部历史 Goal。
 - 通过持久化扫描水位和最近状态变更查增量；首次开启仅处理启用后批次，历史报告由显式请求生成。
 - 批次等待人工处理后又继续计算时，报告标记 `partial` 或 `superseded`，增量部分产生新报告版本；旧版本保留。
+- 相同来源指纹重新满足条件时，恢复原报告 ID/revision 及已完成证据/分析；撤销暂停前运行令牌，未完成任务重新入队。来源变化仍建立新版本，`by-goal` 优先返回当前有效报告。不得直接返回仍处于 superseded 的报告 ID 而不恢复其调度资格。
 - 不使用聊天 SSE 驱动证据任务生命周期；关页面不停止后台持久任务。
 
 ## 5. 数据契约与持久化
@@ -333,6 +364,7 @@ length = (x1 - x0) * bytes_per_sample
 - 模型并发默认 1，与栅格读取分阶段；调用模型时不占栅格线程槽。
 - 默认等待全局 SR 空闲，以覆盖本机模型共用 GPU 的场景。若部署明确为独立硬件，后续才能配置放宽。
 - 用户主动聊天优先，后台分析不能挤满模型并发额度；新增模型准入器时覆盖普通聊天和证据任务的两条路径。
+- 共享同一 SQLite 的实例通过数据库模型资源租约互斥；同一规范化 base URL 为单槽，聊天等待记录跨实例可见。进程内 `admission()` 只是预检查，真正派发必须在取得资源租约后进行。取消完成传输清理后释放；队列等待计入原始请求 deadline，崩溃租约在请求截止时间加清理余量后过期。不同数据库不共享此互斥，实机共享 GPU 与不同端点部署仍需分别验证。
 - 后台请求必须有总时限、取消令牌和大小预算。取消发出不等于端点停止 GPU 计算，日志区分取消请求与确认结束；首版不得声称远端可即时抢占。
 - 首版自动分析不开放无界 Agent 工具循环。每 ROI 一组固定证据、最多两组补充细节，固定调用次数和 token / 时间上限。
 - 初始每组为同位置的三角色图（缺 before 时两图），一次请求只分析一组；最多 1 组上下文 + 2 组细节。每行所有网络调用合计最多 6 次，包含瞬态重试和格式修正；总墙钟预算初始 10 分钟，后续按真实模型调整。耗尽预算保留已有分析并标 partial，不继续追加调用。
@@ -463,7 +495,7 @@ output_revision、nosr_revision、before_revision、source_bbox、comparison_rol
 4. 加载两角色图像，等待对比画面、布局稳定后定位 region。
 5. 加载过程中检查用户意图代号；用户切换影像时停止旧定位。
 
-现有 `requestQualityReview(itemId, regionId)` 缺 goal_id，不能直接从任意历史报告调用。扩展为兼容旧调用的载荷或增加独立请求函数；在 `BatchProgressPanel.vue` 消费端实现上述顺序。
+报告入口使用 `requestQualityReview(itemId, regionId, goalId, reviewId)` 的显式绑定，旧调用参数仍兼容；不能在历史报告入口省略 Goal/review 身份。`BatchProgressPanel.vue` 与质量面板沿此请求完成顺序加载，组合竞态仍按本节检查。
 
 ### 11.3 历史与版本失效
 
@@ -607,6 +639,10 @@ output_revision、nosr_revision、before_revision、source_bbox、comparison_rol
 
 完成标准：工程测试和性能预算通过；真实环境未验证时仅标“工程完成、生产视觉 / 性能待核”。不得写“生产质量验收通过”。
 
+### P9：最终验收与交接
+
+使用 §15 清单逐项关联实际命令、结果文件与未覆盖环境。P0–P8 的功能代码存在不能直接视为 P9 通过。工程完成须有受影响回归、合成端到端和性能对照；真实盘阵与真实模型结论由内网实测给出。未获得实机结论时保持生产开关关闭，交付明确标注实验能力与未核范围。
+
 ## 13. 测试矩阵与性能验收
 
 ### 13.1 必须覆盖的故障
@@ -680,11 +716,13 @@ output_revision、nosr_revision、before_revision、source_bbox、comparison_rol
 
 ### 14.2 验证命令
 
-以下新测试文件须在对应工作包创建，不能对不存在文件运行后声称通过。先核对解释器：本工作区有 `.venv/Scripts/python.exe`，系统 `python` 可能指向 WindowsApps 启动别名；下列 `python` 指项目已激活且可运行的解释器，未激活时用 `.\.venv\Scripts\python.exe` 替换。仓库根目录执行后端命令：
+先用 `Get-Command python`、`python --version` 核对实际解释器及依赖。不要假定工作区一定有 `.venv/Scripts/python.exe`；只有文件确实存在时才使用该路径。以下测试文件已存在，命令在仓库根目录执行：
 
 ```powershell
 python -m pytest backend/tests/test_evidence_geometry.py backend/tests/test_evidence_raster.py
 python -m pytest backend/tests/test_evidence_report.py backend/tests/test_evidence_worker.py backend/tests/test_evidence_analysis.py
+python -m pytest backend/tests/test_evidence_extended.py backend/tests/test_evidence_recovery.py
+python -m pytest backend/tests/test_model_resources.py backend/tests/test_async_transport.py backend/tests/test_session_titles.py
 python -m pytest backend/tests/test_batch_heavy_queue.py backend/tests/test_multi_user_work.py backend/tests/test_batch_quality.py backend/tests/test_repair_application.py backend/tests/test_chat_images.py
 ```
 
@@ -697,7 +735,9 @@ npm test -- --maxWorkers=2 --minWorkers=1
 npm run build
 ```
 
-构建后在根目录运行新增 `.e2e/test-repair-evidence.js`。夹具沿用 `python -m backend.tests.quality_browser_fixture --root <临时目录> --port 8797` 的合成生产审核模式，证据扩展参数由 P8 定义；不能用 `--mask-review` 的待提交状态冒充修复产物分析。
+构建后在根目录运行 `.e2e/test-repair-evidence.js`。夹具使用 `python -m backend.tests.quality_browser_fixture --root <临时目录> --port 8797 --evidence`；通过 `--evidence-scenes` 设置合成景数（1–40）。报告 ID 取夹具目录的 `fixtures.json`，写入 `SR_EVIDENCE_REPORT_ID`；非默认端口另设 `SR_EVIDENCE_E2E_URL`。不能用 `--mask-review` 的待提交状态冒充修复产物分析。
+
+Windows 使用盘符根下的唯一短测试目录（例如 `D:\er-<随机短串>`）；默认 TEMP 与工作区深层路径均可能在第二批次的私有修复目录触发长路径限制。可直接使用状态文档“复跑”中的命令。
 
 基准命令建议定义为：
 

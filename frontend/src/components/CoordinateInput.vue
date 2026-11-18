@@ -22,9 +22,9 @@ const validExternal = computed(() => props.sceneKey !== null && props.coordinate
 const badge = computed(() => ({ external: '已导入', none: '未提供', manual: '手动' })[origin.value]);
 const heading = computed(() => ({ external: '外部坐标已载入', none: '当前未导入坐标', manual: '手动输入' })[origin.value]);
 const explanation = computed(() => origin.value === 'external'
-  ? `来源：${props.sourceName || '待修复清单'}的已解析行列号。按原顺序用于像素定位，不代表经纬度；地理坐标系未确认。`
-  : origin.value === 'manual' ? '来源：手动输入，按像素坐标 X, Y 定位；不代表外部导入或经纬度。'
-    : '当前场景未提供可确认的外部坐标。可手动输入像素坐标 X, Y；地理坐标系未确认。');
+  ? `来源：${props.sourceName || '待修复清单'}的已解析行列号。按原顺序用于像素定位。`
+  : origin.value === 'manual' ? '来源：手动输入，按像素坐标 X, Y 定位。'
+    : '当前场景未提供可确认的外部坐标。可手动输入像素坐标 X, Y。');
 watch([() => props.sceneKey, () => props.coordinates, () => props.sourceName], () => {
   const pair = validExternal.value;
   text.value = pair ? `${pair[0]},${pair[1]}` : '';

@@ -13,7 +13,7 @@ decoded TIFFs.
 from __future__ import annotations
 
 import time
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
 CONTRACT_VERSION = "batch_snapshot.v1"
 
@@ -205,7 +205,7 @@ def _item_summary(item: dict) -> dict:
     }
 
 
-def current_item(items: Iterable[dict]) -> dict | None:
+def current_item(items: Iterable[dict]) -> Optional[dict]:
     eligible = [
         item for item in items
         if item.get("status") in CURRENT_PRIORITY
@@ -222,7 +222,7 @@ def current_item(items: Iterable[dict]) -> dict | None:
     return _item_summary(item)
 
 
-def _job_summary(item: dict, task: dict | None) -> dict:
+def _job_summary(item: dict, task: Optional[dict]) -> dict:
     cp = _cp(item)
     task = task or {}
     target = cp.get("target_image") if isinstance(cp.get("target_image"), dict) else {}
@@ -255,7 +255,7 @@ def _job_summary(item: dict, task: dict | None) -> dict:
     }
 
 
-def active_jobs(items: Iterable[dict], tasks: dict[str, dict] | None = None) -> list[dict]:
+def active_jobs(items: Iterable[dict], tasks: Optional[dict[str, dict]] = None) -> list[dict]:
     tasks = tasks or {}
     result: list[dict] = []
     for item in items:
@@ -272,7 +272,7 @@ def active_jobs(items: Iterable[dict], tasks: dict[str, dict] | None = None) -> 
     return result
 
 
-def recent_jobs(items: Iterable[dict], tasks: dict[str, dict] | None = None,
+def recent_jobs(items: Iterable[dict], tasks: Optional[dict[str, dict]] = None,
                 limit: int = 30) -> list[dict]:
     """Active Jobs first, then attention rows, then recently settled Jobs.
 
@@ -317,12 +317,12 @@ def control_revision(goal: dict) -> int:
 def build_snapshot(
     goal: dict,
     items: Iterable[dict],
-    tasks: dict[str, dict] | None = None,
+    tasks: Optional[dict[str, dict]] = None,
     *,
     last_seq: int = 0,
-    server_time: float | None = None,
+    server_time: Optional[float] = None,
     report_available: bool = False,
-    report_updated_at: float | None = None,
+    report_updated_at: Optional[float] = None,
 ) -> dict:
     items = list(items)
     counts = count_items(items)

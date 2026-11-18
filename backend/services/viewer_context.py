@@ -120,6 +120,9 @@ def validate_snapshot(value, attachment_count=0):
         raise ValueError('viewer_context 过大')
     result = {k: deepcopy(value[k]) for k in
               ('version', 'captured_at', 'current', 'selected_ids', 'displayed') if k in value}
+    if 'agent_repair_settings' in value:
+        from backend.services.agent_repair_settings import normalize
+        result['agent_repair_settings']=normalize(value['agent_repair_settings'])
     def observation(v, depth=0):
         if depth > 7:
             raise ValueError('viewer observation 嵌套过深')
@@ -174,13 +177,15 @@ def validate_snapshot(value, attachment_count=0):
     return result
 
 
-def bind_registry(registry, snapshot, *, store=None, session_id=None):
+def bind_registry(registry, snapshot, *, store=None, session_id=None, raster_runner=None):
     """冻结本条消息的观察数据，并把工作区/隐藏集合绑进检索工具。
 
     `store` 用来读服务端持久化的隐藏集合（场景库「清除/隐藏」）。不传时工具会退到
     默认库文件读（见 tools.search_scenes），测试或纯内存调用可以显式传。
     """
     frozen = deepcopy(snapshot)
+    from backend.services.agent_repair_settings import normalize
+    preferences=normalize((frozen or {}).get('agent_repair_settings')) or {}
     workspace = (frozen or {}).get('workspace')
     hidden_provider = None
     if store is not None:
@@ -195,6 +200,7 @@ def bind_registry(registry, snapshot, *, store=None, session_id=None):
             return err('本条消息没有绑定当前影像；请先选择影像。不要以场景库搜索代替。')
         data = {'image': deepcopy(frozen.get('current')), 'captured_at': frozen.get('captured_at'),
                 'source': 'message_viewer_snapshot', 'attachment_count': frozen.get('attachment_count', 0)}
+        if preferences:data['agent_repair_settings']=deepcopy(preferences)
         for key in ('selected_ids', 'selected_images', 'selected_total', 'selected_truncated', 'displayed', 'roi', 'masks', 'differences'):
             if key in frozen:
                 data[key] = deepcopy(frozen[key])
@@ -210,6 +216,8 @@ def bind_registry(registry, snapshot, *, store=None, session_id=None):
             # Legacy registrations are placeholders; the paged, session-scoped
             # implementation below is the sole owner of these three names.
             continue
+        if preferences.get('inspection_only') and item.name in {'prepare_repair','start_repair','run_sr','fix_bad_lines','prepare_batch_repair','create_batch_repair','start_batch_repair'}:
+            continue
         if item.name in repair_tools.BOUND_NAMES:
             # Only bind the built-in implementation; a plugin/test tool with
             # the same name does not understand the workspace context.
@@ -220,7 +228,7 @@ def bind_registry(registry, snapshot, *, store=None, session_id=None):
                     selected_images=(frozen or {}).get('selected_images'),
                     batch_draft=(frozen or {}).get('batch_draft'),
                     selected_truncated=bool((frozen or {}).get('selected_truncated')),
-                    session_id=session_id, store=store))
+                    session_id=session_id, store=store, preferences=preferences))
             else:
                 result.register(item)
             continue
@@ -276,6 +284,8 @@ def bind_registry(registry, snapshot, *, store=None, session_id=None):
     for tool in bound_tools(frozen, store, session_id):
         if result.get(tool.name) is None:
             result.register(tool)
+    if preferences.get('inspection_only'):
+        result.register(repair_tools.inspection_tool(frozen,store,session_id,raster_runner=raster_runner))
     return result
 
 

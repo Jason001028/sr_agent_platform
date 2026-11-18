@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Optional
 
 from jsonschema.validators import validator_for
 
@@ -17,10 +17,10 @@ class Tool:
     run: Callable[..., dict]
     version: str = "1"
     visibility: str = "public"
-    timeout_sec: float | None = None
+    timeout_sec: Optional[float] = None
     permissions: tuple[str, ...] = ()
-    result_max_bytes: int | None = None
-    result_formatter: Callable | None = None
+    result_max_bytes: Optional[int] = None
+    result_formatter: Optional[Callable] = None
     result_protected_fields: tuple[str, ...] = ()
 
     def openai_function(self) -> dict:
@@ -65,7 +65,7 @@ class ToolRegistry:
         self._tools[item.name] = item
         return item
 
-    def get(self, name: str) -> Tool | None:
+    def get(self, name: str) -> Optional[Tool]:
         return self._tools.get(name)
 
     def list(self) -> list[Tool]:
@@ -74,7 +74,7 @@ class ToolRegistry:
     def manifest(self) -> list[dict]:
         return [item.openai_function() for item in self._tools.values()]
 
-    def validate(self, name: str, arguments=None) -> dict | None:
+    def validate(self, name: str, arguments=None) -> Optional[dict]:
         """Return a safe diagnostic without executing or coercing arguments."""
         item = self.get(name)
         if item is None:

@@ -29,6 +29,7 @@
 """
 
 from __future__ import annotations
+from typing import Optional
 
 import asyncio
 import contextlib
@@ -141,7 +142,7 @@ def _queue_state(st: dict) -> str:
     return "COMPLETED" if raw == "COMPLETED" else "FAILED"
 
 
-def _task_state(state, task: dict) -> tuple[str, bool, dict | None]:
+def _task_state(state, task: dict) -> tuple[str, bool, Optional[dict]]:
     """Calibrate one sr_task row against the scheduler.
 
     Returns (state, changed, fresh_row) — `fresh_row` 是这次**写回后**从库里读回的
@@ -205,7 +206,7 @@ def _task_state(state, task: dict) -> tuple[str, bool, dict | None]:
     return state_name, True, fresh
 
 
-def _run_dataroot(task: dict) -> str | None:
+def _run_dataroot(task: dict) -> Optional[str]:
     """The directory the job actually works in — its private copy when the
     sandbox is on, otherwise lq_path itself.
 

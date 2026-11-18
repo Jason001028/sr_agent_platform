@@ -9,6 +9,7 @@ line because it could not understand it; instead the line becomes a diagnostic
 that must be explicitly excluded before a Goal may be created.
 """
 from __future__ import annotations
+from typing import Optional
 
 import hashlib
 import json
@@ -53,7 +54,7 @@ class ManifestError(ValueError):
 class ManifestConflict(ManifestError):
     """The manifest needs explicit exclusions before a Goal may be created."""
 
-    def __init__(self, message: str, diagnostics: list[dict] | None = None):
+    def __init__(self, message: str, diagnostics: Optional[list[dict]] = None):
         super().__init__(message)
         self.diagnostics = diagnostics or []
 
@@ -109,7 +110,7 @@ def _clean_name(raw: str) -> str:
     return _TRAILING_COMMA_RE.sub("", str(raw).strip()).strip()
 
 
-def _parse_status(raw: str) -> dict | None:
+def _parse_status(raw: str) -> Optional[dict]:
     if "\t" not in raw:
         return None
     fields = raw.split("\t")
@@ -122,7 +123,7 @@ def _parse_status(raw: str) -> dict | None:
     return {"name": name, "status": status}
 
 
-def _parse_issue(raw: str) -> dict | None:
+def _parse_issue(raw: str) -> Optional[dict]:
     if "\t" not in raw:
         return None
     fields = raw.split("\t")
@@ -214,7 +215,7 @@ def parse_qc_text(text: str) -> dict:
     return {"rows": rows, "items": items, "diagnostics": diagnostics}
 
 
-def _image(path: Path, role: str | None = None) -> dict:
+def _image(path: Path, role: Optional[str] = None) -> dict:
     info = preview_jpg.probe_tiff(path)
     identity = resource_identity(path)
     revision = preview_jpg.source_revision(path)
@@ -234,7 +235,7 @@ def _image(path: Path, role: str | None = None) -> dict:
     }
 
 
-def _resolve_item(row: dict, *, date: str | None, product: str | None) -> dict:
+def _resolve_item(row: dict, *, date: Optional[str], product: Optional[str]) -> dict:
     if row.get("explicit_path"):
         hinted = Path(row["explicit_path"])
         directory = ensure_allowed(hinted.parent, kind="dir")
@@ -412,11 +413,12 @@ def _publish(manifest_id: str, raw: bytes, manifest: dict) -> Path:
     return final
 
 
-def import_manifest(*, data: bytes | None = None, text: str | None = None,
-                    encoding: str = "auto", date: str | None = None,
-                    product: str | None = None, mode: str = "demo",
-                    sources: list[dict] | None = None, strategy: str = "automatic",
-                    detection_method: str = "absdiff", smart_options: dict | None = None) -> dict:
+def import_manifest(*, data: Optional[bytes] = None, text: Optional[str] = None,
+                    encoding: str = "auto", date: Optional[str] = None,
+                    product: Optional[str] = None, mode: str = "demo",
+                    sources: Optional[list[dict]] = None, strategy: str = "automatic",
+                    detection_method: str = "absdiff", smart_options: Optional[dict] = None,
+                    tone_weight: bool = False, skip_completed: bool = False) -> dict:
     """Freeze a QC TXT import; no Goal is created here."""
     if data is not None:
         raw = bytes(data)
@@ -478,6 +480,11 @@ def import_manifest(*, data: bytes | None = None, text: str | None = None,
                 row, date=date, product=product or row.get("imgType") or None)
         except (scene_resolve.SceneLookupError, PathDeniedError,
                 preview_jpg.PreviewError, OSError) as exc:
+            conflict=getattr(exc,'conflict',{})
+            if skip_completed and conflict.get('code')=='pan_backup_exists':
+                diagnostics.append({'line':row['source_lines'][0],'severity':'info',**conflict,
+                    'code':'completed_scene_skipped','name':row['name'],'message':'已有 PAN 备份，按设置跳过；未删除或覆盖原文件'})
+                continue
             diagnostics.append({
                 "line": row["source_lines"][0],
                 "severity": "error",
@@ -512,6 +519,7 @@ def import_manifest(*, data: bytes | None = None, text: str | None = None,
                 "max_edge":2048,"min_area_px":64,"margin":"standard","version":"shared-difference.v1"}
             if detection_method != "absdiff":
                 item["config"]["detection"]["method"] = detection_method
+            item['config']['detection']['tone_weight']=tone_weight
             if detection_method == "smart":
                 item["config"]["detection"]["smart_options"] = smart_options or {}
                 from backend.services.blur_detection import VERSION
@@ -524,6 +532,8 @@ def import_manifest(*, data: bytes | None = None, text: str | None = None,
         "mode": mode,
         "config": {
             "strategy": strategy,
+            "skip_completed": skip_completed,
+            "detection": {"method":detection_method,"tone_weight":tone_weight},
             "max_inflight_sr_jobs": 3 if mode == "demo" else 1,
             "max_prepared_items": 1,
         },

@@ -131,6 +131,17 @@ def detect(target, reference, base, config):
     result["analysisGrid"]["mode"]="preview"  # affine grid convention; input is REAL DN, not preview JPG
     bind_auto_mask(result, ({"sourceRevision":target["revision"]},{"sourceRevision":reference["revision"]}))
     auto=result["autoMask"]
+    tone={};region_weights={}
+    if config.get('tone_weight'):
+        from backend.services.repair_tone import weight_map,VERSION as TONE_VERSION
+        weights=weight_map(a,b,va&vb)
+        difference,_=image_diff.decode_gray_png(result['differenceMap'])
+        tone={'tone_weight':True,'tone_weight_version':TONE_VERSION,
+            'weightedDifferenceMap':image_diff._b64_png(np.rint(np.clip(difference*weights,0,1)*255).astype(np.uint8)),
+            'tone_weight_semantics':'display_and_ranking_only; binaryMask and mask eligibility unchanged'}
+        for region in result['regions']:
+            x,y,bw,bh=map(int,region['bbox']);sample=weights[y:y+bh,x:x+bw];valid=(va&vb)[y:y+bh,x:x+bw]
+            region_weights[region['rank']]=float(sample[valid].mean()) if valid.any() else 1.
     candidates=[]; rejected=[]
     for p in auto["polygons"]:
         source=next(s for s in p["source_polygons"] if s["image_id"]==target["image_key"])
@@ -140,6 +151,9 @@ def detect(target, reference, base, config):
                            "label":"difference", "auto_mask":{k:p[k] for k in (
                                "rank","coverage_ratio","area_ratio","buffer_px","needs_review","holes","fallback",
                                "merged_regions","full_image_area_ratio","soft_min_area_ratio","soft_target_met")}})
+    if tone:
+        for candidate in candidates:candidate['auto_mask']['tone_weight']=region_weights.get(candidate['auto_mask']['rank'],1.)
+        candidates.sort(key=lambda c:c['auto_mask']['tone_weight'],reverse=True)
     for ref in (target,reference):
         if (preview_jpg.source_revision(Path(ref["path"])) != ref["revision"]
                 or resource_identity(Path(ref["path"]))["image_key"]!=ref["image_key"]):
@@ -152,7 +166,7 @@ def detect(target, reference, base, config):
         "source_revision":target["revision"],
         "requires_geometry_review":config.get("method") == "smart" or any(p["needs_review"] for p in auto["polygons"]),
         "geometry_diagnostics":[{k:p[k] for k in ("region_id","vertex_count","coverage_ratio","supersample_coverage_ratio","buffer_px","buffer_space","needs_review","diagnostics","area_ratio","holes","fallback")} for p in auto["polygons"]],
-        "analysis":{"source":"real-dn-grid","size":[gw,gh],"parameters":result["parameters"],
+        "analysis":{"source":"real-dn-grid","size":[gw,gh],"parameters":result["parameters"],**tone,
                     "differenceMap":result["differenceMap"],"validityMap":result["validityMap"],
                     "grid_to_pan":auto["sources"][0]["transform"],"grid_to_nosr":auto["sources"][1]["transform"],
                     "coverage_scope":"projected_analysis_pixel_centres","downsampled":gw<w or gh<h,

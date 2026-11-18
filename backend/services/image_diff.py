@@ -30,6 +30,7 @@
 """
 
 from __future__ import annotations
+from typing import Optional, Union
 
 import base64
 import io
@@ -116,7 +117,7 @@ def decode_gray_png(data: str) -> tuple[np.ndarray, np.ndarray]:
     return gray, valid
 
 
-def load_gray_image(path: str | Path) -> tuple[np.ndarray, np.ndarray]:
+def load_gray_image(path: Union[str, Path]) -> tuple[np.ndarray, np.ndarray]:
     """服务端文件（预览 JPG / 普通图片）→ 灰度与有效掩码。"""
     try:
         with Image.open(path) as im:
@@ -504,33 +505,33 @@ def analyze_arrays(
     a: np.ndarray,
     b: np.ndarray,
     *,
-    valid_a: np.ndarray | None = None,
-    valid_b: np.ndarray | None = None,
+    valid_a: Optional[np.ndarray] = None,
+    valid_b: Optional[np.ndarray] = None,
     method: str = "absdiff",
     sensitivity: str = "standard",
-    threshold: float | None = None,
+    threshold: Optional[float] = None,
     min_area_px: int = DEFAULT_MIN_AREA_PX,
     blur: bool = True,
     open_kernel: int = 3,
     close_kernel: int = 3,
     ssim_window: int = 7,
     ssim_gaussian: bool = False,
-    roi: dict | None = None,
+    roi: Optional[dict] = None,
     source: str = "preview",
-    scale_a: tuple[float, float] | None = None,
-    scale_b: tuple[float, float] | None = None,
-    nodata_a: float | None = None,
-    nodata_b: float | None = None,
-    warnings: list[str] | None = None,
-    elapsed_ms: float | None = None,
+    scale_a: Optional[tuple[float, float]] = None,
+    scale_b: Optional[tuple[float, float]] = None,
+    nodata_a: Optional[float] = None,
+    nodata_b: Optional[float] = None,
+    warnings: Optional[list[str]] = None,
+    elapsed_ms: Optional[float] = None,
     auto_mask: bool = False,
     auto_mask_margin: str = "standard",
     auto_mask_limit: int = 16,
-    smart_options: dict | None = None,
-    reference_side: str | None = None,
-    scene_masks: dict | None = None,
-    score_override: np.ndarray | None = None,
-    smart_evidence: dict | None = None,
+    smart_options: Optional[dict] = None,
+    reference_side: Optional[str] = None,
+    scene_masks: Optional[dict] = None,
+    score_override: Optional[np.ndarray] = None,
+    smart_evidence: Optional[dict] = None,
     evidence_sink=None,
 ) -> dict:
     """核心入口。数组形状必须一致；不一致由调用方先重采样。
@@ -942,7 +943,7 @@ def _resize_pair(shape, b: np.ndarray, valid: np.ndarray):
 _TAG_GDAL_NODATA = 42113
 
 
-def _tiff_nodata(path, scalars, arrays) -> float | None:
+def _tiff_nodata(path, scalars, arrays) -> Optional[float]:
     """读 GDAL_NODATA（ASCII）标签；读不到或不是数字时返回 None。"""
     try:
         if _TAG_GDAL_NODATA in arrays:
@@ -966,7 +967,7 @@ def _tiff_nodata(path, scalars, arrays) -> float | None:
         return None
 
 
-def read_source_window(path: str | Path, x0: int, y0: int, x1: int, y1: int,
+def read_source_window(path: Union[str, Path], x0: int, y0: int, x1: int, y1: int,
                        *, max_edge: int = DEFAULT_MAX_EDGE):
     """读取无压缩条带 TIFF 的窗口。
 

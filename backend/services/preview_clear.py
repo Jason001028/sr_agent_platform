@@ -40,6 +40,7 @@ TestNeverListsDirectories` 把 `os.listdir/scandir/walk` 与 `Path.glob/rglob/it
 """
 
 from __future__ import annotations
+from typing import Optional
 
 from pathlib import Path
 
@@ -61,7 +62,7 @@ def is_preview_name(name: str) -> bool:
     return low.endswith(_NAME_NEW) or low.endswith(_NAME_LEGACY)
 
 
-def refusal_reason(entry: Path) -> str | None:
+def refusal_reason(entry: Path) -> Optional[str]:
     """这个文件**不能删**的原因；None = 可以删。
 
     调用方只在名字像预览件时调它（否则场景目录里每个 `.tif` 都会带回一条原因，

@@ -46,6 +46,7 @@ SR_code/variants/verify_sr_run.py, and `exit_code_file_for()` below recomputes
 that same path here — the naming contract is locked by test_sr_verify.py.
 """
 from __future__ import annotations
+from typing import Optional
 
 import hashlib
 import json
@@ -151,7 +152,7 @@ def _posix_basename(path) -> str:
     return str(path).rstrip("/").rsplit("/", 1)[-1]
 
 
-def sandbox_scene_paths(lq_path, fingerprint, sandbox_root=None) -> dict | None:
+def sandbox_scene_paths(lq_path, fingerprint, sandbox_root=None) -> Optional[dict]:
     """Where a job's private copy of `lq_path` lives — or None when off.
 
     Returns ``{"root", "parent", "scene"}``. `scene` is a copy of the lq_path
@@ -494,7 +495,7 @@ def _sanitize_job_name(name: str) -> str:
     return (cleaned or "run_sr")[:64]
 
 
-def read_dataroot_lq(config_xml_path) -> str | None:
+def read_dataroot_lq(config_xml_path) -> Optional[str]:
     """<DatarootLQ> from a platform-written config.xml, or None.
 
     Used to locate the per-job verdict file (`exit_code_file_for`). Never
@@ -511,7 +512,7 @@ def read_dataroot_lq(config_xml_path) -> str | None:
     return node.text.strip()
 
 
-def read_bundle_suffix(bundle_dir=None, config_name=None) -> str | None:
+def read_bundle_suffix(bundle_dir=None, config_name=None) -> Optional[str]:
     """`<Suffix>` out of the SR team's own sfsr config, or None.
 
     That file sits next to the SR code (`SR_BUNDLE_DIR`, i.e. beside
@@ -587,7 +588,7 @@ def normalize_suffix(value) -> str:
     return raw
 
 
-def exit_code_file_for(config_xml_path, job_id) -> str | None:
+def exit_code_file_for(config_xml_path, job_id) -> Optional[str]:
     """Path of the verdict file the job writes, or None when not derivable.
 
     Same convention as SR_code/variants/verify_sr_run.py (EXIT_FILE_FMT): the
@@ -611,7 +612,7 @@ def task_fingerprint(params: dict) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def query_job_status(job_id, task: dict | None = None, run_cmd=None) -> dict:
+def query_job_status(job_id, task: Optional[dict] = None, run_cmd=None) -> dict:
     """Scheduler status for a task, pointing it at that task's verdict file.
 
     A job's *terminal* state lives in `<DatarootLQ>/Debug/_SREXIT_<job_id>.txt`

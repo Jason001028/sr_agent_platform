@@ -5,6 +5,7 @@ TestClient 内存驱动。覆盖：
   工具 manifest + 直调；chat 新建/历史/SSE 事件序列/并发 409/404；
   queue list/submit/幂等复用/cancel/events 广播；masks 落原图目录 + 白名单。
 """
+from typing import Union
 
 import asyncio
 import base64
@@ -70,7 +71,7 @@ def sse_events(text: str) -> list[dict]:
     return events
 
 
-def touch_tif(path: str | Path) -> Path:
+def touch_tif(path: Union[str, Path]) -> Path:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(b"")          # mask 端点只要求文件存在（W/H 来自 body）

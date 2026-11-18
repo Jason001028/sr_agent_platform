@@ -38,6 +38,7 @@ the source *and* carries the current rule stamp.
 """
 
 from __future__ import annotations
+from typing import Optional
 
 import hashlib
 import os
@@ -125,7 +126,7 @@ class PreviewError(Exception):
 # --------------------------------------------------------------------------
 # ENVI header dimensions（优先：很多盘阵场景带 .hdr）
 # --------------------------------------------------------------------------
-def dims_from_envi_header(path) -> dict | None:
+def dims_from_envi_header(path) -> Optional[dict]:
     """Read samples/lines/bands from `<basename>.hdr`; None if absent/unusable."""
     hdr = Path(path).with_suffix(".hdr")
     if not hdr.is_file():
@@ -297,7 +298,7 @@ def probe_tiff(path) -> dict:
     }
 
 
-def scene_dims(path) -> dict | None:
+def scene_dims(path) -> Optional[dict]:
     """W/H for a scene path: ENVI .hdr preferred, else TIFF header probe.
 
     JPG/JPEG（最小原型 §4.7 盘阵里的显示就绪图）走 Pillow 头解析：只读标记段取
@@ -323,7 +324,7 @@ def scene_dims(path) -> dict | None:
 
 
 def preview_max_edge(source_path, div: int = LEGACY_PREVIEW_DIV, *,
-                     cap: int | None = None) -> int:
+                     cap: Optional[int] = None) -> int:
     """本次预览生成的长边 = min(源图长边 / div, 平台设置的上限)。
 
     上限默认 16384 = 4096×4，是浏览器画布/内存能按真分辨率装下的上限；超过它再
@@ -611,7 +612,7 @@ def _overview_preview(path, max_edge, is_big, endian, root, base):
     return None
 
 
-def build_preview_pixels(path, max_edge: int | None = None) -> np.ndarray:
+def build_preview_pixels(path, max_edge: Optional[int] = None) -> np.ndarray:
     """uint8 grayscale preview pixels (h×w) for a scene TIFF.
 
     max_edge 省略时按 `LEGACY_PREVIEW_DIV`（各边 1/2）从源图尺寸推出 —— 只有直接
@@ -667,7 +668,7 @@ def source_key(path) -> str:
     return hashlib.sha1(real.encode("utf-8")).hexdigest()[:12]
 
 
-def source_revision(path) -> str | None:
+def source_revision(path) -> Optional[str]:
     """源文件的身份串：路径哈希 + 字节数 + mtime_ns。
 
     写进规则戳，用来识破「源被换上另一份内容、但 mtime 仍不晚于预览」这种陈旧
@@ -684,8 +685,8 @@ def source_revision(path) -> str | None:
 
 def rule_stamp(quality: int = PREVIEW_JPG_QUALITY,
                div: int = LEGACY_PREVIEW_DIV, *,
-               source=None, source_rev: str | None = None,
-               max_edge: int | None = None) -> bytes:
+               source=None, source_rev: Optional[str] = None,
+               max_edge: Optional[int] = None) -> bytes:
     """当前预览生成规则的签名（写进 JPEG 注释，用来判缓存是否还符合现规则）。
 
     **div 进戳**（v3 起）：同一个落点上换个档位必须判废重生成 —— 只按落点判的话，
@@ -723,7 +724,7 @@ _STAMP_RE = re.compile(
     r"(?:;src=(?P<src>[0-9a-f]+-\d+-\d+))?$")
 
 
-def stamp_div(stamp) -> int | None:
+def stamp_div(stamp) -> Optional[int]:
     """解出这份产物**是按哪一档生成的**；解不出（缺戳 / 旧格式 / 非法档位）→ None。
 
     场景行的 `previewDiv` 用它：前端据「盘上这份的档位 ≠ 当前档位」决定要不要重生成。
@@ -742,7 +743,7 @@ def stamp_div(stamp) -> int | None:
     return div if div in PREVIEW_DIVISORS else None
 
 
-def stamp_src(stamp) -> str | None:
+def stamp_src(stamp) -> Optional[str]:
     """解出戳里的源身份（`;src=` 尾巴）；没有 / 旧戳 / 解不出 → None。
 
     **端点发字节前要用它核对「这份预览确实由本次请求的源生成」**：档位对得上
@@ -781,7 +782,7 @@ def _comment_of(jpg_path):
     return str(stamp)
 
 
-def preview_div_of(jpg_path) -> int | None:
+def preview_div_of(jpg_path) -> Optional[int]:
     """盘上某个预览 JPG 是按哪一档生成的；文件不在 / 读不出 / 旧格式 → None。
 
     只 `Image.open` 读头拿注释，**不解码像素** —— 与 `scene_dims` 同级，可以在
@@ -811,7 +812,7 @@ def has_rule_stamp(jpg_path) -> bool:
 
 
 def cache_meta(dst: Path, *, quality: int = PREVIEW_JPG_QUALITY,
-               source=None, source_rev: str | None = None) -> dict | None:
+               source=None, source_rev: Optional[str] = None) -> Optional[dict]:
     """盘上这份预览的元信息 `{w, h, div}`；不符合当前规则 / 源身份 → None。
 
     与 `cache_hit` 是同一套判据，但不要求调用方**先知道档位**：场景列表要回填
@@ -857,7 +858,7 @@ def cache_meta(dst: Path, *, quality: int = PREVIEW_JPG_QUALITY,
 
 
 def cache_hit(dst: Path, quality: int, div: int, *,
-              source=None, source_rev: str | None = None) -> dict | None:
+              source=None, source_rev: Optional[str] = None) -> Optional[dict]:
     """缓存可用则返回 {w, h}，否则 None（缺戳 / 旧规则 / 换档 / 换源 / 损坏一律重生成）。
 
     公开（无下划线）是因为**产物急生成**（`api/app.py::_eager_bake_tick`）要在动手读
@@ -888,7 +889,7 @@ def _serialize_preview(fn):
 
 
 def versioned_preview_path(jpg_path, source_rev, div, quality=PREVIEW_JPG_QUALITY,
-                           *, max_edge: int | None = None):
+                           *, max_edge: Optional[int] = None):
     """Immutable cache identity, still matching the guarded preview clear rule."""
     dst = Path(jpg_path)
     identity = hashlib.sha256(str(dst.name).encode("utf-8")
@@ -901,8 +902,8 @@ def versioned_preview_path(jpg_path, source_rev, div, quality=PREVIEW_JPG_QUALIT
 def write_preview_jpg(jpg_path, pixels, *,
                       quality: int = PREVIEW_JPG_QUALITY,
                       div: int = LEGACY_PREVIEW_DIV,
-                      source=None, source_rev: str | None = None,
-                      max_edge: int | None = None) -> dict:
+                      source=None, source_rev: Optional[str] = None,
+                      max_edge: Optional[int] = None) -> dict:
     """把灰度像素落成预览 JPEG（先写临时文件再 `os.replace`，原子替换）。
 
     从 `ensure_preview_jpg` 里抽出来，是为了让**产物急生成**能在「像素已读出」与

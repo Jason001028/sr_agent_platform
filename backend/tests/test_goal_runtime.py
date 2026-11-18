@@ -771,7 +771,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
             response = await event_stream(gid, request)
             iterator = response.body_iterator
-            self.assertIn("goal_created", await anext(iterator))
+            self.assertIn("goal_created", await iterator.__anext__())
             await iterator.aclose()
             deadline = time.monotonic() + 3
             while (

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from backend.config import Config
@@ -19,5 +19,6 @@ class AppContext:
     config: "Config"
     store: "Store"
     tool_registry: "ToolRegistry"
-    scenes_root: Path | None
+    scenes_root: Optional[Path]
     poll_sec: float
+    raster_runner: Optional[object] = None

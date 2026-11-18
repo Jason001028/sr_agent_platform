@@ -35,6 +35,7 @@ SR_API_HOST/PORT  仅 `python -m backend.api` 直启用
 """
 
 from __future__ import annotations
+from typing import Optional
 
 import asyncio
 import io
@@ -96,7 +97,7 @@ _FAKE_W = [20000, 4096, 12000, 8192, 16000, 24000]
 _FAKE_H = [20000, 2048, 6000, 8192, 8000, 12000]
 
 
-def _cached_dims(abs_path: Path) -> dict | None:
+def _cached_dims(abs_path: Path) -> Optional[dict]:
     """影像尺寸（带 LRU 缓存）；**文件不在/读不出 → None**，不抛。
 
     None 而不是抛异常，是和 `scene_dims` 对齐的：这个函数的语义是「能读就读，
@@ -126,11 +127,11 @@ def _cached_dims(abs_path: Path) -> dict | None:
 # 与 _DIMS_CACHE 同一范式 —— 只读 JPEG 注释头、不解码像素，但列表路径上逐行都要来
 # 一次，仍值得缓存。源身份进 key：源换了（size / mtime_ns 变）就不该再认旧结论。
 # 长边上限也进 key：设置改了之后，同一份 JPG 的有效性结论必须重新算。
-_PREVIEW_STATE_CACHE: dict[tuple[str, float, str, int], tuple[bool, int | None]] = {}
+_PREVIEW_STATE_CACHE: dict[tuple[str, float, str, int], tuple[bool, Optional[int]]] = {}
 _PREVIEW_STATE_CACHE_MAX = 1024
 
 
-def _preview_cache_state(jpg: Path, source: Path) -> tuple[bool, int | None]:
+def _preview_cache_state(jpg: Path, source: Path) -> tuple[bool, Optional[int]]:
     """盘上这份预览是否**确实由 `source` 按当前规则**生成；返回 (可用, 档位)。
 
     只看「文件在 + 戳里解得出档位」是不够的：旧戳没有 `;src=`、源也可能已经被
@@ -148,7 +149,7 @@ def _preview_cache_state(jpg: Path, source: Path) -> tuple[bool, int | None]:
         return _PREVIEW_STATE_CACHE[key]
     if len(_PREVIEW_STATE_CACHE) >= _PREVIEW_STATE_CACHE_MAX:
         _PREVIEW_STATE_CACHE.clear()
-    state: tuple[bool, int | None] = (False, None)
+    state: tuple[bool, Optional[int]] = (False, None)
     if rev is not None:
         meta = cache_meta(jpg, source_rev=rev)
         if meta is not None:
@@ -203,7 +204,7 @@ def _ensure_shared_preview(source_path, jpg_path, div=2):
     return ensure_preview_jpg(source_path, jpg_path, div=div)
 
 
-def _diff_source_path(scene_id: str, root: Path | None) -> Path:
+def _diff_source_path(scene_id: str, root: Optional[Path]) -> Path:
     """场景 id → 用于差异分析的源文件（显示件 jpg 优先换成同名栅格）。"""
     abs_path = paths.scene_id_to_abs(scene_id, root, allow_preview=True)
     raster = _display_sibling_raster(abs_path)
@@ -212,7 +213,7 @@ def _diff_source_path(scene_id: str, root: Path | None) -> Path:
     return abs_path
 
 
-def _diff_load_scene(scene_id: str, root: Path | None):
+def _diff_load_scene(scene_id: str, root: Optional[Path]):
     """供 Batch Goal / Agent 复用的「读预览像素」入口。
 
     与查看器自己传 PNG 的那条路等价：盘阵栅格走**已有预览缓存**
@@ -241,7 +242,7 @@ def _diff_load_scene(scene_id: str, root: Path | None):
     return gray, valid, warnings
 
 
-def _diff_source_roi(body: dict, root: Path | None) -> dict:
+def _diff_source_roi(body: dict, root: Optional[Path]) -> dict:
     """原始分辨率 ROI 差异（可选路径）。
 
     两个影像都必须有 ``sceneId``（本地浏览器文件没有服务端路径）。ROI 用 **A 的
@@ -353,7 +354,7 @@ def _hidden_dirs(store) -> set[str]:
         return set()
 
 
-def _raster_preview(abs_path: Path, root: Path | None) -> dict | None:
+def _raster_preview(abs_path: Path, root: Optional[Path]) -> Optional[dict]:
     """显示件 jpg 的「同名栅格」预览信息；不适用 → None。
 
     盘阵里预生成的显示件（`PAN.jpg` / `<编号>.jpg`，长边约 8192）配着一张同名栅格
@@ -403,7 +404,7 @@ def _raster_preview(abs_path: Path, root: Path | None) -> dict | None:
     return out
 
 
-def _thumbnail_url(source: Path, root: Path | None) -> str | None:
+def _thumbnail_url(source: Path, root: Optional[Path]) -> Optional[str]:
     """Reuse one scene thumbnail for input/PAN/ORI/NOSR list cards only.
 
     The shared thumbnail is a browsing aid, never the stage's analysis pixels.
@@ -422,7 +423,7 @@ def _thumbnail_url(source: Path, root: Path | None) -> str | None:
     return paths.rel_url(thumb, root)
 
 
-def _scene_row(scene: dict, root: Path | None) -> dict:
+def _scene_row(scene: dict, root: Optional[Path]) -> dict:
     """Wrap one search_scenes row with W/H + jpgUrl (opaque id, no abs file path).
 
     `id` 是供 /api/scenes/{id}/preview 解析的**不透明 id**（base64url rel），
@@ -507,7 +508,7 @@ def _same_file(a: Path, b: Path) -> bool:
         return os.path.normcase(str(a)) == os.path.normcase(str(b))
 
 
-def _capabilities(*, sr_capable: bool, scene_dir: Path | None,
+def _capabilities(*, sr_capable: bool, scene_dir: Optional[Path],
                   in_array: bool, preview_only: bool) -> dict:
     """把「这张图能做什么」显式写出来，而不是让调用方从来源去猜。
 
@@ -531,7 +532,7 @@ def _capabilities(*, sr_capable: bool, scene_dir: Path | None,
     }
 
 
-def _manual_row(abs_path: Path, dir_path: Path, root: Path | None) -> dict:
+def _manual_row(abs_path: Path, dir_path: Path, root: Optional[Path]) -> dict:
     """手工场景行（用户手填/反推的盘阵路径），与 `/api/scenes` 行同形。
 
     差别只有三处：`id` 是 `~` + base64url(绝对路径)（库行是 rel 的 base64url，
@@ -713,7 +714,7 @@ def _finish_preview(state, task: dict, state_name: str, note: str) -> None:
                        "note": row.get("preview_note")})
 
 
-def _display_sibling_raster(path: Path) -> Path | None:
+def _display_sibling_raster(path: Path) -> Optional[Path]:
     """显示件 jpg 的同名栅格；**显式 TIFF 原样返回 None**。
 
     `sibling_raster_path` 的候选顺序是 `.tif` 在前，对 `same.tiff` 会先命中
@@ -729,8 +730,8 @@ class _PreviewSnapshotError(Exception):
     """预览 JPG 在生成与读取之间被另一个请求换掉了（档位 / 源对不上）。"""
 
 
-def _jpeg_snapshot(path: Path, *, div: int, source_rev: str | None = None,
-                   headers: dict | None = None) -> Response:
+def _jpeg_snapshot(path: Path, *, div: int, source_rev: Optional[str] = None,
+                   headers: Optional[dict] = None) -> Response:
     """把预览 JPG 读成**字节快照**再返回（而不是交给 FileResponse 延迟打开）。
 
     `FileResponse` 在响应发送阶段才按路径打开文件，而预览落点是「换档位原地覆盖
@@ -965,7 +966,7 @@ def _bake_nosr_preview(task: dict, div: int) -> str:
         return f"failed: {type(e).__name__}: {e}"
 
 
-def _latest_completed_suffix(store, lq_path: str) -> str | None:
+def _latest_completed_suffix(store, lq_path: str) -> Optional[str]:
     """该场景目录最近一条 **COMPLETED** 任务的 suffix；没有则 None。
 
     只认 COMPLETED：FAILED 已经动过产物路径，名字拼得出来但内容是半截 —— 让它进
@@ -1009,7 +1010,7 @@ def _clear_note() -> str:
             "下次打开会重新预览生成")
 
 
-def _clear_result(sid: str, status: str, reason: str | None) -> dict:
+def _clear_result(sid: str, status: str, reason: Optional[str]) -> dict:
     """一条 id 的结论骨架：明细三列表恒在（空列表，不是缺键）。
 
     前端要按 id 批量渲染明细，缺键就得处处判 `?? []` —— 形状固定住更省事。
@@ -1044,7 +1045,7 @@ def _completed_rows_for_dir(store, scene_dir) -> list[dict]:
     return out
 
 
-def _clear_dirs_for(abs_path: Path, root: Path | None) -> list[Path]:
+def _clear_dirs_for(abs_path: Path, root: Optional[Path]) -> list[Path]:
     """这一景的预览可能落在哪些目录（保序去重，第 0 个是场景目录本身）。
 
     **两个落点都得列**，只清一个会留下另一半：
@@ -1146,7 +1147,7 @@ def _clear_one_scene(state, dirs: list[Path], scene_dir) -> dict:
     return out
 
 
-def _seconds_to_next_midnight(now: datetime | None = None) -> float:
+def _seconds_to_next_midnight(now: Optional[datetime] = None) -> float:
     """到下一个**本地** 0 点的秒数（临时预览缓存的清扫时刻）。
 
     用 `combine(明天, min.time())` 而不是「now + 1 天再抹掉时分秒」：后者是在
@@ -1211,7 +1212,7 @@ def _parse_anchors(raw, notes: list[str]) -> list[str]:
 
 
 def _anchor_stage_hit(dirs: list[str], name: str,
-                      notes: list[str]) -> tuple[Path, Path, str, str, Path] | None:
+                      notes: list[str]) -> Optional[tuple[Path, Path, str, str, Path]]:
     """在锚定目录里认这份 jpg → 与 `resolve_scene` 里 `scan` 同一个五元组；都不成立则 None。
 
     判据就是 `scan` 里那条「这份 jpg 是哪个环节」，**但不过 `_fingerprint_mismatch`**：
@@ -1240,7 +1241,7 @@ def _anchor_stage_hit(dirs: list[str], name: str,
     return None
 
 
-def _fingerprint_mismatch(inp: Path, name: str, size_bytes: int) -> str | None:
+def _fingerprint_mismatch(inp: Path, name: str, size_bytes: int) -> Optional[str]:
     """拖拽入口的身份门：拖进来的是**栅格**时比「名字 + 字节数」，是 **jpg** 时只比名字。
     返回人话原因（并入 404 的候选清单），None = 吻合。
 
@@ -1317,7 +1318,7 @@ _LEVEL_BELOW_LEVELS = {
 }
 
 
-def _dir_level(d: Path) -> str | None:
+def _dir_level(d: Path) -> Optional[str]:
     """被粘目录在生产树里的位置 —— 纯词法（pathguard 两个原语），不 stat、不列举。"""
     depth = production_tree_depth(d)
     if depth is None:
@@ -1453,6 +1454,7 @@ def create_app() -> FastAPI:
         tool_registry=app.state.tool_registry,
         scenes_root=root,
         poll_sec=app.state.poll_sec,
+        raster_runner=lambda fn: app.state.heavy_work.background_executor().submit(fn).result(),
     )
     app.include_router(platform_router)
     # Durable goals are opt-in for callers; mounting the read/write API is
@@ -1567,10 +1569,10 @@ def create_app() -> FastAPI:
     @app.get("/api/scenes")
     def list_scenes(
         query: str = "",
-        satellite: str | None = Query(default=None),
-        sensor: str | None = Query(default=None),
-        date_from: str | None = Query(default=None, alias="dateFrom"),
-        date_to: str | None = Query(default=None, alias="dateTo"),
+        satellite: Optional[str] = Query(default=None),
+        sensor: Optional[str] = Query(default=None),
+        date_from: Optional[str] = Query(default=None, alias="dateFrom"),
+        date_to: Optional[str] = Query(default=None, alias="dateTo"),
         limit: int = Query(default=20, ge=1, le=500),
     ):
         # 这里不吞异常：读不到隐藏集合时宁可报错，也不能当成「没有隐藏」把
@@ -1983,10 +1985,10 @@ def create_app() -> FastAPI:
 
         # 命中四元组：场景目录 / 本体输入影像 / 环节 / 该环节**自己的栅格**。
         # 环节只对拖进来的 jpg 有第三种取值；.tif 反推与粘路径恒为 'input'。
-        hit: tuple[Path, Path, str, str, Path] | None = None
+        hit: Optional[tuple[Path, Path, str, str, Path]] = None
 
         def scan(cands: list[tuple[str, str]]
-                 ) -> tuple[Path, Path, str, str, Path] | None:
+                 ) -> Optional[tuple[Path, Path, str, str, Path]]:
             """按顺序挑第一条成立的候选；每条不成立的原因都记进 `reasons`。
 
             候选是 `(目录, 指纹用的名字)` 两元组。名字那一半是给
@@ -2174,7 +2176,7 @@ def create_app() -> FastAPI:
         # 生成到响应发送之间可能被另一个请求原地覆盖（同一源换档位；同 stem 的
         # `.tif/.tiff` 已由落点名分开）。字节快照 + 档位复核保证发出去的就是
         # 这次确认过的那一份；真被抢换就再生成一次。
-        last: _PreviewSnapshotError | None = None
+        last: Optional[_PreviewSnapshotError] = None
         for _ in range(2):
             try:
                 out = _ensure_shared_preview(str(abs_path), str(jpg), div=div)
@@ -2280,7 +2282,7 @@ def create_app() -> FastAPI:
 
         def bake_and_serve(path: Path) -> Response:
             """生成/命中后读成字节快照；并发抢换档位则整轮再试一次。"""
-            last: _PreviewSnapshotError | None = None
+            last: Optional[_PreviewSnapshotError] = None
             for _ in range(2):
                 out = _ensure_shared_preview(str(abs_path), str(path), div=div)
                 _sweep_legacy_preview(path, abs_path)
@@ -2489,7 +2491,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/scenes/{scene_id}/siblings")
     def scene_siblings(scene_id: str, request: Request,
-                       suffix: str | None = Query(default=None),
+                       suffix: Optional[str] = Query(default=None),
                        tour: bool = Query(default=False),
                        known: list[str] = Query(default=[])):
         """这个场景的三类图：输入影像 / 本轮超分产物 / NOSR。
@@ -2526,7 +2528,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404,
                                 detail=f"场景不可访问：{e}") from e
         scene_dir = abs_path.parent
-        suffix_from: str | None = None
+        suffix_from: Optional[str] = None
         if suffix:
             if not run_sr_svc.SUFFIX_RE.match(suffix):
                 raise HTTPException(
@@ -2541,7 +2543,7 @@ def create_app() -> FastAPI:
                 suffix = run_sr_svc.default_suffix()
                 suffix_from = "default" if suffix else None
 
-        def item(kind: str, p: Path | None) -> dict:
+        def item(kind: str, p: Optional[Path]) -> dict:
             """一类图。`p` 为 None = 这一类拼不出名字（没有可用的 suffix）。"""
             row = {"kind": kind, "id": None, "name": None, "rel": None,
                    "exists": False, "sizeBytes": None, "mtime": None,
@@ -2589,7 +2591,7 @@ def create_app() -> FastAPI:
         inp = scene_search.input_scene_path(scene_dir)
         items = [item("input", inp)]
         cand_names: list[str] = []
-        product: Path | None = None
+        product: Optional[Path] = None
         repaired = any((r.get('params') or {}).get('repair')
                        for r in _completed_rows_for_dir(request.app.state.store, scene_dir.as_posix())[:1])
         if inp is not None and suffix:

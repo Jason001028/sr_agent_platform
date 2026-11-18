@@ -13,7 +13,7 @@ import json
 import time
 import uuid
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Optional
 
 
 DEFAULT_MAX_BYTES = 32_000
@@ -30,7 +30,7 @@ def stable_hash(value: Any) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _redact(value: Any, *, key: str | None = None) -> Any:
+def _redact(value: Any, *, key: Optional[str] = None) -> Any:
     if key and key.lower() in _SENSITIVE_KEYS:
         return "[REDACTED]"
     if isinstance(value, Mapping):
@@ -58,7 +58,7 @@ def bounded_payload(value: Any, *, max_bytes: int = DEFAULT_MAX_BYTES) -> dict:
             "sha256": hashlib.sha256(encoded).hexdigest()}
 
 
-def _prompt_column(prompt: Any, max_bytes: int) -> str | None:
+def _prompt_column(prompt: Any, max_bytes: int) -> Optional[str]:
     """`agent_runs.prompt` 是 TEXT 列，只能绑标量。
 
     带截图的回合 prompt 是 OpenAI content block 列表（见 services/chat_images.py），
@@ -77,8 +77,8 @@ class TrajectoryRecorder:
     """Small synchronous adapter around Store's append-only trajectory API."""
 
     def __init__(self, store, *, session_id: str, prompt: Any = None,
-                 machine_id: str | None = None, model: str | None = None,
-                 system_prompt: str | None = None, tools: list | None = None,
+                 machine_id: Optional[str] = None, model: Optional[str] = None,
+                 system_prompt: Optional[str] = None, tools: Optional[list] = None,
                  max_payload_bytes: int = DEFAULT_MAX_BYTES):
         self.store = store
         self.session_id = session_id
@@ -92,18 +92,18 @@ class TrajectoryRecorder:
             system_prompt_hash=stable_hash(system_prompt or ""),
             tool_manifest_hash=stable_hash(tools or []),
         )
-        self._last_event_id: str | None = None
+        self._last_event_id: Optional[str] = None
         self._started = time.time()
         self.event("run_start", status="running", payload={
             "model": model, "machine_id": machine_id,
         })
 
-    def event(self, event_type: str, *, turn: int | None = None,
-              parent_event_id: str | None = None,
-              tool_call_id: str | None = None, tool_name: str | None = None,
-              status: str | None = None, payload: Any = None,
-              started_at: float | None = None, finished_at: float | None = None,
-              duration_ms: int | None = None) -> dict:
+    def event(self, event_type: str, *, turn: Optional[int] = None,
+              parent_event_id: Optional[str] = None,
+              tool_call_id: Optional[str] = None, tool_name: Optional[str] = None,
+              status: Optional[str] = None, payload: Any = None,
+              started_at: Optional[float] = None, finished_at: Optional[float] = None,
+              duration_ms: Optional[int] = None) -> dict:
         event_id = uuid.uuid4().hex
         item = self.store.append_trajectory_event(
             run_id=self.run_id, session_id=self.session_id,
@@ -118,8 +118,8 @@ class TrajectoryRecorder:
         self._last_event_id = event_id
         return item
 
-    def finish(self, *, status: str, answer: str | None = None,
-               error: str | None = None) -> dict:
+    def finish(self, *, status: str, answer: Optional[str] = None,
+               error: Optional[str] = None) -> dict:
         finished = time.time()
         self.event("run_end", status=status, payload={
             "answer": answer, "error": error,

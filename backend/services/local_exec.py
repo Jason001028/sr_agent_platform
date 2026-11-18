@@ -52,6 +52,7 @@ second worker host ever needs this, that is the moment to go back to Slurm.
 """
 
 from __future__ import annotations
+from typing import Optional
 
 import json
 import logging
@@ -103,7 +104,7 @@ _DISPATCH_BLOCKED.set()
 #: Loaded from STATE_FILE on first use after a restart.
 _JOBS: dict[int, dict] = {}
 _STATE_LOADED = False
-_LOADED_WORK_DIR: str | None = None
+_LOADED_WORK_DIR: Optional[str] = None
 #: Incremented by ``_reset``. A runner that was already queued in the old
 #: process must not start after a simulated restart (threads die in reality).
 _EPOCH = 0
@@ -135,7 +136,7 @@ def _wsl_stub(path: str) -> bool:
     return os.path.normcase(os.path.dirname(os.path.abspath(path))) == system32
 
 
-def _bash_path() -> str | None:
+def _bash_path() -> Optional[str]:
     """Absolute path of a bash that can actually run a script, or None.
 
     Windows ships a ``bash.exe`` in System32 that is **not** bash: it is the WSL
@@ -304,7 +305,7 @@ def reserve_job_id(work_dir=None) -> int:
         return n
 
 
-def _child_env(extra: dict | None = None) -> dict:
+def _child_env(extra: Optional[dict] = None) -> dict:
     """Environment for the SR child — the shell-activation equivalent.
 
     The API process runs in ``/opt/sr-venv`` (py3.9) while the job needs the SR
@@ -375,7 +376,7 @@ def _pid_alive(pid) -> bool:
         return False
 
 
-def _process_identity(pid) -> dict | None:
+def _process_identity(pid) -> Optional[dict]:
     """Identify a process beyond its PID.
 
     PID reuse is the reason a bare ``kill(pid, 0)`` is not enough: the platform
@@ -429,7 +430,7 @@ def _process_identity(pid) -> dict | None:
         return None
 
 
-def _save_pid_identity(pid) -> str | None:
+def _save_pid_identity(pid) -> Optional[str]:
     ident = _process_identity(pid)
     return str(ident["start"]) if ident else None
 
@@ -594,7 +595,7 @@ def _mark_exited_locked(jid: int, *, timed_out: bool = False) -> None:
 
 
 def _run_job(jid: int, script: str, log_path: Path, env,
-             epoch: int | None = None) -> None:
+             epoch: Optional[int] = None) -> None:
     """Slot-holding runner thread: start the child, wait for it, free the slot."""
     _DISPATCH_BLOCKED.wait()                      # quarantined launch window
     with _SLOT:                                   # single slot: one job at a time
@@ -859,7 +860,7 @@ def recover() -> dict:
             "quarantined": len(quarantine)}
 
 
-def resolve_quarantine(job_id: int | None = None) -> int:
+def resolve_quarantine(job_id: Optional[int] = None) -> int:
     """Release a quarantine after the operator reconciles the launch window.
 
     This never signals a PID (the PID may not be ours). Call only after
@@ -980,7 +981,7 @@ def _env_seconds(name: str, default: float) -> float:
     return value if value > 0 else default
 
 
-def _resolve_executable(value: str) -> str | None:
+def _resolve_executable(value: str) -> Optional[str]:
     if not value:
         return None
     path = Path(value)

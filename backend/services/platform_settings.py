@@ -9,6 +9,7 @@
 缓存判据才能用同一个数；只改前端会出现「服务端给了 16384、前端仍按 4096 截」。
 """
 from __future__ import annotations
+from typing import Optional
 
 import os
 import threading
@@ -37,7 +38,7 @@ class SettingsError(ValueError):
     """非法设置值（HTTP 层转 400）。"""
 
 
-def _cache_key(store: Store) -> str | None:
+def _cache_key(store: Store) -> Optional[str]:
     # `:memory:` 每个 Store 都是独立库，路径相同却不能共用缓存。
     path = str(getattr(store, "path", "") or "")
     return None if not path or path == ":memory:" else path
@@ -58,7 +59,7 @@ def _normalize(values: dict) -> dict:
     return out
 
 
-def load_settings(store: Store | None = None, *, refresh: bool = False) -> dict:
+def load_settings(store: Optional[Store] = None, *, refresh: bool = False) -> dict:
     """当前平台设置（缺省值补齐）。`refresh=True` 绕过 2 秒缓存。"""
     store = store or default_store()
     key = _cache_key(store)
@@ -82,7 +83,7 @@ def load_settings(store: Store | None = None, *, refresh: bool = False) -> dict:
     return merged
 
 
-def save_settings(patch: dict, store: Store | None = None) -> dict:
+def save_settings(patch: dict, store: Optional[Store] = None) -> dict:
     """校验并写入部分设置；返回写入后的全量值。"""
     if not isinstance(patch, dict) or not patch:
         raise SettingsError("设置内容不能为空")
@@ -106,6 +107,6 @@ def save_settings(patch: dict, store: Store | None = None) -> dict:
     return merged
 
 
-def configured_preview_max_edge(store: Store | None = None) -> int:
+def configured_preview_max_edge(store: Optional[Store] = None) -> int:
     """服务端生成 / 缓存判据共用的当前长边上限。"""
     return int(load_settings(store)[PREVIEW_MAX_EDGE_KEY])

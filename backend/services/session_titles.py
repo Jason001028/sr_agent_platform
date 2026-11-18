@@ -85,6 +85,24 @@ def generate_title(cfg, topic):
 
 
 def process_title(store, cfg, sid, generate=generate_title):
+    if generate is not generate_title or cfg.llm_mock or not text_topic(store.first_user_content(sid)):
+        return _process_title(store,cfg,sid,generate)
+    from backend.services import model_resources
+    import time,uuid
+    key=model_resources.resource_key(os.getenv('SR_TITLE_BASE_URL') or cfg.llm_base_url)
+    token=uuid.uuid4().hex
+    timeout=min(30,max(1,float(os.getenv('SR_TITLE_TIMEOUT','10'))))
+    if not model_resources.acquire(store,key,token,'title',time.time()+2*timeout+model_resources.GRACE_SECONDS):
+        store.close_thread()
+        return False
+    try:
+        return _process_title(store,cfg,sid,generate)
+    finally:
+        model_resources.release(store,key,token)
+        store.close_thread()
+
+
+def _process_title(store, cfg, sid, generate):
     token = store.claim_session_title(sid, ttl=90)
     if not token:
         store.close_thread()

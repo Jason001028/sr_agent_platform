@@ -63,7 +63,7 @@ def _execute_tool(state, goal, tc, invoke):
         "search_scenes", "sr_job_status", "read_tool_result",
         "prepare_batch_repair", "query_batch_repair",
         "prepare_repair", "get_repair_workspace", "list_repair_items",
-        "get_repair_item",
+        "get_repair_item", "inspect_repair_workspace",
     } or (tc["name"] == "fix_bad_lines" and not args.get("output_path"))
     # Unknown extension tools are conservatively non-replayable.
     key = _intent_key(store, goal["session_id"], tc["id"])
