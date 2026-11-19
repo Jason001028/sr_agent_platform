@@ -1,4 +1,4 @@
-import { getPreviewTrueMaxEdge } from './previewLevel';
+import { getPreviewTrueMaxEdge, PREVIEW_CANVAS_AREA_MAX } from './previewLevel';
 
 /** Read JPEG frame dimensions without decoding pixels or copying the full file. */
 export async function jpegSize(blob: Blob): Promise<{ width: number; height: number } | null> {
@@ -38,12 +38,18 @@ export async function jpegSize(blob: Blob): Promise<{ width: number; height: num
 }
 
 /** Request the bounded bitmap during decode, before a full-size RGBA allocation.
- *  `maxEdge` 与平台设置里的「真分辨率」上限同口径（默认长边 16384）；超过这个
- *  尺寸浏览器画布本身就不保证能建出来，所以高于它必须 resize。默认值在**调用时**
- *  求值，设置改了以后下一次解码就按新上限走。 */
+ *  `maxEdge` 与平台设置里的「真分辨率」上限同口径（默认长边 32768）；
+ *  超过这个尺寸或整幅面积超过 Chromium 画布上限（16384²）都必须 resize —— 32768
+ *  只放宽长边，不放宽面积。默认值在**调用时**求值，设置改了以后下一次解码就按新
+ *  上限走。 */
 export async function decodeJpegBitmap(blob: Blob, maxEdge = getPreviewTrueMaxEdge()): Promise<ImageBitmap> {
   const size = await jpegSize(blob);
-  const scale = size ? Math.min(1, maxEdge / Math.max(size.width, size.height)) : 1;
+  const areaCap = Math.min(maxEdge * maxEdge, PREVIEW_CANVAS_AREA_MAX);
+  const scale = size ? Math.min(
+    1,
+    maxEdge / Math.max(size.width, size.height),
+    Math.sqrt(areaCap / (size.width * size.height)),
+  ) : 1;
   const options: ImageBitmapOptions | undefined = size && scale < 1 ? {
     resizeWidth: Math.max(1, Math.round(size.width * scale)),
     resizeHeight: Math.max(1, Math.round(size.height * scale)),

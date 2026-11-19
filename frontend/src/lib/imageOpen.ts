@@ -1,6 +1,7 @@
 import { joinBase, loadSrConfig } from './scene';
 import { sourceFingerprint } from './local_preview';
 import { LoadControl } from './loadControl';
+import { isZeroLengthImageFile, zeroLengthImageMessage } from './imageFiles';
 
 export interface PreviewAsset {
   id: string; name: string; W: number; H: number; size: number; uploaded: boolean;
@@ -60,8 +61,15 @@ export async function waitPicker(token: string, control: LoadControl, progress: 
   } finally { off();void pickerState(token,'cancelled').catch(()=>{}); }
 }
 export async function uploadPreviewFile(file: File, control: LoadControl, progress:(fraction:number)=>void) {
+  if (isZeroLengthImageFile(file)) throw new Error(zeroLengthImageMessage([file.name]));
   await control.checkpoint('准备服务端 JPG（上传影像）');
-  const fingerprint=await control.wait(sourceFingerprint(file));
+  let fingerprint: Awaited<ReturnType<typeof sourceFingerprint>>;
+  try {
+    fingerprint = await control.wait(sourceFingerprint(file));
+  } catch (error) {
+    if (control.signal.aborted || (error as Error)?.name === 'AbortError') throw error;
+    throw new Error(`无法读取文件「${file.name}」：文件可能已被移动或删除，请刷新资源管理器后重试。`);
+  }
   const session=await control.wait(createPickerSession());
   try {
     let value=await control.wait(json<PickerState>(`/tickets/${session.token}/selection`,post({files:[{name:file.name,size:file.size,fingerprint}]},control.signal)));

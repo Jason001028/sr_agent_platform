@@ -149,6 +149,12 @@ async function onAgentRepair() {
   const revision = qc.coordinateImportRevision;
   try {
     if (!list || !qc.issues.length) return;
+    // 移交给 Agent 后不再聚焦某一景：先收掉选中行、点亮与左侧聚焦遮罩，再开始可能
+    // 较久的解析。遮罩显式清一次，不单靠 selName 的 watch —— 交接事件处理期间若
+    // 组件被切走，遮罩不该留在查看器上。口径与 onRow 的「再点一行取消选中」一致。
+    qc.select(null);
+    viewer.clearLights();
+    viewer.clearSpotlight();
     if (qc.bakeState !== 'done') await qc.bakeAll();
     if (qc.list !== list || qc.coordinateImportRevision !== revision) {
       viewer.showErr('清单已更换或关闭，请重新点击 Agent协助');

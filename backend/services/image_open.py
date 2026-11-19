@@ -195,7 +195,7 @@ class ImageOpen:
                 if not isinstance(name, str) or len(name) > 255 or re.search(r'[\\/\x00-\x1f:]', name) or Path(name).suffix.lower() not in SUFFIXES:
                     raise HTTPException(400, '文件名或影像类型无效')
                 if not isinstance(size, int) or not 0 < size < 2**53:
-                    raise HTTPException(413, '文件大小无效')
+                    raise HTTPException(413, f'文件大小无效（收到 {size!r}）')
                 files.append(dict(id=secrets.token_hex(32), name=name, size=size, received=0, state='resolving',
                                   fingerprint=choice.get('fingerprint'), originalPath=choice.get('path')))
             t['files'] = files
@@ -325,7 +325,8 @@ class ImageOpen:
 
     def _preview(self, ident, div, ready_only):
         started=time.monotonic();sample_ms=0
-        from backend.services.preview_jpg import PREVIEW_DIVISORS, configured_preview_max_edge
+        from backend.services.preview_jpg import (
+            PREVIEW_DIVISORS, configured_preview_max_edge, preview_target_edge)
         if div not in PREVIEW_DIVISORS:
             raise HTTPException(400, '预览档位无效')
         meta = self.metadata(ident)
@@ -337,8 +338,8 @@ class ImageOpen:
         rev = source_revision(source)
         if rev != meta['sourceRev']:
             raise HTTPException(409, '源文件已变化，请重新选择')
-        edge = min(configured_preview_max_edge(),
-                   max(1, round(max(meta['W'],meta['H'])/div)))
+        edge = preview_target_edge(meta['W'], meta['H'], div,
+                                   configured_preview_max_edge())
         jpg = self.directory(ident) / f'preview-v1-{PREVIEW_RULE_VERSION}-{edge}.jpg'
         cache_kind='hit' if jpg.is_file() else 'miss'
         if jpg.is_symlink():

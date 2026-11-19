@@ -417,6 +417,132 @@ def get_repair_item(goal_id, item_id, verify=True):
 # bound variants (workspace/session frozen per message)
 # ---------------------------------------------------------------------------
 
+_INSPECTION_ROW_FIELDS = ('item_id', 'name', 'ordinal', 'status',
+                          'candidate_count', 'candidates_truncated')
+_INSPECTION_DIAGNOSTIC_FIELDS = ('line', 'severity', 'code', 'name', 'message')
+# Local difference crop shown in the UI. The full difference map is a
+# multi-megabyte PNG; only a bounded JPEG around the first candidate travels
+# with the page. The model view strips every image (see inspection_result_view).
+_INSPECTION_THUMB_PX = 160
+_INSPECTION_THUMB_MAX_BYTES = 12000
+
+
+def _inspection_thumbnail(detected):
+    """Crop of the difference map around the first candidate, as a data JPEG.
+
+    Around the ranked candidate keeps the comparison local to the area under
+    review; clean items get the whole (downscaled) map so the column still
+    shows the evidence behind "no candidate". A missing or unusable map returns
+    None (UI shows its dash placeholder); a crop that cannot be established
+    falls back to the whole map instead of removing the evidence entirely.
+
+    **坐标口径**：候选的 ``bbox`` 在 PAN 源像素里（``source_pixel``），而
+    ``differenceMap`` 是下采样后的分析网格（长边 ≤2048）。两者不是同一坐标系，
+    必须先用 ``analysis.grid_to_pan`` 的仿射变换反算回网格；直接把源坐标当网格
+    坐标裁剪，真实大图里靠右下角的候选会整框出界，差异图列就会时有时无。
+    """
+    analysis = detected.get('analysis') if isinstance(detected, dict) else None
+    if not isinstance(analysis, dict):
+        return None
+    encoded = analysis.get('weightedDifferenceMap') or analysis.get('differenceMap')
+    if not isinstance(encoded, str) or not encoded.startswith('data:image/'):
+        return None
+    try:
+        import base64
+        import io
+
+        import numpy as np
+        from PIL import Image
+
+        from backend.services import image_diff
+
+        gray, _valid = image_diff.decode_gray_png(encoded)
+        height, width = gray.shape
+        box = None
+        for candidate in detected.get('candidates') or []:
+            bbox = candidate.get('bbox') if isinstance(candidate, dict) else None
+            if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                box = [float(value) for value in bbox]
+                break
+        if box is not None:
+            transform = analysis.get('grid_to_pan')
+            scale = transform.get('scale') if isinstance(transform, dict) else None
+            offset = transform.get('offset') if isinstance(transform, dict) else None
+            usable = (isinstance(scale, (list, tuple)) and len(scale) == 2
+                      and isinstance(offset, (list, tuple)) and len(offset) == 2
+                      and all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                              and np.isfinite(value) for value in (*scale, *offset))
+                      and scale[0] > 0 and scale[1] > 0)
+            if usable:
+                box = [(box[0] - offset[0]) / scale[0], (box[1] - offset[1]) / scale[1],
+                       (box[2] - offset[0]) / scale[0], (box[3] - offset[1]) / scale[1]]
+            else:
+                # 没有可信变换就不硬裁：整幅图仍能说明差异在哪。
+                box = None
+        if box is not None:
+            x0, y0, x1, y1 = (int(round(value)) for value in box)
+            pad = max(8, int(max(x1 - x0, y1 - y0) * 0.25))
+            x0, y0 = max(0, x0 - pad), max(0, y0 - pad)
+            x1, y1 = min(width, x1 + pad), min(height, y1 + pad)
+            if x1 - x0 < 2 or y1 - y0 < 2:
+                box = None
+        if box is None:
+            x0, y0, x1, y1 = 0, 0, width, height
+        crop = np.clip(gray[y0:y1, x0:x1], 0, 1).astype(np.float32)
+        # 表格缩略图只做显示层对比度拉伸：接近灰底的真实差异往往只占几个 DN，
+        # 缩到 160px 后几乎看不出来。按非零像素的 1%..99.5% 分位拉满，零点保持黑；
+        # 分析数值、阈值、候选资格与掩码都不受这里影响。
+        positive = crop[crop > 0]
+        if positive.size:
+            sample = positive[::max(1, positive.size // 200_000)]
+            lo = float(np.percentile(sample, 1.0))
+            hi = float(np.percentile(sample, 99.5))
+            if np.isfinite(lo) and np.isfinite(hi) and hi - lo > 1e-6:
+                crop = np.clip((crop - lo) / (hi - lo), 0, 1)
+        crop = np.rint(crop * 255).astype(np.uint8)
+        image = Image.fromarray(crop)
+        # 末档 64px/40 是兜底：异常噪声图在 96px 下也可能超过 12KB 的 base64 预算。
+        for edge, quality in ((_INSPECTION_THUMB_PX, 70), (128, 55), (96, 45), (64, 40)):
+            view = image.copy()
+            view.thumbnail((edge, edge), Image.BILINEAR)
+            buffer = io.BytesIO()
+            view.save(buffer, format='JPEG', quality=quality)
+            raw = buffer.getvalue()
+            if len(raw) * 4 // 3 <= _INSPECTION_THUMB_MAX_BYTES:
+                return 'data:image/jpeg;base64,' + base64.b64encode(raw).decode('ascii')
+        return None
+    except Exception:
+        return None
+
+
+def inspection_result_view(result):
+    """Compact model view; the UI keeps the full stored page.
+
+    Preview URLs and candidate geometry dominate the byte budget without
+    helping the agent summarize a QC page. Keeping the outcome fields for
+    every row also means a failed scene never silently disappears.
+    """
+    data = result.get('data') if isinstance(result, dict) else None
+    if not isinstance(data, dict) or data.get('kind') != 'repair_inspection.v1':
+        return result
+    rows = []
+    for row in data.get('items') or []:
+        if not isinstance(row, dict):
+            continue
+        kept = {key: row[key] for key in _INSPECTION_ROW_FIELDS if key in row}
+        if row.get('reason'):
+            kept['reason'] = row['reason']
+        rows.append(kept)
+    diagnostics = [row for row in data.get('diagnostics') or [] if isinstance(row, dict)]
+    view = dict(result)
+    view['data'] = {**data, 'items': rows,
+                    'diagnostics': [{k: row[k] for k in _INSPECTION_DIAGNOSTIC_FIELDS
+                                     if k in row} for row in diagnostics[:8]]}
+    if len(diagnostics) > 8:
+        view['data']['diagnostics_total'] = len(diagnostics)
+    return view
+
+
 def inspection_tool(snapshot,store,session_id,*,raster_runner=None):
     """Read-only, paged DN inspection. No MaskBuilder, repair plan or Goal."""
     from backend.services import batch_manifest,batch_detector,agent_repair_settings
@@ -424,9 +550,9 @@ def inspection_tool(snapshot,store,session_id,*,raster_runner=None):
     from urllib.parse import quote
     settings=agent_repair_settings.normalize((snapshot or {}).get('agent_repair_settings')) or {}
     frozen=snapshot or {};manifests={}
-    def run(scope='workspace',cursor=0,limit=4):
-        if scope not in ('workspace','current','selection') or type(cursor) is not int or cursor<0 or type(limit) is not int or not 1<=limit<=4:
-            return err('质检分页参数无效，limit 为1–4')
+    def run(scope='workspace',cursor=0,limit=5):
+        if scope not in ('workspace','current','selection') or type(cursor) is not int or cursor<0 or type(limit) is not int or not 1<=limit<=5:
+            return err('质检分页参数无效，limit 为1–5')
         if scope=='selection' and frozen.get('selected_truncated'):return err('多选影像已截断，请缩小选择范围')
         if scope=='workspace' and not (frozen.get('workspace') or {}).get('items') and frozen.get('current'):scope='current'
         try:
@@ -447,14 +573,15 @@ def inspection_tool(snapshot,store,session_id,*,raster_runner=None):
                 try:
                     detected=raster_runner(inspect) if raster_runner else inspect()
                     candidates=detected.get('candidates') or []
+                    images={'pan': '/api/scenes/'+quote(scene_id_abs(item['target_image']['path']),safe='')+'/preview?div=16',
+                        'nosr':'/api/scenes/'+quote(scene_id_abs(item['reference_image']['path']),safe='')+'/preview?div=16'}
+                    # Only a bounded local crop, never the full difference PNG.
+                    thumbnail=_inspection_thumbnail(detected)
+                    if thumbnail:
+                        images['difference']=thumbnail
                     rows.append({'item_id':item['item_id'],'name':item['name'],'ordinal':item['ordinal'],
                         'status':'candidates' if candidates else 'no_candidate','candidate_count':len(candidates),
-                        # Keep only short browser URLs. The difference map is a
-                        # multi-megabyte base64 PNG; embedding it here made a
-                        # single item exceed the tool-result budget and the
-                        # whole page unreadable via read_tool_result.
-                        'images':{'pan': '/api/scenes/'+quote(scene_id_abs(item['target_image']['path']),safe='')+'/preview?div=16',
-                            'nosr':'/api/scenes/'+quote(scene_id_abs(item['reference_image']['path']),safe='')+'/preview?div=16'},
+                        'images':images,
                         'source':'real-dn-grid','candidates':[{'candidate_id':c['candidate_id'],'bbox':c.get('bbox'),'label':c.get('label')} for c in candidates[:12]],
                         'candidates_truncated':len(candidates)>12})
                 except Exception as exc:
@@ -466,10 +593,11 @@ def inspection_tool(snapshot,store,session_id,*,raster_runner=None):
                 'has_more':next_cursor<len(items),'next_cursor':next_cursor if next_cursor<len(items) else None,
                 'note':'只读检测候选，不代表确认缺陷；未生成掩码、修复计划、Goal 或 SR 作业'})
         except (ValueError,OSError) as exc:return err(str(exc))
-    return Tool(name='inspect_repair_workspace',description='仅质检：对本消息冻结的 Viewer PAN/NOSR 读取真实 DN 并复用差异检测。整批使用 limit=4，从 cursor=0 按 next_cursor 继续直到 has_more=false。直接调用工具，避免逐页播报快照字段、游标和分页计划。全部分页收齐后界面自动展示总表。返回候选与失败/跳过事实，不生成掩码、计划或 SR 作业。',
-        result_protected_fields=('next_cursor',),
+    return Tool(name='inspect_repair_workspace',description='仅质检：对本消息冻结的 Viewer PAN/NOSR 读取真实 DN 并复用差异检测。整批使用 limit=5，从 cursor=0 按 next_cursor 继续直到 has_more=false。直接调用工具，避免逐页播报快照字段、游标和分页计划。全部分页收齐后界面自动展示总表。返回候选与失败/跳过事实，不生成掩码、计划或 SR 作业。',
+        result_protected_fields=('next_cursor',), result_record_fields=('items',),
+        result_formatter=inspection_result_view,
         params_schema={'type':'object','properties':{'scope':{'type':'string','enum':['workspace','current','selection']},
-            'cursor':{'type':'integer','minimum':0},'limit':{'type':'integer','minimum':1,'maximum':4}},'additionalProperties':False},run=run,timeout_sec=180)
+            'cursor':{'type':'integer','minimum':0},'limit':{'type':'integer','minimum':1,'maximum':5}},'additionalProperties':False},run=run,timeout_sec=180)
 
 
 def bound_tool(name: str, *, workspace=None, current=None, selected_images=None,

@@ -5,7 +5,8 @@
  * 混合批次的顺序保持（TIF 与 JPG 各自成堆，互不串味）。
  */
 import { describe, it, expect } from 'vitest';
-import { imageKindOf, classifyImages } from '../imageFiles.js';
+import { imageKindOf, classifyImages, isZeroLengthImageFile,
+  zeroLengthImageMessage } from '../imageFiles.js';
 
 const f = (name: string, type = ''): { name: string; type: string } => ({ name, type });
 
@@ -40,6 +41,22 @@ describe('imageKindOf', () => {
     // 不能把 .jpgis 之类的前缀混淆当成合法扩展
     expect(imageKindOf(f('a.jpgx'))).toBeNull();
     expect(imageKindOf(f('a.tifx'))).toBeNull();
+  });
+});
+
+describe('zero-length entries', () => {
+  it('treats 0 / NaN size as an unreadable file', () => {
+    expect(isZeroLengthImageFile({ size: 0 })).toBe(true);
+    expect(isZeroLengthImageFile({ size: NaN })).toBe(true);
+    expect(isZeroLengthImageFile({ size: 1 })).toBe(false);
+    expect(isZeroLengthImageFile({ size: 4885525299 })).toBe(false);
+  });
+
+  it('names the file and says it may have been moved or deleted', () => {
+    const message = zeroLengthImageMessage(['a.tif', 'b.tif']);
+    expect(message).toContain('a.tif、b.tif');
+    expect(message).toContain('0 字节');
+    expect(message).toContain('刷新资源管理器');
   });
 });
 

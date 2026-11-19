@@ -28,9 +28,13 @@ it('renders one visible inspection table after all positions have arrived', asyn
   await nextTick();
   const table = el.querySelector('.inspection-card table')!;
   expect(table.closest('details')).toBeNull();
-  expect([...table.querySelectorAll('th')].map(cell => cell.textContent)).toEqual(['景名 / 结果', 'PAN', 'NOSR', '差异图']);
+  expect([...table.querySelectorAll('th')].map(cell => cell.textContent)).toEqual(['景名 / 结果', 'PAN', 'NOSR', '差分结果']);
   expect([...table.querySelectorAll('tbody tr')].map(row => row.querySelector('td')?.textContent))
-    .toEqual([0, 1, 2].map(count => name + count + ' 处候选'));
+    .toEqual([0, 1, 2].map(count => name + count + ' 处候选跳转至对应景'));
+  const jumps = [...table.querySelectorAll<HTMLButtonElement>('tbody .jump-scene')];
+  expect(jumps).toHaveLength(3);
+  expect(jumps.map(button => button.textContent)).toEqual(['跳转至对应景', '跳转至对应景', '跳转至对应景']);
+  expect(jumps[0]!.disabled).toBe(false);
   expect(table.querySelector('.scene-name')?.getAttribute('title')).toBe(name);
   messages.value.push({ ...page(2, false), seq: 5 });
   await nextTick();

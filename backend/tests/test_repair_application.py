@@ -116,15 +116,23 @@ class RepairApplicationTest(unittest.TestCase):
             self.assertIsNone(registry.get(name))
         with (mock.patch('backend.services.batch_mask.build_mask_result',side_effect=AssertionError('no mask')),
               mock.patch('backend.services.run_sr.submit_run_sr',side_effect=AssertionError('no SR'))):
-            result=registry.get('inspect_repair_workspace').run()
+            tool=registry.get('inspect_repair_workspace')
+            result=tool.run()
         self.assertTrue(result['ok'],result)
+        # 每页 5 景是模型侧建议值；参数边界与工具契约保持一致。
+        self.assertEqual(tool.params_schema['properties']['limit']['maximum'],5)
+        self.assertFalse(tool.run(limit=6)['ok'])
         self.assertEqual(result['data']['kind'],'repair_inspection.v1')
         self.assertEqual(result['data']['items'][0]['status'],'no_candidate')
-        # A page must stay readable as a tool result. The difference map is a
-        # multi-MB data URL and must not be embedded in the inspection payload.
+        # A page must stay readable as a tool result. The full-resolution
+        # difference PNG must not be embedded; the UI gets only a bounded JPEG
+        # crop around the ranked candidate (or the whole map when clean).
         encoded = json.dumps(result, ensure_ascii=False).encode('utf-8')
-        self.assertNotIn(b'data:image', encoded)
-        self.assertLess(len(encoded), 12000)
+        self.assertNotIn(b'data:image/png', encoded)
+        self.assertLess(len(encoded), 60000)
+        thumbnail = result['data']['items'][0]['images']['difference']
+        self.assertTrue(thumbnail.startswith('data:image/jpeg;base64,'))
+        self.assertLess(len(thumbnail), 12000)
         self.assertEqual(len(calls),2)
         self.assertEqual(self.store._db().execute('SELECT COUNT(*) FROM repair_plans').fetchone()[0],0)
         self.assertEqual(self.store._db().execute('SELECT COUNT(*) FROM agent_goals').fetchone()[0],0)

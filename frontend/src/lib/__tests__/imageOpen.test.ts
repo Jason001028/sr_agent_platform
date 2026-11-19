@@ -25,6 +25,12 @@ it('uploads bounded slices and returns a preview asset without inventing a scene
   const result=await uploadPreviewFile(new File(['abcdefghi'],'a.tif'),new LoadControl(),()=>{});
   expect(uploaded.map(part=>part.size)).toEqual([9]);expect(result.serverPath).toBeNull();expect(result).not.toHaveProperty('sceneId');
 });
+it('rejects a zero-length File before contacting the server',async()=>{
+  const mockedFetch=vi.fn();vi.stubGlobal('fetch',mockedFetch);
+  await expect(uploadPreviewFile(new File([],'deleted.tif'),new LoadControl(),()=>{}))
+    .rejects.toThrow('文件不存在或不可读取：deleted.tif');
+  expect(mockedFetch).not.toHaveBeenCalled();
+});
 it('waits for full JPEG bytes and reports effective dimensions separately from the requested tier',async()=>{
   vi.stubGlobal('fetch',vi.fn().mockResolvedValue(new Response('jpeg',{headers:{'X-SR-Preview-W':'4096','X-SR-Preview-H':'2048'}})));
   const result=await fetchPreviewAsset(asset,2);

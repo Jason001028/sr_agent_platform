@@ -5,7 +5,7 @@
  * 元数据 W/H 的 thumbToOrig 换算分支。JPG 加载/画布在浏览器 .e2e 回归覆盖。
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { applyPreviewTrueMaxEdge } from '../previewLevel.js';
+import { applyPreviewTrueMaxEdge, PREVIEW_TRUE_MAX_EDGE } from '../previewLevel.js';
 import {
   loadSrConfig, joinBase, scenesQuery, scenesListUrl, scenePreviewUrl,
   dropPreviewUrl,
@@ -404,7 +404,7 @@ describe('手工场景路径（盘阵任意合法场景目录）', () => {
 });
 
 describe('previewCacheKey（预览 blob 的缓存键）', () => {
-  afterEach(() => { applyPreviewTrueMaxEdge(16384); });
+  afterEach(() => { applyPreviewTrueMaxEdge(PREVIEW_TRUE_MAX_EDGE); });
 
   it('同一条行 + 同档位 → 稳定（同参数两次调用逐字相同）', () => {
     const row = { id: 'abc123' };
@@ -469,7 +469,7 @@ describe('previewCacheKey（预览 blob 的缓存键）', () => {
     expect(lowered).toBe('a|4|jpg|max:4096');
     // 前缀仍是行 id，场景库「清除缓存」按 `${id}|` 删得掉
     expect(lowered.startsWith('a|')).toBe(true);
-    applyPreviewTrueMaxEdge(16384);
+    applyPreviewTrueMaxEdge(PREVIEW_TRUE_MAX_EDGE);
     expect(previewCacheKey(row, 4)).toBe(atDefault);
   });
 });

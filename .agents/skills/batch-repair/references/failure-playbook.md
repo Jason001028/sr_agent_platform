@@ -17,7 +17,7 @@
 13. **NO_ISSUE**：只表示无候选，不等于无缺陷；仍以人工层为准。
 14. **SKIPPED**：`excluded=true` 为创建时排除；否则看 `exclusion_reason`（`user_cancelled`、`capacity_deadlock`），不混为失败。
 15. **列表为空或 ordinal 不符**：核对 `status`、`cursor`、是否误用筛选后序号；不猜 item_id。
-16. **仅质检模式**：`inspect_repair_workspace` 从 `cursor=0, limit=4` 开始，沿 `next_cursor` 取完；收齐后界面展示总表，Agent 只汇总候选、失败与跳过；中途结束说明已检/未检范围。
+16. **仅质检模式**：`inspect_repair_workspace` 从 `cursor=0, limit=5` 开始，沿 `next_cursor` 取完；收齐后界面展示总表，Agent 只汇总候选、失败与跳过；中途结束说明已检/未检范围。
 17. **结果被截断**：`read_tool_result(result_id, path?)` 按引用分页；不根据截断内容下结论。
 
 ## 回复模板

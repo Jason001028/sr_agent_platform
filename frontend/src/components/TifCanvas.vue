@@ -232,8 +232,12 @@ function render() {
     ctx.scale(p.view.scale, p.view.scale);
     ctx.imageSmoothingEnabled = p.view.scale < 4;
     const basis = rec.thumb ?? rec.progressivePreview ?? image;
-    if (rec.progressivePreview) ctx.drawImage(image as unknown as CanvasImageSource, 0, 0, basis.width, basis.height);
-    else drawDiffSource(ctx, image as unknown as CanvasImageSource,
+    // 手势期间改画降采样副本：16384 档位的缩略画布上亿像素，整幅缩放的每帧
+    // 采样都压在它上面；停手后 store 会补一帧全分辨率（见 noteViewGesture）。
+    const source = (rec.thumb && image === rec.thumb
+      ? store.gestureSourceFor(rec) ?? image : image) as unknown as CanvasImageSource;
+    if (rec.progressivePreview) ctx.drawImage(source, 0, 0, basis.width, basis.height);
+    else drawDiffSource(ctx, source,
       basis.width, basis.height, diff.layerFor(rec), diff.display, diff.opacity, diff.feather);
     ctx.restore();
   }

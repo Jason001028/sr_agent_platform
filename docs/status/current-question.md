@@ -7,6 +7,24 @@
 
 修复流程 Skill 化的最终目标、当前能力、缺口任务板与多 Agent 分工见 [repair-skill-autonomy-handoff.md](repair-skill-autonomy-handoff.md)。Skill 正文下一轮撰写；在此之前不要新增只读工具或放开执行权限。
 
+2026-11-19：32768 档下接近方形的大图选 1:1，实际仍受 Chromium 16384² 画布面积约束：49475×49454 → 长边 16387（约 1/3.02），与 1/2 档产物同尺寸。这不是 16384 默认值残留，`preview_target_edge` 的面积公式一直生效。状态栏 `previewResolutionNote` 现在把这种情况标为「受画布面积限制」，不再写「真分辨率」；窄长图 32768×8192（面积恰为上限）与降档后有余量的情况仍标真分辨率。要真正 1:1 看这类巨图需要按视野窗口分块读取，当前预览 JPG 链路没有实现。
+
+2026-11-19：拖入已删除的本地影像不再被后端报成「文件大小无效」。根因是资源管理器未刷新，拖出的条目在浏览器里是 0 字节 File（`size=0`，三段采样为空），`/api/scenes/resolve` 先 400，随后 image-open selection 413。现在 `addFiles` 在入口按 `file.size > 0` 拦截并提示「文件不存在或不可读取……请刷新资源管理器后重新选择」；`uploadPreviewFile` 同样早退，并包装指纹读取失败；后端 413 文案带上实际收到的值。真实 4.55 GB 文件在默认 8 GiB 上传上限内，不会被这项校验挡住。前端 imageFiles / imageOpen / localLoading 用例与后端 image_open 的两项边界（0 字节、4.55 GB）已覆盖。
+
+2026-11-19：真分辨率长边默认档从 16384 调到 32768。后端 `DEFAULT_PREVIEW_MAX_EDGE` 与前端 `PREVIEW_TRUE_MAX_EDGE` 同步改值，设置面板的「（默认）」标记随之移动；32768 只放宽长边，整幅面积仍受 Chromium 16384² 画布上限约束，接近方形的大图由面积公式退回更小的长边。已保存过 16384 的库不受影响（设置仍读库里的值），需要时在 `设置 → 真分辨率长边` 手动切到 32768。前端补了一条老戳判据：没有 `;max=` 的预览生成于固定 16384 上限，默认变成 32768 后不再命中，会退回 `/preview` 重生成。后端平台设置、预览生成与缓存判据回归，前端预览档位 / 准入 / 解码用例同步更新。
+
+2026-11-19：查看器「质检 TXT 清单」点「Agent协助」后，Agent 侧舱输入区不再被锁定遮罩罩住。根因是交接的自动发送分支在置位 `batchContext` 之前就 `return`，而清单场景通常没有已加载的活动影像（`enabled` 为 false），底部 `.at-input-lock` 磨砂层始终盖着输入区。现在交接事件一到即解锁输入区（自动发送与手动移交一致）；解锁跟着交接会话走，发送后只收掉「已携带批次上下文」提示行，显式新建/切换/删除会话时才恢复默认锁定。`AgentChatTab.test.ts` 新增 3 项（无图时仍锁定、自动发送后解锁、追问发送后不再遮罩），前端全量 1173 项通过（默认并发在本机 OOM，降为 `--maxWorkers=2` 后跑完），`check:terms` 通过；未跑浏览器回归。
+
+2026-11-19：16384 长边档位的缩放 / 拖拽改为手势期画降采样副本。`stores/viewer.ts` 新增 `screenPreviewFor`（按 thumb 首次生成并缓存长边 ≤4096 的副本，键是 thumb 本身，换像素即作废）与 `gestureSourceFor`；`onWheel` / `onPan` / `setPaneView` / 归位动画调用 `noteViewGesture`，手势中主画布只画副本，停手 160ms 后补一帧全分辨率。鹰眼导航不再每帧从整幅缩略画布重采样，改用同一副本，并只在尺寸变化时重设背板。副本只影响屏幕绘制，DN、掩码坐标与统计仍读 `src` 与元数据。隔离探针（16384×10923 本地 JPG，无头 Chrome）实测：手势帧间隔 p50/p95 16.7ms 无长帧，手势期间绘制源 42 次为 4096×2731、仅 2 次为全尺寸；同一探针里首次把 16384² 画布画上屏约 1.8s，此后按源缓存。真机 GPU / 旧内核浏览器未复测。
+
+2026-11-19：查看器「质检 TXT 清单」点「Agent协助」时先退休当前聚焦行：`qc.select(null)` + `viewer.clearLights()` + `viewer.clearSpotlight()`，左侧卡片点亮与聚焦遮罩一起收，口径与「再点一行取消选中」一致；交接事件处理期间组件若被切走，遮罩也不会残留。清收发生在点击后、等待解析前。`QcListPanel.test.ts` 新增 1 项，前端全量 1164 项通过。
+
+2026-11-19：仅质检分页从每页 4 景改为 5 景，后端上限与默认值、工具描述、前端提示词与 batch-repair Skill 同步。活动时间线的分页步骤不再把整批 `total` 当成已读条数（原先每页都显示「已读取 27 项」），改为按位置显示「5/27 景…」，末页显示「27/27 景」；工具动作标签补「质检工作区」。已发送的 `limit=4` 历史消息仍按原提示词折叠为同一句摘要。前端 `agentActivity` 新增 1 项用例，后端 `test_repair_application` 增加 limit 边界断言；真实模型未复测。
+
+2026-11-19：Agent 仅质检表的「差异图」列不再恒为空。`inspect_repair_workspace` 每行附带差异图局部裁剪：在检测结果的首个候选框（外扩 25%）范围内从加权差异图裁出，无候选时用整幅降采样；Pillow 转灰度 JPEG data URL，单张上限 12000 字节，超限依次降尺寸/质量，仍超限则省略。完整分辨率差异 PNG 仍不进入工具结果，模型视图继续剥离全部图片。界面沿用既有 `images.difference` 字段，无需改动。`test_repair_application.py` 38 项、Formatter/差异/工作区相关 87 项通过。
+
+2026-11-19：修正仅质检分页的模型视图塌缩。`inspect_repair_workspace` 每页 4 条记录都带 `status`/`source`，通用 Formatter 把整个 `items` 数组当成一条业务判定整体保护，记录超过 4000 字节预算后整页变成 `data:null`（`critical_fields_exceed_budget`），模型只能再调 `read_tool_result`，并按 Schema 里的示例字段猜 `/data/results` 而失败。现在工具可声明 `result_record_fields`，记录数组按页内容缩减；质检页使用专属视图，只保留 item_id/name/ordinal/status/candidate_count/失败原因，完整行仍由 SSE 与落库结果提供给界面。截断视图新增 `read_paths`，列出本结果实际存在的顶层字段路径；`read_tool_result` 的路径说明不再给出与结果无关的示例。`test_tool_result_formatter.py` 54 项、契约与修复相关 73 项通过；真实模型未复测。
+
 2026-11-19：新增 `.agents/skills/batch-repair/`：`SKILL.md` 只保留硬约束、模式判断与流程入口；`references/workflow.md` 记录按意图分流的诊断/准备/卡片启动/监控细节，`state-model.md` 记录状态/计数/验证层，`plan-and-tools.md` 记录 prepare 参数、计划状态与工具字段，`failure-playbook.md` 记录症状与处置。每个文件控制在 4000 字节内，避免首次读取被工具结果预算截断。正文只写增量，关键确认门复述一次；不新增工具或权限。尚未用真实模型验证选择与遵循率，部署时需确认 `SR_SKILL_ROOTS` 指向该目录。详见 [repair-skill-autonomy-handoff.md](repair-skill-autonomy-handoff.md)。
 
 2026-11-18：收敛 Agent 只读修复工具，不新增工具。`list_repair_items` 的 `status` 支持英文逗号分隔并返回 `has_more`；`get_repair_item` 新增 `verify`（默认 true，调用 `validate_current` 返回 `review_valid`/`review_invalid_reason`），区域详情按 rejected > pending > approved 取前 20 条且不含几何/审核人；`query_batch_repair` 改为有界脱敏摘要（counts/progress、最多 20 条 active_jobs、10 条 recent_jobs、待审/驳回项），剔除 `session_id` 与绝对路径；legacy 静态工具复用同一投影。本轮执行环境拒绝 `python`，测试未运行。详见 [repair-workspace-awareness.md](repair-workspace-awareness.md) §2026-11-18。

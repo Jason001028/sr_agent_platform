@@ -13,11 +13,11 @@ let app: App, root: HTMLDivElement, finish: () => void;
 const flush = async () => { await Promise.resolve(); await nextTick(); await Promise.resolve(); };
 beforeEach(() => {
   state.send.mockClear();
-  state.viewer = { showErr: vi.fn() };
+  state.viewer = { showErr: vi.fn(), clearSpotlight: vi.fn(), clearLights: vi.fn() };
   state.qc = reactive({ list: {}, coordinateImportRevision: 1, loaded: true,
     issues: [{ name: 'scene', row: null, col: null }], counts: { done: 0, total: 1 },
     bakeState: 'idle', bakeFails: {}, bakeFailList: [], bakeNoteList: [], targetPath: '',
-    rowForScene: () => null, selectForScene: vi.fn(), statusOf: () => undefined,
+    rowForScene: () => null, selectForScene: vi.fn(), select: vi.fn(), statusOf: () => undefined,
     bakeAll: vi.fn(() => new Promise<void>(resolve => { finish = resolve; })),
   });
   root = document.createElement('div'); document.body.append(root);
@@ -38,6 +38,12 @@ it('sends immediately when already parsed successfully', () => {
   state.qc.bakeState = 'done'; click();
   expect(state.qc.bakeAll).not.toHaveBeenCalled();
   expect(state.send).toHaveBeenCalledTimes(1);
+});
+it('retires the focused row, its lights and spotlight on handoff', () => {
+  state.qc.bakeState = 'done'; click();
+  expect(state.qc.select).toHaveBeenCalledWith(null);
+  expect(state.viewer.clearLights).toHaveBeenCalled();
+  expect(state.viewer.clearSpotlight).toHaveBeenCalled();
 });
 it.each(['failure', 'stopped', 'changed', 'closed'])('does not send after %s', async outcome => {
   click();

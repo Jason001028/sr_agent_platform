@@ -131,12 +131,32 @@ def format_result(name, result, *, budget=None, reference=None, arguments=None, 
                 "byte_limit": limit, "token_estimate": "utf8_bytes_upper_bound",
                 "full_result": reference or {"available": False, "reason": "no_result_store"},
                 "read_tool": "read_tool_result", "tool": name}
+    data_view = safe.get('data') if isinstance(safe, dict) else None
+    record_fields = set(getattr(tool, 'result_record_fields', ()) or ())
+    if name == "search_scenes":
+        record_fields.add('results')
     critical_input = safe
-    if isinstance(safe.get('data'), dict) and safe['data'].get('kind') == 'repair_plan.v1':
+    if isinstance(data_view, dict) and record_fields:
+        kept = {k: v for k, v in data_view.items() if k not in record_fields}
+        if len(kept) != len(data_view):
+            # Record lists are paged content; the generic formatter may shrink
+            # them. Treating them as one atomic verdict made a whole inspection
+            # page collapse to data:null once four rows exceeded the budget.
+            critical_input = {**safe, "data": kept}
+    if isinstance(data_view, dict):
+        # Advertise only paths that exist in this result. Without this the
+        # model copies an example from the tool schema (e.g. /data/results)
+        # and the read fails for any tool with a different shape.
+        paths = {}
+        for key in data_view:
+            if not isinstance(key, str) or len(key) > 64 or len(paths) >= 12:
+                continue
+            paths[key] = '/data/' + key.replace('~', '~0').replace('/', '~1')
+        if paths and size({**metadata, 'read_paths': paths}) <= max(512, limit // 3):
+            metadata['read_paths'] = paths
+    if isinstance(data_view, dict) and data_view.get('kind') == 'repair_plan.v1':
         metadata['read_paths'] = {'targets': '/data/targets/items', 'plan_id': '/data/plan_id',
                                   'execution': '/data/execution'}
-    if name == "search_scenes" and isinstance(safe.get("data"), dict):
-        critical_input = {**safe, "data": {k:v for k,v in safe["data"].items() if k != "results"}}
     critical = _critical(critical_input, extra=getattr(tool, "result_protected_fields", ()))
     candidate = safe
     custom = getattr(tool, "result_formatter", None)

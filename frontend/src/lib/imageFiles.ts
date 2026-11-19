@@ -16,6 +16,19 @@ export interface NamedFileLike {
   type?: string;
 }
 
+/** 浏览器读到的 0 字节 File：多半是文件已被删除/移动，而资源管理器还没刷新，
+ *  拖出来的只是一个失效条目；同步盘的占位文件也可能这样。此时 File.size 为 0、
+ *  读内容全空，后端只会把它当成非法的文件大小。 */
+export function isZeroLengthImageFile(file: { size: number }): boolean {
+  return !(file.size > 0);
+}
+
+/** 入口检查失败时给用户看的话：说清是文件不存在，而不是「格式/大小非法」。 */
+export function zeroLengthImageMessage(names: string[]): string {
+  return `文件不存在或不可读取：${names.join('、')}（浏览器读到 0 字节）。`
+    + '如果文件刚被移动或删除，请刷新资源管理器后重新选择。';
+}
+
 /** 单个文件的影像类型；不是受支持的影像 → null。 */
 export function imageKindOf(f: NamedFileLike): ImageKind | null {
   const name = f.name || '';

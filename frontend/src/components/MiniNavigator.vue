@@ -61,11 +61,15 @@ async function paint(){
   const ctx=c.getContext('2d');if(!ctx||!r.thumb.width||!r.thumb.height)return;
   // Fit inside the navigator bounds without stretching the source image.
   const scale=Math.min(maxWidth/r.thumb.width,200*size.value/100/r.thumb.height);
-  c.width=Math.max(1,Math.round(r.thumb.width*scale));
-  c.height=Math.max(1,Math.round(r.thumb.height*scale));
+  const cw=Math.max(1,Math.round(r.thumb.width*scale)),ch=Math.max(1,Math.round(r.thumb.height*scale));
+  // 背板尺寸只在变化时才重设：每次赋值都会清空并重新分配。
+  if(c.width!==cw)c.width=cw;if(c.height!==ch)c.height=ch;
+  ctx.clearRect(0,0,c.width,c.height);
   ctx.save();
   ctx.scale(c.width/r.thumb.width,c.height/r.thumb.height);
-  drawDiffSource(ctx,(r.stretchPreview??r.thumb) as unknown as CanvasImageSource,r.thumb.width,r.thumb.height,review.active?null:diff.layerFor(r),diff.display,diff.opacity,diff.feather);
+  // 鹰眼最终只有几百像素：16384 档位每帧从整幅缩略画布重采样太贵，改画缓存副本。
+  const source=(r.stretchPreview??store.screenPreviewFor(r)??r.thumb) as unknown as CanvasImageSource;
+  drawDiffSource(ctx,source,r.thumb.width,r.thumb.height,review.active?null:diff.layerFor(r),diff.display,diff.opacity,diff.feather);
   ctx.restore();
   if(tour.coverageVisible){
    const n=tour.coverage.size;ctx.fillStyle='rgba(61,169,164,.22)';ctx.beginPath();
@@ -86,7 +90,8 @@ async function paint(){
  const c=heatRoot.value,heat=heatSource.value,p=store.panes[0],r=p?.rec;
  if(c&&heat&&r?.thumb){
   const scale=Math.min(maxWidth/r.thumb.width,200*size.value/100/r.thumb.height);
-  c.width=Math.max(1,Math.round(r.thumb.width*scale));c.height=Math.max(1,Math.round(r.thumb.height*scale));
+  const hw=Math.max(1,Math.round(r.thumb.width*scale)),hh=Math.max(1,Math.round(r.thumb.height*scale));
+  if(c.width!==hw)c.width=hw;if(c.height!==hh)c.height=hh;
   const ctx=c.getContext('2d');if(ctx){
    ctx.fillStyle='#202c39';ctx.fillRect(0,0,c.width,c.height);
    const coverage=review.active?[0,0,r.thumb.width,r.thumb.height]:diff.layerFor(r)?.coverage;

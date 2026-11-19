@@ -69,7 +69,8 @@ import {
   apiGetSettings, apiSaveSettings,
 } from '../lib/api.js';
 import type { SceneResolveResult, SceneSibling, SceneSiblings } from '../lib/api.js';
-import { classifyImages, imageKindOf } from '../lib/imageFiles.js';
+import { classifyImages, imageKindOf, isZeroLengthImageFile,
+  zeroLengthImageMessage } from '../lib/imageFiles.js';
 import type { SceneOpenMeta, SceneRow } from '../lib/scene.js';
 import { sourceFingerprint } from '../lib/local_preview.js';
 import { LoadControl, isLoadAbort } from '../lib/loadControl';
@@ -222,8 +223,8 @@ const WAND_EDGE = 64;
 const CLOUD_OVERLAY_MAX = 2048;
 
 /** 限制显示层尺寸：后续 RGBA 拷贝和 Float32 像素也按此尺寸分配。
- *  上限 = 平台设置里的「真分辨率」长边（默认 16384，可下调到 4096/8192）；
- *  超过才截断。 */
+ *  上限 = 平台设置里的「真分辨率」长边（默认 32768，可调 4096/8192/16384）；
+ *  超过或整幅面积超过画布上限才截断。 */
 async function decodeJpgToCanvas(blob: Blob): Promise<HTMLCanvasElement> {
   const bmp = await decodeJpegBitmap(blob);
   try {
@@ -890,7 +891,7 @@ export const useViewerStore = defineStore('viewer', () => {
         if (changed) reloadVisibleForPreviewCap();
       }
       platformSettingsLoaded = true;
-    } catch { /* 读不到就用默认 16384，不阻塞查看 */ }
+    } catch { /* 读不到就用默认 32768，不阻塞查看 */ }
   }
 
   /** 改全局上限；成功后立刻重载当前可见影像，旧尺寸不会继续占着内存。 */
@@ -1132,6 +1133,7 @@ export const useViewerStore = defineStore('viewer', () => {
   /** 外部组件（鹰眼）改某一格的视口。交替对比只有一份视口，且 `panes[0].view` 在
    *  第二张时是**换算出来的临时对象** —— 直接改它不会留下任何状态，必须走这里。 */
   function setPaneView(side: 'A' | 'B', v: ViewState) {
+    noteViewGesture();
     if (compareMode.value === 'flicker') view.value = v;
     else setSideView(side, v);
     renderTick.value++;
@@ -1217,6 +1219,7 @@ export const useViewerStore = defineStore('viewer', () => {
     const t0 = performance.now();
     const step = (now: number) => {
       if (id !== viewAnimId) return;                 // 被新动画或手势接管
+      noteViewGesture();
       const p = Math.min(1, Math.max(0, (now - t0) / duration));
       const e = easeOutCubic(p);
       if (toA) viewA.value = lerpView(fromA, toA, e);
@@ -2038,6 +2041,57 @@ export const useViewerStore = defineStore('viewer', () => {
     if (spotlightIds.value.length) setSpotlight(spotlightIds.value);
   }
 
+  /* ---------------- 交互绘制源（LOD） ----------------
+     16384 长边档位的缩略画布有上亿像素，Canvas2D 的 drawImage 没有 mipmap：
+     整幅缩放时每一帧都从这张巨大源采样，真机上表现为缩放 / 拖拽一顿一顿。
+     对策是按需从 thumb 生成一份长边 ≤4096 的副本 —— 手势期间只画它，停手 160ms
+     再补一帧全分辨率；鹰眼本来就要缩到几百像素，也一直画它。副本只影响屏幕显示，
+     DN、掩码坐标与统计仍走 rec.src 与元数据，换 thumb 时按引用自动作废旧副本。 */
+  const SCREEN_PREVIEW_EDGE = 4096;
+  const GESTURE_SETTLE_MS = 160;
+  const gestureActive = ref(false);
+  let gestureTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 缩略画布 → 降采样副本。键用 thumb 本身：换像素即换引用，旧副本自然作废。 */
+  const screenPreviews = new WeakMap<object, KitCanvas>();
+
+  /** 小副本；原图长边不超过阈值时返回 null（直接用 thumb 更省）。 */
+  function screenPreviewFor(rec: ViewerRec): KitCanvas | null {
+    const thumb = rec.thumb;
+    if (!thumb) return null;
+    const edge = Math.max(thumb.width, thumb.height);
+    if (edge <= SCREEN_PREVIEW_EDGE) return null;
+    const cached = screenPreviews.get(thumb);
+    if (cached) return cached;
+    const scale = SCREEN_PREVIEW_EDGE / edge;
+    const cv = browserKit.createCanvas(
+      Math.max(1, Math.round(thumb.width * scale)),
+      Math.max(1, Math.round(thumb.height * scale)),
+    );
+    const ctx = cv.getContext('2d');
+    if (!ctx) return null;
+    ctx.imageSmoothingQuality = 'medium';
+    ctx.drawImage(thumb, 0, 0, cv.width, cv.height);
+    screenPreviews.set(thumb, cv);
+    return cv;
+  }
+
+  /** 手势（滚轮 / 拖动 / 归位动画 / 鹰眼拖视口）中置位；停手后补一帧全分辨率。 */
+  function noteViewGesture(): void {
+    gestureActive.value = true;
+    if (gestureTimer !== null) clearTimeout(gestureTimer);
+    gestureTimer = setTimeout(() => {
+      gestureTimer = null;
+      if (!gestureActive.value) return;
+      gestureActive.value = false;
+      renderTick.value++;            // 停手后的那一帧改用全分辨率
+    }, GESTURE_SETTLE_MS);
+  }
+
+  /** 手势期间主画布该用的小源；不在手势中返回 null（保持全分辨率）。 */
+  function gestureSourceFor(rec: ViewerRec): KitCanvas | null {
+    return gestureActive.value ? screenPreviewFor(rec) : null;
+  }
+
   /* ---------------- 点选清单 ---------------- */
 
   /** 新拖入的图自动加入清单（幂等）。 */
@@ -2186,16 +2240,23 @@ export const useViewerStore = defineStore('viewer', () => {
       showErr('没有识别到影像文件（支持 .tif/.tiff/.jpg/.jpeg）');
       return;
     }
+    // 失效条目：资源管理器里还挂着，文件本体已删除/移动，浏览器拿到的是 0 字节
+    // File。继续往下走只会被后端报成「文件大小无效」，这里先说清原因。
+    const unreadable = [...tifs, ...imgs].filter(isZeroLengthImageFile);
+    if (unreadable.length) showErr(zeroLengthImageMessage(unreadable.map((f) => f.name)));
+    const readableTifs = tifs.filter((f) => !isZeroLengthImageFile(f));
+    const readableImgs = imgs.filter((f) => !isZeroLengthImageFile(f));
+    if (!readableTifs.length && !readableImgs.length) return;
     const dupOf = (f: File): ViewerRec | undefined =>
       recs.value.find((r) => r.file.name === f.name && (r.previewAsset?r.size:r.file.size) === f.size);
     const queued: {id?:number;file?:File}[]=[];
-    tifs.forEach((f) => {
+    readableTifs.forEach((f) => {
       const dup = dupOf(f);
       // 重复的仍然走一遍 activate：分屏下「把同一张图拖到另一侧」是有意义的操作，
       // 归位规则（含两格互换）在 placeRec 里。
       queued.push({id:dup?dup.id:openOne(f)});
     });
-    imgs.forEach((f) => {
+    readableImgs.forEach((f) => {
       const dup = dupOf(f);
       queued.push(dup?{id:dup.id}:{file:f});
     });
@@ -3694,6 +3755,7 @@ export const useViewerStore = defineStore('viewer', () => {
   function onWheel(mx: number, my: number, factor: number) {
     noteUserIntent();
     stopViewAnim();                       // 手势优先：缓动中的归位立即让位
+    noteViewGesture();
     if (split.value) {
       // 指针落在哪一格，就以那一格里的归一化位置为锚点，同一个归一化位置施加到另一格。
       // 两格等宽且都 fit 时这条规则就是逐像素锁定。
@@ -3729,6 +3791,7 @@ export const useViewerStore = defineStore('viewer', () => {
   function onPan(dx: number, dy: number) {
     noteUserIntent();
     stopViewAnim();
+    noteViewGesture();
     if (split.value) {
       if (!splitSynchronized.value) {
         view.value = { ...view.value, ox: view.value.ox + dx, oy: view.value.oy + dy };
@@ -4846,6 +4909,8 @@ export const useViewerStore = defineStore('viewer', () => {
     // 场景聚焦遮罩：模式（持久化）+ 聚焦中的卡片
     canvasBackground, setCanvasBackground,
     spotlightMode, setSpotlightMode, spotlightIds, sceneCardIds, setSpotlight, clearSpotlight,
+    // 交互绘制源（LOD）：手势用降采样副本，停手补全分辨率
+    screenPreviewFor, gestureSourceFor,
     // 一键解析：先排满占位卡，再原地补齐 / 标红 / 收尾
     insertPendingCards, fillPendingCard, setPendingStatus, failPendingCard, finishPendingCards,
     // 拉伸 / 视图

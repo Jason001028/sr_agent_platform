@@ -13,14 +13,21 @@ it('limits progress traffic while always reporting start and completion', () => 
 });
 
 it('rejects unsafe whole JPEG before downloading without changing the requested level', () => {
-  expect(wholeJpegFits(49474, 49454, 2)).toBe(false); // 24737 > 16384
-  expect(wholeJpegFits(49474, 49454, 4)).toBe(true);  // 12368 ≤ 16384 且面积 < 16384²
+  expect(wholeJpegFits(49474, 49454, 2)).toBe(false); // 24737 边长虽在 32768 内，面积超 16384²
+  expect(wholeJpegFits(49474, 49454, 4)).toBe(true);  // 12368 ≤ 32768 且面积 < 16384²
   expect(wholeJpegFits(49474, 49454, 16)).toBe(true);
   expect(wholeJpegFits(49474, 49454, 8)).toBe(true); // previously over-eager local fallback
-  expect(wholeJpegFits(16384, 16384, 1)).toBe(true);  // 真分辨率上限边界
-  expect(wholeJpegFits(16385, 16384, 1)).toBe(false);
+  expect(wholeJpegFits(16384, 16384, 1)).toBe(true);  // 面积恰为 16384²（边长仍在 32768 内）
+  expect(wholeJpegFits(16385, 16384, 1)).toBe(false); // 边长未超，面积已超
   for (const dimensions of [[NaN, 20, 2], [10, 0, 2], [10, 10, 0], [Infinity, 10, 2]])
     expect(wholeJpegFits(...dimensions as [number, number, number])).toBe(false);
+});
+it('opens the 32768 long edge but still rejects over-area whole JPEGs', () => {
+  applyPreviewTrueMaxEdge(32768);
+  expect(wholeJpegFits(32768, 8192, 1)).toBe(true);   // area exactly 16384²
+  expect(wholeJpegFits(32768, 8193, 1)).toBe(false);  // area over, edge under
+  expect(wholeJpegFits(32000, 9000, 1)).toBe(false);  // 288M > canvas area
+  expect(wholeJpegFits(32769, 8192, 1)).toBe(false);  // edge over
 });
 it('re-admits whole JPEGs when the platform limit is lowered', () => {
   applyPreviewTrueMaxEdge(4096);

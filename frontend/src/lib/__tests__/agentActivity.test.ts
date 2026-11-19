@@ -70,6 +70,20 @@ it('retains important results separately and does not repeat their contents in t
   expect(p.groups.size).toBe(0);
   expect(JSON.stringify(messages)).toBe(before);
 });
+it('reports inspection progress by scene position instead of the batch total', () => {
+  const page = (cursor: number, count: number, hasMore: boolean): ChatMsg => ({
+    seq: null, role: 'tool', content: '', toolName: 'inspect_repair_workspace',
+    toolCallId: `qc${cursor}`, ok: true,
+    data: { kind: 'repair_inspection.v1', total: 27, cursor, has_more: hasMore,
+      items: Array.from({ length: count }, (_, index) => ({ item_id: `i${cursor + index}` })) },
+  });
+  const call = (id: string): ChatMsg => ({ seq: 2, role: 'assistant', content: '',
+    toolCalls: [{ id, name: 'inspect_repair_workspace', args: {} }] });
+  expect(projectAgentActivity([user, call('qc0'), page(0, 5, true)], false).steps[0].summary)
+    .toBe('5/27 景…');
+  expect(projectAgentActivity([user, call('qc25'), page(25, 2, false)], false).steps[0].summary)
+    .toBe('27/27 景');
+});
 it('keeps failed searches visible and groups across tool-only assistant messages', () => {
   const a = calls('a'), b = {...calls('b'),seq:4};
   expect(projectAgentActivity([user,a,result('a'),b,result('b')],false).groups.size).toBe(1);

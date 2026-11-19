@@ -19,7 +19,7 @@ disable-model-invocation: false
 
 ## 模式
 
-- `inspect_repair_workspace` 可用，且 `prepare_repair` / `start_repair` / `run_sr` 被禁用 → **仅质检**：只读检测分页（`cursor=0, limit=4`，沿 `next_cursor`）；收齐后界面出总表，只汇总候选、失败与跳过；中途结束说明已检/未检范围。
+- `inspect_repair_workspace` 可用，且 `prepare_repair` / `start_repair` / `run_sr` 被禁用 → **仅质检**：只读检测分页（`cursor=0, limit=5`，沿 `next_cursor`）；收齐后界面出总表，只汇总候选、失败与跳过；中途结束说明已检/未检范围。
 - 否则为**正常修复模式**；只读查询工具在两种模式下都可能存在。
 
 ## 流程

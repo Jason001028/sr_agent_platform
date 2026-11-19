@@ -220,6 +220,58 @@ def test_custom_short_summary_cannot_hide_failure():
     assert view['data']['state']=='FAILED'
 
 
+def test_inspection_page_stays_readable_and_keeps_failed_rows():
+    """A QC page is paged content, not one atomic verdict.
+
+    Before the record-field fix, any item carrying ``status`` made the whole
+    ``items`` array protected; four rows with preview URLs then exceeded the
+    budget and the model saw ``data: null`` + ``critical_fields_exceed_budget``.
+    """
+    from backend.tools.repair import inspection_result_view
+    def row(n, status='candidates'):
+        return {'item_id': f'item-{n}', 'name': f'scene-{n}', 'ordinal': n,
+                'status': status, 'candidate_count': 12,
+                'images': {'pan': '/api/scenes/' + 'x' * 400 + '/preview?div=16',
+                           'nosr': '/api/scenes/' + 'y' * 400 + '/preview?div=16'},
+                'candidates': [{'candidate_id': str(i), 'bbox': [i, i, 40, 40],
+                                'label': 'repair'} for i in range(12)],
+                'candidates_truncated': False}
+    full = ok({'kind': 'repair_inspection.v1', 'inspection_only': True,
+               'detection_method': 'ssim', 'tone_weight': True, 'scope': 'workspace',
+               'cursor': 0, 'total': 9, 'items': [row(1), row(2), row(3), row(4)],
+               'diagnostics': [], 'has_more': True, 'next_cursor': 4, 'note': 'read-only'})
+    tool = Tool('inspect_repair_workspace', '', {'type': 'object'}, Mock(),
+                result_protected_fields=('next_cursor',), result_record_fields=('items',),
+                result_formatter=inspection_result_view)
+    view = check(format_result('inspect_repair_workspace', full, budget=BUDGET, tool=tool))
+    assert view['data'] is not None
+    assert view[META].get('budget_error') is None
+    assert [item['status'] for item in view['data']['items']] == ['candidates'] * 4
+    assert 'images' not in view['data']['items'][0]
+    assert view[META]['read_paths']['items'] == '/data/items'
+    # The failure reason survives even though the record is compacted.
+    failed = ok({**full['data'], 'items': [row(1), {**row(2, 'failed'), 'reason': 'boom'}]})
+    failed_view = check(format_result('inspect_repair_workspace', failed, budget=BUDGET, tool=tool))
+    assert failed_view['data']['items'][1] == {
+        'item_id': 'item-2', 'name': 'scene-2', 'ordinal': 2,
+        'status': 'failed', 'candidate_count': 12,
+        'candidates_truncated': False, 'reason': 'boom'}
+
+
+def test_truncated_view_advertises_only_paths_that_exist():
+    manager = ToolResults(budget=BUDGET)
+    full = ok({'items': [{'id': str(i), 'pad': 'x' * 200} for i in range(30)],
+               'has_more': False})
+    reference = manager.model_view('list_something', full, 'paged')[META]
+    assert reference['read_paths'] == {'items': '/data/items', 'has_more': '/data/has_more'}
+    assert '/data/results' not in json.dumps(reference['read_paths'])
+
+
+def test_reader_schema_does_not_offer_a_foreign_path_example():
+    tool = ToolResults().registry(ToolRegistry()).get('read_tool_result')
+    assert '/data/results' not in tool.params_schema['properties']['path']['description']
+
+
 def test_reader_is_a_schema_validated_model_tool(tmp_path):
     full=ok({'rows':[{'id':str(i)} for i in range(1000)]})
     execute=Mock(return_value=full)

@@ -41,6 +41,13 @@ it('keeps verified scene identity when server preview fails and publishes a loca
   expect(rec.route).toBe('sparse'); expect(rec.localPreviewJpeg?.type).toBe('image/jpeg');
   await vi.waitFor(() => expect(store.imageLoad.active).toBe(false));
 });
+it('rejects a zero-length dropped file before creating a record or touching the server', () => {
+  const store = useViewerStore();
+  store.addFiles(new File([], 'deleted.tif'));
+  expect(store.recs).toHaveLength(0);
+  expect(store.error).toContain('文件不存在或不可读取');
+  expect(sourceFingerprint).not.toHaveBeenCalled();
+});
 it('never labels an unverified local TIFF as server-associated', async () => {
   vi.mocked(apiResolveScene).mockRejectedValue(new Error('not found'));
   const store = useViewerStore(); store.addFiles(new File(['raw'], 'a.tif'));

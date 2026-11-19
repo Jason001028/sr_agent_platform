@@ -35,7 +35,7 @@ class ImageOpenTests(unittest.TestCase):
         self.data=self.root/'data';self.data.mkdir()
         env=allowed_roots_env(self.data)
         # 平台设置（真分辨率长边上限）从 SR_AGENT_DB 读；不隔离就会跟着开发者
-        # 本地库里的值走，断言 16384 时会假红。
+        # 本地库里的值走，断言 32768 时会假红。
         env.update(SR_IMAGE_CACHE_ROOT=str(self.root/'cache'),SR_PREVIEW_ROOTS='',SR_IMAGE_CACHE_TTL_SEC='300',
                    SR_AGENT_DB=str(self.root/'db.sqlite'))
         env['SR_DRIVE_MAP']=env.get('SR_DRIVE_MAP','')+f';W:={self.data};X:={self.data}'
@@ -105,12 +105,30 @@ class ImageOpenTests(unittest.TestCase):
             for div in (1,2):
                 response=self.client.get(f"/api/image-open/assets/{asset['id']}/preview?div={div}")
                 self.assertEqual(response.status_code,200,response.text)
-            build.assert_called_once_with(self.source,max_edge=16384)
+            # 默认上限 32768 下 div=1 / div=2 都先被画布面积压到同一长边 16387，
+            # 所以第二次请求直接命中缓存，只生成一次。
+            build.assert_called_once_with(self.source,max_edge=16387)
 
     def test_wrong_fingerprint_uploads_instead_of_linking_another_file(self):
         token=self.ticket();fp=fingerprint(self.source);fp['samples'][0]=''
         response=self.client.post(f'/api/image-open/tickets/{token}/selection',json={'files':[
             {'path':'W:\\image.tif','name':self.source.name,'size':self.source.stat().st_size,'fingerprint':fp}]})
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(response.json()['files'][0]['state'],'upload')
+
+    def test_zero_length_selection_reports_the_received_size(self):
+        token=self.ticket()
+        response=self.client.post(f'/api/image-open/tickets/{token}/selection',
+                                  json={'files':[{'name':'a.tif','size':0}]})
+        self.assertEqual(response.status_code,413)
+        self.assertIn('收到 0',response.json()['detail'])
+
+    def test_four_gib_source_is_valid_and_enters_the_upload_path(self):
+        """4.55 GB 不是上限问题：默认 8 GiB 上传上限下它应被判为 upload，
+        而不是「文件大小无效」。"""
+        token=self.ticket()
+        response=self.client.post(f'/api/image-open/tickets/{token}/selection',
+                                  json={'files':[{'name':'a.tif','size':4885525299}]})
         self.assertEqual(response.status_code,200,response.text)
         self.assertEqual(response.json()['files'][0]['state'],'upload')
 

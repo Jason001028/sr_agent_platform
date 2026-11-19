@@ -45,6 +45,8 @@ UTF-8 字节数作为字节级 Tokenizer 的保守 Token 上界，不宣称是�
   `UNKNOWN`、失败、运行中和合法跳过保持不同语义。
 - 日志文本：优先 ERROR / WARNING / FATAL、首部和尾部，附原始字节数、行数及至少省略的字节数；UTF-8 边界安全。
 - 其他 JSON、数组、嵌套对象：逐级缩减，并独立保留关键字段；包含业务判定的数组作为整体保护，放不下则明确报告预算异常。
+- 分页记录列表（如 `inspect_repair_workspace` 的 `items`）由工具声明 `result_record_fields`，按页内容缩减而不是当成一条业务判定；专属 Formatter 保留每一行的结论字段与失败原因，完整行仍走 SSE 与落库结果。
+- 截断视图的 `_tool_result_budget.read_paths` 只列出本结果实际存在的顶层字段路径（如 `/data/items`），避免模型照抄工具 Schema 里与本结果无关的示例路径。
 
 ## 完整结果与恢复
 

@@ -5,15 +5,16 @@ import {
   PREVIEW_TRUE_MAX_EDGE_OPTIONS,
 } from '../previewLevel';
 afterEach(() => { applyPreviewTrueMaxEdge(PREVIEW_TRUE_MAX_EDGE); });
-it('treats long edge 16384 as the true-resolution boundary',()=>{
-  expect(PREVIEW_TRUE_MAX_EDGE).toBe(16384);
+it('treats long edge 32768 as the default true-resolution boundary',()=>{
+  expect(PREVIEW_TRUE_MAX_EDGE).toBe(32768);
   expect(isTruePreviewEdge(16384)).toBe(true);
-  expect(isTruePreviewEdge(16385)).toBe(false);
+  expect(isTruePreviewEdge(32768)).toBe(true);
+  expect(isTruePreviewEdge(32769)).toBe(false);
   expect(isTruePreviewEdge(0)).toBe(false);
 });
 it('applies the platform setting without accepting arbitrary edges',()=>{
-  expect(PREVIEW_TRUE_MAX_EDGE_OPTIONS).toEqual([4096, 8192, 16384]);
-  expect(getPreviewTrueMaxEdge()).toBe(16384);
+  expect(PREVIEW_TRUE_MAX_EDGE_OPTIONS).toEqual([4096, 8192, 16384, 32768]);
+  expect(getPreviewTrueMaxEdge()).toBe(32768);
   expect(applyPreviewTrueMaxEdge(8192)).toBe(true);
   expect(getPreviewTrueMaxEdge()).toBe(8192);
   expect(previewTrueMaxPixels()).toBe(8192 * 8192);
@@ -22,11 +23,31 @@ it('applies the platform setting without accepting arbitrary edges',()=>{
   expect(applyPreviewTrueMaxEdge(5000)).toBe(false);
   expect(getPreviewTrueMaxEdge()).toBe(8192); // 非法值不改当前值
 });
+it('opens the 32768 long edge but keeps the canvas area cap',()=>{
+  expect(applyPreviewTrueMaxEdge(32768)).toBe(true);
+  expect(getPreviewTrueMaxEdge()).toBe(32768);
+  expect(isTruePreviewEdge(32768)).toBe(true);
+  expect(isTruePreviewEdge(32769)).toBe(false);
+  expect(previewTrueMaxPixels()).toBe(16384 * 16384);
+});
 it('reports the actual ratio and whether the edge is a true-resolution tier',()=>{
   expect(previewResolutionNote(48000,40000,12000,10000)).toBe('实际约 1/4（长边 12000，真分辨率）');
   expect(previewResolutionNote(48000,40000,16384,13653)).toBe('实际约 1/2.93（长边 16384，真分辨率）');
-  expect(previewResolutionNote(48000,40000,20000,16667)).toBe('实际约 1/2.4（长边 20000，超过 16384 上限）');
+  expect(previewResolutionNote(48000,40000,20000,16667)).toBe('实际约 1/2.4（长边 20000，真分辨率）');
+  expect(previewResolutionNote(48000,40000,40000,33333)).toBe('实际约 1/1.2（长边 40000，超过 32768 上限）');
   expect(previewResolutionNote(48000,40000,0,0)).toBe('');
+});
+it('labels area-capped near-square previews instead of calling them true-resolution',()=>{
+  // 49475×49454 选 1:1：长边被 16384² 画布面积压到 16387，实际约 1/3.02，
+  // 与 1/2 档产物同尺寸。不能继续标「真分辨率」。
+  expect(previewResolutionNote(49475,49454,16387,16380))
+    .toBe('实际约 1/3.02（长边 16387，受画布面积限制）');
+  // 窄长图面积恰为画布上限：32768 长边仍是真分辨率。
+  expect(previewResolutionNote(32768,8192,32768,8192))
+    .toBe('实际约 1/1（长边 32768，真分辨率）');
+  // 降到余量足够的档位后，面积不再是约束。
+  expect(previewResolutionNote(49475,49454,12369,12364))
+    .toBe('实际约 1/4（长边 12369，真分辨率）');
 });
 it('uses the configured limit in the status note',()=>{
   applyPreviewTrueMaxEdge(4096);

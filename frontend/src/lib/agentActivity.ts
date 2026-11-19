@@ -60,6 +60,15 @@ function stepSummary(step: ActivityStep): string {
   if (step.name === 'read_tool_result') return '已读取保存结果';
   if (step.name === 'get_current_image_info') return '已读取当前影像信息';
   if (step.name === 'prepare_repair') return '已准备修复计划';
+  // 质检分页：total 是整批景数，不是本页条数。每页只报“已到第几景”，
+  // 末页不带省略号；27 景按 5 景一页即显示 5/27 景…
+  if (data?.kind === 'repair_inspection.v1' && Array.isArray(data.items)
+      && typeof data.total === 'number') {
+    const shown = data.items.length;
+    const end = typeof data.cursor === 'number' ? data.cursor + shown
+      : typeof data.next_cursor === 'number' ? data.next_cursor : data.total;
+    return `${end}/${data.total} 景${data.has_more ? '…' : ''}`;
+  }
   if (typeof data?.total === 'number') return `已读取 ${data.total} 项`;
   return '执行完成';
 }

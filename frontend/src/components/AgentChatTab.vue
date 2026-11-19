@@ -55,17 +55,27 @@ const chat = useChatStore();
 const toolPresentation = computed(() => projectAgentActivity(chat.messages, chat.sending));
 const scenes = useScenesStore();
 const draft = ref('');
+/** 交接后的输入区解锁：清单场景通常没有已加载的活动影像，只靠 `enabled` 会让底部
+ *  一直罩着「未打开影像」的锁定遮罩。解锁跟着交接走，直到显式新建/切换/删除会话
+ *  —— 已发出的消息本身就是上下文，追问不该因为没图又被锁回去。 */
 const batchContext = ref(false);
+/** 「已携带批次上下文」提示行只在交接尚未发出时显示；发送后提示收掉，解锁保留。 */
+const batchHint = ref(false);
 const composerEnabled = computed(() => enabled.value || batchContext.value);
+function clearBatchContext(): void {
+  batchContext.value = false;
+  batchHint.value = false;
+}
 function receiveBatch(event: Event) {
   const detail = (event as CustomEvent<BatchAgentHandoff>).detail;
   const text = detail?.text;
   if (!text) return;
+  batchContext.value = true;
   if (detail.autoSend && detail.repairSettings) {
     void sendAgentRepair(detail);
     return;
   }
-  batchContext.value = true;
+  batchHint.value = true;
   draft.value = draft.value.trim() ? `${draft.value}\n\n${text}` : text;
 }
 onMounted(() => window.addEventListener('batch-agent-handoff', receiveBatch));
@@ -158,12 +168,14 @@ function toggleMenu(): void {
 async function startNew(): Promise<void> {
   if (chat.sending || creating.value) return;
   menuOpen.value = false;
+  clearBatchContext();
   await chat.newSession();
 }
 
 async function switchTo(sid: string): Promise<void> {
   menuOpen.value = false;
   if (chat.sending || sid === chat.sessionId) return;
+  clearBatchContext();
   await chat.selectSession(sid);
 }
 
@@ -175,6 +187,7 @@ async function removeCurrent(): Promise<void> {
     `删除会话 ${shortId(sid)}？\n消息、用量和轨迹记录会一并删除，且不可恢复。`);
   if (!ok) return;
   menuOpen.value = false;
+  clearBatchContext();
   await chat.deleteSession(sid);
 }
 
@@ -281,7 +294,8 @@ async function onSend(): Promise<void> {
   }
   draft.value = '';
   const latest = snap.value;
-  batchContext.value = false;
+  // 提示行收起，但输入区保持解锁：本会话已经有交接上下文，追问不再依赖当前影像。
+  batchHint.value = false;
   void chat.send(latest ? agentPayload(text, buildContextNote(latest)) : text);
 }
 
@@ -314,8 +328,8 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
 
 <template>
   <div class="at">
-    <!-- 头部：会话操作 + 去 Chat 页。不再显示「会话 xxxxxxxx」：当前会话在
-         历史菜单里高亮，那串 id 对操作没有帮助。 -->
+    <!-- 头部：左侧一组会话操作（新建 / 历史 / 删除 / 设置）+ 去 Chat 页。
+         不再显示「会话 xxxxxxxx」：当前会话在历史菜单里高亮，那串 id 对操作没有帮助。 -->
     <div class="at-head">
       <!-- 锁定只影响输入；历史查看与会话管理始终可用。 -->
       <div class="at-sess-tools">
@@ -340,8 +354,8 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
                 @click="removeCurrent">
           <AppIcon name="circle-x" :size="16" />
         </button>
+        <AgentRepairSettings />
       </div>
-      <AgentRepairSettings />
       <router-link class="at-go" to="/chat">去 Chat 页继续 ↗</router-link>
     </div>
 
@@ -431,7 +445,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
 
       <div class="at-foot" :class="{ locked: !composerEnabled }">
         <div :inert="!composerEnabled">
-        <p v-if="batchContext" class="at-desc">已携带批次上下文，可补充问题后发送。</p>
+        <p v-if="batchHint" class="at-desc">已携带批次上下文，可补充问题后发送。</p>
 
         <div v-if="viewer.questionRegion" class="roi-reference"><button @click="viewer.activeRec?.id===viewer.questionRegion.recId && viewer.focusSourceBounds(viewer.activeSide,viewer.questionRegion.bounds)">{{ viewer.questionRegion.name }} · 源影像区域 {{ viewer.questionRegion.bounds.join(', ') }}</button><button @click="viewer.questionRegion=null">移除</button><small>手动发送消息时附上区域预览截图。</small></div>
         <ChatAttachTray :items="chat.pendingImages" @remove="chat.removePendingImage" />
@@ -483,6 +497,21 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
   background: var(--surface);
 }
 .at-sess-tools { display: flex; align-items: center; gap: 2px; }
+/* 设置键并进左侧三键一组：外壳与 .at-hbtn 同为 24×24，四颗图标中心与右边界齐平
+   （AgentRepairSettings 默认 28×28，只在这个头部里收一档）。 */
+.at-sess-tools :deep(.settings-trigger) {
+  width: 24px;
+  height: 24px;
+  box-sizing: border-box;
+  border: 1px solid transparent;
+  border-radius: var(--r-ctrl);
+  transition: border-color var(--motion-hover) var(--ease-standard), background var(--motion-hover) var(--ease-standard);
+}
+.at-sess-tools :deep(.settings-trigger:hover),
+.at-sess-tools :deep(.settings-trigger[aria-expanded="true"]) {
+  border-color: var(--accent-2);
+  background: var(--accent-soft);
+}
 /* 三个图标键（新会话 / 历史 / 删除当前）：24px 方形，图标本体 16px。
    图标是 `<img>` 里的 currentColor 单色 SVG，改不了颜色 —— 状态靠底色与描边表达。 */
 .at-hbtn {

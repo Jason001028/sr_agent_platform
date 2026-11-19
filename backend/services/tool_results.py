@@ -141,8 +141,9 @@ class ToolResults:
                      '这只是历史结果回读失败，不代表修复任务启动失败；不要重新提交修复。')
         result['data'] = {'result_id': result_id, 'requested_path': path,
                           'resolved_path': resolved, 'available_paths': children,
-                          'recovery': '可先使用 path="" 查看根对象；修复计划目标使用 /data/targets/items，'
-                                      '逐项读取 item_id，不存在 targets.ids。任务进度使用 list_repair_items 查询。'}
+                          'recovery': '可先使用 path="" 查看根对象，或按截断视图的 read_paths 选择字段；'
+                                      '修复计划目标使用 /data/targets/items，逐项读取 item_id，不存在 targets.ids；'
+                                      '质检分页使用 /data/items。任务进度使用 list_repair_items 查询。'}
         # Diagnostics are bounded too; never archive errors into another read loop.
         while size(result) > self.budget.limit and children:
             children.pop()
@@ -157,7 +158,8 @@ class ToolResults:
                              "使用截断结果中 full_result.available=true 的引用 id；无持久化会话时引用仅本次运行有效。"
                              "路径基于完整的 ok/data/error 结果，读取前按既有策略脱敏。数组按元素、对象按键、字符串按字符分页；"
                              "修复计划目标列表路径为 /data/targets/items，每项有 item_id；不存在 /data/targets/ids。"
-                             "路径失败时查看 available_paths，按实际字段改读；不确定先用空 path 查看根对象，不重复猜同一路径。"
+                             "截断视图的 read_paths 列出本结果实际可读字段；路径失败时查看 available_paths，按实际字段改读；"
+                             "不确定先用空 path 查看根对象，不重复猜同一路径，也不要把示例当成本结果字段。"
                              "返回 value、shown、total、has_more、next_offset，标量仅返回 value 和引用信息。"
                              "has_more=true 时沿 next_offset 继续；预算可缩小页面（page_reduced），单项超限时 shown=0、游标不前进，须改读更深路径。"
                              "过期、跨会话、不可用引用或不存在的路径返回错误；不要因此盲目重调有副作用的原工具。",
@@ -165,7 +167,7 @@ class ToolResults:
                 "result_id":{"type":"string","pattern":"^[a-f0-9]{32}$",
                     "description":"当前会话工具结果中 full_result.available=true 时提供的 id，32 位小写十六进制；不是 job_id 或文件路径。"},
                 "path":{"type":"string","maxLength":512,
-                    "description":"完整结果中的 JSON Pointer，最多 512 字符；省略或空串选根对象，例如 /data/results；~1 表示 /，~0 表示 ~，数组用从 0 起的索引。"},
+                    "description":"完整结果中的 JSON Pointer，最多 512 字符；省略或空串选根对象。必须取本结果实际存在的字段，优先按截断视图的 read_paths 选择；例如 /data/items 或 /data/targets/items。~1 表示 /，~0 表示 ~，数组用从 0 起的索引。"},
                 "offset":{"type":"integer","minimum":0,
                     "description":"从 0 起的非负偏移，省略为 0；单位是数组元素、对象键或字符串字符。下一页使用返回的 next_offset；标量不使用此参数。"},
                 "limit":{"type":"integer","minimum":1,"maximum":100,

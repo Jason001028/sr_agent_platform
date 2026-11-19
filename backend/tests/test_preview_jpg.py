@@ -268,9 +268,9 @@ class TestBigPreviewNotMistakenForBomb(unittest.TestCase):
     def test_huge_preview_cache_still_hits(self):
         """端到端：巨大的旧缓存 + mtime 比源新 → 必须判为命中，而不是重生成。
 
-        默认上限 16384 下不会再生成 20000 的产物；这里模拟「上限允许更大」的
-        未来档位（钉住的是 cache_hit 只读文件头、且不能被 Pillow 炸弹阈值挡住），
-        生成与缓存判据读的是同一个上限，所以戳与尺寸仍能对上。
+        默认上限 32768 允许 20000 的产物；这里把上限钉在 HUGE，验证 cache_hit
+        只读文件头、且不能被 Pillow 炸弹阈值挡住 —— 生成与缓存判据读的是同一个
+        上限，所以戳与尺寸仍能对上。
         """
         with tempfile.TemporaryDirectory() as d:
             p, _ = make_strip_tif(d, "s.tif", 64, 64)

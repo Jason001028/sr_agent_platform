@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import tifffile
@@ -38,7 +39,7 @@ class PlatformSettingsTest(unittest.TestCase):
 
     def test_defaults_and_round_trip_across_store_instances(self):
         self.assertEqual(platform_settings.load_settings(refresh=True),
-                         {"preview_max_edge": 16384})
+                         {"preview_max_edge": 32768})
         platform_settings.save_settings({"preview_max_edge": 8192})
         path = os.environ["SR_AGENT_DB"]
         self.assertEqual(Store(path).list_platform_settings(),
@@ -46,15 +47,15 @@ class PlatformSettingsTest(unittest.TestCase):
         self.assertEqual(platform_settings.load_settings(refresh=True),
                          {"preview_max_edge": 8192})
 
-    def test_rejects_values_outside_the_three_options(self):
-        for bad in (5000, 16383, 0, -4096, "8192", True, None):
+    def test_rejects_values_outside_the_options(self):
+        for bad in (5000, 16383, 65536, 0, -4096, "8192", True, None):
             with self.subTest(value=bad):
                 with self.assertRaises(platform_settings.SettingsError):
                     platform_settings.save_settings({"preview_max_edge": bad})
         with self.assertRaises(platform_settings.SettingsError):
             platform_settings.save_settings({"unknown": 1})
         self.assertEqual(platform_settings.load_settings(refresh=True),
-                         {"preview_max_edge": 16384})
+                         {"preview_max_edge": 32768})
 
     def test_corrupt_or_unknown_saved_value_falls_back_to_default(self):
         store = Store(os.environ["SR_AGENT_DB"])
@@ -64,15 +65,41 @@ class PlatformSettingsTest(unittest.TestCase):
         db.commit()
         store.close()
         self.assertEqual(platform_settings.load_settings(refresh=True),
-                         {"preview_max_edge": 16384})
+                         {"preview_max_edge": 32768})
 
     def test_preview_generation_uses_the_configured_cap(self):
-        source = make_tif(self.tmp.name, "wide.tif", 20000, 1)
+        source = make_tif(self.tmp.name, "wide.tif", 40000, 1)
         self.assertEqual(preview_max_edge(source, 1), PREVIEW_TRUE_MAX_EDGE)
         platform_settings.save_settings({"preview_max_edge": 4096})
         self.assertEqual(preview_max_edge(source, 1), 4096)
         platform_settings.save_settings({"preview_max_edge": 8192})
         self.assertEqual(preview_max_edge(source, 1), 8192)
+        narrower = make_tif(self.tmp.name, "narrower.tif", 20000, 1)
+        platform_settings.save_settings({"preview_max_edge": 32768})
+        self.assertEqual(preview_max_edge(narrower, 1), 20000)  # 源长边不足上限
+        platform_settings.save_settings({"preview_max_edge": 32768})
+        self.assertEqual(preview_max_edge(source, 1), 32768)
+
+    def test_preview_generation_respects_the_canvas_area_at_32768(self):
+        from backend.services import preview_jpg
+        source = make_tif(self.tmp.name, "edge.tif", 2, 2)
+        platform_settings.save_settings({"preview_max_edge": 32768})
+        # 窄长图：长边 32768、面积恰为 16384²，保留 32768。
+        with mock.patch.object(preview_jpg, "scene_dims",
+                               return_value={"W": 32768, "H": 8192}):
+            self.assertEqual(preview_max_edge(source, 1), 32768)
+        # 方图：长边可以到 32768，但整幅面积装不下，退回 16384。
+        with mock.patch.object(preview_jpg, "scene_dims",
+                               return_value={"W": 32768, "H": 32768}):
+            self.assertEqual(preview_max_edge(source, 1), 16384)
+        # 接近方形：按面积算出的最长边，结果面积不超过画布上限。
+        with mock.patch.object(preview_jpg, "scene_dims",
+                               return_value={"W": 32768, "H": 25127}):
+            edge = preview_max_edge(source, 1)
+        self.assertLess(edge, 32768)
+        scale = edge / 32768
+        self.assertLessEqual(round(32768 * scale) * round(25127 * scale),
+                             16384 * 16384 + 1_000_000)
 
     def test_cache_stamp_follows_the_cap_in_both_directions(self):
         jpg = Path(self.tmp.name) / "v_preview.jpg"
@@ -122,8 +149,9 @@ class PlatformSettingsApiTest(unittest.TestCase):
     def test_get_put_and_validation(self):
         c = self.base.client()
         body = c.get("/api/settings").json()
-        self.assertEqual(body["settings"], {"preview_max_edge": 16384})
-        self.assertEqual(body["options"]["preview_max_edge"], [4096, 8192, 16384])
+        self.assertEqual(body["settings"], {"preview_max_edge": 32768})
+        self.assertEqual(body["options"]["preview_max_edge"],
+                         [4096, 8192, 16384, 32768])
 
         r = c.put("/api/settings", json={"preview_max_edge": 8192})
         self.assertEqual(r.status_code, 200, r.text)
@@ -132,8 +160,8 @@ class PlatformSettingsApiTest(unittest.TestCase):
         self.assertEqual(
             c.get("/api/settings").json()["settings"]["preview_max_edge"], 8192)
 
-        for bad in ({"preview_max_edge": 16383}, {"preview_max_edge": "4096"},
-                    {"unknown": 1}, {}):
+        for bad in ({"preview_max_edge": 16383}, {"preview_max_edge": 65536},
+                    {"preview_max_edge": "4096"}, {"unknown": 1}, {}):
             with self.subTest(body=bad):
                 self.assertEqual(
                     c.put("/api/settings", json=bad).status_code, 400)

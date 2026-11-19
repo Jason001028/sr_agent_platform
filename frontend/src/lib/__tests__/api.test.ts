@@ -368,13 +368,26 @@ describe('fetchSceneJpg', () => {
   });
 
   it('静态落点的签名与请求一致 → 只用它，一次请求', async () => {
-    const ok = jpegWithStamp('srprev:v4:div4+equal:q85;src=abc-100-1');
+    const ok = jpegWithStamp(`srprev:v4:div4+equal:q85;max=${PREVIEW_TRUE_MAX_EDGE};src=abc-100-1`);
     stubFetch({ '/disk-array/a/b_preview.jpg?div=4': ok });
     const r = row({ jpgUrl: BAKED, hasPreview: true, previewDiv: 4,
       srcRev: 'abc-100-1' });
     const got = new Uint8Array(await (await fetchSceneJpg(CFG, r, 4)).arrayBuffer());
     expect(Array.from(got)).toEqual(Array.from(ok));
     expect(urls).toEqual(['/disk-array/a/b_preview.jpg?div=4']);
+  });
+
+  it('老戳没有 ;max= → 生成于固定 16384 上限，默认 32768 下退回 /preview', async () => {
+    const legacy = jpegWithStamp('srprev:v4:div4+equal:q85;src=abc-100-1');
+    stubFetch({
+      '/disk-array/a/b_preview.jpg?div=4': legacy,
+      '/api/scenes/~YWJj/preview?div=4': 'FRESH',
+    });
+    const r = row({ jpgUrl: BAKED, hasPreview: true, previewDiv: 4,
+      srcRev: 'abc-100-1' });
+    expect(await (await fetchSceneJpg(CFG, r, 4)).text()).toBe('FRESH');
+    expect(urls).toEqual(['/disk-array/a/b_preview.jpg?div=4',
+      '/api/scenes/~YWJj/preview?div=4']);
   });
 
   it('静态落点的生成上限与当前设置不一致 → 退回 /preview 重生成', async () => {

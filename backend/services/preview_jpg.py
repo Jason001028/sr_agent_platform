@@ -1,7 +1,7 @@
 """Disk-array scene preview JPEG generation (server-side).
 
 规则 v4：优先使用已有无压缩条带 Overview；**长宽各为源图的 1/div**（长边再按
-平台设置里的「真分辨率长边上限」封顶，默认 16384），显示值用**直方图均衡**。
+平台设置里的「真分辨率长边上限」封顶，默认 32768），显示值用**直方图均衡**。
 div 由调用方按用户的滑块档位传入（`div ∈ PREVIEW_DIVISORS`，缺省 `LEGACY_PREVIEW_DIV`）。
 
     ps   = min(1, max_edge / max(W, H))，max_edge = round(max(W,H) / div)
@@ -41,6 +41,7 @@ from __future__ import annotations
 from typing import Optional
 
 import hashlib
+import math
 import os
 import re
 import tempfile
@@ -58,15 +59,15 @@ from backend.services import platform_settings
 #: HTTP 层的 `?div=` 与前端滑块都只能取这里面的值。
 PREVIEW_DIVISORS = (1, 2, 4, 8, 16, 32)
 
-#: 「真分辨率」长边上限的**默认值**：4096 × 4 = 16384。实际生效值由平台设置
-#: `preview_max_edge` 决定（4096 / 8192 / 16384，服务端 SQLite 持久化，所有机器
+#: 「真分辨率」长边上限的**默认值**：32768。实际生效值由平台设置
+#: `preview_max_edge` 决定（4096 / 8192 / 16384 / 32768，服务端 SQLite 持久化，所有机器
 #: 共用）。这里保留常量是为了「读不到设置时仍有安全默认」与测试基准；
 #: 生成/缓存判据一律走 `configured_preview_max_edge()`，不要再直接引用它。
 PREVIEW_TRUE_MAX_EDGE = platform_settings.DEFAULT_PREVIEW_MAX_EDGE
 
 
 def configured_preview_max_edge() -> int:
-    """当前生效的长边上限（平台设置；读不到时回落默认 16384）。"""
+    """当前生效的长边上限（平台设置；读不到时回落默认 32768）。"""
     return platform_settings.configured_preview_max_edge()
 
 
@@ -323,14 +324,40 @@ def scene_dims(path) -> Optional[dict]:
     return None
 
 
+#: Chromium 画布面积上限（16384²）。32768 档只放宽**长边**，整幅面积仍不能越过它。
+PREVIEW_CANVAS_AREA_MAX = 16384 * 16384
+
+
+def preview_target_edge(width: int, height: int, div: int, cap: int) -> int:
+    """本次预览的目标长边：min(平台上限, 源长边 / div, 面积上限允许的长边)。
+
+    32768 档下，32768×8192 这类窄长图仍按 32768 采样；32768×32768 或
+    32768×25127 则会按画布面积（16384²）退回更小的长边 —— 整幅画布装不下，
+    继续生成更大的图只会白占内存。目标尺寸由长边等比缩放，故面积约束可写成
+    `short_edge * edge² / long_edge <= 16384²`。
+    """
+    if div not in PREVIEW_DIVISORS:
+        raise PreviewError(
+            f"下采样档位非法：{div}（只认 {'/'.join(map(str, PREVIEW_DIVISORS))}）")
+    width, height = int(width), int(height)
+    if width <= 0 or height <= 0:
+        raise PreviewError("影像尺寸非法")
+    long_edge, short_edge = max(width, height), min(width, height)
+    edge = min(int(cap), max(1, int(round(long_edge / div))))
+    area_edge = max(1, int(math.floor(
+        math.sqrt(PREVIEW_CANVAS_AREA_MAX * long_edge / short_edge))))
+    return max(1, min(edge, area_edge))
+
+
 def preview_max_edge(source_path, div: int = LEGACY_PREVIEW_DIV, *,
                      cap: Optional[int] = None) -> int:
-    """本次预览生成的长边 = min(源图长边 / div, 平台设置的上限)。
+    """本次预览生成的长边 = min(源图长边 / div, 平台设置的上限, 画布面积上限)。
 
-    上限默认 16384 = 4096×4，是浏览器画布/内存能按真分辨率装下的上限；超过它再
-    生成也只是白占服务端内存，前端必然要截断。设置里可降到 4096 / 8192（低内存
-    机器），服务端生成、前端解码与缓存判据用的是同一个值。只读头 / `.hdr` 拿
-    尺寸，极便宜（`scene_dims`），不解码任何像素。
+    上限默认 32768，长边超过 16384 的窄长图也能按真分辨率装下；设置里可降到
+    4096 / 8192 / 16384（低内存机器，或只按画布面积给整幅上限）。32768 只放宽
+    长边，整幅面积仍受 16384² 画布面积约束，见 `preview_target_edge`。服务端生成、
+    前端解码与缓存判据用的是同一个值。只读头 / `.hdr` 拿尺寸，极便宜
+    （`scene_dims`），不解码任何像素。
 
     `cap` 用于调用方已经读过一次设置、要把「像素尺寸」与「规则戳里的上限」钉在
     同一个值上：不传时现读平台设置。**注意返回值是实际生成尺寸，不是上限本身** ——
@@ -339,9 +366,6 @@ def preview_max_edge(source_path, div: int = LEGACY_PREVIEW_DIV, *,
     `div` 非法一律抛 `PreviewError`：HTTP 层会先校验成 400，走到这儿还不合法就是
     调用方漏了校验 —— 宁可报错，也不要拿一个奇怪的尺寸生成出一张图来。
     """
-    if div not in PREVIEW_DIVISORS:
-        raise PreviewError(
-            f"下采样档位非法：{div}（只认 {'/'.join(map(str, PREVIEW_DIVISORS))}）")
     src = Path(source_path)
     if not src.is_file():
         raise PreviewError("场景文件不存在")
@@ -349,8 +373,7 @@ def preview_max_edge(source_path, div: int = LEGACY_PREVIEW_DIV, *,
     if not dims:
         raise PreviewError(f"无法读取图像尺寸：{src.name}")
     limit = configured_preview_max_edge() if cap is None else int(cap)
-    return min(limit,
-               max(1, int(round(max(dims["W"], dims["H"]) / div))))
+    return preview_target_edge(dims["W"], dims["H"], div, limit)
 
 
 # --------------------------------------------------------------------------
@@ -694,11 +717,11 @@ def rule_stamp(quality: int = PREVIEW_JPG_QUALITY,
     与这里的 `…:div2+equal:…` 字符串本就不同，所以 v2 产物一律重生成一轮（预期内）。
 
     **max 也进戳**（2026-11-10 起）：真分辨率长边上限可在设置里改。只按尺寸判废
-    能处理「调低」，处理不了「调高」—— 16384 档恢复后，盘上那份 8192 的旧图
+    能处理「调低」，处理不了「调高」—— 32768 档恢复后，盘上那份 16384 的旧图
     尺寸并不超限，会被当成命中，界面永远看不到更清晰的版本。把上限写进戳后，
     两个方向都会重生成一轮；旧戳没有 `;max=`，升级后也一次性判废（预期内）。
 
-    `max_edge` 参数是**平台设置里的上限**（4096 / 8192 / 16384），不是本次按
+    `max_edge` 参数是**平台设置里的上限**（4096 / 8192 / 16384 / 32768），不是本次按
     `min(上限, 源长边/div)` 算出的实际尺寸 —— 小图在浅档位下两者不同，戳必须记
     上限，`cache_meta` 才能按「当前设置」逐个对得上。
 

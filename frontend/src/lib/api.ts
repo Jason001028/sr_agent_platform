@@ -17,7 +17,7 @@ import type { SceneRow, SrConfig, RasterPreview } from './scene.js';
 import { createBlobCache } from './blobCache.js';
 import type { BlobCacheStats } from './blobCache.js';
 import {
-  PREVIEW_TRUE_MAX_EDGE, getPreviewTrueMaxEdge, isPreviewMaxEdgeSynced,
+  getPreviewTrueMaxEdge, isPreviewMaxEdgeSynced,
 } from './previewLevel.js';
 import type { ClearResponse } from './scene.js';
 import type { ViewerContextSnapshot } from './agentContext.js';
@@ -1171,6 +1171,10 @@ function cacheBlob(key: string, blob: Blob): Blob {
  *  `max` 是生成时的真分辨率长边上限；升级前的老戳没有这一段。 */
 interface PreviewStamp { div: number; src: string | null; max: number | null }
 
+/** 老戳（没有 `;max=`）生成时的固定长边上限。平台默认值已调高，不能用
+ *  `PREVIEW_TRUE_MAX_EDGE` 代替这个历史值。 */
+const LEGACY_STAMP_MAX_EDGE = 16384;
+
 /** 从 JPEG 的 COM 段里读出预览规则签名（只看文件头，不解码像素）。
  *
  *  返回 `null` = 不是 JPEG；`false` = 是 JPEG 但没有可解析的本平台规则签名。
@@ -1218,9 +1222,10 @@ async function jpegPreviewStamp(blob: Blob): Promise<PreviewStamp | false | null
  *  * 生成时的长边上限与当前平台设置对不上 → 不认。nginx 静态链有 `max-age=3600`，
  *    在设置里改完上限后，同一 `?div=` 的 URL 可能还是旧口径的那张；这里不放行，
  *    下游会退回 `/preview`（`no-store`）让服务端按新上限重生成。
- *    老戳没有 `max`：它生成于固定上限 16384 的版本，当前上限仍是默认值时可信。
- *    本页还没同步过服务端设置（`isPreviewMaxEdgeSynced()` 为假）时不做这条判断：
- *    同一后端的别处可能已把上限调低，用未同步的默认值去判只会把有效缩略图全判废。 */
+ *    老戳没有 `max`：它生成于上限固定 16384 的版本，只有当前上限仍是 16384 时
+ *    才可信。本页还没同步过服务端设置（`isPreviewMaxEdgeSynced()` 为假）时不做
+ *    这条判断：同一后端的别处可能已把上限调低，用未同步的默认值去判只会把有效
+ *    缩略图全判废。 */
 async function blobMatchesPreview(
   blob: Blob, div: number, srcRev?: string | null,
 ): Promise<boolean> {
@@ -1230,7 +1235,8 @@ async function blobMatchesPreview(
   if (stamp.div !== div) return false;
   if (isPreviewMaxEdgeSynced()) {
     if (stamp.max == null) {
-      if (getPreviewTrueMaxEdge() !== PREVIEW_TRUE_MAX_EDGE) return false;
+      // 老戳生成于上限固定 16384 的版本，与当前默认值无关。
+      if (getPreviewTrueMaxEdge() !== LEGACY_STAMP_MAX_EDGE) return false;
     } else if (stamp.max !== getPreviewTrueMaxEdge()) return false;
   }
   return !srcRev || stamp.src === srcRev;

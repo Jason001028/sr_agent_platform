@@ -22,6 +22,10 @@ class Tool:
     result_max_bytes: Optional[int] = None
     result_formatter: Optional[Callable] = None
     result_protected_fields: tuple[str, ...] = ()
+    #: Top-level ``data`` keys holding record lists. Records are page content,
+    #: not a single business verdict, so the generic formatter may shrink them
+    #: instead of collapsing the whole view to "critical field overflow".
+    result_record_fields: tuple[str, ...] = ()
 
     def openai_function(self) -> dict:
         """OpenAI-compatible function-calling entry."""

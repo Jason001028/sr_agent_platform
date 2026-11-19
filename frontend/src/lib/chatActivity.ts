@@ -19,12 +19,13 @@ const tools: Record<string, [string, string]> = {
   read_skill_resource: ['正在读取操作指引附件', '正在结合指引附件分析'],
   prepare_repair: ['正在准备修复计划', '正在核对修复计划'],
   start_repair: ['正在启动修复任务', '正在核对启动回执'],
+  inspect_repair_workspace: ['正在质检工作区', '正在整理质检结果'],
 };
 const actions: Record<string, string> = {
   search_scenes:'检索场景', get_current_image_info:'读取影像信息', prepare_repair:'准备修复计划',
   read_tool_result:'读取工具结果', start_repair:'启动修复任务', run_sr:'提交超分任务',
   sr_job_status:'查询任务状态', get_repair_workspace:'读取修复工作区', list_repair_items:'读取修复清单',
-  get_repair_item:'读取修复项', read_skill:'读取操作指引', read_skill_resource:'读取指引附件',
+  get_repair_item:'读取修复项', inspect_repair_workspace:'质检工作区', read_skill:'读取操作指引', read_skill_resource:'读取指引附件',
   present_spatial_annotations:'生成空间批注', request_clarification:'请求用户确认', fix_bad_lines:'处理影像坏线',
 };
 export function toolActionLabel(name: string): string { return actions[name] ?? '执行工具操作'; }

@@ -2,7 +2,7 @@ import { getPreviewTrueMaxEdge } from './previewLevel';
 
 /** Bound browser preview buffers independently of source size and selected level.
  *
- *  长边先按平台设置的「真分辨率」上限封顶（默认 16384，可在 4096/8192 下调）；
+ *  长边先按平台设置的「真分辨率」上限封顶（默认 32768，可调 4096/8192/16384）；
  *  256MB 的 Float32 预算仍可能更早封顶（多波段尤其明显），这是内存保护，
  *  不是档位合并 —— 状态栏会报实际长边与比例。 */
 export function localPreviewSize(w: number, h: number, bands: number, div: number,

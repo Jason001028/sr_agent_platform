@@ -21,6 +21,7 @@ import { isStreamingEnabled, setStreamingEnabled } from '../lib/streaming';
 import { SPOTLIGHT_MODE_OPTIONS } from '../lib/spotlight.js';
 import { VIEWER_BACKGROUNDS } from '../lib/viewerBackground';
 import { heatPalette } from '../lib/heatPalette';
+import { PREVIEW_TRUE_MAX_EDGE } from '../lib/previewLevel';
 import ImagePickerDialog from './ImagePickerDialog.vue';
 
 const store = useViewerStore();
@@ -180,13 +181,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
           data-e2e="set-preview-max-edge"
           @change="changePreviewMaxEdge">
           <option v-for="edge in store.previewMaxEdgeOptions" :key="edge" :value="edge">
-            {{ edge }}{{ edge === 16384 ? '（默认）' : '' }}
+            {{ edge }}{{ edge === PREVIEW_TRUE_MAX_EDGE ? '（默认）' : '' }}
           </option>
         </select>
         <div class="set-note">
           预览实际长边不超过这个值时按真实采样交付，超过才截断。调低能减少内存占用，
-          1:1 档位会相应变模糊；调高更清晰但画布与解码内存也更大。
-          由服务端保存，所有机器共用同一份。
+          1:1 档位会相应变模糊；调高更清晰但画布与解码内存也更大。32768 只放宽长边，
+          整幅面积超过 16384² 时仍会按面积降采样。由服务端保存，所有机器共用同一份。
         </div>
       </div>
 
