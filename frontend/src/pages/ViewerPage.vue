@@ -26,6 +26,7 @@ import CompareOverlay from '../components/CompareOverlay.vue';
 import FlickerControls from '../components/FlickerControls.vue';
 import AutoTourControls from '../components/AutoTourControls.vue';
 import BatchDetectionOverlay from '../components/BatchDetectionOverlay.vue';
+import MssWaterOverlay from '../components/MssWaterOverlay.vue';
 import BatchRepairPlayback from '../components/BatchRepairPlayback.vue';
 import BatchQualityOverlay from '../components/BatchQualityOverlay.vue';
 import BatchMaskReviewOverlay from '../components/BatchMaskReviewOverlay.vue';
@@ -95,6 +96,7 @@ onUnmounted(() => {
         <FlickerControls />
         <AutoTourControls />
         <BatchDetectionOverlay v-if="!maskReview.active" />
+        <MssWaterOverlay v-if="!maskReview.active && !diff.comparisonView" />
         <BatchRepairPlayback />
         <BatchQualityOverlay />
         <BatchMaskReviewOverlay />

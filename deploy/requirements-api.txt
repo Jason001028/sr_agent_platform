@@ -15,6 +15,7 @@ fastapi>=0.110
 uvicorn[standard]>=0.29
 numpy>=1.24
 pillow>=10.0
+tifffile>=2021.7.2
 PyYAML>=6.0,<7
 openai>=1.40,<2
 # ⚠️ Python<3.10 必需：后端注解用 PEP604 `X | None`，fastapi/pydantic 在 py3.9 上

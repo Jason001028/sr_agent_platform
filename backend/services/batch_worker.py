@@ -947,6 +947,8 @@ def _verify_submission_inputs(item, mode="demo"):
     verified again here — immediately before the capacity reservation.
     """
     cp = item["checkpoint"]
+    if mode == "production" and cp.get("mask_policy") != "existing":
+        raise ItemBlocked("自动修复已阻断：尚无经验证并冻结的 MSS 陆地约束")
     target = cp.get("target_image") or {}
     detection = cp.get("detection") or {}
     mask = cp.get("mask") or {}

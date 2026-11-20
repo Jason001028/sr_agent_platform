@@ -251,3 +251,35 @@ sequenceDiagram
   是惰性的，不是一次性全量。
 - **库外与拖入两条链的落点同名**，差别只在目录，别按文件名区分它们。
 - **检索的白名单是「有 `_meta.xml`」**。看不到某个目录时先查这份 xml，不要先怀疑路径。
+
+## 9. MSS 辅助水体（P0）
+
+- 在 Viewer 的生产场景 PAN/NOSR 上点「MSS 水体」。
+  `POST /api/scenes/{scene_id}/mss-water` 返回 `ready`（带源版本、产物 ID、阈值和对齐状态），
+  或 `unavailable`（带原因码与说明）。失败不会返回占位掩膜，也不写原 TIFF 或进入检测、修复、审核链路。
+- 全生产名仅替换末尾产品段：按已有场景模板及成像日/次日查找，兼容平铺同级及 PAN/MSS 段级目录。
+  只试 `<完整 MSS 名>.tif[f]` / `MSS.tif[f]` 和同一目录的 `<完整 MSS 名>_meta.xml`；精确命中多份则拒绝。
+- 当前元数据契约：唯一的 `SensorID` 与场景传感器一致；若声明 `SatelliteID`，也必须一致。
+  若声明 `SceneID` / `ProductType`，则分别必须与完整 MSS 场景名、`MSS` 一致；冲突或重复声明直接拒绝。
+  缺少这两个字段仍可按文件名生成辅助预览，但与字段吻合一样，都不构成执行级身份凭证。
+  XML 根、`ProductInfo` 或 `ProcessInfo` 内须有显式的逗号分隔 `BandOrder` / `BandNames`，
+  确认第 2/4 波段为 Green/NIR。`ProcessInfo` 中的 `AbsCalibrationGain` / `AbsCalibrationBias`
+  须各含四个有限数，Gain 为正。盘阵 XML 若没有显式波段定义，P0 不猜顺序，需先核对真实样本再扩展元数据契约。
+- 在 MSS 原始网格逐行读取四波段无压缩条带 TIFF（像素交织或波段分离）；支持 8/16 位整数和 32 位浮点。
+  先按 `DN × Gain + Bias` 定标，再以浮点计算 NDWI。Profile `mss-ndwi-reference` 的默认阈值是 0.3，
+  可由 `SR_MSS_WATER_THRESHOLD` 配置（有限、[-1, 1]）；它是待标定参考值，不是经真机验证的分类标准。
+  负定标值标为无效，不截断为零；发现内嵌 GDAL 联合或逐波段 NoData 声明时返回 `unavailable`，
+  暂不推断其有效像素。二值判断用已量化的 float32 NDWI 与原 Profile 阈值比较，与导出栅格可复算。
+- `GET /api/scenes/{scene_id}/mss-water/{id}/{asset}` 只提供当前源版本的产物：
+  `ndwi.tif`（float32，NaN 为无效）、`water.tif`（0 陆地 / 1 水体 / 255 无效）、
+  `valid.tif`（0 无效 / 1 有效）与 `metadata.json`（输入版本、波段、系数、阈值、算法版本等）。
+  产物保留内嵌空间标签，不补造坐标，也不应用或复制外部 RPC；压缩/分块、外置有效性掩膜、
+  PAM XML 和世界文件暂不支持，提示会列出触发拦截的文件名。
+- 只有 PAN/MSS 内嵌 GeoTIFF 明确声明同一 CRS、相同范围、轴对齐的 PixelIsArea 网格，并且 Viewer
+  显示版本匹配时，才提供最多 1024 像素长边的半透明预览。无可靠映射时提示「未完成空间对齐」，仍可下载 MSS 原生栅格。
+  不做 RPC 正射、重投影、裁切补偿或影像配准；不从相同尺寸推断对齐。
+  外部 RPC 不妨碍按原始 MSS 像素分类，但会禁用 PAN 叠加；未对齐时 Viewer 单独显示
+  `mss-preview.png`，不是地理对齐图层。`mss-ndwi.v3` 仍标记 `usage=viewer_preview_only`，
+  不复用旧缓存，也不为 P1 放行。
+- API 进程需安装部署依赖 `tifffile`。分析按需走后台栅格队列，产物原子发布到
+  `SR_MSS_WATER_DIR`（缺省为数据库所在目录下 `mss_water/`），按源版本与 Profile 保存；旧版本目录暂由运维清理。

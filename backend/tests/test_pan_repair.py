@@ -1,7 +1,6 @@
 """Repair orchestration tests use real TIFF bytes and a bounded fake GDAL API.
 
-GPU inference and GDAL cubic interpolation need intranet acceptance; constant
-NOSR images make the expected cubic background exact without those libraries.
+GPU inference and real GDAL behavior need intranet acceptance.
 """
 import os
 from pathlib import Path
@@ -32,6 +31,11 @@ class Raster:
 
     def GetMetadata(self, _):
         return {}
+
+    def GetNoDataValue(self):
+        with tifffile.TiffFile(self.pixels.filename) as tif:
+            tag = tif.pages[0].tags.get(42113)
+            return float(tag.value) if tag else None
 
     def ReadAsArray(self, x, y, w, h):
         return np.array(self.pixels[y:y+h, x:x+w])
@@ -112,13 +116,13 @@ class TestPanRepair(unittest.TestCase):
     def run_repair(self, execute=None):
         return repair.run(self.config, 'unused-inference.py', gdal=self.gdal, execute=execute or self.inference)
 
-    def test_mask_only_model_background_cubic_and_exact_file_size(self):
+    def test_mask_only_model_background_unchanged_and_exact_file_size(self):
         old = self.pan.read_bytes()
         original = self.nosr.read_bytes()
         metadata = self.meta.read_bytes()
         receipt = self.run_repair()
         got = tifffile.imread(self.pan)
-        expected = np.full((8, 8), 12, dtype=np.uint16)
+        expected = np.full((8, 8), 77, dtype=np.uint16)
         expected[3, 3] = 99
         np.testing.assert_array_equal(got, expected)
         self.assertEqual(self.pan.stat().st_size, len(old))
@@ -161,7 +165,8 @@ class TestPanRepair(unittest.TestCase):
         pan, nosr = work / 'pan.tif', work / 'nosr.tif'
         mask, model = work / 'mask.tif', work / 'model.tif'
         dest = work / 'dest.tif'
-        tifffile.imwrite(pan, np.zeros((100, 100), dtype=np.uint16))
+        before = np.arange(10000, dtype=np.uint16).reshape(100, 100)
+        tifffile.imwrite(pan, before)
         tifffile.imwrite(nosr, np.zeros((50, 50), dtype=np.uint16))
         selection = np.zeros((100, 100), dtype=np.uint8)
         selection[60, 60] = 255
@@ -171,7 +176,27 @@ class TestPanRepair(unittest.TestCase):
         got = tifffile.imread(dest)
         self.assertEqual(got.shape, (100, 100))
         self.assertEqual(got[60, 60], 99)
+        np.testing.assert_array_equal(got[selection == 0], before[selection == 0])
         self.assertEqual(os.path.getsize(dest), os.path.getsize(pan))
+
+    def test_publication_preserves_empty_mask_and_clipped_shoreline_with_nodata(self):
+        work = Path(self.tmp.name) / 'coast'
+        work.mkdir()
+        mask, model, dest = (work / name for name in ('mask.tif', 'model.tif', 'result.tif'))
+        before = np.arange(64, dtype=np.uint16).reshape(8, 8) + 300
+        before[3, 2] = 65535
+        tifffile.imwrite(self.pan, before, extratags=[(42113, 's', 0, '65535', False)])
+        tifffile.imwrite(model, np.full(before.shape, 999, dtype=np.uint16))
+        candidate = np.zeros(before.shape, dtype=bool)
+        candidate[1:7, 1:7] = True
+        shore_and_water = np.indices(before.shape)[1] >= 4
+        for selected in (np.zeros_like(candidate), candidate, candidate & ~shore_and_water):
+            tifffile.imwrite(mask, selected.astype(np.uint8) * 255)
+            repair.compose(self.gdal, self.pan, self.nosr, mask, model, dest, work)
+            allowed = selected & (before != 65535)
+            np.testing.assert_array_equal(tifffile.imread(dest), np.where(allowed, 999, before))
+            with tifffile.TiffFile(dest) as tif:
+                self.assertEqual(tif.pages[0].tags[42113].value, '65535')
 
     def test_model_output_grossly_off_body_grid_is_refused(self):
         work = Path(self.tmp.name) / 'compose_bad'
@@ -420,7 +445,7 @@ class TestScRepair(unittest.TestCase):
         receipt = repair.run(self.config, 'unused-inference.py', gdal=self.gdal,
                              execute=self.inference)
         got = tifffile.imread(self.body)
-        expected = np.full((8, 8), 12, dtype=np.uint16)
+        expected = np.full((8, 8), 77, dtype=np.uint16)
         expected[3, 3] = 99
         np.testing.assert_array_equal(got, expected)
         self.assertEqual(self.body.stat().st_size, len(old))

@@ -2076,6 +2076,40 @@ def create_app() -> FastAPI:
         except (PathDeniedError, OSError) as exc:
             raise HTTPException(status_code=404, detail="Scene resource unavailable") from exc
 
+    def _water_plan(scene_id):
+        from backend.services.mss_water import plan_water
+        return plan_water(_diff_source_path(scene_id, root))
+
+    @app.post("/api/scenes/{scene_id}/mss-water")
+    async def mss_water(scene_id: str):
+        from backend.services.mss_water import WaterUnavailable, generate_water
+        try:
+            plan = await app.state.heavy_work.read(_water_plan, scene_id)
+            return await app.state.heavy_work.run(generate_water, plan, background=True,
+                                                  key=('mss-water', plan[0]))
+        except WaterUnavailable as exc:
+            return {'status': 'unavailable', 'reason': exc.code, 'detail': str(exc)}
+        except (PathDeniedError, scene_resolve.SceneLookupError):
+            return {'status': 'unavailable', 'reason': 'scene_unavailable', 'detail': 'PAN 或对应 MSS 场景不可访问'}
+        except OSError:
+            return {'status': 'unavailable', 'reason': 'io_error', 'detail': '无法读取 MSS 源或写入水体产物'}
+
+    @app.get("/api/scenes/{scene_id}/mss-water/{revision}/{asset}")
+    async def mss_water_asset(scene_id: str, revision: str, asset: str):
+        from backend.services.mss_water import ASSETS, WaterUnavailable
+        if asset not in ASSETS:
+            raise HTTPException(404, '水体产物不存在')
+        try:
+            key, output, *_ = await app.state.heavy_work.read(_water_plan, scene_id)
+        except (PathDeniedError, scene_resolve.SceneLookupError, WaterUnavailable, OSError) as exc:
+            raise HTTPException(404, '水体产物源不可访问') from exc
+        if revision != key or not (output / 'metadata.json').is_file() or not (output / asset).is_file():
+            raise HTTPException(404, '水体产物不存在或对应的源版本已更改')
+        inline = asset in ('overlay.png', 'mss-preview.png')
+        media = 'image/png' if inline else 'application/json' if asset == 'metadata.json' else 'image/tiff'
+        return FileResponse(output / asset, media_type=media, headers={'Cache-Control': 'no-store'},
+                            filename=None if inline else asset)
+
     @app.get("/api/work-status")
     async def work_status():
         return {**app.state.heavy_work.snapshot(), "event_loop_delay_ms": app.state.heavy_work.loop_delay_ms}

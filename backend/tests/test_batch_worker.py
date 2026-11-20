@@ -32,6 +32,11 @@ DESC = "模糊 问题类型:模糊 影像类型:pan 行列号:12,34"
 
 
 class BatchWorkerTest(unittest.TestCase):
+    def test_unconstrained_auto_mask_blocks_production_submission(self):
+        for checkpoint in ({}, {"mask_policy": "auto", "mss": {"usage": "viewer_preview_only"}}):
+            with self.assertRaisesRegex(batch_worker.ItemBlocked, "MSS"):
+                batch_worker._verify_submission_inputs({"checkpoint": checkpoint}, "production")
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)

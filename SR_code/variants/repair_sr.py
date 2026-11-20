@@ -120,6 +120,7 @@ def compose(gdal, pan, nosr, mask, model, destination, work):
     current = _open(gdal, pan)
     original = _open(gdal, nosr)
     inferred = _open(gdal, model)
+    model_nodata = inferred.GetRasterBand(1).GetNoDataValue()
     dtype = current.GetRasterBand(1).DataType
     if inferred.GetRasterBand(1).DataType != dtype or original.GetRasterBand(1).DataType != dtype:
         raise ValueError('PAN, NOSR and model output sample types differ')
@@ -146,27 +147,52 @@ def compose(gdal, pan, nosr, mask, model, destination, work):
             raise ValueError('Cannot resample the model output onto the body grid')
         ds = None
         inferred = _open(gdal, resampled)
-    bg_path = Path(work) / 'bicubic.tif'
-    bg = gdal.Translate(str(bg_path), original, format='GTiff', width=width, height=height,
-                        resampleAlg='cubic', outputType=dtype,
-                        creationOptions=['BIGTIFF=IF_SAFER', 'COMPRESS=NONE'])
-    if bg is None:
-        raise ValueError('NOSR interpolation failed')
     selection = _open(gdal, mask)
     if _size(selection) != (width, height):
         raise ValueError('Publication mask must match current PAN dimensions')
     shutil.copyfile(str(pan), str(destination))
+    current_band = current.GetRasterBand(1)
+    model_band = inferred.GetRasterBand(1)
+    current_nodata = current_band.GetNoDataValue()
     target = _open(gdal, destination, update=True)
+    target_band = target.GetRasterBand(1)
     for y in range(0, height, 256):
         h = min(256, height - y)
         for x in range(0, width, 1024):
             w = min(1024, width - x)
             roi = selection.GetRasterBand(1).ReadAsArray(x, y, w, h) != 0
-            baseline = bg.GetRasterBand(1).ReadAsArray(x, y, w, h)
-            generated = inferred.GetRasterBand(1).ReadAsArray(x, y, w, h)
-            target.GetRasterBand(1).WriteArray(np.where(roi, generated, baseline), x, y)
+            if not roi.any():
+                continue
+            baseline = current_band.ReadAsArray(x, y, w, h)
+            generated = model_band.ReadAsArray(x, y, w, h)
+            roi &= np.isfinite(baseline)
+            if current_nodata is not None:
+                roi &= baseline != current_nodata
+            if not roi.any():
+                continue
+            if not np.isfinite(generated[roi]).all() or any(
+                    value is not None and np.any(generated[roi] == value)
+                    for value in (current_nodata, model_nodata)):
+                raise ValueError('Model returned invalid samples inside the publication mask')
+            baseline[roi] = generated[roi]
+            if target_band.WriteArray(baseline, x, y) not in (None, 0):
+                raise ValueError('Failed to write candidate PAN block')
     target.FlushCache()
-    target = selection = inferred = original = bg = current = None
+    target_band = target = None
+    staged = _open(gdal, destination)
+    staged_band = staged.GetRasterBand(1)
+    for y in range(0, height, 256):
+        h = min(256, height - y)
+        for x in range(0, width, 1024):
+            w = min(1024, width - x)
+            before = current_band.ReadAsArray(x, y, w, h)
+            after = staged_band.ReadAsArray(x, y, w, h)
+            allowed = (selection.GetRasterBand(1).ReadAsArray(x, y, w, h) != 0) & np.isfinite(before)
+            if current_nodata is not None:
+                allowed &= before != current_nodata
+            if before[~allowed].tobytes() != after[~allowed].tobytes():
+                raise ValueError('Candidate PAN changed pixels outside the publication mask')
+    staged_band = staged = current_band = model_band = selection = inferred = original = current = None
     if os.path.getsize(str(destination)) != os.path.getsize(str(pan)):
         raise ValueError('Candidate byte size differs from current PAN; nothing published')
 
@@ -310,7 +336,7 @@ def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
         # The success log is written only after publication and receipt persistence.
         log = debug / (body_stem + '_SRLOG.txt')
         note = ('Repair GPU: ' + gpu_note + '\n') if gpu_note else ''
-        log.write_text('Repair from NOSR; mask SR, outside mask cubic.\n' + note
+        log.write_text('Repair from NOSR; mask SR, outside mask unchanged.\n' + note
                        + 'Run finished.\n', encoding='utf-8')
         return receipt
     finally:

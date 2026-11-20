@@ -16,6 +16,19 @@ def signature(path):
     return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
 
 
+def read_strip_span(stream, offsets, lengths, strip, start, size, file_size):
+    if not 0 <= strip < min(len(offsets), len(lengths)) or start + size > int(lengths[strip]):
+        raise EvidenceError('truncated_strip')
+    offset = int(offsets[strip]) + start
+    if offset < 0 or offset + size > file_size:
+        raise EvidenceError('truncated_file')
+    stream.seek(offset)
+    data = stream.read(size)
+    if len(data) != size:
+        raise EvidenceError('truncated_file')
+    return data
+
+
 def read_window(path, window, *, max_bytes=33554432, cancelled=lambda:False):
     started = time.monotonic()
     before = signature(path)
@@ -47,14 +60,8 @@ def read_window(path, window, *, max_bytes=33554432, cancelled=lambda:False):
             strip=y//rps
             local=((y%rps)*W+x0)*bpp
             count=(x1-x0)*bpp
-            if strip>=len(offsets) or strip>=len(lengths) or local+count>int(lengths[strip]):
-                raise EvidenceError('truncated_strip')
-            offset=int(offsets[strip])+local
-            if offset<0 or offset+count>before[2]:
-                raise EvidenceError('truncated_file')
-            f.seek(offset); data=f.read(count); read_bytes+=len(data)
-            if len(data)!=count:
-                raise EvidenceError('truncated_file')
+            data = read_strip_span(f, offsets, lengths, strip, local, count, before[2])
+            read_bytes += len(data)
             out[i]=np.frombuffer(data,dtype=dtype)
     if before!=signature(path):
         raise EvidenceError('source_changed')
