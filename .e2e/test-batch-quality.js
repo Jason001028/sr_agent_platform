@@ -3,13 +3,14 @@
 const assert=require('assert/strict'),fs=require('fs'),path=require('path'),os=require('os'),net=require('net');
 const {spawn}=require('child_process');const {launchBrowser}=require('./launchBrowser');
 const repo=path.resolve(__dirname,'..'),root=fs.mkdtempSync(path.join(os.tmpdir(),'q-'));
-const artifacts=path.join(__dirname,'artifacts');let child,browser,logs='';
+const artifacts=process.env.SR_TEST_ARTIFACT_DIR || path.join(__dirname,'artifacts');let child,browser,logs='';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function port(){const s=net.createServer();await new Promise(r=>s.listen(0,'127.0.0.1',r));const p=s.address().port;await new Promise(r=>s.close(r));return p;}
-async function start(p){
+async function start(p,localOnly=false){
   const venv=path.join(repo,'.venv/Scripts/python.exe');
-  child=spawn(process.env.SR_TEST_PYTHON || (fs.existsSync(venv)?venv:'python'),['-m','backend.tests.quality_browser_fixture','--root',root,'--port',String(p)],
-    {cwd:repo,windowsHide:true,env:{...process.env,PYTHONUTF8:'1'}});
+  child=spawn(process.env.SR_TEST_PYTHON || (fs.existsSync(venv)?venv:'python'),['-m','backend.tests.quality_browser_fixture','--root',root,'--port',String(p),'--paired-effect'],
+    {cwd:repo,windowsHide:true,env:{...process.env,PYTHONUTF8:'1',
+      ...(localOnly?{SR_GOAL_WORKER_ENABLED:'0',SR_BATCH_WORKER_ENABLED:'0'}:{})}});
   child.stdout.on('data',d=>logs+=d);child.stderr.on('data',d=>logs+=d);
   for(let i=0;i<600;i++){if(child.exitCode!=null)throw new Error(logs);try{if((await fetch(`http://127.0.0.1:${p}/api/health`)).ok)return;}catch{}await sleep(100);}
   throw new Error('fixture startup timeout: '+logs);
@@ -53,6 +54,23 @@ async function stop(){if(child&&child.exitCode==null){const c=child;await new Pr
     }
     async function button(text){const handle=await page.evaluateHandle(text=>[...document.querySelectorAll('[data-e2e=batch-quality-panel] button')].find(b=>b.textContent.trim()===text),text);return handle.asElement();}
     await open();await select(0);
+    const requestedRegion=await page.evaluate(()=>qstores.quality.doc.regions[1].region_id);
+    await page.evaluate(async ([item, region])=>{
+      await qstores.quality.select(item,undefined,true,region);
+    },[fixture.items[0],requestedRegion]);
+    const pair=await page.evaluate(()=>({
+      enabled:qstores.quality.comparisonReady,
+      error:qstores.quality.error,
+      region:qstores.quality.regionId,
+      before:qstores.quality.doc?.images[1]?.image_key,
+      backup:qstores.quality.doc?.binding.backup.image_key,
+    }));
+    assert.equal(pair.error,'');
+    assert.equal(pair.enabled,true);
+    assert.equal(pair.before,pair.backup);
+    assert.equal(pair.region,requestedRegion);
+    assert.equal(await(await button('整景确认通过')).evaluate(e=>e.disabled),true);
+    await select(0);
     assert.equal(await page.evaluate(()=>qstores.quality.reviews.length),2);
     assert.equal(await page.evaluate(()=>qstores.quality.doc.regions.length),2);
     assert.equal(await page.evaluate(()=>qstores.viewer.splitSynchronized),true);
@@ -90,10 +108,38 @@ async function stop(){if(child&&child.exitCode==null){const c=child;await new Pr
     assert.equal(await page.evaluate(()=>qstores.quality.doc.regions.filter(r=>r.decision==='approved').length),0);
     await page.type('[aria-label=审核原因]','纹理仍需人工处理，不自动重提 SR');
     await(await button('驳回')).click();await page.waitForFunction(()=>!qstores.quality.busy&&qstores.quality.doc.version===1);
-    await(await button('整景驳回 · 转人工处理')).click();
+    await page.type('[aria-label=审核原因]','整景纹理需人工处理');
+    const rejectScene = await button('整景驳回 · 转人工处理');
+    assert.equal(await rejectScene.evaluate(e=>e.disabled),false);
+    await rejectScene.click();
     await page.waitForFunction(()=>qstores.batch.snapshot?.goal.status==='BLOCKED');
     const first=(await api(`/api/goals/${fixture.goal_id}/items/${fixture.items[0]}/quality-review`)).data;
     assert.equal(first.audit.length,3);
+    await stop();await start(p,true);
+    const inspectionResponse = await fetch(base+'/api/goals/batch-inspections',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+        session_id:fixture.inspection_session,manifest_ref:fixture.inspection_manifest,request_key:'browser-inspection',
+      }),
+    });
+    assert.ok(inspectionResponse.ok, await inspectionResponse.clone().text());
+    const inspection = await inspectionResponse.json();
+    await page.setViewport({width:900,height:860});
+    await page.goto(base+'/viewer?batch_goal='+inspection.goal_id);
+    await page.waitForSelector('[data-e2e=batch-task-dock]');
+    await page.evaluate((id)=>{
+      const pinia=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia;
+      window.batchForInspection=pinia._s.get('batchGoal');
+      return batchForInspection.selectGoal(id).then(()=>window.dispatchEvent(new CustomEvent('batch-task-open')));
+    },inspection.goal_id);
+    await page.waitForFunction(()=>batchForInspection.snapshot?.goal.status==='COMPLETED');
+    const inspectionSnapshot=(await api('/api/goals/'+inspection.goal_id+'/batch-snapshot')).data;
+    assert.deepEqual(inspectionSnapshot.todos.map(row=>row.status),['SUCCEEDED','SUCCEEDED']);
+    const firstTodo='[aria-label=执行待办] li:first-child .todo-name[title]';
+    await page.waitForSelector(firstTodo,{visible:true});
+    await page.reload();
+    await page.waitForSelector('[data-e2e=batch-task-dock]');
+    await page.evaluate(()=>window.dispatchEvent(new CustomEvent('batch-task-open')));
+    await page.waitForSelector(firstTodo,{visible:true});
     const original=first.binding.output.path,tmp=original+'.replacement';fs.writeFileSync(tmp,fs.readFileSync(original));fs.renameSync(tmp,original);
     assert.equal((await api(`/api/goals/${fixture.goal_id}/items/${fixture.items[0]}/quality-review`)).status,409);
     const stale=(await api(`/api/goals/${fixture.goal_id}/quality-reviews`)).data.reviews;
@@ -102,7 +148,7 @@ async function stop(){if(child&&child.exitCode==null){const c=child;await new Pr
     assert.equal(new Set(posts.map(p=>p.request_key)).size,5);
     assert.ok(!logs.includes('quality test MUST NOT submit SR'));
     const report={seeded_jobs:2,new_sr_submissions:0,regions_per_scene:2,review_posts:posts.length,restart_persisted:true,
-      stale_output_rejected:true,goal_status:'BLOCKED',errors,root};
+      stale_output_rejected:true,paired_effect_opened:true,inspection_todos_after_reload:2,goal_status:'BLOCKED',errors,root};
     fs.writeFileSync(path.join(artifacts,'batch-quality-report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));
   }finally{if(browser)await browser.close();await stop();fs.writeFileSync(path.join(artifacts,'batch-quality-server.log'),logs);}
 })().catch(e=>{console.error(e);process.exitCode=1;});

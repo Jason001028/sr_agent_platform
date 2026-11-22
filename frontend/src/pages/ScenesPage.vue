@@ -44,10 +44,7 @@ const sceneGroups = computed(() => {
 /** 卡片垃圾篓：只隐藏（不删盘上文件）。同一张卡覆盖的行一起递交 —— 服务端按
  *  场景目录隐藏，同一目录的输入/产物/NOSR 会一并从场景库与 Agent 检索里消失。 */
 function removeSceneCard(group: { row: SceneRow; variants: SceneRow[] }): void {
-  const label = group.row.name;
-  if (window.confirm(`从场景库隐藏“${label}”？盘上的影像不删，场景库与 Agent 检索都不再返回，可通过“恢复已隐藏”找回。`)) {
-    void scenes.hideRows(group.variants);
-  }
+  void scenes.hideRows(group.variants);
 }
 
 
@@ -140,7 +137,9 @@ onMounted(() => { scenes.ensureSearched(); });
     <div class="sp-tbl-wrap">
       <SceneCacheBar />
       <div class="scene-cards">
-        <SceneLibraryCard v-for="group in sceneGroups" :key="group.row.id" :row="group.row" :variants="group.variants" :opening="scenes.openingId === group.row.id" @open="scenes.open(group.row)" @remove="removeSceneCard(group)" />
+        <SceneLibraryCard v-for="group in sceneGroups" :key="group.row.id" :row="group.row" :variants="group.variants"
+          :opening="scenes.openingId === group.row.id" :removing="scenes.clearing"
+          @open="scenes.open(group.row)" @remove="removeSceneCard(group)" />
       </div>
       <table class="sp-tbl">
         <thead>

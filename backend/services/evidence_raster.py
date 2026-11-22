@@ -69,7 +69,9 @@ def read_window(path, window, *, max_bytes=33554432, cancelled=lambda:False):
     nodata=_tiff_nodata(path,scalars,arrays)
     if nodata is not None and np.isfinite(nodata):
         valid &= out!=np.float32(nodata)
+    saturation = int(np.iinfo(dtype).max) if np.issubdtype(dtype, np.integer) else None
     return out, valid, {'actual_window':[x0,y0,x1,y1], 'source_size':[W,H],
+        'saturation_dn': saturation,
         'read_bytes':read_bytes,'metadata_bytes_excluded':True,'photometric':info.get('photometric'),
         'read_ms':(time.monotonic()-started)*1000,'peak_dn_bytes':out.nbytes}
 

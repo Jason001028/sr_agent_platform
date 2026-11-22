@@ -565,6 +565,7 @@ sr_agent_platform/
 |---|---|
 | [api-contract.md](planning/api-contract.md) | 平台 REST / SSE 契约：端点、参数、错误码、帧类型。截图、trajectory、机器与插件端点以代码和对应 planning 文档为准 |
 | [repair_evidence_report_plan.md](planning/repair_evidence_report_plan.md) | Agent 修复图像证据报告开发规划：最终掩码区域、三角色局部裁片、有界读取与空闲调度、多模态分析、30 行分页表格、Viewer 定位及逐步验收；功能待实现 |
+| [本地 Agent 长任务 Plan–Act 开发计划](planning/本地Agent长任务Plan-Act开发计划.md) | Agent协助入口、通用动态 Todo、异步逐景修复、SR 终态回检及分阶段验收 |
 | [mask-auto-draw-research.md](planning/mask-auto-draw-research.md) | 差异热力图「自动绘制」外接多边形：算法对比、边距与顶点上限、后端接口与动效方案（历史调研；实现见 mask-auto-draw.md） |
 | [1023.md](planning/1023.md) | Harness P0 与 Batch v2 统一计划：当前状态、PR A–F、M0–M4、异步执行与验收边界 |
 | [gui-requirements.md](planning/gui-requirements.md) | Agent 与 GUI 平台的中长期需求与阶段目标 |

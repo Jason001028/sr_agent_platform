@@ -17,7 +17,8 @@ from backend.services.goal_lease import GoalLease, current_lease
 
 
 @pytest.fixture
-def quality(tmp_path,monkeypatch):
+def quality(tmp_path,monkeypatch,request):
+    local = getattr(request, "param", False)
     # Real TIFF, actual repair publication and deployed contract verifier, with
     # only GDAL/inference replaced by the existing bounded synthetic fixture.
     case=repair_fixtures.TestPanRepair(methodName='runTest');case.setUp()
@@ -32,10 +33,13 @@ def quality(tmp_path,monkeypatch):
         'detection':{'provenance':'real','candidate_accounting':{'unprocessed':0},'candidates':[
             {'candidate_id':'r1','kind':'bbox','bbox':[3,3,3,3],'points':None}]},
         'sr_fingerprint':'fingerprint','job_id':42,'job_status':{'state':'COMPLETED','active':False,'exit_code':'0'}}
-    goal=store.create_batch_goal(title='human',request_key='key',content_sha256='content',
+    if local:
+        cp["effect_review"] = {"todo_id": "job-42", "job_id": "42", "status": "pending"}
+    owner = "local_agent" if local else "worker"
+    goal=store.create_batch_goal(execution_owner=owner,title='human',request_key='key',content_sha256='content',
         checkpoint={'mode':'production','workflow':batch_manifest.WORKFLOW},items=[
             {'item_id':'item','ordinal':1,'name':'scene','status':'PENDING','checkpoint':cp}])
-    claimed=store.claim_goal(goal['goal_id'],'worker',lease_sec=600)
+    claimed=store.claim_goal(goal['goal_id'],'worker',lease_sec=600,execution_owner=owner)
     lease=GoalLease(goal['goal_id'],claimed['lease_token'],claimed['version'])
     item=store.get_goal_item(goal['goal_id'],'item')
     item=store.transition_goal_item(goal['goal_id'],step_id=item['step_id'],expected_version=item['version'],status='VERIFYING',
@@ -45,7 +49,8 @@ def quality(tmp_path,monkeypatch):
         token=current_lease.set(lease)
         try:return batch_worker._verify_item(state,store.get_goal(goal['goal_id']),store.get_goal_item(goal['goal_id'],'item'),lease,{},'production')
         finally:current_lease.reset(token)
-    verify()
+    if not local:
+        verify()
     q=SimpleNamespace(store=store,goal=goal,case=case,lease=lease,verify=verify,state=state,cp=cp)
     try:yield q
     finally:store.close();case.doCleanups()
@@ -262,3 +267,25 @@ def test_waiting_quality_does_not_stop_other_batch_items(monkeypatch):
         assert len(case.submits)==3 and case.store.get_goal(goal['goal_id'])['status']!='COMPLETED'
         assert case.store.count_reserved_slots(goal['goal_id'])==0
     finally:case.tearDown()
+
+
+@pytest.mark.parametrize("quality", [True], indirect=True)
+def test_local_effect_resumes_after_output_verification(quality):
+    q = quality
+    gid = q.goal["goal_id"]
+    item = q.store.get_goal_item(gid, "item")
+    verified = batch_worker._verify_item(
+        q.state, q.goal, item, q.lease, {}, "production", defer_effect=True)
+    assert verified["status"] == "VERIFYING"
+    assert verified["checkpoint"]["effect_review"]["status"] == "output_verified"
+    assert review(q) is None
+
+    q.store.close_thread()
+    persisted = q.store.get_goal_item(gid, "item")
+    assessed = batch_worker._assess_item(q.state, q.goal, persisted, q.lease)
+    assert assessed["status"] == "AWAITING_REVIEW"
+    effect = assessed["checkpoint"]["effect_review"]
+    assert effect["todo_id"] == "job-42"
+    assert effect["job_id"] == "42"
+    assert effect["regions"][0]["region_id"] == "r1"
+    assert review(q)["scene_decision"] == "pending"

@@ -74,10 +74,10 @@ async function flush() {
   await new Promise(resolve => setTimeout(resolve, 70));
   await nextTick();
 }
-async function mount(data: unknown) {
+async function mount(data: unknown, standalone = false) {
   root = document.createElement('div');
   document.body.append(root);
-  app = createApp(AgentRepairPlanCard, { data });
+  app = createApp(AgentRepairPlanCard, { data, standalone });
   app.mount(root);
   await flush();
 }
@@ -288,20 +288,31 @@ it('shows the plan stage and confirms/starts on the same card', async () => {
   expect(root.querySelector('[data-e2e=repair-plan-start]')).not.toBeNull();
 });
 
-it('requires confirmation and cancels the bound task through the existing control chain', async () => {
+it('requires a full hold and cancels the bound task through the existing control chain', async () => {
   state.batch.goalId = 'cancel-goal';
   state.batch.control = vi.fn().mockResolvedValue('已请求取消');
   vi.mocked(apiRepairStatus).mockResolvedValue(status({
     plan: plan({status:'STARTED'}),
     goal: {goal_id:'cancel-goal',status:'WAITING_USER',phase:'waiting_review',monitoring_done:false},
   }) as never);
-  await mount(plan({status:'STARTED'}));
+  await mount(plan({status:'STARTED'}), true);
   expect(root.textContent).not.toContain('在后台执行，可随时查看进度');
-  const button = root.querySelector<HTMLButtonElement>('[data-e2e=repair-stop-task]')!;
-  button.click(); await nextTick();
-  expect(button.textContent).toBe('确认中止');
-  expect(state.batch.control).not.toHaveBeenCalled();
-  button.click(); button.click(); await flush();
+  const button = root.querySelector<HTMLButtonElement>('.standalone-footer [data-e2e=repair-stop-task]')!;
+  const key = (type: string) => button.dispatchEvent(new KeyboardEvent(type, { key: ' ' }));
+  vi.useFakeTimers();
+  try {
+    button.click();
+    key('keydown');
+    await vi.advanceTimersByTimeAsync(999);
+    key('keyup');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(state.batch.control).not.toHaveBeenCalled();
+    key('keydown');
+    await vi.advanceTimersByTimeAsync(1000);
+    key('keyup');
+  } finally {
+    vi.useRealTimers();
+  }
   expect(state.batch.control).toHaveBeenCalledTimes(1);
   expect(state.batch.control).toHaveBeenCalledWith('cancel');
   expect(apiStartRepair).not.toHaveBeenCalled();
@@ -483,4 +494,79 @@ it('marks a fully approved production result as quality accepted', async () => {
   expect(text).not.toContain('请以逐区域人工验收为准');
   const stateEl = root.querySelector('[data-e2e=agent-repair-task] .state');
   expect(stateEl?.className).toContain('done');
+});
+
+
+it('updates local Todos in place and links the reported region to a before-after comparison', async () => {
+  const current = plan({ status: 'STARTED', goal_id: 'g' });
+  const goal = { goal_id: 'g', status: 'RUNNING', phase: 'dispatching', last_seq: 1 };
+  state.batch.goalId = 'g';
+  state.batch.snapshot = reactive({
+    goal, counts: counts({ waiting_sr: 1, detecting: 1 }), progress: progress(2),
+    producer: { current: null }, active_jobs: [],
+    todos: [
+      { todo_id: 'a', item_id: 'a', ordinal: 1, name: 'A', status: 'WAITING_SR', job_id: 42 },
+      { todo_id: 'b', item_id: 'b', ordinal: 2, name: 'B', status: 'DETECTING' },
+    ] as Record<string, unknown>[],
+  });
+  vi.mocked(apiRepairStatus).mockResolvedValue(status({
+    plan: current, goal, items: [{ item_id: 'a', status: 'AWAITING_REVIEW', quality_review_id: 'q' }],
+  }) as never);
+  await mount(current);
+  const section = root.querySelector('[aria-label=执行待办]')!;
+  expect(section.querySelector('[data-todo-id="a"] .todo-status')?.textContent).toBe('修复中');
+  expect(section.querySelector('[data-todo-id="b"] .todo-status')?.textContent).toBe('正在检查');
+  const original = section.querySelector('[data-todo-id="a"]');
+  state.batch.snapshot.todos[0] = {
+    ...state.batch.snapshot.todos[0], status: 'AWAITING_REVIEW',
+    effect_review: { status: 'measured', regions: [{ region_id: 'r1', bbox: [0, 0, 20, 20] }] },
+  };
+  await flush();
+  expect(section.querySelector('[data-todo-id="a"]')).toBe(original);
+  expect(original?.querySelector('.todo-fill')).toBeNull();
+  const second = section.querySelector('[data-todo-id="b"]')!;
+  state.batch.snapshot.todos[1] = { ...state.batch.snapshot.todos[1], status: 'FAILED' };
+  await flush();
+  expect(second.querySelector('.todo-fill')).toBeNull();
+  state.batch.snapshot.todos[1] = { ...state.batch.snapshot.todos[1], status: 'SUCCEEDED' };
+  await flush();
+  expect(section.querySelector('[data-todo-id="b"]')).toBe(second);
+  expect(second.matches('.is-complete')).toBe(true);
+  expect(second.querySelector('.todo-fill path')).not.toBeNull();
+  expect(original?.querySelector('.todo-status')?.textContent).toBe('待人工验收');
+  expect(original?.querySelector('.todo-name')?.getAttribute('title')).toBe('A');
+  expect(section.querySelector('details, select')).toBeNull();
+  const region = [...section.querySelectorAll('button')].find(button => button.textContent === '查看区域')!;
+  region.click();
+  await flush();
+  expect(requestQualityReview).toHaveBeenCalledWith('a', 'r1', 'g', undefined, true);
+});
+
+it('shows a compact standalone sequence and focuses each completed Todo before advancing', async () => {
+  const current = plan({ status: 'STARTED', goal_id: 'g', targets: { total: 3, excluded: 0, applicable: 3, items: [] } });
+  const goal = { goal_id: 'g', status: 'RUNNING', phase: 'dispatching' };
+  state.batch.goalId = 'g';
+  state.batch.snapshot = reactive({
+    goal, counts: counts(), progress: progress(3), producer: { current: null }, active_jobs: [],
+    todos: ['DETECTING', 'PENDING', 'PENDING'].map((status, index) => ({
+      todo_id: String(index), item_id: String(index), ordinal: index + 1, name: String(index), status,
+      effect_review: index === 0 ? { status: 'pending' } : null,
+    })),
+  });
+  vi.mocked(apiRepairStatus).mockResolvedValue(status({ plan: current, goal }) as never);
+  await mount(current, true);
+  expect(root.querySelector('.standalone-task')?.textContent).not.toMatch(/工作区清单|回检 ·|绝对差异/);
+  const footer = root.querySelector('.standalone-footer')!;
+  expect(footer.textContent).toContain('已结束 0 / 3 景');
+  expect(Array.from(footer.querySelectorAll('button'), button => button.textContent?.trim())).toEqual(['中止任务']);
+  const focused = () => root.querySelector('.todo-viewport > .is-focused')?.getAttribute('data-todo-id');
+  expect(focused()).toBe('0');
+  state.batch.snapshot.todos[0].status = 'NO_ISSUE';
+  state.batch.snapshot.todos[1].status = 'NO_ISSUE';
+  await nextTick();
+  expect(focused()).toBe('0');
+  expect(root.querySelector('[data-todo-id="1"] .todo-fill')).toBeNull();
+  await vi.waitFor(() => expect(focused()).toBe('1'));
+  expect(root.querySelector('[data-todo-id="1"] .todo-fill')).not.toBeNull();
+  await vi.waitFor(() => expect(focused()).toBe('2'));
 });

@@ -18,6 +18,9 @@ let timers: ReturnType<typeof setTimeout>[] = [];
 let closeTimer: ReturnType<typeof setTimeout> | undefined;
 const hovered = ref(false);
 const focused = ref(false);
+const compactMotionMs = 240;
+const locked = () => state.value === 'submitting' || state.value === 'unknown'
+  || (props.compact && state.value === 'accepted');
 const later = (fn: () => void, ms: number) => { timers.push(setTimeout(() => { if (!disposed) fn(); }, ms)); };
 function close() { visible.value = false; clearTimeout(closeTimer); }
 function scheduleClose() {
@@ -33,8 +36,9 @@ function positionCard() {
     top: `${Math.max(12, Math.min(b.bottom + 8 + h <= window.innerHeight - 12 ? b.bottom + 8 : b.top - h - 8, window.innerHeight - h - 12))}px` };
 }
 async function run() {
-  if (props.disabled || ['submitting', 'unknown'].includes(state.value)) return;
+  if (props.disabled || locked()) return;
   timers.forEach(clearTimeout); timers = []; close();
+  const startedAt = Date.now();
   state.value = 'submitting'; message.value = '';
   try {
     const r = await props.submit();
@@ -43,6 +47,11 @@ async function run() {
     if (!r) { state.value = 'error'; return; }
     const kind = receiptKind(r);
     if (kind === 'unknown') { state.value = 'unknown'; message.value = '提交结果待确认'; return; }
+    const remaining = compactMotionMs - (Date.now() - startedAt);
+    if (props.compact && remaining > 0 && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+      await new Promise<void>(resolve => setTimeout(resolve, remaining));
+      if (disposed) return;
+    }
     receipt.value = r; existing.value = kind === 'existing'; state.value = 'accepted';
     message.value = existing.value ? '已关联现有任务' : '任务已加入队列';
     emit('accepted', r.task_id, kind === 'new');
@@ -62,9 +71,22 @@ window.addEventListener('scroll', positionCard, true);
 
 <template>
   <div class="sr-feedback" :class="{ 'sr-compact': compact }">
-    <button ref="anchor" type="button" class="sr-submit" :class="state" :title="title" :disabled="disabled || state === 'submitting' || state === 'unknown'" :aria-busy="state === 'submitting'" @click="run">
-      <span class="sr-content"><span class="sr-icon" aria-hidden="true"><i v-if="state === 'submitting'" class="sr-spinner" /><span v-else-if="state === 'accepted'">✓</span><span v-else-if="state === 'unknown'">!</span><AppIcon v-else name="square-chart-gantt" :size="15" tint /></span><span>{{ state === 'submitting' ? '正在提交…' : state === 'accepted' ? (existing ? '已关联任务' : '已加入队列') : state === 'unknown' ? '结果待确认' : '提交 SR' }}</span></span>
-    </button>
+    <span class="sr-button-slot">
+      <button ref="anchor" type="button" class="sr-submit" :class="state" :title="title"
+        :disabled="disabled || locked()" :aria-busy="state === 'submitting'"
+        :aria-label="compact && state === 'submitting' ? '正在提交 SR' : undefined" @click="run">
+        <span class="sr-content">
+          <span class="sr-icon" aria-hidden="true">
+            <i v-if="state === 'submitting'" class="sr-spinner" />
+            <span v-else-if="state === 'accepted'">✓</span>
+            <span v-else-if="state === 'unknown'">!</span>
+            <AppIcon v-else name="square-chart-gantt" :size="15" tint />
+          </span>
+          <span v-if="!compact || state !== 'submitting'">{{ state === 'submitting' ? '正在提交…' : state === 'accepted'
+            ? (existing ? '已关联任务' : compact ? '已提交' : '已加入队列') : state === 'unknown' ? '结果待确认' : '提交 SR' }}</span>
+        </span>
+      </button>
+    </span>
     <span class="sr-status" role="status" aria-live="polite">{{ message }}</span>
     <button v-if="state === 'unknown'" class="sr-link" @click="emit('query')">查询已有任务状态 →</button>
     <Teleport to="body">
@@ -85,7 +107,15 @@ window.addEventListener('scroll', positionCard, true);
 :root { --motion-sr-press: 90ms; --motion-sr-content: 150ms; --motion-sr-morph: 260ms; --motion-sr-enter: 280ms; --motion-sr-queue: 240ms; --motion-sr-highlight: 750ms; --motion-sr-leave: 220ms; --ease-sr: cubic-bezier(.22,1,.36,1); }
 .sr-feedback { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 .sr-compact { flex-wrap: nowrap; position: relative; }
-.sr-compact .sr-submit { height: 32px; border-radius: 8px; font-weight: 500; }
+.sr-button-slot { display: inline-grid; place-items: center; }
+.sr-compact .sr-button-slot { width: 142px; flex: none; }
+.sr-compact .sr-submit {
+  display: inline-grid; place-items: center; box-sizing: border-box; padding: 0;
+  height: 32px; border-radius: 8px; font-weight: 500;
+  transition: width 240ms var(--ease-sr), border-radius 240ms var(--ease-sr), background 240ms var(--ease-sr), color 240ms;
+}
+.sr-compact .sr-submit.submitting { width: 32px; border-radius: 50%; }
+.sr-compact .sr-submit.accepted { background: #287858; color: #fff; opacity: 1; }
 .sr-compact .sr-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 .sr-compact:has(.error) .sr-status, .sr-compact:has(.unknown) .sr-status { position: fixed; right: 18px; bottom: 110px; width: min(320px, calc(100vw - 36px)); height: auto; clip-path: none; padding: 12px; border-radius: 8px; background: var(--surface); border: 1px solid var(--warn-line); z-index: 2000; }
 .sr-submit:disabled:not(.submitting):not(.unknown) { opacity: .55; cursor: not-allowed; }

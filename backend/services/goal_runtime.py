@@ -166,6 +166,33 @@ def _batch_import_sync(request, body):
         raise HTTPException(400, str(exc)) from exc
     return result
 
+@router.post("/batch-inspections")
+async def start_inspection(request: Request):
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "body must be an object")
+    return await run_in_threadpool(_start_inspection, request.app.state.store, body)
+
+
+def _start_inspection(store, body):
+    from backend.services.inspection_pipeline import create_inspection
+
+    session_id = body.get("session_id")
+    manifest_ref = body.get("manifest_ref")
+    request_key = body.get("request_key")
+    if not isinstance(session_id, str) or not store.get_session(session_id):
+        raise HTTPException(403, "unknown session")
+    if not isinstance(manifest_ref, str) or not isinstance(request_key, str) or not request_key.strip():
+        raise HTTPException(400, "manifest_ref and request_key are required")
+    try:
+        return create_inspection(store, batch_manifest.load_manifest(manifest_ref),
+                                 manifest_ref, session_id, request_key)
+    except BatchConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (ValueError, KeyError, OSError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @router.get("")
 def list_goals(request: Request, limit: int=100, session_id: Optional[str]=None,
                kind: Optional[str]=None, include_clarifications: bool=False):
@@ -359,7 +386,7 @@ def quality_reviews(goal_id:str,request:Request):
 
 
 @router.get("/{goal_id}/items/{item_id}/quality-review")
-def quality_review(goal_id:str,item_id:str,request:Request):
+def quality_review(goal_id:str,item_id:str,request:Request,comparison:Optional[str]=None):
     from backend.api import paths
     store=request.app.state.store; item=_quality_item(request,goal_id,item_id)
     review=batch_quality.review_for_item(store,item,verify=False)
@@ -368,7 +395,12 @@ def quality_review(goal_id:str,item_id:str,request:Request):
     except (ValueError,OSError,KeyError) as e: raise HTTPException(409,str(e)) from e
     b=review["binding"]
     images=[]
-    for name,role in (("output","pan"),("nosr","nosr")):
+    pair = (("output", "pan"), ("nosr", "nosr"))
+    if comparison == "effect":
+        if not item["checkpoint"].get("effect_review") or not b.get("backup"):
+            raise HTTPException(404, "paired effect evidence not found")
+        pair = (("output", "pan"), ("backup", "pan"))
+    for name,role in pair:
         file=b[name]; path=Path(file["path"])
         images.append({"id":paths.scene_id_abs(path),"name":path.name,"kind":"input" if role=="pan" else "nosr",
             "exists":True,"W":file["width"],"H":file["height"],"srcRev":file["revision"],

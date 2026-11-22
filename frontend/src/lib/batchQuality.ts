@@ -26,5 +26,7 @@ async function request<T>(path:string,body?:unknown,signal?:AbortSignal):Promise
   return value as T;
 }
 export const qualityList=(goal:string,signal?:AbortSignal)=>request<{reviews:QualitySummary[]}>(encodeURIComponent(goal)+'/quality-reviews',undefined,signal);
-export const qualityDocument=(goal:string,item:string,signal?:AbortSignal)=>request<QualityDocument>(encodeURIComponent(goal)+'/items/'+encodeURIComponent(item)+'/quality-review',undefined,signal);
+export const qualityDocument=(goal:string,item:string,signal?:AbortSignal,effect=false)=>
+  request<QualityDocument>(encodeURIComponent(goal)+'/items/'+encodeURIComponent(item)
+    +'/quality-review'+(effect?'?comparison=effect':''),undefined,signal);
 export const qualityDecide=(goal:string,item:string,body:unknown)=>request(encodeURIComponent(goal)+'/items/'+encodeURIComponent(item)+'/quality-review',body);

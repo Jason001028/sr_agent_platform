@@ -227,7 +227,8 @@ async def start(plan_id: str, request: Request):
         return await run_in_threadpool(
             svc.start_repair, store, plan_id, session_id=session_id,
             workspace=workspace, workspace_version=workspace_version,
-            plan_version=plan_version)
+            plan_version=plan_version,
+            execution_owner="local_agent" if body.get("local_agent") is True else "worker")
     except Exception as exc:  # noqa: BLE001
         _map_error(exc)
 

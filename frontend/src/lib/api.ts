@@ -129,6 +129,7 @@ export interface BatchJobSummary {
 }
 
 export interface BatchSnapshotGoal {
+  pipeline?: string;
   goal_id: string;
   session_id: string | null;
   title: string;
@@ -147,7 +148,32 @@ export interface BatchSnapshotGoal {
   batch_control: Record<string, unknown>;
 }
 
+export interface BatchTodo {
+  phase?: string | null;
+  inspection?: { candidate_count: number } | null;
+  todo_id: string;
+  item_id: string;
+  ordinal: number;
+  name: string;
+  status: string;
+  job_id?: number | string | null;
+  error?: string | null;
+  effect_review?: {
+    status: string;
+    evidence_gap?: string;
+    regions?: {
+      region_id: string;
+      bbox?: number[];
+      conclusion?: string;
+      evidence_gap?: string;
+      metrics?: Record<string, { before: number; after: number; delta: number }>;
+      gradient_p98?: { before: number; after: number; delta: number };
+    }[];
+  } | null;
+}
+
 export interface BatchSnapshot {
+  todos?: BatchTodo[];
   quality?: { waiting_scenes: number; rejected_scenes: number; items: {review_id:string;item_id:string;item_version:number;status:string}[] };
   contract_version: string;
   goal: BatchSnapshotGoal;
@@ -1855,7 +1881,7 @@ export async function apiRepairTargets(planId: string, sessionId: string, versio
   const query = new URLSearchParams({ session_id: sessionId, version: String(version), offset: String(offset), limit: '100' });
   return (await http(apiUrl(loadSrConfig(), `/api/repairs/${encodeURIComponent(planId)}/targets?${query}`))).json();
 }
-export async function apiStartRepair(planId: string, body: { session_id: string | null; plan_version?: number; workspace_version?: number; workspace?: unknown }): Promise<RepairStartResult> {
+export async function apiStartRepair(planId: string, body: { session_id: string | null; plan_version?: number; workspace_version?: number; workspace?: unknown; local_agent?: boolean }): Promise<RepairStartResult> {
   const r = await http(apiUrl(loadSrConfig(), `/api/repairs/${encodeURIComponent(planId)}/start`), {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });

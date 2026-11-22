@@ -6,56 +6,23 @@
  * 「清除选定」「全部清除」。清的是**服务端那份预览 JPG**（盘阵上的
  * `<源 stem>_preview.jpg`），不是浏览器缓存（那个在设置浮层里有自己的按钮）。
  *
- * 三件事都在这里交代清楚，因为它们都是「删生产数据目录里的文件」这件事的一部分：
- *
- * 1. **确认**。清除选定弹一条内联确认条（不引模态框组件：本页没有第二处需要它，
- *    引一个组件只为这一句话不值得）；全部清除**要求输入确认词**才放行 —— 它一次
- *    动几十上百个场景目录。确认词定死为「清除全部」，作用只是让人停一下，
- *    它不是安全凭据（真安全在服务端的判据里，见 backend/services/preview_clear.py）。
- * 2. **范围**。全部清除 = **当前列表里的那些行**（受筛选影响，且只到 limit 那条
- *    截断线为止）。截断线外还有多少、fake 行有多少，都在确认文案里写明。
- * 3. **结果**。汇总一行 + 明细可展开（失败的自动展开）。成功的行不需要钻取，
- *    明细只列跳过与失败 —— 那是用户唯一需要动作的两类。
- *
- * 组件直接读 scenes store（同 ScenePathBar 的页面局部组件做法），不引第三方库。
+ * 两个操作均长按确认。全部清除以当前列表为范围，结果汇总可展开查看跳过与失败项。
  */
-import { computed, ref } from 'vue';
+import { computed } from 'vue';
 import { useScenesStore } from '../stores/scenes.js';
+import HoldConfirmButton from './HoldConfirmButton.vue';
 
 const scenes = useScenesStore();
 
-/** 「全部清除」的确认词。 */
-const CLEAR_ALL_WORD = '清除全部';
-
-/** '' = 没在确认；'selected' / 'all' = 哪一颗按钮的确认条 */
-type AskMode = '' | 'selected' | 'all';
-const ask = ref<AskMode>('');
-const word = ref('');
-
 /** fake 行（未配 SR_SCENES_ROOT 的占位）在盘上没有文件，清不动也不该发过去。 */
 const fakeCount = computed(() => scenes.rows.filter((r) => r.fake).length);
-/** 命中数里没进列表的那部分：limit 截断 / 受筛选影响。它清不到，得说出来。
- *  与 store 的 `hiddenCount`（服务端隐藏集合大小）不是一回事，别混。 */
 const offListCount = computed(() =>
   Math.max(0, scenes.count - scenes.rows.length));
+const selectedKey = computed(() => JSON.stringify([...scenes.selected]));
+const allKey = computed(() => JSON.stringify(scenes.selectableRows.map(row => row.id)));
 
 const busy = computed(() =>
   scenes.clearing || scenes.loading || !!scenes.openingId);
-
-function askSelected(): void { ask.value = 'selected'; word.value = ''; }
-function askAll(): void { ask.value = 'all'; word.value = ''; }
-function cancel(): void { ask.value = ''; word.value = ''; }
-
-/** 确认词对齐了才能点（去空格；大小写无关在这里没意义，是中文）。 */
-const wordOk = computed(() => word.value.trim() === CLEAR_ALL_WORD);
-
-async function confirm(): Promise<void> {
-  const m = ask.value;
-  ask.value = '';
-  word.value = '';
-  if (m === 'selected') await scenes.clearSelected();
-  else if (m === 'all') await scenes.clearAllRows();
-}
 
 /** 明细行：逐文件的跳过与失败，成功的不列。
  *
@@ -100,48 +67,14 @@ const failedCount = computed(() =>
           v-if="fakeCount">，另有 {{ fakeCount }} 个 fake 占位行不在盘上</template>）</span>
       </span>
       <span class="scb-spacer" />
-      <button type="button" class="btn mini" :disabled="busy || !scenes.selectedCount"
-              title="清除勾选场景在盘阵上的预览 JPG（<源 stem>_preview.jpg）"
-              @click="askSelected">清除选定</button>
-      <button type="button" class="btn mini ghost"
-              :disabled="busy || !scenes.selectableRows.length"
-              title="清除当前检索结果里所有场景的预览 JPG（要输入确认词）"
-              @click="askAll">全部清除</button>
+      <HoldConfirmButton :key="'selected-' + selectedKey" class="btn mini" :disabled="busy || !scenes.selectedCount"
+        :label="`清除选中的 ${scenes.selectedCount} 项预览 JPG`"
+        @confirm="scenes.clearSelected()">清除选定</HoldConfirmButton>
+      <HoldConfirmButton :key="'all-' + allKey" class="btn mini ghost"
+        :disabled="busy || !scenes.selectableRows.length"
+        :label="`清除当前列表的 ${scenes.selectableRows.length} 项预览 JPG${offListCount ? `（另有 ${offListCount} 项在列表外）` : ''}`"
+        @confirm="scenes.clearAllRows()">全部清除</HoldConfirmButton>
     </div>
-
-    <!-- 内联确认条（不引模态框）：普通确认 / 输入确认词 -->
-    <Transition name="inline-fade" mode="out-in">
-      <div v-if="ask" class="scb-ask">
-        <template v-if="ask === 'selected'">
-          <span class="scb-ask-text">
-            清除选定的 <strong>{{ scenes.selectedCount }}</strong> 项？
-            删掉的是盘阵上的预览 JPG（<strong>不进回收站</strong>），
-            成功项同时在服务端隐藏：场景库与 Agent 检索都不再返回，可通过“恢复已隐藏”找回。
-          </span>
-          <button type="button" class="btn mini danger" :disabled="busy"
-                  @click="confirm">确认清除</button>
-          <button type="button" class="btn mini ghost" @click="cancel">取消</button>
-        </template>
-        <template v-else>
-          <span class="scb-ask-text">
-            将清除<strong>当前列表里的 {{ scenes.selectableRows.length }} 项</strong>
-            （受筛选影响，不是盘阵上所有场景）。删掉的是盘阵上的预览 JPG，
-            <strong>不进回收站</strong>；成功项同时在服务端隐藏（场景库与 Agent 检索都不再
-            返回），可通过“恢复已隐藏”找回。<template
-              v-if="offListCount">另有 {{ offListCount }} 项命中不在这份列表里（列表最多显示
-              {{ scenes.rows.length }} 条），这次清不到，要一并清请缩小筛选后再来。</template>
-          </span>
-          <label class="scb-word">
-            <span>输入确认词</span>
-            <input v-model="word" class="scb-in" type="text" spellcheck="false"
-                   :placeholder="CLEAR_ALL_WORD" :disabled="busy" />
-          </label>
-          <button type="button" class="btn mini danger" :disabled="busy || !wordOk"
-                  @click="confirm">确认清除</button>
-          <button type="button" class="btn mini ghost" @click="cancel">取消</button>
-        </template>
-      </div>
-    </Transition>
 
     <Transition name="inline-fade">
       <p v-if="scenes.clearError" class="scb-err">{{ scenes.clearError }}</p>
@@ -199,32 +132,6 @@ const failedCount = computed(() =>
 .scb-sub { color: var(--ink-sub); font-size: 12px; }
 .scb-spacer { flex: 1 1 auto; }
 
-.scb-ask {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-  align-items: center;
-  padding: 10px 12px;
-  background: var(--warn-bg);
-  border-top: 1px solid var(--warn-line);
-}
-.scb-ask-text { flex: 1 1 320px; font-size: 12px; line-height: 1.7; color: var(--ink-body); }
-.scb-ask-text strong { color: var(--warn); }
-.scb-word { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-sub); }
-.scb-in {
-  height: 30px;
-  width: 120px;
-  padding: 0 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-ctrl);
-  font-size: 12px;
-  color: var(--ink);
-  background: var(--surface);
-  outline: none;
-  font-family: inherit;
-}
-.scb-in:focus { border-color: var(--accent-3); box-shadow: 0 0 0 3px rgba(45, 164, 162, 0.14); }
-
 .scb-err { margin: 0; padding: 0 12px 10px; color: var(--err); font-size: 12px; }
 
 .scb-res {
@@ -266,6 +173,5 @@ const failedCount = computed(() =>
   box-shadow: none;
 }
 .btn.ghost:hover { color: var(--accent-deep); border-color: var(--accent-2); }
-.btn.danger { background: var(--err); box-shadow: 0 2px 6px rgba(200, 80, 80, 0.22); }
 .btn.mini { height: 28px; padding: 0 12px; font-size: 12px; font-weight: 500; }
 </style>

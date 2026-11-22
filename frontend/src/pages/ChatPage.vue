@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import ThinkingSlider from "../components/ThinkingSlider.vue";
 import AgentRepairSettings from '../components/AgentRepairSettings.vue';
+import HoldConfirmButton from '../components/HoldConfirmButton.vue';
+import AgentRepairPlanCard from '../components/AgentRepairPlanCard.vue';
+import { useAgentTaskView } from '../lib/agentTaskView';
 /**
  * ChatPage.vue — Agent 聊天（阶段5，api-contract.md §3.2）
  * 布局：左侧会话列表（新建/切换），右侧消息 timeline + 发送框。
@@ -37,6 +40,7 @@ import { reasoningViews, type ReasoningTiming } from '../lib/reasoningTrace';
 
 const chat = useChatStore();
 const toolPresentation = computed(() => projectAgentActivity(chat.messages, chat.sending));
+const { task, closeTask, resolvePlan, revisePlan, reviseTask } = useAgentTaskView(() => toolPresentation.value, () => chat.sessionId, () => chat.sending);
 const viewer = useViewerStore();
 const developerMode = ref(false);
 onMounted(() => { developerMode.value = isDeveloperMode(); });
@@ -161,9 +165,6 @@ async function togglePin(s: ChatSession): Promise<void> {
 
 async function removeOne(s: ChatSession): Promise<void> {
   if (chat.sending) return;
-  const ok = window.confirm(
-    `删除会话 ${shortId(s.session_id)}？\n消息、用量和轨迹记录会一并删除，且不可恢复。`);
-  if (!ok) return;
   await chat.deleteSession(s.session_id);
 }
 
@@ -176,9 +177,6 @@ async function batchPin(): Promise<void> {
 async function batchDelete(): Promise<void> {
   const ids = selected.value.slice();
   if (!ids.length || chat.sending) return;
-  const ok = window.confirm(
-    `删除选中的 ${ids.length} 个会话？\n消息、用量和轨迹记录会一并删除，且不可恢复。`);
-  if (!ok) return;
   await chat.deleteSessions(ids);
   // 失败的会话仍在列表里，保留其勾选；全部成功则退出多选。
   selected.value = ids.filter((id) => chat.sessions.some((s) => s.session_id === id));
@@ -260,8 +258,8 @@ onMounted(() => {
             <button type="button" class="cp-act" @click.stop="rename(s)">重命名</button>
             <button type="button" class="cp-act" :disabled="chat.sending"
                     @click.stop="togglePin(s)">{{ s.pinned ? '取消置顶' : '置顶' }}</button>
-            <button type="button" class="cp-act danger" :disabled="chat.sending"
-                    @click.stop="removeOne(s)">删除</button>
+            <HoldConfirmButton class="cp-act danger" :disabled="chat.sending"
+              :label="`删除会话 ${s.metadata?.title || shortId(s.session_id)}`" @confirm="removeOne(s)">删除</HoldConfirmButton>
           </span>
         </li>
       </ul>
@@ -270,9 +268,9 @@ onMounted(() => {
         <span class="cp-batch-count">已选 {{ selected.length }}</span>
         <button type="button" class="cp-batch-btn" :disabled="!selected.length"
                 @click="batchPin">{{ allPickedPinned ? '取消置顶' : '置顶' }}</button>
-        <button type="button" class="cp-batch-btn danger"
-                :disabled="!selected.length || chat.sending"
-                @click="batchDelete">删除</button>
+        <HoldConfirmButton :key="selected.join(',')" class="cp-batch-btn danger"
+          :disabled="!selected.length || chat.sending" :label="`删除选中的 ${selected.length} 个会话`"
+          @confirm="batchDelete">删除</HoldConfirmButton>
       </div>
 
       <p v-if="!chat.loading && !chat.sessions.length" class="cp-side-hint">
@@ -292,7 +290,10 @@ onMounted(() => {
 
       <p v-if="chat.error" class="cp-err">{{ chat.error }}</p>
 
-      <div ref="scrollEl" class="cp-scroll">
+      <div v-if="task" class="agent-task-pane">
+        <AgentRepairPlanCard :key="task.id" :data="task.data" standalone @back="closeTask" @plan-revised="reviseTask" />
+      </div>
+      <div v-show="!task" ref="scrollEl" class="cp-scroll">
         <div v-if="chat.loading" class="cp-loading">
           <ThinkingIndicator label="加载会话中" />
         </div>
@@ -332,8 +333,9 @@ onMounted(() => {
             </template>
           </template>
 
-          <AgentToolPresentation :projection="toolPresentation" :index="i" :session-key="chat.sessionId"
-            :developer-mode="developerMode" @open-scene="openSearchScene" />
+          <AgentToolPresentation v-if="!task" :projection="toolPresentation" :index="i" :session-key="chat.sessionId"
+            :developer-mode="developerMode" :resolve-plan="resolvePlan"
+            @open-scene="openSearchScene" @plan-revised="revisePlan" />
         </div>
 
         <GoalClarifications :session-id="chat.sessionId" @updated="!chat.sending && chat.sessionId && chat.loadHistory(chat.sessionId)" />
@@ -353,7 +355,7 @@ onMounted(() => {
         </div>
       </div>
 
-      <div class="cp-foot">
+      <div v-show="!task" class="cp-foot">
 
         <ChatAttachTray :items="chat.pendingImages" @remove="chat.removePendingImage" />
         <div class="cp-inputbar">
@@ -381,6 +383,8 @@ onMounted(() => {
 </template>
 
 <style scoped>
+.agent-task-pane { flex:1; min-height:0; overflow:auto; }
+.agent-task-pane :deep(.standalone-task) { max-width:540px; margin-inline:auto; }
 .chat-page {
   height: calc(100vh - var(--topbar-h));
   display: flex;

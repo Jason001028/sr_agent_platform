@@ -464,15 +464,18 @@ const barText = (page, sel) => page.evaluate((s) => {
   return el ? el.textContent.replace(/\s+/g, ' ').trim() : '';
 }, sel);
 
-/** 往「全部清除」的确认词输入框里打字。v-model 认 input 事件（同 setFilter），
- *  所以这里不能只写 el.value —— 那样 DOM 上有字、组件里的状态还是空的。 */
-async function typeClearWord(page, v) {
-  await page.evaluate((val) => {
-    const el = document.querySelector('.scb-in');
-    if (!el) throw new Error('确认词输入框不存在');
-    el.value = val;
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-  }, v);
+async function holdClearButton(page, label, ms = 1100) {
+  const handle = await page.evaluateHandle(t => [...document.querySelectorAll('.scb .hold-confirm')]
+    .find(button => button.textContent.trim() === t && !button.disabled), label);
+  const button = handle.asElement();
+  if (!button) throw new Error('找不到可长按的按钮: ' + label);
+  try {
+    await button.hover();
+    await page.mouse.down();
+    try { await sleep(ms); } finally { await page.mouse.up(); }
+  } finally {
+    await handle.dispose();
+  }
 }
 
 function isIgnorableConsole(msg) {
@@ -982,7 +985,7 @@ async function main() {
       //   删掉的必须是缓存；
       //   留下的必须是**生产数据**（场景源 .tif/.jpg 与 `<编号>_mask.tif`）——
       //   所以逐个数着断，不是「没报错就算过」。
-      console.log('\n[J] 清除预览缓存：勾选 → 清除选定 → 全部清除（要确认词）');
+      console.log('\n[J] 清除预览缓存：勾选 → 长按清除选定 → 长按全部清除');
       await page.goto(base + '/scenes', { waitUntil: 'networkidle2', timeout: 30000 });
       await waitRows(page, 3);
       const subDir = path.join(scenesRoot, 'sub', SUB_ROW);   // 嵌套目录那一景
@@ -1019,20 +1022,14 @@ async function main() {
         `勾一行后计数跟上（${await barText(page, '.scb-count')}）`);
       assert(await btnDisabled('清除选定') === false, '勾选后「清除选定」可用');
 
-      // J1. 取消必须是真的取消：确认条先弹，取消后盘上文件一个不动。
+      // J1. 单击和提前松手都保留磁盘文件。
       await clickByText(page, '清除选定');
-      await waitFor(page, () => !!document.querySelector('.scb-ask'), 10000, '确认条');
-      const askText = await barText(page, '.scb-ask-text');
-      assert(askText.includes('不进回收站'), `确认条写明不可逆（${askText.slice(0, 34)}…）`);
-      assert(fs.existsSync(previewJpg), '还没点确认 → 盘上文件没动');
-      await clickByText(page, '取消');
-      await waitFor(page, () => !document.querySelector('.scb-ask'), 10000, '确认条收起');
-      assert(fs.existsSync(previewJpg), '点「取消」后文件仍在');
+      await holdClearButton(page, '清除选定', 250);
+      await sleep(900);
+      assert(fs.existsSync(previewJpg), '短按取消后盘上文件仍在');
 
       // J2. 清除选定：删缓存 + 该行从列表移除（不重新检索）。
-      await clickByText(page, '清除选定');
-      await waitFor(page, () => !!document.querySelector('.scb-ask'), 10000, '确认条');
-      await clickByText(page, '确认清除');
+      await holdClearButton(page, '清除选定');
       await waitRows(page, 2);
       assert(!fs.existsSync(previewJpg), `盘上的缓存被删掉（${path.basename(previewJpg)}）`);
       rs = await rows(page);
@@ -1055,9 +1052,7 @@ async function main() {
       await relist('检索');
       await waitRows(page, 3);
       await clickRowPick(page, SUB_ROW);
-      await clickByText(page, '清除选定');
-      await waitFor(page, () => !!document.querySelector('.scb-ask'), 10000, '确认条');
-      await clickByText(page, '确认清除');
+      await holdClearButton(page, '清除选定');
       await waitFor(page, () => !!document.querySelector('.scb-det'), 15000, '明细区');
       assert(fs.readFileSync(foreign, 'utf8') === 'not our preview',
         '没有规则签名的同名件没被删（判据生效，字节都没动）');
@@ -1095,18 +1090,11 @@ async function main() {
       // （SceneCacheBar 的 busy = clearing ‖ loading ‖ openingId）随之解除，下面
       // 「全部清除」才点得动（2026-09-22 实测撞过一次点不动）。
 
-      // J4. 全部清除：范围 = 当前列表，且必须输入确认词。
-      await clickByText(page, '全部清除');
-      await waitFor(page, () => !!document.querySelector('.scb-ask'), 10000, '确认条');
-      const allText = await barText(page, '.scb-ask-text');
-      assert(allText.includes('当前列表里的 3 项'),
-        `确认条写明范围是当前列表（${allText.slice(0, 40)}…）`);
-      assert(await btnDisabled('确认清除') === true, '没输入确认词 → 「确认清除」禁用');
-      await typeClearWord(page, '清');
-      assert(await btnDisabled('确认清除') === true, '确认词不完整 → 仍禁用（不是「有字就行」）');
-      await typeClearWord(page, '清除全部');
-      assert(await btnDisabled('确认清除') === false, '输入确认词后才放行');
-      await clickByText(page, '确认清除');
+      // J4. 全部清除：长按确认，范围为当前列表。
+      const allTitle = await page.evaluate(() => [...document.querySelectorAll('.scb .hold-confirm')]
+        .find(button => button.textContent.trim() === '全部清除')?.title);
+      assert(allTitle?.includes('当前列表的 3 项'), '全部清除的提示说明当前列表范围');
+      await holdClearButton(page, '全部清除');
       await waitRows(page, 1);   // 3 → 1：SUB 那一景有同名外来件，结论是「跳过」，行留下
       assert(!fs.existsSync(previewJpg) && !fs.existsSync(jpgPreview),
         '两份缓存（本景 re-baked 的 + B2 段生成的）都清了');
@@ -1125,10 +1113,7 @@ async function main() {
       fs.rmSync(foreign);
       await relist('检索');
       await waitRows(page, 3);
-      await clickByText(page, '全部清除');
-      await waitFor(page, () => !!document.querySelector('.scb-ask'), 10000, '确认条');
-      await typeClearWord(page, '清除全部');
-      await clickByText(page, '确认清除');
+      await holdClearButton(page, '全部清除');
       await waitFor(page, () => !!document.querySelector('.sp-tbl td.empty'), 15000, '空态行');
       const emptyAfter = await page.evaluate(
         () => document.querySelector('.sp-tbl td.empty').textContent.replace(/\s+/g, ' ').trim());

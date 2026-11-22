@@ -18,7 +18,11 @@ const {spawn}=require('child_process'),{launchBrowser}=require('./launchBrowser'
   await page.waitForFunction(()=>document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('viewer').activeRec?.thumb);
   await page.waitForNetworkIdle({idleTime:300});
   await page.evaluate(()=>document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('viewer').hideModal());
-  await page.click('.image-pill');await page.waitForFunction(()=>document.querySelectorAll('.annotation-marker').length===3,{timeout:10000}).catch(async e=>{console.log(await page.evaluate(()=>document.querySelector('.at').innerText));console.log(logs);throw e;});
+  await page.hover('.image-pill-action');
+  await page.mouse.down();
+  await page.waitForFunction(()=>Number(getComputedStyle(document.querySelector('.image-pill-action')).scale)<.97);
+  await page.mouse.up();
+  await page.waitForFunction(()=>document.querySelectorAll('.annotation-marker').length===3,{timeout:10000}).catch(async e=>{console.log(await page.evaluate(()=>document.querySelector('.at').innerText));console.log(logs);throw e;});
   assert.equal((await page.$$('.spatial-references button')).length,3);assert.equal((await page.$$('.annotation-geometry polygon, .annotation-geometry .annotation-bbox')).length,0);
   await page.click('.spatial-references button:nth-of-type(2)');assert.equal((await page.$$('.annotation-geometry polygon, .annotation-geometry .annotation-bbox')).length,1);
   await page.click('.annotation-close');assert.equal((await page.$$('.annotation-geometry polygon, .annotation-geometry .annotation-bbox')).length,0);
@@ -27,7 +31,7 @@ const {spawn}=require('child_process'),{launchBrowser}=require('./launchBrowser'
   await page.evaluate(async()=>{const c=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('chat');await c.loadHistory(c.sessionId);});
   assert.equal((await page.$$('.spatial-references button')).length,3);assert.equal((await page.$$('.annotation-marker')).length,3);
   await page.evaluate(async()=>{const c=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('chat');await c.newSession();});
-  await page.type('.at-input','TEXT_ONLY');await page.click('.image-pill');
+  await page.type('.at-input','TEXT_ONLY');await page.click('.image-pill-action');
   await page.waitForFunction(()=>{const c=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('chat');return !c.sending&&c.messages.some(m=>m.role==='assistant'&&m.content?.includes('Mock text only'));});
   assert.equal((await page.$$('.annotation-marker')).length,0,'Text-only result creates no invented locations');
   assert.equal((await page.$$('.spatial-references button')).length,0);

@@ -75,7 +75,7 @@ export const useBatchMaskReviewStore = defineStore('batchMaskReview', () => {
     const i = list.findIndex(r => r.candidate_id === regionId.value);
     const next = list[(i + direction + list.length) % list.length]; if (next) focus(next.candidate_id);
   }
-  async function open() {
+  async function open(itemId?: string) {
     const gid = batch.goalId; if (!gid || viewer.drawMode) { error.value = '请先退出掩码编辑'; return; }
     close(); active.value = true; busy.value = true; error.value = ''; notice.value = '';
     const gen = generation;
@@ -85,7 +85,8 @@ export const useBatchMaskReviewStore = defineStore('batchMaskReview', () => {
       while (!current) {
         const page = await apiBatchItems(gid, cursor, 'MASK_READY');
         if (gen !== generation || batch.goalId !== gid) return;
-        current = page.items.find(i => i.checkpoint.review_required && !i.checkpoint.review);
+        current = page.items.find(i => (!itemId || i.item_id === itemId)
+          && i.checkpoint.review_required && !i.checkpoint.review);
         if (current || page.items.length < 20) break;
         const next = page.next_after_ordinal;
         if (next <= cursor) break;

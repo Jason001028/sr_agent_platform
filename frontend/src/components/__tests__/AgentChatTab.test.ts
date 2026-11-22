@@ -14,13 +14,24 @@ vi.mock('../../stores/annotations', () => ({ useAnnotationsStore: () => state.an
 state.annotations = reactive({ all: [], demo: [], hidden: false, status: '', selected: null, hovered: null });
 // 会话一挂上就会去拉澄清项；本用例不测那条网络链路。
 vi.mock('../GoalClarifications.vue', () => ({ default: { setup: () => () => null } }));
+vi.mock('../AgentRepairPlanCard.vue', () => ({
+  default: {
+    props: { data: Object, standalone: Boolean }, emits: ['back'],
+    setup(props: { data: { plan_id: string }; standalone: boolean }, { emit }: { emit: (name: 'back') => void }) {
+      return () => h('button', { 'data-plan-id': props.data.plan_id, onClick: () => emit('back') },
+        props.standalone ? '修复待办' : '修复计划');
+    },
+  },
+}));
 
 import Tab from '../AgentChatTab.vue';
+import { agentTaskView } from '../../lib/agentTaskView';
 
 let app: App;
 let root: HTMLDivElement;
 
 beforeEach(() => {
+  agentTaskView.value = 'card';
   // AgentBotIcon 用 matchMedia 判断减少动态；jsdom 没有，给个静态替身。
   Object.defineProperty(window, 'matchMedia', {
     configurable: true,
@@ -82,4 +93,29 @@ it('keeps the composer unlocked after sending the handed-off context', async () 
   await nextTick();
   expect(state.chat.send).toHaveBeenCalledTimes(1);
   expect(root.querySelector('.at-input-lock')).toBeNull();
+});
+
+it('renders the task card directly and switches to the standalone view for the same plan', async () => {
+  state.chat.sending = true;
+  state.chat.messages = [
+    { seq: 1, role: 'user', content: '准备修复计划' },
+    { seq: 2, role: 'assistant', content: '', toolCalls: [{ id: 'p', name: 'prepare_repair', args: {} }] },
+    { seq: 3, role: 'tool', content: '', toolCallId: 'p', toolName: 'prepare_repair', ok: true,
+      data: { kind: 'repair_plan.v1', plan_id: 'p' } },
+  ];
+  await nextTick();
+  expect(root.querySelector('.agent-task-pane')).toBeNull();
+  expect(root.querySelector('[data-plan-id="p"]')?.textContent).toBe('修复计划');
+  expect(root.textContent).not.toContain('打开修复待办');
+  agentTaskView.value = 'standalone';
+  await nextTick();
+  expect(root.querySelector('.agent-task-pane [data-plan-id="p"]')?.textContent).toBe('修复待办');
+  root.querySelector<HTMLButtonElement>('.agent-task-pane button')!.click();
+  await nextTick();
+  expect(root.querySelector('.agent-task-pane')).toBeNull();
+  expect(root.querySelector('[data-plan-id="p"]')?.textContent).toBe('修复计划');
+  state.chat.sessionId = 's2';
+  state.chat.messages = [];
+  await nextTick();
+  expect(root.querySelector('.agent-task-pane')).toBeNull();
 });

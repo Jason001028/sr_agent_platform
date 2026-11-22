@@ -8,7 +8,7 @@ const quality=useBatchQualityStore();
 const noCandidates=computed(()=>quality.doc?.binding.kind==='no-candidate');
 const wholeScene=computed(()=>noCandidates.value||quality.doc?.binding.geometry_unavailable);
 const canConfirm=computed(()=>wholeScene.value||!!quality.doc?.regions.length&&quality.doc.regions.every(r=>r.decision==='approved'));
-const editable=computed(()=>quality.doc?.scene_decision==='pending'&&quality.comparisonReady&&!quality.busy);
+const editable=computed(()=>quality.doc?.scene_decision==='pending'&&quality.comparisonReady&&!quality.effectMode&&!quality.busy);
 const label=(v:string)=>({approved:'通过',rejected:'驳回',pending:'待复核'}[v]??v);
 const regionIndex=computed(()=>{
   const regions=quality.doc?.regions??[];
@@ -45,7 +45,8 @@ async function applyRequest(){
       ??quality.reviews.find(r=>['AWAITING_REVIEW','REVIEW_REJECTED'].includes(r.status))?.item_id
       ??quality.reviews[0]?.item_id;
     if(!target)return;
-    if(request.reviewId)await quality.select(target,request.reviewId);
+    if(request.effect)await quality.select(target,request.reviewId,true,request.regionId);
+    else if(request.reviewId)await quality.select(target,request.reviewId);
     else await quality.select(target);
     if(batchQualityRequest.value?.token!==request.token)return;
     if(request.regionId&&quality.doc)await quality.openRegion(request.regionId);
@@ -88,7 +89,8 @@ watch(()=>batchQualityRequest.value?.token,()=>{if(mounted)void applyRequest();}
       </div>
       <p v-if="!wholeScene" class="hint" data-e2e="quality-region-info">Job {{ quality.doc.job_id }} · {{ regionInfo }}</p>
       <p class="hint">{{ quality.doc.binding.geometry_unavailable ? '旧人工掩码缺少精确矢量区域；请对本次产物进行整景人工复核，图像证据报告不支持精确定位。' : noCandidates ? '本次实验检测未检出候选；左侧为冻结的 PAN，右侧为对应 NOSR。请人工核对整景，未执行 SR。' : '左侧为本次 Job 的 PAN 产物，右侧为对应 NOSR；同步缩放和平移。请逐区域确认后再整景确认。' }}</p>
-      <p v-if="!quality.comparisonReady" class="hint">当前双图或版本未匹配，禁止提交审核；请重新定位。</p>
+      <p v-if="quality.effectMode" class="hint">当前显示修复前后对照。返回人工复核可提交审核决定。</p>
+      <p v-else-if="!quality.comparisonReady" class="hint">当前双图或版本未匹配，禁止提交审核；请重新定位。</p>
       <input v-model="quality.reviewer" aria-label="审核人" placeholder="审核人（必填）" maxlength="100">
       <textarea v-model="quality.reason" aria-label="审核原因" placeholder="审核原因；驳回必须填写" maxlength="2000" rows="2" />
       <div v-if="!wholeScene" class="quality-actions">

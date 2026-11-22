@@ -225,6 +225,46 @@ class RepairApplicationTest(unittest.TestCase):
         self.assertEqual(
             len(self.store.list_goals(kinds=["batch"])), 1)
 
+    def test_local_agent_goal_survives_reopen_and_is_fenced_from_workers(self):
+        scene_dir, inp = self.scene(2)
+        plan = self.prepared((scene_dir, inp))
+        svc.confirm_repair(self.store, plan["plan_id"], session_id="s1")
+        started = svc.start_repair(
+            self.store, plan["plan_id"], session_id="s1",
+            execution_owner="local_agent")
+        goal_id = started["goal"]["goal_id"]
+        self.store.close()
+        self.store = Store(self.root / "test.db")
+
+        self.assertEqual(self.store.get_goal(goal_id)["execution_owner"], "local_agent")
+        self.assertEqual(self.store.list_goals(
+            kinds=["batch"], execution_owner="worker"), [])
+        self.assertIsNone(self.store.claim_goal(goal_id, "batch:legacy"))
+        claimed = self.store.claim_goal(
+            goal_id, "agent:test", execution_owner="local_agent")
+        self.assertIsNotNone(claimed)
+        initial = self.store.batch_snapshot(goal_id)
+        todo, = initial["todos"]
+        self.assertEqual(todo["status"], "PENDING")
+        self.store.transition_goal_item(
+            goal_id, step_id=todo["todo_id"], expected_version=todo["version"],
+            status="DETECTING", lease_token=claimed["lease_token"])
+        snapshot = self.store.batch_snapshot(goal_id)
+        updated, = snapshot["todos"]
+        self.assertEqual(updated["todo_id"], todo["todo_id"])
+        self.assertEqual(updated["status"], "DETECTING")
+        event, = self.store.list_goal_events(goal_id, after=initial["goal"]["last_seq"])
+        self.assertEqual(event["payload"]["todo"], updated)
+        self.store.release_goal(goal_id, claimed["lease_token"], claimed["version"])
+        self.store.transition_goal(goal_id, "PAUSED")
+        self.assertEqual(self.store.list_batch_monitor_goals(), [])
+        self.assertIsNone(self.store.claim_goal_monitor(goal_id, "batch:legacy"))
+        self.assertEqual(
+            [row["goal_id"] for row in self.store.list_batch_monitor_goals(
+                execution_owner="local_agent")], [goal_id])
+        self.assertIsNotNone(self.store.claim_goal_monitor(
+            goal_id, "agent:test", execution_owner="local_agent"))
+
     def test_reprepare_bumps_version_and_old_version_cannot_start(self):
         scene_dir, inp = self.scene(14)
         plan = self.prepared((scene_dir, inp))

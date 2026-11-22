@@ -2,6 +2,9 @@
 import { imageRef } from '../lib/spatial';
 import ThinkingSlider from "./ThinkingSlider.vue";
 import AgentRepairSettings from './AgentRepairSettings.vue';
+import HoldConfirmButton from './HoldConfirmButton.vue';
+import AgentRepairPlanCard from './AgentRepairPlanCard.vue';
+import { useAgentTaskView } from '../lib/agentTaskView';
 /**
  * AgentChatTab.vue — 上下文侧舱 [Agent] tab（阶段6 L2）
  * ------------------------------------------------------------------
@@ -53,6 +56,7 @@ import type { BatchAgentHandoff } from '../lib/batchHandoff';
 const viewer = useViewerStore();
 const chat = useChatStore();
 const toolPresentation = computed(() => projectAgentActivity(chat.messages, chat.sending));
+const { task, closeTask, resolvePlan, revisePlan, reviseTask } = useAgentTaskView(() => toolPresentation.value, () => chat.sessionId, () => chat.sending);
 const scenes = useScenesStore();
 const draft = ref('');
 /** 交接后的输入区解锁：清单场景通常没有已加载的活动影像，只靠 `enabled` 会让底部
@@ -179,13 +183,10 @@ async function switchTo(sid: string): Promise<void> {
   await chat.selectSession(sid);
 }
 
-/** 删除**当前**会话；确认文案与 /chat 行内删除同一口径（消息/用量/轨迹一并删）。 */
+/** 删除当前会话及其消息、用量和轨迹。 */
 async function removeCurrent(): Promise<void> {
   const sid = chat.sessionId;
   if (!sid || chat.sending) return;
-  const ok = window.confirm(
-    `删除会话 ${shortId(sid)}？\n消息、用量和轨迹记录会一并删除，且不可恢复。`);
-  if (!ok) return;
   menuOpen.value = false;
   clearBatchContext();
   await chat.deleteSession(sid);
@@ -345,15 +346,10 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
                 @click="toggleMenu">
           <AppIcon name="clock" :size="16" />
         </button>
-        <button type="button" class="at-hbtn danger" data-e2e="agent-del"
-                :disabled="!chat.sessionId || chat.sending"
-                :title="chat.sessionId
-                  ? '删除当前会话（消息、用量和轨迹一并删除）'
-                  : '当前没有会话'"
-                aria-label="删除当前会话"
-                @click="removeCurrent">
+        <HoldConfirmButton :key="chat.sessionId ?? undefined" class="at-hbtn danger" data-e2e="agent-del"
+          :disabled="!chat.sessionId || chat.sending" label="删除当前会话" @confirm="removeCurrent">
           <AppIcon name="circle-x" :size="16" />
-        </button>
+        </HoldConfirmButton>
         <AgentRepairSettings />
       </div>
       <router-link class="at-go" to="/chat">去 Chat 页继续 ↗</router-link>
@@ -387,7 +383,10 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
     <p v-if="chat.error" class="at-err" role="alert">{{ chat.error }}</p>
 
     <!-- 会话区 -->
-      <div ref="scrollEl" class="at-scroll">
+      <div v-if="task" class="agent-task-pane">
+        <AgentRepairPlanCard :key="task.id" :data="task.data" standalone @back="closeTask" @plan-revised="reviseTask" />
+      </div>
+      <div v-show="!task" ref="scrollEl" class="at-scroll">
         <p v-if="creating && !chat.messages.length" class="at-desc" role="status">正在创建 Agent 会话…</p>
         <div v-else-if="!chat.messages.length && !chat.sending" class="at-welcome">
           <AgentBotIcon :status="chat.agentStatus" :size="24" label="遥感影像助手" />
@@ -433,8 +432,9 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
             </template>
           </template>
 
-          <AgentToolPresentation :projection="toolPresentation" :index="i" :session-key="chat.sessionId"
-            :developer-mode="developerMode" @open-scene="openSearchScene" />
+          <AgentToolPresentation v-if="!task" :projection="toolPresentation" :index="i" :session-key="chat.sessionId"
+            :developer-mode="developerMode" :resolve-plan="resolvePlan"
+            @open-scene="openSearchScene" @plan-revised="revisePlan" />
         </div>
 
         <GoalClarifications :session-id="chat.sessionId" @updated="!chat.sending && chat.sessionId && chat.loadHistory(chat.sessionId)" />
@@ -443,7 +443,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
         </div>
       </div>
 
-      <div class="at-foot" :class="{ locked: !composerEnabled }">
+      <div v-show="!task" class="at-foot" :class="{ locked: !composerEnabled }">
         <div :inert="!composerEnabled">
         <p v-if="batchHint" class="at-desc">已携带批次上下文，可补充问题后发送。</p>
 
@@ -476,6 +476,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
 </template>
 
 <style scoped>
+.agent-task-pane { flex:1; min-height:0; overflow:auto; }
 .at {
   position: relative;          /* 会话菜单的定位基准 */
   height: 100%;

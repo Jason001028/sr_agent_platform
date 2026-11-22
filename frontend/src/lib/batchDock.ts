@@ -10,9 +10,9 @@
 import { ref } from 'vue';
 
 export const batchDockOpen = ref(false);
-export const batchMaskRequest = ref<{ goalId: string; token: number } | null>(null);
-export function requestMaskReview(goalId: string): void {
-  batchMaskRequest.value = { goalId, token: (batchMaskRequest.value?.token ?? 0) + 1 };
+export const batchMaskRequest = ref<{ goalId: string; itemId?: string; token: number } | null>(null);
+export function requestMaskReview(goalId: string, itemId?: string): void {
+  batchMaskRequest.value = { goalId, itemId, token: (batchMaskRequest.value?.token ?? 0) + 1 };
 }
 
 export function openBatchDock(): void {
@@ -41,13 +41,14 @@ export interface BatchQualityRequest {
   regionId?: string;
   goalId?: string;
   reviewId?: string;
+  effect?: boolean;
 }
 export const batchQualityRequest = ref<BatchQualityRequest | null>(null);
 let qualityRequestToken = 0;
 
-export function requestQualityReview(itemId?: string, regionId?: string, goalId?: string, reviewId?: string): void {
+export function requestQualityReview(itemId?: string, regionId?: string, goalId?: string, reviewId?: string, effect = false): void {
   qualityRequestToken += 1;
-  batchQualityRequest.value = { token: qualityRequestToken, itemId, regionId, goalId, reviewId };
+  batchQualityRequest.value = { token: qualityRequestToken, itemId, regionId, goalId, reviewId, ...(effect ? { effect } : {}) };
   openBatchDock();
   window.dispatchEvent(new CustomEvent('batch-task-open', {
     detail: { section: 'monitor', quality: true },

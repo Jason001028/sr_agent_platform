@@ -12,6 +12,9 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { isDeveloperMode } from '../lib/developerMode.js';
 import { useBatchGoalStore } from '../stores/batchGoal';
 import { useChatStore } from '../stores/chat';
+import AgentTodoList from './AgentTodoList.vue';
+import HoldConfirmButton from './HoldConfirmButton.vue';
+import type { BatchTodo } from '../lib/api';
 import { useViewerStore } from '../stores/viewer';
 import { snapshotWorkspace } from '../lib/viewerContext';
 import { apiPrepareRepair, apiConfirmRepair, apiRepairStatus, apiStartRepair, apiRepairTargets, HttpError } from '../lib/api';
@@ -29,7 +32,8 @@ import { goalStatusLabel, itemStatusLabel } from '../lib/batchUi';
 import { missionItemLabel, terminalMission } from '../lib/batchMission';
 import type { MissionItem } from '../lib/batchMission';
 
-const props = defineProps<{ data: unknown }>();
+const props = defineProps<{ data: unknown; standalone?: boolean }>();
+const emit = defineEmits<{ back: []; planRevised: [plan: RepairPlan] }>();
 const developerMode = isDeveloperMode();
 const chat = useChatStore();
 const batch = useBatchGoalStore();
@@ -44,7 +48,7 @@ onMounted(() => {
       : { scale: .985, pressMs: 90, releaseMs: 90 });
 });
 onBeforeUnmount(() => disposePress?.());
-const cancelConfirming = ref(false), cancelBusy = ref(false), controlNotice = ref('');
+const cancelBusy = ref(false), controlNotice = ref('');
 const canStop = computed(() => started.value && !!goalId.value && !terminalMission(goalStatus.value));
 
 const plan = ref<RepairPlan | null>(repairPlanData(props.data));
@@ -69,7 +73,7 @@ const linkedSnapshot = computed(() => {
 });
 const goal = computed(() => linkedSnapshot.value?.goal ?? status.value?.goal ?? null);
 const goalStatus = computed(() => goal.value?.status ?? '');
-watch([goalId, goalStatus], () => { cancelConfirming.value = false; controlNotice.value = ''; });
+watch([goalId, goalStatus], () => { controlNotice.value = ''; });
 const maskReviewOpening = ref(false);
 const needsMaskReview = computed(() => phase.value === 'waiting_review'
   && started.value && !terminalMission(goalStatus.value) && goalStatus.value !== 'PAUSED');
@@ -78,6 +82,74 @@ const counts = computed(() => linkedSnapshot.value?.counts ?? status.value?.coun
 const progress = computed(() => linkedSnapshot.value?.progress ?? status.value?.progress ?? null);
 const quality = computed(() => linkedSnapshot.value?.quality ?? status.value?.quality);
 const items = computed<RepairStatusItem[]>(() => status.value?.items ?? []);
+const todoLabels: Record<string, string> = {
+  PENDING: '待检查', OPENING: '正在检查', DETECTING: '正在检查',
+  MASK_PENDING: '等待生成 Mask', BUILDING_MASK: '正在生成 Mask',
+  MASK_READY: '等待提交或区域复核', SUBMITTING: '正在提交',
+  WAITING_SR: '修复中', VERIFYING: '等待回检', AWAITING_REVIEW: '待人工验收',
+  SUCCEEDED: '已通过', SKIPPED: '已跳过', NO_ISSUE: '无需修复',
+  BLOCKED: '受阻', FAILED: '失败', RETRY_WAIT: '等待重试', REVIEW_REJECTED: '人工驳回',
+};
+const actionLabels: Record<string, string> = {
+  detect_repair_item: '检测', build_repair_mask: '生成 Mask', submit_repair_item: '提交 SR',
+  verify_repair_output: '验证产物', assess_repair_effect: '效果回检',
+};
+function todoLabel(row: BatchTodo): string {
+  return todoLabels[row.phase ?? ''] ?? todoLabels[row.status] ?? row.status;
+}
+function needsItemMaskReview(itemId: string): boolean {
+  return items.value.some(item => item.item_id === itemId && item.status === 'MASK_READY'
+    && item.review_required && !item.review_decision);
+}
+function todoGroup(row: BatchTodo): 'active' | 'attention' | 'ended' {
+  if (['AWAITING_REVIEW', 'BLOCKED'].includes(row.status) || needsItemMaskReview(row.item_id)) return 'attention';
+  if (['SUCCEEDED', 'SKIPPED', 'NO_ISSUE', 'FAILED', 'REVIEW_REJECTED'].includes(row.status)) return 'ended';
+  return 'active';
+}
+const decisionsByItem = computed(() => {
+  const decisions = new Map<string, NonNullable<typeof batch.events>>();
+  if (!linkedSnapshot.value) return decisions;
+  for (const event of batch.events ?? []) {
+    const id = event.payload?.item_id;
+    if (event.event_type !== 'agent_action_selected' || typeof id !== 'string') continue;
+    const rows = decisions.get(id) ?? [];
+    rows.push(event);
+    decisions.set(id, rows);
+  }
+  return decisions;
+});
+const latestAgentEvent = computed(() => (linkedSnapshot.value ? batch.events ?? [] : [])
+  .slice().reverse().find(event => ['agent_action_selected', 'agent_decision_failed'].includes(event.event_type)));
+const effectCounts = computed(() => {
+  const rechecks = linkedSnapshot.value?.todos?.flatMap(row => row.effect_review ? [row.effect_review] : []) ?? [];
+  return {
+    measured: rechecks.filter(row => row.status === 'measured').length,
+    blocked: rechecks.filter(row => row.status === 'blocked').length,
+    waiting: rechecks.filter(row => !['measured', 'blocked'].includes(row.status)).length,
+  };
+});
+const metricLabels: Record<string, string> = {
+  edge_width_px: '边缘宽度（像素）', edge_halo_fraction: '过冲比例',
+  hf_mad_dn: '高频残差 MAD', row_banding_dn: '横向条带',
+  column_banding_dn: '纵向条带', mask_boundary_jump_dn: 'Mask 边界亮度跳变',
+};
+function describeTodo(row: BatchTodo): string {
+  const lines = [todoLabel(row)];
+  if (row.job_id) lines.push(`Job ${row.job_id}`);
+  if (row.error) lines.push(row.error);
+  if (row.effect_review?.evidence_gap) lines.push(row.effect_review.evidence_gap);
+  for (const region of row.effect_review?.regions ?? []) {
+    lines.push(`${region.region_id} · ${region.conclusion === 'unchanged' ? '未见变化' : '证据不足'}`);
+    for (const [key, metric] of Object.entries(region.metrics ?? {})) {
+      lines.push(`${metricLabels[key] ?? key} ${metric.before.toFixed(2)} → ${metric.after.toFixed(2)}`);
+    }
+  }
+  for (const entry of decisionsByItem.value.get(row.item_id) ?? []) {
+    const action = String(entry.payload.action);
+    lines.push([actionLabels[action] ?? action, entry.payload.reason].filter(Boolean).join(' · '));
+  }
+  return lines.join('\n');
+}
 const planStatus = computed(() => plan.value?.status ?? '');
 const started = computed(() => !!goalId.value || !!goal.value || planStatus.value === 'STARTED');
 /* Convergence is explicit: terminal status **and** the Monitor's own
@@ -195,6 +267,7 @@ async function excludeConflicts() {
       mask_policy: p.mask?.policy === 'existing' ? 'existing' : 'auto', mask_path: p.mask?.path, title: p.title });
     if (disposed) return;
     resetTargets(); plan.value = next; status.value = null; synchronized.value = false;
+    emit('planRevised', next);
     detailsOpen.value = false; conflictsOpen.value = false;
     await refreshStatus();
   } catch (e) { error.value = e instanceof Error ? e.message : String(e); }
@@ -303,6 +376,9 @@ const productReviews = computed(() => {
 });
 const productPending = computed(() => status.value?.quality_products?.pending ?? 0);
 const noCandidatePending = computed(() => Math.max(0, pendingReviews.value - productPending.value));
+const taskTodos = computed(() => linkedSnapshot.value?.todos ?? []);
+const todoFinished = computed(() => taskTodos.value.filter(row => todoGroup(row) === 'ended').length);
+const todoAttention = computed(() => taskTodos.value.filter(row => todoGroup(row) === 'attention').length);
 /** Backend-owned acceptance verdict; never inferred from a green status. */
 const qualityPassed = computed(() => status.value?.acceptance?.quality_passed === true);
 /** Only a scene with a bound quality review that still needs a decision is
@@ -422,8 +498,12 @@ async function refreshStatus(): Promise<void> {
   }
 }
 async function linkBatch(): Promise<void> {
-  if (!goalId.value || batch.goalId) return;
-  try { await batch.attach(goalId.value); } catch { /* REST status remains usable */ }
+  if (!goalId.value || batch.goalId === goalId.value) return;
+  if (batch.goalId && !props.standalone) return;
+  try {
+    if (batch.goalId) await batch.selectGoal(goalId.value);
+    else await batch.attach(goalId.value);
+  } catch { /* REST status remains usable */ }
 }
 async function startPlan(): Promise<void> {
   const current = plan.value;
@@ -444,7 +524,7 @@ async function startPlan(): Promise<void> {
       }
     }
     const startedResult = await apiStartRepair(current.plan_id, {
-      session_id: sessionId, plan_version: current.version,
+      session_id: sessionId, plan_version: current.version, local_agent: true,
       workspace_version: viewer.workspaceVersion,
       workspace: snapshotWorkspace(viewer.recsOrdered, viewer.workspaceVersion),
     });
@@ -474,24 +554,34 @@ async function openTask(): Promise<void> {
   window.dispatchEvent(new CustomEvent('batch-task-open',
     { detail: { section: 'monitor' } }));
 }
-async function openMaskReview(): Promise<void> {
-  if (!needsMaskReview.value || !goalId.value || maskReviewOpening.value) return;
+async function openMaskReview(itemId?: string): Promise<void> {
+  const canOpen = () => itemId ? needsItemMaskReview(itemId) : needsMaskReview.value;
+  if (!canOpen() || !goalId.value || maskReviewOpening.value) return;
   const gid = goalId.value;
   maskReviewOpening.value = true;
   error.value = '';
   try {
     if (batch.goalId !== gid && !await batch.selectGoal(gid)) throw new Error('无法打开该任务，请稍后重试。');
-    if (gid !== goalId.value || !needsMaskReview.value) return;
+    if (gid !== goalId.value || !canOpen()) return;
     await router.push('/viewer');
-    requestMaskReview(gid);
+    if (itemId) requestMaskReview(gid, itemId);
+    else requestMaskReview(gid);
   } catch (e) { error.value = e instanceof Error ? e.message : String(e); }
   finally { maskReviewOpening.value = false; }
 }
+async function togglePause(): Promise<void> {
+  const gid = goalId.value;
+  if (!gid || batch.controlBusy) return;
+  if (batch.goalId !== gid && !await batch.selectGoal(gid)) return;
+  if (goalId.value !== gid) return;
+  controlNotice.value = await batch.control(goalStatus.value === 'PAUSED' ? 'resume' : 'pause');
+  error.value = batch.controlError;
+  await refreshStatus();
+}
 async function stopTask(): Promise<void> {
   if (!canStop.value || cancelBusy.value || batch.controlBusy) return;
-  if (!cancelConfirming.value) { cancelConfirming.value = true; return; }
   const gid = goalId.value;
-  cancelBusy.value = true; cancelConfirming.value = false; error.value = '';
+  cancelBusy.value = true; error.value = '';
   try {
     if (batch.goalId !== gid && !await batch.selectGoal(gid)) throw new Error('无法打开该任务，请稍后重试。');
     if (goalId.value !== gid || batch.goalId !== gid) throw new Error('当前任务已变化，请重新操作。');
@@ -503,8 +593,7 @@ async function stopTask(): Promise<void> {
   } catch (e) { if (goalId.value === gid) error.value = e instanceof Error ? e.message : String(e); }
   finally { cancelBusy.value = false; }
 }
-async function openResult(): Promise<void> {
-  const item = resultItem.value;
+async function openResult(item = resultItem.value): Promise<void> {
   const gid = goalId.value;
   // Only the SR output named by the passed artifacts contract may be shown;
   // the frozen target/backup paths are deliberately not accepted here.
@@ -520,18 +609,18 @@ async function openResult(): Promise<void> {
   if (problem) error.value = problem;
   else await router.push('/viewer');
 }
-async function startReview(): Promise<void> {
+async function startReview(itemId = reviewTarget.value?.item_id, regionId?: string, effect = false): Promise<void> {
   const gid = goalId.value;
   if (!gid) return;
   if (batch.goalId !== gid && !await batch.selectGoal(gid)) return;
-  const itemId = reviewTarget.value?.item_id;
   error.value = '';
   // One direct landing: the existing Batch Panel opens its quality block and
   // the existing quality store selects this Item's first pending region and
   // opens the NOSR / SR pair.  No second review UI is created.
   await router.push('/viewer');
   await nextTick();
-  requestQualityReview(itemId, undefined, gid);
+  if (effect) requestQualityReview(itemId, regionId, gid, undefined, true);
+  else requestQualityReview(itemId, regionId, gid);
 }
 function onVisibility(): void {
   if (document.visibilityState === 'visible') scheduleStatusRefresh(0);
@@ -564,9 +653,14 @@ onBeforeUnmount(() => {
 });
 </script>
 <template>
-  <RepairEvidenceEntry v-if="goalId" :goal-id="goalId" />
-  <div v-if="plan" ref="cardRoot" class="repair-task" data-e2e="agent-repair-task" :data-stage="stage">
-    <header class="task-head">
+  <RepairEvidenceEntry v-if="goalId && !standalone" :goal-id="goalId" />
+  <div v-if="plan" ref="cardRoot" class="repair-task" :class="{ 'standalone-task': standalone }"
+    data-e2e="agent-repair-task" :data-stage="stage">
+    <header v-if="standalone" class="standalone-head">
+      <div><button type="button" class="task-back" @click="emit('back')">‹ 返回聊天</button><h2>修复待办</h2></div>
+      <span class="state" :class="stateTone">{{ goalStatus === 'RUNNING' && stateLabel === '已启动' ? '执行中' : stateLabel }}</span>
+    </header>
+    <header v-else class="task-head">
       <span class="task-title"><AppIcon v-if="stage !== 'plan'" name="layers" :size="18" tint /><strong>{{ stage === 'done' ? '修复结果' : stage === 'running' ? '自动修复' : '修复计划' }} · {{ targetCount }} 景</strong></span>
       <span class="task-state">
         <span class="state-ring" :class="stateIcon" :data-state-icon="stateIcon" data-e2e="repair-state-ring" aria-hidden="true">
@@ -586,7 +680,8 @@ onBeforeUnmount(() => {
 
     <Transition name="repair-stage" mode="out-in">
     <section v-if="stage === 'plan'" :key="planId" class="plan-body">
-      <p class="plan-meta">{{ scopeLabel }} · {{ detectionLabel }} · {{ plan.strategy.mask === 'existing' ? '已有掩码' : '自动掩码' }}</p>
+      <strong v-if="standalone">{{ scopeLabel }} · {{ targetCount }} 景</strong>
+      <p class="plan-meta"><template v-if="!standalone">{{ scopeLabel }} · </template>{{ detectionLabel }} · {{ plan.strategy.mask === 'existing' ? '已有掩码' : '自动掩码' }}</p>
       <p v-if="plan.skipped_completed?.length" class="plan-meta">已跳过 {{ plan.skipped_completed.length }} 景已有 PAN 备份的影像</p>
       <button v-if="historical" class="list-link" :aria-expanded="historyExpanded" @click="historyExpanded = !historyExpanded">{{ historyExpanded ? '收起历史计划' : '查看历史计划' }}</button>
       <template v-if="!historical || historyExpanded">
@@ -619,16 +714,41 @@ onBeforeUnmount(() => {
     </section>
 
     <section v-else :key="stage" class="execution-body">
-      <RepairLandSummary v-if="plan.land_constraint" :plan="plan" />
+      <RepairLandSummary v-if="!standalone && plan.land_constraint" :plan="plan" />
       <p v-if="plan.mode !== 'production'" class="mode-note">Demo / Fake SR · 不产生真实修复成果</p>
-      <p v-if="currentItem" class="current" :title="`${currentItem.name} · ${currentItem.label}`">
+      <p v-if="!standalone && currentItem" class="current" :title="`${currentItem.name} · ${currentItem.label}`">
         <span class="current-prefix">当前影像</span><span class="current-name">{{ currentItem.name }}</span>
       </p>
-      <p class="overall-summary" data-e2e="repair-overall-summary">
+      <p v-if="!standalone" class="overall-summary" data-e2e="repair-overall-summary">
         <template v-if="primaryPercent != null">已处理 <b>{{ processed.done }} / {{ processed.total }}</b> 景 · {{ Math.round(primaryPercent) }}%</template>
         <template v-else>{{ processed.known ? '无适用影像' : '统计中' }}</template>
       </p>
-      <BatchProgressTracks :counts="counts" :demo="plan.mode !== 'production'" />
+      <p v-if="!standalone && (effectCounts.measured || effectCounts.blocked || effectCounts.waiting)" class="overall-summary">
+        效果回检 · {{ effectCounts.measured }} 景已测量 · {{ effectCounts.blocked }} 景受阻 · {{ effectCounts.waiting }} 景待完成
+      </p>
+      <p v-if="latestAgentEvent?.event_type === 'agent_decision_failed' && !terminalMission(goalStatus)" class="note">
+        Agent 暂未取得有效动作，稍后重试。
+      </p>
+      <AgentTodoList v-if="linkedSnapshot?.todos" :rows="linkedSnapshot.todos"
+        :label="todoLabel" :describe="describeTodo" :group="todoGroup">
+        <template v-if="!standalone" #actions>
+          <button v-if="!terminalMission(goalStatus)" :disabled="batch.controlBusy" @click="togglePause">
+            {{ goalStatus === 'PAUSED' ? '恢复执行' : '暂停执行' }}
+          </button>
+        </template>
+        <template #default="{ row }">
+          <button v-if="needsItemMaskReview(row.item_id)" :disabled="maskReviewOpening" title="复核候选区域"
+            @click="openMaskReview(row.item_id)">复核</button>
+          <button v-else-if="row.effect_review?.regions?.[0] && items.some(item => item.item_id === row.item_id && item.quality_review_id)"
+            @click="startReview(row.item_id, row.effect_review.regions[0].region_id, true)">查看区域</button>
+          <button v-else-if="standalone && row.status === 'AWAITING_REVIEW' && items.some(item => item.item_id === row.item_id && item.quality_review_id)"
+            @click="startReview(row.item_id)">前往复核</button>
+          <button v-else-if="items.some(item => item.item_id === row.item_id && item.output_path)"
+            @click="openResult(items.find(item => item.item_id === row.item_id))">查看成果</button>
+        </template>
+      </AgentTodoList>
+      <p v-else-if="standalone && !error" class="note" role="status">正在读取逐景状态…</p>
+      <BatchProgressTracks v-if="!standalone" :counts="counts" :demo="plan.mode !== 'production'" />
       <div v-if="stage === 'done' && regionCounts?.total" class="counts review-regions" data-e2e="repair-region-counts">
         <span>待审区域 <b>{{ regionCounts.pending }}</b></span>
         <span>区域通过 <b>{{ regionCounts.approved }}</b></span>
@@ -650,22 +770,36 @@ onBeforeUnmount(() => {
       </p>
       <p v-if="error" class="warn">{{ error }}</p>
       <p v-if="controlNotice" class="note" role="status">{{ controlNotice }}</p>
-      <p v-if="cancelConfirming" class="note">再次点击确认中止；已提交作业仍由后台监控到终态。</p>
-      <div v-if="goalId || resultItem || reviewTarget" class="actions" data-e2e="repair-task-actions">
-        <button v-if="goalId" class="primary" @click="openTask">查看进度</button>
-        <button v-if="canStop" class="stop-task" data-e2e="repair-stop-task" :disabled="cancelBusy || batch.controlBusy" @click="stopTask">{{ cancelBusy ? '正在中止…' : cancelConfirming ? '确认中止' : '中止任务' }}</button>
-        <button v-if="needsMaskReview" class="mask-review-button" data-e2e="repair-mask-review" :disabled="maskReviewOpening" @click="openMaskReview">{{ maskReviewOpening ? '正在前往…' : '前往复核' }}</button>
-        <button v-if="stage === 'done' && resultItem" data-e2e="repair-view-result" @click="openResult">查看成果</button>
-        <button v-if="stage === 'done' && reviewTarget" data-e2e="repair-start-review" @click="startReview">开始复核</button>
+      <div v-if="goalId || resultItem || reviewTarget" class="actions"
+        :class="{ 'standalone-footer': standalone }" data-e2e="repair-task-actions">
+        <span v-if="standalone && linkedSnapshot?.todos" class="standalone-count">
+          已结束 {{ todoFinished }} / {{ targetCount }} 景<span v-if="todoAttention"> · 待处理 {{ todoAttention }} 景</span>
+        </span>
+        <button v-if="!standalone && goalId" class="primary" @click="openTask">查看进度</button>
+        <HoldConfirmButton v-if="canStop" :key="goalId" class="stop-task" data-e2e="repair-stop-task"
+          label="中止任务" :disabled="cancelBusy || batch.controlBusy" @confirm="stopTask">
+          {{ cancelBusy ? '正在中止…' : '中止任务' }}
+        </HoldConfirmButton>
+        <button v-if="needsMaskReview" class="mask-review-button" data-e2e="repair-mask-review" :disabled="maskReviewOpening" @click="openMaskReview()">{{ maskReviewOpening ? '正在前往…' : '前往复核' }}</button>
+        <button v-if="stage === 'done' && resultItem" data-e2e="repair-view-result" @click="openResult()">查看成果</button>
+        <button v-if="stage === 'done' && reviewTarget" data-e2e="repair-start-review" @click="startReview()">开始复核</button>
       </div>
     </section>
     </Transition>
+    <RepairEvidenceEntry v-if="standalone && goalId" :goal-id="goalId" />
     <Teleport to="body"><Transition name="repair-drawer">
       <RepairTargetDrawer v-if="drawerOpen" :rows="targetRows" :total="plan.targets.total" :loading="drawerLoading" :error="drawerError" @close="drawerOpen = false" />
     </Transition></Teleport>
   </div>
 </template>
 <style scoped>
+.repair-task.standalone-task { border:0; border-radius:0; margin:0; padding:16px; background:var(--surface,#fff); gap:14px; }
+.standalone-head { display:flex; justify-content:space-between; align-items:end; gap:8px; padding-bottom:12px; border-bottom:1px solid var(--tb-border,#e4ebe6); }
+.standalone-head h2 { margin:6px 0 0; font-size:20px; line-height:1.25; }
+.standalone-task .task-back { border:0; padding:0; background:none; color:var(--tb-primary,#166c67); }
+.standalone-task :deep(.todo-viewport) { margin-block:0; max-height:15rem; }
+.standalone-count { margin-inline-end:auto; color:var(--tb-muted,#566960); }
+.standalone-footer .stop-task { margin-inline-start:auto; }
 .repair-task { display:grid; grid-template-columns:minmax(0,1fr); gap:10px; margin:6px 0; padding:12px; border:1px solid var(--tb-border); border-radius:12px; font-size:12px; background:var(--tb-bg); color:var(--tb-fg); min-width:0; width:100%; max-width:100%; box-sizing:border-box; overflow:hidden; }
 .plan-body, .execution-body { min-width:0; display:grid; gap:10px; }
 .plan-facts { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:12px 16px; margin:0; }

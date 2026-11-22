@@ -2,9 +2,10 @@
 import { ref } from 'vue';
 import type { SceneRow } from '../lib/scene.js';
 import AppIcon from './AppIcon.vue';
+import HoldConfirmButton from './HoldConfirmButton.vue';
 import { tagGroups } from '../lib/sceneLibrary.js';
 
-const props = defineProps<{ row: SceneRow; variants?: SceneRow[]; opening?: boolean }>();
+const props = defineProps<{ row: SceneRow; variants?: SceneRow[]; opening?: boolean; removing?: boolean }>();
 const emit = defineEmits<{ open: []; remove: []; }>();
 const expanded = ref(false);
 const editing = ref(false);
@@ -56,9 +57,10 @@ function dims(r: SceneRow): string { return r.W && r.H ? `${r.W} × ${r.H}` : '�
         <button type="button" class="scene-action" aria-label="编辑场景显示名称" title="编辑场景显示名称" @click="beginEdit">
           <AppIcon name="settings" :size="16" label="编辑场景显示名称" />
         </button>
-        <button type="button" class="scene-action scene-action-danger" aria-label="从场景库隐藏（本机）" title="从场景库隐藏（本机）" @click="emit('remove')">
-          <AppIcon name="trash" :size="16" label="从场景库隐藏（本机）" />
-        </button>
+        <HoldConfirmButton class="scene-action scene-action-danger" label="从场景库隐藏" :disabled="removing"
+          @confirm="emit('remove')">
+          <AppIcon name="trash" :size="16" />
+        </HoldConfirmButton>
         <button type="button" class="scene-expand" :aria-expanded="expanded" :aria-label="expanded ? '收起更多信息' : '展开更多信息'" :title="expanded ? '收起更多信息' : '展开更多信息'" @click="expanded = !expanded"><AppIcon name="clipboard-list" :size="16" :label="expanded ? '收起详情' : '展开更多信息'" /></button>
       </div>
     </div>

@@ -77,7 +77,7 @@ from backend.tools import build_builtin_registry
 from backend.services import preview_clear
 from backend.services import plugins as plugin_svc
 from backend.services import run_sr as run_sr_svc
-from backend.services import goal_runtime, goal_worker, batch_worker, evidence_worker
+from backend.services import goal_runtime, goal_worker, batch_worker, evidence_worker, repair_agent
 from backend.api import repair as repair_api
 from backend.services import scene_search, store as store_mod
 from backend.services.preview_jpg import (PREVIEW_DIVISORS, PREVIEW_JPG_QUALITY,
@@ -1395,9 +1395,12 @@ def create_app() -> FastAPI:
             asyncio.create_task(_tmp_preview_purge_loop()),
             asyncio.create_task(image_open_purge_loop(app.state.image_open)),
             asyncio.create_task(_eager_preview_loop(app.state)),
-            asyncio.create_task(goal_worker.goal_loop(app.state)),
-            asyncio.create_task(batch_worker.batch_loop(app.state)),
         ]
+        if os.environ.get("SR_GOAL_WORKER_ENABLED", "1") != "0":
+            app.state.tasks.append(asyncio.create_task(goal_worker.goal_loop(app.state)))
+        if os.environ.get("SR_BATCH_WORKER_ENABLED", "1") != "0":
+            app.state.tasks.append(asyncio.create_task(batch_worker.batch_loop(app.state)))
+        app.state.tasks.append(asyncio.create_task(repair_agent.repair_agent_loop(app.state)))
         # Warm the production preflight once at startup when the operator has
         # opened production (Python imports + nvidia-smi can take seconds).
         # Plan-card polling then reads the cache instead of probing again.

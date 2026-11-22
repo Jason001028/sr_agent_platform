@@ -108,7 +108,7 @@ class BatchWorkerTest(unittest.TestCase):
         return "".join(f"{name}\t{DESC}\t张三\n" for name in names)
 
     def make_goal(self, count=5, *, mode="demo", exclusions=None,
-                  frozen_config=None):
+                  frozen_config=None, execution_owner="worker"):
         names = [self.scene(i) for i in range(1, count + 1)]
         imported = batch_manifest.import_manifest(
             text=self.qc(*names), mode=mode)
@@ -137,7 +137,7 @@ class BatchWorkerTest(unittest.TestCase):
         goal = self.store.create_batch_goal(
             title="batch", request_key="req-" + str(time.time_ns()),
             content_sha256=imported["manifest_ref"], checkpoint=checkpoint,
-            items=items, max_model_calls=0)
+            items=items, max_model_calls=0, execution_owner=execution_owner)
         if frozen_config:
             original = batch_manifest.load_manifest
 
@@ -394,6 +394,103 @@ class BatchWorkerTest(unittest.TestCase):
         self.run_until(
             lambda: self.store.get_goal(goal["goal_id"])["status"] == "COMPLETED")
         self.assertEqual(len(self.submits), 3)
+
+    def test_local_agent_overlaps_and_recovers_one_effect_review(self):
+        from backend.services.repair_agent import choose_repair_action
+
+        goal, _ = self.make_goal(2, execution_owner="local_agent")
+        gid = goal["goal_id"]
+        self.tick()
+        self.assertEqual(self.statuses(gid), {"PENDING"})
+
+        def chat(messages, tools):
+            import json
+            context = json.loads(messages[-1]["content"])
+            recent = context["recent"]
+            selected = next((row for row in context["eligible"]
+                             if row["action"] == "submit_repair_item"),
+                            context["eligible"][0])
+            if selected["ordinal"] == 2 and selected["action"] == "detect_repair_item":
+                self.assertTrue(any(e["event"] == "sr_receipt_recorded" for e in recent))
+            return {"finish_reason": "tool_calls", "tool_calls": [{
+                "id": "call_test", "name": selected["action"],
+                "arguments": json.dumps({"item_id": selected["item_id"]}),
+            }]}
+
+        def tick():
+            self.state.repair_action_chat = chat
+            asyncio.run(batch_worker.batch_tick(
+                self.state, execution_owner="local_agent", choose=choose_repair_action))
+
+        self.tick = tick
+        self.status = {"active": True, "state": "RUNNING", "exit_code": None}
+        self.run_until(lambda: self.items(gid)[1]["status"] in {"DETECTING", "MASK_READY"})
+        original_job = self.items(gid)[0]["external_job_id"]
+        self.assertIsNotNone(original_job)
+        self.assertEqual(len(self.submits), 1)
+        self.status = {"active": False, "state": "COMPLETED", "exit_code": "0:0"}
+        self.make_monitor_due(gid)
+        self.run_until(lambda: self.items(gid)[0]["status"] == "VERIFYING")
+        self.assertEqual(self.items(gid)[0]["checkpoint"]["effect_review"]["status"], "pending")
+        self.state = SimpleNamespace(store=self.store)
+        self.run_until(lambda: self.store.get_goal(gid)["status"] == "COMPLETED")
+        first, second = self.items(gid)
+        self.assertEqual(first["external_job_id"], original_job)
+        self.assertEqual(first["checkpoint"]["effect_review"]["status"], "blocked")
+        self.assertEqual(len(self.submits), 2)
+        events = self.store.list_goal_events(gid)
+        receipts = [e for e in events if e["event_type"] == "sr_receipt_recorded"
+                    and e["payload"]["item_id"] == first["item_id"]]
+        terminal = [e for e in events if e["event_type"] == "external_job_terminal"
+                    and e["payload"]["item_id"] == first["item_id"]]
+        b_detection = next(e for e in events if e["event_type"] == "item_state_changed"
+                           and e["payload"]["item_id"] == second["item_id"]
+                           and e["payload"]["to"] == "DETECTING")
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(len(terminal), 1)
+        self.assertLess(receipts[0]["created_at"], b_detection["created_at"])
+        self.assertLess(b_detection["created_at"], terminal[0]["created_at"])
+        print("Fake SR timeline (epoch seconds):", receipts[0]["created_at"],
+              b_detection["created_at"], terminal[0]["created_at"])
+
+    def test_read_only_inspection_reuses_agent_todos_and_changes_order_after_receipt(self):
+        import json
+
+        from backend.services.goal_runtime import _start_inspection
+        from backend.services.repair_agent import choose_repair_action
+
+        legacy, _ = self.make_goal(3)
+        sid = self.store.create_session()
+        request = {"session_id": sid, "request_key": "inspection",
+                   "manifest_ref": legacy["checkpoint"]["manifest_ref"]}
+        goal = _start_inspection(self.store, request)
+        gid = goal["goal_id"]
+        self.assertEqual(_start_inspection(self.store, request)["goal_id"], gid)
+
+        def chat(messages, tools):
+            self.assertEqual([t["function"]["name"] for t in tools], ["inspect_item"])
+            context = json.loads(messages[-1]["content"])
+            has_candidates = any(e["event"] == "inspection_result"
+                                 and e["data"].get("candidate_count", 0) > 0 for e in context["recent"])
+            selected = context["eligible"][-1 if has_candidates else 0]
+            return {"finish_reason": "tool_calls", "tool_calls": [{
+                "id": "inspect", "name": "inspect_item",
+                "arguments": json.dumps({"item_id": selected["item_id"]}),
+            }]}
+
+        self.state.repair_action_chat = chat
+        self.tick = lambda: asyncio.run(batch_worker.batch_tick(
+            self.state, execution_owner="local_agent", choose=choose_repair_action))
+        self.run_until(lambda: self.store.get_goal(gid)["status"] == "COMPLETED")
+        snapshot = self.store.batch_snapshot(gid)
+        self.assertEqual(snapshot["goal"]["pipeline"], "inspection")
+        self.assertEqual([row["status"] for row in snapshot["todos"]], ["SUCCEEDED"] * 3)
+        ordinal = {row["item_id"]: row["ordinal"] for row in snapshot["todos"]}
+        choices = [ordinal[e["payload"]["item_id"]] for e in self.store.list_goal_events(gid)
+                   if e["event_type"] == "agent_action_selected"]
+        self.assertEqual(choices, [1, 3, 2])
+        self.assertFalse(self.submits)
+        self.assertEqual(self.statuses(legacy["goal_id"]), {"PENDING"})
 
     def test_restart_does_not_resubmit_an_accepted_job(self):
         goal, _ = self.make_goal(3)

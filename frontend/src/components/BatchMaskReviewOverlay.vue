@@ -7,7 +7,7 @@ import { useBatchGoalStore } from '../stores/batchGoal';
 import { thumbToScreen } from '../lib/viewMath';
 const review = useBatchMaskReviewStore(), viewer = useViewerStore(), batch = useBatchGoalStore();
 watch([() => batchMaskRequest.value?.token, () => batch.goalId], () => {
-  if (batchMaskRequest.value?.goalId === batch.goalId) void review.open();
+  if (batchMaskRequest.value?.goalId === batch.goalId) void review.open(batchMaskRequest.value?.itemId);
 }, {immediate:true});
 onBeforeUnmount(() => review.close());
 const panes = computed(() => {
@@ -34,7 +34,7 @@ const panes = computed(() => {
       <button :disabled="review.busy || !review.ready" @click="review.navigate(1)">下一处</button>
       <button :disabled="review.busy || !review.ready" @click="review.flicker">{{ viewer.compareMode === 'flicker' ? '返回分屏' : '交替对比' }}</button>
       <button aria-label="退出候选复核" @click="review.close">×</button>
-      <button v-if="review.error" :disabled="review.busy" @click="review.open">重新读取</button>
+      <button v-if="review.error" :disabled="review.busy" @click="review.open()">重新读取</button>
       <p v-if="review.busy || review.error || review.notice" :class="{error:review.error}" role="status">{{ review.error || (review.busy ? '正在处理…' : review.notice) }}</p>
     </div>
   </div>

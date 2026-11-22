@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue';
 import { agentRepairSettings as settings } from '../lib/agentRepairSettings';
+import { agentTaskView } from '../lib/agentTaskView';
 import LayerSwitch from './LayerSwitch.vue';
 import AppIcon from './AppIcon.vue';
 const open=ref(false),root=ref<HTMLElement|null>(null),trigger=ref<HTMLButtonElement|null>(null);
@@ -22,6 +23,12 @@ onBeforeUnmount(()=>document.removeEventListener('pointerdown',outside));
     <button ref="trigger" type="button" class="settings-trigger" aria-label="Agent 修复设置" :aria-expanded="open" @click="toggle"><AppIcon name="settings" :size="16" tint /></button>
     <Teleport to="body"><Transition name="agent-settings"><section v-if="open" ref="panel" class="settings-panel" :style="position" aria-label="Agent 修复设置" @keydown="escape">
       <header><strong>Agent 修复设置</strong><button type="button" aria-label="关闭设置" @click="open=false">×</button></header>
+      <label class="method-row">Agent 任务视图
+        <select v-model="agentTaskView">
+          <option value="card">聊天内工作流卡片（默认）</option>
+          <option value="standalone">独立待办</option>
+        </select>
+      </label>
       <button class="setting-row" type="button" role="switch" :aria-checked="settings.inspection_only" @click="settings.inspection_only=!settings.inspection_only">
         <span><b>Agent协助仅质检</b><small>检测与定位，不生成掩码或提交 SR</small></span><LayerSwitch :selected="settings.inspection_only" />
       </button>

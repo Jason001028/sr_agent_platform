@@ -37,7 +37,7 @@ class TinyGdal(FakeGdal):
         except ValueError:return ReadRaster(path)
 
 
-def seed(store,root,count=2,mask_review=False,request_key="quality-browser"):
+def seed(store,root,count=2,mask_review=False,request_key="quality-browser",paired_effect=False):
     from backend.services import batch_manifest,batch_detector,batch_mask,batch_worker,run_sr
     from backend.services.goal_runtime import _batch_item_checkpoint
     from backend.services.goal_lease import GoalLease,current_lease
@@ -93,13 +93,25 @@ def seed(store,root,count=2,mask_review=False,request_key="quality-browser"):
             from types import SimpleNamespace
             batch_worker._verify_item(SimpleNamespace(store=store),store.get_goal(goal['goal_id']),item,lease,{},'production')
             assert store.get_goal_item(goal['goal_id'],item['item_id'])['status']=='AWAITING_REVIEW'
+            if paired_effect:
+                from backend.services import batch_quality, repair_effect
+
+                staged = store.get_goal_item(goal['goal_id'], item['item_id'])
+                review = batch_quality.review_for_item(store, staged, verify=False)
+                report = repair_effect.assess_repair_effect(
+                    item['item_id'], str(jid), review['binding'])
+                store.transition_goal_item(
+                    goal['goal_id'], step_id=staged['step_id'], expected_version=staged['version'],
+                    status='AWAITING_REVIEW', lease_token=lease.token,
+                    checkpoint={**staged['checkpoint'], 'effect_review': report})
+
     finally:
         current_lease.reset(token);store.release_goal(goal['goal_id'],lease.token,lease.version)
     return {'goal_id':goal['goal_id'],'items':[p['item_id'] for p in planned]}
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--root',required=True);parser.add_argument('--port',type=int,required=True);parser.add_argument('--mask-review',action='store_true');parser.add_argument('--evidence',action='store_true');parser.add_argument('--evidence-scenes',type=int,default=2);args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--root',required=True);parser.add_argument('--port',type=int,required=True);parser.add_argument('--mask-review',action='store_true');parser.add_argument('--evidence',action='store_true');parser.add_argument('--paired-effect',action='store_true');parser.add_argument('--evidence-scenes',type=int,default=2);args=parser.parse_args()
     if not 1<=args.evidence_scenes<=40:raise ValueError('evidence-scenes must be 1..40')
     root=Path(args.root).resolve();root.mkdir(parents=True,exist_ok=True)
     os.environ.update({**allowed_roots_env(root),'SR_AGENT_DB':str(root/'app.db'),'SR_BATCH_ARTIFACT_DIR':str(root/'artifacts'),
@@ -112,7 +124,38 @@ def main():
     run_sr.query_job_status=lambda jid,**kw:{'job_id':jid,'state':'COMPLETED','active':False,'exit_code':'0'}
     app=create_app()
     fixtures=root/'fixtures.json'
-    if not fixtures.exists():fixtures.write_text(json.dumps(seed(app.state.store,root,count=args.evidence_scenes,mask_review=args.mask_review),ensure_ascii=False),encoding='utf-8')
+    if not fixtures.exists():fixtures.write_text(json.dumps(seed(app.state.store,root,count=args.evidence_scenes,mask_review=args.mask_review,paired_effect=args.paired_effect),ensure_ascii=False),encoding='utf-8')
+    if args.paired_effect:
+        from backend.services import batch_manifest
+
+        def fixture_decision(messages, tools):
+            choice = json.loads(messages[-1]["content"])["eligible"][0]
+            return {"finish_reason": "tool_calls", "tool_calls": [{
+                "id": "fixture-action", "name": choice["action"],
+                "arguments": json.dumps({"item_id": choice["item_id"]}),
+            }]}
+
+        app.state.repair_action_chat = fixture_decision
+        data = json.loads(fixtures.read_text(encoding="utf-8"))
+        if "inspection_session" not in data:
+            store = app.state.store
+            import shutil
+
+            sources = []
+            for item in store.list_goal_items(data["goal_id"]):
+                cp = item["checkpoint"]
+                target = Path(cp["target_image"]["path"])
+                directory = root / "inspection" / target.parent.name
+                directory.mkdir(parents=True, exist_ok=True)
+                for source in (target, Path(cp["reference_image"]["path"]),
+                               target.parent / (target.parent.name + "_meta.xml")):
+                    shutil.copy2(source, directory / source.name)
+                sources.append({"path": str(directory / target.name)})
+            imported = batch_manifest.import_manifest(text="", mode="production", sources=sources)
+            assert not imported["rejected"], imported
+            data["inspection_manifest"] = imported["manifest_ref"]
+            data["inspection_session"] = store.create_session()
+            fixtures.write_text(json.dumps(data), encoding="utf-8")
     if args.evidence:
         if args.mask_review: raise ValueError('evidence requires published repair artifacts')
         from backend.services import evidence_store as ledger, batch_quality

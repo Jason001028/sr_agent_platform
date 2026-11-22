@@ -13,6 +13,7 @@ import BatchProgressTracks from './BatchProgressTracks.vue';
 import BatchRepairDraft from './BatchRepairDraft.vue';
 import BatchControls from './BatchControls.vue';
 import BatchEventTimeline from './BatchEventTimeline.vue';
+import AgentTodoList from './AgentTodoList.vue';
 import AppIcon from './AppIcon.vue';
 const batch = useBatchGoalStore(), chat = useChatStore(), refresh = useImageRefreshStore();
 const expanded = ref(true), menuOpen = ref(false), dock = ref<HTMLElement | null>(null);
@@ -103,7 +104,7 @@ watch(() => chat.sessionId, sid => { void batch.associate(sid); });
         <button class="icon-button collapse-button" data-e2e="batch-task-expand" :aria-expanded="expanded" :aria-label="expanded ? '收起任务面板' : '展开任务面板'" @click="expanded = !expanded"><svg viewBox="0 0 20 20" aria-hidden="true"><path :d="expanded ? 'm5 12 5-5 5 5' : 'm5 8 5 5 5-5'"/></svg></button>
       </header>
       <div class="mission-collapse" :class="{ collapsed: !expanded }" :aria-hidden="!expanded" :inert="!expanded"><div class="mission-body">
-        <div v-if="monitoring && snap && mission" class="mission-status" :class="mission.tone" data-e2e="batch-status" role="status">
+        <div v-if="monitoring && snap && mission && snap.goal.pipeline !== 'inspection'" class="mission-status" :class="mission.tone" data-e2e="batch-status" role="status">
           <div class="status-line"><span class="status-dot" aria-hidden="true"/>{{ mission.state }}<small v-if="snap.goal.mode === 'demo'">DEMO / MOCK</small></div>
           <div class="mission-hero">
             <div class="hero-symbol" aria-hidden="true"><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="13"/><path v-if="mission.tone === 'error'" d="M18 10v10m0 5v1"/><path v-else-if="mission.tone === 'done'" d="m11 18 5 5 10-11"/><path v-else d="M18 10v9l6 3"/></svg></div>
@@ -117,6 +118,12 @@ watch(() => chat.sessionId, sid => { void batch.associate(sid); });
         <p v-if="batch.loadError" class="connection-note error" role="alert">{{ batch.loadError }}</p>
         <p v-if="batch.syncState === 'loading' && !snap" class="connection-note">正在读取任务…</p>
         <BatchRepairDraft v-if="batchDockOpen && section === 'draft'" @created="created" />
+        <AgentTodoList v-else-if="section === 'monitor' && snap?.goal.pipeline === 'inspection'"
+          :rows="snap.todos ?? []"
+          :label="row => ({ SUCCEEDED: '已质检', DETECTING: '正在检查', BLOCKED: '受阻', SKIPPED: '已跳过' }[row.status] ?? '待检查')"
+          :describe="row => row.error ?? (row.inspection ? `候选区域 ${row.inspection.candidate_count} 个` : '')"
+          :group="row => row.status === 'BLOCKED' ? 'attention'
+            : ['SUCCEEDED', 'SKIPPED'].includes(row.status) ? 'ended' : 'active'" />
         <BatchProgressPanel v-else-if="section === 'monitor' && snap" v-model:full-queue="prefs.fullQueue" />
         <BatchEventTimeline v-if="monitoring && prefs.events && developer" />
       </div></div>

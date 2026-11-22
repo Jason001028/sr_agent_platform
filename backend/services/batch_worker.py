@@ -323,6 +323,15 @@ def _detection_job(snapshot):
         return {"detection":detection,"mask":None,"incomplete":True}
     if not candidates:
         return {"detection": detection, "mask": None}
+    if snapshot.get("detect_only"):
+        return {"detection": detection, "mask_pending": True}
+    return _mask_job({**snapshot, "detection": detection})
+
+
+def _mask_job(snapshot):
+    detection = snapshot["detection"]
+    target = snapshot["target_image"]
+    mode = snapshot.get("mode") or "demo"
     mask_path = snapshot.get("mask_path")
     if snapshot.get("candidate_root"):
         mask_path = str(Path(snapshot["candidate_root"]) / batch_mask.candidate_digest(detection) / "mask.tif")
@@ -442,8 +451,8 @@ def _defer_io_capacity(state, goal, item, lease, reason):
     return False
 
 
-def _start_detection(state, goal, item, lease, cfg):
-    """Record DETECTING and hand detection+Mask to the IO executor."""
+def _start_detection(state, goal, item, lease, cfg, *, build_mask=False):
+    """Record the active action and hand bounded work to the IO executor."""
     cp = dict(item["checkpoint"])
     cp["phase"] = "DETECTING"
     # A restart replays a DETECTING item with the same round: detection is
@@ -454,6 +463,8 @@ def _start_detection(state, goal, item, lease, cfg):
     if item["status"] != "DETECTING" or round_no <= 0:
         round_no += 1
     cp["detection_round"] = round_no
+    if build_mask:
+        cp["phase"] = "BUILDING_MASK"
     updated = state.store.transition_goal_item(
         goal["goal_id"], step_id=item["step_id"],
         expected_version=item["version"], status="DETECTING",
@@ -479,10 +490,14 @@ def _start_detection(state, goal, item, lease, cfg):
         "rows_per_strip": item_config.get("mask_rows_per_strip"),
         "overlay_max_edge": item_config.get("mask_overlay_max_edge"),
         "detection_config": item_config.get("detection") or {},
+        "detect_only": goal.get("execution_owner") == "local_agent",
     }
+    if build_mask:
+        snapshot["detection"] = cp["detection"]
     executor = _ensure_io_executor(state)
     try:
-        future, timing = _submit_io(executor, _detection_job, snapshot, cfg.get("io_queue_timeout_sec", 300))
+        work = _mask_job if build_mask else _detection_job
+        future, timing = _submit_io(executor, work, snapshot, cfg.get("io_queue_timeout_sec", 300))
     except WorkCapacityError as exc:
         return _defer_io_capacity(state, goal, updated, lease, str(exc))
     except Exception as exc:  # executor shutdown is a worker bug, not an item fact
@@ -577,6 +592,15 @@ def _collect_detections(state, goal, lease, cfg, *, allow_write=True):
         if not detection.get("candidates"):
             _finish_no_candidates(state, goal, item, lease, cp)
             continue
+        if payload.get("mask_pending"):
+            cp["phase"] = "MASK_PENDING"
+            state.store.transition_goal_item(
+                gid, step_id=item["step_id"], expected_version=item["version"],
+                status="DETECTING", lease_token=lease.token, checkpoint=cp,
+                next_wake_at=time.time(), extra_events=[("repair_detection_ready", {
+                    "item_id": item["item_id"], "candidate_count": len(detection["candidates"]),
+                })])
+            continue
         mask = payload["mask"]
         cp["mask"] = mask
         cp["phase"] = "MASK_READY"
@@ -655,7 +679,7 @@ def _review_allows_submit(item):
                 and review.get("mask_sha256") == sha)
 
 
-def _produce_one(state, goal, lease, cfg):
+def _produce_one(state, goal, lease, cfg, choose=None):
     """Advance at most one Item. Returns True when a producer step happened."""
     store = state.store
     gid = goal["goal_id"]
@@ -673,32 +697,64 @@ def _produce_one(state, goal, lease, cfg):
     jobs = getattr(state, "batch_io_jobs", None) or {}
     orphan = next(
         (i for i in items if i["status"] == "DETECTING"
+         and i["checkpoint"].get("phase") != "MASK_PENDING"
          and _io_key(gid, i) not in jobs
          and (i["next_wake_at"] is None or i["next_wake_at"] <= now)), None)
     if orphan:
         # Read-only detection is safe to replay after a restart.
-        return _start_detection(state, goal, orphan, lease, cfg)
+        return _start_detection(state, goal, orphan, lease, cfg,
+                                build_mask=orphan["checkpoint"].get("phase") == "BUILDING_MASK")
 
     capacity_full = (store.count_reserved_slots(gid)
                      >= cfg["max_inflight_sr_jobs"])
-    ready = None
-    if not capacity_full:
-        ready = next(
-            (i for i in items if i["status"] == "MASK_READY" and _review_allows_submit(i)
-             and (i["next_wake_at"] is None or i["next_wake_at"] <= now)), None)
-    if ready:
-        return _start_submit_preparation(state, goal, ready, lease, cfg)
+    ready = [
+        i for i in items if i["status"] == "MASK_READY" and _review_allows_submit(i)
+        and (i["next_wake_at"] is None or i["next_wake_at"] <= now)
+    ] if not capacity_full else []
+    if choose is None and ready:
+        return _start_submit_preparation(state, goal, ready[0], lease, cfg)
 
     prepared = sum(1 for i in items if i["status"] in PREPARING)
-    if prepared >= cfg["max_prepared_items"]:
-        return False
     pending_jobs = sum(1 for r in jobs.values() if r["goal_id"] == gid)
-    if pending_jobs >= cfg["detection_concurrency"]:
-        return False
-    candidate = next(
-        (i for i in items if i["status"] in {"PENDING", "RETRY_WAIT"}
-         and (i["next_wake_at"] is None or i["next_wake_at"] <= now)), None)
-    if candidate is None:
+    pending = [
+        i for i in items if i["status"] in {"PENDING", "RETRY_WAIT"}
+        and (i["next_wake_at"] is None or i["next_wake_at"] <= now)
+    ] if (prepared < cfg["max_prepared_items"]
+          and pending_jobs < cfg["detection_concurrency"]) else []
+    if choose is not None:
+        if pending_jobs:
+            return False
+        recheck = [i for i in items if i["status"] == "VERIFYING"
+                   and (i["next_wake_at"] is None or i["next_wake_at"] <= now)]
+        if recheck:
+            oldest = min(recheck, key=lambda i: i["updated_at"])
+            effect = oldest["checkpoint"].get("effect_review") or {}
+            action = ("assess_repair_effect" if effect.get("status") in {"output_verified", "assessing"}
+                      else "verify_repair_output")
+            choices = [(oldest, action)]
+        else:
+            choices = [(i, "submit_repair_item") for i in ready]
+            choices += [(i, "build_repair_mask") for i in items
+                        if i["status"] == "DETECTING" and i["checkpoint"].get("phase") == "MASK_PENDING"
+                        and (i["next_wake_at"] is None or i["next_wake_at"] <= now)]
+            choices += [(i, "detect_repair_item") for i in pending]
+        selected = choose(state, goal, lease, choices) if choices else None
+        if selected is None:
+            return False
+        candidate, action = selected
+        if action == "submit_repair_item":
+            return _start_submit_preparation(state, goal, candidate, lease, cfg)
+        if action == "build_repair_mask":
+            return _start_detection(state, goal, candidate, lease, cfg, build_mask=True)
+        if action == "verify_repair_output":
+            return bool(_verify_item(
+                state, goal, candidate, lease, cfg, goal["checkpoint"].get("mode", "demo"),
+                defer_effect=True))
+        if action == "assess_repair_effect":
+            return bool(_assess_item(state, goal, candidate, lease))
+    elif pending:
+        candidate = pending[0]
+    else:
         return False
     cp = dict(candidate["checkpoint"])
     cp["phase"] = "OPENING"
@@ -1458,7 +1514,7 @@ def _verify_layers(status, mode, task, job_id):
     return verification
 
 
-def _verify_item(state, goal, item, lease, cfg, mode):
+def _verify_item(state, goal, item, lease, cfg, mode, *, defer_effect=False):
     store = state.store
     gid = goal["goal_id"]
     cp = dict(item["checkpoint"])
@@ -1493,11 +1549,44 @@ def _verify_item(state, goal, item, lease, cfg, mode):
     cp.pop("monitor_failures", None)
 
     verification = _verify_layers(status, mode, task, job_id)
+    effect = cp.get("effect_review")
+    if (defer_effect and mode == "production" and effect
+            and verification["layers"]["artifacts"]["status"] == LAYER_FAILED):
+        checks = int(effect.get("output_checks") or 0) + 1
+        if checks <= 3:
+            cp["effect_review"] = {
+                **effect, "status": "awaiting_artifacts", "output_checks": checks,
+                "evidence_gap": verification["layers"]["artifacts"].get("reason"),
+            }
+            return store.transition_goal_item(
+                gid, step_id=item["step_id"], expected_version=item["version"],
+                status="VERIFYING", lease_token=lease.token, checkpoint=cp,
+                verification=verification, capacity_reserved=0,
+                next_wake_at=time.time() + cfg["monitor_poll_interval"])
     if mode == "production":
         from backend.services import batch_quality
         infrastructure_ok=all(verification["layers"][name]["status"]==LAYER_PASSED for name in ("submit","terminal","contract","artifacts"))
         if infrastructure_ok:
             if not cp.get("quality_review_id"):
+                if defer_effect:
+                    try:
+                        binding = batch_quality.make_binding(item, task, verification)
+                    except (ValueError, OSError, KeyError) as exc:
+                        return _park_effect(state, goal, item, lease, str(exc))
+                    cp["effect_review"] = {
+                        **{key: value for key, value in (effect or {}).items()
+                           if key != "evidence_gap"},
+                        "job_id": str(job_id), "status": "output_verified",
+                    }
+                    cp["effect_binding"] = binding
+                    cp["verification"] = verification
+                    return store.transition_goal_item(
+                        gid, step_id=item["step_id"], expected_version=item["version"],
+                        status="VERIFYING", lease_token=lease.token, checkpoint=cp,
+                        verification=verification, capacity_reserved=0,
+                        next_wake_at=time.time(),
+                        extra_events=[("repair_output_verified", {
+                            "item_id": item["item_id"], "job_id": job_id})])
                 try:
                     return batch_quality.enqueue(store,goal,item,lease,task,verification)
                 except (ValueError,OSError,KeyError) as exc:
@@ -1507,6 +1596,12 @@ def _verify_item(state, goal, item, lease, cfg, mode):
             verification["failed_layers"]=[n for n,l in verification["layers"].items() if l["status"] in {LAYER_FAILED,LAYER_UNVERIFIED}]
             verification["ok"]=not verification["failed_layers"]
             verification["reasons"]=[] if verification["ok"] else [layer.get("reason","人工审核未完成")]
+    if (cp.get("effect_review") or {}).get("status") in {"pending", "awaiting_artifacts"}:
+        cp["effect_review"] = {
+            **cp["effect_review"], "job_id": str(job_id), "status": "blocked",
+            "evidence_gap": ("demo_no_verified_output" if mode == "demo"
+                             else "; ".join(verification["reasons"]) or "output_verification_failed"),
+        }
     ok = verification["ok"]
     cp["phase"] = "SUCCEEDED" if ok else "FAILED"
     cp["verification"] = verification
@@ -1523,6 +1618,46 @@ def _verify_item(state, goal, item, lease, cfg, mode):
             "success_scope": verification.get("success_scope"),
             "failed_layers": verification.get("failed_layers"),
             "state": status.get("state"), "job_id": job_id})])
+
+
+def _park_effect(state, goal, item, lease, reason):
+    cp = dict(item["checkpoint"])
+    cp["phase"] = "BLOCKED"
+    cp["effect_review"] = {**cp["effect_review"], "status": "blocked", "evidence_gap": reason}
+    cp.pop("effect_binding", None)
+    return state.store.transition_goal_item(
+        goal["goal_id"], step_id=item["step_id"], expected_version=item["version"],
+        status="BLOCKED", lease_token=lease.token, checkpoint=cp,
+        error=reason, capacity_reserved=0, next_wake_at=None)
+
+
+def _assess_item(state, goal, item, lease):
+    from backend.services import batch_quality, repair_effect
+
+    cp = dict(item["checkpoint"])
+    cp["effect_review"] = {**cp["effect_review"], "status": "assessing"}
+    active = state.store.transition_goal_item(
+        goal["goal_id"], step_id=item["step_id"], expected_version=item["version"],
+        status="VERIFYING", lease_token=lease.token, checkpoint=cp, capacity_reserved=0)
+    if active is None:
+        return None
+    item = active
+    try:
+        binding = cp["effect_binding"]
+        verification = cp["verification"]
+        task = state.store.get_sr_task(cp["sr_fingerprint"])
+        if batch_quality.make_binding(item, task, verification) != binding:
+            raise ValueError("产物验证后的备份、成果或有效 Mask 版本已改变")
+        effect = repair_effect.assess_repair_effect(
+            item["item_id"], cp["effect_review"]["job_id"], binding)
+        effect = {**cp["effect_review"], **effect}
+        cleaned = {**cp}
+        cleaned.pop("effect_binding")
+        return batch_quality.enqueue(
+            state.store, goal, {**item, "checkpoint": cleaned}, lease, task,
+            verification, binding=binding, effect=effect)
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        return _park_effect(state, goal, item, lease, str(exc))
 
 
 def _monitor_item(state, goal, item, lease, cfg, mode):
@@ -1572,29 +1707,45 @@ def _monitor_item(state, goal, item, lease, cfg, mode):
             next_wake_at=time.time() + cfg["monitor_poll_interval"])
     cp.update({"phase": "VERIFYING", "job_status": status,
                "sr_status": status.get("state"), "unknown_checks": 0})
+    local = goal.get("execution_owner") == "local_agent"
+    if local and _terminal_layer(status)["status"] == LAYER_PASSED:
+        cp["effect_review"] = {
+            "todo_id": f'{item["step_id"]}:{_item_attempt(item)}:{job_id}',
+            "job_id": str(job_id), "status": "pending",
+        }
     verifying = store.transition_goal_item(
         gid, step_id=item["step_id"], expected_version=item["version"],
         status="VERIFYING", lease_token=lease.token, checkpoint=cp,
-        capacity_reserved=1, next_wake_at=time.time(),
+        capacity_reserved=not local, next_wake_at=time.time(),
         extra_events=[(EVT_JOB_TERMINAL, {
             "item_id": item["item_id"], "job_id": job_id,
             "state": status.get("state"),
             "exit_code": status.get("exit_code"),
             "provenance": "mock" if mode == "demo" else "contract"})])
-    if verifying:
+    if verifying and not local:
         _verify_item(state, goal, verifying, lease, cfg, mode)
     return verifying
 
 
 def _monitor_due(state, goal, lease, cfg, mode):
+    recheck_created = False
     items = state.store.list_due_goal_items(
         goal["goal_id"], statuses=("SUBMITTING", "WAITING_SR", "VERIFYING"))
     for item in items:
         if item["status"] == "SUBMITTING":
             _reconcile_submitting(state, goal, lease)
             continue
-        _monitor_item(state, goal, item, lease, cfg, mode)
-    return len(items)
+        if goal.get("execution_owner") == "local_agent" and item["status"] == "VERIFYING":
+            effect = item["checkpoint"].get("effect_review")
+            if not effect:
+                _verify_item(state, goal, item, lease, cfg, mode)
+            elif goal["status"] == "CANCELLED":
+                _park_effect(state, goal, item, lease, "批次已取消，效果回检未执行")
+            continue
+        updated = _monitor_item(state, goal, item, lease, cfg, mode)
+        if updated and updated["status"] == "VERIFYING" and updated["checkpoint"].get("effect_review"):
+            recheck_created = True
+    return recheck_created
 
 
 # ---------------------------------------------------------------------------
@@ -1772,7 +1923,11 @@ def _settle(state, goal, lease, cfg, mode):
         # "Draining" means the Producer genuinely cannot advance. An inflight
         # job alone must not stop N+1: keep dispensing until capacity and the
         # prepared window are both saturated.
-        draining = not (can_prepare or can_submit)
+        can_build_mask = any(i["status"] == "DETECTING"
+                             and i["checkpoint"].get("phase") == "MASK_PENDING" for i in items)
+        can_recheck = (goal.get("execution_owner") == "local_agent"
+                       and counts.get("VERIFYING", 0) > 0)
+        draining = not (can_prepare or can_submit or can_build_mask or can_recheck)
         target = "WAITING_EXTERNAL" if draining else "RUNNING"
         phase = "draining" if draining else "dispatching"
         if draining and not monitored and any(i["status"] == "AWAITING_REVIEW" for i in items):
@@ -1866,13 +2021,19 @@ def _load(goal):
     return manifest, str(manifest.get("mode") or "demo")
 
 
-def _process_batch(state, claimed, lease, allow_produce):
+def _process_batch(state, claimed, lease, allow_produce, choose=None):
     scope = current_lease.set(lease)
     store = state.store
     try:
         goal = lease.check(store)
+        if goal["checkpoint"].get("pipeline") == "inspection":
+            from backend.services.inspection_pipeline import process_inspection
+
+            return {"produced": allow_produce and process_inspection(state, goal, lease, choose)}
         manifest, mode = _load(goal)
         cfg = batch_config(manifest)
+        if choose is not None:
+            cfg.update(max_inflight_sr_jobs=1, detection_concurrency=1)
         if allow_produce and mode != "production":
             ensure_execution_allowed(mode)
         # A resumed Goal must not inherit a stale monitoring_done marker from
@@ -1887,10 +2048,10 @@ def _process_batch(state, claimed, lease, allow_produce):
                 monitor_state=goal["status"])
         _reconcile_submitting(state, goal, lease)
         _collect_detections(state, goal, lease, cfg)
-        _monitor_due(state, goal, lease, cfg, mode)
+        recheck_created = _monitor_due(state, goal, lease, cfg, mode)
         produced = False
-        if allow_produce:
-            produced = _produce_one(state, goal, lease, cfg)
+        if allow_produce and not recheck_created:
+            produced = _produce_one(state, goal, lease, cfg, choose=choose)
         _settle(state, goal, lease, cfg, mode)
         return {"produced": bool(produced)}
     except LeaseLost:
@@ -2012,7 +2173,7 @@ def _rotate(goals, state):
     return ordered[index:] + ordered[:index]
 
 
-async def batch_tick(state):
+async def batch_tick(state, *, execution_owner="worker", choose=None):
     """One serial Batch pass: monitor first, then at most one producer step."""
     if not hasattr(state, "batch_tick_lock"):
         state.batch_tick_lock = asyncio.Lock()
@@ -2026,12 +2187,13 @@ async def batch_tick(state):
             seconds = max(0.5, float(os.getenv("SR_BATCH_LEASE_SEC", "60")))
             produced = False
             candidates = await run_sync(state.store.list_goals,
-                    limit=200, statuses=CLAIMABLE, kinds=("batch",))
+                    limit=200, statuses=CLAIMABLE, kinds=("batch",),
+                    execution_owner=execution_owner)
             active = _rotate(candidates, state)
             for goal in active:
                 claimed = await run_sync(state.store.claim_goal,
                     goal["goal_id"], "batch:" + uuid.uuid4().hex,
-                    lease_sec=seconds)
+                    lease_sec=seconds, execution_owner=execution_owner)
                 if not claimed:
                     continue
                 lease = GoalLease(
@@ -2041,7 +2203,7 @@ async def batch_tick(state):
                     result = await _run_leased(
                         state, executor,
                         functools.partial(_process_batch,
-                                          allow_produce=not produced),
+                                          allow_produce=not produced, choose=choose),
                         claimed, lease, seconds)
                 except Exception:
                     logging.getLogger(__name__).exception(
@@ -2054,11 +2216,12 @@ async def batch_tick(state):
             # being re-claimed as runnable. Already-converged control rows are
             # filtered out in SQL before LIMIT, so a large finished backlog
             # cannot hide an older Goal that still owns a live job.
-            monitoring = await run_sync(state.store.list_batch_monitor_goals, limit=200)
+            monitoring = await run_sync(state.store.list_batch_monitor_goals,
+                                        limit=200, execution_owner=execution_owner)
             for goal in _rotate(monitoring, state):
                 claimed = await run_sync(state.store.claim_goal_monitor,
                     goal["goal_id"], "batch-monitor:" + uuid.uuid4().hex,
-                    lease_sec=seconds)
+                    lease_sec=seconds, execution_owner=execution_owner)
                 if not claimed:
                     continue
                 lease = GoalLease(

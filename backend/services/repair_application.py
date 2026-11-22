@@ -1117,7 +1117,7 @@ def _goal_content_hash(plan: dict, manifest: dict, title: str) -> str:
 
 
 def _create_goal(store, plan: dict, manifest: dict, *, title: str,
-                 request_key: str) -> dict:
+                 request_key: str, execution_owner: str) -> dict:
     planned = batch_manifest.plan_goal_items(
         manifest, plan.get("exclusions") or [])
     checkpoint = _batch_checkpoint(manifest, plan)
@@ -1183,7 +1183,7 @@ def _create_goal(store, plan: dict, manifest: dict, *, title: str,
     return store.create_batch_goal(
         title=title, request_key=request_key, content_sha256=content_sha256,
         checkpoint=checkpoint, items=items, session_id=plan.get("session_id"),
-        max_model_calls=0)
+        max_model_calls=0, execution_owner=execution_owner)
 
 
 def _goal_matches_plan(goal: dict, plan: dict) -> bool:
@@ -1201,7 +1201,8 @@ def _goal_matches_plan(goal: dict, plan: dict) -> bool:
 
 def start_repair(store, plan_id: str, *, session_id: Optional[str],
                  workspace=None, workspace_version=None,
-                 plan_version: Optional[int] = None) -> dict:
+                 plan_version: Optional[int] = None,
+                 execution_owner: str = "worker") -> dict:
     """Start a plan that a real user has already confirmed server-side."""
     plan = store.get_repair_plan(plan_id)
     if not plan:
@@ -1277,7 +1278,7 @@ def start_repair(store, plan_id: str, *, session_id: Optional[str],
                             reason="execution_blocked")
     try:
         goal = _create_goal(store, plan, manifest, title=title,
-                            request_key=request_key)
+                            request_key=request_key, execution_owner=execution_owner)
     except RepairPlanConflict as exc:
         store.update_repair_plan_status(plan_id, "SUPERSEDED", exc.reason)
         raise
@@ -1325,7 +1326,7 @@ def verified_output_path(item: dict) -> Optional[str]:
 def _goal_view(goal: dict) -> dict:
     view = {key: goal.get(key) for key in
             ("goal_id", "session_id", "title", "status", "phase", "kind",
-             "version", "created_at", "updated_at", "finished_at")}
+             "execution_owner", "version", "created_at", "updated_at", "finished_at")}
     # Explicit convergence: the checkpoint marker wins over the mirrored
     # column, and a missing value is **not** convergence.  Callers must never
     # read ``None`` as "done".

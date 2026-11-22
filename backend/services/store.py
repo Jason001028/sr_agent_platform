@@ -336,7 +336,8 @@ CREATE TABLE IF NOT EXISTS agent_goals (
     finished_at REAL,
     kind TEXT NOT NULL DEFAULT 'chat',
     monitor_done INTEGER NOT NULL DEFAULT 0,
-    monitor_state TEXT
+    monitor_state TEXT,
+    execution_owner TEXT NOT NULL DEFAULT 'worker'
 );
 CREATE INDEX IF NOT EXISTS idx_agent_goals_schedule
     ON agent_goals(status, next_wake_at, updated_at);
@@ -558,6 +559,7 @@ def _ensure_columns(db: sqlite3.Connection) -> None:
             # list_batch_monitor_goals). Old rows default to "not converged".
             ("monitor_done", "INTEGER NOT NULL DEFAULT 0"),
             ("monitor_state", "TEXT"),
+            ("execution_owner", "TEXT NOT NULL DEFAULT 'worker'"),
         ))
         _backfill_batch_goal_kinds(db)
         _add_missing_columns(db, "agent_goal_steps", _STEP_ADDED_COLUMNS)
@@ -1658,12 +1660,13 @@ class Store:
                 "max_model_calls": row[13], "model_calls_used": row[14],
                 "error": row[15], "created_at": row[16], "updated_at": row[17],
                 "finished_at": row[18], "lease_token": row[19], "kind": row[20],
-                "monitor_done": bool(row[21]), "monitor_state": row[22]}
+                "monitor_done": bool(row[21]), "monitor_state": row[22],
+                "execution_owner": row[23]}
 
     _GOAL_COLS = ("goal_id, session_id, request_key, title, status, phase, checkpoint, "
                   "version, lease_owner, lease_until, next_wake_at, max_rounds, "
                   "rounds_used, max_model_calls, model_calls_used, error, created_at, "
-                  "updated_at, finished_at, lease_token, kind, monitor_done, monitor_state")
+                  "updated_at, finished_at, lease_token, kind, monitor_done, monitor_state, execution_owner")
 
     def get_goal(self, goal_id: str):
         return self._goal_row(self._db().execute(
@@ -1689,11 +1692,11 @@ class Store:
                 old = self.get_goal_by_request_key(request_key)
                 if old: db.rollback(); return old
             safe_cp = {k: v for k, v in (checkpoint or {}).items() if k == "acceptance"}
-            db.execute(f"INSERT INTO agent_goals ({self._GOAL_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            db.execute(f"INSERT INTO agent_goals ({self._GOAL_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                        (gid, session_id, request_key, title, status, phase,
                         json.dumps(safe_cp, ensure_ascii=False), 0, None, None, now,
                         max(1,int(max_rounds)), 0, max(1,int(max_model_calls)), 0, None, now, now, None, None, "chat",
-                        0, None))
+                        0, None, "worker"))
             self._append_goal_event_tx(db, gid, "goal_created", {"status": status})
             db.commit()
         except Exception:
@@ -1701,7 +1704,7 @@ class Store:
         return self.get_goal(gid)
 
     def list_goals(self, *, limit: int = 100, statuses=None, session_id=None,
-                   kinds=None, exclude_kinds=None):
+                   kinds=None, exclude_kinds=None, execution_owner=None):
         """List Goals, filtering by kind *before* LIMIT.
 
         The worker excludes Batch Goals here rather than skipping them in
@@ -1720,6 +1723,8 @@ class Store:
             vals=list(kinds)
             where.append("kind IN (" + ",".join("?" for _ in vals) + ")")
             args.extend(vals)
+        if execution_owner is not None:
+            where.append("execution_owner=?"); args.append(execution_owner)
         if exclude_kinds:
             vals=list(exclude_kinds)
             where.append("kind NOT IN (" + ",".join("?" for _ in vals) + ")")
@@ -2636,10 +2641,11 @@ class Store:
             item = next(c for c in self.list_goal_clarifications(goal_id) if c["clarification_id"] == clarification_id)
             return {"goal": updated, "clarification": item}
 
-    def claim_goal(self, goal_id: str, owner: str, *, lease_sec: float=60) -> Optional[dict]:
+    def claim_goal(self, goal_id: str, owner: str, *, lease_sec: float=60,
+                   execution_owner: str = "worker") -> Optional[dict]:
         with self.worker_transaction() as db:
             now=time.time()
-            cur=db.execute("UPDATE agent_goals SET lease_owner=?,lease_token=?,lease_until=?,version=version+1,updated_at=? WHERE goal_id=? AND status IN ('QUEUED','RUNNING','RETRY_WAIT','WAITING_EXTERNAL','VERIFYING') AND (next_wake_at IS NULL OR next_wake_at<=?) AND (lease_until IS NULL OR lease_until<=?)", (owner,uuid.uuid4().hex,now+lease_sec,now,goal_id,now,now))
+            cur=db.execute("UPDATE agent_goals SET lease_owner=?,lease_token=?,lease_until=?,version=version+1,updated_at=? WHERE goal_id=? AND execution_owner=? AND status IN ('QUEUED','RUNNING','RETRY_WAIT','WAITING_EXTERNAL','VERIFYING') AND (next_wake_at IS NULL OR next_wake_at<=?) AND (lease_until IS NULL OR lease_until<=?)", (owner,uuid.uuid4().hex,now+lease_sec,now,goal_id,execution_owner,now,now))
             if not cur.rowcount: return None
             self._append_goal_event_tx(db, goal_id, "goal_claimed", {"owner":owner})
             return self.get_goal(goal_id)
@@ -2715,7 +2721,8 @@ class Store:
         if verification.get("ok") is not True:
             raise ValueError("verification did not pass")
         goal=self.get_goal(goal_id)
-        if goal and goal.get("kind")=="batch" and goal.get("checkpoint",{}).get("mode")=="production":
+        cp = (goal or {}).get("checkpoint", {})
+        if goal and goal.get("kind") == "batch" and cp.get("mode") == "production" and cp.get("pipeline") != "inspection":
             from backend.services import batch_quality
             human=batch_quality.verify_goal(self,goal)
             if not human["ok"]:
@@ -2832,7 +2839,8 @@ class Store:
         return int(row[0]) if row else 0
 
     def claim_goal_monitor(self, goal_id: str, owner: str, *,
-                           lease_sec: float = 60) -> Optional[dict]:
+                           lease_sec: float = 60,
+                           execution_owner: str = "worker") -> Optional[dict]:
         """Lease a PAUSED/CANCELLED batch Goal **without** changing its status.
 
         PR C keeps the Monitor alive after the user stops the Producer: items
@@ -2846,10 +2854,10 @@ class Store:
             cur = db.execute(
                 "UPDATE agent_goals SET lease_owner=?,lease_token=?,lease_until=?,"
                 "version=version+1,updated_at=?,monitor_done=0 "
-                "WHERE goal_id=? AND kind='batch' AND status IN ('PAUSED','CANCELLED') "
+                "WHERE goal_id=? AND execution_owner=? AND kind='batch' AND status IN ('PAUSED','CANCELLED') "
                 "AND (lease_until IS NULL OR lease_until<=?)",
                 (owner, uuid.uuid4().hex, now + lease_sec, now,
-                 goal_id, now))
+                 goal_id, execution_owner, now))
             if not cur.rowcount:
                 return None
             self._append_goal_event_tx(
@@ -2890,7 +2898,8 @@ class Store:
                     db, goal_id, event_type, event_payload or {})
             return True
 
-    def list_batch_monitor_goals(self, *, limit: int = 200):
+    def list_batch_monitor_goals(self, *, limit: int = 200,
+                                 execution_owner: str = "worker"):
         """Paused/cancelled Batch Goals that still need a monitor pass.
 
         The filter runs in SQL before LIMIT. Skipping finished rows in Python
@@ -2901,11 +2910,11 @@ class Store:
         """
         rows = self._db().execute(
             f"SELECT {self._GOAL_COLS} FROM agent_goals "
-            "WHERE kind='batch' AND status IN ('PAUSED','CANCELLED') "
+            "WHERE kind='batch' AND execution_owner=? AND status IN ('PAUSED','CANCELLED') "
             "AND (monitor_done=0 OR monitor_state IS NULL "
             "     OR monitor_state<>status) "
             "ORDER BY updated_at ASC LIMIT ?",
-            (max(1, int(limit)),)).fetchall()
+            (execution_owner, max(1, int(limit)))).fetchall()
         return [self._goal_row(row) for row in rows]
 
     def transition_goal_item(self, goal_id, *, step_id, expected_version,
@@ -2982,6 +2991,10 @@ class Store:
                 "to": status,
                 **(event_payload or {}),
             }
+            if goal["execution_owner"] == "local_agent":
+                from backend.services.batch_snapshot import item_todo
+
+                payload["todo"] = item_todo(self.get_goal_item(goal_id, item["item_id"]))
             self._append_goal_event_tx(
                 db, goal_id, event_type, payload, step_id=step_id)
             for extra_type, extra_payload in (extra_events or ()):
@@ -3091,7 +3104,8 @@ class Store:
                           content_sha256: str, checkpoint: dict, items: list[dict],
                           session_id: Optional[str] = None,
                           max_rounds: int = 20,
-                          max_model_calls: int = 0) -> dict:
+                          max_model_calls: int = 0,
+                          execution_owner: str = "worker") -> dict:
         """Create one Goal and all Item Steps in a single fenced transaction.
 
         ``content_sha256`` covers the frozen manifest plus the exclusions that
@@ -3100,6 +3114,8 @@ class Store:
         therefore leaves either the whole batch or no runnable Goal — never a
         Goal with a partial Item set.
         """
+        if execution_owner not in {"worker", "local_agent"}:
+            raise ValueError("invalid batch execution owner")
         if not isinstance(request_key, str) or not request_key.strip():
             raise ValueError("batch request key is required")
         if not isinstance(content_sha256, str) or not content_sha256:
@@ -3125,11 +3141,11 @@ class Store:
             cp = {**checkpoint, "batch_content_sha256": content_sha256}
             db.execute(
                 f"INSERT INTO agent_goals ({self._GOAL_COLS}) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (gid, session_id, request_key, title, "QUEUED", "dispatching",
                  json.dumps(cp, ensure_ascii=False), 0, None, None, now,
                  max(1, int(max_rounds)), 0, max(0, int(max_model_calls)), 0,
-                 None, now, now, None, None, "batch", 0, None))
+                 None, now, now, None, None, "batch", 0, None, execution_owner))
             for item in items:
                 item_status = str(item.get("status") or "PENDING")
                 # MASK_READY is the manual-mask entry: the operator's saved

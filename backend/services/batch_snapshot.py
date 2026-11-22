@@ -329,7 +329,7 @@ def build_snapshot(
     cp = goal.get("checkpoint") if isinstance(goal.get("checkpoint"), dict) else {}
     batch_control = cp.get("batch_control") if isinstance(cp.get("batch_control"), dict) else {}
     now = time.time() if server_time is None else float(server_time)
-    return {
+    snapshot = {
         "contract_version": CONTRACT_VERSION,
         "goal": {
             "goal_id": goal.get("goal_id"),
@@ -373,6 +373,27 @@ def build_snapshot(
             "updated_at": report_updated_at,
         },
         "server_time": now,
+    }
+    if goal.get("execution_owner") == "local_agent":
+        snapshot["goal"]["execution_owner"] = "local_agent"
+        snapshot["goal"]["pipeline"] = cp.get("pipeline", "repair")
+        snapshot["todos"] = [item_todo(item) for item in items]
+    return snapshot
+
+
+def item_todo(item: dict) -> dict:
+    return {
+        "todo_id": item["step_id"],
+        "item_id": item["item_id"],
+        "ordinal": item["ordinal"],
+        "name": item["name"],
+        "status": item["status"],
+        "version": item["version"],
+        "phase": _cp(item).get("phase"),
+        "job_id": item_job_id(item),
+        "error": item.get("error"),
+        "effect_review": _cp(item).get("effect_review"),
+        "inspection": _cp(item).get("inspection"),
     }
 
 

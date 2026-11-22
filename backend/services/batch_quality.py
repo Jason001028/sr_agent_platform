@@ -96,8 +96,9 @@ def get_review(store,review_id):
     return _decode(store._db().execute("SELECT review_id,goal_id,item_id,job_id,binding,regions,scene_decision,version,created_at,updated_at FROM batch_quality_reviews WHERE review_id=?",(review_id,)).fetchone())
 
 
-def enqueue(store,goal,item,lease,task,verification):
-    binding=make_binding(item,task,verification)
+def enqueue(store,goal,item,lease,task,verification, *, binding=None, effect=None):
+    if binding is None:
+        binding = make_binding(item, task, verification)
     rid=_hash({"goal":goal["goal_id"],"item":item["item_id"],"binding":binding})
     regions=[{"region_id":c["candidate_id"],"decision":"pending","reason":"","reviewer":""} for c in binding["regions"]]
     with store.worker_transaction() as db:
@@ -105,6 +106,8 @@ def enqueue(store,goal,item,lease,task,verification):
         db.execute("INSERT OR IGNORE INTO batch_quality_reviews(review_id,goal_id,item_id,job_id,binding,regions,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
             (rid,goal["goal_id"],item["item_id"],binding["job_id"],json.dumps(binding,ensure_ascii=False),json.dumps(regions),now,now))
         cp={**item["checkpoint"],"phase":"AWAITING_REVIEW","quality_review_id":rid,"verification":verification}
+        if effect is not None:
+            cp["effect_review"] = effect
         updated=store.transition_goal_item(goal["goal_id"],step_id=item["step_id"],expected_version=item["version"],
             status="AWAITING_REVIEW",lease_token=lease.token,checkpoint=cp,verification=verification,
             capacity_reserved=0,next_wake_at=None,error=None,

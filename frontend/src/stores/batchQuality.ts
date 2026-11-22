@@ -13,6 +13,7 @@ export const useBatchQualityStore=defineStore('batchQuality',()=>{
   const reviews=ref<QualitySummary[]>([]), doc=shallowRef<QualityDocument|null>(null);
   registerViewerObservation('repair_item',()=>doc.value && doc.value.goal_id===batch.goalId
     ? {goal_id:doc.value.goal_id,item_id:doc.value.item_id,source:'quality_panel'} : null);
+  const effectMode=ref(false);
   const regionId=ref(''), error=ref(''), busy=ref(false), loading=ref(false);
   const reviewer=ref(''), reason=ref(''), overlay=ref<'off'|'outline'|'fill'>('fill');
   const pair=shallowRef<{output:number;nosr:number;review:string}|null>(null);
@@ -29,22 +30,22 @@ export const useBatchQualityStore=defineStore('batchQuality',()=>{
     regions:a.regions+r.counts.pending+r.counts.approved+r.counts.rejected,pending:a.pending+r.counts.pending,
     approved:a.approved+(r.current?r.counts.approved:0),rejected:a.rejected+r.counts.rejected}),
     {scenes:0,regions:0,pending:0,approved:0,rejected:0}));
-  function clear(){generation++;controller?.abort();controller=null;doc.value=null;pair.value=null;regionId.value='';reviews.value=[];error.value='';loading.value=false;busy.value=false;}
+  function clear(){generation++;controller?.abort();controller=null;doc.value=null;pair.value=null;effectMode.value=false;regionId.value='';reviews.value=[];error.value='';loading.value=false;busy.value=false;}
   async function refresh(){
     const gid=batch.goalId,seq=++listSeq;if(!gid)return;
     try{const result=await qualityList(gid);if(batch.goalId===gid&&seq===listSeq)reviews.value=result.reviews;}
     catch(e){if(batch.goalId===gid&&seq===listSeq)error.value=String(e);}
   }
-  async function select(itemId:string, expectedReviewId?:string){
+  async function select(itemId:string, expectedReviewId?:string, effect=false, initialRegion?:string){
     const gid=batch.goalId;if(!gid)return;
     const gen=++generation;controller?.abort();controller=new AbortController();
     viewer.noteUserIntent();const selectionIntent=viewer.userIntentSeq;
-    doc.value=null;pair.value=null;error.value='';loading.value=true;busy.value=false;
+    doc.value=null;pair.value=null;effectMode.value=effect;error.value='';loading.value=true;busy.value=false;
     try{
-      const value=await qualityDocument(gid,itemId,controller.signal);
+      const value=await qualityDocument(gid,itemId,controller.signal,effect);
       if(gen!==generation||batch.goalId!==gid||viewer.userIntentSeq!==selectionIntent||viewer.drawMode)return;
       if(expectedReviewId && value.review_id!==expectedReviewId)throw new Error('历史审核绑定已改变，请查看归档证据');
-      doc.value=value;regionId.value=value.regions.find(r=>r.decision==='pending')?.region_id??value.regions[0]?.region_id??'';
+      doc.value=value;regionId.value=initialRegion??value.regions.find(r=>r.decision==='pending')?.region_id??value.regions[0]?.region_id??'';
       await openRegion(regionId.value);
     }catch(e){if(gen===generation){error.value=String(e);pair.value=null;}}
     finally{if(gen===generation)loading.value=false;}
@@ -69,7 +70,10 @@ export const useBatchQualityStore=defineStore('batchQuality',()=>{
     if(comparisonReady.value){focus();return;}
     const gen=generation;viewer.noteUserIntent();const intent=viewer.userIntentSeq;
     const wanted=()=>gen===generation&&batch.goalId===gid&&doc.value===d&&viewer.userIntentSeq===intent&&!viewer.drawMode;
-    const siblings={lqPath:d.scene_path} as SceneSiblings;
+    const siblings: SceneSiblings = {
+      lqPath: d.scene_path, sceneId: d.item_id, items: d.images,
+      suffix: null, suffixFrom: null, div: 16, productCandidates: [], nosrCandidates: [],
+    };
     try{
       const ids=[];
       for(const image of d.images){ids.push(await viewer.loadTourImage(image,siblings,wanted));if(!wanted())return;}
@@ -81,7 +85,7 @@ export const useBatchQualityStore=defineStore('batchQuality',()=>{
       viewer.setCtxRailOpen(true);
       await nextTick();
       await new Promise<void>(resolve=>requestAnimationFrame(()=>resolve()));
-      const current=await qualityDocument(gid,d.item_id);
+      const current=await qualityDocument(gid,d.item_id,undefined,effectMode.value);
       if(gen!==generation||viewer.userIntentSeq!==openedIntent||doc.value!==d)return;
       if(current.review_id!==d.review_id||current.version!==d.version)throw new Error('审核对象已改变，请刷新');
       viewer.splitLinked=true;pair.value={output:a,nosr:b,review:d.review_id};error.value='';focus();
@@ -89,7 +93,7 @@ export const useBatchQualityStore=defineStore('batchQuality',()=>{
   }
   function flicker(){const p=pair.value;if(!p||!comparisonReady.value)return;if(viewer.openComparePair(p.output,p.nosr)){focus();viewer.flickerStart();}}
   async function decide(action:'region'|'scene',decision:QualityDecision){
-    const d=doc.value,gid=batch.goalId;if(!d||!gid||busy.value||!comparisonReady.value)return;
+    const d=doc.value,gid=batch.goalId;if(!d||!gid||busy.value||effectMode.value||!comparisonReady.value)return;
     busy.value=true;error.value='';const gen=generation;
     try{
       await qualityDecide(gid,d.item_id,{review_id:d.review_id,expected_version:d.version,request_key:spatialId(),
@@ -107,5 +111,5 @@ export const useBatchQualityStore=defineStore('batchQuality',()=>{
   }
   watch(()=>batch.goalId,()=>{clear();void refresh();});
   watch(()=>JSON.stringify(batch.snapshot?.quality?.items??[]),()=>{void refresh();});
-  return{reviews,doc,regionId,error,busy,loading,reviewer,reason,overlay,pair,selectedRegion,comparisonReady,totals,refresh,select,openRegion,focus,flicker,decide,clear};
+  return{reviews,doc,effectMode,regionId,error,busy,loading,reviewer,reason,overlay,pair,selectedRegion,comparisonReady,totals,refresh,select,openRegion,focus,flicker,decide,clear};
 });

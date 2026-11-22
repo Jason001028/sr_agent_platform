@@ -789,7 +789,8 @@ async def goal_tick(state):
             executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="goal")
         try:
             candidates = await run_sync(state.store.list_goals,
-                    limit=200, statuses=SCHEDULED, exclude_kinds=("batch",))
+                    limit=200, statuses=SCHEDULED, exclude_kinds=("batch",),
+                    execution_owner="worker")
             for goal in candidates:
                 # Batch Goals belong to the deterministic Producer/Monitor
                 # (PR C). They are excluded inside the query, before LIMIT, so a
