@@ -518,6 +518,24 @@ describe('automatic polygon staging and identity isolation', () => {
     d.result = { ...d.result!, autoMask: undefined };
     expect(d.autoDrawReason).toContain('未提供');
   });
+  it('uses source vertex validation for both the toolbar and the action', async () => {
+    const d = await readyAuto();
+    const auto = d.result!.autoMask!;
+    auto.geometry_policy = 'adaptive-4to6-v1';
+    const polygon = auto.polygons[0];
+    // Preserve server coverage flags while injecting invalid coordinates.
+    polygon.source_polygons[0].points[0][0] = -1;
+    expect(d.autoDrawReason).toContain('源坐标验证');
+    expect(await d.autoDraw()).toBe(false);
+    expect(mocks.siblings).not.toHaveBeenCalled();
+  });
+  it('allows a retry after a temporary source lookup failure', async () => {
+    const d = await readyAuto();
+    mocks.siblings.mockRejectedValueOnce(new Error('temporary network failure'));
+    expect(await d.autoDraw()).toBe(false);
+    expect(d.error).toContain('temporary network failure');
+    expect(d.autoDrawReason).toBe('');
+  });
   it('isolates a late source-check response from a newer drawing transaction', async () => {
     const d = await readyAuto(); vi.useFakeTimers();
     const first=d.autoDraw(); await Promise.resolve(); await Promise.resolve();

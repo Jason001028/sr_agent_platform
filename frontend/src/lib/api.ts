@@ -1768,6 +1768,21 @@ export interface RepairPlanTargetItem {
   source_lines?: number[];
   status?: string;
 }
+export interface RepairLandCounts {
+  candidates: number;
+  excluded: number;
+  clipped: number;
+  executable: number;
+}
+export interface RepairLandItem extends RepairLandCounts {
+  item_id: string;
+  scene_id?: string;
+  image_path?: string;
+  preview_url?: string;
+  preview_revision?: string;
+  width?: number;
+  height?: number;
+}
 export interface RepairPlan {
   kind?: string;
   contract_version: string;
@@ -1786,6 +1801,7 @@ export interface RepairPlan {
   execution: { allowed: boolean; mode: string; reason: string | null };
   manifest_ref: string;
   manifest_sha256?: string;
+  land_constraint?: RepairLandCounts & { items: RepairLandItem[] };
   title?: string;
   session_id?: string | null;
   mask?: { policy: string; path: string; revision?: string; width: number; height: number } | null;

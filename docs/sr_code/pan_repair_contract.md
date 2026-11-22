@@ -83,3 +83,25 @@ python -m pytest backend/tests/test_pan_repair.py backend/tests/test_run_sr.py b
 开发机测试使用真实 TIFF 文件和替代 GDAL 接口，验证流程、逐像素选区、尺寸、字节数、备份、
 缺输入、错误输出、静默退出与文件变化。掩码外使用非均匀 PAN 逐值验证。
 真实 GDAL、GPU 推理与生产体量耗时仍需内网验收。
+
+## 5. P1 可信陆地自动修复
+
+生产自动计划要求服务端设置 `SR_MSS_EXEC_PROFILE`，指向 API 和 SR worker 都可读取的 JSON 文件。
+Profile 包含 `profile_id`、实景验收记录 `verification_ref`、`satellite`、`sensor`、
+`registration_method`、`land_threshold`、`water_threshold`、`shoreline_pan_pixels`
+和 `registration_error_pan_pixels`。距离按目标 PAN 像素计。两个阈值之间保留不确定类。
+当前实现支持 `exact_embedded_geotiff_footprint`，要求 XML 明示匹配的 SceneID/ProductType，
+PAN 和 MSS 使用同 CRS、同覆盖、轴对齐的内嵌 GeoTIFF 网格。外部 RPC、无法确认的配准、
+不支持的有效性掩膜，以及缺少适用 Profile 的场景阻断自动计划。
+
+计划在确认前复用原差分检测和 MaskBuilder，保留原候选。最近邻映射后按 MSS 像元大小、
+配准误差及岸线距离建立保护区。执行掩膜只包含候选内的可信陆地和有效 PAN 样本。
+计划与 Item 持久化来源、Profile、波段、配准、P0 产物版本、候选/执行掩膜及摘要。
+计划卡统计完全排除和部分裁剪，Viewer 核对层绑定 PAN 版本和尺寸。
+完全排除的 Item 不生成作业。逐区域复核产生子集时沿用原约束重新求交，并由复核记录绑定新摘要。
+
+Worker 提交前复核证据，作业在启动前检查确认有效期及共享输入版本，并校验执行掩膜 SHA-256。
+推理使用私有掩膜副本，发布使用原 PAN 网格上的同一冻结掩膜。发布前复核源和掩膜，
+复读候选 TIFF 并比较禁止样本，回执包含约束证据。作业配置中的文件路径与文件身份要求
+API 和 worker 对共享盘阵具有一致的视图。正式启用前仍需现场校验 Profile、配准精度、
+GDAL 行为和大图磁盘预算。测试 Profile 仅用于合成夹具。

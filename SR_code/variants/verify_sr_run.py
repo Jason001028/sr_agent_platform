@@ -424,6 +424,9 @@ def _check_repair(v, config_path, doc, sr_exit_code):
         receipt = os.path.join(v.lq_path, 'Debug', '_SRREPAIR_' + digest + '.json')
         with open(receipt, encoding='utf-8') as stream:
             result = json.load(stream)
+        land_constraint = _cfg_value(doc, 'LandConstraint')
+        if isinstance(land_constraint, str) and result.get('land_constraint') != json.loads(land_constraint):
+            raise ValueError('receipt land constraint does not match this repair')
         expected_nosr = _cfg_value(doc, 'RepairNOSR')
         # <body stem>_old_latest.tif is canonical since 2026-11-02; the legacy
         # name stays accepted so a repair queued before the rename can still be

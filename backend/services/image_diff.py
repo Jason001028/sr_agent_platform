@@ -526,6 +526,7 @@ def analyze_arrays(
     elapsed_ms: Optional[float] = None,
     auto_mask: bool = False,
     auto_mask_margin: str = "standard",
+    auto_mask_geometry_policy=None,
     auto_mask_limit: int = 16,
     smart_options: Optional[dict] = None,
     reference_side: Optional[str] = None,
@@ -788,7 +789,7 @@ def analyze_arrays(
     if auto_mask:
         from backend.services.auto_mask_geometry import build_auto_mask
         try:
-            result["autoMask"] = build_auto_mask(labels, kept, margin=auto_mask_margin, limit=auto_mask_limit)
+            result["autoMask"] = build_auto_mask(labels, kept, margin=auto_mask_margin, limit=auto_mask_limit, policy=auto_mask_geometry_policy)
         except ValueError as e:
             raise DiffError(str(e)) from e
     return result
@@ -870,6 +871,7 @@ def analyze_payload(payload: dict, *, load_scene=None) -> dict:
         warnings=warnings,
         auto_mask=payload.get("autoMask") is True,
         auto_mask_margin=payload.get("autoMaskMargin", "standard"),
+        auto_mask_geometry_policy=payload.get("autoMaskGeometryPolicy"),
         smart_options=payload.get("smartOptions"),
         reference_side=payload.get("referenceSide"),
     )

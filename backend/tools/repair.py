@@ -31,7 +31,8 @@ def _unbound_store():
 
 class _Context:
     def __init__(self, *, store=None, session_id=None, workspace=None,
-                 current=None, selected_images=None, batch_draft=None, selected_truncated=False, preferences=None):
+                 current=None, selected_images=None, batch_draft=None, selected_truncated=False,
+                 preferences=None, raster_runner=None):
         self.store = store
         self.session_id = session_id
         self.workspace = workspace
@@ -40,6 +41,7 @@ class _Context:
         self.batch_draft = batch_draft
         self.selected_truncated = selected_truncated
         self.preferences = preferences or {}
+        self.raster_runner = raster_runner
 
     def close(self):
         pass
@@ -104,7 +106,7 @@ def _prepare(ctx, scope, mode, strategy, detection_method, mask_policy, title,
             current=ctx.current, selected_images=ctx.selected_images,
             scope=scope, mode=mode, strategy=strategy,
             detection_method=detection_method, mask_policy=mask_policy,
-            title=title, created_by=source, **kwargs)
+            title=title, created_by=source, raster_runner=ctx.raster_runner, **kwargs)
         return ok(plan)
     except (svc.RepairError, ValueError) as exc:
         return err(str(exc))
@@ -601,12 +603,14 @@ def inspection_tool(snapshot,store,session_id,*,raster_runner=None):
 
 
 def bound_tool(name: str, *, workspace=None, current=None, selected_images=None,
-               batch_draft=None, session_id=None, store=None, selected_truncated=False, preferences=None) -> Tool:
+               batch_draft=None, session_id=None, store=None, selected_truncated=False,
+               preferences=None, raster_runner=None) -> Tool:
     """Return one tool bound to this message's frozen Viewer context."""
     context = _Context(store=store, session_id=session_id,
                        workspace=workspace, current=current,
                        selected_images=selected_images,
-                       batch_draft=batch_draft, selected_truncated=selected_truncated,preferences=preferences)
+                       batch_draft=batch_draft, selected_truncated=selected_truncated,
+                       preferences=preferences, raster_runner=raster_runner)
     if name == "prepare_repair":
         def run(scope="workspace", mode="production", strategy="automatic",
                 detection_method="ssim", mask_policy="auto", title=None):

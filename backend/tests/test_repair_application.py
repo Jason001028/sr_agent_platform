@@ -387,9 +387,10 @@ class RepairApplicationTest(unittest.TestCase):
             self.store, session_id="s1", workspace=self.workspace(
                 (scene_dir, inp)), scope="workspace", mode="production")
         self.assertFalse(plan["execution"]["allowed"])
-        svc.confirm_repair(self.store, plan["plan_id"], session_id="s1")
-        with self.assertRaises(svc.RepairBlocked):
-            svc.start_repair(self.store, plan["plan_id"], session_id="s1")
+        self.assertEqual(plan["status"], "BLOCKED")
+        with self.assertRaises(RepairPlanConflict) as denied:
+            svc.confirm_repair(self.store, plan["plan_id"], session_id="s1")
+        self.assertEqual(denied.exception.reason, "plan_blocked")
         self.assertEqual(self.store.list_goals(kinds=["batch"]), [])
 
     def test_manual_mask_becomes_a_mask_ready_batch_item(self):
@@ -759,11 +760,12 @@ class RepairApplicationTest(unittest.TestCase):
 
     def test_explicit_production_opt_in_marks_the_plan_executable(self):
         directory, inp = self.scene(816)
+        self.save_mask(directory)
         # Prepare while the gate is closed: the persisted plan records the
         # refusal, which is what the plan card shows at creation time.
         plan = svc.prepare_repair(
             self.store, session_id=self.session_id, mode='production',
-            sources=[{'path': str(inp), 'name': directory.name}])
+            sources=[{'path': str(inp), 'name': directory.name}], mask_policy="existing")
         self.assertEqual(plan['mode'], 'production')
         self.assertFalse(plan['execution']['allowed'])
         # Opening the switch re-probes the existing plan when the card reads
@@ -797,10 +799,12 @@ class RepairApplicationTest(unittest.TestCase):
             self.assertEqual(prepared['data']['mode'],'production')
             self.assertFalse(prepared['data']['execution']['allowed'])
             self.assertFalse(registry.invoke('prepare_repair',{'mode':'demo'})['ok'])
-            svc.confirm_repair(self.store,prepared['data']['plan_id'],session_id=self.session_id)
+            self.assertEqual(prepared['data']['status'], 'BLOCKED')
+            with self.assertRaises(RepairPlanConflict):
+                svc.confirm_repair(self.store,prepared['data']['plan_id'],session_id=self.session_id)
             denied=registry.invoke('start_repair',{'plan_id':prepared['data']['plan_id']})
             self.assertFalse(denied['ok'])
-            self.assertEqual(denied.get('error_class'),'execution_blocked')
+            self.assertEqual(denied.get('error_class'),'confirmation_required')
             old=svc.prepare_repair(self.store,session_id=self.session_id,mode='demo',sources=[{'path':str(inp),'name':directory.name}])
             refused=registry.invoke('start_repair',{'plan_id':old['plan_id']})
             self.assertFalse(refused['ok'])
@@ -810,12 +814,14 @@ class RepairApplicationTest(unittest.TestCase):
             response=client.post('/api/repairs/prepare',json={'session_id':self.session_id,'sources':[{'path':str(inp),'name':directory.name}]})
             self.assertEqual(response.status_code,200,response.text)
             self.assertEqual(response.json()['mode'],'production')
+            self.assertEqual(response.json()['status'],'BLOCKED')
 
     @mock.patch('backend.services.batch_worker.ensure_execution_allowed')
     def test_agent_prepare_then_start_shares_the_plan_contract(self, execution_gate):
         # Test only plan/Goal creation; no worker, detector or SR is run.
         execution_gate.return_value = self.root / 'work'
         scene_dir, inp = self.scene(9)
+        self.save_mask(scene_dir)
         snapshot = validate_snapshot({
             "version": 1,
             "captured_at": "send-time",
@@ -829,7 +835,7 @@ class RepairApplicationTest(unittest.TestCase):
         })
         registry = bind_registry(build_builtin_registry(), snapshot,
                                  store=self.store, session_id="s1")
-        prepared = registry.invoke("prepare_repair", {"scope": "workspace"})
+        prepared = registry.invoke("prepare_repair", {"scope": "workspace", "mask_policy": "existing"})
         self.assertTrue(prepared["ok"], prepared)
         self.assertEqual(prepared['data']['mode'],'production')
         plan_id = prepared["data"]["plan_id"]

@@ -180,13 +180,13 @@ def ndwi_window(green, nir, nodata, gain, bias, profile):
     return values, water, valid.astype(np.uint8)
 
 
-def _sidecars(path):
+def _sidecar_candidates(path):
     scene = path.parent.name
     bases = {path.stem, scene, re.sub(r'[_ ](?:MSS|PAN)$', '', scene, flags=re.IGNORECASE)}
     rpc = [path.with_name(base + separator + band + suffix)
            for base in bases for separator in ('_', ' ') for band in ('B1', 'B2', 'B3', 'B4')
            for suffix in ('_rpc.txt', '_RPC.txt', '_RPC.TXT')]
-    return [candidate for candidate in (
+    return (
         path.with_suffix('.tfw'), path.with_suffix('.TFW'), path.with_suffix('.tifw'),
         path.with_suffix('.tiffw'), path.with_suffix('.wld'), path.with_suffix('.prj'),
         path.with_suffix('.rpb'), path.with_suffix('.RPB'), path.with_suffix('.rpc'),
@@ -194,7 +194,12 @@ def _sidecars(path):
         path.with_name(path.name + '.aux.xml'), path.with_suffix('.aux.xml'),
         path.with_name(path.name + '.msk'),
         *rpc,
-    ) if candidate.exists() or candidate.is_symlink()]
+    )
+
+
+def _sidecars(path):
+    return [candidate for candidate in _sidecar_candidates(path)
+            if candidate.exists() or candidate.is_symlink()]
 
 
 def _tags(page):

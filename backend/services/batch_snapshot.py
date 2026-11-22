@@ -197,7 +197,7 @@ def _item_summary(item: dict) -> dict:
         "scene_ref": cp.get("scene_ref"),
         "image_path": target.get("path"),
         "has_mask": bool(mask),
-        "overlay_ready": bool(mask.get("overlay")),
+        "overlay_ready": bool((cp.get("candidate_mask") or mask).get("overlay")),
         "candidate_count": len(detection.get("candidates") or []),
         "job_id": item_job_id(item),
         "sr_status": cp.get("sr_status"),
@@ -248,7 +248,7 @@ def _job_summary(item: dict, task: Optional[dict]) -> dict:
         "error": item.get("error"),
         "image_path": target.get("path"),
         "has_mask": bool(mask),
-        "overlay_ready": bool(mask.get("overlay")),
+        "overlay_ready": bool((cp.get("candidate_mask") or mask).get("overlay")),
         "verification_ok": (
             verification_ok(item) if item.get("status") == "SUCCEEDED" else None
         ),

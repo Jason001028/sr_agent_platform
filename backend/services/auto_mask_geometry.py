@@ -17,6 +17,7 @@ from PIL import Image, ImageDraw
 from scipy.ndimage import binary_fill_holes, distance_transform_edt, label
 from scipy.spatial import ConvexHull, QhullError
 
+from backend.services import adaptive_polygon
 from backend.services.mask import rasterize_polygons
 
 VERSION = "auto-diff-v2-repair"
@@ -41,7 +42,7 @@ def _measure(points, original):
     return coverage, covered / count, int(filled.sum()) / count
 
 
-def build_auto_mask(labels, regions, *, margin="standard", limit=MAX_REGIONS):
+def build_auto_mask(labels, regions, *, margin="standard", limit=MAX_REGIONS, policy=None):
     """One polygon per *sorted independent label*, never a mixed mask contour.
 
     Callers supply regions with label/x/y/w/h/area attributes. Coordinates in
@@ -54,6 +55,9 @@ def build_auto_mask(labels, regions, *, margin="standard", limit=MAX_REGIONS):
         raise ValueError("autoMaskMargin must be tight, standard or loose")
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 512:
         raise ValueError("auto mask region limit must be in 1..512")
+    policy = adaptive_polygon.geometry_policy(policy)
+    if policy == adaptive_polygon.POLICY:
+        return _build_adaptive(labels, regions, margin, limit)
     started = time.perf_counter()
     output = []
     height, width = labels.shape
@@ -146,6 +150,123 @@ def build_auto_mask(labels, regions, *, margin="standard", limit=MAX_REGIONS):
             "elapsed_ms": round((time.perf_counter() - started) * 1000, 2)}
 
 
+def _build_adaptive(labels, regions, margin, limit):
+    from backend.services.repair_regions import group_regions
+
+    start = time.perf_counter()
+    h, w = labels.shape
+    output = []
+
+    extra_regions = limit - min(limit, len(regions))
+
+    def fit(members, partition=None):
+        x0 = max(0, min(r.x for r in members) - 24)
+        y0 = max(0, min(r.y for r in members) - 24)
+        x1 = min(w, max(r.x + r.w for r in members) + 24)
+        y1 = min(h, max(r.y + r.h for r in members) + 24)
+        target = np.isin(labels[y0:y1, x0:x1], [r.label for r in members])
+        if partition:
+            left, top, right, bottom = partition
+            target[:, :max(0, left-x0)] = False
+            target[:, max(0, right-x0):] = False
+            target[:max(0, top-y0)] = False
+            target[max(0, bottom-y0):] = False
+        count = int(target.sum())
+        target_width = max(r.x+r.w for r in members) - min(r.x for r in members)
+        target_height = max(r.y+r.h for r in members) - min(r.y for r in members)
+        radius = adaptive_polygon.margin_radius(count, target_width, target_height, margin)
+        options, tested = adaptive_polygon.enclose(target, radius, _measure)
+        for option in options:
+            option["points"] = [[x+x0, y+y0] for x, y in option["points"]]
+        return options, tested, count
+
+    for group in group_regions(labels, regions[:limit]):
+        tick = time.perf_counter()
+        options, tested, count = fit(group)
+        proposals = [(group, options, tested, count, None)]
+        if len(group) > 1:
+            singles = [([r], *fit([r]), None) for r in group]
+            if (not options or all(parts for _, parts, _, _, _ in singles) and
+                    options[0]["polygon_area_px"] > 1.15 * sum(parts[0]["polygon_area_px"]
+                                                               for _, parts, _, _, _ in singles)):
+                proposals = singles
+        elif extra_regions and options and options[0]["excess_area_ratio"] > adaptive_polygon.CONFIG.excess_review:
+            r = group[0]
+            x, y, right, bottom = r.x, r.y, r.x+r.w, r.y+r.h
+            mx, my = x+r.w//2, y+r.h//2
+            splits = [((x, y, mx, bottom), (mx, y, right, bottom)),
+                      ((x, y, right, my), (x, my, right, bottom))]
+            if extra_regions >= 2 and min(r.w, r.h) >= 4:
+                pixels = labels[y:bottom, x:right] == r.label
+                row_change = np.diff(pixels.sum(axis=1))
+                cut = y + int(np.argmax(np.abs(row_change))) + 1
+                # The broad section retains one ROI; split the two narrow arms.
+                if row_change[cut-y-1] > 0:
+                    splits.append(((x, y, mx, cut), (mx, y, right, cut), (x, cut, right, bottom)))
+                else:
+                    splits.append(((x, y, right, cut), (x, cut, mx, bottom), (mx, cut, right, bottom)))
+            alternatives = []
+            for boxes in splits:
+                parts = [(group, *fit(group, box), box) for box in boxes]
+                if all(choices for _, choices, _, _, _ in parts):
+                    cost = sum(choices[0]["polygon_area_px"] for _, choices, _, _, _ in parts)
+                    alternatives.append((cost, parts))
+            if alternatives:
+                cost, parts = min(alternatives, key=lambda entry: entry[0])
+                if cost < .85 * options[0]["polygon_area_px"]:
+                    proposals = parts
+                    extra_regions -= len(parts) - 1
+        for members, options, attempts, count, partition in proposals:
+            seeds = []
+            digest = hashlib.sha256()
+            for r in members:
+                original = labels[r.y:r.y+r.h, r.x:r.x+r.w] == r.label
+                if partition:
+                    left, top, right, bottom = partition
+                    crop = original[top-r.y:bottom-r.y, left-r.x:right-r.x]
+                    y, x = np.unravel_index(crop.argmax(), crop.shape)
+                    seeds.append([int(x+left), int(y+top)])
+                    digest.update(repr(partition).encode())
+                else:
+                    y, x = np.unravel_index(original.argmax(), original.shape)
+                    seeds.append([int(x+r.x), int(y+r.y)])
+                digest.update(f"{r.x},{r.y},{r.w},{r.h}:".encode() + np.packbits(original).tobytes())
+            best = options[0] if options else {"points": [], "vertex_count": 0,
+                "coverage_ratio": 0., "supersample_coverage_ratio": 0., "area_ratio": None,
+                "buffer_px": 0., "polygon_area_px": 0, "target_area_px": count}
+            diagnostics = []
+            if not options:
+                diagnostics.append("adaptive_enclosure_failed")
+            elif best["excess_area_ratio"] > adaptive_polygon.CONFIG.excess_review:
+                diagnostics.append("adaptive_excess_area")
+            if options and best["margin_coverage_ratio"] != 1:
+                diagnostics.append("adaptive_margin_incomplete")
+            output.append({**best, "region_id": digest.hexdigest()[:16], "rank": len(output)+1,
+                "coordinate_space": "analysis_pixel", "analysis_size": [w, h],
+                "analysis_seed": seeds[0], "analysis_seeds": seeds, "detected_area_px": count,
+                "analysis_bounds": [min(r.x for r in members), min(r.y for r in members),
+                                    max(r.x+r.w for r in members), max(r.y+r.h for r in members)],
+                "geometry_method": "supporting_half_planes", "evaluated_candidates": attempts,
+                "buffer_space": "analysis_pixel",
+                "fallback": "margin_reduced" if options and not best["buffer_px"] else None,
+                "needs_review": bool(diagnostics),
+                "diagnostics": diagnostics, "drawable": bool(options),
+                "holes": {"count": 0, "area_px": 0, "filled": False, "large": False},
+                "elapsed_ms": round((time.perf_counter()-tick)*1000, 2)})
+            if partition:
+                output[-1]["analysis_partition"] = list(partition)
+                r = members[0]
+                yy, xx = np.unravel_index(original.argmax(), original.shape)
+                output[-1]["analysis_member_seeds"] = [[int(r.x+xx), int(r.y+yy)]]
+            output[-1].pop("score", None)
+    return {"parameter_version": adaptive_polygon.POLICY, "geometry_policy": adaptive_polygon.POLICY,
+            "margin": margin, "polygons": output, "analysis_size": [w, h],
+            "coordinate_space": "analysis_pixel", "total_regions": len(regions),
+            "processed_regions": min(len(regions), limit), "detected_regions": min(len(regions), limit),
+            "unprocessed_regions": max(0, len(regions)-limit), "truncated": len(regions)>limit,
+            "elapsed_ms": round((time.perf_counter()-start)*1000, 2)}
+
+
 def bind_auto_mask(result, specs, *, preview_grid=None, source_windows=None):
     """Attach source identity and grid->source affine transforms for BOTH sides.
 
@@ -195,17 +316,23 @@ def bind_auto_mask(result, specs, *, preview_grid=None, source_windows=None):
                            "pixel_key": spec.get("pixelKey"), "source_size": [sw, sh],
                            "transform": transform})
     from backend.services.repair_regions import consolidate
-    consolidate(auto, transforms)
+    adaptive = auto.get("geometry_policy") == adaptive_polygon.POLICY
+    if not adaptive:
+        consolidate(auto, transforms)
     auto["sources"] = transforms
     auto["analysis_id"] = hashlib.sha256(json.dumps({
         "mask": result["binaryMask"], "parameters": result["parameters"],
         "sources": transforms, "size": auto["analysis_size"], "margin": auto["margin"],
         "version": VERSION,
+        **({"geometry_policy": adaptive_polygon.POLICY, "config": vars(adaptive_polygon.CONFIG)} if adaptive else {}),
     }, sort_keys=True).encode()).hexdigest()[:24]
     mask = np.asarray(Image.open(io.BytesIO(base64.b64decode(result["binaryMask"].split(",", 1)[1])))) > 0
     labels, _ = label(mask, structure=np.ones((3, 3), bool))
     for polygon in auto["polygons"]:
         polygon["sources"] = transforms
+        if adaptive and not polygon["drawable"]:
+            polygon["source_polygons"] = []
+            continue
         seed_x, seed_y = polygon["analysis_seed"]
         target_labels = [labels[y, x] for x, y in polygon.get("analysis_seeds", [[seed_x, seed_y]])]
         # Actual source rasterizer recheck, not a promise that affine rounding
@@ -221,16 +348,35 @@ def bind_auto_mask(result, specs, *, preview_grid=None, source_windows=None):
             points = [[max(0, min(int(sw) - 1, int(np.floor(x*sx + ox + .5)))),
                        max(0, min(int(sh) - 1, int(np.floor(y*sy + oy + .5))))]
                       for x, y in polygon["points"]]
+            export_error = None
+            if adaptive:
+                points = adaptive_polygon.canonical_polygon(points)
+                if len(points) != polygon["vertex_count"]:
+                    source_polygons.append({"image_id": source["image_id"], "points": points,
+                        "coordinate_space": "source_pixel", "coverage_ratio": None, "drawable": False,
+                        "coverage_scope": "projected_analysis_pixel_centres"})
+                    continue
+                export_error = adaptive_polygon.verify_export(points, sh, rasterize_polygons)
+                if export_error:
+                    if export_error not in polygon["diagnostics"]:
+                        polygon["diagnostics"].append(export_error)
+                    source_polygons.append({"image_id": source["image_id"], "points": points,
+                        "coordinate_space": "source_pixel", "coverage_ratio": None, "drawable": False,
+                        "coverage_scope": "projected_analysis_pixel_centres"})
+                    continue
             xmin = min(p[0] for p in points); xmax = max(p[0] for p in points)
             # Allocate one source scanline, never a full source mask.
             covered = total = 0
-            for y in range(mask.shape[0]):
+            partition = polygon.get("analysis_partition", polygon.get("analysis_bounds"))
+            left, top, right, bottom = partition or (0, 0, mask.shape[1], mask.shape[0])
+            for y in range(top, bottom):
                 xs = np.flatnonzero(labels[y] == target_labels[0] if len(target_labels) == 1
                                     else np.isin(labels[y], target_labels))
+                xs = xs[(xs >= left) & (xs < right)]
                 if not xs.size:
                     continue
                 source_y = max(0, min(int(sh) - 1, int(np.floor(y*sy + oy + .5))))
-                row = rasterize_polygons(xmax - xmin + 1, 1,
+                row = rasterize_polygons(xmax - xmin + 1, 1 + int(adaptive and source_y+1 < sh),
                     [[[x - xmin, yy - source_y] for x, yy in points]])[0]
                 sample_x = np.clip(np.floor(xs*sx + ox + .5).astype(np.int64), 0, sw-1) - xmin
                 inside = (sample_x >= 0) & (sample_x < len(row))
@@ -239,8 +385,11 @@ def bind_auto_mask(result, specs, *, preview_grid=None, source_windows=None):
                         for i in range(len(points)))
             source_polygons.append({"image_id": source["image_id"], "points": points,
                                     "coordinate_space": "source_pixel", "coverage_ratio": covered / total,
-                                    "drawable": abs(area2) > 0, "coverage_scope": "projected_analysis_pixel_centres"})
+                                    "drawable": abs(area2) > 0 and (not adaptive or total > 0 and covered == total),
+                                    "coverage_scope": "projected_analysis_pixel_centres"})
         polygon["source_polygons"] = source_polygons
+        if adaptive:
+            polygon["drawable"] = any(p["drawable"] for p in source_polygons)
         if any(not p["drawable"] or p["coverage_ratio"] != 1 for p in source_polygons):
             polygon["needs_review"] = True
             polygon["diagnostics"].append("source_projection_conflict")

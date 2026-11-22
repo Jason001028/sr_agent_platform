@@ -4,12 +4,12 @@ const assert = require('assert/strict');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { launchBrowser } = require('./launchBrowser');
 const root = path.resolve(__dirname, '..'), dist = path.join(root, 'frontend/dist');
 const venvPython = path.join(root, '.venv/Scripts/python.exe');
 const python = process.env.SR_TEST_PYTHON || (fs.existsSync(venvPython) ? venvPython : 'python');
-const artifacts = path.join(__dirname, 'artifacts');
+const artifacts = process.env.SR_MASK_E2E_ARTIFACTS || path.join(__dirname, 'artifacts');
 const mime = { '.html':'text/html', '.js':'text/javascript', '.css':'text/css', '.svg':'image/svg+xml' };
 const forbidden = [], metrics = [];
 let calls = 0, legacy = false;
@@ -121,6 +121,8 @@ let browser;
     // CSS SVG animation must not repaint the TIFF canvas once per frame.
     assert.ok(await page.evaluate(()=>stores.v.renderTick-window.renderBefore)<4);
     await page.waitForSelector('.approval-actions button');
+    await page.click('.review-progress button:first-of-type');
+    assert.equal(await page.evaluate(()=>stores.d.autoDrawing?.reviewing),true,'locating a pending region keeps approval open');
     assert.equal(await page.evaluate(()=>stores.v.activeRec.maskRois.length),1,'pending approval preserves only manual masks');
     await page.evaluate(async()=>{
       const ids=stores.d.autoDrawing.polygons.map(p=>p.autoDiff.region_id);
@@ -129,6 +131,40 @@ let browser;
     await page.waitForFunction(()=>!stores.d.autoDrawing);
     const count=await page.evaluate(()=>stores.v.activeRec.maskRois.length);
     assert.equal(count,4,'three independent regions + existing hand mask');
+    const exported = await page.evaluate(async () => {
+      const {v,d} = stores;
+      const {W,H,thumb,maskRois} = v.activeRec;
+      const polygons = maskRois.map(poly => poly.map(([x,y]) => [
+        Math.max(0, Math.min(W-1, Math.round(x*(W-1)/(thumb.width-1)))),
+        Math.max(0, Math.min(H-1, Math.round(y*(H-1)/(thumb.height-1)))),
+      ]));
+      const saved = URL.createObjectURL, click = HTMLAnchorElement.prototype.click;
+      let tiff;
+      URL.createObjectURL = function(blob) {
+        if (blob.type === 'image/tiff') tiff = blob;
+        return saved.call(URL, blob);
+      };
+      HTMLAnchorElement.prototype.click = function() {};
+      try { await v.genMask(); }
+      finally { URL.createObjectURL = saved; HTMLAnchorElement.prototype.click = click; }
+      const bytes = new Uint8Array(await tiff.arrayBuffer());
+      return { W, H, polygons, policy:d.result.autoMask.geometry_policy,
+        origins:maskRois.map(poly=>[poly.autoDiff?.parameter_version,poly.autoDiff?.initial_points===JSON.stringify(poly)]),
+        tiff:btoa(Array.from(bytes, n=>String.fromCharCode(n)).join('')) };
+    });
+    assert.equal(exported.policy, 'adaptive-4to6-v1');
+    const compared = spawnSync(python, ['-c', [
+      'import base64,io,json,sys,numpy as np',
+      'from PIL import Image',
+      'from backend.services.mask import rasterize_polygons',
+      'd=json.load(sys.stdin)',
+      'actual=np.asarray(Image.open(io.BytesIO(base64.b64decode(d["tiff"])))) != 0',
+      'expected=rasterize_polygons(d["W"],d["H"],d["polygons"]) != 0',
+      'print(np.count_nonzero(actual != expected))',
+      'if (actual!=expected).any(): print(np.argwhere(actual!=expected).min(0),np.argwhere(actual!=expected).max(0),actual.sum(),expected.sum(),file=sys.stderr)',
+    ].join('\n')], {cwd:root, input:JSON.stringify(exported), encoding:'utf8'});
+    assert.equal(compared.status, 0, compared.stderr);
+    assert.equal(Number(compared.stdout), 0, 'browser-exported TIFF vs backend PIL '+compared.stderr);
     await page.screenshot({path:path.join(artifacts,'mask-auto-draw-complete.png')});
     await page.evaluate(()=>stores.v.undoRoi());
     assert.equal(await page.evaluate(()=>JSON.stringify(stores.v.activeRec.maskRois)),await page.evaluate(()=>manual));

@@ -80,9 +80,10 @@ const paneLayers = computed(() => {
         @error="failure = '水体叠加预览不可用，请重试'">
     </div>
     <div class="water-controls" data-e2e="mss-water">
-      <details v-if="ready?.alignment.status === 'unaligned'" open class="water-native">
+      <details v-if="ready?.alignment.status === 'unaligned' && !failure" open class="water-native">
         <summary>MSS 原始网格预览（未叠加到 PAN）</summary>
-        <img :src="assetBase + 'mss-preview.png'" alt="MSS 水体分类：蓝色水体、深灰非水体、棕灰无效">
+        <img :src="assetBase + 'mss-preview.png'" alt="MSS 水体分类：蓝色水体、深灰非水体、棕灰无效"
+          @error="failure = 'MSS 原始网格预览不可用，请重试'">
         <div>蓝色水体 · 深灰非水体 · 棕灰无效</div>
       </details>
       <button v-if="!ready || failure" type="button" :disabled="loading" @click="load">

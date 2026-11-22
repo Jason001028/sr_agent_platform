@@ -141,7 +141,7 @@ def bind_metadata(result, specs, refs, reference_side, *, windows=None):
         region["maskEligible"] = bool(region.get("maskEligible", True) and windows and sx == 1 and sy == 1)
     if result.get("method") == "smart":
         for p in result.get("autoMask", {}).get("polygons", []):
-            seeds = p.get("analysis_seeds", [p.get("analysis_seed")])
+            seeds = p.get("analysis_member_seeds", p.get("analysis_seeds", [p.get("analysis_seed")]))
             p["candidate_ids"] = [r["id"] for r in result["regions"] if r.get("componentSeed") in seeds]
             p["needs_review"] = True
             p["diagnostics"].append("experimental-smart-candidate-human-review-required")
@@ -201,6 +201,7 @@ def analyze_grid(body, resolve):
             min_area_px=body.get("minAreaPx", 64), open_kernel=body.get("openKernel", 3), close_kernel=body.get("closeKernel", 3),
             blur=body.get("blur", True), ssim_window=body.get("ssimWindow", 7), ssim_gaussian=body.get("ssimGaussian", False),
             source="source-grid", auto_mask=body.get("autoMask") is True,
+        auto_mask_geometry_policy=body.get("autoMaskGeometryPolicy"),
             smart_options=body.get("smartOptions"), reference_side=reference_side,
             scene_masks=scene_masks,
             scale_a=(refs[0]["width"]/shape[1], refs[0]["height"]/shape[0]),
@@ -274,6 +275,7 @@ def analyze_roi(body, resolve):
     crop = {"x": x0-rect_a[0], "y": y0-rect_a[1], "w": x1-x0, "h": y1-y0}
     result = image_diff.analyze_arrays(a, b, valid_a=va, valid_b=vb, method="smart", roi=crop,
         source="source-roi", auto_mask=body.get("autoMask") is True,
+        auto_mask_geometry_policy=body.get("autoMaskGeometryPolicy"),
         smart_options=body.get("smartOptions"), reference_side=reference_side,
         scene_masks=load_scene_masks(body,resolve,refs,a.shape,window=rect_a),
         evidence_sink=body.get("_native_sink"),
@@ -375,7 +377,8 @@ def analyze_native_scan(body, resolve):
     pooled["sceneMasks"] = {name:mask for name,mask in pooled_masks.items() if all(s.startswith("available") for s in mask_states[name])}
     result=image_diff.analyze_arrays(pooled_target,pooled_reference,valid_a=pooled["validity"],valid_b=pooled["validity"],
         method="smart",reference_side=side,source="source-tiled",smart_options=options,smart_evidence=pooled,
-        auto_mask=body.get("autoMask") is True,min_area_px=body.get("minAreaPx",64),
+        auto_mask=body.get("autoMask") is True,
+        auto_mask_geometry_policy=body.get("autoMaskGeometryPolicy"),min_area_px=body.get("minAreaPx",64),
         threshold=body.get("threshold"),sensitivity=body.get("sensitivity","standard"),
         open_kernel=body.get("openKernel",3),close_kernel=body.get("closeKernel",3),scale_a=(w/gw,h/gh))
     for key,spec,r in zip(("imageA","imageB"),specs,refs):

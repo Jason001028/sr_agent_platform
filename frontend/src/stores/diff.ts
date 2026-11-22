@@ -41,6 +41,7 @@ interface GridRect { x: number; y: number; w: number; h: number }
 
 const VIEWER_MARKER_MAX = 8;
 const MASK_COLOR = 'rgb(224,86,50)';
+class AutoMaskSourceChanged extends Error {}
 const MAX_CANVAS_EDGE = ANALYSIS_MAX_EDGE;
 
 function fullRect(width: number, height: number): GridRect {
@@ -653,10 +654,11 @@ export const useDiffStore = defineStore('diff', () => {
   async function reviewAutoRegion(id: string, decision: 'approved' | 'rejected') {
     const batch = autoDrawing.value;
     if (!batch?.reviewing || autoReviewBusy.value || !batch.polygons.some(p => p.autoDiff?.region_id === id)) return;
+    const epoch = autoEpoch;
     autoDrawing.value = { ...batch, decisions: { ...batch.decisions, [id]: decision } };
     if (batch.polygons.every(p => autoDrawing.value?.decisions[p.autoDiff!.region_id])) {
       autoReviewBusy.value = true;
-      try { await finishReview?.(); } finally { autoReviewBusy.value = false; }
+      try { await finishReview?.(); } finally { if (epoch === autoEpoch) autoReviewBusy.value = false; }
     }
   }
   const autoPreparing = ref(false);
@@ -667,6 +669,7 @@ export const useDiffStore = defineStore('diff', () => {
   let autoActivating = false;
   let finishAuto: ((ok: boolean) => void) | null = null;
   function cancelAutoDraw() {
+    if (autoDrawing.value?.reviewing) notice.value = '';
     autoEpoch++;
     autoValidation?.abort(); autoValidation = null;
     if (autoTimer !== null) clearTimeout(autoTimer);
@@ -682,7 +685,7 @@ export const useDiffStore = defineStore('diff', () => {
     return viewer.recs.find(r => [res.imageA.id, res.imageB.id].includes(r.id)
       && r.stageKind === 'input' && (!r.tourIdentity || r.tourIdentity.role === 'pan')) ?? null;
   });
-  const autoDrawReason = computed(() => {
+  function autoDrawRefusal(regionIds?: string[]) {
     const res = result.value, auto = res?.autoMask, target = autoTarget.value;
     if (busy.value || autoPreparing.value || autoDrawing.value || viewer.merging) return '正在处理，请稍候';
     if (!auto) return '当前服务未提供自动绘制数据，请升级服务并重新分析';
@@ -702,26 +705,33 @@ export const useDiffStore = defineStore('diff', () => {
       || (target.tourIdentity && (target.tourIdentity.width !== target.W || target.tourIdentity.height !== target.H))) return '源影像身份或尺寸已改变，请重新分析';
     if (auto.coordinate_space !== 'analysis_pixel' || auto.analysis_size[0] !== res!.analysisGrid.width
       || auto.analysis_size[1] !== res!.analysisGrid.height) return '分析网格不一致，请重新分析';
-    if (!auto.polygons.some(p => p.coverage_ratio === 1 && p.supersample_coverage_ratio === 1
-      && p.source_polygons?.some(s => s.image_id === target.id && s.coverage_ratio === 1 && s.drawable)
-      && p.vertex_count === p.points.length && p.points.length >= 3 && p.points.length <= 24)) return '没有满足完整覆盖与顶点约束的候选区域';
     if (viewer.pendingPts?.length || viewer.pendingRect) return '请先完成或取消当前手绘草稿';
+    const wanted = regionIds ?? selectedRegionIds.value;
+    if (res?.method === 'smart' && !wanted.length) return '请先勾选已完成原图精检的候选';
+    const candidates = autoCandidates(wanted);
+    if (!candidates.length) {
+      if (res?.method === 'smart') return '所选候选没有可绘制的掩码，合并区域需勾选全部成员';
+      if (!auto.polygons.length) return '本次分析没有检测到可绘制的候选';
+      if (auto.polygons.some(p => p.diagnostics.includes('source_export_budget'))) return '候选超出源像素栅格验证预算，请缩小分析范围';
+      if (auto.polygons.some(p => p.diagnostics.includes('source_export_raster_conflict'))) return '候选在两种 TIFF 栅格化中存在像素差异，请手工绘制';
+      return '没有通过覆盖和源坐标验证的候选';
+    }
     return '';
-  });
-  async function autoDraw(regionIds?: string[]): Promise<boolean> {
-    if (autoDrawReason.value) { error.value = autoDrawReason.value; return false; }
-    const res = result.value!, auto = res.autoMask!, target = autoTarget.value!;
-    const key = currentKey(), pixels = pixelKey(target.id), epoch = ++autoEpoch;
+  }
+  const autoDrawReason = computed(() => autoDrawRefusal());
+
+  function autoCandidates(wanted: string[]) {
+    const res = result.value, auto = res?.autoMask, target = autoTarget.value;
+    if (!res || !auto || !target?.thumb) return [];
     const groupId = `${auto.analysis_id}:${target.id}:${auto.parameter_version}`;
     const polygons: OwnedPoly[] = [];
     for (const p of auto.polygons) {
       if (res.method === 'smart') {
-        const wanted = Array.isArray(regionIds) ? regionIds : selectedRegionIds.value;
         if (!wanted.length || !p.candidate_ids?.length || !p.candidate_ids.every(id=>wanted.includes(id))) continue;
         if (p.candidate_ids.some(id=>res.regions.find(r=>r.id===id)?.maskEligible !== true)) continue;
       }
-      if (p.coverage_ratio !== 1 || p.supersample_coverage_ratio !== 1 || p.points.length < 3
-        || p.points.length > 24 || p.vertex_count !== p.points.length) continue;
+      if (p.coverage_ratio !== 1 || p.supersample_coverage_ratio !== 1 || p.points.length < (auto.geometry_policy === 'adaptive-4to6-v1' ? 4 : 3)
+        || p.points.length > (auto.geometry_policy === 'adaptive-4to6-v1' ? 6 : 24) || p.vertex_count !== p.points.length) continue;
       if (p.coordinate_space !== 'analysis_pixel' || p.analysis_size[0] !== auto.analysis_size[0]
         || p.analysis_size[1] !== auto.analysis_size[1]) continue;
       const projected = p.source_polygons?.find(s => s.image_id === target.id);
@@ -732,12 +742,25 @@ export const useDiffStore = defineStore('diff', () => {
         x, y, target.W, target.H, target.thumb!.width, target.thumb!.height));
       if (projected.points.some(([x,y]) => !Number.isInteger(x) || !Number.isInteger(y)
         || x < 0 || y < 0 || x >= target.W || y >= target.H) || poly.some(v => !v.every(Number.isFinite))) continue;
+      if (auto.geometry_policy === 'adaptive-4to6-v1' && poly.some(([x, y], i) => {
+        const [sx, sy] = thumbToOrig(x, y, target.W, target.H, target.thumb!.width, target.thumb!.height);
+        return sx !== projected.points[i][0] || sy !== projected.points[i][1];
+      })) continue;
       poly.autoDiff = { source: 'auto_diff', analysis_id: auto.analysis_id, image_id: target.id,
         group_id: groupId, region_id: p.region_id, parameter_version: auto.parameter_version,
         initial_points: JSON.stringify(poly), needs_review: p.needs_review };
       polygons.push(poly);
     }
-    if (!polygons.length) { error.value = '没有可安全绘制的多边形'; return false; }
+    return polygons;
+  }
+
+  async function autoDraw(regionIds?: string[]): Promise<boolean> {
+    const refusal = autoDrawRefusal(regionIds);
+    if (refusal) { error.value = refusal; return false; }
+    const res = result.value!, auto = res.autoMask!, target = autoTarget.value!;
+    const key = currentKey(), pixels = pixelKey(target.id), epoch = ++autoEpoch;
+    const groupId = `${auto.analysis_id}:${target.id}:${auto.parameter_version}`;
+    const polygons = autoCandidates(regionIds ?? selectedRegionIds.value);
     autoPreparing.value = true;
     error.value = ''; notice.value = '';
     const inputs = [res.imageA.id, res.imageB.id].map(id => viewer.recs.find(r => r.id === id)!);
@@ -765,9 +788,14 @@ export const useDiffStore = defineStore('diff', () => {
           // a local certificate exists it must still match the server.
           || (r.tourIdentity && (item.tourIdentity?.role !== r.tourIdentity.role
             || item.tourIdentity?.sequence !== r.tourIdentity.sequence))) {
-          throw new Error('源文件不可用、版本或尺寸已改变，请重新加载影像并分析');
+          throw new AutoMaskSourceChanged('源文件不可用、版本或尺寸已改变，请重新加载影像并分析');
         }
       }
+    }
+    function reportAutoDrawError(cause: unknown) {
+      error.value = cause instanceof Error ? cause.message : String(cause);
+      if (cause instanceof AutoMaskSourceChanged) autoSourceError.value = error.value;
+      viewer.showToast(error.value);
     }
     try {
       await validateFiles();
@@ -790,8 +818,8 @@ export const useDiffStore = defineStore('diff', () => {
         try { await validateFiles(); }
         catch (e) {
           if (epoch === autoEpoch) {
-            error.value = autoSourceError.value = e instanceof Error ? e.message : String(e);
-            viewer.showToast(error.value); cancelAutoDraw();
+            reportAutoDrawError(e);
+            cancelAutoDraw();
           }
           return false;
         }
@@ -807,11 +835,14 @@ export const useDiffStore = defineStore('diff', () => {
           return copy;
         });
         const ok = !accepted.length || viewer.addMaskPolygonBatch(target.id, accepted, auto.analysis_id);
-        const skipped = auto.polygons.length - polygons.length;
+        const skipped = res.method === 'smart' ? 0 : auto.polygons.length - polygons.length;
         if (ok) {
           resultVisible.value = false;
           notice.value = `审批完成：通过 ${accepted.length} 个，驳回 ${polygons.length - accepted.length} 个${skipped ? `；${skipped} 个因覆盖或坐标冲突未绘制` : ''}；通过区域已转为可编辑掩码，可整批撤销 / 重做。`;
           viewer.showToast(notice.value);
+        } else {
+          notice.value = '';
+          reportAutoDrawError(new Error('本批掩码未能写入，请重新开始自动绘制'));
         }
         autoDrawing.value = null; autoPreparing.value = false; autoTimer = null; finishReview = null;
         return ok;
@@ -819,7 +850,7 @@ export const useDiffStore = defineStore('diff', () => {
       const beginReview = async () => {
         try { await validateFiles(); }
         catch (e) {
-          if (epoch === autoEpoch) { error.value = autoSourceError.value = e instanceof Error ? e.message : String(e); cancelAutoDraw(); }
+          if (epoch === autoEpoch) { reportAutoDrawError(e); cancelAutoDraw(); }
           return false;
         }
         if (epoch !== autoEpoch || !autoDrawing.value) return false;
@@ -842,8 +873,7 @@ export const useDiffStore = defineStore('diff', () => {
       });
     } catch (e) {
       if (epoch === autoEpoch) {
-        error.value = autoSourceError.value = e instanceof Error ? e.message : String(e);
-        viewer.showToast(error.value);
+        reportAutoDrawError(e);
       }
       return false;
     } finally { if (epoch === autoEpoch) autoPreparing.value = false; }
@@ -1248,6 +1278,7 @@ export const useDiffStore = defineStore('diff', () => {
       };
       const req: DiffRequest = {
         autoMask: true,
+        autoMaskGeometryPolicy: 'adaptive-4to6-v1',
         autoMaskGrid: { width: plan.width, height: plan.height, x: scopeRect.x, y: scopeRect.y },
         method: method.value,
         sensitivity: sensitivity.value,
@@ -1317,7 +1348,7 @@ export const useDiffStore = defineStore('diff', () => {
       threshold:advanced.value.threshold ?? undefined, openKernel:advanced.value.openKernel, closeKernel:advanced.value.closeKernel,
       blur:advanced.value.blur, ssimWindow:advanced.value.ssimWindow, ssimGaussian:advanced.value.ssimGaussian,
       smartOptions:{...smartOptions.value}, referenceSide:(a.tourIdentity?.role ?? roleOf(a)) === 'nosr' ? 'A' : 'B',
-      maxEdge:ANALYSIS_MAX_EDGE, autoMask:true, image_a:spec(a), image_b:spec(b), precision:smartPrecision.value,
+      maxEdge:ANALYSIS_MAX_EDGE, autoMask:true, autoMaskGeometryPolicy:'adaptive-4to6-v1', image_a:spec(a), image_b:spec(b), precision:smartPrecision.value,
       compare:parallelCompare.value};
   }
 
@@ -1576,6 +1607,7 @@ export const useDiffStore = defineStore('diff', () => {
         maxEdge: MAX_CANVAS_EDGE,
         precision: 'source-roi',
         autoMask: true,
+        autoMaskGeometryPolicy: 'adaptive-4to6-v1',
         roi,
         image_a: {
           id: a.id, name: a.name, sourceWidth: a.W, sourceHeight: a.H,
@@ -1722,7 +1754,12 @@ export const useDiffStore = defineStore('diff', () => {
       error.value = '该候选尚未完成原始 DN 精检或轮廓不可靠，请先精检再加入修复掩码';
       return false;
     }
-    if (res?.method === 'smart') { void autoDraw([id]); return true; }
+    if (res?.method === 'smart') {
+      const refusal = autoDrawRefusal([id]);
+      if (refusal) { error.value = refusal; return false; }
+      void autoDraw([id]);
+      return true;
+    }
     if (!res || !reg) return false;
     if (stale.value) {
       error.value = '结果已对应旧参数，请重新分析后再加入掩码';
@@ -1875,7 +1912,7 @@ export const useDiffStore = defineStore('diff', () => {
     nextRegion: (step:number) => { const list=orderedRegions.value; if(!list.length)return;
       const index=list.findIndex(r=>r.id===selectedId.value); void locateRegion(list[(index+step+list.length)%list.length].id); },
     restoreView: () => { for(const p of savedViews??[]) if(viewer.panes.some(q=>q.side===p.side&&q.rec?.id===p.id)) viewer.setPaneView(p.side,{...p.view}); savedViews=null; },
-    autoDrawing, autoPreparing, autoDrawReason, autoDraw, cancelAutoDraw, autoReviewBusy, reviewAutoRegion,
+    autoDrawing, autoPreparing, autoDrawReason, autoDrawRefusal, autoDraw, cancelAutoDraw, autoReviewBusy, reviewAutoRegion,
     // 面板
     open, resultVisible, opacity, openPanel, closePanel, busy, error, notice,
     method, sensitivity, scope, display, feather, minAreaPx, advanced, toneWeight,

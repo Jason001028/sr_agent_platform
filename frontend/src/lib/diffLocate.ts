@@ -193,6 +193,7 @@ export interface DiffRequest {
   compare?: boolean;
   autoMask?: boolean;
   autoMaskMargin?: 'tight' | 'standard' | 'loose';
+  autoMaskGeometryPolicy?: 'adaptive-4to6-v1' | 'repair-4to6-soft2pct-v1';
   autoMaskGrid?: { width: number; height: number; x: number; y: number };
   method: DiffMethod;
   sensitivity: DiffSensitivity;
@@ -219,14 +220,15 @@ export interface AutoMaskSource {
 export interface AutoMaskPolygon {
   candidate_ids?: string[];
   source_polygons: { image_id: number; points: [number, number][];
-    coordinate_space: 'source_pixel'; coverage_ratio: number; drawable: boolean }[];
+    coordinate_space: 'source_pixel'; coverage_ratio: number | null; drawable: boolean }[];
   region_id: string; rank: number; coordinate_space: 'analysis_pixel';
   analysis_size: [number, number]; points: [number, number][]; vertex_count: number;
-  coverage_ratio: number; supersample_coverage_ratio: number; area_ratio: number;
+  coverage_ratio: number; supersample_coverage_ratio: number; area_ratio: number | null;
   buffer_px: number; fallback: string | null; needs_review: boolean;
   diagnostics: string[]; holes: { count: number; area_px: number; filled: boolean; large: boolean };
 }
 export interface AutoMaskGeometry {
+  geometry_policy?: 'adaptive-4to6-v1' | 'repair-4to6-soft2pct-v1';
   analysis_id: string;
   parameter_version: string; margin: string; coordinate_space: 'analysis_pixel';
   analysis_size: [number, number]; polygons: AutoMaskPolygon[];

@@ -267,6 +267,8 @@ def build_config_xml(params: dict, dataroot=None) -> str:
         add("RepairNOSR", (scene / (scene.name + "_NOSR.tif")).as_posix())
         if params.get('repair_revision'):
             add('RepairRevision', json.dumps(params['repair_revision'], sort_keys=True))
+        if params.get("land_constraint"):
+            add("LandConstraint", json.dumps(params["land_constraint"], sort_keys=True))
     if params.get("grid_align") is False:
         add("GridAlign", "false")
 
@@ -705,6 +707,12 @@ def submit_run_sr(params: dict, run_cmd=None, store=None) -> dict:
     if params.get('_batch_demo_executor'):
         raise ValueError('演示任务只能交给独立 Demo 执行器')
     _reject_delete_ori(params)      # 原型期禁用，见 DELETE_ORI_MSG；两个入口共用
+    if params.get("repair") and params.get("mask_path") and not params.get("land_constraint"):
+        from backend.services.batch_manifest import artifact_root
+
+        mask = Path(params["mask_path"]).resolve()
+        if (artifact_root() / "land-plans").resolve() in mask.parents:
+            raise ValueError("可信陆地候选及执行掩膜须通过已确认的修复计划提交")
     if sr_runtime().executor == "local":
         # No scheduler involved: the API host runs the job itself. local_exec
         # is always available (it only needs bash); the real precondition is

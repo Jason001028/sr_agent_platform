@@ -389,6 +389,7 @@ export const useViewerStore = defineStore('viewer', () => {
   const userIntentSeq = ref(0);
   /** 当前要绘制的 Batch 检测叠加层（来自「批次」面板或 URL 初始值）。 */
   const batchOverlayTarget = ref<{ goalId: string; itemId: string; overlayReady?: boolean } | null>(null);
+  const repairLandTarget = ref<import('../lib/api').RepairLandItem | null>(null);
   /** 用户明确关掉叠加层时，URL 里的初始目标也不能复活它。 */
   const batchOverlayOff = ref(false);
   function noteUserIntent(): void {
@@ -4295,7 +4296,14 @@ export const useViewerStore = defineStore('viewer', () => {
     const base = rec.name.replace(/\.tiff?$/i, '');
     showMask('正在生成掩码（全分辨率 ' + W + '×' + H + '，' + polys.length + ' 区域）…', '', true);
     try {
+      const adaptivePolygons = new Set<number>();
+      rois.forEach((poly, index) => {
+        const origin = (poly as OwnedPoly).autoDiff;
+        if (origin?.parameter_version === 'adaptive-4to6-v1'
+          && origin.initial_points === JSON.stringify(poly)) adaptivePolygons.add(index);
+      });
       const tif = await buildTiff(W, H, polys, {
+        adaptivePolygons,
         batch: 128,
         onProgress: (f) => {
           updateProgressUI(f);
@@ -4887,7 +4895,7 @@ export const useViewerStore = defineStore('viewer', () => {
     previewMaxEdge, previewMaxEdgeOptions, loadPlatformSettings, setPreviewMaxEdge,
     // 状态
     recs, workspaceVersion, activeId, activeRec, view, canvasSize, renderTick, marker,
-    userIntentSeq, noteUserIntent, batchOverlayTarget, batchOverlayOff,
+    userIntentSeq, noteUserIntent, batchOverlayTarget, batchOverlayOff, repairLandTarget,
     viewAnimating,captureNavigationView,navigationViewAvailable,restoreNavigationView,
     cursor, setCursor,
     canvasAttached, setCanvasAttached,

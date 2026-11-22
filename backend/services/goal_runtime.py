@@ -418,7 +418,7 @@ def _batch_overlay_refs(goal_id: str, item_id: str, request: Request):
     if not item:
         raise HTTPException(404, "batch item not found")
     cp = item.get("checkpoint") or {}
-    mask = cp.get("mask") or {}
+    mask = (cp.get("candidate_mask") if cp.get("land_constraint") else cp.get("mask")) or {}
     overlay_ref = mask.get("overlay") or {}
     overlay_value = overlay_ref.get("path")
     if not overlay_value:

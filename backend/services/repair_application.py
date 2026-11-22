@@ -33,7 +33,9 @@ and no detection rewrite.
 """
 
 from __future__ import annotations
+from functools import partial
 from typing import Optional
+from urllib.parse import urlencode
 
 import json
 import os
@@ -43,7 +45,7 @@ import time
 
 from backend.pathguard import PathDeniedError, ensure_allowed
 from backend.services import (batch_contracts, batch_manifest, batch_mask,
-                              batch_snapshot, preview_jpg, scene_search)
+                              batch_snapshot, preview_jpg, repair_land, scene_search)
 from backend.services.store import RepairPlanConflict
 
 PLAN_CONTRACT_VERSION = "repair_plan.v1"
@@ -470,6 +472,7 @@ def prepare_repair(
     created_by: str = "agent",
     tone_weight: bool = False,
     skip_completed: bool = False,
+    raster_runner=None,
 ) -> dict:
     """Validate targets and persist a confirmable repair plan.  No SR side effect."""
     mode = str(mode or "demo").strip().lower()
@@ -627,6 +630,27 @@ def prepare_repair(
         blocking.append({"severity": "error", "code": "mask_unavailable",
                          "message": str(exc)})
 
+    land_items = {}
+    if status == "READY" and mask_policy == "auto" and (
+            mode == "production" or os.environ.get("SR_MSS_EXEC_PROFILE")):
+        from backend.services import batch_detector, batch_worker, mss_water
+
+        for item in planned:
+            if item["status"] == "SKIPPED":
+                continue
+            try:
+                prepare_item = partial(repair_land.prepare_item, item, mode)
+                land_items[item["item_id"]] = raster_runner(prepare_item) if raster_runner else prepare_item()
+            except (ValueError, OSError, PathDeniedError, batch_worker.ItemBlocked,
+                    batch_detector.DetectionError, batch_mask.MaskError,
+                    mss_water.WaterUnavailable) as exc:
+                status = "BLOCKED"
+                blocking.append({"severity": "error", "code": "land_constraint_unavailable",
+                                 "item_id": item["item_id"], "message": str(exc)})
+                # A missing global profile applies to every scene.
+                if not os.environ.get("SR_MSS_EXEC_PROFILE"):
+                    break
+
     scope_name = "single" if len(targets["items"]) == 1 else "batch"
     binding = {
         "contract_version": PLAN_CONTRACT_VERSION,
@@ -643,9 +667,15 @@ def prepare_repair(
         "workspace_scene_ids": sorted(executable_scene_ids),
         "workspace_identity_digest": workspace_identity_digest,
     }
+    if land_items:
+        binding["land_constraint"] = {
+            item_id: {key: value[key] for key in ("evidence", "nosr", "pan_metadata")}
+            for item_id, value in land_items.items()}
     plan_id = _plan_hash(binding)
     now = _now()
     execution = probe_execution(mode)
+    if any(row["code"] == "land_constraint_unavailable" for row in blocking):
+        execution = {**execution, "allowed": False, "reason": "可信陆地约束不可用"}
     skipped_completed=[row for row in diagnostics if row.get('code')=='completed_scene_skipped']
     if skipped_completed and not manifest.get('items') and not any(r.get('severity')=='error' for r in diagnostics):
         status='SKIPPED';blocking=[]
@@ -696,6 +726,8 @@ def prepare_repair(
         "expires_at": now + _env_float("SR_REPAIR_PLAN_TTL_SEC", PLAN_TTL_SEC),
         "confirmation": None,
     }
+    if land_items:
+        plan["land_items"] = land_items
     stored = store.upsert_repair_plan(plan)
     return public_plan(stored)
 
@@ -709,10 +741,31 @@ def public_plan(plan: dict) -> dict:
     """
     if not plan:
         return plan
-    hidden = {"identities", "plan_json"}
+    hidden = {"identities", "plan_json", "land_items"}
     result = {k: v for k, v in plan.items() if k not in hidden}
     result = json.loads(json.dumps(result, ensure_ascii=False, default=str))
     targets = result.get("targets")
+    land_items = plan.get("land_items")
+    if land_items:
+        from backend.api.paths import scene_id_abs
+
+        metrics = ("candidates", "excluded", "clipped", "executable")
+        rows = []
+        for item_id, item in land_items.items():
+            evidence = item["evidence"]
+            row = {"item_id": item_id, "scene_id": scene_id_abs(item["pan_path"]),
+                   **{key: evidence["stats"][key] for key in metrics}}
+            if evidence.get("preview") and plan.get("session_id"):
+                query = urlencode({"session_id": plan["session_id"]})
+                row["preview_url"] = f"/api/repairs/{plan['plan_id']}/land-preview/{item_id}?{query}"
+                row["preview_revision"] = evidence["sources"]["pan"]["preview_revision"]
+                row["image_path"] = item["pan_path"]
+                row.update({key: evidence["alignment"][key] for key in ("width", "height")})
+            rows.append(row)
+        result["land_constraint"] = {
+            **{key: sum(row[key] for row in rows) for key in metrics},
+            "items": rows[:50],
+        }
     if isinstance(targets, dict):
         items = targets.get("items")
         if isinstance(items, list) and len(items) > 50:
@@ -731,10 +784,30 @@ def confirm_repair(store, plan_id: str, *, session_id: Optional[str]) -> dict:
     The confirmation actor is derived server-side from the session; there is no
     ``confirmed_by`` argument for a caller to forge.
     """
+    current = store.get_repair_plan(plan_id)
+    if (current and current.get("status") in ("READY", "CONFIRMED")
+            and current.get("session_id") in (None, session_id)):
+        try:
+            _check_land_items(current)
+        except RepairPlanConflict as exc:
+            store.update_repair_plan_status(plan_id, "SUPERSEDED", exc.reason)
+            raise
     plan = store.confirm_repair_plan(
         plan_id, session_id=session_id,
         confirmed_by=(f"user:{session_id}" if session_id else None))
     return public_plan(plan)
+
+
+def _check_land_items(plan):
+    from backend.services import mss_water
+
+    try:
+        for item in (plan.get("land_items") or {}).values():
+            repair_land.verify_item(item)
+    except (ValueError, OSError, PathDeniedError, batch_mask.MaskError,
+            mss_water.WaterUnavailable) as exc:
+        raise RepairPlanConflict(
+            f"可信陆地约束或掩膜已变化：{exc}", reason="stale_land_constraint") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -1078,6 +1151,25 @@ def _create_goal(store, plan: dict, manifest: dict, *, title: str,
             })
             plan["mask"] = {**(plan.get("mask") or {}), "sha256": mask["sha256"]}
             status = "MASK_READY"
+        elif item["item_id"] in (plan.get("land_items") or {}):
+            prepared = plan["land_items"][item["item_id"]]
+            status = "MASK_READY" if prepared["mask"] else (
+                "SKIPPED" if prepared["candidate_mask"] else "PENDING")
+            cp.update({
+                "phase": status,
+                "mask": prepared["mask"],
+                "detection": prepared["detection"],
+                "candidate_mask": prepared["candidate_mask"],
+                "land_constraint": prepared["evidence"],
+                "land_nosr": prepared["nosr"],
+                "land_pan_metadata": prepared["pan_metadata"],
+                "land_expires_at": min(plan["expires_at"], plan["confirmation_expires_at"]),
+                "mask_policy": "confident_land",
+                "review_required": bool(prepared["mask"] and (review_required or
+                    prepared["detection"].get("requires_geometry_review"))),
+            })
+            if status == "SKIPPED":
+                cp["exclusion_reason"] = "可信陆地约束排除了全部候选"
         items.append({
             "item_id": item["item_id"],
             "ordinal": item["ordinal"],
@@ -1169,12 +1261,17 @@ def start_repair(store, plan_id: str, *, session_id: Optional[str],
         _check_workspace(plan, workspace, workspace_version)
         manifest = _check_manifest(plan)
         _check_identities(plan)
+        _check_land_items(plan)
     except RepairPlanConflict as exc:
         # A changed target/list/source invalidates this confirmation; preparing
         # the same binding again resets it to READY for a fresh confirmation.
         store.update_repair_plan_status(plan_id, "SUPERSEDED", exc.reason)
         raise
     execution = probe_execution(plan.get("mode") or "demo")
+    if (plan.get("mode") == "production" and (plan.get("mask") or {}).get("policy") != "existing"
+            and not plan.get("land_items")):
+        raise RepairBlocked("缺少已确认的可信陆地约束，请重新准备计划",
+                            reason="land_constraint_unavailable")
     if not execution["allowed"]:
         raise RepairBlocked(execution["reason"] or "当前执行环境不允许启动修复",
                             reason="execution_blocked")
@@ -1257,7 +1354,11 @@ def _execution_is_current(plan: dict) -> dict:
     """
     if plan.get("goal_id") or plan.get("status") not in ("READY", "CONFIRMED"):
         return plan
-    return {**plan, "execution": probe_execution(plan.get("mode") or "demo")}
+    execution = probe_execution(plan.get("mode") or "demo")
+    if (plan.get("mode") == "production" and (plan.get("mask") or {}).get("policy") != "existing"
+            and not plan.get("land_items")):
+        execution = {**execution, "allowed": False, "reason": "缺少可信陆地约束，请重新准备计划"}
+    return {**plan, "execution": execution}
 
 
 def get_repair_status(store, plan_id: str) -> dict:
@@ -1318,7 +1419,8 @@ def get_repair_status(store, plan_id: str) -> dict:
             "sr_status": cp.get("sr_status"),
             "image_path": target.get("path"),
             "output_path": verified_output_path(item),
-            "overlay_ready": bool(mask.get("overlay")),
+            "overlay_ready": bool((cp.get("candidate_mask") or mask).get("overlay")),
+            "land_constraint": (cp.get("land_constraint") or {}).get("stats"),
             "phase": cp.get("phase"),
             "candidate_count": len((cp.get("detection") or {}).get("candidates") or []),
         })

@@ -18,6 +18,7 @@ export type Pt = [number, number];
 export type Poly = Pt[];
 
 export interface RasterRowsOpts {
+  adaptivePolygons?: ReadonlySet<number>;
   batch?: number;
   /** 以批次喂给下游（如 deflate）；返回 Promise 时每批让出主线程。
       第二参 = batch 批大小（与原实现传 opts.batch 一致） */
@@ -26,6 +27,7 @@ export interface RasterRowsOpts {
 }
 
 export interface BuildTiffOpts {
+  adaptivePolygons?: ReadonlySet<number>;
   pako?: { Deflate: new (opts?: Record<string, unknown>) => { push: (d: Uint8Array, flush: boolean) => void; result: Uint8Array } };
   level?: number;
   batch?: number;
@@ -89,12 +91,24 @@ export function buildMaskTxt(width: number, height: number, polygons: Poly[]): s
    每个多边形**单独**算区间（even-odd 只在单多边形内有效：重叠多边形若合算
    even-odd，重叠区被两条边界穿过判为偶→漏），再对所有区间做**并集**
    （与后端逐多边形填充再 OR 的 union 语义一致）。 */
-export function rowIntervals(polygons: Poly[], r: number): [number, number][] {
+export function rowIntervals(polygons: Poly[], r: number, adaptive?: ReadonlySet<number>): [number, number][] {
   const all: [number, number][] = [];
   for (let p = 0; p < polygons.length; p++) {
     const poly = polygons[p];
     const n = poly.length;
     if (n < 3) continue;                       // 退化多边形不填充（与后端一致）
+    if (adaptive?.has(p)) {
+      let left = Infinity, right = -Infinity;
+      for (let i = 0; i < n; i++) {
+        const [x, y] = poly[i], [xx, yy] = poly[(i + 1) % n];
+        if (r < Math.min(y, yy) || r > Math.max(y, yy)) continue;
+        const edge = yy === y ? x : x + (r - y) * (xx - x) / (yy - y);
+        left = Math.min(left, edge, yy === y ? xx : edge);
+        right = Math.max(right, edge, yy === y ? xx : edge);
+      }
+      if (left !== Infinity) all.push([Math.floor(left + .5), Math.ceil(right - .5)]);
+      continue;
+    }
     const events: number[] = [], horiz: [number, number][] = [], cross: number[] = [];
     for (let i = 0; i < n; i++) {
       const j = (i + 1) % n;
@@ -154,7 +168,7 @@ export function rasterRows(W: number, H: number, polygons: Poly[], opts?: Raster
   const totalB = Math.max(1, Math.ceil(H / batch));
   function step(): Promise<void> {
     for (; r < H; r++) {
-      const gaps = rowIntervals(polygons, r);
+      const gaps = rowIntervals(polygons, r, o.adaptivePolygons);
       row.fill(0);
       for (let g = 0; g < gaps.length; g++) {
         const c0 = Math.max(0, Math.ceil(gaps[g][0] - EPS));
@@ -171,7 +185,10 @@ export function rasterRows(W: number, H: number, polygons: Poly[], opts?: Raster
         if (o.onProgress) o.onProgress(bDone / totalB);
         if (feed) {
           const pr = feed(chunk, batch);
-          if (pr && typeof (pr as Promise<unknown>).then === 'function') return (pr as Promise<void>).then(step);
+          if (pr && typeof (pr as Promise<unknown>).then === 'function') {
+            r++;
+            return (pr as Promise<void>).then(step);
+          }
         }
       }
     }
@@ -206,6 +223,7 @@ export function buildTiff(W: number, H: number, polygons: Poly[], opts?: BuildTi
   };
   return rasterRows(W, H, polygons, {
     batch: opts.batch || 128,
+    adaptivePolygons: opts.adaptivePolygons,
     feed,
     onProgress: opts.onProgress,
   }).then(() => {

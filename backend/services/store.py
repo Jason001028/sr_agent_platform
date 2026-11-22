@@ -1941,7 +1941,7 @@ class Store:
 
     def review_batch_item(self, goal_id, item_id, expected_version, decision, *, region_id=None):
         """Approve the exact detected mask, never a running or historical item."""
-        with self.worker_transaction() as db:
+        def read_reviewable():
             goal = self.get_goal(goal_id)
             item = self.get_goal_item(goal_id, item_id)
             if not goal or goal.get("kind") != "batch" or not item:
@@ -1952,48 +1952,72 @@ class Store:
             if (item["version"] != expected_version or item["status"] != "MASK_READY"
                     or not cp.get("review_required") or cp.get("review") or item.get("capacity_reserved")):
                 raise ValueError("item changed or is not awaiting review; reload")
-            if decision not in {"approve", "exclude"}:
-                raise ValueError("invalid review decision")
-            mask_sha = (cp.get("mask") or {}).get("sha256")
-            if not mask_sha:
-                raise ValueError("mask identity is missing")
-            status = "MASK_READY"
-            if region_id is not None:
-                candidates = (cp.get("detection") or {}).get("candidates") or []
-                ids = {c["candidate_id"] for c in candidates}
-                if not isinstance(region_id, str) or region_id not in ids:
-                    raise ValueError("unknown review region")
-                decisions = {**cp.get("region_reviews", {}), region_id: decision}
-                cp["region_reviews"] = decisions
-                if ids <= decisions.keys():
-                    accepted = [c for c in candidates if decisions[c["candidate_id"]] == "approve"]
-                    decision = "approve" if accepted else "exclude"
-                    if accepted and len(accepted) != len(candidates):
-                        from backend.services import batch_mask
-                        import hashlib
-                        from pathlib import Path
-                        original = Path(cp["mask"]["path"])
-                        digest = hashlib.sha256(json.dumps(decisions, sort_keys=True).encode()).hexdigest()[:16]
-                        detection = {**cp["detection"], "candidates": accepted}
-                        accounting = detection.get("candidate_accounting")
-                        if accounting:
-                            cp["review_candidate_accounting"] = accounting
-                            detection["candidate_accounting"] = {**accounting, "total": len(accepted),
-                                "processed": len(accepted), "unprocessed": 0, "excluded_by_review": len(candidates)-len(accepted)}
-                        cp["mask"] = batch_mask.build_mask_result(detection, {**cp["target_image"], "item_id": item_id}, {
-                            "path": str(original.parent.with_name(original.parent.name + "-review-" + digest) / original.name),
-                            "execution_mode": (goal.get("checkpoint") or {}).get("mode", "demo")})
-                        mask_sha = cp["mask"]["sha256"]
-                        cp["review_candidates"] = candidates
-                        cp["detection"] = detection
-                    cp["review"] = {"decision": decision, "mask_sha256": mask_sha, "reviewed_at": time.time()}
-                    status = "MASK_READY" if accepted else "SKIPPED"
-            else:
-                if cp.get("region_reviews"):
-                    raise ValueError("逐区域复核已开始，请处理剩余区域")
+            return goal, item, cp
+
+        goal, _, cp = read_reviewable()
+        if decision not in {"approve", "exclude"}:
+            raise ValueError("invalid review decision")
+        mask_sha = (cp.get("mask") or {}).get("sha256")
+        if not mask_sha:
+            raise ValueError("mask identity is missing")
+        status = "MASK_READY"
+        if region_id is not None:
+            candidates = (cp.get("detection") or {}).get("candidates") or []
+            ids = {c["candidate_id"] for c in candidates}
+            if not isinstance(region_id, str) or region_id not in ids:
+                raise ValueError("unknown review region")
+            decisions = {**cp.get("region_reviews", {}), region_id: decision}
+            cp["region_reviews"] = decisions
+            if ids <= decisions.keys():
+                accepted = [c for c in candidates if decisions[c["candidate_id"]] == "approve"]
+                decision = "approve" if accepted else "exclude"
+                if accepted and len(accepted) != len(candidates):
+                    from backend.services import batch_mask
+                    import hashlib
+                    from pathlib import Path
+                    original = Path(cp["mask"]["path"])
+                    digest = hashlib.sha256(json.dumps(decisions, sort_keys=True).encode()).hexdigest()[:16]
+                    detection = {**cp["detection"], "candidates": accepted}
+                    accounting = detection.get("candidate_accounting")
+                    if accounting:
+                        cp["review_candidate_accounting"] = accounting
+                        detection["candidate_accounting"] = {**accounting, "total": len(accepted),
+                            "processed": len(accepted), "unprocessed": 0, "excluded_by_review": len(candidates)-len(accepted)}
+                    revised = batch_mask.build_mask_result(detection, {**cp["target_image"], "item_id": item_id}, {
+                        "path": str(original.parent.with_name(original.parent.name + "-review-" + digest) / original.name),
+                        "execution_mode": (goal.get("checkpoint") or {}).get("mode", "demo")})
+                    if cp.get("land_constraint"):
+                        from backend.services import mss_water, repair_land
+
+                        try:
+                            evidence, mask = repair_land.restrict_review(cp, revised, detection)
+                        except (OSError, mss_water.WaterUnavailable) as exc:
+                            raise ValueError(f"复核可信陆地约束失败：{exc}") from exc
+                        cp["review_original_land_constraint"] = cp["land_constraint"]
+                        cp["land_constraint"] = evidence
+                        cp["candidate_mask"] = revised
+                        cp["mask"] = mask
+                        if mask is None:
+                            cp["exclusion_reason"] = "可信陆地约束排除了复核保留的候选"
+                            accepted = []
+                            decision = "exclude"
+                    else:
+                        cp["mask"] = revised
+                    mask_sha = (cp["mask"] or {}).get("sha256")
+                    cp["review_candidates"] = candidates
+                    cp["detection"] = detection
                 cp["review"] = {"decision": decision, "mask_sha256": mask_sha, "reviewed_at": time.time()}
-                status = "MASK_READY" if decision == "approve" else "SKIPPED"
-            cp["phase"] = status
+                status = "MASK_READY" if accepted else "SKIPPED"
+        else:
+            if cp.get("region_reviews"):
+                raise ValueError("逐区域复核已开始，请处理剩余区域")
+            cp["review"] = {"decision": decision, "mask_sha256": mask_sha, "reviewed_at": time.time()}
+            status = "MASK_READY" if decision == "approve" else "SKIPPED"
+        cp["phase"] = status
+        with self.worker_transaction() as db:
+            # Artifact generation may take minutes. Recheck the review fence
+            # under the writer lock before attaching the completed bundle.
+            _, item, _ = read_reviewable()
             db.execute("UPDATE agent_goal_steps SET checkpoint=?, status=?, version=version+1, "
                        "updated_at=? WHERE goal_id=? AND item_id=? AND kind='batch_item'",
                        (json.dumps(cp, ensure_ascii=False), status, time.time(), goal_id, item_id))

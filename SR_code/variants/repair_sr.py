@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 
 MODE = 'pan-nosr-v1'
@@ -34,6 +35,47 @@ INFERENCE_ERROR_MARKERS = ('out of memory', 'runtimeerror', 'exception is')
 def signature(path):
     st = os.stat(str(path))
     return [st.st_size, st.st_mtime_ns, st.st_ino]
+
+
+def verify_land_constraint(proof, body, nosr, mask):
+    if not isinstance(proof, dict) or proof.get('version') != 'land-constraint.v1':
+        raise ValueError('Unsupported land constraint proof')
+    sources = proof.get('sources')
+    if not isinstance(sources, dict) or not {'pan', 'nosr', 'mss', 'xml'} <= set(sources):
+        raise ValueError('Incomplete land constraint sources')
+    for role, identity in sources.items():
+        if (not isinstance(identity, dict) or not isinstance(identity.get('path'), str)
+                or type(identity.get('size')) is not int or type(identity.get('mtime_ns')) is not int):
+            raise ValueError('Invalid land constraint source: ' + role)
+        path = Path(identity['path']).resolve()
+        if (role == 'pan' and path != body.resolve()) or (role == 'nosr' and path != nosr):
+            raise ValueError('Land constraint identifies a different repair input: ' + role)
+        stat = path.stat()
+        actual = {'size': stat.st_size, 'mtime_ns': stat.st_mtime_ns,
+                  'inode': stat.st_ino, 'ctime_ns': stat.st_ctime_ns}
+        if any(value != identity[key] for key, value in actual.items() if key in identity):
+            raise ValueError('Land constraint source changed: ' + role)
+        if 'sha256' in identity and file_sha256(path) != identity['sha256']:
+            raise ValueError('Land constraint source content changed: ' + role)
+    absent = proof.get('sidecars_absent', [])
+    if not isinstance(absent, list) or any(not isinstance(path, str) for path in absent):
+        raise ValueError('Invalid land constraint sidecars')
+    if any(Path(path).exists() or Path(path).is_symlink() for path in absent):
+        raise ValueError('A spatial or validity sidecar appeared after land constraint preparation')
+    verify_land_mask(proof, mask)
+
+
+def verify_land_mask(proof, mask):
+    if file_sha256(mask) != proof.get('mask_sha256'):
+        raise ValueError('Land constraint mask hash changed')
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with path.open('rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def receipt_path(config):
@@ -85,7 +127,7 @@ def _size(ds):
     return ds.RasterXSize, ds.RasterYSize
 
 
-def reduce_mask(gdal, source, destination, width, height):
+def reduce_mask(gdal, source, destination, width, height, *, constrained=False):
     """Conservative area mapping: a selected high-resolution pixel is not lost."""
     import numpy as np
     src = _open(gdal, source)
@@ -103,6 +145,8 @@ def reduce_mask(gdal, source, destination, width, height):
         top = int(math.floor(row * sh / height))
         bottom = int(math.ceil((row + 1) * sh / height))
         data = src.GetRasterBand(1).ReadAsArray(0, top, sw, bottom - top)
+        if constrained and np.any((data != 0) & (data != 255)):
+            raise ValueError('Land constraint requires a binary 0/255 publication mask')
         columns = np.any(data != 0, axis=0)
         cumulative = np.concatenate(([0], np.cumsum(columns)))
         mask = ((cumulative[right] - cumulative[left]) > 0).astype('uint8') * 255
@@ -114,7 +158,7 @@ def reduce_mask(gdal, source, destination, width, height):
         raise ValueError('Repair mask is empty')
 
 
-def compose(gdal, pan, nosr, mask, model, destination, work):
+def compose(gdal, pan, nosr, mask, model, destination, work, *, constrained=False):
     """Keep PAN's TIFF layout and byte size, replace pixels in bounded blocks."""
     import numpy as np
     current = _open(gdal, pan)
@@ -156,20 +200,30 @@ def compose(gdal, pan, nosr, mask, model, destination, work):
     current_nodata = current_band.GetNoDataValue()
     target = _open(gdal, destination, update=True)
     target_band = target.GetRasterBand(1)
+    selection_band = selection.GetRasterBand(1)
+    validity_band = (None if current_band.GetMaskFlags() & gdal.GMF_ALL_VALID
+                     else current_band.GetMaskBand())
+
+    def allowed_pixels(before, x, y, w, h):
+        selected = selection_band.ReadAsArray(x, y, w, h)
+        if constrained and np.any((selected != 0) & (selected != 255)):
+            raise ValueError('Land constraint requires a binary 0/255 publication mask')
+        allowed = (selected != 0) & np.isfinite(before)
+        if current_nodata is not None:
+            allowed &= before != current_nodata
+        if validity_band is not None:
+            allowed &= validity_band.ReadAsArray(x, y, w, h) != 0
+        return allowed
+
     for y in range(0, height, 256):
         h = min(256, height - y)
         for x in range(0, width, 1024):
             w = min(1024, width - x)
-            roi = selection.GetRasterBand(1).ReadAsArray(x, y, w, h) != 0
-            if not roi.any():
-                continue
             baseline = current_band.ReadAsArray(x, y, w, h)
-            generated = model_band.ReadAsArray(x, y, w, h)
-            roi &= np.isfinite(baseline)
-            if current_nodata is not None:
-                roi &= baseline != current_nodata
+            roi = allowed_pixels(baseline, x, y, w, h)
             if not roi.any():
                 continue
+            generated = model_band.ReadAsArray(x, y, w, h)
             if not np.isfinite(generated[roi]).all() or any(
                     value is not None and np.any(generated[roi] == value)
                     for value in (current_nodata, model_nodata)):
@@ -187,12 +241,11 @@ def compose(gdal, pan, nosr, mask, model, destination, work):
             w = min(1024, width - x)
             before = current_band.ReadAsArray(x, y, w, h)
             after = staged_band.ReadAsArray(x, y, w, h)
-            allowed = (selection.GetRasterBand(1).ReadAsArray(x, y, w, h) != 0) & np.isfinite(before)
-            if current_nodata is not None:
-                allowed &= before != current_nodata
+            allowed = allowed_pixels(before, x, y, w, h)
             if before[~allowed].tobytes() != after[~allowed].tobytes():
                 raise ValueError('Candidate PAN changed pixels outside the publication mask')
-    staged_band = staged = current_band = model_band = selection = inferred = original = current = None
+    staged_band = staged = validity_band = selection_band = current_band = model_band = None
+    selection = inferred = original = current = None
     if os.path.getsize(str(destination)) != os.path.getsize(str(pan)):
         raise ValueError('Candidate byte size differs from current PAN; nothing published')
 
@@ -243,6 +296,14 @@ def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
     if existing_backup is not None:
         raise ValueError('Backup exists; refusing to overwrite ' + str(existing_backup))
     expected = json.loads(root.findtext('RepairRevision') or '{}')
+    proof_node = root.find('LandConstraint')
+    proof = json.loads(proof_node.text or '{}') if proof_node is not None else None
+    if proof_node is not None:
+        expires_at = proof.get('expires_at') if isinstance(proof, dict) else None
+        if expires_at is not None and (type(expires_at) not in (int, float)
+                                       or not math.isfinite(expires_at) or time.time() >= expires_at):
+            raise ValueError('Land constraint confirmation expired')
+        verify_land_constraint(proof, body, nosr, mask)
     for key, path in (('mask', mask), ('nosr', nosr)):
         if key in expected and signature(path)[:2] != expected[key][:2]:
             raise ValueError('Queued repair input changed: ' + str(path))
@@ -266,6 +327,8 @@ def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
         if _size(m) not in ((pw, ph), (nw, nh)):
             raise ValueError('Mask dimensions match neither body nor NOSR')
         mask_is_body = _size(m) == (pw, ph)
+        if proof is not None and (not mask_is_body or m.GetRasterBand(1).DataType != gdal.GDT_Byte):
+            raise ValueError('Land constraint requires a byte mask in the PAN pixel grid')
         p = n = m = None
         private = work / scene.name
         private.mkdir()
@@ -275,8 +338,12 @@ def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
         meta = scene.name + '_meta.xml'
         shutil.copyfile(str(scene / meta), str(private / meta))
         lr_mask = work / 'mask_lr.tif'
-        reduce_mask(gdal, mask, lr_mask, nw, nh)
         full_mask = mask
+        if proof is not None:
+            full_mask = work / 'frozen_pan_mask.tif'
+            shutil.copyfile(str(mask), str(full_mask))
+            verify_land_mask(proof, full_mask)
+        reduce_mask(gdal, full_mask, lr_mask, nw, nh, constrained=proof is not None)
         if not mask_is_body:
             full_mask = work / 'mask_body.tif'
             ds = gdal.Translate(str(full_mask), str(mask), format='GTiff', width=pw, height=ph,
@@ -291,7 +358,7 @@ def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
                 node = ET.SubElement(root, tag)
             node.text = text
         # Repair tags belong to the adapter, not the legacy inference program.
-        for tag in ('RepairMode', 'RepairNOSR', 'RepairRevision'):
+        for tag in ('RepairMode', 'RepairNOSR', 'RepairRevision', 'LandConstraint'):
             node = root.find(tag)
             if node is not None:
                 root.remove(node)
@@ -311,9 +378,12 @@ def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
         if not verdict.ok or verdict.skip:
             raise ValueError('Inference produced no verified repair: ' + verdict.reason_text)
         candidate = work / (body_stem + '_repaired.tif')
-        compose(gdal, body, nosr, full_mask, verdict.output, candidate, work)
+        compose(gdal, body, nosr, full_mask, verdict.output, candidate, work, constrained=proof is not None)
         if [signature(body), signature(nosr), signature(mask)] != [body_sig, nosr_sig, mask_sig]:
             raise ValueError('Repair input changed during inference; nothing published')
+        if proof is not None:
+            verify_land_constraint(proof, body, nosr, mask)
+            verify_land_mask(proof, full_mask)
         existing_backup = next((p for p in (backup,) + legacy_backups if p.exists()), None)
         if existing_backup is not None:
             raise ValueError('Backup appeared during inference; nothing published: '
@@ -329,6 +399,8 @@ def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
                    'output_signature': signature(body), 'backup_signature': body_sig,
                    'nosr_signature': nosr_sig, 'width': pw, 'height': ph,
                    'size_bytes': body_sig[0]}
+        if proof is not None:
+            receipt['land_constraint'] = proof
         target = receipt_path(config)
         temporary = work / 'receipt.json'
         temporary.write_text(json.dumps(receipt), encoding='utf-8')

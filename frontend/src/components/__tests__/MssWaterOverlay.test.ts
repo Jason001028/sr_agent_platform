@@ -62,3 +62,14 @@ it('offers native-grid downloads without requesting an unaligned overlay', async
   await nextTick();
   expect(element.querySelector('a')).toBeNull();
 });
+
+it('offers a retry when the native-grid asset expires after analysis', async () => {
+  const result = { ...doc, alignment: { status: 'unaligned', detail: '未完成空间对齐' } };
+  await analyze(result);
+  element.querySelector('.water-native img')!.dispatchEvent(new Event('error'));
+  await nextTick();
+  expect(element.querySelector('.water-native')).toBeNull();
+  expect(element.querySelector('[role="status"]')?.textContent).toContain('请重试');
+  await analyze(result);
+  expect(element.querySelector('.water-native img')).not.toBeNull();
+});

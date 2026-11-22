@@ -1236,7 +1236,8 @@ def _submit_queue_sync(request: Request, body: dict):
             body = scene_search.body_path(params["lq_path"])
             body_name = body.name if body is not None else "PAN.tif"
             out["notice"] = (
-                f"场景目录 {params['lq_path']}：从同景完整生产名_NOSR.tif 计算，掩码内模型超分、掩码外插值，"
+                f"场景目录 {params['lq_path']}：从同景完整生产名_NOSR.tif 计算，仅在发布掩码内更新有效像素，"
+                "保留其余本体像素，"
                 f"保持当前本体 {body_name} 的尺寸与文件大小；校验后将旧 {body_name} 备份为 "
                 f"{Path(body_name).stem}_old_latest.tif，新结果发布为 {body_name}。备份已存在则停止。")
     return out

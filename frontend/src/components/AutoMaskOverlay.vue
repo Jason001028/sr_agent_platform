@@ -12,19 +12,34 @@ const panes = computed(() => {
     side: p.side, rect: p.rect, reviewing: batch.reviewing,
     polygons: batch.polygons.map((poly, i) => {
       const screen = poly.map(([x, y]) => thumbToScreen(p.view, x, y));
+      const xs = screen.map(([x]) => x), ys = screen.map(([, y]) => y);
       return ({
       id: poly.autoDiff!.region_id,
       points: screen.map(p => p.join(',')).join(' '),
-      x: Math.max(0, Math.min(p.rect.w - 76, Math.max(...screen.map(p => p[0])) - 76)),
-      y: Math.max(0, Math.min(p.rect.h - 32, Math.min(...screen.map(p => p[1])) - 32)),
+      x: Math.max(0, Math.min(p.rect.w - 76, Math.max(...xs) - 76)),
+      y: Math.max(0, Math.min(p.rect.h - 32, Math.min(...ys) - 32)),
+      visible: Math.max(...xs) >= 0 && Math.max(...ys) >= 0
+        && Math.min(...xs) < p.rect.w && Math.min(...ys) < p.rect.h,
       decision: batch.decisions[poly.autoDiff!.region_id],
       delay: `${i * batch.duration / batch.polygons.length}ms`,
       duration: `${batch.duration / batch.polygons.length}ms`,
       review: poly.autoDiff!.needs_review,
+      vertices: poly.length,
     }); }),
   }));
 });
-function escape(e: KeyboardEvent) { if (e.key === 'Escape') diff.cancelAutoDraw(); }
+function locatePending() {
+  const batch = diff.autoDrawing;
+  const poly = batch?.polygons.find(p => !batch.decisions[p.autoDiff!.region_id]);
+  const pane = viewer.panes.find(p => p.rec?.id === batch?.imageId);
+  if (!poly || !pane) return;
+  const xs = poly.map(([x]) => x), ys = poly.map(([, y]) => y);
+  const x = Math.min(...xs), y = Math.min(...ys);
+  viewer.focusPaneRect(pane.side, [x, y, Math.max(...xs) - x, Math.max(...ys) - y], false);
+}
+function escape(e: KeyboardEvent) {
+  if (e.key === 'Escape' && (diff.autoDrawing || diff.autoPreparing)) diff.cancelAutoDraw();
+}
 onMounted(() => document.addEventListener('keydown', escape));
 onBeforeUnmount(() => { document.removeEventListener('keydown', escape); diff.cancelAutoDraw(); });
 </script>
@@ -42,10 +57,11 @@ onBeforeUnmount(() => { document.removeEventListener('keydown', escape); diff.ca
         <polygon :points="p.points" pathLength="1"
           :class="{ review: p.review, ready: pane.reviewing, approved: p.decision === 'approved', rejected: p.decision === 'rejected' }"
           :style="{ '--delay': p.delay, '--duration': p.duration }" />
-        <foreignObject v-if="pane.reviewing" :x="p.x" :y="p.y" width="76" height="32">
+        <foreignObject v-if="pane.reviewing && p.visible" :x="p.x" :y="p.y" width="76" height="32">
           <div class="approval-actions" @pointerdown.stop @mousedown.stop @dblclick.stop @wheel.stop>
             <button type="button" :aria-label="`通过区域 ${p.id}`" :aria-pressed="p.decision === 'approved'" :disabled="diff.autoReviewBusy"
-              title="通过此区域" @click.stop="diff.reviewAutoRegion(p.id, 'approved')">√</button>
+              :title="'通过此区域（' + p.vertices + ' 顶点' + (p.review ? '，请核对包络范围' : '') + '）'"
+              @click.stop="diff.reviewAutoRegion(p.id, 'approved')">√</button>
             <button type="button" :aria-label="`驳回区域 ${p.id}`" :aria-pressed="p.decision === 'rejected'" :disabled="diff.autoReviewBusy"
               title="驳回此区域" @click.stop="diff.reviewAutoRegion(p.id, 'rejected')">×</button>
           </div>
@@ -55,7 +71,10 @@ onBeforeUnmount(() => { document.removeEventListener('keydown', escape); diff.ca
     <div v-if="diff.autoDrawing?.reviewing" class="review-progress" role="status">
       区域审批 {{ Object.keys(diff.autoDrawing.decisions).length }} / {{ diff.autoDrawing.polygons.length }}
       <span v-if="diff.autoReviewBusy">正在确认…</span>
-      <button v-else type="button" @click.stop="diff.cancelAutoDraw()">取消</button>
+      <template v-else>
+        <button type="button" @click.stop="locatePending">定位下一待审</button>
+        <button type="button" @click.stop="diff.cancelAutoDraw()">取消</button>
+      </template>
     </div>
   </div>
 </template>

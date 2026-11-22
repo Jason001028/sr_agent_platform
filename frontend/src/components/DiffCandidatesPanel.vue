@@ -52,6 +52,14 @@ function choose(reg: DiffRegion) {
 function toggle(reg: DiffRegion) {
   diff.selectRegion(diff.selectedId === reg.id ? null : reg.id);
 }
+function maskRefusal(reg: DiffRegion) {
+  if (diff.result?.method === 'smart') return diff.autoDrawRefusal([reg.id]);
+  if (diff.stale) return '结果已对应旧参数，请重新分析';
+  if (reg.contourKind === 'bbox') return '只有外接矩形轮廓，不能直接作为精确区域';
+  if ((reg.holes ?? 0) > 0) return '区域含孔洞，单多边形掩码会填掉孔洞';
+  if ((reg.contourKind ?? 'exact') !== 'exact') return '轮廓简化后与真实掩码偏差较大，请手工绘制';
+  return '';
+}
 </script>
 
 <template>
@@ -128,13 +136,8 @@ function toggle(reg: DiffRegion) {
             <button
               type="button"
               class="dc-act"
-              :disabled="diff.stale || (diff.result.method === 'smart' && !reg.maskEligible) || reg.contourKind === 'bbox'
-                || (reg.contourKind ?? 'exact') !== 'exact' || (reg.holes ?? 0) > 0"
-              :title="diff.stale ? '结果已对应旧参数，请重新分析'
-                : reg.contourKind === 'bbox' ? '只有外接矩形轮廓，不能直接作为精确区域'
-                : (reg.holes ?? 0) > 0 ? '区域含孔洞，单多边形掩码会填掉孔洞'
-                : (reg.contourKind ?? 'exact') !== 'exact' ? '轮廓简化后与真实掩码偏差较大，请手工绘制'
-                : '把该区域轮廓加入结果对应影像的人工掩码'"
+              :disabled="!!maskRefusal(reg)"
+              :title="maskRefusal(reg) || (diff.result.method === 'smart' ? '预览并审批此区域' : '把该区域轮廓加入结果对应影像的人工掩码')"
               @click="diff.addRegionToMask(reg.id)"
             >加入修复掩码</button>
             <button

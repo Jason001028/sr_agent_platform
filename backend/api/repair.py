@@ -14,8 +14,11 @@ from __future__ import annotations
 from typing import Optional
 
 import re
+import time
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
 
 from backend.services import repair_application as svc
@@ -170,6 +173,8 @@ async def prepare(request: Request):
     mask_path = body.get("mask_path")
     if mask_path is not None and not isinstance(mask_path, str):
         raise HTTPException(400, "mask_path must be a string")
+    heavy = getattr(request.app.state, "heavy_work", None)
+    raster_runner = (lambda fn: heavy.background_executor().submit(fn).result()) if heavy is not None else None
     try:
         plan = await run_in_threadpool(
             svc.prepare_repair, store,
@@ -183,7 +188,7 @@ async def prepare(request: Request):
             mode=mode, strategy=strategy, detection_method=detection,
             smart_options=body.get("smart_options"),
             mask_policy=mask_policy, mask_path=mask_path,
-            title=title, created_by="tool_panel")
+            title=title, created_by="tool_panel", raster_runner=raster_runner)
     except Exception as exc:  # noqa: BLE001 — service is the contract boundary
         _map_error(exc)
     return plan
@@ -225,6 +230,34 @@ async def start(plan_id: str, request: Request):
             plan_version=plan_version)
     except Exception as exc:  # noqa: BLE001
         _map_error(exc)
+
+
+@router.get("/{plan_id}/land-preview/{item_id}")
+def land_preview(plan_id: str, item_id: str, request: Request, session_id: Optional[str] = None):
+    from backend.pathguard import PathDeniedError
+    from backend.services import batch_manifest, batch_mask, mss_water, repair_land
+
+    store = _store(request)
+    session_id = _session_id(store, session_id, required=True)
+    plan = _owned_plan(store, _plan_id(plan_id), session_id)
+    if (plan["status"] in {"SUPERSEDED", "EXPIRED"} or
+            (plan["status"] != "STARTED" and time.time() >= plan["expires_at"])):
+        raise HTTPException(409, "可信陆地计划已失效")
+    item = (plan.get("land_items") or {}).get(item_id)
+    evidence = (item or {}).get("evidence") or {}
+    preview = evidence.get("preview")
+    if not preview:
+        raise HTTPException(404, "可信陆地预览不存在")
+    path = Path(preview["path"]).resolve()
+    if batch_manifest.artifact_root().resolve() not in path.parents:
+        raise HTTPException(404, "可信陆地预览不存在")
+    try:
+        repair_land.verify_item(item, contents=False)
+        if batch_mask._sha256(path) != preview["sha256"]:
+            raise HTTPException(409, "可信陆地预览的影像版本或图层已变化")
+    except (OSError, ValueError, PathDeniedError, mss_water.WaterUnavailable) as exc:
+        raise HTTPException(409, "可信陆地预览已不可用") from exc
+    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
 @router.get("")

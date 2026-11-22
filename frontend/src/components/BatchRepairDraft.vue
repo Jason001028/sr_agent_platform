@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import RepairLandSummary from './RepairLandSummary.vue';
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import { useBatchGoalStore } from '../stores/batchGoal';
@@ -137,6 +138,7 @@ async function start() {
     <p v-if="pendingPlan && !pendingPlan.execution.allowed" class="error" role="status">
       计划已准备，当前环境暂不能启动：{{ compactBatchError(pendingPlan.execution.reason || '执行条件未满足') }}
     </p>
+    <RepairLandSummary v-if="pendingPlan?.land_constraint" :plan="pendingPlan" />
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <p class="note">自动配对、检测、绘制掩码并提交验收；沿用生产提交限制和成果保护。</p>
     <button class="primary" :disabled="busy || loading || !chosen.length || !!(pendingPlan && !pendingPlan.execution.allowed)" @click="start">{{ busy ? '正在核验并创建任务…' : pendingPlan && !pendingPlan.execution.allowed ? '计划已准备 · 当前环境不可启动' : pendingPlan ? `确认并启动 · ${pendingPlan.targets.applicable} 景` : `准备修复计划 · 已选 ${chosen.length} 组` }}</button>

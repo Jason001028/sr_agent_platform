@@ -2,6 +2,8 @@
 
 GPU inference and real GDAL behavior need intranet acceptance.
 """
+import hashlib
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -37,6 +39,12 @@ class Raster:
             tag = tif.pages[0].tags.get(42113)
             return float(tag.value) if tag else None
 
+    def GetMaskFlags(self):
+        return 2 if Path(self.pixels.filename + '.msk').is_file() else 1
+
+    def GetMaskBand(self):
+        return Raster(self.pixels.filename + '.msk')
+
     def ReadAsArray(self, x, y, w, h):
         return np.array(self.pixels[y:y+h, x:x+w])
 
@@ -52,6 +60,7 @@ class FakeGdal:
     GA_Update = 1
     GA_ReadOnly = 0
     GDT_Byte = 1
+    GMF_ALL_VALID = 1
 
     def Open(self, path, _=0):
         return Raster(path)
@@ -290,6 +299,60 @@ class TestPanRepair(unittest.TestCase):
     def test_queued_mask_change_is_rejected_before_inference(self):
         os.utime(self.mask, ns=(self.mask.stat().st_atime_ns, self.mask.stat().st_mtime_ns + 10000000))
         with self.assertRaisesRegex(ValueError, 'Queued repair input changed'):
+            self.run_repair(lambda _: self.fail('must not run'))
+
+    def _constrain(self):
+        mss = Path(self.tmp.name) / 'mss.tif'
+        mss.write_bytes(b'MSS')
+        sources = {}
+        for role, path in (('pan', self.pan), ('nosr', self.nosr), ('mss', mss), ('xml', self.meta)):
+            stat = path.stat()
+            sources[role] = {'path': str(path), 'size': stat.st_size, 'mtime_ns': stat.st_mtime_ns}
+        proof = {'version': 'land-constraint.v1', 'sources': sources,
+                 'mask_sha256': hashlib.sha256(self.mask.read_bytes()).hexdigest()}
+        tree = ET.parse(self.config)
+        ET.SubElement(tree.getroot(), 'LandConstraint').text = json.dumps(proof)
+        tree.write(self.config, encoding='utf-8')
+        return proof
+
+    def test_land_constraint_protects_pan_validity_and_is_bound_in_receipt(self):
+        valid = np.full((8, 8), 255, dtype=np.uint8)
+        valid[3, 3] = 0
+        tifffile.imwrite(str(self.pan) + '.msk', valid)
+        selection = tifffile.imread(self.mask)
+        selection[2, 2] = 255
+        tifffile.imwrite(self.mask, selection)
+        self.config.write_text(build_config_xml(repair_request(
+            {k: v for k, v in self.params.items() if k != 'repair_revision'})), encoding='utf-8')
+        proof = self._constrain()
+        receipt = self.run_repair()
+        expected = np.full((8, 8), 77, dtype=np.uint16)
+        expected[2, 2] = 99
+        np.testing.assert_array_equal(tifffile.imread(self.pan), expected)
+        self.assertEqual(receipt['land_constraint'], proof)
+
+    def test_land_constraint_rechecks_mss_before_publishing(self):
+        proof = self._constrain()
+        old = self.pan.read_bytes()
+
+        def changed(argv):
+            self.inference(argv)
+            Path(proof['sources']['mss']['path']).write_bytes(b'Replaced MSS')
+
+        with self.assertRaisesRegex(ValueError, 'Land constraint source changed: mss'):
+            self.run_repair(changed)
+        self.assertEqual(self.pan.read_bytes(), old)
+        self.assertFalse((self.scene / 'PAN_old_latest.tif').exists())
+
+    def test_land_constraint_requires_exact_mask_bytes(self):
+        self._constrain()
+        stat = self.mask.stat()
+        pixels = tifffile.memmap(self.mask)
+        pixels[2, 2] = 255
+        pixels.flush()
+        del pixels
+        os.utime(self.mask, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        with self.assertRaisesRegex(ValueError, 'Land constraint mask hash changed'):
             self.run_repair(lambda _: self.fail('must not run'))
 
     def test_model_process_cannot_publish_after_source_changes(self):

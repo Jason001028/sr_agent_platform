@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import RepairEvidenceEntry from './RepairEvidenceEntry.vue';
+import RepairLandSummary from './RepairLandSummary.vue';
 /**
  * Agent 自动修复任务卡：计划 → 执行 → 结果，同一张卡、同一个 Goal。
  *
@@ -589,6 +590,7 @@ onBeforeUnmount(() => {
       <p v-if="plan.skipped_completed?.length" class="plan-meta">已跳过 {{ plan.skipped_completed.length }} 景已有 PAN 备份的影像</p>
       <button v-if="historical" class="list-link" :aria-expanded="historyExpanded" @click="historyExpanded = !historyExpanded">{{ historyExpanded ? '收起历史计划' : '查看历史计划' }}</button>
       <template v-if="!historical || historyExpanded">
+      <RepairLandSummary v-if="plan.land_constraint" :plan="plan" />
       <div v-if="blockedReason" class="conflict-section">
         <strong class="conflict-title">{{ firstConflict?.code === 'pan_backup_exists' ? '检测到已有 PAN 备份' : '计划待处理' }}</strong>
         <p v-if="firstConflictLabel" class="conflict-name" :title="firstConflictLabel">{{ firstConflictLabel }}</p>
@@ -617,6 +619,7 @@ onBeforeUnmount(() => {
     </section>
 
     <section v-else :key="stage" class="execution-body">
+      <RepairLandSummary v-if="plan.land_constraint" :plan="plan" />
       <p v-if="plan.mode !== 'production'" class="mode-note">Demo / Fake SR · 不产生真实修复成果</p>
       <p v-if="currentItem" class="current" :title="`${currentItem.name} · ${currentItem.label}`">
         <span class="current-prefix">当前影像</span><span class="current-name">{{ currentItem.name }}</span>

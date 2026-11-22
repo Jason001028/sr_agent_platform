@@ -54,6 +54,15 @@ describe('buildMaskTxt 格式（全角头/CRLF/2dp）', () => {
 });
 
 describe('填充约定', () => {
+  it('does not repeat a scanline when asynchronous TIFF batches yield', async () => {
+    const { rasterRows } = await import('../maskgen.js');
+    const data: number[] = [];
+    await rasterRows(8, 8, [[[1, 1], [6, 1], [6, 6], [1, 6]]], {
+      batch: 2, feed: async chunk => { data.push(...chunk); },
+    });
+    expect(data.map(value => value > 0 ? 1 : 0)).toEqual(
+      Array.from(MaskGen.rasterMask([[[1, 1], [6, 1], [6, 6], [1, 6]]], 8, 8)));
+  });
   it('方形边界含入 = 36px', () => {
     const m = MaskGen.rasterMask([SQ], 16, 16);
     expect(countOnes(m)).toBe(36);

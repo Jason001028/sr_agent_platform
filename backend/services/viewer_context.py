@@ -228,7 +228,8 @@ def bind_registry(registry, snapshot, *, store=None, session_id=None, raster_run
                     selected_images=(frozen or {}).get('selected_images'),
                     batch_draft=(frozen or {}).get('batch_draft'),
                     selected_truncated=bool((frozen or {}).get('selected_truncated')),
-                    session_id=session_id, store=store, preferences=preferences))
+                    session_id=session_id, store=store, preferences=preferences,
+                    raster_runner=raster_runner))
             else:
                 result.register(item)
             continue

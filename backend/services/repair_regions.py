@@ -106,3 +106,32 @@ def consolidate(auto, transforms):
     auto['processed_regions'] = len(output)
     auto['total_regions'] = len(output) + auto['unprocessed_regions']
     auto['geometry_policy'] = 'repair-4to6-soft2pct-v1'
+
+
+def group_regions(labels, regions):
+    """Pair independent labels only when their actual pixels are locally close."""
+    import numpy as np
+    from scipy.ndimage import distance_transform_edt
+
+    index = 0
+    remaining = list(regions)
+    while index < len(remaining):
+        first = remaining[index]
+        group = [first]
+        gap = min(6., max(2., math.sqrt(first.area) * .12))
+        for j in range(index + 1, len(remaining)):
+            other = remaining[j]
+            left, top = min(first.x, other.x), min(first.y, other.y)
+            right = max(first.x+first.w, other.x+other.w)
+            bottom = max(first.y+first.h, other.y+other.h)
+            dx = max(0, first.x-other.x-other.w, other.x-first.x-first.w)
+            dy = max(0, first.y-other.y-other.h, other.y-first.y-first.h)
+            if math.hypot(dx, dy) > gap or (right-left)*(bottom-top) > 262144:
+                continue
+            tile = labels[top:bottom, left:right]
+            distance = distance_transform_edt(tile != first.label)
+            if distance[tile == other.label].min() <= gap:
+                group.append(remaining.pop(j))
+                break
+        yield group
+        index += 1

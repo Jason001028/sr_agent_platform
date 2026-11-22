@@ -299,6 +299,7 @@ def _diff_source_roi(body: dict, root: Optional[Path]) -> dict:
         source="source-roi",
         auto_mask=body.get("autoMask") is True,
         auto_mask_margin=body.get("autoMaskMargin", "standard"),
+        auto_mask_geometry_policy=body.get("autoMaskGeometryPolicy"),
         scale_a=(ra, ah / a.shape[0]),
         scale_b=(dims_b[0] / b.shape[1], dims_b[1] / b.shape[0]),
         warnings=["原始 ROI 分析：按原始分辨率重算该区域，区域外仍是预览结果。"],
@@ -1503,6 +1504,11 @@ def create_app() -> FastAPI:
 
         def _run():
             check_cancelled()
+            from backend.services.adaptive_polygon import geometry_policy
+            try:
+                geometry_policy(body.get("autoMaskGeometryPolicy"))
+            except ValueError as exc:
+                raise image_diff.DiffError(str(exc)) from exc
             body["method"] = image_diff._method(body.get("method"))
             if body.get("method") == "smart" or body.get("compare") is True:
                 from backend.services import smart_compare

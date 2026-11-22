@@ -9,6 +9,7 @@ const state = vi.hoisted(() => ({
 vi.mock('../../stores/chat', () => ({ useChatStore: () => state.chat }));
 vi.mock('../../stores/batchGoal', () => ({ useBatchGoalStore: () => state.batch }));
 vi.mock('../../stores/viewer', () => ({ useViewerStore: () => state.viewer }));
+vi.mock('../../stores/scenes', () => ({ useScenesStore: () => ({ openQuiet: vi.fn() }) }));
 vi.mock('../../lib/viewerContext', () => ({
   snapshotWorkspace: () => ({
     version: 0, items: [], total: 0, local_only: 0, truncated: false,
@@ -94,6 +95,26 @@ beforeEach(() => {
   vi.mocked(apiRepairStatus).mockResolvedValue(status() as never);
 });
 afterEach(() => { app?.unmount(); app = undefined; root?.remove(); document.querySelectorAll('.repair-drawer-backdrop').forEach(el => el.remove()); });
+
+it('shows land clipping counts and opens the matching frozen PAN in Viewer', async () => {
+  const item = { item_id: 'target', scene_id: 'pan', preview_revision: 'r1',
+    preview_url: '/api/repairs/p/land-preview/target', candidates: 3, excluded: 1, clipped: 1, executable: 2 };
+  const current = plan({ land_constraint: { ...item, items: [item] } });
+  state.viewer.recsOrdered = [{ id: 9, sceneId: 'pan', srcRev: 'r1', route: 'jpg' }];
+  state.viewer.noteUserIntent = vi.fn();
+  state.viewer.activate = vi.fn().mockResolvedValue(undefined);
+  vi.mocked(apiRepairStatus).mockResolvedValue(status({ plan: current }) as never);
+  await mount(current);
+  const summary = root.querySelector('[data-e2e=repair-land-counts]');
+  expect(summary?.textContent).toContain('完全排除 1');
+  expect(summary?.textContent).toContain('部分裁剪 1');
+  const button = [...root.querySelectorAll('button')].find(b => b.textContent === '在 Viewer 核对')!;
+  button.click();
+  await flush();
+  expect(state.viewer.activate).toHaveBeenCalledWith(9, undefined, 'follow');
+  expect(state.viewer.repairLandTarget).toEqual(item);
+  expect(router.push).toHaveBeenCalledWith('/viewer');
+});
 
 it('keeps conflict paths collapsed and prepares a new manifest plan without starting SR', async () => {
   const blocking = [1, 2].map(line => ({ code: 'pan_backup_exists', line, name: `PMS0${line}`,

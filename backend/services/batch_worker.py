@@ -323,11 +323,14 @@ def _detection_job(snapshot):
         return {"detection":detection,"mask":None,"incomplete":True}
     if not candidates:
         return {"detection": detection, "mask": None}
+    mask_path = snapshot.get("mask_path")
+    if snapshot.get("candidate_root"):
+        mask_path = str(Path(snapshot["candidate_root"]) / batch_mask.candidate_digest(detection) / "mask.tif")
     mask = batch_mask.build_mask_result(
         detection,
         target,
         {
-            "path": snapshot["mask_path"],
+            "path": mask_path,
             "execution_mode": mode,
             "rows_per_strip": snapshot.get("rows_per_strip"),
             "overlay_max_edge": snapshot.get("overlay_max_edge"),
@@ -572,24 +575,7 @@ def _collect_detections(state, goal, lease, cfg, *, allow_write=True):
         if detection.get("requires_geometry_review"):
             cp["review_required"]=True
         if not detection.get("candidates"):
-            if detection.get("analysis",{}).get("calibrationStatus")=="experimental-unvalidated":
-                from backend.services import batch_quality
-                try:
-                    batch_quality.enqueue_no_candidates(state.store,goal,{**item,"checkpoint":cp},lease)
-                except (ValueError,OSError,KeyError) as exc:
-                    _block_item(state,goal,item,lease,"无候选人工审核建立失败："+str(exc))
-                continue
-            cp["phase"] = "NO_ISSUE"
-            state.store.transition_goal_item(
-                gid, step_id=item["step_id"], expected_version=item["version"],
-                status="NO_ISSUE", lease_token=lease.token, checkpoint=cp,
-                verification={"ok": True, "provenance": detection.get("provenance"),
-                              "reason": "no_candidate"},
-                capacity_reserved=0,
-                extra_events=[(EVT_ITEM_VERIFIED, {
-                    "item_id": item["item_id"], "ok": True,
-                    "provenance": detection.get("provenance"),
-                    "state": "NO_ISSUE"})])
+            _finish_no_candidates(state, goal, item, lease, cp)
             continue
         mask = payload["mask"]
         cp["mask"] = mask
@@ -620,6 +606,27 @@ def _collect_detections(state, goal, lease, cfg, *, allow_write=True):
     return None
 
 
+def _finish_no_candidates(state, goal, item, lease, cp):
+    detection = cp["detection"]
+    if detection.get("analysis", {}).get("calibrationStatus") == "experimental-unvalidated":
+        from backend.services import batch_quality
+
+        try:
+            batch_quality.enqueue_no_candidates(state.store, goal, {**item, "checkpoint": cp}, lease)
+        except (ValueError, OSError, KeyError) as exc:
+            _block_item(state, goal, item, lease, "无候选人工审核建立失败：" + str(exc))
+        return
+    cp["phase"] = "NO_ISSUE"
+    provenance = detection.get("provenance")
+    state.store.transition_goal_item(
+        goal["goal_id"], step_id=item["step_id"], expected_version=item["version"],
+        status="NO_ISSUE", lease_token=lease.token, checkpoint=cp,
+        verification={"ok": True, "provenance": provenance, "reason": "no_candidate"},
+        capacity_reserved=0,
+        extra_events=[(EVT_ITEM_VERIFIED, {"item_id": item["item_id"], "ok": True,
+                                          "provenance": provenance, "state": "NO_ISSUE"})])
+
+
 def _advance_open(state, goal, item, lease, cfg):
     cp = dict(item["checkpoint"])
     try:
@@ -632,6 +639,9 @@ def _advance_open(state, goal, item, lease, cfg):
             lease_token=lease.token, checkpoint=cp, error=str(exc),
             capacity_reserved=0)
         return False
+    if cp.get("land_constraint") and not (cp.get("detection") or {}).get("candidates"):
+        _finish_no_candidates(state, goal, item, lease, cp)
+        return True
     return _start_detection(state, goal, item, lease, cfg)
 
 
@@ -742,6 +752,7 @@ def _backup_names(scene_ref, target_path=None):
 
 _INPUT_LABELS = {
     "pan": "PAN", "nosr": "NOSR", "mask": "掩码", "backups": "PAN 备份",
+    "land": "MSS 陆地约束",
 }
 
 
@@ -755,12 +766,23 @@ def _input_identities(cp):
     target = cp.get("target_image") or {}
     reference = cp.get("reference_image") or {}
     mask = cp.get("mask") or {}
-    return {
+    inputs = {
         "pan": _file_identity(target.get("path")),
         "nosr": _file_identity(reference.get("path")),
         "mask": _file_identity(mask.get("path")),
         "backups": _backup_names(cp.get("scene_ref"), target.get("path")),
     }
+    if cp.get("land_constraint"):
+        from backend.services import mss_land, mss_water, repair_land
+
+        try:
+            inputs["land"] = {
+                "revision": mss_land.preflight(Path(target["path"]))["revision"],
+                "pan_metadata": repair_land.file_revision(cp["land_pan_metadata"]["path"]),
+            }
+        except (ValueError, PathDeniedError, mss_water.WaterUnavailable) as exc:
+            raise ItemBlocked(f"MSS 陆地约束不可用：{exc}") from exc
+    return inputs
 
 
 def _capture_identities(cp):
@@ -923,7 +945,7 @@ def _submit_params(item):
     if not mask.get("path"):
         raise ItemBlocked("MASK_READY 项缺少掩码工件")
     config = cp.get("config") or {}
-    return sr_service.repair_request({
+    params = sr_service.repair_request({
         "lq_path": normalize_submit_path(cp["scene_ref"]),
         "mask_path": mask["path"],
         "sr_scale": int(config.get("sr_scale") or 2),
@@ -935,6 +957,21 @@ def _submit_params(item):
         "options_yml": None,
         "repair": True,
     })
+    land = cp.get("land_constraint")
+    if land:
+        from backend.services import mss_water
+
+        params["land_constraint"] = {
+            "version": "land-constraint.v1",
+            "mask_sha256": mask["sha256"],
+            "sources": {**land["sources"], "nosr": cp["land_nosr"],
+                        "pan_metadata": cp["land_pan_metadata"]},
+            "evidence_revision": land["revision"],
+            "expires_at": cp["land_expires_at"],
+            "sidecars_absent": sorted({str(path) for role in ("pan", "mss")
+                for path in mss_water._sidecar_candidates(Path(land["sources"][role]["path"]))}),
+        }
+    return params
 
 
 def _verify_submission_inputs(item, mode="demo"):
@@ -947,7 +984,8 @@ def _verify_submission_inputs(item, mode="demo"):
     verified again here — immediately before the capacity reservation.
     """
     cp = item["checkpoint"]
-    if mode == "production" and cp.get("mask_policy") != "existing":
+    land = cp.get("land_constraint")
+    if mode == "production" and cp.get("mask_policy") != "existing" and not land:
         raise ItemBlocked("自动修复已阻断：尚无经验证并冻结的 MSS 陆地约束")
     target = cp.get("target_image") or {}
     detection = cp.get("detection") or {}
@@ -961,6 +999,20 @@ def _verify_submission_inputs(item, mode="demo"):
             f"提交前复核输入失败：{type(exc).__name__}: {exc}") from exc
     if not mask.get("path"):
         raise ItemBlocked("MASK_READY 项缺少掩码工件")
+    if land:
+        from backend.services import mss_water, repair_land
+
+        if time.time() >= cp.get("land_expires_at", 0):
+            raise ItemBlocked("可信陆地修复计划或确认已过期")
+        final = land.get("final_mask") or {}
+        if (cp.get("mask_policy") != "confident_land" or mask.get("sha256") != final.get("sha256")
+                or Path(mask["path"]).resolve() != Path(final.get("path") or "").resolve()):
+            raise ItemBlocked("执行掩码与冻结的可信陆地约束不一致")
+        try:
+            repair_land.verify_item({"evidence": land, "pan_path": target["path"],
+                                     "nosr": cp["land_nosr"], "pan_metadata": cp["land_pan_metadata"]})
+        except (ValueError, OSError, PathDeniedError, mss_water.WaterUnavailable) as exc:
+            raise ItemBlocked(f"提交前复核 MSS 陆地约束失败：{exc}") from exc
     if target.get("width") is None or target.get("height") is None:
         raise ItemBlocked("MASK_READY 项缺少冻结的 PAN 尺寸")
     # The mask on disk can satisfy the byte-level check while the checkpoint
@@ -1030,6 +1082,9 @@ def _submit_ready(state, goal, item, lease, cfg, prepared):
         return False
     if not _review_allows_submit(current):
         return False
+    cp = current.get("checkpoint") or {}
+    if cp.get("land_constraint") and time.time() >= cp.get("land_expires_at", 0):
+        return _block_item(state, goal, current, lease, "可信陆地修复计划或确认已过期")
     try:
         identities = _input_identities(current["checkpoint"] or {})
     except (OSError, ItemBlocked) as exc:
@@ -1564,6 +1619,7 @@ def _build_report(goal, items, counts, mode):
             "verification": item.get("verification"),
             "error": item.get("error"),
             "capacity_reserved": item.get("capacity_reserved"),
+            "land_constraint": ((item.get("checkpoint") or {}).get("land_constraint") or {}).get("stats"),
         } for item in items],
     }
 
