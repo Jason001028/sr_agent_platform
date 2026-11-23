@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { createApp, h, nextTick, reactive } from 'vue';
+import { computed, createApp, h, nextTick, reactive } from 'vue';
 import type { App } from 'vue';
 
 /* 侧舱 Agent tab 的输入区解锁。这里的重点是「没有已加载影像」的场景：点击
  * 质检清单的 Agent协助 后，输入区不该继续被 .at-input-lock 磨砂遮罩盖住。 */
-const state = vi.hoisted(() => ({ chat: {} as any, viewer: {} as any, annotations: {} as any }));
+const state = vi.hoisted(() => ({ chat: {} as any, viewer: {} as any, annotations: {} as any, togglePause: vi.fn(), control: {} as any }));
 vi.mock('../../stores/viewer', () => ({ useViewerStore: () => state.viewer }));
 vi.mock('../../stores/chat.js', () => ({ useChatStore: () => state.chat }));
 vi.mock('../../stores/chat', () => ({ useChatStore: () => state.chat }));
@@ -17,7 +17,8 @@ vi.mock('../GoalClarifications.vue', () => ({ default: { setup: () => () => null
 vi.mock('../AgentRepairPlanCard.vue', () => ({
   default: {
     props: { data: Object, standalone: Boolean }, emits: ['back'],
-    setup(props: { data: { plan_id: string }; standalone: boolean }, { emit }: { emit: (name: 'back') => void }) {
+    setup(props: { data: { plan_id: string }; standalone: boolean }, { emit, expose }: { emit: (name: 'back') => void; expose: (exposed: object) => void }) {
+      expose({ taskControl: computed(() => state.control[props.data.plan_id]), togglePause: state.togglePause });
       return () => h('button', { 'data-plan-id': props.data.plan_id, onClick: () => emit('back') },
         props.standalone ? '修复待办' : '修复计划');
     },
@@ -32,6 +33,8 @@ let root: HTMLDivElement;
 
 beforeEach(() => {
   agentTaskView.value = 'card';
+  state.control = reactive({});
+  state.togglePause.mockClear();
   // AgentBotIcon 用 matchMedia 判断减少动态；jsdom 没有，给个静态替身。
   Object.defineProperty(window, 'matchMedia', {
     configurable: true,
@@ -118,4 +121,33 @@ it('renders the task card directly and switches to the standalone view for the s
   state.chat.messages = [];
   await nextTick();
   expect(root.querySelector('.agent-task-pane')).toBeNull();
+});
+
+it('uses the composer button to pause and resume the default Agent assist card', async () => {
+  handoff(true);
+  state.chat.messages = [
+    { seq: 1, role: 'assistant', content: '', toolCalls: [{ id: 'p', name: 'prepare_repair', args: {} }] },
+    { seq: 2, role: 'tool', content: '', toolCallId: 'p', toolName: 'prepare_repair', ok: true,
+      data: { kind: 'repair_plan.v1', plan_id: 'p' } },
+  ];
+  const button = () => root.querySelector<HTMLButtonElement>('.at-inputbar .cbtn')!;
+  await nextTick();
+  expect(button().getAttribute('aria-label')).toBe('发送');
+  state.control.p = { icon: 'pause', label: '暂停执行', busy: false };
+  await nextTick();
+  expect(root.querySelector('.agent-task-pane')).toBeNull();
+  expect(button().getAttribute('aria-label')).toBe('暂停执行');
+  button().click();
+  expect(state.togglePause).toHaveBeenCalledTimes(1);
+  state.control.p = { icon: 'square', label: '正在暂停…', busy: true };
+  await nextTick();
+  expect(button().disabled).toBe(true);
+  state.control.p = { icon: 'play', label: '继续执行', busy: false };
+  await nextTick();
+  expect(button().getAttribute('aria-label')).toBe('继续执行');
+  button().click();
+  expect(state.togglePause).toHaveBeenCalledTimes(2);
+  state.chat.messages = [];
+  await nextTick();
+  expect(button().getAttribute('aria-label')).toBe('发送');
 });

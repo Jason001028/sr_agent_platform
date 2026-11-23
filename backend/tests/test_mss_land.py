@@ -63,9 +63,10 @@ def test_constraint_rejects_water_uncertainty_and_pan_nodata(execution_scene, tm
         mss_land.verify(pan, evidence)
 
 
-def test_execution_blocks_unsupported_alignment_and_missing_profile(execution_scene, monkeypatch):
+@pytest.mark.parametrize("suffix", [".rpb", ".prj"])
+def test_execution_blocks_unsupported_alignment_and_missing_profile(execution_scene, monkeypatch, suffix):
     pan, mss, _, _, _ = execution_scene
-    sidecar = mss.with_suffix('.rpb')
+    sidecar = mss.with_suffix(suffix)
     sidecar.touch()
     with pytest.raises(mss_land.WaterUnavailable) as failed:
         mss_land.preflight(pan)
@@ -88,3 +89,12 @@ def test_no_candidates_preserves_evidence_without_executable_pixels(execution_sc
     with pytest.raises(mss_land.WaterUnavailable) as failed:
         mss_land.verify(pan, evidence)
     assert failed.value.code == 'missing_mss'
+
+def test_missing_tifffile_becomes_raster_dependency_error(execution_scene, monkeypatch):
+    import sys
+
+    pan, *_ = execution_scene
+    monkeypatch.setitem(sys.modules, 'tifffile', None)
+    with pytest.raises(mss_land.WaterUnavailable, match='requirements-api.txt') as failed:
+        mss_land.preflight(pan)
+    assert failed.value.code == 'raster_dependency'

@@ -54,7 +54,7 @@ def _profile(satellite, sensor):
 
 
 def _preflight(pan_path):
-    import tifffile
+    tifffile = mss_water.require_tifffile()
 
     plan = mss_water.plan_water(pan_path)
     key, _, paths, sources, _ = plan
@@ -65,7 +65,7 @@ def _preflight(pan_path):
         raise WaterUnavailable('xml_identity', 'MSS 执行要求 XML 明确声明同景 SceneID 和 ProductType')
     with tifffile.TiffFile(mss) as mss_tif, tifffile.TiffFile(pan) as pan_tif:
         mss_page, pan_page = mss_tif.pages[0], pan_tif.pages[0]
-        alignment = mss_water._alignment(pan, mss_page, sources['mss']['external_rpc'])
+        alignment = mss_water._alignment(pan, mss_page, mss_water.external_spatial_metadata(sources['mss']))
         if alignment.get('method') != METHOD:
             raise WaterUnavailable('registration_required', 'MSS 与 PAN 缺少可信执行级配准')
         if (len(pan_tif.pages) != 1 or pan_page.subifds or pan_page.is_tiled
@@ -160,7 +160,7 @@ def _nearest(source, target):
 
 
 def _render(staged, candidate, candidates, evidence, pan_path, mss_path, water_profile):
-    import tifffile
+    tifffile = mss_water.require_tifffile()
     from scipy.ndimage import maximum_filter
 
     grid, profile = evidence['alignment'], evidence['profile']

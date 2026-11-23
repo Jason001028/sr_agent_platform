@@ -372,9 +372,11 @@ export const useQcListStore = defineStore('qclist', () => {
     }, 1000);
     /** 行名 → 本体卡 id：NOSR 卡要插在它后面。 */
     const bodyIds = new Map<string, number>();
+    const requestSignal = (signal: AbortSignal) =>
+      AbortSignal.any([signal, AbortSignal.timeout(20_000)]);
     try {
       const report = await runSceneBake(rows, {
-        resolve: (it, signal) => scenes.resolveByName(it.name, it.imgType, { signal }),
+        resolve: (it, signal) => scenes.resolveByName(it.name, it.imgType, { signal: requestSignal(signal) }),
         body: async (it, res) => {
           // 补齐权威身份后完成列表准备；详细预览生成不属于批量成功条件。
           const r = res as SceneResolveResult;
@@ -384,9 +386,10 @@ export const useQcListStore = defineStore('qclist', () => {
           bodyIds.set(it.name, id);
           await viewer.bakeCardPixels(id);
         },
-        nosr: async (it, res) => {
+        nosr: async (it, res, signal) => {
           const r = res as SceneResolveResult;
-          const sib = await apiSceneSiblings(loadSrConfig(), r.row.id);
+          const sib = await apiSceneSiblings(loadSrConfig(), r.row.id, undefined, false, [], requestSignal(signal));
+          signal.throwIfAborted();
           const item = nosrItemOf(sib);
           // 「没有这一份」是盘上的事实，不是失败（口径见 api.ts::nosrItemOf）。
           // 尺寸读不出来同上：打不开就不入列，免得留一张点了必炸的空卡。
@@ -396,9 +399,10 @@ export const useQcListStore = defineStore('qclist', () => {
               bodyIds.get(it.name)));
           return 'ok';
         },
-        old: withOld ? async (it, res) => {
+        old: withOld ? async (it, res, signal) => {
           const r = res as SceneResolveResult;
-          const sib = await apiSceneSiblings(loadSrConfig(), r.row.id, 'old');
+          const sib = await apiSceneSiblings(loadSrConfig(), r.row.id, 'old', false, [], requestSignal(signal));
+          signal.throwIfAborted();
           const item = sib.items.find((v) => v.kind === 'product' && v.exists);
           if (!item?.id || item.W == null || item.H == null) return;
           const meta = { ...nosrMeta(sib, item), stageKind: 'product' as const, stageSuffix: 'old' };

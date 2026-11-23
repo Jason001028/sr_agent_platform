@@ -127,17 +127,48 @@ def read_calibration(path, satellite, sensor, scene_name):
     def paths(*labels):
         return [prefix + label for prefix in ('', 'ProductInfo/', 'ProcessInfo/') for label in labels]
 
-    xml_sensor = field(paths('SensorID', 'SensorId'), 'sensor_mismatch', 'SensorID')
+    # Production metadata may wrap identity in additional XML sections.
+    # All explicit declarations must agree, including declarations in nested sections.
+    sensor_nodes = [node for node in root.iter() if node.tag.casefold() in {'sensorid', 'sensor'}]
+    if not sensor_nodes:
+        candidates = sorted({node.tag for node in root.iter() if 'sensor' in node.tag.casefold()})
+        hint = '；相关标签：' + '、'.join(candidates[:6]) if candidates else ''
+        raise WaterUnavailable('sensor_mismatch', f'MSS XML {path.name} 缺少 SensorID 或 Sensor{hint}')
+    sensor_values = {(node.text or '').strip().upper() for node in sensor_nodes}
+    if '' in sensor_values or any(len(node) for node in sensor_nodes):
+        raise WaterUnavailable('sensor_mismatch', 'MSS XML 的 SensorID 或 Sensor 必须是非空文本')
+    if len(sensor_values) != 1:
+        raise WaterUnavailable('sensor_mismatch', 'MSS XML 中多处传感器标识的值冲突')
+    xml_sensor = sensor_values.pop()
     xml_sat = field(paths('SatelliteID', 'SatelliteId'), 'sensor_mismatch', 'SatelliteID', optional=True)
-    if xml_sensor.upper() != sensor or (xml_sat and xml_sat.upper() != satellite):
-        raise WaterUnavailable('sensor_mismatch', 'MSS XML 的传感器或卫星与 PAN 场景不符')
+    if xml_sensor != sensor:
+        raise WaterUnavailable('sensor_mismatch', f'MSS XML 传感器与 PAN 不符（XML={xml_sensor[:32]}，PAN={sensor}）')
+    if xml_sat and xml_sat.upper() != satellite:
+        raise WaterUnavailable('sensor_mismatch', 'MSS XML 的卫星与 PAN 场景不符')
     scene_id = field(paths('SceneID', 'SceneId'), 'scene_mismatch', 'SceneID', optional=True)
     product = field(paths('ProductType'), 'scene_mismatch', 'ProductType', optional=True)
-    if ((scene_id and scene_id.casefold().replace(' ', '_') != scene_name.casefold().replace(' ', '_'))
+    product_id = field(paths('ProductID', 'ProductId'), 'scene_mismatch', 'ProductID', optional=True)
+    normalized_name = scene_name.upper().replace(' ', '_')
+    normalized_product = product_id.upper().replace(' ', '_') if product_id else None
+    normalized_scene = scene_id.upper().replace(' ', '_') if scene_id else None
+    short_scene = re.fullmatch(r'(.+)_[0-9]{3}_L[0-9]+_MSS', normalized_name)
+    valid_scene_ids = {normalized_name}
+    if normalized_product == normalized_name and short_scene:
+        valid_scene_ids.add(short_scene[1])
+    if ((normalized_scene and normalized_scene not in valid_scene_ids)
+            or (normalized_product and normalized_product != normalized_name)
             or (product and product.upper() != 'MSS')):
         raise WaterUnavailable('scene_mismatch', 'MSS XML 声明的场景或产品与精确匹配的 MSS 目录不符')
-    order = field(paths('BandOrder', 'BandNames'), 'band_mismatch', 'BandOrder/BandNames')
-    bands = tuple(part.strip().upper() for part in order.split(','))
+    if not product and normalized_product == normalized_name and normalized_name.endswith('_MSS'):
+        product = 'MSS'
+    order = field(paths('BandOrder', 'BandNames'), 'band_mismatch', 'BandOrder/BandNames', optional=True)
+    fusion = field(['ProductInfo/FUSMethod'], 'band_mismatch', 'FUSMethod', optional=True)
+    bands = tuple(part.strip().upper() for part in order.split(',')) if order else ()
+    if fusion and fusion.strip().upper() == 'B-G-R-NIR':
+        production_bands = ('BLUE', 'GREEN', 'RED', 'NIR')
+        if bands and bands != production_bands:
+            raise WaterUnavailable('band_mismatch', 'MSS XML 的 FUSMethod 与波段顺序冲突')
+        bands = production_bands
     if (len(bands) != 4 or len(set(bands)) != 4 or not all(bands)
             or bands[1] != 'GREEN' or bands[3] not in ('NIR', 'NEAR INFRARED', 'NEAR-INFRARED')):
         raise WaterUnavailable('band_mismatch', 'MSS 必须明确声明 Band 2=Green、Band 4=NIR')
@@ -183,14 +214,17 @@ def ndwi_window(green, nir, nodata, gain, bias, profile):
 def _sidecar_candidates(path):
     scene = path.parent.name
     bases = {path.stem, scene, re.sub(r'[_ ](?:MSS|PAN)$', '', scene, flags=re.IGNORECASE)}
+    scene_rpc = [path.with_name(base + suffix)
+                 for base in {path.stem, scene}
+                 for suffix in ('_rpc.txt', '_RPC.txt', '_RPC.TXT', '_rpc.TXT')]
     rpc = [path.with_name(base + separator + band + suffix)
            for base in bases for separator in ('_', ' ') for band in ('B1', 'B2', 'B3', 'B4')
            for suffix in ('_rpc.txt', '_RPC.txt', '_RPC.TXT')]
     return (
         path.with_suffix('.tfw'), path.with_suffix('.TFW'), path.with_suffix('.tifw'),
-        path.with_suffix('.tiffw'), path.with_suffix('.wld'), path.with_suffix('.prj'),
+        path.with_suffix('.tiffw'), path.with_suffix('.wld'), path.with_suffix('.prj'), path.with_suffix('.PRJ'),
         path.with_suffix('.rpb'), path.with_suffix('.RPB'), path.with_suffix('.rpc'),
-        path.with_suffix('.rpc.txt'), path.with_name(path.stem + '_RPC.txt'),
+        path.with_suffix('.rpc.txt'), *scene_rpc,
         path.with_name(path.name + '.aux.xml'), path.with_suffix('.aux.xml'),
         path.with_name(path.name + '.msk'),
         *rpc,
@@ -234,7 +268,7 @@ def _alignment(pan, mss_page, mss_sidecars):
 
     unavailable = {'status': 'unaligned', 'detail': '未完成空间对齐：没有可验证的同 CRS、同范围轴对齐像元网格'}
     if mss_sidecars:
-        return {'status': 'unaligned', 'detail': '未完成空间对齐：MSS 含外部 RPC，仅显示 MSS 原始像素网格'}
+        return {'status': 'unaligned', 'detail': '未完成空间对齐：MSS 含外部空间参考，仅显示 MSS 原始像素网格'}
     try:
         if _sidecars(pan):
             return unavailable
@@ -380,19 +414,39 @@ def plan_water(pan, profile=None):
     profile = profile or _config_profile()
     pan, mss, xml, satellite, sensor = resolve_mss(pan)
     sidecars = sorted(set(_sidecars(mss)))
-    unsupported = [path.name for path in sidecars
-                   if not path.name.lower().endswith(('.rpb', '.rpc', '.rpc.txt', '_rpc.txt'))]
+    rpc = [path.name for path in sidecars
+           if path.name.lower().endswith(('.rpb', '.rpc', '.rpc.txt', '_rpc.txt'))]
+    projections = [path.name for path in sidecars if path.suffix.lower() == '.prj']
+    accepted = set(rpc + projections)
+    unsupported = [path.name for path in sidecars if path.name not in accepted]
     if unsupported:
         raise WaterUnavailable('unsupported_spatial_metadata',
                                '无法安全读取 MSS 旁车空间参考或有效性信息：' + '、'.join(unsupported))
     sources = {role: {'scene': path.parent.name, 'name': path.name, **resource_identity(path)}
                for role, path in (('pan', pan), ('mss', mss), ('xml', xml))}
     sources['pan']['preview_revision'] = source_revision(pan)
-    sources['mss']['external_rpc'] = [path.name for path in sidecars]
+    sources['mss']['external_rpc'] = rpc
+    if projections:
+        sources['mss']['external_projection'] = projections
     key = hashlib.sha256(json.dumps([VERSION, asdict(profile), sources, bool(_sidecars(pan))],
                                     sort_keys=True).encode()).hexdigest()
     root = Path(os.environ.get('SR_MSS_WATER_DIR') or Path(default_db_path()).resolve().parent / 'mss_water')
     return key, root / key, (pan, mss, xml, satellite, sensor), sources, profile
+
+
+def external_spatial_metadata(source):
+    return bool(source.get('external_rpc') or source.get('external_projection'))
+
+
+def require_tifffile():
+    try:
+        import tifffile
+    except ImportError as exc:
+        raise WaterUnavailable(
+            'raster_dependency',
+            'sr-api 的 Python 无法导入 tifffile。请在服务实际使用的 Python 中安装 requirements-api.txt 并通过运行依赖预检。',
+        ) from exc
+    return tifffile
 
 
 def generate_water(plan):
@@ -401,10 +455,7 @@ def generate_water(plan):
         raise WaterUnavailable('source_changed', 'MSS 或 PAN 在排队期间变更，请重试')
     if (output / 'metadata.json').is_file():
         return json.loads((output / 'metadata.json').read_text(encoding='utf-8'))
-    try:
-        import tifffile
-    except ImportError as exc:
-        raise WaterUnavailable('raster_dependency', 'API 环境未安装 MSS GeoTIFF 输出依赖 tifffile') from exc
+    tifffile = require_tifffile()
     calibration = read_calibration(xml, satellite, sensor, mss.parent.name)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.mss-', dir=output.parent) as temporary:
@@ -415,7 +466,7 @@ def generate_water(plan):
                 page = tif.pages[0]
                 if len(tif.pages) != 1 or page.subifds:
                     raise WaterUnavailable('unsupported_raster', 'MSS 必须是单 IFD 四波段 TIFF')
-                alignment = _alignment(pan, page, sources['mss']['external_rpc'])
+                alignment = _alignment(pan, page, external_spatial_metadata(sources['mss']))
                 raster = _render(page, stream, staged, profile, calibration, alignment)
         except WaterUnavailable:
             raise

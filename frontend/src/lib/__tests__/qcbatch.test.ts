@@ -332,3 +332,18 @@ describe('runSceneBake —— 取消点', () => {
     expect(r).toEqual({ total: 3, done: 0, stopped: true, fails: {}, notes: {} });
   });
 });
+
+it.each(['nosr', 'old'] as const)('passes cancellation into the %s request without recording a failure', async (stage) => {
+  const controller = new AbortController();
+  const { calls, deps } = harness({
+    [stage]: async (_item: BakeRow, _result: unknown, signal: AbortSignal) => {
+      expect(signal).toBe(controller.signal);
+      controller.abort();
+      signal.throwIfAborted();
+      return 'ok';
+    },
+  });
+  const result = await runSceneBake(ROWS, deps, controller.signal);
+  expect(result).toMatchObject({ done: 1, stopped: true, fails: {}, notes: {} });
+  expect(calls).not.toContain('resolve:b');
+});

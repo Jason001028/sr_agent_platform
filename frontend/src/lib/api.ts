@@ -547,6 +547,7 @@ export interface QueueTask {
 
 /** POST /api/queue 请求体（run_sr 参数，lq_path 必填）。 */
 export interface QueueSubmitBody {
+  scene_id?: string;
   lq_path: string;
   mask_path?: string | null;
   sr_scale?: number;
@@ -585,6 +586,7 @@ export interface QueueSubmitResult {
 /** POST /api/scenes/resolve 响应（打开盘阵任意合法场景目录）。 */
 export interface SceneResolveResult {
   source: 'manual';
+  discovery?: string;
   row: SceneRow;
   resolved: {
     /** 场景目录（盘阵 POSIX） */
@@ -606,6 +608,8 @@ export interface SceneResolveResult {
     sr_capable: boolean;
     /** 仅预览源（`SR_PREVIEW_ROOTS`）：只读预览，换档位走 `/preview`。 */
     preview_only?: boolean;
+    read_only?: boolean;
+    viewer_role?: SceneTiffFile['viewerRole'];
     /** 拖进来的这份影像属于场景里的哪个环节（2026-09-21 起中间产物也能关联）。
      *  `'input'` = 本体（显示件 / 输入影像，可修复可提交）；`'product'` = 本次
      *  SR 产物；`'nosr'` = 上一次的产物。**只有 kind='input' 才是可修复对象** ——
@@ -1568,6 +1572,24 @@ export async function apiResolveScene(
   return (await r.json()) as SceneResolveResult;
 }
 
+export interface SceneTiffFile {
+  id: string;
+  name: string;
+  size_bytes: number;
+  mtime_ms: number;
+  srcRev: string;
+  kind: SceneResolveResult['resolved']['kind'] | null;
+  suffix: string;
+  readOnly: true;
+  viewerRole: 'reference' | 'stage' | 'other';
+}
+
+export async function apiSceneTiffFiles(cfg: SrConfig, id: string, grant: string, signal: AbortSignal): Promise<SceneTiffFile[]> {
+  const url = joinBase(cfg.apiBase, `/api/scenes/${encodeURIComponent(id)}/tiff-files`);
+  const response = await http(`${url}?${new URLSearchParams({ grant })}`, { signal });
+  return (await response.json()).files;
+}
+
 /* ---------------- 场景内三类图（GET /api/scenes/{id}/siblings） ---------------- */
 
 /** 一类图。字段与 backend/api/app.py 里 `scene_siblings.item()` 一一对应，
@@ -1675,7 +1697,7 @@ export function nosrItemOf(res: SceneSiblings): SceneSibling | null {
  * W/H 必须是源影像的真实尺寸 —— 栅格化按它建画布。 */
 export async function apiBakeMask(
   cfg: SrConfig,
-  body: { lq_path: string; W: number; H: number; polygons: unknown },
+  body: { lq_path: string; scene_id?: string; W: number; H: number; polygons: unknown },
 ): Promise<MaskBakeResult> {
   const r = await http(apiUrl(cfg, '/api/masks'), {
     method: 'POST',
@@ -1832,7 +1854,7 @@ export interface RepairPlan {
   session_id?: string | null;
   mask?: { policy: string; path: string; revision?: string; width: number; height: number } | null;
   goal_id?: string | null;
-  blocking?: { message?: string; code?: string; line?: number; name?: string; scene_ref?: string; conflict_path?: string; filename?: string }[];
+  blocking?: { message?: string; code?: string; reason?: string; line?: number; name?: string; scene_ref?: string; conflict_path?: string; filename?: string }[];
   exclusions?: { line: number; reason: string }[];
   strategy_policy?: "automatic" | "review";
   tone_weight?: boolean; skip_completed?: boolean; skipped_completed?: {name?: string;scene_ref?: string}[];

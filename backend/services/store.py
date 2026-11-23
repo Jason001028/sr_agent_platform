@@ -596,7 +596,8 @@ class Store:
         self.path = str(path or default_db_path())
         self._local = threading.local()
         self._connections = set()
-        self._connections_lock = threading.Lock()
+        self._connections_lock = threading.RLock()
+        self._schema_ready = False
         self._generation = 0
 
     @property
@@ -617,23 +618,29 @@ class Store:
         if getattr(self._local, "transaction", None) is not None:
             return self._local.transaction
         if self._conn is None:
-            parent = os.path.dirname(os.path.abspath(self.path))
-            if parent:
+            with self._connections_lock:
+                parent = os.path.dirname(os.path.abspath(self.path))
                 os.makedirs(parent, exist_ok=True)
-            # One connection per thread: chat, REST and Goal workers must not
-            # interleave BEGIN/COMMIT on the same connection. SQLite serializes
-            # independent connections through BEGIN IMMEDIATE + busy timeout.
-            self._conn = sqlite3.connect(self.path, timeout=10,
-                                         check_same_thread=False)
-            self._conn.executescript(_SCHEMA)
-            # Evidence indexes reference kind, added when upgrading old goals.
-            _ensure_columns(self._conn)
-            from backend.services.model_resources import SCHEMA as model_schema
-            self._conn.executescript(model_schema)
-            from backend.services.evidence_store import SCHEMA as evidence_schema
-            self._conn.executescript(evidence_schema)
-            from backend.services.evidence_store import migrate as migrate_evidence
-            migrate_evidence(self._conn)
+                # Keep transactions thread-local. Schema setup belongs to the
+                # Store, not to each reader's first request. An in-memory DB
+                # still needs its own schema for each independent connection.
+                connection = sqlite3.connect(self.path, timeout=10,
+                                             check_same_thread=False)
+                try:
+                    if not self._schema_ready or self.path == ":memory:":
+                        connection.executescript(_SCHEMA)
+                        _ensure_columns(connection)
+                        from backend.services.model_resources import SCHEMA as model_schema
+                        connection.executescript(model_schema)
+                        from backend.services.evidence_store import SCHEMA as evidence_schema
+                        from backend.services.evidence_store import migrate as migrate_evidence
+                        connection.executescript(evidence_schema)
+                        migrate_evidence(connection)
+                        self._schema_ready = True
+                except BaseException:
+                    connection.close()
+                    raise
+                self._conn = connection
         return self._conn
 
     @contextmanager
@@ -679,6 +686,7 @@ class Store:
         """Application/test teardown closes all per-thread connections."""
         with self._connections_lock:
             self._generation += 1
+            self._schema_ready = False
             for connection in self._connections:
                 connection.close()
             self._connections.clear()

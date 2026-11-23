@@ -276,6 +276,8 @@ _PREPARE_DESC = (
     "消息中的资源引用仅用于观察与规划，不授予任意文件访问权限。"
     "返回 plan_id、targets、strategy、mode、execution 与 confirmation_required；"
     "targets 含 total/excluded/applicable/items/unresolved，items 每项含 item_id/ordinal/name/scene_ref/status；不存在 targets.ids。"
+    "如返回 land_constraint_unavailable，读取 blocking 中的具体原因；受阻计划不能确认或启动。"
+    "可提示使用 Viewer 自动绘制并核对、保存掩码。仅在用户明确选择后，使用已有掩码另建当前景计划。"
     "归档结果读取 /data/targets/items；启动仅需 plan_id 和版本，不需要逐景提取 ID。"
     "计划必须由真实用户在界面上确认后，才能用 start_repair 启动。"
 )

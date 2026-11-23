@@ -68,6 +68,7 @@ const status = (over: Record<string, unknown> = {}) => ({
 });
 
 let app: App | undefined;
+let card: InstanceType<typeof AgentRepairPlanCard>;
 let root: HTMLDivElement;
 async function flush() {
   for (let i = 0; i < 20; i++) { await Promise.resolve(); await nextTick(); }
@@ -78,7 +79,7 @@ async function mount(data: unknown, standalone = false) {
   root = document.createElement('div');
   document.body.append(root);
   app = createApp(AgentRepairPlanCard, { data, standalone });
-  app.mount(root);
+  card = app.mount(root) as InstanceType<typeof AgentRepairPlanCard>;
   await flush();
 }
 beforeEach(() => {
@@ -569,4 +570,49 @@ it('shows a compact standalone sequence and focuses each completed Todo before a
   await vi.waitFor(() => expect(focused()).toBe('1'));
   expect(root.querySelector('[data-todo-id="1"] .todo-fill')).not.toBeNull();
   await vi.waitFor(() => expect(focused()).toBe('2'));
+});
+
+it('pauses and resumes the standalone task without controlling a different selected goal', async () => {
+  const goalId = 'card-goal';
+  let phase = 'RUNNING';
+  const control = vi.fn(async (action: string) => {
+    expect(state.batch.goalId).toBe(goalId);
+    phase = action === 'pause' ? 'PAUSED' : 'RUNNING';
+    return 'updated';
+  });
+  const selectGoal = vi.fn(async (id: string) => { state.batch.goalId = id; return true; });
+  state.batch.goalId = 'other-goal';
+  state.batch.control = control;
+  state.batch.selectGoal = selectGoal;
+  vi.mocked(apiRepairStatus).mockImplementation(async () => status({
+    plan: plan({ status: 'STARTED' }),
+    goal: { goal_id: goalId, status: phase, phase: phase.toLowerCase(), monitoring_done: false },
+  }) as never);
+  await mount(plan({ status: 'STARTED' }), true);
+  expect(card.taskControl?.icon).toBe('pause');
+  state.batch.goalId = 'other-goal';
+  const pending = card.togglePause();
+  expect(card.taskControl).toMatchObject({ icon: 'square', busy: true });
+  await card.togglePause();
+  await pending;
+  expect(selectGoal).toHaveBeenLastCalledWith(goalId);
+  expect(control.mock.calls).toEqual([['pause']]);
+  expect(card.taskControl?.icon).toBe('play');
+  await card.togglePause();
+  expect(control.mock.calls).toEqual([['pause'], ['resume']]);
+  expect(root.querySelector('[data-e2e=repair-stop-task]')).toBeTruthy();
+});
+
+it('explains the land constraint block and keeps the production start unavailable', async () => {
+  const blocked = plan({
+    status: 'BLOCKED',
+    execution: { allowed: false, mode: 'production', reason: '可信陆地约束不可用' },
+    blocking: [{ code: 'land_constraint_unavailable', reason: 'registration_required',
+      message: 'MSS 与 PAN 缺少可信执行级配准' }],
+  });
+  vi.mocked(apiRepairStatus).mockResolvedValue(status({ plan: blocked }) as never);
+  await mount(blocked);
+  expect(root.querySelector('[data-e2e=repair-land-block]')?.textContent).toContain('缺少可信执行级配准');
+  expect(root.textContent).toContain('差异定位 → 自动绘制');
+  expect(root.querySelector('[data-e2e=repair-plan-start]')).toBeNull();
 });

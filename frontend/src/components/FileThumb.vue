@@ -4,12 +4,19 @@ import { onBeforeUnmount, computed, ref, watch } from 'vue';
 import { loadSrConfig, sceneImageUrl } from '../lib/scene';
 import type { ViewerRec } from '../stores/viewer';
 
-const props = defineProps<{ rec?: ViewerRec; size?: number; previewSrc?: string; detailSrc?: string }>();
+const props = defineProps<{
+  rec?: ViewerRec;
+  size?: number;
+  previewSrc?: string;
+  detailSrc?: string;
+  standbyPhase?: 'resolving' | 'standby' | 'loading' | 'failed';
+  scanActive?: boolean;
+}>();
 
 const diskSrc = computed(() => sceneImageUrl(loadSrConfig(), props.rec?.card?.row.thumbnail_url ?? null));
 const failed = ref(false);
 watch(diskSrc, () => { failed.value = false; });
-const showDisk = computed(() => !!diskSrc.value && !failed.value);
+const showDisk = computed(() => !props.standbyPhase && !!diskSrc.value && !failed.value);
 
 const BOX_H = 96;                       // 横幅形态的高度（与 CSS 一致）
 
@@ -17,6 +24,7 @@ const cv = ref<HTMLCanvasElement | null>(null);
 const hasDrawing = ref(false);
 watch(() => props.rec?.id, () => { hasDrawing.value = false; });
 let ro: ResizeObserver | null = null;
+const phase = computed(() => props.standbyPhase && (hasDrawing.value ? 'ready' : props.standbyPhase));
 
 function draw(): void {
   const el = cv.value;
@@ -81,7 +89,8 @@ onBeforeUnmount(() => {
 <template>
   <div
     class="ft"
-    :class="{ compact: !!size }"
+    :data-phase="phase"
+    :class="{ compact: !!size, scanning: scanActive }"
     :style="size ? { width: size + 'px', height: size + 'px' } : undefined"
   >
     <img v-if="showDisk" :key="diskSrc" class="ft-preview" :src="diskSrc" alt="" loading="lazy" decoding="async" draggable="false" @error="failed = true" />
@@ -90,7 +99,15 @@ onBeforeUnmount(() => {
       <img v-if="detailSrc" class="ft-preview ft-detail" :src="detailSrc" alt="" draggable="false" />
     </template>
     <canvas v-else-if="rec?.thumb || hasDrawing || !rec?.card" ref="cv" class="ft-cv"></canvas>
-    <span v-if="!showDisk && !previewSrc && !rec?.thumb && !hasDrawing" class="ft-ph">{{ rec?.status || '未打开' }}</span>
+    <div v-if="standbyPhase" class="ft-standby" aria-hidden="true">
+      <i class="ft-frame" />
+      <i class="ft-corners" />
+      <i class="ft-search" />
+      <i class="ft-film" />
+      <i class="ft-scan" />
+    </div>
+    <i v-if="standbyPhase && hasDrawing" class="ft-ready" aria-hidden="true" />
+    <span v-if="!standbyPhase && !showDisk && !previewSrc && !rec?.thumb && !hasDrawing" class="ft-ph">{{ rec?.status || '未打开' }}</span>
   </div>
 </template>
 
@@ -138,5 +155,133 @@ onBeforeUnmount(() => {
   font-size: 10px;
   line-height: 1.45;
   padding: 0 6px;
+}
+/* Viewer sidebar only. All layers are positioned inside the fixed-size thumbnail. */
+.ft[data-phase] {
+  --standby-ease: cubic-bezier(.22,1,.36,1);
+  --standby-ink: #678878;
+  background: color-mix(in srgb, #93aa98 23%, var(--chrome));
+  transition: border-color 240ms var(--standby-ease);
+}
+.ft[data-phase="standby"]:hover {
+  border-color: color-mix(in srgb, var(--standby-ink) 60%, var(--line));
+}
+.ft-standby, .ft-standby > i, .ft-ready { position: absolute; pointer-events: none; }
+.ft-standby { inset: 0; overflow: hidden; }
+.ft-frame, .ft-corners {
+  inset: 10px;
+  border: 1px solid rgb(103 136 120 / .24);
+  border-radius: 4px;
+  transition: opacity 360ms var(--standby-ease), transform 360ms var(--standby-ease);
+}
+.ft-corners {
+  inset: 16px;
+  border: 0;
+  --corner: linear-gradient(var(--standby-ink), var(--standby-ink));
+  background:
+    var(--corner) left top / 8px 1px, var(--corner) left top / 1px 8px,
+    var(--corner) right top / 8px 1px, var(--corner) right top / 1px 8px,
+    var(--corner) left bottom / 8px 1px, var(--corner) left bottom / 1px 8px,
+    var(--corner) right bottom / 8px 1px, var(--corner) right bottom / 1px 8px;
+  background-repeat: no-repeat;
+  opacity: .64;
+}
+.ft-search, .ft-film {
+  top: 50%;
+  left: 50%;
+  color: var(--standby-ink);
+  transition: transform 360ms var(--standby-ease), opacity 360ms var(--standby-ease);
+}
+.ft-search {
+  width: 18px;
+  height: 18px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  transform: translate(-57%, -57%) scale(.75);
+  opacity: 0;
+}
+.ft-search::after {
+  content: '';
+  position: absolute;
+  width: 8px;
+  height: 1.5px;
+  right: -6px;
+  bottom: -2px;
+  background: currentColor;
+  transform: rotate(45deg);
+}
+.ft-film {
+  width: 30px;
+  height: 22px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  background:
+    repeating-linear-gradient(180deg, transparent 0 3px, currentColor 3px 5px) left 2px top / 2px 100% no-repeat,
+    repeating-linear-gradient(180deg, transparent 0 3px, currentColor 3px 5px) right 2px top / 2px 100% no-repeat;
+  transform: translate(-50%, -50%);
+  opacity: .76;
+}
+.ft-film::after {
+  content: '';
+  position: absolute;
+  inset: 4px 6px;
+  background: currentColor;
+  opacity: .45;
+  clip-path: polygon(0 100%, 0 82%, 38% 33%, 59% 61%, 76% 42%, 100% 76%, 100% 100%);
+}
+.ft[data-phase="resolving"] .ft-search { opacity: .85; transform: translate(-57%, -57%); }
+.ft[data-phase="resolving"] .ft-film { opacity: 0; transform: translate(-50%, -50%) scale(.8); }
+.ft[data-phase="resolving"] .ft-corners { transform: scale(1.17); }
+.ft[data-phase="loading"] :is(.ft-frame, .ft-corners, .ft-film) { transition-duration: 240ms; }
+.ft[data-phase="loading"] :is(.ft-frame, .ft-corners) { opacity: 0; }
+.ft[data-phase="loading"] .ft-film { opacity: .3; transform: translate(-50%, -50%) scale(.86); }
+.ft[data-phase="failed"] .ft-film { opacity: .36; }
+.ft-scan {
+  inset: 7px 6px;
+  opacity: 0;
+  transition: opacity 240ms var(--standby-ease);
+}
+.ft[data-phase="loading"] .ft-scan { opacity: 1; }
+.ft-scan::before {
+  content: '';
+  position: absolute;
+  width: 100%;
+  height: 1px;
+  top: 50%;
+  background: linear-gradient(90deg, transparent, #70bbaa 50%, transparent);
+  box-shadow: 0 0 8px 2px rgb(112 187 170 / .28);
+}
+.ft[data-phase="loading"] .ft-scan::before {
+  animation: ft-scan 2.3s var(--standby-ease) infinite paused;
+}
+.ft[data-phase="loading"].scanning .ft-scan::before { animation-play-state: running; }
+@keyframes ft-scan {
+  0% { top: 5%; opacity: 0; }
+  20% { opacity: .72; }
+  84% { opacity: .6; }
+  100% { top: 95%; opacity: 0; }
+}
+.ft[data-phase="ready"] :is(.ft-frame, .ft-corners, .ft-film) { opacity: 0; }
+.ft[data-phase="ready"] .ft-cv { animation: ft-reveal 620ms var(--standby-ease); }
+@keyframes ft-reveal {
+  from { clip-path: inset(0 0 100%); opacity: 0; scale: 1.035; }
+  to { clip-path: inset(0); opacity: 1; scale: 1; }
+}
+.ft-ready {
+  inset: 1px;
+  border: 1px solid #83b5a0;
+  border-radius: 6px;
+  opacity: 0;
+  animation: ft-ready 480ms var(--standby-ease) 440ms;
+}
+@keyframes ft-ready {
+  0%, 100% { opacity: 0; }
+  35% { opacity: .55; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ft[data-phase], .ft-standby > i { transition: none; }
+  .ft[data-phase="loading"] .ft-scan::before,
+  .ft[data-phase="ready"] .ft-cv, .ft-ready { animation: none; }
+  .ft-scan::before { top: 50%; }
 }
 </style>

@@ -39,6 +39,8 @@ from typing import Optional
 
 import asyncio
 import io
+import hmac
+import secrets
 import json
 import threading
 import logging
@@ -1598,6 +1600,52 @@ def create_app() -> FastAPI:
                 # 服务端隐藏总数（不是这份结果里的）：场景库「恢复已隐藏 (N)」用。
                 "hidden": len(hidden)}
 
+    discovery_key = secrets.token_bytes(32)
+    discovery_slot = asyncio.Semaphore(1)
+
+    def discovery_signature(scene_id: str, expires: int, revision: str) -> str:
+        return hmac.digest(discovery_key, f"{expires}:{scene_id}:{revision}".encode(), "sha256").hex()
+
+    def discovery_grant(result: dict, source: Path) -> dict:
+        revision = result["row"].get("srcRev")
+        if revision and source.suffix.lower() in (".tif", ".tiff"):
+            expires = int(time.time()) + 60
+            scene_id = result["row"]["id"]
+            result["discovery"] = f"{expires}.{revision}.{discovery_signature(scene_id, expires, revision)}"
+        return result
+
+    def discover_tiffs(scene_id: str, revision: str) -> list[dict]:
+        source = paths.scene_id_to_abs(scene_id, root)
+        directory = scene_resolve.validated_tiff_directory(source.parent)
+        if source.resolve(strict=True).parent != directory or source.is_symlink():
+            raise PathDeniedError("TIFF 不在当前场景目录")
+        if source_revision(source) != revision:
+            return []
+        return scene_resolve.discover_tiffs(directory, paths.scene_id_abs)
+
+    @app.get("/api/scenes/{scene_id}/tiff-files")
+    async def scene_tiff_files(scene_id: str, grant: str = Query(max_length=160)):
+        """List one verified production scene without entering the raster queue."""
+        expires_text, _, signed = grant.partition(".")
+        revision, _, signature = signed.partition(".")
+        if (not expires_text.isascii() or not expires_text.isdecimal()
+                or int(expires_text) < time.time() or not signature.isascii()
+                or not hmac.compare_digest(signature, discovery_signature(scene_id, int(expires_text), revision))):
+            raise HTTPException(403, "场景发现授权无效")
+        async def scan():
+            try:
+                async with discovery_slot:
+                    return await app.state.heavy_work.resolve(discover_tiffs, scene_id, revision)
+            except (OSError, RuntimeError, PathDeniedError):
+                return []
+
+        task = asyncio.create_task(scan())
+        done, _ = await asyncio.wait({task}, timeout=2)
+        if not done:
+            task.cancel()
+            return {"files": []}
+        return {"files": task.result()}
+
     def _resolve_bare_tif(src: Path) -> dict:
         """裸 `.tif` 文件路径的 resolve 结果（与目录分支同形的响应）。
 
@@ -1617,7 +1665,7 @@ def create_app() -> FastAPI:
         parent = src.parent
         scene_dir = None
         inp = scene_search.input_scene_path(parent)
-        if inp is not None and _same_file(inp, src):
+        if inp is not None and src.stem.lower() != "pan_ori" and inp.resolve() == src.resolve():
             scene_dir = parent
         # 能不能提交 SR 有两道门：父目录得是合法场景目录，**且**这个文件在盘阵
         # 前缀里。第二道是为 `SR_PREVIEW_ROOTS` 加的 —— 盘阵外的一张 TIFF 可以
@@ -1648,6 +1696,11 @@ def create_app() -> FastAPI:
                 "writable": os.access(str(parent), os.W_OK),
                 "sr_capable": can_submit,
                 "preview_only": preview_only,
+                **({} if can_submit else {
+                    "read_only": True,
+                    "viewer_role": "reference" if src.stem.lower() == "pan_ori"
+                                   else "stage" if kind != "input" else "other",
+                }),
                 "kind": kind,
                 "suffix": suffix,
                 "capabilities": _capabilities(
@@ -1752,7 +1805,12 @@ def create_app() -> FastAPI:
             if "source_fingerprint" in body:
                 from backend.services.source_match import verify_source
                 try:
-                    timed('sample',verify_source,raster,body["source_fingerprint"])
+                    ensure_allowed(raster, kind="file")
+                    if raster.resolve(strict=True).parent != d.resolve(strict=True):
+                        raise PathDeniedError("源 TIFF 不在已定位场景内")
+                    timed('sample', verify_source, raster, body["source_fingerprint"])
+                except (PathDeniedError, OSError, RuntimeError) as exc:
+                    raise HTTPException(403, "源 TIFF 超出场景读取边界") from exc
                 except ValueError as exc:
                     raise HTTPException(status_code=409, detail=str(exc)) from exc
             dims = timed('dims',_cached_dims,raster)
@@ -1795,7 +1853,7 @@ def create_app() -> FastAPI:
             # 也就无从推起 —— 推出来的那份是本体的掩码，与这张产物毫无关系。
             # 盘阵外的预览源同理：没有写掩码的权限。
             mask_path = derived_mask_path(str(d)) if can_submit else None
-            return {
+            result = {
                 "source": "manual",
                 "row": row,
                 "resolved": {
@@ -1833,6 +1891,27 @@ def create_app() -> FastAPI:
                 },
             }
 
+            return discovery_grant(result, raster) if "source_fingerprint" in body else result
+
+        def verify_directory_tiff(path: Path, filename: str) -> dict:
+            if (not isinstance(filename, str) or not filename
+                    or any(c in filename for c in ("/", chr(92), ":", chr(0)))):
+                raise HTTPException(400, "TIFF 文件名无效")
+            try:
+                directory = scene_resolve.validated_tiff_directory(path)
+                target = scene_resolve.direct_tiff(directory, filename)
+                actual_size = target.stat().st_size
+            except (PathDeniedError, OSError, RuntimeError) as exc:
+                raise HTTPException(404, {"code": "tiff_unlinked", "message": "当前场景内没有可关联的同名 TIFF"}) from exc
+            from backend.services.source_match import verify_source
+            try:
+                if size_bytes is not None and actual_size != size_bytes:
+                    raise ValueError("文件字节数不符，不能关联")
+                timed('sample', verify_source, target, body["source_fingerprint"])
+            except (ValueError, OSError) as exc:
+                raise HTTPException(409, str(exc)) from exc
+            return discovery_grant(timed('row', _resolve_bare_tif, target), target)
+
         raw_path = body.get("path")
         if isinstance(raw_path, str) and raw_path.strip():
             try:
@@ -1863,9 +1942,12 @@ def create_app() -> FastAPI:
                         timed('sample',verify_source,target,body["source_fingerprint"])
                     except ValueError as exc:
                         raise HTTPException(status_code=409, detail=str(exc)) from exc
-                return timed('row',_resolve_bare_tif,target)
+                result = timed('row', _resolve_bare_tif, target)
+                return discovery_grant(result, target) if "source_fingerprint" in body else result
             if "source_fingerprint" in body:
-                raise HTTPException(status_code=400, detail="关联拖入文件须填写具体 TIFF 文件路径，不能填目录")
+                fingerprint = body["source_fingerprint"]
+                filename = fingerprint.get("name") if isinstance(fingerprint, dict) else None
+                return verify_directory_tiff(target, filename)
             tried = [(posix, "")]
         else:
             name, date = body.get("name") or "", body.get("date")
@@ -1882,10 +1964,21 @@ def create_app() -> FastAPI:
             # 指的是哪一景是它自己说的，比「用户当时在看哪一景」权威。所以今天所有
             # 生产全名的行为一个字节都不变，锚定目录对它们连 stat 都不花。
             anchor_notes: list[str] = []
-            anchors = _parse_anchors(body.get("anchor"), anchor_notes)
+            raw_anchors = body.get("anchor")
             # 试过锚定目录却不成 → 把「试过哪儿、为什么不成」并进下面那几条 400 的
             # 说明里。不说的话用户只看见「认不出这份 jpg」，而他自己明明开着那一景。
             # 没试过（名字自己能反推）时这段话恒为空 —— 那几条 400 的措辞不变。
+            if (Path(name).suffix.lower() in (".tif", ".tiff")
+                    and not parse_scene_date(name) and "source_fingerprint" in body):
+                if size_bytes is None:
+                    raise HTTPException(400, "须提供 TIFF 字节数")
+                current_anchor = raw_anchors[:1] if isinstance(raw_anchors, list) else raw_anchors
+                tiff_anchor = _parse_anchors(current_anchor, [])
+                if not tiff_anchor:
+                    raise HTTPException(404, {"code": "tiff_unlinked", "message": "未关联场景"})
+                return verify_directory_tiff(Path(tiff_anchor[0]), name)
+
+            anchors = _parse_anchors(raw_anchors, anchor_notes)
             anchor_note = ""
             if anchors and not parse_scene_date(name) \
                     and Path(name).suffix.lower() in (".jpg", ".jpeg"):

@@ -423,9 +423,15 @@ class RepairApplicationTest(unittest.TestCase):
 
     def test_production_mode_is_refused_without_bypassing_the_gate(self):
         scene_dir, inp = self.scene(6)
-        plan = svc.prepare_repair(
-            self.store, session_id="s1", workspace=self.workspace(
-                (scene_dir, inp)), scope="workspace", mode="production")
+        from backend.services.mss_water import WaterUnavailable
+
+        with mock.patch("backend.services.repair_land.prepare_item",
+                        side_effect=WaterUnavailable("registration_required", "MSS registration required")):
+            plan = svc.prepare_repair(
+                self.store, session_id="s1", workspace=self.workspace(
+                    (scene_dir, inp)), scope="workspace", mode="production")
+        self.assertEqual(plan["blocking"][0]["reason"], "registration_required")
+        self.assertEqual(plan["blocking"][0]["name"], scene_dir.name)
         self.assertFalse(plan["execution"]["allowed"])
         self.assertEqual(plan["status"], "BLOCKED")
         with self.assertRaises(RepairPlanConflict) as denied:

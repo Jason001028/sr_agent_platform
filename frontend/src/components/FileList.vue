@@ -71,7 +71,8 @@ watch(() => Object.values(refresh.entries).map(e => `${e.recId}:${e.unread}:${e.
 function decorated(id: number) { return refresh.entries[id]?.unread || leaving.value.includes(id); }
 function groupOf(rec: { sceneDir?: string | null; lqPath?: string | null }) { return normDir(rec.sceneDir || rec.lqPath || ''); }
 function groupHeader(id: number, group: string) {
-  return !!group && Object.values(refresh.entries).some(e => normDir(e.result.group || '') === group)
+  return !!group && (Object.values(refresh.entries).some(e => normDir(e.result.group || '') === group)
+    || store.recsOrdered.filter(r => r.discoveredTiff && groupOf(r) === group).length >= 4)
     && store.recsOrdered.find(r => groupOf(r) === group)?.id === id;
 }
 function toggleGroup(group: string) { closedGroups.value = closedGroups.value.includes(group) ? closedGroups.value.filter(g => g !== group) : [...closedGroups.value, group]; }
@@ -261,8 +262,26 @@ function fmtBytes(n: number): string {
  *  与「目录不存在」不是一回事，分开说。 */
 function linkTag(rec: ViewerRec): string {
   if (rec.serverSourceVerified) return '已核对';
-  return rec.linkNote?.includes('字节数') ? '源不符' : '未关联';
+  return /字节数|内容采样不符/.test(rec.linkNote ?? '') ? '源不符' : '未关联';
 }
+function thumbnailPhase(rec: ViewerRec) {
+  if (rec.statusCls === 'err' || rec.pendingError) return 'failed';
+  if (rec.pending || rec.resolvingSource) return 'resolving';
+  if (store.imageLoad.active && store.imageLoad.recId === rec.id
+      && store.imageLoad.state !== 'stopped') return 'loading';
+  return 'standby';
+}
+
+function thumbnailStatus(rec: ViewerRec) {
+  if (rec.card && rec.thumb && rec.statusCls !== 'err') return '已打开';
+  switch (thumbnailPhase(rec)) {
+    case 'resolving': return rec.pending ? rec.status : '解析中';
+    case 'loading': return store.imageLoad.state === 'running' ? '加载中' : '已暂停';
+    case 'standby': return rec.status.startsWith('已停止') ? rec.status : '待打开';
+    default: return rec.pending ? '解析失败' : '打开失败';
+  }
+}
+
 function linkTitle(rec: ViewerRec): string {
   const asset = rec.previewAsset;
   return [rec.linkNote, asset && (asset.uploaded ? '读取方式：上传缓存' : '读取方式：服务端直读'),
@@ -322,7 +341,12 @@ function linkTitle(rec: ViewerRec): string {
         @dragstart="store.startRecDrag(rec, $event)"
         @dragend="store.endRecDrag()"
       >
-        <template #thumbnail><FileThumb class="sr-refresh-card__thumb" :rec="rec" :size="96" /></template>
+        <template #thumbnail>
+          <FileThumb class="sr-refresh-card__thumb" :rec="rec" :size="96"
+            :standby-phase="thumbnailPhase(rec)"
+            :scan-active="store.imageLoad.state === 'running' && store.imageLoad.recId === rec.id
+              && pageVisible && !reduced && !store.sidebarCollapsed && visibleCards.includes(rec.id)" />
+        </template>
         <span v-if="decorated(rec.id)" class="sr-refresh-card__rail" aria-hidden="true" />
         <span v-if="decorated(rec.id)" class="sr-refresh-card__badge" data-e2e="image-refresh-badge">
           <img class="sr-refresh-card__badge-icon" :src="`${refreshIconBase}sr-holo-new-${sweepId === rec.id && !reduced && !leaving.includes(rec.id) ? 'animated' : 'static'}.svg`" alt="" draggable="false">✦ 新成果
@@ -375,7 +399,7 @@ function linkTitle(rec: ViewerRec): string {
             <!-- 三颗小标挤在文件名上方、**不留换行**：换行会被 Vue 编成空白文本节点，
                  名字的 textContent 会多出空格（e2e 有整串比对名字的断言）。间距一律
                  由 CSS 的 margin-right 给。 -->
-            <template v-if="rec.route === 'jpg'"><span class="scn" :title="rec.sceneDir && !rec.previewOnly ? SCENE_TITLE : '服务端缓存 JPG；业务关联与预览独立'">{{ rec.sceneDir && !rec.previewOnly ? '盘阵' : '服务端 JPG' }}</span><span v-if="rec.sceneDir" class="ord" :title="ORD_TITLE">{{ store.sceneOrdinalOf(rec) }}</span><span v-if="rec.sceneDir" class="stage" :class="rec.stageKind" :title="STAGE_TITLE">{{ rec.stageLabel }}</span></template><span class="fname">{{ rec.name }}</span>
+            <template v-if="rec.route === 'jpg'"><span class="scn" :title="rec.sceneDir && !rec.previewOnly ? SCENE_TITLE : '服务端缓存 JPG；业务关联与预览独立'">{{ rec.sceneDir && !rec.previewOnly ? '盘阵' : '服务端 JPG' }}</span><span v-if="rec.sceneDir" class="ord" :title="ORD_TITLE">{{ store.sceneOrdinalOf(rec) }}</span><span v-if="rec.sceneDir && rec.stageLabel" class="stage" :class="rec.stageKind" :title="STAGE_TITLE">{{ rec.stageLabel }}</span></template><span class="fname">{{ rec.name }}</span>
           </div>
           <div class="meta">
             <!-- 占位卡没有尺寸可言，但这一行**留在原地**：补齐时不至于整卡跳一下。 -->
@@ -392,7 +416,11 @@ function linkTitle(rec: ViewerRec): string {
               <button type="button" class="refresh-open" :disabled="refresh.opening !== null" @click.stop="refresh.open(rec.id)">{{ refresh.opening === rec.id ? '加载中…' : '查看新图' }}</button>
             </template>
             <span v-else-if="refresh.preparing[groupOf(rec)]" class="status muted">成果准备中</span>
-            <span v-else class="status" :class="rec.statusCls" :title="rec.pendingError || rec.status">{{ rec.status }}</span>
+            <Transition v-else-if="rec.pending || rec.resolvingSource || rec.card" name="standby-status">
+              <span :key="thumbnailStatus(rec)" class="status standby-status" :data-phase="thumbnailPhase(rec)"
+                :title="rec.pendingError || rec.linkNote || rec.status">{{ thumbnailStatus(rec) }}</span>
+            </Transition>
+            <span v-else class="status" :class="rec.statusCls" :title="rec.pendingError || rec.linkNote || rec.status">{{ rec.status }}</span>
             <span v-if="refresh.errors[rec.id]" class="refresh-error" role="status">{{ refresh.errors[rec.id] }}</span>
             <!-- 中间产物：说清它与本体的关系。卡片上那三颗小标只说「哪一景、哪个环节」，
                  这一条说的是「所以你不能对它做什么」。 -->
@@ -406,7 +434,7 @@ function linkTitle(rec: ViewerRec): string {
               <button v-if="rec.localPreviewJpeg" type="button" class="link-source preview-download" aria-label="下载预览 JPG" :title="rec.previewAsset ? '下载缓存预览 JPG（当前缩放档位；长边受真分辨率上限限制）' : '下载本地预览 JPG（导出长边最多 4096）'" @click.stop="store.downloadLocalPreview(rec.id)">预览↓</button>
             </span>
             <span v-if="rec.previewOnly && !isIntermediateStage(rec.stageKind)" class="link-tag" title="仅可查看，不能提交 SR 或写入掩码">只读</span>
-            <button v-if="!rec.sceneId && /\.tiff?$/i.test(rec.file.name)" type="button" class="link-source" @click.stop="startLink(rec.id)">关联服务端路径</button>
+            <button v-if="!rec.sceneId && /\.tiff?$/i.test(rec.file.name)" type="button" class="link-source" @click.stop="startLink(rec.id)">关联场景</button>
           </div>
         </template>
       </FileListCard>
@@ -415,8 +443,8 @@ function linkTitle(rec: ViewerRec): string {
   <div v-if="linkId !== null" class="source-link-backdrop" @click.self="!linking && (linkId=null)">
     <form class="source-link-dialog" role="dialog" aria-modal="true" aria-labelledby="source-link-title" @submit.prevent="submitLink">
       <h3 id="source-link-title">关联服务端影像</h3>
-      <p>填写这张 TIFF 在服务端的完整文件路径。核对文件名、字节数及头中尾内容采样后使用服务端预览；采样不等同于全文件校验。仅预览授权不增加 SR 提交权限。</p>
-      <input v-model="linkPath" aria-label="服务端 TIFF 文件路径" placeholder="完整 TIFF 路径（不能只填目录）" :disabled="linking" required />
+      <p>填写生产场景目录或这张 TIFF 的服务端路径。平台会核对同名文件的字节数及内容采样。</p>
+      <input v-model="linkPath" aria-label="场景目录或服务端 TIFF 路径" placeholder="场景目录或完整 TIFF 路径" :disabled="linking" required />
       <p v-if="linkError" role="alert">{{ linkError }}</p>
       <div v-if="linking && store.imageLoad.active && store.imageLoad.recId === linkId">
         <span>{{ store.imageLoad.stage }}{{ store.imageLoad.state === 'paused' ? '（已暂停）' : '' }}</span>
@@ -724,6 +752,17 @@ function linkTitle(rec: ViewerRec): string {
   border-radius: 4px;
   background: var(--surface-2);
   border: 1px solid var(--line);
+}
+.file-item .status.standby-status {
+  color: var(--ink-faint);
+  background: color-mix(in srgb, #91a998 16%, var(--surface-3));
+}
+.file-item .standby-status[data-phase="loading"] { color: var(--ok); }
+.file-item .standby-status[data-phase="failed"] { color: var(--err); }
+.standby-status-enter-active { transition: opacity 240ms cubic-bezier(.22,1,.36,1); }
+.standby-status-enter-from { opacity: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .standby-status-enter-active { transition: none; }
 }
 .file-item .status { color: var(--warn); max-width:100%; overflow:hidden; text-overflow:ellipsis; }
 .file-item .status.err { color: var(--err); }

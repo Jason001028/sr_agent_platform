@@ -26,7 +26,7 @@ from starlette.concurrency import run_in_threadpool
 
 from backend.api import paths
 from backend.pathguard import ensure_preview_allowed, to_posix_array_path
-from backend.services import preview_cache
+from backend.services import preview_cache, scene_resolve
 from backend.services.preview_jpg import (build_preview_pixels, scene_dims, source_revision,
     cache_meta, versioned_preview_path, PREVIEW_RULE_VERSION)
 from backend.services.source_match import verify_source
@@ -166,14 +166,23 @@ class ImageOpen:
             'serverPath': None if meta['uploaded'] else meta['path']}
 
     def resolve(self, body):
+        expected_revision = body.get('expectedSourceRev')
         try:
             candidate = paths.scene_id_to_abs(body['sceneId'], paths.scenes_root(), allow_preview=True) if body.get('sceneId') else to_posix_array_path(body.get('path', ''))
             candidate = ensure_preview_allowed(candidate, kind='file')
+            if expected_revision is not None:
+                directory = scene_resolve.validated_tiff_directory(candidate.parent)
+                candidate = scene_resolve.direct_tiff(directory, candidate.name)
+                if source_revision(candidate) != expected_revision:
+                    raise ValueError('源 TIFF 已变化，请重新发现同景影像')
             if body.get('fingerprint'):
                 verify_source(candidate, body['fingerprint'])
         except Exception as exc:
             raise HTTPException(409, f'服务端无法直接读取此文件：{exc}') from exc
-        return self.asset(candidate)
+        asset = self.asset(candidate)
+        if expected_revision is not None and asset['sourceRev'] != expected_revision:
+            raise HTTPException(409, '源 TIFF 已变化，请重新发现同景影像')
+        return asset
 
     def select(self, token, body):
         with self.lock:

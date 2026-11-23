@@ -1985,3 +1985,100 @@ class TestMssSameStemPreview(ResolveBase):
                 import io
                 with Image.open(io.BytesIO(preview.content)) as image:
                     self.assertEqual(image.size, (320 // div, 640 // div))
+
+class TestSceneTiffDiscovery(ResolveBase):
+    def _pan_scene(self, name, value):
+        directory = make_scene(self.root / name, name, tif=False)
+        for filename in ("PAN.tif", "PAN_ori.tif", "PAN_NOSR.tif", "other.TIFF",
+                         "mask.tif", "fifth.tif", "sixth.tiff"):
+            tifffile.imwrite(directory / filename, np.full((16, 24), value, dtype=np.uint16))
+        return directory
+
+    def _drop(self, client, source, directory=None):
+        import base64
+        content = source.read_bytes()
+        sample = base64.b64encode(content).decode()
+        return client.post("/api/scenes/resolve", json={
+            "name": source.name, "size_bytes": len(content),
+            "source_fingerprint": {"name": source.name, "size": len(content), "samples": [sample] * 3},
+            "anchor": [directory.as_posix()] if directory else [],
+        })
+
+    def test_short_tiff_discovery_and_production_gates(self):
+        scene_a = self._pan_scene("gf07-a", 100)
+        scene_b = self._pan_scene("gf07-b", 200)
+        client = self.client()
+        for name, can_submit in [("PAN.tif", True), ("PAN_ori.tif", False)]:
+            response = self._drop(client, scene_a / name, scene_a)
+            self.assertEqual(response.status_code, 200, response.text)
+            result = response.json()
+            self.assertEqual(result["resolved"]["sr_capable"], can_submit)
+            url = f'/api/scenes/{result["row"]["id"]}/tiff-files'
+            self.assertEqual(client.get(url, params={"grant": "invalid"}).status_code, 403)
+            self.assertEqual(client.get(f"/api/scenes/{scene_id_abs(scene_b / name)}/tiff-files",
+                                        params={"grant": result["discovery"]}).status_code, 403)
+            with mock.patch("backend.api.app._cached_dims", side_effect=AssertionError("pixel metadata read")):
+                listing = client.get(url, params={"grant": result["discovery"]})
+            self.assertEqual(listing.status_code, 200, listing.text)
+            files = {file["name"]: file for file in listing.json()["files"]}
+            self.assertEqual(len(files), 7)
+            self.assertEqual(files["PAN_ori.tif"]["viewerRole"], "reference")
+            self.assertTrue(all(file["readOnly"] for file in files.values()))
+            self.assertEqual(files["PAN_NOSR.tif"]["kind"], "nosr")
+            if not can_submit:
+                self.assertFalse(result["resolved"]["capabilities"]["mask_write"])
+                for directory in ({}, {"lq_path": scene_a.as_posix()}):
+                    self.assertEqual(client.post("/api/masks", json={
+                        **directory, "scene_id": result["row"]["id"], "read_only": False,
+                    }).status_code, 403)
+        self.assertEqual(client.post("/api/queue", json={
+            "lq_path": scene_a.as_posix(), "scene_id": scene_id_abs(scene_a / "PAN_ori.tif"),
+            "capabilities": {"sr_submit": True},
+        }).status_code, 403)
+        self.assertEqual(self._drop(client, scene_a / "PAN.tif", scene_b).status_code, 409)
+        self.assertEqual(self._drop(client, scene_a / "PAN.tif").status_code, 404)
+        payload = self._drop(client, scene_a / "PAN.tif", scene_a).request.read()
+        import json
+        request = json.loads(payload)
+        request["path"] = scene_a.as_posix()
+        manual = client.post("/api/scenes/resolve", json=request)
+        self.assertEqual(manual.status_code, 200, manual.text)
+        self.assertIn("discovery", manual.json())
+        self.assertFalse(list(scene_a.glob("*.jpg")))
+
+    def test_reference_preview_checks_source_revision_before_open(self):
+        directory = self._pan_scene("gf07", 100)
+        client = self.client()
+        response = self._drop(client, directory / "PAN.tif", directory).json()
+        listing = client.get(f'/api/scenes/{response["row"]["id"]}/tiff-files',
+                             params={"grant": response["discovery"]}).json()
+        reference = next(file for file in listing["files"] if file["name"] == "PAN_ori.tif")
+        body = {"sceneId": reference["id"], "expectedSourceRev": reference["srcRev"]}
+        asset = client.post("/api/image-open/assets", json=body)
+        self.assertEqual(asset.status_code, 200, asset.text)
+        preview = client.get(f'/api/image-open/assets/{asset.json()["id"]}/preview?div=4')
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview.headers["content-type"], "image/jpeg")
+        tifffile.imwrite(directory / reference["name"], np.zeros((30, 40), dtype=np.uint16))
+        self.assertEqual(client.post("/api/image-open/assets", json=body).status_code, 409)
+
+    def test_discovery_bounds_and_io_failure(self):
+        directory = self._pan_scene("gf07", 100)
+        other = self._pan_scene("other", 200)
+        client = self.client()
+        try:
+            (directory / "escaped.tif").symlink_to(other / "PAN.tif")
+        except OSError:
+            pass
+        else:
+            self.assertEqual(self._drop(client, directory / "escaped.tif", directory).status_code, 404)
+        response = self._drop(client, directory / "PAN.tif", directory).json()
+        url = f'/api/scenes/{response["row"]["id"]}/tiff-files'
+        params = {"grant": response["discovery"]}
+        names = {item["name"] for item in client.get(url, params=params).json()["files"]}
+        self.assertNotIn("escaped.tif", names)
+        with mock.patch("backend.services.scene_resolve.discover_tiffs", side_effect=OSError):
+            self.assertEqual(client.get(url, params=params).json(), {"files": []})
+        for index in range(256):
+            (directory / f"{index}.txt").touch()
+        self.assertEqual(client.get(url, params=params).json(), {"files": []})

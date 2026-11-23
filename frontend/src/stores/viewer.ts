@@ -64,7 +64,7 @@ import {
   PREVIEW_TRUE_MAX_EDGE_OPTIONS, previewResolutionNote,
 } from '../lib/previewLevel.js';
 import {
-  apiResolveScene, apiBakeMask, apiSceneSiblings, fetchSceneJpg, fetchDropSceneJpg,
+  apiResolveScene, apiSceneTiffFiles, HttpError, apiBakeMask, apiSceneSiblings, fetchSceneJpg, fetchDropSceneJpg,
   siblingRow, nosrItemOf, previewCacheStats, clearPreviewCache, watchPreviewCache,
   apiGetSettings, apiSaveSettings,
 } from '../lib/api.js';
@@ -191,6 +191,11 @@ export interface ViewerRec {
   linkNote?: string;
   /** Verified scene identity may exist independently of server JPG pixels. */
   serverSourceVerified?: boolean;
+  discoveredTiff?: boolean;
+  viewerRole?: SceneResolveResult['resolved']['viewer_role'];
+  dropAnchor?: string | null;
+  preferLocalTiff?: boolean;
+  resolvingSource?: boolean;
   localPreviewJpeg?: Blob;
   /** 像素写令牌：每次「有新的写者要接管这张图的像素」时 +1（本地解码
    *  `decodeRec` / 盘阵 JPG 升级 `applySceneJpgToRec`）。落笔前比对，对不上就说
@@ -2251,12 +2256,8 @@ export const useViewerStore = defineStore('viewer', () => {
     const dupOf = (f: File): ViewerRec | undefined =>
       recs.value.find((r) => r.file.name === f.name && (r.previewAsset?r.size:r.file.size) === f.size);
     const queued: {id?:number;file?:File}[]=[];
-    readableTifs.forEach((f) => {
-      const dup = dupOf(f);
-      // 重复的仍然走一遍 activate：分屏下「把同一张图拖到另一侧」是有意义的操作，
-      // 归位规则（含两格互换）在 placeRec 里。
-      queued.push({id:dup?dup.id:openOne(f)});
-    });
+    const anchor = sceneDirOf(side ? recForSide(side) : activeRec.value) ?? lastSceneDir;
+    readableTifs.forEach((file) => queued.push({ id: openOne(file, anchor) }));
     readableImgs.forEach((f) => {
       const dup = dupOf(f);
       queued.push(dup?{id:dup.id}:{file:f});
@@ -2277,9 +2278,9 @@ export const useViewerStore = defineStore('viewer', () => {
     })().catch(error=>{if(!isLoadAbort(error))showErr(error instanceof Error?error.message:String(error));});
   }
 
-  function openOne(file: File):number {
+  function openOne(file: File, dropAnchor?: string | null):number {
     const rec: ViewerRec = {
-      id: nextId++, file: markRaw(file),
+      id: nextId++, file: markRaw(file), dropAnchor,
       probe: null, name: file.name, size: file.size,
       W: 0, H: 0, thumb: null, src: null, srcw: 0, srch: 0, nbands: 0, invert: false,
       stats: null, route: null, sceneId: null, lqPath: null,
@@ -2298,6 +2299,8 @@ export const useViewerStore = defineStore('viewer', () => {
                           origin: 'user' | 'follow' = 'user', readyDiv?: number) {
     const rec = recs.value.find(r => r.id === id);
     if (!rec || rec.pending) return;
+    const running = loadControlFor(rec);
+    if (rec.discoveredTiff && running && !running.signal.aborted) return;
     if (imageLoadOwner && imageLoadOwner.rec !== rec) imageLoadOwner.control.stop();
     if (!rec.thumb || ((rec.previewAsset || (rec.route==='jpg'&&rec.sceneId&&rec.detailDiv!==undefined) || ['sparse', 'chunked', 'utif'].includes(rec.route ?? '')) && rec.detailDiv !== effectivePreviewDiv(rec) && rec.detailDiv!==readyDiv)) {
       return withImageLoad(rec, () => activateCore(id, side, origin, readyDiv), undefined);
@@ -2380,16 +2383,17 @@ export const useViewerStore = defineStore('viewer', () => {
     // 未命中（盘阵上没有 / 指纹不符 / 后端不可达）才回落本地解码，能力不变。
     if (!rec.route && await tryLinkScenes(rec)) return;
     if (!recs.value.includes(rec)) return;      // 关联期间被移除了
-    if(!rec.route && !rec.serverSourceVerified) {
-      const control=loadControlFor(rec)!;
+    if (!rec.route && !rec.serverSourceVerified && !rec.preferLocalTiff) {
+      const control = loadControlFor(rec)!;
       try {
-        const asset=await uploadPreviewFile(rec.file,control,f=>updateProgressUI(f));
-        rec.previewAsset=markRaw(asset); // Retry a stopped JPEG request without uploading again.
-        await loadPreviewAsset(rec,asset,control);return;
-      } catch(error) {
-        if(isLoadAbort(error)||control.signal.aborted)throw error;
+        const asset = await uploadPreviewFile(rec.file, control, updateProgressUI);
+        rec.previewAsset = markRaw(asset);
+        await loadPreviewAsset(rec, asset, control);
+        return;
+      } catch (error) {
+        if (isLoadAbort(error) || control.signal.aborted) throw error;
         delete rec.previewAsset;
-        showToast('服务端临时 JPG 不可用，改用本地预览：'+(error instanceof Error?error.message:String(error)));
+        showToast('服务端临时 JPG 不可用，改用本地预览：' + (error instanceof Error ? error.message : String(error)));
       }
     }
     await decodeRec(rec);
@@ -2561,8 +2565,10 @@ export const useViewerStore = defineStore('viewer', () => {
     if(!applied)return;
     rec.previewAsset=markRaw(asset);rec.detailDiv=div;
     rec.localPreviewJpeg=markRaw(result.blob);
-    rec.status=layout;rec.statusCls='ok';
-    rec.linkNote=rec.serverSourceVerified?'源文件已核对；使用服务端缓存 JPG。':'服务端临时 JPG，仅预览，未关联盘阵业务场景。';
+    rec.status=rec.discoveredTiff ? '已打开' : layout;rec.statusCls='ok';
+    if (!rec.discoveredTiff) {
+      rec.linkNote=rec.serverSourceVerified?'源文件已核对；使用服务端缓存 JPG。':'服务端临时 JPG，仅预览，未关联盘阵业务场景。';
+    }
     if(!rec.file.size)rec.file=markRaw(new File([result.blob],asset.name,{type:'image/jpeg'}));
     // The asset already authorizes preview. Optional scene classification must
     // not hold up this JPG, the next image, or the foreground loading controls.
@@ -2758,10 +2764,12 @@ export const useViewerStore = defineStore('viewer', () => {
     // 环节（本体 / 产物 / NOSR）：两处入口（拖拽升级、快捷芯片）都在 meta 里给，
     // 缺省按本体 —— 只有盘阵场景才有这一项，本地图片 stageKind 保持 undefined。
     // 标签在这一个漏斗里算出来，卡片直接渲染，不必各自再判一遍。
-    rec.stageKind = meta.stageKind ?? 'input';
+    rec.stageKind = rec.viewerRole === 'reference' || rec.viewerRole === 'other'
+      ? undefined : meta.stageKind ?? 'input';
     rec.previewPanSize=meta.previewPanSize??rec.previewPanSize;
     rec.detailDiv=effectivePreviewDiv(rec);
-    rec.stageLabel = stageLabel(rec.stageKind, meta.stageSuffix, rec.name);
+    rec.stageLabel = rec.viewerRole === 'reference' ? '参考影像'
+      : rec.viewerRole === 'other' ? '' : stageLabel(rec.stageKind, meta.stageSuffix, rec.name);
     // 默认是服务端生成预览那份的口径；拖本地 jpg 升级进来的那条路自报来源
     // （它的像素是用户拖进来的原图，写成「服务端已生成」与事实不符）。
     // 尺度报当前档位 —— 取图的两处调用点都按 `previewDiv.value` 生成，所以
@@ -2819,14 +2827,15 @@ export const useViewerStore = defineStore('viewer', () => {
     };
     rec.stageKind = meta.stageKind ?? 'input';
     rec.previewPanSize=meta.previewPanSize;
-    rec.stageLabel = stageLabel(rec.stageKind, meta.stageSuffix, rec.name);
+    rec.stageLabel = rec.viewerRole === 'reference' ? '参考影像'
+      : rec.viewerRole === 'other' ? '' : stageLabel(rec.stageKind, meta.stageSuffix, rec.name);
     rec.serverMaskPath = meta.serverMaskPath ?? null;
     // 一键解析：NOSR 卡紧跟本体卡；其余情况追加到末尾。不参与批量错峰（延迟 0），
     // 只占一次淡入，免得凭空一跳。
     const at = afterId == null ? -1 : recs.value.findIndex((r) => r.id === afterId);
     if (at >= 0) { rec.enterDelay = strictIdentity ? undefined : 0; recs.value.splice(at + 1, 0, rec); }
     else recs.value.push(rec);
-    noteSceneDir(rec);
+    if (meta.W && meta.H) noteSceneDir(rec);
     return rec.id;
   }
 
@@ -2866,7 +2875,8 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.sceneDir = meta.sceneDir ?? null;
     rec.stageKind = meta.stageKind ?? 'input';
     rec.previewPanSize=meta.previewPanSize;
-    rec.stageLabel = stageLabel(rec.stageKind, meta.stageSuffix, rec.name);
+    rec.stageLabel = rec.viewerRole === 'reference' ? '参考影像'
+      : rec.viewerRole === 'other' ? '' : stageLabel(rec.stageKind, meta.stageSuffix, rec.name);
     rec.serverMaskPath = meta.serverMaskPath ?? null;
     rec.status = '正在生成预览…';
     rec.statusCls = '';
@@ -2960,21 +2970,36 @@ export const useViewerStore = defineStore('viewer', () => {
         phase('正在准备服务端 JPG 缓存…');
         let resolvedAsset:PreviewAsset|undefined;
         try {
-          resolvedAsset=rec.previewAsset??await owner.request(signal=>createPreviewAsset({sceneId:rec.sceneId!},signal),'准备服务端概览');
+          resolvedAsset = rec.previewAsset ?? await owner.request(
+            signal => createPreviewAsset({
+              sceneId: rec.sceneId!,
+              ...(rec.discoveredTiff && card.row.srcRev ? { expectedSourceRev: card.row.srcRev } : {}),
+            }, signal), '准备服务端概览');
         } catch(error) {
           if(isLoadAbort(error)||owner.signal.aborted)throw error;
-          if(!(error instanceof ImageOpenError&&error.status===404&&wholeJpegFits(rec.W,rec.H,div)))throw error;
+          if(rec.discoveredTiff || !(error instanceof ImageOpenError&&error.status===404&&wholeJpegFits(rec.W,rec.H,div)))throw error;
         }
         if(resolvedAsset) {
           const asset=resolvedAsset;
-          if(asset.W!==rec.W||asset.H!==rec.H||(card.row.srcRev&&asset.sourceRev!==card.row.srcRev))throw new Error('候选影像源版本或尺寸已变化，请刷新候选');
+          if((!rec.discoveredTiff&&(asset.W!==rec.W||asset.H!==rec.H))||(card.row.srcRev&&asset.sourceRev!==card.row.srcRev))throw new Error('候选影像源版本或尺寸已变化，请刷新候选');
           const result=await owner.request(signal=>fetchPreviewAsset(asset,div,signal,phase),'服务端下采样 JPG（缓存）');
           if(!stillWanted()||rec.token!==intent.token||!recs.value.includes(rec)||effectivePreviewDiv(rec)!==div)return;
           phase('正在解码并装载 JPG…');intent.token++;
           const note=previewResolutionNote(asset.W,asset.H,result.width,result.height);
           const layout=`服务端缓存 JPG 概览 · 请求 ${previewDivLabel(div)}${note?' · '+note:''} · 缓存定期清理`;
-          const applied=await applySceneJpgToRec(rec,{...card.meta,srcRev:asset.sourceRev},result.blob,layout,true,stillWanted,owner);
-          if(applied){rec.previewAsset=markRaw(asset);rec.localPreviewJpeg=markRaw(result.blob);rec.detailDiv=div;}
+          const meta = { ...card.meta, W: asset.W, H: asset.H, srcRev: asset.sourceRev };
+          if (rec.discoveredTiff) {
+            meta.lqPath = null;
+            meta.serverMaskPath = null;
+            meta.previewOnly = true;
+          }
+          const applied = await applySceneJpgToRec(rec, meta, result.blob, layout, true, stillWanted, owner);
+          if(applied){rec.previewAsset=markRaw(asset);rec.localPreviewJpeg=markRaw(result.blob);rec.detailDiv=div;
+            if (rec.discoveredTiff) {
+              rec.status = '已打开';
+              delete rec.linkNote;
+            }
+          }
           return;
         }
         const pending = fetchSceneJpgShared(card.row, div);
@@ -3012,12 +3037,13 @@ export const useViewerStore = defineStore('viewer', () => {
     showMask('正在取盘阵场景的图…', rec.name + '（按需生成或读取预览，'
       + previewDivLabel(effectivePreviewDiv(rec)) + ' 尺度）', false);
     try {
-      await fetchCardPixels(rec);
+      await fetchCardPixels(rec, () => recs.value.includes(rec) && !control?.signal.aborted);
       await warmZoom(rec);
     } catch (e) {
       if (isLoadAbort(e)) throw e;
       const t = e instanceof Error ? e.message : String(e);
-      rec.status = '取图失败'; rec.statusCls = 'err'; rec.linkNote = t;
+      rec.status = rec.discoveredTiff ? '打开失败' : '取图失败'; rec.statusCls = 'err'; rec.linkNote = t;
+      if (rec.discoveredTiff) return;
       showErr('「' + rec.name + '」取图失败：' + t);
     } finally {
       cardLoadCount--;
@@ -3288,13 +3314,13 @@ export const useViewerStore = defineStore('viewer', () => {
     return dropRecs(ids);
   }
 
-  function removeRec(id: number) {
+  function removeRec(id: number, recordUndo = true) {
     if (imageLoadOwner?.rec.id === id) imageLoadOwner.control.stop();
     const i = recs.value.findIndex((r) => r.id === id);
     if (i < 0 || recs.value[i].pending) return;
     cancelAssetAssociation(id);
     for(const [key,job] of cardFetchInflight)if(key.startsWith(id+'|'))job.control?.stop();
-    pushUndo('移除 1 张');
+    if (recordUndo) pushUndo('移除 1 张');
     recs.value.splice(i, 1);
     pruneSpotlight();
     selectedIds.value = selectedIds.value.filter((x) => x !== id);
@@ -4350,7 +4376,9 @@ export const useViewerStore = defineStore('viewer', () => {
     if (autoSubmission.value) {
       try {
         // Capture this scene before awaiting; later selection changes cannot change this request.
-        return await useQueueStore().submit(formToSubmit({ ...defaultForm(), lq_path: rec.lqPath }));
+        const body = formToSubmit({ ...defaultForm(), lq_path: rec.lqPath });
+        if (rec.serverSourceVerified && rec.sceneId) body.scene_id = rec.sceneId;
+        return await useQueueStore().submit(body);
       } finally {
         srBusy.value = false;
       }
@@ -4461,14 +4489,85 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.sceneId = res.row.id;
     rec.sceneDir = res.resolved.dir;
     rec.lqPath = res.resolved.sr_capable ? res.resolved.dir : null;
-    rec.previewOnly = res.resolved.preview_only;
+    rec.previewOnly = (res.resolved.preview_only || res.resolved.read_only);
     rec.srcRev = res.row.srcRev;
     rec.serverMaskPath = res.resolved.mask_path;
-    rec.stageKind = res.resolved.kind;
+    rec.stageKind = res.resolved.viewer_role === 'reference' || res.resolved.viewer_role === 'other'
+      ? undefined : res.resolved.kind;
     rec.resolvedSuffix=res.resolved.suffix;
-    rec.stageLabel = stageLabel(res.resolved.kind, res.resolved.suffix, rec.name);
+    rec.stageLabel = res.resolved.viewer_role === 'reference' ? '参考影像'
+      : res.resolved.viewer_role === 'other' ? '' : stageLabel(res.resolved.kind, res.resolved.suffix, rec.name);
     rec.serverSourceVerified = true;
+    rec.viewerRole = res.resolved.viewer_role;
+    const duplicate = recs.value.find(other => other !== rec && (
+      other.sceneId === rec.sceneId || (rec.srcRev && other.sceneDir === rec.sceneDir && other.srcRev === rec.srcRev)
+    ));
+    if (duplicate) {
+      rec.fav = duplicate.fav;
+      rec.favAt = duplicate.favAt;
+      if (duplicate.srcRev === rec.srcRev) rec.maskRois = duplicate.maskRois;
+      if (activeId.value === duplicate.id) activeId.value = rec.id;
+      if (paneA.value === duplicate.id && paneB.value !== rec.id) paneA.value = rec.id;
+      if (paneB.value === duplicate.id && paneA.value !== rec.id) paneB.value = rec.id;
+      removeRec(duplicate.id, false);
+    }
     noteSceneDir(rec);
+    void mergeSceneTiffs(rec, res);
+  }
+
+  const sceneTiffRequests = new Map<string, AbortController>();
+
+  async function mergeSceneTiffs(rec: ViewerRec, result: SceneResolveResult) {
+    if (!result.discovery) return;
+    const { id } = result.row;
+    const directory = result.resolved.dir;
+    const workspace = workspaceVersion.value;
+    sceneTiffRequests.get(directory)?.abort();
+    const request = new AbortController();
+    sceneTiffRequests.set(directory, request);
+    try {
+      const signal = AbortSignal.any([request.signal, AbortSignal.timeout(3000)]);
+      const files = await apiSceneTiffFiles(loadSrConfig(), id, result.discovery, signal);
+      if (signal.aborted || workspaceVersion.value !== workspace || !recs.value.includes(rec)
+          || rec.sceneId !== id || rec.sceneDir !== directory) return;
+      let after = rec.id;
+      for (const file of files) {
+        const existing = recs.value.find(other => other.sceneId === file.id
+          || (other.sceneDir === directory && other.srcRev === file.srcRev));
+        if (existing) {
+          if (existing.discoveredTiff && !existing.thumb && !loadControlFor(existing) && existing.card) {
+            if (existing.srcRev !== file.srcRev) delete existing.previewAsset;
+            existing.srcRev = file.srcRev;
+            existing.card.row.srcRev = file.srcRev;
+            existing.card.meta.srcRev = file.srcRev;
+          }
+          continue;
+        }
+        const row: SceneRow = {
+          ...file, satellite: null, sensor: null, date: null, fake: false,
+          W: null, H: null, rel: null, jpgUrl: null, hasPreview: false, lq_path: null,
+        };
+        after = insertSceneCard({
+          name: file.name, W: 0, H: 0, sceneId: file.id, sceneDir: directory,
+          lqPath: null, stageKind: file.kind ?? undefined, stageSuffix: file.suffix,
+          serverMaskPath: null, previewOnly: true, srcRev: file.srcRev,
+        }, row, after, true);
+        const card = recs.value.find(other => other.id === after)!;
+        card.discoveredTiff = true;
+        card.viewerRole = file.viewerRole;
+        if (file.viewerRole !== 'stage') {
+          card.stageKind = undefined;
+          card.stageLabel = file.viewerRole === 'reference' ? '参考影像' : '';
+        }
+        card.previewOnly = true;
+        card.status = '待打开';
+        card.srcRev = file.srcRev;
+      }
+    } catch {
+      // The foreground image remains available when directory discovery fails.
+    } finally {
+      if (sceneTiffRequests.get(directory) === request) sceneTiffRequests.delete(directory);
+    }
   }
 
   function downloadLocalPreview(id: number) {
@@ -4493,8 +4592,16 @@ export const useViewerStore = defineStore('viewer', () => {
     rememberVerifiedSource(rec, res);
     try {
       const asset=await control.request(signal=>createPreviewAsset({sceneId:res.row.id},signal),'服务端临时 JPG');
+      if (res.row.srcRev && asset.sourceRev !== res.row.srcRev) {
+        await decodeRec(rec, true);
+        return;
+      }
       await loadPreviewAsset(rec,asset,control);return;
     }catch(error){if(isLoadAbort(error)||control.signal.aborted)throw error;if(error instanceof ImageOpenError&&error.status!==404){await decodeRec(rec,true);return;}}
+    if (res.resolved.read_only) {
+      await decodeRec(rec, true);
+      return;
+    }
     if (!wholeJpegFits(res.row.W, res.row.H, div) && /\.tiff?$/i.test(rec.file.name)) {
       rec.linkNote = '已核对盘阵源；整幅 JPG 超出显示预算，直接使用本地渐进预览。';
       await decodeRec(rec, true); return;
@@ -4513,7 +4620,7 @@ export const useViewerStore = defineStore('viewer', () => {
       lqPath: res.resolved.sr_capable ? res.resolved.dir : null,
       sceneDir: res.resolved.dir, serverMaskPath: res.resolved.mask_path,
       stageKind: res.resolved.kind, stageSuffix: res.resolved.suffix,
-      previewOnly: res.resolved.preview_only, srcRev: res.row.srcRev,
+      previewOnly: (res.resolved.preview_only || res.resolved.read_only), srcRev: res.row.srcRev,
     }, blob, `服务端预览（${previewDivLabel(div)}，文件名、字节数与三段内容采样已核对）`, true); }
     catch (error) {
       if (isLoadAbort(error)) throw error;
@@ -4536,9 +4643,10 @@ export const useViewerStore = defineStore('viewer', () => {
     let res: SceneResolveResult;
     // 当前打开的那几景（分屏两块格格子各自的那一景），最近的排在最前 —— 后端按这个
     // 顺序取第一个成立的。名字能自己反推时它完全用不上（后端连 stat 都不花）。
-    const anchor = sceneAnchors([
-      lastSceneDir, sceneDirOf(recForSide('A')), sceneDirOf(recForSide('B')),
-    ]);
+    const anchor = imageKindOf(r.file) === 'tif'
+      ? sceneAnchors([r.dropAnchor === undefined ? lastSceneDir : r.dropAnchor])
+      : sceneAnchors([lastSceneDir, sceneDirOf(recForSide('A')), sceneDirOf(recForSide('B'))]);
+    r.resolvingSource = true;
     try {
       const fingerprint = /\.tiff?$/i.test(r.file.name)
         ? await (control ? control.wait(sourceFingerprint(r.file), '核对源文件') : sourceFingerprint(r.file)) : undefined;
@@ -4576,10 +4684,13 @@ export const useViewerStore = defineStore('viewer', () => {
           + '认得出（平台照当前场景目录点同级栅格）。先到「场景库」页打开该场景，'
           + '再拖一次即可；也可以直接用同场景芯片切到产物。');
       } else {
-        showToast('「' + r.name + '」没有关联到盘阵场景，按本地文件查看'
-          + '（要提交 SR 请到「场景库」页打开该场景目录）');
+        r.preferLocalTiff = e instanceof HttpError && (e.status === 409
+          || (e.detail as { code?: string } | undefined)?.code === 'tiff_unlinked');
+        r.linkNote = '未关联场景：' + r.linkNote;
       }
       return false;
+    } finally {
+      r.resolvingSource = false;
     }
     if (!recs.value.includes(r)) return false;      // 期间已切图/关掉
     await control?.checkpoint('核对关联结果');
@@ -4599,10 +4710,12 @@ export const useViewerStore = defineStore('viewer', () => {
     if(!localJpg&&control) {
       try {
         const asset=await control.request(signal=>createPreviewAsset({sceneId:res.row.id},signal),'服务端临时 JPG');
+        if (res.row.srcRev && asset.sourceRev !== res.row.srcRev) return false;
         await loadPreviewAsset(r,asset,control);
         if(r.previewAsset)return true;
       }catch(error){if(isLoadAbort(error)||control.signal.aborted)throw error;if(error instanceof ImageOpenError&&error.status!==404){r.linkNote='服务端缓存 JPG 不可用，改用本地预览：'+error.message;return false;}}
     }
+    if (!localJpg && res.resolved.read_only) return false;
     if (!localJpg && res.row.W && res.row.H && !wholeJpegFits(res.row.W, res.row.H, previewDiv.value)) {
       r.linkNote = '已核对盘阵源；整幅 JPG 超出显示预算，直接使用本地渐进预览。';
       return false;
@@ -4635,7 +4748,7 @@ export const useViewerStore = defineStore('viewer', () => {
         sceneDir: res.resolved.dir,
         serverMaskPath: res.resolved.mask_path,
         stageKind: res.resolved.kind,
-        stageSuffix: res.resolved.suffix,
+        stageSuffix: res.resolved.suffix, previewOnly: (res.resolved.preview_only || res.resolved.read_only), srcRev: res.row.srcRev,
       }, blob, localJpg && !useServer
         ? '盘阵场景 JPG（拖入的原图，本地解码）' : undefined);
       if (!ok) return false;
@@ -4649,7 +4762,8 @@ export const useViewerStore = defineStore('viewer', () => {
       if (localJpg && !useServer && r.sceneId) void bakeDropPreview(r);
       // 选择与拖入共用本入口：核对成功的 TIFF 同样预热 NOSR，供同景对比。
       // 仅预览授权的外部源不预热；已打开 NOSR 不重复生成。
-      if (r.sceneId && !res.resolved.preview_only && r.stageKind !== 'nosr') void warmNosrPreview(r);
+      if ((localJpg || !res.discovery) && r.sceneId && !(res.resolved.preview_only || res.resolved.read_only) && r.stageKind !== 'nosr') void warmNosrPreview(r);
+      if (!localJpg) return true;
       if (isIntermediateStage(r.stageKind)) {
         // 中间产物：如实说清它与本体的关系。此处**不能**说「可以提交 SR 了」——
         // 这一条的 lqPath 已被服务端置空（见 resolve 的 kind 分岔），提交按钮是
@@ -4719,7 +4833,8 @@ export const useViewerStore = defineStore('viewer', () => {
       }, 200);
       try {
         const res = await apiBakeMask(loadSrConfig(),
-          { lq_path: rec.lqPath, W, H, polygons: polys });
+          { lq_path: rec.lqPath, W, H, polygons: polys,
+            ...(rec.serverSourceVerified && rec.sceneId ? { scene_id: rec.sceneId } : {}) });
         rec.serverMaskPath = res.mask_path;
         hideMask();
         showToast('掩码已写入盘阵：' + res.mask_path

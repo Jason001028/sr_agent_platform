@@ -6,7 +6,7 @@ paths need — turning a production name into candidate scene directories and
 stating whether a directory really is a submit-ready scene — in one place.
 """
 from __future__ import annotations
-from typing import Optional
+from typing import Callable, Optional
 
 from pathlib import Path
 
@@ -93,3 +93,63 @@ def resolve_scene_dir(name: str, *, date: Optional[str] = None,
         raise SceneLookupError(
             "配对歧义：名字命中多个合法场景目录 —— " + "、".join(sorted(hits)))
     return next(iter(hits.values()))
+
+
+def validated_tiff_directory(path: Path) -> Path:
+    """Validate the production directory and its canonical input before listing."""
+    directory = ensure_allowed(path, kind="dir").resolve(strict=True)
+    ensure_allowed(directory, kind="dir")
+    source = scene_search.input_scene_path(directory)
+    meta = directory / f"{directory.name}_meta.xml"
+    if (source is None or source.resolve(strict=True).parent != directory
+            or meta.resolve(strict=True).parent != directory):
+        raise PathDeniedError("无有效场景输入")
+    ensure_allowed(source, kind="file")
+    return directory
+
+
+def direct_tiff(directory: Path, name: str) -> Path:
+    candidate = directory / name
+    if candidate.parent != directory or candidate.suffix.lower() not in (".tif", ".tiff"):
+        raise PathDeniedError("TIFF 必须是场景目录的一级文件")
+    if candidate.resolve(strict=True) != candidate:
+        raise PathDeniedError("不接受 TIFF 符号链接")
+    return ensure_allowed(candidate, kind="file")
+
+
+def discover_tiffs(directory: Path, source_ref: Callable[[Path], str]) -> list[dict]:
+    import os
+    import time
+
+    from backend.services.preview_jpg import source_key
+
+    deadline = time.monotonic() + 1
+    source = scene_search.input_scene_path(directory)
+    files = []
+    with os.scandir(directory) as entries:
+        for index, entry in enumerate(entries):
+            if index >= 256 or time.monotonic() >= deadline:
+                return []
+            if not entry.is_file(follow_symlinks=False) or Path(entry.name).suffix.lower() not in (".tif", ".tiff"):
+                continue
+            try:
+                candidate = direct_tiff(directory, entry.name)
+                info = candidate.stat()
+            except (OSError, PathDeniedError, RuntimeError):
+                continue
+            kind, suffix = None, ""
+            if candidate == source:
+                kind = "input"
+            elif source is not None and candidate.stem.lower() != "pan_ori":
+                stage = scene_search.stage_of_jpg(directory, source, candidate.stem)
+                if stage and stage[2] == candidate and stage[0] != "input":
+                    kind, suffix = stage[:2]
+            files.append({
+                "name": entry.name, "id": source_ref(candidate), "size_bytes": info.st_size,
+                "mtime_ms": info.st_mtime_ns // 1_000_000,
+                "srcRev": f"{source_key(candidate)}-{info.st_size}-{info.st_mtime_ns}",
+                "kind": kind, "suffix": suffix, "readOnly": True,
+                "viewerRole": "reference" if candidate.stem.lower() == "pan_ori"
+                              else "stage" if kind else "other",
+            })
+    return sorted(files, key=lambda item: item["name"].casefold()) if time.monotonic() < deadline else []

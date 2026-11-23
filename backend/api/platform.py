@@ -1013,6 +1013,21 @@ def _mask_target_dir(body: dict) -> Path:
     两条路都收敛到 `scene_search.input_scene_path`，掩码文件名再由
     `mask_stem` 取 —— 目录是不是场景目录，判断只此一处。
     """
+    scene_id = body.get("scene_id")
+    source = None
+    if isinstance(scene_id, str) and scene_id:
+        try:
+            source = paths.scene_id_to_abs(scene_id, paths.scenes_root())
+            if scene_id.startswith("~"):
+                source = ensure_allowed(source, kind="file")
+            canonical = scene_search.input_scene_path(source.parent)
+            if (source.stem.lower() == "pan_ori"
+                    or (scene_id.startswith("~") and canonical is None)
+                    or (canonical is not None and source.resolve(strict=True) != canonical.resolve(strict=True))):
+                raise HTTPException(403, "仅生产输入影像可写入掩码")
+        except (PathDeniedError, OSError, RuntimeError) as e:
+            raise HTTPException(404, "场景不可访问") from e
+
     lq_path = body.get("lq_path")
     if isinstance(lq_path, str) and lq_path.strip():
         try:
@@ -1027,20 +1042,12 @@ def _mask_target_dir(body: dict) -> Path:
                 status_code=404,
                 detail=f"不是合法场景目录：{d}"
                        f"（需含 <目录名>_meta.xml，且含 {cands} 之一）")
+        if source is not None and source.resolve() != inp.resolve():
+            raise HTTPException(403, "掩码目标与影像来源不一致")
         return inp
-    root = paths.scenes_root()
-    if root is None:
-        raise HTTPException(status_code=404,
-                            detail="盘阵未配置（SR_SCENES_ROOT），无场景可掩码")
-    scene_id = body.get("scene_id")
-    if not isinstance(scene_id, str) or not scene_id:
-        raise HTTPException(status_code=400, detail="scene_id 或 lq_path 必填")
-    try:
-        return paths.scene_id_to_abs(scene_id, root)
-    except PathDeniedError as e:
-        raise HTTPException(status_code=404, detail=f"场景不可访问：{e}") from e
-
-
+    if source is not None:
+        return source
+    raise HTTPException(status_code=400, detail="scene_id 或 lq_path 必填")
 
 
 def _norm_sr_params(body: dict) -> dict:
@@ -1093,6 +1100,11 @@ def _norm_sr_params(body: dict) -> dict:
         lq_path = normalize_submit_path(lq_path)
     except PathDeniedError as e:
         raise HTTPException(status_code=400, detail=f"lq_path 不可用：{e}") from e
+    if "scene_id" in body:
+        source_id = body["scene_id"]
+        if not isinstance(source_id, str) or not source_id:
+            raise HTTPException(400, "scene_id 无效")
+        _mask_target_dir({"lq_path": lq_path, "scene_id": source_id})
     if rt.locked_dir and _norm_dir(lq_path) != _norm_dir(rt.locked_dir):
         raise HTTPException(
             status_code=400,

@@ -49,6 +49,7 @@ onMounted(() => {
 });
 onBeforeUnmount(() => disposePress?.());
 const cancelBusy = ref(false), controlNotice = ref('');
+const pausePending = ref<'pause' | 'resume' | null>(null);
 const canStop = computed(() => started.value && !!goalId.value && !terminalMission(goalStatus.value));
 
 const plan = ref<RepairPlan | null>(repairPlanData(props.data));
@@ -73,6 +74,9 @@ const linkedSnapshot = computed(() => {
 });
 const goal = computed(() => linkedSnapshot.value?.goal ?? status.value?.goal ?? null);
 const goalStatus = computed(() => goal.value?.status ?? '');
+const canTogglePause = computed(() => synchronized.value && !!goalId.value && !!goalStatus.value && !terminalMission(goalStatus.value));
+const pauseLabel = computed(() => pausePending.value === 'pause' ? '正在暂停…'
+  : pausePending.value === 'resume' ? '正在继续…' : goalStatus.value === 'PAUSED' ? '继续执行' : '暂停执行');
 watch([goalId, goalStatus], () => { controlNotice.value = ''; });
 const maskReviewOpening = ref(false);
 const needsMaskReview = computed(() => phase.value === 'waiting_review'
@@ -240,6 +244,7 @@ const blockedReason = computed(() => {
 const detailsOpen = ref(false), conflictsOpen = ref(false), preparing = ref(false);
 const conflicts = computed(() => plan.value?.blocking ?? []);
 const firstConflict = computed(() => conflicts.value.find(r => r.code === 'pan_backup_exists') ?? conflicts.value[0]);
+const landBlock = computed(() => conflicts.value.find(row => row.code === 'land_constraint_unavailable'));
 const otherConflicts = computed(() => conflicts.value.filter(r => r !== firstConflict.value));
 const firstConflictLabel = computed(() => [firstConflict.value?.name, firstConflict.value?.filename].filter(Boolean).join(' · '));
 const historical = computed(() => ['EXPIRED', 'SUPERSEDED'].includes(planStatus.value) || plan.value?.mode !== 'production');
@@ -570,16 +575,43 @@ async function openMaskReview(itemId?: string): Promise<void> {
   finally { maskReviewOpening.value = false; }
 }
 async function togglePause(): Promise<void> {
+  if (!canTogglePause.value || pausePending.value || cancelBusy.value || batch.controlBusy) return;
   const gid = goalId.value;
-  if (!gid || batch.controlBusy) return;
-  if (batch.goalId !== gid && !await batch.selectGoal(gid)) return;
-  if (goalId.value !== gid) return;
-  controlNotice.value = await batch.control(goalStatus.value === 'PAUSED' ? 'resume' : 'pause');
-  error.value = batch.controlError;
-  await refreshStatus();
+  const sessionId = chat.sessionId;
+  const action = goalStatus.value === 'PAUSED' ? 'resume' : 'pause';
+  const current = () => !disposed && goalId.value === gid && chat.sessionId === sessionId;
+  pausePending.value = action;
+  error.value = '';
+  controlNotice.value = '';
+  try {
+    if (batch.goalId !== gid && !await batch.selectGoal(gid)) {
+      throw new Error('无法读取该任务，请稍后重试。');
+    }
+    if (!current() || batch.goalId !== gid) return;
+    const notice = await batch.control(action);
+    if (!current() || batch.goalId !== gid) return;
+    const problem = batch.controlError;
+    await refreshStatus();
+    if (!current()) return;
+    if (problem) error.value = problem;
+    else controlNotice.value = notice;
+  } catch (e) {
+    if (current()) error.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    pausePending.value = null;
+  }
 }
+const taskControl = computed<{ icon: 'pause' | 'play' | 'square'; label: string; busy: boolean } | null>(() => canTogglePause.value ? {
+  icon: pausePending.value || cancelBusy.value || batch.controlBusy
+    ? 'square' : goalStatus.value === 'PAUSED' ? 'play' : 'pause',
+  label: pauseLabel.value,
+  busy: Boolean(pausePending.value || cancelBusy.value || batch.controlBusy),
+} : null);
+
+defineExpose({ taskControl, togglePause });
+
 async function stopTask(): Promise<void> {
-  if (!canStop.value || cancelBusy.value || batch.controlBusy) return;
+  if (!canStop.value || cancelBusy.value || pausePending.value || batch.controlBusy) return;
   const gid = goalId.value;
   cancelBusy.value = true; error.value = '';
   try {
@@ -687,7 +719,11 @@ onBeforeUnmount(() => {
       <template v-if="!historical || historyExpanded">
       <RepairLandSummary v-if="plan.land_constraint" :plan="plan" />
       <div v-if="blockedReason" class="conflict-section">
-        <strong class="conflict-title">{{ firstConflict?.code === 'pan_backup_exists' ? '检测到已有 PAN 备份' : '计划待处理' }}</strong>
+        <strong class="conflict-title">{{ firstConflict?.code === 'pan_backup_exists' ? '检测到已有 PAN 备份' : landBlock ? '生产自动修复受阻' : '计划待处理' }}</strong>
+        <template v-if="landBlock">
+          <p class="warn" data-e2e="repair-land-block">{{ landBlock.message || plan.execution.reason || '可信陆地约束不可用' }}</p>
+          <p class="note">仍可在 Viewer 使用「差异定位 → 自动绘制」生成掩码。核对并保存后，可按单景使用已有掩码另建计划。</p>
+        </template>
         <p v-if="firstConflictLabel" class="conflict-name" :title="firstConflictLabel">{{ firstConflictLabel }}</p>
         <div class="actions">
           <span v-if="firstConflict?.scene_ref" class="folder-action"><ExplorerButton :directory="firstConflict.scene_ref" label="定位文件夹" /></span>
@@ -732,8 +768,8 @@ onBeforeUnmount(() => {
       <AgentTodoList v-if="linkedSnapshot?.todos" :rows="linkedSnapshot.todos"
         :label="todoLabel" :describe="describeTodo" :group="todoGroup">
         <template v-if="!standalone" #actions>
-          <button v-if="!terminalMission(goalStatus)" :disabled="batch.controlBusy" @click="togglePause">
-            {{ goalStatus === 'PAUSED' ? '恢复执行' : '暂停执行' }}
+          <button v-if="canTogglePause" :disabled="!!pausePending || cancelBusy || batch.controlBusy" @click="togglePause">
+            {{ pauseLabel }}
           </button>
         </template>
         <template #default="{ row }">
@@ -777,7 +813,7 @@ onBeforeUnmount(() => {
         </span>
         <button v-if="!standalone && goalId" class="primary" @click="openTask">查看进度</button>
         <HoldConfirmButton v-if="canStop" :key="goalId" class="stop-task" data-e2e="repair-stop-task"
-          label="中止任务" :disabled="cancelBusy || batch.controlBusy" @confirm="stopTask">
+          label="中止任务" :disabled="cancelBusy || !!pausePending || batch.controlBusy" @confirm="stopTask">
           {{ cancelBusy ? '正在中止…' : '中止任务' }}
         </HoldConfirmButton>
         <button v-if="needsMaskReview" class="mask-review-button" data-e2e="repair-mask-review" :disabled="maskReviewOpening" @click="openMaskReview()">{{ maskReviewOpening ? '正在前往…' : '前往复核' }}</button>

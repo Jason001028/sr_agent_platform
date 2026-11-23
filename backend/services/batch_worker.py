@@ -2249,12 +2249,13 @@ async def batch_loop(state):
     _ensure_io_executor(state)
     try:
         while True:
+            started = time.monotonic()
             try:
                 await batch_tick(state)
             except Exception:
-                import logging
                 logging.getLogger(__name__).exception(
-                    "Batch scheduler pass failed; retrying next pass")
+                    "Batch scheduler pass failed; retrying next pass (pid=%s, elapsed_ms=%.0f)",
+                    os.getpid(), (time.monotonic() - started) * 1000)
             await asyncio.sleep(max(
                 0.05, float(os.getenv("SR_BATCH_POLL_SEC", "1"))))
     finally:

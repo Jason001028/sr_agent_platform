@@ -7,7 +7,7 @@ vi.mock('../../lib/api.js', async original => ({ ...await original<typeof import
 vi.mock('../../lib/local_preview.js', async original => ({ ...await original<typeof import('../../lib/local_preview.js')>(),
   sourceFingerprint: vi.fn().mockResolvedValue({ name: 'a.tif', size: 3, samples: ['','',''] }) }));
 vi.mock('../../lib/localDecodeWorker', () => ({ decodeLocalFile: vi.fn() }));
-import { apiResolveScene, fetchDropSceneJpg } from '../../lib/api';
+import { apiResolveScene, fetchDropSceneJpg, HttpError } from '../../lib/api';
 import type { SceneResolveResult } from '../../lib/api';
 import { decodeLocalFile } from '../../lib/localDecodeWorker';
 import { browserKit } from '../../lib/browserKit';
@@ -114,4 +114,18 @@ it('a stopped load cannot hide the next load or overwrite its pixels', async () 
   finish(decoded());
   await vi.waitFor(() => expect(store.imageLoad.active).toBe(false));
   expect(store.recs[1].src?.[0]).toBe(1); expect(store.recs[0].src).toBeNull();
+});
+
+it('retries the same local TIFF after manual association without another drop', async () => {
+  vi.mocked(apiResolveScene).mockRejectedValueOnce(new HttpError(404, 'no anchor', '', true, { code: 'tiff_unlinked' }));
+  const store = useViewerStore();
+  store.addFiles(new File(['raw'], 'a.tif'));
+  await vi.waitFor(() => expect(store.recs[0]?.thumb).toBeTruthy());
+  await vi.waitFor(() => expect(store.imageLoad.active).toBe(false));
+  const id = store.recs[0].id;
+  await store.linkServerPath(id, '/DiskArray/scene');
+  expect(apiResolveScene).toHaveBeenLastCalledWith(expect.anything(),
+    expect.objectContaining({ path: '/DiskArray/scene', source_fingerprint: expect.anything() }), expect.anything());
+  expect(store.recs).toHaveLength(1);
+  expect(store.recs[0]).toMatchObject({ id, sceneId: 'source-1', serverSourceVerified: true });
 });

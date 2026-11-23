@@ -647,6 +647,16 @@ export const useDiffStore = defineStore('diff', () => {
 
   /* Automatic polygons are staged in SVG; only one atomic vector transaction
      is committed after the animation and a final identity/draft recheck. */
+  const autoDrawApprovalKey = 'sr-viewer-auto-draw-approval';
+  function readAutoDrawApproval() {
+    try { return localStorage.getItem(autoDrawApprovalKey) === 'true'; }
+    catch { return false; }
+  }
+  const autoDrawApproval = ref(readAutoDrawApproval());
+  function setAutoDrawApproval(enabled: boolean) {
+    autoDrawApproval.value = enabled;
+    try { localStorage.setItem(autoDrawApprovalKey, String(enabled)); } catch { /* In-memory setting still applies. */ }
+  }
   const autoDrawing = shallowRef<{ imageId: number; groupId: string; polygons: OwnedPoly[]; duration: number;
     reviewing: boolean; decisions: Record<string, 'approved' | 'rejected'> } | null>(null);
   let finishReview: (() => Promise<boolean>) | null = null;
@@ -757,6 +767,7 @@ export const useDiffStore = defineStore('diff', () => {
   async function autoDraw(regionIds?: string[]): Promise<boolean> {
     const refusal = autoDrawRefusal(regionIds);
     if (refusal) { error.value = refusal; return false; }
+    const requireReview = autoDrawApproval.value;
     const res = result.value!, auto = res.autoMask!, target = autoTarget.value!;
     const key = currentKey(), pixels = pixelKey(target.id), epoch = ++autoEpoch;
     const groupId = `${auto.analysis_id}:${target.id}:${auto.parameter_version}`;
@@ -829,7 +840,7 @@ export const useDiffStore = defineStore('diff', () => {
           || viewer.pendingPts?.length || viewer.pendingRect || JSON.stringify(target.maskRois ?? []) !== before) {
           cancelAutoDraw(); return false;
         }
-        const accepted = polygons.filter(p => autoDrawing.value?.decisions[p.autoDiff!.region_id] === 'approved').map(p => {
+        const accepted = polygons.filter(p => !requireReview || autoDrawing.value?.decisions[p.autoDiff!.region_id] === 'approved').map(p => {
           const copy: OwnedPoly = p.map(([x, y]) => [x, y]);
           copy.autoDiff = { ...p.autoDiff!, reviewed: true, needs_review: false };
           return copy;
@@ -838,7 +849,10 @@ export const useDiffStore = defineStore('diff', () => {
         const skipped = res.method === 'smart' ? 0 : auto.polygons.length - polygons.length;
         if (ok) {
           resultVisible.value = false;
-          notice.value = `审批完成：通过 ${accepted.length} 个，驳回 ${polygons.length - accepted.length} 个${skipped ? `；${skipped} 个因覆盖或坐标冲突未绘制` : ''}；通过区域已转为可编辑掩码，可整批撤销 / 重做。`;
+          const summary = requireReview
+            ? `审批完成：通过 ${accepted.length} 个，驳回 ${polygons.length - accepted.length} 个`
+            : `自动绘制完成：已加入 ${accepted.length} 个区域`;
+          notice.value = `${summary}${skipped ? `；${skipped} 个因覆盖或坐标冲突未绘制` : ''}；通过区域已转为可编辑掩码，可整批撤销 / 重做。`;
           viewer.showToast(notice.value);
         } else {
           notice.value = '';
@@ -863,10 +877,11 @@ export const useDiffStore = defineStore('diff', () => {
         autoPreparing.value = false;
         return true;
       };
-      if (!duration) return beginReview();
+      const finishDrawing = requireReview ? beginReview : commit;
+      if (!duration) return await finishDrawing();
       return await new Promise<boolean>(resolve => {
         finishAuto = resolve;
-        autoTimer = setTimeout(() => { void beginReview().then(ok => {
+        autoTimer = setTimeout(() => { void finishDrawing().then(ok => {
           if (epoch === autoEpoch) finishAuto = null;
           resolve(ok);
         }); }, duration);
@@ -1912,7 +1927,7 @@ export const useDiffStore = defineStore('diff', () => {
     nextRegion: (step:number) => { const list=orderedRegions.value; if(!list.length)return;
       const index=list.findIndex(r=>r.id===selectedId.value); void locateRegion(list[(index+step+list.length)%list.length].id); },
     restoreView: () => { for(const p of savedViews??[]) if(viewer.panes.some(q=>q.side===p.side&&q.rec?.id===p.id)) viewer.setPaneView(p.side,{...p.view}); savedViews=null; },
-    autoDrawing, autoPreparing, autoDrawReason, autoDrawRefusal, autoDraw, cancelAutoDraw, autoReviewBusy, reviewAutoRegion,
+    autoDrawApproval, setAutoDrawApproval, autoDrawing, autoPreparing, autoDrawReason, autoDrawRefusal, autoDraw, cancelAutoDraw, autoReviewBusy, reviewAutoRegion,
     // 面板
     open, resultVisible, opacity, openPanel, closePanel, busy, error, notice,
     method, sensitivity, scope, display, feather, minAreaPx, advanced, toneWeight,

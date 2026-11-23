@@ -375,10 +375,9 @@ describe('automatic polygon staging and identity isolation', () => {
     expect(d.autoDrawReason).toBe('');
     vi.stubGlobal('window', { matchMedia: () => ({ matches: true }) });
     expect(await d.autoDraw()).toBe(true);
-    await d.reviewAutoRegion(d.autoDrawing!.polygons[0].autoDiff!.region_id, 'approved');
     expect(v.addMaskPolygonBatch).toHaveBeenCalledTimes(1);
     expect(v.addMaskPolygonBatch.mock.calls[0][0]).toBe(1);
-    expect(mocks.siblings).toHaveBeenCalledTimes(3); // staging, review, final commit
+    expect(mocks.siblings).toHaveBeenCalledTimes(2); // staging and final commit
   });
 
   it('rejects a missing-certificate input if the server identifies it as NOSR', async () => {
@@ -410,6 +409,7 @@ describe('automatic polygon staging and identity isolation', () => {
 
   it('works outside heat mode, stages SVG vectors, and atomically commits once', async () => {
     const d = await readyAuto(); vi.useFakeTimers();
+    expect(d.autoDrawApproval).toBe(false);
     d.display = 'regions'; d.resultVisible = false;
     expect(d.autoDrawReason).toBe('');
     const pending = d.autoDraw();
@@ -419,13 +419,24 @@ describe('automatic polygon staging and identity isolation', () => {
     expect(await d.autoDraw()).toBe(false); // double click
     await vi.advanceTimersByTimeAsync(3200);
     expect(await pending).toBe(true);
-    expect(d.autoDrawing?.reviewing).toBe(true);
-    expect(mocks.viewer.addMaskPolygonBatch).not.toHaveBeenCalled();
-    await d.reviewAutoRegion(d.autoDrawing!.polygons[0].autoDiff!.region_id, 'approved');
+    expect(d.autoDrawing).toBeNull();
+    expect(d.notice).toContain('自动绘制完成');
     expect(mocks.viewer.addMaskPolygonBatch).toHaveBeenCalledTimes(1);
     const p = mocks.viewer.addMaskPolygonBatch.mock.calls[0][1][0];
     expect(thumbToOrig(p[0][0], p[0][1], 32, 32, 16, 16)).toEqual([4, 4]);
     expect(p.autoDiff.source).toBe('auto_diff');
+    expect(p.autoDiff).toMatchObject({ reviewed: true, needs_review: false });
+  });
+  it('persists the approval preference for a new store instance', () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal('localStorage', { getItem: (key: string) => storage.get(key), setItem: storage.set.bind(storage) });
+    const d = useDiffStore();
+    expect(d.autoDrawApproval).toBe(false);
+    d.setAutoDrawApproval(true);
+    const reopened = useDiffStore(createPinia());
+    expect(reopened.autoDrawApproval).toBe(true);
+    reopened.setAutoDrawApproval(false);
+    expect(useDiffStore(createPinia()).autoDrawApproval).toBe(false);
   });
   it.each(['switch', 'revision', 'dimensions', 'clear', 'cancel', 'draft', 'reanalyze'])(
     'discards staged polygons on %s', async action => {
@@ -445,6 +456,7 @@ describe('automatic polygon staging and identity isolation', () => {
     });
   it('supports reduced motion and reports review flags', async () => {
     const d = await readyAuto();
+    d.setAutoDrawApproval(true);
     vi.stubGlobal('window', { matchMedia: () => ({ matches: true }) });
     d.result!.autoMask!.polygons[0].needs_review = true;
     expect(await d.autoDraw()).toBe(true);
@@ -455,6 +467,7 @@ describe('automatic polygon staging and identity isolation', () => {
   });
   it('waits for all decisions and commits only approved polygons once', async () => {
     const d = await readyAuto();
+    d.setAutoDrawApproval(true);
     vi.stubGlobal('window', { matchMedia: () => ({ matches: true }) });
     const second = structuredClone(d.result!.autoMask!.polygons[0]);
     second.region_id = 'second';
@@ -471,6 +484,7 @@ describe('automatic polygon staging and identity isolation', () => {
   });
   it('all rejected or cancelled candidates never modify existing masks', async () => {
     const d = await readyAuto();
+    d.setAutoDrawApproval(true);
     vi.stubGlobal('window', { matchMedia: () => ({ matches: true }) });
     await d.autoDraw();
     await d.reviewAutoRegion(d.autoDrawing!.polygons[0].autoDiff!.region_id, 'rejected');
@@ -482,6 +496,7 @@ describe('automatic polygon staging and identity isolation', () => {
   });
   it('rechecks source identity after approval and refuses a replaced source', async () => {
     const d = await readyAuto();
+    d.setAutoDrawApproval(true);
     vi.stubGlobal('window', { matchMedia: () => ({ matches: true }) });
     await d.autoDraw();
     mocks.siblings.mockResolvedValueOnce({ items: [] });
@@ -549,7 +564,6 @@ describe('automatic polygon staging and identity isolation', () => {
     expect(d.autoDrawing).not.toBeNull();
     await vi.advanceTimersByTimeAsync(3200);
     expect(await second).toBe(true);
-    await d.reviewAutoRegion(d.autoDrawing!.polygons[0].autoDiff!.region_id, 'approved');
     expect(mocks.viewer.addMaskPolygonBatch).toHaveBeenCalledTimes(1);
   });
   it('preserves a draft started while the initial source check is in flight', async () => {

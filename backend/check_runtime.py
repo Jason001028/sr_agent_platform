@@ -1,10 +1,11 @@
 """Dependency presence preflight; run with the Python used by sr-api.service.
 
-Uses only the standard library so missing application dependencies cannot prevent
-this diagnostic from running. It neither installs packages nor starts the API.
+Starts with the standard library so it can report missing dependencies.
+It imports tifffile to validate the runtime and does not install packages or start the API.
 """
 from __future__ import annotations
 
+import importlib
 import importlib.util
 from pathlib import Path
 import sys
@@ -12,7 +13,7 @@ import sys
 REQUIRED_MODULES = (
     ("fastapi", "fastapi"), ("uvicorn", "uvicorn"), ("numpy", "numpy"),
     ("PIL", "pillow"), ("openai", "openai"), ("yaml", "PyYAML"),
-    ("jsonschema", "jsonschema"),
+    ("jsonschema", "jsonschema"), ("tifffile", "tifffile"),
 )
 
 
@@ -23,14 +24,23 @@ def main() -> int:
     missing = [package for module, package in required
                if importlib.util.find_spec(module) is None]
     print(f"API Python: {sys.executable}")
-    if not missing:
+    import_failure = None
+    if "tifffile" not in missing:
+        try:
+            importlib.import_module("tifffile")
+        except Exception as exc:
+            import_failure = f"tifffile: {type(exc).__name__}: {exc}"
+    if not missing and import_failure is None:
         print("Runtime dependency modules found. Run python -m pip check and API import validation next.")
         return 0
     requirements = Path(__file__).with_name("requirements-api.txt")
     source_requirements = Path(__file__).resolve().parents[1] / "deploy" / "requirements-api.txt"
     if not requirements.is_file() and source_requirements.is_file():
         requirements = source_requirements
-    print("Missing runtime dependencies: " + ", ".join(missing), file=sys.stderr)
+    if missing:
+        print("Missing runtime dependencies: " + ", ".join(missing), file=sys.stderr)
+    if import_failure:
+        print("Runtime dependency import failed: " + import_failure, file=sys.stderr)
     print(f'Install using this interpreter: "{sys.executable}" -m pip install -r "{requirements}"', file=sys.stderr)
     return 1
 

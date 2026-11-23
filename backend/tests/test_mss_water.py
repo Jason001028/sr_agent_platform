@@ -169,6 +169,23 @@ def test_matching_identity_and_external_rpc_allow_native_preview_only(scene):
         assert preview.getpixel((2, 0)) == (118, 103, 84, 255)
 
 
+@pytest.mark.parametrize('suffix', ['.prj', '.PRJ'])
+def test_projection_sidecar_allows_native_preview_without_pan_overlay(scene, suffix):
+    pan, mss, _ = scene
+    write_mss(mss)
+    original = plan_water(pan)
+    projection = mss.with_suffix(suffix)
+    projection.write_text('GEOGCS["WGS 84"]', encoding='ascii')
+    plan = plan_water(pan)
+    result = generate_water(plan)
+    assert original[0] != plan[0]
+    assert [name.casefold() for name in result['sources']['mss']['external_projection']] == [projection.name.casefold()]
+    assert result['sources']['mss']['external_rpc'] == []
+    assert result['alignment']['status'] == 'unaligned'
+    assert 'mss-preview.png' in result['assets']
+    assert 'overlay.png' not in result['assets']
+
+
 @pytest.mark.parametrize('suffix', ['.msk', '.aux.xml', '.tfw'])
 def test_non_rpc_sidecar_still_blocks_and_names_the_file(scene, suffix):
     pan, mss, _ = scene
@@ -284,3 +301,135 @@ def test_api_returns_unavailability_and_fences_asset_revision(scene, monkeypatch
         assert client.get(url + '/PAN.tif').status_code == 404
         write_mss(mss, 'uint16')
         assert client.get(url + '/water.tif').status_code == 404
+
+@pytest.mark.parametrize("value, accepted", [(" pms ", True), ("PMS09", False)])
+def test_repeated_sensor_id_requires_consensus(scene, value, accepted):
+    from backend.services.mss_water import read_calibration
+
+    _, _, xml = scene
+    xml.write_text(XML.replace("<ProcessInfo>", f"<ProcessInfo><SensorId>{value}</SensorId>"),
+                   encoding="utf-8")
+    if accepted:
+        read_calibration(xml, "SAT", "PMS", MSS)
+    else:
+        with pytest.raises(WaterUnavailable) as failed:
+            read_calibration(xml, "SAT", "PMS", MSS)
+        assert failed.value.code == "sensor_mismatch"
+
+def test_sensor_id_nested_in_metadata_wrapper(scene):
+    from backend.services.mss_water import read_calibration
+
+    _, _, xml = scene
+    xml.write_text(XML.replace("<SensorID>PMS</SensorID>",
+                               "<Acquisition><SENSORID>PMS</SENSORID></Acquisition>"),
+                   encoding="utf-8")
+    read_calibration(xml, "SAT", "PMS", MSS)
+
+
+def test_missing_sensor_id_reports_selected_file_and_candidate_tag(scene):
+    from backend.services.mss_water import read_calibration
+
+    _, _, xml = scene
+    xml.write_text(XML.replace("SensorID", "SensorName"), encoding="utf-8")
+    with pytest.raises(WaterUnavailable) as failed:
+        read_calibration(xml, "SAT", "PMS", MSS)
+    assert xml.name in str(failed.value)
+    assert "SensorName" in str(failed.value)
+
+@pytest.mark.parametrize("sensor_tag", ["<Sensor>PMS</Sensor>", "<Sensor>PMS09</Sensor>"])
+def test_production_sensor_tag_matches_scene(scene, sensor_tag):
+    from backend.services.mss_water import read_calibration
+
+    _, _, xml = scene
+    xml.write_text(XML.replace("<SensorID>PMS</SensorID>", sensor_tag +
+                               "<SensorWorkMode>MSS</SensorWorkMode>"), encoding="utf-8")
+    if sensor_tag == "<Sensor>PMS</Sensor>":
+        read_calibration(xml, "SAT", "PMS", MSS)
+    else:
+        with pytest.raises(WaterUnavailable, match="XML=PMS09"):
+            read_calibration(xml, "SAT", "PMS", MSS)
+
+def test_production_product_id_short_scene_and_fus_method(scene):
+    from backend.services.mss_water import read_calibration
+
+    _, _, xml = scene
+    product = "JL1KF02B02_PMS04_20261025120913_200548603_102_0024_001_L1_MSS"
+    short = product.rsplit("_", 3)[0]
+    content = XML.replace("<ProductInfo>", f"<ProductInfo><ProductID>{product}</ProductID><SceneID>{short}</SceneID>")
+    content = content.replace(">SAT<", ">JL1KF02B02<").replace("<SensorID>PMS</SensorID>", "<Sensor>PMS04</Sensor>")
+    import re
+    content = re.sub(r"<BandOrder>.*?</BandOrder>", "", content)
+    content = content.replace("</ProductInfo>", "<FUSMethod>B-G-R-NIR</FUSMethod></ProductInfo>")
+    xml.write_text(content, encoding="utf-8")
+    bands, _, _, identity = read_calibration(xml, "JL1KF02B02", "PMS04", product)
+    assert bands == ("BLUE", "GREEN", "RED", "NIR")
+    assert identity == {"scene_id": short, "product_type": "MSS"}
+    xml.write_text(content.replace(product, product.replace("_0024_", "_0025_")), encoding="utf-8")
+    with pytest.raises(WaterUnavailable) as failed:
+        read_calibration(xml, "JL1KF02B02", "PMS04", product)
+    assert failed.value.code == "scene_mismatch"
+
+def test_registration_probe_reports_grids_and_prj_without_decoding(scene, monkeypatch):
+    from backend.probe_mss_registration import inspect_registration
+
+    pan, mss, _ = scene
+    write_mss(mss)
+    monkeypatch.setattr(tifffile.TiffPage, "asarray",
+                        lambda *args, **kwargs: pytest.fail("unexpected raster decode"))
+    report = inspect_registration(pan)
+    assert report["passes_current_alignment_rules"]
+    projection = mss.with_suffix('.prj')
+    projection.write_text('PROJCS["fixture"]', encoding='ascii')
+    report = inspect_registration(pan)
+    assert report["embedded_grids_match"]
+    assert not report["passes_current_alignment_rules"]
+    assert report["mss"]["sidecars"][0]["text"] == 'PROJCS["fixture"]'
+    assert report["mss"]["tags"]["34735"]["value"][15] == 32651
+    assert not (pan.parent.parent / "water-out").exists()
+
+def test_probe_detects_production_lowercase_scene_rpc(scene):
+    from backend.probe_mss_registration import inspect_registration
+
+    pan, mss, _ = scene
+    write_mss(mss)
+    for raster in (pan, mss):
+        raster.with_name(raster.parent.name + '_rpc.txt').write_text('LINE_OFF: 10 pixels', encoding='ascii')
+    report = inspect_registration(pan)
+    assert report['embedded_grids_match']
+    assert not report['passes_current_alignment_rules']
+    assert report['pan']['sidecars'][0]['name'] == pan.parent.name + '_rpc.txt'
+    assert plan_water(pan)[3]['mss']['external_rpc'] == [mss.parent.name + '_rpc.txt']
+
+def test_registration_probe_validates_numbered_rpc_fields():
+    from backend.probe_mss_registration import RPC_SCALARS, RPC_COEFFICIENTS, _rpc_summary
+
+    scalars = {key: 1 for key in RPC_SCALARS}
+    scalars.update(LINE_OFF=3859.5, SAMP_OFF=3847.5)
+    text = '\n'.join([f'{key}: {value}' for key, value in scalars.items()]
+                     + [f'{key}: +1.0e-03' for key in RPC_COEFFICIENTS])
+    report = _rpc_summary(text, 7695, 7719)
+    assert report['status'] == 'complete'
+    assert report['offset_minus_half_size'] == {'line': 0, 'sample': 0}
+    assert _rpc_summary(text + '\nLINE_OFF: 8', 7695, 7719)['status'] == 'invalid_field'
+    assert _rpc_summary('LINE_OFF: 10 pixels', 7695, 7719)['status'] == 'incomplete'
+
+def test_rpc_sweep_measures_height_sensitivity_without_decoding(scene, monkeypatch):
+    from backend.probe_mss_registration import RPC_COEFFICIENTS, rpc_sweep
+
+    pan, mss, _ = scene
+    write_mss(mss)
+    for source, width, height, parallax in ((pan, 8, 4, 0.5), (mss, 4, 2, 0)):
+        fields = dict.fromkeys(RPC_COEFFICIENTS, 0)
+        fields.update(LINE_OFF=0, SAMP_OFF=0, LAT_OFF=30, LONG_OFF=113, HEIGHT_OFF=0,
+                      LINE_SCALE=height, SAMP_SCALE=width, LAT_SCALE=1, LONG_SCALE=1,
+                      HEIGHT_SCALE=100, LINE_NUM_COEFF_3=1, SAMP_NUM_COEFF_2=1,
+                      LINE_DEN_COEFF_1=1, SAMP_DEN_COEFF_1=1, SAMP_NUM_COEFF_4=parallax)
+        source.with_name(source.parent.name + '_rpc.txt').write_text(
+            '\n'.join(f'{key}: {value}' for key, value in fields.items()), encoding='ascii')
+    monkeypatch.setattr(tifffile.TiffPage, 'asarray', lambda *args, **kwargs: pytest.fail('unexpected decode'))
+    report = rpc_sweep(pan, [0, 50])
+    center = report['samples'][4]
+    assert center['samples'][0]['pan_xy'] == pytest.approx((3, 1))
+    assert center['pan_height_spread_px'] == pytest.approx(2)
+    assert center['samples'][1]['mss_round_trip_error_px'] < 0.001
+    assert report['usage'] == 'diagnostic_only'

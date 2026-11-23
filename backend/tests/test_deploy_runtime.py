@@ -12,12 +12,13 @@ from backend import check_runtime
 REPO = Path(__file__).resolve().parents[2]
 
 
-def test_missing_jsonschema_reports_correct_interpreter_and_install_command(capsys):
+@pytest.mark.parametrize("missing", ["jsonschema", "tifffile"])
+def test_missing_dependency_reports_correct_interpreter_and_install_command(capsys, missing):
     with patch.object(check_runtime.importlib.util, 'find_spec',
-                      side_effect=lambda module: None if module == 'jsonschema' else object()):
+                      side_effect=lambda module: None if module == missing else object()):
         assert check_runtime.main() == 1
     output = capsys.readouterr()
-    assert 'jsonschema' in output.err
+    assert missing in output.err
     assert check_runtime.sys.executable in output.err
     assert '-m pip install -r' in output.err
     assert 'requirements-api.txt' in output.err
@@ -28,6 +29,16 @@ def test_installed_modules_pass_preflight(capsys):
     with patch.object(check_runtime.importlib.util, 'find_spec', return_value=object()):
         assert check_runtime.main() == 0
     assert 'modules found' in capsys.readouterr().out
+
+
+def test_visible_tifffile_with_broken_import_fails_preflight(capsys):
+    with patch.object(check_runtime.importlib.util, 'find_spec', return_value=object()), \
+         patch.object(check_runtime.importlib, 'import_module',
+                      side_effect=ImportError('NumPy ABI mismatch')):
+        assert check_runtime.main() == 1
+    output = capsys.readouterr()
+    assert 'tifffile: ImportError: NumPy ABI mismatch' in output.err
+    assert check_runtime.sys.executable in output.out
 
 
 def bash_executable():

@@ -3,6 +3,9 @@ import { imageRef } from '../lib/spatial';
 import ThinkingSlider from "./ThinkingSlider.vue";
 import AgentRepairSettings from './AgentRepairSettings.vue';
 import HoldConfirmButton from './HoldConfirmButton.vue';
+import pauseIcon from '../../icon/pause.svg?url';
+import playIcon from '../../icon/play.svg?url';
+import squareIcon from '../../icon/square.svg?url';
 import AgentRepairPlanCard from './AgentRepairPlanCard.vue';
 import { useAgentTaskView } from '../lib/agentTaskView';
 /**
@@ -22,7 +25,7 @@ import { useAgentTaskView } from '../lib/agentTaskView';
  *   原话：CTX_DIVIDER 之后的自动附文默认不进渲染，只有开发者模式在气泡下给一块浅米色
  *   折叠面板（`<details>`，默认收起）—— 排查「Agent 到底看到了什么」时才展开。
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import { shallowReactive, computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { useViewerStore } from '../stores/viewer';
 import { useChatStore } from '../stores/chat.js';
 import type { ChatMsg } from '../stores/chat.js';
@@ -57,6 +60,35 @@ const viewer = useViewerStore();
 const chat = useChatStore();
 const toolPresentation = computed(() => projectAgentActivity(chat.messages, chat.sending));
 const { task, closeTask, resolvePlan, revisePlan, reviseTask } = useAgentTaskView(() => toolPresentation.value, () => chat.sessionId, () => chat.sending);
+const taskCard = ref<InstanceType<typeof AgentRepairPlanCard> | null>(null);
+const inlinePlanCards = shallowReactive(new Map<string, {
+  index: number; card: InstanceType<typeof AgentRepairPlanCard>;
+}>());
+function registerInlinePlanCard(key: string, index: number, card: InstanceType<typeof AgentRepairPlanCard> | null) {
+  if (!card) {
+    inlinePlanCards.delete(key);
+    return;
+  }
+  const previous = inlinePlanCards.get(key);
+  if (previous?.card !== card || previous.index !== index) inlinePlanCards.set(key, { index, card });
+}
+const controlledTaskCard = computed(() => {
+  if (task.value) return taskCard.value;
+  if (draft.value.trim() || chat.pendingImages.length) return null;
+  return [...inlinePlanCards.values()].sort((a, b) => b.index - a.index)
+    .find(entry => entry.card.taskControl)?.card ?? null;
+});
+const taskControl = computed(() => controlledTaskCard.value?.taskControl ?? null);
+const taskControlIcons = { pause: pauseIcon, play: playIcon, square: squareIcon };
+
+function onPrimaryAction() {
+  if (taskControl.value || task.value) {
+    if (taskControl.value && !taskControl.value.busy) void controlledTaskCard.value?.togglePause();
+    return;
+  }
+  void onSend();
+}
+
 const scenes = useScenesStore();
 const draft = ref('');
 /** 交接后的输入区解锁：清单场景通常没有已加载的活动影像，只靠 `enabled` 会让底部
@@ -384,7 +416,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
 
     <!-- 会话区 -->
       <div v-if="task" class="agent-task-pane">
-        <AgentRepairPlanCard :key="task.id" :data="task.data" standalone @back="closeTask" @plan-revised="reviseTask" />
+        <AgentRepairPlanCard ref="taskCard" :key="task.id" :data="task.data" standalone @back="closeTask" @plan-revised="reviseTask" />
       </div>
       <div v-show="!task" ref="scrollEl" class="at-scroll">
         <p v-if="creating && !chat.messages.length" class="at-desc" role="status">正在创建 Agent 会话…</p>
@@ -433,7 +465,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
           </template>
 
           <AgentToolPresentation v-if="!task" :projection="toolPresentation" :index="i" :session-key="chat.sessionId"
-            :developer-mode="developerMode" :resolve-plan="resolvePlan"
+            :developer-mode="developerMode" :resolve-plan="resolvePlan" :plan-card-ref="registerInlinePlanCard"
             @open-scene="openSearchScene" @plan-revised="revisePlan" />
         </div>
 
@@ -443,13 +475,15 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
         </div>
       </div>
 
-      <div v-show="!task" class="at-foot" :class="{ locked: !composerEnabled }">
-        <div :inert="!composerEnabled">
+      <div v-show="!task || taskControl" class="at-foot" :class="{ locked: !task && !taskControl && !composerEnabled }">
+        <div v-show="!task" :inert="!composerEnabled">
         <p v-if="batchHint" class="at-desc">已携带批次上下文，可补充问题后发送。</p>
 
         <div v-if="viewer.questionRegion" class="roi-reference"><button @click="viewer.activeRec?.id===viewer.questionRegion.recId && viewer.focusSourceBounds(viewer.activeSide,viewer.questionRegion.bounds)">{{ viewer.questionRegion.name }} · 源影像区域 {{ viewer.questionRegion.bounds.join(', ') }}</button><button @click="viewer.questionRegion=null">移除</button><small>手动发送消息时附上区域预览截图。</small></div>
         <ChatAttachTray :items="chat.pendingImages" @remove="chat.removePendingImage" />
-        <div class="at-inputbar">
+        </div>
+        <div class="at-inputbar" :inert="!task && !taskControl && !composerEnabled">
+          <template v-if="!task">
           <ThinkingSlider v-model="chat.thinkingProfile" :status="chat.thinkingStatus" :disabled="!enabled" />
           <button type="button" class="at-shot" data-e2e="chat-shot-open"
                   aria-label="添加截图" title="添加截图（截取当前视野）"
@@ -461,12 +495,17 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
                  :placeholder="placeholder"
                  :disabled="!composerEnabled || chat.sending || creating"
                  @keyup.enter="onSend()" />
-          <button type="button" class="cbtn" :disabled="!canSend()" @click="onSend()">
-            {{ chat.sending || creating ? '…' : '发送' }}
+          </template>
+          <button type="button" class="cbtn" :class="{ 'task-primary': !!taskControl }"
+            :disabled="taskControl ? taskControl.busy : !!task || !canSend()"
+            :aria-label="taskControl?.label ?? '发送'" :title="taskControl?.label"
+            :aria-busy="taskControl?.busy" @click="onPrimaryAction">
+            <span v-if="taskControl" class="task-primary-icon" aria-hidden="true"
+              :style="{ maskImage: `url(${taskControlIcons[taskControl.icon]})` }" />
+            <template v-else>{{ chat.sending || creating ? '…' : '发送' }}</template>
           </button>
         </div>
-        </div>
-        <div v-if="!composerEnabled" class="at-input-lock" role="status" aria-live="polite">
+        <div v-if="!task && !taskControl && !composerEnabled" class="at-input-lock" role="status" aria-live="polite">
           <p class="at-desc">Agent 支持本地、上传及服务器影像</p>
           <p class="at-reason">{{ reason }}</p>
         </div>
@@ -700,6 +739,8 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
   font-weight: 500; font-family: inherit;
   transition: filter var(--motion-hover) var(--ease-standard);
 }
+.task-primary { margin-inline-start:auto; display:grid; place-items:center; min-inline-size:48px; }
+.task-primary-icon { width:18px; height:18px; background:currentColor; mask-repeat:no-repeat; mask-position:center; mask-size:contain; }
 .cbtn:hover { filter: brightness(1.05); }
 .cbtn:disabled { opacity: .55; cursor: not-allowed; }
 .at-row:empty { display:none; }

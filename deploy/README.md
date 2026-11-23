@@ -407,7 +407,7 @@ systemctl status sr-api            # 判定： active (running)
 curl -s http://127.0.0.1:8000/api/health   # 判定： {"status":"ok",...}
 ```
 
-> 只更新代码不会自动安装新增依赖。`jsonschema` 用于工具参数校验，`PyYAML` 用于 Skill 读取；
+> 只更新代码不会自动安装新增依赖。MSS 水体与生产修复计划使用 `tifffile`，运行依赖预检会检查服务解释器是否能找到该包。`jsonschema` 用于工具参数校验，`PyYAML` 用于 Skill 读取；
 > 缺少任一项都可能在 import 阶段退出。不要使用系统 Python 或 SR 的 torch/GDAL 环境安装平台依赖。
 > 无内网镜像时，按 §三.2 准备与目标 Linux / Python 版本匹配、包含全部传递依赖的 wheel 目录，再使用
 > `<API-Python> -m pip install --no-index --find-links=/tmp/sr-api-wheels -r <APP>/backend/requirements-api.txt`。

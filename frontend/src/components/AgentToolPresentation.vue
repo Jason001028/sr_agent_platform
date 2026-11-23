@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { ComponentPublicInstance } from 'vue';
 import type { AgentActivityProjection } from '../lib/agentActivity';
 import { toolPayload } from '../lib/agentActivity';
 import AgentInspectionCard from './AgentInspectionCard.vue';
@@ -7,15 +8,18 @@ import AgentRepairPlanCard from './AgentRepairPlanCard.vue';
 import SceneSearchResultCard from './SceneSearchResultCard.vue';
 import AgentBatchReceipt from './AgentBatchReceipt.vue';
 import AgentAnnotationReference from './AgentAnnotationReference.vue';
-defineProps<{ projection: AgentActivityProjection; index: number; sessionKey?: string | null; developerMode?: boolean; resolvePlan?: (data: unknown) => unknown }>();
+const props = defineProps<{ planCardRef?: (key: string, index: number, card: InstanceType<typeof AgentRepairPlanCard> | null) => void; projection: AgentActivityProjection; index: number; sessionKey?: string | null; developerMode?: boolean; resolvePlan?: (data: unknown) => unknown }>();
 const emit = defineEmits<{ openScene: [item: Record<string, unknown>]; planRevised: [source: unknown, replacement: unknown] }>();
+function registerPlanCard(key: string, card: Element | ComponentPublicInstance | null) {
+  props.planCardRef?.(key, props.index, card as InstanceType<typeof AgentRepairPlanCard> | null);
+}
 </script>
 <template>
   <div v-if="projection.groups.has(index) || projection.business.has(index)" class="tool-presentation">
     <AgentActivityTimeline v-for="group in projection.groups.get(index)" :key="group.key" :group="group" :session-key="sessionKey" :developer-mode="developerMode" />
     <template v-for="step in projection.business.get(index)" :key="step.key">
       <AgentInspectionCard v-if="step.business === 'inspection'" :data="step.inspection" />
-      <AgentRepairPlanCard v-else-if="step.business === 'plan'" :data="resolvePlan ? resolvePlan(step.result?.data) : step.result?.data"
+      <AgentRepairPlanCard v-else-if="step.business === 'plan'" :ref="card => registerPlanCard(step.key, card)" :data="resolvePlan ? resolvePlan(step.result?.data) : step.result?.data"
         @plan-revised="emit('planRevised', step.result?.data, $event)" />
       <SceneSearchResultCard v-else-if="step.business === 'scenes'" :data="toolPayload(step.result)" :args="(step.args ?? {}) as Record<string, unknown>" status="completed" @open="emit('openScene', $event)" />
       <AgentBatchReceipt v-else-if="step.business === 'receipt'" :data="step.result?.data" />

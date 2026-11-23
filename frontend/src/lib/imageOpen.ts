@@ -22,7 +22,7 @@ async function json<T>(path: string, init: RequestInit = {}): Promise<T> {
   return response.json();
 }
 const post = (value: unknown, signal?: AbortSignal): RequestInit => ({ method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(value),signal });
-export function createPreviewAsset(value: { path?: string; sceneId?: string; fingerprint?: PreviewAsset['fingerprint'] }, signal?: AbortSignal) {
+export function createPreviewAsset(value: { path?: string; sceneId?: string; expectedSourceRev?: string; fingerprint?: PreviewAsset['fingerprint'] }, signal?: AbortSignal) {
   return json<PreviewAsset>('/assets',post(value,signal));
 }
 export async function createPickerSession() {

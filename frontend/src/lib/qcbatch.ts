@@ -121,8 +121,8 @@ export interface BakeDeps<T extends BakeRow = BakeRow> {
   /** 本体 jpg：入列一张卡 + 生成一份。失败抛。 */
   body(it: T, res: unknown): Promise<void>;
   /** NOSR：问 /siblings，有那份就入列一张卡 + 生成一份；返回 'missing' = 盘上没有。失败抛。 */
-  nosr(it: T, res: unknown): Promise<'ok' | 'missing'>;
-  old?(it: T, res: unknown): Promise<void>;
+  nosr(it: T, res: unknown, signal: AbortSignal): Promise<'ok' | 'missing'>;
+  old?(it: T, res: unknown, signal: AbortSignal): Promise<void>;
   onProgress?(i: number, n: number, it: T, phase: BakeStage): void;
   /** 某一步失败时立刻回调（在继续下一景之前）—— 占位卡要当场标红，不能等整批跑完。 */
   onFail?(it: T, stage: BakeStage, reason: string): void;
@@ -189,26 +189,28 @@ export async function runSceneBake<T extends BakeRow>(
     if (signal.aborted) { stopped = true; break; }
     deps.onProgress?.(i + 1, total, it, 'nosr');
     try {
-      if (await deps.nosr(it, res) === 'missing') {
+      if (await deps.nosr(it, res, signal) === 'missing') {
         notes[it.name] = '盘上没有未超分那份（NOSR），只加入本体卡片';
       }
     } catch (e) {
       // 本体生成成功、NOSR 没成功：**不覆盖**本体那条失败记录（两条记的是不同的事，
       // 而卡片上只有一个名字）。本体已成的状态下这条只进 notes 更准确 —— 但
       // 名字只有一个键，所以本体失败时保留本体那条（更严重、且先发生）。
+      if (signal.aborted) { stopped = true; break; }
       if (!fails[it.name]) fails[it.name] = { stage: 'nosr', reason: errText(e) };
       else notes[it.name] = 'NOSR 卡片关联失败：' + errText(e);
     }
     if (signal.aborted) { stopped = true; break; }
     if (deps.old) {
       deps.onProgress?.(i + 1, total, it, 'old');
-      try { await deps.old(it, res); }
+      try { await deps.old(it, res, signal); }
       catch (e) {
+        if (signal.aborted) { stopped = true; break; }
         if (!fails[it.name]) fails[it.name] = { stage: 'old', reason: errText(e) };
       }
     }
   }
-  return { total, done, stopped, fails, notes };
+  return { total, done, stopped: stopped || signal.aborted, fails, notes };
 }
 
 /** 后端 detail 是中文原话（含「试过哪些候选、各自为什么不行」），原样用。 */

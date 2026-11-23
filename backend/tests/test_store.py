@@ -491,3 +491,22 @@ class TestPreviewBakeQueue(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+def test_new_reader_does_not_start_migrations_while_writer_holds_lock(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    path = tmp_path / "db.sqlite"
+    store = Store(path)
+    writer = sqlite3.connect(path)
+    try:
+        assert store.list_sr_tasks() == []
+        writer.execute("BEGIN IMMEDIATE")
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            result = executor.submit(store.list_sr_tasks)
+            try:
+                assert result.result(timeout=2) == []
+            finally:
+                writer.rollback()
+    finally:
+        writer.close()
+        store.close()

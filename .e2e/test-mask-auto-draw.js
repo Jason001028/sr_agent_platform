@@ -72,6 +72,13 @@ let browser;
     await page.setViewport({width:1440,height:1000});
     await page.goto('http://127.0.0.1:'+server.address().port+'/viewer');
     await page.waitForSelector('[data-e2e=diff-open]');
+    await page.click('[data-e2e=set-open]');
+    const approvalSwitch = '[data-e2e=set-auto-draw-approval]';
+    assert.equal(await page.$eval(approvalSwitch, el => el.getAttribute('aria-checked')), 'false');
+    await page.click(approvalSwitch);
+    assert.equal(await page.$eval(approvalSwitch, el => el.getAttribute('aria-checked')), 'true');
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('[data-e2e=set-panel]', { hidden: true });
     await page.evaluate(async () => {
       const pinia=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia;
       window.stores={v:pinia._s.get('viewer'),d:pinia._s.get('diff')};

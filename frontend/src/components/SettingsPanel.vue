@@ -12,6 +12,7 @@
  * 关法三种：再点一次工具栏那颗按钮、点浮层外的任意处（透明捕手）、Esc。
  */
 import { onMounted, onUnmounted, ref, watch } from 'vue';
+import { useDiffStore } from '../stores/diff';
 import { useQcListStore } from '../stores/qclist';
 import { useViewerStore } from '../stores/viewer';
 import {
@@ -25,6 +26,7 @@ import { PREVIEW_TRUE_MAX_EDGE } from '../lib/previewLevel';
 import ImagePickerDialog from './ImagePickerDialog.vue';
 
 const store = useViewerStore();
+const diff = useDiffStore();
 const qc = useQcListStore();
 const imagePicker = ref<InstanceType<typeof ImagePickerDialog> | null>(null);
 const fileInput = ref<HTMLInputElement | null>(null);
@@ -118,6 +120,14 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
           <option value="spectrum">蓝 → 青 → 黄 → 橙 → 红</option>
         </select>
         <span class="set-line">三种算法共用，本机记住选择</span>
+      </div>
+      <div class="set-row">
+        <button type="button" class="set-sw" :class="{ on: diff.autoDrawApproval }"
+          role="switch" aria-label="自动绘制审批" :aria-checked="diff.autoDrawApproval" data-e2e="set-auto-draw-approval"
+          @click="diff.setAutoDrawApproval(!diff.autoDrawApproval)">
+          自动绘制审批 · {{ diff.autoDrawApproval ? '是' : '否' }}
+        </button>
+        <div class="set-note">默认选「否」，符合条件的区域直接加入掩码。选「是」后逐区审批。本机记住选择。</div>
       </div>
       <div class="set-row">
         <button type="button" class="set-sw" :class="{ on: qc.includeOld }"

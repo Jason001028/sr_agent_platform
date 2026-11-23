@@ -12,13 +12,13 @@ vi.mock('../../components/DiffLocateButton.vue', () => ({ default: { render: () 
 vi.mock('../../components/DiffContinueButton.vue', () => ({ default: { render: () => null } }));
 vi.mock('../../components/SRSubmitFeedback.vue', () => ({ default: { render: () => null } }));
 vi.mock('../../lib/api.js', async original => ({ ...await original<typeof import('../../lib/api.js')>(),
-  apiResolveScene: vi.fn(), fetchDropSceneJpg: vi.fn(), fetchSceneJpg: vi.fn(), apiSceneSiblings: vi.fn() }));
+  apiResolveScene: vi.fn(), apiSceneTiffFiles: vi.fn(), fetchDropSceneJpg: vi.fn(), fetchSceneJpg: vi.fn(), apiSceneSiblings: vi.fn() }));
 vi.mock('../../lib/local_preview.js', async original => ({ ...await original<typeof import('../../lib/local_preview.js')>(),
   sourceFingerprint: vi.fn() }));
 vi.mock('../../lib/localDecodeWorker', () => ({ decodeLocalFile: vi.fn() }));
 import Toolbar from '../../components/Toolbar.vue';
 import CompareBar from '../../components/CompareBar.vue';
-import { apiResolveScene, fetchDropSceneJpg, fetchSceneJpg, apiSceneSiblings } from '../../lib/api';
+import { apiResolveScene, apiSceneTiffFiles, fetchDropSceneJpg, fetchSceneJpg, apiSceneSiblings } from '../../lib/api';
 import type { SceneResolveResult, SceneSiblings } from '../../lib/api';
 import { sourceFingerprint } from '../../lib/local_preview';
 import { decodeLocalFile } from '../../lib/localDecodeWorker';
@@ -101,4 +101,60 @@ it('keeps the PAN tier while smaller NOSR opens at half size and follows fine PA
   expect(vi.mocked(fetchDropSceneJpg).mock.calls.filter(call=>call[1]==='nosr')).toHaveLength(count);
   store.setPreviewDiv(8);await vi.waitFor(()=>expect(nosr.detailDiv).toBe(2));
   expect(store.previewDiv).toBe(8);
+});
+
+it('merges metadata only, then loads a companion once on repeated clicks', async () => {
+  const verified = await apiResolveScene({ apiBase: '', staticBase: '' }, { name: 'selected.tif' });
+  vi.mocked(apiResolveScene).mockResolvedValue({ ...verified, discovery: 'grant' });
+  vi.mocked(apiSceneTiffFiles).mockResolvedValue([
+    { id: 'selected', name: 'selected.tif', size_bytes: 3, srcRev: 'main-rev',
+      kind: 'input', suffix: '', mtime_ms: 1, readOnly: true, viewerRole: 'stage' },
+    ...['PAN_ori.tif', 'other.TIFF', 'third.tiff', 'fourth.tif', 'fifth.tif'].map((name, index) => ({
+      id: 'companion-' + index, name, size_bytes: 3, srcRev: 'rev-' + index,
+      kind: null, suffix: '', mtime_ms: 1, readOnly: true as const,
+      viewerRole: index === 0 ? 'reference' as const : 'other' as const,
+    })),
+  ]);
+  const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+    if (url.endsWith('/assets') && JSON.parse(String(init?.body)).sceneId === 'companion-0') {
+      return Response.json({ id: 'asset-ref', name: 'PAN_ori.tif', W: 100, H: 100,
+        sourceRev: 'rev-0', uploaded: false });
+    }
+    if (url.includes('/assets/asset-ref/preview?')) {
+      return new Response('jpg', { headers: { 'X-Preview-Width': '2', 'X-Preview-Height': '2' } });
+    }
+    return new Response(null, { status: 404 });
+  });
+  vi.stubGlobal('fetch', fetcher);
+  const store = await selectTiff();
+  await vi.waitFor(() => expect(store.recs).toHaveLength(6));
+  const cards = store.recs.filter(rec => rec.discoveredTiff);
+  expect(cards).toHaveLength(5);
+  expect(cards.every(rec => !rec.thumb && !rec.W && !rec.lqPath)).toBe(true);
+  expect(fetchSceneJpg).not.toHaveBeenCalled();
+  expect(fetcher.mock.calls).toHaveLength(1);
+  await Promise.all([store.activate(cards[0].id), store.activate(cards[0].id)]);
+  expect(store.activeRec).toMatchObject({ sceneId: 'companion-0', W: 100, H: 100,
+    previewOnly: true, lqPath: null, viewerRole: 'reference' });
+  expect(cards[0].thumb).toBeTruthy();
+  expect(cards.slice(1).every(rec => !rec.thumb)).toBe(true);
+  expect(fetcher.mock.calls.filter(([url]) => url.includes('/assets/asset-ref/preview?'))).toHaveLength(1);
+  store.addFiles(new File(['raw'], 'selected.tif'));
+  await vi.waitFor(() => expect(store.imageLoad.active).toBe(false));
+  expect(store.recs).toHaveLength(6);
+  expect(store.recs.map(rec => rec.sceneId).filter(id => id === 'selected')).toHaveLength(1);
+});
+
+it('discards a discovery response after the workspace is cleared', async () => {
+  const verified = await apiResolveScene({ apiBase: '', staticBase: '' }, { name: 'selected.tif' });
+  vi.mocked(apiResolveScene).mockResolvedValue({ ...verified, discovery: 'grant' });
+  let respond!: (files: Awaited<ReturnType<typeof apiSceneTiffFiles>>) => void;
+  vi.mocked(apiSceneTiffFiles).mockImplementationOnce(() => new Promise(resolve => { respond = resolve; }));
+  const store = await selectTiff();
+  await vi.waitFor(() => expect(respond).toBeTypeOf('function'));
+  store.clearRecs();
+  respond([{ id: 'stale', name: 'PAN_ori.tif', size_bytes: 3, srcRev: 'rev-0',
+    kind: null, suffix: '', mtime_ms: 1, readOnly: true, viewerRole: 'reference' }]);
+  await Promise.resolve();
+  expect(store.recs).toHaveLength(0);
 });

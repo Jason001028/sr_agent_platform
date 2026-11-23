@@ -645,10 +645,16 @@ def prepare_repair(
                     batch_detector.DetectionError, batch_mask.MaskError,
                     mss_water.WaterUnavailable) as exc:
                 status = "BLOCKED"
-                blocking.append({"severity": "error", "code": "land_constraint_unavailable",
-                                 "item_id": item["item_id"], "message": str(exc)})
-                # A missing global profile applies to every scene.
-                if not os.environ.get("SR_MSS_EXEC_PROFILE"):
+                detail = {"severity": "error", "code": "land_constraint_unavailable",
+                          "item_id": item["item_id"], "message": str(exc)}
+                if item.get("scene_ref"):
+                    detail["name"] = Path(item["scene_ref"]).name
+                if isinstance(exc, mss_water.WaterUnavailable):
+                    detail["reason"] = exc.code
+                blocking.append(detail)
+                # Missing runtime dependencies and profiles apply to every scene.
+                if (getattr(exc, "code", None) == "raster_dependency"
+                        or not os.environ.get("SR_MSS_EXEC_PROFILE")):
                     break
 
     scope_name = "single" if len(targets["items"]) == 1 else "batch"
