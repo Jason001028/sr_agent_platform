@@ -3,6 +3,15 @@ import type { AssetTile, AssetTileInfo, PreviewAsset } from './imageOpen';
 
 export const TILE_OVERVIEW_EDGE = 3200;
 
+export function bootstrapTileLevel(info: AssetTileInfo) {
+  const whole = Math.ceil(Math.log2(Math.max(info.width, info.height) / info.tileSize));
+  // The first frame only needs one sample per two TIFF blocks on each axis.
+  // The viewport scheduler supplies the normal display LOD once it is visible.
+  const sparse = info.layout === 'tiled' && !info.overviews.length
+    ? Math.ceil(Math.log2(Math.max(...info.block_size))) + 1 : 0;
+  return Math.min(info.maxLevel, Math.max(0, whole, sparse));
+}
+
 export interface TileSource {
   asset: PreviewAsset;
   info: AssetTileInfo;

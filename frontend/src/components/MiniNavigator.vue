@@ -7,7 +7,7 @@ import { useDiffStore } from '../stores/diff';
 import {useAutoTourStore} from '../stores/autoTour';
 const diff = useDiffStore();
 const tour=useAutoTourStore();
-const store=useViewerStore(); const roots=ref<HTMLCanvasElement[]>([]);
+const store=useViewerStore(); const roots=ref<(HTMLCanvasElement | null)[]>([]);
 const review=useBatchMaskReviewStore();
 const heatRoot=ref<HTMLCanvasElement|null>(null);
 const heatSource=computed(()=>{
@@ -16,6 +16,7 @@ const heatSource=computed(()=>{
  return store.split?diff.layerFor(store.panes[0]?.rec??null)?.heat??null:null;
 });
 const windowRef=ref<HTMLDivElement|null>(null);
+const mapBases = new WeakMap<HTMLCanvasElement, { image: HTMLCanvasElement; signature: unknown[] }>();
 const position=ref<{left:number;top:number}|null>(null);
 const VISIBILITY_KEY='sr.viewer.minimap.visible';
 function restoredVisibility(){try{return localStorage.getItem(VISIBILITY_KEY)!=='0';}catch{return true;}}
@@ -57,20 +58,32 @@ async function paint(){
  const count=store.panes.filter(p=>p.rec?.thumb).length+Number(!!heatSource.value);
  const maxWidth=Math.min(320*size.value/100,Math.max(60,((windowRef.value?.parentElement?.clientWidth??1000)-36)/Math.max(1,count)));
  store.panes.forEach((p,i)=>{
-  const c=roots.value[i],r=p.rec;if(!c||!r?.thumb)return;
+  const c=roots.value[i],r=p.rec;
+  if(!c)return;
+  if(!r?.thumb){mapBases.delete(c);return;}
   const ctx=c.getContext('2d');if(!ctx||!r.thumb.width||!r.thumb.height)return;
   // Fit inside the navigator bounds without stretching the source image.
   const scale=Math.min(maxWidth/r.thumb.width,200*size.value/100/r.thumb.height);
   const cw=Math.max(1,Math.round(r.thumb.width*scale)),ch=Math.max(1,Math.round(r.thumb.height*scale));
   // 背板尺寸只在变化时才重设：每次赋值都会清空并重新分配。
   if(c.width!==cw)c.width=cw;if(c.height!==ch)c.height=ch;
+  const layer = review.active ? null : diff.layerFor(r);
+  const signature = [cw, ch, r.thumb, r.stretchPreview, r.paintedMode, r.displayStretch?.version,
+    layer?.heat, ...(layer?.coverage ?? []), diff.display, diff.opacity, diff.feather];
+  let base = mapBases.get(c);
+  if (!base || signature.some((value, j) => value !== base?.signature[j])) {
+   const image = base?.image ?? document.createElement('canvas');
+   image.width = cw;
+   image.height = ch;
+   const baseCtx = image.getContext('2d')!;
+   baseCtx.scale(cw/r.thumb.width,ch/r.thumb.height);
+   const source=(r.stretchPreview??r.thumb) as unknown as CanvasImageSource;
+   drawDiffSource(baseCtx,source,r.thumb.width,r.thumb.height,layer,diff.display,diff.opacity,diff.feather);
+   base = { image, signature };
+   mapBases.set(c, base);
+  }
   ctx.clearRect(0,0,c.width,c.height);
-  ctx.save();
-  ctx.scale(c.width/r.thumb.width,c.height/r.thumb.height);
-  // 鹰眼最终只有几百像素：16384 档位每帧从整幅缩略画布重采样太贵，改画缓存副本。
-  const source=(r.stretchPreview??store.screenPreviewFor(r)??r.thumb) as unknown as CanvasImageSource;
-  drawDiffSource(ctx,source,r.thumb.width,r.thumb.height,review.active?null:diff.layerFor(r),diff.display,diff.opacity,diff.feather);
-  ctx.restore();
+  ctx.drawImage(base.image,0,0);
   if(tour.coverageVisible){
    const n=tour.coverage.size;ctx.fillStyle='rgba(61,169,164,.22)';ctx.beginPath();
    for(let j=0;j<n;j++)for(let k=0;k<n;k++)if(tour.coverage.viewed(j*n+k,tour.coverageCompare))ctx.rect(k*c.width/n,j*c.height/n,c.width/n,c.height/n);
@@ -135,7 +148,7 @@ function navigate(e:PointerEvent,i:number){
    <label>不透明度 <output>{{ opacity }}%</output><input v-model.number="opacity" type="range" min="0" max="100" step="5" aria-label="鹰眼不透明度" /></label>
    <label>大小 <output>{{ size }}%</output><input v-model.number="size" type="range" min="50" max="200" step="10" aria-label="鹰眼相对大小" /></label>
   </div>
-  <div class="navigator-surface"><div class="maps"><canvas v-for="(p,i) in store.panes" v-show="p.rec?.thumb" :key="p.side" :ref="el=>{if(el)roots[i]=el as HTMLCanvasElement}" :aria-label="p.side+' 影像导航'" @pointerdown.stop="navigate($event,i)" @pointermove.stop="navigate($event,i)" /><div v-if="heatSource" class="heat-map"><span>差异热力图</span><canvas ref="heatRoot" aria-label="差异热力图导航" data-e2e="review-heat-navigator" @pointerdown.stop="navigate($event,0)" @pointermove.stop="navigate($event,0)" /></div></div></div>
+  <div class="navigator-surface"><div class="maps"><canvas v-for="(p,i) in store.panes" v-show="p.rec?.thumb" :key="p.side" :ref="el=>{roots[i]=el as HTMLCanvasElement | null}" :aria-label="p.side+' 影像导航'" @pointerdown.stop="navigate($event,i)" @pointermove.stop="navigate($event,i)" /><div v-if="heatSource" class="heat-map"><span>差异热力图</span><canvas ref="heatRoot" aria-label="差异热力图导航" data-e2e="review-heat-navigator" @pointerdown.stop="navigate($event,0)" @pointermove.stop="navigate($event,0)" /></div></div></div>
  </div>
  </Transition>
 </template>

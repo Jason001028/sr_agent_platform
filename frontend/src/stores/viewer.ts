@@ -36,7 +36,7 @@ import {
 } from '../lib/maskgen.js';
 import { fitView, locateView, wheelZoom, hitRoi, thumbToSource, sourceToMaskThumb, clampSourcePixel, origToThumb, thumbToDisplaySource, visibleThumbRect,
   clampSplitRatio, splitRects, paneAtX, wheelZoomBoth, panBoth,
-  remapViewForImage, easeOutCubic, lerpView } from '../lib/viewMath.js';
+  remapViewForImage, easeOutCubic, lerpView, nativePreviewScale } from '../lib/viewMath.js';
 import type { ViewState, Rect, PaneRect } from '../lib/viewMath.js';
 import { planShot, drawShot } from '../lib/chatShot.js';
 import type { ChatShot } from '../lib/chatShot.js';
@@ -75,11 +75,11 @@ import type { SceneResolveResult, SceneSibling, SceneSiblings } from '../lib/api
 import { classifyImages, imageKindOf, isZeroLengthImageFile,
   zeroLengthImageMessage } from '../lib/imageFiles.js';
 import type { SceneOpenMeta, SceneRow } from '../lib/scene.js';
-import { sourceFingerprint, localPreviewBudget } from '../lib/local_preview.js';
+import { sourceFingerprint, localPreviewBudget, localTiffPreviewEdge, LARGE_LOCAL_TIFF_BYTES } from '../lib/local_preview.js';
 import { LoadControl, isLoadAbort } from '../lib/loadControl';
 import { decodeLocalFile } from '../lib/localDecodeWorker';
 import { createPreviewAsset, uploadPreviewFile, fetchAssetTile, fetchPreviewAsset, ImageOpenError } from '../lib/imageOpen';
-import { openTileSource, overviewDiv, TILE_OVERVIEW_EDGE } from '../lib/tileSource';
+import { bootstrapTileLevel, openTileSource, overviewDiv, TILE_OVERVIEW_EDGE } from '../lib/tileSource';
 import type { TileSource } from '../lib/tileSource';
 import type { PreviewAsset } from '../lib/imageOpen';
 import type { LocalPixels, LocalSourceInfo } from '../lib/localDecodeWorker';
@@ -1178,7 +1178,11 @@ export const useViewerStore = defineStore('viewer', () => {
     if (!image) return null;
     const rect = rectForSide(side);
     viewFor[side] = { w: image.width, h: image.height };
-    return fitView(image.width, image.height, rect.w, rect.h);
+    return fitRaster(rec, image.width, image.height, rect.w, rect.h);
+  }
+
+  function fitRaster(rec: ViewerRec | null, tw: number, th: number, w: number, h: number) {
+    return fitView(tw, th, w, h, rec?.tileSource ? nativePreviewScale(tw, th, rec.W, rec.H, 1) : 1);
   }
 
   /** 只适配某一格（按它自己的视口矩形），立即落位。 */
@@ -1314,7 +1318,7 @@ export const useViewerStore = defineStore('viewer', () => {
       const prev = viewFor.A;
       flickerView.value = prev
         ? remapViewForImage(flickerView.value, prev, size, w, h)
-        : fitView(size.w, size.h, w, h);
+        : fitRaster(rec, size.w, size.h, w, h);
       viewFor.A = size;
       return;
     }
@@ -1324,7 +1328,7 @@ export const useViewerStore = defineStore('viewer', () => {
     const cur = side === 'B' ? viewB.value : viewA.value;
     setSideView(side, (compareOn.value && prev)
       ? remapViewForImage(cur, prev, size, rect.w, rect.h)
-      : fitView(size.w, size.h, rect.w, rect.h));
+      : fitRaster(rec, size.w, size.h, rect.w, rect.h));
     viewFor[side] = size;
   }
 
@@ -1346,7 +1350,7 @@ export const useViewerStore = defineStore('viewer', () => {
         const { w, h } = canvasSize.value;
         flickerView.value = previousSize
           ? remapViewForImage(flickerView.value, previousSize, size, w, h)
-          : fitView(size.w, size.h, w, h);
+          : fitRaster(rec, size.w, size.h, w, h);
         viewFor.A = size;
       }
       refreshCloudStats();
@@ -1541,7 +1545,7 @@ export const useViewerStore = defineStore('viewer', () => {
     // 分屏的半幅视口不能直接搬到整块画布（会缩在左上角）→ 参考图重新适配；
     // 单屏本来就是这个视口，原样接过来，进入模式时画面不跳。
     flickerView.value = wasSplit && active.thumb
-      ? fitView(active.thumb.width, active.thumb.height, canvasSize.value.w, canvasSize.value.h)
+      ? fitRaster(active, active.thumb.width, active.thumb.height, canvasSize.value.w, canvasSize.value.h)
       : { ...viewA.value };
     if (active.thumb) viewFor.A = { w: active.thumb.width, h: active.thumb.height };
     compareMode.value = 'flicker';
@@ -1650,7 +1654,7 @@ export const useViewerStore = defineStore('viewer', () => {
       const { w, h } = canvasSize.value;
       flickerView.value = prev && prev.w === size.w && prev.h === size.h
         ? flickerView.value
-        : fitView(size.w, size.h, w, h);
+        : fitRaster(active, size.w, size.h, w, h);
       viewFor.A = size;
     } else {
       flickerView.value = { ...viewA.value };
@@ -2407,7 +2411,7 @@ export const useViewerStore = defineStore('viewer', () => {
     // 未命中（盘阵上没有 / 指纹不符 / 后端不可达）才回落本地解码，能力不变。
     if (!rec.route && await tryLinkScenes(rec)) return;
     if (!recs.value.includes(rec)) return;      // 关联期间被移除了
-    if (!rec.route && !rec.serverSourceVerified && !rec.preferLocalTiff) {
+    if (!rec.route && !rec.serverSourceVerified && !rec.preferLocalTiff && rec.file.size < LARGE_LOCAL_TIFF_BYTES) {
       const control = loadControlFor(rec)!;
       try {
         const asset = await uploadPreviewFile(rec.file, control, updateProgressUI);
@@ -2497,7 +2501,7 @@ export const useViewerStore = defineStore('viewer', () => {
           renderTick.value++;
         },
         pixels: commitPixels,
-      });
+      }, localTiffPreviewEdge(rec.file));
       await control.checkpoint();
       if (rec.token !== my || !recs.value.includes(rec)) return;
       if (!committed) commitPixels(result);
@@ -2523,7 +2527,7 @@ export const useViewerStore = defineStore('viewer', () => {
     const source = new FileSource(rec.file, rec.name, control);
     try {
       const d = await decodeOne(source, probe, rec.file, browserKit, {
-        previewDiv: div,
+        previewDiv: div, previewMaxEdge: localTiffPreviewEdge(rec.file),
         checkpoint: stage => control.checkpoint(stage),
         onOverlay: (title, sub, bar) => { if (imageLoadOwner?.control === control) showMask(title, sub, bar); },
         onProgress: (f) => {
@@ -2575,7 +2579,7 @@ export const useViewerStore = defineStore('viewer', () => {
   }
   async function coarseAssetOverview(source: TileSource, signal?: AbortSignal) {
     const { asset, info } = source;
-    const level = Math.max(0, Math.ceil(Math.log2(Math.max(asset.W, asset.H) / info.tileSize)));
+    const level = bootstrapTileLevel(info);
     const { tile, blob } = await fetchAssetTile(asset, level, 0, 0, signal);
     if (tile.rasterVersion !== info.rasterVersion || tile.sourceWidth !== asset.W
       || tile.sourceHeight !== asset.H) throw new Error('概览源版本或尺寸已变化，请重新打开影像');
@@ -2711,7 +2715,7 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.route = d.route;
     const domain = rec.dnDomain ?? rec.probe;
     const div = effectivePreviewDiv(rec);
-    const { limits, size } = localPreviewBudget(d.W, d.H, d.nbands, div);
+    const { limits, size } = localPreviewBudget(d.W, d.H, d.nbands, div, localTiffPreviewEdge(rec.file));
     if (size.w !== d.srcw || size.h !== d.srch) limits.push('reader');
     recordPreview(rec, {
       width: d.W, height: d.H, identity: rec.sceneId ?? `${rec.file.name}:${rec.file.size}:${rec.file.lastModified}`,
@@ -3838,7 +3842,7 @@ export const useViewerStore = defineStore('viewer', () => {
       // 交替对比只适配**参考图**：另一张的视图是它的换算结果，一起适配就是两套视口。
       const ref = flickerRefRec.value;
       if (!ref || !ref.thumb) return;
-      flickerView.value = fitView(ref.thumb.width, ref.thumb.height,
+      flickerView.value = fitRaster(ref, ref.thumb.width, ref.thumb.height,
         canvasSize.value.w, canvasSize.value.h);
       return;
     }
@@ -3846,7 +3850,7 @@ export const useViewerStore = defineStore('viewer', () => {
     const image = rec?.thumb ?? rec?.progressivePreview;
     if (!image) return;
     const rect = activePaneRect();
-    view.value = fitView(image.width, image.height, rect.w, rect.h);
+    view.value = fitRaster(rec, image.width, image.height, rect.w, rect.h);
     viewFor[activeSide.value] = { w: image.width, h: image.height };
   }
 
@@ -3955,12 +3959,12 @@ export const useViewerStore = defineStore('viewer', () => {
         const side = onA ? 'A' : 'B';
         if (!recForSide(side)?.thumb && !recForSide(side)?.progressivePreview) return;
         const target = onA ? viewA : viewB;
-        target.value = wheelZoom(target.value, mx - pPane.x, my - pPane.y, factor);
+        target.value = wheelZoom(target.value, mx - pPane.x, my - pPane.y, factor, .05, maxWheelScale(recForSide(side)));
         renderTick.value++;
         return;
       }
       const out = wheelZoomBoth(viewA.value, viewB.value, pPane, oPane,
-        onA ? 'A' : 'B', mx, my, factor);
+        onA ? 'A' : 'B', mx, my, factor, maxWheelScale(recForSide('A')), maxWheelScale(recForSide('B')));
       viewA.value = out.a;
       viewB.value = out.b;
       renderTick.value++;
@@ -3971,8 +3975,13 @@ export const useViewerStore = defineStore('viewer', () => {
     // **单屏刻意保留这条字面表达式**：改走 normAnchor/anchorAt 会多一次除法与乘法，
     // IEEE double 下不保证往返（100/1314*1314 = 99.99999999999999），
     // 而 test-vue-viewer.js 的 D/E 段在采样画布中心像素。
-    view.value = wheelZoom(view.value, mx, my, factor);
+    view.value = wheelZoom(view.value, mx, my, factor, .05, maxWheelScale(rec));
     renderTick.value++;
+  }
+
+  function maxWheelScale(rec: ViewerRec | null) {
+    const t = rec?.thumb;
+    return rec?.tileSource && t ? Math.max(64, nativePreviewScale(t.width, t.height, rec.W, rec.H, 1) * 4) : 64;
   }
 
   function zoomNative() {
@@ -3980,7 +3989,7 @@ export const useViewerStore = defineStore('viewer', () => {
     const rec = pane?.rec;
     if (!pane || !rec?.tileSource || !rec.thumb) return;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const scale = Math.max(rec.W / rec.thumb.width, rec.H / rec.thumb.height) / dpr;
+    const scale = nativePreviewScale(rec.thumb.width, rec.thumb.height, rec.W, rec.H, dpr);
     onWheel(pane.rect.x + pane.rect.w / 2, pane.rect.y + pane.rect.h / 2, scale / pane.view.scale);
   }
 

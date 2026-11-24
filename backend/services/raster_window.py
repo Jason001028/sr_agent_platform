@@ -241,6 +241,12 @@ class RasterWindowReader:
             # A small threshold disables implicit selection on the strict tile
             # grid. GDAL permits a threshold below 1 to force the base band.
             options = {"GDAL_OVERVIEW_OVERSAMPLING_THRESHOLD": "0.001"} if grid_step else {}
+            # At coarse steps a TIFF block contributes only a few samples.
+            # Read these directly for uncompressed tiled input, keeping the
+            # block cache for nearby native tiles and all compressed reads.
+            if (selected is raster and info.layout == "tiled" and info.compression == "NONE"
+                    and resampling == "nearest" and grid_step and grid_step >= max(info.block_size)):
+                options["GTIFF_DIRECT_IO"] = "YES"
             candidates = (selected,) if grid_step or (sw, sh) == (dw, dh) else (selected, *overviews)
             if any(math.prod(b.GetBlockSize()) * bytes_per_pixel > MAX_BLOCK_BYTES for b in candidates):
                 raise RasterReadError("TIFF decoding block exceeds 32 MiB")

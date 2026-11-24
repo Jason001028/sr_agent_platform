@@ -24,6 +24,23 @@ export function sourceScale(view: ViewState, tw: number, th: number, width: numb
   return { x: view.scale * tw / width, y: view.scale * th / height };
 }
 
+export function nativePreviewScale(tw: number, th: number, width: number, height: number, dpr: number) {
+  return Math.max(width / tw, height / th) / dpr;
+}
+
+/** Preview dimensions are independently rounded. At native zoom align both
+ * axes to the device grid while retaining the source coordinate at the pane centre. */
+export function rasterTransform(view: ViewState, tw: number, th: number, width: number, height: number,
+  paneWidth: number, paneHeight: number, dpr: number) {
+  const scale = sourceScale(view, tw, th, width, height);
+  const target = nativePreviewScale(tw, th, width, height, dpr);
+  if (Math.abs(view.scale / target - 1) > 1e-9) return { ...scale, ox: view.ox, oy: view.oy };
+  const pixel = 1 / dpr;
+  const cx = paneWidth / 2, cy = paneHeight / 2;
+  return { x: pixel, y: pixel, ox: cx - (cx - view.ox) * pixel / scale.x,
+    oy: cy - (cy - view.oy) * pixel / scale.y };
+}
+
 /** At one device pixel per original pixel, L0 is always eligible. */
 export function tileLevel(deviceScale: number, maxLevel: number, previous?: number) {
   const ideal = Math.log2(1 / deviceScale);
@@ -34,8 +51,8 @@ export function tileLevel(deviceScale: number, maxLevel: number, previous?: numb
 
 /* ---------------- fit（HTML `fit()`） ----------------
    把缩略图适配进画布：scale = min(cw/tw, ch/th, 1)，居中。 */
-export function fitView(thumbW: number, thumbH: number, cw: number, ch: number): ViewState {
-  const s = Math.min(cw / thumbW, ch / thumbH, 1);
+export function fitView(thumbW: number, thumbH: number, cw: number, ch: number, maxScale = 1): ViewState {
+  const s = Math.min(cw / thumbW, ch / thumbH, maxScale);
   return { scale: s, ox: (cw - thumbW * s) / 2, oy: (ch - thumbH * s) / 2 };
 }
 
@@ -278,6 +295,7 @@ export function anchorAtLocal(rect: PaneRect, u: number, v: number): [number, nu
 export function wheelZoomBoth(
   va: ViewState, vb: ViewState, pPane: PaneRect, oPane: PaneRect,
   pointerSide: 'A' | 'B', mx: number, my: number, factor: number,
+  maxA = 64, maxB = 64,
 ): { a: ViewState; b: ViewState } {
   const n = normAnchor(pPane, mx, my);
   // 指针所在的那一格直接用指针的格局部坐标 —— 不走归一化往返，省一次除法一次乘法
@@ -288,8 +306,8 @@ export function wheelZoomBoth(
   const [ax, ay] = onA ? [px, py] : [qx, qy];
   const [bx, by] = onA ? [qx, qy] : [px, py];
   return {
-    a: wheelZoom(va, ax, ay, factor),
-    b: wheelZoom(vb, bx, by, factor),
+    a: wheelZoom(va, ax, ay, factor, .05, maxA),
+    b: wheelZoom(vb, bx, by, factor, .05, maxB),
   };
 }
 

@@ -2,6 +2,12 @@ import { getPreviewTrueMaxEdge } from './previewLevel';
 import type { PreviewPlan } from './previewPlan';
 
 export const LOCAL_PREVIEW_DN_BYTES = 256 * 1024 * 1024;
+export const LARGE_LOCAL_TIFF_BYTES = 1024 ** 3;
+
+export function localTiffPreviewEdge(file: File) {
+  const max = getPreviewTrueMaxEdge();
+  return file.size >= LARGE_LOCAL_TIFF_BYTES ? Math.min(4096, max) : max;
+}
 
 /** Bound browser preview buffers independently of source size and selected level.
  *
@@ -25,7 +31,7 @@ export function localPreviewBudget(w: number, h: number, bands: number, div: num
   return { size: { w: Math.max(1, Math.floor(w * scale)), h: Math.max(1, Math.floor(h * scale)) }, limits };
 }
 
-export async function sourceFingerprint(file: File) {
+async function sampleFingerprint(file: File) {
   const length = 4096;
   const offsets = [0, Math.max(0, Math.floor((file.size - length) / 2)), Math.max(0, file.size - length)];
   const samples = await Promise.all(offsets.map(async offset => {
@@ -33,4 +39,18 @@ export async function sourceFingerprint(file: File) {
     return btoa(String.fromCharCode(...bytes));
   }));
   return { name: file.name, size: file.size, samples };
+}
+
+const fingerprints = new WeakMap<File, ReturnType<typeof sampleFingerprint>>();
+
+export function sourceFingerprint(file: File) {
+  let sampled = fingerprints.get(file);
+  if (!sampled) {
+    sampled = sampleFingerprint(file).catch(error => {
+      fingerprints.delete(file);
+      throw error;
+    });
+    fingerprints.set(file, sampled);
+  }
+  return sampled;
 }

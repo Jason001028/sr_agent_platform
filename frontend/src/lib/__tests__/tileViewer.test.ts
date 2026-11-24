@@ -1,9 +1,9 @@
 import { expect, it, vi } from 'vitest';
 import { TileScheduler, tileRequests } from '../tileScheduler';
 import { TileRenderer, tileAxis } from '../tileRenderer';
-import { openTileSource, overviewDiv } from '../tileSource';
+import { bootstrapTileLevel, openTileSource, overviewDiv } from '../tileSource';
 import type { DecodedTile, TileSource } from '../tileSource';
-import { tileLevel } from '../viewMath';
+import { nativePreviewScale, rasterTransform, tileLevel } from '../viewMath';
 
 const source = {
   key: 'source/v1',
@@ -53,6 +53,20 @@ it('uses the band_count field from the real P1 JSON contract', async () => {
     expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/assets/one/tiles?band=1'), expect.any(Object));
   } finally {
     vi.unstubAllGlobals();
+  }
+});
+
+it('uses a cheap tiled bootstrap and maps a rounded overview at native scale on both axes', () => {
+  const info = { ...source.info, layout:'tiled', overviews:[], block_size:[512,512] } as TileSource['info'];
+  expect(bootstrapTileLevel(info)).toBe(10);
+  expect(bootstrapTileLevel({ ...info, overviews:[[387,387]] })).toBe(7);
+  for (const dpr of [1,2]) {
+    const scale = nativePreviewScale(49,49,49475,49454,dpr);
+    expect(scale).toBeGreaterThan(64);
+    const v = { scale, ox:-1024, oy:-2048 };
+    const t = rasterTransform(v,49,49,49475,49454,900,700,dpr);
+    expect([t.x*dpr,t.y*dpr]).toEqual([1,1]);
+    expect((350-t.oy)/t.y).toBeCloseTo((350-v.oy)/(scale*49/49454),8);
   }
 });
 

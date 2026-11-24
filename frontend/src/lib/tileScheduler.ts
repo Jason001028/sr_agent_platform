@@ -1,4 +1,4 @@
-import { sourceScale, tileLevel } from './viewMath';
+import { rasterTransform, tileLevel } from './viewMath';
 import type { PaneRect, ViewState } from './viewMath';
 import { loadTile } from './tileSource';
 import type { DecodedTile, TileSource } from './tileSource';
@@ -32,9 +32,9 @@ export function tileRequests(pane: TilePane, dpr: number, previous?: number, dir
   maxVisible = 96) {
   const { source, rect, view } = pane;
   const { width, height, maxLevel, tileSize } = source.info;
-  const scale = sourceScale(view, pane.tw, pane.th, width, height);
+  const scale = rasterTransform(view, pane.tw, pane.th, width, height, rect.w, rect.h, dpr);
   let level = tileLevel(Math.max(scale.x, scale.y) * dpr, maxLevel, previous);
-  const left = -view.ox / scale.x, top = -view.oy / scale.y;
+  const left = -scale.ox / scale.x, top = -scale.oy / scale.y;
   const right = left + rect.w / scale.x, bottom = top + rect.h / scale.y;
   if (right <= 0 || bottom <= 0 || left >= width || top >= height || !rect.w || !rect.h) {
     return { level, requests: [] };
@@ -88,8 +88,11 @@ export class TileScheduler {
     for (const request of requests) {
       if ((next.get(request.key)?.priority ?? Infinity) > request.priority) next.set(request.key, request);
     }
-    const preserve = new Set(sources.map(source => source.key));
-    this.sources = new Map(sources.map(source => [source.asset.id, source]));
+    if (this.sources.size !== sources.length || sources.some(source => this.sources.get(source.asset.id)?.key !== source.key)) {
+      const preserve = new Set(sources.map(source => source.key));
+      this.sources = new Map(sources.map(source => [source.asset.id, source]));
+      for (const [key, value] of this.cache) if (!preserve.has(value.sourceKey)) this.release(key, value);
+    }
     for (const [key, request] of next) {
       if (request.priority < 1 && (this.demand.get(key)?.priority ?? 0) >= 1) this.failed.delete(key);
     }
@@ -103,9 +106,6 @@ export class TileScheduler {
     }
     for (const key of this.failed) if (!next.has(key)) this.failed.delete(key);
     for (const key of this.retries) if (!next.has(key)) this.retries.delete(key);
-    for (const [key, value] of this.cache) {
-      if (!preserve.has(value.sourceKey)) this.release(key, value);
-    }
     this.trim();
     this.pump();
   }
@@ -130,12 +130,13 @@ export class TileScheduler {
 
   private pump() {
     if (this.disposed || this.pending.size >= this.concurrency) return;
-    const work = [...this.demand.values()].sort((a, b) => a.priority - b.priority);
+    const work = [...this.demand.values()].filter(request =>
+      !this.cache.has(request.key) && !this.pending.has(request.key) && !this.failed.has(request.key))
+      .sort((a, b) => a.priority - b.priority);
     for (const request of work) {
       if (this.pending.size >= this.concurrency) break;
       const { key, source, level, x, y } = request;
-      if (this.cache.has(key) || this.pending.has(key) || this.failed.has(key)
-        || (request.priority >= 1 && this.bytes + 512 * 512 * 4 > this.budget)) continue;
+      if (request.priority >= 1 && this.bytes + 512 * 512 * 4 > this.budget) break;
       const controller = new AbortController();
       this.pending.set(key, controller);
       void this.read(source, level, x, y, controller.signal).then(decoded => {

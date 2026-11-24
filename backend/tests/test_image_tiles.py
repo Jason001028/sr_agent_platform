@@ -115,6 +115,20 @@ def test_grid_partial_footprints_and_overview(gdal, tmp_path):
     reader.release(source)
 
 
+def test_coarse_direct_io_preserves_uncompressed_tile_sample_phase(gdal, tmp_path):
+    source = tmp_path / "direct.tif"
+    width, height = 291, 299
+    dn = np.arange(width * height, dtype=np.uint32).reshape(height, width).astype(np.uint16)
+    tifffile.imwrite(source, dn, tile=(16, 16))
+    reader = RasterWindowReader()
+    window = tile_window(width, height, 5, 0, 0)
+    result = reader.read_window(source, *window, grid_step=32)
+    x = np.array([(left + min(left + 32, width)) // 2 for left in range(0, width, 32)])
+    y = np.array([(top + min(top + 32, height)) // 2 for top in range(0, height, 32)])
+    np.testing.assert_array_equal(result.dn, dn[np.ix_(y, x)])
+    reader.release(source)
+
+
 def test_oversized_compressed_block_is_rejected_before_decode(gdal, tmp_path):
     source = tmp_path / "large-block.tif"
     ds = gdal.GetDriverByName("GTiff").Create(

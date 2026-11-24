@@ -268,35 +268,36 @@ function render(now: number) {
     const rec = p.rec;
     const image = rec?.stretchPreview ?? rec?.progressivePreview ?? rec?.thumb;
     if (!rec || !image) continue;
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(p.rect.x, p.rect.y, p.rect.w, p.rect.h);
-    ctx.clip();
-    ctx.translate(p.rect.x + p.view.ox, p.rect.y + p.view.oy);
-    ctx.scale(p.view.scale, p.view.scale);
-    ctx.imageSmoothingEnabled = p.view.scale < 4;
+    const key = paneKey(p);
+    const tiled = tilePanes.has(key);
     const basis = rec.thumb ?? rec.progressivePreview ?? image;
-    // 手势期间改画降采样副本：16384 档位的缩略画布上亿像素，整幅缩放的每帧
-    // 采样都压在它上面；停手后 store 会补一帧全分辨率（见 noteViewGesture）。
     const source = (rec.thumb && image === rec.thumb && !rec.tileSource
       ? store.gestureSourceFor(rec) ?? image : image) as unknown as CanvasImageSource;
-    const tiled = tilePanes.has(paneKey(p));
     const layer = diff.layerFor(rec);
+    if (!tiled || !tileRenderer.covers(key)) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(p.rect.x, p.rect.y, p.rect.w, p.rect.h);
+      ctx.clip();
+      ctx.translate(p.rect.x + p.view.ox, p.rect.y + p.view.oy);
+      ctx.scale(p.view.scale, p.view.scale);
+      ctx.imageSmoothingEnabled = p.view.scale < 4;
+      if (tiled) {
+        const start = overviewStarts.get(rec) ?? (previous && previous.rec !== rec ? now - 160 : now);
+        overviewStarts.set(rec, start);
+        ctx.globalAlpha = immediate ? 1 : easeOutCubic((now - start) / 160);
+        animate ||= ctx.globalAlpha < 1;
+        const x = Math.max(0, -p.view.ox / p.view.scale);
+        const y = Math.max(0, -p.view.oy / p.view.scale);
+        const w = Math.min(basis.width, (p.rect.w - p.view.ox) / p.view.scale) - x;
+        const h = Math.min(basis.height, (p.rect.h - p.view.oy) / p.view.scale) - y;
+        if (w > 0 && h > 0) ctx.drawImage(source, x, y, w, h, x, y, w, h);
+      } else if (rec.progressivePreview) ctx.drawImage(source, 0, 0, basis.width, basis.height);
+      else drawDiffSource(ctx, source, basis.width, basis.height, layer, diff.display, diff.opacity, diff.feather);
+      ctx.restore();
+    }
     if (tiled) {
-      const start = overviewStarts.get(rec) ?? (previous && previous.rec !== rec ? now - 160 : now);
-      overviewStarts.set(rec, start);
-      ctx.globalAlpha = immediate ? 1 : easeOutCubic((now - start) / 160);
-      animate ||= ctx.globalAlpha < 1;
-      const x = Math.max(0, -p.view.ox / p.view.scale);
-      const y = Math.max(0, -p.view.oy / p.view.scale);
-      const w = Math.min(basis.width, (p.rect.w - p.view.ox) / p.view.scale) - x;
-      const h = Math.min(basis.height, (p.rect.h - p.view.oy) / p.view.scale) - y;
-      if (w > 0 && h > 0) ctx.drawImage(source, x, y, w, h, x, y, w, h);
-    } else if (rec.progressivePreview) ctx.drawImage(source, 0, 0, basis.width, basis.height);
-    else drawDiffSource(ctx, source, basis.width, basis.height, layer, diff.display, diff.opacity, diff.feather);
-    ctx.restore();
-    if (tiled) {
-      animate = tileRenderer.draw(ctx, paneKey(p), now, dpr, immediate) || animate;
+      animate = tileRenderer.draw(ctx, key, now, dpr, immediate) || animate;
       if (layer && diff.display !== 'regions') {
         ctx.save();
         ctx.beginPath();

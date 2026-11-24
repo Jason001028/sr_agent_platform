@@ -1,7 +1,7 @@
 import type { CachedTile, TilePane } from './tileScheduler';
 import { TileScheduler, tileRequests } from './tileScheduler';
 import type { TileSource } from './tileSource';
-import { easeOutCubic, sourceScale } from './viewMath';
+import { easeOutCubic, rasterTransform } from './viewMath';
 
 export function tileAxis(start: number, span: number, pixels: number, step: number) {
   const full = Math.floor(span / step);
@@ -12,13 +12,15 @@ export function tileAxis(start: number, span: number, pixels: number, step: numb
   return parts;
 }
 
-interface Camera { key: string; level: number; ox: number; oy: number; scale: number; levelChanged: number }
+interface Camera { key: string; level: number; ox: number; oy: number; scale: number; levelChanged: number; time: number }
 
 export class TileRenderer {
   readonly scheduler: TileScheduler;
   private cameras = new Map<string, Camera>();
-  private layers = new Map<string, { pane: TilePane; tiles: CachedTile[]; level: number; ready: number; total: number }>();
-  private recent = new Map<string, { at: number; x: number; y: number; distance: number }>();
+  private layers = new Map<string, { pane: TilePane; tiles: CachedTile[]; level: number; ready: number;
+    total: number; opaque: boolean; transform: ReturnType<typeof rasterTransform> }>();
+  private recent = new Map<string, { at: number; x: number; y: number; speed: number }>();
+  private geometry = new WeakMap<CachedTile, { x: ReturnType<typeof tileAxis>; y: ReturnType<typeof tileAxis> }>();
 
   constructor(frame: () => void) {
     this.scheduler = new TileScheduler(frame);
@@ -27,7 +29,7 @@ export class TileRenderer {
   update(panes: Map<string, TilePane>, sources: TileSource[], now: number, dpr: number, reducedMotion: boolean) {
     const pins = new Set<string>();
     const wanted: ReturnType<typeof tileRequests>['requests'] = [];
-    const cached = [...this.scheduler.cache.values()];
+    let cached: CachedTile[] | undefined;
     this.layers.clear();
     for (const [id, pane] of panes) {
       const prior = this.cameras.get(id);
@@ -36,12 +38,14 @@ export class TileRenderer {
       const dx = old && old.scale === scale ? old.ox - ox : 0;
       const dy = old && old.scale === scale ? old.oy - oy : 0;
       const movement = Math.hypot(dx, dy);
-      if (movement > 0) this.recent.set(id, { at: now, x: dx, y: dy, distance: movement });
+      if (movement > 0 && old) this.recent.set(id, {
+        at: now, x: dx, y: dy, speed: movement * 1000 / Math.max(8, now - old.time),
+      });
       const last = this.recent.get(id);
       const direction = old?.scale === scale && last && now - last.at < 120 ? last : undefined;
       const { level, requests } = tileRequests(pane, dpr, old?.level, direction, Math.floor(96 / panes.size));
       const levelChanged = old && old.level !== level ? now : old?.levelChanged ?? -Infinity;
-      this.cameras.set(id, { key: pane.source.key, level, ox, oy, scale, levelChanged });
+      this.cameras.set(id, { key: pane.source.key, level, ox, oy, scale, levelChanged, time: now });
       const visible = requests.filter(req => req.priority < 1);
       const target = visible.flatMap(req => {
         const tile = this.scheduler.cache.get(req.key);
@@ -49,12 +53,13 @@ export class TileRenderer {
       });
       const opaque = (entry: CachedTile) => reducedMotion || now - entry.ready >= entry.fade;
       const complete = target.length === visible.length && target.every(opaque);
-      const s = sourceScale(pane.view, pane.tw, pane.th, pane.source.info.width, pane.source.info.height);
-      const fallback = complete ? [] : cached.filter(entry => {
+      const s = rasterTransform(pane.view, pane.tw, pane.th, pane.source.info.width, pane.source.info.height,
+        pane.rect.w, pane.rect.h, dpr);
+      const fallback = complete ? [] : (cached ??= [...this.scheduler.cache.values()]).filter(entry => {
         const t = entry.tile;
         return entry.sourceKey === pane.source.key && t.level !== level
-          && ox + (t.x + t.sourceWidth) * s.x > 0 && ox + t.x * s.x < pane.rect.w
-          && oy + (t.y + t.sourceHeight) * s.y > 0 && oy + t.y * s.y < pane.rect.h;
+          && s.ox + (t.x + t.sourceWidth) * s.x > 0 && s.ox + t.x * s.x < pane.rect.w
+          && s.oy + (t.y + t.sourceHeight) * s.y > 0 && s.oy + t.y * s.y < pane.rect.h;
       }).sort((a, b) => b.tile.level - a.tile.level).slice(-Math.floor(24 / panes.size));
       const tiles = [...fallback, ...target];
       for (const tile of tiles) {
@@ -62,11 +67,12 @@ export class TileRenderer {
         this.scheduler.touch(tile);
       }
       for (const request of requests) {
-        if (reducedMotion || (direction && direction.distance > 100)) request.fade = 0;
+        if (reducedMotion || (direction && direction.speed >= 1000)) request.fade = 0;
         else if (now - levelChanged < 220) request.fade = 200;
         wanted.push(request);
       }
-      this.layers.set(id, { pane, tiles, level, ready: target.length, total: visible.length });
+      this.layers.set(id, { pane, tiles, level, ready: target.length, total: visible.length,
+        opaque: complete && target.length > 0, transform: s });
     }
     for (const id of this.cameras.keys()) {
       if (!panes.has(id)) {
@@ -82,12 +88,14 @@ export class TileRenderer {
     return layer && { level: layer.level, ready: layer.ready, total: layer.total };
   }
 
+  covers(id: string) {
+    return this.layers.get(id)?.opaque === true;
+  }
+
   draw(ctx: CanvasRenderingContext2D, id: string, now: number, dpr: number, immediate: boolean) {
     const layer = this.layers.get(id);
     if (!layer) return false;
-    const { pane, tiles } = layer;
-    const { rect, view, tw, th, source } = pane;
-    const s = sourceScale(view, tw, th, source.info.width, source.info.height);
+    const { pane: { rect }, tiles, transform: s } = layer;
     const snap = (v: number) => Math.round(v * dpr) / dpr;
     ctx.save();
     ctx.beginPath();
@@ -99,13 +107,19 @@ export class TileRenderer {
       const step = 2 ** t.level;
       ctx.globalAlpha = immediate || !entry.fade ? 1 : easeOutCubic((now - entry.ready) / entry.fade);
       if (ctx.globalAlpha < 1) active = true;
+      if (ctx.globalAlpha === 0) continue;
       ctx.imageSmoothingEnabled = Math.max(s.x, s.y) * step * dpr < 1;
-      for (const x of tileAxis(t.x, t.sourceWidth, t.width, step)) {
-        for (const y of tileAxis(t.y, t.sourceHeight, t.height, step)) {
-          const sx = snap(rect.x + view.ox + x.start * s.x);
-          const sy = snap(rect.y + view.oy + y.start * s.y);
-          const w = snap(rect.x + view.ox + x.end * s.x) - sx;
-          const h = snap(rect.y + view.oy + y.end * s.y) - sy;
+      let axes = this.geometry.get(entry);
+      if (!axes) {
+        axes = { x: tileAxis(t.x, t.sourceWidth, t.width, step), y: tileAxis(t.y, t.sourceHeight, t.height, step) };
+        this.geometry.set(entry, axes);
+      }
+      for (const x of axes.x) {
+        for (const y of axes.y) {
+          const sx = snap(rect.x + s.ox + x.start * s.x);
+          const sy = snap(rect.y + s.oy + y.start * s.y);
+          const w = snap(rect.x + s.ox + x.end * s.x) - sx;
+          const h = snap(rect.y + s.oy + y.end * s.y) - sy;
           if (w > 0 && h > 0) ctx.drawImage(entry.bitmap, x.from, y.from, x.count, y.count, sx, sy, w, h);
         }
       }
