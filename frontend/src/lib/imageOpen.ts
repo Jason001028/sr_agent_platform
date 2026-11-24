@@ -28,6 +28,36 @@ const post = (value: unknown, signal?: AbortSignal): RequestInit => ({ method:'P
 export function createPreviewAsset(value: { path?: string; sceneId?: string; expectedSourceRev?: string; fingerprint?: PreviewAsset['fingerprint'] }, signal?: AbortSignal) {
   return json<PreviewAsset>('/assets',post(value,signal));
 }
+
+export interface AssetTileInfo {
+  width: number; height: number; tileSize: number; maxLevel: number; bandCount: number;
+  band: number; dtype: string; nodata: number | string | null; layout: 'strip' | 'tiled';
+  compression: string; block_size: [number, number]; overviews: [number, number][];
+  sourceVersion: string; rasterVersion: string; stretchVersion: string;
+}
+
+export interface AssetTile {
+  id: string; x: number; y: number; sourceWidth: number; sourceHeight: number;
+  width: number; height: number; level: number; tileX: number; tileY: number; band: number;
+  resampling: 'nearest'; sourceVersion: string; rasterVersion: string; stretchVersion: string;
+  dnBytes: number; displayBytes: number; decodedBytes: number;
+}
+
+export function fetchAssetTileInfo(asset: PreviewAsset, signal?: AbortSignal, band = 1) {
+  return json<AssetTileInfo>(`/assets/${asset.id}/tiles?band=${band}`, { signal });
+}
+
+export async function fetchAssetTile(asset: PreviewAsset, level: number, tileX: number,
+  tileY: number, signal?: AbortSignal, band = 1) {
+  const response = await fetch(api(`/assets/${asset.id}/tiles/${level}/${tileX}/${tileY}?band=${band}`), { signal });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new ImageOpenError(body.detail ?? `HTTP ${response.status}`, response.status);
+  }
+  const header = response.headers.get('X-SR-Tile');
+  if (!header) throw new ImageOpenError('Missing tile metadata', response.status);
+  return { tile: JSON.parse(header) as AssetTile, blob: await response.blob() };
+}
 export async function createPickerSession() {
   const value = await json<{token:string;chunkBytes:number}>('/tickets',{method:'POST'});
   if (!/^[a-f0-9]{64}$/.test(value.token)) throw new Error('服务端尚未支持影像路径组件，请更新后端');

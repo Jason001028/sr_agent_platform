@@ -73,6 +73,7 @@ from backend.services import platform_settings
 from backend.services.heavy_work import HeavyWork
 from backend.services import preview_cache
 from backend.services.image_open import ImageOpen, router_for as image_open_router, purge_loop as image_open_purge_loop
+from backend.services.image_tiles import TILE_HEADERS
 from backend.services import scene_resolve
 from backend.runtime_context import AppContext
 from backend.tools import build_builtin_registry
@@ -1446,6 +1447,7 @@ def create_app() -> FastAPI:
         # Runs finish persistence before closing their Store. No SSE owns them.
         if app.state.chat_workers:
             await asyncio.gather(*(asyncio.shield(w) for w in tuple(app.state.chat_workers)))
+        await app.state.image_open.tiles.close()
         await app.state.heavy_work.close()
         app.state.store.close()
 
@@ -1457,7 +1459,7 @@ def create_app() -> FastAPI:
     # 不列这里的话 X-SR-Preview-Fallback 恒为 null，那条提示就是死代码。
     app.add_middleware(CORSMiddleware, allow_origins=["*"],
                        allow_methods=["*"], allow_headers=["*"],
-                       expose_headers=["X-SR-Preview-Fallback", "X-SR-Image-W", "X-SR-Image-H", "X-SR-Preview-W", "X-SR-Preview-H", "X-SR-Preview-Plan"])
+                       expose_headers=["X-SR-Preview-Fallback", "X-SR-Image-W", "X-SR-Image-H", "X-SR-Preview-W", "X-SR-Preview-H", "X-SR-Preview-Plan", *TILE_HEADERS])
 
     # 阶段5 运行时状态：create_app 即建（env 已就绪）；lifespan 只额外启轮询。
     app.state.store = store_mod.Store()          # SR_AGENT_DB，懒打开

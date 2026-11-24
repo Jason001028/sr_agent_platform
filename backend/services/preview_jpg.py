@@ -483,6 +483,17 @@ def _np_dtype(bits: int, sf: int, endian: str) -> np.dtype:
     raise PreviewError(f"仅支持 8/16/32bit 采样（bits={bits}）")
 
 
+def _strip_tables(path, endian, scalars, arrays):
+    def strip_ints(tag, label):
+        if tag in arrays:
+            return _read_array(path, arrays[tag], endian)
+        if tag in scalars:
+            return np.array([scalars[tag]], dtype=np.int64)
+        raise PreviewError(f"缺 {label}")
+
+    return strip_ints(_TAG_OFFS, "StripOffsets"), strip_ints(_TAG_BYTES, "StripByteCounts")
+
+
 def sample_strips(path, endian, scalars, arrays, max_edge: int, *, output_shape=None):
     """Sparse-sample band 1 of an uncompressed strip TIFF to <=max_edge.
 
@@ -519,16 +530,7 @@ def sample_strips(path, endian, scalars, arrays, max_edge: int, *, output_shape=
     rps = scalars.get(_TAG_RPS)
     if not rps:
         rps = H                     # 缺 RowsPerStrip → 整幅单条带
-    def strip_ints(tag: int, label: str):
-        """StripOffsets/ByteCounts 可能是 count>1 数组或 count==1 标量。"""
-        if tag in arrays:
-            return _read_array(path, arrays[tag], endian)
-        if tag in scalars:
-            return np.array([scalars[tag]], dtype=np.int64)
-        raise PreviewError(f"缺 {label}")
-
-    offs = strip_ints(_TAG_OFFS, "StripOffsets")
-    lens = strip_ints(_TAG_BYTES, "StripByteCounts")
+    offs, lens = _strip_tables(path, endian, scalars, arrays)
     n_strips = int(np.ceil(H / rps))
     if len(offs) < n_strips or len(lens) < n_strips:
         raise PreviewError("条带数量与图像高不匹配")

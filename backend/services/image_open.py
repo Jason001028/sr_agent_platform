@@ -31,6 +31,7 @@ from backend.services.preview_jpg import (build_preview_pixels, scene_dims, sour
     cache_meta, preview_candidates, PREVIEW_RULE_VERSION, PREVIEW_JPG_QUALITY,
     preview_pixel_key, preview_plan, preview_source)
 from backend.services.source_match import verify_source
+from backend.services.image_tiles import ImageTiles, add_tile_routes
 
 CHUNK = 4 * 1024 * 1024
 MARKER = '.sr-image-open-v1'
@@ -53,6 +54,7 @@ class ImageOpen:
         self.active = {}
         self.removing = set()
         self.upload_slots = asyncio.Semaphore(4)
+        self.tiles = ImageTiles(self, workers=max(2, min(4, int(os.environ.get('SR_TILE_WORKERS', '2')))))
 
     def directory(self, ident):
         if not re.fullmatch('[a-f0-9]{64}', ident):
@@ -340,15 +342,7 @@ class ImageOpen:
             PREVIEW_DIVISORS, configured_preview_max_edge)
         if div not in PREVIEW_DIVISORS:
             raise HTTPException(400, '预览档位无效')
-        meta = self.metadata(ident)
-        source = Path(meta['path'])
-        if not meta['uploaded']:
-            source = ensure_preview_allowed(source, kind='file')
-        elif source.parent != self.directory(ident)/'source' or source.is_symlink() or source.parent.is_symlink() or source.parent.resolve().parent!=self.directory(ident).resolve():
-            raise HTTPException(403, '上传源路径无效')
-        rev = source_revision(source)
-        if rev != meta['sourceRev']:
-            raise HTTPException(409, '源文件已变化，请重新选择')
+        meta, source, rev = self.asset_source(ident)
         cap = configured_preview_max_edge()
         plan = preview_plan(meta['W'], meta['H'], div, cap)
         expected = plan['width'], plan['height']
@@ -428,6 +422,18 @@ class ImageOpen:
             cache_kind,elapsed,sample_ms,meta['W'],meta['H'],plan['width'],plan['height'],div,len(data))
         return Response(data,media_type='image/jpeg',headers=headers)
 
+    def asset_source(self, ident):
+        meta = self.metadata(ident)
+        source = Path(meta['path'])
+        if not meta['uploaded']:
+            source = ensure_preview_allowed(source, kind='file')
+        elif source.parent != self.directory(ident)/'source' or source.is_symlink() or source.parent.is_symlink() or source.parent.resolve().parent!=self.directory(ident).resolve():
+            raise HTTPException(403, '上传源路径无效')
+        rev = source_revision(source)
+        if rev is None or rev != meta['sourceRev']:
+            raise HTTPException(409, '源文件已变化，请重新选择')
+        return meta, source, rev
+
     def purge(self, now=None):
         now = time.time() if now is None else now
         if not self.root.exists():
@@ -462,6 +468,7 @@ class ImageOpen:
 
 def router_for(manager: ImageOpen):
     router = APIRouter(prefix='/api/image-open')
+    add_tile_routes(router, manager.tiles)
 
     async def body(request):
         data = bytearray()

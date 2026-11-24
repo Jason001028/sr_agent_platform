@@ -16,6 +16,8 @@ Smart Compare 智能对比、原始 DN 精检、候选 Mask、Agent/Batch 接入
 
 选择影像原生路径组件、未关联时服务端 JPG 优先及缓存清理见 [server-jpg-picker.md](status/server-jpg-picker.md)。
 
+P1 原生 TIFF 窗口、512px Tile API、离线部署和性能实测见 [raster-window-p1.md](status/raster-window-p1.md)。
+
 本地 TIFF 预览、已核对关联保留与加载阶段暂停/停止见 [local-tiff-load-control.md](status/local-tiff-load-control.md)。
 
 整图概览、后台行带回填、超限整幅 JPG 提前分流与后置 IFD 兼容见 [progressive-tiff-preview.md](status/progressive-tiff-preview.md)。

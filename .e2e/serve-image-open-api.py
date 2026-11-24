@@ -13,6 +13,7 @@ import numpy as np
 import uvicorn
 from backend.services.heavy_work import HeavyWork
 from backend.services.image_open import ImageOpen,router_for,purge_loop
+from backend.services.image_tiles import TILE_HEADERS
 import backend.services.image_open as image_module
 from backend.tests import allowed_roots_env
 
@@ -25,9 +26,10 @@ os.environ.update(env)
 @asynccontextmanager
 async def lifespan(app):
     yield
+    await app.state.image_open.tiles.close()
     await app.state.heavy_work.close()
 app=FastAPI(lifespan=lifespan);app.state.heavy_work=HeavyWork();app.state.image_open=ImageOpen()
-app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_methods=['*'],allow_headers=['*'],expose_headers=['X-SR-Image-W','X-SR-Image-H','X-SR-Preview-W','X-SR-Preview-H','X-SR-Preview-Plan'])
+app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_methods=['*'],allow_headers=['*'],expose_headers=['X-SR-Image-W','X-SR-Image-H','X-SR-Preview-W','X-SR-Preview-H','X-SR-Preview-Plan',*TILE_HEADERS])
 app.include_router(router_for(app.state.image_open))
 metrics={'decodes':0};build=image_module.build_preview_pixels
 def counted(*args,**kwargs):metrics['decodes']+=1;return build(*args,**kwargs)

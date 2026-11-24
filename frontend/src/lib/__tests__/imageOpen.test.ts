@@ -2,12 +2,31 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { LoadControl } from '../loadControl';
 vi.mock('../local_preview',()=>({sourceFingerprint:vi.fn().mockResolvedValue({name:'a.tif',size:9,samples:['YQ==','YQ==','YQ==']})}));
-import { createPickerSession, fetchPreviewAsset, uploadPreviewFile, waitPicker } from '../imageOpen';
+import { createPickerSession, fetchAssetTile, fetchAssetTileInfo, fetchPreviewAsset, uploadPreviewFile, waitPicker } from '../imageOpen';
 import type { PreviewAsset } from '../imageOpen';
 const token='a'.repeat(64), id='b'.repeat(64);
 const asset={id,name:'a.tif',W:20,H:10,size:9,uploaded:true,serverPath:null,sourceRev:'revision',fingerprint:{name:'a.tif',size:9,samples:[]}} satisfies PreviewAsset;
 afterEach(()=>{vi.useRealTimers();vi.unstubAllGlobals();});
 const response=(value:unknown)=>new Response(JSON.stringify(value),{headers:{'Content-Type':'application/json'}});
+
+it('fetches the asset Tile and geometry with cancellation and the requested band', async () => {
+  const signal = new AbortController().signal;
+  const tile = { id: 'tile', width: 5, height: 512, sourceWidth: 9, rasterVersion: 'rev' };
+  const info = { tileSize: 512, rasterVersion: 'rev' };
+  const mockedFetch = vi.fn()
+    .mockResolvedValueOnce(response(info))
+    .mockResolvedValueOnce(new Response('png', {
+      headers: { 'Content-Type': 'image/png', 'X-SR-Tile': JSON.stringify(tile) },
+    }));
+  vi.stubGlobal('fetch', mockedFetch);
+  expect(await fetchAssetTileInfo(asset, signal, 2)).toEqual(info);
+  const result = await fetchAssetTile(asset, 1, 1, 0, signal, 2);
+  expect(result.tile).toEqual(tile);
+  expect(result.blob.type).toBe('image/png');
+  expect(mockedFetch).toHaveBeenNthCalledWith(1, expect.stringContaining(`/assets/${id}/tiles?band=2`), { signal });
+  expect(mockedFetch).toHaveBeenNthCalledWith(2, expect.stringContaining(`/assets/${id}/tiles/1/1/0?band=2`), { signal });
+});
+
 it('encodes an exact callback URL as data in the native protocol',async()=>{
   vi.stubGlobal('fetch',vi.fn().mockResolvedValue(response({token,chunkBytes:4194304})));
   const session=await createPickerSession();
