@@ -1,3 +1,6 @@
+import { jpegPlans } from '../lib/previewPlan';
+import type { PreviewPlan, PreviewSource } from '../lib/previewPlan';
+import { isDeveloperMode } from '../lib/developerMode';
 import { imageRef, spatialId } from '../lib/spatial';
 import { planeStats, samplePlane, sharedStats, presetRange } from '../lib/histogramStretch';
 import type { DisplayStretch, PixelPlane } from '../lib/histogramStretch';
@@ -31,7 +34,7 @@ import {
   floodSelect, fillRegionHoles, traceContour, simplifyPoly,
   mergeConnectedAsync, buildTiff, buildMaskTxt,
 } from '../lib/maskgen.js';
-import { fitView, locateView, wheelZoom, hitRoi, thumbToOrig, visibleThumbRect,
+import { fitView, locateView, wheelZoom, hitRoi, thumbToSource, sourceToMaskThumb, clampSourcePixel, origToThumb, thumbToDisplaySource, visibleThumbRect,
   clampSplitRatio, splitRects, paneAtX, wheelZoomBoth, panBoth,
   remapViewForImage, easeOutCubic, lerpView } from '../lib/viewMath.js';
 import type { ViewState, Rect, PaneRect } from '../lib/viewMath.js';
@@ -72,12 +75,12 @@ import type { SceneResolveResult, SceneSibling, SceneSiblings } from '../lib/api
 import { classifyImages, imageKindOf, isZeroLengthImageFile,
   zeroLengthImageMessage } from '../lib/imageFiles.js';
 import type { SceneOpenMeta, SceneRow } from '../lib/scene.js';
-import { sourceFingerprint } from '../lib/local_preview.js';
+import { sourceFingerprint, localPreviewBudget } from '../lib/local_preview.js';
 import { LoadControl, isLoadAbort } from '../lib/loadControl';
 import { decodeLocalFile } from '../lib/localDecodeWorker';
 import { createPreviewAsset, uploadPreviewFile, fetchPreviewAsset, ImageOpenError } from '../lib/imageOpen';
 import type { PreviewAsset } from '../lib/imageOpen';
-import type { LocalPixels } from '../lib/localDecodeWorker';
+import type { LocalPixels, LocalSourceInfo } from '../lib/localDecodeWorker';
 import { wholeJpegFits } from '../lib/progressivePreview';
 import type { PreviewFrame } from '../lib/progressivePreview';
 import { isIntermediateStage, stageLabel, stageRefusal } from '../lib/stage.js';
@@ -103,8 +106,9 @@ export interface ViewerRec {
   stretchDefaultMode?:StretchMode;
   stretchPreview?:KitCanvas;
   progressiveDN?:PixelPlane;
-  dnDomain?:{bits:number;sampleFormat:number};
+  dnDomain?: LocalSourceInfo;
   previewAsset?: PreviewAsset;
+  previewPlan?: PreviewPlan;
   resolvedSuffix?: string | null;
   /** Display only. Partial pixels must never become ROI or repair input. */
   progressivePreview?: KitCanvas;
@@ -230,12 +234,10 @@ const CLOUD_OVERLAY_MAX = 2048;
 /** 限制显示层尺寸：后续 RGBA 拷贝和 Float32 像素也按此尺寸分配。
  *  上限 = 平台设置里的「真分辨率」长边（默认 32768，可调 4096/8192/16384）；
  *  超过或整幅面积超过画布上限才截断。 */
-async function decodeJpgToCanvas(blob: Blob): Promise<HTMLCanvasElement> {
-  const bmp = await decodeJpegBitmap(blob);
+async function decodeJpgToCanvas(blob: Blob, onSourceSize?: (size: { width: number; height: number }) => void): Promise<HTMLCanvasElement> {
+  const bmp = await decodeJpegBitmap(blob, undefined, onSourceSize);
   try {
-    const scale = Math.min(1, getPreviewTrueMaxEdge() / Math.max(bmp.width, bmp.height));
-    const width = Math.max(1, Math.round(bmp.width * scale));
-    const height = Math.max(1, Math.round(bmp.height * scale));
+    const { width, height } = bmp;
     const cv = browserKit.createCanvas(width, height) as unknown as HTMLCanvasElement;
     const ctx = cv.getContext('2d');
     if (!ctx) throw new Error('取不到 2d 上下文');
@@ -1320,6 +1322,7 @@ export const useViewerStore = defineStore('viewer', () => {
      缩放与位置抹掉（按相对视野搬过去）。关闭模式 `compareOn` 为假，仍然走 `fit()`。 */
   function afterPixels(rec: ViewerRec, previousSize?: { w: number; h: number }) {
     stopViewAnim();
+    updateMaskGrid(rec);
     // 交替对比：只有**参考图**的视口由 flickerView 保管，另一张靠换算。
     // 不走下面分屏那套写 viewA/viewB 的路 —— 那会把「退出后恢复原视口」破坏掉。
     if (compareMode.value === 'flicker') {
@@ -2206,13 +2209,6 @@ export const useViewerStore = defineStore('viewer', () => {
       const row = siblingRow(res, item);
       const previewPanSize=siblingPanSize(res);
       const div=imagePreviewDiv(previewDiv.value,item.kind,{W:item.W,H:item.H},previewPanSize);
-      if(item.kind==='nosr'&&!wholeJpegFits(item.W,item.H,div)) {
-        const id=insertSceneCard({name:(item.name??kind).replace(/\.(tif|tiff|jpg|jpeg)$/i,''),W:item.W,H:item.H,
-          sceneId:item.id,lqPath:res.lqPath,sceneDir:res.lqPath,stageKind:item.kind,stageSuffix:res.suffix,
-          srcRev:item.srcRev??null,previewPanSize},row);
-        hideMask();busy.value=false;
-        await activate(id,split.value?activeSide.value:undefined);return true;
-      }
       const blob = await fetchSceneJpg(loadSrConfig(), row, div, (text) => {
         showMask('正在加载同场景的图…', text, false);
       });
@@ -2566,7 +2562,7 @@ export const useViewerStore = defineStore('viewer', () => {
     const result=await control.request(signal=>fetchPreviewAsset(asset,div,signal),'服务端下采样 JPG（缓存）');
     await control.checkpoint('装载服务端 JPG');
     if(!recs.value.includes(rec)||effectivePreviewDiv(rec)!==div)return;
-    const note=previewResolutionNote(asset.W,asset.H,result.width,result.height);
+    const note=previewResolutionNote(asset.W,asset.H,result.width,result.height,jpegPlans.get(result.blob)?.limits);
     const layout=`服务端缓存 JPG 概览 · 请求 ${previewDivLabel(div)}${note?' · '+note:''} · 缓存定期清理`;
     const applied=await applySceneJpgToRec(rec,{
       name:rec.name,W:asset.W,H:asset.H,sceneId:rec.sceneId!,lqPath:rec.lqPath,
@@ -2614,6 +2610,20 @@ export const useViewerStore = defineStore('viewer', () => {
     }
   }
 
+  function recordPreview(rec: ViewerRec, source: PreviewSource, div: number, width: number, height: number,
+    mode: PreviewPlan['mode'], decodeMs: number, plan?: PreviewPlan, limits: PreviewPlan['limits'] = []) {
+    const exact = plan && plan.width === width && plan.height === height;
+    rec.previewPlan = exact ? plan : {
+      source, requestedDiv: div, width, height, mode, limits: plan ? [...plan.limits, 'reader'] : limits,
+      scaleX: width / source.width, scaleY: height / source.height,
+      pixels: width * height, decodedBytes: width * height * 4,
+      dnBytes: width * height * 4 * (mode === 'local-progressive' ? rec.nbands : 1), cache: plan?.cache,
+    };
+    if (import.meta.env.DEV || isDeveloperMode()) {
+      console.debug('[image-preview]', { ...rec.previewPlan, decodeMs, route: rec.route });
+    }
+  }
+
   function applyDecoded(rec: ViewerRec, d: DecodedRec, token: number, previousSize?: { w: number; h: number }, rendered?: { rgba: Uint8ClampedArray; mode: StretchMode }) {
     // 解码是几十秒级的异步过程：期间这张图可能已经被升级成盘阵 JPG（或又被解码
     // 一次），那份结果比这份新。令牌对不上就整份丢掉，一个字都不写。
@@ -2626,16 +2636,26 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.invert = d.invert;
     rec.stats = d.stats ? markRaw(d.stats) : null;
     rec.route = d.route;
+    const domain = rec.dnDomain ?? rec.probe;
+    const div = effectivePreviewDiv(rec);
+    const { limits, size } = localPreviewBudget(d.W, d.H, d.nbands, div);
+    if (size.w !== d.srcw || size.h !== d.srch) limits.push('reader');
+    recordPreview(rec, {
+      width: d.W, height: d.H, identity: rec.sceneId ?? `${rec.file.name}:${rec.file.size}:${rec.file.lastModified}`,
+      version: rec.srcRev ?? String(rec.file.lastModified),
+      bandCount: rec.dnDomain?.bandCount ?? rec.probe?.spp ?? d.nbands,
+      noData: rec.dnDomain?.noData ?? rec.probe?.noData,
+      dtype: domain ? (domain.sampleFormat === 3 ? 'float' : domain.sampleFormat === 2 ? 'int' : 'uint') + domain.bits : undefined,
+      serverWindowRead: false, localFile: true,
+    }, div, d.srcw, d.srch, 'local-progressive', d.ms, undefined, limits);
     validateDisplayDomain(rec);
     const routeText = d.route === 'sparse'
       ? '（稀疏条带预览：' + d.sparseInfo + '）'
       : '';
     rec.status = '完成，' + (d.route === 'utif' ? '解码' : '读取') + '耗时 ' + fmtTime(d.ms) + routeText;
     rec.statusCls = 'ok';
-    const note = previewResolutionNote(d.W, d.H, d.srcw, d.srch);
+    const note = previewResolutionNote(d.W, d.H, d.srcw, d.srch, limits);
     if (note) rec.status += ' · ' + note;
-    const ratio = Math.max(d.W / d.srcw, d.H / d.srch);
-    if (ratio > previewDiv.value * 1.01) rec.status += ' · 已达本地预览内存上限';
     // 像素刚换过 → 一律重画。已选过模式的（同一 rec 重复解码）沿用原模式，不重置。
     if (rendered) {
       const ctx = (rec.thumb as unknown as HTMLCanvasElement).getContext('2d');
@@ -2670,7 +2690,10 @@ export const useViewerStore = defineStore('viewer', () => {
     busy.value = true;
     showMask('正在读取图片…', file.name, false);
     try {
-      const cv = await decodeJpgToCanvas(file);
+      let original: { width: number; height: number } | undefined;
+      const started = performance.now();
+      const cv = await decodeJpgToCanvas(file, size => { original = size; });
+      const decodeMs = performance.now() - started;
       const tw = cv.width, th = cv.height;
       const ctx = cv.getContext('2d');
       if (!ctx) throw new Error('取不到 2d 上下文');
@@ -2678,7 +2701,7 @@ export const useViewerStore = defineStore('viewer', () => {
       const rec: ViewerRec = {
         id: nextId++, file: markRaw(file),
         probe: null, name: file.name, size: file.size,
-        W: tw, H: th,
+        W: original?.width ?? tw, H: original?.height ?? th,
         thumb: markRaw(cv as unknown as KitCanvas),
         src: markRaw(d.src), srcw: d.tw, srch: d.th, nbands: d.nbands,
         invert: false, stats: d.stats ? markRaw(d.stats) : null,
@@ -2689,6 +2712,11 @@ export const useViewerStore = defineStore('viewer', () => {
         status: '已读取',
         statusCls: 'ok', paintedMode: null, maskRois: null, token: 0,
       };
+      recordPreview(rec, {
+        width: rec.W, height: rec.H, identity: `${file.name}:${file.size}:${file.lastModified}`,
+        version: String(file.lastModified), dtype: 'uint8', serverWindowRead: false, localFile: true,
+      }, 1, tw, th, 'whole-jpeg', decodeMs, undefined,
+      tw === rec.W && th === rec.H ? [] : ['reader']);
       recs.value.push(rec);
       // 入列之后一律用 recs 里那份（响应式代理）：上面这个局部变量是**原始对象**，
       // 直接改它的字段不会触发渲染 —— 关联成功后工具栏那两颗按钮会一直是灰的
@@ -2746,28 +2774,42 @@ export const useViewerStore = defineStore('viewer', () => {
     await control?.checkpoint('解码服务端 JPG');
     const my = ++rec.token;                     // 领号：JPG 要接管像素了
     const requestedDiv = previewDiv.value;
-    const cv = control ? await control.wait(decodeJpgToCanvas(blob)) : await decodeJpgToCanvas(blob);
+    const plan = jpegPlans.get(blob);
+    const reuse = plan?.artifactId && plan.artifactId === rec.previewPlan?.artifactId
+      && rec.route === 'jpg' && rec.src && rec.thumb?.width === plan.width && rec.thumb.height === plan.height;
+    const decodeStarted = performance.now();
+    const cv = reuse ? rec.thumb as unknown as HTMLCanvasElement
+      : control ? await control.wait(decodeJpgToCanvas(blob)) : await decodeJpgToCanvas(blob);
+    const decodeMs = reuse ? 0 : performance.now() - decodeStarted;
     await control?.checkpoint('装载服务端预览');
     if (previewDiv.value !== requestedDiv) return false;
     if (!stillWanted() || rec.token !== my || !recs.value.includes(rec)) return false;
     const tw = cv.width, th = cv.height;
-    const ctx = cv.getContext('2d');
-    if (!ctx) throw new Error('取不到 2d 上下文');
-    const d = sceneDecodeCanvas(ctx, tw, th);   // 固定 0..255 → linear 恒等
     const previousSize = preserveView && rec.thumb
       ? { w: rec.thumb.width, h: rec.thumb.height } : undefined;
-    rec.thumb = markRaw(cv as unknown as KitCanvas);
-    rec.W = meta.W; rec.H = meta.H;
-    rec.src = markRaw(d.src); rec.srcw = d.tw; rec.srch = d.th;
-    rec.nbands = d.nbands;
-    rec.invert = false;
-    rec.stats = d.stats ? markRaw(d.stats) : null;
+    if (!reuse) {
+      const ctx = cv.getContext('2d');
+      if (!ctx) throw new Error('取不到 2d 上下文');
+      const d = sceneDecodeCanvas(ctx, tw, th);
+      rec.thumb = markRaw(cv as unknown as KitCanvas);
+      rec.src = markRaw(d.src); rec.srcw = d.tw; rec.srch = d.th;
+      rec.nbands = d.nbands;
+      rec.invert = false;
+      rec.stats = d.stats ? markRaw(d.stats) : null;
+    }
+    rec.W = plan?.source.width ?? meta.W;
+    rec.H = plan?.source.height ?? meta.H;
     rec.route = 'jpg';
+    const source = plan?.source ?? {
+      width: rec.W, height: rec.H, identity: meta.sceneId ?? rec.name,
+      version: meta.srcRev ?? null, serverWindowRead: false, localFile: blob === rec.file,
+    };
+    recordPreview(rec, source, effectivePreviewDiv(rec), tw, th, 'whole-jpeg', decodeMs, plan);
     rec.sceneId = meta.sceneId ?? null;
     rec.lqPath = meta.lqPath ?? null;
     rec.sceneDir = meta.sceneDir ?? null;
     rec.previewOnly = meta.previewOnly === true;
-    rec.srcRev = meta.srcRev ?? null;
+    rec.srcRev = plan?.source.version ?? meta.srcRev ?? null;
     validateDisplayDomain(rec);
     // 这一景是「用户当前打开着的」——记下来，供下一次拖没有场景身份的 jpg 时当
     // `anchor` 用（见 lastSceneDir）。中途产物那条路 lqPath 是空的，用 sceneDir。
@@ -2778,7 +2820,7 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.stageKind = rec.viewerRole === 'reference' || rec.viewerRole === 'other'
       ? undefined : meta.stageKind ?? 'input';
     rec.previewPanSize=meta.previewPanSize??rec.previewPanSize;
-    rec.detailDiv=effectivePreviewDiv(rec);
+    rec.detailDiv=plan?.requestedDiv ?? effectivePreviewDiv(rec);
     rec.stageLabel = rec.viewerRole === 'reference' ? '参考影像'
       : rec.viewerRole === 'other' ? '' : stageLabel(rec.stageKind, meta.stageSuffix, rec.name);
     // 默认是服务端生成预览那份的口径；拖本地 jpg 升级进来的那条路自报来源
@@ -2786,9 +2828,9 @@ export const useViewerStore = defineStore('viewer', () => {
     // 尺度报当前档位 —— 取图的两处调用点都按 `previewDiv.value` 生成，所以
     // 「刚拿到手的这张是按哪一档生成的」就是它（用户若在取图途中又拖了滑块，
     // 文案最多早一拍，下次打开即对齐）。
-    const sizeNote = previewResolutionNote(meta.W, meta.H, tw, th);
+    const sizeNote = previewResolutionNote(rec.W, rec.H, tw, th, plan ? rec.previewPlan?.limits : undefined);
     rec.layout = layout
-      ?? `盘阵 JPG（${previewDivLabel(rec.detailDiv)} 尺度 + 直方图均衡，服务端已生成）${sizeNote ? ' · ' + sizeNote : ''}`;
+      ?? `盘阵 JPG（请求 ${previewDivLabel(rec.detailDiv)} + 直方图均衡，服务端已生成）${sizeNote ? ' · ' + sizeNote : ''}`;
     // 同上：名字与尺寸卡片上已有（标题行、图属性行、布局行），状态只表态
     rec.status = '场景就绪';
     rec.statusCls = 'ok';
@@ -2797,8 +2839,10 @@ export const useViewerStore = defineStore('viewer', () => {
     // 库行没有这个字段 → null，写掩码时再拿后端回的值。
     rec.serverMaskPath = meta.serverMaskPath ?? null;
     // 像素刚换过 → 一律重画（沿用已选模式，不重置用户的选择）
-    paintStretch(rec, rec.paintedMode ?? startStretch(rec.route, stretchMode.value));
-    afterPixels(rec, previousSize);
+    if (!reuse) {
+      paintStretch(rec, rec.paintedMode ?? startStretch(rec.route, stretchMode.value));
+      afterPixels(rec, previousSize);
+    }
     return true;
   }
 
@@ -2976,7 +3020,7 @@ export const useViewerStore = defineStore('viewer', () => {
       try {
         await control?.checkpoint('获取盘阵预览');
         // Diff A/B preload owns independent controls. All candidate roles use
-        // the same bounded cache; legacy fallback requires 404 and safe size.
+        // the same bounded cache; legacy fallback requires 404.
         const owner=intent.control;
         phase('正在准备服务端 JPG 缓存…');
         let resolvedAsset:PreviewAsset|undefined;
@@ -2988,7 +3032,7 @@ export const useViewerStore = defineStore('viewer', () => {
             }, signal), '准备服务端概览');
         } catch(error) {
           if(isLoadAbort(error)||owner.signal.aborted)throw error;
-          if(rec.discoveredTiff || !(error instanceof ImageOpenError&&error.status===404&&wholeJpegFits(rec.W,rec.H,div)))throw error;
+          if(rec.discoveredTiff || !(error instanceof ImageOpenError&&error.status===404))throw error;
         }
         if(resolvedAsset) {
           const asset=resolvedAsset;
@@ -2996,7 +3040,7 @@ export const useViewerStore = defineStore('viewer', () => {
           const result=await owner.request(signal=>fetchPreviewAsset(asset,div,signal,phase),'服务端下采样 JPG（缓存）');
           if(!stillWanted()||rec.token!==intent.token||!recs.value.includes(rec)||effectivePreviewDiv(rec)!==div)return;
           phase('正在解码并装载 JPG…');intent.token++;
-          const note=previewResolutionNote(asset.W,asset.H,result.width,result.height);
+          const note=previewResolutionNote(asset.W,asset.H,result.width,result.height,jpegPlans.get(result.blob)?.limits);
           const layout=`服务端缓存 JPG 概览 · 请求 ${previewDivLabel(div)}${note?' · '+note:''} · 缓存定期清理`;
           const meta = { ...card.meta, W: asset.W, H: asset.H, srcRev: asset.sourceRev };
           if (rec.discoveredTiff) {
@@ -3619,9 +3663,6 @@ export const useViewerStore = defineStore('viewer', () => {
     if (!loadControlFor(rec) || loadControlFor(rec)!.signal.aborted) return withImageLoad(rec, () => reloadPreviewLevel(rec, selectedDiv), undefined);
     const div=effectivePreviewDiv(rec,selectedDiv);
     const control = loadControlFor(rec)!;
-    if(!rec.previewAsset&&rec.stageKind==='nosr'&&!wholeJpegFits(rec.W,rec.H,div)) {
-      rec.previewAsset=markRaw(await control.request(signal=>createPreviewAsset({sceneId:rec.sceneId!},signal),'准备 NOSR 服务端概览'));
-    }
     if(rec.previewAsset){await loadPreviewAsset(rec,rec.previewAsset,control);return;}
     await control.checkpoint('切换服务端预览');
     const meta: SceneOpenMeta = rec.card?.meta ?? {
@@ -3922,8 +3963,76 @@ export const useViewerStore = defineStore('viewer', () => {
     return h;
   };
   const canRedoMask = computed(() => { void maskHistoryTick.value; return !!activeRec.value && maskHistoryFor(activeRec.value).canRedo; });
+  // Keep committed geometry and undo snapshots in source pixels. Canvas tools
+  // edit a projection, and only an edited projection is converted back.
+  const maskGrids = new WeakMap<ViewerRec, { w: number; h: number }>();
+  const sourceMasks = new WeakMap<Poly, { points: string; poly: OwnedPoly }>();
+
+  function mapMask(poly: OwnedPoly, map: (x: number, y: number) => Pt): OwnedPoly {
+    const mapped: OwnedPoly = poly.map(([x, y]) => map(x, y));
+    if (poly.autoDiff) {
+      const initial = JSON.parse(poly.autoDiff.initial_points) as Poly;
+      mapped.autoDiff = { ...poly.autoDiff, initial_points: JSON.stringify(initial.map(([x, y]) => map(x, y))) };
+    }
+    return mapped;
+  }
+
+  function maskInSource(rec: ViewerRec, poly: OwnedPoly): OwnedPoly {
+    const grid = maskGrids.get(toRaw(rec)) ?? { w: rec.thumb?.width ?? 0, h: rec.thumb?.height ?? 0 };
+    const key = toRaw(poly);
+    const points = JSON.stringify({ poly, origin: poly.autoDiff });
+    const cached = sourceMasks.get(key);
+    if (cached?.points === points) return cached.poly;
+    const source = mapMask(poly, (x, y) => thumbToSource(x, y, rec.W, rec.H, grid.w, grid.h));
+    sourceMasks.set(key, { points, poly: source });
+    return source;
+  }
+
+  function maskOnPreview(rec: ViewerRec, poly: OwnedPoly): OwnedPoly {
+    const { width, height } = rec.thumb!;
+    const display = mapMask(poly, (x, y) => sourceToMaskThumb(x, y, rec.W, rec.H, width, height));
+    sourceMasks.set(display, { points: JSON.stringify({ poly: display, origin: display.autoDiff }), poly });
+    return display;
+  }
+
+  function updateMaskGrid(rec: ViewerRec) {
+    if (!rec.thumb) return;
+    const next = { w: rec.thumb.width, h: rec.thumb.height };
+    const prior = maskGrids.get(toRaw(rec));
+    if (prior && (prior.w !== next.w || prior.h !== next.h)) {
+      if (rec.maskRois?.length) {
+        const selected = rec.maskRois.findIndex(poly => toRaw(poly) === toRaw(selRoi.value));
+        rec.maskRois = rec.maskRois.map(poly => maskOnPreview(rec, maskInSource(rec, poly)));
+        if (activeId.value === rec.id && selected >= 0) selRoi.value = rec.maskRois[selected]!;
+      }
+      if (activeId.value === rec.id) {
+        const project = ([x, y]: Pt) => sourceToMaskThumb(
+          ...thumbToSource(x, y, rec.W, rec.H, prior.w, prior.h), rec.W, rec.H, next.w, next.h);
+        if (pendingPts.value) pendingPts.value = pendingPts.value.map(project);
+        if (hoverPt.value) hoverPt.value = project(hoverPt.value);
+        if (pendingRect.value) {
+          const { x0, y0, x1, y1 } = pendingRect.value;
+          const a = project([x0, y0]), b = project([x1, y1]);
+          pendingRect.value = { x0: a[0], y0: a[1], x1: b[0], y1: b[1] };
+        }
+        if (marker.value) {
+          const { tx, ty, until } = marker.value;
+          const [x, y] = origToThumb(
+            ...thumbToDisplaySource(tx, ty, prior.w, prior.h, rec.W, rec.H), next.w, next.h, rec.W, rec.H);
+          marker.value = { tx: x, ty: y, until };
+        }
+      }
+    }
+    maskGrids.set(toRaw(rec), next);
+  }
+
+  function maskExportPoints(rec: ViewerRec, poly: Poly): Poly {
+    return maskInSource(rec, poly).map(point => clampSourcePixel(point, rec.W, rec.H));
+  }
+
   function changeMasks(rec: ViewerRec, polys: Poly[]) {
-    maskHistoryFor(rec).record(rec.maskRois ?? [], polys);
+    maskHistoryFor(rec).record((rec.maskRois ?? []).map(poly => maskInSource(rec, poly)),
+      polys.map(poly => maskInSource(rec, poly)));
     rec.maskRois = polys;
     maskHistoryTick.value++;
     refreshRoiStats();
@@ -3944,9 +4053,9 @@ export const useViewerStore = defineStore('viewer', () => {
   function redoRoi() {
     const rec = activeRec.value;
     if (!rec || pendingPts.value?.length || pendingRect.value) return;
-    const restored = maskHistoryFor(rec).redo(rec.maskRois ?? []);
+    const restored = maskHistoryFor(rec).redo((rec.maskRois ?? []).map(poly => maskInSource(rec, poly)));
     if (!restored) return;
-    rec.maskRois = restored; maskHistoryTick.value++;
+    rec.maskRois = restored.map(poly => maskOnPreview(rec, poly)); maskHistoryTick.value++;
     refreshRoiStats(); renderTick.value++;
   }
 
@@ -3964,7 +4073,7 @@ export const useViewerStore = defineStore('viewer', () => {
       return;
     }
     const t = rec.thumb;
-    const tx = xi * (t.width / W), ty = yi * (t.height / H);
+    const [tx, ty] = origToThumb(xi, yi, t.width, t.height, W, H);
     // 居中到**活动格**的中心：分屏下把点定位到右半屏的中心，而不是整块画布的中心。
     const rect = activePaneRect();
     view.value = locateView(view.value.scale, tx, ty, rect.w, rect.h);
@@ -4192,9 +4301,9 @@ export const useViewerStore = defineStore('viewer', () => {
     if (!rec) return;
     const h = maskHistoryFor(rec);
     if (h.canUndo) {
-      const restored = h.undo(rec.maskRois ?? []);
+      const restored = h.undo((rec.maskRois ?? []).map(poly => maskInSource(rec, poly)));
       if (!restored) { showToast('区域已被编辑，无法覆盖这些修改'); return; }
-      rec.maskRois = restored; maskHistoryTick.value++;
+      rec.maskRois = restored.map(poly => maskOnPreview(rec, poly)); maskHistoryTick.value++;
     } else changeMasks(rec, (rec.maskRois ?? []).slice(0, -1));
     pendingPts.value = null; pendingRect.value = null; hoverPt.value = null;
     refreshRoiStats();
@@ -4301,10 +4410,9 @@ export const useViewerStore = defineStore('viewer', () => {
     const rec = activeRec.value;
     if (!rec) return null;
     const W = rec.W, H = rec.H;
-    const tw = rec.thumb ? rec.thumb.width : 0, th = rec.thumb ? rec.thumb.height : 0;
     const polys = getRois().map((pts, i) => ({
       label: 'roi_' + (i + 1),
-      points: pts.map((p) => thumbToOrig(p[0], p[1], W, H, tw, th)),
+      points: maskExportPoints(rec, pts),
     }));
     return { width: W, height: H, polygons: polys };
   }
@@ -4328,8 +4436,7 @@ export const useViewerStore = defineStore('viewer', () => {
     const rois = getRois();
     if (!rois.length) { showErr('还没有任何掩码区域：先「绘制掩码」，用矩形/多边形/魔棒画 ROI'); return; }
     const W = rec.W, H = rec.H;
-    const tw = rec.thumb.width, th = rec.thumb.height;
-    const polys = rois.map((pts) => pts.map((p) => thumbToOrig(p[0], p[1], W, H, tw, th)));
+    const polys = rois.map(pts => maskExportPoints(rec, pts));
     const base = rec.name.replace(/\.tiff?$/i, '');
     showMask('正在生成掩码（全分辨率 ' + W + '×' + H + '，' + polys.length + ' 区域）…', '', true);
     try {
@@ -4516,7 +4623,12 @@ export const useViewerStore = defineStore('viewer', () => {
     if (duplicate) {
       rec.fav = duplicate.fav;
       rec.favAt = duplicate.favAt;
-      if (duplicate.srcRev === rec.srcRev) rec.maskRois = duplicate.maskRois;
+      if (duplicate.srcRev === rec.srcRev) {
+        rec.maskRois = duplicate.maskRois;
+        const grid = maskGrids.get(toRaw(duplicate));
+        if (grid) maskGrids.set(toRaw(rec), grid);
+        updateMaskGrid(rec);
+      }
       if (activeId.value === duplicate.id) activeId.value = rec.id;
       if (paneA.value === duplicate.id && paneB.value !== rec.id) paneA.value = rec.id;
       if (paneB.value === duplicate.id && paneA.value !== rec.id) paneB.value = rec.id;
@@ -4612,10 +4724,6 @@ export const useViewerStore = defineStore('viewer', () => {
     if (res.resolved.read_only) {
       await decodeRec(rec, true);
       return;
-    }
-    if (!wholeJpegFits(res.row.W, res.row.H, div) && /\.tiff?$/i.test(rec.file.name)) {
-      rec.linkNote = '已核对盘阵源；整幅 JPG 超出显示预算，直接使用本地渐进预览。';
-      await decodeRec(rec, true); return;
     }
     await control.checkpoint('获取服务端预览');
     let blob: Blob;
@@ -4727,10 +4835,6 @@ export const useViewerStore = defineStore('viewer', () => {
       }catch(error){if(isLoadAbort(error)||control.signal.aborted)throw error;if(error instanceof ImageOpenError&&error.status!==404){r.linkNote='服务端缓存 JPG 不可用，改用本地预览：'+error.message;return false;}}
     }
     if (!localJpg && res.resolved.read_only) return false;
-    if (!localJpg && res.row.W && res.row.H && !wholeJpegFits(res.row.W, res.row.H, previewDiv.value)) {
-      r.linkNote = '已核对盘阵源；整幅 JPG 超出显示预算，直接使用本地渐进预览。';
-      return false;
-    }
     const rp = res.row.rasterPreview;
     const useServer = localJpg && !!rp && rasterPreviewWins(rp, previewDiv.value);
     try {
@@ -4826,9 +4930,7 @@ export const useViewerStore = defineStore('viewer', () => {
       return false;
     }
     const W = rec.W, H = rec.H;
-    const tw = rec.thumb.width, th = rec.thumb.height;
-    // 缩略图坐标 → 全分辨率（与 genMask 同一套换算）
-    const polys = rois.map((pts) => pts.map((p) => thumbToOrig(p[0], p[1], W, H, tw, th)));
+    const polys = rois.map(pts => maskExportPoints(rec, pts));
     if (srBusy.value) return false;
     srBusy.value = true;
     const t0 = Date.now();

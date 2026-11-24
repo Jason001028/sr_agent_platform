@@ -1,3 +1,4 @@
+import { previewResponseBlob } from './previewPlan';
 /**
  * api.ts — 阶段5 平台 REST/SSE 客户端（纯函数 + fetch 封装）
  * ------------------------------------------------------------------
@@ -1414,7 +1415,7 @@ export async function fetchSceneJpg(
     // 库外：没有静态 URL，这次请求的**响应体本身**就是那张 JPEG。
     const p = await requestPreview(cfg, row.id, div, onPhase, undefined, signal);
     row.hasPreview = true;
-    return cacheBlob(previewCacheKey(row, div), await p.blob());
+    return cacheBlob(previewCacheKey(row, div), await previewResponseBlob(p));
   }
   if (needBake) {
     // `/preview` 的响应体就是权威字节（端点内读定并核对过档位 / 源身份）。
@@ -1422,7 +1423,7 @@ export async function fetchSceneJpg(
     const p = await requestPreview(cfg, row.id, div, onPhase, undefined, signal);
     row.hasPreview = true;
     row.previewDiv = div;      // 记上实际档位：同一会话内再打开不必重新生成
-    return cacheBlob(previewCacheKey(row, div), await p.blob());
+    return cacheBlob(previewCacheKey(row, div), await previewResponseBlob(p));
   }
   // 档位已对上 → 静态直出。取到字节后仍要复核：`?div=N` 只击穿浏览器缓存，
   // 不锁定盘上内容；另一客户端可能在这次请求之前把落点换成了别的档位 / 别的源。
@@ -1432,7 +1433,7 @@ export async function fetchSceneJpg(
     const p = await requestPreview(cfg, row.id, div, onPhase, undefined, signal);
     row.hasPreview = true;
     row.previewDiv = div;
-    return cacheBlob(previewCacheKey(row, div), await p.blob());
+    return cacheBlob(previewCacheKey(row, div), await previewResponseBlob(p));
   }
   return cacheBlob(previewCacheKey(row, div), blob);
 }
@@ -1477,7 +1478,7 @@ async function fetchRasterPreview(
     const p = await requestPreview(cfg, row.id, div, onPhase, undefined, signal);
     rp.hasPreview = true;
     rp.previewDiv = div;
-    return cacheBlob(key, await p.blob());
+    return cacheBlob(key, await previewResponseBlob(p));
   }
   if (needBake) {
     // 同 fetchSceneJpg：需要生成时，`/preview` 的响应体就是与档位 / 源一致的
@@ -1485,7 +1486,7 @@ async function fetchRasterPreview(
     const p = await requestPreview(cfg, row.id, div, onPhase, undefined, signal);
     rp.hasPreview = true;
     rp.previewDiv = div;
-    return cacheBlob(key, await p.blob());
+    return cacheBlob(key, await previewResponseBlob(p));
   }
   // 档位已对上 → 静态直出，但取到字节后复核签名（理由同 fetchSceneJpg）。
   const img = await http(sceneImageUrl(cfg, rp.jpgUrl, div), { signal });
@@ -1495,7 +1496,7 @@ async function fetchRasterPreview(
     const p = await requestPreview(cfg, row.id, div, onPhase, undefined, signal);
     rp.hasPreview = true;
     rp.previewDiv = div;
-    return cacheBlob(key, await p.blob());
+    return cacheBlob(key, await previewResponseBlob(p));
   }
   return cacheBlob(key, blob);
 }
@@ -1526,7 +1527,7 @@ export async function fetchDropSceneJpg(
   if (r.headers.get('X-SR-Preview-Fallback') === 'tmp') {
     onPhase?.('该场景目录不可写，预览暂时落在服务端临时缓存，次日会清掉。');
   }
-  return await r.blob();
+  return previewResponseBlob(r);
 }
 
 /** 打开盘阵上任意一个合法场景目录：POST /api/scenes/resolve。

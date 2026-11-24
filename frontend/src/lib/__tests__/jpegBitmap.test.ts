@@ -1,6 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { decodeJpegBitmap, jpegSize } from '../jpegBitmap';
 import { applyPreviewTrueMaxEdge, PREVIEW_TRUE_MAX_EDGE } from '../previewLevel';
+import { jpegPlans, previewResponseBlob } from '../previewPlan';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -56,4 +57,20 @@ it('includes source dimensions on decode failure without retrying full-size', as
   vi.stubGlobal('createImageBitmap', decode);
   await expect(decodeJpegBitmap(jpeg(30000, 20000))).rejects.toThrow('30000×20000');
   expect(decode).toHaveBeenCalledTimes(1);
+});
+
+it('decodes the delivered server grid once even when the frontend has an older edge setting', async () => {
+  applyPreviewTrueMaxEdge(4096);
+  const decode = vi.fn().mockResolvedValue({ width: 16387, height: 16380 });
+  vi.stubGlobal('createImageBitmap', decode);
+  const plan = { source: { width: 49475, height: 49454 }, requestedDiv: 2,
+    width: 16387, height: 16380, mode: 'whole-jpeg', limits: ['area'] };
+  const blob = await previewResponseBlob(new Response(jpeg(16387, 16380), {
+    headers: { 'X-SR-Preview-Plan': JSON.stringify(plan) },
+  }));
+  expect(jpegPlans.get(blob)).toEqual(plan);
+  const read = vi.spyOn(blob, 'slice');
+  await decodeJpegBitmap(blob);
+  expect(read).not.toHaveBeenCalled();
+  expect(decode).toHaveBeenCalledExactlyOnceWith(blob, undefined);
 });

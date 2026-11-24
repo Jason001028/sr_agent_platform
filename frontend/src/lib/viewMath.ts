@@ -6,7 +6,8 @@
  *
  * 坐标系约定（与 HTML 一致）：
  *   - 缩略图坐标 (tx,ty)：预览画布（rec.thumb）的像素坐标，0 ≤ tx < tw。
- *   - 屏幕坐标 (x,y)：viewCanvas 内像素坐标。
+ *   - 屏幕坐标 (x,y)：查看格局部 CSS 像素，client 坐标先减去画布和格的原点。
+ *   - Canvas 背板像素：当前按 CSS 尺寸 1:1 分配，由 TifCanvas 的 resize 接线。
  *   - 原图坐标 (ox,oy)：原始 TIF 像素坐标（x=列、y=行）。
  *   - view = { scale, ox, oy }：缩略图 → 屏幕的仿射变换（HTML 全局 `view`）。
  */
@@ -61,8 +62,15 @@ export function mouseToThumb(
 
 /* 缩略图坐标 → 原图像素坐标（HTML `thumbToOrig`；round + clamp 到 [0,W-1]/[0,H-1]） */
 export function thumbToOrig(tx: number, ty: number, W: number, H: number, tw: number, th: number): Pt {
-  const ox = tw <= 1 ? 0 : tx * (W - 1) / (tw - 1);
-  const oy = th <= 1 ? 0 : ty * (H - 1) / (th - 1);
+  return clampSourcePixel(thumbToSource(tx, ty, W, H, tw, th), W, H);
+}
+
+/** Continuous source coordinates for endpoint-aligned sampling and MASK export. */
+export function thumbToSource(tx: number, ty: number, W: number, H: number, tw: number, th: number): Pt {
+  return [tw <= 1 ? 0 : tx * (W - 1) / (tw - 1), th <= 1 ? 0 : ty * (H - 1) / (th - 1)];
+}
+
+export function clampSourcePixel([ox, oy]: Pt, W: number, H: number): Pt {
   return [
     Math.max(0, Math.min(W - 1, Math.round(ox))),
     Math.max(0, Math.min(H - 1, Math.round(oy))),
@@ -72,6 +80,11 @@ export function thumbToOrig(tx: number, ty: number, W: number, H: number, tw: nu
 /* 原图像素坐标 → 缩略图坐标（HTML `locatePixel` 用 `x * (t.width / W)`） */
 export function origToThumb(x: number, y: number, tw: number, th: number, W: number, H: number): Pt {
   return [x * (tw / W), y * (th / H)];
+}
+
+/** Inverse of the display rectangle transform used to place source annotations. */
+export function thumbToDisplaySource(x: number, y: number, tw: number, th: number, W: number, H: number): Pt {
+  return [x * (W / tw), y * (H / th)];
 }
 
 /** Exact inverse of MASK export's endpoint-aligned thumbToOrig. Display

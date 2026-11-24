@@ -17,6 +17,7 @@ import { decodeLocalFile } from '../../lib/localDecodeWorker';
 import { browserKit } from '../../lib/browserKit';
 import { sourceFingerprint } from '../../lib/local_preview';
 import { useViewerStore } from '../viewer';
+import { jpegPlans } from '../../lib/previewPlan';
 const asset=():PreviewAsset=>({id:'a'.repeat(64),name:'a.tif',W:64,H:32,size:3,uploaded:true,serverPath:null,sourceRev:'rev',fingerprint:{name:'a.tif',size:3,samples:['','','']}});
 beforeEach(()=>{
   vi.clearAllMocks();localStorage.clear();setActivePinia(createPinia());
@@ -43,6 +44,45 @@ it('native picker assets support cache-based tier changes without a scene identi
   await vi.waitFor(()=>expect(rec.detailDiv).toBe(div));
   expect(fetchPreviewAsset).toHaveBeenLastCalledWith(expect.anything(),div,expect.any(AbortSignal));
   expect(uploadPreviewFile).not.toHaveBeenCalled();expect(decodeLocalFile).not.toHaveBeenCalled();
+});
+it('reuses decoded pixels for collapsed tiers and keeps masks in source coordinates across other tiers', async () => {
+  const original = { ...asset(), W: 64, H: 32 };
+  vi.mocked(fetchPreviewAsset).mockImplementation(async (_asset, div) => {
+    const blob = new Blob(['jpeg']);
+    const [width, height] = div <= 2 ? [8, 5] : [4, 2];
+    const pixels = width * height;
+    jpegPlans.set(blob, {
+      source: { width: 64, height: 32, identity: original.id, version: 'rev', serverWindowRead: true, localFile: false },
+      artifactId: String(width), mode: 'whole-jpeg', limits: ['area'], requestedDiv: div,
+      width, height, scaleX: width / 64, scaleY: height / 32, pixels, decodedBytes: pixels * 4,
+    });
+    return { blob, width, height };
+  });
+  vi.mocked(createImageBitmap).mockImplementation(async (blob) => {
+    const { width, height } = jpegPlans.get(blob as Blob)!;
+    return { width, height, close() {} } as ImageBitmap;
+  });
+  const store = useViewerStore();
+  store.setPreviewDiv(1);
+  await store.openPreviewAsset(original);
+  const rec = store.recs[0];
+  store.addMaskPolygon(rec.id, [[1.25, 1.75], [6.5, 1.75], [6.5, 3.25]]);
+  const mask = store.buildMaskJson();
+  const thumb = rec.thumb;
+  store.setPreviewDiv(2);
+  await vi.waitFor(() => expect(rec.detailDiv).toBe(2));
+  expect(rec.previewPlan?.requestedDiv).toBe(2);
+  expect(rec.thumb).toBe(thumb);
+  expect(createImageBitmap).toHaveBeenCalledOnce();
+  for (const div of [4, 1, 4, 2]) {
+    store.setPreviewDiv(div);
+    await vi.waitFor(() => expect(rec.detailDiv).toBe(div));
+    expect(store.buildMaskJson()).toEqual(mask);
+  }
+  store.undoRoi();
+  expect(store.getRois()).toHaveLength(0);
+  store.redoRoi();
+  expect(store.buildMaskJson()).toEqual(mask);
 });
 it('oversized linked sources still get bounded server JPG and preserve scene authority',async()=>{
   const large={...asset(),W:49474,H:49454,uploaded:false,serverPath:'/DiskArray/scene/a.tif'};

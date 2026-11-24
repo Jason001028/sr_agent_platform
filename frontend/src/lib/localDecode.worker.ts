@@ -88,7 +88,9 @@ async function run(input: { file: File; div: number; maxEdge?: number;
   await new Promise<void>(resolve => {
     acknowledgements.set(displaySequence, resolve);
     scope.postMessage({ type: 'pixels', sequence: displaySequence, result: { ...data, ms: Math.max(0, Date.now() - started - gate.pausedMilliseconds),
-      rgba, paintedMode: mode, layout: probe.layout, dnDomain:{bits:probe.bits,sampleFormat:probe.sampleFormat} } }, [decoded.src.buffer as ArrayBuffer, rgba.buffer as ArrayBuffer]);
+      rgba, paintedMode: mode, layout: probe.layout,
+      dnDomain: { bits: probe.bits, sampleFormat: probe.sampleFormat, bandCount: probe.spp, noData: probe.noData } } },
+  [decoded.src.buffer as ArrayBuffer, rgba.buffer as ArrayBuffer]);
   });
   await checkpoint('生成本地 JPG');
   // JPEG is a display artifact, not a replacement for DN or selected sampling.

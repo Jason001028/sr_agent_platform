@@ -1,3 +1,5 @@
+import { previewResponseBlob } from './previewPlan';
+import type { PreviewSource } from './previewPlan';
 import { joinBase, loadSrConfig } from './scene';
 import { sourceFingerprint } from './local_preview';
 import { LoadControl } from './loadControl';
@@ -7,6 +9,7 @@ export interface PreviewAsset {
   id: string; name: string; W: number; H: number; size: number; uploaded: boolean;
   sourceRev: string; serverPath: string | null;
   clientPath?:string;
+  source?: PreviewSource;
   fingerprint: Awaited<ReturnType<typeof sourceFingerprint>>;
 }
 export interface PickerFile { id: string; name: string; size: number; received: number; state: string; asset?: PreviewAsset; error?: string; originalPath?:string }
@@ -110,7 +113,7 @@ export async function fetchPreviewAsset(asset: PreviewAsset, div: number, signal
     const response=await fetch(api(`/assets/${asset.id}/preview?div=${div}`),{signal});
     if(!response.ok){const body=await response.json().catch(()=>({detail:`HTTP ${response.status}`}));throw new ImageOpenError(body.detail??'服务端 JPG 生成失败',response.status);}
     downloading=true;clearTimeout(timer);statusAbort.abort();onPhase?.('正在下载服务端 JPG…');
-    const blob=await response.blob();
+    const blob=await previewResponseBlob(response);
     return {blob,width:Number(response.headers.get('X-SR-Preview-W')),height:Number(response.headers.get('X-SR-Preview-H'))};
   }finally{stop();signal?.removeEventListener('abort',stop);}
 }

@@ -55,10 +55,12 @@ export interface GeoTiffImageLike {
   getSamplesPerPixel(): number;
   getBitsPerSample(): number | number[];
   getSampleFormat(): number | number[];
+  getGDALNoData?(): number | null;
   readRasters(opts: { window: [number, number, number, number]; samples: number[]; interleave: boolean }): Promise<ArrayLike<number>>;
 }
 
 export interface ProbeInfo {
+  noData?: number | string;
   stripRows?: number;
   tileWidth?: number;
   tileHeight?: number;
@@ -605,10 +607,16 @@ export function probeImage(file: Blob): Promise<ProbeInfo> {
         try { sf = image.getSampleFormat() as number; } catch (e) { /* 兜底 1 */ }
         if (Array.isArray(sf)) sf = sf[0];
         if (typeof sf !== 'number' || !isFinite(sf)) sf = 1;
+        let noData: number | string | undefined;
+        try {
+          const value = image.getGDALNoData?.();
+          if (value != null) noData = Number.isFinite(value) ? value : String(value);
+        } catch { /* Optional TIFF metadata can be unavailable in the lazy directory. */ }
         const ph = tags[262] != null ? tags[262] : null;
         image._ph = ph;   // 供 getSamplePlan 判断反相
         return bigTiffFromBlob(file).then((big) => ({
           W: image.getWidth(), H: image.getHeight(),
+          noData,
           spp: image.getSamplesPerPixel(), bits: safeBits(image),
           sampleFormat: sf,             // 1=无符号整数 2=有符号 3=浮点
           photometric: ph,

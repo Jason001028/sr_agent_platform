@@ -16,6 +16,8 @@
   if(f.requests.some(r=>r.method==='PUT'))throw Error('upload started while paused');
   f.store.resumeImageLoad();await until(()=>!f.store.imageLoad.active&&f.store.recs[0]?.route==='jpg');f.pauseAt='';
   const uploaded=f.store.recs[0],chunks=f.requests.filter(r=>r.method==='PUT');
+  if(uploaded.previewPlan?.requestedDiv!==2||uploaded.previewPlan?.width!==uploaded.thumb.width||
+     uploaded.previewPlan?.source?.version!==uploaded.previewAsset?.sourceRev)throw Error('server preview plan missing or inconsistent');
   if(!uploaded.previewAsset?.uploaded||uploaded.sceneId||uploaded.lqPath||!uploaded.previewOnly)throw Error('upload bypassed or invented scene authority');
   if(chunks.length!==3||chunks.some(r=>r.bytes>4194304))throw Error('upload not bounded');
   const assetId=uploaded.previewAsset.id;

@@ -1,6 +1,7 @@
 import base64
 import asyncio
 import io
+import json
 import os
 import tempfile
 import time
@@ -70,6 +71,11 @@ class ImageOpenTests(unittest.TestCase):
         self.assertEqual(response.status_code,200,response.text)
         self.assertEqual(response.headers['content-type'],'image/jpeg')
         self.assertEqual(Image.open(io.BytesIO(response.content)).size,(16,8))
+        plan = json.loads(response.headers['X-SR-Preview-Plan'])
+        self.assertEqual((plan['width'], plan['height'], plan['requestedDiv']), (16, 8, 2))
+        self.assertEqual(plan['source'], asset['source'])
+        self.assertEqual(plan['source']['dtype'], 'uint16')
+        self.assertTrue(plan['source']['serverWindowRead'])
         self.assertEqual(list(self.data.iterdir()),[self.source])
 
     def test_status_reports_queue_state_without_starting_preview_or_reading_source_pixels(self):

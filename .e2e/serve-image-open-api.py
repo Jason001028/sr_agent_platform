@@ -27,7 +27,7 @@ async def lifespan(app):
     yield
     await app.state.heavy_work.close()
 app=FastAPI(lifespan=lifespan);app.state.heavy_work=HeavyWork();app.state.image_open=ImageOpen()
-app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_methods=['*'],allow_headers=['*'],expose_headers=['X-SR-Image-W','X-SR-Image-H','X-SR-Preview-W','X-SR-Preview-H'])
+app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_methods=['*'],allow_headers=['*'],expose_headers=['X-SR-Image-W','X-SR-Image-H','X-SR-Preview-W','X-SR-Preview-H','X-SR-Preview-Plan'])
 app.include_router(router_for(app.state.image_open))
 metrics={'decodes':0};build=image_module.build_preview_pixels
 def counted(*args,**kwargs):metrics['decodes']+=1;return build(*args,**kwargs)

@@ -23,8 +23,8 @@ div 由调用方按用户的滑块档位传入（`div ∈ PREVIEW_DIVISORS`，�
 
 **缓存失效靠写进 JPEG 注释的规则签名**，不是只看 mtime：升级后旧规则生成出来的图
 mtime 比源新，只看 mtime 会把它判为有效而永不重生成，真机上换包后看不到任何变化。
-规则签名 = PREVIEW_RULE_VERSION + div + max_edge + quality，改规则/改档位/改上限/改质量
-都要跟着变（上限进戳后，设置调高调低都会让旧图失效）。
+兼容文件的规则签名仍包含 div、max_edge 和 quality。版本件按源修订、实际尺寸、
+采样/拉伸规则和质量寻址，多个档位可以读取同一个版本件。
 
 Pure-struct TIFF header/IFD parsing — no new runtime dependency, classic TIFF
 (42) and BigTIFF (43) both handled. The reader targets the confirmed real
@@ -46,7 +46,7 @@ import os
 import re
 import tempfile
 import threading
-from functools import wraps
+from functools import lru_cache, wraps
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -254,6 +254,35 @@ def _read_array(path, ref, endian) -> np.ndarray:
     return np.frombuffer(data, dtype=dt).astype(np.int64)
 
 
+_TAG_GDAL_NODATA = 42113
+
+
+def tiff_nodata(path, scalars, arrays) -> Optional[float]:
+    """读 GDAL_NODATA（ASCII）标签；读不到或不是数字时返回 None。"""
+    try:
+        if _TAG_GDAL_NODATA in arrays:
+            count, size, loc = arrays[_TAG_GDAL_NODATA]
+            if count * size > 256:
+                return None
+            if isinstance(loc, (bytes, bytearray)):
+                data = bytes(loc)
+            else:
+                with open(path, "rb") as f:
+                    f.seek(int(loc))
+                    data = f.read(int(count) * int(size))
+        elif _TAG_GDAL_NODATA in scalars:
+            value = int(scalars[_TAG_GDAL_NODATA])
+            data = bytes([value]) if 0 <= value <= 255 else b""
+        else:
+            return None
+        text = data.rstrip(b"\x00").decode("ascii", "ignore").strip()
+        if not text:
+            return None
+        return float(text)
+    except Exception:  # noqa: BLE001 - 标签损坏不影响读取
+        return None
+
+
 def probe_tiff(path) -> dict:
     """Dimension / layout probe of a TIFF header (never decodes pixels).
 
@@ -288,6 +317,7 @@ def probe_tiff(path) -> dict:
         sf = int(vals[0])
     return {
         "W": W, "H": H,
+        "nodata": tiff_nodata(path, scalars, arrays),
         "bits": bits if bits is not None else 8,
         "spp": scalars.get(_TAG_SPP, 1),
         "compression": scalars.get(_TAG_COMP, 1),
@@ -299,16 +329,24 @@ def probe_tiff(path) -> dict:
     }
 
 
-def scene_dims(path) -> Optional[dict]:
+def scene_dims(path, *, prefer_tiff=False) -> Optional[dict]:
     """W/H for a scene path: ENVI .hdr preferred, else TIFF header probe.
 
     JPG/JPEG（最小原型 §4.7 盘阵里的显示就绪图）走 Pillow 头解析：只读标记段取
     W/H，不解码像素（`Image.open` 本身是懒的，几十 MB 的图也是毫秒级）。
     """
+    suffix = Path(path).suffix.lower()
+    if prefer_tiff and suffix in (".tif", ".tiff"):
+        try:
+            big, endian, offset = _parse_tiff_header(path)
+            fields, _ = _read_ifd(path, big, endian, offset)
+            if fields.get(_TAG_W, 0) > 0 and fields.get(_TAG_H, 0) > 0:
+                return {"W": fields[_TAG_W], "H": fields[_TAG_H]}
+        except (PreviewError, OSError):
+            pass
     dims = dims_from_envi_header(path)
     if dims:
         return {"W": dims["W"], "H": dims["H"]}
-    suffix = Path(path).suffix.lower()
     if suffix in (".tif", ".tiff"):
         try:
             info = probe_tiff(path)
@@ -349,6 +387,58 @@ def preview_target_edge(width: int, height: int, div: int, cap: int) -> int:
     return max(1, min(edge, area_edge))
 
 
+def _scaled_dimensions(width, height, edge):
+    scale = min(1, edge / max(width, height))
+    return max(1, round(width * scale)), max(1, round(height * scale))
+
+
+def preview_dimensions(width, height, edge):
+    w, h = _scaled_dimensions(width, height, edge)
+    # Rounding the short edge up can otherwise exceed the integer canvas budget.
+    if w >= h:
+        h = min(h, PREVIEW_CANVAS_AREA_MAX // w)
+    else:
+        w = min(w, PREVIEW_CANVAS_AREA_MAX // h)
+    return w, h
+
+
+def preview_plan(width, height, div, cap, *, source=None, delivered=None):
+    edge = preview_target_edge(width, height, div, cap)
+    target = preview_dimensions(width, height, edge)
+    w, h = delivered or target
+    requested = max(1, round(max(width, height) / div))
+    reasons = []
+    if requested > cap:
+        reasons.append("long-edge")
+    if edge < min(requested, cap) or target != _scaled_dimensions(width, height, edge):
+        reasons.append("area")
+    if (w, h) != target:
+        reasons.append("reader")
+    return dict(source=source or dict(width=width, height=height), requestedDiv=div,
+                width=w, height=h, scaleX=w / width, scaleY=h / height,
+                pixels=w * h, decodedBytes=w * h * 4, dnBytes=w * h * 4,
+                mode="whole-jpeg", limits=reasons)
+
+
+@lru_cache(maxsize=1024)
+def preview_source(path, width, height, revision, *, uploaded=False):
+    meta = dict(width=width, height=height, identity=source_key(path),
+                version=revision, serverWindowRead=False, localFile=uploaded)
+    if Path(path).suffix.lower() in (".tif", ".tiff"):
+        try:
+            probe = probe_tiff(path)
+            meta["bandCount"] = probe["spp"]
+            meta["dtype"] = _np_dtype(probe["bits"], probe["sample_format"], "=").name
+            meta["serverWindowRead"] = (probe["compression"] == 1 and not probe["tiled"]
+                                        and probe["spp"] == 1 and probe["sample_format"] in (1, 2, 3))
+            if probe["nodata"] is not None:
+                value = probe["nodata"]
+                meta["noData"] = value if math.isfinite(value) else str(value)
+        except (PreviewError, OSError, TypeError, ValueError):
+            pass
+    return meta
+
+
 def preview_max_edge(source_path, div: int = LEGACY_PREVIEW_DIV, *,
                      cap: Optional[int] = None) -> int:
     """本次预览生成的长边 = min(源图长边 / div, 平台设置的上限, 画布面积上限)。
@@ -369,7 +459,7 @@ def preview_max_edge(source_path, div: int = LEGACY_PREVIEW_DIV, *,
     src = Path(source_path)
     if not src.is_file():
         raise PreviewError("场景文件不存在")
-    dims = scene_dims(src)
+    dims = scene_dims(src, prefer_tiff=True)
     if not dims:
         raise PreviewError(f"无法读取图像尺寸：{src.name}")
     limit = configured_preview_max_edge() if cap is None else int(cap)
@@ -443,9 +533,7 @@ def sample_strips(path, endian, scalars, arrays, max_edge: int, *, output_shape=
     if len(offs) < n_strips or len(lens) < n_strips:
         raise PreviewError("条带数量与图像高不匹配")
 
-    ps = min(1.0, max_edge / max(W, H))
-    pw = max(1, int(round(W * ps)))
-    ph = max(1, int(round(H * ps)))
+    pw, ph = preview_dimensions(W, H, max_edge)
     if output_shape is not None:
         ph, pw = output_shape
     stride = spp if planar == 1 else 1
@@ -574,8 +662,9 @@ def _pillow_preview(path, max_edge: int) -> np.ndarray:
                 raise PreviewError(
                     "Pillow 兜底仅限小文件；该图须走无压缩条带稀疏采样")
             im = im.convert("L")
-            if max(im.width, im.height) > max_edge:
-                im.thumbnail((max_edge, max_edge), Image.LANCZOS)
+            target = preview_dimensions(im.width, im.height, max_edge)
+            if im.size != target:
+                im = im.resize(target, Image.LANCZOS, reducing_gap=2.0)
             return np.asarray(im, dtype=np.uint8)
     except PreviewError:
         raise
@@ -592,8 +681,7 @@ def _overview_preview(path, max_edge, is_big, endian, root, base):
     w, h = base.get(256, 0), base.get(257, 0)
     if not w or not h:
         return None
-    scale = min(1., max_edge / max(w, h))
-    shape = (max(1, round(h * scale)), max(1, round(w * scale)))
+    shape = preview_dimensions(w, h, max_edge)[::-1]
     pending, seen, candidates = [root], set(), []
     file_size = os.path.getsize(path)
     count_size, entry_size, ptr_size = (8, 20, 8) if is_big else (2, 12, 4)
@@ -835,15 +923,13 @@ def has_rule_stamp(jpg_path) -> bool:
 
 
 def cache_meta(dst: Path, *, quality: int = PREVIEW_JPG_QUALITY,
-               source=None, source_rev: Optional[str] = None) -> Optional[dict]:
+               source=None, source_rev: Optional[str] = None, size=None) -> Optional[dict]:
     """盘上这份预览的元信息 `{w, h, div}`；不符合当前规则 / 源身份 → None。
 
     与 `cache_hit` 是同一套判据，但不要求调用方**先知道档位**：场景列表要回填
     「盘上这份是哪一档」，再让前端据此判断要不要重生成（见 `api/app.py` 的行构造）。
-    版本、质量、合法档位、当前长边上限与可选的源身份逐条校验。旧戳（没有
-    `;max=` / `;src=`）一律不命中：那是上限可配置之前生成的，继续发会出现
-    「设置调高后仍看旧分辨率」或「设置调低后仍发超大图」。再按实际尺寸兜底判废
-    —— 防止手写注释伪造出超限的产物。
+    有有效尺寸计划时，核对 JPEG 实际尺寸、规则和源修订。静态兼容入口没有计划时，
+    继续核对戳里的档位和设置上限。
 
     只 `Image.open` 读头拿注释，不解码像素 —— 与 `scene_dims` 同级，可以逐行调。
     """
@@ -864,24 +950,24 @@ def cache_meta(dst: Path, *, quality: int = PREVIEW_JPG_QUALITY,
         return None
     div = int(m.group("div"))
     max_edge = configured_preview_max_edge()
+    stamp_cap = m.group("max")
     if (m.group("ver") != PREVIEW_RULE_VERSION
             or int(m.group("q")) != quality
             or div not in PREVIEW_DIVISORS
-            or m.group("max") != str(max_edge)):
+            or not stamp_cap
+            or (size is None and stamp_cap != str(max_edge))):
         return None
     if source is not None or source_rev is not None:
         rev = source_rev if source_rev is not None else source_revision(source)
         if not rev or m.group("src") != rev:
             return None
-    # 上限已经由戳里的 `;max=` 核对过，这里再按实际尺寸兜底：注释可以手写，
-    # 尺寸不能撒谎。调低上限后，旧的大图正好在这里被判废。
-    if max(w, h) > max_edge:
+    if (size is not None and (w, h) != size) or max(w, h) > max_edge or w * h > PREVIEW_CANVAS_AREA_MAX:
         return None
     return {"w": w, "h": h, "div": div}
 
 
 def cache_hit(dst: Path, quality: int, div: int, *,
-              source=None, source_rev: Optional[str] = None) -> Optional[dict]:
+              source=None, source_rev: Optional[str] = None, size=None) -> Optional[dict]:
     """缓存可用则返回 {w, h}，否则 None（缺戳 / 旧规则 / 换档 / 换源 / 损坏一律重生成）。
 
     公开（无下划线）是因为**产物急生成**（`api/app.py::_eager_bake_tick`）要在动手读
@@ -892,8 +978,8 @@ def cache_hit(dst: Path, quality: int, div: int, *,
     这一节 → 判为不命中（升级后一次性重生成），否则保留时间戳的替换永远看不出来。
     """
     meta = cache_meta(dst, quality=quality, source=source,
-                      source_rev=source_rev)
-    if meta is None or meta["div"] != div:
+                      source_rev=source_rev, size=size)
+    if meta is None or (size is None and meta["div"] != div):
         return None
     return {"w": meta["w"], "h": meta["h"]}
 
@@ -912,13 +998,28 @@ def _serialize_preview(fn):
 
 
 def versioned_preview_path(jpg_path, source_rev, div, quality=PREVIEW_JPG_QUALITY,
-                           *, max_edge: Optional[int] = None):
+                           *, max_edge: Optional[int] = None, size=None):
     """Immutable cache identity, still matching the guarded preview clear rule."""
     dst = Path(jpg_path)
-    identity = hashlib.sha256(str(dst.name).encode("utf-8")
-                              + rule_stamp(quality, div, source_rev=source_rev,
-                                           max_edge=max_edge)).hexdigest()[:24]
+    if size is None:
+        rule = rule_stamp(quality, div, source_rev=source_rev, max_edge=max_edge)
+    else:
+        rule = preview_pixel_key(source_rev, size, quality=quality).encode()
+    identity = hashlib.sha256(dst.name.encode("utf-8") + rule).hexdigest()[:24]
     return dst.with_name(f"v_{identity}_preview.jpg")
+
+
+def preview_pixel_key(source_rev, size, *, quality=PREVIEW_JPG_QUALITY, is_tiff=True):
+    # v4 versions the overview/base sampling, first display band and equal stretch.
+    rule = f"{PREVIEW_RULE_VERSION}:band0:equal" if is_tiff else "pillow-rgb-v1"
+    return f"{source_rev}:{size[0]}x{size[1]}:{rule}:q{quality}"
+
+
+def preview_candidates(jpg_path, revision, div, size, *, cap=None, quality=PREVIEW_JPG_QUALITY):
+    """Canonical size-addressed JPEG, then the previous variant and static path."""
+    return (versioned_preview_path(jpg_path, revision, div, quality, size=size),
+            versioned_preview_path(jpg_path, revision, div, quality, max_edge=cap),
+            jpg_path)
 
 
 @_serialize_preview
@@ -959,50 +1060,41 @@ def write_preview_jpg(jpg_path, pixels, *,
         source_revision(source) if source is not None else None)
     if rev is not None:
         _copy_preview(dst, versioned_preview_path(dst, rev, div, quality,
-                                                  max_edge=max_edge))
+                                                  max_edge=max_edge, size=(w, h)))
     return {"path": str(dst), "w": w, "h": h}
 
 
 @_serialize_preview
 def ensure_preview_jpg(source_path, jpg_path, div: int = LEGACY_PREVIEW_DIV,
                        quality: int = PREVIEW_JPG_QUALITY) -> dict:
-    """Generate preview JPEG if missing/stale; idempotent (cache by caller).
-
-    命中要求两条同时成立：**不比源旧**，且**规则签名等于当前规则**（含档位）。只看
-    mtime 会让升级前生成的图永远不重生成 —— 它的 mtime 就是比源新。
-
-    `div` 是**尺寸与规则签名的共同来源**（不是分开的两个参数）：两者只要有一处不同步，
-    就会出现「尺寸换了但戳没换 → 缓存永远命中 → 界面滑了盘上不动」这种哑火，所以
-    干脆不给它们分开的机会。
-
-    Returns {"status": "generated"|"cached", "path", "w", "h", "error": None}.
-    Raises PreviewError on generation failure.
-    """
+    """Return the immutable JPEG for this source revision and effective grid."""
     src, dst = Path(source_path), Path(jpg_path)
     # 上限读一次，像素尺寸与规则戳共用，避免生成途中改设置造成「旧尺寸配新戳」。
     cap = configured_preview_max_edge()
-    max_edge = preview_max_edge(src, div, cap=cap)  # 顺带校验 div 合法
     # 源身份在动手前记一次、落盘前再核一次：读到一半源被换掉（重跑覆盖产物、
     # 有人保留时间戳换了一份文件）就不能把半新半旧的像素写成长期缓存。
     rev = source_revision(src)
-    variant = versioned_preview_path(dst, rev, div, quality, max_edge=cap)
+    dims = scene_dims(src, prefer_tiff=True)
+    if not dims:
+        raise PreviewError(f"无法读取图像尺寸：{src.name}")
+    plan = preview_plan(dims["W"], dims["H"], div, cap)
+    size = plan["width"], plan["height"]
+    candidates = preview_candidates(dst, rev, div, size, cap=cap, quality=quality)
+    variant = candidates[0]
     if rev is not None:
-        hit = cache_hit(variant, quality, div, source_rev=rev)
-        if hit is not None:
-            return {"status": "cached", "path": str(variant),
-                    "w": hit["w"], "h": hit["h"], "error": None}
-    if (rev is not None and dst.is_file()
-            and os.path.getmtime(dst) >= os.path.getmtime(src)):
-        hit = cache_hit(dst, quality, div, source_rev=rev)
-        if hit is not None:
-            _copy_preview(dst, variant)
-            return {"status": "cached", "path": str(variant),
-                    "w": hit["w"], "h": hit["h"], "error": None}
-    pixels = build_preview_pixels(str(src), max_edge)
+        for candidate in candidates:
+            hit = cache_hit(candidate, quality, div, source_rev=rev, size=size)
+            if hit is not None:
+                if candidate != variant:
+                    _copy_preview(candidate, variant)
+                return {"status": "cached", "path": str(variant), **hit, "error": None}
+    pixels = build_preview_pixels(str(src), max(size))
     if source_revision(src) != rev:
         raise PreviewError("源在预览生成途中被改写")
     out = write_preview_jpg(dst, pixels, quality=quality, div=div,
                             source_rev=rev, max_edge=cap)
+    actual = out["w"], out["h"]
+    variant = versioned_preview_path(dst, rev, div, quality, max_edge=cap, size=actual)
     return {"status": "generated", "path": str(variant),
             "w": out["w"], "h": out["h"], "error": None}
 

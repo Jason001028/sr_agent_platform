@@ -1,4 +1,7 @@
 import { getPreviewTrueMaxEdge } from './previewLevel';
+import type { PreviewPlan } from './previewPlan';
+
+export const LOCAL_PREVIEW_DN_BYTES = 256 * 1024 * 1024;
 
 /** Bound browser preview buffers independently of source size and selected level.
  *
@@ -7,10 +10,19 @@ import { getPreviewTrueMaxEdge } from './previewLevel';
  *  不是档位合并 —— 状态栏会报实际长边与比例。 */
 export function localPreviewSize(w: number, h: number, bands: number, div: number,
                                  maxEdge = getPreviewTrueMaxEdge()) {
-  const maxPixels = 256 * 1024 * 1024 / (4 * Math.max(1, bands));
-  const scale = Math.min(1 / div, maxEdge / Math.max(w, h),
-                         Math.sqrt(maxPixels / (w * h)));
-  return { w: Math.max(1, Math.floor(w * scale)), h: Math.max(1, Math.floor(h * scale)) };
+  return localPreviewBudget(w, h, bands, div, maxEdge).size;
+}
+
+export function localPreviewBudget(w: number, h: number, bands: number, div: number,
+                                   maxEdge = getPreviewTrueMaxEdge()) {
+  const maxPixels = LOCAL_PREVIEW_DN_BYTES / (4 * Math.max(1, bands));
+  const edgeScale = maxEdge / Math.max(w, h);
+  const memoryScale = Math.sqrt(maxPixels / (w * h));
+  const scale = Math.min(1 / div, edgeScale, memoryScale);
+  const limits: PreviewPlan['limits'] = [];
+  if (edgeScale < 1 / div) limits.push('long-edge');
+  if (memoryScale < Math.min(1 / div, edgeScale)) limits.push('memory');
+  return { size: { w: Math.max(1, Math.floor(w * scale)), h: Math.max(1, Math.floor(h * scale)) }, limits };
 }
 
 export async function sourceFingerprint(file: File) {

@@ -11,8 +11,28 @@ import {
   clampSplitRatio, splitRects, paneAtX, ratioFromPointer, normAnchor, anchorAtLocal,
   wheelZoomBoth, panBoth, remapViewForImage, SPLIT_MIN_HALF_PX,
   easeOutCubic, lerpView,
+  thumbToDisplaySource, thumbToSource, sourceToMaskThumb,
 } from '../viewMath.js';
 import type { Poly } from '../maskgen.js';
+
+it('round-trips source coordinates through both large preview grids and a CSS pane', () => {
+  const world = [41234.25, 17654.875] as const;
+  const view = { scale: 2.75, ox: -612, oy: 42 };
+  for (const [tw, th] of [[16387, 16380], [12369, 12364]] as const) {
+    const t = origToThumb(...world, tw, th, 49475, 49454);
+    const css = thumbToScreen(view, ...t);
+    const fromScreen = mouseToThumb(view, css[0] + 505, css[1] + 19, { left: 505, top: 19 });
+    const roundTrip = thumbToDisplaySource(...fromScreen, tw, th, 49475, 49454);
+    const mask = sourceToMaskThumb(...world, 49475, 49454, tw, th);
+    const maskRoundTrip = thumbToSource(...mask, 49475, 49454, tw, th);
+    for (const p of [roundTrip, maskRoundTrip]) {
+      expect(p[0]).toBeCloseTo(world[0], 9);
+      expect(p[1]).toBeCloseTo(world[1], 9);
+    }
+    expect(thumbToOrig(tw - 1, th - 1, 49475, 49454, tw, th)).toEqual([49474, 49453]);
+  }
+  expect(thumbToSource(3, 0, 10, 1, 5, 1)).toEqual([6.75, 0]);
+});
 
 describe('fitView（适配 + 居中）', () => {
   it('thumb 大于画布 → scale 缩到能放下', () => {

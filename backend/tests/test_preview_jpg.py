@@ -266,23 +266,20 @@ class TestBigPreviewNotMistakenForBomb(unittest.TestCase):
                 self.assertEqual(im.size, (self.HUGE, self.HUGE))
 
     def test_huge_preview_cache_still_hits(self):
-        """端到端：巨大的旧缓存 + mtime 比源新 → 必须判为命中，而不是重生成。
-
-        默认上限 32768 允许 20000 的产物；这里把上限钉在 HUGE，验证 cache_hit
-        只读文件头、且不能被 Pillow 炸弹阈值挡住 —— 生成与缓存判据读的是同一个
-        上限，所以戳与尺寸仍能对上。
-        """
+        """A 200 MP JPEG within budget is a header-only cache hit."""
         with tempfile.TemporaryDirectory() as d:
             p, _ = make_strip_tif(d, "s.tif", 64, 64)
             jpg = Path(d, "s.preview.jpg")
             with patch("backend.services.preview_jpg.configured_preview_max_edge",
-                       return_value=self.HUGE):
-                self._fake_huge_jpeg(jpg, self.HUGE, self.HUGE, source=p)
+                       return_value=self.HUGE), patch(
+                           "backend.services.preview_jpg.scene_dims",
+                           return_value={"W": self.HUGE * 2, "H": self.HUGE}):
+                self._fake_huge_jpeg(jpg, self.HUGE, self.HUGE // 2, source=p)
                 future = p.stat().st_mtime + 100
                 os.utime(jpg, (future, future))
                 r = ensure_preview_jpg(str(p), str(jpg))
             self.assertEqual(r["status"], "cached")
-            self.assertEqual((r["w"], r["h"]), (self.HUGE, self.HUGE))
+            self.assertEqual((r["w"], r["h"]), (self.HUGE, self.HUGE // 2))
 
 
 class TestWhiteIsZero(unittest.TestCase):

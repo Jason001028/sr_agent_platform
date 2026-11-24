@@ -942,33 +942,6 @@ def _resize_pair(shape, b: np.ndarray, valid: np.ndarray):
 # 原始 ROI 分析（可选）：只读无压缩条带 TIFF 的有界窗口
 # --------------------------------------------------------------------------
 
-_TAG_GDAL_NODATA = 42113
-
-
-def _tiff_nodata(path, scalars, arrays) -> Optional[float]:
-    """读 GDAL_NODATA（ASCII）标签；读不到或不是数字时返回 None。"""
-    try:
-        if _TAG_GDAL_NODATA in arrays:
-            count, size, loc = arrays[_TAG_GDAL_NODATA]
-            if isinstance(loc, (bytes, bytearray)):
-                data = bytes(loc)
-            else:
-                with open(path, "rb") as f:
-                    f.seek(int(loc))
-                    data = f.read(int(count) * int(size))
-        elif _TAG_GDAL_NODATA in scalars:
-            value = int(scalars[_TAG_GDAL_NODATA])
-            data = bytes([value]) if 0 <= value <= 255 else b""
-        else:
-            return None
-        text = data.rstrip(b"\x00").decode("ascii", "ignore").strip()
-        if not text:
-            return None
-        return float(text)
-    except Exception:  # noqa: BLE001 - 标签损坏不影响读取
-        return None
-
-
 def read_source_window(path: Union[str, Path], x0: int, y0: int, x1: int, y1: int,
                        *, max_edge: int = DEFAULT_MAX_EDGE):
     """读取无压缩条带 TIFF 的窗口。
@@ -1045,7 +1018,7 @@ def read_source_window(path: Union[str, Path], x0: int, y0: int, x1: int, y1: in
             arr = np.frombuffer(data, dtype=dt, count=len(data) // bpp)
             out[i] = arr[cols * stride]
     valid = np.isfinite(out)
-    nodata = _tiff_nodata(path, scalars, arrays)
+    nodata = pf.tiff_nodata(path, scalars, arrays)
     if nodata is not None and np.isfinite(nodata):
         # 只有有限哨兵才做值比较；GDAL_NODATA 可以是 "nan"/"inf"，
         # 那类已经由上面的 isfinite(out) 排除，不能再拿 isfinite(nodata) 与掩码相与。

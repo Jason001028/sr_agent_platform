@@ -1,4 +1,5 @@
-import { getPreviewTrueMaxEdge, PREVIEW_CANVAS_AREA_MAX } from './previewLevel';
+import { getPreviewTrueMaxEdge, PREVIEW_CANVAS_AREA_MAX, PREVIEW_TRUE_MAX_EDGE } from './previewLevel';
+import { jpegPlans } from './previewPlan';
 
 /** Read JPEG frame dimensions without decoding pixels or copying the full file. */
 export async function jpegSize(blob: Blob): Promise<{ width: number; height: number } | null> {
@@ -42,8 +43,12 @@ export async function jpegSize(blob: Blob): Promise<{ width: number; height: num
  *  超过这个尺寸或整幅面积超过 Chromium 画布上限（16384²）都必须 resize —— 32768
  *  只放宽长边，不放宽面积。默认值在**调用时**求值，设置改了以后下一次解码就按新
  *  上限走。 */
-export async function decodeJpegBitmap(blob: Blob, maxEdge = getPreviewTrueMaxEdge()): Promise<ImageBitmap> {
-  const size = await jpegSize(blob);
+export async function decodeJpegBitmap(blob: Blob, maxEdge = getPreviewTrueMaxEdge(),
+  onSourceSize?: (size: { width: number; height: number }) => void): Promise<ImageBitmap> {
+  const plan = jpegPlans.get(blob);
+  const size = plan ?? await jpegSize(blob);
+  if (size) onSourceSize?.(size);
+  if (plan) maxEdge = PREVIEW_TRUE_MAX_EDGE;
   const areaCap = Math.min(maxEdge * maxEdge, PREVIEW_CANVAS_AREA_MAX);
   const scale = size ? Math.min(
     1,
@@ -55,6 +60,13 @@ export async function decodeJpegBitmap(blob: Blob, maxEdge = getPreviewTrueMaxEd
     resizeHeight: Math.max(1, Math.round(size.height * scale)),
     resizeQuality: 'high',
   } : undefined;
+  if (options?.resizeWidth && options.resizeHeight && options.resizeWidth * options.resizeHeight > areaCap) {
+    if (options.resizeWidth >= options.resizeHeight) {
+      options.resizeHeight = Math.floor(areaCap / options.resizeWidth);
+    } else {
+      options.resizeWidth = Math.floor(areaCap / options.resizeHeight);
+    }
+  }
   try {
     return await createImageBitmap(blob, options);
   } catch (error) {

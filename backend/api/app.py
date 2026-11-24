@@ -87,12 +87,12 @@ from backend.services.preview_jpg import (PREVIEW_DIVISORS, PREVIEW_JPG_QUALITY,
                                           cache_hit, cache_meta,
                                           configured_preview_max_edge,
                                           ensure_preview_jpg,
-                                          preview_max_edge, scene_dims,
-                                          source_revision, stamp_div,
-                                          stamp_src, write_preview_jpg, versioned_preview_path)
+                                          preview_candidates, preview_max_edge, preview_pixel_key,
+                                          preview_plan, preview_source, scene_dims,
+                                          source_revision, write_preview_jpg, versioned_preview_path)
 
 # W/H 探测缓存：LRU，key = (绝对路径, mtime)，header 级读取很廉价但盘阵文件多
-_DIMS_CACHE: dict[tuple[str, float], dict] = {}
+_DIMS_CACHE: dict[tuple[str, int, int], dict] = {}
 _DIMS_CACHE_MAX = 1024
 
 _FAKE_W = [20000, 4096, 12000, 8192, 16000, 24000]
@@ -110,16 +110,16 @@ def _cached_dims(abs_path: Path) -> Optional[dict]:
     「不换图」，不该把整个 resolve 打成 500。
     """
     try:
-        mtime = abs_path.stat().st_mtime
+        stat = abs_path.stat()
     except OSError:
         return None
-    key = (str(abs_path), mtime)
+    key = (str(abs_path), stat.st_mtime_ns, stat.st_size)
     hit = _DIMS_CACHE.get(key)
     if hit is not None:
         return hit
     if len(_DIMS_CACHE) >= _DIMS_CACHE_MAX:
         _DIMS_CACHE.clear()
-    dims = scene_dims(str(abs_path))
+    dims = scene_dims(str(abs_path), prefer_tiff=True)
     if dims is not None:
         _DIMS_CACHE[key] = dims
     return dims
@@ -170,6 +170,17 @@ def _check_div(div: int) -> int:
     return div
 
 
+def _source_preview_plan(source, div, cap):
+    dims = _cached_dims(source)
+    if not dims:
+        return None
+    return preview_plan(dims["W"], dims["H"], div, cap)
+
+
+def _plan_size(plan):
+    return plan["width"], plan["height"]
+
+
 def _reuse_shared_preview(source: Path, destination: Path, div: int):
     """Reuse a tier across mirror/drop destinations without decoding again.
 
@@ -178,8 +189,15 @@ def _reuse_shared_preview(source: Path, destination: Path, div: int):
     """
     from backend.services.preview_jpg import _copy_preview
     rev = source_revision(source)
-    target = versioned_preview_path(destination, rev, div)
-    if not rev or cache_hit(target, PREVIEW_JPG_QUALITY, div, source_rev=rev):
+    cap = configured_preview_max_edge()
+    plan = _source_preview_plan(source, div, cap)
+    if not rev or not plan:
+        return
+    size = _plan_size(plan)
+    local = preview_candidates(destination, rev, div, size, cap=cap)
+    target = local[0]
+    if any(cache_hit(candidate, PREVIEW_JPG_QUALITY, div, source_rev=rev, size=size)
+           for candidate in local):
         return
     candidates = []
     try:
@@ -191,14 +209,14 @@ def _reuse_shared_preview(source: Path, destination: Path, div: int):
     if not is_preview_only(source):
         candidates.append(paths.drop_preview_path(source))
     for base in candidates:
-        candidate = versioned_preview_path(base, rev, div)
-        if candidate == target:
+        if base == destination:
             continue
-        if cache_hit(candidate, PREVIEW_JPG_QUALITY, div, source_rev=rev):
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            _copy_preview(candidate, target)
-            _copy_preview(target, destination)
-            return
+        for candidate in preview_candidates(base, rev, div, size, cap=cap):
+            if cache_hit(candidate, PREVIEW_JPG_QUALITY, div, source_rev=rev, size=size):
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                _copy_preview(candidate, target)
+                _copy_preview(target, destination)
+                return
 
 
 def _ensure_shared_preview(source_path, jpg_path, div=2):
@@ -734,7 +752,7 @@ class _PreviewSnapshotError(Exception):
 
 
 def _jpeg_snapshot(path: Path, *, div: int, source_rev: Optional[str] = None,
-                   headers: Optional[dict] = None) -> Response:
+                   headers: Optional[dict] = None, plan=None, cache=None) -> Response:
     """把预览 JPG 读成**字节快照**再返回（而不是交给 FileResponse 延迟打开）。
 
     `FileResponse` 在响应发送阶段才按路径打开文件，而预览落点是「换档位原地覆盖
@@ -754,20 +772,18 @@ def _jpeg_snapshot(path: Path, *, div: int, source_rev: Optional[str] = None,
     except OSError as e:
         raise HTTPException(status_code=422,
                             detail=f"预览读取失败：{e}") from e
-    try:
-        with Image.open(io.BytesIO(data)) as im:
-            comment = im.info.get("comment")
-            got = stamp_div(comment)
-            got_src = stamp_src(comment)
-    except Exception as e:  # noqa: BLE001 — 损坏的缓存不能当图发出去
-        raise _PreviewSnapshotError(f"预览缓存不可读：{e}") from e
-    if got != div:
-        raise _PreviewSnapshotError(
-            f"预览档位在读取时变成 {got}（期望 {div}）")
-    if source_rev is not None and got_src != source_rev:
-        raise _PreviewSnapshotError(
-            f"预览缓存来自另一份源（戳 {got_src or '无'}，期望 {source_rev}）")
+    size = _plan_size(plan) if plan else None
+    if not source_rev or cache_hit(io.BytesIO(data), PREVIEW_JPG_QUALITY, div,
+                                   source_rev=source_rev, size=size) is None:
+        raise _PreviewSnapshotError("预览缓存的源修订、实际尺寸或生成规则已变化")
     h = dict(headers or {})
+    if plan is not None:
+        h["X-SR-Preview-Plan"] = json.dumps(
+            {**plan, "cache": cache, "artifactId": preview_pixel_key(source_rev, size)},
+            separators=(",", ":"))
+        h["X-SR-Preview-W"], h["X-SR-Preview-H"] = map(str, size)
+        h["X-SR-Image-W"] = str(plan["source"]["width"])
+        h["X-SR-Image-H"] = str(plan["source"]["height"])
     h["Content-Length"] = str(len(data))
     return Response(content=data, media_type="image/jpeg", headers=h)
 
@@ -865,9 +881,13 @@ def _bake_product_preview(state, task: dict, div: int) -> None:
     try:
         _reuse_shared_preview(product, jpg, div)
         if jpg.is_file() and os.path.getmtime(jpg) >= os.path.getmtime(product):
-            hit = (cache_hit(versioned_preview_path(jpg, source_revision(product), div),
-                             PREVIEW_JPG_QUALITY, div, source=product)
-                   or cache_hit(jpg, PREVIEW_JPG_QUALITY, div, source=product))
+            rev = source_revision(product)
+            cap = configured_preview_max_edge()
+            plan = _source_preview_plan(product, div, cap)
+            size = _plan_size(plan) if plan else None
+            hit = (cache_hit(versioned_preview_path(jpg, rev, div, max_edge=cap, size=size),
+                             PREVIEW_JPG_QUALITY, div, source_rev=rev, size=size)
+                   or cache_hit(jpg, PREVIEW_JPG_QUALITY, div, source_rev=rev, size=size))
             if hit is not None:
                 _finish_preview(state, task, "done",
                                 f"cached: 盘上那份已是 ÷{div}"
@@ -943,9 +963,13 @@ def _bake_nosr_preview(task: dict, div: int) -> str:
     try:
         _reuse_shared_preview(source, out, div)
         if out.is_file() and os.path.getmtime(out) >= os.path.getmtime(source):
-            hit = (cache_hit(versioned_preview_path(out, source_revision(source), div),
-                             PREVIEW_JPG_QUALITY, div, source=source)
-                   or cache_hit(out, PREVIEW_JPG_QUALITY, div, source=source))
+            rev = source_revision(source)
+            cap = configured_preview_max_edge()
+            plan = _source_preview_plan(source, div, cap)
+            size = _plan_size(plan) if plan else None
+            hit = (cache_hit(versioned_preview_path(out, rev, div, max_edge=cap, size=size),
+                             PREVIEW_JPG_QUALITY, div, source_rev=rev, size=size)
+                   or cache_hit(out, PREVIEW_JPG_QUALITY, div, source_rev=rev, size=size))
             if hit is not None:
                 return f"cached: {out.name} 已是 ÷{div}（{hit['w']}×{hit['h']}）"
     except OSError:
@@ -1433,7 +1457,7 @@ def create_app() -> FastAPI:
     # 不列这里的话 X-SR-Preview-Fallback 恒为 null，那条提示就是死代码。
     app.add_middleware(CORSMiddleware, allow_origins=["*"],
                        allow_methods=["*"], allow_headers=["*"],
-                       expose_headers=["X-SR-Preview-Fallback", "X-SR-Image-W", "X-SR-Image-H", "X-SR-Preview-W", "X-SR-Preview-H"])
+                       expose_headers=["X-SR-Preview-Fallback", "X-SR-Image-W", "X-SR-Image-H", "X-SR-Preview-W", "X-SR-Preview-H", "X-SR-Preview-Plan"])
 
     # 阶段5 运行时状态：create_app 即建（env 已就绪）；lifespan 只额外启轮询。
     app.state.store = store_mod.Store()          # SR_AGENT_DB，懒打开
@@ -2245,22 +2269,37 @@ def create_app() -> FastAPI:
         source = _diff_source_path(scene_id, root)
         return ("preview", str(source), source_revision(source), div, ready_only)
 
+    def _serve_preview(path, source, div, rev, plan, cache, headers=None):
+        if plan is not None:
+            plan = {**plan, "source": preview_source(
+                source, plan["source"]["width"], plan["source"]["height"], rev)}
+        return _jpeg_snapshot(path, div=div, source_rev=source_revision(source),
+                              plan=plan, cache=cache, headers=headers)
+
     def _ready_preview(scene_id, div, ready_only):
         source = _diff_source_path(scene_id, root)
         if source.suffix.lower() in (".jpg", ".jpeg"):
             return {"ready": True} if ready_only else FileResponse(str(source), media_type="image/jpeg")
         jpg = paths.preview_jpg_for(source, root)
         rev = source_revision(source)
-        variant = versioned_preview_path(jpg, rev, div)
-        hit = cache_hit(variant, PREVIEW_JPG_QUALITY, div, source_rev=rev)
-        if hit is None:
+        cap = configured_preview_max_edge()
+        plan = _source_preview_plan(source, div, cap)
+        if not rev or not plan:
             return None
-        if ready_only:
-            return {"ready": True}
-        try:
-            return _jpeg_snapshot(variant, div=div, source_rev=source_revision(source))
-        except _PreviewSnapshotError:
-            return None
+        size = _plan_size(plan)
+        for candidate in preview_candidates(jpg, rev, div, size, cap=cap):
+            if cache_hit(candidate, PREVIEW_JPG_QUALITY, div, source_rev=rev, size=size) is None:
+                continue
+            if ready_only:
+                return {"ready": True}
+            try:
+                return _serve_preview(candidate, source, div, rev, plan, "hit")
+            except _PreviewSnapshotError:
+                continue
+            except HTTPException as exc:
+                if exc.status_code != 422:
+                    raise
+        return None
 
     def _preview_sync(scene_id: str, div: int = Query(2), ready_only: bool = False):
         """场景预览 JPG（响应体即字节）。`?div=` 选下采样档位（各边 ÷div）。
@@ -2323,8 +2362,9 @@ def create_app() -> FastAPI:
             # 生成后现算源身份再比对（不是生成前算好的那份）：源在这两步之间
             # 被换掉时，戳里仍是旧身份 → 判废重生成，不会把旧字节发出去。
             try:
-                return _jpeg_snapshot(Path(out["path"]), div=div,
-                                      source_rev=source_revision(abs_path))
+                rev = source_revision(abs_path)
+                plan = _source_preview_plan(abs_path, div, configured_preview_max_edge())
+                return _serve_preview(Path(out["path"]), abs_path, div, rev, plan, out["status"])
             except _PreviewSnapshotError as e:
                 last = e
         raise HTTPException(
@@ -2357,13 +2397,17 @@ def create_app() -> FastAPI:
         key = ("preview-drop", str(source), rev, div, str(main), str(tmp))
         if rev is None:
             return None, key
+        cap = configured_preview_max_edge()
+        plan = _source_preview_plan(source, div, cap)
+        if not plan:
+            return None, key
+        size = _plan_size(plan)
         for base, fallback in ((main, False), (tmp, True)):
-            for candidate in (versioned_preview_path(base, rev, div), base):
-                if cache_hit(candidate, PREVIEW_JPG_QUALITY, div, source_rev=rev) is None:
+            for candidate in preview_candidates(base, rev, div, size, cap=cap):
+                if cache_hit(candidate, PREVIEW_JPG_QUALITY, div, source_rev=rev, size=size) is None:
                     continue
                 try:
-                    response = _jpeg_snapshot(candidate, div=div,
-                        source_rev=source_revision(source), headers={**headers,
+                    response = _serve_preview(candidate, source, div, rev, plan, "hit", headers={**headers,
                             **({"X-SR-Preview-Fallback": "tmp"} if fallback else {})})
                     return response, key
                 except _PreviewSnapshotError:
@@ -2423,9 +2467,9 @@ def create_app() -> FastAPI:
                 out = _ensure_shared_preview(str(abs_path), str(path), div=div)
                 _sweep_legacy_preview(path, abs_path)
                 try:
-                    return _jpeg_snapshot(
-                        Path(out["path"]), div=div, headers=headers,
-                        source_rev=source_revision(abs_path))
+                    rev = source_revision(abs_path)
+                    plan = _source_preview_plan(abs_path, div, configured_preview_max_edge())
+                    return _serve_preview(Path(out["path"]), abs_path, div, rev, plan, out["status"], headers)
                 except _PreviewSnapshotError as e:
                     last = e
             raise PreviewError(f"预览在生成与读取之间被并发改写：{last}")

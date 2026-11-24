@@ -24,7 +24,7 @@ import { drawDiffSource } from '../lib/diffRender';
 import { useDiffStore } from '../stores/diff';
 import type { Pane } from '../stores/viewer';
 import { useQcListStore } from '../stores/qclist';
-import { mouseToThumb, thumbToScreen, thumbToOrig, paneAtX } from '../lib/viewMath';
+import { mouseToThumb, thumbToScreen, thumbToDisplaySource, clampSourcePixel, paneAtX } from '../lib/viewMath';
 import { dropSideAt } from '../lib/compare';
 import type { Pt } from '../lib/maskgen';
 
@@ -168,6 +168,8 @@ function applyResize() {
   if (!stage || !vc || !dc) return;
   const w = stage.clientWidth, h = stage.clientHeight;
   if (vc.width === w && vc.height === h) return;
+  // The backing store is intentionally 1 device pixel per CSS pixel here.
+  // ViewState and pane/pointer calculations stay in CSS pixels.
   vc.width = w; vc.height = h;
   dc.width = w; dc.height = h;
   store.setCanvasSize(w, h);
@@ -422,7 +424,7 @@ function cursorAt(e: MouseEvent): Pt | null {
     { left: r.left, top: r.top });
   const tw = rec.thumb.width, th = rec.thumb.height;
   if (t[0] < 0 || t[1] < 0 || t[0] >= tw || t[1] >= th) return null;
-  return thumbToOrig(t[0], t[1], rec.W, rec.H, tw, th);
+  return clampSourcePixel(thumbToDisplaySource(t[0], t[1], tw, th, rec.W, rec.H), rec.W, rec.H);
 }
 
 function askSelected(){

@@ -59,10 +59,18 @@ export function isTruePreviewEdge(edge:number) {
  *  约 1/3.02；它和 1/2 档的产物尺寸相同。这时不能说「真分辨率」，否则用户会
  *  以为 1:1 已经给了原尺寸。判据是长边已达到面积公式允许的最大值，且整幅面积
  *  落在画布上限内（超过上限的异常尺寸不冒充「受限制」）。 */
-export function previewResolutionNote(sourceW:number,sourceH:number,width:number,height:number) {
+export function previewResolutionNote(sourceW:number,sourceH:number,width:number,height:number, limits?: readonly string[]) {
   if(![sourceW,sourceH,width,height].every(n=>Number.isFinite(n)&&n>0))return '';
   const edge = Math.max(width,height);
   const ratio = Math.max(sourceW / width, sourceH / height);
+  if (limits) {
+    const reason = limits.includes('area') ? '受画布面积限制'
+      : limits.includes('memory') ? '受本地预览内存限制'
+      : limits.includes('long-edge') ? '受长边限制'
+      : limits.includes('reader') ? '读取器交付尺寸'
+      : ratio === 1 ? '原图像素' : '档位分辨率';
+    return `实际约 1/${Number(ratio.toFixed(2))}（长边 ${edge}，${reason}）`;
+  }
   const limit = currentPreviewTrueMaxEdge;
   const longEdge = Math.max(sourceW, sourceH), shortEdge = Math.min(sourceW, sourceH);
   const areaEdge = Math.max(1, Math.floor(

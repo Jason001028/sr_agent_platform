@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 import numpy as np
 from backend.services import preview_jpg as pf
-from backend.services.image_diff import _tiff_nodata
+from backend.services.preview_jpg import tiff_nodata
 
 
 class EvidenceError(ValueError):
@@ -66,7 +66,7 @@ def read_window(path, window, *, max_bytes=33554432, cancelled=lambda:False):
     if before!=signature(path):
         raise EvidenceError('source_changed')
     valid=np.isfinite(out)
-    nodata=_tiff_nodata(path,scalars,arrays)
+    nodata=tiff_nodata(path,scalars,arrays)
     if nodata is not None and np.isfinite(nodata):
         valid &= out!=np.float32(nodata)
     saturation = int(np.iinfo(dtype).max) if np.issubdtype(dtype, np.integer) else None

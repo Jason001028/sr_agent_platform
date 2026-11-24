@@ -65,7 +65,7 @@ it('keeps the server JPG path for a normal 38-megapixel preview instead of forci
   await vi.waitFor(()=>expect(store.recs[0]?.route).toBe('jpg'));
   expect(fetchDropSceneJpg).toHaveBeenCalled();expect(decodeLocalFile).not.toHaveBeenCalled();
 });
-it('skips an oversized server JPG and keeps progressive display separate from DN until pixels finish', async () => {
+it('tries the bounded server preview and keeps progressive display separate from DN when the request fails', async () => {
   const res = resolved(); res.row.W = 49474; res.row.H = 49454;
   vi.mocked(apiResolveScene).mockResolvedValue(res);
   let finish!: () => void;
@@ -80,7 +80,7 @@ it('skips an oversized server JPG and keeps progressive display separate from DN
   });
   const store = useViewerStore(); store.setPreviewDiv(2); store.addFiles(new File(['raw'], 'a.tif'));
   await vi.waitFor(() => expect(store.recs[0]?.progressivePreview).toBeTruthy());
-  expect(fetchDropSceneJpg).not.toHaveBeenCalled();
+  expect(fetchDropSceneJpg).toHaveBeenCalledOnce();
   expect(store.recs[0].src).toBeNull(); expect(store.recs[0].sceneId).toBe('source-1');
   finish(); await vi.waitFor(() => expect(store.imageLoad.active).toBe(false));
   expect(store.recs[0].progressivePreview).toBeUndefined(); expect(store.recs[0].src).toBeTruthy();

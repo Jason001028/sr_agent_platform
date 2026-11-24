@@ -41,10 +41,8 @@ export interface PreviewFrame {
   dnDomain?:{bits:number;sampleFormat:number};
 }
 
-// Conservative whole-JPEG admission. This does not change the selected div.
-// 与当前平台设置的真分辨率上限同口径：档位采样后的长边 ≤ 上限且总面积 ≤ 上限²
-// 才整幅接纳。上限调低时，原本能整幅读的档位会自动改走稀疏/分块路径，而不是
-// 先下载一张浏览器装不下的 JPG。
+// A nominal size check for speculative warming. Interactive server previews
+// use their delivered PreviewPlan (or the JPEG frame header on legacy routes).
 export function wholeJpegFits(W: number, H: number, div: number): boolean {
   if (![W, H, div].every(value => Number.isFinite(value) && value > 0)) return false;
   const maxEdge = getPreviewTrueMaxEdge();

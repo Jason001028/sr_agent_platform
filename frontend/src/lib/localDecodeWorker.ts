@@ -4,9 +4,11 @@ import type { StretchMode } from './tifDecode';
 import type { PreviewFrame } from './progressivePreview';
 import { getPreviewTrueMaxEdge } from './previewLevel';
 
+export type LocalSourceInfo = { bits: number; sampleFormat: number; bandCount?: number; noData?: number | string };
+
 export type LocalPixels = Omit<DecodedRec, 'thumb'> & {
   rgba: Uint8ClampedArray; paintedMode: StretchMode; layout: string;
-  dnDomain?:{bits:number;sampleFormat:number};
+  dnDomain?: LocalSourceInfo;
 };
 export type LocalDecoded = LocalPixels & { jpeg?: Blob; exportError?: string };
 

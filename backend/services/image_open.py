@@ -28,7 +28,8 @@ from backend.api import paths
 from backend.pathguard import ensure_preview_allowed, to_posix_array_path
 from backend.services import preview_cache, scene_resolve
 from backend.services.preview_jpg import (build_preview_pixels, scene_dims, source_revision,
-    cache_meta, versioned_preview_path, PREVIEW_RULE_VERSION)
+    cache_meta, preview_candidates, PREVIEW_RULE_VERSION, PREVIEW_JPG_QUALITY,
+    preview_pixel_key, preview_plan, preview_source)
 from backend.services.source_match import verify_source
 
 CHUNK = 4 * 1024 * 1024
@@ -137,7 +138,7 @@ class ImageOpen:
         path = Path(path)
         if path.suffix.lower() not in SUFFIXES:
             raise HTTPException(415, '支持 TIFF、JPG、JPEG、PNG')
-        dims = scene_dims(path)
+        dims = scene_dims(path, prefer_tiff=True)
         if not dims:
             # scene_dims intentionally only accepts TIFF in some deployments.
             try:
@@ -156,6 +157,7 @@ class ImageOpen:
         ident = ident or hashlib.sha256((str(path.resolve())+'|'+str(rev)).encode()).hexdigest()
         meta = dict(id=ident, name=name or path.name, path=str(path.resolve()), uploaded=uploaded,
                     W=dims['W'], H=dims['H'], sourceRev=rev, size=size,
+                    source=preview_source(path, dims['W'], dims['H'], rev, uploaded=uploaded),
                     fingerprint=dict(name=name or path.name,size=size,samples=samples), expires=time.time()+self.ttl)
         self.save(ident, meta)
         return self.public(meta)
@@ -335,7 +337,7 @@ class ImageOpen:
     def _preview(self, ident, div, ready_only):
         started=time.monotonic();sample_ms=0
         from backend.services.preview_jpg import (
-            PREVIEW_DIVISORS, configured_preview_max_edge, preview_target_edge)
+            PREVIEW_DIVISORS, configured_preview_max_edge)
         if div not in PREVIEW_DIVISORS:
             raise HTTPException(400, '预览档位无效')
         meta = self.metadata(ident)
@@ -347,31 +349,45 @@ class ImageOpen:
         rev = source_revision(source)
         if rev != meta['sourceRev']:
             raise HTTPException(409, '源文件已变化，请重新选择')
-        edge = preview_target_edge(meta['W'], meta['H'], div,
-                                   configured_preview_max_edge())
-        jpg = self.directory(ident) / f'preview-v1-{PREVIEW_RULE_VERSION}-{edge}.jpg'
-        cache_kind='hit' if jpg.is_file() else 'miss'
+        cap = configured_preview_max_edge()
+        plan = preview_plan(meta['W'], meta['H'], div, cap)
+        expected = plan['width'], plan['height']
+        edge = max(expected)
+        is_tiff = source.suffix.lower() in ('.tif', '.tiff')
+        pixel_key = preview_pixel_key(rev, expected, is_tiff=is_tiff)
+        key = hashlib.sha256(pixel_key.encode()).hexdigest()[:24]
+        jpg = self.directory(ident) / f'preview-{key}.jpg'
         if jpg.is_symlink():
             raise HTTPException(403, '预览缓存不能是符号链接')
+        if is_tiff and not jpg.is_file():
+            legacy = jpg.with_name(f'preview-v1-{PREVIEW_RULE_VERSION}-{edge}.jpg')
+            if not legacy.is_symlink() and legacy.is_file():
+                try:
+                    with Image.open(legacy) as cached:
+                        if cached.size == expected:
+                            jpg = legacy
+                except (OSError, ValueError):
+                    pass
+        cache_kind='hit' if jpg.is_file() else 'miss'
         if not jpg.is_file() and not meta['uploaded']:
             # Reuse already-baked production previews by immutable byte snapshot;
             # never re-read TIFF just to move the same JPG into an expiring cache.
             candidates=[]
             try:
                 base=paths.preview_jpg_for(source,paths.scenes_root())
-                candidates.extend((versioned_preview_path(base,rev,div),base))
+                candidates.extend(preview_candidates(base, rev, div, expected, cap=cap))
                 drop=paths.drop_preview_path(source)
-                candidates.extend((versioned_preview_path(drop,rev,div),drop))
+                candidates.extend(preview_candidates(drop, rev, div, expected, cap=cap))
             except Exception:
                 pass
-            scale=min(1,edge/max(meta['W'],meta['H']))
-            expected=(max(1,round(meta['W']*scale)),max(1,round(meta['H']*scale)))
             for candidate in dict.fromkeys(candidates):
-                state=cache_meta(candidate,source_rev=rev)
-                if not state or (state['w'],state['h'])!=expected:continue
-                data=candidate.read_bytes()
-                checked=cache_meta(io.BytesIO(data),source_rev=rev)
-                if checked and (checked['w'],checked['h'])==expected and source_revision(source)==rev:
+                if not cache_meta(candidate, source_rev=rev, size=expected):
+                    continue
+                try:
+                    data = candidate.read_bytes()
+                except OSError:
+                    continue  # The scene cache can be cleared concurrently.
+                if cache_meta(io.BytesIO(data), source_rev=rev, size=expected) and source_revision(source)==rev:
                     temp=jpg.with_name(jpg.name+'.'+secrets.token_hex(8)+'.tmp')
                     temp.write_bytes(data);temp.replace(jpg);cache_kind='production-reuse';break
         if ready_only and not jpg.is_file():
@@ -380,28 +396,36 @@ class ImageOpen:
             return None
         if not jpg.is_file():
             sampling=time.monotonic()
-            if source.suffix.lower() in ('.tif','.tiff'):
+            if is_tiff:
                 pixels = build_preview_pixels(source, max_edge=edge)
                 image = Image.fromarray(pixels)
             else:
                 with Image.open(source) as original:
-                    original.draft('RGB',(edge,edge)); original.thumbnail((edge,edge))
-                    image = original.convert('RGB')
+                    original.draft('RGB', expected)
+                    resized = original if original.size == expected else original.resize(
+                        expected, Image.BICUBIC, reducing_gap=2.0)
+                    image = resized.convert('RGB')
             sample_ms=(time.monotonic()-sampling)*1000;cache_kind='generated'
-            buf = io.BytesIO(); image.save(buf,format='JPEG',quality=85)
+            buf = io.BytesIO(); image.save(buf,format='JPEG',quality=PREVIEW_JPG_QUALITY)
             if source_revision(source) != rev:
                 raise HTTPException(409, '源文件在预览生成期间变化')
-            temporary = jpg.with_suffix('.tmp'); temporary.write_bytes(buf.getvalue()); temporary.replace(jpg)
+            temporary = jpg.with_suffix('.'+secrets.token_hex(8)+'.tmp'); temporary.write_bytes(buf.getvalue()); temporary.replace(jpg)
         data = jpg.read_bytes()
         if source_revision(source) != rev:
             raise HTTPException(409, '源文件已变化，请重新选择')
         with Image.open(io.BytesIO(data)) as result:
+            source_meta = meta.get('source') or preview_source(source, meta['W'], meta['H'], rev, uploaded=meta['uploaded'])
+            plan = preview_plan(meta['W'], meta['H'], div, cap, source=source_meta, delivered=result.size)
+            plan['cache'] = cache_kind
+            plan['artifactId'] = preview_pixel_key(rev, result.size, is_tiff=is_tiff)
             headers = {'X-SR-Image-W':str(meta['W']), 'X-SR-Image-H':str(meta['H']),
                        'X-SR-Preview-W':str(result.width), 'X-SR-Preview-H':str(result.height),
+                       'X-SR-Preview-Plan':json.dumps(plan, separators=(',', ':')),
                        'Cache-Control':'no-store'}
         elapsed=(time.monotonic()-started)*1000
         logging.getLogger(__name__).log(logging.WARNING if elapsed>2000 else logging.INFO,
-            'image_preview cache=%s elapsed_ms=%.0f sample_ms=%.0f edge=%d div=%d bytes=%d',cache_kind,elapsed,sample_ms,edge,div,len(data))
+            'image_preview cache=%s elapsed_ms=%.0f sample_ms=%.0f source=%dx%d target=%dx%d div=%d bytes=%d',
+            cache_kind,elapsed,sample_ms,meta['W'],meta['H'],plan['width'],plan['height'],div,len(data))
         return Response(data,media_type='image/jpeg',headers=headers)
 
     def purge(self, now=None):
