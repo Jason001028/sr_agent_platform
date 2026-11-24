@@ -30,7 +30,7 @@ export function createPreviewAsset(value: { path?: string; sceneId?: string; exp
 }
 
 export interface AssetTileInfo {
-  width: number; height: number; tileSize: number; maxLevel: number; bandCount: number;
+  width: number; height: number; tileSize: number; maxLevel: number; band_count: number;
   band: number; dtype: string; nodata: number | string | null; layout: 'strip' | 'tiled';
   compression: string; block_size: [number, number]; overviews: [number, number][];
   sourceVersion: string; rasterVersion: string; stretchVersion: string;

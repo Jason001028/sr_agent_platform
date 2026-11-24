@@ -5,6 +5,9 @@ import Toolbar from '/src/components/Toolbar.vue';import FileList from '/src/com
 import SettingsPanel from '/src/components/SettingsPanel.vue';
 import TifCanvas from '/src/components/TifCanvas.vue';import DecodeOverlay from '/src/components/DecodeOverlay.vue';
 import {useViewerStore} from '/src/stores/viewer.ts';import {sourceFingerprint} from '/src/lib/local_preview.ts';
+import {useScenesStore} from '/src/stores/scenes.ts';
+import {useAutoTourStore} from '/src/stores/autoTour.ts';
+import {createPreviewAsset} from '/src/lib/imageOpen.ts';
 import '/src/style.css';
 window.__SR_CFG__={apiBase:'http://127.0.0.1:8766',staticBase:''};
 const pinia=createPinia();setActivePinia(pinia);const store=useViewerStore();
@@ -14,7 +17,10 @@ window.fetch=(url,options={})=>{requests.push({url:String(url),method:options.me
 document.addEventListener('click',e=>{const a=e.target.closest?.('a[href^="sr-explorer://pick/"]');if(a){e.preventDefault();
   const value=a.getAttribute('href').split('/').at(-1).replace(/-/g,'+').replace(/_/g,'/');window.nativeCallback=atob(value);
 }},{capture:true});
-window.imageOpenTest={store,requests,pauseAt:'',pausedOnce:false,async nativeSelect(path='X:\\native-source.tif'){
+window.imageOpenTest={store,tour:useAutoTourStore(),requests,pauseAt:'',pausedOnce:false,
+  openScene: row => useScenesStore().open(row),
+  async openAsset(sceneId) { await store.openPreviewAsset(await createPreviewAsset({sceneId})); },
+  async nativeSelect(path='X:\\native-source.tif'){
   const blob=await(await fetch('http://127.0.0.1:8766/fixture/source.tif')).blob();
   const file=new File([blob],'native-source.tif');const fingerprint=await sourceFingerprint(file);
   const response=await fetch(window.nativeCallback,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({files:[{path,name:file.name,size:file.size,fingerprint}]})});

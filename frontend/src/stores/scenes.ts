@@ -16,6 +16,7 @@
 import { defineStore } from 'pinia';
 import { ref, computed, watch } from 'vue';
 import { useViewerStore } from './viewer.js';
+import { TILE_OVERVIEW_EDGE } from '../lib/tileSource';
 import type { ClearResponse, SceneRow, SceneQueryParams } from '../lib/scene.js';
 import { clearSummaryText, loadSrConfig, rowsAfterClear,
          scenesListUrl } from '../lib/scene.js';
@@ -355,8 +356,11 @@ export const useScenesStore = defineStore('scenes', () => {
       // /viewer 上，本页调了也看不见，所以这里走自己的 phase 文案行。
       // 档位取 viewer store 里的那份（工具栏拖动条写的就是它）—— 这样用户拖完
       // 滑块不必刷新页面就生效；loadPreviewDiv() 只负责冷启动时的初值。
-      const blob = await fetchSceneJpg(cfg, row, viewer.previewDiv,
-                                       (text) => { if (!quiet) phase.value = text; });
+      const progress = (text: string) => { if (!quiet) phase.value = text; };
+      const tiled = Math.max(row.W, row.H) > TILE_OVERVIEW_EDGE
+        ? await viewer.fetchTiledSceneOverview(row, viewer.previewDiv, progress, stillWanted) : null;
+      if (stillWanted && !stillWanted()) return '';
+      const blob = tiled?.blob ?? await fetchSceneJpg(cfg, row, viewer.previewDiv, progress);
       // The byte fetch may have taken long enough for the caller's reason to
       // open this image to expire.  Check before mutating the viewer.
       if (stillWanted && !stillWanted()) return '';
@@ -374,14 +378,14 @@ export const useScenesStore = defineStore('scenes', () => {
         serverMaskPath: resolved ? resolved.mask_path : null,
         previewOnly: resolved?.preview_only === true,
         srcRev: row.srcRev ?? null,
-      }, blob, undefined, origin, stillWanted);
+      }, blob, undefined, origin, stillWanted, tiled);
       // 打开成功 = 这一景**确实还在盘上**的实证，而且这一趟之后盘上必有它当前档位的
       // 预览（fetchSceneJpg 的保证）。若当前列表里也有它，就地翻回来 —— 那一格的灰块
       // 「已自动清除」是按**推定**画的，别让列表继续印着一个刚落空的结论。
       // 手工入口（路径栏 / 按名打开）拿到的是另一份行对象，只能按场景目录对回去。
       const listed = rows.value.find((r) => r !== row && !!r.lq_path
         && r.lq_path === row.lq_path);
-      if (listed) {
+      if (listed && !tiled) {
         listed.hasPreview = true;
         listed.previewDiv = viewer.previewDiv;
         listed.purged = false;

@@ -18,6 +18,7 @@ import { browserKit } from '../../lib/browserKit';
 import { sourceFingerprint } from '../../lib/local_preview';
 import { useViewerStore } from '../viewer';
 import { jpegPlans } from '../../lib/previewPlan';
+import type { TileSource } from '../../lib/tileSource';
 const asset=():PreviewAsset=>({id:'a'.repeat(64),name:'a.tif',W:64,H:32,size:3,uploaded:true,serverPath:null,sourceRev:'rev',fingerprint:{name:'a.tif',size:3,samples:['','','']}});
 beforeEach(()=>{
   vi.clearAllMocks();localStorage.clear();setActivePinia(createPinia());
@@ -44,6 +45,29 @@ it('native picker assets support cache-based tier changes without a scene identi
   await vi.waitFor(()=>expect(rec.detailDiv).toBe(div));
   expect(fetchPreviewAsset).toHaveBeenLastCalledWith(expect.anything(),div,expect.any(AbortSignal));
   expect(uploadPreviewFile).not.toHaveBeenCalled();expect(decodeLocalFile).not.toHaveBeenCalled();
+});
+it('reopening a Tile scene replaces the source revision without replacing its card or view', async () => {
+  const store = useViewerStore();
+  store.setCanvasSize(800, 600);
+  const open = async (version: string) => {
+    const next = { ...asset(), id: version.repeat(64), sourceRev: version };
+    const source = { asset: next, key: version, info: {
+      width: next.W, height: next.H, sourceVersion: version, rasterVersion: version,
+      band: 1, band_count: 1, tileSize: 512, maxLevel: 6,
+    } } as TileSource;
+    const blob = new Blob(['jpeg']);
+    await store.openSceneJpg({ sceneId: 'scene', name: next.name, lqPath: '/scene', W: next.W, H: next.H,
+      srcRev: version }, blob, undefined, 'user', undefined, { source, blob, div: store.previewDiv });
+  };
+  await open('a');
+  store.onPan(12, 18);
+  const rec = store.activeRec, view = { ...store.view };
+  await open('b');
+  expect(store.recs).toHaveLength(1);
+  expect(store.activeRec).toBe(rec);
+  expect(rec?.tileSource?.key).toBe('b');
+  expect(rec?.srcRev).toBe('b');
+  expect(store.view).toEqual(view);
 });
 it('reuses decoded pixels for collapsed tiers and keeps masks in source coordinates across other tiers', async () => {
   const original = { ...asset(), W: 64, H: 32 };

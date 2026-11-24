@@ -78,7 +78,9 @@ import type { SceneOpenMeta, SceneRow } from '../lib/scene.js';
 import { sourceFingerprint, localPreviewBudget } from '../lib/local_preview.js';
 import { LoadControl, isLoadAbort } from '../lib/loadControl';
 import { decodeLocalFile } from '../lib/localDecodeWorker';
-import { createPreviewAsset, uploadPreviewFile, fetchPreviewAsset, ImageOpenError } from '../lib/imageOpen';
+import { createPreviewAsset, uploadPreviewFile, fetchAssetTile, fetchPreviewAsset, ImageOpenError } from '../lib/imageOpen';
+import { openTileSource, overviewDiv, TILE_OVERVIEW_EDGE } from '../lib/tileSource';
+import type { TileSource } from '../lib/tileSource';
 import type { PreviewAsset } from '../lib/imageOpen';
 import type { LocalPixels, LocalSourceInfo } from '../lib/localDecodeWorker';
 import { wholeJpegFits } from '../lib/progressivePreview';
@@ -108,6 +110,7 @@ export interface ViewerRec {
   progressiveDN?:PixelPlane;
   dnDomain?: LocalSourceInfo;
   previewAsset?: PreviewAsset;
+  tileSource?: TileSource | null;
   previewPlan?: PreviewPlan;
   resolvedSuffix?: string | null;
   /** Display only. Partial pixels must never become ROI or repair input. */
@@ -1044,6 +1047,17 @@ export const useViewerStore = defineStore('viewer', () => {
       { side: 'B', rect: r.b, view: viewB.value, rec: recForSide('B'), active: activeSide.value === 'B' },
     ];
   });
+
+  function hiddenFlickerPanes(): Pane[] {
+    if (compareMode.value !== 'flicker') return [];
+    const a = flickerRefRec.value, b = flickerAltRec.value;
+    if (!a?.thumb || !b?.thumb) return [];
+    const shown = panes.value[0];
+    if (flickerIndex.value === 1) return [{ ...shown, rec: a, view: flickerView.value }];
+    return [{ ...shown, rec: b, view: remapViewForImage(flickerView.value,
+      { w: a.thumb.width, h: a.thumb.height }, { w: b.thumb.width, h: b.thumb.height },
+      shown.rect.w, shown.rect.h) }];
+  }
 
   /* ---------------- 归位（placeRec）：新图进哪一格 ---------------- */
 
@@ -2157,9 +2171,10 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   /** 打开活动侧场景里的某一类图（input / product / nosr），落在活动侧。 */
-  function effectivePreviewDiv(rec:Pick<ViewerRec,'W'|'H'|'stageKind'|'sceneDir'|'previewPanSize'>,selected=previewDiv.value) {
+  function effectivePreviewDiv(rec:Pick<ViewerRec,'W'|'H'|'stageKind'|'sceneDir'|'previewPanSize'|'tileSource'>,selected=previewDiv.value) {
     const pan=rec.sceneDir?recs.value.find(r=>r.sceneDir===rec.sceneDir&&r.stageKind==='input'&&r.W>0&&r.H>0):undefined;
-    return imagePreviewDiv(selected,rec.stageKind,rec,pan??rec.previewPanSize);
+    const div = imagePreviewDiv(selected,rec.stageKind,rec,pan??rec.previewPanSize);
+    return rec.tileSource ? overviewDiv(rec.W, rec.H, div) : div;
   }
   function siblingPanSize(res:SceneSiblings) {
     const pan=res.items.find(item=>item.kind==='input'&&item.exists&&item.W&&item.H);
@@ -2209,9 +2224,11 @@ export const useViewerStore = defineStore('viewer', () => {
       const row = siblingRow(res, item);
       const previewPanSize=siblingPanSize(res);
       const div=imagePreviewDiv(previewDiv.value,item.kind,{W:item.W,H:item.H},previewPanSize);
-      const blob = await fetchSceneJpg(loadSrConfig(), row, div, (text) => {
+      const phase = (text: string) => {
         showMask('正在加载同场景的图…', text, false);
-      });
+      };
+      const tiled = await fetchTiledSceneOverview(row, div, phase);
+      const blob = tiled?.blob ?? await fetchSceneJpg(loadSrConfig(), row, div, phase);
       hideMask(); busy.value = false;
       // 名字取 stem：与场景库那些行一个口径（列表里两个名字并排时不至于一个带后缀
       // 一个不带）。lqPath 用场景目录 —— 任务区靠它关联当前场景的队列行。
@@ -2226,7 +2243,7 @@ export const useViewerStore = defineStore('viewer', () => {
         stageKind: item.kind, stageSuffix: res.suffix,
         previewPanSize,
         srcRev: item.srcRev ?? null,
-      }, blob, split.value ? activeSide.value : undefined);
+      }, blob, split.value ? activeSide.value : undefined, 'user', undefined, tiled);
       if (res.suffixFrom !== 'query') {
         showToast('suffix 用的是'
           + (res.suffixFrom === 'task' ? '「最近跑过的任务」' : '「配置缺省」')
@@ -2556,21 +2573,68 @@ export const useViewerStore = defineStore('viewer', () => {
         :'服务端 JPG 已显示；未确认盘阵业务关联，仅预览。';
     }).finally(()=>{if(assetAssociations.get(rec.id)===job)assetAssociations.delete(rec.id);});
   }
+  async function coarseAssetOverview(source: TileSource, signal?: AbortSignal) {
+    const { asset, info } = source;
+    const level = Math.max(0, Math.ceil(Math.log2(Math.max(asset.W, asset.H) / info.tileSize)));
+    const { tile, blob } = await fetchAssetTile(asset, level, 0, 0, signal);
+    if (tile.rasterVersion !== info.rasterVersion || tile.sourceWidth !== asset.W
+      || tile.sourceHeight !== asset.H) throw new Error('概览源版本或尺寸已变化，请重新打开影像');
+    return { blob, width: tile.width, height: tile.height };
+  }
+
+  async function readAssetOverview(asset: PreviewAsset, source: TileSource | null, div: number,
+    signal?: AbortSignal, phase?: (text: string) => void) {
+    if (source && Math.max(asset.W, asset.H) / div > TILE_OVERVIEW_EDGE) {
+      return coarseAssetOverview(source, signal);
+    }
+    try {
+      return await (phase ? fetchPreviewAsset(asset, div, signal, phase) : fetchPreviewAsset(asset, div, signal));
+    } catch (error) {
+      if (signal?.aborted || !source || !(error instanceof ImageOpenError) || error.status !== 422) throw error;
+      // P0 guards its full-image decoder on large compressed TIFFs. A single
+      // coarse P1 tile can still cover the complete raster in this case.
+      return coarseAssetOverview(source, signal);
+    }
+  }
+
+  async function fetchTiledSceneOverview(row: Pick<SceneRow, 'id'|'W'|'H'|'srcRev'>, div: number,
+    phase?: (text: string) => void, stillWanted = () => true) {
+    if (Math.max(row.W ?? 0, row.H ?? 0) <= TILE_OVERVIEW_EDGE) return null;
+    try {
+      const asset = await createPreviewAsset({ sceneId: row.id });
+      if (!stillWanted() || asset.W !== row.W || asset.H !== row.H
+        || (row.srcRev && row.srcRev !== asset.sourceRev)) return null;
+      const source = await openTileSource(asset);
+      if (!source || !stillWanted()) return null;
+      const overview = overviewDiv(asset.W, asset.H, div);
+      const result = await readAssetOverview(asset, source, overview, undefined, phase);
+      return { source, blob: result.blob, div: overview };
+    } catch {
+      return null; // Legacy scene preview remains available on older deployments.
+    }
+  }
+
   async function loadPreviewAsset(rec:ViewerRec,asset:PreviewAsset,control:LoadControl) {
     await control.checkpoint('获取服务端缓存 JPG');
-    const div=effectivePreviewDiv(rec);
-    const result=await control.request(signal=>fetchPreviewAsset(asset,div,signal),'服务端下采样 JPG（缓存）');
+    const selected = previewDiv.value;
+    const source = rec.tileSource?.asset.id === asset.id ? rec.tileSource
+      : await control.request(signal => openTileSource(asset, signal), '检查影像窗口');
+    const requested = effectivePreviewDiv(rec);
+    const div = source ? overviewDiv(asset.W, asset.H, requested) : requested;
+    const result=await control.request(signal=>readAssetOverview(asset,source,div,signal),'服务端下采样 JPG（缓存）');
     await control.checkpoint('装载服务端 JPG');
-    if(!recs.value.includes(rec)||effectivePreviewDiv(rec)!==div)return;
+    if(!recs.value.includes(rec)||previewDiv.value!==selected)return;
     const note=previewResolutionNote(asset.W,asset.H,result.width,result.height,jpegPlans.get(result.blob)?.limits);
-    const layout=`服务端缓存 JPG 概览 · 请求 ${previewDivLabel(div)}${note?' · '+note:''} · 缓存定期清理`;
+    const format = result.blob.type === 'image/png' ? '服务端 PNG' : '服务端缓存 JPG';
+    const layout=`${format} 概览 · 请求 ${previewDivLabel(div)}${note?' · '+note:''} · 缓存定期清理`;
     const applied=await applySceneJpgToRec(rec,{
       name:rec.name,W:asset.W,H:asset.H,sceneId:rec.sceneId!,lqPath:rec.lqPath,
       sceneDir:rec.sceneDir,serverMaskPath:rec.serverMaskPath,stageKind:rec.stageKind,
       stageSuffix:rec.card?.meta.stageSuffix??rec.resolvedSuffix,previewOnly:rec.card?!!rec.card.meta.previewOnly:rec.serverSourceVerified?rec.previewOnly:true,srcRev:asset.sourceRev,previewPanSize:rec.previewPanSize,
-    },result.blob,layout,true,()=>!control.signal.aborted);
+    },result.blob,layout,true,()=>!control.signal.aborted,control,source);
     if(!applied)return;
     rec.previewAsset=markRaw(asset);rec.detailDiv=div;
+    renderTick.value++;
     rec.localPreviewJpeg=markRaw(result.blob);
     rec.status=rec.discoveredTiff ? '已打开' : layout;rec.statusCls='ok';
     if (!rec.discoveredTiff) {
@@ -2584,7 +2648,16 @@ export const useViewerStore = defineStore('viewer', () => {
 
   async function openPreviewAsset(asset:PreviewAsset):Promise<void> {
     const existing=recs.value.find(rec=>rec.previewAsset?.id===asset.id);
-    if(existing){await activate(existing.id);return;}
+    if(existing){
+      await activate(existing.id);
+      const source = await openTileSource(asset);
+      if (source && recs.value.includes(existing) && existing.previewAsset?.id === asset.id
+        && existing.tileSource?.key !== source.key) {
+        existing.tileSource = markRaw(source);
+        renderTick.value++;
+      }
+      return;
+    }
     const rec:ViewerRec={id:nextId++,file:markRaw(new File([],asset.name)),name:asset.name,size:asset.size,
       W:asset.W,H:asset.H,probe:null,thumb:null,src:null,srcw:0,srch:0,nbands:0,invert:false,stats:null,
       route:null,sceneId:null,lqPath:null,layout:'',status:'等待服务端 JPG…',statusCls:'',paintedMode:null,maskRois:null,token:0,previewAsset:markRaw(asset)};
@@ -2769,7 +2842,8 @@ export const useViewerStore = defineStore('viewer', () => {
    *  `rec.file`/`name`/`size` 归调用方管：拖拽升级那条路要**保持**用户拖进来的
    *  那个文件名与字节数（FileList 展示与 addFiles 查重都靠它），只换像素与身份。 */
   async function applySceneJpgToRec(rec: ViewerRec, meta: SceneOpenMeta,
-                                    blob: Blob, layout?: string, preserveView = false, stillWanted:()=>boolean=()=>true, ownedControl?:LoadControl): Promise<boolean> {
+                                    blob: Blob, layout?: string, preserveView = false, stillWanted:()=>boolean=()=>true,
+                                    ownedControl?:LoadControl, tiles?: TileSource | null): Promise<boolean> {
     const control = ownedControl??loadControlFor(rec);
     await control?.checkpoint('解码服务端 JPG');
     const my = ++rec.token;                     // 领号：JPG 要接管像素了
@@ -2804,12 +2878,16 @@ export const useViewerStore = defineStore('viewer', () => {
       width: rec.W, height: rec.H, identity: meta.sceneId ?? rec.name,
       version: meta.srcRev ?? null, serverWindowRead: false, localFile: blob === rec.file,
     };
-    recordPreview(rec, source, effectivePreviewDiv(rec), tw, th, 'whole-jpeg', decodeMs, plan);
+    const coarseTile = !!tiles && blob.type === 'image/png';
+    recordPreview(rec, source, effectivePreviewDiv(rec), tw, th, coarseTile ? 'tiles' : 'whole-jpeg', decodeMs, plan);
     rec.sceneId = meta.sceneId ?? null;
     rec.lqPath = meta.lqPath ?? null;
     rec.sceneDir = meta.sceneDir ?? null;
     rec.previewOnly = meta.previewOnly === true;
     rec.srcRev = plan?.source.version ?? meta.srcRev ?? null;
+    if (tiles !== undefined) rec.tileSource = tiles ? markRaw(tiles) : null;
+    if (rec.tileSource && rec.tileSource.asset.sourceRev !== rec.srcRev) rec.tileSource = null;
+    if (rec.previewAsset && rec.previewAsset.sourceRev !== rec.srcRev) delete rec.previewAsset;
     validateDisplayDomain(rec);
     // 这一景是「用户当前打开着的」——记下来，供下一次拖没有场景身份的 jpg 时当
     // `anchor` 用（见 lastSceneDir）。中途产物那条路 lqPath 是空的，用 sceneDir。
@@ -2830,7 +2908,8 @@ export const useViewerStore = defineStore('viewer', () => {
     // 文案最多早一拍，下次打开即对齐）。
     const sizeNote = previewResolutionNote(rec.W, rec.H, tw, th, plan ? rec.previewPlan?.limits : undefined);
     rec.layout = layout
-      ?? `盘阵 JPG（请求 ${previewDivLabel(rec.detailDiv)} + 直方图均衡，服务端已生成）${sizeNote ? ' · ' + sizeNote : ''}`;
+      ?? (coarseTile ? `服务端 PNG 概览 · ${tw}×${th}`
+        : `盘阵 JPG（请求 ${previewDivLabel(rec.detailDiv)} + 直方图均衡，服务端已生成）${sizeNote ? ' · ' + sizeNote : ''}`);
     // 同上：名字与尺寸卡片上已有（标题行、图属性行、布局行），状态只表态
     rec.status = '场景就绪';
     rec.statusCls = 'ok';
@@ -2840,7 +2919,9 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.serverMaskPath = meta.serverMaskPath ?? null;
     // 像素刚换过 → 一律重画（沿用已选模式，不重置用户的选择）
     if (!reuse) {
-      paintStretch(rec, rec.paintedMode ?? startStretch(rec.route, stretchMode.value));
+      const mode = rec.paintedMode ?? startStretch(rec.route, stretchMode.value);
+      if (rec.tileSource && mode === 'equal' && !rec.displayStretch) rec.paintedMode = mode;
+      else paintStretch(rec, mode);
       afterPixels(rec, previousSize);
     }
     return true;
@@ -3006,7 +3087,8 @@ export const useViewerStore = defineStore('viewer', () => {
     const control = loadControlFor(rec);
     const card = rec.card;
     if (!card) return Promise.resolve();
-    const div = effectivePreviewDiv(rec);
+    let div = effectivePreviewDiv(rec);
+    const selected = previewDiv.value;
     const key = rec.id + '|' + div + '|' + (card.row.srcRev ?? '');
     const flying = cardFetchInflight.get(key);
     if (flying && (flying.token === rec.token || flying.token === rec.token+1) && !flying.control?.signal.aborted) return flying.promise;
@@ -3037,19 +3119,24 @@ export const useViewerStore = defineStore('viewer', () => {
         if(resolvedAsset) {
           const asset=resolvedAsset;
           if((!rec.discoveredTiff&&(asset.W!==rec.W||asset.H!==rec.H))||(card.row.srcRev&&asset.sourceRev!==card.row.srcRev))throw new Error('候选影像源版本或尺寸已变化，请刷新候选');
-          const result=await owner.request(signal=>fetchPreviewAsset(asset,div,signal,phase),'服务端下采样 JPG（缓存）');
-          if(!stillWanted()||rec.token!==intent.token||!recs.value.includes(rec)||effectivePreviewDiv(rec)!==div)return;
+          const source = rec.tileSource?.asset.id === asset.id ? rec.tileSource
+            : await owner.request(signal => openTileSource(asset, signal), '检查影像窗口');
+          if (source) div = overviewDiv(asset.W, asset.H, div);
+          const result=await owner.request(signal=>readAssetOverview(asset,source,div,signal,phase),'服务端下采样 JPG（缓存）');
+          if(!stillWanted()||rec.token!==intent.token||!recs.value.includes(rec)||previewDiv.value!==selected)return;
           phase('正在解码并装载 JPG…');intent.token++;
           const note=previewResolutionNote(asset.W,asset.H,result.width,result.height,jpegPlans.get(result.blob)?.limits);
-          const layout=`服务端缓存 JPG 概览 · 请求 ${previewDivLabel(div)}${note?' · '+note:''} · 缓存定期清理`;
+          const format = result.blob.type === 'image/png' ? '服务端 PNG' : '服务端缓存 JPG';
+          const layout=`${format} 概览 · 请求 ${previewDivLabel(div)}${note?' · '+note:''} · 缓存定期清理`;
           const meta = { ...card.meta, W: asset.W, H: asset.H, srcRev: asset.sourceRev };
           if (rec.discoveredTiff) {
             meta.lqPath = null;
             meta.serverMaskPath = null;
             meta.previewOnly = true;
           }
-          const applied = await applySceneJpgToRec(rec, meta, result.blob, layout, true, stillWanted, owner);
-          if(applied){rec.previewAsset=markRaw(asset);rec.localPreviewJpeg=markRaw(result.blob);rec.detailDiv=div;
+          const applied = await applySceneJpgToRec(rec, meta, result.blob, layout, true, stillWanted, owner, source);
+          if(applied){rec.previewAsset=markRaw(asset);
+            rec.localPreviewJpeg=markRaw(result.blob);rec.detailDiv=div;renderTick.value++;
             if (rec.discoveredTiff) {
               rec.status = '已打开';
               delete rec.linkNote;
@@ -3064,7 +3151,7 @@ export const useViewerStore = defineStore('viewer', () => {
         const applied = await applySceneJpgToRec(rec, card.meta, blob, undefined, true, stillWanted);
         if (applied) rec.detailDiv = div;
       } catch (e) {
-        if (rec.token === intent.token && recs.value.includes(rec) && effectivePreviewDiv(rec) === div) throw e;
+        if (rec.token === intent.token && recs.value.includes(rec) && previewDiv.value === selected) throw e;
       }
     })().finally(() => {
       if (cardFetchInflight.get(key) === intent) cardFetchInflight.delete(key);
@@ -3114,14 +3201,28 @@ export const useViewerStore = defineStore('viewer', () => {
   async function openSceneJpg(meta: SceneOpenMeta, blob: Blob,
                               side?: 'A' | 'B',
                               origin: 'user' | 'follow' = 'user',
-                              stillWanted?: () => boolean) {
+                              stillWanted?: () => boolean,
+                              tiled?: Awaited<ReturnType<typeof fetchTiledSceneOverview>>) {
     if (stillWanted && !stillWanted()) return;
     if (origin === 'user') noteUserIntent();
-    const dup = findRecByMeta(meta);
+    const matching = findRecByMeta(meta);
+    const dup = tiled && matching?.sceneId !== meta.sceneId ? undefined : matching;
     if (dup) {
       // 已经在列表里的场景：只需重新上屏。**仍要过一遍预热** —— 重复打开往往正是
       // 换过预览档位之后（画布换了），那份旧画布的缩放缓存不作数。
       if (stillWanted && !stillWanted()) return;
+      if (tiled) {
+        const srcRev = tiled.source.asset.sourceRev;
+        if (dup.srcRev !== srcRev) {
+          const applied = await applySceneJpgToRec(dup, { ...meta, srcRev }, blob, undefined,
+            true, stillWanted, undefined, tiled.source);
+          if (!applied) return;
+          dup.detailDiv = tiled.div;
+        }
+        dup.previewAsset = markRaw(tiled.source.asset);
+        dup.tileSource = markRaw(tiled.source);
+        renderTick.value++;
+      }
       await activate(dup.id, side, origin);
       await warmZoom(dup);
       return;
@@ -3140,14 +3241,19 @@ export const useViewerStore = defineStore('viewer', () => {
     };
     recs.value.push(rec);
     try {
-      await applySceneJpgToRec(rec, meta, blob);
+      const applied = await applySceneJpgToRec(rec, tiled ? { ...meta, srcRev: tiled.source.asset.sourceRev } : meta,
+        blob, undefined, false, stillWanted, undefined, tiled?.source);
       // 解码期间用户可能已经放弃这次跟随：把刚入列的空壳撤掉，不激活、不抢视图。
-      if (stillWanted && !stillWanted()) {
+      if (!applied || (stillWanted && !stillWanted())) {
         const i = recs.value.indexOf(rec);
         if (i >= 0) recs.value.splice(i, 1);
         hideMask();
         busy.value = false;
         return;
+      }
+      if (tiled) {
+        rec.previewAsset = markRaw(tiled.source.asset);
+        rec.detailDiv = tiled.div;
       }
       await activate(rec.id, side, origin);
       await warmZoom(rec);                 // 遮罩仍盖着：把首次缩放的代价在这里付掉
@@ -3477,8 +3583,10 @@ export const useViewerStore = defineStore('viewer', () => {
     const bandRows = Math.max(1, Math.min(512, Math.floor((16 * 1024 * 1024) / (w * 4))));
     for (let y = 0; y < h; y += bandRows) {
       const rows = Math.min(bandRows, h - y);
+      const baked = !!rec.tileSource && mode === 'equal';
       const rgba = stretchRgba(rec.src.subarray(y * w * nb, (y + rows) * w * nb),
-        w, rows, nb, rec.stats, mode, rec.invert);
+        w, rows, nb, rec.stats, baked ? 'linear' : mode, rec.invert, undefined,
+        baked ? { low: 0, high: 255 } : undefined);
       ctx.putImageData(new ImageData(rgba as Uint8ClampedArray<ArrayBuffer>, w, rows), 0, y);
     }
     rec.paintedMode = mode;
@@ -3788,7 +3896,7 @@ export const useViewerStore = defineStore('viewer', () => {
    *  用户看到的仍是适配好的那一帧，中间那几帧全在遮罩底下。遮罩本来不在（例如从
    *  位置文件升级盘阵场景那条路）就自己盖一个、热完再收，不改变调用方的编排。 */
   async function warmZoom(rec: ViewerRec | null): Promise<void> {
-    if (!rec) return;
+    if (!rec || rec.tileSource) return;
     // 入列之后一律用 recs 里那份**代理**：调用方可能递来入列前的原始对象
     // （openSceneJpg 那条正是如此），拿它去比 `p.rec === rec` 永远不等，
     // 预热会被静默跳过 —— 而「静默跳过」在这里等于「功能没上」。
@@ -3865,6 +3973,15 @@ export const useViewerStore = defineStore('viewer', () => {
     // 而 test-vue-viewer.js 的 D/E 段在采样画布中心像素。
     view.value = wheelZoom(view.value, mx, my, factor);
     renderTick.value++;
+  }
+
+  function zoomNative() {
+    const pane = panes.value.find(p => p.active);
+    const rec = pane?.rec;
+    if (!pane || !rec?.tileSource || !rec.thumb) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const scale = Math.max(rec.W / rec.thumb.width, rec.H / rec.thumb.height) / dpr;
+    onWheel(pane.rect.x + pane.rect.w / 2, pane.rect.y + pane.rect.h / 2, scale / pane.view.scale);
   }
 
   function onPan(dx: number, dy: number) {
@@ -5134,7 +5251,7 @@ export const useViewerStore = defineStore('viewer', () => {
     imageLoad, pauseImageLoad, resumeImageLoad, stopImageLoad, downloadLocalPreview,
     sidebarCollapsed, busy, srBusy,
     // 文件 / 解码
-    addFiles, removeRec, activate, openSceneJpg, openLocalImage, openPreviewAsset, displayImageRefresh,
+    addFiles, removeRec, activate, openSceneJpg, fetchTiledSceneOverview, openLocalImage, openPreviewAsset, displayImageRefresh,
     // 左侧列表工具条：收藏（置顶）/ 多选 / 批量清理 / 撤回
     recsOrdered, favCount, selectMode, selectedIds, isSelected,
     toggleSelectMode, toggleSelected, clearSelection,
@@ -5150,7 +5267,7 @@ export const useViewerStore = defineStore('viewer', () => {
     // 一键解析：先排满占位卡，再原地补齐 / 标红 / 收尾
     insertPendingCards, fillPendingCard, setPendingStatus, failPendingCard, finishPendingCards,
     // 拉伸 / 视图
-    setStretch, setPreviewDiv, setCanvasSize, fit, onWheel, onPan, locatePixel, focusSourceBounds,
+    setStretch, setPreviewDiv, setCanvasSize, fit, zoomNative, onWheel, onPan, locatePixel, focusSourceBounds,
     focusPaneRect, addMaskPolygon, addMaskPolygonBatch, redoRoi, canRedoMask,
     // 掩码
     enterDraw, exitDraw, setDrawTool, commitRect, closePolygon, polygonCanCloseAt, undoRoi, clearRois,
@@ -5161,7 +5278,7 @@ export const useViewerStore = defineStore('viewer', () => {
     // 图像对比（关闭 / 点选对比 / 分屏对比）
     compareMode, compareOn, split, setCompareMode, withSilentIntent,
     cmpStripOpen, setCmpStripOpen,
-    panes, splitX, splitRatio, setSplitRatio, resetSplit, splitLinked, splitSynchronized, splitPrecisionReason, openPreviewPair,
+    panes, hiddenFlickerPanes, splitX, splitRatio, setSplitRatio, resetSplit, splitLinked, splitSynchronized, splitPrecisionReason, openPreviewPair,
     activeSide, setActiveSide, paneA, paneB, recForSide, rectForSide, activePaneRect,
     setPaneView, stopViewAnim,
     captureForChat,

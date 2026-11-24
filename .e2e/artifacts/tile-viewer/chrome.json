@@ -1,0 +1,38 @@
+{
+  "browser": "Chrome/158.0.8127.36",
+  "dpr": 1,
+  "overviewMs": 873.2,
+  "firstTileMs": 876.1,
+  "firstNativeMs": 46.6,
+  "nativeReadyMs": 270.9,
+  "adversarialReadyMs": 1075.7,
+  "tileRequestP95Ms": 21.3,
+  "peakTileBytes": 74889928,
+  "bytesDual": 70179528,
+  "overviewDual": 43519488,
+  "bytesAfterRemoval": 68857028,
+  "releasedOnRemoval": 11,
+  "removedVersionReleased": true,
+  "aborted": 63,
+  "blendedDraws": 692,
+  "failedDecodeInjected": true,
+  "rasterVersions": 2,
+  "anchorDriftSourcePixels": 1.0913936421275139e-11,
+  "blankCenterFrames": 0,
+  "seam": {
+    "rendered": [
+      11,
+      12
+    ],
+    "directTiles": [
+      11,
+      12
+    ]
+  },
+  "alignedFlickerDrift": 0.0001617076326002609,
+  "comparisonTourMoved": true,
+  "roiUndoRedo": true,
+  "frameP95Ms": 6.300000000000182,
+  "slowFramesOver25ms": 0,
+  "measuredFrames": 51
+}

@@ -24,7 +24,9 @@ import { drawDiffSource } from '../lib/diffRender';
 import { useDiffStore } from '../stores/diff';
 import type { Pane } from '../stores/viewer';
 import { useQcListStore } from '../stores/qclist';
-import { mouseToThumb, thumbToScreen, thumbToDisplaySource, clampSourcePixel, paneAtX } from '../lib/viewMath';
+import { easeOutCubic, mouseToThumb, thumbToScreen, thumbToDisplaySource, clampSourcePixel, paneAtX } from '../lib/viewMath';
+import { TileRenderer } from '../lib/tileRenderer';
+import type { TilePane } from '../lib/tileScheduler';
 import { dropSideAt } from '../lib/compare';
 import type { Pt } from '../lib/maskgen';
 
@@ -41,6 +43,19 @@ let completionTimer: ReturnType<typeof setTimeout> | null = null;
 let panButton: number | null = null;
 let suppressDoubleClick = false;
 let pointerEvent: MouseEvent | null = null;
+let frame = 0;
+let presentationPending = true;
+let dpr = 1;
+const tileRenderer = new TileRenderer(() => scheduleRender());
+const overviewStarts = new WeakMap<object, number>();
+const lastReady = new Map<Pane['side'], Pane>();
+const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+const tileDebug = new URLSearchParams(location.search).has('tileDebug');
+
+function scheduleRender(present = false) {
+  presentationPending ||= present;
+  if (!frame) frame = requestAnimationFrame(render);
+}
 const closeHint = computed(() => {
   if (dragging.value || !store.drawMode || store.drawTool !== 'polygon' || !store.hoverPt || !store.polygonCanCloseAt(store.hoverPt)) return null;
   const p = thumbToScreen(store.view, store.pendingPts![0][0], store.pendingPts![0][1]);
@@ -122,7 +137,7 @@ function pinCanvasSize() {
   const vc = viewCanvasRef.value;
   const dc = drawCanvasRef.value;
   if (!vc || !dc || canvasPinned) return;
-  const w = vc.width, h = vc.height;
+  const w = dc.width, h = dc.height;
   if (!w || !h) return;
   canvasPinned = true;
   vc.style.width = w + 'px';
@@ -167,12 +182,13 @@ function applyResize() {
   const dc = drawCanvasRef.value;
   if (!stage || !vc || !dc) return;
   const w = stage.clientWidth, h = stage.clientHeight;
-  if (vc.width === w && vc.height === h) return;
-  // The backing store is intentionally 1 device pixel per CSS pixel here.
-  // ViewState and pane/pointer calculations stay in CSS pixels.
-  vc.width = w; vc.height = h;
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const pw = Math.round(w * dpr), ph = Math.round(h * dpr);
+  if (vc.width === pw && vc.height === ph && dc.width === w && dc.height === h) return;
+  vc.width = pw; vc.height = ph;
   dc.width = w; dc.height = h;
   store.setCanvasSize(w, h);
+  scheduleRender(true);
 }
 
 function scheduleResize() {
@@ -215,14 +231,40 @@ function clipToActivePane(ctx: CanvasRenderingContext2D, ps: Pane[]): boolean {
   return true;
 }
 
-function render() {
+function tilePane(p: Pane): TilePane | null {
+  const r = p.rec;
+  if (!r?.tileSource || !r.thumb || r.stretchPreview || r.displayStretch
+    || (r.paintedMode && r.paintedMode !== 'equal')) return null;
+  if (diff.display === 'heat' && diff.layerFor(r)) return null;
+  return { source: r.tileSource, rect: p.rect, view: p.view, tw: r.thumb.width, th: r.thumb.height };
+}
+
+function render(now: number) {
+  frame = 0;
   const vc = viewCanvasRef.value;
   const dc = drawCanvasRef.value;
   if (!vc || !dc) return;
   const ctx = vc.getContext('2d')!;
+  ctx.resetTransform();
   ctx.clearRect(0, 0, vc.width, vc.height);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const ps = store.panes;
-  for (const p of ps) {
+  const tilePanes = new Map<string, TilePane>();
+  const paneKey = (p: Pane) => `${p.side}:${p.rec?.id}`;
+  for (const p of [...ps, ...store.hiddenFlickerPanes()]) {
+    const tiled = tilePane(p);
+    if (tiled) tilePanes.set(paneKey(p), tiled);
+  }
+  const immediate = !!reducedMotion?.matches || store.compareMode === 'flicker';
+  tileRenderer.update(tilePanes, store.recs.flatMap(rec => rec.tileSource ? [rec.tileSource] : []),
+    now, dpr, immediate);
+  let animate = false;
+  for (const current of ps) {
+    const previous = lastReady.get(current.side);
+    const ready = current.rec?.thumb || current.rec?.progressivePreview;
+    if (ready) lastReady.set(current.side, current);
+    else if (!current.rec) lastReady.delete(current.side);
+    const p = current.rec && !ready && previous ? { ...previous, rect: current.rect } : current;
     const rec = p.rec;
     const image = rec?.stretchPreview ?? rec?.progressivePreview ?? rec?.thumb;
     if (!rec || !image) continue;
@@ -236,15 +278,50 @@ function render() {
     const basis = rec.thumb ?? rec.progressivePreview ?? image;
     // 手势期间改画降采样副本：16384 档位的缩略画布上亿像素，整幅缩放的每帧
     // 采样都压在它上面；停手后 store 会补一帧全分辨率（见 noteViewGesture）。
-    const source = (rec.thumb && image === rec.thumb
+    const source = (rec.thumb && image === rec.thumb && !rec.tileSource
       ? store.gestureSourceFor(rec) ?? image : image) as unknown as CanvasImageSource;
-    if (rec.progressivePreview) ctx.drawImage(source, 0, 0, basis.width, basis.height);
-    else drawDiffSource(ctx, source,
-      basis.width, basis.height, diff.layerFor(rec), diff.display, diff.opacity, diff.feather);
+    const tiled = tilePanes.has(paneKey(p));
+    const layer = diff.layerFor(rec);
+    if (tiled) {
+      const start = overviewStarts.get(rec) ?? (previous && previous.rec !== rec ? now - 160 : now);
+      overviewStarts.set(rec, start);
+      ctx.globalAlpha = immediate ? 1 : easeOutCubic((now - start) / 160);
+      animate ||= ctx.globalAlpha < 1;
+      const x = Math.max(0, -p.view.ox / p.view.scale);
+      const y = Math.max(0, -p.view.oy / p.view.scale);
+      const w = Math.min(basis.width, (p.rect.w - p.view.ox) / p.view.scale) - x;
+      const h = Math.min(basis.height, (p.rect.h - p.view.oy) / p.view.scale) - y;
+      if (w > 0 && h > 0) ctx.drawImage(source, x, y, w, h, x, y, w, h);
+    } else if (rec.progressivePreview) ctx.drawImage(source, 0, 0, basis.width, basis.height);
+    else drawDiffSource(ctx, source, basis.width, basis.height, layer, diff.display, diff.opacity, diff.feather);
     ctx.restore();
+    if (tiled) {
+      animate = tileRenderer.draw(ctx, paneKey(p), now, dpr, immediate) || animate;
+      if (layer && diff.display !== 'regions') {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(p.rect.x, p.rect.y, p.rect.w, p.rect.h);
+        ctx.clip();
+        ctx.translate(p.rect.x + p.view.ox, p.rect.y + p.view.oy);
+        ctx.scale(p.view.scale, p.view.scale);
+        drawDiffSource(ctx, source, basis.width, basis.height, layer, diff.display, diff.opacity, diff.feather, false);
+        ctx.restore();
+      }
+    } else if (!overviewStarts.has(rec)) overviewStarts.set(rec, now - 160);
   }
-  tour.presented();
-  renderDraw();
+  if (tileDebug) {
+    vc.dataset.tiles = JSON.stringify(ps.map(p => tileRenderer.status(paneKey(p)) ?? null));
+    vc.dataset.tileBytes = String(tileRenderer.scheduler.bytes);
+    vc.dataset.tilePeakBytes = String(tileRenderer.scheduler.peakBytes);
+    vc.dataset.tileAnimating = String(animate);
+    vc.dataset.tileVersions = JSON.stringify([...new Set(
+      [...tileRenderer.scheduler.cache.values()].map(entry => entry.tile.rasterVersion),
+    )]);
+  }
+  if (presentationPending) {
+    presentationPending = false;
+    tour.presented();
+  }
   // 像素定位红叉（约 7 秒，随缩放/平移保持在目标像素上）
   const m = store.marker;
   if (m) {
@@ -263,6 +340,7 @@ function render() {
     ctx.fillRect(sx - 1.5, sy - 1.5, 3, 3);
     if (clipped) ctx.restore();
   }
+  if (animate) scheduleRender();
 }
 
 function strokePoly(pts: Pt[], fill: string, stroke: string, lw: number, open: boolean) {
@@ -611,8 +689,11 @@ function clearDragHint() { store.setDragHint(false, null); }
 /* ---------------- 生命周期：重绘信号 + 尺寸 + window 事件 ---------------- */
 watch(
   () => store.renderTick,
-  () => render(),
+  () => { renderDraw(); scheduleRender(true); },
 );
+// Removing an idle card can leave the camera unchanged. Reconcile its cached
+// image resources on the next frame even when the store has no paint tick.
+watch(() => store.recs.map(rec => rec.tileSource?.key ?? '').join('\n'), () => scheduleRender());
 
 // 切图 / 切活动侧 / 进出分屏：上一条图的像素坐标不能留在新图上（鼠标恰好没动时
 // 不会有 mousemove 来覆盖它，状态栏就会报一个不属于这张图的点）。
@@ -633,6 +714,9 @@ watch(() => store.getRois().length, (count, previous) => {
 
 onMounted(() => {
   applyResize();
+  scheduleRender(true);
+  window.addEventListener('resize', applyResize);
+  reducedMotion?.addEventListener('change', onMotionChange);
   // 画布「挂着」才说明 view/canvasSize 是这一页的真实视口；换页后 store 里
   // 的旧值不能拿去裁聊天截图（见 viewer.captureForChat）。
   store.setCanvasAttached(true);
@@ -653,6 +737,11 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  if (frame) cancelAnimationFrame(frame);
+  tileRenderer.scheduler.close();
+  lastReady.clear();
+  window.removeEventListener('resize', applyResize);
+  reducedMotion?.removeEventListener('change', onMotionChange);
   if (completionTimer !== null) clearTimeout(completionTimer);
   store.setCanvasAttached(false);
   store.setCursor(null);
@@ -670,6 +759,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('mousemove', onWindowMouseMove);
   window.removeEventListener('mouseup', onWindowMouseUp);
 });
+
+function onMotionChange() { scheduleRender(); }
 </script>
 
 <template>

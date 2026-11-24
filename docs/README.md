@@ -18,6 +18,8 @@ Smart Compare 智能对比、原始 DN 精检、候选 Mask、Agent/Batch 接入
 
 P1 原生 TIFF 窗口、512px Tile API、离线部署和性能实测见 [raster-window-p1.md](status/raster-window-p1.md)。
 
+P2 多尺度 Viewer、渐进显影、浏览器证据和性能数据见 [tile-viewer-p2.md](status/tile-viewer-p2.md)。
+
 本地 TIFF 预览、已核对关联保留与加载阶段暂停/停止见 [local-tiff-load-control.md](status/local-tiff-load-control.md)。
 
 整图概览、后台行带回填、超限整幅 JPG 提前分流与后置 IFD 兼容见 [progressive-tiff-preview.md](status/progressive-tiff-preview.md)。

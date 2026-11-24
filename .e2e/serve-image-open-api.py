@@ -14,13 +14,15 @@ import uvicorn
 from backend.services.heavy_work import HeavyWork
 from backend.services.image_open import ImageOpen,router_for,purge_loop
 from backend.services.image_tiles import TILE_HEADERS
+from backend.api.paths import scene_id_abs
 import backend.services.image_open as image_module
 from backend.tests import allowed_roots_env
 
 fixture=root/'.e2e/fixtures/image-open-api';data=fixture/'data';data.mkdir(parents=True,exist_ok=True)
 source=data/'native-source.tif'
 Image.fromarray(np.arange(2300*2300,dtype=np.uint16).reshape(2300,2300)).save(source)
-env=allowed_roots_env(data);env.update(SR_IMAGE_CACHE_ROOT=str(fixture/'cache'),SR_PREVIEW_ROOTS='')
+large = Path(os.environ['SR_E2E_TILE_SOURCE']).resolve() if os.environ.get('SR_E2E_TILE_SOURCE') else None
+env=allowed_roots_env(data, *([large.parent] if large else []));env.update(SR_IMAGE_CACHE_ROOT=str(fixture/'cache'),SR_PREVIEW_ROOTS='')
 env['SR_DRIVE_MAP']=env.get('SR_DRIVE_MAP','')+f';W:={data};X:={data}'
 os.environ.update(env)
 @asynccontextmanager
@@ -38,6 +40,12 @@ image_module.build_preview_pixels=counted
 def image():return FileResponse(source,media_type='image/tiff')
 @app.get('/fixture/stats')
 def stats():return {**metrics,'sourceFiles':[p.name for p in data.iterdir()]}
+@app.get('/fixture/tile-scenes')
+def tile_scenes():
+    if large is None:
+        raise HTTPException(404, 'Set SR_E2E_TILE_SOURCE to the benchmark Strip TIFF')
+    return [dict(id=scene_id_abs(path),name=path.name,W=w,H=h,hasPreview=False,lq_path=None)
+            for path,w,h in ((large,49475,49454),(source,2300,2300))]
 @app.post('/api/scenes/resolve')
 def no_business_scene():raise HTTPException(404,'fixture: source has no production scene')
 uvicorn.run(app,host='127.0.0.1',port=8766,log_level='warning')

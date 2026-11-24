@@ -72,6 +72,7 @@ export interface HeatViewLayer {
 export function drawDiffSource(
   ctx: CanvasRenderingContext2D, original: CanvasImageSource, width: number, height: number,
   layer: HeatViewLayer | null, display: DiffDisplay, opacity: number, feather: DiffFeather,
+  drawOriginal = true,
 ): void {
   ctx.save();
   try {
@@ -81,7 +82,7 @@ export function drawDiffSource(
     if (layer && display === 'heat') {
       ctx.fillStyle = UNANALYZED_COLOR;
       ctx.fillRect(0, 0, width, height);
-    } else {
+    } else if (drawOriginal) {
       ctx.drawImage(original, 0, 0, width, height);
     }
     if (!layer || display === 'regions') return;

@@ -19,6 +19,19 @@ export interface ViewState {
   oy: number;
 }
 
+/** Scale from original TIFF pixel edges into pane-local CSS pixels. */
+export function sourceScale(view: ViewState, tw: number, th: number, width: number, height: number) {
+  return { x: view.scale * tw / width, y: view.scale * th / height };
+}
+
+/** At one device pixel per original pixel, L0 is always eligible. */
+export function tileLevel(deviceScale: number, maxLevel: number, previous?: number) {
+  const ideal = Math.log2(1 / deviceScale);
+  if (deviceScale >= 1) return 0;
+  if (previous !== undefined && Math.abs(ideal - previous) <= 0.68) return previous;
+  return Math.max(0, Math.min(maxLevel, Math.round(ideal)));
+}
+
 /* ---------------- fit（HTML `fit()`） ----------------
    把缩略图适配进画布：scale = min(cw/tw, ch/th, 1)，居中。 */
 export function fitView(thumbW: number, thumbH: number, cw: number, ch: number): ViewState {
