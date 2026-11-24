@@ -2,7 +2,7 @@
 import pytest
 
 from backend.services.adaptive_polygon import POLICY, enclose, verify_export
-from backend.services.auto_mask_geometry import _measure, build_auto_mask
+from backend.services.auto_mask_geometry import _adaptive_source_polygon, _measure, build_auto_mask
 from backend.services.image_diff import _regions
 from backend.services.mask import rasterize_polygons
 
@@ -59,6 +59,44 @@ def test_split_retains_original_pixel_union():
 def test_export_gate_measures_pillow_corner_disagreement():
     points = [[3, 0], [13, 1], [21, 6], [22, 10], [20, 11]]
     assert verify_export(points, 24, rasterize_polygons) == "source_export_raster_conflict"
+
+
+def test_source_projection_recovers_a_raster_conflict_with_verified_alternative():
+    preferred = [[3, 0], [13, 1], [21, 6], [22, 10], [20, 11]]
+    rectangle = [[10, 3], [15, 3], [15, 7], [10, 7]]
+    source = {"image_id": "PAN", "source_size": [24, 24],
+              "transform": {"scale": [1, 1], "offset": [0, 0]}}
+    evidence = rasterize_polygons(24, 24, [rectangle]).astype(bool)
+    polygon = {"points": preferred, "polygon_area_px": 60}
+    result = _adaptive_source_polygon(polygon, [rectangle], source, evidence, 0, 0)
+    assert result["fallback"] == "verified_alternative"
+    assert verify_export(result["points"], 24, rasterize_polygons) is None
+    assert rasterize_polygons(24, 24, [result["points"]])[evidence].all()
+
+
+def test_source_projection_bounds_rectangle_fallback_and_rejects_sparse_enlargement():
+    preferred = [[3, 0], [13, 1], [21, 6], [22, 10], [20, 11]]
+    source = {"image_id": "PAN", "source_size": [24, 24],
+              "transform": {"scale": [1, 1], "offset": [0, 0]}}
+    polygon = {"points": preferred, "polygon_area_px": 60}
+    evidence = np.zeros((24, 24), bool)
+    evidence[3:8, 10:16] = True
+    assert _adaptive_source_polygon(polygon, [], source, evidence, 0, 0)["fallback"] == "verified_tight_rectangle"
+    evidence[22, 22] = True
+    result = _adaptive_source_polygon(polygon, [], source, evidence, 0, 0)
+    assert result["reason"] == "source_export_raster_conflict"
+    assert not result["drawable"]
+
+
+def test_analysis_fit_uses_measured_rectangle_when_greedy_search_has_no_solution(monkeypatch):
+    from backend.services import adaptive_polygon
+    monkeypatch.setattr(adaptive_polygon, "enclose", lambda *args: ([], 0))
+    evidence = np.zeros((24, 24), bool)
+    evidence[3:8, 10:16] = True
+    labels, regions = _regions(evidence, evidence.astype(float))
+    polygon = build_auto_mask(labels, regions, policy=POLICY)["polygons"][0]
+    assert polygon["fallback"] == "verified_analysis_rectangle"
+    assert polygon["coverage_ratio"] == polygon["supersample_coverage_ratio"] == 1
 
 
 def test_adaptive_paired_source_grids_and_policy_identity():

@@ -6,7 +6,7 @@ disable-model-invocation: false
 
 # 批量修复工作流
 
-常驻 Viewer 策略仍有效。界面计划卡的「确认并启动」是默认启动入口；本 Skill 负责诊断与解释，流程细节按需读取 references。
+常驻 Viewer 策略仍有效。界面计划卡默认在准备完成后自动启动；用户在 Agent 设置打开「启动前确认」时，卡片等待点击「确认并启动」。本 Skill 负责诊断与解释，流程细节按需读取 references。
 
 ## 硬约束
 

@@ -320,6 +320,25 @@ describe('事件追平', () => {
     expect(batch.snapshot?.goal.goal_id).toBe('g2');
   });
 
+  it('中止回执确认后立即清理展示，无需等待快照返回', async () => {
+    const batch = useBatchGoalStore();
+    await batch.attach('g1');
+    batch.playbackManaged = true;
+    batch.setFollow(true);
+    const closeSeq = batch.overlayCloseSeq;
+    const cancelled = snapshot({ status: 'CANCELLED' });
+    let resumeSnapshot!: (value: typeof cancelled) => void;
+    vi.mocked(apiBatchSnapshot).mockImplementationOnce(() => new Promise(resolve => { resumeSnapshot = resolve; }));
+    vi.mocked(apiBatchControl).mockResolvedValueOnce({
+      goal: cancelled.goal, changed: true, control_revision: 2, monitoring_done: false,
+    });
+    const action = batch.control('cancel');
+    await vi.waitFor(() => expect(batch.overlayCloseSeq).toBe(closeSeq + 1));
+    expect(batch.follow).toBe(false);
+    resumeSnapshot(cancelled);
+    await action;
+  });
+
   it('SSE 缺口从已消费游标 after 分页追平，而不是跳到快照水位', async () => {
     const batch = useBatchGoalStore();
     await batch.attach('g1');

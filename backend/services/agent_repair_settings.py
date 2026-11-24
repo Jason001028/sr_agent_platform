@@ -8,4 +8,9 @@ def normalize(value):
         v=value.get(key,default)
         if type(v) is not bool:raise ValueError('Agent 设置须为布尔值：'+key)
         result[key]=v
+    for key in ('require_mss_land', 'confirm_before_start', 'auto_approve_mask'):
+        if key in value:
+            if type(value[key]) is not bool:
+                raise ValueError('Agent 设置须为布尔值：'+key)
+            result[key] = value[key]
     return result

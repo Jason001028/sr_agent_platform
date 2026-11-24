@@ -19,7 +19,7 @@
 
 - `prepare_repair(scope, mode="production", strategy, detection_method, mask_policy)` 只冻结计划。`READY` 说明总数/可执行/排除/未解析并请用户去卡片确认；`BLOCKED` 说明缺项；不输出计划表或 `plan_id`。
 - `smart` 固定掩码复核；`mask_policy="existing"` 仅单景。
-- 卡片「确认并启动」是默认路径；已点卡片只查状态，不调用 `start_repair`。
+- 卡片默认自动启动（「启动前确认」开启时等待点击「确认并启动」）；已启动的卡片只查状态，不调用 `start_repair`。
 - `start_repair` 补充路径：有效确认、用户明确要求、计划未启动；只传 `plan_id`，省略 `plan_version` 取最新；不传路径/掩码/SR 参数/`approved`。
 - 未确认请用户去卡片；`stale_plan` 省略版本再试一次；过期或确认过期重新准备；`reused=true` 说明复用。
 

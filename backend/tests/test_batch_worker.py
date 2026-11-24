@@ -32,6 +32,20 @@ DESC = "模糊 问题类型:模糊 影像类型:pan 行列号:12,34"
 
 
 class BatchWorkerTest(unittest.TestCase):
+    def test_production_detection_default_and_explicit_timeout_keep_distinct_budgets(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            cfg = batch_worker.batch_config({"mode": "production"})
+            self.assertEqual(cfg["detection_timeout_sec"], 120.0)
+            self.assertEqual(cfg["submit_prepare_timeout_sec"], 30.0)
+        with mock.patch.dict(os.environ, {"SR_BATCH_IO_TIMEOUT_SEC": "45",
+                                          "SR_BATCH_DETECTION_TIMEOUT_SEC": "90"}, clear=True):
+            cfg = batch_worker.batch_config({"mode": "production"})
+            self.assertEqual(cfg["detection_timeout_sec"], 90.0)
+            self.assertEqual(cfg["submit_prepare_timeout_sec"], 45.0)
+            frozen = batch_worker.batch_config({"mode": "production", "config": {"detection_timeout_sec": 60}})
+            self.assertEqual(frozen["detection_timeout_sec"], 60.0)
+            self.assertEqual(frozen["submit_prepare_timeout_sec"], 60.0)
+
     def test_unconstrained_auto_mask_blocks_production_submission(self):
         for checkpoint in ({}, {"mask_policy": "auto", "mss": {"usage": "viewer_preview_only"}}):
             with self.assertRaisesRegex(batch_worker.ItemBlocked, "MSS"):
@@ -75,6 +89,9 @@ class BatchWorkerTest(unittest.TestCase):
         io_executor = getattr(self.state, "batch_io_executor", None)
         if io_executor is not None:
             io_executor.shutdown(wait=True, cancel_futures=True)
+        copy_executor = getattr(self.state, "nosr_copy_executor", None)
+        if copy_executor is not None:
+            copy_executor.shutdown(wait=True, cancel_futures=True)
         self.query_patch.stop()
         self.sbatch_patch.stop()
         self.store.close()
@@ -168,6 +185,84 @@ class BatchWorkerTest(unittest.TestCase):
     def items(self, goal_id):
         return self.store.list_goal_items(goal_id)
 
+    def test_production_stages_nosr_after_detection_in_parallel_with_mask(self):
+        goal, _ = self.make_goal(1, mode="production")
+        gid = goal["goal_id"]
+        release, copying, building = threading.Event(), threading.Event(), threading.Event()
+        copy_nosr = batch_worker.nosr_stage.stage
+        detection = {"provenance": "real", "candidates": [{"candidate_id": "a"}]}
+
+        def staged_copy(folder, reference, stopped):
+            copying.set()
+            if not release.wait(10):
+                raise RuntimeError("test did not release the copy")
+            copy_nosr(folder, reference, stopped)
+
+        def make_mask(snapshot):
+            building.set()
+            return {"detection": detection, "mask": {"path": "/fixture/mask.tif",
+                "sha256": "mask", "width": 16, "height": 16, "spp": 1, "foreground_pixels": 1}}
+
+        with mock.patch.object(batch_worker, "_detection_job", return_value={"detection": detection, "mask_pending": True}), \
+                mock.patch.object(batch_worker, "_mask_job", side_effect=make_mask), \
+                mock.patch.object(batch_worker.nosr_stage, "stage", side_effect=staged_copy) as copy, \
+                mock.patch.object(batch_worker, "_start_submit_preparation", return_value=True) as submit:
+            self.assertFalse(copying.is_set())
+            try:
+                self.run_until(lambda: self.statuses(gid) == {"MASK_READY"})
+                self.assertTrue(copying.is_set())
+                self.assertTrue(building.is_set())
+                submit.assert_not_called()
+            finally:
+                release.set()
+            self.run_until(lambda: submit.called)
+            item = self.items(gid)[0]
+            first = batch_worker._verified_nosr_stage(gid, item)
+            self.assertEqual(Path(first["path"]).read_bytes(),
+                             Path(item["checkpoint"]["reference_image"]["path"]).read_bytes())
+            self.tick()
+            self.assertEqual(batch_worker._verified_nosr_stage(gid, item), first)
+            copy.assert_called_once()
+            with Path(item["checkpoint"]["reference_image"]["path"]).open("ab") as stream:
+                stream.write(b"changed after staging")
+            with self.assertRaisesRegex(batch_worker.ItemBlocked, "原 NOSR"):
+                batch_worker._verified_nosr_stage(gid, item)
+
+    def test_production_with_no_candidates_does_not_copy_nosr(self):
+        goal, _ = self.make_goal(1, mode="production")
+        gid = goal["goal_id"]
+        with mock.patch.object(batch_worker, "_detection_job",
+                               return_value={"detection": {"provenance": "real", "candidates": []}}), \
+                mock.patch.object(batch_worker.nosr_stage, "stage") as copy:
+            self.run_until(lambda: self.statuses(gid) == {"NO_ISSUE"})
+            copy.assert_not_called()
+
+    def test_cancel_releases_an_unsubmitted_nosr_copy(self):
+        goal, _ = self.make_goal(1, mode="production")
+        gid = goal["goal_id"]
+        detection = {"provenance": "real", "candidates": [{"candidate_id": "a"}]}
+        copied = threading.Event()
+        copy_nosr = batch_worker.nosr_stage.stage
+
+        def hold_copy(folder, reference, stopped):
+            copy_nosr(folder, reference, stopped)
+            copied.set()
+            stopped.wait(10)
+
+        with mock.patch.object(batch_worker, "_detection_job",
+                               return_value={"detection": detection, "mask_pending": True}), \
+                mock.patch.object(batch_worker, "_mask_job", return_value={"detection": detection, "mask": {
+                    "path": "/fixture/mask.tif", "sha256": "mask", "width": 16, "height": 16, "spp": 1, "foreground_pixels": 1,
+                }}), mock.patch.object(batch_worker.nosr_stage, "stage", side_effect=hold_copy):
+            self.run_until(copied.is_set)
+            folder = batch_worker.nosr_stage.directory(gid, self.items(gid)[0])
+            self.assertTrue(folder.is_dir())
+            self.store.transition_goal(gid, "CANCELLED")
+            self.run_until(lambda: self.store.get_goal(gid)["checkpoint"].get("monitoring_done"))
+        self.assertFalse(folder.exists())
+        self.assertEqual(self.statuses(gid), {"SKIPPED"})
+        self.assertEqual(self.submits, [])
+
     def statuses(self, goal_id):
         return {item["status"] for item in self.items(goal_id)}
 
@@ -213,6 +308,25 @@ class BatchWorkerTest(unittest.TestCase):
             self.store, plan["plan_id"], session_id=session)["goal"]
 
     # ---- acceptance ----------------------------------------------------
+    def test_auto_approve_mask_survives_geometry_review_flag(self):
+        goal, _ = self.make_goal(count=1)
+        gid = goal["goal_id"]
+        item = self.items(gid)[0]
+        cp = {**item["checkpoint"], "auto_approve_mask": True, "review_required": False}
+        db = self.store._db()
+        db.execute("UPDATE agent_goal_steps SET checkpoint=? WHERE step_id=?", (json.dumps(cp), item["step_id"]))
+        db.commit()
+        detect = batch_detector.detect
+
+        def flagged(*args, **kwargs):
+            return {**detect(*args, **kwargs), "requires_geometry_review": True}
+
+        with mock.patch.object(batch_detector, "detect", side_effect=flagged):
+            self.run_until(lambda: self._submitted_count() == 1)
+        checkpoint = self.items(gid)[0]["checkpoint"]
+        self.assertTrue(checkpoint["detection"]["requires_geometry_review"])
+        self.assertFalse(checkpoint["review_required"])
+
     def test_manual_mask_review_gates_submission_and_survives_reload(self):
         goal, _ = self.make_goal(count=1)
         gid = goal["goal_id"]

@@ -544,6 +544,20 @@ describe('automatic polygon staging and identity isolation', () => {
     expect(await d.autoDraw()).toBe(false);
     expect(mocks.siblings).not.toHaveBeenCalled();
   });
+  it('draws an independently verified source rectangle after fitting five analysis vertices', async () => {
+    const d = await readyAuto();
+    const auto = d.result!.autoMask!;
+    auto.geometry_policy = 'adaptive-4to6-v1';
+    const polygon = auto.polygons[0];
+    polygon.points = [[4, 4], [12, 4], [15, 7], [15, 15], [4, 15]];
+    polygon.vertex_count = 5;
+    expect(d.autoDrawReason).toBe('');
+    vi.useFakeTimers();
+    const drawing = d.autoDraw();
+    await vi.advanceTimersByTimeAsync(3500);
+    expect(await drawing).toBe(true);
+    expect(mocks.viewer.addMaskPolygonBatch.mock.calls[0][1][0]).toHaveLength(4);
+  });
   it('allows a retry after a temporary source lookup failure', async () => {
     const d = await readyAuto();
     mocks.siblings.mockRejectedValueOnce(new Error('temporary network failure'));

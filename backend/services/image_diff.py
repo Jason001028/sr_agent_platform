@@ -66,11 +66,11 @@ MAX_EDGE = 4096
 #: 前端 ``lib/diffLocate.ts`` 有一份同值副本，只用于高级参数的占位提示。
 THRESHOLD_PRESETS = {
     "absdiff": {"low": 0.20, "standard": 0.12, "high": 0.07},
-    "ssim": {"low": 0.26, "standard": 0.15, "high": 0.08},
+    "ssim": {"low": 0.36, "standard": 0.25, "high": 0.18},
     "smart": {"low": 0.7, "standard": 0.5, "high": 0.3},
 }
 
-DEFAULT_MIN_AREA_PX = 64
+DEFAULT_MIN_AREA_PX = 96
 MAX_REGIONS = 200
 MAX_CONTOUR_POINTS = 96
 #: 简化轮廓与真实连通域掩码的最小 IoU。低于它的轮廓不标 ``exact``，

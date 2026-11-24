@@ -10,13 +10,26 @@ afterEach(()=>{app.unmount();root.remove();document.querySelectorAll('.settings-
 it('opens one compact panel, saves switches and chooses the inspection instruction',async()=>{
  root.querySelector<HTMLButtonElement>('button')!.click();await nextTick();
  const panel=document.querySelector<HTMLElement>('.settings-panel')!;
- expect(panel.querySelectorAll('[role=switch]')).toHaveLength(3);
+ expect(panel.querySelectorAll('[role=switch]')).toHaveLength(6);
+ const maskSwitch=panel.querySelector<HTMLButtonElement>('[data-e2e=agent-auto-approve-mask]')!;
+ expect(maskSwitch.getAttribute('aria-checked')).toBe('true');
+ maskSwitch.click();await nextTick();
+ expect(maskSwitch.getAttribute('aria-checked')).toBe('false');
+ expect(JSON.parse(localStorage.getItem(AGENT_REPAIR_SETTINGS_KEY)!).auto_approve_mask).toBe(false);
+ const previewSwitch=panel.querySelector<HTMLButtonElement>('[data-e2e=agent-auto-play-preview]')!;
+ expect(previewSwitch.getAttribute('aria-checked')).toBe('true');
+ previewSwitch.click();await nextTick();
+ expect(previewSwitch.getAttribute('aria-checked')).toBe('false');
+ expect(JSON.parse(localStorage.getItem(AGENT_REPAIR_SETTINGS_KEY)!).auto_play_preview).toBe(false);
  panel.querySelector<HTMLButtonElement>('[role=switch]')!.click();await nextTick();
  expect(agentRepairSettings.value.inspection_only).toBe(true);
  expect(JSON.parse(localStorage.getItem(AGENT_REPAIR_SETTINGS_KEY)!).inspection_only).toBe(true);
+ panel.querySelector<HTMLButtonElement>('[data-e2e=agent-confirm-before-start]')!.click();await nextTick();
+ expect(agentRepairSettings.value.confirm_before_start).toBe(true);
+ expect(JSON.parse(localStorage.getItem(AGENT_REPAIR_SETTINGS_KEY)!).confirm_before_start).toBe(true);
  expect(buildAgentRepairPrompt()).toContain(AGENT_INSPECTION_PROMPT);
  expect(buildAgentRepairPrompt()).not.toContain('prepare_repair');
- const method=panel.querySelector('select')!;method.value='smart';method.dispatchEvent(new Event('change'));await nextTick();
+ const method=panel.querySelector<HTMLSelectElement>('#agent-detection-method')!;method.value='smart';method.dispatchEvent(new Event('change'));await nextTick();
  expect(agentRepairSettings.value.detection_method).toBe('smart');
  expect(buildAgentRepairPrompt()).toContain('smart');
  panel.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));await nextTick();

@@ -23,6 +23,7 @@ import type { RepairPlan } from '../api';
 import BatchRepairDraft from '../../components/BatchRepairDraft.vue';
 import { viewerRepairSequences } from '../batchSequences';
 import { batchDockOpen, openBatchSelection } from '../batchDock';
+import { agentRepairSettings, DEFAULT_AGENT_REPAIR_SETTINGS } from '../agentRepairSettings';
 const imported = (n = 1) => ({ manifest_ref: 'manifest:test', rejected: false, counts: { items: n, errors: 0, warnings: 0 }, diagnostics: [], items: [] });
 const plan = (n = 2, over: Partial<RepairPlan> = {}): RepairPlan => ({
   kind: 'repair_plan.v1', contract_version: 'repair_plan.v1', plan_id: 'plan-a',
@@ -41,6 +42,7 @@ function buttons() { return [...root.querySelectorAll('button')]; }
 const start = () => root.querySelector<HTMLButtonElement>('.primary')!;
 beforeEach(() => {
   vi.resetAllMocks();
+  agentRepairSettings.value = { ...DEFAULT_AGENT_REPAIR_SETTINGS };
   state.viewer = reactive({ recsOrdered: [rec(1, '/prod/A'), rec(2, '/prod/A', 'product'), rec(3, '/prod/B')], sceneOrdinalOf: (r: ViewerRec) => r.sceneDir === '/prod/A' ? 7 : 2 });
   state.chat = reactive({ sessionId: 'session-a' });
   state.batch = { selectGoal: vi.fn().mockResolvedValue(undefined), setFollow: vi.fn() };
@@ -78,7 +80,7 @@ describe('compact sequence selection', () => {
     start().click(); await flush();
     expect(apiPrepareRepair).toHaveBeenCalledTimes(1);
     expect(vi.mocked(apiPrepareRepair).mock.calls[0][0]).toMatchObject({
-      session_id: 'session-a', mode: 'production',
+      session_id: 'session-a', mode: 'production', mask_policy: 'auto_diff',
       sources: [{ path: '/prod/A/PAN.tif', name: 'A', evidence: expect.any(String) }],
     });
     expect(start().textContent).toContain('确认并启动 · 1 景');
@@ -87,6 +89,12 @@ describe('compact sequence selection', () => {
     expect(apiStartRepair).toHaveBeenCalledWith('plan-a', { session_id: 'session-a', plan_version: 1 });
     expect(state.batch.selectGoal).toHaveBeenCalledWith('goal-a');
     expect(state.batch.setFollow).toHaveBeenCalledWith(false);
+  });
+  it('requests trusted land evidence when MSS validation is enabled', async () => {
+    agentRepairSettings.value.require_mss_land = true;
+    await mount();
+    start().click(); await flush();
+    expect(apiPrepareRepair).toHaveBeenCalledWith(expect.objectContaining({ mask_policy: 'auto' }));
   });
   it('disables missing NOSR groups and exposes their reason without paths', async () => {
     vi.mocked(apiBatchImport).mockResolvedValue({ ...imported(0), rejected: true, diagnostics: [{ line: 1, severity: 'error', message: '缺 /prod/A/A_NOSR.tif' }] });

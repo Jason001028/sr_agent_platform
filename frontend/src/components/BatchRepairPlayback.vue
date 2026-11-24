@@ -5,10 +5,13 @@ import { useBatchGoalStore } from '../stores/batchGoal';
 import { useViewerStore } from '../stores/viewer';
 import { candidateScreenPoints, overlayMatchesImage } from '../lib/batchOverlay';
 import { imageRef } from '../lib/spatial';
+import { agentRepairSettings } from '../lib/agentRepairSettings';
 
 const playback = useBatchPlaybackStore();
 const batch = useBatchGoalStore();
 const viewer = useViewerStore();
+const hasImage = computed(() => viewer.panes.some(pane => !!pane.rec?.thumb));
+const cancelled = computed(() => batch.snapshot?.goal.status === 'CANCELLED');
 const panes = computed(() => {
   const doc = playback.doc;
   if (!doc) return [];
@@ -18,7 +21,8 @@ const panes = computed(() => {
       const points = candidateScreenPoints(candidate, imageRef(p.rec!)!, p.rec!.thumb!.width,
         p.rec!.thumb!.height, p.view, { x: 0, y: 0, w: p.rect.w, h: p.rect.h });
       return { id: candidate.candidate_id, points: points?.map(p=>p.join(',')).join(' ') ?? '',
-        drawing: index === playback.regionIndex && playback.phase === 'drawing' };
+        drawing: playback.phase === 'drawing' && (index === playback.regionIndex
+          || doc.candidates.length > 24 && playback.regionIndex === doc.candidates.length - 1 && index >= 8) };
     }),
   }));
 });
@@ -27,16 +31,40 @@ function toggle() {
   if (playback.phase === 'done') playback.reset();
   batch.setFollow(!batch.follow);
 }
-function escape(e: KeyboardEvent) { if (e.key === 'Escape' && playback.running) batch.setFollow(false); }
-function visibility() { if (document.hidden && playback.running) batch.setFollow(false); }
+function pause(reason: string) {
+  playback.stop(reason);
+  if (batch.follow) batch.setFollow(false);
+}
+function escape(e: KeyboardEvent) { if (e.key === 'Escape' && playback.running) pause('已按 Esc 暂停展示。'); }
+function visibility() { if (document.hidden && playback.running) pause('页面切到后台，展示已暂停。'); }
 watch(() => batch.overlayCloseSeq, () => {
   playback.hideOverlay();
-  batch.setFollow(false);
 }, { flush: 'sync' });
-watch(() => [batch.follow, batch.goalId, viewer.drawMode] as const, ([follow, goal, drawing], previous) => {
+watch(cancelled, value => {
+  if (value) batch.clearOverlay();
+}, { flush: 'sync' });
+watch(() => [batch.follow, batch.goalId, viewer.drawMode, batch.paused] as const, ([follow, goal, drawing, paused], previous) => {
   if (previous && goal !== previous[1]) playback.reset();
-  if (follow && goal && !drawing && playback.mounted) void playback.start();
-  else playback.stop();
+  if (cancelled.value) return;
+  if ((drawing || paused) && (playback.running || follow)) {
+    pause(drawing ? '正在编辑掩码，展示已暂停。' : '批次已暂停，继续批次后可恢复展示。');
+  } else if (follow && goal && playback.mounted) void playback.start();
+  else playback.stop(batch.followNote);
+});
+// Fresh Agent starts carry an in-memory request. Restoring a batch snapshot
+// after refresh restores monitoring only.
+let autoFollowGoal = '';
+watch(() => [batch.pendingAutoPreview, batch.goalId, playback.mounted, viewer.drawMode] as const,
+  ([requested, goal, mounted, drawing]) => {
+    if (!requested || requested !== goal || !mounted || drawing || !batch.consumeAutoPreview(goal)) return;
+    if (!agentRepairSettings.value.auto_play_preview || batch.isTerminal || batch.paused || cancelled.value) return;
+    autoFollowGoal = goal;
+    if (!batch.follow) batch.setFollow(true);
+  }, { immediate: true });
+watch(() => agentRepairSettings.value.auto_play_preview, enabled => {
+  if (!enabled && autoFollowGoal && batch.goalId === autoFollowGoal) {
+    if (batch.follow) batch.setFollow(false);
+  }
 });
 onMounted(() => {
   playback.mounted = true; batch.playbackManaged = true;
@@ -52,7 +80,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div v-if="batch.goalId && (playback.running || playback.phase !== 'idle')" class="repair-playback" data-e2e="repair-playback">
+  <div v-if="batch.goalId && !cancelled && (playback.running || hasImage && playback.phase !== 'idle'
+    || playback.phase === 'paused' && playback.note)" class="repair-playback" data-e2e="repair-playback">
     <template v-if="playback.running || playback.phase === 'paused' || playback.phase === 'done'">
       <svg v-for="pane in panes" :key="pane.side" class="repair-vectors"
         :style="{ left: `${pane.rect.x}px`, top: `${pane.rect.y}px`, width: `${pane.rect.w}px`, height: `${pane.rect.h}px` }">
@@ -64,15 +93,17 @@ onBeforeUnmount(() => {
     <div class="repair-card" role="status" aria-live="polite" @mousedown.stop @dblclick.stop @wheel.stop>
       <div class="repair-heading">
         <span class="repair-dot" :class="{ live: playback.running }" />
-        <strong>{{ playback.label }}</strong>
+        <strong>{{ playback.detectionOnly && playback.phase === 'drawing' ? '绘制候选轮廓' : playback.label }}</strong>
+        <span v-if="playback.detectionOnly" class="repair-mock">候选预览</span>
         <span v-if="playback.doc?.provenance === 'mock'" class="repair-mock">演示 · 非真实结果</span>
         <span v-if="playback.ordinal" class="repair-count">第 {{ playback.ordinal }} 景</span>
-        <button type="button" class="repair-toggle" @click="toggle">{{ batch.follow ? '暂停' : playback.phase === 'paused' ? '继续' : '逐景展示' }}</button>
+        <button type="button" class="repair-toggle" :disabled="batch.paused || viewer.drawMode" @click="toggle">{{ playback.running ? '暂停' : playback.phase === 'paused' ? '继续' : '逐景展示' }}</button>
         <button v-if="playback.running" type="button" class="repair-skip" @click="playback.skip">跳过</button>
       </div>
       <div v-if="playback.name" class="repair-name" :title="playback.name">{{ playback.name }}</div>
       <div class="repair-steps" aria-hidden="true">
         <span :class="{ current: playback.phase === 'loading' }">加载定位</span><i />
+        <span :class="{ current: playback.phase === 'quality' }">质检预览</span><i />
         <span :class="{ current: playback.phase === 'detecting' }">识别区域</span><i />
         <span :class="{ current: playback.phase === 'drawing' }">绘制掩码</span>
       </div>

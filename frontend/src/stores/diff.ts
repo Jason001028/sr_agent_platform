@@ -645,8 +645,6 @@ export const useDiffStore = defineStore('diff', () => {
     return '';
   });
 
-  /* Automatic polygons are staged in SVG; only one atomic vector transaction
-     is committed after the animation and a final identity/draft recheck. */
   const autoDrawApprovalKey = 'sr-viewer-auto-draw-approval';
   function readAutoDrawApproval() {
     try { return localStorage.getItem(autoDrawApprovalKey) === 'true'; }
@@ -657,6 +655,9 @@ export const useDiffStore = defineStore('diff', () => {
     autoDrawApproval.value = enabled;
     try { localStorage.setItem(autoDrawApprovalKey, String(enabled)); } catch { /* In-memory setting still applies. */ }
   }
+
+  /* Automatic polygons are staged in SVG; only one atomic vector transaction
+     is committed after the animation and a final identity/draft recheck. */
   const autoDrawing = shallowRef<{ imageId: number; groupId: string; polygons: OwnedPoly[]; duration: number;
     reviewing: boolean; decisions: Record<string, 'approved' | 'rejected'> } | null>(null);
   let finishReview: (() => Promise<boolean>) | null = null;
@@ -746,7 +747,10 @@ export const useDiffStore = defineStore('diff', () => {
         || p.analysis_size[1] !== auto.analysis_size[1]) continue;
       const projected = p.source_polygons?.find(s => s.image_id === target.id);
       if (!projected || projected.coordinate_space !== 'source_pixel' || projected.coverage_ratio !== 1
-        || !projected.drawable || projected.points.length !== p.points.length) continue;
+        || !projected.drawable) continue;
+      const sourceVertices = projected.points.length;
+      if (auto.geometry_policy === 'adaptive-4to6-v1' ? sourceVertices < 4 || sourceVertices > 6
+        : sourceVertices !== p.points.length) continue;
       // Source vertices were independently checked with the official rasterizer.
       const poly: OwnedPoly = projected.points.map(([x, y]) => sourceToMaskThumb(
         x, y, target.W, target.H, target.thumb!.width, target.thumb!.height));

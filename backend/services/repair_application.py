@@ -468,6 +468,7 @@ def prepare_repair(
     smart_options=None,
     mask_policy: str = "auto",
     mask_path: Optional[str] = None,
+    auto_approve_mask: Optional[bool] = None,
     title: Optional[str] = None,
     created_by: str = "agent",
     tone_weight: bool = False,
@@ -487,8 +488,10 @@ def prepare_repair(
     if detection_method not in ("absdiff", "ssim", "smart"):
         raise RepairError("detection_method 只支持 absdiff、ssim、smart")
     mask_policy = str(mask_policy or "auto").strip().lower()
-    if mask_policy not in ("auto", "existing"):
-        raise RepairError("mask_policy 只支持 auto、existing")
+    if mask_policy not in ("auto", "auto_diff", "existing"):
+        raise RepairError("mask_policy 只支持 auto、auto_diff、existing")
+    if auto_approve_mask is not None and type(auto_approve_mask) is not bool:
+        raise RepairError("auto_approve_mask 须为布尔值")
     # ``existing`` is a plan-level strategy, not an importer detection method:
     # the frozen importer only accepts absdiff/ssim/smart.  The mask policy is
     # written into the plan separately, and the manual path never runs a
@@ -496,6 +499,7 @@ def prepare_repair(
     plan_detection = detection_method
     import_detection = detection_method
     if mask_policy == "existing":
+        auto_approve_mask = None
         plan_detection = "existing"
         import_detection = "absdiff"  # no detector runs on the manual path
         strategy = "review"
@@ -677,6 +681,8 @@ def prepare_repair(
         binding["land_constraint"] = {
             item_id: {key: value[key] for key in ("evidence", "nosr", "pan_metadata")}
             for item_id, value in land_items.items()}
+    if auto_approve_mask is not None:
+        binding["auto_approve_mask"] = auto_approve_mask
     plan_id = _plan_hash(binding)
     now = _now()
     execution = probe_execution(mode)
@@ -696,11 +702,12 @@ def prepare_repair(
         "confirmation_required": True,
         "targets": targets,
         "strategy_policy": strategy,
+        "mask_policy": mask_policy,
         "strategy": {
             "detection": _DETECTION_LABELS.get(plan_detection,
                                                "existing_diff_pipeline"),
             "detection_method": plan_detection,
-            "mask": "existing" if mask_policy == "existing" else "auto_or_existing",
+            "mask": "auto_or_existing" if mask_policy == "auto" else mask_policy,
             "execution": "existing_batch_runtime",
         },
         "mode": mode,
@@ -734,6 +741,8 @@ def prepare_repair(
     }
     if land_items:
         plan["land_items"] = land_items
+    if auto_approve_mask is not None:
+        plan["auto_approve_mask"] = auto_approve_mask
     stored = store.upsert_repair_plan(plan)
     return public_plan(stored)
 
@@ -931,6 +940,7 @@ def _plan_binding_hash(plan: dict) -> str:
         "exclusions": plan.get("exclusions") or [],
         "title": plan.get("title"),
         "mask_policy": plan.get("mask_policy"),
+        **({"auto_approve_mask": plan["auto_approve_mask"]} if "auto_approve_mask" in plan else {}),
         "mask_revision": (plan.get("mask") or {}).get("revision"),
     })
 
@@ -961,7 +971,9 @@ def _check_manifest(plan: dict) -> dict:
 
 
 def _batch_checkpoint(manifest: dict, plan: dict) -> dict:
-    review = (manifest.get("config") or {}).get("strategy") == "review"
+    auto_approve_mask = plan.get("auto_approve_mask")
+    review = (not auto_approve_mask if auto_approve_mask is not None else
+              (manifest.get("config") or {}).get("strategy") == "review")
     cp = {
         "workflow": batch_manifest.WORKFLOW,
         "manifest_ref": plan["manifest_ref"],
@@ -1128,7 +1140,8 @@ def _create_goal(store, plan: dict, manifest: dict, *, title: str,
         manifest, plan.get("exclusions") or [])
     checkpoint = _batch_checkpoint(manifest, plan)
     manual = (plan.get("mask") or {}).get("policy") == "existing"
-    review_required = (manifest.get("config") or {}).get("strategy") == "review"
+    review_required = checkpoint["review_strategy"]
+    auto_approve_mask = plan.get("auto_approve_mask")
     items = []
     for item in planned:
         cp = _item_checkpoint(item, review_required=review_required)
@@ -1172,10 +1185,14 @@ def _create_goal(store, plan: dict, manifest: dict, *, title: str,
                 "land_expires_at": min(plan["expires_at"], plan["confirmation_expires_at"]),
                 "mask_policy": "confident_land",
                 "review_required": bool(prepared["mask"] and (review_required or
-                    prepared["detection"].get("requires_geometry_review"))),
+                    auto_approve_mask is not True and prepared["detection"].get("requires_geometry_review"))),
             })
             if status == "SKIPPED":
                 cp["exclusion_reason"] = "可信陆地约束排除了全部候选"
+        elif plan.get("mask_policy") == "auto_diff":
+            cp["mask_policy"] = "auto_diff"
+        if not manual and auto_approve_mask is not None:
+            cp["auto_approve_mask"] = auto_approve_mask
         items.append({
             "item_id": item["item_id"],
             "ordinal": item["ordinal"],
@@ -1275,8 +1292,7 @@ def start_repair(store, plan_id: str, *, session_id: Optional[str],
         store.update_repair_plan_status(plan_id, "SUPERSEDED", exc.reason)
         raise
     execution = probe_execution(plan.get("mode") or "demo")
-    if (plan.get("mode") == "production" and (plan.get("mask") or {}).get("policy") != "existing"
-            and not plan.get("land_items")):
+    if _missing_land_constraint(plan):
         raise RepairBlocked("缺少已确认的可信陆地约束，请重新准备计划",
                             reason="land_constraint_unavailable")
     if not execution["allowed"]:
@@ -1351,6 +1367,13 @@ def _report_info(goal_id: str) -> dict:
     return {"available": True, "updated_at": stat.st_mtime}
 
 
+def _missing_land_constraint(plan: dict) -> bool:
+    return (plan.get("mode") == "production"
+            and plan.get("mask_policy") != "auto_diff"
+            and (plan.get("mask") or {}).get("policy") != "existing"
+            and not plan.get("land_items"))
+
+
 def _execution_is_current(plan: dict) -> dict:
     """Re-probe a not-yet-started plan instead of serving a stale gate verdict.
 
@@ -1362,8 +1385,7 @@ def _execution_is_current(plan: dict) -> dict:
     if plan.get("goal_id") or plan.get("status") not in ("READY", "CONFIRMED"):
         return plan
     execution = probe_execution(plan.get("mode") or "demo")
-    if (plan.get("mode") == "production" and (plan.get("mask") or {}).get("policy") != "existing"
-            and not plan.get("land_items")):
+    if _missing_land_constraint(plan):
         execution = {**execution, "allowed": False, "reason": "缺少可信陆地约束，请重新准备计划"}
     return {**plan, "execution": execution}
 

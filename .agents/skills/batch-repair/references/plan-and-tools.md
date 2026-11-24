@@ -10,7 +10,7 @@
 
 ## 计划状态
 
-`READY` 待确认；`CONFIRMED` 已确认；`STARTED` 已启动/可复用；`EXPIRED` 过期；`SUPERSEDED` 目标或源变化；`BLOCKED` 不可启动。`start_repair` 的 `plan_version` 可省略，服务端按最新计划校验。
+`READY` 待启动（按 Agent 设置自动启动或等待确认）；`CONFIRMED` 已确认；`STARTED` 已启动/可复用；`EXPIRED` 过期；`SUPERSEDED` 目标或源变化；`BLOCKED` 不可启动。`start_repair` 的 `plan_version` 可省略，服务端按最新计划校验。
 
 ## `get_repair_item`
 

@@ -126,3 +126,16 @@ Check that the documented Python interpreter actually exists; this workspace can
 
 ## 2026-11-16 ? ????????
 ? frontend ???????????? frontend/src ?????????????????????????? workdir ???
+
+## [ERR-20261124-001] CentOS 7 systemctl MainPID
+
+**Logged**: 2026-11-24 (Asia/Shanghai)
+**Priority**: medium
+**Status**: resolved
+**Area**: infra
+
+### Summary
+The on-host repair audit used `systemctl show --value`, which the intranet host rejected. Python received an empty PID and reported a misleading `ValueError` before any plan checks.
+
+### Suggested Fix
+Use `systemctl show sr-api -p MainPID | sed -n 's/^MainPID=//p'` and require a positive numeric PID before launching the audit. Keep copy-paste commands on one line. The deployment already uses this compatible property-output pattern.

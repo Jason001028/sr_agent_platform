@@ -22,7 +22,7 @@ function decodePng(url: string): Promise<HTMLCanvasElement> {
 /** Pre-SR geometry review; decisions stay bound to the server Item/version. */
 export const useBatchMaskReviewStore = defineStore('batchMaskReview', () => {
   const viewer = useViewerStore(), batch = useBatchGoalStore(), diff = useDiffStore();
-  const active = ref(false), busy = ref(false), error = ref(''), notice = ref('');
+  const active = ref(false), busy = ref(false), previewing = ref(false), error = ref(''), notice = ref('');
   const item = shallowRef<BatchItemRecord | null>(null), document = shallowRef<BatchOverlayDoc | null>(null);
   const pair = shallowRef<{pan: number; nosr: number} | null>(null);
   const heat = shallowRef<HTMLCanvasElement | null>(null), regionId = ref('');
@@ -52,7 +52,17 @@ export const useBatchMaskReviewStore = defineStore('batchMaskReview', () => {
       : viewer.split ? viewer.panes.map(p => p.rec?.id) : [];
     return ids.includes(p.pan) && ids.includes(p.nosr);
   });
-  function close() { generation++; active.value = false; busy.value = false; pair.value = null; heat.value = null; document.value = null; item.value = null; }
+  function close() {
+    const wasPreview = previewing.value;
+    generation++; active.value = false; busy.value = false; previewing.value = false;
+    pair.value = null; heat.value = null; document.value = null; item.value = null;
+    if (wasPreview) {
+      viewer.setCompareMode('off', true);
+      viewer.repairOverlaySelected = false;
+      viewer.overlayMasterVisible = false;
+      diff.resultVisible = false;
+    }
+  }
   function focus(id: string) {
     regionId.value = id;
     const c = selected.value, d = document.value;
@@ -75,9 +85,65 @@ export const useBatchMaskReviewStore = defineStore('batchMaskReview', () => {
     const i = list.findIndex(r => r.candidate_id === regionId.value);
     const next = list[(i + direction + list.length) % list.length]; if (next) focus(next.candidate_id);
   }
+  /** Open the same split-screen + heat visuals for an already selected item.
+   *  `silent` keeps the playback from treating this as a user gesture. */
+  async function loadVisuals(current: BatchItemRecord, gen: number, silent: boolean): Promise<void> {
+    const gid = batch.goalId;
+    if (!gid) throw new Error('没有关联的修复任务');
+    const wanted = () => gen === generation && batch.goalId === gid;
+    item.value = current;
+    const target = {item_id:current.item_id, image_path:current.checkpoint.target_image?.path, overlay_ready:true};
+    const open = () => silent ? batch.openItem(target, wanted) : batch.openItem(target);
+    const message = await (silent ? viewer.withSilentIntent(open) : open());
+    if (message) throw new Error(message);
+    if (gen !== generation || batch.goalId !== gid) return;
+    const pan = viewer.activeRec;
+    if (!pan?.sceneId) throw new Error('PAN 尚未关联服务端影像');
+    await resolveSceneIdentity(pan);
+    if (!wanted()) return;
+    const intent = viewer.userIntentSeq;
+    const siblings = await apiSceneSiblings(loadSrConfig(), pan.sceneId);
+    if (!wanted()) return;
+    const nosr = siblings.items.find(r => r.kind === 'nosr' && r.exists);
+    if (!nosr) throw new Error('未找到对应的 NOSR 参考图');
+    const id = viewer.ensureSceneImage(nosr, siblings);
+    if (id == null || !await viewer.ensureCardPixels(id)) throw new Error('NOSR 参考图加载失败');
+    if (gen !== generation || batch.goalId !== gid) return;
+    if (intent !== viewer.userIntentSeq || viewer.drawMode) throw new Error('已按新的视图操作取消复核定位');
+    const overlay = await loadBatchOverlay({goalId:gid,itemId:current.item_id});
+    if (overlay.status !== 'ready') throw new Error('候选修复范围尚未就绪，请重试');
+    if (gen !== generation || batch.goalId !== gid) return;
+    if (!overlayMatchesImage(overlay.doc, imageRef(pan))) throw new Error('候选掩码与当前 PAN 版本不一致');
+    const opened = silent ? await viewer.openPreviewPair(pan.id, id, true, wanted) : await viewer.openPreviewPair(pan.id, id);
+    if (!opened) throw new Error('无法打开 PAN / NOSR 分屏');
+    if (gen !== generation || batch.goalId !== gid) return;
+    viewer.splitLinked = true; viewer.overlayMasterVisible = true; viewer.repairOverlaySelected = true; diff.resultVisible = true;
+    pair.value = {pan:pan.id,nosr:id}; document.value = overlay.doc;
+    regionId.value = pending.value[0]?.candidate_id ?? regions.value[0]?.candidate_id ?? '';
+    await settledLayout();
+    if (gen !== generation || batch.goalId !== gid) return;
+    focus(regionId.value);
+    const analysis = current.checkpoint.detection?.analysis;
+    if (analysis?.differenceMap) {
+      const [raw, valid] = await Promise.all([decodePng(analysis.weightedDifferenceMap || analysis.differenceMap), analysis.validityMap ? decodePng(analysis.validityMap) : Promise.resolve(null)]);
+      if (gen === generation) heat.value = markRaw(colorizeHeat(raw, valid));
+    } else if (silent) {
+      // 自动播放只展示 Agent 自己的差异图；Viewer 预览重算的范围与候选可能
+      // 不同，不能拿来给 Agent 的掩码轮廓配一张来源不一致的热力图。
+      notice.value = '该景未提供 Agent 差异图，仅显示候选轮廓';
+    } else if (diff.result && !diff.stale && diff.result.imageA.id === pan.id && diff.result.imageB.id === id) {
+      heat.value = diff.heatLayer;
+    } else {
+      // Old checkpoints have no continuous map. Reuse the read-only difference pipeline.
+      diff.setPair(pan.id,id); diff.scope = 'common'; diff.display = 'overlay'; diff.opacity = .25;
+      if (await diff.analyze() && gen === generation) heat.value = diff.heatLayer;
+      else if (gen === generation) notice.value = diff.error || '热力图暂不可用，候选范围仍可复核';
+    }
+  }
+
   async function open(itemId?: string) {
     const gid = batch.goalId; if (!gid || viewer.drawMode) { error.value = '请先退出掩码编辑'; return; }
-    close(); active.value = true; busy.value = true; error.value = ''; notice.value = '';
+    close(); active.value = true; previewing.value = false; busy.value = true; error.value = ''; notice.value = '';
     const gen = generation;
     try {
       batch.setFollow(false);
@@ -94,46 +160,26 @@ export const useBatchMaskReviewStore = defineStore('batchMaskReview', () => {
       }
       if (gen !== generation || batch.goalId !== gid) return;
       if (!current) { notice.value = '当前批次没有待复核的候选掩码'; return; }
-      item.value = current;
-      const message = await batch.openItem({item_id:current.item_id, image_path:current.checkpoint.target_image?.path, overlay_ready:true});
-      if (message) throw new Error(message);
-      const pan = viewer.activeRec;
-      if (!pan?.sceneId) throw new Error('PAN 尚未关联服务端影像');
-      await resolveSceneIdentity(pan);
-      const intent = viewer.userIntentSeq;
-      const siblings = await apiSceneSiblings(loadSrConfig(), pan.sceneId);
-      const nosr = siblings.items.find(r => r.kind === 'nosr' && r.exists);
-      if (!nosr) throw new Error('未找到对应的 NOSR 参考图');
-      const id = viewer.ensureSceneImage(nosr, siblings);
-      if (id == null || !await viewer.ensureCardPixels(id)) throw new Error('NOSR 参考图加载失败');
-      if (gen !== generation || batch.goalId !== gid) return;
-      if (intent !== viewer.userIntentSeq || viewer.drawMode) throw new Error('已按新的视图操作取消复核定位');
-      const overlay = await loadBatchOverlay({goalId:gid,itemId:current.item_id});
-      if (overlay.status !== 'ready') throw new Error('候选修复范围尚未就绪，请重试');
-      if (gen !== generation || batch.goalId !== gid) return;
-      if (!overlayMatchesImage(overlay.doc, imageRef(pan))) throw new Error('候选掩码与当前 PAN 版本不一致');
-      if (!await viewer.openPreviewPair(pan.id, id)) throw new Error('无法打开 PAN / NOSR 分屏');
-      if (gen !== generation || batch.goalId !== gid) return;
-      viewer.splitLinked = true; viewer.overlayMasterVisible = true; viewer.repairOverlaySelected = true; diff.resultVisible = true;
-      pair.value = {pan:pan.id,nosr:id}; document.value = overlay.doc;
-      regionId.value = pending.value[0]?.candidate_id ?? regions.value[0]?.candidate_id ?? '';
-      await settledLayout();
-      if (gen !== generation || batch.goalId !== gid) return;
-      focus(regionId.value);
-      const analysis = current.checkpoint.detection?.analysis;
-      if (analysis?.differenceMap) {
-        const [raw, valid] = await Promise.all([decodePng(analysis.weightedDifferenceMap || analysis.differenceMap), analysis.validityMap ? decodePng(analysis.validityMap) : Promise.resolve(null)]);
-        if (gen === generation) heat.value = markRaw(colorizeHeat(raw, valid));
-      } else if (diff.result && !diff.stale && diff.result.imageA.id === pan.id && diff.result.imageB.id === id) {
-        heat.value = diff.heatLayer;
-      } else {
-        // Old checkpoints have no continuous map. Reuse the read-only difference pipeline.
-        diff.setPair(pan.id,id); diff.scope = 'common'; diff.display = 'overlay'; diff.opacity = .25;
-        if (await diff.analyze() && gen === generation) heat.value = diff.heatLayer;
-        else if (gen === generation) notice.value = diff.error || '热力图暂不可用，候选范围仍可复核';
-      }
+      await loadVisuals(current, gen, false);
     } catch (e) { if (gen === generation) error.value = e instanceof Error ? e.message : String(e); }
     finally { if (gen === generation) busy.value = false; }
+  }
+
+  /** Read-only QC stage used by the automatic repair playback. It reuses the
+   *  same split/heat layout as「前往复核」without pausing the playback or
+   *  accepting review decisions. */
+  async function preview(record: BatchItemRecord): Promise<boolean> {
+    const gid = batch.goalId;
+    if (!gid || !record || viewer.drawMode) return false;
+    close(); active.value = true; previewing.value = true; busy.value = true; error.value = ''; notice.value = '';
+    const gen = generation;
+    try {
+      await loadVisuals(record, gen, true);
+      return gen === generation && active.value && !error.value;
+    } catch (e) {
+      if (gen === generation) error.value = e instanceof Error ? e.message : String(e);
+      return false;
+    } finally { if (gen === generation) busy.value = false; }
   }
   async function decide(decision: 'approve' | 'exclude') {
     const current = item.value, gid = batch.goalId;
@@ -168,5 +214,5 @@ export const useBatchMaskReviewStore = defineStore('batchMaskReview', () => {
     }
   }
   watch(() => batch.goalId, close);
-  return {active,busy,error,notice,item,document,pair,heat,regionId,regions,selected,pending,ready,open,close,focus,navigate,decide,flicker};
+  return {active,busy,previewing,error,notice,item,document,pair,heat,regionId,regions,selected,pending,ready,open,preview,close,focus,navigate,decide,flicker};
 });

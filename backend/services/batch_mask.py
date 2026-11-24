@@ -148,6 +148,16 @@ def _strip_image(width, strip_height, candidates, start_row):
             if (max(y for _, y in points) < 0
                     or min(y for _, y in points) >= strip_height):
                 continue
+            if candidate.get("rasterizer"):
+                from backend.services.adaptive_polygon import convex_spans
+
+                first = max(0, int(min(y for _, y in points)))
+                last = min(strip_height - 1, int(max(y for _, y in points)))
+                left, right = convex_spans(points, np.arange(first, last + 1))
+                for row, x0, x1 in zip(range(first, last + 1), left, right):
+                    if x0 <= x1:
+                        draw.line((int(x0), row, int(x1), row), fill=contracts.FOREGROUND_VALUE)
+                continue
             draw.polygon(points, fill=contracts.FOREGROUND_VALUE)
     return image
 

@@ -37,6 +37,8 @@ export interface ToolUse {
 
 /** 展示消息：SSE 与历史投影的统一形状。seq=null 表示仍在流（未落库）。 */
 export interface ChatMsg {
+  /** Local launch intent attached only to a fresh prepare_repair response. */
+  autoStartRepair?: true;
   toolCallId?: string;
   progress?: ChatPhase[];
   seq: number | null;
@@ -462,7 +464,14 @@ export const useChatStore = defineStore('chat', () => {
           lastRunId.value = ev.run_id;
           feedbackRating.value = null;
         }
-        messages.value = reduceChatSse(messages.value, ev);
+        const previous = messages.value;
+        const next = reduceChatSse(previous, ev);
+        if (ev.type === 'tool_result' && ev.name === 'prepare_repair' && ev.ok
+            && next.length > previous.length && !viewerContext.agent_repair_settings.confirm_before_start
+            && !viewerContext.agent_repair_settings.inspection_only) {
+          next[next.length - 1].autoStartRepair = true;
+        }
+        messages.value = next;
       };
       const flush = (): void => {
         if (timer !== null) { clearTimeout(timer); timer = null; }

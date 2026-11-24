@@ -32,7 +32,7 @@ _MAX_TEXT = 4096
 _MODES = {"demo", "production"}
 _STRATEGIES = {"automatic", "review"}
 _DETECTIONS = {"absdiff", "ssim", "smart"}
-_MASK_POLICIES = {"auto", "existing"}
+_MASK_POLICIES = {"auto", "auto_diff", "existing"}
 _SCOPES = {"current", "selection", "workspace", "draft"}
 
 
@@ -173,6 +173,9 @@ async def prepare(request: Request):
     mask_path = body.get("mask_path")
     if mask_path is not None and not isinstance(mask_path, str):
         raise HTTPException(400, "mask_path must be a string")
+    auto_approve_mask = body.get("auto_approve_mask")
+    if auto_approve_mask is not None and type(auto_approve_mask) is not bool:
+        raise HTTPException(400, "auto_approve_mask must be a boolean")
     heavy = getattr(request.app.state, "heavy_work", None)
     raster_runner = (lambda fn: heavy.background_executor().submit(fn).result()) if heavy is not None else None
     try:
@@ -188,6 +191,7 @@ async def prepare(request: Request):
             mode=mode, strategy=strategy, detection_method=detection,
             smart_options=body.get("smart_options"),
             mask_policy=mask_policy, mask_path=mask_path,
+            auto_approve_mask=auto_approve_mask,
             title=title, created_by="tool_panel", raster_runner=raster_runner)
     except Exception as exc:  # noqa: BLE001 — service is the contract boundary
         _map_error(exc)

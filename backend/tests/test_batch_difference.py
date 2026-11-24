@@ -6,6 +6,9 @@ from PIL import Image
 from unittest.mock import patch
 
 from backend.services import batch_detector, batch_manifest, batch_mask, batch_worker, image_diff, batch_difference
+from backend.services.adaptive_polygon import POLICY
+from backend.services.auto_mask_geometry import MAX_BATCH_REGIONS
+from backend.services.mask import rasterize_polygons
 
 
 def refs(tmp_path, size=(160,160)):
@@ -46,12 +49,16 @@ def test_http_and_batch_share_core_and_batch_keeps_more_than_16(tmp_path):
         detection=batch_detector.detect(target,reference,config)
         http=image_diff.analyze_payload({'image_a':{'id':1,'sourceWidth':160,'sourceHeight':160,'grayPng':image_diff._b64_png(original.astype('uint8'))},
             'image_b':{'id':2,'sourceWidth':80,'sourceHeight':80,'grayPng':image_diff._b64_png(np.full((160,160),100,np.uint8))},
-            'autoMask':True,'minAreaPx':1,'blur':False,'openKernel':1,'closeKernel':1})
+            'autoMask':True,'autoMaskGeometryPolicy':POLICY,'minAreaPx':1,'blur':False,'openKernel':1,'closeKernel':1})
         assert core.call_count==2
     assert len(http['autoMask']['polygons'])==16
     assert detection['candidate_count']==25
-    assert detection['candidate_accounting']=={'total':25,'processed':25,'unprocessed':0,'rejected':[], 'region_budget':512,'budget_exhausted':False}
+    assert detection['candidate_accounting']=={'total':25,'processed':25,'unprocessed':0,'rejected':[], 'region_budget':MAX_BATCH_REGIONS,'budget_exhausted':False}
     assert detection['detector_name']=='shared-difference' and detection['provenance']=='real'
+    assert detection['analysis']['parameter_version'] == http['autoMask']['geometry_policy'] == POLICY
+    batch_points = {c['candidate_id']: c['points'] for c in detection['candidates']}
+    for polygon in http['autoMask']['polygons']:
+        assert batch_points[polygon['region_id']] == polygon['source_polygons'][0]['points']
     result=batch_mask.build_mask_result(detection,target,{'path':str(tmp_path/'bundle'/'mask.tif'),'rows_per_strip':7})
     # Decode independently of tifffile's optional, host-specific imagecodecs.
     with Image.open(result['path']) as image:
@@ -61,6 +68,54 @@ def test_http_and_batch_share_core_and_batch_keeps_more_than_16(tmp_path):
     assert set(np.unique(mask))=={0,255}
     with pytest.raises(ValueError,match='另一份源影像'):
         batch_mask.build_mask_result(detection,{**target,'image_key':'different-image'},{'path':str(tmp_path/'bad'/'mask.tif')})
+
+
+def test_batch_processes_more_than_the_old_512_candidate_budget(tmp_path):
+    pan = tmp_path / 'PAN.tif'
+    nosr = tmp_path / 'scene_NOSR.tif'
+    signal = np.full((384, 384), 100, np.uint16)
+    for y in range(4, 372, 16):
+        for x in range(4, 372, 16):
+            signal[y:y+8, x:x+8] = 200
+    tifffile.imwrite(pan, signal)
+    tifffile.imwrite(nosr, np.full((192, 192), 100, np.uint16))
+    target = {**batch_manifest._image(pan), 'item_id': 'dense'}
+    detection = batch_detector.detect(target, batch_manifest._image(nosr), {
+        'mode': 'diff', 'min_area_px': 1, 'blur': False, 'open_kernel': 1, 'close_kernel': 1,
+    })
+    assert detection['candidate_accounting']['unprocessed'] == 0
+    assert len(detection['candidates']) == 529
+
+
+def test_split_geometry_matches_viewer_and_rasterizes_across_strip_boundaries(tmp_path):
+    signal = np.zeros((120, 120), bool)
+    signal[10:100, 10:17] = True
+    signal[10:100, 90:97] = True
+    signal[92:100, 10:97] = True
+    pan = np.where(signal, 200, 100).astype(np.uint16)
+    tifffile.imwrite(tmp_path / 'PAN.tif', pan)
+    tifffile.imwrite(tmp_path / 'scene_NOSR.tif', np.full((60, 60), 100, np.uint16))
+    target = {**batch_manifest._image(tmp_path / 'PAN.tif'), 'item_id': 'split'}
+    reference = batch_manifest._image(tmp_path / 'scene_NOSR.tif')
+    detection = batch_detector.detect(target, reference, {
+        'mode': 'diff', 'min_area_px': 1, 'blur': False, 'open_kernel': 1, 'close_kernel': 1})
+    auto = image_diff.analyze_payload({
+        'image_a': {'id': 1, 'sourceWidth': 120, 'sourceHeight': 120, 'grayPng': image_diff._b64_png(pan.astype(np.uint8))},
+        'image_b': {'id': 2, 'sourceWidth': 60, 'sourceHeight': 60, 'grayPng': image_diff._b64_png(np.full((120, 120), 100, np.uint8))},
+        'autoMask': True, 'autoMaskGeometryPolicy': POLICY,
+        'minAreaPx': 1, 'blur': False, 'openKernel': 1, 'closeKernel': 1,
+    })['autoMask']
+    expected = [p['source_polygons'][0]['points'] for p in auto['polygons']]
+    assert detection['analysis']['region_accounting']['eligible'] == 1
+    assert detection['candidate_accounting']['processed'] == len(expected) > 1
+    assert detection['candidate_accounting']['unprocessed'] == 0
+    assert [item['points'] for item in detection['candidates']] == expected
+    mask = batch_mask.build_mask_result(detection, target, {
+        'path': str(tmp_path / 'bundle' / 'mask.tif'), 'rows_per_strip': 7})
+    with Image.open(mask['path']) as image:
+        actual = np.asarray(image) > 0
+    np.testing.assert_array_equal(actual, rasterize_polygons(120, 120, expected) > 0)
+    assert actual[signal].all()
 
 
 def test_grid_sampler_is_bounded_and_matches_shared_bilinear_resize(tmp_path):

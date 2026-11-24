@@ -10,6 +10,7 @@ import { registerViewerObservation } from '../lib/viewerContext';
 import { compactBatchError, importProblem, viewerRepairSequences } from '../lib/batchSequences';
 import type { RepairSequence } from '../lib/batchSequences';
 import { REPAIR_EXECUTION_MODE } from '../lib/repairExecution';
+import { agentRepairSettings } from '../lib/agentRepairSettings';
 const emit = defineEmits<{ created: [] }>();
 const viewer = useViewerStore(), batch = useBatchGoalStore(), chat = useChatStore();
 const groups = ref<RepairSequence[]>([]), busy = ref(false), loading = ref(false), error = ref('');
@@ -30,7 +31,7 @@ const unregisterSelection = registerViewerObservation('repair_selection', () => 
 onBeforeUnmount(unregisterSelection);
 let generation = 0;
 onBeforeUnmount(() => { generation++; });
-const signature = () => JSON.stringify([chat.sessionId, chosen.value.map(g => g.path), mode.value, detectionMethod.value, strategy.value]);
+const signature = () => JSON.stringify([chat.sessionId, chosen.value.map(g => g.path), mode.value, detectionMethod.value, strategy.value, agentRepairSettings.value.require_mss_land]);
 watch(() => JSON.stringify([viewer.recsOrdered.map(r => [r.id, r.sceneDir, r.previewOnly]), mode.value, detectionMethod.value]), async () => {
   const token = ++generation;
   pendingPlan.value = null;
@@ -62,6 +63,7 @@ async function prepareOnly(sessionId: string | null, token: number, key: string)
   const plan = await apiPrepareRepair({
     session_id: sessionId, sources, mode: mode.value,
     strategy: strategy.value, detection_method: detectionMethod.value,
+    mask_policy: agentRepairSettings.value.require_mss_land ? 'auto' : 'auto_diff',
     title: `批量自动修复 · ${sources.length} 组`, created_by: 'tool_panel',
   });
   if (key !== signature() || token !== generation) throw new Error('序列、模式或会话已变化，请重新开始');

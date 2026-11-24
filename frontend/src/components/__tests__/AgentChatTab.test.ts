@@ -16,23 +16,20 @@ state.annotations = reactive({ all: [], demo: [], hidden: false, status: '', sel
 vi.mock('../GoalClarifications.vue', () => ({ default: { setup: () => () => null } }));
 vi.mock('../AgentRepairPlanCard.vue', () => ({
   default: {
-    props: { data: Object, standalone: Boolean }, emits: ['back'],
-    setup(props: { data: { plan_id: string }; standalone: boolean }, { emit, expose }: { emit: (name: 'back') => void; expose: (exposed: object) => void }) {
+    props: { data: Object },
+    setup(props: { data: { plan_id: string } }, { expose }: { expose: (exposed: object) => void }) {
       expose({ taskControl: computed(() => state.control[props.data.plan_id]), togglePause: state.togglePause });
-      return () => h('button', { 'data-plan-id': props.data.plan_id, onClick: () => emit('back') },
-        props.standalone ? '修复待办' : '修复计划');
+      return () => h('div', { 'data-plan-id': props.data.plan_id }, '修复计划');
     },
   },
 }));
 
 import Tab from '../AgentChatTab.vue';
-import { agentTaskView } from '../../lib/agentTaskView';
 
 let app: App;
 let root: HTMLDivElement;
 
 beforeEach(() => {
-  agentTaskView.value = 'card';
   state.control = reactive({});
   state.togglePause.mockClear();
   // AgentBotIcon 用 matchMedia 判断减少动态；jsdom 没有，给个静态替身。
@@ -56,11 +53,10 @@ beforeEach(() => {
   root = document.createElement('div');
   document.body.append(root);
   app = createApp(Tab);
-  app.component('router-link', { render: () => h('a') });
   app.mount(root);
 });
 
-afterEach(() => { app.unmount(); root.remove(); });
+afterEach(() => { app.unmount(); root.remove(); localStorage.removeItem('sr.agent.task-view.v1'); });
 
 function handoff(autoSend: boolean): void {
   window.dispatchEvent(new CustomEvent('batch-agent-handoff', { detail: {
@@ -98,7 +94,9 @@ it('keeps the composer unlocked after sending the handed-off context', async () 
   expect(root.querySelector('.at-input-lock')).toBeNull();
 });
 
-it('renders the task card directly and switches to the standalone view for the same plan', async () => {
+it('keeps the Agent assist plan and follow-up in the conversation even with a legacy standalone preference', async () => {
+  localStorage.setItem('sr.agent.task-view.v1', 'standalone');
+  handoff(true);
   state.chat.sending = true;
   state.chat.messages = [
     { seq: 1, role: 'user', content: '准备修复计划' },
@@ -108,15 +106,11 @@ it('renders the task card directly and switches to the standalone view for the s
   ];
   await nextTick();
   expect(root.querySelector('.agent-task-pane')).toBeNull();
-  expect(root.querySelector('[data-plan-id="p"]')?.textContent).toBe('修复计划');
-  expect(root.textContent).not.toContain('打开修复待办');
-  agentTaskView.value = 'standalone';
+  expect(root.querySelector('.at-scroll [data-plan-id="p"]')?.textContent).toBe('修复计划');
+  expect(root.textContent).not.toMatch(/返回聊天|去 Chat 页继续/);
+  state.chat.sending = false;
   await nextTick();
-  expect(root.querySelector('.agent-task-pane [data-plan-id="p"]')?.textContent).toBe('修复待办');
-  root.querySelector<HTMLButtonElement>('.agent-task-pane button')!.click();
-  await nextTick();
-  expect(root.querySelector('.agent-task-pane')).toBeNull();
-  expect(root.querySelector('[data-plan-id="p"]')?.textContent).toBe('修复计划');
+  expect(root.querySelector<HTMLInputElement>('.at-input')?.disabled).toBe(false);
   state.chat.sessionId = 's2';
   state.chat.messages = [];
   await nextTick();

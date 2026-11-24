@@ -13,6 +13,7 @@
  */
 import { onMounted, onUnmounted, ref, watch } from 'vue';
 import { useDiffStore } from '../stores/diff';
+import { agentRepairSettings } from '../lib/agentRepairSettings';
 import { useQcListStore } from '../stores/qclist';
 import { useViewerStore } from '../stores/viewer';
 import {
@@ -128,6 +129,14 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
           自动绘制审批 · {{ diff.autoDrawApproval ? '是' : '否' }}
         </button>
         <div class="set-note">默认选「否」，符合条件的区域直接加入掩码。选「是」后逐区审批。本机记住选择。</div>
+      </div>
+      <div class="set-row">
+        <button type="button" class="set-sw" :class="{ on: agentRepairSettings.require_mss_land }"
+          role="switch" aria-label="MSS 可信陆地校验" :aria-checked="agentRepairSettings.require_mss_land"
+          data-e2e="set-mss-land-check" @click="agentRepairSettings.require_mss_land = !agentRepairSettings.require_mss_land">
+          MSS 可信陆地校验 · {{ agentRepairSettings.require_mss_land ? '开' : '关' }}
+        </button>
+        <div class="set-note">关闭时，新建自动修复计划使用差异掩码，水面也可能纳入修复。开启时仅修复通过 MSS 校验的可信陆地。</div>
       </div>
       <div class="set-row">
         <button type="button" class="set-sw" :class="{ on: qc.includeOld }"

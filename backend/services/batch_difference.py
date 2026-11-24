@@ -9,8 +9,8 @@ import time
 
 import numpy as np
 
-from backend.services import image_diff, batch_contracts as contracts, preview_jpg
-from backend.services.auto_mask_geometry import bind_auto_mask
+from backend.services import adaptive_polygon, image_diff, batch_contracts as contracts, preview_jpg
+from backend.services.auto_mask_geometry import MAX_BATCH_REGIONS, bind_auto_mask
 from backend.services.tour_identity import image_identity
 from backend.services.spatial_identity import resource_identity
 
@@ -121,8 +121,10 @@ def detect(target, reference, base, config):
         reference_side="B", smart_options=config.get("smart_options"),
         threshold=config.get("threshold"), min_area_px=config.get("min_area_px",64),
         blur=config.get("blur",True), open_kernel=config.get("open_kernel",3),
-        close_kernel=config.get("close_kernel",5), source="source-grid",
-        auto_mask=True, auto_mask_limit=512, auto_mask_margin=config.get("margin","standard"),
+        close_kernel=config.get("close_kernel",5), ssim_window=config.get("ssim_window",7),
+        ssim_gaussian=config.get("ssim_gaussian",False), source="source-grid",
+        auto_mask=True, auto_mask_limit=MAX_BATCH_REGIONS, auto_mask_margin=config.get("margin","standard"),
+        auto_mask_geometry_policy=adaptive_polygon.POLICY,
         scale_a=(w/shape[1], h/shape[0]), scale_b=(rw/shape[1], rh/shape[0]))
     gh, gw = shape
     for key, ref in (("imageA",target),("imageB",reference)):
@@ -131,7 +133,8 @@ def detect(target, reference, base, config):
     result["analysisGrid"]["mode"]="preview"  # affine grid convention; input is REAL DN, not preview JPG
     bind_auto_mask(result, ({"sourceRevision":target["revision"]},{"sourceRevision":reference["revision"]}))
     auto=result["autoMask"]
-    tone={};region_weights={}
+    tone = {}
+    weights = None
     if config.get('tone_weight'):
         from backend.services.repair_tone import weight_map,VERSION as TONE_VERSION
         weights=weight_map(a,b,va&vb)
@@ -139,30 +142,33 @@ def detect(target, reference, base, config):
         tone={'tone_weight':True,'tone_weight_version':TONE_VERSION,
             'weightedDifferenceMap':image_diff._b64_png(np.rint(np.clip(difference*weights,0,1)*255).astype(np.uint8)),
             'tone_weight_semantics':'display_and_ranking_only; binaryMask and mask eligibility unchanged'}
-        for region in result['regions']:
-            x,y,bw,bh=map(int,region['bbox']);sample=weights[y:y+bh,x:x+bw];valid=(va&vb)[y:y+bh,x:x+bw]
-            region_weights[region['rank']]=float(sample[valid].mean()) if valid.any() else 1.
     candidates=[]; rejected=[]
     for p in auto["polygons"]:
-        source=next(s for s in p["source_polygons"] if s["image_id"]==target["image_key"])
-        if p["coverage_ratio"] != 1 or p["supersample_coverage_ratio"] != 1 or source["coverage_ratio"] != 1 or not source["drawable"]:
-            rejected.append({"region_id":p["region_id"],"reason":"coverage_or_degeneracy"}); continue
+        source = next((s for s in p["source_polygons"] if s["image_id"] == target["image_key"]), None)
+        if (p["coverage_ratio"] != 1 or p["supersample_coverage_ratio"] != 1
+                or not source or not source["drawable"] or source["coverage_ratio"] != 1):
+            reason = source.get("reason") if source else "adaptive_enclosure_failed"
+            rejected.append({"region_id":p["region_id"],"reason":reason or "coverage_or_degeneracy",
+                             "diagnostics":p.get("diagnostics", [])}); continue
         candidates.append({"candidate_id":p["region_id"],"kind":"polygon","points":source["points"],
-                           "label":"difference", "auto_mask":{k:p[k] for k in (
-                               "rank","coverage_ratio","area_ratio","buffer_px","needs_review","holes","fallback",
-                               "merged_regions","full_image_area_ratio","soft_min_area_ratio","soft_target_met")}})
-    if tone:
-        for candidate in candidates:candidate['auto_mask']['tone_weight']=region_weights.get(candidate['auto_mask']['rank'],1.)
-        candidates.sort(key=lambda c:c['auto_mask']['tone_weight'],reverse=True)
+                           "label":"difference", "rasterizer":adaptive_polygon.POLICY})
+        if weights is not None:
+            x, y, right, bottom = p.get("analysis_partition") or p["analysis_bounds"]
+            valid = va[y:bottom, x:right] & vb[y:bottom, x:right]
+            candidates[-1]["score"] = float(weights[y:bottom, x:right][valid].mean()) if valid.any() else 1.
+    if weights is not None:
+        candidates.sort(key=lambda candidate: candidate["score"], reverse=True)
     for ref in (target,reference):
         if (preview_jpg.source_revision(Path(ref["path"])) != ref["revision"]
                 or resource_identity(Path(ref["path"]))["image_key"]!=ref["image_key"]):
             raise contracts.DetectionError("检测期间源影像被替换")
-    counts={"total":auto["total_regions"],"processed":len(candidates),
+    # A geometry can merge detector regions or split one region into multiple
+    # masks. Count the resulting work units plus regions omitted by the budget.
+    counts={"total":len(auto["polygons"])+auto["unprocessed_regions"],"processed":len(candidates),
             "unprocessed":auto["unprocessed_regions"]+len(rejected),"rejected":rejected,
-            "region_budget":512,"budget_exhausted":auto["truncated"]}
+            "region_budget":MAX_BATCH_REGIONS,"budget_exhausted":auto["truncated"]}
     return contracts.validate_detection_result({**base,"provenance":"real","detector_name":"shared-difference",
-        "detector_version":"1.0.0","candidates":candidates,"candidate_accounting":counts,
+        "detector_version":"1.1.1","candidates":candidates,"candidate_accounting":counts,
         "source_revision":target["revision"],
         "requires_geometry_review":config.get("method") == "smart" or any(p["needs_review"] for p in auto["polygons"]),
         "geometry_diagnostics":[{k:p[k] for k in ("region_id","vertex_count","coverage_ratio","supersample_coverage_ratio","buffer_px","buffer_space","needs_review","diagnostics","area_ratio","holes","fallback")} for p in auto["polygons"]],

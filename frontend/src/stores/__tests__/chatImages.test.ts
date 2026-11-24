@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it, vi, afterEach } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import { useChatStore } from '../chat.js';
 import { msgFromHistory } from '../chat.js';
+import { DEFAULT_AGENT_REPAIR_SETTINGS } from '../../lib/agentRepairSettings';
 
 const shot = (name: string) => ({ dataUrl: `data:image/jpeg;base64,${name}`, name });
 
@@ -78,6 +79,20 @@ describe('待发截图托盘', () => {
 });
 
 describe('发送', () => {
+  it.each([false, true])('keeps the launch choice after a fast prepare response (%s)', async confirmBeforeStart => {
+    const chat = useChatStore();
+    chat.sessionId = 's1';
+    const result = { type: 'tool_result', id: 'p', name: 'prepare_repair', ok: true, data: { plan_id: 'p' } };
+    vi.stubGlobal('fetch', () => Promise.resolve(sseResponse([
+      JSON.stringify(result),
+      JSON.stringify({ type: 'turn_done', content: '后续状态见执行轨迹' }),
+    ])));
+    await chat.send('开始修复', { repairSettings: { ...DEFAULT_AGENT_REPAIR_SETTINGS, confirm_before_start: confirmBeforeStart } });
+    expect(chat.sending).toBe(false);
+    expect(chat.messages.at(-1)?.role).toBe('assistant');
+    expect(chat.messages.find(message => message.toolName === 'prepare_repair')?.autoStartRepair)
+      .toBe(confirmBeforeStart ? undefined : true);
+  });
   it('纯图消息：请求体带 images、乐观气泡带 images、托盘清空', async () => {
     const chat = useChatStore();
     chat.sessionId = 's1';

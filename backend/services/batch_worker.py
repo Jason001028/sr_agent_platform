@@ -57,6 +57,7 @@ detector/verifier result.
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from backend.services.async_work import run_sync
 from backend.services.heavy_work import WorkCapacityError
 import functools
@@ -65,13 +66,14 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 import time
 import uuid
 
 from backend.config import sr_runtime
 from backend.pathguard import PathDeniedError, ensure_allowed, normalize_submit_path
 from backend.services import (
-    batch_contracts, batch_detector, batch_manifest, batch_mask, preview_jpg)
+    batch_contracts, batch_detector, batch_manifest, batch_mask, nosr_stage, preview_jpg)
 from backend.services import run_sr as sr_service
 from backend.services.goal_lease import (
     GoalLease, LeaseLost, current_lease, current_tool)
@@ -160,6 +162,10 @@ def batch_config(manifest):
 
     # ``max_attempts_per_item`` is frozen for PR D/F; PR C physically submits
     # an item at most once and a failed verification is final for this item.
+    io_timeout = _env_float("SR_BATCH_IO_TIMEOUT_SEC", 30.0)
+    detection_timeout = (_env_float("SR_BATCH_DETECTION_TIMEOUT_SEC",
+                                    _env_float("SR_BATCH_IO_TIMEOUT_SEC", 120.0))
+                         if manifest.get("mode") == "production" else io_timeout)
     return {
         "max_inflight_sr_jobs": integer("max_inflight_sr_jobs", 1, 1, 64),
         "max_prepared_items": integer("max_prepared_items", 1, 1, 64),
@@ -170,8 +176,8 @@ def batch_config(manifest):
             _env_float("SR_BATCH_MONITOR_POLL_SEC", 5.0)),
         "io_queue_timeout_sec": seconds("io_queue_timeout_sec", 300.0),
         "detection_timeout_sec": seconds(
-            "detection_timeout_sec",
-            _env_float("SR_BATCH_IO_TIMEOUT_SEC", 30.0)),
+            "detection_timeout_sec", detection_timeout),
+        "submit_prepare_timeout_sec": seconds("detection_timeout_sec", io_timeout),
     }
 
 
@@ -426,15 +432,16 @@ def _submit_io(executor, fn, snapshot, queue_timeout=300):
     return executor.submit(execute), timing
 
 
-def _io_timeout(record, cfg):
+def _io_timeout(record, cfg, *, submission=False):
+    limit = cfg.get("submit_prepare_timeout_sec", cfg["detection_timeout_sec"]) if submission else cfg["detection_timeout_sec"]
     timing = record.get("timing")
     if timing is None:  # Compatibility with an existing process/test record.
-        return "running" if time.monotonic() - record["started"] > cfg["detection_timeout_sec"] else None
+        return "running" if time.monotonic() - record["started"] > limit else None
     started = timing["started_at"]
     if started is None:
         return "queued" if time.monotonic() - timing["queued_at"] > cfg.get("io_queue_timeout_sec", 300) else None
     end = timing["finished_at"] or time.monotonic()
-    return "running" if end - started > cfg["detection_timeout_sec"] else None
+    return "running" if end - started > limit else None
 
 
 def _defer_io_capacity(state, goal, item, lease, reason):
@@ -490,7 +497,8 @@ def _start_detection(state, goal, item, lease, cfg, *, build_mask=False):
         "rows_per_strip": item_config.get("mask_rows_per_strip"),
         "overlay_max_edge": item_config.get("mask_overlay_max_edge"),
         "detection_config": item_config.get("detection") or {},
-        "detect_only": goal.get("execution_owner") == "local_agent",
+        "detect_only": (goal.get("execution_owner") == "local_agent"
+                        or (goal.get("checkpoint") or {}).get("mode") == "production"),
     }
     if build_mask:
         snapshot["detection"] = cp["detection"]
@@ -571,7 +579,9 @@ def _collect_detections(state, goal, lease, cfg, *, allow_write=True):
             _defer_io_capacity(state, goal, item, lease, str(error))
             continue
         if record.get("timed_out") or timeout == "running":
-            _retry_detection(state, goal, item, lease, cfg, "检测超时")
+            operation = "生成掩码" if item["checkpoint"].get("phase") == "BUILDING_MASK" else "检测"
+            _retry_detection(state, goal, item, lease, cfg,
+                             f"{operation}超时（执行超过 {cfg['detection_timeout_sec']:g} 秒）")
             continue
         if error is not None:
             _retry_detection(state, goal, item, lease, cfg,
@@ -582,12 +592,33 @@ def _collect_detections(state, goal, lease, cfg, *, allow_write=True):
         cp = dict(item["checkpoint"])
         cp["detection"] = detection
         if payload.get("incomplete"):
+            accounting = detection["candidate_accounting"]
+            remaining = accounting["unprocessed"]
+            rejected = len(accounting.get("rejected") or [])
+            detail = []
+            if accounting.get("budget_exhausted") and remaining > rejected:
+                detail.append(f"{remaining - rejected} 个超出候选处理上限 {accounting['region_budget']}")
+            if rejected:
+                reasons = {
+                    "adaptive_enclosure_failed": "分析网格无法拟合",
+                    "source_projection_empty": "源像素无有效投影",
+                    "source_projection_degenerate": "投影后多边形退化",
+                    "source_projection_coverage": "投影未覆盖全部候选像素",
+                    "source_export_raster_conflict": "源像素栅格化结果不一致",
+                    "source_export_budget": "源像素范围超出校验预算",
+                }
+                failures = Counter(reasons.get(row.get("reason"), "覆盖或源像素几何校验失败")
+                                   for row in accounting["rejected"])
+                detail.extend(f"{count} 个{message}" for message, count in failures.items())
+            reason = f"差异候选有 {remaining} 个未处理"
+            if detail:
+                reason += "（" + "，".join(detail) + "）"
             cp["phase"]="BLOCKED"
             state.store.transition_goal_item(gid,step_id=item["step_id"],expected_version=item["version"],
                 status="BLOCKED",lease_token=lease.token,checkpoint=cp,capacity_reserved=0,
-                error="差异候选未全部处理，禁止部分掩码自动提交；详见 candidate_accounting")
+                error=reason + "，未提交本景掩码。")
             continue
-        if detection.get("requires_geometry_review"):
+        if detection.get("requires_geometry_review") and cp.get("auto_approve_mask") is not True:
             cp["review_required"]=True
         if not detection.get("candidates"):
             _finish_no_candidates(state, goal, item, lease, cp)
@@ -679,7 +710,58 @@ def _review_allows_submit(item):
                 and review.get("mask_sha256") == sha)
 
 
-def _produce_one(state, goal, lease, cfg, choose=None):
+def _sync_nosr_stage(state, goal, lease, *, produce):
+    """One copy in flight per scheduler; mask work uses its own executor."""
+    gid = goal["goal_id"]
+    store = state.store
+    active = getattr(state, "nosr_copy", None)
+    if active and active[0] == gid and goal["status"] == "CANCELLED":
+        active[4].set()
+    if active and active[0] == gid and active[3].done():
+        _, item_id, _, future, _ = active
+        state.nosr_copy = active = None
+        item = store.get_goal_item(gid, item_id)
+        if item and item["status"] in {"DETECTING", "MASK_READY"} and goal["status"] != "CANCELLED":
+            try:
+                future.result()
+            except Exception as exc:
+                _block_item(state, goal, item, lease, f"NOSR 预复制失败：{exc}")
+    waiting = set()
+    for item in store.list_goal_items(gid):
+        cp = item["checkpoint"]
+        ref = cp.get("reference_image") or {}
+        if not all(ref.get(key) for key in ("path", "image_key", "revision")):
+            continue
+        folder = nosr_stage.directory(gid, item)
+        if item["status"] in CONVERGED | PARKED | {"AWAITING_REVIEW"} and not item.get("capacity_reserved"):
+            if not active or active[2] != folder:
+                try:
+                    nosr_stage.discard(folder)
+                except OSError:
+                    logging.getLogger(__name__).warning("暂存 NOSR 清理失败", exc_info=True)
+            continue
+        if not produce or not (item["status"] == "MASK_READY" or (
+                item["status"] == "DETECTING" and cp.get("phase") in {"MASK_PENDING", "BUILDING_MASK"})):
+            continue
+        try:
+            if nosr_stage.ready(folder, ref):
+                continue
+        except (OSError, ValueError, KeyError) as exc:
+            _block_item(state, goal, item, lease, f"NOSR 暂存验证失败：{exc}")
+            waiting.add(item["item_id"])
+            continue
+        waiting.add(item["item_id"])
+        if active is None:
+            executor = getattr(state, "nosr_copy_executor", None)
+            if executor is None:
+                executor = state.nosr_copy_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nosr-copy")
+            stopped = Event()
+            active = (gid, item["item_id"], folder, executor.submit(nosr_stage.stage, folder, ref, stopped), stopped)
+            state.nosr_copy = active
+    return waiting
+
+
+def _produce_one(state, goal, lease, cfg, choose=None, waiting_nosr=()):
     """Advance at most one Item. Returns True when a producer step happened."""
     store = state.store
     gid = goal["goal_id"]
@@ -709,13 +791,20 @@ def _produce_one(state, goal, lease, cfg, choose=None):
                      >= cfg["max_inflight_sr_jobs"])
     ready = [
         i for i in items if i["status"] == "MASK_READY" and _review_allows_submit(i)
+        and i["item_id"] not in waiting_nosr
         and (i["next_wake_at"] is None or i["next_wake_at"] <= now)
     ] if not capacity_full else []
     if choose is None and ready:
         return _start_submit_preparation(state, goal, ready[0], lease, cfg)
+    pending_jobs = sum(1 for r in jobs.values() if r["goal_id"] == gid)
+    if choose is None and pending_jobs < cfg["detection_concurrency"]:
+        mask_pending = next((i for i in items if i["status"] == "DETECTING"
+                             and i["checkpoint"].get("phase") == "MASK_PENDING"
+                             and (i["next_wake_at"] is None or i["next_wake_at"] <= now)), None)
+        if mask_pending:
+            return _start_detection(state, goal, mask_pending, lease, cfg, build_mask=True)
 
     prepared = sum(1 for i in items if i["status"] in PREPARING)
-    pending_jobs = sum(1 for r in jobs.values() if r["goal_id"] == gid)
     pending = [
         i for i in items if i["status"] in {"PENDING", "RETRY_WAIT"}
         and (i["next_wake_at"] is None or i["next_wake_at"] <= now)
@@ -886,6 +975,8 @@ def _prepare_submission(snapshot):
         raise ItemBlocked(
             f"提交前复核输入失败：{type(exc).__name__}: {exc}") from exc
     params = _submit_params(item)
+    if snapshot["mode"] == "production":
+        params["nosr_stage"] = _verified_nosr_stage(snapshot["goal_id"], item)
     inputs = _capture_identities(cp)
     changed = _changed_inputs(before, inputs)
     if changed:
@@ -896,6 +987,20 @@ def _prepare_submission(snapshot):
         "mask_path": inputs["mask"]["path"],
         "inputs": inputs,
     }
+
+
+def _verified_nosr_stage(gid, item):
+    try:
+        ref = item["checkpoint"]["reference_image"]
+        staged = nosr_stage.ready(nosr_stage.directory(gid, item), ref)
+        if not staged:
+            raise ValueError("副本尚未发布")
+        nosr_stage.assert_source(ref)
+        if staged["source_signature"] != nosr_stage.signature(Path(ref["path"])):
+            raise ValueError("原 NOSR 与暂存版本不一致")
+        return staged
+    except (OSError, ValueError, KeyError, PathDeniedError) as exc:
+        raise ItemBlocked(f"NOSR 暂存验证失败：{exc}") from exc
 
 
 def _block_item(state, goal, item, lease, reason):
@@ -914,6 +1019,7 @@ def _start_submit_preparation(state, goal, item, lease, cfg):
     key = _submit_prepare_key(goal["goal_id"], item)
     snapshot = {
         "item": item,
+        "goal_id": goal["goal_id"],
         "mode": (goal.get("checkpoint") or {}).get("mode") or "demo",
     }
     try:
@@ -962,7 +1068,7 @@ def _collect_submit_preparation(state, goal, lease, cfg):
             record["future"].cancel()
             return False
         future = record["future"]
-        timeout = _io_timeout(record, cfg)
+        timeout = _io_timeout(record, cfg, submission=True)
         if not future.done():
             if timeout == "queued" and future.cancel():
                 jobs.pop(key, None)
@@ -1041,7 +1147,7 @@ def _verify_submission_inputs(item, mode="demo"):
     """
     cp = item["checkpoint"]
     land = cp.get("land_constraint")
-    if mode == "production" and cp.get("mask_policy") != "existing" and not land:
+    if mode == "production" and cp.get("mask_policy") not in {"existing", "auto_diff"} and not land:
         raise ItemBlocked("自动修复已阻断：尚无经验证并冻结的 MSS 陆地约束")
     target = cp.get("target_image") or {}
     detection = cp.get("detection") or {}
@@ -1162,9 +1268,13 @@ def _submit_ready(state, goal, item, lease, cfg, prepared):
         return _block_item(state,goal,current,lease,str(exc))
     try:
         params = prepared["params"]
+        if mode == "production" and params.get("nosr_stage") != _verified_nosr_stage(gid, current):
+            raise ItemBlocked("NOSR 暂存副本在复核后发生变化")
     except KeyError as exc:  # pragma: no cover — programming error
         return _block_item(
             state, goal, current, lease, f"复核结果缺少参数：{exc}")
+    except ItemBlocked as exc:
+        return _block_item(state, goal, current, lease, str(exc))
     # One physical PAN may only be executed by one repair Item at a time,
     # across plans and across the tool-panel / Agent entries.  The claim is a
     # single SQLite transaction; a check-then-write in Python would still let
@@ -1947,6 +2057,9 @@ def _settle(state, goal, lease, cfg, mode):
 
     # Every item reached a terminal/parked state. Verify, then aggregate with
     # the documented priority: BLOCKED > FAILED > COMPLETED.
+    active_copy = getattr(state, "nosr_copy", None)
+    if active_copy and active_copy[0] == gid:
+        return False
     if goal["status"] != "VERIFYING":
         goal = store.transition_goal(
             gid, "VERIFYING", phase="verifying", next_wake_at=time.time(),
@@ -2049,9 +2162,10 @@ def _process_batch(state, claimed, lease, allow_produce, choose=None):
         _reconcile_submitting(state, goal, lease)
         _collect_detections(state, goal, lease, cfg)
         recheck_created = _monitor_due(state, goal, lease, cfg, mode)
+        waiting_nosr = _sync_nosr_stage(state, goal, lease, produce=allow_produce) if mode == "production" else ()
         produced = False
         if allow_produce and not recheck_created:
-            produced = _produce_one(state, goal, lease, cfg, choose=choose)
+            produced = _produce_one(state, goal, lease, cfg, choose=choose, waiting_nosr=waiting_nosr)
         _settle(state, goal, lease, cfg, mode)
         return {"produced": bool(produced)}
     except LeaseLost:
@@ -2106,9 +2220,13 @@ def _process_batch_monitor(state, claimed, lease):
         else:
             _collect_detections(state, goal, lease, cfg)
         _monitor_due(state, goal, lease, cfg, mode)
+        if mode == "production":
+            _sync_nosr_stage(state, goal, lease, produce=False)
 
         counts = store.goal_item_status_counts(goal["goal_id"])
         active = any(counts.get(name) for name in MONITORED)
+        copy = getattr(state, "nosr_copy", None)
+        active = active or bool(goal["status"] == "CANCELLED" and copy and copy[0] == goal["goal_id"])
         cp = dict(goal["checkpoint"])
         was_done = bool(cp.get("monitoring_done"))
         status_changed = cp.get("monitor_status") != goal["status"]
@@ -2263,3 +2381,9 @@ async def batch_loop(state):
         io_executor = getattr(state, "batch_io_executor", None)
         if io_executor is not None:
             io_executor.shutdown(wait=False, cancel_futures=True)
+        copy_executor = getattr(state, "nosr_copy_executor", None)
+        if copy_executor is not None:
+            copy = getattr(state, "nosr_copy", None)
+            if copy:
+                copy[4].set()
+            copy_executor.shutdown(wait=False, cancel_futures=True)

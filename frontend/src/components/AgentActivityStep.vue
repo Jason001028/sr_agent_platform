@@ -7,7 +7,7 @@ const stateLabels = {running:'执行中',success:'已完成',failed:'失败',int
   <li class="activity-step" :data-state="step.state">
     <div class="step-line">
       <span class="trace-node" :class="{active:step.state === 'running',issue:step.state === 'failed' || step.state === 'interrupted'}" :aria-label="stateLabels[step.state]" role="img"></span>
-      <span class="step-label" :title="`${step.label} · ${step.summary}`">{{ step.label }}<span class="step-summary"> · {{ step.summary }}</span></span>
+      <span class="step-label" :title="`${step.label} · ${step.summary}`">{{ step.label }}<span class="step-summary" :title="step.summaryTitle"> · {{ step.summary }}</span></span>
     </div>
     <details v-if="developerMode" class="step-details"><summary>开发者详情</summary>
       <pre>{{ JSON.stringify({tool:step.name,call_id:step.callId,arguments:step.args,result:step.result}, null, 2) }}</pre>

@@ -26,15 +26,18 @@ import AppIcon from './AppIcon.vue';
 import { installButtonPress } from '../lib/buttonPress';
 import { batchDisplayProgress, displayPercent } from '../lib/batchDisplayProgress';
 import { repairPlanData } from '../lib/repairPlan';
+import { agentRepairSettings } from '../lib/agentRepairSettings';
+import AgentRepairToolCalls from './AgentRepairTrajectory.vue';
 import { requestQualityReview, requestMaskReview } from '../lib/batchDock';
 import router from '../router';
 import { goalStatusLabel, itemStatusLabel } from '../lib/batchUi';
 import { missionItemLabel, terminalMission } from '../lib/batchMission';
 import type { MissionItem } from '../lib/batchMission';
 
-const props = defineProps<{ data: unknown; standalone?: boolean }>();
-const emit = defineEmits<{ back: []; planRevised: [plan: RepairPlan] }>();
-const developerMode = isDeveloperMode();
+const props = defineProps<{ data: unknown; autoStart?: boolean; timelineTarget?: string; developerMode?: boolean }>();
+const emit = defineEmits<{ planRevised: [plan: RepairPlan]; toolCallsUpdated: [] }>();
+const executionBody = ref<HTMLElement | null>(null);
+const developerMode = computed(() => props.developerMode ?? isDeveloperMode());
 const chat = useChatStore();
 const batch = useBatchGoalStore();
 const viewer = useViewerStore();
@@ -66,6 +69,7 @@ let statusGen = 0;
 let targetGen = 0;
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 let disposed = false;
+let autoStartRequested = false;
 
 const planId = computed(() => plan.value?.plan_id ?? '');
 const linkedSnapshot = computed(() => {
@@ -94,10 +98,6 @@ const todoLabels: Record<string, string> = {
   SUCCEEDED: '已通过', SKIPPED: '已跳过', NO_ISSUE: '无需修复',
   BLOCKED: '受阻', FAILED: '失败', RETRY_WAIT: '等待重试', REVIEW_REJECTED: '人工驳回',
 };
-const actionLabels: Record<string, string> = {
-  detect_repair_item: '检测', build_repair_mask: '生成 Mask', submit_repair_item: '提交 SR',
-  verify_repair_output: '验证产物', assess_repair_effect: '效果回检',
-};
 function todoLabel(row: BatchTodo): string {
   return todoLabels[row.phase ?? ''] ?? todoLabels[row.status] ?? row.status;
 }
@@ -110,20 +110,6 @@ function todoGroup(row: BatchTodo): 'active' | 'attention' | 'ended' {
   if (['SUCCEEDED', 'SKIPPED', 'NO_ISSUE', 'FAILED', 'REVIEW_REJECTED'].includes(row.status)) return 'ended';
   return 'active';
 }
-const decisionsByItem = computed(() => {
-  const decisions = new Map<string, NonNullable<typeof batch.events>>();
-  if (!linkedSnapshot.value) return decisions;
-  for (const event of batch.events ?? []) {
-    const id = event.payload?.item_id;
-    if (event.event_type !== 'agent_action_selected' || typeof id !== 'string') continue;
-    const rows = decisions.get(id) ?? [];
-    rows.push(event);
-    decisions.set(id, rows);
-  }
-  return decisions;
-});
-const latestAgentEvent = computed(() => (linkedSnapshot.value ? batch.events ?? [] : [])
-  .slice().reverse().find(event => ['agent_action_selected', 'agent_decision_failed'].includes(event.event_type)));
 const effectCounts = computed(() => {
   const rechecks = linkedSnapshot.value?.todos?.flatMap(row => row.effect_review ? [row.effect_review] : []) ?? [];
   return {
@@ -147,10 +133,6 @@ function describeTodo(row: BatchTodo): string {
     for (const [key, metric] of Object.entries(region.metrics ?? {})) {
       lines.push(`${metricLabels[key] ?? key} ${metric.before.toFixed(2)} → ${metric.after.toFixed(2)}`);
     }
-  }
-  for (const entry of decisionsByItem.value.get(row.item_id) ?? []) {
-    const action = String(entry.payload.action);
-    lines.push([actionLabels[action] ?? action, entry.payload.reason].filter(Boolean).join(' · '));
   }
   return lines.join('\n');
 }
@@ -252,7 +234,7 @@ const historyExpanded = ref(false);
 const canExclude = computed(() => conflicts.value.some(r => r.code === 'pan_backup_exists' && r.scene_ref && Number.isInteger(r.line)));
 const copyNotice = ref('');
 const primaryFeedback = computed(() => preparing.value ? '正在重新准备…'
-  : action.value === 'starting' ? '正在确认并启动…'
+  : action.value === 'starting' ? (autoLaunching.value ? '正在自动启动…' : '正在确认并启动…')
   : !synchronized.value ? '正在核对计划…'
   : error.value ? '操作失败 · 点击重试'
   : canExclude.value && planStatus.value === 'BLOCKED' ? '排除冲突项并重新准备' : '确认并启动');
@@ -269,8 +251,10 @@ async function excludeConflicts() {
       exclusions: [...(p.exclusions ?? []), ...conflicts.value.filter(r => r.code === 'pan_backup_exists' && r.scene_ref && Number.isInteger(r.line)).map(r => ({ line: r.line!, reason: '已有 PAN 备份' }))],
       mode: 'production', strategy: p.strategy_policy ?? 'automatic',
       detection_method: (p.strategy.detection_method === 'existing' ? 'absdiff' : p.strategy.detection_method) as 'absdiff' | 'ssim' | 'smart',
-      mask_policy: p.mask?.policy === 'existing' ? 'existing' : 'auto', mask_path: p.mask?.path, title: p.title });
+      mask_policy: p.mask_policy ?? (p.mask?.policy === 'existing' ? 'existing' : 'auto'), mask_path: p.mask?.path,
+      auto_approve_mask: p.auto_approve_mask, title: p.title });
     if (disposed) return;
+    autoStartRequested = true;
     resetTargets(); plan.value = next; status.value = null; synchronized.value = false;
     emit('planRevised', next);
     detailsOpen.value = false; conflictsOpen.value = false;
@@ -381,9 +365,6 @@ const productReviews = computed(() => {
 });
 const productPending = computed(() => status.value?.quality_products?.pending ?? 0);
 const noCandidatePending = computed(() => Math.max(0, pendingReviews.value - productPending.value));
-const taskTodos = computed(() => linkedSnapshot.value?.todos ?? []);
-const todoFinished = computed(() => taskTodos.value.filter(row => todoGroup(row) === 'ended').length);
-const todoAttention = computed(() => taskTodos.value.filter(row => todoGroup(row) === 'attention').length);
 /** Backend-owned acceptance verdict; never inferred from a green status. */
 const qualityPassed = computed(() => status.value?.acceptance?.quality_passed === true);
 /** Only a scene with a bound quality review that still needs a decision is
@@ -504,16 +485,15 @@ async function refreshStatus(): Promise<void> {
 }
 async function linkBatch(): Promise<void> {
   if (!goalId.value || batch.goalId === goalId.value) return;
-  if (batch.goalId && !props.standalone) return;
-  try {
-    if (batch.goalId) await batch.selectGoal(goalId.value);
-    else await batch.attach(goalId.value);
-  } catch { /* REST status remains usable */ }
+  if (batch.goalId) return;
+  try { await batch.attach(goalId.value); } catch { /* REST status remains usable */ }
 }
-async function startPlan(): Promise<void> {
+const autoLaunching = ref(false);
+async function startPlan(automatic = false): Promise<void> {
   const current = plan.value;
   if (!current || action.value !== 'idle' || !synchronized.value || !canAct.value) return;
   action.value = 'starting';
+  autoLaunching.value = automatic;
   error.value = '';
   try {
     const sessionId = await ensureSession();
@@ -536,28 +516,35 @@ async function startPlan(): Promise<void> {
     if (disposed || chat.sessionId !== sessionId || planId.value !== current.plan_id) return;
     plan.value = startedResult.plan;
     goalId.value = startedResult.goal.goal_id;
-    await batch.selectGoal(startedResult.goal.goal_id);
+    await batch.selectGoal(startedResult.goal.goal_id, {
+      autoPreview: startedResult.reused === false && agentRepairSettings.value.auto_play_preview,
+    });
     await refreshStatus();
   } catch (e) {
     if (e instanceof HttpError && e.status === 409) {
       await refreshStatus();
       error.value = '计划状态已变化，已重新读取；请核对后再次确认。';
     } else {
-      error.value = e instanceof Error ? e.message : String(e);
+      error.value = (automatic ? '自动启动失败：' : '') + (e instanceof Error ? e.message : String(e));
     }
-  } finally { action.value = 'idle'; }
+  } finally { action.value = 'idle'; autoLaunching.value = false; }
 }
-async function openTask(): Promise<void> {
+async function focusProgress(): Promise<void> {
   const gid = goalId.value;
   if (!gid) return;
   if (batch.goalId !== gid) {
     const ok = await batch.selectGoal(gid);
     if (!ok) { error.value = '无法打开该任务，请稍后重试。'; return; }
   }
-  await router.push('/viewer');
+  if (disposed || goalId.value !== gid) return;
   await nextTick();
-  window.dispatchEvent(new CustomEvent('batch-task-open',
-    { detail: { section: 'monitor' } }));
+  const target = executionBody.value;
+  if (target) {
+    const details = target.querySelector<HTMLDetailsElement>('.execution-details');
+    if (details) details.open = true;
+  }
+  target?.focus({ preventScroll: true });
+  target?.scrollIntoView?.({ block: 'start' });
 }
 async function openMaskReview(itemId?: string): Promise<void> {
   const canOpen = () => itemId ? needsItemMaskReview(itemId) : needsMaskReview.value;
@@ -658,6 +645,12 @@ function onVisibility(): void {
   if (document.visibilityState === 'visible') scheduleStatusRefresh(0);
 }
 watch(() => linkedSnapshot.value?.goal.last_seq, () => scheduleStatusRefresh());
+watch(() => [goalId.value, settled.value, batch.goalId, batch.syncState] as const,
+  ([id, done, active, sync], _, onCleanup) => {
+    if (!id || done || id === active && sync === 'live') return;
+    const timer = setInterval(() => scheduleStatusRefresh(0), 3500);
+    onCleanup(() => clearInterval(timer));
+  }, { immediate: true });
 watch(() => batch.goalId, (value) => {
   if (value && value === goalId.value) scheduleStatusRefresh(100);
 });
@@ -672,6 +665,14 @@ watch(() => props.data, value => {
   synchronized.value = false;
   void refreshStatus();
 });
+// The chat store freezes launch intent on receipt of a fresh tool result.
+// Keep that intent while the model continues to stream and status loads.
+watch(() => [props.autoStart, synchronized.value, canAct.value, started.value] as const, () => {
+  if (autoStartRequested || disposed || !props.autoStart
+      || !synchronized.value || !canAct.value || started.value) return;
+  autoStartRequested = true;
+  void startPlan(true);
+}, { immediate: true });
 onMounted(() => {
   document.addEventListener('visibilitychange', onVisibility);
   void refreshStatus();
@@ -685,14 +686,10 @@ onBeforeUnmount(() => {
 });
 </script>
 <template>
-  <RepairEvidenceEntry v-if="goalId && !standalone" :goal-id="goalId" />
-  <div v-if="plan" ref="cardRoot" class="repair-task" :class="{ 'standalone-task': standalone }"
+  <RepairEvidenceEntry v-if="goalId" :goal-id="goalId" />
+  <div v-if="plan" ref="cardRoot" class="repair-task"
     data-e2e="agent-repair-task" :data-stage="stage">
-    <header v-if="standalone" class="standalone-head">
-      <div><button type="button" class="task-back" @click="emit('back')">‹ 返回聊天</button><h2>修复待办</h2></div>
-      <span class="state" :class="stateTone">{{ goalStatus === 'RUNNING' && stateLabel === '已启动' ? '执行中' : stateLabel }}</span>
-    </header>
-    <header v-else class="task-head">
+    <header class="task-head">
       <span class="task-title"><AppIcon v-if="stage !== 'plan'" name="layers" :size="18" tint /><strong>{{ stage === 'done' ? '修复结果' : stage === 'running' ? '自动修复' : '修复计划' }} · {{ targetCount }} 景</strong></span>
       <span class="task-state">
         <span class="state-ring" :class="stateIcon" :data-state-icon="stateIcon" data-e2e="repair-state-ring" aria-hidden="true">
@@ -712,8 +709,7 @@ onBeforeUnmount(() => {
 
     <Transition name="repair-stage" mode="out-in">
     <section v-if="stage === 'plan'" :key="planId" class="plan-body">
-      <strong v-if="standalone">{{ scopeLabel }} · {{ targetCount }} 景</strong>
-      <p class="plan-meta"><template v-if="!standalone">{{ scopeLabel }} · </template>{{ detectionLabel }} · {{ plan.strategy.mask === 'existing' ? '已有掩码' : '自动掩码' }}</p>
+      <p class="plan-meta">{{ scopeLabel }} · {{ detectionLabel }} · {{ plan.strategy.mask === 'existing' ? '已有掩码' : '自动掩码' }}</p>
       <p v-if="plan.skipped_completed?.length" class="plan-meta">已跳过 {{ plan.skipped_completed.length }} 景已有 PAN 备份的影像</p>
       <button v-if="historical" class="list-link" :aria-expanded="historyExpanded" @click="historyExpanded = !historyExpanded">{{ historyExpanded ? '收起历史计划' : '查看历史计划' }}</button>
       <template v-if="!historical || historyExpanded">
@@ -740,7 +736,7 @@ onBeforeUnmount(() => {
       <p v-if="error" class="warn action-error" role="alert">{{ error }}</p>
       <div v-if="canAct" class="actions plan-actions">
         <button class="primary" data-e2e="repair-plan-start"
-          :aria-busy="action === 'starting'" :disabled="action !== 'idle' || !synchronized" @click="startPlan">
+          :aria-busy="action === 'starting'" :disabled="action !== 'idle' || !synchronized" @click="startPlan()">
           <Transition name="button-label" mode="out-in"><span :key="primaryFeedback">{{ primaryFeedback }}</span></Transition>
         </button>
       </div>
@@ -749,42 +745,36 @@ onBeforeUnmount(() => {
       </template>
     </section>
 
-    <section v-else :key="stage" class="execution-body">
-      <RepairLandSummary v-if="!standalone && plan.land_constraint" :plan="plan" />
+    <section v-else :key="stage" ref="executionBody" class="execution-body" tabindex="-1" aria-label="修复进度">
+      <RepairLandSummary v-if="plan.land_constraint" :plan="plan" />
       <p v-if="plan.mode !== 'production'" class="mode-note">Demo / Fake SR · 不产生真实修复成果</p>
-      <p v-if="!standalone && currentItem" class="current" :title="`${currentItem.name} · ${currentItem.label}`">
+      <p v-if="currentItem" class="current" :title="`${currentItem.name} · ${currentItem.label}`">
         <span class="current-prefix">当前影像</span><span class="current-name">{{ currentItem.name }}</span>
       </p>
-      <p v-if="!standalone" class="overall-summary" data-e2e="repair-overall-summary">
+      <p class="overall-summary" data-e2e="repair-overall-summary">
         <template v-if="primaryPercent != null">已处理 <b>{{ processed.done }} / {{ processed.total }}</b> 景 · {{ Math.round(primaryPercent) }}%</template>
         <template v-else>{{ processed.known ? '无适用影像' : '统计中' }}</template>
       </p>
-      <p v-if="!standalone && (effectCounts.measured || effectCounts.blocked || effectCounts.waiting)" class="overall-summary">
+      <p v-if="effectCounts.measured || effectCounts.blocked || effectCounts.waiting" class="overall-summary">
         效果回检 · {{ effectCounts.measured }} 景已测量 · {{ effectCounts.blocked }} 景受阻 · {{ effectCounts.waiting }} 景待完成
       </p>
-      <p v-if="latestAgentEvent?.event_type === 'agent_decision_failed' && !terminalMission(goalStatus)" class="note">
-        Agent 暂未取得有效动作，稍后重试。
-      </p>
+      <details class="execution-details" v-if="counts || linkedSnapshot?.todos">
+        <summary>逐景进度</summary>
       <AgentTodoList v-if="linkedSnapshot?.todos" :rows="linkedSnapshot.todos"
         :label="todoLabel" :describe="describeTodo" :group="todoGroup">
-        <template v-if="!standalone" #actions>
-          <button v-if="canTogglePause" :disabled="!!pausePending || cancelBusy || batch.controlBusy" @click="togglePause">
-            {{ pauseLabel }}
-          </button>
-        </template>
         <template #default="{ row }">
           <button v-if="needsItemMaskReview(row.item_id)" :disabled="maskReviewOpening" title="复核候选区域"
             @click="openMaskReview(row.item_id)">复核</button>
           <button v-else-if="row.effect_review?.regions?.[0] && items.some(item => item.item_id === row.item_id && item.quality_review_id)"
             @click="startReview(row.item_id, row.effect_review.regions[0].region_id, true)">查看区域</button>
-          <button v-else-if="standalone && row.status === 'AWAITING_REVIEW' && items.some(item => item.item_id === row.item_id && item.quality_review_id)"
+          <button v-else-if="row.status === 'AWAITING_REVIEW' && items.some(item => item.item_id === row.item_id && item.quality_review_id)"
             @click="startReview(row.item_id)">前往复核</button>
           <button v-else-if="items.some(item => item.item_id === row.item_id && item.output_path)"
             @click="openResult(items.find(item => item.item_id === row.item_id))">查看成果</button>
         </template>
       </AgentTodoList>
-      <p v-else-if="standalone && !error" class="note" role="status">正在读取逐景状态…</p>
-      <BatchProgressTracks v-if="!standalone" :counts="counts" :demo="plan.mode !== 'production'" />
+      <BatchProgressTracks :counts="counts" :demo="plan.mode !== 'production'" />
+      </details>
       <div v-if="stage === 'done' && regionCounts?.total" class="counts review-regions" data-e2e="repair-region-counts">
         <span>待审区域 <b>{{ regionCounts.pending }}</b></span>
         <span>区域通过 <b>{{ regionCounts.approved }}</b></span>
@@ -801,17 +791,16 @@ onBeforeUnmount(() => {
           <div v-if="rejectedReviews"><dt>已驳回景</dt><dd>{{ rejectedReviews }}</dd></div>
         </dl>
       </template>
-      <p v-if="goalStatus === 'CANCELLED' && !settled" class="note">
+      <p v-if="goalStatus === 'CANCELLED' && !settled && !controlNotice" class="note">
         已请求取消；已接收的{{ plan.mode === 'production' ? ' SR ' : '演示' }}作业仍由后台监控到终态。
       </p>
       <p v-if="error" class="warn">{{ error }}</p>
       <p v-if="controlNotice" class="note" role="status">{{ controlNotice }}</p>
-      <div v-if="goalId || resultItem || reviewTarget" class="actions"
-        :class="{ 'standalone-footer': standalone }" data-e2e="repair-task-actions">
-        <span v-if="standalone && linkedSnapshot?.todos" class="standalone-count">
-          已结束 {{ todoFinished }} / {{ targetCount }} 景<span v-if="todoAttention"> · 待处理 {{ todoAttention }} 景</span>
-        </span>
-        <button v-if="!standalone && goalId" class="primary" @click="openTask">查看进度</button>
+      <div v-if="goalId || resultItem || reviewTarget" class="actions" data-e2e="repair-task-actions">
+        <button v-if="goalId" class="primary" @click="focusProgress">查看进度</button>
+        <button v-if="canTogglePause" :disabled="!!pausePending || cancelBusy || batch.controlBusy" @click="togglePause">
+          {{ pauseLabel }}
+        </button>
         <HoldConfirmButton v-if="canStop" :key="goalId" class="stop-task" data-e2e="repair-stop-task"
           label="中止任务" :disabled="cancelBusy || !!pausePending || batch.controlBusy" @confirm="stopTask">
           {{ cancelBusy ? '正在中止…' : '中止任务' }}
@@ -822,22 +811,21 @@ onBeforeUnmount(() => {
       </div>
     </section>
     </Transition>
-    <RepairEvidenceEntry v-if="standalone && goalId" :goal-id="goalId" />
     <Teleport to="body"><Transition name="repair-drawer">
       <RepairTargetDrawer v-if="drawerOpen" :rows="targetRows" :total="plan.targets.total" :loading="drawerLoading" :error="drawerError" @close="drawerOpen = false" />
     </Transition></Teleport>
   </div>
+  <Teleport v-if="timelineTarget && goalId && status?.goal?.execution_owner === 'local_agent'" defer :to="timelineTarget">
+    <AgentRepairToolCalls :key="goalId" :goal-id="goalId" :live-events="batch.events ?? []"
+      :following="batch.goalId === goalId && batch.syncState === 'live'" :settled="settled" :developer-mode="developerMode"
+      :session-key="chat.sessionId" :rows="linkedSnapshot?.todos ?? items" @updated="emit('toolCallsUpdated')" />
+  </Teleport>
 </template>
 <style scoped>
-.repair-task.standalone-task { border:0; border-radius:0; margin:0; padding:16px; background:var(--surface,#fff); gap:14px; }
-.standalone-head { display:flex; justify-content:space-between; align-items:end; gap:8px; padding-bottom:12px; border-bottom:1px solid var(--tb-border,#e4ebe6); }
-.standalone-head h2 { margin:6px 0 0; font-size:20px; line-height:1.25; }
-.standalone-task .task-back { border:0; padding:0; background:none; color:var(--tb-primary,#166c67); }
-.standalone-task :deep(.todo-viewport) { margin-block:0; max-height:15rem; }
-.standalone-count { margin-inline-end:auto; color:var(--tb-muted,#566960); }
-.standalone-footer .stop-task { margin-inline-start:auto; }
 .repair-task { display:grid; grid-template-columns:minmax(0,1fr); gap:10px; margin:6px 0; padding:12px; border:1px solid var(--tb-border); border-radius:12px; font-size:12px; background:var(--tb-bg); color:var(--tb-fg); min-width:0; width:100%; max-width:100%; box-sizing:border-box; overflow:hidden; }
 .plan-body, .execution-body { min-width:0; display:grid; gap:10px; }
+.execution-details > summary { color:var(--tb-muted); cursor:pointer; width:fit-content; }
+.execution-details[open] > summary { margin-bottom:6px; }
 .plan-facts { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:12px 16px; margin:0; }
 .plan-facts div { min-width:0; } .plan-facts dt { font-size:10px; color:var(--tb-muted); margin-bottom:3px; }
 .plan-facts dd { margin:0; font-weight:500; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .plan-facts dd.demo { color:var(--tb-active-fg); }

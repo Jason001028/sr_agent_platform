@@ -6,9 +6,9 @@ export { AGENT_REPAIR_PROMPT } from './repairPrompt';
 
 /** One-click handoff from the Viewer tool panel into the Agent repair flow.
  *
- *  It only prepares work: the Agent must call ``prepare_repair`` and let the
- *  real user confirm the plan card.  ``start_repair`` remains server-gated by
- *  that confirmation, so this prompt cannot auto-approve anything. */
+ *  The Agent only prepares the plan.  The plan card starts it immediately when
+ *  the live turn and the Agent setting allow it; with「启动前确认」turned on the
+ *  real user confirms first.  The Agent never calls ``start_repair`` itself. */
 
 export interface BatchAgentHandoff {
   text: string;

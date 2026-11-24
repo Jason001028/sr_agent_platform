@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """PAN repair adapter. Python 3.6 compatible; GDAL stays in the SR environment.
 
-Inference runs in a private scene with NOSR linked as its input. Original PAN,
+Inference runs in a private scene with an independent NOSR copy. Original PAN,
 NOSR and metadata are untouched until a validated candidate is published.
 """
 import argparse
@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+import errno
 from pathlib import Path
 import runpy
 import shutil
@@ -296,6 +297,10 @@ def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
     if existing_backup is not None:
         raise ValueError('Backup exists; refusing to overwrite ' + str(existing_backup))
     expected = json.loads(root.findtext('RepairRevision') or '{}')
+    stage_node = root.find('RepairNOSRStage')
+    stage = json.loads(stage_node.text or '{}') if stage_node is not None else None
+    if stage_node is not None and not stage:
+        raise ValueError('Missing NOSR staging descriptor')
     proof_node = root.find('LandConstraint')
     proof = json.loads(proof_node.text or '{}') if proof_node is not None else None
     if proof_node is not None:
@@ -313,8 +318,33 @@ def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
     fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     os.close(fd)
     work = Path(tempfile.mkdtemp(prefix='.repair-', dir=str(debug)))
+    aliases = []
+    local_copy = None
     try:
         body_sig, nosr_sig, mask_sig = signature(body), signature(nosr), signature(mask)
+        nosr_ctime = nosr.stat().st_ctime_ns
+        frozen_source = nosr
+        if stage:
+            source_copy = Path(stage['path'])
+            # A Slurm sandbox may contain a separate copy of the same scene.
+            frozen_source = Path(stage.get('source_path') or raw_nosr).resolve(strict=True)
+            if (source_copy.resolve(strict=True) != source_copy or not source_copy.is_file()
+                    or os.path.samefile(str(source_copy), str(nosr))
+                    or os.path.samefile(str(source_copy), str(frozen_source))
+                    or os.path.samefile(str(source_copy), str(body))
+                    or frozen_source.name != nosr.name
+                    or stage['source_signature'] != signature(frozen_source)
+                    or stage['source_ctime_ns'] != frozen_source.stat().st_ctime_ns
+                    or stage['source_signature'][:2] != nosr_sig[:2]
+                    or signature(source_copy) != stage['signature'] or stage['signature'][0] != nosr_sig[0]):
+                raise ValueError('Staged NOSR or original revision changed')
+        else:
+            # Direct repair and already queued legacy configs still isolate the original inode.
+            local_copy = source_copy = work / 'nosr-input.tif'
+            shutil.copyfile(str(nosr), str(source_copy))
+            if signature(nosr) != nosr_sig or nosr.stat().st_ctime_ns != nosr_ctime:
+                raise ValueError('Original NOSR changed while copying')
+        copy_sig = signature(source_copy)
         p, n, m = _open(gdal, body), _open(gdal, nosr), _open(gdal, mask)
         pw, ph = _size(p)
         nw, nh = _size(n)
@@ -332,9 +362,17 @@ def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
         p = n = m = None
         private = work / scene.name
         private.mkdir()
-        # Preserve SC naming and RC PAN naming without renaming any original.
-        for filename in ('PAN.tif', scene.name + '.tif'):
-            os.link(str(nosr), str(private / filename))
+        # Both production names refer to the copy, including across mounts.
+        for filename in dict.fromkeys(('PAN.tif', scene.name + '.tif')):
+            alias = private / filename
+            try:
+                os.link(str(source_copy), str(alias))
+            except OSError as exc:
+                if exc.errno != errno.EXDEV:
+                    raise
+                os.symlink(str(source_copy), str(alias))
+            aliases.append(alias)
+        copy_ctime = source_copy.stat().st_ctime_ns
         meta = scene.name + '_meta.xml'
         shutil.copyfile(str(scene / meta), str(private / meta))
         lr_mask = work / 'mask_lr.tif'
@@ -358,7 +396,7 @@ def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
                 node = ET.SubElement(root, tag)
             node.text = text
         # Repair tags belong to the adapter, not the legacy inference program.
-        for tag in ('RepairMode', 'RepairNOSR', 'RepairRevision', 'LandConstraint'):
+        for tag in ('RepairMode', 'RepairNOSR', 'RepairRevision', 'RepairNOSRStage', 'LandConstraint'):
             node = root.find(tag)
             if node is not None:
                 root.remove(node)
@@ -378,9 +416,16 @@ def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
         if not verdict.ok or verdict.skip:
             raise ValueError('Inference produced no verified repair: ' + verdict.reason_text)
         candidate = work / (body_stem + '_repaired.tif')
+        if signature(source_copy) != copy_sig or source_copy.stat().st_ctime_ns != copy_ctime:
+            raise ValueError('Staged NOSR changed during inference')
+        # Read the original in the compositor so GDAL sees its existing sidecars.
         compose(gdal, body, nosr, full_mask, verdict.output, candidate, work, constrained=proof is not None)
-        if [signature(body), signature(nosr), signature(mask)] != [body_sig, nosr_sig, mask_sig]:
+        if ([signature(body), signature(nosr), signature(mask)] != [body_sig, nosr_sig, mask_sig]
+                or nosr.stat().st_ctime_ns != nosr_ctime or signature(source_copy) != copy_sig):
             raise ValueError('Repair input changed during inference; nothing published')
+        if stage and (signature(frozen_source) != stage['source_signature']
+                      or frozen_source.stat().st_ctime_ns != stage['source_ctime_ns']):
+            raise ValueError('Original NOSR changed during inference; nothing published')
         if proof is not None:
             verify_land_constraint(proof, body, nosr, mask)
             verify_land_mask(proof, full_mask)
@@ -412,8 +457,13 @@ def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
                        + 'Run finished.\n', encoding='utf-8')
         return receipt
     finally:
-        # Retain staging files for diagnosis, including uncommitted candidates.
-        lock.unlink()
+        # Retain diagnostics and results while releasing private input aliases.
+        try:
+            for path in aliases + ([local_copy] if local_copy else []):
+                if path.exists() or path.is_symlink():
+                    path.unlink()
+        finally:
+            lock.unlink()
 
 
 def main():

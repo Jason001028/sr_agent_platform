@@ -267,6 +267,8 @@ def build_config_xml(params: dict, dataroot=None) -> str:
         add("RepairNOSR", (scene / (scene.name + "_NOSR.tif")).as_posix())
         if params.get('repair_revision'):
             add('RepairRevision', json.dumps(params['repair_revision'], sort_keys=True))
+        if params.get('nosr_stage'):
+            add('RepairNOSRStage', json.dumps(params['nosr_stage'], sort_keys=True))
         if params.get("land_constraint"):
             add("LandConstraint", json.dumps(params["land_constraint"], sort_keys=True))
     if params.get("grid_align") is False:
@@ -610,7 +612,9 @@ def exit_code_file_for(config_xml_path, job_id) -> Optional[str]:
 def task_fingerprint(params: dict) -> str:
     """Stable hash of the submit params; identical params collide, which is
     exactly what the idempotency layer keys on."""
-    canonical = json.dumps(params, sort_keys=True, ensure_ascii=False)
+    # Rebuilding a byte-identical staging copy must not change Job identity.
+    canonical = json.dumps({k: v for k, v in params.items() if k != "nosr_stage"},
+                           sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 

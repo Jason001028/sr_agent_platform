@@ -35,8 +35,12 @@ export interface BatchOverlayCandidate {
   candidate_id: string;
   kind: 'bbox' | 'polygon' | string;
   bbox?: [number, number, number, number] | null;
+  /** Polygon vertices in source pixels. Adaptive masks use 4–6 vertices. */
   points?: XY[] | null;
   label?: string | null;
+  score?: number | null;
+  /** Present when the backend used the shared adaptive polygon rasterizer. */
+  rasterizer?: string | null;
 }
 
 export interface BatchOverlayDoc {
@@ -51,6 +55,26 @@ export interface BatchOverlayDoc {
   detector_version?: string | null;
   candidates: BatchOverlayCandidate[];
   overlay: { url: string; width: number; height: number; sha256?: string };
+}
+
+export type BatchCandidatePreview = Pick<BatchOverlayDoc, 'source' | 'provenance' | 'candidates'>;
+
+/** Detection-only coordinates are used for the animation, never for submission. */
+export function detectionCandidatePreview(
+  source: Partial<BatchOverlaySource> | undefined,
+  detection: { provenance?: string; candidates?: unknown[] } | undefined,
+): BatchCandidatePreview | null {
+  if (!source?.image_key || !source.revision || !source.width || !source.height
+      || !Number.isSafeInteger(source.width) || !Number.isSafeInteger(source.height)
+      || detection?.provenance !== 'real' || !Array.isArray(detection.candidates)
+      || !detection.candidates.length) return null;
+  const candidates = detection.candidates as BatchOverlayCandidate[];
+  if (!candidates.every(candidate => candidate?.kind === 'polygon' && typeof candidate.candidate_id === 'string'
+      && Array.isArray(candidate.points) && candidate.points.length >= 3
+      && candidate.points.every(p => Array.isArray(p) && p.length === 2 && p.every(isFiniteNumber)
+        && p[0] >= 0 && p[0] < source.width! && p[1] >= 0 && p[1] < source.height!))) return null;
+  return { source: { image_key: source.image_key, revision: source.revision, width: source.width, height: source.height },
+    provenance: detection.provenance, candidates };
 }
 
 export interface BatchOverlayParams {
@@ -145,7 +169,7 @@ export function validateBatchOverlayDoc(
  * 源 TIFF 的原尺寸本来就不同；overlay 覆盖的是整幅影像范围，按屏幕矩形铺开。
  */
 export function overlayMatchesImage(
-  doc: BatchOverlayDoc | null | undefined,
+  doc: Pick<BatchOverlayDoc, 'source'> | null | undefined,
   identity: Pick<ImageRef, 'image_key'> | null | undefined,
 ): boolean {
   if (!doc || !identity || !identity.image_key) return false;

@@ -137,7 +137,8 @@ function maskRefusal(reg: DiffRegion) {
               type="button"
               class="dc-act"
               :disabled="!!maskRefusal(reg)"
-              :title="maskRefusal(reg) || (diff.result.method === 'smart' ? '预览并审批此区域' : '把该区域轮廓加入结果对应影像的人工掩码')"
+              :title="maskRefusal(reg) || (diff.result.method === 'smart' && diff.autoDrawApproval
+                ? '预览并审批此区域' : '把该区域轮廓加入结果对应影像的人工掩码')"
               @click="diff.addRegionToMask(reg.id)"
             >加入修复掩码</button>
             <button

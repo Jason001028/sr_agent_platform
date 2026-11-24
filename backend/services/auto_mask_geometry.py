@@ -22,6 +22,7 @@ from backend.services.mask import rasterize_polygons
 
 VERSION = "auto-diff-v2-repair"
 MAX_REGIONS = 16
+MAX_BATCH_REGIONS = 2048
 
 
 def _measure(points, original):
@@ -53,8 +54,8 @@ def build_auto_mask(labels, regions, *, margin="standard", limit=MAX_REGIONS, po
 
     if margin not in ("tight", "standard", "loose"):
         raise ValueError("autoMaskMargin must be tight, standard or loose")
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 512:
-        raise ValueError("auto mask region limit must be in 1..512")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_BATCH_REGIONS:
+        raise ValueError(f"auto mask region limit must be in 1..{MAX_BATCH_REGIONS}")
     policy = adaptive_polygon.geometry_policy(policy)
     if policy == adaptive_polygon.POLICY:
         return _build_adaptive(labels, regions, margin, limit)
@@ -158,6 +159,7 @@ def _build_adaptive(labels, regions, margin, limit):
     output = []
 
     extra_regions = limit - min(limit, len(regions))
+    small_fits = {}
 
     def fit(members, partition=None):
         x0 = max(0, min(r.x for r in members) - 24)
@@ -175,10 +177,32 @@ def _build_adaptive(labels, regions, margin, limit):
         target_width = max(r.x+r.w for r in members) - min(r.x for r in members)
         target_height = max(r.y+r.h for r in members) - min(r.y for r in members)
         radius = adaptive_polygon.margin_radius(count, target_width, target_height, margin)
-        options, tested = adaptive_polygon.enclose(target, radius, _measure)
-        for option in options:
-            option["points"] = [[x+x0, y+y0] for x, y in option["points"]]
-        return options, tested, count
+        # Equal local bitmaps have the same legal bounds and greedy solution.
+        # Keep the cache local and bounded; source coordinates are translated on read.
+        key = (target.shape, radius, np.packbits(target).tobytes()) if target.size <= 4096 else None
+        fit_result = small_fits.get(key)
+        if fit_result is None:
+            fit_result = adaptive_polygon.enclose(target, radius, _measure)
+            if not fit_result[0] and count:
+                rows = np.flatnonzero(target.any(axis=1))
+                columns = np.flatnonzero(target.any(axis=0))
+                top, bottom = map(int, rows[[0, -1]])
+                left, right = map(int, columns[[0, -1]])
+                area = (right-left+1)*(bottom-top+1)
+                if right > left and bottom > top and area <= count * (1 + adaptive_polygon.CONFIG.excess_review):
+                    points = [[left, top], [right, top], [right, bottom], [left, bottom]]
+                    coverage, footprint, ratio = _measure(points, target)
+                    if coverage == footprint == 1:
+                        fit_result = ([{"points": points, "vertex_count": 4,
+                            "coverage_ratio": coverage, "supersample_coverage_ratio": footprint,
+                            "margin_coverage_ratio": 1., "area_ratio": ratio, "excess_area_ratio": ratio-1.,
+                            "polygon_area_px": area, "target_area_px": count, "buffer_px": 0.,
+                            "fallback": "verified_analysis_rectangle"}], fit_result[1]+1)
+            if key is not None and len(small_fits) < 256:
+                small_fits[key] = fit_result
+        options, tested = fit_result
+        translated = [{**option, "points": [[x+x0, y+y0] for x, y in option["points"]]} for option in options]
+        return translated, tested, count
 
     for group in group_regions(labels, regions[:limit]):
         tick = time.perf_counter()
@@ -248,11 +272,14 @@ def _build_adaptive(labels, regions, margin, limit):
                                     max(r.x+r.w for r in members), max(r.y+r.h for r in members)],
                 "geometry_method": "supporting_half_planes", "evaluated_candidates": attempts,
                 "buffer_space": "analysis_pixel",
-                "fallback": "margin_reduced" if options and not best["buffer_px"] else None,
+                "fallback": best.get("fallback") or ("margin_reduced" if options and not best["buffer_px"] else None),
                 "needs_review": bool(diagnostics),
                 "diagnostics": diagnostics, "drawable": bool(options),
                 "holes": {"count": 0, "area_px": 0, "filled": False, "large": False},
                 "elapsed_ms": round((time.perf_counter()-tick)*1000, 2)})
+            if len(options) > 1:
+                output[-1]["_projection_alternatives"] = [option["points"] for option in options[1:9]
+                    if option["polygon_area_px"] <= 1.10 * best["polygon_area_px"]]
             if partition:
                 output[-1]["analysis_partition"] = list(partition)
                 r = members[0]
@@ -265,6 +292,73 @@ def _build_adaptive(labels, regions, margin, limit):
             "processed_regions": min(len(regions), limit), "detected_regions": min(len(regions), limit),
             "unprocessed_regions": max(0, len(regions)-limit), "truncated": len(regions)>limit,
             "elapsed_ms": round((time.perf_counter()-start)*1000, 2)}
+
+
+def _adaptive_source_polygon(polygon, alternatives, source, evidence, top, left):
+    sx, sy = source["transform"]["scale"]
+    ox, oy = source["transform"]["offset"]
+    sw, sh = source["source_size"]
+
+    def project(values, scale, offset, size):
+        return np.clip(np.floor(values * scale + offset + .5).astype(np.int64), 0, size - 1)
+
+    doc = {"image_id": source["image_id"], "points": [], "coordinate_space": "source_pixel",
+           "coverage_ratio": 0., "drawable": False, "coverage_scope": "projected_analysis_pixel_centres"}
+    evidence_rows = np.flatnonzero(evidence.any(axis=1))
+    if not len(evidence_rows) or sx <= 0 or sy <= 0:
+        return {**doc, "reason": "source_projection_empty"}
+    sample_rows = project(evidence_rows + top, sy, oy, sh)
+    seen = set()
+    first_error = None
+
+    def check(points):
+        if len(points) < 4 or len(points) > 6:
+            return "source_projection_degenerate"
+        error = adaptive_polygon.verify_export(points, sh, rasterize_polygons)
+        if error:
+            return error
+        # Export verification established that these spans match the TIFF rasterizer.
+        ymin = min(p[1] for p in points)
+        ymax = max(p[1] for p in points)
+        if sample_rows[0] < ymin or sample_rows[-1] > ymax:
+            return "source_projection_coverage"
+        span_left, span_right = adaptive_polygon.convex_spans(points, sample_rows)
+        for start in range(0, len(evidence_rows), 128):
+            block_rows = evidence_rows[start:start+128]
+            dy, dx = np.nonzero(evidence[block_rows])
+            sample_x = project(dx + left, sx, ox, sw)
+            if not np.all((sample_x >= span_left[start+dy]) & (sample_x <= span_right[start+dy])):
+                return "source_projection_coverage"
+        return None
+
+    for index, candidate in enumerate((polygon["points"], *alternatives)):
+        vertices = np.asarray(candidate)
+        points = adaptive_polygon.canonical_polygon(np.column_stack((
+            project(vertices[:, 0], sx, ox, sw), project(vertices[:, 1], sy, oy, sh))))
+        key = tuple(map(tuple, points))
+        if key in seen:
+            continue
+        seen.add(key)
+        error = check(points)
+        if not error:
+            fallback = {"fallback": "verified_alternative"} if index else {}
+            return {**doc, "points": points, "coverage_ratio": 1., "drawable": True, **fallback}
+        if first_error is None:
+            first_error = error
+            doc["points"] = points
+
+    # A tight raster rectangle is only eligible within the original fitted
+    # footprint budget. Sparse or truly degenerate candidates stay blocked.
+    columns = np.flatnonzero(evidence.any(axis=0))
+    xmin, xmax = project(columns[[0, -1]] + left, sx, ox, sw).tolist()
+    ymin, ymax = int(sample_rows[0]), int(sample_rows[-1])
+    limit = polygon["polygon_area_px"] * max(1., sx * sy) * 1.10
+    if xmax > xmin and ymax > ymin and (xmax-xmin+1)*(ymax-ymin+1) <= limit:
+        rectangle = [[xmin, ymin], [xmax, ymin], [xmax, ymax], [xmin, ymax]]
+        if not check(rectangle):
+            return {**doc, "points": rectangle, "coverage_ratio": 1., "drawable": True,
+                    "fallback": "verified_tight_rectangle"}
+    return {**doc, "reason": first_error}
 
 
 def bind_auto_mask(result, specs, *, preview_grid=None, source_windows=None):
@@ -324,12 +418,14 @@ def bind_auto_mask(result, specs, *, preview_grid=None, source_windows=None):
         "mask": result["binaryMask"], "parameters": result["parameters"],
         "sources": transforms, "size": auto["analysis_size"], "margin": auto["margin"],
         "version": VERSION,
-        **({"geometry_policy": adaptive_polygon.POLICY, "config": vars(adaptive_polygon.CONFIG)} if adaptive else {}),
+        **({"geometry_policy": adaptive_polygon.POLICY, "config": vars(adaptive_polygon.CONFIG),
+            "source_projection_version": 2} if adaptive else {}),
     }, sort_keys=True).encode()).hexdigest()[:24]
     mask = np.asarray(Image.open(io.BytesIO(base64.b64decode(result["binaryMask"].split(",", 1)[1])))) > 0
     labels, _ = label(mask, structure=np.ones((3, 3), bool))
     for polygon in auto["polygons"]:
         polygon["sources"] = transforms
+        alternatives = polygon.pop("_projection_alternatives", ())
         if adaptive and not polygon["drawable"]:
             polygon["source_polygons"] = []
             continue
@@ -339,44 +435,38 @@ def bind_auto_mask(result, specs, *, preview_grid=None, source_windows=None):
         # cannot affect coverage. Only source pixels corresponding to original
         # analysis pixel centres are asserted (not unobserved sub-grid defects).
         source_polygons = []
+        partition = polygon.get("analysis_partition", polygon.get("analysis_bounds"))
+        left, top, right, bottom = partition or (0, 0, mask.shape[1], mask.shape[0])
+        if adaptive:
+            tile = labels[top:bottom, left:right]
+            evidence = tile == target_labels[0] if len(target_labels) == 1 else np.isin(tile, target_labels)
         for source in transforms:
             t = source["transform"]
             if not t:
+                continue
+            if adaptive:
+                projected = _adaptive_source_polygon(polygon, alternatives, source, evidence, top, left)
+                source_polygons.append(projected)
+                reason = projected.get("reason")
+                if reason and reason not in polygon["diagnostics"]:
+                    polygon["diagnostics"].append(reason)
                 continue
             sx, sy = t["scale"]; ox, oy = t["offset"]
             sw, sh = source["source_size"]
             points = [[max(0, min(int(sw) - 1, int(np.floor(x*sx + ox + .5)))),
                        max(0, min(int(sh) - 1, int(np.floor(y*sy + oy + .5))))]
                       for x, y in polygon["points"]]
-            export_error = None
-            if adaptive:
-                points = adaptive_polygon.canonical_polygon(points)
-                if len(points) != polygon["vertex_count"]:
-                    source_polygons.append({"image_id": source["image_id"], "points": points,
-                        "coordinate_space": "source_pixel", "coverage_ratio": None, "drawable": False,
-                        "coverage_scope": "projected_analysis_pixel_centres"})
-                    continue
-                export_error = adaptive_polygon.verify_export(points, sh, rasterize_polygons)
-                if export_error:
-                    if export_error not in polygon["diagnostics"]:
-                        polygon["diagnostics"].append(export_error)
-                    source_polygons.append({"image_id": source["image_id"], "points": points,
-                        "coordinate_space": "source_pixel", "coverage_ratio": None, "drawable": False,
-                        "coverage_scope": "projected_analysis_pixel_centres"})
-                    continue
             xmin = min(p[0] for p in points); xmax = max(p[0] for p in points)
             # Allocate one source scanline, never a full source mask.
             covered = total = 0
-            partition = polygon.get("analysis_partition", polygon.get("analysis_bounds"))
-            left, top, right, bottom = partition or (0, 0, mask.shape[1], mask.shape[0])
             for y in range(top, bottom):
-                xs = np.flatnonzero(labels[y] == target_labels[0] if len(target_labels) == 1
-                                    else np.isin(labels[y], target_labels))
-                xs = xs[(xs >= left) & (xs < right)]
+                label_window = labels[y, left:right]
+                xs = left + np.flatnonzero(label_window == target_labels[0] if len(target_labels) == 1
+                                           else np.isin(label_window, target_labels))
                 if not xs.size:
                     continue
                 source_y = max(0, min(int(sh) - 1, int(np.floor(y*sy + oy + .5))))
-                row = rasterize_polygons(xmax - xmin + 1, 1 + int(adaptive and source_y+1 < sh),
+                row = rasterize_polygons(xmax - xmin + 1, 1,
                     [[[x - xmin, yy - source_y] for x, yy in points]])[0]
                 sample_x = np.clip(np.floor(xs*sx + ox + .5).astype(np.int64), 0, sw-1) - xmin
                 inside = (sample_x >= 0) & (sample_x < len(row))
@@ -384,8 +474,8 @@ def bind_auto_mask(result, specs, *, preview_grid=None, source_windows=None):
             area2 = sum(points[i][0]*points[(i+1) % len(points)][1] - points[(i+1) % len(points)][0]*points[i][1]
                         for i in range(len(points)))
             source_polygons.append({"image_id": source["image_id"], "points": points,
-                                    "coordinate_space": "source_pixel", "coverage_ratio": covered / total,
-                                    "drawable": abs(area2) > 0 and (not adaptive or total > 0 and covered == total),
+                                    "coordinate_space": "source_pixel", "coverage_ratio": covered / total if total else 0.,
+                                    "drawable": abs(area2) > 0,
                                     "coverage_scope": "projected_analysis_pixel_centres"})
         polygon["source_polygons"] = source_polygons
         if adaptive:

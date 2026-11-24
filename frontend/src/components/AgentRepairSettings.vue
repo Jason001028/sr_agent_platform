@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue';
 import { agentRepairSettings as settings } from '../lib/agentRepairSettings';
-import { agentTaskView } from '../lib/agentTaskView';
 import LayerSwitch from './LayerSwitch.vue';
 import AppIcon from './AppIcon.vue';
 const open=ref(false),root=ref<HTMLElement|null>(null),trigger=ref<HTMLButtonElement|null>(null);
@@ -23,14 +22,17 @@ onBeforeUnmount(()=>document.removeEventListener('pointerdown',outside));
     <button ref="trigger" type="button" class="settings-trigger" aria-label="Agent 修复设置" :aria-expanded="open" @click="toggle"><AppIcon name="settings" :size="16" tint /></button>
     <Teleport to="body"><Transition name="agent-settings"><section v-if="open" ref="panel" class="settings-panel" :style="position" aria-label="Agent 修复设置" @keydown="escape">
       <header><strong>Agent 修复设置</strong><button type="button" aria-label="关闭设置" @click="open=false">×</button></header>
-      <label class="method-row">Agent 任务视图
-        <select v-model="agentTaskView">
-          <option value="card">聊天内工作流卡片（默认）</option>
-          <option value="standalone">独立待办</option>
-        </select>
-      </label>
       <button class="setting-row" type="button" role="switch" :aria-checked="settings.inspection_only" @click="settings.inspection_only=!settings.inspection_only">
         <span><b>Agent协助仅质检</b><small>检测与定位，不生成掩码或提交 SR</small></span><LayerSwitch :selected="settings.inspection_only" />
+      </button>
+      <button class="setting-row" type="button" role="switch" :aria-checked="settings.confirm_before_start" data-e2e="agent-confirm-before-start" @click="settings.confirm_before_start=!settings.confirm_before_start">
+        <span><b>启动前确认</b><small>关闭时，修复计划准备完成后直接启动；打开后等待点击「确认并启动」</small></span><LayerSwitch :selected="settings.confirm_before_start" />
+      </button>
+      <button class="setting-row" type="button" role="switch" :aria-checked="settings.auto_approve_mask" data-e2e="agent-auto-approve-mask" @click="settings.auto_approve_mask=!settings.auto_approve_mask">
+        <span><b>自动绘制免复核</b><small>开启时，自动生成的掩码通过校验后继续修复；关闭后逐区复核掩码</small></span><LayerSwitch :selected="settings.auto_approve_mask" />
+      </button>
+      <button class="setting-row" type="button" role="switch" :aria-checked="settings.auto_play_preview" data-e2e="agent-auto-play-preview" @click="settings.auto_play_preview=!settings.auto_play_preview">
+        <span><b>全程播放预览</b><small>Agent 修复时在左侧自动播放质检分屏、热力图与掩码绘制；手动操作即暂停</small></span><LayerSwitch :selected="settings.auto_play_preview" />
       </button>
       <div class="method-row"><label for="agent-detection-method">伪影 / 模糊定位方式</label><select id="agent-detection-method" v-model="settings.detection_method" aria-label="Agent 检测方法"><option value="absdiff">绝对差异</option><option value="ssim">结构差异 SSIM</option><option value="smart">LTD 纹理退化</option></select></div>
       <button class="setting-row" type="button" role="switch" :aria-checked="settings.tone_weight" @click="settings.tone_weight=!settings.tone_weight">
@@ -44,7 +46,7 @@ onBeforeUnmount(()=>document.removeEventListener('pointerdown',outside));
   </div>
 </template>
 <style scoped>
-.agent-settings{position:relative;display:inline-flex;flex:none}.settings-trigger{display:grid;place-items:center;width:28px;height:28px;border:0;border-radius:7px;background:transparent;color:var(--tb-muted);cursor:pointer}.settings-trigger:hover,.settings-trigger[aria-expanded=true]{background:var(--tb-hover);color:var(--tb-fg)}
+.agent-settings{position:relative;display:inline-flex;flex:none}.settings-trigger{display:grid;place-items:center;width:28px;height:28px;padding:0;border:0;border-radius:7px;background:transparent;color:var(--tb-muted);cursor:pointer}.settings-trigger:hover,.settings-trigger[aria-expanded=true]{background:var(--tb-hover);color:var(--tb-fg)}
 .settings-panel{position:fixed;z-index:1000;width:310px;max-width:calc(100vw - 32px);max-height:calc(100vh - 110px);overflow:auto;box-sizing:border-box;padding:12px;background:var(--tb-bg);border:1px solid var(--tb-border);border-radius:12px;color:var(--tb-fg);box-shadow:0 4px 18px #173f3b14;font-size:12px;text-align:left}
 header{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}header strong{font-weight:600}header button{border:0;background:transparent;color:var(--tb-muted);font-size:18px;cursor:pointer}
 .setting-row{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:10px 0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer;font:inherit}.setting-row>span{min-width:0;display:grid;gap:4px}b{font-weight:500}small{color:var(--tb-muted);font-size:10px;line-height:1.5}

@@ -27,6 +27,8 @@ const actions: Record<string, string> = {
   sr_job_status:'查询任务状态', get_repair_workspace:'读取修复工作区', list_repair_items:'读取修复清单',
   get_repair_item:'读取修复项', inspect_repair_workspace:'质检工作区', read_skill:'读取操作指引', read_skill_resource:'读取指引附件',
   present_spatial_annotations:'生成空间批注', request_clarification:'请求用户确认', fix_bad_lines:'处理影像坏线',
+  detect_repair_item:'检测差异', build_repair_mask:'生成掩码', submit_repair_item:'提交 SR',
+  verify_repair_output:'验证 SR 产物', assess_repair_effect:'回检修复效果',
 };
 export function toolActionLabel(name: string): string { return actions[name] ?? '执行工具操作'; }
 export function startActivity(hasImages = false, hasRegion = false): ChatActivity {

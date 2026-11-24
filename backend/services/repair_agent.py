@@ -82,6 +82,7 @@ def choose_action(state, goal, lease, choices, descriptions):
     lease.check(store)
     store.append_goal_event(gid, "agent_action_selected", {
         "action": action, "item_id": item["item_id"], "reason": str(args.get("reason", ""))[:300],
+        "call_id": call.get("id"),
     }, step_id=item["step_id"])
     return item, action
 

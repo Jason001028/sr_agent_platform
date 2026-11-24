@@ -397,7 +397,15 @@ export const useViewerStore = defineStore('viewer', () => {
   const repairLandTarget = ref<import('../lib/api').RepairLandItem | null>(null);
   /** 用户明确关掉叠加层时，URL 里的初始目标也不能复活它。 */
   const batchOverlayOff = ref(false);
+  /** Programmatic playback may change the layout without counting as a user
+   *  gesture; otherwise the playback would stop itself. */
+  let suppressUserIntent = 0;
+  function withSilentIntent<T>(fn: () => T): T {
+    suppressUserIntent += 1;
+    try { return fn(); } finally { suppressUserIntent -= 1; }
+  }
   function noteUserIntent(): void {
+    if (suppressUserIntent > 0) return;
     userIntentSeq.value += 1;
     // 平移 / 缩放 / 切图 / 切侧 / 改分隔 / 开新图都会走这里 —— 交替对比里
     // 任何主动操作都先停播，画面停在用户此刻看到的那一帧（要求 7）。
@@ -1389,19 +1397,22 @@ export const useViewerStore = defineStore('viewer', () => {
     renderTick.value++;
   }
   /** Exploratory viewing never implies a shared pixel grid or permission to submit SR. */
-  async function openPreviewPair(aId: number, bId: number): Promise<boolean> {
+  async function openPreviewPair(aId: number, bId: number, silent = false, wanted?: () => boolean): Promise<boolean> {
     if (drawMode.value || aId === bId) return false;
     const a = recs.value.find(r => r.id === aId), b = recs.value.find(r => r.id === bId);
     if (!a || !b) return false;
     const intent = userIntentSeq.value;
     try { await Promise.all([a.thumb ? undefined : loadCardPixels(a), b.thumb ? undefined : loadCardPixels(b)]); }
     catch (e) { showErr(String(e)); return false; }
-    if (intent !== userIntentSeq.value || drawMode.value || !a.thumb || !b.thumb ||
+    if (wanted?.() === false || intent !== userIntentSeq.value || drawMode.value || !a.thumb || !b.thumb ||
       !recs.value.includes(a) || !recs.value.includes(b)) return false;
-    setCompareMode('split');
-    paneA.value = aId; paneB.value = bId; activeSide.value = 'A';
-    switchActive(aId); splitLinked.value = false;
-    fitBoth(); renderTick.value++;
+    const apply = () => {
+      setCompareMode('split', silent);
+      paneA.value = aId; paneB.value = bId; activeSide.value = 'A';
+      switchActive(aId); splitLinked.value = false;
+      fitBoth(); renderTick.value++;
+    };
+    if (silent) withSilentIntent(apply); else apply();
     return true;
   }
 
@@ -1631,10 +1642,10 @@ export const useViewerStore = defineStore('viewer', () => {
   }
 
   /** 切「关闭 / 点选对比 / 分屏对比 / 交替对比」。 */
-  function setCompareMode(mode: CompareMode) {
+  function setCompareMode(mode: CompareMode, silent = false) {
     const next = parseCompareMode(mode);
     if (next === compareMode.value) return;
-    noteUserIntent();
+    if (!silent) noteUserIntent();
     stopViewAnim();
     const wasSplit = split.value;
     const wasFlicker = compareMode.value === 'flicker';
@@ -5046,7 +5057,7 @@ export const useViewerStore = defineStore('viewer', () => {
     // 本地图反推关联（打开盘阵场景统一走「场景库」页）
     tryLinkScenes, linkServerPath,
     // 图像对比（关闭 / 点选对比 / 分屏对比）
-    compareMode, compareOn, split, setCompareMode,
+    compareMode, compareOn, split, setCompareMode, withSilentIntent,
     cmpStripOpen, setCmpStripOpen,
     panes, splitX, splitRatio, setSplitRatio, resetSplit, splitLinked, splitSynchronized, splitPrecisionReason, openPreviewPair,
     activeSide, setActiveSide, paneA, paneB, recForSide, rectForSide, activePaneRect,

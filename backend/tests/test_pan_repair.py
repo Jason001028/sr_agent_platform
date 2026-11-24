@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -128,6 +128,7 @@ class TestPanRepair(unittest.TestCase):
     def test_mask_only_model_background_unchanged_and_exact_file_size(self):
         old = self.pan.read_bytes()
         original = self.nosr.read_bytes()
+        original_stat = self.nosr.stat()
         metadata = self.meta.read_bytes()
         receipt = self.run_repair()
         got = tifffile.imread(self.pan)
@@ -137,6 +138,8 @@ class TestPanRepair(unittest.TestCase):
         self.assertEqual(self.pan.stat().st_size, len(old))
         self.assertEqual((self.scene / 'PAN_old_latest.tif').read_bytes(), old)
         self.assertEqual(self.nosr.read_bytes(), original)
+        self.assertEqual(self.nosr.stat().st_ctime_ns, original_stat.st_ctime_ns)
+        self.assertEqual(self.nosr.stat().st_nlink, original_stat.st_nlink)
         self.assertEqual(self.meta.read_bytes(), metadata)
         self.assertFalse((self.scene / 'PAN_260318.tif').exists())
         verdict = verifier.check_contract(str(self.config), 0)
@@ -150,6 +153,59 @@ class TestPanRepair(unittest.TestCase):
         with self.pan.open('ab') as stream:
             stream.write(b'tamper')
         self.assertFalse(verifier.check_contract(str(self.config), 0).ok)
+
+    def test_pre_staged_nosr_drives_inference_without_copying_or_linking_the_original(self):
+        from backend.services.spatial_identity import resource_identity
+
+        staged = Path(self.tmp.name) / 'staged-nosr.tif'
+        staged.write_bytes(self.nosr.read_bytes())
+        self.params['nosr_stage'] = {
+            'path': staged.as_posix(), 'signature': repair.signature(staged),
+            'source_signature': repair.signature(self.nosr),
+            'source_ctime_ns': self.nosr.stat().st_ctime_ns,
+        }
+        self.assertEqual(task_fingerprint(self.params), task_fingerprint({
+            k: v for k, v in self.params.items() if k != 'nosr_stage'}))
+        self.config.write_text(build_config_xml(self.params), encoding='utf-8')
+        identity = resource_identity(self.nosr)
+
+        def infer(argv):
+            cfg = ET.parse(argv[-1]).getroot()
+            private = Path(cfg.findtext('DatarootLQ'))
+            self.assertTrue((private / 'PAN.tif').samefile(staged))
+            self.assertFalse((private / 'PAN.tif').samefile(self.nosr))
+            self.assertIsNone(cfg.find('RepairNOSRStage'))
+            self.inference(argv)
+
+        # The only remaining copies are metadata and the existing PAN compositor.
+        copyfile = repair.shutil.copyfile
+        def guard_copy(source, destination, *args, **kwargs):
+            self.assertNotEqual(Path(source), self.nosr)
+            return copyfile(source, destination, *args, **kwargs)
+
+        with patch.object(repair.shutil, 'copyfile', side_effect=guard_copy):
+            receipt = self.run_repair(infer)
+        self.assertEqual(resource_identity(self.nosr), identity)
+        self.assertEqual(Path(receipt['nosr']), self.nosr)
+        self.assertEqual(staged.stat().st_nlink, 1)
+        self.assertTrue(verifier.check_contract(str(self.config), 0).ok)
+
+    def test_changed_staged_nosr_blocks_before_inference(self):
+        staged = Path(self.tmp.name) / 'staged-nosr.tif'
+        staged.write_bytes(self.nosr.read_bytes())
+        self.params['nosr_stage'] = {
+            'path': staged.as_posix(), 'signature': repair.signature(staged),
+            'source_signature': repair.signature(self.nosr),
+            'source_ctime_ns': self.nosr.stat().st_ctime_ns,
+        }
+        self.config.write_text(build_config_xml(self.params), encoding='utf-8')
+        with staged.open('ab') as stream:
+            stream.write(b'changed')
+        execute = Mock()
+        with self.assertRaisesRegex(ValueError, 'Staged NOSR'):
+            self.run_repair(execute)
+        execute.assert_not_called()
+        self.assertFalse((self.scene / 'PAN_old_latest.tif').exists())
 
     def test_missing_nosr_never_reads_pan_as_input(self):
         old = self.pan.read_bytes()

@@ -6,8 +6,8 @@ import HoldConfirmButton from './HoldConfirmButton.vue';
 import pauseIcon from '../../icon/pause.svg?url';
 import playIcon from '../../icon/play.svg?url';
 import squareIcon from '../../icon/square.svg?url';
-import AgentRepairPlanCard from './AgentRepairPlanCard.vue';
-import { useAgentTaskView } from '../lib/agentTaskView';
+import type AgentRepairPlanCard from './AgentRepairPlanCard.vue';
+import { useAgentPlanRevisions } from '../lib/agentPlanRevisions';
 /**
  * AgentChatTab.vue — 上下文侧舱 [Agent] tab（阶段6 L2）
  * ------------------------------------------------------------------
@@ -17,7 +17,7 @@ import { useAgentTaskView } from '../lib/agentTaskView';
  *   新建（circle-plus）/ 历史（clock，点开切换）/ 删除当前（circle-x）。历史列表
  *   **打开菜单时才拉**（`refreshSessions`），不用会话管理就一个请求都不多发。
  *   原先头部左侧那串「会话 xxxxxxxx」已去掉 —— 它对操作没有帮助，当前会话在历史列表里
- *   高亮即已说明。角落保留「去 Chat 页继续 ↗」。
+ *   高亮即已说明。
  * - 每个发送 = agentPayload(question, buildContextNote(snap)) —— question 原样 + CTX_DIVIDER
  *   + 自动上下文快照（图像名 / 原图 W×H / 显示尺寸 / 拉伸 + 选中 ROI 的确定性统计）。
  *   Agent 只解读/建议，数字一律来自 buildStats，不得编造（见 agentContext.ts 纪律）。
@@ -59,8 +59,7 @@ import type { BatchAgentHandoff } from '../lib/batchHandoff';
 const viewer = useViewerStore();
 const chat = useChatStore();
 const toolPresentation = computed(() => projectAgentActivity(chat.messages, chat.sending));
-const { task, closeTask, resolvePlan, revisePlan, reviseTask } = useAgentTaskView(() => toolPresentation.value, () => chat.sessionId, () => chat.sending);
-const taskCard = ref<InstanceType<typeof AgentRepairPlanCard> | null>(null);
+const { resolvePlan, revisePlan } = useAgentPlanRevisions(() => chat.sessionId);
 const inlinePlanCards = shallowReactive(new Map<string, {
   index: number; card: InstanceType<typeof AgentRepairPlanCard>;
 }>());
@@ -73,7 +72,6 @@ function registerInlinePlanCard(key: string, index: number, card: InstanceType<t
   if (previous?.card !== card || previous.index !== index) inlinePlanCards.set(key, { index, card });
 }
 const controlledTaskCard = computed(() => {
-  if (task.value) return taskCard.value;
   if (draft.value.trim() || chat.pendingImages.length) return null;
   return [...inlinePlanCards.values()].sort((a, b) => b.index - a.index)
     .find(entry => entry.card.taskControl)?.card ?? null;
@@ -82,8 +80,8 @@ const taskControl = computed(() => controlledTaskCard.value?.taskControl ?? null
 const taskControlIcons = { pause: pauseIcon, play: playIcon, square: squareIcon };
 
 function onPrimaryAction() {
-  if (taskControl.value || task.value) {
-    if (taskControl.value && !taskControl.value.busy) void controlledTaskCard.value?.togglePause();
+  if (taskControl.value) {
+    if (!taskControl.value.busy) void controlledTaskCard.value?.togglePause();
     return;
   }
   void onSend();
@@ -384,7 +382,6 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
         </HoldConfirmButton>
         <AgentRepairSettings />
       </div>
-      <router-link class="at-go" to="/chat">去 Chat 页继续 ↗</router-link>
     </div>
 
     <!-- 会话菜单（下拉）+ 点外部关闭的透明捕手 -->
@@ -415,10 +412,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
     <p v-if="chat.error" class="at-err" role="alert">{{ chat.error }}</p>
 
     <!-- 会话区 -->
-      <div v-if="task" class="agent-task-pane">
-        <AgentRepairPlanCard ref="taskCard" :key="task.id" :data="task.data" standalone @back="closeTask" @plan-revised="reviseTask" />
-      </div>
-      <div v-show="!task" ref="scrollEl" class="at-scroll">
+      <div ref="scrollEl" class="at-scroll">
         <p v-if="creating && !chat.messages.length" class="at-desc" role="status">正在创建 Agent 会话…</p>
         <div v-else-if="!chat.messages.length && !chat.sending" class="at-welcome">
           <AgentBotIcon :status="chat.agentStatus" :size="24" label="遥感影像助手" />
@@ -464,9 +458,10 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
             </template>
           </template>
 
-          <AgentToolPresentation v-if="!task" :projection="toolPresentation" :index="i" :session-key="chat.sessionId"
+          <AgentToolPresentation :projection="toolPresentation" :index="i" :session-key="chat.sessionId"
+            timeline-scope="viewer-agent"
             :developer-mode="developerMode" :resolve-plan="resolvePlan" :plan-card-ref="registerInlinePlanCard"
-            @open-scene="openSearchScene" @plan-revised="revisePlan" />
+            @open-scene="openSearchScene" @plan-revised="revisePlan" @tool-calls-updated="nearBottom() && scrollBottom()" />
         </div>
 
         <GoalClarifications :session-id="chat.sessionId" @updated="!chat.sending && chat.sessionId && chat.loadHistory(chat.sessionId)" />
@@ -475,15 +470,14 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
         </div>
       </div>
 
-      <div v-show="!task || taskControl" class="at-foot" :class="{ locked: !task && !taskControl && !composerEnabled }">
-        <div v-show="!task" :inert="!composerEnabled">
+      <div class="at-foot" :class="{ locked: !taskControl && !composerEnabled }">
+        <div :inert="!composerEnabled">
         <p v-if="batchHint" class="at-desc">已携带批次上下文，可补充问题后发送。</p>
 
         <div v-if="viewer.questionRegion" class="roi-reference"><button @click="viewer.activeRec?.id===viewer.questionRegion.recId && viewer.focusSourceBounds(viewer.activeSide,viewer.questionRegion.bounds)">{{ viewer.questionRegion.name }} · 源影像区域 {{ viewer.questionRegion.bounds.join(', ') }}</button><button @click="viewer.questionRegion=null">移除</button><small>手动发送消息时附上区域预览截图。</small></div>
         <ChatAttachTray :items="chat.pendingImages" @remove="chat.removePendingImage" />
         </div>
-        <div class="at-inputbar" :inert="!task && !taskControl && !composerEnabled">
-          <template v-if="!task">
+        <div class="at-inputbar" :inert="!taskControl && !composerEnabled">
           <ThinkingSlider v-model="chat.thinkingProfile" :status="chat.thinkingStatus" :disabled="!enabled" />
           <button type="button" class="at-shot" data-e2e="chat-shot-open"
                   aria-label="添加截图" title="添加截图（截取当前视野）"
@@ -495,9 +489,8 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
                  :placeholder="placeholder"
                  :disabled="!composerEnabled || chat.sending || creating"
                  @keyup.enter="onSend()" />
-          </template>
           <button type="button" class="cbtn" :class="{ 'task-primary': !!taskControl }"
-            :disabled="taskControl ? taskControl.busy : !!task || !canSend()"
+            :disabled="taskControl ? taskControl.busy : !canSend()"
             :aria-label="taskControl?.label ?? '发送'" :title="taskControl?.label"
             :aria-busy="taskControl?.busy" @click="onPrimaryAction">
             <span v-if="taskControl" class="task-primary-icon" aria-hidden="true"
@@ -505,7 +498,7 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
             <template v-else>{{ chat.sending || creating ? '…' : '发送' }}</template>
           </button>
         </div>
-        <div v-if="!task && !taskControl && !composerEnabled" class="at-input-lock" role="status" aria-live="polite">
+        <div v-if="!taskControl && !composerEnabled" class="at-input-lock" role="status" aria-live="polite">
           <p class="at-desc">Agent 支持本地、上传及服务器影像</p>
           <p class="at-reason">{{ reason }}</p>
         </div>
@@ -515,7 +508,6 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
 </template>
 
 <style scoped>
-.agent-task-pane { flex:1; min-height:0; overflow:auto; }
 .at {
   position: relative;          /* 会话菜单的定位基准 */
   height: 100%;
@@ -571,8 +563,6 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
 .at-hbtn.on { border-color: var(--accent-2); background: var(--accent-soft); }
 .at-hbtn.danger:hover:not(:disabled) { border-color: var(--err-line); background: var(--err-bg); }
 .at-hbtn:disabled { opacity: .35; cursor: not-allowed; }
-.at-go { font-size: 11px; color: var(--accent-ink); text-decoration: none; font-weight: 500; }
-.at-go:hover { text-decoration: underline; }
 
 /* 透明捕手：点菜单之外的任何地方即关（与设置浮层同一手法） */
 .at-menu-catch { position: fixed; inset: 0; z-index: 40; }

@@ -28,6 +28,15 @@ it('updates a repeated repair plan in its original card position', () => {
   expect([...updated.keys()]).toEqual([2]);
   expect(updated.get(2)![0]).toMatchObject({ key: original.key, result: latest });
 });
+it('retains fresh launch intent when the model rereads the same plan revision', () => {
+  const data = { kind: 'repair_plan.v1', plan_id: 'plan-one', version: 1 };
+  const prepared: ChatMsg = { ...result('p'), toolName: 'prepare_repair', autoStartRepair: true, data };
+  const read = { ...result('q'), data };
+  const rows = [user, prepared, read];
+  expect(projectAgentActivity(rows, false).business.get(1)?.[0].result?.autoStartRepair).toBe(true);
+  const revised = { ...read, data: { ...data, version: 2 } };
+  expect(projectAgentActivity([user, prepared, revised], false).business.get(1)?.[0].result?.autoStartRepair).toBeUndefined();
+});
 it('matches legacy calls FIFO without merging legitimate identical operations', () => {
   const call: ChatMsg = {seq:2,role:'assistant',content:'',toolCalls:[{name:'read_skill',args:{}},{name:'read_skill',args:{}}]};
   const first: ChatMsg = {seq:3,role:'tool',content:'',toolName:'read_skill',ok:false};
@@ -67,8 +76,16 @@ it('retains important results separately and does not repeat their contents in t
   ].map(([id,name,data],n)=>({seq:n+3,role:'tool',content:'',toolCallId:id,toolName:name,ok:true,data} as ChatMsg))];
   const before = JSON.stringify(messages), p = projectAgentActivity(messages,false);
   expect([...p.business.values()].flat().map(s=>s.business)).toEqual(['plan','scenes','receipt','annotation','confirmation']);
-  expect(p.groups.size).toBe(0);
+  expect([...p.groups.values()].flatMap(groups => groups.flatMap(group => group.steps.map(step => step.name))))
+    .toEqual(['prepare_repair']);
   expect(JSON.stringify(messages)).toBe(before);
+});
+it('anchors repair runtime tools after the completed chat reply in the same turn', () => {
+  const plan = { ...result('p'), toolName: 'prepare_repair', data: { kind: 'repair_plan.v1', plan_id: 'p' } };
+  const answer: ChatMsg = { seq: 4, role: 'assistant', content: '计划正文' };
+  const rows = [user, plan, answer];
+  expect(projectAgentActivity(rows, true).repairTails.size).toBe(0);
+  expect(projectAgentActivity([...rows, { ...user, seq: 5 }, { ...answer, seq: 6 }], false).repairTails.get(1)).toBe(2);
 });
 it('reports inspection progress by scene position instead of the batch total', () => {
   const page = (cursor: number, count: number, hasMore: boolean): ChatMsg => ({

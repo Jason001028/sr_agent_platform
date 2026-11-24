@@ -21,7 +21,7 @@ const heading = computed(() => [
 function toggle() { setActivityDisclosure(identity.value,!expanded.value); }
 </script>
 <template>
-  <section class="activity-timeline agent-trace" aria-label="工具执行轨迹" :data-group="group.key">
+  <section class="activity-timeline agent-trace" aria-label="工具调用记录" :data-group="group.key">
     <button v-if="!single" type="button" class="group-toggle" :aria-expanded="expanded" @click="toggle">
       <span class="trace-node" :class="{ active: running.length > 0, issue: pinned.some(s => s.state === 'failed' || s.state === 'interrupted') }" aria-hidden="true"></span><span>{{ heading }}</span>
     </button>

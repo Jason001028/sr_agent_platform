@@ -93,6 +93,9 @@ def _prepare(ctx, scope, mode, strategy, detection_method, mask_policy, title,
         if ctx.preferences:
             detection_method=ctx.preferences['detection_method']
             kwargs.update(tone_weight=ctx.preferences['tone_weight'],skip_completed=ctx.preferences['skip_completed'])
+            kwargs['auto_approve_mask'] = ctx.preferences.get('auto_approve_mask')
+            if mask_policy == 'auto' and ctx.preferences.get('require_mss_land') is False:
+                mask_policy = 'auto_diff'
         if mode != 'production':
             return err('Agent 协助与自动修复统一使用真实修复（production），不支持新建演示计划。')
         if scope == "draft":
@@ -107,6 +110,8 @@ def _prepare(ctx, scope, mode, strategy, detection_method, mask_policy, title,
             scope=scope, mode=mode, strategy=strategy,
             detection_method=detection_method, mask_policy=mask_policy,
             title=title, created_by=source, raster_runner=ctx.raster_runner, **kwargs)
+        if 'confirm_before_start' in ctx.preferences:
+            plan = {**plan, "launch_policy": "confirm" if ctx.preferences['confirm_before_start'] else "auto"}
         return ok(plan)
     except (svc.RepairError, ValueError) as exc:
         return err(str(exc))
@@ -279,7 +284,10 @@ _PREPARE_DESC = (
     "如返回 land_constraint_unavailable，读取 blocking 中的具体原因；受阻计划不能确认或启动。"
     "可提示使用 Viewer 自动绘制并核对、保存掩码。仅在用户明确选择后，使用已有掩码另建当前景计划。"
     "归档结果读取 /data/targets/items；启动仅需 plan_id 和版本，不需要逐景提取 ID。"
-    "计划必须由真实用户在界面上确认后，才能用 start_repair 启动。"
+    "计划卡按界面设置自动启动，或在「启动前确认」开启时等待真实用户点击。"
+    "launch_policy=auto 时，由界面自动确认并启动。计划可执行时不要复述计划已准备完成或要求确认；实际启动状态和工具调用结果显示在对话中。"
+    "auto_approve_mask=true 时免除自动掩码的人工复核；后续产物验收仍独立。"
+    "Agent 不得代替用户确认，也不得在未确认的卡片上调用 start_repair。"
 )
 
 _START_DESC = (
@@ -653,4 +661,5 @@ def bound_tool(name: str, *, workspace=None, current=None, selected_images=None,
         "get_repair_item": _GET_ITEM_PARAMS,
     }
     return Tool(name=name, description=descriptions[name],
-                params_schema=schemas[name], run=run)
+                params_schema=schemas[name], run=run,
+                result_protected_fields=("launch_policy", "auto_approve_mask") if name == "prepare_repair" else ())

@@ -105,6 +105,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
   const hasEarlier = ref(false);
   const consumedSeq = ref(0);
   const follow = ref(false);
+  const pendingAutoPreview = ref<string | null>(null);
   const playbackManaged = ref(false);
   const overlayCloseSeq = ref(0);
   const followNote = ref('');
@@ -203,6 +204,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     window.removeEventListener('pagehide', onPageHide);
     window.removeEventListener('pageshow', onOnline);
     reset();
+    pendingAutoPreview.value = null;
     goalId.value = null;
   }
 
@@ -235,6 +237,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
    *  generation; a direct attach starts a fresh one. */
   async function attach(id: string, gen?: number): Promise<boolean> {
     if (gen !== undefined && gen !== loadGen) return false;
+    if (pendingAutoPreview.value !== id) pendingAutoPreview.value = null;
     const viewer = useViewerStore();
     const query = new URLSearchParams(window.location.search);
     const initialItem = !goalId.value && !viewer.batchOverlayOff
@@ -325,8 +328,9 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     return ok;
   }
 
-  async function selectGoal(id: string): Promise<boolean> {
+  async function selectGoal(id: string, options?: { autoPreview?: boolean }): Promise<boolean> {
     const attached = await attach(id);
+    if (attached && goalId.value === id && options?.autoPreview) pendingAutoPreview.value = id;
     if (attached && goalId.value === id && typeof window !== 'undefined') {
       const url = new URL(window.location.href);
       url.searchParams.set('batch_goal', id);
@@ -334,6 +338,12 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
       window.history.replaceState(window.history.state, '', url);
     }
     return attached;
+  }
+
+  function consumeAutoPreview(id: string): boolean {
+    if (pendingAutoPreview.value !== id || goalId.value !== id) return false;
+    pendingAutoPreview.value = null;
+    return true;
   }
 
   function scheduleRefresh(delay = 350): void {
@@ -548,6 +558,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
       // Switching batches while the request was in flight: the reply belongs
       // to the old batch, so it must not touch the new Panel.
       if (!isCurrent(gen, gid)) return '';
+      if (action === 'cancel' && result.goal?.status === 'CANCELLED') clearOverlay();
       await refreshSnapshot();
       await catchUp();
       if (!isCurrent(gen, gid)) return '';
@@ -572,6 +583,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
   /* ---------------- follow / open ---------------- */
 
   function setFollow(on: boolean): void {
+    if (on && snapshot.value?.goal.status === 'CANCELLED') return;
     follow.value = on;
     writeStored(FOLLOW_KEY, String(on));
     followError.value = '';
@@ -622,7 +634,8 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
   }
 
   async function openItem(item: Pick<BatchItemSummary,
-    'item_id' | 'image_path'> & Partial<Pick<BatchItemSummary, 'overlay_ready'>>): Promise<string> {
+    'item_id' | 'image_path'> & Partial<Pick<BatchItemSummary, 'overlay_ready'>>,
+    wanted?: () => boolean): Promise<string> {
     const gid = goalId.value;
     if (!gid) return '还没有关联批次。';
     if (!item.image_path) return '这一项还没有可打开的影像路径。';
@@ -633,7 +646,8 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     // Record the user's action before IO, so a pending follow cannot win.
     viewer.noteUserIntent();
     const seq = viewer.userIntentSeq;
-    const stillWanted = () => isCurrent(gen, gid) && viewer.userIntentSeq === seq && !viewer.drawMode;
+    const stillWanted = () => isCurrent(gen, gid) && viewer.userIntentSeq === seq && !viewer.drawMode
+      && (wanted?.() ?? true);
     const err = await scenes.openQuiet(item.image_path, 'follow', { stillWanted });
     if (err) return err;
     if (!stillWanted()) return '已按新的视图操作取消定位。';
@@ -643,6 +657,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
   }
 
   function clearOverlay(): void {
+    pendingAutoPreview.value = null;
     setFollow(false);
     overlayCloseSeq.value++;
     const viewer = useViewerStore();
@@ -708,7 +723,7 @@ export const useBatchGoalStore = defineStore('batchGoal', () => {
     goalId, snapshot, feedback, claimFeedback, events, historyPage, availableGoals,
     syncState, syncError, loadError, controlError, controlBusy,
     loadingEarlier, hasEarlier, consumedSeq,
-    follow, followNote, followError, playbackManaged, overlayCloseSeq,
+    follow, pendingAutoPreview, consumeAutoPreview, followNote, followError, playbackManaged, overlayCloseSeq,
     hasGoal, isVisible, isTerminal, isDone, paused,
     associate, discover, selectGoal, attach, detach,
     refreshSnapshot, catchUp, loadEarlier, control,

@@ -36,9 +36,15 @@ NOSR、原始场景元数据不修改。模型在私有场景中读取 NOSR，�
 配置包含 `RepairMode=pan-nosr-v1`、明确的 `RepairNOSR` 和可用的 `RepairRevision`。
 
 运行脚本调用 `SR_code/variants/repair_sr.py`，再由适配层调用配置的生产脚本或部署变体。
-原生产算法源码保持不变。私有目录保留原场景目录名，将 NOSR 硬链接为算法预期的
-`PAN.tif` 与 `<目录名>.tif`，并复制 meta.xml；原场景文件不被改名。
-私有进程绕过按文件大小判断“已经超分”的输入选择规则，明确选择暂存的 NOSR。
+原生产算法源码保持不变。生产批次检出候选后，在掩码生成期间预复制冻结的 NOSR。
+每个后端实例同时复制一景，副本和来源描述写完后一起原子发布到批次工件根目录的
+`nosr-stage/`。该目录与批次掩码一样，须由 API 节点和 SR 节点以同一路径访问。
+提交前复核原文件和副本身份，已有同版本副本可复用。
+
+私有目录保留原场景目录名，将独立副本映射为算法需要的 `PAN.tif` 和 `<目录名>.tif`，
+并复制 meta.xml。未携带 `RepairNOSRStage` 的单景入口和旧 Job 在私有目录中临时复制一次。
+推理读取暂存 NOSR，修复回执与验收仍绑定原 NOSR 路径。推理退出时清理私有输入入口。
+批次在该景结算后清理预复制文件，未提交即取消时也清理。
 
 掩码向 NOSR 网格映射时按覆盖面积保留选中像素，单个 PAN 像素的选区也不会消失。
 算法仍按瓦片计算，适配层最终只在发布掩码内写入模型值；保留掩码外以及 PAN NoData/非有限值。
@@ -86,7 +92,8 @@ python -m pytest backend/tests/test_pan_repair.py backend/tests/test_run_sr.py b
 
 ## 5. P1 可信陆地自动修复
 
-生产自动计划要求服务端设置 `SR_MSS_EXEC_PROFILE`，指向 API 和 SR worker 都可读取的 JSON 文件。
+查看器设置中的「MSS 可信陆地校验」默认关闭。新建自动计划在关闭时冻结 `mask_policy=auto_diff`，直接使用差异掩码，仍需用户确认及生产执行预检。
+开启校验时，生产自动计划要求服务端设置 `SR_MSS_EXEC_PROFILE`，指向 API 和 SR worker 都可读取的 JSON 文件。
 Profile 包含 `profile_id`、实景验收记录 `verification_ref`、`satellite`、`sensor`、
 `registration_method`、`land_threshold`、`water_threshold`、`shoreline_pan_pixels`
 和 `registration_error_pan_pixels`。距离按目标 PAN 像素计。两个阈值之间保留不确定类。

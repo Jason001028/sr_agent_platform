@@ -27,14 +27,19 @@ const panes = computed(() => {
       <polygon v-for="c in p.polygons" :key="c.id" :points="c.points" :class="{selected:c.selected,approved:c.decision==='approve',rejected:c.decision==='exclude'}" />
     </svg>
     <div class="review-toolbar" @pointerdown.stop @mousedown.stop @dblclick.stop @wheel.stop>
-      <span class="review-position">候选复核 · {{ review.regions.findIndex(r=>r.candidate_id===review.regionId)+1 }} / {{ review.regions.length }}</span>
-      <button :disabled="review.busy || !review.ready" @click="review.navigate(-1)">上一处</button>
-      <button class="approve" :disabled="review.busy || !review.ready || !review.selected" @click="review.decide('approve')">通过</button>
-      <button :disabled="review.busy || !review.ready || !review.selected" @click="review.decide('exclude')">驳回</button>
-      <button :disabled="review.busy || !review.ready" @click="review.navigate(1)">下一处</button>
-      <button :disabled="review.busy || !review.ready" @click="review.flicker">{{ viewer.compareMode === 'flicker' ? '返回分屏' : '交替对比' }}</button>
-      <button aria-label="退出候选复核" @click="review.close">×</button>
-      <button v-if="review.error" :disabled="review.busy" @click="review.open()">重新读取</button>
+      <template v-if="review.previewing">
+        <span class="review-position">质检预览 · {{ review.regions.findIndex(r=>r.candidate_id===review.regionId)+1 }} / {{ review.regions.length }}</span>
+      </template>
+      <template v-else>
+        <span class="review-position">候选复核 · {{ review.regions.findIndex(r=>r.candidate_id===review.regionId)+1 }} / {{ review.regions.length }}</span>
+        <button :disabled="review.busy || !review.ready" @click="review.navigate(-1)">上一处</button>
+        <button class="approve" :disabled="review.busy || !review.ready || !review.selected" @click="review.decide('approve')">通过</button>
+        <button :disabled="review.busy || !review.ready || !review.selected" @click="review.decide('exclude')">驳回</button>
+        <button :disabled="review.busy || !review.ready" @click="review.navigate(1)">下一处</button>
+        <button :disabled="review.busy || !review.ready" @click="review.flicker">{{ viewer.compareMode === 'flicker' ? '返回分屏' : '交替对比' }}</button>
+        <button aria-label="退出候选复核" @click="review.close">×</button>
+        <button v-if="review.error" :disabled="review.busy" @click="review.open()">重新读取</button>
+      </template>
       <p v-if="review.busy || review.error || review.notice" :class="{error:review.error}" role="status">{{ review.error || (review.busy ? '正在处理…' : review.notice) }}</p>
     </div>
   </div>

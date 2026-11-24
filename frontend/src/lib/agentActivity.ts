@@ -1,14 +1,14 @@
 /** Pure presentation projection. No execution, timers, persistence or reasoning inference. */
 import type { ChatMsg } from '../stores/chat';
 import { toolActionLabel } from './chatActivity';
-import { repairPlanId } from './repairPlan';
+import { repairPlanData, repairPlanId } from './repairPlan';
 
 export type ActivityState = 'running' | 'success' | 'failed' | 'interrupted';
 export type BusinessKind = 'inspection' | 'plan' | 'scenes' | 'receipt' | 'annotation' | 'confirmation';
 export interface ActivityStep {
   key: string; name: string; label: string; args: unknown; callId?: string;
   callIndex: number; resultIndex?: number; result?: ChatMsg;
-  state: ActivityState; summary: string; business: BusinessKind | null;
+  state: ActivityState; summary: string; summaryTitle?: string; business: BusinessKind | null;
   inspection?: Record<string, unknown>;
 }
 export interface ActivityGroup { key: string; steps: ActivityStep[] }
@@ -16,6 +16,7 @@ export interface AgentActivityProjection {
   steps: ActivityStep[];
   groups: Map<number, ActivityGroup[]>;
   business: Map<number, ActivityStep[]>;
+  repairTails: Map<number, number>;
 }
 export function toolPayload(result?: ChatMsg): Record<string, unknown> | null {
   const raw = result?.data;
@@ -143,7 +144,7 @@ export function projectAgentActivity(messages: ChatMsg[], sending: boolean): Age
   finishTurn();
   const latestUser = messages.map(m => m.role).lastIndexOf('user');
   const groups = new Map<number, ActivityGroup[]>(), business = new Map<number, ActivityStep[]>();
-  const plans = new Map<string, { anchor: ActivityStep; latest: ActivityStep }>();
+  const plans = new Map<string, { anchor: ActivityStep; latest: ActivityStep; autoStart: boolean }>();
   for (const step of steps) {
     const outcome = toolOutcome(step.result);
     // Only unresolved calls in the active assistant phase are still running.
@@ -153,8 +154,13 @@ export function projectAgentActivity(messages: ChatMsg[], sending: boolean): Age
       : !step.result && sending && step.callIndex > latestUser && !endedAfterCall ? 'running' : 'interrupted';
     step.summary = stepSummary(step); step.business = businessKind(step);
     if (step.business === 'plan') {
-      const id = repairPlanId(step.result?.data)!;
-      plans.set(id, { anchor: plans.get(id)?.anchor ?? step, latest: step });
+      const plan = repairPlanData(step.result?.data)!;
+      const previous = plans.get(plan.plan_id);
+      const sameRevision = typeof plan.version === 'number'
+        && repairPlanData(previous?.latest.result?.data)?.version === plan.version;
+      const autoStart = step.result?.autoStartRepair === true
+        || (step.name === 'read_tool_result' && sameRevision && previous?.autoStart === true);
+      plans.set(plan.plan_id, { anchor: previous?.anchor ?? step, latest: step, autoStart });
     }
   }
   for (const segment of segments) {
@@ -168,11 +174,18 @@ export function projectAgentActivity(messages: ChatMsg[], sending: boolean): Age
       if (proseBoundary) flush();
       previousIndex = step.callIndex;
       if (step.business) {
+        if (step.business === 'plan') {
+          if (!pending) { anchor = step.callIndex; pending = {key:step.key,steps:[]}; }
+          pending.steps.push(step);
+        }
         flush();
         const plan = step.business === 'plan' ? plans.get(repairPlanId(step.result?.data)!) : undefined;
         if (!plan || plan.anchor === step) {
           const at = step.resultIndex!;
           const presented = plan ? { ...plan.latest, key: step.key } : step;
+          if (plan?.autoStart && presented.result && !presented.result.autoStartRepair) {
+            presented.result = { ...presented.result, autoStartRepair: true };
+          }
           business.set(at,[...(business.get(at) ?? []),presented]);
         }
         continue;
@@ -182,5 +195,15 @@ export function projectAgentActivity(messages: ChatMsg[], sending: boolean): Age
     }
     flush();
   }
-  return {steps,groups,business};
+  const repairTails = new Map<number, number>();
+  let reply = -1;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role === 'user') reply = -1;
+    else if (reply === -1 && message.role === 'assistant' && message.content && !message.streaming) reply = index;
+    if ((!sending || index < latestUser) && reply > index && business.get(index)?.some(step => step.business === 'plan')) {
+      repairTails.set(index, reply);
+    }
+  }
+  return {steps,groups,business,repairTails};
 }

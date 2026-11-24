@@ -280,6 +280,13 @@ def normalize_candidate(candidate, width, height, index):
     label = candidate.get("label")
     if label is not None and not isinstance(label, str):
         raise ContractError(f"候选 label 必须是字符串：{label!r}")
+    rasterizer = candidate.get("rasterizer")
+    if rasterizer is not None:
+        from backend.services.adaptive_polygon import POLICY, canonical_polygon
+
+        if (rasterizer != POLICY or kind != "polygon" or not 4 <= len(points) <= 6
+                or diagnostics or canonical_polygon(points) != points):
+            raise ContractError("自适应掩码须为影像范围内的 4–6 顶点凸多边形")
     return ({
         "candidate_id": candidate_id,
         "kind": kind,
@@ -287,6 +294,7 @@ def normalize_candidate(candidate, width, height, index):
         "points": points,
         "score": score,
         "label": label,
+        **({"rasterizer": rasterizer} if rasterizer is not None else {}),
     }, diagnostics)
 
 

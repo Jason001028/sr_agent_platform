@@ -2,8 +2,7 @@
 import ThinkingSlider from "../components/ThinkingSlider.vue";
 import AgentRepairSettings from '../components/AgentRepairSettings.vue';
 import HoldConfirmButton from '../components/HoldConfirmButton.vue';
-import AgentRepairPlanCard from '../components/AgentRepairPlanCard.vue';
-import { useAgentTaskView } from '../lib/agentTaskView';
+import { useAgentPlanRevisions } from '../lib/agentPlanRevisions';
 /**
  * ChatPage.vue — Agent 聊天（阶段5，api-contract.md §3.2）
  * 布局：左侧会话列表（新建/切换），右侧消息 timeline + 发送框。
@@ -40,7 +39,7 @@ import { reasoningViews, type ReasoningTiming } from '../lib/reasoningTrace';
 
 const chat = useChatStore();
 const toolPresentation = computed(() => projectAgentActivity(chat.messages, chat.sending));
-const { task, closeTask, resolvePlan, revisePlan, reviseTask } = useAgentTaskView(() => toolPresentation.value, () => chat.sessionId, () => chat.sending);
+const { resolvePlan, revisePlan } = useAgentPlanRevisions(() => chat.sessionId);
 const viewer = useViewerStore();
 const developerMode = ref(false);
 onMounted(() => { developerMode.value = isDeveloperMode(); });
@@ -290,10 +289,7 @@ onMounted(() => {
 
       <p v-if="chat.error" class="cp-err">{{ chat.error }}</p>
 
-      <div v-if="task" class="agent-task-pane">
-        <AgentRepairPlanCard :key="task.id" :data="task.data" standalone @back="closeTask" @plan-revised="reviseTask" />
-      </div>
-      <div v-show="!task" ref="scrollEl" class="cp-scroll">
+      <div ref="scrollEl" class="cp-scroll">
         <div v-if="chat.loading" class="cp-loading">
           <ThinkingIndicator label="加载会话中" />
         </div>
@@ -333,9 +329,10 @@ onMounted(() => {
             </template>
           </template>
 
-          <AgentToolPresentation v-if="!task" :projection="toolPresentation" :index="i" :session-key="chat.sessionId"
+          <AgentToolPresentation :projection="toolPresentation" :index="i" :session-key="chat.sessionId"
+            timeline-scope="chat-page"
             :developer-mode="developerMode" :resolve-plan="resolvePlan"
-            @open-scene="openSearchScene" @plan-revised="revisePlan" />
+            @open-scene="openSearchScene" @plan-revised="revisePlan" @tool-calls-updated="nearBottom() && scrollBottom()" />
         </div>
 
         <GoalClarifications :session-id="chat.sessionId" @updated="!chat.sending && chat.sessionId && chat.loadHistory(chat.sessionId)" />
@@ -355,7 +352,7 @@ onMounted(() => {
         </div>
       </div>
 
-      <div v-show="!task" class="cp-foot">
+      <div class="cp-foot">
 
         <ChatAttachTray :items="chat.pendingImages" @remove="chat.removePendingImage" />
         <div class="cp-inputbar">
@@ -383,8 +380,6 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.agent-task-pane { flex:1; min-height:0; overflow:auto; }
-.agent-task-pane :deep(.standalone-task) { max-width:540px; margin-inline:auto; }
 .chat-page {
   height: calc(100vh - var(--topbar-h));
   display: flex;

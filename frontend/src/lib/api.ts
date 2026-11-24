@@ -44,6 +44,7 @@ export interface DurableGoal {
   phase?: string | null;
   title?: string;
   kind?: 'chat' | 'batch' | string;
+  execution_owner?: string;
   version: number;
   checkpoint?: Record<string, unknown>;
   updated_at?: number;
@@ -1850,6 +1851,8 @@ export interface RepairPlan {
   manifest_ref: string;
   manifest_sha256?: string;
   land_constraint?: RepairLandCounts & { items: RepairLandItem[] };
+  mask_policy?: 'auto' | 'auto_diff' | 'existing';
+  auto_approve_mask?: boolean;
   title?: string;
   session_id?: string | null;
   mask?: { policy: string; path: string; revision?: string; width: number; height: number } | null;
@@ -1880,7 +1883,8 @@ export async function apiPrepareRepair(body: {
   strategy?: 'automatic' | 'review';
   detection_method?: 'absdiff' | 'ssim' | 'smart';
   smart_options?: unknown;
-  mask_policy?: 'auto' | 'existing';
+  mask_policy?: 'auto' | 'auto_diff' | 'existing';
+  auto_approve_mask?: boolean;
   mask_path?: string | null;
   title?: string;
   created_by?: string;
@@ -1967,7 +1971,9 @@ export interface BatchItemRecord {
   external_job_id?: number | string | null;
   checkpoint: {
     job_id?: number | string | null;
-    target_image?: { path?: string }; reference_image?: { path?: string; revision?: string }; scene_ref?: string; attempt?: number;
+    target_image?: { path?: string; image_key?: string; revision?: string; width?: number; height?: number };
+    reference_image?: { path?: string; revision?: string }; scene_ref?: string; attempt?: number;
+    phase?: string;
     review_required?: boolean; review?: { decision: string };
     detection?: { candidates?: unknown[]; provenance?: string; analysis?: { differenceMap?: string; weightedDifferenceMap?: string; validityMap?: string } };
     region_reviews?: Record<string, 'approve' | 'exclude'>;
@@ -1975,8 +1981,8 @@ export interface BatchItemRecord {
   };
   error?: string;
 }
-export async function apiBatchItems(goal: string, after = 0, status = '', signal?: AbortSignal): Promise<{ items: BatchItemRecord[]; next_after_ordinal: number }> {
-  const r = await http(apiUrl(loadSrConfig(), `/api/goals/${encodeURIComponent(goal)}/items?after_ordinal=${after}&limit=20&status=${encodeURIComponent(status)}`), { signal });
+export async function apiBatchItems(goal: string, after = 0, status = '', signal?: AbortSignal, limit = 20): Promise<{ items: BatchItemRecord[]; next_after_ordinal: number }> {
+  const r = await http(apiUrl(loadSrConfig(), `/api/goals/${encodeURIComponent(goal)}/items?after_ordinal=${after}&limit=${limit}&status=${encodeURIComponent(status)}`), { signal });
   return r.json();
 }
 export async function apiBatchReview(goal: string, item: BatchItemRecord, decision: 'approve' | 'exclude', regionId?: string): Promise<BatchItemRecord> {

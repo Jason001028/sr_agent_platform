@@ -14,7 +14,7 @@ import time
 import unittest
 from unittest import mock
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from backend.api import paths
 from backend.services import batch_manifest, batch_worker, repair_application as svc
@@ -438,6 +438,74 @@ class RepairApplicationTest(unittest.TestCase):
             svc.confirm_repair(self.store, plan["plan_id"], session_id="s1")
         self.assertEqual(denied.exception.reason, "plan_blocked")
         self.assertEqual(self.store.list_goals(kinds=["batch"]), [])
+
+    def test_agent_can_freeze_diff_only_automatic_mask_and_start_after_confirmation(self):
+        scene = self.scene(601)
+        directory, pan = scene
+        source = Image.new("I;16", (160, 160), 100)
+        draw = ImageDraw.Draw(source)
+        for x in range(10, 110, 20):
+            for y in range(10, 110, 20):
+                draw.rectangle((x, y, x + 9, y + 9), fill=200)
+        source.save(pan)
+        Image.new("I;16", (80, 80), 100).save(directory / f"{directory.name}_NOSR.tif")
+        workspace = self.workspace(scene)
+        snapshot = validate_snapshot({
+            "version": 1, "workspace": workspace,
+            "agent_repair_settings": {"require_mss_land": False, "detection_method": "absdiff",
+                                      "confirm_before_start": False, "auto_approve_mask": True},
+        })
+        registry = bind_registry(
+            build_builtin_registry(), snapshot, store=self.store, session_id=self.session_id)
+        with mock.patch.dict(os.environ, {"SR_BATCH_PRODUCTION": "1", "SR_SLURM_FAKE": "0"}), \
+             mock.patch("backend.services.repair_land.prepare_item") as land:
+            reply = registry.get("prepare_repair").run(strategy="review")
+            self.assertTrue(reply["ok"], reply)
+            plan = reply["data"]
+            self.assertEqual(plan["mask_policy"], "auto_diff")
+            self.assertEqual(plan["launch_policy"], "auto")
+            self.assertIs(plan["auto_approve_mask"], True)
+            self.assertEqual(plan["status"], "READY")
+            land.assert_not_called()
+            kwargs = {"session_id": self.session_id, "workspace": workspace, "workspace_version": 7}
+            with self.assertRaises(RepairPlanConflict):
+                svc.start_repair(self.store, plan["plan_id"], **kwargs)
+            svc.confirm_repair(self.store, plan["plan_id"], session_id=self.session_id)
+            started = svc.start_repair(self.store, plan["plan_id"], **kwargs)
+        item, = self.store.list_goal_items(started["goal"]["goal_id"])
+        self.assertEqual(item["status"], "PENDING")
+        self.assertEqual(item["checkpoint"]["mask_policy"], "auto_diff")
+        self.assertIs(item["checkpoint"]["review_required"], False)
+        self.assertNotIn("land_constraint", item["checkpoint"])
+        with self.assertRaisesRegex(batch_worker.ItemBlocked, "缺少掩码工件"):
+            batch_worker._verify_submission_inputs(item, "production")
+        cp = item["checkpoint"]
+        result = batch_worker._detection_job({
+            "mode": "production",
+            "target_image": {**cp["target_image"], "item_id": item["item_id"],
+                             "reference_image": cp["reference_image"]},
+            "detection_config": {**cp["config"]["detection"], "min_area_px": 1,
+                                 "blur": False, "open_kernel": 1, "close_kernel": 1},
+            "candidate_root": str(batch_manifest.artifact_root() / "test-candidates"),
+        })
+        self.assertGreater(result["mask"]["foreground_pixels"], 0)
+        cp.update(result)
+        batch_worker._verify_submission_inputs(item, "production")
+        self.assertNotIn("land_constraint", batch_worker._submit_params(item))
+
+    def test_disabling_mask_waiver_freezes_manual_mask_review(self):
+        directory, pan = self.scene(602)
+        with mock.patch.dict(os.environ, {"SR_BATCH_PRODUCTION": "1", "SR_SLURM_FAKE": "0"}):
+            plan = svc.prepare_repair(
+                self.store, session_id=self.session_id, mode="production",
+                sources=[{"path": str(pan), "name": directory.name}],
+                mask_policy="auto_diff", auto_approve_mask=False)
+            self.assertIs(plan["auto_approve_mask"], False)
+            svc.confirm_repair(self.store, plan["plan_id"], session_id=self.session_id)
+            started = svc.start_repair(self.store, plan["plan_id"], session_id=self.session_id)
+        item, = self.store.list_goal_items(started["goal"]["goal_id"])
+        self.assertIs(item["checkpoint"]["review_required"], True)
+        self.assertFalse(batch_worker._review_allows_submit(item))
 
     def test_manual_mask_becomes_a_mask_ready_batch_item(self):
         scene_dir, inp = self.scene(7)
