@@ -1,6 +1,6 @@
 # 4 GB BigTIFF 性能复核
 
-审查起点为 `ab353c5`，包括 P1 `9e783e6` 和 P0 `efff3fa`。开始时工作区干净，本地 HEAD 相对当时的 `origin/main` 领先 2 个提交。完整差异可用 `git diff ab353c5 HEAD` 查看。
+审查起点为 `ab353c5`，包括 P1 `9e783e6` 和 P0 `efff3fa`。审查结果提交为 `3f393e4`（已同步到 `origin/main`），完整差异用 `git diff ab353c5 3f393e4` 查看。
 
 ## 问题与修改
 
@@ -43,7 +43,13 @@ Puppeteer 在视口内持续按住鼠标，按真实经过时间计算 130 CSS p
 | Edge / 1 | 26.8 / 30.3 / 28.7 | 27.6–30.0 / 27.4–29.6 / 28.6–29.1 | −10.4% |
 | Edge / 2 | 27.5 / 29.2 / 29.1 | 28.3–28.8 / 27.3–30.7 / 27.2–29.2 | −5.9% |
 
-复测为 59.9–60.4 次 Viewer Canvas 更新/s，指针到下一次画布绘制 P95 为 6.2–6.7 ms，24 轮最终平移误差均为 0 CSS px，没有记录到 50 ms 以上的长任务。130 px 的原生轨迹完全命中可视图块，主要测量热拖拽。DPR 1 与 2 的主 Canvas 背板为 1014×832 与 2028×1664，RGBA 约 3.22 MiB 与 12.87 MiB。Edge DPR 2 的全图、中间倍率、双图同步和 ROI 各测了三种速度，P95 为 26.9–29.4 ms，双图两侧最终位移均无漂移。自动巡览另跑 10 秒。历史 P2 的 18.7 ms 来自更短的采样，持续拖拽对照没有复现该帧间隔，也未达到 16.7 ms 目标。
+复测为 59.9–60.4 次 Viewer Canvas 更新/s，指针到下一次画布绘制 P95 为 6.2–6.7 ms，24 轮最终平移误差均为 0 CSS px，没有记录到 50 ms 以上的长任务。130 px 的原生轨迹完全命中可视图块，主要测量热拖拽。DPR 1 与 2 的主 Canvas 背板为 1014×832 与 2028×1664，RGBA 约 3.22 MiB 与 12.87 MiB。Edge DPR 2 的全图、中间倍率、双图同步和 ROI 各测了三种速度，P95 为 26.9–29.4 ms，双图两侧最终位移均无漂移。自动巡览另跑 10 秒。
+
+每轮拖拽注入 601 次 PointerMove，同一区间 Viewer Canvas 重绘 601–610 帧（计时器记录的间隔为 600–609 个，帧/事件 1.000–1.015，最多把 1 帧的两次移动合并），即没有丢帧；帧间隔中位 15.2–15.4 ms、均值约 16.6 ms（60.0–60.8 fps）。P95 27–31 ms 来自注入节拍本身：Node 定时器与 CDP 往返使部分相邻事件间隔变长，而渲染是输入驱动的，下一帧跟着事件走。同一区间 `drawImage` 提交耗时 P95 为 0 ms（2D 光栅化转交合成器），长任务为 0，指针到下一帧 P95 6.2–6.7 ms，可见图块覆盖率 100%，取消请求为 0，新增图块请求最多 18 个（图块进入视野时）。因此在本测量方式下 16.7 ms 的帧间隔 P95 不可达：要让它低于 16.7 ms，只能让应用脱离输入自行跑 rAF，而任务书明确排除了空闲 rAF 采样。能证明流畅的指标（逐事件出帧、无长任务、输入延迟）全部满足。另有一组补充的原生拖拽（601 事件 / 605–610 帧，期间新增 12–18 个图块请求），结论相同。历史 P2 的 18.7 ms 来自更短的采样，持续拖拽对照没有复现该帧间隔。
+
+## 内存与生命周期
+
+Edge DPR 2 下把四种布局连续开关 4 轮，每轮固定做 18 次跨视口跳转并等 L0 覆盖。四张同时打开时 Bitmap 缓存峰值 134,217,728 B，正好是 128 MiB 预算；服务端缓存图块从 9.2 MB 长到 14.1 MB 后不再增长。每轮 `clearRecs` 后 `liveBitmapBytes`、预览输入与画布字节都回到 0，事件监听器回到 121、DOM 节点回到 408，说明调度器、预览画布和浏览器侧图块都能释放。轮与轮之间 `JSHeapUsedSize` 为 5.6 → 6.4 → 7.0 → 7.4 → 7.9 MB，renderer RSS 为 403 → 411 → 416 → 421 → 426 MB，每轮约 +0.5 MB / +5.5 MB，没有加速增长，更像分配器保留页而不是按图累积的引用；但 4 轮不足以宣称完全无泄漏。后端 RSS 稳定在 109–110 MB，未把整幅 TIFF 读进内存。
 
 ## DN、画质与显示
 
@@ -51,7 +57,20 @@ Puppeteer 在视口内持续按住鼠标，按真实经过时间计算 130 CSS p
 
 Chrome/Edge × DPR 1/2 在 Strip 源上通过 64×64 设备像素逐点比对。采样点在源坐标 (24576, 24576) 的四 Tile 交点，Canvas 与独立拼装的 P1 PNG 参考差异为 0。Chrome DPR 1 另外跑了其他三种布局。L0 的 1,048,576 B RGBA 纹理预算、262,144 B 灰度缓冲和 524,288 B UInt16 DN 各自计量。
 
-Chrome 的实际文件句柄拖入中，同名已核验源进入 Tile 模式。未映射的短文件名 `loose.tif` 走本地 P0 Worker，约 141 ms 提供渐进预览状态，约 1.59 s 生成 4096×4094 概览。浏览器主线程观测到的最大 Blob.arrayBuffer 为 4 KiB，两条路径上传均为 0 B。中止本地解码后打开映射源，取消条目未发布预览。
+Chrome 的实际文件句柄拖入中，同名已核验源在约 1.06 s 后进入 Tile 模式（`serverSourceVerified`，上传 0 B）。未映射的短文件名 `loose.tif` 走本地 P0 Worker：约 137 ms 提供渐进预览状态，约 1.78 s 生成 4096×4094 概览，全程不进入 Tile 模式。浏览器主线程观测到的最大 `Blob.arrayBuffer` 为 4 KiB，两条路径上传均为 0 B。中止本地解码后打开映射源时，取消条目未发布预览；连续拖入本地大图与映射大图时，被替换的旧条目同样没有发布半成品。
+
+## 产物
+
+基准 JSON、原生截图与 DN 校验在 `.e2e/fixtures/raster-audit-results/`：`before-*` / `after-*` 对应 P2 基线与本轮，`after-lifecycle.json` 是四轮开关内存，`large-drop.json` 是文件拖入，`after-edge-2-scenarios.json` / `after-edge-2-wide.json` 是 Edge DPR 2 的其余场景与宽扫。样本 TIFF 在 `.e2e/fixtures/raster-audit/`，不入库。
+
+## 尚未验证与后续
+
+- 真实盘阵、冷 OS 页缓存与 CentOS 7 的 GDAL 环境没有复测。本轮 Windows 进程 I/O 计数含文件系统缓存命中；DEFLATE 首开耗时主要来自 CPU 解压，不是冷盘读取，盘阵上的绝对值会不同。
+- 无头模式记录的是 Canvas 提交节拍，未覆盖物理显示器 vsync、GPU 执行与屏幕实际呈现；上文的帧间隔结论要按「逐事件出帧」解读。
+- 无 Overview 的 DEFLATE 首开 T6 仍为 3.34 s：目标 LOD 的 4 个 L6 象限合计仍要把整幅约 4.9 GB 的压缩数据解一遍（步长 64 小于 512 的块，每个块都要解码），而服务端图块线程池默认 2 线程（`SR_TILE_WORKERS` 可调到 4）。请求同时发出，墙钟却被 2 线程摊成两批；调高线程数是最可能缩短 T6 的下一步，但本轮没有复测，不能当作已验证收益。
+- 服务端 `RasterWindowReader._open` 固定了 `NUM_THREADS=1`。GTiff 的多线程块解码本可把单次大窗口解压并行化，但显式 open option 会压过 `GDAL_NUM_THREADS`；要做对照实验得先把它改成可配置，再比较 T3/T6、CPU 与并发请求下的相互影响。本轮没有改。
+- 任务书引用的 4.41 s 与本地 P2 基线 3,769 / 3,933 ms 不同（数据、机器与计时口径不同），本文一律以本地复测为准。
+- 约 7,000 设备像素宽以上（如 8K 视口）在「原生」档会因 `maxVisible` 上限（96 个可见图块）自动退到更粗 LOD；本机 1440×880 × DPR 2（2880×1760 设备像素、24 个可见图块）不受影响。
 
 ## 复跑
 
@@ -67,4 +86,4 @@ $env:CHROME_PATH='C:/Program Files/Google/Chrome/Application/chrome.exe'; $env:T
 .venv/Scripts/python.exe -m scripts.audit_raster .e2e/fixtures/raster-audit --layout strip --api http://127.0.0.1:8766
 ```
 
-Edge 改用本机 `msedge.exe`。分别以 `TILE_DPR=1` 和 `2` 测量。以 `AUDIT_TAG` 标识输出文件，`AUDIT_LAYOUTS` 选择样本，`AUDIT_MODES=fit,mid,split,roi,tour` 跑场景，`AUDIT_LIFECYCLE` 控制切换和清空轮数。可选的 `AUDIT_PYTHON` 用于记录 Chromium 进程 RSS。CentOS 7 可以用其专用 GDAL 环境执行同一 Python 诊断入口。浏览器可使用 `AUDIT_API` 与 `AUDIT_FIXTURE` 指向对应测试入口。真实数据应采用只读源和独立测试缓存。
+Edge 改用本机 `msedge.exe`。分别以 `TILE_DPR=1` 和 `2` 测量。以 `AUDIT_TAG` 标识输出文件，`AUDIT_LAYOUTS` 选择样本，`AUDIT_MODES=fit,mid,split,roi,tour` 跑场景，`AUDIT_LIFECYCLE` 控制切换和清空轮数。可选的 `AUDIT_PYTHON` 用于记录 Chromium 进程 RSS。CentOS 7 可以用其专用 GDAL 环境执行同一 Python 诊断入口。浏览器可使用 `AUDIT_API` 与 `AUDIT_FIXTURE` 指向对应测试入口。真实数据应采用只读源和独立测试缓存。文件拖入另跑 `node .e2e/audit-large-drop.js <同名映射 TIFF> <改名副本>`，用 `AUDIT_DROP_RESULT` 落盘；对照无金字塔 T6 时可在服务端设 `SR_TILE_WORKERS=4`。
