@@ -26,6 +26,7 @@ import type { Pane } from '../stores/viewer';
 import { useQcListStore } from '../stores/qclist';
 import { easeOutCubic, mouseToThumb, thumbToScreen, thumbToDisplaySource, clampSourcePixel, paneAtX, fitView, nativePreviewScale } from '../lib/viewMath';
 import { TileRenderer } from '../lib/tileRenderer';
+import { withTileDisplay } from '../lib/tileSource';
 import { overviewResolution, tileResolution } from '../lib/viewResolution';
 import { previewResolutionNote } from '../lib/previewLevel';
 import type { TilePane } from '../lib/tileScheduler';
@@ -235,10 +236,13 @@ function clipToActivePane(ctx: CanvasRenderingContext2D, ps: Pane[]): boolean {
 
 function tilePane(p: Pane): TilePane | null {
   const r = p.rec;
-  if (!r?.tileSource || !r.thumb || r.stretchPreview || r.displayStretch
-    || (r.paintedMode && r.paintedMode !== 'equal')) return null;
+  if (!r?.tileSource || !r.thumb) return null;
+  if (!r.tileSource.info.displayProfiles && (r.stretchPreview || r.displayStretch
+    || (r.paintedMode && r.paintedMode !== 'equal'))) return null;
   if (diff.display === 'heat' && diff.layerFor(r)) return null;
-  return { source: r.tileSource, rect: p.rect, view: p.view, tw: r.thumb.width, th: r.thumb.height };
+  const source = withTileDisplay(r.tileSource, r.tileDisplay ?? 'equal');
+  return { source, rect: p.rect, view: p.view, tw: r.thumb.width, th: r.thumb.height,
+    hasOverview: source.key === r.tileOverviewKey };
 }
 
 function render(now: number) {
@@ -258,7 +262,8 @@ function render(now: number) {
     if (tiled) tilePanes.set(paneKey(p), tiled);
   }
   const immediate = !!reducedMotion?.matches || store.compareMode === 'flicker';
-  tileRenderer.update(tilePanes, store.recs.flatMap(rec => rec.tileSource ? [rec.tileSource] : []),
+  tileRenderer.update(tilePanes, store.recs.flatMap(rec => rec.tileSource
+    ? [withTileDisplay(rec.tileSource, rec.tileDisplay ?? 'equal')] : []),
     now, dpr, immediate);
   let animate = false;
   for (const current of ps) {
@@ -276,7 +281,9 @@ function render(now: number) {
     const source = (rec.thumb && image === rec.thumb && !rec.tileSource
       ? store.gestureSourceFor(rec) ?? image : image) as unknown as CanvasImageSource;
     const layer = diff.layerFor(rec);
-    if (!tiled || !tileRenderer.covers(key)) {
+    const tileBase = tilePanes.get(key);
+    const matchingBase = !tileBase?.source.info.displayProfiles || tileBase.hasOverview;
+    if ((!tiled || !tileRenderer.covers(key)) && matchingBase) {
       ctx.save();
       ctx.beginPath();
       ctx.rect(p.rect.x, p.rect.y, p.rect.w, p.rect.h);

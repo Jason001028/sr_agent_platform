@@ -7,21 +7,22 @@ import hashlib
 import io
 import json
 from threading import Lock
+from typing import Literal, Optional
 
 from fastapi import HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
-import numpy as np
 from PIL import Image
 
 from backend.pathguard import PathDeniedError
-from backend.services.preview_jpg import EQUAL_BINS, PREVIEW_RULE_VERSION, PreviewError
+from backend.services.preview_jpg import PreviewError
+from backend.services.raster_tone import Display, display_pixels, parse_display, sample_source_stats, stretch_stats
 from backend.services.raster_window import (
     MAX_OUTPUT, RasterReadError, RasterUnavailable, RasterWindowReader, json_nodata, raster_revision,
 )
 
 TILE_SIZE = MAX_OUTPUT
-STRETCH_VERSION = f"{PREVIEW_RULE_VERSION}-equal-sample-grid-v1"
-TILE_RULE = "grid-nearest-png-v1"
+STRETCH_VERSION = "source-tone-u16-stratified-v2"
+TILE_RULE = "grid-nearest-area-png-v2"
 TILE_HEADERS = ["ETag", "X-SR-Tile", "X-SR-Raster-Window"]
 
 
@@ -36,36 +37,6 @@ def tile_window(width, height, level, tx, ty):
         raise RasterReadError("Tile index is outside the raster")
     w, h = min(span, width - x), min(span, height - y)
     return x, y, w, h, (w + step - 1) // step, (h + step - 1) // step
-
-
-def valid_dn(dn, nodata):
-    valid = np.isfinite(dn)
-    if nodata is not None:
-        valid &= dn != nodata
-    return valid
-
-
-def stretch_stats(samples):
-    if samples.size == 0:
-        return 0, 0, None
-    lo, hi = float(samples.min()), float(samples.max())
-    if hi == lo:
-        return lo, hi, None
-    bins = ((samples - lo) * (EQUAL_BINS / (hi - lo))).astype(np.intp)
-    counts = np.bincount(bins.clip(0, EQUAL_BINS - 1), minlength=EQUAL_BINS)
-    return lo, hi, np.rint(counts.cumsum() / samples.size * 255).astype(np.uint8)
-
-
-def display_pixels(dn, nodata, stats):
-    lo, hi, lut = stats
-    valid = valid_dn(dn, nodata)
-    pixels = np.zeros(dn.shape, dtype=np.uint8)
-    if lut is None:
-        pixels[valid] = 128 if lo != 0 else 0
-    else:
-        t = ((dn[valid].astype(np.float64) - lo) / (hi - lo)).clip(0, 1)
-        pixels[valid] = lut[(t * (EQUAL_BINS - 1)).astype(np.intp)]
-    return pixels
 
 
 @dataclass
@@ -145,20 +116,10 @@ class ImageTiles:
         if existing is not None:
             return existing.result()
         try:
-            # Small L0 patches sample the same source population at every LOD.
-            w, h = min(32, info.width), min(32, info.height)
-            xs = np.linspace(0, info.width - w, 5, dtype=int)
-            ys = np.linspace(0, info.height - h, 5, dtype=int)
-            parts = []
-            for y in np.unique(ys):
-                for x in np.unique(xs):
-                    dn = self.reader.read_window(source, int(x), int(y), w, h,
-                                                 band=band, revision=revision).dn
-                    parts.append(dn[valid_dn(dn, info.nodata)])
-            result = stretch_stats(np.concatenate(parts).astype(np.float64))
+            result = sample_source_stats(self.reader, source, revision, band, info)
             with self.lock:
                 self.stats[key] = result
-                if len(self.stats) > 128:
+                if len(self.stats) > 32:
                     self.stats.popitem(last=False)
             future.set_result(result)
             return result
@@ -169,24 +130,30 @@ class ImageTiles:
             with self.lock:
                 del self.stats_inflight[key]
 
-    def _tile(self, source, revision, band, info, level, tx, ty):
+    def _tile(self, source, revision, band, info, level, tx, ty, display=Display(), sampling="nearest"):
         window = tile_window(info.width, info.height, level, tx, ty)
-        key = revision, band, TILE_RULE, STRETCH_VERSION, level, tx, ty
+        area = sampling == "area" and level in (1, 2) and not info.categorical
+        key = revision, band, TILE_RULE, STRETCH_VERSION, display.key, sampling, level, tx, ty
         tile_id = hashlib.sha256(repr(key).encode()).hexdigest()
         with self.lock:
             if key in self.tiles:
                 self.tiles.move_to_end(key)
                 return self.tiles[key]
-        stats = self._source_stats(source, revision, band, info)
-        result = self.reader.read_window(source, *window, band=band, revision=revision, grid_step=1 << level)
-        pixels = display_pixels(result.dn, info.nodata, stats)
+        stats = None if display.mode == "window" else self._source_stats(source, revision, band, info)
+        if area:
+            result = self.reader.read_area(source, *window, step=1 << level, band=band, revision=revision, info=info)
+        else:
+            result = self.reader.read_window(source, *window, band=band, revision=revision, grid_step=1 << level)
+        pixels = display_pixels(result.dn, None if area else info.nodata, stats, display,
+                                invert=info.photometric == 0)
         output = io.BytesIO()
         Image.fromarray(pixels).save(output, format="PNG", compress_level=1)
         data = output.getvalue()
         x, y, w, h, ow, oh = window
         metadata = dict(id=tile_id, x=x, y=y, sourceWidth=w, sourceHeight=h, width=ow,
                         height=oh, level=level, tileX=tx, tileY=ty, band=band,
-                        resampling=result.resampling, stretchVersion=STRETCH_VERSION,
+                        resampling=result.resampling, requestedSampling=sampling, rasterSources=result.sources,
+                        displayKey=display.key, stretchVersion=STRETCH_VERSION,
                         dnBytes=result.dn.nbytes, displayBytes=pixels.nbytes, decodedBytes=ow * oh * 4)
         value = data, metadata
         # The caller checks the same revision again before returning cached bytes.
@@ -219,11 +186,13 @@ class ImageTiles:
                     headers = dict(zip(("x", "y", "width", "height"), result.window))
                     headers.update(band=band, dtype=dn.dtype.str, noData=json_nodata(info.nodata),
                                    dnBytes=len(data))
+                elif kind == "stats":
+                    headers = self._source_stats(source, revision, band, info).summary()
                 else:
                     headers = asdict(info)
                     headers.update(nodata=json_nodata(info.nodata), band=band, tileSize=TILE_SIZE,
                                    maxLevel=(max(info.width, info.height) - 1).bit_length(),
-                                   stretchVersion=STRETCH_VERSION)
+                                   stretchVersion=STRETCH_VERSION, displayProfiles=True)
             except RasterUnavailable as exc:
                 raise HTTPException(503, str(exc)) from exc
             except (RasterReadError, RuntimeError, PreviewError, OSError) as exc:
@@ -237,7 +206,7 @@ class ImageTiles:
             if raster_revision(source) != revision:
                 raise HTTPException(409, "Source changed during window read")
             headers = dict(headers, sourceVersion=version, rasterVersion=revision)
-            if kind == "info":
+            if kind in ("info", "stats"):
                 return JSONResponse(headers, headers={"Cache-Control": "no-store"})
             if kind == "tile":
                 return Response(data, media_type="image/png", headers={
@@ -256,10 +225,22 @@ def add_tile_routes(router, service):
     async def info(ident: str, request: Request, band: int = Query(1, ge=1)):
         return await service.serve(request, (ident, "info", band))
 
+    @router.get("/assets/{ident}/tiles/stats")
+    async def stats(ident: str, request: Request, band: int = Query(1, ge=1)):
+        return await service.serve(request, (ident, "stats", band))
+
     @router.get("/assets/{ident}/tiles/{level}/{tile_x}/{tile_y}")
     async def tile(ident: str, level: int, tile_x: int, tile_y: int, request: Request,
-                   band: int = Query(1, ge=1)):
-        response = await service.serve(request, (ident, "tile", band, level, tile_x, tile_y))
+                   band: int = Query(1, ge=1), display: str = Query("equal", max_length=2800),
+                   sampling: Literal["nearest", "area"] = Query("nearest"),
+                   stretchVersion: Optional[str] = Query(None, max_length=80)):
+        if stretchVersion is not None and stretchVersion != STRETCH_VERSION:
+            raise HTTPException(409, "Tile display version changed")
+        try:
+            tone = parse_display(display)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        response = await service.serve(request, (ident, "tile", band, level, tile_x, tile_y, tone, sampling))
         etag = response.headers.get("ETag")
         if etag and any(tag.strip().removeprefix("W/") in (etag, "*")
                         for tag in request.headers.get("If-None-Match", "").split(",")):

@@ -14,6 +14,7 @@ import numpy as np
 from backend.services.preview_jpg import (
     _TAG_RPS, _np_dtype, _parse_tiff_header, _read_ifd, _strip_tables, probe_tiff, source_revision,
 )
+from backend.services.raster_tone import valid_dn
 
 RESAMPLING = {"nearest": "NearestNeighbour", "average": "Average", "bilinear": "Bilinear"}
 MAX_OUTPUT = 512
@@ -70,6 +71,11 @@ class RasterInfo:
     compression: str
     block_size: tuple
     overviews: tuple
+    photometric: int | None = None
+    scale: float = 1
+    offset: float = 0
+    unit: str = ""
+    categorical: bool = False
 
 
 @dataclass(frozen=True)
@@ -79,6 +85,7 @@ class RasterWindow:
     info: RasterInfo
     band: int
     resampling: str
+    sources: tuple = ("base",)
 
 
 @dataclass(frozen=True)
@@ -164,7 +171,7 @@ class RasterWindowReader:
             self.local.handles.pop(str(Path(source).resolve()), None)
 
     def _band(self, source, band, revision):
-        from osgeo import gdal_array
+        from osgeo import gdal, gdal_array
         ds, probe, sparse = self._open(source, revision)
         if not 1 <= band <= ds.RasterCount:
             raise RasterReadError("Band is outside the raster")
@@ -181,10 +188,16 @@ class RasterWindowReader:
         if sparse is None and math.prod(block) * bytes_per_pixel > MAX_BLOCK_BYTES:
             raise RasterReadError("TIFF decoding block exceeds 32 MiB")
         overviews = tuple(raster.GetOverview(i) for i in range(raster.GetOverviewCount()))
+        scale, offset = raster.GetScale(), raster.GetOffset()
+        categorical = (probe["bits"] == 1 or raster.GetColorInterpretation() == gdal.GCI_PaletteIndex
+                       or bool(raster.GetCategoryNames()))
         info = RasterInfo(ds.RasterXSize, ds.RasterYSize, ds.RasterCount, dtype.name,
                           raster.GetNoDataValue(), "tiled" if probe["tiled"] else "strip",
                           ds.GetMetadataItem("COMPRESSION", "IMAGE_STRUCTURE") or "NONE",
-                          block, tuple((o.XSize, o.YSize) for o in overviews))
+                          block, tuple((o.XSize, o.YSize) for o in overviews), probe["photometric"],
+                          scale if scale is not None and math.isfinite(scale) else 1,
+                          offset if offset is not None and math.isfinite(offset) else 0,
+                          raster.GetUnitType() or "", categorical)
         return raster, info, overviews, sparse, bytes_per_pixel
 
     def info(self, source, band=1, *, revision=None):
@@ -212,6 +225,7 @@ class RasterWindowReader:
         if (ow, oh) == (w, h):
             resampling = "nearest"
         algorithm = getattr(gdal, "GRIORA_" + RESAMPLING[resampling])
+        sources = set()
 
         def sections(start, size, count):
             if grid_step and count > 1 and size % grid_step:
@@ -231,10 +245,13 @@ class RasterWindowReader:
                     matching = next((o for o in overviews if (o.XSize, o.YSize) == reduced), None)
                     if matching is not None:
                         selected = matching
+                        sources.add(f"overview:{matching.XSize}x{matching.YSize}")
                         sx, sy = sx // scale, sy // scale
                         sw, sh = (sw + scale - 1) // scale, (sh + scale - 1) // scale
                         break
                     scale //= 2
+            if selected is raster:
+                sources.add("base" if grid_step or (sw, sh) == (dw, dh) or not overviews else "gdal-auto")
             if (selected is raster and sparse is not None and resampling == "nearest"
                     and (grid_step or not overviews or (sw, sh) == (dw, dh))):
                 return sparse.read(source, info, sx, sy, sw, sh, dw, dh)
@@ -264,4 +281,32 @@ class RasterWindowReader:
             for sy, sh, dh, dy in ys:
                 for sx, sw, dw, dx in xs:
                     dn[dy:dy + dh, dx:dx + dw] = read(sx, sy, sw, sh, dw, dh)
-        return RasterWindow(dn, (x, y, w, h), info, band, resampling)
+        return RasterWindow(dn, (x, y, w, h), info, band, resampling, tuple(sorted(sources)))
+
+    def read_area(self, source, x, y, w, h, ow, oh, *, step, band, revision, info):
+        """Average globally aligned source footprints in bounded native windows."""
+        if (step not in (2, 4) or not 0 <= x < x+w <= info.width or not 0 <= y < y+h <= info.height
+                or (ow, oh) != ((w+step-1)//step, (h+step-1)//step) or max(ow, oh) > MAX_OUTPUT):
+            raise RasterReadError("Invalid Area tile footprint")
+        raster, _, _, sparse, _ = self._band(source, band, revision)
+        gdal = _gdal()
+        dn = np.empty((oh, ow), dtype=np.float64)
+        cols = np.arange(0, w, step)
+        for top in range(0, h, MAX_OUTPUT):
+            height = min(MAX_OUTPUT, h-top)
+            if sparse is not None:
+                block = sparse.read(source, info, x, y+top, w, height, w, height)
+            else:
+                with gdal.ExceptionMgr():
+                    block = raster.ReadAsArray(x, y+top, w, height, w, height)
+                if block is None:
+                    raise RasterReadError("TIFF window read failed")
+            valid = valid_dn(block, info.nodata)
+            rows = np.arange(0, height, step)
+            sums = np.add.reduceat(np.add.reduceat(np.where(valid, block, 0), rows, axis=0,
+                                                   dtype=np.float64), cols, axis=1)
+            counts = np.add.reduceat(np.add.reduceat(valid, rows, axis=0, dtype=np.int32), cols, axis=1)
+            out = dn[top//step:top//step+len(rows)]
+            out.fill(np.nan)
+            np.divide(sums, counts, out=out, where=counts != 0)
+        return RasterWindow(dn, (x, y, w, h), info, band, "area", ("base",))

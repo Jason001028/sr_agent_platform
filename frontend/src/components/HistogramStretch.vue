@@ -8,6 +8,7 @@ const snapshot=shallowRef<ReturnType<typeof store.histogramSnapshot>>(null);
 const position=ref({left:'8px',top:'48px'});
 const modes:StretchMode[]=['linear','linear2','equal','sqrt','log'];
 const logHistogram=ref(false);
+const nativeHistogram=computed(()=>!!store.histogramRec?.tileSource?.info.displayProfiles);
 const label=computed(()=>{
   const rec=open.value?store.histogramRec:store.activeRec;
   return rec?.displayStretch?.curve?'曲线':rec?.displayStretch?.custom?'自定义':STRETCH_LABELS[rec?.paintedMode??store.activeStretch];
@@ -159,7 +160,7 @@ onBeforeUnmount(()=>{cancelAnimationFrame(frame);cancelAnimationFrame(statsFrame
   <Teleport to="body">
     <section v-if="open" ref="panel" class="hist-panel" role="dialog" aria-label="灰度直方图拉伸" tabindex="-1" :style="position" @pointerdown.stop @keydown.stop @keydown.esc.prevent="close">
       <header><svg class="panel-icon" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 16V10m5 6V3m5 13V7m4 9H2" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg><strong>灰度调整</strong><button class="close" aria-label="关闭直方图" @click="close">×</button></header>
-      <div class="hist-distribution"><span>灰度分布</span><div class="scope range-scope" role="group" aria-label="直方图统计范围"><button :class="{selected:store.histogramScope==='whole'}" @click="store.histogramScope='whole';refresh()">整图</button><button :class="{selected:store.histogramScope==='view'}" @click="store.histogramScope='view';refresh()">当前视野</button></div><button class="hist-log" :class="{selected:logHistogram}" :aria-pressed="logHistogram" title="切换直方图频数的对数纵轴，不改变影像映射" @click="logHistogram=!logHistogram">▥ log</button></div>
+      <div class="hist-distribution"><span>灰度分布</span><div v-if="!nativeHistogram" class="scope range-scope" role="group" aria-label="直方图统计范围"><button :class="{selected:store.histogramScope==='whole'}" @click="store.histogramScope='whole';refresh()">整图</button><button :class="{selected:store.histogramScope==='view'}" @click="store.histogramScope='view';refresh()">当前视野</button></div><button class="hist-log" :class="{selected:logHistogram}" :aria-pressed="logHistogram" title="切换直方图频数的对数纵轴，不改变影像映射" @click="logHistogram=!logHistogram">▥ log</button></div>
       <template v-if="snapshot">
         <svg class="hist-plot" :class="{'curve-active':!!snapshot.curve}" viewBox="0 -4 300 112" preserveAspectRatio="none" :role="snapshot.curve?'group':'img'" :tabindex="snapshot.curve?0:undefined" aria-label="灰度直方图与拉伸曲线，回车新增控制点" @keydown.enter.self.prevent="snapshot.curve&&curveInsertKey()" @pointerdown="curveAdd" @pointermove="move($event);curveMove($event)" @pointerup="end($event);curveEnd($event)" @pointercancel="end($event);curveEnd($event)">
           <defs><linearGradient id="hist-gray"><stop stop-color="#151b19"/><stop offset="1" stop-color="#fafbfa"/></linearGradient><linearGradient id="hist-bars" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#4f7b70"/><stop offset="1" stop-color="#87948f"/></linearGradient></defs>
@@ -188,8 +189,8 @@ onBeforeUnmount(()=>{cancelAnimationFrame(frame);cancelAnimationFrame(statsFrame
         <button class="curve-entry" :class="{selected:!!snapshot.curve}" :aria-pressed="!!snapshot.curve" @click="!snapshot.curve&&chooseCurve()">曲线拉伸 <span>调整暗部、中间调与高光</span></button>
         <div v-if="store.split||store.compareMode==='flicker'" class="hist-link"><div v-if="store.stretchLink==='independent'" class="scope" role="group" aria-label="调整影像"><span>调整</span><button v-for="(side,i) in (['A','B'] as const)" :key="side" :disabled="!targets[i]" :title="targets[i]?.name" :class="{selected:store.histogramRec?.id===targets[i]?.id}" @click="selectTarget(side)">{{ side }}</button></div><span v-else>双图映射</span><div class="scope"><button :class="{selected:store.stretchLink==='independent'}" @click="store.setStretchLink('independent');refresh()">独立</button><button :disabled="!!store.sharedStretchReason" :title="store.sharedStretchReason||'同一上下限及 CDF 映射'" :class="{selected:store.stretchLink==='shared'}" @click="store.setStretchLink('shared');refresh()">共享</button></div></div>
         <p v-if="(store.split||store.compareMode==='flicker')&&store.sharedStretchReason" class="hist-note">{{ store.sharedStretchReason }}</p>
-        <footer><span>{{ snapshot.curve?'曲线映射':snapshot.custom?'自定义线性映射':STRETCH_LABELS[snapshot.mode] }}<small v-if="store.stretchLink==='shared'"> · 共享范围 / CDF</small></span><button @click="store.resetHistogramStretch();refresh()"><span aria-hidden="true">↻</span> 恢复默认</button></footer>
-        <p class="hist-note source-note"><span aria-hidden="true">ⓘ</span> 数据来源：{{ snapshot.source }}<br v-if="store.histogramScope==='view'"/><span v-if="store.histogramScope==='view'">视野统计来自缓存像素，不重新读取 TIFF。</span></p>
+        <footer><span>{{ snapshot.curve?'曲线映射':snapshot.custom?'自定义线性映射':STRETCH_LABELS[snapshot.mode] }}<small v-if="store.stretchLink==='shared'">{{ nativeHistogram ? ' · 共享 DN 黑白场' : ' · 共享范围 / CDF' }}</small></span><button @click="store.resetHistogramStretch();refresh()"><span aria-hidden="true">↻</span> 恢复默认</button></footer>
+        <p class="hist-note source-note"><span aria-hidden="true">ⓘ</span> 数据来源：{{ snapshot.source }}<br v-if="!nativeHistogram&&store.histogramScope==='view'"/><span v-if="!nativeHistogram&&store.histogramScope==='view'">视野统计来自缓存像素，不重新读取 TIFF。</span></p>
       </template>
       <p v-else class="hist-empty">当前范围暂无有效采样；请打开影像、等待概览或调整视野。</p>
     </section>

@@ -1,0 +1,29 @@
+{
+  "browser": "Chrome/157.0.8103.80",
+  "openToNativeMs": 1884.5,
+  "zoomToNativeMs": 327.59999999403954,
+  "gray": [
+    0,
+    42,
+    85,
+    128,
+    170,
+    212,
+    255
+  ],
+  "alpha": [
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255
+  ],
+  "manualStableMs": 1226.7000000178814,
+  "staleReleased": 6,
+  "panRafP95": 16.700000000000728,
+  "panFrames": 120,
+  "peakTileBytes": 25764900,
+  "sharedManual": true
+}

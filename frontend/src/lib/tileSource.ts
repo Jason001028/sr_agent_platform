@@ -1,5 +1,6 @@
 import { fetchAssetTile, fetchAssetTileInfo } from './imageOpen';
 import type { AssetTile, AssetTileInfo, PreviewAsset } from './imageOpen';
+import type { DisplayStretch } from './histogramStretch';
 
 export const TILE_OVERVIEW_EDGE = 3200;
 
@@ -16,6 +17,22 @@ export interface TileSource {
   asset: PreviewAsset;
   info: AssetTileInfo;
   key: string;
+  display?: string;
+  sampling?: 'nearest' | 'area';
+  baseKey?: string;
+}
+
+export function tileDisplayKey(stretch?: DisplayStretch) {
+  if (!stretch?.custom) return stretch?.mode ?? 'equal';
+  const values = [stretch.low, stretch.high, ...(stretch.curve ?? []).flatMap(p => [p.x, p.y])];
+  const encoded = values.map(v => (v || 0).toExponential(11));
+  return Number(encoded[1]) > Number(encoded[0]) ? `window:${encoded.join(':')}` : 'linear';
+}
+
+export function withTileDisplay(source: TileSource, display: string): TileSource {
+  if (!source.info.displayProfiles || (display === 'equal' && source.sampling !== 'area')) return source;
+  const baseKey = source.baseKey ?? source.key;
+  return { ...source, baseKey, display, key: JSON.stringify([baseKey, display, source.sampling ?? 'nearest']) };
 }
 
 export async function openTileSource(asset: PreviewAsset, signal?: AbortSignal): Promise<TileSource | null> {
@@ -38,12 +55,18 @@ export function overviewDiv(width: number, height: number, requested: number) {
 }
 
 export async function loadTile(source: TileSource, level: number, x: number, y: number, signal: AbortSignal) {
-  const { tile, blob } = await fetchAssetTile(source.asset, level, x, y, signal, source.info.band);
+  const { tile, blob } = await fetchAssetTile(source.asset, level, x, y, signal, source.info.band,
+    source.info.displayProfiles ? (source.display ?? 'equal') : undefined,
+    source.sampling, source.info.displayProfiles ? source.info.stretchVersion : undefined);
   const { info } = source;
   const step = 2 ** level, span = info.tileSize * step;
   const w = Math.min(span, info.width - x * span), h = Math.min(span, info.height - y * span);
   if (tile.rasterVersion !== info.rasterVersion || tile.sourceVersion !== info.sourceVersion
     || tile.stretchVersion !== info.stretchVersion || tile.band !== info.band
+    || (info.displayProfiles && (tile.displayKey !== (source.display ?? 'equal')
+      || tile.requestedSampling !== (source.sampling ?? 'nearest')
+      || tile.resampling !== (source.sampling === 'area' && !info.categorical
+        && (level === 1 || level === 2) ? 'area' : 'nearest')))
     || tile.level !== level || tile.tileX !== x || tile.tileY !== y
     || tile.x !== x * span || tile.y !== y * span || tile.sourceWidth !== w || tile.sourceHeight !== h
     || tile.width !== Math.ceil(w / step) || tile.height !== Math.ceil(h / step)) {

@@ -1,7 +1,7 @@
 import { expect, it, vi } from 'vitest';
 import { TileScheduler, tileRequests } from '../tileScheduler';
 import { TileRenderer, tileAxis } from '../tileRenderer';
-import { bootstrapTileLevel, openTileSource, overviewDiv } from '../tileSource';
+import { bootstrapTileLevel, loadTile, openTileSource, overviewDiv, withTileDisplay } from '../tileSource';
 import type { DecodedTile, TileSource } from '../tileSource';
 import { nativePreviewScale, rasterTransform, tileLevel } from '../viewMath';
 import { overviewResolution, tileResolution } from '../viewResolution';
@@ -93,6 +93,48 @@ it('deduplicates, cancels queued and stale work, and closes a late Bitmap', asyn
   scheduler.close();
   expect(accepted.bitmap.close).toHaveBeenCalledOnce();
   expect(scheduler.bytes).toBe(0);
+});
+
+it('cancels the previous display configuration at the same L0 position', async () => {
+  const viewSource = { ...source, info: { ...source.info, displayProfiles: true } };
+  const configured = withTileDisplay(viewSource, 'window:1.00000000000e+0:7.00000000000e+0');
+  const calls: { signal: AbortSignal; resolve: (tile: DecodedTile) => void }[] = [];
+  const scheduler = new TileScheduler(vi.fn(), 8 * 1024 ** 2, 1, (_src, _l, _x, _y, signal) =>
+    new Promise(resolve => calls.push({ signal, resolve })));
+  const frame = (tileSource: TileSource) => {
+    const requests = tileRequests({ ...pane(), source: tileSource }, 1).requests;
+    scheduler.update(requests, [tileSource], new Set());
+  };
+  frame(viewSource);
+  frame(configured);
+  expect(calls[0].signal.aborted).toBe(true);
+  const obsolete = decoded();
+  calls[0].resolve(obsolete);
+  await vi.waitFor(() => expect(calls).toHaveLength(2));
+  expect(obsolete.bitmap.close).toHaveBeenCalledOnce();
+  calls[1].resolve(decoded());
+  await vi.waitFor(() => expect(scheduler.cache.has(`${configured.key}/0/0/0`)).toBe(true));
+  expect(scheduler.cache.has(`${viewSource.key}/0/0/0`)).toBe(false);
+  scheduler.close();
+});
+
+it('rejects stale display metadata before allocating a bitmap', async () => {
+  const configured = withTileDisplay({ ...source, info: {
+    ...source.info, displayProfiles: true, sourceVersion: 'v1', stretchVersion: 'tone-v2', band: 1,
+  } }, 'linear2');
+  const header = { ...decoded().tile, sourceVersion: 'v1', rasterVersion: 'v1',
+    stretchVersion: 'tone-v2', band: 1, requestedSampling: 'nearest', resampling: 'nearest', displayKey: 'equal' };
+  const decode = vi.fn();
+  vi.stubGlobal('createImageBitmap', decode);
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('png', {
+    headers: { 'X-SR-Tile': JSON.stringify(header) },
+  })));
+  try {
+    await expect(loadTile(configured, 0, 0, 0, new AbortController().signal)).rejects.toThrow('geometry changed');
+    expect(decode).not.toHaveBeenCalled();
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });
 
 it('evicts inactive least-recently-used Bitmaps and invalidates an old source version', async () => {
