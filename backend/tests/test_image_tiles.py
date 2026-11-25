@@ -15,7 +15,9 @@ import tifffile
 from backend.services.heavy_work import HeavyWork
 from backend.services.image_open import ImageOpen, router_for
 from backend.services.image_tiles import ImageTiles, tile_window
-from backend.services.raster_window import RasterReadError, RasterUnavailable, RasterWindowReader, _gdal
+from backend.services.raster_window import (
+    RasterReadError, RasterUnavailable, RasterWindowReader, _gdal, _has_overview_threshold,
+)
 from backend.tests import allowed_roots_env
 
 
@@ -84,6 +86,45 @@ def test_averaging_keeps_nodata_and_native_dtype(gdal, tmp_path):
     reader.release(source)
 
 
+def test_signed_byte_uses_native_dn_and_rejects_legacy_unsigned_interpolation(gdal, tmp_path):
+    source = tmp_path / "signed.tif"
+    dn = np.tile(np.array([-120, 100, -5, 9, -4], dtype=np.int8), (5, 1))
+    tifffile.imwrite(source, dn, compression="deflate")
+    reader = RasterWindowReader()
+    result = reader.read_window(source, 0, 0, 5, 5)
+    assert result.info.dtype == "int8"
+    np.testing.assert_array_equal(result.dn, dn)
+    result = reader.read_window(source, 0, 0, 5, 5, 3, 3, grid_step=2)
+    np.testing.assert_array_equal(result.dn, dn[np.ix_([1, 3, 4], [1, 3, 4])])
+    if _has_overview_threshold(gdal):
+        result = reader.read_window(source, 0, 0, 4, 2, 2, 1, resampling="average", grid_step=2)
+        np.testing.assert_array_equal(result.dn, [[-10, 2]])
+    else:
+        with pytest.raises(RasterReadError, match="native Int8"):
+            reader.read_window(source, 0, 0, 4, 2, 2, 1, resampling="average", grid_step=2)
+    reader.release(source)
+
+
+@pytest.mark.parametrize(("step", "method", "expected"), [
+    (2, "average", [[42005, 42010, 42010, 42009], [42008, 65535, 42011, 42012],
+                    [42010, 42007, 42011, 42009], [42007, 42012, 42012, 42007]]),
+    (2, "bilinear", [[42007, 42009, 42009, 42011], [42008, 42010, 42010, 42011],
+                     [42008, 42006, 42012, 42009], [42009, 42010, 42011, 42007]]),
+    (4, "average", [[42008, 42010], [42009, 42009]]),
+    (4, "bilinear", [[42008, 42010], [42009, 42010]]),
+])
+def test_u16_average_bilinear_reference_dn(gdal, tmp_path, step, method, expected):
+    source = tmp_path / "u16.tif"
+    y, x = np.indices((9, 11))
+    dn = (42000 + (x * 7 + y * 13) % 19).astype(np.uint16)
+    dn[2:5, 2:5] = 65535
+    tifffile.imwrite(source, dn, extratags=[(42113, "s", 0, "65535", False)])
+    reader = RasterWindowReader()
+    result = reader.read_window(source, 0, 0, 8, 8, 8//step, 8//step, resampling=method, grid_step=step)
+    np.testing.assert_array_equal(result.dn, expected)
+    reader.release(source)
+
+
 def test_grid_partial_footprints_and_overview(gdal, tmp_path):
     source = tmp_path / "odd.tif"
     width, height = 1031, 1027
@@ -126,6 +167,116 @@ def test_coarse_direct_io_preserves_uncompressed_tile_sample_phase(gdal, tmp_pat
     x = np.array([(left + min(left + 32, width)) // 2 for left in range(0, width, 32)])
     y = np.array([(top + min(top + 32, height)) // 2 for top in range(0, height, 32)])
     np.testing.assert_array_equal(result.dn, dn[np.ix_(y, x)])
+    reader.release(source)
+
+
+def test_jpeg_tiff_grid_uses_decoded_base_samples(gdal, tmp_path):
+    source = tmp_path / "jpeg.tif"
+    ds = gdal.GetDriverByName("GTiff").Create(str(source), 257, 259, 1, gdal.GDT_Byte,
+                                             ["TILED=YES", "COMPRESS=JPEG"])
+    y, x = np.indices((259, 257))
+    assert ds.GetRasterBand(1).WriteArray(((x*31 + y*17) % 251).astype(np.uint8)) == 0
+    ds = None
+    ds = gdal.Open(str(source))
+    base = ds.ReadAsArray()
+    ds = None
+    reader = RasterWindowReader()
+    result = reader.read_window(source, 0, 0, 256, 256, 32, 32, grid_step=8)
+    assert result.sources == ("base",)
+    np.testing.assert_array_equal(result.dn, base[4:256:8, 4:256:8])
+    reader.release(source)
+
+
+@pytest.mark.parametrize("layout", ["strip", "deflate-strip", "tile", "deflate-bigtiff"])
+@pytest.mark.parametrize("overview", [None, "internal", "external"])
+def test_strict_grid_resampling_against_overview_free_reference(gdal, tmp_path, layout, overview):
+    source = tmp_path / "grid.tif"
+    w, h = 2055, 39
+    y, x = np.indices((h, w))
+    dn = (42000 + (x * 7 + y * 13) % 19).astype(np.uint16)
+    dn[:8, 8:16] = 65535
+    dn[8:16, :24] = 42011
+    options = (["TILED=YES", "BLOCKXSIZE=32", "BLOCKYSIZE=32"]
+               if layout in ("tile", "deflate-bigtiff") else ["BLOCKYSIZE=7"])
+    if layout.startswith("deflate"):
+        options.append("COMPRESS=DEFLATE")
+    if layout == "deflate-bigtiff":
+        options.append("BIGTIFF=YES")
+    ds = gdal.GetDriverByName("GTiff").Create(str(source), w, h, 1, gdal.GDT_UInt16, options)
+    band = ds.GetRasterBand(1)
+    band.SetNoDataValue(65535)
+    band.SetScale(0.25)
+    band.SetOffset(-10)
+    assert band.WriteArray(dn) == 0
+    band = ds = None
+
+    reader = RasterWindowReader()
+    before = reader.read_window(source, 0, 0, 16, 16, 4, 4, grid_step=4).dn
+    if overview:
+        ds = gdal.Open(str(source), gdal.GA_Update if overview == "internal" else gdal.GA_ReadOnly)
+        assert ds.BuildOverviews("NEAREST", [2, 3]) == 0
+        ds = None
+        ds = gdal.Open(str(source if overview == "internal" else source.with_suffix(".tif.ovr")), gdal.GA_Update)
+        band = ds.GetRasterBand(1)
+        matched = band.GetOverview(0) if overview == "internal" else band
+        other = band.GetOverview(1) if overview == "internal" else band.GetOverview(0)
+        assert matched.Fill(321) == other.Fill(987) == 0
+        matched = other = band = ds = None
+        # The same reader must observe the revision change, including a new .ovr.
+        np.testing.assert_array_equal(reader.read_window(source, 0, 0, 16, 16, 4, 4, grid_step=4).dn, 321)
+    np.testing.assert_array_equal(before, dn[2:16:4, 2:16:4])
+
+    reference = gdal.GetDriverByName("MEM").Create("", w, h, 1, gdal.GDT_UInt16)
+    ref = reference.GetRasterBand(1)
+    ref.SetNoDataValue(65535)
+    assert ref.WriteArray(dn) == 0
+    for tx in (0, 3, 4):
+        tile = tile_window(w, h, 0, tx, 0)
+        sx, sy, sw, sh, _, _ = tile
+        native = reader.read_window(source, *tile, grid_step=1)
+        np.testing.assert_array_equal(native.dn, dn[sy:sy+sh, sx:sx+sw])
+        assert native.dn.dtype == np.uint16
+        assert (native.info.scale, native.info.offset, native.info.nodata) == (0.25, -10, 65535)
+        assert native.sources == ("base",)
+
+    for level in (1, 2):
+        step = 2 ** level
+        for tx in range((w + 512 * step - 1) // (512 * step)):
+            tile = tile_window(w, h, level, tx, 0)
+            sx, sy, sw, sh, ow, oh = tile
+            for name, alg in (("nearest", gdal.GRIORA_NearestNeighbour),
+                              ("average", gdal.GRIORA_Average), ("bilinear", gdal.GRIORA_Bilinear)):
+                actual = reader.read_window(source, *tile, grid_step=step, resampling=name)
+                if overview and name == "nearest":
+                    np.testing.assert_array_equal(actual.dn, 321)
+                    assert actual.sources == ("overview:1028x20",)
+                    continue
+                expected = np.empty((oh, ow), dtype=np.uint16)
+                for j in (0, oh - 1):
+                    dh = oh - 1 if j == 0 else 1
+                    rh = min(dh * step, sh - j * step)
+                    full_cols, tail = divmod(sw, step)
+                    if full_cols:
+                        expected[j:j+dh, :full_cols] = ref.ReadAsArray(
+                            sx, sy+j*step, full_cols*step, rh, full_cols, dh, resample_alg=alg)
+                    if tail:
+                        expected[j:j+dh, -1:] = ref.ReadAsArray(
+                            sx+full_cols*step, sy+j*step, tail, rh, 1, dh, resample_alg=alg)
+                np.testing.assert_array_equal(actual.dn, expected)
+                repeated = reader.read_window(source, *tile, grid_step=step, resampling=name)
+                np.testing.assert_array_equal(repeated.dn, actual.dn)
+                assert actual.sources == ("base",)
+        if not overview:
+            for name, top, expected in (("average", 0, 65535), ("bilinear", 10, 42011)):
+                result = reader.read_window(source, 8, top, step, step, 1, 1, resampling=name, grid_step=step)
+                assert result.dn.item() == expected
+    if overview:
+        for name in ("average", "bilinear"):
+            if _has_overview_threshold(gdal):
+                assert reader.read_window(source, 0, 0, 16, 16, 4, 4, resampling=name).dn.shape == (4, 4)
+            else:
+                with pytest.raises(RasterReadError, match="use an explicit tile grid"):
+                    reader.read_window(source, 0, 0, 16, 16, 4, 4, resampling=name)
     reader.release(source)
 
 
@@ -239,7 +390,12 @@ def test_same_tile_shares_work_and_disconnected_queued_job_is_cancelled():
             release.set()
             await service.close()
 
-    asyncio.run(run())
+    # Keep the main thread's default loop available to later Python 3.9 fixtures.
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(run())
+    finally:
+        loop.close()
 
 
 def test_u16_native_window_tone_cache_and_raw(gdal, image_api):

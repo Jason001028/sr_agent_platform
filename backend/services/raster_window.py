@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 import hashlib
@@ -21,6 +22,8 @@ MAX_OUTPUT = 512
 BLOCK_CACHE_BYTES = 128 * 1024**2
 MAX_BLOCK_BYTES = 32 * 1024**2
 TIFF_FILL_ORDER = 266
+MIN_GDAL = 3040100
+GDAL_OVERVIEW_THRESHOLD = 3090000
 
 
 class RasterUnavailable(Exception):
@@ -33,14 +36,50 @@ class RasterReadError(ValueError):
 
 @lru_cache(maxsize=1)
 def _gdal():
+    requirement = "Tile API requires GDAL >= 3.4.1 with matching NumPy bindings"
     try:
         from osgeo import gdal, gdal_array
-    except (ImportError, OSError) as exc:
-        raise RasterUnavailable("Tile API requires GDAL with matching NumPy bindings") from exc
-    if int(gdal.VersionInfo()) < 3090000 or gdal_array.GDALTypeCodeToNumericTypeCode(gdal.GDT_UInt16) is None:
-        raise RasterUnavailable("Tile API requires GDAL >= 3.9 with NumPy bindings")
+        if int(gdal.VersionInfo()) < MIN_GDAL:
+            raise RasterUnavailable(requirement)
+        # Exercise the NumPy bridge, including the high bit of a native DN.
+        driver = gdal.GetDriverByName("MEM")
+        if driver is None or gdal_array.GDALTypeCodeToNumericTypeCode(gdal.GDT_UInt16) is None:
+            raise RasterUnavailable(requirement)
+        with _raster_io(gdal, {}):
+            ds = driver.Create("", 2, 1, 1, gdal.GDT_UInt16)
+            expected = np.array([[0, 65535]], dtype=np.uint16)
+            if ds is None or ds.GetRasterBand(1).WriteArray(expected) != gdal.CE_None:
+                raise RasterUnavailable(requirement)
+            result = ds.ReadAsArray()
+        if result is None or result.dtype != expected.dtype or not np.array_equal(result, expected):
+            raise RasterUnavailable(requirement)
+    except (ImportError, OSError, RuntimeError, AttributeError, ValueError) as exc:
+        raise RasterUnavailable(requirement) from exc
     gdal.SetCacheMax(min(gdal.GetCacheMax(), BLOCK_CACHE_BYTES))
     return gdal
+
+
+@lru_cache(maxsize=1)
+def _has_overview_threshold(gdal):
+    return int(gdal.VersionInfo()) >= GDAL_OVERVIEW_THRESHOLD
+
+
+@contextmanager
+def _raster_io(gdal, options):
+    if _has_overview_threshold(gdal):
+        with gdal.config_options(options), gdal.ExceptionMgr():
+            yield
+        return
+    # Old Python bindings have process-wide exception mode. Leave it alone
+    # and use RasterIO's error return, checking it at the call site.
+    saved = {key: gdal.GetThreadLocalConfigOption(key) for key in options}
+    try:
+        for key, value in options.items():
+            gdal.SetThreadLocalConfigOption(key, value)
+        yield
+    finally:
+        for key, value in saved.items():
+            gdal.SetThreadLocalConfigOption(key, value)
 
 
 def json_nodata(value):
@@ -138,45 +177,79 @@ class SparseStrips:
         return out
 
 
+@dataclass
+class _OpenedRaster:
+    revision: str
+    dataset: object
+    probe: dict
+    sparse: SparseStrips | None
+    isolated_level: str | None = None
+    isolated_dataset: object = None
+
+
 class RasterWindowReader:
     def __init__(self):
         self.local = local()
 
-    def _open(self, source, revision):
+    @staticmethod
+    def _open_dataset(path, overview_level=None):
         gdal = _gdal()
+        options = ["NUM_THREADS=1"]
+        if overview_level is not None:
+            options.append(f"OVERVIEW_LEVEL={overview_level}")
+        with _raster_io(gdal, {"GDAL_ENABLE_TIFF_SPLIT": "FALSE"}):
+            ds = gdal.OpenEx(path, gdal.OF_RASTER | gdal.OF_READONLY | gdal.OF_VERBOSE_ERROR,
+                             allowed_drivers=["GTiff"], open_options=options)
+        if ds is None:
+            raise RasterReadError("Cannot open TIFF for window reads")
+        return ds
+
+    def _open(self, source, revision):
         handles = getattr(self.local, "handles", None)
         if handles is None:
             handles = self.local.handles = OrderedDict()
         path = str(Path(source).resolve())
         if revision is None:
             revision = raster_revision(path)
-        if path in handles and handles[path][0] == revision:
+        if path in handles and handles[path].revision == revision:
             handles.move_to_end(path)
-            return handles[path][1:]
+            return handles[path]
         handles.pop(path, None)
-        with gdal.config_options({"GDAL_ENABLE_TIFF_SPLIT": "FALSE"}), gdal.ExceptionMgr():
-            ds = gdal.OpenEx(path, gdal.OF_RASTER | gdal.OF_READONLY | gdal.OF_VERBOSE_ERROR,
-                             allowed_drivers=["GTiff"], open_options=["NUM_THREADS=1"])
-        if ds is None:
-            raise RasterReadError("Cannot open TIFF for window reads")
+        ds = self._open_dataset(path)
         probe = probe_tiff(path)
         sparse = SparseStrips.open(path, probe)
-        handles[path] = revision, ds, probe, sparse
+        opened = handles[path] = _OpenedRaster(revision, ds, probe, sparse)
         if len(handles) > 2:
             handles.popitem(last=False)
-        return ds, probe, sparse
+        return opened
+
+    def _isolated_band(self, opened, band, selected, index):
+        level = "NONE" if index is None else f"{index}only"
+        if opened.isolated_level != level:
+            ds = self._open_dataset(opened.dataset.GetDescription(), level)
+            opened.isolated_dataset, opened.isolated_level = ds, level
+        isolated = opened.isolated_dataset.GetRasterBand(band)
+        if (isolated is None or isolated.GetOverviewCount() != 0
+                or (isolated.XSize, isolated.YSize, isolated.DataType)
+                != (selected.XSize, selected.YSize, selected.DataType)):
+            raise RasterReadError("Cannot isolate the requested TIFF level")
+        return isolated
 
     def release(self, source):
         if hasattr(self.local, "handles"):
             self.local.handles.pop(str(Path(source).resolve()), None)
 
     def _band(self, source, band, revision):
-        from osgeo import gdal, gdal_array
-        ds, probe, sparse = self._open(source, revision)
+        gdal = _gdal()
+        from osgeo import gdal_array
+        opened = self._open(source, revision)
+        ds, probe, sparse = opened.dataset, opened.probe, opened.sparse
         if not 1 <= band <= ds.RasterCount:
             raise RasterReadError("Band is outside the raster")
         raster = ds.GetRasterBand(band)
         native = gdal_array.GDALTypeCodeToNumericTypeCode(raster.DataType)
+        if raster.DataType == gdal.GDT_Byte and raster.GetMetadataItem("PIXELTYPE", "IMAGE_STRUCTURE") == "SIGNEDBYTE":
+            native = np.int8
         if native is None or np.dtype(native).kind not in "uif" or np.dtype(native).itemsize > 4:
             raise RasterReadError("Unsupported TIFF DN type")
         dtype = np.dtype(native)
@@ -198,7 +271,7 @@ class RasterWindowReader:
                           scale if scale is not None and math.isfinite(scale) else 1,
                           offset if offset is not None and math.isfinite(offset) else 0,
                           raster.GetUnitType() or "", categorical)
-        return raster, info, overviews, sparse, bytes_per_pixel
+        return raster, info, overviews, sparse, bytes_per_pixel, opened
 
     def info(self, source, band=1, *, revision=None):
         _gdal()
@@ -212,7 +285,7 @@ class RasterWindowReader:
         footprint independently on each axis.
         """
         gdal = _gdal()
-        raster, info, overviews, sparse, bytes_per_pixel = self._band(source, band, revision)
+        raster, info, overviews, sparse, bytes_per_pixel, opened = self._band(source, band, revision)
         if not (0 <= x < info.width and 0 <= y < info.height and width > 0 and height > 0):
             raise RasterReadError("Window is outside the raster")
         if resampling not in RESAMPLING:
@@ -224,7 +297,15 @@ class RasterWindowReader:
             raise RasterReadError("Window output is limited to 512 pixels per axis")
         if (ow, oh) == (w, h):
             resampling = "nearest"
+        if resampling != "nearest" and info.dtype == "int8" and raster.DataType == gdal.GDT_Byte:
+            raise RasterReadError("Average/Bilinear requires a GDAL build with native Int8 for this signed TIFF")
         algorithm = getattr(gdal, "GRIORA_" + RESAMPLING[resampling])
+        has_threshold = _has_overview_threshold(gdal)
+        may_have_hidden_overviews = "JPEG" in info.compression
+        if (not has_threshold and not grid_step and resampling != "nearest"
+                and (ow < w or oh < h) and (overviews or may_have_hidden_overviews)):
+            raise RasterReadError("Automatic TIFF overview selection for resized Average/Bilinear windows "
+                                  "requires GDAL >= 3.9; use an explicit tile grid")
         sources = set()
 
         def sections(start, size, count):
@@ -237,15 +318,17 @@ class RasterWindowReader:
             # Pick only overviews whose pixel grid aligns with this source window.
             # The generic window service lets GDAL pick for arbitrary resize ratios.
             selected = raster
+            overview_index = None
             if grid_step and resampling == "nearest":
                 scale = grid_step
                 while scale > 1:
                     reduced = ((info.width + scale - 1) // scale,
                                (info.height + scale - 1) // scale)
-                    matching = next((o for o in overviews if (o.XSize, o.YSize) == reduced), None)
-                    if matching is not None:
-                        selected = matching
-                        sources.add(f"overview:{matching.XSize}x{matching.YSize}")
+                    overview_index = next((i for i, o in enumerate(overviews)
+                                           if (o.XSize, o.YSize) == reduced), None)
+                    if overview_index is not None:
+                        selected = overviews[overview_index]
+                        sources.add(f"overview:{selected.XSize}x{selected.YSize}")
                         sx, sy = sx // scale, sy // scale
                         sw, sh = (sw + scale - 1) // scale, (sh + scale - 1) // scale
                         break
@@ -257,7 +340,7 @@ class RasterWindowReader:
                 return sparse.read(source, info, sx, sy, sw, sh, dw, dh)
             # A small threshold disables implicit selection on the strict tile
             # grid. GDAL permits a threshold below 1 to force the base band.
-            options = {"GDAL_OVERVIEW_OVERSAMPLING_THRESHOLD": "0.001"} if grid_step else {}
+            options = {"GDAL_OVERVIEW_OVERSAMPLING_THRESHOLD": "0.001"} if grid_step and has_threshold else {}
             # At coarse steps a TIFF block contributes only a few samples.
             # Read these directly for uncompressed tiled input, keeping the
             # block cache for nearby native tiles and all compressed reads.
@@ -267,7 +350,10 @@ class RasterWindowReader:
             candidates = (selected,) if grid_step or (sw, sh) == (dw, dh) else (selected, *overviews)
             if any(math.prod(b.GetBlockSize()) * bytes_per_pixel > MAX_BLOCK_BYTES for b in candidates):
                 raise RasterReadError("TIFF decoding block exceeds 32 MiB")
-            with gdal.config_options(options), gdal.ExceptionMgr():
+            if (grid_step and not has_threshold and (dw < sw or dh < sh)
+                    and (overviews or may_have_hidden_overviews)):
+                selected = self._isolated_band(opened, band, selected, overview_index)
+            with _raster_io(gdal, options):
                 result = selected.ReadAsArray(sx, sy, sw, sh, dw, dh, resample_alg=algorithm)
             if result is None:
                 raise RasterReadError("TIFF window read failed")
@@ -288,7 +374,7 @@ class RasterWindowReader:
         if (step not in (2, 4) or not 0 <= x < x+w <= info.width or not 0 <= y < y+h <= info.height
                 or (ow, oh) != ((w+step-1)//step, (h+step-1)//step) or max(ow, oh) > MAX_OUTPUT):
             raise RasterReadError("Invalid Area tile footprint")
-        raster, _, _, sparse, _ = self._band(source, band, revision)
+        raster, _, _, sparse, _, _ = self._band(source, band, revision)
         gdal = _gdal()
         dn = np.empty((oh, ow), dtype=np.float64)
         cols = np.arange(0, w, step)
@@ -297,7 +383,7 @@ class RasterWindowReader:
             if sparse is not None:
                 block = sparse.read(source, info, x, y+top, w, height, w, height)
             else:
-                with gdal.ExceptionMgr():
+                with _raster_io(gdal, {}):
                     block = raster.ReadAsArray(x, y+top, w, height, w, height)
                 if block is None:
                     raise RasterReadError("TIFF window read failed")
