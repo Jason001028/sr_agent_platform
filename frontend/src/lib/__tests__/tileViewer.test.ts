@@ -4,6 +4,7 @@ import { TileRenderer, tileAxis } from '../tileRenderer';
 import { bootstrapTileLevel, openTileSource, overviewDiv } from '../tileSource';
 import type { DecodedTile, TileSource } from '../tileSource';
 import { nativePreviewScale, rasterTransform, tileLevel } from '../viewMath';
+import { overviewResolution, tileResolution } from '../viewResolution';
 
 const source = {
   key: 'source/v1',
@@ -124,11 +125,45 @@ it('draws the cached parent under a fading child and stops animating after opaqu
     drawImage(this: { globalAlpha: number }, image: unknown) { draws.push([image, this.globalAlpha]); },
   } as unknown as CanvasRenderingContext2D;
   renderer.update(camera, [source], 240, 1, false);
+  expect(renderer.presentation('A')).toMatchObject({ targetLOD: 0, readyLOD: null, drawn: 0, visible: 1 });
   expect(renderer.draw(ctx, 'A', 240, 1, false)).toBe(true);
+  expect(renderer.presentation('A')?.readyLOD).toBeNull();
   expect(draws).toEqual([[parent.bitmap, 1], [child.bitmap, 1 - .75 ** 3]]);
   draws.length = 0;
   renderer.update(camera, [source], 380, 1, false);
   expect(renderer.draw(ctx, 'A', 380, 1, false)).toBe(false);
+  expect(renderer.presentation('A')).toMatchObject({ readyLOD: 0, drawn: 1 });
   expect(draws).toEqual([[child.bitmap, 1]]);
+  renderer.update(new Map([['A', pane(-512)], ['B', pane(600)]]), [source], 400, 1, true);
+  renderer.draw(ctx, 'A', 400, 1, true);
+  renderer.draw(ctx, 'B', 400, 1, true);
+  expect(renderer.presentation('A')).toMatchObject({ readyLOD: null, drawn: 0, visible: 1 });
+  expect(renderer.presentation('B')).toMatchObject({ readyLOD: null, drawn: 0, visible: 0 });
+  renderer.scheduler.close();
+});
+
+it('keeps Overview dimensions independent of displayed LOD and physical screen scale', () => {
+  expect(overviewResolution(49475, 49454, 16387, 16380)).toBe('16387×16380 · 约 1/3.02');
+  expect(tileResolution({ x: 1, y: 1 }, 1, false, 0, null, 4)).toBe('原生 1:1 · 高清加载中');
+  expect(tileResolution({ x: .5, y: .5 }, 2, false, 0, 0, 4)).toBe('原生 1:1 · 已就绪');
+  expect(tileResolution({ x: .5, y: .5 }, 3, false, 0, 0, 4)).toBe('视图 1.5:1 · L0');
+  expect(tileResolution({ x: .25, y: .25 }, 2, false, 1, 1, 4)).toBe('视图 1:2 · L1');
+  expect(tileResolution({ x: .125, y: .125 }, 2, false, 2, 2, 4)).toBe('视图 1:4 · L2');
+});
+
+it('counts the short edge tile without requiring coverage beyond the image', () => {
+  const renderer = new TileRenderer(vi.fn());
+  const edge = decoded(0, 96, 96);
+  Object.assign(edge.tile, { sourceWidth: 323, sourceHeight: 302, width: 323, height: 302 });
+  const key = `${source.key}/0/96/96`;
+  renderer.scheduler.cache.set(key, {
+    ...edge, bitmap: bitmap(323, 302), key, sourceKey: source.key, ready: 0, fade: 0,
+  });
+  const drawImage = vi.fn();
+  const ctx = { save() {}, restore() {}, beginPath() {}, rect() {}, clip() {}, drawImage } as unknown as CanvasRenderingContext2D;
+  renderer.update(new Map([['A', pane(-49152, -49152)]]), [source], 1, 1, true);
+  renderer.draw(ctx, 'A', 1, 1, true);
+  expect(drawImage).toHaveBeenCalledWith(expect.anything(), 0, 0, 323, 302, 32, 0, 323, 302);
+  expect(renderer.presentation('A')).toMatchObject({ visible: 1, drawn: 1, readyLOD: 0 });
   renderer.scheduler.close();
 });

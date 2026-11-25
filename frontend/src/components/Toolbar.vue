@@ -162,16 +162,15 @@ function onPick(e: Event) {
       图像对比{{ store.compareOn ? ' · ' + cmpModeLabel : '' }}
     </button>
 
-    <!-- 预览下采样档位：紧邻定位组件，因为两者是同一类「看图前先定参数」的控件。
-         文案「预览 1/N」而不是「缩放」：它改的是**服务端生成的那张 JPG**的分辨率，
-         不是画布的显示缩放（那个在右下角，别混）。 -->
     <PreviewScaleControl :model-value="store.previewDiv" @update:model-value="store.setPreviewDiv"
       :title="store.activeRec?.tileSource
         ? '调整全图概览采样；局部图块随缩放自动切换清晰度'
         : 'PAN／通用预览档位；同景较小的 NOSR 默认使用 1/2，PAN 为 1/2 或 1:1 时 NOSR 使用 1:1'" />
     <button v-if="store.activeRec?.tileSource && !store.activeRec.displayStretch && store.activeRec.paintedMode === 'equal'"
-      type="button" class="cmp-btn" data-e2e="native-zoom" title="一个原图像素对应一个屏幕设备像素"
+      type="button" class="cmp-btn" data-e2e="native-zoom" title="一个原图像素对应一个 Canvas 背板像素"
       @click="store.zoomNative()">原生 1:1</button>
+    <span v-if="store.resolutionLabels.length === 1" class="cmp-btn" data-e2e="view-resolution"
+      :title="store.resolutionLabels[0]?.title">{{ store.resolutionLabels[0]?.text }}</span>
     <AutoTourButton />
     <DiffLocateButton />
     <DiffContinueButton />

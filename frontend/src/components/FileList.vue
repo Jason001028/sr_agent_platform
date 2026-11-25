@@ -404,7 +404,7 @@ function linkTitle(rec: ViewerRec): string {
           <div class="meta">
             <!-- 占位卡没有尺寸可言，但这一行**留在原地**：补齐时不至于整卡跳一下。 -->
             <template v-if="rec.pending">—</template>
-            <template v-else><template v-if="rec.W">{{ rec.W }}×{{ rec.H }} · </template>{{ fmtBytes(rec.size) }}<template v-if="rec.layout"> · {{ rec.layout }}</template></template>
+            <template v-else><template v-if="rec.W">{{ rec.W }}×{{ rec.H }} · </template>{{ fmtBytes(rec.size) }}<template v-if="rec.tileSource"> · 支持按需高清</template><template v-else-if="rec.layout"> · {{ rec.layout }}</template></template>
           </div>
           <!-- 状态与关联结果同排一行、都做成短标签（2026-09-18）：原先两者各占一行，
                且各自又把文件名抄了一遍 —— 一张卡三行里三处同名。
