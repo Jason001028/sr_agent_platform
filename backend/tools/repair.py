@@ -550,35 +550,70 @@ def inspection_result_view(result):
     view['data'] = {**data, 'items': rows,
                     'diagnostics': [{k: row[k] for k in _INSPECTION_DIAGNOSTIC_FIELDS
                                      if k in row} for row in diagnostics[:8]]}
+    omitted = view['data'].pop('not_inspected', [])
+    view['data']['not_inspected_total'] = sum(row.get('count', 1) for row in omitted)
     if len(diagnostics) > 8:
         view['data']['diagnostics_total'] = len(diagnostics)
     return view
 
 
-def inspection_tool(snapshot,store,session_id,*,raster_runner=None):
+def inspection_tool(snapshot,store,session_id,*,raster_runner=None,on_progress=None):
     """Read-only, paged DN inspection. No MaskBuilder, repair plan or Goal."""
     from backend.services import batch_manifest,batch_detector,agent_repair_settings
     from backend.api.paths import scene_id_abs
     from urllib.parse import quote
     settings=agent_repair_settings.normalize((snapshot or {}).get('agent_repair_settings')) or {}
+    method = settings.get('detection_method', 'ssim')
     frozen=snapshot or {};manifests={}
     def run(scope='workspace',cursor=0,limit=5):
         if scope not in ('workspace','current','selection') or type(cursor) is not int or cursor<0 or type(limit) is not int or not 1<=limit<=5:
             return err('质检分页参数无效，limit 为1–5')
         if scope=='selection' and frozen.get('selected_truncated'):return err('多选影像已截断，请缩小选择范围')
-        if scope=='workspace' and not (frozen.get('workspace') or {}).get('items') and frozen.get('current'):scope='current'
+        workspace = frozen.get('workspace') or {}
+        if scope == 'workspace' and not workspace.get('items') and not workspace.get('local_only') and frozen.get('current'):
+            scope = 'current'
         try:
             if scope not in manifests:
                 def prepare():
-                    sources,*_=svc._workspace_sources(frozen.get('workspace'),frozen.get('current'),frozen.get('selected_images'),scope)
-                    if not sources:raise ValueError('没有可质检的服务端影像，请先解析影像与 NOSR 配对')
+                    sources, unresolved, *_ = svc._workspace_sources(
+                        workspace, frozen.get('current'), frozen.get('selected_images'), scope, inspection=True)
+                    omitted = [{'name': row['name'], 'reason': row['reason'],
+                                'kind': row.get('kind', 'unresolved')} for row in unresolved]
+                    local_only = workspace.get('local_only', 0) if scope == 'workspace' else 0
+                    resources = (workspace.get('resources') or [])[:local_only]
+                    for resource in resources:
+                        omitted.append({'name': resource.get('name') or '本地影像',
+                                        'reason': '影像未绑定服务器资源', 'kind': 'unresolved'})
+                    unnamed = local_only - len(resources)
+                    if unnamed:
+                        omitted.append({'name': '其余本地影像', 'reason': '影像未绑定服务器资源',
+                                        'kind': 'unresolved', 'count': unnamed})
+                    requested = len(sources) + len(unresolved) + local_only
+                    if not sources:
+                        if requested:
+                            return {'items': [], 'diagnostics': []}, requested, omitted
+                        raise ValueError('没有可质检的服务端影像，请先解析影像与 NOSR 配对')
                     imported=batch_manifest.import_manifest(text='',sources=sources,mode='production',
-                        detection_method=settings.get('detection_method','ssim'),tone_weight=settings.get('tone_weight',True),
+                        detection_method=method,tone_weight=settings.get('tone_weight',True),
                         skip_completed=settings.get('skip_completed',True))
-                    return batch_manifest.load_manifest(imported['manifest_ref'])
+                    manifest = batch_manifest.load_manifest(imported['manifest_ref'])
+                    for diagnostic in manifest['diagnostics']:
+                        code = diagnostic.get('code')
+                        kind = ('skipped' if code == 'completed_scene_skipped'
+                                else 'excluded' if code == 'duplicate_scene' else 'unresolved')
+                        omitted.append({'name': diagnostic.get('name') or '未命名影像',
+                                        'reason': diagnostic.get('message') or '影像未进入检测',
+                                        'kind': kind})
+                    return manifest, requested, omitted
+                if on_progress:
+                    on_progress({'phase': 'resolving_inspection', 'method': method})
                 manifests[scope]=raster_runner(prepare) if raster_runner else prepare()
-            manifest=manifests[scope];items=manifest['items'];rows=[]
-            for item in items[cursor:cursor+limit]:
+            manifest, requested, omitted = manifests[scope]
+            items=manifest['items'];rows=[]
+            for index, item in enumerate(items[cursor:cursor+limit], start=cursor + 1):
+                if on_progress:
+                    on_progress({'phase': 'detecting_scene', 'position': index, 'total': len(items),
+                                 'scene': item['name'], 'method': method})
                 def inspect(item=item):
                     target={**item['target_image'],'item_id':item['item_id']}
                     return batch_detector.detect(target,item['reference_image'],{**item['config']['detection'],'execution_mode':'production'})
@@ -597,11 +632,13 @@ def inspection_tool(snapshot,store,session_id,*,raster_runner=None):
                         'source':'real-dn-grid','candidates':[{'candidate_id':c['candidate_id'],'bbox':c.get('bbox'),'label':c.get('label')} for c in candidates[:12]],
                         'candidates_truncated':len(candidates)>12})
                 except Exception as exc:
-                    rows.append({'item_id':item['item_id'],'name':item['name'],'status':'failed','reason':str(exc)[:300]})
+                    rows.append({'item_id':item['item_id'],'name':item['name'],'ordinal':item['ordinal'],
+                                 'status':'failed','reason':str(exc)[:300]})
             next_cursor=cursor+len(rows)
-            return ok({'kind':'repair_inspection.v1','inspection_only':True,'detection_method':settings.get('detection_method','ssim'),
+            return ok({'kind':'repair_inspection.v1','inspection_only':True,'detection_method':method,
                 'tone_weight':settings.get('tone_weight',True),'scope':scope,'cursor':cursor,
                 'total':len(items),'items':rows,'diagnostics':manifest.get('diagnostics',[]),
+                'requested_total':requested,'not_inspected':omitted,
                 'has_more':next_cursor<len(items),'next_cursor':next_cursor if next_cursor<len(items) else None,
                 'note':'只读检测候选，不代表确认缺陷；未生成掩码、修复计划、Goal 或 SR 作业'})
         except (ValueError,OSError) as exc:return err(str(exc))

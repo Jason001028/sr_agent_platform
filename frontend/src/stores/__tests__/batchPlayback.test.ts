@@ -65,7 +65,9 @@ it('pauses pending detection without advancing, and resumes the same scene', asy
   const playback = useBatchPlaybackStore(); playback.mounted = true;
   const run = playback.start(); await vi.advanceTimersByTimeAsync(500);
   expect(playback.phase).toBe('detecting');
+  expect(playback.presentation).toMatchObject({ goalId: 'g', itemId: 'i1', ordinal: 1, phase: 'detecting' });
   playback.stop(); await run;
+  expect(playback.presentation).toMatchObject({ itemId: 'i1', phase: 'paused' });
   expect(playback.completed).toBe(0);
   state.batch.isTerminal = true;
   state.items.mockImplementation((_g, after) => Promise.resolve({ items: after ? [] : [row(1)] }));
@@ -111,6 +113,7 @@ it('an aborted NO_ISSUE hold cannot advance a newly started goal', async () => {
   expect(playback.completed).toBe(0);
   expect(state.items.mock.calls.filter(c=>c[0]==='new').every(c=>c[1]===0)).toBe(true);
   expect(playback.ordinal).toBe(1);
+  expect(playback.presentation).toMatchObject({ goalId: 'new', itemId: 'i1', ordinal: 1 });
   playback.stop(); await newRun;
 });
 
@@ -119,6 +122,8 @@ it('plays the QC split and heat before drawing when 全程播放预览 is enable
   state.items.mockImplementation((_g, after) => Promise.resolve({ items: [row(1)].filter(r=>r.ordinal>after) }));
   const playback = useBatchPlaybackStore(); playback.mounted = true;
   const run = playback.start();
+  await vi.advanceTimersByTimeAsync(500);
+  expect(playback.presentation).toMatchObject({ itemId: 'i1', phase: 'quality' });
   await vi.advanceTimersByTimeAsync(12000); await run;
   expect(state.review.preview).toHaveBeenCalledOnce();
   expect(state.review.close).toHaveBeenCalled();
@@ -162,10 +167,11 @@ it('closes a stalled quality preview immediately when the display is cleared', a
   const playback = useBatchPlaybackStore(); playback.mounted = true;
   const run = playback.start();
   await vi.advanceTimersByTimeAsync(500);
-  expect(playback.phase).toBe('quality');
+  expect(playback.presentation).toMatchObject({ itemId: 'i1', phase: 'loadingQuality' });
   playback.hideOverlay(); await run;
   expect(playback.phase).toBe('idle');
   expect(playback.doc).toBeNull();
+  expect(playback.presentation).toBeNull();
   expect(state.review.close).toHaveBeenCalledOnce();
   resolvePreview(true);
   await vi.advanceTimersByTimeAsync(1000);

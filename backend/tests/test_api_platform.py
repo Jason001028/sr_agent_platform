@@ -340,6 +340,22 @@ class TestChat(PlatformBase):
         self.assertIn("mock 模型", final["content"])
         self.assertIsNone(final["tool_calls"])
 
+    def test_history_preserves_the_batch_query_result(self):
+        app, c = self.app_client()
+        sid = c.post("/api/chat/sessions").json()["session_id"]
+        store = app.state.store
+        store.append_message(sid, {
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "q1", "type": "function",
+                            "function": {"name": "query_batch_repair", "arguments": "{}"}}],
+        })
+        data = {"counts": {"failed": 3}, "quality": {"waiting_scenes": 2}, "active_jobs_total": 4}
+        store.append_message(sid, {"role": "tool", "tool_call_id": "q1",
+                                   "content": json.dumps({"ok": True, "data": data})})
+        rows = c.get(f"/api/chat/sessions/{sid}/messages").json()["messages"]
+        self.assertEqual(rows[-1]["tool_name"], "query_batch_repair")
+        self.assertEqual(rows[-1]["data"], data)
+
     # ---------------- 截图附件（§3.2.1） ----------------
 
     @staticmethod
@@ -490,6 +506,24 @@ class TestChat(PlatformBase):
         self.assertIn("tool_execution_start", types)
         self.assertIn("tool_execution_end", types)
         self.assertEqual(body["events"][-1]["event_type"], "run_end")
+
+    def test_chat_history_recovers_exact_request_and_deduplicates_post(self):
+        c = self.client()
+        sid = c.post("/api/chat/sessions").json()["session_id"]
+        url = f"/api/chat/sessions/{sid}/messages"
+        request_id = "a" * 32
+        payload = {"content": "查看当前结果", "request_id": request_id}
+        response = c.post(url, json=payload)
+        self.assertEqual(response.status_code, 200)
+        events = sse_events(response.text)
+        run_id = next(event["run_id"] for event in events if event["type"] == "turn_start")
+        self.assertEqual(next(event["run_id"] for event in events if event["type"] == "turn_done"), run_id)
+        history = c.get(url, params={"request_id": request_id}).json()
+        self.assertEqual(history["run"], {"run_id": run_id, "status": "succeeded", "error": None})
+        self.assertTrue(any(row["role"] == "tool" for row in history["messages"]))
+        self.assertIsNone(c.get(url, params={"request_id": "b" * 32}).json()["run"])
+        self.assertEqual(c.post(url, json=payload).status_code, 409)
+        self.assertEqual(c.get(url, params={"request_id": request_id}).json(), history)
 
     def test_trajectory_feedback_is_optional_and_idempotently_guarded(self):
         c = self.client()

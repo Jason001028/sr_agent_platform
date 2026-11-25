@@ -35,6 +35,7 @@ import asyncio
 import contextlib
 from dataclasses import replace
 import json
+import re
 import os
 import stat
 import tempfile
@@ -61,6 +62,7 @@ from backend.services import plugins as plugin_svc
 from backend.services import run_sr as run_sr_svc
 from backend.services import scene_search
 from backend.services.skills import load_catalog
+from backend.services.tool_results import REPAIR_HISTORY_TOOLS
 from backend.services import slurm
 #: 掩码命名的唯一实现搬到了 services（REST 与 agent 工具两个入口都要用同一份
 #: 推导，见 scene_search.derived_mask_path）；这里转出给既有调用方
@@ -561,15 +563,20 @@ def _project_message(seq: int, wire: dict, name_of_call: dict) -> dict:
             payload = json.loads(wire["content"])
         except (TypeError, ValueError):
             payload = {"ok": False, "data": None, "error": str(wire["content"])}
-        structured = name_of_call.get(wire.get('tool_call_id')) in {
-            'prepare_repair', 'start_repair', 'read_tool_result', 'inspect_repair_workspace',
+        tool_name = name_of_call.get(wire.get("tool_call_id"))
+        structured = tool_name in REPAIR_HISTORY_TOOLS | {
+            'prepare_repair', 'start_repair', 'read_tool_result',
         }
+        data = payload.get("data")
+        if tool_name == "run_sr" and isinstance(data, dict):
+            structured = True
+            data = {key: data[key] for key in ("job_id", "status", "state", "reused", "idempotent") if key in data}
         return {"seq": seq, "role": "tool",
-                "tool_name": name_of_call.get(wire.get("tool_call_id")),
+                "tool_name": tool_name,
                 "tool_call_id": wire.get("tool_call_id"),
                 "content": (json.dumps(payload, ensure_ascii=False) if name_of_call.get(wire.get("tool_call_id")) == "present_spatial_annotations" else payload.get("content") or payload.get("error")),
                 "ok": bool(payload.get("ok")),
-                **({'data': payload.get('data')} if structured else {})}
+                **({'data': data} if structured else {})}
     return {"seq": seq, "role": role}
 
 
@@ -628,9 +635,11 @@ def delete_session(session_id: str, request: Request):
 
 
 @router.get("/api/chat/sessions/{session_id}/messages")
-def get_messages(session_id: str, request: Request):
+def get_messages(session_id: str, request: Request, request_id: Optional[str] = None):
     state = request.app.state
     _session_or_404(state, session_id)
+    # Read the run before the messages so a terminal snapshot includes its committed results.
+    run = state.store.get_agent_run(_chat_run_id(session_id, request_id)) if request_id else None
     wire_msgs = state.store.get_messages(session_id)
     # tool 行要还原工具名：先扫一遍建立 assistant tool_calls id → name 映射
     name_of_call = {}
@@ -638,9 +647,9 @@ def get_messages(session_id: str, request: Request):
         for tc in (wire.get("tool_calls") or []):
             name_of_call[tc.get("id")] = tc["function"]["name"]
     # Older runs may only have persisted a budgeted model view. Recover the
-    # archived plan inside this session; never ask the model to regenerate it.
+    # original display data from the current session's archive when available.
     for wire in wire_msgs:
-        if wire.get('role') != 'tool' or name_of_call.get(wire.get('tool_call_id')) != 'prepare_repair':
+        if wire.get('role') != 'tool' or name_of_call.get(wire.get('tool_call_id')) not in REPAIR_HISTORY_TOOLS | {'prepare_repair'}:
             continue
         try:
             payload = json.loads(wire['content'])
@@ -655,8 +664,9 @@ def get_messages(session_id: str, request: Request):
                  for seq, wire in enumerate(wire_msgs, start=1)
                  if wire["role"] in ("user", "assistant", "tool")]
     sess = state.store.get_session(session_id)
-    return {"session_id": session_id, "status": sess["status"],
-            "messages": projected}
+    return {"session_id": session_id, "status": sess["status"], "messages": projected,
+            **({"run": {key: run[key] for key in ("run_id", "status", "error")} if run else None}
+               if request_id else {})}
 
 
 @router.get("/api/chat/sessions/{session_id}/images/{filename}")
@@ -729,6 +739,10 @@ def _add_trajectory_feedback_sync(session_id, request, body):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+def _chat_run_id(session_id: str, request_id: str) -> str:
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"chat:{session_id}:{request_id}").hex
+
+
 @router.post("/api/chat/sessions/{session_id}/messages")
 async def chat_send(session_id: str, request: Request):
     """发一条用户消息，POST 即流：SSE 逐事件返回一个回合的全部产出。
@@ -746,6 +760,10 @@ async def chat_send(session_id: str, request: Request):
         raise HTTPException(status_code=400, detail="请求体须为合法 JSON 对象")
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected a JSON object")
+    request_id = body.get("request_id")
+    if request_id is not None and (not isinstance(request_id, str) or not re.fullmatch("[a-f0-9]{32}", request_id)):
+        raise HTTPException(status_code=400, detail="Invalid request_id")
+    run_id = _chat_run_id(session_id, request_id) if request_id else uuid.uuid4().hex
     thinking_profile = body.get("thinking_profile")
     if thinking_profile is not None and (not isinstance(thinking_profile, str) or thinking_profile not in {"fast", "low", "balanced", "deep"}):
         raise HTTPException(status_code=400, detail="Invalid thinking_profile")
@@ -780,6 +798,8 @@ async def chat_send(session_id: str, request: Request):
 
     # 落盘在锁内做：同一会话的两个回合不该同时往同一个目录写；失败必须释放锁。
     try:
+        if request_id and await run_in_threadpool(state.store.get_agent_run, run_id):
+            raise HTTPException(status_code=409, detail="该回合已接收，请查询回合状态")
         saved = await asyncio.to_thread(
             chat_images.save_images, session_id, images or [])
     except chat_images.ChatImageError as exc:
@@ -829,7 +849,6 @@ async def chat_send(session_id: str, request: Request):
         except RuntimeError:
             pending.release()
     loop = asyncio.get_running_loop()
-    run_id = uuid.uuid4().hex
     title_announced = False
     terminal_error = None
 
@@ -856,7 +875,9 @@ async def chat_send(session_id: str, request: Request):
         elif t == "tool_result":
             out = {"type": "tool_result", "id": ev.get("id"), "name": ev["name"],
                    "ok": ev.get("ok"), "data": ev.get("data"),
-                   "error": ev.get("error")}
+                   "error": ev.get("error"), "duration_ms": ev.get("duration_ms")}
+        elif t in {"tool_progress", "model_wait"}:
+            out = ev
         elif t == "assistant":
             out = {"type": "assistant", "content": ev.get("content")}
         elif t == "llm_phase":
@@ -901,10 +922,13 @@ async def chat_send(session_id: str, request: Request):
                 store=None if context is not None else state.store,
                 session_id=session_id, resume=True, on_step=bridge,
                 registry=None if context is not None else getattr(state, "tool_registry", None),
-                context=context, machine_id=machine_id, stream=stream_on, viewer_snapshot=viewer_snapshot)
+                context=context, machine_id=machine_id, stream=stream_on, viewer_snapshot=viewer_snapshot, run_id=run_id)
         except Exception as e:  # noqa: BLE001 — 流上收尾，不让线程挂死
             try:
                 state.store.set_session_status(session_id, "error")
+                if state.store.get_agent_run(run_id) is None:
+                    state.store.create_agent_run(session_id, run_id=run_id)
+                state.store.finish_agent_run(run_id, status="failed", error=str(e))
             except Exception:
                 pass
             bridge({"type": "error", "error": f"{type(e).__name__}: {e}"})

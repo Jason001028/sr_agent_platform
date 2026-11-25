@@ -2,6 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { advanceActivity, startActivity } from '../chatActivity';
 
 describe('execution activity', () => {
+  it('distinguishes model resource admission from waiting for the provider', () => {
+    const queued = advanceActivity(startActivity(), { type: 'model_wait', phase: 'queued' });
+    expect(queued.label).toBe('等待模型资源');
+    const dispatched = advanceActivity(queued, { type: 'model_wait', phase: 'response' });
+    expect(dispatched.label).toBe('等待模型响应');
+    expect(advanceActivity(dispatched, { type: 'token', delta: '结果' }).label).toBe('正在整理回答');
+  });
   it('uses only frozen attachment and region facts for the initial label', () => {
     expect(startActivity().label).toBe('正在分析任务');
     expect(startActivity(true).label).toBe('正在分析影像内容');

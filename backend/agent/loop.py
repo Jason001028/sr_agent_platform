@@ -37,7 +37,7 @@ from backend.services import chat_images
 from backend.services import plugins as plugin_svc
 from backend.services.skills import load_catalog, prepare_agent
 from backend.services.trajectory import TrajectoryRecorder
-from backend.services.tool_results import ToolResults
+from backend.services.tool_results import REPAIR_HISTORY_TOOLS, ToolResults
 from backend.services.tool_result_formatter import encode as encode_tool_result
 from backend.tools.contract import ToolRegistry, default_registry
 from backend.tools.contract import list_tools
@@ -589,7 +589,7 @@ def call_tool(name, arguments_json, registry: Optional[ToolRegistry] = None,
     return active.invoke(name, arguments_json, source="agent")
 
 
-def _default_chat(cfg: Config, *, round_seconds=None, store=None):
+def _default_chat(cfg: Config, *, round_seconds=None, store=None, on_step=None):
     if cfg.llm_mock:
         return _mock_chat(cfg)
     image_cache: dict[str, str] = {}
@@ -603,7 +603,7 @@ def _default_chat(cfg: Config, *, round_seconds=None, store=None):
         return asyncio.run(request(cfg, wire, tools, on_delta=on_delta,
             request_config=request_config, deadline=deadline,
             fallback_reserve=fallback_reserve, consume=_consume_stream_async,
-            parse=parse_response, diagnostics=diagnostics, store=store))
+            parse=parse_response, diagnostics=diagnostics, store=store, on_step=on_step))
 
     return chat
 
@@ -667,7 +667,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
              context=None, machine_id=None, stream=None, durable=False,
              max_model_calls=None, max_tool_calls=32, max_seconds=60,
              tool_executor=None, result_hook=None, before_model=None, viewer_snapshot=None,
-             goal_status_provider=None, goal_id=None):
+             goal_status_provider=None, goal_id=None, run_id=None):
     """Run the loop; returns {"ok", "turns", "messages", "answer", "error",
     "session_id"}.
 
@@ -724,7 +724,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
         raise ValueError("run_loop requires cfg or context")
 
     if chat is None:
-        chat = _default_chat(cfg, round_seconds=max_seconds if durable else None, store=store)
+        chat = _default_chat(cfg, round_seconds=max_seconds if durable else None, store=store, on_step=on_step)
 
     if stream is None:
         stream = bool(getattr(cfg, "llm_stream", True))
@@ -791,9 +791,15 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
         if skill_catalog.skills:
             allowed_names = set(allowed_names) | {'read_skill', 'read_skill_resource'}
     result_manager = ToolResults(store, session_id)
+    inspection_call_id = None
+
+    def inspection_progress(progress):
+        on_step({"type": "tool_progress", "id": inspection_call_id, **progress})
+
     active_registry = result_manager.registry(bind_registry(
         registry or default_registry(), latest_user.get("viewer_snapshot"),
-        store=store, session_id=session_id,raster_runner=getattr(context,'raster_runner',None)))
+        store=store, session_id=session_id, raster_runner=getattr(context,'raster_runner',None),
+        on_inspection_progress=inspection_progress if on_step is not None else None))
     active_registry = ToolRegistry(t for t in active_registry.list() if t.name != CLARIFY)
     if durable:
         active_registry.register(control_tool())
@@ -815,7 +821,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
         trajectory = TrajectoryRecorder(
             store, session_id=session_id, prompt=prompt,
             machine_id=machine_id, model=getattr(cfg, "llm_model", None),
-            system_prompt=system_prompt, tools=tools)
+            system_prompt=system_prompt, tools=tools, run_id=run_id)
 
     def finish_run(result: dict) -> dict:
         result.setdefault("outcome", RoundOutcome.COMPLETED_CANDIDATE if result.get("ok") else RoundOutcome.FAILED)
@@ -1151,6 +1157,7 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
             if on_step is not None:
                 on_step({"type": "tool_call", "id": tc["id"], "name": tc["name"],
                          "args": _parse_args(tc["arguments"])})
+            inspection_call_id = tc["id"]
             tool_count += 1
             validation_failure = active_registry.validate(tc["name"], tc["arguments"])
             if validation_failure is not None:
@@ -1201,11 +1208,11 @@ def run_loop(cfg=None, prompt=None, *, max_turns=8, system_prompt=DEFAULT_SYSTEM
             if on_step is not None:
                 on_step({"type": "tool_result", "id": tc["id"], "name": tc["name"],
                          "ok": bool(result["ok"]), "data": result["data"],
-                         "error": result["error"]})
+                         "error": result["error"], "duration_ms": max(0, int((time.time() - tool_started) * 1000))})
             if tc["name"] != "present_spatial_annotations":
                 commit({"role": "tool", "tool_call_id": tc["id"],
                         "content": encode_tool_result(model_view)},
-                       stored_content=encode_tool_result(result) if tc["name"] == "inspect_repair_workspace" else None)
+                       stored_content=encode_tool_result(result) if tc["name"] in REPAIR_HISTORY_TOOLS else None)
             transcript.append({"role": "tool", "name": tc["name"],
                                "tool_call_id": tc["id"], "content": result})
             if durable and tc["name"] == CLARIFY and result.get("ok"):

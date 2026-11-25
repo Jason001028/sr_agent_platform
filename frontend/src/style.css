@@ -305,6 +305,7 @@ body {
 .trace-node.active::after{background:var(--accent-3,#78bd96)}
 .trace-node.issue::after{background:#b86f60}
 .agent-trace button[aria-expanded]:hover{color:var(--accent-deep)}
+.chat-new-activity{align-self:center;margin:4px 0;padding:4px 10px;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:var(--accent-deep);font:inherit;font-size:12px;cursor:pointer}
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;

@@ -6,13 +6,24 @@
  * 与模型推理两种场景，靠 label 区分。
  * prefers-reduced-motion 下停掉位移动画，只保留静态圆点。
  */
-withDefaults(defineProps<{ label?: string }>(), { label: '模型推理中' });
+import { ref, watch } from 'vue';
+
+const props = withDefaults(defineProps<{ label?: string; showElapsed?: boolean }>(), { label: '模型推理中' });
+const seconds = ref(0);
+watch(() => [props.showElapsed, props.label] as const, ([enabled], _, onCleanup) => {
+  seconds.value = 0;
+  if (!enabled) return;
+  const since = Date.now();
+  const timer = setInterval(() => { seconds.value = Math.floor((Date.now() - since) / 1000); }, 1000);
+  onCleanup(() => clearInterval(timer));
+}, { immediate: true });
 </script>
 
 <template>
   <span class="thinking" role="status" aria-live="polite">
     <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
     <span class="thinking-label">{{ label }}</span>
+    <span v-if="seconds >= 3" class="thinking-elapsed" aria-hidden="true">· {{ seconds }} 秒</span>
   </span>
 </template>
 
@@ -37,6 +48,7 @@ withDefaults(defineProps<{ label?: string }>(), { label: '模型推理中' });
 .dots i:nth-child(3) { animation-delay: calc(var(--motion-think-step) * 2); }
 
 .thinking-label { letter-spacing: 0.01em; }
+.thinking-elapsed { white-space: nowrap; font-variant-numeric: tabular-nums; }
 
 @keyframes think-bounce {
   0%, 80%, 100% { transform: translateY(0); opacity: 0.35; }

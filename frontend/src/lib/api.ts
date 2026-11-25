@@ -454,20 +454,26 @@ export interface HistoryResponse {
   session_id: string;
   status: string;
   messages: HistoryMsg[];
+  run?: { run_id: string; status: string; error: string | null } | null;
 }
 
 /** 聊天 SSE 事件（§3.2 schema；字段即事件字段，逐一对齐）。 */
 export type ChatPhase = 'thinking' | 'answering' | 'tool_call';
+export type InspectionProgress =
+  | { phase: 'resolving_inspection'; method?: string }
+  | { phase: 'detecting_scene'; position: number; total: number; scene: string; method?: string };
 
 export type ChatSseEvent =
   | { type: 'session_update'; session: ChatSession }
   | { type: 'turn_start'; run_id: string; session_id: string }
   | { type: 'thinking_status'; profile: string; status: string; rejections: string[] }
   | { type: 'llm_phase'; phase: ChatPhase; name?: string }
+  | { type: 'model_wait'; phase: 'queued' | 'response' }
   | { type: 'reasoning'; delta: string }
   | { type: 'token'; delta: string }
   | { type: 'tool_call'; id?: string; name: string; args: Record<string, unknown> }
-  | { type: 'tool_result'; id?: string; name: string; ok: boolean; data: unknown; error: string | null }
+  | ({ type: 'tool_progress'; id: string } & InspectionProgress)
+  | { type: 'tool_result'; id?: string; name: string; ok: boolean; data: unknown; error: string | null; duration_ms?: number | null }
   | { type: 'assistant'; content: string }
   | { type: 'usage'; usage: TokenUsageEvent; aggregate: ChatUsage }
   | { type: 'turn_done'; content: string; error: string | null; usage?: ChatUsage; run_id?: string }
@@ -772,8 +778,7 @@ export async function readSseJsonStream(
  *  `url` 与 `jsonBody` 是**给分派用的**：同一个 404，打的是 `/disk-array/…` 还是
  *  `/api/…`、响应是不是后端给的 JSON，能得出的结论完全相反（见下面两个判据）。
  *
- *  只有 `http()` 抛它。聊天与队列 SSE 那两处（apiChatSend / subscribeQueueEvents）
- *  自己抛 Error：它们的失败与「盘阵上这个文件在不在」无关，不需要状态码。 */
+ *  `apiChatSend` 也用该类型区分 HTTP 拒绝与接收结果时断流。 */
 export class HttpError extends Error {
   readonly status: number;
   /** 请求的 URL（原样，含查询串）。 */
@@ -938,9 +943,10 @@ export async function apiListPluginOperations(
 }
 
 export async function apiSessionMessages(
-  cfg: SrConfig, sid: string,
+  cfg: SrConfig, sid: string, requestId?: string, signal?: AbortSignal,
 ): Promise<HistoryResponse> {
-  const r = await http(sessionMessagesUrl(cfg, sid));
+  const url = sessionMessagesUrl(cfg, sid);
+  const r = await http(requestId ? `${url}?request_id=${encodeURIComponent(requestId)}` : url, { signal });
   return (await r.json()) as HistoryResponse;
 }
 
@@ -977,12 +983,14 @@ export async function apiChatSend(
   stream?: boolean,
   viewerContext?: unknown,
   thinkingProfile?: 'fast' | 'low' | 'balanced' | 'deep',
+  requestId?: string,
 ): Promise<void> {
   const body: Record<string, unknown> = { content };
   if (images && images.length) body.images = images;
   if (stream !== undefined) body.stream = stream;
   if (viewerContext !== undefined) body.viewer_context = viewerContext;
   if (thinkingProfile !== undefined) body.thinking_profile = thinkingProfile;
+  if (requestId !== undefined) body.request_id = requestId;
   const r = await fetch(sessionMessagesUrl(cfg, sid), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -996,9 +1004,14 @@ export async function apiChatSend(
     } catch {
       /* ignore */
     }
-    throw new Error(detail);
+    throw new HttpError(r.status, detail);
   }
-  await readSseStream(r.body, onEvent);
+  let terminal = false;
+  await readSseStream(r.body, event => {
+    terminal ||= event.type === 'turn_done' || event.type === 'error';
+    onEvent(event);
+  });
+  if (!terminal) throw new Error('聊天连接在回合结束前关闭');
 }
 
 export async function apiListQueue(cfg: SrConfig): Promise<QueueTask[]> {

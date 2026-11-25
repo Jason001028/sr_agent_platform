@@ -93,7 +93,7 @@ onBeforeUnmount(() => {
     <div class="repair-card" role="status" aria-live="polite" @mousedown.stop @dblclick.stop @wheel.stop>
       <div class="repair-heading">
         <span class="repair-dot" :class="{ live: playback.running }" />
-        <strong>{{ playback.detectionOnly && playback.phase === 'drawing' ? '绘制候选轮廓' : playback.label }}</strong>
+        <strong>{{ playback.label }}</strong>
         <span v-if="playback.detectionOnly" class="repair-mock">候选预览</span>
         <span v-if="playback.doc?.provenance === 'mock'" class="repair-mock">演示 · 非真实结果</span>
         <span v-if="playback.ordinal" class="repair-count">第 {{ playback.ordinal }} 景</span>
@@ -103,8 +103,8 @@ onBeforeUnmount(() => {
       <div v-if="playback.name" class="repair-name" :title="playback.name">{{ playback.name }}</div>
       <div class="repair-steps" aria-hidden="true">
         <span :class="{ current: playback.phase === 'loading' }">加载定位</span><i />
-        <span :class="{ current: playback.phase === 'quality' }">质检预览</span><i />
         <span :class="{ current: playback.phase === 'detecting' }">识别区域</span><i />
+        <span :class="{ current: playback.phase === 'loadingQuality' || playback.phase === 'quality' }">质检预览</span><i />
         <span :class="{ current: playback.phase === 'drawing' }">绘制掩码</span>
       </div>
       <p v-if="playback.note">{{ playback.note }}</p>

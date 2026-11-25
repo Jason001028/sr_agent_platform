@@ -13,16 +13,16 @@ import { startActivity, advanceActivity } from '../lib/chatActivity';
 import { captureViewerContext } from '../lib/viewerContext.js';
 import { agentRepairSettings, type AgentRepairSettings } from '../lib/agentRepairSettings';
 import { defineStore } from 'pinia';
-import { ref, onScopeDispose } from 'vue';
+import { computed, ref, onScopeDispose } from 'vue';
 import { loadSrConfig } from '../lib/scene.js';
 import {
   apiCreateSession, apiListSessions, apiSessionMessages, apiSessionUsage,
   apiChatSend, apiSubmitTrajectoryFeedback,
-  apiDeleteSession, apiSetSessionPinned, apiRenameSession, chatImageUrl,
+  apiDeleteSession, apiSetSessionPinned, apiRenameSession, chatImageUrl, HttpError,
 } from '../lib/api.js';
 import type {
   ChatImage, ChatPhase, ChatSession, ChatUploadImage, ChatUsage, HistoryMsg,
-  PlatformSseEvent, TrajectoryFeedbackRating,
+  HistoryResponse, InspectionProgress, PlatformSseEvent, TrajectoryFeedbackRating,
 } from '../lib/api.js';
 import { SHOT_MAX_COUNT } from '../lib/chatShot.js';
 import type { ChatShot } from '../lib/chatShot.js';
@@ -33,6 +33,8 @@ export interface ToolUse {
   id?: string;
   name: string;
   args: Record<string, unknown>;
+  startedAt?: number;
+  inspectionProgress?: InspectionProgress;
 }
 
 /** 展示消息：SSE 与历史投影的统一形状。seq=null 表示仍在流（未落库）。 */
@@ -49,6 +51,7 @@ export interface ChatMsg {
   ok?: boolean;                    // tool 行：成功/失败
   detail?: string;                 // tool 行：结果摘要 / 失败原因
   data?: unknown;                  // tool 原始结构化返回（实时 SSE）
+  durationMs?: number;
   isError?: boolean;               // 回合级 error（LLM 失败/循环超限）
   images?: ChatImage[] | null;     // user 行：截图附件（已带可用 src，渲染层不再换算）
   /** 本回合的 Qwen 推理内容（reasoning_content）。**不入库**：刷新后不再出现。 */
@@ -116,6 +119,7 @@ export function reduceChatSse(
 ): ChatMsg[] {
   switch (ev.type) {
     case 'turn_start':
+    case 'model_wait':
     case 'job_update':
     case 'ping':
       return msgs;                       // 无渲染载体：sending 灯已是状态
@@ -164,7 +168,7 @@ export function reduceChatSse(
 
     case 'tool_call': {
       if (ev.id && msgs.some(m => m.toolCalls?.some(t => t.id === ev.id))) return msgs;
-      const use: ToolUse = { id: ev.id, name: ev.name, args: ev.args };
+      const use: ToolUse = { id: ev.id, name: ev.name, args: ev.args, startedAt: Date.now() };
       const last = msgs[msgs.length - 1];
       if (last && last.role === 'assistant') {
         // 同回合连续多次工具声明 → 并入同一个 assistant 气泡
@@ -187,6 +191,12 @@ export function reduceChatSse(
       }];
     }
 
+    case 'tool_progress':
+      return msgs.map(message => message.toolCalls?.some(call => call.id === ev.id)
+        ? { ...message, toolCalls: message.toolCalls.map(call =>
+            call.id === ev.id ? { ...call, inspectionProgress: ev } : call) }
+        : message);
+
     case 'tool_result': {
       if (ev.id && msgs.some(m => m.role === 'tool' && m.toolCallId === ev.id)) return msgs;
       const ok = Boolean(ev.ok);
@@ -195,7 +205,7 @@ export function reduceChatSse(
         : (ev.error ?? '调用失败');
       return [...msgs, {
         seq: null, role: 'tool', content: '', toolName: ev.name, toolCallId: ev.id,
-        ok, detail, data: ev.data,
+        ok, detail, data: ev.data, durationMs: ev.duration_ms ?? undefined,
       }];
     }
 
@@ -227,10 +237,6 @@ export function reduceChatSse(
       }
       if (last && last.role === 'assistant') {
         if (last.content === content) return msgs;          // 已就位
-        if (!last.content && last.toolCalls) {
-          const filled: ChatMsg = { ...last, content, toolCalls: null };
-          return [...msgs.slice(0, -1), filled];
-        }
         if (!content) return msgs;
       }
       if (!content) return msgs;
@@ -291,6 +297,8 @@ export const useChatStore = defineStore('chat', () => {
   const sessionId = ref<string | null>(null);
   const messages = ref<ChatMsg[]>([]);
   const sending = ref(false);
+  const recoveries = ref(new Map<string, { requestId: string; checking: boolean; message: string; resolved: boolean }>());
+  const recovery = computed(() => sessionId.value ? recoveries.value.get(sessionId.value) : undefined);
   const activity = ref(startActivity());
   const thinkingStatus = ref('');
   const thinkingProfile = ref<'fast' | 'low' | 'balanced' | 'deep'>('low');
@@ -347,21 +355,66 @@ export const useChatStore = defineStore('chat', () => {
     if (epoch === sessionEpoch && serial === refreshSerial) sessions.value = sortSessions(rows);
   }
 
-  async function loadHistory(sid: string): Promise<void> {
-    const cfg = loadSrConfig();
-    const body = await apiSessionMessages(cfg, sid);
-    // 历史图存的是平台相对 URL，这里一次性换算成 <img> 能直接用的 src
-    messages.value = body.messages.map((h) => {
+  function historyMessages(body: HistoryResponse, cfg: ReturnType<typeof loadSrConfig>): ChatMsg[] {
+    return body.messages.map((h) => {
       const msg = msgFromHistory(h);
       if (msg.images) {
         msg.images = msg.images.map((im) => ({ ...im, url: chatImageUrl(cfg, im.url) }));
       }
       return msg;
     });
+  }
+
+  async function loadHistory(sid: string): Promise<void> {
+    const cfg = loadSrConfig();
+    const body = await apiSessionMessages(cfg, sid);
+    messages.value = historyMessages(body, cfg);
     usage.value = await apiSessionUsage(cfg, sid);
     lastRunId.value = null;
     feedbackRating.value = null;
     error.value = '';
+  }
+
+  async function reconcileTurn(sid = sessionId.value, attempts = 1): Promise<void> {
+    const entry = sid ? recoveries.value.get(sid) : undefined;
+    if (!sid || !entry || entry.checking || entry.resolved) return;
+    entry.checking = true;
+    const checking = '聊天连接已中断，正在核对服务端结果';
+    entry.message = checking;
+    const cfg = loadSrConfig();
+    try {
+      for (let attempt = 0; attempt < attempts && sessionId.value === sid; attempt++) {
+        if (attempt) await new Promise(resolve => setTimeout(resolve, 1500));
+        if (sessionId.value !== sid) return;
+        try {
+          const body = await apiSessionMessages(cfg, sid, entry.requestId, AbortSignal.timeout(3000));
+          if (sessionId.value !== sid || recoveries.value.get(sid) !== entry) return;
+          const run = body.run;
+          if (run && ['succeeded', 'failed', 'interrupted', 'yielded'].includes(run.status)) {
+            const liveResults = new Map(messages.value.filter(m => m.role === 'tool' && m.toolCallId)
+              .map(m => [m.toolCallId, m]));
+            messages.value = historyMessages(body, cfg).map(m => {
+              const live = m.role === 'tool' ? liveResults.get(m.toolCallId) : undefined;
+              return live ? { ...m, data: m.data ?? live.data, durationMs: live.durationMs } : m;
+            });
+            entry.resolved = true;
+            entry.message = run.status === 'succeeded' ? '已恢复本轮结果，请查看下方回执'
+              : run.status === 'yielded' ? '已同步本轮结果，后续状态请查看关联任务'
+              : `已同步本轮记录 · ${run.error || '本轮未完成'}`;
+            lastRunId.value = run.status === 'succeeded' ? run.run_id : null;
+            feedbackRating.value = null;
+            return;
+          }
+          entry.message = run?.status === 'running' ? '服务端仍在处理本轮，可继续查询状态'
+            : '暂未核对到本轮结果，可再次查询状态';
+        } catch {
+          entry.message = '暂时无法读取本轮结果，请重新查询状态';
+        }
+      }
+    } finally {
+      entry.checking = false;
+      if (entry.message === checking) entry.message = '尚未核对本轮结果，可继续查询状态';
+    }
   }
 
   /** 首挂载：取最近会话；无则新建一个。 */
@@ -372,7 +425,7 @@ export const useChatStore = defineStore('chat', () => {
     try {
       await refreshSessions();
       if (sessionId.value) {
-        await loadHistory(sessionId.value);
+        if (!sending.value && !recovery.value?.checking) await loadHistory(sessionId.value);
         return;
       }
       const first = sessions.value[0];
@@ -422,7 +475,9 @@ export const useChatStore = defineStore('chat', () => {
     const sid = sessionId.value;
     const text = content.trim();
     if (!sid || (!text && !pendingImages.value.length)) return;
-    if (sending.value) { error.value = '上一回合仍在进行，请稍候'; return; }
+    if (sending.value || recovery.value?.checking) { error.value = '上一回合仍在处理，请稍候'; return; }
+    const requestId = Array.from(crypto.getRandomValues(new Uint8Array(16)), n => n.toString(16).padStart(2, '0')).join('');
+    recoveries.value.delete(sid);
     error.value = '';
     sending.value = true;
     const requestThinkingProfile = thinkingProfile.value;
@@ -502,15 +557,20 @@ export const useChatStore = defineStore('chat', () => {
         // 开（默认）就不带 stream 字段，请求体保持老形状；只有关掉时才显式发 false。
         await apiChatSend(cfg, sid, text, onEvent,
                           upload.length ? upload : undefined,
-                          isStreamingEnabled() ? undefined : false, viewerContext, requestThinkingProfile);
+                           isStreamingEnabled() ? undefined : false, viewerContext, requestThinkingProfile, requestId);
       } finally {
         flush();                          // 失败时也别丢掉已到的半截文本
       }
     } catch (e) {
-      error.value = '发送失败：' + (e instanceof Error ? e.message : String(e));
-      // 回合失败也补一个失败态气泡，保持 timeline 连续
-      messages.value = reduceChatSse(messages.value,
-                                     { type: 'error', error: '回合异常中止' });
+      if (e instanceof HttpError && e.status < 500) {
+        error.value = '发送失败：' + e.message;
+        messages.value = reduceChatSse(messages.value, { type: 'error', error: '请求未被接收' });
+      } else {
+        finalizeStreaming();
+        activity.value = { ...activity.value, label: '', pending: [], terminal: true };
+        recoveries.value.set(sid, { requestId, checking: false, message: '', resolved: false });
+        await reconcileTurn(sid, 3);
+      }
     } finally {
       finalizeStreaming();                // 没有 turn_done 的异常路径也要熄灯
       activity.value = { ...activity.value, label: '', pending: [], terminal: true };
@@ -628,7 +688,7 @@ export const useChatStore = defineStore('chat', () => {
 
   return {
     sessions, sessionId, messages, sending, agentStatus, streamTick, error, loading,
-    activity, usage, lastRunId, feedbackRating, thinkingProfile, thinkingStatus,
+    activity, usage, lastRunId, feedbackRating, thinkingProfile, thinkingStatus, recovery, reconcileTurn,
     pendingImages, addPendingImage, removePendingImage, clearPendingImages,
     hasSession, init, refreshSessions, loadHistory, newSession, selectSession, send,
     submitFeedback, deleteSession, deleteSessions, pinSession, pinSessions, renameSession,

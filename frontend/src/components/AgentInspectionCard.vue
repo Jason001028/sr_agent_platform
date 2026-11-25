@@ -1,6 +1,7 @@
 ﻿<script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { installButtonPress } from '../lib/buttonPress';
+import { inspectionCoverage } from '../lib/agentActivity';
 
 interface InspectionRow {
   item_id: string;
@@ -14,6 +15,12 @@ interface InspectionRow {
 const props = defineProps<{ data?: Record<string, unknown> }>();
 const rows = computed(() => (props.data?.items ?? []) as InspectionRow[]);
 const failed = computed(() => rows.value.filter(row => row.status === 'failed').length);
+const partial = computed(() => props.data?.partial === true);
+const total = computed(() => props.data?.total ?? rows.value.length);
+const coverage = computed(() => inspectionCoverage(props.data));
+const examined = computed(() => rows.value.length - failed.value);
+const candidates = computed(() => rows.value.filter(row => row.status === 'candidates').length);
+const omissionLabels: Record<string, string> = { unresolved: '未进入检测', skipped: '按设置跳过', excluded: '已排除' };
 const dialog = ref<HTMLDialogElement | null>(null);
 const fullTable = ref<HTMLElement | null>(null);
 const expanded = ref(false);
@@ -42,7 +49,9 @@ async function onJump(row: InspectionRow) {
     // 查看器 / 差异定位整条链只在真正点下去时载入：这张表在聊天页也会出现，
     // 只是渲染结果不该带上它。
     const { jumpToInspectionScene } = await import('../lib/inspectionJump');
-    await jumpToInspectionScene(row.name, row.images?.pan ?? row.images?.nosr);
+    await jumpToInspectionScene(row.name, row.images?.pan ?? row.images?.nosr, {
+      method: props.data?.detection_method, toneWeight: props.data?.tone_weight,
+    });
   } finally {
     jumping.value = null;
   }
@@ -56,23 +65,37 @@ const imageColumns = [
 
 <template>
   <section ref="cardRoot" class="inspection-card">
-    <header><strong>质检结果 · {{ rows.length }} 景</strong><span>整批检测结束</span></header>
+    <header><strong>质检结果 · 请求 {{ coverage.requested }} 景</strong><span>{{ partial ? `已返回 ${rows.length}/${total} 景` : '本轮结果已返回' }}</span></header>
     <p>仅质检 · {{ {absdiff:'绝对差异',ssim:'结构差异 SSIM',smart:'LTD 纹理退化'}[String(data?.detection_method) as 'absdiff'|'ssim'|'smart'] }}</p>
-    <p v-if="failed">{{ failed }} 景检测失败，详见表内原因。</p>
-    <button v-if="rows.length" class="expand-table" type="button" @click="openFullTable">展开完整表格 · {{ rows.length }} 景</button>
+    <p class="inspection-coverage">
+      <span>{{ examined }} 景已检测</span>
+      <span v-if="candidates">{{ candidates }} 景有候选</span>
+      <span v-if="failed">{{ failed }} 景检测失败</span>
+      <span v-if="coverage.notInspected">{{ coverage.notInspected }} 景未检测</span>
+    </p>
+    <details v-if="coverage.omitted.length">
+      <summary>查看未检测影像</summary>
+      <ul class="inspection-omissions">
+        <li v-for="(row, index) in coverage.omitted" :key="index">
+          <strong>{{ row.name }}{{ row.count ? `（${row.count} 景）` : '' }}</strong>
+          <span>{{ omissionLabels[row.kind] || omissionLabels.unresolved }} · {{ row.reason }}</span>
+        </li>
+      </ul>
+    </details>
+    <button v-if="rows.length" class="expand-table" type="button" @click="openFullTable">展开检测记录 · {{ rows.length }} 景</button>
     <dialog ref="dialog" aria-label="完整质检表格" @close="expanded = false">
       <header><strong>质检结果 · {{ rows.length }} 景</strong><button class="dialog-close" type="button" autofocus @click="dialog?.close()">关闭</button></header>
       <div ref="fullTable"></div>
     </dialog>
     <Teleport :to="fullTable ?? 'body'" :disabled="!expanded">
-    <div class="table-scroll" tabindex="0" role="region" aria-label="质检结果表格">
+    <div v-if="rows.length" class="table-scroll" tabindex="0" role="region" aria-label="质检结果表格">
     <table>
       <thead><tr><th scope="col">景名 / 结果</th><th v-for="column in imageColumns" :key="column.role" scope="col">{{ column.label }}</th></tr></thead>
       <tbody>
         <tr v-for="row in rows" :key="row.item_id">
           <td>
             <span class="scene-name" :title="row.name">{{ row.name }}</span>
-            <span>{{ row.status === 'failed' ? (row.reason || '检测失败') : row.candidate_count + ' 处候选' }}</span>
+            <span>{{ row.status === 'failed' ? (row.reason || '检测失败') : row.candidate_count ? row.candidate_count + ' 处候选' : '未检出候选' }}</span>
             <button
               type="button"
               class="jump-scene"
@@ -80,7 +103,7 @@ const imageColumns = [
               :disabled="!!jumping"
               :title="jumping === row.item_id
                 ? '正在打开这一景并加载原图/NOSR 差异定位…'
-                : '跳到这一景：加载原图与 NOSR 的 SSIM 差异定位，并打开点选对比'"
+                : '按本次质检设置加载原图与 NOSR 的差异定位，并打开点选对比'"
               @click="onJump(row)"
             >{{ jumping === row.item_id ? '跳转中…' : '跳转至对应景' }}</button>
           </td>
@@ -98,6 +121,9 @@ const imageColumns = [
 </template>
 
 <style scoped>
+.inspection-coverage { display:flex; flex-wrap:wrap; gap:4px 12px; }
+.inspection-omissions { max-height:200px; overflow:auto; margin:6px 0; padding-inline-start:20px; overflow-wrap:anywhere; }
+.inspection-omissions span { display:block; }
 .inspection-card{min-width:0;padding:12px;border:1px solid var(--tb-border);border-radius:12px;background:var(--tb-bg);color:var(--tb-fg);font-size:12px}
 header{display:flex;justify-content:space-between;gap:8px}
 header span,p,small{color:var(--tb-muted);font-size:11px}

@@ -71,7 +71,7 @@ class _ProgressStream:
 
 
 async def request(cfg, wire, tools, *, on_delta=None, request_config=None,
-                  deadline=None, fallback_reserve=None, consume, parse, diagnostics=None, store=None):
+                  deadline=None, fallback_reserve=None, consume, parse, diagnostics=None, store=None, on_step=None):
     kwargs=dict(on_delta=on_delta,request_config=request_config,deadline=deadline,
                 fallback_reserve=fallback_reserve,consume=consume,parse=parse,diagnostics=diagnostics)
     if store is None:return await _request(cfg,wire,tools,**kwargs)
@@ -79,7 +79,12 @@ async def request(cfg, wire, tools, *, on_delta=None, request_config=None,
     images=any(isinstance(m.get('content'),list) and any(isinstance(b,dict) and b.get('type')=='image_url' for b in m['content']) for m in wire)
     total=response_limits(cfg,deadline=deadline,has_images=images,streaming=on_delta is not None)['total']
     end=min(time.monotonic()+total,deadline-cfg.llm_deadline_margin if deadline is not None else float('inf'))
-    async with model_slot(store,cfg.llm_base_url,deadline=end):
+    def waiting():
+        on_step({'type': 'model_wait', 'phase': 'queued'})
+
+    async with model_slot(store,cfg.llm_base_url,deadline=end,on_wait=waiting if on_step is not None else None):
+        if on_step is not None:
+            on_step({'type': 'model_wait', 'phase': 'response'})
         return await _request(cfg,wire,tools,resource_end=end,**kwargs)
 
 

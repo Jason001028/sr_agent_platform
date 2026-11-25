@@ -53,12 +53,13 @@ import { reasoningViews, type ReasoningTiming } from '../lib/reasoningTrace';
 import { roiOrigGeom } from '../lib/roiStats.js';
 
 import AgentToolPresentation from './AgentToolPresentation.vue';
+import { useChatScroll } from '../lib/chatScroll';
 import { projectAgentActivity } from '../lib/agentActivity';
 import type { BatchAgentHandoff } from '../lib/batchHandoff';
 
 const viewer = useViewerStore();
 const chat = useChatStore();
-const toolPresentation = computed(() => projectAgentActivity(chat.messages, chat.sending));
+const toolPresentation = computed(() => projectAgentActivity(chat.messages, chat.sending && !chat.recovery));
 const { resolvePlan, revisePlan } = useAgentPlanRevisions(() => chat.sessionId);
 const inlinePlanCards = shallowReactive(new Map<string, {
   index: number; card: InstanceType<typeof AgentRepairPlanCard>;
@@ -344,17 +345,7 @@ function annotationConversation(event: Event) {
 }
 onMounted(()=>window.addEventListener('annotation-conversation',annotationConversation));
 onBeforeUnmount(()=>window.removeEventListener('annotation-conversation',annotationConversation));
-function nearBottom(): boolean {
-  const el = scrollEl.value;
-  return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-}
-async function scrollBottom(): Promise<void> {
-  await nextTick();
-  if (scrollEl.value) scrollEl.value.scrollTop = scrollEl.value.scrollHeight;
-}
-watch(() => chat.messages.length, () => void scrollBottom());
-// 流式增量不新增消息，只改长度：已经贴着底部才跟随，用户翻上去就不拽回来。
-watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
+const { hasNewActivity, followActivity, onScroll, scrollBottom } = useChatScroll(scrollEl, chat, 60);
 </script>
 
 <template>
@@ -410,9 +401,14 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
     <CurrentImagePill v-if="enabled && rec" :name="rec.name" :busy="chat.sending || creating" @analyze="analyzeCurrent" />
     <AnnotationManager />
     <p v-if="chat.error" class="at-err" role="alert">{{ chat.error }}</p>
+    <div v-if="chat.recovery" class="at-err">
+      <span role="status">{{ chat.recovery.message }}</span>
+      <button v-if="!chat.recovery.resolved && !chat.recovery.checking" type="button"
+              class="btn" @click="chat.reconcileTurn()">查询本轮状态</button>
+    </div>
 
     <!-- 会话区 -->
-      <div ref="scrollEl" class="at-scroll">
+      <div ref="scrollEl" class="at-scroll" data-agent-transcript @scroll.passive="onScroll">
         <p v-if="creating && !chat.messages.length" class="at-desc" role="status">正在创建 Agent 会话…</p>
         <div v-else-if="!chat.messages.length && !chat.sending" class="at-welcome">
           <AgentBotIcon :status="chat.agentStatus" :size="24" label="遥感影像助手" />
@@ -453,23 +449,23 @@ watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
               <AgentAssistantText v-if="m.content" :message="m" :developer-mode="developerMode" />
               <div v-else-if="chat.sending && !m.toolCalls?.length && ((m.streaming && !m.reasoning) || m.phase === 'tool_call')"
                    class="bubble assistant tools">
-                <ThinkingIndicator :label="waitLabel(m)" />
+                <ThinkingIndicator :label="waitLabel(m)" show-elapsed />
               </div>
             </template>
           </template>
 
           <AgentToolPresentation :projection="toolPresentation" :index="i" :session-key="chat.sessionId"
-            timeline-scope="viewer-agent"
             :developer-mode="developerMode" :resolve-plan="resolvePlan" :plan-card-ref="registerInlinePlanCard"
-            @open-scene="openSearchScene" @plan-revised="revisePlan" @tool-calls-updated="nearBottom() && scrollBottom()" />
+            @open-scene="openSearchScene" @plan-revised="revisePlan" @tool-calls-updated="followActivity" />
         </div>
 
         <GoalClarifications :session-id="chat.sessionId" @updated="!chat.sending && chat.sessionId && chat.loadHistory(chat.sessionId)" />
-        <div v-if="chat.sending && !liveMsg" class="at-thinking">
-          <ThinkingIndicator :label="chat.activity.label" />
+        <div v-if="chat.sending && !liveMsg && !chat.recovery && !chat.activity.pending?.length" class="at-thinking">
+          <ThinkingIndicator :label="chat.activity.label" show-elapsed />
         </div>
       </div>
 
+      <button v-if="hasNewActivity" type="button" class="chat-new-activity" @click="scrollBottom">有新活动 ↓</button>
       <div class="at-foot" :class="{ locked: !taskControl && !composerEnabled }">
         <div :inert="!composerEnabled">
         <p v-if="batchHint" class="at-desc">已携带批次上下文，可补充问题后发送。</p>

@@ -78,7 +78,7 @@ describe('reduceChatSse（SSE 逐帧归并）', () => {
     push({ type: 'turn_done', content: reply, error: null });
 
     expect(roles(msgs)).toEqual(['assistant', 'tool', 'assistant']);
-    expect(msgs[0].toolCalls).toEqual([{ name: 'search_scenes', args: {} }]);
+    expect(msgs[0].toolCalls).toEqual([{ name: 'search_scenes', args: {}, startedAt: expect.any(Number) }]);
     expect(msgs[1].toolName).toBe('search_scenes');
     expect(msgs[1].ok).toBe(true);
     expect(msgs[1].detail).toContain('12 个场景');
@@ -105,13 +105,13 @@ describe('reduceChatSse（SSE 逐帧归并）', () => {
     expect(msgs[1].detail).toBe('slurm not available');
   });
 
-  it('无 assistant 文本事件 → turn_done 回填占位气泡', () => {
+  it('keeps unresolved tool rows when turn_done arrives without a tool result', () => {
     let msgs: ChatMsg[] = [];
     msgs = reduceChatSse(msgs, { type: 'tool_call', name: 'a', args: {} });
     msgs = reduceChatSse(msgs, { type: 'turn_done', content: '结果', error: null });
-    expect(roles(msgs)).toEqual(['assistant']);
-    expect(msgs[0].content).toBe('结果');
-    expect(msgs[0].toolCalls).toBeNull();      // 已填文 → 不再当声明气泡
+    expect(roles(msgs)).toEqual(['assistant', 'assistant']);
+    expect(msgs[0].toolCalls?.[0].name).toBe('a');
+    expect(msgs[1].content).toBe('结果');
   });
 
   it('error 事件 → isError 警示气泡', () => {

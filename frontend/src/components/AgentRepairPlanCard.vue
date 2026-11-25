@@ -11,6 +11,7 @@ import RepairLandSummary from './RepairLandSummary.vue';
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { isDeveloperMode } from '../lib/developerMode.js';
 import { useBatchGoalStore } from '../stores/batchGoal';
+import { useBatchPlaybackStore } from '../stores/batchPlayback';
 import { useChatStore } from '../stores/chat';
 import AgentTodoList from './AgentTodoList.vue';
 import HoldConfirmButton from './HoldConfirmButton.vue';
@@ -28,18 +29,21 @@ import { batchDisplayProgress, displayPercent } from '../lib/batchDisplayProgres
 import { repairPlanData } from '../lib/repairPlan';
 import { agentRepairSettings } from '../lib/agentRepairSettings';
 import AgentRepairToolCalls from './AgentRepairTrajectory.vue';
+import type { RepairToolStep } from '../lib/repairTrajectory';
+import { toolPayload } from '../lib/agentActivity';
 import { requestQualityReview, requestMaskReview } from '../lib/batchDock';
 import router from '../router';
 import { goalStatusLabel, itemStatusLabel } from '../lib/batchUi';
 import { missionItemLabel, terminalMission } from '../lib/batchMission';
 import type { MissionItem } from '../lib/batchMission';
 
-const props = defineProps<{ data: unknown; autoStart?: boolean; timelineTarget?: string; developerMode?: boolean }>();
+const props = defineProps<{ data: unknown; autoStart?: boolean; developerMode?: boolean }>();
 const emit = defineEmits<{ planRevised: [plan: RepairPlan]; toolCallsUpdated: [] }>();
 const executionBody = ref<HTMLElement | null>(null);
 const developerMode = computed(() => props.developerMode ?? isDeveloperMode());
 const chat = useChatStore();
 const batch = useBatchGoalStore();
+const playback = useBatchPlaybackStore();
 const viewer = useViewerStore();
 const cardRoot = ref<HTMLElement | null>(null);
 let disposePress: (() => void) | undefined;
@@ -57,7 +61,7 @@ const canStop = computed(() => started.value && !!goalId.value && !terminalMissi
 
 const plan = ref<RepairPlan | null>(repairPlanData(props.data));
 const status = ref<RepairStatus | null>(null);
-const goalId = ref('');
+const goalId = ref(plan.value?.goal_id ?? '');
 const action = ref<'idle' | 'starting'>('idle');
 const synchronized = ref(false);
 const drawerOpen = ref(false);
@@ -72,6 +76,10 @@ let disposed = false;
 let autoStartRequested = false;
 
 const planId = computed(() => plan.value?.plan_id ?? '');
+const presentation = computed(() => {
+  const view = playback.presentation;
+  return view && view.goalId === goalId.value && view.goalId === batch.goalId ? view : null;
+});
 const linkedSnapshot = computed(() => {
   const snap = batch.snapshot;
   return snap && goalId.value && snap.goal.goal_id === goalId.value ? snap : null;
@@ -90,6 +98,11 @@ const counts = computed(() => linkedSnapshot.value?.counts ?? status.value?.coun
 const progress = computed(() => linkedSnapshot.value?.progress ?? status.value?.progress ?? null);
 const quality = computed(() => linkedSnapshot.value?.quality ?? status.value?.quality);
 const items = computed<RepairStatusItem[]>(() => status.value?.items ?? []);
+const itemsById = computed(() => new Map(items.value.map(item => [item.item_id, item])));
+const showToolRecords = computed(() => {
+  const owner = status.value?.goal?.execution_owner;
+  return !!goalId.value && (!owner || owner === 'local_agent');
+});
 const todoLabels: Record<string, string> = {
   PENDING: '待检查', OPENING: '正在检查', DETECTING: '正在检查',
   MASK_PENDING: '等待生成 Mask', BUILDING_MASK: '正在生成 Mask',
@@ -641,6 +654,49 @@ async function startReview(itemId = reviewTarget.value?.item_id, regionId?: stri
   if (effect) requestQualityReview(itemId, regionId, gid, undefined, true);
   else requestQualityReview(itemId, regionId, gid);
 }
+async function locateToolScene(item: RepairStatusItem): Promise<void> {
+  const gid = goalId.value;
+  const path = item.image_path;
+  if (!gid || !path) return;
+  try {
+    if (batch.goalId !== gid && !await batch.selectGoal(gid)) throw new Error('无法打开该任务，请稍后重试。');
+    if (disposed || goalId.value !== gid || batch.goalId !== gid) return;
+    const problem = await batch.openItem({ item_id: item.item_id, image_path: path, overlay_ready: item.overlay_ready });
+    if (disposed || goalId.value !== gid) return;
+    if (problem) error.value = problem;
+    else await router.push('/viewer');
+  } catch (e) { if (!disposed && goalId.value === gid) error.value = e instanceof Error ? e.message : String(e); }
+}
+function toolAction(step: RepairToolStep) {
+  if (step.name === 'submit_repair_item' && step.state === 'success') {
+    const job = toolPayload(step.result)?.job_id;
+    if ((typeof job === 'number' || typeof job === 'string') && /^\d+$/.test(String(job))) {
+      return { label: '查看作业', run: () => router.push({ name: 'queue', hash: `#queue-job-${job}` }) };
+    }
+  }
+  const item = itemsById.value.get(step.itemId);
+  if (step.state === 'success' && item) {
+    switch (step.name) {
+      case 'detect_repair_item':
+        if (toolPayload(step.result)?.kind === 'no-candidate' && item.quality_review_id) {
+          return { label: '前往复核', run: () => startReview(item.item_id) };
+        }
+        if (item.image_path) return { label: '定位本景', run: () => locateToolScene(item) };
+        break;
+      case 'build_repair_mask':
+        if (needsItemMaskReview(item.item_id)) return { label: '复核掩码', run: () => openMaskReview(item.item_id) };
+        if (item.image_path && item.overlay_ready) return { label: '查看掩码', run: () => locateToolScene(item) };
+        break;
+      case 'verify_repair_output':
+        if (item.output_path) return { label: '查看成果', run: () => openResult(item) };
+        break;
+      case 'assess_repair_effect':
+        if (item.quality_review_id) return { label: '前往验收', run: () => startReview(item.item_id) };
+        break;
+    }
+  }
+  return { label: '查看进度', run: focusProgress };
+}
 function onVisibility(): void {
   if (document.visibilityState === 'visible') scheduleStatusRefresh(0);
 }
@@ -661,7 +717,7 @@ watch(() => chat.sessionId, () => { statusGen++; synchronized.value = false; res
 watch(() => props.data, value => {
   const next = repairPlanData(value);
   if (!next || next.plan_id === plan.value?.plan_id && next.version === plan.value?.version) return;
-  statusGen++; plan.value = next; status.value = null; goalId.value = '';
+  statusGen++; plan.value = next; status.value = null; goalId.value = next?.goal_id ?? '';
   synchronized.value = false;
   void refreshStatus();
 });
@@ -745,11 +801,13 @@ onBeforeUnmount(() => {
       </template>
     </section>
 
-    <section v-else :key="stage" ref="executionBody" class="execution-body" tabindex="-1" aria-label="修复进度">
+    <section v-else key="execution" ref="executionBody" class="execution-body" tabindex="-1" aria-label="修复进度">
       <RepairLandSummary v-if="plan.land_constraint" :plan="plan" />
       <p v-if="plan.mode !== 'production'" class="mode-note">Demo / Fake SR · 不产生真实修复成果</p>
-      <p v-if="currentItem" class="current" :title="`${currentItem.name} · ${currentItem.label}`">
-        <span class="current-prefix">当前影像</span><span class="current-name">{{ currentItem.name }}</span>
+      <p v-if="presentation || currentItem" class="current"
+        :title="[presentation?.name ?? currentItem?.name, presentation?.label ?? currentItem?.label].filter(Boolean).join(' · ')">
+        <span class="current-prefix">{{ presentation ? '逐景展示' : ['后台处理', currentItem?.label].filter(Boolean).join(' · ') }}</span>
+        <span class="current-name">{{ presentation ? [presentation.name, presentation.label].filter(Boolean).join(' · ') : currentItem?.name }}</span>
       </p>
       <p class="overall-summary" data-e2e="repair-overall-summary">
         <template v-if="primaryPercent != null">已处理 <b>{{ processed.done }} / {{ processed.total }}</b> 景 · {{ Math.round(primaryPercent) }}%</template>
@@ -815,13 +873,19 @@ onBeforeUnmount(() => {
       <RepairTargetDrawer v-if="drawerOpen" :rows="targetRows" :total="plan.targets.total" :loading="drawerLoading" :error="drawerError" @close="drawerOpen = false" />
     </Transition></Teleport>
   </div>
-  <Teleport v-if="timelineTarget && goalId && status?.goal?.execution_owner === 'local_agent'" defer :to="timelineTarget">
+  <div v-if="showToolRecords" class="repair-tool-record" data-e2e="repair-tool-record">
     <AgentRepairToolCalls :key="goalId" :goal-id="goalId" :live-events="batch.events ?? []"
       :following="batch.goalId === goalId && batch.syncState === 'live'" :settled="settled" :developer-mode="developerMode"
-      :session-key="chat.sessionId" :rows="linkedSnapshot?.todos ?? items" @updated="emit('toolCallsUpdated')" />
-  </Teleport>
+      :session-key="chat.sessionId" :rows="linkedSnapshot?.todos ?? items" :presentation="presentation"
+      @updated="emit('toolCallsUpdated')">
+      <template #action="{ step }">
+        <button type="button" class="repair-tool-action" @click="toolAction(step).run()">{{ toolAction(step).label }}</button>
+      </template>
+    </AgentRepairToolCalls>
+  </div>
 </template>
 <style scoped>
+.repair-tool-action { padding:0 4px; margin-left:4px; font:inherit; color:var(--tb-primary); background:none; border:0; text-decoration:underline; cursor:pointer; }
 .repair-task { display:grid; grid-template-columns:minmax(0,1fr); gap:10px; margin:6px 0; padding:12px; border:1px solid var(--tb-border); border-radius:12px; font-size:12px; background:var(--tb-bg); color:var(--tb-fg); min-width:0; width:100%; max-width:100%; box-sizing:border-box; overflow:hidden; }
 .plan-body, .execution-body { min-width:0; display:grid; gap:10px; }
 .execution-details > summary { color:var(--tb-muted); cursor:pointer; width:fit-content; }

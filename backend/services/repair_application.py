@@ -152,7 +152,7 @@ def _workspace_identity(workspace) -> tuple[list[str], Optional[str]]:
     return ids, digest
 
 
-def _workspace_sources(workspace, current, selected_images, scope):
+def _workspace_sources(workspace, current, selected_images, scope, *, inspection=False):
     """Resolve the current message's Viewer workspace into scene input files.
 
     Only opaque scene ids from the message snapshot are used.  There is no
@@ -168,18 +168,25 @@ def _workspace_sources(workspace, current, selected_images, scope):
             "工作区候选集被截断（超过 200 项或字节预算），不能静默只规划前一部分；"
             "请缩小题数/多选目标后重新准备")
     ids: list[tuple[str, str]] = []
+    unresolved: list[dict] = []
     if scope == "current":
         scene_id = (current or {}).get("scene_id")
         if not isinstance(scene_id, str) or not scene_id:
+            if inspection and current:
+                return [], [{"name": current.get("name") or "当前影像",
+                             "reason": "影像未绑定服务器资源"}], [], {}
             raise RepairError(
                 "当前影像尚未绑定可用于SR的服务器资源；"
                 "可先准备资源评估计划，再补齐后端源文件与输入契约")
         ids.append((scene_id, str((current or {}).get("name") or "当前影像")))
     elif scope == "selection":
         for image in selected_images or []:
-            if isinstance(image, dict) and isinstance(image.get("scene_id"), str):
+            if isinstance(image, dict) and isinstance(image.get("scene_id"), str) and image["scene_id"]:
                 ids.append((image["scene_id"], str(image.get("name") or "选中影像")))
-        if not ids:
+            elif inspection and isinstance(image, dict):
+                unresolved.append({"name": str(image.get("name") or "选中影像"),
+                                   "reason": "影像未绑定服务器资源"})
+        if not ids and not inspection:
             raise RepairError(
                 "这条消息没有已绑定服务器源文件的多选影像；"
                 "请重新发送包含所选资源身份的快照，先准备资源评估计划")
@@ -188,7 +195,7 @@ def _workspace_sources(workspace, current, selected_images, scope):
             if isinstance(item, dict) and isinstance(item.get("scene_id"), str):
                 ids.append((item["scene_id"], str(item.get("name") or "工作区影像")))
 
-    if not ids:
+    if not ids and not inspection:
         local_only = int((workspace or {}).get("local_only") or 0)
         if local_only:
             raise RepairError(
@@ -197,7 +204,6 @@ def _workspace_sources(workspace, current, selected_images, scope):
         raise RepairError("当前工作区没有可准备修复计划的影像资源")
 
     sources: list[dict] = []
-    unresolved: list[dict] = []
     scene_ids: list[str] = []
     scene_refs: dict[str, str] = {}
     seen_files: set[str] = set()
@@ -209,6 +215,8 @@ def _workspace_sources(workspace, current, selected_images, scope):
             continue
         key = inp.as_posix()
         if key in seen_files:
+            if inspection:
+                unresolved.append({"name": name, "reason": "与另一条目指向同一输入影像", "kind": "excluded"})
             continue
         seen_files.add(key)
         scene_ids.append(scene_id)
@@ -220,7 +228,7 @@ def _workspace_sources(workspace, current, selected_images, scope):
             "name": name,
             "evidence": "Agent 工作区选择；问题与区域待检测",
         })
-    if not sources:
+    if not sources and not inspection:
         reasons = "；".join(f"{row['name']}：{row['reason']}" for row in unresolved[:5])
         raise RepairError(
             "工作区里没有满足现有SR输入契约的服务器影像" + (f"（{reasons}）" if reasons else ""))

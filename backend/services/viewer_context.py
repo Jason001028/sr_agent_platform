@@ -177,7 +177,7 @@ def validate_snapshot(value, attachment_count=0):
     return result
 
 
-def bind_registry(registry, snapshot, *, store=None, session_id=None, raster_runner=None):
+def bind_registry(registry, snapshot, *, store=None, session_id=None, raster_runner=None, on_inspection_progress=None):
     """冻结本条消息的观察数据，并把工作区/隐藏集合绑进检索工具。
 
     `store` 用来读服务端持久化的隐藏集合（场景库「清除/隐藏」）。不传时工具会退到
@@ -287,7 +287,8 @@ def bind_registry(registry, snapshot, *, store=None, session_id=None, raster_run
         if result.get(tool.name) is None:
             result.register(tool)
     if preferences.get('inspection_only'):
-        result.register(repair_tools.inspection_tool(frozen,store,session_id,raster_runner=raster_runner))
+        result.register(repair_tools.inspection_tool(frozen, store, session_id, raster_runner=raster_runner,
+                                                     on_progress=on_inspection_progress))
     return result
 
 

@@ -3,6 +3,8 @@ import { createApp, h, nextTick, ref } from 'vue';
 import { expect, it, vi } from 'vitest';
 import type { ChatMsg } from '../../stores/chat';
 import { projectAgentActivity } from '../../lib/agentActivity';
+const { jump } = vi.hoisted(() => ({ jump: vi.fn() }));
+vi.mock('../../lib/inspectionJump', () => ({ jumpToInspectionScene: jump }));
 vi.mock('../AgentRepairPlanCard.vue',()=>({default:{props:['data'],render(){return h('section',{'data-business':'plan'},'修复计划')}}}));
 vi.mock('../SceneSearchResultCard.vue',()=>({default:{props:['data'],emits:['open'],render(this:{$emit:(event:string,value:unknown)=>void}){return h('button',{'data-business':'scenes',onClick:()=>this.$emit('open',{name:'candidate'})},'打开候选')}}}));
 vi.mock('../AgentBatchReceipt.vue',()=>({default:{render(){return h('section',{'data-business':'receipt'},'任务回执')}}}));
@@ -14,7 +16,9 @@ it('renders one visible inspection table after all positions have arrived', asyn
   const page = (cursor: number, hasMore: boolean): ChatMsg => ({
     seq: cursor + 2, role: 'tool', content: '', ok: true, toolName: 'inspect_repair_workspace',
     data: { kind: 'repair_inspection.v1', total: 3, cursor, has_more: hasMore, scope: 'workspace',
-      items: [{ item_id: String(cursor), name, status: 'candidates', candidate_count: cursor }] },
+      detection_method: 'smart', tone_weight: false,
+      requested_total: 4, not_inspected: [{ name: '缺少配对影像', reason: '缺少 NOSR', kind: 'unresolved' }],
+      items: [{ item_id: String(cursor), name, status: cursor ? 'candidates' : 'no_candidate', candidate_count: cursor }] },
   });
   const messages = ref<ChatMsg[]>([{ seq: 1, role: 'user', content: '质检' }, page(0, true), page(2, false)]);
   const el = document.createElement('div');
@@ -27,14 +31,21 @@ it('renders one visible inspection table after all positions have arrived', asyn
   messages.value.push(page(1, true));
   await nextTick();
   const table = el.querySelector('.inspection-card table')!;
+  const card = el.querySelector('.inspection-card')!;
+  expect(card.textContent).toContain('请求 4 景');
+  expect(card.textContent).toContain('3 景已检测');
+  expect(card.textContent).toContain('1 景未检测');
+  expect(card.querySelector('details')?.textContent).toContain('缺少 NOSR');
   expect(table.closest('details')).toBeNull();
   expect([...table.querySelectorAll('th')].map(cell => cell.textContent)).toEqual(['景名 / 结果', 'PAN', 'NOSR', '差分结果']);
   expect([...table.querySelectorAll('tbody tr')].map(row => row.querySelector('td')?.textContent))
-    .toEqual([0, 1, 2].map(count => name + count + ' 处候选跳转至对应景'));
+    .toEqual(['未检出候选', '1 处候选', '2 处候选'].map(outcome => name + outcome + '跳转至对应景'));
   const jumps = [...table.querySelectorAll<HTMLButtonElement>('tbody .jump-scene')];
   expect(jumps).toHaveLength(3);
   expect(jumps.map(button => button.textContent)).toEqual(['跳转至对应景', '跳转至对应景', '跳转至对应景']);
   expect(jumps[0]!.disabled).toBe(false);
+  jumps[0]!.click();
+  await vi.waitFor(() => expect(jump).toHaveBeenCalledWith(name, undefined, { method: 'smart', toneWeight: false }));
   expect(table.querySelector('.scene-name')?.getAttribute('title')).toBe(name);
   messages.value.push({ ...page(2, false), seq: 5 });
   await nextTick();
@@ -55,7 +66,7 @@ it('renders one visible inspection table after all positions have arrived', asyn
   app.unmount();
 });
 
-it('preserves actionable business components without an extra ordinary trace',async()=>{
+it('keeps the original call group while showing actionable business results',async()=>{
   const messages: ChatMsg[] = [
     {seq:1,role:'user',content:'work'},
     {seq:2,role:'assistant',content:'',toolCalls:[{id:'p',name:'prepare_repair',args:{}},{id:'s',name:'search_scenes',args:{}}]},
@@ -69,8 +80,9 @@ it('preserves actionable business components without an extra ordinary trace',as
   const app=createApp(()=>messages.map((_,index)=>h(AgentToolPresentation,{projection,index,onOpenScene:open})));
   app.mount(el); await nextTick();
   expect(el.querySelectorAll('[data-business]')).toHaveLength(4);
-  expect(el.querySelector('.activity-timeline')).toBeNull();
-  el.querySelector<HTMLButtonElement>('button')!.click();
+  expect(el.querySelectorAll('.activity-timeline')).toHaveLength(1);
+  expect(el.querySelectorAll('.activity-step:not([hidden])')).toHaveLength(1);
+  el.querySelector<HTMLButtonElement>('[data-business=scenes]')!.click();
   expect(open).toHaveBeenCalledWith({name:'candidate'});
   expect(el.querySelector('pre')).toBeNull();
   app.unmount();el.remove();

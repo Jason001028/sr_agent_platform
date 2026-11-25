@@ -44,9 +44,11 @@ def test_waiting_chat_blocks_new_evidence_and_cancel_removes_waiter(tmp_path):
     async def scenario():
         url='http://model/v1';key=resources.resource_key(url)
         assert resources.acquire(a,key,'first','evidence',time.time()+60)
+        queued = asyncio.Event()
         async def waiting_chat():
-            async with resources.model_slot(b,url,deadline=time.monotonic()+30):pass
-        chat=asyncio.create_task(waiting_chat());await asyncio.sleep(.01)
+            async with resources.model_slot(b,url,deadline=time.monotonic()+30,on_wait=queued.set):pass
+        chat=asyncio.create_task(waiting_chat())
+        await asyncio.wait_for(queued.wait(), 1)
         assert a._db().execute('SELECT COUNT(*) FROM model_resource_waiters').fetchone()[0]==1
         resources.release(a,key,'first')
         # The chat's DB waiter has priority even before its next poll executes.

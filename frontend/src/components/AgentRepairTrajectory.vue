@@ -2,8 +2,9 @@
 import { computed, ref, shallowRef, watch } from 'vue';
 import { apiBatchEvents, type BatchEvent } from '../lib/api';
 import { mergeBatchEvents } from '../lib/batchEventSync';
-import { projectRepairToolCalls } from '../lib/repairTrajectory';
+import { projectRepairToolCalls, type RepairToolStep } from '../lib/repairTrajectory';
 import { loadSrConfig } from '../lib/scene';
+import type { BatchPlaybackPresentation } from '../stores/batchPlayback';
 import AgentActivityTimeline from './AgentActivityTimeline.vue';
 
 const props = defineProps<{
@@ -14,8 +15,10 @@ const props = defineProps<{
   sessionKey?: string | null;
   developerMode?: boolean;
   rows: ReadonlyArray<{ item_id: string; ordinal: number }>;
+  presentation?: BatchPlaybackPresentation | null;
 }>();
 const emit = defineEmits<{ updated: [] }>();
+defineSlots<{ action(props: { step: RepairToolStep }): unknown }>();
 const recent = shallowRef<BatchEvent[]>([]);
 const older = shallowRef<BatchEvent[]>([]);
 const before = ref<number | null>(null);
@@ -31,8 +34,25 @@ const ordinals = computed(() => new Map(props.rows.map(row => [row.item_id, row.
 const steps = computed(() => projectRepairToolCalls(
   mergeBatchEvents(older.value, recent.value, Number.MAX_SAFE_INTEGER), props.settled, ordinals.value));
 const group = computed(() => ({ key: `repair-${props.goalId}`, steps: steps.value }));
-watch(() => steps.value.at(-1)?.key, (key, previous) => {
-  if (key && key !== previous) emit('updated');
+const viewing = computed(() => props.presentation?.goalId === props.goalId ? props.presentation : null);
+const displayedGroup = computed(() => {
+  const view = viewing.value;
+  if (!view) return group.value;
+  const relevant = view.phase === 'drawing'
+    ? view.detectionOnly ? ['detect_repair_item'] : ['detect_repair_item', 'build_repair_mask']
+    : ['detecting', 'loadingQuality', 'quality'].includes(view.phase) ? ['detect_repair_item']
+    : view.phase === 'holding' ? ['detect_repair_item', 'build_repair_mask'] : [];
+  const key = `repair-view-${view.goalId}-${view.itemId}`;
+  const latest = new Map<string, RepairToolStep>();
+  for (const step of steps.value) {
+    if (step.itemId === view.itemId && relevant.includes(step.name)) latest.set(step.name, step);
+  }
+  return { key, steps: [...latest.values()].sort((a, b) => a.callIndex - b.callIndex) };
+});
+watch(() => [viewing.value?.itemId, viewing.value?.phase, displayedGroup.value.steps.at(-1)] as const,
+  ([item, phase, step], [priorItem, priorPhase, priorStep]) => {
+    if ((step && (step.key !== priorStep?.key || step.state !== priorStep?.state))
+        || (phase && (phase !== priorPhase || item !== priorItem))) emit('updated');
 });
 
 watch(() => props.goalId, () => {
@@ -91,10 +111,22 @@ watch(() => [props.goalId, props.following, props.settled] as const, ([id, follo
 </script>
 
 <template>
-  <AgentActivityTimeline v-if="steps.length" :group="group" :session-key="sessionKey" :developer-mode="developerMode" />
+  <p v-if="viewing && displayedGroup.steps.length" class="tool-record-caption">本景后台工具记录</p>
+  <AgentActivityTimeline v-if="displayedGroup.steps.length" :group="displayedGroup"
+    :session-key="sessionKey" :developer-mode="developerMode" :keep-latest="true">
+    <template #action="{ step }"><slot name="action" :step="step as RepairToolStep" /></template>
+  </AgentActivityTimeline>
+  <details v-if="viewing && steps.length" class="tool-record-history">
+    <summary>完整后台工具记录</summary>
+    <AgentActivityTimeline :group="group" :session-key="sessionKey" :developer-mode="developerMode">
+      <template #action="{ step }"><slot name="action" :step="step as RepairToolStep" /></template>
+    </AgentActivityTimeline>
+  </details>
+  <p v-if="!steps.length && following && !settled && !unavailable" class="tool-record-caption">等待后台工具调用</p>
   <p v-if="unavailable" class="tool-record-error" role="status">暂时无法读取工具调用记录</p>
 </template>
 
 <style scoped>
-.tool-record-error { color:var(--ink-sub); font-size:12px; margin:4px 0; }
+.tool-record-error,.tool-record-caption,.tool-record-history { color:var(--ink-sub); font-size:12px; margin:4px 0; }
+.tool-record-history > summary { cursor:pointer; }
 </style>

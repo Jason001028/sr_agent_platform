@@ -77,15 +77,18 @@ it('retains important results separately and does not repeat their contents in t
   const before = JSON.stringify(messages), p = projectAgentActivity(messages,false);
   expect([...p.business.values()].flat().map(s=>s.business)).toEqual(['plan','scenes','receipt','annotation','confirmation']);
   expect([...p.groups.values()].flatMap(groups => groups.flatMap(group => group.steps.map(step => step.name))))
-    .toEqual(['prepare_repair']);
+    .toEqual(['prepare_repair', 'search_scenes', 'draft', 'present_spatial_annotations', 'request_clarification']);
   expect(JSON.stringify(messages)).toBe(before);
 });
-it('anchors repair runtime tools after the completed chat reply in the same turn', () => {
-  const plan = { ...result('p'), toolName: 'prepare_repair', data: { kind: 'repair_plan.v1', plan_id: 'p' } };
-  const answer: ChatMsg = { seq: 4, role: 'assistant', content: '计划正文' };
-  const rows = [user, plan, answer];
-  expect(projectAgentActivity(rows, true).repairTails.size).toBe(0);
-  expect(projectAgentActivity([...rows, { ...user, seq: 5 }, { ...answer, seq: 6 }], false).repairTails.get(1)).toBe(2);
+it('keeps a blocked plan on the original tool row and projects its card before the reply', () => {
+  const declaration: ChatMsg = { seq: 2, role: 'assistant', content: '', toolCalls: [{ id: 'p', name: 'prepare_repair', args: {} }] };
+  const plan = { ...result('p'), toolName: 'prepare_repair', data: { kind: 'repair_plan.v1', plan_id: 'p', status: 'BLOCKED' } };
+  const active = projectAgentActivity([user, declaration], true);
+  const received = projectAgentActivity([user, declaration, plan], true);
+  expect(received.groups.get(1)?.[0].steps[0]).toMatchObject({
+    key: active.steps[0].key, summary: '计划受阻', resultLink: { key: active.steps[0].key, label: '查看计划' },
+  });
+  expect(received.business.get(2)?.[0].business).toBe('plan');
 });
 it('reports inspection progress by scene position instead of the batch total', () => {
   const page = (cursor: number, count: number, hasMore: boolean): ChatMsg => ({
@@ -100,6 +103,30 @@ it('reports inspection progress by scene position instead of the batch total', (
     .toBe('5/27 景…');
   expect(projectAgentActivity([user, call('qc25'), page(25, 2, false)], false).steps[0].summary)
     .toBe('27/27 景');
+});
+it('keeps separate reports for repeated inspections and preserves rows from an unfinished run', () => {
+  const page = (seq: number, cursor: number, name: string): ChatMsg => ({
+    seq, role: 'tool', content: '', ok: true, toolName: 'inspect_repair_workspace',
+    data: { kind: 'repair_inspection.v1', total: 2, cursor, has_more: cursor === 0,
+      scope: 'workspace', detection_method: 'smart', tone_weight: false, items: [{ name }] },
+  });
+  const messages = [user, page(2, 0, 'A'), page(3, 1, 'B'), page(4, 0, 'C')];
+  const report = (sending: boolean) => [...projectAgentActivity(messages, sending).business.values()]
+    .flat().map(step => step.inspection);
+  expect(report(true)).toMatchObject([{ partial: false, items: [{ name: 'A' }, { name: 'B' }] }]);
+  expect(report(false)).toMatchObject([
+    { partial: false, items: [{ name: 'A' }, { name: 'B' }] },
+    { partial: true, items: [{ name: 'C' }], total: 2, detection_method: 'smart', tone_weight: false },
+  ]);
+  messages.push(page(5, 1, 'D'));
+  expect(report(false)[1]).toMatchObject({ partial: false, items: [{ name: 'C' }, { name: 'D' }] });
+});
+it('shows the business counts returned by a batch status query', () => {
+  const query: ChatMsg = { ...result('q'), toolName: 'query_batch_repair',
+    data: { counts: { failed: 3, total: 27 }, quality: { waiting_scenes: 2 }, active_jobs_total: 4 } };
+  expect(projectAgentActivity([user, query], false).steps[0]).toMatchObject({
+    state: 'success', label: '查询修复进度', summary: '3 景失败 · 2 景待人工验收 · 4 个作业进行中',
+  });
 });
 it('keeps failed searches visible and groups across tool-only assistant messages', () => {
   const a = calls('a'), b = {...calls('b'),seq:4};

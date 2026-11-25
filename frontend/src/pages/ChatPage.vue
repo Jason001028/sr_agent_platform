@@ -10,7 +10,7 @@ import { useAgentPlanRevisions } from '../lib/agentPlanRevisions';
  *   工具回合渲染为 用户 ─ Assistant(声明工具) ─ 工具结果 ─ 最终回复。
  * mock LLM（SR_LLM_MOCK=1）每回合固定 search_scenes → 总结，可离线走通。
  */
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { useChatStore } from '../stores/chat.js';
 import { useViewerStore } from '../stores/viewer.js';
 import { isDeveloperMode } from '../lib/developerMode.js';
@@ -34,11 +34,12 @@ import { loadSrConfig } from '../lib/scene.js';
 import { splitAgentPayload } from '../lib/agentContext.js';
 
 import AgentToolPresentation from '../components/AgentToolPresentation.vue';
+import { useChatScroll } from '../lib/chatScroll';
 import { projectAgentActivity } from '../lib/agentActivity';
 import { reasoningViews, type ReasoningTiming } from '../lib/reasoningTrace';
 
 const chat = useChatStore();
-const toolPresentation = computed(() => projectAgentActivity(chat.messages, chat.sending));
+const toolPresentation = computed(() => projectAgentActivity(chat.messages, chat.sending && !chat.recovery));
 const { resolvePlan, revisePlan } = useAgentPlanRevisions(() => chat.sessionId);
 const viewer = useViewerStore();
 const developerMode = ref(false);
@@ -182,19 +183,7 @@ async function batchDelete(): Promise<void> {
   if (!selected.value.length) selectMode.value = false;
 }
 
-function nearBottom(): boolean {
-  const el = scrollEl.value;
-  return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-}
-
-async function scrollBottom(): Promise<void> {
-  await nextTick();
-  if (scrollEl.value) scrollEl.value.scrollTop = scrollEl.value.scrollHeight;
-}
-
-watch(() => chat.messages.length, () => void scrollBottom());
-// 流式增量不新增消息，只改长度：已经贴着底部才跟随，用户翻上去就不拽回来。
-watch(() => chat.streamTick, () => { if (nearBottom()) void scrollBottom(); });
+const { hasNewActivity, followActivity, onScroll, scrollBottom } = useChatScroll(scrollEl, chat, 80);
 onMounted(() => {
   void chat.init();
   void (async () => {
@@ -288,8 +277,13 @@ onMounted(() => {
       </div>
 
       <p v-if="chat.error" class="cp-err">{{ chat.error }}</p>
+      <div v-if="chat.recovery" class="cp-err">
+        <span role="status">{{ chat.recovery.message }}</span>
+        <button v-if="!chat.recovery.resolved && !chat.recovery.checking" type="button"
+                class="btn" @click="chat.reconcileTurn()">查询本轮状态</button>
+      </div>
 
-      <div ref="scrollEl" class="cp-scroll">
+      <div ref="scrollEl" class="cp-scroll" data-agent-transcript @scroll.passive="onScroll">
         <div v-if="chat.loading" class="cp-loading">
           <ThinkingIndicator label="加载会话中" />
         </div>
@@ -324,20 +318,19 @@ onMounted(() => {
               <AgentAssistantText v-if="m.content" :message="m" :developer-mode="developerMode" />
               <div v-else-if="chat.sending && !m.toolCalls?.length && ((m.streaming && !m.reasoning) || m.phase === 'tool_call')"
                    class="bubble assistant tools">
-                <ThinkingIndicator :label="waitLabel(m)" />
+                <ThinkingIndicator :label="waitLabel(m)" show-elapsed />
               </div>
             </template>
           </template>
 
           <AgentToolPresentation :projection="toolPresentation" :index="i" :session-key="chat.sessionId"
-            timeline-scope="chat-page"
             :developer-mode="developerMode" :resolve-plan="resolvePlan"
-            @open-scene="openSearchScene" @plan-revised="revisePlan" @tool-calls-updated="nearBottom() && scrollBottom()" />
+            @open-scene="openSearchScene" @plan-revised="revisePlan" @tool-calls-updated="followActivity" />
         </div>
 
         <GoalClarifications :session-id="chat.sessionId" @updated="!chat.sending && chat.sessionId && chat.loadHistory(chat.sessionId)" />
-        <div v-if="chat.sending && !liveMsg" class="cp-thinking">
-          <ThinkingIndicator :label="chat.activity.label" />
+        <div v-if="chat.sending && !liveMsg && !chat.recovery && !chat.activity.pending?.length" class="cp-thinking">
+          <ThinkingIndicator :label="chat.activity.label" show-elapsed />
         </div>
         <div v-if="chat.lastRunId && !chat.sending" class="cp-feedback">
           <span>这次回答有帮助吗？</span>
@@ -352,6 +345,7 @@ onMounted(() => {
         </div>
       </div>
 
+      <button v-if="hasNewActivity" type="button" class="chat-new-activity" @click="scrollBottom">有新活动 ↓</button>
       <div class="cp-foot">
 
         <ChatAttachTray :items="chat.pendingImages" @remove="chat.removePendingImage" />

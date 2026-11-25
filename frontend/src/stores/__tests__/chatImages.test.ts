@@ -79,6 +79,33 @@ describe('待发截图托盘', () => {
 });
 
 describe('发送', () => {
+  it('reconciles a lost stream using server history without sending the prompt again', async () => {
+    const chat = useChatStore();
+    chat.sessionId = 's1';
+    const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        return sseResponse([JSON.stringify({ type: 'tool_call', id: 'p', name: 'prepare_repair', args: {} })]);
+      }
+      return new Response(JSON.stringify({
+        run: { run_id: 'completed-run', status: 'succeeded', error: null },
+        messages: [
+          { role: 'user', seq: 1, content: '修复' },
+          { role: 'assistant', seq: 2, tool_calls: [{ id: 'p', name: 'prepare_repair' }] },
+          { role: 'tool', seq: 3, tool_call_id: 'p', tool_name: 'prepare_repair', ok: true,
+            data: { kind: 'repair_plan.v1', plan_id: 'prepared-plan', status: 'READY' } },
+        ],
+      }));
+    });
+    vi.stubGlobal('fetch', fetch);
+    await chat.send('修复');
+    const posted = JSON.parse(fetch.mock.calls[0][1]?.body as string);
+    expect(fetch.mock.calls.map(([url]) => url.split('?')[1])).toEqual([undefined, `request_id=${posted.request_id}`]);
+    expect(chat.recovery).toMatchObject({ resolved: true, message: '已恢复本轮结果，请查看下方回执' });
+    expect(chat.messages.at(-1)?.data).toMatchObject({ plan_id: 'prepared-plan' });
+    expect(chat.messages.at(-1)?.autoStartRepair).toBeUndefined();
+    expect(chat.sending).toBe(false);
+  });
+
   it.each([false, true])('keeps the launch choice after a fast prepare response (%s)', async confirmBeforeStart => {
     const chat = useChatStore();
     chat.sessionId = 's1';

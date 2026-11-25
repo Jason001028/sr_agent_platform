@@ -79,7 +79,7 @@ class TrajectoryRecorder:
     def __init__(self, store, *, session_id: str, prompt: Any = None,
                  machine_id: Optional[str] = None, model: Optional[str] = None,
                  system_prompt: Optional[str] = None, tools: Optional[list] = None,
-                 max_payload_bytes: int = DEFAULT_MAX_BYTES):
+                 max_payload_bytes: int = DEFAULT_MAX_BYTES, run_id: Optional[str] = None):
         self.store = store
         self.session_id = session_id
         self.max_payload_bytes = max_payload_bytes
@@ -91,6 +91,7 @@ class TrajectoryRecorder:
             prompt=_prompt_column(prompt, max_payload_bytes),
             system_prompt_hash=stable_hash(system_prompt or ""),
             tool_manifest_hash=stable_hash(tools or []),
+            run_id=run_id,
         )
         self._last_event_id: Optional[str] = None
         self._started = time.time()

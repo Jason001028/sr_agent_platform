@@ -6,7 +6,7 @@
  *
  *   1. 跳到对应景（已在查看器里就只切过去，不重复取图）；
  *   2. 取同景 siblings，锁定「原图（input）」与「NOSR」，按需取像素；
- *   3. 用 SSIM + 非线性亮度归因权重跑一次差异定位，显示方式落在「独立热力图」；
+ *   3. 按本次质检设置运行差异定位，显示独立热力图；
  *   4. 打开「图像对比 → 点选对比」，展开对比条，并调出差异定位设置浮层。
  *
  * 失败不抛：返回错误串（'' = 成功），由调用方决定怎么显示 —— Agent 卡片在
@@ -30,6 +30,7 @@ function dirBase(p: string | null | undefined): string {
  *  这里能拿回这一行对应的**精确栅格路径**。手工打开的 RC 场景 rec.name 只有
  *  `PAN`，按名字反查会撞车；有 URL 时优先用它。 */
 export interface InspectionSceneRef { id: string; path: string }
+const inspectionMethodLabels = { absdiff: '绝对差异', ssim: '结构差异 SSIM', smart: 'LTD 纹理退化' };
 
 export function sceneRefFromPreviewUrl(url?: string | null): InspectionSceneRef | null {
   if (!url) return null;
@@ -50,13 +51,15 @@ export function sceneRefFromPreviewUrl(url?: string | null): InspectionSceneRef 
 }
 
 /**
- * 把某个质检景带到眼前：打开 → 原图/NOSR → SSIM 差异定位 → 点选对比。
+ * 把某个质检景带到眼前：打开 → 原图/NOSR → 差异定位 → 点选对比。
  *
  * `name` 来自质检结果的 `item.name`；`imageUrl` 是同一行 PAN（或退而求其次
  * NOSR）的预览 URL，用来拿精确场景身份。本函数不改任何修复状态，只读盘阵、
  * 只驱动查看器与差异定位。
  */
-export async function jumpToInspectionScene(name: string, imageUrl?: string | null): Promise<string> {
+export async function jumpToInspectionScene(name: string, imageUrl?: string | null, settings?: {
+  method?: unknown; toneWeight?: unknown;
+}): Promise<string> {
   const trimmed = String(name ?? '').trim();
   if (!trimmed) return '景名为空，无法跳转';
 
@@ -141,13 +144,12 @@ export async function jumpToInspectionScene(name: string, imageUrl?: string | nu
   // 让原图回到当前格：分析结果与原图标记都落在它上面。
   if (viewer.activeId !== aId) await viewer.activate(aId);
 
-  // SSIM + 非线性亮度归因权重（toneWeight）是入口约定，不沿用上一次的方法。
-  // 正在跑的旧分析先取消：这是一次新的显式意图，不该被上一条结果卡住。
   if (diff.busy) diff.cancelAnalysis();
-  diff.method = 'ssim';
-  diff.toneWeight = true;
-  // 整景共同覆盖范围，不沿用面板里上一次的「当前视野 ROI」；三算法并行是
-  // 开发者对照开关，这里要的是单一 SSIM 结果。
+  const method = settings?.method;
+  diff.method = method === 'absdiff' || method === 'smart' ? method : 'ssim';
+  diff.toneWeight = typeof settings?.toneWeight === 'boolean' ? settings.toneWeight : true;
+  const methodLabel = inspectionMethodLabels[diff.method];
+  // 质检使用整景共同覆盖范围。
   diff.scope = 'common';
   diff.parallelCompare = false;
   // 默认落在「独立热力图」：进来先看差异本身，而不是原图上的标记框。
@@ -156,7 +158,7 @@ export async function jumpToInspectionScene(name: string, imageUrl?: string | nu
   diff.display = 'heat';
   viewer.overlayMasterVisible = true;
   diff.setPair(aId, bId);
-  viewer.showToast('正在加载「' + trimmed + '」原图与 NOSR 的 SSIM 差异定位…');
+  viewer.showToast(`正在加载「${trimmed}」原图与 NOSR · ${methodLabel}…`);
   const analyzed = await diff.analyze();
   if (!analyzed) {
     const msg = diff.error || '差异定位未完成';
@@ -169,6 +171,6 @@ export async function jumpToInspectionScene(name: string, imageUrl?: string | nu
   // 设置浮层（显示方式那一栏正停在「独立热力图」）。
   viewer.setCmpStripOpen(true);
   diff.openPanel();
-  viewer.showToast('已跳到「' + trimmed + '」：SSIM 差异定位已按独立热力图显示，图像对比为点选模式');
+  viewer.showToast(`已跳到「${trimmed}」 · ${methodLabel}热力图 · 点选对比`);
   return '';
 }

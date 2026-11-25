@@ -20,12 +20,13 @@ const tools: Record<string, [string, string]> = {
   prepare_repair: ['正在准备修复计划', '正在核对修复计划'],
   start_repair: ['正在启动修复任务', '正在核对启动回执'],
   inspect_repair_workspace: ['正在质检工作区', '正在整理质检结果'],
+  query_batch_repair: ['正在查询修复进度', '正在整理修复进度'],
 };
 const actions: Record<string, string> = {
   search_scenes:'检索场景', get_current_image_info:'读取影像信息', prepare_repair:'准备修复计划',
   read_tool_result:'读取工具结果', start_repair:'启动修复任务', run_sr:'提交超分任务',
   sr_job_status:'查询任务状态', get_repair_workspace:'读取修复工作区', list_repair_items:'读取修复清单',
-  get_repair_item:'读取修复项', inspect_repair_workspace:'质检工作区', read_skill:'读取操作指引', read_skill_resource:'读取指引附件',
+  get_repair_item:'读取修复项', query_batch_repair:'查询修复进度', inspect_repair_workspace:'质检工作区', read_skill:'读取操作指引', read_skill_resource:'读取指引附件',
   present_spatial_annotations:'生成空间批注', request_clarification:'请求用户确认', fix_bad_lines:'处理影像坏线',
   detect_repair_item:'检测差异', build_repair_mask:'生成掩码', submit_repair_item:'提交 SR',
   verify_repair_output:'验证 SR 产物', assess_repair_effect:'回检修复效果',
@@ -43,6 +44,9 @@ export function advanceActivity(state: ChatActivity, event: PlatformSseEvent): C
   if (state.terminal) return state;
   let label = state.label, analysis = state.analysis, pending = state.pending, terminal = false;
   switch (event.type) {
+    case 'model_wait':
+      label = event.phase === 'queued' ? '等待模型资源' : '等待模型响应';
+      break;
     case 'llm_phase':
       label = event.phase === 'answering' ? '正在整理回答'
         : event.phase === 'tool_call' ? '正在组织工具调用' : analysis;

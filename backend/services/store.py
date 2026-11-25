@@ -1032,8 +1032,8 @@ class Store:
                          model: Optional[str] = None, prompt: Optional[str] = None,
                          system_prompt_hash: Optional[str] = None,
                          tool_manifest_hash: Optional[str] = None,
-                         metadata: Optional[dict] = None) -> str:
-        run_id = uuid.uuid4().hex
+                         metadata: Optional[dict] = None, run_id: Optional[str] = None) -> str:
+        run_id = run_id or uuid.uuid4().hex
         now = time.time()
         self._db().execute(
             "INSERT INTO agent_runs (run_id, session_id, machine_id, status, model, "

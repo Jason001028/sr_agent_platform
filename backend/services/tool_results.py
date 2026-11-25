@@ -12,6 +12,12 @@ from backend.services.trajectory import _redact
 from backend.tools.contract import Tool, ToolRegistry, err, ok
 
 
+REPAIR_HISTORY_TOOLS = frozenset({
+    "inspect_repair_workspace", "query_batch_repair", "get_repair_workspace",
+    "list_repair_items", "get_repair_item",
+})
+
+
 class ToolResults:
     def __init__(self, store=None, session_id=None, budget=None):
         self.store, self.session_id = store, session_id

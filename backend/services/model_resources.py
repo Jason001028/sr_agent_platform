@@ -51,7 +51,7 @@ def release(store,key,token):
 
 
 @asynccontextmanager
-async def model_slot(store,base_url,*,kind='chat',deadline,wait=True):
+async def model_slot(store,base_url,*,kind='chat',deadline,wait=True,on_wait=None):
     """Hold until the actual HTTP context closes, including cancellation.
 
     The resource expiry exceeds the caller's absolute request deadline by a
@@ -71,6 +71,9 @@ async def model_slot(store,base_url,*,kind='chat',deadline,wait=True):
             if time.monotonic()>=deadline:raise DeadlineExceeded('model admission deadline reached')
             if acquire(store,key,token,kind,expiry):break
             if not wait:raise ModelBusy('waiting_model_idle')
+            if on_wait is not None:
+                on_wait()
+                on_wait = None
             await asyncio.sleep(min(.05,max(0,deadline-time.monotonic())))
         yield
     finally:

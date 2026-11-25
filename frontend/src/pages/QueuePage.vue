@@ -23,10 +23,13 @@ import type { QueueTask } from '../lib/api.js';
 const queue = useQueueStore();
 const route = useRoute();
 watch([() => route.hash, () => queue.tasks], async () => {
-  const match = /^#queue-task-(\d+)$/.exec(route.hash);
+  const match = /^#queue-(task|job)-(\d+)$/.exec(route.hash);
   if (!match) return;
+  const taskId = match[1] === 'task' ? Number(match[2])
+    : queue.tasks.find(task => String(task.job_id) === match[2])?.task_id;
+  if (taskId == null) return;
   await nextTick();
-  if (mounted) viewTask(Number(match[1]));
+  if (mounted) viewTask(taskId);
 }, { immediate: true });
 const highlighted = ref<number | null>(null);
 let highlightTimer: ReturnType<typeof setTimeout> | undefined;

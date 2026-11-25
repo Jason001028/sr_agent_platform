@@ -4,10 +4,11 @@ import { createApp, h, nextTick, reactive } from 'vue';
 import type { App } from 'vue';
 
 const state = vi.hoisted(() => ({
-  chat: {} as any, batch: {} as any, viewer: {} as any,
+  chat: {} as any, batch: {} as any, viewer: {} as any, playback: {} as any,
 }));
 vi.mock('../../stores/chat', () => ({ useChatStore: () => state.chat }));
 vi.mock('../../stores/batchGoal', () => ({ useBatchGoalStore: () => state.batch }));
+vi.mock('../../stores/batchPlayback', () => ({ useBatchPlaybackStore: () => state.playback }));
 vi.mock('../../stores/viewer', () => ({ useViewerStore: () => state.viewer }));
 vi.mock('../../stores/scenes', () => ({ useScenesStore: () => ({ openQuiet: vi.fn() }) }));
 vi.mock('../../lib/viewerContext', () => ({
@@ -79,11 +80,10 @@ async function mount(data: unknown, props: Record<string, unknown> = {}) {
   root = document.createElement('div');
   document.body.append(root);
   app = createApp({ render: () => [
-    h(AgentRepairPlanCard, { data, ...props, timelineTarget: '#test-repair-tools', ref: (value: unknown) => {
+    h(AgentRepairPlanCard, { data, ...props, ref: (value: unknown) => {
       if (value) card = value as InstanceType<typeof AgentRepairPlanCard>;
     } }),
     h('p', { class: 'test-plan-reply' }, '计划正文'),
-    h('div', { id: 'test-repair-tools' }),
   ] });
   app.mount(root);
   await flush();
@@ -94,6 +94,7 @@ beforeEach(() => {
     goal_id, events: [], last_seq: 0, next_after: null, next_before: null, has_more: false, has_earlier: false,
   }));
   state.chat = reactive({ sessionId: 's', newSession: vi.fn(), error: '' });
+  state.playback = reactive({ presentation: null });
   state.batch = {
     goalId: null, snapshot: null,
     attach: vi.fn().mockResolvedValue(true),
@@ -266,7 +267,7 @@ it('restores an already-started server plan without presenting a start button', 
   expect(apiConfirmRepair).not.toHaveBeenCalled();
 });
 
-it('shows real repair calls below the reply using the regular tool record component', async () => {
+it('shows real repair calls next to the task card using the regular tool record component', async () => {
   const goal = { goal_id: 'trace-goal', status: 'RUNNING', phase: 'dispatching', execution_owner: 'local_agent' };
   const current = plan({ status: 'STARTED', goal_id: goal.goal_id });
   state.batch.goalId = goal.goal_id;
@@ -274,7 +275,8 @@ it('shows real repair calls below the reply using the regular tool record compon
   vi.mocked(apiRepairStatus).mockResolvedValue(status({ plan: current, goal, counts: counts() }) as never);
   await mount(current);
   const card = root.querySelector('[data-e2e=agent-repair-task]')!;
-  const trace = root.querySelector('.test-plan-reply + #test-repair-tools')!;
+  const trace = root.querySelector('[data-e2e=repair-tool-record]')!;
+  expect(trace.nextElementSibling).toBe(root.querySelector('.test-plan-reply'));
   expect(trace.querySelector('.activity-timeline')).toBeNull();
   expect(card.querySelector('details.execution-details')?.hasAttribute('open')).toBe(false);
   state.batch.events = [
@@ -286,16 +288,18 @@ it('shows real repair calls below the reply using the regular tool record compon
   expect(trace.querySelector(':scope > .activity-timeline')?.getAttribute('aria-label')).toBe('工具调用记录');
   expect(trace.textContent).not.toContain('轨迹');
   expect(trace.querySelector('[data-state=running]')?.textContent).toContain('检测差异 · 第 4 景');
+  const detectionRow = trace.querySelector('[data-state=running]');
   expect(trace.textContent).not.toContain('生成掩码');
   expect(card.textContent).not.toContain('等待执行结果');
   state.batch.events.push({ goal_id: goal.goal_id, seq: 3, event_type: 'repair_detection_ready',
     payload: { item_id: 'a', candidate_count: 2 } });
   await nextTick();
   expect(trace.querySelector('[data-state=success]')?.textContent).toContain('检出 2 个候选区域');
+  expect(trace.querySelector('[data-state=success]')).toBe(detectionRow);
   expect(trace.querySelector('[data-state=running]')).toBeNull();
   state.batch.events.push(
     { goal_id: goal.goal_id, seq: 4, event_type: 'agent_action_selected', payload: { item_id: 'a', action: 'submit_repair_item' } },
-    { goal_id: goal.goal_id, seq: 5, event_type: 'sr_receipt_recorded', payload: { item_id: 'a', job_id: 15 } },
+    { goal_id: goal.goal_id, seq: 5, event_type: 'sr_receipt_recorded', payload: { item_id: 'a', job_id: 15, status: 'QUEUED' } },
     { goal_id: goal.goal_id, seq: 6, event_type: 'external_job_terminal', payload: { item_id: 'a', job_id: 15, state: 'COMPLETED' } },
     { goal_id: goal.goal_id, seq: 7, event_type: 'agent_decision_failed', payload: { error_type: 'ValueError' } },
   );
@@ -303,8 +307,96 @@ it('shows real repair calls below the reply using the regular tool record compon
   const groupToggle = trace.querySelector<HTMLButtonElement>('.group-toggle');
   if (groupToggle?.getAttribute('aria-expanded') === 'false') groupToggle.click();
   await nextTick();
-  expect(trace.textContent).toContain('提交 SR · Job 15');
+  expect(trace.textContent).toContain('提交 SR · 已收到作业回执 · Job 15 · 排队中');
+  const viewJob = [...trace.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === '查看作业');
+  expect(viewJob).toBeDefined();
+  viewJob!.click();
+  expect(router.push).toHaveBeenCalledWith({ name: 'queue', hash: '#queue-job-15' });
   expect(trace.querySelectorAll('.activity-step')).toHaveLength(2);
+});
+
+it('follows the displayed scene and phase even when backend tool events lead or lag playback', async () => {
+  const goal = { goal_id: 'trace-goal', status: 'RUNNING', phase: 'dispatching', execution_owner: 'local_agent' };
+  const current = plan({ status: 'STARTED', goal_id: goal.goal_id });
+  state.batch = reactive({ ...state.batch, goalId: goal.goal_id, events: [], syncState: 'live' });
+  vi.mocked(apiRepairStatus).mockResolvedValue(status({ plan: current, goal, counts: counts(),
+    items: [{ item_id: 'b', name: '后台场景二', status: 'DETECTING' }],
+  }) as never);
+  const shown = { goalId: goal.goal_id, itemId: 'a', name: '场景一', ordinal: 1,
+    phase: 'detecting', label: '识别区域', detectionOnly: false };
+  state.playback.presentation = shown;
+  await mount(current);
+  const trace = root.querySelector('[data-e2e=repair-tool-record]')!;
+  const visibleTool = () => trace.querySelector(':scope > .activity-timeline');
+  const call = (seq: number, item_id: string, step_ordinal: number, action: string) => ({
+    goal_id: goal.goal_id, seq, step_ordinal, event_type: 'agent_action_selected', payload: { item_id, action },
+  });
+  expect(root.querySelector('.current')?.textContent).toContain('场景一 · 识别区域');
+  expect(visibleTool()).toBeNull();
+
+  state.batch.events = [
+    call(1, 'a', 1, 'detect_repair_item'), {
+      goal_id: goal.goal_id, seq: 2, event_type: 'repair_detection_ready', payload: { item_id: 'a', candidate_count: 2 },
+    }, call(3, 'a', 1, 'build_repair_mask'), call(4, 'b', 2, 'detect_repair_item'),
+  ];
+  await nextTick();
+  expect(visibleTool()?.textContent).toContain('检测差异 · 第 1 景');
+  expect(visibleTool()?.textContent).not.toContain('第 2 景');
+  expect(visibleTool()?.textContent).not.toContain('生成掩码');
+  const history = trace.querySelector<HTMLDetailsElement>('details.tool-record-history')!;
+  expect(history.open).toBe(false);
+  expect(history.textContent).toContain('检测差异 · 第 2 景');
+
+  state.playback.presentation = { ...shown, phase: 'drawing', label: '绘制掩码' };
+  await nextTick();
+  expect(root.querySelector('.current')?.textContent).toContain('场景一 · 绘制掩码');
+  expect(visibleTool()?.textContent).toContain('生成掩码 · 第 1 景');
+
+  state.playback.presentation = { ...shown, itemId: 'b', name: '场景二', ordinal: 2, phase: 'loading', label: '加载影像' };
+  await nextTick();
+  expect(root.querySelector('.current')?.textContent).toContain('场景二 · 加载影像');
+  expect(visibleTool()).toBeNull();
+  state.playback.presentation.phase = 'detecting';
+  state.playback.presentation.label = '识别区域';
+  await nextTick();
+  expect(visibleTool()?.textContent).toContain('检测差异 · 第 2 景');
+
+  state.playback.presentation = { ...shown, goalId: 'other' };
+  await nextTick();
+  expect(root.querySelector('.current')?.textContent).toContain('后台处理');
+  expect(root.querySelector('.current')?.textContent).toContain('检测中');
+  expect(trace.querySelector('details.tool-record-history')).toBeNull();
+});
+
+it('shows calls before status hydration and updates the same row with its result and next action', async () => {
+  const gid = 'early-goal';
+  const current = plan({ status: 'STARTED', goal_id: gid });
+  let finishStatus!: (value: never) => void;
+  vi.mocked(apiRepairStatus).mockImplementation(() => new Promise(resolve => { finishStatus = resolve; }));
+  state.batch = reactive({ ...state.batch, goalId: gid, syncState: 'live', events: [
+    { goal_id: gid, seq: 1, event_type: 'agent_action_selected', step_ordinal: 1,
+      payload: { item_id: 'scene-a', action: 'detect_repair_item' } },
+  ] });
+  await mount(current);
+  const trace = root.querySelector('[data-e2e=repair-tool-record]')!;
+  const row = trace.querySelector('[data-state=running]')!;
+  expect(row.textContent).toContain('检测差异 · 第 1 景');
+  state.batch.events.push({ goal_id: gid, seq: 2, event_type: 'repair_detection_ready',
+    payload: { item_id: 'scene-a', candidate_count: 2 } });
+  finishStatus(status({ plan: current, counts: counts(),
+    goal: { goal_id: gid, status: 'RUNNING', phase: 'dispatching', execution_owner: 'local_agent' },
+    items: [{ item_id: 'scene-a', ordinal: 1, status: 'DETECTING', image_path: '/test/input.tif' }],
+  }) as never);
+  await flush();
+  expect(trace.querySelector('[data-state=success]')).toBe(row);
+  expect(row.textContent).toContain('检出 2 个候选区域');
+  const locate = row.querySelector<HTMLButtonElement>('.repair-tool-action')!;
+  expect(locate.textContent).toBe('定位本景');
+  locate.click();
+  await nextTick();
+  expect(state.batch.openItem).toHaveBeenCalledWith(expect.objectContaining({
+    item_id: 'scene-a', image_path: '/test/input.tif',
+  }));
 });
 
 it('lists every Agent tool step instead of keeping only the latest five', async () => {
@@ -313,7 +405,7 @@ it('lists every Agent tool step instead of keeping only the latest five', async 
   state.batch = reactive({ ...state.batch, events: [], syncState: 'live' });
   vi.mocked(apiRepairStatus).mockResolvedValue(status({ plan: plan({ status: 'STARTED', goal_id: goal.goal_id }), goal, counts: counts() }) as never);
   await mount(plan({ status: 'STARTED', goal_id: goal.goal_id }));
-  const trace = root.querySelector('#test-repair-tools')!;
+  const trace = root.querySelector('[data-e2e=repair-tool-record]')!;
   state.batch.events = Array.from({ length: 7 }, (_, index) => ({
     goal_id: goal.goal_id, seq: index + 1, event_type: 'agent_action_selected',
     payload: { item_id: `item-${index}`, action: 'detect_repair_item' },
@@ -340,7 +432,7 @@ it('loads earlier event pages so the first Agent tool step stays visible', async
   });
   vi.mocked(apiRepairStatus).mockResolvedValue(status({ plan: plan({ status: 'STARTED', goal_id: goal.goal_id }), goal, counts: counts() }) as never);
   await mount(plan({ status: 'STARTED', goal_id: goal.goal_id }));
-  const trace = root.querySelector('#test-repair-tools')!;
+  const trace = root.querySelector('[data-e2e=repair-tool-record]')!;
   expect(trace.textContent).toContain('检测差异');
   expect(trace.textContent).toContain('生成掩码');
   expect(trace.querySelectorAll('[data-state=running]')).toHaveLength(2);
@@ -352,7 +444,7 @@ it('exposes the blocked reason when hovering the blocked step summary', async ()
   state.batch = reactive({ ...state.batch, events: [], syncState: 'live' });
   vi.mocked(apiRepairStatus).mockResolvedValue(status({ plan: plan({ status: 'STARTED', goal_id: goal.goal_id }), goal, counts: counts() }) as never);
   await mount(plan({ status: 'STARTED', goal_id: goal.goal_id }));
-  const trace = root.querySelector('#test-repair-tools')!;
+  const trace = root.querySelector('[data-e2e=repair-tool-record]')!;
   state.batch.events = [
     { goal_id: goal.goal_id, seq: 1, event_type: 'agent_action_selected', step_ordinal: 4,
       payload: { item_id: 'a', action: 'detect_repair_item' } },
@@ -388,6 +480,10 @@ it('shows a three-quarter loading arc during execution and keeps paused and term
   expect(ring().classList.contains('running')).toBe(true);
   expect(ring().querySelector('.loading-arc')?.getAttribute('stroke-dasharray')).toBe('75 25');
   expect(ring().querySelector('.ring')).toBeNull();
+  const detail = root.querySelector<HTMLDetailsElement>('.execution-details')!;
+  detail.open = true;
+  const disclosure = detail.querySelector('summary')!;
+  disclosure.focus();
 
   for (const [status, phase] of [['WAITING_USER', 'waiting_review'], ['WAITING_EXTERNAL', 'monitoring'], ['VERIFYING', 'verifying']]) {
     state.batch.snapshot = { ...snapshot, goal: { ...snapshot.goal, status, phase } } as never;
@@ -415,6 +511,9 @@ it('shows a three-quarter loading arc during execution and keeps paused and term
   } as never;
   await flush();
   expect(ring().getAttribute('data-state-icon')).toBe('done');
+  expect(root.querySelector('.execution-details')).toBe(detail);
+  expect(detail.open).toBe(true);
+  expect(document.activeElement).toBe(disclosure);
 
   state.batch.snapshot = {
     ...snapshot,

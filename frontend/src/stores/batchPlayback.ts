@@ -11,7 +11,17 @@ import { useScenesStore } from './scenes';
 import { useViewerStore } from './viewer';
 import { agentRepairSettings } from '../lib/agentRepairSettings';
 
-export type PlaybackPhase = 'idle' | 'loading' | 'quality' | 'detecting' | 'drawing' | 'holding' | 'waiting' | 'paused' | 'done';
+export type PlaybackPhase = 'idle' | 'loading' | 'loadingQuality' | 'quality' | 'detecting' | 'drawing' | 'holding' | 'waiting' | 'paused' | 'done';
+
+export interface BatchPlaybackPresentation {
+  goalId: string;
+  itemId: string;
+  name: string;
+  ordinal: number;
+  phase: PlaybackPhase;
+  label: string;
+  detectionOnly: boolean;
+}
 
 function delay(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise(resolve => {
@@ -49,6 +59,7 @@ function presentationStep<T>(
 
 export const useBatchPlaybackStore = defineStore('batchPlayback', () => {
   const phase = ref<PlaybackPhase>('idle');
+  const itemId = ref('');
   const name = ref('');
   const ordinal = ref(0);
   const completed = ref(0);
@@ -60,15 +71,25 @@ export const useBatchPlaybackStore = defineStore('batchPlayback', () => {
   const running = ref(false);
   const mounted = ref(false);
   let controller: AbortController | null = null;
-  let goal = '';
+  const goal = ref('');
   let cursor = 0;
   let skipped = false;
   const active = computed(() => mounted.value && running.value);
   const labels: Record<PlaybackPhase, string> = {
-    idle: '逐景展示', loading: '加载影像', quality: '质检预览', detecting: '等待识别结果', drawing: '绘制掩码',
+    idle: '逐景展示', loading: '加载影像', loadingQuality: '加载质检预览', quality: '质检预览',
+    detecting: '识别区域', drawing: '绘制掩码',
     holding: '本景结果', waiting: '等待下一景', paused: '展示已暂停', done: '展示完成',
   };
-  const label = computed(() => labels[phase.value]);
+  const label = computed(() => {
+    if (detectionOnly.value && phase.value === 'drawing') return '绘制候选轮廓';
+    if (itemId.value && phase.value === 'waiting') return '等待影像就绪';
+    return labels[phase.value];
+  });
+  const presentation = computed<BatchPlaybackPresentation | null>(() => {
+    if (!mounted.value || !goal.value || phase.value === 'idle' || phase.value === 'done') return null;
+    return { goalId: goal.value, itemId: itemId.value, name: name.value, ordinal: ordinal.value,
+      phase: phase.value, label: label.value, detectionOnly: detectionOnly.value };
+  });
 
   function stop(reason = '') {
     controller?.abort(); controller = null;
@@ -82,16 +103,20 @@ export const useBatchPlaybackStore = defineStore('batchPlayback', () => {
   function hideOverlay() {
     reset();
   }
+  function clearScene() {
+    itemId.value = ''; name.value = ''; ordinal.value = 0;
+    doc.value = null; detectionOnly.value = false; regionIndex.value = -1;
+  }
   function reset() {
-    stop(); goal = ''; cursor = 0; completed.value = 0;
-    doc.value = null; detectionOnly.value = false; regionIndex.value = -1; name.value = ''; ordinal.value = 0; note.value = ''; phase.value = 'idle';
+    stop(); goal.value = ''; cursor = 0; completed.value = 0;
+    clearScene(); note.value = ''; phase.value = 'idle';
   }
 
   async function start() {
     const batch = useBatchGoalStore(), viewer = useViewerStore(), scenes = useScenesStore();
     const gid = batch.goalId;
     if (!gid || batch.paused || batch.snapshot?.goal.status === 'CANCELLED' || running.value || !mounted.value) return;
-    if (gid !== goal) { reset(); goal = gid; }
+    if (gid !== goal.value) { reset(); goal.value = gid; }
     const abort = new AbortController(); controller = abort;
     const signal = abort.signal;
     const intent = viewer.userIntentSeq;
@@ -99,12 +124,12 @@ export const useBatchPlaybackStore = defineStore('batchPlayback', () => {
       && !batch.paused && batch.snapshot?.goal.status !== 'CANCELLED'
       && !viewer.drawMode && viewer.userIntentSeq === intent;
     note.value = '';
+    clearScene();
     phase.value = 'waiting';
     running.value = true;
     // Resume the interrupted scene; only a fully presented/skipped scene
     // advances cursor. Pagination cannot lose fast backend transitions.
     let opened = '';
-    let presenting = '';
     let loadFailures = 0;
     let overlayFailures = 0;
     try {
@@ -118,10 +143,11 @@ export const useBatchPlaybackStore = defineStore('batchPlayback', () => {
           phase.value = batch.isTerminal ? 'done' : 'waiting';
           note.value = '';
           if (batch.isTerminal) break;
+          clearScene();
           await delay(1500, signal); continue;
         }
-        if (presenting !== row.item_id) {
-          presenting = row.item_id;
+        if (itemId.value !== row.item_id) {
+          itemId.value = row.item_id;
           doc.value = null; detectionOnly.value = false; regionIndex.value = -1; skipped = false;
           name.value = row.name; ordinal.value = row.ordinal; note.value = '';
         }
@@ -203,15 +229,19 @@ export const useBatchPlaybackStore = defineStore('batchPlayback', () => {
               viewer.batchOverlayTarget = null;
             }
           };
-          phase.value = 'quality';
-          note.value = '质检预览：双图分屏对比与热力图';
+          phase.value = 'loadingQuality';
+          note.value = '正在加载双图分屏与热力图。';
           signal.addEventListener('abort', close, { once: true });
           try {
             const shown = await presentationStep(signal, '加载质检预览', 8_000, step => {
               step.addEventListener('abort', close, { once: true });
               return review.preview(row).finally(() => step.removeEventListener('abort', close));
             });
-            if (shown && wanted()) await delay(reduced ? 300 : 1800, signal);
+            if (shown && wanted()) {
+              phase.value = 'quality';
+              note.value = '双图分屏对比与热力图';
+              await delay(reduced ? 300 : 1800, signal);
+            }
           } catch {
             // The optional comparison can fail while the published mask remains drawable.
           } finally {
@@ -287,5 +317,5 @@ export const useBatchPlaybackStore = defineStore('batchPlayback', () => {
     }
   }
   return { phase, name, ordinal, completed, note, doc, detectionOnly, regionIndex, duration, running, mounted,
-    active, label, start, stop, skip, reset, hideOverlay };
+    active, label, presentation, start, stop, skip, reset, hideOverlay };
 });

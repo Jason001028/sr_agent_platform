@@ -137,6 +137,28 @@ class RepairApplicationTest(unittest.TestCase):
         self.assertEqual(self.store._db().execute('SELECT COUNT(*) FROM repair_plans').fetchone()[0],0)
         self.assertEqual(self.store._db().execute('SELECT COUNT(*) FROM agent_goals').fetchone()[0],0)
 
+    def test_inspection_reports_scenes_excluded_before_detection(self):
+        valid, skipped, missing = (self.scene(i) for i in (191, 192, 193))
+        (skipped[0] / 'PAN_old_latest.tif').write_bytes(b'existing')
+        workspace = self.workspace(valid, skipped, missing)
+        missing[1].unlink()
+        workspace.update(local_only=1, resources=[{'name': '本地影像'}])
+        snapshot = validate_snapshot({'version': 1, 'workspace': workspace,
+                                      'agent_repair_settings': {'inspection_only': True}})
+        events = []
+        registry = bind_registry(build_builtin_registry(), snapshot, store=self.store,
+                                 session_id=self.session_id, on_inspection_progress=events.append)
+        result = registry.get('inspect_repair_workspace').run()
+        self.assertTrue(result['ok'], result)
+        data = result['data']
+        self.assertEqual((data['requested_total'], data['total']), (4, 1))
+        self.assertEqual({row['name']: row['kind'] for row in data['not_inspected']}, {
+            missing[0].name: 'unresolved', skipped[0].name: 'skipped', '本地影像': 'unresolved',
+        })
+        self.assertTrue(all(row['reason'] for row in data['not_inspected']))
+        self.assertEqual([event['phase'] for event in events], ['resolving_inspection', 'detecting_scene'])
+        self.assertEqual(events[-1]['position'], 1)
+
     def test_skip_all_returns_no_startable_plan_and_disabled_skip_keeps_conflict(self):
         a=self.scene(94);(a[0]/'PAN_old_latest.tif').write_bytes(b'keep')
         skipped=self.prepared(a,skip_completed=True)
