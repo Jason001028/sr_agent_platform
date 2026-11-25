@@ -34,12 +34,22 @@ export interface AssetTileInfo {
   band: number; dtype: string; nodata: number | string | null; layout: 'strip' | 'tiled';
   compression: string; block_size: [number, number]; overviews: [number, number][];
   sourceVersion: string; rasterVersion: string; stretchVersion: string;
+  displayProfiles?: boolean;
+  photometric?: number | null;
+  scale?: number; offset?: number; unit?: string;
+  categorical?: boolean;
+}
+
+export interface AssetTileStats {
+  min: number; max: number; p2: number; p98: number; total: number; hist: number[];
+  bounds: [number, number]; state: string; rasterVersion: string;
 }
 
 export interface AssetTile {
   id: string; x: number; y: number; sourceWidth: number; sourceHeight: number;
   width: number; height: number; level: number; tileX: number; tileY: number; band: number;
-  resampling: 'nearest'; sourceVersion: string; rasterVersion: string; stretchVersion: string;
+  resampling: 'nearest' | 'area'; sourceVersion: string; rasterVersion: string; stretchVersion: string;
+  displayKey?: string; requestedSampling?: 'nearest' | 'area';
   dnBytes: number; displayBytes: number; decodedBytes: number;
 }
 
@@ -47,9 +57,18 @@ export function fetchAssetTileInfo(asset: PreviewAsset, signal?: AbortSignal, ba
   return json<AssetTileInfo>(`/assets/${asset.id}/tiles?band=${band}`, { signal });
 }
 
+export function fetchAssetTileStats(asset: PreviewAsset, band: number, signal?: AbortSignal) {
+  return json<AssetTileStats>(`/assets/${asset.id}/tiles/stats?band=${band}`, { signal });
+}
+
 export async function fetchAssetTile(asset: PreviewAsset, level: number, tileX: number,
-  tileY: number, signal?: AbortSignal, band = 1) {
-  const response = await fetch(api(`/assets/${asset.id}/tiles/${level}/${tileX}/${tileY}?band=${band}`), { signal });
+  tileY: number, signal?: AbortSignal, band = 1, display?: string, sampling?: 'nearest' | 'area',
+  stretchVersion?: string) {
+  const query = new URLSearchParams({ band: String(band) });
+  if (display) query.set('display', display);
+  if (sampling) query.set('sampling', sampling);
+  if (stretchVersion) query.set('stretchVersion', stretchVersion);
+  const response = await fetch(api(`/assets/${asset.id}/tiles/${level}/${tileX}/${tileY}?${query}`), { signal });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
     throw new ImageOpenError(body.detail ?? `HTTP ${response.status}`, response.status);

@@ -166,7 +166,8 @@ function onPick(e: Event) {
       :title="store.activeRec?.tileSource
         ? '调整全图概览采样；局部图块随缩放自动切换清晰度'
         : 'PAN／通用预览档位；同景较小的 NOSR 默认使用 1/2，PAN 为 1/2 或 1:1 时 NOSR 使用 1:1'" />
-    <button v-if="store.activeRec?.tileSource && !store.activeRec.displayStretch && store.activeRec.paintedMode === 'equal'"
+    <button v-if="store.activeRec?.tileSource && (store.activeRec.tileSource.info.displayProfiles
+      || (!store.activeRec.displayStretch && store.activeRec.paintedMode === 'equal'))"
       type="button" class="cmp-btn" data-e2e="native-zoom" title="一个原图像素对应一个 Canvas 背板像素"
       @click="store.zoomNative()">原生 1:1</button>
     <span v-if="store.resolutionLabels.length === 1" class="cmp-btn" data-e2e="view-resolution"

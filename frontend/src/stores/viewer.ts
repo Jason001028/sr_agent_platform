@@ -78,8 +78,8 @@ import type { SceneOpenMeta, SceneRow } from '../lib/scene.js';
 import { sourceFingerprint, localPreviewBudget, localTiffPreviewEdge, LARGE_LOCAL_TIFF_BYTES } from '../lib/local_preview.js';
 import { LoadControl, isLoadAbort } from '../lib/loadControl';
 import { decodeLocalFile } from '../lib/localDecodeWorker';
-import { createPreviewAsset, uploadPreviewFile, fetchAssetTile, fetchPreviewAsset, ImageOpenError } from '../lib/imageOpen';
-import { bootstrapTileLevel, openTileSource, overviewDiv, TILE_OVERVIEW_EDGE } from '../lib/tileSource';
+import { createPreviewAsset, uploadPreviewFile, fetchAssetTile, fetchAssetTileStats, fetchPreviewAsset, ImageOpenError } from '../lib/imageOpen';
+import { bootstrapTileLevel, openTileSource, overviewDiv, tileDisplayKey, TILE_OVERVIEW_EDGE } from '../lib/tileSource';
 import type { TileSource } from '../lib/tileSource';
 import type { PreviewAsset } from '../lib/imageOpen';
 import type { LocalPixels, LocalSourceInfo } from '../lib/localDecodeWorker';
@@ -111,6 +111,8 @@ export interface ViewerRec {
   dnDomain?: LocalSourceInfo;
   previewAsset?: PreviewAsset;
   tileSource?: TileSource | null;
+  tileDisplay?: string;
+  tileOverviewKey?: string;
   previewPlan?: PreviewPlan;
   resolvedSuffix?: string | null;
   /** Display only. Partial pixels must never become ROI or repair input. */
@@ -2580,9 +2582,13 @@ export const useViewerStore = defineStore('viewer', () => {
   async function coarseAssetOverview(source: TileSource, signal?: AbortSignal) {
     const { asset, info } = source;
     const level = bootstrapTileLevel(info);
-    const { tile, blob } = await fetchAssetTile(asset, level, 0, 0, signal);
+    const { tile, blob } = info.displayProfiles
+      ? await fetchAssetTile(asset, level, 0, 0, signal, info.band, 'equal', 'nearest', info.stretchVersion)
+      : await fetchAssetTile(asset, level, 0, 0, signal);
     if (tile.rasterVersion !== info.rasterVersion || tile.sourceWidth !== asset.W
-      || tile.sourceHeight !== asset.H) throw new Error('概览源版本或尺寸已变化，请重新打开影像');
+      || tile.sourceHeight !== asset.H || (info.displayProfiles
+        && (tile.displayKey !== 'equal' || tile.stretchVersion !== info.stretchVersion)))
+      throw new Error('概览源版本、尺寸或显示映射已变化，请重新打开影像');
     return { blob, width: tile.width, height: tile.height };
   }
 
@@ -2891,6 +2897,7 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.srcRev = plan?.source.version ?? meta.srcRev ?? null;
     if (tiles !== undefined) rec.tileSource = tiles ? markRaw(tiles) : null;
     if (rec.tileSource && rec.tileSource.asset.sourceRev !== rec.srcRev) rec.tileSource = null;
+    rec.tileOverviewKey = coarseTile && tiles?.info.displayProfiles ? tiles.key : undefined;
     if (rec.previewAsset && rec.previewAsset.sourceRev !== rec.srcRev) delete rec.previewAsset;
     validateDisplayDomain(rec);
     // 这一景是「用户当前打开着的」——记下来，供下一次拖没有场景身份的 jpg 时当
@@ -3610,6 +3617,7 @@ export const useViewerStore = defineStore('viewer', () => {
     comparisonStretchPair()[histogramTarget.value==='A'?0:1]??activeRec.value);
   const stretchLink=ref<'independent'|'shared'>('independent');
   const displayJobs=new Map<number,number>();
+  const tileHistograms=shallowRef(new Map<string,BandStats>());
   const displayPaints=new Map<number,number>();
   const displaySamples=new WeakMap<Float32Array,PixelPlane>();
   let stretchVersion=0;
@@ -3621,10 +3629,30 @@ export const useViewerStore = defineStore('viewer', () => {
     return compareMode.value==='flicker'?[flickerRefRec.value,flickerAltRec.value]:split.value?[recForSide('A'),recForSide('B')]:[];
   }
   function stretchDomain(rec:ViewerRec) {
+    if(rec.tileSource?.info.displayProfiles) {
+      const {dtype,photometric,scale,offset,unit}=rec.tileSource.info;
+      return JSON.stringify(['tile-dn',dtype,photometric??null,scale??1,offset??0,unit??'']);
+    }
     if(!rec.progressiveDN&&(rec.route==='jpg'||rec.route==='img'))return 'display-gray';
     const d=rec.dnDomain??rec.probe;
     return d?`dn:${d.bits}:${d.sampleFormat}`:'dn:unknown';
   }
+  watch(()=>histogramRec.value?.tileSource, (source,_,onCleanup)=>{
+    if(!source?.info.displayProfiles||tileHistograms.value.has(source.key))return;
+    const controller=new AbortController();
+    onCleanup(()=>controller.abort());
+    void fetchAssetTileStats(source.asset,source.info.band,controller.signal).then(s=>{
+      if(controller.signal.aborted||s.rasterVersion!==source.info.rasterVersion)return;
+      const hist=new Float64Array(s.hist),cdf=new Float64Array(hist.length);
+      let sum=0;
+      for(let i=0;i<hist.length;i++)cdf[i]=sum+=hist[i];
+      const next=new Map(tileHistograms.value);
+      next.set(source.key,{min:s.bounds[0],max:s.bounds[1],p2:s.p2,p98:s.p98,total:s.total,hist,cdf});
+      if(next.size>32)next.delete(next.keys().next().value!);
+      tileHistograms.value=next;
+      renderTick.value++;
+    }).catch(()=>{ /* The manual DN fields remain usable if source statistics are unavailable. */ });
+  },{immediate:true});
   const sharedStretchReason=computed(()=>{
     const [a,b]=comparisonStretchPair();
     if(!a||!b||a.id===b.id)return '请先打开两张对比影像';
@@ -3640,6 +3668,17 @@ export const useViewerStore = defineStore('viewer', () => {
   function histogramForRec(rec:ViewerRec|null,scope=histogramScope.value) {
     const p=rec&&cachedPlane(rec);
     if(!rec||!p)return null;
+    if(rec.tileSource?.info.displayProfiles){
+      const {dtype}=rec.tileSource.info;
+      const bounds=dtype==='uint16'?[0,65535]:dtype==='int16'?[-32768,32767]:dtype==='uint8'?[0,255]:[0,1];
+      const stats=tileHistograms.value.get(rec.tileSource.key)??{
+        min:bounds[0]!,max:bounds[1]!,p2:bounds[0]!,p98:bounds[1]!,total:0,
+        hist:new Float64Array(1024),cdf:new Float64Array(1024),
+      };
+      const d=rec.displayStretch,mode=d?.mode??'equal';
+      return {id:rec.id,stats:[stats],mode,custom:d?.custom??false,curve:d?.curve,
+        ...(d?{low:d.low,high:d.high}:presetRange(stats,mode)),source:'源 TIFF DN · 全源分层采样'};
+    }
     let rect:ReturnType<typeof visibleThumbRect>=null;
     if(scope==='view'){
       const pane=panes.value.find(v=>v.rec?.id===rec.id)??panes.value[0];
@@ -3665,6 +3704,17 @@ export const useViewerStore = defineStore('viewer', () => {
     const settings=rec.displayStretch,p=cachedPlane(rec);
     if(!settings||!p)return;
     const version=(displayJobs.get(rec.id)??0)+1;displayJobs.set(rec.id,version);
+    if(rec.tileSource?.info.displayProfiles){
+      const commit=()=>{
+        if(!recs.value.includes(rec)||rec.displayStretch!==settings||displayJobs.get(rec.id)!==version)return;
+        rec.tileDisplay=tileDisplayKey(settings);
+        rec.paintedMode=settings.mode;
+        delete rec.stretchPreview;
+        renderTick.value++;
+      };
+      if(lightOnly)setTimeout(commit,100);else commit();
+      return;
+    }
     let small=displaySamples.get(p.src);
     if(!small){small=samplePlane(p,undefined,512*512);displaySamples.set(p.src,small);}
     const cv=rec.stretchPreview?.width===small.w&&rec.stretchPreview?.height===small.h?rec.stretchPreview:browserKit.createCanvas(small.w,small.h);
@@ -3694,12 +3744,14 @@ export const useViewerStore = defineStore('viewer', () => {
     if(!rec||!snapshot)return;
     noteUserIntent();
     let targets=[rec],stats=snapshot.stats;
+    if(rec.tileSource?.info.displayProfiles&&!custom)stretchLink.value='independent';
     if(stretchLink.value==='shared'){
       if(sharedStretchReason.value){stretchLink.value='independent';showToast(sharedStretchReason.value);}
       else {
         targets=comparisonStretchPair().filter((r):r is ViewerRec=>!!r);
         const other=targets.find(r=>r.id!==rec.id)!;
-        stats=[sharedStats(stats[0],(histogramForRec(other)?.stats??planeStats(cachedPlane(other)!))[0])];
+        if(!rec.tileSource?.info.displayProfiles)
+          stats=[sharedStats(stats[0],(histogramForRec(other)?.stats??planeStats(cachedPlane(other)!))[0])];
       }
     }
     const range=custom??presetRange(stats[0],mode);
@@ -3719,6 +3771,9 @@ export const useViewerStore = defineStore('viewer', () => {
   }
   function setStretchBounds(low:number,high:number,preview=false){applyHistogramStretch('linear',{low,high,curve:histogramRec.value?.displayStretch?.curve},preview);}
   function setStretchCurve(points:readonly import('../lib/tifDecode').CurvePoint[],preview=false){
+    if(histogramRec.value?.tileSource?.info.displayProfiles&&points.length>64){
+      showToast('原生图块曲线最多支持 64 个控制点');return;
+    }
     if(points.length<2||points.some((p,i)=>!Number.isFinite(p.x)||!Number.isFinite(p.y)||p.x<0||p.x>1||p.y<0||p.y>1||(i>0&&p.x<=points[i-1].x))||points[0].x!==0||points[points.length-1]?.x!==1)return;
     const s=histogramSnapshot();if(!s)return;
     applyHistogramStretch('linear',{low:s.low,high:s.high,curve:points.map(p=>({...p}))},preview);
@@ -3726,7 +3781,9 @@ export const useViewerStore = defineStore('viewer', () => {
   function setStretchLink(value:'independent'|'shared') {
     if(value==='shared'&&sharedStretchReason.value){showToast(sharedStretchReason.value);return;}
     stretchLink.value=value;if(value==='shared'){
-      const s=histogramSnapshot();applyHistogramStretch(s?.mode??activeStretch.value,s?.custom?{low:s.low,high:s.high,curve:s.curve}:undefined);
+      const s=histogramSnapshot();
+      const native=histogramRec.value?.tileSource?.info.displayProfiles;
+      applyHistogramStretch(s?.mode??activeStretch.value,s&&(s.custom||native)?{low:s.low,high:s.high,curve:s.curve}:undefined);
     }
   }
   function resetHistogramStretch() {
@@ -3747,7 +3804,8 @@ export const useViewerStore = defineStore('viewer', () => {
   function validateDisplayDomain(rec:ViewerRec) {
     const d=rec.displayStretch;
     if(d&&((d.domain&&d.domain!==stretchDomain(rec))||(d.sourceRev&&rec.srcRev&&d.sourceRev!==rec.srcRev))){
-      delete rec.displayStretch;delete rec.stretchPreview;delete rec.stretchDefaultMode;displayJobs.set(rec.id,(displayJobs.get(rec.id)??0)+1);
+      delete rec.displayStretch;delete rec.stretchPreview;delete rec.stretchDefaultMode;delete rec.tileDisplay;
+      displayJobs.set(rec.id,(displayJobs.get(rec.id)??0)+1);
     }
   }
 

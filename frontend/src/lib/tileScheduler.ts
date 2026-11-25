@@ -9,6 +9,7 @@ export interface TilePane {
   view: ViewState;
   tw: number;
   th: number;
+  hasOverview?: boolean;
 }
 
 interface TileRequest {

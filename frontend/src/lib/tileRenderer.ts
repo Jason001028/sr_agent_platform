@@ -1,6 +1,7 @@
 import type { CachedTile, TilePane } from './tileScheduler';
 import { TileScheduler, tileRequests } from './tileScheduler';
 import type { TileSource } from './tileSource';
+import { bootstrapTileLevel } from './tileSource';
 import { easeOutCubic, rasterTransform } from './viewMath';
 
 export function tileAxis(start: number, span: number, pixels: number, step: number) {
@@ -33,7 +34,8 @@ export class TileRenderer {
     this.layers.clear();
     for (const [id, pane] of panes) {
       const prior = this.cameras.get(id);
-      const old = prior?.key === pane.source.key ? prior : undefined;
+      const cameraKey = pane.source.baseKey ?? pane.source.key;
+      const old = prior?.key === cameraKey ? prior : undefined;
       const { ox, oy, scale } = pane.view;
       const dx = old && old.scale === scale ? old.ox - ox : 0;
       const dy = old && old.scale === scale ? old.oy - oy : 0;
@@ -45,7 +47,7 @@ export class TileRenderer {
       const direction = old?.scale === scale && last && now - last.at < 120 ? last : undefined;
       const { level, requests } = tileRequests(pane, dpr, old?.level, direction, Math.floor(96 / panes.size));
       const levelChanged = old && old.level !== level ? now : old?.levelChanged ?? -Infinity;
-      this.cameras.set(id, { key: pane.source.key, level, ox, oy, scale, levelChanged, time: now });
+      this.cameras.set(id, { key: cameraKey, level, ox, oy, scale, levelChanged, time: now });
       const s = rasterTransform(pane.view, pane.tw, pane.th, pane.source.info.width, pane.source.info.height,
         pane.rect.w, pane.rect.h, dpr);
       const span = pane.source.info.tileSize * 2 ** level;
@@ -79,6 +81,13 @@ export class TileRenderer {
         if (reducedMotion || (direction && direction.speed >= 1000)) request.fade = 0;
         else if (now - levelChanged < 220) request.fade = 200;
         wanted.push(request);
+      }
+      if (info.displayProfiles && !pane.hasOverview && !complete && visible.length) {
+        const whole = bootstrapTileLevel(info);
+        const key = `${pane.source.key}/${whole}/0/0`;
+        if (!requests.some(request => request.key === key)) {
+          wanted.push({ key, source:pane.source, level:whole, x:0, y:0, priority:0.95, fade:0 });
+        }
       }
       this.layers.set(id, { pane, tiles, level, ready: target.length, total: visible.length,
         opaque: complete && target.length > 0, drawn: 0, transform: s });

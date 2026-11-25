@@ -240,3 +240,116 @@ def test_same_tile_shares_work_and_disconnected_queued_job_is_cancelled():
             await service.close()
 
     asyncio.run(run())
+
+
+def test_u16_native_window_tone_cache_and_raw(gdal, image_api):
+    from backend.services.raster_tone import BLOCK_BYTES_LIMIT, BLOCK_LIMIT, SAMPLE_LIMIT
+    data, client, manager = image_api
+    source = data / "weak.tif"
+    dn = np.full((1025, 1027), 21000, dtype=np.uint16)
+    dn[300, 509:516] = np.arange(21700, 21707)
+    dn[300, 516] = 65535
+    tifffile.imwrite(source, dn, rowsperstrip=16, extratags=[(42113, "s", 0, "65535", False)])
+    base = "/api/image-open/assets/" + manager.asset(source)["id"]
+    stats = client.get(base+"/tiles/stats").json()
+    assert stats["state"] == "low-confidence"
+    assert stats["total"] > 0
+    assert stats["coverage"]["blockReads"] <= BLOCK_LIMIT
+    assert stats["coverage"]["physicalBlockBytes"] <= BLOCK_BYTES_LIMIT
+    assert stats["coverage"]["attempted"] <= SAMPLE_LIMIT
+    assert sum(stats["hist"]) == stats["total"]
+    old = client.get(base+"/tiles/0/0/0")
+    assert client.get(base+"/tiles/0/0/0?stretchVersion=obsolete").status_code == 409
+    assert np.asarray(Image.open(io.BytesIO(old.content)))[300, 509] != 128
+    left = client.get(base+"/tiles/0/0/0?display=window:21700:21706")
+    right = client.get(base+"/tiles/0/1/0?display=window:21700:21706")
+    assert left.headers["etag"] != old.headers["etag"]
+    same = client.get(base+"/tiles/0/0/0?display=window:21700.0:2.1706e4",
+                      headers={"If-None-Match": left.headers["etag"]})
+    assert same.status_code == 304
+    a, b = (np.asarray(Image.open(io.BytesIO(resp.content))) for resp in (left, right))
+    assert np.r_[a[300,509:], b[300,:5]].tolist() == [0,42,85,128,170,212,255,0]
+    raw = client.get(base+"/raw-window?x=509&y=300&width=8&height=1")
+    np.testing.assert_array_equal(np.frombuffer(raw.content,"<u2"), dn[300,509:517])
+    assert json.loads(left.headers["X-SR-Tile"])["displayKey"] == "window:2.17000000000e+4:2.17060000000e+4"
+    for bad in ("window:1:1", "window:0:inf", "window:0:5:0:2:1:0"):
+        assert client.get(base+"/tiles/0/0/0", params={"display":bad}).status_code == 422
+
+
+@pytest.mark.parametrize("level", [1,2])
+@pytest.mark.parametrize("layout", ["strip","tiled-deflate"])
+def test_area_adjacent_tiles_odd_footprint_and_overview(gdal, image_api, level, layout):
+    data, client, manager = image_api
+    source = data / "area.tif"
+    w,h=2051,19
+    y,x=np.indices((h,w))
+    dn=(1000+3*x+11*y+(x%2)*300).astype(np.uint16)
+    dn[:4,:4]=65535
+    dn[5,8]=65535
+    with tifffile.TiffWriter(source) as file:
+        storage={"rowsperstrip":4} if layout=="strip" else {"tile":(128,128),"compression":"deflate"}
+        file.write(dn, **storage, subifds=1,
+                   extratags=[(42113,"s",0,"65535",False)])
+        file.write(np.full(((h+1)//2,(w+1)//2), 9999, np.uint16),
+                   rowsperstrip=4, subfiletype=1)
+    base="/api/image-open/assets/"+manager.asset(source)["id"]
+    step=2**level
+    outputs=[]
+    for tx in range((w+512*step-1)//(512*step)):
+        response=client.get(base+f"/tiles/{level}/{tx}/0?sampling=area&display=window:1000:8000")
+        assert response.status_code==200,response.text
+        header=json.loads(response.headers["X-SR-Tile"])
+        assert header["resampling"]=="area"
+        assert header["rasterSources"]==["base"]
+        outputs.append(np.asarray(Image.open(io.BytesIO(response.content))))
+    expected=[]
+    for yy in range(0,h,step):
+        row=[]
+        for xx in range(0,w,step):
+            block=dn[yy:yy+step,xx:xx+step]
+            good=block[block!=65535]
+            row.append(np.rint(np.clip((good.mean()-1000)/7000,0,1)*255) if good.size else 0)
+        expected.append(row)
+    np.testing.assert_array_equal(np.concatenate(outputs,axis=1),expected)
+    nearest=client.get(base+f"/tiles/{level}/0/0")
+    assert json.loads(nearest.headers["X-SR-Tile"])["rasterSources"] == ["overview:1026x10"]
+    l0=client.get(base+"/tiles/0/0/0?sampling=area")
+    assert json.loads(l0.headers["X-SR-Tile"])["resampling"]=="nearest"
+    assert l0.content==client.get(base+"/tiles/0/0/0").content
+
+
+def test_palette_uses_nearest_even_when_area_is_requested(gdal, image_api):
+    data,client,manager=image_api
+    source=data/"classes.tif"
+    dn=(np.indices((16,16)).sum(axis=0)%2).astype(np.uint8)
+    colors=np.zeros((3,256),dtype=np.uint16)
+    colors[:,1]=65535
+    tifffile.imwrite(source,dn,photometric="palette",colormap=colors)
+    base="/api/image-open/assets/"+manager.asset(source)["id"]
+    assert client.get(base+"/tiles").json()["categorical"]
+    result=client.get(base+"/tiles/1/0/0?sampling=area")
+    assert json.loads(result.headers["X-SR-Tile"])["resampling"]=="nearest"
+
+
+def test_tone_constant_requires_exhaustive_source_and_quantiles():
+    from backend.services.raster_tone import Display, display_pixels, stretch_stats
+    samples=np.full(256,12000,np.uint16)
+    assert stretch_stats(samples).state=="low-confidence"
+    assert stretch_stats(samples, exhaustive=True).state=="constant"
+    assert display_pixels(samples,None,stretch_stats(samples,exhaustive=True))[0]==128
+    stats=stretch_stats(np.arange(65536,dtype=np.uint16))
+    assert (stats.p2,stats.p98)==(1310,64225)
+    values=np.array([0,30000,65535],np.uint16)
+    assert display_pixels(values,65535,stats,Display("linear2","linear2")).tolist()==[0,116,0]
+
+
+def test_compressed_u16_preview_keeps_native_values_until_mapping(tmp_path):
+    from backend.services.preview_jpg import build_preview_pixels
+    source=tmp_path/"pillow-native.tif"
+    dn=np.tile(np.repeat(np.array([1000,2000,4000,8000],np.uint16),64),(32,1))
+    tifffile.imwrite(source,dn,compression="deflate",photometric="minisblack")
+    for edge in (256,128):
+        preview=build_preview_pixels(source,edge)
+        values=preview[preview.shape[0]//2,edge//8::edge//4]
+        assert len(set(values.tolist()))==4
+        assert np.all(np.diff(values.astype(int))>0)

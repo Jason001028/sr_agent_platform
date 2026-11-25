@@ -52,6 +52,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
+from backend.services.raster_tone import valid_dn
 
 from backend.services import platform_settings
 
@@ -82,7 +83,7 @@ PILLOW_FALLBACK_MAX_PX = 1 << 26  # 67M px：Pillow 兜底只敢接小文件（�
 #: 规则版本戳：改动「尺寸 / 档位 / 拉伸 / 质量」任一规则都必须 bump，否则旧缓存不会失效。
 #: v3（2026-09-20）：尺度从写死的 1/2 变成可调档位，戳里必须带上 div，
 #: 否则同一落点上换个档位会被判成缓存命中 —— 界面滑了、盘上的图一个字节都不变。
-PREVIEW_RULE_VERSION = "v4"  # Existing overview resampling can change sampled values.
+PREVIEW_RULE_VERSION = "v5"  # Preserve native grayscale DN through Pillow resampling.
 #: 并行读的行数阈值：小图线程开销盖过收益，保持串行（也让小 fixture 的测试确定）。
 PARALLEL_MIN_ROWS = 512
 #: 并行度。盘阵若是单块 HDD，磁头竞争可能让更高并发反而更慢，故取保守的 8。
@@ -494,7 +495,7 @@ def _strip_tables(path, endian, scalars, arrays):
     return strip_ints(_TAG_OFFS, "StripOffsets"), strip_ints(_TAG_BYTES, "StripByteCounts")
 
 
-def sample_strips(path, endian, scalars, arrays, max_edge: int, *, output_shape=None):
+def sample_strips(path, endian, scalars, arrays, max_edge: int, *, output_shape=None, source_nodata=None):
     """Sparse-sample band 1 of an uncompressed strip TIFF to <=max_edge.
 
     Returns stretched uint8 grayscale (ph, pw). Raises PreviewError when the
@@ -583,21 +584,18 @@ def sample_strips(path, endian, scalars, arrays, max_edge: int, *, output_shape=
     else:
         read_rows(0, n_rows)
 
-    u8 = stretch_equal(out)
+    nodata = tiff_nodata(path, scalars, arrays)
+    if nodata is None:
+        nodata = source_nodata
+    u8 = stretch_equal(out, nodata)
     if photo == 0:
         u8 = 255 - u8
+        if nodata is not None or out.dtype.kind == "f":
+            u8[~valid_dn(out, nodata)] = 0
     return u8, ph, pw
 
 
-def _finite_of(chunk: np.ndarray, is_float: bool) -> np.ndarray:
-    """统计用视图：丢掉非有限值（镜像 computeStats 里 `v===v && isFinite(v)` 跳过）。"""
-    if not is_float:
-        return chunk
-    mask = np.isfinite(chunk)
-    return chunk[mask] if not mask.all() else chunk
-
-
-def stretch_equal(arr: np.ndarray) -> np.ndarray:
+def stretch_equal(arr: np.ndarray, nodata=None) -> np.ndarray:
     """直方图均衡（镜像前端 stretchMap(mode='equal') + computeStats）。
 
     逐式对齐前端，两处公式故意不同、不要"顺手统一"：
@@ -610,24 +608,33 @@ def stretch_equal(arr: np.ndarray) -> np.ndarray:
     """
     flat = arr.reshape(-1)
     is_float = arr.dtype.kind == "f"
-    if is_float:
-        finite = flat[np.isfinite(flat)]
-        if finite.size == 0:
+    has_mask = is_float or nodata is not None
+    if has_mask:
+        extrema = []
+        for s in range(0, flat.size, _STRETCH_CHUNK):
+            chunk = flat[s:s + _STRETCH_CHUNK]
+            finite = chunk[valid_dn(chunk, nodata)]
+            if finite.size:
+                extrema.append((float(finite.min()), float(finite.max())))
+        if not extrema:
             return np.zeros(arr.shape, dtype=np.uint8)
-        lo, hi = float(finite.min()), float(finite.max())
+        lo, hi = min(a for a, _ in extrema), max(b for _, b in extrema)
     else:
         lo, hi = float(flat.min()), float(flat.max())
 
     out = np.empty(flat.shape, dtype=np.uint8)
     if not hi > lo:
         out.fill(0 if lo == 0 else 128)
+        if lo != 0 and has_mask:
+            for s in range(0, flat.size, _STRETCH_CHUNK):
+                out[s:s + _STRETCH_CHUNK][~valid_dn(flat[s:s + _STRETCH_CHUNK], nodata)] = 0
         return out.reshape(arr.shape)
 
     hist = np.zeros(EQUAL_BINS, dtype=np.int64)
     sc = EQUAL_BINS / (hi - lo)
     for s in range(0, flat.size, _STRETCH_CHUNK):
-        c = np.asarray(_finite_of(flat[s:s + _STRETCH_CHUNK], is_float),
-                       dtype=np.float64)
+        chunk = flat[s:s + _STRETCH_CHUNK]
+        c = np.asarray(chunk[valid_dn(chunk, nodata)] if has_mask else chunk, dtype=np.float64)
         if c.size == 0:
             continue
         q = ((c - lo) * sc).astype(np.int64)
@@ -650,6 +657,8 @@ def stretch_equal(arr: np.ndarray) -> np.ndarray:
         k = (t * (EQUAL_BINS - 1)).astype(np.int64)
         np.clip(k, 0, EQUAL_BINS - 1, out=k)
         out[s:s + _STRETCH_CHUNK] = lut[k]
+        if has_mask:
+            out[s:s + _STRETCH_CHUNK][~valid_dn(c, nodata)] = 0
     return out.reshape(arr.shape)
 
 
@@ -663,18 +672,37 @@ def _pillow_preview(path, max_edge: int) -> np.ndarray:
             if im.width * im.height > PILLOW_FALLBACK_MAX_PX:
                 raise PreviewError(
                     "Pillow 兜底仅限小文件；该图须走无压缩条带稀疏采样")
-            im = im.convert("L")
             target = preview_dimensions(im.width, im.height, max_edge)
+            if im.mode not in ("I;16", "I;16B", "I;16L", "I;16N", "I", "F"):
+                im = im.convert("L")
+                if im.size != target:
+                    im = im.resize(target, Image.LANCZOS, reducing_gap=2.0)
+                return np.asarray(im, dtype=np.uint8)
+            # Pillow's grayscale Lanczos accepts F without clipping values at 255.
+            # Pillow has already applied WhiteIsZero interpretation on TIFF decode.
+            dn = np.asarray(im, dtype=np.float32)
+            tag = im.tag_v2.get(42113)
+            nodata = float(tag) if tag is not None else None
             if im.size != target:
-                im = im.resize(target, Image.LANCZOS, reducing_gap=2.0)
-            return np.asarray(im, dtype=np.uint8)
+                def resize(values):
+                    return np.asarray(Image.fromarray(values).resize(target, Image.LANCZOS))
+                valid = valid_dn(dn, nodata)
+                if valid.all():
+                    dn = resize(dn)
+                else:
+                    weight = resize(valid.astype(np.float32))
+                    numerator = resize(np.where(valid, dn, 0))
+                    dn = np.full(numerator.shape, np.nan, dtype=np.float32)
+                    np.divide(numerator, weight, out=dn, where=weight > 1e-6)
+                nodata = None
+            return stretch_equal(dn, nodata)
     except PreviewError:
         raise
     except Exception as e:  # noqa: BLE001 — Pillow 失败转业务错误
         raise PreviewError(f"Pillow 兜底失败：{e}") from e
 
 
-def _overview_preview(path, max_edge, is_big, endian, root, base):
+def _overview_preview(path, max_edge, is_big, endian, root, base, source_nodata=None):
     """Read only reduced-resolution IFDs; never build or modify a pyramid.
 
     Bound traversal (cycles/corrupt offsets included). Ordinary multipage pages
@@ -719,7 +747,7 @@ def _overview_preview(path, max_edge, is_big, endian, root, base):
     for _, s, a in sorted(candidates, key=lambda c: c[0]):
         try:
             return sample_strips(path, endian, s, a, max_edge,
-                                 output_shape=shape)[0]
+                                 output_shape=shape, source_nodata=source_nodata)[0]
         except Exception:
             continue
     return None
@@ -747,7 +775,8 @@ def build_preview_pixels(path, max_edge: Optional[int] = None) -> np.ndarray:
     is_big, endian, ifd_off = _parse_tiff_header(path)
     scalars, arrays = _read_ifd(path, is_big, endian, ifd_off)
     try:
-        overview = _overview_preview(path, max_edge, is_big, endian, ifd_off, scalars)
+        overview = _overview_preview(path, max_edge, is_big, endian, ifd_off, scalars,
+                                     tiff_nodata(path, scalars, arrays))
         if overview is not None:
             return overview
     except Exception:
