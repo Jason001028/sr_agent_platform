@@ -1,0 +1,641 @@
+{
+  "size": [
+    49475,
+    49454
+  ],
+  "roi": [
+    24576,
+    24576,
+    1024,
+    1024
+  ],
+  "gdal": "3.11.5",
+  "numpy": "2.4.6",
+  "cap32768_plans": [
+    {
+      "source": {
+        "width": 49475,
+        "height": 49454
+      },
+      "requestedDiv": 1,
+      "width": 16387,
+      "height": 16380,
+      "scaleX": 0.3312177867609904,
+      "scaleY": 0.3312168884215635,
+      "pixels": 268419060,
+      "decodedBytes": 1073676240,
+      "dnBytes": 1073676240,
+      "mode": "whole-jpeg",
+      "limits": [
+        "long-edge",
+        "area"
+      ]
+    },
+    {
+      "source": {
+        "width": 49475,
+        "height": 49454
+      },
+      "requestedDiv": 2,
+      "width": 16387,
+      "height": 16380,
+      "scaleX": 0.3312177867609904,
+      "scaleY": 0.3312168884215635,
+      "pixels": 268419060,
+      "decodedBytes": 1073676240,
+      "dnBytes": 1073676240,
+      "mode": "whole-jpeg",
+      "limits": [
+        "area"
+      ]
+    },
+    {
+      "source": {
+        "width": 49475,
+        "height": 49454
+      },
+      "requestedDiv": 4,
+      "width": 12369,
+      "height": 12364,
+      "scaleX": 0.2500050530570995,
+      "scaleY": 0.2500101104056295,
+      "pixels": 152930316,
+      "decodedBytes": 611721264,
+      "dnBytes": 611721264,
+      "mode": "whole-jpeg",
+      "limits": []
+    },
+    {
+      "source": {
+        "width": 49475,
+        "height": 49454
+      },
+      "requestedDiv": 16,
+      "width": 3092,
+      "height": 3091,
+      "scaleX": 0.06249621020717534,
+      "scaleY": 0.06250252760140737,
+      "pixels": 9557372,
+      "decodedBytes": 38229488,
+      "dnBytes": 38229488,
+      "mode": "whole-jpeg",
+      "limits": []
+    }
+  ],
+  "timing": {
+    "A_raw_512": {
+      "ms_median": 8.637,
+      "n": 7,
+      "base_mib": 87.11,
+      "peak_mib": 87.46,
+      "delta_mib": 0.36
+    },
+    "B_P0_read_stretch": {
+      "ms_median": 14434.65,
+      "n": 1,
+      "base_mib": 91.52,
+      "peak_mib": 1042.69,
+      "delta_mib": 951.17
+    },
+    "B_P0_encode_q85": {
+      "ms_median": 1185.563,
+      "n": 1,
+      "base_mib": 347.89,
+      "peak_mib": 348.2,
+      "delta_mib": 0.31
+    },
+    "B_Pillow_decode_full_jpeg_crop": {
+      "ms_median": 1585.048,
+      "n": 1,
+      "base_mib": 92.32,
+      "peak_mib": 348.36,
+      "delta_mib": 256.04
+    },
+    "P1_tone_first_source": {
+      "ms_median": 62.53,
+      "n": 1,
+      "base_mib": 93.43,
+      "peak_mib": 94.18,
+      "delta_mib": 0.76
+    },
+    "P1_L0_DN": {
+      "ms_median": 9.415,
+      "n": 7,
+      "base_mib": 95.31,
+      "peak_mib": 95.96,
+      "delta_mib": 0.66
+    },
+    "P1_L0_tile_cold": {
+      "ms_median": 16.858,
+      "n": 1,
+      "base_mib": 96.2,
+      "peak_mib": 97.04,
+      "delta_mib": 0.84
+    },
+    "P1_L0_tile_hot": {
+      "ms_median": 0.01,
+      "n": 7,
+      "base_mib": 97.03,
+      "peak_mib": 97.04,
+      "delta_mib": 0.0
+    },
+    "P1_L1_DN": {
+      "ms_median": 9.249,
+      "n": 7,
+      "base_mib": 100.61,
+      "peak_mib": 100.63,
+      "delta_mib": 0.02
+    },
+    "P1_L1_tile_cold": {
+      "ms_median": 20.74,
+      "n": 1,
+      "base_mib": 100.62,
+      "peak_mib": 101.14,
+      "delta_mib": 0.52
+    },
+    "P1_L1_tile_hot": {
+      "ms_median": 0.007,
+      "n": 7,
+      "base_mib": 101.14,
+      "peak_mib": 101.14,
+      "delta_mib": 0.0
+    },
+    "P1_generic_L1_nearest": {
+      "ms_median": 9.485,
+      "n": 7,
+      "base_mib": 101.13,
+      "peak_mib": 101.15,
+      "delta_mib": 0.02
+    },
+    "P1_generic_L1_average": {
+      "ms_median": 3.392,
+      "n": 7,
+      "base_mib": 101.25,
+      "peak_mib": 202.78,
+      "delta_mib": 101.53
+    },
+    "P1_generic_L1_bilinear": {
+      "ms_median": 8.437,
+      "n": 7,
+      "base_mib": 201.75,
+      "peak_mib": 206.34,
+      "delta_mib": 4.59
+    },
+    "E_L1_Average": {
+      "ms_median": 8.774,
+      "n": 7,
+      "base_mib": 204.81,
+      "peak_mib": 211.45,
+      "delta_mib": 6.64
+    },
+    "E_L1_Bilinear": {
+      "ms_median": 10.824,
+      "n": 7,
+      "base_mib": 205.84,
+      "peak_mib": 213.59,
+      "delta_mib": 7.75
+    },
+    "E_L1_Lanczos": {
+      "ms_median": 20.492,
+      "n": 7,
+      "base_mib": 206.84,
+      "peak_mib": 214.73,
+      "delta_mib": 7.89
+    },
+    "P1_L2_DN": {
+      "ms_median": 16.622,
+      "n": 7,
+      "base_mib": 211.85,
+      "peak_mib": 211.87,
+      "delta_mib": 0.02
+    },
+    "P1_L2_tile_cold": {
+      "ms_median": 29.144,
+      "n": 1,
+      "base_mib": 211.86,
+      "peak_mib": 211.88,
+      "delta_mib": 0.02
+    },
+    "P1_L2_tile_hot": {
+      "ms_median": 0.009,
+      "n": 7,
+      "base_mib": 211.39,
+      "peak_mib": 211.4,
+      "delta_mib": 0.0
+    },
+    "P1_generic_L2_nearest": {
+      "ms_median": 11.338,
+      "n": 7,
+      "base_mib": 213.14,
+      "peak_mib": 213.16,
+      "delta_mib": 0.02
+    },
+    "P1_generic_L2_average": {
+      "ms_median": 4.302,
+      "n": 7,
+      "base_mib": 211.61,
+      "peak_mib": 212.8,
+      "delta_mib": 1.19
+    },
+    "P1_generic_L2_bilinear": {
+      "ms_median": 7.212,
+      "n": 7,
+      "base_mib": 212.32,
+      "peak_mib": 214.39,
+      "delta_mib": 2.07
+    },
+    "E_L2_Average": {
+      "ms_median": 8.649,
+      "n": 7,
+      "base_mib": 210.32,
+      "peak_mib": 218.36,
+      "delta_mib": 8.04
+    },
+    "E_L2_Bilinear": {
+      "ms_median": 9.726,
+      "n": 7,
+      "base_mib": 210.35,
+      "peak_mib": 215.67,
+      "delta_mib": 5.32
+    },
+    "E_L2_Lanczos": {
+      "ms_median": 14.43,
+      "n": 7,
+      "base_mib": 210.6,
+      "peak_mib": 214.3,
+      "delta_mib": 3.7
+    }
+  },
+  "space": {
+    "P0_nearest_same_LUT": {
+      "mae": 5.2266,
+      "ssim": 0.781559,
+      "road_pct": 0.0,
+      "road_peak_mean": 16.0,
+      "stripe_pct": 0.0,
+      "edge_gradient": 179.0,
+      "edge_min_max": [
+        16,
+        195
+      ],
+      "checker_sigma": 48.0,
+      "low_contrast_levels": 1
+    },
+    "GDAL_L1_nearest": {
+      "mae": 4.9973,
+      "ssim": 0.812817,
+      "road_pct": 0.0,
+      "road_peak_mean": 16.0,
+      "stripe_pct": 0.0,
+      "edge_gradient": 179.0,
+      "edge_min_max": [
+        16,
+        195
+      ],
+      "checker_sigma": 0.0,
+      "low_contrast_levels": 1
+    },
+    "GDAL_L1_average": {
+      "mae": 4.8552,
+      "ssim": 0.861906,
+      "road_pct": 100.0,
+      "road_peak_mean": 107.0,
+      "stripe_pct": 100.0,
+      "edge_gradient": 90.0,
+      "edge_min_max": [
+        16,
+        195
+      ],
+      "checker_sigma": 0.0,
+      "low_contrast_levels": 1
+    },
+    "GDAL_L1_bilinear": {
+      "mae": 5.3398,
+      "ssim": 0.848238,
+      "road_pct": 100.0,
+      "road_peak_mean": 84.0,
+      "stripe_pct": 0.0,
+      "edge_gradient": 90.0,
+      "edge_min_max": [
+        16,
+        195
+      ],
+      "checker_sigma": 0.0,
+      "low_contrast_levels": 1
+    },
+    "L1_Nearest": {
+      "mae": 4.9973,
+      "ssim": 0.812817,
+      "road_pct": 0.0,
+      "road_peak_mean": 16.0,
+      "stripe_pct": 0.0,
+      "edge_gradient": 179.0,
+      "edge_min_max": [
+        16,
+        195
+      ],
+      "checker_sigma": 0.0,
+      "low_contrast_levels": 1
+    },
+    "L1_Average": {
+      "mae": 4.8551,
+      "ssim": 0.861906,
+      "road_pct": 100.0,
+      "road_peak_mean": 107.0,
+      "stripe_pct": 100.0,
+      "edge_gradient": 90.0,
+      "edge_min_max": [
+        16,
+        195
+      ],
+      "checker_sigma": 0.0,
+      "low_contrast_levels": 1
+    },
+    "L1_Bilinear": {
+      "mae": 5.3301,
+      "ssim": 0.848333,
+      "road_pct": 100.0,
+      "road_peak_mean": 84.0,
+      "stripe_pct": 0.0,
+      "edge_gradient": 90.0,
+      "edge_min_max": [
+        16,
+        195
+      ],
+      "checker_sigma": 0.0,
+      "low_contrast_levels": 1
+    },
+    "L1_Lanczos": {
+      "mae": 5.2095,
+      "ssim": 0.855635,
+      "road_pct": 100.0,
+      "road_peak_mean": 97.0,
+      "stripe_pct": 52.92,
+      "edge_gradient": 104.0,
+      "edge_min_max": [
+        2,
+        209
+      ],
+      "checker_sigma": 0.0,
+      "low_contrast_levels": 1
+    },
+    "GDAL_L2_nearest": {
+      "mae": 6.3024,
+      "ssim": 0.71925,
+      "road_pct": 100.0,
+      "road_peak_mean": 198.0,
+      "stripe_pct": 0.0,
+      "edge_gradient": 179.0,
+      "edge_min_max": [
+        16,
+        195
+      ],
+      "checker_sigma": 0.0,
+      "low_contrast_levels": 1
+    },
+    "GDAL_L2_average": {
+      "mae": 6.3898,
+      "ssim": 0.76078,
+      "road_pct": 0.0,
+      "road_peak_mean": 62.0,
+      "stripe_pct": 0.0,
+      "edge_gradient": 134.0,
+      "edge_min_max": [
+        16,
+        195
+      ],
+      "checker_sigma": 0.0,
+      "low_contrast_levels": 1
+    },
+    "GDAL_L2_bilinear": {
+      "mae": 6.918,
+      "ssim": 0.745934,
+      "road_pct": 0.0,
+      "road_peak_mean": 56.0,
+      "stripe_pct": 0.0,
+      "edge_gradient": 122.0,
+      "edge_min_max": [
+        16,
+        195
+      ],
+      "checker_sigma": 0.0,
+      "low_contrast_levels": 1
+    },
+    "L2_Nearest": {
+      "mae": 6.3024,
+      "ssim": 0.71925,
+      "road_pct": 100.0,
+      "road_peak_mean": 198.0,
+      "stripe_pct": 0.0,
+      "edge_gradient": 179.0,
+      "edge_min_max": [
+        16,
+        195
+      ],
+      "checker_sigma": 0.0,
+      "low_contrast_levels": 1
+    },
+    "L2_Average": {
+      "mae": 6.3898,
+      "ssim": 0.76078,
+      "road_pct": 0.0,
+      "road_peak_mean": 62.0,
+      "stripe_pct": 0.0,
+      "edge_gradient": 134.0,
+      "edge_min_max": [
+        16,
+        195
+      ],
+      "checker_sigma": 0.0,
+      "low_contrast_levels": 1
+    },
+    "L2_Bilinear": {
+      "mae": 6.904,
+      "ssim": 0.746126,
+      "road_pct": 0.0,
+      "road_peak_mean": 56.0,
+      "stripe_pct": 0.0,
+      "edge_gradient": 122.0,
+      "edge_min_max": [
+        16,
+        195
+      ],
+      "checker_sigma": 0.0,
+      "low_contrast_levels": 1
+    },
+    "L2_Lanczos": {
+      "mae": 6.8086,
+      "ssim": 0.748566,
+      "road_pct": 0.0,
+      "road_peak_mean": 61.0,
+      "stripe_pct": 0.0,
+      "edge_gradient": 141.0,
+      "edge_min_max": [
+        7,
+        203
+      ],
+      "checker_sigma": 0.0,
+      "low_contrast_levels": 1
+    }
+  },
+  "tone": {
+    "fixed_linear": {
+      "unique": 68,
+      "low_contrast_levels": 1,
+      "mae": 0.0,
+      "ssim": 1.0
+    },
+    "P0_equal_on_same_L0": {
+      "unique": 186,
+      "low_contrast_levels": 1,
+      "mae": 74.8924,
+      "ssim": 0.459115
+    },
+    "P1_sampled_equal": {
+      "unique": 177,
+      "low_contrast_levels": 1,
+      "mae": 166.0894,
+      "ssim": 0.273836
+    },
+    "P1_constant_sample": {
+      "unique": 1,
+      "low_contrast_levels": 1,
+      "mae": 78.0652,
+      "ssim": 0.382079
+    },
+    "diagnostic_narrow_linear": {
+      "unique": 9,
+      "low_contrast_levels": 7,
+      "mae": 44.6466,
+      "ssim": 0.077446
+    }
+  },
+  "codec": {
+    "P0_actual_Q85": {
+      "mae": 3.571,
+      "ssim": 0.990005
+    },
+    "PNG": {
+      "bytes": 224549,
+      "mae": 0.0,
+      "ssim": 1.0
+    },
+    "JPEG-Q85": {
+      "bytes": 156633,
+      "mae": 1.4271,
+      "ssim": 0.973402
+    },
+    "JPEG-Q95": {
+      "bytes": 265088,
+      "mae": 0.7779,
+      "ssim": 0.990317
+    }
+  },
+  "overview": {
+    "Nearest": {
+      "P1_L1": {
+        "mae": 4.9973,
+        "ssim": 0.812817,
+        "road_pct": 0.0,
+        "road_peak_mean": 16.0,
+        "stripe_pct": 0.0,
+        "edge_gradient": 179.0,
+        "edge_min_max": [
+          16,
+          195
+        ],
+        "checker_sigma": 0.0,
+        "low_contrast_levels": 1
+      },
+      "P0_350_equals_overview_then_nearest": true
+    },
+    "Average": {
+      "P1_L1": {
+        "mae": 4.8551,
+        "ssim": 0.861906,
+        "road_pct": 100.0,
+        "road_peak_mean": 107.0,
+        "stripe_pct": 100.0,
+        "edge_gradient": 90.0,
+        "edge_min_max": [
+          16,
+          195
+        ],
+        "checker_sigma": 0.0,
+        "low_contrast_levels": 1
+      },
+      "P0_350_equals_overview_then_nearest": true
+    }
+  },
+  "p0_size": [
+    16387,
+    16380
+  ],
+  "p0_jpeg_crop_xyxy": [
+    8140,
+    8140,
+    8479,
+    8479
+  ],
+  "sampled_dn_range": [
+    6400.0,
+    12430.0
+  ],
+  "edge": {
+    "L0": {
+      "source_window": [
+        49152,
+        49152,
+        323,
+        302
+      ],
+      "output": [
+        323,
+        302
+      ],
+      "different_dn": 0
+    },
+    "L1": {
+      "source_window": [
+        49152,
+        49152,
+        323,
+        302
+      ],
+      "output": [
+        162,
+        151
+      ],
+      "different_dn": 0
+    },
+    "L2": {
+      "source_window": [
+        49152,
+        49152,
+        323,
+        302
+      ],
+      "output": [
+        81,
+        76
+      ],
+      "different_dn": 0
+    }
+  },
+  "p0_pillow_fallback": {
+    "input": [
+      254,
+      255,
+      256,
+      1000,
+      65535
+    ],
+    "output": [
+      254,
+      255,
+      255,
+      255,
+      255
+    ]
+  }
+}

@@ -257,6 +257,24 @@ function fmtBytes(n: number): string {
   return n + ' B';
 }
 
+function imageMetaText(rec: ViewerRec): string {
+  const parts = [];
+  if (rec.W) parts.push(`${rec.W}×${rec.H}`);
+  parts.push(fmtBytes(rec.size));
+  if (rec.layout) parts.push(rec.layout);
+  return parts.join(' · ');
+}
+
+function previewStatus(rec: ViewerRec): string | undefined {
+  if (rec.tileSource) return '支持按需高清';
+  if (rec.thumb && (rec.discoveredTiff || rec.route === 'jpg' || rec.route === 'img')) return '仅整图预览';
+  if (rec.discoveredTiff) return '打开后检查高清图块';
+}
+
+function imageCardTitle(rec: ViewerRec): string {
+  return [rec.name, !rec.pending && imageMetaText(rec), previewStatus(rec)].filter(Boolean).join('\n');
+}
+
 /** 关联失败的短标签。后端那句以「没找到合法场景目录 —— 」开头、后面还跟着整条候选
  *  路径与原因，卡片上放不下，整句仍进 title。字节数不符是「目录在、文件对不上」，
  *  与「目录不存在」不是一回事，分开说。 */
@@ -320,6 +338,7 @@ function linkTitle(rec: ViewerRec): string {
         v-show="!closedGroups.includes(groupOf(rec))"
         :ref="(el) => setItemEl(rec.id, el)"
         :data-rec-id="rec.id"
+        :title="imageCardTitle(rec)"
         class="file-item sr-refresh-card"
         :class="[
           {
@@ -394,18 +413,21 @@ function linkTitle(rec: ViewerRec): string {
           @click.stop="store.removeRec(rec.id)"
         >×</span>
         <template #body>
-          <!-- title 挂整条文件名：两行省略后靠悬停仍能看全称。 -->
-          <div class="name" :title="rec.name">
+          <!-- 文件名两行省略，悬停卡片可看全称。 -->
+          <div class="name">
             <!-- 三颗小标挤在文件名上方、**不留换行**：换行会被 Vue 编成空白文本节点，
                  名字的 textContent 会多出空格（e2e 有整串比对名字的断言）。间距一律
                  由 CSS 的 margin-right 给。 -->
-            <template v-if="rec.route === 'jpg'"><span class="scn" :title="rec.sceneDir && !rec.previewOnly ? SCENE_TITLE : '服务端缓存 JPG；业务关联与预览独立'">{{ rec.sceneDir && !rec.previewOnly ? '盘阵' : '服务端 JPG' }}</span><span v-if="rec.sceneDir" class="ord" :title="ORD_TITLE">{{ store.sceneOrdinalOf(rec) }}</span><span v-if="rec.sceneDir && rec.stageLabel" class="stage" :class="rec.stageKind" :title="STAGE_TITLE">{{ rec.stageLabel }}</span></template><span class="fname">{{ rec.name }}</span>
+            <template v-if="rec.route === 'jpg' || rec.discoveredTiff">
+              <span v-if="rec.discoveredTiff || (rec.tileSource && (!rec.sceneDir || rec.previewOnly))" class="scn"
+                :title="rec.tileSource ? '原始 TIFF 支持按需高清' : rec.thumb ? '已关联原始 TIFF，当前仅整图预览' : '已发现原始 TIFF，打开后检查高清图块'">{{ rec.sceneDir ? '盘阵 TIFF' : 'TIFF' }}</span>
+              <span v-else class="scn" :title="rec.sceneDir && !rec.previewOnly ? SCENE_TITLE : '服务端缓存 JPG；业务关联与预览独立'">{{ rec.sceneDir && !rec.previewOnly ? '盘阵' : '服务端 JPG' }}</span>
+              <span v-if="rec.sceneDir" class="ord" :title="ORD_TITLE">{{ store.sceneOrdinalOf(rec) }}</span>
+              <span v-if="rec.sceneDir && rec.stageLabel" class="stage" :class="rec.stageKind" :title="STAGE_TITLE">{{ rec.stageLabel }}</span>
+            </template><span class="fname">{{ rec.name }}</span>
           </div>
-          <div class="meta">
-            <!-- 占位卡没有尺寸可言，但这一行**留在原地**：补齐时不至于整卡跳一下。 -->
-            <template v-if="rec.pending">—</template>
-            <template v-else><template v-if="rec.W">{{ rec.W }}×{{ rec.H }} · </template>{{ fmtBytes(rec.size) }}<template v-if="rec.tileSource"> · 支持按需高清</template><template v-else-if="rec.layout"> · {{ rec.layout }}</template></template>
-          </div>
+          <!-- 占位卡保留同一行高度，加载完成后再显示悬停提示。 -->
+          <div class="meta">{{ rec.pending ? '—' : imageMetaText(rec) }}</div>
           <!-- 状态与关联结果同排一行、都做成短标签（2026-09-18）：原先两者各占一行，
                且各自又把文件名抄了一遍 —— 一张卡三行里三处同名。
                关联原因仍然单独一个字段：rec.status 会被解码进度/结果覆盖，写在那里
@@ -421,6 +443,7 @@ function linkTitle(rec: ViewerRec): string {
                 :title="rec.pendingError || rec.linkNote || rec.status">{{ thumbnailStatus(rec) }}</span>
             </Transition>
             <span v-else class="status" :class="rec.statusCls" :title="rec.pendingError || rec.linkNote || rec.status">{{ rec.status }}</span>
+            <span v-if="previewStatus(rec)" class="status" data-e2e="file-preview-status">{{ previewStatus(rec) }}</span>
             <span v-if="refresh.errors[rec.id]" class="refresh-error" role="status">{{ refresh.errors[rec.id] }}</span>
             <!-- 中间产物：说清它与本体的关系。卡片上那三颗小标只说「哪一景、哪个环节」，
                  这一条说的是「所以你不能对它做什么」。 -->
@@ -694,7 +717,7 @@ function linkTitle(rec: ViewerRec): string {
   word-break: break-all;
 }
 .file-item:not(.demo-card) .name { padding-right: 43px; } /* 为目录与移除小按钮留出空间 */
-/* 文件名最多两行，超出省略；完整名在 .name 的 title 里。 */
+/* 文件名最多两行，完整名可悬停卡片查看。 */
 .file-item .fname {
   display: -webkit-box;
   -webkit-line-clamp: 2;

@@ -869,6 +869,16 @@ export const useViewerStore = defineStore('viewer', () => {
     try { localStorage.setItem('sr-preview-memory-mb', String(value)); } catch { /* 本次仍生效 */ }
   }
 
+  const mssWaterEntryKey = 'sr.viewer.mss-water-entry';
+  const mssWaterEntryEnabled = ref((() => {
+    try { return localStorage.getItem(mssWaterEntryKey) === 'true'; }
+    catch { return false; }
+  })());
+  function setMssWaterEntryEnabled(enabled: boolean) {
+    mssWaterEntryEnabled.value = enabled;
+    try { localStorage.setItem(mssWaterEntryKey, String(enabled)); } catch { /* 本次仍生效 */ }
+  }
+
   /* 真分辨率长边上限：**平台级**设置，服务端 SQLite 存一份，所有机器共用。
      与上面的预览内存预算（本机 localStorage）不同，这里不能乐观更新：改动会
      让服务端生成与缓存判据一起换口径，必须等服务端确认后再改本地。 */
@@ -2233,7 +2243,8 @@ export const useViewerStore = defineStore('viewer', () => {
       const phase = (text: string) => {
         showMask('正在加载同场景的图…', text, false);
       };
-      const tiled = await fetchTiledSceneOverview(row, div, phase);
+      const tiled = /\.tiff?$/i.test(item.name ?? '')
+        ? await fetchTiledSceneOverview(row, div, phase) : null;
       const blob = tiled?.blob ?? await fetchSceneJpg(loadSrConfig(), row, div, phase);
       hideMask(); busy.value = false;
       // 名字取 stem：与场景库那些行一个口径（列表里两个名字并排时不至于一个带后缀
@@ -2609,7 +2620,6 @@ export const useViewerStore = defineStore('viewer', () => {
 
   async function fetchTiledSceneOverview(row: Pick<SceneRow, 'id'|'W'|'H'|'srcRev'>, div: number,
     phase?: (text: string) => void, stillWanted = () => true) {
-    if (Math.max(row.W ?? 0, row.H ?? 0) <= TILE_OVERVIEW_EDGE) return null;
     try {
       const asset = await createPreviewAsset({ sceneId: row.id });
       if (!stillWanted() || asset.W !== row.W || asset.H !== row.H
@@ -5306,6 +5316,7 @@ export const useViewerStore = defineStore('viewer', () => {
     overlayMasterVisible, repairOverlaySelected, roiOverlaySelected,
     agentAnnotationsVisible, setAgentAnnotationsVisible, toggleAgentAnnotations,
     previewMemoryMB, previewMemoryOptions, setPreviewMemoryMB,
+    mssWaterEntryEnabled, setMssWaterEntryEnabled,
     previewMaxEdge, previewMaxEdgeOptions, loadPlatformSettings, setPreviewMaxEdge,
     // 状态
     recs, workspaceVersion, activeId, activeRec, view, canvasSize, renderTick, marker,

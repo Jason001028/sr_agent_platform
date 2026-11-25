@@ -18,6 +18,7 @@ vi.mock('../../lib/local_preview.js', async original => ({ ...await original<typ
 vi.mock('../../lib/localDecodeWorker', () => ({ decodeLocalFile: vi.fn() }));
 import Toolbar from '../../components/Toolbar.vue';
 import CompareBar from '../../components/CompareBar.vue';
+import FileList from '../../components/FileList.vue';
 import { apiResolveScene, apiSceneTiffFiles, fetchDropSceneJpg, fetchSceneJpg, apiSceneSiblings } from '../../lib/api';
 import type { SceneResolveResult, SceneSiblings } from '../../lib/api';
 import { sourceFingerprint } from '../../lib/local_preview';
@@ -30,6 +31,7 @@ const dir = '/DiskArray/selected-scene';
 beforeEach(() => {
   localStorage.clear(); vi.clearAllMocks();
   const pinia = createPinia(); setActivePinia(pinia);
+  vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
   vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue({ width: 2, height: 2, close() {} }));
   vi.stubGlobal('ImageData', class { constructor(public data: unknown, public width: number, public height: number) {} });
   vi.spyOn(browserKit, 'createCanvas').mockImplementation((width, height) => ({ width, height,
@@ -46,7 +48,7 @@ beforeEach(() => {
       { kind: 'nosr' as const, id: 'nosr', name: 'selected_NOSR.tif' } ].map(it => ({ ...it, exists: true, W: 100, H: 100,
         hasPreview: false, previewDiv: null, jpgUrl: null, rel: null, sizeBytes: 3, mtime: null })) } satisfies SceneSiblings));
   root = document.createElement('div'); document.body.append(root);
-  app = createApp({ render: () => h('div', [h(Toolbar), h(CompareBar)]) }); app.use(pinia); app.mount(root);
+  app = createApp({ render: () => h('div', [h(Toolbar), h(CompareBar), h(FileList)]) }); app.use(pinia); app.mount(root);
 });
 afterEach(() => { useViewerStore().stopImageLoad(); app.unmount(); root.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
@@ -79,6 +81,27 @@ it.each(['nosr', 'product', 'old'] as const)('opens the selected TIFF companion 
   expect(store.activeRec?.route).toBe('jpg');
   expect(store.activeRec?.sceneDir).toBe(dir);
   expect(decodeLocalFile).not.toHaveBeenCalled();
+});
+
+it('offers native tiles for a small TIFF opened through the same-scene shortcut', async () => {
+  const store = await selectTiff();
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+    if (url.endsWith('/assets')) {
+      return Response.json({ id: 'asset-nosr', name: 'selected_NOSR.tif', W: 100, H: 100,
+        sourceRev: 'nosr-rev', uploaded: false });
+    }
+    if (url.includes('/assets/asset-nosr/tiles?')) {
+      return Response.json({ width: 100, height: 100, tileSize: 512, band_count: 1,
+        sourceVersion: 'nosr-rev', rasterVersion: 'raster-nosr', displayProfiles: true });
+    }
+    if (url.includes('/assets/asset-nosr/preview?')) {
+      return new Response('jpg', { headers: { 'X-Preview-Width': '2', 'X-Preview-Height': '2' } });
+    }
+    return new Response(null, { status: 404 });
+  }));
+  expect(await store.openSceneSibling('nosr')).toBe(true);
+  expect(store.activeRec?.tileSource?.asset.id).toBe('asset-nosr');
+  await vi.waitFor(() => expect(root.querySelector('[data-e2e="native-zoom"]')).toBeTruthy());
 });
 
 it('keeps the PAN tier while smaller NOSR opens at half size and follows fine PAN tiers at full size',async()=>{
@@ -123,13 +146,26 @@ it('merges metadata only, then loads a companion once on repeated clicks', async
     if (url.includes('/assets/asset-ref/preview?')) {
       return new Response('jpg', { headers: { 'X-Preview-Width': '2', 'X-Preview-Height': '2' } });
     }
+    if (url.endsWith('/assets') && JSON.parse(String(init?.body)).sceneId === 'companion-1') {
+      return Response.json({ id: 'asset-tiff', name: 'other.TIFF', W: 100, H: 100,
+        sourceRev: 'rev-1', uploaded: false });
+    }
+    if (url.includes('/assets/asset-tiff/tiles?')) {
+      return Response.json({ width: 100, height: 100, tileSize: 512, band_count: 1,
+        sourceVersion: 'rev-1', rasterVersion: 'raster-tiff', displayProfiles: true });
+    }
+    if (url.includes('/assets/asset-tiff/preview?')) {
+      return new Response('jpg', { headers: { 'X-Preview-Width': '2', 'X-Preview-Height': '2' } });
+    }
     return new Response(null, { status: 404 });
   });
   vi.stubGlobal('fetch', fetcher);
   const store = await selectTiff();
   await vi.waitFor(() => expect(store.recs).toHaveLength(6));
   const cards = store.recs.filter(rec => rec.discoveredTiff);
+  const cardElement = (id: number) => root.querySelector(`[data-rec-id="${id}"]`);
   expect(cards).toHaveLength(5);
+  expect(cardElement(cards[0].id)?.getAttribute('title')).toContain('打开后检查高清图块');
   expect(cards.every(rec => !rec.thumb && !rec.W && !rec.lqPath)).toBe(true);
   expect(fetchSceneJpg).not.toHaveBeenCalled();
   expect(fetcher.mock.calls).toHaveLength(1);
@@ -139,6 +175,14 @@ it('merges metadata only, then loads a companion once on repeated clicks', async
   expect(cards[0].thumb).toBeTruthy();
   expect(cards.slice(1).every(rec => !rec.thumb)).toBe(true);
   expect(fetcher.mock.calls.filter(([url]) => url.includes('/assets/asset-ref/preview?'))).toHaveLength(1);
+  expect(cards[0].tileSource).toBeNull();
+  expect(cardElement(cards[0].id)?.getAttribute('title')).toContain('仅整图预览');
+  expect(cardElement(cards[0].id)?.querySelector('[data-e2e="file-preview-status"]')?.textContent).toBe('仅整图预览');
+  await store.activate(cards[1].id);
+  expect(store.activeRec?.tileSource?.asset.id).toBe('asset-tiff');
+  await vi.waitFor(() => expect(root.querySelector('[data-e2e="native-zoom"]')).toBeTruthy());
+  expect(cardElement(cards[1].id)?.getAttribute('title')).toContain('支持按需高清');
+  expect(cardElement(cards[1].id)?.querySelector('[data-e2e="file-preview-status"]')?.textContent).toBe('支持按需高清');
   store.addFiles(new File(['raw'], 'selected.tif'));
   await vi.waitFor(() => expect(store.imageLoad.active).toBe(false));
   expect(store.recs).toHaveLength(6);
