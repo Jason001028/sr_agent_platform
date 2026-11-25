@@ -13,7 +13,7 @@ import psutil
 
 from backend.api.paths import scene_id_abs
 from backend.services.image_tiles import ImageTiles, display_pixels, tile_window
-from backend.services.preview_jpg import EQUAL_BINS, PREVIEW_JPG_QUALITY
+from backend.services.preview_jpg import PREVIEW_JPG_QUALITY
 from backend.services.raster_window import raster_revision
 
 W, H = 49475, 49454
@@ -115,24 +115,16 @@ def audit_api(path, base):
         np.testing.assert_array_equal(dn, pixels(x, y, w, h))
         verified += dn.size
 
-    # Reference CDF uses the analytic scene samples, independently of the
-    # server cache, TIFF reader and PNG encoder.
-    sample = np.concatenate([pixels(int(x), int(y), 32, 32).ravel()
-                             for y in np.linspace(0, H - 32, 5, dtype=int)
-                             for x in np.linspace(0, W - 32, 5, dtype=int)])
-    lo, hi = float(sample.min()), float(sample.max())
-    cdf = np.bincount(((sample - lo) * (EQUAL_BINS / (hi-lo))).astype(int).clip(0, EQUAL_BINS-1),
-                      minlength=EQUAL_BINS).cumsum()
-    lut = np.rint(cdf / len(sample) * 255).astype(np.uint8)
+    # A fixed display window isolates the PNG grid from automatic tone sampling.
     def display(array):
-        return lut[(((array.astype(float) - lo) / (hi-lo)).clip(0, 1) * (EQUAL_BINS-1)).astype(int)]
+        return np.rint(array / 257.0).astype(np.uint8)
 
     errors = {}
     l0 = display(pixels(24576, 24576, 512, 512))
     for level in (0, 1, 2):
         step = 2 ** level
         coord = 48 // step
-        data, headers = get(f"/tiles/{level}/{coord}/{coord}")
+        data, headers = get(f"/tiles/{level}/{coord}/{coord}?display=window:0:65535")
         meta = json.loads(headers["X-SR-Tile"])
         assert meta["x"] == meta["y"] == 24576 and meta["level"] == level
         png = np.asarray(Image.open(io.BytesIO(data)))
@@ -143,7 +135,7 @@ def audit_api(path, base):
         np.testing.assert_array_equal(png, expected)
         projected = png[:512//step, :512//step].repeat(step,axis=0).repeat(step,axis=1)
         errors[level] = float(np.mean(np.abs(l0.astype(int)-projected)))
-    data, _ = get("/tiles/0/96/96")
+    data, _ = get("/tiles/0/96/96?display=window:0:65535")
     edge = np.asarray(Image.open(io.BytesIO(data)))
     np.testing.assert_array_equal(edge, display(pixels(49152,49152,323,302)))
     jpeg = same_stretch_jpeg = None
@@ -154,7 +146,7 @@ def audit_api(path, base):
         xx = np.arange(24576,25088)*image.shape[1]//W
         jpeg = float(np.mean(np.abs(l0.astype(int)-image[np.ix_(yy,xx)])))
         # Encode an 8×8-aligned patch of the legacy sampling grid using the
-        # P1 LUT so the comparison isolates downsampling and JPEG loss.
+        # same window so the comparison isolates downsampling and JPEG loss.
         y0, x0 = int(yy[0] // 8 * 8), int(xx[0] // 8 * 8)
         ys = np.rint(np.arange(y0, (yy[-1] // 8 + 1) * 8) * (H - 1) / (image.shape[0] - 1)).astype(int)
         xs = np.rint(np.arange(x0, (xx[-1] // 8 + 1) * 8) * (W - 1) / (image.shape[1] - 1)).astype(int)
