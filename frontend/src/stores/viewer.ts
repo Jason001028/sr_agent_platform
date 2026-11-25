@@ -3984,6 +3984,8 @@ export const useViewerStore = defineStore('viewer', () => {
     return rec?.tileSource && t ? Math.max(64, nativePreviewScale(t.width, t.height, rec.W, rec.H, 1) * 4) : 64;
   }
 
+  const resolutionLabels = shallowRef<{ side: string; left: number; text: string; title: string }[]>([]);
+
   function zoomNative() {
     const pane = panes.value.find(p => p.active);
     const rec = pane?.rec;
@@ -5276,7 +5278,7 @@ export const useViewerStore = defineStore('viewer', () => {
     // 一键解析：先排满占位卡，再原地补齐 / 标红 / 收尾
     insertPendingCards, fillPendingCard, setPendingStatus, failPendingCard, finishPendingCards,
     // 拉伸 / 视图
-    setStretch, setPreviewDiv, setCanvasSize, fit, zoomNative, onWheel, onPan, locatePixel, focusSourceBounds,
+    setStretch, setPreviewDiv, setCanvasSize, fit, zoomNative, resolutionLabels, onWheel, onPan, locatePixel, focusSourceBounds,
     focusPaneRect, addMaskPolygon, addMaskPolygonBatch, redoRoi, canRedoMask,
     // 掩码
     enterDraw, exitDraw, setDrawTool, commitRect, closePolygon, polygonCanCloseAt, undoRoi, clearRois,

@@ -4,7 +4,7 @@ import { computed, ref, watch } from 'vue';
 const props = defineProps<{ modelValue: number }>();
 const emit = defineEmits<{ 'update:modelValue': [value: number] }>();
 const stops = [16, 8, 4, 2, 1];
-const names = ['极速预览', '快速预览', '均衡预览', '精细预览', '原始分辨率'];
+const names = ['极速预览', '快速预览', '均衡预览', '精细预览', '请求原尺寸'];
 const label = (i: number) => stops[i] === 1 ? '1:1' : `1/${stops[i]}`;
 const index = computed(() => Math.max(0, stops.indexOf(props.modelValue)));
 const position = ref(index.value);
@@ -83,11 +83,12 @@ function wheel(e: WheelEvent) {
 <template>
   <div class="preview-scale" :class="{ dragging }" data-e2e="preview-div" @wheel="wheel">
     <svg class="psc-icon" width="16" height="16" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-      <title>图像预览档位</title>
+      <title>概览精度</title>
       <path d="m10 2 8 4.5-8 4.5-8-4.5L10 2Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
       <path d="m2 10 8 4.5 8-4.5M2 13.5 10 18l8-4.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
     </svg>
-    <div ref="rail" class="psc-rail" role="slider" tabindex="0" aria-label="图像预览档位"
+    <span class="psc-label">概览精度</span>
+    <div ref="rail" class="psc-rail" role="slider" tabindex="0" aria-label="概览精度"
       aria-valuemin="0" aria-valuemax="4" :aria-valuenow="index"
       :aria-valuetext="`${label(index)} · ${names[index]}`"
       :style="{ '--position': position, '--progress': `${position * 25}%` }"
@@ -133,6 +134,7 @@ function wheel(e: WheelEvent) {
   box-shadow: inset 0 1px 0 #fff, 0 2px 5px #183d3614;
 }
 .psc-icon { flex: none; opacity: .8; }
+.psc-label { font-size: 11px; white-space: nowrap; }
 .psc-rail {
   position: relative;
   width: 96px;

@@ -18,7 +18,7 @@ export class TileRenderer {
   readonly scheduler: TileScheduler;
   private cameras = new Map<string, Camera>();
   private layers = new Map<string, { pane: TilePane; tiles: CachedTile[]; level: number; ready: number;
-    total: number; opaque: boolean; transform: ReturnType<typeof rasterTransform> }>();
+    total: number; opaque: boolean; drawn: number; transform: ReturnType<typeof rasterTransform> }>();
   private recent = new Map<string, { at: number; x: number; y: number; speed: number }>();
   private geometry = new WeakMap<CachedTile, { x: ReturnType<typeof tileAxis>; y: ReturnType<typeof tileAxis> }>();
 
@@ -46,15 +46,24 @@ export class TileRenderer {
       const { level, requests } = tileRequests(pane, dpr, old?.level, direction, Math.floor(96 / panes.size));
       const levelChanged = old && old.level !== level ? now : old?.levelChanged ?? -Infinity;
       this.cameras.set(id, { key: pane.source.key, level, ox, oy, scale, levelChanged, time: now });
-      const visible = requests.filter(req => req.priority < 1);
+      const s = rasterTransform(pane.view, pane.tw, pane.th, pane.source.info.width, pane.source.info.height,
+        pane.rect.w, pane.rect.h, dpr);
+      const span = pane.source.info.tileSize * 2 ** level;
+      const intersects = (start: number, end: number, offset: number, size: number) =>
+        Math.round(start * dpr) < Math.round(end * dpr)
+        && Math.round(end * dpr) > offset * dpr && Math.round(start * dpr) < (offset + size) * dpr;
+      const { rect, source: { info } } = pane;
+      const visible = requests.filter(req => req.priority < 1
+        && intersects(rect.x + s.ox + req.x * span * s.x,
+          rect.x + s.ox + Math.min((req.x + 1) * span, info.width) * s.x, rect.x, rect.w)
+        && intersects(rect.y + s.oy + req.y * span * s.y,
+          rect.y + s.oy + Math.min((req.y + 1) * span, info.height) * s.y, rect.y, rect.h));
       const target = visible.flatMap(req => {
         const tile = this.scheduler.cache.get(req.key);
         return tile ? [tile] : [];
       });
       const opaque = (entry: CachedTile) => reducedMotion || now - entry.ready >= entry.fade;
       const complete = target.length === visible.length && target.every(opaque);
-      const s = rasterTransform(pane.view, pane.tw, pane.th, pane.source.info.width, pane.source.info.height,
-        pane.rect.w, pane.rect.h, dpr);
       const fallback = complete ? [] : (cached ??= [...this.scheduler.cache.values()]).filter(entry => {
         const t = entry.tile;
         return entry.sourceKey === pane.source.key && t.level !== level
@@ -72,7 +81,7 @@ export class TileRenderer {
         wanted.push(request);
       }
       this.layers.set(id, { pane, tiles, level, ready: target.length, total: visible.length,
-        opaque: complete && target.length > 0, transform: s });
+        opaque: complete && target.length > 0, drawn: 0, transform: s });
     }
     for (const id of this.cameras.keys()) {
       if (!panes.has(id)) {
@@ -92,6 +101,18 @@ export class TileRenderer {
     return this.layers.get(id)?.opaque === true;
   }
 
+  presentation(id: string) {
+    const layer = this.layers.get(id);
+    if (!layer) return;
+    return {
+      targetLOD: layer.level,
+      readyLOD: layer.total > 0 && layer.drawn === layer.total ? layer.level : null,
+      visible: layer.total,
+      drawn: layer.drawn,
+      scale: { x: layer.transform.x, y: layer.transform.y },
+    };
+  }
+
   draw(ctx: CanvasRenderingContext2D, id: string, now: number, dpr: number, immediate: boolean) {
     const layer = this.layers.get(id);
     if (!layer) return false;
@@ -102,6 +123,7 @@ export class TileRenderer {
     ctx.rect(rect.x, rect.y, rect.w, rect.h);
     ctx.clip();
     let active = false;
+    layer.drawn = 0;
     for (const entry of tiles) {
       const t = entry.tile;
       const step = 2 ** t.level;
@@ -114,15 +136,22 @@ export class TileRenderer {
         axes = { x: tileAxis(t.x, t.sourceWidth, t.width, step), y: tileAxis(t.y, t.sourceHeight, t.height, step) };
         this.geometry.set(entry, axes);
       }
+      let painted = false;
       for (const x of axes.x) {
         for (const y of axes.y) {
           const sx = snap(rect.x + s.ox + x.start * s.x);
           const sy = snap(rect.y + s.oy + y.start * s.y);
           const w = snap(rect.x + s.ox + x.end * s.x) - sx;
           const h = snap(rect.y + s.oy + y.end * s.y) - sy;
-          if (w > 0 && h > 0) ctx.drawImage(entry.bitmap, x.from, y.from, x.count, y.count, sx, sy, w, h);
+          if (w > 0 && h > 0) {
+            ctx.drawImage(entry.bitmap, x.from, y.from, x.count, y.count, sx, sy, w, h);
+            painted ||= sx < rect.x + rect.w && sx + w > rect.x
+              && sy < rect.y + rect.h && sy + h > rect.y;
+          }
         }
       }
+      // P2 encodes opaque grayscale PNGs, including black NoData samples.
+      if (painted && ctx.globalAlpha === 1 && t.level === layer.level) layer.drawn++;
     }
     ctx.restore();
     return active;
