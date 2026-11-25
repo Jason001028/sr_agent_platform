@@ -131,6 +131,14 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
         <div class="set-note">默认选「否」，符合条件的区域直接加入掩码。选「是」后逐区审批。本机记住选择。</div>
       </div>
       <div class="set-row">
+        <button type="button" class="set-sw" :class="{ on: store.mssWaterEntryEnabled }"
+          role="switch" aria-label="显示 MSS 水体入口" :aria-checked="store.mssWaterEntryEnabled"
+          data-e2e="set-mss-water-entry" @click="store.setMssWaterEntryEnabled(!store.mssWaterEntryEnabled)">
+          显示 MSS 水体入口 · {{ store.mssWaterEntryEnabled ? '开' : '关' }}
+        </button>
+        <div class="set-note">开启后在支持 MSS 水体分析的影像中显示入口，本机浏览器记住选择。</div>
+      </div>
+      <div class="set-row">
         <button type="button" class="set-sw" :class="{ on: agentRepairSettings.require_mss_land }"
           role="switch" aria-label="MSS 可信陆地校验" :aria-checked="agentRepairSettings.require_mss_land"
           data-e2e="set-mss-land-check" @click="agentRepairSettings.require_mss_land = !agentRepairSettings.require_mss_land">

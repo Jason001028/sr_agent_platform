@@ -98,7 +98,7 @@ onUnmounted(() => {
         <AutoTourControls />
         <BatchDetectionOverlay v-if="!maskReview.active" />
         <RepairLandOverlay v-if="!maskReview.active && !diff.comparisonView && viewer.repairLandTarget" />
-        <MssWaterOverlay v-else-if="!maskReview.active && !diff.comparisonView" />
+        <MssWaterOverlay v-else-if="viewer.mssWaterEntryEnabled && !maskReview.active && !diff.comparisonView" />
         <BatchRepairPlayback />
         <BatchQualityOverlay />
         <BatchMaskReviewOverlay />

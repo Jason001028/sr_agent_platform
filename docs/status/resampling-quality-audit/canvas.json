@@ -1,0 +1,128 @@
+{
+  "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/157.0.0.0 Safari/537.36",
+  "results": {
+    "1": {
+      "fallback": {
+        "active": false,
+        "covers": false,
+        "lod": {
+          "targetLOD": 0,
+          "readyLOD": null,
+          "visible": 4,
+          "drawn": 0,
+          "scale": {
+            "x": 1,
+            "y": 1
+          }
+        },
+        "compared": 1048576,
+        "different": 323050,
+        "mae": 5.643520355224609,
+        "transparent": 0
+      },
+      "fading": {
+        "active": true,
+        "covers": false,
+        "lod": {
+          "targetLOD": 0,
+          "readyLOD": null,
+          "visible": 4,
+          "drawn": 0,
+          "scale": {
+            "x": 1,
+            "y": 1
+          }
+        },
+        "compared": 1048576,
+        "different": 271591,
+        "mae": 1.8163623809814453,
+        "transparent": 0
+      },
+      "settled": {
+        "active": false,
+        "covers": true,
+        "lod": {
+          "targetLOD": 0,
+          "readyLOD": 0,
+          "visible": 4,
+          "drawn": 4,
+          "scale": {
+            "x": 1,
+            "y": 1
+          }
+        },
+        "compared": 1048576,
+        "different": 0,
+        "mae": 0,
+        "transparent": 0
+      }
+    },
+    "2": {
+      "fallback": {
+        "active": false,
+        "covers": false,
+        "lod": {
+          "targetLOD": 0,
+          "readyLOD": null,
+          "visible": 4,
+          "drawn": 0,
+          "scale": {
+            "x": 0.5,
+            "y": 0.5
+          }
+        },
+        "compared": 1048576,
+        "different": 323050,
+        "mae": 5.643520355224609,
+        "transparent": 0
+      },
+      "fading": {
+        "active": true,
+        "covers": false,
+        "lod": {
+          "targetLOD": 0,
+          "readyLOD": null,
+          "visible": 4,
+          "drawn": 0,
+          "scale": {
+            "x": 0.5,
+            "y": 0.5
+          }
+        },
+        "compared": 1048576,
+        "different": 271591,
+        "mae": 1.8163623809814453,
+        "transparent": 0
+      },
+      "settled": {
+        "active": false,
+        "covers": true,
+        "lod": {
+          "targetLOD": 0,
+          "readyLOD": 0,
+          "visible": 4,
+          "drawn": 4,
+          "scale": {
+            "x": 0.5,
+            "y": 0.5
+          }
+        },
+        "compared": 1048576,
+        "different": 0,
+        "mae": 0,
+        "transparent": 0
+      }
+    }
+  },
+  "p0_smoothing_on_vs_off": {
+    "compared": 1048576,
+    "different": 864030,
+    "mae": 11.596182823181152,
+    "transparent": 0
+  },
+  "browser": "Chrome/157.0.8103.80",
+  "viewer_custom_stretch": {
+    "label": "整图预览 · 实际约 1/8",
+    "custom": true
+  }
+}

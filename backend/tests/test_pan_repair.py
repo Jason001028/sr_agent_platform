@@ -207,6 +207,58 @@ class TestPanRepair(unittest.TestCase):
         execute.assert_not_called()
         self.assertFalse((self.scene / 'PAN_old_latest.tif').exists())
 
+    def test_quality_binding_accepts_retained_legacy_nosr_hardlinks(self):
+        from backend.services import batch_manifest, batch_mask, batch_quality
+
+        target = batch_manifest._image(self.pan)
+        reference = batch_manifest._image(self.nosr)
+        work = self.scene / 'Debug' / '.repair-legacy'
+        private = work / self.scene.name
+        private.mkdir(parents=True)
+        os.link(self.nosr, private / 'PAN.tif')
+        os.link(self.nosr, private / (self.scene.name + '.tif'))
+        (work / 'inference.xml').write_text(
+            build_config_xml({'lq_path': private.as_posix()}), encoding='utf-8')
+        if reference['image_key'] == batch_manifest._image(self.nosr)['image_key'] and os.name == 'nt':
+            # Windows Python 3.11 reports creation time as ctime. Model the
+            # Linux hard-link side effect on the frozen key on this platform.
+            reference['image_key'] += '-before-link'
+        self.assertNotEqual(reference['image_key'], batch_manifest._image(self.nosr)['image_key'])
+        self.run_repair()
+        task = {'job_id': 34, 'fingerprint': 'repair-fingerprint',
+                'params': self.params, 'config_xml': str(self.config)}
+        item = {'external_job_id': 34, 'checkpoint': {
+            'target_image': target, 'reference_image': reference,
+            'mask': {'path': str(self.mask), 'sha256': batch_mask._sha256(self.mask)},
+            'detection': {'candidates': [{'candidate_id': 'roi'}]},
+            'sr_fingerprint': task['fingerprint'], 'quality_review_id': 'review',
+        }}
+        verdict = verifier.check_contract(str(self.config), 0)
+        self.assertTrue(verdict.ok, verdict.reason_text)
+        verification = {'layers': {'contract': {'status': 'passed'},
+                                   'artifacts': {'status': 'passed', 'path': verdict.output}}}
+        with patch.object(batch_manifest, 'artifact_root', return_value=Path(self.tmp.name)), \
+                patch.object(batch_quality, 'ensure_allowed'):
+            binding = batch_quality.make_binding(item, task, verification)
+            self.assertEqual(binding['frozen_nosr_image_key'], reference['image_key'])
+            self.assertNotEqual(binding['nosr']['image_key'], reference['image_key'])
+            store = Mock()
+            store.get_goal_item.return_value = item
+            review = {'goal_id': 'goal', 'item_id': 'item', 'review_id': 'review', 'binding': binding}
+            self.assertIs(batch_quality.validate_current(store, review, contract=False), item)
+
+            # Replacing NOSR with equal bytes and restoring mtime still changes
+            # the inode and invalidates both original and pending bindings.
+            replacement = self.nosr.with_suffix('.replacement')
+            replacement.write_bytes(self.nosr.read_bytes())
+            stat = self.nosr.stat()
+            os.utime(replacement, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+            os.replace(replacement, self.nosr)
+            with self.assertRaisesRegex(batch_quality.ReviewConflict, 'NOSR 源版本已改变'):
+                batch_quality.make_binding(item, task, verification)
+            with self.assertRaisesRegex(batch_quality.ReviewConflict, 'nosr 已替换'):
+                batch_quality.validate_current(store, review, contract=False)
+
     def test_missing_nosr_never_reads_pan_as_input(self):
         old = self.pan.read_bytes()
         self.nosr.unlink()

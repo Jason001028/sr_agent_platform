@@ -70,7 +70,7 @@ THRESHOLD_PRESETS = {
     "smart": {"low": 0.7, "standard": 0.5, "high": 0.3},
 }
 
-DEFAULT_MIN_AREA_PX = 96
+DEFAULT_MIN_AREA_PX = 256
 MAX_REGIONS = 200
 MAX_CONTOUR_POINTS = 96
 #: 简化轮廓与真实连通域掩码的最小 IoU。低于它的轮廓不标 ``exact``，

@@ -22,6 +22,8 @@ P2 多尺度 Viewer、渐进显影、浏览器证据和性能数据见 [tile-vie
 
 4 GB BigTIFF 专项审查、四种存储布局及 Chrome/Edge 持续拖拽复测见 [bigtiff-performance-audit.md](status/bigtiff-performance-audit.md)。
 
+P0/P1/P2 重采样、灰度量化、编码及显示损失的固定 ROI 对照见 [resampling-quality-audit.md](status/resampling-quality-audit.md)。
+
 本地 TIFF 预览、已核对关联保留与加载阶段暂停/停止见 [local-tiff-load-control.md](status/local-tiff-load-control.md)。
 
 整图概览、后台行带回填、超限整幅 JPG 提前分流与后置 IFD 兼容见 [progressive-tiff-preview.md](status/progressive-tiff-preview.md)。

@@ -36,6 +36,39 @@ def _file(path, *, raster=False):
     return result
 
 
+def _legacy_nosr_aliases(reference, config, document, receipt, receipt_doc):
+    """Recognize retained hard links from the adapter predating NOSR staging."""
+    if document.find("RepairNOSRStage") is not None:
+        return False
+    source = Path(reference["path"])
+    stat = source.stat()
+    signature = [stat.st_size, stat.st_mtime_ns, stat.st_ino]
+    submitted = json.loads(document.findtext("RepairRevision") or "{}")
+    receipt_time = receipt.stat().st_mtime_ns
+    config_time = config.stat().st_mtime_ns
+    if (submitted.get("nosr") != signature or receipt_doc.get("nosr_signature") != signature
+            or stat.st_ctime_ns > receipt_time or stat.st_nlink < 3):
+        return False
+    for work in receipt.parent.glob(".repair-*"):
+        private = work / source.parent.name
+        aliases = (private / "PAN.tif", private / (source.parent.name + ".tif"))
+        inference = work / "inference.xml"
+        if not inference.is_file():
+            continue
+        inference_time = inference.stat().st_mtime_ns
+        if not max(config_time, stat.st_ctime_ns) <= inference_time <= receipt_time:
+            continue
+        try:
+            dataroot = ET.parse(inference).getroot().findtext("DatarootLQ")
+        except ET.ParseError:
+            continue
+        if (dataroot and Path(dataroot).resolve() == private
+                and all(not alias.is_symlink() and alias.is_file() and alias.samefile(source)
+                        for alias in aliases)):
+            return True
+    return False
+
+
 def make_binding(item,task,verification):
     cp=item["checkpoint"]; target=cp["target_image"]; ref=cp["reference_image"]; mask=cp["mask"]
     if verification["layers"]["contract"]["status"] != "passed" or verification["layers"]["artifacts"]["status"] != "passed":
@@ -45,7 +78,7 @@ def make_binding(item,task,verification):
         raise ReviewConflict("Job/提交身份不一致")
     output=_file(verification["layers"]["artifacts"]["path"],raster=True)
     reference=_file(ref["path"],raster=True)
-    if reference["revision"] != ref["revision"] or reference["image_key"] != ref["image_key"]:
+    if reference["revision"] != ref["revision"]:
         raise ReviewConflict("NOSR 源版本已改变")
     if (output["width"],output["height"],output["spp"]) != (target["width"],target["height"],1):
         raise ReviewConflict("本次 PAN 产物尺寸/波段不符合冻结网格")
@@ -67,6 +100,9 @@ def make_binding(item,task,verification):
     receipt_info=_file(receipt)
     receipt_info["sha256"]=batch_mask._sha256(receipt)
     receipt_doc=json.loads(receipt.read_text(encoding="utf-8"))
+    legacy_reference = reference["image_key"] != ref["image_key"]
+    if legacy_reference and not _legacy_nosr_aliases(reference, config, document, receipt, receipt_doc):
+        raise ReviewConflict("NOSR 源版本已改变")
     backup=_file(receipt_doc["backup"],raster=True)
     frozen_stat=str(target["revision"]).rsplit("-",2)[-2:]
     if frozen_stat!=[str(v) for v in receipt_doc["backup_signature"][:2]]:
@@ -78,6 +114,7 @@ def make_binding(item,task,verification):
     return {"version":"human-quality.v1","job_id":str(job),"fingerprint":cp["sr_fingerprint"],
             "task_params_sha256":_hash(task.get("params") or {}),
             "input":target,"nosr":reference,"output":output,"backup":backup,
+            **({"frozen_nosr_image_key": ref["image_key"]} if legacy_reference else {}),
             "mask":{**_file(mask_path),"sha256":mask["sha256"],"width":target["width"],"height":target["height"]},
             "config":{**_file(config),"sha256":config_sha},"receipt":receipt_info,
             "geometry_sha256":_hash(candidates),"regions":candidates,
@@ -164,7 +201,7 @@ def validate_current(store,review,*,contract=True):
         raise ReviewConflict("Job 已改变，旧审核无效")
     cp=item["checkpoint"]
     if (_hash(cp.get("target_image"))!=_hash(b["input"])
-            or cp.get("reference_image",{}).get("image_key")!=b["nosr"]["image_key"]
+            or cp.get("reference_image",{}).get("image_key")!=b.get("frozen_nosr_image_key", b["nosr"]["image_key"])
             or cp.get("reference_image",{}).get("revision")!=b["nosr"]["revision"]
             or Path(cp.get("mask",{}).get("path") or "").resolve()!=Path(b["mask"]["path"])):
         raise ReviewConflict("冻结的源影像/NOSR/Mask 引用已改变，旧审核无效")

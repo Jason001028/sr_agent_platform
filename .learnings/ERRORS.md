@@ -139,3 +139,11 @@ The on-host repair audit used `systemctl show --value`, which the intranet host 
 
 ### Suggested Fix
 Use `systemctl show sr-api -p MainPID | sed -n 's/^MainPID=//p'` and require a positive numeric PID before launching the audit. Keep copy-paste commands on one line. The deployment already uses this compatible property-output pattern.
+
+## 2026-11-25 Viewer baseline on Windows
+
+A full temporary worktree exceeded Windows checkout limits on nested evidence artifacts. Export only the baseline `frontend` tree with `git archive` and reuse installed dependencies through a junction. Run browser fixtures using `.e2e/serve-local-load.mjs` so Rollup adapts local TIFF vendors before serving.
+
+## 2026-11-25 PowerShell file search
+
+Bash brace expansion in a file argument is parsed as invalid syntax by PowerShell. Pass explicit paths to rg or use a quoted -g glob; a parser failure prevents earlier statements on the same invocation from running.
