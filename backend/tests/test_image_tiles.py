@@ -5,7 +5,7 @@ import json
 import os
 from threading import Event
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 import numpy as np
 from PIL import Image
@@ -404,15 +404,16 @@ def test_real_api_png_dn_jpeg_and_version(gdal, image_api):
     assert len(manager.tiles.stats) == 2
 
 
+class PendingRequest:
+    def __init__(self):
+        self.disconnected = asyncio.Event()
+
+    async def receive(self):
+        await self.disconnected.wait()
+        return {"type": "http.disconnect"}
+
+
 def test_same_tile_shares_work_and_disconnected_queued_job_is_cancelled():
-    class Request:
-        def __init__(self):
-            self.disconnected = asyncio.Event()
-
-        async def receive(self):
-            await self.disconnected.wait()
-            return {"type": "http.disconnect"}
-
     async def run():
         service = ImageTiles(None, workers=1)
         entered, release = Event(), Event()
@@ -426,11 +427,11 @@ def test_same_tile_shares_work_and_disconnected_queued_job_is_cancelled():
 
         service.render = render
         try:
-            req = Request()
+            req = PendingRequest()
             first = asyncio.create_task(service.serve(req, ("one",)))
-            second = asyncio.create_task(service.serve(Request(), ("one",)))
+            second = asyncio.create_task(service.serve(PendingRequest(), ("one",)))
             assert await asyncio.to_thread(entered.wait, 5)
-            abandoned = Request()
+            abandoned = PendingRequest()
             queued = asyncio.create_task(service.serve(abandoned, ("queued",)))
             await asyncio.sleep(0)
             abandoned.disconnected.set()
@@ -450,6 +451,135 @@ def test_same_tile_shares_work_and_disconnected_queued_job_is_cancelled():
         loop.run_until_complete(run())
     finally:
         loop.close()
+
+
+def test_background_work_leaves_admission_and_execution_for_visible_l0():
+    async def run():
+        service = ImageTiles(None, workers=2, max_pending=4)
+        entered, release = Event(), Event()
+        calls = []
+
+        def render(key):
+            calls.append(key)
+            if key == "old":
+                entered.set()
+                assert release.wait(5)
+            return key
+
+        service.render = render
+        try:
+            old = PendingRequest()
+            running = asyncio.create_task(service.serve(old, ("old",), priority=1))
+            assert await asyncio.to_thread(entered.wait, 5)
+            queued = asyncio.create_task(service.serve(PendingRequest(), ("prefetch",), priority=2))
+            await asyncio.sleep(0)
+            with pytest.raises(HTTPException) as rejected:
+                await service.serve(PendingRequest(), ("extra",), priority=2)
+            assert (rejected.value.status_code, rejected.value.headers) == (503, {"Retry-After": "1"})
+            old.disconnected.set()
+            assert (await running).status_code == 499
+            assert await asyncio.wait_for(service.serve(PendingRequest(), ("visible",), priority=0), 2) == "visible"
+            assert calls == ["old", "visible"]
+            release.set()
+            assert await queued == "prefetch"
+        finally:
+            release.set()
+            await service.close()
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(run())
+    finally:
+        loop.close()
+
+
+def test_conditional_tile_skips_cold_png_and_checks_geometry_and_revision(gdal, image_api, monkeypatch):
+    data, client, manager = image_api
+    source = data / "conditional.tif"
+    tifffile.imwrite(source, np.arange(515 * 515, dtype=np.uint16).reshape(515, 515))
+    url = "/api/image-open/assets/" + manager.asset(source)["id"] + "/tiles/0/0/0"
+    first = client.get(url)
+    assert first.status_code == 200
+    manager.tiles.tiles.clear()
+    manager.tiles.tile_bytes = 0
+    headers = {"If-None-Match": 'W/' + first.headers["ETag"]}
+    with monkeypatch.context() as patch:
+        def unexpected(*args, **kwargs):
+            pytest.fail("A matching conditional request reached raster rendering")
+
+        patch.setattr(manager.tiles, "_tile", unexpected)
+        cached = client.get(url, headers=headers)
+        assert cached.status_code == 304
+        assert cached.headers["ETag"] == first.headers["ETag"]
+        assert not cached.content and not manager.tiles.tiles
+        assert client.get(url[:-1] + "2", headers={"If-None-Match": "*"}).status_code == 422
+    source.with_suffix(".tif.aux.xml").write_text("<PAMDataset/>", encoding="utf-8")
+    fresh = client.get(url, headers=headers)
+    assert fresh.status_code == 200 and fresh.headers["ETag"] != first.headers["ETag"]
+
+
+def test_contiguous_native_tiles_share_a_strip_read_and_preserve_png_and_headers(gdal, image_api, monkeypatch):
+    from backend.services.raster_tone import parse_display
+
+    data, client, manager = image_api
+    source = data / "span.tif"
+    dn = np.arange(515 * 1051, dtype=np.uint16).reshape(515, 1051)
+    tifffile.imwrite(source, dn, rowsperstrip=8, bigtiff=True)
+    asset = manager.asset(source)["id"]
+    base = "/api/image-open/assets/" + asset + "/tiles/0/"
+    expected = [client.get(f"{base}{x}/1?display=window:0:65535") for x in range(3)]
+    assert all(response.status_code == 200 for response in expected)
+    service = ImageTiles(manager, workers=1)
+    original = service.reader.read_native_strip_span
+    spans = []
+
+    def track(source, x, y, w, h, **kwargs):
+        spans.append((x, y, w, h))
+        return original(source, x, y, w, h, **kwargs)
+
+    monkeypatch.setattr(service.reader, "read_native_strip_span", track)
+    display = parse_display("window:0:65535")
+    entered, release = Event(), Event()
+    render = service.render
+
+    def hold_slot(ident, *args):
+        if ident == "hold":
+            entered.set()
+            assert release.wait(5)
+            return None
+        return render(ident, *args)
+
+    monkeypatch.setattr(service, "render", hold_slot)
+
+    async def run():
+        try:
+            await service.serve(PendingRequest(), (asset, "info", 1))
+            holding = asyncio.create_task(service.serve(PendingRequest(), ("hold",)))
+            assert await asyncio.to_thread(entered.wait, 5)
+            tasks = [
+                asyncio.create_task(service.serve(
+                    PendingRequest(), (asset, "tile", 1, 0, x, 1, display, "nearest", frozenset()), priority=0,
+                ))
+                for x in (1, 0, 2)
+            ]
+            await asyncio.sleep(0)
+            release.set()
+            await holding
+            return await asyncio.gather(*tasks)
+        finally:
+            release.set()
+            await service.close()
+
+    loop = asyncio.new_event_loop()
+    try:
+        results = loop.run_until_complete(run())
+    finally:
+        loop.close()
+    assert spans == [(0, 512, 1051, 3)]
+    for result, individual in zip(results, (expected[1], expected[0], expected[2])):
+        assert result.body == individual.content
+        assert result.headers["ETag"] == individual.headers["ETag"]
+        assert json.loads(result.headers["X-SR-Tile"]) == json.loads(individual.headers["X-SR-Tile"])
 
 
 def test_u16_native_window_tone_cache_and_raw(gdal, image_api):

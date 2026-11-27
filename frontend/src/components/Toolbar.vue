@@ -38,6 +38,7 @@ function submissionAccepted(_id: number, fresh: boolean) {
 
 const store = useViewerStore();
 const diff = useDiffStore();
+const tourSettingsOpen = ref(false);
 const qc = useQcListStore();
 const maskRipples = new Map<Animation, HTMLElement>();
 onBeforeUnmount(() => {
@@ -113,7 +114,7 @@ function onPick(e: Event) {
 </script>
 
 <template>
-  <div class="toolbar">
+  <div class="toolbar" :class="{ 'toolbar-popover-open': tourSettingsOpen || diff.open }">
     <button
       type="button"
       class="btn"
@@ -170,7 +171,7 @@ function onPick(e: Event) {
       || (!store.activeRec.displayStretch && store.activeRec.paintedMode === 'equal'))"
       type="button" class="cmp-btn" data-e2e="native-zoom" title="一个原图像素对应一个 Canvas 背板像素"
       @click="store.zoomNative()">原生 1:1</button>
-    <AutoTourButton />
+    <AutoTourButton v-model:open="tourSettingsOpen" />
     <DiffLocateButton />
     <DiffContinueButton />
     <button v-if="diff.result?.autoMask" type="button" class="auto-mask-button auto-mask-draw" data-e2e="auto-mask-draw"
@@ -282,7 +283,7 @@ function onPick(e: Event) {
 .diff-visibility{display:inline-flex;align-items:center;gap:4px;flex:none;height:32px;padding:0 7px;border:1px solid var(--tb-border);border-radius:8px;background:var(--tb-surface);color:var(--tb-fg);font:inherit;font-size:12px;cursor:pointer}
 .diff-visibility[aria-pressed="true"]{color:var(--tb-primary);background:var(--tb-active-bg)}
 .diff-visibility:focus-visible{outline:2px solid var(--tb-focus);outline-offset:2px}
-.toolbar:has(.tour-popover),.toolbar:has(.diff-popover){z-index:7}
+.toolbar.toolbar-popover-open { z-index:7 }
 .btn,
 .outbtn,
 .cmp-btn,

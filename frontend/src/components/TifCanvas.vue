@@ -13,6 +13,7 @@
 import MiniNavigator from './MiniNavigator.vue';
 import ViewerBackdrop from './ViewerBackdrop.vue';
 import ViewerHistoryNavigation from './ViewerHistoryNavigation.vue';
+import AutoTourControls from './AutoTourControls.vue';
 import { useAutoTourStore } from '../stores/autoTour';
 const tour=useAutoTourStore();
 import AgentAnnotationOverlay from './AgentAnnotationOverlay.vue';
@@ -813,6 +814,7 @@ function onMotionChange() { scheduleRender(); }
     <DiffOverlay @wheel="onWheel" />
     <AutoMaskOverlay />
     <MiniNavigator v-if="store.panes.some(p => p.rec?.thumb)" />
+    <AutoTourControls />
     <ViewerHistoryNavigation />
     <div class="question-tools" @mousedown.stop @dblclick.stop>
       <button v-if="store.roiSelIndex()>=0 && !store.pendingRect" @click="askSelected">询问 Agent · 选中 ROI</button>

@@ -72,7 +72,8 @@ from backend.services import image_diff
 from backend.services import platform_settings
 from backend.services.heavy_work import HeavyWork
 from backend.services import preview_cache
-from backend.services.image_open import ImageOpen, router_for as image_open_router, purge_loop as image_open_purge_loop
+from backend.services.image_open import (ImageOpen, clear_mapped_previews, mapped_preview_snapshot, retier_preview_response,
+                                         router_for as image_open_router, purge_loop as image_open_purge_loop)
 from backend.services.image_tiles import TILE_HEADERS
 from backend.services import scene_resolve
 from backend.runtime_context import AppContext
@@ -188,7 +189,7 @@ def _reuse_shared_preview(source: Path, destination: Path, div: int):
     Only fixed known paths are probed. The outer raster queue owns writes;
     immutable variant bytes and the source revision are checked before reuse.
     """
-    from backend.services.preview_jpg import _copy_preview
+    from backend.services.preview_jpg import _copy_preview, publish_preview_snapshot
     rev = source_revision(source)
     cap = configured_preview_max_edge()
     plan = _source_preview_plan(source, div, cap)
@@ -218,6 +219,11 @@ def _reuse_shared_preview(source: Path, destination: Path, div: int):
                 _copy_preview(candidate, target)
                 _copy_preview(target, destination)
                 return
+    data = mapped_preview_snapshot(source, rev, size)
+    if data is not None and source_revision(source) == rev:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        publish_preview_snapshot(target, data)
+        publish_preview_snapshot(destination, data)
 
 
 def _ensure_shared_preview(source_path, jpg_path, div=2):
@@ -1146,6 +1152,9 @@ def _clear_one_scene(state, dirs: list[Path], scene_dir) -> dict:
                     for n, why in res["skipped"]]
         failed += [{"name": n, "reason": why, "dir": posix}
                    for n, why in res["failed"]]
+    mapped_removed, mapped_failed = clear_mapped_previews(Path(scene_dir))
+    removed.extend(mapped_removed)
+    failed.extend(mapped_failed)
 
     out = {"dirs": dirs, "removed": removed, "skipped": skipped,
            "failed": failed, "marked": marked, "reason": None}
@@ -2274,7 +2283,7 @@ def create_app() -> FastAPI:
         return {"state": app.state.heavy_work.states.get(key, "missing")}
 
     @app.get("/api/scenes/{scene_id}/preview")
-    async def preview(scene_id: str, div: int = Query(2), ready_only: bool = False):
+    async def preview(scene_id: str, request: Request, div: int = Query(2), ready_only: bool = False):
         div = _check_div(div)
         try:
             cached = await app.state.heavy_work.read(_ready_preview, scene_id, div, ready_only)
@@ -2283,12 +2292,15 @@ def create_app() -> FastAPI:
             key = await app.state.heavy_work.read(_preview_job_key, scene_id, div, ready_only)
         except PathDeniedError as exc:
             raise HTTPException(404, f"场景不可访问：{exc}") from exc
-        return await app.state.heavy_work.run(
-            _preview_sync, scene_id, div, ready_only, key=key)
+        if ready_only:
+            return await app.state.heavy_work.run(_preview_sync, scene_id, div, ready_only, key=key)
+        result = await app.state.heavy_work.preview_request(request, _preview_sync, scene_id, div, ready_only, key=key)
+        return retier_preview_response(result, div)
 
     def _preview_job_key(scene_id, div, ready_only):
         source = _diff_source_path(scene_id, root)
-        return ("preview", str(source), source_revision(source), div, ready_only)
+        plan = _source_preview_plan(source, div, configured_preview_max_edge())
+        return ("preview", str(source), source_revision(source), _plan_size(plan) if plan else div, ready_only)
 
     def _serve_preview(path, source, div, rev, plan, cache, headers=None):
         if plan is not None:
@@ -2393,7 +2405,7 @@ def create_app() -> FastAPI:
             detail=f"预览在生成与读取之间被并发改写，请重试：{last}")
 
     @app.get("/api/scenes/{scene_id}/preview-drop")
-    async def preview_drop(scene_id: str, div: int = Query(2)):
+    async def preview_drop(scene_id: str, request: Request, div: int = Query(2)):
         div = _check_div(div)
         try:
             cached, key = await app.state.heavy_work.read(_ready_drop_preview, scene_id, div)
@@ -2401,7 +2413,8 @@ def create_app() -> FastAPI:
             raise HTTPException(404, f"场景不可访问：{exc}") from exc
         if cached is not None:
             return cached
-        return await app.state.heavy_work.run(_preview_drop_sync, scene_id, div, key=key)
+        result = await app.state.heavy_work.preview_request(request, _preview_drop_sync, scene_id, div, key=key)
+        return retier_preview_response(result, div)
 
     def _ready_drop_preview(scene_id, div):
         # Keep drop's write-capable whitelist, including sibling substitution.
@@ -2423,6 +2436,7 @@ def create_app() -> FastAPI:
         if not plan:
             return None, key
         size = _plan_size(plan)
+        key = ("preview-drop", str(source), rev, size, str(main), str(tmp))
         for base, fallback in ((main, False), (tmp, True)):
             for candidate in preview_candidates(base, rev, div, size, cap=cap):
                 if cache_hit(candidate, PREVIEW_JPG_QUALITY, div, source_rev=rev, size=size) is None:

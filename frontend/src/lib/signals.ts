@@ -10,17 +10,35 @@
  * 这里只在**缺失时**安装，不覆盖浏览器原生实现。入口在 main.ts 最先调用一次。
  */
 
+/** Chrome 96 有 aborted，但还没有 reason 和 throwIfAborted。 */
+export function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) {
+    const reason = signal.reason;
+    throw reason === undefined ? new DOMException('The operation was aborted.', 'AbortError') : reason;
+  }
+}
+
 /** 原生 @types 里这两个是只读静态方法，安装时要按可变对象写。 */
 type SignalStatics = {
   timeout?: (milliseconds: number) => AbortSignal;
   any?: (signals: AbortSignal[]) => AbortSignal;
 };
 
+function abortWithReason(controller: AbortController, reason: unknown) {
+  // Chrome 96 aborts the fetch but ignores the argument to abort().
+  if (!('reason' in controller.signal)) {
+    Object.defineProperty(controller.signal, 'reason', {
+      value: reason === undefined ? new DOMException('The operation was aborted.', 'AbortError') : reason,
+    });
+  }
+  controller.abort(reason);
+}
+
 /** 与原生 AbortSignal.timeout 同形：到点后以 name='TimeoutError' 的 DOMException 中止。 */
 export function timeoutSignal(milliseconds: number): AbortSignal {
   const controller = new AbortController();
   setTimeout(() => {
-    controller.abort(new DOMException('signal timed out', 'TimeoutError'));
+    abortWithReason(controller, new DOMException('signal timed out', 'TimeoutError'));
   }, milliseconds);
   return controller.signal;
 }
@@ -34,7 +52,7 @@ export function anySignal(signals: AbortSignal[]): AbortSignal {
   const detach: (() => void)[] = [];
   const stop = (reason: unknown) => {
     for (const off of detach.splice(0)) off();
-    controller.abort(reason);
+    abortWithReason(controller, reason);
   };
   for (const signal of signals) {
     if (controller.signal.aborted) break;

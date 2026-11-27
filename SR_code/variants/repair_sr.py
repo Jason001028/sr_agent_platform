@@ -140,6 +140,26 @@ def _size(ds):
     return ds.RasterXSize, ds.RasterYSize
 
 
+def _reduce_byte_mask_2x(src, out, width, height, constrained):
+    import numpy as np
+
+    # Read up to 128 source rows at once, bounded by the width of the mask.
+    rows_per_batch = max(1, min(64, (8 * 1024 * 1024) // (4 * width)))
+    selected = False
+    for top in range(0, height, rows_per_batch):
+        rows = min(rows_per_batch, height - top)
+        data = src.ReadAsArray(0, top * 2, width * 2, rows * 2)
+        if constrained and np.any((data != 0) & (data != 255)):
+            raise ValueError('Land constraint requires a binary 0/255 publication mask')
+        mapped = data[::2, ::2] | data[1::2, ::2] | data[::2, 1::2] | data[1::2, 1::2]
+        if not constrained:
+            # Legacy byte masks treat every nonzero value as selected.
+            mapped = (mapped != 0).astype('uint8') * 255
+        selected = selected or bool(np.any(mapped))
+        out.WriteArray(mapped, 0, top)
+    return selected
+
+
 def reduce_mask(gdal, source, destination, width, height, *, constrained=False):
     """Conservative area mapping: a selected high-resolution pixel is not lost."""
     import numpy as np
@@ -150,21 +170,24 @@ def reduce_mask(gdal, source, destination, width, height, *, constrained=False):
     out = gdal.GetDriverByName('GTiff').Create(str(destination), width, height, 1, gdal.GDT_Byte)
     if out is None:
         raise ValueError('Cannot create mapped mask')
-    selected = 0
-    # One LR row at a time: memory scales with width, not full PAN area.
-    left = np.floor(np.arange(width) * sw / width).astype(int)
-    right = np.ceil((np.arange(width) + 1) * sw / width).astype(int)
-    for row in range(height):
-        top = int(math.floor(row * sh / height))
-        bottom = int(math.ceil((row + 1) * sh / height))
-        data = src.GetRasterBand(1).ReadAsArray(0, top, sw, bottom - top)
-        if constrained and np.any((data != 0) & (data != 255)):
-            raise ValueError('Land constraint requires a binary 0/255 publication mask')
-        columns = np.any(data != 0, axis=0)
-        cumulative = np.concatenate(([0], np.cumsum(columns)))
-        mask = ((cumulative[right] - cumulative[left]) > 0).astype('uint8') * 255
-        selected += int(np.count_nonzero(mask))
-        out.GetRasterBand(1).WriteArray(mask.reshape(1, width), 0, row)
+    if sw == width * 2 and sh == height * 2 and src.GetRasterBand(1).DataType == gdal.GDT_Byte:
+        selected = _reduce_byte_mask_2x(src.GetRasterBand(1), out.GetRasterBand(1), width, height, constrained)
+    else:
+        selected = 0
+        # One LR row at a time: memory scales with width, not full PAN area.
+        left = np.floor(np.arange(width) * sw / width).astype(int)
+        right = np.ceil((np.arange(width) + 1) * sw / width).astype(int)
+        for row in range(height):
+            top = int(math.floor(row * sh / height))
+            bottom = int(math.ceil((row + 1) * sh / height))
+            data = src.GetRasterBand(1).ReadAsArray(0, top, sw, bottom - top)
+            if constrained and np.any((data != 0) & (data != 255)):
+                raise ValueError('Land constraint requires a binary 0/255 publication mask')
+            columns = np.any(data != 0, axis=0)
+            cumulative = np.concatenate(([0], np.cumsum(columns)))
+            mask = ((cumulative[right] - cumulative[left]) > 0).astype('uint8') * 255
+            selected += int(np.count_nonzero(mask))
+            out.GetRasterBand(1).WriteArray(mask.reshape(1, width), 0, row)
     out.FlushCache()
     out = src = None
     if not selected:
@@ -455,6 +478,21 @@ def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
     try:
         body_sig, nosr_sig, mask_sig = signature(body), signature(nosr), signature(mask)
         nosr_ctime = nosr.stat().st_ctime_ns
+        p, n, m = _open(gdal, body), _open(gdal, nosr), _open(gdal, mask)
+        pw, ph = _size(p)
+        nw, nh = _size(n)
+        if (p.GetMetadata('IMAGE_STRUCTURE') or {}).get('COMPRESSION', 'NONE').upper() != 'NONE':
+            raise ValueError('Exact byte-size repair requires an uncompressed body TIFF')
+        if p.GetRasterBand(1).DataType != n.GetRasterBand(1).DataType:
+            raise ValueError('Body and NOSR sample types differ')
+        if not (pw >= nw and ph >= nh and (pw, ph) != (nw, nh)):
+            raise ValueError('NOSR must have lower resolution than the current body')
+        if _size(m) not in ((pw, ph), (nw, nh)):
+            raise ValueError('Mask dimensions match neither body nor NOSR')
+        mask_is_body = _size(m) == (pw, ph)
+        if proof is not None and (not mask_is_body or m.GetRasterBand(1).DataType != gdal.GDT_Byte):
+            raise ValueError('Land constraint requires a byte mask in the PAN pixel grid')
+        p = n = m = None
         frozen_source = nosr
         started = time.monotonic()
         if stage:
@@ -479,21 +517,6 @@ def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
                 raise ValueError('Original NOSR changed while copying')
         repair_timing('stage_nosr', started, ' method=' + ('staged' if stage else 'copy'))
         copy_sig = signature(source_copy)
-        p, n, m = _open(gdal, body), _open(gdal, nosr), _open(gdal, mask)
-        pw, ph = _size(p)
-        nw, nh = _size(n)
-        if (p.GetMetadata('IMAGE_STRUCTURE') or {}).get('COMPRESSION', 'NONE').upper() != 'NONE':
-            raise ValueError('Exact byte-size repair requires an uncompressed body TIFF')
-        if p.GetRasterBand(1).DataType != n.GetRasterBand(1).DataType:
-            raise ValueError('Body and NOSR sample types differ')
-        if not (pw >= nw and ph >= nh and (pw, ph) != (nw, nh)):
-            raise ValueError('NOSR must have lower resolution than the current body')
-        if _size(m) not in ((pw, ph), (nw, nh)):
-            raise ValueError('Mask dimensions match neither body nor NOSR')
-        mask_is_body = _size(m) == (pw, ph)
-        if proof is not None and (not mask_is_body or m.GetRasterBand(1).DataType != gdal.GDT_Byte):
-            raise ValueError('Land constraint requires a byte mask in the PAN pixel grid')
-        p = n = m = None
         private = work / scene.name
         private.mkdir()
         # Both production names refer to the copy, including across mounts.

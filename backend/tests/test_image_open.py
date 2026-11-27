@@ -81,10 +81,24 @@ class ImageOpenTests(unittest.TestCase):
     def test_status_reports_queue_state_without_starting_preview_or_reading_source_pixels(self):
         asset=self.manager.asset(self.source);ident=asset['id']
         with patch('backend.services.image_open.build_preview_pixels',side_effect=AssertionError('status must not generate')):
-            self.client.app.state.heavy_work.states[('image-open',ident,2)]='queued'
+            self.client.app.state.heavy_work.states[self.manager.preview_key(ident,2)]='queued'
             response=self.client.get(f'/api/image-open/assets/{ident}/preview-status?div=2')
             self.assertEqual(response.json(),{'state':'queued'})
             self.assertEqual(self.client.get(f'/api/image-open/assets/{ident}/preview-status?div=3').status_code,400)
+
+    def test_asset_preview_revalidates_bytes_and_still_checks_source_revision(self):
+        asset = self.manager.asset(self.source)
+        url = f"/api/image-open/assets/{asset['id']}/preview?div=2"
+        first = self.client.get(url)
+        self.assertEqual(first.status_code, 200)
+        headers = {'If-None-Match': first.headers['ETag']}
+        second = self.client.get(url, headers=headers)
+        self.assertEqual(second.status_code, 304)
+        self.assertEqual(second.content, b'')
+        self.assertEqual(json.loads(second.headers['X-SR-Preview-Plan'])['requestedDiv'], 2)
+        with self.source.open('ab') as stream:
+            stream.write(b'changed')
+        self.assertEqual(self.client.get(url, headers=headers).status_code, 409)
 
     def test_browser_or_unmapped_path_upload_becomes_read_only_cached_jpg(self):
         token=self.ticket();entry=self.select(token,'C:\\Users\\anyone\\image.tif')

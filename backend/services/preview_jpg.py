@@ -546,6 +546,7 @@ def sample_strips(path, endian, scalars, arrays, max_edge: int, *, output_shape=
     out = np.empty((ph, pw), dtype=dt)
     col_idx = (np.round(np.arange(pw) * (W - 1) / (pw - 1)).astype(np.int64)
                if pw > 1 else np.zeros(1, dtype=np.int64))
+    col_idx *= stride
     # ph == 1 时没有「第 ph-1 行」可除；与上面的单列一样取首行。
     row_idx = ([int(round(i * (H - 1) / (ph - 1))) for i in range(ph)]
                if ph > 1 else [0])
@@ -557,6 +558,8 @@ def sample_strips(path, endian, scalars, arrays, max_edge: int, *, output_shape=
         Windows 没有 os.pread，所以这是唯一可移植的并行读法。
         """
         with open(path, "rb") as f:
+            buffer = bytearray(row_bytes)
+            view = memoryview(buffer)
             for i in range(start, end):
                 r = row_idx[i]
                 si = r // rps
@@ -566,13 +569,13 @@ def sample_strips(path, endian, scalars, arrays, max_edge: int, *, output_shape=
                     raise PreviewError("条带偏移越界")
                 length = min(avail - row_off, row_bytes)
                 f.seek(int(offs[si]) + row_off)
-                data = f.read(length)
-                if len(data) < row_bytes and len(data) < length:
+                received = f.readinto(view[:length])
+                if received < length:
                     raise PreviewError("读取条带失败（文件截断？）")
-                arr = np.frombuffer(data, dtype=dt, count=len(data) // bpp)
+                arr = np.frombuffer(view, dtype=dt, count=received // bpp)
                 if arr.size < W * stride:
                     raise PreviewError("条带宽度小于图像宽度")
-                out[i] = arr[col_idx * stride]
+                out[i] = arr[col_idx]
 
     n_rows = len(row_idx)
     if n_rows >= PARALLEL_MIN_ROWS:
@@ -790,6 +793,24 @@ def build_preview_pixels(path, max_edge: Optional[int] = None) -> np.ndarray:
             try:
                 return _pillow_preview(path, max_edge)
             except PreviewError as fallback:
+                if (scalars.get(_TAG_W, 0) * scalars.get(_TAG_H, 0) > PILLOW_FALLBACK_MAX_PX
+                        and (scalars.get(_TAG_COMP, 1) != 1 or _TAG_TILE_W in scalars or _TAG_TILE_W in arrays)):
+                    # The legacy small-image paths keep their sampling and tone. Large
+                    # compressed/tiled images had no JPEG when Pillow declined them.
+                    from backend.services.raster_window import RasterReadError, RasterUnavailable, RasterWindowReader
+                    try:
+                        w, h = preview_dimensions(scalars[_TAG_W], scalars[_TAG_H], max_edge)
+                        dn, nodata = RasterWindowReader().read_preview(p, w, h)
+                        gray = stretch_equal(dn, nodata)
+                        if scalars.get(_TAG_PHOTO) == 0:
+                            np.subtract(255, gray, out=gray)
+                            if nodata is not None or dn.dtype.kind == "f":
+                                for start in range(0, h, max(1, _STRETCH_CHUNK // w)):
+                                    rows = slice(start, start + max(1, _STRETCH_CHUNK // w))
+                                    gray[rows][~valid_dn(dn[rows], nodata)] = 0
+                        return gray
+                    except (RasterReadError, RasterUnavailable, RuntimeError, OSError) as exc:
+                        fallback = PreviewError(f"{fallback}; GDAL preview: {exc}")
                 info = probe_tiff(path)
                 raise PreviewError(f"{fallback}; TIFF layout={info}; sparse reader: {e}") from fallback
         raise
@@ -1145,6 +1166,21 @@ def _copy_preview(source, target):
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
+
+
+def publish_preview_snapshot(target, data):
+    """Atomically publish a previously validated immutable JPEG snapshot."""
+    target = Path(target)
+    fd, tmp = tempfile.mkstemp(prefix="pv.", suffix=".tmp", dir=target.parent)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
+        os.replace(tmp, target)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
 
 
 def is_uncompressed_strip_error(msg: str) -> bool:

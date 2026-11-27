@@ -196,7 +196,7 @@ export function stretchMap(v: number, b: number, st: BandStats[] | null | undefi
 }
 
 export function stretchRgba(
-  src: Float32Array, sw: number, sh: number, nb: number,
+  src: Float32Array | Uint8Array, sw: number, sh: number, nb: number,
   st: BandStats[] | null | undefined, mode: StretchMode, invert: boolean,
   output?: Uint8ClampedArray,
   range?:StretchRange,
@@ -221,7 +221,7 @@ export function stretchRgba(
 
 /* 每波段统计：min/max、1024 直方图 + CDF、2%/98% 百分位（供 2%线性 / 直方图均衡）。
    传 fLo/fHi 时（8bit 原样图）按固定范围统计，线性退化为恒等映射。 */
-export function computeStats(src: Float32Array, sw: number, sh: number, nb: number, fLo?: number, fHi?: number): BandStats[] {
+export function computeStats(src: Float32Array | Uint8Array, sw: number, sh: number, nb: number, fLo?: number, fHi?: number): BandStats[] {
   const BINS = 1024, n = sw * sh;
   const st: BandStats[] = [];
   for (let b = 0; b < nb; b++) {

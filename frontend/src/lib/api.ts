@@ -1088,7 +1088,7 @@ export const PREVIEW_BLOB_CACHE_MAX = 128 * 1024 * 1024;
 
 /** 「缓存内容变了」的订阅者（见 `watchPreviewCache`）。 */
 const previewCacheWatchers = new Set<() => void>();
-const previewBlobs = createBlobCache(PREVIEW_BLOB_CACHE_MAX, () => {
+export const previewBlobs = createBlobCache(PREVIEW_BLOB_CACHE_MAX, () => {
   for (const cb of previewCacheWatchers) cb();
 });
 

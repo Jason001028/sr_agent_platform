@@ -35,7 +35,7 @@ async function main() {
         request.tile = JSON.parse(response.headers.get('X-SR-Tile'));
         if (bench.slow && l0) {
           await new Promise(resolve => setTimeout(resolve, 90 + ((request.tile.tileX + request.tile.tileY) % 4) * 40));
-          options.signal?.throwIfAborted();
+          if (options.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
           if (bench.failOnce) {
             bench.failOnce = false;
             return new Response('corrupt PNG', { headers: response.headers });

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { anySignal, installAbortSignalPolyfills, timeoutSignal } from '../signals';
+import { anySignal, installAbortSignalPolyfills, throwIfAborted, timeoutSignal } from '../signals';
 
 describe('AbortSignal 兜底实现', () => {
   beforeEach(() => vi.useFakeTimers());
@@ -38,6 +38,42 @@ describe('AbortSignal 兜底实现', () => {
   it('anySignal 输入为空时永不中止', () => {
     const any = anySignal([]);
     expect(any.aborted).toBe(false);
+  });
+
+  it('Chrome 96 的组合信号保留超时原因，并与手动取消区分', () => {
+    const prototype = AbortSignal.prototype;
+    const reason = Object.getOwnPropertyDescriptor(prototype, 'reason')!;
+    Reflect.deleteProperty(prototype, 'reason');
+    try {
+      const cancel = new AbortController();
+      const timeout = timeoutSignal(100);
+      const timed = anySignal([new AbortController().signal, timeout]);
+      const stopped = anySignal([cancel.signal, timeoutSignal(100)]);
+      cancel.abort();
+      vi.advanceTimersByTime(100);
+      expect(stopped.reason.name).toBe('AbortError');
+      expect(timed.reason.name).toBe('TimeoutError');
+      const alreadyTimedOut = anySignal([timeout]);
+      expect(alreadyTimedOut.reason.name).toBe('TimeoutError');
+      expect(alreadyTimedOut.reason).toBe(timeout.reason);
+    } finally {
+      Object.defineProperty(prototype, 'reason', reason);
+    }
+  });
+
+  it('旧内核没有 reason 时仍按 AbortError 中止', () => {
+    const controller = new AbortController();
+    Object.defineProperty(controller.signal, 'reason', { value: undefined });
+    expect(() => throwIfAborted(controller.signal)).not.toThrow();
+    controller.abort();
+    expect(() => throwIfAborted(controller.signal)).toThrow(expect.objectContaining({ name: 'AbortError' }));
+  });
+
+  it('保留现代浏览器提供的中止原因', async () => {
+    const controller = new AbortController();
+    const reason = new DOMException('读取超时', 'TimeoutError');
+    controller.abort(reason);
+    await expect(Promise.resolve().then(() => throwIfAborted(controller.signal))).rejects.toBe(reason);
   });
 
   it('安装是幂等的，有原生实现时不覆盖', () => {

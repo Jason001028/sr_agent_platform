@@ -97,11 +97,13 @@ export function luma(r: number, g: number, b: number): number {
 }
 
 /* ---------------- buildStats：核心统计 ---------------- */
-export function buildStats(img: RoiImage, poly: Poly, o?: RoiStatsOpts): RoiStats {
+export function buildStats(img: RoiImage | {
+  width: number; height: number; readRow(y: number): Uint8ClampedArray;
+}, poly: Poly, o?: RoiStatsOpts): RoiStats {
   const hi = o && o.hi !== undefined ? o.hi : STAT_HI;
   const clip = o && o.clip !== undefined ? o.clip : STAT_CLIP;
   const maxPx = o && o.maxPx !== undefined ? o.maxPx : STAT_MAX_PX;
-  const W = img.width, H = img.height, data = img.data;
+  const W = img.width, H = img.height;
 
   // 退化多边形（<3 顶点，与 maskgen 栅格化一致不填充）或空图 → 空统计
   if (poly.length < 3 || W <= 0 || H <= 0) return emptyStats(false, 1, 0);
@@ -129,17 +131,20 @@ export function buildStats(img: RoiImage, poly: Poly, o?: RoiStatsOpts): RoiStat
   let n = 0, sum = 0, sumSq = 0;
   let mn = Infinity, mx = -Infinity;
   let hiN = 0, clipN = 0, rowsSampled = 0;
+  const row = 'readRow' in img;
 
   for (let r = r0; r <= r1; r++) {
     if (stride > 1 && ((r - r0) % stride) !== 0) continue;   // 等距抽行（确定性）
     const gaps = rowIntervals([poly], r);                    // 与掩码栅格化同源判定
     if (!gaps.length) continue;
+    const data = row ? img.readRow(r) : img.data;
+    const offset = row ? 0 : r * W;
     let hitRow = false;
     for (let g = 0; g < gaps.length; g++) {
       const c0 = Math.max(0, Math.ceil(gaps[g][0] - SCAN_EPS));
       const c1 = Math.min(W - 1, Math.floor(gaps[g][1] + SCAN_EPS));
       for (let c = c0; c <= c1; c++) {
-        const o4 = (r * W + c) * 4;
+        const o4 = (offset + c) * 4;
         if (data[o4 + 3] === 0) continue;                    // 全透明像元不计入
         const Y = luma(data[o4], data[o4 + 1], data[o4 + 2]);
         n++;

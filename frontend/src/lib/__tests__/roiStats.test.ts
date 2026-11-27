@@ -29,6 +29,20 @@ function rectPoly(x0: number, y0: number, x1: number, y1: number): Poly {
   return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
 }
 
+it('reads only sampled canvas rows and preserves whole-image statistics', () => {
+  const image = imgOf(11, 23, (x, y) => (x + y) % 5 ? x * 7 + y : undefined);
+  const rows: number[] = [];
+  const stats = buildStats({
+    width: image.width, height: image.height,
+    readRow: y => {
+      rows.push(y);
+      return image.data.subarray(y * 44, (y + 1) * 44);
+    },
+  }, rectPoly(0, 0, 11, 23), { maxPx: 64 });
+  expect(stats).toEqual(buildStats(image, rectPoly(0, 0, 11, 23), { maxPx: 64 }));
+  expect(rows).toEqual([0, 5, 10, 15, 20]);
+});
+
 describe('buildStats 空 / 退化输入', () => {
   it('空图（0 宽）→ 空统计', () => {
     const s = buildStats(imgOf(0, 0, () => 0), rectPoly(0, 0, 2, 2));

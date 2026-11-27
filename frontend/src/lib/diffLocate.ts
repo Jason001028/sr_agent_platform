@@ -272,7 +272,7 @@ export function sampleStride(width: number, height: number): number {
 
 /** 双线性采样到共同网格。非有限值（NoData）输出 valid=0，灰度填 0。 */
 export function sampleGray(
-  src: Float32Array | null,
+  src: Float32Array | Uint8Array | null,
   sw: number,
   sh: number,
   gw: number,

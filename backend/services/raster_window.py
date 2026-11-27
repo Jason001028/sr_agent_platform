@@ -19,6 +19,7 @@ from backend.services.raster_tone import valid_dn
 
 RESAMPLING = {"nearest": "NearestNeighbour", "average": "Average", "bilinear": "Bilinear"}
 MAX_OUTPUT = 512
+MAX_TILE_BATCH = 4
 BLOCK_CACHE_BYTES = 128 * 1024**2
 MAX_BLOCK_BYTES = 32 * 1024**2
 TIFF_FILL_ORDER = 266
@@ -285,6 +286,33 @@ class RasterWindowReader:
     def info(self, source, band=1, *, revision=None):
         _gdal()
         return self._band(source, band, revision)[1]
+
+    def read_preview(self, source, width, height):
+        """Sample band one into the delivered preview grid, with bounded GTiff blocks."""
+        gdal = _gdal()
+        with _raster_io(gdal, {"GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
+                               "GDAL_PAM_ENABLED": "NO", "GDAL_NUM_THREADS": "1"}):
+            ds = self._open_dataset(str(source))
+            band = ds.GetRasterBand(1)
+            candidates = [band] + [band.GetOverview(i) for i in range(band.GetOverviewCount())]
+            if any(math.prod(b.GetBlockSize()) * max(1, (gdal.GetDataTypeSize(b.DataType) + 7) // 8)
+                   * ds.RasterCount > MAX_BLOCK_BYTES for b in candidates if b is not None):
+                raise RasterReadError("TIFF decoding block exceeds 32 MiB")
+            result = band.ReadAsArray(0, 0, band.XSize, band.YSize, width, height,
+                                      resample_alg=gdal.GRIORA_NearestNeighbour)
+            if result is None or result.shape != (height, width) or result.dtype.kind not in "uif":
+                raise RasterReadError("Unsupported TIFF preview samples")
+            return result, band.GetNoDataValue()
+
+    def read_native_strip_span(self, source, x, y, width, height, *, band, revision):
+        """Read a bounded horizontal run of native tiles when sparse Strip I/O applies."""
+        _, info, _, sparse, _, _ = self._band(source, band, revision)
+        if sparse is None:
+            return None
+        if (not 0 <= x < x + width <= info.width or not 0 <= y < y + height <= info.height
+                or width > MAX_TILE_BATCH * MAX_OUTPUT or height > MAX_OUTPUT):
+            raise RasterReadError("Invalid native Strip span")
+        return sparse.read(source, info, x, y, width, height, width, height)
 
     def read_window(self, source, x, y, width, height, output_width=None, output_height=None,
                     band=1, resampling="nearest", *, revision=None, grid_step=None):

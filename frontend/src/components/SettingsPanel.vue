@@ -344,6 +344,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
   flex-direction: column;
   gap: 12px;
   width: 320px;
+  max-height:calc(100vh - var(--topbar-h) - 80px);
   max-height:calc(100dvh - var(--topbar-h) - 80px);
   overflow-y:auto;
   padding: 14px 16px;

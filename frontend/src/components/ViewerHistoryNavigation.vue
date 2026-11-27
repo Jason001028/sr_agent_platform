@@ -25,7 +25,7 @@ onBeforeUnmount(()=>{
  </nav>
 </template>
 <style scoped>
-:global(.stage:has(.viewer-history:not([hidden])) .toast){bottom:64px}
+:global(.stage > .viewer-history:not([hidden]) ~ .toast){bottom:64px}
 .viewer-history{position:absolute;bottom:6px;left:50%;transform:translateX(-50%);z-index:6;display:flex;align-items:center;gap:40px;height:42px;max-width:calc(100% - 24px);pointer-events:none;opacity:.22;transition:opacity var(--motion-history-reveal,170ms) var(--ease-standard)}
 .viewer-history[hidden]{display:none}.viewer-history.near,.viewer-history:hover,.viewer-history:focus-within{opacity:1}
 button{display:flex;align-items:center;justify-content:center;gap:8px;box-sizing:border-box;min-width:90px;height:36px;padding:0 15px;pointer-events:auto;border:1px solid #68877b42;border-radius:10px;background:#f6faf6b8;backdrop-filter:blur(7px);color:#244c3f;box-shadow:0 2px 8px #173e3110;font:inherit;font-size:12px;cursor:pointer;touch-action:manipulation}

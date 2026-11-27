@@ -29,13 +29,76 @@ from backend.pathguard import ensure_preview_allowed, to_posix_array_path
 from backend.services import preview_cache, scene_resolve
 from backend.services.preview_jpg import (build_preview_pixels, scene_dims, source_revision,
     cache_meta, preview_candidates, PREVIEW_RULE_VERSION, PREVIEW_JPG_QUALITY,
-    preview_pixel_key, preview_plan, preview_source)
+    preview_pixel_key, preview_plan, preview_source, rule_stamp)
 from backend.services.source_match import verify_source
 from backend.services.image_tiles import ImageTiles, add_tile_routes
 
 CHUNK = 4 * 1024 * 1024
 MARKER = '.sr-image-open-v1'
 SUFFIXES = {'.tif', '.tiff', '.jpg', '.jpeg', '.png'}
+
+
+def _cache_root():
+    database = os.environ.get('SR_AGENT_DB', '')
+    default = (Path(database).parent / 'image-preview-cache'
+               if database and database != ':memory:' and not os.environ.get('SR_TEMP_PREVIEWS_ROOT')
+               else preview_cache.temp_previews_root() / 'image-open')
+    return Path(os.environ.get('SR_IMAGE_CACHE_ROOT', str(default))).resolve()
+
+
+def _mapped_id(path, revision):
+    return hashlib.sha256((str(Path(path).resolve()) + '|' + str(revision)).encode()).hexdigest()
+
+
+def _pixel_filename(pixel_key):
+    return f'preview-{hashlib.sha256(pixel_key.encode()).hexdigest()[:24]}.jpg'
+
+
+def mapped_preview_snapshot(source, revision, size):
+    """Read an authorized scene's existing asset JPEG without extending its lease."""
+    root = _cache_root()
+    if root == Path(root.anchor):
+        return None
+    directory = root / _mapped_id(source, revision)
+    if directory.is_symlink() or not (directory / MARKER).is_file():
+        return None
+    path = directory / _pixel_filename(preview_pixel_key(revision, size))
+    if path.is_symlink():
+        return None
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    return data if cache_meta(io.BytesIO(data), source_rev=revision, size=size) else None
+
+
+def clear_mapped_previews(scene_dir):
+    """Clear the current mapped TIFF previews without scanning unrelated assets."""
+    root = _cache_root()
+    removed, failed = [], []
+    if root == Path(root.anchor) or not root.is_dir():
+        return removed, failed
+    try:
+        sources = list(scene_dir.iterdir())
+    except OSError as exc:
+        return removed, [{"name": scene_dir.name, "dir": scene_dir.as_posix(), "reason": str(exc)}]
+    for source in sources:
+        if source.suffix.lower() not in ('.tif', '.tiff') or source.is_symlink() or not source.is_file():
+            continue
+        revision = source_revision(source)
+        if not revision:
+            continue
+        directory = root / _mapped_id(source, revision)
+        if directory.is_symlink() or not (directory / MARKER).is_file():
+            continue
+        try:
+            for path in directory.glob('preview-*.jpg'):
+                if re.fullmatch(r'preview-(?:[a-f0-9]{24}|v1-v\d+-\d+)\.jpg', path.name) and not path.is_symlink():
+                    path.unlink(missing_ok=True)
+                    removed.append({"name": path.name, "dir": directory.as_posix()})
+        except OSError as exc:
+            failed.append({"name": source.name, "dir": directory.as_posix(), "reason": str(exc)})
+    return removed, failed
 
 
 def _cached_jpeg(path, *, size=None):
@@ -50,11 +113,27 @@ def _cached_jpeg(path, *, size=None):
     return None
 
 
+def retier_preview_response(result, div):
+    if not isinstance(result, Response) or result.status_code != 200:
+        return result
+    raw = result.headers.get('X-SR-Preview-Plan')
+    if not raw:
+        return result
+    plan = json.loads(raw)
+    if plan['requestedDiv'] == div:
+        return result
+    from backend.services.preview_jpg import configured_preview_max_edge
+    source = plan['source']
+    adapted = preview_plan(source['width'], source['height'], div, configured_preview_max_edge(),
+                           source=source, delivered=(plan['width'], plan['height']))
+    headers = dict(result.headers)
+    headers['x-sr-preview-plan'] = json.dumps({**plan, **adapted}, separators=(',', ':'))
+    return Response(result.body, headers=headers)
+
+
 class ImageOpen:
     def __init__(self):
-        database=os.environ.get('SR_AGENT_DB','')
-        default_root=(Path(database).parent/'image-preview-cache') if database and database!=':memory:' and not os.environ.get('SR_TEMP_PREVIEWS_ROOT') else preview_cache.temp_previews_root()/'image-open'
-        self.root = Path(os.environ.get('SR_IMAGE_CACHE_ROOT', str(default_root))).resolve()
+        self.root = _cache_root()
         if self.root == Path(self.root.anchor):
             raise ValueError('SR_IMAGE_CACHE_ROOT cannot be a filesystem root')
         self.ttl = max(300, int(os.environ.get('SR_IMAGE_CACHE_TTL_SEC', '86400')))
@@ -168,7 +247,7 @@ class ImageOpen:
                 stream.seek(offset); samples.append(base64.b64encode(stream.read(4096)).decode())
         if source_revision(path) != rev:
             raise HTTPException(409, '源文件在读取期间变化')
-        ident = ident or hashlib.sha256((str(path.resolve())+'|'+str(rev)).encode()).hexdigest()
+        ident = ident or _mapped_id(path, rev)
         meta = dict(id=ident, name=name or path.name, path=str(path.resolve()), uploaded=uploaded,
                     W=dims['W'], H=dims['H'], sourceRev=rev, size=size,
                     source=preview_source(path, dims['W'], dims['H'], rev, uploaded=uploaded),
@@ -348,6 +427,14 @@ class ImageOpen:
             except Exception as exc:
                 raise HTTPException(422, f'服务端 JPG 生成失败：{exc}') from exc
 
+    def preview_key(self, ident, div):
+        from backend.services.preview_jpg import PREVIEW_DIVISORS, configured_preview_max_edge
+        if div not in PREVIEW_DIVISORS:
+            raise HTTPException(400, '预览档位无效')
+        meta = self.metadata(ident)
+        plan = preview_plan(meta['W'], meta['H'], div, configured_preview_max_edge())
+        return ('image-open', ident, meta['sourceRev'], plan['width'], plan['height'])
+
     def _preview(self, ident, div, ready_only):
         started=time.monotonic();sample_ms=0
         from backend.services.preview_jpg import (
@@ -361,8 +448,7 @@ class ImageOpen:
         edge = max(expected)
         is_tiff = source.suffix.lower() in ('.tif', '.tiff')
         pixel_key = preview_pixel_key(rev, expected, is_tiff=is_tiff)
-        key = hashlib.sha256(pixel_key.encode()).hexdigest()[:24]
-        jpg = self.directory(ident) / f'preview-{key}.jpg'
+        jpg = self.directory(ident) / _pixel_filename(pixel_key)
         if jpg.is_symlink():
             raise HTTPException(403, '预览缓存不能是符号链接')
         data = _cached_jpeg(jpg)
@@ -409,7 +495,9 @@ class ImageOpen:
                         expected, Image.BICUBIC, reducing_gap=2.0)
                     image = resized.convert('RGB')
             sample_ms=(time.monotonic()-sampling)*1000;cache_kind='generated'
-            buf = io.BytesIO(); image.save(buf,format='JPEG',quality=PREVIEW_JPG_QUALITY)
+            buf = io.BytesIO()
+            options = {'comment': rule_stamp(PREVIEW_JPG_QUALITY, div, source_rev=rev, max_edge=cap)} if is_tiff else {}
+            image.save(buf, format='JPEG', quality=PREVIEW_JPG_QUALITY, **options)
             if source_revision(source) != rev:
                 raise HTTPException(409, '源文件在预览生成期间变化')
             data = buf.getvalue()
@@ -424,7 +512,8 @@ class ImageOpen:
             headers = {'X-SR-Image-W':str(meta['W']), 'X-SR-Image-H':str(meta['H']),
                        'X-SR-Preview-W':str(result.width), 'X-SR-Preview-H':str(result.height),
                        'X-SR-Preview-Plan':json.dumps(plan, separators=(',', ':')),
-                       'Cache-Control':'no-store'}
+                       'Cache-Control':'private, no-cache',
+                       'ETag': '"' + hashlib.sha256(data).hexdigest() + '"'}
         elapsed=(time.monotonic()-started)*1000
         logging.getLogger(__name__).log(logging.WARNING if elapsed>2000 else logging.INFO,
             'image_preview cache=%s elapsed_ms=%.0f sample_ms=%.0f source=%dx%d target=%dx%d div=%d bytes=%d',
@@ -535,25 +624,26 @@ def router_for(manager: ImageOpen):
 
     @router.get('/assets/{ident}/preview')
     async def preview(ident: str, request: Request, div: int = 2):
-        cached = await request.app.state.heavy_work.read(manager.preview,ident,div,True)
-        if cached is not None:
-            return cached
-        # A queued/shared raster job owns its cache lease even after this HTTP
-        # consumer disconnects. Cleanup may not delete its uploaded source.
-        lease=manager.protecting(ident);lease.__enter__()
-        task=asyncio.create_task(request.app.state.heavy_work.run(manager.preview,ident,div,key=('image-open',ident,div)))
-        def finished(future):
-            lease.__exit__(None,None,None)
-            if not future.cancelled():future.exception()
-        task.add_done_callback(finished)
-        return await asyncio.shield(task)
+        work = request.app.state.heavy_work
+        result = await work.read(manager.preview, ident, div, True)
+        if result is None:
+            key = await work.read(manager.preview_key, ident, div)
+            result = await work.preview_request(request, manager.preview, ident, div, key=key,
+                                                ownership=manager.protecting(ident))
+        if result.status_code != 200:
+            return result
+        result = retier_preview_response(result, div)
+        headers = dict(result.headers)
+        validators = (tag.strip().removeprefix('W/') for tag in request.headers.get('If-None-Match', '').split(','))
+        if any(tag in ('*', headers['etag']) for tag in validators):
+            headers.pop('content-length', None)
+            return Response(status_code=304, headers=headers)
+        return result
 
     @router.get('/assets/{ident}/preview-status')
     async def preview_status(ident: str, request: Request, div: int = 2):
-        from backend.services.preview_jpg import PREVIEW_DIVISORS
-        if div not in PREVIEW_DIVISORS:raise HTTPException(400,'预览档位无效')
-        await run_in_threadpool(manager.metadata,ident)
-        return {'state':request.app.state.heavy_work.states.get(('image-open',ident,div),'checking')}
+        key = await run_in_threadpool(manager.preview_key, ident, div)
+        return {'state': request.app.state.heavy_work.states.get(key, 'checking')}
 
     return router
 

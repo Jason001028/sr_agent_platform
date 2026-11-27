@@ -10,7 +10,7 @@ export interface DisplayStretch extends StretchRange {
   domain?:string;sourceRev?:string|null;
   toneAdjustment?: ToneAdjustment;
 }
-export interface PixelPlane {src:Float32Array;w:number;h:number;nb:number;stats:BandStats[]|null;invert:boolean}
+export interface PixelPlane {src:Float32Array|Uint8Array;w:number;h:number;nb:number;stats:BandStats[]|null;invert:boolean}
 export interface PixelRect {x0:number;y0:number;x1:number;y1:number}
 /** Bounded work, entirely from cached DN; no IO and no stretched canvas reads. */
 export function samplePlane(p:PixelPlane,rect:PixelRect={x0:0,y0:0,x1:p.w-1,y1:p.h-1},max=256*256) {

@@ -14,7 +14,7 @@
  */
 import { computed, markRaw, ref, shallowRef, watch } from 'vue';
 import { defineStore } from 'pinia';
-import { useViewerStore } from './viewer';
+import { materializePreviewPixels, useViewerStore } from './viewer';
 import { loadSrConfig } from '../lib/scene.js';
 import { apiDiffAnalyze, apiSceneSiblings } from '../lib/api.js';
 import {
@@ -59,9 +59,10 @@ function clampRect(r: GridRect, width: number, height: number): GridRect {
 /** `rec.src` 可能是 1 波段（稀疏条带 / 盘阵 JPG）或 3 波段（UTIF / 分块）。
  *  差异分析只吃单通道灰度，这里按显示层同样的 luma 权重压成 1 波段。
  *  3 波段缓冲按源数组身份缓存，同一张图重复分析不重算。 */
-const lumaCache = new WeakMap<Float32Array, Float32Array>();
+const lumaCache = new WeakMap<Float32Array | Uint8Array, Float32Array>();
 
-function grayBuffer(rec: ViewerRec): { src: Float32Array; w: number; h: number } | null {
+function grayBuffer(rec: ViewerRec): { src: Float32Array | Uint8Array; w: number; h: number } | null {
+  if (!rec.src && rec.previewPixelsDeferred) materializePreviewPixels(rec);
   if (!rec.src || !rec.srcw || !rec.srch) return null;
   const nb = Math.max(1, rec.nbands || 1);
   if (nb === 1) return { src: rec.src, w: rec.srcw, h: rec.srch };
@@ -477,7 +478,7 @@ export const useDiffStore = defineStore('diff', () => {
     const dir = activeSceneKey();
     return viewer.recs
       .filter((r) => !r.pending && sceneKeyOf(r) === dir
-        && ((r.W > 0 && r.H > 0 && ((!!r.thumb && !!r.src) || !!r.card))
+        && ((r.W > 0 && r.H > 0 && ((!!r.thumb && (!!r.src || r.previewPixelsDeferred)) || !!r.card))
           || (r.discoveredTiff && !!r.card)))
       .map((r) => ({
         id: r.id,
@@ -531,7 +532,7 @@ export const useDiffStore = defineStore('diff', () => {
   function openOptions(): DiffPairOption[] {
     return pairOptions.value.filter((o) => {
       const r = viewer.recs.find((x) => x.id === o.id);
-      return !!r?.thumb && !!r?.src;
+      return !!r?.thumb && (!!r.src || !!r.previewPixelsDeferred);
     });
   }
 
@@ -607,7 +608,7 @@ export const useDiffStore = defineStore('diff', () => {
     if (id == null) return 'none';
     const r = viewer.recs.find((x) => x.id === id);
     if (!r) return 'missing';
-    if (r.pending || !r.src) return 'pending';
+    if (r.pending || (!r.src && !r.previewPixelsDeferred)) return 'pending';
     return `${r.sceneId ?? ''}|${r.stageKind ?? ''}|${r.W}x${r.H}|${r.thumb?.width}x${r.thumb?.height}|${r.srcRev ?? ''}|${r.token ?? 0}|${r.srcw}x${r.srch}|${JSON.stringify(r.tourIdentity)}`;
   }
 
@@ -718,7 +719,7 @@ export const useDiffStore = defineStore('diff', () => {
     if (res?.method === 'smart' && res.source !== 'source-roi') return 'LTD网格候选需先原图精检，再加入修复掩码';
     if (autoSourceError.value) return autoSourceError.value;
     if (!target) return '当前分析的 A/B 未包含已确认的 PAN 本体，请选择本体后重新分析';
-    if (!target.thumb || !target.src || target.pending || !target.sceneId || !target.srcRev) return 'PAN 本体源文件或预览不可用';
+    if (!target.thumb || (!target.src && !target.previewPixelsDeferred) || target.pending || !target.sceneId || !target.srcRev) return 'PAN 本体源文件或预览不可用';
     const a = viewer.recs.find(r => r.id === res!.imageA.id);
     const b = viewer.recs.find(r => r.id === res!.imageB.id);
     const reason = res?.method === 'smart' ? smartPairReason.value : precisePairReason(a, b);
@@ -1161,7 +1162,7 @@ export const useDiffStore = defineStore('diff', () => {
   }
 
   function sampleBuffer(
-    buf: { src: Float32Array; w: number; h: number }, fx: number, fy: number,
+    buf: { src: Float32Array | Uint8Array; w: number; h: number }, fx: number, fy: number,
   ): number {
     const x = Math.max(0, Math.min(buf.w - 1, fx));
     const y = Math.max(0, Math.min(buf.h - 1, fy));

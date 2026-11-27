@@ -2,6 +2,7 @@ import { rasterTransform, tileLevel } from './viewMath';
 import type { PaneRect, ViewState } from './viewMath';
 import { loadTile } from './tileSource';
 import type { DecodedTile, TileSource } from './tileSource';
+import { ImageOpenError } from './imageOpen';
 
 export interface TilePane {
   source: TileSource;
@@ -73,13 +74,13 @@ export class TileScheduler {
   bytes = 0;
   peakBytes = 0;
   private demand = new Map<string, TileRequest>();
-  private pending = new Map<string, AbortController>();
+  private pending = new Map<string, { controller: AbortController; prefetch: boolean }>();
   private failed = new Set<string>();
   private sources = new Map<string, TileSource>();
   private protected = new Set<string>();
   private disposed = false;
-  private retry: ReturnType<typeof setTimeout> | undefined;
-  private retries = new Set<string>();
+  private retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private retries = new Map<string, number>();
 
   constructor(private frame: () => void, private budget = 128 * 1024 ** 2,
     private concurrency = 6, private read = loadTile) {}
@@ -95,18 +96,28 @@ export class TileScheduler {
       for (const [key, value] of this.cache) if (!preserve.has(value.sourceKey)) this.release(key, value);
     }
     for (const [key, request] of next) {
-      if (request.priority < 1 && (this.demand.get(key)?.priority ?? 0) >= 1) this.failed.delete(key);
+      if (request.priority < 1 && (this.demand.get(key)?.priority ?? 0) >= 1 && !this.retryTimers.has(key)) {
+        this.failed.delete(key);
+        this.retries.delete(key);
+      }
     }
     this.demand = next;
     this.protected = protectedKeys;
     const visiblePending = requests.some(req => req.priority < 1 && !this.cache.has(req.key)
       && !this.failed.has(req.key) && !this.pending.has(req.key));
-    for (const [key, controller] of this.pending) {
+    for (const [key, { controller, prefetch }] of this.pending) {
       const request = next.get(key);
-      if (!request || (visiblePending && request.priority >= 1)) controller.abort();
+      if (!request || (visiblePending && request.priority >= 1)
+        || (prefetch && request.level === 0 && request.priority < 1)) controller.abort();
     }
     for (const key of this.failed) if (!next.has(key)) this.failed.delete(key);
-    for (const key of this.retries) if (!next.has(key)) this.retries.delete(key);
+    for (const [key, timer] of this.retryTimers) {
+      if (!next.has(key)) {
+        clearTimeout(timer);
+        this.retryTimers.delete(key);
+      }
+    }
+    for (const key of this.retries.keys()) if (!next.has(key)) this.retries.delete(key);
     this.trim();
     this.pump();
   }
@@ -137,35 +148,27 @@ export class TileScheduler {
     for (const request of work) {
       if (this.pending.size >= this.concurrency) break;
       const { key, source, level, x, y } = request;
-      if (request.priority >= 1 && this.bytes + 512 * 512 * 4 > this.budget) break;
+      const prefetch = request.priority >= 1;
+      if (prefetch && this.bytes + 512 * 512 * 4 > this.budget) break;
       const controller = new AbortController();
-      this.pending.set(key, controller);
-      void this.read(source, level, x, y, controller.signal).then(decoded => {
+      this.pending.set(key, { controller, prefetch });
+      void this.read(source, level, x, y, controller.signal, prefetch).then(decoded => {
         const current = this.demand.get(key);
         if (controller.signal.aborted || !current || this.sources.get(source.asset.id)?.key !== source.key) {
           decoded.bitmap.close();
           return;
         }
         this.bytes += decoded.bitmap.width * decoded.bitmap.height * 4;
+        this.retries.delete(key);
         this.cache.set(key, { ...decoded, key, sourceKey: source.key, ready: performance.now(),
           fade: current.priority < 1 ? current.fade : 0 });
         this.trim();
         this.peakBytes = Math.max(this.peakBytes, this.bytes);
         this.frame();
-      }).catch(() => {
+      }).catch(error => {
         if (controller.signal.aborted) return;
         this.failed.add(key);
-        if ((this.demand.get(key)?.priority ?? Infinity) >= 1 || this.retries.has(key)) return;
-        if (this.retry === undefined) this.retry = setTimeout(() => {
-          this.retry = undefined;
-          for (const failed of this.failed) {
-            if ((this.demand.get(failed)?.priority ?? Infinity) < 1 && !this.retries.has(failed)) {
-              this.failed.delete(failed);
-              this.retries.add(failed);
-            }
-          }
-          this.pump();
-        }, 700);
+        if ((this.demand.get(key)?.priority ?? Infinity) < 1) this.retryVisible(key, error);
       }).finally(() => {
         this.pending.delete(key);
         this.pump();
@@ -173,10 +176,27 @@ export class TileScheduler {
     }
   }
 
+  private retryVisible(key: string, error: unknown) {
+    const attempts = this.retries.get(key) ?? 0;
+    const overloaded = error instanceof ImageOpenError && error.status === 503;
+    if (attempts >= (overloaded ? 4 : 1)) return;
+    const delay = overloaded ? Math.max(error.retryAfterMs ?? 0, 1000 * 2 ** attempts) : 700;
+    if (delay > 2_147_483_647) return;
+    this.retries.set(key, attempts + 1);
+    this.retryTimers.set(key, setTimeout(() => {
+      this.retryTimers.delete(key);
+      if ((this.demand.get(key)?.priority ?? Infinity) < 1) {
+        this.failed.delete(key);
+        this.pump();
+      }
+    }, delay));
+  }
+
   close() {
     this.disposed = true;
-    clearTimeout(this.retry);
-    for (const request of this.pending.values()) request.abort();
+    for (const timer of this.retryTimers.values()) clearTimeout(timer);
+    this.retryTimers.clear();
+    for (const { controller } of this.pending.values()) controller.abort();
     for (const [key, entry] of this.cache) this.release(key, entry);
     this.demand.clear();
     this.sources.clear();

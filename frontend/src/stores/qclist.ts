@@ -25,6 +25,7 @@ import { pathLeafOf } from './queue.js';
 import { useViewerStore } from './viewer.js';
 import { useScenesStore } from './scenes.js';
 import { registerViewerObservation } from '../lib/viewerContext';
+import { throwIfAborted } from '../lib/signals';
 
 const LS_KEY = 'sr.viewer.qcList';
 
@@ -389,7 +390,7 @@ export const useQcListStore = defineStore('qclist', () => {
         nosr: async (it, res, signal) => {
           const r = res as SceneResolveResult;
           const sib = await apiSceneSiblings(loadSrConfig(), r.row.id, undefined, false, [], requestSignal(signal), true);
-          signal.throwIfAborted();
+          throwIfAborted(signal);
           const item = nosrItemOf(sib);
           let after = bodyIds.get(it.name);
           const hasNosr = !!item?.id && !!item.W && !!item.H;
@@ -408,7 +409,7 @@ export const useQcListStore = defineStore('qclist', () => {
         old: withOld ? async (it, res, signal) => {
           const r = res as SceneResolveResult;
           const sib = await apiSceneSiblings(loadSrConfig(), r.row.id, 'old', false, [], requestSignal(signal));
-          signal.throwIfAborted();
+          throwIfAborted(signal);
           const item = sib.items.find((v) => v.kind === 'product' && v.exists);
           if (!item?.id || item.W == null || item.H == null) return;
           const meta = { ...nosrMeta(sib, item), stageKind: 'product' as const, stageSuffix: 'old' };

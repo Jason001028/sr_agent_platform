@@ -7,6 +7,7 @@ import {useViewerStore} from '../viewer';
 import {computeStats} from '../../lib/tifDecode';
 import {browserKit} from '../../lib/browserKit';
 import type {ViewerRec} from '../viewer';
+import type { TileSource } from '../../lib/tileSource';
 const ctx={putImageData:vi.fn()};
 function record(id:number,values:number[],route:'sparse'|'jpg'='sparse'):ViewerRec {
  const src=new Float32Array(values);
@@ -59,6 +60,47 @@ it('refuses mixed DN and irreversible JPG domains without granting a false share
  s.setCompareMode('split');s.paneA=1;s.paneB=2;await nextTick();
  expect(s.sharedStretchReason).toContain('数据来源');s.setStretchLink('shared');expect(s.stretchLink).toBe('independent');
  s.activeId=2;expect(s.histogramSnapshot()?.source).toContain('不能恢复原始 DN');
+});
+it('keeps a repair pair on the backup DN window and restores independent display outside the comparison',async()=>{
+ const s=useViewerStore();
+ const after=record(1,[100,200],'jpg'),before=record(2,[100,200],'jpg');
+ after.name='PAN';before.name='PAN_old_latest';
+ for(const rec of [after,before]){
+  rec.srcRev=`rev-${rec.id}`;
+  rec.tileSource={key:rec.name,asset:{id:rec.name,name:rec.name+'.tif'},
+   info:{displayProfiles:true,dtype:'uint16',photometric:1,band:1,rasterVersion:rec.srcRev}} as TileSource;
+ }
+ const fetch=vi.spyOn(globalThis,'fetch').mockImplementation(async input=>{
+  const backup=String(input).includes('PAN_old_latest');
+  return Response.json({rasterVersion:backup?'rev-2':'rev-1',min:0,max:900,
+   bounds:[0,900],p2:backup?110:20,p98:backup?650:200,total:2,hist:[1,1]});
+ });
+ s.recs.push(after,before);s.activeId=1;
+ s.setCompareMode('split');s.paneA=1;s.paneB=2;
+ const [a,b]=s.recs;
+ await vi.waitFor(()=>expect(a.displayStretch?.low).toBe(110));
+ expect(fetch.mock.calls.some(([url])=>String(url).includes('PAN_old_latest/tiles/stats'))).toBe(true);
+ expect(s.stretchLink).toBe('shared');
+ expect(a.tileDisplay).toBe('window:1.10000000000e+2:6.50000000000e+2');
+ expect(b.tileDisplay).toBe(a.tileDisplay);
+ s.setStretchBounds(90,450);
+ expect(b.tileDisplay).toBe('window:9.00000000000e+1:4.50000000000e+2');
+ expect(a.tileDisplay).toBe(b.tileDisplay);
+ s.setStretchBounds(250,250);
+ expect(b.tileDisplay).toBe('window:9.00000000000e+1:4.50000000000e+2');
+ s.setCompareMode('flicker');await nextTick();
+ expect(s.compareMode).toBe('flicker');
+ expect(s.stretchLink).toBe('shared');
+ expect(a.tileDisplay).toBe(b.tileDisplay);
+ s.resetHistogramStretch();
+ expect(a.tileDisplay).toBe('window:1.10000000000e+2:6.50000000000e+2');
+ expect(b.tileDisplay).toBe(a.tileDisplay);
+ s.setStretchLink('independent');
+ expect(a.tileDisplay).toBeUndefined();expect(b.tileDisplay).toBeUndefined();
+ s.setStretchLink('shared');
+ expect(a.tileDisplay).toBe('window:1.10000000000e+2:6.50000000000e+2');
+ s.setCompareMode('off');await nextTick();
+ expect(a.tileDisplay).toBeUndefined();expect(b.tileDisplay).toBeUndefined();
 });
 it('last interaction wins and removal prevents asynchronous paints from reviving a card',async()=>{
  const s=useViewerStore();s.recs.push(record(1,[0,100,200,300]));s.activeId=1;

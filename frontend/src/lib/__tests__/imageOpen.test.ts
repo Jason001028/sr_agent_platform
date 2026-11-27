@@ -1,13 +1,27 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from 'vitest';
 import { LoadControl } from '../loadControl';
+import { resetPreviewCache } from '../api';
 vi.mock('../local_preview',()=>({sourceFingerprint:vi.fn().mockResolvedValue({name:'a.tif',size:9,samples:['YQ==','YQ==','YQ==']})}));
 import { createPickerSession, fetchAssetTile, fetchAssetTileInfo, fetchPreviewAsset, uploadPreviewFile, waitPicker } from '../imageOpen';
 import type { PreviewAsset } from '../imageOpen';
 const token='a'.repeat(64), id='b'.repeat(64);
 const asset={id,name:'a.tif',W:20,H:10,size:9,uploaded:true,serverPath:null,sourceRev:'revision',fingerprint:{name:'a.tif',size:9,samples:[]}} satisfies PreviewAsset;
-afterEach(()=>{vi.useRealTimers();vi.unstubAllGlobals();});
+afterEach(()=>{vi.useRealTimers();vi.unstubAllGlobals();resetPreviewCache();});
 const response=(value:unknown)=>new Response(JSON.stringify(value),{headers:{'Content-Type':'application/json'}});
+
+it('revalidates bounded asset bytes and reuses the Blob on 304', async () => {
+  const headers = { ETag: '"preview"', 'X-SR-Preview-W': '10', 'X-SR-Preview-H': '5' };
+  const fetch = vi.fn()
+    .mockResolvedValueOnce(new Response('jpeg', { headers }))
+    .mockResolvedValueOnce(new Response(null, { status: 304, headers }));
+  vi.stubGlobal('fetch', fetch);
+  const first = await fetchPreviewAsset(asset, 2);
+  const second = await fetchPreviewAsset(asset, 2);
+  expect(second.blob).toBe(first.blob);
+  expect(second).toMatchObject({ width: 10, height: 5 });
+  expect(fetch.mock.calls[1][1]).toMatchObject({ headers: { 'If-None-Match': '"preview"' } });
+});
 
 it('fetches the asset Tile and geometry with cancellation and the requested band', async () => {
   const signal = new AbortController().signal;
@@ -25,6 +39,18 @@ it('fetches the asset Tile and geometry with cancellation and the requested band
   expect(result.blob.type).toBe('image/png');
   expect(mockedFetch).toHaveBeenNthCalledWith(1, expect.stringContaining(`/assets/${id}/tiles?band=2`), { signal });
   expect(mockedFetch).toHaveBeenNthCalledWith(2, expect.stringContaining(`/assets/${id}/tiles/1/1/0?band=2`), { signal });
+});
+
+it('marks prefetch without changing the URL and returns the server retry delay', async () => {
+  const signal = new AbortController().signal;
+  const fetch = vi.fn(async () => new Response('{"detail":"Tile queue is full"}', {
+    status: 503, headers: { 'Retry-After': '3' },
+  }));
+  vi.stubGlobal('fetch', fetch);
+  await expect(fetchAssetTile(asset, 0, 0, 0, signal, 1, undefined, undefined, undefined, true))
+    .rejects.toMatchObject({ status: 503, retryAfterMs: 3000 });
+  expect(fetch).toHaveBeenCalledWith(expect.stringContaining(`/assets/${id}/tiles/0/0/0?band=1`),
+    { signal, headers: { 'X-SR-Tile-Priority': 'prefetch' } });
 });
 
 it('encodes an exact callback URL as data in the native protocol',async()=>{

@@ -31,7 +31,11 @@ export const jpegPlans = new WeakMap<Blob, PreviewPlan>();
 
 export async function previewResponseBlob(response: Response): Promise<Blob> {
   const blob = await response.blob();
-  const header = response.headers.get('X-SR-Preview-Plan');
+  return applyPreviewResponsePlan(blob, response.headers);
+}
+
+export function applyPreviewResponsePlan(blob: Blob, headers: Headers): Blob {
+  const header = headers.get('X-SR-Preview-Plan');
   if (header) {
     try {
       const plan = JSON.parse(header) as PreviewPlan;

@@ -10,7 +10,7 @@ export default defineConfig({
   plugins: [vue(), explorerSetupPlugin()],
   base: '/',
   build: {
-    target: 'es2022', // 仅 Chromium 系内网机，直接用现代目标，产物更小
+    target: 'chrome96', // 为内网 Chrome 96 编译语法，运行时 API 由兼容代码处理
     outDir: 'dist',
     sourcemap: false,
     // Vite 6 的 @rollup/plugin-commonjs 默认只处理 node_modules；src/vendor 三库

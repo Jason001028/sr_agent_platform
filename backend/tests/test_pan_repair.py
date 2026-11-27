@@ -192,6 +192,40 @@ class TestPanRepair(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'outside the publication mask'):
                 repair.compose(self.gdal, self.pan, self.nosr, self.mask, model, candidate, self.scene)
 
+    def test_exact_2x_reduction_batches_rows_without_losing_single_pixels(self):
+        pixels = np.zeros((258, 6), dtype=np.uint8)
+        for y, x in ((0, 0), (127, 1), (128, 2), (255, 3), (257, 5)):
+            pixels[y, x] = 255
+        tifffile.imwrite(self.mask, pixels)
+        output = self.scene / 'reduced.tif'
+        read = Raster.ReadAsArray
+        windows = []
+
+        def track(raster, x, y, w, h):
+            windows.append((x, y, w, h))
+            return read(raster, x, y, w, h)
+
+        with patch.object(Raster, 'ReadAsArray', track):
+            repair.reduce_mask(self.gdal, self.mask, output, 3, 129, constrained=True)
+        self.assertEqual(windows, [(0, 0, 6, 128), (0, 128, 6, 128), (0, 256, 6, 2)])
+        expected = np.any(pixels.reshape(129, 2, 3, 2), axis=(1, 3)).astype(np.uint8) * 255
+        np.testing.assert_array_equal(tifffile.imread(output), expected)
+
+        pixels[-1, -1] = 7
+        tifffile.imwrite(self.mask, pixels)
+        repair.reduce_mask(self.gdal, self.mask, output, 3, 129)
+        np.testing.assert_array_equal(tifffile.imread(output), expected)
+        with self.assertRaisesRegex(ValueError, 'binary 0/255'):
+            repair.reduce_mask(self.gdal, self.mask, output, 3, 129, constrained=True)
+
+    def test_odd_mask_size_keeps_conservative_fractional_coverage(self):
+        pixels = np.zeros((5, 7), dtype=np.uint8)
+        pixels[2, 2] = 255
+        tifffile.imwrite(self.mask, pixels)
+        output = self.scene / 'reduced.tif'
+        repair.reduce_mask(self.gdal, self.mask, output, 3, 2, constrained=True)
+        np.testing.assert_array_equal(tifffile.imread(output), [[255, 255, 0], [255, 255, 0]])
+
     def test_windowed_inference_matches_dense_crop_at_image_edges_and_tile_seam(self):
         # Two SR windows meet at x=4 after removing the left wrap.
         windows = ((slice(0, 6), slice(0, 6)), (slice(0, 6), slice(6, 12)))
@@ -707,9 +741,12 @@ class TestScRepair(unittest.TestCase):
         self.assertEqual(self.params['repair_revision']['nosr'], repair.signature(self.nosr))
         tifffile.imwrite(self.mask, np.full((6, 7), 255, dtype=np.uint8))
         self.config.write_text(build_config_xml(repair_request(self.params)), encoding='utf-8')
-        with self.assertRaisesRegex(ValueError, 'Mask dimensions match neither body nor NOSR'):
-            repair.run(self.config, 'unused-inference.py', gdal=self.gdal,
-                       execute=lambda _: self.fail('inference must not run on the SC grid'))
+        execute = Mock()
+        with patch.object(repair.shutil, 'copyfile') as copy:
+            with self.assertRaisesRegex(ValueError, 'Mask dimensions match neither body nor NOSR'):
+                repair.run(self.config, 'unused-inference.py', gdal=self.gdal, execute=execute)
+        copy.assert_not_called()
+        execute.assert_not_called()
         mask = np.zeros((8, 8), dtype=np.uint8)
         mask[3, 3] = 255
         tifffile.imwrite(self.mask, mask)

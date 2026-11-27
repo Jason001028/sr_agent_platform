@@ -23,6 +23,23 @@ def fixture(path, *, subifds=True, big=False, overview=True, compressed=False):
 
 
 class TestOverview(unittest.TestCase):
+    def test_large_tiled_deflate_has_bounded_jpeg_fallback(self):
+        try:
+            from osgeo import gdal
+        except ImportError:
+            self.skipTest("GDAL preview fallback is unavailable")
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'large.tif'
+            ds = gdal.GetDriverByName('GTiff').Create(
+                str(path), 9000, 9000, 1, gdal.GDT_UInt16,
+                options=['TILED=YES', 'COMPRESS=DEFLATE', 'SPARSE_OK=YES'])
+            ds.GetRasterBand(1).WriteArray(np.full((1024, 1024), 3000, dtype=np.uint16), 4096, 4096)
+            ds = None
+            pixels = pj.build_preview_pixels(path, 512)
+            self.assertEqual(pixels.shape, (512, 512))
+            self.assertEqual(pixels.dtype, np.uint8)
+            self.assertGreater(int(np.ptp(pixels)), 0)
+
     def test_selection_and_exact_dimensions(self):
         for sub in (True, False):
             for big in (True, False):

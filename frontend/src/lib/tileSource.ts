@@ -1,6 +1,7 @@
 import { fetchAssetTile, fetchAssetTileInfo } from './imageOpen';
 import type { AssetTile, AssetTileInfo, PreviewAsset } from './imageOpen';
 import type { DisplayStretch } from './histogramStretch';
+import { throwIfAborted } from './signals';
 
 export const TILE_OVERVIEW_EDGE = 3200;
 
@@ -54,10 +55,11 @@ export function overviewDiv(width: number, height: number, requested: number) {
   return Math.min(32, Math.max(requested, 2 ** Math.ceil(Math.log2(required))));
 }
 
-export async function loadTile(source: TileSource, level: number, x: number, y: number, signal: AbortSignal) {
+export async function loadTile(source: TileSource, level: number, x: number, y: number, signal: AbortSignal,
+  prefetch = false) {
   const { tile, blob } = await fetchAssetTile(source.asset, level, x, y, signal, source.info.band,
     source.info.displayProfiles ? (source.display ?? 'equal') : undefined,
-    source.sampling, source.info.displayProfiles ? source.info.stretchVersion : undefined);
+    source.sampling, source.info.displayProfiles ? source.info.stretchVersion : undefined, prefetch);
   const { info } = source;
   const step = 2 ** level, span = info.tileSize * step;
   const w = Math.min(span, info.width - x * span), h = Math.min(span, info.height - y * span);
@@ -72,11 +74,11 @@ export async function loadTile(source: TileSource, level: number, x: number, y: 
     || tile.width !== Math.ceil(w / step) || tile.height !== Math.ceil(h / step)) {
     throw new Error('Tile source or geometry changed');
   }
-  signal.throwIfAborted();
+  throwIfAborted(signal);
   const bitmap = await createImageBitmap(blob);
   if (signal.aborted || bitmap.width !== tile.width || bitmap.height !== tile.height) {
     bitmap.close();
-    signal.throwIfAborted();
+    throwIfAborted(signal);
     throw new Error('Tile bitmap dimensions changed');
   }
   return { tile, bitmap };

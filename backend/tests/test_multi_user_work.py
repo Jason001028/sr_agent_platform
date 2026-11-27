@@ -21,6 +21,33 @@ from backend.tests import allowed_roots_env
 
 
 class WorkQueueTests(unittest.IsolatedAsyncioTestCase):
+    async def test_queued_preview_is_removed_only_after_last_waiter_leaves(self):
+        queue = HeavyWork()
+        entered, release = threading.Event(), threading.Event()
+        def block():
+            entered.set()
+            assert release.wait(10)
+
+        running = asyncio.create_task(queue.run(block))
+        try:
+            self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+            key = ("preview", "obsolete")
+            job = mock.Mock(return_value=True)
+            clients = [asyncio.create_task(queue.run(job, key=key, cancel_unobserved=True)) for _ in range(2)]
+            await asyncio.sleep(0)
+            clients[0].cancel()
+            await asyncio.gather(clients[0], return_exceptions=True)
+            self.assertIn(key, queue.inflight)
+            clients[1].cancel()
+            await asyncio.gather(clients[1], return_exceptions=True)
+            self.assertNotIn(key, queue.inflight)
+            self.assertEqual(queue.snapshot()["queued"], 0)
+        finally:
+            release.set()
+            await running
+            await queue.close()
+        job.assert_not_called()
+
     async def test_cancelled_database_wait_drains_before_store_shutdown(self):
         from backend.services.async_work import run_sync
         entered, release, exited = threading.Event(), threading.Event(), threading.Event()
@@ -125,6 +152,19 @@ class PreviewConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         self.app.state.store.close()
         self.env.stop()
         self.tmp.cleanup()
+
+    async def test_scene_reuses_asset_preview_and_clear_invalidates_both(self):
+        asset = self.app.state.image_open.asset(self.source)
+        asset_url = f"/api/image-open/assets/{asset['id']}/preview?div=4"
+        first = await self.client.get(asset_url)
+        self.assertEqual(first.status_code, 200, first.text)
+        with mock.patch.object(pj, "build_preview_pixels", side_effect=AssertionError("must reuse asset")):
+            result = await self.client.get(self.url + "?div=4")
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.content, first.content)
+        cleared = await self.client.post("/api/scenes/clear-preview", json={"ids": [scene_id_abs(self.source)]})
+        self.assertEqual(cleared.status_code, 200, cleared.text)
+        self.assertIsNone(self.app.state.image_open.preview(asset["id"], 4, True))
 
     async def test_slow_preview_keeps_queries_controls_and_cached_image_responsive(self):
         # Build a different tier before blocking the raster worker.

@@ -87,7 +87,8 @@ window.addEventListener('scroll', positionCard, true);
         </span>
       </button>
     </span>
-    <span class="sr-status" role="status" aria-live="polite">{{ message }}</span>
+    <span class="sr-status" :class="{ 'sr-status-visible': state === 'error' || state === 'unknown' }"
+      role="status" aria-live="polite">{{ message }}</span>
     <button v-if="state === 'unknown'" class="sr-link" @click="emit('query')">查询已有任务状态 →</button>
     <Teleport to="body">
       <Transition name="sr-receipt">
@@ -117,7 +118,7 @@ window.addEventListener('scroll', positionCard, true);
 .sr-compact .sr-submit.submitting { width: 32px; border-radius: 50%; }
 .sr-compact .sr-submit.accepted { background: #287858; color: #fff; opacity: 1; }
 .sr-compact .sr-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-.sr-compact:has(.error) .sr-status, .sr-compact:has(.unknown) .sr-status { position: fixed; right: 18px; bottom: 110px; width: min(320px, calc(100vw - 36px)); height: auto; clip-path: none; padding: 12px; border-radius: 8px; background: var(--surface); border: 1px solid var(--warn-line); z-index: 2000; }
+.sr-compact .sr-status-visible { position: fixed; right: 18px; bottom: 110px; width: min(320px, calc(100vw - 36px)); height: auto; clip-path: none; padding: 12px; border-radius: 8px; background: var(--surface); border: 1px solid var(--warn-line); z-index: 2000; }
 .sr-submit:disabled:not(.submitting):not(.unknown) { opacity: .55; cursor: not-allowed; }
 .sr-receipt { max-height: calc(100vh - 24px); overflow-y: auto; }
 .sr-submit { width: 142px; height: 36px; border: 1px solid transparent; border-radius: 9px; background: var(--tb-primary); color: white; font-family: inherit; font-size: 13px; font-weight: 600; cursor: pointer; transition: background var(--motion-sr-morph) var(--ease-sr), color var(--motion-sr-morph), transform 110ms ease-out; }

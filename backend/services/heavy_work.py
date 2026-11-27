@@ -10,7 +10,7 @@ import time
 from collections import deque, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, Future
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +34,7 @@ class HeavyWork:
         self.limit = limit
         self.queues = (deque(), deque(), deque())
         self.inflight = {}
+        self.preview_waiters = {}
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="raster")
         self.reader = ThreadPoolExecutor(max_workers=2, thread_name_prefix="preview-cache")
         self.read_slots = asyncio.Semaphore(2)
@@ -65,7 +66,8 @@ class HeavyWork:
                 await asyncio.shield(task)
                 raise
 
-    async def run(self, fn, *args, key=None, background=False, evidence=False, _ticket=None):
+    async def run(self, fn, *args, key=None, background=False, evidence=False, _ticket=None,
+                  cancel_unobserved=False, ownership=None):
         self.loop = asyncio.get_running_loop()
         if _ticket is not None and _ticket.cancelled():
             return None
@@ -73,10 +75,18 @@ class HeavyWork:
             raise WorkCapacityError("重任务调度正在关闭")
         if key is not None and key in self.inflight:
             self.deduplicated += 1
-            return await asyncio.shield(self.inflight[key])
+            future = self.inflight[key]
+            if not cancel_unobserved:
+                self.preview_waiters.pop(future, None)
+            return await self._wait(key, future)
         if sum(map(len, self.queues)) >= self.limit:
             raise WorkCapacityError()
         future = asyncio.get_running_loop().create_future()
+        if ownership is not None:
+            ownership.__enter__()
+            future.add_done_callback(lambda _: ownership.__exit__(None, None, None))
+        if cancel_unobserved:
+            self.preview_waiters[future] = 0
         # A disconnected sole caller must not produce an unobserved exception.
         future.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
         if key is not None:
@@ -87,7 +97,42 @@ class HeavyWork:
         self.queues[2 if evidence else int(background)].append((fn, args, key, future, time.monotonic(), _ticket))
         if self.drain is None or self.drain.done():
             self.drain = asyncio.create_task(self._drain())
-        return await asyncio.shield(future)
+        return await self._wait(key, future)
+
+    async def _wait(self, key, future):
+        if future in self.preview_waiters:
+            self.preview_waiters[future] += 1
+        try:
+            return await asyncio.shield(future)
+        finally:
+            if future in self.preview_waiters:
+                self.preview_waiters[future] -= 1
+                if not self.preview_waiters[future]:
+                    self.preview_waiters.pop(future)
+                    for queue in self.queues:
+                        job = next((job for job in queue if job[3] is future), None)
+                        if job is not None:
+                            queue.remove(job)
+                            self.inflight.pop(key, None)
+                            self.states.pop(key, None)
+                            future.cancel()
+                            break
+
+    async def preview_request(self, request, fn, *args, key, ownership=None):
+        async def disconnected():
+            while (await request.receive())["type"] != "http.disconnect":
+                pass
+
+        work = asyncio.create_task(self.run(fn, *args, key=key, cancel_unobserved=True,
+                                            ownership=ownership))
+        disconnect = asyncio.create_task(disconnected())
+        try:
+            await asyncio.wait((work, disconnect), return_when=asyncio.FIRST_COMPLETED)
+            return work.result() if work.done() else Response(status_code=499)
+        finally:
+            work.cancel()
+            disconnect.cancel()
+            await asyncio.gather(work, disconnect, return_exceptions=True)
 
     async def _drain(self):
         streak = 0

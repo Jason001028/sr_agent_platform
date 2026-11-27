@@ -1,5 +1,6 @@
 <!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>Local load acceptance</title>
 <body><div id="root"></div><script type="module">
+import '/src/lib/browserCompatibility.ts';
 import { createApp, h, watch } from 'vue';
 import { createPinia, setActivePinia } from 'pinia';
 import { useViewerStore } from '/src/stores/viewer.ts';

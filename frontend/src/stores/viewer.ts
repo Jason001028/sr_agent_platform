@@ -93,7 +93,7 @@ import type { ViewerBackground } from '../lib/viewerBackground';
 import type { ViewHistoryEntry } from '../lib/viewHistory';
 import {VIEW_HISTORY_MS} from '../lib/motion';
 import type { SpotlightMode } from '../lib/spotlight.js';
-import { buildStats, luma, STAT_HI } from '../lib/roiStats.js';
+import { buildStats, luma, STAT_HI, STAT_MAX_PX } from '../lib/roiStats.js';
 import type { RoiStats } from '../lib/roiStats.js';
 import { downloadBlob } from '../lib/saver.js';
 import { useQueueStore, pathLeafOf, defaultForm, formToSubmit } from './queue.js';
@@ -128,7 +128,8 @@ export interface ViewerRec {
   W: number;
   H: number;
   thumb: KitCanvas | null;
-  src: Float32Array | null;
+  src: Float32Array | Uint8Array | null;
+  previewPixelsDeferred?: boolean;
   srcw: number;
   srch: number;
   nbands: number;
@@ -278,7 +279,7 @@ function roiStatsOnCanvas(rec: ViewerRec, poly: Poly): RoiStats | null {
   const by1 = Math.min(th - 1, Math.max(0, Math.floor(maxy)));
   const bw = bx1 - bx0 + 1, bh = by1 - by0 + 1;
   if (bw < 1 || bh < 1) return null;
-  const region = ctx.getImageData(bx0, by0, bw, bh);
+  const region = canvasStatsRegion(ctx, bx0, by0, bw, bh);
   const shifted = poly.map((p) => [p[0] - bx0, p[1] - by0] as Pt);
   return buildStats(region, shifted);
 }
@@ -287,8 +288,29 @@ function roiStatsOnCanvas(rec: ViewerRec, poly: Poly): RoiStats | null {
    语义与 ROI 统计同源：整景/视野矩形多边形喂 buildStats，阈值 STAT_HI(=200) 高亮占比即
    「疑似云占比」——PAN 没有真实云掩码时这是亮度启发估算，亮雪/亮建筑会同样计入，非入库云量口径。 */
 
-/** 整景云量 +（可选）疑似云区红叠：同一份整幅 getImageData 喂 buildStats 与 makeCloudOverlay，
-    避免两次 256MB 级瞬态副本；整幅读失败（内存/画布上限）→ 双 null（UI 显 —，不崩）。 */
+const LARGE_PREVIEW_PIXELS = 8_000_000;
+
+function canvasStatsRegion(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number) {
+  return width * height <= STAT_MAX_PX ? ctx.getImageData(x, y, width, height)
+    : { width, height, readRow: (row: number) => ctx.getImageData(x, y + row, width, 1).data };
+}
+
+export function materializePreviewPixels(rec: ViewerRec): boolean {
+  if (rec.src) return true;
+  const ctx = rec.previewPixelsDeferred && (rec.thumb as HTMLCanvasElement | null)?.getContext('2d');
+  if (!ctx || !rec.thumb) return false;
+  const { width, height } = rec.thumb;
+  const rows = Math.max(1, Math.min(512, Math.floor(16 * 1024 * 1024 / (width * 4))));
+  const decoded = width * height >= LARGE_PREVIEW_PIXELS
+    ? sceneDecodeCanvas(ctx, width, height, rows, true) : sceneDecodeCanvas(ctx, width, height, rows);
+  rec.src = markRaw(decoded.src);
+  rec.stats = decoded.stats ? markRaw(decoded.stats) : null;
+  if (rec.previewPlan) rec.previewPlan = { ...rec.previewPlan, dnBytes: decoded.src.byteLength };
+  delete rec.previewPixelsDeferred;
+  return true;
+}
+
+/** Large canvases read only the rows used by the existing statistics and overlay samples. */
 function buildSceneCloud(rec: ViewerRec, wantOverlay: boolean): { stats: RoiStats | null; overlay: HTMLCanvasElement | null } {
   const cv = rec.thumb as unknown as HTMLCanvasElement | null;
   if (!cv) return { stats: null, overlay: null };
@@ -296,29 +318,36 @@ function buildSceneCloud(rec: ViewerRec, wantOverlay: boolean): { stats: RoiStat
   if (tw <= 0 || th <= 0) return { stats: null, overlay: null };
   const ctx = cv.getContext('2d');
   if (!ctx) return { stats: null, overlay: null };
-  let img: ImageData;
-  try { img = ctx.getImageData(0, 0, tw, th); } catch { return { stats: null, overlay: null }; }
-  const stats = buildStats(img, [[0, 0], [tw, 0], [tw, th], [0, th]]);
+  let stats: RoiStats;
+  const readRow = (y: number) => ctx.getImageData(0, y, tw, 1).data;
+  let region: ReturnType<typeof canvasStatsRegion>;
+  try {
+    region = canvasStatsRegion(ctx, 0, 0, tw, th);
+    stats = buildStats(region, [[0, 0], [tw, 0], [tw, th], [0, th]]);
+  } catch { return { stats: null, overlay: null }; }
   let overlay: HTMLCanvasElement | null = null;
   if (wantOverlay) {
-    try { overlay = makeCloudOverlay(img, tw, th); } catch { overlay = null; }
+    try {
+      const pixels = 'data' in region ? region.data : undefined;
+      overlay = makeCloudOverlay(pixels ? y => pixels.subarray(y * tw * 4, (y + 1) * tw * 4) : readRow, tw, th);
+    } catch { overlay = null; }
   }
   return { stats, overlay };
 }
 
 /** 把整幅 RGBA 降采样成 ≤CLOUD_OVERLAY_MAX 的半透明红叠画布：源像元 luma≥STAT_HI → 红。
     逐目标像元按 step 抽源点（云是大片高亮区，抽样已足够）→ 输出画布 ≤2048² RGBA（≤16MB）。 */
-function makeCloudOverlay(img: ImageData, tw: number, th: number): HTMLCanvasElement {
+function makeCloudOverlay(readRow: (y: number) => Uint8ClampedArray, tw: number, th: number): HTMLCanvasElement {
   const step = Math.max(1, Math.ceil(Math.max(tw, th) / CLOUD_OVERLAY_MAX));
   const ow = Math.max(1, Math.ceil(tw / step));
   const oh = Math.max(1, Math.ceil(th / step));
-  const data = img.data;
   const out = new Uint8ClampedArray(ow * oh * 4);
   for (let ry = 0; ry < oh; ry++) {
     const sy = Math.min(th - 1, ry * step);
+    const data = readRow(sy);
     for (let cx = 0; cx < ow; cx++) {
       const sx = Math.min(tw - 1, cx * step);
-      const o4 = (sy * tw + sx) * 4;
+      const o4 = sx * 4;
       const Y = luma(data[o4], data[o4 + 1], data[o4 + 2]);
       if (Y >= STAT_HI) {
         const p = (ry * ow + cx) * 4;
@@ -345,9 +374,9 @@ function statsOnRect(rec: ViewerRec, r: Rect): RoiStats | null {
   const w = x1 - x0 + 1, h = y1 - y0 + 1;
   const ctx = cv.getContext('2d');
   if (!ctx) return null;
-  let img: ImageData;
-  try { img = ctx.getImageData(x0, y0, w, h); } catch { return null; }
-  return buildStats(img, [[0, 0], [w, 0], [w, h], [0, h]]);
+  try {
+    return buildStats(canvasStatsRegion(ctx, x0, y0, w, h), [[0, 0], [w, 0], [w, h], [0, h]]);
+  } catch { return null; }
 }
 
 function fmtBytes(n: number): string {
@@ -525,6 +554,7 @@ export const useViewerStore = defineStore('viewer', () => {
   const cloudShow = ref(false);
   /** 疑似云区红叠画布（≤2048，draw 时放大；整幅读失败/关闭 → null）。markRaw 重字段。 */
   const cloudOverlay = ref<HTMLCanvasElement | null>(null);
+  let cloudStatsFrame = 0;
   const wandTol = ref(20);
   const merging = ref(false);
   const overlay = ref({ visible: false, title: '', sub: '', bar: false, progress: 0, indeterminate: true });
@@ -1482,10 +1512,10 @@ export const useViewerStore = defineStore('viewer', () => {
   async function ensureCardPixels(id:number):Promise<boolean> {
     const rec=recs.value.find(r=>r.id===id);
     if(!rec||rec.pending)return false;
-    if(rec.thumb&&rec.src)return true;
+    if(rec.thumb&&materializePreviewPixels(rec))return true;
     if(!rec.card)return false;
     await loadCardPixels(rec);
-    return !!rec.thumb&&!!rec.src;
+    return !!rec.thumb&&materializePreviewPixels(rec);
   }
 
   async function loadTourImage(item:SceneSibling,res:SceneSiblings,stillWanted:()=>boolean=()=>true) {
@@ -2595,8 +2625,9 @@ export const useViewerStore = defineStore('viewer', () => {
     assetAssociations.set(rec.id,job);
     rec.linkNote='服务端 JPG 已显示，正在后台核对盘阵关联；核对完成前仅预览。';
     const wanted=()=>assetAssociations.get(rec.id)===job&&recs.value.includes(rec)&&rec.previewAsset?.id===asset.id&&!rec.serverSourceVerified;
+    const signal=AbortSignal.any([job.controller.signal,AbortSignal.timeout(20000)]);
     void apiResolveScene(loadSrConfig(),{path:asset.serverPath,source_fingerprint:asset.fingerprint},
-      {signal:AbortSignal.any([job.controller.signal,AbortSignal.timeout(20000)])}).then(resolved=>{
+      {signal}).then(resolved=>{
       if(!wanted())return;
       if(resolved.row.srcRev!==asset.sourceRev||resolved.row.W!==asset.W||resolved.row.H!==asset.H) {
         rec.linkNote='服务端 JPG 已显示；盘阵源身份或尺寸已变化，未授予业务关联。';return;
@@ -2605,7 +2636,7 @@ export const useViewerStore = defineStore('viewer', () => {
       rec.linkNote='源文件已核对；使用服务端缓存 JPG。';
     }).catch(error=>{
       if(!wanted())return;
-      rec.linkNote=(error as Error)?.name==='TimeoutError'
+      rec.linkNote=(error as Error)?.name==='TimeoutError'||signal.reason?.name==='TimeoutError'
         ?'服务端 JPG 已显示；后台盘阵核对超时，仅预览，可稍后关联。'
         :'服务端 JPG 已显示；未确认盘阵业务关联，仅预览。';
     }).finally(()=>{if(assetAssociations.get(rec.id)===job)assetAssociations.delete(rec.id);});
@@ -2731,11 +2762,15 @@ export const useViewerStore = defineStore('viewer', () => {
   function recordPreview(rec: ViewerRec, source: PreviewSource, div: number, width: number, height: number,
     mode: PreviewPlan['mode'], decodeMs: number, plan?: PreviewPlan, limits: PreviewPlan['limits'] = []) {
     const exact = plan && plan.width === width && plan.height === height;
-    rec.previewPlan = exact ? plan : {
+    rec.previewPlan = exact ? {
+      ...plan, dnBytes: rec.route === 'jpg' ? (rec.src?.byteLength ?? 0) : plan.dnBytes,
+    } : {
       source, requestedDiv: div, width, height, mode, limits: plan ? [...plan.limits, 'reader'] : limits,
       scaleX: width / source.width, scaleY: height / source.height,
       pixels: width * height, decodedBytes: width * height * 4,
-      dnBytes: width * height * 4 * (mode === 'local-progressive' ? rec.nbands : 1), cache: plan?.cache,
+      dnBytes: rec.route === 'jpg' ? (rec.src?.byteLength ?? 0)
+        : width * height * 4 * (mode === 'local-progressive' ? rec.nbands : 1),
+      cache: plan?.cache,
     };
     if (import.meta.env.DEV || isDeveloperMode()) {
       console.debug('[image-preview]', { ...rec.previewPlan, decodeMs, route: rec.route });
@@ -2895,7 +2930,8 @@ export const useViewerStore = defineStore('viewer', () => {
     const requestedDiv = previewDiv.value;
     const plan = jpegPlans.get(blob);
     const reuse = plan?.artifactId && plan.artifactId === rec.previewPlan?.artifactId
-      && rec.route === 'jpg' && rec.src && rec.thumb?.width === plan.width && rec.thumb.height === plan.height;
+      && rec.route === 'jpg' && (rec.src || rec.previewPixelsDeferred)
+      && rec.thumb?.width === plan.width && rec.thumb.height === plan.height;
     const decodeStarted = performance.now();
     const cv = reuse ? rec.thumb as unknown as HTMLCanvasElement
       : control ? await control.wait(decodeJpgToCanvas(blob)) : await decodeJpgToCanvas(blob);
@@ -2909,12 +2945,14 @@ export const useViewerStore = defineStore('viewer', () => {
     if (!reuse) {
       const ctx = cv.getContext('2d');
       if (!ctx) throw new Error('取不到 2d 上下文');
-      const d = sceneDecodeCanvas(ctx, tw, th);
       rec.thumb = markRaw(cv as unknown as KitCanvas);
-      rec.src = markRaw(d.src); rec.srcw = d.tw; rec.srch = d.th;
-      rec.nbands = d.nbands;
+      rec.src = null;
+      rec.srcw = tw; rec.srch = th; rec.nbands = 1;
       rec.invert = false;
-      rec.stats = d.stats ? markRaw(d.stats) : null;
+      rec.stats = null;
+      rec.previewPixelsDeferred = true;
+      const native = tiles === undefined ? rec.tileSource : tiles;
+      if (!native?.info.displayProfiles || tw * th < LARGE_PREVIEW_PIXELS) materializePreviewPixels(rec);
     }
     rec.W = plan?.source.width ?? meta.W;
     rec.H = plan?.source.height ?? meta.H;
@@ -3624,8 +3662,9 @@ export const useViewerStore = defineStore('viewer', () => {
       盘阵场景同样走这条路：服务端生成的直方图均衡只是**底图**，显示层照常可二次
       拉伸（均衡是不可逆的，拉不回来 —— 这一点在工具栏 title 里说明）。 */
   function paintStretch(rec: ViewerRec, mode: StretchMode = stretchMode.value) {
-    if (rec.tileDisplay === 'binary' || !rec.src || !rec.thumb) return;
+    if (rec.tileDisplay === 'binary' || !rec.thumb) return;
     if(rec.displayStretch){renderDisplayStretch(rec,false);return;}
+    if (!materializePreviewPixels(rec) || !rec.src) return;
     const ctx = (rec.thumb as unknown as HTMLCanvasElement).getContext('2d');
     if (!ctx) return;
     // 逐带拉伸/上屏：16384 档位整幅 RGBA 又是约 1GB，一次分配会把
@@ -3660,7 +3699,7 @@ export const useViewerStore = defineStore('viewer', () => {
   const displayJobs=new Map<number,number>();
   const tileHistograms=shallowRef(new Map<string,BandStats>());
   const displayPaints=new Map<number,number>();
-  const displaySamples=new WeakMap<Float32Array,PixelPlane>();
+  const displaySamples=new WeakMap<Float32Array|Uint8Array,PixelPlane>();
   let stretchVersion=0;
   function cachedPlane(rec:ViewerRec):PixelPlane|null {
     if(rec.progressivePreview)return rec.progressiveDN??null;
@@ -3678,11 +3717,33 @@ export const useViewerStore = defineStore('viewer', () => {
     const d=rec.dnDomain??rec.probe;
     return d?`dn:${d.bits}:${d.sampleFormat}`:'dn:unknown';
   }
-  watch(()=>histogramRec.value?.tileSource, (source,_,onCleanup)=>{
-    if(!source?.info.displayProfiles||source.display==='binary'||tileHistograms.value.has(source.key))return;
+
+  const repairDisplayPair = computed(() => {
+    const [a, b] = comparisonStretchPair();
+    if (!a?.sceneDir || a.sceneDir !== b?.sceneDir || a.W !== b.W || a.H !== b.H) return null;
+    const stem = (rec: ViewerRec) => (rec.tileSource?.asset.name || rec.name).replace(/\.(tiff?|jpe?g)$/i, '').toLowerCase();
+    const backup = /^(.+)_old_(?:latest|2)$/;
+    if (stem(a).match(backup)?.[1] === stem(b)) return { before: a, after: b };
+    if (stem(b).match(backup)?.[1] === stem(a)) return { before: b, after: a };
+    return null;
+  });
+  const repairTonePair = computed(() => {
+    const pair = repairDisplayPair.value;
+    if (!pair) return null;
+    const { before, after } = pair;
+    const a = before.tileSource, b = after.tileSource;
+    if (!before.thumb || !after.thumb || !a?.info.displayProfiles || !b?.info.displayProfiles
+      || a.info.categorical || b.info.categorical || a.info.stretchVersion !== b.info.stretchVersion
+      || stretchDomain(before) !== stretchDomain(after)) return null;
+    return { ...pair, key: JSON.stringify([before.id, a.key, after.id, b.key]) };
+  });
+
+  watch([()=>histogramRec.value?.tileSource,()=>repairTonePair.value?.before.tileSource], (sources,_,onCleanup)=>{
     const controller=new AbortController();
     onCleanup(()=>controller.abort());
-    void fetchAssetTileStats(source.asset,source.info.band,controller.signal).then(s=>{
+    const unique = new Map(sources.filter((source): source is TileSource => !!source?.info.displayProfiles
+      && source.display !== 'binary' && !tileHistograms.value.has(source.key)).map(source => [source.key, source]));
+    for (const source of unique.values()) void fetchAssetTileStats(source.asset,source.info.band,controller.signal).then(s=>{
       if(controller.signal.aborted||s.rasterVersion!==source.info.rasterVersion)return;
       const hist=new Float64Array(s.hist),cdf=new Float64Array(hist.length);
       let sum=0;
@@ -3698,19 +3759,20 @@ export const useViewerStore = defineStore('viewer', () => {
     const [a,b]=comparisonStretchPair();
     if(!a||!b||a.id===b.id)return '请先打开两张对比影像';
     if(a.tileDisplay==='binary'||b.tileDisplay==='binary')return '掩码使用固定黑白配色';
+    if (repairDisplayPair.value && !repairTonePair.value) return '修复前后共享拉伸需要两张同 DN 数值域的源 TIFF';
+    const native = a.tileSource?.info.displayProfiles && b.tileSource?.info.displayProfiles && a.thumb && b.thumb;
     const pa=cachedPlane(a),pb=cachedPlane(b);
-    if(!pa||!pb)return '等待两张影像的缓存像素';
-    if(pa.nb!==1||pb.nb!==1)return '共享暂仅支持单波段灰度影像';
+    if(!native&&(!pa||!pb))return '等待两张影像的缓存像素';
+    if((pa?.nb??a.nbands)!==1||(pb?.nb??b.nbands)!==1)return '共享暂仅支持单波段灰度影像';
     const da=stretchDomain(a),db=stretchDomain(b);
-    if(da!==db||da==='dn:unknown'||pa.invert!==pb.invert)return '数据来源、DN 类型或反相方式不同，不能共享映射';
+    if(da!==db||da==='dn:unknown'||(!native&&(pa?.invert??a.invert)!==(pb?.invert??b.invert)))return '数据来源、DN 类型或反相方式不同，不能共享映射';
     if(da!=='display-gray'&&(!a.sceneDir||a.sceneDir!==b.sceneDir))return '缺少同景身份，不能确认两图 DN 数值域可比';
-    if([planeStats(pa)[0],planeStats(pb)[0]].some(s=>!Number.isFinite(s.min)||!Number.isFinite(s.max)))return '当前范围没有有效采样值';
+    if(!native&&pa&&pb&&[planeStats(pa)[0],planeStats(pb)[0]].some(s=>!Number.isFinite(s.min)||!Number.isFinite(s.max)))return '当前范围没有有效采样值';
     return '';
   });
   function histogramForRec(rec:ViewerRec|null,scope=histogramScope.value) {
-    const p=rec&&cachedPlane(rec);
-    if(!rec||rec.tileDisplay==='binary'||!p)return null;
-    if(rec.tileSource?.info.displayProfiles){
+    if(!rec||rec.tileDisplay==='binary')return null;
+    if(rec.thumb&&rec.tileSource?.info.displayProfiles){
       const {dtype}=rec.tileSource.info;
       const bounds=dtype==='uint16'?[0,65535]:dtype==='int16'?[-32768,32767]:dtype==='uint8'?[0,255]:[0,1];
       const stats=tileHistograms.value.get(rec.tileSource.key)??{
@@ -3721,6 +3783,8 @@ export const useViewerStore = defineStore('viewer', () => {
       return {id:rec.id,stats:[stats],mode,custom:d?.custom??false,curve:d?.curve,
         ...(d?{low:d.low,high:d.high}:presetRange(stats,mode)),source:'源 TIFF DN · 全源分层采样'};
     }
+    const p=cachedPlane(rec);
+    if(!p)return null;
     let rect:ReturnType<typeof visibleThumbRect>=null;
     if(scope==='view'){
       const pane=panes.value.find(v=>v.rec?.id===rec.id)??panes.value[0];
@@ -3740,11 +3804,70 @@ export const useViewerStore = defineStore('viewer', () => {
         rec.progressivePreview?'TIFF 采样 DN · 渐进概览':'TIFF 采样 DN · '+(p.nb===1?'单波段':'首波段直方图，RGB 共用范围')};
   }
   function histogramSnapshot(scope=histogramScope.value){return histogramForRec(histogramRec.value,scope);}
-  watch(()=>comparisonStretchPair().map(r=>r?`${r.id}:${r.srcRev??''}`:'').join('|'),()=>{stretchLink.value='independent';histogramTarget.value='active';});
+  let repairTone: {
+    automatic: boolean;
+    saved: { rec: ViewerRec; key: string; display?: string; settings?: DisplayStretch;
+      defaultMode?: StretchMode; paintedMode: ViewerRec['paintedMode'] }[];
+  } | null = null;
+
+  function restoreRepairTone() {
+    if (!repairTone) return;
+    for (const saved of repairTone.saved) {
+      const { rec } = saved;
+      if (!recs.value.includes(rec) || rec.tileSource?.key !== saved.key) continue;
+      displayJobs.set(rec.id, (displayJobs.get(rec.id) ?? 0) + 1);
+      rec.tileDisplay = saved.display;
+      rec.displayStretch = saved.settings;
+      rec.stretchDefaultMode = saved.defaultMode;
+      rec.paintedMode = saved.paintedMode;
+    }
+    repairTone = null;
+    renderTick.value++;
+  }
+
+  function applyRepairToneDefault(mode: 'linear' | 'linear2' = 'linear2') {
+    const pair = repairTonePair.value;
+    const stats = pair && histogramForRec(pair.before)?.stats;
+    if (!pair || !stats) return;
+    const reference = stats[0];
+    const limits = presetRange(reference, mode);
+    const range = limits.high > limits.low ? limits : presetRange(reference, 'linear');
+    const padding = range.low === range.high ? Math.max(1, Math.abs(range.low) * 0.01) : 0;
+    const version = ++stretchVersion;
+    for (const rec of [pair.before, pair.after]) {
+      rec.displayStretch = markRaw<DisplayStretch>({ low: range.low - padding, high: range.high + padding,
+        mode: 'linear', custom: true, stats, version, domain: stretchDomain(rec), sourceRev: rec.srcRev });
+      renderDisplayStretch(rec, false);
+    }
+  }
+
+  function startRepairTone() {
+    const pair = repairTonePair.value;
+    if (!pair) return;
+    repairTone = { automatic: true, saved: [pair.before, pair.after].map(rec => ({
+      rec, key: rec.tileSource!.key, display: rec.tileDisplay, settings: rec.displayStretch,
+      defaultMode: rec.stretchDefaultMode, paintedMode: rec.paintedMode,
+    })) };
+    stretchLink.value = 'shared';
+    applyRepairToneDefault();
+  }
+
+  watch(()=>comparisonStretchPair().map(r=>r?`${r.id}:${r.srcRev??''}`:'').join('|'),()=>{
+    if (!repairTonePair.value) stretchLink.value='independent';
+    histogramTarget.value='active';
+  });
+  watch(()=>repairTonePair.value?.key, key => {
+    restoreRepairTone();
+    stretchLink.value = 'independent';
+    if (key) startRepairTone();
+  });
+  watch(()=>tileHistograms.value.get(repairTonePair.value?.before.tileSource?.key ?? ''), stats => {
+    if (stats && repairTone?.automatic) applyRepairToneDefault();
+  });
   watch(sharedStretchReason,reason=>{if(reason)stretchLink.value='independent';});
   function renderDisplayStretch(rec:ViewerRec,lightOnly:boolean) {
-    const settings=rec.displayStretch,p=cachedPlane(rec);
-    if(!settings||!p)return;
+    const settings=rec.displayStretch;
+    if(!settings)return;
     const version=(displayJobs.get(rec.id)??0)+1;displayJobs.set(rec.id,version);
     if(rec.tileSource?.info.displayProfiles){
       const commit=()=>{
@@ -3757,6 +3880,9 @@ export const useViewerStore = defineStore('viewer', () => {
       if(lightOnly)setTimeout(commit,100);else commit();
       return;
     }
+    materializePreviewPixels(rec);
+    const p=cachedPlane(rec);
+    if(!p)return;
     let small=displaySamples.get(p.src);
     if(!small){small=samplePlane(p,undefined,512*512);displaySamples.set(p.src,small);}
     const cv=rec.stretchPreview?.width===small.w&&rec.stretchPreview?.height===small.h?rec.stretchPreview:browserKit.createCanvas(small.w,small.h);
@@ -3785,6 +3911,14 @@ export const useViewerStore = defineStore('viewer', () => {
     const rec=histogramRec.value,snapshot=histogramSnapshot();
     if(!rec||!snapshot)return;
     noteUserIntent();
+    if (repairTone) {
+      if (!custom) {
+        if (mode !== 'linear' && mode !== 'linear2') return;
+        repairTone.automatic = false;
+        applyRepairToneDefault(mode);
+        return;
+      }
+    }
     let targets=[rec],stats=snapshot.stats;
     if(rec.tileSource?.info.displayProfiles&&!custom)stretchLink.value='independent';
     if(stretchLink.value==='shared'){
@@ -3798,10 +3932,15 @@ export const useViewerStore = defineStore('viewer', () => {
     }
     const range=custom??presetRange(stats[0],mode);
     if(!Number.isFinite(range.low)||!Number.isFinite(range.high)||range.high<range.low)return;
-    const version=++stretchVersion;
+    const mapping: DisplayStretch = {...range, mode:custom?'linear':mode, custom:!!custom, stats, version:stretchVersion+1, toneAdjustment};
+    if (repairTone) {
+      if (!tileDisplayKey(mapping).startsWith('window:')) return;
+      repairTone.automatic = false;
+    }
+    stretchVersion = mapping.version;
     for(const target of targets){
       target.stretchDefaultMode??=target.paintedMode??startStretch(target.route,stretchMode.value);
-      target.displayStretch=markRaw({...range,mode:custom?'linear':mode,custom:!!custom,stats,version,domain:stretchDomain(target),sourceRev:target.srcRev,toneAdjustment});
+      target.displayStretch=markRaw({...mapping,domain:stretchDomain(target),sourceRev:target.srcRev});
       renderDisplayStretch(target,lightOnly);
     }
   }
@@ -3844,6 +3983,11 @@ export const useViewerStore = defineStore('viewer', () => {
   }
   function setStretchLink(value:'independent'|'shared') {
     if(value==='shared'&&sharedStretchReason.value){showToast(sharedStretchReason.value);return;}
+    if (repairTonePair.value) {
+      if (value === 'shared' && !repairTone) startRepairTone();
+      if (value === 'independent') { restoreRepairTone(); stretchLink.value = 'independent'; }
+      return;
+    }
     stretchLink.value=value;if(value==='shared'){
       const s=histogramSnapshot();
       const native=histogramRec.value?.tileSource?.info.displayProfiles;
@@ -3852,11 +3996,16 @@ export const useViewerStore = defineStore('viewer', () => {
     }
   }
   function resetHistogramStretch() {
+    if (repairTone) {
+      repairTone.automatic = true;
+      applyRepairToneDefault();
+      return;
+    }
     const targets=stretchLink.value==='shared'?comparisonStretchPair():[histogramRec.value];
     noteUserIntent();
     stretchLink.value='independent';
-    for(const rec of targets){if(!rec||rec.tileDisplay==='binary')continue;const p=cachedPlane(rec);if(!p)continue;
-      const stats=planeStats(p),mode=rec.stretchDefaultMode??startStretch(rec.route,stretchMode.value);
+    for(const rec of targets){if(!rec||rec.tileDisplay==='binary')continue;const snapshot=histogramForRec(rec);if(!snapshot)continue;
+      const stats=snapshot.stats,mode=rec.stretchDefaultMode??startStretch(rec.route,stretchMode.value);
       rec.displayStretch=markRaw({...presetRange(stats[0],mode),mode,custom:false,stats,version:++stretchVersion,domain:stretchDomain(rec),sourceRev:rec.srcRev});
       renderDisplayStretch(rec,false);}
     renderTick.value++;refreshRoiStats();refreshCloudStats();
@@ -4426,6 +4575,8 @@ export const useViewerStore = defineStore('viewer', () => {
 
   /** 清空云量四态（切图/删图时随图失效；缓寸分支会在同 tick refreshCloudStats 补回）。 */
   function clearCloud() {
+    if (cloudStatsFrame) cancelAnimationFrame(cloudStatsFrame);
+    cloudStatsFrame = 0;
     cloudScene.value = null;
     cloudView.value = null;
     cloudOverlay.value = null;
@@ -4434,16 +4585,24 @@ export const useViewerStore = defineStore('viewer', () => {
   /** 开图/换拉伸后重算：整景（+红叠，若开关开）与当前视野。thumb 未就绪 → 四态置空。 */
   function refreshCloudStats() {
     const rec = activeRec.value;
-    if (!rec || !rec.thumb) {
-      cloudScene.value = null;
-      cloudView.value = null;
-      cloudOverlay.value = null;
+    const thumb = rec?.thumb;
+    if (!rec || !thumb) {
+      clearCloud();
       return;
     }
-    const sc = buildSceneCloud(rec, cloudShow.value);
-    cloudScene.value = sc.stats;
-    cloudOverlay.value = sc.overlay ? markRaw(sc.overlay) : null;
-    cloudView.value = computeCloudView(sc.stats);
+    if (cloudStatsFrame) cancelAnimationFrame(cloudStatsFrame);
+    const update = () => {
+      cloudStatsFrame = 0;
+      if (activeRec.value?.id !== rec.id || rec.thumb !== thumb) return;
+      const sc = buildSceneCloud(rec, cloudShow.value);
+      cloudScene.value = sc.stats;
+      cloudOverlay.value = sc.overlay ? markRaw(sc.overlay) : null;
+      cloudView.value = computeCloudView(sc.stats);
+      if (cloudShow.value) renderTick.value++;
+    };
+    if (thumb.width * thumb.height >= LARGE_PREVIEW_PIXELS) {
+      cloudStatsFrame = requestAnimationFrame(() => { cloudStatsFrame = requestAnimationFrame(update); });
+    } else update();
   }
 
   /** 仅刷当前视野（pan/zoom 停稳后 RoiToolsTab 防抖调用，不动整景/红叠）。 */
@@ -4456,13 +4615,7 @@ export const useViewerStore = defineStore('viewer', () => {
     if (cloudShow.value === v) return;
     cloudShow.value = v;
     if (v) {
-      const rec = activeRec.value;
-      if (rec && rec.thumb) {
-        const sc = buildSceneCloud(rec, true);
-        cloudScene.value = sc.stats;                       // 同时校正整景数字
-        cloudOverlay.value = sc.overlay ? markRaw(sc.overlay) : null;
-        cloudView.value = computeCloudView(sc.stats);
-      }
+      refreshCloudStats();
     } else {
       cloudOverlay.value = null;                            // 释放
     }
@@ -5383,6 +5536,7 @@ export const useViewerStore = defineStore('viewer', () => {
     canvasAttached, setCanvasAttached,
     stretchMode, activeStretch, drawMode, drawTool, pendingRect, pendingPts, hoverPt, hoverRoi, flashRoi,
     histogramScope,histogramTarget,histogramRec,stretchLink,sharedStretchReason,histogramSnapshot,setStretchBounds,setStretchCurve,setToneAdjustment,setStretchLink,resetHistogramStretch,finishStretchInteraction,
+    repairToneShared: computed(() => !!repairTonePair.value && stretchLink.value === 'shared'),
     previewDiv,
     wandTol, merging, overlay, toast, error, modal,
     imageLoad, pauseImageLoad, resumeImageLoad, stopImageLoad, downloadLocalPreview,

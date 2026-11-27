@@ -1,9 +1,10 @@
-import { previewResponseBlob } from './previewPlan';
+import { applyPreviewResponsePlan, previewResponseBlob } from './previewPlan';
 import type { PreviewSource } from './previewPlan';
 import { joinBase, loadSrConfig } from './scene';
 import { sourceFingerprint } from './local_preview';
 import { LoadControl } from './loadControl';
 import { isZeroLengthImageFile, zeroLengthImageMessage } from './imageFiles';
+import { previewBlobs } from './api';
 
 export interface PreviewAsset {
   id: string; name: string; W: number; H: number; size: number; uploaded: boolean;
@@ -15,7 +16,16 @@ export interface PreviewAsset {
 export interface PickerFile { id: string; name: string; size: number; received: number; state: string; asset?: PreviewAsset; error?: string; originalPath?:string }
 export interface PickerState { state: string; files: PickerFile[]; error?:string }
 const api = (path: string) => joinBase(loadSrConfig().apiBase,'/api/image-open'+path);
-export class ImageOpenError extends Error { constructor(message:string,public status:number){super(message);} }
+export class ImageOpenError extends Error {
+  constructor(message: string, public status: number, public retryAfterMs?: number) { super(message); }
+}
+
+function retryAfterMs(value: string | null) {
+  if (!value) return undefined;
+  const text = value.trim();
+  const delay = /^\d+$/.test(text) ? Number(text) * 1000 : Date.parse(text) - Date.now();
+  return Number.isFinite(delay) ? Math.max(0, delay) : undefined;
+}
 async function json<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(api(path),init);
   if (!response.ok) {
@@ -63,15 +73,18 @@ export function fetchAssetTileStats(asset: PreviewAsset, band: number, signal?: 
 
 export async function fetchAssetTile(asset: PreviewAsset, level: number, tileX: number,
   tileY: number, signal?: AbortSignal, band = 1, display?: string, sampling?: 'nearest' | 'area',
-  stretchVersion?: string) {
+  stretchVersion?: string, prefetch = false) {
   const query = new URLSearchParams({ band: String(band) });
   if (display) query.set('display', display);
   if (sampling) query.set('sampling', sampling);
   if (stretchVersion) query.set('stretchVersion', stretchVersion);
-  const response = await fetch(api(`/assets/${asset.id}/tiles/${level}/${tileX}/${tileY}?${query}`), { signal });
+  const options: RequestInit = { signal };
+  if (prefetch) options.headers = { 'X-SR-Tile-Priority': 'prefetch' };
+  const response = await fetch(api(`/assets/${asset.id}/tiles/${level}/${tileX}/${tileY}?${query}`), options);
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new ImageOpenError(body.detail ?? `HTTP ${response.status}`, response.status);
+    throw new ImageOpenError(body.detail ?? `HTTP ${response.status}`, response.status,
+      retryAfterMs(response.headers.get('Retry-After')));
   }
   const header = response.headers.get('X-SR-Tile');
   if (!header) throw new ImageOpenError('Missing tile metadata', response.status);
@@ -140,6 +153,8 @@ export async function uploadPreviewFile(file: File, control: LoadControl, progre
     return result.asset;
   } finally { void pickerState(session.token,'cancelled').catch(()=>{}); }
 }
+const assetPreviewTags = new WeakMap<Blob, string>();
+
 export async function fetchPreviewAsset(asset: PreviewAsset, div: number, signal?: AbortSignal, onPhase?:(text:string)=>void) {
   const statusAbort=new AbortController();let finished=false,downloading=false;
   let timer:ReturnType<typeof setTimeout>|undefined;
@@ -159,10 +174,25 @@ export async function fetchPreviewAsset(asset: PreviewAsset, div: number, signal
   if(signal?.aborted)stop();
   if(onPhase&&!finished){onPhase('正在核对服务端 JPG 缓存…');timer=setTimeout(()=>{void poll();},800);}
   try {
-    const response=await fetch(api(`/assets/${asset.id}/preview?div=${div}`),{signal});
+    const url = api(`/assets/${asset.id}/preview?div=${div}`);
+    const key = `asset|${url}|${asset.sourceRev}`;
+    const cached = previewBlobs.get(key);
+    const etag = cached && assetPreviewTags.get(cached);
+    const response = await fetch(url, etag
+      ? { signal, cache: 'no-store', headers: { 'If-None-Match': etag } }
+      : { signal });
+    if (response.status === 304 && cached && etag) {
+      return { blob: applyPreviewResponsePlan(cached, response.headers),
+        width: Number(response.headers.get('X-SR-Preview-W')), height: Number(response.headers.get('X-SR-Preview-H')) };
+    }
     if(!response.ok){const body=await response.json().catch(()=>({detail:`HTTP ${response.status}`}));throw new ImageOpenError(body.detail??'服务端 JPG 生成失败',response.status);}
     downloading=true;clearTimeout(timer);statusAbort.abort();onPhase?.('正在下载服务端 JPG…');
     const blob=await previewResponseBlob(response);
+    const validator = response.headers.get('ETag');
+    if (validator) {
+      assetPreviewTags.set(blob, validator);
+      previewBlobs.set(key, blob);
+    }
     return {blob,width:Number(response.headers.get('X-SR-Preview-W')),height:Number(response.headers.get('X-SR-Preview-H'))};
   }finally{stop();signal?.removeEventListener('abort',stop);}
 }

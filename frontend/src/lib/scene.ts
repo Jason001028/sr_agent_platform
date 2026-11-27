@@ -461,8 +461,8 @@ export interface SceneOpenMeta {
 }
 
 /* ---------------- JPG 像素 → 查看器 rec 的同构数据 ---------------- */
-export interface SceneDecoded {
-  src: Float32Array;      // 单波段自然值（0..255，服务端已生成）
+export interface SceneDecoded<T = Float32Array> {
+  src: T;                // 单波段显示值（0..255，服务端已生成）
   tw: number;             // JPG 画布尺寸（= 预览缩略图尺寸）
   th: number;
   nbands: 1;
@@ -494,9 +494,17 @@ export function sceneDecodePixels(
  *  按 512 行一块读，峰值只多一小块，16384 长边档位才落得下去。 */
 export function sceneDecodeCanvas(
   ctx: { getImageData(sx: number, sy: number, sw: number, sh: number): ImageData },
-  tw: number, th: number, bandRows = 512,
-): SceneDecoded {
-  const src = new Float32Array(tw * th);
+  tw: number, th: number, bandRows?: number,
+): SceneDecoded;
+export function sceneDecodeCanvas(
+  ctx: { getImageData(sx: number, sy: number, sw: number, sh: number): ImageData },
+  tw: number, th: number, bandRows: number, compact: true,
+): SceneDecoded<Uint8Array>;
+export function sceneDecodeCanvas(
+  ctx: { getImageData(sx: number, sy: number, sw: number, sh: number): ImageData },
+  tw: number, th: number, bandRows = 512, compact = false,
+): SceneDecoded<Float32Array | Uint8Array> {
+  const src = compact ? new Uint8Array(tw * th) : new Float32Array(tw * th);
   let offset = 0;
   for (let y = 0; y < th; y += bandRows) {
     const rows = Math.min(bandRows, th - y);

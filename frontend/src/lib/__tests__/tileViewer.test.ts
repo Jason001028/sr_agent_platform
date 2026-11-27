@@ -4,6 +4,7 @@ import { TileRenderer, tileAxis } from '../tileRenderer';
 import { bootstrapTileLevel, loadTile, openTileSource, overviewDiv, withTileDisplay } from '../tileSource';
 import type { DecodedTile, TileSource } from '../tileSource';
 import { nativePreviewScale, rasterTransform, tileLevel } from '../viewMath';
+import { ImageOpenError } from '../imageOpen';
 
 const source = {
   key: 'source/v1',
@@ -117,6 +118,58 @@ it('cancels the previous display configuration at the same L0 position', async (
   scheduler.close();
 });
 
+it('backs off a visible tile after repeated 503s, honors Retry-After and cancels retry on exit', async () => {
+  vi.useFakeTimers();
+  const read = vi.fn()
+    .mockRejectedValueOnce(new ImageOpenError('busy', 503, 1500))
+    .mockRejectedValueOnce(new ImageOpenError('busy', 503, 1000))
+    .mockResolvedValueOnce(decoded())
+    .mockRejectedValueOnce(new ImageOpenError('busy', 503, 1000));
+  const scheduler = new TileScheduler(vi.fn(), 4 * 1024 ** 2, 1, read);
+  try {
+    const request = tileRequests(pane(), 1).requests.filter(r => r.priority < 1);
+    scheduler.update(request, [source], new Set());
+    await vi.advanceTimersByTimeAsync(1499);
+    expect(read).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(read).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(read).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(scheduler.cache.has(request[0].key)).toBe(true);
+    const next = tileRequests(pane(-512), 1).requests.filter(r => r.priority < 1);
+    scheduler.update(next, [source], new Set());
+    await vi.advanceTimersByTimeAsync(0);
+    scheduler.update([], [source], new Set());
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(read).toHaveBeenCalledTimes(4);
+  } finally {
+    scheduler.close();
+    vi.useRealTimers();
+  }
+});
+
+it('reissues a native prefetch as foreground once it becomes visible', async () => {
+  const signals: AbortSignal[] = [];
+  const read = vi.fn((_source, _level, _x, _y, signal: AbortSignal, _prefetch?: boolean) => {
+    signals.push(signal);
+    if (signals.length > 1) return Promise.resolve(decoded());
+    return new Promise<DecodedTile>((_, reject) =>
+      signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true }));
+  });
+  const scheduler = new TileScheduler(vi.fn(), 4 * 1024 ** 2, 1, read);
+  try {
+    const request = tileRequests(pane(), 1).requests.find(r => r.priority < 1)!;
+    scheduler.update([{ ...request, priority: 2 }], [source], new Set());
+    scheduler.update([request], [source], new Set());
+    await vi.waitFor(() => expect(scheduler.cache.has(request.key)).toBe(true));
+    expect(signals[0].aborted).toBe(true);
+    expect(read.mock.calls.map(args => args.at(5))).toEqual([true, false]);
+  } finally {
+    scheduler.close();
+  }
+});
+
 it('rejects stale display metadata before allocating a bitmap', async () => {
   const configured = withTileDisplay({ ...source, info: {
     ...source.info, displayProfiles: true, sourceVersion: 'v1', stretchVersion: 'tone-v2', band: 1,
@@ -131,6 +184,36 @@ it('rejects stale display metadata before allocating a bitmap', async () => {
   try {
     await expect(loadTile(configured, 0, 0, 0, new AbortController().signal)).rejects.toThrow('geometry changed');
     expect(decode).not.toHaveBeenCalled();
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+it('decodes a successful L0 response on Chrome 96 and closes the bitmap if cancelled during decode', async () => {
+  const configured = { ...source, info: {
+    ...source.info, displayProfiles: true, sourceVersion: 'v1', stretchVersion: 'tone-v2', band: 1,
+  } };
+  const header = { ...decoded().tile, sourceVersion: 'v1', rasterVersion: 'v1',
+    stretchVersion: 'tone-v2', band: 1, requestedSampling: 'nearest', resampling: 'nearest', displayKey: 'equal' };
+  const controller = new AbortController();
+  Object.defineProperties(controller.signal, {
+    throwIfAborted: { value: undefined },
+    reason: { value: undefined },
+  });
+  const accepted = bitmap();
+  const obsolete = bitmap();
+  const decode = vi.fn().mockResolvedValueOnce(accepted).mockImplementationOnce(async () => {
+    controller.abort();
+    return obsolete;
+  });
+  vi.stubGlobal('createImageBitmap', decode);
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('png', {
+    headers: { 'Content-Type': 'image/png', 'X-SR-Tile': JSON.stringify(header) },
+  })));
+  try {
+    await expect(loadTile(configured, 0, 0, 0, controller.signal)).resolves.toEqual({ tile: header, bitmap: accepted });
+    await expect(loadTile(configured, 0, 0, 0, controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(obsolete.close).toHaveBeenCalledOnce();
   } finally {
     vi.unstubAllGlobals();
   }

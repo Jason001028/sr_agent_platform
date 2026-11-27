@@ -24,7 +24,6 @@ import ViewerEmptyState from '../components/ViewerEmptyState.vue';
 import DrawPanel from '../components/DrawPanel.vue';
 import CompareOverlay from '../components/CompareOverlay.vue';
 import FlickerControls from '../components/FlickerControls.vue';
-import AutoTourControls from '../components/AutoTourControls.vue';
 import BatchDetectionOverlay from '../components/BatchDetectionOverlay.vue';
 import MssWaterOverlay from '../components/MssWaterOverlay.vue';
 import RepairLandOverlay from '../components/RepairLandOverlay.vue';
@@ -95,7 +94,6 @@ onUnmounted(() => {
         <DrawPanel />
         <CompareOverlay />
         <FlickerControls />
-        <AutoTourControls />
         <BatchDetectionOverlay v-if="!maskReview.active" />
         <RepairLandOverlay v-if="!maskReview.active && !diff.comparisonView && viewer.repairLandTarget" />
         <MssWaterOverlay v-else-if="viewer.mssWaterEntryEnabled && !maskReview.active && !diff.comparisonView" />
