@@ -13,7 +13,10 @@ export function tileAxis(start: number, span: number, pixels: number, step: numb
   return parts;
 }
 
-interface Camera { key: string; level: number; ox: number; oy: number; scale: number; levelChanged: number; time: number }
+interface Camera {
+  key: string; level: number; ox: number; oy: number; scale: number; levelChanged: number; time: number;
+  moved: boolean;
+}
 type TileCoverage = 'pending' | 'fading' | 'opaque';
 
 export class TileRenderer {
@@ -48,7 +51,8 @@ export class TileRenderer {
       const direction = old?.scale === scale && last && now - last.at < 120 ? last : undefined;
       const { level, requests } = tileRequests(pane, dpr, old?.level, direction, Math.floor(96 / panes.size));
       const levelChanged = old && old.level !== level ? now : old?.levelChanged ?? -Infinity;
-      this.cameras.set(id, { key: cameraKey, level, ox, oy, scale, levelChanged, time: now });
+      const moved = !!old && (old.moved || old.scale !== scale || dx !== 0 || dy !== 0);
+      this.cameras.set(id, { key: cameraKey, level, ox, oy, scale, levelChanged, time: now, moved });
       const s = rasterTransform(pane.view, pane.tw, pane.th, pane.source.info.width, pane.source.info.height,
         pane.rect.w, pane.rect.h, dpr);
       const span = pane.source.info.tileSize * 2 ** level;
@@ -118,6 +122,10 @@ export class TileRenderer {
 
   coverage(id: string): TileCoverage {
     return this.layers.get(id)?.coverage ?? 'pending';
+  }
+
+  cameraMoved(id: string): boolean {
+    return this.cameras.get(id)?.moved === true;
   }
 
   presentation(id: string) {

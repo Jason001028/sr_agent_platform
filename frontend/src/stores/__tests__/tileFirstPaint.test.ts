@@ -29,7 +29,7 @@ afterEach(() => {
   vi.mocked(loadTile).mockReset();
 });
 
-function mountCanvas() {
+function mountCanvas(width = 1024) {
   const frames = new Map<number, FrameRequestCallback>();
   let frameId = 0;
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
@@ -49,18 +49,18 @@ function mountCanvas() {
   vi.spyOn(performance, 'now').mockReturnValue(100);
   const source = markRaw<TileSource>({
     key: 'asset/rev',
-    asset: { id: 'asset', name: 'scene.tif', W: 1024, H: 512, size: 1, uploaded: false,
+    asset: { id: 'asset', name: 'scene.tif', W: width, H: 512, size: 1, uploaded: false,
       serverPath: null, sourceRev: 'rev', fingerprint: { name: 'scene.tif', size: 1, samples: ['', '', ''] } },
-    info: { width: 1024, height: 512, tileSize: 512, maxLevel: 10, displayProfiles: true, overviews: [],
+    info: { width, height: 512, tileSize: 512, maxLevel: 10, displayProfiles: true, overviews: [],
       band: 1, band_count: 1, dtype: 'uint16', nodata: null, layout: 'strip', compression: 'none',
-      block_size: [1024, 1], sourceVersion: 'rev', rasterVersion: 'raster', stretchVersion: 'tone' },
+      block_size: [width, 1], sourceVersion: 'rev', rasterVersion: 'raster', stretchVersion: 'tone' },
   });
-  const thumb = markRaw(browserKit.createCanvas(1024, 512));
+  const thumb = markRaw(browserKit.createCanvas(width, 512));
   const pinia = createPinia();
   const store = useViewerStore(pinia);
   const rec: ViewerRec = {
-    id: 1, name: 'scene', W: 1024, H: 512, route: 'jpg', paintedMode: 'equal', thumb, tileSource: source,
-    file: markRaw(new File(['x'], 'scene.jpg')), size: 1, probe: null, src: null, srcw: 1024, srch: 512,
+    id: 1, name: 'scene', W: width, H: 512, route: 'jpg', paintedMode: 'equal', thumb, tileSource: source,
+    file: markRaw(new File(['x'], 'scene.jpg')), size: 1, probe: null, src: null, srcw: width, srch: 512,
     nbands: 1, invert: false, stats: null, sceneId: 'scene', lqPath: null, token: 0, layout: '', status: '',
     statusCls: '', maskRois: null,
   };
@@ -71,7 +71,7 @@ function mountCanvas() {
   app = createApp(TifCanvas);
   app.use(pinia).mount(root);
   store.setCanvasSize(1024, 512);
-  store.view = { scale: 1, ox: 0, oy: 0 };
+  store.view = { scale: 1024 / width, ox: 0, oy: 0 };
   const render = async (now: number) => {
     await nextTick();
     drawImage.mockClear();
@@ -118,6 +118,22 @@ it.each(['target', 'overview'])('shows the whole JPEG until an opaque %s layer c
     expect(await render(160)).toEqual([thumb]);
     expect(await render(270)).toEqual([left, right]);
   }
+});
+
+it('draws local detail after zoom while a neighboring tile and the full-image tile are pending', async () => {
+  const tiles = delayedTiles();
+  const { store, thumb, render } = mountCanvas(2048);
+  expect(await render(100)).toEqual([thumb]);
+  const coarseLeft = await tiles.release(1, 0);
+  const coarseRight = await tiles.release(1, 1);
+  expect(await render(270)).toEqual([coarseLeft, coarseRight]);
+
+  store.onWheel(0, 0, 2);
+  expect(await render(290)).toEqual([thumb, coarseLeft]);
+  expect(tiles.requests.has('0/1')).toBe(true);
+  expect(tiles.requests.has('2/0')).toBe(true);
+  const detailLeft = await tiles.release(0, 0);
+  expect(await render(310)).toEqual([thumb, coarseLeft, detailLeft]);
 });
 
 it('retains the default JPEG after repeated tile failures and excludes it for custom and binary displays', async () => {

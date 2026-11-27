@@ -281,14 +281,15 @@ function render(now: number) {
     const layer = diff.layerFor(rec);
     const tileBase = tilePanes.get(key);
     const matchingBase = !tileBase?.source.info.displayProfiles || tileBase.hasOverview;
-    // Default JPEG and native-DN tiles can have different tone curves. Keep the
-    // whole JPEG visible until matching tiles can replace it without gaps.
+    // Switch the initial fit from JPEG to native-DN tiles as a whole. During
+    // navigation, keep the JPEG under any gaps while sharper tiles arrive.
     const jpegFallback = !matchingBase && !rec.tileOverviewKey && rec.route === 'jpg'
       && image === rec.thumb && !rec.displayStretch && rec.paintedMode === 'equal'
       && (rec.tileDisplay ?? 'equal') === 'equal';
     const coverage = jpegFallback ? tileRenderer.coverage(key) : 'pending';
     const showJpeg = jpegFallback && coverage !== 'opaque';
-    animate ||= coverage === 'fading';
+    const waitForCoverage = showJpeg && !tileRenderer.cameraMoved(key);
+    animate ||= waitForCoverage && coverage === 'fading';
     if (showJpeg || (matchingBase && (!tiled || !tileRenderer.covers(key)))) {
       ctx.save();
       ctx.beginPath();
@@ -312,7 +313,7 @@ function render(now: number) {
       ctx.restore();
     }
     if (tiled) {
-      if (!showJpeg) animate = tileRenderer.draw(ctx, key, now, dpr, immediate) || animate;
+      if (!waitForCoverage) animate = tileRenderer.draw(ctx, key, now, dpr, immediate) || animate;
       if (layer && diff.display !== 'regions') {
         ctx.save();
         ctx.beginPath();
