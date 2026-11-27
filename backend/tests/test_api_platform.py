@@ -983,6 +983,32 @@ class TestQueue(PlatformBase):
         self.assertEqual(frames[0]["state"], "COMPLETED")   # 状态照推
         self.assertNotIn("updated_at", frames[0])
 
+    def test_failed_job_exposes_original_error_in_event_and_after_reload(self):
+        app, c = self.app_client()
+        tid = self._submit(c).json()["task_id"]
+        task = app.state.store.get_sr_task_by_id(tid)
+        job = task["job_id"]
+        name = Path(task["batch_script"]).stem
+        log = Path(task["log_dir"]) / f"{name}.{job}.out"
+        unrelated = log.with_name(f"{name}.{int(job) + 1}.out")
+        unrelated.write_text("PAN repair failed: another attempt\n", encoding="utf-8")
+        reason = "Mask dimensions match neither body nor NOSR"
+        log.write_text("large log line\n" * 3000 + f"PAN repair failed: {reason}\n"
+                       "PAN repair failed: Command ['python'] returned non-zero exit status 1.\n"
+                       "verify_sr_run: repair process did not exit successfully\n", encoding="utf-8")
+        status = {"active": False, "state": "FAILED", "reason": "repair process did not exit successfully"}
+        with mock.patch.object(svc, "query_job_status", return_value=status):
+            async def scenario():
+                q = asyncio.Queue()
+                app.state.subscribers.add(_Subscriber(asyncio.get_running_loop(), q))
+                _task_state(app.state, task)
+                return sse_events(await asyncio.wait_for(q.get(), 1))
+
+            self.assertEqual(asyncio.run(scenario())[0]["error"], reason)
+            self.assertEqual(self._task(c, tid)["failure_reason"], reason)
+            log.unlink()
+            self.assertEqual(self._task(c, tid)["failure_reason"], status["reason"])
+
     def test_elapsed_counts_this_run_not_the_row_age(self):
         """重交复用的行：耗时必须是**这一次**跑的时长，不是这一行的年龄。
 

@@ -518,6 +518,7 @@ export interface QueueTask {
   session_id: string | null;
   job_id: number | null;
   state: QueueState | string;
+  failure_reason?: string | null;
   params: {
     lq_path: string;
     mask_path: string | null;
@@ -1631,6 +1632,7 @@ export interface SceneSibling {
 }
 
 export interface SceneSiblings {
+  mask?: SceneSibling | null;
   tourItems?: SceneSibling[];
   tourDiagnostics?: string[];
   sceneId: string;
@@ -1654,10 +1656,11 @@ export interface SceneSiblings {
  *  找不到也是答案（`exists:false` + `productCandidates`），不抛。 */
 export async function apiSceneSiblings(
   cfg: SrConfig, sceneId: string, suffix?: string, tour = false, known: readonly string[] = [],
-  signal?: AbortSignal,
+  signal?: AbortSignal, includeMask = false,
 ): Promise<SceneSiblings> {
   const url=sceneSiblingsUrl(cfg, sceneId, suffix);
-  const query=tour?'tour=true'+known.slice(0,32).map(id=>'&known='+encodeURIComponent(id)).join(''):'';
+  const query=[tour ? 'tour=true'+known.slice(0,32).map(id=>'&known='+encodeURIComponent(id)).join('') : '',
+    includeMask ? 'includeMask=true' : ''].filter(Boolean).join('&');
   const r = await http(url+(query?(url.includes('?')?'&':'?')+query:''), { signal });
   return (await r.json()) as SceneSiblings;
 }

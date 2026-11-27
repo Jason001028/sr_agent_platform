@@ -1,8 +1,14 @@
 import { computeStats } from './tifDecode';
 import type { BandStats, StretchMode, StretchRange } from './tifDecode';
+export interface ToneAdjustment {
+  brightness: number;
+  contrast: number;
+  base: StretchRange & { mode: StretchMode; custom: boolean };
+}
 export interface DisplayStretch extends StretchRange {
   mode:StretchMode;custom:boolean;stats:BandStats[];version:number;
   domain?:string;sourceRev?:string|null;
+  toneAdjustment?: ToneAdjustment;
 }
 export interface PixelPlane {src:Float32Array;w:number;h:number;nb:number;stats:BandStats[]|null;invert:boolean}
 export interface PixelRect {x0:number;y0:number;x1:number;y1:number}

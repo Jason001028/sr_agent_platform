@@ -140,10 +140,14 @@ def discover_tiffs(directory: Path, source_ref: Callable[[Path], str]) -> list[d
             kind, suffix = None, ""
             if candidate == source:
                 kind = "input"
-            elif source is not None and candidate.stem.lower() != "pan_ori":
-                stage = scene_search.stage_of_jpg(directory, source, candidate.stem)
-                if stage and stage[2] == candidate and stage[0] != "input":
-                    kind, suffix = stage[:2]
+            elif source is not None:
+                gf07_stage = scene_search.gf07_tiff_stage(directory, candidate, source)
+                if gf07_stage:
+                    kind, suffix = gf07_stage
+                elif candidate.stem.lower() != "pan_ori":
+                    stage = scene_search.stage_of_jpg(directory, source, candidate.stem)
+                    if stage and stage[2] == candidate and stage[0] != "input":
+                        kind, suffix = stage[:2]
             files.append({
                 "name": entry.name, "id": source_ref(candidate), "size_bytes": info.st_size,
                 "mtime_ms": info.st_mtime_ns // 1_000_000,

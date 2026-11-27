@@ -189,6 +189,53 @@ it('merges metadata only, then loads a companion once on repeated clicks', async
   expect(store.recs.map(rec => rec.sceneId).filter(id => id === 'selected')).toHaveLength(1);
 });
 
+it.each([
+  ['JXGF07B04', 'PAN', 'PAN_ori.tif', 'picker'],
+  ['JL1KF01A', 'PAN', 'PAN_NOSR.tif', 'picker'],
+  ['KF02B04', 'PAN', 'PAN_NOSR.tif', 'drop'],
+  ['JL1KF02B01', 'MSS', 'MSS_NOSR.tif', 'drop'],
+])('uses %s %s to link short names through %s (%s)', async (satellite, product, nosr, entrance) => {
+  const serial = `${satellite}_PMS_20261120110901_200554604_102_0039_001_L1_${product}`;
+  const scene = '/DiskArray/' + serial;
+  const names = [`${product}.tif`, nosr, serial + '.tif'];
+  const ids = ['pan', 'nosr', 'sc'];
+  const isGf07 = satellite.includes('GF07');
+  const bodyIndex = isGf07 ? 0 : 2;
+  vi.mocked(sourceFingerprint).mockImplementation(async file => ({ name: file.name, size: file.size, samples: ['a','b','c'] }));
+  vi.mocked(apiResolveScene).mockImplementation(async (_cfg, query) => {
+    if (!('name' in query)) throw new Error('Expected the browser file selection request');
+    const index = names.indexOf(query.name);
+    if (index !== 2) expect(query.anchor).toEqual([scene]);
+    return { row: { id: ids[index], name: names[index], W: 100, H: 100, srcRev: ids[index] },
+      resolved: { dir: scene, sr_capable: index === bodyIndex, read_only: index !== bodyIndex,
+        kind: index === 1 ? 'nosr' : isGf07 && index === 2 ? 'product' : 'input',
+        suffix: isGf07 && index === 2 ? 'SC' : '',
+        viewer_role: index === 1 && isGf07 ? 'reference' : index === 0 && !isGf07 ? 'other' : 'stage' } } as SceneResolveResult;
+  });
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+    if (url.endsWith('/assets')) {
+      const id = JSON.parse(String(init?.body)).sceneId;
+      return Response.json({ id, name: names[ids.indexOf(id)], W: 100, H: 100, sourceRev: id, uploaded: false });
+    }
+    return url.includes('/preview?') ? new Response('jpg') : new Response(null, { status: 404 });
+  }));
+  const store = useViewerStore();
+  const files = names.map(name => new File(['raw'], name));
+  if (entrance === 'picker') {
+    const input = root.querySelector<HTMLInputElement>('input[type=file]')!;
+    Object.defineProperty(input, 'files', { configurable: true, value: files });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  } else {
+    store.addFiles(files, 'A');
+  }
+  await vi.waitFor(() => expect(store.recs.filter(rec => rec.thumb)).toHaveLength(3));
+  expect(vi.mocked(apiResolveScene).mock.calls.map(([, query]) => 'name' in query ? query.name : query.path))
+    .toEqual([names[2], names[0], names[1]]);
+  expect(store.recs.find(rec => rec.sceneId === ids[bodyIndex])).toMatchObject({ lqPath: scene, stageKind: 'input' });
+  expect(store.recs.find(rec => rec.sceneId === 'nosr')).toMatchObject({ lqPath: null, stageLabel: 'NOSR' });
+  expect(store.recs.find(rec => rec.sceneId === (isGf07 ? 'sc' : 'pan'))?.lqPath).toBeNull();
+});
+
 it('discards a discovery response after the workspace is cleared', async () => {
   const verified = await apiResolveScene({ apiBase: '', staticBase: '' }, { name: 'selected.tif' });
   vi.mocked(apiResolveScene).mockResolvedValue({ ...verified, discovery: 'grant' });

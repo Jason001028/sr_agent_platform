@@ -63,6 +63,9 @@ _META_SUFFIX = "_meta.xml"
 _RC_INPUT_STEM = "pan"
 
 _TS_RE = re.compile(r"\d{8,14}")
+_GF07_SCENE_RE = re.compile(r"(?:JX)?GF07[A-Z0-9]*_", re.IGNORECASE)
+_KF_SCENE_RE = re.compile(r"(?:JL[0-9]+)?KF[0-9][A-Z0-9]*_", re.IGNORECASE)
+_GF07_NOSR_NAME = "PAN_ori.tif"
 
 #: `<SolarAzimuth/>`（无内容）与 `<SolarAzimuth></SolarAzimuth>` 都算 RC；
 #: 有任何文本（含空白节点）都算 SC —— 与 util.check_sr_previous_step 的
@@ -112,6 +115,31 @@ def input_candidates(dir_path) -> list[Path]:
             for ext in _RASTER_EXT_ORDER]
 
 
+def gf07_pan_body(dir_path) -> Optional[Path]:
+    d = Path(dir_path)
+    pan = d / "PAN.tif"
+    return pan if _GF07_SCENE_RE.match(d.name) and pan.is_file() else None
+
+
+def gf07_tiff_stage(directory: Path, source: Path, body: Path) -> Optional[tuple[str, str]]:
+    if not _GF07_SCENE_RE.match(directory.name):
+        return None
+    if source.name.lower() == _GF07_NOSR_NAME.lower():
+        return "nosr", ""
+    if body.name == "PAN.tif" and source.stem == directory.name:
+        return "product", "SC"
+    return None
+
+
+def kf_tiff_parent_stems(name: str) -> list[str]:
+    """Candidate scene stems for a production-named KF stage TIFF."""
+    if not _KF_SCENE_RE.match(name):
+        return []
+    stem = Path(name).stem
+    candidates = [stem[:part.end()] for part in re.finditer(r"_(?:PAN|MSS)(?=_)", stem, re.IGNORECASE)]
+    return [base for base in reversed(candidates) if jpg_stage_name(stem, base)]
+
+
 def input_scene_path(dir_path) -> Optional[Path]:
     """该场景目录里的输入影像（= 提交 SR 时的 `lq_path` 指向的那份文件）。
 
@@ -126,6 +154,8 @@ def input_scene_path(dir_path) -> Optional[Path]:
     if not is_scene_dir(dir_path):
         return None
     d = Path(dir_path)
+    if pan := gf07_pan_body(d):
+        return pan
     # NOSR is a backup, not a signal to replace an existing named input with PAN.
     # Keep SC-before-RC priority shared by resolve, masks and SR metadata.
     for cand in input_candidates(dir_path):
@@ -167,12 +197,24 @@ def body_path(dir_path) -> Optional[Path]:
     step = previous_step(d)
     if step is None:
         return None
+    if pan := gf07_pan_body(d):
+        return pan
     stem = _RC_INPUT_STEM.upper() if step == "RC" else d.name
     for ext in _RASTER_EXT_ORDER:
         candidate = d / f"{stem}{ext}"
         if candidate.is_file():
             return candidate
     return d / f"{stem}{_RASTER_EXT_ORDER[0]}"
+
+
+def repair_nosr_path(dir_path) -> Path:
+    """Resolve the original low-resolution input used by PAN repair."""
+    directory = Path(dir_path)
+    normal = directory / (directory.name + "_NOSR.tif")
+    alias = directory / _GF07_NOSR_NAME
+    if _GF07_SCENE_RE.match(directory.name) and not normal.is_file() and alias.is_file():
+        return alias
+    return normal
 
 
 def mask_stem(lq_path) -> str:
@@ -441,6 +483,9 @@ def stage_bases(dir_path, input_path) -> list[str]:
     for cand in input_candidates(dir_path):
         if cand.stem != first and cand.stem not in out:
             out.append(cand.stem)
+    directory = Path(dir_path)
+    if _KF_SCENE_RE.match(directory.name) and directory.name.upper().endswith("_MSS") and "MSS" not in out:
+        out.append("MSS")
     return out
 
 
@@ -451,6 +496,7 @@ def nosr_candidates(dir_path, input_path, product_path=None) -> list[Path]:
     SC 场景即 `<目录名>_NOSR.tif`，RC 场景即 `PAN_NOSR.tif`。基准名取 `stage_bases`，
     于是 SC / RC / 混合目录（上游 SC 遗留件与 RC 真读的那份同在）全覆盖，与产物名的
     拼法同一套规则。扩展名沿用产物那一组（生产上 `.tif` 与 `.tiff` 两种拼写都出现过）。
+    GF07 场景在这些候选之后补试同目录的 `PAN_ori.tif`。
 
     `product_path` 给了就把 `nosr_path_for(product_path)` 追加为**最后一条次选**：
     那是 `SR_code/util.py::writeTiff` 的改名产物（上一次同一 suffix 的**超分结果**，
@@ -464,6 +510,8 @@ def nosr_candidates(dir_path, input_path, product_path=None) -> list[Path]:
     bases = list(dict.fromkeys([d.name] + (stage_bases(d, input_path) if input_path else [])))
     out = [d / f"{base}{_NOSR_TAIL}{ext}"
            for base in bases for ext in _PRODUCT_EXT_ORDER]
+    if _GF07_SCENE_RE.match(d.name):
+        out.append(d / _GF07_NOSR_NAME)
     if product_path is not None:
         out.append(nosr_path_for(product_path))
     return out

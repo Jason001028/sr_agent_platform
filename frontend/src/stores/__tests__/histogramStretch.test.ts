@@ -67,3 +67,27 @@ it('last interaction wins and removal prevents asynchronous paints from reviving
  expect(s.recs[0].displayStretch?.low).toBe(100);
  s.setStretchBounds(0,300);s.removeRec(1);await new Promise(r=>setTimeout(r,20));expect(s.recs).toHaveLength(0);
 });
+it('adjusts brightness and contrast relative to one window and restores the preset at zero',()=>{
+ const s=useViewerStore(),image=record(1,[0,100,200,300]);
+ s.recs.push(image,record(2,[0,200]));s.activeId=1;s.setStretch('equal');
+ const settings=()=>s.recs[0].displayStretch;
+ s.setToneAdjustment('brightness',50);
+ expect(settings()).toMatchObject({low:-75,high:225,toneAdjustment:{brightness:50,contrast:0}});
+ s.setToneAdjustment('contrast',100);
+ expect(settings()).toMatchObject({low:37.5,high:187.5,toneAdjustment:{brightness:50,contrast:100}});
+ s.setToneAdjustment('brightness',0);
+ expect(settings()).toMatchObject({low:75,high:225});
+ s.setToneAdjustment('contrast',0);
+ expect(settings()).toMatchObject({mode:'equal',custom:false,low:0,high:300});
+ expect(settings()?.toneAdjustment).toBeUndefined();
+ expect(s.recs[1].displayStretch).toBeUndefined();
+ expect(image.src).toEqual(new Float32Array([0,100,200,300]));
+});
+it('brightens inverted imagery in the opposite DN direction and clears sliders on reset',()=>{
+ const s=useViewerStore(),image=record(1,[0,200]);image.invert=true;
+ s.recs.push(image);s.activeId=1;
+ s.setToneAdjustment('brightness',50);
+ expect(s.recs[0].displayStretch).toMatchObject({low:50,high:250});
+ s.resetHistogramStretch();
+ expect(s.recs[0].displayStretch?.toneAdjustment).toBeUndefined();
+});

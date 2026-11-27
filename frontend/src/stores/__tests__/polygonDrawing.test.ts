@@ -107,10 +107,17 @@ it('snaps within 11 CSS pixels and closes without a duplicate vertex', async () 
   expect(root.querySelector('.polygon-close-hint')).not.toBeNull();
   click(105,102); expect(store.getRois()[0]).toHaveLength(3); expect(store.pendingPts).toBeNull();
 });
-it('double click adds only the first click and right click closes', () => {
+it('double click adds only the first click and right click adds the closing vertex', () => {
   click(100,100); click(200,100); click(200,200); click(200,200,2); mouse('dblclick',200,200,0,2);
   expect(store.getRois()[0]).toHaveLength(3);
   triangle(); mouse('contextmenu',250,250,2); expect(store.getRois()).toHaveLength(2);
+  expect(store.getRois()[1]).toEqual([[100,100],[200,100],[200,200],[250,250]]);
+});
+it('closes two left-click vertices with the transformed right-click position', () => {
+  store.view={scale:2,ox:20,oy:40};
+  click(100,100); click(200,100); mouse('contextmenu',200,200,2);
+  expect(store.getRois()[0]).toEqual([[40,30],[90,30],[90,80]]);
+  expect(store.pendingPts).toBeNull();
 });
 it('uses the right pane origin and preserves the active draft when clicking the opposite pane', async () => {
   store.compareMode='split'; store.paneA=1; store.paneB=1; store.activeSide='B';

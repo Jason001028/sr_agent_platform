@@ -32,6 +32,12 @@ watch([() => route.hash, () => queue.tasks], async () => {
   if (mounted) viewTask(taskId);
 }, { immediate: true });
 const highlighted = ref<number | null>(null);
+const expandedFailure = ref<string | null>(null);
+const attemptKey = (task: QueueTask) => `${task.task_id}:${task.job_id}`;
+function toggleFailure(task: QueueTask) {
+  const key = attemptKey(task);
+  expandedFailure.value = expandedFailure.value === key ? null : key;
+}
 let highlightTimer: ReturnType<typeof setTimeout> | undefined;
 let mounted = true;
 let pendingHighlight: number | null = null;
@@ -275,8 +281,15 @@ onUnmounted(() => {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="t in queue.tasks" :key="t.task_id" :id="`queue-task-${t.task_id}`" class="qp-row" :class="{ 'sr-new-task': highlighted === t.task_id }">
-            <td><span class="tag" :class="stateCls(t)">{{ stateText(t) }}</span></td>
+          <template v-for="t in queue.tasks" :key="t.task_id">
+          <tr :id="`queue-task-${t.task_id}`" class="qp-row" :class="{ 'sr-new-task': highlighted === t.task_id }">
+            <td>
+              <button v-if="t.state === 'FAILED'" type="button" class="tag st-fail failure-tag"
+                      :aria-expanded="expandedFailure === attemptKey(t)"
+                      :aria-controls="expandedFailure === attemptKey(t) ? `queue-failure-${t.task_id}` : undefined"
+                      @click="toggleFailure(t)">{{ stateText(t) }}</button>
+              <span v-else class="tag" :class="stateCls(t)">{{ stateText(t) }}</span>
+            </td>
             <td>{{ t.task_id }}</td>
             <td>{{ t.job_id ?? '—' }}</td>
             <td class="left mono" :title="t.fingerprint">{{ shortFp(t.fingerprint) }}</td>
@@ -298,6 +311,16 @@ onUnmounted(() => {
                       title="把这行的参数填回上方表单（只填，不自动提交）">再提交</button>
             </td>
           </tr>
+          <tr v-if="t.state === 'FAILED' && expandedFailure === attemptKey(t)" class="failure-row">
+            <td colspan="8">
+              <section :id="`queue-failure-${t.task_id}`" class="failure-panel" aria-label="失败原因">
+                <strong>失败原因</strong>
+                <p>{{ t.failure_reason || '该作业没有可读的失败详情。' }}</p>
+                <small v-if="!t.failure_reason && t.log_dir">日志目录 {{ t.log_dir }}</small>
+              </section>
+            </td>
+          </tr>
+          </template>
           <tr v-if="!queue.loading && !queue.tasks.length">
             <td colspan="8" class="empty">暂无 SR 任务。在查看器画完掩码「提交 SR」，或在上方选目录提交。</td>
           </tr>
@@ -422,6 +445,12 @@ onUnmounted(() => {
 .st-run { background: var(--accent-soft); color: var(--accent-deep); border-color: rgba(61,169,164,0.3); }
 .st-ok { background: var(--ok-bg); color: var(--ok); border-color: var(--ok-line); }
 .st-fail { background: var(--err-bg); color: var(--err); border-color: var(--err-line); }
+.failure-tag { cursor: pointer; font-family: inherit; }
+.failure-tag[aria-expanded="true"] { font-weight: 650; }
+.failure-row td { text-align: left; }
+.failure-panel { max-width: 540px; padding: 10px 12px; border: 1px solid var(--err-line); border-radius: var(--r-ctrl); background: var(--err-bg); overflow-wrap: anywhere; }
+.failure-panel p { margin: 5px 0 0; white-space: pre-wrap; }
+.failure-panel small { color: var(--ink-sub); }
 .st-muted { background: var(--surface-2); color: var(--ink-sub); border-color: var(--line); }
 .qp-mask { color: var(--accent-deep); background: var(--accent-soft); padding: 0 6px; border-radius: 6px; margin-left: 6px; }
 .qp-sub2 { color: var(--ink-sub); margin-left: 8px; font-size: 12px; }

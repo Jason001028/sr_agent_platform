@@ -35,7 +35,7 @@ export interface FlickerImageMeta {
   /** 场景目录（盘阵 POSIX）。同一景的三份影像共用它；本地单张图为 null。 */
   sceneDir?: string | null;
   /** 环节：本体输入 / 本轮超分产物 / NOSR。 */
-  stageKind?: 'input' | 'product' | 'nosr' | null;
+  stageKind?: 'input' | 'product' | 'nosr' | 'mask' | null;
   /** 卡片标签（PAN / 本体 / SR / NOSR）；没有就用文件名兜底。 */
   stageLabel?: string | null;
   name: string;
@@ -127,9 +127,9 @@ export function pickFlickerPartner<T extends FlickerImageMeta>(
   active: FlickerImageMeta, candidates: readonly T[],
 ): T | null {
   const dir = active.sceneDir ?? '';
-  if (!dir) return null;
+  if (!dir || active.stageKind === 'mask') return null;
   const pool = candidates.filter((c) =>
-    c.id !== active.id && !c.pending && c.sceneDir === dir);
+    c.id !== active.id && !c.pending && c.stageKind !== 'mask' && c.sceneDir === dir);
   if (!pool.length) return null;
   const stageRank = (c: FlickerImageMeta): number => {
     if (active.stageKind === 'nosr') return c.stageKind === 'product' ? 0 : c.stageKind === 'input' ? 1 : 2;

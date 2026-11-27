@@ -17,6 +17,8 @@ import { decodeLocalFile } from '../../lib/localDecodeWorker';
 import { browserKit } from '../../lib/browserKit';
 import { sourceFingerprint } from '../../lib/local_preview';
 import { useViewerStore } from '../viewer';
+import { useQcListStore } from '../qclist';
+import { useScenesStore } from '../scenes';
 import { jpegPlans } from '../../lib/previewPlan';
 import type { TileSource } from '../../lib/tileSource';
 const asset=():PreviewAsset=>({id:'a'.repeat(64),name:'a.tif',W:64,H:32,size:3,uploaded:true,serverPath:null,sourceRev:'rev',fingerprint:{name:'a.tif',size:3,samples:['','','']}});
@@ -45,6 +47,54 @@ it('native picker assets support cache-based tier changes without a scene identi
   await vi.waitFor(()=>expect(rec.detailDiv).toBe(div));
   expect(fetchPreviewAsset).toHaveBeenLastCalledWith(expect.anything(),div,expect.any(AbortSignal));
   expect(uploadPreviewFile).not.toHaveBeenCalled();expect(decodeLocalFile).not.toHaveBeenCalled();
+});
+
+it('imports a mask without NOSR and opens it with the fixed binary tile profile', async () => {
+  const source = { ...asset(), name: 'PAN_mask.tif', W: 4, H: 2 };
+  const name = 'JXGF07D03_PMS_20260622052600_200516571_101_0020_001_L1';
+  vi.mocked(createPreviewAsset).mockResolvedValue(source);
+  vi.spyOn(useScenesStore(), 'resolveByName').mockResolvedValue({ row: { id: 'scene', name, W: 4, H: 2, lq_path: '/scene' },
+    resolved: { dir: '/scene', kind: 'input', suffix: '', mask_path: '/scene/PAN_mask.tif' } } as SceneResolveResult);
+  const fetcher = vi.fn(async (url: string) => {
+    if (url.includes('/siblings?includeMask=true')) return Response.json({ items: [], lqPath: '/scene',
+      mask: { id: 'scene-mask', name: source.name, exists: true, kind: 'product', W: 4, H: 2 } });
+    if (url.includes('/tiles?')) return Response.json({ width: 4, height: 2, tileSize: 512, maxLevel: 2,
+      band: 1, band_count: 1, sourceVersion: 'rev', rasterVersion: 'raster', stretchVersion: 'tone', displayProfiles: true });
+    if (url.includes('/tiles/0/0/0?')) return new Response('png', { headers: { 'Content-Type': 'image/png',
+      'X-SR-Tile': JSON.stringify({ rasterVersion: 'raster', sourceWidth: 4, sourceHeight: 2,
+        width: 4, height: 2, displayKey: 'binary', stretchVersion: 'tone' }) } });
+    return new Response(null, { status: 404 });
+  });
+  vi.stubGlobal('fetch', fetcher);
+  const store = useViewerStore();
+  const qc = useQcListStore();
+  expect(qc.importText('qc.txt', `${name},\t产品存在伪影 (问题类型:产品存在伪影 行列号:1,1 影像类型:PAN )\tQC`, 'utf-8')).toBe(true);
+  await qc.bakeAll();
+  expect(store.recs).toHaveLength(2);
+  expect(store.recs[1]).toMatchObject({ name: source.name, stageLabel: '掩码', previewOnly: true, thumb: null });
+  const id = store.recs[1].id;
+  await store.activate(id);
+  expect(store.activeRec).toMatchObject({ previewOnly: true, lqPath: null, tileDisplay: 'binary' });
+  expect(store.activeRec?.tileSource?.display).toBe('binary');
+  expect(fetcher.mock.calls.some(([url]) => url.includes('display=binary'))).toBe(true);
+  expect(fetchPreviewAsset).not.toHaveBeenCalled();
+  store.setStretch('log');
+  expect(store.activeRec?.tileDisplay).toBe('binary');
+});
+it('labels the automatic TIFF overview separately from the selected native-size tier', async () => {
+  const source = { ...asset(), W: 49481, H: 32 };
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ width: source.W, height: source.H,
+    tileSize: 512, band_count: 1, band: 1, sourceVersion: 'rev', rasterVersion: 'raster', displayProfiles: true })));
+  vi.mocked(fetchPreviewAsset).mockResolvedValue({ blob: new Blob(['jpeg']), width: 3093, height: 2 });
+  vi.mocked(createImageBitmap).mockResolvedValue({ width: 3093, height: 2, close() {} });
+  const store = useViewerStore();
+  store.setPreviewDiv(1);
+  await store.openPreviewAsset(source);
+  expect(store.previewDiv).toBe(1);
+  expect(store.activeRec?.tileSource).toBeTruthy();
+  expect(store.activeRec?.detailDiv).toBe(16);
+  expect(store.activeRec?.layout).toContain('整图概览档位 1/16');
+  expect(store.activeRec?.layout).toContain('实际约 1/16');
 });
 it('reopening a Tile scene replaces the source revision without replacing its card or view', async () => {
   const store = useViewerStore();

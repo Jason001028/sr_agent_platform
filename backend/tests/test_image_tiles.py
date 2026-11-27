@@ -156,6 +156,38 @@ def test_grid_partial_footprints_and_overview(gdal, tmp_path):
     reader.release(source)
 
 
+def test_stripped_l4_ignores_older_external_overview_with_repeated_rows(gdal, tmp_path):
+    source = tmp_path / "PAN.tif"
+    y, x = np.indices((1027, 1031), dtype=np.uint32)
+    dn = ((17 * y + 23 * x) % 65000).astype(np.uint16)
+    tifffile.imwrite(source, dn, rowsperstrip=17, metadata=None)
+    ds = gdal.Open(str(source), gdal.GA_ReadOnly)
+    assert ds.BuildOverviews("NEAREST", [16]) == 0
+    ds = None
+    overview = source.with_name(source.name + ".ovr")
+    ds = gdal.Open(str(overview), gdal.GA_Update)
+    y, x = np.indices((ds.RasterYSize, ds.RasterXSize), dtype=np.uint16)
+    repeated = (x + y % 8 * 31) % 256
+    ds.GetRasterBand(1).WriteArray(repeated)
+    ds = None
+
+    reader = RasterWindowReader()
+    mtime = source.stat().st_mtime_ns
+    os.utime(overview, ns=(mtime, mtime + 10**9))
+    fresh = reader.read_window(source, 0, 0, 1024, 1024, 64, 64, grid_step=16)
+    assert fresh.sources == ("overview:65x65",)
+    np.testing.assert_array_equal(fresh.dn, repeated[:64, :64])
+    reader.release(source)
+
+    os.utime(overview, ns=(mtime, mtime - 10**9))
+    fixed = reader.read_window(source, 0, 0, 1024, 1024, 64, 64, grid_step=16)
+    assert fixed.sources == ("base",)
+    np.testing.assert_array_equal(fixed.dn, dn[8:1024:16, 8:1024:16])
+    np.testing.assert_array_equal(reader.read_window(source, 8, 8, 64, 64, grid_step=1).dn,
+                                  dn[8:72, 8:72])
+    reader.release(source)
+
+
 def test_coarse_direct_io_preserves_uncompressed_tile_sample_phase(gdal, tmp_path):
     source = tmp_path / "direct.tif"
     width, height = 291, 299
@@ -306,6 +338,28 @@ def test_missing_gdal_leaves_legacy_jpeg_available(image_api, monkeypatch):
     monkeypatch.setattr("backend.services.raster_window._gdal", unavailable)
     assert client.get(base + "/tiles/0/0/0").status_code == 503
     assert client.get(base + "/preview?div=2").status_code == 200
+
+
+def test_binary_mask_tiles_keep_black_white_without_stretch_or_averaging(gdal, image_api):
+    data, client, manager = image_api
+    source = data / 'mask.tif'
+    dn = np.zeros((8, 8), dtype=np.uint8)
+    dn[:, 2:4] = 1
+    dn[:, 4:6] = 255
+    dn[:, 6:] = 99
+    tifffile.imwrite(source, dn, compression='deflate',
+                     extratags=[(42113, 's', 0, '99', False)])
+    asset = client.post('/api/image-open/assets', json={'path': str(source)}).json()
+    base = f"/api/image-open/assets/{asset['id']}/tiles"
+    expected = np.where((dn > 0) & (dn != 99), 255, 0).astype(np.uint8)
+    native = client.get(base + '/0/0/0?display=binary')
+    assert native.status_code == 200
+    np.testing.assert_array_equal(np.asarray(Image.open(io.BytesIO(native.content))), expected)
+    overview = client.get(base + '/1/0/0?display=binary&sampling=area')
+    assert overview.status_code == 200
+    assert json.loads(overview.headers['X-SR-Tile'])['resampling'] == 'nearest'
+    np.testing.assert_array_equal(np.asarray(Image.open(io.BytesIO(overview.content))), expected[1::2, 1::2])
+    assert not manager.tiles.stats
 
 
 def test_real_api_png_dn_jpeg_and_version(gdal, image_api):

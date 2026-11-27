@@ -11,6 +11,7 @@ import math
 import os
 import errno
 from pathlib import Path
+import re
 import runpy
 import shutil
 import subprocess
@@ -20,6 +21,7 @@ import time
 import xml.etree.ElementTree as ET
 
 MODE = 'pan-nosr-v1'
+_GF07_SCENE_RE = re.compile(r'(?:JX)?GF07[A-Z0-9]*_', re.IGNORECASE)
 
 #: Inference card, fixed. Slurm injects an integer CUDA_VISIBLE_DEVICES without
 #: binding the device, so every job lands on card 0, where the LLM service
@@ -86,7 +88,7 @@ def receipt_path(config):
     return scene / 'Debug' / ('_SRREPAIR_' + digest + '.json')
 
 
-def repair_body(scene):
+def repair_body(scene, pinned_name=None):
     """Current body raster: RC -> PAN.tif, SC -> <scene>.tif.
 
     Mirrors util.check_sr_previous_step: an empty <SolarAzimuth> means the
@@ -111,6 +113,10 @@ def repair_body(scene):
     if node is None:
         raise ValueError('meta.xml has no SolarAzimuth; cannot choose the repair body')
     step = 'RC' if node.text is None else 'SC'
+    if pinned_name is not None:
+        if pinned_name != 'PAN.tif' or not _GF07_SCENE_RE.match(scene.name):
+            raise ValueError('Invalid pinned GF07 repair body')
+        return step, scene / pinned_name
     name = 'PAN.tif' if step == 'RC' else scene.name + '.tif'
     return step, scene / name
 
@@ -275,7 +281,7 @@ def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
     if root.findtext('RepairMode') != MODE:
         raise ValueError('Missing supported RepairMode')
     scene = Path(root.findtext('DatarootLQ')).resolve()
-    _, body = repair_body(scene)
+    _, body = repair_body(scene, root.findtext('RepairBody'))
     body_stem = body.stem
     # 新旧顺序：<完整生产名>_old（上一轮产物）→ <本体 stem>_old_latest（本次修复前）
     # → 本体（修复后）。旧平台写过的 PAN_old_2 只做只读兼容，不再新写。
@@ -285,8 +291,9 @@ def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
     if not raw_nosr:
         raise ValueError('RepairNOSR is required; never infer from the current body')
     nosr = Path(raw_nosr).resolve()
-    if nosr.parent != scene or not nosr.stem.endswith('_NOSR') or nosr == body:
-        raise ValueError('RepairNOSR must identify a same-scene _NOSR raster')
+    gf07_alias = nosr.name == 'PAN_ori.tif' and _GF07_SCENE_RE.match(scene.name)
+    if nosr.parent != scene or nosr == body or not (nosr.stem.endswith('_NOSR') or gf07_alias):
+        raise ValueError('RepairNOSR must identify a same-scene _NOSR raster or GF07 PAN_ori.tif')
     mask = Path(root.findtext('MaskPath') or '').resolve()
     for path in (body, nosr, mask, scene / (scene.name + '_meta.xml')):
         if not path.is_file():
@@ -396,7 +403,7 @@ def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
                 node = ET.SubElement(root, tag)
             node.text = text
         # Repair tags belong to the adapter, not the legacy inference program.
-        for tag in ('RepairMode', 'RepairNOSR', 'RepairRevision', 'RepairNOSRStage', 'LandConstraint'):
+        for tag in ('RepairMode', 'RepairBody', 'RepairNOSR', 'RepairRevision', 'RepairNOSRStage', 'LandConstraint'):
             node = root.find(tag)
             if node is not None:
                 root.remove(node)

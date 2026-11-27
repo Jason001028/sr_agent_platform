@@ -338,7 +338,7 @@ export const useDiffStore = defineStore('diff', () => {
   function openedSceneIds(): string[] {
     const dir = activeSceneKey();
     return [...new Set(viewer.recs
-      .filter((r) => !!r.sceneId && sceneKeyOf(r) === dir)
+      .filter((r) => !!r.sceneId && r.stageKind !== 'mask' && sceneKeyOf(r) === dir)
       .map((r) => r.sceneId!))].slice(0, 32);
   }
 
@@ -348,12 +348,17 @@ export const useDiffStore = defineStore('diff', () => {
   type DiffRole = 'pan' | 'pan_old' | 'nosr' | 'sr' | 'old' | 'ori' | 'input';
 
   function roleOf(r: ViewerRec | null): DiffRole | null {
-    if (!r) return null;
+    if (!r || r.stageKind === 'mask') return null;
     if (r.stageKind === 'nosr') return 'nosr';
     if (r.stageKind === 'product') {
       return (r.stageLabel ?? '').toLowerCase() === 'old' ? 'old' : 'sr';
     }
     const n = r.name.toLowerCase();
+    if (n === 'pan_ori.tif') {
+      // 与后端 nosr_candidates 的 GF07/JXGF07 生产命名契约一致。
+      const scene = sceneKeyOf(r).split(/[/\\]/).pop() ?? '';
+      return /^(?:JX)?GF07[A-Z0-9]*_/i.test(scene) ? 'nosr' : 'ori';
+    }
     if (n.includes('pan_old') || n.includes('pan-old')) return 'pan_old';
     if (n.includes('nosr')) return 'nosr';
     if (n.includes('pan')) return 'pan';
@@ -471,8 +476,9 @@ export const useDiffStore = defineStore('diff', () => {
   const pairOptions = computed<DiffPairOption[]>(() => {
     const dir = activeSceneKey();
     return viewer.recs
-      .filter((r) => !r.pending && r.W > 0 && r.H > 0 && sceneKeyOf(r) === dir
-        && ((!!r.thumb && !!r.src) || !!r.card))
+      .filter((r) => !r.pending && sceneKeyOf(r) === dir
+        && ((r.W > 0 && r.H > 0 && ((!!r.thumb && !!r.src) || !!r.card))
+          || (r.discoveredTiff && !!r.card)))
       .map((r) => ({
         id: r.id,
         name: r.name,
@@ -482,12 +488,13 @@ export const useDiffStore = defineStore('diff', () => {
       }));
   });
 
-  /** 影像组合是否满足「同宽高比 + 尺寸已知」。 */
+  /** 已知尺寸时检查宽高比。自动发现的 TIFF 在分析时先读取尺寸。 */
   function compatible(a: number | null, b: number | null): boolean {
     if (a == null || b == null || a === b) return false;
     const ra = pairOptions.value.find((o) => o.id === a);
     const rb = pairOptions.value.find((o) => o.id === b);
     if (!ra || !rb) return false;
+    if (ra.width <= 0 || ra.height <= 0 || rb.width <= 0 || rb.height <= 0) return true;
     return !commonGrid(ra.width, ra.height, rb.width, rb.height).refusal;
   }
 
@@ -622,7 +629,14 @@ export const useDiffStore = defineStore('diff', () => {
     comparison.value = undefined; comparisonKey.value = ''; comparisonView.value = false;
   }
   const stale = computed(() => !!result.value && resultKey.value !== currentKey());
-  const precisionReason = computed(() => analysisPairReason(aRec.value, bRec.value));
+  function needsDiscoveredDimensions(rec: ViewerRec): boolean {
+    return !!rec.discoveredTiff && (rec.W <= 0 || rec.H <= 0);
+  }
+  const precisionReason = computed(() => {
+    const a = aRec.value, b = bRec.value;
+    if (a && b && a.id !== b.id && [a, b].some(needsDiscoveredDimensions)) return null;
+    return analysisPairReason(a, b);
+  });
   const alignmentNote = computed(() => analysisPairNote(aRec.value, bRec.value));
   const flickerPairReason = computed(() => precisePairReason(aRec.value, bRec.value));
   const smartPairReason = computed(() => {
@@ -635,7 +649,7 @@ export const useDiffStore = defineStore('diff', () => {
     const sequenceA=a.tourIdentity?.sequence, sequenceB=b.tourIdentity?.sequence;
     if ((!groupA || groupA!==groupB) && (!sequenceA || sequenceA!==sequenceB)) return '缺少可靠的共同场景关联';
     if (!!a.tourIdentity?.registration !== !!b.tourIdentity?.registration) return '两张影像的空间配准证据不对称，请先核对';
-    return analysisPairReason(a,b) ?? '';
+    return precisionReason.value ?? '';
   });
   const nativeRefineReason = computed(() => {
     if (smartPairReason.value) return smartPairReason.value;
@@ -1207,6 +1221,34 @@ export const useDiffStore = defineStore('diff', () => {
   /* ---------------- 开始分析 ---------------- */
   async function analyze(): Promise<boolean> {
     if (busy.value) return false;
+    const selectedA = aRec.value, selectedB = bRec.value;
+    if (selectedA && selectedB && selectedA.id !== selectedB.id) {
+      const unread = [selectedA, selectedB].filter(needsDiscoveredDimensions);
+      if (unread.length) {
+        const seq = ++requestSeq;
+        busy.value = true;
+        error.value = '';
+        analysisState.value = '读取中';
+        try {
+          const loaded = await Promise.all(unread.map(r => viewer.ensureCardPixels(r.id)));
+          if (seq !== requestSeq || aRec.value !== selectedA || bRec.value !== selectedB) return false;
+          if (!loaded.every(Boolean)) {
+            const failed = unread[loaded.indexOf(false)];
+            throw new Error(failed.linkNote || `无法读取影像「${failed.name}」的预览`);
+          }
+          const reason = analysisPairReason(selectedA, selectedB);
+          if (reason) throw new Error(reason);
+        } catch (e) {
+          if (seq === requestSeq) {
+            error.value = e instanceof Error ? e.message : String(e);
+            analysisState.value = '检测失败';
+          }
+          return false;
+        } finally {
+          if (seq === requestSeq) busy.value = false;
+        }
+      }
+    }
     if (method.value === 'smart' || parallelCompare.value) return analyzeSmart();
     clearComparison();
     cancelAutoDraw();

@@ -9,6 +9,8 @@ const position=ref({left:'8px',top:'48px'});
 const modes:StretchMode[]=['linear','linear2','equal','sqrt','log'];
 const logHistogram=ref(false);
 const nativeHistogram=computed(()=>!!store.histogramRec?.tileSource?.info.displayProfiles);
+const toneAdjustment = computed(() => store.histogramRec?.displayStretch?.toneAdjustment);
+const toneSliders = [{ key: 'brightness', label: '亮度' }, { key: 'contrast', label: '对比度' }] as const;
 const label=computed(()=>{
   const rec=open.value?store.histogramRec:store.activeRec;
   return rec?.displayStretch?.curve?'曲线':rec?.displayStretch?.custom?'自定义':STRETCH_LABELS[rec?.paintedMode??store.activeStretch];
@@ -140,6 +142,11 @@ function field(which:'low'|'high',event:Event){
   if(!Number.isFinite(value)||(which==='low'?value>=r.high:value<=r.low)){input.value=number(r[which]);return;}
   update(which==='low'?value:r.low,which==='high'?value:r.high);
 }
+function adjustTone(which: 'brightness' | 'contrast', event: Event) {
+  if (!snapshot.value || snapshot.value.id !== store.histogramRec?.id) return;
+  dragId = snapshot.value.id;
+  store.setToneAdjustment(which, (event.target as HTMLInputElement).valueAsNumber);
+}
 function selectTarget(side:'A'|'B'){commit();store.histogramTarget=side;if(store.compareMode==='flicker')store.setTourLayer(side==='B');refresh();}
 watch(()=>[store.histogramRec?.id,store.histogramRec?.src,store.renderTick,store.histogramScope],()=>{
   if(!open.value)return;
@@ -185,6 +192,14 @@ onBeforeUnmount(()=>{cancelAnimationFrame(frame);cancelAnimationFrame(statsFrame
         <div class="hist-axis" aria-label="输入灰度刻度"><span>{{ number(extent.min) }}</span><span>{{ number((extent.min+extent.max)/2) }}</span><span>{{ number(extent.max) }}</span></div>
         <div v-if="snapshot.curve" class="curve-caption"><span>点击任意位置加点 · 双击 / Delete 删点</span><button @click="chooseCurve">重置曲线</button></div>
         <div class="hist-values"><label>黑场 <input aria-label="黑场数值" type="number" step="any" :value="number(range.low)" @change="field('low',$event)"/></label><label>白场 <input aria-label="白场数值" type="number" step="any" :value="number(range.high)" @change="field('high',$event)"/></label></div>
+        <div class="tone-sliders">
+          <label v-for="slider in toneSliders" :key="slider.key">
+            <span>{{ slider.label }}</span>
+            <input type="range" min="-100" max="100" step="1" :aria-label="slider.label"
+              :value="toneAdjustment?.[slider.key] ?? 0" @input="adjustTone(slider.key, $event)" @change="commit" />
+            <span aria-hidden="true">{{ toneAdjustment?.[slider.key] ?? 0 }}</span>
+          </label>
+        </div>
         <div class="hist-section-label">拉伸模式</div><div class="hist-modes" role="group" aria-label="拉伸模式"><button v-for="mode in modes" :key="mode" :class="{selected:!snapshot.custom&&snapshot.mode===mode}" :aria-pressed="!snapshot.custom&&snapshot.mode===mode" @click="choose(mode)">{{ STRETCH_LABELS[mode] }}</button></div>
         <button class="curve-entry" :class="{selected:!!snapshot.curve}" :aria-pressed="!!snapshot.curve" @click="!snapshot.curve&&chooseCurve()">曲线拉伸 <span>调整暗部、中间调与高光</span></button>
         <div v-if="store.split||store.compareMode==='flicker'" class="hist-link"><div v-if="store.stretchLink==='independent'" class="scope" role="group" aria-label="调整影像"><span>调整</span><button v-for="(side,i) in (['A','B'] as const)" :key="side" :disabled="!targets[i]" :title="targets[i]?.name" :class="{selected:store.histogramRec?.id===targets[i]?.id}" @click="selectTarget(side)">{{ side }}</button></div><span v-else>双图映射</span><div class="scope"><button :class="{selected:store.stretchLink==='independent'}" @click="store.setStretchLink('independent');refresh()">独立</button><button :disabled="!!store.sharedStretchReason" :title="store.sharedStretchReason||'同一上下限及 CDF 映射'" :class="{selected:store.stretchLink==='shared'}" @click="store.setStretchLink('shared');refresh()">共享</button></div></div>
@@ -197,6 +212,10 @@ onBeforeUnmount(()=>{cancelAnimationFrame(frame);cancelAnimationFrame(statsFrame
   </Teleport>
 </template>
 <style scoped>
+.tone-sliders{display:grid;gap:7px;margin:0 0 14px}
+.tone-sliders label{display:grid;grid-template-columns:42px minmax(0,1fr) 27px;align-items:center;gap:6px;color:#3b5145}
+.tone-sliders input{width:100%;margin:0;accent-color:#28766a;cursor:default}
+.tone-sliders label>span:last-child{text-align:right;font-variant-numeric:tabular-nums}
 .hist-entry{height:32px;display:inline-flex;align-items:center;gap:7px;padding:0 10px;white-space:nowrap;border:1px solid #d8e4df;border-radius:8px;color:#304c40;background:#fafbfa;font:12px inherit;cursor:pointer}.hist-entry:hover,.hist-entry.on{border-color:#83a397;background:#f2f5f3}.chevron{margin-left:3px;color:#82958b}
 .hist-panel{position:fixed;z-index:130;width:340px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);overflow:auto;box-sizing:border-box;padding:0 15px 12px;background:#FAFBFA;border:1px solid #D8E4DF;border-radius:15px;box-shadow:0 3px 9px #142c2009,0 18px 40px #142c201a;color:#263c33;font-size:12px;outline:none}
 .hist-panel header{display:flex;align-items:center;gap:9px;margin:0 -15px 13px;padding:12px 15px;border-bottom:1px solid #e5ece8;background:linear-gradient(110deg,#eff5f280,#fafbfa);border-radius:15px 15px 0 0}.panel-icon{color:#20634f;filter:drop-shadow(0 2px 2px #20634f26)}.hist-panel strong{font-size:15px;flex:1;font-weight:650;letter-spacing:.3px}.hist-panel button{font:inherit;cursor:pointer;transition:background 150ms,border-color 150ms,box-shadow 150ms;color:inherit}.hist-panel .close{border:0;background:none;padding:0 1px;color:#52655a;font-size:22px;line-height:20px}.hist-panel .close:hover{color:#183e2e}

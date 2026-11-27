@@ -122,12 +122,14 @@ function onRow(it: QcIssue) {
 
    注意它只管**聚焦窗口**；卡片点亮与滚动仍由 onRow 里那次 lightCards 负责 ——
    自动选中（打开一张卡）不该把列表滚一下，但把窗口挪到那一景是合理的。 */
-watch(() => qc.selName, (name) => {
-  if (!name) { viewer.clearSpotlight(); return; }
-  const it = qc.issues.find((i) => i.name === name);
-  if (!it) { viewer.clearSpotlight(); return; }
-  viewer.setSpotlight(viewer.sceneCardIds(sceneNameCandidates(it.name, it.imgType)));
-});
+watch(() => {
+  const it = qc.selIssue;
+  // 拖入卡片可能在选中行保持不变时才取得 sceneDir。
+  return it ? viewer.sceneCardIds(sceneNameCandidates(it.name, it.imgType)) : [];
+}, (ids) => {
+  if (ids.length) viewer.setSpotlight(ids);
+  else viewer.clearSpotlight();
+}, { immediate: true });
 
 /* ---------------- 一键解析 ---------------- */
 

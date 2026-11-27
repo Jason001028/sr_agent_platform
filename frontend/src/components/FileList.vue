@@ -70,11 +70,25 @@ watch(() => Object.values(refresh.entries).map(e => `${e.recId}:${e.unread}:${e.
 });
 function decorated(id: number) { return refresh.entries[id]?.unread || leaving.value.includes(id); }
 function groupOf(rec: { sceneDir?: string | null; lqPath?: string | null }) { return normDir(rec.sceneDir || rec.lqPath || ''); }
-function groupHeader(id: number, group: string) {
-  return !!group && (Object.values(refresh.entries).some(e => normDir(e.result.group || '') === group)
-    || store.recsOrdered.filter(r => r.discoveredTiff && groupOf(r) === group).length >= 4)
-    && store.recsOrdered.find(r => groupOf(r) === group)?.id === id;
-}
+const groupHeaders = computed(() => {
+  const groups = new Map<string, { firstId: number; count: number }>();
+  for (const rec of store.recsOrdered) {
+    const key = groupOf(rec);
+    if (!key) continue;
+    const group = groups.get(key);
+    if (group) group.count++;
+    else groups.set(key, { firstId: rec.id, count: 1 });
+  }
+  const refreshed = new Set(Object.values(refresh.entries).map(e => normDir(e.result.group || '')));
+  const headers = new Set<number>();
+  for (const [key, group] of groups) {
+    // 折叠后删到只剩一张时，保留展开入口。
+    if (group.count > 1 || refreshed.has(key) || closedGroups.value.includes(key)) {
+      headers.add(group.firstId);
+    }
+  }
+  return headers;
+});
 function toggleGroup(group: string) { closedGroups.value = closedGroups.value.includes(group) ? closedGroups.value.filter(g => g !== group) : [...closedGroups.value, group]; }
 let motionQuery: MediaQueryList | undefined;
 function syncMotion() { reduced.value = motionQuery?.matches ?? false; }
@@ -208,7 +222,10 @@ function itemEl(id: number): HTMLElement | undefined {
 
 /* 聚焦遮罩的「结构版本」：成员或顺序一变就变（收藏置顶、增删、撤回）。
    做成字符串而不是数组，watch 按值比较才不会每帧重启。 */
-const spotRevision = computed(() => store.recsOrdered.map((r) => r.id).join(','));
+const spotRevision = computed(() => JSON.stringify([
+  closedGroups.value,
+  store.recsOrdered.map(r => [r.id, groupOf(r), !!r.discoveredTiff]),
+]));
 
 /** 侧栏滚动容器本身（聚焦遮罩的坐标基准，也是 e2e 读 scrollTop 的那个元素）。 */
 const scrollEl = ref<HTMLElement | null>(null);
@@ -331,7 +348,7 @@ function linkTitle(rec: ViewerRec): string {
         class="fav-divider"
         aria-hidden="true"
       ></div>
-      <button v-if="groupHeader(rec.id, groupOf(rec))" type="button" class="refresh-group" :aria-expanded="!closedGroups.includes(groupOf(rec))" @click="toggleGroup(groupOf(rec))">
+      <button v-if="groupHeaders.has(rec.id)" type="button" class="refresh-group" :aria-expanded="!closedGroups.includes(groupOf(rec))" @click="toggleGroup(groupOf(rec))">
         <span>影像组 {{ store.sceneOrdinalOf(rec) }} {{ closedGroups.includes(groupOf(rec)) ? '›' : '⌄' }}</span><span v-if="refresh.groupCount(groupOf(rec))" class="refresh-group-count">{{ refresh.groupCount(groupOf(rec)) }} 张新图</span>
       </button>
       <FileListCard

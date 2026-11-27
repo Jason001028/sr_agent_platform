@@ -58,7 +58,7 @@ export function noticeKey(ev: JobUpdateEvent): string | null {
  *
  *  `task` 缺席是**正常情况**：订阅是应用级常驻的，帧可能在这次会话还没 GET 过队列、
  *  或那一行已被清出列表时到达。这时只报 task_id 与倍率位置留空，绝不编造目录名。
- *  `liveError` = 运行期捕获的失败原因（stores/queue 的 failReason），比行里的 log_dir 具体。 */
+ *  `liveError` 是实时事件附带的失败原因。 */
 export function jobNotice(
   ev: JobUpdateEvent, task: QueueTask | null, liveError?: string | null,
 ): JobNoticeDraft | null {
@@ -72,7 +72,7 @@ export function jobNotice(
   if (task && Number.isFinite(Number(task.params.sr_scale))) {
     parts.push('×' + Number(task.params.sr_scale));
   }
-  const reason = ok ? '' : (liveError || '')
+  const reason = ok ? '' : (liveError || task?.failure_reason || '')
     || (leaf(task?.log_dir) ? '原因见目录 ' + leaf(task?.log_dir) : '原因见队列页');
   return {
     key,

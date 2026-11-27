@@ -117,7 +117,7 @@ function onPick(e: Event) {
     <button
       type="button"
       class="btn"
-      title="选择 TIFF 或 JPG；核对盘阵后优先使用服务端下采样 JPG，并可打开同景影像"
+      title="选择 TIFF 或 JPG；核对盘阵后可打开同景影像。GF07 和 KF 可同时选择生产序列号影像与同景短文件名影像"
       :disabled="store.busy"
       @click="fileInput?.click()"
     >
@@ -164,14 +164,12 @@ function onPick(e: Event) {
 
     <PreviewScaleControl :model-value="store.previewDiv" @update:model-value="store.setPreviewDiv"
       :title="store.activeRec?.tileSource
-        ? '调整全图概览采样；局部图块随缩放自动切换清晰度'
+        ? '设置整图概览精度，超大图会自动降低概览档位；查看原始像素请点「原生 1:1」'
         : 'PAN／通用预览档位；同景较小的 NOSR 默认使用 1/2，PAN 为 1/2 或 1:1 时 NOSR 使用 1:1'" />
     <button v-if="store.activeRec?.tileSource && (store.activeRec.tileSource.info.displayProfiles
       || (!store.activeRec.displayStretch && store.activeRec.paintedMode === 'equal'))"
       type="button" class="cmp-btn" data-e2e="native-zoom" title="一个原图像素对应一个 Canvas 背板像素"
       @click="store.zoomNative()">原生 1:1</button>
-    <span v-if="store.resolutionLabels.length === 1" class="cmp-btn" data-e2e="view-resolution"
-      :title="store.resolutionLabels[0]?.title">{{ store.resolutionLabels[0]?.text }}</span>
     <AutoTourButton />
     <DiffLocateButton />
     <DiffContinueButton />

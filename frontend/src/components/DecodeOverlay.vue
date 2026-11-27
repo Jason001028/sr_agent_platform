@@ -9,9 +9,15 @@ import { useViewerStore } from '../stores/viewer';
 import { computed } from 'vue';
 
 const store = useViewerStore();
-const previewVisible = computed(() => {
+const previewVisible = computed(() => store.imageLoad.active &&
+  store.overlay.title !== '正在预热缩放…' &&
+  store.panes.some(({ rec }) => rec?.thumb || rec?.progressivePreview));
+const loadTitle = computed(() => {
+  if (!previewVisible.value) return store.overlay.title;
   const rec = store.recs.find(r => r.id === store.imageLoad.recId);
-  return store.imageLoad.active && !!(rec?.progressivePreview || (rec?.thumb && ['装载本地预览', '生成本地 JPG'].includes(store.imageLoad.stage)));
+  if (rec?.progressivePreview) return '整图概览已显示，后台回填中';
+  if (rec?.thumb && store.imageLoad.stage === '生成本地 JPG') return '影像已显示，后台生成 JPG';
+  return store.overlay.title;
 });
 const progressLabel = computed(() => {
   if(store.imageLoad.active&&store.imageLoad.state==='paused')return '已暂停';
@@ -27,8 +33,8 @@ const progressLabel = computed(() => {
     <div v-if="store.overlay.visible" class="decode-mask" :class="{ 'preview-ready': previewVisible }">
       <div class="decode-box">
         <div class="spinner"></div>
-        <div class="mask-title">{{ previewVisible ? (store.imageLoad.stage === '生成本地 JPG' ? '影像已显示，后台生成 JPG' : '整图概览已显示，后台回填中') : store.overlay.title }}</div>
-        <div v-if="store.overlay.sub && !previewVisible" class="mask-sub">{{ store.overlay.sub }}</div>
+        <div class="mask-title">{{ loadTitle }}</div>
+        <div v-if="store.overlay.sub && (!previewVisible || !store.overlay.bar || store.overlay.indeterminate)" class="mask-sub">{{ store.overlay.sub }}</div>
         <template v-if="store.imageLoad.active">
           <div class="mask-sub" aria-live="polite">{{ store.imageLoad.stage }}</div>
           <div v-if="store.imageLoad.state === 'pausing'" class="mask-sub">正在暂停，当前读取或处理块结束后生效…</div>

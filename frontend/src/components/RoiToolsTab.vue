@@ -93,8 +93,7 @@ function toneCls(t: QueueTask): string {
 }
 function failReason(t: QueueTask): string {
   if (t.state !== 'FAILED') return '';
-  const live = queue.failReason[t.task_id];
-  if (live) return '失败原因：' + live;
+  if (t.failure_reason) return '失败原因：' + t.failure_reason;
   return t.log_dir
     ? '失败（历史记录，原因见目录 ' + pathLeafOf(t.log_dir) + '）'
     : '任务失败';

@@ -2004,6 +2004,81 @@ class TestSceneTiffDiscovery(ResolveBase):
             "anchor": [directory.as_posix()] if directory else [],
         })
 
+    def test_gf07_drop_matches_sc_tiff_without_granting_pan_repair_authority(self):
+        name = 'JXGF07B04_PMS_20261120110901_200554604_102_0039_001_L1_PAN'
+        os.environ['SR_SCENE_PATH_TEMPLATE'] = self.root.as_posix() + '/{name}'
+        d = self._pan_scene(name, 100)
+        sc = d / (name + '.tif')
+        tifffile.imwrite(sc, np.full((12, 18), 200, dtype=np.uint16))
+        c = self.client()
+        response = self._drop(c, sc)
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual((result['row']['W'], result['row']['H']), (18, 12))
+        self.assertIsNone(result['row']['lq_path'])
+        self.assertEqual(result['resolved']['input_name'], 'PAN.tif')
+        self.assertEqual((result['resolved']['kind'], result['resolved']['suffix']), ('product', 'SC'))
+        self.assertFalse(result['resolved']['sr_capable'])
+        self.assertIsNone(result['resolved']['mask_path'])
+        asset = c.post('/api/image-open/assets', json={'sceneId': result['row']['id']})
+        self.assertEqual(asset.status_code, 200, asset.text)
+        self.assertEqual(asset.json()['name'], sc.name)
+        entries = c.get('/api/scenes/' + result['row']['id'] + '/tiff-files',
+                        params={'grant': result['discovery']}).json()['files']
+        stages = {entry['name']: (entry['kind'], entry['suffix']) for entry in entries}
+        self.assertEqual(stages[sc.name], ('product', 'SC'))
+        self.assertEqual(stages['PAN_ori.tif'], ('nosr', ''))
+        self.assertEqual(stages['PAN.tif'], ('input', ''))
+        for path, kind in ((sc, 'product'), (d / 'PAN_ori.tif', 'nosr')):
+            by_path = c.post('/api/scenes/resolve', json={'path': path.as_posix()})
+            self.assertEqual(by_path.status_code, 200, by_path.text)
+            self.assertEqual(by_path.json()['resolved']['kind'], kind)
+            self.assertFalse(by_path.json()['resolved']['sr_capable'])
+
+        other = self.root / 'local-copy'
+        other.mkdir()
+        tifffile.imwrite(other / sc.name, np.full((12, 18), 201, dtype=np.uint16))
+        mismatch = self._drop(c, other / sc.name)
+        self.assertEqual(mismatch.status_code, 409, mismatch.text)
+
+    def test_kf_pan_and_mss_companions_resolve_by_their_own_fingerprints(self):
+        os.environ['SR_SCENE_PATH_TEMPLATE'] = self.root.as_posix() + '/{name}'
+        c = self.client()
+        for satellite, product in (('JL1KF01A', 'PAN'), ('KF02B04', 'PAN'), ('JL1KF02B01', 'MSS')):
+            with self.subTest(satellite=satellite, product=product):
+                name = f'{satellite}_PMS05_20260722125045_200524168_102_0034_001_L1_{product}'
+                directory = make_scene(self.root / name, name, tif=False)
+                for tail, value in (('', 1), ('_NOSR', 2), ('_sr_2', 3), ('_sr_2_NOSR', 4)):
+                    tifffile.imwrite(directory / (name + tail + '.tif'), np.full((8, 12), value, dtype=np.uint16))
+                source = self._drop(c, directory / (name + '.tif'))
+                self.assertEqual(source.status_code, 200, source.text)
+                scene = source.json()
+                self.assertTrue(scene['resolved']['sr_capable'])
+                listing = c.get('/api/scenes/' + scene['row']['id'] + '/tiff-files',
+                                params={'grant': scene['discovery']})
+                self.assertEqual(listing.status_code, 200, listing.text)
+                by_name = {entry['name']: entry for entry in listing.json()['files']}
+                for tail, kind in (('_NOSR', 'nosr'), ('_sr_2', 'product'), ('_sr_2_NOSR', 'nosr')):
+                    image = directory / (name + tail + '.tif')
+                    resolved = self._drop(c, image)
+                    self.assertEqual(resolved.status_code, 200, resolved.text)
+                    result = resolved.json()
+                    self.assertEqual(result['row']['id'], by_name[image.name]['id'])
+                    self.assertEqual(by_name[image.name]['kind'], kind)
+                    self.assertEqual(result['resolved']['kind'], kind)
+                    self.assertFalse(result['resolved']['sr_capable'])
+                    self.assertIsNone(result['row']['lq_path'])
+                short_nosr = directory / (product + '_NOSR.tif')
+                tifffile.imwrite(short_nosr, np.full((8, 12), 5, dtype=np.uint16))
+                anchored = self._drop(c, short_nosr, directory)
+                self.assertEqual(anchored.status_code, 200, anchored.text)
+                self.assertEqual(anchored.json()['resolved']['kind'], 'nosr')
+                self.assertFalse(anchored.json()['resolved']['sr_capable'])
+                copy = self.root / (name + '_NOSR.tif')
+                tifffile.imwrite(copy, np.full((8, 12), 4, dtype=np.uint16))
+                conflict = self._drop(c, copy)
+                self.assertEqual(conflict.status_code, 409, conflict.text)
+
     def test_short_tiff_discovery_and_production_gates(self):
         scene_a = self._pan_scene("gf07-a", 100)
         scene_b = self._pan_scene("gf07-b", 200)

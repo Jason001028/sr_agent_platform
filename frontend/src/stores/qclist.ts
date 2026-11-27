@@ -388,16 +388,22 @@ export const useQcListStore = defineStore('qclist', () => {
         },
         nosr: async (it, res, signal) => {
           const r = res as SceneResolveResult;
-          const sib = await apiSceneSiblings(loadSrConfig(), r.row.id, undefined, false, [], requestSignal(signal));
+          const sib = await apiSceneSiblings(loadSrConfig(), r.row.id, undefined, false, [], requestSignal(signal), true);
           signal.throwIfAborted();
           const item = nosrItemOf(sib);
-          // 「没有这一份」是盘上的事实，不是失败（口径见 api.ts::nosrItemOf）。
-          // 尺寸读不出来同上：打不开就不入列，免得留一张点了必炸的空卡。
-          if (!item || !item.id || item.W == null || item.H == null) return 'missing';
-          await viewer.bakeCardPixels(
-            viewer.insertSceneCard(nosrMeta(sib, item), siblingRow(sib, item),
-              bodyIds.get(it.name)));
-          return 'ok';
+          let after = bodyIds.get(it.name);
+          const hasNosr = !!item?.id && !!item.W && !!item.H;
+          if (item && hasNosr) {
+            after = viewer.insertSceneCard(nosrMeta(sib, item), siblingRow(sib, item), after);
+            await viewer.bakeCardPixels(after);
+          }
+          const mask = sib.mask;
+          if (mask?.exists && mask.id && mask.W && mask.H) {
+            const meta: SceneOpenMeta = { ...nosrMeta(sib, mask), name: mask.name ?? 'mask.tif',
+              lqPath: null, previewOnly: true, stageKind: 'mask', stageSuffix: '' };
+            await viewer.bakeCardPixels(viewer.insertSceneCard(meta, siblingRow(sib, mask), after, true));
+          }
+          return hasNosr ? 'ok' : 'missing';
         },
         old: withOld ? async (it, res, signal) => {
           const r = res as SceneResolveResult;

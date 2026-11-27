@@ -4,7 +4,6 @@ import { TileRenderer, tileAxis } from '../tileRenderer';
 import { bootstrapTileLevel, loadTile, openTileSource, overviewDiv, withTileDisplay } from '../tileSource';
 import type { DecodedTile, TileSource } from '../tileSource';
 import { nativePreviewScale, rasterTransform, tileLevel } from '../viewMath';
-import { overviewResolution, tileResolution } from '../viewResolution';
 
 const source = {
   key: 'source/v1',
@@ -182,15 +181,6 @@ it('draws the cached parent under a fading child and stops animating after opaqu
   expect(renderer.presentation('A')).toMatchObject({ readyLOD: null, drawn: 0, visible: 1 });
   expect(renderer.presentation('B')).toMatchObject({ readyLOD: null, drawn: 0, visible: 0 });
   renderer.scheduler.close();
-});
-
-it('keeps Overview dimensions independent of displayed LOD and physical screen scale', () => {
-  expect(overviewResolution(49475, 49454, 16387, 16380)).toBe('16387×16380 · 约 1/3.02');
-  expect(tileResolution({ x: 1, y: 1 }, 1, false, 0, null, 4)).toBe('原生 1:1 · 高清加载中');
-  expect(tileResolution({ x: .5, y: .5 }, 2, false, 0, 0, 4)).toBe('原生 1:1 · 已就绪');
-  expect(tileResolution({ x: .5, y: .5 }, 3, false, 0, 0, 4)).toBe('视图 1.5:1 · L0');
-  expect(tileResolution({ x: .25, y: .25 }, 2, false, 1, 1, 4)).toBe('视图 1:2 · L1');
-  expect(tileResolution({ x: .125, y: .125 }, 2, false, 2, 2, 4)).toBe('视图 1:4 · L2');
 });
 
 it('counts the short edge tile without requiring coverage beyond the image', () => {

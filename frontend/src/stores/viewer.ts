@@ -3,7 +3,7 @@ import type { PreviewPlan, PreviewSource } from '../lib/previewPlan';
 import { isDeveloperMode } from '../lib/developerMode';
 import { imageRef, spatialId } from '../lib/spatial';
 import { planeStats, samplePlane, sharedStats, presetRange } from '../lib/histogramStretch';
-import type { DisplayStretch, PixelPlane } from '../lib/histogramStretch';
+import type { DisplayStretch, PixelPlane, ToneAdjustment } from '../lib/histogramStretch';
 import { tourImageFromEvidence, tourPairRefusal } from '../lib/tourCompare';
 import { precisePairReason } from '../lib/compareCapabilities';
 import { decodeJpegBitmap } from '../lib/jpegBitmap';
@@ -79,7 +79,7 @@ import { sourceFingerprint, localPreviewBudget, localTiffPreviewEdge, LARGE_LOCA
 import { LoadControl, isLoadAbort } from '../lib/loadControl';
 import { decodeLocalFile } from '../lib/localDecodeWorker';
 import { createPreviewAsset, uploadPreviewFile, fetchAssetTile, fetchAssetTileStats, fetchPreviewAsset, ImageOpenError } from '../lib/imageOpen';
-import { bootstrapTileLevel, openTileSource, overviewDiv, tileDisplayKey, TILE_OVERVIEW_EDGE } from '../lib/tileSource';
+import { bootstrapTileLevel, openTileSource, overviewDiv, tileDisplayKey, TILE_OVERVIEW_EDGE, withTileDisplay } from '../lib/tileSource';
 import type { TileSource } from '../lib/tileSource';
 import type { PreviewAsset } from '../lib/imageOpen';
 import type { LocalPixels, LocalSourceInfo } from '../lib/localDecodeWorker';
@@ -2278,7 +2278,7 @@ export const useViewerStore = defineStore('viewer', () => {
   /** 选文件 / 拖入：TIF 走解码管线，.jpg/.jpeg 走显示就绪图片管线（§4.6）。
    *  `side` 只在分屏下由拖放位置给出（落在左半是 'A'、右半是 'B'）；选文件对话框、
    *  场景快捷入口、以及任何别的调用都不给 → 落活动侧。 */
-  function addFiles(fileList: FileList | File[] | File, side?: 'A' | 'B') {
+  function addFiles(fileList: FileList | File[] | File, side?: 'A' | 'B', listOnly = false) {
     const files = Array.isArray(fileList)
       ? fileList
       : Array.from(fileList instanceof File ? [fileList] : fileList);
@@ -2298,7 +2298,24 @@ export const useViewerStore = defineStore('viewer', () => {
       recs.value.find((r) => r.file.name === f.name && (r.previewAsset?r.size:r.file.size) === f.size);
     const queued: {id?:number;file?:File}[]=[];
     const anchor = sceneDirOf(side ? recForSide(side) : activeRec.value) ?? lastSceneDir;
-    readableTifs.forEach((file) => queued.push({ id: openOne(file, anchor) }));
+    if (listOnly) {
+      readableTifs.forEach(file => { if (!dupOf(file)) openOne(file, anchor); });
+      readableImgs.forEach(file => { if (!dupOf(file)) openOne(file, anchor, 'img'); });
+      return;
+    }
+    const shortCompanion = /^(?:PAN|MSS)(?:_[a-z0-9]+)*\.tiff?$/i;
+    const productionFiles = readableTifs.filter(file =>
+      /^(?:(?:JX)?GF07[A-Z0-9]*|(?:JL[0-9]+)?KF[0-9][A-Z0-9]*)_.*_(?:PAN|MSS)\.tiff?$/i.test(file.name));
+    // A browser picker provides names only. In a single-scene selection the
+    // verified production file can anchor the short names in that same batch.
+    const sceneFile = productionFiles.length === 1 && readableTifs.some(file => shortCompanion.test(file.name))
+      ? productionFiles[0] : undefined;
+    let sceneFileId: number | undefined;
+    if (sceneFile) {
+      sceneFileId = openOne(sceneFile, anchor);
+      queued.push({ id: sceneFileId });
+    }
+    readableTifs.forEach(file => { if (file !== sceneFile) queued.push({ id: openOne(file, anchor) }); });
     readableImgs.forEach((f) => {
       const dup = dupOf(f);
       queued.push(dup?{id:dup.id}:{file:f});
@@ -2306,11 +2323,14 @@ export const useViewerStore = defineStore('viewer', () => {
     // One chooser batch shares the foreground instead of cancelling every
     // preceding upload as the next file is enqueued.
     void (async()=>{
+      let verifiedScene: string | null = null;
       for(const item of queued){
         if(item.id!==undefined){
           const rec=recs.value.find(row=>row.id===item.id);if(!rec)return;
+          if (verifiedScene && shortCompanion.test(rec.name)) rec.dropAnchor = verifiedScene;
           await activate(item.id,side);
           if(!recs.value.includes(rec)||rec.status.startsWith('已停止'))return;
+          if (item.id === sceneFileId && rec.serverSourceVerified) verifiedScene = rec.sceneDir ?? null;
         }else if(item.file){
           await openUploadedImage(item.file,side);
           if(recs.value.some(row=>row.file===item.file&&row.status.startsWith('已停止')))return;
@@ -2319,12 +2339,12 @@ export const useViewerStore = defineStore('viewer', () => {
     })().catch(error=>{if(!isLoadAbort(error))showErr(error instanceof Error?error.message:String(error));});
   }
 
-  function openOne(file: File, dropAnchor?: string | null):number {
+  function openOne(file: File, dropAnchor?: string | null, route: ViewerRec['route'] = null):number {
     const rec: ViewerRec = {
       id: nextId++, file: markRaw(file), dropAnchor,
       probe: null, name: file.name, size: file.size,
       W: 0, H: 0, thumb: null, src: null, srcw: 0, srch: 0, nbands: 0, invert: false,
-      stats: null, route: null, sceneId: null, lqPath: null,
+      stats: null, route, sceneId: null, lqPath: null,
       layout: '', status: '等待…', statusCls: '',
       paintedMode: null, maskRois: null, token: 0,
     };
@@ -2593,19 +2613,20 @@ export const useViewerStore = defineStore('viewer', () => {
   async function coarseAssetOverview(source: TileSource, signal?: AbortSignal) {
     const { asset, info } = source;
     const level = bootstrapTileLevel(info);
+    const display = source.display === 'binary' ? 'binary' : 'equal';
     const { tile, blob } = info.displayProfiles
-      ? await fetchAssetTile(asset, level, 0, 0, signal, info.band, 'equal', 'nearest', info.stretchVersion)
+      ? await fetchAssetTile(asset, level, 0, 0, signal, info.band, display, 'nearest', info.stretchVersion)
       : await fetchAssetTile(asset, level, 0, 0, signal);
     if (tile.rasterVersion !== info.rasterVersion || tile.sourceWidth !== asset.W
       || tile.sourceHeight !== asset.H || (info.displayProfiles
-        && (tile.displayKey !== 'equal' || tile.stretchVersion !== info.stretchVersion)))
+        && (tile.displayKey !== display || tile.stretchVersion !== info.stretchVersion)))
       throw new Error('概览源版本、尺寸或显示映射已变化，请重新打开影像');
     return { blob, width: tile.width, height: tile.height };
   }
 
   async function readAssetOverview(asset: PreviewAsset, source: TileSource | null, div: number,
     signal?: AbortSignal, phase?: (text: string) => void) {
-    if (source && Math.max(asset.W, asset.H) / div > TILE_OVERVIEW_EDGE) {
+    if (source && (source.display === 'binary' || Math.max(asset.W, asset.H) / div > TILE_OVERVIEW_EDGE)) {
       return coarseAssetOverview(source, signal);
     }
     try {
@@ -2637,8 +2658,12 @@ export const useViewerStore = defineStore('viewer', () => {
   async function loadPreviewAsset(rec:ViewerRec,asset:PreviewAsset,control:LoadControl) {
     await control.checkpoint('获取服务端缓存 JPG');
     const selected = previewDiv.value;
-    const source = rec.tileSource?.asset.id === asset.id ? rec.tileSource
+    let source = rec.tileSource?.asset.id === asset.id ? rec.tileSource
       : await control.request(signal => openTileSource(asset, signal), '检查影像窗口');
+    if (rec.tileDisplay === 'binary') {
+      if (!source?.info.displayProfiles) throw new Error('服务端黑白掩码预览不可用');
+      source = withTileDisplay(source, 'binary');
+    }
     const requested = effectivePreviewDiv(rec);
     const div = source ? overviewDiv(asset.W, asset.H, requested) : requested;
     const result=await control.request(signal=>readAssetOverview(asset,source,div,signal),'服务端下采样 JPG（缓存）');
@@ -2646,7 +2671,7 @@ export const useViewerStore = defineStore('viewer', () => {
     if(!recs.value.includes(rec)||previewDiv.value!==selected)return;
     const note=previewResolutionNote(asset.W,asset.H,result.width,result.height,jpegPlans.get(result.blob)?.limits);
     const format = result.blob.type === 'image/png' ? '服务端 PNG' : '服务端缓存 JPG';
-    const layout=`${format} 概览 · 请求 ${previewDivLabel(div)}${note?' · '+note:''} · 缓存定期清理`;
+    const layout=`${format} · ${source ? '整图概览档位' : '概览请求'} ${previewDivLabel(div)}${note?' · '+note:''} · 缓存定期清理`;
     const applied=await applySceneJpgToRec(rec,{
       name:rec.name,W:asset.W,H:asset.H,sceneId:rec.sceneId!,lqPath:rec.lqPath,
       sceneDir:rec.sceneDir,serverMaskPath:rec.serverMaskPath,stageKind:rec.stageKind,
@@ -2663,7 +2688,7 @@ export const useViewerStore = defineStore('viewer', () => {
     if(!rec.file.size)rec.file=markRaw(new File([result.blob],asset.name,{type:'image/jpeg'}));
     // The asset already authorizes preview. Optional scene classification must
     // not hold up this JPG, the next image, or the foreground loading controls.
-    associatePreviewAsset(rec,asset);
+    if (rec.tileDisplay !== 'binary') associatePreviewAsset(rec,asset);
   }
 
   async function openPreviewAsset(asset:PreviewAsset):Promise<void> {
@@ -2916,11 +2941,11 @@ export const useViewerStore = defineStore('viewer', () => {
     // 环节（本体 / 产物 / NOSR）：两处入口（拖拽升级、快捷芯片）都在 meta 里给，
     // 缺省按本体 —— 只有盘阵场景才有这一项，本地图片 stageKind 保持 undefined。
     // 标签在这一个漏斗里算出来，卡片直接渲染，不必各自再判一遍。
-    rec.stageKind = rec.viewerRole === 'reference' || rec.viewerRole === 'other'
+    rec.stageKind = (rec.viewerRole === 'reference' && meta.stageKind !== 'nosr') || rec.viewerRole === 'other'
       ? undefined : meta.stageKind ?? 'input';
     rec.previewPanSize=meta.previewPanSize??rec.previewPanSize;
     rec.detailDiv=plan?.requestedDiv ?? effectivePreviewDiv(rec);
-    rec.stageLabel = rec.viewerRole === 'reference' ? '参考影像'
+    rec.stageLabel = rec.viewerRole === 'reference' && rec.stageKind !== 'nosr' ? '参考影像'
       : rec.viewerRole === 'other' ? '' : stageLabel(rec.stageKind, meta.stageSuffix, rec.name);
     // 默认是服务端生成预览那份的口径；拖本地 jpg 升级进来的那条路自报来源
     // （它的像素是用户拖进来的原图，写成「服务端已生成」与事实不符）。
@@ -2930,7 +2955,7 @@ export const useViewerStore = defineStore('viewer', () => {
     const sizeNote = previewResolutionNote(rec.W, rec.H, tw, th, plan ? rec.previewPlan?.limits : undefined);
     rec.layout = layout
       ?? (coarseTile ? `服务端 PNG 概览 · ${tw}×${th}`
-        : `盘阵 JPG（请求 ${previewDivLabel(rec.detailDiv)} + 直方图均衡，服务端已生成）${sizeNote ? ' · ' + sizeNote : ''}`);
+        : `盘阵 JPG（${tiles ? '整图概览档位' : '请求'} ${previewDivLabel(rec.detailDiv)} + 直方图均衡，服务端已生成）${sizeNote ? ' · ' + sizeNote : ''}`);
     // 同上：名字与尺寸卡片上已有（标题行、图属性行、布局行），状态只表态
     rec.status = '场景就绪';
     rec.statusCls = 'ok';
@@ -2983,8 +3008,10 @@ export const useViewerStore = defineStore('viewer', () => {
       card: markRaw({ row, meta }),
     };
     rec.stageKind = meta.stageKind ?? 'input';
+    rec.previewOnly = meta.previewOnly === true;
+    if (meta.stageKind === 'mask') rec.tileDisplay = 'binary';
     rec.previewPanSize=meta.previewPanSize;
-    rec.stageLabel = rec.viewerRole === 'reference' ? '参考影像'
+    rec.stageLabel = rec.viewerRole === 'reference' && rec.stageKind !== 'nosr' ? '参考影像'
       : rec.viewerRole === 'other' ? '' : stageLabel(rec.stageKind, meta.stageSuffix, rec.name);
     rec.serverMaskPath = meta.serverMaskPath ?? null;
     // 一键解析：NOSR 卡紧跟本体卡；其余情况追加到末尾。不参与批量错峰（延迟 0），
@@ -3032,7 +3059,7 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.sceneDir = meta.sceneDir ?? null;
     rec.stageKind = meta.stageKind ?? 'input';
     rec.previewPanSize=meta.previewPanSize;
-    rec.stageLabel = rec.viewerRole === 'reference' ? '参考影像'
+    rec.stageLabel = rec.viewerRole === 'reference' && rec.stageKind !== 'nosr' ? '参考影像'
       : rec.viewerRole === 'other' ? '' : stageLabel(rec.stageKind, meta.stageSuffix, rec.name);
     rec.serverMaskPath = meta.serverMaskPath ?? null;
     rec.status = '正在生成预览…';
@@ -3135,20 +3162,24 @@ export const useViewerStore = defineStore('viewer', () => {
             }, signal), '准备服务端概览');
         } catch(error) {
           if(isLoadAbort(error)||owner.signal.aborted)throw error;
-          if(rec.discoveredTiff || !(error instanceof ImageOpenError&&error.status===404))throw error;
+          if(rec.discoveredTiff || rec.tileDisplay === 'binary' || !(error instanceof ImageOpenError&&error.status===404))throw error;
         }
         if(resolvedAsset) {
           const asset=resolvedAsset;
           if((!rec.discoveredTiff&&(asset.W!==rec.W||asset.H!==rec.H))||(card.row.srcRev&&asset.sourceRev!==card.row.srcRev))throw new Error('候选影像源版本或尺寸已变化，请刷新候选');
-          const source = rec.tileSource?.asset.id === asset.id ? rec.tileSource
+          let source = rec.tileSource?.asset.id === asset.id ? rec.tileSource
             : await owner.request(signal => openTileSource(asset, signal), '检查影像窗口');
+          if (rec.tileDisplay === 'binary') {
+            if (!source?.info.displayProfiles) throw new Error('服务端黑白掩码预览不可用');
+            source = withTileDisplay(source, 'binary');
+          }
           if (source) div = overviewDiv(asset.W, asset.H, div);
           const result=await owner.request(signal=>readAssetOverview(asset,source,div,signal,phase),'服务端下采样 JPG（缓存）');
           if(!stillWanted()||rec.token!==intent.token||!recs.value.includes(rec)||previewDiv.value!==selected)return;
           phase('正在解码并装载 JPG…');intent.token++;
           const note=previewResolutionNote(asset.W,asset.H,result.width,result.height,jpegPlans.get(result.blob)?.limits);
           const format = result.blob.type === 'image/png' ? '服务端 PNG' : '服务端缓存 JPG';
-          const layout=`${format} 概览 · 请求 ${previewDivLabel(div)}${note?' · '+note:''} · 缓存定期清理`;
+          const layout=`${format} · ${source ? '整图概览档位' : '概览请求'} ${previewDivLabel(div)}${note?' · '+note:''} · 缓存定期清理`;
           const meta = { ...card.meta, W: asset.W, H: asset.H, srcRev: asset.sourceRev };
           if (rec.discoveredTiff) {
             meta.lqPath = null;
@@ -3593,7 +3624,7 @@ export const useViewerStore = defineStore('viewer', () => {
       盘阵场景同样走这条路：服务端生成的直方图均衡只是**底图**，显示层照常可二次
       拉伸（均衡是不可逆的，拉不回来 —— 这一点在工具栏 title 里说明）。 */
   function paintStretch(rec: ViewerRec, mode: StretchMode = stretchMode.value) {
-    if (!rec.src || !rec.thumb) return;
+    if (rec.tileDisplay === 'binary' || !rec.src || !rec.thumb) return;
     if(rec.displayStretch){renderDisplayStretch(rec,false);return;}
     const ctx = (rec.thumb as unknown as HTMLCanvasElement).getContext('2d');
     if (!ctx) return;
@@ -3648,7 +3679,7 @@ export const useViewerStore = defineStore('viewer', () => {
     return d?`dn:${d.bits}:${d.sampleFormat}`:'dn:unknown';
   }
   watch(()=>histogramRec.value?.tileSource, (source,_,onCleanup)=>{
-    if(!source?.info.displayProfiles||tileHistograms.value.has(source.key))return;
+    if(!source?.info.displayProfiles||source.display==='binary'||tileHistograms.value.has(source.key))return;
     const controller=new AbortController();
     onCleanup(()=>controller.abort());
     void fetchAssetTileStats(source.asset,source.info.band,controller.signal).then(s=>{
@@ -3666,6 +3697,7 @@ export const useViewerStore = defineStore('viewer', () => {
   const sharedStretchReason=computed(()=>{
     const [a,b]=comparisonStretchPair();
     if(!a||!b||a.id===b.id)return '请先打开两张对比影像';
+    if(a.tileDisplay==='binary'||b.tileDisplay==='binary')return '掩码使用固定黑白配色';
     const pa=cachedPlane(a),pb=cachedPlane(b);
     if(!pa||!pb)return '等待两张影像的缓存像素';
     if(pa.nb!==1||pb.nb!==1)return '共享暂仅支持单波段灰度影像';
@@ -3677,7 +3709,7 @@ export const useViewerStore = defineStore('viewer', () => {
   });
   function histogramForRec(rec:ViewerRec|null,scope=histogramScope.value) {
     const p=rec&&cachedPlane(rec);
-    if(!rec||!p)return null;
+    if(!rec||rec.tileDisplay==='binary'||!p)return null;
     if(rec.tileSource?.info.displayProfiles){
       const {dtype}=rec.tileSource.info;
       const bounds=dtype==='uint16'?[0,65535]:dtype==='int16'?[-32768,32767]:dtype==='uint8'?[0,255]:[0,1];
@@ -3749,7 +3781,7 @@ export const useViewerStore = defineStore('viewer', () => {
     })().catch(error=>{if(wanted())showErr('显示拉伸失败：'+String(error));})
       .finally(()=>{if(displayPaints.get(rec.id)===version)displayPaints.delete(rec.id);});
   }
-  function applyHistogramStretch(mode:StretchMode,custom?:import('../lib/tifDecode').StretchRange,lightOnly=false) {
+  function applyHistogramStretch(mode:StretchMode,custom?:import('../lib/tifDecode').StretchRange,lightOnly=false,toneAdjustment?:ToneAdjustment) {
     const rec=histogramRec.value,snapshot=histogramSnapshot();
     if(!rec||!snapshot)return;
     noteUserIntent();
@@ -3769,7 +3801,7 @@ export const useViewerStore = defineStore('viewer', () => {
     const version=++stretchVersion;
     for(const target of targets){
       target.stretchDefaultMode??=target.paintedMode??startStretch(target.route,stretchMode.value);
-      target.displayStretch=markRaw({...range,mode:custom?'linear':mode,custom:!!custom,stats,version,domain:stretchDomain(target),sourceRev:target.srcRev});
+      target.displayStretch=markRaw({...range,mode:custom?'linear':mode,custom:!!custom,stats,version,domain:stretchDomain(target),sourceRev:target.srcRev,toneAdjustment});
       renderDisplayStretch(target,lightOnly);
     }
   }
@@ -3780,6 +3812,28 @@ export const useViewerStore = defineStore('viewer', () => {
     applyHistogramStretch(mode);
   }
   function setStretchBounds(low:number,high:number,preview=false){applyHistogramStretch('linear',{low,high,curve:histogramRec.value?.displayStretch?.curve},preview);}
+  function setToneAdjustment(which: 'brightness' | 'contrast', value: number) {
+    const rec = histogramRec.value;
+    const snapshot = histogramSnapshot();
+    if (!rec || !snapshot || !Number.isFinite(value)) return;
+    const current = rec.displayStretch?.toneAdjustment;
+    const { low, high, mode, custom, curve } = snapshot;
+    const base = current?.base ?? { low, high, mode, custom, curve };
+    const adjustment = { brightness: current?.brightness ?? 0, contrast: current?.contrast ?? 0,
+      base, [which]: Math.max(-100, Math.min(100, value)) };
+    const { brightness, contrast } = adjustment;
+    if (!brightness && !contrast) {
+      applyHistogramStretch(base.mode, base.custom ? base : undefined, true);
+      return;
+    }
+    // A narrower input window increases contrast. Moving it toward lower DN
+    // brightens non-inverted images. Both controls use the original window.
+    const half = (base.high - base.low || 1) / 2 ** (1 + contrast / 100);
+    const info = rec.tileSource?.info;
+    const inverted = info?.displayProfiles ? info.photometric === 0 : rec.invert;
+    const center = base.low + (base.high - base.low) / 2 - half * brightness / 100 * (inverted ? -1 : 1);
+    applyHistogramStretch('linear', { low: center - half, high: center + half, curve: base.curve }, true, adjustment);
+  }
   function setStretchCurve(points:readonly import('../lib/tifDecode').CurvePoint[],preview=false){
     if(histogramRec.value?.tileSource?.info.displayProfiles&&points.length>64){
       showToast('原生图块曲线最多支持 64 个控制点');return;
@@ -3793,14 +3847,15 @@ export const useViewerStore = defineStore('viewer', () => {
     stretchLink.value=value;if(value==='shared'){
       const s=histogramSnapshot();
       const native=histogramRec.value?.tileSource?.info.displayProfiles;
-      applyHistogramStretch(s?.mode??activeStretch.value,s&&(s.custom||native)?{low:s.low,high:s.high,curve:s.curve}:undefined);
+      applyHistogramStretch(s?.mode??activeStretch.value,s&&(s.custom||native)?{low:s.low,high:s.high,curve:s.curve}:undefined,
+        false,histogramRec.value?.displayStretch?.toneAdjustment);
     }
   }
   function resetHistogramStretch() {
     const targets=stretchLink.value==='shared'?comparisonStretchPair():[histogramRec.value];
     noteUserIntent();
     stretchLink.value='independent';
-    for(const rec of targets){if(!rec)continue;const p=cachedPlane(rec);if(!p)continue;
+    for(const rec of targets){if(!rec||rec.tileDisplay==='binary')continue;const p=cachedPlane(rec);if(!p)continue;
       const stats=planeStats(p),mode=rec.stretchDefaultMode??startStretch(rec.route,stretchMode.value);
       rec.displayStretch=markRaw({...presetRange(stats[0],mode),mode,custom:false,stats,version:++stretchVersion,domain:stretchDomain(rec),sourceRev:rec.srcRev});
       renderDisplayStretch(rec,false);}
@@ -4052,7 +4107,6 @@ export const useViewerStore = defineStore('viewer', () => {
     return rec?.tileSource && t ? Math.max(64, nativePreviewScale(t.width, t.height, rec.W, rec.H, 1) * 4) : 64;
   }
 
-  const resolutionLabels = shallowRef<{ side: string; left: number; text: string; title: string }[]>([]);
 
   function zoomNative() {
     const pane = panes.value.find(p => p.active);
@@ -4484,9 +4538,12 @@ export const useViewerStore = defineStore('viewer', () => {
       Math.hypot(p[0] - pts[0][0], p[1] - pts[0][1]) * view.value.scale <= 11);
   }
 
-  function closePolygon() {
-    if (drawMode.value && drawTool.value === 'polygon' && canDrawOn(activeRec.value) && pendingPts.value && pendingPts.value.length >= 3) {
-      addMaskPolygon(activeRec.value!.id, pendingPts.value.slice());
+  function closePolygon(finalPoint?: Pt) {
+    if (drawMode.value && drawTool.value === 'polygon' && canDrawOn(activeRec.value) && pendingPts.value) {
+      const points = pendingPts.value.slice();
+      if (finalPoint && [points[0], points[points.length - 1]].every(p =>
+        !p || p[0] !== finalPoint[0] || p[1] !== finalPoint[1])) points.push(finalPoint);
+      if (points.length >= 3) addMaskPolygon(activeRec.value!.id, points);
     }
     pendingPts.value = null; hoverPt.value = null;
     renderTick.value++;
@@ -4806,10 +4863,10 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.previewOnly = (res.resolved.preview_only || res.resolved.read_only);
     rec.srcRev = res.row.srcRev;
     rec.serverMaskPath = res.resolved.mask_path;
-    rec.stageKind = res.resolved.viewer_role === 'reference' || res.resolved.viewer_role === 'other'
+    rec.stageKind = (res.resolved.viewer_role === 'reference' && res.resolved.kind !== 'nosr') || res.resolved.viewer_role === 'other'
       ? undefined : res.resolved.kind;
     rec.resolvedSuffix=res.resolved.suffix;
-    rec.stageLabel = res.resolved.viewer_role === 'reference' ? '参考影像'
+    rec.stageLabel = res.resolved.viewer_role === 'reference' && rec.stageKind !== 'nosr' ? '参考影像'
       : res.resolved.viewer_role === 'other' ? '' : stageLabel(res.resolved.kind, res.resolved.suffix, rec.name);
     rec.serverSourceVerified = true;
     rec.viewerRole = res.resolved.viewer_role;
@@ -4874,7 +4931,7 @@ export const useViewerStore = defineStore('viewer', () => {
         const card = recs.value.find(other => other.id === after)!;
         card.discoveredTiff = true;
         card.viewerRole = file.viewerRole;
-        if (file.viewerRole !== 'stage') {
+        if (file.viewerRole !== 'stage' && file.kind !== 'nosr') {
           card.stageKind = undefined;
           card.stageLabel = file.viewerRole === 'reference' ? '参考影像' : '';
         }
@@ -5325,7 +5382,7 @@ export const useViewerStore = defineStore('viewer', () => {
     cursor, setCursor,
     canvasAttached, setCanvasAttached,
     stretchMode, activeStretch, drawMode, drawTool, pendingRect, pendingPts, hoverPt, hoverRoi, flashRoi,
-    histogramScope,histogramTarget,histogramRec,stretchLink,sharedStretchReason,histogramSnapshot,setStretchBounds,setStretchCurve,setStretchLink,resetHistogramStretch,finishStretchInteraction,
+    histogramScope,histogramTarget,histogramRec,stretchLink,sharedStretchReason,histogramSnapshot,setStretchBounds,setStretchCurve,setToneAdjustment,setStretchLink,resetHistogramStretch,finishStretchInteraction,
     previewDiv,
     wandTol, merging, overlay, toast, error, modal,
     imageLoad, pauseImageLoad, resumeImageLoad, stopImageLoad, downloadLocalPreview,
@@ -5347,7 +5404,7 @@ export const useViewerStore = defineStore('viewer', () => {
     // 一键解析：先排满占位卡，再原地补齐 / 标红 / 收尾
     insertPendingCards, fillPendingCard, setPendingStatus, failPendingCard, finishPendingCards,
     // 拉伸 / 视图
-    setStretch, setPreviewDiv, setCanvasSize, fit, zoomNative, resolutionLabels, onWheel, onPan, locatePixel, focusSourceBounds,
+    setStretch, setPreviewDiv, setCanvasSize, fit, zoomNative, onWheel, onPan, locatePixel, focusSourceBounds,
     focusPaneRect, addMaskPolygon, addMaskPolygonBatch, redoRoi, canRedoMask,
     // 掩码
     enterDraw, exitDraw, setDrawTool, commitRect, closePolygon, polygonCanCloseAt, undoRoi, clearRois,

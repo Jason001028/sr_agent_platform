@@ -99,6 +99,13 @@ def raster_revision(source, version=None):
     return hashlib.sha256(repr(stamps).encode()).hexdigest()
 
 
+def _stale_external_overview(path):
+    try:
+        return Path(path + ".ovr").stat().st_mtime_ns < Path(path).stat().st_mtime_ns
+    except FileNotFoundError:
+        return False
+
+
 @dataclass(frozen=True)
 class RasterInfo:
     width: int
@@ -215,7 +222,9 @@ class RasterWindowReader:
             handles.move_to_end(path)
             return handles[path]
         handles.pop(path, None)
-        ds = self._open_dataset(path)
+        # GDAL can attach an older external pyramid to a replacement TIFF of
+        # the same dimensions. An aligned grid alone cannot validate its pixels.
+        ds = self._open_dataset(path, "NONE" if _stale_external_overview(path) else None)
         probe = probe_tiff(path)
         sparse = SparseStrips.open(path, probe)
         opened = handles[path] = _OpenedRaster(revision, ds, probe, sparse)

@@ -194,6 +194,16 @@ describe('formToSubmit（提交 body 归一）', () => {
 });
 
 describe('mergeJobUpdate（SSE 归并）', () => {
+  it('shows an attempt failure and clears it when the task runs again', () => {
+    const rows = [task({ state: 'RUNNING' })];
+    const event = { type: 'job_update', task_id: 1, job_id: 101, state: 'FAILED',
+      prev_state: 'RUNNING', ok: false, error: 'Mask dimensions match neither body nor NOSR' } as const;
+    const failed = mergeJobUpdate(rows, event);
+    expect(failed[0].failure_reason).toBe(event.error);
+    expect(mergeJobUpdate(failed, { ...event, state: 'RUNNING', error: null })[0].failure_reason).toBeNull();
+    expect(mergeJobUpdate(rows, { ...event, error: 'state=FAILED' })[0].failure_reason).toBeNull();
+    expect(mergeJobUpdate(rows, { ...event, job_id: 100 })).toBe(rows);
+  });
   it('task_id 匹配 → 覆盖 state，其余行不动', () => {
     const rows = [task({ task_id: 1, state: 'PENDING' }),
                   task({ task_id: 2, state: 'RUNNING' })];

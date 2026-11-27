@@ -78,7 +78,7 @@ export class TileRenderer {
         this.scheduler.touch(tile);
       }
       for (const request of requests) {
-        if (reducedMotion || (direction && direction.speed >= 1000)) request.fade = 0;
+        if (pane.source.display === 'binary' || reducedMotion || (direction && direction.speed >= 1000)) request.fade = 0;
         else if (now - levelChanged < 220) request.fade = 200;
         wanted.push(request);
       }
@@ -139,7 +139,7 @@ export class TileRenderer {
       ctx.globalAlpha = immediate || !entry.fade ? 1 : easeOutCubic((now - entry.ready) / entry.fade);
       if (ctx.globalAlpha < 1) active = true;
       if (ctx.globalAlpha === 0) continue;
-      ctx.imageSmoothingEnabled = Math.max(s.x, s.y) * step * dpr < 1;
+      ctx.imageSmoothingEnabled = layer.pane.source.display !== 'binary' && Math.max(s.x, s.y) * step * dpr < 1;
       let axes = this.geometry.get(entry);
       if (!axes) {
         axes = { x: tileAxis(t.x, t.sourceWidth, t.width, step), y: tileAxis(t.y, t.sourceHeight, t.height, step) };

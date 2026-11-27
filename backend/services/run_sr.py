@@ -218,9 +218,16 @@ def _reject_delete_ori(params: dict) -> None:
 def repair_request(params: dict) -> dict:
     """Shared REST/tool repair semantics; a changed mask creates a new task."""
     result = {**params, 'repair': True}
+    scene = Path(params['lq_path'])
+    nosr = scene_search.repair_nosr_path(scene)
+    result.pop('repair_body_name', None)
+    if scene_search.gf07_pan_body(scene):
+        result['repair_body_name'] = 'PAN.tif'
+    result.pop('repair_nosr_name', None)
+    if nosr.name == 'PAN_ori.tif':
+        result['repair_nosr_name'] = nosr.name
     revision = {}
-    for key, path in (('mask', params.get('mask_path')),
-                      ('nosr', str(Path(params['lq_path']) / (Path(params['lq_path']).name + '_NOSR.tif')))):
+    for key, path in (('mask', params.get('mask_path')), ('nosr', nosr)):
         if path:
             try:
                 st = os.stat(path)
@@ -264,7 +271,9 @@ def build_config_xml(params: dict, dataroot=None) -> str:
     if params.get("repair"):
         scene = Path(dataroot or params["lq_path"])
         add("RepairMode", "pan-nosr-v1")
-        add("RepairNOSR", (scene / (scene.name + "_NOSR.tif")).as_posix())
+        add("RepairBody", params.get("repair_body_name"))
+        nosr_name = params.get('repair_nosr_name') or (scene.name + '_NOSR.tif')
+        add("RepairNOSR", (scene / nosr_name).as_posix())
         if params.get('repair_revision'):
             add('RepairRevision', json.dumps(params['repair_revision'], sort_keys=True))
         if params.get('nosr_stage'):
@@ -643,6 +652,42 @@ def query_job_status(job_id, task: Optional[dict] = None, run_cmd=None) -> dict:
     if run_cmd is not None:
         return slurm.job_status(job_id, run_cmd=run_cmd, exit_code_file=exit_file)
     return slurm.job_status(job_id, exit_code_file=exit_file)
+
+
+def task_failure_reason(task: dict, status: dict) -> Optional[str]:
+    """Prefer the execution exception from this attempt's bounded log tail."""
+    job = str(task.get("job_id"))
+    directory, batch = task.get("log_dir"), task.get("batch_script")
+    if job.isdecimal() and directory:
+        root = Path(directory)
+        local = root / f"{Path(batch).stem}.{job}.out" if batch else None
+        logs = (local,) if local and local.is_file() else (root / f"{job}.err", root / f"{job}.out")
+        for path in logs:
+            if not path.is_file():
+                continue
+            try:
+                with path.open("rb") as stream:
+                    size = stream.seek(0, os.SEEK_END)
+                    stream.seek(max(0, size - 16384))
+                    lines = stream.read(16384).decode("utf-8", errors="replace").splitlines()
+                if size > 16384:
+                    lines = lines[1:]
+            except OSError:
+                continue
+            wrapper_error = None
+            for line in reversed(lines):
+                line = line.strip()
+                if line.startswith("PAN repair failed: "):
+                    reason = line[len("PAN repair failed: "):]
+                    if reason.startswith("Command ") and "returned non-zero exit status" in reason:
+                        wrapper_error = reason
+                        continue  # An inference child may have logged the actual error first.
+                    return reason[:2048]
+                if re.match(r"^[\w.]+(?:Error|Exception):\s", line) or ("can't open file" in line and "[Errno " in line):
+                    return line[:2048]
+            if wrapper_error:
+                return wrapper_error[:2048]
+    return (status.get("reason") or "")[:2048] or None
 
 
 class SubmissionUnknown(RuntimeError):

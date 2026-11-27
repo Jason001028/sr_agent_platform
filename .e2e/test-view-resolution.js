@@ -61,11 +61,11 @@ async function main() {
           }) } });
         };
       });
-      const label = '[data-e2e="view-resolution"]';
-      const waitLabel = text => page.waitForFunction((selector, value) =>
-        document.querySelector(selector)?.textContent.trim() === value, {}, label, text);
+      const hiddenLabels = () => page.$$('[data-e2e="view-resolution"], .view-resolution');
+      const waitLevel = level => page.waitForFunction(value =>
+        JSON.parse(document.querySelector('.view-canvas').dataset.tilePresentation || '[]')[0]?.targetLOD === value, {}, level);
       const shot = name => dpr === 1 && page.screenshot({ path: path.join(out, tag + '-' + name + '.png') });
-      await waitLabel('整图预览 · 实际约 1/1');
+      assert.equal((await hiddenLabels()).length, 0);
       await shot('no-tile');
       await page.evaluate(() => {
         const { store } = window.imageOpenTest;
@@ -77,10 +77,11 @@ async function main() {
           } } });
         store.fit();
       });
-      await waitLabel('全图概览 · 按需高清');
+      await page.waitForFunction(() =>
+        JSON.parse(document.querySelector('.view-canvas').dataset.tilePresentation || '[]')[0]?.visible > 0);
       await shot('overview');
       await page.click('[data-e2e="native-zoom"]');
-      await waitLabel(dpr === 3 ? '视图 1.5:1 · L0 加载中' : '原生 1:1 · 高清加载中');
+      await waitLevel(0);
       await page.waitForFunction(() => window.lodFixture.requested.includes(0));
       await shot('native-loading');
       await page.evaluate(() => {
@@ -93,7 +94,7 @@ async function main() {
         const state = JSON.parse(document.querySelector('.view-canvas').dataset.tilePresentation)[0];
         return state.readyLOD === 0 && state.drawn === state.visible && state.visible > 0;
       });
-      await waitLabel(dpr === 3 ? '视图 1.5:1 · L0' : '原生 1:1 · 已就绪');
+      assert.equal((await hiddenLabels()).length, 0);
       assert.equal(await page.evaluate(() => window.lodFixture.fail), false);
       await shot('native-ready');
       for (const level of [1, 2]) {
@@ -104,8 +105,7 @@ async function main() {
           store.setPaneView(p.side, { scale, ox: (p.rect.w - p.rec.thumb.width * scale) / 2,
             oy: (p.rect.h - p.rec.thumb.height * scale) / 2 });
         }, level);
-        const denominator = Number((2 ** level * Math.min(dpr, 2) / dpr).toPrecision(3));
-        await waitLabel(`视图 1:${denominator} · L${level}`);
+        await waitLevel(level);
       }
       await page.evaluate(async () => {
         const { store } = window.imageOpenTest;
@@ -118,14 +118,11 @@ async function main() {
         await store.activate(tiled, 'A');
         store.fit();
       });
-      await page.waitForFunction(() => window.imageOpenTest.store.resolutionLabels.length === 2);
-      const split = await page.evaluate(() => ({
-        a: document.querySelector('[data-pane="A"].view-resolution')?.textContent,
-        b: document.querySelector('[data-pane="B"].view-resolution')?.textContent,
-        labels: window.imageOpenTest.store.resolutionLabels,
-      }));
-      assert.equal(split.a, '全图概览 · 按需高清', JSON.stringify(split));
-      assert.match(split.b, /整图预览/);
+      await page.waitForFunction(() => {
+        const panes = JSON.parse(document.querySelector('.view-canvas').dataset.tilePresentation || '[]');
+        return panes.length === 2 && panes[0]?.visible > 0 && panes[1] === null;
+      });
+      assert.equal((await hiddenLabels()).length, 0);
       console.log(await browser.version(), 'DPR', dpr, 'passed');
       await page.close();
     }

@@ -65,7 +65,7 @@ export async function loadTile(source: TileSource, level: number, x: number, y: 
     || tile.stretchVersion !== info.stretchVersion || tile.band !== info.band
     || (info.displayProfiles && (tile.displayKey !== (source.display ?? 'equal')
       || tile.requestedSampling !== (source.sampling ?? 'nearest')
-      || tile.resampling !== (source.sampling === 'area' && !info.categorical
+      || tile.resampling !== (source.sampling === 'area' && !info.categorical && source.display !== 'binary'
         && (level === 1 || level === 2) ? 'area' : 'nearest')))
     || tile.level !== level || tile.tileX !== x || tile.tileY !== y
     || tile.x !== x * span || tile.y !== y * span || tile.sourceWidth !== w || tile.sourceHeight !== h

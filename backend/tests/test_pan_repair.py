@@ -562,10 +562,17 @@ class TestScRepair(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.scene = Path(self.tmp.name) / 'A_B_20261009120519_200544503_101_0017_001_L1_PAN'
+        self.gdal = FakeGdal()
+        self.patch = patch.dict('sys.modules', {'verify_sr_run': verifier})
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+        self.write_scene('A_B_20261009120519_200544503_101_0017_001_L1_PAN')
+
+    def write_scene(self, name, nosr_name=None):
+        self.scene = Path(self.tmp.name) / name
         self.scene.mkdir()
         self.body = self.scene / (self.scene.name + '.tif')
-        self.nosr = self.scene / (self.scene.name + '_NOSR.tif')
+        self.nosr = self.scene / (nosr_name or self.scene.name + '_NOSR.tif')
         self.mask = self.scene / (self.scene.name + '_mask.tif')
         self.decoy = self.scene / 'PAN.tif'
         tifffile.imwrite(self.body, np.full((8, 8), 77, dtype=np.uint16))
@@ -588,10 +595,6 @@ class TestScRepair(unittest.TestCase):
                                       'suffix': '260318', 'sr_scale': 2,
                                       'options_yml': str(self.opt)})
         self.config.write_text(build_config_xml(self.params), encoding='utf-8')
-        self.gdal = FakeGdal()
-        self.patch = patch.dict('sys.modules', {'verify_sr_run': verifier})
-        self.patch.start()
-        self.addCleanup(self.patch.stop)
 
     def inference(self, argv):
         self.assertIn('--infer', argv)
@@ -611,6 +614,47 @@ class TestScRepair(unittest.TestCase):
         (debug / (self.scene.name + '_SRLOG.txt')).write_text('Run finished.\n')
 
     def test_sc_body_is_repaired_and_decoy_pan_untouched(self):
+        self.assert_repair_result()
+
+    def test_gf07_uses_pan_ori_from_submit_through_contract(self):
+        self.write_scene('JXGF07B04_PMS_20261120110901_L1_PAN', 'PAN_ori.tif')
+        # The SC-named raster is a different grid; repair must only touch PAN.tif.
+        self.body, self.decoy = self.decoy, self.body
+        tifffile.imwrite(self.body, np.full((8, 8), 77, dtype=np.uint16))
+        tifffile.imwrite(self.decoy, np.full((6, 7), 5, dtype=np.uint16))
+        root = ET.parse(self.config)
+        self.assertEqual(root.findtext('RepairBody'), 'PAN.tif')
+        self.assertEqual(root.findtext('RepairNOSR'), self.nosr.as_posix())
+        self.assertEqual(self.params['repair_revision']['nosr'], repair.signature(self.nosr))
+        tifffile.imwrite(self.mask, np.full((6, 7), 255, dtype=np.uint8))
+        self.config.write_text(build_config_xml(repair_request(self.params)), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'Mask dimensions match neither body nor NOSR'):
+            repair.run(self.config, 'unused-inference.py', gdal=self.gdal,
+                       execute=lambda _: self.fail('inference must not run on the SC grid'))
+        mask = np.zeros((8, 8), dtype=np.uint8)
+        mask[3, 3] = 255
+        tifffile.imwrite(self.mask, mask)
+        self.config.write_text(build_config_xml(repair_request(self.params)), encoding='utf-8')
+        original = self.nosr.read_bytes()
+        self.assert_repair_result()
+        self.assertEqual(self.nosr.read_bytes(), original)
+
+    def test_pan_ori_alias_is_gf07_only_and_standard_name_has_priority(self):
+        self.write_scene('GF07A03_PMS_20261120110901_L1_PAN', 'PAN_ori.tif')
+        standard = self.scene / (self.scene.name + '_NOSR.tif')
+        standard.write_bytes(self.nosr.read_bytes())
+        self.assertEqual(ET.fromstring(build_config_xml(repair_request(self.params))).findtext('RepairNOSR'),
+                         standard.as_posix())
+
+        self.write_scene('GF06A03_PMS_20261120110901_L1_PAN', 'PAN_ori.tif')
+        root = ET.parse(self.config)
+        self.assertTrue(root.findtext('RepairNOSR').endswith('_NOSR.tif'))
+        root.getroot().find('RepairNOSR').text = self.nosr.as_posix()
+        root.write(self.config)
+        with self.assertRaisesRegex(ValueError, 'same-scene _NOSR'):
+            repair.run(self.config, 'unused-inference.py', gdal=self.gdal, execute=self.inference)
+
+    def assert_repair_result(self):
         old = self.body.read_bytes()
         decoy = self.decoy.read_bytes()
         receipt = repair.run(self.config, 'unused-inference.py', gdal=self.gdal,
@@ -620,7 +664,7 @@ class TestScRepair(unittest.TestCase):
         expected[3, 3] = 99
         np.testing.assert_array_equal(got, expected)
         self.assertEqual(self.body.stat().st_size, len(old))
-        backup = self.scene / (self.scene.name + '_old_latest.tif')
+        backup = self.scene / (self.body.stem + '_old_latest.tif')
         self.assertEqual(backup.read_bytes(), old)
         self.assertEqual(self.decoy.read_bytes(), decoy)
         verdict = verifier.check_contract(str(self.config), 0)

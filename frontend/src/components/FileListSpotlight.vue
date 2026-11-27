@@ -199,7 +199,7 @@ function sync(opts: { animate: boolean }): void {
     return;
   }
   const m = measure();
-  if (!m) {
+  if (!m || !m.holes.length) {
     // 分屏塌陷、侧栏收起、锚点未挂载：直接收场（不淡出，避免和折叠动画叠在一起）。
     stopMove();
     visible.value = false;
@@ -221,6 +221,11 @@ function sync(opts: { animate: boolean }): void {
     return;
   }
   if (moving) {
+    if (m.holes.length !== shownHoles.length) {
+      stopMove();
+      setShown(m.holes);
+      return;
+    }
     // 插值进行中：滚动只改目标，不重启计时（否则每帧从 0 重新缓动＝永远追不上）。
     toHoles = m.holes;
     return;

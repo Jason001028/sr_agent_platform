@@ -135,11 +135,11 @@ async function main() {
       await page.waitForFunction(() =>
         JSON.parse(document.querySelector('.view-canvas').dataset.tilePresentation)[0] === null);
       result.viewer_custom_stretch = await page.evaluate(() => ({
-        label: document.querySelector('[data-e2e="view-resolution"]').textContent.trim(),
+        tile_presentation: JSON.parse(document.querySelector('.view-canvas').dataset.tilePresentation)[0],
         custom: !!window.imageOpenTest.store.activeRec.displayStretch,
       }));
       assert.equal(result.viewer_custom_stretch.custom, true);
-      assert.match(result.viewer_custom_stretch.label, /整图预览/);
+      assert.equal(result.viewer_custom_stretch.tile_presentation, null);
     }
     fs.writeFileSync(path.join(out,'canvas.json'),JSON.stringify(result,null,2)+'\n');
     console.log(JSON.stringify(result));

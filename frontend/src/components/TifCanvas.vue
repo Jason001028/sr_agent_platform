@@ -24,11 +24,9 @@ import { drawDiffSource } from '../lib/diffRender';
 import { useDiffStore } from '../stores/diff';
 import type { Pane } from '../stores/viewer';
 import { useQcListStore } from '../stores/qclist';
-import { easeOutCubic, mouseToThumb, thumbToScreen, thumbToDisplaySource, clampSourcePixel, paneAtX, fitView, nativePreviewScale } from '../lib/viewMath';
+import { easeOutCubic, mouseToThumb, thumbToScreen, thumbToDisplaySource, clampSourcePixel, paneAtX } from '../lib/viewMath';
 import { TileRenderer } from '../lib/tileRenderer';
 import { withTileDisplay } from '../lib/tileSource';
-import { overviewResolution, tileResolution } from '../lib/viewResolution';
-import { previewResolutionNote } from '../lib/previewLevel';
 import type { TilePane } from '../lib/tileScheduler';
 import { dropSideAt } from '../lib/compare';
 import type { Pt } from '../lib/maskgen';
@@ -290,11 +288,11 @@ function render(now: number) {
       ctx.clip();
       ctx.translate(p.rect.x + p.view.ox, p.rect.y + p.view.oy);
       ctx.scale(p.view.scale, p.view.scale);
-      ctx.imageSmoothingEnabled = p.view.scale < 4;
+      ctx.imageSmoothingEnabled = rec.tileDisplay !== 'binary' && p.view.scale < 4;
       if (tiled) {
         const start = overviewStarts.get(rec) ?? (previous && previous.rec !== rec ? now - 160 : now);
         overviewStarts.set(rec, start);
-        ctx.globalAlpha = immediate ? 1 : easeOutCubic((now - start) / 160);
+        ctx.globalAlpha = immediate || rec.tileDisplay === 'binary' ? 1 : easeOutCubic((now - start) / 160);
         animate ||= ctx.globalAlpha < 1;
         const x = Math.max(0, -p.view.ox / p.view.scale);
         const y = Math.max(0, -p.view.oy / p.view.scale);
@@ -319,34 +317,6 @@ function render(now: number) {
       }
     } else if (!overviewStarts.has(rec)) overviewStarts.set(rec, now - 160);
   }
-  const screenDpr = window.devicePixelRatio || 1;
-  const labels = ps.flatMap(p => {
-    const rec = p.rec;
-    const overview = rec?.stretchPreview ?? rec?.progressivePreview ?? rec?.thumb;
-    if (!rec || !overview) return [];
-    const { width, height } = overview;
-    const state = tileRenderer.presentation(paneKey(p));
-    const detail = overviewResolution(rec.W, rec.H, width, height);
-    const base = { side: p.side, left: p.rect.x + 12 };
-    if (!state) {
-      const note = previewResolutionNote(rec.W, rec.H, width, height, rec.previewPlan?.limits).split('（')[0];
-      return [{ ...base, text: note ? `整图预览 · ${note}` : '整图预览',
-        title: `概览 ${detail} · ${rec.tileSource ? '当前显示模式使用整图' : '无 Tile'}` }];
-    }
-    const fit = fitView(width, height, p.rect.w, p.rect.h, nativePreviewScale(width, height, rec.W, rec.H, 1));
-    const fitted = Math.abs(p.view.scale / fit.scale - 1) < 1e-6
-      && Math.abs(p.view.ox - fit.ox) < 1 && Math.abs(p.view.oy - fit.oy) < 1;
-    const progress = state.visible
-      ? ` · 图块 ${state.drawn}/${state.visible}${state.readyLOD === null ? ' · 回退画面' : ''}` : '';
-    return [{ ...base,
-      text: tileResolution(state.scale, screenDpr, fitted, state.targetLOD, state.readyLOD, state.visible),
-      title: `概览 ${detail} · 目标 L${state.targetLOD}${progress} · DPR ${screenDpr} / 背板 ${dpr}` }];
-  });
-  if (labels.length !== store.resolutionLabels.length || labels.some((label, i) => {
-    const prior = store.resolutionLabels[i];
-    return !prior || label.side !== prior.side || label.left !== prior.left
-      || label.text !== prior.text || label.title !== prior.title;
-  })) store.resolutionLabels = labels;
   if (tileDebug) {
     vc.dataset.tiles = JSON.stringify(ps.map(p => tileRenderer.status(paneKey(p)) ?? null));
     vc.dataset.tilePresentation = JSON.stringify(ps.map(p => tileRenderer.presentation(paneKey(p)) ?? null));
@@ -638,7 +608,9 @@ function onDblClick(e: MouseEvent) {
 function onContextMenu(e: MouseEvent) {
   if (store.drawMode) {
     e.preventDefault();
-    if (!dragging.value && !spaceHeld.value && pointerInActivePane(e)) store.closePolygon();
+    if (!dragging.value && !spaceHeld.value && pointerInActivePane(e)) {
+      store.closePolygon(e.button === 2 ? mousePos(e) : undefined);
+    }
   }
 }
 
@@ -714,6 +686,11 @@ function onDrop(e: DragEvent) {
   if (store.compareOn) {
     const hit = dropSide(e);
     if (hit === null) {
+      if (e.target instanceof Element && e.target.closest('aside.sidebar') &&
+          !store.panes.some(pane => pane.rec)) {
+        store.addFiles(rest, undefined, true);
+        return;
+      }
       store.showToast('图像对比模式下只能把影像拖到画布上');
       return;
     }
@@ -778,7 +755,6 @@ onMounted(() => {
 onBeforeUnmount(() => {
   if (frame) cancelAnimationFrame(frame);
   tileRenderer.scheduler.close();
-  store.resolutionLabels = [];
   lastReady.clear();
   window.removeEventListener('resize', applyResize);
   reducedMotion?.removeEventListener('change', onMotionChange);
@@ -829,8 +805,6 @@ function onMotionChange() { scheduleRender(); }
     <AutoMaskOverlay />
     <MiniNavigator v-if="store.panes.some(p => p.rec?.thumb)" />
     <ViewerHistoryNavigation />
-    <span v-for="label in store.resolutionLabels.length > 1 ? store.resolutionLabels : []" :key="label.side" class="view-resolution"
-      :data-pane="label.side" :style="{ left: `${label.left}px` }" :title="label.title">{{ label.text }}</span>
     <div class="question-tools" @mousedown.stop @dblclick.stop>
       <button v-if="store.roiSelIndex()>=0 && !store.pendingRect" @click="askSelected">询问 Agent · 选中 ROI</button>
     </div>
@@ -845,8 +819,6 @@ function onMotionChange() { scheduleRender(); }
 .polygon-completed { position:absolute; top:58px; z-index:7; pointer-events:none; color:#D94752; background:rgba(255,255,255,.94); padding:4px 7px; border-radius:5px; font-size:12px; animation:polygon-complete var(--motion-hover) var(--ease-standard); }
 @keyframes polygon-complete { from { opacity:.4; } to { opacity:1; } }
 .view-canvas.grabbing { cursor:grab; }
-.view-resolution { position:absolute; z-index:3; bottom:12px; padding:4px 8px; border-radius:6px;
-  background:#f7faf8ed; color:#24544e; border:1px solid #ccdad5; font-size:12px; white-space:nowrap; }
 
 .question-tools{position:absolute;top:12px;left:12px;z-index:4}.question-tools button{background:#f5f8f6;color:#244c3b;border:1px solid #b8ccc3;border-radius:8px;padding:7px 12px;cursor:pointer}
 

@@ -1701,9 +1701,13 @@ def create_app() -> FastAPI:
         preview_only = is_preview_only(src)
         kind, suffix = "input", ""
         if inp is not None and not _same_file(inp, src):
-            stage = scene_search.stage_of_jpg(parent, inp, src.stem)
-            if stage is not None and _same_file(stage[2], src):
-                kind, suffix = stage[:2]
+            gf07_stage = scene_search.gf07_tiff_stage(parent, src, inp)
+            if gf07_stage:
+                kind, suffix = gf07_stage
+            else:
+                stage = scene_search.stage_of_jpg(parent, inp, src.stem)
+                if stage is not None and _same_file(stage[2], src):
+                    kind, suffix = stage[:2]
         row = _manual_row(src, parent, root)
         row["W"], row["H"] = dims["W"], dims["H"]
         if not can_submit:
@@ -1810,10 +1814,11 @@ def create_app() -> FastAPI:
                 status_code=400,
                 detail=f"size_bytes 须为正整数（收到 {size_bytes!r}）")
         name = ""       # 仅 name 分支赋值；path 分支是精确路径，无需指纹
-        # 第二阶段的候选（(目录, 指纹名) 两元组）：拖进来的 jpg 是中间产物时才非空，
-        # 且**只在第一阶段全落空时**才展开（见下面两处 scan 调用）。在这里先置空
+        # 第二阶段的候选（(目录, 指纹名) 两元组）：带产物尾段的 JPG 或 TIFF 可尝试
+        # 同景目录，且只在第一阶段全落空时展开（见下面两处 scan 调用）。在这里先置空
         # 是因为 path 分支不经过构造它的那段代码。
         late: list[tuple[str, str]] = []
+        kf_stage_parents: list[str] = []
         # 404 的补充说明：反推按「成像日 + 次日」找了**两天**时，得让用户知道
         # 这件事，否则他看见两条只差一天的路径只会更懵（见 infer_scene_paths）。
         day_note = ""
@@ -2091,10 +2096,12 @@ def create_app() -> FastAPI:
             #
             # 为什么分两阶段而不是一开始就一起试：第一阶段（今天的全部行为）命中的
             # 常见情形**一个 stat 都不多花** —— 钉住探测量上限的那几条用例正走在上面。
-            if Path(name).suffix.lower() in (".tif", ".tiff") and Path(name).stem.lower().endswith("_old"):
-                base = Path(name).stem[:-4]
-                for cand in infer_scene_paths(base + Path(name).suffix, date):
-                    late.append((cand, name))
+            ext = Path(name).suffix.lower()
+            if ext in (".tif", ".tiff"):
+                kf_stage_parents = scene_search.kf_tiff_parent_stems(name)
+                bases = kf_stage_parents or ([Path(name).stem[:-4]] if Path(name).stem.lower().endswith("_old") else [])
+                for base in bases:
+                    late.extend((cand, name) for cand in infer_scene_paths(base + ext, date))
             if Path(name).suffix.lower() in (".jpg", ".jpeg"):
                 for stem in scene_search.de_suffixed_stems(name):
                     for cand in infer_scene_paths(stem + Path(name).suffix, date):
@@ -2112,7 +2119,7 @@ def create_app() -> FastAPI:
         reasons: list[str] = []
 
         # 命中四元组：场景目录 / 本体输入影像 / 环节 / 该环节**自己的栅格**。
-        # 环节只对拖进来的 jpg 有第三种取值；.tif 反推与粘路径恒为 'input'。
+        # 独立产物保留自己的环节与 TIFF 源，提交权限仍由本体判定。
         hit: Optional[tuple[Path, Path, str, str, Path]] = None
 
         def scan(cands: list[tuple[str, str]]
@@ -2144,23 +2151,35 @@ def create_app() -> FastAPI:
                                           for c in scene_search.input_candidates(d))
                         reasons.append(f"{d}：目录里没有输入影像（找过 {names}）")
                     continue
-                old_raster = None
+                kind, suffix, raster = "input", "", inp
                 if (fp_name and Path(fp_name).suffix.lower() in (".tif", ".tiff")
                         and Path(fp_name).stem.lower() == d.name.lower() + "_old"):
                     old_raster = d / Path(fp_name).name
                     if not old_raster.is_file():
                         reasons.append(f"{d}: missing OLD raster {old_raster.name}")
                         continue
+                    kind, suffix, raster = "product", "old", old_raster
+                elif (fp_name and Path(fp_name).suffix.lower() in (".tif", ".tiff")
+                        and scene_search.gf07_tiff_stage(d, Path(fp_name), inp) == ("product", "SC")):
+                    # The delivered SC product has its own file and grid. Match
+                    # its fingerprint while keeping PAN.tif as the repair input.
+                    product = d / Path(fp_name).name
+                    if product.is_file():
+                        kind, suffix, raster = "product", "SC", product
+                elif d.name in kf_stage_parents and fp_name == name:
+                    candidate = d / Path(fp_name).name
+                    stage = scene_search.stage_of_jpg(d, inp, candidate.stem)
+                    if not stage or stage[0] == "input" or stage[2].stem != candidate.stem or not candidate.is_file():
+                        reasons.append(f"{d}：{candidate.name} 不是可读取的同景中间产物")
+                        continue
+                    kind, suffix, raster = stage[0], stage[1], candidate
                 if size_bytes is not None and fp_name:
-                    why = _fingerprint_mismatch(old_raster or inp, fp_name, size_bytes)
+                    why = _fingerprint_mismatch(raster, fp_name, size_bytes)
                     if why:
                         # 指纹不认就当作**这条候选**不合格，接着试下一条（次日那条），
                         # 不要立刻 404 —— 报错口径仍由下面统一出。
                         reasons.append(why)
                         continue
-                kind, suffix, raster = "input", "", inp
-                if old_raster is not None:
-                    kind, suffix, raster = "product", "old", old_raster
                 if fp_name and Path(fp_name).suffix.lower() in (".jpg", ".jpeg"):
                     # 拖 jpg：除了目录还得认**这份 jpg 是哪个环节**。目录名对不上
                     # 环节名（`_cloud` / `.preview` / `- 副本` 那些），或该环节自己
@@ -2675,6 +2694,7 @@ def create_app() -> FastAPI:
     def scene_siblings(scene_id: str, request: Request,
                        suffix: Optional[str] = Query(default=None),
                        tour: bool = Query(default=False),
+                       includeMask: bool = Query(default=False),
                        known: list[str] = Query(default=[])):
         """这个场景的三类图：输入影像 / 本轮超分产物 / NOSR。
 
@@ -2876,6 +2896,15 @@ def create_app() -> FastAPI:
                 tour_items.append(entry)
         elif tour:
             tour_diagnostics.append("场景元数据未能确定生产本体，请核对 Scene 关联")
+        mask_item = None
+        if includeMask and inp is not None:
+            for p in dict.fromkeys((Path(derived_mask_path(scene_dir)), scene_dir / 'mask.tif')):
+                try:
+                    if p.is_file() and p.resolve().parent == scene_dir.resolve() and is_allowed(p):
+                        mask_item = item('product', p)
+                        break
+                except OSError:
+                    continue  # An unreadable optional mask must not block the scene.
         return {
             "tourItems": tour_items,
             "tourDiagnostics": tour_diagnostics,
@@ -2886,6 +2915,7 @@ def create_app() -> FastAPI:
             # **不参与任何前端决策**（前端的档位是用户滑块那个）。
             "div": _product_preview_div(),
             "items": items,
+            **({"mask": mask_item} if includeMask else {}),
             "productCandidates": cand_names,
             "nosrCandidates": nosr_names,
         }

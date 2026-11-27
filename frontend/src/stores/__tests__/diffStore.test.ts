@@ -209,6 +209,32 @@ describe('LTD integration', () => {
     expect(diff.result?.source).toBe('source-roi');
     await diff.restorePreview();expect(diff.result).toBe(overview);
   });
+  it.each(['GF07B04', 'JXGF07D03'])('treats %s PAN_ori.tif as the LTD reference on either side', async (satellite) => {
+    const diff = setup();
+    const [pan, original] = mocks.viewer.recs;
+    pan.name = 'PAN.tif';
+    original.name = 'PAN_ori.tif';
+    original.stageKind = undefined;
+    pan.tourIdentity = original.tourIdentity = undefined;
+    pan.sceneDir = original.sceneDir = `/production/${satellite}_PMS_L1`;
+    mocks.api.mockImplementation(async (_cfg, req) => answer(req));
+    expect(diff.smartPairReason).toBe('');
+    expect(await diff.analyze()).toBe(true);
+    expect(mocks.api.mock.calls.at(-1)?.[1].referenceSide).toBe('B');
+    diff.setPair(2, 1);
+    expect(await diff.analyze()).toBe(true);
+    expect(mocks.api.mock.calls.at(-1)?.[1].referenceSide).toBe('A');
+  });
+  it('keeps PAN_ori.tif outside the LTD reference roles for GF04', () => {
+    const diff = setup();
+    const [pan, original] = mocks.viewer.recs;
+    pan.name = 'PAN.tif';
+    original.name = 'PAN_ori.tif';
+    original.stageKind = undefined;
+    pan.tourIdentity = original.tourIdentity = undefined;
+    pan.sceneDir = original.sceneDir = '/production/GF04_PMS_L1';
+    expect(diff.smartPairReason).toContain('PAN 本体与 NOSR');
+  });
   it('rejects old/other roles and protects unrefined candidates from Mask insertion',async()=>{
     const diff=setup();mocks.viewer.recs[1].tourIdentity.role='pan_old';mocks.viewer.recs[1].stageKind='input';
     expect(await diff.analyze()).toBe(false);expect(mocks.api).not.toHaveBeenCalled();
@@ -877,18 +903,19 @@ describe('diff store — 同景收口', () => {
     expect(mocks.siblings).toHaveBeenCalledWith({}, 's1', undefined, true, ['s1', 's2', 's3']);
   });
 
-  it('fetches pixels for an unopened same-scene image before analyzing', async () => {
+  it.each([false, true])('loads an unopened same-scene image before analyzing (discovered: %s)', async (discoveredTiff) => {
     const v = mocks.viewer;
     v.recs.forEach((r: any) => { r.sceneDir = '/scenes/20260101'; });
     v.recs.push({
-      id: 9, name: 'PAN_ori.tif', W: 32, H: 32, sceneId: 's9',
+      id: 9, name: 'PAN_ori.tif', W: discoveredTiff ? 0 : 32, H: discoveredTiff ? 0 : 32, sceneId: 's9',
       sceneDir: '/scenes/20260101', srcRev: 'v9', pending: false,
-      thumb: null, src: null, card: {},
+      thumb: null, src: null, card: {}, discoveredTiff,
     });
     v.ensureCardPixels.mockImplementation(async (id: number) => {
       const r = v.recs.find((x: any) => x.id === id);
       if (!r) return false;
       if (!r.thumb) {
+        r.W = 32; r.H = 32;
         r.thumb = { width: 16, height: 16 };
         r.src = new Float32Array(32 * 32);
         r.srcw = 32; r.srch = 32; r.nbands = 1;
@@ -898,6 +925,9 @@ describe('diff store — 同景收口', () => {
     mocks.api.mockResolvedValue(fakeResult());
     const diff = useDiffStore();
     diff.aId = 1; diff.bId = 9;
+    expect(diff.pairOptions.map(o => o.id)).toContain(9);
+    expect(diff.compatible(1, 9)).toBe(true);
+    expect(diff.precisionReason).toBeNull();
     expect(await diff.analyze()).toBe(true);
     expect(v.ensureCardPixels).toHaveBeenCalledWith(9);
   });

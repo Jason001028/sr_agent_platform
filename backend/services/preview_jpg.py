@@ -962,10 +962,14 @@ def cache_meta(dst: Path, *, quality: int = PREVIEW_JPG_QUALITY,
     有有效尺寸计划时，核对 JPEG 实际尺寸、规则和源修订。静态兼容入口没有计划时，
     继续核对戳里的档位和设置上限。
 
-    只 `Image.open` 读头拿注释，不解码像素 —— 与 `scene_dims` 同级，可以逐行调。
+    读头拿注释，再检查 JPEG 结束标记，不解码像素。
     """
     try:
         with Image.open(dst) as im:
+            # A valid header and rule stamp can survive a truncated pixel stream.
+            im.fp.seek(-2, os.SEEK_END)
+            if im.format != 'JPEG' or im.fp.read(2) != b'\xff\xd9':
+                return None
             stamp = im.info.get("comment")
             w, h = im.width, im.height
     except Exception:  # noqa: BLE001 — 缓存损坏按重新生成处理

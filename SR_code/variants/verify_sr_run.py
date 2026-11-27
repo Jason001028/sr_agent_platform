@@ -398,6 +398,11 @@ def _repair_body_name(lq_path, doc):
     scene name, and a stale PAN.tif next to it would otherwise be treated as
     the repaired artifact.
     """
+    pinned_name = _cfg_value(doc, 'RepairBody')
+    if pinned_name is not _MISSING:
+        if pinned_name != 'PAN.tif':
+            raise ValueError('Invalid pinned repair body')
+        return pinned_name
     step = resolve_previous_step(lq_path)
     if step is None:
         raise ValueError('meta.xml 不可读或缺 <SolarAzimuth>，无法判定 RC/SC 本体')

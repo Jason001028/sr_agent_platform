@@ -38,6 +38,18 @@ MARKER = '.sr-image-open-v1'
 SUFFIXES = {'.tif', '.tiff', '.jpg', '.jpeg', '.png'}
 
 
+def _cached_jpeg(path, *, size=None):
+    try:
+        data = path.read_bytes()
+        if data.endswith(b'\xff\xd9'):
+            with Image.open(io.BytesIO(data)) as image:
+                if image.format == 'JPEG' and (size is None or size == image.size):
+                    return data
+    except (OSError, ValueError):
+        pass  # Missing, truncated or concurrently cleared cache.
+    return None
+
+
 class ImageOpen:
     def __init__(self):
         database=os.environ.get('SR_AGENT_DB','')
@@ -353,17 +365,13 @@ class ImageOpen:
         jpg = self.directory(ident) / f'preview-{key}.jpg'
         if jpg.is_symlink():
             raise HTTPException(403, '预览缓存不能是符号链接')
-        if is_tiff and not jpg.is_file():
+        data = _cached_jpeg(jpg)
+        if is_tiff and data is None:
             legacy = jpg.with_name(f'preview-v1-{PREVIEW_RULE_VERSION}-{edge}.jpg')
-            if not legacy.is_symlink() and legacy.is_file():
-                try:
-                    with Image.open(legacy) as cached:
-                        if cached.size == expected:
-                            jpg = legacy
-                except (OSError, ValueError):
-                    pass
-        cache_kind='hit' if jpg.is_file() else 'miss'
-        if not jpg.is_file() and not meta['uploaded']:
+            if not legacy.is_symlink():
+                data = _cached_jpeg(legacy, size=expected)
+        cache_kind='hit' if data is not None else 'miss'
+        if data is None and not meta['uploaded']:
             # Reuse already-baked production previews by immutable byte snapshot;
             # never re-read TIFF just to move the same JPG into an expiring cache.
             candidates=[]
@@ -378,17 +386,18 @@ class ImageOpen:
                 if not cache_meta(candidate, source_rev=rev, size=expected):
                     continue
                 try:
-                    data = candidate.read_bytes()
+                    candidate_data = candidate.read_bytes()
                 except OSError:
                     continue  # The scene cache can be cleared concurrently.
-                if cache_meta(io.BytesIO(data), source_rev=rev, size=expected) and source_revision(source)==rev:
+                if cache_meta(io.BytesIO(candidate_data), source_rev=rev, size=expected) and source_revision(source)==rev:
+                    data = candidate_data
                     temp=jpg.with_name(jpg.name+'.'+secrets.token_hex(8)+'.tmp')
                     temp.write_bytes(data);temp.replace(jpg);cache_kind='production-reuse';break
-        if ready_only and not jpg.is_file():
+        if ready_only and data is None:
             elapsed=(time.monotonic()-started)*1000
             if elapsed>2000:logging.getLogger(__name__).warning('image_preview cache=miss check_ms=%.0f edge=%d div=%d',elapsed,edge,div)
             return None
-        if not jpg.is_file():
+        if data is None:
             sampling=time.monotonic()
             if is_tiff:
                 pixels = build_preview_pixels(source, max_edge=edge)
@@ -403,8 +412,8 @@ class ImageOpen:
             buf = io.BytesIO(); image.save(buf,format='JPEG',quality=PREVIEW_JPG_QUALITY)
             if source_revision(source) != rev:
                 raise HTTPException(409, '源文件在预览生成期间变化')
-            temporary = jpg.with_suffix('.'+secrets.token_hex(8)+'.tmp'); temporary.write_bytes(buf.getvalue()); temporary.replace(jpg)
-        data = jpg.read_bytes()
+            data = buf.getvalue()
+            temporary = jpg.with_suffix('.'+secrets.token_hex(8)+'.tmp'); temporary.write_bytes(data); temporary.replace(jpg)
         if source_revision(source) != rev:
             raise HTTPException(409, '源文件已变化，请重新选择')
         with Image.open(io.BytesIO(data)) as result:

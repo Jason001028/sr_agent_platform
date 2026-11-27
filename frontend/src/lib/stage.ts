@@ -14,12 +14,12 @@
  */
 
 /** 环节：本体输入 / 本轮超分产物 / NOSR（与后端 kind 同字面量）。 */
-export type StageKind = 'input' | 'product' | 'nosr';
+export type StageKind = 'input' | 'product' | 'nosr' | 'mask';
 
 /** 中间产物 = 任何不是本体的环节。`undefined`（老 rec、本地图片）按本体算 ——
  *  它们本来就没有盘阵目录，另有 `lqPath` 那道门管着。 */
 export function isIntermediateStage(kind?: StageKind | null): boolean {
-  return kind === 'product' || kind === 'nosr';
+  return kind === 'product' || kind === 'nosr' || kind === 'mask';
 }
 
 /** 卡片与提示上的环节标签。
@@ -34,6 +34,7 @@ export function stageLabel(kind: StageKind | undefined | null,
                            suffix: string | undefined | null,
                            fileName: string): string {
   if (kind === 'nosr') return 'NOSR';
+  if (kind === 'mask') return '掩码';
   if (kind === 'product') {
     const s = (suffix || tailOf(stemOf(fileName))).trim();
     if (s.toLowerCase() === 'old') return 'old';

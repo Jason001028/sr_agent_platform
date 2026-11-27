@@ -198,7 +198,8 @@ def read_exit_code_file(path):
     except (KeyError, ValueError):
         sr_exit_code = None
     return {"verdict": verdict, "skip": fields.get("skip") == "1",
-            "sr_exit_code": sr_exit_code, "job_id": fields.get("job_id")}
+            "sr_exit_code": sr_exit_code, "job_id": fields.get("job_id"),
+            "reason": fields.get("reason") or None}
 
 
 def job_status(job_id, run_cmd: Callable = _run, exit_code_file=None) -> dict:
@@ -263,7 +264,7 @@ def terminal_from_exit_file(job_id, exit_code_file) -> dict:
     # Contract not satisfied: a run that exited 0 without SRLOG/output is a
     # FAILURE here even though Slurm would call the step COMPLETED.
     return {"job_id": job_id, "active": False, "state": "FAILED",
-            "exit_code": f"{rc if rc is not None else -1}:0"}
+            "exit_code": f"{rc if rc is not None else -1}:0", "reason": rec["reason"]}
 
 
 # Kept for callers/tests written against the old private name.

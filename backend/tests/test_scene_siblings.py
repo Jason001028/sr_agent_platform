@@ -24,7 +24,7 @@ from backend.services import run_sr as run_sr_svc
 from backend.services import scene_search
 from backend.services.run_sr import task_fingerprint
 from backend.tests.test_preview_jpg import make_strip_tif
-from backend.tests.test_scene_resolve import SCENE_NAME, ResolveBase
+from backend.tests.test_scene_resolve import SCENE_NAME, ResolveBase, make_scene
 
 SUFFIX = "260318"
 NOSR_SUFFIX = "260317"
@@ -56,6 +56,18 @@ class SiblingsBase(ResolveBase):
 
 
 class TestSiblingsOk(SiblingsBase):
+    def test_optional_mask_finds_same_scene_file_without_adding_a_comparison_role(self):
+        d = self.make_scene()
+        c = self.client()
+        row = self.resolve(c, d)
+        self.assertIsNone(self.q(c, row['id'], includeMask=True)['mask'])
+        make_strip_tif(d, 'mask.tif', 320, 640, bits=8)
+        self.assertNotIn('mask', self.q(c, row['id']))
+        self.assertEqual(self.q(c, row['id'], includeMask=True)['mask']['name'], 'mask.tif')
+        make_strip_tif(d, SCENE_NAME + '_mask.tif', 320, 640, bits=8)
+        mask = self.q(c, row['id'], includeMask=True)['mask']
+        self.assertEqual((mask['name'], mask['W'], mask['H']), (SCENE_NAME + '_mask.tif', 320, 640))
+
     def test_three_kinds_all_present(self):
         d = self.make_scene()
         product = self._product(d, SUFFIX)
@@ -235,6 +247,41 @@ class TestSiblingsNosr(SiblingsBase):
         self.assertTrue(nosr["exists"])
         self.assertEqual(body["nosrCandidates"][0], mine.name)
         self.assertEqual(body["nosrCandidates"][-1], previous.name)
+
+    def test_gf07_pan_ori_is_returned_as_nosr_before_previous_product(self):
+        name = 'JXGF07B04_PMS_20261120110901_200554604_102_0039_001_L1_PAN'
+        d = make_scene(self.root / name, name)
+        make_strip_tif(d, 'PAN_ori.tif', 80, 40)
+        make_strip_tif(d, f'{name}_{SUFFIX}_NOSR.tif', 90, 50)
+        c = self.client()
+        row = self.resolve(c, d)
+        result = self.q(c, row['id'], suffix=SUFFIX)
+        nosr = self.by_kind(result, 'nosr')
+        self.assertTrue(nosr['exists'])
+        self.assertEqual((nosr['name'], nosr['W'], nosr['H']), ('PAN_ori.tif', 80, 40))
+        self.assertNotEqual(nosr['id'], row['id'])
+
+        make_strip_tif(d, f'{name}_NOSR.tif', 70, 30)
+        self.assertEqual(self.by_kind(self.q(c, row['id']), 'nosr')['name'], f'{name}_NOSR.tif')
+
+    def test_gf07_pan_is_the_scene_input_when_both_body_names_exist(self):
+        name = 'JXGF07B04_PMS_20261120110901_200554604_102_0039_001_L1_PAN'
+        d = make_scene(self.root / name, name)
+        pan = make_strip_tif(d, 'PAN.tif', 120, 90)[0]
+        c = self.client()
+        row = self.resolve(c, d)
+        self.assertEqual((row['W'], row['H']), (120, 90))
+        self.assertEqual(self.by_kind(self.q(c, row['id']), 'input')['name'], pan.name)
+        self.assertEqual(scene_search.body_path(d), pan)
+        self.assertEqual(scene_search.mask_stem(d), 'PAN')
+
+    def test_pan_ori_is_not_a_nosr_candidate_for_other_satellites(self):
+        d = self.make_scene()
+        make_strip_tif(d, 'PAN_ori.tif', 80, 40)
+        c = self.client()
+        result = self.q(c, self.resolve(c, d)['id'])
+        self.assertFalse(self.by_kind(result, 'nosr')['exists'])
+        self.assertNotIn('PAN_ori.tif', result['nosrCandidates'])
 
     def test_product_stem_name_is_still_the_fallback(self):
         """只有 `writeTiff` 那套名字时照样命中（真机上那份也真可能出现）。"""

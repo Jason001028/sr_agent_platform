@@ -165,9 +165,10 @@ export function formatDuration(seconds: number): string {
 export function mergeJobUpdate(tasks: QueueTask[], ev: JobUpdateEvent): QueueTask[] {
   let hit = false;
   const next = tasks.map((t) => {
-    if (t.task_id !== ev.task_id) return t;
+    if (t.task_id !== ev.task_id || (ev.state === 'FAILED' && t.job_id !== null && ev.job_id !== t.job_id)) return t;
     hit = true;
     const patch: Partial<QueueTask> = { state: ev.state };
+    patch.failure_reason = ev.state === 'FAILED' && ev.error !== 'state=FAILED' ? ev.error : null;
     for (const col of ['updated_at', 'started_at', 'finished_at'] as const) {
       const v = Number(ev[col]);
       if (Number.isFinite(v) && v > 0) patch[col] = v;
@@ -260,9 +261,6 @@ export const useQueueStore = defineStore('queue', () => {
   const loading = ref(false);
   const error = ref('');
   const draft = ref<QueueDraft | null>(null);
-  /** 阶段6 实时失败原因（task_id → job_update.error；仅运行期捕获，非契约字段，
-      页面重载后旧 FAILED 行无原因可追 → 展示回退「见 log_dir」）。 */
-  const failReason = ref<Record<number, string>>({});
   /** 掉线重连中（**连过之后**掉线才为真；首次连接前为假）。
    *  提醒栈用它显示一行「提醒已断开，正在重连」—— 这条流没有心跳帧，断了是**看不出来**
    *  的：不主动说，用户只会以为「任务还没跑完」。 */
@@ -376,21 +374,14 @@ export const useQueueStore = defineStore('queue', () => {
       return;
     }
     if (ev.type !== 'job_update') return;
-    if (ev.state === 'COMPLETED') scheduleList();
+    if (ev.state === 'COMPLETED' || ev.state === 'FAILED') scheduleList();
     tasks.value = mergeJobUpdate(tasks.value, ev);
-    if (ev.state === 'FAILED' && ev.error) {
-      failReason.value = { ...failReason.value, [ev.task_id]: ev.error };
-    } else if (ev.state !== 'FAILED' && failReason.value[ev.task_id] !== undefined) {
-      const next = { ...failReason.value };
-      delete next[ev.task_id];
-      failReason.value = next;
-    }
     // 终态 → 右下角提醒（去重与文案在 lib/notices + stores/notices）。
     // **行可能不在列表里**（订阅是应用级常驻的，这次会话可能还没 GET 过队列）——
     // jobNotice 允许 task 传 null，只报 task_id，不编目录名。
     useNoticesStore().push(jobNotice(
       ev, tasks.value.find((t) => t.task_id === ev.task_id) ?? null,
-      failReason.value[ev.task_id],
+      ev.error === 'state=FAILED' ? null : ev.error,
     ));
   }
 
@@ -467,7 +458,7 @@ export const useQueueStore = defineStore('queue', () => {
   }
 
   return {
-    tasks, connected, reconnecting, loading, error, draft, failReason,
+    tasks, connected, reconnecting, loading, error, draft,
     list, submit, cancel, connect, disconnect,
     /** 查看器「提交 SR」带过来的目录（不自动提交）。
         maskPath 传后端给的权威值（resolve 响应或写掩码响应里的；拿不到传 null

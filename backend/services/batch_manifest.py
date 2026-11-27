@@ -257,7 +257,7 @@ def _resolve_item(row: dict, *, date: Optional[str], product: Optional[str]) -> 
     # /siblings）。批量检测的宽高比与修复发布都针对本体；混合目录里那份
     # PAN.tif 可能只是上游遗留，不能拿来当 SC 场景的比较对象。
     pan = scene_search.body_path(directory) or (directory / "PAN.tif")
-    nosr = directory / (directory.name + "_NOSR.tif")
+    nosr = scene_search.repair_nosr_path(directory)
     meta = directory / (directory.name + "_meta.xml")
     if not meta.is_file():
         raise scene_resolve.SceneLookupError(f"缺 {meta.name}")

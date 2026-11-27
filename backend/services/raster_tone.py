@@ -31,7 +31,7 @@ def _number(value):
 
 
 def parse_display(value):
-    if value in ("equal", "linear", "linear2", "sqrt", "log"):
+    if value in ("equal", "linear", "linear2", "sqrt", "log", "binary"):
         return Display(value, value)
     number = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
     parts = value.split(":")
@@ -134,6 +134,9 @@ def _manual_u16(display, invert):
 def display_pixels(dn, nodata, stats, display=Display(), *, invert=False):
     valid = valid_dn(dn, nodata)
     pixels = np.zeros(dn.shape, dtype=np.uint8)
+    if display.mode == "binary":
+        pixels[valid & (dn > 0)] = 255
+        return pixels
     if display.mode == "window":
         if dn.dtype.kind == "u" and dn.dtype.itemsize == 2:
             pixels[valid] = _manual_u16(display, invert)[dn[valid]]

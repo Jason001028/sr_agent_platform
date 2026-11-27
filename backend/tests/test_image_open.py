@@ -20,7 +20,7 @@ from PIL import Image
 
 from backend.services.image_open import ImageOpen, MARKER, router_for, purge_loop
 from backend.services.heavy_work import HeavyWork
-from backend.services.preview_jpg import ensure_preview_jpg
+from backend.services.preview_jpg import build_preview_pixels, ensure_preview_jpg
 from backend.tests import allowed_roots_env
 
 
@@ -186,6 +186,40 @@ class ImageOpenTests(unittest.TestCase):
             response=self.client.get(f"/api/image-open/assets/{asset['id']}/preview?div=2")
             self.assertEqual(response.status_code,200,response.text)
             self.assertEqual(Image.open(io.BytesIO(response.content)).size,(16,8))
+
+    def test_truncated_preview_is_rebuilt_even_when_its_jpeg_header_is_readable(self):
+        asset = self.manager.asset(self.source)
+        url = f"/api/image-open/assets/{asset['id']}/preview?div=2"
+        production = self.source.with_name('image_preview.jpg')
+        variant = Path(ensure_preview_jpg(self.source, production, div=2)['path'])
+        original = self.client.get(url)
+        self.assertEqual(original.status_code, 200)
+        cached = next(self.manager.directory(asset['id']).glob('preview-*.jpg'))
+
+        for path in (cached, production, variant):
+            data = path.read_bytes()
+            truncated = data[:data.index(b'\xff\xda') + 10]
+            with Image.open(io.BytesIO(truncated)) as image:
+                self.assertEqual(image.size, (16, 8))
+                with self.assertRaises(OSError):
+                    image.load()
+            path.write_bytes(truncated)
+
+        with patch('backend.services.image_open.build_preview_pixels', wraps=build_preview_pixels) as build:
+            for expected_cache in ('generated', 'hit'):
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(json.loads(response.headers['X-SR-Preview-Plan'])['cache'], expected_cache)
+                with Image.open(io.BytesIO(response.content)) as image:
+                    image.load()
+                    self.assertEqual(image.size, (16, 8))
+            build.assert_called_once()
+
+        rebuilt = ensure_preview_jpg(self.source, production, div=2)
+        self.assertEqual(rebuilt['status'], 'generated')
+        with Image.open(rebuilt['path']) as image:
+            image.load()
+            self.assertEqual(image.size, (16, 8))
 
     def test_unc_requires_explicit_mapping_and_checks_complete_share_boundary(self):
         with patch.dict(os.environ,{'SR_UNC_MAP':f'\\\\host\\share={self.data}'}):

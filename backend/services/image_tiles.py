@@ -22,7 +22,7 @@ from backend.services.raster_window import (
 
 TILE_SIZE = MAX_OUTPUT
 STRETCH_VERSION = "source-tone-u16-stratified-v2"
-TILE_RULE = "grid-nearest-area-png-v2"
+TILE_RULE = "grid-nearest-area-png-v3"
 TILE_HEADERS = ["ETag", "X-SR-Tile", "X-SR-Raster-Window"]
 
 
@@ -132,14 +132,14 @@ class ImageTiles:
 
     def _tile(self, source, revision, band, info, level, tx, ty, display=Display(), sampling="nearest"):
         window = tile_window(info.width, info.height, level, tx, ty)
-        area = sampling == "area" and level in (1, 2) and not info.categorical
+        area = sampling == "area" and level in (1, 2) and not info.categorical and display.mode != "binary"
         key = revision, band, TILE_RULE, STRETCH_VERSION, display.key, sampling, level, tx, ty
         tile_id = hashlib.sha256(repr(key).encode()).hexdigest()
         with self.lock:
             if key in self.tiles:
                 self.tiles.move_to_end(key)
                 return self.tiles[key]
-        stats = None if display.mode == "window" else self._source_stats(source, revision, band, info)
+        stats = None if display.mode in ("window", "binary") else self._source_stats(source, revision, band, info)
         if area:
             result = self.reader.read_area(source, *window, step=1 << level, band=band, revision=revision, info=info)
         else:

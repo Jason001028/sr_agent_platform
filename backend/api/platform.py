@@ -144,7 +144,7 @@ def _queue_state(st: dict) -> str:
     return "COMPLETED" if raw == "COMPLETED" else "FAILED"
 
 
-def _task_state(state, task: dict) -> tuple[str, bool, Optional[dict]]:
+def _task_state(state, task: dict, *, details: Optional[dict] = None) -> tuple[str, bool, Optional[dict]]:
     """Calibrate one sr_task row against the scheduler.
 
     Returns (state, changed, fresh_row) — `fresh_row` 是这次**写回后**从库里读回的
@@ -175,6 +175,10 @@ def _task_state(state, task: dict) -> tuple[str, bool, Optional[dict]]:
     except Exception:  # noqa: BLE001 — scheduler hiccup → keep last known
         return prev or "UNKNOWN", False, None
     state_name = _queue_state(st)
+    reason = (run_sr_svc.task_failure_reason(task, st)
+              if state_name == "FAILED" and (details is not None or state_name != prev) else None)
+    if details is not None:
+        details["failure_reason"] = reason
     if state_name == prev:
         return state_name, False, None
     cache[task_id] = state_name
@@ -194,9 +198,7 @@ def _task_state(state, task: dict) -> tuple[str, bool, Optional[dict]]:
              "job_id": task["job_id"], "state": state_name,
              "prev_state": prev,
              "ok": state_name in ("PENDING", "RUNNING", "COMPLETED"),
-             "error": None
-             if state_name not in ("FAILED", "UNKNOWN")
-             else f"state={state_name}"}
+             "error": reason if state_name == "FAILED" else "state=UNKNOWN" if state_name == "UNKNOWN" else None}
     # 帧必须带上这次写库的时间戳（updated_at + 耗时用的 started_at/finished_at）。
     # 只推 state 的话，客户端手上的还是上一次 GET 的快照，耗时列要么退化成「0 秒」
     # （2026-09-17 真机），要么停在上一次运行的数字上。写库成功才带：写失败时库里
@@ -228,7 +230,8 @@ def _run_dataroot(task: dict) -> Optional[str]:
 
 def _task_view(state, task: dict) -> dict:
     """Project an sr_task row onto the /api/queue response shape (params subset)."""
-    state_name, _, fresh = _task_state(state, task)
+    details = {}
+    state_name, _, fresh = _task_state(state, task, details=details)
     if fresh is not None:
         task = fresh          # 刚写回的行：传进来那份是写之前的快照
     p = task.get("params") or {}
@@ -236,6 +239,7 @@ def _task_view(state, task: dict) -> dict:
         "task_id": task["task_id"], "fingerprint": task["fingerprint"],
         "session_id": task["session_id"], "job_id": task["job_id"],
         "state": state_name,
+        "failure_reason": details.get("failure_reason"),
         "params": {
             "lq_path": p.get("lq_path"),
             "mask_path": p.get("mask_path"),
@@ -1271,8 +1275,9 @@ def _submit_queue_sync(request: Request, body: dict):
             # SR 脚本）。判不出来时退回 PAN.tif，保持旧口径。
             body = scene_search.body_path(params["lq_path"])
             body_name = body.name if body is not None else "PAN.tif"
+            nosr_name = params.get("repair_nosr_name") or Path(params["lq_path"]).name + "_NOSR.tif"
             out["notice"] = (
-                f"场景目录 {params['lq_path']}：从同景完整生产名_NOSR.tif 计算，仅在发布掩码内更新有效像素，"
+                f"场景目录 {params['lq_path']}：从同景 {nosr_name} 计算，仅在发布掩码内更新有效像素，"
                 "保留其余本体像素，"
                 f"保持当前本体 {body_name} 的尺寸与文件大小；校验后将旧 {body_name} 备份为 "
                 f"{Path(body_name).stem}_old_latest.tif，新结果发布为 {body_name}。备份已存在则停止。")
