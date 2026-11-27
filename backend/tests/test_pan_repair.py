@@ -45,6 +45,9 @@ class Raster:
     def GetMaskBand(self):
         return Raster(self.pixels.filename + '.msk')
 
+    def GetBlockSize(self):
+        return self.RasterXSize, 1
+
     def ReadAsArray(self, x, y, w, h):
         return np.array(self.pixels[y:y+h, x:x+w])
 
@@ -60,6 +63,7 @@ class FakeGdal:
     GA_Update = 1
     GA_ReadOnly = 0
     GDT_Byte = 1
+    GDT_UInt16 = 2
     GMF_ALL_VALID = 1
 
     def Open(self, path, _=0):
@@ -68,7 +72,7 @@ class FakeGdal:
     def GetDriverByName(self, _):
         return self
 
-    def Create(self, path, width, height, bands, dtype):
+    def Create(self, path, width, height, bands, dtype, options=None):
         tifffile.imwrite(path, np.zeros((height, width), dtype=np.uint8 if dtype == 1 else np.uint16))
         return Raster(path)
 
@@ -153,6 +157,81 @@ class TestPanRepair(unittest.TestCase):
         with self.pan.open('ab') as stream:
             stream.write(b'tamper')
         self.assertFalse(verifier.check_contract(str(self.config), 0).ok)
+
+    def test_composition_reads_pan_only_at_selected_windows_and_verifies_the_whole_candidate(self):
+        width = 2050
+        model = self.scene / 'model.tif'
+        candidate = self.scene / 'candidate.tif'
+        tifffile.imwrite(self.pan, np.full((4, width), 77, dtype=np.uint16))
+        tifffile.imwrite(model, np.full((4, width), 99, dtype=np.uint16))
+        mask = np.zeros((4, width), dtype=np.uint8)
+        mask[1, 1025] = 255
+        tifffile.imwrite(self.mask, mask)
+        pan_reads = []
+        read = Raster.ReadAsArray
+
+        def track_read(raster, x, y, w, h):
+            if Path(raster.pixels.filename) == self.pan:
+                pan_reads.append((x, y, w, h))
+            return read(raster, x, y, w, h)
+
+        with patch.object(Raster, 'ReadAsArray', track_read):
+            repair.compose(self.gdal, self.pan, self.nosr, self.mask, model, candidate, self.scene)
+        self.assertEqual(pan_reads, [(1024, 0, 1024, 4), (0, 0, width, 4)])
+        expected = tifffile.imread(self.pan)
+        expected[1, 1025] = 99
+        np.testing.assert_array_equal(tifffile.imread(candidate), expected)
+
+        write = Raster.WriteArray
+
+        def corrupt_empty_window(raster, pixels, x=0, y=0):
+            write(raster, pixels, x, y)
+            raster.pixels[0, -1] = 42
+
+        with patch.object(Raster, 'WriteArray', corrupt_empty_window):
+            with self.assertRaisesRegex(ValueError, 'outside the publication mask'):
+                repair.compose(self.gdal, self.pan, self.nosr, self.mask, model, candidate, self.scene)
+
+    def test_windowed_inference_matches_dense_crop_at_image_edges_and_tile_seam(self):
+        # Two SR windows meet at x=4 after removing the left wrap.
+        windows = ((slice(0, 6), slice(0, 6)), (slice(0, 6), slice(6, 12)))
+        tiles = (np.arange(36).reshape(6, 6), 100 + np.arange(36).reshape(6, 6))
+        selected = ((0, 0), (1, 3), (1, 4), (3, 7))
+        mask = np.zeros((8, 8), dtype=np.uint8)
+        for y, x in selected:
+            mask[y, x] = 255
+        tifffile.imwrite(self.mask, mask)
+        self.config.write_text(build_config_xml(repair_request({
+            'lq_path': str(self.scene), 'mask_path': str(self.mask),
+            'suffix': '260318', 'sr_scale': 2, 'options_yml': str(self.opt),
+        })), encoding='utf-8')
+
+        dense = np.zeros((12, 12), dtype=np.uint16)
+        for window, tile in zip(windows, tiles):
+            dense[window] = tile
+        dense_model = np.clip(dense[2:10, 2:10], 20, 110)
+        expected = tifffile.imread(self.pan)
+        expected[mask != 0] = dense_model[mask != 0]
+
+        def infer(argv, *, complete):
+            config = ET.parse(argv[-1]).getroot()
+            private = Path(config.findtext('DatarootLQ'))
+            self.assertEqual(argv[argv.index('--pan-size') + 1:][:2], ['8', '8'])
+            writer = repair.WindowOutput(self.gdal, private / 'PAN_260318.tif', 8, 8, 2, 2, (20, 110))
+            count = 2 if complete else 1
+            for window, tile in list(zip(windows, tiles))[:count]:
+                writer[window] = tile
+            writer.finish(count)
+            (private / 'Debug').mkdir()
+            (private / 'Debug' / 'PAN_SRLOG.txt').write_text('Run finished.\n')
+
+        with self.assertRaisesRegex(ValueError, 'do not cover the publication mask'):
+            self.run_repair(lambda argv: infer(argv, complete=False))
+        self.assertFalse((self.scene / 'PAN_old_latest.tif').exists())
+        receipt = self.run_repair(lambda argv: infer(argv, complete=True))
+        np.testing.assert_array_equal(tifffile.imread(self.pan), expected)
+        self.assertEqual(receipt['width'], 8)
+        self.assertTrue(verifier.check_contract(str(self.config), 0).ok)
 
     def test_pre_staged_nosr_drives_inference_without_copying_or_linking_the_original(self):
         from backend.services.spatial_identity import resource_identity

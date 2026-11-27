@@ -190,7 +190,7 @@ def valid(raster, pixels):
     return keep if nodata is None else keep & (pixels != nodata)
 
 
-def audit(before, nosr, model, published, mask, roi):
+def audit(before, nosr, model, published, mask, roi, *, model_windows=None):
     x, y, w, h = roi
     pw, ph = size(before)
     nw, nh = size(nosr)
@@ -213,7 +213,18 @@ def audit(before, nosr, model, published, mask, roi):
     inferred = read(model, x, y, w, h).astype(np.float64)
     final = read(published, x, y, w, h).astype(np.float64)
     labels = read(mask, x, y, w, h)
-    keep = valid(before, original) & valid(model, inferred) & valid(published, final) & np.isfinite(labels)
+    keep = valid(before, original) & valid(published, final) & np.isfinite(labels)
+    model_valid = valid(model, inferred)
+    if model_windows is None:
+        keep &= model_valid
+    else:
+        covered = np.zeros((h, w), dtype=bool)
+        for left, top, right, bottom in model_windows:
+            x0, y0 = max(left, x), max(top, y)
+            x1, y1 = min(right, x + w), min(bottom, y + h)
+            if x0 < x1 and y0 < y1:
+                covered[y0 - y:y1 - y, x0 - x:x1 - x] = True
+        model_valid &= covered
     band = before.GetRasterBand(1)
     if not band.GetMaskFlags() & gdal.GMF_ALL_VALID:
         keep &= band.GetMaskBand().ReadAsArray(x, y, w, h) != 0
@@ -222,17 +233,21 @@ def audit(before, nosr, model, published, mask, roi):
         raise ValueError('Pick a water-only ROI crossing the mask boundary, with valid pixels on both sides')
 
     differences = {
-        'bicubic_NOSR_minus_before': control - original,
-        'model_file_minus_bicubic_NOSR': inferred - control,
-        'published_minus_model_file': final - inferred,
-        'published_minus_before': final - original,
+        'bicubic_NOSR_minus_before': (control - original, keep),
+        'model_file_minus_bicubic_NOSR': (inferred - control, model_valid),
+        'published_minus_model_file': (final - inferred, model_valid),
+        'published_minus_before': (final - original, keep),
     }
-    return {name: {side: {'mean_dn': float(values[region].mean()),
-                          'median_dn': float(np.median(values[region])),
-                          'changed_pixels': int(np.count_nonzero(values[region])),
-                          'valid_pixels': int(region.sum())}
-                   for side, region in (('inside', inside), ('outside', outside))}
-            for name, values in differences.items()}
+
+    def summarize(values):
+        return {'mean_dn': float(values.mean()) if values.size else None,
+                'median_dn': float(np.median(values)) if values.size else None,
+                'changed_pixels': int(np.count_nonzero(values)),
+                'valid_pixels': int(values.size)}
+
+    return {name: {'inside': summarize(values[inside & valid_pixels]),
+                   'outside': summarize(values[outside & valid_pixels])}
+            for name, (values, valid_pixels) in differences.items()}
 
 
 def candidate_rois(before, mask):
@@ -323,16 +338,20 @@ def main():
     for name, path in zip(INPUTS, paths):
         report('Opening {}: {}'.format(name, path))
         rasters.append(open_raster(str(path)))
+    manifest = Path(str(paths[2]) + '.windows.json')
+    model_windows = json.loads(manifest.read_text(encoding='utf-8')) if manifest.is_file() else None
+    if model_windows is not None:
+        report('Windowed model output: model comparisons use only written pixels')
     if args.roi:
         report('Reading ROI (x, y, width, height): {}'.format(tuple(args.roi)))
-        result = audit(*rasters, args.roi)
+        result = audit(*rasters, args.roi, model_windows=model_windows)
     else:
         report('Searching for low-texture ROIs that straddle the publication mask')
         results = []
         for texture, roi in candidate_rois(rasters[0], rasters[-1]):
             report('Reading ROI (x, y, width, height): {}'.format(roi))
             try:
-                differences = audit(*rasters, roi)
+                differences = audit(*rasters, roi, model_windows=model_windows)
             except ValueError as exc:
                 report('Skipped ROI {}: {}'.format(roi, exc))
                 continue

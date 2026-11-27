@@ -32,7 +32,7 @@ import json
 import os
 import sys
 
-GENERATOR_VERSION = "1.0.0"
+GENERATOR_VERSION = "1.1.0"
 GENERATOR_REL = "SR_code/tools/gen_slurm_variant.py"
 
 SOURCE_REL = "SR_code/code_0817_prod.py"
@@ -46,10 +46,40 @@ GITATTRIBUTES_TEXT = "* text eol=lf\n"
 BANNER_RULE = "# " + "=" * 75
 
 # ---------------------------------------------------------------------------
-# The edit table.  One entry per finding (E1-E9), documented in
-# docs/sr_code/sr-platform-variant.md sec 3.  Order matches the numbering,
+# The edit table. Order matches the numbering,
 # not the file position; the anchors are disjoint so order does not matter.
 # ---------------------------------------------------------------------------
+
+DENSE_POST = """    img_no_wrap = util.cut_down_wrap(result_sr_wrap, tl_obj["ori_ht"], tl_obj["ori_wd"], tl_obj["wrap_top"], tl_obj["wrap_lt"], scl)
+    del result_sr_wrap
+
+    torch.cuda.empty_cache()
+    print("torch.cuda.EMPTY_CACHE()")
+
+    if resize_scale == 2:
+        result_sr = img_no_wrap
+    else:
+        result_sr = util.resize_by_sat_rcsc_2(img_no_wrap, img_name, resize_scale, sr_previous_step)
+
+    # clip value range; redundant for scale=2 (tiles already clipped in tensor2img)
+    if resize_scale != 2:
+        np.clip(result_sr, ori_min, ori_max, out=result_sr)
+
+    del img_no_wrap
+
+    msg = "Output min {:.1f}, max {:.1f}, mean {:.1f}, dtype {:s}, shape {:s}".format(
+        result_sr.min(), result_sr.max(), result_sr.mean(), str(result_sr.dtype), str(result_sr.shape))
+    _log(msg, opt)
+
+    if suffix is not None:
+        util.writeTiff(result_sr, lq_path + "/" + img_name[0:-4] + "_" + suffix, tiftype=tiftype,
+                       del_ori_tif=del_ori_tif)
+    else:
+        util.writeTiff(result_sr, lq_path + "/" + img_name[0:-4], tiftype=tiftype,
+                       del_ori_tif=del_ori_tif)
+
+    del result_sr
+"""
 
 EDITS = [
     # E1 -- module-level load_library() with no guard: a missing .so kills the
@@ -162,6 +192,52 @@ EDITS = [
         "        exit(0)",
         1,
     ),
+    (
+        "E10",
+        "    result_sr_wrap = util.init_res_img(tl_obj, scl)\n",
+        "    window_output = None\n",
+        1,
+    ),
+    (
+        "E11",
+        "        # Phase B: parallel bicubic (CPU)\n"
+        "        t_bic = time.time()\n"
+        "        if bicubic_tiles:\n",
+        "        # Same-grid repair can deliver cropped SR windows to the adapter.\n"
+        "        window_factory = globals().get('repair_window_output')\n"
+        "        if window_factory and resize_scale in (2, '2', '2.0') and scl == 2 and tiles_skip_count:\n"
+        "            stem = img_name[:-4] + ('_' + suffix if suffix is not None else '')\n"
+        "            # The XML value is usually text, so preserve the dense path's final clip.\n"
+        "            clip_bounds = None if resize_scale == 2 else (ori_min, ori_max)\n"
+        "            window_output = window_factory(osp.join(lq_path, stem + tiftype), tl_obj, scl, clip_bounds)\n"
+        "        if window_output is None:\n"
+        "            result_sr_wrap = util.init_res_img(tl_obj, scl)\n"
+        "        else:\n"
+        "            result_sr_wrap = window_output\n"
+        "            logger.info('Repair window output: skipping %d background tiles', tiles_skip_count)\n"
+        "            tiles_skip_count = 0\n"
+        "\n"
+        "        # Phase B: parallel bicubic (CPU) for dense output\n"
+        "        t_bic = time.time()\n"
+        "        if bicubic_tiles and window_output is None:\n",
+        1,
+    ),
+    (
+        "E12",
+        "        # full-image SR: all tiles through GPU worker\n",
+        "        # full-image SR: all tiles through GPU worker\n"
+        "        result_sr_wrap = util.init_res_img(tl_obj, scl)\n",
+        1,
+    ),
+    (
+        "E13",
+        DENSE_POST,
+        "    if window_output is not None:\n"
+        "        window_output.finish(tiles_sr_count)\n"
+        "    else:\n"
+        + "".join("    " + line if line.strip() else line for line in DENSE_POST.splitlines(True)),
+        1,
+    ),
 ]
 
 # One-line rationale per edit id, copied into provenance.json for review.
@@ -175,6 +251,10 @@ EDIT_NOTES = {
     "E7": "never systemctl stop slurmd from inside a job",
     "E8": "GPU-error log wording no longer claims the node was stopped",
     "E9": "cloud-limit skip writes SRLOG + 'Run skipped:' before exit(0)",
+    "E10": "defer dense output allocation until the output mode is known",
+    "E11": "use the repair window writer for same-grid SR and skip background bicubic",
+    "E12": "allocate the dense output in the full-image SR branch",
+    "E13": "close window output or run the original dense post-processing",
 }
 
 

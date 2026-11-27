@@ -7,7 +7,7 @@
 +# Slurm deployment variant of the SR production script.  Edit the
 +# source and regenerate; hand edits here are lost and fail --check.
 +#
-+# Generator : SR_code/tools/gen_slurm_variant.py v1.0.0
++# Generator : SR_code/tools/gen_slurm_variant.py v1.1.0
 +# Source    : SR_code/code_0817_prod.py
 +# Source sha256 (CRLF->LF normalised) : 03c9b4fc3f64cfd5e3b331128be5a09477d5ebe0362b0e9e4927fcdd356d40af
 +# Regenerate: python SR_code/tools/gen_slurm_variant.py
@@ -64,7 +64,117 @@
          exit(0)
  
      # ---- logger ----
-@@ -641,23 +674,23 @@
+@@ -437,7 +470,7 @@
+         return acc['sr'], acc['fill'], acc['pt']
+ 
+     # ---- tile loop ----
+-    result_sr_wrap = util.init_res_img(tl_obj, scl)
++    window_output = None
+     tile_rows = ((tl_obj["ori_ht"] + tl_obj["wrap_top"] + tl_obj["wrap_btm"]) // t_ht)
+     tile_cols = ((tl_obj["ori_wd"] + tl_obj["wrap_lt"] + tl_obj["wrap_rt"]) // t_wd)
+ 
+@@ -473,9 +506,23 @@
+         tiles_skip_count = len(bicubic_tiles)
+         t_precomp = time.time() - t_pre
+ 
+-        # Phase B: parallel bicubic (CPU)
++        # Same-grid repair can deliver cropped SR windows to the adapter.
++        window_factory = globals().get('repair_window_output')
++        if window_factory and resize_scale in (2, '2', '2.0') and scl == 2 and tiles_skip_count:
++            stem = img_name[:-4] + ('_' + suffix if suffix is not None else '')
++            # The XML value is usually text, so preserve the dense path's final clip.
++            clip_bounds = None if resize_scale == 2 else (ori_min, ori_max)
++            window_output = window_factory(osp.join(lq_path, stem + tiftype), tl_obj, scl, clip_bounds)
++        if window_output is None:
++            result_sr_wrap = util.init_res_img(tl_obj, scl)
++        else:
++            result_sr_wrap = window_output
++            logger.info('Repair window output: skipping %d background tiles', tiles_skip_count)
++            tiles_skip_count = 0
++
++        # Phase B: parallel bicubic (CPU) for dense output
+         t_bic = time.time()
+-        if bicubic_tiles:
++        if bicubic_tiles and window_output is None:
+ 
+             def _bicubic_worker(key, grid):
+                 lq_tile = img_ori_wrap[grid[0]:grid[1], grid[2]:grid[3]]
+@@ -522,6 +569,7 @@
+ 
+     else:
+         # full-image SR: all tiles through GPU worker
++        result_sr_wrap = util.init_res_img(tl_obj, scl)
+         all_tiles = []
+         for key in tile_grid_dict.keys():
+             row, col = map(int, key.split("_"))
+@@ -557,35 +605,38 @@
+     else:
+         del img_ori_wrap, models
+ 
+-    img_no_wrap = util.cut_down_wrap(result_sr_wrap, tl_obj["ori_ht"], tl_obj["ori_wd"], tl_obj["wrap_top"], tl_obj["wrap_lt"], scl)
+-    del result_sr_wrap
+-
+-    torch.cuda.empty_cache()
+-    print("torch.cuda.EMPTY_CACHE()")
+-
+-    if resize_scale == 2:
+-        result_sr = img_no_wrap
++    if window_output is not None:
++        window_output.finish(tiles_sr_count)
+     else:
+-        result_sr = util.resize_by_sat_rcsc_2(img_no_wrap, img_name, resize_scale, sr_previous_step)
+-
+-    # clip value range; redundant for scale=2 (tiles already clipped in tensor2img)
+-    if resize_scale != 2:
+-        np.clip(result_sr, ori_min, ori_max, out=result_sr)
+-
+-    del img_no_wrap
+-
+-    msg = "Output min {:.1f}, max {:.1f}, mean {:.1f}, dtype {:s}, shape {:s}".format(
+-        result_sr.min(), result_sr.max(), result_sr.mean(), str(result_sr.dtype), str(result_sr.shape))
+-    _log(msg, opt)
+-
+-    if suffix is not None:
+-        util.writeTiff(result_sr, lq_path + "/" + img_name[0:-4] + "_" + suffix, tiftype=tiftype,
+-                       del_ori_tif=del_ori_tif)
+-    else:
+-        util.writeTiff(result_sr, lq_path + "/" + img_name[0:-4], tiftype=tiftype,
+-                       del_ori_tif=del_ori_tif)
+-
+-    del result_sr
++        img_no_wrap = util.cut_down_wrap(result_sr_wrap, tl_obj["ori_ht"], tl_obj["ori_wd"], tl_obj["wrap_top"], tl_obj["wrap_lt"], scl)
++        del result_sr_wrap
++
++        torch.cuda.empty_cache()
++        print("torch.cuda.EMPTY_CACHE()")
++
++        if resize_scale == 2:
++            result_sr = img_no_wrap
++        else:
++            result_sr = util.resize_by_sat_rcsc_2(img_no_wrap, img_name, resize_scale, sr_previous_step)
++
++        # clip value range; redundant for scale=2 (tiles already clipped in tensor2img)
++        if resize_scale != 2:
++            np.clip(result_sr, ori_min, ori_max, out=result_sr)
++
++        del img_no_wrap
++
++        msg = "Output min {:.1f}, max {:.1f}, mean {:.1f}, dtype {:s}, shape {:s}".format(
++            result_sr.min(), result_sr.max(), result_sr.mean(), str(result_sr.dtype), str(result_sr.shape))
++        _log(msg, opt)
++
++        if suffix is not None:
++            util.writeTiff(result_sr, lq_path + "/" + img_name[0:-4] + "_" + suffix, tiftype=tiftype,
++                           del_ori_tif=del_ori_tif)
++        else:
++            util.writeTiff(result_sr, lq_path + "/" + img_name[0:-4], tiftype=tiftype,
++                           del_ori_tif=del_ori_tif)
++
++        del result_sr
+ 
+     util.update_meta_gsd(osp.join(lq_path, osp.basename(lq_path) + "_meta.xml"))
+     util.update_meta_integrationtime(osp.join(lq_path, osp.basename(lq_path) + "_meta.xml"))
+@@ -641,23 +692,23 @@
  
      util.setup_logger('gpu', level=logging.INFO, screen=True)
      logger = logging.getLogger('gpu')

@@ -18,12 +18,32 @@ TIMING = re.compile(r'^\s*(.+?)\s+(\d+(?:\.\d+)?)s(?:\s+\([^)]*%\))?\s*$')
 LOG_TIME = re.compile(r'^(\d{2}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+-\s+INFO:')
 LOOP = re.compile(r'tile loop total:\s*([\d.]+)s.*?SR:\s*(\d+) tiles.*?bicubic:\s*(\d+) tiles')
 ROI = re.compile(r'Local SR mask loaded, ROI pixels:\s*(\d+)\s*/\s*(\d+)\s*\(([\d.]+)%\)')
+REPAIR_TIMING = re.compile(r'^\[REPAIR TIMING\] (\w+): (\d+\.\d+)s(?: (.*))?$')
+REPAIR_WINDOWS = re.compile(r'^\[REPAIR WINDOW OUTPUT\] (\d+) windows written$')
+INFER_START = re.compile(r'^\[REPAIR INFER START\] (\d+\.\d+)$')
 
 
 def read_log(path):
     result, pending = {}, None
     with path.open(encoding='utf-8', errors='replace') as stream:
         for line in stream:
+            infer_start = INFER_START.match(line)
+            if infer_start:
+                result['infer_process_started'] = float(infer_start[1])
+                continue
+            repair = REPAIR_TIMING.match(line)
+            if repair:
+                name, elapsed, detail = repair.groups()
+                timing = {'wall_seconds': float(elapsed)}
+                for field in (detail or '').split():
+                    key, value = field.split('=', 1)
+                    timing[key] = int(value) if value.isdigit() else value
+                result.setdefault('repair_timing', {})[name] = timing
+                continue
+            windows = REPAIR_WINDOWS.match(line)
+            if windows:
+                result['repair_output_windows'] = int(windows[1])
+                continue
             match = SUMMARY.search(line)
             if match:
                 pending = {'tile_size': int(match[1]), 'workers': int(match[2]), 'stages_seconds': {}}
@@ -175,8 +195,10 @@ def seconds_between(start, end):
 
 def audit(task, paths):
     native = {}
+    repair_timing = {}
     for path in paths:
         parsed = read_log(path)
+        repair_timing.update(parsed.pop('repair_timing', {}))
         if parsed.get('diagnostics') and native.get('diagnostics'):
             parsed['diagnostics'] = native['diagnostics'] + parsed['diagnostics']
         native.update(parsed)
@@ -186,13 +208,21 @@ def audit(task, paths):
     if executor is None:
         executor = {'source': 'platform polling', 'started': task.get('started_at'), 'ended': task.get('finished_at')}
     started, ended = executor.get('started'), executor.get('ended')
+    infer_started = native.get('infer_process_started')
+    platform_started = task.get('started_at')
+    if platform_started is not None:
+        executor['platform_started'] = platform_started
     events = publication(task, started, ended)
     finish = native.get('model_finished')
     verdict = events.get('verified_at')
     published = events.get('published_at')
     durations = {
         'queue_wait': seconds_between(executor.get('submitted'), started),
+        'executor_start_to_platform_running': (
+            seconds_between(started, platform_started) if executor['source'] != 'platform polling' else None),
         'executor_wall': seconds_between(started, ended),
+        'launch_to_infer_process': seconds_between(started, infer_started),
+        'infer_process_to_model_start_log': seconds_between(infer_started, native.get('model_started')),
         'launch_to_model_start_log': seconds_between(started, native.get('model_started')),
         'native_pipeline_wall': native.get('summary', {}).get('total_seconds'),
         'native_tile_loop_wall': native.get('tile_loop', {}).get('wall_seconds'),
@@ -206,8 +236,12 @@ def audit(task, paths):
              'Model finish log to verdict includes any repair composition, publication, cleanup and verification in that interval.']
     if not native.get('summary'):
         notes.append('No complete native timing summary in this job log. It may be running, failed early, or use another SR script.')
-    return {'job_id': task.get('job_id'), 'state': task.get('state'), 'logs': list(map(str, paths)),
-            'clock': executor, 'duration_seconds': durations, 'native': native, 'publication': events, 'notes': notes}
+    result = {'job_id': task.get('job_id'), 'state': task.get('state'), 'logs': list(map(str, paths)),
+              'clock': executor, 'duration_seconds': durations, 'native': native,
+              'publication': events, 'notes': notes}
+    if repair_timing:
+        result['repair_timing'] = repair_timing
+    return result
 
 
 def main():

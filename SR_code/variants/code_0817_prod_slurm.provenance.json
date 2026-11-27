@@ -1,6 +1,6 @@
 {
   "generator": "SR_code/tools/gen_slurm_variant.py",
-  "generator_version": "1.0.0",
+  "generator_version": "1.1.0",
   "source": {
     "path": "SR_code/code_0817_prod.py",
     "sha256": "03c9b4fc3f64cfd5e3b331128be5a09477d5ebe0362b0e9e4927fcdd356d40af",
@@ -8,11 +8,11 @@
   },
   "variant": {
     "path": "SR_code/variants/code_0817_prod_slurm.py",
-    "sha256": "041bea73b36f6e3c8289d4e4c029c5fe492cbd09502a178c5f1d9798287474a9"
+    "sha256": "6167a18204ef4a7d3c0b8c39e26486f711e2ccaca8afe44f87cfc28849224b60"
   },
   "diff": {
     "path": "SR_code/variants/code_0817_prod_slurm.diff",
-    "sha256": "f7756e7839ff888f2aa3ba16ce8b3e4c4cce472c70b61f18ff3f044f12f25256"
+    "sha256": "e3a2d250a97961d541d31d6df925a05957c220fbcc5c8d0fc0c19004432e38b7"
   },
   "edits": [
     {
@@ -67,6 +67,30 @@
       "id": "E9",
       "note": "cloud-limit skip writes SRLOG + 'Run skipped:' before exit(0)",
       "anchor_sha256": "0ff4bda6194b0350c7aeabf8ac61c2752c3e9eed236f8f329f1d285458351f39",
+      "occurrences": 1
+    },
+    {
+      "id": "E10",
+      "note": "defer dense output allocation until the output mode is known",
+      "anchor_sha256": "b9d28ecf5ea75ef666eac3da0b8875e091ecd6f3cf3159db477be92b8a1dd2c0",
+      "occurrences": 1
+    },
+    {
+      "id": "E11",
+      "note": "use the repair window writer for same-grid SR and skip background bicubic",
+      "anchor_sha256": "6d01144fd3d893c403488a0a58c30d72f471949fdaa757c84267bc030e9d6761",
+      "occurrences": 1
+    },
+    {
+      "id": "E12",
+      "note": "allocate the dense output in the full-image SR branch",
+      "anchor_sha256": "4406bbdf8776bb9bb6893c18ff877a0bbfc2b2dc4c09e3c3487c301368232af3",
+      "occurrences": 1
+    },
+    {
+      "id": "E13",
+      "note": "close window output or run the original dense post-processing",
+      "anchor_sha256": "fc49b458a3443d916e353ac2a772fea97a926ddef6cef1257420327b4f807291",
       "occurrences": 1
     }
   ]

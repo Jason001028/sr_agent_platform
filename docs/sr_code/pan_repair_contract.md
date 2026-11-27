@@ -62,6 +62,9 @@ NOSR、原始场景元数据不修改。模型在私有场景中读取 NOSR，�
 或 `<目录名>_260318.tif`；配置了其他合法后缀时同理。正式结果恒为 `PAN.tif`。
 
 模型输出必须先通过普通退出码、SRLOG 与产物校验，然后检查其尺寸与当前 PAN 一致。
+修复适配器与部署变体都更新后，2× 模型输出直接匹配 PAN 网格且存在背景瓦片时，
+私有中间 TIFF 只存储 SR 窗口。适配器按窗口清单检查所有待替换像素都有模型值。
+需要重采样的场景继续沿用整景中间图。作业日志的 `[REPAIR WINDOW OUTPUT]` 记录实际写出的窗口数。
 适配层复制当前 PAN 的 TIFF 文件布局，在副本中按块写入合成像素，避免创建不同布局导致字节数变化。
 当前实现要求单波段、相同样本类型、未压缩 PAN；不支持的布局明确停止。
 输出倍率必须与当前 PAN 的目标尺寸匹配，不能通过额外放大掩盖配置错误。
@@ -94,6 +97,8 @@ Goal 服务使用相同随平台交付的 verifier 复核，不使用生产环�
 `SR_code/variants/verify_sr_run.py`，解压到同一个应用根目录。
 两脚本由 SR 生产 Python 执行，使用已有 GDAL、NumPy 与模型环境；API 环境不导入 GDAL。
 适配层与 verifier 兼容 Python 3.6。`SR_SR_SCRIPT` 仍指向生产模型脚本或部署变体。
+窗口交付需同步更新应用目录的 `SR_code/variants/repair_sr.py` 和 `SR_BUNDLE_DIR`
+下由 `SR_SR_SCRIPT` 选中的 `code_0817_prod_slurm.py`。
 
 ```text
 python -m pytest backend/tests/test_pan_repair.py backend/tests/test_run_sr.py backend/tests/test_sr_verify.py -q

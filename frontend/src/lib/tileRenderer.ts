@@ -14,12 +14,13 @@ export function tileAxis(start: number, span: number, pixels: number, step: numb
 }
 
 interface Camera { key: string; level: number; ox: number; oy: number; scale: number; levelChanged: number; time: number }
+type TileCoverage = 'pending' | 'fading' | 'opaque';
 
 export class TileRenderer {
   readonly scheduler: TileScheduler;
   private cameras = new Map<string, Camera>();
   private layers = new Map<string, { pane: TilePane; tiles: CachedTile[]; level: number; ready: number;
-    total: number; opaque: boolean; drawn: number; transform: ReturnType<typeof rasterTransform> }>();
+    total: number; opaque: boolean; coverage: TileCoverage; drawn: number; transform: ReturnType<typeof rasterTransform> }>();
   private recent = new Map<string, { at: number; x: number; y: number; speed: number }>();
   private geometry = new WeakMap<CachedTile, { x: ReturnType<typeof tileAxis>; y: ReturnType<typeof tileAxis> }>();
 
@@ -72,6 +73,11 @@ export class TileRenderer {
           && s.ox + (t.x + t.sourceWidth) * s.x > 0 && s.ox + t.x * s.x < pane.rect.w
           && s.oy + (t.y + t.sourceHeight) * s.y > 0 && s.oy + t.y * s.y < pane.rect.h;
       }).sort((a, b) => b.tile.level - a.tile.level).slice(-Math.floor(24 / panes.size));
+      const wholeOverview = fallback.find(({ tile }) => tile.x === 0 && tile.y === 0
+        && tile.sourceWidth === info.width && tile.sourceHeight === info.height);
+      const targetReady = target.length > 0 && target.length === visible.length;
+      const coverage = (targetReady && complete) || (wholeOverview && opaque(wholeOverview)) ? 'opaque'
+        : targetReady || wholeOverview ? 'fading' : 'pending';
       const tiles = [...fallback, ...target];
       for (const tile of tiles) {
         pins.add(tile.key);
@@ -90,7 +96,7 @@ export class TileRenderer {
         }
       }
       this.layers.set(id, { pane, tiles, level, ready: target.length, total: visible.length,
-        opaque: complete && target.length > 0, drawn: 0, transform: s });
+        opaque: complete && targetReady, coverage, drawn: 0, transform: s });
     }
     for (const id of this.cameras.keys()) {
       if (!panes.has(id)) {
@@ -108,6 +114,10 @@ export class TileRenderer {
 
   covers(id: string) {
     return this.layers.get(id)?.opaque === true;
+  }
+
+  coverage(id: string): TileCoverage {
+    return this.layers.get(id)?.coverage ?? 'pending';
   }
 
   presentation(id: string) {

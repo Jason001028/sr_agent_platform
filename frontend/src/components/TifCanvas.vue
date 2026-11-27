@@ -281,7 +281,15 @@ function render(now: number) {
     const layer = diff.layerFor(rec);
     const tileBase = tilePanes.get(key);
     const matchingBase = !tileBase?.source.info.displayProfiles || tileBase.hasOverview;
-    if ((!tiled || !tileRenderer.covers(key)) && matchingBase) {
+    // Default JPEG and native-DN tiles can have different tone curves. Keep the
+    // whole JPEG visible until matching tiles can replace it without gaps.
+    const jpegFallback = !matchingBase && !rec.tileOverviewKey && rec.route === 'jpg'
+      && image === rec.thumb && !rec.displayStretch && rec.paintedMode === 'equal'
+      && (rec.tileDisplay ?? 'equal') === 'equal';
+    const coverage = jpegFallback ? tileRenderer.coverage(key) : 'pending';
+    const showJpeg = jpegFallback && coverage !== 'opaque';
+    animate ||= coverage === 'fading';
+    if (showJpeg || (matchingBase && (!tiled || !tileRenderer.covers(key)))) {
       ctx.save();
       ctx.beginPath();
       ctx.rect(p.rect.x, p.rect.y, p.rect.w, p.rect.h);
@@ -292,7 +300,7 @@ function render(now: number) {
       if (tiled) {
         const start = overviewStarts.get(rec) ?? (previous && previous.rec !== rec ? now - 160 : now);
         overviewStarts.set(rec, start);
-        ctx.globalAlpha = immediate || rec.tileDisplay === 'binary' ? 1 : easeOutCubic((now - start) / 160);
+        ctx.globalAlpha = immediate || showJpeg || rec.tileDisplay === 'binary' ? 1 : easeOutCubic((now - start) / 160);
         animate ||= ctx.globalAlpha < 1;
         const x = Math.max(0, -p.view.ox / p.view.scale);
         const y = Math.max(0, -p.view.oy / p.view.scale);
@@ -304,7 +312,7 @@ function render(now: number) {
       ctx.restore();
     }
     if (tiled) {
-      animate = tileRenderer.draw(ctx, key, now, dpr, immediate) || animate;
+      if (!showJpeg) animate = tileRenderer.draw(ctx, key, now, dpr, immediate) || animate;
       if (layer && diff.display !== 'regions') {
         ctx.save();
         ctx.beginPath();

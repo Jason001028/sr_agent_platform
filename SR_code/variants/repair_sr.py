@@ -34,6 +34,12 @@ INFERENCE_GPU = 1
 #: keeps running, so an OOM would otherwise publish a stale block as success.
 INFERENCE_ERROR_MARKERS = ('out of memory', 'runtimeerror', 'exception is')
 
+# Linux FICLONE creates a separate inode while sharing the source's data extents.
+FICLONE = 0x40049409
+CLONE_UNAVAILABLE = {errno.EINVAL, errno.ENOTTY, errno.EOPNOTSUPP, errno.ENOSYS,
+                     errno.EXDEV, errno.EPERM}
+COMPOSE_WIDTH, COMPOSE_HEIGHT = 1024, 256
+
 
 def signature(path):
     st = os.stat(str(path))
@@ -165,6 +171,84 @@ def reduce_mask(gdal, source, destination, width, height, *, constrained=False):
         raise ValueError('Repair mask is empty')
 
 
+def copy_candidate(source, destination):
+    if sys.platform.startswith('linux'):
+        import fcntl
+
+        with source.open('rb') as src, destination.open('wb') as dst:
+            try:
+                fcntl.ioctl(dst.fileno(), FICLONE, src.fileno())
+                return 'reflink'
+            except OSError as exc:
+                if exc.errno not in CLONE_UNAVAILABLE:
+                    raise
+    shutil.copyfile(str(source), str(destination))
+    return 'copy'
+
+
+def repair_timing(stage, started, detail=''):
+    elapsed = time.monotonic() - started
+    print('[REPAIR TIMING] {}: {:.3f}s{}'.format(stage, elapsed, detail), flush=True)
+
+
+def window_manifest(model):
+    return Path(str(model) + '.windows.json')
+
+
+class WindowOutput:
+    """Accept the same slice assignments as the wrapped SR array, on disk."""
+
+    def __init__(self, gdal, path, width, height, left, top, clip_bounds):
+        self.path = path
+        self.width, self.height = width, height
+        self.left, self.top = left, top
+        self.clip_bounds = clip_bounds
+        self.windows = []
+        self.dataset = gdal.GetDriverByName('GTiff').Create(
+            str(path), width, height, 1, gdal.GDT_UInt16,
+            options=['BIGTIFF=IF_SAFER', 'TILED=YES', 'SPARSE_OK=YES'])
+        self.band = self.dataset.GetRasterBand(1)
+
+    def __setitem__(self, slices, pixels):
+        import numpy as np
+
+        rows, cols = slices
+        x, y = cols.start - self.left, rows.start - self.top
+        w, h = cols.stop - cols.start, rows.stop - rows.start
+        if pixels.shape != (h, w):
+            raise ValueError('SR tile does not match its output window')
+        left, top = max(0, x), max(0, y)
+        right, bottom = min(self.width, x + w), min(self.height, y + h)
+        if right <= left or bottom <= top:
+            raise ValueError('SR tile is outside the output grid')
+        samples = pixels[top - y:bottom - y, left - x:right - x].astype('uint16', copy=False)
+        if self.clip_bounds is not None:
+            samples = np.clip(samples, *self.clip_bounds)
+        if self.band.WriteArray(samples, left, top) not in (None, 0):
+            raise ValueError('Failed to write SR output window')
+        self.windows.append((left, top, right, bottom))
+
+    def finish(self, expected_windows):
+        if not expected_windows or len(self.windows) != expected_windows:
+            raise ValueError('Inference did not write all selected SR windows')
+        self.dataset.FlushCache()
+        self.band = self.dataset = None
+        window_manifest(self.path).write_text(json.dumps(self.windows), encoding='utf-8')
+        print('[REPAIR WINDOW OUTPUT] {} windows written'.format(expected_windows), flush=True)
+
+
+def model_window_index(model):
+    manifest = window_manifest(model)
+    if not manifest.is_file():
+        return None
+    index = {}
+    for left, top, right, bottom in json.loads(manifest.read_text(encoding='utf-8')):
+        for y in range(top // COMPOSE_HEIGHT, (bottom - 1) // COMPOSE_HEIGHT + 1):
+            for x in range(left // COMPOSE_WIDTH, (right - 1) // COMPOSE_WIDTH + 1):
+                index.setdefault((x, y), []).append((left, top, right, bottom))
+    return index
+
+
 def compose(gdal, pan, nosr, mask, model, destination, work, *, constrained=False):
     """Keep PAN's TIFF layout and byte size, replace pixels in bounded blocks."""
     import numpy as np
@@ -179,7 +263,11 @@ def compose(gdal, pan, nosr, mask, model, destination, work, *, constrained=Fals
     if compression.upper() != 'NONE':
         raise ValueError('Exact byte-size repair requires an uncompressed PAN TIFF')
     width, height = _size(current)
+    window_index = model_window_index(model)
     if _size(inferred) != (width, height):
+        if window_index is not None:
+            raise ValueError('Windowed model output must match the PAN grid')
+        started = time.monotonic()
         # SC scenes need not sit on an integer multiple of NOSR: the field case
         # is 30831x30948 from 15730x15790 (x1.96), while SRScale=2 produces
         # 31460x31580. Refuse only a gross mismatch (wrong scale), otherwise
@@ -198,10 +286,13 @@ def compose(gdal, pan, nosr, mask, model, destination, work, *, constrained=Fals
             raise ValueError('Cannot resample the model output onto the body grid')
         ds = None
         inferred = _open(gdal, resampled)
+        repair_timing('resample_model', started)
     selection = _open(gdal, mask)
     if _size(selection) != (width, height):
         raise ValueError('Publication mask must match current PAN dimensions')
-    shutil.copyfile(str(pan), str(destination))
+    started = time.monotonic()
+    copy_method = copy_candidate(Path(pan), Path(destination))
+    repair_timing('copy_candidate', started, ' method=' + copy_method)
     current_band = current.GetRasterBand(1)
     model_band = inferred.GetRasterBand(1)
     current_nodata = current_band.GetNoDataValue()
@@ -211,50 +302,82 @@ def compose(gdal, pan, nosr, mask, model, destination, work, *, constrained=Fals
     validity_band = (None if current_band.GetMaskFlags() & gdal.GMF_ALL_VALID
                      else current_band.GetMaskBand())
 
-    def allowed_pixels(before, x, y, w, h):
+    def selected_pixels(x, y, w, h):
         selected = selection_band.ReadAsArray(x, y, w, h)
         if constrained and np.any((selected != 0) & (selected != 255)):
             raise ValueError('Land constraint requires a binary 0/255 publication mask')
-        allowed = (selected != 0) & np.isfinite(before)
+        return selected != 0
+
+    def allowed_pixels(selected, before, x, y, w, h):
+        allowed = selected & np.isfinite(before)
         if current_nodata is not None:
             allowed &= before != current_nodata
         if validity_band is not None:
             allowed &= validity_band.ReadAsArray(x, y, w, h) != 0
         return allowed
 
-    for y in range(0, height, 256):
-        h = min(256, height - y)
-        for x in range(0, width, 1024):
-            w = min(1024, width - x)
+    started = time.monotonic()
+    empty_windows = written_windows = 0
+    for y in range(0, height, COMPOSE_HEIGHT):
+        h = min(COMPOSE_HEIGHT, height - y)
+        for x in range(0, width, COMPOSE_WIDTH):
+            w = min(COMPOSE_WIDTH, width - x)
+            selected = selected_pixels(x, y, w, h)
+            if not selected.any():
+                empty_windows += 1
+                continue
             baseline = current_band.ReadAsArray(x, y, w, h)
-            roi = allowed_pixels(baseline, x, y, w, h)
+            roi = allowed_pixels(selected, baseline, x, y, w, h)
             if not roi.any():
                 continue
+            if window_index is not None:
+                uncovered = roi.copy()
+                key = (x // COMPOSE_WIDTH, y // COMPOSE_HEIGHT)
+                for left, top, right, bottom in window_index.get(key, ()):
+                    uncovered[max(0, top - y):bottom - y, max(0, left - x):right - x] = False
+                if uncovered.any():
+                    raise ValueError('SR output windows do not cover the publication mask')
             generated = model_band.ReadAsArray(x, y, w, h)
-            if not np.isfinite(generated[roi]).all() or any(
-                    value is not None and np.any(generated[roi] == value)
+            replacement = generated[roi]
+            if not np.isfinite(replacement).all() or any(
+                    value is not None and np.any(replacement == value)
                     for value in (current_nodata, model_nodata)):
                 raise ValueError('Model returned invalid samples inside the publication mask')
-            baseline[roi] = generated[roi]
+            baseline[roi] = replacement
             if target_band.WriteArray(baseline, x, y) not in (None, 0):
                 raise ValueError('Failed to write candidate PAN block')
+            written_windows += 1
     target.FlushCache()
     target_band = target = None
+    repair_timing('compose', started, ' empty_windows={} written_windows={}'.format(
+        empty_windows, written_windows))
+
+    started = time.monotonic()
     staged = _open(gdal, destination)
     staged_band = staged.GetRasterBand(1)
-    for y in range(0, height, 256):
-        h = min(256, height - y)
-        for x in range(0, width, 1024):
-            w = min(1024, width - x)
+    block_width, block_height = current_band.GetBlockSize()
+    # Read full strips or adjacent tiles in one call, targeting ~1M samples
+    # per window while keeping complete native blocks together.
+    read_width = min(width, block_width * max(1, 4096 // block_width))
+    read_height = block_height * max(1, (1024 * 1024) // (read_width * block_height))
+    for y in range(0, height, read_height):
+        h = min(read_height, height - y)
+        for x in range(0, width, read_width):
+            w = min(read_width, width - x)
             before = current_band.ReadAsArray(x, y, w, h)
             after = staged_band.ReadAsArray(x, y, w, h)
-            allowed = allowed_pixels(before, x, y, w, h)
-            if before[~allowed].tobytes() != after[~allowed].tobytes():
+            selected = selected_pixels(x, y, w, h)
+            if selected.any():
+                allowed = allowed_pixels(selected, before, x, y, w, h)
+                # Mask the permitted changes in memory before comparing bytes.
+                after[allowed] = before[allowed]
+            if not np.array_equal(before.view(np.uint8), after.view(np.uint8)):
                 raise ValueError('Candidate PAN changed pixels outside the publication mask')
     staged_band = staged = validity_band = selection_band = current_band = model_band = None
     selection = inferred = original = current = None
     if os.path.getsize(str(destination)) != os.path.getsize(str(pan)):
         raise ValueError('Candidate byte size differs from current PAN; nothing published')
+    repair_timing('verify_candidate', started)
 
 
 def inference_errors(private):
@@ -311,11 +434,13 @@ def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
     proof_node = root.find('LandConstraint')
     proof = json.loads(proof_node.text or '{}') if proof_node is not None else None
     if proof_node is not None:
+        started = time.monotonic()
         expires_at = proof.get('expires_at') if isinstance(proof, dict) else None
         if expires_at is not None and (type(expires_at) not in (int, float)
                                        or not math.isfinite(expires_at) or time.time() >= expires_at):
             raise ValueError('Land constraint confirmation expired')
         verify_land_constraint(proof, body, nosr, mask)
+        repair_timing('verify_land_inputs', started)
     for key, path in (('mask', mask), ('nosr', nosr)):
         if key in expected and signature(path)[:2] != expected[key][:2]:
             raise ValueError('Queued repair input changed: ' + str(path))
@@ -331,6 +456,7 @@ def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
         body_sig, nosr_sig, mask_sig = signature(body), signature(nosr), signature(mask)
         nosr_ctime = nosr.stat().st_ctime_ns
         frozen_source = nosr
+        started = time.monotonic()
         if stage:
             source_copy = Path(stage['path'])
             # A Slurm sandbox may contain a separate copy of the same scene.
@@ -351,6 +477,7 @@ def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
             shutil.copyfile(str(nosr), str(source_copy))
             if signature(nosr) != nosr_sig or nosr.stat().st_ctime_ns != nosr_ctime:
                 raise ValueError('Original NOSR changed while copying')
+        repair_timing('stage_nosr', started, ' method=' + ('staged' if stage else 'copy'))
         copy_sig = signature(source_copy)
         p, n, m = _open(gdal, body), _open(gdal, nosr), _open(gdal, mask)
         pw, ph = _size(p)
@@ -385,17 +512,23 @@ def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
         lr_mask = work / 'mask_lr.tif'
         full_mask = mask
         if proof is not None:
+            started = time.monotonic()
             full_mask = work / 'frozen_pan_mask.tif'
             shutil.copyfile(str(mask), str(full_mask))
             verify_land_mask(proof, full_mask)
+            repair_timing('freeze_mask', started)
+        started = time.monotonic()
         reduce_mask(gdal, full_mask, lr_mask, nw, nh, constrained=proof is not None)
+        repair_timing('reduce_mask', started)
         if not mask_is_body:
+            started = time.monotonic()
             full_mask = work / 'mask_body.tif'
             ds = gdal.Translate(str(full_mask), str(mask), format='GTiff', width=pw, height=ph,
                                 resampleAlg='nearest')
             if ds is None:
                 raise ValueError('Cannot map NOSR mask to the body grid')
             ds = None
+            repair_timing('expand_publication_mask', started)
         for tag, text in (('DatarootLQ', str(private)), ('MaskPath', str(lr_mask)),
                           ('Suffix', root.findtext('Suffix') or '260318'), ('DeleteOriTifNeeded', 'False')):
             node = root.find(tag)
@@ -410,7 +543,8 @@ def run(config, sr_script, gdal=None, execute=None, gpu_note=None):
         stage_config = work / 'inference.xml'
         tree.write(str(stage_config), encoding='utf-8', xml_declaration=True)
         execute([sys.executable, str(Path(__file__).resolve()), '--infer',
-                 '--sr-script', str(Path(sr_script).resolve()), '-f', str(stage_config)])
+                 '--sr-script', str(Path(sr_script).resolve()), '--pan-size', str(pw), str(ph),
+                 '-f', str(stage_config)])
         # The model wrapper swallows per-tile RuntimeError and keeps the previous
         # tile's result, so an out-of-memory run still exits 0 with a full output.
         # Refuse it here: a stale block must never be published as a repair.
@@ -478,9 +612,11 @@ def main():
     parser.add_argument('-f', '--config', required=True)
     parser.add_argument('--sr-script', required=True)
     parser.add_argument('--infer', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--pan-size', nargs=2, type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
         if args.infer:
+            print('[REPAIR INFER START] {:.6f}'.format(time.time()), flush=True)
             # The production file-size heuristic classifies some valid NOSR
             # inputs as already SRed. Selection is explicit inside this private
             # scene, so bypass that heuristic without editing production util.
@@ -494,8 +630,22 @@ def main():
                     raise ValueError('Missing staged NOSR input: ' + str(path))
                 return str(path)
             util.get_l1_pan_tif_rcsc = select_input
+
+            def repair_window_output(path, tl_obj, scale, clip_bounds):
+                width = tl_obj['ori_wd'] * scale
+                height = tl_obj['ori_ht'] * scale
+                if args.pan_size != [width, height]:
+                    return None
+                from osgeo import gdal
+
+                gdal.UseExceptions()
+                return WindowOutput(gdal, path, width, height,
+                                    tl_obj['wrap_lt'] * scale, tl_obj['wrap_top'] * scale,
+                                    clip_bounds)
+
             sys.argv = [str(script), '-f', args.config]
-            runpy.run_path(str(script), run_name='__main__')
+            runpy.run_path(str(script), run_name='__main__',
+                           init_globals={'repair_window_output': repair_window_output})
             return 0
         # Pin the card in the parent, before any CUDA import; the --infer child
         # inherits CUDA_VISIBLE_DEVICES. This deliberately overrides the integer
