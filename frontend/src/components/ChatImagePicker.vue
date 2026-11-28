@@ -51,7 +51,7 @@ async function pick(recId: number): Promise<void> {
 
         <p v-if="!viewer.recs.length" class="pk-empty">
           影像列表是空的。截图取自查看器里正在看的画面，请先回
-          <router-link class="pk-go" to="/viewer" @click="close">查看器</router-link>
+          <router-link class="pk-go" to="/viewer" @click="close">影像工作台</router-link>
           打开一张图，再回来添加。
         </p>
 

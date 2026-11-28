@@ -85,7 +85,7 @@ import type { PreviewAsset } from '../lib/imageOpen';
 import type { LocalPixels, LocalSourceInfo } from '../lib/localDecodeWorker';
 import { wholeJpegFits } from '../lib/progressivePreview';
 import type { PreviewFrame } from '../lib/progressivePreview';
-import { isIntermediateStage, stageLabel, stageRefusal } from '../lib/stage.js';
+import { gfProductionImageLabel, isIntermediateStage, sceneImageLabel, stageRefusal } from '../lib/stage.js';
 import type { StageKind } from '../lib/stage.js';
 import { readSpotlightMode, saveSpotlightMode } from '../lib/spotlight.js';
 import { readViewerBackground, saveViewerBackground, isViewerBackground } from '../lib/viewerBackground';
@@ -203,6 +203,7 @@ export interface ViewerRec {
   serverSourceVerified?: boolean;
   discoveredTiff?: boolean;
   viewerRole?: SceneResolveResult['resolved']['viewer_role'];
+  verifiedFileName?: string;
   dropAnchor?: string | null;
   preferLocalTiff?: boolean;
   resolvingSource?: boolean;
@@ -2981,10 +2982,11 @@ export const useViewerStore = defineStore('viewer', () => {
     // 标签在这一个漏斗里算出来，卡片直接渲染，不必各自再判一遍。
     rec.stageKind = (rec.viewerRole === 'reference' && meta.stageKind !== 'nosr') || rec.viewerRole === 'other'
       ? undefined : meta.stageKind ?? 'input';
+    if (meta.stageSuffix != null) rec.resolvedSuffix = meta.stageSuffix;
     rec.previewPanSize=meta.previewPanSize??rec.previewPanSize;
     rec.detailDiv=plan?.requestedDiv ?? effectivePreviewDiv(rec);
-    rec.stageLabel = rec.viewerRole === 'reference' && rec.stageKind !== 'nosr' ? '参考影像'
-      : rec.viewerRole === 'other' ? '' : stageLabel(rec.stageKind, meta.stageSuffix, rec.name);
+    rec.stageLabel = sceneImageLabel(rec.stageKind, meta.stageSuffix, rec.verifiedFileName ?? rec.name,
+      rec.sceneDir, rec.viewerRole);
     // 默认是服务端生成预览那份的口径；拖本地 jpg 升级进来的那条路自报来源
     // （它的像素是用户拖进来的原图，写成「服务端已生成」与事实不符）。
     // 尺度报当前档位 —— 取图的两处调用点都按 `previewDiv.value` 生成，所以
@@ -3049,8 +3051,7 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.previewOnly = meta.previewOnly === true;
     if (meta.stageKind === 'mask') rec.tileDisplay = 'binary';
     rec.previewPanSize=meta.previewPanSize;
-    rec.stageLabel = rec.viewerRole === 'reference' && rec.stageKind !== 'nosr' ? '参考影像'
-      : rec.viewerRole === 'other' ? '' : stageLabel(rec.stageKind, meta.stageSuffix, rec.name);
+    rec.stageLabel = sceneImageLabel(rec.stageKind, meta.stageSuffix, rec.name, rec.sceneDir);
     rec.serverMaskPath = meta.serverMaskPath ?? null;
     // 一键解析：NOSR 卡紧跟本体卡；其余情况追加到末尾。不参与批量错峰（延迟 0），
     // 只占一次淡入，免得凭空一跳。
@@ -3097,8 +3098,7 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.sceneDir = meta.sceneDir ?? null;
     rec.stageKind = meta.stageKind ?? 'input';
     rec.previewPanSize=meta.previewPanSize;
-    rec.stageLabel = rec.viewerRole === 'reference' && rec.stageKind !== 'nosr' ? '参考影像'
-      : rec.viewerRole === 'other' ? '' : stageLabel(rec.stageKind, meta.stageSuffix, rec.name);
+    rec.stageLabel = sceneImageLabel(rec.stageKind, meta.stageSuffix, rec.name, rec.sceneDir);
     rec.serverMaskPath = meta.serverMaskPath ?? null;
     rec.status = '正在生成预览…';
     rec.statusCls = '';
@@ -4053,7 +4053,7 @@ export const useViewerStore = defineStore('viewer', () => {
       name: rec.name, W: rec.W, H: rec.H, sceneId: rec.sceneId!,
       lqPath: rec.lqPath, sceneDir: rec.sceneDir,
       serverMaskPath: rec.serverMaskPath, stageKind: rec.stageKind,
-      stageSuffix: rec.stageKind === 'product' ? rec.stageLabel : '',
+      stageSuffix: rec.resolvedSuffix,
       previewOnly: rec.previewOnly,
       srcRev: rec.srcRev,
       previewPanSize:rec.previewPanSize,
@@ -4908,7 +4908,7 @@ export const useViewerStore = defineStore('viewer', () => {
       }
     }
     useQueueStore().setSrDraft(rec.lqPath, rec.serverMaskPath ?? null);
-    showToast('已带入目录 ' + rec.lqPath + '，去「任务队列」确认后提交 SR');
+    showToast('已带入目录 ' + rec.lqPath + '，去「任务管理」确认后提交 SR');
     try { await router.push('/queue'); } finally { srBusy.value = false; }
   }
 
@@ -5019,8 +5019,9 @@ export const useViewerStore = defineStore('viewer', () => {
     rec.stageKind = (res.resolved.viewer_role === 'reference' && res.resolved.kind !== 'nosr') || res.resolved.viewer_role === 'other'
       ? undefined : res.resolved.kind;
     rec.resolvedSuffix=res.resolved.suffix;
-    rec.stageLabel = res.resolved.viewer_role === 'reference' && rec.stageKind !== 'nosr' ? '参考影像'
-      : res.resolved.viewer_role === 'other' ? '' : stageLabel(res.resolved.kind, res.resolved.suffix, rec.name);
+    rec.verifiedFileName = res.resolved.input_name;
+    rec.stageLabel = sceneImageLabel(rec.stageKind, res.resolved.suffix, rec.verifiedFileName ?? rec.name,
+      rec.sceneDir, res.resolved.viewer_role);
     rec.serverSourceVerified = true;
     rec.viewerRole = res.resolved.viewer_role;
     const duplicate = recs.value.find(other => other !== rec && (
@@ -5064,6 +5065,8 @@ export const useViewerStore = defineStore('viewer', () => {
         const existing = recs.value.find(other => other.sceneId === file.id
           || (other.sceneDir === directory && other.srcRev === file.srcRev));
         if (existing) {
+          const label = gfProductionImageLabel(file.name, directory);
+          if (label && existing.stageKind !== 'mask') existing.stageLabel = label;
           if (existing.discoveredTiff && !existing.thumb && !loadControlFor(existing) && existing.card) {
             if (existing.srcRev !== file.srcRev) delete existing.previewAsset;
             existing.srcRev = file.srcRev;
@@ -5086,8 +5089,8 @@ export const useViewerStore = defineStore('viewer', () => {
         card.viewerRole = file.viewerRole;
         if (file.viewerRole !== 'stage' && file.kind !== 'nosr') {
           card.stageKind = undefined;
-          card.stageLabel = file.viewerRole === 'reference' ? '参考影像' : '';
         }
+        card.stageLabel = sceneImageLabel(card.stageKind, file.suffix, file.name, directory, file.viewerRole);
         card.previewOnly = true;
         card.status = '待打开';
         card.srcRev = file.srcRev;

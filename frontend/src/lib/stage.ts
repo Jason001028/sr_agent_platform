@@ -43,6 +43,32 @@ export function stageLabel(kind: StageKind | undefined | null,
   return /^pan$/i.test(stemOf(fileName)) ? 'PAN' : '本体';
 }
 
+/** GF production labels describe the files in the viewer, independently of SR authority. */
+export function gfProductionImageLabel(fileName: string, sceneDir: string | undefined | null): string | undefined {
+  const scene = sceneDir?.split(/[/\\]/).filter(Boolean).pop()?.toLowerCase();
+  if (!scene || !/^(?:jx)?gf\d+[a-z0-9]*_/i.test(scene) || !/\.tiff?$/i.test(fileName)) return;
+  const stem = stemOf(fileName).toLowerCase();
+  const serialPan = scene.endsWith('_pan') ? scene : scene + '_pan';
+  if (stem === 'pan') return 'PAN';
+  if (stem === serialPan) return '最终产物';
+  if (stem === serialPan + '_ori') return 'ori';
+  const auxiliary = /^(?:(.*)[_-])?(cloud|thumb|mask)$/.exec(stem);
+  if (auxiliary && (!auxiliary[1] || ['pan', scene, serialPan].includes(auxiliary[1]))) {
+    return auxiliary[2] === 'mask' ? '掩码' : auxiliary[2];
+  }
+}
+
+export function sceneImageLabel(kind: StageKind | undefined | null, suffix: string | undefined | null,
+                                fileName: string, sceneDir: string | undefined | null,
+                                role?: 'stage' | 'reference' | 'other'): string {
+  if (kind === 'mask') return stageLabel(kind, suffix, fileName);
+  const productionLabel = gfProductionImageLabel(fileName, sceneDir);
+  if (productionLabel) return productionLabel;
+  if (role === 'reference' && kind !== 'nosr') return '参考影像';
+  if (role === 'other') return '';
+  return stageLabel(kind, suffix, fileName);
+}
+
 /** 中间产物的修复拒绝语（`enterDraw` / `bakeMaskToServer` / `submitSr` 共用一句，
  *  三处措辞一致用户才不会以为是三个毛病）。 */
 export function stageRefusal(label: string): string {

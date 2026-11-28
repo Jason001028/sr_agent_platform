@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 应用外壳：顶部导航（查看器 / 场景库 / 聊天 / 任务队列）+ 路由视图
+// 应用外壳：顶部导航与路由视图
 import { onMounted, onUnmounted, ref } from 'vue';
 import { useRoute, RouterLink, RouterView } from 'vue-router';
 import { APP_NAME } from './lib/brand';
@@ -30,7 +30,7 @@ const logoOk = ref(true);
 </script>
 
 <template>
-  <div class="app-shell" :class="{ 'report-route': route.path.startsWith('/repair-reports/') }">
+  <div class="app-shell">
     <header class="app-nav">
       <RouterLink to="/viewer" class="brand" :class="{ 'has-logo': logoOk }">
         <span class="brand-mark">
@@ -45,15 +45,15 @@ const logoOk = ref(true);
         </span>
         <span class="brand-name">{{ APP_NAME }}</span>
       </RouterLink>
-      <nav class="nav-links">
-        <RouterLink to="/viewer">查看器</RouterLink>
+      <nav class="nav-links" aria-label="主导航">
+        <RouterLink to="/viewer">影像工作台</RouterLink>
+        <RouterLink to="/chat">会话管理</RouterLink>
+        <RouterLink to="/queue">任务管理</RouterLink>
+        <RouterLink to="/plugins">工具管理</RouterLink>
         <RouterLink to="/scenes">场景库</RouterLink>
-        <RouterLink to="/chat">聊天</RouterLink>
-        <RouterLink to="/queue">任务队列</RouterLink>
         <RouterLink v-for="item in extensionNavigation" :key="item.to" :to="item.to">
           {{ item.label }}
         </RouterLink>
-        <RouterLink to="/plugins">插件管理</RouterLink>
       </nav>
     </header>
     <!-- flush 路由（查看器）去掉 padding，页面贴边填满 -->

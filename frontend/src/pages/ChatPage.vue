@@ -269,7 +269,7 @@ onMounted(() => {
     <!-- 对话区 -->
     <section class="cp-main">
       <div class="cp-head">
-        <span class="cp-title"><AgentBotIcon :status="chat.agentStatus" :size="16" />Agent 聊天</span>
+        <span class="cp-title"><AgentBotIcon :status="chat.agentStatus" :size="16" />会话管理</span>
         <span v-if="chat.sessionId" class="cp-sessid">{{ chat.sessions.find(s => s.session_id === chat.sessionId)?.metadata?.title || shortId(chat.sessionId) }}</span>
         <span v-else class="cp-sessid empty">未选择会话</span>
         <TokenUsagePanel v-if="tokenPluginEnabled" :usage="chat.usage" />

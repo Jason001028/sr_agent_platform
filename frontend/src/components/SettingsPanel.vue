@@ -183,7 +183,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
         </button>
         <div class="set-note">
           默认开启：查看器点击「提交 SR」即使用默认参数提交，留在当前影像并显示任务回执；
-          任务完成或失败时在右下角提醒。关闭后进入任务队列确认参数再提交。选择在本机保存。
+          任务完成或失败时在右下角提醒。关闭后进入任务管理确认参数再提交。选择在本机保存。
         </div>
       </div>
 

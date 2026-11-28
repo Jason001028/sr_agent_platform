@@ -55,7 +55,7 @@ onMounted(() => void plugins.refresh());
   <div class="plugins-page">
     <div class="plugins-head">
       <div>
-        <h2>插件管理</h2>
+        <h2>工具管理</h2>
         <p class="plugins-sub">按机器维护插件目标状态；远程机器由 Agent 执行并回报结果。</p>
       </div>
       <div class="plugins-head-actions">

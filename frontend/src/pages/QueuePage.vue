@@ -197,7 +197,7 @@ onUnmounted(() => {
 <template>
   <div class="queue-page">
     <div class="qp-head">
-      <h2>共享任务队列</h2>
+      <h2>任务管理</h2>
       <div class="qp-actions">
         <span class="qp-dot" :class="{ on: queue.connected }"></span>
         <span class="qp-conn">{{ queue.connected ? 'SSE 已连接' : 'SSE 断开' }}</span>

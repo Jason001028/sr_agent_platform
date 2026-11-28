@@ -1126,7 +1126,7 @@ async function main() {
       //     已经删了，那一刻没有任何东西撤销它）。判据两条：页面上结果还在 + 没有新的
       //     /api/scenes 往返 —— 只断前者的话，一次「查完又清一遍」的自动检索也能蒙混。
       const listBeforeNav = countUrl(listRe);
-      await clickNav(page, '查看器');
+      await clickNav(page, '影像工作台');
       await waitFor(page, () => location.pathname.endsWith('/viewer'), 15000, '切到查看器');
       await clickNav(page, '场景库');
       await waitFor(page, () => location.pathname.endsWith('/scenes'), 15000, '切回场景库');

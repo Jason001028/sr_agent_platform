@@ -201,13 +201,22 @@ it.each([
   const ids = ['pan', 'nosr', 'sc'];
   const isGf07 = satellite.includes('GF07');
   const bodyIndex = isGf07 ? 0 : 2;
+  if (isGf07) {
+    vi.mocked(apiSceneTiffFiles).mockResolvedValue([
+      { id: 'cloud', name: serial + '_Cloud.TIF', kind: null, suffix: '', viewerRole: 'other',
+        size_bytes: 3, srcRev: 'cloud', mtime_ms: 1, readOnly: true },
+      { id: 'serial-ori', name: serial + '_ori.tif', kind: 'product', suffix: 'ori', viewerRole: 'stage',
+        size_bytes: 3, srcRev: 'serial-ori', mtime_ms: 1, readOnly: true },
+    ]);
+  }
   vi.mocked(sourceFingerprint).mockImplementation(async file => ({ name: file.name, size: file.size, samples: ['a','b','c'] }));
   vi.mocked(apiResolveScene).mockImplementation(async (_cfg, query) => {
     if (!('name' in query)) throw new Error('Expected the browser file selection request');
     const index = names.indexOf(query.name);
     if (index !== 2) expect(query.anchor).toEqual([scene]);
     return { row: { id: ids[index], name: names[index], W: 100, H: 100, srcRev: ids[index] },
-      resolved: { dir: scene, sr_capable: index === bodyIndex, read_only: index !== bodyIndex,
+      ...(isGf07 ? { discovery: 'gf07-grant' } : {}),
+      resolved: { dir: scene, input_name: names[index], sr_capable: index === bodyIndex, read_only: index !== bodyIndex,
         kind: index === 1 ? 'nosr' : isGf07 && index === 2 ? 'product' : 'input',
         suffix: isGf07 && index === 2 ? 'SC' : '',
         viewer_role: index === 1 && isGf07 ? 'reference' : index === 0 && !isGf07 ? 'other' : 'stage' } } as SceneResolveResult;
@@ -215,7 +224,8 @@ it.each([
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
     if (url.endsWith('/assets')) {
       const id = JSON.parse(String(init?.body)).sceneId;
-      return Response.json({ id, name: names[ids.indexOf(id)], W: 100, H: 100, sourceRev: id, uploaded: false });
+      return Response.json({ id, name: id === 'cloud' ? serial + '_Cloud.TIF' : names[ids.indexOf(id)],
+        W: 100, H: 100, sourceRev: id, uploaded: false });
     }
     return url.includes('/preview?') ? new Response('jpg') : new Response(null, { status: 404 });
   }));
@@ -234,6 +244,20 @@ it.each([
   expect(store.recs.find(rec => rec.sceneId === ids[bodyIndex])).toMatchObject({ lqPath: scene, stageKind: 'input' });
   expect(store.recs.find(rec => rec.sceneId === 'nosr')).toMatchObject({ lqPath: null, stageLabel: 'NOSR' });
   expect(store.recs.find(rec => rec.sceneId === (isGf07 ? 'sc' : 'pan'))?.lqPath).toBeNull();
+  if (isGf07) {
+    expect(store.recs.find(rec => rec.sceneId === 'pan')).toMatchObject({ stageLabel: 'PAN', lqPath: scene });
+    expect(store.recs.find(rec => rec.sceneId === 'sc')).toMatchObject({ stageLabel: '最终产物', lqPath: null });
+    await vi.waitFor(() => expect(store.recs.find(rec => rec.sceneId === 'cloud')).toMatchObject({
+      stageLabel: 'cloud', thumb: null, previewOnly: true, lqPath: null,
+    }));
+    const cloud = store.recs.find(rec => rec.sceneId === 'cloud')!;
+    const ori = store.recs.find(rec => rec.sceneId === 'serial-ori')!;
+    expect(root.querySelector(`[data-rec-id="${ori.id}"] .stage`)?.textContent).toBe('ori');
+    expect(root.querySelector(`[data-rec-id="${cloud.id}"] .stage`)?.textContent).toBe('cloud');
+    await store.activate(cloud.id);
+    expect(store.activeRec).toMatchObject({ stageLabel: 'cloud', previewOnly: true, lqPath: null });
+    expect(store.activeRec?.thumb).toBeTruthy();
+  }
 });
 
 it('discards a discovery response after the workspace is cleared', async () => {

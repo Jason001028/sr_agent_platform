@@ -753,7 +753,7 @@ async function main() {
 
       /* ---------- E. 拖本地文件 → 双指纹反推 → 走服务端预览 JPG ---------- */
       console.log('\n[E] 查看器拖本地 tif → 同名同字节才关联，命中即换服务端 JPG');
-      await clickLink(page, '查看器');
+      await clickLink(page, '影像工作台');
       await waitFor(page, () => location.pathname.endsWith('/viewer'), 15000, '回 /viewer');
       const input = await page.$('input[type=file]');
       if (!input) throw new Error('未找到 input[type=file]');
@@ -1104,7 +1104,7 @@ async function main() {
       await clickLink(page, '场景库');
       await waitFor(page, () => location.pathname.endsWith('/scenes'), 15000, '回 /scenes');
       await openPathBar(page, winPath(PAN_DIR));
-      await clickLink(page, '查看器');
+      await clickLink(page, '影像工作台');
       await waitFor(page, () => location.pathname.endsWith('/viewer'), 15000, '回 /viewer');
       // 期望值必须当实参传进页面：page.evaluate 的函数体在页面里跑，够不到 Node 变量
       await waitFor(page, (want) => {
